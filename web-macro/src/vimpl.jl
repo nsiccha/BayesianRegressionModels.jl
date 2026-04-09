@@ -59,25 +59,70 @@ vmeta_sampling_rhs(meta, x::ExprColumn{typeof(|)}; kwargs...) = begin
 end
 vmeta_sampling_rhs(meta, ::Int; group) = begin
     meta, p = growblock!!(meta, group, 1)
-    meta, p
-end 
+    meta, _re_lookup(p, _gc_idx(group))
+end
 vmeta_sampling_rhs(meta, x::NamedColumn; kwargs...) = vmeta_sampling_rhs(meta, meta.materialized[name(x)]; kwargs...)
 vmeta_sampling_rhs(meta, x::DataColumn; kwargs...) = vmeta_sampling_rhs(meta, parent(x); kwargs...)
 vmeta_sampling_rhs(meta, x::AbstractVector{<:AbstractFloat}; group) = begin
     meta, p = growblock!!(meta, group, 1)
-    meta, Base.broadcasted(*, x, p)
-end 
+    meta, Base.broadcasted(*, x, _re_lookup(p, _gc_idx(group)))
+end
 FBroadcasted{F,Style<:Union{Nothing, Base.Broadcast.BroadcastStyle},Axes} = Base.Broadcast.Broadcasted{Style,Axes,F}
 vmeta_sampling_rhs(meta, x::FBroadcasted; group) = begin
     meta, p = growblock!!(meta, group, 1)
-    meta, Base.broadcasted(*, x, p)
-end 
-vmeta_sampling_rhs(meta, x::AbstractVector{<:Integer}; group) = begin
-    meta, p = growblock!!(meta, group, 1)
-    meta, Base.broadcasted(*, x, p)
-    # meta, p = growblock!!(meta, group, length(unique(parent(x)))-1)
-    # Base.broadcasted(*, x, p)
+    meta, Base.broadcasted(*, x, _re_lookup(p, _gc_idx(group)))
 end
+vmeta_sampling_rhs(meta, x::AbstractVector{<:Integer}; group) = begin
+    # Treatment-coded categorical predictor: level 1 is the reference (drops out),
+    # remaining k-1 levels each get their own coefficient slot in the block.
+    # TODO: figure out where to cache `levels`/`level_map`/`dense`/`gc_idx` so we
+    # don't rebuild them on every VBRMI construction. Candidates: a new
+    # `meta.factor` NamedTuple keyed by column name, or attach it to the
+    # materialized entry for the source column — _gc_idx() does the same
+    # dense-mapping work for the grouping-factor side.
+    # TODO: investigate hooking into an existing "categorical values vector"
+    # abstraction instead of building the dense map by hand. CategoricalArrays.jl
+    # (used by DataFrames) already exposes `levels`, `levelcode`, and a `.refs`
+    # field that *is* the dense Int8/16 code vector — if the input column is
+    # already a CategoricalVector we'd avoid the Dict round-trip entirely. Same
+    # idea applies to PooledArrays.jl. Need to decide whether vimpl.jl should
+    # take a hard dep on CategoricalArrays or sniff for the duck-typed interface.
+    levels = sort(unique(x))
+    level_map = Dict(l => i for (i, l) in enumerate(levels))
+    dense = [level_map[l] for l in x]
+    meta, p = growblock!!(meta, group, length(levels) - 1)
+    meta, _cat_broadcast(p, _gc_idx(group), dense)
+end
+# Population case (gc_idx === nothing): p is (1, k-1), look up the (level-1)-th
+# column via linear indexing.
+_cat_broadcast(p, ::Nothing, dense) =
+    Base.broadcasted(_cat_lookup, Ref(p), dense)
+# Grouped case: p is (n_levels, k-1), look up p[gc_idx[i], level - 1].
+_cat_broadcast(p, gc_idx::AbstractVector{Int}, dense) =
+    Base.broadcasted(_cat_re_lookup, Ref(p), gc_idx, dense)
+_cat_lookup(p, level) = level == 1 ? zero(eltype(p)) : p[level - 1]
+_cat_re_lookup(p, gc, level) = level == 1 ? zero(eltype(p)) : p[gc, level - 1]
+
+# Group code index: maps each row of the data to its row in the block matrix
+# `values`. Returns `nothing` for the special :__population__ marker so that the
+# population-level path can pass through `_re_lookup` unchanged.
+_gc_idx(::Symbol) = nothing
+function _gc_idx(group::NamedColumn)
+    raw = parent(parent(group))
+    levels = sort(unique(raw))
+    level_map = Dict(l => i for (i, l) in enumerate(levels))
+    [level_map[l] for l in raw]
+end
+
+# Wrap a (m, 1) growblock view as a length-N broadcasted lookup keyed by
+# `gc_idx`. For population groups (`gc_idx === nothing`) the (1, 1) view
+# already broadcasts as a scalar against length-N data, so it passes through
+# unchanged. Only handles n=1 (single column per growblock!! call) — multi-term
+# random specs like `(1 + x | group)` decompose into separate growblock!!
+# calls inside the parent `+` foldl, so each call hits this with n=1.
+_re_lookup(p, ::Nothing) = p
+_re_lookup(p, gc_idx::AbstractVector{Int}) =
+    Base.broadcasted(getindex, Ref(p), gc_idx, 1)
 vmeta_sampling_rhs(meta, x::FBroadcasted{<:Type{<:Distribution}}; group) = meta, x
 vmaterialize(x) = MaterializedColumn(Base.materialize(x), x)
 struct MaterializedColumn{P,B} <: AbstractColumn
@@ -96,7 +141,7 @@ growblock!!(meta, group::Symbol, m, n) = begin
     end
     idxs = (size(g, 2)+1):(size(g, 2)+n)
     append!(g, zeros(m, n))
-    rmerge(meta, (;blocks=(;group=>g))), view(g, :, 1)#idxs)
+    rmerge(meta, (;blocks=(;group=>g))), view(g, :, idxs)
 end
 growblock!!(meta, group::NamedColumn, n) = growblock!!(meta, name(group), n_levels(group), n)
 
