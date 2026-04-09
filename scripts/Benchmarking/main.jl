@@ -3,8 +3,8 @@ using Pkg
 Pkg.activate(@__DIR__)
 insert!(LOAD_PATH, 2, joinpath(@__DIR__, ".."))
 
-include("../macro.jl")
-include("../vimpl.jl")
+include("../../web-macro/src/macro.jl")
+include("../../web-macro/src/vimpl.jl")
 include("../examples/database.jl")
 
 using Chairmarks, Random
