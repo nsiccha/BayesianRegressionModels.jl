@@ -194,12 +194,22 @@ struct BRMI{O<:NamedTuple}
     operations::O
 end
 BRMI(;kwargs...) = BRMI((;kwargs...))
-Base.show(io::IO, (;operations)::BRMI) = begin 
+Base.show(io::IO, (;operations)::BRMI) = begin
     print(io, "BRMI:\n")
     for (key, value::NamedColumn) in pairs(operations)
-        print(io, "  ", key, ": ", parent(value), "\n")
+        print(io, "  ")
+        _show_top(io, key, parent(value))
+        print(io, "\n")
     end
 end
+# Top-level entries in a BRMI listing are either ExprColumns whose own show
+# already names the LHS (`loc ~ ...`, `(err = ...)`) or other column types
+# (DataColumn, MaterializedColumn, ...) whose show prints just the value with
+# no name. For the former we strip the outermost parens; for the latter we
+# prefix with the operation key so the name doesn't get lost.
+_show_top(io::IO, key, op) = print(io, key, ": ", op)
+_show_top(io::IO, key, op::ExprColumn{<:Union{typeof(~),typeof(assign)}}) =
+    join(io, getargs(op), " $(getop(op)) ")
 Base.show(io::IO, d::DataColumn) = begin
     print(io, "data (eltype=", eltype(parent(d)), ")")
 end

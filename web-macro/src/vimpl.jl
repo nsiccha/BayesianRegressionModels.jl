@@ -28,6 +28,9 @@ vbroadcasted(;kwargs...) = (args...)->vbroadcasted(args...; kwargs...)
 vbroadcasted(x::NamedColumn{<:Any,<:DataColumn}; meta) = parent(meta.materialized[name(x)])
 vbroadcasted(x::NamedColumn; meta) = meta.materialized[name(x)]
 vbroadcasted(x::ExprColumn; meta) = Base.broadcasted(getf(x), map(vbroadcasted(;meta), getargs(x))...)
+# Literals (Int, Float, etc.) inside formula expressions like `a^2` pass
+# through unchanged — they get broadcasted as scalars by Base.broadcasted.
+vbroadcasted(x::Number; meta) = x
 getinverse(x::ExprColumn{<:Any,<:Tuple{<:Any}}) = inverse(getf(x))
 getinverse(x::ExprColumn{<:Any,<:Tuple{<:ExprColumn}}) = inverse(getf(x)) ∘ getinverse(getargs(x, 1)[1]) 
 vmeta_sampling(meta, lhs::ExprColumn, rhs) = begin
