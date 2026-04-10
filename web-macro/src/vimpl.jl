@@ -60,7 +60,8 @@ vmeta_sampling_rhs(meta, x::ExprColumn{typeof(|)}; kwargs...) = begin
     lhs, rhs = getargs(x, 2)
     vmeta_sampling_rhs(meta, lhs; group=rhs)
 end
-vmeta_sampling_rhs(meta, ::Int; group) = begin
+vmeta_sampling_rhs(meta, n::Int; group) = begin
+    n == 0 && return meta, 0  # `0` suppresses the intercept (no parameter allocated)
     meta, p = growblock!!(meta, group, 1)
     meta, _re_lookup(p, _gc_idx(group))
 end
