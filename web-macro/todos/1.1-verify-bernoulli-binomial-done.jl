@@ -1,6 +1,6 @@
 # label: 1.1 verify Bernoulli/Binomial
 # tier: 1
-# status: done
+# status: open
 #=
 **Status: done.** ✓ Confirmed that the existing `FBroadcasted{<:Type{<:Distribution}}` pass-through in `vimpl.jl` handles both Bernoulli and Binomial cleanly.
 
@@ -8,7 +8,7 @@
 
 =#
 
-log_odds_bin ~ 1 + c1 + (1 | g1)
+log_odds_bin ~ 1 + c2 + (1 | g1)
 bin_succ ~ Binomial(bin_n, logistic(log_odds_bin))
 
 log_odds_b ~ 1 + (1 | g1)

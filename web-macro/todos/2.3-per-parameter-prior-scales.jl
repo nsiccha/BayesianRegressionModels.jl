@@ -1,6 +1,6 @@
 # label: 2.3 per-parameter prior scales
 # tier: 2
-# status: deprioritized
+# status: open
 #=
 **What it is.** Currently every parameter is `Normal(0, 1)` in `lprior!`. brms / Stan-style models routinely set custom priors per coefficient: `b ~ Normal(0, 0.5)` for tight priors on slopes, `b ~ Cauchy(0, 1)` for heavy-tailed priors, etc.
 

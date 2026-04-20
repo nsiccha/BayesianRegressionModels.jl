@@ -1,6 +1,6 @@
 # label: 1.6 cache levels / level_map / dense / gc_idx
 # tier: 1
-# status: deprioritized
+# status: open
 #=
 **What it is.** Stop rebuilding the dense level mapping (`Dict(level => row_index)`) and the gc_idx vector on every `VBRMI(brmi)` call. Cache them once per source data column.
 

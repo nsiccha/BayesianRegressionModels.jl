@@ -1,6 +1,6 @@
 # label: 1.4 scale(x) / standardize(x)
 # tier: 1
-# status: deprioritized
+# status: open
 #=
 **What it is.** brms's `scale(x)` z-transforms a column at parse time: `scale(x) = (x - mean(x)) / std(x)`. The model sees the standardized column. Crucial for default priors (which are scale-invariant only after standardization) and sampler stability (well-conditioned linear predictors).
 

@@ -1,6 +1,6 @@
 # label: 2.7 se() / weights() — already works (just a different distribution)
 # tier: 2
-# status: done
+# status: open
 #=
 **Status: already works without any new code.** Same insight as 1.2 (offset) and 1.3 (`I()`): brms needs sidecar syntax (`y | se(sigma_y) ~ ...`, `y | weights(w) ~ ...`) because R's formula DSL has no other way to attach extra info to the LHS. Our DSL has no such constraint — the likelihood is a free-form Julia expression, so anything brms expresses via sidecar syntax we can express via constructor arguments or a wrapper distribution.
 

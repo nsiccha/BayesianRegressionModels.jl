@@ -1,6 +1,6 @@
 # label: 1.3 I(expr) — likely already works
 # tier: 1
-# status: done
+# status: open
 #=
 **What it is.** brms's `I()` is a literal-escape: `I(x^2)` says "compute `x^2` from the data and treat it as a single column". brms needs it because `+`, `*`, `:`, `|`, … all have special meaning inside an R formula.
 

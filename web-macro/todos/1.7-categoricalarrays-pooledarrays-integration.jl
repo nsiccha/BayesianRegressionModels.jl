@@ -1,6 +1,6 @@
 # label: 1.7 CategoricalArrays / PooledArrays integration
 # tier: 1
-# status: deprioritized
+# status: open
 #=
 **What it is.** When the input column is already a `CategoricalVector` or a `PooledArray`, the dense level mapping is already computed and stored in the column's `.refs` field. Use it directly instead of rebuilding via `Dict`.
 
