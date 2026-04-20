@@ -1,14 +1,53 @@
-using LogExpFunctions, InverseFunctions, Distributions, ElasticArrays, LogDensityProblems, LinearAlgebra
+using LogExpFunctions, InverseFunctions, Distributions, ElasticArrays, LogDensityProblems, LinearAlgebra, SpecialFunctions
+import CategoricalArrays as CA
 
 struct VBRMI{P<:BRMI,M<:NamedTuple}
     parent::P
     meta::M
 end
 VBRMI(p::BRMI) = VBRMI(p, finalize(foldl(vmeta, p.operations; init=(;materialized=(;), blocks=(;)))))
-finalize(x) = merge(x, (;block_data=map(x.blocks) do values 
-    m, n = size(values)
-    (;L=zeros(n, n))
-end))
+
+"""
+    Part{F<:Function,D<:NamedTuple}
+
+Bundles a marker function `func` (the sole dispatch tag for per-part behavior —
+`nparams`, `lprior!`, `Base.show`) with a NamedTuple `data` of per-kind state.
+Each part owns its buffer and knows how to consume a slice of the unconstrained
+vector, constrain it into the buffer, and return its log-prior contribution.
+
+`meta.blocks` is a NamedTuple keyed by coalescing Symbol (`:__population__`, or
+a grouping-factor name like `:g1`); each value is a tuple of parts.
+"""
+struct Part{F<:Function,D<:NamedTuple}
+    func::F
+    data::D
+end
+
+"""IID-normal population slots."""
+function normal end
+"""Grouped column set, correlated via a shared L."""
+function grouped_normal end
+"""LKJ-Cholesky owning the shared L for a grouped block."""
+function chol end
+"""Unit simplex owning `values`; `length(values)` entries sum to 1, parameterized by `length(values)-1` unconstrained reals via stick-breaking."""
+function simplex end
+
+"""
+    finalize(meta) / finalize(parts) / finalize(part, acc)
+
+Threaded finalize: fold over each block's parts, each part emitting zero or
+more replacement parts. `acc` is visible to later parts so a part can observe
+what already landed (e.g. a `grouped_normal` could skip re-allocating L if a
+`chol` sibling is already present — useful for the future multi-grouped_normal
+case). Default per-part method is a pass-through; specializations emit their
+own expansion (e.g. `grouped_normal` prepends a `chol` sharing the same L).
+"""
+finalize(x::NamedTuple) = merge(x, (; blocks = map(finalize, x.blocks)))
+finalize(parts::Tuple) = foldl((acc, p) -> (acc..., finalize(p, acc)...), parts; init=())
+finalize(p::Part, _) = (p,)
+finalize(p::Part{typeof(grouped_normal)}, _) = let n = size(p.data.values, 2), L = zeros(n, n)
+    (Part(chol, (; L)), Part(grouped_normal, merge(p.data, (; L))))
+end
 rmerge(x::NamedTuple, y::NamedTuple) = begin
     xykeys = (intersect(keys(x), keys(y))...,)
     merge(x, y, map(rmerge, NamedTuple{xykeys}(x), NamedTuple{xykeys}(y)))
@@ -67,35 +106,15 @@ vmeta_sampling_rhs(meta, n::Int; group) = begin
 end
 vmeta_sampling_rhs(meta, x::NamedColumn; kwargs...) = vmeta_sampling_rhs(meta, meta.materialized[name(x)]; kwargs...)
 vmeta_sampling_rhs(meta, x::DataColumn; kwargs...) = vmeta_sampling_rhs(meta, parent(x); kwargs...)
-vmeta_sampling_rhs(meta, x::AbstractVector{<:AbstractFloat}; group) = begin
-    meta, p = growblock!!(meta, group, 1)
-    meta, Base.broadcasted(*, x, _re_lookup(p, _gc_idx(group)))
-end
+vmeta_sampling_rhs(meta, x::AbstractVector{<:AbstractFloat}; group) = _scale_by_beta(meta, x; group)
 FBroadcasted{F,Style<:Union{Nothing, Base.Broadcast.BroadcastStyle},Axes} = Base.Broadcast.Broadcasted{Style,Axes,F}
-vmeta_sampling_rhs(meta, x::FBroadcasted; group) = begin
-    meta, p = growblock!!(meta, group, 1)
-    meta, Base.broadcasted(*, x, _re_lookup(p, _gc_idx(group)))
-end
+vmeta_sampling_rhs(meta, x::FBroadcasted; group) = _scale_by_beta(meta, x; group)
 vmeta_sampling_rhs(meta, x::AbstractVector{<:Integer}; group) = begin
     # Treatment-coded categorical predictor: level 1 is the reference (drops out),
     # remaining k-1 levels each get their own coefficient slot in the block.
-    # TODO: figure out where to cache `levels`/`level_map`/`dense`/`gc_idx` so we
-    # don't rebuild them on every VBRMI construction. Candidates: a new
-    # `meta.factor` NamedTuple keyed by column name, or attach it to the
-    # materialized entry for the source column — _gc_idx() does the same
-    # dense-mapping work for the grouping-factor side.
-    # TODO: investigate hooking into an existing "categorical values vector"
-    # abstraction instead of building the dense map by hand. CategoricalArrays.jl
-    # (used by DataFrames) already exposes `levels`, `levelcode`, and a `.refs`
-    # field that *is* the dense Int8/16 code vector — if the input column is
-    # already a CategoricalVector we'd avoid the Dict round-trip entirely. Same
-    # idea applies to PooledArrays.jl. Need to decide whether vimpl.jl should
-    # take a hard dep on CategoricalArrays or sniff for the duck-typed interface.
-    levels = sort(unique(x))
-    level_map = Dict(l => i for (i, l) in enumerate(levels))
-    dense = [level_map[l] for l in x]
-    meta, p = growblock!!(meta, group, length(levels) - 1)
-    meta, _cat_broadcast(p, _gc_idx(group), dense)
+    K, c_idx = _level_index(x)
+    meta, p = growblock!!(meta, group, K - 1)
+    meta, _cat_broadcast(p, _gc_idx(group), c_idx)
 end
 # Population case (gc_idx === nothing): p is (1, k-1), look up the (level-1)-th
 # column via linear indexing.
@@ -111,11 +130,44 @@ _cat_re_lookup(p, gc, level) = level == 1 ? zero(eltype(p)) : p[gc, level - 1]
 # `values`. Returns `nothing` for the special :__population__ marker so that the
 # population-level path can pass through `_re_lookup` unchanged.
 _gc_idx(::Symbol) = nothing
-function _gc_idx(group::NamedColumn)
-    raw = parent(parent(group))
-    levels = sort(unique(raw))
-    level_map = Dict(l => i for (i, l) in enumerate(levels))
-    [level_map[l] for l in raw]
+_gc_idx(group::NamedColumn) = _level_index(parent(parent(group)))[2]
+
+"""
+    _level_index(raw) -> (K, c_idx)
+
+Return the number of distinct levels `K` and a dense `c_idx::Vector{Int}`
+mapping each row to its 1-based level index. `CategoricalArrays.CategoricalVector`
+is handled for free via `levels` + `levelcode`; plain vectors fall back to
+building a `Dict` on the fly and warn once per call site.
+"""
+_level_index(raw::CA.CategoricalVector) = length(CA.levels(raw)), CA.levelcode.(raw)
+_level_index(raw::AbstractVector) = begin
+    @warn "Building categorical level index from a plain vector; wrap in `categorical(…)` to avoid the per-call Dict." maxlog=1 _id=:vimpl_level_index
+    lvls = sort(unique(raw))
+    lm = Dict(l => i for (i, l) in enumerate(lvls))
+    length(lvls), [lm[l] for l in raw]
+end
+
+"""
+    push_parts!!(meta, group::Symbol, parts::Part...) -> meta
+
+Append `parts` to `meta.blocks[group]`, creating the block if it didn't exist.
+"""
+push_parts!!(meta, group::Symbol, new::Part...) =
+    rmerge(meta, (; blocks = (; group => (get(meta.blocks, group, ())..., new...))))
+
+"""
+    _scale_by_beta(meta, bcast; group) -> (meta, scaled_bcast)
+
+Allocate one normal slot via `growblock!!(meta, group, 1)` and return a
+broadcasted expression that multiplies `bcast` by that β. Works at both the
+population (scalar β) and group (one β per level, looked up via `_re_lookup`)
+levels. Shared backbone of `AbstractVector{<:AbstractFloat}`, `FBroadcasted`,
+and `mo(c)` parsers.
+"""
+_scale_by_beta(meta, bcast; group) = begin
+    meta, p = growblock!!(meta, group, 1)
+    meta, Base.broadcasted(*, bcast, _re_lookup(p, _gc_idx(group)))
 end
 
 # Wrap a (m, 1) growblock view as a length-N broadcasted lookup keyed by
@@ -138,66 +190,112 @@ getbroadcast(x::MaterializedColumn) = getfield(x, :broadcast)
 Base.broadcastable(x::MaterializedColumn) = Base.broadcastable(parent(x))
 
 n_levels(group::NamedColumn) = length(unique(parent(parent(group))))
-growblock!!(meta, group::Symbol, n) = growblock!!(meta, group, 1, n)
-growblock!!(meta, group::Symbol, m, n) = begin
-    g = get(meta.blocks, group) do 
-        ElasticMatrix(zeros(m, 0))
-    end
-    idxs = (size(g, 2)+1):(size(g, 2)+n)
-    append!(g, zeros(m, n))
-    rmerge(meta, (;blocks=(;group=>g))), view(g, :, idxs)
+
+_append!(values, m, n) = begin
+    append!(values, zeros(m, n))
+    view(values, :, size(values, 2)-n+1:size(values, 2))
 end
-growblock!!(meta, group::NamedColumn, n) = growblock!!(meta, name(group), n_levels(group), n)
+
+# Append a fresh part with an (m, n) buffer; always valid, no coalescing.
+_push_part(parts::Tuple, f, m, n) = let values = ElasticMatrix(zeros(m, n))
+    (parts..., Part(f, (; values))), view(values, :, 1:n)
+end
+
+# Coalesce-if-same-kind: extend trailing part's ElasticMatrix by `n` cols when
+# its func type matches, else append fresh. Dispatches on `(last_part, f)`.
+_grow_or_push(parts::Tuple{}, f, m, n) = _push_part(parts, f, m, n)
+_grow_or_push(parts::Tuple, f, m, n) = _grow_or_push_tail(parts, last(parts), f, m, n)
+_grow_or_push_tail(parts::Tuple, tail::Part{F}, ::F, m, n) where F =
+    (parts, _append!(tail.data.values, m, n))
+_grow_or_push_tail(parts::Tuple, _, f, m, n) = _push_part(parts, f, m, n)
+
+growblock!!(meta, ::Symbol, n) = begin
+    parts = get(meta.blocks, :__population__, ())
+    parts, p = _grow_or_push(parts, normal, 1, n)
+    rmerge(meta, (; blocks = (; __population__ = parts))), p
+end
+growblock!!(meta, group::NamedColumn, n) = begin
+    key, m = name(group), n_levels(group)
+    parts = get(meta.blocks, key, ())
+    parts, p = _grow_or_push(parts, grouped_normal, m, n)
+    rmerge(meta, (; blocks = (; key => parts))), p
+end
 
 Base.show(io::IO, (;parent, broadcast)::MaterializedColumn) = print(io, eltype(parent), "[...] .= ", broadcast)
 Base.show(io::IO, (;parent, rhs)::LikelihoodColumn) = print(io, eltype(parent), "[...] .~ ", rhs)
-Base.show(io::IO, vbrm::VBRMI) = begin 
-    (;parent, meta) = vbrm
+
+Base.show(io::IO, p::Part{typeof(normal)}) = print(io, "Part{normal}", size(p.data.values))
+Base.show(io::IO, p::Part{typeof(grouped_normal)}) = print(io, "Part{grouped_normal}", size(p.data.values))
+Base.show(io::IO, p::Part{typeof(chol)}) = print(io, "Part{chol}(", size(p.data.L, 1), ")")
+Base.show(io::IO, p::Part{typeof(simplex)}) = print(io, "Part{simplex}(", length(p.data.values), ")")
+Base.show(io::IO, p::Part) = print(io, "Part{", p.func, "}")
+
+Base.show(io::IO, vbrm::VBRMI) = begin
+    (; parent, meta) = vbrm
     print(io, parent)
     print(io, "dim: ", LogDensityProblems.dimension(vbrm), "\n")
     print(io, "materialized:\n")
     for (key, value) in pairs(meta.materialized)
         print(io, "  ", key, ": ", value, "\n")
     end
-    print(io, "blocks (n_levels, n_params):\n")
-    for (key, value) in pairs(meta.blocks)
-        print(io, "  ", key, ": ", size(value), "\n")
-    end
-end
-LogDensityProblems.dimension(vbrm::VBRMI) = hyperdim(vbrm) + directdim(vbrm)
-hyperdim(vbrm::VBRMI) = sum(pairs(vbrm.meta.blocks)) do (k, v)
-    n = size(v, 2)
-    k == :__population__ ? 0 : n * (n+1) ÷ 2
-end
-directdim(vbrm::VBRMI) = sum(length, vbrm.meta.blocks)
-advance!!(x, pos) = x[pos+1], pos+1
-advance!!(x, pos, n) = view(x, pos+1:pos+n), pos+n
-lprior!((;meta)::VBRMI, x::AbstractVector; init=(0., 0)) = foldl(pairs(meta.blocks); init) do (lprior, pos), (key, values)
-    m, n = size(values)
-    if key == :__population__
-        xi, pos = advance!!(x, pos, n)
-        values[1, :] .= xi
-        lprior += sum(Base.Fix1(logpdf, Normal()), xi)
-    else
-        C = LinearAlgebra.Cholesky(meta.block_data[key].L, :L, 0)
-        lprior, pos = lprior!(C, x; init=(lprior, pos))
-        for vi in eachrow(values)
-            xi, pos = advance!!(x, pos, n)
-            mul!(vi, C.L, xi)
-            lprior += sum(Base.Fix1(logpdf, Normal()), xi)
+    print(io, "blocks:\n")
+    for (key, parts) in pairs(meta.blocks)
+        print(io, "  ", key, ":\n")
+        for part in parts
+            print(io, "    ", part, "\n")
         end
     end
-    lprior, pos
-end |> first
-log_abs_tanh(x) = begin 
+end
+
+LogDensityProblems.dimension(vbrm::VBRMI) = nparams(vbrm.meta.blocks)
+
+nparams(x::Union{Tuple,NamedTuple}) = sum(nparams, x; init=0)
+nparams(p::Part{typeof(normal)}) = size(p.data.values, 2)
+nparams(p::Part{typeof(grouped_normal)}) = let (m, n) = size(p.data.values); m * n end
+nparams(p::Part{typeof(chol)}) = let n = size(p.data.L, 1); n * (n + 1) ÷ 2 end
+nparams(p::Part{typeof(simplex)}) = length(p.data.values) - 1
+
+advance!!(x, pos) = x[pos+1], pos+1
+advance!!(x, pos, n) = view(x, pos+1:pos+n), pos+n
+
+"""
+    lprior!(container, x) -> lp
+
+Recursive shell: each child (block-container, `Part`, …) is handed a view of
+exactly `nparams(child)` unconstrained reals; bottoms out on `Part` methods,
+each of which writes its constrained buffer and returns its log-prior +
+Jacobian contribution.
+"""
+lprior!(vbrmi::VBRMI, x::AbstractVector) = lprior!(vbrmi.meta.blocks, x)
+lprior!(xs::Union{Tuple,NamedTuple}, x::AbstractVector) =
+    foldl(xs; init=(0.0, 0)) do (total, pos), child
+        xi, pos = advance!!(x, pos, nparams(child))
+        total + lprior!(child, xi), pos
+    end |> first
+
+lprior!(p::Part{typeof(normal)}, x) = begin
+    p.data.values[1, :] .= x
+    sum(Base.Fix1(logpdf, Normal()), x)
+end
+
+log_abs_tanh(x) = begin
     z = -2*abs(x)
     (log1mexp(z) - log1pexp(z))
 end
 log_square_tanh(x) = 2 * log_abs_tanh(x)
-"Either wrong or better LKJCholesky unconstraining + prior"
-lprior!((;L)::Cholesky, x; init, eta=1.) = begin 
-    lprior, pos = init
+
+"""
+    lprior!(p::Part{typeof(chol)}, x; eta=1.0) -> lp
+
+Either wrong or better LKJCholesky unconstraining + prior. Writes `p.data.L`
+in place from `x` (length n(n+1)/2) and returns the log-prior + Jacobian
+contribution. `eta` is the LKJ shape parameter.
+"""
+lprior!(p::Part{typeof(chol)}, x; eta=1.0) = begin
+    L = p.data.L
     n = LinearAlgebra.checksquare(L)
+    pos = 0
+    lprior = 0.0
     log_scale, pos = advance!!(x, pos)
     lprior += logpdf(Normal(), log_scale)
     L[1, 1] = exp(log_scale)
@@ -222,8 +320,52 @@ lprior!((;L)::Cholesky, x; init, eta=1.) = begin
         L[i, i] = exp(log_scale + .5 * log1mexp(log_sos))
         lprior += (n - i + 2*eta-2) * .5 * log1mexp(log_sos)
     end
-    lprior, pos
+    lprior
 end
+
+lprior!(p::Part{typeof(grouped_normal)}, x) = begin
+    (; values, L) = p.data
+    _, n = size(values)
+    lprior = 0.0
+    pos = 0
+    for vi in eachrow(values)
+        xi, pos = advance!!(x, pos, n)
+        mul!(vi, LowerTriangular(L), xi)
+        lprior += sum(Base.Fix1(logpdf, Normal()), xi)
+    end
+    lprior
+end
+
+"""
+    lprior!(p::Part{typeof(simplex)}, x; alpha=1.0) -> lp
+
+Log-scale stick-breaking with logistic slices: constrain `length(values)-1`
+unconstrained reals `x` into the simplex `p.data.values` in place and return
+`log|J| + logpdf(Dirichlet(K, α), values)` in one pass. Fully log-scale —
+never forms `1 - Σ values_<i` on the linear scale, so it stays stable even
+when simplex entries get tiny. `α == 1.0` reduces to the Jacobian-only
+transform (plus the constant `loggamma(K)`).
+
+Ported from `blog/posts/simplex/transforms/stickbreakingLogistic.stan`.
+"""
+lprior!(p::Part{typeof(simplex)}, x; alpha=1.0) = begin
+    values = p.data.values
+    K = length(values)
+    lp = 0.0
+    log_cum_prod = 0.0
+    for i in 1:K-1
+        log_zi = -log1pexp(-(x[i] - log(K - i)))
+        log_xi = log_cum_prod + log_zi
+        values[i] = exp(log_xi)
+        lp += alpha * log_xi
+        log_cum_prod += log1mexp(log_zi)
+    end
+    values[K] = exp(log_cum_prod)
+    lp += alpha * log_cum_prod
+    lp += loggamma(K * alpha) - K * loggamma(alpha)
+    lp
+end
+
 llikelihood!((;meta)::VBRMI) = foldl(meta.materialized; init=0.) do llikelihood, m
     llikelihood + llikelihood!(m)
 end
@@ -235,7 +377,7 @@ llikelihood!(x::LikelihoodColumn) = ssum(Base.broadcasted(logpdf, rhs(x), parent
 llikelihood!(x) = error(typeof(x))
 
 ssum(args...; kwargs...) = sum(args...; kwargs...)
-ssum(x::Base.Broadcast.Broadcasted; init) = begin 
+ssum(x::Base.Broadcast.Broadcasted; init) = begin
     rv = init
     for xi in x
         rv += xi
@@ -245,3 +387,101 @@ end
 
 Distributions.logpdf(vbrmi::VBRMI, x::AbstractVector) = lprior!(vbrmi, x) + llikelihood!(vbrmi)
 LogDensityProblems.logdensity(vbrmi::VBRMI, x::AbstractVector) = lprior!(vbrmi, x) + llikelihood!(vbrmi)
+
+# ==============================================================================
+# Template: user-defined terms `mo1(c)` / `mo(c)` — brms-style monotonic effects
+# ------------------------------------------------------------------------------
+# Every block below is what a user adding a new term would need to touch. Use
+# this as the canonical template when sketching additional user-model terms.
+#
+# 1. Marker function    — pure dispatch tag, never called.
+# 2. Parser method      — `vmeta_sampling_rhs(meta, ::ExprColumn{typeof(mo1)};…)`
+#                         allocates the backing buffers, pushes Part(s) into
+#                         `meta.blocks`, returns a broadcasted expression that
+#                         feeds the linear predictor.
+# 3. `nparams` method   — how many unconstrained reals this Part consumes.
+# 4. `lprior!` method   — refresh derived buffers / return log-prior + Jacobian.
+# 5. `Base.show` method — pretty-printed entry in the VBRMI summary.
+#
+# `mo1` piggy-backs on the library `simplex` Part: the parser pushes a
+# `Part(simplex, (; values))` that owns the unit simplex, followed by a
+# zero-parameter `Part(mo1, (; values, contrast, c_idx))` that just refreshes
+# `contrast = vcat(0, cumsum(values))` each draw.
+#
+# `mo` is the brms-style free-β variant: it reuses the `mo1` pipeline for the
+# monotonic contrast and multiplies by a fresh β slot (one extra normal slot
+# allocated via `growblock!!`) — so `mo(c)` ≡ β · mo1(c).
+# ==============================================================================
+
+"""Monotonic effect with β fixed to 1 (brms-style mo, β=1); shares a `simplex` sibling."""
+function mo1 end
+
+"""Monotonic effect with free β coefficient (brms-style mo); reuses `mo1` + one normal slot."""
+function mo end
+
+"""
+    _mo_contrast!(meta, raw) -> (meta, broadcasted)
+
+Shared core of `mo1` and `mo`: for a categorical column `raw` with K levels,
+emits `(Part(simplex, …), Part(mo1, …))` into the population block and returns
+a broadcasted `getindex(contrast, c_idx)` expression.
+"""
+_mo_contrast!(meta, raw) = begin
+    K, c_idx = _level_index(raw)
+    K >= 2 || error("mo/mo1: categorical must have ≥ 2 levels (got $K)")
+    values   = zeros(K - 1)
+    contrast = zeros(K)
+    meta = push_parts!!(meta, :__population__,
+        Part(simplex, (; values)),
+        Part(mo1,     (; values, contrast, c_idx)),
+    )
+    meta, Base.broadcasted(getindex, Ref(contrast), c_idx)
+end
+
+"""
+    vmeta_sampling_rhs(meta, x::ExprColumn{typeof(mo1)}; group) -> (meta, broadcasted)
+
+Parse a `mo1(c)` term: brms-style monotonic effect with β fixed to 1.
+Population-level only for now.
+"""
+vmeta_sampling_rhs(meta, x::ExprColumn{typeof(mo1)}; group) = begin
+    group === :__population__ || error("mo1: only population-level supported for now (got group=$group)")
+    _mo_contrast!(meta, vbroadcasted(getargs(x, 1)[1]; meta))
+end
+
+"""
+    vmeta_sampling_rhs(meta, x::ExprColumn{typeof(mo)}; group) -> (meta, broadcasted)
+
+Parse a `mo(c)` term: brms-style monotonic effect with free β. Delegates to
+`_mo_contrast!` for the monotonic contrast and multiplies by a fresh β slot
+allocated via `growblock!!`. Population-level only for now.
+"""
+vmeta_sampling_rhs(meta, x::ExprColumn{typeof(mo)}; group) = begin
+    group === :__population__ || error("mo: only population-level supported for now (got group=$group)")
+    meta, contrast_bcast = _mo_contrast!(meta, vbroadcasted(getargs(x, 1)[1]; meta))
+    _scale_by_beta(meta, contrast_bcast; group)
+end
+
+nparams(p::Part{typeof(mo1)}) = 0
+
+"""
+    lprior!(p::Part{typeof(mo1)}, _) -> 0.0
+
+Zero-parameter follow-up to a `simplex` sibling: refresh
+`contrast = vcat(0, cumsum(values))` in place so downstream broadcasts see
+up-to-date contrast values. Contributes nothing to the log-prior.
+"""
+lprior!(p::Part{typeof(mo1)}, _) = begin
+    (; values, contrast) = p.data
+    contrast[1] = 0.0
+    for k in 2:length(contrast)
+        contrast[k] = contrast[k-1] + values[k-1]
+    end
+    0.0
+end
+
+Base.show(io::IO, p::Part{typeof(mo1)}) = print(io, "Part{mo1}(K=", length(p.data.contrast), ")")
+
+# ==============================================================================
+# End of `mo1` / `mo` template
+# ==============================================================================

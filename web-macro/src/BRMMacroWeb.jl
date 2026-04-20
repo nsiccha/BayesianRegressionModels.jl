@@ -419,15 +419,15 @@ function vbrmi_card(vbrmi::VBRMI)
         end
     end for (key, value) in pairs(meta.materialized)]
 
-    # Blocks: show dimensions with styled block key
+    # Blocks: each block is a tuple of parts; print the block key + one line per part.
     blocks_rows = [begin
-        m, n = size(value)
-        role = key == :__population__ ? :derived : :data
+        role = key === :__population__ ? :derived : :data
         h.div(
             _styled_name(key, role),
-            h.span(": (n_levels=$m, n_params=$n)"; style="color:#999"),
+            [h.div(; style="color:#999;margin-left:1.5rem")(sprint(show, part))
+                for part in parts]...,
         )
-    end for (key, value) in pairs(meta.blocks)]
+    end for (key, parts) in pairs(meta.blocks)]
 
     h.article(; style="margin:0.5rem 0")(
         h.header(h.strong("VBRMI"),
@@ -619,13 +619,13 @@ _index_body(formula::String) = h.div(
 )
 
 @htmx struct AppContext
-    req = nothing
+    
 
-    # HTMXObjects auto-uses `page` to wrap any route's return value into a full
-    # page on direct browser navigation, while returning just the fragment for
-    # HTMX requests (see `_resolve_response` in HTMXObjects.jl). The sidebar's
-    # `hx-get` swaps target `#content` directly.
-    page(content) = htmx(
+    # HTMXObjects auto-uses `__page__` to wrap any route's return value into a
+    # full page on direct browser navigation, while returning just the fragment
+    # for HTMX requests (see `_resolve_response` in HTMXObjects.jl). The
+    # sidebar's `hx-get` swaps target `#content` directly.
+    __page__(content) = htmx(
         h.div(; style="display:flex;gap:1rem;align-items:flex-start")(
             nav_sidebar([
                 "Pipeline" => "/",
@@ -670,16 +670,11 @@ _index_body(formula::String) = h.div(
     end
 
     @get todo = begin
-        todos = _load_todos()
+        todos = _load_todos(refresh=true)
         h.div(
             h.h1("TODO — what's missing for full BRM coverage"),
-            h.p("Items grouped by tier. Each item has a sketch of what it is, why it matters, how to implement, and how to verify. Sourced from .jl files under ", h.code("web-macro/todos/"), "; status edits and edited formulas are written back to disk."),
-            h.h2("Tier 1 — cheap wins"),
-            [_todo_card(t) for t in todos if t.tier == 1]...,
-            h.h2("Tier 2 — moderate (one design decision each)"),
-            [_todo_card(t) for t in todos if t.tier == 2]...,
-            h.h2("Tier 3 — bigger features (real new infrastructure)"),
-            [_todo_card(t) for t in todos if t.tier == 3]...,
+            h.p("Sorted by last modified. Each item has a sketch of what it is, why it matters, how to implement, and how to verify. Sourced from .jl files under ", h.code("web-macro/todos/"), "; status edits and edited formulas are written back to disk."),
+            [_todo_card(t) for t in todos]...,
         )
     end
 end
@@ -721,7 +716,7 @@ function _load_todos(; refresh::Bool=false)
     if refresh || !isassigned(_todos_cache)
         dir = _todos_dir()
         isdir(dir) || _migrate_todos!()
-        files = sort(filter(endswith(".jl"), readdir(dir; join=true)))
+        files = sort(filter(endswith(".jl"), readdir(dir; join=true)); by=mtime, rev=true)
         _todos_cache[] = TodoEntry[_parse_todo_file(f) for f in files]
     end
     _todos_cache[]
@@ -828,6 +823,20 @@ end
 
 # ── Rendering: one Pico CSS article per TODO with status-colored border ────
 
+const _TIER_LABELS = (
+    "T1",  # tier 1
+    "T2",  # tier 2
+    "T3",  # tier 3
+)
+const _TIER_COLORS = ("#4a7c59", "#5a6a8c", "#8c5a5a")
+
+_tier_pill(tier::Int) = h.span(
+    get(_TIER_LABELS, tier, "T$tier");
+    style="font-size:0.7em;padding:0.1rem 0.4rem;border-radius:1rem;" *
+          "color:white;background:$(get(_TIER_COLORS, tier, "#888"));" *
+          "vertical-align:middle;font-weight:normal",
+)
+
 const _STATUS_COLORS = (
     open = "#888",
     done = "#2e7d32",
@@ -856,7 +865,9 @@ function _todo_card(todo::TodoEntry)
     )(
         h.details(; open=todo.status == :open)(
             h.summary(; style="cursor:pointer;list-style-position:outside")(
-                h.strong(todo.label), " ", _status_pills(todo.label, todo.status),
+                _tier_pill(todo.tier), " ",
+                h.strong(todo.label), " ",
+                _status_pills(todo.label, todo.status),
             ),
             h.div(; style="margin-top:0.5rem")(body_children...),
         ),
