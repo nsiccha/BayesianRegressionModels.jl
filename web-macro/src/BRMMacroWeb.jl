@@ -1,6 +1,7 @@
 module BRMMacroWeb
 
 using HTMXObjects
+using Treebars: polling_fetchindex, initialize_progress!
 using Random
 using Chairmarks
 using DataFrames
@@ -74,6 +75,29 @@ function synthetic_df(; n=64, seed=1)
                 y1, y2, k1, k2, bin_n, bin_succ, bin_y)
 end
 
+# Extension hook: extensions (e.g. the gitignored `bruno-ext.jl`) that need
+# to contribute auxiliary data which doesn't fit as per-row DataFrame
+# columns -- for example `dose_times::Vector{<:AbstractVector}` indexed by
+# subject id -- add a method `dataset_extras(::Val{:ns}, df)` returning a
+# NamedTuple of extras. The namespace is derived from the TODO label/slug
+# (first dash/space-separated segment), so `bruno-qt-*` TODOs dispatch to
+# `::Val{:bruno}`. Default is no extras.
+dataset_extras(::Val, df) = (;)
+
+# Namespace extracted from a TODO label or slug; empty -> :default.
+dataset_namespace(label::AbstractString) = isempty(strip(label)) ? :default :
+    Symbol(lowercase(first(split(strip(label), r"[\s:\-]+"))))
+
+# Build the container passed as `df` to `_brm`: a NamedTuple merging the
+# synthetic-df columns with extras dispatched by namespace. `@brm` only
+# needs `hasproperty`/`getproperty` on its data argument, so a NamedTuple
+# works as a drop-in for the DataFrame and lets extensions splice in
+# extras without touching macro.jl.
+function dataset_container(df, ns::Symbol=:default)
+    cols = (; (Symbol(c) => df[!, c] for c in names(df))...)
+    merge(cols, dataset_extras(Val(ns), df))
+end
+
 # ── Formula safety whitelist ────────────────────────────────────────────────
 #
 # The formula textarea accepts arbitrary text that gets `Meta.parse`d then
@@ -83,7 +107,7 @@ end
 # generous for formula-writing (math, distributions, data-column references)
 # but blocks I/O, shell, eval, include, ccall, macros, etc.
 
-const _ALLOWED_CALLS = Set{Symbol}([
+_ALLOWED_CALLS = Set{Symbol}([
     # DSL operators
     :~, :(+), :(-), :(*), :(/), :(^), :(|), :(||),
     # Comparison (may appear in ifelse-style expressions)
@@ -104,7 +128,7 @@ const _ALLOWED_CALLS = Set{Symbol}([
     :OrderedLogistic, :Categorical,
     # TODO stubs (not yet implemented but syntactically valid)
     :scale, :center, :standardize, :factor, :offset,
-    :s, :bs, :t2, :gp, :ar, :ar1, :mo,
+    :s, :bs, :t2, :gp, :ar, :ar1, :mo, :mo1,
     :cbind, :mvbind, :mm, :gr, :dp, :me, :centered,
     :Horseshoe, :ZeroInflatedPoisson, :weighted,
     # Data helpers
@@ -112,7 +136,7 @@ const _ALLOWED_CALLS = Set{Symbol}([
 ])
 
 # Expression heads that are safe in a formula AST (literals, blocks, calls, …)
-const _SAFE_HEADS = Set{Symbol}([
+_SAFE_HEADS = Set{Symbol}([
     :block, :call, :., :(=), :(||), :tuple, :vect, :ref,
     :kw, :parameters, :(...),
     # Comparison chains
@@ -173,7 +197,7 @@ end
 # intermediate step (parsing, transforming, wrapping, eval'ing, materializing,
 # benchmarking) and inspect the result without paying for the later stages.
 
-const STAGES = (
+STAGES = (
     :parse,      # Meta.parse(formula)
     :transform,  # parse!(...) — rewrites = and ~ into @n/@x macro calls
     :wrap,       # _brm(formula; df) — full let-block ready to eval
@@ -186,10 +210,11 @@ stage_index(s::Symbol) = something(findfirst(==(s), STAGES), length(STAGES))
 
 # Run the pipeline up to (and including) `stage`. Returns a NamedTuple
 # carrying every intermediate value computed so far.
-function pipeline(formula::AbstractString, stage::Symbol)
+function pipeline(formula::AbstractString, stage::Symbol;
+                  namespace::Symbol=:default)
     s = stage_index(stage)
     df = synthetic_df()
-    out = (; df)
+    out = (; df, namespace)
 
     s >= 1 || return out
     raw = Meta.parse("begin\n$formula\nend")
@@ -205,7 +230,8 @@ function pipeline(formula::AbstractString, stage::Symbol)
     out = merge(out, (; transformed, alllocals))
 
     s >= 3 || return out
-    wrapped = _brm(formula; df)
+    container = dataset_container(df, namespace)
+    wrapped = _brm(formula; df=container)
     out = merge(out, (; wrapped))
 
     s >= 4 || return out
@@ -216,29 +242,44 @@ function pipeline(formula::AbstractString, stage::Symbol)
     vbrmi = VBRMI(brmi)
     dim = LogDensityProblems.dimension(vbrmi)
     x0 = randn(Xoshiro(0), dim)
-    ldp = try
-        string(LogDensityProblems.logdensity(vbrmi, x0))
-    catch e
-        "error: " * sprint(showerror, e)
-    end
-    grad = try
-        FiniteDifferences.grad(
-            central_fdm(5, 1),
-            Base.Fix1(LogDensityProblems.logdensity, vbrmi),
-            x0,
-        )[1]
-    catch e
-        e
-    end
+    ldp = string(LogDensityProblems.logdensity(vbrmi, x0))
+    grad = FiniteDifferences.grad(
+        central_fdm(5, 1),
+        Base.Fix1(LogDensityProblems.logdensity, vbrmi),
+        x0,
+    )[1]
     out = merge(out, (; vbrmi, dim, ldp, x0, grad))
 
     s >= 6 || return out
-    bench = try
-        @be randn(dim) LogDensityProblems.logdensity($vbrmi, _)
-    catch e
-        e
+    x_rand = randn(dim)
+    benches = Pair{String,Any}[]
+    push!(benches, "logdensity (total)" =>
+        @be randn(dim) LogDensityProblems.logdensity($vbrmi, _))
+    push!(benches, "lprior!" =>
+        @be randn(dim) lprior!($vbrmi, _))
+    # Per-Part lprior! split: the foldl in lprior!(blocks, x) hands each Part
+    # a view of exactly nparams(part) reals. Reconstruct those slices here so
+    # each Part's contribution can be benched in isolation.
+    let pos = 0
+        for (group_key, parts) in pairs(vbrmi.meta.blocks)
+            for (i, part) in enumerate(parts)
+                n = nparams(part)
+                xi = view(x_rand, pos+1:pos+n)
+                push!(benches, "  lprior!($group_key[$i] $(part))" =>
+                    @be lprior!($part, $xi))
+                pos += n
+            end
+        end
     end
-    merge(out, (; bench))
+    # llikelihood! splits: each materialized column (either a linear-predictor
+    # MaterializedColumn or a LikelihoodColumn). Bench each in isolation so the
+    # allocation / time cost of each step is visible.
+    _ = lprior!(vbrmi, x_rand)   # pre-fill buffers so bench measures the per-step cost
+    for (key, m) in pairs(vbrmi.meta.materialized)
+        push!(benches, "llikelihood!($key)" =>
+            @be llikelihood!($m))
+    end
+    merge(out, (; benches))
 end
 
 # ── Rendering helpers ───────────────────────────────────────────────────────
@@ -442,103 +483,82 @@ function vbrmi_card(vbrmi::VBRMI)
 end
 
 
-function render_output(formula::AbstractString; stage::Symbol=:vbrmi)
+function render_pipeline(out::NamedTuple)
     sections = Vector{Any}[]  # one entry per stage; rendered most-recent-first
-    try
-        out = pipeline(formula, stage)
 
-        # Synthetic data always pinned at the top, collapsed by default so the
-        # macro pipeline output stays the focus.
-        data_section = Any[
-            h.details(
-                h.summary("Synthetic data ($(nrow(out.df)) rows × $(ncol(out.df)) cols: " *
-                    join(string.(names(out.df)), ", ") * ") — click to expand"),
-                render_table(out.df; sortable=false),
-            ),
-        ]
+    # Synthetic data always pinned at the top, collapsed by default so the
+    # macro pipeline output stays the focus.
+    data_section = Any[
+        h.details(
+            h.summary("Synthetic data ($(nrow(out.df)) rows × $(ncol(out.df)) cols: " *
+                join(string.(names(out.df)), ", ") * ") — click to expand"),
+            render_table(out.df; sortable=false),
+        ),
+    ]
 
-        if haskey(out, :raw)
-            push!(sections, Any[_section("1. Meta.parse — raw Julia AST",
-                sprint(show, out.raw))...])
-        end
-        if haskey(out, :transformed)
-            push!(sections, Any[
-                _section("2. parse! — rewritten AST (= → @n/@x assign, ~ → @n/@x ~)",
-                    sprint(show, out.transformed))...,
-                h.h3("    locals classified by parse!"),
-                h.pre(sprint(show, out.alllocals)),
-            ])
-        end
-        if haskey(out, :wrapped)
-            push!(sections, Any[_section("3. _brm — full let-block (df spliced as a literal)",
-                sprint(show, out.wrapped))...])
-        end
-        if haskey(out, :brmi)
-            push!(sections, Any[
-                h.h3("4. eval — BRMI value (parsed model)"),
-                brmi_card(out.brmi),
-            ])
-        end
-        if haskey(out, :vbrmi)
-            # Build the FD check summary for the <details> toggle line
-            fd_summary = if out.grad isa Exception
-                h.span("logdensity + FD check: error"; style="color:crimson")
-            else
-                tol = 1e-8
-                n_dead = count(<=(tol) ∘ abs, out.grad)
-                if n_dead == 0
-                    h.span("logdensity + FD check: $(out.dim)/$(out.dim) active ✓";
-                        style="color:green")
-                else
-                    h.span("logdensity + FD check: $(n_dead) dead param(s)";
-                        style="color:crimson")
-                end
-            end
-
-            fd_body = if out.grad isa Exception
-                h.pre("gradient error: " * sprint(showerror, out.grad))
-            else
-                tol = 1e-8
-                dead = findall(<=(tol) ∘ abs, out.grad)
-                h.div(
-                    h.p("dim = ", string(out.dim), ", logdensity = ", out.ldp),
-                    isempty(dead) ? "" :
-                        h.p(; style="color:crimson")(
-                            "dead param indices: ", string(dead)),
-                    h.pre(sprint(show, MIME"text/plain"(), out.grad)),
-                )
-            end
-
-            push!(sections, Any[
-                h.h3("5. VBRMI — materialized action (blocks, dim, columns)"),
-                vbrmi_card(out.vbrmi),
-                h.details(h.summary(fd_summary), fd_body),
-            ])
-        end
-        if haskey(out, :bench)
-            bench_body = out.bench isa Exception ?
-                h.pre("benchmark error: " * sprint(showerror, out.bench)) :
-                h.pre(sprint(show, MIME"text/plain"(), out.bench))
-            push!(sections, Any[h.h3("6. Chairmarks @be — primal logdensity"), bench_body])
-        end
-
-        # Stages render most-recent-first; synthetic data sits at the very top.
-        children = reduce(vcat, reverse(sections); init=Any[])
-        prepend!(children, data_section)
-        return h.div(; id="brm-macro-output")(children...)
-    catch e
-        return h.div(; id="brm-macro-output")(
-            h.h3("Error"),
-            h.pre(sprint(showerror, e, catch_backtrace())),
-        )
+    if haskey(out, :raw)
+        push!(sections, Any[_section("1. Meta.parse — raw Julia AST",
+            sprint(show, out.raw))...])
     end
+    if haskey(out, :transformed)
+        push!(sections, Any[
+            _section("2. parse! — rewritten AST (= → @n/@x assign, ~ → @n/@x ~)",
+                sprint(show, out.transformed))...,
+            h.h3("    locals classified by parse!"),
+            h.pre(sprint(show, out.alllocals)),
+        ])
+    end
+    if haskey(out, :wrapped)
+        push!(sections, Any[_section("3. _brm — full let-block (df spliced as a literal)",
+            sprint(show, out.wrapped))...])
+    end
+    if haskey(out, :brmi)
+        push!(sections, Any[
+            h.h3("4. eval — BRMI value (parsed model)"),
+            brmi_card(out.brmi),
+        ])
+    end
+    if haskey(out, :vbrmi)
+        tol = 1e-8
+        n_dead = count(<=(tol) ∘ abs, out.grad)
+        fd_summary = n_dead == 0 ?
+            h.span("logdensity + FD check: $(out.dim)/$(out.dim) active ✓";
+                style="color:green") :
+            h.span("logdensity + FD check: $(n_dead) dead param(s)";
+                style="color:crimson")
+        dead = findall(<=(tol) ∘ abs, out.grad)
+        fd_body = h.div(
+            h.p("dim = ", string(out.dim), ", logdensity = ", out.ldp),
+            isempty(dead) ? "" :
+                h.p(; style="color:crimson")(
+                    "dead param indices: ", string(dead)),
+            h.pre(sprint(show, MIME"text/plain"(), out.grad)),
+        )
+        push!(sections, Any[
+            h.h3("5. VBRMI — materialized action (blocks, dim, columns)"),
+            vbrmi_card(out.vbrmi),
+            h.details(h.summary(fd_summary), fd_body),
+        ])
+    end
+    if haskey(out, :benches)
+        bench_rows = [h.div(
+            h.strong(label), h.br(),
+            h.pre(sprint(show, MIME"text/plain"(), b))
+        ) for (label, b) in out.benches]
+        push!(sections, Any[h.h3("6. Chairmarks @be — per-step"), bench_rows...])
+    end
+
+    # Stages render most-recent-first; synthetic data sits at the very top.
+    children = reduce(vcat, reverse(sections); init=Any[])
+    prepend!(children, data_section)
+    h.div(; id="brm-macro-output")(children...)
 end
 
 # ── Routes ──────────────────────────────────────────────────────────────────
 
-_stage_button(label, stage) = h.button(label; type="button",
+_stage_button(self, label, stage) = h.button(label; type="button",
     id="stage-$stage",
-    hx_get="/stage/$stage",
+    hx_get=string(query_url(self/"stage/$stage"; force=true)),
     hx_include="#brm-macro-form",
     hx_target="#brm-macro-output",
     hx_swap="outerHTML")
@@ -582,12 +602,12 @@ _preset_button(label, formula) = h.button(label;
     onclick="document.querySelector('textarea[name=formula]').value = this.dataset.formula; document.getElementById('stage-vbrmi').click()",
     style="font-size:0.8em;padding:0.2rem 0.5rem;margin:0")
 
-_index_body(formula::String) = h.div(
+_index_body(self, formula::String) = h.div(
     h.h1("BRM macro pipeline"),
     h.p(
         "Enter a ", h.code("@brm"), " formula and step through the macro pipeline: ",
-        h.code("Meta.parse"), " → ", h.code("parse!"), " → ", h.code("_brm"),
-        " let-block → ", h.code("eval"), " → ", h.code("VBRMI"), " action → ",
+        h.code("Meta.parse"), " -> ", h.code("parse!"), " -> ", h.code("_brm"),
+        " let-block -> ", h.code("eval"), " -> ", h.code("VBRMI"), " action -> ",
         h.code("Chairmarks"), " benchmark.",
     ),
     h.details(
@@ -607,19 +627,19 @@ _index_body(formula::String) = h.div(
                 style="width:100%;font-family:monospace"),
         ),
         h.fieldset(; class="grid")(
-            _stage_button("1. Parse",     :parse),
-            _stage_button("2. Transform", :transform),
-            _stage_button("3. Wrap",      :wrap),
-            _stage_button("4. BRMI",      :brmi),
-            _stage_button("5. VBRMI",     :vbrmi),
-            _stage_button("6. Benchmark", :bench),
+            _stage_button(self, "1. Parse",     :parse),
+            _stage_button(self, "2. Transform", :transform),
+            _stage_button(self, "3. Wrap",      :wrap),
+            _stage_button(self, "4. BRMI",      :brmi),
+            _stage_button(self, "5. VBRMI",     :vbrmi),
+            _stage_button(self, "6. Benchmark", :bench),
         ),
     ),
-    render_output(formula),
+    lazy(string(query_url(self/"stage/bench"; formula)); id="brm-macro-output"),
 )
 
 @htmx struct AppContext
-    
+    __appdata__ = APPDATA
 
     # HTMXObjects auto-uses `__page__` to wrap any route's return value into a
     # full page on direct browser navigation, while returning just the fragment
@@ -646,35 +666,54 @@ _index_body(formula::String) = h.div(
         # If a TODO form posted us a (label, formula) pair, persist the edited
         # formula to that TODO's .jl file so the next visit to the TODO page
         # shows the user's edits instead of the seed default.
-        isempty(label) || _save_todo!(label; new_formula=formula)
-        _index_body(formula)
+        isempty(label) || _save_todo!(__appdata__, label; new_formula=formula)
+        _index_body(__self__, formula)
     end
 
     @get mark(; label::String="", state::String="") = begin
         isempty(label) && return ""
         target = Symbol(state)
-        entry = _find_todo(label)
+        entry = _find_todo(__appdata__, label)
         entry === nothing && return ""
         next_status = entry.status == target ? :open : target
-        updated = _save_todo!(label; new_status=next_status)
+        updated = _save_todo!(__appdata__, label; new_status=next_status)
         # Re-render the whole card so the border + collapse state update
         # together with the pill text.
-        _todo_card(updated)
+        _todo_card(__self__, updated)
     end
 
-    @get stage(name::AbstractString; formula::String=default_formula(), label::String="") = begin
+    @get stage(name::AbstractString; formula::String=default_formula(),
+               label::String="", force::Bool=false) = begin
         # When called from a TODO card's form, persist the (possibly edited)
         # formula back to the todo's .jl file before rendering.
-        isempty(label) || _save_todo!(label; new_formula=formula)
-        render_output(formula; stage=Symbol(name))
+        isempty(label) || _save_todo!(__appdata__, label; new_formula=formula)
+        ns = dataset_namespace(label)
+        polling_fetchindex(__appdata__.pipeline_result,
+                           formula, Symbol(name), ns;
+                           poll_url=string(query_url(__self__/"stage/$name"; formula, label)),
+                           label="BRM pipeline - $name",
+                           force) do out
+            render_pipeline(out)
+        end
     end
 
-    @get todo = begin
-        todos = _load_todos(refresh=true)
+    @get todo(; slug::String="") = begin
+        if !isempty(slug)
+            entry = _find_todo_by_slug(__appdata__, slug)
+            entry === nothing && return h.div(
+                h.p("No TODO with slug ", h.code(slug), "."),
+                h.a("<- Back to TODO list"; href="/todo"),
+            )
+            return h.div(
+                h.p(h.a("<- Back to TODO list"; href="/todo")),
+                _todo_card(__self__, entry),
+            )
+        end
+        todos = _load_todos(__appdata__)
         h.div(
-            h.h1("TODO — what's missing for full BRM coverage"),
+            h.h1("TODO - what's missing for full BRM coverage"),
             h.p("Sorted by last modified. Each item has a sketch of what it is, why it matters, how to implement, and how to verify. Sourced from .jl files under ", h.code("web-macro/todos/"), "; status edits and edited formulas are written back to disk."),
-            [_todo_card(t) for t in todos]...,
+            [_todo_card(__self__, t) for t in todos]...,
         )
     end
 end
@@ -710,21 +749,31 @@ end
 _todos_dir() = joinpath(dirname(@__DIR__), "todos")
 _slug(label::AbstractString) = lowercase(strip(replace(label, r"[^\w.]+" => "-"), '-'))
 
-const _todos_cache = Ref{Vector{TodoEntry}}()
-
-function _load_todos(; refresh::Bool=false)
-    if refresh || !isassigned(_todos_cache)
-        dir = _todos_dir()
-        isdir(dir) || _migrate_todos!()
-        files = sort(filter(endswith(".jl"), readdir(dir; join=true)); by=mtime, rev=true)
-        _todos_cache[] = TodoEntry[_parse_todo_file(f) for f in files]
-    end
-    _todos_cache[]
+@dynamicstruct struct AppData
+    __status__ = initialize_progress!(:state; description="BRM pipeline")
+    @cached pipeline_result(formula, stage, namespace) =
+        pipeline(formula, stage; namespace)
 end
 
-function _find_todo(label::AbstractString)
-    for t in _load_todos()
+function _load_todos(::AppData)
+    dir = _todos_dir()
+    isdir(dir) || _migrate_todos!()
+    files = sort(filter(endswith(".jl"), readdir(dir; join=true)); by=mtime, rev=true)
+    TodoEntry[_parse_todo_file(f) for f in files]
+end
+
+function _find_todo(appdata::AppData, label::AbstractString)
+    for t in _load_todos(appdata)
         t.label == label && return t
+    end
+    nothing
+end
+
+_todo_slug(t::TodoEntry) = replace(basename(t.path), r"\.jl$" => "")
+
+function _find_todo_by_slug(appdata::AppData, slug::AbstractString)
+    for t in _load_todos(appdata)
+        _todo_slug(t) == slug && return t
     end
     nothing
 end
@@ -785,10 +834,10 @@ function _write_todo_file(todo::TodoEntry)
     write(todo.path, take!(io))
 end
 
-function _save_todo!(label::AbstractString;
+function _save_todo!(appdata::AppData, label::AbstractString;
                      new_status::Union{Symbol,Nothing}=nothing,
                      new_formula::Union{String,Nothing}=nothing)
-    todo = _find_todo(label)
+    todo = _find_todo(appdata, label)
     todo === nothing && return nothing
     updated = TodoEntry(
         todo.path, todo.label, todo.tier,
@@ -797,7 +846,6 @@ function _save_todo!(label::AbstractString;
         new_formula === nothing ? todo.formula : new_formula,
     )
     _write_todo_file(updated)
-    _load_todos(refresh=true)
     updated
 end
 
@@ -823,12 +871,12 @@ end
 
 # ── Rendering: one Pico CSS article per TODO with status-colored border ────
 
-const _TIER_LABELS = (
+_TIER_LABELS = (
     "T1",  # tier 1
     "T2",  # tier 2
     "T3",  # tier 3
 )
-const _TIER_COLORS = ("#4a7c59", "#5a6a8c", "#8c5a5a")
+_TIER_COLORS = ("#4a7c59", "#5a6a8c", "#8c5a5a")
 
 _tier_pill(tier::Int) = h.span(
     get(_TIER_LABELS, tier, "T$tier");
@@ -837,20 +885,20 @@ _tier_pill(tier::Int) = h.span(
           "vertical-align:middle;font-weight:normal",
 )
 
-const _STATUS_COLORS = (
+_STATUS_COLORS = (
     open = "#888",
     done = "#2e7d32",
     deprioritized = "#a05a2c",
 )
 _status_color(s::Symbol) = get(_STATUS_COLORS, s, "#888")
 
-function _todo_card(todo::TodoEntry)
+function _todo_card(self, todo::TodoEntry)
     border_color = _status_color(todo.status)
     body_children = Any[HTMXObjects.md_to_node(todo.body)]
     if todo.formula !== nothing
-        push!(body_children, _formula_form(todo.label, todo.formula))
+        push!(body_children, _formula_form(self, todo.label, todo.formula))
         # Inline pipeline-result target — the form's hx_get fills this div
-        # with `render_output(formula; stage=:vbrmi)` so the user sees the
+        # with `render_pipeline(out)` so the user sees the
         # VBRMI/finite-difference output right inside the card.
         push!(body_children, h.div(; id="todo-result-$(hash(todo.label))",
                                      style="margin-top:0.5rem"))
@@ -867,16 +915,24 @@ function _todo_card(todo::TodoEntry)
             h.summary(; style="cursor:pointer;list-style-position:outside")(
                 _tier_pill(todo.tier), " ",
                 h.strong(todo.label), " ",
-                _status_pills(todo.label, todo.status),
+                _status_pills(todo.label, todo.status), " ",
+                _permalink(todo),
             ),
             h.div(; style="margin-top:0.5rem")(body_children...),
         ),
     )
 end
 
-function _formula_form(label::String, formula::String)
+_permalink(todo::TodoEntry) = h.a("🔗";
+    href="/todo?slug=$(HTTP.URIs.escapeuri(_todo_slug(todo)))",
+    title="Standalone URL",
+    onclick="event.stopPropagation()",
+    style="text-decoration:none;font-size:0.8em;margin-left:0.3rem;vertical-align:middle",
+)
+
+function _formula_form(self, label::String, formula::String)
     h.form(;
-        hx_get="/stage/vbrmi",
+        hx_get=string(query_url(self/"stage/bench"; force=true)),
         hx_target="#todo-result-$(hash(label))",
         hx_swap="innerHTML",
         style="margin:0.5rem 0",
@@ -901,10 +957,6 @@ function _status_pills(label::AbstractString, state::Symbol)
         _state_pill(label, :deprioritized, state, "✓ deprioritized", "deprioritize"),
     )
 end
-
-# Convenience overload that fetches the current status from disk.
-_status_pills(label::AbstractString) = _status_pills(label,
-    something(_find_todo(label), (status=:open,)).status)
 
 # Pill text and color reflect the *current* state. When the pill's target_state
 # is currently active, it shows the active label (e.g. "✓ done") in the active
@@ -1274,8 +1326,15 @@ Defer until everything else is solid.
 """,
 ]
 
+const APPDATA = AppData(; cache_type=:parallel)
+
 function __init__()
     route!(AppContext())
+end
+
+# Bruno-specific extensions (gitignored); load if present.
+let path = joinpath(@__DIR__, "bruno-ext.jl")
+    isfile(path) && include(path)
 end
 
 end # module

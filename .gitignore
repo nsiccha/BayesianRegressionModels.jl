@@ -30,3 +30,4 @@ JuliaLocalPreferences.toml
 
 # Confidential client-project TODOs (local-only, never commit)
 web-macro/todos/bruno-*.jl
+web-macro/src/bruno-*.jl

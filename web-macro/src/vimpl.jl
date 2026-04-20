@@ -188,6 +188,10 @@ end
 Base.parent(x::MaterializedColumn) = getfield(x, :parent)
 getbroadcast(x::MaterializedColumn) = getfield(x, :broadcast)
 Base.broadcastable(x::MaterializedColumn) = Base.broadcastable(parent(x))
+# A name bound via `~` (e.g. `loc1 ~ 1 + a`) lands in meta.materialized as a
+# MaterializedColumn whose parent is the live buffer refreshed each draw.
+# When it reappears on a later `~` RHS, scale the buffer by a fresh beta.
+vmeta_sampling_rhs(meta, x::MaterializedColumn; group) = _scale_by_beta(meta, parent(x); group)
 
 n_levels(group::NamedColumn) = length(unique(parent(parent(group))))
 
@@ -255,8 +259,8 @@ nparams(p::Part{typeof(grouped_normal)}) = let (m, n) = size(p.data.values); m *
 nparams(p::Part{typeof(chol)}) = let n = size(p.data.L, 1); n * (n + 1) ÷ 2 end
 nparams(p::Part{typeof(simplex)}) = length(p.data.values) - 1
 
-advance!!(x, pos) = x[pos+1], pos+1
-advance!!(x, pos, n) = view(x, pos+1:pos+n), pos+n
+@inline advance!!(x, pos) = x[pos+1], pos+1
+@inline advance!!(x, pos, n) = view(x, pos+1:pos+n), pos+n
 
 """
     lprior!(container, x) -> lp
@@ -266,14 +270,14 @@ exactly `nparams(child)` unconstrained reals; bottoms out on `Part` methods,
 each of which writes its constrained buffer and returns its log-prior +
 Jacobian contribution.
 """
-lprior!(vbrmi::VBRMI, x::AbstractVector) = lprior!(vbrmi.meta.blocks, x)
-lprior!(xs::Union{Tuple,NamedTuple}, x::AbstractVector) =
+@inline lprior!(vbrmi::VBRMI, x::AbstractVector) = lprior!(vbrmi.meta.blocks, x)
+@inline lprior!(xs::Union{Tuple,NamedTuple}, x::AbstractVector) =
     foldl(xs; init=(0.0, 0)) do (total, pos), child
         xi, pos = advance!!(x, pos, nparams(child))
         total + lprior!(child, xi), pos
     end |> first
 
-lprior!(p::Part{typeof(normal)}, x) = begin
+@inline lprior!(p::Part{typeof(normal)}, x) = begin
     p.data.values[1, :] .= x
     sum(Base.Fix1(logpdf, Normal()), x)
 end
@@ -291,7 +295,7 @@ Either wrong or better LKJCholesky unconstraining + prior. Writes `p.data.L`
 in place from `x` (length n(n+1)/2) and returns the log-prior + Jacobian
 contribution. `eta` is the LKJ shape parameter.
 """
-lprior!(p::Part{typeof(chol)}, x; eta=1.0) = begin
+@inline lprior!(p::Part{typeof(chol)}, x; eta=1.0) = begin
     L = p.data.L
     n = LinearAlgebra.checksquare(L)
     pos = 0
@@ -323,7 +327,7 @@ lprior!(p::Part{typeof(chol)}, x; eta=1.0) = begin
     lprior
 end
 
-lprior!(p::Part{typeof(grouped_normal)}, x) = begin
+@inline lprior!(p::Part{typeof(grouped_normal)}, x) = begin
     (; values, L) = p.data
     _, n = size(values)
     lprior = 0.0
@@ -348,7 +352,7 @@ transform (plus the constant `loggamma(K)`).
 
 Ported from `blog/posts/simplex/transforms/stickbreakingLogistic.stan`.
 """
-lprior!(p::Part{typeof(simplex)}, x; alpha=1.0) = begin
+@inline lprior!(p::Part{typeof(simplex)}, x; alpha=1.0) = begin
     values = p.data.values
     K = length(values)
     lp = 0.0
@@ -366,14 +370,14 @@ lprior!(p::Part{typeof(simplex)}, x; alpha=1.0) = begin
     lp
 end
 
-llikelihood!((;meta)::VBRMI) = foldl(meta.materialized; init=0.) do llikelihood, m
+@inline llikelihood!((;meta)::VBRMI) = foldl(meta.materialized; init=0.) do llikelihood, m
     llikelihood + llikelihood!(m)
 end
-llikelihood!(::DataColumn) = 0.
-llikelihood!(x::MaterializedColumn) = (Base.materialize!(parent(x), getbroadcast(x)); 0.)
+@inline llikelihood!(::DataColumn) = 0.
+@inline llikelihood!(x::MaterializedColumn) = (Base.materialize!(parent(x), getbroadcast(x)); 0.)
 # llikelihood!(x::LikelihoodColumn) = sum(Base.broadcasted(logpdf, rhs(x), parent(x)); init=0.)
 # The below is faster for some reason?
-llikelihood!(x::LikelihoodColumn) = ssum(Base.broadcasted(logpdf, rhs(x), parent(x)); init=0.)
+@inline llikelihood!(x::LikelihoodColumn) = ssum(Base.broadcasted(logpdf, rhs(x), parent(x)); init=0.)
 llikelihood!(x) = error(typeof(x))
 
 ssum(args...; kwargs...) = sum(args...; kwargs...)
@@ -471,7 +475,7 @@ Zero-parameter follow-up to a `simplex` sibling: refresh
 `contrast = vcat(0, cumsum(values))` in place so downstream broadcasts see
 up-to-date contrast values. Contributes nothing to the log-prior.
 """
-lprior!(p::Part{typeof(mo1)}, _) = begin
+@inline lprior!(p::Part{typeof(mo1)}, _) = begin
     (; values, contrast) = p.data
     contrast[1] = 0.0
     for k in 2:length(contrast)
