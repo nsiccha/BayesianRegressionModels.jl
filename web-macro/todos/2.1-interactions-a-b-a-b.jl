@@ -1,21 +1,33 @@
-# label: 2.1 interactions a:b, a*b
+# label: 2.1 interactions a:b (cont x cont done; cat cases open)
 # tier: 2
-# status: open
+# status: partial (cont x cont done; cont x cat / cat x cat open)
 #=
-**What it is.** brms's `a:b` is the elementwise interaction term (a single coefficient multiplying `a[i] * b[i]`). `a*b` is the "main effects + interaction" shorthand: it desugars to `a + b + a:b`.
+**Status: partial in vimpl.** Continuous-by-continuous interactions via `a:b`
+are implemented -- one free beta times the elementwise product. Cont x cat and
+cat x cat still error out (with a pointer to this TODO).
 
-**Why it matters.** Interactions are the most commonly missed feature in regression DSLs. Without them, every model that needs `a:b` has to manually create the interaction column in the input DataFrame.
+**Julia syntax quirk.** In Julia, `a:b` parses as `Expr(:call, :(:), :a, :b)`
+-- i.e. the `Colon()` function applied to `a` and `b`. At BRMI-walk time it
+lands as `ExprColumn{Colon}(a, b)`. Precedence is tighter than `+` but looser
+than `*`, so `1 + a + a:b` behaves correctly. `a*b` / `*`-interaction sugar is
+left out for now because `*` already means scalar/array multiplication in most
+Julia contexts -- keeping its surface meaning avoids DSL ambiguity.
 
-**Implementation.**
-1. **Parser side.** Add a `:` case to `_x` so that `a:b` becomes `ExprColumn(:, NamedColumn(:a), NamedColumn(:b))` instead of falling through to a Symbol/Range parse error.
-2. **Materialization side.** Add `vmeta_sampling_rhs(meta, x::ExprColumn{typeof(:)}; group)` that elementwise-multiplies the operands and dispatches to the float-vector path. For continuous × continuous it's a single coefficient on `a .* b`; for categorical × continuous it's `(k-1)` coefficients (one per non-reference level of the categorical, multiplied by the continuous); for categorical × categorical it's `(k₁-1)*(k₂-1)` coefficients via a 2D `_cat_lookup`.
-3. **`a*b` desugaring.** At parse time in `_x`, rewrite `*` between formula terms as `+(a, b, :(a:b))`. This needs care because `*` also means multiplication elsewhere (e.g. `Normal(0, 2*sigma)`); the rewrite should only apply at formula-RHS top-level.
+**Implementation.** `vmeta_sampling_rhs(meta, x::ExprColumn{Colon}; group)`
+broadcasts the two operands, multiplies them elementwise, and hands off to
+`_scale_by_beta` like any other continuous predictor. A small
+`_check_cont_interaction` guard errors out if either operand is an integer /
+categorical column.
 
-**Verification.** Presets exercising each interaction type:
-- continuous×continuous: `loc ~ 1 + a + b + a:b; y1 ~ Normal(loc, 1)` → dim 4
-- continuous×categorical: `loc ~ 1 + a + c1 + a:c1; y1 ~ Normal(loc, 1)` → dim 6 (1 + 1 + 2 + 2)
-- categorical×categorical: `loc ~ 1 + c1 + c2 + c1:c2; y1 ~ Normal(loc, 1)` → dim 5 (1 + 2 + 1 + 2)
-- shorthand: `loc ~ 1 + a*b; y1 ~ Normal(loc, 1)` should match `loc ~ 1 + a + b + a:b` exactly.
+**Open (cat expansions).** For cont x cat, allocate `(K-1)` slots multiplied
+by the treatment dummies. For cat x cat, allocate `(K1-1)*(K2-1)` slots via a
+2D level-index lookup. Both reuse the existing `_cat_broadcast` / `_cat_lookup`
+machinery but need a slightly different indexing path.
+
+**Verification presets.**
+- cont x cont (working):  `loc ~ 1 + a + b + a:b; y1 ~ Normal(loc, 1)`   -> dim 4
+- cont x cat  (open):     `loc ~ 1 + a + c1 + a:c1; y1 ~ Normal(loc, 1)` -> dim 6
+- cat x cat   (open):     `loc ~ 1 + c1 + c2 + c1:c2; y1 ~ Normal(loc, 1)` -> dim 5
 
 =#
 

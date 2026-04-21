@@ -1,28 +1,35 @@
-# label: 1.4 scale(x) / standardize(x)
+# label: 1.4 scale(x) / center(x) / standardize(x)
 # tier: 1
-# status: open
+# status: done (vimpl)
 #=
-**What it is.** brms's `scale(x)` z-transforms a column at parse time: `scale(x) = (x - mean(x)) / std(x)`. The model sees the standardized column. Crucial for default priors (which are scale-invariant only after standardization) and sampler stability (well-conditioned linear predictors).
+**Status: done in vimpl.** Three data-transform wrappers that z-transform (or
+just center) a column at VBRMI-materialization time. brms does `scale(x)`
+automatically in most vignettes for sampler stability + prior scale-invariance;
+making it available as a formula-level wrapper avoids forcing users to
+pre-transform their DataFrame columns.
 
-**Why it matters.** Most brms vignettes do `scale(x)` automatically as a convenience. Without it, every formula has to either manually z-transform the data or accept poorly-scaled coefficients.
+**Semantics.**
+- `center(x)`      -> `x - mean(x)`
+- `scale(x)`       -> `(x - mean(x)) / std(x)`
+- `standardize(x)` -> alias for `scale(x)`
 
-**Implementation.**
-1. Add `function scale end` (and `function center end`, `function standardize end`) to `macro.jl`.
-2. Add a `vmeta_sampling_rhs` overload in `vimpl.jl`:
-```julia
-vmeta_sampling_rhs(meta, x::ExprColumn{typeof(scale)}; group) = begin
-    inner = vbroadcasted(only(getargs(x)); meta)
-    materialized = Base.materialize(inner)
-    z = (materialized .- Statistics.mean(materialized)) ./ Statistics.std(materialized)
-    vmeta_sampling_rhs(meta, z; group)
-end
-```
-The standardization happens once when the BRMI is materialized into a VBRMI. Composes with the existing dense-map caching TODO.
-3. Add `Statistics` to `vimpl.jl`'s using-list (or vendor `mean`/`std` inline).
+Each fires inside `vbroadcasted`, so transforms compose with every downstream
+consumer: pop predictor, ranef slope, link functions, interactions, etc.
+`scale(a):scale(b)` works as expected (z-transformed both operands before the
+elementwise product).
 
-**Verification.** Preset: `loc ~ 1 + scale(a) + scale(b); y1 ~ Normal(loc, 1)`. Compare against the unscaled version: same dim, different posterior geometry. The fitted coefficients should be ≈ the unscaled coefficients × std(x).
+**Implementation.** Three-line `vbroadcasted` overloads in vimpl.jl using
+inlined `_mean`/`_std` helpers (no new dependency). The transform evaluates
+once at VBRMI construction and caches the resulting vector.
+
+**Verification.** Same model spelled two ways:
+- `loc ~ 1 + scale(a) + scale(b)` -- standardized at formula level
+- `loc ~ 1 + a_z + b_z` (where a_z, b_z were pre-standardized in the DataFrame)
+
+VBRMI dim + log-density should be identical; fitted coefficients ≈ the
+unscaled coefficients × `std(x)`.
 
 =#
 
-loc ~ 1 + scale(a) + scale(b)
+loc ~ 1 + scale(a) + center(b)
 y1 ~ Normal(loc, 1)
