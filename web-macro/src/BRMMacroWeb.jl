@@ -12,6 +12,7 @@ using FiniteDifferences: FiniteDifferences, central_fdm
 # StanBlocksImpl) include them via relative paths into here.
 include("macro.jl")
 include("vimpl.jl")
+include("sbimpl.jl")
 
 # ── Default formula + synthetic data ────────────────────────────────────────
 
@@ -120,7 +121,7 @@ _ALLOWED_CALLS = Set{Symbol}([
     :logistic, :logit, :softmax, :logsumexp,
     :log_abs_tanh, :log_square_tanh,
     # Distributions (Type constructors — the pass-through handles these)
-    :Normal, :Poisson, :Binomial, :Bernoulli, :Beta, :Gamma,
+    :Normal, :Poisson, :Binomial, :Bernoulli, :BernoulliLogit, :Beta, :Gamma,
     :Exponential, :Cauchy, :StudentT, :LogNormal, :Weibull,
     :NegativeBinomial, :Geometric, :Laplace, :Uniform,
     :MvNormal, :MixtureModel, :Dirichlet,
@@ -203,7 +204,9 @@ STAGES = (
     :wrap,       # _brm(formula; df) — full let-block ready to eval
     :brmi,       # eval(...) — BRMI value
     :vbrmi,      # VBRMI(brmi) — materialized action with blocks/dim
+    # ── branches after vbrmi (pick one) ──
     :bench,      # Chairmarks @be primal logdensity
+    :stan_code,  # SBBRMI(brmi): emit @slic body (a) + transpile to Stan (b)
 )
 
 stage_index(s::Symbol) = something(findfirst(==(s), STAGES), length(STAGES))
@@ -238,6 +241,16 @@ function pipeline(formula::AbstractString, stage::Symbol;
     brmi = eval(wrapped)
     out = merge(out, (; brmi))
 
+    # ── divergent branches after brmi ─────────────────────────────────────
+    # :stan_code targets the StanBlocks backend, which does NOT need VBRMI —
+    # SBBRMI walks the BRMI directly. Short-circuit here so the SB branch
+    # doesn't pay for VBRMI materialization.
+    if stage === :stan_code
+        sbbrmi = SBBRMI(brmi)
+        stan_src = stan_code(sbbrmi)
+        return merge(out, (; sbbrmi, stan_src))
+    end
+
     s >= 5 || return out
     vbrmi = VBRMI(brmi)
     dim = LogDensityProblems.dimension(vbrmi)
@@ -250,7 +263,7 @@ function pipeline(formula::AbstractString, stage::Symbol;
     )[1]
     out = merge(out, (; vbrmi, dim, ldp, x0, grad))
 
-    s >= 6 || return out
+    stage === :bench || return out
     x_rand = randn(dim)
     benches = Pair{String,Any}[]
     push!(benches, "logdensity (total)" =>
@@ -547,6 +560,18 @@ function render_pipeline(out::NamedTuple)
         ) for (label, b) in out.benches]
         push!(sections, Any[h.h3("6. Chairmarks @be — per-step"), bench_rows...])
     end
+    if haskey(out, :sbbrmi)
+        push!(sections, Any[
+            h.h3("5. SBBRMI — emitted @slic body"),
+            h.pre(sprint(show, out.sbbrmi.model.model)),
+            h.p("data keys: ",
+                h.code(string(sort(collect(keys(out.sbbrmi.data)))))),
+        ])
+        push!(sections, Any[
+            h.h3("6. transpiled Stan source"),
+            h.pre(out.stan_src),
+        ])
+    end
 
     # Stages render most-recent-first; synthetic data sits at the very top.
     children = reduce(vcat, reverse(sections); init=Any[])
@@ -632,7 +657,11 @@ _index_body(self, formula::String) = h.div(
             _stage_button(self, "3. Wrap",      :wrap),
             _stage_button(self, "4. BRMI",      :brmi),
             _stage_button(self, "5. VBRMI",     :vbrmi),
-            _stage_button(self, "6. Benchmark", :bench),
+        ),
+        h.small("Pick a branch:"),
+        h.fieldset(; class="grid")(
+            _stage_button(self, "6. Benchmark",  :bench),
+            _stage_button(self, "6. Stan code",  :stan_code),
         ),
     ),
     lazy(string(query_url(self/"stage/bench"; formula)); id="brm-macro-output"),
@@ -931,20 +960,25 @@ _permalink(todo::TodoEntry) = h.a("🔗";
 )
 
 function _formula_form(self, label::String, formula::String)
-    h.form(;
-        hx_get=string(query_url(self/"stage/bench"; force=true)),
-        hx_target="#todo-result-$(hash(label))",
+    # Two terminal branches — cimpl (julia/VBRMI benchmark) vs sbimpl (Stan
+    # source). Each button is `type=button` (not submit) and carries its own
+    # `hx_get`; `hx_include="closest form"` pulls the textarea + hidden label.
+    target = "#todo-result-$(hash(label))"
+    _branch_button(text, stage) = h.button(text;
+        type="button",
+        hx_get=string(query_url(self/"stage/$stage"; force=true)),
+        hx_include="closest form",
+        hx_target=target,
         hx_swap="innerHTML",
-        style="margin:0.5rem 0",
-    )(
+        style="font-size:0.85em;padding:0.3rem 0.8rem;margin:0.3rem 0.3rem 0 0")
+    h.form(; style="margin:0.5rem 0")(
         h.input(; type="hidden", name="label", value=label),
         h.textarea(formula;
             name="formula",
             rows=max(3, count('\n', formula) + 1),
             style="width:100%;font-family:monospace;font-size:0.85em"),
-        h.button("Try in pipeline ▶";
-            type="submit",
-            style="font-size:0.85em;padding:0.3rem 0.8rem;margin:0.3rem 0 0 0"),
+        _branch_button("cimpl (bench) ▶", :bench),
+        _branch_button("sbimpl (Stan) ▶", :stan_code),
     )
 end
 
