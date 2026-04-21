@@ -1,23 +1,41 @@
-# label: 2.5 grouped random effects (per-factor variance)
+# label: 2.5 grouped random effects (gr(g, by=b)) — per-stratum covariance
 # tier: 2
-# status: open
+# status: done (vimpl); sb backend open
 #=
-**What it is.** Peter's "different variance by diagnosis" pattern: `(1 | subject) gr(diagnosis)` says "the random intercept by subject has a different variance per diagnosis level". In brms this is a custom group structure where the variance hyperparameter itself depends on a second factor.
+**Status: done in vimpl.** `gr(g, by=b)` on the RHS of `|` allocates an
+independent LKJ-Cholesky + grouped-normal block per level of `b`, so each
+stratum gets its own full covariance structure (not just its own variance).
 
-**Why it matters.** Common in clinical data where treatment groups have intrinsically different between-subject variability. Without this, you have to fit separate models per diagnosis or accept a single pooled variance.
+**Semantics.** `(1 + x | gr(g, by=b))` says: random intercept + slope on `x`
+across `g`-levels, but with a separate covariance matrix per `b`-level. If
+`b` has 3 levels you get 3 independent (K, K) Cholesky factors (and 3
+independent tau vectors) — brms's canonical "different correlations per
+diagnosis" pattern. `gr(g)` with no kwargs collapses to the plain `(... | g)`
+path (same block, fully correlated shared prior).
 
-**Implementation.** Bigger than it looks because the variance is no longer a single scalar but a length-`n_levels(diagnosis)` vector that needs its own prior and its own gradient.
+**Constraint.** Every level of `g` must belong to exactly one level of `b`.
+The walker (`_stratum_idx`) checks this at VBRMI time and errors if any
+group-level straddles strata.
 
-Proposed shape:
-- A new `gr(group_factor)` wrapper recognized in the `~` RHS via a `function gr end` stub (already exists in `macro.jl`).
-- The wrapped block stores `n_levels(group_factor)` log-scale parameters instead of one. `lprior!` walks them, multiplying each subject's random intercept by the diagnosis-specific scale.
-- Requires the gc_idx for the inner factor (subject) AND for the outer factor (diagnosis) — both vectors of length N.
+**Implementation sketch** (vimpl.jl):
+- `GrGroup(group, by)` walker-side tag, produced by `_normalize_group`.
+- New Part kinds: `grouped_normal_by` (values + stratum_idx + n_strata),
+  `chol_by` (Ls::Array{Float64, 3}).
+- `finalize(::Part{grouped_normal_by})` allocates the (n, n, n_strata) Ls
+  and prepends a `chol_by` sibling sharing the tensor.
+- `lprior!(::Part{chol_by})` loops strata, reuses `_chol_lprior!` per slice.
+- `lprior!(::Part{grouped_normal_by})` loops rows, picks
+  `Ls[:, :, stratum_idx[i]]` for the per-row mul.
 
-This composes naturally with (1.6 caching) and (2.3 per-parameter priors).
+**sb backend.** See sibling TODO (TBD) — needs an SB loop over groups and
+array-of-cholesky allocation, then the same `rows_dot_product` form.
 
-**Verification.** Preset against synthetic data with two grouping factors, one nested inside the other, with intentionally different per-outer-level variance. Confirm the fitted scales recover the synthetic values.
+**Verification.** Synthetic data with two grouping factors (one nested) and
+intentionally different per-outer-level correlation structure. Confirm the
+fitted scales + correlations recover the synthetic values.
 
 =#
 
-loc ~ 1 + (1 | gr(g1, g2))
-y1 ~ Normal(loc, 1)
+loc ~ 1 + a + (1 + a | gr(g1, by=g2))
+log(err) ~ 1
+y1 ~ Normal(loc, err)

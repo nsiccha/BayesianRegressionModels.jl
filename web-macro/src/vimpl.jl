@@ -29,8 +29,24 @@ function normal end
 function grouped_normal end
 """LKJ-Cholesky owning the shared L for a grouped block."""
 function chol end
+"""Stratified grouped-normal: per-row L picked from `Ls[:,:,stratum_idx[i]]`. Implements brms `gr(g, by=b)` — each stratum gets its own covariance structure."""
+function grouped_normal_by end
+"""Array-of-LKJ-Cholesky owning per-stratum Ls for a `grouped_normal_by` block."""
+function chol_by end
 """Unit simplex owning `values`; `length(values)` entries sum to 1, parameterized by `length(values)-1` unconstrained reals via stick-breaking."""
 function simplex end
+
+"""
+    GrGroup(group::NamedColumn, by::NamedColumn)
+
+Walker-side grouping tag for `gr(group, by=strata)`. `growblock!!` /
+`_gc_idx` dispatch on it to allocate a `grouped_normal_by` block whose
+per-row covariance is keyed off `by`.
+"""
+struct GrGroup
+    group
+    by
+end
 
 """
     finalize(meta) / finalize(parts) / finalize(part, acc)
@@ -47,6 +63,11 @@ finalize(parts::Tuple) = foldl((acc, p) -> (acc..., finalize(p, acc)...), parts;
 finalize(p::Part, _) = (p,)
 finalize(p::Part{typeof(grouped_normal)}, _) = let n = size(p.data.values, 2), L = zeros(n, n)
     (Part(chol, (; L)), Part(grouped_normal, merge(p.data, (; L))))
+end
+finalize(p::Part{typeof(grouped_normal_by)}, _) = let
+    n = size(p.data.values, 2)
+    Ls = zeros(n, n, p.data.n_strata)
+    (Part(chol_by, (; Ls)), Part(grouped_normal_by, merge(p.data, (; Ls))))
 end
 rmerge(x::NamedTuple, y::NamedTuple) = begin
     xykeys = (intersect(keys(x), keys(y))...,)
@@ -67,6 +88,27 @@ vbroadcasted(;kwargs...) = (args...)->vbroadcasted(args...; kwargs...)
 vbroadcasted(x::NamedColumn{<:Any,<:DataColumn}; meta) = parent(meta.materialized[name(x)])
 vbroadcasted(x::NamedColumn; meta) = meta.materialized[name(x)]
 vbroadcasted(x::ExprColumn; meta) = Base.broadcasted(getf(x), map(vbroadcasted(;meta), getargs(x))...)
+# `I(expr)` is brms's literal-escape. In our DSL every call is already a first-
+# class `ExprColumn` node, so `I` just needs to unwrap to its inner argument.
+vbroadcasted(x::ExprColumn{typeof(I)}; meta) = vbroadcasted(only(getargs(x)); meta)
+# `scale(x)` / `center(x)` / `standardize(x)` z-transform the inner column at
+# VBRMI-materialization time: they materialize the inner broadcast once, apply
+# the transform, and pass the resulting plain vector back up to the predictor
+# pipeline. Because this fires inside `vbroadcasted`, they compose with every
+# downstream consumer (pop predictor, ranefs, link transforms, ...).
+vbroadcasted(x::ExprColumn{typeof(center)}; meta) = let raw = Base.materialize(vbroadcasted(only(getargs(x)); meta))
+    raw .- _mean(raw)
+end
+vbroadcasted(x::ExprColumn{typeof(scale)}; meta) = let raw = Base.materialize(vbroadcasted(only(getargs(x)); meta))
+    mu = _mean(raw); sd = _std(raw, mu)
+    sd > 0 || error("scale: zero variance in `$(only(getargs(x)))`")
+    (raw .- mu) ./ sd
+end
+vbroadcasted(x::ExprColumn{typeof(standardize)}; meta) = vbroadcasted(ExprColumn(scale, getargs(x)...); meta)
+
+_mean(xs) = sum(xs) / length(xs)
+_std(xs, mu=_mean(xs)) = sqrt(sum(abs2, xs .- mu) / (length(xs) - 1))
+
 # Literals (Int, Float, etc.) inside formula expressions like `a^2` pass
 # through unchanged — they get broadcasted as scalars by Base.broadcasted.
 vbroadcasted(x::Number; meta) = x
@@ -97,7 +139,56 @@ vmeta_sampling_rhs(meta, x::ExprColumn{typeof(*)}; kwargs...) = error("NOT IMPLE
 vmeta_sampling_rhs(meta, x::ExprColumn{typeof(&)}; kwargs...) = error("NOT IMPLEMENTED")
 vmeta_sampling_rhs(meta, x::ExprColumn{typeof(|)}; kwargs...) = begin
     lhs, rhs = getargs(x, 2)
-    vmeta_sampling_rhs(meta, lhs; group=rhs)
+    vmeta_sampling_rhs(meta, lhs; group=_normalize_group(rhs))
+end
+
+# `(a + b + ... || g)` -- zero-correlation random effects. Each term on the LHS
+# gets its own 1-column block keyed by a synthetic `__nocor__N` suffix, so no
+# `chol` sibling is ever allocated between them. Same total direct-parameter
+# count as the correlated variant, minus the Cholesky factor parameters.
+vmeta_sampling_rhs(meta, x::ExprColumn{typeof(doublepipe)}; kwargs...) = begin
+    lhs, rhs = getargs(x, 2)
+    rhs isa NamedColumn || error("zerocorr `||`: RHS must be a NamedColumn group, got $(typeof(rhs))")
+    terms = lhs isa ExprColumn{typeof(+)} ? getargs(lhs) : (lhs,)
+    meta, args = foldl(enumerate(terms); init=(meta, ())) do (mm, aa), (i, term)
+        nocor_key = NamedColumn(Symbol(name(rhs), :__nocor__, i), parent(rhs))
+        mm, arg = vmeta_sampling_rhs(mm, term; group=nocor_key)
+        mm, (aa..., arg)
+    end
+    meta, length(args) == 1 ? only(args) : Base.broadcasted(+, args...)
+end
+
+# `a:b` -- continuous x continuous interaction. Single slot on the elementwise
+# product. Categorical operands (integer/CategoricalVector) would need K-1
+# dummy expansion; errors out for now with a pointer to the 2.1 TODO.
+vmeta_sampling_rhs(meta, x::ExprColumn{Colon}; group) = begin
+    length(getargs(x)) == 2 || error("interaction `:` expects exactly two operands, got $(length(getargs(x)))")
+    lhs, rhs = getargs(x, 2)
+    _check_cont_interaction(lhs); _check_cont_interaction(rhs)
+    lbc = vbroadcasted(lhs; meta); rbc = vbroadcasted(rhs; meta)
+    _scale_by_beta(meta, Base.broadcasted(*, lbc, rbc); group)
+end
+_check_cont_interaction(t) = nothing
+_check_cont_interaction(t::NamedColumn) = let raw = parent(parent(t))
+    raw isa AbstractVector{<:Real} && !(raw isa AbstractVector{<:Integer}) ||
+        error("interaction `:`: only continuous x continuous is supported for now (got `$(name(t))`); see 2.1 TODO for cat expansions")
+end
+
+# `(... | rhs)` -> walker-side group tag. Bare NamedColumn stays as-is; `gr(g)`
+# with no kwargs normalizes to the inner NamedColumn (so it coalesces with
+# plain `(... | g)` blocks); `gr(g; by=b)` becomes a `GrGroup` so growblock!!
+# and _gc_idx can allocate the stratified structure.
+_normalize_group(g) = g
+_normalize_group(g::NamedColumn) = g
+_normalize_group(g::ExprColumn{typeof(gr)}) = begin
+    args = getargs(g); kw = getkwargs(g)
+    length(args) == 1 || error("gr(...) expects exactly one positional group, got $(length(args))")
+    group = args[1]
+    group isa NamedColumn || error("gr(...) expects a NamedColumn group, got $(typeof(group))")
+    by = get(kw, :by, nothing)
+    by === nothing && return group
+    by isa NamedColumn || error("gr(...; by=...) expects a NamedColumn for `by`, got $(typeof(by))")
+    GrGroup(group, by)
 end
 vmeta_sampling_rhs(meta, n::Int; group) = begin
     n == 0 && return meta, 0  # `0` suppresses the intercept (no parameter allocated)
@@ -213,6 +304,26 @@ _grow_or_push_tail(parts::Tuple, tail::Part{F}, ::F, m, n) where F =
     (parts, _append!(tail.data.values, m, n))
 _grow_or_push_tail(parts::Tuple, _, f, m, n) = _push_part(parts, f, m, n)
 
+# Stratified variant: Part.data carries `(values, stratum_idx, n_strata)`.
+# Coalescing is valid only when the trailing part uses the same stratification
+# (same stratum_idx + n_strata) — i.e. repeated `(… | gr(g, by=b))` with
+# identical (g, b). Ls is allocated later by finalize once the final column
+# count is known.
+_push_part_by(parts::Tuple, f, m, n, stratum_idx, n_strata) = let
+    values = ElasticMatrix(zeros(m, n))
+    (parts..., Part(f, (; values, stratum_idx, n_strata))), view(values, :, 1:n)
+end
+_grow_or_push_by(parts::Tuple{}, f, m, n, n_strata, stratum_idx) =
+    _push_part_by(parts, f, m, n, stratum_idx, n_strata)
+_grow_or_push_by(parts::Tuple, f, m, n, n_strata, stratum_idx) =
+    _grow_or_push_tail_by(parts, last(parts), f, m, n, n_strata, stratum_idx)
+_grow_or_push_tail_by(parts::Tuple, tail::Part{F}, ::F, m, n, n_strata, stratum_idx) where F =
+    (tail.data.n_strata == n_strata && tail.data.stratum_idx == stratum_idx) ?
+        (parts, _append!(tail.data.values, m, n)) :
+        _push_part_by(parts, f, m, n, stratum_idx, n_strata)
+_grow_or_push_tail_by(parts::Tuple, _, f, m, n, n_strata, stratum_idx) =
+    _push_part_by(parts, f, m, n, stratum_idx, n_strata)
+
 growblock!!(meta, ::Symbol, n) = begin
     parts = get(meta.blocks, :__population__, ())
     parts, p = _grow_or_push(parts, normal, 1, n)
@@ -224,13 +335,50 @@ growblock!!(meta, group::NamedColumn, n) = begin
     parts, p = _grow_or_push(parts, grouped_normal, m, n)
     rmerge(meta, (; blocks = (; key => parts))), p
 end
+growblock!!(meta, group::GrGroup, n) = begin
+    # Stratified (gr(g, by=b)) block. Keyed distinctly from plain (_|g) so
+    # the two don't coalesce, even if the same `g` shows up in both forms.
+    m = n_levels(group.group)
+    n_strata = n_levels(group.by)
+    stratum_idx = _stratum_idx(group.group, group.by)
+    key = Symbol(name(group.group), :__by__, name(group.by))
+    parts = get(meta.blocks, key, ())
+    parts, p = _grow_or_push_by(parts, grouped_normal_by, m, n, n_strata, stratum_idx)
+    rmerge(meta, (; blocks = (; key => parts))), p
+end
+
+# For each level of `group`, find the level of `by` it belongs to. Each group
+# level must map to exactly one stratum (same stratum on every row of that
+# group); otherwise the covariance structure is ill-defined.
+_stratum_idx(group::NamedColumn, by::NamedColumn) = begin
+    _, g_idx = _level_index(parent(parent(group)))
+    _, b_idx = _level_index(parent(parent(by)))
+    m_groups = maximum(g_idx)
+    mapping = zeros(Int, m_groups)
+    for (gi, bi) in zip(g_idx, b_idx)
+        if mapping[gi] == 0
+            mapping[gi] = bi
+        elseif mapping[gi] != bi
+            error("gr($(name(group)), by=$(name(by))): group level $gi straddles multiple strata ($(mapping[gi]) vs $bi)")
+        end
+    end
+    mapping
+end
+
+# Extend `_re_lookup` / `_gc_idx` to the stratified group. The per-row lookup
+# into `values` is still keyed by the primary group column — stratum handling
+# lives inside `lprior!(::Part{grouped_normal_by})`, not in the lookup path.
+n_levels(g::GrGroup) = n_levels(g.group)
+_gc_idx(g::GrGroup) = _level_index(parent(parent(g.group)))[2]
 
 Base.show(io::IO, (;parent, broadcast)::MaterializedColumn) = print(io, eltype(parent), "[...] .= ", broadcast)
 Base.show(io::IO, (;parent, rhs)::LikelihoodColumn) = print(io, eltype(parent), "[...] .~ ", rhs)
 
 Base.show(io::IO, p::Part{typeof(normal)}) = print(io, "Part{normal}", size(p.data.values))
 Base.show(io::IO, p::Part{typeof(grouped_normal)}) = print(io, "Part{grouped_normal}", size(p.data.values))
+Base.show(io::IO, p::Part{typeof(grouped_normal_by)}) = print(io, "Part{grouped_normal_by}", size(p.data.values), " x ", p.data.n_strata, " strata")
 Base.show(io::IO, p::Part{typeof(chol)}) = print(io, "Part{chol}(", size(p.data.L, 1), ")")
+Base.show(io::IO, p::Part{typeof(chol_by)}) = print(io, "Part{chol_by}(", size(p.data.Ls, 1), " x ", size(p.data.Ls, 3), " strata)")
 Base.show(io::IO, p::Part{typeof(simplex)}) = print(io, "Part{simplex}(", length(p.data.values), ")")
 Base.show(io::IO, p::Part) = print(io, "Part{", p.func, "}")
 
@@ -256,7 +404,9 @@ LogDensityProblems.dimension(vbrm::VBRMI) = nparams(vbrm.meta.blocks)
 nparams(x::Union{Tuple,NamedTuple}) = sum(nparams, x; init=0)
 nparams(p::Part{typeof(normal)}) = size(p.data.values, 2)
 nparams(p::Part{typeof(grouped_normal)}) = let (m, n) = size(p.data.values); m * n end
+nparams(p::Part{typeof(grouped_normal_by)}) = let (m, n) = size(p.data.values); m * n end
 nparams(p::Part{typeof(chol)}) = let n = size(p.data.L, 1); n * (n + 1) ÷ 2 end
+nparams(p::Part{typeof(chol_by)}) = let n = size(p.data.Ls, 1), S = size(p.data.Ls, 3); S * n * (n + 1) ÷ 2 end
 nparams(p::Part{typeof(simplex)}) = length(p.data.values) - 1
 
 @inline advance!!(x, pos) = x[pos+1], pos+1
@@ -295,8 +445,12 @@ Either wrong or better LKJCholesky unconstraining + prior. Writes `p.data.L`
 in place from `x` (length n(n+1)/2) and returns the log-prior + Jacobian
 contribution. `eta` is the LKJ shape parameter.
 """
-@inline lprior!(p::Part{typeof(chol)}, x; eta=1.0) = begin
-    L = p.data.L
+@inline lprior!(p::Part{typeof(chol)}, x; eta=1.0) = _chol_lprior!(p.data.L, x; eta)
+
+# Shared LKJ-Cholesky unconstraining body. Writes `L` in place from the first
+# n(n+1)/2 entries of `x` and returns the log-prior + Jacobian contribution.
+# Used by both `chol` (one shared L) and `chol_by` (per-stratum slice).
+@inline _chol_lprior!(L, x; eta=1.0) = begin
     n = LinearAlgebra.checksquare(L)
     pos = 0
     lprior = 0.0
@@ -327,6 +481,23 @@ contribution. `eta` is the LKJ shape parameter.
     lprior
 end
 
+# Array-of-Cholesky: one L per stratum. Unconstrains n_strata independent LKJ
+# factors, writing each slice `Ls[:, :, s]` in place. Same eta for every
+# stratum (brms `gr(g, by=b)` shares the prior hyperparameters).
+@inline lprior!(p::Part{typeof(chol_by)}, x; eta=1.0) = begin
+    (; Ls) = p.data
+    n = size(Ls, 1)
+    n_strata = size(Ls, 3)
+    n_per = n * (n + 1) ÷ 2
+    lprior = 0.0
+    pos = 0
+    for s in 1:n_strata
+        xi, pos = advance!!(x, pos, n_per)
+        lprior += _chol_lprior!(view(Ls, :, :, s), xi; eta)
+    end
+    lprior
+end
+
 @inline lprior!(p::Part{typeof(grouped_normal)}, x) = begin
     (; values, L) = p.data
     _, n = size(values)
@@ -335,6 +506,21 @@ end
     for vi in eachrow(values)
         xi, pos = advance!!(x, pos, n)
         mul!(vi, LowerTriangular(L), xi)
+        lprior += sum(Base.Fix1(logpdf, Normal()), xi)
+    end
+    lprior
+end
+
+# Stratified grouped-normal: per-row pick the stratum's Cholesky slice.
+@inline lprior!(p::Part{typeof(grouped_normal_by)}, x) = begin
+    (; values, Ls, stratum_idx) = p.data
+    _, n = size(values)
+    lprior = 0.0
+    pos = 0
+    for (i, vi) in enumerate(eachrow(values))
+        xi, pos = advance!!(x, pos, n)
+        s = stratum_idx[i]
+        mul!(vi, LowerTriangular(view(Ls, :, :, s)), xi)
         lprior += sum(Base.Fix1(logpdf, Normal()), xi)
     end
     lprior
@@ -489,3 +675,120 @@ Base.show(io::IO, p::Part{typeof(mo1)}) = print(io, "Part{mo1}(K=", length(p.dat
 # ==============================================================================
 # End of `mo1` / `mo` template
 # ==============================================================================
+
+# ==============================================================================
+# User-term: `gp(x; k=K, c=C)` -- 1D Hilbert-space approx GP (squared-exp kernel)
+# ------------------------------------------------------------------------------
+# Standard Riutort-Mayol et al. (2020) parameterization. Julia-side precompute:
+#   x_c       = x .- mean(x)         (center)
+#   L         = c * maximum(abs, x_c)
+#   lambda[k] = (k * pi / (2L))^2    for k = 1..K   (eigenvalues)
+#   PHI[i,k]  = (1/sqrt(L)) * sin(sqrt(lambda[k]) * (x_c[i] + L))
+#
+# Per-draw state (inside `lprior!`):
+#   log_rho, log_sigma, beta_1..beta_K   <- K + 2 unconstrained params
+#   rho, sigma           = exp(log_rho), exp(log_sigma)
+#   sqrt_spd[k]          = sigma * (2*pi)^(1/4) * sqrt(rho) * exp(-0.25 * rho^2 * lambda[k])
+#   contrib              = PHI * (sqrt_spd .* beta)        # length-n vector
+#
+# Priors: log_rho, log_sigma ~ Normal(0, 1) directly on the unconstrained scale
+# (=> rho, sigma ~ LogNormal(0, 1), no Jacobian needed since we parameterize on
+# log scale); beta_k ~ Normal(0, 1). Scope: population-level, data-x only.
+# ==============================================================================
+
+"""
+    vmeta_sampling_rhs(meta, x::ExprColumn{typeof(offset)}; group) -> (meta, broadcasted)
+
+Parse an `offset(x)` term: fixed-slope (no beta) contribution to the linear
+predictor. brms-compatible — adds `x` directly to the predictor without
+allocating any parameters. Population-level only.
+"""
+vmeta_sampling_rhs(meta, x::ExprColumn{typeof(offset)}; group) = begin
+    group === :__population__ || error("offset: only population-level supported (got group=$group)")
+    length(getargs(x)) == 1 || error("offset: expects exactly one positional argument, got $(length(getargs(x)))")
+    meta, vbroadcasted(getargs(x, 1)[1]; meta)
+end
+
+"""Hilbert-space approx GP marker; population-level, 1D squared-exp kernel."""
+function hsgp end
+
+"""
+    _hsgp_basis(raw, K, c) -> (PHI, lambda)
+
+Precompute the Riutort-Mayol eigen-basis from raw x values. `PHI` is (n, K),
+`lambda` is length-K. Center-then-scale-by-boundary-factor-c is standard.
+"""
+_hsgp_basis(raw::AbstractVector{<:Real}, K::Integer, c::Real) = begin
+    K >= 1 || error("gp: k must be >= 1 (got $K)")
+    c > 1  || error("gp: c must be > 1 (got $c)")
+    x_c = raw .- (sum(raw) / length(raw))
+    L = c * maximum(abs, x_c)
+    L > 0 || error("gp: degenerate input (all x equal)")
+    lambda = [(k * pi / (2 * L))^2 for k in 1:K]
+    PHI = zeros(length(raw), K)
+    inv_sqrt_L = 1 / sqrt(L)
+    for k in 1:K, i in eachindex(x_c)
+        PHI[i, k] = inv_sqrt_L * sin(sqrt(lambda[k]) * (x_c[i] + L))
+    end
+    PHI, lambda
+end
+
+"""
+    vmeta_sampling_rhs(meta, x::ExprColumn{typeof(gp)}; group) -> (meta, broadcasted)
+
+Parse a `gp(x; k=K, c=C)` term. Precomputes `PHI` + `lambda` from raw data,
+pushes a `Part(hsgp, …)` into the population block, and returns a broadcast
+wrapper over the per-draw `contrib` buffer (refreshed in `lprior!`).
+"""
+vmeta_sampling_rhs(meta, x::ExprColumn{typeof(gp)}; group) = begin
+    group === :__population__ || error("gp: only population-level supported for now (got group=$group)")
+    args = getargs(x); kw = getkwargs(x)
+    length(args) == 1 || error("gp: expects exactly one positional argument, got $(length(args))")
+    inner = args[1]
+    inner isa NamedColumn || error("gp: expects a NamedColumn argument, got $(typeof(inner))")
+    raw = parent(parent(inner))
+    raw isa AbstractVector{<:Real} || error("gp: `$(name(inner))` must be a real-valued vector (got $(typeof(raw)))")
+    K = get(kw, :k, 20)
+    c = get(kw, :c, 1.5)
+    PHI, lambda = _hsgp_basis(raw, K, c)
+    sqrt_spd = zeros(K)
+    beta = zeros(K)
+    contrib = zeros(length(raw))
+    meta = push_parts!!(meta, :__population__,
+        Part(hsgp, (; PHI, lambda, sqrt_spd, beta, contrib)),
+    )
+    meta, Base.broadcasted(identity, contrib)
+end
+
+nparams(p::Part{typeof(hsgp)}) = length(p.data.lambda) + 2
+
+"""
+    lprior!(p::Part{typeof(hsgp)}, x) -> lp
+
+Refresh `sqrt_spd` + `contrib` in place from the `K+2` unconstrained reals
+(ordering: log_rho, log_sigma, beta_1..beta_K). Returns Normal(0,1) log-priors
+on all three component groups (no Jacobian because we parameterize on the
+log-scale directly).
+"""
+@inline lprior!(p::Part{typeof(hsgp)}, x) = begin
+    (; PHI, lambda, sqrt_spd, beta, contrib) = p.data
+    K = length(lambda)
+    pos = 0
+    log_rho,   pos = advance!!(x, pos)
+    log_sigma, pos = advance!!(x, pos)
+    beta_x,    pos = advance!!(x, pos, K)
+    beta .= beta_x
+    rho   = exp(log_rho)
+    sigma = exp(log_sigma)
+    # sqrt(S(sqrt(lambda[k]); rho, sigma)) for the 1D squared-exp spectral density.
+    c_base = sigma * (2 * pi)^(1/4) * sqrt(rho)
+    for k in 1:K
+        sqrt_spd[k] = c_base * exp(-0.25 * rho^2 * lambda[k])
+    end
+    mul!(contrib, PHI, sqrt_spd .* beta)
+    lp = logpdf(Normal(), log_rho) + logpdf(Normal(), log_sigma)
+    lp += sum(Base.Fix1(logpdf, Normal()), beta_x)
+    lp
+end
+
+Base.show(io::IO, p::Part{typeof(hsgp)}) = print(io, "Part{hsgp}(K=", length(p.data.lambda), ", n=", length(p.data.contrib), ")")

@@ -68,6 +68,28 @@ const ranef_correlated = StanBlocks.@slic begin
     return rows_dot_product(Z, b[group_idx, :])
 end
 
+# `(expr | gr(g, by=b))` stratified random effects: independent LKJ-Cholesky +
+# tau per level of `b`, so each stratum has its own full covariance structure.
+# `stratum_idx[g]` maps each group-level to its stratum (walker pre-computes it
+# and errors if any group straddles strata).
+#   L   :: array[n_strata] cholesky_factor_corr[n_terms]
+#   tau :: array[n_strata] vector<lower=0>[n_terms]
+#   z   :: array[n_groups] vector[n_terms]
+# Per-group contribution: b[g, :] = (diag_pre_multiply(tau[s], L[s]) * z[g])'
+# where s = stratum_idx[g]. Uses SB's `lkj_corr_cholesky_lpdfs` array-broadcast
+# (one-liner added to StanBlocks.jl builtins) so L's sampling statement
+# vectorizes across strata.
+const ranef_correlated_by = StanBlocks.@slic begin
+    L   ~ lkj_corr_cholesky(1.; n=n_terms, m=n_strata)
+    tau ~ std_normal(; n=n_terms, m=n_strata, lower=0., type=vector)
+    z   ~ std_normal(; n=n_terms, m=n_groups, type=vector)
+    b = rep_matrix(0., n_groups, n_terms)
+    for g in 1:n_groups
+        b[g, :] = (diag_pre_multiply(tau[stratum_idx[g]], L[stratum_idx[g]]) * z[g])'
+    end
+    return rows_dot_product(Z, b[group_idx, :])
+end
+
 # Treatment-coded categorical predictor. Allocates K-1 free betas; reference
 # level 1 contributes 0. Mirrors vimpl's `AbstractVector{<:Integer}` dispatch.
 # `x` is the per-row 1-based level index, `n_levels = K`.
@@ -191,16 +213,20 @@ _sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs) = begin
     end
 end
 
-# Link-transformed LHS: `log(err) ~ 1 + d` etc.
+# Link-transformed LHS: `log(err) ~ 1 + d`, `logit(p) ~ 1 + x`, etc.
+# Sample the linear predictor on the linked scale, then invert to recover the
+# response. Mirrors vimpl's `inverse(getf(lhs))` path — any link whose Julia
+# `inverse` is a function with a Stan-known name (log/exp/logit/logistic/
+# sqrt/square, ...) works; unknown links error at transpile time.
 _sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs) = begin
     f = getf(lhs)
-    f === log || error("sbimpl: only `log(x)` links supported for now (got `$f`)")
-    inner = getargs(lhs, 1)[1]
+    inner = only(getargs(lhs))
     inner isa NamedColumn || error("sbimpl: expected NamedColumn inside link, got $(typeof(inner))")
+    inv_f = InverseFunctions.inverse(f)
     inner_name = name(inner)
-    log_name = Symbol(:log_, inner_name)
-    _sb_linear_predictor!(stmts, data, log_name, rhs)
-    push!(stmts, :($inner_name = exp($log_name)))
+    pre_name = Symbol(nameof(f), :_, inner_name)
+    _sb_linear_predictor!(stmts, data, pre_name, rhs)
+    push!(stmts, :($inner_name = $(Symbol(nameof(inv_f)))($pre_name)))
 end
 
 
@@ -327,52 +353,134 @@ end
 # and emit one `~ ranef_correlated(...)` (K >= 2) or `~ ranef_intercept(...)`
 # (K == 1, intercept-only) call. Scalar-slope-only blocks (K == 1 but not an
 # intercept) also go through ranef_correlated -- the math degenerates gracefully.
+# `(... | rhs)` -> walker-side group descriptor. Bare NamedColumn and `gr(g)`
+# (no kwargs) both collapse to the inner NamedColumn (plain correlated block);
+# `gr(g; by=b)` returns `(group, by)` so the emitter allocates the stratified
+# `ranef_correlated_by` block. Mirrors vimpl's `_normalize_group`.
+_sb_normalize_group(g::NamedColumn) = g
+_sb_normalize_group(g::ExprColumn) = begin
+    getf(g) === gr || error("sbimpl: expected NamedColumn or `gr(...)` on RHS of `|`, got `$(getf(g))`")
+    args = getargs(g); kw = getkwargs(g)
+    length(args) == 1 || error("sbimpl: `gr(...)` expects exactly one positional group, got $(length(args))")
+    group = args[1]
+    group isa NamedColumn || error("sbimpl: `gr(...)` expects a NamedColumn group, got $(typeof(group))")
+    by = get(kw, :by, nothing)
+    by === nothing && return group
+    by isa NamedColumn || error("sbimpl: `gr(...; by=...)` expects a NamedColumn for `by`, got $(typeof(by))")
+    (group, by)
+end
+_sb_normalize_group(g) = error("sbimpl: expected NamedColumn or `gr(...)` on RHS of `|`, got $(typeof(g))")
+
+# Walker-side key used to coalesce ran_terms. Plain group -> `Symbol`; stratified
+# `gr(g, by=b)` -> `(Symbol, Symbol)` so the two don't accidentally merge.
+_sb_group_key(g::NamedColumn) = name(g)
+_sb_group_key(g::Tuple{NamedColumn,NamedColumn}) = (name(g[1]), name(g[2]))
+
+# Per-group level of `g` -> stratum level of `by`. Errors if any group level
+# straddles multiple strata. Ported from vimpl's `_stratum_idx`.
+_sb_stratum_idx(g_idx::AbstractVector{Int}, b_idx::AbstractVector{Int}, gname, bname) = begin
+    m_groups = maximum(g_idx)
+    mapping = zeros(Int, m_groups)
+    for (gi, bi) in zip(g_idx, b_idx)
+        if mapping[gi] == 0
+            mapping[gi] = bi
+        elseif mapping[gi] != bi
+            error("sbimpl: gr($gname, by=$bname): group level $gi straddles multiple strata ($(mapping[gi]) vs $bi)")
+        end
+    end
+    mapping
+end
+
 function _sb_emit_ranefs!(stmts, data, target::Symbol, ran_terms, summands)
     isempty(ran_terms) && return
-    # Group `(expr | g)` terms by the group symbol, preserving first-seen order.
-    groups = Symbol[]
-    by_group = Dict{Symbol, Vector{Any}}()
+    # Group `(expr | g)` / `(expr | gr(g, by=b))` terms by normalized group key,
+    # preserving first-seen order. Bare-NamedColumn and gr-by groups key
+    # differently so they never coalesce.
+    keys_seen = Any[]
+    by_group = Dict{Any, Vector{Any}}()
+    descs = Dict{Any, Any}()  # key -> normalized group descriptor
     for rt in ran_terms
-        lhs, group = getargs(rt, 2)
-        group isa NamedColumn || error("sbimpl: expected NamedColumn on RHS of `|`, got $(typeof(group))")
-        g_backing = parent(group)
-        g_backing isa DataColumn || error("sbimpl: group `$(name(group))` must be a raw data column")
-        g = name(group)
-        haskey(by_group, g) || (push!(groups, g); by_group[g] = Any[])
+        lhs, raw_group = getargs(rt, 2)
+        g = _sb_normalize_group(raw_group)
+        k = _sb_group_key(g)
+        haskey(by_group, k) || (push!(keys_seen, k); by_group[k] = Any[]; descs[k] = g)
         # Flatten `lhs` on `+` (same walker as pop terms; reuses `0` drop).
-        append!(by_group[g], _sb_terms(lhs))
+        append!(by_group[k], _sb_terms(lhs))
     end
-    for g in groups
-        gterms = by_group[g]
-        isempty(gterms) && error("sbimpl: ranef `(… | $g)` has no terms after dropping `0`")
-        # Resolve group index/count from the first occurrence (same backing data).
-        example = first(rt for rt in ran_terms if name(getargs(rt, 2)[2]) === g)
-        group_col = getargs(example, 2)[2]
-        n_levels, g_idx = _sb_level_index(parent(parent(group_col)))
-        idx_name = Symbol(g, :_idx)
-        n_name   = Symbol(:n_, g)
-        data[idx_name] = g_idx
-        data[n_name]   = n_levels
-        r_name = Symbol(:r_, target, :_, g)
-        if length(gterms) == 1 && gterms[1] === 1
-            # (1 | g) fast/equivalent path -- stays on ranef_intercept so the
-            # emitted Stan matches existing sb.3 smoke tests bit for bit.
-            push!(stmts, :($r_name ~ ranef_intercept(; group_idx=$idx_name, n_groups=$n_name)))
-        else
-            col_exprs = Any[]
-            for t in gterms
-                _sb_ranef_cols!(col_exprs, data, stmts, t)
-            end
-            Z_name = Symbol(:Z_, target, :_, g)
-            k_name = Symbol(:n_terms_, target, :_, g)
-            data[k_name] = length(col_exprs)
-            push!(stmts, :($Z_name = $(Expr(:call, :hcat, col_exprs...))))
-            push!(stmts, :($r_name ~ ranef_correlated(;
-                Z=$Z_name, group_idx=$idx_name,
-                n_groups=$n_name, n_terms=$k_name)))
+    for k in keys_seen
+        gterms = by_group[k]
+        desc = descs[k]
+        isempty(gterms) && error("sbimpl: ranef `(… | $k)` has no terms after dropping `0`")
+        _sb_emit_ranef_block!(stmts, data, target, desc, gterms, summands)
+    end
+end
+
+# Emit a single ranef block for one normalized group descriptor.
+function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, gterms, summands)
+    g_backing = parent(group)
+    g_backing isa DataColumn || error("sbimpl: group `$(name(group))` must be a raw data column")
+    g = name(group)
+    n_levels, g_idx = _sb_level_index(parent(g_backing))
+    idx_name = Symbol(g, :_idx)
+    n_name   = Symbol(:n_, g)
+    data[idx_name] = g_idx
+    data[n_name]   = n_levels
+    r_name = Symbol(:r_, target, :_, g)
+    if length(gterms) == 1 && gterms[1] === 1
+        # (1 | g) fast/equivalent path -- stays on ranef_intercept so the
+        # emitted Stan matches existing sb.3 smoke tests bit for bit.
+        push!(stmts, :($r_name ~ ranef_intercept(; group_idx=$idx_name, n_groups=$n_name)))
+    else
+        col_exprs = Any[]
+        for t in gterms
+            _sb_ranef_cols!(col_exprs, data, stmts, t)
         end
-        push!(summands, r_name)
+        Z_name = Symbol(:Z_, target, :_, g)
+        k_name = Symbol(:n_terms_, target, :_, g)
+        data[k_name] = length(col_exprs)
+        push!(stmts, :($Z_name = $(Expr(:call, :hcat, col_exprs...))))
+        push!(stmts, :($r_name ~ ranef_correlated(;
+            Z=$Z_name, group_idx=$idx_name,
+            n_groups=$n_name, n_terms=$k_name)))
     end
+    push!(summands, r_name)
+end
+
+function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::Tuple{NamedColumn,NamedColumn}, gterms, summands)
+    gcol, bcol = group
+    g_backing = parent(gcol)
+    b_backing = parent(bcol)
+    g_backing isa DataColumn || error("sbimpl: group `$(name(gcol))` must be a raw data column")
+    b_backing isa DataColumn || error("sbimpl: `by=$(name(bcol))` must be a raw data column")
+    g, b = name(gcol), name(bcol)
+    n_groups, g_idx = _sb_level_index(parent(g_backing))
+    n_strata, b_idx = _sb_level_index(parent(b_backing))
+    stratum_idx = _sb_stratum_idx(g_idx, b_idx, g, b)
+    # Block-local names include both `g` and `b` so this block never clashes
+    # with a plain `(… | g)` block against the same group column.
+    suffix = Symbol(g, :__by__, b)
+    idx_name     = Symbol(suffix, :_idx)
+    n_name       = Symbol(:n_, suffix)
+    s_idx_name   = Symbol(suffix, :_stratum_idx)
+    n_strata_nm  = Symbol(:n_strata_, suffix)
+    data[idx_name]    = g_idx
+    data[n_name]      = n_groups
+    data[s_idx_name]  = stratum_idx
+    data[n_strata_nm] = n_strata
+    r_name = Symbol(:r_, target, :_, suffix)
+    col_exprs = Any[]
+    for t in gterms
+        _sb_ranef_cols!(col_exprs, data, stmts, t)
+    end
+    Z_name = Symbol(:Z_, target, :_, suffix)
+    k_name = Symbol(:n_terms_, target, :_, suffix)
+    data[k_name] = length(col_exprs)
+    push!(stmts, :($Z_name = $(Expr(:call, :hcat, col_exprs...))))
+    push!(stmts, :($r_name ~ ranef_correlated_by(;
+        Z=$Z_name, group_idx=$idx_name,
+        n_groups=$n_name, n_terms=$k_name,
+        stratum_idx=$s_idx_name, n_strata=$n_strata_nm)))
+    push!(summands, r_name)
 end
 
 # Extract pop terms from `1 + a + c1 [+ (...|g)]`. `0` is the standard
