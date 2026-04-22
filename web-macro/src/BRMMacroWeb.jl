@@ -1,12 +1,21 @@
 module BRMMacroWeb
 
 using HTMXObjects
-using Treebars: polling_fetchindex, initialize_progress!
+using DynamicObjects: fetchindex!
+using Treebars: polling_fetchindex, initialize_progress!,
+                prepare_progress!, with_prepared_progress,
+                htmx_treebar_styles
 using Random
 using Chairmarks
 using DataFrames
+using Statistics: quantile, median
 using FiniteDifferences: FiniteDifferences, central_fdm
 using BridgeStan: BridgeStan
+using StanLogDensityProblems: StanProblem
+using WarmupHMC: initialize_mcmc, adaptive_warmup_mcmc
+using JSON
+using AlgebraOfVega: vega_head, auto_remap_node, with_plot_caption, config, pointinterval, lineribbon, to_node, ECDFPlot, VLines
+import AlgebraOfGraphics as AoG
 
 # The @brm macro and the VBRMI / SBBRMI implementations live alongside this
 # module so Revise tracks them. The scripts/ entry points (parsing.jl,
@@ -27,12 +36,15 @@ include("html_expr.jl")
 # dispatch to `::Val{:bruno}`. Default is no extras.
 dataset_extras(::Val, df) = (;)
 
-# DOs in dependency order. Every feature is a focused @dynamicstruct: the
-# pipeline stages live as derived properties on `BRMRun`, example file I/O
-# on `ExampleStore`, synthetic + namespace-merged data on `Dataset`, and
-# AST parse/safety/transform on `Formula`. `AppData` is just a thin holder
-# of sub-DOs plus the `pipeline_run` polling entry point; `AppContext` is
-# the HTMX routes and rendering layer.
+# DOs in dependency order. Every feature is a focused @dynamicstruct:
+# - Backend/data lives on `AppData`: `dataset`, `run(text, ns)` with its pipeline
+#   data, `step_chain` / `compute_steps` for polling_fetchindex, `context` for
+#   per-request namespace/run bundles.
+# - UI/HTML lives on the routes structs: `PipelineRoutes` owns the formula
+#   editor page, per-step render dispatch, and `context!`; the `@include
+#   examples` sub-struct owns the examples list/detail/mark routes and the
+#   inline `example_store` that constructs ExampleEntry instances with the
+#   right `__parent__` for URL construction.
 struct FormulaSecurityError <: Exception
     msg::String
 end
@@ -53,7 +65,7 @@ _ALLOWED_CALLS = Set{Symbol}([
     :MvNormal, :MixtureModel, :Dirichlet,
     :InverseGamma, :InverseGaussian, :VonMises, :Pareto,
     :OrderedLogistic, :Categorical,
-    :scale, :center, :standardize, :factor, :offset,
+    :zscale, :center, :standardize, :factor, :offset, :protect,
     :s, :bs, :t2, :gp, :ar, :ar1, :mo, :mo1,
     :cbind, :mvbind, :mm, :gr, :dp, :me, :centered,
     :Horseshoe, :ZeroInflatedPoisson, :weighted,
@@ -110,14 +122,14 @@ end
     is_safe = violation === nothing
 
     _t = begin
-        alllocals = OrderedDict{Symbol,Symbol}()
+        local alllocals = OrderedDict{Symbol,Symbol}()
         (; ex=parse!(deepcopy(raw); info=(;alllocals)), alllocals)
     end
     transformed = _t.ex
     alllocals   = _t.alllocals
 end
 @dynamicstruct struct Dataset
-    n::Int = 64
+    n::Int = 16
     seed::Int = 1
 
     df = begin
@@ -233,8 +245,12 @@ end
         class="brm-tier-pill",
         style="background:$tier_color")
 
+    # `__parent__` is the `@include examples` sub-struct (owns /examples/* routes).
+    # `__parent__.__parent__.pipeline` is the sibling PipelineRoutes sub-struct
+    # (owns /pipeline/* routes). URLs built via `query_url` so request @params
+    # auto-propagate and values auto-encode.
     permalink = h.a("🔗";
-        href="/examples/$(HTTP.URIs.escapeuri(slug))",
+        href=string(__parent__/slug),
         title="Standalone URL",
         onclick="event.stopPropagation()",
         class="brm-permalink")
@@ -245,7 +261,7 @@ end
         h.button(is_active ? active_text : inactive_text;
             type="button",
             class="brm-state-pill",
-            hx_get="/mark?label=$(HTTP.URIs.escapeuri(label))&state=$target_state",
+            hx_get=string(query_url(__parent__/"mark"; label, state=target_state)),
             hx_target="#$card_id",
             hx_swap="outerHTML",
             onclick="event.stopPropagation()",
@@ -260,7 +276,7 @@ end
         state_pill(:deprioritized, "✓ deprioritized", "deprioritize"),
     )
 
-    formula_form(routes) = h.form(; class="brm-example-form")(
+    formula_form = h.form(; class="brm-example-form")(
         h.input(; type="hidden", name="label", value=label),
         h.textarea(formula;
             name="formula",
@@ -269,26 +285,26 @@ end
         h.button("cimpl (bench) ▶";
             type="button",
             class="brm-branch-btn",
-            hx_get=string(query_url(routes/"stage/bench"; force=true)),
+            hx_get=string(query_url(__parent__.__parent__.pipeline/"stage/bench"; force=true)),
             hx_include="closest form",
             hx_target="#$result_id",
             hx_swap="innerHTML"),
         h.button("sbimpl (compile) ▶";
             type="button",
             class="brm-branch-btn",
-            hx_get=string(query_url(routes/"stage/stan_compile"; force=true)),
+            hx_get=string(query_url(__parent__.__parent__.pipeline/"stage/stan_compile"; force=true)),
             hx_include="closest form",
             hx_target="#$result_id",
             hx_swap="innerHTML"),
     )
 
-    card(routes) = begin
+    card = begin
         children = Any[HTMXObjects.md_to_node(body)]
         if formula !== nothing
-            push!(children, formula_form(routes))
+            push!(children, formula_form)
             # Inline pipeline-result target — the form's hx_get fills this div
-            # with `render_pipeline(out)` so the user sees the
-            # VBRMI/finite-difference output right inside the card.
+            # with the pipeline output so the user sees the VBRMI/FD/stan-compile
+            # output right inside the card.
             push!(children, h.div(;
                 id=result_id,
                 class="brm-example-result"))
@@ -314,7 +330,7 @@ end
         )
     end
 
-    write_with!(; new_status=status, new_formula=formula) = begin
+    save!(; new_status=status, new_formula=formula) = begin
         io = IOBuffer()
         println(io, "# label: ", label)
         println(io, "# tier: ", tier)
@@ -330,205 +346,569 @@ end
             endswith(new_formula, "\n") || println(io)
         end
         write(path, take!(io))
-        ExampleEntry(; path)
+        # Preserve __parent__ so the reloaded entry can still build route URLs.
+        ExampleEntry(; __parent__, path)
     end
+
+    toggle_status!(target) =
+        save!(; new_status = status == target ? :open : target)
 end
-@dynamicstruct struct ExampleStore
-    dir::String
+# Element-returning counterpart to `Base.findfirst(pred, coll)` (which returns an
+# index or `nothing`). Does the index-then-lookup dance once so callers don't.
+findfirstelement(pred, coll) = begin
+    i = findfirst(pred, coll)
+    isnothing(i) ? nothing : coll[i]
+end
 
-    # `entries` is a method, not a cached field, because `save!` writes to
-    # disk and we want subsequent reads to see the new file mtime/content.
-    entries() = begin
-        isdir(dir) || mkpath(dir)
-        files = sort(filter(endswith(".jl"),
-                            readdir(dir; join=true));
-                     by=mtime, rev=true)
-        ExampleEntry[ExampleEntry(; path=f) for f in files]
-    end
+# Stan draws → DataFrames plumbing, shared between prior-predictive generation
+# and posterior fits (pathfinder / warmup). Keep these as plain module-level
+# helpers so callsites inside `@struct stan = …` don't accidentally become IPs.
 
-    find(label) = begin
-        for e in entries()
-            e.label == label && return e
-        end
-        nothing
-    end
-    find_by_slug(slug) = begin
-        for e in entries()
-            e.slug == slug && return e
-        end
-        nothing
-    end
-
-    save!(label; new_status=nothing, new_formula=nothing) = begin
-        e = find(label)
-        e === nothing && return nothing
-        e.write_with!(;
-            new_status = new_status === nothing ? e.status  : new_status,
-            new_formula = new_formula === nothing ? e.formula : new_formula,
+# Param-constrain each column of `unc_draws` (dim × n) with `include_tp=true,
+# include_gq=true`, returning an (m × n) matrix where `m = length(param_names(instance; include_tp=true, include_gq=true))`.
+constrain_draws(unc_draws, instance; rng_seed) = begin
+    rng = BridgeStan.StanRNG(instance, rng_seed)
+    m = length(BridgeStan.param_names(instance; include_tp=true, include_gq=true))
+    n = size(unc_draws, 2)
+    mat = Matrix{Float64}(undef, m, n)
+    for i in 1:n
+        mat[:, i] = BridgeStan.param_constrain(
+            instance, collect(view(unc_draws, :, i));
+            include_tp=true, include_gq=true, rng=rng,
         )
     end
+    mat
 end
-# One run of the @brm pipeline for a given (text, namespace) pair. Every
-# stage is a derived property -- accessing `run.brmi` triggers parse + eval,
-# accessing `run.benches` triggers vbrmi + finite-difference check + the
-# benchmark loop, etc. Unused branches don't compute. Safety is enforced
-# at the one point where it matters: `wrapped` refuses to produce Julia
-# code for an unsafe formula.
 
-@dynamicstruct struct BRMRun
-    text::String
-    namespace::Symbol = :default
-    (; dataset) = __parent__
-
-    formula = Formula(; text)
-    df = dataset.df
-    container = dataset.container(namespace)
-
-    wrapped = begin
-        formula.is_safe || throw(formula.violation)
-        _brm(text; df=container)
-    end
-    brmi = eval(wrapped)
-
-    # ── cimpl branch ──
-    vbrmi = VBRMI(brmi)
-    dim   = LogDensityProblems.dimension(vbrmi)
-    x0    = randn(Xoshiro(0), dim)
-    ldp   = string(LogDensityProblems.logdensity(vbrmi, x0))
-    grad  = FiniteDifferences.grad(
-        central_fdm(5, 1),
-        Base.Fix1(LogDensityProblems.logdensity, vbrmi),
-        x0,
-    )[1]
-
-    benches = begin
-        x_rand = randn(dim)
-        bs = Pair{String,Any}[]
-        push!(bs, "logdensity (total)" =>
-            @be randn(dim) LogDensityProblems.logdensity($vbrmi, _))
-        push!(bs, "lprior!" =>
-            @be randn(dim) lprior!($vbrmi, _))
-        # Per-Part lprior! split: the foldl in lprior!(blocks, x) hands
-        # each Part a view of exactly nparams(part) reals. Reconstruct
-        # those slices here so each Part's contribution can be benched
-        # in isolation.
-        let pos = 0
-            for (group_key, parts) in pairs(vbrmi.meta.blocks)
-                for (i, part) in enumerate(parts)
-                    n = nparams(part)
-                    xi = view(x_rand, pos+1:pos+n)
-                    push!(bs, "  lprior!($group_key[$i] $(part))" =>
-                        @be lprior!($part, $xi))
-                    pos += n
-                end
-            end
-        end
-        # llikelihood! splits: each materialized column (either a
-        # linear-predictor MaterializedColumn or a LikelihoodColumn).
-        _ = lprior!(vbrmi, x_rand)
-        for (key, m) in pairs(vbrmi.meta.materialized)
-            push!(bs, "llikelihood!($key)" =>
-                @be llikelihood!($m))
-        end
-        bs
-    end
-
-    # ── stan branch ──
-    sbbrmi    = SBBRMI(brmi)
-    stan_src  = stan_code(sbbrmi)
-    stan_file = begin
-        f = tempname() * ".stan"
-        write(f, stan_src)
-        f
-    end
-    stan_lib = BridgeStan.compile_model(stan_file)
+# Build the (long, wide, summary) DataFrame triple from a constrained draws
+# matrix `constrained` (m × n) and its matching parameter `names` (length m).
+# Splits indexed names on the first `.` into (:param, :index) with :index as Int
+# (0 for scalars); summary groups by (:param, :index) with the bands columns
+# expected by `pointinterval(bands=…)` / `lineribbon(bands=…)`.
+dfs_from_constrained(constrained, names) = begin
+    n = size(constrained, 2)
+    splits     = [split(nm, '.', limit=2) for nm in names]
+    base_names = [String(first(s)) for s in splits]
+    parse_idx(s) = (v = tryparse(Int, s); isnothing(v) ? 0 : v)
+    indices    = [length(s) > 1 ? parse_idx(String(s[2])) : 0 for s in splits]
+    long = DataFrame(
+        param = repeat(base_names, inner=n),
+        index = repeat(indices, inner=n),
+        draw  = repeat(1:n, outer=length(base_names)),
+        value = vec(constrained'),
+    )
+    wide = DataFrame(
+        [Symbol(names[i]) => constrained[i, :] for i in eachindex(names)]
+    )
+    summary = combine(
+        groupby(long, [:param, :index]),
+        :value => (v -> quantile(v, 0.025)) => :q025,
+        :value => (v -> quantile(v, 0.10))  => :q10,
+        :value => (v -> quantile(v, 0.25))  => :q25,
+        :value => median                    => :median,
+        :value => (v -> quantile(v, 0.75))  => :q75,
+        :value => (v -> quantile(v, 0.90))  => :q90,
+        :value => (v -> quantile(v, 0.975)) => :q975,
+    )
+    (; long, wide, summary)
 end
+
 @dynamicstruct struct AppData
     __status__ = initialize_progress!(:state; description="BRM pipeline")
     examples_dir = joinpath(dirname(@__DIR__), "examples")
 
-    default_formula = """loc1 ~ 1 + a + c1 + (1 + b + c1 | g1) + (1 | g2)
-log(err1) ~ 1 + d
-y1 ~ Normal(loc1, err1)
-
-log_rate ~ 1 + a + (1 | g3)
-k1 ~ Poisson(exp(log_rate))
-
-log_odds_bin ~ 1 + c2 + (1 | g2)
-bin_succ ~ Binomial(bin_n, logistic(log_odds_bin))
-
-log_odds_b ~ 1 + b
-bin_y ~ Bernoulli(logistic(log_odds_b))
-"""
-
-    dataset       = Dataset()
-    example_store = ExampleStore(; dir=examples_dir)
+    dataset = Dataset()
 
     namespace_from(label) = isempty(strip(label)) ? :default :
         Symbol(lowercase(first(split(strip(label), r"[\s:\-]+"))))
 
-    # Ordered pipeline stages. Index gates which BRMRun properties
-    # `pipeline_run` touches (and which sections `render_pipeline` shows).
-    stages = (:parse, :transform, :wrap, :brmi,
-              :vbrmi, :bench,
-              :slic_model, :stan_code, :stan_compile)
-    stage_index(s) = something(findfirst(==(s), stages), length(stages))
+    # One run of the @brm pipeline for a given (text, namespace) pair. Every
+    # stage is a derived property -- accessing `.brmi` triggers parse + eval,
+    # `.benches` triggers the benchmark loop, etc. Unused branches don't
+    # compute. Safety is enforced at `wrapped`, which refuses to produce Julia
+    # code for an unsafe formula.
+    # TODO(DO): investigate whether indexed inline structs (@struct) should
+    # accept default values for index params. Today `@struct run(text, namespace=:default)`
+    # errors with "index param must be a Symbol" because the default becomes
+    # a `:kw` Expr. Unclear if there's a sensible meaning for such defaults at
+    # all (cache keying, forwarding, etc.) or if we should just continue
+    # requiring bare Symbol params.
+    @struct run(text, namespace) = begin
+        formula = Formula(text)
+        df = dataset.df
+        container = dataset.container(namespace)
 
-    # Indexable property: `appdata.run[text, ns]` is cached in-memory per key,
-    # `appdata.run(text, ns)` is fresh each call.
-    run(text, namespace=:default) =
-        BRMRun(; __parent__=__self__, text, namespace)
+        wrapped = begin
+            formula.is_safe || throw(formula.violation)
+            _brm(text; df=container)
+        end
+        brmi = eval(wrapped)
 
-    # Indexable fetch for `polling_fetchindex` (accessed via brackets by the
-    # caller). Touches BRMRun properties up through `stage` so the heavy work
-    # lands inside the polled task rather than the HTTP response callback.
-    pipeline_run(text, stage::Symbol, namespace=:default) = begin
-        r = run[text, namespace]
-        s = stage_index(stage)
-        s >= 1 && r.formula.raw
-        s >= 2 && r.formula.transformed
-        s >= 3 && r.wrapped
-        s >= 4 && r.brmi
-        stage === :vbrmi       && r.grad
-        stage === :bench       && r.benches
-        stage === :slic_model  && r.sbbrmi
-        stage === :stan_code   && r.stan_src
-        stage === :stan_compile && r.stan_lib
-        r
+        # ── cimpl branch ──
+        vbrmi = VBRMI(brmi)
+        dim   = LogDensityProblems.dimension(vbrmi)
+        x0    = randn(Xoshiro(0), dim)
+        ldp   = string(LogDensityProblems.logdensity(vbrmi, x0))
+        grad  = FiniteDifferences.grad(
+            central_fdm(5, 1),
+            Base.Fix1(LogDensityProblems.logdensity, vbrmi),
+            x0,
+        )[1]
+
+        tol    = 1e-8
+        n_dead = count(<=(tol) ∘ abs, grad)
+        dead   = findall(<=(tol) ∘ abs, grad)
+
+        benches = vcat(
+            [
+                "logdensity (total)" => @be(randn(dim), LogDensityProblems.logdensity($vbrmi, _)),
+                "lprior!"            => @be(randn(dim), lprior!($vbrmi, _)),
+            ],
+            [
+                "  lprior!($group_key[$i] $(part))" => @be(randn(nparams(part)), lprior!($part, _))
+                for (group_key, parts) in pairs(vbrmi.meta.blocks)
+                for (i, part) in enumerate(parts)
+            ],
+            [
+                "llikelihood!($key)" => @be(llikelihood!($m))
+                for (key, m) in pairs(vbrmi.meta.materialized)
+            ],
+        )
+
+        # ── stan branch ──
+        sbbrmi = SBBRMI(brmi)
+
+        # Everything Stan-related bundled under `r.stan.*`. Nested access via
+        # step_chain's tuple-path specs (e.g. `(:stan, :src)`).
+        @struct stan = begin
+            src = stan_code(sbbrmi)
+            # Hash-keyed cache path so identical Stan source reuses the same
+            # .stan (and co-located .so) across requests. `BridgeStan.compile_model`
+            # invokes make, which skips when the .so is newer than the .stan —
+            # so a cache hit resolves in milliseconds instead of re-running
+            # the C++ build.
+            file = begin
+                p = joinpath(tempdir(), "brm_stan", string(hash(src)) * ".stan")
+                mkpath(dirname(p))
+                isfile(p) || write(p, src)
+                p
+            end
+            lib      = BridgeStan.compile_model(file)
+            # SB's `stan_data` walks the SlicModel → StanModel tracing which
+            # auto-declares `_n` / `_m` sizes for every vector / matrix, then
+            # `bridgestan_data` JSON-serializes with Stan's column-major
+            # matrix convention.
+            data     = StanBlocks.stan.bridgestan_data(StanBlocks.stan_data(sbbrmi.model))
+            instance = BridgeStan.StanModel(lib, data)
+            dim      = BridgeStan.param_unc_num(instance)
+            # Fixed-rng narrow-normal init — deterministic, cache-friendly.
+            init     = 0.1 .* randn(Xoshiro(42), dim)
+
+            # Smoke-test evaluation: log density at the init params. Forces the
+            # model-loaded + data-bound path without running Pathfinder.
+            log_density = BridgeStan.log_density(instance, init)
+
+            # Synthetic-data generation: sample N unconstrained parameter draws
+            # from a narrow zero-mean normal, then `param_constrain` each with
+            # `include_tp` + `include_gq` so the output matrix also carries
+            # transformed parameters and generated-quantities (the synthetic
+            # outcomes `y_sim` live in the GQ block when the model defines
+            # one).
+            generated_n     = 50
+            generated_unc   = 0.1 .* randn(Xoshiro(44), dim, generated_n)
+            generated_names = BridgeStan.param_names(instance; include_tp=true, include_gq=true)
+            generated = constrain_draws(generated_unc, instance; rng_seed=45)
+            generated_dfs = dfs_from_constrained(generated, generated_names)
+            generated_df      = generated_dfs.long
+            generated_wide_df = generated_dfs.wide
+            generated_summary_df = generated_dfs.summary
+            # Ground-truth overlay: the `fit_draw_idx`-th column of the
+            # constrained generated matrix — one value per indexed parameter.
+            # Same (param, index) layout as `generated_df` so plots can join on it.
+            truth_df = begin
+                truth_col = view(generated, :, fit_draw_idx)
+                splits     = [split(nm, '.', limit=2) for nm in generated_names]
+                base_names = [String(first(s)) for s in splits]
+                parse_idx(s) = (v = tryparse(Int, s); isnothing(v) ? 0 : v)
+                indices    = [length(s) > 1 ? parse_idx(String(s[2])) : 0 for s in splits]
+                DataFrame(
+                    param = base_names,
+                    index = indices,
+                    truth = collect(truth_col),
+                )
+            end
+            # Simulation-based calibration setup: pick one draw from the prior
+            # predictive `generated` matrix, extract every `*_gen[.i.j]` entry,
+            # and fold them back into the Stan data dict as their `*` (observed)
+            # counterparts. The resulting `fit_instance` shares the compiled
+            # .so with `instance` but is bound to this synthetic observed data,
+            # so Pathfinder / full warmup samples `p(theta | y_sim)` and should
+            # recover the ground-truth `generated_unc[:, fit_draw_idx]`.
+            fit_draw_idx = 1
+            fit_truth_unc = collect(view(generated_unc, :, fit_draw_idx))
+            fit_data_dict = begin
+                base = StanBlocks.stan_data(sbbrmi.model)
+                col  = view(generated, :, fit_draw_idx)
+                groups = Dict{Symbol, Vector{Tuple{Vector{Int}, Float64}}}()
+                for (i, name) in enumerate(generated_names)
+                    m = match(r"^(.+)_gen(?:\.(.+))?$", name)
+                    isnothing(m) && continue
+                    base_name = Symbol(m.captures[1])
+                    idx_str   = m.captures[2]
+                    idxs = isnothing(idx_str) ? Int[] :
+                           [Base.parse(Int, s) for s in split(idx_str, ".")]
+                    push!(get!(Vector{Tuple{Vector{Int}, Float64}}, groups, base_name),
+                          (idxs, col[i]))
+                end
+                overrides = Dict{Symbol, Any}()
+                for (name, entries) in groups
+                    if length(entries) == 1 && isempty(entries[1][1])
+                        overrides[name] = entries[1][2]
+                    else
+                        orig = base[name]
+                        out  = similar(orig, Float64)
+                        for (idxs, v) in entries
+                            out[idxs...] = v
+                        end
+                        overrides[name] = out
+                    end
+                end
+                merge(base, overrides)
+            end
+            fit_instance = BridgeStan.StanModel(lib,
+                StanBlocks.stan.bridgestan_data(fit_data_dict))
+
+            # IP: Pathfinder init (fast, no MCMC). The `progress=__status__`
+            # hook lets Treebars nest the 100 maxiters subtree under whatever
+            # node called `fetchindex!(status, …, pathfinder, instance, init)`.
+            pathfinder(instance, init; rng=Xoshiro(42), maxiters=100) =
+                initialize_mcmc(StanProblem(instance), init; rng, progress=__status__, maxiters)
+            # IP: full Stan + WarmupHMC fit. Same progress-hooking pattern.
+            # Returns a rich NamedTuple with `.posterior_position`, `.ess`,
+            # `.n_divergent_samples`, etc.
+            posterior_warmup(instance, init; rng=Xoshiro(42), n_draws=200) =
+                adaptive_warmup_mcmc(rng, StanProblem(instance); init, n_draws, progress=__status__)
+            # Gaussian-approximation draws from Pathfinder. Reads the IP via
+            # `@memo` so if `compute_steps` already computed it with progress
+            # nesting, we get the cached value for free.
+            posterior_pathfinder = begin
+                pf = @memo pathfinder(fit_instance, init)
+                pf.position .+ pf.scale * randn(Xoshiro(43), dim, 200)
+            end
+            # Default. Switch this alias to the warmup draws (`@memo
+            # posterior_warmup(instance, init).posterior_position`) to promote
+            # the full fit, or expose a toggle via a param later.
+            posterior = posterior_pathfinder
+            # Constrained posterior draws (+TP+GQ), plus (long, wide, summary).
+            posterior_constrained = constrain_draws(posterior, fit_instance; rng_seed=46)
+            posterior_dfs = dfs_from_constrained(posterior_constrained, generated_names)
+            posterior_long_df    = posterior_dfs.long
+            posterior_wide_df    = posterior_dfs.wide
+            posterior_summary_df = posterior_dfs.summary
+
+            # Parallel set for the warmup+MCMC path. The warmup IP cache is
+            # warmed by `fetchindex!` in `compute_steps`; `@memo` hits it here.
+            posterior_warmup_draws = (@memo posterior_warmup(fit_instance, init)).posterior_position
+            posterior_warmup_constrained = constrain_draws(posterior_warmup_draws, fit_instance; rng_seed=47)
+            posterior_warmup_dfs = dfs_from_constrained(posterior_warmup_constrained, generated_names)
+            posterior_warmup_long_df    = posterior_warmup_dfs.long
+            posterior_warmup_wide_df    = posterior_warmup_dfs.wide
+            posterior_warmup_summary_df = posterior_warmup_dfs.summary
+            posterior_warmup_diagnostics = begin
+                w = @memo posterior_warmup(fit_instance, init)
+                (; w.n_divergent_samples, ess=w.ess)
+            end
+        end
+
+        # Stage-named aliases. `step_chain` / `compute_steps` extract step
+        # outputs by looking up these names via `getproperty`.
+        parse     = formula.raw
+        transform = (; formula.transformed, formula.alllocals)
+        wrap      = wrapped
+    end
+
+    # Per-request bundle for a (label, formula) pair. Pure construction; the
+    # routes side handles persistence before invoking this.
+    @struct context(label, formula) = begin
+        namespace = namespace_from(label)
+        run = __parent__.run(formula, namespace)
+    end
+
+    # DAG of step chains — one NamedTuple per stage target, keyed by step names
+    # in dependency order. Built incrementally via `merge`: each stage's chain
+    # is its parent's chain plus the one step it adds. The DAG branches are
+    # visible in the `merge` calls (e.g. `slic_model = merge(brmi, …)` forks
+    # off of `brmi`, parallel to `vbrmi`). Inner values are one of:
+    #   - Symbol                       → `r.<sym>` (top-level property)
+    #   - Tuple{Vararg{Symbol}}        → nested access, e.g. `(:stan, :src)` → `r.stan.src`
+    #   - NamedTuple of (Symbol|Tuple) → bundle, keys preserved in the result.
+    step_chain(name::Symbol) = begin
+        parse            = (; parse=:parse)
+        transform        = merge(parse,      (; transform=:transform))
+        wrap             = merge(transform,  (; wrap=:wrap))
+        brmi             = merge(wrap,       (; brmi=:brmi))
+        vbrmi            = merge(brmi,       (; vbrmi=(; vbrmi=:vbrmi, dim=:dim, ldp=:ldp, grad=:grad, n_dead=:n_dead, dead=:dead)))
+        bench            = merge(vbrmi,      (; bench=:benches))
+        slic_model       = merge(brmi,       (; slic_model=:sbbrmi))
+        stan_code        = merge(slic_model, (; stan_code=(:stan, :src)))
+        stan_compile     = merge(stan_code,  (; stan_compile=(; file=(:stan, :file), lib=(:stan, :lib))))
+        stan_instantiate = merge(stan_compile, (; stan_instantiate=(; instance=(:stan, :instance), dim=(:stan, :dim), init=(:stan, :init))))
+        stan_eval        = merge(stan_instantiate, (; stan_eval=(:stan, :log_density)))
+        stan_generate    = merge(stan_eval,  (; stan_generate=(; long=(:stan, :generated_df), wide=(:stan, :generated_wide_df), summary=(:stan, :generated_summary_df), truth=(:stan, :truth_df))))
+        # Pathfinder / full warmup are computed via `fetchindex!` in
+        # `compute_steps` (special-cased below by step name) so the IP's
+        # progress subtree attaches to the step's phase. Chain-level specs
+        # read the resulting cached values back out as plain properties.
+        stan_fit_pathfinder = merge(stan_generate, (; stan_fit_pathfinder=(; long=(:stan, :posterior_long_df), wide=(:stan, :posterior_wide_df), summary=(:stan, :posterior_summary_df), truth=(:stan, :truth_df))))
+        stan_fit_warmup     = merge(stan_fit_pathfinder, (; stan_fit_warmup=(; long=(:stan, :posterior_warmup_long_df), wide=(:stan, :posterior_warmup_wide_df), summary=(:stan, :posterior_warmup_summary_df), diagnostics=(:stan, :posterior_warmup_diagnostics), truth=(:stan, :truth_df))))
+        (; parse, transform, wrap, brmi, vbrmi, bench, slic_model, stan_code, stan_compile,
+           stan_instantiate, stan_eval, stan_generate, stan_fit_pathfinder, stan_fit_warmup)[name]
+    end
+
+    # Fetch target for `polling_fetchindex`. Pre-enumerates each step in the
+    # requested chain as a pending progress child (so the whole pipeline is
+    # visible up front as dim "pending" nodes), then runs each step under its
+    # phase — `with_prepared_progress` handles start/finalize/fail around the
+    # property access. Heavy work runs in polling_fetchindex's background task
+    # via DO's lazy property cascading. Returns a NamedTuple keyed by step
+    # names plus `:data` (the synthetic-data frame for the pipeline top pin).
+    "Pipeline($name)"
+    compute_steps(text, namespace, name::Symbol) = begin
+        r = run(text, namespace)
+        chain = step_chain(name)
+        phases = [prepare_progress!(__status__; description=string(k)) for k in keys(chain)]
+        # Resolve each spec against `r`:
+        #   Symbol          → `r.<sym>`
+        #   Tuple of Symbol → nested path `r.<a>.<b>...`
+        #   NamedTuple      → bundle, recurse per value.
+        resolve(s::Symbol) = getproperty(r, s)
+        resolve(p::Tuple{Vararg{Symbol}}) = foldl(getproperty, p; init=r)
+        resolve(b::NamedTuple) = map(resolve, b)
+        vals = map(pairs(chain), phases) do (step_name, spec), phase
+            with_prepared_progress(phase) do progress
+                if step_name === :stan_fit_pathfinder
+                    # Warm the pathfinder IP cache under this phase's progress,
+                    # then resolve the (long, wide, summary) bundle (which
+                    # reads back the cached value via `@memo`).
+                    fetchindex!(progress, r.stan.pathfinder, r.stan.fit_instance, r.stan.init)
+                    resolve(spec)
+                elseif step_name === :stan_fit_warmup
+                    # Warm the warmup IP cache under this phase's progress,
+                    # then resolve the (long, wide, summary, diagnostics)
+                    # bundle (which reads back the cached value via `@memo`).
+                    fetchindex!(progress, r.stan.posterior_warmup, r.stan.fit_instance, r.stan.init)
+                    resolve(spec)
+                else
+                    resolve(spec)
+                end
+            end
+        end
+        # Stages render most-recent-first; synthetic data pinned at the top.
+        merge((; data=r.df),
+              NamedTuple{reverse(keys(chain))}(Tuple(reverse(vals))))
     end
 end
 
 APPDATA = AppData(; cache_type=:parallel)
-@htmx struct AppContext
-    __appdata__ = APPDATA
-    (; default_formula, dataset, example_store, namespace_from,
-       stages, stage_index, run, pipeline_run) = __appdata__
 
-    # Page-level stylesheet read once at construction. Classes are consumed by
-    # ExampleEntry.card / html_expr.jl; per-symbol / per-status colors that
-    # are data-derived stay inline on the element.
-    css = read(joinpath(@__DIR__, "brm-macro.css"), String)
+# Pipeline-page routes mounted at /pipeline. The formula editor, stage polling,
+# and sbimpl source views all live here. The top-level AppContext just includes
+# this struct plus the Examples section and the page chrome.
+@htmx struct PipelineRoutes
+    (; context, compute_steps) = __appdata__
+    (; default_formula) = __parent__
+    @param (; formula, label) = __parent__
 
-    # HTMXObjects auto-uses `__page__` to wrap any route's return value into a
-    # full page on direct browser navigation, while returning just the fragment
-    # for HTMX requests (see `_resolve_response` in HTMXObjects.jl). The
-    # sidebar's `hx-get` swaps target `#content` directly.
-    __page__(content) = htmx(
-        h.div(; class="brm-layout")(
-            nav_sidebar([
-                "Pipeline" => "/",
-                "Examples" => "/examples",
-            ]),
-            h.main(; class="container brm-main")(
-                h.div(; id="content")(content),
-            ),
-        );
-        pico_version="2",
-        extra_head=(
-            h.title("BRM macro action"),
-            h.style(__self__.css),
-        ),
-    )
+    # Persist + context. Reaches into the sibling Examples include for the
+    # examples store (UI concern: writing the edited formula back to the .jl
+    # file corresponding to `label`), then returns the pure run context.
+    context!() = begin
+        isempty(label) || __parent__.examples.example_store.persist!(label, formula)
+        context(label, formula)
+    end
+
+    # Per-step HTML rendering. `getproperty(render, step_key)(value)` emits the
+    # section for that step; `compute_steps` produces the NamedTuple whose keys
+    # drive dispatch here.
+    @struct render = begin
+        data(df) = h.details(
+            h.summary("Synthetic data ($(nrow(df)) rows × $(ncol(df)) cols: " *
+                join(names(df), ", ") * ") — click to expand"),
+            render_table(df; sortable=false),
+        )
+        parse(x) = h.section(
+            h.h3("1. Meta.parse — raw Julia AST"),
+            h.pre(x),
+        )
+        transform(x) = h.section(
+            h.h3("2. parse! — rewritten AST (= → @n/@x assign, ~ → @n/@x ~)"),
+            h.pre(x.transformed),
+            h.h3("    locals classified by parse!"),
+            h.pre(x.alllocals),
+        )
+        wrap(x) = h.section(
+            h.h3("3. _brm — full let-block (df spliced as a literal)"),
+            h.pre(x),
+        )
+        brmi(x) = h.section(
+            h.h3("4. eval — BRMI value (parsed model)"),
+            brmi_card(x),
+        )
+        vbrmi(x) = begin
+            fd_summary = x.n_dead == 0 ?
+                h.span("logdensity + FD check: $(x.dim)/$(x.dim) active ✓"; class="brm-status-ok") :
+                h.span("logdensity + FD check: $(x.n_dead) dead param(s)"; class="brm-status-err")
+            fd_body = h.div(
+                h.p("dim = ", x.dim, ", logdensity = ", x.ldp),
+                isempty(x.dead) ? "" :
+                    h.p(; class="brm-status-err")("dead param indices: ", x.dead),
+                h.pre(x.grad),
+            )
+            h.section(
+                h.h3("5. VBRMI — materialized action (blocks, dim, columns)"),
+                vbrmi_card(x.vbrmi),
+                h.details(h.summary(fd_summary), fd_body),
+            )
+        end
+        bench(x) = h.section(
+            h.h3("6. Chairmarks @be — per-step"),
+            [h.article(h.header(lbl), h.pre(b)) for (lbl, b) in x]...,
+        )
+        slic_model(x) = h.section(
+            h.h3("5a. SlicModel — SBBRMI @slic body"),
+            h.pre(x.model.model),
+            h.p("data keys: ", h.code(sort(collect(keys(x.data))))),
+        )
+        stan_code(x) = h.section(
+            h.h3("5b. StanCode — transpiled Stan source"),
+            h.pre(x),
+        )
+        stan_compile(x) = h.section(
+            h.h3("5c. StanCompile — BridgeStan shared library"),
+            h.p("stan file: ", h.code(x.file)),
+            h.p("compiled .so: ", h.code(x.lib)),
+        )
+        stan_instantiate(x) = h.section(
+            h.h3("6a. StanInstantiate — model bound to data"),
+            h.p("param_unc_num = ", x.dim),
+            h.p("init (narrow normal, rng=Xoshiro(42)):"),
+            h.pre(x.init),
+        )
+        stan_eval(x) = h.section(
+            h.h3("6b. StanEval — log density at init"),
+            h.p("log_density = ", x),
+        )
+        # Shared plot-tabset builder used by stan_generate and the fit stages.
+        # `kind` goes into tab titles ("prior predictive" / "posterior") and
+        # plot ids. Returns the tabset + wide-table details block.
+        posterior_plots(long, wide, summary; id_prefix, kind, truth=nothing) = begin
+            bands = [:q025 => :q975, :q10 => :q90, :q25 => :q75]
+            pi_title   = "$kind (N=$(nrow(wide)) draws)"
+            ecdf_title = "$kind — ECDF"
+            lr_title   = "$kind — line + ribbon"
+            den_title  = "$kind — histogram"
+            indep_x = config(facet=(; linkxaxes=:none))
+            indep_y = config(facet=(; linkyaxes=:none))
+            # Overlay layers: for (x=:index, y=:value) plots, plot truth as
+            # filled black dots at (:index, :truth); for (x=:value) plots,
+            # overlay vertical rules at truth values, colored by :index to
+            # match the base layer's coloring.
+            overlay_xy    = isnothing(truth) ? nothing :
+                AoG.data(truth) * AoG.mapping(:index, :truth, row=:param) *
+                AoG.visual(AoG.Scatter; color=:black)
+            overlay_vrule = isnothing(truth) ? nothing :
+                AoG.data(truth) * AoG.mapping(:truth; row=:param, color=:index) *
+                AoG.visual(VLines)
+            add(spec, overlay) = isnothing(overlay) ? spec : spec + overlay
+            spec_pi = add(AoG.data(summary) *
+                          AoG.mapping(:index, :median, row=:param) *
+                          pointinterval(; bands, orientation=:vertical),
+                          overlay_xy) *
+                      config(title=pi_title) * indep_y
+            spec_lr = add(AoG.data(summary) *
+                          AoG.mapping(:index, :median, row=:param) *
+                          lineribbon(; bands),
+                          overlay_xy) *
+                      config(title=lr_title) * indep_y
+            spec_hist = add(AoG.data(long) *
+                            AoG.mapping(:value; row=:param, color=:index) *
+                            AoG.visual(ECDFPlot),
+                            overlay_vrule) *
+                        config(title=ecdf_title) * indep_x
+            spec_den = add(AoG.data(long) *
+                           AoG.mapping(:value; row=:param, color=:index) *
+                           AoG.histogram(),
+                           overlay_vrule) *
+                       config(title=den_title) * indep_x
+            tabs = tabset(
+                "Point + Interval" => to_node(spec_pi;   id="$id_prefix-pi"),
+                "Line + Ribbon"    => to_node(spec_lr;   id="$id_prefix-lr"),
+                "ECDF"             => to_node(spec_hist; id="$id_prefix-ecdf"),
+                "Histogram"        => to_node(spec_den;  id="$id_prefix-hist"),
+                "Point + Interval (picker)" => with_plot_caption(spec_pi;
+                    auto_remap=(; dims=["param" => "Parameter / TP / GQ"]),
+                    title=pi_title, plot_id="$id_prefix-pi-pick"),
+                "Line + Ribbon (picker)" => with_plot_caption(spec_lr;
+                    auto_remap=(; dims=["param" => "Parameter / TP / GQ"]),
+                    title=lr_title, plot_id="$id_prefix-lr-pick"),
+                "ECDF (picker)" => with_plot_caption(spec_hist;
+                    auto_remap=(; dims=["param" => "Parameter / TP / GQ",
+                                         "index" => "Index (vector/matrix position)"]),
+                    title=ecdf_title, plot_id="$id_prefix-ecdf-pick"),
+                "Histogram (picker)" => with_plot_caption(spec_den;
+                    auto_remap=(; dims=["param" => "Parameter / TP / GQ",
+                                         "index" => "Index (vector/matrix position)"]),
+                    title=den_title, plot_id="$id_prefix-hist-pick");
+                id="$id_prefix-tabs",
+            )
+            wide_details = h.details(
+                h.summary("Wide-format table (one row per draw, one column per indexed parameter)"),
+                render_table(wide; sortable=true),
+            )
+            (; tabs, wide_details)
+        end
+        stan_generate(x) = begin
+            (; long, wide, summary, truth) = x
+            p = posterior_plots(long, wide, summary;
+                                id_prefix="brm-plot-generated",
+                                kind="Generated data (prior predictive)",
+                                truth)
+            h.section(
+                h.h3("6c. StanGenerate — synthetic data from narrow-normal prior + param_constrain"),
+                h.p("long format: ", nrow(long), " rows · ", ncol(long), " cols · ",
+                    "wide format: ", nrow(wide), " rows · ", ncol(wide), " cols"),
+                p.tabs, p.wide_details,
+            )
+        end
+        stan_fit_pathfinder(x) = begin
+            (; long, wide, summary, truth) = x
+            p = posterior_plots(long, wide, summary;
+                                id_prefix="brm-plot-pf",
+                                kind="Pathfinder posterior",
+                                truth)
+            h.section(
+                h.h3("6d. StanFit (Pathfinder) — variational approximation draws"),
+                h.p("long format: ", nrow(long), " rows · ", ncol(long), " cols · ",
+                    "wide format: ", nrow(wide), " rows · ", ncol(wide), " cols"),
+                p.tabs, p.wide_details,
+            )
+        end
+        stan_fit_warmup(x) = begin
+            (; long, wide, summary, diagnostics, truth) = x
+            p = posterior_plots(long, wide, summary;
+                                id_prefix="brm-plot-warmup",
+                                kind="Warmup+MCMC posterior",
+                                truth)
+            h.section(
+                h.h3("6d'. StanFit (Warmup+MCMC) — full Stan fit"),
+                h.p("n_divergent_samples: ", diagnostics.n_divergent_samples,
+                    " · min ESS: ", minimum(diagnostics.ess)),
+                h.p("long format: ", nrow(long), " rows · ", ncol(long), " cols · ",
+                    "wide format: ", nrow(wide), " rows · ", ncol(wide), " cols"),
+                p.tabs, p.wide_details,
+            )
+        end
+    end
 
     # Pre-canned formulas. The ones above the divider exercise individual
     # features in isolation; the last one stacks everything into a single
@@ -555,221 +935,246 @@ bin_y ~ Bernoulli(logistic(log_odds_b))
         "everything" => default_formula,
     ]
 
-    preset_button(label, formula) = h.button(label;
-        type="button",
-        class="brm-preset-btn",
-        data_formula=formula,
-        onclick="document.querySelector('textarea[name=formula]').value = this.dataset.formula; document.getElementById('stage-vbrmi').click()")
-
-    stage_button(label, stage) = h.button(label;
-        type="button",
-        id="stage-$stage",
-        hx_get=string(query_url(__self__/"stage/$stage"; force=true)),
-        hx_include="#brm-macro-form",
-        hx_target="#brm-macro-output",
-        hx_swap="outerHTML")
-
-    render_pipeline(r, stage) = begin
-        s = stage_index(stage)
-        sections = Vector{Any}[]
-
-        # Synthetic data pinned at top, collapsed by default so the macro
-        # pipeline output stays the focus.
-        data_section = Any[
-            h.details(
-                h.summary("Synthetic data ($(nrow(r.df)) rows × $(ncol(r.df)) cols: " *
-                    join(string.(names(r.df)), ", ") * ") — click to expand"),
-                render_table(r.df; sortable=false),
-            ),
-        ]
-
-        s >= 1 && push!(sections, Any[
-            h.h3("1. Meta.parse — raw Julia AST"),
-            h.pre(sprint(show, r.formula.raw)),
-        ])
-        s >= 2 && push!(sections, Any[
-            h.h3("2. parse! — rewritten AST (= → @n/@x assign, ~ → @n/@x ~)"),
-            h.pre(sprint(show, r.formula.transformed)),
-            h.h3("    locals classified by parse!"),
-            h.pre(sprint(show, r.formula.alllocals)),
-        ])
-        s >= 3 && push!(sections, Any[
-            h.h3("3. _brm — full let-block (df spliced as a literal)"),
-            h.pre(sprint(show, r.wrapped)),
-        ])
-        s >= 4 && push!(sections, Any[
-            h.h3("4. eval — BRMI value (parsed model)"),
-            brmi_card(r.brmi),
-        ])
-
-        if stage in (:vbrmi, :bench)
-            tol = 1e-8
-            n_dead = count(<=(tol) ∘ abs, r.grad)
-            fd_summary = n_dead == 0 ?
-                h.span("logdensity + FD check: $(r.dim)/$(r.dim) active ✓";
-                    class="brm-status-ok") :
-                h.span("logdensity + FD check: $(n_dead) dead param(s)";
-                    class="brm-status-err")
-            dead = findall(<=(tol) ∘ abs, r.grad)
-            fd_body = h.div(
-                h.p("dim = ", string(r.dim), ", logdensity = ", r.ldp),
-                isempty(dead) ? "" :
-                    h.p(; class="brm-status-err")(
-                        "dead param indices: ", string(dead)),
-                h.pre(sprint(show, MIME"text/plain"(), r.grad)),
-            )
-            push!(sections, Any[
-                h.h3("5. VBRMI — materialized action (blocks, dim, columns)"),
-                vbrmi_card(r.vbrmi),
-                h.details(h.summary(fd_summary), fd_body),
-            ])
-        end
-        if stage === :bench
-            bench_rows = [h.div(
-                h.strong(lbl), h.br(),
-                h.pre(sprint(show, MIME"text/plain"(), b))
-            ) for (lbl, b) in r.benches]
-            push!(sections, Any[h.h3("6. Chairmarks @be — per-step"), bench_rows...])
-        end
-        if stage in (:slic_model, :stan_code, :stan_compile)
-            push!(sections, Any[
-                h.h3("5a. SlicModel — SBBRMI @slic body"),
-                h.pre(sprint(show, r.sbbrmi.model.model)),
-                h.p("data keys: ",
-                    h.code(string(sort(collect(keys(r.sbbrmi.data)))))),
-            ])
-        end
-        if stage in (:stan_code, :stan_compile)
-            push!(sections, Any[
-                h.h3("5b. StanCode — transpiled Stan source"),
-                h.pre(r.stan_src),
-            ])
-        end
-        if stage === :stan_compile
-            push!(sections, Any[
-                h.h3("5c. StanCompile — BridgeStan shared library"),
-                h.p("stan file: ", h.code(r.stan_file)),
-                h.p("compiled .so: ", h.code(r.stan_lib)),
-            ])
-        end
-
-        # Stages render most-recent-first; synthetic data sits at the very top.
-        children = reduce(vcat, reverse(sections); init=Any[])
-        prepend!(children, data_section)
-        h.div(; id="brm-macro-output")(children...)
+    @struct preset(label, formula) = begin
+        button = h.button(label;
+            type="button",
+            class="brm-preset-btn",
+            data_formula=formula,
+            onclick="document.querySelector('textarea[name=formula]').value = this.dataset.formula; document.getElementById('stage-vbrmi').click()"
+        )
     end
 
-    index_body(formula) = h.div(
-        h.h1("BRM macro pipeline"),
-        h.p(
-            "Enter a ", h.code("@brm"), " formula and step through the macro pipeline: ",
-            h.code("Meta.parse"), " -> ", h.code("parse!"), " -> ", h.code("_brm"),
-            " let-block -> ", h.code("eval"), " -> ", h.code("VBRMI"), " action -> ",
-            h.code("Chairmarks"), " benchmark.",
-        ),
-        h.details(
-            h.summary(h.small("Allowed functions in formulas")),
-            h.p(h.small(
-                join(sort(collect(string.(s) for s in _ALLOWED_CALLS)), ", "),
-            )),
-        ),
-        h.form(; id="brm-macro-form")(
-            h.label("Load preset"),
-            h.div(; class="brm-preset-row")(
-                [preset_button(lbl, body) for (lbl, body) in presets]...,
-            ),
-            h.label("Formula")(
-                h.textarea(formula;
-                    name="formula", rows=8,
-                    class="brm-formula-textarea"),
-            ),
-            h.fieldset(; class="grid")(
-                stage_button("1. Parse",     :parse),
-                stage_button("2. Transform", :transform),
-                stage_button("3. Wrap",      :wrap),
-                stage_button("4. BRMI",      :brmi),
-            ),
-            h.small("Pick a branch:"),
-            h.fieldset(; class="grid")(
-                stage_button("5. VBRMI",     :vbrmi),
-                stage_button("6. Benchmark", :bench),
-            ),
-            h.fieldset(; class="grid")(
-                stage_button("5a. SlicModel",  :slic_model),
-                stage_button("5b. StanCode",   :stan_code),
-                stage_button("5c. StanCompile",:stan_compile),
-            ),
-        ),
-        lazy(string(query_url(__self__/"stage/bench"; formula)); id="brm-macro-output"),
-    )
+    @struct stage(label, id) = begin
+        button = h.button(label;
+            type="button",
+            id="stage-$id",
+            hx_get=string(query_url(__self__/"stage/$id"; force=true)),
+            hx_include="#brm-macro-form",
+            hx_target="#brm-macro-output",
+            # `innerHTML` keeps the `#brm-macro-output` wrapper in the DOM
+            # across swaps — including when polling_fetchindex throws and the
+            # response is a bare error article with no matching id. Without
+            # this, buttons target a gone id after the first failure.
+            hx_swap="innerHTML")
+    end
 
-    @get index(; formula::String=default_formula, label::String="") = begin
+    @get index = begin
         # If an example form posted us a (label, formula) pair, persist the
         # edited formula to that example's .jl file so the next visit to the
         # Examples page shows the user's edits instead of the seed default.
-        isempty(label) || example_store.save!(label; new_formula=formula)
-        index_body(formula)
+        context!()
+        h.div(
+            h.h1("BRM macro pipeline"),
+            h.p(
+                "Enter a ", h.code("@brm"), " formula and step through the macro pipeline: ",
+                h.code("Meta.parse"), " -> ", h.code("parse!"), " -> ", h.code("_brm"),
+                " let-block -> ", h.code("eval"), " -> ", h.code("VBRMI"), " action -> ",
+                h.code("Chairmarks"), " benchmark.",
+            ),
+            h.details(
+                h.summary(h.small("Allowed functions in formulas")),
+                h.p(h.small(
+                    join(sort(collect(string.(s) for s in _ALLOWED_CALLS)), ", "),
+                )),
+            ),
+            h.form(; id="brm-macro-form")(
+                h.label("Load preset"),
+                h.div(; class="brm-preset-row")(
+                    [preset(lbl, body).button for (lbl, body) in presets]...,
+                ),
+                h.label("Formula")(
+                    h.textarea(formula;
+                        name="formula", rows=8,
+                        class="brm-formula-textarea"),
+                ),
+                h.fieldset(; class="grid")(
+                    stage("1. Parse",     :parse).button,
+                    stage("2. Transform", :transform).button,
+                    stage("3. Wrap",      :wrap).button,
+                    stage("4. BRMI",      :brmi).button,
+                ),
+                h.small("Pick a branch:"),
+                h.fieldset(; class="grid")(
+                    stage("5. VBRMI",     :vbrmi).button,
+                    stage("6. Benchmark", :bench).button,
+                ),
+                h.fieldset(; class="grid")(
+                    stage("5a. SlicModel",  :slic_model).button,
+                    stage("5b. StanCode",   :stan_code).button,
+                    stage("5c. StanCompile", :stan_compile).button,
+                ),
+                h.fieldset(; class="grid")(
+                    stage("6a. StanInstantiate", :stan_instantiate).button,
+                    stage("6b. StanEval",        :stan_eval).button,
+                    stage("6c. StanGenerate",    :stan_generate).button,
+                    stage("6d. StanFit (PF)",    :stan_fit_pathfinder).button,
+                    stage("6d'. StanFit (Warmup)", :stan_fit_warmup).button,
+                ),
+                h.small("Bug-report helper:"),
+                h.button("SB repro (current formula)";
+                    type="submit",
+                    formaction=string(__self__/"sb_repro"),
+                    class="secondary"),
+            ),
+            # Persistent wrapper — buttons swap `innerHTML` into here so the
+            # id survives polling/error responses.
+            h.div(; id="brm-macro-output")(
+                lazy(query_url(__self__/"stage/bench"; formula)),
+            ),
+        )
     end
 
-    @get mark(; label::String="", state::String="") = begin
-        isempty(label) && return ""
-        target = Symbol(state)
-        entry = example_store.find(label)
-        entry === nothing && return ""
-        next_status = entry.status == target ? :open : target
-        updated = example_store.save!(label; new_status=next_status)
-        # Re-render the whole card so the border + collapse state update
-        # together with the pill text.
-        updated === nothing ? "" : updated.card(__self__)
-    end
-
-    @get stage(name::AbstractString; formula::String=default_formula,
-               label::String="", force::Bool=false) = begin
-        # When called from an example card's form, persist the (possibly
-        # edited) formula back to the example's .jl file before rendering.
-        isempty(label) || example_store.save!(label; new_formula=formula)
-        ns = namespace_from(label)
-        stage_sym = Symbol(name)
-        polling_fetchindex(pipeline_run,
-                           formula, stage_sym, ns;
-                           poll_url=string(query_url(__self__/"stage/$name"; formula, label)),
-                           label="BRM pipeline - $name",
-                           force) do r
-            render_pipeline(r, stage_sym)
-        end
+    @get stage(name::Symbol; force::Bool=false) = polling_fetchindex(
+        compute_steps, formula, context!().namespace, name;
+        poll_url=query_url(__self__/"stage/$name"; formula, label),
+        label="BRM pipeline - $name",
+        force,
+    ) do result
+        # No id on this wrapper — the outer `#brm-macro-output` div in the
+        # form is the persistent target (see buttons' `hx_swap="innerHTML"`);
+        # putting the id here too would duplicate ids after a button swap.
+        h.div(
+            (getproperty(render, k)(v) for (k, v) in pairs(result))...,
+        )
     end
 
     # Focused per-model views of the sbimpl intermediate artifacts. Each
     # route runs the pipeline just far enough and returns the relevant
     # source in `h.pre` (plus markdown_only serves the bare source via
     # `?plain` / `Accept: text/plain`, for piping into agents or curl).
-    @get slic(; formula::String=default_formula, label::String="") = begin
-        isempty(label) || example_store.save!(label; new_formula=formula)
-        h.pre(sprint(show, run(formula, namespace_from(label)).sbbrmi.model.model))
-    end
+    @get slic = h.pre(context!().run.sbbrmi.model.model)
 
-    @get stan(; formula::String=default_formula, label::String="") = begin
-        isempty(label) || example_store.save!(label; new_formula=formula)
-        h.pre(run(formula, namespace_from(label)).stan_src)
-    end
+    @get stan = h.pre(context!().run.stan.src)
 
-    @get examples(slug::String="") = begin
-        if !isempty(slug)
-            entry = example_store.find_by_slug(slug)
-            entry === nothing && return h.div(
-                h.p("No example with slug ", h.code(slug), "."),
-                h.a("<- Back to Examples"; href="/examples"),
-            )
-            return h.div(
-                h.p(h.a("<- Back to Examples"; href="/examples")),
-                entry.card(__self__),
-            )
+    # One-stop bug-report page for the StanBlocks agent. Renders the SlicModel
+    # body, generated Stan source, and BridgeStan compile output (success msg
+    # or full error) for the current formula. HTMXO's `_resolve_response`
+    # auto-converts to markdown when `Accept: text/plain` is requested, so the
+    # same URL works for humans (browser) and agents (curl).
+    #   curl -H 'Accept: text/plain' 'http://localhost:<port>/pipeline/sb_repro?formula=<url-encoded>'
+    @get sb_repro = begin
+        r = context!().run
+        compile_out = try
+            r.stan.lib
+            "(compile succeeded — lib at `$(r.stan.lib)`)"
+        catch e
+            sprint(showerror, e)
         end
         h.div(
+            h.h1("StanBlocks bug report"),
+            h.h2("Formula"),
+            h.pre(formula),
+            h.h2("SlicModel body"),
+            h.p(h.code("r.sbbrmi.model.model")),
+            h.pre(r.sbbrmi.model.model),
+            h.h2("Generated Stan source"),
+            h.p(h.code("r.stan.src")),
+            h.pre(r.stan.src),
+            h.h2("BridgeStan compile output"),
+            h.p(h.code("r.stan.lib")),
+            h.pre(compile_out),
+        )
+    end
+end
+
+@htmx struct AppContext
+    __appdata__ = APPDATA
+
+    default_formula = """loc ~ 1
+log(err) ~ 1
+y1 ~ Normal(loc, err)
+"""
+
+    # Page-level stylesheet read once at construction. Classes are consumed by
+    # ExampleEntry.card / html_expr.jl; per-symbol / per-status colors that
+    # are data-derived stay inline on the element.
+    css = read(joinpath(@__DIR__, "brm-macro.css"), String)
+
+    # HTMXObjects auto-uses `__page__` to wrap any route's return value into a
+    # full page on direct browser navigation, while returning just the fragment
+    # for HTMX requests (see `_resolve_response` in HTMXObjects.jl). The
+    # sidebar's `hx-get` swaps target `#content` directly.
+    __page__(content) = htmx(
+        h.div(; class="brm-layout")(
+            nav_sidebar([
+                "Pipeline" => "/pipeline",
+                "Examples" => "/examples",
+            ]),
+            h.main(; class="container brm-main")(
+                h.div(; id="content")(content),
+            ),
+        );
+        pico_version="2",
+        extra_head=(
+            h.title("BRM macro action"),
+            h.style(css),
+            htmx_treebar_styles(),
+            vega_head()...,
+        ),
+    )
+
+    @param begin
+        formula::String = default_formula
+        label::String   = ""
+    end
+
+    # `/` mirrors the pipeline landing page.
+    @get index = __self__.pipeline.index
+
+    @include pipeline = PipelineRoutes()
+
+    # The Examples section mounts at /examples. Both the list view and per-slug
+    # detail view share `@get index(slug)` (HTMXO registers `/examples` AND
+    # `/examples/{slug}` thanks to slug's default). `@get mark` lives here too
+    # since it operates exclusively on ExampleEntry; pill URLs hit /examples/mark.
+    @include examples = begin
+        (; examples_dir) = __appdata__
+        # `label` is auto-forwarded from AppContext's `@param`; no explicit
+        # `@param (; label) = __parent__` needed (and declaring it explicitly
+        # collides with the auto-forward → "method overwritten" error).
+
+        # Inline examples store. Constructs ExampleEntry with
+        # `__parent__=__parent__` (the Examples sub-struct) so each entry's
+        # rendering methods can build URLs via its parent chain.
+        @struct example_store = begin
+            entries() = begin
+                isdir(examples_dir) || mkpath(examples_dir)
+                files = sort(filter(endswith(".jl"),
+                                    readdir(examples_dir; join=true));
+                             by=mtime, rev=true)
+                ExampleEntry[ExampleEntry(; __parent__=__parent__, path=f) for f in files]
+            end
+            find(label)        = findfirstelement(e -> e.label == label, entries())
+            find_by_slug(slug) = findfirstelement(e -> e.slug == slug,   entries())
+            persist!(label, formula) = begin
+                e = find(label)
+                e === nothing || e.save!(; new_formula=formula)
+            end
+        end
+
+        @get mark(; state::Symbol=Symbol("")) =
+            example_store.find(label).toggle_status!(state).card
+
+        # List view vs detail view as separate derived-property methods; DO
+        # supports multi-method dispatch on a single property name (the route
+        # layer doesn't — see TODO below).
+        _index() = h.div(
             h.h1("Examples - coverage gaps and demos for BRM"),
             h.p("Sorted by last modified. Each item has a sketch of what it is, why it matters, how to implement, and how to verify. Sourced from .jl files under ", h.code("web-macro/examples/"), "; status edits and edited formulas are written back to disk."),
-            [e.card(__self__) for e in example_store.entries()]...,
+            [e.card for e in example_store.entries()]...,
         )
+
+        _index(slug::AbstractString) = h.div(
+            h.p(h.a("<- Back to Examples"; href=__prefix__)),
+            example_store.find_by_slug(slug).card,
+        )
+
+        # TODO(HTMXO): allow two `@get name` methods with distinct arities
+        # (e.g. `@get index()` + `@get index(slug::String)`) to be registered
+        # as separate paths `/examples` and `/examples/{slug}`. Today DO's
+        # meta dict rejects duplicate route property names, so we delegate to
+        # the multi-methoded `_index` helper above.
+        @get index(slug::String="") = isempty(slug) ? _index() : _index(slug)
     end
 end
 
