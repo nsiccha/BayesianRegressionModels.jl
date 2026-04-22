@@ -14,7 +14,7 @@ using BridgeStan: BridgeStan
 using StanLogDensityProblems: StanProblem
 using WarmupHMC: initialize_mcmc, adaptive_warmup_mcmc
 using JSON
-using AlgebraOfVega: vega_head, auto_remap_node, with_plot_caption, config, pointinterval, lineribbon, to_node, ECDFPlot, VLines
+using AlgebraOfVega: vega_head, auto_remap_node, with_plot_caption, config, pointinterval, lineribbon, to_node, ECDFPlot, VLines, nonnumeric
 import AlgebraOfGraphics as AoG
 
 # The @brm macro and the VBRMI / SBBRMI implementations live alongside this
@@ -193,6 +193,7 @@ end
 
 @dynamicstruct struct ExampleEntry
     path::String
+    __parent__ = nothing
 
     _STATUS_COLORS = (open="#888", done="#2e7d32", deprioritized="#a05a2c")
     _TIER_LABELS   = ("T1", "T2", "T3")
@@ -347,7 +348,7 @@ end
         end
         write(path, take!(io))
         # Preserve __parent__ so the reloaded entry can still build route URLs.
-        ExampleEntry(; __parent__, path)
+        ExampleEntry(path; __parent__)
     end
 
     toggle_status!(target) =
@@ -517,6 +518,17 @@ end
             generated_n     = 50
             generated_unc   = 0.1 .* randn(Xoshiro(44), dim, generated_n)
             generated_names = BridgeStan.param_names(instance; include_tp=true, include_gq=true)
+            # One row per base parameter name (before any `.`), with the
+            # number of indexed entries. Scalar params have n_indices=1.
+            param_shapes_df = begin
+                splits     = [split(nm, '.', limit=2) for nm in generated_names]
+                base_names = [String(first(s)) for s in splits]
+                uniq = unique(base_names)
+                DataFrame(
+                    param = uniq,
+                    n_indices = [count(==(p), base_names) for p in uniq],
+                )
+            end
             generated = constrain_draws(generated_unc, instance; rng_seed=45)
             generated_dfs = dfs_from_constrained(generated, generated_names)
             generated_df      = generated_dfs.long
@@ -654,7 +666,8 @@ end
         stan_compile     = merge(stan_code,  (; stan_compile=(; file=(:stan, :file), lib=(:stan, :lib))))
         stan_instantiate = merge(stan_compile, (; stan_instantiate=(; instance=(:stan, :instance), dim=(:stan, :dim), init=(:stan, :init))))
         stan_eval        = merge(stan_instantiate, (; stan_eval=(:stan, :log_density)))
-        stan_generate    = merge(stan_eval,  (; stan_generate=(; long=(:stan, :generated_df), wide=(:stan, :generated_wide_df), summary=(:stan, :generated_summary_df), truth=(:stan, :truth_df))))
+        stan_shapes      = merge(stan_eval,  (; stan_shapes=(:stan, :param_shapes_df)))
+        stan_generate    = merge(stan_shapes, (; stan_generate=(; long=(:stan, :generated_df), wide=(:stan, :generated_wide_df), summary=(:stan, :generated_summary_df), truth=(:stan, :truth_df))))
         # Pathfinder / full warmup are computed via `fetchindex!` in
         # `compute_steps` (special-cased below by step name) so the IP's
         # progress subtree attaches to the step's phase. Chain-level specs
@@ -662,7 +675,7 @@ end
         stan_fit_pathfinder = merge(stan_generate, (; stan_fit_pathfinder=(; long=(:stan, :posterior_long_df), wide=(:stan, :posterior_wide_df), summary=(:stan, :posterior_summary_df), truth=(:stan, :truth_df))))
         stan_fit_warmup     = merge(stan_fit_pathfinder, (; stan_fit_warmup=(; long=(:stan, :posterior_warmup_long_df), wide=(:stan, :posterior_warmup_wide_df), summary=(:stan, :posterior_warmup_summary_df), diagnostics=(:stan, :posterior_warmup_diagnostics), truth=(:stan, :truth_df))))
         (; parse, transform, wrap, brmi, vbrmi, bench, slic_model, stan_code, stan_compile,
-           stan_instantiate, stan_eval, stan_generate, stan_fit_pathfinder, stan_fit_warmup)[name]
+           stan_instantiate, stan_eval, stan_shapes, stan_generate, stan_fit_pathfinder, stan_fit_warmup)[name]
     end
 
     # Fetch target for `polling_fetchindex`. Pre-enumerates each step in the
@@ -798,6 +811,12 @@ APPDATA = AppData(; cache_type=:parallel)
             h.h3("6b. StanEval — log density at init"),
             h.p("log_density = ", x),
         )
+        stan_shapes(df) = h.section(
+            h.h3("6b'. StanShapes — index count per base parameter (p + tp + gq)"),
+            h.p("total indexed entries: ", sum(df.n_indices),
+                " across ", nrow(df), " base params"),
+            render_table(df; sortable=true),
+        )
         # Shared plot-tabset builder used by stan_generate and the fit stages.
         # `kind` goes into tab titles ("prior predictive" / "posterior") and
         # plot ids. Returns the tabset + wide-table details block.
@@ -807,39 +826,40 @@ APPDATA = AppData(; cache_type=:parallel)
             ecdf_title = "$kind — ECDF"
             lr_title   = "$kind — line + ribbon"
             den_title  = "$kind — histogram"
-            indep_x = config(facet=(; linkxaxes=:none))
-            indep_y = config(facet=(; linkyaxes=:none))
             # Overlay layers: for (x=:index, y=:value) plots, plot truth as
             # filled black dots at (:index, :truth); for (x=:value) plots,
             # overlay vertical rules at truth values, colored by :index to
-            # match the base layer's coloring.
+            # match the base layer's (nominal-sorted) coloring.
             overlay_xy    = isnothing(truth) ? nothing :
                 AoG.data(truth) * AoG.mapping(:index, :truth, row=:param) *
-                AoG.visual(AoG.Scatter; color=:black)
+                AoG.visual(AoG.Scatter; color=:black, filled=true)
             overlay_vrule = isnothing(truth) ? nothing :
-                AoG.data(truth) * AoG.mapping(:truth; row=:param, color=:index) *
+                AoG.data(truth) * AoG.mapping(:truth; row=:param,
+                                               color=:index => nonnumeric) *
                 AoG.visual(VLines)
             add(spec, overlay) = isnothing(overlay) ? spec : spec + overlay
             spec_pi = add(AoG.data(summary) *
                           AoG.mapping(:index, :median, row=:param) *
                           pointinterval(; bands, orientation=:vertical),
                           overlay_xy) *
-                      config(title=pi_title) * indep_y
+                      config(title=pi_title, facet=(; linkyaxes=:none))
             spec_lr = add(AoG.data(summary) *
                           AoG.mapping(:index, :median, row=:param) *
                           lineribbon(; bands),
                           overlay_xy) *
-                      config(title=lr_title) * indep_y
+                      config(title=lr_title, facet=(; linkyaxes=:none))
             spec_hist = add(AoG.data(long) *
-                            AoG.mapping(:value; row=:param, color=:index) *
+                            AoG.mapping(:value; row=:param,
+                                        color=:index => nonnumeric) *
                             AoG.visual(ECDFPlot),
                             overlay_vrule) *
-                        config(title=ecdf_title) * indep_x
+                        config(title=ecdf_title, facet=(; linkxaxes=:none))
             spec_den = add(AoG.data(long) *
-                           AoG.mapping(:value; row=:param, color=:index) *
-                           AoG.histogram(),
+                           AoG.mapping(:value; row=:param,
+                                       color=:index => nonnumeric) *
+                           AoG.histogram(; bins=30, datalimits=extrema),
                            overlay_vrule) *
-                       config(title=den_title) * indep_x
+                       config(title=den_title, facet=(; linkxaxes=:none))
             tabs = tabset(
                 "Point + Interval" => to_node(spec_pi;   id="$id_prefix-pi"),
                 "Line + Ribbon"    => to_node(spec_lr;   id="$id_prefix-lr"),
@@ -1006,6 +1026,7 @@ bin_y ~ Bernoulli(logistic(log_odds_b))
                 h.fieldset(; class="grid")(
                     stage("6a. StanInstantiate", :stan_instantiate).button,
                     stage("6b. StanEval",        :stan_eval).button,
+                    stage("6b'. StanShapes",     :stan_shapes).button,
                     stage("6c. StanGenerate",    :stan_generate).button,
                     stage("6d. StanFit (PF)",    :stan_fit_pathfinder).button,
                     stage("6d'. StanFit (Warmup)", :stan_fit_warmup).button,
@@ -1142,7 +1163,7 @@ y1 ~ Normal(loc, err)
                 files = sort(filter(endswith(".jl"),
                                     readdir(examples_dir; join=true));
                              by=mtime, rev=true)
-                ExampleEntry[ExampleEntry(; __parent__=__parent__, path=f) for f in files]
+                ExampleEntry[ExampleEntry(f; __parent__) for f in files]
             end
             find(label)        = findfirstelement(e -> e.label == label, entries())
             find_by_slug(slug) = findfirstelement(e -> e.slug == slug,   entries())
