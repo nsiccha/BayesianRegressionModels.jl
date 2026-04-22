@@ -1,0 +1,56 @@
+:root { font-size: 87.5%; }
+
+/* Layout */
+.brm-layout { display: flex; gap: 1rem; align-items: flex-start; }
+.brm-main { flex: 1; min-width: 0; }
+
+/* Pipeline form */
+.brm-preset-row { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-bottom: 0.6rem; }
+.brm-preset-btn { font-size: 0.8em; padding: 0.2rem 0.5rem; margin: 0; }
+.brm-formula-textarea { width: 100%; font-family: monospace; }
+
+/* Pipeline status line */
+.brm-status-ok { color: green; }
+.brm-status-err { color: crimson; }
+
+/* BRMI / VBRMI cards */
+.brm-card { margin: 0.5rem 0; }
+.brm-expr-list { font-family: monospace; font-size: 1.15em; line-height: 1.8; padding: 0.3rem 0; }
+.brm-indent { margin-left: 1rem; }
+.brm-subhead { margin-bottom: 0.2rem; }
+.brm-block-part { color: #999; margin-left: 1.5rem; }
+
+/* Styled AST rendering (per-symbol color is inline) */
+.brm-sym-param { font-weight: bold; }
+.brm-num { color: #666; }
+.brm-muted { color: #999; }
+.brm-op { color: #555; }
+.brm-op-dark { color: #333; }
+.brm-fname { color: #777; }
+.brm-shape { color: #999; font-size: 0.85em; }
+.brm-arr { font-style: italic; color: #888; }
+.brm-vec { font-weight: bold; color: #888; }
+.brm-likelihood { text-decoration: underline; text-decoration-color: #aaa; text-underline-offset: 3px; }
+
+/* Example cards (border-left color, tier/status pill bg are inline) */
+.brm-example-card { border-left: 6px solid #888; margin: 0.8rem 0; padding: 0.5rem 1rem; }
+.brm-example-summary { cursor: pointer; list-style-position: outside; }
+.brm-example-body { margin-top: 0.5rem; }
+.brm-example-result { margin-top: 0.5rem; }
+.brm-example-form { margin: 0.5rem 0; }
+.brm-example-textarea { width: 100%; font-family: monospace; font-size: 0.85em; }
+.brm-branch-btn { font-size: 0.85em; padding: 0.3rem 0.8rem; margin: 0.3rem 0.3rem 0 0; }
+.brm-permalink { text-decoration: none; font-size: 0.8em; margin-left: 0.3rem; vertical-align: middle; }
+
+/* Pills */
+.brm-tier-pill {
+    font-size: 0.7em; padding: 0.1rem 0.4rem; border-radius: 1rem;
+    color: white; vertical-align: middle; font-weight: normal;
+}
+.brm-status-pills {
+    margin-left: 0.5rem; display: inline-flex; gap: 0.3rem; vertical-align: middle;
+}
+.brm-state-pill {
+    font-size: 0.7em; padding: 0.15rem 0.6rem; border: none; border-radius: 1rem;
+    color: white; cursor: pointer;
+}

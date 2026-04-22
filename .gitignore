@@ -28,6 +28,6 @@ Manifest*.toml
 LocalPreferences.toml
 JuliaLocalPreferences.toml
 
-# Confidential client-project TODOs (local-only, never commit)
-web-macro/todos/bruno-*.jl
+# Confidential client-project examples (local-only, never commit)
+web-macro/examples/bruno-*.jl
 web-macro/src/bruno-*.jl
