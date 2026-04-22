@@ -88,10 +88,11 @@ vbroadcasted(;kwargs...) = (args...)->vbroadcasted(args...; kwargs...)
 vbroadcasted(x::NamedColumn{<:Any,<:DataColumn}; meta) = parent(meta.materialized[name(x)])
 vbroadcasted(x::NamedColumn; meta) = meta.materialized[name(x)]
 vbroadcasted(x::ExprColumn; meta) = Base.broadcasted(getf(x), map(vbroadcasted(;meta), getargs(x))...)
-# `I(expr)` is brms's literal-escape. In our DSL every call is already a first-
-# class `ExprColumn` node, so `I` just needs to unwrap to its inner argument.
-vbroadcasted(x::ExprColumn{typeof(I)}; meta) = vbroadcasted(only(getargs(x)); meta)
-# `scale(x)` / `center(x)` / `standardize(x)` z-transform the inner column at
+# `protect(expr)` is brms's `I()` literal-escape. In our DSL every call is
+# already a first-class `ExprColumn` node, so `protect` just needs to unwrap to
+# its inner argument.
+vbroadcasted(x::ExprColumn{typeof(protect)}; meta) = vbroadcasted(only(getargs(x)); meta)
+# `zscale(x)` / `center(x)` / `standardize(x)` z-transform the inner column at
 # VBRMI-materialization time: they materialize the inner broadcast once, apply
 # the transform, and pass the resulting plain vector back up to the predictor
 # pipeline. Because this fires inside `vbroadcasted`, they compose with every
@@ -99,12 +100,12 @@ vbroadcasted(x::ExprColumn{typeof(I)}; meta) = vbroadcasted(only(getargs(x)); me
 vbroadcasted(x::ExprColumn{typeof(center)}; meta) = let raw = Base.materialize(vbroadcasted(only(getargs(x)); meta))
     raw .- _mean(raw)
 end
-vbroadcasted(x::ExprColumn{typeof(scale)}; meta) = let raw = Base.materialize(vbroadcasted(only(getargs(x)); meta))
+vbroadcasted(x::ExprColumn{typeof(zscale)}; meta) = let raw = Base.materialize(vbroadcasted(only(getargs(x)); meta))
     mu = _mean(raw); sd = _std(raw, mu)
-    sd > 0 || error("scale: zero variance in `$(only(getargs(x)))`")
+    sd > 0 || error("zscale: zero variance in `$(only(getargs(x)))`")
     (raw .- mu) ./ sd
 end
-vbroadcasted(x::ExprColumn{typeof(standardize)}; meta) = vbroadcasted(ExprColumn(scale, getargs(x)...); meta)
+vbroadcasted(x::ExprColumn{typeof(standardize)}; meta) = vbroadcasted(ExprColumn(zscale, getargs(x)...); meta)
 
 _mean(xs) = sum(xs) / length(xs)
 _std(xs, mu=_mean(xs)) = sqrt(sum(abs2, xs .- mu) / (length(xs) - 1))

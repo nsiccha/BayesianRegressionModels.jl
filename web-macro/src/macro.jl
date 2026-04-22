@@ -47,10 +47,10 @@ function doublepipe end
 function gr end
 function gp end
 function offset end
-function scale end
+function zscale end
 function center end
 function standardize end
-function I end
+function protect end
 _brm(x::AbstractString; kwargs...) = _brm(Meta.parse("""
 begin
     $x
