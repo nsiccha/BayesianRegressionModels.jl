@@ -27,4 +27,16 @@ export AbstractColumn, MissingColumn, DataColumn, NamedColumn,
        ExprColumn, LikelihoodColumn, MaterializedColumn
 export BRMI, SBBRMI
 
+# Accessor helpers for column types — used unqualified by html renderers,
+# sbimpl dispatch logic, and downstream extension hooks like bruno-ext.
+export name, getf, getargs, getkwargs, getbroadcast
+
+# Extension API. Downstream packages (bruno) add their own formula terms
+# by defining methods on `vmeta_sampling_rhs` + `_sb_submodel_rhs!` and
+# pushing `Part`s via `push_parts!!`; `nparams` + `lprior!` complete the
+# vimpl side. `vbroadcasted` is the materializer they call to resolve
+# column args inside those method bodies.
+export Part, push_parts!!, nparams, lprior!
+export vbroadcasted, vmeta_sampling_rhs, _sb_submodel_rhs!
+
 end # module
