@@ -251,7 +251,7 @@ end
     # (owns /pipeline/* routes). URLs built via `query_url` so request @params
     # auto-propagate and values auto-encode.
     permalink = h.a("🔗";
-        href=string(__parent__/slug),
+        href="/examples/$slug",
         title="Standalone URL",
         onclick="event.stopPropagation()",
         class="brm-permalink")
@@ -277,26 +277,46 @@ end
         state_pill(:deprioritized, "✓ deprioritized", "deprioritize"),
     )
 
+    # Full pipeline stage list, mirroring the buttons on the main pipeline
+    # page. Each entry renders a button that GETs the corresponding /stage/:id
+    # and drops the response into this card's result div.
+    _stage_buttons = let
+        stages = [
+            "1. Parse"           => :parse,
+            "2. Transform"       => :transform,
+            "3. Wrap"            => :wrap,
+            "4. BRMI"            => :brmi,
+            "5. VBRMI"           => :vbrmi,
+            "6. Benchmark"       => :bench,
+            "5a. SlicModel"      => :slic_model,
+            "5b. StanCode"       => :stan_code,
+            "5c. StanCompile"    => :stan_compile,
+            "6a. StanInstantiate" => :stan_instantiate,
+            "6b. StanEval"       => :stan_eval,
+            "6b'. StanShapes"    => :stan_shapes,
+            "6c. StanGenerate"   => :stan_generate,
+            "6d. StanFit (PF)"   => :stan_fit_pathfinder,
+            "6d'. StanFit (Warmup)" => :stan_fit_warmup,
+        ]
+        [h.button(label;
+            type="button",
+            class="brm-branch-btn",
+            hx_get=string(query_url(__parent__.__parent__.pipeline/"stage/$id"; force=true)),
+            hx_include="closest form",
+            hx_target="#$result_id",
+            hx_swap="innerHTML") for (label, id) in stages]
+    end
     formula_form = h.form(; class="brm-example-form")(
         h.input(; type="hidden", name="label", value=label),
         h.textarea(formula;
             name="formula",
             rows=max(3, count('\n', formula) + 1),
             class="brm-example-textarea"),
-        h.button("cimpl (bench) ▶";
-            type="button",
-            class="brm-branch-btn",
-            hx_get=string(query_url(__parent__.__parent__.pipeline/"stage/bench"; force=true)),
-            hx_include="closest form",
-            hx_target="#$result_id",
-            hx_swap="innerHTML"),
-        h.button("sbimpl (compile) ▶";
-            type="button",
-            class="brm-branch-btn",
-            hx_get=string(query_url(__parent__.__parent__.pipeline/"stage/stan_compile"; force=true)),
-            hx_include="closest form",
-            hx_target="#$result_id",
-            hx_swap="innerHTML"),
+        _stage_buttons...,
+        h.button("SB repro ▶";
+            type="submit",
+            formaction=string(__parent__.__parent__.pipeline/"sb_repro"),
+            class="secondary"),
     )
 
     card = begin
@@ -832,7 +852,7 @@ APPDATA = AppData(; cache_type=:parallel)
             # match the base layer's (nominal-sorted) coloring.
             overlay_xy    = isnothing(truth) ? nothing :
                 AoG.data(truth) * AoG.mapping(:index, :truth, row=:param) *
-                AoG.visual(AoG.Scatter; color=:black, filled=true)
+                AoG.visual(AoG.Scatter; color=:black)
             overlay_vrule = isnothing(truth) ? nothing :
                 AoG.data(truth) * AoG.mapping(:truth; row=:param,
                                                color=:index => nonnumeric) *
@@ -1195,7 +1215,7 @@ y1 ~ Normal(loc, err)
         # as separate paths `/examples` and `/examples/{slug}`. Today DO's
         # meta dict rejects duplicate route property names, so we delegate to
         # the multi-methoded `_index` helper above.
-        @get index(slug::String="") = isempty(slug) ? _index() : _index(slug)
+        @get index(slug::AbstractString="") = isempty(slug) ? _index() : _index(slug)
     end
 end
 
