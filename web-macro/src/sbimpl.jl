@@ -13,6 +13,7 @@ using StanBlocks
 # the actual backend is implemented below (`_sb_predictor_term!`). These may
 # migrate to macro.jl once the frontend agent adds shared stubs.
 function me end
+function s end
 
 const popefs = StanBlocks.@slic begin
     n_covariates = dims(X)[2]
@@ -102,6 +103,51 @@ end
 const _sb_cat = StanBlocks.@slic begin
     beta ~ std_normal(; n=n_levels - 1)
     return append_row(0., beta)[x]
+end
+
+# Minimal `s(x)` cubic-spline predictor. Uses a truncated-power basis for a
+# natural cubic spline with n_interior interior knots placed at equally-spaced
+# quantiles of `x`. The submodel takes the precomputed N x n_basis matrix
+# `X_basis` (raw columns: x, x^2, x^3, (x - k_j)^3_+ for each interior knot)
+# and returns `X_basis * coefs` -- a length-N smooth contribution. The caller
+# emits `s_<x> ~ _sb_s(; X_basis=..., n_basis=...)` and hands `s_<x>` to
+# popefs as a single design-matrix column (so there is one extra overall beta
+# multiplying the smooth; a direct-summand variant would drop that beta).
+# This is a first-pass implementation: no penalty / smoothness prior beyond
+# std_normal on the basis coefficients, no tensor products, no bs/t2/gp.
+const _sb_s = StanBlocks.@slic begin
+    n_basis = dims(X_basis)[2]
+    coefs ~ std_normal(; n=n_basis)
+    return X_basis * coefs
+end
+
+function _sb_spline_basis_ncs(x::AbstractVector{<:Real}; n_interior::Int=2)
+    n_interior >= 0 || error("sbimpl: `s(x)` needs n_interior >= 0 (got $n_interior)")
+    xs = collect(Float64, x)
+    n = length(xs)
+    sorted = sort(xs)
+    # Equally-spaced quantiles at 1/(n_interior+1), ..., n_interior/(n_interior+1)
+    knots = Float64[]
+    for j in 1:n_interior
+        q = j / (n_interior + 1)
+        pos = 1 + q * (n - 1)
+        lo  = floor(Int, pos); hi = ceil(Int, pos)
+        val = lo == hi ? sorted[lo] : sorted[lo] + (pos - lo) * (sorted[hi] - sorted[lo])
+        push!(knots, val)
+    end
+    n_basis = 3 + n_interior
+    M = zeros(Float64, n, n_basis)
+    for i in 1:n
+        xi = xs[i]
+        M[i, 1] = xi
+        M[i, 2] = xi * xi
+        M[i, 3] = xi * xi * xi
+        for (j, k) in enumerate(knots)
+            d = xi - k
+            M[i, 3 + j] = d > 0 ? d^3 : 0.0
+        end
+    end
+    M, n_basis
 end
 
 # brms-style `me(x_obs, sd_x)` measurement-error predictor. The submodel
@@ -582,8 +628,42 @@ _sb_predictor_term!(stmts, data, ::typeof(me), t) = begin
     push!(stmts, :($xname ~ normal($col_name, $sd_name)))
     col_name
 end
+# Cubic-spline predictor `s(x)`. Precomputes the basis matrix from the raw
+# data column and stashes it under `X_basis_<x>`; the submodel `_sb_s` owns
+# the coefficient vector + prior. Returns the per-row smooth contribution as
+# a single column (so popefs multiplies by an overall beta). Only the default
+# basis is supported right now -- `bs`, `t2`, and kwargs like `k=` or
+# `knots=` will need extra dispatches.
+_sb_predictor_term!(stmts, data, ::typeof(s), t) = begin
+    args = getargs(t)
+    length(args) == 1 || error("sbimpl: `s(x)` expects 1 positional arg, got $(length(args))")
+    inner = only(args)
+    inner isa NamedColumn || error("sbimpl: `s(...)` expects a NamedColumn, got $(typeof(inner))")
+    backing = parent(inner)
+    backing isa DataColumn || error("sbimpl: `s($(name(inner)))` expects a raw data column, got $(typeof(backing))")
+    v = parent(backing)
+    v isa AbstractVector{<:Real} || error("sbimpl: `s($(name(inner)))` expects numeric data, got $(typeof(v))")
+    basis, n_basis = _sb_spline_basis_ncs(v; n_interior=2)
+    xname = name(inner)
+    # Build the basis matrix inside the slic via `hcat` of per-column data
+    # kwargs -- same pattern popefs uses. Passing a Julia Matrix directly as
+    # a data kwarg triggers StanBlocks type-inference issues where the
+    # resulting `X_basis * coefs` length symbol doesn't unify with other
+    # N-indexed vectors downstream.
+    col_syms = Symbol[]
+    for j in 1:n_basis
+        cj = Symbol(:s_, xname, :_col, j)
+        data[cj] = collect(Float64, basis[:, j])
+        push!(col_syms, cj)
+    end
+    X_name = Symbol(:X_basis_, xname)
+    push!(stmts, :($X_name = $(Expr(:call, :hcat, col_syms...))))
+    col_name = Symbol(:s_, xname)
+    push!(stmts, :($col_name ~ _sb_s(; X_basis=$X_name)))
+    col_name
+end
 _sb_predictor_term!(_, _, f, _) =
-    error("sbimpl: unsupported predictor-term function `$f` (supported: `mo`, `mo1`, `me`)")
+    error("sbimpl: unsupported predictor-term function `$f` (supported: `mo`, `mo1`, `me`, `s`)")
 
 _sb_n_obs_probe(terms) = begin
     for t in terms
