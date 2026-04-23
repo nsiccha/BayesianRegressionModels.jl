@@ -289,9 +289,9 @@ _sb_emit!(stmts, data, key, op::ExprColumn; id_lookup=_sb_empty_id_lookup()) =
 # Raw data / missing columns appear as top-level ops when the formula mentions
 # them as bare references (e.g. `c2` in `loc ~ 1 + c2`). Nothing to emit — the
 # prepass already stashed data columns in `data`.
-_sb_emit!(_, _, _, ::DataColumn; kwargs...) = nothing
-_sb_emit!(_, _, _, ::MissingColumn; kwargs...) = nothing
-_sb_emit!(_, _, key, op; kwargs...) = error("sbimpl: top-level op for `$key` not an ExprColumn (got $(typeof(op)))")
+_sb_emit!(stmts, data, key, ::DataColumn; kwargs...) = nothing
+_sb_emit!(stmts, data, key, ::MissingColumn; kwargs...) = nothing
+_sb_emit!(stmts, data, key, op; kwargs...) = error("sbimpl: top-level op for `$key` not an ExprColumn (got $(typeof(op)))")
 
 _sb_emit_expr!(stmts, data, key, ::typeof(~), op; id_lookup=_sb_empty_id_lookup()) = begin
     lhs, rhs = getargs(op, 2)
@@ -302,7 +302,7 @@ _sb_emit_expr!(stmts, data, key, ::typeof(assign), op; id_lookup=_sb_empty_id_lo
     target_expr = _sb_scalar_expr(rhs, data)
     push!(stmts, :($key = $target_expr))
 end
-_sb_emit_expr!(_, _, key, f, _; kwargs...) = error("sbimpl: unsupported top-level op `$f` for `$key`")
+_sb_emit_expr!(stmts, data, key, f, op; kwargs...) = error("sbimpl: unsupported top-level op `$f` for `$key`")
 
 _sb_empty_id_lookup() = Dict{Tuple{Symbol,Tuple{Symbol,Any}}, Any}()
 
