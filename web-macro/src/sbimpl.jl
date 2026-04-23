@@ -16,6 +16,14 @@ function me end
 function s end
 function ar end
 
+# Local marker type for cumulative-link ordinal likelihoods. Mirrors the
+# `Normal` / `BernoulliLogit` pattern (formula surface uses the type as a
+# likelihood family). Not a real `Distributions.Distribution` -- Distributions.jl
+# does not ship `OrderedLogistic`, and the @brm `_x` parser never actually
+# calls the constructor, so a bare marker struct is enough. If Distributions
+# later adds its own `OrderedLogistic`, drop this in favour of that.
+struct OrderedLogistic end
+
 const popefs = StanBlocks.@slic begin
     n_covariates = dims(X)[2]
     beta_pop ~ std_normal(; n=n_covariates)
@@ -178,14 +186,16 @@ function _sb_spline_basis_ncs(x::AbstractVector{<:Real}; n_interior::Int=2)
 end
 
 # brms-style `me(x_obs, sd_x)` measurement-error predictor. The submodel
-# allocates a length-N latent `x_true` vector with prior `std_normal`. The
-# observation likelihood `x_obs ~ normal(x_true, sd_x)` is emitted at the
-# call site (not inside the submodel) because StanBlocks' activity analysis
-# drops sampling statements whose LHS is a submodel kwarg. The linear
-# predictor uses `x_true` via popefs's free beta, so this behaves like a
-# regular continuous covariate except the predictor values are parameters.
+# allocates a length-N latent `x_true` vector with prior `std_normal` and
+# emits the observation likelihood `x_obs ~ normal(x_true, sd_x)` directly.
+# (Earlier StanBlocks versions silently dropped data-LHS `~` inside submodel
+# bodies; that's fixed, so we keep the likelihood self-contained.)
+# The linear predictor uses `x_true` via popefs's free beta, so `me` behaves
+# like a regular continuous covariate except the predictor values themselves
+# are parameters.
 const _sb_me = StanBlocks.@slic begin
     x_true ~ std_normal(; n=num_elements(x_obs))
+    x_obs ~ normal(x_true, sd_x)
     return x_true
 end
 
@@ -651,8 +661,7 @@ _sb_predictor_term!(stmts, data, ::typeof(me), t) = begin
     sd_name = Symbol(:sd_, xname)
     data[sd_name] = Float64(sd_arg)
     col_name = Symbol(:me_, xname)
-    push!(stmts, :($col_name ~ _sb_me(; x_obs=$xname)))
-    push!(stmts, :($xname ~ normal($col_name, $sd_name)))
+    push!(stmts, :($col_name ~ _sb_me(; x_obs=$xname, sd_x=$sd_name)))
     col_name
 end
 # Cubic-spline predictor `s(x)`. Precomputes the basis matrix from the raw
@@ -738,6 +747,21 @@ _sb_lik_stan(target, name::Symbol, args, data) =
     Expr(:call, :~, target,
         Expr(:call, name, (_sb_scalar_expr(a, data) for a in args)...))
 
+# `y ~ OrderedLogistic(eta)`: cumulative-link ordinal likelihood. Blocked on
+# StanBlocks support for Stan's `ordered_logistic_lpmf`. Two concrete gaps:
+#   1. `ordered_logistic_lpmf` is not in StanBlocks' @builtin_module list, so
+#      `y ~ ordered_logistic(eta, c)` errors at symbol resolution.
+#   2. `type=ordered` (for declaring an ordered-vector parameter inside a
+#      `std_normal(; n, type=ordered)` call) is not surfaced by @slic --
+#      symbol resolution for `ordered` fails in the caller's module lookup.
+# Workaround attempts that failed: @deffun wrapping + manual `lpxf_expr`
+# registration (the inner call to `ordered_logistic_lpmf` still hits (1));
+# @defsig-declared external signature (generated code references
+# StanBlocks-internal `stan_size`, not reachable from outside the module).
+# Leaving the marker struct and MWE in place so the card is ready to light
+# up once StanBlocks lands the builtin.
+_sb_lik_family(target, ::Type{<:OrderedLogistic},  args, data) =
+    error("sbimpl: `OrderedLogistic` likelihood is blocked on StanBlocks adding `ordered_logistic_lpmf` to its builtin distributions; see comment in sbimpl.jl")
 _sb_lik_family(target, ::Type{<:Normal},           args::Tuple{Any,Any}, data) = _sb_lik_stan(target, :normal,       args, data)
 _sb_lik_family(target, ::Type{<:Bernoulli},        args::Tuple{Any},     data) = _sb_lik_stan(target, :bernoulli,    args, data)
 _sb_lik_family(target, ::Type{<:BernoulliLogit},   args::Tuple{Any},     data) = _sb_lik_stan(target, :bernoulli_logit, args, data)
