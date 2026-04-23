@@ -1,6 +1,7 @@
 # label: 3.11 zero-inflated / hurdle likelihoods
 # tier: 3
 # status: open
+# flag: sbbrm
 #=
 **What it is.** ZI Poisson, ZI Negative Binomial, hurdle Poisson, hurdle Gamma, … — likelihoods that mix a point mass at zero (or a separate "is zero" Bernoulli) with a continuous/count distribution for the nonzero values.
 

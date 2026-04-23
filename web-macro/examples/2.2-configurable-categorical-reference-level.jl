@@ -1,6 +1,7 @@
 # label: 2.2 configurable categorical reference level
 # tier: 2
 # status: open
+# flag: sbbrm
 #=
 **What it is.** Currently the reference level for treatment-coded categoricals is `sort(unique(x))[1]`. brms / lme4 let you override this via `factor(x, ref="some_level")` or by reordering the factor's levels.
 

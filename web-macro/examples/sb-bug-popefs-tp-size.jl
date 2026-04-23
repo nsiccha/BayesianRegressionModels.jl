@@ -1,6 +1,7 @@
 # label: Bruno SB bug: popefs TP matrix size scope
 # tier: 2
 # status: open
+# stages_pass: brmi,parse,slic_model,stan_code,stan_compile,stan_eval,stan_generate,stan_instantiate,stan_shapes,transform,wrap
 #=
 **SB bug repro (pending SB agent fix).** Pinned to the `pop_loc_loc_n_covariates`
 scope issue in StanBlocks: when a `pop_*` reduction lifts the covariate matrix
@@ -22,6 +23,6 @@ assay-indexed log scale matches bruno's production residual structure.
 in the same scope where it's consumed (or inline the size expression).
 =#
 
-loc ~ 1 + ftime
+loc ~ 1 + ztime
 log(y_scale) ~ 0 + assay_idx
 y ~ Normal(loc, y_scale)

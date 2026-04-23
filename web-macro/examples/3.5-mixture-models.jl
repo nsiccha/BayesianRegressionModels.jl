@@ -1,6 +1,7 @@
 # label: 3.5 mixture models
 # tier: 3
 # status: open
+# flag: sbbrm
 #=
 **What it is.** brms's `mixture(Normal, Normal)` lets the likelihood be a weighted mixture of K component distributions, with mixing weights estimated as parameters.
 

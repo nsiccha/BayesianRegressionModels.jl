@@ -1,6 +1,6 @@
 # label: 2.6 multi-membership random effects mm()
 # tier: 2
-# status: open
+# status: deprioritized
 #=
 **What it is.** brms's `mm(g1, g2, ...)` lets one observation belong to **multiple** levels of the same random factor simultaneously, with weights summing to 1. Standard use: a student belongs to multiple schools across the year, and we want their random effect to be a weighted average of the per-school effects.
 

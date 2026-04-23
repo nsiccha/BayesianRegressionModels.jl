@@ -226,6 +226,11 @@ end
     label   = get(_parsed.header, "label", basename(path))
     tier    = parse(Int, get(_parsed.header, "tier", "1"))
     status  = Symbol(get(_parsed.header, "status", "open"))
+    # `# flag: sb|sbbrm|both` header marks a card as needing backend
+    # attention. `:sb` targets the StanBlocks-proper agent; `:sbbrm`
+    # targets the BRM sbimpl.jl agent; `:both` is both. Default `:none`.
+    # Flagged-in-any-way cards sort to the top so agents can triage them.
+    flag = Symbol(get(_parsed.header, "flag", "none"))
     body    = _parsed.body
     formula = _parsed.formula
     slug    = replace(basename(path), r"\.jl$" => "")
@@ -282,11 +287,33 @@ end
         )
     end
 
+    # Flag pill — cycles through none → SB → SBBRM → both → none.
+    # `SB` targets the StanBlocks-proper agent; `SBBRM` targets the BRM
+    # sbimpl.jl agent; `both` goes to both. Flagged cards sort to the top.
+    _flag_label = flag === :sb    ? "⚑ SB" :
+                  flag === :sbbrm ? "⚑ SBBRM" :
+                  flag === :both  ? "⚑ SB+SBBRM" :
+                                    "flag"
+    _flag_color = flag === :sb    ? "#c97f0c" :
+                  flag === :sbbrm ? "#2e7d32" :
+                  flag === :both  ? "#a02828" :
+                                    "#888"
+    flag_pill = h.button(_flag_label;
+        type="button",
+        class="brm-state-pill",
+        hx_get=string(query_url(__parent__/"flag"; label)),
+        hx_target="#$card_id",
+        hx_swap="outerHTML",
+        onclick="event.stopPropagation()",
+        style="background:$_flag_color",
+    )
+
     status_pills = h.span(;
         id=status_id,
         class="brm-status-pills")(
         state_pill(:done,          "✓ done",          "mark done"),
         state_pill(:deprioritized, "✓ deprioritized", "deprioritize"),
+        flag_pill,
     )
 
     # Stage list pulled from AppContext.stage_labels so the order + names
@@ -329,11 +356,13 @@ end
     card = card_with_preload("")
 
     save!(; new_status=status, new_formula=formula,
-            new_stages_pass=stages_pass, new_stages_fail=stages_fail) = begin
+            new_stages_pass=stages_pass, new_stages_fail=stages_fail,
+            new_flag=flag) = begin
         io = IOBuffer()
         println(io, "# label: ", label)
         println(io, "# tier: ", tier)
         println(io, "# status: ", new_status)
+        new_flag === :none || println(io, "# flag: ", new_flag)
         _fmt_stage_set(s) = join(sort(collect(String.(s))), ",")
         isempty(new_stages_pass) || println(io, "# stages_pass: ", _fmt_stage_set(new_stages_pass))
         isempty(new_stages_fail) || println(io, "# stages_fail: ", _fmt_stage_set(new_stages_fail))
@@ -354,6 +383,10 @@ end
 
     toggle_status!(target) =
         save!(; new_status = status == target ? :open : target)
+
+    # Cycle: none → sb → sbbrm → both → none
+    _flag_next = Dict(:none => :sb, :sb => :sbbrm, :sbbrm => :both, :both => :none)
+    cycle_flag!() = save!(; new_flag = _flag_next[flag])
 
     # Mark a set of stage names as pass / fail and persist to disk. Passed
     # stages remove from the fail set (and vice versa) so the most recent
@@ -392,6 +425,8 @@ end
     # surfaces open work first; default-on below.
     _sort_status     = status === :open ? 0 : 1
     _sort_progress   = length(stages_pass)
+    # 0=none, 1=sb-only or sbbrm-only, 2=both → "most in need" sorts highest.
+    _sort_flagged    = flag === :none ? 0 : flag === :both ? 2 : 1
 
     card_with_preload(preload_stage::AbstractString; force_open::Bool=false) = begin
         children = Any[HTMXObjects.md_to_node(body)]
@@ -416,6 +451,7 @@ end
             data_brokenness=string(_sort_brokenness),
             data_status=string(_sort_status),
             data_progress=string(_sort_progress),
+            data_flagged=string(_sort_flagged),
             data_label=label,
         )(
             h.details(; open=(force_open || status == :open))(
@@ -706,21 +742,15 @@ end
                 StanBlocks.stan.bridgestan_data(fit_data_dict))
 
             # IP: Pathfinder init (fast, no MCMC). The `progress=__status__`
-            # hook lets Treebars nest the 100 maxiters subtree under whatever
+            # hook lets Treebars nest the maxiters subtree under whatever
             # node called `fetchindex!(status, …, pathfinder, instance, init)`.
-            # TODO(DO): docstrings on IP properties inside nested inline
-            # `@struct` bodies trip precompile with
-            # `MethodError: Cannot convert GlobalRef to Symbol` at
-            # `dynamicstruct` line 1674 (`push!(macros, arg.args[1])`). Both
-            # interpolated (`"Pathfinder(maxiters=$maxiters)"`) and plain
-            # (`"Pathfinder"`) fail; same pattern works fine at level-0 (see
-            # `compute_steps` / `"Pipeline($name)"`). Re-add once DO agent
-            # fixes the nested-struct docstring handling.
+            "Pathfinder(maxiters=$maxiters)"
             pathfinder(instance, init; rng=Xoshiro(42), maxiters=100) =
                 initialize_mcmc(StanProblem(instance), init; rng, progress=__status__, maxiters)
             # IP: full Stan + WarmupHMC fit. Same progress-hooking pattern.
             # Returns a rich NamedTuple with `.posterior_position`, `.ess`,
             # `.n_divergent_samples`, etc.
+            "WarmupHMC(n_draws=$n_draws)"
             posterior_warmup(instance, init; rng=Xoshiro(42), n_draws=200) =
                 adaptive_warmup_mcmc(rng, StanProblem(instance); init, n_draws, progress=__status__)
             # Gaussian-approximation draws from Pathfinder. Reads the IP via
@@ -1364,6 +1394,8 @@ y1 ~ Normal(loc, err)
         @get mark(; state::Symbol=Symbol("")) =
             example_store.find(label).toggle_status!(state).card
 
+        @get flag = example_store.find(label).cycle_flag!().card
+
         # List view vs detail view as separate derived-property methods; DO
         # supports multi-method dispatch on a single property name (the route
         # layer doesn't — see TODO below).
@@ -1380,10 +1412,10 @@ y1 ~ Normal(loc, err)
             const list = document.querySelector('#brm-examples-list');
             if (!bar || !list) return;
             const pills = Array.from(bar.querySelectorAll('.brm-sort-pill'));
-            // Defaults: `status` asc (open first), `brokenness` desc
-            // (most-broken first), `complexity` asc (simple first) — we're
-            // looking for the simplest broken open cards. Other pills off.
-            const state = { status: 1, brokenness: -1, complexity: 1 };  // key -> 1 | -1 | 0
+            // Defaults: `flagged` desc (triage candidates first),
+            // `status` asc (open first), `brokenness` desc (most-broken
+            // first), `complexity` asc (simple first). Other pills off.
+            const state = { flagged: -1, status: 1, brokenness: -1, complexity: 1 };  // key -> 1 | -1 | 0
             const render = () => pills.forEach(p => {
                 const s = state[p.dataset.sortKey] || 0;
                 p.textContent = p.dataset.sortKey + (s === 1 ? ' ↑' : s === -1 ? ' ↓' : '');
@@ -1442,6 +1474,7 @@ y1 ~ Normal(loc, err)
             h.p("Each item has a sketch of what it is, why it matters, how to implement, and how to verify. Sourced from .jl files under ", h.code("web-macro/examples/"), "; status edits and edited formulas are written back to disk."),
             h.div(; class="brm-sort-bar")(
                 h.span("Sort by (click to cycle, drag to reorder):"),
+                _sort_pill("flagged",    "flagged"),
                 _sort_pill("status",     "status"),
                 _sort_pill("brokenness", "brokenness"),
                 _sort_pill("complexity", "complexity"),

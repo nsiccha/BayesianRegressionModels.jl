@@ -1,6 +1,7 @@
 # label: sb.6 submodels (mo, mm, spline) as SlicModels — needs impl
 # tier: 3
 # status: open
+# stages_pass: brmi,parse,slic_model,stan_code,stan_compile,stan_eval,stan_fit_pathfinder,stan_generate,stan_instantiate,stan_shapes,transform,wrap
 #=
 **Status: not implemented.** The main architectural bet behind sbimpl: terms that introduce their own parameters (`mo(x)` monotonic effects, `mm(x)` multi-membership, `s(x)` splines, etc.) should map to their own `@slic` submodels with their own `~`-sampled hyperparameters, composed into the overall linear predictor via `popranefs`-style addition.
 

@@ -1,6 +1,6 @@
 # label: 3.10 Dirichlet process / non-parametric models
 # tier: 3
-# status: open
+# status: deprioritized
 #=
 **What it is.** Models where the number of components / clusters / random-effect levels is itself inferred during sampling, via a Dirichlet process or stick-breaking prior.
 

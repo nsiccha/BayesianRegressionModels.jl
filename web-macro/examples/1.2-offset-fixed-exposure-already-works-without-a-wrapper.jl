@@ -1,6 +1,7 @@
 # label: 1.2 offset / fixed exposure — already works without a wrapper
 # tier: 1
 # status: open
+# flag: sbbrm
 #=
 **Status: already works without any new code.** brms needs `offset(z)` because R's formula syntax has no other way to put a "no-coefficient term" into the linear predictor — the only thing on the RHS of `~` is the formula DSL. In our DSL the linear predictor and the likelihood are *separate* `~` lines, and the second one (the likelihood) takes a free-form Julia expression. Anything inside that expression gets evaluated as plain code at materialization time via `vbroadcasted` — function calls dispatch to whatever Julia function the symbol resolves to, and data column references are pulled from the dataframe.
 

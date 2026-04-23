@@ -1,6 +1,7 @@
 # label: 3.9 spike-and-slab / Horseshoe priors
 # tier: 3
 # status: open
+# flag: sbbrm
 #=
 **What it is.** Sparsity-inducing priors for high-dimensional regression. Spike-and-slab puts a delta-spike at zero plus a wide slab; Horseshoe uses a half-Cauchy hyperprior on a per-coefficient scale, producing a heavy-tailed shrinkage prior.
 

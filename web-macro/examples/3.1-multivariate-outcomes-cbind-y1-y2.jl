@@ -1,6 +1,6 @@
 # label: 3.1 multivariate outcomes — uncorrelated free, correlated needs MvNormal
 # tier: 3
-# status: open
+# status: deprioritized
 #=
 **What it is.** brms's `mvbind(y1, y2) ~ x + (1 | g)` declares two outcomes sharing the same linear predictor structure with **correlated residuals** (joint MvNormal with a covariance matrix to estimate). brms also supports combining multiple per-outcome formulas via `bf(y1 ~ x) + bf(y2 ~ x)`, but **`+` on the LHS of `~` is not a thing in brms's formula DSL** — both their multivariate syntaxes are sidecars (`mvbind`) or formula-object combinators (`bf + bf`).
 

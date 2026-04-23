@@ -1,6 +1,6 @@
 # label: 2.4 centered / non-centered parameterization toggle
 # tier: 2
-# status: open
+# status: deprioritized
 #=
 **What it is.** Currently every random-effect block uses non-centered parameterization (we sample standard normals and apply `mul!(vi, C.L, xi)`). brms / Stan let you choose centered (sample directly from `Normal(0, σ)` per group) on a per-factor basis.
 
