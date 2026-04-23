@@ -124,7 +124,7 @@ end
 # `stratified_correlated_b` (a @deffun helper) because @slic bodies cannot
 # contain control flow.
 ranef_correlated_by = StanBlocks.@slic begin
-    L   ~ lkj_corr_cholesky(1.; n=n_terms, m=n_strata)
+    L   ~ lkj_corr_cholesky(1., n_strata, n_terms)
     tau ~ std_normal(; n=n_terms, m=n_strata, lower=0., type=vector)
     z   ~ std_normal(; n=n_terms, m=n_groups, type=vector)
     b = stratified_correlated_b(L, tau, z, stratum_idx, n_groups, n_terms)
@@ -135,7 +135,7 @@ end
 # `(e | ID | gr(g, by=b))` buckets. Matrix-returning variant of
 # `ranef_correlated_by` so each sub-formula can slice its own column(s).
 ranef_correlated_by_draws = StanBlocks.@slic begin
-    L   ~ lkj_corr_cholesky(1.; n=n_terms, m=n_strata)
+    L   ~ lkj_corr_cholesky(1., n_strata, n_terms)
     tau ~ std_normal(; n=n_terms, m=n_strata, lower=0., type=vector)
     z   ~ std_normal(; n=n_terms, m=n_groups, type=vector)
     return stratified_correlated_b(L, tau, z, stratum_idx, n_groups, n_terms)
