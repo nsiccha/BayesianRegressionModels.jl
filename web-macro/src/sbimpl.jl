@@ -721,9 +721,12 @@ _sb_n_obs_probe(terms) = begin
 end
 _sb_any_data_symbol(data) = begin
     isempty(data) && error("sbimpl: can't emit `rep_vector(1., n)` — no data column seen yet. Make sure an observed `~` comes before the intercept-only predictor, or add a concrete covariate.")
-    # Prefer any vector-valued entry
+    # Prefer a flat length-N vector (numeric / integer) so `num_elements(...)` in
+    # Stan resolves to an int. Skip ragged `Vector{<:AbstractVector}` layouts
+    # (bruno-ext's `dose_times`) which StanBlocks serializes as a
+    # `tuple(vector, array[] int)` that Stan's `num_elements` rejects.
     for (k, v) in data
-        v isa AbstractVector && return k
+        v isa AbstractVector && !(eltype(v) <: AbstractVector) && return k
     end
     first(keys(data))
 end
@@ -786,5 +789,17 @@ _sb_scalar_expr(x::NamedColumn, data) = begin
     end
     name(x)
 end
-_sb_scalar_expr(x::ExprColumn, data) = Expr(:call, getf(x), (_sb_scalar_expr(a, data) for a in getargs(x))...)
+# Formula arithmetic is element-wise by intent -- `loc = loc_loc + loc_slope * cdslope`
+# on two length-n vectors means Stan's `.*`, not matrix/dot product. Translate `*`
+# and `/` to their dotted variants so Stan's typechecker accepts vector-vector
+# operands (and scalar operands broadcast correctly in either form). Addition /
+# subtraction already element-wise-broadcast in Stan between vectors, no change
+# needed there.
+_sb_scalar_expr(x::ExprColumn, data) = begin
+    f = getf(x)
+    op = f === (*) ? Symbol(".*") :
+         f === (/) ? Symbol("./") :
+         f
+    Expr(:call, op, (_sb_scalar_expr(a, data) for a in getargs(x))...)
+end
 _sb_scalar_expr(x, _) = error("sbimpl: cannot lift to Stan expression: $(typeof(x)): $x")
