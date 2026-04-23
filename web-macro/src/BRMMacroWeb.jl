@@ -251,7 +251,7 @@ end
     # (owns /pipeline/* routes). URLs built via `query_url` so request @params
     # auto-propagate and values auto-encode.
     permalink = h.a("🔗";
-        href="/examples/$slug",
+        href=string(__parent__/slug),
         title="Standalone URL",
         onclick="event.stopPropagation()",
         class="brm-permalink")
@@ -877,7 +877,7 @@ APPDATA = AppData(; cache_type=:parallel)
             spec_den = add(AoG.data(long) *
                            AoG.mapping(:value; row=:param,
                                        color=:index => nonnumeric) *
-                           AoG.histogram(; bins=30, datalimits=extrema),
+                           AoG.histogram(; bins=30),
                            overlay_vrule) *
                        config(title=den_title, facet=(; linkxaxes=:none))
             tabs = tabset(
