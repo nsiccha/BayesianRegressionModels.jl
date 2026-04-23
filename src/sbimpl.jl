@@ -118,6 +118,20 @@ const ranef_correlated_by = StanBlocks.@slic begin
     return rows_dot_product(Z, b[group_idx, :])
 end
 
+# Cross-formula stratified correlated ranef draws for brms-style
+# `(e | ID | gr(g, by=b))` buckets. Matrix-returning variant of
+# `ranef_correlated_by` so each sub-formula can slice its own column(s).
+const ranef_correlated_by_draws = StanBlocks.@slic begin
+    L   ~ lkj_corr_cholesky(1.; n=n_terms, m=n_strata)
+    tau ~ std_normal(; n=n_terms, m=n_strata, lower=0., type=vector)
+    z   ~ std_normal(; n=n_terms, m=n_groups, type=vector)
+    b = rep_matrix(0., n_groups, n_terms)
+    for g in 1:n_groups
+        b[g, :] = (diag_pre_multiply(tau[stratum_idx[g]], L[stratum_idx[g]]) * z[g])'
+    end
+    return b   # n_groups x n_terms
+end
+
 # Treatment-coded categorical predictor. Allocates K-1 free betas; reference
 # level 1 contributes 0. Mirrors vimpl's `AbstractVector{<:Integer}` dispatch.
 # `x` is the per-row 1-based level index, `n_levels = K`.
@@ -499,9 +513,8 @@ _sb_normalize_group(g::ExprColumn) = begin
     if by === nothing
         return (group, id_sym)
     end
-    id_sym === nothing || error("sbimpl: `gr(g, by=b, id=...)` is not supported yet (v1)")
     by isa NamedColumn || error("sbimpl: `gr(...; by=...)` expects a NamedColumn for `by`, got $(typeof(by))")
-    ((group, by), nothing)
+    ((group, by), id_sym)
 end
 _sb_normalize_group(g) = error("sbimpl: expected NamedColumn or `gr(...)` on RHS of `|`, got $(typeof(g))")
 
@@ -710,10 +723,7 @@ function _sb_emit_id_buckets!(stmts, data, buckets)
     for (k, bucket) in pairs(buckets)
         id_sym, _ = k
         desc = bucket.group_desc
-        desc isa NamedColumn ||
-            error("sbimpl: `|$id_sym|` with `gr(..., by=...)` is not supported yet (v1)")
-        idx_name, n_name = _sb_ensure_group_data!(data, desc)
-        suffix = Symbol(id_sym, :_, name(desc))
+        suffix = _sb_id_bucket_suffix(id_sym, desc)
         bucket_name = Symbol(:b_, suffix)
         n_terms_name = Symbol(:n_terms_, suffix)
         cursor = 0
@@ -727,13 +737,36 @@ function _sb_emit_id_buckets!(stmts, data, buckets)
         n_terms_total = cursor
         n_terms_total >= 1 || error("sbimpl: `|$id_sym|` bucket has zero terms")
         data[n_terms_name] = n_terms_total
-        push!(stmts, :($bucket_name ~ ranef_correlated_draws(;
-            group_idx=$idx_name, n_groups=$n_name, n_terms=$n_terms_name)))
+        idx_name = _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, desc)
         for (brmi_key, cols) in per_target_ranges
             lookup[(brmi_key, k)] = (; bucket_name, cols, idx_name, suffix)
         end
     end
     lookup
+end
+
+_sb_id_bucket_suffix(id_sym, g::NamedColumn) = Symbol(id_sym, :_, name(g))
+_sb_id_bucket_suffix(id_sym, g::Tuple{NamedColumn,NamedColumn}) =
+    Symbol(id_sym, :_, name(g[1]), :__by__, name(g[2]))
+
+# Emit the shared `b_<suffix> ~ …_draws(...)` statement for one ID bucket.
+# Plain group -> `ranef_correlated_draws`; `gr(g, by=b)` group -> stratified
+# `ranef_correlated_by_draws`. Returns the idx_name callers use to slice the
+# draw matrix per sub-formula.
+function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g::NamedColumn)
+    idx_name, n_name = _sb_ensure_group_data!(data, g)
+    push!(stmts, :($bucket_name ~ ranef_correlated_draws(;
+        group_idx=$idx_name, n_groups=$n_name, n_terms=$n_terms_name)))
+    idx_name
+end
+function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name,
+                                       g::Tuple{NamedColumn,NamedColumn})
+    info = _sb_ensure_group_data!(data, g)
+    push!(stmts, :($bucket_name ~ ranef_correlated_by_draws(;
+        group_idx=$(info.idx_name), n_groups=$(info.n_name),
+        n_terms=$n_terms_name,
+        stratum_idx=$(info.s_idx_name), n_strata=$(info.n_strata_name))))
+    info.idx_name
 end
 
 # Ensure `group_idx` / `n_groups` for a plain-group ranef descriptor are stashed
@@ -749,6 +782,31 @@ function _sb_ensure_group_data!(data, g::NamedColumn)
     data[idx_name] = g_idx
     data[n_name]   = n_levels
     idx_name, n_name
+end
+
+# Stratified variant for `gr(g, by=b)`: stashes g_idx / n_groups as well as
+# stratum_idx / n_strata under block-local names (suffixed with `__by__`) so
+# this block never clashes with a plain `(... | g)` bucket on the same group.
+function _sb_ensure_group_data!(data, g::Tuple{NamedColumn,NamedColumn})
+    gcol, bcol = g
+    g_backing = parent(gcol)
+    b_backing = parent(bcol)
+    g_backing isa DataColumn || error("sbimpl: group `$(name(gcol))` must be a raw data column")
+    b_backing isa DataColumn || error("sbimpl: `by=$(name(bcol))` must be a raw data column")
+    gname, bname = name(gcol), name(bcol)
+    n_groups, g_idx = _sb_level_index(parent(g_backing))
+    n_strata, b_idx = _sb_level_index(parent(b_backing))
+    stratum_idx = _sb_stratum_idx(g_idx, b_idx, gname, bname)
+    suffix = Symbol(gname, :__by__, bname)
+    idx_name       = Symbol(suffix, :_idx)
+    n_name         = Symbol(:n_, suffix)
+    s_idx_name     = Symbol(suffix, :_stratum_idx)
+    n_strata_name  = Symbol(:n_strata_, suffix)
+    data[idx_name]      = g_idx
+    data[n_name]        = n_groups
+    data[s_idx_name]    = stratum_idx
+    data[n_strata_name] = n_strata
+    (; idx_name, n_name, s_idx_name, n_strata_name)
 end
 
 # Emit the per-sub-formula reference to a pre-emitted ID bucket: slice the

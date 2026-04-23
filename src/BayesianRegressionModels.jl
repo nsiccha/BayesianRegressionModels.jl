@@ -49,7 +49,7 @@ export vbroadcasted, vmeta_sampling_rhs, _sb_submodel_rhs!
 # caller's namespace can still resolve the BRM built-in submodel names.
 export popefs, cdirichlet, c0dirichlet, c01dirichlet,
        ranef_intercept, ranef_correlated, ranef_correlated_by,
-       ranef_correlated_draws,
+       ranef_correlated_draws, ranef_correlated_by_draws,
        _sb_mo, _sb_cat, _sb_ar1, _sb_s, _sb_me
 
 end # module
