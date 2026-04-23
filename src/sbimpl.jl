@@ -24,23 +24,23 @@ function ar end
 # later adds its own `OrderedLogistic`, drop this in favour of that.
 struct OrderedLogistic end
 
-const popefs = StanBlocks.@slic begin
+popefs = StanBlocks.@slic begin
     n_covariates = dims(X)[2]
     beta_pop ~ std_normal(; n=n_covariates)
     return X * beta_pop
 end
 
-const cdirichlet = StanBlocks.@slic begin
+cdirichlet = StanBlocks.@slic begin
     increments ~ dirichlet(alpha)
     return cumulative_sum(increments)
 end
 
-const c0dirichlet = StanBlocks.@slic begin
+c0dirichlet = StanBlocks.@slic begin
     increments ~ dirichlet(alpha)
     return cumulative_sum(increments) - increments[1]
 end
 
-const c01dirichlet = StanBlocks.@slic begin
+c01dirichlet = StanBlocks.@slic begin
     increments ~ dirichlet(alpha)
     return append_row(0., cumulative_sum(increments))
 end
@@ -49,7 +49,7 @@ end
 # contrast vector; the walker hcat's it as one column of X_pop so popefs
 # supplies the free beta (matches vimpl's free-beta `mo` variant, not `mo1`).
 # Named `_sb_mo` to avoid clashing with vimpl's marker function `mo`.
-const _sb_mo = StanBlocks.@slic begin
+_sb_mo = StanBlocks.@slic begin
     n_levels = maximum(x)
     simplex_incr ~ dirichlet(rep_vector(1., n_levels - 1))
     return cumulative_sum(append_row(0., simplex_incr))[x]
@@ -59,7 +59,7 @@ end
 # collapse: Part{chol}(1x1) -> log_scale ~ N(0,1), L[1,1] = exp(log_scale);
 # Part{grouped_normal}(n_groups, 1) -> xi ~ N(0,1), values = L[1,1] * xi;
 # per-obs contribution is values[group_idx]. No LKJ needed at n=1.
-const ranef_intercept = StanBlocks.@slic begin
+ranef_intercept = StanBlocks.@slic begin
     log_scale ~ std_normal()
     xi ~ std_normal(; n=n_groups)
     return exp(log_scale) * xi[group_idx]
@@ -75,7 +75,7 @@ end
 # vector via rows_dot_product. Note: `(1 | g) + (0 + x | g)` and `(1 + x | g)`
 # are equivalent -- the walker merges everything sharing a group symbol into
 # one correlated block.
-const ranef_correlated = StanBlocks.@slic begin
+ranef_correlated = StanBlocks.@slic begin
     L      ~ lkj_corr_cholesky(1.; n=n_terms)
     tau    ~ std_normal(; n=n_terms, lower=0.)
     z_flat ~ std_normal(; n=n_terms * n_groups)
@@ -88,12 +88,28 @@ end
 # Same parameterization as `ranef_correlated` but returns the raw per-group
 # matrix `b` (n_groups x n_terms) so multiple sub-formulas can each slice out
 # their own column(s) and apply their own Z separately.
-const ranef_correlated_draws = StanBlocks.@slic begin
+ranef_correlated_draws = StanBlocks.@slic begin
     L      ~ lkj_corr_cholesky(1.; n=n_terms)
     tau    ~ std_normal(; n=n_terms, lower=0.)
     z_flat ~ std_normal(; n=n_terms * n_groups)
     z = reshape(z_flat, n_terms, n_groups)
     return (diag_pre_multiply(tau, L) * z)'   # n_groups x n_terms
+end
+
+# Stratified gather + Cholesky scale, kept as a Stan function (loops are not
+# allowed in @slic bodies, but they are allowed in @deffun bodies). For each
+# group g, pick the stratum s = stratum_idx[g] and compute
+#   b[g, :] = (diag_pre_multiply(tau[s, :], L[s, :, :]) * z[g, :])'.
+StanBlocks.@deffun begin
+    stratified_correlated_b(L, tau, z, stratum_idx::int[n_groups],
+                            n_groups::int, n_terms::int) = begin
+        b = rep_matrix(0., n_groups, n_terms)
+        for g in 1:n_groups
+            b[g, :] = (diag_pre_multiply(tau[stratum_idx[g], :],
+                                         L[stratum_idx[g], :, :]) * z[g, :])'
+        end
+        b
+    end
 end
 
 # `(expr | gr(g, by=b))` stratified random effects: independent LKJ-Cholesky +
@@ -104,42 +120,31 @@ end
 #   tau :: array[n_strata] vector<lower=0>[n_terms]
 #   z   :: array[n_groups] vector[n_terms]
 # Per-group contribution: b[g, :] = (diag_pre_multiply(tau[s], L[s]) * z[g])'
-# where s = stratum_idx[g]. Uses SB's `lkj_corr_cholesky_lpdfs` array-broadcast
-# (one-liner added to StanBlocks.jl builtins) so L's sampling statement
-# vectorizes across strata.
-# `L[k, :, :]` / `tau[k, :]` / `z[g, :]` forms are used instead of `L[k]` etc.
-# because StanBlocks' `tracetype` only resolves colon-indexing through matrix
-# axes, not single-int indexing into an `array[N] T` collection. When StanBlocks
-# adds a scalar-int-into-array tracetype rule, these can simplify to `L[k]` etc.
-const ranef_correlated_by = StanBlocks.@slic begin
+# where s = stratum_idx[g]. The per-group loop lives in
+# `stratified_correlated_b` (a @deffun helper) because @slic bodies cannot
+# contain control flow.
+ranef_correlated_by = StanBlocks.@slic begin
     L   ~ lkj_corr_cholesky(1.; n=n_terms, m=n_strata)
     tau ~ std_normal(; n=n_terms, m=n_strata, lower=0., type=vector)
     z   ~ std_normal(; n=n_terms, m=n_groups, type=vector)
-    b = rep_matrix(0., n_groups, n_terms)
-    for g in 1:n_groups
-        b[g, :] = (diag_pre_multiply(tau[stratum_idx[g], :], L[stratum_idx[g], :, :]) * z[g, :])'
-    end
+    b = stratified_correlated_b(L, tau, z, stratum_idx, n_groups, n_terms)
     return rows_dot_product(Z, b[group_idx, :])
 end
 
 # Cross-formula stratified correlated ranef draws for brms-style
 # `(e | ID | gr(g, by=b))` buckets. Matrix-returning variant of
 # `ranef_correlated_by` so each sub-formula can slice its own column(s).
-const ranef_correlated_by_draws = StanBlocks.@slic begin
+ranef_correlated_by_draws = StanBlocks.@slic begin
     L   ~ lkj_corr_cholesky(1.; n=n_terms, m=n_strata)
     tau ~ std_normal(; n=n_terms, m=n_strata, lower=0., type=vector)
     z   ~ std_normal(; n=n_terms, m=n_groups, type=vector)
-    b = rep_matrix(0., n_groups, n_terms)
-    for g in 1:n_groups
-        b[g, :] = (diag_pre_multiply(tau[stratum_idx[g], :], L[stratum_idx[g], :, :]) * z[g, :])'
-    end
-    return b   # n_groups x n_terms
+    return stratified_correlated_b(L, tau, z, stratum_idx, n_groups, n_terms)
 end
 
 # Treatment-coded categorical predictor. Allocates K-1 free betas; reference
 # level 1 contributes 0. Mirrors vimpl's `AbstractVector{<:Integer}` dispatch.
 # `x` is the per-row 1-based level index, `n_levels = K`.
-const _sb_cat = StanBlocks.@slic begin
+_sb_cat = StanBlocks.@slic begin
     beta ~ std_normal(; n=n_levels - 1)
     return append_row(0., beta)[x]
 end
@@ -162,7 +167,7 @@ StanBlocks.@deffun begin
     end
 end
 
-const _sb_ar1 = StanBlocks.@slic begin
+_sb_ar1 = StanBlocks.@slic begin
     n_obs = num_elements(time)
     phi_raw ~ std_normal()
     phi = tanh(phi_raw)
@@ -180,7 +185,7 @@ end
 # multiplying the smooth; a direct-summand variant would drop that beta).
 # This is a first-pass implementation: no penalty / smoothness prior beyond
 # std_normal on the basis coefficients, no tensor products, no bs/t2/gp.
-const _sb_s = StanBlocks.@slic begin
+_sb_s = StanBlocks.@slic begin
     n_basis = dims(X_basis)[2]
     coefs ~ std_normal(; n=n_basis)
     return X_basis * coefs
@@ -223,7 +228,7 @@ end
 # The linear predictor uses `x_true` via popefs's free beta, so `me` behaves
 # like a regular continuous covariate except the predictor values themselves
 # are parameters.
-const _sb_me = StanBlocks.@slic begin
+_sb_me = StanBlocks.@slic begin
     x_true ~ std_normal(; n=num_elements(x_obs))
     x_obs ~ normal(x_true, sd_x)
     return x_true
