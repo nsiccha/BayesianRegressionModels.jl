@@ -17,14 +17,18 @@ using JSON
 using AlgebraOfVega: vega_head, auto_remap_node, with_plot_caption, config, pointinterval, lineribbon, to_node, ECDFPlot, VLines, nonnumeric
 import AlgebraOfGraphics as AoG
 
-# The @brm macro and the VBRMI / SBBRMI implementations live alongside this
-# module so Revise tracks them. The scripts/ entry points (parsing.jl,
-# Benchmarking, StanBlocksImpl) include them via relative paths into here.
-include("macro.jl")
-include("vimpl.jl")
-include("sbimpl.jl")
-# Styled HTML rendering for BRMI / VBRMI cards. Lives in its own file
-# because it will eventually move to an ext of the main package.
+# The @brm macro and VBRMI / SBBRMI implementations now live in the main
+# `BayesianRegressionModels` package (moved out of web-macro in `ns/devibe`
+# so bruno can consume them as a submodule without the web app deps).
+using BayesianRegressionModels
+# Pull in the types / functions the web app touches by unqualified name.
+using BayesianRegressionModels: AbstractColumn, MissingColumn, DataColumn,
+    NamedColumn, ExprColumn, LikelihoodColumn, Data, MaybeData, BRMI, SBBRMI,
+    assign, doublepipe, gr, gp, offset, zscale, center, standardize, protect,
+    me, s, ar, OrderedLogistic
+
+# Styled HTML rendering for BRMI / VBRMI cards stays web-side (pulls in
+# HTMX builders).
 include("html_expr.jl")
 
 # Extension hook: extensions (e.g. the gitignored `bruno-ext.jl`) that need

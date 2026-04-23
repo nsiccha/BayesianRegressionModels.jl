@@ -1,29 +1,30 @@
 module BayesianRegressionModels
 
-## For the regression distribution ##
-using Distributions
-using LinearAlgebra
-using Random
-using PDMats #This gives efficient computation for positive definite matrices, used for the LKJCholesky stuff
-using DimensionalData #This allows for named dimensions in arrays
-using DimensionalData: @dim
+# @brm macro — parses a formula block, produces a BRMI (BRM
+# intermediate: expression tree + column metadata).
+using OrderedCollections
+include("macro.jl")
 
-include("1_RegressionSpecifications.jl")
+# VBRMI — vectorized implementation. Materializes predictors and
+# likelihood into a LogDensityProblems-compatible object.
+using LogExpFunctions, InverseFunctions, Distributions, ElasticArrays,
+      LogDensityProblems, LinearAlgebra, SpecialFunctions
+import CategoricalArrays as CA
+include("vimpl.jl")
 
-include("2_RegressionCoefficients.jl")
+# SBBRMI — StanBlocks backend. Lowers a BRMI into a StanBlocks SlicModel
+# so it can be compiled by BridgeStan / fit via Stan.
+using StanBlocks
+include("sbimpl.jl")
 
-include("3_RegressionPrior.jl")
+# Public surface. The macros and value types everything downstream
+# (web-macro, bruno, tests) reaches for.
+export @brm, @n, @x, @getproperty
+export assign, doublepipe, gr, gp, offset, zscale, center, standardize, protect
+export me, s, ar, OrderedLogistic
+export Data, MaybeData
+export AbstractColumn, MissingColumn, DataColumn, NamedColumn,
+       ExprColumn, LikelihoodColumn
+export BRMI, SBBRMI
 
-include("4_RegressionPredictors.jl")
-
-include("5_linear_combination.jl")
-
-include("7_basis_expansions.jl")
-
-include("8_interaction_operators.jl")
-
-include("9_regression_submodels.jl")
-
-include("10_formula.jl")
-
-end
+end # module
