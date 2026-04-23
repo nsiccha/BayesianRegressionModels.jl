@@ -22,14 +22,18 @@ include("sbimpl.jl")
 export @brm, @n, @x, @getproperty
 export assign, doublepipe, gr, gp, offset, zscale, center, standardize, protect
 export me, s, ar, OrderedLogistic
-export Data, MaybeData
+export Data, MaybeData, maybedata
 export AbstractColumn, MissingColumn, DataColumn, NamedColumn,
        ExprColumn, LikelihoodColumn, MaterializedColumn
-export BRMI, SBBRMI
+export BRMI, VBRMI, SBBRMI
 
 # Accessor helpers for column types — used unqualified by html renderers,
 # sbimpl dispatch logic, and downstream extension hooks like bruno-ext.
-export name, getf, getargs, getkwargs, getbroadcast
+export name, getf, getargs, getkwargs, getbroadcast, getop
+
+# Macro plumbing + compiled-output accessors used by downstream code
+# (web-macro's Formula struct, bruno's direct pipeline calls).
+export parse!, _brm, stan_code
 
 # Extension API. Downstream packages (bruno) add their own formula terms
 # by defining methods on `vmeta_sampling_rhs` + `_sb_submodel_rhs!` and
@@ -38,5 +42,13 @@ export name, getf, getargs, getkwargs, getbroadcast
 # column args inside those method bodies.
 export Part, push_parts!!, nparams, lprior!
 export vbroadcasted, vmeta_sampling_rhs, _sb_submodel_rhs!
+
+# Internal @slic submodels from sbimpl.jl — exported so downstream
+# modules (bruno-ext via web-macro) that build their own SBBRMI-style
+# models with `StanBlocks.SlicModel(body, data, mod)` where `mod` is the
+# caller's namespace can still resolve the BRM built-in submodel names.
+export popefs, cdirichlet, c0dirichlet, c01dirichlet,
+       ranef_intercept, ranef_correlated, ranef_correlated_by,
+       _sb_mo, _sb_cat, _sb_ar1, _sb_s, _sb_me
 
 end # module

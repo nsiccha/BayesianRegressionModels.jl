@@ -12,6 +12,9 @@ using Statistics: quantile, median
 using FiniteDifferences: FiniteDifferences, central_fdm
 using BridgeStan: BridgeStan
 using StanLogDensityProblems: StanProblem
+using StanBlocks
+using Distributions
+using OrderedCollections: OrderedDict
 using WarmupHMC: initialize_mcmc, adaptive_warmup_mcmc
 using JSON
 using AlgebraOfVega: vega_head, auto_remap_node, with_plot_caption, config, pointinterval, lineribbon, to_node, ECDFPlot, VLines, nonnumeric
@@ -24,11 +27,20 @@ using BayesianRegressionModels
 # Pull in the types / functions the web app touches by unqualified name.
 using BayesianRegressionModels: AbstractColumn, MissingColumn, DataColumn,
     NamedColumn, ExprColumn, LikelihoodColumn, MaterializedColumn,
-    Data, MaybeData, BRMI, SBBRMI,
+    Data, MaybeData, BRMI, VBRMI, SBBRMI,
     assign, doublepipe, gr, gp, offset, zscale, center, standardize, protect,
     me, s, ar, OrderedLogistic,
     # Accessors used unqualified by html_expr.jl and stan_compile code.
-    name, getargs, getf, getkwargs, getbroadcast
+    name, getargs, getf, getkwargs, getbroadcast, getop,
+    # Macro / pipeline entry points called by Formula + stan_code.
+    parse!, _brm, stan_code, maybedata,
+    # Part machinery and push_parts!! (called by bruno-ext unqualified).
+    Part, push_parts!!, vbroadcasted
+# Extension hooks — use `import` (not `using`) so bruno-ext can ADD
+# methods to the same function binding rather than creating a shadowing
+# local function.
+import BayesianRegressionModels: _sb_submodel_rhs!, vmeta_sampling_rhs,
+    nparams, lprior!
 
 # Styled HTML rendering for BRMI / VBRMI cards stays web-side (pulls in
 # HTMX builders).
@@ -597,7 +609,7 @@ end
         )
 
         # ── stan branch ──
-        sbbrmi = SBBRMI(brmi)
+        sbbrmi = SBBRMI(brmi; mod=@__MODULE__)
 
         # Everything Stan-related bundled under `r.stan.*`. Nested access via
         # step_chain's tuple-path specs (e.g. `(:stan, :src)`).
@@ -753,13 +765,13 @@ end
             # node called `fetchindex!(status, …, pathfinder, instance, init)`.
             "Pathfinder(maxiters=$maxiters)"
             pathfinder(instance, init; rng=Xoshiro(42), maxiters=100) =
-                initialize_mcmc(StanProblem(instance), init; rng, progress=__status__, maxiters)
+                initialize_mcmc(StanProblem(instance; nan_on_error=true), init; rng, progress=__status__, maxiters)
             # IP: full Stan + WarmupHMC fit. Same progress-hooking pattern.
             # Returns a rich NamedTuple with `.posterior_position`, `.ess`,
             # `.n_divergent_samples`, etc.
             "WarmupHMC(n_draws=$n_draws)"
             posterior_warmup(instance, init; rng=Xoshiro(42), n_draws=200) =
-                adaptive_warmup_mcmc(rng, StanProblem(instance); init, n_draws, progress=__status__)
+                adaptive_warmup_mcmc(rng, StanProblem(instance; nan_on_error=true); init, n_draws, progress=__status__)
             # Gaussian-approximation draws from Pathfinder. Reads the IP via
             # `@memo` so if `compute_steps` already computed it with progress
             # nesting, we get the cached value for free.

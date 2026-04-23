@@ -229,7 +229,7 @@ struct SBBRMI{P<:BRMI, M, D<:AbstractDict}
     data::D
 end
 
-SBBRMI(brmi::BRMI) = begin
+SBBRMI(brmi::BRMI; mod::Module=@__MODULE__) = begin
     stmts = Any[]
     data = Dict{Symbol,Any}()
     # Prepass: stash every data-backed NamedColumn so later intercept-only
@@ -243,7 +243,7 @@ SBBRMI(brmi::BRMI) = begin
         _sb_emit!(stmts, data, key, parent(op))
     end
     body = Expr(:block, stmts...)
-    model = StanBlocks.SlicModel(body, data, @__MODULE__)
+    model = StanBlocks.SlicModel(body, data, mod)
     SBBRMI(brmi, model, data)
 end
 
