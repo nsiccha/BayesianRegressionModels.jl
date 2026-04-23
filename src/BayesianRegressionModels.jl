@@ -24,7 +24,7 @@ export assign, doublepipe, gr, gp, offset, zscale, center, standardize, protect
 export me, s, ar, OrderedLogistic
 export Data, MaybeData
 export AbstractColumn, MissingColumn, DataColumn, NamedColumn,
-       ExprColumn, LikelihoodColumn
+       ExprColumn, LikelihoodColumn, MaterializedColumn
 export BRMI, SBBRMI
 
 end # module

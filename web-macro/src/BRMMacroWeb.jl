@@ -23,9 +23,12 @@ import AlgebraOfGraphics as AoG
 using BayesianRegressionModels
 # Pull in the types / functions the web app touches by unqualified name.
 using BayesianRegressionModels: AbstractColumn, MissingColumn, DataColumn,
-    NamedColumn, ExprColumn, LikelihoodColumn, Data, MaybeData, BRMI, SBBRMI,
+    NamedColumn, ExprColumn, LikelihoodColumn, MaterializedColumn,
+    Data, MaybeData, BRMI, SBBRMI,
     assign, doublepipe, gr, gp, offset, zscale, center, standardize, protect,
-    me, s, ar, OrderedLogistic
+    me, s, ar, OrderedLogistic,
+    # Accessors used unqualified by html_expr.jl and stan_compile code.
+    name, getargs, getf, getkwargs, getbroadcast
 
 # Styled HTML rendering for BRMI / VBRMI cards stays web-side (pulls in
 # HTMX builders).
