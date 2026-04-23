@@ -14,6 +14,7 @@ using StanBlocks
 # migrate to macro.jl once the frontend agent adds shared stubs.
 function me end
 function s end
+function ar end
 
 const popefs = StanBlocks.@slic begin
     n_covariates = dims(X)[2]
@@ -103,6 +104,32 @@ end
 const _sb_cat = StanBlocks.@slic begin
     beta ~ std_normal(; n=n_levels - 1)
     return append_row(0., beta)[x]
+end
+
+# Minimal `ar(time, p=1)` autoregressive submodel. Adds an AR(1) noise process
+# `u[t] = phi * u[t-1] + epsilon[t]` (with `u[1] = epsilon[1]`; no stationary
+# init) to the linear predictor. `phi` is parameterized via `tanh(phi_raw)` so
+# it stays in (-1, 1) under a `std_normal` prior on `phi_raw`. Rows are
+# assumed to already be in time order; the `time` arg is used only as a
+# length probe (explicit sort by time is a follow-up). Only `p=1` is
+# supported for the first pass.
+StanBlocks.@deffun begin
+    ar1_recurse(phi::real, epsilon::vector[n], n::int)::vector[n] = begin
+        u = rep_vector(0., n)
+        u[1] = epsilon[1]
+        for t in 2:n
+            u[t] = phi * u[t-1] + epsilon[t]
+        end
+        u
+    end
+end
+
+const _sb_ar1 = StanBlocks.@slic begin
+    n_obs = num_elements(time)
+    phi_raw ~ std_normal()
+    phi = tanh(phi_raw)
+    epsilon ~ std_normal(; n=n_obs)
+    return ar1_recurse(phi, epsilon, n_obs)
 end
 
 # Minimal `s(x)` cubic-spline predictor. Uses a truncated-power basis for a
@@ -651,8 +678,31 @@ _sb_predictor_term!(stmts, data, ::typeof(s), t) = begin
     push!(stmts, :($col_name ~ _sb_s(; X_basis=$X_name)))
     col_name
 end
+# `ar(time; p=1)` AR(1) residual submodel. Routes to `_sb_ar1`, which owns the
+# phi / epsilon parameters and returns the per-row u[t] as a single length-N
+# column. popefs multiplies by an overall beta -- harmless, but a direct-
+# summand variant would skip it.
+_sb_predictor_term!(stmts, data, ::typeof(ar), t) = begin
+    args = getargs(t)
+    kw = getkwargs(t)
+    p = get(kw, :p, 1)
+    p == 1 || error("sbimpl: `ar(time; p=$p)` only supports p=1 so far")
+    length(args) == 1 || error("sbimpl: `ar(time; p=1)` expects 1 positional arg, got $(length(args))")
+    time = only(args)
+    time isa NamedColumn || error("sbimpl: `ar(time)` expects a NamedColumn, got $(typeof(time))")
+    backing = parent(time)
+    backing isa DataColumn || error("sbimpl: `ar($(name(time)))` expects a raw data column, got $(typeof(backing))")
+    xname = name(time)
+    # Ensure the time column lands in `data`. The prepass already handles this
+    # for named data columns, but be defensive -- the submodel uses it as a
+    # length probe via `num_elements(time)`.
+    data[xname] = collect(Float64, parent(backing))
+    col_name = Symbol(:ar_, xname)
+    push!(stmts, :($col_name ~ _sb_ar1(; time=$xname)))
+    col_name
+end
 _sb_predictor_term!(_, _, f, _) =
-    error("sbimpl: unsupported predictor-term function `$f` (supported: `mo`, `mo1`, `me`, `s`)")
+    error("sbimpl: unsupported predictor-term function `$f` (supported: `mo`, `mo1`, `me`, `s`, `ar`)")
 
 _sb_n_obs_probe(terms) = begin
     for t in terms
