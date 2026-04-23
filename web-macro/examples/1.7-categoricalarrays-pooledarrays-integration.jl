@@ -1,16 +1,22 @@
 # label: 1.7 CategoricalArrays / PooledArrays integration
 # tier: 1
-# status: deprioritized
+# status: open
 #=
 **What it is.** When the input column is already a `CategoricalVector` or a `PooledArray`, the dense level mapping is already computed and stored in the column's `.refs` field. Use it directly instead of rebuilding via `Dict`.
 
 **Why it matters.** Most real-world DataFrames use `CategoricalArrays.jl` for factor columns. Skipping the rebuild eliminates allocation entirely for the common case and gets us "for free" interop with the standard categorical-data ecosystem.
 
+**Status: done in sbimpl (CategoricalArrays).** `_sb_level_index(raw::CA.CategoricalVector)` in sbimpl.jl already dispatches to `CA.levelcode` + `CA.levels` and skips the Dict path. `PooledArrays` support is not yet in sbimpl; add a dispatch there if/when a real dataset needs it.
+
+**Remaining gaps.**
+- vimpl `_level_index` on plain `AbstractVector` still issues a `@warn` and builds a Dict (the fallback path).
+- `Dataset` in `BRMMacroWeb.jl` does not yet expose a `CategoricalVector`-backed column, so the hot path is not exercised in examples. Adding one would be the smallest end-to-end verification.
+
 **Implementation.** Two design choices:
 - **Hard dep**: add `CategoricalArrays` to vimpl.jl's deps, dispatch on `CategoricalVector`, read `levelcode.(col)` and `levels(col)` directly.
 - **Duck-typed**: sniff for the `.refs` field and `levels` method without importing the package, falling back to the generic Dict path.
 
-Recommend hard dep — it's the standard for tabular Julia code, and the duck-type path is more code with no real win. Same for `PooledArrays`.
+Recommend hard dep -- it's the standard for tabular Julia code, and the duck-type path is more code with no real win. Same for `PooledArrays`.
 
 The actual integration is small once the design is picked: a method specialization in `_gc_idx` and in the categorical-predictor path. Composes with the caching TODO above.
 
