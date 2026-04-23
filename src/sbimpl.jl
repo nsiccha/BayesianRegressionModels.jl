@@ -107,13 +107,17 @@ end
 # where s = stratum_idx[g]. Uses SB's `lkj_corr_cholesky_lpdfs` array-broadcast
 # (one-liner added to StanBlocks.jl builtins) so L's sampling statement
 # vectorizes across strata.
+# `L[k, :, :]` / `tau[k, :]` / `z[g, :]` forms are used instead of `L[k]` etc.
+# because StanBlocks' `tracetype` only resolves colon-indexing through matrix
+# axes, not single-int indexing into an `array[N] T` collection. When StanBlocks
+# adds a scalar-int-into-array tracetype rule, these can simplify to `L[k]` etc.
 const ranef_correlated_by = StanBlocks.@slic begin
     L   ~ lkj_corr_cholesky(1.; n=n_terms, m=n_strata)
     tau ~ std_normal(; n=n_terms, m=n_strata, lower=0., type=vector)
     z   ~ std_normal(; n=n_terms, m=n_groups, type=vector)
     b = rep_matrix(0., n_groups, n_terms)
     for g in 1:n_groups
-        b[g, :] = (diag_pre_multiply(tau[stratum_idx[g]], L[stratum_idx[g]]) * z[g])'
+        b[g, :] = (diag_pre_multiply(tau[stratum_idx[g], :], L[stratum_idx[g], :, :]) * z[g, :])'
     end
     return rows_dot_product(Z, b[group_idx, :])
 end
@@ -127,7 +131,7 @@ const ranef_correlated_by_draws = StanBlocks.@slic begin
     z   ~ std_normal(; n=n_terms, m=n_groups, type=vector)
     b = rep_matrix(0., n_groups, n_terms)
     for g in 1:n_groups
-        b[g, :] = (diag_pre_multiply(tau[stratum_idx[g]], L[stratum_idx[g]]) * z[g])'
+        b[g, :] = (diag_pre_multiply(tau[stratum_idx[g], :], L[stratum_idx[g], :, :]) * z[g, :])'
     end
     return b   # n_groups x n_terms
 end
