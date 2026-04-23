@@ -90,12 +90,31 @@ elseif x.head == :(=)
     :(@n $lhs = @x $assign($(xname(lhs)), $rhs))
 elseif isxcall(x, :~)
     _, lhs, rhs = x.args
+    # Shield brms-style `(e | ID | g)` ranef IDs from parselocals! so the bare
+    # ID symbol doesn't get registered as a data-column name. Left-associative
+    # `|` lowers to `Expr(:call, :|, Expr(:call, :|, e, id), g)`; rewrite to a
+    # three-arg `|` whose middle is a QuoteNode so parselocals! treats it as a
+    # literal, not a bare Symbol. _x then sees the three-arg form and emits an
+    # ExprColumn{|} with the id as a Symbol value.
+    rhs = rewrite_ranef_ids(rhs)
     parselocals!(rhs; info, val=:nonlocal)
     parselocals!(lhs; info, val=:maybelocal)
-    :(@n $lhs = @x $x)
+    :(@n $lhs = @x $(Expr(:call, :~, lhs, rhs)))
 else
     dump(x)
     error("Don't know how to handle parse!($x)!")
+end
+rewrite_ranef_ids(x) = x
+rewrite_ranef_ids(x::Expr) = if isxcall(x, :|) && length(x.args) == 3 &&
+                                isxcall(x.args[2], :|) && length(x.args[2].args) == 3 &&
+                                x.args[2].args[3] isa Symbol
+    inner = x.args[2]
+    lhs = rewrite_ranef_ids(inner.args[2])
+    id_sym = inner.args[3]
+    g = rewrite_ranef_ids(x.args[3])
+    Expr(:call, :|, lhs, QuoteNode(id_sym), g)
+else
+    Expr(x.head, rewrite_ranef_ids.(x.args)...)
 end
 parselocals!(x; kwargs...) = x
 parselocals!(x::Symbol; info, val) = get!(info.alllocals, x, val)

@@ -84,6 +84,18 @@ const ranef_correlated = StanBlocks.@slic begin
     return rows_dot_product(Z, b[group_idx, :])
 end
 
+# Cross-formula correlated ranef draws for brms-style `(e | ID | g)` buckets.
+# Same parameterization as `ranef_correlated` but returns the raw per-group
+# matrix `b` (n_groups x n_terms) so multiple sub-formulas can each slice out
+# their own column(s) and apply their own Z separately.
+const ranef_correlated_draws = StanBlocks.@slic begin
+    L      ~ lkj_corr_cholesky(1.; n=n_terms)
+    tau    ~ std_normal(; n=n_terms, lower=0.)
+    z_flat ~ std_normal(; n=n_terms * n_groups)
+    z = reshape(z_flat, n_terms, n_groups)
+    return (diag_pre_multiply(tau, L) * z)'   # n_groups x n_terms
+end
+
 # `(expr | gr(g, by=b))` stratified random effects: independent LKJ-Cholesky +
 # tau per level of `b`, so each stratum has its own full covariance structure.
 # `stratum_idx[g]` maps each group-level to its stratum (walker pre-computes it
@@ -232,15 +244,21 @@ end
 SBBRMI(brmi::BRMI; mod::Module=@__MODULE__) = begin
     stmts = Any[]
     data = Dict{Symbol,Any}()
-    # Prepass: stash every data-backed NamedColumn so later intercept-only
+    # Prepass 1: stash every data-backed NamedColumn so later intercept-only
     # predictors have a length probe to hang `rep_vector(1., num_elements(...))`
     # off, regardless of iteration order.
     for (_, op) in pairs(brmi.operations)
         _sb_collect_data!(data, op)
     end
+    # Prepass 2: collect brms-style `|ID|` ranef buckets across all sub-formulas,
+    # emit one shared ranef_correlated_draws per bucket, and build a lookup
+    # `(brmi_key, (id_sym, group_key)) => (bucket_name, col_range, idx_name, suffix)`
+    # for per-sub-formula emission below.
+    id_buckets = _sb_collect_id_buckets(brmi)
+    id_lookup = _sb_emit_id_buckets!(stmts, data, id_buckets)
     for (key, op) in pairs(brmi.operations)
         op isa NamedColumn || error("sbimpl: top-level op `$key` is not a NamedColumn")
-        _sb_emit!(stmts, data, key, parent(op))
+        _sb_emit!(stmts, data, key, parent(op); id_lookup)
     end
     body = Expr(:block, stmts...)
     model = StanBlocks.SlicModel(body, data, mod)
@@ -266,24 +284,27 @@ end
 
 # ---- top-level op dispatch ---------------------------------------------------
 
-_sb_emit!(stmts, data, key, op::ExprColumn) = _sb_emit_expr!(stmts, data, key, getf(op), op)
+_sb_emit!(stmts, data, key, op::ExprColumn; id_lookup=_sb_empty_id_lookup()) =
+    _sb_emit_expr!(stmts, data, key, getf(op), op; id_lookup)
 # Raw data / missing columns appear as top-level ops when the formula mentions
 # them as bare references (e.g. `c2` in `loc ~ 1 + c2`). Nothing to emit — the
 # prepass already stashed data columns in `data`.
-_sb_emit!(_, _, _, ::DataColumn) = nothing
-_sb_emit!(_, _, _, ::MissingColumn) = nothing
-_sb_emit!(_, _, key, op) = error("sbimpl: top-level op for `$key` not an ExprColumn (got $(typeof(op)))")
+_sb_emit!(_, _, _, ::DataColumn; kwargs...) = nothing
+_sb_emit!(_, _, _, ::MissingColumn; kwargs...) = nothing
+_sb_emit!(_, _, key, op; kwargs...) = error("sbimpl: top-level op for `$key` not an ExprColumn (got $(typeof(op)))")
 
-_sb_emit_expr!(stmts, data, key, ::typeof(~), op) = begin
+_sb_emit_expr!(stmts, data, key, ::typeof(~), op; id_lookup=_sb_empty_id_lookup()) = begin
     lhs, rhs = getargs(op, 2)
-    _sb_sampling!(stmts, data, key, lhs, rhs)
+    _sb_sampling!(stmts, data, key, lhs, rhs; id_lookup)
 end
-_sb_emit_expr!(stmts, data, key, ::typeof(assign), op) = begin
+_sb_emit_expr!(stmts, data, key, ::typeof(assign), op; id_lookup=_sb_empty_id_lookup()) = begin
     _, rhs = getargs(op, 2)
     target_expr = _sb_scalar_expr(rhs, data)
     push!(stmts, :($key = $target_expr))
 end
-_sb_emit_expr!(_, _, key, f, _) = error("sbimpl: unsupported top-level op `$f` for `$key`")
+_sb_emit_expr!(_, _, key, f, _; kwargs...) = error("sbimpl: unsupported top-level op `$f` for `$key`")
+
+_sb_empty_id_lookup() = Dict{Tuple{Symbol,Tuple{Symbol,Any}}, Any}()
 
 
 # ---- sampling: likelihood vs linear-predictor split --------------------------
@@ -298,7 +319,7 @@ _sb_submodel_rhs!(stmts, data, target, f, rhs) = nothing
 
 # LHS backed by real data => this is a likelihood. Record the observed values
 # under the formula name in `data` and emit `key ~ dist(args...)`.
-_sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs) = begin
+_sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lookup()) = begin
     backing = parent(lhs)
     if backing isa DataColumn
         data[key] = parent(backing)
@@ -308,7 +329,7 @@ _sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs) = begin
            _sb_submodel_rhs!(stmts, data, key, getf(rhs), rhs) !== nothing
             return
         end
-        _sb_linear_predictor!(stmts, data, key, rhs)
+        _sb_linear_predictor!(stmts, data, key, rhs; id_lookup, brmi_key=key)
     else
         error("sbimpl: unsupported LHS backing for `$key` ($(typeof(backing)))")
     end
@@ -319,21 +340,23 @@ end
 # response. Mirrors vimpl's `inverse(getf(lhs))` path — any link whose Julia
 # `inverse` is a function with a Stan-known name (log/exp/logit/logistic/
 # sqrt/square, ...) works; unknown links error at transpile time.
-_sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs) = begin
+_sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup()) = begin
     f = getf(lhs)
     inner = only(getargs(lhs))
     inner isa NamedColumn || error("sbimpl: expected NamedColumn inside link, got $(typeof(inner))")
     inv_f = InverseFunctions.inverse(f)
     inner_name = name(inner)
     pre_name = Symbol(nameof(f), :_, inner_name)
-    _sb_linear_predictor!(stmts, data, pre_name, rhs)
+    _sb_linear_predictor!(stmts, data, pre_name, rhs; id_lookup, brmi_key=key)
     push!(stmts, :($inner_name = $(Symbol(nameof(inv_f)))($pre_name)))
 end
 
 
 # ---- linear predictor: emit `X_<name> = hcat(...); <name> ~ popefs(; X=X_<name>)` --
 
-function _sb_linear_predictor!(stmts, data, target::Symbol, rhs)
+function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
+                                id_lookup=_sb_empty_id_lookup(),
+                                brmi_key::Symbol=target)
     terms = _sb_terms(rhs)
     pop_terms    = Any[]
     ran_terms    = Any[]  # `(expr | group)` -> collected per-group below
@@ -369,7 +392,7 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs)
         _sb_emit_direct!(stmts, data, target, dt, summands)
     end
 
-    _sb_emit_ranefs!(stmts, data, target, ran_terms, summands)
+    _sb_emit_ranefs!(stmts, data, target, ran_terms, summands; id_lookup, brmi_key)
 
     if length(summands) == 1
         push!(stmts, :($target = $(only(summands))))
@@ -457,8 +480,10 @@ end
 # `(... | rhs)` -> walker-side group descriptor. Bare NamedColumn and `gr(g)`
 # (no kwargs) both collapse to the inner NamedColumn (plain correlated block);
 # `gr(g; by=b)` returns `(group, by)` so the emitter allocates the stratified
-# `ranef_correlated_by` block. Mirrors vimpl's `_normalize_group`.
-_sb_normalize_group(g::NamedColumn) = g
+# `ranef_correlated_by` block. Mirrors vimpl's `_normalize_group`. Also extracts
+# brms's `gr(g, id=<sym|str>)`, producing an id Symbol which the caller carries
+# alongside the group descriptor to drive cross-formula bucket coalescing.
+_sb_normalize_group(g::NamedColumn) = (g, nothing)
 _sb_normalize_group(g::ExprColumn) = begin
     getf(g) === gr || error("sbimpl: expected NamedColumn or `gr(...)` on RHS of `|`, got `$(getf(g))`")
     args = getargs(g); kw = getkwargs(g)
@@ -466,9 +491,17 @@ _sb_normalize_group(g::ExprColumn) = begin
     group = args[1]
     group isa NamedColumn || error("sbimpl: `gr(...)` expects a NamedColumn group, got $(typeof(group))")
     by = get(kw, :by, nothing)
-    by === nothing && return group
+    raw_id = get(kw, :id, nothing)
+    id_sym = raw_id === nothing ? nothing :
+             raw_id isa Symbol ? raw_id :
+             raw_id isa AbstractString ? Symbol(raw_id) :
+             error("sbimpl: `gr(...; id=...)` expects a Symbol or String, got $(typeof(raw_id))")
+    if by === nothing
+        return (group, id_sym)
+    end
+    id_sym === nothing || error("sbimpl: `gr(g, by=b, id=...)` is not supported yet (v1)")
     by isa NamedColumn || error("sbimpl: `gr(...; by=...)` expects a NamedColumn for `by`, got $(typeof(by))")
-    (group, by)
+    ((group, by), nothing)
 end
 _sb_normalize_group(g) = error("sbimpl: expected NamedColumn or `gr(...)` on RHS of `|`, got $(typeof(g))")
 
@@ -476,6 +509,29 @@ _sb_normalize_group(g) = error("sbimpl: expected NamedColumn or `gr(...)` on RHS
 # `gr(g, by=b)` -> `(Symbol, Symbol)` so the two don't accidentally merge.
 _sb_group_key(g::NamedColumn) = name(g)
 _sb_group_key(g::Tuple{NamedColumn,NamedColumn}) = (name(g[1]), name(g[2]))
+
+# Normalize `(expr | group)` vs `(expr | id | group)` into (id_sym, lhs, descriptor)
+# where id_sym === nothing signals the plain (non-ID'd) case. Surface-level
+# `gr(g, id=...)` with a plain `|` likewise produces a non-nothing id_sym.
+# `|` rewritten by macro.jl: ExprColumn{|}(lhs, id_sym::Symbol, group) for `|ID|`.
+function _sb_ranef_parts(rt::ExprColumn)
+    getf(rt) === (|) || error("sbimpl: expected `|` ExprColumn, got `$(getf(rt))`")
+    args = getargs(rt)
+    if length(args) == 2
+        lhs, raw_group = args
+        desc, id_sym = _sb_normalize_group(raw_group)
+        (id_sym, lhs, desc)
+    elseif length(args) == 3
+        lhs, id_sym, raw_group = args
+        id_sym isa Symbol || error("sbimpl: `(e | ID | g)` middle must be a Symbol, got $(typeof(id_sym))")
+        desc, gr_id_sym = _sb_normalize_group(raw_group)
+        gr_id_sym === nothing ||
+            error("sbimpl: `(e | ID | g)` cannot also carry `gr(g, id=...)` (got `$gr_id_sym`)")
+        (id_sym, lhs, desc)
+    else
+        error("sbimpl: malformed ranef term, expected 2 or 3 args, got $(length(args))")
+    end
+end
 
 # Per-group level of `g` -> stratum level of `by`. Errors if any group level
 # straddles multiple strata. Ported from vimpl's `_stratum_idx`.
@@ -492,27 +548,42 @@ _sb_stratum_idx(g_idx::AbstractVector{Int}, b_idx::AbstractVector{Int}, gname, b
     mapping
 end
 
-function _sb_emit_ranefs!(stmts, data, target::Symbol, ran_terms, summands)
+function _sb_emit_ranefs!(stmts, data, target::Symbol, ran_terms, summands;
+                           id_lookup=_sb_empty_id_lookup(),
+                           brmi_key::Symbol=target)
     isempty(ran_terms) && return
-    # Group `(expr | g)` / `(expr | gr(g, by=b))` terms by normalized group key,
-    # preserving first-seen order. Bare-NamedColumn and gr-by groups key
-    # differently so they never coalesce.
-    keys_seen = Any[]
-    by_group = Dict{Any, Vector{Any}}()
-    descs = Dict{Any, Any}()  # key -> normalized group descriptor
+    # Partition: ID'd terms route to the pre-emitted shared bucket; plain terms
+    # coalesce per-target via the existing `ranef_correlated` block. Bare-
+    # NamedColumn and gr-by groups key differently so they never coalesce.
+    plain_keys_seen = Any[]
+    plain_by_group = Dict{Any, Vector{Any}}()
+    plain_descs = Dict{Any, Any}()
+    id_keys_seen = Any[]
+    id_terms_by_bucket = Dict{Tuple{Symbol,Any}, Vector{Any}}()
     for rt in ran_terms
-        lhs, raw_group = getargs(rt, 2)
-        g = _sb_normalize_group(raw_group)
-        k = _sb_group_key(g)
-        haskey(by_group, k) || (push!(keys_seen, k); by_group[k] = Any[]; descs[k] = g)
-        # Flatten `lhs` on `+` (same walker as pop terms; reuses `0` drop).
-        append!(by_group[k], _sb_terms(lhs))
+        id_sym, lhs, desc = _sb_ranef_parts(rt)
+        if id_sym === nothing
+            k = _sb_group_key(desc)
+            haskey(plain_by_group, k) || (push!(plain_keys_seen, k); plain_by_group[k] = Any[]; plain_descs[k] = desc)
+            append!(plain_by_group[k], _sb_terms(lhs))
+        else
+            k = (id_sym, _sb_group_key(desc))
+            haskey(id_terms_by_bucket, k) || (push!(id_keys_seen, k); id_terms_by_bucket[k] = Any[])
+            append!(id_terms_by_bucket[k], _sb_terms(lhs))
+        end
     end
-    for k in keys_seen
-        gterms = by_group[k]
-        desc = descs[k]
+    for k in plain_keys_seen
+        gterms = plain_by_group[k]
+        desc = plain_descs[k]
         isempty(gterms) && error("sbimpl: ranef `(… | $k)` has no terms after dropping `0`")
         _sb_emit_ranef_block!(stmts, data, target, desc, gterms, summands)
+    end
+    for k in id_keys_seen
+        gterms = id_terms_by_bucket[k]
+        isempty(gterms) && error("sbimpl: ranef `(… | $(k[1]) | $(k[2]))` has no terms after dropping `0`")
+        info = get(id_lookup, (brmi_key, k), nothing)
+        info === nothing && error("sbimpl: internal — no pre-emitted bucket for (target=$brmi_key, id=$(k[1]), group=$(k[2]))")
+        _sb_emit_id_ranef_block!(stmts, data, target, info, gterms, summands)
     end
 end
 
@@ -581,6 +652,132 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::Tuple{NamedCo
         Z=$Z_name, group_idx=$idx_name,
         n_groups=$n_name, n_terms=$k_name,
         stratum_idx=$s_idx_name, n_strata=$n_strata_nm)))
+    push!(summands, r_name)
+end
+
+# Pre-pass: harvest every `|ID|` ranef across all sub-formulas and bucket by
+# (id_sym, group_key). Returns an OrderedDict keyed by bucket, carrying
+# `(group_desc, per_target::Vector{Pair{Symbol, Vector}})` in appearance order.
+# Non-ID'd ranef terms are left alone for the existing per-target emitter.
+function _sb_collect_id_buckets(brmi::BRMI)
+    buckets = OrderedCollections.OrderedDict{Tuple{Symbol,Any}, Any}()
+    for (brmi_key, op_nc) in pairs(brmi.operations)
+        op = parent(op_nc)
+        op isa ExprColumn || continue
+        getf(op) === (~) || continue
+        _, rhs = getargs(op, 2)
+        rhs isa ExprColumn || continue
+        for t in _sb_terms(rhs)
+            t isa ExprColumn && getf(t) === (|) || continue
+            id_sym, lhs, desc = _sb_ranef_parts(t)
+            id_sym === nothing && continue
+            k = (id_sym, _sb_group_key(desc))
+            if !haskey(buckets, k)
+                buckets[k] = (group_desc=desc, per_target=Pair{Symbol,Vector{Any}}[])
+            else
+                # Consistency check: same id must always pair with the same group.
+                _sb_group_desc_matches(buckets[k].group_desc, desc) ||
+                    error("sbimpl: `|$id_sym|` sees conflicting grouping factors ($(buckets[k].group_desc) vs $desc)")
+            end
+            push!(buckets[k].per_target, brmi_key => _sb_terms(lhs))
+        end
+    end
+    buckets
+end
+
+_sb_group_desc_matches(a::NamedColumn, b::NamedColumn) = name(a) === name(b)
+_sb_group_desc_matches(a::Tuple{NamedColumn,NamedColumn}, b::Tuple{NamedColumn,NamedColumn}) =
+    name(a[1]) === name(b[1]) && name(a[2]) === name(b[2])
+_sb_group_desc_matches(_, _) = false
+
+# Column count for a ranef term (without emitting). `1` -> 1 (intercept);
+# scalar NamedColumn -> 1; categorical NamedColumn -> (n_levels-1); ExprColumn
+# submodel terms (mo/s/ar/me) -> 1.
+_sb_ranef_term_ncols(t::Int, _) = t == 0 ? 0 : 1
+_sb_ranef_term_ncols(t::NamedColumn, data) = if _sb_is_categorical(t)
+    _sb_level_index(parent(parent(t)))[1] - 1
+else
+    1
+end
+_sb_ranef_term_ncols(::ExprColumn, _) = 1
+_sb_ranef_term_ncols(t, _) = error("sbimpl: unsupported ranef term $(typeof(t)): $t")
+
+# Emit one shared `b_<id>_<g> ~ ranef_correlated_draws(...)` per bucket, compute
+# per-target column ranges, stash `group_idx` / `n_groups` / `n_terms_<id>_<g>`
+# in `data`, and return the lookup table consumed by `_sb_emit_ranefs!`.
+function _sb_emit_id_buckets!(stmts, data, buckets)
+    lookup = _sb_empty_id_lookup()
+    for (k, bucket) in pairs(buckets)
+        id_sym, _ = k
+        desc = bucket.group_desc
+        desc isa NamedColumn ||
+            error("sbimpl: `|$id_sym|` with `gr(..., by=...)` is not supported yet (v1)")
+        idx_name, n_name = _sb_ensure_group_data!(data, desc)
+        suffix = Symbol(id_sym, :_, name(desc))
+        bucket_name = Symbol(:b_, suffix)
+        n_terms_name = Symbol(:n_terms_, suffix)
+        cursor = 0
+        per_target_ranges = Pair{Symbol,UnitRange{Int}}[]
+        for (brmi_key, terms) in bucket.per_target
+            ncols = sum(_sb_ranef_term_ncols(t, data) for t in terms; init=0)
+            ncols > 0 || error("sbimpl: `|$id_sym|` bucket sees empty term list for target `$brmi_key`")
+            push!(per_target_ranges, brmi_key => (cursor+1):(cursor+ncols))
+            cursor += ncols
+        end
+        n_terms_total = cursor
+        n_terms_total >= 1 || error("sbimpl: `|$id_sym|` bucket has zero terms")
+        data[n_terms_name] = n_terms_total
+        push!(stmts, :($bucket_name ~ ranef_correlated_draws(;
+            group_idx=$idx_name, n_groups=$n_name, n_terms=$n_terms_name)))
+        for (brmi_key, cols) in per_target_ranges
+            lookup[(brmi_key, k)] = (; bucket_name, cols, idx_name, suffix)
+        end
+    end
+    lookup
+end
+
+# Ensure `group_idx` / `n_groups` for a plain-group ranef descriptor are stashed
+# in `data`. Idempotent — safe to call from both the ID pre-pass and the per-
+# target plain-block emitter. Returns the (idx_name, n_name) pair used in stmts.
+function _sb_ensure_group_data!(data, g::NamedColumn)
+    g_backing = parent(g)
+    g_backing isa DataColumn || error("sbimpl: group `$(name(g))` must be a raw data column")
+    gname = name(g)
+    idx_name = Symbol(gname, :_idx)
+    n_name   = Symbol(:n_, gname)
+    n_levels, g_idx = _sb_level_index(parent(g_backing))
+    data[idx_name] = g_idx
+    data[n_name]   = n_levels
+    idx_name, n_name
+end
+
+# Emit the per-sub-formula reference to a pre-emitted ID bucket: slice the
+# bucket's draw matrix at this target's column range, apply this target's Z,
+# and append the resulting per-row contribution to `summands`.
+function _sb_emit_id_ranef_block!(stmts, data, target::Symbol, info, gterms, summands)
+    (; bucket_name, cols, idx_name, suffix) = info
+    r_name = Symbol(:r_, target, :_, suffix)
+    col_exprs = Any[]
+    for t in gterms
+        _sb_ranef_cols!(col_exprs, data, stmts, t)
+    end
+    length(col_exprs) == length(cols) ||
+        error("sbimpl: id-bucket `$suffix` for target `$target`: expanded $(length(col_exprs)) columns but reserved $(length(cols)) — internal mismatch")
+    if length(cols) == 1
+        col_idx = first(cols)
+        if length(gterms) == 1 && gterms[1] === 1
+            # Intercept fast path: Z is all-ones, skip the elementwise multiply.
+            push!(stmts, :($r_name = $bucket_name[$idx_name, $col_idx]))
+        else
+            push!(stmts, :($r_name = $(col_exprs[1]) .* $bucket_name[$idx_name, $col_idx]))
+        end
+    else
+        Z_name       = Symbol(:Z_, target, :_, suffix)
+        col_idx_name = Symbol(:col_idx_, target, :_, suffix)
+        data[col_idx_name] = collect(Int, cols)
+        push!(stmts, :($Z_name = $(Expr(:call, :hcat, col_exprs...))))
+        push!(stmts, :($r_name = rows_dot_product($Z_name, $bucket_name[$idx_name, $col_idx_name])))
+    end
     push!(summands, r_name)
 end
 
