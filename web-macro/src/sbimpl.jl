@@ -8,6 +8,12 @@ using StanBlocks
 # depending on bruno. Duplication is intentional for now.
 # ==============================================================================
 
+# Formula-term stubs needed so the @brm macro can parse example formulas
+# whose parser side is not yet owned by macro.jl. Empty function bindings only;
+# the actual backend is implemented below (`_sb_predictor_term!`). These may
+# migrate to macro.jl once the frontend agent adds shared stubs.
+function me end
+
 const popefs = StanBlocks.@slic begin
     n_covariates = dims(X)[2]
     beta_pop ~ std_normal(; n=n_covariates)
@@ -96,6 +102,18 @@ end
 const _sb_cat = StanBlocks.@slic begin
     beta ~ std_normal(; n=n_levels - 1)
     return append_row(0., beta)[x]
+end
+
+# brms-style `me(x_obs, sd_x)` measurement-error predictor. The submodel
+# allocates a length-N latent `x_true` vector with prior `std_normal`. The
+# observation likelihood `x_obs ~ normal(x_true, sd_x)` is emitted at the
+# call site (not inside the submodel) because StanBlocks' activity analysis
+# drops sampling statements whose LHS is a submodel kwarg. The linear
+# predictor uses `x_true` via popefs's free beta, so this behaves like a
+# regular continuous covariate except the predictor values are parameters.
+const _sb_me = StanBlocks.@slic begin
+    x_true ~ std_normal(; n=num_elements(x_obs))
+    return x_true
 end
 
 # Categorical -> (n_levels::Int, per-row level index::Vector{Int}). Mirrors
@@ -539,8 +557,33 @@ _sb_predictor_term!(stmts, data, ::typeof(mo), t) = begin
     push!(stmts, :($col_name ~ _sb_mo(; x=$idx_name)))
     col_name
 end
+# Measurement-error predictor `me(x_obs, sd_x)`: emit a submodel that allocates
+# a length-N latent `me_<x>` with prior std_normal and an observation
+# likelihood `x_obs ~ normal(me_<x>, sd_x)`. Returns `me_<x>` as the predictor
+# column so popefs supplies a free beta. `sd_x` must be a positive constant;
+# per-row error sizes would require a vector kwarg and a tweaked submodel.
+_sb_predictor_term!(stmts, data, ::typeof(me), t) = begin
+    args = getargs(t)
+    length(args) == 2 || error("sbimpl: `me(x, sd)` expects 2 args, got $(length(args))")
+    inner, sd_arg = args
+    inner isa NamedColumn || error("sbimpl: `me(...)` expects a NamedColumn first arg, got $(typeof(inner))")
+    backing = parent(inner)
+    backing isa DataColumn || error("sbimpl: `me($(name(inner)), ...)` expects a raw data column, got $(typeof(backing))")
+    v = parent(backing)
+    v isa AbstractVector{<:Real} || error("sbimpl: `me($(name(inner)), ...)` expects a numeric data column, got $(typeof(v))")
+    sd_arg isa Real || error("sbimpl: `me(x, sd)` expects a numeric constant `sd`, got $(typeof(sd_arg))")
+    sd_arg > 0 || error("sbimpl: `me(x, sd)` expects sd > 0 (got $sd_arg)")
+    xname = name(inner)
+    data[xname] = collect(Float64, v)
+    sd_name = Symbol(:sd_, xname)
+    data[sd_name] = Float64(sd_arg)
+    col_name = Symbol(:me_, xname)
+    push!(stmts, :($col_name ~ _sb_me(; x_obs=$xname)))
+    push!(stmts, :($xname ~ normal($col_name, $sd_name)))
+    col_name
+end
 _sb_predictor_term!(_, _, f, _) =
-    error("sbimpl: unsupported predictor-term function `$f` (supported: `mo`, `mo1`)")
+    error("sbimpl: unsupported predictor-term function `$f` (supported: `mo`, `mo1`, `me`)")
 
 _sb_n_obs_probe(terms) = begin
     for t in terms
