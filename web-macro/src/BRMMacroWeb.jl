@@ -1093,8 +1093,10 @@ bin_y ~ Bernoulli(logistic(log_odds_b))
     # auto-converts to markdown when `Accept: text/plain` is requested, so the
     # same URL works for humans (browser) and agents (curl).
     #   curl -H 'Accept: text/plain' 'http://localhost:<port>/pipeline/sb_repro?formula=<url-encoded>'
-    @get sb_repro = begin
-        r = context!().run
+    # Shared renderer: takes a ready `run` context + the raw formula string and
+    # emits the bug-report HTML. Same output whether invoked via POST with an
+    # edited formula (`sb_repro`) or via GET by example slug (`sb_repro_example`).
+    _sb_repro_html(r, formula_str) = begin
         compile_out = try
             r.stan.lib
             "(compile succeeded — lib at `$(r.stan.lib)`)"
@@ -1104,7 +1106,7 @@ bin_y ~ Bernoulli(logistic(log_odds_b))
         h.div(
             h.h1("StanBlocks bug report"),
             h.h2("Formula"),
-            h.pre(formula),
+            h.pre(formula_str),
             h.h2("SlicModel body"),
             h.p(h.code("r.sbbrmi.model.model")),
             h.pre(r.sbbrmi.model.model),
@@ -1115,6 +1117,21 @@ bin_y ~ Bernoulli(logistic(log_odds_b))
             h.p(h.code("r.stan.lib")),
             h.pre(compile_out),
         )
+    end
+
+    @get sb_repro = _sb_repro_html(context!().run, formula)
+
+    # Saved-example entry point for external agents: GET by slug so curl/agents
+    # can reproduce a StanBlocks bug without POSTing a formula. The slug is the
+    # URL-safe name used by /examples/<slug>.
+    #   curl -H 'Accept: text/plain' 'http://.../pipeline/sb_repro_example?name=<slug>'
+    @get sb_repro_example(; name::AbstractString="") = begin
+        entry = __parent__.examples.example_store.find_by_slug(name)
+        isnothing(entry) && return h.div(
+            h.h1("Example not found"),
+            h.p("No example with slug ", h.code(name)),
+        )
+        _sb_repro_html(context(entry.label, entry.formula).run, entry.formula)
     end
 end
 
