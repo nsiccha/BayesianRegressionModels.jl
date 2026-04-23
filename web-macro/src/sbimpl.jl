@@ -643,21 +643,10 @@ _sb_predictor_term!(stmts, data, ::typeof(s), t) = begin
     backing isa DataColumn || error("sbimpl: `s($(name(inner)))` expects a raw data column, got $(typeof(backing))")
     v = parent(backing)
     v isa AbstractVector{<:Real} || error("sbimpl: `s($(name(inner)))` expects numeric data, got $(typeof(v))")
-    basis, n_basis = _sb_spline_basis_ncs(v; n_interior=2)
+    basis, _ = _sb_spline_basis_ncs(v; n_interior=2)
     xname = name(inner)
-    # Build the basis matrix inside the slic via `hcat` of per-column data
-    # kwargs -- same pattern popefs uses. Passing a Julia Matrix directly as
-    # a data kwarg triggers StanBlocks type-inference issues where the
-    # resulting `X_basis * coefs` length symbol doesn't unify with other
-    # N-indexed vectors downstream.
-    col_syms = Symbol[]
-    for j in 1:n_basis
-        cj = Symbol(:s_, xname, :_col, j)
-        data[cj] = collect(Float64, basis[:, j])
-        push!(col_syms, cj)
-    end
     X_name = Symbol(:X_basis_, xname)
-    push!(stmts, :($X_name = $(Expr(:call, :hcat, col_syms...))))
+    data[X_name] = basis
     col_name = Symbol(:s_, xname)
     push!(stmts, :($col_name ~ _sb_s(; X_basis=$X_name)))
     col_name

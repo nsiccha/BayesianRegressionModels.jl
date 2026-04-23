@@ -7,7 +7,7 @@
 
 **Why it matters.** Nonlinear effects without committing to a specific functional form. The de facto way to model dose-response curves, time effects, growth curves, spatial trends, ...
 
-**Status: `s(x)` first-pass done in sbimpl.** Emits a natural-cubic-spline truncated-power basis with 2 interior knots at 1/3 and 2/3 quantiles of `x` (5 basis columns: x, x^2, x^3, (x - k1)^3_+, (x - k2)^3_+). The submodel `_sb_s` puts a `std_normal` prior on the basis coefficients and returns `X_basis * coefs` as a single length-N column that popefs multiplies by an overall beta. The basis is built inside the slic via `hcat` of per-column data kwargs (passing a raw Julia Matrix as a data kwarg currently triggers a StanBlocks type-inference bug -- see sbimpl.jl comment on `_sb_predictor_term!(::typeof(s), ...)`).
+**Status: `s(x)` first-pass done in sbimpl.** Emits a natural-cubic-spline truncated-power basis with 2 interior knots at 1/3 and 2/3 quantiles of `x` (5 basis columns: x, x^2, x^3, (x - k1)^3_+, (x - k2)^3_+). The submodel `_sb_s` puts a `std_normal` prior on the basis coefficients and returns `X_basis * coefs` as a single length-N column that popefs multiplies by an overall beta. The basis matrix is passed as a raw `Matrix{Float64}` data kwarg.
 
 **Gaps.**
 - `bs(x, knots=...)`, `t2(x, y)`, `gp(x)` dispatches are not yet added.
