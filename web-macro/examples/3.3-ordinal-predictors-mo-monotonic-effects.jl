@@ -1,6 +1,7 @@
 # label: 3.3 ordinal predictors mo() (monotonic effects)
 # tier: 3
 # status: open
+# stages_pass: brmi,parse,slic_model,stan_code,stan_compile,stan_eval,stan_instantiate,stan_shapes,transform,wrap
 #=
 **What it is.** brms's `mo(x)` for an ordinal predictor with K levels: instead of `K-1` independent treatment-coded coefficients, fit a single "total effect" β plus a `K-1`-dim simplex of inter-level shape. Forces the effect to be monotonic in the ordering of `x`'s levels.
 

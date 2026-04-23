@@ -1,7 +1,7 @@
 module BRMMacroWeb
 
 using HTMXObjects
-using DynamicObjects: fetchindex!
+using DynamicObjects: fetchindex!, clear_mem_caches!
 using Treebars: polling_fetchindex, initialize_progress!,
                 prepare_progress!, with_prepared_progress,
                 htmx_treebar_styles
@@ -230,6 +230,18 @@ end
     formula = _parsed.formula
     slug    = replace(basename(path), r"\.jl$" => "")
 
+    # Per-stage pass/fail state, persisted as comma-separated stage names in
+    # `# stages_pass:` / `# stages_fail:` header lines. Empty / missing → no
+    # known state for that stage (rendered as unknown/gray indicator).
+    _parse_stage_set(key) = Set{Symbol}(
+        Symbol(strip(s)) for s in split(get(_parsed.header, key, ""), ",")
+        if !isempty(strip(s)))
+    stages_pass = _parse_stage_set("stages_pass")
+    stages_fail = _parse_stage_set("stages_fail")
+    _stage_pill_color = (pass="#2e7d32", fail="#a02828", unknown="#888")
+    stage_state(name) = name in stages_fail ? :fail :
+                        name in stages_pass ? :pass : :unknown
+
     border_color = get(_STATUS_COLORS, status, "#888")
     tier_label   = get(_TIER_LABELS,   tier,   "T$tier")
     tier_color   = get(_TIER_COLORS,   tier,   "#888")
@@ -277,85 +289,54 @@ end
         state_pill(:deprioritized, "✓ deprioritized", "deprioritize"),
     )
 
-    # Full pipeline stage list, mirroring the buttons on the main pipeline
-    # page. Each entry renders a button that GETs the corresponding /stage/:id
-    # and drops the response into this card's result div.
-    _stage_buttons = let
-        stages = [
-            "1. Parse"           => :parse,
-            "2. Transform"       => :transform,
-            "3. Wrap"            => :wrap,
-            "4. BRMI"            => :brmi,
-            "5. VBRMI"           => :vbrmi,
-            "6. Benchmark"       => :bench,
-            "5a. SlicModel"      => :slic_model,
-            "5b. StanCode"       => :stan_code,
-            "5c. StanCompile"    => :stan_compile,
-            "6a. StanInstantiate" => :stan_instantiate,
-            "6b. StanEval"       => :stan_eval,
-            "6b'. StanShapes"    => :stan_shapes,
-            "6c. StanGenerate"   => :stan_generate,
-            "6d. StanFit (PF)"   => :stan_fit_pathfinder,
-            "6d'. StanFit (Warmup)" => :stan_fit_warmup,
-        ]
-        [h.button(label;
-            type="button",
-            class="brm-branch-btn",
-            hx_get=string(query_url(__parent__.__parent__.pipeline/"stage/$id"; force=true)),
-            hx_include="closest form",
-            hx_target="#$result_id",
-            hx_swap="innerHTML") for (label, id) in stages]
-    end
-    formula_form = h.form(; class="brm-example-form")(
-        h.input(; type="hidden", name="label", value=label),
-        h.textarea(formula;
-            name="formula",
-            rows=max(3, count('\n', formula) + 1),
-            class="brm-example-textarea"),
-        _stage_buttons...,
-        h.button("SB repro ▶";
-            type="submit",
-            formaction=string(__parent__.__parent__.pipeline/"sb_repro"),
-            class="secondary"),
-    )
+    # Stage list pulled from AppContext.stage_labels so the order + names
+    # stay in sync with the pipeline page.
+    _stages = __parent__.__parent__.stage_labels
 
-    card = begin
-        children = Any[HTMXObjects.md_to_node(body)]
-        if formula !== nothing
-            push!(children, formula_form)
-            # Inline pipeline-result target — the form's hx_get fills this div
-            # with the pipeline output so the user sees the VBRMI/FD/stan-compile
-            # output right inside the card.
-            push!(children, h.div(;
-                id=result_id,
-                class="brm-example-result"))
-        end
-        # `:open` status → expanded; `:done`/`:deprioritized` → collapsed by
-        # default. Pills sit inside the <summary> so they're always reachable,
-        # but their onclick stops propagation so clicking a pill doesn't also
-        # toggle the disclosure.
-        h.article(;
-            id=card_id,
-            class="brm-example-card",
-            style="border-left-color:$border_color",
-        )(
-            h.details(; open=(status == :open))(
-                h.summary(; class="brm-example-summary")(
-                    tier_pill, " ",
-                    h.strong(label), " ",
-                    status_pills, " ",
-                    permalink,
-                ),
-                h.div(; class="brm-example-body")(children...),
-            ),
+    # Formula form with stage buttons. `push_url=true` in the standalone
+    # detail view makes each button push `/examples/<slug>?stage=<id>` into
+    # browser history (shareable, back/forward works); `push_url=false` in
+    # the list view leaves the URL at `/examples`.
+    formula_form(push_url::Bool) = begin
+        stage_btns = [
+            h.button(lbl;
+                type="button",
+                class="brm-branch-btn",
+                hx_get=string(query_url(__parent__.__parent__.pipeline/"stage/$id"; force=true)),
+                hx_include="closest form",
+                hx_target="#$result_id",
+                hx_swap="innerHTML",
+                (push_url ? (; hx_push_url="$(__parent__/slug)?stage=$id") : (;))...,
+            ) for (id, lbl) in _stages]
+        h.form(; class="brm-example-form")(
+            h.input(; type="hidden", name="label", value=label),
+            h.textarea(formula;
+                name="formula",
+                rows=max(3, count('\n', formula) + 1),
+                class="brm-example-textarea"),
+            stage_btns...,
+            h.button("SB repro ▶";
+                type="submit",
+                formaction=string(__parent__.__parent__.pipeline/"sb_repro"),
+                class="secondary"),
         )
     end
 
-    save!(; new_status=status, new_formula=formula) = begin
+    # Default card render (no stage pre-loaded; clicks on stage buttons
+    # populate the inline result div on demand). `card_with_preload("")`
+    # below handles both list-mode and (when called with a non-empty
+    # preload_stage) detail-mode.
+    card = card_with_preload("")
+
+    save!(; new_status=status, new_formula=formula,
+            new_stages_pass=stages_pass, new_stages_fail=stages_fail) = begin
         io = IOBuffer()
         println(io, "# label: ", label)
         println(io, "# tier: ", tier)
         println(io, "# status: ", new_status)
+        _fmt_stage_set(s) = join(sort(collect(String.(s))), ",")
+        isempty(new_stages_pass) || println(io, "# stages_pass: ", _fmt_stage_set(new_stages_pass))
+        isempty(new_stages_fail) || println(io, "# stages_fail: ", _fmt_stage_set(new_stages_fail))
         if !isempty(body)
             println(io, "#=")
             println(io, body)
@@ -373,6 +354,82 @@ end
 
     toggle_status!(target) =
         save!(; new_status = status == target ? :open : target)
+
+    # Mark a set of stage names as pass / fail and persist to disk. Passed
+    # stages remove from the fail set (and vice versa) so the most recent
+    # outcome wins. Returns the reloaded entry.
+    mark_stages!(; passed=Symbol[], failed=Symbol[]) = begin
+        new_pass = union(setdiff(stages_pass, failed), passed)
+        new_fail = union(setdiff(stages_fail, passed), failed)
+        save!(; new_stages_pass=new_pass, new_stages_fail=new_fail)
+    end
+
+    # Per-stage indicator pills rendered in the card summary. Each links to
+    # `/examples/<slug>?stage=<name>`, a shareable GET URL that loads the
+    # card with that stage's result pre-populated (without force=true).
+    stage_indicators = h.span(; class="brm-stage-indicators")(
+        [h.a(;
+            href="$(__parent__/slug)?stage=$id",
+            title="$lbl -- $(stage_state(id))",
+            onclick="event.stopPropagation()",
+            class="brm-stage-indicator",
+            style="background:$(_stage_pill_color[stage_state(id)])")(lbl)
+         for (id, lbl) in __parent__.__parent__.stage_labels]...
+    )
+
+    # Card renderer, parameterized by an optional `preload_stage`. When set,
+    # the result div is seeded with a `lazy(...)` that fires the stage GET
+    # on first view — so `/examples/<slug>?stage=<name>` shows the card with
+    # that stage's output already running/rendered (no click needed).
+    # Numeric sort attributes used by the client-side sort bar. Higher
+    # `brokenness` = more failed stages (fewer passes, more fails); zero when
+    # no stage state is recorded yet.
+    _sort_mtime      = stat(path).mtime
+    _sort_tier       = tier
+    _sort_complexity = formula === nothing ? 0 : length(formula)
+    _sort_brokenness = length(stages_fail) - length(stages_pass)
+    # 0 = open (top), 1 = done / deprioritized (bottom, tied). Ascending
+    # surfaces open work first; default-on below.
+    _sort_status     = status === :open ? 0 : 1
+    _sort_progress   = length(stages_pass)
+
+    card_with_preload(preload_stage::AbstractString; force_open::Bool=false) = begin
+        children = Any[HTMXObjects.md_to_node(body)]
+        if formula !== nothing
+            # Push URL on stage-button clicks only in the detail view
+            # (`force_open=true`); list view keeps URL at `/examples`.
+            push!(children, formula_form(force_open))
+            result_children = Any[]
+            isempty(preload_stage) || push!(result_children,
+                lazy(query_url(__parent__.__parent__.pipeline/"stage/$preload_stage";
+                               formula, label)))
+            push!(children, h.div(; id=result_id,
+                class="brm-example-result")(result_children...))
+        end
+        h.article(;
+            id=card_id,
+            class="brm-example-card",
+            style="border-left-color:$border_color",
+            data_mtime=string(_sort_mtime),
+            data_tier=string(_sort_tier),
+            data_complexity=string(_sort_complexity),
+            data_brokenness=string(_sort_brokenness),
+            data_status=string(_sort_status),
+            data_progress=string(_sort_progress),
+            data_label=label,
+        )(
+            h.details(; open=(force_open || status == :open))(
+                h.summary(; class="brm-example-summary")(
+                    tier_pill, " ",
+                    h.strong(label), " ",
+                    status_pills, " ",
+                    stage_indicators, " ",
+                    permalink,
+                ),
+                h.div(; class="brm-example-body")(children...),
+            ),
+        )
+    end
 end
 # Element-returning counterpart to `Base.findfirst(pred, coll)` (which returns an
 # index or `nothing`). Does the index-then-lookup dance once so callers don't.
@@ -508,13 +565,19 @@ end
             # invokes make, which skips when the .so is newer than the .stan —
             # so a cache hit resolves in milliseconds instead of re-running
             # the C++ build.
+            # Hash folds in the make-args so changing compile flags (e.g.
+            # adding STAN_THREADS=true) naturally routes to a fresh path and
+            # triggers a rebuild — BridgeStan doesn't support reloading a
+            # previously-dlopened .so, so we can't reuse old binaries.
+            _make_args = ["STAN_THREADS=true"]
             file = begin
-                p = joinpath(tempdir(), "brm_stan", string(hash(src)) * ".stan")
+                p = joinpath(tempdir(), "brm_stan",
+                             string(hash((src, _make_args))) * ".stan")
                 mkpath(dirname(p))
                 isfile(p) || write(p, src)
                 p
             end
-            lib      = BridgeStan.compile_model(file)
+            lib      = BridgeStan.compile_model(file; make_args=_make_args)
             # SB's `stan_data` walks the SlicModel → StanModel tracing which
             # auto-declares `_n` / `_m` sizes for every vector / matrix, then
             # `bridgestan_data` JSON-serializes with Stan's column-major
@@ -539,14 +602,26 @@ end
             generated_unc   = 0.1 .* randn(Xoshiro(44), dim, generated_n)
             generated_names = BridgeStan.param_names(instance; include_tp=true, include_gq=true)
             # One row per base parameter name (before any `.`), with the
-            # number of indexed entries. Scalar params have n_indices=1.
+            # number of indexed entries and Stan-block classification:
+            # P = parameter, TP = transformed parameter, GQ = generated
+            # quantity. Classification is derived from BridgeStan's
+            # param_names called with/without include_tp / include_gq.
             param_shapes_df = begin
+                p_names   = BridgeStan.param_names(instance)
+                p_tp_names = BridgeStan.param_names(instance; include_tp=true)
+                tp_set = Set(setdiff(p_tp_names, p_names))
+                gq_set = Set(setdiff(generated_names, p_tp_names))
+                classify(name) =
+                    name in tp_set ? "TP" : name in gq_set ? "GQ" : "P"
                 splits     = [split(nm, '.', limit=2) for nm in generated_names]
                 base_names = [String(first(s)) for s in splits]
-                uniq = unique(base_names)
+                kinds      = [classify(nm) for nm in generated_names]
+                uniq_base  = unique(base_names)
+                uniq_kind  = [kinds[findfirst(==(b), base_names)] for b in uniq_base]
                 DataFrame(
-                    param = uniq,
-                    n_indices = [count(==(p), base_names) for p in uniq],
+                    param = uniq_base,
+                    kind = uniq_kind,
+                    n_indices = [count(==(p), base_names) for p in uniq_base],
                 )
             end
             generated = constrain_draws(generated_unc, instance; rng_seed=45)
@@ -567,6 +642,22 @@ end
                     param = base_names,
                     index = indices,
                     truth = collect(truth_col),
+                )
+            end
+            # Parallel truth-df for fit plots: unconstrained parameter names
+            # + `fit_truth_unc` as the ground-truth values. Matches the
+            # `posterior_unc_names`-based long/wide/summary DFs on the fit
+            # path so the scatter overlay joins correctly.
+            truth_unc_df = begin
+                unc_names = BridgeStan.param_unc_names(fit_instance)
+                splits     = [split(nm, '.', limit=2) for nm in unc_names]
+                base_names = [String(first(s)) for s in splits]
+                parse_idx(s) = (v = tryparse(Int, s); isnothing(v) ? 0 : v)
+                indices    = [length(s) > 1 ? parse_idx(String(s[2])) : 0 for s in splits]
+                DataFrame(
+                    param = base_names,
+                    index = indices,
+                    truth = fit_truth_unc,
                 )
             end
             # Simulation-based calibration setup: pick one draw from the prior
@@ -592,15 +683,19 @@ end
                     push!(get!(Vector{Tuple{Vector{Int}, Float64}}, groups, base_name),
                           (idxs, col[i]))
                 end
+                # Preserve the original's element type so integer-valued data
+                # vars (Bernoulli outcomes, counts) stay integers after the
+                # override — Stan's int-typed data variables reject Float64s
+                # even when the values are exact (1.0, 0.0, …).
                 overrides = Dict{Symbol, Any}()
                 for (name, entries) in groups
+                    orig = base[name]
                     if length(entries) == 1 && isempty(entries[1][1])
-                        overrides[name] = entries[1][2]
+                        overrides[name] = convert(typeof(orig), entries[1][2])
                     else
-                        orig = base[name]
-                        out  = similar(orig, Float64)
+                        out = similar(orig)  # preserves eltype
                         for (idxs, v) in entries
-                            out[idxs...] = v
+                            out[idxs...] = v  # implicit convert to eltype(out)
                         end
                         overrides[name] = out
                     end
@@ -613,6 +708,14 @@ end
             # IP: Pathfinder init (fast, no MCMC). The `progress=__status__`
             # hook lets Treebars nest the 100 maxiters subtree under whatever
             # node called `fetchindex!(status, …, pathfinder, instance, init)`.
+            # TODO(DO): docstrings on IP properties inside nested inline
+            # `@struct` bodies trip precompile with
+            # `MethodError: Cannot convert GlobalRef to Symbol` at
+            # `dynamicstruct` line 1674 (`push!(macros, arg.args[1])`). Both
+            # interpolated (`"Pathfinder(maxiters=$maxiters)"`) and plain
+            # (`"Pathfinder"`) fail; same pattern works fine at level-0 (see
+            # `compute_steps` / `"Pipeline($name)"`). Re-add once DO agent
+            # fixes the nested-struct docstring handling.
             pathfinder(instance, init; rng=Xoshiro(42), maxiters=100) =
                 initialize_mcmc(StanProblem(instance), init; rng, progress=__status__, maxiters)
             # IP: full Stan + WarmupHMC fit. Same progress-hooking pattern.
@@ -631,9 +734,13 @@ end
             # posterior_warmup(instance, init).posterior_position`) to promote
             # the full fit, or expose a toggle via a param later.
             posterior = posterior_pathfinder
-            # Constrained posterior draws (+TP+GQ), plus (long, wide, summary).
-            posterior_constrained = constrain_draws(posterior, fit_instance; rng_seed=46)
-            posterior_dfs = dfs_from_constrained(posterior_constrained, generated_names)
+            # For fit plots we only want the unconstrained parameters (the
+            # raw sampler output) — constrained/TP/GQ adds lots of derived
+            # noise (y_gen, y_likelihood) that drowns out the actual
+            # parameter posterior. Keep prior-predictive plots on the full
+            # constrained set above; fit plots use `param_unc_names` here.
+            posterior_unc_names = BridgeStan.param_unc_names(fit_instance)
+            posterior_dfs = dfs_from_constrained(posterior, posterior_unc_names)
             posterior_long_df    = posterior_dfs.long
             posterior_wide_df    = posterior_dfs.wide
             posterior_summary_df = posterior_dfs.summary
@@ -641,8 +748,7 @@ end
             # Parallel set for the warmup+MCMC path. The warmup IP cache is
             # warmed by `fetchindex!` in `compute_steps`; `@memo` hits it here.
             posterior_warmup_draws = (@memo posterior_warmup(fit_instance, init)).posterior_position
-            posterior_warmup_constrained = constrain_draws(posterior_warmup_draws, fit_instance; rng_seed=47)
-            posterior_warmup_dfs = dfs_from_constrained(posterior_warmup_constrained, generated_names)
+            posterior_warmup_dfs = dfs_from_constrained(posterior_warmup_draws, posterior_unc_names)
             posterior_warmup_long_df    = posterior_warmup_dfs.long
             posterior_warmup_wide_df    = posterior_warmup_dfs.wide
             posterior_warmup_summary_df = posterior_warmup_dfs.summary
@@ -666,15 +772,17 @@ end
         run = __parent__.run(formula, namespace)
     end
 
-    # DAG of step chains — one NamedTuple per stage target, keyed by step names
-    # in dependency order. Built incrementally via `merge`: each stage's chain
-    # is its parent's chain plus the one step it adds. The DAG branches are
-    # visible in the `merge` calls (e.g. `slic_model = merge(brmi, …)` forks
-    # off of `brmi`, parallel to `vbrmi`). Inner values are one of:
+    # Expanded DAG of step chains — one NamedTuple per stage target, keyed by
+    # step names in dependency order. Built incrementally via `merge`: each
+    # stage's chain is its parent's chain plus the one step it adds. Fork
+    # points are visible in the `merge` calls (e.g. `slic_model = merge(brmi,
+    # …)` forks off of `brmi`, parallel to `vbrmi`). Inner values are one of:
     #   - Symbol                       → `r.<sym>` (top-level property)
     #   - Tuple{Vararg{Symbol}}        → nested access, e.g. `(:stan, :src)` → `r.stan.src`
     #   - NamedTuple of (Symbol|Tuple) → bundle, keys preserved in the result.
-    step_chain(name::Symbol) = begin
+    # Top-level key = stage name. Callers either iterate (stage list, indicators)
+    # or index by name (`step_chain(:brmi)`).
+    step_chain = begin
         parse            = (; parse=:parse)
         transform        = merge(parse,      (; transform=:transform))
         wrap             = merge(transform,  (; wrap=:wrap))
@@ -692,10 +800,10 @@ end
         # `compute_steps` (special-cased below by step name) so the IP's
         # progress subtree attaches to the step's phase. Chain-level specs
         # read the resulting cached values back out as plain properties.
-        stan_fit_pathfinder = merge(stan_generate, (; stan_fit_pathfinder=(; long=(:stan, :posterior_long_df), wide=(:stan, :posterior_wide_df), summary=(:stan, :posterior_summary_df), truth=(:stan, :truth_df))))
-        stan_fit_warmup     = merge(stan_fit_pathfinder, (; stan_fit_warmup=(; long=(:stan, :posterior_warmup_long_df), wide=(:stan, :posterior_warmup_wide_df), summary=(:stan, :posterior_warmup_summary_df), diagnostics=(:stan, :posterior_warmup_diagnostics), truth=(:stan, :truth_df))))
+        stan_fit_pathfinder = merge(stan_generate, (; stan_fit_pathfinder=(; long=(:stan, :posterior_long_df), wide=(:stan, :posterior_wide_df), summary=(:stan, :posterior_summary_df), truth=(:stan, :truth_unc_df))))
+        stan_fit_warmup     = merge(stan_fit_pathfinder, (; stan_fit_warmup=(; long=(:stan, :posterior_warmup_long_df), wide=(:stan, :posterior_warmup_wide_df), summary=(:stan, :posterior_warmup_summary_df), diagnostics=(:stan, :posterior_warmup_diagnostics), truth=(:stan, :truth_unc_df))))
         (; parse, transform, wrap, brmi, vbrmi, bench, slic_model, stan_code, stan_compile,
-           stan_instantiate, stan_eval, stan_shapes, stan_generate, stan_fit_pathfinder, stan_fit_warmup)[name]
+           stan_instantiate, stan_eval, stan_shapes, stan_generate, stan_fit_pathfinder, stan_fit_warmup)
     end
 
     # Fetch target for `polling_fetchindex`. Pre-enumerates each step in the
@@ -708,7 +816,7 @@ end
     "Pipeline($name)"
     compute_steps(text, namespace, name::Symbol) = begin
         r = run(text, namespace)
-        chain = step_chain(name)
+        chain = step_chain[name]
         phases = [prepare_progress!(__status__; description=string(k)) for k in keys(chain)]
         # Resolve each spec against `r`:
         #   Symbol          → `r.<sym>`
@@ -1071,6 +1179,17 @@ bin_y ~ Bernoulli(logistic(log_odds_b))
         label="BRM pipeline - $name",
         force,
     ) do result
+        # On successful stage computation, mark this stage + all prerequisite
+        # stages as pass on the corresponding ExampleEntry (if label
+        # identifies one). `result` keys are `(:data, <stages in reverse>)`;
+        # filter :data out to get the stage symbols. No-op if label is empty
+        # (main pipeline page without an example context) or label doesn't
+        # match any saved example.
+        if !isempty(label)
+            entry = __parent__.examples.example_store.find(label)
+            isnothing(entry) || entry.mark_stages!(;
+                passed=[k for k in keys(result) if k !== :data])
+        end
         # No id on this wrapper — the outer `#brm-macro-output` div in the
         # form is the persistent target (see buttons' `hx_swap="innerHTML"`);
         # putting the id here too would duplicate ids after a button swap.
@@ -1143,6 +1262,28 @@ log(err) ~ 1
 y1 ~ Normal(loc, err)
 """
 
+    # Per-stage display labels, in the order they should appear in the UI
+    # (pipeline page buttons, example-card indicators, etc.). The stage
+    # symbols (`:parse`, `:transform`, …) are the DAG keys from
+    # `__appdata__.step_chain`; labels here are UI-only.
+    stage_labels = [
+        :parse               => "1. Parse",
+        :transform           => "2. Transform",
+        :wrap                => "3. Wrap",
+        :brmi                => "4. BRMI",
+        :vbrmi               => "5. VBRMI",
+        :bench               => "6. Benchmark",
+        :slic_model          => "5a. SlicModel",
+        :stan_code           => "5b. StanCode",
+        :stan_compile        => "5c. StanCompile",
+        :stan_instantiate    => "6a. StanInstantiate",
+        :stan_eval           => "6b. StanEval",
+        :stan_shapes         => "6b'. StanShapes",
+        :stan_generate       => "6c. StanGenerate",
+        :stan_fit_pathfinder => "6d. StanFit (PF)",
+        :stan_fit_warmup     => "6d'. StanFit (Warmup)",
+    ]
+
     # Page-level stylesheet read once at construction. Classes are consumed by
     # ExampleEntry.card / html_expr.jl; per-symbol / per-status colors that
     # are data-derived stay inline on the element.
@@ -1167,6 +1308,7 @@ y1 ~ Normal(loc, err)
             h.title("BRM macro action"),
             h.style(css),
             htmx_treebar_styles(),
+            sortable_table_js(),
             vega_head()...,
         ),
     )
@@ -1178,6 +1320,15 @@ y1 ~ Normal(loc, err)
 
     # `/` mirrors the pipeline landing page.
     @get index = __self__.pipeline.index
+
+    # Utility route: clears all in-memory caches on AppData (compute_steps
+    # results, nested IP dicts, etc.). Useful after code changes when you
+    # want to re-run a stage that's currently returning a stale cached
+    # value. Mirrors bruno's OpsRoutes.reset.
+    @get reset = begin
+        clear_mem_caches!(__appdata__)
+        h.p("In-memory caches cleared.")
+    end
 
     @include pipeline = PipelineRoutes()
 
@@ -1216,23 +1367,109 @@ y1 ~ Normal(loc, err)
         # List view vs detail view as separate derived-property methods; DO
         # supports multi-method dispatch on a single property name (the route
         # layer doesn't — see TODO below).
+        # Sort-bar pill. `key` matches a `data-<key>` attribute on each card.
+        # Click cycles off → desc → asc → off; drag between pills reorders
+        # sort priority (left = highest). A small inline script below wires
+        # this up to the `#brm-examples-list` container's DOM order.
+        _sort_pill(key, label) = h.span(label;
+            class="brm-sort-pill", draggable=true, data_sort_key=key)
+
+        _sort_script = """
+        (() => {
+            const bar = document.querySelector('.brm-sort-bar');
+            const list = document.querySelector('#brm-examples-list');
+            if (!bar || !list) return;
+            const pills = Array.from(bar.querySelectorAll('.brm-sort-pill'));
+            // Defaults: `status` asc (open first), `brokenness` desc
+            // (most-broken first), `complexity` asc (simple first) — we're
+            // looking for the simplest broken open cards. Other pills off.
+            const state = { status: 1, brokenness: -1, complexity: 1 };  // key -> 1 | -1 | 0
+            const render = () => pills.forEach(p => {
+                const s = state[p.dataset.sortKey] || 0;
+                p.textContent = p.dataset.sortKey + (s === 1 ? ' ↑' : s === -1 ? ' ↓' : '');
+                p.classList.toggle('active', s !== 0);
+            });
+            const resort = () => {
+                const orderedPills = Array.from(bar.querySelectorAll('.brm-sort-pill'));
+                const active = orderedPills
+                    .map(p => [p.dataset.sortKey, state[p.dataset.sortKey] || 0])
+                    .filter(([k, s]) => s !== 0);
+                if (active.length === 0) return;
+                const cards = Array.from(list.querySelectorAll('.brm-example-card'));
+                cards.sort((a, b) => {
+                    for (const [k, dir] of active) {
+                        const aRaw = a.dataset[k], bRaw = b.dataset[k];
+                        const aNum = parseFloat(aRaw), bNum = parseFloat(bRaw);
+                        const numeric = !isNaN(aNum) && !isNaN(bNum);
+                        const av = numeric ? aNum : aRaw;
+                        const bv = numeric ? bNum : bRaw;
+                        if (av < bv) return -dir;
+                        if (av > bv) return dir;
+                    }
+                    return 0;
+                });
+                cards.forEach(c => list.appendChild(c));
+            };
+            pills.forEach(p => p.addEventListener('click', () => {
+                const k = p.dataset.sortKey;
+                state[k] = ({0:-1, '-1':1, 1:0})[state[k] || 0];
+                render(); resort();
+            }));
+            // Drag-reorder
+            let dragged = null;
+            pills.forEach(p => {
+                p.addEventListener('dragstart', e => { dragged = p; e.dataTransfer.effectAllowed='move'; });
+                p.addEventListener('dragover',  e => { e.preventDefault(); });
+                p.addEventListener('drop',      e => {
+                    e.preventDefault();
+                    if (dragged && dragged !== p) bar.insertBefore(dragged, p);
+                    dragged = null;
+                    resort();
+                });
+            });
+            // When a card's outerHTML gets swapped (e.g. mark done /
+            // deprioritize updates its data-status), re-run the sort so the
+            // card moves to its new position.
+            document.body.addEventListener('htmx:afterSwap', e => {
+                if (list.contains(e.detail.target)) resort();
+            });
+            render(); resort();
+        })();
+        """
+
         _index() = h.div(
             h.h1("Examples - coverage gaps and demos for BRM"),
-            h.p("Sorted by last modified. Each item has a sketch of what it is, why it matters, how to implement, and how to verify. Sourced from .jl files under ", h.code("web-macro/examples/"), "; status edits and edited formulas are written back to disk."),
-            [e.card for e in example_store.entries()]...,
+            h.p("Each item has a sketch of what it is, why it matters, how to implement, and how to verify. Sourced from .jl files under ", h.code("web-macro/examples/"), "; status edits and edited formulas are written back to disk."),
+            h.div(; class="brm-sort-bar")(
+                h.span("Sort by (click to cycle, drag to reorder):"),
+                _sort_pill("status",     "status"),
+                _sort_pill("brokenness", "brokenness"),
+                _sort_pill("complexity", "complexity"),
+                _sort_pill("mtime",      "mtime"),
+                _sort_pill("tier",       "tier"),
+                _sort_pill("progress",   "progress"),
+                _sort_pill("label",      "label"),
+            ),
+            h.div(; id="brm-examples-list")(
+                [e.card for e in example_store.entries()]...,
+            ),
+            h.script(_sort_script),
         )
 
-        _index(slug::AbstractString) = h.div(
+        _index(slug::AbstractString, stage::AbstractString) = h.div(
             h.p(h.a("<- Back to Examples"; href=__prefix__)),
-            example_store.find_by_slug(slug).card,
+            example_store.find_by_slug(slug).card_with_preload(stage; force_open=true),
         )
 
         # TODO(HTMXO): allow two `@get name` methods with distinct arities
         # (e.g. `@get index()` + `@get index(slug::String)`) to be registered
         # as separate paths `/examples` and `/examples/{slug}`. Today DO's
         # meta dict rejects duplicate route property names, so we delegate to
-        # the multi-methoded `_index` helper above.
-        @get index(slug::AbstractString="") = isempty(slug) ? _index() : _index(slug)
+        # the multi-methoded `_index` helper above. `stage` is a query kwarg
+        # that pre-populates the card's inline result div with that stage's
+        # output -- used by the per-stage indicator pill links.
+        @get index(slug::AbstractString=""; stage::AbstractString="") =
+            isempty(slug) ? _index() : _index(slug, stage)
     end
 end
 

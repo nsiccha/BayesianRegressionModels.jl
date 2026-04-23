@@ -1,6 +1,6 @@
 # label: 3.8 decompositions (QR, orthogonal polar)
 # tier: 3
-# status: open
+# status: deprioritized
 #=
 **What it is.** Numerical-stability transformations of the population design matrix. brms uses QR decomposition on the design matrix internally so the sampler sees an orthogonal-columns version, then transforms back at the end. Stan does the same.
 

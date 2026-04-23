@@ -1,6 +1,6 @@
 # label: 3.4 ordinal outcomes (proportional odds)
 # tier: 3
-# status: open
+# status: deprioritized
 #=
 **What it is.** When `y` is itself ordered categorical (Likert response, severity grades, …), use a cumulative-link model: `Pr(y ≤ k) = logistic(α_k - η)` where `α_k` are K-1 cutpoints and η is the linear predictor. The likelihood is the difference of consecutive CDFs.
 

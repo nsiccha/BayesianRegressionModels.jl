@@ -1,6 +1,6 @@
 # label: 3.6 splines / GP submodels s(), bs(), gp(), t2()
 # tier: 3
-# status: open
+# status: deprioritized
 #=
 **What it is.** Smoothers in the linear predictor: `s(x)` for a generic spline, `bs(x, knots=...)` for a B-spline basis, `gp(x)` for a Gaussian process, `t2(x, y)` for a tensor-product spline. brms / mgcv use these heavily.
 
