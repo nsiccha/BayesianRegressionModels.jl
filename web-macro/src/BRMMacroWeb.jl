@@ -348,6 +348,7 @@ end
             h.button(lbl;
                 type="button",
                 class="brm-branch-btn",
+                data_stage_id=string(id),
                 hx_get=string(query_url(__parent__.__parent__.pipeline/"stage/$id"; force=true)),
                 hx_include="closest form",
                 hx_target="#$result_id",
@@ -1429,8 +1430,49 @@ y1 ~ Normal(loc, err)
         (() => {
             const bar = document.querySelector('.brm-sort-bar');
             const list = document.querySelector('#brm-examples-list');
+            const search = document.querySelector('#brm-examples-search');
             if (!bar || !list) return;
             const pills = Array.from(bar.querySelectorAll('.brm-sort-pill'));
+            const filter = () => {
+                const q = (search && search.value || '').trim().toLowerCase();
+                const cards = Array.from(list.querySelectorAll('.brm-example-card'));
+                cards.forEach(c => {
+                    const hay = (c.dataset.label + ' ' + c.textContent).toLowerCase();
+                    c.style.display = (!q || hay.includes(q)) ? '' : 'none';
+                });
+            };
+            if (search) {
+                const params = new URLSearchParams(window.location.search);
+                const initial = params.get('q');
+                if (initial) search.value = initial;
+                const syncUrl = () => {
+                    const url = new URL(window.location.href);
+                    const v = search.value.trim();
+                    if (v) url.searchParams.set('q', v);
+                    else   url.searchParams.delete('q');
+                    history.replaceState(null, '', url);
+                };
+                search.addEventListener('input', () => { filter(); syncUrl(); });
+                window.addEventListener('popstate', () => {
+                    const p = new URLSearchParams(window.location.search);
+                    search.value = p.get('q') || '';
+                    filter();
+                });
+            }
+            // Global stage buttons: dispatch a click to the matching
+            // per-card stage button of every currently visible card.
+            document.querySelectorAll('.brm-global-btn').forEach(gb => {
+                gb.addEventListener('click', () => {
+                    const id = gb.dataset.stageId;
+                    const cards = Array.from(list.querySelectorAll('.brm-example-card'))
+                        .filter(c => c.style.display !== 'none');
+                    cards.forEach(c => {
+                        const btn = c.querySelector(
+                            '.brm-branch-btn[data-stage-id="' + id + '"]');
+                        if (btn) btn.click();
+                    });
+                });
+            });
             // Defaults: `flagged` desc (triage candidates first),
             // `status` asc (open first), `brokenness` desc (most-broken
             // first), `complexity` asc (simple first). Other pills off.
@@ -1482,15 +1524,54 @@ y1 ~ Normal(loc, err)
             // deprioritize updates its data-status), re-run the sort so the
             // card moves to its new position.
             document.body.addEventListener('htmx:afterSwap', e => {
-                if (list.contains(e.detail.target)) resort();
+                if (list.contains(e.detail.target)) { resort(); filter(); }
             });
-            render(); resort();
+            // Success/error feedback for stage-button runs. A card gets a
+            // green flash on success (auto-clears) or red border on failure
+            // (persistent until the next fresh attempt on that card).
+            const cardOf = el => el && el.closest && el.closest('.brm-example-card');
+            document.body.addEventListener('htmx:beforeRequest', e => {
+                const el = e.detail.elt;
+                if (!el || !el.classList.contains('brm-branch-btn')) return;
+                const card = cardOf(el);
+                if (!card) return;
+                card.classList.remove('brm-card-success', 'brm-card-error');
+            });
+            document.body.addEventListener('htmx:afterRequest', e => {
+                const el = e.detail.elt;
+                if (!el || !el.classList.contains('brm-branch-btn')) return;
+                const card = cardOf(el);
+                if (!card) return;
+                const ok = e.detail.successful && e.detail.xhr.status < 400;
+                if (ok) {
+                    card.classList.add('brm-card-success');
+                    setTimeout(() => card.classList.remove('brm-card-success'), 1200);
+                } else {
+                    card.classList.add('brm-card-error');
+                }
+            });
+            render(); resort(); filter();
         })();
         """
 
         _index() = h.div(
             h.h1("Examples - coverage gaps and demos for BRM"),
             h.p("Each item has a sketch of what it is, why it matters, how to implement, and how to verify. Sourced from .jl files under ", h.code("web-macro/examples/"), "; status edits and edited formulas are written back to disk."),
+            h.div(; class="brm-search-bar")(
+                h.input(;
+                    id="brm-examples-search",
+                    type="search",
+                    placeholder="Search examples (label, body, formula)...",
+                    autocomplete="off"),
+            ),
+            h.div(; class="brm-global-bar")(
+                h.span("Run stage on all visible:"),
+                [h.button(lbl;
+                    type="button",
+                    class="brm-global-btn",
+                    data_stage_id=string(id),
+                ) for (id, lbl) in __parent__.stage_labels]...,
+            ),
             h.div(; class="brm-sort-bar")(
                 h.span("Sort by (click to cycle, drag to reorder):"),
                 _sort_pill("flagged",    "flagged"),
