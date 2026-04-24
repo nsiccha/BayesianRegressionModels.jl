@@ -123,34 +123,14 @@ end
 # where s = stratum_idx[g]. The per-group loop lives in
 # `stratified_correlated_b` (a @deffun helper) because @slic bodies cannot
 # contain control flow.
-# Per-stratum broadcast lpdfs for `array[m] T` sampling statements. The inline
-# `@lpxf` annotation tells SB to register the three dispatch hooks
-# (`lpxf_expr` / `rng_expr` / `likelihood_expr`) for the base name in addition
-# to defining the method, so `x ~ multi_foo(...)` resolves to
-# `multi_foo_lpdf(x, ...)`. The inner `::real` annotations on each nested
-# `_lpdf` call are required by SB's tracing — without them the return type
-# stays at `anything` and the outer `+=` errors.
-StanBlocks.@deffun begin
-    @lhs @lpxf multi_lkj_corr_cholesky_lpdf(L::cholesky_factor_corr[m, n], x::real, m::int, n::int)::real = begin
-        rv = 0.
-        for i in 1:m
-            rv += lkj_corr_cholesky_lpdf(L[i, :, :], x)::real
-        end
-        rv
-    end
-    @lhs @lpxf multi_std_normal_lpdf(x::vector[m, n], m::int, n::int)::real = begin
-        rv = 0.
-        for i in 1:m
-            rv += std_normal_lpdf(x[i, :])::real
-        end
-        rv
-    end
-end
-
+# Typed-LHS sampling drives dispatch against the SB built-in `@lhs`-annotated
+# array-of-cholesky overload of `lkj_corr_cholesky_lpdf` and Stan's native
+# vectorized `std_normal_lpdf` for `array[m] vector[n]`. No BRM-side
+# `multi_*_lpdf` wrappers needed.
 ranef_correlated_by = StanBlocks.@slic begin
-    L   ~ multi_lkj_corr_cholesky(1., n_strata, n_terms)
-    tau ~ multi_std_normal(n_strata, n_terms; lower=0.)
-    z   ~ multi_std_normal(n_strata, n_terms)
+    L::cholesky_factor_corr[n_strata, n_terms] ~ lkj_corr_cholesky(1.)
+    tau::vector[n_strata, n_terms] ~ std_normal(; lower=0.)
+    z::vector[n_strata, n_terms] ~ std_normal()
     b = stratified_correlated_b(L, tau, z, stratum_idx, n_groups, n_terms)
     return rows_dot_product(Z, b[group_idx, :])
 end
@@ -159,9 +139,9 @@ end
 # `(e | ID | gr(g, by=b))` buckets. Matrix-returning variant of
 # `ranef_correlated_by` so each sub-formula can slice its own column(s).
 ranef_correlated_by_draws = StanBlocks.@slic begin
-    L   ~ multi_lkj_corr_cholesky(1., n_strata, n_terms)
-    tau ~ multi_std_normal(n_strata, n_terms; lower=0.)
-    z   ~ multi_std_normal(n_strata, n_terms)
+    L::cholesky_factor_corr[n_strata, n_terms] ~ lkj_corr_cholesky(1.)
+    tau::vector[n_strata, n_terms] ~ std_normal(; lower=0.)
+    z::vector[n_strata, n_terms] ~ std_normal()
     return stratified_correlated_b(L, tau, z, stratum_idx, n_groups, n_terms)
 end
 
