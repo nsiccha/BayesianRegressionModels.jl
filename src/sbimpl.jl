@@ -424,7 +424,10 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     summands = Symbol[]
 
     if !isempty(pop_terms)
-        col_exprs = Any[_sb_predictor_col(t, data, stmts) for t in pop_terms]
+        col_exprs = Any[]
+        for t in pop_terms
+            _sb_pop_cols!(col_exprs, t, data, stmts)
+        end
         X_name = Symbol(:X_, target)
         pop_name = Symbol(:pop_, target)
         # StanBlocks `hcat` promotes a lone vector to matrix[n,1] and folds to
@@ -883,6 +886,88 @@ _sb_collect_terms_expr!(acc, ::typeof(+), x) = foreach(a -> _sb_collect_terms!(a
 # the ranef side of the additive linear predictor.
 _sb_collect_terms_expr!(acc, ::typeof(|), x) = push!(acc, x)
 _sb_collect_terms_expr!(acc, _, x) = push!(acc, x)
+
+# Pop-term column accumulator. Most terms produce a single column via
+# `_sb_predictor_col`; interactions (`a:b`) can produce multiple columns
+# depending on operand types, so we push into a caller-owned vector.
+_sb_pop_cols!(cols, t, data, stmts) = push!(cols, _sb_predictor_col(t, data, stmts))
+_sb_pop_cols!(cols, t::ExprColumn, data, stmts) =
+    _sb_pop_cols_expr!(cols, getf(t), t, data, stmts)
+_sb_pop_cols_expr!(cols, ::Any, t, data, stmts) =
+    push!(cols, _sb_predictor_col(t, data, stmts))
+_sb_pop_cols_expr!(cols, ::Colon, t, data, stmts) =
+    _sb_interaction_cols!(cols, t, data, stmts)
+
+# `a:b` interaction expansion. Three supported operand-type combinations:
+#   cont x cont -> 1 column (elementwise product)
+#   cont x cat  -> K-1 columns (a .* (c == k ? 1 : 0) for k=2..K)
+#   cat  x cat  -> (K1-1)*(K2-1) columns (product of level-k1, level-k2 dummies)
+# Reference level is always 1 (treatment coding; matches brms / vimpl).
+# Columns are materialised at walker time (indicator math only uses data
+# columns), stashed in `data` under a `int_<name...>` key, and pushed as
+# Symbol refs for hcat downstream.
+function _sb_interaction_cols!(cols, t::ExprColumn, data, stmts)
+    args = getargs(t)
+    length(args) == 2 ||
+        error("sbimpl: interaction `:` expects exactly 2 operands, got $(length(args))")
+    l = _sb_interaction_operand(args[1])
+    r = _sb_interaction_operand(args[2])
+    _sb_interaction_expand!(cols, data, l, r)
+end
+
+_sb_interaction_operand(t::NamedColumn) = begin
+    d = parent(t)
+    d isa DataColumn || error(
+        "sbimpl: interaction operand `$(name(t))` must be a raw data column, got $(typeof(d))"
+    )
+    v = parent(d)
+    if _sb_is_categorical(t)
+        n_levels, idx = _sb_level_index(v)
+        n_levels >= 2 || error(
+            "sbimpl: categorical interaction operand `$(name(t))` needs >= 2 levels (got $n_levels)"
+        )
+        (; kind=:cat, name=name(t), n_levels, idx)
+    elseif v isa AbstractVector{<:Real}
+        (; kind=:cont, name=name(t), vec=collect(Float64, v))
+    else
+        error("sbimpl: interaction operand `$(name(t))` has unsupported eltype $(eltype(v))")
+    end
+end
+_sb_interaction_operand(t) = error(
+    "sbimpl: interaction operand must be a raw-data NamedColumn, got $(typeof(t)); ",
+    "interactions with `mo` / `me` / `s` / `ar` are not supported yet"
+)
+
+# cont x cont
+_sb_interaction_expand!(cols, data, l::NamedTuple{<:Any,<:Tuple}, r::NamedTuple{<:Any,<:Tuple}) = begin
+    if l.kind === :cont && r.kind === :cont
+        col_name = Symbol(:int_, l.name, :_x_, r.name)
+        data[col_name] = l.vec .* r.vec
+        push!(cols, col_name)
+    elseif l.kind === :cont && r.kind === :cat
+        for lvl in 2:r.n_levels
+            col_name = Symbol(:int_, l.name, :_x_, r.name, :_lvl_, lvl)
+            data[col_name] = Float64[l.vec[i] * (r.idx[i] == lvl ? 1.0 : 0.0) for i in eachindex(l.vec)]
+            push!(cols, col_name)
+        end
+    elseif l.kind === :cat && r.kind === :cont
+        # Symmetric: reuse the :cont × :cat branch with swapped operands so
+        # column names consistently put the cont term first.
+        _sb_interaction_expand!(cols, data, r, l)
+    elseif l.kind === :cat && r.kind === :cat
+        n = length(l.idx)
+        length(r.idx) == n || error(
+            "sbimpl: interaction `$(l.name):$(r.name)`: operand lengths mismatch ($n vs $(length(r.idx)))"
+        )
+        for lvl1 in 2:l.n_levels, lvl2 in 2:r.n_levels
+            col_name = Symbol(:int_, l.name, :_lvl_, lvl1, :_x_, r.name, :_lvl_, lvl2)
+            data[col_name] = Float64[(l.idx[i] == lvl1 && r.idx[i] == lvl2) ? 1.0 : 0.0 for i in 1:n]
+            push!(cols, col_name)
+        end
+    else
+        error("sbimpl: unsupported interaction operand combination (`$(l.kind)` x `$(r.kind)`)")
+    end
+end
 
 # Predictor column emitter. `stmts` is threaded in so terms that need their own
 # `~` statement (e.g. `mo(c)`) can push before returning their column symbol.
