@@ -21,7 +21,7 @@ include("sbimpl.jl")
 # (web-macro, bruno, tests) reaches for.
 export @brm, @n, @x, @getproperty
 export assign, doublepipe, gr, gp, offset, zscale, center, standardize, protect
-export me, s, ar, OrderedLogistic
+export me, s, ar, mo, mo1, hsgp, OrderedLogistic
 export Data, MaybeData, maybedata
 export AbstractColumn, MissingColumn, DataColumn, NamedColumn,
        ExprColumn, LikelihoodColumn, MaterializedColumn
