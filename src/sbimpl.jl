@@ -131,14 +131,14 @@ end
 # `_lpdf` call are required by SB's tracing — without them the return type
 # stays at `anything` and the outer `+=` errors.
 StanBlocks.@deffun begin
-    @lpxf multi_lkj_corr_cholesky_lpdf(L::cholesky_factor_corr[m, n], x::real, m::int, n::int)::real = begin
+    @lhs @lpxf multi_lkj_corr_cholesky_lpdf(L::cholesky_factor_corr[m, n], x::real, m::int, n::int)::real = begin
         rv = 0.
         for i in 1:m
             rv += lkj_corr_cholesky_lpdf(L[i, :, :], x)::real
         end
         rv
     end
-    @lpxf multi_std_normal_lpdf(x::vector[m, n], m::int, n::int)::real = begin
+    @lhs @lpxf multi_std_normal_lpdf(x::vector[m, n], m::int, n::int)::real = begin
         rv = 0.
         for i in 1:m
             rv += std_normal_lpdf(x[i, :])::real
