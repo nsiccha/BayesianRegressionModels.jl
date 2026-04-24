@@ -124,7 +124,7 @@ end
 # `stratified_correlated_b` (a @deffun helper) because @slic bodies cannot
 # contain control flow.
 # Distinctly-named 2-arg `@lhs @lpxf` UDFs so typed-LHS sampling routes to a
-# user-defined Stan function without clashing with Stan's scalar-only
+# user-defined Stan function without clashing with Stan's scalar-only 
 # built-ins. `@lpxf` creates the base stub + `lpxf_expr` hook so
 # `L ~ multi_lkj_corr_cholesky(1.)` resolves; `@lhs` registers the base
 # tracetype so the 2-arg call dispatches to this lpdf with `m, n` bound from
@@ -134,7 +134,7 @@ StanBlocks.@deffun begin
         rv = 0.
         for i in 1:m
             rv += lkj_corr_cholesky_lpdf(L[i, :, :], x)::real
-        end
+        end 
         rv
     end
     @lhs @lpxf multi_std_normal_lpdf(x::vector[m, n])::real = begin
