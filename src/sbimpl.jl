@@ -885,6 +885,25 @@ _sb_collect_terms_expr!(acc, ::typeof(+), x) = foreach(a -> _sb_collect_terms!(a
 # `(expr | group)` is kept as-is; `_sb_linear_predictor!` splits it off into
 # the ranef side of the additive linear predictor.
 _sb_collect_terms_expr!(acc, ::typeof(|), x) = push!(acc, x)
+# Julia parses `:` as lower-precedence than `+`, so `A + B + C:D` arrives as
+# `Colon(Sum(A, B, C), D)`. Mirror R/brms's formula-precedence convention: peel
+# the last `+` operand of the left side, interact it with the right, and flatten
+# the remaining operands as top-level terms. Handles chains via recursion
+# (`1 + a + a:b + b:c` peels both `:` in order). Explicit-paren interactions
+# like `(a + b):c` arrive the same way — treated as a peeled interaction, which
+# matches the formula-convention reading.
+_sb_collect_terms_expr!(acc, ::Colon, x) = begin
+    args = getargs(x)
+    if length(args) == 2 && args[1] isa ExprColumn && getf(args[1]) === (+)
+        sum_args = getargs(args[1])
+        for a in sum_args[1:end-1]
+            _sb_collect_terms!(acc, a)
+        end
+        _sb_collect_terms!(acc, ExprColumn(Colon(), sum_args[end], args[2]))
+    else
+        push!(acc, x)
+    end
+end
 _sb_collect_terms_expr!(acc, _, x) = push!(acc, x)
 
 # Pop-term column accumulator. Most terms produce a single column via
