@@ -159,11 +159,13 @@ vmeta_sampling_rhs(meta, x::ExprColumn{typeof(doublepipe)}; kwargs...) = begin
     meta, length(args) == 1 ? only(args) : Base.broadcasted(+, args...)
 end
 
-# `a:b` -- continuous x continuous interaction. Single slot on the elementwise
-# product. Categorical operands (integer/CategoricalVector) would need K-1
-# dummy expansion; errors out for now with a pointer to the 2.1 TODO.
-vmeta_sampling_rhs(meta, x::ExprColumn{Colon}; group) = begin
-    length(getargs(x)) == 2 || error("interaction `:` expects exactly two operands, got $(length(getargs(x)))")
+# `a & b` -- continuous x continuous interaction (parallels StatsModels.jl).
+# Single slot on the elementwise product. Categorical operands (integer /
+# CategoricalVector) would need K-1 dummy expansion; errors out for now with
+# a pointer to the 2.1 TODO. `&` was chosen over R's `:` because Julia parses
+# `:` as lower-precedence than `+`, breaking formula conventions.
+vmeta_sampling_rhs(meta, x::ExprColumn{typeof(&)}; group) = begin
+    length(getargs(x)) == 2 || error("interaction `&` expects exactly two operands, got $(length(getargs(x)))")
     lhs, rhs = getargs(x, 2)
     _check_cont_interaction(lhs); _check_cont_interaction(rhs)
     lbc = vbroadcasted(lhs; meta); rbc = vbroadcasted(rhs; meta)
@@ -172,7 +174,7 @@ end
 _check_cont_interaction(t) = nothing
 _check_cont_interaction(t::NamedColumn) = let raw = parent(parent(t))
     raw isa AbstractVector{<:Real} && !(raw isa AbstractVector{<:Integer}) ||
-        error("interaction `:`: only continuous x continuous is supported for now (got `$(name(t))`); see 2.1 TODO for cat expansions")
+        error("interaction `&`: only continuous x continuous is supported for now (got `$(name(t))`); see 2.1 TODO for cat expansions")
 end
 
 # `(... | rhs)` -> walker-side group tag. Bare NamedColumn stays as-is; `gr(g)`

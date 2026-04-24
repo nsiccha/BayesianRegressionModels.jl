@@ -885,25 +885,11 @@ _sb_collect_terms_expr!(acc, ::typeof(+), x) = foreach(a -> _sb_collect_terms!(a
 # `(expr | group)` is kept as-is; `_sb_linear_predictor!` splits it off into
 # the ranef side of the additive linear predictor.
 _sb_collect_terms_expr!(acc, ::typeof(|), x) = push!(acc, x)
-# Julia parses `:` as lower-precedence than `+`, so `A + B + C:D` arrives as
-# `Colon(Sum(A, B, C), D)`. Mirror R/brms's formula-precedence convention: peel
-# the last `+` operand of the left side, interact it with the right, and flatten
-# the remaining operands as top-level terms. Handles chains via recursion
-# (`1 + a + a:b + b:c` peels both `:` in order). Explicit-paren interactions
-# like `(a + b):c` arrive the same way — treated as a peeled interaction, which
-# matches the formula-convention reading.
-_sb_collect_terms_expr!(acc, ::Colon, x) = begin
-    args = getargs(x)
-    if length(args) == 2 && args[1] isa ExprColumn && getf(args[1]) === (+)
-        sum_args = getargs(args[1])
-        for a in sum_args[1:end-1]
-            _sb_collect_terms!(acc, a)
-        end
-        _sb_collect_terms!(acc, ExprColumn(Colon(), sum_args[end], args[2]))
-    else
-        push!(acc, x)
-    end
-end
+# `a & b` is the interaction operator (parallels StatsModels.jl). `&` has
+# higher precedence than `+` in Julia, so `1 + a + b + a&b` naturally parses
+# as `+(1, a, b, a&b)` and the normal `+`-flatten path applies. We deliberately
+# chose `&` over R's `:` because Julia parses `:` as lower-precedence than
+# `+`, which forces a precedence-peel hack that breaks chained interactions.
 _sb_collect_terms_expr!(acc, _, x) = push!(acc, x)
 
 # Pop-term column accumulator. Most terms produce a single column via
@@ -914,10 +900,10 @@ _sb_pop_cols!(cols, t::ExprColumn, data, stmts) =
     _sb_pop_cols_expr!(cols, getf(t), t, data, stmts)
 _sb_pop_cols_expr!(cols, ::Any, t, data, stmts) =
     push!(cols, _sb_predictor_col(t, data, stmts))
-_sb_pop_cols_expr!(cols, ::Colon, t, data, stmts) =
+_sb_pop_cols_expr!(cols, ::typeof(&), t, data, stmts) =
     _sb_interaction_cols!(cols, t, data, stmts)
 
-# `a:b` interaction expansion. Three supported operand-type combinations:
+# `a & b` interaction expansion. Three supported operand-type combinations:
 #   cont x cont -> 1 column (elementwise product)
 #   cont x cat  -> K-1 columns (a .* (c == k ? 1 : 0) for k=2..K)
 #   cat  x cat  -> (K1-1)*(K2-1) columns (product of level-k1, level-k2 dummies)
@@ -928,7 +914,7 @@ _sb_pop_cols_expr!(cols, ::Colon, t, data, stmts) =
 function _sb_interaction_cols!(cols, t::ExprColumn, data, stmts)
     args = getargs(t)
     length(args) == 2 ||
-        error("sbimpl: interaction `:` expects exactly 2 operands, got $(length(args))")
+        error("sbimpl: interaction `&` expects exactly 2 operands, got $(length(args))")
     l = _sb_interaction_operand(args[1])
     r = _sb_interaction_operand(args[2])
     _sb_interaction_expand!(cols, data, l, r)
