@@ -369,7 +369,7 @@ _sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lo
     backing = parent(lhs)
     if backing isa DataColumn
         data[key] = parent(backing)
-        push!(stmts, _sb_likelihood(key, rhs, data))
+        _sb_likelihood!(stmts, key, rhs, data)
     elseif backing isa MissingColumn
         if rhs isa ExprColumn &&
            _sb_submodel_rhs!(stmts, data, key, getf(rhs), rhs) !== nothing
@@ -1111,11 +1111,11 @@ end
 
 # ---- likelihood emitters: `y ~ Normal(loc, sigma)` etc. ----------------------
 
-function _sb_likelihood(target::Symbol, rhs::ExprColumn, data)
+function _sb_likelihood!(stmts, target::Symbol, rhs::ExprColumn, data)
     f = getf(rhs)
-    _sb_lik_family(target, f, getargs(rhs), data)
+    _sb_lik_family!(stmts, target, f, getargs(rhs), data)
 end
-_sb_likelihood(target, rhs, _) =
+_sb_likelihood!(stmts, target, rhs, _) =
     error("sbimpl: likelihood RHS for `$target` must be an ExprColumn (got $(typeof(rhs)))")
 
 # One dispatch per likelihood family. Each method states the Stan name and
@@ -1123,35 +1123,37 @@ _sb_likelihood(target, rhs, _) =
 # Distributions.jl parameterizes by (r, p); Stan's neg_binomial is (alpha, beta)
 # — the emitted model is NOT posterior-identical to the Julia side. Convert
 # upstream if that matters.
-_sb_lik_stan(target, name::Symbol, args, data) =
-    Expr(:call, :~, target,
-        Expr(:call, name, (_sb_scalar_expr(a, data) for a in args)...))
+_sb_lik_stan!(stmts, target, name::Symbol, args, data) =
+    push!(stmts, Expr(:call, :~, target,
+        Expr(:call, name, (_sb_scalar_expr(a, data) for a in args)...)))
 
-# `y ~ OrderedLogistic(eta)`: cumulative-link ordinal likelihood. Blocked on
-# StanBlocks support for Stan's `ordered_logistic_lpmf`. Two concrete gaps:
-#   1. `ordered_logistic_lpmf` is not in StanBlocks' @builtin_module list, so
-#      `y ~ ordered_logistic(eta, c)` errors at symbol resolution.
-#   2. `type=ordered` (for declaring an ordered-vector parameter inside a
-#      `std_normal(; n, type=ordered)` call) is not surfaced by @slic --
-#      symbol resolution for `ordered` fails in the caller's module lookup.
-# Workaround attempts that failed: @deffun wrapping + manual `lpxf_expr`
-# registration (the inner call to `ordered_logistic_lpmf` still hits (1));
-# @defsig-declared external signature (generated code references
-# StanBlocks-internal `stan_size`, not reachable from outside the module).
-# Leaving the marker struct and MWE in place so the card is ready to light
-# up once StanBlocks lands the builtin.
-_sb_lik_family(target, ::Type{<:OrderedLogistic},  args, data) =
-    error("sbimpl: `OrderedLogistic` likelihood is blocked on StanBlocks adding `ordered_logistic_lpmf` to its builtin distributions; see comment in sbimpl.jl")
-_sb_lik_family(target, ::Type{<:Normal},           args::Tuple{Any,Any}, data) = _sb_lik_stan(target, :normal,       args, data)
-_sb_lik_family(target, ::Type{<:Bernoulli},        args::Tuple{Any},     data) = _sb_lik_stan(target, :bernoulli,    args, data)
-_sb_lik_family(target, ::Type{<:BernoulliLogit},   args::Tuple{Any},     data) = _sb_lik_stan(target, :bernoulli_logit, args, data)
-_sb_lik_family(target, ::Type{<:Binomial},         args::Tuple{Any,Any}, data) = _sb_lik_stan(target, :binomial,     args, data)
-_sb_lik_family(target, ::Type{<:Poisson},          args::Tuple{Any},     data) = _sb_lik_stan(target, :poisson,      args, data)
-_sb_lik_family(target, ::Type{<:Gamma},            args::Tuple{Any,Any}, data) = _sb_lik_stan(target, :gamma,        args, data)
-_sb_lik_family(target, ::Type{<:NegativeBinomial}, args::Tuple{Any,Any}, data) = _sb_lik_stan(target, :neg_binomial, args, data)
-_sb_lik_family(target, ::Type{<:Beta},             args::Tuple{Any,Any}, data) = _sb_lik_stan(target, :beta,         args, data)
+# `y ~ OrderedLogistic(eta)`: cumulative-link ordinal likelihood. Allocates
+# `ordered[K-1]` cutpoints (K = max(y)) with a std_normal prior via typed-LHS,
+# then emits `y ~ ordered_logistic(eta, cutpoints)` — dispatches against
+# Stan's built-in `ordered_logistic_lpmf` (surfaced into SB's @builtin_module).
+function _sb_lik_family!(stmts, target, ::Type{<:OrderedLogistic}, args::Tuple{Any}, data)
+    y = data[target]
+    y isa AbstractVector{<:Integer} || error(
+        "sbimpl: `OrderedLogistic` expects integer outcome data for `$target`, got $(typeof(y))"
+    )
+    n_levels = maximum(y)
+    n_levels >= 2 || error("sbimpl: `OrderedLogistic($target)` needs >= 2 levels (got $n_levels)")
+    n_cut = n_levels - 1
+    cut_name = Symbol(target, :_cutpoints)
+    push!(stmts, :($cut_name::ordered[$n_cut] ~ std_normal()))
+    eta_expr = _sb_scalar_expr(args[1], data)
+    push!(stmts, :($target ~ ordered_logistic($eta_expr, $cut_name)))
+end
+_sb_lik_family!(stmts, target, ::Type{<:Normal},           args::Tuple{Any,Any}, data) = _sb_lik_stan!(stmts, target, :normal,       args, data)
+_sb_lik_family!(stmts, target, ::Type{<:Bernoulli},        args::Tuple{Any},     data) = _sb_lik_stan!(stmts, target, :bernoulli,    args, data)
+_sb_lik_family!(stmts, target, ::Type{<:BernoulliLogit},   args::Tuple{Any},     data) = _sb_lik_stan!(stmts, target, :bernoulli_logit, args, data)
+_sb_lik_family!(stmts, target, ::Type{<:Binomial},         args::Tuple{Any,Any}, data) = _sb_lik_stan!(stmts, target, :binomial,     args, data)
+_sb_lik_family!(stmts, target, ::Type{<:Poisson},          args::Tuple{Any},     data) = _sb_lik_stan!(stmts, target, :poisson,      args, data)
+_sb_lik_family!(stmts, target, ::Type{<:Gamma},            args::Tuple{Any,Any}, data) = _sb_lik_stan!(stmts, target, :gamma,        args, data)
+_sb_lik_family!(stmts, target, ::Type{<:NegativeBinomial}, args::Tuple{Any,Any}, data) = _sb_lik_stan!(stmts, target, :neg_binomial, args, data)
+_sb_lik_family!(stmts, target, ::Type{<:Beta},             args::Tuple{Any,Any}, data) = _sb_lik_stan!(stmts, target, :beta,         args, data)
 
-_sb_lik_family(target, fam, args, _) =
+_sb_lik_family!(stmts, target, fam, args, _) =
     error("sbimpl: likelihood family `$fam` (arity $(length(args))) not supported yet")
 
 
