@@ -70,7 +70,7 @@ end
 Base.showerror(io::IO, e::FormulaSecurityError) = print(io, "FormulaSecurityError: ", e.msg)
 
 _ALLOWED_CALLS = Set{Symbol}([
-    :~, :(+), :(-), :(*), :(/), :(^), :(|), :(||),
+    :~, :(+), :(-), :(*), :(/), :(^), :(|), :(||), :(:),
     :(==), :(!=), :(<), :(>), :(<=), :(>=),
     :log, :log2, :log10, :log1p, :exp, :exp2, :expm1,
     :sqrt, :cbrt, :abs, :abs2, :sign, :floor, :ceil, :round,
