@@ -137,7 +137,6 @@ vmeta_sampling_rhs(meta, x::ExprColumn{typeof(+)}; kwargs...) = begin
 end
 vmeta_sampling_rhs(meta, x::ExprColumn; kwargs...) = vmeta_sampling_rhs(meta, vbroadcasted(x; meta); kwargs...)
 vmeta_sampling_rhs(meta, x::ExprColumn{typeof(*)}; kwargs...) = error("NOT IMPLEMENTED")
-vmeta_sampling_rhs(meta, x::ExprColumn{typeof(&)}; kwargs...) = error("NOT IMPLEMENTED")
 vmeta_sampling_rhs(meta, x::ExprColumn{typeof(|)}; kwargs...) = begin
     lhs, rhs = getargs(x, 2)
     vmeta_sampling_rhs(meta, lhs; group=_normalize_group(rhs))
