@@ -1433,12 +1433,24 @@ y1 ~ Normal(loc, err)
             const search = document.querySelector('#brm-examples-search');
             if (!bar || !list) return;
             const pills = Array.from(bar.querySelectorAll('.brm-sort-pill'));
+            // Query is treated as a case-insensitive regex. Invalid regex
+            // (e.g. while typing `(foo`) falls back to literal substring
+            // match so the input never feels broken mid-keystroke.
             const filter = () => {
-                const q = (search && search.value || '').trim().toLowerCase();
+                const raw = (search && search.value || '').trim();
+                let re = null, lit = '';
+                if (raw) {
+                    try { re = new RegExp(raw, 'i'); }
+                    catch (_) { lit = raw.toLowerCase(); }
+                }
+                if (search) search.classList.toggle('brm-search-literal', !!lit);
                 const cards = Array.from(list.querySelectorAll('.brm-example-card'));
                 cards.forEach(c => {
-                    const hay = (c.dataset.label + ' ' + c.textContent).toLowerCase();
-                    c.style.display = (!q || hay.includes(q)) ? '' : 'none';
+                    const hay = c.dataset.label + ' ' + c.textContent;
+                    const show = !raw
+                        || (re && re.test(hay))
+                        || (lit && hay.toLowerCase().includes(lit));
+                    c.style.display = show ? '' : 'none';
                 });
             };
             if (search) {
@@ -1561,7 +1573,7 @@ y1 ~ Normal(loc, err)
                 h.input(;
                     id="brm-examples-search",
                     type="search",
-                    placeholder="Search examples (label, body, formula)...",
+                    placeholder="Search (case-insensitive regex; e.g. interact|bruno)...",
                     autocomplete="off"),
             ),
             h.div(; class="brm-global-bar")(
