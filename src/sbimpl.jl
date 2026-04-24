@@ -123,10 +123,36 @@ end
 # where s = stratum_idx[g]. The per-group loop lives in
 # `stratified_correlated_b` (a @deffun helper) because @slic bodies cannot
 # contain control flow.
+# Per-stratum broadcast lpdfs for `array[m] T` sampling statements. Until SB
+# lands an auto-registration shim (e.g. `@lpxf` inside `@deffun`), we spell
+# both halves explicitly: the `_lpdf` loop body under `@deffun`, then the
+# `lpxf_expr` hook so SB resolves `x ~ multi_foo(...)` to `multi_foo_lpdf(x, ...)`.
+# The inner `::real` annotations on each nested `_lpdf` call are required by
+# SB's tracing — without them the return type stays at `anything` and the
+# outer `+=` errors.
+StanBlocks.@deffun begin
+    multi_lkj_corr_cholesky_lpdf(L::cholesky_factor_corr[m, n], x::real, m::int, n::int)::real = begin
+        rv = 0.
+        for i in 1:m
+            rv += lkj_corr_cholesky_lpdf(L[i, :, :], x)::real
+        end
+        rv
+    end
+    multi_std_normal_lpdf(x::vector[m, n], m::int, n::int)::real = begin
+        rv = 0.
+        for i in 1:m
+            rv += std_normal_lpdf(x[i, :])::real
+        end
+        rv
+    end
+end
+StanBlocks.stan.lpxf_expr(::typeof(multi_lkj_corr_cholesky)) = multi_lkj_corr_cholesky_lpdf
+StanBlocks.stan.lpxf_expr(::typeof(multi_std_normal))        = multi_std_normal_lpdf
+
 ranef_correlated_by = StanBlocks.@slic begin
-    L   ~ lkj_corr_cholesky(1., n_strata, n_terms)
-    tau ~ std_normal(; n=n_terms, m=n_strata, lower=0., type=vector)
-    z   ~ std_normal(; n=n_terms, m=n_groups, type=vector)
+    L   ~ multi_lkj_corr_cholesky(1., n_strata, n_terms)
+    tau ~ multi_std_normal(n_strata, n_terms; lower=0.)
+    z   ~ multi_std_normal(n_strata, n_terms)
     b = stratified_correlated_b(L, tau, z, stratum_idx, n_groups, n_terms)
     return rows_dot_product(Z, b[group_idx, :])
 end
@@ -135,9 +161,9 @@ end
 # `(e | ID | gr(g, by=b))` buckets. Matrix-returning variant of
 # `ranef_correlated_by` so each sub-formula can slice its own column(s).
 ranef_correlated_by_draws = StanBlocks.@slic begin
-    L   ~ lkj_corr_cholesky(1., n_strata, n_terms)
-    tau ~ std_normal(; n=n_terms, m=n_strata, lower=0., type=vector)
-    z   ~ std_normal(; n=n_terms, m=n_groups, type=vector)
+    L   ~ multi_lkj_corr_cholesky(1., n_strata, n_terms)
+    tau ~ multi_std_normal(n_strata, n_terms; lower=0.)
+    z   ~ multi_std_normal(n_strata, n_terms)
     return stratified_correlated_b(L, tau, z, stratum_idx, n_groups, n_terms)
 end
 
