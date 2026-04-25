@@ -12,6 +12,7 @@ using Statistics: quantile, median
 using FiniteDifferences: FiniteDifferences, central_fdm
 using BridgeStan: BridgeStan
 using StanLogDensityProblems: StanProblem
+using LogDensityProblems
 using StanBlocks
 using Distributions
 using OrderedCollections: OrderedDict
@@ -35,7 +36,7 @@ using BayesianRegressionModels: AbstractColumn, MissingColumn, DataColumn,
     # Macro / pipeline entry points called by Formula + stan_code.
     parse!, _brm, stan_code, maybedata,
     # Part machinery and push_parts!! (called by bruno-ext unqualified).
-    Part, push_parts!!, vbroadcasted
+    Part, push_parts!!, vbroadcasted, llikelihood!
 # Extension hooks — use `import` (not `using`) so bruno-ext can ADD
 # methods to the same function binding rather than creating a shadowing
 # local function.
