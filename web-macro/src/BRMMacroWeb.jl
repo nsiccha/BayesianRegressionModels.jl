@@ -1430,14 +1430,32 @@ APPDATA = AppData(; cache_type=:parallel)
             isnothing(spec) && return nothing
             link_label = pat.link_fn === identity ? string(pat.loc) :
                          "$(pat.link_fn)($(pat.loc))"
-            group_label = (pat.kind === :linear_re) ? "; coloured by $(pat.group)" : ""
             cap = which === :prior ?
-                "Prior-predictive draws of $link_label$predictor_label$group_label (no observation overlay -- $(pat.family) family, kind=$(pat.kind))" :
-                "Posterior draws of $link_label$predictor_label$group_label, with observed $(pat.response) overlaid (kind=$(pat.kind))"
+                "Prior-predictive draws of $link_label$predictor_label (no observation overlay -- $(pat.family) family, kind=$(pat.kind))" :
+                "Posterior draws of $link_label$predictor_label, with observed $(pat.response) overlaid (kind=$(pat.kind))"
+            # AoV's mapping picker: any kind that has a categorical /
+            # grouping column gets a row/column/color/detail picker so
+            # users can swap which channel that variable maps to. Plain
+            # :linear / :scalar have nothing remappable; skip the picker.
+            picker_dims = if pat.kind === :linear_re
+                ["group" => "Group ($(pat.group))"]
+            elseif pat.kind === :categorical
+                ["x" => "Level of $(pat.predictor)"]
+            elseif pat.kind === :multi_continuous
+                ["predictor" => "Predictor"]
+            else
+                nothing
+            end
+            plot_block = if isnothing(picker_dims)
+                with_plot_caption(spec; plot_id="$id_prefix-ppc", title=cap)
+            else
+                with_plot_caption(spec; plot_id="$id_prefix-ppc", title=cap,
+                                  auto_remap=(; dims=picker_dims))
+            end
             h.section(
                 h.h4(heading, ": ", h.code(string(pat.response)), predictor_label,
                      " (", string(pat.kind), ")"),
-                with_plot_caption(spec; plot_id="$id_prefix-ppc", title=cap),
+                plot_block,
             )
         end
 
