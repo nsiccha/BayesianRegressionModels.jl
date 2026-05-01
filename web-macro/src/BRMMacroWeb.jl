@@ -896,7 +896,12 @@ end
             # adding STAN_THREADS=true) naturally routes to a fresh path and
             # triggers a rebuild — BridgeStan doesn't support reloading a
             # previously-dlopened .so, so we can't reuse old binaries.
-            _make_args = ["STAN_THREADS=true"]
+            # `-j1` keeps g++ peak memory low so the kernel doesn't OOM-kill
+            # julia during a fresh compile on the 3.8GB strato box. Costs
+            # ~30s per first-time compile but stops the recurring crashes.
+            # Hash includes make_args, so flipping this routes to a fresh
+            # cache path -- old `-j` cached .so's are not reused.
+            _make_args = ["-j1", "STAN_THREADS=true"]
             file = begin
                 p = joinpath(tempdir(), "brm_stan",
                              string(hash((src, _make_args))) * ".stan")
