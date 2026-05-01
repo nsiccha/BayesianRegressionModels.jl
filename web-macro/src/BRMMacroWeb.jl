@@ -548,6 +548,78 @@ dfs_from_constrained(constrained, names) = begin
     (; long, wide, summary)
 end
 
+# Detect a "simple linear regression" pattern in a BRMI:
+#   `<loc> ~ 1 + <single bare continuous predictor>` and
+#   `<response> ~ Normal(<loc>, _)` with no link transform on the loc LHS.
+# Returns `(; predictor::Symbol, response::Symbol, loc::Symbol)` or `nothing`.
+# Skips (returns nothing) on: link-transformed loc, multi-term RHS, integer /
+# categorical predictor, non-Normal likelihood, missing loc op.
+_linreg_ppc_columns(brmi::BRMI) = begin
+    ops = brmi.operations
+    response = nothing
+    loc_name = nothing
+    for (k, v) in pairs(ops)
+        v isa NamedColumn || continue
+        op = parent(v)
+        op isa ExprColumn || continue
+        getf(op) === (~) || continue
+        lhs, rh = getargs(op, 2)
+        lhs isa NamedColumn && parent(lhs) isa DataColumn || continue
+        rh isa ExprColumn || continue
+        getf(rh) === Normal || continue
+        args = getargs(rh)
+        length(args) == 2 && args[1] isa NamedColumn || continue
+        response = k
+        loc_name = name(args[1])
+        break
+    end
+    isnothing(response) && return nothing
+    haskey(ops, loc_name) || return nothing
+    loc_v = ops[loc_name]
+    loc_v isa NamedColumn || return nothing
+    loc_op = parent(loc_v)
+    loc_op isa ExprColumn || return nothing
+    getf(loc_op) === (~) || return nothing
+    lhs, rhs_expr = getargs(loc_op, 2)
+    lhs isa NamedColumn || return nothing  # link-transformed loc -> bail
+    rhs_expr isa ExprColumn || return nothing
+    getf(rhs_expr) === (+) || return nothing
+    bare = NamedColumn[]
+    for s in getargs(rhs_expr)
+        s isa Number && continue            # intercept
+        s isa NamedColumn || return nothing # not a simple predictor
+        push!(bare, s)
+    end
+    length(bare) == 1 || return nothing
+    pcol = parent(bare[1])
+    pcol isa DataColumn || return nothing
+    elt = eltype(parent(pcol))
+    (elt <: Real && !(elt <: Integer)) || return nothing
+    (; predictor=name(bare[1]), response, loc=loc_name)
+end
+
+# Build an AoV node: median + 50/80/95% credible bands of `<loc>` across draws,
+# plotted vs the predictor column, with observed responses overlaid as a black
+# scatter. `summary` is the long-form (param, index)-keyed summary from
+# `dfs_from_constrained`. Returns `nothing` if no `<loc>` rows are present
+# (e.g. fit-side `posterior_long_df` without TPs / GQs).
+_linreg_ppc_node(summary::DataFrame, df::DataFrame, loc::Symbol,
+                 predictor::Symbol, response::Symbol; id, title) = begin
+    rows = filter(:param => ==(string(loc)), summary)
+    isempty(rows) && return nothing
+    sort!(rows, :index)
+    rows.x     = df[!, predictor][rows.index]
+    rows.y_obs = df[!, response][rows.index]
+    bands = [:q025 => :q975, :q10 => :q90, :q25 => :q75]
+    spec = (
+        AoG.data(rows) * AoG.mapping(:x, :median) * lineribbon(; bands)
+        +
+        AoG.data(rows) * AoG.mapping(:x, :y_obs) *
+            AoG.visual(AoG.Scatter; color=:black)
+    ) * config(title=title)
+    to_node(spec; id)
+end
+
 @dynamicstruct struct AppData
     __status__ = initialize_progress!(:state; description="BRM pipeline")
     examples_dir = joinpath(dirname(@__DIR__), "examples")
@@ -1072,12 +1144,42 @@ APPDATA = AppData(; cache_type=:parallel)
                                 id_prefix="brm-plot-generated",
                                 kind="Generated data (prior predictive)",
                                 truth)
-            h.section(
+            # Auto-generated linreg PPC: only renders when the formula is a
+            # single-continuous-predictor + Normal likelihood; otherwise
+            # `cols === nothing` and we skip silently.
+            linreg_section = begin
+                cols = _linreg_ppc_columns(context!().run.brmi)
+                if isnothing(cols)
+                    nothing
+                else
+                    df = context!().run.df
+                    title = "$(cols.response) vs $(cols.predictor) -- prior-predictive PPC"
+                    node = _linreg_ppc_node(summary, df, cols.loc,
+                                            cols.predictor, cols.response;
+                                            id="brm-plot-generated-linreg",
+                                            title=title)
+                    isnothing(node) ? nothing : h.section(
+                        h.h4("Linear-regression PPC: ",
+                             h.code("$(cols.response) ~ 1 + $(cols.predictor)"),
+                             " (prior-predictive)"),
+                        h.p(h.small("Median + 50/80/95% credible bands of ",
+                                    h.code(string(cols.loc)),
+                                    " across draws as a function of ",
+                                    h.code(string(cols.predictor)),
+                                    "; black dots are observed ",
+                                    h.code(string(cols.response)), ".")),
+                        node,
+                    )
+                end
+            end
+            parts = Any[
                 h.h3("6c. StanGenerate — synthetic data from narrow-normal prior + param_constrain"),
                 h.p("long format: ", nrow(long), " rows · ", ncol(long), " cols · ",
                     "wide format: ", nrow(wide), " rows · ", ncol(wide), " cols"),
                 p.tabs, p.wide_details,
-            )
+            ]
+            isnothing(linreg_section) || push!(parts, linreg_section)
+            h.section(parts...)
         end
         stan_fit_pathfinder(x) = begin
             (; long, wide, summary, truth) = x
