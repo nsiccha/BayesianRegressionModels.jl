@@ -771,9 +771,12 @@ end
             # triggers a rebuild — BridgeStan doesn't support reloading a
             # previously-dlopened .so, so we can't reuse old binaries.
             _make_args = ["STAN_THREADS=true"]
-            file = joinpath(tempdir(), "brm_stan",
-                            string(hash((src, _make_args))) * ".stan")
-            mkpath(dirname(file))
+            file = begin
+                p = joinpath(tempdir(), "brm_stan",
+                             string(hash((src, _make_args))) * ".stan")
+                mkpath(dirname(p))
+                p
+            end
             # Serialize file-write + compile per .stan path. Two threads
             # racing into the same `make` invocation produced a half-written
             # `.so` whose subsequent dlopen segfaulted Julia. The lock is
