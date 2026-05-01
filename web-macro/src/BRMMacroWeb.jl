@@ -629,25 +629,50 @@ _ppc_pattern(brmi::BRMI) = begin
     bare_continuous  = NamedColumn[]
     bare_categorical = NamedColumn[]
     group = nothing
-    for s in getargs(rhs_expr)
-        s isa Number && continue                     # intercept literal
-        if s isa NamedColumn
-            pcol = parent(s)
-            pcol isa DataColumn || return nothing
+    # Collect bare NamedColumn predictors from `expr`. `expr` is either
+    # a NamedColumn, a Number (skip), or an ExprColumn{+} whose args we
+    # recurse into. Used at the top level AND on the lhs of `(... | g)`
+    # so that `(1 + a | g1)` contributes `a` to bare_continuous (so we
+    # can plot loc vs a faceted by g1, instead of falling back to
+    # :scalar).
+    collect_predictors! = function(expr)
+        if expr isa Number
+            return :ok
+        elseif expr isa NamedColumn
+            pcol = parent(expr)
+            pcol isa DataColumn || return :bail
             elt = eltype(parent(pcol))
             if elt <: Integer
-                push!(bare_categorical, s)
+                push!(bare_categorical, expr)
             elseif elt <: Real
-                push!(bare_continuous, s)
+                push!(bare_continuous, expr)
             else
-                return nothing
+                return :bail
             end
+            return :ok
+        elseif expr isa ExprColumn && getf(expr) === (+)
+            for s in getargs(expr)
+                collect_predictors!(s) === :bail && return :bail
+            end
+            return :ok
+        else
+            return :bail
+        end
+    end
+    for s in getargs(rhs_expr)
+        s isa Number && continue                     # intercept literal
+        if s isa NamedColumn || (s isa ExprColumn && getf(s) === (+))
+            collect_predictors!(s) === :bail && return nothing
         elseif s isa ExprColumn && getf(s) === (|)
             ra = getargs(s)
-            if length(ra) >= 2 && ra[end] isa NamedColumn &&
-               parent(ra[end]) isa DataColumn
+            length(ra) >= 2 || return nothing
+            # Grouping factor (last arg).
+            if ra[end] isa NamedColumn && parent(ra[end]) isa DataColumn
                 group = name(ra[end])
             end
+            # RE-internal predictors (lhs of `|`). `(1 + a | g)` ->
+            # collect `a`. `(1 | g)` -> nothing.
+            collect_predictors!(ra[1]) === :bail && return nothing
         else
             return nothing
         end
@@ -658,8 +683,10 @@ _ppc_pattern(brmi::BRMI) = begin
     n_cont = length(bare_continuous)
     n_cat  = length(bare_categorical)
 
-    if n_cont == 0 && n_cat == 0
+    if n_cont == 0 && n_cat == 0 && isnothing(group)
         merge(base, (; kind=:scalar))
+    elseif n_cont == 0 && n_cat == 0 && !isnothing(group)
+        merge(base, (; kind=:scalar_re, group))
     elseif n_cont == 1 && n_cat == 0 && isnothing(group)
         merge(base, (; kind=:linear, predictor=name(bare_continuous[1])))
     elseif n_cont == 1 && n_cat == 0 && !isnothing(group)
@@ -696,6 +723,16 @@ _pred_categorical(long, df, loc::Symbol, predictor::Symbol, link_fn::Function) =
     rows = _loc_long(long, loc); isnothing(rows) && return nothing
     DataFrame(
         level = df[!, predictor][rows.index],
+        y     = link_fn.(rows.value),
+    )
+end
+
+# Scalar + group: same as :categorical but the levels come from the RE
+# grouping factor instead of an explicit predictor.
+_pred_scalar_re(long, df, loc::Symbol, group::Symbol, link_fn::Function) = begin
+    rows = _loc_long(long, loc); isnothing(rows) && return nothing
+    DataFrame(
+        group = df[!, group][rows.index],
         y     = link_fn.(rows.value),
     )
 end
@@ -740,6 +777,12 @@ _prior_ppc_spec(long, df, p::NamedTuple; title) = begin
         isnothing(pred) && return nothing
         AoG.data(pred) * AoG.mapping(:y) * AoG.visual(ECDFPlot) *
             config(title=title)
+    elseif p.kind === :scalar_re
+        pred = _pred_scalar_re(long, df, p.loc, p.group, p.link_fn)
+        isnothing(pred) && return nothing
+        AoG.data(pred) * AoG.mapping(:y, row=:group => nonnumeric) *
+            AoG.visual(ECDFPlot) *
+            config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
     elseif p.kind === :linear
         pred = _pred_continuous(long, df, p.loc, p.predictor, p.link_fn, nothing)
         isnothing(pred) && return nothing
@@ -786,6 +829,17 @@ _posterior_ppc_spec(long, df, obs_y, p::NamedTuple; title) = begin
             AoG.data(obs) * AoG.mapping(:y) *
                 AoG.visual(ECDFPlot; color="black", strokeWidth=2)
         ) * config(title=title)
+    elseif p.kind === :scalar_re
+        pred = _pred_scalar_re(long, df, p.loc, p.group, p.link_fn)
+        isnothing(pred) && return nothing
+        obs  = DataFrame(group = df[!, p.group], y = obs_y)
+        (
+            AoG.data(pred) * AoG.mapping(:y, row=:group => nonnumeric) *
+                AoG.visual(ECDFPlot)
+            +
+            AoG.data(obs) * AoG.mapping(:y, row=:group => nonnumeric) *
+                AoG.visual(ECDFPlot; color="black", strokeWidth=2)
+        ) * config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
     elseif p.kind === :linear
         pred = _pred_continuous(long, df, p.loc, p.predictor, p.link_fn, nothing)
         isnothing(pred) && return nothing
@@ -1460,7 +1514,7 @@ APPDATA = AppData(; cache_type=:parallel)
             # grouping column gets a row/column/color/detail picker so
             # users can swap which channel that variable maps to. Plain
             # :linear / :scalar have nothing remappable; skip the picker.
-            picker_dims = if pat.kind === :linear_re
+            picker_dims = if pat.kind === :linear_re || pat.kind === :scalar_re
                 ["group" => "Group ($(pat.group))"]
             elseif pat.kind === :categorical
                 ["level" => "Level of $(pat.predictor)"]
