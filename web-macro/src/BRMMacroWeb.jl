@@ -552,150 +552,73 @@ dfs_from_constrained(constrained, names) = begin
 end
 
 # Detect a PPC pattern in a BRMI. Returns a NamedTuple `(; kind, ...)` or
-# `nothing` if the formula doesn't fit any supported shape.
+# `nothing` if the formula doesn't fit any supported shape. Built on the
+# `outcomes` / `predictors` introspection helpers in BayesianRegressionModels
+# rather than re-walking the operations dict here.
 #
 # `kind` is one of:
-#   :scalar           -- intercept-only loc; ECDF of link(loc), obs ECDF overlay
-#   :linear           -- single bare continuous predictor; line + ribbon vs x
-#   :linear_re        -- :linear plus an `(1|g)` term; coloured by g
-#   :categorical      -- single integer (treatment-coded) predictor; per-level
-#                        pointinterval + per-level observed scatter overlay
-#   :multi_continuous -- 2+ bare continuous predictors; faceted by predictor
+#   :scalar           -- intercept-only loc; pooled ECDF.
+#   :scalar_re        -- intercept + (1|g); ECDF faceted by group.
+#   :linear           -- single bare continuous predictor; line + ribbon vs x.
+#   :linear_re        -- continuous predictor + an (1|g) term; faceted by group.
+#   :categorical      -- single integer (treatment-coded) predictor; ECDF
+#                        faceted by level.
+#   :multi_continuous -- 2+ bare continuous predictors; faceted by predictor.
 #
 # Common fields: `response::Symbol`, `loc::Symbol`, `family`, `link_fn`.
 # Per-kind extras: `predictor` / `predictors` / `group` / `n_trials` (Binomial
-# only -- the trials column from `Binomial(N, p)` so caller can compute the
-# observed proportion `obs / n_trials`).
-#
-# Skips on: link transform on loc LHS, mixed continuous+categorical,
-# unsupported family, missing loc op.
+# only -- so caller can convert observed counts to proportions).
 _ppc_pattern(brmi::BRMI) = begin
-    ops = brmi.operations
-    response = nothing
-    loc_name = nothing
-    family   = nothing
-    link_fn  = identity
-    n_trials = nothing
-    for (k, v) in pairs(ops)
-        v isa NamedColumn || continue
-        op = parent(v)
-        op isa ExprColumn || continue
-        getf(op) === (~) || continue
-        lhs, rh = getargs(op, 2)
-        lhs isa NamedColumn && parent(lhs) isa DataColumn || continue
-        rh isa ExprColumn || continue
-        f = getf(rh)
-        (f === Normal || f === Poisson || f === Bernoulli || f === Binomial) || continue
-        args = getargs(rh)
-        # Locate which arg carries the linear-predictor wrap.
-        # Binomial(N, p): args[1] = trials data, args[2] = link(loc).
-        # Normal(loc, sigma) / Poisson / Bernoulli: args[1] = link(loc).
-        target_arg = nothing
-        if f === Binomial
-            length(args) == 2 || continue
-            args[1] isa NamedColumn && parent(args[1]) isa DataColumn || continue
-            n_trials = name(args[1])
-            target_arg = args[2]
-        else
-            length(args) >= 1 || continue
-            target_arg = args[1]
-        end
-        # Peel link: bare NamedColumn -> identity; unary ExprColumn -> peel.
-        if target_arg isa NamedColumn
-            loc_name = name(target_arg)
-            link_fn  = identity
-        elseif target_arg isa ExprColumn && length(getargs(target_arg)) == 1 &&
-               getargs(target_arg)[1] isa NamedColumn
-            link_fn  = getf(target_arg)
-            loc_name = name(getargs(target_arg)[1])
-        else
-            continue
-        end
-        response = k
-        family   = f
-        break
+    outs = outcomes(brmi)
+    isempty(outs) && return nothing
+    o = nothing
+    for cand in outs
+        cand.family in (Normal, Poisson, Bernoulli, Binomial) || continue
+        o = cand; break
     end
-    isnothing(response) && return nothing
-    haskey(ops, loc_name) || return nothing
-    loc_v = ops[loc_name]
-    loc_v isa NamedColumn || return nothing
-    loc_op = parent(loc_v)
-    loc_op isa ExprColumn || return nothing
-    getf(loc_op) === (~) || return nothing
-    lhs, rhs_expr = getargs(loc_op, 2)
-    lhs isa NamedColumn || return nothing            # link on loc LHS -> skip
-    rhs_expr isa ExprColumn || return nothing
-    getf(rhs_expr) === (+) || return nothing
-    bare_continuous  = NamedColumn[]
-    bare_categorical = NamedColumn[]
+    isnothing(o) && return nothing
+    pred = predictors(brmi, o.link_lp)
+    isnothing(pred) && return nothing
+
+    # Flatten RE-internal predictors into the bare lists so `(1 + a | g)`
+    # contributes `a` as a bare predictor (with the group threaded out).
+    cont = copy(pred.continuous)
+    cat  = copy(pred.categorical)
     group = nothing
-    # Collect bare NamedColumn predictors from `expr`. `expr` is either
-    # a NamedColumn, a Number (skip), or an ExprColumn{+} whose args we
-    # recurse into. Used at the top level AND on the lhs of `(... | g)`
-    # so that `(1 + a | g1)` contributes `a` to bare_continuous (so we
-    # can plot loc vs a faceted by g1, instead of falling back to
-    # :scalar).
-    collect_predictors! = function(expr)
-        if expr isa Number
-            return :ok
-        elseif expr isa NamedColumn
-            pcol = parent(expr)
-            pcol isa DataColumn || return :bail
-            elt = eltype(parent(pcol))
-            if elt <: Integer
-                push!(bare_categorical, expr)
-            elseif elt <: Real
-                push!(bare_continuous, expr)
-            else
-                return :bail
-            end
-            return :ok
-        elseif expr isa ExprColumn && getf(expr) === (+)
-            for s in getargs(expr)
-                collect_predictors!(s) === :bail && return :bail
-            end
-            return :ok
-        else
-            return :bail
-        end
+    for re in pred.re_terms
+        group = re.group   # last RE wins (multi-RE coalescing left for later)
+        append!(cont, re.inner.continuous)
+        append!(cat,  re.inner.categorical)
     end
-    for s in getargs(rhs_expr)
-        s isa Number && continue                     # intercept literal
-        if s isa NamedColumn || (s isa ExprColumn && getf(s) === (+))
-            collect_predictors!(s) === :bail && return nothing
-        elseif s isa ExprColumn && getf(s) === (|)
-            ra = getargs(s)
-            length(ra) >= 2 || return nothing
-            # Grouping factor (last arg).
-            if ra[end] isa NamedColumn && parent(ra[end]) isa DataColumn
-                group = name(ra[end])
+
+    # Binomial: pull out the trials column from family_args so the caller
+    # can convert observed counts to proportions on the link scale.
+    n_trials = nothing
+    if o.family === Binomial
+        for fa in o.family_args
+            if fa isa NamedColumn && parent(fa) isa DataColumn
+                n_trials = name(fa); break
             end
-            # RE-internal predictors (lhs of `|`). `(1 + a | g)` ->
-            # collect `a`. `(1 | g)` -> nothing.
-            collect_predictors!(ra[1]) === :bail && return nothing
-        else
-            return nothing
         end
     end
 
-    base = (; response, loc=loc_name, family, link_fn)
+    base = (; response=o.response, loc=o.link_lp, family=o.family, link_fn=o.link_fn)
     isnothing(n_trials) || (base = merge(base, (; n_trials)))
-    n_cont = length(bare_continuous)
-    n_cat  = length(bare_categorical)
 
+    n_cont = length(cont)
+    n_cat  = length(cat)
     if n_cont == 0 && n_cat == 0 && isnothing(group)
         merge(base, (; kind=:scalar))
     elseif n_cont == 0 && n_cat == 0 && !isnothing(group)
         merge(base, (; kind=:scalar_re, group))
     elseif n_cont == 1 && n_cat == 0 && isnothing(group)
-        merge(base, (; kind=:linear, predictor=name(bare_continuous[1])))
+        merge(base, (; kind=:linear, predictor=cont[1]))
     elseif n_cont == 1 && n_cat == 0 && !isnothing(group)
-        merge(base, (; kind=:linear_re, predictor=name(bare_continuous[1]), group))
+        merge(base, (; kind=:linear_re, predictor=cont[1], group))
     elseif n_cont == 0 && n_cat == 1
-        merge(base, (; kind=:categorical, predictor=name(bare_categorical[1])))
+        merge(base, (; kind=:categorical, predictor=cat[1]))
     elseif n_cont >= 2 && n_cat == 0
-        merge(base, (; kind=:multi_continuous,
-                       predictors=Symbol[name(p) for p in bare_continuous]))
+        merge(base, (; kind=:multi_continuous, predictors=cont))
     else
         nothing  # mixed continuous+categorical -- not handled yet
     end
