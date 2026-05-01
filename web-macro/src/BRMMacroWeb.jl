@@ -1137,7 +1137,12 @@ APPDATA = AppData(; cache_type=:parallel)
         end
         bench(x) = h.section(
             h.h3("6. Chairmarks @be — per-step"),
-            [h.article(h.header(lbl), h.pre(b)) for (lbl, b) in x]...,
+            # `h.pre(b)` would call 2-arg show -> `Benchmark([Sample(...)...])`.
+            # Force the 3-arg `text/plain` show to get Chairmarks' pretty
+            # multi-line summary (min/median/quantiles/etc.).
+            [h.article(h.header(lbl),
+                       h.pre(sprint(show, MIME("text/plain"), b)))
+             for (lbl, b) in x]...,
         )
         slic_model(x) = h.section(
             h.h3("5a. SlicModel — SBBRMI @slic body"),
