@@ -1549,12 +1549,23 @@ bin_y ~ Bernoulli(logistic(log_odds_b))
         "everything" => default_formula,
     ]
 
+    # `formula` is the preset's preset-text; the outer `formula` (the
+    # @param) is shadowed here. `__parent__.formula` reaches the page's
+    # current formula state so we can mark this preset as active when
+    # they match. Inactive presets get Pico's `outline` class (ghost
+    # button); the active one drops it (filled primary).
     @struct preset(label, formula) = begin
         button = h.button(label;
             type="button",
-            class="brm-preset-btn",
+            class=("brm-preset-btn" * (formula == __parent__.formula ? "" : " outline")),
             data_formula=formula,
-            onclick="document.querySelector('textarea[name=formula]').value = this.dataset.formula; document.getElementById('stage-vbrmi').click()"
+            onclick="""
+                document.querySelector('textarea[name=formula]').value = this.dataset.formula;
+                document.querySelectorAll('.brm-preset-btn').forEach(b => b.classList.add('outline'));
+                this.classList.remove('outline');
+                const tab = document.querySelector('.tab-row a.primary') || document.querySelector('.tab-row a');
+                if (tab) tab.click();
+            """,
         )
     end
 
@@ -1703,7 +1714,10 @@ bin_y ~ Bernoulli(logistic(log_odds_b))
                 h.label("Formula")(
                     h.textarea(formula;
                         name="formula", rows=8,
-                        class="brm-formula-textarea"),
+                        class="brm-formula-textarea",
+                        # Edited formula no longer matches any preset --
+                        # de-highlight every preset button.
+                        oninput="document.querySelectorAll('.brm-preset-btn').forEach(b => b.classList.add('outline'))"),
                 ),
                 # Lazy stage-picker tabs. Each tab fetches its stage on
                 # click; the response replaces the inner HTML of
