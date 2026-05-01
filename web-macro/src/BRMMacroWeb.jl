@@ -1524,17 +1524,14 @@ bin_y ~ Bernoulli(logistic(log_odds_b))
         button = h.button(label;
             type="button",
             id="stage-$id",
-            hx_get=string(__self__/"stage/$id"),
+            hx_get=string(query_url(__self__/"stage/$id"; force=true)),
             hx_include="#brm-macro-form",
             hx_target="#brm-macro-output",
-            # `force=true` is sent as a header (not a query param) so the
-            # pushed URL only carries the formula -- reload / share of the
-            # address re-attaches to the polling_fetchindex IP for the same
-            # (formula, stage) instead of forcing a recompute.
-            # Cobweb doesn't escape inner double quotes in attribute values,
-            # so write the JSON with `&quot;` directly -- the browser sees
-            # `{"X-Brm-Force": "true"}` and HTMX parses it.
-            hx_headers="{&quot;X-Brm-Force&quot;: &quot;true&quot;}",
+            # Push the full request URL (formula + force) so click history
+            # is preserved. The route honours `force=true` only when the
+            # request actually came from HTMX (HX-Request header present);
+            # a direct browser reload of the pushed URL re-attaches to the
+            # polling_fetchindex IP instead of forcing a recompute.
             hx_push_url="true",
             # `innerHTML` keeps the `#brm-macro-output` wrapper in the DOM
             # across swaps — including when polling_fetchindex throws and the
@@ -1712,11 +1709,12 @@ bin_y ~ Bernoulli(logistic(log_odds_b))
         compute_steps, formula, context!().namespace, name;
         poll_url=query_url(__self__/"stage/$name"; formula, label),
         label="BRM pipeline - $name",
-        # Accept `force` either as a query param (legacy) or as the
-        # `X-Brm-Force: true` header (set by stage buttons so the pushed
-        # URL stays clean -- reload re-attaches to the IP cache instead of
-        # forcing a recompute).
-        force=force || HTTP.header(__req__, "X-Brm-Force", "false") == "true",
+        # Honour `force=true` only when the request actually came from
+        # HTMX (button click). A direct browser reload of a pushed URL
+        # has no HX-Request header, so we ignore `force` and let the
+        # polling_fetchindex IP cache re-attach to whatever's already
+        # running / cached for this (formula, name).
+        force=force && is_htmx(__req__),
     ) do result
         # On successful stage computation, mark this stage + all prerequisite
         # stages as pass on the corresponding ExampleEntry (if label
