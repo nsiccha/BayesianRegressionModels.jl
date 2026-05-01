@@ -1506,6 +1506,10 @@ bin_y ~ Bernoulli(logistic(log_odds_b))
             hx_get=string(query_url(__self__/"stage/$id"; force=true)),
             hx_include="#brm-macro-form",
             hx_target="#brm-macro-output",
+            # Push the resolved request URL (with the formula + force in the
+            # query string) so the address bar reflects the active stage and
+            # the page is shareable / reload-survivable.
+            hx_push_url="true",
             # `innerHTML` keeps the `#brm-macro-output` wrapper in the DOM
             # across swaps — including when polling_fetchindex throws and the
             # response is a bare error article with no matching id. Without
