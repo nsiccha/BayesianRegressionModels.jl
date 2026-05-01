@@ -551,26 +551,31 @@ dfs_from_constrained(constrained, names) = begin
     (; long, wide, summary)
 end
 
-# Detect a "single-continuous-predictor" PPC pattern in a BRMI. Returns a
-# NamedTuple describing what to plot, or `nothing` if the formula doesn't fit.
+# Detect a PPC pattern in a BRMI. Returns a NamedTuple `(; kind, ...)` or
+# `nothing` if the formula doesn't fit any supported shape.
 #
-# Supported patterns:
-#   1. Linreg:        `loc ~ 1 + a`,  `y ~ Normal(loc, _)`           link = identity
-#   2. Linreg + RE:   `loc ~ 1 + a + (1|g)`, `y ~ Normal(loc, _)`    link = identity, group = g
-#   3. Poisson:       `eta ~ 1 + a`,  `k ~ Poisson(exp(eta))`        link = exp
-#   4. Bernoulli:     `eta ~ 1 + a`,  `b ~ Bernoulli(logistic(eta))` link = logistic
+# `kind` is one of:
+#   :scalar           -- intercept-only loc; ECDF of link(loc), obs ECDF overlay
+#   :linear           -- single bare continuous predictor; line + ribbon vs x
+#   :linear_re        -- :linear plus an `(1|g)` term; coloured by g
+#   :categorical      -- single integer (treatment-coded) predictor; per-level
+#                        pointinterval + per-level observed scatter overlay
+#   :multi_continuous -- 2+ bare continuous predictors; faceted by predictor
 #
-# Returns `(; predictor, response, loc, family, link_fn, group)`. `group` is
-# `nothing` unless an `(1 | g)` random intercept is present alongside the bare
-# predictor (multi-term + RE is allowed). Skips on: multi-bare-predictor,
-# non-supported family, link transform on the loc LHS, integer/categorical
-# predictor, missing loc op.
+# Common fields: `response::Symbol`, `loc::Symbol`, `family`, `link_fn`.
+# Per-kind extras: `predictor` / `predictors` / `group` / `n_trials` (Binomial
+# only -- the trials column from `Binomial(N, p)` so caller can compute the
+# observed proportion `obs / n_trials`).
+#
+# Skips on: link transform on loc LHS, mixed continuous+categorical,
+# unsupported family, missing loc op.
 _ppc_pattern(brmi::BRMI) = begin
     ops = brmi.operations
     response = nothing
     loc_name = nothing
     family   = nothing
     link_fn  = identity
+    n_trials = nothing
     for (k, v) in pairs(ops)
         v isa NamedColumn || continue
         op = parent(v)
@@ -580,20 +585,29 @@ _ppc_pattern(brmi::BRMI) = begin
         lhs isa NamedColumn && parent(lhs) isa DataColumn || continue
         rh isa ExprColumn || continue
         f = getf(rh)
-        # Only detect families we know how to overlay observed values for.
-        (f === Normal || f === Poisson || f === Bernoulli) || continue
+        (f === Normal || f === Poisson || f === Bernoulli || f === Binomial) || continue
         args = getargs(rh)
-        length(args) >= 1 || continue
-        # Accept either a bare loc NamedColumn or a unary link wrap
-        # (e.g. `Poisson(exp(eta))`, `Bernoulli(logistic(eta))`).
-        a1 = args[1]
-        if a1 isa NamedColumn
-            loc_name = name(a1)
+        # Locate which arg carries the linear-predictor wrap.
+        # Binomial(N, p): args[1] = trials data, args[2] = link(loc).
+        # Normal(loc, sigma) / Poisson / Bernoulli: args[1] = link(loc).
+        target_arg = nothing
+        if f === Binomial
+            length(args) == 2 || continue
+            args[1] isa NamedColumn && parent(args[1]) isa DataColumn || continue
+            n_trials = name(args[1])
+            target_arg = args[2]
+        else
+            length(args) >= 1 || continue
+            target_arg = args[1]
+        end
+        # Peel link: bare NamedColumn -> identity; unary ExprColumn -> peel.
+        if target_arg isa NamedColumn
+            loc_name = name(target_arg)
             link_fn  = identity
-        elseif a1 isa ExprColumn && length(getargs(a1)) == 1 &&
-               getargs(a1)[1] isa NamedColumn
-            link_fn  = getf(a1)
-            loc_name = name(getargs(a1)[1])
+        elseif target_arg isa ExprColumn && length(getargs(target_arg)) == 1 &&
+               getargs(target_arg)[1] isa NamedColumn
+            link_fn  = getf(target_arg)
+            loc_name = name(getargs(target_arg)[1])
         else
             continue
         end
@@ -612,14 +626,23 @@ _ppc_pattern(brmi::BRMI) = begin
     lhs isa NamedColumn || return nothing            # link on loc LHS -> skip
     rhs_expr isa ExprColumn || return nothing
     getf(rhs_expr) === (+) || return nothing
-    bare = NamedColumn[]
+    bare_continuous  = NamedColumn[]
+    bare_categorical = NamedColumn[]
     group = nothing
     for s in getargs(rhs_expr)
         s isa Number && continue                     # intercept literal
         if s isa NamedColumn
-            push!(bare, s)
+            pcol = parent(s)
+            pcol isa DataColumn || return nothing
+            elt = eltype(parent(pcol))
+            if elt <: Integer
+                push!(bare_categorical, s)
+            elseif elt <: Real
+                push!(bare_continuous, s)
+            else
+                return nothing
+            end
         elseif s isa ExprColumn && getf(s) === (|)
-            # `(... | g)` random-effects term: extract grouping factor name.
             ra = getargs(s)
             if length(ra) >= 2 && ra[end] isa NamedColumn &&
                parent(ra[end]) isa DataColumn
@@ -629,24 +652,47 @@ _ppc_pattern(brmi::BRMI) = begin
             return nothing
         end
     end
-    length(bare) == 1 || return nothing
-    pcol = parent(bare[1])
-    pcol isa DataColumn || return nothing
-    elt = eltype(parent(pcol))
-    (elt <: Real && !(elt <: Integer)) || return nothing
-    (; predictor=name(bare[1]), response, loc=loc_name, family, link_fn, group)
+
+    base = (; response, loc=loc_name, family, link_fn)
+    isnothing(n_trials) || (base = merge(base, (; n_trials)))
+    n_cont = length(bare_continuous)
+    n_cat  = length(bare_categorical)
+
+    if n_cont == 0 && n_cat == 0
+        merge(base, (; kind=:scalar))
+    elseif n_cont == 1 && n_cat == 0 && isnothing(group)
+        merge(base, (; kind=:linear, predictor=name(bare_continuous[1])))
+    elseif n_cont == 1 && n_cat == 0 && !isnothing(group)
+        merge(base, (; kind=:linear_re, predictor=name(bare_continuous[1]), group))
+    elseif n_cont == 0 && n_cat == 1
+        merge(base, (; kind=:categorical, predictor=name(bare_categorical[1])))
+    elseif n_cont >= 2 && n_cat == 0
+        merge(base, (; kind=:multi_continuous,
+                       predictors=Symbol[name(p) for p in bare_continuous]))
+    else
+        nothing  # mixed continuous+categorical -- not handled yet
+    end
 end
 
-# Project the long-format draws (cols: param, index, draw, value) into a
-# (x, y, draw, group?) table by filtering for `loc`, mapping `index -> x`
-# from the dataset's predictor column, and applying `link_fn` to `value` so
-# `y` lives on the response scale (identity for Normal, exp for Poisson,
-# logistic for Bernoulli). `df` is the dataset; `group` is the optional
-# grouping-factor column name (added as a `:group` column).
-_loc_pred_table(long::DataFrame, df::DataFrame, loc::Symbol, predictor::Symbol,
-                link_fn::Function, group::Union{Symbol,Nothing}) = begin
+# ---- per-kind table builders ------------------------------------------------
+
+# Filter `long` to rows where `param == loc`; nothing when missing (e.g. fit
+# posterior_long_df without TPs). Returns the filtered DataFrame.
+_loc_long(long::DataFrame, loc::Symbol) = begin
     rows = filter(:param => ==(string(loc)), long)
-    isempty(rows) && return nothing
+    isempty(rows) ? nothing : rows
+end
+
+# Scalar loc (intercept-only). One (y, draw) row per draw; loc rows have index=0.
+_pred_scalar(long, loc::Symbol, link_fn::Function) = begin
+    rows = _loc_long(long, loc); isnothing(rows) && return nothing
+    DataFrame(y = link_fn.(rows.value), draw = rows.draw)
+end
+
+# Indexed continuous predictor: x = df[predictor][index], y = link(loc[i, draw]).
+_pred_continuous(long, df, loc::Symbol, predictor::Symbol,
+                 link_fn::Function, group::Union{Symbol,Nothing}) = begin
+    rows = _loc_long(long, loc); isnothing(rows) && return nothing
     out = DataFrame(
         x     = df[!, predictor][rows.index],
         y     = link_fn.(rows.value),
@@ -657,31 +703,111 @@ _loc_pred_table(long::DataFrame, df::DataFrame, loc::Symbol, predictor::Symbol,
     out
 end
 
-# Prior-predictive PPC spec: lineribbon (median + 50/80/95% bands) of `loc[i]`
-# (link-transformed onto the response scale) vs the predictor x[i], aggregated
-# across draws. NO observation overlay -- the prior and the data shouldn't be
-# eyeballed against each other on this stage.
-_prior_ppc_spec(long, df, p::NamedTuple; title) = begin
-    pred = _loc_pred_table(long, df, p.loc, p.predictor, p.link_fn, p.group)
-    isnothing(pred) && return nothing
-    base = AoG.data(pred) * AoG.mapping(:x, :y, group=:draw)
-    base = isnothing(p.group) ? base : base * AoG.mapping(color=:group => nonnumeric)
-    base * lineribbon() * config(title=title)
+# Multi-continuous: stack one block per predictor with a :predictor column so
+# the plot can facet by predictor name (`row=:predictor`).
+_pred_multi(long, df, loc::Symbol, predictors::Vector{Symbol}, link_fn::Function) = begin
+    rows = _loc_long(long, loc); isnothing(rows) && return nothing
+    parts = DataFrame[]
+    for p in predictors
+        push!(parts, DataFrame(
+            predictor = string(p),
+            x         = df[!, p][rows.index],
+            y         = link_fn.(rows.value),
+            draw      = rows.draw,
+            index     = rows.index,
+        ))
+    end
+    vcat(parts...)
 end
 
-# Posterior-predictive PPC spec: predicted lineribbon + observed scatter via
-# AoV's `ppc_overlay`. `obs_y` is the response vector the model was fit to
-# (synthetic SBC observations from `fit_data_dict`). For non-identity links
-# the response data lives on the response scale already (k for Poisson, 0/1
-# for Bernoulli) so it lines up with the link-transformed prediction.
+# ---- per-kind spec builders -------------------------------------------------
+
+# Prior-predictive: NO observation overlay (don't eyeball prior vs data).
+_prior_ppc_spec(long, df, p::NamedTuple; title) = begin
+    if p.kind === :scalar
+        pred = _pred_scalar(long, p.loc, p.link_fn); isnothing(pred) && return nothing
+        AoG.data(pred) * AoG.mapping(:y) * AoG.visual(ECDFPlot) *
+            config(title=title)
+    elseif p.kind === :linear
+        pred = _pred_continuous(long, df, p.loc, p.predictor, p.link_fn, nothing)
+        isnothing(pred) && return nothing
+        AoG.data(pred) * AoG.mapping(:x, :y, group=:draw) * lineribbon() *
+            config(title=title)
+    elseif p.kind === :linear_re
+        pred = _pred_continuous(long, df, p.loc, p.predictor, p.link_fn, p.group)
+        isnothing(pred) && return nothing
+        AoG.data(pred) *
+            AoG.mapping(:x, :y, group=:draw, color=:group => nonnumeric) *
+            lineribbon() *
+            config(title=title)
+    elseif p.kind === :categorical
+        pred = _pred_continuous(long, df, p.loc, p.predictor, p.link_fn, nothing)
+        isnothing(pred) && return nothing
+        AoG.data(pred) * AoG.mapping(:x => nonnumeric, :y) *
+            pointinterval(orientation=:vertical) *
+            config(title=title)
+    elseif p.kind === :multi_continuous
+        pred = _pred_multi(long, df, p.loc, p.predictors, p.link_fn)
+        isnothing(pred) && return nothing
+        AoG.data(pred) * AoG.mapping(:x, :y, group=:draw, row=:predictor) *
+            lineribbon() *
+            config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
+    end
+end
+
+# Posterior-predictive: predicted layer + observed overlay. `obs_y` already on
+# the response scale (caller does Binomial proportion conversion via n_trials).
 _posterior_ppc_spec(long, df, obs_y, p::NamedTuple; title) = begin
-    pred = _loc_pred_table(long, df, p.loc, p.predictor, p.link_fn, p.group)
-    isnothing(pred) && return nothing
-    obs = DataFrame(x = df[!, p.predictor], y = obs_y)
-    layers = ppc_overlay(obs, pred; x=:x, y=:y,
-                         group=:draw,
-                         color = isnothing(p.group) ? nothing : :group)
-    layers * config(title=title)
+    if p.kind === :scalar
+        pred = _pred_scalar(long, p.loc, p.link_fn); isnothing(pred) && return nothing
+        obs  = DataFrame(y = obs_y)
+        (
+            AoG.data(pred) * AoG.mapping(:y) * AoG.visual(ECDFPlot)
+            +
+            AoG.data(obs)  * AoG.mapping(:y) *
+                AoG.visual(ECDFPlot; color="black", strokeWidth=2)
+        ) * config(title=title)
+    elseif p.kind === :linear
+        pred = _pred_continuous(long, df, p.loc, p.predictor, p.link_fn, nothing)
+        isnothing(pred) && return nothing
+        obs  = DataFrame(x = df[!, p.predictor], y = obs_y)
+        ppc_overlay(obs, pred; x=:x, y=:y, group=:draw) * config(title=title)
+    elseif p.kind === :linear_re
+        pred = _pred_continuous(long, df, p.loc, p.predictor, p.link_fn, p.group)
+        isnothing(pred) && return nothing
+        obs  = DataFrame(x = df[!, p.predictor], y = obs_y, group = df[!, p.group])
+        ppc_overlay(obs, pred; x=:x, y=:y, group=:draw, color=:group) *
+            config(title=title)
+    elseif p.kind === :categorical
+        pred = _pred_continuous(long, df, p.loc, p.predictor, p.link_fn, nothing)
+        isnothing(pred) && return nothing
+        obs  = DataFrame(x = df[!, p.predictor], y = obs_y)
+        (
+            AoG.data(pred) * AoG.mapping(:x => nonnumeric, :y) *
+                pointinterval(orientation=:vertical)
+            +
+            AoG.data(obs) * AoG.mapping(:x => nonnumeric, :y) *
+                AoG.visual(Scatter; color="black")
+        ) * config(title=title)
+    elseif p.kind === :multi_continuous
+        pred = _pred_multi(long, df, p.loc, p.predictors, p.link_fn)
+        isnothing(pred) && return nothing
+        obs_parts = DataFrame[]
+        for pname in p.predictors
+            push!(obs_parts, DataFrame(
+                predictor = string(pname),
+                x         = df[!, pname],
+                y         = obs_y,
+            ))
+        end
+        obs = vcat(obs_parts...)
+        (
+            AoG.data(pred) * AoG.mapping(:x, :y, group=:draw, row=:predictor) * lineribbon()
+            +
+            AoG.data(obs)  * AoG.mapping(:x, :y, row=:predictor) *
+                AoG.visual(Scatter; color="black")
+        ) * config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
+    end
 end
 
 @dynamicstruct struct AppData
@@ -1249,24 +1375,40 @@ APPDATA = AppData(; cache_type=:parallel)
             df  = context!().run.df
             heading = which === :prior ? "Prior predictive" :
                                           "Posterior predictive check"
-            title = "$(pat.response) vs $(pat.predictor) -- $heading"
+            # Predictor label depends on the kind: scalar has none, multi has
+            # several, the rest have one.
+            predictor_label = if pat.kind === :scalar
+                ""
+            elseif pat.kind === :multi_continuous
+                " vs " * join(string.(pat.predictors), ", ")
+            else
+                " vs $(pat.predictor)"
+            end
+            title = "$(pat.response)$predictor_label -- $heading"
             spec = if which === :prior
                 _prior_ppc_spec(long, df, pat; title)
             else
-                obs_y = context!().run.stan.fit_data_dict[Symbol(pat.response)]
+                # Binomial outcomes are counts (`bin_succ`); the predicted
+                # `link(loc)` is a probability. Convert obs to a proportion so
+                # both layers share the [0, 1] response scale.
+                obs_y_raw = context!().run.stan.fit_data_dict[Symbol(pat.response)]
+                obs_y = if pat.family === Binomial && haskey(pat, :n_trials)
+                    obs_y_raw ./ context!().run.stan.fit_data_dict[Symbol(pat.n_trials)]
+                else
+                    obs_y_raw
+                end
                 _posterior_ppc_spec(long, df, obs_y, pat; title)
             end
             isnothing(spec) && return nothing
             link_label = pat.link_fn === identity ? string(pat.loc) :
                          "$(pat.link_fn)($(pat.loc))"
-            group_label = isnothing(pat.group) ? "" :
-                          "; coloured by $(pat.group)"
+            group_label = (pat.kind === :linear_re) ? "; coloured by $(pat.group)" : ""
             cap = which === :prior ?
-                "Prior-predictive draws of $link_label vs $(pat.predictor)$group_label (no observation overlay -- $(pat.family) family)" :
-                "Posterior draws of $link_label vs $(pat.predictor)$group_label, with observed $(pat.response) overlaid (black dots)"
+                "Prior-predictive draws of $link_label$predictor_label$group_label (no observation overlay -- $(pat.family) family, kind=$(pat.kind))" :
+                "Posterior draws of $link_label$predictor_label$group_label, with observed $(pat.response) overlaid (kind=$(pat.kind))"
             h.section(
-                h.h4(heading, ": ", h.code(string(pat.response)), " vs ",
-                     h.code(string(pat.predictor))),
+                h.h4(heading, ": ", h.code(string(pat.response)), predictor_label,
+                     " (", string(pat.kind), ")"),
                 with_plot_caption(spec; plot_id="$id_prefix-ppc", title=cap),
             )
         end
