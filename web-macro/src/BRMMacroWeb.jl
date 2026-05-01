@@ -1531,7 +1531,10 @@ bin_y ~ Bernoulli(logistic(log_odds_b))
             # pushed URL only carries the formula -- reload / share of the
             # address re-attaches to the polling_fetchindex IP for the same
             # (formula, stage) instead of forcing a recompute.
-            hx_headers="""{"X-Brm-Force": "true"}""",
+            # Cobweb doesn't escape inner double quotes in attribute values,
+            # so write the JSON with `&quot;` directly -- the browser sees
+            # `{"X-Brm-Force": "true"}` and HTMX parses it.
+            hx_headers="{&quot;X-Brm-Force&quot;: &quot;true&quot;}",
             hx_push_url="true",
             # `innerHTML` keeps the `#brm-macro-output` wrapper in the DOM
             # across swaps — including when polling_fetchindex throws and the
