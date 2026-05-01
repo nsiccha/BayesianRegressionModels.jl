@@ -683,10 +683,21 @@ _loc_long(long::DataFrame, loc::Symbol) = begin
     isempty(rows) ? nothing : rows
 end
 
-# Scalar loc (intercept-only). One (y, draw) row per draw; loc rows have index=0.
-_pred_scalar(long, loc::Symbol, link_fn::Function) = begin
+# Scalar loc (intercept-only). Replicated per observation index so a downstream
+# lineribbon over draws produces a flat horizontal band against the same x-axis
+# as the observed-y scatter -- much more informative than a pooled ECDFPlot.
+# Cost: n_obs * n_draws rows, but n_obs is small (~16) so negligible.
+_pred_scalar(long, n_obs::Int, loc::Symbol, link_fn::Function) = begin
     rows = _loc_long(long, loc); isnothing(rows) && return nothing
-    DataFrame(y = link_fn.(rows.value), draw = rows.draw)
+    parts = DataFrame[]
+    for i in 1:n_obs
+        push!(parts, DataFrame(
+            x    = i,
+            y    = link_fn.(rows.value),
+            draw = rows.draw,
+        ))
+    end
+    vcat(parts...)
 end
 
 # Indexed continuous predictor: x = df[predictor][index], y = link(loc[i, draw]).
@@ -725,8 +736,9 @@ end
 # Prior-predictive: NO observation overlay (don't eyeball prior vs data).
 _prior_ppc_spec(long, df, p::NamedTuple; title) = begin
     if p.kind === :scalar
-        pred = _pred_scalar(long, p.loc, p.link_fn); isnothing(pred) && return nothing
-        AoG.data(pred) * AoG.mapping(:y) * AoG.visual(ECDFPlot) *
+        pred = _pred_scalar(long, nrow(df), p.loc, p.link_fn)
+        isnothing(pred) && return nothing
+        AoG.data(pred) * AoG.mapping(:x, :y, group=:draw) * lineribbon() *
             config(title=title)
     elseif p.kind === :linear
         pred = _pred_continuous(long, df, p.loc, p.predictor, p.link_fn, nothing)
@@ -736,10 +748,13 @@ _prior_ppc_spec(long, df, p::NamedTuple; title) = begin
     elseif p.kind === :linear_re
         pred = _pred_continuous(long, df, p.loc, p.predictor, p.link_fn, p.group)
         isnothing(pred) && return nothing
+        # Default to row-faceting by group (scales gracefully to many
+        # levels). Picker (auto_remap dims=["group" => ...]) lets the
+        # user move group to color / column / detail.
         AoG.data(pred) *
-            AoG.mapping(:x, :y, group=:draw, color=:group => nonnumeric) *
+            AoG.mapping(:x, :y, group=:draw, row=:group => nonnumeric) *
             lineribbon() *
-            config(title=title)
+            config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
     elseif p.kind === :categorical
         pred = _pred_continuous(long, df, p.loc, p.predictor, p.link_fn, nothing)
         isnothing(pred) && return nothing
@@ -759,14 +774,10 @@ end
 # the response scale (caller does Binomial proportion conversion via n_trials).
 _posterior_ppc_spec(long, df, obs_y, p::NamedTuple; title) = begin
     if p.kind === :scalar
-        pred = _pred_scalar(long, p.loc, p.link_fn); isnothing(pred) && return nothing
-        obs  = DataFrame(y = obs_y)
-        (
-            AoG.data(pred) * AoG.mapping(:y) * AoG.visual(ECDFPlot)
-            +
-            AoG.data(obs)  * AoG.mapping(:y) *
-                AoG.visual(ECDFPlot; color="black", strokeWidth=2)
-        ) * config(title=title)
+        pred = _pred_scalar(long, length(obs_y), p.loc, p.link_fn)
+        isnothing(pred) && return nothing
+        obs  = DataFrame(x = collect(eachindex(obs_y)), y = obs_y)
+        ppc_overlay(obs, pred; x=:x, y=:y, group=:draw) * config(title=title)
     elseif p.kind === :linear
         pred = _pred_continuous(long, df, p.loc, p.predictor, p.link_fn, nothing)
         isnothing(pred) && return nothing
@@ -776,8 +787,10 @@ _posterior_ppc_spec(long, df, obs_y, p::NamedTuple; title) = begin
         pred = _pred_continuous(long, df, p.loc, p.predictor, p.link_fn, p.group)
         isnothing(pred) && return nothing
         obs  = DataFrame(x = df[!, p.predictor], y = obs_y, group = df[!, p.group])
-        ppc_overlay(obs, pred; x=:x, y=:y, group=:draw, color=:group) *
-            config(title=title)
+        # Default to row-faceting by group (scales to many levels).
+        # Picker lets users swap to color / column / detail.
+        ppc_overlay(obs, pred; x=:x, y=:y, group=:draw, row=:group) *
+            config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
     elseif p.kind === :categorical
         pred = _pred_continuous(long, df, p.loc, p.predictor, p.link_fn, nothing)
         isnothing(pred) && return nothing
