@@ -5,6 +5,12 @@ module BayesianRegressionModels
 using OrderedCollections
 include("macro.jl")
 
+# Introspection helpers on a BRMI -- outcomes / linear predictors /
+# grouping factors / continuous & categorical predictors / RE terms.
+# Used by web-macro's auto-PPC detector (and any downstream code that
+# wants the model shape without re-walking the operations dict).
+include("introspection.jl")
+
 # VBRMI — vectorized implementation. Materializes predictors and
 # likelihood into a LogDensityProblems-compatible object.
 using LogExpFunctions, InverseFunctions, Distributions, ElasticArrays,
@@ -34,6 +40,11 @@ export name, getf, getargs, getkwargs, getbroadcast, getop
 # Macro plumbing + compiled-output accessors used by downstream code
 # (web-macro's Formula struct, bruno's direct pipeline calls).
 export parse!, _brm, stan_code
+
+# Introspection -- model-shape questions answered without re-walking
+# the operations dict.
+export outcomes, linear_predictor_op, predictors,
+       grouping_factors, column_data, hierarchical_outcomes
 
 # Extension API. Downstream packages (bruno) add their own formula terms
 # by defining methods on `vmeta_sampling_rhs` + `_sb_submodel_rhs!` and
