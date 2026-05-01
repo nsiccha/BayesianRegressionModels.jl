@@ -912,15 +912,23 @@ end
             # because per-task ReentrantLocks combined with progress-yields
             # appeared to deadlock the chain in practice.
             lib = Base.lock(get!(ReentrantLock, stan_compile_locks, file)) do
+                @info "[stan] before compile_model" file
                 isfile(file) || write(file, src)
-                BridgeStan.compile_model(file; make_args=_make_args)
+                rv = BridgeStan.compile_model(file; make_args=_make_args)
+                @info "[stan] after compile_model" file
+                rv
             end
             # SB's `stan_data` walks the SlicModel → StanModel tracing which
             # auto-declares `_n` / `_m` sizes for every vector / matrix, then
             # `bridgestan_data` JSON-serializes with Stan's column-major
             # matrix convention.
             data     = StanBlocks.stan.bridgestan_data(StanBlocks.stan_data(sbbrmi.model))
-            instance = BridgeStan.StanModel(lib, data)
+            instance = begin
+                @info "[stan] before StanModel(instance)"
+                rv = BridgeStan.StanModel(lib, data)
+                @info "[stan] after StanModel(instance)"
+                rv
+            end
             dim      = BridgeStan.param_unc_num(instance)
             # Fixed-rng narrow-normal init — deterministic, cache-friendly.
             init     = 0.1 .* randn(Xoshiro(42), dim)
@@ -1039,21 +1047,34 @@ end
                 end
                 merge(base, overrides)
             end
-            fit_instance = BridgeStan.StanModel(lib,
-                StanBlocks.stan.bridgestan_data(fit_data_dict))
+            fit_instance = begin
+                @info "[stan] before StanModel(fit_instance)"
+                rv = BridgeStan.StanModel(lib,
+                    StanBlocks.stan.bridgestan_data(fit_data_dict))
+                @info "[stan] after StanModel(fit_instance)"
+                rv
+            end
 
             # IP: Pathfinder init (fast, no MCMC). The `progress=__status__`
             # hook lets Treebars nest the maxiters subtree under whatever
             # node called `fetchindex!(status, …, pathfinder, instance, init)`.
             "Pathfinder(maxiters=$maxiters)"
-            pathfinder(instance, init; rng=Xoshiro(42), maxiters=100) =
-                initialize_mcmc(StanProblem(instance; nan_on_error=true), init; rng, progress=__status__, maxiters)
+            pathfinder(instance, init; rng=Xoshiro(42), maxiters=100) = begin
+                @info "[stan] entering pathfinder" maxiters
+                rv = initialize_mcmc(StanProblem(instance; nan_on_error=true), init; rng, progress=__status__, maxiters)
+                @info "[stan] leaving pathfinder"
+                rv
+            end
             # IP: full Stan + WarmupHMC fit. Same progress-hooking pattern.
             # Returns a rich NamedTuple with `.posterior_position`, `.ess`,
             # `.n_divergent_samples`, etc.
             "WarmupHMC(n_draws=$n_draws)"
-            posterior_warmup(instance, init; rng=Xoshiro(42), n_draws=200) =
-                adaptive_warmup_mcmc(rng, StanProblem(instance; nan_on_error=true); init, n_draws, progress=__status__)
+            posterior_warmup(instance, init; rng=Xoshiro(42), n_draws=200) = begin
+                @info "[stan] entering posterior_warmup" n_draws
+                rv = adaptive_warmup_mcmc(rng, StanProblem(instance; nan_on_error=true); init, n_draws, progress=__status__)
+                @info "[stan] leaving posterior_warmup"
+                rv
+            end
             # Gaussian-approximation draws from Pathfinder. Reads the IP via
             # `@memo` so if `compute_steps` already computed it with progress
             # nesting, we get the cached value for free.
@@ -1503,12 +1524,14 @@ bin_y ~ Bernoulli(logistic(log_odds_b))
         button = h.button(label;
             type="button",
             id="stage-$id",
-            hx_get=string(query_url(__self__/"stage/$id"; force=true)),
+            hx_get=string(__self__/"stage/$id"),
             hx_include="#brm-macro-form",
             hx_target="#brm-macro-output",
-            # Push the resolved request URL (with the formula + force in the
-            # query string) so the address bar reflects the active stage and
-            # the page is shareable / reload-survivable.
+            # `force=true` is sent as a header (not a query param) so the
+            # pushed URL only carries the formula -- reload / share of the
+            # address re-attaches to the polling_fetchindex IP for the same
+            # (formula, stage) instead of forcing a recompute.
+            hx_headers="""{"X-Brm-Force": "true"}""",
             hx_push_url="true",
             # `innerHTML` keeps the `#brm-macro-output` wrapper in the DOM
             # across swaps — including when polling_fetchindex throws and the
@@ -1686,7 +1709,11 @@ bin_y ~ Bernoulli(logistic(log_odds_b))
         compute_steps, formula, context!().namespace, name;
         poll_url=query_url(__self__/"stage/$name"; formula, label),
         label="BRM pipeline - $name",
-        force,
+        # Accept `force` either as a query param (legacy) or as the
+        # `X-Brm-Force: true` header (set by stage buttons so the pushed
+        # URL stays clean -- reload re-attaches to the IP cache instead of
+        # forcing a recompute).
+        force=force || HTTP.header(__req__, "X-Brm-Force", "false") == "true",
     ) do result
         # On successful stage computation, mark this stage + all prerequisite
         # stages as pass on the corresponding ExampleEntry (if label
