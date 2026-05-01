@@ -1216,19 +1216,20 @@ APPDATA = AppData(; cache_type=:parallel)
             )
             (; tabs, wide_details)
         end
-        # Helper: build the optional PPC section common to stan_generate /
-        # stan_fit_*. `which` is `:prior` or `:posterior`; for posterior we
-        # pull observed y from `fit_data_dict[response]` and overlay it.
+        # Helper: build the optional predictive-check section. `which` is
+        # `:prior` (prior predictive, no overlay) or `:posterior` (PPC -- pulls
+        # observed y from `fit_data_dict[response]` and overlays it).
         build_ppc_section(long, which::Symbol; id_prefix) = begin
             pat = _ppc_pattern(context!().run.brmi)
             isnothing(pat) && return nothing
             df  = context!().run.df
-            kind_label = which === :prior ? "prior-predictive" : "posterior PPC"
-            title = "$(pat.response) vs $(pat.predictor) -- $kind_label"
+            heading = which === :prior ? "Prior predictive" :
+                                          "Posterior predictive check"
+            title = "$(pat.response) vs $(pat.predictor) -- $heading"
             spec = if which === :prior
                 _prior_ppc_spec(long, df, pat; title)
             else
-                obs_y = getproperty(context!().run.stan.fit_data_dict, Symbol(pat.response))
+                obs_y = context!().run.stan.fit_data_dict[Symbol(pat.response)]
                 _posterior_ppc_spec(long, df, obs_y, pat; title)
             end
             isnothing(spec) && return nothing
@@ -1240,8 +1241,8 @@ APPDATA = AppData(; cache_type=:parallel)
                 "Prior-predictive draws of $link_label vs $(pat.predictor)$group_label (no observation overlay -- $(pat.family) family)" :
                 "Posterior draws of $link_label vs $(pat.predictor)$group_label, with observed $(pat.response) overlaid (black dots)"
             h.section(
-                h.h4("PPC: ", h.code(string(pat.response)), " vs ",
-                     h.code(string(pat.predictor)), " (", kind_label, ")"),
+                h.h4(heading, ": ", h.code(string(pat.response)), " vs ",
+                     h.code(string(pat.predictor))),
                 with_plot_caption(spec; plot_id="$id_prefix-ppc", title=cap),
             )
         end
@@ -1257,9 +1258,9 @@ APPDATA = AppData(; cache_type=:parallel)
                 h.h3("6c. StanGenerate — synthetic data from narrow-normal prior + param_constrain"),
                 h.p("long format: ", nrow(long), " rows · ", ncol(long), " cols · ",
                     "wide format: ", nrow(wide), " rows · ", ncol(wide), " cols"),
-                p.tabs, p.wide_details,
             ]
             isnothing(ppc) || push!(parts, ppc)
+            push!(parts, p.tabs, p.wide_details)
             h.section(parts...)
         end
         stan_fit_pathfinder(x) = begin
@@ -1273,9 +1274,9 @@ APPDATA = AppData(; cache_type=:parallel)
                 h.h3("6d. StanFit (Pathfinder) — variational approximation draws"),
                 h.p("long format: ", nrow(long), " rows · ", ncol(long), " cols · ",
                     "wide format: ", nrow(wide), " rows · ", ncol(wide), " cols"),
-                p.tabs, p.wide_details,
             ]
             isnothing(ppc) || push!(parts, ppc)
+            push!(parts, p.tabs, p.wide_details)
             h.section(parts...)
         end
         stan_fit_warmup(x) = begin
@@ -1291,9 +1292,9 @@ APPDATA = AppData(; cache_type=:parallel)
                     " · min ESS: ", minimum(diagnostics.ess)),
                 h.p("long format: ", nrow(long), " rows · ", ncol(long), " cols · ",
                     "wide format: ", nrow(wide), " rows · ", ncol(wide), " cols"),
-                p.tabs, p.wide_details,
             ]
             isnothing(ppc) || push!(parts, ppc)
+            push!(parts, p.tabs, p.wide_details)
             h.section(parts...)
         end
     end
