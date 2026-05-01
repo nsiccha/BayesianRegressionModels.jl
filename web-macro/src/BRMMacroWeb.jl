@@ -19,7 +19,7 @@ using Distributions
 using OrderedCollections: OrderedDict
 using WarmupHMC: initialize_mcmc, adaptive_warmup_mcmc
 using JSON
-using AlgebraOfVega: vega_head, vega_controls, auto_remap_node, with_plot_caption,
+using AlgebraOfVega: vega_head, auto_remap_node, with_plot_caption,
     config, pointinterval, lineribbon, to_node, ppc_overlay,
     ECDFPlot, VLines, nonnumeric, Scatter
 import AlgebraOfGraphics as AoG
@@ -1661,14 +1661,7 @@ y1 ~ Normal(loc, err)
             nav_sidebar([
                 "Pipeline" => "/pipeline",
                 "Examples" => "/examples",
-            ])(
-                # Site-wide Vega-Embed controls: zoom +/- and an "Actions"
-                # toggle that exposes Vega-Embed's per-plot menu (download
-                # PNG/SVG, view source, share via spec URL, ...).
-                h.div(; style="margin-top:0.6rem; padding:0 0.6rem; font-size:0.85em;")(
-                    vega_controls(),
-                ),
-            ),
+            ]),
             h.main(; class="container brm-main")(
                 h.div(; id="content")(content),
             ),
