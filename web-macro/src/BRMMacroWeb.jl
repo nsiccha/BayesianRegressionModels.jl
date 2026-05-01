@@ -896,7 +896,14 @@ end
             # adding STAN_THREADS=true) naturally routes to a fresh path and
             # triggers a rebuild — BridgeStan doesn't support reloading a
             # previously-dlopened .so, so we can't reuse old binaries.
-            _make_args = ["STAN_THREADS=true"]
+            # `O=0` overrides Stan's default `-O3` (set in
+            # stan_math/make/compiler_flags as `O ?= 3`). Templated Stan
+            # headers blow up g++'s memory at -O3 -- ~2 GB peak per
+            # invocation, which OOM-kills julia on the 3.8 GB strato box.
+            # -O0 cuts that ~3x at the cost of slower model run-time
+            # (acceptable for a pipeline-explorer demo). The hash includes
+            # make_args so old -O3 .so caches are not reused.
+            _make_args = ["O=0", "STAN_THREADS=true"]
             file = begin
                 p = joinpath(tempdir(), "brm_stan",
                              string(hash((src, _make_args))) * ".stan")
