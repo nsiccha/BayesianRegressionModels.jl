@@ -4,7 +4,8 @@ using HTMXObjects
 using DynamicObjects: fetchindex!, clear_mem_caches!
 using Treebars: polling_fetchindex, initialize_progress!,
                 prepare_progress!, with_prepared_progress,
-                htmx_treebar_styles, htmx_treebar_script
+                htmx_treebar_styles, htmx_treebar_script,
+                ThreadsafeDict
 using Random
 using Chairmarks
 using DataFrames
@@ -689,6 +690,14 @@ end
 
     dataset = Dataset()
 
+    # Per-stan-path locks for the "ensure .stan written + compile_model"
+    # sequence. Without these, two requests for the same model can run `make`
+    # concurrently into the same .so target and corrupt it -- subsequent
+    # dlopen segfaults Julia (no Julia stack, no OOM, just process gone).
+    # Keyed by absolute .stan path. Entries are never reaped; one per distinct
+    # compiled model. `get!(ReentrantLock, locks, path)` lazily creates.
+    stan_compile_locks = ThreadsafeDict{String,ReentrantLock}()
+
     namespace_from(label) = isempty(strip(label)) ? :default :
         Symbol(lowercase(first(split(strip(label), r"[\s:\-]+"))))
 
@@ -762,14 +771,19 @@ end
             # triggers a rebuild — BridgeStan doesn't support reloading a
             # previously-dlopened .so, so we can't reuse old binaries.
             _make_args = ["STAN_THREADS=true"]
-            file = begin
-                p = joinpath(tempdir(), "brm_stan",
-                             string(hash((src, _make_args))) * ".stan")
-                mkpath(dirname(p))
-                isfile(p) || write(p, src)
-                p
+            file = joinpath(tempdir(), "brm_stan",
+                            string(hash((src, _make_args))) * ".stan")
+            mkpath(dirname(file))
+            # Serialize file-write + compile per .stan path. Two threads
+            # racing into the same `make` invocation produced a half-written
+            # `.so` whose subsequent dlopen segfaulted Julia. The lock is
+            # held only for the file-write + compile_model call; once the
+            # `.so` is on disk the rest of the pipeline (StanModel /
+            # param_constrain / ...) proceeds in parallel as before.
+            lib = Base.lock(get!(ReentrantLock, stan_compile_locks, file)) do
+                isfile(file) || write(file, src)
+                BridgeStan.compile_model(file; make_args=_make_args)
             end
-            lib      = BridgeStan.compile_model(file; make_args=_make_args)
             # SB's `stan_data` walks the SlicModel → StanModel tracing which
             # auto-declares `_n` / `_m` sizes for every vector / matrix, then
             # `bridgestan_data` JSON-serializes with Stan's column-major
