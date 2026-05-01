@@ -1705,29 +1705,39 @@ bin_y ~ Bernoulli(logistic(log_odds_b))
                         name="formula", rows=8,
                         class="brm-formula-textarea"),
                 ),
-                h.fieldset(; class="grid")(
-                    stage("1. Parse",     :parse).button,
-                    stage("2. Transform", :transform).button,
-                    stage("3. Wrap",      :wrap).button,
-                    stage("4. BRMI",      :brmi).button,
-                ),
-                h.small("Pick a branch:"),
-                h.fieldset(; class="grid")(
-                    stage("5. VBRMI",     :vbrmi).button,
-                    stage("6. Benchmark", :bench).button,
-                ),
-                h.fieldset(; class="grid")(
-                    stage("5a. SlicModel",  :slic_model).button,
-                    stage("5b. StanCode",   :stan_code).button,
-                    stage("5c. StanCompile", :stan_compile).button,
-                ),
-                h.fieldset(; class="grid")(
-                    stage("6a. StanInstantiate", :stan_instantiate).button,
-                    stage("6b. StanEval",        :stan_eval).button,
-                    stage("6b'. StanShapes",     :stan_shapes).button,
-                    stage("6c. StanGenerate",    :stan_generate).button,
-                    stage("6d. StanFit (PF)",    :stan_fit_pathfinder).button,
-                    stage("6d'. StanFit (Warmup)", :stan_fit_warmup).button,
+                # Lazy stage-picker tabs. Each tab fetches its stage on
+                # click; the response replaces the inner HTML of
+                # `#brm-macro-output`. Labels match the previous button
+                # row so the numeric prefix carries the macro-frontend
+                # / VBRMI / SB-branch / SB-fit grouping. `hx_push_url`
+                # so the address bar reflects the active tab; the
+                # server gates `force=true` on `is_htmx(__req__)` so a
+                # reload of that pushed URL re-attaches to the IP cache
+                # rather than recomputing.
+                htmx_tabset([
+                    "1. Parse"             => string(query_url(__self__/"stage/parse";            force=true)),
+                    "2. Transform"         => string(query_url(__self__/"stage/transform";        force=true)),
+                    "3. Wrap"              => string(query_url(__self__/"stage/wrap";             force=true)),
+                    "4. BRMI"              => string(query_url(__self__/"stage/brmi";             force=true)),
+                    "5. VBRMI"             => string(query_url(__self__/"stage/vbrmi";            force=true)),
+                    "6. Benchmark"         => string(query_url(__self__/"stage/bench";            force=true)),
+                    "5a. SlicModel"        => string(query_url(__self__/"stage/slic_model";       force=true)),
+                    "5b. StanCode"         => string(query_url(__self__/"stage/stan_code";        force=true)),
+                    "5c. StanCompile"      => string(query_url(__self__/"stage/stan_compile";     force=true)),
+                    "6a. StanInstantiate"  => string(query_url(__self__/"stage/stan_instantiate"; force=true)),
+                    "6b. StanEval"         => string(query_url(__self__/"stage/stan_eval";        force=true)),
+                    "6b'. StanShapes"      => string(query_url(__self__/"stage/stan_shapes";      force=true)),
+                    "6c. StanGenerate"     => string(query_url(__self__/"stage/stan_generate";    force=true)),
+                    "6d. StanFit (PF)"     => string(query_url(__self__/"stage/stan_fit_pathfinder"; force=true)),
+                    "6d'. StanFit (Warmup)" => string(query_url(__self__/"stage/stan_fit_warmup"; force=true)),
+                ];
+                    active="6d. StanFit (PF)",
+                    target="#brm-macro-output",
+                    tab_attrs=_label -> (;
+                        hx_include="#brm-macro-form",
+                        hx_swap="innerHTML",
+                        hx_push_url="true",
+                    ),
                 ),
                 h.small("Bug-report helper:"),
                 h.button("SB repro (current formula)";
@@ -1735,10 +1745,11 @@ bin_y ~ Bernoulli(logistic(log_odds_b))
                     formaction=string(__self__/"sb_repro"),
                     class="secondary"),
             ),
-            # Persistent wrapper — buttons swap `innerHTML` into here so the
-            # id survives polling/error responses.
+            # Persistent wrapper — tabs swap `innerHTML` into here so the
+            # id survives polling/error responses. Default lazy load is
+            # the 6d Pathfinder fit (the default active tab).
             h.div(; id="brm-macro-output")(
-                lazy(query_url(__self__/"stage/bench"; formula)),
+                lazy(query_url(__self__/"stage/stan_fit_pathfinder"; formula)),
             ),
         )
     end
