@@ -777,13 +777,17 @@ end
                 mkpath(dirname(p))
                 p
             end
-            # Serialize file-write + compile per .stan path. Two threads
-            # racing into the same `make` invocation produced a half-written
-            # `.so` whose subsequent dlopen segfaulted Julia. The lock is
-            # held only for the file-write + compile_model call; once the
-            # `.so` is on disk the rest of the pipeline (StanModel /
-            # param_constrain / ...) proceeds in parallel as before.
-            lib = Base.lock(get!(ReentrantLock, stan_compile_locks, file)) do
+            # Serialize all BridgeStan calls that touch the same `.so` per
+            # .stan path. Two distinct races crash Julia with no Julia stack:
+            #   1. Concurrent `make` invocations into the same .so target
+            #      produce a half-written .so that segfaults on dlopen.
+            #   2. Concurrent `BridgeStan.StanModel(lib, ...)` calls dlopen
+            #      the same .so twice; one StanModel later being GC'd
+            #      dlcloses the lib while the other is mid-call -> segfault.
+            # `lib_lock` serializes per .so path (same lib => same
+            # ReentrantLock); different models still proceed in parallel.
+            lib_lock = get!(ReentrantLock, stan_compile_locks, file)
+            lib = Base.lock(lib_lock) do
                 isfile(file) || write(file, src)
                 BridgeStan.compile_model(file; make_args=_make_args)
             end
@@ -792,7 +796,7 @@ end
             # `bridgestan_data` JSON-serializes with Stan's column-major
             # matrix convention.
             data     = StanBlocks.stan.bridgestan_data(StanBlocks.stan_data(sbbrmi.model))
-            instance = BridgeStan.StanModel(lib, data)
+            instance = Base.lock(() -> BridgeStan.StanModel(lib, data), lib_lock)
             dim      = BridgeStan.param_unc_num(instance)
             # Fixed-rng narrow-normal init — deterministic, cache-friendly.
             init     = 0.1 .* randn(Xoshiro(42), dim)
@@ -911,8 +915,10 @@ end
                 end
                 merge(base, overrides)
             end
-            fit_instance = BridgeStan.StanModel(lib,
-                StanBlocks.stan.bridgestan_data(fit_data_dict))
+            fit_instance = Base.lock(lib_lock) do
+                BridgeStan.StanModel(lib,
+                    StanBlocks.stan.bridgestan_data(fit_data_dict))
+            end
 
             # IP: Pathfinder init (fast, no MCMC). The `progress=__status__`
             # hook lets Treebars nest the maxiters subtree under whatever
