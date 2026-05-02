@@ -1097,6 +1097,12 @@ display_name(::MultiContinuousPPC)  = "multi-predictor"
     # around `compile_model` caps the box at one compile in flight.
     # StanModel construction is left outside the lock (cheap dlopen).
     stan_compile_global_lock = ReentrantLock()
+    # Per-(formula, namespace) cache of the rendered auto-PPC HTML element.
+    # The underlying Stan fit is already memoized via polling_fetchindex /
+    # @memo on `r.stan.*`, but `build_ppc_section` itself is non-trivial
+    # (DataFrames -> Vega-Lite specs); caching the resulting h.div node
+    # turns repeated card opens into pure HTML re-emits.
+    ppc_html_cache = ThreadsafeDict{Tuple{UInt,Symbol},Any}()
 
     namespace_from(label) = isempty(strip(label)) ? :default :
         Symbol(lowercase(first(split(strip(label), r"[\s:\-]+"))))
@@ -2105,15 +2111,18 @@ APPDATA = AppData(; cache_type=:parallel)
         label="PPC - $(isempty(label) ? "preset" : label)",
         force=false,
     ) do result
-        try
-            full_long = result.stan_fit_pathfinder.full_long
-            ppc_div = render.build_ppc_section(full_long, :posterior;
-                                               id_prefix="brm-gallery-$(hash(formula))")
-            isnothing(ppc_div) ? h.p("(no PPC kind detected)";
-                                     class="brm-gallery-empty") : ppc_div
-        catch e
-            h.pre(class="brm-gallery-error")(
-                first(sprint(showerror, e), 600))
+        ns = context!().namespace
+        get!(__appdata__.ppc_html_cache, (hash(formula), ns)) do
+            try
+                full_long = result.stan_fit_pathfinder.full_long
+                ppc_div = render.build_ppc_section(full_long, :posterior;
+                                                   id_prefix="brm-gallery-$(hash(formula))")
+                isnothing(ppc_div) ? h.p("(no PPC kind detected)";
+                                         class="brm-gallery-empty") : ppc_div
+            catch e
+                h.pre(class="brm-gallery-error")(
+                    first(sprint(showerror, e), 600))
+            end
         end
     end
 
@@ -2160,17 +2169,29 @@ APPDATA = AppData(; cache_type=:parallel)
                 ),
             )
         end
+        # File-based examples (web-macro/examples/*.jl). Skip entries
+        # with no formula -- those are markdown-only notes.
+        example_pairs = [(e.label, e.formula)
+                         for e in __parent__.examples.example_store.entries()
+                         if !isnothing(e.formula)]
         h.div(
             h.h1("PPC gallery"),
             h.p(
-                "One auto-PPC card per preset. Click 'Show PPC plot' to kick off the ",
-                "Stan compile + fit (cached per formula for the server's lifetime). ",
-                "Nothing runs until you open a card.",
+                "Auto-PPC card per preset and per example file. Click 'Show PPC plot' ",
+                "to kick off the Stan compile + fit (cached per formula for the ",
+                "server's lifetime). Nothing runs until you open a card.",
             ),
+            h.h2("Presets"; style="font-size:1.1em; margin-top:1rem;"),
             h.div(;
                 style="display:grid; grid-template-columns:repeat(auto-fill, minmax(20rem, 1fr)); gap:0.75rem;",
             )(
                 [gallery_card(lbl, body) for (lbl, body) in __self__.presets_list]...
+            ),
+            h.h2("Examples"; style="font-size:1.1em; margin-top:1.5rem;"),
+            h.div(;
+                style="display:grid; grid-template-columns:repeat(auto-fill, minmax(20rem, 1fr)); gap:0.75rem;",
+            )(
+                [gallery_card(lbl, body) for (lbl, body) in example_pairs]...
             ),
         )
     end
