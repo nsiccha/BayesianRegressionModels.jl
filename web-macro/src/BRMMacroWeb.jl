@@ -2096,8 +2096,8 @@ APPDATA = AppData(; cache_type=:parallel)
         try
             r = context!().run
             full_long = r.stan.posterior_full_long_df
-            ppc_div = build_ppc_section(full_long, :posterior;
-                                        id_prefix="brm-gallery-$(hash(formula))")
+            ppc_div = render.build_ppc_section(full_long, :posterior;
+                                               id_prefix="brm-gallery-$(hash(formula))")
             isnothing(ppc_div) ? h.p("(no PPC kind detected)";
                                      class="brm-gallery-empty") : ppc_div
         catch e
