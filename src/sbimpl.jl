@@ -885,6 +885,22 @@ _sb_collect_terms_expr!(acc, ::typeof(+), x) = foreach(a -> _sb_collect_terms!(a
 # `(expr | group)` is kept as-is; `_sb_linear_predictor!` splits it off into
 # the ranef side of the additive linear predictor.
 _sb_collect_terms_expr!(acc, ::typeof(|), x) = push!(acc, x)
+# `(t1 + t2 + ... || g)` zerocorr ranefs: independent variances per term,
+# no shared correlation. Expand into N separate `(t_i | g_nocor_i)` ran
+# terms with synthetic group names so the ran-term coalescer in
+# `_sb_emit_ranefs!` keeps them as separate (degenerate K=1) blocks.
+# Mirrors vimpl's `vmeta_sampling_rhs(::ExprColumn{typeof(doublepipe)})`.
+_sb_collect_terms_expr!(acc, ::typeof(doublepipe), x) = begin
+    args = getargs(x)
+    length(args) == 2 || error("sbimpl: `||` zerocorr expects 2 args, got $(length(args))")
+    lhs, rhs = args
+    rhs isa NamedColumn || error("sbimpl: `||` zerocorr RHS must be a NamedColumn group, got $(typeof(rhs))")
+    inner = lhs isa ExprColumn && getf(lhs) === (+) ? collect(getargs(lhs)) : Any[lhs]
+    for (i, term) in enumerate(inner)
+        nocor = NamedColumn(Symbol(name(rhs), :__nocor__, i), parent(rhs))
+        push!(acc, ExprColumn(|, term, nocor))
+    end
+end
 # `a & b` is the interaction operator (parallels StatsModels.jl). `&` has
 # higher precedence than `+` in Julia, so `1 + a + b + a&b` naturally parses
 # as `+(1, a, b, a&b)` and the normal `+`-flatten path applies. We deliberately
@@ -1087,8 +1103,69 @@ _sb_predictor_term!(stmts, data, ::typeof(ar), t) = begin
     push!(stmts, :($col_name ~ _sb_ar1(; time=$xname)))
     col_name
 end
-_sb_predictor_term!(_, _, f, _) =
-    error("sbimpl: unsupported predictor-term function `$f` (supported: `mo`, `mo1`, `me`, `s`, `ar`)")
+# Vector-wise wrapper predictors: `zscale`, `standardize`, and `center`
+# need the whole inner column to compute (mean / sd are not element-wise),
+# so the generic broadcast-based fallback in `_sb_materialize_vec` won't
+# do. Materialize the inner separately, apply the transform, stash. (The
+# brms-style `protect(...)` no-op is handled by the generic fallback once
+# `protect(x::Real) = x` is defined in macro.jl.)
+for (fn, transform) in (
+        (:zscale,      :_sb_zscale),
+        (:standardize, :_sb_zscale),
+        (:center,      :_sb_center),
+    )
+    @eval function _sb_predictor_term!(stmts, data, ::typeof($fn), t)
+        inner = only(getargs(t))
+        v = collect(Float64, _sb_materialize_vec(inner))
+        v_t = $transform(v)
+        cn = _sb_wrapper_col_name(Symbol($(QuoteNode(fn))), inner)
+        data[cn] = v_t
+        cn
+    end
+end
+
+# Fallback: a "plain" expression like `log(exposure)` or `a^2` reaching this
+# point is treated as an implicit `protect(...)` -- materialize the whole
+# subtree to a Stan data vector and let popefs supply the beta. Errors out
+# if any leaf isn't a raw data column (e.g. references a sampled parameter
+# directly), preserving the old "unsupported" diagnostic.
+function _sb_predictor_term!(stmts, data, f::Function, t)
+    try
+        v = collect(Float64, _sb_materialize_vec(t))
+        cn = _sb_wrapper_col_name(Symbol(f), t)
+        data[cn] = v
+        return cn
+    catch err
+        err isa ErrorException || rethrow()
+        error("sbimpl: unsupported predictor-term function `$f` (supported: `mo`, `mo1`, `me`, `s`, `ar`, `protect`, `zscale`, `center`, `standardize`, or any expression in raw data columns) -- materialization failed: $(err.msg)")
+    end
+end
+
+# Recursively materialize an ExprColumn / NamedColumn tree into a plain
+# vector, walking only data-backed leaves. Used by the wrapper predictors
+# (protect / zscale / etc) to compute their column at transpile time.
+_sb_materialize_vec(x::Number) = x
+_sb_materialize_vec(x::NamedColumn) = let d = parent(x)
+    d isa DataColumn ? parent(d) : error(
+        "sbimpl: cannot materialize NamedColumn `$(name(x))` -- only raw data columns supported inside `protect` / `zscale` / `center` / `standardize`")
+end
+_sb_materialize_vec(x::ExprColumn) = broadcast(getf(x), map(_sb_materialize_vec, getargs(x))...)
+_sb_materialize_vec(x) = error("sbimpl: cannot materialize $(typeof(x)) inside wrapper predictor")
+
+_sb_zscale(v::AbstractVector{<:Real}) = let mu = sum(v) / length(v)
+    sd = sqrt(sum((x - mu)^2 for x in v) / length(v))
+    sd > 0 || error("sbimpl: zscale: zero variance")
+    (v .- mu) ./ sd
+end
+_sb_center(v::AbstractVector{<:Real}) = v .- (sum(v) / length(v))
+
+# Stable, human-readable column name for a wrapped predictor. When the
+# inner is a single NamedColumn we tag with its name; otherwise we hash
+# the expr structure so multiple `protect(...)` summands don't collide.
+_sb_wrapper_col_name(prefix::Symbol, inner::NamedColumn) =
+    Symbol(prefix, :_, name(inner))
+_sb_wrapper_col_name(prefix::Symbol, inner) =
+    Symbol(prefix, :_expr_, string(hash(inner); base=16)[1:8])
 
 _sb_n_obs_probe(terms) = begin
     for t in terms

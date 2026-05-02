@@ -29,13 +29,25 @@ _classify_named(a, op::ExprColumn) = getf(op) === (~) ?
     (; role=:expression, expr=a)
 _classify_named(a, _) = (; role=:expression, expr=a)
 
-_classify_arg(a::ExprColumn) =
-    if length(getargs(a)) == 1 && getargs(a)[1] isa NamedColumn &&
-       parent(getargs(a)[1]) isa ExprColumn && getf(parent(getargs(a)[1])) === (~)
-        (; role=:linear_predictor, link_fn=getf(a), link_lp=name(getargs(a)[1]))
-    else
+# A unary wrapper around exactly one LP -- bare like `exp(loc)` or with
+# inline offset terms like `exp(loc + log(exposure))` -- classifies as
+# `:linear_predictor` with the outer function as `link_fn`. Anything
+# more entangled (multiple LPs, LP buried inside a non-`+` op) stays
+# opaque. Walks the subtree and counts LP NamedColumns; >1 or 0 -> not
+# a clean wrapped LP.
+_classify_arg(a::ExprColumn) = let lps = _collect_lps(a)
+    length(getargs(a)) == 1 && length(lps) == 1 ?
+        (; role=:linear_predictor, link_fn=getf(a), link_lp=lps[1]) :
         (; role=:expression, expr=a)
-    end
+end
+
+_collect_lps(::Any) = Symbol[]
+_collect_lps(x::NamedColumn) = parent(x) isa ExprColumn && getf(parent(x)) === (~) ?
+    Symbol[name(x)] : Symbol[]
+_collect_lps(x::ExprColumn) = let out = Symbol[]
+    for a in getargs(x); append!(out, _collect_lps(a)); end
+    out
+end
 
 _classify_arg(a) = (; role=:expression, expr=a)
 
@@ -178,6 +190,22 @@ function predictors(brmi::BRMI, lhs::Symbol)
     _walk_predictors(summands)
 end
 
+# Find the first data-column NamedColumn reachable in `x`'s subtree, or
+# `nothing` if no data leaf is reachable. Used to:
+#   - decide whether a wrapper expression (`mo(c)`, `protect(a^2)`,
+#     `log(exposure)`, ...) is a valid predictor (it must touch data),
+#   - label the resulting predictor column by the inner data name
+#     instead of the outermost function name.
+_walk_pred_label(x::NamedColumn) = parent(x) isa DataColumn ? name(x) : nothing
+function _walk_pred_label(x::ExprColumn)
+    for a in getargs(x)
+        lbl = _walk_pred_label(a)
+        lbl === nothing || return lbl
+    end
+    nothing
+end
+_walk_pred_label(_) = nothing
+
 function _walk_predictors(summands)
     intercept = false
     continuous = Symbol[]
@@ -204,6 +232,20 @@ function _walk_predictors(summands)
             append!(continuous, sub.continuous)
             append!(categorical, sub.categorical)
             append!(re_terms, sub.re_terms)
+        elseif s isa ExprColumn && getf(s) === doublepipe
+            # Zero-correlation ranef `(... || g)` -- treat structurally
+            # like `(... | g)` for PPC enumeration: the group + inner
+            # predictors matter, the variance-correlation structure
+            # doesn't show up in PPC plots.
+            ra = getargs(s)
+            length(ra) >= 2 || return nothing
+            ra[end] isa NamedColumn && parent(ra[end]) isa DataColumn || return nothing
+            grp = name(ra[end])
+            inner_summands = (ra[1] isa ExprColumn && getf(ra[1]) === (+)) ?
+                             getargs(ra[1]) : (ra[1],)
+            inner = _walk_predictors(inner_summands)
+            isnothing(inner) && return nothing
+            push!(re_terms, (; group=grp, inner))
         elseif s isa ExprColumn && getf(s) === (|)
             ra = getargs(s)
             length(ra) >= 2 || return nothing
@@ -215,13 +257,20 @@ function _walk_predictors(summands)
             isnothing(inner) && return nothing
             push!(re_terms, (; group=grp, inner))
         elseif s isa ExprColumn && getf(s) === (&)
-            # `a & b` is an interaction term (parallels StatsModels.jl). For
-            # PPC enumeration we treat it as opaque -- the marginal `a` /
-            # `b` terms (when present in the same formula) cover the
-            # plottable axes; the interaction itself is a derived column
-            # the user wouldn't recognise as a separate predictor anyway.
-            # Skip without bailing so models like `1 + a + b + a&b` still
-            # surface a MultiContinuousPPC over (a, b).
+            # Skip without bailing so the marginal `a` / `b` (when
+            # present in the same formula) still drive PPC kind
+            # detection. The interaction itself is a derived column the
+            # user wouldn't recognise as a separate predictor anyway.
+        elseif s isa ExprColumn
+            # Generic wrapped/derived predictor: `mo(c)`, `s(a)`,
+            # `log(exposure)`, `a^2`, ... -- anything whose subtree
+            # touches at least one data leaf is a continuous-valued
+            # column for PPC purposes. Bail when no data leaf is
+            # reachable (opaque expression with only sampled-parameter
+            # references can't drive a PPC axis).
+            lbl = _walk_pred_label(s)
+            lbl === nothing && return nothing
+            push!(continuous, lbl)
         else
             return nothing
         end

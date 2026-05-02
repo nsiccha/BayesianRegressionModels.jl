@@ -51,6 +51,10 @@ function zscale end
 function center end
 function standardize end
 function protect end
+# brms's `I()` literal-escape: in formula-eval contexts it's a no-op
+# wrapper, so a method on Real lets the generic broadcast / materialise
+# paths handle `protect(expr)` without a dedicated dispatch.
+protect(x::Real) = x
 _brm(x::AbstractString; kwargs...) = _brm(Meta.parse("""
 begin
     $x
