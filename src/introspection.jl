@@ -12,15 +12,16 @@
 
 # ---- arg-role classification ------------------------------------------------
 
-# Each family arg gets classified into one of these tagged NamedTuples by
-# `_classify_arg`. Used by `outcomes` to expose every family arg, not
-# just the first linear predictor (so distributional likelihoods like
-# `Normal(loc, err)` where both `loc` and `err` are LPs surface both).
+# Tagged NamedTuples returned by `_classify_arg`: one of
+#   (; role=:data, name)
+#   (; role=:linear_predictor, link_fn, link_lp)
+#   (; role=:constant, value)
+#   (; role=:expression, expr)
+# `outcomes` uses these to expose every family arg, so distributional
+# likelihoods like `Normal(loc, err)` surface both LPs.
 
-# Number / literal / constant.
 _classify_arg(a::Number) = (; role=:constant, value=a)
 
-# NamedColumn -> dispatch on its parent's role.
 _classify_arg(a::NamedColumn) = _classify_named(a, parent(a))
 _classify_named(a, ::DataColumn)  = (; role=:data, name=name(a))
 _classify_named(a, op::ExprColumn) = getf(op) === (~) ?
@@ -28,17 +29,14 @@ _classify_named(a, op::ExprColumn) = getf(op) === (~) ?
     (; role=:expression, expr=a)
 _classify_named(a, _) = (; role=:expression, expr=a)
 
-# ExprColumn -> peel a unary link wrap if it's of the form `link(NC{lp,~})`.
-_classify_arg(a::ExprColumn) = _classify_expr(a, getargs(a))
-_classify_expr(a, args) =
-    if length(args) == 1 && args[1] isa NamedColumn &&
-       parent(args[1]) isa ExprColumn && getf(parent(args[1])) === (~)
-        (; role=:linear_predictor, link_fn=getf(a), link_lp=name(args[1]))
+_classify_arg(a::ExprColumn) =
+    if length(getargs(a)) == 1 && getargs(a)[1] isa NamedColumn &&
+       parent(getargs(a)[1]) isa ExprColumn && getf(parent(getargs(a)[1])) === (~)
+        (; role=:linear_predictor, link_fn=getf(a), link_lp=name(getargs(a)[1]))
     else
         (; role=:expression, expr=a)
     end
 
-# Catch-all.
 _classify_arg(a) = (; role=:expression, expr=a)
 
 # ---- outcomes ---------------------------------------------------------------

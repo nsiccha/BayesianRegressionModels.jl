@@ -569,10 +569,6 @@ end
 
 abstract type PPCKind end
 
-# Macro-style boilerplate: each subtype carries the common header + its
-# kind-specific extras. Keep them as plain structs (Revise-friendly,
-# constructor verbose at one site is fine).
-
 struct ScalarPPC <: PPCKind
     response::Symbol
     loc::Symbol
@@ -643,9 +639,14 @@ function _ppc_kinds(brmi::BRMI)
     out = PPCKind[]
     for o in outcomes(brmi)
         o.family in (Normal, Poisson, Bernoulli, Binomial) || continue
-        # Trials column for Binomial -- shared across its LPs.
-        n_trials = let dargs = data_args(o)
+        # Trials column ONLY for Binomial -- other families that happen
+        # to take a data-arg (none today, but e.g. an exposure offset
+        # someday) shouldn't be misread as Binomial trials.
+        n_trials = if o.family === Binomial
+            dargs = data_args(o)
             isempty(dargs) ? nothing : first(dargs).name
+        else
+            nothing
         end
         for lp in linear_predictor_args(o)
             kind = _kind_for_lp(brmi, o, lp, n_trials)
@@ -674,7 +675,7 @@ function _kind_for_lp(brmi::BRMI, o, lp, n_trials)
 
     # Wide picker covariates: every data column this LP's DAG touches.
     # Includes the predictor itself + the group + any deeper deps.
-    covs = Symbol[c for c in dependencies(brmi, lp.link_lp).data]
+    covs = copy(dependencies(brmi, lp.link_lp).data)
 
     n_cont = length(cont)
     n_cat  = length(cat)
@@ -698,29 +699,21 @@ end
 
 # ---- per-kind table helpers (dispatch on PPCKind subtype) ----------------
 
-# `loc` rows from the long-format draws table.
 _loc_long(long::DataFrame, loc::Symbol) = begin
     rows = filter(:param => ==(string(loc)), long)
     isempty(rows) ? nothing : rows
 end
 
-# Generic enrichment: join every covariate column from `df` into `tab`
-# via the `:index` column. No-op if `tab` doesn't have an `:index`
-# column (e.g. ScalarPPC's predicted-y table is one row per draw).
-function _enrich_covariates!(tab::DataFrame, df::DataFrame, covariates)
-    hasproperty(tab, :index) || return tab
-    for c in covariates
-        c in propertynames(tab) && continue           # don't overwrite :group, :level, ...
-        hasproperty(df, c) || continue
-        tab[!, c] = df[!, c][tab.index]
-    end
-    tab
-end
-function _enrich_covariates_obs!(tab::DataFrame, df::DataFrame, covariates)
+# Join every covariate column from `df` into `tab`. Pred tables index
+# `df` by `tab.index` (one row per (i, draw)); obs tables take the
+# whole column (one row per obs). Caller controls which by passing the
+# index vector or `:` -- skips columns already present in `tab` (the
+# kind's structural cols like :group / :level / :predictor).
+function _enrich_covariates!(tab::DataFrame, df::DataFrame, covariates, by)
     for c in covariates
         c in propertynames(tab) && continue
         hasproperty(df, c) || continue
-        tab[!, c] = df[!, c]
+        tab[!, c] = by === Colon() ? df[!, c] : df[!, c][by]
     end
     tab
 end
@@ -729,22 +722,22 @@ end
 
 pred_table(::PPCKind, long, df) = nothing  # fallback
 
-function pred_table(p::ScalarPPC, long, df)
+pred_table(p::ScalarPPC, long, df) = begin
     rows = _loc_long(long, p.loc); isnothing(rows) && return nothing
     DataFrame(y = p.link_fn.(rows.value))
 end
 
-function pred_table(p::ScalarRePPC, long, df)
+pred_table(p::ScalarRePPC, long, df) = begin
     rows = _loc_long(long, p.loc); isnothing(rows) && return nothing
     tab = DataFrame(
         group = df[!, p.group][rows.index],
         y     = p.link_fn.(rows.value),
         index = rows.index,
     )
-    _enrich_covariates!(tab, df, p.covariates)
+    _enrich_covariates!(tab, df, p.covariates, rows.index)
 end
 
-function pred_table(p::Union{LinearPPC,LinearRePPC}, long, df)
+pred_table(p::LinearPPC, long, df) = begin
     rows = _loc_long(long, p.loc); isnothing(rows) && return nothing
     tab = DataFrame(
         x     = df[!, p.predictor][rows.index],
@@ -752,77 +745,82 @@ function pred_table(p::Union{LinearPPC,LinearRePPC}, long, df)
         draw  = rows.draw,
         index = rows.index,
     )
-    if p isa LinearRePPC
-        tab.group = df[!, p.group][rows.index]
-    end
-    _enrich_covariates!(tab, df, p.covariates)
+    _enrich_covariates!(tab, df, p.covariates, rows.index)
 end
 
-function pred_table(p::CategoricalPPC, long, df)
+pred_table(p::LinearRePPC, long, df) = begin
+    rows = _loc_long(long, p.loc); isnothing(rows) && return nothing
+    tab = DataFrame(
+        x     = df[!, p.predictor][rows.index],
+        y     = p.link_fn.(rows.value),
+        draw  = rows.draw,
+        index = rows.index,
+        group = df[!, p.group][rows.index],
+    )
+    _enrich_covariates!(tab, df, p.covariates, rows.index)
+end
+
+pred_table(p::CategoricalPPC, long, df) = begin
     rows = _loc_long(long, p.loc); isnothing(rows) && return nothing
     tab = DataFrame(
         level = df[!, p.predictor][rows.index],
         y     = p.link_fn.(rows.value),
         index = rows.index,
     )
-    _enrich_covariates!(tab, df, p.covariates)
+    _enrich_covariates!(tab, df, p.covariates, rows.index)
 end
 
-function pred_table(p::MultiContinuousPPC, long, df)
+# Build the stacked `(predictor, x, y, draw, index)` table once: y / draw
+# / index / covariates are the SAME across predictor blocks (they only
+# depend on the loc draws), so we slice them once and `repeat(... outer)`
+# instead of slicing per predictor-block as the naive vcat-of-blocks did.
+pred_table(p::MultiContinuousPPC, long, df) = begin
     rows = _loc_long(long, p.loc); isnothing(rows) && return nothing
-    parts = DataFrame[]
-    for pname in p.predictors
-        block = DataFrame(
-            predictor = string(pname),
-            x         = df[!, pname][rows.index],
-            y         = p.link_fn.(rows.value),
-            draw      = rows.draw,
-            index     = rows.index,
-        )
-        _enrich_covariates!(block, df, p.covariates)
-        push!(parts, block)
+    n = nrow(rows)
+    k = length(p.predictors)
+    y_link = p.link_fn.(rows.value)
+    out = DataFrame(
+        predictor = repeat(string.(p.predictors), inner=n),
+        x         = vcat((df[!, q][rows.index] for q in p.predictors)...),
+        y         = repeat(y_link, outer=k),
+        draw      = repeat(rows.draw, outer=k),
+        index     = repeat(rows.index, outer=k),
+    )
+    for c in p.covariates
+        c in propertynames(out) && continue
+        hasproperty(df, c) || continue
+        out[!, c] = repeat(df[!, c][rows.index], outer=k)
     end
-    vcat(parts...)
+    out
 end
 
 # ---- obs_table: the observed-y table per kind (posterior side only) ------
 
 obs_table(::PPCKind, df, obs_y) = nothing
-
-function obs_table(p::ScalarPPC, df, obs_y)
-    DataFrame(y = obs_y)
-end
-
-function obs_table(p::ScalarRePPC, df, obs_y)
-    tab = DataFrame(group = df[!, p.group], y = obs_y)
-    _enrich_covariates_obs!(tab, df, p.covariates)
-end
-
-function obs_table(p::Union{LinearPPC,LinearRePPC}, df, obs_y)
-    tab = DataFrame(x = df[!, p.predictor], y = obs_y)
-    if p isa LinearRePPC
-        tab.group = df[!, p.group]
+obs_table(p::ScalarPPC, df, obs_y)     = DataFrame(y = obs_y)
+obs_table(p::ScalarRePPC, df, obs_y)   = _enrich_covariates!(
+    DataFrame(group = df[!, p.group], y = obs_y), df, p.covariates, :)
+obs_table(p::LinearPPC, df, obs_y)     = _enrich_covariates!(
+    DataFrame(x = df[!, p.predictor], y = obs_y), df, p.covariates, :)
+obs_table(p::LinearRePPC, df, obs_y)   = _enrich_covariates!(
+    DataFrame(x = df[!, p.predictor], y = obs_y, group = df[!, p.group]),
+    df, p.covariates, :)
+obs_table(p::CategoricalPPC, df, obs_y) = _enrich_covariates!(
+    DataFrame(level = df[!, p.predictor], y = obs_y), df, p.covariates, :)
+obs_table(p::MultiContinuousPPC, df, obs_y) = begin
+    n = length(obs_y)
+    k = length(p.predictors)
+    out = DataFrame(
+        predictor = repeat(string.(p.predictors), inner=n),
+        x         = vcat((df[!, q] for q in p.predictors)...),
+        y         = repeat(obs_y, outer=k),
+    )
+    for c in p.covariates
+        c in propertynames(out) && continue
+        hasproperty(df, c) || continue
+        out[!, c] = repeat(df[!, c], outer=k)
     end
-    _enrich_covariates_obs!(tab, df, p.covariates)
-end
-
-function obs_table(p::CategoricalPPC, df, obs_y)
-    tab = DataFrame(level = df[!, p.predictor], y = obs_y)
-    _enrich_covariates_obs!(tab, df, p.covariates)
-end
-
-function obs_table(p::MultiContinuousPPC, df, obs_y)
-    parts = DataFrame[]
-    for pname in p.predictors
-        block = DataFrame(
-            predictor = string(pname),
-            x         = df[!, pname],
-            y         = obs_y,
-        )
-        _enrich_covariates_obs!(block, df, p.covariates)
-        push!(parts, block)
-    end
-    vcat(parts...)
+    out
 end
 
 # ---- prior_spec / posterior_spec: per-kind plot specs --------------------
@@ -936,29 +934,50 @@ structural_dims(p::LinearRePPC) = ["group" => "Group ($(p.group))"]
 structural_dims(p::CategoricalPPC) = ["level" => "Level of $(p.predictor)"]
 structural_dims(p::MultiContinuousPPC) = ["predictor" => "Predictor"]
 
+# Reserved column names a kind's pred / obs tables already use for
+# their plot axes / structural facets -- the picker shouldn't expose
+# them as remappable extras (they'd collide with the spec's mapping).
+reserved_columns(::PPCKind)            = Set{String}(["y"])
+reserved_columns(::ScalarPPC)          = Set{String}(["y"])
+reserved_columns(::ScalarRePPC)        = Set{String}(["y", "group"])
+reserved_columns(::LinearPPC)          = Set{String}(["x", "y"])
+reserved_columns(::LinearRePPC)        = Set{String}(["x", "y", "group"])
+reserved_columns(::CategoricalPPC)     = Set{String}(["y", "level"])
+reserved_columns(::MultiContinuousPPC) = Set{String}(["x", "y", "predictor"])
+
 # Wide picker: structural + every covariate the LP's DAG touches.
-# Skip covariates already named by structural channels (they'd be
-# duplicates with different labels).
+# Skip covariates whose name collides with a reserved table column
+# (the structural mapping would clash) or with a structural-channel
+# label.
 function picker_dims(p::PPCKind)
     structural = structural_dims(p)
     structural_keys = Set(string(first(d)) for d in structural)
+    reserved = reserved_columns(p)
     extras = [string(c) => "Covariate $c" for c in p.covariates
-              if string(c) ∉ structural_keys && string(c) != "x" && string(c) != "y"]
+              if !(string(c) in structural_keys) && !(string(c) in reserved)]
     isempty(structural) && isempty(extras) ? nothing :
         Pair{String,String}[structural..., extras...]
 end
 
-# ---- caption helpers ------------------------------------------------------
+# ---- caption / heading helpers ------------------------------------------
 
-# Short label of "what's being plotted" -- the loc, optionally
-# link-wrapped, optionally with the structural facet noted.
 predictor_label(::PPCKind) = ""
 predictor_label(p::LinearPPC) = " vs $(p.predictor)"
 predictor_label(p::LinearRePPC) = " vs $(p.predictor)"
 predictor_label(p::CategoricalPPC) = " vs $(p.predictor)"
 predictor_label(p::MultiContinuousPPC) = " vs " * join(string.(p.predictors), ", ")
 
+# Stable machine identifier (used in plot ids / log lines) -- kept as
+# the bare struct name. User-facing copy goes through `display_name`.
 kind_tag(::T) where {T<:PPCKind} = string(nameof(T))
+
+display_name(::PPCKind)             = "scalar"
+display_name(::ScalarPPC)           = "scalar"
+display_name(p::ScalarRePPC)        = "by $(p.group)"
+display_name(::LinearPPC)           = "linear"
+display_name(p::LinearRePPC)        = "linear by $(p.group)"
+display_name(p::CategoricalPPC)     = "per $(p.predictor) level"
+display_name(::MultiContinuousPPC)  = "multi-predictor"
 
 @dynamicstruct struct AppData
     __status__ = initialize_progress!(:state; description="BRM pipeline")
@@ -1591,9 +1610,10 @@ APPDATA = AppData(; cache_type=:parallel)
 
             link_lbl = p.link_fn === identity ? string(p.loc) :
                        "$(p.link_fn)($(p.loc))"
+            kind_disp = display_name(p)
             cap = which === :prior ?
-                "Prior-predictive draws of $link_lbl$pred_lbl ($(p.family) family, $(kind_tag(p)))" :
-                "Posterior draws of $link_lbl$pred_lbl, with observed $(p.response) overlaid ($(kind_tag(p)))"
+                "Prior-predictive draws of $link_lbl$pred_lbl ($(p.family) family, $kind_disp)" :
+                "Posterior draws of $link_lbl$pred_lbl, with observed $(p.response) overlaid ($kind_disp)"
 
             dims = picker_dims(p)
             plot_block = isnothing(dims) ?
@@ -1602,7 +1622,7 @@ APPDATA = AppData(; cache_type=:parallel)
                                   auto_remap=(; dims))
             h.section(
                 h.h4(heading, ": ", h.code(string(p.response)), pred_lbl,
-                     " (", kind_tag(p), ")"),
+                     " (", kind_disp, ")"),
                 plot_block,
             )
         end
