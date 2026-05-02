@@ -551,264 +551,410 @@ dfs_from_constrained(constrained, names) = begin
     (; long, wide, summary)
 end
 
-# Detect a PPC pattern in a BRMI. Returns a NamedTuple `(; kind, ...)` or
-# `nothing` if the formula doesn't fit any supported shape. Built on the
-# `outcomes` / `predictors` introspection helpers in BayesianRegressionModels
-# rather than re-walking the operations dict here.
+# ---- PPC kinds: dispatch-based (one type per kind, methods per kind) -----
 #
-# `kind` is one of:
-#   :scalar           -- intercept-only loc; pooled ECDF.
-#   :scalar_re        -- intercept + (1|g); ECDF faceted by group.
-#   :linear           -- single bare continuous predictor; line + ribbon vs x.
-#   :linear_re        -- continuous predictor + an (1|g) term; faceted by group.
-#   :categorical      -- single integer (treatment-coded) predictor; ECDF
-#                        faceted by level.
-#   :multi_continuous -- 2+ bare continuous predictors; faceted by predictor.
+# Replaces the earlier kind=:Symbol switch + `if-elseif` cascade with a
+# small `abstract type PPCKind` hierarchy and a handful of single-dispatch
+# methods. Adding a new kind = a new struct + the methods it needs.
 #
-# Common fields: `response::Symbol`, `loc::Symbol`, `family`, `link_fn`.
-# Per-kind extras: `predictor` / `predictors` / `group` / `n_trials` (Binomial
-# only -- so caller can convert observed counts to proportions).
-_ppc_pattern(brmi::BRMI) = begin
-    outs = outcomes(brmi)
-    isempty(outs) && return nothing
-    o = nothing
-    for cand in outs
-        cand.family in (Normal, Poisson, Bernoulli, Binomial) || continue
-        o = cand; break
+# Every kind carries the common fields (`response`, `loc`, `family`,
+# `link_fn`, `n_trials`, `covariates`) so renderers don't have to thread
+# them through. `covariates` is the WIDE picker set: every data column
+# this LP transitively depends on (DAG-traced via `dependencies`), so
+# users can re-channel any of them onto color / row / column / detail.
+
+abstract type PPCKind end
+
+# Macro-style boilerplate: each subtype carries the common header + its
+# kind-specific extras. Keep them as plain structs (Revise-friendly,
+# constructor verbose at one site is fine).
+
+struct ScalarPPC <: PPCKind
+    response::Symbol
+    loc::Symbol
+    family
+    link_fn::Function
+    n_trials::Union{Nothing,Symbol}
+    covariates::Vector{Symbol}
+end
+
+struct ScalarRePPC <: PPCKind
+    response::Symbol
+    loc::Symbol
+    family
+    link_fn::Function
+    n_trials::Union{Nothing,Symbol}
+    covariates::Vector{Symbol}
+    group::Symbol
+end
+
+struct LinearPPC <: PPCKind
+    response::Symbol
+    loc::Symbol
+    family
+    link_fn::Function
+    n_trials::Union{Nothing,Symbol}
+    covariates::Vector{Symbol}
+    predictor::Symbol
+end
+
+struct LinearRePPC <: PPCKind
+    response::Symbol
+    loc::Symbol
+    family
+    link_fn::Function
+    n_trials::Union{Nothing,Symbol}
+    covariates::Vector{Symbol}
+    predictor::Symbol
+    group::Symbol
+end
+
+struct CategoricalPPC <: PPCKind
+    response::Symbol
+    loc::Symbol
+    family
+    link_fn::Function
+    n_trials::Union{Nothing,Symbol}
+    covariates::Vector{Symbol}
+    predictor::Symbol
+end
+
+struct MultiContinuousPPC <: PPCKind
+    response::Symbol
+    loc::Symbol
+    family
+    link_fn::Function
+    n_trials::Union{Nothing,Symbol}
+    covariates::Vector{Symbol}
+    predictors::Vector{Symbol}
+end
+
+# ---- detection: enumerate all PPCKinds for a BRMI -------------------------
+
+# One PPCKind per (likelihood × linear-predictor) -- distributional
+# `Normal(loc, err)` with `loc ~ ...` and `log(err) ~ ...` produces TWO
+# kinds (one per LP), each with its own picker. Returns an empty Vector
+# when nothing matches.
+function _ppc_kinds(brmi::BRMI)
+    out = PPCKind[]
+    for o in outcomes(brmi)
+        o.family in (Normal, Poisson, Bernoulli, Binomial) || continue
+        # Trials column for Binomial -- shared across its LPs.
+        n_trials = let dargs = data_args(o)
+            isempty(dargs) ? nothing : first(dargs).name
+        end
+        for lp in linear_predictor_args(o)
+            kind = _kind_for_lp(brmi, o, lp, n_trials)
+            isnothing(kind) || push!(out, kind)
+        end
     end
-    isnothing(o) && return nothing
-    pred = predictors(brmi, o.link_lp)
+    out
+end
+
+# Build the PPCKind for one outcome × LP pair. Returns `nothing` if the
+# LP's predictor pattern doesn't match a supported shape.
+function _kind_for_lp(brmi::BRMI, o, lp, n_trials)
+    pred = predictors(brmi, lp.link_lp)
     isnothing(pred) && return nothing
 
-    # Flatten RE-internal predictors into the bare lists so `(1 + a | g)`
-    # contributes `a` as a bare predictor (with the group threaded out).
+    # Flatten RE-internal predictors so `(1 + a | g)` contributes `a`
+    # as a bare predictor (with `g` carried out as the group).
     cont = copy(pred.continuous)
     cat  = copy(pred.categorical)
     group = nothing
     for re in pred.re_terms
-        group = re.group   # last RE wins (multi-RE coalescing left for later)
+        group = re.group  # last RE wins; multi-RE coalescing is future work
         append!(cont, re.inner.continuous)
         append!(cat,  re.inner.categorical)
     end
 
-    # Binomial: pull out the trials column from family_args so the caller
-    # can convert observed counts to proportions on the link scale.
-    n_trials = nothing
-    if o.family === Binomial
-        for fa in o.family_args
-            if fa isa NamedColumn && parent(fa) isa DataColumn
-                n_trials = name(fa); break
-            end
-        end
-    end
-
-    base = (; response=o.response, loc=o.link_lp, family=o.family, link_fn=o.link_fn)
-    isnothing(n_trials) || (base = merge(base, (; n_trials)))
+    # Wide picker covariates: every data column this LP's DAG touches.
+    # Includes the predictor itself + the group + any deeper deps.
+    covs = Symbol[c for c in dependencies(brmi, lp.link_lp).data]
 
     n_cont = length(cont)
     n_cat  = length(cat)
+
     if n_cont == 0 && n_cat == 0 && isnothing(group)
-        merge(base, (; kind=:scalar))
+        ScalarPPC(o.response, lp.link_lp, o.family, lp.link_fn, n_trials, covs)
     elseif n_cont == 0 && n_cat == 0 && !isnothing(group)
-        merge(base, (; kind=:scalar_re, group))
+        ScalarRePPC(o.response, lp.link_lp, o.family, lp.link_fn, n_trials, covs, group)
     elseif n_cont == 1 && n_cat == 0 && isnothing(group)
-        merge(base, (; kind=:linear, predictor=cont[1]))
+        LinearPPC(o.response, lp.link_lp, o.family, lp.link_fn, n_trials, covs, cont[1])
     elseif n_cont == 1 && n_cat == 0 && !isnothing(group)
-        merge(base, (; kind=:linear_re, predictor=cont[1], group))
+        LinearRePPC(o.response, lp.link_lp, o.family, lp.link_fn, n_trials, covs, cont[1], group)
     elseif n_cont == 0 && n_cat == 1
-        merge(base, (; kind=:categorical, predictor=cat[1]))
+        CategoricalPPC(o.response, lp.link_lp, o.family, lp.link_fn, n_trials, covs, cat[1])
     elseif n_cont >= 2 && n_cat == 0
-        merge(base, (; kind=:multi_continuous, predictors=cont))
+        MultiContinuousPPC(o.response, lp.link_lp, o.family, lp.link_fn, n_trials, covs, cont)
     else
-        nothing  # mixed continuous+categorical -- not handled yet
+        nothing  # mixed continuous + categorical not yet handled
     end
 end
 
-# ---- per-kind table builders ------------------------------------------------
+# ---- per-kind table helpers (dispatch on PPCKind subtype) ----------------
 
-# Filter `long` to rows where `param == loc`; nothing when missing (e.g. fit
-# posterior_long_df without TPs). Returns the filtered DataFrame.
+# `loc` rows from the long-format draws table.
 _loc_long(long::DataFrame, loc::Symbol) = begin
     rows = filter(:param => ==(string(loc)), long)
     isempty(rows) ? nothing : rows
 end
 
-# Scalar loc (intercept-only). One y-value per draw -- pooled across draws
-# for an ECDF.
-_pred_scalar(long, loc::Symbol, link_fn::Function) = begin
-    rows = _loc_long(long, loc); isnothing(rows) && return nothing
-    DataFrame(y = link_fn.(rows.value))
+# Generic enrichment: join every covariate column from `df` into `tab`
+# via the `:index` column. No-op if `tab` doesn't have an `:index`
+# column (e.g. ScalarPPC's predicted-y table is one row per draw).
+function _enrich_covariates!(tab::DataFrame, df::DataFrame, covariates)
+    hasproperty(tab, :index) || return tab
+    for c in covariates
+        c in propertynames(tab) && continue           # don't overwrite :group, :level, ...
+        hasproperty(df, c) || continue
+        tab[!, c] = df[!, c][tab.index]
+    end
+    tab
+end
+function _enrich_covariates_obs!(tab::DataFrame, df::DataFrame, covariates)
+    for c in covariates
+        c in propertynames(tab) && continue
+        hasproperty(df, c) || continue
+        tab[!, c] = df[!, c]
+    end
+    tab
 end
 
-# Categorical predictor: for each (i, draw) pair, emit (level=df.predictor[i],
-# y=link(loc[i, draw])). Plot as ECDFs faceted by level.
-_pred_categorical(long, df, loc::Symbol, predictor::Symbol, link_fn::Function) = begin
-    rows = _loc_long(long, loc); isnothing(rows) && return nothing
-    DataFrame(
-        level = df[!, predictor][rows.index],
-        y     = link_fn.(rows.value),
+# ---- pred_table: the predicted (model) data table per kind ---------------
+
+pred_table(::PPCKind, _, _) = nothing  # fallback
+
+function pred_table(p::ScalarPPC, long, df)
+    rows = _loc_long(long, p.loc); isnothing(rows) && return nothing
+    DataFrame(y = p.link_fn.(rows.value))
+end
+
+function pred_table(p::ScalarRePPC, long, df)
+    rows = _loc_long(long, p.loc); isnothing(rows) && return nothing
+    tab = DataFrame(
+        group = df[!, p.group][rows.index],
+        y     = p.link_fn.(rows.value),
+        index = rows.index,
     )
+    _enrich_covariates!(tab, df, p.covariates)
 end
 
-# Scalar + group: same as :categorical but the levels come from the RE
-# grouping factor instead of an explicit predictor.
-_pred_scalar_re(long, df, loc::Symbol, group::Symbol, link_fn::Function) = begin
-    rows = _loc_long(long, loc); isnothing(rows) && return nothing
-    DataFrame(
-        group = df[!, group][rows.index],
-        y     = link_fn.(rows.value),
-    )
-end
-
-# Indexed continuous predictor: x = df[predictor][index], y = link(loc[i, draw]).
-_pred_continuous(long, df, loc::Symbol, predictor::Symbol,
-                 link_fn::Function, group::Union{Symbol,Nothing}) = begin
-    rows = _loc_long(long, loc); isnothing(rows) && return nothing
-    out = DataFrame(
-        x     = df[!, predictor][rows.index],
-        y     = link_fn.(rows.value),
+function pred_table(p::Union{LinearPPC,LinearRePPC}, long, df)
+    rows = _loc_long(long, p.loc); isnothing(rows) && return nothing
+    tab = DataFrame(
+        x     = df[!, p.predictor][rows.index],
+        y     = p.link_fn.(rows.value),
         draw  = rows.draw,
         index = rows.index,
     )
-    isnothing(group) || (out.group = df[!, group][rows.index])
-    out
+    if p isa LinearRePPC
+        tab.group = df[!, p.group][rows.index]
+    end
+    _enrich_covariates!(tab, df, p.covariates)
 end
 
-# Multi-continuous: stack one block per predictor with a :predictor column so
-# the plot can facet by predictor name (`row=:predictor`).
-_pred_multi(long, df, loc::Symbol, predictors::Vector{Symbol}, link_fn::Function) = begin
-    rows = _loc_long(long, loc); isnothing(rows) && return nothing
+function pred_table(p::CategoricalPPC, long, df)
+    rows = _loc_long(long, p.loc); isnothing(rows) && return nothing
+    tab = DataFrame(
+        level = df[!, p.predictor][rows.index],
+        y     = p.link_fn.(rows.value),
+        index = rows.index,
+    )
+    _enrich_covariates!(tab, df, p.covariates)
+end
+
+function pred_table(p::MultiContinuousPPC, long, df)
+    rows = _loc_long(long, p.loc); isnothing(rows) && return nothing
     parts = DataFrame[]
-    for p in predictors
-        push!(parts, DataFrame(
-            predictor = string(p),
-            x         = df[!, p][rows.index],
-            y         = link_fn.(rows.value),
+    for pname in p.predictors
+        block = DataFrame(
+            predictor = string(pname),
+            x         = df[!, pname][rows.index],
+            y         = p.link_fn.(rows.value),
             draw      = rows.draw,
             index     = rows.index,
-        ))
+        )
+        _enrich_covariates!(block, df, p.covariates)
+        push!(parts, block)
     end
     vcat(parts...)
 end
 
-# ---- per-kind spec builders -------------------------------------------------
+# ---- obs_table: the observed-y table per kind (posterior side only) ------
 
-# Prior-predictive: NO observation overlay (don't eyeball prior vs data).
-_prior_ppc_spec(long, df, p::NamedTuple; title) = begin
-    if p.kind === :scalar
-        pred = _pred_scalar(long, p.loc, p.link_fn)
-        isnothing(pred) && return nothing
-        AoG.data(pred) * AoG.mapping(:y) * AoG.visual(ECDFPlot) *
-            config(title=title)
-    elseif p.kind === :scalar_re
-        pred = _pred_scalar_re(long, df, p.loc, p.group, p.link_fn)
-        isnothing(pred) && return nothing
+obs_table(::PPCKind, _, _) = nothing
+
+function obs_table(p::ScalarPPC, df, obs_y)
+    DataFrame(y = obs_y)
+end
+
+function obs_table(p::ScalarRePPC, df, obs_y)
+    tab = DataFrame(group = df[!, p.group], y = obs_y)
+    _enrich_covariates_obs!(tab, df, p.covariates)
+end
+
+function obs_table(p::Union{LinearPPC,LinearRePPC}, df, obs_y)
+    tab = DataFrame(x = df[!, p.predictor], y = obs_y)
+    if p isa LinearRePPC
+        tab.group = df[!, p.group]
+    end
+    _enrich_covariates_obs!(tab, df, p.covariates)
+end
+
+function obs_table(p::CategoricalPPC, df, obs_y)
+    tab = DataFrame(level = df[!, p.predictor], y = obs_y)
+    _enrich_covariates_obs!(tab, df, p.covariates)
+end
+
+function obs_table(p::MultiContinuousPPC, df, obs_y)
+    parts = DataFrame[]
+    for pname in p.predictors
+        block = DataFrame(
+            predictor = string(pname),
+            x         = df[!, pname],
+            y         = obs_y,
+        )
+        _enrich_covariates_obs!(block, df, p.covariates)
+        push!(parts, block)
+    end
+    vcat(parts...)
+end
+
+# ---- prior_spec / posterior_spec: per-kind plot specs --------------------
+
+# Prior-predictive: NO observation overlay. Posterior-predictive: predicted
+# layer + observed overlay (a black ECDF / scatter).
+prior_spec(::PPCKind, _, _; title) = nothing
+posterior_spec(::PPCKind, _, _, _; title) = nothing
+
+function prior_spec(p::ScalarPPC, long, df; title)
+    pred = pred_table(p, long, df); isnothing(pred) && return nothing
+    AoG.data(pred) * AoG.mapping(:y) * AoG.visual(ECDFPlot) *
+        config(title=title)
+end
+function posterior_spec(p::ScalarPPC, long, df, obs_y; title)
+    pred = pred_table(p, long, df); isnothing(pred) && return nothing
+    obs  = obs_table(p, df, obs_y)
+    (
+        AoG.data(pred) * AoG.mapping(:y) * AoG.visual(ECDFPlot)
+        +
+        AoG.data(obs)  * AoG.mapping(:y) *
+            AoG.visual(ECDFPlot; color="black", strokeWidth=2)
+    ) * config(title=title)
+end
+
+function prior_spec(p::ScalarRePPC, long, df; title)
+    pred = pred_table(p, long, df); isnothing(pred) && return nothing
+    AoG.data(pred) * AoG.mapping(:y, row=:group => nonnumeric) *
+        AoG.visual(ECDFPlot) *
+        config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
+end
+function posterior_spec(p::ScalarRePPC, long, df, obs_y; title)
+    pred = pred_table(p, long, df); isnothing(pred) && return nothing
+    obs  = obs_table(p, df, obs_y)
+    (
         AoG.data(pred) * AoG.mapping(:y, row=:group => nonnumeric) *
-            AoG.visual(ECDFPlot) *
-            config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
-    elseif p.kind === :linear
-        pred = _pred_continuous(long, df, p.loc, p.predictor, p.link_fn, nothing)
-        isnothing(pred) && return nothing
-        AoG.data(pred) * AoG.mapping(:x, :y, group=:draw) * lineribbon() *
-            config(title=title)
-    elseif p.kind === :linear_re
-        pred = _pred_continuous(long, df, p.loc, p.predictor, p.link_fn, p.group)
-        isnothing(pred) && return nothing
-        # Default to row-faceting by group (scales gracefully to many
-        # levels). Picker (auto_remap dims=["group" => ...]) lets the
-        # user move group to color / column / detail.
-        AoG.data(pred) *
-            AoG.mapping(:x, :y, group=:draw, row=:group => nonnumeric) *
-            lineribbon() *
-            config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
-    elseif p.kind === :categorical
-        # Faceted ECDF: one panel per level of the categorical predictor,
-        # showing the model's predicted-y CDF pooled across (obs, draw)
-        # for that level. Picker can reroute `level` to color/column.
-        pred = _pred_categorical(long, df, p.loc, p.predictor, p.link_fn)
-        isnothing(pred) && return nothing
-        AoG.data(pred) * AoG.mapping(:y, row=:level => nonnumeric) *
-            AoG.visual(ECDFPlot) *
-            config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
-    elseif p.kind === :multi_continuous
-        pred = _pred_multi(long, df, p.loc, p.predictors, p.link_fn)
-        isnothing(pred) && return nothing
-        AoG.data(pred) * AoG.mapping(:x, :y, group=:draw, row=:predictor) *
-            lineribbon() *
-            config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
-    end
+            AoG.visual(ECDFPlot)
+        +
+        AoG.data(obs)  * AoG.mapping(:y, row=:group => nonnumeric) *
+            AoG.visual(ECDFPlot; color="black", strokeWidth=2)
+    ) * config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
 end
 
-# Posterior-predictive: predicted layer + observed overlay. `obs_y` already on
-# the response scale (caller does Binomial proportion conversion via n_trials).
-_posterior_ppc_spec(long, df, obs_y, p::NamedTuple; title) = begin
-    if p.kind === :scalar
-        pred = _pred_scalar(long, p.loc, p.link_fn)
-        isnothing(pred) && return nothing
-        obs  = DataFrame(y = obs_y)
-        (
-            AoG.data(pred) * AoG.mapping(:y) * AoG.visual(ECDFPlot)
-            +
-            AoG.data(obs) * AoG.mapping(:y) *
-                AoG.visual(ECDFPlot; color="black", strokeWidth=2)
-        ) * config(title=title)
-    elseif p.kind === :scalar_re
-        pred = _pred_scalar_re(long, df, p.loc, p.group, p.link_fn)
-        isnothing(pred) && return nothing
-        obs  = DataFrame(group = df[!, p.group], y = obs_y)
-        (
-            AoG.data(pred) * AoG.mapping(:y, row=:group => nonnumeric) *
-                AoG.visual(ECDFPlot)
-            +
-            AoG.data(obs) * AoG.mapping(:y, row=:group => nonnumeric) *
-                AoG.visual(ECDFPlot; color="black", strokeWidth=2)
-        ) * config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
-    elseif p.kind === :linear
-        pred = _pred_continuous(long, df, p.loc, p.predictor, p.link_fn, nothing)
-        isnothing(pred) && return nothing
-        obs  = DataFrame(x = df[!, p.predictor], y = obs_y)
-        ppc_overlay(obs, pred; x=:x, y=:y, group=:draw) * config(title=title)
-    elseif p.kind === :linear_re
-        pred = _pred_continuous(long, df, p.loc, p.predictor, p.link_fn, p.group)
-        isnothing(pred) && return nothing
-        obs  = DataFrame(x = df[!, p.predictor], y = obs_y, group = df[!, p.group])
-        # Default to row-faceting by group (scales to many levels).
-        # Picker lets users swap to color / column / detail.
-        ppc_overlay(obs, pred; x=:x, y=:y, group=:draw, row=:group) *
-            config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
-    elseif p.kind === :categorical
-        # Faceted ECDF per level: predicted ECDF (default colour) plus
-        # observed ECDF (black, thicker) overlaid.
-        pred = _pred_categorical(long, df, p.loc, p.predictor, p.link_fn)
-        isnothing(pred) && return nothing
-        obs  = DataFrame(level = df[!, p.predictor], y = obs_y)
-        (
-            AoG.data(pred) * AoG.mapping(:y, row=:level => nonnumeric) *
-                AoG.visual(ECDFPlot)
-            +
-            AoG.data(obs) * AoG.mapping(:y, row=:level => nonnumeric) *
-                AoG.visual(ECDFPlot; color="black", strokeWidth=2)
-        ) * config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
-    elseif p.kind === :multi_continuous
-        pred = _pred_multi(long, df, p.loc, p.predictors, p.link_fn)
-        isnothing(pred) && return nothing
-        obs_parts = DataFrame[]
-        for pname in p.predictors
-            push!(obs_parts, DataFrame(
-                predictor = string(pname),
-                x         = df[!, pname],
-                y         = obs_y,
-            ))
-        end
-        obs = vcat(obs_parts...)
-        (
-            AoG.data(pred) * AoG.mapping(:x, :y, group=:draw, row=:predictor) * lineribbon()
-            +
-            AoG.data(obs)  * AoG.mapping(:x, :y, row=:predictor) *
-                AoG.visual(Scatter; color="black")
-        ) * config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
-    end
+function prior_spec(p::LinearPPC, long, df; title)
+    pred = pred_table(p, long, df); isnothing(pred) && return nothing
+    AoG.data(pred) * AoG.mapping(:x, :y, group=:draw) * lineribbon() *
+        config(title=title)
 end
+function posterior_spec(p::LinearPPC, long, df, obs_y; title)
+    pred = pred_table(p, long, df); isnothing(pred) && return nothing
+    obs  = obs_table(p, df, obs_y)
+    ppc_overlay(obs, pred; x=:x, y=:y, group=:draw) * config(title=title)
+end
+
+function prior_spec(p::LinearRePPC, long, df; title)
+    pred = pred_table(p, long, df); isnothing(pred) && return nothing
+    AoG.data(pred) *
+        AoG.mapping(:x, :y, group=:draw, row=:group => nonnumeric) *
+        lineribbon() *
+        config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
+end
+function posterior_spec(p::LinearRePPC, long, df, obs_y; title)
+    pred = pred_table(p, long, df); isnothing(pred) && return nothing
+    obs  = obs_table(p, df, obs_y)
+    ppc_overlay(obs, pred; x=:x, y=:y, group=:draw, row=:group) *
+        config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
+end
+
+function prior_spec(p::CategoricalPPC, long, df; title)
+    pred = pred_table(p, long, df); isnothing(pred) && return nothing
+    AoG.data(pred) * AoG.mapping(:y, row=:level => nonnumeric) *
+        AoG.visual(ECDFPlot) *
+        config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
+end
+function posterior_spec(p::CategoricalPPC, long, df, obs_y; title)
+    pred = pred_table(p, long, df); isnothing(pred) && return nothing
+    obs  = obs_table(p, df, obs_y)
+    (
+        AoG.data(pred) * AoG.mapping(:y, row=:level => nonnumeric) *
+            AoG.visual(ECDFPlot)
+        +
+        AoG.data(obs)  * AoG.mapping(:y, row=:level => nonnumeric) *
+            AoG.visual(ECDFPlot; color="black", strokeWidth=2)
+    ) * config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
+end
+
+function prior_spec(p::MultiContinuousPPC, long, df; title)
+    pred = pred_table(p, long, df); isnothing(pred) && return nothing
+    AoG.data(pred) * AoG.mapping(:x, :y, group=:draw, row=:predictor) *
+        lineribbon() *
+        config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
+end
+function posterior_spec(p::MultiContinuousPPC, long, df, obs_y; title)
+    pred = pred_table(p, long, df); isnothing(pred) && return nothing
+    obs  = obs_table(p, df, obs_y)
+    (
+        AoG.data(pred) * AoG.mapping(:x, :y, group=:draw, row=:predictor) * lineribbon()
+        +
+        AoG.data(obs)  * AoG.mapping(:x, :y, row=:predictor) *
+            AoG.visual(Scatter; color="black")
+    ) * config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
+end
+
+# ---- picker_dims: structural + wide covariates ---------------------------
+
+# Structural channels (the "natural" facet/color candidate per kind).
+# Default empty; per-kind overrides extend it.
+structural_dims(::PPCKind) = Pair{String,String}[]
+structural_dims(p::ScalarRePPC) = ["group" => "Group ($(p.group))"]
+structural_dims(p::LinearRePPC) = ["group" => "Group ($(p.group))"]
+structural_dims(p::CategoricalPPC) = ["level" => "Level of $(p.predictor)"]
+structural_dims(p::MultiContinuousPPC) = ["predictor" => "Predictor"]
+
+# Wide picker: structural + every covariate the LP's DAG touches.
+# Skip covariates already named by structural channels (they'd be
+# duplicates with different labels).
+function picker_dims(p::PPCKind)
+    structural = structural_dims(p)
+    structural_keys = Set(string(first(d)) for d in structural)
+    extras = [string(c) => "Covariate $c" for c in p.covariates
+              if string(c) ∉ structural_keys && string(c) != "x" && string(c) != "y"]
+    isempty(structural) && isempty(extras) ? nothing :
+        Pair{String,String}[structural..., extras...]
+end
+
+# ---- caption helpers ------------------------------------------------------
+
+# Short label of "what's being plotted" -- the loc, optionally
+# link-wrapped, optionally with the structural facet noted.
+predictor_label(::PPCKind) = ""
+predictor_label(p::LinearPPC) = " vs $(p.predictor)"
+predictor_label(p::LinearRePPC) = " vs $(p.predictor)"
+predictor_label(p::CategoricalPPC) = " vs $(p.predictor)"
+predictor_label(p::MultiContinuousPPC) = " vs " * join(string.(p.predictors), ", ")
+
+kind_tag(::T) where {T<:PPCKind} = string(nameof(T))
 
 @dynamicstruct struct AppData
     __status__ = initialize_progress!(:state; description="BRM pipeline")
@@ -1394,67 +1540,65 @@ APPDATA = AppData(; cache_type=:parallel)
             )
             (; tabs, wide_details)
         end
-        # Helper: build the optional predictive-check section. `which` is
-        # `:prior` (prior predictive, no overlay) or `:posterior` (PPC -- pulls
-        # observed y from `fit_data_dict[response]` and overlays it).
+        # Build one h.section per detected `PPCKind` (so distributional
+        # likelihoods like `Normal(loc, err)` get one panel per LP -- one
+        # for `loc`, one for `log(err)` -- each with its own independent
+        # picker). Returns `nothing` if no kind matched, otherwise a
+        # `h.div` wrapping the per-kind sections.
         build_ppc_section(long, which::Symbol; id_prefix) = begin
-            pat = _ppc_pattern(context!().run.brmi)
-            isnothing(pat) && return nothing
+            kinds = _ppc_kinds(context!().run.brmi)
+            isempty(kinds) && return nothing
             df  = context!().run.df
+            sections = Any[]
+            for (i, p) in enumerate(kinds)
+                sec = _build_one_ppc(p, long, df, which;
+                                     id_prefix="$id_prefix-$i")
+                isnothing(sec) || push!(sections, sec)
+            end
+            isempty(sections) ? nothing : h.div(sections...)
+        end
+
+        # One section for one kind. `dispatch_spec` picks prior vs
+        # posterior; `obs_y` is materialised lazily (only when needed +
+        # only after the Binomial proportion conversion). No explicit
+        # type annotation on `p` since this lives in a @struct body and
+        # the actual per-kind dispatch happens inside prior_spec /
+        # posterior_spec / picker_dims / predictor_label / kind_tag.
+        _build_one_ppc(p, long, df, which; id_prefix) = begin
             heading = which === :prior ? "Prior predictive" :
                                           "Posterior predictive check"
-            # Predictor label depends on the kind: scalar has none, multi has
-            # several, the rest have one.
-            predictor_label = if pat.kind === :scalar
-                ""
-            elseif pat.kind === :multi_continuous
-                " vs " * join(string.(pat.predictors), ", ")
-            else
-                " vs $(pat.predictor)"
-            end
-            title = "$(pat.response)$predictor_label -- $heading"
+            label   = predictor_label(p)
+            title   = "$(p.response)$label -- $heading"
             spec = if which === :prior
-                _prior_ppc_spec(long, df, pat; title)
+                prior_spec(p, long, df; title)
             else
-                # Binomial outcomes are counts (`bin_succ`); the predicted
-                # `link(loc)` is a probability. Convert obs to a proportion so
-                # both layers share the [0, 1] response scale.
-                obs_y_raw = context!().run.stan.fit_data_dict[Symbol(pat.response)]
-                obs_y = if pat.family === Binomial && haskey(pat, :n_trials)
-                    obs_y_raw ./ context!().run.stan.fit_data_dict[Symbol(pat.n_trials)]
+                # Binomial outcomes are counts; predicted `link(loc)` is
+                # a probability. Convert observed counts to proportions
+                # so both layers share the same response scale.
+                obs_y_raw = context!().run.stan.fit_data_dict[Symbol(p.response)]
+                obs_y = if p.family === Binomial && !isnothing(p.n_trials)
+                    obs_y_raw ./ context!().run.stan.fit_data_dict[Symbol(p.n_trials)]
                 else
                     obs_y_raw
                 end
-                _posterior_ppc_spec(long, df, obs_y, pat; title)
+                posterior_spec(p, long, df, obs_y; title)
             end
             isnothing(spec) && return nothing
-            link_label = pat.link_fn === identity ? string(pat.loc) :
-                         "$(pat.link_fn)($(pat.loc))"
+
+            link_lbl = p.link_fn === identity ? string(p.loc) :
+                       "$(p.link_fn)($(p.loc))"
             cap = which === :prior ?
-                "Prior-predictive draws of $link_label$predictor_label (no observation overlay -- $(pat.family) family, kind=$(pat.kind))" :
-                "Posterior draws of $link_label$predictor_label, with observed $(pat.response) overlaid (kind=$(pat.kind))"
-            # AoV's mapping picker: any kind that has a categorical /
-            # grouping column gets a row/column/color/detail picker so
-            # users can swap which channel that variable maps to. Plain
-            # :linear / :scalar have nothing remappable; skip the picker.
-            picker_dims = if pat.kind === :linear_re || pat.kind === :scalar_re
-                ["group" => "Group ($(pat.group))"]
-            elseif pat.kind === :categorical
-                ["level" => "Level of $(pat.predictor)"]
-            elseif pat.kind === :multi_continuous
-                ["predictor" => "Predictor"]
-            else
-                nothing
-            end
-            plot_block = if isnothing(picker_dims)
-                with_plot_caption(spec; plot_id="$id_prefix-ppc", title=cap)
-            else
+                "Prior-predictive draws of $link_lbl$label ($(p.family) family, $(kind_tag(p)))" :
+                "Posterior draws of $link_lbl$label, with observed $(p.response) overlaid ($(kind_tag(p)))"
+
+            dims = picker_dims(p)
+            plot_block = isnothing(dims) ?
+                with_plot_caption(spec; plot_id="$id_prefix-ppc", title=cap) :
                 with_plot_caption(spec; plot_id="$id_prefix-ppc", title=cap,
-                                  auto_remap=(; dims=picker_dims))
-            end
+                                  auto_remap=(; dims))
             h.section(
-                h.h4(heading, ": ", h.code(string(pat.response)), predictor_label,
-                     " (", string(pat.kind), ")"),
+                h.h4(heading, ": ", h.code(string(p.response)), label,
+                     " (", kind_tag(p), ")"),
                 plot_block,
             )
         end
