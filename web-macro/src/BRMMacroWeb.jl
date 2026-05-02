@@ -14,6 +14,10 @@ using FiniteDifferences: FiniteDifferences, central_fdm
 using BridgeStan: BridgeStan
 using StanLogDensityProblems: StanProblem
 using LogDensityProblems
+# Formula presets reference `logistic` (Bernoulli / Binomial link); BRM imports
+# LogExpFunctions internally but doesn't re-export it, so eval-context needs
+# its own import.
+using LogExpFunctions: logistic, logit, softmax, logsumexp
 using StanBlocks
 using Distributions
 using OrderedCollections: OrderedDict

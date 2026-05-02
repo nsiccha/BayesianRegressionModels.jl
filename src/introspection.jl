@@ -163,15 +163,14 @@ For a linear-predictor LHS, classify the RHS into:
   `inner` recursively the same shape so callers can reach RE-internal
   predictors.
 
-`nothing` if the LP isn't introspectable (link-transformed LHS via
-`linear_predictor_op` returning the wrapped op rather than the bare
-form, etc.).
+Works for both bare-LHS LPs (`loc ~ 1 + a`) and link-transformed-LHS
+LPs (`log(err) ~ 1 + b`); the link is captured separately via
+`linear_predictors`. `nothing` only when the RHS is malformed.
 """
 function predictors(brmi::BRMI, lhs::Symbol)
     op = linear_predictor_op(brmi, lhs)
     isnothing(op) && return nothing
-    op_lhs, rhs_expr = getargs(op, 2)
-    op_lhs isa NamedColumn || return nothing
+    _, rhs_expr = getargs(op, 2)
     rhs_expr isa ExprColumn || return nothing
     getf(rhs_expr) === (+) || return nothing
     _walk_predictors(getargs(rhs_expr))
