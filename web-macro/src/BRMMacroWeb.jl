@@ -1090,6 +1090,13 @@ display_name(::MultiContinuousPPC)  = "multi-predictor"
     # Keyed by absolute .stan path. Entries are never reaped; one per distinct
     # compiled model. `get!(ReentrantLock, locks, path)` lazily creates.
     stan_compile_locks = ThreadsafeDict{String,ReentrantLock}()
+    # Global serialization for ALL Stan compiles across paths. Per-path locks
+    # only prevent two threads racing on the SAME .so; with the gallery,
+    # opening N cards spawns N parallel `make` jobs at -O3-scale memory
+    # peaks, which OOM-killed the 3.8 GB strato box. Holding this lock
+    # around `compile_model` caps the box at one compile in flight.
+    # StanModel construction is left outside the lock (cheap dlopen).
+    stan_compile_global_lock = ReentrantLock()
 
     namespace_from(label) = isempty(strip(label)) ? :default :
         Symbol(lowercase(first(split(strip(label), r"[\s:\-]+"))))
@@ -1188,7 +1195,13 @@ display_name(::MultiContinuousPPC)  = "multi-predictor"
             lib = Base.lock(get!(ReentrantLock, stan_compile_locks, file)) do
                 @info "[stan] before compile_model" file
                 isfile(file) || write(file, src)
-                rv = BridgeStan.compile_model(file; make_args=_make_args)
+                # Hold the global compile lock only across the actual `make`
+                # invocation -- per-path lock above already short-circuits
+                # cache hits cheaply, so the global queue only fills up with
+                # genuine first-time compiles.
+                rv = Base.lock(stan_compile_global_lock) do
+                    BridgeStan.compile_model(file; make_args=_make_args)
+                end
                 @info "[stan] after compile_model" file
                 rv
             end
