@@ -24,6 +24,18 @@ function ar end
 # later adds its own `OrderedLogistic`, drop this in favour of that.
 struct OrderedLogistic end
 
+# Carvalho-Polson-Scott horseshoe shrinkage prior. Surfaces in the formula
+# as `coef ~ Horseshoe()`; sbimpl emits the standard reparameterised
+# hierarchy via `_sb_horseshoe`. Bare marker -- the @brm parser never
+# constructs an instance, so a struct with no fields is enough.
+struct Horseshoe end
+
+# Zero-inflated Poisson likelihood. Two-parameter mixture of a point-mass at
+# zero (with prob `zi`) and a Poisson(lambda). Surfaces as
+# `y ~ ZeroInflatedPoisson(lambda, zi)`; sbimpl emits `y ~ zero_inflated_poisson(...)`
+# which routes to the @deffun lpmf below.
+struct ZeroInflatedPoisson end
+
 popefs = StanBlocks.@slic begin
     n_covariates = dims(X)[2]
     beta_pop ~ std_normal(; n=n_covariates)
@@ -100,6 +112,47 @@ end
 # allowed in @slic bodies, but they are allowed in @deffun bodies). For each
 # group g, pick the stratum s = stratum_idx[g] and compute
 #   b[g, :] = (diag_pre_multiply(tau[s, :], L[s, :, :]) * z[g, :])'.
+# Zero-inflated Poisson lpmf (per-element + vectorised). Per element:
+#   y == 0 -> log_sum_exp(log(zi),  log1m(zi) + poisson_lpmf(0  | lambda))
+#   y >  0 ->                       log1m(zi) + poisson_lpmf(y  | lambda)
+# Defined here (not in StanBlocks/builtin.jl) so the BRM frontend can ship
+# zero-inflated Poisson without an upstream addition; @deffun bodies are
+# allowed control flow, which the per-element conditional needs. The
+# `@lpxf` annotation on the first definition wires the SLIC sampling
+# dispatch (lpxf_expr / rng_expr / likelihood_expr hooks) so
+# `y ~ zero_inflated_poisson(lambda, zi)` resolves to the lpmf.
+StanBlocks.@deffun begin
+    @lpxf zero_inflated_poisson_lpmf(y::int, lambda::real, zi::real)::real = begin
+        if y == 0
+            log_sum_exp(log(zi), log1m(zi) + poisson_lpmf(0::int, lambda))
+        else
+            log1m(zi) + poisson_lpmf(y, lambda)
+        end
+    end
+    zero_inflated_poisson_lpmf(y::int[n], lambda::vector[n], zi::vector[n])::real = begin
+        rv = 0.
+        for i in 1:n
+            rv += zero_inflated_poisson_lpmf(y[i], lambda[i], zi[i])::real
+        end
+        rv
+    end
+    # Hand-rolled per-element loop returning vector[n]. Mirrors the
+    # `ordered_logistic_lpmfs` pattern in StanBlocks/builtin.jl --
+    # avoids `jbroadcasted` which lives in `StanBlocks.builtin` and may
+    # not be reachable from a user-side @deffun's symbol resolver.
+    zero_inflated_poisson_lpmfs(args...) = begin
+        zero_inflated_poisson_lpmf(args...)
+    end
+    zero_inflated_poisson_lpmfs(y, lambda, zi) = begin
+        n = num_elements(y)
+        rv::vector[n]
+        for i in 1:n
+            rv[i] = zero_inflated_poisson_lpmf(y[i], lambda[i], zi[i])
+        end
+        rv
+    end
+end
+
 StanBlocks.@deffun begin
     stratified_correlated_b(L, tau, z, stratum_idx::int[n_groups],
                             n_groups::int, n_terms::int) = begin
@@ -149,7 +202,9 @@ end
 ranef_correlated_by = StanBlocks.@slic begin
     L::cholesky_factor_corr[n_strata, n_terms] ~ multi_lkj_corr_cholesky(1.)
     tau::vector[n_strata, n_terms] ~ multi_std_normal(; lower=0.)
-    z::vector[n_strata, n_terms] ~ multi_std_normal()
+    # z is the standardised per-GROUP draw (n_groups rows), not per-stratum --
+    # `stratified_correlated_b` indexes z[g, :] for g in 1:n_groups.
+    z::vector[n_groups, n_terms] ~ multi_std_normal()
     b = stratified_correlated_b(L, tau, z, stratum_idx, n_groups, n_terms)
     return rows_dot_product(Z, b[group_idx, :])
 end
@@ -160,7 +215,7 @@ end
 ranef_correlated_by_draws = StanBlocks.@slic begin
     L::cholesky_factor_corr[n_strata, n_terms] ~ multi_lkj_corr_cholesky(1.)
     tau::vector[n_strata, n_terms] ~ multi_std_normal(; lower=0.)
-    z::vector[n_strata, n_terms] ~ multi_std_normal()
+    z::vector[n_groups, n_terms] ~ multi_std_normal()
     return stratified_correlated_b(L, tau, z, stratum_idx, n_groups, n_terms)
 end
 
@@ -255,6 +310,18 @@ _sb_me = StanBlocks.@slic begin
     x_true ~ std_normal(; n=num_elements(x_obs))
     x_obs ~ normal(x_true, sd_x)
     return x_true
+end
+
+# Carvalho-Polson-Scott horseshoe prior, scalar form. Standard
+# reparameterisation: beta = raw * lambda * tau with raw ~ N(0,1) and
+# half-Cauchy(0,1) local + global scales. Each `coef ~ Horseshoe()`
+# call site gets its own (raw, lambda, tau) triple via SLIC's per-call
+# scoping.
+_sb_horseshoe = StanBlocks.@slic begin
+    raw    ~ std_normal()
+    lambda ~ cauchy(0., 1.; lower=0.)
+    tau    ~ cauchy(0., 1.; lower=0.)
+    return raw * lambda * tau
 end
 
 # Hilbert-space approximate Gaussian process (Riutort-Mayol et al. 2022),
@@ -388,6 +455,15 @@ _sb_empty_id_lookup() = Dict{Tuple{Symbol,Tuple{Symbol,Any}}, Any}()
 # through. Default: no hook registered.
 _sb_submodel_rhs!(stmts, data, target, f, rhs) = nothing
 
+# Built-in prior families on a missing-LHS sampling statement (e.g.
+# `coef_a ~ Horseshoe()`). Returns `true` if it consumed the binding,
+# `false` otherwise (then `_sb_linear_predictor!` runs).
+_sb_emit_prior!(stmts, target, ::Type{<:Horseshoe}, _) = begin
+    push!(stmts, :($target ~ _sb_horseshoe()))
+    true
+end
+_sb_emit_prior!(_, _, _, _) = false
+
 # LHS backed by real data => this is a likelihood. Record the observed values
 # under the formula name in `data` and emit `key ~ dist(args...)`.
 _sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lookup()) = begin
@@ -398,6 +474,9 @@ _sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lo
     elseif backing isa MissingColumn
         if rhs isa ExprColumn &&
            _sb_submodel_rhs!(stmts, data, key, getf(rhs), rhs) !== nothing
+            return
+        end
+        if rhs isa ExprColumn && _sb_emit_prior!(stmts, key, getf(rhs), rhs)
             return
         end
         _sb_linear_predictor!(stmts, data, key, rhs; id_lookup, brmi_key=key)
@@ -419,8 +498,14 @@ _sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_loo
     inner_name = name(inner)
     pre_name = Symbol(nameof(f), :_, inner_name)
     _sb_linear_predictor!(stmts, data, pre_name, rhs; id_lookup, brmi_key=key)
-    push!(stmts, :($inner_name = $(Symbol(nameof(inv_f)))($pre_name)))
+    push!(stmts, :($inner_name = $(_sb_julia_to_stan_fn(inv_f))($pre_name)))
 end
+
+# Map a Julia function (typically the result of `InverseFunctions.inverse(...)`
+# for a link transform) to the Stan-side function name. Stan ships
+# `inv_logit` rather than `logistic`, so the bare `nameof` would emit a
+# call stanc rejects. Add other rename cases here as they come up.
+_sb_julia_to_stan_fn(f) = f === LogExpFunctions.logistic ? :inv_logit : Symbol(nameof(f))
 
 
 # ---- linear predictor: emit `X_<name> = hcat(...); <name> ~ popefs(; X=X_<name>)` --
@@ -436,6 +521,11 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
         if t isa ExprColumn && getf(t) === (|)
             push!(ran_terms, t)
         elseif t isa ExprColumn && getf(t) === mo1
+            push!(direct_terms, t)
+        elseif t isa ExprColumn && getf(t) === (*)
+            # `coef * a` -- sampled scalar times data column. The user
+            # is supplying the coefficient explicitly (e.g. for a
+            # horseshoe prior); routes around popefs.
             push!(direct_terms, t)
         elseif _sb_is_categorical(t)
             push!(direct_terms, t)
@@ -475,6 +565,25 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     end
 end
 
+# Decide which operand of `coef * a` is the sampled scalar vs the data
+# column. Returns `(scalar, data)`. Errors if the args aren't exactly
+# (sampled-scalar NamedColumn, data NamedColumn) in either order.
+_sb_split_scalar_data(args) = begin
+    a, b = args
+    if _sb_is_sampled_scalar(a) && _sb_is_data_named(b)
+        (a, b)
+    elseif _sb_is_sampled_scalar(b) && _sb_is_data_named(a)
+        (b, a)
+    else
+        error("sbimpl: `*` LP term needs one sampled-scalar NamedColumn and one data NamedColumn (got $(typeof(a)) and $(typeof(b)))")
+    end
+end
+_sb_is_sampled_scalar(t::NamedColumn) =
+    parent(t) isa ExprColumn && getf(parent(t)) === (~)
+_sb_is_sampled_scalar(_) = false
+_sb_is_data_named(t::NamedColumn) = parent(t) isa DataColumn
+_sb_is_data_named(_) = false
+
 # Classify a predictor term as "direct" (allocates its own parameters, no
 # popefs multiplication). Matches vimpl: integer-backed NamedColumns are
 # treated as treatment-coded categoricals; floats go through popefs.
@@ -495,6 +604,22 @@ function _sb_emit_direct!(stmts, data, target::Symbol, t, summands)
         return
     end
     f = getf(t)
+    if f === (*)
+        # `coef * a` -- one operand is a sampled scalar (NamedColumn over
+        # an ExprColumn{~}), the other is a data column. Materialise the
+        # data into the data dict (if not already) and bind an
+        # intermediate `<coef>_x_<a>` to the product so the LP-sum sees a
+        # plain Symbol. Stan broadcasts `real * vector` elementwise.
+        args = getargs(t)
+        length(args) == 2 || error("sbimpl: `*` LP term expects 2 operands, got $(length(args))")
+        scalar, dat = _sb_split_scalar_data(args)
+        cn = name(dat)
+        haskey(data, cn) || (data[cn] = collect(Float64, parent(parent(dat))))
+        prod_name = Symbol(name(scalar), :_x_, cn)
+        push!(stmts, :($prod_name = $(name(scalar)) * $cn))
+        push!(summands, prod_name)
+        return
+    end
     f === mo1 || error("sbimpl: unsupported direct-summand term `$f`")
     inner = only(getargs(t))
     inner isa NamedColumn || error("sbimpl: `mo1(…)` expects a NamedColumn, got $(typeof(inner))")
@@ -910,6 +1035,10 @@ _sb_collect_terms_expr!(acc, ::typeof(+), x) = foreach(a -> _sb_collect_terms!(a
 # `(expr | group)` is kept as-is; `_sb_linear_predictor!` splits it off into
 # the ranef side of the additive linear predictor.
 _sb_collect_terms_expr!(acc, ::typeof(|), x) = push!(acc, x)
+# `coef * a` -- sampled scalar times a data column. Kept whole here so the
+# classifier in `_sb_linear_predictor!` can route it into direct_terms
+# (the user supplies their own coefficient via the scalar; no popefs beta).
+_sb_collect_terms_expr!(acc, ::typeof(*), x) = push!(acc, x)
 # `factor(c, ref=k)`: configurable reference level for a categorical
 # column. Re-encode at term-collection time (swap level k <-> level 1)
 # and inject a synthetic NamedColumn with the recoded data, so the
@@ -1155,23 +1284,8 @@ _sb_predictor_term!(stmts, data, ::typeof(gp), t) = begin
     col_name
 end
 
-# Riutort-Mayol HSGP eigen-basis (1D, squared-exp kernel). Mirrors vimpl's
-# `_hsgp_basis`: PHI[i,k] = (1/sqrt(L)) * sin(sqrt(lambda_k) * (x_i - mean(x) + L)),
-# lambda_k = (k * pi / (2 L))^2 with L = c * max(|x - mean(x)|).
-function _hsgp_basis(raw::AbstractVector{<:Real}, K::Integer, c::Real)
-    K >= 1 || error("sbimpl: gp k must be >= 1 (got $K)")
-    c >  1 || error("sbimpl: gp c must be > 1 (got $c)")
-    x_c = raw .- (sum(raw) / length(raw))
-    L = c * maximum(abs, x_c)
-    L > 0 || error("sbimpl: gp degenerate input (all x equal)")
-    lambda = [(k * pi / (2 * L))^2 for k in 1:K]
-    PHI = zeros(length(raw), K)
-    inv_sqrt_L = 1 / sqrt(L)
-    for k in 1:K, i in eachindex(x_c)
-        PHI[i, k] = inv_sqrt_L * sin(sqrt(lambda[k]) * (x_c[i] + L))
-    end
-    PHI, lambda
-end
+# `_hsgp_basis` is defined in vimpl.jl; reuse rather than redefine here
+# to avoid method-overwriting precompile errors.
 
 # `ar(time; p=1)` AR(1) residual submodel. Routes to `_sb_ar1`, which owns the
 # phi / epsilon parameters and returns the per-row u[t] as a single length-N
@@ -1320,6 +1434,7 @@ _sb_lik_family!(stmts, target, ::Type{<:BernoulliLogit},   args::Tuple{Any},    
 _sb_lik_family!(stmts, target, ::Type{<:Binomial},         args::Tuple{Any,Any}, data) = _sb_lik_stan!(stmts, target, :binomial,     args, data)
 _sb_lik_family!(stmts, target, ::Type{<:BinomialLogit},    args::Tuple{Any,Any}, data) = _sb_lik_stan!(stmts, target, :binomial_logit, args, data)
 _sb_lik_family!(stmts, target, ::Type{<:Poisson},          args::Tuple{Any},     data) = _sb_lik_stan!(stmts, target, :poisson,      args, data)
+_sb_lik_family!(stmts, target, ::Type{<:ZeroInflatedPoisson}, args::Tuple{Any,Any}, data) = _sb_lik_stan!(stmts, target, :zero_inflated_poisson, args, data)
 _sb_lik_family!(stmts, target, ::Type{<:Gamma},            args::Tuple{Any,Any}, data) = _sb_lik_stan!(stmts, target, :gamma,        args, data)
 _sb_lik_family!(stmts, target, ::Type{<:NegativeBinomial}, args::Tuple{Any,Any}, data) = _sb_lik_stan!(stmts, target, :neg_binomial, args, data)
 _sb_lik_family!(stmts, target, ::Type{<:Beta},             args::Tuple{Any,Any}, data) = _sb_lik_stan!(stmts, target, :beta,         args, data)

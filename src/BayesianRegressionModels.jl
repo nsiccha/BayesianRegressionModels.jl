@@ -27,7 +27,7 @@ include("sbimpl.jl")
 # (web-macro, bruno, tests) reaches for.
 export @brm, @n, @x, @getproperty
 export assign, doublepipe, gr, gp, offset, zscale, center, standardize, protect, factor
-export me, s, ar, mo, mo1, hsgp, OrderedLogistic
+export me, s, ar, mo, mo1, hsgp, OrderedLogistic, Horseshoe, ZeroInflatedPoisson
 # Logit-form Bernoulli/Binomial -- prefer these over `Bernoulli(logistic(eta))`
 # / `Binomial(N, logistic(eta))`. Both backends lower to a logit-native log-pmf
 # (Stan's `bernoulli_logit_lpmf` / `binomial_logit_lpmf`; LogExpFunctions'
@@ -70,6 +70,8 @@ export vbroadcasted, vmeta_sampling_rhs, _sb_submodel_rhs!
 export popefs, cdirichlet, c0dirichlet, c01dirichlet,
        ranef_intercept, ranef_correlated, ranef_correlated_by,
        ranef_correlated_draws, ranef_correlated_by_draws,
-       _sb_mo, _sb_cat, _sb_ar1, _sb_s, _sb_me, _sb_hsgp
+       _sb_mo, _sb_cat, _sb_ar1, _sb_s, _sb_me, _sb_hsgp, _sb_horseshoe,
+       zero_inflated_poisson, zero_inflated_poisson_lpmf,
+       zero_inflated_poisson_lpmfs, zero_inflated_poisson_rng
 
 end # module

@@ -38,6 +38,13 @@ using BayesianRegressionModels: AbstractColumn, MissingColumn, DataColumn,
     Data, MaybeData, BRMI, VBRMI, SBBRMI,
     assign, doublepipe, gr, gp, offset, zscale, center, standardize, protect,
     me, s, ar, OrderedLogistic,
+    # Custom-distribution stub names. SLIC's symbol resolver checks
+    # `isdefined(BRMMacroWeb, :name)`, which is false for names only
+    # brought in via plain `using`; explicit-name imports register them
+    # so the lookup succeeds.
+    zero_inflated_poisson, zero_inflated_poisson_lpmf,
+    zero_inflated_poisson_lpmfs, zero_inflated_poisson_rng,
+    Horseshoe, ZeroInflatedPoisson,
     # Accessors used unqualified by html_expr.jl and stan_compile code.
     name, getargs, getf, getkwargs, getbroadcast, getop,
     # Macro / pipeline entry points called by Formula + stan_code.
