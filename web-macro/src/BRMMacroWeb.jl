@@ -657,7 +657,8 @@ function _ppc_kinds(brmi::BRMI)
     out = PPCKind[]
     for o in outcomes(brmi)
         o.family in (Normal, Poisson, Bernoulli, BernoulliLogit,
-                     Binomial, BinomialLogit, OrderedLogistic) || continue
+                     Binomial, BinomialLogit, OrderedLogistic,
+                     ZeroInflatedPoisson) || continue
         # Trials column ONLY for Binomial / BinomialLogit -- other
         # families that happen to take a data-arg (none today, but e.g.
         # an exposure offset someday) shouldn't be misread as trials.
@@ -2075,6 +2076,22 @@ bin_y ~ BernoulliLogit(log_odds_b)
     @get slic = h.pre(context!().run.sbbrmi.model.model)
 
     @get stan = h.pre(context!().run.stan.src)
+
+    # Dev-only introspection: GET /pipeline/debug?q=<urlencoded Julia expr>
+    # parses + evaluates the expression in BRMMacroWeb's namespace and
+    # returns the (truncated) string form. Lets the agent ask the live
+    # Julia process questions like
+    #   methods(StanBlocks.stan.tracetype, ...)
+    # without restarting or running julia from bash. Errors are caught
+    # and returned as text so curl always succeeds.
+    @get debug(; q::String="") = h.pre(
+        try
+            isempty(q) ? "Pass ?q=<julia expr>" :
+                first(string(Base.eval(@__MODULE__, Meta.parse(q))), 8000)
+        catch e
+            sprint(showerror, e)
+        end
+    )
 
     # One-stop bug-report page for the StanBlocks agent. Renders the SlicModel
     # body, generated Stan source, and BridgeStan compile output (success msg

@@ -143,11 +143,25 @@ StanBlocks.@deffun begin
     zero_inflated_poisson_lpmfs(args...) = begin
         zero_inflated_poisson_lpmf(args...)
     end
-    zero_inflated_poisson_lpmfs(y, lambda, zi) = begin
-        n = num_elements(y)
+    zero_inflated_poisson_lpmfs(y::int[n], lambda, zi) = begin
         rv::vector[n]
         for i in 1:n
             rv[i] = zero_inflated_poisson_lpmf(y[i], lambda[i], zi[i])
+        end
+        rv
+    end
+    # Synthetic-data RNG used by SLIC's generated_quantities. Mirrors the
+    # `binomial_logit_rng(int[n], …)` token-path pattern from
+    # StanBlocks/builtin.jl: takes a sized int[n] token + the params,
+    # writes per-element draws into the output vector.
+    zero_inflated_poisson_rng(int[n], lambda::vector[n], zi::vector[n])::int[n] = begin
+        rv::int[n]
+        for i in 1:n
+            if bernoulli_rng(zi[i]) == 1
+                rv[i] = 0
+            else
+                rv[i] = poisson_rng(lambda[i])
+            end
         end
         rv
     end
