@@ -214,6 +214,14 @@ function _walk_predictors(summands)
             inner = _walk_predictors(inner_summands)
             isnothing(inner) && return nothing
             push!(re_terms, (; group=grp, inner))
+        elseif s isa ExprColumn && getf(s) === (&)
+            # `a & b` is an interaction term (parallels StatsModels.jl). For
+            # PPC enumeration we treat it as opaque -- the marginal `a` /
+            # `b` terms (when present in the same formula) cover the
+            # plottable axes; the interaction itself is a derived column
+            # the user wouldn't recognise as a separate predictor anyway.
+            # Skip without bailing so models like `1 + a + b + a&b` still
+            # surface a MultiContinuousPPC over (a, b).
         else
             return nothing
         end

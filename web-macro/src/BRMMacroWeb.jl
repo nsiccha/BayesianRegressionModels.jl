@@ -706,20 +706,26 @@ function _kind_for_lp(brmi::BRMI, o, lp, n_trials, is_primary::Bool)
     link_fn = (is_primary && lp.link_fn === identity) ?
         _family_inverse_link(o.family) : lp.link_fn
 
-    if n_cont == 0 && n_cat == 0 && isnothing(group)
+    # Pick the most-specific kind that fits. Extra predictors beyond the
+    # one(s) the kind nails into structural slots are NOT silently
+    # dropped -- they're already in `covs` (DAG-traced), so the picker
+    # exposes them as remappable channels (color / row / column).
+    # Order matters: try the kinds with the richest structural axes
+    # first, fall through to scalar.
+    if n_cont >= 2 && isnothing(group)
+        MultiContinuousPPC(o.response, lp.link_lp, o.family, link_fn, n_trials, covs, cont, is_primary)
+    elseif n_cont == 1 && isnothing(group)
+        LinearPPC(o.response, lp.link_lp, o.family, link_fn, n_trials, covs, cont[1], is_primary)
+    elseif n_cont == 1 && !isnothing(group)
+        LinearRePPC(o.response, lp.link_lp, o.family, link_fn, n_trials, covs, cont[1], group, is_primary)
+    elseif n_cont == 0 && n_cat >= 1
+        CategoricalPPC(o.response, lp.link_lp, o.family, link_fn, n_trials, covs, cat[1], is_primary)
+    elseif n_cont == 0 && n_cat == 0 && isnothing(group)
         ScalarPPC(o.response, lp.link_lp, o.family, link_fn, n_trials, covs, is_primary)
     elseif n_cont == 0 && n_cat == 0 && !isnothing(group)
         ScalarRePPC(o.response, lp.link_lp, o.family, link_fn, n_trials, covs, group, is_primary)
-    elseif n_cont == 1 && n_cat == 0 && isnothing(group)
-        LinearPPC(o.response, lp.link_lp, o.family, link_fn, n_trials, covs, cont[1], is_primary)
-    elseif n_cont == 1 && n_cat == 0 && !isnothing(group)
-        LinearRePPC(o.response, lp.link_lp, o.family, link_fn, n_trials, covs, cont[1], group, is_primary)
-    elseif n_cont == 0 && n_cat == 1
-        CategoricalPPC(o.response, lp.link_lp, o.family, link_fn, n_trials, covs, cat[1], is_primary)
-    elseif n_cont >= 2 && n_cat == 0
-        MultiContinuousPPC(o.response, lp.link_lp, o.family, link_fn, n_trials, covs, cont, is_primary)
     else
-        nothing  # mixed continuous + categorical not yet handled
+        nothing
     end
 end
 
