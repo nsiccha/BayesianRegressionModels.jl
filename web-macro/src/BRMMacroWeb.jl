@@ -723,7 +723,7 @@ end
 
 # ---- pred_table: the predicted (model) data table per kind ---------------
 
-pred_table(::PPCKind, _, _) = nothing  # fallback
+pred_table(::PPCKind, long, df) = nothing  # fallback
 
 function pred_table(p::ScalarPPC, long, df)
     rows = _loc_long(long, p.loc); isnothing(rows) && return nothing
@@ -783,7 +783,7 @@ end
 
 # ---- obs_table: the observed-y table per kind (posterior side only) ------
 
-obs_table(::PPCKind, _, _) = nothing
+obs_table(::PPCKind, df, obs_y) = nothing
 
 function obs_table(p::ScalarPPC, df, obs_y)
     DataFrame(y = obs_y)
@@ -825,8 +825,8 @@ end
 
 # Prior-predictive: NO observation overlay. Posterior-predictive: predicted
 # layer + observed overlay (a black ECDF / scatter).
-prior_spec(::PPCKind, _, _; title) = nothing
-posterior_spec(::PPCKind, _, _, _; title) = nothing
+prior_spec(::PPCKind, long, df; title) = nothing
+posterior_spec(::PPCKind, long, df, obs_y; title) = nothing
 
 function prior_spec(p::ScalarPPC, long, df; title)
     pred = pred_table(p, long, df); isnothing(pred) && return nothing
