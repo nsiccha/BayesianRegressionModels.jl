@@ -2079,23 +2079,21 @@ APPDATA = AppData(; cache_type=:parallel)
 
     @get stan = h.pre(context!().run.stan.src)
 
-    # Dev-only introspection: GET /pipeline/debug?q=<urlencoded Julia expr>
-    # parses + evaluates the expression in BRMMacroWeb's namespace and
-    # returns the (truncated) string form. Lets the agent ask the live
-    # Julia process questions like
-    #   methods(StanBlocks.stan.tracetype, ...)
-    # without restarting or running julia from bash. Errors are caught
-    # and returned as text so curl always succeeds.
-    # PPC gallery card -- returns ONLY the auto-PPC section for the
-    # current `formula`. The gallery (`@get gallery`) embeds these
-    # via `hx-trigger="intersect once"` so cards lazy-load as you
-    # scroll. Caching is automatic: the underlying pipeline cache
-    # (per `(formula, namespace)` key) means the Stan compile + fit
-    # for a given formula runs at most once per server lifetime.
-    @get ppc = begin
+    # PPC gallery card -- runs the pipeline through stan_fit_pathfinder
+    # via the same `polling_fetchindex` infrastructure the stage buttons
+    # use, so the user sees the progress treebar during compile + fit.
+    # Once finished, the do-block extracts `posterior_full_long_df` from
+    # the result and renders just the auto-PPC section (no surrounding
+    # tabs / wide-table). Caching is shared with the main pipeline page
+    # because polling_fetchindex keys on (formula, namespace, step).
+    @get ppc = polling_fetchindex(
+        compute_steps, formula, context!().namespace, :stan_fit_pathfinder;
+        poll_url=query_url(__self__/"ppc"; formula, label),
+        label="PPC - $(isempty(label) ? "preset" : label)",
+        force=false,
+    ) do result
         try
-            r = context!().run
-            full_long = r.stan.posterior_full_long_df
+            full_long = result.stan_fit_pathfinder.full_long
             ppc_div = render.build_ppc_section(full_long, :posterior;
                                                id_prefix="brm-gallery-$(hash(formula))")
             isnothing(ppc_div) ? h.p("(no PPC kind detected)";
