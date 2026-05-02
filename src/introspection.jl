@@ -190,21 +190,26 @@ function predictors(brmi::BRMI, lhs::Symbol)
     _walk_predictors(summands)
 end
 
-# Find the first data-column NamedColumn reachable in `x`'s subtree, or
-# `nothing` if no data leaf is reachable. Used to:
+# Find the first data-column NamedColumn reachable in `x`'s subtree
+# (returning the NamedColumn itself), or `nothing` if no data leaf is
+# reachable. Used by the predictors walker to:
 #   - decide whether a wrapper expression (`mo(c)`, `protect(a^2)`,
 #     `log(exposure)`, ...) is a valid predictor (it must touch data),
 #   - label the resulting predictor column by the inner data name
-#     instead of the outermost function name.
-_walk_pred_label(x::NamedColumn) = parent(x) isa DataColumn ? name(x) : nothing
-function _walk_pred_label(x::ExprColumn)
+#     instead of the outermost function name,
+#   - and pick the right (continuous vs categorical) bucket from the
+#     leaf's eltype (so e.g. `factor(c1, ref=2)` lands in categorical
+#     instead of continuous).
+_walk_pred_leaf(x::NamedColumn) = parent(x) isa DataColumn ? x : nothing
+function _walk_pred_leaf(x::ExprColumn)
     for a in getargs(x)
-        lbl = _walk_pred_label(a)
-        lbl === nothing || return lbl
+        leaf = _walk_pred_leaf(a)
+        leaf === nothing || return leaf
     end
     nothing
 end
-_walk_pred_label(_) = nothing
+_walk_pred_leaf(_) = nothing
+_walk_pred_label(x) = let leaf = _walk_pred_leaf(x); leaf === nothing ? nothing : name(leaf) end
 
 function _walk_predictors(summands)
     intercept = false
@@ -263,14 +268,16 @@ function _walk_predictors(summands)
             # user wouldn't recognise as a separate predictor anyway.
         elseif s isa ExprColumn
             # Generic wrapped/derived predictor: `mo(c)`, `s(a)`,
-            # `log(exposure)`, `a^2`, ... -- anything whose subtree
-            # touches at least one data leaf is a continuous-valued
-            # column for PPC purposes. Bail when no data leaf is
-            # reachable (opaque expression with only sampled-parameter
+            # `log(exposure)`, `factor(c1, ref=2)`, `a^2`, ... -- any
+            # subtree that touches a data leaf becomes a predictor.
+            # Bucket follows the leaf's eltype: integer -> categorical,
+            # real -> continuous. Bail when no data leaf is reachable
+            # (opaque expression with only sampled-parameter
             # references can't drive a PPC axis).
-            lbl = _walk_pred_label(s)
-            lbl === nothing && return nothing
-            push!(continuous, lbl)
+            leaf = _walk_pred_leaf(s)
+            leaf === nothing && return nothing
+            elt = eltype(parent(parent(leaf)))
+            push!(elt <: Integer ? categorical : continuous, name(leaf))
         else
             return nothing
         end

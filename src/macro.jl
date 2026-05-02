@@ -55,6 +55,7 @@ function protect end
 # wrapper, so a method on Real lets the generic broadcast / materialise
 # paths handle `protect(expr)` without a dedicated dispatch.
 protect(x::Real) = x
+function factor end
 _brm(x::AbstractString; kwargs...) = _brm(Meta.parse("""
 begin
     $x

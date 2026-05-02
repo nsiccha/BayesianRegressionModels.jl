@@ -257,6 +257,31 @@ _sb_me = StanBlocks.@slic begin
     return x_true
 end
 
+# Hilbert-space approximate Gaussian process (Riutort-Mayol et al. 2022),
+# 1D squared-exponential kernel. Inputs precomputed by the caller:
+#   PHI    : N x K eigen-basis matrix (sin terms)
+#   lambda : length-K squared eigenvalues
+# Parameters:
+#   log_rho   -- log length-scale
+#   log_sigma -- log marginal sd
+#   beta_raw  -- length-K standard-normal basis weights
+# Spectral-density-scaled basis weights `sqrt_spd .* beta_raw` give the
+# usual GP draw f(x) = PHI * (sqrt_spd .* beta_raw). Returns f as a
+# length-N column the caller (popefs) multiplies by an overall beta.
+_sb_hsgp = StanBlocks.@slic begin
+    n_basis = num_elements(lambda)
+    log_rho   ~ std_normal()
+    log_sigma ~ std_normal()
+    beta_raw  ~ std_normal(; n=n_basis)
+    rho   = exp(log_rho)
+    sigma = exp(log_sigma)
+    # sqrt(spectral density of squared-exp kernel) at omega = sqrt(lambda).
+    # = sigma * sqrt(rho * sqrt(2*pi)) * exp(-0.25 * rho^2 * lambda).
+    # Inlined sqrt(2*pi) constant since SLIC has no `pi` builtin.
+    sqrt_spd = sigma * sqrt(rho * 2.5066282746310002) * exp(-0.25 * rho * rho * lambda)
+    return PHI * (sqrt_spd .* beta_raw)
+end
+
 # Categorical -> (n_levels::Int, per-row level index::Vector{Int}). Mirrors
 # vimpl._level_index so the integer indices the walker stashes in `data`
 # agree with what the cimpl-side uses.
@@ -885,6 +910,28 @@ _sb_collect_terms_expr!(acc, ::typeof(+), x) = foreach(a -> _sb_collect_terms!(a
 # `(expr | group)` is kept as-is; `_sb_linear_predictor!` splits it off into
 # the ranef side of the additive linear predictor.
 _sb_collect_terms_expr!(acc, ::typeof(|), x) = push!(acc, x)
+# `factor(c, ref=k)`: configurable reference level for a categorical
+# column. Re-encode at term-collection time (swap level k <-> level 1)
+# and inject a synthetic NamedColumn with the recoded data, so the
+# downstream categorical pipeline (treatment-coded dummies relative to
+# level 1) reuses unchanged.
+_sb_collect_terms_expr!(acc, ::typeof(factor), x::ExprColumn) = begin
+    args = getargs(x); kw = getkwargs(x)
+    length(args) == 1 || error("sbimpl: `factor(...)` expects 1 positional arg, got $(length(args))")
+    inner = only(args)
+    inner isa NamedColumn || error("sbimpl: `factor(...)` expects a NamedColumn, got $(typeof(inner))")
+    backing = parent(inner)
+    backing isa DataColumn || error("sbimpl: `factor($(name(inner)))` expects a raw data column")
+    raw = parent(backing)
+    raw isa AbstractVector{<:Integer} || error("sbimpl: `factor($(name(inner)))` expects integer-coded categorical data, got $(typeof(raw))")
+    ref = get(kw, :ref, 1)
+    ref isa Integer || error("sbimpl: `factor(...; ref=k)` expects an integer level, got $(typeof(ref))")
+    1 <= ref <= maximum(raw) || error("sbimpl: `factor($(name(inner)); ref=$ref)` ref out of range (max level $(maximum(raw)))")
+    new_name = ref == 1 ? name(inner) : Symbol(name(inner), :__ref_, ref)
+    new_backing = ref == 1 ? backing :
+        DataColumn(Int[r == ref ? 1 : r == 1 ? ref : r for r in raw])
+    push!(acc, NamedColumn(new_name, new_backing))
+end
 # `(t1 + t2 + ... || g)` zerocorr ranefs: independent variances per term,
 # no shared correlation. Expand into N separate `(t_i | g_nocor_i)` ran
 # terms with synthetic group names so the ran-term coalescer in
@@ -1080,6 +1127,52 @@ _sb_predictor_term!(stmts, data, ::typeof(s), t) = begin
     push!(stmts, :($col_name ~ _sb_s(; X_basis=$X_name)))
     col_name
 end
+# `gp(x; k=K, c=C)` HSGP predictor. Precomputes the Riutort-Mayol eigen-basis
+# from the raw data (matrix PHI of size N x K, vector lambda of length K) and
+# stashes them in the data dict. The submodel `_sb_hsgp` owns log_rho,
+# log_sigma, beta_raw and returns a length-N smooth contribution. popefs
+# multiplies by an overall beta -- harmless extra slope but conventional.
+# Defaults match vimpl's: K=20 basis fns, c=1.5 boundary factor.
+_sb_predictor_term!(stmts, data, ::typeof(gp), t) = begin
+    args = getargs(t); kw = getkwargs(t)
+    length(args) == 1 || error("sbimpl: `gp(x; k=K, c=C)` expects 1 positional arg, got $(length(args))")
+    inner = only(args)
+    inner isa NamedColumn || error("sbimpl: `gp(...)` expects a NamedColumn, got $(typeof(inner))")
+    backing = parent(inner)
+    backing isa DataColumn || error("sbimpl: `gp($(name(inner)))` expects a raw data column, got $(typeof(backing))")
+    raw = parent(backing)
+    raw isa AbstractVector{<:Real} || error("sbimpl: `gp($(name(inner)))` expects numeric data, got $(typeof(raw))")
+    K = get(kw, :k, 20)
+    c = get(kw, :c, 1.5)
+    PHI, lambda = _hsgp_basis(raw, K, c)
+    xname = name(inner)
+    PHI_name    = Symbol(:PHI_, xname)
+    lambda_name = Symbol(:lambda_, xname)
+    data[PHI_name]    = PHI
+    data[lambda_name] = lambda
+    col_name = Symbol(:gp_, xname)
+    push!(stmts, :($col_name ~ _sb_hsgp(; PHI=$PHI_name, lambda=$lambda_name)))
+    col_name
+end
+
+# Riutort-Mayol HSGP eigen-basis (1D, squared-exp kernel). Mirrors vimpl's
+# `_hsgp_basis`: PHI[i,k] = (1/sqrt(L)) * sin(sqrt(lambda_k) * (x_i - mean(x) + L)),
+# lambda_k = (k * pi / (2 L))^2 with L = c * max(|x - mean(x)|).
+function _hsgp_basis(raw::AbstractVector{<:Real}, K::Integer, c::Real)
+    K >= 1 || error("sbimpl: gp k must be >= 1 (got $K)")
+    c >  1 || error("sbimpl: gp c must be > 1 (got $c)")
+    x_c = raw .- (sum(raw) / length(raw))
+    L = c * maximum(abs, x_c)
+    L > 0 || error("sbimpl: gp degenerate input (all x equal)")
+    lambda = [(k * pi / (2 * L))^2 for k in 1:K]
+    PHI = zeros(length(raw), K)
+    inv_sqrt_L = 1 / sqrt(L)
+    for k in 1:K, i in eachindex(x_c)
+        PHI[i, k] = inv_sqrt_L * sin(sqrt(lambda[k]) * (x_c[i] + L))
+    end
+    PHI, lambda
+end
+
 # `ar(time; p=1)` AR(1) residual submodel. Routes to `_sb_ar1`, which owns the
 # phi / epsilon parameters and returns the per-row u[t] as a single length-N
 # column. popefs multiplies by an overall beta -- harmless, but a direct-

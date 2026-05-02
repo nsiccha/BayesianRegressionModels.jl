@@ -26,7 +26,7 @@ include("sbimpl.jl")
 # Public surface. The macros and value types everything downstream
 # (web-macro, bruno, tests) reaches for.
 export @brm, @n, @x, @getproperty
-export assign, doublepipe, gr, gp, offset, zscale, center, standardize, protect
+export assign, doublepipe, gr, gp, offset, zscale, center, standardize, protect, factor
 export me, s, ar, mo, mo1, hsgp, OrderedLogistic
 # Logit-form Bernoulli/Binomial -- prefer these over `Bernoulli(logistic(eta))`
 # / `Binomial(N, logistic(eta))`. Both backends lower to a logit-native log-pmf
@@ -70,6 +70,6 @@ export vbroadcasted, vmeta_sampling_rhs, _sb_submodel_rhs!
 export popefs, cdirichlet, c0dirichlet, c01dirichlet,
        ranef_intercept, ranef_correlated, ranef_correlated_by,
        ranef_correlated_draws, ranef_correlated_by_draws,
-       _sb_mo, _sb_cat, _sb_ar1, _sb_s, _sb_me
+       _sb_mo, _sb_cat, _sb_ar1, _sb_s, _sb_me, _sb_hsgp
 
 end # module
