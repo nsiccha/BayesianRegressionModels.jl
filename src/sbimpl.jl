@@ -1148,6 +1148,7 @@ _sb_lik_family!(stmts, target, ::Type{<:Normal},           args::Tuple{Any,Any},
 _sb_lik_family!(stmts, target, ::Type{<:Bernoulli},        args::Tuple{Any},     data) = _sb_lik_stan!(stmts, target, :bernoulli,    args, data)
 _sb_lik_family!(stmts, target, ::Type{<:BernoulliLogit},   args::Tuple{Any},     data) = _sb_lik_stan!(stmts, target, :bernoulli_logit, args, data)
 _sb_lik_family!(stmts, target, ::Type{<:Binomial},         args::Tuple{Any,Any}, data) = _sb_lik_stan!(stmts, target, :binomial,     args, data)
+_sb_lik_family!(stmts, target, ::Type{<:BinomialLogit},    args::Tuple{Any,Any}, data) = _sb_lik_stan!(stmts, target, :binomial_logit, args, data)
 _sb_lik_family!(stmts, target, ::Type{<:Poisson},          args::Tuple{Any},     data) = _sb_lik_stan!(stmts, target, :poisson,      args, data)
 _sb_lik_family!(stmts, target, ::Type{<:Gamma},            args::Tuple{Any,Any}, data) = _sb_lik_stan!(stmts, target, :gamma,        args, data)
 _sb_lik_family!(stmts, target, ::Type{<:NegativeBinomial}, args::Tuple{Any,Any}, data) = _sb_lik_stan!(stmts, target, :neg_binomial, args, data)

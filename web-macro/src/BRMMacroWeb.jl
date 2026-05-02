@@ -86,7 +86,7 @@ _ALLOWED_CALLS = Set{Symbol}([
     :min, :max, :clamp, :mod, :rem, :div,
     :logistic, :logit, :softmax, :logsumexp,
     :log_abs_tanh, :log_square_tanh,
-    :Normal, :Poisson, :Binomial, :Bernoulli, :BernoulliLogit, :Beta, :Gamma,
+    :Normal, :Poisson, :Binomial, :BinomialLogit, :Bernoulli, :BernoulliLogit, :Beta, :Gamma,
     :Exponential, :Cauchy, :StudentT, :LogNormal, :Weibull,
     :NegativeBinomial, :Geometric, :Laplace, :Uniform,
     :MvNormal, :MixtureModel, :Dirichlet,
@@ -649,11 +649,12 @@ end
 function _ppc_kinds(brmi::BRMI)
     out = PPCKind[]
     for o in outcomes(brmi)
-        o.family in (Normal, Poisson, Bernoulli, Binomial) || continue
-        # Trials column ONLY for Binomial -- other families that happen
-        # to take a data-arg (none today, but e.g. an exposure offset
-        # someday) shouldn't be misread as Binomial trials.
-        n_trials = if o.family === Binomial
+        o.family in (Normal, Poisson, Bernoulli, BernoulliLogit,
+                     Binomial, BinomialLogit) || continue
+        # Trials column ONLY for Binomial / BinomialLogit -- other
+        # families that happen to take a data-arg (none today, but e.g.
+        # an exposure offset someday) shouldn't be misread as trials.
+        n_trials = if o.family === Binomial || o.family === BinomialLogit
             dargs = data_args(o)
             isempty(dargs) ? nothing : first(dargs).name
         else
@@ -667,6 +668,16 @@ function _ppc_kinds(brmi::BRMI)
     end
     out
 end
+
+# Family-natural inverse link. For *Logit families the LP is sampled
+# on the logit scale and the family applies `inv_logit` internally;
+# the PPC needs to do the same to land predicted draws on the same
+# (probability) scale as the observed response. Only kicks in for
+# primary LPs whose user-facing link_fn is `identity` -- if the user
+# wrote `logit(p) ~ ...` they've already declared the scale.
+_family_inverse_link(family) =
+    (family === BernoulliLogit || family === BinomialLogit) ? logistic :
+    identity
 
 # Build the PPCKind for one outcome × LP pair. Returns `nothing` if the
 # LP's predictor pattern doesn't match a supported shape.
@@ -692,18 +703,21 @@ function _kind_for_lp(brmi::BRMI, o, lp, n_trials, is_primary::Bool)
     n_cont = length(cont)
     n_cat  = length(cat)
 
+    link_fn = (is_primary && lp.link_fn === identity) ?
+        _family_inverse_link(o.family) : lp.link_fn
+
     if n_cont == 0 && n_cat == 0 && isnothing(group)
-        ScalarPPC(o.response, lp.link_lp, o.family, lp.link_fn, n_trials, covs, is_primary)
+        ScalarPPC(o.response, lp.link_lp, o.family, link_fn, n_trials, covs, is_primary)
     elseif n_cont == 0 && n_cat == 0 && !isnothing(group)
-        ScalarRePPC(o.response, lp.link_lp, o.family, lp.link_fn, n_trials, covs, group, is_primary)
+        ScalarRePPC(o.response, lp.link_lp, o.family, link_fn, n_trials, covs, group, is_primary)
     elseif n_cont == 1 && n_cat == 0 && isnothing(group)
-        LinearPPC(o.response, lp.link_lp, o.family, lp.link_fn, n_trials, covs, cont[1], is_primary)
+        LinearPPC(o.response, lp.link_lp, o.family, link_fn, n_trials, covs, cont[1], is_primary)
     elseif n_cont == 1 && n_cat == 0 && !isnothing(group)
-        LinearRePPC(o.response, lp.link_lp, o.family, lp.link_fn, n_trials, covs, cont[1], group, is_primary)
+        LinearRePPC(o.response, lp.link_lp, o.family, link_fn, n_trials, covs, cont[1], group, is_primary)
     elseif n_cont == 0 && n_cat == 1
-        CategoricalPPC(o.response, lp.link_lp, o.family, lp.link_fn, n_trials, covs, cat[1], is_primary)
+        CategoricalPPC(o.response, lp.link_lp, o.family, link_fn, n_trials, covs, cat[1], is_primary)
     elseif n_cont >= 2 && n_cat == 0
-        MultiContinuousPPC(o.response, lp.link_lp, o.family, lp.link_fn, n_trials, covs, cont, is_primary)
+        MultiContinuousPPC(o.response, lp.link_lp, o.family, link_fn, n_trials, covs, cont, is_primary)
     else
         nothing  # mixed continuous + categorical not yet handled
     end
@@ -1684,7 +1698,8 @@ APPDATA = AppData(; cache_type=:parallel)
                 # primary LPs need the obs vector at all.
                 obs_y = if p.is_primary
                     obs_y_raw = context!().run.stan.fit_data_dict[Symbol(p.response)]
-                    p.family === Binomial && !isnothing(p.n_trials) ?
+                    is_binomial = p.family === Binomial || p.family === BinomialLogit
+                    is_binomial && !isnothing(p.n_trials) ?
                         obs_y_raw ./ context!().run.stan.fit_data_dict[Symbol(p.n_trials)] :
                         obs_y_raw
                 else
@@ -1780,8 +1795,8 @@ APPDATA = AppData(; cache_type=:parallel)
         "multiple groups" => "loc ~ 1 + a + (1 | g1) + (1 | g2)\nlog(err) ~ 1\ny1 ~ Normal(loc, err)\n",
         "distributional" => "loc ~ 1 + a\nlog(err) ~ 1 + b\ny1 ~ Normal(loc, err)\n",
         "Poisson" => "log_rate ~ 1 + a + (1 | g1)\nk1 ~ Poisson(exp(log_rate))\n",
-        "Binomial" => "log_odds ~ 1 + a + (1 | g1)\nbin_succ ~ Binomial(bin_n, logistic(log_odds))\n",
-        "Bernoulli" => "log_odds ~ 1 + a + (1 | g1)\nbin_y ~ Bernoulli(logistic(log_odds))\n",
+        "Binomial" => "log_odds ~ 1 + a + (1 | g1)\nbin_succ ~ BinomialLogit(bin_n, log_odds)\n",
+        "Bernoulli" => "log_odds ~ 1 + a + (1 | g1)\nbin_y ~ BernoulliLogit(log_odds)\n",
         "cbpp + therapeutic touch" => """log_odds_bin ~ 1 + c1 + (1 | g1)
 bin_succ ~ Binomial(bin_n, logistic(log_odds_bin))
 

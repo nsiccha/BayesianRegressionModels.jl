@@ -558,6 +558,23 @@ Ported from `blog/posts/simplex/transforms/stickbreakingLogistic.stan`.
     lp
 end
 
+# Logit-parameterised Binomial. Distributions.jl ships `BernoulliLogit`
+# (sufficient on its own) but no `BinomialLogit`, so define it here. Both
+# the SBBRMI backend (lowering to Stan's `binomial_logit_lpmf`) and the
+# VBRMI backend (this `logpdf`) avoid the `inv_logit` round-trip and stay
+# numerically stable for large |logitp|.
+struct BinomialLogit{Tn<:Real,Tp<:Real} <: Distributions.DiscreteUnivariateDistribution
+    n::Tn
+    logitp::Tp
+end
+Distributions.logpdf(d::BinomialLogit, k::Real) = begin
+    n, eta = d.n, d.logitp
+    (k < 0 || k > n) && return oftype(float(eta), -Inf)
+    SpecialFunctions.logabsbinomial(n, k)[1] +
+        k * loglogistic(eta) +
+        (n - k) * log1mlogistic(eta)
+end
+
 @inline llikelihood!((;meta)::VBRMI) = foldl(meta.materialized; init=0.) do llikelihood, m
     llikelihood + llikelihood!(m)
 end

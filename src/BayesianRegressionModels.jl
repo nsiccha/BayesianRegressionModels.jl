@@ -28,6 +28,13 @@ include("sbimpl.jl")
 export @brm, @n, @x, @getproperty
 export assign, doublepipe, gr, gp, offset, zscale, center, standardize, protect
 export me, s, ar, mo, mo1, hsgp, OrderedLogistic
+# Logit-form Bernoulli/Binomial -- prefer these over `Bernoulli(logistic(eta))`
+# / `Binomial(N, logistic(eta))`. Both backends lower to a logit-native log-pmf
+# (Stan's `bernoulli_logit_lpmf` / `binomial_logit_lpmf`; LogExpFunctions'
+# `loglogistic` / `log1mlogistic` on the Julia side), avoiding the `inv_logit`
+# round-trip and staying numerically stable for large |eta|. `BernoulliLogit`
+# is re-exported from Distributions; `BinomialLogit` is defined in vimpl.jl.
+export BernoulliLogit, BinomialLogit
 export Data, MaybeData, maybedata
 export AbstractColumn, MissingColumn, DataColumn, NamedColumn,
        ExprColumn, LikelihoodColumn, MaterializedColumn
