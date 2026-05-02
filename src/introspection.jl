@@ -171,9 +171,13 @@ function predictors(brmi::BRMI, lhs::Symbol)
     op = linear_predictor_op(brmi, lhs)
     isnothing(op) && return nothing
     _, rhs_expr = getargs(op, 2)
-    rhs_expr isa ExprColumn || return nothing
-    getf(rhs_expr) === (+) || return nothing
-    _walk_predictors(getargs(rhs_expr))
+    # Normalise the RHS to a list of summands: `loc ~ 1 + a` ->
+    # `getargs(+)`, `loc ~ 1` (intercept-only) or `loc ~ a` (single
+    # predictor) -> singleton wrap. _walk_predictors handles each
+    # summand kind (Number / NamedColumn / RE) the same way.
+    summands = (rhs_expr isa ExprColumn && getf(rhs_expr) === (+)) ?
+               getargs(rhs_expr) : (rhs_expr,)
+    _walk_predictors(summands)
 end
 
 function _walk_predictors(summands)
