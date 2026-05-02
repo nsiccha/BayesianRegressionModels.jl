@@ -2131,22 +2131,30 @@ APPDATA = AppData(; cache_type=:parallel)
                     h.summary("Formula"),
                     h.pre(formula_text; style="font-size:0.85em; margin:0;")
                 ),
-                h.div(;
-                    hx_get=ppc_url,
-                    hx_trigger="intersect once",
-                    hx_swap="innerHTML",
-                    style="min-height:8rem;",
-                )(
-                    h.p("Loading…"; style="color:var(--pico-muted-color); font-size:0.8em; margin:0;")
+                # Click-to-fetch: the inner <div> only fires hx-get when the
+                # surrounding <details> first toggles open. `once` keeps it
+                # from re-fetching on every collapse/expand. Mirrors Bruno's
+                # qt detail pattern -- nothing runs until the user opts in.
+                h.details(; style="margin:0.25rem 0;")(
+                    h.summary("Show PPC plot"; style="cursor:pointer;"),
+                    h.div(;
+                        hx_get=ppc_url,
+                        hx_trigger="toggle once from:closest details",
+                        hx_swap="innerHTML",
+                        style="min-height:8rem;",
+                    )(
+                        h.p("Loading… (Stan compile may take ~30s on first load)";
+                            style="color:var(--pico-muted-color); font-size:0.8em; margin:0;")
+                    ),
                 ),
             )
         end
         h.div(
             h.h1("PPC gallery"),
             h.p(
-                "One auto-PPC plot per preset, lazy-loaded as cards scroll into view. ",
-                "Each formula's Stan compile + fit is cached for the server's lifetime, ",
-                "so the first page load is the slow one.",
+                "One auto-PPC card per preset. Click 'Show PPC plot' to kick off the ",
+                "Stan compile + fit (cached per formula for the server's lifetime). ",
+                "Nothing runs until you open a card.",
             ),
             h.div(;
                 style="display:grid; grid-template-columns:repeat(auto-fill, minmax(20rem, 1fr)); gap:0.75rem;",
