@@ -569,6 +569,11 @@ end
 
 abstract type PPCKind end
 
+# `is_primary=false` means this kind belongs to a *secondary* LP of a
+# distributional family (e.g. `err` in `Normal(loc, err)`). Such an LP is
+# NOT a likelihood location, so we must not overlay the observed response
+# nor frame the panel as a "predictive check of <response>". Renderers
+# branch on this flag.
 struct ScalarPPC <: PPCKind
     response::Symbol
     loc::Symbol
@@ -576,6 +581,7 @@ struct ScalarPPC <: PPCKind
     link_fn::Function
     n_trials::Union{Nothing,Symbol}
     covariates::Vector{Symbol}
+    is_primary::Bool
 end
 
 struct ScalarRePPC <: PPCKind
@@ -586,6 +592,7 @@ struct ScalarRePPC <: PPCKind
     n_trials::Union{Nothing,Symbol}
     covariates::Vector{Symbol}
     group::Symbol
+    is_primary::Bool
 end
 
 struct LinearPPC <: PPCKind
@@ -596,6 +603,7 @@ struct LinearPPC <: PPCKind
     n_trials::Union{Nothing,Symbol}
     covariates::Vector{Symbol}
     predictor::Symbol
+    is_primary::Bool
 end
 
 struct LinearRePPC <: PPCKind
@@ -607,6 +615,7 @@ struct LinearRePPC <: PPCKind
     covariates::Vector{Symbol}
     predictor::Symbol
     group::Symbol
+    is_primary::Bool
 end
 
 struct CategoricalPPC <: PPCKind
@@ -617,6 +626,7 @@ struct CategoricalPPC <: PPCKind
     n_trials::Union{Nothing,Symbol}
     covariates::Vector{Symbol}
     predictor::Symbol
+    is_primary::Bool
 end
 
 struct MultiContinuousPPC <: PPCKind
@@ -627,6 +637,7 @@ struct MultiContinuousPPC <: PPCKind
     n_trials::Union{Nothing,Symbol}
     covariates::Vector{Symbol}
     predictors::Vector{Symbol}
+    is_primary::Bool
 end
 
 # ---- detection: enumerate all PPCKinds for a BRMI -------------------------
@@ -648,8 +659,9 @@ function _ppc_kinds(brmi::BRMI)
         else
             nothing
         end
+        primary = primary_lp(o)
         for lp in linear_predictor_args(o)
-            kind = _kind_for_lp(brmi, o, lp, n_trials)
+            kind = _kind_for_lp(brmi, o, lp, n_trials, lp === primary)
             isnothing(kind) || push!(out, kind)
         end
     end
@@ -658,7 +670,7 @@ end
 
 # Build the PPCKind for one outcome × LP pair. Returns `nothing` if the
 # LP's predictor pattern doesn't match a supported shape.
-function _kind_for_lp(brmi::BRMI, o, lp, n_trials)
+function _kind_for_lp(brmi::BRMI, o, lp, n_trials, is_primary::Bool)
     pred = predictors(brmi, lp.link_lp)
     isnothing(pred) && return nothing
 
@@ -681,17 +693,17 @@ function _kind_for_lp(brmi::BRMI, o, lp, n_trials)
     n_cat  = length(cat)
 
     if n_cont == 0 && n_cat == 0 && isnothing(group)
-        ScalarPPC(o.response, lp.link_lp, o.family, lp.link_fn, n_trials, covs)
+        ScalarPPC(o.response, lp.link_lp, o.family, lp.link_fn, n_trials, covs, is_primary)
     elseif n_cont == 0 && n_cat == 0 && !isnothing(group)
-        ScalarRePPC(o.response, lp.link_lp, o.family, lp.link_fn, n_trials, covs, group)
+        ScalarRePPC(o.response, lp.link_lp, o.family, lp.link_fn, n_trials, covs, group, is_primary)
     elseif n_cont == 1 && n_cat == 0 && isnothing(group)
-        LinearPPC(o.response, lp.link_lp, o.family, lp.link_fn, n_trials, covs, cont[1])
+        LinearPPC(o.response, lp.link_lp, o.family, lp.link_fn, n_trials, covs, cont[1], is_primary)
     elseif n_cont == 1 && n_cat == 0 && !isnothing(group)
-        LinearRePPC(o.response, lp.link_lp, o.family, lp.link_fn, n_trials, covs, cont[1], group)
+        LinearRePPC(o.response, lp.link_lp, o.family, lp.link_fn, n_trials, covs, cont[1], group, is_primary)
     elseif n_cont == 0 && n_cat == 1
-        CategoricalPPC(o.response, lp.link_lp, o.family, lp.link_fn, n_trials, covs, cat[1])
+        CategoricalPPC(o.response, lp.link_lp, o.family, lp.link_fn, n_trials, covs, cat[1], is_primary)
     elseif n_cont >= 2 && n_cat == 0
-        MultiContinuousPPC(o.response, lp.link_lp, o.family, lp.link_fn, n_trials, covs, cont)
+        MultiContinuousPPC(o.response, lp.link_lp, o.family, lp.link_fn, n_trials, covs, cont, is_primary)
     else
         nothing  # mixed continuous + categorical not yet handled
     end
@@ -702,6 +714,24 @@ end
 _loc_long(long::DataFrame, loc::Symbol) = begin
     rows = filter(:param => ==(string(loc)), long)
     isempty(rows) ? nothing : rows
+end
+
+# Cap the number of distinct draws plotted as separate ECDF curves --
+# above this, the panel becomes a hairball and downstream Vega slows
+# to a crawl. Subsampling is deterministic so the picture is stable
+# across reloads.
+const MAX_PPC_DRAW_LINES = 50
+
+# Filter `rows` to a deterministic random subset of distinct draws so
+# at most `max_n` curves are emitted. Returns `rows` unchanged when the
+# `:draw` column is missing or already small enough.
+function _subsample_draws(rows::DataFrame; max_n::Int=MAX_PPC_DRAW_LINES)
+    hasproperty(rows, :draw) || return rows
+    draws = unique(rows.draw)
+    length(draws) <= max_n && return rows
+    rng = MersenneTwister(20260425)
+    keep = Set(draws[randperm(rng, length(draws))[1:max_n]])
+    filter(:draw => in(keep), rows)
 end
 
 # Join every covariate column from `df` into `tab`. Pred tables index
@@ -724,14 +754,17 @@ pred_table(::PPCKind, long, df) = nothing  # fallback
 
 pred_table(p::ScalarPPC, long, df) = begin
     rows = _loc_long(long, p.loc); isnothing(rows) && return nothing
-    DataFrame(y = p.link_fn.(rows.value))
+    rows = _subsample_draws(rows)
+    DataFrame(y = p.link_fn.(rows.value), draw = rows.draw)
 end
 
 pred_table(p::ScalarRePPC, long, df) = begin
     rows = _loc_long(long, p.loc); isnothing(rows) && return nothing
+    rows = _subsample_draws(rows)
     tab = DataFrame(
         group = df[!, p.group][rows.index],
         y     = p.link_fn.(rows.value),
+        draw  = rows.draw,
         index = rows.index,
     )
     _enrich_covariates!(tab, df, p.covariates, rows.index)
@@ -762,9 +795,11 @@ end
 
 pred_table(p::CategoricalPPC, long, df) = begin
     rows = _loc_long(long, p.loc); isnothing(rows) && return nothing
+    rows = _subsample_draws(rows)
     tab = DataFrame(
         level = df[!, p.predictor][rows.index],
         y     = p.link_fn.(rows.value),
+        draw  = rows.draw,
         index = rows.index,
     )
     _enrich_covariates!(tab, df, p.covariates, rows.index)
@@ -832,36 +867,42 @@ posterior_spec(::PPCKind, long, df, obs_y; title) = nothing
 
 function prior_spec(p::ScalarPPC, long, df; title)
     pred = pred_table(p, long, df); isnothing(pred) && return nothing
-    AoG.data(pred) * AoG.mapping(:y) * AoG.visual(ECDFPlot) *
+    AoG.data(pred) * AoG.mapping(:y, group=:draw => nonnumeric) *
+        AoG.visual(ECDFPlot; opacity=0.3) *
         config(title=title)
 end
 function posterior_spec(p::ScalarPPC, long, df, obs_y; title)
     pred = pred_table(p, long, df); isnothing(pred) && return nothing
-    obs  = obs_table(p, df, obs_y)
-    (
-        AoG.data(pred) * AoG.mapping(:y) * AoG.visual(ECDFPlot)
-        +
-        AoG.data(obs)  * AoG.mapping(:y) *
-            AoG.visual(ECDFPlot; color="black", strokeWidth=2)
-    ) * config(title=title)
+    pred_layer = AoG.data(pred) *
+        AoG.mapping(:y, group=:draw => nonnumeric) *
+        AoG.visual(ECDFPlot; opacity=0.3)
+    spec = p.is_primary ?
+        pred_layer +
+            AoG.data(obs_table(p, df, obs_y)) * AoG.mapping(:y) *
+                AoG.visual(ECDFPlot; color="black", strokeWidth=2) :
+        pred_layer
+    spec * config(title=title)
 end
 
 function prior_spec(p::ScalarRePPC, long, df; title)
     pred = pred_table(p, long, df); isnothing(pred) && return nothing
-    AoG.data(pred) * AoG.mapping(:y, row=:group => nonnumeric) *
-        AoG.visual(ECDFPlot) *
+    AoG.data(pred) *
+        AoG.mapping(:y, row=:group => nonnumeric, group=:draw => nonnumeric) *
+        AoG.visual(ECDFPlot; opacity=0.3) *
         config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
 end
 function posterior_spec(p::ScalarRePPC, long, df, obs_y; title)
     pred = pred_table(p, long, df); isnothing(pred) && return nothing
-    obs  = obs_table(p, df, obs_y)
-    (
-        AoG.data(pred) * AoG.mapping(:y, row=:group => nonnumeric) *
-            AoG.visual(ECDFPlot)
-        +
-        AoG.data(obs)  * AoG.mapping(:y, row=:group => nonnumeric) *
-            AoG.visual(ECDFPlot; color="black", strokeWidth=2)
-    ) * config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
+    pred_layer = AoG.data(pred) *
+        AoG.mapping(:y, row=:group => nonnumeric, group=:draw => nonnumeric) *
+        AoG.visual(ECDFPlot; opacity=0.3)
+    spec = p.is_primary ?
+        pred_layer +
+            AoG.data(obs_table(p, df, obs_y)) *
+                AoG.mapping(:y, row=:group => nonnumeric) *
+                AoG.visual(ECDFPlot; color="black", strokeWidth=2) :
+        pred_layer
+    spec * config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
 end
 
 function prior_spec(p::LinearPPC, long, df; title)
@@ -871,7 +912,10 @@ function prior_spec(p::LinearPPC, long, df; title)
 end
 function posterior_spec(p::LinearPPC, long, df, obs_y; title)
     pred = pred_table(p, long, df); isnothing(pred) && return nothing
-    obs  = obs_table(p, df, obs_y)
+    p.is_primary || return AoG.data(pred) *
+        AoG.mapping(:x, :y, group=:draw) * lineribbon() *
+        config(title=title)
+    obs = obs_table(p, df, obs_y)
     ppc_overlay(obs, pred; x=:x, y=:y, group=:draw) * config(title=title)
 end
 
@@ -884,27 +928,34 @@ function prior_spec(p::LinearRePPC, long, df; title)
 end
 function posterior_spec(p::LinearRePPC, long, df, obs_y; title)
     pred = pred_table(p, long, df); isnothing(pred) && return nothing
-    obs  = obs_table(p, df, obs_y)
+    p.is_primary || return AoG.data(pred) *
+        AoG.mapping(:x, :y, group=:draw, row=:group => nonnumeric) *
+        lineribbon() *
+        config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
+    obs = obs_table(p, df, obs_y)
     ppc_overlay(obs, pred; x=:x, y=:y, group=:draw, row=:group) *
         config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
 end
 
 function prior_spec(p::CategoricalPPC, long, df; title)
     pred = pred_table(p, long, df); isnothing(pred) && return nothing
-    AoG.data(pred) * AoG.mapping(:y, row=:level => nonnumeric) *
-        AoG.visual(ECDFPlot) *
+    AoG.data(pred) *
+        AoG.mapping(:y, row=:level => nonnumeric, group=:draw => nonnumeric) *
+        AoG.visual(ECDFPlot; opacity=0.3) *
         config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
 end
 function posterior_spec(p::CategoricalPPC, long, df, obs_y; title)
     pred = pred_table(p, long, df); isnothing(pred) && return nothing
-    obs  = obs_table(p, df, obs_y)
-    (
-        AoG.data(pred) * AoG.mapping(:y, row=:level => nonnumeric) *
-            AoG.visual(ECDFPlot)
-        +
-        AoG.data(obs)  * AoG.mapping(:y, row=:level => nonnumeric) *
-            AoG.visual(ECDFPlot; color="black", strokeWidth=2)
-    ) * config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
+    pred_layer = AoG.data(pred) *
+        AoG.mapping(:y, row=:level => nonnumeric, group=:draw => nonnumeric) *
+        AoG.visual(ECDFPlot; opacity=0.3)
+    spec = p.is_primary ?
+        pred_layer +
+            AoG.data(obs_table(p, df, obs_y)) *
+                AoG.mapping(:y, row=:level => nonnumeric) *
+                AoG.visual(ECDFPlot; color="black", strokeWidth=2) :
+        pred_layer
+    spec * config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
 end
 
 function prior_spec(p::MultiContinuousPPC, long, df; title)
@@ -915,13 +966,15 @@ function prior_spec(p::MultiContinuousPPC, long, df; title)
 end
 function posterior_spec(p::MultiContinuousPPC, long, df, obs_y; title)
     pred = pred_table(p, long, df); isnothing(pred) && return nothing
-    obs  = obs_table(p, df, obs_y)
-    (
-        AoG.data(pred) * AoG.mapping(:x, :y, group=:draw, row=:predictor) * lineribbon()
-        +
-        AoG.data(obs)  * AoG.mapping(:x, :y, row=:predictor) *
-            AoG.visual(Scatter; color="black")
-    ) * config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
+    pred_layer = AoG.data(pred) *
+        AoG.mapping(:x, :y, group=:draw, row=:predictor) * lineribbon()
+    spec = p.is_primary ?
+        pred_layer +
+            AoG.data(obs_table(p, df, obs_y)) *
+                AoG.mapping(:x, :y, row=:predictor) *
+                AoG.visual(Scatter; color="black") :
+        pred_layer
+    spec * config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
 end
 
 # ---- picker_dims: structural + wide covariates ---------------------------
@@ -945,16 +998,33 @@ reserved_columns(::LinearRePPC)        = Set{String}(["x", "y", "group"])
 reserved_columns(::CategoricalPPC)     = Set{String}(["y", "level"])
 reserved_columns(::MultiContinuousPPC) = Set{String}(["x", "y", "predictor"])
 
+# Raw data column names a kind already consumes as a structural
+# slot (x axis, group facet, level facet). These appear in
+# `p.covariates` because the DAG reaches them, but re-exposing them
+# in the picker would let the user (or auto-remap) place a column
+# already on the plot onto another channel -- e.g. faceting `y vs a`
+# by `a` itself.
+consumed_data_columns(::PPCKind) = Symbol[]
+consumed_data_columns(p::ScalarRePPC)        = [p.group]
+consumed_data_columns(p::LinearPPC)          = [p.predictor]
+consumed_data_columns(p::LinearRePPC)        = [p.predictor, p.group]
+consumed_data_columns(p::CategoricalPPC)     = [p.predictor]
+consumed_data_columns(p::MultiContinuousPPC) = copy(p.predictors)
+
 # Wide picker: structural + every covariate the LP's DAG touches.
 # Skip covariates whose name collides with a reserved table column
-# (the structural mapping would clash) or with a structural-channel
-# label.
+# (the structural mapping would clash), with a structural-channel
+# label, or with a raw data column already consumed as an axis /
+# facet.
 function picker_dims(p::PPCKind)
     structural = structural_dims(p)
     structural_keys = Set(string(first(d)) for d in structural)
     reserved = reserved_columns(p)
+    consumed = Set(string(c) for c in consumed_data_columns(p))
     extras = [string(c) => "Covariate $c" for c in p.covariates
-              if !(string(c) in structural_keys) && !(string(c) in reserved)]
+              if !(string(c) in structural_keys) &&
+                 !(string(c) in reserved) &&
+                 !(string(c) in consumed)]
     isempty(structural) && isempty(extras) ? nothing :
         Pair{String,String}[structural..., extras...]
 end
@@ -1588,32 +1658,49 @@ APPDATA = AppData(; cache_type=:parallel)
         # the actual per-kind dispatch happens inside prior_spec /
         # posterior_spec / picker_dims / predictor_label / kind_tag.
         _build_one_ppc(p, long, df, which; id_prefix) = begin
-            heading  = which === :prior ? "Prior predictive" :
-                                           "Posterior predictive check"
-            pred_lbl = predictor_label(p)   # `label` is a @param; avoid shadowing
-            title    = "$(p.response)$pred_lbl -- $heading"
+            link_lbl  = p.link_fn === identity ? string(p.loc) :
+                        "$(p.link_fn)($(p.loc))"
+            pred_lbl  = predictor_label(p)   # `label` is a @param; avoid shadowing
+            kind_disp = display_name(p)
+
+            # Non-primary LPs (e.g. `err` in `Normal(loc, err)`) are not
+            # likelihood locations -- framing them as a "predictive check
+            # of <response>" is wrong, and there's nothing observed to
+            # overlay. Switch to a posterior-of-<link(loc)> framing.
+            heading = if which === :prior
+                p.is_primary ? "Prior predictive" : "Prior of $link_lbl"
+            else
+                p.is_primary ? "Posterior predictive check" :
+                               "Posterior of $link_lbl"
+            end
+            subject = p.is_primary ? string(p.response) : link_lbl
+            title   = "$subject$pred_lbl -- $heading"
             spec = if which === :prior
                 prior_spec(p, long, df; title)
             else
                 # Binomial outcomes are counts; predicted `link(loc)` is
                 # a probability. Convert observed counts to proportions
-                # so both layers share the same response scale.
-                obs_y_raw = context!().run.stan.fit_data_dict[Symbol(p.response)]
-                obs_y = if p.family === Binomial && !isnothing(p.n_trials)
-                    obs_y_raw ./ context!().run.stan.fit_data_dict[Symbol(p.n_trials)]
+                # so both layers share the same response scale. Only
+                # primary LPs need the obs vector at all.
+                obs_y = if p.is_primary
+                    obs_y_raw = context!().run.stan.fit_data_dict[Symbol(p.response)]
+                    p.family === Binomial && !isnothing(p.n_trials) ?
+                        obs_y_raw ./ context!().run.stan.fit_data_dict[Symbol(p.n_trials)] :
+                        obs_y_raw
                 else
-                    obs_y_raw
+                    nothing
                 end
                 posterior_spec(p, long, df, obs_y; title)
             end
             isnothing(spec) && return nothing
 
-            link_lbl = p.link_fn === identity ? string(p.loc) :
-                       "$(p.link_fn)($(p.loc))"
-            kind_disp = display_name(p)
-            cap = which === :prior ?
-                "Prior-predictive draws of $link_lbl$pred_lbl ($(p.family) family, $kind_disp)" :
+            cap = if which === :prior
+                "Prior-predictive draws of $link_lbl$pred_lbl ($(p.family) family, $kind_disp)"
+            elseif p.is_primary
                 "Posterior draws of $link_lbl$pred_lbl, with observed $(p.response) overlaid ($kind_disp)"
+            else
+                "Posterior draws of $link_lbl$pred_lbl ($kind_disp)"
+            end
 
             dims = picker_dims(p)
             plot_block = isnothing(dims) ?
@@ -1621,7 +1708,7 @@ APPDATA = AppData(; cache_type=:parallel)
                 with_plot_caption(spec; plot_id="$id_prefix-ppc", title=cap,
                                   auto_remap=(; dims))
             h.section(
-                h.h4(heading, ": ", h.code(string(p.response)), pred_lbl,
+                h.h4(heading, ": ", h.code(subject), pred_lbl,
                      " (", kind_disp, ")"),
                 plot_block,
             )
