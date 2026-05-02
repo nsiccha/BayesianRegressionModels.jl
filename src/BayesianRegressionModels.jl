@@ -43,8 +43,10 @@ export parse!, _brm, stan_code
 
 # Introspection -- model-shape questions answered without re-walking
 # the operations dict.
-export outcomes, linear_predictor_op, predictors,
-       grouping_factors, column_data, hierarchical_outcomes
+export outcomes, linear_predictor_op, linear_predictors, predictors,
+       grouping_factors, column_data, data_columns, dependencies,
+       hierarchical_outcomes,
+       linear_predictor_args, data_args, primary_lp
 
 # Extension API. Downstream packages (bruno) add their own formula terms
 # by defining methods on `vmeta_sampling_rhs` + `_sb_submodel_rhs!` and
