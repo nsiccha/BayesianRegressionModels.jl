@@ -1565,10 +1565,10 @@ APPDATA = AppData(; cache_type=:parallel)
         # the actual per-kind dispatch happens inside prior_spec /
         # posterior_spec / picker_dims / predictor_label / kind_tag.
         _build_one_ppc(p, long, df, which; id_prefix) = begin
-            heading = which === :prior ? "Prior predictive" :
-                                          "Posterior predictive check"
-            label   = predictor_label(p)
-            title   = "$(p.response)$label -- $heading"
+            heading  = which === :prior ? "Prior predictive" :
+                                           "Posterior predictive check"
+            pred_lbl = predictor_label(p)   # `label` is a @param; avoid shadowing
+            title    = "$(p.response)$pred_lbl -- $heading"
             spec = if which === :prior
                 prior_spec(p, long, df; title)
             else
@@ -1588,8 +1588,8 @@ APPDATA = AppData(; cache_type=:parallel)
             link_lbl = p.link_fn === identity ? string(p.loc) :
                        "$(p.link_fn)($(p.loc))"
             cap = which === :prior ?
-                "Prior-predictive draws of $link_lbl$label ($(p.family) family, $(kind_tag(p)))" :
-                "Posterior draws of $link_lbl$label, with observed $(p.response) overlaid ($(kind_tag(p)))"
+                "Prior-predictive draws of $link_lbl$pred_lbl ($(p.family) family, $(kind_tag(p)))" :
+                "Posterior draws of $link_lbl$pred_lbl, with observed $(p.response) overlaid ($(kind_tag(p)))"
 
             dims = picker_dims(p)
             plot_block = isnothing(dims) ?
@@ -1597,7 +1597,7 @@ APPDATA = AppData(; cache_type=:parallel)
                 with_plot_caption(spec; plot_id="$id_prefix-ppc", title=cap,
                                   auto_remap=(; dims))
             h.section(
-                h.h4(heading, ": ", h.code(string(p.response)), label,
+                h.h4(heading, ": ", h.code(string(p.response)), pred_lbl,
                      " (", kind_tag(p), ")"),
                 plot_block,
             )
