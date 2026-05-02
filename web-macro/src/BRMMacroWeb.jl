@@ -1798,10 +1798,10 @@ APPDATA = AppData(; cache_type=:parallel)
         "Binomial" => "log_odds ~ 1 + a + (1 | g1)\nbin_succ ~ BinomialLogit(bin_n, log_odds)\n",
         "Bernoulli" => "log_odds ~ 1 + a + (1 | g1)\nbin_y ~ BernoulliLogit(log_odds)\n",
         "cbpp + therapeutic touch" => """log_odds_bin ~ 1 + c1 + (1 | g1)
-bin_succ ~ Binomial(bin_n, logistic(log_odds_bin))
+bin_succ ~ BinomialLogit(bin_n, log_odds_bin)
 
 log_odds_b ~ 1 + (1 | g1)
-bin_y ~ Bernoulli(logistic(log_odds_b))
+bin_y ~ BernoulliLogit(log_odds_b)
 """,
         "everything" => default_formula,
     ]
