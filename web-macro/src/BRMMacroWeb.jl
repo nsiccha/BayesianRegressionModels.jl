@@ -1509,6 +1509,28 @@ APPDATA = AppData(; cache_type=:parallel)
         context(label, formula)
     end
 
+    # Pre-canned formulas, hoisted from the inner `render` block so the
+    # gallery route below can iterate them without going through render.
+    presets_list = [
+        "min"      => "loc ~ 1\nlog(err) ~ 1\ny1 ~ Normal(loc, err)\n",
+        "linear"   => "loc ~ 1 + a\nlog(err) ~ 1\ny1 ~ Normal(loc, err)\n",
+        "multi-lin" => "loc ~ 1 + a + b + c + d\nlog(err) ~ 1\ny1 ~ Normal(loc, err)\n",
+        "categorical" => "loc ~ 1 + c1\nlog(err) ~ 1\ny1 ~ Normal(loc, err)\n",
+        "random intercept" => "loc ~ 1 + a + (1 | g1)\nlog(err) ~ 1\ny1 ~ Normal(loc, err)\n",
+        "random slope" => "loc ~ 1 + (1 + a | g1)\nlog(err) ~ 1\ny1 ~ Normal(loc, err)\n",
+        "categorical random slope" => "loc ~ 1 + (1 + c1 | g1)\nlog(err) ~ 1\ny1 ~ Normal(loc, err)\n",
+        "multiple groups" => "loc ~ 1 + a + (1 | g1) + (1 | g2)\nlog(err) ~ 1\ny1 ~ Normal(loc, err)\n",
+        "distributional" => "loc ~ 1 + a\nlog(err) ~ 1 + b\ny1 ~ Normal(loc, err)\n",
+        "Poisson" => "log_rate ~ 1 + a + (1 | g1)\nk1 ~ Poisson(exp(log_rate))\n",
+        "Binomial" => "log_odds ~ 1 + a + (1 | g1)\nbin_succ ~ BinomialLogit(bin_n, log_odds)\n",
+        "Bernoulli" => "log_odds ~ 1 + a + (1 | g1)\nbin_y ~ BernoulliLogit(log_odds)\n",
+        "cbpp + therapeutic touch" => "log_odds_bin ~ 1 + c1 + (1 | g1)\nbin_succ ~ BinomialLogit(bin_n, log_odds_bin)\n\nlog_odds_b ~ 1 + (1 | g1)\nbin_y ~ BernoulliLogit(log_odds_b)\n",
+        "ZIP" => "log_rate ~ 1 + a\nlogit(zi) ~ 1\nk1 ~ ZeroInflatedPoisson(exp(log_rate), zi)\n",
+        "Horseshoe" => "coef_a ~ Horseshoe()\nloc ~ coef_a * a\ny1 ~ Normal(loc, 1)\n",
+        "GP (HSGP)" => "loc ~ 1 + a + gp(b; k=20, c=1.5)\ny1 ~ Normal(loc, 1)\n",
+        "OrderedLogistic" => "loc ~ 1 + a\nc1 ~ OrderedLogistic(loc)\n",
+    ]
+
     # Per-step HTML rendering. `getproperty(render, step_key)(value)` emits the
     # section for that step; `compute_steps` produces the NamedTuple whose keys
     # drive dispatch here.
@@ -1749,13 +1771,13 @@ APPDATA = AppData(; cache_type=:parallel)
                                 id_prefix="brm-plot-generated",
                                 kind="Generated data (prior predictive)",
                                 truth)
-            ppc = build_ppc_section(long, :prior; id_prefix="brm-plot-generated")
+            local ppc_sec = build_ppc_section(long, :prior; id_prefix="brm-plot-generated")
             parts = Any[
                 h.h3("6c. StanGenerate — synthetic data from narrow-normal prior + param_constrain"),
                 h.p("long format: ", nrow(long), " rows · ", ncol(long), " cols · ",
                     "wide format: ", nrow(wide), " rows · ", ncol(wide), " cols"),
             ]
-            isnothing(ppc) || push!(parts, ppc)
+            isnothing(ppc_sec) || push!(parts, ppc_sec)
             push!(parts, p.tabs, p.wide_details)
             h.section(parts...)
         end
@@ -1765,13 +1787,13 @@ APPDATA = AppData(; cache_type=:parallel)
                                 id_prefix="brm-plot-pf",
                                 kind="Pathfinder posterior",
                                 truth)
-            ppc = build_ppc_section(full_long, :posterior; id_prefix="brm-plot-pf")
+            local ppc_sec = build_ppc_section(full_long, :posterior; id_prefix="brm-plot-pf")
             parts = Any[
                 h.h3("6d. StanFit (Pathfinder) — variational approximation draws"),
                 h.p("long format: ", nrow(long), " rows · ", ncol(long), " cols · ",
                     "wide format: ", nrow(wide), " rows · ", ncol(wide), " cols"),
             ]
-            isnothing(ppc) || push!(parts, ppc)
+            isnothing(ppc_sec) || push!(parts, ppc_sec)
             push!(parts, p.tabs, p.wide_details)
             h.section(parts...)
         end
@@ -1781,7 +1803,7 @@ APPDATA = AppData(; cache_type=:parallel)
                                 id_prefix="brm-plot-warmup",
                                 kind="Warmup+MCMC posterior",
                                 truth)
-            ppc = build_ppc_section(full_long, :posterior; id_prefix="brm-plot-warmup")
+            local ppc_sec = build_ppc_section(full_long, :posterior; id_prefix="brm-plot-warmup")
             parts = Any[
                 h.h3("6d'. StanFit (Warmup+MCMC) — full Stan fit"),
                 h.p("n_divergent_samples: ", diagnostics.n_divergent_samples,
@@ -1789,36 +1811,16 @@ APPDATA = AppData(; cache_type=:parallel)
                 h.p("long format: ", nrow(long), " rows · ", ncol(long), " cols · ",
                     "wide format: ", nrow(wide), " rows · ", ncol(wide), " cols"),
             ]
-            isnothing(ppc) || push!(parts, ppc)
+            isnothing(ppc_sec) || push!(parts, ppc_sec)
             push!(parts, p.tabs, p.wide_details)
             h.section(parts...)
         end
     end
 
-    # Pre-canned formulas. The ones above the divider exercise individual
-    # features in isolation; the last one stacks everything into a single
-    # multi-likelihood model.
-    presets = [
-        "min"      => "loc ~ 1\nlog(err) ~ 1\ny1 ~ Normal(loc, err)\n",
-        "linear"   => "loc ~ 1 + a\nlog(err) ~ 1\ny1 ~ Normal(loc, err)\n",
-        "multi-lin" => "loc ~ 1 + a + b + c + d\nlog(err) ~ 1\ny1 ~ Normal(loc, err)\n",
-        "categorical" => "loc ~ 1 + c1\nlog(err) ~ 1\ny1 ~ Normal(loc, err)\n",
-        "random intercept" => "loc ~ 1 + a + (1 | g1)\nlog(err) ~ 1\ny1 ~ Normal(loc, err)\n",
-        "random slope" => "loc ~ 1 + (1 + a | g1)\nlog(err) ~ 1\ny1 ~ Normal(loc, err)\n",
-        "categorical random slope" => "loc ~ 1 + (1 + c1 | g1)\nlog(err) ~ 1\ny1 ~ Normal(loc, err)\n",
-        "multiple groups" => "loc ~ 1 + a + (1 | g1) + (1 | g2)\nlog(err) ~ 1\ny1 ~ Normal(loc, err)\n",
-        "distributional" => "loc ~ 1 + a\nlog(err) ~ 1 + b\ny1 ~ Normal(loc, err)\n",
-        "Poisson" => "log_rate ~ 1 + a + (1 | g1)\nk1 ~ Poisson(exp(log_rate))\n",
-        "Binomial" => "log_odds ~ 1 + a + (1 | g1)\nbin_succ ~ BinomialLogit(bin_n, log_odds)\n",
-        "Bernoulli" => "log_odds ~ 1 + a + (1 | g1)\nbin_y ~ BernoulliLogit(log_odds)\n",
-        "cbpp + therapeutic touch" => """log_odds_bin ~ 1 + c1 + (1 | g1)
-bin_succ ~ BinomialLogit(bin_n, log_odds_bin)
-
-log_odds_b ~ 1 + (1 | g1)
-bin_y ~ BernoulliLogit(log_odds_b)
-""",
-        "everything" => default_formula,
-    ]
+    # Pre-canned formulas: presets_list lives on PipelineRoutes so the
+    # gallery can iterate them too. Append the "everything" stack here
+    # since it pulls default_formula from the @struct render scope.
+    presets = vcat(presets_list, ["everything" => default_formula])
 
     # `formula` is the preset's preset-text; the outer `formula` (the
     # @param) is shadowed here. `__parent__.formula` reaches the page's
@@ -2084,6 +2086,76 @@ bin_y ~ BernoulliLogit(log_odds_b)
     #   methods(StanBlocks.stan.tracetype, ...)
     # without restarting or running julia from bash. Errors are caught
     # and returned as text so curl always succeeds.
+    # PPC gallery card -- returns ONLY the auto-PPC section for the
+    # current `formula`. The gallery (`@get gallery`) embeds these
+    # via `hx-trigger="intersect once"` so cards lazy-load as you
+    # scroll. Caching is automatic: the underlying pipeline cache
+    # (per `(formula, namespace)` key) means the Stan compile + fit
+    # for a given formula runs at most once per server lifetime.
+    @get ppc = begin
+        try
+            r = context!().run
+            full_long = r.stan.posterior_full_long_df
+            ppc_div = build_ppc_section(full_long, :posterior;
+                                        id_prefix="brm-gallery-$(hash(formula))")
+            isnothing(ppc_div) ? h.p("(no PPC kind detected)";
+                                     class="brm-gallery-empty") : ppc_div
+        catch e
+            h.pre(class="brm-gallery-error")(
+                first(sprint(showerror, e), 600))
+        end
+    end
+
+    # Auto-PPC gallery: card grid showing one PPC plot per preset.
+    # Lazy-loaded via HTMX `intersect once` so off-screen cards don't
+    # trigger Stan compiles. Each card's URL hits `/pipeline/ppc?formula=...`
+    # which returns just the PPC section (full pipeline runs in the
+    # cached background). Card style mirrors AoV's compact gallery.
+    @get gallery = begin
+        # Source the same preset list the pipeline form uses. Defined
+        # later in PipelineRoutes; reach it via `__self__`.
+        gallery_card(card_label, formula_text) = begin
+            ppc_url      = string(query_url(__self__/"ppc"; formula=formula_text, label=""))
+            pipeline_url = string(query_url(__self__/""; formula=formula_text))
+            h.article(;
+                style="margin:0; padding:0.5rem; min-width:0; overflow:hidden;",
+            )(
+                h.header(; style="padding:0 0 0.25rem; margin:0;")(
+                    h.strong(card_label; style="font-size:0.9em;"),
+                    h.a(" ↗"; href=pipeline_url,
+                        target="_blank",
+                        style="font-size:0.8em; margin-left:0.3em; text-decoration:none;",
+                        title="Open in pipeline"),
+                ),
+                h.details(; style="margin:0.25rem 0; font-size:0.75em;")(
+                    h.summary("Formula"),
+                    h.pre(formula_text; style="font-size:0.85em; margin:0;")
+                ),
+                h.div(;
+                    hx_get=ppc_url,
+                    hx_trigger="intersect once",
+                    hx_swap="innerHTML",
+                    style="min-height:8rem;",
+                )(
+                    h.p("Loading…"; style="color:var(--pico-muted-color); font-size:0.8em; margin:0;")
+                ),
+            )
+        end
+        h.div(
+            h.h1("PPC gallery"),
+            h.p(
+                "One auto-PPC plot per preset, lazy-loaded as cards scroll into view. ",
+                "Each formula's Stan compile + fit is cached for the server's lifetime, ",
+                "so the first page load is the slow one.",
+            ),
+            h.div(;
+                style="display:grid; grid-template-columns:repeat(auto-fill, minmax(20rem, 1fr)); gap:0.75rem;",
+            )(
+                [gallery_card(lbl, body) for (lbl, body) in __self__.presets_list]...
+            ),
+        )
+    end
+
     @get debug(; q::String="") = h.pre(
         try
             isempty(q) ? "Pass ?q=<julia expr>" :
