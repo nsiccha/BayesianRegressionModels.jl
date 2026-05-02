@@ -333,10 +333,11 @@ end
 term.
 """
 function hierarchical_outcomes(brmi::BRMI)
-    [o for o in outcomes(brmi) if begin
-        lp = primary_lp(o)
-        isnothing(lp) && return false
-        p = predictors(brmi, lp.link_lp)
-        !isnothing(p) && !isempty(p.re_terms)
-    end]
+    [o for o in outcomes(brmi) if _has_re(brmi, o)]
+end
+function _has_re(brmi::BRMI, o)
+    lp = primary_lp(o)
+    isnothing(lp) && return false
+    p = predictors(brmi, lp.link_lp)
+    !isnothing(p) && !isempty(p.re_terms)
 end
