@@ -2105,23 +2105,32 @@ APPDATA = AppData(; cache_type=:parallel)
     # the result and renders just the auto-PPC section (no surrounding
     # tabs / wide-table). Caching is shared with the main pipeline page
     # because polling_fetchindex keys on (formula, namespace, step).
-    @get ppc = polling_fetchindex(
-        compute_steps, formula, context!().namespace, :stan_fit_pathfinder;
-        poll_url=query_url(__self__/"ppc"; formula, label),
-        label="PPC - $(isempty(label) ? "preset" : label)",
-        force=false,
-    ) do result
+    # `force=true` (sent by the card's Rerun button) bypasses both the
+    # rendered-HTML cache AND the polling_fetchindex result cache, so the
+    # whole pipeline re-runs from scratch. Gated on `is_htmx(__req__)` so
+    # bookmarking / direct reload of `?force=true` doesn't unnecessarily
+    # blow the cache; only an HTMX-triggered button click forces.
+    @get ppc(; force::Bool=false) = begin
         ns = context!().namespace
-        get!(__appdata__.ppc_html_cache, (hash(formula), ns)) do
-            try
-                full_long = result.stan_fit_pathfinder.full_long
-                ppc_div = render.build_ppc_section(full_long, :posterior;
-                                                   id_prefix="brm-gallery-$(hash(formula))")
-                isnothing(ppc_div) ? h.p("(no PPC kind detected)";
-                                         class="brm-gallery-empty") : ppc_div
-            catch e
-                h.pre(class="brm-gallery-error")(
-                    first(sprint(showerror, e), 600))
+        do_force = force && is_htmx(__req__)
+        do_force && delete!(__appdata__.ppc_html_cache, (hash(formula), ns))
+        polling_fetchindex(
+            compute_steps, formula, ns, :stan_fit_pathfinder;
+            poll_url=query_url(__self__/"ppc"; formula, label),
+            label="PPC - $(isempty(label) ? "preset" : label)",
+            force=do_force,
+        ) do result
+            get!(__appdata__.ppc_html_cache, (hash(formula), ns)) do
+                try
+                    full_long = result.stan_fit_pathfinder.full_long
+                    ppc_div = render.build_ppc_section(full_long, :posterior;
+                                                       id_prefix="brm-gallery-$(hash(formula))")
+                    isnothing(ppc_div) ? h.p("(no PPC kind detected)";
+                                             class="brm-gallery-empty") : ppc_div
+                catch e
+                    h.pre(class="brm-gallery-error")(
+                        first(sprint(showerror, e), 600))
+                end
             end
         end
     end
@@ -2135,8 +2144,10 @@ APPDATA = AppData(; cache_type=:parallel)
         # Source the same preset list the pipeline form uses. Defined
         # later in PipelineRoutes; reach it via `__self__`.
         gallery_card(card_label, formula_text) = begin
-            ppc_url      = string(query_url(__self__/"ppc"; formula=formula_text, label=""))
-            pipeline_url = string(query_url(__self__/""; formula=formula_text))
+            ppc_url       = string(query_url(__self__/"ppc"; formula=formula_text, label=""))
+            ppc_force_url = string(query_url(__self__/"ppc"; formula=formula_text, label="", force=true))
+            pipeline_url  = string(query_url(__self__/""; formula=formula_text))
+            ppc_target_id = "brm-card-ppc-$(hash((card_label, formula_text)))"
             h.article(;
                 style="margin:0; padding:0.5rem; min-width:0; overflow:hidden;",
             )(
@@ -2155,9 +2166,21 @@ APPDATA = AppData(; cache_type=:parallel)
                 # surrounding <details> first toggles open. `once` keeps it
                 # from re-fetching on every collapse/expand. Mirrors Bruno's
                 # qt detail pattern -- nothing runs until the user opts in.
+                # The Rerun button targets `#$ppc_target_id` with force=true,
+                # which clears both the rendered-HTML cache and the
+                # polling_fetchindex result and re-runs the pipeline.
                 h.details(; style="margin:0.25rem 0;")(
                     h.summary("Show PPC plot"; style="cursor:pointer;"),
-                    h.div(;
+                    h.div(; style="display:flex; gap:0.5rem; margin:0.25rem 0;")(
+                        h.button("Rerun";
+                            type="button", class="outline",
+                            style="font-size:0.75em; padding:0.1rem 0.4rem;",
+                            hx_get=ppc_force_url,
+                            hx_target="#$ppc_target_id",
+                            hx_swap="innerHTML",
+                            title="Discard cached fit + render and re-run from scratch"),
+                    ),
+                    h.div(; id=ppc_target_id,
                         hx_get=ppc_url,
                         hx_trigger="toggle once from:closest details",
                         hx_swap="innerHTML",
