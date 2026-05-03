@@ -1545,7 +1545,7 @@ APPDATA = AppData(; cache_type=:parallel)
         "Bernoulli" => "log_odds ~ 1 + a + (1 | g1)\nbin_y ~ BernoulliLogit(log_odds)\n",
         "cbpp + therapeutic touch" => "log_odds_bin ~ 1 + c1 + (1 | g1)\nbin_succ ~ BinomialLogit(bin_n, log_odds_bin)\n\nlog_odds_b ~ 1 + (1 | g1)\nbin_y ~ BernoulliLogit(log_odds_b)\n",
         "ZIP" => "log_rate ~ 1 + a\nlogit(zi) ~ 1\nk1 ~ ZeroInflatedPoisson(exp(log_rate), zi)\n",
-        "Horseshoe" => "coef_a ~ Horseshoe()\nloc ~ coef_a * a\ny1 ~ Normal(loc, 1)\n",
+        "Horseshoe" => "coef_a ~ Horseshoe()\nloc = coef_a * a\ny1 ~ Normal(loc, 1)\n",
         "GP (HSGP)" => "loc ~ 1 + a + gp(b; k=20, c=1.5)\ny1 ~ Normal(loc, 1)\n",
         "OrderedLogistic" => "loc ~ 1 + a\nc1 ~ OrderedLogistic(loc)\n",
     ]

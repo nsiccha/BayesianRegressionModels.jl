@@ -24,9 +24,15 @@ _classify_arg(a::Number) = (; role=:constant, value=a)
 
 _classify_arg(a::NamedColumn) = _classify_named(a, parent(a))
 _classify_named(a, ::DataColumn)  = (; role=:data, name=name(a))
-_classify_named(a, op::ExprColumn) = getf(op) === (~) ?
-    (; role=:linear_predictor, link_fn=identity, link_lp=name(a)) :
-    (; role=:expression, expr=a)
+# `~` (formula) and `assign` (literal `=`) are both LP-binding ops as far
+# as outcome introspection cares: each names a latent the response depends
+# on. Stan-emit treats them very differently (popefs vs literal binding),
+# but the PPC kind detector + plot-builder only needs "what's the LP that
+# feeds this outcome arg?".
+_classify_named(a, op::ExprColumn) =
+    (getf(op) === (~) || getf(op) === assign) ?
+        (; role=:linear_predictor, link_fn=identity, link_lp=name(a)) :
+        (; role=:expression, expr=a)
 _classify_named(a, _) = (; role=:expression, expr=a)
 
 # A unary wrapper around exactly one LP -- bare like `exp(loc)` or with
@@ -42,7 +48,8 @@ _classify_arg(a::ExprColumn) = let lps = _collect_lps(a)
 end
 
 _collect_lps(::Any) = Symbol[]
-_collect_lps(x::NamedColumn) = parent(x) isa ExprColumn && getf(parent(x)) === (~) ?
+_collect_lps(x::NamedColumn) = parent(x) isa ExprColumn &&
+    (getf(parent(x)) === (~) || getf(parent(x)) === assign) ?
     Symbol[name(x)] : Symbol[]
 _collect_lps(x::ExprColumn) = let out = Symbol[]
     for a in getargs(x); append!(out, _collect_lps(a)); end
@@ -115,7 +122,11 @@ function linear_predictor_op(brmi::BRMI, n::Symbol)
     v isa NamedColumn || return nothing
     op = parent(v)
     op isa ExprColumn || return nothing
-    getf(op) === (~) || return nothing
+    # Either `<n> ~ <rhs>` (formula) or `<n> = <rhs>` (literal assign).
+    # See `_classify_named` -- both bind a latent that downstream
+    # outcomes can reference as a linear-predictor arg.
+    f = getf(op)
+    (f === (~) || f === assign) || return nothing
     op
 end
 

@@ -536,11 +536,6 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
             push!(ran_terms, t)
         elseif t isa ExprColumn && getf(t) === mo1
             push!(direct_terms, t)
-        elseif t isa ExprColumn && getf(t) === (*)
-            # `coef * a` -- sampled scalar times data column. The user
-            # is supplying the coefficient explicitly (e.g. for a
-            # horseshoe prior); routes around popefs.
-            push!(direct_terms, t)
         elseif _sb_is_categorical(t)
             push!(direct_terms, t)
         else
@@ -579,25 +574,6 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     end
 end
 
-# Decide which operand of `coef * a` is the sampled scalar vs the data
-# column. Returns `(scalar, data)`. Errors if the args aren't exactly
-# (sampled-scalar NamedColumn, data NamedColumn) in either order.
-_sb_split_scalar_data(args) = begin
-    a, b = args
-    if _sb_is_sampled_scalar(a) && _sb_is_data_named(b)
-        (a, b)
-    elseif _sb_is_sampled_scalar(b) && _sb_is_data_named(a)
-        (b, a)
-    else
-        error("sbimpl: `*` LP term needs one sampled-scalar NamedColumn and one data NamedColumn (got $(typeof(a)) and $(typeof(b)))")
-    end
-end
-_sb_is_sampled_scalar(t::NamedColumn) =
-    parent(t) isa ExprColumn && getf(parent(t)) === (~)
-_sb_is_sampled_scalar(_) = false
-_sb_is_data_named(t::NamedColumn) = parent(t) isa DataColumn
-_sb_is_data_named(_) = false
-
 # Classify a predictor term as "direct" (allocates its own parameters, no
 # popefs multiplication). Matches vimpl: integer-backed NamedColumns are
 # treated as treatment-coded categoricals; floats go through popefs.
@@ -618,22 +594,6 @@ function _sb_emit_direct!(stmts, data, target::Symbol, t, summands)
         return
     end
     f = getf(t)
-    if f === (*)
-        # `coef * a` -- one operand is a sampled scalar (NamedColumn over
-        # an ExprColumn{~}), the other is a data column. Materialise the
-        # data into the data dict (if not already) and bind an
-        # intermediate `<coef>_x_<a>` to the product so the LP-sum sees a
-        # plain Symbol. Stan broadcasts `real * vector` elementwise.
-        args = getargs(t)
-        length(args) == 2 || error("sbimpl: `*` LP term expects 2 operands, got $(length(args))")
-        scalar, dat = _sb_split_scalar_data(args)
-        cn = name(dat)
-        haskey(data, cn) || (data[cn] = collect(Float64, parent(parent(dat))))
-        prod_name = Symbol(name(scalar), :_x_, cn)
-        push!(stmts, :($prod_name = $(name(scalar)) * $cn))
-        push!(summands, prod_name)
-        return
-    end
     f === mo1 || error("sbimpl: unsupported direct-summand term `$f`")
     inner = only(getargs(t))
     inner isa NamedColumn || error("sbimpl: `mo1(…)` expects a NamedColumn, got $(typeof(inner))")
