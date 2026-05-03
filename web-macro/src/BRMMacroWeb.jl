@@ -2325,7 +2325,9 @@ y1 ~ Normal(loc, err)
         h.div(; class="brm-layout")(
             nav_sidebar([
                 "Pipeline" => "/pipeline",
+                "Gallery"  => "/pipeline/gallery",
                 "Examples" => "/examples",
+                "Library"  => "/library",
             ]),
             h.main(; class="container brm-main")(
                 h.div(; id="content")(content),
@@ -2360,6 +2362,62 @@ y1 ~ Normal(loc, err)
     end
 
     @include pipeline = PipelineRoutes()
+
+    # Library of SLIC submodels shipped by BRM (sbimpl.jl). Each entry is
+    # a `_sb_*` SlicModel that the @brm macro can route to (priors,
+    # predictor terms, missing-data response, ...). Sourced by reflection
+    # over the BayesianRegressionModels module rather than a hand-curated
+    # list -- new submodels added in sbimpl.jl show up automatically.
+    @include library = begin
+        # Reflection: every `_sb_*` binding in BRM that's a SlicModel.
+        # Sorted alphabetically for stable display.
+        slic_submodels() = begin
+            entries = Pair{Symbol,Any}[]
+            for n in names(BayesianRegressionModels; all=true)
+                startswith(string(n), "_sb_") || continue
+                v = getproperty(BayesianRegressionModels, n)
+                v isa StanBlocks.SlicModel || continue
+                push!(entries, n => v)
+            end
+            sort!(entries; by=first)
+        end
+
+        @get index = h.div(
+            h.h1("SLIC submodel library"),
+            h.p(
+                "Reusable ",
+                h.code("StanBlocks.@slic"),
+                " submodels exported by ",
+                h.code("BayesianRegressionModels"),
+                ". The ",
+                h.code("@brm"),
+                " macro routes formula constructs (priors, predictor ",
+                "terms, missing-data responses, ...) to these. Each ",
+                "card shows the submodel body verbatim plus the data ",
+                "kwargs it expects from the caller.",
+            ),
+            h.div(;
+                style="display:grid; grid-template-columns:repeat(auto-fill, minmax(28rem, 1fr)); gap:0.75rem;",
+            )(
+                [h.article(; style="margin:0; padding:0.75rem;")(
+                    h.header(; style="padding:0 0 0.25rem; margin:0;")(
+                        h.strong(string(nm); style="font-family:monospace;"),
+                    ),
+                    h.details(; style="margin:0.25rem 0; font-size:0.75em;",
+                              open=true)(
+                        h.summary("Body"),
+                        h.pre(string(sm.model);
+                              style="font-size:0.85em; margin:0; max-height:30rem; overflow:auto;"),
+                    ),
+                    isempty(sm.data) ? "" :
+                        h.details(; style="margin:0.25rem 0; font-size:0.75em;")(
+                            h.summary("Pre-bound data keys"),
+                            h.code(join(sort(collect(keys(sm.data))), ", "))),
+                )
+                for (nm, sm) in slic_submodels()]...,
+            ),
+        )
+    end
 
     # The Examples section mounts at /examples. Both the list view and per-slug
     # detail view share `@get index(slug)` (HTMXO registers `/examples` AND
