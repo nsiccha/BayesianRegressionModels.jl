@@ -193,8 +193,14 @@ end
                     for (n_i, p_i) in zip(bin_n, bin_p_true)]
         bin_y = [rand(rng, Distributions.Bernoulli(p_i)) ? 1 : 0
                  for p_i in bin_p_true]
+        # `y1` with ~25% of entries randomly set to `missing` -- exercise the
+        # `mi(y_mi) ~ Family(...)` path without disturbing the other presets.
+        y_mi = Vector{Union{Missing,Float64}}(y1)
+        for i in shuffle(rng, 1:n)[1:max(1, n ÷ 4)]
+            y_mi[i] = missing
+        end
         DataFrame(; a, b, c, d, g1, g2, g3, c1, c2, c3, exposure,
-                    y1, y2, k1, k2, bin_n, bin_succ, bin_y)
+                    y1, y2, k1, k2, bin_n, bin_succ, bin_y, y_mi)
     end
 
     # NamedTuple view of `df`, merged with namespace-dispatched extras so

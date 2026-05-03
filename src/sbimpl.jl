@@ -369,10 +369,14 @@ end
 # rather than HOF-generic because each family's arg list shape differs and
 # needs to be sliced per-arg at `[Jobs]` / `[Jmis]`.
 _sb_mi_normal = StanBlocks.@slic begin
-    y_mis ~ normal(loc[Jmis], scale[Jmis])
+    # Typed-LHS sampling form: explicit `vector[n_mis]` so SLIC declares
+    # y_mis as a vector parameter rather than inferring scalar from the
+    # bare `normal(...)` call (which has no size-bearing kwarg).
+    n_mis = num_elements(Jmis)
+    y_mis :: vector[n_mis] ~ normal(loc[Jmis], scale[Jmis])
     y_obs ~ normal(loc[Jobs], scale[Jobs])
     return mi_merge(y_obs, y_mis, Jobs, Jmis,
-                    num_elements(Jobs) + num_elements(Jmis))
+                    num_elements(Jobs) + n_mis)
 end
 
 # Hilbert-space approximate Gaussian process (Riutort-Mayol et al. 2022),
@@ -687,8 +691,15 @@ end
 function _sb_mi_family_kwargs(::Type{Normal}, rhs::ExprColumn, data)
     args = getargs(rhs, 2)
     loc, scale = args
-    [Expr(:kw, :loc,   _sb_mi_kwarg_value(loc,   data)),
-     Expr(:kw, :scale, _sb_mi_kwarg_value(scale, data))]
+    loc_v   = _sb_mi_kwarg_value(loc,   data)
+    scale_v = _sb_mi_kwarg_value(scale, data)
+    # Submodel body unconditionally subscripts (`scale[Jmis]` etc.), so a
+    # scalar arg has to be lifted to a vector at the call site. Use the
+    # other arg's length probe -- LP names are always full-length.
+    scale_expr = scale isa Real ? :(rep_vector($scale_v, num_elements($loc_v))) : scale_v
+    loc_expr   = loc   isa Real ? :(rep_vector($loc_v,   num_elements($scale_v))) : loc_v
+    [Expr(:kw, :loc,   loc_expr),
+     Expr(:kw, :scale, scale_expr)]
 end
 
 # Resolve a family-arg into the symbol the submodel body should reference.
