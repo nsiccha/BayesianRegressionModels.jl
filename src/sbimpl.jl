@@ -338,6 +338,43 @@ _sb_horseshoe = StanBlocks.@slic begin
     return raw * lambda * tau
 end
 
+# Missing-data scatter. Builds a length-`n` vector by placing the observed
+# values at positions `Jobs` and the imputed parameters at positions `Jmis`.
+# Mutation is allowed inside `@deffun` bodies (top-level @slic blocks are
+# single-assignment), which is why the merge lives here rather than inline.
+StanBlocks.@deffun begin
+    mi_merge(y_obs::vector[n_obs], y_mis::vector[n_mis],
+             Jobs::int[n_obs], Jmis::int[n_mis], n::int)::vector[n] = begin
+        rv = rep_vector(0., n)
+        for i in 1:n_obs; rv[Jobs[i]] = y_obs[i]; end
+        for i in 1:n_mis; rv[Jmis[i]] = y_mis[i]; end
+        return rv
+    end
+end
+
+# Missing-data response submodel for the Normal family. Caller passes
+# `loc`, `scale`, `y_obs`, `Jobs`, `Jmis` as kwargs (all data-qualified
+# in the SLIC sense -- caller-provided). The two `~` lines split the
+# joint likelihood:
+#   - `y_mis ~ Normal(loc[Jmis], scale[Jmis])` introduces y_mis as a
+#     parameter (LHS not yet bound) and contributes the missing-row
+#     log-density. The conditional shape is exactly the family at those
+#     positions, so no informative prior bias is introduced.
+#   - `y_obs ~ Normal(loc[Jobs], scale[Jobs])` is the observed-row
+#     likelihood (y_obs is :data-qualified via the kwarg, so SLIC routes
+#     this to the model block).
+# `mi_merge` then assembles the merged response vector for cross-formula
+# references (e.g. `loc2 = a + b * y` in another formula).
+# Per-family submodels (one each for Normal / BinomialLogit / Poisson / ...)
+# rather than HOF-generic because each family's arg list shape differs and
+# needs to be sliced per-arg at `[Jobs]` / `[Jmis]`.
+_sb_mi_normal = StanBlocks.@slic begin
+    y_mis ~ normal(loc[Jmis], scale[Jmis])
+    y_obs ~ normal(loc[Jobs], scale[Jobs])
+    return mi_merge(y_obs, y_mis, Jobs, Jmis,
+                    num_elements(Jobs) + num_elements(Jmis))
+end
+
 # Hilbert-space approximate Gaussian process (Riutort-Mayol et al. 2022),
 # 1D squared-exponential kernel. Inputs precomputed by the caller:
 #   PHI    : N x K eigen-basis matrix (sin terms)
@@ -570,27 +607,23 @@ _sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_loo
 end
 
 # DRAFT: missing-data response handler. Triggered by `mi(y) ~ <family>(args)`.
+# Splits the response into observed values (data) + missing parameters,
+# routes both to the per-family `_sb_mi_<family>` submodel, and binds the
+# merged vector back to the original symbol for cross-formula reference.
 #
-# The brms-equivalent generated Stan:
-#   data { int N_obs, N_mis; vector[N_obs] y_obs; int Jobs[N_obs]; int Jmis[N_mis]; }
-#   parameters { vector[N_mis] y_mis; }
-#   transformed parameters { vector[N] y; y[Jobs] = y_obs; y[Jmis] = y_mis; }
-#   model { y ~ family(args...); }
+# The submodel does the actual SLIC work: declares y_mis via a real `~`,
+# adds the observed-row likelihood, and returns the merged vector via the
+# `mi_merge` UDF (mutation lives there since top-level slic is single-assign).
+# Per-family rather than HOF-generic because family arg lists differ in
+# shape and need per-arg `[Jobs]` / `[Jmis]` slicing.
 #
-# The merged `y` keeps the original symbol so downstream formulas
-# (`loc2 = a + b * y`, etc.) reference it transparently. Only handles the
-# response-side case today; predictor-side `mi(x)` (where `x` is a covariate
-# with NAs) needs a paired model formula for `x` and isn't drafted here.
-#
-# OPEN: SLIC parameter declaration without an explicit prior. Today the
-# `_sb_horseshoe`-style pattern declares a param via `raw ~ std_normal()`,
-# but here we want `y_mis` to be a parameter whose only "prior" is the
-# implicit constraint from the joint likelihood `y ~ family(...)` on the
-# merged vector. Need either:
-#   (a) SLIC support for a bare `y_mis::vector[n_mis]` parameter declaration
-#       with no associated sampling statement, OR
-#   (b) emit `y_mis ~ improper_uniform()` (or equivalent) as a no-op prior.
-# Picking (a) below; flagged as TODO so the StanBlocks side can wire it up.
+# Today only the Normal family is wired (`_sb_mi_normal`); other families
+# error with a clear "not yet implemented" message until their submodel
+# lands. Predictor-side `mi(x)` (NAs in covariates needing a paired model
+# formula) is also not drafted yet.
+const _SB_MI_FAMILIES = Dict{Any,Symbol}(
+    Normal => :_sb_mi_normal,
+)
 function _sb_emit_mi!(stmts, data, key, lhs::ExprColumn, rhs)
     inner = only(getargs(lhs))
     inner isa NamedColumn || error("sbimpl: `mi(...)` expects a NamedColumn inside, got $(typeof(inner))")
@@ -613,28 +646,64 @@ function _sb_emit_mi!(stmts, data, key, lhs::ExprColumn, rhs)
     elT = nonmissingtype(eltype(raw))
     y_obs = collect(elT, raw[obs_mask])
 
-    obs_data_key = Symbol(inner_name, :_obs)
-    Jobs_key     = Symbol(:Jobs_, inner_name)
-    Jmis_key     = Symbol(:Jmis_, inner_name)
-    n_mis_key    = Symbol(:n_mis_, inner_name)
-    mis_param    = Symbol(inner_name, :_mis)
+    rhs isa ExprColumn || error("sbimpl: `mi($inner_name) ~ <family>(args)` requires the RHS to be a family call, got $(typeof(rhs))")
+    fam = getf(rhs)
+    submodel = get(_SB_MI_FAMILIES, fam, nothing)
+    isnothing(submodel) && error(
+        "sbimpl: `mi(...)` for family `$fam` is not yet implemented. ",
+        "Currently supported: $(sort(collect(keys(_SB_MI_FAMILIES)); by=string)). ",
+        "Add a `_sb_mi_<family>` @slic submodel + a `_SB_MI_FAMILIES` entry.")
 
-    # Stash the split data. n_obs / n_mis fall out of length() in SLIC.
-    data[obs_data_key] = y_obs
-    data[Jobs_key]     = Jobs
-    data[Jmis_key]     = Jmis
-    data[n_mis_key]    = length(Jmis)
+    # Split-data keys, scoped to the response name so two `mi()`-bearing
+    # responses in the same model don't collide.
+    obs_key  = Symbol(inner_name, :_obs)
+    Jobs_key = Symbol(:Jobs_, inner_name)
+    Jmis_key = Symbol(:Jmis_, inner_name)
+    data[obs_key]  = y_obs
+    data[Jobs_key] = Jobs
+    data[Jmis_key] = Jmis
 
-    # Emit SLIC body. The merged vector binds to `inner_name` so any
-    # downstream `=` / `~` referencing it sees the assembled response.
-    # `_sb_likelihood!` handles the family lowering exactly as for a
-    # plain data-LHS likelihood.
-    push!(stmts, :($mis_param :: vector[$n_mis_key]))   # TODO(SB): plain param decl
-    push!(stmts, :($inner_name = rep_vector(0.0, num_elements($Jobs_key) + num_elements($Jmis_key))))
-    push!(stmts, :($inner_name[$Jobs_key] = $obs_data_key))
-    push!(stmts, :($inner_name[$Jmis_key] = $mis_param))
-    _sb_likelihood!(stmts, inner_name, rhs, data)
+    # Family-arg kwargs: inspect the family RHS to pick out the per-arg
+    # source bindings the submodel expects (e.g. Normal -> loc, scale).
+    # Keep the kwarg names matching the submodel's body symbols.
+    fam_kwargs = _sb_mi_family_kwargs(fam, rhs, data)
+
+    # Single submodel call. SLIC binds `inner_name` to the merged vector
+    # via the submodel's `return` (lowered to `<inner_name> = <return>`
+    # in the parent model scope), so cross-formula references (e.g.
+    # `loc2 = a + b * y` elsewhere) see the imputed-merged response.
+    call_kwargs = Expr(:parameters,
+        Expr(:kw, :y_obs, obs_key),
+        Expr(:kw, :Jobs, Jobs_key),
+        Expr(:kw, :Jmis, Jmis_key),
+        fam_kwargs...)
+    push!(stmts, Expr(:call, :~, inner_name, Expr(:call, submodel, call_kwargs)))
 end
+
+# Per-family unpacking of the family RHS into the kwargs the matching
+# `_sb_mi_<family>` submodel body expects. Each family's arg list is
+# fixed (Normal: loc, scale; later: BinomialLogit: n_trials, eta; etc.).
+# Materialises any data columns referenced by family args into `data`.
+function _sb_mi_family_kwargs(::Type{Normal}, rhs::ExprColumn, data)
+    args = getargs(rhs, 2)
+    loc, scale = args
+    [Expr(:kw, :loc,   _sb_mi_kwarg_value(loc,   data)),
+     Expr(:kw, :scale, _sb_mi_kwarg_value(scale, data))]
+end
+
+# Resolve a family-arg into the symbol the submodel body should reference.
+# Plain LP names (NamedColumn over an ExprColumn) pass through as the
+# bound symbol. Data columns get materialised into `data` (if not already)
+# and reference by name. Numeric literals turn into themselves.
+_sb_mi_kwarg_value(x::Real, _) = x
+_sb_mi_kwarg_value(x::NamedColumn, data) = begin
+    d = parent(x)
+    if d isa DataColumn
+        data[name(x)] = _sb_data_vec(name(x), parent(d))
+    end
+    name(x)
+end
+_sb_mi_kwarg_value(x, _) = error("sbimpl: unsupported `mi(...)` family arg shape $(typeof(x))")
 
 # Map a Julia function (typically the result of `InverseFunctions.inverse(...)`
 # for a link transform) to the Stan-side function name. Stan ships
