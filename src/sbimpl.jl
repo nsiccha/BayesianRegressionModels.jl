@@ -396,11 +396,17 @@ end
 SBBRMI(brmi::BRMI; mod::Module=@__MODULE__) = begin
     stmts = Any[]
     data = Dict{Symbol,Any}()
+    # Prepass 0: collect every column wrapped in `mi(...)` somewhere in the
+    # model. Those columns are NOT materialised as plain data -- the
+    # `_sb_emit_mi!` handler later splits them into observed values + missing
+    # parameters. Any other formula that references the same name (e.g.
+    # `loc2 = a + b * y`) will see the merged response, not the raw column.
+    mi_columns = _sb_mi_columns(brmi)
     # Prepass 1: stash every data-backed NamedColumn so later intercept-only
     # predictors have a length probe to hang `rep_vector(1., num_elements(...))`
-    # off, regardless of iteration order.
+    # off, regardless of iteration order. Columns in `mi_columns` are skipped.
     for (_, op) in pairs(brmi.operations)
-        _sb_collect_data!(data, op)
+        _sb_collect_data!(data, op; skip=mi_columns)
     end
     # Prepass 2: collect brms-style `|ID|` ranef buckets across all sub-formulas,
     # emit one shared ranef_correlated_draws per bucket, and build a lookup
@@ -417,13 +423,54 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__) = begin
     SBBRMI(brmi, model, data)
 end
 
-_sb_collect_data!(data, x) = nothing
-_sb_collect_data!(data, x::NamedColumn) = begin
-    d = parent(x)
-    d isa DataColumn && (data[name(x)] = parent(d))
-    _sb_collect_data!(data, d)
+# Materialise a user data vector into Stan's `data` dict. Refuses
+# vectors containing `missing` -- BRM does not silently drop NA rows.
+# To model NAs as parameters wrap the response in `mi(...)`; for NAs
+# in predictors, drop or impute upstream before passing the dataframe.
+_sb_data_vec(col_name::Symbol, raw) = begin
+    if eltype(raw) >: Missing
+        any(ismissing, raw) && error(
+            "sbimpl: data column `$col_name` contains `missing` values. ",
+            "BRM never silently drops rows. Either (a) drop / impute the ",
+            "missing values in your dataframe before passing it, or ",
+            "(b) for the response, wrap the LHS in `mi(...)` to model ",
+            "the missing values as parameters (see TODO for support).")
+        # Statically known to have no missings -- coerce the eltype so the
+        # downstream Stan typer doesn't see a `Union{Missing,Float64}` it
+        # can't translate.
+        return collect(nonmissingtype(eltype(raw)), raw)
+    end
+    raw
 end
-_sb_collect_data!(data, x::ExprColumn) = foreach(a -> _sb_collect_data!(data, a), getargs(x))
+
+# Walk every operation looking for `mi(<sym>) ~ ...` LHS forms; return the
+# set of inner symbols (the columns whose materialisation is deferred to
+# `_sb_emit_mi!`). Empty by default.
+function _sb_mi_columns(brmi::BRMI)
+    out = Set{Symbol}()
+    for (_, op) in pairs(brmi.operations)
+        op isa NamedColumn || continue
+        e = parent(op)
+        e isa ExprColumn || continue
+        getf(e) === (~) || continue
+        lhs, _ = getargs(e, 2)
+        lhs isa ExprColumn && getf(lhs) === mi || continue
+        inner = only(getargs(lhs))
+        inner isa NamedColumn && push!(out, name(inner))
+    end
+    out
+end
+
+_sb_collect_data!(data, x; skip=Set{Symbol}()) = nothing
+_sb_collect_data!(data, x::NamedColumn; skip=Set{Symbol}()) = begin
+    d = parent(x)
+    if d isa DataColumn && !(name(x) in skip)
+        data[name(x)] = _sb_data_vec(name(x), parent(d))
+    end
+    _sb_collect_data!(data, d; skip)
+end
+_sb_collect_data!(data, x::ExprColumn; skip=Set{Symbol}()) =
+    foreach(a -> _sb_collect_data!(data, a; skip), getargs(x))
 
 stan_code(sb::SBBRMI) = StanBlocks.stan_code(sb.model)
 
@@ -483,7 +530,7 @@ _sb_emit_prior!(_, _, _, _) = false
 _sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lookup()) = begin
     backing = parent(lhs)
     if backing isa DataColumn
-        data[key] = parent(backing)
+        data[key] = _sb_data_vec(key, parent(backing))
         _sb_likelihood!(stmts, key, rhs, data)
     elseif backing isa MissingColumn
         if rhs isa ExprColumn &&
@@ -504,8 +551,15 @@ end
 # response. Mirrors vimpl's `inverse(getf(lhs))` path — any link whose Julia
 # `inverse` is a function with a Stan-known name (log/exp/logit/logistic/
 # sqrt/square, ...) works; unknown links error at transpile time.
+#
+# Special case: `mi(y) ~ <family>(args...)` -- response with missing values
+# modelled jointly. The inner symbol stays as the merged response so other
+# formulas can reference it (e.g. `loc2 = ... + b * y`). See `_sb_emit_mi!`.
 _sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup()) = begin
     f = getf(lhs)
+    if f === mi
+        return _sb_emit_mi!(stmts, data, key, lhs, rhs)
+    end
     inner = only(getargs(lhs))
     inner isa NamedColumn || error("sbimpl: expected NamedColumn inside link, got $(typeof(inner))")
     inv_f = InverseFunctions.inverse(f)
@@ -513,6 +567,73 @@ _sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_loo
     pre_name = Symbol(nameof(f), :_, inner_name)
     _sb_linear_predictor!(stmts, data, pre_name, rhs; id_lookup, brmi_key=key)
     push!(stmts, :($inner_name = $(_sb_julia_to_stan_fn(inv_f))($pre_name)))
+end
+
+# DRAFT: missing-data response handler. Triggered by `mi(y) ~ <family>(args)`.
+#
+# The brms-equivalent generated Stan:
+#   data { int N_obs, N_mis; vector[N_obs] y_obs; int Jobs[N_obs]; int Jmis[N_mis]; }
+#   parameters { vector[N_mis] y_mis; }
+#   transformed parameters { vector[N] y; y[Jobs] = y_obs; y[Jmis] = y_mis; }
+#   model { y ~ family(args...); }
+#
+# The merged `y` keeps the original symbol so downstream formulas
+# (`loc2 = a + b * y`, etc.) reference it transparently. Only handles the
+# response-side case today; predictor-side `mi(x)` (where `x` is a covariate
+# with NAs) needs a paired model formula for `x` and isn't drafted here.
+#
+# OPEN: SLIC parameter declaration without an explicit prior. Today the
+# `_sb_horseshoe`-style pattern declares a param via `raw ~ std_normal()`,
+# but here we want `y_mis` to be a parameter whose only "prior" is the
+# implicit constraint from the joint likelihood `y ~ family(...)` on the
+# merged vector. Need either:
+#   (a) SLIC support for a bare `y_mis::vector[n_mis]` parameter declaration
+#       with no associated sampling statement, OR
+#   (b) emit `y_mis ~ improper_uniform()` (or equivalent) as a no-op prior.
+# Picking (a) below; flagged as TODO so the StanBlocks side can wire it up.
+function _sb_emit_mi!(stmts, data, key, lhs::ExprColumn, rhs)
+    inner = only(getargs(lhs))
+    inner isa NamedColumn || error("sbimpl: `mi(...)` expects a NamedColumn inside, got $(typeof(inner))")
+    inner_name = name(inner)
+    backing    = parent(inner)
+    backing isa DataColumn || error(
+        "sbimpl: `mi($inner_name)` requires a real data column with missings; ",
+        "got backing $(typeof(backing)).")
+    raw = parent(backing)
+    eltype(raw) >: Missing || error(
+        "sbimpl: `mi($inner_name)` requires a column whose eltype admits ",
+        "`missing` (got $(eltype(raw))). If `$inner_name` has no NAs, drop ",
+        "the `mi(...)` wrapper.")
+    obs_mask = .!ismissing.(raw)
+    Jobs = findall(obs_mask)
+    Jmis = findall(.!obs_mask)
+    isempty(Jmis) && error(
+        "sbimpl: `mi($inner_name)` invoked on a column with NO missing values. ",
+        "Drop the `mi(...)` wrapper, or check your data.")
+    elT = nonmissingtype(eltype(raw))
+    y_obs = collect(elT, raw[obs_mask])
+
+    obs_data_key = Symbol(inner_name, :_obs)
+    Jobs_key     = Symbol(:Jobs_, inner_name)
+    Jmis_key     = Symbol(:Jmis_, inner_name)
+    n_mis_key    = Symbol(:n_mis_, inner_name)
+    mis_param    = Symbol(inner_name, :_mis)
+
+    # Stash the split data. n_obs / n_mis fall out of length() in SLIC.
+    data[obs_data_key] = y_obs
+    data[Jobs_key]     = Jobs
+    data[Jmis_key]     = Jmis
+    data[n_mis_key]    = length(Jmis)
+
+    # Emit SLIC body. The merged vector binds to `inner_name` so any
+    # downstream `=` / `~` referencing it sees the assembled response.
+    # `_sb_likelihood!` handles the family lowering exactly as for a
+    # plain data-LHS likelihood.
+    push!(stmts, :($mis_param :: vector[$n_mis_key]))   # TODO(SB): plain param decl
+    push!(stmts, :($inner_name = rep_vector(0.0, num_elements($Jobs_key) + num_elements($Jmis_key))))
+    push!(stmts, :($inner_name[$Jobs_key] = $obs_data_key))
+    push!(stmts, :($inner_name[$Jmis_key] = $mis_param))
+    _sb_likelihood!(stmts, inner_name, rhs, data)
 end
 
 # Map a Julia function (typically the result of `InverseFunctions.inverse(...)`

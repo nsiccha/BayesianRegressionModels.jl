@@ -100,7 +100,7 @@ _ALLOWED_CALLS = Set{Symbol}([
     :InverseGamma, :InverseGaussian, :VonMises, :Pareto,
     :OrderedLogistic, :Categorical,
     :zscale, :center, :standardize, :factor, :offset, :protect,
-    :s, :bs, :t2, :gp, :ar, :ar1, :mo, :mo1,
+    :s, :bs, :t2, :gp, :ar, :ar1, :mo, :mo1, :mi,
     :cbind, :mvbind, :mm, :gr, :dp, :me, :centered,
     :Horseshoe, :ZeroInflatedPoisson, :weighted,
     :length, :unique, :sort, :size, :eltype, :nrow, :ncol,

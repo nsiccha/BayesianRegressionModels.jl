@@ -56,6 +56,11 @@ function protect end
 # paths handle `protect(expr)` without a dedicated dispatch.
 protect(x::Real) = x
 function factor end
+# Missing-data marker. Wraps a response LHS (`mi(y) ~ ...`) to opt into
+# the brms-style observed/imputed split. Backend dispatch lives in
+# `_sb_emit_mi!` (sbimpl); the function itself only needs to exist so
+# the formula parser registers it as an op rather than an unknown call.
+function mi end
 _brm(x::AbstractString; kwargs...) = _brm(Meta.parse("""
 begin
     $x
