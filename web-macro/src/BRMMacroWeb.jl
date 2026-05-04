@@ -2209,7 +2209,8 @@ APPDATA = AppData(; cache_type=:parallel)
     #
     # `force=true` invalidates both caches; gated on `is_htmx(__req__)`
     # so direct reloads don't blow the cache.
-    @get gallery_card(slug::String; force::Bool=false) = begin
+    @get gallery_card(slug; force::Bool=false) = begin
+        slug = String(slug)
         item = let lookup = filter(t -> t[1] == slug, gallery_items())
             isempty(lookup) && return h.article(; class="brm-gallery-card-error")(
                 h.p("Unknown gallery slug: ", h.code(slug)))
