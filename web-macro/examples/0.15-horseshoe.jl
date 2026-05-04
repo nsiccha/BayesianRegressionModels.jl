@@ -1,7 +1,6 @@
-# label: 3.9 spike-and-slab / Horseshoe priors
-# tier: 3
+# label: Horseshoe
+# tier: 0
 # status: open
-# flag: sbbrm
 
 coef_a ~ Horseshoe()
 loc = coef_a * a

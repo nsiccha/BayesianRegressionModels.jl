@@ -94,7 +94,7 @@ _ALLOWED_CALLS = Set{Symbol}([
     :logistic, :logit, :softmax, :logsumexp,
     :log_abs_tanh, :log_square_tanh,
     :Normal, :Poisson, :Binomial, :BinomialLogit, :Bernoulli, :BernoulliLogit, :Beta, :Gamma,
-    :Exponential, :Cauchy, :StudentT, :LogNormal, :Weibull,
+    :Exponential, :Cauchy, :TDist, :LocationScale, :LogNormal, :Weibull,
     :NegativeBinomial, :Geometric, :Laplace, :Uniform,
     :MvNormal, :MixtureModel, :Dirichlet,
     :InverseGamma, :InverseGaussian, :VonMises, :Pareto,
@@ -1514,6 +1514,102 @@ display_name(::MultiContinuousPPC)  = "multi-predictor"
         merge((; data=r.df),
               NamedTuple{reverse(keys(chain))}(Tuple(reverse(vals))))
     end
+
+    """
+    `record_gallery(record_dir, record_base)` — IP. Drives every gallery
+    URL through `compute_steps` to terminal state under per-path
+    progress phases, then dumps the rendered HTML for each via
+    `HTMXObjects.record!` into `record_dir`. Cached by
+    `(record_dir, record_base)`; re-runs on `force=true` from the
+    `polling_fetchindex` caller.
+    """
+    record_gallery(record_dir::String, record_base::String) = begin
+        # Build the per-item path list. Same iteration as the gallery
+        # view; recording covers shell + per-card endpoints.
+        examples_dir_local = examples_dir
+        items = let xs = []
+            isdir(examples_dir_local) || mkpath(examples_dir_local)
+            files = sort(filter(endswith(".jl"),
+                                readdir(examples_dir_local; join=true));
+                         by=mtime, rev=true)
+            for path in files
+                lines = readlines(path)
+                header = Dict{String,String}()
+                i = 1
+                while i <= length(lines)
+                    m = match(r"^# (\w+):\s*(.*)$", lines[i])
+                    m === nothing && break
+                    header[m[1]] = m[2]
+                    i += 1
+                end
+                # Skip headers' `#= ... =#` markdown body
+                if i <= length(lines) && strip(lines[i]) == "#="
+                    i += 1
+                    while i <= length(lines) && strip(lines[i]) != "=#"
+                        i += 1
+                    end
+                    i <= length(lines) && (i += 1)
+                end
+                formula_text = strip(join(lines[i:end], '\n'))
+                isempty(formula_text) && continue
+                slug  = replace(basename(path), r"\.jl$" => "")
+                label = get(header, "label", basename(path))
+                push!(xs, (; slug, label, formula=String(formula_text)))
+            end
+            xs
+        end
+
+        # Static paths -- gallery shell, library, plus per-card content.
+        static_paths = ["/pipeline/gallery", "/library"]
+        card_paths   = ["/pipeline/gallery_card/$(it.slug)" for it in items]
+        all_paths    = vcat(static_paths, card_paths)
+        phases = [prepare_progress!(__status__; description=p) for p in all_paths]
+
+        # Pre-warm compute_steps for each item so that when record! hits
+        # the URL the response is the cached terminal HTML rather than a
+        # polling fragment. Lookup uses the same cache key as the route.
+        for (it, phase) in zip(items, phases[length(static_paths)+1:end])
+            with_prepared_progress(phase) do _
+                ns = context(it.label, it.formula).namespace
+                fetchindex!(__status__, compute_steps,
+                            it.formula, ns, :stan_fit_pathfinder)
+            end
+        end
+
+        isdir(record_dir) || mkpath(record_dir)
+        # `HTMXObjects.record!` re-`route!`s the app with recording closures;
+        # the live registration is clobbered while this loop runs, so
+        # restore via plain `route!(app)` in `finally`. Fresh AppContext
+        # instance per record run -- each is per-request anyway.
+        app = AppContext()
+        HTMXObjects.route!(app; record_dir, record_base)
+        router = HTMXObjects.CONTEXT[].service.router
+        try
+            for (path, phase) in zip(static_paths, phases[1:length(static_paths)])
+                with_prepared_progress(phase) do _
+                    HTMXObjects._drive_record_path(router, path, Pair{String,String}[])
+                    HTMXObjects._drive_record_path(router, path, ["HX-Request" => "true"])
+                end
+            end
+            # Card paths were progress-warmed above; this loop just dumps.
+            for path in card_paths
+                HTMXObjects._drive_record_path(router, path, Pair{String,String}[])
+                HTMXObjects._drive_record_path(router, path, ["HX-Request" => "true"])
+            end
+        finally
+            HTMXObjects.route!(app)
+        end
+
+        n_html = 0; n_other = 0
+        for (root, _, fs) in walkdir(record_dir)
+            for f in fs
+                ext = lowercase(splitext(f)[2])
+                ext == ".html" ? (n_html += 1) : (n_other += 1)
+            end
+        end
+        (; n_html, n_other, n_paths=length(all_paths), n_items=length(items),
+           record_dir, record_base)
+    end
 end
 
 APPDATA = AppData(; cache_type=:parallel)
@@ -1534,26 +1630,16 @@ APPDATA = AppData(; cache_type=:parallel)
         context(label, formula)
     end
 
-    # Pre-canned formulas, hoisted from the inner `render` block so the
-    # gallery route below can iterate them without going through render.
-    presets_list = [
-        "min"      => "loc ~ 1\nlog(err) ~ 1\ny1 ~ Normal(loc, err)\n",
-        "linear"   => "loc ~ 1 + a\nlog(err) ~ 1\ny1 ~ Normal(loc, err)\n",
-        "multi-lin" => "loc ~ 1 + a + b + c + d\nlog(err) ~ 1\ny1 ~ Normal(loc, err)\n",
-        "categorical" => "loc ~ 1 + c1\nlog(err) ~ 1\ny1 ~ Normal(loc, err)\n",
-        "random intercept" => "loc ~ 1 + a + (1 | g1)\nlog(err) ~ 1\ny1 ~ Normal(loc, err)\n",
-        "random slope" => "loc ~ 1 + (1 + a | g1)\nlog(err) ~ 1\ny1 ~ Normal(loc, err)\n",
-        "categorical random slope" => "loc ~ 1 + (1 + c1 | g1)\nlog(err) ~ 1\ny1 ~ Normal(loc, err)\n",
-        "multiple groups" => "loc ~ 1 + a + (1 | g1) + (1 | g2)\nlog(err) ~ 1\ny1 ~ Normal(loc, err)\n",
-        "distributional" => "loc ~ 1 + a\nlog(err) ~ 1 + b\ny1 ~ Normal(loc, err)\n",
-        "Poisson" => "log_rate ~ 1 + a + (1 | g1)\nk1 ~ Poisson(exp(log_rate))\n",
-        "Binomial" => "log_odds ~ 1 + a + (1 | g1)\nbin_succ ~ BinomialLogit(bin_n, log_odds)\n",
-        "Bernoulli" => "log_odds ~ 1 + a + (1 | g1)\nbin_y ~ BernoulliLogit(log_odds)\n",
-        "cbpp + therapeutic touch" => "log_odds_bin ~ 1 + c1 + (1 | g1)\nbin_succ ~ BinomialLogit(bin_n, log_odds_bin)\n\nlog_odds_b ~ 1 + (1 | g1)\nbin_y ~ BernoulliLogit(log_odds_b)\n",
-        "ZIP" => "log_rate ~ 1 + a\nlogit(zi) ~ 1\nk1 ~ ZeroInflatedPoisson(exp(log_rate), zi)\n",
-        "Horseshoe" => "coef_a ~ Horseshoe()\nloc = coef_a * a\ny1 ~ Normal(loc, 1)\n",
-        "GP (HSGP)" => "loc ~ 1 + a + gp(b; k=20, c=1.5)\ny1 ~ Normal(loc, 1)\n",
-        "OrderedLogistic" => "loc ~ 1 + a\nc1 ~ OrderedLogistic(loc)\n",
+    # Single source of truth for gallery + preset buttons. Returns
+    # `(slug, label, formula, tier)` tuples sourced from
+    # `web-macro/examples/*.jl` via the existing example_store.
+    # Tier 0 = quick-fill presets (the buttons in the formula editor +
+    # the "Presets" gallery section). Tier 1-3 = file-based examples.
+    # Files with no formula body (markdown-only notes) are skipped.
+    gallery_items() = [
+        (e.slug, e.label, e.formula, e.tier)
+        for e in __parent__.examples.example_store.entries()
+        if !isnothing(e.formula)
     ]
 
     # Per-step HTML rendering. `getproperty(render, step_key)(value)` emits the
@@ -1842,10 +1928,9 @@ APPDATA = AppData(; cache_type=:parallel)
         end
     end
 
-    # Pre-canned formulas: presets_list lives on PipelineRoutes so the
-    # gallery can iterate them too. Append the "everything" stack here
-    # since it pulls default_formula from the @struct render scope.
-    presets = vcat(presets_list, ["everything" => default_formula])
+    # Tier-0 entries are the in-page quick-fill preset buttons (the same
+    # ones that show up in the gallery's Presets section).
+    presets = [(label, formula) for (_, label, formula, tier) in gallery_items() if tier == 0]
 
     # `formula` is the preset's preset-text; the outer `formula` (the
     # @param) is shadowed here. `__parent__.formula` reaches the page's
@@ -2104,88 +2189,113 @@ APPDATA = AppData(; cache_type=:parallel)
 
     @get stan = h.pre(context!().run.stan.src)
 
-    # PPC gallery card -- runs the pipeline through stan_fit_pathfinder
-    # via the same `polling_fetchindex` infrastructure the stage buttons
-    # use, so the user sees the progress treebar during compile + fit.
-    # Once finished, the do-block extracts `posterior_full_long_df` from
-    # the result and renders just the auto-PPC section (no surrounding
-    # tabs / wide-table). Caching is shared with the main pipeline page
-    # because polling_fetchindex keys on (formula, namespace, step).
-    # `force=true` (sent by the card's Rerun button) bypasses both the
-    # rendered-HTML cache AND the polling_fetchindex result cache, so the
-    # whole pipeline re-runs from scratch. Gated on `is_htmx(__req__)` so
-    # bookmarking / direct reload of `?force=true` doesn't unnecessarily
-    # blow the cache; only an HTMX-triggered button click forces.
-    @get ppc(; force::Bool=false) = begin
-        ns = context!().namespace
-        do_force = force && is_htmx(__req__)
-        do_force && delete!(__appdata__.ppc_html_cache, (hash(formula), ns))
+    # Gallery card content for one example/preset, addressed by slug.
+    # Path-based (`/pipeline/gallery_card/<slug>`) so static-deploy
+    # recording works -- query-string URLs lose their differentiator
+    # when GitHub Pages strips the query before file lookup.
+    #
+    # The slug -> formula lookup goes through `gallery_items()`, which
+    # walks `web-macro/examples/*.jl` for tier-tagged entries. Formula
+    # is set up under the example's namespace (so `bruno-*` items get
+    # `dataset_extras(::Val{:bruno}, df)` extras) and run through
+    # `compute_steps` to terminal state via `polling_fetchindex` --
+    # same machinery the stage buttons use, so the user sees the
+    # progress treebar during compile + fit.
+    #
+    # The rendered card contains: input formula, SLIC body, Stan source,
+    # auto-PPC section. The whole card is one self-contained HTML
+    # response, recorded as `live-brm/pipeline/gallery_card/<slug>.html`
+    # for static deploy.
+    #
+    # `force=true` invalidates both caches; gated on `is_htmx(__req__)`
+    # so direct reloads don't blow the cache.
+    @get gallery_card(slug::String; force::Bool=false) = begin
+        item = let lookup = filter(t -> t[1] == slug, gallery_items())
+            isempty(lookup) && return h.article(; class="brm-gallery-card-error")(
+                h.p("Unknown gallery slug: ", h.code(slug)))
+            only(lookup)
+        end
+        item_slug, item_label, item_formula, _ = item
+        ctx       = context(item_label, item_formula)
+        ns        = ctx.namespace
+        cache_key = (hash(item_formula), ns)
+        do_force  = force && is_htmx(__req__)
+        do_force && delete!(__appdata__.ppc_html_cache, cache_key)
         polling_fetchindex(
-            compute_steps, formula, ns, :stan_fit_pathfinder;
-            poll_url=query_url(__self__/"ppc"; formula, label),
-            label="PPC - $(isempty(label) ? "preset" : label)",
+            compute_steps, item_formula, ns, :stan_fit_pathfinder;
+            poll_url=query_url(__self__/"gallery_card/$item_slug"),
+            label="Gallery card - $item_label",
             force=do_force,
-        ) do result
-            get!(__appdata__.ppc_html_cache, (hash(formula), ns)) do
-                try
-                    full_long = result.stan_fit_pathfinder.full_long
-                    ppc_div = render.build_ppc_section(full_long, :posterior;
-                                                       id_prefix="brm-gallery-$(hash(formula))")
-                    isnothing(ppc_div) ? h.p("(no PPC kind detected)";
-                                             class="brm-gallery-empty") : ppc_div
-                catch e
-                    h.pre(class="brm-gallery-error")(
-                        first(sprint(showerror, e), 600))
-                end
+        ) do _result
+            get!(__appdata__.ppc_html_cache, cache_key) do
+                # All four panels share the same finished `run`. Stan
+                # source materialisation is cheap once compute_steps
+                # has run; SLIC body is even cheaper.
+                run        = ctx.run
+                full_long  = run.stan.posterior_full_long_df
+                ppc_div    = render.build_ppc_section(full_long, :posterior;
+                                                      id_prefix="brm-gallery-$item_slug")
+                ppc_div    = isnothing(ppc_div) ?
+                    h.p("(no PPC kind detected)"; class="brm-gallery-empty") :
+                    ppc_div
+                pipeline_url = string(query_url(__self__/""; formula=item_formula, label=item_label))
+                h.article(; class="brm-gallery-card")(
+                    h.header(; class="brm-gallery-card-header")(
+                        h.strong(item_label; class="brm-gallery-card-title"),
+                        h.a(" ↗"; href=pipeline_url, target="_blank",
+                            class="brm-gallery-card-link",
+                            title="Open in pipeline"),
+                    ),
+                    h.details(; class="brm-gallery-card-formula", open=true)(
+                        h.summary("Formula"),
+                        h.pre(item_formula),
+                    ),
+                    h.details(; class="brm-gallery-card-slic")(
+                        h.summary("SLIC model"),
+                        h.pre(string(run.sbbrmi.model.model)),
+                    ),
+                    h.details(; class="brm-gallery-card-stan")(
+                        h.summary("Stan source"),
+                        h.pre(run.stan.src),
+                    ),
+                    ppc_div,
+                )
             end
         end
     end
 
-    # Auto-PPC gallery: card grid showing one PPC plot per preset.
-    # Lazy-loaded via HTMX `intersect once` so off-screen cards don't
-    # trigger Stan compiles. Each card's URL hits `/pipeline/ppc?formula=...`
-    # which returns just the PPC section (full pipeline runs in the
-    # cached background). Card style mirrors AoV's compact gallery.
+    # Gallery shell: card grid where each card is a placeholder div
+    # that lazy-loads `/pipeline/gallery_card/<slug>` on click.
+    # Path-based (`<slug>` from the example file basename) so the
+    # static-deploy recordings can serve the same URLs as files.
+    # The lazy-load target returns the full card content (formula,
+    # SLIC body, Stan source, PPC). One round-trip per card; one
+    # static-recorded HTML file per card.
     @get gallery = begin
-        # Source the same preset list the pipeline form uses. Defined
-        # later in PipelineRoutes; reach it via `__self__`.
-        gallery_card(card_label, formula_text) = begin
-            ppc_url       = string(query_url(__self__/"ppc"; formula=formula_text, label=""))
-            ppc_force_url = string(query_url(__self__/"ppc"; formula=formula_text, label="", force=true))
-            pipeline_url  = string(query_url(__self__/""; formula=formula_text))
-            ppc_target_id = "brm-card-ppc-$(hash((card_label, formula_text)))"
+        card_shell(slug, label, formula) = begin
+            target_id    = "brm-card-content-$slug"
+            card_url     = string(query_url(__self__/"gallery_card/$slug"))
+            force_url    = string(query_url(__self__/"gallery_card/$slug"; force=true))
             h.article(; class="brm-gallery-card")(
                 h.header(; class="brm-gallery-card-header")(
-                    h.strong(card_label; class="brm-gallery-card-title"),
-                    h.a(" ↗"; href=pipeline_url,
-                        target="_blank",
-                        class="brm-gallery-card-link",
-                        title="Open in pipeline"),
+                    h.strong(label; class="brm-gallery-card-title"),
                 ),
-                h.details(; class="brm-gallery-card-formula")(
-                    h.summary("Formula"),
-                    h.pre(formula_text)
-                ),
-                # Click-to-fetch: the inner <div> only fires hx-get when the
-                # surrounding <details> first toggles open. `once` keeps it
-                # from re-fetching on every collapse/expand. Mirrors Bruno's
-                # qt detail pattern -- nothing runs until the user opts in.
-                # The Rerun button targets `#$ppc_target_id` with force=true,
-                # which clears both the rendered-HTML cache and the
-                # polling_fetchindex result and re-runs the pipeline.
-                # `brm-ppc-toggle` is the load-all bulk-action target.
+                # Click-to-fetch: setting `open=true` programmatically
+                # (e.g. via the "Load all" bulk button) fires the DOM
+                # `toggle` event the inner div listens for. `once`
+                # keeps it from re-fetching on collapse/expand.
                 h.details(; class="brm-ppc-toggle brm-gallery-card-toggle")(
-                    h.summary("Show PPC plot"),
+                    h.summary("Show details"),
                     h.div(; class="brm-rerun-bar")(
                         h.button("Rerun";
                             type="button", class="outline brm-rerun-btn",
-                            hx_get=ppc_force_url,
-                            hx_target="#$ppc_target_id",
+                            hx_get=force_url,
+                            hx_target="#$target_id",
                             hx_swap="innerHTML",
                             title="Discard cached fit + render and re-run from scratch"),
                     ),
-                    h.div(; id=ppc_target_id, class="brm-ppc-target",
-                        hx_get=ppc_url,
+                    h.div(; id=target_id, class="brm-ppc-target",
+                        hx_get=card_url,
                         hx_trigger="toggle once from:closest details",
                         hx_swap="innerHTML",
                     )(
@@ -2195,24 +2305,24 @@ APPDATA = AppData(; cache_type=:parallel)
                 ),
             )
         end
-        # File-based examples (web-macro/examples/*.jl). Skip entries
-        # with no formula -- those are markdown-only notes.
-        example_pairs = [(e.label, e.formula)
-                         for e in __parent__.examples.example_store.entries()
-                         if !isnothing(e.formula)]
+        items = gallery_items()
+        local tier0_items = [(s, l, f) for (s, l, f, t) in items if t == 0]
+        local tier1plus   = [(s, l, f) for (s, l, f, t) in items if t > 0]
         h.div(
-            h.h1("PPC gallery"),
+            h.h1("Gallery"),
             h.p(
-                "Auto-PPC card per preset and per example file. Click 'Show PPC plot' ",
-                "to kick off the Stan compile + fit (cached per formula for the ",
-                "server's lifetime). Nothing runs until you open a card.",
+                "One card per preset / example, lazy-loaded on click. ",
+                "Each card shows the input formula, the SLIC submodel ",
+                "body, the transpiled Stan source, and the auto-PPC plot. ",
+                "First open of a fresh formula pays a Stan compile + fit ",
+                "(~30s); subsequent opens are cached.",
             ),
-            # Bulk action: open every card's PPC details. Setting `open`
-            # programmatically fires the DOM `toggle` event, which the
-            # cards' inner divs are listening for via `hx-trigger="toggle
-            # once from:closest details"`. So one click cascades all the
-            # lazy-loads. Stan compiles are still serialized server-side
-            # (stan_compile_global_lock), so this won't OOM strato.
+            # Bulk action: open every card's details element. Setting
+            # `open` programmatically fires the DOM `toggle` event, which
+            # the inner divs are listening for via
+            # `hx-trigger="toggle once from:closest details"`. Stan
+            # compiles are serialized server-side
+            # (stan_compile_global_lock), so this won't OOM the box.
             h.div(; class="brm-load-all-bar")(
                 h.button("Load all";
                     type="button", class="outline brm-load-all-btn",
@@ -2221,11 +2331,11 @@ APPDATA = AppData(; cache_type=:parallel)
             ),
             h.h2("Presets"; class="brm-gallery-section-heading"),
             h.div(; class="brm-gallery-grid")(
-                [gallery_card(lbl, body) for (lbl, body) in __self__.presets_list]...
+                [card_shell(s, l, f) for (s, l, f) in tier0_items]...
             ),
-            h.h2("Examples"; class="brm-gallery-section-heading brm-gallery-section")(),
+            h.h2("Examples"; class="brm-gallery-section-heading brm-gallery-section"),
             h.div(; class="brm-gallery-grid")(
-                [gallery_card(lbl, body) for (lbl, body) in example_pairs]...
+                [card_shell(s, l, f) for (s, l, f) in tier1plus]...
             ),
         )
     end
@@ -2364,6 +2474,48 @@ y1 ~ Normal(loc, err)
     @get reset = begin
         clear_mem_caches!(__appdata__)
         h.p("In-memory caches cleared.")
+    end
+
+    # GET `/record_gallery` — drive the AppData IP to dump every gallery
+    # URL (gallery shell + library + per-card content × full + HX shapes)
+    # into `docs/src/public/live-brm/`. Long-running (Stan compile + fit
+    # per item, serialised), so it goes through `polling_fetchindex`:
+    # first hit kicks off a Task and returns a polling progress fragment;
+    # subsequent polls show the per-path `prepare_progress!` markers;
+    # when finished, the do-block renders the summary article.
+    #
+    # Override the deploy URL prefix via `RECORD_BASE_PREFIX` env var
+    # (default `/BayesianRegressionModels.jl/dev/live-brm`); override
+    # the output directory via the `record_dir` query param.
+    @get record_gallery(; record_dir::String="", record_base::String="", force::Bool=false) = begin
+        rd = isempty(record_dir) ?
+            joinpath(dirname(dirname(@__DIR__)), "docs", "src", "public", "live-brm") :
+            record_dir
+        rb = isempty(record_base) ?
+            get(ENV, "RECORD_BASE_PREFIX", "/BayesianRegressionModels.jl/dev/live-brm") :
+            record_base
+        polling_fetchindex(__appdata__.record_gallery, rd, rb;
+                           poll_url=query_url(__self__/"record_gallery"; record_dir=rd, record_base=rb),
+                           label="Recording BRM gallery",
+                           force) do summary
+            h.article(
+                h.header(h.h2("Gallery recorded")),
+                h.p("Wrote ", h.code(string(summary.n_paths)),
+                    " routes (× full + HX shapes) into ",
+                    h.code(summary.record_dir), "."),
+                h.ul(
+                    h.li(h.code(string(summary.n_html)),  " .html"),
+                    h.li(h.code(string(summary.n_other)), " other"),
+                    h.li(h.code(string(summary.n_items)), " gallery items"),
+                ),
+                h.p(h.strong("Next: "),
+                    h.code("git add docs/src/public/live-brm && git commit && git push"),
+                    " — CI deploys the rest."),
+                h.p("Re-record (overwrites cache): ",
+                    h.a("/record_gallery?force=true";
+                        href=__self__/"record_gallery?force=true")),
+            )
+        end
     end
 
     @include pipeline = PipelineRoutes()

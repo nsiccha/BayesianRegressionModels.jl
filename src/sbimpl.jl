@@ -564,7 +564,72 @@ _sb_emit_prior!(stmts, target, ::Type{<:Horseshoe}, _) = begin
     push!(stmts, :($target ~ _sb_horseshoe()))
     true
 end
+# Generic scalar prior via a Distributions.jl constructor on the RHS
+# (e.g. `coef_a ~ Normal(0, 0.1)`). Reuses the same family -> Stan-name
+# table the likelihood path uses (`_sb_stan_dist_name`), so adding a
+# new family extends both paths in one place. Args are literals or
+# already-bound parameter symbols (no data materialisation in prior
+# context), so we walk them directly without dragging in the full
+# `_sb_scalar_expr` reducer.
+function _sb_emit_prior!(stmts, target, ::Type{D}, op) where {D <: Distribution}
+    stan_name = _sb_stan_dist_name(D)
+    isnothing(stan_name) && return false
+    arg_exprs = map(_sb_prior_arg, _sb_stan_dist_args(D, getargs(op)))
+    push!(stmts, Expr(:call, :~, target, Expr(:call, stan_name, arg_exprs...)))
+    true
+end
 _sb_emit_prior!(_, _, _, _) = false
+
+# `LocationScale(mu, sigma, base)` is Distributions.jl's generic
+# location-scale wrapper (alias for `AffineDistribution`). Useful
+# specifically for distributions that don't take location/scale args
+# natively -- in BRM today that's `TDist`. Compose:
+#   coef ~ LocationScale(0, 0.1, TDist(3))  =>  coef ~ student_t(3, 0, 1) re-args'd to (3, 0, 0.1)
+# i.e. the same effect as if Stan's `student_t` took (nu, mu, sigma).
+# Unwraps the base distribution and reuses the existing per-family
+# dispatch with the LocationScale's mu/sigma threaded in.
+function _sb_emit_prior!(stmts, target, ::Type{<:LocationScale}, op)
+    mu, sigma, base = getargs(op, 3)
+    base isa ExprColumn || error(
+        "sbimpl: `LocationScale(...)` third arg must be a distribution call, got $(typeof(base))")
+    base_fam = getf(base)
+    base_fam isa Type && base_fam <: Distribution || error(
+        "sbimpl: `LocationScale` base must be a Distribution type, got $(base_fam)")
+    stan_name = _sb_stan_dist_name(base_fam)
+    isnothing(stan_name) && error(
+        "sbimpl: `LocationScale` over `$(base_fam)` -- no Stan-name mapping ",
+        "for the base. Add a `_sb_stan_dist_name(::Type{<:$(base_fam)})` entry.")
+    base_args = _sb_stan_dist_args(base_fam, getargs(base))
+    # Stan's standard univariate dists put (location, scale) at
+    # positions 2-3 (e.g. `student_t(nu, mu, sigma)`). The arg-shape
+    # transform on the base already pads to that layout (TDist(nu) ->
+    # (nu, 0, 1)). Replace those defaults with the LocationScale wrapper's
+    # values; if the base call already supplied non-default location/scale,
+    # composing them is the user's job (LocationScale(0.1, 2.0, Normal(5, 0.3))
+    # would otherwise silently overwrite the inner 5 / 0.3).
+    length(base_args) >= 3 || error(
+        "sbimpl: `LocationScale` over `$(base_fam)`: base lowers to ",
+        "$(length(base_args)) Stan args, need >= 3 for location/scale slots.")
+    composed = (base_args[1], mu, sigma, base_args[4:end]...)
+    arg_exprs = map(_sb_prior_arg, composed)
+    push!(stmts, Expr(:call, :~, target, Expr(:call, stan_name, arg_exprs...)))
+    true
+end
+
+# Prior-arg lowering. Literals pass through; bare-Symbol references
+# (already-bound parameter names) pass through; nested expressions
+# recursively lower. Anything else (e.g. a data-column NamedColumn) is
+# rejected -- prior args should be literal hyperparameters or
+# already-declared scalar params.
+_sb_prior_arg(x::Real) = x
+_sb_prior_arg(x::Symbol) = x
+_sb_prior_arg(x::NamedColumn) = let d = parent(x)
+    d isa MissingColumn ? name(x) : error(
+        "sbimpl: prior arg `$(name(x))` is backed by $(typeof(d)); ",
+        "prior args must be literals or already-declared scalar parameters.")
+end
+_sb_prior_arg(x::ExprColumn) = Expr(:call, getf(x), map(_sb_prior_arg, getargs(x))...)
+_sb_prior_arg(x) = error("sbimpl: unsupported prior-arg shape $(typeof(x))")
 
 # LHS backed by real data => this is a likelihood. Record the observed values
 # under the formula name in `data` and emit `key ~ dist(args...)`.
@@ -1603,16 +1668,53 @@ function _sb_lik_family!(stmts, target, ::Type{<:OrderedLogistic}, args::Tuple{A
     eta_expr = _sb_scalar_expr(args[1], data)
     push!(stmts, :($target ~ ordered_logistic($eta_expr, $cut_name)))
 end
-_sb_lik_family!(stmts, target, ::Type{<:Normal},           args::Tuple{Any,Any}, data) = _sb_lik_stan!(stmts, target, :normal,       args, data)
-_sb_lik_family!(stmts, target, ::Type{<:Bernoulli},        args::Tuple{Any},     data) = _sb_lik_stan!(stmts, target, :bernoulli,    args, data)
-_sb_lik_family!(stmts, target, ::Type{<:BernoulliLogit},   args::Tuple{Any},     data) = _sb_lik_stan!(stmts, target, :bernoulli_logit, args, data)
-_sb_lik_family!(stmts, target, ::Type{<:Binomial},         args::Tuple{Any,Any}, data) = _sb_lik_stan!(stmts, target, :binomial,     args, data)
-_sb_lik_family!(stmts, target, ::Type{<:BinomialLogit},    args::Tuple{Any,Any}, data) = _sb_lik_stan!(stmts, target, :binomial_logit, args, data)
-_sb_lik_family!(stmts, target, ::Type{<:Poisson},          args::Tuple{Any},     data) = _sb_lik_stan!(stmts, target, :poisson,      args, data)
-_sb_lik_family!(stmts, target, ::Type{<:ZeroInflatedPoisson}, args::Tuple{Any,Any}, data) = _sb_lik_stan!(stmts, target, :zero_inflated_poisson, args, data)
-_sb_lik_family!(stmts, target, ::Type{<:Gamma},            args::Tuple{Any,Any}, data) = _sb_lik_stan!(stmts, target, :gamma,        args, data)
-_sb_lik_family!(stmts, target, ::Type{<:NegativeBinomial}, args::Tuple{Any,Any}, data) = _sb_lik_stan!(stmts, target, :neg_binomial, args, data)
-_sb_lik_family!(stmts, target, ::Type{<:Beta},             args::Tuple{Any,Any}, data) = _sb_lik_stan!(stmts, target, :beta,         args, data)
+# Single source of truth: Julia Distribution type -> Stan distribution
+# function name. Both the likelihood path (`_sb_lik_family!` below) and
+# the scalar-prior path (`_sb_emit_prior!` above) consult this. Adding
+# a new family adds one entry here and both routes pick it up.
+_sb_stan_dist_name(::Type{<:Normal})              = :normal
+_sb_stan_dist_name(::Type{<:Cauchy})              = :cauchy
+# Distributions.jl's `TDist(nu)` is 1-arg (df only); Stan's `student_t`
+# is 3-arg (nu, mu, sigma). The name maps directly; the arg-shape
+# adjustment is the `_sb_stan_dist_args` override below.
+_sb_stan_dist_name(::Type{<:TDist})               = :student_t
+_sb_stan_dist_name(::Type{<:Exponential})         = :exponential
+_sb_stan_dist_name(::Type{<:Gamma})               = :gamma
+_sb_stan_dist_name(::Type{<:Beta})                = :beta
+_sb_stan_dist_name(::Type{<:Uniform})             = :uniform
+_sb_stan_dist_name(::Type{<:LogNormal})           = :lognormal
+_sb_stan_dist_name(::Type{<:Laplace})             = :double_exponential
+_sb_stan_dist_name(::Type{<:Weibull})             = :weibull
+_sb_stan_dist_name(::Type{<:InverseGamma})        = :inv_gamma
+_sb_stan_dist_name(::Type{<:Bernoulli})           = :bernoulli
+_sb_stan_dist_name(::Type{<:BernoulliLogit})      = :bernoulli_logit
+_sb_stan_dist_name(::Type{<:Binomial})            = :binomial
+_sb_stan_dist_name(::Type{<:BinomialLogit})       = :binomial_logit
+_sb_stan_dist_name(::Type{<:Poisson})             = :poisson
+_sb_stan_dist_name(::Type{<:ZeroInflatedPoisson}) = :zero_inflated_poisson
+_sb_stan_dist_name(::Type{<:NegativeBinomial})    = :neg_binomial
+_sb_stan_dist_name(::Type) = nothing
+
+# Per-family arg shape adjustment between Julia call args and Stan call
+# args. Default: pass through unchanged. Override when Julia's
+# constructor signature differs from Stan's distribution signature.
+_sb_stan_dist_args(::Type, args) = args
+# `TDist(nu)` -> Stan `student_t(nu, 0, 1)`. Pads location/scale defaults.
+_sb_stan_dist_args(::Type{<:TDist}, args::Tuple{Any}) = (args[1], 0, 1)
+
+# Default: look up the Stan name from the table and emit
+# `target ~ <stan-name>(<lowered-args>...)` via `_sb_lik_stan!`. Families
+# that need bespoke handling (custom args, side effects, mangled
+# arities) override on a more-specific signature -- see OrderedLogistic
+# above.
+_sb_lik_family!(stmts, target, ::Type{D}, args, data) where {D <: Distribution} =
+    let stan_name = _sb_stan_dist_name(D)
+        isnothing(stan_name) && error(
+            "sbimpl: likelihood family `$(D)` not supported yet -- ",
+            "no `_sb_stan_dist_name` entry. Add one (and a `_sb_stan_dist_args` ",
+            "override if its args don't lower verbatim).")
+        _sb_lik_stan!(stmts, target, stan_name, _sb_stan_dist_args(D, args), data)
+    end
 
 _sb_lik_family!(stmts, target, fam, args, _) =
     error("sbimpl: likelihood family `$fam` (arity $(length(args))) not supported yet")

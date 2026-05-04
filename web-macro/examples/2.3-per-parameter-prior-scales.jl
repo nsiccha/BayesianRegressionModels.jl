@@ -3,5 +3,5 @@
 # status: deprioritized
 
 coef_a ~ Normal(0, 0.1)
-loc ~ coef_a * a
+loc = coef_a * a
 y1 ~ Normal(loc, 1)
