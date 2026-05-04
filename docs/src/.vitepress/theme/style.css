@@ -1,0 +1,4 @@
+/* Minimal theme overrides for BRM docs. Most styling comes from
+ * VitePress's default theme; the gallery embed styling lives in the
+ * gallery.md page or in BRM's own brm-macro.css served via the
+ * /live-brm proxy. */
