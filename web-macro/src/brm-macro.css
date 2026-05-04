@@ -95,3 +95,44 @@
 }
 .brm-sort-pill.active { background: #4a7c59; color: white; }
 .brm-sort-pill:active { cursor: grabbing; }
+
+/* PPC gallery (/pipeline/gallery) */
+.brm-gallery-section { margin-top: 1.5rem; }
+.brm-gallery-section-heading { font-size: 1.1em; margin-top: 1rem; }
+.brm-load-all-bar { margin: 0.5rem 0; }
+.brm-load-all-btn { font-size: 0.85em; }
+.brm-gallery-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr));
+    gap: 0.75rem;
+}
+.brm-gallery-card { margin: 0; padding: 0.5rem; min-width: 0; overflow: hidden; }
+.brm-gallery-card-header { padding: 0 0 0.25rem; margin: 0; }
+.brm-gallery-card-title { font-size: 0.9em; }
+.brm-gallery-card-link {
+    font-size: 0.8em; margin-left: 0.3em; text-decoration: none;
+}
+.brm-gallery-card-formula { margin: 0.25rem 0; font-size: 0.75em; }
+.brm-gallery-card-formula pre { font-size: 0.85em; margin: 0; }
+.brm-gallery-card-toggle { margin: 0.25rem 0; }
+.brm-gallery-card-toggle summary { cursor: pointer; }
+.brm-rerun-bar { display: flex; gap: 0.5rem; margin: 0.25rem 0; }
+.brm-rerun-btn { font-size: 0.75em; padding: 0.1rem 0.4rem; }
+.brm-ppc-target { min-height: 8rem; }
+.brm-ppc-loading {
+    color: var(--pico-muted-color); font-size: 0.8em; margin: 0;
+}
+
+/* SLIC submodel library (/library) */
+.brm-library-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(28rem, 1fr));
+    gap: 0.75rem;
+}
+.brm-library-card { margin: 0; padding: 0.75rem; }
+.brm-library-card-header { padding: 0 0 0.25rem; margin: 0; }
+.brm-library-card-name { font-family: monospace; }
+.brm-library-card-body { margin: 0.25rem 0; font-size: 0.75em; }
+.brm-library-card-body pre {
+    font-size: 0.85em; margin: 0; max-height: 30rem; overflow: auto;
+}

@@ -2154,19 +2154,17 @@ APPDATA = AppData(; cache_type=:parallel)
             ppc_force_url = string(query_url(__self__/"ppc"; formula=formula_text, label="", force=true))
             pipeline_url  = string(query_url(__self__/""; formula=formula_text))
             ppc_target_id = "brm-card-ppc-$(hash((card_label, formula_text)))"
-            h.article(;
-                style="margin:0; padding:0.5rem; min-width:0; overflow:hidden;",
-            )(
-                h.header(; style="padding:0 0 0.25rem; margin:0;")(
-                    h.strong(card_label; style="font-size:0.9em;"),
+            h.article(; class="brm-gallery-card")(
+                h.header(; class="brm-gallery-card-header")(
+                    h.strong(card_label; class="brm-gallery-card-title"),
                     h.a(" ↗"; href=pipeline_url,
                         target="_blank",
-                        style="font-size:0.8em; margin-left:0.3em; text-decoration:none;",
+                        class="brm-gallery-card-link",
                         title="Open in pipeline"),
                 ),
-                h.details(; style="margin:0.25rem 0; font-size:0.75em;")(
+                h.details(; class="brm-gallery-card-formula")(
                     h.summary("Formula"),
-                    h.pre(formula_text; style="font-size:0.85em; margin:0;")
+                    h.pre(formula_text)
                 ),
                 # Click-to-fetch: the inner <div> only fires hx-get when the
                 # surrounding <details> first toggles open. `once` keeps it
@@ -2175,25 +2173,24 @@ APPDATA = AppData(; cache_type=:parallel)
                 # The Rerun button targets `#$ppc_target_id` with force=true,
                 # which clears both the rendered-HTML cache and the
                 # polling_fetchindex result and re-runs the pipeline.
-                h.details(; style="margin:0.25rem 0;")(
-                    h.summary("Show PPC plot"; style="cursor:pointer;"),
-                    h.div(; style="display:flex; gap:0.5rem; margin:0.25rem 0;")(
+                # `brm-ppc-toggle` is the load-all bulk-action target.
+                h.details(; class="brm-ppc-toggle brm-gallery-card-toggle")(
+                    h.summary("Show PPC plot"),
+                    h.div(; class="brm-rerun-bar")(
                         h.button("Rerun";
-                            type="button", class="outline",
-                            style="font-size:0.75em; padding:0.1rem 0.4rem;",
+                            type="button", class="outline brm-rerun-btn",
                             hx_get=ppc_force_url,
                             hx_target="#$ppc_target_id",
                             hx_swap="innerHTML",
                             title="Discard cached fit + render and re-run from scratch"),
                     ),
-                    h.div(; id=ppc_target_id,
+                    h.div(; id=ppc_target_id, class="brm-ppc-target",
                         hx_get=ppc_url,
                         hx_trigger="toggle once from:closest details",
                         hx_swap="innerHTML",
-                        style="min-height:8rem;",
                     )(
                         h.p("Loading… (Stan compile may take ~30s on first load)";
-                            style="color:var(--pico-muted-color); font-size:0.8em; margin:0;")
+                            class="brm-ppc-loading")
                     ),
                 ),
             )
@@ -2210,16 +2207,24 @@ APPDATA = AppData(; cache_type=:parallel)
                 "to kick off the Stan compile + fit (cached per formula for the ",
                 "server's lifetime). Nothing runs until you open a card.",
             ),
-            h.h2("Presets"; style="font-size:1.1em; margin-top:1rem;"),
-            h.div(;
-                style="display:grid; grid-template-columns:repeat(auto-fill, minmax(20rem, 1fr)); gap:0.75rem;",
-            )(
+            # Bulk action: open every card's PPC details. Setting `open`
+            # programmatically fires the DOM `toggle` event, which the
+            # cards' inner divs are listening for via `hx-trigger="toggle
+            # once from:closest details"`. So one click cascades all the
+            # lazy-loads. Stan compiles are still serialized server-side
+            # (stan_compile_global_lock), so this won't OOM strato.
+            h.div(; class="brm-load-all-bar")(
+                h.button("Load all";
+                    type="button", class="outline brm-load-all-btn",
+                    onclick="document.querySelectorAll('details.brm-ppc-toggle').forEach(d => d.open = true);",
+                    title="Open every card -- their lazy-loads fire in turn (Stan compiles are serialized server-side)"),
+            ),
+            h.h2("Presets"; class="brm-gallery-section-heading"),
+            h.div(; class="brm-gallery-grid")(
                 [gallery_card(lbl, body) for (lbl, body) in __self__.presets_list]...
             ),
-            h.h2("Examples"; style="font-size:1.1em; margin-top:1.5rem;"),
-            h.div(;
-                style="display:grid; grid-template-columns:repeat(auto-fill, minmax(20rem, 1fr)); gap:0.75rem;",
-            )(
+            h.h2("Examples"; class="brm-gallery-section-heading brm-gallery-section")(),
+            h.div(; class="brm-gallery-grid")(
                 [gallery_card(lbl, body) for (lbl, body) in example_pairs]...
             ),
         )
@@ -2396,21 +2401,17 @@ y1 ~ Normal(loc, err)
                 "card shows the submodel body verbatim plus the data ",
                 "kwargs it expects from the caller.",
             ),
-            h.div(;
-                style="display:grid; grid-template-columns:repeat(auto-fill, minmax(28rem, 1fr)); gap:0.75rem;",
-            )(
-                [h.article(; style="margin:0; padding:0.75rem;")(
-                    h.header(; style="padding:0 0 0.25rem; margin:0;")(
-                        h.strong(string(nm); style="font-family:monospace;"),
+            h.div(; class="brm-library-grid")(
+                [h.article(; class="brm-library-card")(
+                    h.header(; class="brm-library-card-header")(
+                        h.strong(string(nm); class="brm-library-card-name"),
                     ),
-                    h.details(; style="margin:0.25rem 0; font-size:0.75em;",
-                              open=true)(
+                    h.details(; class="brm-library-card-body", open=true)(
                         h.summary("Body"),
-                        h.pre(string(sm.model);
-                              style="font-size:0.85em; margin:0; max-height:30rem; overflow:auto;"),
+                        h.pre(string(sm.model)),
                     ),
                     isempty(sm.data) ? "" :
-                        h.details(; style="margin:0.25rem 0; font-size:0.75em;")(
+                        h.details(; class="brm-library-card-body")(
                             h.summary("Pre-bound data keys"),
                             h.code(join(sort(collect(keys(sm.data))), ", "))),
                 )
