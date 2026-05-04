@@ -1525,14 +1525,20 @@ display_name(::MultiContinuousPPC)  = "multi-predictor"
     """
     record_gallery(record_dir::String, record_base::String) = begin
         # Build the per-item path list. Same iteration as the gallery
-        # view; recording covers shell + per-card endpoints.
+        # view; recording covers shell + per-card endpoints. Bruno
+        # examples are skipped when `bruno-ext.jl` isn't on disk -- the
+        # docs CI doesn't have the gitignored ext, so the bruno data
+        # extras would fail to load and `compute_steps` would die.
         examples_dir_local = examples_dir
+        bruno_loaded = isfile(joinpath(dirname(@__DIR__), "src", "bruno-ext.jl"))
         items = let xs = []
             isdir(examples_dir_local) || mkpath(examples_dir_local)
             files = sort(filter(endswith(".jl"),
                                 readdir(examples_dir_local; join=true));
                          by=mtime, rev=true)
             for path in files
+                slug = replace(basename(path), r"\.jl$" => "")
+                (!bruno_loaded && startswith(slug, "bruno-")) && continue
                 lines = readlines(path)
                 header = Dict{String,String}()
                 i = 1
@@ -1552,7 +1558,6 @@ display_name(::MultiContinuousPPC)  = "multi-predictor"
                 end
                 formula_text = strip(join(lines[i:end], '\n'))
                 isempty(formula_text) && continue
-                slug  = replace(basename(path), r"\.jl$" => "")
                 label = get(header, "label", basename(path))
                 push!(xs, (; slug, label, formula=String(formula_text)))
             end
@@ -1636,11 +1641,17 @@ APPDATA = AppData(; cache_type=:parallel)
     # Tier 0 = quick-fill presets (the buttons in the formula editor +
     # the "Presets" gallery section). Tier 1-3 = file-based examples.
     # Files with no formula body (markdown-only notes) are skipped.
-    gallery_items() = [
-        (e.slug, e.label, e.formula, e.tier)
-        for e in __parent__.examples.example_store.entries()
-        if !isnothing(e.formula)
-    ]
+    # `bruno-*` items are skipped when `bruno-ext.jl` isn't on disk
+    # (the file is gitignored): without the ext, the bruno data
+    # extras don't load and the cards' compute_steps would fail.
+    # Skipping at this layer keeps the gallery shell, the formula-
+    # editor preset buttons, and the recorder all in sync.
+    gallery_items() = let bruno_loaded = isfile(joinpath(@__DIR__, "bruno-ext.jl"))
+        [(e.slug, e.label, e.formula, e.tier)
+         for e in __parent__.examples.example_store.entries()
+         if !isnothing(e.formula) &&
+            (bruno_loaded || !startswith(e.slug, "bruno-"))]
+    end
 
     # Per-step HTML rendering. `getproperty(render, step_key)(value)` emits the
     # section for that step; `compute_steps` produces the NamedTuple whose keys
