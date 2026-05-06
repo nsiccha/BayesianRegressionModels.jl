@@ -1,4 +1,6 @@
 using OrderedCollections
+_is_symbol(::Symbol) = true
+_is_symbol(_) = false
 macro brm(x)
     esc(_brm(x))
 end
@@ -117,7 +119,7 @@ end
 rewrite_ranef_ids(x) = x
 rewrite_ranef_ids(x::Expr) = if isxcall(x, :|) && length(x.args) == 3 &&
                                 isxcall(x.args[2], :|) && length(x.args[2].args) == 3 &&
-                                x.args[2].args[3] isa Symbol
+                                _is_symbol(x.args[2].args[3])
     inner = x.args[2]
     lhs = rewrite_ranef_ids(inner.args[2])
     id_sym = inner.args[3]
