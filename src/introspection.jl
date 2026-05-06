@@ -48,15 +48,30 @@ _classify_arg(a::ExprColumn) = let lps = _collect_lps(a)
 end
 
 _collect_lps(::Any) = Symbol[]
-_collect_lps(x::NamedColumn) = parent(x) isa ExprColumn &&
-    (getf(parent(x)) === (~) || getf(parent(x)) === assign) ?
-    Symbol[name(x)] : Symbol[]
+_collect_lps(x::NamedColumn) = _collect_lps_named(x, parent(x))
+_collect_lps_named(x, p::ExprColumn) =
+    (getf(p) === (~) || getf(p) === assign) ? Symbol[name(x)] : Symbol[]
+_collect_lps_named(_, _) = Symbol[]
 _collect_lps(x::ExprColumn) = let out = Symbol[]
     for a in getargs(x); append!(out, _collect_lps(a)); end
     out
 end
 
 _classify_arg(a) = (; role=:expression, expr=a)
+
+# Helpers: a NamedColumn-backed-by-DataColumn predicate, and the underlying
+# ExprColumn for a NamedColumn whose parent is a `~` / `=` op (or nothing).
+# Both fan out via small dispatch pairs so the introspection walkers stay
+# free of `isa` chains.
+_is_data_named(x::NamedColumn) = _is_data_backing(parent(x))
+_is_data_named(_) = false
+_is_data_backing(::DataColumn) = true
+_is_data_backing(_) = false
+
+_named_op(v::NamedColumn) = _named_op_inner(parent(v))
+_named_op(_) = nothing
+_named_op_inner(p::ExprColumn) = p
+_named_op_inner(_) = nothing
 
 # ---- outcomes ---------------------------------------------------------------
 
@@ -81,12 +96,11 @@ Return one entry per `<response> ~ Family(args...)` likelihood (i.e. every
 function outcomes(brmi::BRMI)
     out = NamedTuple[]
     for (k, v) in pairs(brmi.operations)
-        v isa NamedColumn || continue
-        op = parent(v)
-        op isa ExprColumn || continue
+        op = _named_op(v)
+        op === nothing && continue
         getf(op) === (~) || continue
         lhs, rh = getargs(op, 2)
-        lhs isa NamedColumn && parent(lhs) isa DataColumn || continue
+        _is_data_named(lhs) || continue
         rh isa ExprColumn || continue
         family = getf(rh)
         args = [_classify_arg(a) for a in getargs(rh)]
@@ -118,10 +132,8 @@ The `~` ExprColumn that defines `<name> ~ <rhs>`, or `nothing` if
 """
 function linear_predictor_op(brmi::BRMI, n::Symbol)
     haskey(brmi.operations, n) || return nothing
-    v = brmi.operations[n]
-    v isa NamedColumn || return nothing
-    op = parent(v)
-    op isa ExprColumn || return nothing
+    op = _named_op(brmi.operations[n])
+    op === nothing && return nothing
     # Either `<n> ~ <rhs>` (formula) or `<n> = <rhs>` (literal assign).
     # See `_classify_named` -- both bind a latent that downstream
     # outcomes can reference as a linear-predictor arg.
@@ -155,13 +167,12 @@ when bare).
 function linear_predictors(brmi::BRMI)
     out = NamedTuple[]
     for (k, v) in pairs(brmi.operations)
-        v isa NamedColumn || continue
-        op = parent(v)
-        op isa ExprColumn || continue
+        op = _named_op(v)
+        op === nothing && continue
         getf(op) === (~) || continue
         lhs, _ = getargs(op, 2)
         # Skip data-bound LHS (those are likelihoods).
-        lhs isa NamedColumn && parent(lhs) isa DataColumn && continue
+        _is_data_named(lhs) && continue
         peeled = _peel_lp_lhs(lhs)
         isnothing(peeled) && continue
         link_lhs_fn, lp_name = peeled
@@ -282,7 +293,7 @@ _walk_pred_grouped!(re_terms, s) = begin
     ra = getargs(s)
     length(ra) >= 2 || return false
     last_arg = ra[end]
-    last_arg isa NamedColumn && parent(last_arg) isa DataColumn || return false
+    _is_data_named(last_arg) || return false
     grp = name(last_arg)
     inner_summands = (ra[1] isa ExprColumn && getf(ra[1]) === (+)) ?
                      getargs(ra[1]) : (ra[1],)
@@ -333,10 +344,9 @@ function _trace!(brmi, n::Symbol, data, intermediates, seen)
     if isnothing(op)
         # Maybe a likelihood node -- look for `~` op even if LHS is data.
         haskey(brmi.operations, n) || return
-        v = brmi.operations[n]
-        v isa NamedColumn || return
-        outer = parent(v)
-        outer isa ExprColumn && getf(outer) === (~) || return
+        outer = _named_op(brmi.operations[n])
+        outer === nothing && return
+        getf(outer) === (~) || return
         op = outer
     end
     _, rhs = getargs(op, 2)
@@ -378,11 +388,12 @@ Underlying data vector for a NamedColumn-over-DataColumn entry.
 """
 function column_data(brmi::BRMI, n::Symbol)
     haskey(brmi.operations, n) || return nothing
-    v = brmi.operations[n]
-    v isa NamedColumn || return nothing
-    inner = parent(v)
-    inner isa DataColumn ? parent(inner) : nothing
+    _column_data_value(brmi.operations[n])
 end
+_column_data_value(v::NamedColumn) = _column_data_inner(parent(v))
+_column_data_value(_) = nothing
+_column_data_inner(d::DataColumn) = parent(d)
+_column_data_inner(_) = nothing
 
 """
     data_columns(brmi::BRMI) -> Vector{Symbol}
@@ -393,7 +404,7 @@ Every name in `brmi.operations` that is a NamedColumn over a DataColumn
 function data_columns(brmi::BRMI)
     out = Symbol[]
     for (k, v) in pairs(brmi.operations)
-        v isa NamedColumn && parent(v) isa DataColumn && push!(out, k)
+        _is_data_named(v) && push!(out, k)
     end
     out
 end
