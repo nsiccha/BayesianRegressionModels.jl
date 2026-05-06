@@ -925,6 +925,11 @@ end
 # `ranef_correlated_by` block. Mirrors vimpl's `_normalize_group`. Also extracts
 # brms's `gr(g, id=<sym|str>)`, producing an id Symbol which the caller carries
 # alongside the group descriptor to drive cross-formula bucket coalescing.
+_sb_id_sym(::Nothing) = nothing
+_sb_id_sym(s::Symbol) = s
+_sb_id_sym(s::AbstractString) = Symbol(s)
+_sb_id_sym(x) = error("sbimpl: `gr(...; id=...)` expects a Symbol or String, got $(typeof(x))")
+
 _sb_normalize_group(g::NamedColumn) = (g, nothing)
 _sb_normalize_group(g::ExprColumn) = begin
     getf(g) === gr || error("sbimpl: expected NamedColumn or `gr(...)` on RHS of `|`, got `$(getf(g))`")
@@ -933,11 +938,7 @@ _sb_normalize_group(g::ExprColumn) = begin
     group = args[1]
     group isa NamedColumn || error("sbimpl: `gr(...)` expects a NamedColumn group, got $(typeof(group))")
     by = get(kw, :by, nothing)
-    raw_id = get(kw, :id, nothing)
-    id_sym = raw_id === nothing ? nothing :
-             raw_id isa Symbol ? raw_id :
-             raw_id isa AbstractString ? Symbol(raw_id) :
-             error("sbimpl: `gr(...; id=...)` expects a Symbol or String, got $(typeof(raw_id))")
+    id_sym = _sb_id_sym(get(kw, :id, nothing))
     if by === nothing
         return (group, id_sym)
     end
