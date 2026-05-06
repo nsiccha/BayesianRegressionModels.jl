@@ -73,6 +73,15 @@ _named_op(_) = nothing
 _named_op_inner(p::ExprColumn) = p
 _named_op_inner(_) = nothing
 
+# Narrow to ExprColumn (or nothing); split a sum into its summands (or wrap as
+# a 1-tuple so callers don't have to special-case non-`+` RHS shapes).
+_as_expr_column(x::ExprColumn) = x
+_as_expr_column(_) = nothing
+_sum_summands(x::ExprColumn{typeof(+)}) = getargs(x)
+_sum_summands(x) = (x,)
+_data_backed_or_nothing(x::NamedColumn) = _is_data_backing(parent(x)) ? x : nothing
+_data_backed_or_nothing(_) = nothing
+
 # ---- outcomes ---------------------------------------------------------------
 
 """
@@ -101,7 +110,7 @@ function outcomes(brmi::BRMI)
         getf(op) === (~) || continue
         lhs, rh = getargs(op, 2)
         _is_data_named(lhs) || continue
-        rh isa ExprColumn || continue
+        isnothing(_as_expr_column(rh)) && continue
         family = getf(rh)
         args = [_classify_arg(a) for a in getargs(rh)]
         push!(out, (; response=k, family, args))
@@ -147,11 +156,12 @@ end
 _peel_lp_lhs(lhs::NamedColumn) = (identity, name(lhs))
 _peel_lp_lhs(lhs::ExprColumn) = begin
     args = getargs(lhs)
-    if length(args) == 1 && args[1] isa NamedColumn
-        return (getf(lhs), name(args[1]))
-    end
-    return nothing
+    length(args) == 1 || return nothing
+    inner = _as_named_column_intro(args[1])
+    isnothing(inner) ? nothing : (getf(lhs), name(inner))
 end
+_as_named_column_intro(x::NamedColumn) = x
+_as_named_column_intro(_) = nothing
 _peel_lp_lhs(_) = nothing
 
 """
@@ -207,9 +217,7 @@ function predictors(brmi::BRMI, lhs::Symbol)
     # `getargs(+)`, `loc ~ 1` (intercept-only) or `loc ~ a` (single
     # predictor) -> singleton wrap. _walk_predictors handles each
     # summand kind (Number / NamedColumn / RE) the same way.
-    summands = (rhs_expr isa ExprColumn && getf(rhs_expr) === (+)) ?
-               getargs(rhs_expr) : (rhs_expr,)
-    _walk_predictors(summands)
+    _walk_predictors(_sum_summands(rhs_expr))
 end
 
 # Find the first data-column NamedColumn reachable in `x`'s subtree
@@ -222,7 +230,7 @@ end
 #   - and pick the right (continuous vs categorical) bucket from the
 #     leaf's eltype (so e.g. `factor(c1, ref=2)` lands in categorical
 #     instead of continuous).
-_walk_pred_leaf(x::NamedColumn) = parent(x) isa DataColumn ? x : nothing
+_walk_pred_leaf(x::NamedColumn) = _data_backed_or_nothing(x)
 function _walk_pred_leaf(x::ExprColumn)
     for a in getargs(x)
         leaf = _walk_pred_leaf(a)
@@ -245,13 +253,14 @@ function _walk_predictors(summands)
 end
 
 _walk_pred_summand!(intercept, _, _, _, ::Number) = (intercept[] = true; true)
-_walk_pred_summand!(_, continuous, categorical, _, s::NamedColumn) = let pcol = parent(s)
-    pcol isa DataColumn || return false
-    elt = eltype(parent(pcol))
+_walk_pred_summand!(_, continuous, categorical, _, s::NamedColumn) =
+    _bucket_named_pred!(continuous, categorical, s, parent(s))
+_bucket_named_pred!(continuous, categorical, s, pcol::DataColumn) = let elt = eltype(parent(pcol))
     elt <: Integer ? (push!(categorical, name(s)); true) :
     elt <: Real    ? (push!(continuous,  name(s)); true) :
     false
 end
+_bucket_named_pred!(args...) = false
 _walk_pred_summand!(intercept, continuous, categorical, re_terms, s::ExprColumn) =
     _walk_pred_expr!(intercept, continuous, categorical, re_terms, getf(s), s)
 _walk_pred_summand!(_, _, _, _, _) = false
@@ -295,9 +304,7 @@ _walk_pred_grouped!(re_terms, s) = begin
     last_arg = ra[end]
     _is_data_named(last_arg) || return false
     grp = name(last_arg)
-    inner_summands = (ra[1] isa ExprColumn && getf(ra[1]) === (+)) ?
-                     getargs(ra[1]) : (ra[1],)
-    inner = _walk_predictors(inner_summands)
+    inner = _walk_predictors(_sum_summands(ra[1]))
     isnothing(inner) && return false
     push!(re_terms, (; group=grp, inner))
     true

@@ -142,14 +142,23 @@ vmeta_sampling_rhs(meta, x::ExprColumn{typeof(|)}; kwargs...) = begin
     vmeta_sampling_rhs(meta, lhs; group=_normalize_group(rhs))
 end
 
+_as_named_column(x::NamedColumn) = x
+_as_named_column(_) = nothing
+_split_sum_terms(x::ExprColumn{typeof(+)}) = getargs(x)
+_split_sum_terms(x) = (x,)
+_as_real_only_vec(v::AbstractVector{<:Real}) = eltype(v) <: Integer ? nothing : v
+_as_real_only_vec(_) = nothing
+_as_any_real_vec(v::AbstractVector{<:Real}) = v
+_as_any_real_vec(_) = nothing
+
 # `(a + b + ... || g)` -- zero-correlation random effects. Each term on the LHS
 # gets its own 1-column block keyed by a synthetic `__nocor__N` suffix, so no
 # `chol` sibling is ever allocated between them. Same total direct-parameter
 # count as the correlated variant, minus the Cholesky factor parameters.
 vmeta_sampling_rhs(meta, x::ExprColumn{typeof(doublepipe)}; kwargs...) = begin
     lhs, rhs = getargs(x, 2)
-    rhs isa NamedColumn || error("zerocorr `||`: RHS must be a NamedColumn group, got $(typeof(rhs))")
-    terms = lhs isa ExprColumn{typeof(+)} ? getargs(lhs) : (lhs,)
+    isnothing(_as_named_column(rhs)) && error("zerocorr `||`: RHS must be a NamedColumn group, got $(typeof(rhs))")
+    terms = _split_sum_terms(lhs)
     meta, args = foldl(enumerate(terms); init=(meta, ())) do (mm, aa), (i, term)
         nocor_key = NamedColumn(Symbol(name(rhs), :__nocor__, i), parent(rhs))
         mm, arg = vmeta_sampling_rhs(mm, term; group=nocor_key)
@@ -171,10 +180,9 @@ vmeta_sampling_rhs(meta, x::ExprColumn{typeof(&)}; group) = begin
     _scale_by_beta(meta, Base.broadcasted(*, lbc, rbc); group)
 end
 _check_cont_interaction(t) = nothing
-_check_cont_interaction(t::NamedColumn) = let raw = parent(parent(t))
-    raw isa AbstractVector{<:Real} && !(raw isa AbstractVector{<:Integer}) ||
+_check_cont_interaction(t::NamedColumn) =
+    isnothing(_as_real_only_vec(parent(parent(t)))) &&
         error("interaction `&`: only continuous x continuous is supported for now (got `$(name(t))`); see 2.1 TODO for cat expansions")
-end
 
 # `(... | rhs)` -> walker-side group tag. Bare NamedColumn stays as-is; `gr(g)`
 # with no kwargs normalizes to the inner NamedColumn (so it coalesces with
@@ -186,10 +194,10 @@ _normalize_group(g::ExprColumn{typeof(gr)}) = begin
     args = getargs(g); kw = getkwargs(g)
     length(args) == 1 || error("gr(...) expects exactly one positional group, got $(length(args))")
     group = args[1]
-    group isa NamedColumn || error("gr(...) expects a NamedColumn group, got $(typeof(group))")
+    isnothing(_as_named_column(group)) && error("gr(...) expects a NamedColumn group, got $(typeof(group))")
     by = get(kw, :by, nothing)
     by === nothing && return group
-    by isa NamedColumn || error("gr(...; by=...) expects a NamedColumn for `by`, got $(typeof(by))")
+    isnothing(_as_named_column(by)) && error("gr(...; by=...) expects a NamedColumn for `by`, got $(typeof(by))")
     GrGroup(group, by)
 end
 vmeta_sampling_rhs(meta, n::Int; group) = begin
@@ -764,9 +772,10 @@ vmeta_sampling_rhs(meta, x::ExprColumn{typeof(gp)}; group) = begin
     args = getargs(x); kw = getkwargs(x)
     length(args) == 1 || error("gp: expects exactly one positional argument, got $(length(args))")
     inner = args[1]
-    inner isa NamedColumn || error("gp: expects a NamedColumn argument, got $(typeof(inner))")
-    raw = parent(parent(inner))
-    raw isa AbstractVector{<:Real} || error("gp: `$(name(inner))` must be a real-valued vector (got $(typeof(raw)))")
+    isnothing(_as_named_column(inner)) && error("gp: expects a NamedColumn argument, got $(typeof(inner))")
+    raw_in = parent(parent(inner))
+    raw = _as_any_real_vec(raw_in)
+    isnothing(raw) && error("gp: `$(name(inner))` must be a real-valued vector (got $(typeof(raw_in)))")
     K = get(kw, :k, 20)
     c = get(kw, :c, 1.5)
     PHI, lambda = _hsgp_basis(raw, K, c)
