@@ -633,24 +633,27 @@ _sb_prior_arg(x) = error("sbimpl: unsupported prior-arg shape $(typeof(x))")
 
 # LHS backed by real data => this is a likelihood. Record the observed values
 # under the formula name in `data` and emit `key ~ dist(args...)`.
-_sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lookup()) = begin
-    backing = parent(lhs)
-    if backing isa DataColumn
-        data[key] = _sb_data_vec(key, parent(backing))
-        _sb_likelihood!(stmts, key, rhs, data)
-    elseif backing isa MissingColumn
-        if rhs isa ExprColumn &&
-           _sb_submodel_rhs!(stmts, data, key, getf(rhs), rhs) !== nothing
-            return
-        end
-        if rhs isa ExprColumn && _sb_emit_prior!(stmts, key, getf(rhs), rhs)
-            return
-        end
-        _sb_linear_predictor!(stmts, data, key, rhs; id_lookup, brmi_key=key)
-    else
-        error("sbimpl: unsupported LHS backing for `$key` ($(typeof(backing)))")
-    end
+_sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lookup()) =
+    _sb_sampling_backed!(stmts, data, key, parent(lhs), rhs; id_lookup)
+
+_sb_sampling_backed!(stmts, data, key, backing::DataColumn, rhs; id_lookup) = begin
+    data[key] = _sb_data_vec(key, parent(backing))
+    _sb_likelihood!(stmts, key, rhs, data)
 end
+
+_sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs; id_lookup) = begin
+    if rhs isa ExprColumn &&
+       _sb_submodel_rhs!(stmts, data, key, getf(rhs), rhs) !== nothing
+        return
+    end
+    if rhs isa ExprColumn && _sb_emit_prior!(stmts, key, getf(rhs), rhs)
+        return
+    end
+    _sb_linear_predictor!(stmts, data, key, rhs; id_lookup, brmi_key=key)
+end
+
+_sb_sampling_backed!(stmts, data, key, backing, rhs; id_lookup) =
+    error("sbimpl: unsupported LHS backing for `$key` ($(typeof(backing)))")
 
 # Link-transformed LHS: `log(err) ~ 1 + d`, `logit(p) ~ 1 + x`, etc.
 # Sample the linear predictor on the linked scale, then invert to recover the
