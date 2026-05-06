@@ -793,6 +793,15 @@ _sb_julia_to_stan_fn(f) = f === LogExpFunctions.logistic ? :inv_logit : Symbol(n
 
 # ---- linear predictor: emit `X_<name> = hcat(...); <name> ~ popefs(; X=X_<name>)` --
 
+_sb_classify_term!(t::ExprColumn, pop_terms, ran_terms, direct_terms) = begin
+    f = getf(t)
+    f === (|) && (push!(ran_terms, t); return)
+    f === mo1 && (push!(direct_terms, t); return)
+    push!(pop_terms, t)
+end
+_sb_classify_term!(t, pop_terms, ran_terms, direct_terms) =
+    _sb_is_categorical(t) ? push!(direct_terms, t) : push!(pop_terms, t)
+
 function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
                                 id_lookup=_sb_empty_id_lookup(),
                                 brmi_key::Symbol=target)
@@ -801,15 +810,7 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     ran_terms    = Any[]  # `(expr | group)` -> collected per-group below
     direct_terms = Any[]  # e.g. `mo1(c)` -> direct summand, no popefs beta
     for t in terms
-        if t isa ExprColumn && getf(t) === (|)
-            push!(ran_terms, t)
-        elseif t isa ExprColumn && getf(t) === mo1
-            push!(direct_terms, t)
-        elseif _sb_is_categorical(t)
-            push!(direct_terms, t)
-        else
-            push!(pop_terms, t)
-        end
+        _sb_classify_term!(t, pop_terms, ran_terms, direct_terms)
     end
     isempty(pop_terms) && isempty(ran_terms) && isempty(direct_terms) &&
         error("sbimpl: empty RHS for `$target` — no predictor terms")
