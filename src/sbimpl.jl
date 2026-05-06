@@ -520,8 +520,8 @@ _as_data_column(_) = nothing
 _as_missing_column(x::MissingColumn) = x
 _as_missing_column(_) = nothing
 
-_is_distribution_type(::Type{T}) where {T<:Distribution} = true
-_is_distribution_type(_) = false
+_as_distribution_type(::Type{T}) where {T<:Distribution} = T
+_as_distribution_type(_) = nothing
 
 _as_symbol(s::Symbol) = s
 _as_symbol(_) = nothing
@@ -640,7 +640,7 @@ function _sb_emit_prior!(stmts, target, ::Type{<:LocationScale}, op)
     isnothing(base_e) && error(
         "sbimpl: `LocationScale(...)` third arg must be a distribution call, got $(typeof(base))")
     base_fam = getf(base_e)
-    _is_distribution_type(base_fam) || error(
+    isnothing(_as_distribution_type(base_fam)) && error(
         "sbimpl: `LocationScale` base must be a Distribution type, got $(base_fam)")
     base = base_e
     stan_name = _sb_stan_dist_name(base_fam)
@@ -871,7 +871,7 @@ _sb_classify_term!(t::ExprColumn, pop_terms, ran_terms, direct_terms) = begin
     push!(pop_terms, t)
 end
 _sb_classify_term!(t, pop_terms, ran_terms, direct_terms) =
-    _sb_is_categorical(t) ? push!(direct_terms, t) : push!(pop_terms, t)
+    isnothing(_sb_cat_levels(t)) ? push!(pop_terms, t) : push!(direct_terms, t)
 
 function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
                                 id_lookup=_sb_empty_id_lookup(),
@@ -918,15 +918,20 @@ end
 # Classify a predictor term as "direct" (allocates its own parameters, no
 # popefs multiplication). Matches vimpl: integer-backed NamedColumns are
 # treated as treatment-coded categoricals; floats go through popefs.
-_sb_is_categorical(t::NamedColumn) = _is_cat_data(parent(t))
-_sb_is_categorical(_) = false
+# Value-narrowing chain: returns the underlying integer/categorical level
+# vector if `t` is a NamedColumn over a DataColumn over a categorical-shaped
+# vector, else `nothing`. Replaces the old Bool-predicate trio
+# (`_sb_is_categorical` / `_is_cat_data` / `_is_cat_vec`); call sites compose
+# with `isnothing(_sb_cat_levels(t))` instead of carrying the predicate.
+_sb_cat_levels(t::NamedColumn) = _sb_cat_levels_data(parent(t))
+_sb_cat_levels(_t) = nothing
 
-_is_cat_data(d::DataColumn) = _is_cat_vec(parent(d))
-_is_cat_data(_) = false
+_sb_cat_levels_data(d::DataColumn) = _sb_cat_levels_vec(parent(d))
+_sb_cat_levels_data(_d) = nothing
 
-_is_cat_vec(::AbstractVector{<:Integer}) = true
-_is_cat_vec(::CA.CategoricalVector) = true
-_is_cat_vec(_) = false
+_sb_cat_levels_vec(v::AbstractVector{<:Integer}) = v
+_sb_cat_levels_vec(v::CA.CategoricalVector) = v
+_sb_cat_levels_vec(_v) = nothing
 
 # Free-summand terms (no popefs beta): `mo1(c)`, categorical NamedColumns.
 # Categoricals emit `cat_<c> ~ _sb_cat(; x=<c>_idx, n_levels=<c>_n_levels)`.
@@ -966,17 +971,17 @@ end
 # expand to K-1 treatment-coded dummy columns (level 1 is reference), matching
 # the design-matrix that brms / lme4 build for `(1 + c | g)`.
 function _sb_ranef_cols!(cols, data, stmts, t)
-    if _sb_is_categorical(t)
-        backing = parent(t)
-        n_levels, idx = _sb_level_index(parent(backing))
-        n_levels >= 2 || error("sbimpl: categorical ranef term `$(name(t))` needs >= 2 levels (got $n_levels)")
-        for lvl in 2:n_levels
-            col_name = Symbol(name(t), :_dummy_, lvl)
-            data[col_name] = Float64[l == lvl ? 1.0 : 0.0 for l in idx]
-            push!(cols, col_name)
-        end
-    else
-        push!(cols, _sb_predictor_col(t, data, stmts))
+    _sb_ranef_cols_dispatch!(cols, data, stmts, t, _sb_cat_levels(t))
+end
+_sb_ranef_cols_dispatch!(cols, data, stmts, t, ::Nothing) =
+    push!(cols, _sb_predictor_col(t, data, stmts))
+function _sb_ranef_cols_dispatch!(cols, data, _stmts, t, levels)
+    n_levels, idx = _sb_level_index(levels)
+    n_levels >= 2 || error("sbimpl: categorical ranef term `$(name(t))` needs >= 2 levels (got $n_levels)")
+    for lvl in 2:n_levels
+        col_name = Symbol(name(t), :_dummy_, lvl)
+        data[col_name] = Float64[l == lvl ? 1.0 : 0.0 for l in idx]
+        push!(cols, col_name)
     end
 end
 
@@ -1206,11 +1211,9 @@ _sb_group_desc_matches(_, _) = false
 # scalar NamedColumn -> 1; categorical NamedColumn -> (n_levels-1); ExprColumn
 # submodel terms (mo/s/ar/me) -> 1.
 _sb_ranef_term_ncols(t::Int, _) = t == 0 ? 0 : 1
-_sb_ranef_term_ncols(t::NamedColumn, data) = if _sb_is_categorical(t)
-    _sb_level_index(parent(parent(t)))[1] - 1
-else
-    1
-end
+_sb_ranef_term_ncols(t::NamedColumn, _data) = _sb_ranef_named_ncols(_sb_cat_levels(t))
+_sb_ranef_named_ncols(::Nothing) = 1
+_sb_ranef_named_ncols(levels) = _sb_level_index(levels)[1] - 1
 _sb_ranef_term_ncols(::ExprColumn, _) = 1
 _sb_ranef_term_ncols(t, _) = error("sbimpl: unsupported ranef term $(typeof(t)): $t")
 
@@ -1439,13 +1442,16 @@ _sb_interaction_operand(t::NamedColumn) = begin
         "sbimpl: interaction operand `$(name(t))` must be a raw data column, got $(typeof(d_raw))"
     )
     v = parent(d)
-    if _sb_is_categorical(t)
-        n_levels, idx = _sb_level_index(v)
-        n_levels >= 2 || error(
-            "sbimpl: categorical interaction operand `$(name(t))` needs >= 2 levels (got $n_levels)"
-        )
-        return (; kind=:cat, name=name(t), n_levels, idx)
-    end
+    _sb_interaction_operand_kind(t, v, _sb_cat_levels(t))
+end
+_sb_interaction_operand_kind(t, v, levels) = begin
+    n_levels, idx = _sb_level_index(levels)
+    n_levels >= 2 || error(
+        "sbimpl: categorical interaction operand `$(name(t))` needs >= 2 levels (got $n_levels)"
+    )
+    (; kind=:cat, name=name(t), n_levels, idx)
+end
+_sb_interaction_operand_kind(t, v, ::Nothing) = begin
     rv = _as_real_vec(v)
     isnothing(rv) && error("sbimpl: interaction operand `$(name(t))` has unsupported eltype $(eltype(v))")
     (; kind=:cont, name=name(t), vec=collect(Float64, rv))
@@ -1695,13 +1701,18 @@ _sb_any_data_symbol(data) = begin
     # (bruno-ext's `dose_times`) which StanBlocks serializes as a
     # `tuple(vector, array[] int)` that Stan's `num_elements` rejects.
     for (k, v) in data
-        _is_flat_vec(v) && return k
+        hit = _flat_vec_key(k, v)
+        isnothing(hit) || return hit
     end
     first(keys(data))
 end
 
-_is_flat_vec(v::AbstractVector) = !(eltype(v) <: AbstractVector)
-_is_flat_vec(_) = false
+# Return `k` if `v` is a flat (non-ragged) vector, else `nothing` — replaces
+# the old `_is_flat_vec` Bool predicate so the caller composes via the
+# returned value rather than a branch on the test.
+_flat_vec_key(k, ::AbstractVector{<:AbstractVector}) = nothing
+_flat_vec_key(k, ::AbstractVector) = k
+_flat_vec_key(_k, _v) = nothing
 
 
 # ---- likelihood emitters: `y ~ Normal(loc, sigma)` etc. ----------------------
