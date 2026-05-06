@@ -223,77 +223,73 @@ _walk_pred_leaf(_) = nothing
 _walk_pred_label(x) = let leaf = _walk_pred_leaf(x); leaf === nothing ? nothing : name(leaf) end
 
 function _walk_predictors(summands)
-    intercept = false
+    intercept = Ref(false)
     continuous = Symbol[]
     categorical = Symbol[]
     re_terms = NamedTuple[]
     for s in summands
-        if s isa Number
-            intercept = true
-        elseif s isa NamedColumn
-            pcol = parent(s)
-            pcol isa DataColumn || return nothing
-            elt = eltype(parent(pcol))
-            if elt <: Integer
-                push!(categorical, name(s))
-            elseif elt <: Real
-                push!(continuous, name(s))
-            else
-                return nothing
-            end
-        elseif s isa ExprColumn && getf(s) === (+)
-            sub = _walk_predictors(getargs(s))
-            isnothing(sub) && return nothing
-            intercept |= sub.intercept
-            append!(continuous, sub.continuous)
-            append!(categorical, sub.categorical)
-            append!(re_terms, sub.re_terms)
-        elseif s isa ExprColumn && getf(s) === doublepipe
-            # Zero-correlation ranef `(... || g)` -- treat structurally
-            # like `(... | g)` for PPC enumeration: the group + inner
-            # predictors matter, the variance-correlation structure
-            # doesn't show up in PPC plots.
-            ra = getargs(s)
-            length(ra) >= 2 || return nothing
-            ra[end] isa NamedColumn && parent(ra[end]) isa DataColumn || return nothing
-            grp = name(ra[end])
-            inner_summands = (ra[1] isa ExprColumn && getf(ra[1]) === (+)) ?
-                             getargs(ra[1]) : (ra[1],)
-            inner = _walk_predictors(inner_summands)
-            isnothing(inner) && return nothing
-            push!(re_terms, (; group=grp, inner))
-        elseif s isa ExprColumn && getf(s) === (|)
-            ra = getargs(s)
-            length(ra) >= 2 || return nothing
-            ra[end] isa NamedColumn && parent(ra[end]) isa DataColumn || return nothing
-            grp = name(ra[end])
-            inner_summands = (ra[1] isa ExprColumn && getf(ra[1]) === (+)) ?
-                             getargs(ra[1]) : (ra[1],)
-            inner = _walk_predictors(inner_summands)
-            isnothing(inner) && return nothing
-            push!(re_terms, (; group=grp, inner))
-        elseif s isa ExprColumn && getf(s) === (&)
-            # Skip without bailing so the marginal `a` / `b` (when
-            # present in the same formula) still drive PPC kind
-            # detection. The interaction itself is a derived column the
-            # user wouldn't recognise as a separate predictor anyway.
-        elseif s isa ExprColumn
-            # Generic wrapped/derived predictor: `mo(c)`, `s(a)`,
-            # `log(exposure)`, `factor(c1, ref=2)`, `a^2`, ... -- any
-            # subtree that touches a data leaf becomes a predictor.
-            # Bucket follows the leaf's eltype: integer -> categorical,
-            # real -> continuous. Bail when no data leaf is reachable
-            # (opaque expression with only sampled-parameter
-            # references can't drive a PPC axis).
-            leaf = _walk_pred_leaf(s)
-            leaf === nothing && return nothing
-            elt = eltype(parent(parent(leaf)))
-            push!(elt <: Integer ? categorical : continuous, name(leaf))
-        else
-            return nothing
-        end
+        _walk_pred_summand!(intercept, continuous, categorical, re_terms, s) || return nothing
     end
-    (; intercept, continuous, categorical, re_terms)
+    (; intercept=intercept[], continuous, categorical, re_terms)
+end
+
+_walk_pred_summand!(intercept, _, _, _, ::Number) = (intercept[] = true; true)
+_walk_pred_summand!(_, continuous, categorical, _, s::NamedColumn) = let pcol = parent(s)
+    pcol isa DataColumn || return false
+    elt = eltype(parent(pcol))
+    elt <: Integer ? (push!(categorical, name(s)); true) :
+    elt <: Real    ? (push!(continuous,  name(s)); true) :
+    false
+end
+_walk_pred_summand!(intercept, continuous, categorical, re_terms, s::ExprColumn) =
+    _walk_pred_expr!(intercept, continuous, categorical, re_terms, getf(s), s)
+_walk_pred_summand!(_, _, _, _, _) = false
+
+_walk_pred_expr!(intercept, continuous, categorical, re_terms, ::typeof(+), s) = begin
+    sub = _walk_predictors(getargs(s))
+    isnothing(sub) && return false
+    intercept[] |= sub.intercept
+    append!(continuous, sub.continuous)
+    append!(categorical, sub.categorical)
+    append!(re_terms, sub.re_terms)
+    true
+end
+# Zero-correlation ranef `(... || g)` -- treat structurally like `(... | g)`
+# for PPC enumeration: the group + inner predictors matter, the variance-
+# correlation structure doesn't show up in PPC plots.
+_walk_pred_expr!(_, _, _, re_terms, ::typeof(doublepipe), s) =
+    _walk_pred_grouped!(re_terms, s)
+_walk_pred_expr!(_, _, _, re_terms, ::typeof(|), s) =
+    _walk_pred_grouped!(re_terms, s)
+# Skip without bailing so the marginal `a` / `b` (when present in the same
+# formula) still drive PPC kind detection. The interaction itself is a
+# derived column the user wouldn't recognise as a separate predictor anyway.
+_walk_pred_expr!(_, _, _, _, ::typeof(&), _) = true
+# Generic wrapped/derived predictor: `mo(c)`, `s(a)`, `log(exposure)`,
+# `factor(c1, ref=2)`, `a^2`, ... -- any subtree that touches a data leaf
+# becomes a predictor. Bucket follows the leaf's eltype: integer ->
+# categorical, real -> continuous. Bail when no data leaf is reachable
+# (opaque expression with only sampled-parameter references can't drive
+# a PPC axis).
+_walk_pred_expr!(_, continuous, categorical, _, _, s) = let leaf = _walk_pred_leaf(s)
+    leaf === nothing && return false
+    elt = eltype(parent(parent(leaf)))
+    push!(elt <: Integer ? categorical : continuous, name(leaf))
+    true
+end
+
+_walk_pred_grouped!(re_terms, s) = begin
+    ra = getargs(s)
+    length(ra) >= 2 || return false
+    last_arg = ra[end]
+    last_arg isa NamedColumn && parent(last_arg) isa DataColumn || return false
+    grp = name(last_arg)
+    inner_summands = (ra[1] isa ExprColumn && getf(ra[1]) === (+)) ?
+                     getargs(ra[1]) : (ra[1],)
+    inner = _walk_predictors(inner_summands)
+    isnothing(inner) && return false
+    push!(re_terms, (; group=grp, inner))
+    true
 end
 
 """
