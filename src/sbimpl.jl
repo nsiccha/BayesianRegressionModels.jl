@@ -790,6 +790,26 @@ _sb_mi_kwarg_value(x, _) = error("sbimpl: unsupported `mi(...)` family arg shape
 # call stanc rejects. Add other rename cases here as they come up.
 _sb_julia_to_stan_fn(f) = f === LogExpFunctions.logistic ? :inv_logit : Symbol(nameof(f))
 
+# Inner-arg unwrap helpers shared by `_sb_predictor_term!` overloads (mo, me,
+# s, gp, ar, mo1) and a few `mi`-style sites. Each step is a tiny dispatch
+# pair so a wrong call shape errors with the wrapping function's name in the
+# message rather than a generic `isa` failure.
+_sb_named_inner(label::Symbol, x::NamedColumn) = x
+_sb_named_inner(label::Symbol, x) =
+    error("sbimpl: `$label(...)` expects a NamedColumn, got $(typeof(x))")
+
+_sb_data_backing(label::Symbol, n::Symbol, d::DataColumn) = parent(d)
+_sb_data_backing(label::Symbol, n::Symbol, d) =
+    error("sbimpl: `$label($n)` expects a raw data column, got $(typeof(d))")
+
+_sb_inner_data(label::Symbol, x) = let inner = _sb_named_inner(label, x)
+    (name(inner), _sb_data_backing(label, name(inner), parent(inner)))
+end
+
+_sb_real_vec(label::Symbol, n::Symbol, v::AbstractVector{<:Real}) = v
+_sb_real_vec(label::Symbol, n::Symbol, v) =
+    error("sbimpl: `$label($n)` expects numeric data, got $(typeof(v))")
+
 
 # ---- linear predictor: emit `X_<name> = hcat(...); <name> ~ popefs(; X=X_<name>)` --
 
@@ -863,14 +883,11 @@ _sb_emit_direct!(stmts, data, target::Symbol, t::NamedColumn, summands) =
 function _sb_emit_direct!(stmts, data, target::Symbol, t::ExprColumn, summands)
     f = getf(t)
     f === mo1 || error("sbimpl: unsupported direct-summand term `$f`")
-    inner = only(getargs(t))
-    inner isa NamedColumn || error("sbimpl: `mo1(…)` expects a NamedColumn, got $(typeof(inner))")
-    backing = parent(inner)
-    backing isa DataColumn || error("sbimpl: `mo1($(name(inner)))` expects a raw data column, got $(typeof(backing))")
-    n_levels, idx = _sb_level_index(parent(backing))
-    n_levels >= 2 || error("sbimpl: `mo1($(name(inner)))` needs >= 2 levels (got $n_levels)")
-    idx_name = Symbol(name(inner), :_idx)
-    col_name = Symbol(:mo1_, name(inner))
+    inner_name, raw = _sb_inner_data(:mo1, only(getargs(t)))
+    n_levels, idx = _sb_level_index(raw)
+    n_levels >= 2 || error("sbimpl: `mo1($inner_name)` needs >= 2 levels (got $n_levels)")
+    idx_name = Symbol(inner_name, :_idx)
+    col_name = Symbol(:mo1_, inner_name)
     data[idx_name] = idx
     push!(stmts, :($col_name ~ _sb_mo(; x=$idx_name)))
     push!(summands, col_name)
@@ -1440,14 +1457,11 @@ _sb_predictor_col(t, _, _) = error("sbimpl: unsupported predictor term $(typeof(
 # `mo_<c>` as the column. Scope: single NamedColumn inner arg backed by raw
 # data; `mo1`, `mm`, `s` etc. fall through the default error.
 _sb_predictor_term!(stmts, data, ::typeof(mo), t) = begin
-    inner = only(getargs(t))
-    inner isa NamedColumn || error("sbimpl: `mo(…)` expects a NamedColumn, got $(typeof(inner))")
-    backing = parent(inner)
-    backing isa DataColumn || error("sbimpl: `mo($(name(inner)))` expects a raw data column, got $(typeof(backing))")
-    n_levels, idx = _sb_level_index(parent(backing))
-    n_levels >= 2 || error("sbimpl: `mo($(name(inner)))` needs >= 2 levels (got $n_levels)")
-    idx_name = Symbol(name(inner), :_idx)
-    col_name = Symbol(:mo_, name(inner))
+    inner_name, raw = _sb_inner_data(:mo, only(getargs(t)))
+    n_levels, idx = _sb_level_index(raw)
+    n_levels >= 2 || error("sbimpl: `mo($inner_name)` needs >= 2 levels (got $n_levels)")
+    idx_name = Symbol(inner_name, :_idx)
+    col_name = Symbol(:mo_, inner_name)
     data[idx_name] = idx
     push!(stmts, :($col_name ~ _sb_mo(; x=$idx_name)))
     col_name
@@ -1461,14 +1475,10 @@ _sb_predictor_term!(stmts, data, ::typeof(me), t) = begin
     args = getargs(t)
     length(args) == 2 || error("sbimpl: `me(x, sd)` expects 2 args, got $(length(args))")
     inner, sd_arg = args
-    inner isa NamedColumn || error("sbimpl: `me(...)` expects a NamedColumn first arg, got $(typeof(inner))")
-    backing = parent(inner)
-    backing isa DataColumn || error("sbimpl: `me($(name(inner)), ...)` expects a raw data column, got $(typeof(backing))")
-    v = parent(backing)
-    v isa AbstractVector{<:Real} || error("sbimpl: `me($(name(inner)), ...)` expects a numeric data column, got $(typeof(v))")
+    xname, raw = _sb_inner_data(:me, inner)
+    v = _sb_real_vec(:me, xname, raw)
     sd_arg isa Real || error("sbimpl: `me(x, sd)` expects a numeric constant `sd`, got $(typeof(sd_arg))")
     sd_arg > 0 || error("sbimpl: `me(x, sd)` expects sd > 0 (got $sd_arg)")
-    xname = name(inner)
     data[xname] = collect(Float64, v)
     sd_name = Symbol(:sd_, xname)
     data[sd_name] = Float64(sd_arg)
@@ -1485,14 +1495,9 @@ end
 _sb_predictor_term!(stmts, data, ::typeof(s), t) = begin
     args = getargs(t)
     length(args) == 1 || error("sbimpl: `s(x)` expects 1 positional arg, got $(length(args))")
-    inner = only(args)
-    inner isa NamedColumn || error("sbimpl: `s(...)` expects a NamedColumn, got $(typeof(inner))")
-    backing = parent(inner)
-    backing isa DataColumn || error("sbimpl: `s($(name(inner)))` expects a raw data column, got $(typeof(backing))")
-    v = parent(backing)
-    v isa AbstractVector{<:Real} || error("sbimpl: `s($(name(inner)))` expects numeric data, got $(typeof(v))")
+    xname, raw = _sb_inner_data(:s, only(args))
+    v = _sb_real_vec(:s, xname, raw)
     basis, _ = _sb_spline_basis_ncs(v; n_interior=2)
-    xname = name(inner)
     X_name = Symbol(:X_basis_, xname)
     data[X_name] = basis
     col_name = Symbol(:s_, xname)
@@ -1508,16 +1513,11 @@ end
 _sb_predictor_term!(stmts, data, ::typeof(gp), t) = begin
     args = getargs(t); kw = getkwargs(t)
     length(args) == 1 || error("sbimpl: `gp(x; k=K, c=C)` expects 1 positional arg, got $(length(args))")
-    inner = only(args)
-    inner isa NamedColumn || error("sbimpl: `gp(...)` expects a NamedColumn, got $(typeof(inner))")
-    backing = parent(inner)
-    backing isa DataColumn || error("sbimpl: `gp($(name(inner)))` expects a raw data column, got $(typeof(backing))")
-    raw = parent(backing)
-    raw isa AbstractVector{<:Real} || error("sbimpl: `gp($(name(inner)))` expects numeric data, got $(typeof(raw))")
+    xname, raw_col = _sb_inner_data(:gp, only(args))
+    raw = _sb_real_vec(:gp, xname, raw_col)
     K = get(kw, :k, 20)
     c = get(kw, :c, 1.5)
     PHI, lambda = _hsgp_basis(raw, K, c)
-    xname = name(inner)
     PHI_name    = Symbol(:PHI_, xname)
     lambda_name = Symbol(:lambda_, xname)
     data[PHI_name]    = PHI
@@ -1540,15 +1540,11 @@ _sb_predictor_term!(stmts, data, ::typeof(ar), t) = begin
     p = get(kw, :p, 1)
     p == 1 || error("sbimpl: `ar(time; p=$p)` only supports p=1 so far")
     length(args) == 1 || error("sbimpl: `ar(time; p=1)` expects 1 positional arg, got $(length(args))")
-    time = only(args)
-    time isa NamedColumn || error("sbimpl: `ar(time)` expects a NamedColumn, got $(typeof(time))")
-    backing = parent(time)
-    backing isa DataColumn || error("sbimpl: `ar($(name(time)))` expects a raw data column, got $(typeof(backing))")
-    xname = name(time)
+    xname, raw = _sb_inner_data(:ar, only(args))
     # Ensure the time column lands in `data`. The prepass already handles this
     # for named data columns, but be defensive -- the submodel uses it as a
     # length probe via `num_elements(time)`.
-    data[xname] = collect(Float64, parent(backing))
+    data[xname] = collect(Float64, raw)
     col_name = Symbol(:ar_, xname)
     push!(stmts, :($col_name ~ _sb_ar1(; time=$xname)))
     col_name
