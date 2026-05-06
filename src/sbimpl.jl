@@ -523,6 +523,24 @@ _as_missing_column(_) = nothing
 _is_distribution_type(::Type{T}) where {T<:Distribution} = true
 _is_distribution_type(_) = false
 
+_as_symbol(s::Symbol) = s
+_as_symbol(_) = nothing
+
+_as_int_vec(v::AbstractVector{<:Integer}) = v
+_as_int_vec(_) = nothing
+
+_as_real_vec(v::AbstractVector{<:Real}) = v
+_as_real_vec(_) = nothing
+
+_as_integer(x::Integer) = x
+_as_integer(_) = nothing
+
+_as_real(x::Real) = x
+_as_real(_) = nothing
+
+_scalar_or_lift(::Real, scalar_v, other_v) = :(rep_vector($scalar_v, num_elements($other_v)))
+_scalar_or_lift(_, scalar_v, _other_v) = scalar_v
+
 _sb_collect_data!(data, x; skip=Set{Symbol}()) = nothing
 function _sb_record_data!(data, x::NamedColumn, d::DataColumn, skip)
     !(name(x) in skip) && (data[name(x)] = _sb_data_vec(name(x), parent(d)))
@@ -794,8 +812,8 @@ function _sb_mi_family_kwargs(::Type{Normal}, rhs::ExprColumn, data)
     # Submodel body unconditionally subscripts (`scale[Jmis]` etc.), so a
     # scalar arg has to be lifted to a vector at the call site. Use the
     # other arg's length probe -- LP names are always full-length.
-    scale_expr = scale isa Real ? :(rep_vector($scale_v, num_elements($loc_v))) : scale_v
-    loc_expr   = loc   isa Real ? :(rep_vector($loc_v,   num_elements($scale_v))) : loc_v
+    scale_expr = _scalar_or_lift(scale, scale_v, loc_v)
+    loc_expr   = _scalar_or_lift(loc,   loc_v,   scale_v)
     [Expr(:kw, :loc,   loc_expr),
      Expr(:kw, :scale, scale_expr)]
 end
@@ -806,12 +824,12 @@ end
 # and reference by name. Numeric literals turn into themselves.
 _sb_mi_kwarg_value(x::Real, _) = x
 _sb_mi_kwarg_value(x::NamedColumn, data) = begin
-    d = parent(x)
-    if d isa DataColumn
-        data[name(x)] = _sb_data_vec(name(x), parent(d))
-    end
+    _maybe_record_data!(data, x, parent(x))
     name(x)
 end
+
+_maybe_record_data!(data, x, d::DataColumn) = (data[name(x)] = _sb_data_vec(name(x), parent(d)); nothing)
+_maybe_record_data!(args...) = nothing
 _sb_mi_kwarg_value(x, _) = error("sbimpl: unsupported `mi(...)` family arg shape $(typeof(x))")
 
 # Map a Julia function (typically the result of `InverseFunctions.inverse(...)`
@@ -897,13 +915,15 @@ end
 # Classify a predictor term as "direct" (allocates its own parameters, no
 # popefs multiplication). Matches vimpl: integer-backed NamedColumns are
 # treated as treatment-coded categoricals; floats go through popefs.
-_sb_is_categorical(t::NamedColumn) = begin
-    d = parent(t)
-    d isa DataColumn || return false
-    v = parent(d)
-    v isa AbstractVector{<:Integer} || v isa CA.CategoricalVector
-end
+_sb_is_categorical(t::NamedColumn) = _is_cat_data(parent(t))
 _sb_is_categorical(_) = false
+
+_is_cat_data(d::DataColumn) = _is_cat_vec(parent(d))
+_is_cat_data(_) = false
+
+_is_cat_vec(::AbstractVector{<:Integer}) = true
+_is_cat_vec(::CA.CategoricalVector) = true
+_is_cat_vec(_) = false
 
 # Free-summand terms (no popefs beta): `mo1(c)`, categorical NamedColumns.
 # Categoricals emit `cat_<c> ~ _sb_cat(; x=<c>_idx, n_levels=<c>_n_levels)`.
@@ -981,14 +1001,14 @@ _sb_normalize_group(g::ExprColumn) = begin
     getf(g) === gr || error("sbimpl: expected NamedColumn or `gr(...)` on RHS of `|`, got `$(getf(g))`")
     args = getargs(g); kw = getkwargs(g)
     length(args) == 1 || error("sbimpl: `gr(...)` expects exactly one positional group, got $(length(args))")
-    group = args[1]
-    group isa NamedColumn || error("sbimpl: `gr(...)` expects a NamedColumn group, got $(typeof(group))")
-    by = get(kw, :by, nothing)
+    group_raw = args[1]
+    group = _as_named_column(group_raw)
+    isnothing(group) && error("sbimpl: `gr(...)` expects a NamedColumn group, got $(typeof(group_raw))")
+    by_raw = get(kw, :by, nothing)
     id_sym = _sb_id_sym(get(kw, :id, nothing))
-    if by === nothing
-        return (group, id_sym)
-    end
-    by isa NamedColumn || error("sbimpl: `gr(...; by=...)` expects a NamedColumn for `by`, got $(typeof(by))")
+    by_raw === nothing && return (group, id_sym)
+    by = _as_named_column(by_raw)
+    isnothing(by) && error("sbimpl: `gr(...; by=...)` expects a NamedColumn for `by`, got $(typeof(by_raw))")
     ((group, by), id_sym)
 end
 _sb_normalize_group(g) = error("sbimpl: expected NamedColumn or `gr(...)` on RHS of `|`, got $(typeof(g))")
@@ -1010,8 +1030,9 @@ function _sb_ranef_parts(rt::ExprColumn)
         desc, id_sym = _sb_normalize_group(raw_group)
         (id_sym, lhs, desc)
     elseif length(args) == 3
-        lhs, id_sym, raw_group = args
-        id_sym isa Symbol || error("sbimpl: `(e | ID | g)` middle must be a Symbol, got $(typeof(id_sym))")
+        lhs, id_sym_raw, raw_group = args
+        id_sym = _as_symbol(id_sym_raw)
+        isnothing(id_sym) && error("sbimpl: `(e | ID | g)` middle must be a Symbol, got $(typeof(id_sym_raw))")
         desc, gr_id_sym = _sb_normalize_group(raw_group)
         gr_id_sym === nothing ||
             error("sbimpl: `(e | ID | g)` cannot also carry `gr(g, id=...)` (got `$gr_id_sym`)")
@@ -1077,8 +1098,8 @@ end
 
 # Emit a single ranef block for one normalized group descriptor.
 function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, gterms, summands)
-    g_backing = parent(group)
-    g_backing isa DataColumn || error("sbimpl: group `$(name(group))` must be a raw data column")
+    g_backing = _as_data_column(parent(group))
+    isnothing(g_backing) && error("sbimpl: group `$(name(group))` must be a raw data column")
     g = name(group)
     n_levels, g_idx = _sb_level_index(parent(g_backing))
     idx_name = Symbol(g, :_idx)
@@ -1108,10 +1129,10 @@ end
 
 function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::Tuple{NamedColumn,NamedColumn}, gterms, summands)
     gcol, bcol = group
-    g_backing = parent(gcol)
-    b_backing = parent(bcol)
-    g_backing isa DataColumn || error("sbimpl: group `$(name(gcol))` must be a raw data column")
-    b_backing isa DataColumn || error("sbimpl: `by=$(name(bcol))` must be a raw data column")
+    g_backing = _as_data_column(parent(gcol))
+    b_backing = _as_data_column(parent(bcol))
+    isnothing(g_backing) && error("sbimpl: group `$(name(gcol))` must be a raw data column")
+    isnothing(b_backing) && error("sbimpl: `by=$(name(bcol))` must be a raw data column")
     g, b = name(gcol), name(bcol)
     n_groups, g_idx = _sb_level_index(parent(g_backing))
     n_strata, b_idx = _sb_level_index(parent(b_backing))
@@ -1150,13 +1171,13 @@ end
 function _sb_collect_id_buckets(brmi::BRMI)
     buckets = OrderedCollections.OrderedDict{Tuple{Symbol,Any}, Any}()
     for (brmi_key, op_nc) in pairs(brmi.operations)
-        op = parent(op_nc)
-        op isa ExprColumn || continue
+        op = _as_expr_column(parent(op_nc)); isnothing(op) && continue
         getf(op) === (~) || continue
-        _, rhs = getargs(op, 2)
-        rhs isa ExprColumn || continue
-        for t in _sb_terms(rhs)
-            t isa ExprColumn && getf(t) === (|) || continue
+        _, rhs_raw = getargs(op, 2)
+        rhs = _as_expr_column(rhs_raw); isnothing(rhs) && continue
+        for t_raw in _sb_terms(rhs)
+            t = _as_expr_column(t_raw); isnothing(t) && continue
+            getf(t) === (|) || continue
             id_sym, lhs, desc = _sb_ranef_parts(t)
             id_sym === nothing && continue
             k = (id_sym, _sb_group_key(desc))
@@ -1248,8 +1269,8 @@ end
 # in `data`. Idempotent — safe to call from both the ID pre-pass and the per-
 # target plain-block emitter. Returns the (idx_name, n_name) pair used in stmts.
 function _sb_ensure_group_data!(data, g::NamedColumn)
-    g_backing = parent(g)
-    g_backing isa DataColumn || error("sbimpl: group `$(name(g))` must be a raw data column")
+    g_backing = _as_data_column(parent(g))
+    isnothing(g_backing) && error("sbimpl: group `$(name(g))` must be a raw data column")
     gname = name(g)
     idx_name = Symbol(gname, :_idx)
     n_name   = Symbol(:n_, gname)
@@ -1264,10 +1285,10 @@ end
 # this block never clashes with a plain `(... | g)` bucket on the same group.
 function _sb_ensure_group_data!(data, g::Tuple{NamedColumn,NamedColumn})
     gcol, bcol = g
-    g_backing = parent(gcol)
-    b_backing = parent(bcol)
-    g_backing isa DataColumn || error("sbimpl: group `$(name(gcol))` must be a raw data column")
-    b_backing isa DataColumn || error("sbimpl: `by=$(name(bcol))` must be a raw data column")
+    g_backing = _as_data_column(parent(gcol))
+    b_backing = _as_data_column(parent(bcol))
+    isnothing(g_backing) && error("sbimpl: group `$(name(gcol))` must be a raw data column")
+    isnothing(b_backing) && error("sbimpl: `by=$(name(bcol))` must be a raw data column")
     gname, bname = name(gcol), name(bcol)
     n_groups, g_idx = _sb_level_index(parent(g_backing))
     n_strata, b_idx = _sb_level_index(parent(b_backing))
@@ -1337,14 +1358,16 @@ _sb_collect_terms_expr!(acc, ::typeof(*), x) = push!(acc, x)
 _sb_collect_terms_expr!(acc, ::typeof(factor), x::ExprColumn) = begin
     args = getargs(x); kw = getkwargs(x)
     length(args) == 1 || error("sbimpl: `factor(...)` expects 1 positional arg, got $(length(args))")
-    inner = only(args)
-    inner isa NamedColumn || error("sbimpl: `factor(...)` expects a NamedColumn, got $(typeof(inner))")
-    backing = parent(inner)
-    backing isa DataColumn || error("sbimpl: `factor($(name(inner)))` expects a raw data column")
-    raw = parent(backing)
-    raw isa AbstractVector{<:Integer} || error("sbimpl: `factor($(name(inner)))` expects integer-coded categorical data, got $(typeof(raw))")
-    ref = get(kw, :ref, 1)
-    ref isa Integer || error("sbimpl: `factor(...; ref=k)` expects an integer level, got $(typeof(ref))")
+    inner_raw = only(args)
+    inner = _as_named_column(inner_raw)
+    isnothing(inner) && error("sbimpl: `factor(...)` expects a NamedColumn, got $(typeof(inner_raw))")
+    backing = _as_data_column(parent(inner))
+    isnothing(backing) && error("sbimpl: `factor($(name(inner)))` expects a raw data column")
+    raw = _as_int_vec(parent(backing))
+    isnothing(raw) && error("sbimpl: `factor($(name(inner)))` expects integer-coded categorical data, got $(typeof(parent(backing)))")
+    ref_raw = get(kw, :ref, 1)
+    ref = _as_integer(ref_raw)
+    isnothing(ref) && error("sbimpl: `factor(...; ref=k)` expects an integer level, got $(typeof(ref_raw))")
     1 <= ref <= maximum(raw) || error("sbimpl: `factor($(name(inner)); ref=$ref)` ref out of range (max level $(maximum(raw)))")
     new_name = ref == 1 ? name(inner) : Symbol(name(inner), :__ref_, ref)
     new_backing = ref == 1 ? backing :
@@ -1360,13 +1383,17 @@ _sb_collect_terms_expr!(acc, ::typeof(doublepipe), x) = begin
     args = getargs(x)
     length(args) == 2 || error("sbimpl: `||` zerocorr expects 2 args, got $(length(args))")
     lhs, rhs = args
-    rhs isa NamedColumn || error("sbimpl: `||` zerocorr RHS must be a NamedColumn group, got $(typeof(rhs))")
-    inner = lhs isa ExprColumn && getf(lhs) === (+) ? collect(getargs(lhs)) : Any[lhs]
+    rhs_nc = _as_named_column(rhs)
+    isnothing(rhs_nc) && error("sbimpl: `||` zerocorr RHS must be a NamedColumn group, got $(typeof(rhs))")
+    inner = _zerocorr_inner(lhs)
     for (i, term) in enumerate(inner)
-        nocor = NamedColumn(Symbol(name(rhs), :__nocor__, i), parent(rhs))
+        nocor = NamedColumn(Symbol(name(rhs_nc), :__nocor__, i), parent(rhs_nc))
         push!(acc, ExprColumn(|, term, nocor))
     end
 end
+
+_zerocorr_inner(lhs::ExprColumn) = getf(lhs) === (+) ? collect(getargs(lhs)) : Any[lhs]
+_zerocorr_inner(lhs) = Any[lhs]
 # `a & b` is the interaction operator (parallels StatsModels.jl). `&` has
 # higher precedence than `+` in Julia, so `1 + a + b + a&b` naturally parses
 # as `+(1, a, b, a&b)` and the normal `+`-flatten path applies. We deliberately
