@@ -442,7 +442,10 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__) = begin
     # `_sb_emit_mi!` handler later splits them into observed values + missing
     # parameters. Any other formula that references the same name (e.g.
     # `loc2 = a + b * y`) will see the merged response, not the raw column.
-    mi_columns = _sb_mi_columns(brmi)
+    mi_columns = Set{Symbol}()
+    for (_, op) in pairs(brmi.operations)
+        _sb_visit_op!(mi_columns, op)
+    end
     # Prepass 1: stash every data-backed NamedColumn so later intercept-only
     # predictors have a length probe to hang `rep_vector(1., num_elements(...))`
     # off, regardless of iteration order. Columns in `mi_columns` are skipped.
@@ -485,28 +488,26 @@ _sb_data_vec(col_name::Symbol, raw) = begin
     raw
 end
 
-# Walk every operation looking for `mi(<sym>) ~ ...` LHS forms; return the
-# set of inner symbols (the columns whose materialisation is deferred to
-# `_sb_emit_mi!`). Empty by default.
-_mi_inner_name(_) = nothing
-function _mi_inner_name(op::NamedColumn)
-    e = _as_expr_column(parent(op)); isnothing(e) && return nothing
-    getf(e) === (~) || return nothing
-    lhs, _ = getargs(e, 2)
-    lhs_e = _as_expr_column(lhs); isnothing(lhs_e) && return nothing
-    getf(lhs_e) === mi || return nothing
-    inner = only(getargs(lhs_e))
-    nc = _as_named_column(inner); isnothing(nc) ? nothing : name(nc)
-end
+# Generic prepass walker. Visits every operation; per-`typeof(f)` overrides
+# of `_sb_register_sampling_lhs!` claim columns (or anything else they want
+# to register into `out`). The walker has no knowledge of `mi` or any
+# specific decorator — adding one is a new method on
+# `_sb_register_sampling_lhs!`, no walker edit. Modelled on vimpl's
+# `vbroadcasted` dispatch chain.
+_sb_visit_op!(_, _) = nothing
+_sb_visit_op!(out, op::NamedColumn) = _sb_visit_op!(out, parent(op))
+_sb_visit_op!(out, p::ExprColumn{typeof(~)}) =
+    _sb_register_sampling_lhs!(out, getargs(p, 2)[1])
 
-function _sb_mi_columns(brmi::BRMI)
-    out = Set{Symbol}()
-    for (_, op) in pairs(brmi.operations)
-        nm = _mi_inner_name(op)
-        isnothing(nm) || push!(out, nm)
-    end
-    out
-end
+# Default: no LHS shape claims any column.
+_sb_register_sampling_lhs!(_, _) = nothing
+
+# `mi(NamedColumn) ~ rhs` — register the inner column's name.
+_sb_register_sampling_lhs!(out::Set{Symbol}, lhs::ExprColumn{typeof(mi)}) =
+    _sb_register_mi_inner!(out, only(getargs(lhs)))
+_sb_register_mi_inner!(_, _) = nothing
+_sb_register_mi_inner!(out::Set{Symbol}, inner::NamedColumn) =
+    (push!(out, name(inner)); nothing)
 
 
 _as_data_column(x::DataColumn) = x
@@ -702,23 +703,31 @@ _sb_sampling_backed!(stmts, data, key, backing, rhs; id_lookup) =
 # `inverse` is a function with a Stan-known name (log/exp/logit/logistic/
 # sqrt/square, ...) works; unknown links error at transpile time.
 #
-# Special case: `mi(y) ~ <family>(args...)` -- response with missing values
-# modelled jointly. The inner symbol stays as the merged response so other
-# formulas can reference it (e.g. `loc2 = ... + b * y`). See `_sb_emit_mi!`.
-_sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup()) = begin
-    f = getf(lhs)
-    if f === mi
-        return _sb_emit_mi!(stmts, data, key, lhs, rhs)
-    end
-    inner_raw = only(getargs(lhs))
-    inner = _as_named_column(inner_raw)
-    isnothing(inner) && error("sbimpl: expected NamedColumn inside link, got $(typeof(inner_raw))")
+# Generic LHS-of-tilde call `f(NamedColumn) ~ rhs`: link-function path. `f`
+# is treated as a link whose `InverseFunctions.inverse(f)` we can map to a
+# Stan name. Per-`typeof(f)` overrides (`mi`, future `cens`/`trunc`, …) live
+# as separate methods of `_sb_sampling!`, mirroring vimpl's
+# `vbroadcasted(::ExprColumn{typeof(F)})` extension idiom.
+_sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup()) =
+    _sb_sampling_through_link!(stmts, data, key, getf(lhs), only(getargs(lhs)), rhs; id_lookup)
+
+_sb_sampling_through_link!(stmts, data, key, f, inner, rhs; kwargs...) =
+    error("sbimpl: expected NamedColumn inside link `$f(...)`, got $(typeof(inner))")
+function _sb_sampling_through_link!(stmts, data, key, f, inner::NamedColumn, rhs; id_lookup)
     inv_f = InverseFunctions.inverse(f)
     inner_name = name(inner)
     pre_name = Symbol(nameof(f), :_, inner_name)
     _sb_linear_predictor!(stmts, data, pre_name, rhs; id_lookup, brmi_key=key)
     push!(stmts, :($inner_name = $(_sb_julia_to_stan_fn(inv_f))($pre_name)))
 end
+
+# `mi(y) ~ <family>(args...)` — response with missing values modelled
+# jointly. The inner symbol stays as the merged response so other formulas
+# can reference it (e.g. `loc2 = ... + b * y`). One method on the same
+# `_sb_sampling!` dispatch surface — same shape as `vbroadcasted(::ExprColumn{typeof(protect)})`
+# and friends in vimpl.
+_sb_sampling!(stmts, data, key, lhs::ExprColumn{typeof(mi)}, rhs; id_lookup=_sb_empty_id_lookup()) =
+    _sb_emit_mi!(stmts, data, key, lhs, rhs)
 
 # DRAFT: missing-data response handler. Triggered by `mi(y) ~ <family>(args)`.
 # Splits the response into observed values (data) + missing parameters,
