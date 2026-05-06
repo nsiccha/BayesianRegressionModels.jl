@@ -451,9 +451,10 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__) = begin
     end
     # Prepass 1: stash every data-backed NamedColumn so later intercept-only
     # predictors have a length probe to hang `rep_vector(1., num_elements(...))`
-    # off, regardless of iteration order. Columns claimed by the `mi` decorator
-    # are skipped — they're materialised by `_sb_emit_mi!` instead.
-    skip_data = get(prepass, :mi_columns, Set{Symbol}())
+    # off, regardless of iteration order. Decorators that materialise their
+    # own columns (e.g. `mi`'s `_sb_emit_mi!`) claim them via the prepass'
+    # `:skip_data` bucket; the data-collection pass honours that.
+    skip_data = get(prepass, :skip_data, Set{Symbol}())
     for (_, op) in pairs(brmi.operations)
         _sb_collect_data!(data, op; skip=skip_data)
     end
@@ -496,7 +497,7 @@ end
 # Generic prepass walker. Visits every operation; per-`typeof(f)` overrides
 # of `_sb_register_sampling_lhs!` write into `ctx` under their own subkey.
 # `ctx` is a plain Dict — each decorator's extension method picks its own
-# key (e.g. `:mi_columns`) and lazily creates the bucket via `get!`. The
+# key (e.g. `:skip_data`) and lazily creates the bucket via `get!`. The
 # walker has no knowledge of `mi` or any specific decorator. Adding one is
 # a new method on `_sb_register_sampling_lhs!`, no walker edit.
 _sb_visit_op!(_, _) = nothing
@@ -507,12 +508,14 @@ _sb_visit_op!(ctx, p::ExprColumn{typeof(~)}) =
 # Default: no LHS shape claims anything.
 _sb_register_sampling_lhs!(_, _) = nothing
 
-# `mi(NamedColumn) ~ rhs` — claim the inner column under `:mi_columns`.
+# `mi(NamedColumn) ~ rhs` — claim the inner column under `:skip_data`,
+# which the data-collection pass honours by not materialising the column
+# (the merged response is emitted later by `_sb_emit_mi!`).
 _sb_register_sampling_lhs!(ctx::AbstractDict, lhs::ExprColumn{typeof(mi)}) =
     _sb_register_mi_inner!(ctx, only(getargs(lhs)))
 _sb_register_mi_inner!(_, _) = nothing
 _sb_register_mi_inner!(ctx::AbstractDict, inner::NamedColumn) =
-    (push!(get!(ctx, :mi_columns, Set{Symbol}()), name(inner)); nothing)
+    (push!(get!(ctx, :skip_data, Set{Symbol}()), name(inner)); nothing)
 
 
 _as_data_column(x::DataColumn) = x
