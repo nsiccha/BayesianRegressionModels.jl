@@ -538,6 +538,9 @@ _as_integer(_) = nothing
 _as_real(x::Real) = x
 _as_real(_) = nothing
 
+_as_error_exception(e::ErrorException) = e
+_as_error_exception(_) = nothing
+
 _scalar_or_lift(::Real, scalar_v, other_v) = :(rep_vector($scalar_v, num_elements($other_v)))
 _scalar_or_lift(_, scalar_v, _other_v) = scalar_v
 
@@ -1430,9 +1433,10 @@ function _sb_interaction_cols!(cols, t::ExprColumn, data, stmts)
 end
 
 _sb_interaction_operand(t::NamedColumn) = begin
-    d = parent(t)
-    d isa DataColumn || error(
-        "sbimpl: interaction operand `$(name(t))` must be a raw data column, got $(typeof(d))"
+    d_raw = parent(t)
+    d = _as_data_column(d_raw)
+    isnothing(d) && error(
+        "sbimpl: interaction operand `$(name(t))` must be a raw data column, got $(typeof(d_raw))"
     )
     v = parent(d)
     if _sb_is_categorical(t)
@@ -1440,12 +1444,11 @@ _sb_interaction_operand(t::NamedColumn) = begin
         n_levels >= 2 || error(
             "sbimpl: categorical interaction operand `$(name(t))` needs >= 2 levels (got $n_levels)"
         )
-        (; kind=:cat, name=name(t), n_levels, idx)
-    elseif v isa AbstractVector{<:Real}
-        (; kind=:cont, name=name(t), vec=collect(Float64, v))
-    else
-        error("sbimpl: interaction operand `$(name(t))` has unsupported eltype $(eltype(v))")
+        return (; kind=:cat, name=name(t), n_levels, idx)
     end
+    rv = _as_real_vec(v)
+    isnothing(rv) && error("sbimpl: interaction operand `$(name(t))` has unsupported eltype $(eltype(v))")
+    (; kind=:cont, name=name(t), vec=collect(Float64, rv))
 end
 _sb_interaction_operand(t) = error(
     "sbimpl: interaction operand must be a raw-data NamedColumn, got $(typeof(t)); ",
@@ -1493,20 +1496,21 @@ _sb_predictor_col(t::Int, data, _stmts) = begin
     probe = _sb_any_data_symbol(data)
     :(rep_vector(1., num_elements($probe)))
 end
-_sb_predictor_col(t::NamedColumn, data, _stmts) = begin
-    d = parent(t)
-    # If the named column was already bound earlier in the walker (e.g.
-    # `ftime ~ gamma_time(...)` emitted a `ftime ~ _sb_gamma_time(...)` stmt),
-    # its parent is the sampling ExprColumn rather than a raw data column --
-    # just reference the Stan variable by name.
-    d isa ExprColumn && return name(t)
-    d isa DataColumn || error("sbimpl: expected data-backed NamedColumn for `$(name(t))`, got $(typeof(d))")
+_sb_predictor_col(t::NamedColumn, data, _stmts) = _predictor_col_for(t, parent(t), data)
+
+# If the named column was already bound earlier in the walker (e.g.
+# `ftime ~ gamma_time(...)` emitted a `ftime ~ _sb_gamma_time(...)` stmt),
+# its parent is the sampling ExprColumn rather than a raw data column --
+# just reference the Stan variable by name.
+_predictor_col_for(t, ::ExprColumn, _) = name(t)
+function _predictor_col_for(t, d::DataColumn, data)
     v = parent(d)
-    v isa AbstractVector{<:Real} ||
-        error("sbimpl: non-numeric predictor `$(name(t))` not supported yet (wrap in `categorical(…)` once we add it)")
-    data[name(t)] = collect(Float64, v)
+    rv = _as_real_vec(v)
+    isnothing(rv) && error("sbimpl: non-numeric predictor `$(name(t))` not supported yet (wrap in `categorical(…)` once we add it)")
+    data[name(t)] = collect(Float64, rv)
     name(t)
 end
+_predictor_col_for(t, d, _) = error("sbimpl: expected data-backed NamedColumn for `$(name(t))`, got $(typeof(d))")
 _sb_predictor_col(t::ExprColumn, data, stmts) = _sb_predictor_term!(stmts, data, getf(t), t)
 _sb_predictor_col(t, _, _) = error("sbimpl: unsupported predictor term $(typeof(t)): $t")
 
@@ -1534,8 +1538,10 @@ _sb_predictor_term!(stmts, data, ::typeof(me), t) = begin
     inner, sd_arg = args
     xname, raw = _sb_inner_data(:me, inner)
     v = _sb_real_vec(:me, xname, raw)
-    sd_arg isa Real || error("sbimpl: `me(x, sd)` expects a numeric constant `sd`, got $(typeof(sd_arg))")
-    sd_arg > 0 || error("sbimpl: `me(x, sd)` expects sd > 0 (got $sd_arg)")
+    sd_real = _as_real(sd_arg)
+    isnothing(sd_real) && error("sbimpl: `me(x, sd)` expects a numeric constant `sd`, got $(typeof(sd_arg))")
+    sd_real > 0 || error("sbimpl: `me(x, sd)` expects sd > 0 (got $sd_real)")
+    sd_arg = sd_real
     data[xname] = collect(Float64, v)
     sd_name = Symbol(:sd_, xname)
     data[sd_name] = Float64(sd_arg)
@@ -1639,8 +1645,8 @@ function _sb_predictor_term!(stmts, data, f::Function, t)
         data[cn] = v
         return cn
     catch err
-        err isa ErrorException || rethrow()
-        error("sbimpl: unsupported predictor-term function `$f` (supported: `mo`, `mo1`, `me`, `s`, `ar`, `protect`, `zscale`, `center`, `standardize`, or any expression in raw data columns) -- materialization failed: $(err.msg)")
+        _ee = _as_error_exception(err); isnothing(_ee) && rethrow()
+        error("sbimpl: unsupported predictor-term function `$f` (supported: `mo`, `mo1`, `me`, `s`, `ar`, `protect`, `zscale`, `center`, `standardize`, or any expression in raw data columns) -- materialization failed: $(_ee.msg)")
     end
 end
 
@@ -1648,10 +1654,10 @@ end
 # vector, walking only data-backed leaves. Used by the wrapper predictors
 # (protect / zscale / etc) to compute their column at transpile time.
 _sb_materialize_vec(x::Number) = x
-_sb_materialize_vec(x::NamedColumn) = let d = parent(x)
-    d isa DataColumn ? parent(d) : error(
-        "sbimpl: cannot materialize NamedColumn `$(name(x))` -- only raw data columns supported inside `protect` / `zscale` / `center` / `standardize`")
-end
+_sb_materialize_vec(x::NamedColumn) = _materialize_named(x, parent(x))
+_materialize_named(_, d::DataColumn) = parent(d)
+_materialize_named(x, _) = error(
+    "sbimpl: cannot materialize NamedColumn `$(name(x))` -- only raw data columns supported inside `protect` / `zscale` / `center` / `standardize`")
 _sb_materialize_vec(x::ExprColumn) = broadcast(getf(x), map(_sb_materialize_vec, getargs(x))...)
 _sb_materialize_vec(x) = error("sbimpl: cannot materialize $(typeof(x)) inside wrapper predictor")
 
@@ -1670,9 +1676,15 @@ _sb_wrapper_col_name(prefix::Symbol, inner::NamedColumn) =
 _sb_wrapper_col_name(prefix::Symbol, inner) =
     Symbol(prefix, :_expr_, string(hash(inner); base=16)[1:8])
 
+_n_obs_name(t::NamedColumn) = _n_obs_named_data(t, parent(t))
+_n_obs_name(_) = nothing
+_n_obs_named_data(t, ::DataColumn) = name(t)
+_n_obs_named_data(args...) = nothing
+
 _sb_n_obs_probe(terms) = begin
     for t in terms
-        t isa NamedColumn && parent(t) isa DataColumn && return name(t)
+        n = _n_obs_name(t)
+        isnothing(n) || return n
     end
     nothing
 end
@@ -1683,10 +1695,13 @@ _sb_any_data_symbol(data) = begin
     # (bruno-ext's `dose_times`) which StanBlocks serializes as a
     # `tuple(vector, array[] int)` that Stan's `num_elements` rejects.
     for (k, v) in data
-        v isa AbstractVector && !(eltype(v) <: AbstractVector) && return k
+        _is_flat_vec(v) && return k
     end
     first(keys(data))
 end
+
+_is_flat_vec(v::AbstractVector) = !(eltype(v) <: AbstractVector)
+_is_flat_vec(_) = false
 
 
 # ---- likelihood emitters: `y ~ Normal(loc, sigma)` etc. ----------------------
@@ -1712,9 +1727,10 @@ _sb_lik_stan!(stmts, target, name::Symbol, args, data) =
 # then emits `y ~ ordered_logistic(eta, cutpoints)` — dispatches against
 # Stan's built-in `ordered_logistic_lpmf` (surfaced into SB's @builtin_module).
 function _sb_lik_family!(stmts, target, ::Type{<:OrderedLogistic}, args::Tuple{Any}, data)
-    y = data[target]
-    y isa AbstractVector{<:Integer} || error(
-        "sbimpl: `OrderedLogistic` expects integer outcome data for `$target`, got $(typeof(y))"
+    y_raw = data[target]
+    y = _as_int_vec(y_raw)
+    isnothing(y) && error(
+        "sbimpl: `OrderedLogistic` expects integer outcome data for `$target`, got $(typeof(y_raw))"
     )
     n_levels = maximum(y)
     n_levels >= 2 || error("sbimpl: `OrderedLogistic($target)` needs >= 2 levels (got $n_levels)")
@@ -1781,12 +1797,11 @@ _sb_lik_family!(stmts, target, fam, args, _) =
 _sb_scalar_expr(x::Symbol, _) = x
 _sb_scalar_expr(x::Real, _) = x
 _sb_scalar_expr(x::NamedColumn, data) = begin
-    d = parent(x)
-    if d isa DataColumn
-        data[name(x)] = parent(d)
-    end
+    _record_scalar_data!(data, name(x), parent(x))
     name(x)
 end
+_record_scalar_data!(data, sym, d::DataColumn) = (data[sym] = parent(d); nothing)
+_record_scalar_data!(args...) = nothing
 # Formula arithmetic is element-wise by intent -- `loc = loc_loc + loc_slope * cdslope`
 # on two length-n vectors means Stan's `.*`, not matrix/dot product. Translate `*`
 # and `/` to their dotted variants so Stan's typechecker accepts vector-vector
