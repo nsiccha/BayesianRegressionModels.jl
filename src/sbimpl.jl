@@ -858,11 +858,9 @@ _sb_is_categorical(_) = false
 # Free-summand terms (no popefs beta): `mo1(c)`, categorical NamedColumns.
 # Categoricals emit `cat_<c> ~ _sb_cat(; x=<c>_idx, n_levels=<c>_n_levels)`.
 # `mo1(c)` reuses the `_sb_mo` submodel already used for free-beta `mo(c)`.
-function _sb_emit_direct!(stmts, data, target::Symbol, t, summands)
-    if t isa NamedColumn
-        _sb_emit_cat!(stmts, data, t, summands)
-        return
-    end
+_sb_emit_direct!(stmts, data, target::Symbol, t::NamedColumn, summands) =
+    _sb_emit_cat!(stmts, data, t, summands)
+function _sb_emit_direct!(stmts, data, target::Symbol, t::ExprColumn, summands)
     f = getf(t)
     f === mo1 || error("sbimpl: unsupported direct-summand term `$f`")
     inner = only(getargs(t))
