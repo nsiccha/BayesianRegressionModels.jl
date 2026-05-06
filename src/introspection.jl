@@ -59,14 +59,10 @@ end
 
 _classify_arg(a) = (; role=:expression, expr=a)
 
-# Helpers: a NamedColumn-backed-by-DataColumn predicate, and the underlying
-# ExprColumn for a NamedColumn whose parent is a `~` / `=` op (or nothing).
-# Both fan out via small dispatch pairs so the introspection walkers stay
-# free of `isa` chains.
-_is_data_named(x::NamedColumn) = _is_data_backing(parent(x))
-_is_data_named(_) = false
-_is_data_backing(::DataColumn) = true
-_is_data_backing(_) = false
+# Two-level dispatch helpers used by every introspection walker. Each returns
+# either the narrowed value (the NamedColumn / the inner ExprColumn) or
+# `nothing`, so callers compose with `isnothing(...)` rather than carrying
+# Bool predicates and `&&`/`||` control flow internally.
 
 _named_op(v::NamedColumn) = _named_op_inner(parent(v))
 _named_op(_) = nothing
@@ -79,8 +75,14 @@ _as_expr_column(x::ExprColumn) = x
 _as_expr_column(_) = nothing
 _sum_summands(x::ExprColumn{typeof(+)}) = getargs(x)
 _sum_summands(x) = (x,)
-_data_backed_or_nothing(x::NamedColumn) = _is_data_backing(parent(x)) ? x : nothing
+
+# A NamedColumn whose backing storage is a DataColumn → the column itself,
+# else nothing. Two methods peel the wrappers; the previous Bool predicate
+# `_is_data_named`/`_is_data_backing` collapsed into this single Maybe form.
+_data_backed_or_nothing(x::NamedColumn) = _data_backed_inner(x, parent(x))
 _data_backed_or_nothing(_) = nothing
+_data_backed_inner(x, ::DataColumn) = x
+_data_backed_inner(_x, _) = nothing
 
 # ---- outcomes ---------------------------------------------------------------
 
@@ -109,7 +111,7 @@ function outcomes(brmi::BRMI)
         op === nothing && continue
         getf(op) === (~) || continue
         lhs, rh = getargs(op, 2)
-        _is_data_named(lhs) || continue
+        isnothing(_data_backed_or_nothing(lhs)) && continue
         isnothing(_as_expr_column(rh)) && continue
         family = getf(rh)
         args = [_classify_arg(a) for a in getargs(rh)]
@@ -182,7 +184,7 @@ function linear_predictors(brmi::BRMI)
         getf(op) === (~) || continue
         lhs, _ = getargs(op, 2)
         # Skip data-bound LHS (those are likelihoods).
-        _is_data_named(lhs) && continue
+        isnothing(_data_backed_or_nothing(lhs)) || continue
         peeled = _peel_lp_lhs(lhs)
         isnothing(peeled) && continue
         link_lhs_fn, lp_name = peeled
@@ -302,7 +304,7 @@ _walk_pred_grouped!(re_terms, s) = begin
     ra = getargs(s)
     length(ra) >= 2 || return false
     last_arg = ra[end]
-    _is_data_named(last_arg) || return false
+    isnothing(_data_backed_or_nothing(last_arg)) && return false
     grp = name(last_arg)
     inner = _walk_predictors(_sum_summands(ra[1]))
     isnothing(inner) && return false
@@ -411,10 +413,14 @@ Every name in `brmi.operations` that is a NamedColumn over a DataColumn
 function data_columns(brmi::BRMI)
     out = Symbol[]
     for (k, v) in pairs(brmi.operations)
-        _is_data_named(v) && push!(out, k)
+        _push_if_data_name!(out, k, v)
     end
     out
 end
+_push_if_data_name!(out, k, v::NamedColumn) = _push_if_data_inner!(out, k, parent(v))
+_push_if_data_name!(_out, _k, _v) = nothing
+_push_if_data_inner!(out, k, ::DataColumn) = (push!(out, k); nothing)
+_push_if_data_inner!(_out, _k, _p) = nothing
 
 """
     hierarchical_outcomes(brmi::BRMI)
