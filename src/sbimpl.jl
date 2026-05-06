@@ -442,15 +442,20 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__) = begin
     # `_sb_emit_mi!` handler later splits them into observed values + missing
     # parameters. Any other formula that references the same name (e.g.
     # `loc2 = a + b * y`) will see the merged response, not the raw column.
-    mi_columns = Set{Symbol}()
+    # Generic prepass: each registered LHS-decorator method writes into its
+    # own subkey of `prepass`. The constructor only knows the subkey at the
+    # consumer site below.
+    prepass = Dict{Symbol, Any}()
     for (_, op) in pairs(brmi.operations)
-        _sb_visit_op!(mi_columns, op)
+        _sb_visit_op!(prepass, op)
     end
     # Prepass 1: stash every data-backed NamedColumn so later intercept-only
     # predictors have a length probe to hang `rep_vector(1., num_elements(...))`
-    # off, regardless of iteration order. Columns in `mi_columns` are skipped.
+    # off, regardless of iteration order. Columns claimed by the `mi` decorator
+    # are skipped — they're materialised by `_sb_emit_mi!` instead.
+    skip_data = get(prepass, :mi_columns, Set{Symbol}())
     for (_, op) in pairs(brmi.operations)
-        _sb_collect_data!(data, op; skip=mi_columns)
+        _sb_collect_data!(data, op; skip=skip_data)
     end
     # Prepass 2: collect brms-style `|ID|` ranef buckets across all sub-formulas,
     # emit one shared ranef_correlated_draws per bucket, and build a lookup
@@ -489,25 +494,25 @@ _sb_data_vec(col_name::Symbol, raw) = begin
 end
 
 # Generic prepass walker. Visits every operation; per-`typeof(f)` overrides
-# of `_sb_register_sampling_lhs!` claim columns (or anything else they want
-# to register into `out`). The walker has no knowledge of `mi` or any
-# specific decorator — adding one is a new method on
-# `_sb_register_sampling_lhs!`, no walker edit. Modelled on vimpl's
-# `vbroadcasted` dispatch chain.
+# of `_sb_register_sampling_lhs!` write into `ctx` under their own subkey.
+# `ctx` is a plain Dict — each decorator's extension method picks its own
+# key (e.g. `:mi_columns`) and lazily creates the bucket via `get!`. The
+# walker has no knowledge of `mi` or any specific decorator. Adding one is
+# a new method on `_sb_register_sampling_lhs!`, no walker edit.
 _sb_visit_op!(_, _) = nothing
-_sb_visit_op!(out, op::NamedColumn) = _sb_visit_op!(out, parent(op))
-_sb_visit_op!(out, p::ExprColumn{typeof(~)}) =
-    _sb_register_sampling_lhs!(out, getargs(p, 2)[1])
+_sb_visit_op!(ctx, op::NamedColumn) = _sb_visit_op!(ctx, parent(op))
+_sb_visit_op!(ctx, p::ExprColumn{typeof(~)}) =
+    _sb_register_sampling_lhs!(ctx, getargs(p, 2)[1])
 
-# Default: no LHS shape claims any column.
+# Default: no LHS shape claims anything.
 _sb_register_sampling_lhs!(_, _) = nothing
 
-# `mi(NamedColumn) ~ rhs` — register the inner column's name.
-_sb_register_sampling_lhs!(out::Set{Symbol}, lhs::ExprColumn{typeof(mi)}) =
-    _sb_register_mi_inner!(out, only(getargs(lhs)))
+# `mi(NamedColumn) ~ rhs` — claim the inner column under `:mi_columns`.
+_sb_register_sampling_lhs!(ctx::AbstractDict, lhs::ExprColumn{typeof(mi)}) =
+    _sb_register_mi_inner!(ctx, only(getargs(lhs)))
 _sb_register_mi_inner!(_, _) = nothing
-_sb_register_mi_inner!(out::Set{Symbol}, inner::NamedColumn) =
-    (push!(out, name(inner)); nothing)
+_sb_register_mi_inner!(ctx::AbstractDict, inner::NamedColumn) =
+    (push!(get!(ctx, :mi_columns, Set{Symbol}()), name(inner)); nothing)
 
 
 _as_data_column(x::DataColumn) = x
