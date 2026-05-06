@@ -1,6 +1,4 @@
 using OrderedCollections
-_is_symbol(::Symbol) = true
-_is_symbol(_) = false
 macro brm(x)
     esc(_brm(x))
 end
@@ -118,16 +116,21 @@ else
 end
 rewrite_ranef_ids(x) = x
 rewrite_ranef_ids(x::Expr) = if isxcall(x, :|) && length(x.args) == 3 &&
-                                isxcall(x.args[2], :|) && length(x.args[2].args) == 3 &&
-                                _is_symbol(x.args[2].args[3])
-    inner = x.args[2]
-    lhs = rewrite_ranef_ids(inner.args[2])
-    id_sym = inner.args[3]
-    g = rewrite_ranef_ids(x.args[3])
-    Expr(:call, :|, lhs, QuoteNode(id_sym), g)
+                                isxcall(x.args[2], :|) && length(x.args[2].args) == 3
+    _quote_ranef_id(x.args[2].args[3], x)
 else
     Expr(x.head, rewrite_ranef_ids.(x.args)...)
 end
+# Dispatches the brms ranef-ID rewrite on the type of the candidate ID.
+# Symbol → wrap as QuoteNode and rebuild the three-arg `|`. Anything else
+# (already a QuoteNode, an Expr, …) → fall through to the generic recursion.
+_quote_ranef_id(id_sym::Symbol, x::Expr) = begin
+    inner = x.args[2]
+    lhs = rewrite_ranef_ids(inner.args[2])
+    g = rewrite_ranef_ids(x.args[3])
+    Expr(:call, :|, lhs, QuoteNode(id_sym), g)
+end
+_quote_ranef_id(_, x::Expr) = Expr(x.head, rewrite_ranef_ids.(x.args)...)
 parselocals!(x; kwargs...) = x
 parselocals!(x::Symbol; info, val) = get!(info.alllocals, x, val)
 parselocals!(x::Expr; info, val) = if Meta.isexpr(x, (:call, :kw))
