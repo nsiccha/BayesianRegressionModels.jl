@@ -456,8 +456,9 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__) = begin
     id_buckets = _sb_collect_id_buckets(brmi)
     id_lookup = _sb_emit_id_buckets!(stmts, data, id_buckets)
     for (key, op) in pairs(brmi.operations)
-        op isa NamedColumn || error("sbimpl: top-level op `$key` is not a NamedColumn")
-        _sb_emit!(stmts, data, key, parent(op); id_lookup)
+        nc = _as_named_column(op)
+        isnothing(nc) && error("sbimpl: top-level op `$key` is not a NamedColumn")
+        _sb_emit!(stmts, data, key, parent(nc); id_lookup)
     end
     body = Expr(:block, stmts...)
     model = StanBlocks.SlicModel(body, data, mod)
@@ -487,27 +488,51 @@ end
 # Walk every operation looking for `mi(<sym>) ~ ...` LHS forms; return the
 # set of inner symbols (the columns whose materialisation is deferred to
 # `_sb_emit_mi!`). Empty by default.
+_mi_inner_name(_) = nothing
+function _mi_inner_name(op::NamedColumn)
+    e = _as_expr_column(parent(op)); isnothing(e) && return nothing
+    getf(e) === (~) || return nothing
+    lhs, _ = getargs(e, 2)
+    lhs_e = _as_expr_column(lhs); isnothing(lhs_e) && return nothing
+    getf(lhs_e) === mi || return nothing
+    inner = only(getargs(lhs_e))
+    nc = _as_named_column(inner); isnothing(nc) ? nothing : name(nc)
+end
+
 function _sb_mi_columns(brmi::BRMI)
     out = Set{Symbol}()
     for (_, op) in pairs(brmi.operations)
-        op isa NamedColumn || continue
-        e = parent(op)
-        e isa ExprColumn || continue
-        getf(e) === (~) || continue
-        lhs, _ = getargs(e, 2)
-        lhs isa ExprColumn && getf(lhs) === mi || continue
-        inner = only(getargs(lhs))
-        inner isa NamedColumn && push!(out, name(inner))
+        nm = _mi_inner_name(op)
+        isnothing(nm) || push!(out, nm)
     end
     out
 end
 
+_as_named_column(x::NamedColumn) = x
+_as_named_column(_) = nothing
+
+_as_expr_column(x::ExprColumn) = x
+_as_expr_column(_) = nothing
+
+_as_data_column(x::DataColumn) = x
+_as_data_column(_) = nothing
+
+_as_missing_column(x::MissingColumn) = x
+_as_missing_column(_) = nothing
+
+_is_distribution_type(::Type{T}) where {T<:Distribution} = true
+_is_distribution_type(_) = false
+
 _sb_collect_data!(data, x; skip=Set{Symbol}()) = nothing
+function _sb_record_data!(data, x::NamedColumn, d::DataColumn, skip)
+    !(name(x) in skip) && (data[name(x)] = _sb_data_vec(name(x), parent(d)))
+    nothing
+end
+_sb_record_data!(args...) = nothing
+
 _sb_collect_data!(data, x::NamedColumn; skip=Set{Symbol}()) = begin
     d = parent(x)
-    if d isa DataColumn && !(name(x) in skip)
-        data[name(x)] = _sb_data_vec(name(x), parent(d))
-    end
+    _sb_record_data!(data, x, d, skip)
     _sb_collect_data!(data, d; skip)
 end
 _sb_collect_data!(data, x::ExprColumn; skip=Set{Symbol}()) =
@@ -590,11 +615,13 @@ _sb_emit_prior!(_, _, _, _) = false
 # dispatch with the LocationScale's mu/sigma threaded in.
 function _sb_emit_prior!(stmts, target, ::Type{<:LocationScale}, op)
     mu, sigma, base = getargs(op, 3)
-    base isa ExprColumn || error(
+    base_e = _as_expr_column(base)
+    isnothing(base_e) && error(
         "sbimpl: `LocationScale(...)` third arg must be a distribution call, got $(typeof(base))")
-    base_fam = getf(base)
-    base_fam isa Type && base_fam <: Distribution || error(
+    base_fam = getf(base_e)
+    _is_distribution_type(base_fam) || error(
         "sbimpl: `LocationScale` base must be a Distribution type, got $(base_fam)")
+    base = base_e
     stan_name = _sb_stan_dist_name(base_fam)
     isnothing(stan_name) && error(
         "sbimpl: `LocationScale` over `$(base_fam)` -- no Stan-name mapping ",
@@ -623,11 +650,11 @@ end
 # already-declared scalar params.
 _sb_prior_arg(x::Real) = x
 _sb_prior_arg(x::Symbol) = x
-_sb_prior_arg(x::NamedColumn) = let d = parent(x)
-    d isa MissingColumn ? name(x) : error(
-        "sbimpl: prior arg `$(name(x))` is backed by $(typeof(d)); ",
-        "prior args must be literals or already-declared scalar parameters.")
-end
+_sb_prior_arg(x::NamedColumn) = _sb_prior_arg_named(x, parent(x))
+_sb_prior_arg_named(x, ::MissingColumn) = name(x)
+_sb_prior_arg_named(x, d) = error(
+    "sbimpl: prior arg `$(name(x))` is backed by $(typeof(d)); ",
+    "prior args must be literals or already-declared scalar parameters.")
 _sb_prior_arg(x::ExprColumn) = Expr(:call, getf(x), map(_sb_prior_arg, getargs(x))...)
 _sb_prior_arg(x) = error("sbimpl: unsupported prior-arg shape $(typeof(x))")
 
@@ -642,12 +669,10 @@ _sb_sampling_backed!(stmts, data, key, backing::DataColumn, rhs; id_lookup) = be
 end
 
 _sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs; id_lookup) = begin
-    if rhs isa ExprColumn &&
-       _sb_submodel_rhs!(stmts, data, key, getf(rhs), rhs) !== nothing
-        return
-    end
-    if rhs isa ExprColumn && _sb_emit_prior!(stmts, key, getf(rhs), rhs)
-        return
+    rhs_e = _as_expr_column(rhs)
+    if !isnothing(rhs_e)
+        _sb_submodel_rhs!(stmts, data, key, getf(rhs_e), rhs_e) !== nothing && return
+        _sb_emit_prior!(stmts, key, getf(rhs_e), rhs_e) && return
     end
     _sb_linear_predictor!(stmts, data, key, rhs; id_lookup, brmi_key=key)
 end
@@ -669,8 +694,9 @@ _sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_loo
     if f === mi
         return _sb_emit_mi!(stmts, data, key, lhs, rhs)
     end
-    inner = only(getargs(lhs))
-    inner isa NamedColumn || error("sbimpl: expected NamedColumn inside link, got $(typeof(inner))")
+    inner_raw = only(getargs(lhs))
+    inner = _as_named_column(inner_raw)
+    isnothing(inner) && error("sbimpl: expected NamedColumn inside link, got $(typeof(inner_raw))")
     inv_f = InverseFunctions.inverse(f)
     inner_name = name(inner)
     pre_name = Symbol(nameof(f), :_, inner_name)
@@ -697,13 +723,15 @@ const _SB_MI_FAMILIES = Dict{Any,Symbol}(
     Normal => :_sb_mi_normal,
 )
 function _sb_emit_mi!(stmts, data, key, lhs::ExprColumn, rhs)
-    inner = only(getargs(lhs))
-    inner isa NamedColumn || error("sbimpl: `mi(...)` expects a NamedColumn inside, got $(typeof(inner))")
+    inner_raw = only(getargs(lhs))
+    inner = _as_named_column(inner_raw)
+    isnothing(inner) && error("sbimpl: `mi(...)` expects a NamedColumn inside, got $(typeof(inner_raw))")
     inner_name = name(inner)
-    backing    = parent(inner)
-    backing isa DataColumn || error(
+    backing_raw = parent(inner)
+    backing = _as_data_column(backing_raw)
+    isnothing(backing) && error(
         "sbimpl: `mi($inner_name)` requires a real data column with missings; ",
-        "got backing $(typeof(backing)).")
+        "got backing $(typeof(backing_raw)).")
     raw = parent(backing)
     eltype(raw) >: Missing || error(
         "sbimpl: `mi($inner_name)` requires a column whose eltype admits ",
@@ -718,8 +746,10 @@ function _sb_emit_mi!(stmts, data, key, lhs::ExprColumn, rhs)
     elT = nonmissingtype(eltype(raw))
     y_obs = collect(elT, raw[obs_mask])
 
-    rhs isa ExprColumn || error("sbimpl: `mi($inner_name) ~ <family>(args)` requires the RHS to be a family call, got $(typeof(rhs))")
-    fam = getf(rhs)
+    rhs_e = _as_expr_column(rhs)
+    isnothing(rhs_e) && error("sbimpl: `mi($inner_name) ~ <family>(args)` requires the RHS to be a family call, got $(typeof(rhs))")
+    fam = getf(rhs_e)
+    rhs = rhs_e
     submodel = get(_SB_MI_FAMILIES, fam, nothing)
     isnothing(submodel) && error(
         "sbimpl: `mi(...)` for family `$fam` is not yet implemented. ",

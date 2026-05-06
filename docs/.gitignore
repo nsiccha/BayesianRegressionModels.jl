@@ -4,3 +4,6 @@ package-lock.json
 Manifest.toml
 site/
 cache
+
+# Auto-synced by `HTMXObjects.vitepress_theme_install` in make.jl.
+src/.vitepress/theme/htmxo-embed.ts

@@ -23,7 +23,7 @@ using Distributions
 using OrderedCollections: OrderedDict
 using WarmupHMC: initialize_mcmc, adaptive_warmup_mcmc
 using JSON
-using AlgebraOfVega: vega_head, auto_remap_node, with_plot_caption,
+using AlgebraOfVega: vega_head, vega_runtime, auto_remap_node, with_plot_caption,
     config, pointinterval, lineribbon, to_node, ppc_overlay,
     ECDFPlot, VLines, nonnumeric, Scatter
 import AlgebraOfGraphics as AoG
@@ -2247,30 +2247,26 @@ APPDATA = AppData(; cache_type=:parallel)
                 full_long  = run.stan.posterior_full_long_df
                 ppc_div    = render.build_ppc_section(full_long, :posterior;
                                                       id_prefix="brm-gallery-$item_slug")
-                ppc_div    = isnothing(ppc_div) ?
-                    h.p("(no PPC kind detected)"; class="brm-gallery-empty") :
-                    ppc_div
                 pipeline_url = string(query_url(__self__/""; formula=item_formula, label=item_label))
-                h.article(; class="brm-gallery-card")(
-                    h.header(; class="brm-gallery-card-header")(
-                        h.strong(item_label; class="brm-gallery-card-title"),
-                        h.a(" ↗"; href=pipeline_url, target="_blank",
-                            class="brm-gallery-card-link",
+                h.article(; class="htmxo-gallery-card", id="brm-gallery-card-$item_slug")(
+                    h.h4(; class="htmxo-gallery-card-title")(
+                        h.a(item_label; href=pipeline_url, target="_blank",
                             title="Open in pipeline"),
                     ),
-                    h.details(; class="brm-gallery-card-formula", open=true)(
-                        h.summary("Formula"),
-                        h.pre(item_formula),
-                    ),
-                    h.details(; class="brm-gallery-card-slic")(
-                        h.summary("SLIC model"),
-                        h.pre(string(run.sbbrmi.model.model)),
-                    ),
-                    h.details(; class="brm-gallery-card-stan")(
-                        h.summary("Stan source"),
-                        h.pre(run.stan.src),
-                    ),
-                    ppc_div,
+                    h.h5("Formula"; class="htmxo-gallery-card-subheading"),
+                    h.pre(h.code(item_formula; class="language-julia");
+                          class="htmxo-gallery-card-code"),
+                    h.h5("SLIC model"; class="htmxo-gallery-card-subheading"),
+                    h.pre(h.code(string(run.sbbrmi.model.model); class="language-julia");
+                          class="htmxo-gallery-card-code"),
+                    h.h5("Auto PPC"; class="htmxo-gallery-card-subheading"),
+                    isnothing(ppc_div) ?
+                        h.p("(no PPC kind detected)";
+                            class="htmxo-gallery-card-description") :
+                        ppc_div,
+                    h.h5("Stan model"; class="htmxo-gallery-card-subheading"),
+                    h.pre(h.code(run.stan.src; class="language-stan");
+                          class="htmxo-gallery-card-code"),
                 )
             end
         end
@@ -2283,71 +2279,47 @@ APPDATA = AppData(; cache_type=:parallel)
     # The lazy-load target returns the full card content (formula,
     # SLIC body, Stan source, PPC). One round-trip per card; one
     # static-recorded HTML file per card.
+    # Serve AoV's vega-embed runtime as plain JS so the docs page can
+    # `<script src="...">` it before the gallery card swaps in. The
+    # gallery_card response embeds inline `<script>AoV.embed(…)>` calls
+    # for the auto-PPC plot; htmx evaluates those on swap, but they
+    # need `window.AoV` already defined. The docs theme loads this URL
+    # via setupHtmxoEmbed. (Mirrors AoV's own `aov_runtime_js` route.)
+    @get aov_runtime_js = let
+        wrapped = sprint(show, MIME"text/html"(), vega_runtime())
+        body = replace(wrapped, r"^\s*<script[^>]*>"i => "")
+        body = replace(body, r"</script>\s*$"i => "")
+        MIMEResponse("application/javascript; charset=utf-8", body)
+    end
+
     @get gallery = begin
-        card_shell(slug, label, formula) = begin
-            target_id    = "brm-card-content-$slug"
-            card_url     = string(query_url(__self__/"gallery_card/$slug"))
-            force_url    = string(query_url(__self__/"gallery_card/$slug"; force=true))
-            h.article(; class="brm-gallery-card")(
-                h.header(; class="brm-gallery-card-header")(
-                    h.strong(label; class="brm-gallery-card-title"),
-                ),
-                # Click-to-fetch: setting `open=true` programmatically
-                # (e.g. via the "Load all" bulk button) fires the DOM
-                # `toggle` event the inner div listens for. `once`
-                # keeps it from re-fetching on collapse/expand.
-                h.details(; class="brm-ppc-toggle brm-gallery-card-toggle")(
-                    h.summary("Show details"),
-                    h.div(; class="brm-rerun-bar")(
-                        h.button("Rerun";
-                            type="button", class="outline brm-rerun-btn",
-                            hx_get=force_url,
-                            hx_target="#$target_id",
-                            hx_swap="innerHTML",
-                            title="Discard cached fit + render and re-run from scratch"),
-                    ),
-                    h.div(; id=target_id, class="brm-ppc-target",
-                        hx_get=card_url,
-                        hx_trigger="toggle once from:closest details",
-                        hx_swap="innerHTML",
-                    )(
-                        h.p("Loading… (Stan compile may take ~30s on first load)";
-                            class="brm-ppc-loading")
-                    ),
-                ),
+        # Each card placeholder auto-fetches its own body via
+        # `hx-trigger="load"` against `gallery_card/<slug>`. That
+        # route is `polling_fetchindex`-backed: while the underlying
+        # Stan compile + Pathfinder fit run, the user sees the
+        # progress tree; once done, the full card body (formula +
+        # SLIC + auto-PPC + Stan source) replaces the placeholder.
+        # Recordings capture the final terminal state per slug.
+        card_shell(slug, label) = h.article(; class="htmxo-gallery-card",
+                id="brm-gallery-card-$slug",
+                hx_get=string(query_url(__self__/"gallery_card/$slug")),
+                hx_trigger="load",
+                hx_swap="outerHTML",
+            )(
+                h.h4(label; class="htmxo-gallery-card-title"),
+                h.p("Loading…"; class="htmxo-gallery-card-description"),
             )
-        end
         items = gallery_items()
-        local tier0_items = [(s, l, f) for (s, l, f, t) in items if t == 0]
-        local tier1plus   = [(s, l, f) for (s, l, f, t) in items if t > 0]
-        h.div(
-            h.h1("Gallery"),
-            h.p(
-                "One card per preset / example, lazy-loaded on click. ",
-                "Each card shows the input formula, the SLIC submodel ",
-                "body, the transpiled Stan source, and the auto-PPC plot. ",
-                "First open of a fresh formula pays a Stan compile + fit ",
-                "(~30s); subsequent opens are cached.",
+        tier0_items = [(s, l) for (s, l, _, t) in items if t == 0]
+        tier1plus   = [(s, l) for (s, l, _, t) in items if t > 0]
+        h.div(; class="htmxo-gallery")(
+            h.section(; class="htmxo-gallery-section")(
+                h.h3("Presets"; class="htmxo-gallery-section-heading"),
+                [card_shell(s, l) for (s, l) in tier0_items]...,
             ),
-            # Bulk action: open every card's details element. Setting
-            # `open` programmatically fires the DOM `toggle` event, which
-            # the inner divs are listening for via
-            # `hx-trigger="toggle once from:closest details"`. Stan
-            # compiles are serialized server-side
-            # (stan_compile_global_lock), so this won't OOM the box.
-            h.div(; class="brm-load-all-bar")(
-                h.button("Load all";
-                    type="button", class="outline brm-load-all-btn",
-                    onclick="document.querySelectorAll('details.brm-ppc-toggle').forEach(d => d.open = true);",
-                    title="Open every card -- their lazy-loads fire in turn (Stan compiles are serialized server-side)"),
-            ),
-            h.h2("Presets"; class="brm-gallery-section-heading"),
-            h.div(; class="brm-gallery-grid")(
-                [card_shell(s, l, f) for (s, l, f) in tier0_items]...
-            ),
-            h.h2("Examples"; class="brm-gallery-section-heading brm-gallery-section"),
-            h.div(; class="brm-gallery-grid")(
-                [card_shell(s, l, f) for (s, l, f) in tier1plus]...
+            h.section(; class="htmxo-gallery-section")(
+                h.h3("Examples"; class="htmxo-gallery-section-heading"),
+                [card_shell(s, l) for (s, l) in tier1plus]...,
             ),
         )
     end
@@ -2464,6 +2436,8 @@ y1 ~ Normal(loc, err)
         extra_head=(
             h.title("BRM macro action"),
             h.style(css),
+            htmxo_gallery_styles(),
+            htmxo_syntax_head()...,
             htmx_treebar_styles(),
             htmx_treebar_script(),
             sortable_table_js(),
