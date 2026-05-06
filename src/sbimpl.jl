@@ -508,9 +508,6 @@ function _sb_mi_columns(brmi::BRMI)
     out
 end
 
-_as_named_column(x::NamedColumn) = x
-_as_named_column(_) = nothing
-
 _as_expr_column(x::ExprColumn) = x
 _as_expr_column(_) = nothing
 
