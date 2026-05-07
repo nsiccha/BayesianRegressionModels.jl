@@ -1991,39 +1991,41 @@ APPDATA = AppData(; cache_type=:parallel)
                 push!(parts, plots.tabs, plots.wide_details)
                 h.section(parts...)
             end
-            fit_pathfinder = begin
-                (; long, wide, summary, full_long, truth) = bundle
-                plots = posterior_plots(long, wide, summary;
-                                    id_prefix="brm-plot-pf",
-                                    kind="Pathfinder posterior",
-                                    truth)
-                local ppc_sec = build_ppc_section(full_long, :posterior; id_prefix="brm-plot-pf")
-                parts = Any[
-                    h.h3("6d. StanFit (Pathfinder) — variational approximation draws"),
-                    h.p("long format: ", nrow(long), " rows · ", ncol(long), " cols · ",
-                        "wide format: ", nrow(wide), " rows · ", ncol(wide), " cols"),
-                ]
-                isnothing(ppc_sec) || push!(parts, ppc_sec)
-                push!(parts, plots.tabs, plots.wide_details)
-                h.section(parts...)
-            end
-            fit_warmup = begin
-                (; long, wide, summary, full_long, diagnostics, truth) = bundle
-                plots = posterior_plots(long, wide, summary;
-                                    id_prefix="brm-plot-warmup",
-                                    kind="Warmup+MCMC posterior",
-                                    truth)
-                local ppc_sec = build_ppc_section(full_long, :posterior; id_prefix="brm-plot-warmup")
-                parts = Any[
-                    h.h3("6d'. StanFit (Warmup+MCMC) — full Stan fit"),
-                    h.p("n_divergent_samples: ", diagnostics.n_divergent_samples,
-                        " · min ESS: ", minimum(diagnostics.ess)),
-                    h.p("long format: ", nrow(long), " rows · ", ncol(long), " cols · ",
-                        "wide format: ", nrow(wide), " rows · ", ncol(wide), " cols"),
-                ]
-                isnothing(ppc_sec) || push!(parts, ppc_sec)
-                push!(parts, plots.tabs, plots.wide_details)
-                h.section(parts...)
+            @struct fit = begin
+                pathfinder = begin
+                    (; long, wide, summary, full_long, truth) = bundle
+                    plots = posterior_plots(long, wide, summary;
+                                        id_prefix="brm-plot-pf",
+                                        kind="Pathfinder posterior",
+                                        truth)
+                    local ppc_sec = build_ppc_section(full_long, :posterior; id_prefix="brm-plot-pf")
+                    parts = Any[
+                        h.h3("6d. StanFit (Pathfinder) — variational approximation draws"),
+                        h.p("long format: ", nrow(long), " rows · ", ncol(long), " cols · ",
+                            "wide format: ", nrow(wide), " rows · ", ncol(wide), " cols"),
+                    ]
+                    isnothing(ppc_sec) || push!(parts, ppc_sec)
+                    push!(parts, plots.tabs, plots.wide_details)
+                    h.section(parts...)
+                end
+                warmup = begin
+                    (; long, wide, summary, full_long, diagnostics, truth) = bundle
+                    plots = posterior_plots(long, wide, summary;
+                                        id_prefix="brm-plot-warmup",
+                                        kind="Warmup+MCMC posterior",
+                                        truth)
+                    local ppc_sec = build_ppc_section(full_long, :posterior; id_prefix="brm-plot-warmup")
+                    parts = Any[
+                        h.h3("6d'. StanFit (Warmup+MCMC) — full Stan fit"),
+                        h.p("n_divergent_samples: ", diagnostics.n_divergent_samples,
+                            " · min ESS: ", minimum(diagnostics.ess)),
+                        h.p("long format: ", nrow(long), " rows · ", ncol(long), " cols · ",
+                            "wide format: ", nrow(wide), " rows · ", ncol(wide), " cols"),
+                    ]
+                    isnothing(ppc_sec) || push!(parts, ppc_sec)
+                    push!(parts, plots.tabs, plots.wide_details)
+                    h.section(parts...)
+                end
             end
         end
     end
@@ -2229,14 +2231,20 @@ APPDATA = AppData(; cache_type=:parallel)
             isnothing(entry) || entry.mark_stages!(;
                 passed=[k for k in keys(result) if k !== :data])
         end
-        # Step-key dispatch. `:stan_fit_pathfinder` / `:stan_fit_warmup` /
-        # `:stan_generate` route to `render.stan_section(v).<suffix>` (the
-        # bundled fit-section renderers); other `stan_*` keys route to
-        # `render.stan.<suffix>(v)`; everything else to `render.<key>(v)`.
+        # Step-key dispatch. `:stan_generate` routes to
+        # `render.stan_section(v).generate`; `:stan_fit_pathfinder` /
+        # `:stan_fit_warmup` route to `render.stan_section(v).fit.<kind>`
+        # (the nested fit/{pathfinder,warmup} sub-bundle); other `stan_*`
+        # keys route to `render.stan.<suffix>(v)`; everything else to
+        # `render.<key>(v)`.
         render_step(k::Symbol, v) = begin
             s = String(k)
-            if k in (:stan_generate, :stan_fit_pathfinder, :stan_fit_warmup)
-                getproperty(render.stan_section(v), Symbol(s[6:end]))
+            if k === :stan_generate
+                render.stan_section(v).generate
+            elseif k === :stan_fit_pathfinder
+                render.stan_section(v).fit.pathfinder
+            elseif k === :stan_fit_warmup
+                render.stan_section(v).fit.warmup
             elseif startswith(s, "stan_")
                 getproperty(render.stan, Symbol(s[6:end]))(v)
             else
