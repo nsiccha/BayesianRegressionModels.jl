@@ -1324,36 +1324,36 @@ display_name(::MultiContinuousPPC)  = "multi-predictor"
                     n_indices = [count(==(p), base_names) for p in uniq_base],
                 )
             end
-            # Ground-truth overlay: the `fit_draw_idx`-th column of the
-            # constrained generated matrix — one value per indexed parameter.
-            # Same (param, index) layout as `generated_df` so plots can join on it.
-            truth_df = begin
-                truth_col = view(generated.value, :, fit_draw_idx)
-                splits     = [split(nm, '.', limit=2) for nm in generated.names]
-                base_names = [String(first(s)) for s in splits]
-                parse_idx(s) = (v = tryparse(Int, s); isnothing(v) ? 0 : v)
-                indices    = [length(s) > 1 ? parse_idx(String(s[2])) : 0 for s in splits]
-                DataFrame(
-                    param = base_names,
-                    index = indices,
-                    truth = collect(truth_col),
-                )
-            end
-            # Parallel truth-df for fit plots: unconstrained parameter names
-            # + `fit_truth_unc` as the ground-truth values. Matches the
-            # `posterior_unc_names`-based long/wide/summary DFs on the fit
-            # path so the scatter overlay joins correctly.
-            truth_unc_df = begin
-                unc_names = BridgeStan.param_unc_names(fit_instance)
-                splits     = [split(nm, '.', limit=2) for nm in unc_names]
-                base_names = [String(first(s)) for s in splits]
-                parse_idx(s) = (v = tryparse(Int, s); isnothing(v) ? 0 : v)
-                indices    = [length(s) > 1 ? parse_idx(String(s[2])) : 0 for s in splits]
-                DataFrame(
-                    param = base_names,
-                    index = indices,
-                    truth = fit_truth_unc,
-                )
+            # Ground-truth overlays for plot scatter/vrule layers. `df` uses
+            # constrained-with-TP/GQ parameter names (matches
+            # `generated.df`'s long-format layout); `unc_df` uses the
+            # unconstrained subset (matches `posterior.long_df` on the fit
+            # path so the scatter overlay joins correctly).
+            @struct truth = begin
+                df = begin
+                    truth_col = view(generated.value, :, fit.draw_idx)
+                    splits     = [split(nm, '.', limit=2) for nm in generated.names]
+                    base_names = [String(first(s)) for s in splits]
+                    parse_idx(s) = (v = tryparse(Int, s); isnothing(v) ? 0 : v)
+                    indices    = [length(s) > 1 ? parse_idx(String(s[2])) : 0 for s in splits]
+                    DataFrame(
+                        param = base_names,
+                        index = indices,
+                        truth = collect(truth_col),
+                    )
+                end
+                unc_df = begin
+                    unc_names = BridgeStan.param_unc_names(fit.instance)
+                    splits     = [split(nm, '.', limit=2) for nm in unc_names]
+                    base_names = [String(first(s)) for s in splits]
+                    parse_idx(s) = (v = tryparse(Int, s); isnothing(v) ? 0 : v)
+                    indices    = [length(s) > 1 ? parse_idx(String(s[2])) : 0 for s in splits]
+                    DataFrame(
+                        param = base_names,
+                        index = indices,
+                        truth = fit.truth_unc,
+                    )
+                end
             end
             # Simulation-based calibration setup: pick one draw from the prior
             # predictive `generated` matrix, extract every `*_gen[.i.j]` entry,
@@ -1362,47 +1362,55 @@ display_name(::MultiContinuousPPC)  = "multi-predictor"
             # .so with `instance` but is bound to this synthetic observed data,
             # so Pathfinder / full warmup samples `p(theta | y_sim)` and should
             # recover the ground-truth `generated_unc[:, fit_draw_idx]`.
-            fit_draw_idx = 1
-            fit_truth_unc = collect(view(generated.unc, :, fit_draw_idx))
-            fit_data_dict = begin
-                base = StanBlocks.stan_data(sbbrmi.model)
-                col  = view(generated.value, :, fit_draw_idx)
-                groups = Dict{Symbol, Vector{Tuple{Vector{Int}, Float64}}}()
-                for (i, name) in enumerate(generated.names)
-                    m = match(r"^(.+)_gen(?:\.(.+))?$", name)
-                    isnothing(m) && continue
-                    base_name = Symbol(m.captures[1])
-                    idx_str   = m.captures[2]
-                    idxs = isnothing(idx_str) ? Int[] :
-                           [Base.parse(Int, s) for s in split(idx_str, ".")]
-                    push!(get!(Vector{Tuple{Vector{Int}, Float64}}, groups, base_name),
-                          (idxs, col[i]))
-                end
-                # Preserve the original's element type so integer-valued data
-                # vars (Bernoulli outcomes, counts) stay integers after the
-                # override — Stan's int-typed data variables reject Float64s
-                # even when the values are exact (1.0, 0.0, …).
-                overrides = Dict{Symbol, Any}()
-                for (name, entries) in groups
-                    orig = base[name]
-                    if length(entries) == 1 && isempty(entries[1][1])
-                        overrides[name] = convert(typeof(orig), entries[1][2])
-                    else
-                        out = similar(orig)  # preserves eltype
-                        for (idxs, v) in entries
-                            out[idxs...] = v  # implicit convert to eltype(out)
-                        end
-                        overrides[name] = out
+            # Simulation-based-calibration fit setup. `draw_idx`-th column of
+            # the prior-predictive `generated` matrix is folded back into the
+            # Stan data dict as the "observed" data (via `*_gen → *` renames),
+            # then a fresh `instance` is bound to that synthetic data and used
+            # by `pathfinder` / `warmup_fit` to recover the ground-truth
+            # `generated.unc[:, draw_idx]`.
+            @struct fit = begin
+                draw_idx = 1
+                truth_unc = collect(view(generated.unc, :, draw_idx))
+                data_dict = begin
+                    base = StanBlocks.stan_data(sbbrmi.model)
+                    col  = view(generated.value, :, draw_idx)
+                    groups = Dict{Symbol, Vector{Tuple{Vector{Int}, Float64}}}()
+                    for (i, name) in enumerate(generated.names)
+                        m = match(r"^(.+)_gen(?:\.(.+))?$", name)
+                        isnothing(m) && continue
+                        base_name = Symbol(m.captures[1])
+                        idx_str   = m.captures[2]
+                        idxs = isnothing(idx_str) ? Int[] :
+                               [Base.parse(Int, s) for s in split(idx_str, ".")]
+                        push!(get!(Vector{Tuple{Vector{Int}, Float64}}, groups, base_name),
+                              (idxs, col[i]))
                     end
+                    # Preserve the original's element type so integer-valued data
+                    # vars (Bernoulli outcomes, counts) stay integers after the
+                    # override — Stan's int-typed data variables reject Float64s
+                    # even when the values are exact (1.0, 0.0, …).
+                    overrides = Dict{Symbol, Any}()
+                    for (name, entries) in groups
+                        orig = base[name]
+                        if length(entries) == 1 && isempty(entries[1][1])
+                            overrides[name] = convert(typeof(orig), entries[1][2])
+                        else
+                            out = similar(orig)  # preserves eltype
+                            for (idxs, v) in entries
+                                out[idxs...] = v  # implicit convert to eltype(out)
+                            end
+                            overrides[name] = out
+                        end
+                    end
+                    merge(base, overrides)
                 end
-                merge(base, overrides)
-            end
-            fit_instance = begin
-                @info "[stan] before StanModel(fit_instance)"
-                rv = BridgeStan.StanModel(lib,
-                    StanBlocks.stan.bridgestan_data(fit_data_dict))
-                @info "[stan] after StanModel(fit_instance)"
-                rv
+                instance = begin
+                    @info "[stan] before StanModel(fit.instance)"
+                    rv = BridgeStan.StanModel(lib,
+                        StanBlocks.stan.bridgestan_data(data_dict))
+                    @info "[stan] after StanModel(fit.instance)"
+                    rv
+                end
             end
 
             # IP: Pathfinder init (fast, no MCMC). The `progress=__status__`
@@ -1440,7 +1448,7 @@ display_name(::MultiContinuousPPC)  = "multi-predictor"
                 # via `@memo` so if `compute_steps` already computed it with
                 # progress nesting, we get the cached value for free.
                 pathfinder = begin
-                    pf = @memo __parent__.pathfinder(__parent__.fit_instance, __parent__.init)
+                    pf = @memo __parent__.pathfinder(__parent__.fit.instance, __parent__.init)
                     pf.position .+ pf.scale * randn(Xoshiro(43), __parent__.dim, 200)
                 end
                 # Default value. Switch the alias to `warmup.draws` to promote
@@ -1451,7 +1459,7 @@ display_name(::MultiContinuousPPC)  = "multi-predictor"
                 # noise (y_gen, y_likelihood) that drowns out the actual
                 # parameter posterior. Keep prior-predictive plots on the full
                 # constrained set; fit plots use `param_unc_names` here.
-                unc_names = BridgeStan.param_unc_names(__parent__.fit_instance)
+                unc_names = BridgeStan.param_unc_names(__parent__.fit.instance)
                 dfs       = dfs_from_constrained(value, unc_names)
                 long_df    = dfs.long
                 wide_df    = dfs.wide
@@ -1461,29 +1469,29 @@ display_name(::MultiContinuousPPC)  = "multi-predictor"
                 # `log_odds`). The base long_df above intentionally excludes
                 # TPs/GQs to keep the generic plot tabset focused on raw
                 # parameters.
-                constrained_full = constrain_draws(value, __parent__.fit_instance; rng_seed=46)
+                constrained_full = constrain_draws(value, __parent__.fit.instance; rng_seed=46)
                 full_long_df = dfs_from_constrained(
                     constrained_full,
-                    BridgeStan.param_names(__parent__.fit_instance; include_tp=true, include_gq=true),
+                    BridgeStan.param_names(__parent__.fit.instance; include_tp=true, include_gq=true),
                 ).long
 
                 @struct warmup = begin
                     # Parallel set for the warmup+MCMC path. The IP cache is
                     # warmed by `fetchindex!` in `compute_steps`; `@memo`
                     # hits it here.
-                    draws = (@memo __parent__.__parent__.warmup_fit(__parent__.__parent__.fit_instance, __parent__.__parent__.init)).posterior_position
+                    draws = (@memo __parent__.__parent__.warmup_fit(__parent__.__parent__.fit.instance, __parent__.__parent__.init)).posterior_position
                     dfs   = dfs_from_constrained(draws, __parent__.unc_names)
                     long_df    = dfs.long
                     wide_df    = dfs.wide
                     summary_df = dfs.summary
                     diagnostics = begin
-                        w = @memo __parent__.__parent__.warmup_fit(__parent__.__parent__.fit_instance, __parent__.__parent__.init)
+                        w = @memo __parent__.__parent__.warmup_fit(__parent__.__parent__.fit.instance, __parent__.__parent__.init)
                         (; w.n_divergent_samples, ess=w.ess)
                     end
-                    constrained_full = constrain_draws(draws, __parent__.__parent__.fit_instance; rng_seed=47)
+                    constrained_full = constrain_draws(draws, __parent__.__parent__.fit.instance; rng_seed=47)
                     full_long_df = dfs_from_constrained(
                         constrained_full,
-                        BridgeStan.param_names(__parent__.__parent__.fit_instance; include_tp=true, include_gq=true),
+                        BridgeStan.param_names(__parent__.__parent__.fit.instance; include_tp=true, include_gq=true),
                     ).long
                 end
             end
@@ -1548,13 +1556,13 @@ display_name(::MultiContinuousPPC)  = "multi-predictor"
         stan_instantiate = merge(stan_compile, (; stan_instantiate=(; instance=(:stan, :instance), dim=(:stan, :dim), init=(:stan, :init))))
         stan_eval        = merge(stan_instantiate, (; stan_eval=(:stan, :log_density)))
         stan_shapes      = merge(stan_eval,  (; stan_shapes=(:stan, :param_shapes_df)))
-        stan_generate    = merge(stan_shapes, (; stan_generate=(; long=(:stan, :generated, :df), wide=(:stan, :generated, :wide_df), summary=(:stan, :generated, :summary_df), truth=(:stan, :truth_df))))
+        stan_generate    = merge(stan_shapes, (; stan_generate=(; long=(:stan, :generated, :df), wide=(:stan, :generated, :wide_df), summary=(:stan, :generated, :summary_df), truth=(:stan, :truth, :df))))
         # Pathfinder / full warmup are computed via `fetchindex!` in
         # `compute_steps` (special-cased below by step name) so the IP's
         # progress subtree attaches to the step's phase. Chain-level specs
         # read the resulting cached values back out as plain properties.
-        stan_fit_pathfinder = merge(stan_generate, (; stan_fit_pathfinder=(; long=(:stan, :posterior, :long_df), wide=(:stan, :posterior, :wide_df), summary=(:stan, :posterior, :summary_df), full_long=(:stan, :posterior, :full_long_df), truth=(:stan, :truth_unc_df))))
-        stan_fit_warmup     = merge(stan_fit_pathfinder, (; stan_fit_warmup=(; long=(:stan, :posterior, :warmup, :long_df), wide=(:stan, :posterior, :warmup, :wide_df), summary=(:stan, :posterior, :warmup, :summary_df), full_long=(:stan, :posterior, :warmup, :full_long_df), diagnostics=(:stan, :posterior, :warmup, :diagnostics), truth=(:stan, :truth_unc_df))))
+        stan_fit_pathfinder = merge(stan_generate, (; stan_fit_pathfinder=(; long=(:stan, :posterior, :long_df), wide=(:stan, :posterior, :wide_df), summary=(:stan, :posterior, :summary_df), full_long=(:stan, :posterior, :full_long_df), truth=(:stan, :truth, :unc_df))))
+        stan_fit_warmup     = merge(stan_fit_pathfinder, (; stan_fit_warmup=(; long=(:stan, :posterior, :warmup, :long_df), wide=(:stan, :posterior, :warmup, :wide_df), summary=(:stan, :posterior, :warmup, :summary_df), full_long=(:stan, :posterior, :warmup, :full_long_df), diagnostics=(:stan, :posterior, :warmup, :diagnostics), truth=(:stan, :truth, :unc_df))))
         (; parse, transform, wrap, brmi, vbrmi, bench, slic_model, stan_code, stan_compile,
            stan_instantiate, stan_eval, stan_shapes, stan_generate, stan_fit_pathfinder, stan_fit_warmup)
     end
@@ -1584,13 +1592,13 @@ display_name(::MultiContinuousPPC)  = "multi-predictor"
                     # Warm the pathfinder IP cache under this phase's progress,
                     # then resolve the (long, wide, summary) bundle (which
                     # reads back the cached value via `@memo`).
-                    fetchindex!(progress, r.stan.pathfinder, r.stan.fit_instance, r.stan.init)
+                    fetchindex!(progress, r.stan.pathfinder, r.stan.fit.instance, r.stan.init)
                     resolve(spec)
                 elseif step_name === :stan_fit_warmup
                     # Warm the warmup IP cache under this phase's progress,
                     # then resolve the (long, wide, summary, diagnostics)
                     # bundle (which reads back the cached value via `@memo`).
-                    fetchindex!(progress, r.stan.warmup_fit, r.stan.fit_instance, r.stan.init)
+                    fetchindex!(progress, r.stan.warmup_fit, r.stan.fit.instance, r.stan.init)
                     resolve(spec)
                 else
                     resolve(spec)
@@ -1929,10 +1937,10 @@ APPDATA = AppData(; cache_type=:parallel)
                 # so both layers share the same response scale. Only
                 # primary LPs need the obs vector at all.
                 obs_y = if kind.is_primary
-                    obs_y_raw = context!().run.stan.fit_data_dict[Symbol(kind.response)]
+                    obs_y_raw = context!().run.stan.fit.data_dict[Symbol(kind.response)]
                     is_binomial = kind.family === Binomial || kind.family === BinomialLogit
                     is_binomial && !isnothing(kind.n_trials) ?
-                        obs_y_raw ./ context!().run.stan.fit_data_dict[Symbol(kind.n_trials)] :
+                        obs_y_raw ./ context!().run.stan.fit.data_dict[Symbol(kind.n_trials)] :
                         obs_y_raw
                 else
                     nothing
