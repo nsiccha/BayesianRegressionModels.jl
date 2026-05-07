@@ -1415,64 +1415,78 @@ display_name(::MultiContinuousPPC)  = "multi-predictor"
                 @info "[stan] leaving pathfinder"
                 rv
             end
-            # IP: full Stan + WarmupHMC fit. Same progress-hooking pattern.
-            # Returns a rich NamedTuple with `.posterior_position`, `.ess`,
-            # `.n_divergent_samples`, etc.
+            # IP: full Stan + WarmupHMC fit. Same progress-hooking pattern as
+            # `pathfinder` above. Returns a rich NamedTuple with
+            # `.posterior_position`, `.ess`, `.n_divergent_samples`, etc.
+            # Named `warmup_fit` (not `posterior_warmup`) so the bare name
+            # doesn't share the `posterior_*` prefix with the `posterior`
+            # bundle below — would otherwise re-trip the prefix lint.
             "WarmupHMC(n_draws=$n_draws)"
-            posterior_warmup(instance, init; rng=Xoshiro(42), n_draws=200) = begin
-                @info "[stan] entering posterior_warmup" n_draws
+            warmup_fit(instance, init; rng=Xoshiro(42), n_draws=200) = begin
+                @info "[stan] entering warmup_fit" n_draws
                 rv = adaptive_warmup_mcmc(rng, StanProblem(instance; nan_on_error=true); init, n_draws, progress=__status__)
-                @info "[stan] leaving posterior_warmup"
+                @info "[stan] leaving warmup_fit"
                 rv
             end
-            # Gaussian-approximation draws from Pathfinder. Reads the IP via
-            # `@memo` so if `compute_steps` already computed it with progress
-            # nesting, we get the cached value for free.
-            posterior_pathfinder = begin
-                pf = @memo pathfinder(fit_instance, init)
-                pf.position .+ pf.scale * randn(Xoshiro(43), dim, 200)
-            end
-            # Default. Switch this alias to the warmup draws (`@memo
-            # posterior_warmup(instance, init).posterior_position`) to promote
-            # the full fit, or expose a toggle via a param later.
-            posterior = posterior_pathfinder
-            # For fit plots we only want the unconstrained parameters (the
-            # raw sampler output) — constrained/TP/GQ adds lots of derived
-            # noise (y_gen, y_likelihood) that drowns out the actual
-            # parameter posterior. Keep prior-predictive plots on the full
-            # constrained set above; fit plots use `param_unc_names` here.
-            posterior_unc_names = BridgeStan.param_unc_names(fit_instance)
-            posterior_dfs = dfs_from_constrained(posterior, posterior_unc_names)
-            posterior_long_df    = posterior_dfs.long
-            posterior_wide_df    = posterior_dfs.wide
-            posterior_summary_df = posterior_dfs.summary
 
-            # Parallel set for the warmup+MCMC path. The warmup IP cache is
-            # warmed by `fetchindex!` in `compute_steps`; `@memo` hits it here.
-            posterior_warmup_draws = (@memo posterior_warmup(fit_instance, init)).posterior_position
-            posterior_warmup_dfs = dfs_from_constrained(posterior_warmup_draws, posterior_unc_names)
-            posterior_warmup_long_df    = posterior_warmup_dfs.long
-            posterior_warmup_wide_df    = posterior_warmup_dfs.wide
-            posterior_warmup_summary_df = posterior_warmup_dfs.summary
-            posterior_warmup_diagnostics = begin
-                w = @memo posterior_warmup(fit_instance, init)
-                (; w.n_divergent_samples, ess=w.ess)
-            end
+            # All posterior-fit derivations (pathfinder draws + warmup draws +
+            # their long/wide/summary DFs and constrained-with-TP/GQ variants).
+            # Resolves the @error-level "17 posterior_* siblings + bare
+            # posterior" lint by giving every member a home inside `@struct
+            # posterior`. The nested `@struct warmup` further bundles the
+            # warmup-specific subset (8 props sharing the warmup_* prefix).
+            @struct posterior = begin
+                # Gaussian-approximation draws from Pathfinder. Reads the IP
+                # via `@memo` so if `compute_steps` already computed it with
+                # progress nesting, we get the cached value for free.
+                pathfinder = begin
+                    pf = @memo __parent__.pathfinder(__parent__.fit_instance, __parent__.init)
+                    pf.position .+ pf.scale * randn(Xoshiro(43), __parent__.dim, 200)
+                end
+                # Default value. Switch the alias to `warmup.draws` to promote
+                # the full fit, or expose a toggle via a @param later.
+                value = pathfinder
+                # For fit plots we only want the unconstrained parameters (the
+                # raw sampler output) — constrained/TP/GQ adds lots of derived
+                # noise (y_gen, y_likelihood) that drowns out the actual
+                # parameter posterior. Keep prior-predictive plots on the full
+                # constrained set; fit plots use `param_unc_names` here.
+                unc_names = BridgeStan.param_unc_names(__parent__.fit_instance)
+                dfs       = dfs_from_constrained(value, unc_names)
+                long_df    = dfs.long
+                wide_df    = dfs.wide
+                summary_df = dfs.summary
+                # Constrained-with-TP/GQ variant — needed for PPCs that
+                # consume the linear-predictor TP (`loc` / `log_rate` /
+                # `log_odds`). The base long_df above intentionally excludes
+                # TPs/GQs to keep the generic plot tabset focused on raw
+                # parameters.
+                constrained_full = constrain_draws(value, __parent__.fit_instance; rng_seed=46)
+                full_long_df = dfs_from_constrained(
+                    constrained_full,
+                    BridgeStan.param_names(__parent__.fit_instance; include_tp=true, include_gq=true),
+                ).long
 
-            # Constrained-with-TP/GQ variants — needed for PPCs that consume
-            # the linear-predictor TP (`loc` / `log_rate` / `log_odds`). The
-            # base posterior_*_long_df above intentionally excludes TPs/GQs to
-            # keep the generic plot tabset focused on raw parameters.
-            posterior_constrained_full = constrain_draws(posterior, fit_instance; rng_seed=46)
-            posterior_full_long_df = dfs_from_constrained(
-                posterior_constrained_full,
-                BridgeStan.param_names(fit_instance; include_tp=true, include_gq=true),
-            ).long
-            posterior_warmup_constrained_full = constrain_draws(posterior_warmup_draws, fit_instance; rng_seed=47)
-            posterior_warmup_full_long_df = dfs_from_constrained(
-                posterior_warmup_constrained_full,
-                BridgeStan.param_names(fit_instance; include_tp=true, include_gq=true),
-            ).long
+                @struct warmup = begin
+                    # Parallel set for the warmup+MCMC path. The IP cache is
+                    # warmed by `fetchindex!` in `compute_steps`; `@memo`
+                    # hits it here.
+                    draws = (@memo __parent__.__parent__.warmup_fit(__parent__.__parent__.fit_instance, __parent__.__parent__.init)).posterior_position
+                    dfs   = dfs_from_constrained(draws, __parent__.unc_names)
+                    long_df    = dfs.long
+                    wide_df    = dfs.wide
+                    summary_df = dfs.summary
+                    diagnostics = begin
+                        w = @memo __parent__.__parent__.warmup_fit(__parent__.__parent__.fit_instance, __parent__.__parent__.init)
+                        (; w.n_divergent_samples, ess=w.ess)
+                    end
+                    constrained_full = constrain_draws(draws, __parent__.__parent__.fit_instance; rng_seed=47)
+                    full_long_df = dfs_from_constrained(
+                        constrained_full,
+                        BridgeStan.param_names(__parent__.__parent__.fit_instance; include_tp=true, include_gq=true),
+                    ).long
+                end
+            end
         end
 
         # Stage-named aliases. `step_chain` / `compute_steps` extract step
@@ -1539,8 +1553,8 @@ display_name(::MultiContinuousPPC)  = "multi-predictor"
         # `compute_steps` (special-cased below by step name) so the IP's
         # progress subtree attaches to the step's phase. Chain-level specs
         # read the resulting cached values back out as plain properties.
-        stan_fit_pathfinder = merge(stan_generate, (; stan_fit_pathfinder=(; long=(:stan, :posterior_long_df), wide=(:stan, :posterior_wide_df), summary=(:stan, :posterior_summary_df), full_long=(:stan, :posterior_full_long_df), truth=(:stan, :truth_unc_df))))
-        stan_fit_warmup     = merge(stan_fit_pathfinder, (; stan_fit_warmup=(; long=(:stan, :posterior_warmup_long_df), wide=(:stan, :posterior_warmup_wide_df), summary=(:stan, :posterior_warmup_summary_df), full_long=(:stan, :posterior_warmup_full_long_df), diagnostics=(:stan, :posterior_warmup_diagnostics), truth=(:stan, :truth_unc_df))))
+        stan_fit_pathfinder = merge(stan_generate, (; stan_fit_pathfinder=(; long=(:stan, :posterior, :long_df), wide=(:stan, :posterior, :wide_df), summary=(:stan, :posterior, :summary_df), full_long=(:stan, :posterior, :full_long_df), truth=(:stan, :truth_unc_df))))
+        stan_fit_warmup     = merge(stan_fit_pathfinder, (; stan_fit_warmup=(; long=(:stan, :posterior, :warmup, :long_df), wide=(:stan, :posterior, :warmup, :wide_df), summary=(:stan, :posterior, :warmup, :summary_df), full_long=(:stan, :posterior, :warmup, :full_long_df), diagnostics=(:stan, :posterior, :warmup, :diagnostics), truth=(:stan, :truth_unc_df))))
         (; parse, transform, wrap, brmi, vbrmi, bench, slic_model, stan_code, stan_compile,
            stan_instantiate, stan_eval, stan_shapes, stan_generate, stan_fit_pathfinder, stan_fit_warmup)
     end
@@ -1576,7 +1590,7 @@ display_name(::MultiContinuousPPC)  = "multi-predictor"
                     # Warm the warmup IP cache under this phase's progress,
                     # then resolve the (long, wide, summary, diagnostics)
                     # bundle (which reads back the cached value via `@memo`).
-                    fetchindex!(progress, r.stan.posterior_warmup, r.stan.fit_instance, r.stan.init)
+                    fetchindex!(progress, r.stan.warmup_fit, r.stan.fit_instance, r.stan.init)
                     resolve(spec)
                 else
                     resolve(spec)
@@ -2315,7 +2329,7 @@ APPDATA = AppData(; cache_type=:parallel)
                     # source materialisation is cheap once compute_steps
                     # has run; SLIC body is even cheaper.
                     run        = ctx.run
-                    full_long  = run.stan.posterior_full_long_df
+                    full_long  = run.stan.posterior.full_long_df
                     ppc_div    = render.build_ppc_section(full_long, :posterior;
                                                           id_prefix="brm-gallery-$(item.slug)")
                     pipeline_url = string(query_url(__parent__/""; formula=item.formula, label=item.label))
