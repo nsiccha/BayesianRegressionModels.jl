@@ -76,9 +76,9 @@ dataset_extras(::Val, df) = (;)
 #   per-request namespace/run bundles.
 # - UI/HTML lives on the routes structs: `PipelineRoutes` owns the formula
 #   editor page, per-step render dispatch, and `context!`; the `@include
-#   examples` sub-struct owns the examples list/detail/mark routes and the
-#   inline `example_store` that constructs ExampleEntry instances with the
-#   right `__parent__` for URL construction.
+#   examples` sub-struct owns the examples list/detail/mark routes plus the
+#   `entries`/`find`/`find_by_slug`/`persist!` operations that construct
+#   ExampleEntry instances with the right `__parent__` for URL construction.
 struct FormulaSecurityError <: Exception
     msg::String
 end
@@ -235,9 +235,7 @@ end
     path::String
     __parent__ = nothing
 
-    _STATUS_COLORS = (open="#888", done="#2e7d32", deprioritized="#a05a2c")
     _TIER_LABELS   = ("T1", "T2", "T3")
-    _TIER_COLORS   = ("#4a7c59", "#5a6a8c", "#8c5a5a")
 
     _parsed = begin
         lines = readlines(path)
@@ -264,8 +262,11 @@ end
            formula=isempty(formula_text) ? nothing : String(formula_text))
     end
     label   = get(_parsed.header, "label", basename(path))
-    tier    = parse(Int, get(_parsed.header, "tier", "1"))
-    status  = Symbol(get(_parsed.header, "status", "open"))
+    @struct tier = begin
+        n     = parse(Int, get(_parsed.header, "tier", "1"))
+        label = get(_TIER_LABELS, n, "T$n")
+        pill  = h.span(label; class="brm-tier-pill", data_tier=string(n))
+    end
     # `# flag: sb|sbbrm|both` header marks a card as needing backend
     # attention. `:sb` targets the StanBlocks-proper agent; `:sbbrm`
     # targets the BRM sbimpl.jl agent; `:both` is both. Default `:none`.
@@ -283,25 +284,13 @@ end
         if !isempty(strip(s)))
     stages_pass = _parse_stage_set("stages_pass")
     stages_fail = _parse_stage_set("stages_fail")
-    _stage_pill_color = (pass="#2e7d32", fail="#a02828", unknown="#888")
     stage_state(name) = name in stages_fail ? :fail :
                         name in stages_pass ? :pass : :unknown
-
-    border_color = get(_STATUS_COLORS, status, "#888")
-    tier_label   = get(_TIER_LABELS,   tier,   "T$tier")
-    tier_color   = get(_TIER_COLORS,   tier,   "#888")
 
     # DOM ids derived once — HTMX targets reference these (hx_target= / id=).
     # Hashing the label keeps ids stable across requests without needing to
     # URL-escape the label.
     _label_hash = hash(label)
-    card_id     = "example-card-$_label_hash"
-    result_id   = "example-result-$_label_hash"
-    status_id   = "status-$_label_hash"
-
-    tier_pill = h.span(tier_label;
-        class="brm-tier-pill",
-        style="background:$tier_color")
 
     # `__parent__` is the `@include examples` sub-struct (owns /examples/* routes).
     # `__parent__.__parent__.pipeline` is the sibling PipelineRoutes sub-struct
@@ -314,16 +303,16 @@ end
         class="brm-permalink")
 
     state_pill(target_state, active_text, inactive_text) = begin
-        is_active = status == target_state
-        bg = is_active ? get(_STATUS_COLORS, target_state, "#888") : "#888"
+        is_active = status.value == target_state
         h.button(is_active ? active_text : inactive_text;
             type="button",
             class="brm-state-pill",
+            data_state=string(target_state),
+            aria_pressed=string(is_active),
             hx_get=string(query_url(__parent__/"mark"; label, state=target_state)),
-            hx_target="#$card_id",
+            hx_target="#$(card.id)",
             hx_swap="outerHTML",
             onclick="event.stopPropagation()",
-            style="background:$bg",
         )
     end
 
@@ -334,67 +323,69 @@ end
                   flag === :sbbrm ? "⚑ SBBRM" :
                   flag === :both  ? "⚑ SB+SBBRM" :
                                     "flag"
-    _flag_color = flag === :sb    ? "#c97f0c" :
-                  flag === :sbbrm ? "#2e7d32" :
-                  flag === :both  ? "#a02828" :
-                                    "#888"
     flag_pill = h.button(_flag_label;
         type="button",
-        class="brm-state-pill",
+        class="brm-flag-pill",
+        data_flag=string(flag),
         hx_get=string(query_url(__parent__/"flag"; label)),
-        hx_target="#$card_id",
+        hx_target="#$(card.id)",
         hx_swap="outerHTML",
         onclick="event.stopPropagation()",
-        style="background:$_flag_color",
     )
 
-    status_pills = h.span(;
-        id=status_id,
-        class="brm-status-pills")(
-        state_pill(:done,          "✓ done",          "mark done"),
-        state_pill(:deprioritized, "✓ deprioritized", "deprioritize"),
-        flag_pill,
-    )
+    @struct status = begin
+        value = Symbol(get(_parsed.header, "status", "open"))
+        id    = "status-$_label_hash"
+        pills = h.span(; id, class="brm-status-pills")(
+            state_pill(:done,          "✓ done",          "mark done"),
+            state_pill(:deprioritized, "✓ deprioritized", "deprioritize"),
+            flag_pill,
+        )
+    end
 
     # Stage list pulled from AppContext.stage_labels so the order + names
     # stay in sync with the pipeline page.
     _stages = __parent__.__parent__.stage_labels
 
-    # Formula form with stage buttons. `push_url=true` in the standalone
-    # detail view makes each button push `/examples/<slug>?stage=<id>` into
-    # browser history (shareable, back/forward works); `push_url=false` in
-    # the list view leaves the URL at `/examples`.
-    formula_form(push_url::Bool) = begin
-        stage_btns = [
-            h.button(lbl;
-                type="button",
-                class="brm-branch-btn",
-                data_stage_id=string(id),
-                hx_get=string(query_url(__parent__.__parent__.pipeline/"stage/$id"; force=true)),
-                hx_include="closest form",
-                hx_target="#$result_id",
-                hx_swap="innerHTML",
-                (push_url ? (; hx_push_url="$(__parent__/slug)?stage=$id") : (;))...,
-            ) for (id, lbl) in _stages]
-        h.form(; class="brm-example-form")(
-            h.input(; type="hidden", name="label", value=label),
-            h.textarea(formula;
-                name="formula",
-                rows=max(3, count('\n', formula) + 1),
-                class="brm-example-textarea"),
-            stage_btns...,
-            h.button("SB repro ▶";
-                type="submit",
-                formaction=string(__parent__.__parent__.pipeline/"sb_repro"),
-                class="secondary"),
-        )
-    end
 
-    # Default card render (no stage pre-loaded; clicks on stage buttons
-    # populate the inline result div on demand). `card_with_preload("")`
-    # below handles both list-mode and (when called with a non-empty
-    # preload_stage) detail-mode.
-    card = card_with_preload("")
+    # Whether this entry should appear in gallery / preset UIs. Markdown-only
+    # notes (no formula body) are skipped. `bruno-*` examples depend on
+    # `bruno-ext.jl` registering their datasets; without that file on disk
+    # they would error at compile, so they're hidden too.
+    shown = !isnothing(formula) &&
+            (isfile(joinpath(@__DIR__, "bruno-ext.jl")) || !startswith(slug, "bruno-"))
+
+    # Placeholder card emitted by the gallery shell: auto-fetches its body
+    # via `hx-trigger="load"` against `pipeline/gallery/card/<slug>`. The
+    # target route is polling_fetchindex-backed -- the user sees the
+    # progress tree while Stan compile + Pathfinder fit run, then the full
+    # card body (formula + SLIC + auto-PPC + Stan source) replaces this.
+    gallery_placeholder = h.article(;
+            id="brm-gallery-card-$slug",
+            hx_get=string(query_url(__parent__.__parent__.pipeline.gallery/"card/$slug")),
+            hx_trigger="load",
+            hx_swap="outerHTML",
+        )(
+            h.h4(label),
+            h.p("Loading..."),
+        )
+
+    # Quick-fill preset button shown in the pipeline editor for tier-0
+    # entries. Active when its formula matches the page's current formula
+    # @param; inactive presets get Pico's `outline` ghost-button class.
+    preset_button = h.button(label;
+        type="button",
+        class=("brm-preset-btn" *
+            (formula == __parent__.__parent__.pipeline.formula ? "" : " outline")),
+        data_formula=formula,
+        onclick="""
+            document.querySelector('textarea[name=formula]').value = this.dataset.formula;
+            document.querySelectorAll('.brm-preset-btn').forEach(b => b.classList.add('outline'));
+            this.classList.remove('outline');
+            const tab = document.querySelector('.tab-row a.primary') || document.querySelector('.tab-row a');
+            if (tab) tab.click();
+        """,
+    )
 
     save!(; new_status=status, new_formula=formula,
             new_stages_pass=stages_pass, new_stages_fail=stages_fail,
@@ -447,7 +438,7 @@ end
             title="$lbl -- $(stage_state(id))",
             onclick="event.stopPropagation()",
             class="brm-stage-indicator",
-            style="background:$(_stage_pill_color[stage_state(id)])")(lbl)
+            data_state=string(stage_state(id)))(lbl)
          for (id, lbl) in __parent__.__parent__.stage_labels]...
     )
 
@@ -469,43 +460,85 @@ end
     # 0=none, 1=sb-only or sbbrm-only, 2=both → "most in need" sorts highest.
     _sort_flagged    = flag === :none ? 0 : flag === :both ? 2 : 1
 
-    card_with_preload(preload_stage::AbstractString; force_open::Bool=false) = begin
-        children = Any[HTMXObjects.md_to_node(body)]
-        if formula !== nothing
-            # Push URL on stage-button clicks only in the detail view
-            # (`force_open=true`); list view keeps URL at `/examples`.
-            push!(children, formula_form(force_open))
-            result_children = Any[]
-            isempty(preload_stage) || push!(result_children,
-                lazy(query_url(__parent__.__parent__.pipeline/"stage/$preload_stage";
-                               formula, label)))
-            push!(children, h.div(; id=result_id,
-                class="brm-example-result")(result_children...))
+    @struct card = begin
+        id        = "example-card-$_label_hash"
+        result_id = "example-result-$_label_hash"
+
+        # Formula form with stage buttons. `push_url=true` in the standalone
+        # detail view makes each button push `/examples/<slug>?stage=<id>` into
+        # browser history (shareable, back/forward works); `push_url=false` in
+        # the list view leaves the URL at `/examples`.
+        formula_form(push_url::Bool) = begin
+            stage_btns = [
+                h.button(stage_label;
+                    type="button",
+                    class="brm-branch-btn",
+                    data_stage_id=string(stage_id),
+                    hx_get=string(query_url(pipeline/"stage/$stage_id"; force=true)),
+                    hx_include="closest form",
+                    hx_target="#$result_id",
+                    hx_swap="innerHTML",
+                    (push_url ? (; hx_push_url="$(__parent__.__parent__/slug)?stage=$stage_id") : (;))...,
+                ) for (stage_id, stage_label) in _stages]
+            h.form(
+                h.input(; type="hidden", name="label", value=label),
+                h.textarea(formula;
+                    name="formula",
+                    rows=max(3, count('\n', formula) + 1)),
+                stage_btns...,
+                h.button("SB repro ▶";
+                    type="submit",
+                    formaction=string(pipeline/"sb_repro"),
+                    class="secondary"),
+            )
         end
-        h.article(;
-            id=card_id,
-            class="brm-example-card",
-            style="border-left-color:$border_color",
-            data_mtime=string(_sort_mtime),
-            data_tier=string(_sort_tier),
-            data_complexity=string(_sort_complexity),
-            data_brokenness=string(_sort_brokenness),
-            data_status=string(_sort_status),
-            data_progress=string(_sort_progress),
-            data_flagged=string(_sort_flagged),
-            data_label=label,
-        )(
-            h.details(; open=(force_open || status == :open))(
-                h.summary(; class="brm-example-summary")(
-                    tier_pill, " ",
-                    h.strong(label), " ",
-                    status_pills, " ",
-                    stage_indicators, " ",
-                    permalink,
+
+        # Card renderer, parameterized by an optional `preload_stage`. When set,
+        # the result div is seeded with a `lazy(...)` that fires the stage GET
+        # on first view — so `/examples/<slug>?stage=<name>` shows the card with
+        # that stage's output already running/rendered (no click needed).
+        with_preload(preload_stage::AbstractString=""; force_open::Bool=false) = begin
+            children = Any[HTMXObjects.md_to_node(body)]
+            if formula !== nothing
+                # Push URL on stage-button clicks only in the detail view
+                # (`force_open=true`); list view keeps URL at `/examples`.
+                push!(children, formula_form(force_open))
+                result_children = Any[]
+                isempty(preload_stage) || push!(result_children,
+                    lazy(query_url(pipeline/"stage/$preload_stage"; formula, label)))
+                push!(children, h.div(; id=result_id)(result_children...))
+            end
+            h.article(;
+                id,
+                class="brm-example-card",
+                data_state=string(status.value),
+                data_mtime=string(_sort_mtime),
+                data_tier=string(_sort_tier),
+                data_complexity=string(_sort_complexity),
+                data_brokenness=string(_sort_brokenness),
+                data_status=string(_sort_status),
+                data_progress=string(_sort_progress),
+                data_flagged=string(_sort_flagged),
+                data_label=label,
+            )(
+                h.details(; open=(force_open || status.value == :open))(
+                    h.summary(
+                        tier.pill, " ",
+                        h.strong(label), " ",
+                        status.pills, " ",
+                        stage_indicators, " ",
+                        permalink,
+                    ),
+                    children...,
                 ),
-                h.div(; class="brm-example-body")(children...),
-            ),
-        )
+            )
+        end
+
+        # Default card render (no stage pre-loaded; clicks on stage buttons
+        # populate the inline result div on demand). `with_preload` handles
+        # both list-mode and (when called with a non-empty preload_stage)
+        # detail-mode.
+        default = with_preload()
     end
 end
 # Element-returning counterpart to `Base.findfirst(pred, coll)` (which returns an
@@ -1436,6 +1469,28 @@ display_name(::MultiContinuousPPC)  = "multi-predictor"
     @struct context(label, formula) = begin
         namespace = namespace_from(label)
         run = __parent__.run(formula, namespace)
+        sb_repro_html = begin
+            compile_out = try
+                run.stan.lib
+                "(compile succeeded -- lib at `$(run.stan.lib)`)"
+            catch e
+                sprint(showerror, e)
+            end
+            h.div(
+                h.h1("StanBlocks bug report"),
+                h.h2("Formula"),
+                h.pre(formula),
+                h.h2("SlicModel body"),
+                h.p(h.code("r.sbbrmi.model.model")),
+                h.pre(run.sbbrmi.model.model),
+                h.h2("Generated Stan source"),
+                h.p(h.code("r.stan.src")),
+                h.pre(run.stan.src),
+                h.h2("BridgeStan compile output"),
+                h.p(h.code("r.stan.lib")),
+                h.pre(compile_out),
+            )
+        end
     end
 
     # Expanded DAG of step chains — one NamedTuple per stage target, keyed by
@@ -1566,7 +1621,7 @@ display_name(::MultiContinuousPPC)  = "multi-predictor"
 
         # Static paths -- gallery shell, library, plus per-card content.
         static_paths = ["/pipeline/gallery", "/library"]
-        card_paths   = ["/pipeline/gallery_card/$(it.slug)" for it in items]
+        card_paths   = ["/pipeline/gallery/card/$(it.slug)" for it in items]
         all_paths    = vcat(static_paths, card_paths)
         phases = [prepare_progress!(__status__; description=p) for p in all_paths]
 
@@ -1631,26 +1686,8 @@ APPDATA = AppData(; cache_type=:parallel)
     # examples store (UI concern: writing the edited formula back to the .jl
     # file corresponding to `label`), then returns the pure run context.
     context!() = begin
-        isempty(label) || __parent__.examples.example_store.persist!(label, formula)
+        isempty(label) || __parent__.examples.persist!(label, formula)
         context(label, formula)
-    end
-
-    # Single source of truth for gallery + preset buttons. Returns
-    # `(slug, label, formula, tier)` tuples sourced from
-    # `web-macro/examples/*.jl` via the existing example_store.
-    # Tier 0 = quick-fill presets (the buttons in the formula editor +
-    # the "Presets" gallery section). Tier 1-3 = file-based examples.
-    # Files with no formula body (markdown-only notes) are skipped.
-    # `bruno-*` items are skipped when `bruno-ext.jl` isn't on disk
-    # (the file is gitignored): without the ext, the bruno data
-    # extras don't load and the cards' compute_steps would fail.
-    # Skipping at this layer keeps the gallery shell, the formula-
-    # editor preset buttons, and the recorder all in sync.
-    gallery_items() = let bruno_loaded = isfile(joinpath(@__DIR__, "bruno-ext.jl"))
-        [(e.slug, e.label, e.formula, e.tier)
-         for e in __parent__.examples.example_store.entries()
-         if !isnothing(e.formula) &&
-            (bruno_loaded || !startswith(e.slug, "bruno-"))]
     end
 
     # Per-step HTML rendering. `getproperty(render, step_key)(value)` emits the
@@ -1682,12 +1719,12 @@ APPDATA = AppData(; cache_type=:parallel)
         )
         vbrmi(x) = begin
             fd_summary = x.n_dead == 0 ?
-                h.span("logdensity + FD check: $(x.dim)/$(x.dim) active ✓"; class="brm-status-ok") :
-                h.span("logdensity + FD check: $(x.n_dead) dead param(s)"; class="brm-status-err")
+                h.span("logdensity + FD check: $(x.dim)/$(x.dim) active ✓"; data_status="success") :
+                h.span("logdensity + FD check: $(x.n_dead) dead param(s)"; data_status="error")
             fd_body = h.div(
                 h.p("dim = ", x.dim, ", logdensity = ", x.ldp),
                 isempty(x.dead) ? "" :
-                    h.p(; class="brm-status-err")("dead param indices: ", x.dead),
+                    h.p(; data_status="error")("dead param indices: ", x.dead),
                 h.pre(x.grad),
             )
             h.section(
@@ -1939,50 +1976,6 @@ APPDATA = AppData(; cache_type=:parallel)
         end
     end
 
-    # Tier-0 entries are the in-page quick-fill preset buttons (the same
-    # ones that show up in the gallery's Presets section).
-    presets = [(label, formula) for (_, label, formula, tier) in gallery_items() if tier == 0]
-
-    # `formula` is the preset's preset-text; the outer `formula` (the
-    # @param) is shadowed here. `__parent__.formula` reaches the page's
-    # current formula state so we can mark this preset as active when
-    # they match. Inactive presets get Pico's `outline` class (ghost
-    # button); the active one drops it (filled primary).
-    @struct preset(label, formula) = begin
-        button = h.button(label;
-            type="button",
-            class=("brm-preset-btn" * (formula == __parent__.formula ? "" : " outline")),
-            data_formula=formula,
-            onclick="""
-                document.querySelector('textarea[name=formula]').value = this.dataset.formula;
-                document.querySelectorAll('.brm-preset-btn').forEach(b => b.classList.add('outline'));
-                this.classList.remove('outline');
-                const tab = document.querySelector('.tab-row a.primary') || document.querySelector('.tab-row a');
-                if (tab) tab.click();
-            """,
-        )
-    end
-
-    @struct stage(label, id) = begin
-        button = h.button(label;
-            type="button",
-            id="stage-$id",
-            hx_get=string(query_url(__self__/"stage/$id"; force=true)),
-            hx_include="#brm-macro-form",
-            hx_target="#brm-macro-output",
-            # Push the full request URL (formula + force) so click history
-            # is preserved. The route honours `force=true` only when the
-            # request actually came from HTMX (HX-Request header present);
-            # a direct browser reload of the pushed URL re-attaches to the
-            # polling_fetchindex IP instead of forcing a recompute.
-            hx_push_url="true",
-            # `innerHTML` keeps the `#brm-macro-output` wrapper in the DOM
-            # across swaps — including when polling_fetchindex throws and the
-            # response is a bare error article with no matching id. Without
-            # this, buttons target a gone id after the first failure.
-            hx_swap="innerHTML")
-    end
-
     @get index = begin
         # If an example form posted us a (label, formula) pair, persist the
         # edited formula to that example's .jl file so the next visit to the
@@ -2004,7 +1997,7 @@ APPDATA = AppData(; cache_type=:parallel)
                 h.code("StanCode"), " -> ", h.code("StanCompile"),
                 "; 6a-d': instantiate / eval / shapes / generate / fit via Pathfinder or full warmup).",
             ),
-            h.aside(; style="border-left: 3px solid var(--pico-muted-border-color, #888); padding: 0.4rem 0.8rem; margin: 0.5rem 0; background: var(--pico-card-background-color, transparent);")(
+            h.aside(; class="htmxo-status-banner", data_status="muted")(
                 h.small(
                     h.strong("Errors: "),
                     "runtime exceptions are logged on the server (",
@@ -2103,7 +2096,7 @@ APPDATA = AppData(; cache_type=:parallel)
             h.form(; id="brm-macro-form")(
                 h.label("Load preset"),
                 h.div(; class="brm-preset-row")(
-                    [preset(lbl, body).button for (lbl, body) in presets]...,
+                    [e.preset_button for e in gallery.items() if e.tier.n == 0]...,
                 ),
                 h.label("Formula")(
                     h.textarea(formula;
@@ -2180,7 +2173,7 @@ APPDATA = AppData(; cache_type=:parallel)
         # (main pipeline page without an example context) or label doesn't
         # match any saved example.
         if !isempty(label)
-            entry = __parent__.examples.example_store.find(label)
+            entry = __parent__.examples.find(label)
             isnothing(entry) || entry.mark_stages!(;
                 passed=[k for k in keys(result) if k !== :data])
         end
@@ -2200,88 +2193,9 @@ APPDATA = AppData(; cache_type=:parallel)
 
     @get stan = h.pre(context!().run.stan.src)
 
-    # Gallery card content for one example/preset, addressed by slug.
-    # Path-based (`/pipeline/gallery_card/<slug>`) so static-deploy
-    # recording works -- query-string URLs lose their differentiator
-    # when GitHub Pages strips the query before file lookup.
-    #
-    # The slug -> formula lookup goes through `gallery_items()`, which
-    # walks `web-macro/examples/*.jl` for tier-tagged entries. Formula
-    # is set up under the example's namespace (so `bruno-*` items get
-    # `dataset_extras(::Val{:bruno}, df)` extras) and run through
-    # `compute_steps` to terminal state via `polling_fetchindex` --
-    # same machinery the stage buttons use, so the user sees the
-    # progress treebar during compile + fit.
-    #
-    # The rendered card contains: input formula, SLIC body, Stan source,
-    # auto-PPC section. The whole card is one self-contained HTML
-    # response, recorded as `live-brm/pipeline/gallery_card/<slug>.html`
-    # for static deploy.
-    #
-    # `force=true` invalidates both caches; gated on `is_htmx(__req__)`
-    # so direct reloads don't blow the cache.
-    @get gallery_card(slug; force::Bool=false) = begin
-        slug = String(slug)
-        item = let lookup = filter(t -> t[1] == slug, gallery_items())
-            isempty(lookup) && return h.article(; class="brm-gallery-card-error")(
-                h.p("Unknown gallery slug: ", h.code(slug)))
-            only(lookup)
-        end
-        item_slug, item_label, item_formula, _ = item
-        ctx       = context(item_label, item_formula)
-        ns        = ctx.namespace
-        cache_key = (hash(item_formula), ns)
-        do_force  = force && is_htmx(__req__)
-        do_force && delete!(__appdata__.ppc_html_cache, cache_key)
-        polling_fetchindex(
-            compute_steps, item_formula, ns, :stan_fit_pathfinder;
-            poll_url=query_url(__self__/"gallery_card/$item_slug"),
-            label="Gallery card - $item_label",
-            force=do_force,
-        ) do _result
-            get!(__appdata__.ppc_html_cache, cache_key) do
-                # All four panels share the same finished `run`. Stan
-                # source materialisation is cheap once compute_steps
-                # has run; SLIC body is even cheaper.
-                run        = ctx.run
-                full_long  = run.stan.posterior_full_long_df
-                ppc_div    = render.build_ppc_section(full_long, :posterior;
-                                                      id_prefix="brm-gallery-$item_slug")
-                pipeline_url = string(query_url(__self__/""; formula=item_formula, label=item_label))
-                h.article(; class="htmxo-gallery-card", id="brm-gallery-card-$item_slug")(
-                    h.h4(; class="htmxo-gallery-card-title")(
-                        h.a(item_label; href=pipeline_url, target="_blank",
-                            title="Open in pipeline"),
-                    ),
-                    h.h5("Formula"; class="htmxo-gallery-card-subheading"),
-                    h.pre(h.code(item_formula; class="language-julia");
-                          class="htmxo-gallery-card-code"),
-                    h.h5("SLIC model"; class="htmxo-gallery-card-subheading"),
-                    h.pre(h.code(string(run.sbbrmi.model.model); class="language-julia");
-                          class="htmxo-gallery-card-code"),
-                    h.h5("Auto PPC"; class="htmxo-gallery-card-subheading"),
-                    isnothing(ppc_div) ?
-                        h.p("(no PPC kind detected)";
-                            class="htmxo-gallery-card-description") :
-                        ppc_div,
-                    h.h5("Stan model"; class="htmxo-gallery-card-subheading"),
-                    h.pre(h.code(run.stan.src; class="language-stan");
-                          class="htmxo-gallery-card-code"),
-                )
-            end
-        end
-    end
-
-    # Gallery shell: card grid where each card is a placeholder div
-    # that lazy-loads `/pipeline/gallery_card/<slug>` on click.
-    # Path-based (`<slug>` from the example file basename) so the
-    # static-deploy recordings can serve the same URLs as files.
-    # The lazy-load target returns the full card content (formula,
-    # SLIC body, Stan source, PPC). One round-trip per card; one
-    # static-recorded HTML file per card.
     # Serve AoV's vega-embed runtime as plain JS so the docs page can
-    # `<script src="...">` it before the gallery card swaps in. The
-    # gallery_card response embeds inline `<script>AoV.embed(…)>` calls
+    # `<script src="...">` it before a gallery card swaps in. The
+    # gallery card response embeds inline `<script>AoV.embed(…)>` calls
     # for the auto-PPC plot; htmx evaluates those on swap, but they
     # need `window.AoV` already defined. The docs theme loads this URL
     # via setupHtmxoEmbed. (Mirrors AoV's own `aov_runtime_js` route.)
@@ -2292,36 +2206,135 @@ APPDATA = AppData(; cache_type=:parallel)
         MIMEResponse("application/javascript; charset=utf-8", body)
     end
 
-    @get gallery = begin
-        # Each card placeholder auto-fetches its own body via
-        # `hx-trigger="load"` against `gallery_card/<slug>`. That
-        # route is `polling_fetchindex`-backed: while the underlying
-        # Stan compile + Pathfinder fit run, the user sees the
-        # progress tree; once done, the full card body (formula +
-        # SLIC + auto-PPC + Stan source) replaces the placeholder.
-        # Recordings capture the final terminal state per slug.
-        card_shell(slug, label) = h.article(; class="htmxo-gallery-card",
-                id="brm-gallery-card-$slug",
-                hx_get=string(query_url(__self__/"gallery_card/$slug")),
-                hx_trigger="load",
-                hx_swap="outerHTML",
-            )(
-                h.h4(label; class="htmxo-gallery-card-title"),
-                h.p("Loading…"; class="htmxo-gallery-card-description"),
+    # Gallery bundle, mounted at /pipeline/gallery. `index` is the shell
+    # (card grid of placeholder articles); `card(slug)` returns the full
+    # rendered content for one example (formula + SLIC + auto-PPC + Stan
+    # source); `record` triggers the AppData IP that walks every gallery
+    # URL through `compute_steps` and dumps the static HTML for deploy.
+    @include gallery = begin
+        # Showable subset of `examples.entries()` (drops markdown-only
+        # notes and bruno-* entries when bruno-ext.jl isn't on disk).
+        items() = [e for e in __parent__.examples.entries() if e.shown]
+
+        # Card grid: one placeholder article per item, lazy-loading its
+        # body via `hx-trigger=load` against `card/<slug>`. Per-card
+        # placeholder is owned by ExampleEntry (`e.gallery_placeholder`).
+        @get index = let xs = items()
+            h.div(; class="htmxo-gallery")(
+                h.section(
+                    h.h3("Presets"),
+                    [e.gallery_placeholder for e in xs if e.tier.n == 0]...,
+                ),
+                h.section(
+                    h.h3("Examples"),
+                    [e.gallery_placeholder for e in xs if e.tier.n > 0]...,
+                ),
             )
-        items = gallery_items()
-        tier0_items = [(s, l) for (s, l, _, t) in items if t == 0]
-        tier1plus   = [(s, l) for (s, l, _, t) in items if t > 0]
-        h.div(; class="htmxo-gallery")(
-            h.section(; class="htmxo-gallery-section")(
-                h.h3("Presets"; class="htmxo-gallery-section-heading"),
-                [card_shell(s, l) for (s, l) in tier0_items]...,
-            ),
-            h.section(; class="htmxo-gallery-section")(
-                h.h3("Examples"; class="htmxo-gallery-section-heading"),
-                [card_shell(s, l) for (s, l) in tier1plus]...,
-            ),
-        )
+        end
+
+        # Card content for one example/preset, addressed by slug.
+        # Path-based so static-deploy recording works -- query-string
+        # URLs lose their differentiator when GitHub Pages strips the
+        # query before file lookup. Formula is set up under the example's
+        # namespace (so `bruno-*` items get `dataset_extras(::Val{:bruno},
+        # df)` extras) and run through `compute_steps` to terminal state
+        # via `polling_fetchindex` -- same machinery the stage buttons
+        # use, so the user sees the progress treebar during compile + fit.
+        #
+        # The rendered card contains: input formula, SLIC body, Stan
+        # source, auto-PPC section. One self-contained HTML response,
+        # recorded as `live-brm/pipeline/gallery/card/<slug>.html` for
+        # static deploy.
+        #
+        # `force=true` invalidates both caches; gated on `is_htmx(__req__)`
+        # so direct reloads don't blow the cache.
+        @get card(slug; force::Bool=false) = begin
+            slug = String(slug)
+            item = let lookup = filter(e -> e.slug == slug, items())
+                isempty(lookup) && return h.article(
+                    h.p("Unknown gallery slug: ", h.code(slug); class="htmxo-card-error"))
+                only(lookup)
+            end
+            ctx       = context(item.label, item.formula)
+            ns        = ctx.namespace
+            cache_key = (hash(item.formula), ns)
+            do_force  = force && is_htmx(__req__)
+            do_force && delete!(__appdata__.ppc_html_cache, cache_key)
+            polling_fetchindex(
+                compute_steps, item.formula, ns, :stan_fit_pathfinder;
+                poll_url=query_url(__self__/"card/$(item.slug)"),
+                label="Gallery card - $(item.label)",
+                force=do_force,
+            ) do _result
+                get!(__appdata__.ppc_html_cache, cache_key) do
+                    # All four panels share the same finished `run`. Stan
+                    # source materialisation is cheap once compute_steps
+                    # has run; SLIC body is even cheaper.
+                    run        = ctx.run
+                    full_long  = run.stan.posterior_full_long_df
+                    ppc_div    = render.build_ppc_section(full_long, :posterior;
+                                                          id_prefix="brm-gallery-$(item.slug)")
+                    pipeline_url = string(query_url(__parent__/""; formula=item.formula, label=item.label))
+                    h.article(; id="brm-gallery-card-$(item.slug)")(
+                        h.h4(
+                            h.a(item.label; href=pipeline_url, target="_blank",
+                                title="Open in pipeline"),
+                        ),
+                        h.h5("Formula"),
+                        h.pre(h.code(item.formula; class="language-julia")),
+                        h.h5("SLIC model"),
+                        h.pre(h.code(string(run.sbbrmi.model.model); class="language-julia")),
+                        h.h5("Auto PPC"),
+                        isnothing(ppc_div) ? h.p("(no PPC kind detected)") : ppc_div,
+                        h.h5("Stan model"),
+                        h.pre(h.code(run.stan.src; class="language-stan")),
+                    )
+                end
+            end
+        end
+
+        # Drive the AppData IP to dump every gallery URL (gallery shell +
+        # library + per-card content x full + HX shapes) into
+        # `docs/src/public/live-brm/`. Long-running (Stan compile + fit
+        # per item, serialised), so it goes through `polling_fetchindex`:
+        # first hit kicks off a Task and returns a polling progress
+        # fragment; subsequent polls show the per-path
+        # `prepare_progress!` markers; when finished, the do-block
+        # renders the summary article.
+        #
+        # Override the deploy URL prefix via `RECORD_BASE_PREFIX` env var
+        # (default `/BayesianRegressionModels.jl/dev/live-brm`); override
+        # the output directory via the `record_dir` query param.
+        @get record(; record_dir::String="", record_base::String="", force::Bool=false) = begin
+            rd = isempty(record_dir) ?
+                joinpath(dirname(dirname(@__DIR__)), "docs", "src", "public", "live-brm") :
+                record_dir
+            rb = isempty(record_base) ?
+                get(ENV, "RECORD_BASE_PREFIX", "/BayesianRegressionModels.jl/dev/live-brm") :
+                record_base
+            polling_fetchindex(__appdata__.record_gallery, rd, rb;
+                               poll_url=query_url(__self__/"record"; record_dir=rd, record_base=rb),
+                               label="Recording BRM gallery",
+                               force) do summary
+                h.article(
+                    h.header(h.h2("Gallery recorded")),
+                    h.p("Wrote ", h.code(string(summary.n_paths)),
+                        " routes (x full + HX shapes) into ",
+                        h.code(summary.record_dir), "."),
+                    h.ul(
+                        h.li(h.code(string(summary.n_html)),  " .html"),
+                        h.li(h.code(string(summary.n_other)), " other"),
+                        h.li(h.code(string(summary.n_items)), " gallery items"),
+                    ),
+                    h.p(h.strong("Next: "),
+                        h.code("git add docs/src/public/live-brm && git commit && git push"),
+                        " -- CI deploys the rest."),
+                    h.p("Re-record (overwrites cache): ",
+                        h.a("/pipeline/gallery/record?force=true";
+                            href=__self__/"record?force=true")),
+                )
+            end
+        end
     end
 
     @get debug(; q::String="") = h.pre(
@@ -2339,45 +2352,19 @@ APPDATA = AppData(; cache_type=:parallel)
     # auto-converts to markdown when `Accept: text/plain` is requested, so the
     # same URL works for humans (browser) and agents (curl).
     #   curl -H 'Accept: text/plain' 'http://localhost:<port>/pipeline/sb_repro?formula=<url-encoded>'
-    # Shared renderer: takes a ready `run` context + the raw formula string and
-    # emits the bug-report HTML. Same output whether invoked via POST with an
-    # edited formula (`sb_repro`) or via GET by example slug (`sb_repro_example`).
-    _sb_repro_html(r, formula_str) = begin
-        compile_out = try
-            r.stan.lib
-            "(compile succeeded — lib at `$(r.stan.lib)`)"
-        catch e
-            sprint(showerror, e)
-        end
-        h.div(
-            h.h1("StanBlocks bug report"),
-            h.h2("Formula"),
-            h.pre(formula_str),
-            h.h2("SlicModel body"),
-            h.p(h.code("r.sbbrmi.model.model")),
-            h.pre(r.sbbrmi.model.model),
-            h.h2("Generated Stan source"),
-            h.p(h.code("r.stan.src")),
-            h.pre(r.stan.src),
-            h.h2("BridgeStan compile output"),
-            h.p(h.code("r.stan.lib")),
-            h.pre(compile_out),
-        )
-    end
-
-    @get sb_repro = _sb_repro_html(context!().run, formula)
+    @get sb_repro = context!().sb_repro_html
 
     # Saved-example entry point for external agents: GET by slug so curl/agents
     # can reproduce a StanBlocks bug without POSTing a formula. The slug is the
     # URL-safe name used by /examples/<slug>.
     #   curl -H 'Accept: text/plain' 'http://.../pipeline/sb_repro_example?name=<slug>'
     @get sb_repro_example(; name::AbstractString="") = begin
-        entry = __parent__.examples.example_store.find_by_slug(name)
+        entry = __parent__.examples.find_by_slug(name)
         isnothing(entry) && return h.div(
             h.h1("Example not found"),
             h.p("No example with slug ", h.code(name)),
         )
-        _sb_repro_html(context(entry.label, entry.formula).run, entry.formula)
+        context(entry.label, entry.formula).sb_repro_html
     end
 end
 
@@ -2421,16 +2408,14 @@ y1 ~ Normal(loc, err)
     # for HTMX requests (see `_resolve_response` in HTMXObjects.jl). The
     # sidebar's `hx-get` swaps target `#content` directly.
     __page__(content) = htmx(
-        h.div(; class="brm-layout")(
+        app_layout(
             nav_sidebar([
                 "Pipeline" => "/pipeline",
                 "Gallery"  => "/pipeline/gallery",
                 "Examples" => "/examples",
                 "Library"  => "/library",
             ]),
-            h.main(; class="container brm-main")(
-                h.div(; id="content")(content),
-            ),
+            content,
         );
         pico_version="2",
         extra_head=(
@@ -2460,48 +2445,6 @@ y1 ~ Normal(loc, err)
     @get reset = begin
         clear_mem_caches!(__appdata__)
         h.p("In-memory caches cleared.")
-    end
-
-    # GET `/record_gallery` — drive the AppData IP to dump every gallery
-    # URL (gallery shell + library + per-card content × full + HX shapes)
-    # into `docs/src/public/live-brm/`. Long-running (Stan compile + fit
-    # per item, serialised), so it goes through `polling_fetchindex`:
-    # first hit kicks off a Task and returns a polling progress fragment;
-    # subsequent polls show the per-path `prepare_progress!` markers;
-    # when finished, the do-block renders the summary article.
-    #
-    # Override the deploy URL prefix via `RECORD_BASE_PREFIX` env var
-    # (default `/BayesianRegressionModels.jl/dev/live-brm`); override
-    # the output directory via the `record_dir` query param.
-    @get record_gallery(; record_dir::String="", record_base::String="", force::Bool=false) = begin
-        rd = isempty(record_dir) ?
-            joinpath(dirname(dirname(@__DIR__)), "docs", "src", "public", "live-brm") :
-            record_dir
-        rb = isempty(record_base) ?
-            get(ENV, "RECORD_BASE_PREFIX", "/BayesianRegressionModels.jl/dev/live-brm") :
-            record_base
-        polling_fetchindex(__appdata__.record_gallery, rd, rb;
-                           poll_url=query_url(__self__/"record_gallery"; record_dir=rd, record_base=rb),
-                           label="Recording BRM gallery",
-                           force) do summary
-            h.article(
-                h.header(h.h2("Gallery recorded")),
-                h.p("Wrote ", h.code(string(summary.n_paths)),
-                    " routes (× full + HX shapes) into ",
-                    h.code(summary.record_dir), "."),
-                h.ul(
-                    h.li(h.code(string(summary.n_html)),  " .html"),
-                    h.li(h.code(string(summary.n_other)), " other"),
-                    h.li(h.code(string(summary.n_items)), " gallery items"),
-                ),
-                h.p(h.strong("Next: "),
-                    h.code("git add docs/src/public/live-brm && git commit && git push"),
-                    " — CI deploys the rest."),
-                h.p("Re-record (overwrites cache): ",
-                    h.a("/record_gallery?force=true";
-                        href=__self__/"record_gallery?force=true")),
-            )
-        end
     end
 
     @include pipeline = PipelineRoutes()
@@ -2540,16 +2483,14 @@ y1 ~ Normal(loc, err)
                 "kwargs it expects from the caller.",
             ),
             h.div(; class="brm-library-grid")(
-                [h.article(; class="brm-library-card")(
-                    h.header(; class="brm-library-card-header")(
-                        h.strong(string(nm); class="brm-library-card-name"),
-                    ),
-                    h.details(; class="brm-library-card-body", open=true)(
+                [h.article(
+                    h.header(h.strong(string(nm))),
+                    h.details(; open=true)(
                         h.summary("Body"),
                         h.pre(string(sm.model)),
                     ),
                     isempty(sm.data) ? "" :
-                        h.details(; class="brm-library-card-body")(
+                        h.details(
                             h.summary("Pre-bound data keys"),
                             h.code(join(sort(collect(keys(sm.data))), ", "))),
                 )
@@ -2568,29 +2509,26 @@ y1 ~ Normal(loc, err)
         # `@param (; label) = __parent__` needed (and declaring it explicitly
         # collides with the auto-forward → "method overwritten" error).
 
-        # Inline examples store. Constructs ExampleEntry with
-        # `__parent__=__parent__` (the Examples sub-struct) so each entry's
-        # rendering methods can build URLs via its parent chain.
-        @struct example_store = begin
-            entries() = begin
-                isdir(examples_dir) || mkpath(examples_dir)
-                files = sort(filter(endswith(".jl"),
-                                    readdir(examples_dir; join=true));
-                             by=mtime, rev=true)
-                ExampleEntry[ExampleEntry(f; __parent__) for f in files]
-            end
-            find(label)        = findfirstelement(e -> e.label == label, entries())
-            find_by_slug(slug) = findfirstelement(e -> e.slug == slug,   entries())
-            persist!(label, formula) = begin
-                e = find(label)
-                e === nothing || e.save!(; new_formula=formula)
-            end
+        # ExampleEntry is constructed with `__parent__=__parent__` (this
+        # examples include) so each entry's rendering methods can build URLs
+        # via its parent chain (`__parent__.__parent__.pipeline/...`).
+        files() = begin
+            isdir(examples_dir) || mkpath(examples_dir)
+            sort(filter(endswith(".jl"), readdir(examples_dir; join=true));
+                 by=mtime, rev=true)
+        end
+        entries() = ExampleEntry[ExampleEntry(f; __parent__) for f in files()]
+        find(label)        = findfirstelement(e -> e.label == label, entries())
+        find_by_slug(slug) = findfirstelement(e -> e.slug == slug,   entries())
+        persist!(label, formula) = begin
+            e = find(label)
+            e === nothing || e.save!(; new_formula=formula)
         end
 
         @get mark(; state::Symbol=Symbol("")) =
-            example_store.find(label).toggle_status!(state).card
+            find(label).toggle_status!(state).card.default
 
-        @get flag = example_store.find(label).cycle_flag!().card
+        @get flag = find(label).cycle_flag!().card.default
 
         # List view vs detail view as separate derived-property methods; DO
         # supports multi-method dispatch on a single property name (the route
@@ -2600,7 +2538,8 @@ y1 ~ Normal(loc, err)
         # sort priority (left = highest). A small inline script below wires
         # this up to the `#brm-examples-list` container's DOM order.
         _sort_pill(key, label) = h.span(label;
-            class="brm-sort-pill", draggable=true, data_sort_key=key)
+            class="brm-sort-pill", draggable=true,
+            data_sort_key=key, aria_pressed="false")
 
         _sort_script = """
         (() => {
@@ -2619,7 +2558,10 @@ y1 ~ Normal(loc, err)
                     try { re = new RegExp(raw, 'i'); }
                     catch (_) { lit = raw.toLowerCase(); }
                 }
-                if (search) search.classList.toggle('brm-search-literal', !!lit);
+                if (search) {
+                    if (lit) search.setAttribute('data-mode', 'literal');
+                    else     search.removeAttribute('data-mode');
+                }
                 const cards = Array.from(list.querySelectorAll('.brm-example-card'));
                 cards.forEach(c => {
                     const hay = c.dataset.label + ' ' + c.textContent;
@@ -2668,7 +2610,7 @@ y1 ~ Normal(loc, err)
             const render = () => pills.forEach(p => {
                 const s = state[p.dataset.sortKey] || 0;
                 p.textContent = p.dataset.sortKey + (s === 1 ? ' ↑' : s === -1 ? ' ↓' : '');
-                p.classList.toggle('active', s !== 0);
+                p.setAttribute('aria-pressed', s !== 0 ? 'true' : 'false');
             });
             const resort = () => {
                 const orderedPills = Array.from(bar.querySelectorAll('.brm-sort-pill'));
@@ -2723,7 +2665,7 @@ y1 ~ Normal(loc, err)
                 if (!el || !el.classList.contains('brm-branch-btn')) return;
                 const card = cardOf(el);
                 if (!card) return;
-                card.classList.remove('brm-card-success', 'brm-card-error');
+                card.removeAttribute('data-flash');
             });
             document.body.addEventListener('htmx:afterRequest', e => {
                 const el = e.detail.elt;
@@ -2732,10 +2674,10 @@ y1 ~ Normal(loc, err)
                 if (!card) return;
                 const ok = e.detail.successful && e.detail.xhr.status < 400;
                 if (ok) {
-                    card.classList.add('brm-card-success');
-                    setTimeout(() => card.classList.remove('brm-card-success'), 1200);
+                    card.setAttribute('data-flash', 'success');
+                    setTimeout(() => card.removeAttribute('data-flash'), 1200);
                 } else {
-                    card.classList.add('brm-card-error');
+                    card.setAttribute('data-flash', 'error');
                 }
             });
             render(); resort(); filter();
@@ -2772,14 +2714,14 @@ y1 ~ Normal(loc, err)
                 _sort_pill("label",      "label"),
             ),
             h.div(; id="brm-examples-list")(
-                [e.card for e in example_store.entries()]...,
+                [e.card.default for e in entries()]...,
             ),
             h.script(_sort_script),
         )
 
         _index(slug::AbstractString, stage::AbstractString) = h.div(
             h.p(h.a("<- Back to Examples"; href=__prefix__)),
-            example_store.find_by_slug(slug).card_with_preload(stage; force_open=true),
+            find_by_slug(slug).card.with_preload(stage; force_open=true),
         )
 
         # TODO(HTMXO): allow two `@get name` methods with distinct arities
