@@ -1288,9 +1288,19 @@ display_name(::MultiContinuousPPC)  = "multi-predictor"
             # transformed parameters and generated-quantities (the synthetic
             # outcomes `y_sim` live in the GQ block when the model defines
             # one).
-            generated_n     = 50
-            generated_unc   = 0.1 .* randn(Xoshiro(44), dim, generated_n)
-            generated_names = BridgeStan.param_names(instance; include_tp=true, include_gq=true)
+            @struct generated = begin
+                n     = 50
+                unc   = 0.1 .* randn(Xoshiro(44), dim, n)
+                names = BridgeStan.param_names(instance; include_tp=true, include_gq=true)
+                # `value` is the constrained-draws matrix (m × n where m
+                # includes p+tp+gq); access via `generated.value` from
+                # outside.
+                value = constrain_draws(unc, instance; rng_seed=45)
+                dfs   = dfs_from_constrained(value, names)
+                df         = dfs.long
+                wide_df    = dfs.wide
+                summary_df = dfs.summary
+            end
             # One row per base parameter name (before any `.`), with the
             # number of indexed entries and Stan-block classification:
             # P = parameter, TP = transformed parameter, GQ = generated
@@ -1300,12 +1310,12 @@ display_name(::MultiContinuousPPC)  = "multi-predictor"
                 p_names   = BridgeStan.param_names(instance)
                 p_tp_names = BridgeStan.param_names(instance; include_tp=true)
                 tp_set = Set(setdiff(p_tp_names, p_names))
-                gq_set = Set(setdiff(generated_names, p_tp_names))
+                gq_set = Set(setdiff(generated.names, p_tp_names))
                 classify(name) =
                     name in tp_set ? "TP" : name in gq_set ? "GQ" : "P"
-                splits     = [split(nm, '.', limit=2) for nm in generated_names]
+                splits     = [split(nm, '.', limit=2) for nm in generated.names]
                 base_names = [String(first(s)) for s in splits]
-                kinds      = [classify(nm) for nm in generated_names]
+                kinds      = [classify(nm) for nm in generated.names]
                 uniq_base  = unique(base_names)
                 uniq_kind  = [kinds[findfirst(==(b), base_names)] for b in uniq_base]
                 DataFrame(
@@ -1314,17 +1324,12 @@ display_name(::MultiContinuousPPC)  = "multi-predictor"
                     n_indices = [count(==(p), base_names) for p in uniq_base],
                 )
             end
-            generated = constrain_draws(generated_unc, instance; rng_seed=45)
-            generated_dfs = dfs_from_constrained(generated, generated_names)
-            generated_df      = generated_dfs.long
-            generated_wide_df = generated_dfs.wide
-            generated_summary_df = generated_dfs.summary
             # Ground-truth overlay: the `fit_draw_idx`-th column of the
             # constrained generated matrix — one value per indexed parameter.
             # Same (param, index) layout as `generated_df` so plots can join on it.
             truth_df = begin
-                truth_col = view(generated, :, fit_draw_idx)
-                splits     = [split(nm, '.', limit=2) for nm in generated_names]
+                truth_col = view(generated.value, :, fit_draw_idx)
+                splits     = [split(nm, '.', limit=2) for nm in generated.names]
                 base_names = [String(first(s)) for s in splits]
                 parse_idx(s) = (v = tryparse(Int, s); isnothing(v) ? 0 : v)
                 indices    = [length(s) > 1 ? parse_idx(String(s[2])) : 0 for s in splits]
@@ -1358,12 +1363,12 @@ display_name(::MultiContinuousPPC)  = "multi-predictor"
             # so Pathfinder / full warmup samples `p(theta | y_sim)` and should
             # recover the ground-truth `generated_unc[:, fit_draw_idx]`.
             fit_draw_idx = 1
-            fit_truth_unc = collect(view(generated_unc, :, fit_draw_idx))
+            fit_truth_unc = collect(view(generated.unc, :, fit_draw_idx))
             fit_data_dict = begin
                 base = StanBlocks.stan_data(sbbrmi.model)
-                col  = view(generated, :, fit_draw_idx)
+                col  = view(generated.value, :, fit_draw_idx)
                 groups = Dict{Symbol, Vector{Tuple{Vector{Int}, Float64}}}()
-                for (i, name) in enumerate(generated_names)
+                for (i, name) in enumerate(generated.names)
                     m = match(r"^(.+)_gen(?:\.(.+))?$", name)
                     isnothing(m) && continue
                     base_name = Symbol(m.captures[1])
@@ -1529,7 +1534,7 @@ display_name(::MultiContinuousPPC)  = "multi-predictor"
         stan_instantiate = merge(stan_compile, (; stan_instantiate=(; instance=(:stan, :instance), dim=(:stan, :dim), init=(:stan, :init))))
         stan_eval        = merge(stan_instantiate, (; stan_eval=(:stan, :log_density)))
         stan_shapes      = merge(stan_eval,  (; stan_shapes=(:stan, :param_shapes_df)))
-        stan_generate    = merge(stan_shapes, (; stan_generate=(; long=(:stan, :generated_df), wide=(:stan, :generated_wide_df), summary=(:stan, :generated_summary_df), truth=(:stan, :truth_df))))
+        stan_generate    = merge(stan_shapes, (; stan_generate=(; long=(:stan, :generated, :df), wide=(:stan, :generated, :wide_df), summary=(:stan, :generated, :summary_df), truth=(:stan, :truth_df))))
         # Pathfinder / full warmup are computed via `fetchindex!` in
         # `compute_steps` (special-cased below by step name) so the IP's
         # progress subtree attaches to the step's phase. Chain-level specs
