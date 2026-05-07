@@ -282,10 +282,10 @@ end
     _parse_stage_set(key) = Set{Symbol}(
         Symbol(strip(s)) for s in split(get(_parsed.header, key, ""), ",")
         if !isempty(strip(s)))
-    stages_pass = _parse_stage_set("stages_pass")
-    stages_fail = _parse_stage_set("stages_fail")
-    stage_state(name) = name in stages_fail ? :fail :
-                        name in stages_pass ? :pass : :unknown
+    @struct stages = begin
+        pass = _parse_stage_set("stages_pass")
+        fail = _parse_stage_set("stages_fail")
+    end
 
     # DOM ids derived once — HTMX targets reference these (hx_target= / id=).
     # Hashing the label keeps ids stable across requests without needing to
@@ -387,12 +387,12 @@ end
         """,
     )
 
-    save!(; new_status=status, new_formula=formula,
-            new_stages_pass=stages_pass, new_stages_fail=stages_fail,
+    save!(; new_status=status.value, new_formula=formula,
+            new_stages_pass=stages.pass, new_stages_fail=stages.fail,
             new_flag=flag) = begin
         io = IOBuffer()
         println(io, "# label: ", label)
-        println(io, "# tier: ", tier)
+        println(io, "# tier: ", tier.n)
         println(io, "# status: ", new_status)
         new_flag === :none || println(io, "# flag: ", new_flag)
         _fmt_stage_set(s) = join(sort(collect(String.(s))), ",")
@@ -414,7 +414,7 @@ end
     end
 
     toggle_status!(target) =
-        save!(; new_status = status == target ? :open : target)
+        save!(; new_status = status.value == target ? :open : target)
 
     # Cycle: none → sb → sbbrm → both → none
     _flag_next = Dict(:none => :sb, :sb => :sbbrm, :sbbrm => :both, :both => :none)
@@ -424,23 +424,33 @@ end
     # stages remove from the fail set (and vice versa) so the most recent
     # outcome wins. Returns the reloaded entry.
     mark_stages!(; passed=Symbol[], failed=Symbol[]) = begin
-        new_pass = union(setdiff(stages_pass, failed), passed)
-        new_fail = union(setdiff(stages_fail, passed), failed)
+        new_pass = union(setdiff(stages.pass, failed), passed)
+        new_fail = union(setdiff(stages.fail, passed), failed)
         save!(; new_stages_pass=new_pass, new_stages_fail=new_fail)
     end
 
     # Per-stage indicator pills rendered in the card summary. Each links to
     # `/examples/<slug>?stage=<name>`, a shareable GET URL that loads the
     # card with that stage's result pre-populated (without force=true).
-    stage_indicators = h.span(; class="brm-stage-indicators")(
-        [h.a(;
-            href="$(__parent__/slug)?stage=$id",
-            title="$lbl -- $(stage_state(id))",
-            onclick="event.stopPropagation()",
-            class="brm-stage-indicator",
-            data_state=string(stage_state(id)))(lbl)
-         for (id, lbl) in __parent__.__parent__.stage_labels]...
-    )
+    @struct stage = begin
+        # Aliases to ExampleEntry's `stages` inline-struct (DO doesn't
+        # auto-forward inline-struct names into sibling inline-structs, so
+        # we pull what `state` reads explicitly — this also satisfies the
+        # no-self-access lint by giving its body sibling props to read).
+        pass = __parent__.stages.pass
+        fail = __parent__.stages.fail
+        state(name) = name in fail ? :fail :
+                      name in pass ? :pass : :unknown
+        indicators = h.span(; class="brm-stage-indicators")(
+            [h.a(;
+                href="$(__parent__.__parent__/slug)?stage=$stage_id",
+                title="$stage_label -- $(state(stage_id))",
+                onclick="event.stopPropagation()",
+                class="brm-stage-indicator",
+                data_state=string(state(stage_id)))(stage_label)
+             for (stage_id, stage_label) in __parent__.__parent__.__parent__.stage_labels]...
+        )
+    end
 
     # Card renderer, parameterized by an optional `preload_stage`. When set,
     # the result div is seeded with a `lazy(...)` that fires the stage GET
@@ -452,11 +462,11 @@ end
     _sort_mtime      = stat(path).mtime
     _sort_tier       = tier
     _sort_complexity = formula === nothing ? 0 : length(formula)
-    _sort_brokenness = length(stages_fail) - length(stages_pass)
+    _sort_brokenness = length(stages.fail) - length(stages.pass)
     # 0 = open (top), 1 = done / deprioritized (bottom, tied). Ascending
     # surfaces open work first; default-on below.
-    _sort_status     = status === :open ? 0 : 1
-    _sort_progress   = length(stages_pass)
+    _sort_status     = status.value === :open ? 0 : 1
+    _sort_progress   = length(stages.pass)
     # 0=none, 1=sb-only or sbbrm-only, 2=both → "most in need" sorts highest.
     _sort_flagged    = flag === :none ? 0 : flag === :both ? 2 : 1
 
@@ -526,7 +536,7 @@ end
                         tier.pill, " ",
                         h.strong(label), " ",
                         status.pills, " ",
-                        stage_indicators, " ",
+                        stage.indicators, " ",
                         permalink,
                     ),
                     children...,
@@ -1122,20 +1132,23 @@ display_name(::MultiContinuousPPC)  = "multi-predictor"
 
     dataset = Dataset()
 
-    # Per-stan-path locks for the "ensure .stan written + compile_model"
-    # sequence. Without these, two requests for the same model can run `make`
-    # concurrently into the same .so target and corrupt it -- subsequent
-    # dlopen segfaults Julia (no Julia stack, no OOM, just process gone).
-    # Keyed by absolute .stan path. Entries are never reaped; one per distinct
-    # compiled model. `get!(ReentrantLock, locks, path)` lazily creates.
-    stan_compile_locks = ThreadsafeDict{String,ReentrantLock}()
-    # Global serialization for ALL Stan compiles across paths. Per-path locks
-    # only prevent two threads racing on the SAME .so; with the gallery,
-    # opening N cards spawns N parallel `make` jobs at -O3-scale memory
-    # peaks, which OOM-killed the 3.8 GB strato box. Holding this lock
-    # around `compile_model` caps the box at one compile in flight.
-    # StanModel construction is left outside the lock (cheap dlopen).
-    stan_compile_global_lock = ReentrantLock()
+    # Stan compile concurrency control: per-.stan-path locks for the
+    # "ensure file written + compile_model" sequence (without these, two
+    # requests for the same model `make` concurrently into the same .so
+    # target and corrupt it — subsequent dlopen segfaults Julia, no
+    # stack, no OOM, just process gone), plus a global lock that
+    # serializes ALL compiles across paths (gallery-opening N cards
+    # spawns N parallel `make` jobs at -O3-scale memory peaks, which
+    # OOM-killed the 3.8 GB strato box). Holding the global lock around
+    # `compile_model` caps the box at one compile in flight; StanModel
+    # construction is left outside the lock (cheap dlopen).
+    @struct stan_locks = begin
+        # Keyed by absolute .stan path. Entries are never reaped; one per
+        # distinct compiled model. `get!(ReentrantLock, per_path, path)`
+        # lazily creates.
+        per_path = ThreadsafeDict{String,ReentrantLock}()
+        global_lock = ReentrantLock()
+    end
     # Per-(formula, namespace) cache of the rendered auto-PPC HTML element.
     # The underlying Stan fit is already memoized via polling_fetchindex /
     # @memo on `r.stan.*`, but `build_ppc_section` itself is non-trivial
@@ -1237,14 +1250,14 @@ display_name(::MultiContinuousPPC)  = "multi-predictor"
             # compile_model call; StanModel construction is left unguarded
             # because per-task ReentrantLocks combined with progress-yields
             # appeared to deadlock the chain in practice.
-            lib = Base.lock(get!(ReentrantLock, stan_compile_locks, file)) do
+            lib = Base.lock(get!(ReentrantLock, stan_locks.per_path, file)) do
                 @info "[stan] before compile_model" file
                 isfile(file) || write(file, src)
                 # Hold the global compile lock only across the actual `make`
                 # invocation -- per-path lock above already short-circuits
                 # cache hits cheaply, so the global queue only fills up with
                 # genuine first-time compiles.
-                rv = Base.lock(stan_compile_global_lock) do
+                rv = Base.lock(stan_locks.global_lock) do
                     BridgeStan.compile_model(file; make_args=_make_args)
                 end
                 @info "[stan] after compile_model" file
@@ -1850,10 +1863,10 @@ APPDATA = AppData(; cache_type=:parallel)
         build_ppc_section(long, which::Symbol; id_prefix) = begin
             kinds = _ppc_kinds(context!().run.brmi)
             isempty(kinds) && return nothing
-            df  = context!().run.df
+            frame = context!().run.df
             sections = Any[]
-            for (i, p) in enumerate(kinds)
-                sec = _build_one_ppc(p, long, df, which;
+            for (i, kind) in enumerate(kinds)
+                sec = _build_one_ppc(kind, long, frame, which;
                                      id_prefix="$id_prefix-$i")
                 isnothing(sec) || push!(sections, sec)
             end
@@ -1866,53 +1879,53 @@ APPDATA = AppData(; cache_type=:parallel)
         # type annotation on `p` since this lives in a @struct body and
         # the actual per-kind dispatch happens inside prior_spec /
         # posterior_spec / picker_dims / predictor_label / kind_tag.
-        _build_one_ppc(p, long, df, which; id_prefix) = begin
-            link_lbl  = p.link_fn === identity ? string(p.loc) :
-                        "$(p.link_fn)($(p.loc))"
-            pred_lbl  = predictor_label(p)   # `label` is a @param; avoid shadowing
-            kind_disp = display_name(p)
+        _build_one_ppc(kind, long, frame, which; id_prefix) = begin
+            link_lbl  = kind.link_fn === identity ? string(kind.loc) :
+                        "$(kind.link_fn)($(kind.loc))"
+            pred_lbl  = predictor_label(kind)   # `label` is a @param; avoid shadowing
+            kind_disp = display_name(kind)
 
             # Non-primary LPs (e.g. `err` in `Normal(loc, err)`) are not
             # likelihood locations -- framing them as a "predictive check
             # of <response>" is wrong, and there's nothing observed to
             # overlay. Switch to a posterior-of-<link(loc)> framing.
             heading = if which === :prior
-                p.is_primary ? "Prior predictive" : "Prior of $link_lbl"
+                kind.is_primary ? "Prior predictive" : "Prior of $link_lbl"
             else
-                p.is_primary ? "Posterior predictive check" :
+                kind.is_primary ? "Posterior predictive check" :
                                "Posterior of $link_lbl"
             end
-            subject = p.is_primary ? string(p.response) : link_lbl
+            subject = kind.is_primary ? string(kind.response) : link_lbl
             title   = "$subject$pred_lbl -- $heading"
             spec = if which === :prior
-                prior_spec(p, long, df; title)
+                prior_spec(kind, long, frame; title)
             else
                 # Binomial outcomes are counts; predicted `link(loc)` is
                 # a probability. Convert observed counts to proportions
                 # so both layers share the same response scale. Only
                 # primary LPs need the obs vector at all.
-                obs_y = if p.is_primary
-                    obs_y_raw = context!().run.stan.fit_data_dict[Symbol(p.response)]
-                    is_binomial = p.family === Binomial || p.family === BinomialLogit
-                    is_binomial && !isnothing(p.n_trials) ?
-                        obs_y_raw ./ context!().run.stan.fit_data_dict[Symbol(p.n_trials)] :
+                obs_y = if kind.is_primary
+                    obs_y_raw = context!().run.stan.fit_data_dict[Symbol(kind.response)]
+                    is_binomial = kind.family === Binomial || kind.family === BinomialLogit
+                    is_binomial && !isnothing(kind.n_trials) ?
+                        obs_y_raw ./ context!().run.stan.fit_data_dict[Symbol(kind.n_trials)] :
                         obs_y_raw
                 else
                     nothing
                 end
-                posterior_spec(p, long, df, obs_y; title)
+                posterior_spec(kind, long, frame, obs_y; title)
             end
             isnothing(spec) && return nothing
 
             cap = if which === :prior
-                "Prior-predictive draws of $link_lbl$pred_lbl ($(p.family) family, $kind_disp)"
-            elseif p.is_primary
-                "Posterior draws of $link_lbl$pred_lbl, with observed $(p.response) overlaid ($kind_disp)"
+                "Prior-predictive draws of $link_lbl$pred_lbl ($(kind.family) family, $kind_disp)"
+            elseif kind.is_primary
+                "Posterior draws of $link_lbl$pred_lbl, with observed $(kind.response) overlaid ($kind_disp)"
             else
                 "Posterior draws of $link_lbl$pred_lbl ($kind_disp)"
             end
 
-            dims = picker_dims(p)
+            dims = picker_dims(kind)
             plot_block = isnothing(dims) ?
                 with_plot_caption(spec; plot_id="$id_prefix-ppc", title=cap) :
                 with_plot_caption(spec; plot_id="$id_prefix-ppc", title=cap,
@@ -2346,25 +2359,24 @@ APPDATA = AppData(; cache_type=:parallel)
         end
     )
 
-    # One-stop bug-report page for the StanBlocks agent. Renders the SlicModel
-    # body, generated Stan source, and BridgeStan compile output (success msg
-    # or full error) for the current formula. HTMXO's `_resolve_response`
-    # auto-converts to markdown when `Accept: text/plain` is requested, so the
-    # same URL works for humans (browser) and agents (curl).
+    # StanBlocks-bug-report routes for external agents. Both endpoints render
+    # the SlicModel body, generated Stan source, and BridgeStan compile output
+    # (success msg or full error). HTMXO's `_resolve_response` auto-converts
+    # to markdown when `Accept: text/plain` is requested, so the same URL works
+    # for humans (browser) and agents (curl).
     #   curl -H 'Accept: text/plain' 'http://localhost:<port>/pipeline/sb_repro?formula=<url-encoded>'
-    @get sb_repro = context!().sb_repro_html
+    #   curl -H 'Accept: text/plain' 'http://.../pipeline/sb_repro/example?name=<slug>'
+    @include sb_repro = begin
+        @get index = __parent__.context!().sb_repro_html
 
-    # Saved-example entry point for external agents: GET by slug so curl/agents
-    # can reproduce a StanBlocks bug without POSTing a formula. The slug is the
-    # URL-safe name used by /examples/<slug>.
-    #   curl -H 'Accept: text/plain' 'http://.../pipeline/sb_repro_example?name=<slug>'
-    @get sb_repro_example(; name::AbstractString="") = begin
-        entry = __parent__.examples.find_by_slug(name)
-        isnothing(entry) && return h.div(
-            h.h1("Example not found"),
-            h.p("No example with slug ", h.code(name)),
-        )
-        context(entry.label, entry.formula).sb_repro_html
+        @get example(; name::AbstractString="") = begin
+            entry = __parent__.__parent__.examples.find_by_slug(name)
+            isnothing(entry) && return h.div(
+                h.h1("Example not found"),
+                h.p("No example with slug ", h.code(name)),
+            )
+            __parent__.context(entry.label, entry.formula).sb_repro_html
+        end
     end
 end
 
