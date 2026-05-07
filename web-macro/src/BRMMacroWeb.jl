@@ -1760,31 +1760,36 @@ APPDATA = AppData(; cache_type=:parallel)
             h.pre(slic.model.model),
             h.p("data keys: ", h.code(sort(collect(keys(slic.data))))),
         )
-        stan_code(source) = h.section(
-            h.h3("5b. StanCode — transpiled Stan source"),
-            h.pre(source),
-        )
-        stan_compile(artifacts) = h.section(
-            h.h3("5c. StanCompile — BridgeStan shared library"),
-            h.p("stan file: ", h.code(artifacts.file)),
-            h.p("compiled .so: ", h.code(artifacts.lib)),
-        )
-        stan_instantiate(model) = h.section(
-            h.h3("6a. StanInstantiate — model bound to data"),
-            h.p("param_unc_num = ", model.dim),
-            h.p("init (narrow normal, rng=Xoshiro(42)):"),
-            h.pre(model.init),
-        )
-        stan_eval(log_density) = h.section(
-            h.h3("6b. StanEval — log density at init"),
-            h.p("log_density = ", log_density),
-        )
-        stan_shapes(frame) = h.section(
-            h.h3("6b'. StanShapes — index count per base parameter (p + tp + gq)"),
-            h.p("total indexed entries: ", sum(frame.n_indices),
-                " across ", nrow(frame), " base params"),
-            render_table(frame; sortable=true),
-        )
+        # Stan-step renderers bundled. Dispatched from the result-iteration
+        # at line ~2197 by stripping the `stan_` prefix from the step key
+        # and looking it up on `render.stan`.
+        @struct stan = begin
+            code(source) = h.section(
+                h.h3("5b. StanCode — transpiled Stan source"),
+                h.pre(source),
+            )
+            compile(artifacts) = h.section(
+                h.h3("5c. StanCompile — BridgeStan shared library"),
+                h.p("stan file: ", h.code(artifacts.file)),
+                h.p("compiled .so: ", h.code(artifacts.lib)),
+            )
+            instantiate(model) = h.section(
+                h.h3("6a. StanInstantiate — model bound to data"),
+                h.p("param_unc_num = ", model.dim),
+                h.p("init (narrow normal, rng=Xoshiro(42)):"),
+                h.pre(model.init),
+            )
+            eval(log_density) = h.section(
+                h.h3("6b. StanEval — log density at init"),
+                h.p("log_density = ", log_density),
+            )
+            shapes(frame) = h.section(
+                h.h3("6b'. StanShapes — index count per base parameter (p + tp + gq)"),
+                h.p("total indexed entries: ", sum(frame.n_indices),
+                    " across ", nrow(frame), " base params"),
+                render_table(frame; sortable=true),
+            )
+        end
         # Shared plot-tabset builder used by stan_generate and the fit stages.
         # `kind` goes into tab titles ("prior predictive" / "posterior") and
         # plot ids. Returns the tabset + wide-table details block.
@@ -1937,55 +1942,62 @@ APPDATA = AppData(; cache_type=:parallel)
             )
         end
 
-        stan_generate(bundle) = begin
-            (; long, wide, summary, truth) = bundle
-            plots = posterior_plots(long, wide, summary;
-                                id_prefix="brm-plot-generated",
-                                kind="Generated data (prior predictive)",
-                                truth)
-            local ppc_sec = build_ppc_section(long, :prior; id_prefix="brm-plot-generated")
-            parts = Any[
-                h.h3("6c. StanGenerate — synthetic data from narrow-normal prior + param_constrain"),
-                h.p("long format: ", nrow(long), " rows · ", ncol(long), " cols · ",
-                    "wide format: ", nrow(wide), " rows · ", ncol(wide), " cols"),
-            ]
-            isnothing(ppc_sec) || push!(parts, ppc_sec)
-            push!(parts, plots.tabs, plots.wide_details)
-            h.section(parts...)
-        end
-        stan_fit_pathfinder(bundle) = begin
-            (; long, wide, summary, full_long, truth) = bundle
-            plots = posterior_plots(long, wide, summary;
-                                id_prefix="brm-plot-pf",
-                                kind="Pathfinder posterior",
-                                truth)
-            local ppc_sec = build_ppc_section(full_long, :posterior; id_prefix="brm-plot-pf")
-            parts = Any[
-                h.h3("6d. StanFit (Pathfinder) — variational approximation draws"),
-                h.p("long format: ", nrow(long), " rows · ", ncol(long), " cols · ",
-                    "wide format: ", nrow(wide), " rows · ", ncol(wide), " cols"),
-            ]
-            isnothing(ppc_sec) || push!(parts, ppc_sec)
-            push!(parts, plots.tabs, plots.wide_details)
-            h.section(parts...)
-        end
-        stan_fit_warmup(bundle) = begin
-            (; long, wide, summary, full_long, diagnostics, truth) = bundle
-            plots = posterior_plots(long, wide, summary;
-                                id_prefix="brm-plot-warmup",
-                                kind="Warmup+MCMC posterior",
-                                truth)
-            local ppc_sec = build_ppc_section(full_long, :posterior; id_prefix="brm-plot-warmup")
-            parts = Any[
-                h.h3("6d'. StanFit (Warmup+MCMC) — full Stan fit"),
-                h.p("n_divergent_samples: ", diagnostics.n_divergent_samples,
-                    " · min ESS: ", minimum(diagnostics.ess)),
-                h.p("long format: ", nrow(long), " rows · ", ncol(long), " cols · ",
-                    "wide format: ", nrow(wide), " rows · ", ncol(wide), " cols"),
-            ]
-            isnothing(ppc_sec) || push!(parts, ppc_sec)
-            push!(parts, plots.tabs, plots.wide_details)
-            h.section(parts...)
+        # Stan-step renderers that take a NamedTuple bundle
+        # (`(long, wide, summary, [full_long, diagnostics,] truth)`).
+        # Bundled separately from the simpler `@struct stan` above because
+        # they share the `(bundle)` signature — the @error-level "shared
+        # signature + shared prefix" lint.
+        @struct stan_section(bundle) = begin
+            generate = begin
+                (; long, wide, summary, truth) = bundle
+                plots = posterior_plots(long, wide, summary;
+                                    id_prefix="brm-plot-generated",
+                                    kind="Generated data (prior predictive)",
+                                    truth)
+                local ppc_sec = build_ppc_section(long, :prior; id_prefix="brm-plot-generated")
+                parts = Any[
+                    h.h3("6c. StanGenerate — synthetic data from narrow-normal prior + param_constrain"),
+                    h.p("long format: ", nrow(long), " rows · ", ncol(long), " cols · ",
+                        "wide format: ", nrow(wide), " rows · ", ncol(wide), " cols"),
+                ]
+                isnothing(ppc_sec) || push!(parts, ppc_sec)
+                push!(parts, plots.tabs, plots.wide_details)
+                h.section(parts...)
+            end
+            fit_pathfinder = begin
+                (; long, wide, summary, full_long, truth) = bundle
+                plots = posterior_plots(long, wide, summary;
+                                    id_prefix="brm-plot-pf",
+                                    kind="Pathfinder posterior",
+                                    truth)
+                local ppc_sec = build_ppc_section(full_long, :posterior; id_prefix="brm-plot-pf")
+                parts = Any[
+                    h.h3("6d. StanFit (Pathfinder) — variational approximation draws"),
+                    h.p("long format: ", nrow(long), " rows · ", ncol(long), " cols · ",
+                        "wide format: ", nrow(wide), " rows · ", ncol(wide), " cols"),
+                ]
+                isnothing(ppc_sec) || push!(parts, ppc_sec)
+                push!(parts, plots.tabs, plots.wide_details)
+                h.section(parts...)
+            end
+            fit_warmup = begin
+                (; long, wide, summary, full_long, diagnostics, truth) = bundle
+                plots = posterior_plots(long, wide, summary;
+                                    id_prefix="brm-plot-warmup",
+                                    kind="Warmup+MCMC posterior",
+                                    truth)
+                local ppc_sec = build_ppc_section(full_long, :posterior; id_prefix="brm-plot-warmup")
+                parts = Any[
+                    h.h3("6d'. StanFit (Warmup+MCMC) — full Stan fit"),
+                    h.p("n_divergent_samples: ", diagnostics.n_divergent_samples,
+                        " · min ESS: ", minimum(diagnostics.ess)),
+                    h.p("long format: ", nrow(long), " rows · ", ncol(long), " cols · ",
+                        "wide format: ", nrow(wide), " rows · ", ncol(wide), " cols"),
+                ]
+                isnothing(ppc_sec) || push!(parts, ppc_sec)
+                push!(parts, plots.tabs, plots.wide_details)
+                h.section(parts...)
+            end
         end
     end
 
@@ -2190,11 +2202,25 @@ APPDATA = AppData(; cache_type=:parallel)
             isnothing(entry) || entry.mark_stages!(;
                 passed=[k for k in keys(result) if k !== :data])
         end
+        # Step-key dispatch. `:stan_fit_pathfinder` / `:stan_fit_warmup` /
+        # `:stan_generate` route to `render.stan_section(v).<suffix>` (the
+        # bundled fit-section renderers); other `stan_*` keys route to
+        # `render.stan.<suffix>(v)`; everything else to `render.<key>(v)`.
+        render_step(k::Symbol, v) = begin
+            s = String(k)
+            if k in (:stan_generate, :stan_fit_pathfinder, :stan_fit_warmup)
+                getproperty(render.stan_section(v), Symbol(s[6:end]))
+            elseif startswith(s, "stan_")
+                getproperty(render.stan, Symbol(s[6:end]))(v)
+            else
+                getproperty(render, k)(v)
+            end
+        end
         # No id on this wrapper — the outer `#brm-macro-output` div in the
         # form is the persistent target (see buttons' `hx_swap="innerHTML"`);
         # putting the id here too would duplicate ids after a button swap.
         h.div(
-            (getproperty(render, k)(v) for (k, v) in pairs(result))...,
+            (render_step(k, v) for (k, v) in pairs(result))...,
         )
     end
 
