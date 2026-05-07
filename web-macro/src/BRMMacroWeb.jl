@@ -1694,83 +1694,83 @@ APPDATA = AppData(; cache_type=:parallel)
     # section for that step; `compute_steps` produces the NamedTuple whose keys
     # drive dispatch here.
     @struct render = begin
-        data(df) = h.details(
-            h.summary("Synthetic data ($(nrow(df)) rows × $(ncol(df)) cols: " *
-                join(names(df), ", ") * ") — click to expand"),
-            render_table(df; sortable=false),
+        data(frame) = h.details(
+            h.summary("Synthetic data ($(nrow(frame)) rows × $(ncol(frame)) cols: " *
+                join(names(frame), ", ") * ") — click to expand"),
+            render_table(frame; sortable=false),
         )
-        parse(x) = h.section(
+        parse(expr) = h.section(
             h.h3("1. Meta.parse — raw Julia AST"),
-            h.pre(x),
+            h.pre(expr),
         )
-        transform(x) = h.section(
+        transform(rewritten) = h.section(
             h.h3("2. parse! — rewritten AST (= → @n/@x assign, ~ → @n/@x ~)"),
-            h.pre(x.transformed),
+            h.pre(rewritten.transformed),
             h.h3("    locals classified by parse!"),
-            h.pre(x.alllocals),
+            h.pre(rewritten.alllocals),
         )
-        wrap(x) = h.section(
+        wrap(let_block) = h.section(
             h.h3("3. _brm — full let-block (df spliced as a literal)"),
-            h.pre(x),
+            h.pre(let_block),
         )
-        brmi(x) = h.section(
+        brmi(model) = h.section(
             h.h3("4. eval — BRMI value (parsed model)"),
-            brmi_card(x),
+            brmi_card(model),
         )
-        vbrmi(x) = begin
-            fd_summary = x.n_dead == 0 ?
-                h.span("logdensity + FD check: $(x.dim)/$(x.dim) active ✓"; data_status="success") :
-                h.span("logdensity + FD check: $(x.n_dead) dead param(s)"; data_status="error")
+        vbrmi(materialized) = begin
+            fd_summary = materialized.n_dead == 0 ?
+                h.span("logdensity + FD check: $(materialized.dim)/$(materialized.dim) active ✓"; data_status="success") :
+                h.span("logdensity + FD check: $(materialized.n_dead) dead param(s)"; data_status="error")
             fd_body = h.div(
-                h.p("dim = ", x.dim, ", logdensity = ", x.ldp),
-                isempty(x.dead) ? "" :
-                    h.p(; data_status="error")("dead param indices: ", x.dead),
-                h.pre(x.grad),
+                h.p("dim = ", materialized.dim, ", logdensity = ", materialized.ldp),
+                isempty(materialized.dead) ? "" :
+                    h.p(; data_status="error")("dead param indices: ", materialized.dead),
+                h.pre(materialized.grad),
             )
             h.section(
                 h.h3("5. VBRMI — materialized action (blocks, dim, columns)"),
-                vbrmi_card(x.vbrmi),
+                vbrmi_card(materialized.vbrmi),
                 h.details(h.summary(fd_summary), fd_body),
             )
         end
-        bench(x) = h.section(
+        bench(samples) = h.section(
             h.h3("6. Chairmarks @be — per-step"),
             # `h.pre(b)` would call 2-arg show -> `Benchmark([Sample(...)...])`.
             # Force the 3-arg `text/plain` show to get Chairmarks' pretty
             # multi-line summary (min/median/quantiles/etc.).
-            [h.article(h.header(lbl),
+            [h.article(h.header(label),
                        h.pre(sprint(show, MIME("text/plain"), b)))
-             for (lbl, b) in x]...,
+             for (label, b) in samples]...,
         )
-        slic_model(x) = h.section(
+        slic_model(slic) = h.section(
             h.h3("5a. SlicModel — SBBRMI @slic body"),
-            h.pre(x.model.model),
-            h.p("data keys: ", h.code(sort(collect(keys(x.data))))),
+            h.pre(slic.model.model),
+            h.p("data keys: ", h.code(sort(collect(keys(slic.data))))),
         )
-        stan_code(x) = h.section(
+        stan_code(source) = h.section(
             h.h3("5b. StanCode — transpiled Stan source"),
-            h.pre(x),
+            h.pre(source),
         )
-        stan_compile(x) = h.section(
+        stan_compile(artifacts) = h.section(
             h.h3("5c. StanCompile — BridgeStan shared library"),
-            h.p("stan file: ", h.code(x.file)),
-            h.p("compiled .so: ", h.code(x.lib)),
+            h.p("stan file: ", h.code(artifacts.file)),
+            h.p("compiled .so: ", h.code(artifacts.lib)),
         )
-        stan_instantiate(x) = h.section(
+        stan_instantiate(model) = h.section(
             h.h3("6a. StanInstantiate — model bound to data"),
-            h.p("param_unc_num = ", x.dim),
+            h.p("param_unc_num = ", model.dim),
             h.p("init (narrow normal, rng=Xoshiro(42)):"),
-            h.pre(x.init),
+            h.pre(model.init),
         )
-        stan_eval(x) = h.section(
+        stan_eval(log_density) = h.section(
             h.h3("6b. StanEval — log density at init"),
-            h.p("log_density = ", x),
+            h.p("log_density = ", log_density),
         )
-        stan_shapes(df) = h.section(
+        stan_shapes(frame) = h.section(
             h.h3("6b'. StanShapes — index count per base parameter (p + tp + gq)"),
-            h.p("total indexed entries: ", sum(df.n_indices),
-                " across ", nrow(df), " base params"),
-            render_table(df; sortable=true),
+            h.p("total indexed entries: ", sum(frame.n_indices),
+                " across ", nrow(frame), " base params"),
+            render_table(frame; sortable=true),
         )
         # Shared plot-tabset builder used by stan_generate and the fit stages.
         # `kind` goes into tab titles ("prior predictive" / "posterior") and
@@ -1924,9 +1924,9 @@ APPDATA = AppData(; cache_type=:parallel)
             )
         end
 
-        stan_generate(x) = begin
-            (; long, wide, summary, truth) = x
-            p = posterior_plots(long, wide, summary;
+        stan_generate(bundle) = begin
+            (; long, wide, summary, truth) = bundle
+            plots = posterior_plots(long, wide, summary;
                                 id_prefix="brm-plot-generated",
                                 kind="Generated data (prior predictive)",
                                 truth)
@@ -1937,12 +1937,12 @@ APPDATA = AppData(; cache_type=:parallel)
                     "wide format: ", nrow(wide), " rows · ", ncol(wide), " cols"),
             ]
             isnothing(ppc_sec) || push!(parts, ppc_sec)
-            push!(parts, p.tabs, p.wide_details)
+            push!(parts, plots.tabs, plots.wide_details)
             h.section(parts...)
         end
-        stan_fit_pathfinder(x) = begin
-            (; long, wide, summary, full_long, truth) = x
-            p = posterior_plots(long, wide, summary;
+        stan_fit_pathfinder(bundle) = begin
+            (; long, wide, summary, full_long, truth) = bundle
+            plots = posterior_plots(long, wide, summary;
                                 id_prefix="brm-plot-pf",
                                 kind="Pathfinder posterior",
                                 truth)
@@ -1953,12 +1953,12 @@ APPDATA = AppData(; cache_type=:parallel)
                     "wide format: ", nrow(wide), " rows · ", ncol(wide), " cols"),
             ]
             isnothing(ppc_sec) || push!(parts, ppc_sec)
-            push!(parts, p.tabs, p.wide_details)
+            push!(parts, plots.tabs, plots.wide_details)
             h.section(parts...)
         end
-        stan_fit_warmup(x) = begin
-            (; long, wide, summary, full_long, diagnostics, truth) = x
-            p = posterior_plots(long, wide, summary;
+        stan_fit_warmup(bundle) = begin
+            (; long, wide, summary, full_long, diagnostics, truth) = bundle
+            plots = posterior_plots(long, wide, summary;
                                 id_prefix="brm-plot-warmup",
                                 kind="Warmup+MCMC posterior",
                                 truth)
@@ -1971,7 +1971,7 @@ APPDATA = AppData(; cache_type=:parallel)
                     "wide format: ", nrow(wide), " rows · ", ncol(wide), " cols"),
             ]
             isnothing(ppc_sec) || push!(parts, ppc_sec)
-            push!(parts, p.tabs, p.wide_details)
+            push!(parts, plots.tabs, plots.wide_details)
             h.section(parts...)
         end
     end
