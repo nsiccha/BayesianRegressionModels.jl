@@ -1764,7 +1764,7 @@ APPDATA = AppData(; cache_type=:parallel)
             end
             # Step-key dispatch. `compute_steps` already populated the IP
             # cache under progress phases; renderers below are bare
-            # properties that read `context!().run.<…>` themselves — we
+            # properties that read `__parent__.context!().run.<…>` themselves — we
             # only need the keys here. `:stan_generate` routes to
             # `stan_section.generate`; `:stan_fit_{pathfinder,warmup}` to
             # `stan_section.fit.<kind>`; other `stan_*` to `stan.<suffix>`;
@@ -1795,7 +1795,7 @@ APPDATA = AppData(; cache_type=:parallel)
         # the polling progress phases; bare reads here just hit the warm
         # cache. `render_step(k)` dispatches by step key (`:parse` →
         # `__self__.parse`, `:stan_code` → `stan.code`, etc.).
-        data = let frame = context!().run.df
+        data = let frame = __parent__.context!().run.df
             h.details(
                 h.summary("Synthetic data ($(nrow(frame)) rows × $(ncol(frame)) cols: " *
                     join(names(frame), ", ") * ") — click to expand"),
@@ -1804,9 +1804,9 @@ APPDATA = AppData(; cache_type=:parallel)
         end
         parse = h.section(
             h.h3("1. Meta.parse — raw Julia AST"),
-            h.pre(context!().run.parse),
+            h.pre(__parent__.context!().run.parse),
         )
-        transform = let rewritten = context!().run.transform
+        transform = let rewritten = __parent__.context!().run.transform
             h.section(
                 h.h3("2. parse! — rewritten AST (= → @n/@x assign, ~ → @n/@x ~)"),
                 h.pre(rewritten.transformed),
@@ -1816,13 +1816,13 @@ APPDATA = AppData(; cache_type=:parallel)
         end
         wrap = h.section(
             h.h3("3. _brm — full let-block (df spliced as a literal)"),
-            h.pre(context!().run.wrap),
+            h.pre(__parent__.context!().run.wrap),
         )
         brmi = h.section(
             h.h3("4. eval — BRMI value (parsed model)"),
-            brmi_card(context!().run.brmi),
+            brmi_card(__parent__.context!().run.brmi),
         )
-        vbrmi = let r = context!().run
+        vbrmi = let r = __parent__.context!().run
             fd_summary = r.n_dead == 0 ?
                 h.span("logdensity + FD check: $(r.dim)/$(r.dim) active ✓"; data_status="success") :
                 h.span("logdensity + FD check: $(r.n_dead) dead param(s)"; data_status="error")
@@ -1845,9 +1845,9 @@ APPDATA = AppData(; cache_type=:parallel)
             # multi-line summary (min/median/quantiles/etc.).
             [h.article(h.header(label),
                        h.pre(sprint(show, MIME("text/plain"), b)))
-             for (label, b) in context!().run.benches]...,
+             for (label, b) in __parent__.context!().run.benches]...,
         )
-        slic_model = let slic = context!().run.sbbrmi
+        slic_model = let slic = __parent__.context!().run.sbbrmi
             h.section(
                 h.h3("5a. SlicModel — SBBRMI @slic body"),
                 h.pre(slic.model.model),
@@ -1860,16 +1860,16 @@ APPDATA = AppData(; cache_type=:parallel)
         @struct stan = begin
             code = h.section(
                 h.h3("5b. StanCode — transpiled Stan source"),
-                h.pre(context!().run.stan.src),
+                h.pre(__parent__.context!().run.stan.src),
             )
-            compile = let s = context!().run.stan
+            compile = let s = __parent__.context!().run.stan
                 h.section(
                     h.h3("5c. StanCompile — BridgeStan shared library"),
                     h.p("stan file: ", h.code(s.file)),
                     h.p("compiled .so: ", h.code(s.lib)),
                 )
             end
-            instantiate = let s = context!().run.stan
+            instantiate = let s = __parent__.context!().run.stan
                 h.section(
                     h.h3("6a. StanInstantiate — model bound to data"),
                     h.p("param_unc_num = ", s.dim),
@@ -1879,9 +1879,9 @@ APPDATA = AppData(; cache_type=:parallel)
             end
             eval = h.section(
                 h.h3("6b. StanEval — log density at init"),
-                h.p("log_density = ", context!().run.stan.log_density),
+                h.p("log_density = ", __parent__.context!().run.stan.log_density),
             )
-            shapes = let frame = context!().run.stan.param_shapes_df
+            shapes = let frame = __parent__.context!().run.stan.param_shapes_df
                 h.section(
                     h.h3("6b'. StanShapes — index count per base parameter (p + tp + gq)"),
                     h.p("total indexed entries: ", sum(frame.n_indices),
@@ -1966,9 +1966,9 @@ APPDATA = AppData(; cache_type=:parallel)
         # picker). Returns `nothing` if no kind matched, otherwise a
         # `h.div` wrapping the per-kind sections.
         build_ppc_section(long, which::Symbol; id_prefix) = begin
-            kinds = _ppc_kinds(context!().run.brmi)
+            kinds = _ppc_kinds(__parent__.context!().run.brmi)
             isempty(kinds) && return nothing
-            frame = context!().run.df
+            frame = __parent__.context!().run.df
             sections = Any[]
             for (i, kind) in enumerate(kinds)
                 sec = _build_one_ppc(kind, long, frame, which;
@@ -2010,10 +2010,10 @@ APPDATA = AppData(; cache_type=:parallel)
                 # so both layers share the same response scale. Only
                 # primary LPs need the obs vector at all.
                 obs_y = if kind.is_primary
-                    obs_y_raw = context!().run.stan.fit.data_dict[Symbol(kind.response)]
+                    obs_y_raw = __parent__.context!().run.stan.fit.data_dict[Symbol(kind.response)]
                     is_binomial = kind.family === Binomial || kind.family === BinomialLogit
                     is_binomial && !isnothing(kind.n_trials) ?
-                        obs_y_raw ./ context!().run.stan.fit.data_dict[Symbol(kind.n_trials)] :
+                        obs_y_raw ./ __parent__.context!().run.stan.fit.data_dict[Symbol(kind.n_trials)] :
                         obs_y_raw
                 else
                     nothing
@@ -2043,13 +2043,13 @@ APPDATA = AppData(; cache_type=:parallel)
         end
 
         # Stan-step renderers that read NamedTuple bundles directly off
-        # `context!().run.stan` — `:stan_generate` from `.generated`,
+        # `__parent__.context!().run.stan` — `:stan_generate` from `.generated`,
         # `:stan_fit_pathfinder` from `.posterior`, `:stan_fit_warmup` from
         # `.posterior.warmup`. Each composes `posterior_plots` (tabset +
         # wide-table details) with `build_ppc_section` (per-PPCKind sections).
         @struct stan_section = begin
-            generate = let g = context!().run.stan.generated,
-                           truth = context!().run.stan.truth.df,
+            generate = let g = __parent__.context!().run.stan.generated,
+                           truth = __parent__.context!().run.stan.truth.df,
                            long = g.df, wide = g.wide_df, summary = g.summary_df
                 plots = posterior_plots(long, wide, summary;
                                     id_prefix="brm-plot-generated",
@@ -2066,8 +2066,8 @@ APPDATA = AppData(; cache_type=:parallel)
                 h.section(parts...)
             end
             @struct fit = begin
-                pathfinder = let p = context!().run.stan.posterior,
-                                truth = context!().run.stan.truth.unc_df,
+                pathfinder = let p = __parent__.context!().run.stan.posterior,
+                                truth = __parent__.context!().run.stan.truth.unc_df,
                                 long = p.long_df, wide = p.wide_df,
                                 summary = p.summary_df, full_long = p.full_long_df
                     plots = posterior_plots(long, wide, summary;
@@ -2084,8 +2084,8 @@ APPDATA = AppData(; cache_type=:parallel)
                     push!(parts, plots.tabs, plots.wide_details)
                     h.section(parts...)
                 end
-                warmup = let w = context!().run.stan.posterior.warmup,
-                             truth = context!().run.stan.truth.unc_df,
+                warmup = let w = __parent__.context!().run.stan.posterior.warmup,
+                             truth = __parent__.context!().run.stan.truth.unc_df,
                              long = w.long_df, wide = w.wide_df,
                              summary = w.summary_df, full_long = w.full_long_df,
                              diagnostics = w.diagnostics
