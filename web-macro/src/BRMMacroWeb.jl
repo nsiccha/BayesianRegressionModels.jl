@@ -2557,7 +2557,7 @@ y1 ~ Normal(loc, err)
     # straight into the page.
     @get structure = h.div(
         h.h2("AppContext type structure"),
-        h.p(h.small("DynamicObjects.structure(AppContext) — bond colors mark identical worst-case dependency sets")),
+        h.p(h.small("DynamicObjects.structure(AppContext) — colors mark identical worst-case dependency sets")),
         DynamicObjects.structure(AppContext),
     ) 
 
