@@ -1730,92 +1730,165 @@ APPDATA = AppData(; cache_type=:parallel)
         context(label, formula)
     end
 
-    # Per-step HTML rendering. `getproperty(render, step_key)(value)` emits the
-    # section for that step; `compute_steps` produces the NamedTuple whose keys
-    # drive dispatch here.
-    @struct render = begin
-        data(frame) = h.details(
-            h.summary("Synthetic data ($(nrow(frame)) rows × $(ncol(frame)) cols: " *
-                join(names(frame), ", ") * ") — click to expand"),
-            render_table(frame; sortable=false),
-        )
-        parse(expr) = h.section(
+    # Per-stage bundle: indexed `@include` mounts each `(name)` instance's
+    # routes under `/pipeline/stage/<name>/...`. `@get index` is the polling
+    # progress page (formerly `@get stage(name; force)`); the per-step
+    # renderers (`data`, `parse`, …, `stan_section`) are the dispatch targets
+    # `index`'s `render_step` selects from. Single owner of the
+    # `(formula, label, name)` axis — replaces the old sibling pair
+    # `@struct render = …` + `@get stage(name; force) = …`.
+    @include stage(name::Symbol) = begin
+        @get index(; force::Bool=false) = polling_fetchindex(
+            __parent__.compute_steps, formula,
+            __parent__.context!().namespace, name;
+            poll_url=query_url(__self__; formula, label),
+            label="BRM pipeline - $name",
+            # Honour `force=true` only when the request actually came from
+            # HTMX (button click). A direct browser reload of a pushed URL
+            # has no HX-Request header, so we ignore `force` and let the
+            # polling_fetchindex IP cache re-attach to whatever's already
+            # running / cached for this (formula, name).
+            force=force && is_htmx(__req__),
+        ) do result
+            # On successful stage computation, mark this stage + all
+            # prerequisite stages as pass on the corresponding ExampleEntry
+            # (if label identifies one). `result` keys are
+            # `(:data, <stages in reverse>)`; filter :data out to get the
+            # stage symbols. No-op if label is empty (main pipeline page
+            # without an example context) or label doesn't match any
+            # saved example.
+            if !isempty(label)
+                entry = __parent__.__parent__.examples.find(label)
+                isnothing(entry) || entry.mark_stages!(;
+                    passed=[k for k in keys(result) if k !== :data])
+            end
+            # Step-key dispatch. `compute_steps` already populated the IP
+            # cache under progress phases; renderers below are bare
+            # properties that read `context!().run.<…>` themselves — we
+            # only need the keys here. `:stan_generate` routes to
+            # `stan_section.generate`; `:stan_fit_{pathfinder,warmup}` to
+            # `stan_section.fit.<kind>`; other `stan_*` to `stan.<suffix>`;
+            # everything else to `__self__.<key>`.
+            render_step(k::Symbol) = begin
+                s = String(k)
+                if k === :stan_generate
+                    stan_section.generate
+                elseif k === :stan_fit_pathfinder
+                    stan_section.fit.pathfinder
+                elseif k === :stan_fit_warmup
+                    stan_section.fit.warmup
+                elseif startswith(s, "stan_")
+                    getproperty(stan, Symbol(s[6:end]))
+                else
+                    getproperty(__self__, k)
+                end
+            end
+            # No id on this wrapper — the outer `#brm-macro-output` div in
+            # the form is the persistent target (see buttons'
+            # `hx_swap="innerHTML"`); putting the id here too would
+            # duplicate ids after a button swap.
+            h.div((render_step(k) for k in keys(result))...)
+        end
+
+        # Each per-step renderer reads its value off `context!().run`
+        # directly. `compute_steps` populates the underlying IP cache under
+        # the polling progress phases; bare reads here just hit the warm
+        # cache. `render_step(k)` dispatches by step key (`:parse` →
+        # `__self__.parse`, `:stan_code` → `stan.code`, etc.).
+        data = let frame = context!().run.df
+            h.details(
+                h.summary("Synthetic data ($(nrow(frame)) rows × $(ncol(frame)) cols: " *
+                    join(names(frame), ", ") * ") — click to expand"),
+                render_table(frame; sortable=false),
+            )
+        end
+        parse = h.section(
             h.h3("1. Meta.parse — raw Julia AST"),
-            h.pre(expr),
+            h.pre(context!().run.parse),
         )
-        transform(rewritten) = h.section(
-            h.h3("2. parse! — rewritten AST (= → @n/@x assign, ~ → @n/@x ~)"),
-            h.pre(rewritten.transformed),
-            h.h3("    locals classified by parse!"),
-            h.pre(rewritten.alllocals),
-        )
-        wrap(let_block) = h.section(
+        transform = let rewritten = context!().run.transform
+            h.section(
+                h.h3("2. parse! — rewritten AST (= → @n/@x assign, ~ → @n/@x ~)"),
+                h.pre(rewritten.transformed),
+                h.h3("    locals classified by parse!"),
+                h.pre(rewritten.alllocals),
+            )
+        end
+        wrap = h.section(
             h.h3("3. _brm — full let-block (df spliced as a literal)"),
-            h.pre(let_block),
+            h.pre(context!().run.wrap),
         )
-        brmi(model) = h.section(
+        brmi = h.section(
             h.h3("4. eval — BRMI value (parsed model)"),
-            brmi_card(model),
+            brmi_card(context!().run.brmi),
         )
-        vbrmi(materialized) = begin
-            fd_summary = materialized.n_dead == 0 ?
-                h.span("logdensity + FD check: $(materialized.dim)/$(materialized.dim) active ✓"; data_status="success") :
-                h.span("logdensity + FD check: $(materialized.n_dead) dead param(s)"; data_status="error")
+        vbrmi = let r = context!().run
+            fd_summary = r.n_dead == 0 ?
+                h.span("logdensity + FD check: $(r.dim)/$(r.dim) active ✓"; data_status="success") :
+                h.span("logdensity + FD check: $(r.n_dead) dead param(s)"; data_status="error")
             fd_body = h.div(
-                h.p("dim = ", materialized.dim, ", logdensity = ", materialized.ldp),
-                isempty(materialized.dead) ? "" :
-                    h.p(; data_status="error")("dead param indices: ", materialized.dead),
-                h.pre(materialized.grad),
+                h.p("dim = ", r.dim, ", logdensity = ", r.ldp),
+                isempty(r.dead) ? "" :
+                    h.p(; data_status="error")("dead param indices: ", r.dead),
+                h.pre(r.grad),
             )
             h.section(
                 h.h3("5. VBRMI — materialized action (blocks, dim, columns)"),
-                vbrmi_card(materialized.vbrmi),
+                vbrmi_card(r.vbrmi),
                 h.details(h.summary(fd_summary), fd_body),
             )
         end
-        bench(samples) = h.section(
+        bench = h.section(
             h.h3("6. Chairmarks @be — per-step"),
             # `h.pre(b)` would call 2-arg show -> `Benchmark([Sample(...)...])`.
             # Force the 3-arg `text/plain` show to get Chairmarks' pretty
             # multi-line summary (min/median/quantiles/etc.).
             [h.article(h.header(label),
                        h.pre(sprint(show, MIME("text/plain"), b)))
-             for (label, b) in samples]...,
+             for (label, b) in context!().run.benches]...,
         )
-        slic_model(slic) = h.section(
-            h.h3("5a. SlicModel — SBBRMI @slic body"),
-            h.pre(slic.model.model),
-            h.p("data keys: ", h.code(sort(collect(keys(slic.data))))),
-        )
-        # Stan-step renderers bundled. Dispatched from the result-iteration
-        # at line ~2197 by stripping the `stan_` prefix from the step key
-        # and looking it up on `render.stan`.
+        slic_model = let slic = context!().run.sbbrmi
+            h.section(
+                h.h3("5a. SlicModel — SBBRMI @slic body"),
+                h.pre(slic.model.model),
+                h.p("data keys: ", h.code(sort(collect(keys(slic.data))))),
+            )
+        end
+        # Stan-step renderers bundled. Dispatched from `index`'s
+        # `render_step` by stripping the `stan_` prefix from the step key
+        # and looking the suffix up on `stan`.
         @struct stan = begin
-            code(source) = h.section(
+            code = h.section(
                 h.h3("5b. StanCode — transpiled Stan source"),
-                h.pre(source),
+                h.pre(context!().run.stan.src),
             )
-            compile(artifacts) = h.section(
-                h.h3("5c. StanCompile — BridgeStan shared library"),
-                h.p("stan file: ", h.code(artifacts.file)),
-                h.p("compiled .so: ", h.code(artifacts.lib)),
-            )
-            instantiate(model) = h.section(
-                h.h3("6a. StanInstantiate — model bound to data"),
-                h.p("param_unc_num = ", model.dim),
-                h.p("init (narrow normal, rng=Xoshiro(42)):"),
-                h.pre(model.init),
-            )
-            eval(log_density) = h.section(
+            compile = let s = context!().run.stan
+                h.section(
+                    h.h3("5c. StanCompile — BridgeStan shared library"),
+                    h.p("stan file: ", h.code(s.file)),
+                    h.p("compiled .so: ", h.code(s.lib)),
+                )
+            end
+            instantiate = let s = context!().run.stan
+                h.section(
+                    h.h3("6a. StanInstantiate — model bound to data"),
+                    h.p("param_unc_num = ", s.dim),
+                    h.p("init (narrow normal, rng=Xoshiro(42)):"),
+                    h.pre(s.init),
+                )
+            end
+            eval = h.section(
                 h.h3("6b. StanEval — log density at init"),
-                h.p("log_density = ", log_density),
+                h.p("log_density = ", context!().run.stan.log_density),
             )
-            shapes(frame) = h.section(
-                h.h3("6b'. StanShapes — index count per base parameter (p + tp + gq)"),
-                h.p("total indexed entries: ", sum(frame.n_indices),
-                    " across ", nrow(frame), " base params"),
-                render_table(frame; sortable=true),
-            )
+            shapes = let frame = context!().run.stan.param_shapes_df
+                h.section(
+                    h.h3("6b'. StanShapes — index count per base parameter (p + tp + gq)"),
+                    h.p("total indexed entries: ", sum(frame.n_indices),
+                        " across ", nrow(frame), " base params"),
+                    render_table(frame; sortable=true),
+                )
+            end
         end
         # Shared plot-tabset builder used by stan_generate and the fit stages.
         # `kind` goes into tab titles ("prior predictive" / "posterior") and
@@ -1969,19 +2042,20 @@ APPDATA = AppData(; cache_type=:parallel)
             )
         end
 
-        # Stan-step renderers that take a NamedTuple bundle
-        # (`(long, wide, summary, [full_long, diagnostics,] truth)`).
-        # Bundled separately from the simpler `@struct stan` above because
-        # they share the `(bundle)` signature — the @error-level "shared
-        # signature + shared prefix" lint.
-        @struct stan_section(bundle) = begin
-            generate = begin
-                (; long, wide, summary, truth) = bundle
+        # Stan-step renderers that read NamedTuple bundles directly off
+        # `context!().run.stan` — `:stan_generate` from `.generated`,
+        # `:stan_fit_pathfinder` from `.posterior`, `:stan_fit_warmup` from
+        # `.posterior.warmup`. Each composes `posterior_plots` (tabset +
+        # wide-table details) with `build_ppc_section` (per-PPCKind sections).
+        @struct stan_section = begin
+            generate = let g = context!().run.stan.generated,
+                           truth = context!().run.stan.truth.df,
+                           long = g.df, wide = g.wide_df, summary = g.summary_df
                 plots = posterior_plots(long, wide, summary;
                                     id_prefix="brm-plot-generated",
                                     kind="Generated data (prior predictive)",
                                     truth)
-                local ppc_sec = build_ppc_section(long, :prior; id_prefix="brm-plot-generated")
+                ppc_sec = build_ppc_section(long, :prior; id_prefix="brm-plot-generated")
                 parts = Any[
                     h.h3("6c. StanGenerate — synthetic data from narrow-normal prior + param_constrain"),
                     h.p("long format: ", nrow(long), " rows · ", ncol(long), " cols · ",
@@ -1992,13 +2066,15 @@ APPDATA = AppData(; cache_type=:parallel)
                 h.section(parts...)
             end
             @struct fit = begin
-                pathfinder = begin
-                    (; long, wide, summary, full_long, truth) = bundle
+                pathfinder = let p = context!().run.stan.posterior,
+                                truth = context!().run.stan.truth.unc_df,
+                                long = p.long_df, wide = p.wide_df,
+                                summary = p.summary_df, full_long = p.full_long_df
                     plots = posterior_plots(long, wide, summary;
                                         id_prefix="brm-plot-pf",
                                         kind="Pathfinder posterior",
                                         truth)
-                    local ppc_sec = build_ppc_section(full_long, :posterior; id_prefix="brm-plot-pf")
+                    ppc_sec = build_ppc_section(full_long, :posterior; id_prefix="brm-plot-pf")
                     parts = Any[
                         h.h3("6d. StanFit (Pathfinder) — variational approximation draws"),
                         h.p("long format: ", nrow(long), " rows · ", ncol(long), " cols · ",
@@ -2008,13 +2084,16 @@ APPDATA = AppData(; cache_type=:parallel)
                     push!(parts, plots.tabs, plots.wide_details)
                     h.section(parts...)
                 end
-                warmup = begin
-                    (; long, wide, summary, full_long, diagnostics, truth) = bundle
+                warmup = let w = context!().run.stan.posterior.warmup,
+                             truth = context!().run.stan.truth.unc_df,
+                             long = w.long_df, wide = w.wide_df,
+                             summary = w.summary_df, full_long = w.full_long_df,
+                             diagnostics = w.diagnostics
                     plots = posterior_plots(long, wide, summary;
                                         id_prefix="brm-plot-warmup",
                                         kind="Warmup+MCMC posterior",
                                         truth)
-                    local ppc_sec = build_ppc_section(full_long, :posterior; id_prefix="brm-plot-warmup")
+                    ppc_sec = build_ppc_section(full_long, :posterior; id_prefix="brm-plot-warmup")
                     parts = Any[
                         h.h3("6d'. StanFit (Warmup+MCMC) — full Stan fit"),
                         h.p("n_divergent_samples: ", diagnostics.n_divergent_samples,
@@ -2209,56 +2288,6 @@ APPDATA = AppData(; cache_type=:parallel)
         )
     end
 
-    @get stage(name::Symbol; force::Bool=false) = polling_fetchindex(
-        compute_steps, formula, context!().namespace, name;
-        poll_url=query_url(__self__/"stage/$name"; formula, label),
-        label="BRM pipeline - $name",
-        # Honour `force=true` only when the request actually came from
-        # HTMX (button click). A direct browser reload of a pushed URL
-        # has no HX-Request header, so we ignore `force` and let the
-        # polling_fetchindex IP cache re-attach to whatever's already
-        # running / cached for this (formula, name).
-        force=force && is_htmx(__req__),
-    ) do result
-        # On successful stage computation, mark this stage + all prerequisite
-        # stages as pass on the corresponding ExampleEntry (if label
-        # identifies one). `result` keys are `(:data, <stages in reverse>)`;
-        # filter :data out to get the stage symbols. No-op if label is empty
-        # (main pipeline page without an example context) or label doesn't
-        # match any saved example.
-        if !isempty(label)
-            entry = __parent__.examples.find(label)
-            isnothing(entry) || entry.mark_stages!(;
-                passed=[k for k in keys(result) if k !== :data])
-        end
-        # Step-key dispatch. `:stan_generate` routes to
-        # `render.stan_section(v).generate`; `:stan_fit_pathfinder` /
-        # `:stan_fit_warmup` route to `render.stan_section(v).fit.<kind>`
-        # (the nested fit/{pathfinder,warmup} sub-bundle); other `stan_*`
-        # keys route to `render.stan.<suffix>(v)`; everything else to
-        # `render.<key>(v)`.
-        render_step(k::Symbol, v) = begin
-            s = String(k)
-            if k === :stan_generate
-                render.stan_section(v).generate
-            elseif k === :stan_fit_pathfinder
-                render.stan_section(v).fit.pathfinder
-            elseif k === :stan_fit_warmup
-                render.stan_section(v).fit.warmup
-            elseif startswith(s, "stan_")
-                getproperty(render.stan, Symbol(s[6:end]))(v)
-            else
-                getproperty(render, k)(v)
-            end
-        end
-        # No id on this wrapper — the outer `#brm-macro-output` div in the
-        # form is the persistent target (see buttons' `hx_swap="innerHTML"`);
-        # putting the id here too would duplicate ids after a button swap.
-        h.div(
-            (render_step(k, v) for (k, v) in pairs(result))...,
-        )
-    end
-
     # Focused per-model views of the sbimpl intermediate artifacts. Each
     # route runs the pipeline just far enough and returns the relevant
     # source in `h.pre` (plus markdown_only serves the bare source via
@@ -2346,8 +2375,9 @@ APPDATA = AppData(; cache_type=:parallel)
                     # has run; SLIC body is even cheaper.
                     run        = ctx.run
                     full_long  = run.stan.posterior.full_long_df
-                    ppc_div    = render.build_ppc_section(full_long, :posterior;
-                                                          id_prefix="brm-gallery-$(item.slug)")
+                    ppc_div    = __parent__.stage(:stan_fit_pathfinder).build_ppc_section(
+                                     full_long, :posterior;
+                                     id_prefix="brm-gallery-$(item.slug)")
                     pipeline_url = string(query_url(__parent__/""; formula=item.formula, label=item.label))
                     h.article(; id="brm-gallery-card-$(item.slug)")(
                         h.h4(
@@ -2483,10 +2513,11 @@ y1 ~ Normal(loc, err)
     __page__(content) = htmx(
         app_layout(
             nav_sidebar([
-                "Pipeline" => "/pipeline",
-                "Gallery"  => "/pipeline/gallery",
-                "Examples" => "/examples",
-                "Library"  => "/library",
+                "Pipeline"  => "/pipeline",
+                "Gallery"   => "/pipeline/gallery",
+                "Examples"  => "/examples",
+                "Library"   => "/library",
+                "Structure" => "/structure",
             ]),
             content,
         );
@@ -2519,6 +2550,16 @@ y1 ~ Normal(loc, err)
         clear_mem_caches!(__appdata__)
         h.p("In-memory caches cleared.")
     end
+
+    # DO/HTMXO type-tree introspection. `DynamicObjects.structure` returns a
+    # `Node{:pre, …}` that's `Base.showable("text/html", …)`, so Cobweb's
+    # auto-render-HTML-showable-children kicks in and emits the colored tree
+    # straight into the page.
+    @get structure = h.div(
+        h.h2("AppContext type structure"),
+        h.p(h.small("DynamicObjects.structure(AppContext) — bond colors mark identical worst-case dependency sets")),
+        DynamicObjects.structure(AppContext),
+    ) 
 
     @include pipeline = PipelineRoutes()
 
