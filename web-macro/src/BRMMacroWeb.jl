@@ -2472,7 +2472,7 @@ APPDATA = AppData(; cache_type=:parallel)
 end
 
 @htmx struct AppContext
-    __appdata__ = APPDATA
+    __appdata__::AppData = APPDATA
 
     default_formula = """loc ~ 1
 log(err) ~ 1
