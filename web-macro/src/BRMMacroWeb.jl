@@ -797,7 +797,7 @@ end
 # above this, the panel becomes a hairball and downstream Vega slows
 # to a crawl. Subsampling is deterministic so the picture is stable
 # across reloads.
-const MAX_PPC_DRAW_LINES = 50
+MAX_PPC_DRAW_LINES = 50
 
 # Filter `rows` to a deterministic random subset of distinct draws so
 # at most `max_n` curves are emitted. Returns `rows` unchanged when the

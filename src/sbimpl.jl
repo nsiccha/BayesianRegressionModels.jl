@@ -752,7 +752,7 @@ _sb_sampling!(stmts, data, key, lhs::ExprColumn{typeof(mi)}, rhs; id_lookup=_sb_
 # error with a clear "not yet implemented" message until their submodel
 # lands. Predictor-side `mi(x)` (NAs in covariates needing a paired model
 # formula) is also not drafted yet.
-const _SB_MI_FAMILIES = Dict{Any,Symbol}(
+_SB_MI_FAMILIES = Dict{Any,Symbol}(
     Normal => :_sb_mi_normal,
 )
 function _sb_emit_mi!(stmts, data, key, lhs::ExprColumn, rhs)
