@@ -17,21 +17,29 @@ _symbol_color(name::Symbol) = "hsl($(mod(hash(name) * 137, 360)), 60%, 40%)"
 
 # A colored <span> with role-based font styling. Data columns are normal
 # weight; parameters (latent/sampled) are bold. Per-symbol color is the only
-# inline style -- it is data-derived, not presentational.
-_styled_name(name::Symbol, role::Symbol) = h.span(string(name);
-    class=role == :parameter ? "brm-sym brm-sym-param" : "brm-sym",
+# inline style -- it is data-derived (hash of the symbol name), not
+# presentational.
+#
+# TODO(no-inline-style): replace this with a `data-sym-bucket="K"` attribute
+# carrying a small integer (e.g. K = mod(hash(name), 12)) and a fixed CSS
+# palette of 12 hues in brm-macro.css. That collapses the unbounded symbol
+# space into N collision-buckets but eliminates the inline `style=` attribute.
+# Acceptable visual loss should be checked against a real model first; left
+# as a single inline-style site for now.
+_styled_name(name::Symbol, role::Symbol) = (role == :parameter ? h.strong : h.span)(
+    string(name); class="brm-sym",
     style="color:$(_symbol_color(name))")
 
 _html_expr(x::NamedColumn{<:Any, <:DataColumn})  = _styled_name(name(x), :data)
 _html_expr(x::NamedColumn{<:Any, MissingColumn}) = _styled_name(name(x), :parameter)
 _html_expr(x::NamedColumn)                       = _styled_name(name(x), :derived)
-_html_expr(x::Int)                               = h.span(string(x); class="brm-num")
-_html_expr(x::Float64)                           = h.span(string(x); class="brm-num")
-_html_expr(x::Number)                            = h.span(string(x); class="brm-num")
-_html_expr(x::DataColumn) = h.span("data($(eltype(parent(x))))"; class="brm-muted")
+_html_expr(x::Int)                               = h.span(string(x); data_kind="num")
+_html_expr(x::Float64)                           = h.span(string(x); data_kind="num")
+_html_expr(x::Number)                            = h.span(string(x); data_kind="num")
+_html_expr(x::DataColumn) = h.small("data($(eltype(parent(x))))")
 _html_expr(x::MaterializedColumn) = _html_expr(getbroadcast(x))
 _html_expr(x::LikelihoodColumn)   = h.span(
-    _html_expr(parent(x)), h.span(" .~ "; class="brm-op-dark"), _html_expr(rhs(x)))
+    _html_expr(parent(x)), h.span(" .~ "; data_kind="likelihood"), _html_expr(rhs(x)))
 
 # Infix operators: always parenthesized so inner expressions like (1 + b | g1)
 # keep their grouping. Top-level callers (_html_brmi_row) use _html_infix
@@ -45,7 +53,7 @@ _html_infix(x::ExprColumn) = begin
     args = getargs(x)
     parts = Any[]
     for (i, arg) in enumerate(args)
-        i > 1 && push!(parts, h.span(op_str; class="brm-op"))
+        i > 1 && push!(parts, h.span(op_str; data_kind="op"))
         push!(parts, _html_expr(arg))
     end
     h.span(parts...)
@@ -57,7 +65,7 @@ _html_expr(x::ExprColumn) = begin
             getf(x) isa Type     ? nameof(getf(x)) : string(getf(x))
     args = getargs(x)
     kw = getkwargs(x)
-    parts = Any[h.span(string(fname); class="brm-fname"), "("]
+    parts = Any[h.span(string(fname); data_kind="fname"), "("]
     for (i, arg) in enumerate(args)
         i > 1 && push!(parts, ", ")
         push!(parts, _html_expr(arg))
@@ -81,12 +89,12 @@ _html_expr(x::Base.Broadcast.Broadcasted) = begin
     if x.f in (+, -, *, /)
         parts = Any[]
         for (i, arg) in enumerate(args)
-            i > 1 && push!(parts, h.span(" $(x.f) "; class="brm-op"))
+            i > 1 && push!(parts, h.span(" $(x.f) "; data_kind="op"))
             push!(parts, _html_expr(arg))
         end
         return h.span(parts...)
     end
-    parts = Any[h.span(string(fname); class="brm-fname"), "("]
+    parts = Any[h.span(string(fname); data_kind="fname"), "("]
     for (i, arg) in enumerate(args)
         i > 1 && push!(parts, ", ")
         push!(parts, _html_expr(arg))
@@ -96,16 +104,16 @@ _html_expr(x::Base.Broadcast.Broadcasted) = begin
 end
 
 # Arrays / views from block parameter slots: show as a compact shape description
-_html_expr(x::SubArray) = h.span("param[$(join(size(x), "×"))]"; class="brm-arr")
-_html_expr(x::AbstractVector{<:Number}) = h.span("vec[$(length(x))]"; class="brm-vec")
+_html_expr(x::SubArray) = h.span("param[$(join(size(x), "×"))]"; data_kind="arr")
+_html_expr(x::AbstractVector{<:Number}) = h.span("vec[$(length(x))]"; data_kind="vec")
 _html_expr(x::Base.RefValue) = _html_expr(x[])
-_html_expr(x::AbstractMatrix) = h.span("mat[$(join(size(x), "×"))]"; class="brm-arr")
+_html_expr(x::AbstractMatrix) = h.span("mat[$(join(size(x), "×"))]"; data_kind="arr")
 
-_html_expr(x) = h.span(sprint(show, x; context=:compact=>true); class="brm-muted")
+_html_expr(x) = h.small(sprint(show, x; context=:compact=>true))
 
 function brmi_card(brmi::BRMI)
     rows = [_html_brmi_row(key, parent(value)) for (key, value) in pairs(brmi.operations)]
-    h.article(; class="brm-card")(
+    h.article(
         h.header(h.strong("BRMI"),
             h.small(" -- $(length(brmi.operations)) operations")),
         h.div(; class="brm-expr-list")(rows...),
@@ -125,8 +133,8 @@ end
 _html_brmi_row(key, op::ExprColumn{typeof(assign)}) = h.div(_html_infix(op))
 _html_brmi_row(key, op) = h.div(
     _styled_name(key, :data),
-    h.span(": "; class="brm-num"),
-    h.span(sprint(show, op); class="brm-muted"),
+    h.span(": "; data_kind="op"),
+    h.small(sprint(show, op)),
 )
 
 function vbrmi_card(vbrmi::VBRMI)
@@ -141,7 +149,7 @@ function vbrmi_card(vbrmi::VBRMI)
         inner = nc !== nothing ? parent(nc) : nothing
         if inner isa DataColumn
             h.div(_styled_name(key, :data),
-                h.span(": data($(eltype(parent(inner))))"; class="brm-muted"))
+                h.small(": data($(eltype(parent(inner))))"))
         elseif value isa LikelihoodColumn
             expr = inner !== nothing ? _html_infix(inner) : _styled_name(key, :data)
             h.div(expr; class="brm-likelihood")
@@ -149,10 +157,10 @@ function vbrmi_card(vbrmi::VBRMI)
             expr = inner isa ExprColumn{<:Union{typeof(~),typeof(assign)}} ?
                 _html_infix(inner) : _html_expr(inner)
             shape = "$(eltype(parent(value)))[$(length(parent(value)))]"
-            h.div(expr, h.span(" -> $shape"; class="brm-shape"))
+            h.div(expr, h.span(" -> $shape"; data_kind="shape"))
         else
             h.div(_styled_name(key, :derived),
-                h.span(": $(sprint(show, value))"; class="brm-muted"))
+                h.small(": $(sprint(show, value))"))
         end
     end for (key, value) in pairs(meta.materialized)]
 
@@ -165,12 +173,12 @@ function vbrmi_card(vbrmi::VBRMI)
         )
     end for (key, parts) in pairs(meta.blocks)]
 
-    h.article(; class="brm-card")(
+    h.article(
         h.header(h.strong("VBRMI"),
             h.small(" -- dim $n_dim, $n_mat materialized, $n_blocks blocks")),
-        h.h6(; class="brm-subhead")("materialized"),
-        h.div(; class="brm-expr-list brm-indent")(mat_rows...),
-        h.h6(; class="brm-subhead")("blocks"),
-        h.div(; class="brm-expr-list brm-indent")(blocks_rows...),
+        h.h6("materialized"),
+        h.div(; class="brm-expr-list")(mat_rows...),
+        h.h6("blocks"),
+        h.div(; class="brm-expr-list")(blocks_rows...),
     )
 end

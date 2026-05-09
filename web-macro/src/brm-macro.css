@@ -1,46 +1,46 @@
 :root { font-size: 87.5%; }
 
-/* Layout */
-.brm-layout { display: flex; gap: 1rem; align-items: flex-start; }
-.brm-main { flex: 1; min-width: 0; }
-
 /* Pipeline form */
 .brm-preset-row { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-bottom: 0.6rem; }
 .brm-preset-btn { font-size: 0.8em; padding: 0.2rem 0.5rem; margin: 0; }
 .brm-formula-textarea { width: 100%; font-family: monospace; }
 
-/* Pipeline status line */
-.brm-status-ok { color: green; }
-.brm-status-err { color: crimson; }
-
-/* BRMI / VBRMI cards */
-.brm-card { margin: 0.5rem 0; }
+/* BRMI / VBRMI cards. Bare <article> + <h6> section heads; the expr-list
+   adjacent to a section <h6> (vbrmi_card's materialized/blocks sections)
+   gets indented. The standalone list in brmi_card stays flush. */
 .brm-expr-list { font-family: monospace; font-size: 1.15em; line-height: 1.8; padding: 0.3rem 0; }
-.brm-indent { margin-left: 1rem; }
-.brm-subhead { margin-bottom: 0.2rem; }
-.brm-block-part { color: #999; margin-left: 1.5rem; }
+h6:has(+ .brm-expr-list) { margin-bottom: 0.2rem; }
+h6 + .brm-expr-list { margin-left: 1rem; }
+.brm-block-part { color: var(--pico-muted-color, #999); margin-left: 1.5rem; }
 
-/* Styled AST rendering (per-symbol color is inline) */
-.brm-sym-param { font-weight: bold; }
-.brm-num { color: #666; }
-.brm-muted { color: #999; }
-.brm-op { color: #555; }
-.brm-op-dark { color: #333; }
-.brm-fname { color: #777; }
-.brm-shape { color: #999; font-size: 0.85em; }
-.brm-arr { font-style: italic; color: #888; }
-.brm-vec { font-weight: bold; color: #888; }
+/* Styled AST rendering: every emitted token from html_expr.jl carries
+   only a data-kind attribute naming its syntactic role (number,
+   operator, function name, array/vector/matrix, shape annotation,
+   likelihood operator). Scoping is via the .brm-expr-list wrapper, so
+   the spans need no per-element class. Per-symbol color on .brm-sym
+   stays inline because the symbol space is unbounded. Muted
+   annotations are emitted as <small> and inherit Pico's small font-size. */
+.brm-expr-list [data-kind="num"]        { color: #666; }
+.brm-expr-list [data-kind="op"]         { color: #555; }
+.brm-expr-list [data-kind="likelihood"] { color: #333; }
+.brm-expr-list [data-kind="fname"]      { color: #777; }
+.brm-expr-list [data-kind="shape"]      { color: var(--pico-muted-color, #999); font-size: 0.85em; }
+.brm-expr-list [data-kind="arr"]        { font-style: italic; color: #888; }
+.brm-expr-list [data-kind="vec"]        { font-weight: bold; color: #888; }
 .brm-likelihood { text-decoration: underline; text-decoration-color: #aaa; text-underline-offset: 3px; }
+.brm-expr-list small { color: var(--pico-muted-color, #999); }
 
-/* Example cards (border-left color, tier/status pill bg are inline) */
+/* Example cards. Border-left color reflects entry status (open/done/deprioritized).
+   data-flash is set transiently by JS on stage-button success/error. */
 .brm-example-card { border-left: 6px solid #888; margin: 0.8rem 0; padding: 0.5rem 1rem; transition: background-color 0.3s ease, border-color 0.3s ease; }
-.brm-example-card.brm-card-success { background-color: #dff5e0; border-left-color: #2e7d32 !important; }
-.brm-example-card.brm-card-error   { background-color: #fdecea; border-left-color: #c62828 !important; }
-.brm-example-summary { cursor: pointer; list-style-position: outside; }
-.brm-example-body { margin-top: 0.5rem; }
-.brm-example-result { margin-top: 0.5rem; }
-.brm-example-form { margin: 0.5rem 0; }
-.brm-example-textarea { width: 100%; font-family: monospace; font-size: 0.85em; }
+.brm-example-card[data-state="open"]          { border-left-color: #888; }
+.brm-example-card[data-state="done"]          { border-left-color: #2e7d32; }
+.brm-example-card[data-state="deprioritized"] { border-left-color: #a05a2c; }
+.brm-example-card[data-flash="success"] { background-color: #dff5e0; border-left-color: #2e7d32; }
+.brm-example-card[data-flash="error"]   { background-color: #fdecea; border-left-color: #c62828; }
+.brm-example-card details > * + * { margin-top: 0.5rem; }
+.brm-example-card summary { list-style-position: outside; }
+.brm-example-card textarea { width: 100%; font-family: monospace; font-size: 0.85em; }
 .brm-branch-btn { font-size: 0.85em; padding: 0.3rem 0.8rem; margin: 0.3rem 0.3rem 0 0; }
 .brm-permalink { text-decoration: none; font-size: 0.8em; margin-left: 0.3rem; vertical-align: middle; }
 
@@ -48,14 +48,23 @@
 .brm-tier-pill {
     font-size: 0.7em; padding: 0.1rem 0.4rem; border-radius: 1rem;
     color: white; vertical-align: middle; font-weight: normal;
+    background: #888;
 }
+.brm-tier-pill[data-tier="1"] { background: #4a7c59; }
+.brm-tier-pill[data-tier="2"] { background: #5a6a8c; }
+.brm-tier-pill[data-tier="3"] { background: #8c5a5a; }
 .brm-status-pills {
     margin-left: 0.5rem; display: inline-flex; gap: 0.3rem; vertical-align: middle;
 }
-.brm-state-pill {
+.brm-state-pill, .brm-flag-pill {
     font-size: 0.7em; padding: 0.15rem 0.6rem; border: none; border-radius: 1rem;
-    color: white; cursor: pointer;
+    color: white; cursor: pointer; background: #888;
 }
+.brm-state-pill[aria-pressed="true"][data-state="done"]          { background: #2e7d32; }
+.brm-state-pill[aria-pressed="true"][data-state="deprioritized"] { background: #a05a2c; }
+.brm-flag-pill[data-flag="sb"]    { background: #c97f0c; }
+.brm-flag-pill[data-flag="sbbrm"] { background: #2e7d32; }
+.brm-flag-pill[data-flag="both"]  { background: #a02828; }
 .brm-stage-indicators {
     display: inline-flex; flex-wrap: wrap; gap: 0.2rem;
     vertical-align: middle; margin-left: 0.3rem;
@@ -63,7 +72,11 @@
 .brm-stage-indicator {
     font-size: 0.65em; padding: 0.1rem 0.4rem; border-radius: 0.8rem;
     color: white; text-decoration: none; line-height: 1.2;
+    background: #888;
 }
+.brm-stage-indicator[data-state="pass"] { background: #2e7d32; }
+.brm-stage-indicator[data-state="fail"] { background: #a02828; }
+
 .brm-search-bar {
     margin: 0.5rem 0; display: flex; align-items: center;
 }
@@ -71,7 +84,8 @@
     flex: 1; padding: 0.4rem 0.6rem; font-size: 0.95em;
     border: 1px solid #bbb; border-radius: 0.4rem;
 }
-.brm-search-bar input.brm-search-literal { border-color: #c97f0c; background: #fff8ec; }
+.brm-search-bar input[data-mode="literal"] { border-color: #c97f0c; background: #fff8ec; }
+
 .brm-sort-bar {
     display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center;
     margin: 0.5rem 0 1rem; padding: 0.4rem 0.6rem; background: #f5f5f5;
@@ -93,46 +107,21 @@
     background: #ddd; color: #333; cursor: pointer; user-select: none;
     border: 1px solid transparent;
 }
-.brm-sort-pill.active { background: #4a7c59; color: white; }
+.brm-sort-pill[aria-pressed="true"] { background: #4a7c59; color: white; }
 .brm-sort-pill:active { cursor: grabbing; }
 
-/* PPC gallery (/pipeline/gallery) */
-.brm-gallery-section { margin-top: 1.5rem; }
-.brm-gallery-section-heading { font-size: 1.1em; margin-top: 1rem; }
-.brm-load-all-bar { margin: 0.5rem 0; }
-.brm-load-all-btn { font-size: 0.85em; }
-.brm-gallery-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr));
-    gap: 0.75rem;
-}
-.brm-gallery-card { margin: 0; padding: 0.5rem; min-width: 0; overflow: hidden; }
-.brm-gallery-card-header { padding: 0 0 0.25rem; margin: 0; }
-.brm-gallery-card-title { font-size: 0.9em; }
-.brm-gallery-card-link {
-    font-size: 0.8em; margin-left: 0.3em; text-decoration: none;
-}
-.brm-gallery-card-formula { margin: 0.25rem 0; font-size: 0.75em; }
-.brm-gallery-card-formula pre { font-size: 0.85em; margin: 0; }
-.brm-gallery-card-toggle { margin: 0.25rem 0; }
-.brm-gallery-card-toggle summary { cursor: pointer; }
-.brm-rerun-bar { display: flex; gap: 0.5rem; margin: 0.25rem 0; }
-.brm-rerun-btn { font-size: 0.75em; padding: 0.1rem 0.4rem; }
-.brm-ppc-target { min-height: 8rem; }
-.brm-ppc-loading {
-    color: var(--pico-muted-color); font-size: 0.8em; margin: 0;
-}
-
-/* SLIC submodel library (/library) */
+/* SLIC submodel library (/library). Markup is .brm-library-grid > article >
+   header > strong / details. Per-element classes dropped; descendant
+   selectors do the scoping. */
 .brm-library-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(28rem, 1fr));
     gap: 0.75rem;
 }
-.brm-library-card { margin: 0; padding: 0.75rem; }
-.brm-library-card-header { padding: 0 0 0.25rem; margin: 0; }
-.brm-library-card-name { font-family: monospace; }
-.brm-library-card-body { margin: 0.25rem 0; font-size: 0.75em; }
-.brm-library-card-body pre {
+.brm-library-grid article { margin: 0; padding: 0.75rem; }
+.brm-library-grid article > header { padding: 0 0 0.25rem; margin: 0; }
+.brm-library-grid article > header strong { font-family: monospace; }
+.brm-library-grid article > details { margin: 0.25rem 0; font-size: 0.75em; }
+.brm-library-grid article > details pre {
     font-size: 0.85em; margin: 0; max-height: 30rem; overflow: auto;
 }
