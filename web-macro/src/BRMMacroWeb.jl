@@ -2109,7 +2109,7 @@ APPDATA = AppData(; cache_type=:parallel)
         end
     end
 
-    @get index = begin
+    @get index() = begin
         # If an example form posted us a (label, formula) pair, persist the
         # edited formula to that example's .jl file so the next visit to the
         # Examples page shows the user's edits instead of the seed default.
@@ -2292,9 +2292,9 @@ APPDATA = AppData(; cache_type=:parallel)
     # route runs the pipeline just far enough and returns the relevant
     # source in `h.pre` (plus markdown_only serves the bare source via
     # `?plain` / `Accept: text/plain`, for piping into agents or curl).
-    @get slic = h.pre(context!().run.sbbrmi.model.model)
+    @get slic() = h.pre(context!().run.sbbrmi.model.model)
 
-    @get stan = h.pre(context!().run.stan.src)
+    @get stan() = h.pre(context!().run.stan.src)
 
     # Serve AoV's vega-embed runtime as plain JS so the docs page can
     # `<script src="...">` it before a gallery card swaps in. The
@@ -2302,7 +2302,7 @@ APPDATA = AppData(; cache_type=:parallel)
     # for the auto-PPC plot; htmx evaluates those on swap, but they
     # need `window.AoV` already defined. The docs theme loads this URL
     # via setupHtmxoEmbed. (Mirrors AoV's own `aov_runtime_js` route.)
-    @get aov_runtime_js = let
+    @get aov_runtime_js() = let
         wrapped = sprint(show, MIME"text/html"(), vega_runtime())
         body = replace(wrapped, r"^\s*<script[^>]*>"i => "")
         body = replace(body, r"</script>\s*$"i => "")
@@ -2322,7 +2322,7 @@ APPDATA = AppData(; cache_type=:parallel)
         # Card grid: one placeholder article per item, lazy-loading its
         # body via `hx-trigger=load` against `card/<slug>`. Per-card
         # placeholder is owned by ExampleEntry (`e.gallery_placeholder`).
-        @get index = let xs = items()
+        @get index() = let xs = items()
             h.div(; class="htmxo-gallery")(
                 h.section(
                     h.h3("Presets"),
@@ -2458,7 +2458,7 @@ APPDATA = AppData(; cache_type=:parallel)
     #   curl -H 'Accept: text/plain' 'http://localhost:<port>/pipeline/sb_repro?formula=<url-encoded>'
     #   curl -H 'Accept: text/plain' 'http://.../pipeline/sb_repro/example?name=<slug>'
     @include sb_repro = begin
-        @get index = __parent__.context!().sb_repro_html
+        @get index() = __parent__.context!().sb_repro_html
 
         @get example(; name::AbstractString="") = begin
             entry = __parent__.__parent__.examples.find_by_slug(name)
@@ -2540,13 +2540,13 @@ y1 ~ Normal(loc, err)
     end
 
     # `/` mirrors the pipeline landing page.
-    @get index = __self__.pipeline.index
+    @get index() = __self__.pipeline.index()
 
     # Utility route: clears all in-memory caches on AppData (compute_steps
     # results, nested IP dicts, etc.). Useful after code changes when you
     # want to re-run a stage that's currently returning a stale cached
     # value. Mirrors bruno's OpsRoutes.reset.
-    @get reset = begin
+    @get reset() = begin
         clear_mem_caches!(__appdata__)
         h.p("In-memory caches cleared.")
     end
@@ -2555,7 +2555,7 @@ y1 ~ Normal(loc, err)
     # `Node{:pre, …}` that's `Base.showable("text/html", …)`, so Cobweb's
     # auto-render-HTML-showable-children kicks in and emits the colored tree
     # straight into the page.
-    @get structure = h.div(
+    @get structure() = h.div(
         h.h2("AppContext type structure"),
         h.p(h.small("DynamicObjects.structure(AppContext) — colors mark identical worst-case dependency sets")),
         DynamicObjects.structure(AppContext),
@@ -2582,7 +2582,7 @@ y1 ~ Normal(loc, err)
             sort!(entries; by=first)
         end
 
-        @get index = h.div(
+        @get index() = h.div(
             h.h1("SLIC submodel library"),
             h.p(
                 "Reusable ",
@@ -2642,7 +2642,7 @@ y1 ~ Normal(loc, err)
         @get mark(; state::Symbol=Symbol("")) =
             find(label).toggle_status!(state).card.default
 
-        @get flag = find(label).cycle_flag!().card.default
+        @get flag() = find(label).cycle_flag!().card.default
 
         # List view vs detail view as separate derived-property methods; DO
         # supports multi-method dispatch on a single property name (the route
