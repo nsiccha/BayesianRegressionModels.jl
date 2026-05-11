@@ -11,12 +11,13 @@ makedocs(
     format   = DocumenterVitepress.MarkdownVitepress(
         repo = "github.com/JuliaBayes/BayesianRegressionModels.jl",
         devurl = "dev",
-        devbranch = "main",
+        devbranch = "dev",
         build_vitepress = false,
     ),
     pages = [
         "Home" => "index.md",
         "Gallery" => "gallery.md",
+        "API" => "api.md",
     ],
     checkdocs = :none,
     warnonly = true,
@@ -46,6 +47,6 @@ end
 
 DocumenterVitepress.deploydocs(
     repo = "github.com/JuliaBayes/BayesianRegressionModels.jl",
-    devbranch = "main",
+    devbranch = "dev",
     push_preview = true,
 )

@@ -1,6 +1,24 @@
 using LogExpFunctions, InverseFunctions, Distributions, ElasticArrays, LogDensityProblems, LinearAlgebra, SpecialFunctions
 import CategoricalArrays as CA
 
+"""
+    VBRMI(brmi::BRMI) -> VBRMI
+
+Vectorised-Julia backend: materialises `brmi` into a
+`LogDensityProblems`-compatible struct over a flat unconstrained vector.
+Holds `meta.blocks` (per-block tuples of [`Part`](@ref)s) and
+`meta.materialized` (per-name materialised columns).
+
+```julia
+brmi  = @brm df (y ~ 1 + a)
+vbrmi = VBRMI(brmi)
+d     = LogDensityProblems.dimension(vbrmi)
+ld    = LogDensityProblems.logdensity(vbrmi, randn(d))
+```
+
+For Stan-grade sampling use [`SBBRMI`](@ref) instead; `VBRMI` is the
+pure-Julia path (Mooncake AD compatible, no BridgeStan required).
+"""
 struct VBRMI{P<:BRMI,M<:NamedTuple}
     parent::P
     meta::M
@@ -84,6 +102,16 @@ vmeta(meta, x::ExprColumn{typeof(assign)}) = vmeta_assignment(meta, getargs(x)..
 vmeta(meta, x::ExprColumn{typeof(~)}) = vmeta_sampling(meta, getargs(x)...; getkwargs(x)...)
 
 vmeta_assignment(meta, ::Symbol, x) = meta, vmaterialize(vbroadcasted(x; meta))
+"""
+    vbroadcasted(x; meta) -> Broadcasted
+
+vimpl's column materialiser. Resolves a column-tree value to a
+broadcastable expression by walking [`NamedColumn`](@ref),
+[`DataColumn`](@ref), [`ExprColumn`](@ref) leaves. Used inside
+[`vmeta_sampling_rhs`](@ref) method bodies to resolve argument columns
+before scaling by a fresh β or wrapping in a likelihood. Add a method
+for a custom term to expose it under generic broadcast/arithmetic.
+"""
 vbroadcasted(;kwargs...) = (args...)->vbroadcasted(args...; kwargs...)
 vbroadcasted(x::NamedColumn{<:Any,<:DataColumn}; meta) = parent(meta.materialized[name(x)])
 vbroadcasted(x::NamedColumn; meta) = meta.materialized[name(x)]
@@ -127,8 +155,24 @@ vmeta_sampling(meta, lhs::NamedColumn{<:Any,<:DataColumn}, rhs) = begin
     meta, o = vmeta_sampling_rhs(meta, rhs; group=:__population__)
     meta, LikelihoodColumn(parent(parent(lhs)), o)
 end
+"""
+    vmeta_sampling_rhs(meta, rhs; group) -> (meta', broadcasted)
+
+vimpl's per-term sampling-RHS walker. Dispatches on the type of `rhs`
+([`ExprColumn`](@ref) of `+` / `|` / `&` / custom term, scalar `Int`,
+[`NamedColumn`](@ref), …) and returns an updated `meta` plus a
+broadcasted expression that feeds the linear predictor. `group` is the
+current ranef-grouping symbol (`:__population__` for fixed effects).
+
+**Extension hook**: add a method on this function (typically dispatched
+on `::ExprColumn{typeof(your_term)}`) to register a new formula term
+with the vimpl backend. The method allocates any [`Part`](@ref)s into
+`meta.blocks` via [`push_parts!!`](@ref) and returns the per-row
+contribution. See `mo` / `mo1` / `gp` / `offset` in `vimpl.jl` for
+worked examples.
+"""
 vmeta_sampling_rhs(;kwargs...) = (args...)->vmeta_sampling_rhs(args...; kwargs...)
-vmeta_sampling_rhs(meta, x::ExprColumn{typeof(+)}; kwargs...) = begin 
+vmeta_sampling_rhs(meta, x::ExprColumn{typeof(+)}; kwargs...) = begin
     meta, args = foldl(getargs(x); init=(meta, ())) do (_meta, _args), _arg
         _meta, _arg = vmeta_sampling_rhs(_meta, _arg; kwargs...)
         _meta, (_args..., _arg)
@@ -282,11 +326,26 @@ _re_lookup(p, gc_idx::AbstractVector{Int}) =
     Base.broadcasted(getindex, Ref(p), gc_idx, 1)
 vmeta_sampling_rhs(meta, x::FBroadcasted{<:Type{<:Distribution}}; group) = meta, x
 vmaterialize(x) = MaterializedColumn(Base.materialize(x), x)
+
+"""
+    MaterializedColumn(parent, broadcast)
+
+vimpl's already-materialised storage: `parent` is the live buffer
+refreshed each draw, `broadcast` is the lazy expression that fills it.
+Used inside `VBRMI.meta.materialized` to thread per-draw recomputation
+of named intermediates (`loc ~ 1 + a`, etc.).
+"""
 struct MaterializedColumn{P,B} <: AbstractColumn
     parent::P
     broadcast::B
 end
 Base.parent(x::MaterializedColumn) = getfield(x, :parent)
+"""
+    getbroadcast(x::MaterializedColumn) -> Broadcasted
+
+Access the lazy broadcast expression that refreshes
+[`MaterializedColumn`](@ref)`(x)`'s `parent` buffer each draw.
+"""
 getbroadcast(x::MaterializedColumn) = getfield(x, :broadcast)
 Base.broadcastable(x::MaterializedColumn) = Base.broadcastable(parent(x))
 # A name bound via `~` (e.g. `loc1 ~ 1 + a`) lands in meta.materialized as a
@@ -411,6 +470,14 @@ end
 
 LogDensityProblems.dimension(vbrm::VBRMI) = nparams(vbrm.meta.blocks)
 
+"""
+    nparams(x) -> Int
+
+Number of unconstrained reals consumed by `x` (a [`Part`](@ref), a
+tuple/NamedTuple of parts, or `meta.blocks`). Defines the slice length
+each part owns in the flat unconstrained vector. Extension methods
+register the dimension of a new marker function's parameter block.
+"""
 nparams(x::Union{Tuple,NamedTuple}) = sum(nparams, x; init=0)
 nparams(p::Part{typeof(normal)}) = size(p.data.values, 2)
 nparams(p::Part{typeof(grouped_normal)}) = let (m, n) = size(p.data.values); m * n end
@@ -571,6 +638,18 @@ end
 # the SBBRMI backend (lowering to Stan's `binomial_logit_lpmf`) and the
 # VBRMI backend (this `logpdf`) avoid the `inv_logit` round-trip and stay
 # numerically stable for large |logitp|.
+"""
+    BinomialLogit(n, logitp)
+
+Binomial likelihood parameterised on the logit scale: prefer this over
+`Binomial(n, logistic(eta))`. Both backends lower to a logit-native
+log-pmf (Stan's `binomial_logit_lpmf`; LogExpFunctions' `loglogistic` /
+`log1mlogistic` on the Julia side), avoiding the `inv_logit` round-trip
+and staying numerically stable for large `|logitp|`.
+
+Distributions.jl ships `BernoulliLogit` (sufficient on its own) but no
+`BinomialLogit`, hence this definition.
+"""
 struct BinomialLogit{Tn<:Real,Tp<:Real} <: Distributions.DiscreteUnivariateDistribution
     n::Tn
     logitp::Tp

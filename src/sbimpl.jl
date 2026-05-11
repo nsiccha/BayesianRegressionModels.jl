@@ -12,28 +12,64 @@ using StanBlocks
 # whose parser side is not yet owned by macro.jl. Empty function bindings only;
 # the actual backend is implemented below (`_sb_predictor_term!`). These may
 # migrate to macro.jl once the frontend agent adds shared stubs.
+
+"""
+    me(x_obs, sd_x)
+
+brms-style measurement-error predictor marker. `me(x_obs, sd_x)` declares
+that the observed `x_obs` has Gaussian measurement error with SD `sd_x`;
+the backend allocates a latent `x_true` and emits the observation
+likelihood `x_obs ~ Normal(x_true, sd_x)`. Dispatch tag — see `_sb_me`.
+"""
 function me end
+
+"""
+    s(x)
+
+Smooth-term marker (cubic-spline predictor). brms-style `s(x)` — the
+backend builds a natural cubic-spline basis with default interior knots
+and emits a linear-in-basis predictor. Dispatch tag — see `_sb_s`.
+"""
 function s end
+
+"""
+    ar(time; p=1)
+
+Autoregressive-noise predictor marker. Adds an AR(p) noise process
+ordered by `time`. Only `p=1` is supported in the current sbimpl
+emitter. Dispatch tag — see `_sb_ar1`.
+"""
 function ar end
 
-# Local marker type for cumulative-link ordinal likelihoods. Mirrors the
-# `Normal` / `BernoulliLogit` pattern (formula surface uses the type as a
-# likelihood family). Not a real `Distributions.Distribution` -- Distributions.jl
-# does not ship `OrderedLogistic`, and the @brm `_x` parser never actually
-# calls the constructor, so a bare marker struct is enough. If Distributions
-# later adds its own `OrderedLogistic`, drop this in favour of that.
+"""
+    OrderedLogistic
+
+Cumulative-link ordinal-likelihood marker. Use as a family on the RHS:
+`y ~ OrderedLogistic(eta)`. The sbimpl backend lowers to Stan's
+`ordered_logistic_lpmf`. Marker struct only — Distributions.jl does not
+ship an `OrderedLogistic`, and the `@brm` parser never constructs an
+instance, so the empty struct is sufficient.
+"""
 struct OrderedLogistic end
 
-# Carvalho-Polson-Scott horseshoe shrinkage prior. Surfaces in the formula
-# as `coef ~ Horseshoe()`; sbimpl emits the standard reparameterised
-# hierarchy via `_sb_horseshoe`. Bare marker -- the @brm parser never
-# constructs an instance, so a struct with no fields is enough.
+"""
+    Horseshoe
+
+Carvalho-Polson-Scott horseshoe shrinkage prior marker. Use as a prior
+on a coefficient: `coef ~ Horseshoe()`. sbimpl emits the standard
+reparameterised hierarchy `beta = raw * lambda * tau`. Marker struct
+only — the `@brm` parser never constructs an instance.
+"""
 struct Horseshoe end
 
-# Zero-inflated Poisson likelihood. Two-parameter mixture of a point-mass at
-# zero (with prob `zi`) and a Poisson(lambda). Surfaces as
-# `y ~ ZeroInflatedPoisson(lambda, zi)`; sbimpl emits `y ~ zero_inflated_poisson(...)`
-# which routes to the @deffun lpmf below.
+"""
+    ZeroInflatedPoisson(lambda, zi)
+
+Zero-inflated Poisson likelihood marker — a mixture of a point-mass at
+zero (with probability `zi`) and `Poisson(lambda)`. Surfaces as
+`y ~ ZeroInflatedPoisson(lambda, zi)`; sbimpl routes through
+`zero_inflated_poisson_lpmf`. Marker struct only.
+"""
 struct ZeroInflatedPoisson end
 
 popefs = StanBlocks.@slic begin
@@ -428,6 +464,24 @@ end
 # data / parameters / model).
 # ==============================================================================
 
+"""
+    SBBRMI(brmi::BRMI; mod=@__MODULE__) -> SBBRMI
+
+StanBlocks backend: walks `brmi`, emits a `StanBlocks.SlicModel`, and
+materialises the data dict. Pass `mod` if you're constructing the model
+from a module other than `BayesianRegressionModels` so SLIC's symbol
+resolver finds your locally-defined submodels.
+
+Use [`stan_code`](@ref) to extract the transpiled Stan source. For
+sampling, load `StanLogDensityProblems` + `BridgeStan` and wrap the
+emitted `SlicModel` in a `StanProblem`.
+
+```julia
+brmi  = @brm df (y ~ 1 + a + (1|g))
+sbbrmi = SBBRMI(brmi)
+src   = stan_code(sbbrmi)
+```
+"""
 struct SBBRMI{P<:BRMI, M, D<:AbstractDict}
     parent::P
     model::M
@@ -563,6 +617,13 @@ end
 _sb_collect_data!(data, x::ExprColumn; skip=Set{Symbol}()) =
     foreach(a -> _sb_collect_data!(data, a; skip), getargs(x))
 
+"""
+    stan_code(sb::SBBRMI) -> String
+
+Return the transpiled Stan source generated from `sb.model`. Forwards
+to `StanBlocks.stan_code`. Useful for inspecting what the sbimpl walker
+emitted before compiling.
+"""
 stan_code(sb::SBBRMI) = StanBlocks.stan_code(sb.model)
 
 Base.show(io::IO, sb::SBBRMI) = begin
@@ -599,12 +660,23 @@ _sb_empty_id_lookup() = Dict{Tuple{Symbol,Tuple{Symbol,Any}}, Any}()
 
 # ---- sampling: likelihood vs linear-predictor split --------------------------
 
-# Extension hook. Overridden (e.g. in bruno-ext.jl) to route `target ~ f(...)`
-# where `f` is a known submodel family (`logistic_dr`, `gamma_time`, etc.)
-# straight to `target ~ <slic>(; kwargs)`, bypassing the pop-linear-predictor
-# wrap (which would wrongly multiply the submodel output by a beta). Return
-# anything non-`nothing` to claim the binding; return `nothing` to fall
-# through. Default: no hook registered.
+"""
+    _sb_submodel_rhs!(stmts, data, target, f, rhs)
+
+sbimpl extension hook. Override (e.g. in `bruno-ext.jl`) to route
+`target ~ f(...)` where `f` is a known SLIC submodel family
+(`logistic_dr`, `gamma_time`, …) straight to `target ~ <slic>(; kwargs)`,
+bypassing the population-linear-predictor wrap (which would otherwise
+multiply the submodel output by a fresh β).
+
+Return anything non-`nothing` to claim the binding; return `nothing` to
+fall through to the default linear-predictor path. The default method
+(this one) returns `nothing`.
+
+**Use `import BayesianRegressionModels: _sb_submodel_rhs!`** (not
+`using`) when adding methods from a downstream module so the binding is
+extended rather than shadowed.
+"""
 _sb_submodel_rhs!(stmts, data, target, f, rhs) = nothing
 
 # Built-in prior families on a missing-LHS sampling statement (e.g.
