@@ -601,7 +601,7 @@
     @include gallery = begin
         # Showable subset of `examples.entries()` (drops markdown-only
         # notes and bruno-* entries when bruno-ext.jl isn't on disk).
-        items() = [e for e in __parent__.examples.entries() if e.shown]
+        items() = [e for e in __parent__.__parent__.examples.entries() if e.shown]
 
         # Card grid: one placeholder article per item, lazy-loading its
         # body via `hx-trigger=load` against `card/<slug>`. Per-card

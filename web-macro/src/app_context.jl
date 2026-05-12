@@ -67,7 +67,7 @@ y1 ~ Normal(loc, err)
     end
 
     # `/` mirrors the pipeline landing page.
-    @get index() = __self__.pipeline.index()
+    @get index() = __self__.pipeline.index(__verb__)
 
     # Utility route: clears all in-memory caches on AppData (compute_steps
     # results, nested IP dicts, etc.). Useful after code changes when you
