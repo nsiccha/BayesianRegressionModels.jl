@@ -31,6 +31,15 @@ jobs:
         with:
           version: '1.10'
       - uses: julia-actions/cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install npm dependencies
+        # make.jl uses the split-build form (`build_vitepress=false` plus
+        # an explicit `DocumenterVitepress.build_docs`), which shells out
+        # to `npm run env -- vitepress build …` — vitepress must be
+        # installed via npm before the Julia build runs (see /ci §6g).
+        run: cd docs && npm install
       - name: Install dependencies
         # BRM's only nsiccha-org runtime dep is StanBlocks; the registered
         # version in General can be stale relative to BRM's expectations
