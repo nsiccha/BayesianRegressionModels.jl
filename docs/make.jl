@@ -1,9 +1,14 @@
 using Documenter, DocumenterVitepress, BayesianRegressionModels
-import HTMXObjects
 
-# Sync the canonical `htmxo-embed.ts` into our theme dir before
-# DocumenterVitepress runs. The theme's `index.ts` imports from it.
-HTMXObjects.vitepress_theme_install(joinpath(@__DIR__, "src", ".vitepress", "theme"))
+# Note: BRM is published from JuliaBayes/, which can't access the private
+# HTMXObjects.jl repo from CI. So `htmxo-embed.ts` is committed in-tree
+# (see docs/src/.vitepress/theme/) rather than synced from HTMXObjects via
+# `HTMXObjects.vitepress_theme_install` at build time. Local edits to the
+# canonical upstream file should be hand-copied; see /docs-vitepress §8.
+@static if Base.find_package("HTMXObjects") !== nothing
+    @eval import HTMXObjects
+    @eval HTMXObjects.vitepress_theme_install(joinpath(@__DIR__, "src", ".vitepress", "theme"))
+end
 
 makedocs(
     sitename = "BayesianRegressionModels.jl",

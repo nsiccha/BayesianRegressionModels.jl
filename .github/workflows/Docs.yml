@@ -33,25 +33,7 @@ jobs:
       - uses: julia-actions/cache@v2
       - name: Install dependencies
         run: |
-          git clone https://github.com/nsiccha/DynamicObjects.jl.git
-          git clone https://github.com/nsiccha/HTMX.jl.git
-          git clone https://github.com/nsiccha/HTMXObjects.jl.git
-          git clone https://github.com/nsiccha/ReactiveObjects.jl.git
-          git clone https://github.com/nsiccha/ReactiveHMC.jl.git
-          git clone https://github.com/nsiccha/StanBlocks.jl.git
-          git clone https://github.com/nsiccha/Treebars.jl.git
-          git clone https://github.com/nsiccha/WarmupHMC.jl.git
-          julia --project=docs -e 'using Pkg; Pkg.develop([
-            PackageSpec(path=pwd()),
-            PackageSpec(path="DynamicObjects.jl"),
-            PackageSpec(path="HTMX.jl"),
-            PackageSpec(path="HTMXObjects.jl"),
-            PackageSpec(path="ReactiveObjects.jl"),
-            PackageSpec(path="ReactiveHMC.jl"),
-            PackageSpec(path="StanBlocks.jl"),
-            PackageSpec(path="Treebars.jl"),
-            PackageSpec(path="WarmupHMC.jl"),
-          ]); Pkg.instantiate()'
+          julia --project=docs -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
       - name: Build and deploy
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
