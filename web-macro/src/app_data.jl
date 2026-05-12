@@ -23,7 +23,7 @@
     end
     # Per-(formula, namespace) cache of the rendered auto-PPC HTML element.
     # The underlying Stan fit is already memoized via polling_fetchindex /
-    # @memo on `r.stan.*`, but `build_ppc_section` itself is non-trivial
+    # @memo! on `r.stan.*`, but `build_ppc_section` itself is non-trivial
     # (DataFrames -> Vega-Lite specs); caching the resulting h.div node
     # turns repeated card opens into pure HTML re-emits.
     ppc_html_cache = ThreadsafeDict{Tuple{UInt,Symbol},Any}()
@@ -317,10 +317,10 @@
             # warmup-specific subset (8 props sharing the warmup_* prefix).
             @struct posterior = begin
                 # Gaussian-approximation draws from Pathfinder. Reads the IP
-                # via `@memo` so if `compute_steps` already computed it with
+                # via `@memo!` so if `compute_steps` already computed it with
                 # progress nesting, we get the cached value for free.
                 pathfinder = begin
-                    pf = @memo __parent__.pathfinder(__parent__.fit.instance, __parent__.init)
+                    pf = @memo! __parent__.pathfinder(__parent__.fit.instance, __parent__.init)
                     pf.position .+ pf.scale * randn(Xoshiro(43), __parent__.dim, 200)
                 end
                 # Default value. Switch the alias to `warmup.draws` to promote
@@ -349,15 +349,15 @@
 
                 @struct warmup = begin
                     # Parallel set for the warmup+MCMC path. The IP cache is
-                    # warmed by `fetchindex!` in `compute_steps`; `@memo`
+                    # warmed by `fetchindex!` in `compute_steps`; `@memo!`
                     # hits it here.
-                    draws = (@memo __parent__.__parent__.warmup_fit(__parent__.__parent__.fit.instance, __parent__.__parent__.init)).posterior_position
+                    draws = (@memo! __parent__.__parent__.warmup_fit(__parent__.__parent__.fit.instance, __parent__.__parent__.init)).posterior_position
                     dfs   = dfs_from_constrained(draws, __parent__.unc_names)
                     long_df    = dfs.long
                     wide_df    = dfs.wide
                     summary_df = dfs.summary
                     diagnostics = begin
-                        w = @memo __parent__.__parent__.warmup_fit(__parent__.__parent__.fit.instance, __parent__.__parent__.init)
+                        w = @memo! __parent__.__parent__.warmup_fit(__parent__.__parent__.fit.instance, __parent__.__parent__.init)
                         (; w.n_divergent_samples, ess=w.ess)
                     end
                     constrained_full = constrain_draws(draws, __parent__.__parent__.fit.instance; rng_seed=47)
@@ -463,13 +463,13 @@
                 if step_name === :stan_fit_pathfinder
                     # Warm the pathfinder IP cache under this phase's progress,
                     # then resolve the (long, wide, summary) bundle (which
-                    # reads back the cached value via `@memo`).
+                    # reads back the cached value via `@memo!`).
                     fetchindex!(progress, r.stan.pathfinder, r.stan.fit.instance, r.stan.init)
                     resolve(spec)
                 elseif step_name === :stan_fit_warmup
                     # Warm the warmup IP cache under this phase's progress,
                     # then resolve the (long, wide, summary, diagnostics)
-                    # bundle (which reads back the cached value via `@memo`).
+                    # bundle (which reads back the cached value via `@memo!`).
                     fetchindex!(progress, r.stan.warmup_fit, r.stan.fit.instance, r.stan.init)
                     resolve(spec)
                 else
