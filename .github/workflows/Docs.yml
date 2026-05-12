@@ -32,8 +32,18 @@ jobs:
           version: '1.10'
       - uses: julia-actions/cache@v2
       - name: Install dependencies
+        # BRM's only nsiccha-org runtime dep is StanBlocks; the registered
+        # version in General can be stale relative to BRM's expectations
+        # and cause precompile asserts during `using BayesianRegressionModels`.
+        # Clone the public source and Pkg.develop in a single batch
+        # (see /ci §5). HTMXObjects is private and not needed by the
+        # docs build — see make.jl's conditional theme install.
         run: |
-          julia --project=docs -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
+          git clone https://github.com/nsiccha/StanBlocks.jl.git
+          julia --project=docs -e 'using Pkg; Pkg.develop([
+            PackageSpec(path=pwd()),
+            PackageSpec(path="StanBlocks.jl"),
+          ]); Pkg.instantiate()'
       - name: Build and deploy
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
