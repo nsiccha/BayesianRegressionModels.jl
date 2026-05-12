@@ -39,7 +39,7 @@ jobs:
         # (see /ci §5). HTMXObjects is private and not needed by the
         # docs build — see make.jl's conditional theme install.
         run: |
-          git clone https://github.com/nsiccha/StanBlocks.jl.git
+          git clone -b dev https://github.com/nsiccha/StanBlocks.jl.git
           julia --project=docs -e 'using Pkg; Pkg.develop([
             PackageSpec(path=pwd()),
             PackageSpec(path="StanBlocks.jl"),
