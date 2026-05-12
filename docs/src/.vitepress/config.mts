@@ -33,8 +33,11 @@ export default defineConfig({
   cleanUrls: true,
   // Allow `http://localhost:…` references (gallery.md links to the
   // local BRM web app) — vitepress build flags them as dead links
-  // otherwise.
-  ignoreDeadLinks: [/^https?:\/\/localhost(:\d+)?(\/|$)/],
+  // otherwise. Also tolerate Documenter's `./@ref` artifact: when a
+  // `[`x`](@ref)` in a docstring can't be resolved and make.jl runs
+  // with `warnonly=true`, Documenter emits the link as a literal
+  // `./@ref`, which vitepress then flags as a dead link.
+  ignoreDeadLinks: [/^https?:\/\/localhost(:\d+)?(\/|$)/, /@ref/],
   outDir: 'REPLACE_ME_DOCUMENTER_VITEPRESS', // This is required for MarkdownVitepress to work correctly...
   head: [
     ['link', { rel: 'icon', href: 'REPLACE_ME_DOCUMENTER_VITEPRESS_FAVICON' }],
