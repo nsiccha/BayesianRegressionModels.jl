@@ -7,7 +7,7 @@ end
 
 # Stan draws → DataFrames plumbing, shared between prior-predictive generation
 # and posterior fits (pathfinder / warmup). Keep these as plain module-level
-# helpers so callsites inside `@struct stan = …` don't accidentally become IPs.
+# helpers so callsites inside `@include stan = …` don't accidentally become IPs.
 
 # Param-constrain each column of `unc_draws` (dim × n) with `include_tp=true,
 # include_gq=true`, returning an (m × n) matrix where `m = length(param_names(instance; include_tp=true, include_gq=true))`.

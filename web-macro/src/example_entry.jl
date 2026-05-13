@@ -47,7 +47,7 @@
            formula=isempty(formula_text) ? nothing : String(formula_text))
     end
     label   = get(_parsed.header, "label", basename(path))
-    @struct tier = begin
+    @include tier = begin
         n     = parse(Int, get(_parsed.header, "tier", "1"))
         label = get(_TIER_LABELS, n, "T$n")
         pill  = h.span(label; class="brm-tier-pill", data_tier=string(n))
@@ -67,7 +67,7 @@
     _parse_stage_set(key) = Set{Symbol}(
         Symbol(strip(s)) for s in split(get(_parsed.header, key, ""), ",")
         if !isempty(strip(s)))
-    @struct stages = begin
+    @include stages = begin
         pass = _parse_stage_set("stages_pass")
         fail = _parse_stage_set("stages_fail")
     end
@@ -118,7 +118,7 @@
         onclick="event.stopPropagation()",
     )
 
-    @struct status = begin
+    @include status = begin
         value = Symbol(get(_parsed.header, "status", "open"))
         id    = "status-$_label_hash"
         pills = h.span(; id, class="brm-status-pills")(
@@ -217,7 +217,7 @@
     # Per-stage indicator pills rendered in the card summary. Each links to
     # `/examples/<slug>?stage=<name>`, a shareable GET URL that loads the
     # card with that stage's result pre-populated (without force=true).
-    @struct stage = begin
+    @include stage = begin
         # Aliases to ExampleEntry's `stages` inline-struct (DO doesn't
         # auto-forward inline-struct names into sibling inline-structs, so
         # we pull what `state` reads explicitly — this also satisfies the
@@ -255,7 +255,7 @@
     # 0=none, 1=sb-only or sbbrm-only, 2=both → "most in need" sorts highest.
     _sort_flagged    = flag === :none ? 0 : flag === :both ? 2 : 1
 
-    @struct card = begin
+    @include card = begin
         id        = "example-card-$_label_hash"
         result_id = "example-result-$_label_hash"
 

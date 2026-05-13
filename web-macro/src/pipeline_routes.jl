@@ -20,7 +20,7 @@
     # renderers (`data`, `parse`, …, `stan_section`) are the dispatch targets
     # `index`'s `render_step` selects from. Single owner of the
     # `(formula, label, name)` axis — replaces the old sibling pair
-    # `@struct render = …` + `@get stage(name; force) = …`.
+    # `@include render = …` + `@get stage(name; force) = …`.
     @include stage(name::Symbol) = begin
         @get index(; force::Bool=false) = polling_fetchindex(
             __parent__.compute_steps, formula,
@@ -141,7 +141,7 @@
         # Stan-step renderers bundled. Dispatched from `index`'s
         # `render_step` by stripping the `stan_` prefix from the step key
         # and looking the suffix up on `stan`.
-        @struct stan = begin
+        @include stan = begin
             code = h.section(
                 h.h3("5b. StanCode — transpiled Stan source"),
                 h.pre(__parent__.context!().run.stan.src),
@@ -265,7 +265,7 @@
         # One section for one kind. `dispatch_spec` picks prior vs
         # posterior; `obs_y` is materialised lazily (only when needed +
         # only after the Binomial proportion conversion). No explicit
-        # type annotation on `p` since this lives in a @struct body and
+        # type annotation on `p` since this lives in a @include body and
         # the actual per-kind dispatch happens inside prior_spec /
         # posterior_spec / picker_dims / predictor_label / kind_tag.
         _build_one_ppc(kind, long, frame, which; id_prefix) = begin
@@ -331,7 +331,7 @@
         # `:stan_fit_pathfinder` from `.posterior`, `:stan_fit_warmup` from
         # `.posterior.warmup`. Each composes `posterior_plots` (tabset +
         # wide-table details) with `build_ppc_section` (per-PPCKind sections).
-        @struct stan_section = begin
+        @include stan_section = begin
             generate = let g = __parent__.context!().run.stan.generated,
                            truth = __parent__.context!().run.stan.truth.df,
                            long = g.df, wide = g.wide_df, summary = g.summary_df
@@ -349,7 +349,7 @@
                 push!(parts, plots.tabs, plots.wide_details)
                 h.section(parts...)
             end
-            @struct fit = begin
+            @include fit = begin
                 pathfinder = let p = __parent__.context!().run.stan.posterior,
                                 truth = __parent__.context!().run.stan.truth.unc_df,
                                 long = p.long_df, wide = p.wide_df,
