@@ -1612,7 +1612,7 @@ function _predictor_col_for(t, d::DataColumn, data)
 end
 _predictor_col_for(t, d, _) = error("sbimpl: expected data-backed NamedColumn for `$(name(t))`, got $(typeof(d))")
 _sb_predictor_col(t::ExprColumn, data, stmts, _pop_terms=()) = _sb_predictor_term!(stmts, data, getf(t), t)
-_sb_predictor_col(t, _, _, _pop_terms=()) = error("sbimpl: unsupported predictor term $(typeof(t)): $t")
+_sb_predictor_col(t, _data, _stmts, _pop_terms=()) = error("sbimpl: unsupported predictor term $(typeof(t)): $t")
 
 # Monotonic-effect predictor: emit `mo_<c> ~ _sb_mo(; x=<c>_idx)` and return
 # `mo_<c>` as the column. Scope: single NamedColumn inner arg backed by raw
