@@ -518,10 +518,16 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__) = begin
     # for per-sub-formula emission below.
     id_buckets = _sb_collect_id_buckets(brmi)
     id_lookup = _sb_emit_id_buckets!(stmts, data, id_buckets)
+    # Prepass 3: target -> observation-source map. Lets purely-intercept
+    # linear predictors (`loc ~ 1`, `log(y_scale) ~ 1`) borrow N from the
+    # observed `~` target that consumes them, instead of the hash-order
+    # `_sb_any_data_symbol(data)` fallback. See `_sb_collect_target_obs`.
+    target_obs = _sb_collect_target_obs(brmi)
     for (key, op) in pairs(brmi.operations)
         nc = _as_named_column(op)
         isnothing(nc) && error("sbimpl: top-level op `$key` is not a NamedColumn")
-        _sb_emit!(stmts, data, key, parent(nc); id_lookup)
+        obs_n = get(target_obs, key, nothing)
+        _sb_emit!(stmts, data, key, parent(nc); id_lookup, obs_n)
     end
     body = Expr(:block, stmts...)
     model = StanBlocks.SlicModel(body, data, mod)
@@ -635,8 +641,8 @@ end
 
 # ---- top-level op dispatch ---------------------------------------------------
 
-_sb_emit!(stmts, data, key, op::ExprColumn; id_lookup=_sb_empty_id_lookup()) =
-    _sb_emit_expr!(stmts, data, key, getf(op), op; id_lookup)
+_sb_emit!(stmts, data, key, op::ExprColumn; id_lookup=_sb_empty_id_lookup(), obs_n=nothing) =
+    _sb_emit_expr!(stmts, data, key, getf(op), op; id_lookup, obs_n)
 # Raw data / missing columns appear as top-level ops when the formula mentions
 # them as bare references (e.g. `c2` in `loc ~ 1 + c2`). Nothing to emit — the
 # prepass already stashed data columns in `data`.
@@ -644,11 +650,11 @@ _sb_emit!(stmts, data, key, ::DataColumn; kwargs...) = nothing
 _sb_emit!(stmts, data, key, ::MissingColumn; kwargs...) = nothing
 _sb_emit!(stmts, data, key, op; kwargs...) = error("sbimpl: top-level op for `$key` not an ExprColumn (got $(typeof(op)))")
 
-_sb_emit_expr!(stmts, data, key, ::typeof(~), op; id_lookup=_sb_empty_id_lookup()) = begin
+_sb_emit_expr!(stmts, data, key, ::typeof(~), op; id_lookup=_sb_empty_id_lookup(), obs_n=nothing) = begin
     lhs, rhs = getargs(op, 2)
-    _sb_sampling!(stmts, data, key, lhs, rhs; id_lookup)
+    _sb_sampling!(stmts, data, key, lhs, rhs; id_lookup, obs_n)
 end
-_sb_emit_expr!(stmts, data, key, ::typeof(assign), op; id_lookup=_sb_empty_id_lookup()) = begin
+_sb_emit_expr!(stmts, data, key, ::typeof(assign), op; id_lookup=_sb_empty_id_lookup(), kwargs...) = begin
     _, rhs = getargs(op, 2)
     target_expr = _sb_scalar_expr(rhs, data)
     push!(stmts, :($key = $target_expr))
@@ -757,24 +763,24 @@ _sb_prior_arg(x) = error("sbimpl: unsupported prior-arg shape $(typeof(x))")
 
 # LHS backed by real data => this is a likelihood. Record the observed values
 # under the formula name in `data` and emit `key ~ dist(args...)`.
-_sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lookup()) =
-    _sb_sampling_backed!(stmts, data, key, parent(lhs), rhs; id_lookup)
+_sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing) =
+    _sb_sampling_backed!(stmts, data, key, parent(lhs), rhs; id_lookup, obs_n)
 
-_sb_sampling_backed!(stmts, data, key, backing::DataColumn, rhs; id_lookup) = begin
+_sb_sampling_backed!(stmts, data, key, backing::DataColumn, rhs; id_lookup, kwargs...) = begin
     data[key] = _sb_data_vec(key, parent(backing))
     _sb_likelihood!(stmts, key, rhs, data)
 end
 
-_sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs; id_lookup) = begin
+_sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs; id_lookup, obs_n=nothing) = begin
     rhs_e = _as_expr_column(rhs)
     if !isnothing(rhs_e)
         _sb_submodel_rhs!(stmts, data, key, getf(rhs_e), rhs_e) !== nothing && return
         _sb_emit_prior!(stmts, key, getf(rhs_e), rhs_e) && return
     end
-    _sb_linear_predictor!(stmts, data, key, rhs; id_lookup, brmi_key=key)
+    _sb_linear_predictor!(stmts, data, key, rhs; id_lookup, brmi_key=key, obs_n)
 end
 
-_sb_sampling_backed!(stmts, data, key, backing, rhs; id_lookup) =
+_sb_sampling_backed!(stmts, data, key, backing, rhs; id_lookup, kwargs...) =
     error("sbimpl: unsupported LHS backing for `$key` ($(typeof(backing)))")
 
 # Link-transformed LHS: `log(err) ~ 1 + d`, `logit(p) ~ 1 + x`, etc.
@@ -788,16 +794,16 @@ _sb_sampling_backed!(stmts, data, key, backing, rhs; id_lookup) =
 # Stan name. Per-`typeof(f)` overrides (`mi`, future `cens`/`trunc`, …) live
 # as separate methods of `_sb_sampling!`, mirroring vimpl's
 # `vbroadcasted(::ExprColumn{typeof(F)})` extension idiom.
-_sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup()) =
-    _sb_sampling_through_link!(stmts, data, key, getf(lhs), only(getargs(lhs)), rhs; id_lookup)
+_sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing) =
+    _sb_sampling_through_link!(stmts, data, key, getf(lhs), only(getargs(lhs)), rhs; id_lookup, obs_n)
 
 _sb_sampling_through_link!(stmts, data, key, f, inner, rhs; kwargs...) =
     error("sbimpl: expected NamedColumn inside link `$f(...)`, got $(typeof(inner))")
-function _sb_sampling_through_link!(stmts, data, key, f, inner::NamedColumn, rhs; id_lookup)
+function _sb_sampling_through_link!(stmts, data, key, f, inner::NamedColumn, rhs; id_lookup, obs_n=nothing)
     inv_f = InverseFunctions.inverse(f)
     inner_name = name(inner)
     pre_name = Symbol(nameof(f), :_, inner_name)
-    _sb_linear_predictor!(stmts, data, pre_name, rhs; id_lookup, brmi_key=key)
+    _sb_linear_predictor!(stmts, data, pre_name, rhs; id_lookup, brmi_key=key, obs_n)
     push!(stmts, :($inner_name = $(_sb_julia_to_stan_fn(inv_f))($pre_name)))
 end
 
@@ -806,7 +812,7 @@ end
 # can reference it (e.g. `loc2 = ... + b * y`). One method on the same
 # `_sb_sampling!` dispatch surface — same shape as `vbroadcasted(::ExprColumn{typeof(protect)})`
 # and friends in vimpl.
-_sb_sampling!(stmts, data, key, lhs::ExprColumn{typeof(mi)}, rhs; id_lookup=_sb_empty_id_lookup()) =
+_sb_sampling!(stmts, data, key, lhs::ExprColumn{typeof(mi)}, rhs; id_lookup=_sb_empty_id_lookup(), kwargs...) =
     _sb_emit_mi!(stmts, data, key, lhs, rhs)
 
 # DRAFT: missing-data response handler. Triggered by `mi(y) ~ <family>(args)`.
@@ -959,7 +965,8 @@ _sb_classify_term!(t, pop_terms, ran_terms, direct_terms) =
 
 function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
                                 id_lookup=_sb_empty_id_lookup(),
-                                brmi_key::Symbol=target)
+                                brmi_key::Symbol=target,
+                                obs_n::Union{Symbol,Nothing}=nothing)
     terms = _sb_terms(rhs)
     pop_terms    = Any[]
     ran_terms    = Any[]  # `(expr | group)` -> collected per-group below
@@ -975,7 +982,7 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     if !isempty(pop_terms)
         col_exprs = Any[]
         for t in pop_terms
-            _sb_pop_cols!(col_exprs, t, data, stmts, pop_terms)
+            _sb_pop_cols!(col_exprs, t, data, stmts, pop_terms; obs_n)
         end
         X_name = Symbol(:X_, target)
         pop_name = Symbol(:pop_, target)
@@ -1501,13 +1508,13 @@ _sb_collect_terms_expr!(acc, _, x) = push!(acc, x)
 # `pop_terms` is threaded so the intercept emitter can borrow N from a
 # data-backed peer in the same formula (deterministic) rather than
 # probing the shared `data` dict in hash order.
-_sb_pop_cols!(cols, t, data, stmts, pop_terms=()) =
-    push!(cols, _sb_predictor_col(t, data, stmts, pop_terms))
-_sb_pop_cols!(cols, t::ExprColumn, data, stmts, pop_terms=()) =
-    _sb_pop_cols_expr!(cols, getf(t), t, data, stmts, pop_terms)
-_sb_pop_cols_expr!(cols, ::Any, t, data, stmts, pop_terms=()) =
-    push!(cols, _sb_predictor_col(t, data, stmts, pop_terms))
-_sb_pop_cols_expr!(cols, ::typeof(&), t, data, stmts, _pop_terms=()) =
+_sb_pop_cols!(cols, t, data, stmts, pop_terms=(); obs_n=nothing) =
+    push!(cols, _sb_predictor_col(t, data, stmts, pop_terms; obs_n))
+_sb_pop_cols!(cols, t::ExprColumn, data, stmts, pop_terms=(); obs_n=nothing) =
+    _sb_pop_cols_expr!(cols, getf(t), t, data, stmts, pop_terms; obs_n)
+_sb_pop_cols_expr!(cols, ::Any, t, data, stmts, pop_terms=(); obs_n=nothing) =
+    push!(cols, _sb_predictor_col(t, data, stmts, pop_terms; obs_n))
+_sb_pop_cols_expr!(cols, ::typeof(&), t, data, stmts, _pop_terms=(); kwargs...) =
     _sb_interaction_cols!(cols, t, data, stmts)
 
 # `a & b` interaction expansion. Three supported operand-type combinations:
@@ -1588,19 +1595,24 @@ end
 # `~` statement (e.g. `mo(c)`) can push before returning their column symbol.
 # Integer `1` -> intercept, NamedColumn -> reference by name, ExprColumn(mo, c)
 # -> submodel-sampled contrast column.
-_sb_predictor_col(t::Int, data, _stmts, pop_terms=()) = begin
+_sb_predictor_col(t::Int, data, _stmts, pop_terms=(); obs_n::Union{Symbol,Nothing}=nothing) = begin
     t == 1 || error("sbimpl: integer term must be `1` for intercept, got `$t`")
-    # Prefer borrowing N from a data-backed peer in the same formula —
-    # deterministic and length-correct. Fall back to the hash-order data
-    # probe only when no such peer exists (e.g. a purely-intercept `y ~ 1`
-    # formula); that fallback still has the known length-mismatch hazard
-    # for composite models with multi-length data, but a same-formula peer
-    # makes it unreachable for any mixed-intercept case.
+    # Three-tier length probe, in priority order:
+    #   1. A data-backed peer in the same formula's terms (`_sb_n_obs_probe`).
+    #      Deterministic for any mixed-intercept formula like `y ~ 1 + x`.
+    #   2. The observation column threaded from the likelihood walker
+    #      (`obs_n`). Covers purely-intercept formulas like `loc ~ 1` whose
+    #      length matches the observed `~` target consuming `loc`.
+    #   3. Hash-order fallback (`_sb_any_data_symbol`). Last resort; lossy
+    #      for composite models with multi-length data and reachable only
+    #      when neither (1) nor (2) yields a name (e.g. a `~ 1` formula
+    #      whose target isn't referenced by any observed likelihood).
     probe = _sb_n_obs_probe(pop_terms)
+    isnothing(probe) && !isnothing(obs_n) && (probe = obs_n)
     isnothing(probe) && (probe = _sb_any_data_symbol(data))
     :(rep_vector(1., num_elements($probe)))
 end
-_sb_predictor_col(t::NamedColumn, data, _stmts, _pop_terms=()) = _predictor_col_for(t, parent(t), data)
+_sb_predictor_col(t::NamedColumn, data, _stmts, _pop_terms=(); kwargs...) = _predictor_col_for(t, parent(t), data)
 
 # If the named column was already bound earlier in the walker (e.g.
 # `ftime ~ gamma_time(...)` emitted a `ftime ~ _sb_gamma_time(...)` stmt),
@@ -1615,8 +1627,8 @@ function _predictor_col_for(t, d::DataColumn, data)
     name(t)
 end
 _predictor_col_for(t, d, _) = error("sbimpl: expected data-backed NamedColumn for `$(name(t))`, got $(typeof(d))")
-_sb_predictor_col(t::ExprColumn, data, stmts, _pop_terms=()) = _sb_predictor_term!(stmts, data, getf(t), t)
-_sb_predictor_col(t, _data, _stmts, _pop_terms=()) = error("sbimpl: unsupported predictor term $(typeof(t)): $t")
+_sb_predictor_col(t::ExprColumn, data, stmts, _pop_terms=(); kwargs...) = _sb_predictor_term!(stmts, data, getf(t), t)
+_sb_predictor_col(t, _data, _stmts, _pop_terms=(); kwargs...) = error("sbimpl: unsupported predictor term $(typeof(t)): $t")
 
 # Monotonic-effect predictor: emit `mo_<c> ~ _sb_mo(; x=<c>_idx)` and return
 # `mo_<c>` as the column. Scope: single NamedColumn inner arg backed by raw
@@ -1792,6 +1804,50 @@ _sb_n_obs_probe(terms) = begin
     end
     nothing
 end
+
+# Prepass: build a `target -> observation` map. For each `~` op whose LHS is
+# observed (a data-backed NamedColumn directly, or wrapped in a link like
+# `log(y)` over a data-backed NamedColumn), walk the RHS recursively and
+# record `target_obs[ref_name] = obs_name` for every NamedColumn reference.
+# The observation column itself maps to itself. First write wins -- if a
+# target is referenced by multiple likelihoods, the first encountered op
+# (BRMI iteration order) supplies the source N. The intercept emitter
+# consults this map for purely-intercept formulas (`y ~ 1`, `loc ~ 1`) where
+# no in-formula data-backed peer exists; the threaded `obs_n` becomes the
+# length probe before falling through to `_sb_any_data_symbol`.
+function _sb_collect_target_obs(brmi::BRMI)
+    target_obs = Dict{Symbol,Symbol}()
+    for (_, op_nc) in pairs(brmi.operations)
+        op = _as_expr_column(parent(op_nc))
+        isnothing(op) && continue
+        getf(op) === ~ || continue
+        lhs, rhs = getargs(op, 2)
+        obs_name = _sb_observation_name(lhs)
+        isnothing(obs_name) && continue
+        get!(target_obs, obs_name, obs_name)
+        _sb_collect_rhs_refs!(target_obs, rhs, obs_name)
+    end
+    target_obs
+end
+
+# Resolve a `~` op's LHS to the observed data-column name (the source of N),
+# or `nothing` if the LHS isn't an observation. Handles direct
+# data-backed NamedColumn and one-arg link wrappers (`log(y)`, `mi(y)`, etc.).
+_sb_observation_name(_) = nothing
+_sb_observation_name(lhs::NamedColumn) = _n_obs_named_data(lhs, parent(lhs))
+_sb_observation_name(lhs::ExprColumn) = begin
+    args = getargs(lhs)
+    length(args) == 1 ? _sb_observation_name(args[1]) : nothing
+end
+
+# Walk a RHS expression tree, recording every NamedColumn reference's name
+# into `target_obs` keyed back to `obs_name`. `get!` ensures first-write
+# wins so the BRMI's natural iteration order picks the source.
+_sb_collect_rhs_refs!(_target_obs, _x, _obs_name) = nothing
+_sb_collect_rhs_refs!(target_obs, x::NamedColumn, obs_name) =
+    (get!(target_obs, name(x), obs_name); nothing)
+_sb_collect_rhs_refs!(target_obs, x::ExprColumn, obs_name) =
+    foreach(a -> _sb_collect_rhs_refs!(target_obs, a, obs_name), getargs(x))
 _sb_any_data_symbol(data) = begin
     isempty(data) && error("sbimpl: can't emit `rep_vector(1., n)` — no data column seen yet. Make sure an observed `~` comes before the intercept-only predictor, or add a concrete covariate.")
     # Prefer a flat length-N vector (numeric / integer) so `num_elements(...)` in
