@@ -975,7 +975,7 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     if !isempty(pop_terms)
         col_exprs = Any[]
         for t in pop_terms
-            _sb_pop_cols!(col_exprs, t, data, stmts)
+            _sb_pop_cols!(col_exprs, t, data, stmts, pop_terms)
         end
         X_name = Symbol(:X_, target)
         pop_name = Symbol(:pop_, target)
@@ -1494,12 +1494,16 @@ _sb_collect_terms_expr!(acc, _, x) = push!(acc, x)
 # Pop-term column accumulator. Most terms produce a single column via
 # `_sb_predictor_col`; interactions (`a:b`) can produce multiple columns
 # depending on operand types, so we push into a caller-owned vector.
-_sb_pop_cols!(cols, t, data, stmts) = push!(cols, _sb_predictor_col(t, data, stmts))
-_sb_pop_cols!(cols, t::ExprColumn, data, stmts) =
-    _sb_pop_cols_expr!(cols, getf(t), t, data, stmts)
-_sb_pop_cols_expr!(cols, ::Any, t, data, stmts) =
-    push!(cols, _sb_predictor_col(t, data, stmts))
-_sb_pop_cols_expr!(cols, ::typeof(&), t, data, stmts) =
+# `pop_terms` is threaded so the intercept emitter can borrow N from a
+# data-backed peer in the same formula (deterministic) rather than
+# probing the shared `data` dict in hash order.
+_sb_pop_cols!(cols, t, data, stmts, pop_terms=()) =
+    push!(cols, _sb_predictor_col(t, data, stmts, pop_terms))
+_sb_pop_cols!(cols, t::ExprColumn, data, stmts, pop_terms=()) =
+    _sb_pop_cols_expr!(cols, getf(t), t, data, stmts, pop_terms)
+_sb_pop_cols_expr!(cols, ::Any, t, data, stmts, pop_terms=()) =
+    push!(cols, _sb_predictor_col(t, data, stmts, pop_terms))
+_sb_pop_cols_expr!(cols, ::typeof(&), t, data, stmts, _pop_terms=()) =
     _sb_interaction_cols!(cols, t, data, stmts)
 
 # `a & b` interaction expansion. Three supported operand-type combinations:
@@ -1580,13 +1584,19 @@ end
 # `~` statement (e.g. `mo(c)`) can push before returning their column symbol.
 # Integer `1` -> intercept, NamedColumn -> reference by name, ExprColumn(mo, c)
 # -> submodel-sampled contrast column.
-_sb_predictor_col(t::Int, data, _stmts) = begin
+_sb_predictor_col(t::Int, data, _stmts, pop_terms=()) = begin
     t == 1 || error("sbimpl: integer term must be `1` for intercept, got `$t`")
-    # Use any data column to get n
-    probe = _sb_any_data_symbol(data)
+    # Prefer borrowing N from a data-backed peer in the same formula —
+    # deterministic and length-correct. Fall back to the hash-order data
+    # probe only when no such peer exists (e.g. a purely-intercept `y ~ 1`
+    # formula); that fallback still has the known length-mismatch hazard
+    # for composite models with multi-length data, but a same-formula peer
+    # makes it unreachable for any mixed-intercept case.
+    probe = _sb_n_obs_probe(pop_terms)
+    isnothing(probe) && (probe = _sb_any_data_symbol(data))
     :(rep_vector(1., num_elements($probe)))
 end
-_sb_predictor_col(t::NamedColumn, data, _stmts) = _predictor_col_for(t, parent(t), data)
+_sb_predictor_col(t::NamedColumn, data, _stmts, _pop_terms=()) = _predictor_col_for(t, parent(t), data)
 
 # If the named column was already bound earlier in the walker (e.g.
 # `ftime ~ gamma_time(...)` emitted a `ftime ~ _sb_gamma_time(...)` stmt),
@@ -1601,8 +1611,8 @@ function _predictor_col_for(t, d::DataColumn, data)
     name(t)
 end
 _predictor_col_for(t, d, _) = error("sbimpl: expected data-backed NamedColumn for `$(name(t))`, got $(typeof(d))")
-_sb_predictor_col(t::ExprColumn, data, stmts) = _sb_predictor_term!(stmts, data, getf(t), t)
-_sb_predictor_col(t, _, _) = error("sbimpl: unsupported predictor term $(typeof(t)): $t")
+_sb_predictor_col(t::ExprColumn, data, stmts, _pop_terms=()) = _sb_predictor_term!(stmts, data, getf(t), t)
+_sb_predictor_col(t, _, _, _pop_terms=()) = error("sbimpl: unsupported predictor term $(typeof(t)): $t")
 
 # Monotonic-effect predictor: emit `mo_<c> ~ _sb_mo(; x=<c>_idx)` and return
 # `mo_<c>` as the column. Scope: single NamedColumn inner arg backed by raw
