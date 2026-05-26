@@ -1820,7 +1820,7 @@ function _sb_collect_target_obs(brmi::BRMI)
     for (_, op_nc) in pairs(brmi.operations)
         op = _as_expr_column(parent(op_nc))
         isnothing(op) && continue
-        getf(op) === ~ || continue
+        getf(op) === (~) || continue
         lhs, rhs = getargs(op, 2)
         obs_name = _sb_observation_name(lhs)
         isnothing(obs_name) && continue
