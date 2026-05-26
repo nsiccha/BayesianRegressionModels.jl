@@ -1054,12 +1054,16 @@ end
 # Continuous/intercept terms produce a single column; categorical NamedColumns
 # expand to K-1 treatment-coded dummy columns (level 1 is reference), matching
 # the design-matrix that brms / lme4 build for `(1 + c | g)`.
-function _sb_ranef_cols!(cols, data, stmts, t)
-    _sb_ranef_cols_dispatch!(cols, data, stmts, t, _sb_cat_levels(t))
+# `gterms` is the full LHS-terms list of the current ranef block, threaded so
+# an intercept term (`t === 1`) can probe peer terms in the same block for a
+# deterministic length probe (analogous to how `pop_terms` is threaded on the
+# population path; see `_sb_pop_cols!`).
+function _sb_ranef_cols!(cols, data, stmts, t, gterms=())
+    _sb_ranef_cols_dispatch!(cols, data, stmts, t, _sb_cat_levels(t), gterms)
 end
-_sb_ranef_cols_dispatch!(cols, data, stmts, t, ::Nothing) =
-    push!(cols, _sb_predictor_col(t, data, stmts))
-function _sb_ranef_cols_dispatch!(cols, data, _stmts, t, levels)
+_sb_ranef_cols_dispatch!(cols, data, stmts, t, ::Nothing, gterms=()) =
+    push!(cols, _sb_predictor_col(t, data, stmts, gterms))
+function _sb_ranef_cols_dispatch!(cols, data, _stmts, t, levels, _gterms=())
     n_levels, idx = _sb_level_index(levels)
     n_levels >= 2 || error("sbimpl: categorical ranef term `$(name(t))` needs >= 2 levels (got $n_levels)")
     for lvl in 2:n_levels
@@ -1206,7 +1210,7 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, 
     else
         col_exprs = Any[]
         for t in gterms
-            _sb_ranef_cols!(col_exprs, data, stmts, t)
+            _sb_ranef_cols!(col_exprs, data, stmts, t, gterms)
         end
         Z_name = Symbol(:Z_, target, :_, g)
         k_name = Symbol(:n_terms_, target, :_, g)
@@ -1243,7 +1247,7 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::Tuple{NamedCo
     r_name = Symbol(:r_, target, :_, suffix)
     col_exprs = Any[]
     for t in gterms
-        _sb_ranef_cols!(col_exprs, data, stmts, t)
+        _sb_ranef_cols!(col_exprs, data, stmts, t, gterms)
     end
     Z_name = Symbol(:Z_, target, :_, suffix)
     k_name = Symbol(:n_terms_, target, :_, suffix)
@@ -1403,7 +1407,7 @@ function _sb_emit_id_ranef_block!(stmts, data, target::Symbol, info, gterms, sum
     r_name = Symbol(:r_, target, :_, suffix)
     col_exprs = Any[]
     for t in gterms
-        _sb_ranef_cols!(col_exprs, data, stmts, t)
+        _sb_ranef_cols!(col_exprs, data, stmts, t, gterms)
     end
     length(col_exprs) == length(cols) ||
         error("sbimpl: id-bucket `$suffix` for target `$target`: expanded $(length(col_exprs)) columns but reserved $(length(cols)) — internal mismatch")
