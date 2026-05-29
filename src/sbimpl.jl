@@ -144,6 +144,53 @@ ranef_correlated_draws = StanBlocks.@slic begin
     return (diag_pre_multiply(tau, L) * z)'   # n_groups x n_terms
 end
 
+# ---- cv-contagious ranef variants (opt-in; for out-of-sample / CV models) ----
+#
+# StanBlocks' cv-contagion (see StanBlocks forward.jl:321 + types.jl:215):
+# a parameter taints to a `:quantities` (generated-quantities re-draw) qual iff
+# its TYPE is cv, and a type is cv iff its own flag OR *any element of its size*
+# is cv. So a random effect flips to a GQ population re-draw exactly when its
+# SIZE traces from a cv-marked input. The default `ranef_*` submodels above size
+# the std-normal draw from the standalone data scalar `n_groups`, which carries
+# no taint -- so `maybecv(:<group>_idx)` reaches `group_idx` but never the RE's
+# size, and the RE stays a fitted parameter (the QT out-of-sample FAIL).
+#
+# These `_cv` variants are identical in *value* but size the std-normal draw
+# from `maximum(group_idx)` instead, computed INSIDE the body so the cv taint on
+# `group_idx` propagates into the size (`maximum` -> `cv` via passes.jl:23) and
+# flips the draw to a generated-quantities re-draw. `L`/`tau` keep their
+# `n_terms` (untainted) sizing, so under marking ONLY the standardised draw `z`
+# is re-drawn -- a leave-all-out population re-draw from the fitted covariance,
+# the semantics confirmed for QT's `source` knob.
+#
+# They are OPT-IN: emitted only for groups passed in `SBBRMI(...; cv_groups=...)`
+# (used when generating a CV model artifact, e.g. qt_cv.stan). The default build
+# keeps the `n_groups`-sized submodels above, so committed models are emitted
+# byte-for-byte unchanged and never recompile.
+#
+# Scope: only the clean `std_normal(; n=...)` forms below can flip via a size
+# change. The typed-LHS `_by`/stratified path (`z::vector[n_groups, n_terms] ~
+# multi_std_normal()`) cannot -- StanBlocks' typed-LHS forward (forward.jl:355)
+# derives cv from the RHS call-args, not the declared-size, so a cv size there
+# yields a cv *parameter*, not a `:quantities` re-draw. Making `gr(g, by=b)`
+# blocks and `(e | ID | g)` buckets cv-contagious needs either a StanBlocks
+# typed-LHS fix or a bare-`z` rewrite, and neither is in QT's current use case.
+ranef_intercept_cv = StanBlocks.@slic begin
+    log_scale ~ std_normal()
+    xi ~ std_normal(; n=maximum(group_idx))
+    return exp(log_scale) * xi[group_idx]
+end
+
+ranef_correlated_cv = StanBlocks.@slic begin
+    n_g    = maximum(group_idx)
+    L      ~ lkj_corr_cholesky(1.; n=n_terms)
+    tau    ~ std_normal(; n=n_terms, lower=0.)
+    z_flat ~ std_normal(; n=n_terms * n_g)
+    z = reshape(z_flat, n_terms, n_g)
+    b = (diag_pre_multiply(tau, L) * z)'   # n_groups x n_terms
+    return rows_dot_product(Z, b[group_idx, :])
+end
+
 # Stratified gather + Cholesky scale, kept as a Stan function (loops are not
 # allowed in @slic bodies, but they are allowed in @deffun bodies). For each
 # group g, pick the stratum s = stratum_idx[g] and compute
@@ -465,12 +512,23 @@ end
 # ==============================================================================
 
 """
-    SBBRMI(brmi::BRMI; mod=@__MODULE__) -> SBBRMI
+    SBBRMI(brmi::BRMI; mod=@__MODULE__, cv_groups=Set{Symbol}()) -> SBBRMI
 
 StanBlocks backend: walks `brmi`, emits a `StanBlocks.SlicModel`, and
 materialises the data dict. Pass `mod` if you're constructing the model
 from a module other than `BayesianRegressionModels` so SLIC's symbol
 resolver finds your locally-defined submodels.
+
+`cv_groups` is an opt-in set of grouping-factor names (e.g. `[:subject]`)
+whose per-group random effect should be emitted with **cv-contagious
+sizing** -- the std-normal draw is sized from `maximum(<g>_idx)` instead of
+the standalone data scalar `n_<g>`, so marking the group index with
+`maybecv(:<g>_idx)` at trace time flips that RE to a generated-quantities
+population re-draw (leave-all-out / out-of-sample). This is used when
+generating a CV model artifact; the default (empty `cv_groups`) emits the
+group RE byte-for-byte as before, so committed models never recompile. Only
+plain `(… | g)` ranefs are supported; stratified `gr(g, by=b)` and
+cross-formula `(… |ID| g)` buckets error if opted-in (see `ranef_*_cv`).
 
 Use [`stan_code`](@ref) to extract the transpiled Stan source. For
 sampling, load `StanLogDensityProblems` + `BridgeStan` and wrap the
@@ -488,7 +546,8 @@ struct SBBRMI{P<:BRMI, M, D<:AbstractDict}
     data::D
 end
 
-SBBRMI(brmi::BRMI; mod::Module=@__MODULE__) = begin
+SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}()) = begin
+    cv_groups = cv_groups isa Set ? cv_groups : Set{Symbol}(cv_groups)
     stmts = Any[]
     data = Dict{Symbol,Any}()
     # Prepass 0: collect every column wrapped in `mi(...)` somewhere in the
@@ -527,7 +586,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__) = begin
         nc = _as_named_column(op)
         isnothing(nc) && error("sbimpl: top-level op `$key` is not a NamedColumn")
         obs_n = get(target_obs, key, nothing)
-        _sb_emit!(stmts, data, key, parent(nc); id_lookup, obs_n)
+        _sb_emit!(stmts, data, key, parent(nc); id_lookup, obs_n, cv_groups)
     end
     body = Expr(:block, stmts...)
     model = StanBlocks.SlicModel(body, data, mod)
@@ -641,8 +700,8 @@ end
 
 # ---- top-level op dispatch ---------------------------------------------------
 
-_sb_emit!(stmts, data, key, op::ExprColumn; id_lookup=_sb_empty_id_lookup(), obs_n=nothing) =
-    _sb_emit_expr!(stmts, data, key, getf(op), op; id_lookup, obs_n)
+_sb_emit!(stmts, data, key, op::ExprColumn; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}()) =
+    _sb_emit_expr!(stmts, data, key, getf(op), op; id_lookup, obs_n, cv_groups)
 # Raw data / missing columns appear as top-level ops when the formula mentions
 # them as bare references (e.g. `c2` in `loc ~ 1 + c2`). Nothing to emit — the
 # prepass already stashed data columns in `data`.
@@ -650,9 +709,9 @@ _sb_emit!(stmts, data, key, ::DataColumn; kwargs...) = nothing
 _sb_emit!(stmts, data, key, ::MissingColumn; kwargs...) = nothing
 _sb_emit!(stmts, data, key, op; kwargs...) = error("sbimpl: top-level op for `$key` not an ExprColumn (got $(typeof(op)))")
 
-_sb_emit_expr!(stmts, data, key, ::typeof(~), op; id_lookup=_sb_empty_id_lookup(), obs_n=nothing) = begin
+_sb_emit_expr!(stmts, data, key, ::typeof(~), op; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}()) = begin
     lhs, rhs = getargs(op, 2)
-    _sb_sampling!(stmts, data, key, lhs, rhs; id_lookup, obs_n)
+    _sb_sampling!(stmts, data, key, lhs, rhs; id_lookup, obs_n, cv_groups)
 end
 _sb_emit_expr!(stmts, data, key, ::typeof(assign), op; id_lookup=_sb_empty_id_lookup(), kwargs...) = begin
     _, rhs = getargs(op, 2)
@@ -763,21 +822,21 @@ _sb_prior_arg(x) = error("sbimpl: unsupported prior-arg shape $(typeof(x))")
 
 # LHS backed by real data => this is a likelihood. Record the observed values
 # under the formula name in `data` and emit `key ~ dist(args...)`.
-_sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing) =
-    _sb_sampling_backed!(stmts, data, key, parent(lhs), rhs; id_lookup, obs_n)
+_sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}()) =
+    _sb_sampling_backed!(stmts, data, key, parent(lhs), rhs; id_lookup, obs_n, cv_groups)
 
 _sb_sampling_backed!(stmts, data, key, backing::DataColumn, rhs; id_lookup, kwargs...) = begin
     data[key] = _sb_data_vec(key, parent(backing))
     _sb_likelihood!(stmts, key, rhs, data)
 end
 
-_sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs; id_lookup, obs_n=nothing) = begin
+_sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs; id_lookup, obs_n=nothing, cv_groups=Set{Symbol}()) = begin
     rhs_e = _as_expr_column(rhs)
     if !isnothing(rhs_e)
         _sb_submodel_rhs!(stmts, data, key, getf(rhs_e), rhs_e) !== nothing && return
         _sb_emit_prior!(stmts, key, getf(rhs_e), rhs_e) && return
     end
-    _sb_linear_predictor!(stmts, data, key, rhs; id_lookup, brmi_key=key, obs_n)
+    _sb_linear_predictor!(stmts, data, key, rhs; id_lookup, brmi_key=key, obs_n, cv_groups)
 end
 
 _sb_sampling_backed!(stmts, data, key, backing, rhs; id_lookup, kwargs...) =
@@ -794,16 +853,16 @@ _sb_sampling_backed!(stmts, data, key, backing, rhs; id_lookup, kwargs...) =
 # Stan name. Per-`typeof(f)` overrides (`mi`, future `cens`/`trunc`, …) live
 # as separate methods of `_sb_sampling!`, mirroring vimpl's
 # `vbroadcasted(::ExprColumn{typeof(F)})` extension idiom.
-_sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing) =
-    _sb_sampling_through_link!(stmts, data, key, getf(lhs), only(getargs(lhs)), rhs; id_lookup, obs_n)
+_sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}()) =
+    _sb_sampling_through_link!(stmts, data, key, getf(lhs), only(getargs(lhs)), rhs; id_lookup, obs_n, cv_groups)
 
 _sb_sampling_through_link!(stmts, data, key, f, inner, rhs; kwargs...) =
     error("sbimpl: expected NamedColumn inside link `$f(...)`, got $(typeof(inner))")
-function _sb_sampling_through_link!(stmts, data, key, f, inner::NamedColumn, rhs; id_lookup, obs_n=nothing)
+function _sb_sampling_through_link!(stmts, data, key, f, inner::NamedColumn, rhs; id_lookup, obs_n=nothing, cv_groups=Set{Symbol}())
     inv_f = InverseFunctions.inverse(f)
     inner_name = name(inner)
     pre_name = Symbol(nameof(f), :_, inner_name)
-    _sb_linear_predictor!(stmts, data, pre_name, rhs; id_lookup, brmi_key=key, obs_n)
+    _sb_linear_predictor!(stmts, data, pre_name, rhs; id_lookup, brmi_key=key, obs_n, cv_groups)
     push!(stmts, :($inner_name = $(_sb_julia_to_stan_fn(inv_f))($pre_name)))
 end
 
@@ -966,7 +1025,8 @@ _sb_classify_term!(t, pop_terms, ran_terms, direct_terms) =
 function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
                                 id_lookup=_sb_empty_id_lookup(),
                                 brmi_key::Symbol=target,
-                                obs_n::Union{Symbol,Nothing}=nothing)
+                                obs_n::Union{Symbol,Nothing}=nothing,
+                                cv_groups=Set{Symbol}())
     terms = _sb_terms(rhs)
     pop_terms    = Any[]
     ran_terms    = Any[]  # `(expr | group)` -> collected per-group below
@@ -997,7 +1057,7 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
         _sb_emit_direct!(stmts, data, target, dt, summands)
     end
 
-    _sb_emit_ranefs!(stmts, data, target, ran_terms, summands; id_lookup, brmi_key)
+    _sb_emit_ranefs!(stmts, data, target, ran_terms, summands; id_lookup, brmi_key, cv_groups)
 
     if length(summands) == 1
         push!(stmts, :($target = $(only(summands))))
@@ -1162,7 +1222,8 @@ end
 
 function _sb_emit_ranefs!(stmts, data, target::Symbol, ran_terms, summands;
                            id_lookup=_sb_empty_id_lookup(),
-                           brmi_key::Symbol=target)
+                           brmi_key::Symbol=target,
+                           cv_groups=Set{Symbol}())
     isempty(ran_terms) && return
     # Partition: ID'd terms route to the pre-emitted shared bucket; plain terms
     # coalesce per-target via the existing `ranef_correlated` block. Bare-
@@ -1188,11 +1249,20 @@ function _sb_emit_ranefs!(stmts, data, target::Symbol, ran_terms, summands;
         gterms = plain_by_group[k]
         desc = plain_descs[k]
         isempty(gterms) && error("sbimpl: ranef `(… | $k)` has no terms after dropping `0`")
-        _sb_emit_ranef_block!(stmts, data, target, desc, gterms, summands)
+        _sb_emit_ranef_block!(stmts, data, target, desc, gterms, summands; cv_groups)
     end
     for k in id_keys_seen
         gterms = id_terms_by_bucket[k]
         isempty(gterms) && error("sbimpl: ranef `(… | $(k[1]) | $(k[2]))` has no terms after dropping `0`")
+        # The `|ID|` bucket path shares one pre-emitted `ranef_correlated_draws`
+        # block (prepass 2, before cv_groups is known) -- not yet cv-contagious.
+        # Error rather than silently emit an in-sample RE for an opted-in group.
+        k[2] in cv_groups && error(
+            "sbimpl: cv-contagious sizing requested for group `$(k[2])`, but it ",
+            "appears in a `(… |$(k[1])| $(k[2]))` cross-formula ID bucket, whose ",
+            "shared draws block is emitted in a prepass and is not yet cv-aware. ",
+            "Use a plain `(… | $(k[2]))` ranef for the cv group, or extend the ",
+            "bucket emitter -- not yet supported.")
         info = get(id_lookup, (brmi_key, k), nothing)
         info === nothing && error("sbimpl: internal — no pre-emitted bucket for (target=$brmi_key, id=$(k[1]), group=$(k[2]))")
         _sb_emit_id_ranef_block!(stmts, data, target, info, gterms, summands)
@@ -1200,10 +1270,16 @@ function _sb_emit_ranefs!(stmts, data, target::Symbol, ran_terms, summands;
 end
 
 # Emit a single ranef block for one normalized group descriptor.
-function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, gterms, summands)
+# `cv_groups`: groups whose RE should be sized cv-contagiously (opt-in, for CV
+# model artifacts) -- emits the `_cv` submodel variants so `maybecv(:<g>_idx)`
+# flips the RE to a generated-quantities population re-draw. Empty by default,
+# in which case the emitted Stan is byte-identical to before.
+function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, gterms, summands;
+                                cv_groups=Set{Symbol}())
     g_backing = _as_data_column(parent(group))
     isnothing(g_backing) && error("sbimpl: group `$(name(group))` must be a raw data column")
     g = name(group)
+    is_cv = g in cv_groups
     n_levels, g_idx = _sb_level_index(parent(g_backing))
     idx_name = Symbol(g, :_idx)
     n_name   = Symbol(:n_, g)
@@ -1212,8 +1288,13 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, 
     r_name = Symbol(:r_, target, :_, g)
     if length(gterms) == 1 && gterms[1] === 1
         # (1 | g) fast/equivalent path -- stays on ranef_intercept so the
-        # emitted Stan matches existing sb.3 smoke tests bit for bit.
-        push!(stmts, :($r_name ~ ranef_intercept(; group_idx=$idx_name, n_groups=$n_name)))
+        # emitted Stan matches existing sb.3 smoke tests bit for bit. The cv
+        # variant sizes `xi` from `maximum(group_idx)` and takes no `n_groups`.
+        if is_cv
+            push!(stmts, :($r_name ~ ranef_intercept_cv(; group_idx=$idx_name)))
+        else
+            push!(stmts, :($r_name ~ ranef_intercept(; group_idx=$idx_name, n_groups=$n_name)))
+        end
     else
         col_exprs = Any[]
         for t in gterms
@@ -1223,20 +1304,33 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, 
         k_name = Symbol(:n_terms_, target, :_, g)
         data[k_name] = length(col_exprs)
         push!(stmts, :($Z_name = $(Expr(:call, :hcat, col_exprs...))))
-        push!(stmts, :($r_name ~ ranef_correlated(;
-            Z=$Z_name, group_idx=$idx_name,
-            n_groups=$n_name, n_terms=$k_name)))
+        if is_cv
+            push!(stmts, :($r_name ~ ranef_correlated_cv(;
+                Z=$Z_name, group_idx=$idx_name, n_terms=$k_name)))
+        else
+            push!(stmts, :($r_name ~ ranef_correlated(;
+                Z=$Z_name, group_idx=$idx_name,
+                n_groups=$n_name, n_terms=$k_name)))
+        end
     end
     push!(summands, r_name)
 end
 
-function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::Tuple{NamedColumn,NamedColumn}, gterms, summands)
+function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::Tuple{NamedColumn,NamedColumn}, gterms, summands;
+                                cv_groups=Set{Symbol}())
     gcol, bcol = group
     g_backing = _as_data_column(parent(gcol))
     b_backing = _as_data_column(parent(bcol))
     isnothing(g_backing) && error("sbimpl: group `$(name(gcol))` must be a raw data column")
     isnothing(b_backing) && error("sbimpl: `by=$(name(bcol))` must be a raw data column")
     g, b = name(gcol), name(bcol)
+    g in cv_groups && error(
+        "sbimpl: cv-contagious sizing requested for group `$g`, but `$g` is a ",
+        "stratified `gr($g, by=$b)` ranef whose `z` is declared via typed-LHS. ",
+        "StanBlocks' typed-LHS forward derives cv from RHS call-args, not the ",
+        "declared size, so a cv size yields a cv *parameter*, not a generated-",
+        "quantities re-draw. Making `by=` blocks cv-contagious needs a bare-`z` ",
+        "rewrite or a StanBlocks typed-LHS fix -- not yet supported.")
     n_groups, g_idx = _sb_level_index(parent(g_backing))
     n_strata, b_idx = _sb_level_index(parent(b_backing))
     stratum_idx = _sb_stratum_idx(g_idx, b_idx, g, b)

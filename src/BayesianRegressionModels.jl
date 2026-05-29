@@ -70,6 +70,7 @@ export vbroadcasted, vmeta_sampling_rhs, _sb_submodel_rhs!
 export popefs, cdirichlet, c0dirichlet, c01dirichlet,
        ranef_intercept, ranef_correlated, ranef_correlated_by,
        ranef_correlated_draws, ranef_correlated_by_draws,
+       ranef_intercept_cv, ranef_correlated_cv,
        _sb_mo, _sb_cat, _sb_ar1, _sb_s, _sb_me, _sb_hsgp, _sb_horseshoe,
        _sb_mi_normal, mi_merge,
        zero_inflated_poisson, zero_inflated_poisson_lpmf,
