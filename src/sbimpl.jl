@@ -1103,14 +1103,27 @@ function _sb_emit_direct!(stmts, data, target::Symbol, t::ExprColumn, summands)
 end
 
 # Categorical population-level predictor. Allocates K-1 betas via `_sb_cat`
-# and pushes the per-row contribution column into `summands`.
+# and pushes the per-row contribution column into `summands`. K == 1 (single
+# level) degenerates to a zero column instead of erroring — see the in-body note.
 function _sb_emit_cat!(stmts, data, t::NamedColumn, summands)
     backing = parent(t)
     n_levels, idx = _sb_level_index(parent(backing))
-    n_levels >= 2 || error("sbimpl: categorical `$(name(t))` needs >= 2 levels (got $n_levels)")
+    col_name = Symbol(:cat_, name(t))
+    if n_levels < 2
+        # Single-level categorical: K-1 = 0 treatment contrasts, so the term
+        # degenerates to a zero contribution — the lone level is absorbed by the
+        # intercept (or, for an intercept-less predictor, vanishes). Emit a literal
+        # zero column instead of erroring, so callers never need an
+        # `n_levels > 1 ? " + c" : ""` conditional: `y ~ 1 + c` ≡ `y ~ 1`, and a
+        # no-intercept `b ~ c` ≡ 0, at K == 1. (`_sb_cat` already degenerates via
+        # `std_normal(; n=0)`, but the assembler has no zero-summand branch —
+        # `length(summands)==0` would emit `+()` — so we contribute a column, not skip.)
+        data[col_name] = zeros(Float64, length(idx))
+        push!(summands, col_name)
+        return
+    end
     idx_name = Symbol(name(t), :_idx)
     n_name   = Symbol(name(t), :_n_levels)
-    col_name = Symbol(:cat_, name(t))
     data[idx_name] = idx
     data[n_name]   = n_levels
     push!(stmts, :($col_name ~ _sb_cat(; x=$idx_name, n_levels=$n_name)))
