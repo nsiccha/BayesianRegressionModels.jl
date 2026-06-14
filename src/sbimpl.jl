@@ -1454,6 +1454,74 @@ function _sb_collect_id_buckets(brmi::BRMI)
     buckets
 end
 
+# ---- group-block prepass (Prepass 2.5) ---------------------------------------
+#
+# Scan brmi.operations for `mu ~ f(...)` where f has a _sb_term_group_block
+# declaration and mu is a MissingColumn (parameter, not data). Collect them;
+# a subsequent emit step allocates one ranef_correlated_draws block per
+# (f, group-column) pair and builds a lookup for the emit phase.
+
+function _sb_collect_group_block_terms(brmi::BRMI)
+    result = Any[]
+    for (key, op_nc) in pairs(brmi.operations)
+        op = _as_expr_column(parent(op_nc)); isnothing(op) && continue
+        getf(op) === (~) || continue
+        lhs, rhs = getargs(op, 2)
+        lhs_nc = _as_named_column(lhs); isnothing(lhs_nc) && continue
+        isnothing(_as_missing_column(parent(lhs_nc))) && continue
+        rhs_e = _as_expr_column(rhs); isnothing(rhs_e) && continue
+        f = getf(rhs_e)
+        decl = _sb_term_group_block(f)
+        isnothing(decl) && continue
+        push!(result, (; key, f, rhs_e, decl))
+    end
+    result
+end
+
+# Allocate one ranef_correlated_draws block per (f, group-column) pair and
+# return a lookup Dict{(f, group_name) => (; block_name, idx_name, n_per_group)}.
+# Idempotent: duplicate (f, group) pairs within the same BRMI are skipped.
+function _sb_emit_group_blocks!(stmts, data, gb_terms)
+    lookup = Dict{Tuple{Any,Symbol}, NamedTuple}()
+    for (; f, rhs_e, decl) in gb_terms
+        pos = get(decl, :group_arg_pos, 1)
+        args = getargs(rhs_e)
+        pos <= length(args) || error(
+            "sbimpl: group-block term `$(nameof(f))` has group_arg_pos=$pos ",
+            "but only $(length(args)) args")
+        group_col = _as_named_column(args[pos])
+        isnothing(group_col) && error(
+            "sbimpl: group-block term `$(nameof(f))` arg $pos must be a ",
+            "NamedColumn group, got $(typeof(args[pos]))")
+        gname = name(group_col)
+        lk = (f, gname)
+        haskey(lookup, lk) && continue
+        suffix = Symbol(nameof(f), :_, gname)
+        block_name = Symbol(:b_, suffix)
+        n_terms_name = Symbol(:n_terms_, suffix)
+        data[n_terms_name] = decl.n_per_group
+        idx_name, n_name = _sb_ensure_group_data!(data, group_col)
+        push!(stmts, :($block_name ~ ranef_correlated_draws(;
+            group_idx=$idx_name, n_groups=$n_name, n_terms=$n_terms_name)))
+        lookup[lk] = (; block_name, idx_name, n_per_group=decl.n_per_group)
+    end
+    lookup
+end
+
+# Look up block_info for a group-block term call at emit time, or nothing.
+# Calls _sb_term_group_block(f) to retrieve group_arg_pos, then matches the
+# concrete group-column name against the prepass-built lookup.
+function _sb_find_group_block(f, rhs_e, group_block_lookup)
+    decl = _sb_term_group_block(f)
+    isnothing(decl) && return nothing
+    pos = get(decl, :group_arg_pos, 1)
+    args = getargs(rhs_e)
+    pos > length(args) && return nothing
+    group_col = _as_named_column(args[pos])
+    isnothing(group_col) && return nothing
+    get(group_block_lookup, (f, name(group_col)), nothing)
+end
+
 _sb_group_desc_matches(a::NamedColumn, b::NamedColumn) = name(a) === name(b)
 _sb_group_desc_matches(a::Tuple{NamedColumn,NamedColumn}, b::Tuple{NamedColumn,NamedColumn}) =
     name(a[1]) === name(b[1]) && name(a[2]) === name(b[2])
