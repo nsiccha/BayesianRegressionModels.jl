@@ -195,6 +195,20 @@ end
 # allowed in @slic bodies, but they are allowed in @deffun bodies). For each
 # group g, pick the stratum s = stratum_idx[g] and compute
 #   b[g, :] = (diag_pre_multiply(tau[s, :], L[s, :, :]) * z[g, :])'.
+
+# ---- group-block toy demo term -----------------------------------------------
+#
+# sb_group_demo: demonstrates the inverted-control group-block mechanism.
+# Allocates 2 correlated per-group params via ranef_correlated_draws (proper
+# 2x2 LKJ block), receives them as `group_block` (n_groups x 2 matrix), and
+# returns the per-obs sum of both per-group params.
+# No docstring (docstring → @deffun AssertionError gotcha; see primer).
+function sb_group_demo end
+
+sb_group_demo_slic = StanBlocks.@slic begin
+    return group_block[group_idx, 1] + group_block[group_idx, 2]
+end
+
 # Zero-inflated Poisson lpmf (per-element + vectorised). Per element:
 #   y == 0 -> log_sum_exp(log(zi),  log1m(zi) + poisson_lpmf(0  | lambda))
 #   y >  0 ->                       log1m(zi) + poisson_lpmf(y  | lambda)
@@ -743,6 +757,42 @@ fall through to the default linear-predictor path. The default method
 extended rather than shadowed.
 """
 _sb_submodel_rhs!(stmts, data, target, f, rhs) = nothing
+
+# ---- group-block declaration + emit API -------------------------------------
+#
+# A submodel term author declares K normally-distributed correlated per-group
+# params by defining a `_sb_term_group_block(::typeof(term))` method. BRM's
+# Prepass 2.5 reads the declaration, allocates one ranef_correlated_draws
+# block per (term-function, group-column) pair, and threads the un-expanded
+# n_groups×K matrix into the term at emit time via `_sb_emit_group_block_term!`.
+#
+# Declaration shape: (; n_per_group::Int, group_arg_pos::Int)
+#   n_per_group   — K params per group (fixed by the term, not user-adjustable)
+#   group_arg_pos — which positional arg of the term call is the grouping column
+#                   (defaults to 1 when reading via `get(decl, :group_arg_pos, 1)`)
+#
+# Use `import BayesianRegressionModels: _sb_emit_group_block_term!` when adding
+# methods from a downstream module so the binding is extended, not shadowed.
+
+# Default: no group block. Override for declaring terms.
+_sb_term_group_block(_) = nothing
+
+# Toy term declaration: 2 correlated params per group, first arg is the group.
+_sb_term_group_block(::typeof(sb_group_demo)) = (; n_per_group=2, group_arg_pos=1)
+
+# Emit hook for group-block terms. block_info = (; block_name, idx_name, n_per_group).
+# Default errors so a term with a declaration but no emit method is caught early.
+_sb_emit_group_block_term!(stmts, data, target, f, rhs_e, block_info) =
+    error("sbimpl: `$(nameof(f))` declared a group block but has no ",
+          "`_sb_emit_group_block_term!` method — define one.")
+
+# Toy term emit: thread group_block + group_idx into sb_group_demo_slic.
+function _sb_emit_group_block_term!(stmts, data, target, ::typeof(sb_group_demo),
+                                     rhs_e, block_info)
+    (; block_name, idx_name) = block_info
+    push!(stmts, :($target ~ sb_group_demo_slic(;
+        group_block=$block_name, group_idx=$idx_name)))
+end
 
 # Built-in prior families on a missing-LHS sampling statement (e.g.
 # `coef_a ~ Horseshoe()`). Returns `true` if it consumed the binding,
