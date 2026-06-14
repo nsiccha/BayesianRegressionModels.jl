@@ -14,7 +14,7 @@
     # OOM-killed the 3.8 GB strato box). Holding the global lock around
     # `compile_model` caps the box at one compile in flight; StanModel
     # construction is left outside the lock (cheap dlopen).
-    @include stan_locks = begin
+    @struct stan_locks = begin
         # Keyed by absolute .stan path. Entries are never reaped; one per
         # distinct compiled model. `get!(ReentrantLock, per_path, path)`
         # lazily creates.
@@ -42,7 +42,7 @@
     # a `:kw` Expr. Unclear if there's a sensible meaning for such defaults at
     # all (cache keying, forwarding, etc.) or if we should just continue
     # requiring bare Symbol params.
-    @include run(text, namespace) = begin
+    @struct run(text, namespace) = begin
         formula = Formula(text)
         df = dataset.df
         container = dataset.container(namespace)
@@ -89,7 +89,7 @@
 
         # Everything Stan-related bundled under `r.stan.*`. Nested access via
         # step_chain's tuple-path specs (e.g. `(:stan, :src)`).
-        @include stan = begin
+        @struct stan = begin
             src = stan_code(sbbrmi)
             # Hash-keyed cache path so identical Stan source reuses the same
             # .stan (and co-located .so) across requests. `BridgeStan.compile_model`
@@ -160,7 +160,7 @@
             # transformed parameters and generated-quantities (the synthetic
             # outcomes `y_sim` live in the GQ block when the model defines
             # one).
-            @include generated = begin
+            @struct generated = begin
                 n     = 50
                 unc   = 0.1 .* randn(Xoshiro(44), dim, n)
                 names = BridgeStan.param_names(instance; include_tp=true, include_gq=true)
@@ -201,7 +201,7 @@
             # `generated.df`'s long-format layout); `unc_df` uses the
             # unconstrained subset (matches `posterior.long_df` on the fit
             # path so the scatter overlay joins correctly).
-            @include truth = begin
+            @struct truth = begin
                 df = begin
                     truth_col = view(generated.value, :, fit.draw_idx)
                     splits     = [split(nm, '.', limit=2) for nm in generated.names]
@@ -240,7 +240,7 @@
             # then a fresh `instance` is bound to that synthetic data and used
             # by `pathfinder` / `warmup_fit` to recover the ground-truth
             # `generated.unc[:, draw_idx]`.
-            @include fit = begin
+            @struct fit = begin
                 draw_idx = 1
                 truth_unc = collect(view(generated.unc, :, draw_idx))
                 data_dict = begin
@@ -315,7 +315,7 @@
             # posterior" lint by giving every member a home inside `@include
             # posterior`. The nested `@include warmup` further bundles the
             # warmup-specific subset (8 props sharing the warmup_* prefix).
-            @include posterior = begin
+            @struct posterior = begin
                 # Gaussian-approximation draws from Pathfinder. Reads the IP
                 # via `@memo!` so if `compute_steps` already computed it with
                 # progress nesting, we get the cached value for free.
@@ -347,7 +347,7 @@
                     BridgeStan.param_names(__parent__.fit.instance; include_tp=true, include_gq=true),
                 ).long
 
-                @include warmup = begin
+                @struct warmup = begin
                     # Parallel set for the warmup+MCMC path. The IP cache is
                     # warmed by `fetchindex!` in `compute_steps`; `@memo!`
                     # hits it here.
@@ -378,7 +378,7 @@
 
     # Per-request bundle for a (label, formula) pair. Pure construction; the
     # routes side handles persistence before invoking this.
-    @include context(label, formula) = begin
+    @struct context(label, formula) = begin
         namespace = namespace_from(label)
         run = __parent__.run(formula, namespace)
         sb_repro_html = begin
