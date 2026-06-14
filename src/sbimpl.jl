@@ -591,6 +591,13 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}()) = begin
     # for per-sub-formula emission below.
     id_buckets = _sb_collect_id_buckets(brmi)
     id_lookup = _sb_emit_id_buckets!(stmts, data, id_buckets)
+    # Prepass 2.5: group-block terms. For each `mu ~ f(...)` where f has a
+    # _sb_term_group_block declaration, allocate one ranef_correlated_draws
+    # block per (f, group-column) pair. The lookup is threaded into _sb_emit!
+    # so _sb_sampling_backed! can route declaring terms to their emit hook
+    # with the pre-allocated block name and group-index name in hand.
+    gb_terms = _sb_collect_group_block_terms(brmi)
+    group_block_lookup = _sb_emit_group_blocks!(stmts, data, gb_terms)
     # Prepass 3: target -> observation-source map. Lets purely-intercept
     # linear predictors (`loc ~ 1`, `log(y_scale) ~ 1`) borrow N from the
     # observed `~` target that consumes them, instead of the hash-order
@@ -600,7 +607,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}()) = begin
         nc = _as_named_column(op)
         isnothing(nc) && error("sbimpl: top-level op `$key` is not a NamedColumn")
         obs_n = get(target_obs, key, nothing)
-        _sb_emit!(stmts, data, key, parent(nc); id_lookup, obs_n, cv_groups)
+        _sb_emit!(stmts, data, key, parent(nc); id_lookup, obs_n, cv_groups, group_block_lookup)
     end
     body = Expr(:block, stmts...)
     model = StanBlocks.SlicModel(body, data, mod)
@@ -714,8 +721,8 @@ end
 
 # ---- top-level op dispatch ---------------------------------------------------
 
-_sb_emit!(stmts, data, key, op::ExprColumn; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}()) =
-    _sb_emit_expr!(stmts, data, key, getf(op), op; id_lookup, obs_n, cv_groups)
+_sb_emit!(stmts, data, key, op::ExprColumn; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), group_block_lookup=Dict()) =
+    _sb_emit_expr!(stmts, data, key, getf(op), op; id_lookup, obs_n, cv_groups, group_block_lookup)
 # Raw data / missing columns appear as top-level ops when the formula mentions
 # them as bare references (e.g. `c2` in `loc ~ 1 + c2`). Nothing to emit — the
 # prepass already stashed data columns in `data`.
@@ -723,9 +730,9 @@ _sb_emit!(stmts, data, key, ::DataColumn; kwargs...) = nothing
 _sb_emit!(stmts, data, key, ::MissingColumn; kwargs...) = nothing
 _sb_emit!(stmts, data, key, op; kwargs...) = error("sbimpl: top-level op for `$key` not an ExprColumn (got $(typeof(op)))")
 
-_sb_emit_expr!(stmts, data, key, ::typeof(~), op; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}()) = begin
+_sb_emit_expr!(stmts, data, key, ::typeof(~), op; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), group_block_lookup=Dict()) = begin
     lhs, rhs = getargs(op, 2)
-    _sb_sampling!(stmts, data, key, lhs, rhs; id_lookup, obs_n, cv_groups)
+    _sb_sampling!(stmts, data, key, lhs, rhs; id_lookup, obs_n, cv_groups, group_block_lookup)
 end
 _sb_emit_expr!(stmts, data, key, ::typeof(assign), op; id_lookup=_sb_empty_id_lookup(), kwargs...) = begin
     _, rhs = getargs(op, 2)
@@ -872,19 +879,30 @@ _sb_prior_arg(x) = error("sbimpl: unsupported prior-arg shape $(typeof(x))")
 
 # LHS backed by real data => this is a likelihood. Record the observed values
 # under the formula name in `data` and emit `key ~ dist(args...)`.
-_sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}()) =
-    _sb_sampling_backed!(stmts, data, key, parent(lhs), rhs; id_lookup, obs_n, cv_groups)
+_sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), group_block_lookup=Dict()) =
+    _sb_sampling_backed!(stmts, data, key, parent(lhs), rhs; id_lookup, obs_n, cv_groups, group_block_lookup)
 
 _sb_sampling_backed!(stmts, data, key, backing::DataColumn, rhs; id_lookup, kwargs...) = begin
     data[key] = _sb_data_vec(key, parent(backing))
     _sb_likelihood!(stmts, key, rhs, data)
 end
 
-_sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs; id_lookup, obs_n=nothing, cv_groups=Set{Symbol}()) = begin
+_sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs;
+                     id_lookup, obs_n=nothing, cv_groups=Set{Symbol}(),
+                     group_block_lookup=Dict()) = begin
     rhs_e = _as_expr_column(rhs)
     if !isnothing(rhs_e)
-        _sb_submodel_rhs!(stmts, data, key, getf(rhs_e), rhs_e) !== nothing && return
-        _sb_emit_prior!(stmts, key, getf(rhs_e), rhs_e) && return
+        f = getf(rhs_e)
+        # Group-block terms are claimed before the generic submodel/prior hooks.
+        if !isempty(group_block_lookup)
+            block_info = _sb_find_group_block(f, rhs_e, group_block_lookup)
+            if !isnothing(block_info)
+                _sb_emit_group_block_term!(stmts, data, key, f, rhs_e, block_info)
+                return
+            end
+        end
+        _sb_submodel_rhs!(stmts, data, key, f, rhs_e) !== nothing && return
+        _sb_emit_prior!(stmts, key, f, rhs_e) && return
     end
     _sb_linear_predictor!(stmts, data, key, rhs; id_lookup, brmi_key=key, obs_n, cv_groups)
 end
@@ -903,7 +921,7 @@ _sb_sampling_backed!(stmts, data, key, backing, rhs; id_lookup, kwargs...) =
 # Stan name. Per-`typeof(f)` overrides (`mi`, future `cens`/`trunc`, …) live
 # as separate methods of `_sb_sampling!`, mirroring vimpl's
 # `vbroadcasted(::ExprColumn{typeof(F)})` extension idiom.
-_sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}()) =
+_sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), group_block_lookup=Dict()) =
     _sb_sampling_through_link!(stmts, data, key, getf(lhs), only(getargs(lhs)), rhs; id_lookup, obs_n, cv_groups)
 
 _sb_sampling_through_link!(stmts, data, key, f, inner, rhs; kwargs...) =
