@@ -30,7 +30,7 @@ macro brm(x)
     esc(_brm(x))
 end
 macro brm(df, x)
-    esc(Expr(:call, _brm(x), df))
+    esc(_brm(x; df=df))
 end
 
 """
@@ -68,7 +68,7 @@ _getproperty(x::Expr) = begin
     @assert x.head == :(.)
     @assert length(x.args) == 2
     lhs, qrhs = x.args
-    :(hasproperty($lhs, $qrhs) ? $x : $(qrhs.value))
+    :(hasproperty($lhs, $qrhs) ? $x : $NamedColumn($(Meta.quot(qrhs.value)), $MissingColumn()))
 end
 begin
 isxcall(x, f) = Meta.isexpr(x, :call) && x.args[1] == f
