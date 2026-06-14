@@ -195,6 +195,20 @@ end
 # allowed in @slic bodies, but they are allowed in @deffun bodies). For each
 # group g, pick the stratum s = stratum_idx[g] and compute
 #   b[g, :] = (diag_pre_multiply(tau[s, :], L[s, :, :]) * z[g, :])'.
+
+# ---- group-block toy demo term -----------------------------------------------
+#
+# sb_group_demo: demonstrates the inverted-control group-block mechanism.
+# Allocates 2 correlated per-group params via ranef_correlated_draws (proper
+# 2x2 LKJ block), receives them as `group_block` (n_groups x 2 matrix), and
+# returns the per-obs sum of both per-group params.
+# No docstring (docstring → @deffun AssertionError gotcha; see primer).
+function sb_group_demo end
+
+sb_group_demo_slic = StanBlocks.@slic begin
+    return group_block[group_idx, 1] + group_block[group_idx, 2]
+end
+
 # Zero-inflated Poisson lpmf (per-element + vectorised). Per element:
 #   y == 0 -> log_sum_exp(log(zi),  log1m(zi) + poisson_lpmf(0  | lambda))
 #   y >  0 ->                       log1m(zi) + poisson_lpmf(y  | lambda)
@@ -577,6 +591,13 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}()) = begin
     # for per-sub-formula emission below.
     id_buckets = _sb_collect_id_buckets(brmi)
     id_lookup = _sb_emit_id_buckets!(stmts, data, id_buckets)
+    # Prepass 2.5: group-block terms. For each `mu ~ f(...)` where f has a
+    # _sb_term_group_block declaration, allocate one ranef_correlated_draws
+    # block per (f, group-column) pair. The lookup is threaded into _sb_emit!
+    # so _sb_sampling_backed! can route declaring terms to their emit hook
+    # with the pre-allocated block name and group-index name in hand.
+    gb_terms = _sb_collect_group_block_terms(brmi)
+    group_block_lookup = _sb_emit_group_blocks!(stmts, data, gb_terms)
     # Prepass 3: target -> observation-source map. Lets purely-intercept
     # linear predictors (`loc ~ 1`, `log(y_scale) ~ 1`) borrow N from the
     # observed `~` target that consumes them, instead of the hash-order
@@ -586,7 +607,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}()) = begin
         nc = _as_named_column(op)
         isnothing(nc) && error("sbimpl: top-level op `$key` is not a NamedColumn")
         obs_n = get(target_obs, key, nothing)
-        _sb_emit!(stmts, data, key, parent(nc); id_lookup, obs_n, cv_groups)
+        _sb_emit!(stmts, data, key, parent(nc); id_lookup, obs_n, cv_groups, group_block_lookup)
     end
     body = Expr(:block, stmts...)
     model = StanBlocks.SlicModel(body, data, mod)
@@ -700,8 +721,8 @@ end
 
 # ---- top-level op dispatch ---------------------------------------------------
 
-_sb_emit!(stmts, data, key, op::ExprColumn; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}()) =
-    _sb_emit_expr!(stmts, data, key, getf(op), op; id_lookup, obs_n, cv_groups)
+_sb_emit!(stmts, data, key, op::ExprColumn; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), group_block_lookup=Dict()) =
+    _sb_emit_expr!(stmts, data, key, getf(op), op; id_lookup, obs_n, cv_groups, group_block_lookup)
 # Raw data / missing columns appear as top-level ops when the formula mentions
 # them as bare references (e.g. `c2` in `loc ~ 1 + c2`). Nothing to emit — the
 # prepass already stashed data columns in `data`.
@@ -709,9 +730,9 @@ _sb_emit!(stmts, data, key, ::DataColumn; kwargs...) = nothing
 _sb_emit!(stmts, data, key, ::MissingColumn; kwargs...) = nothing
 _sb_emit!(stmts, data, key, op; kwargs...) = error("sbimpl: top-level op for `$key` not an ExprColumn (got $(typeof(op)))")
 
-_sb_emit_expr!(stmts, data, key, ::typeof(~), op; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}()) = begin
+_sb_emit_expr!(stmts, data, key, ::typeof(~), op; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), group_block_lookup=Dict()) = begin
     lhs, rhs = getargs(op, 2)
-    _sb_sampling!(stmts, data, key, lhs, rhs; id_lookup, obs_n, cv_groups)
+    _sb_sampling!(stmts, data, key, lhs, rhs; id_lookup, obs_n, cv_groups, group_block_lookup)
 end
 _sb_emit_expr!(stmts, data, key, ::typeof(assign), op; id_lookup=_sb_empty_id_lookup(), kwargs...) = begin
     _, rhs = getargs(op, 2)
@@ -743,6 +764,42 @@ fall through to the default linear-predictor path. The default method
 extended rather than shadowed.
 """
 _sb_submodel_rhs!(stmts, data, target, f, rhs) = nothing
+
+# ---- group-block declaration + emit API -------------------------------------
+#
+# A submodel term author declares K normally-distributed correlated per-group
+# params by defining a `_sb_term_group_block(::typeof(term))` method. BRM's
+# Prepass 2.5 reads the declaration, allocates one ranef_correlated_draws
+# block per (term-function, group-column) pair, and threads the un-expanded
+# n_groups×K matrix into the term at emit time via `_sb_emit_group_block_term!`.
+#
+# Declaration shape: (; n_per_group::Int, group_arg_pos::Int)
+#   n_per_group   — K params per group (fixed by the term, not user-adjustable)
+#   group_arg_pos — which positional arg of the term call is the grouping column
+#                   (defaults to 1 when reading via `get(decl, :group_arg_pos, 1)`)
+#
+# Use `import BayesianRegressionModels: _sb_emit_group_block_term!` when adding
+# methods from a downstream module so the binding is extended, not shadowed.
+
+# Default: no group block. Override for declaring terms.
+_sb_term_group_block(_) = nothing
+
+# Toy term declaration: 2 correlated params per group, first arg is the group.
+_sb_term_group_block(::typeof(sb_group_demo)) = (; n_per_group=2, group_arg_pos=1)
+
+# Emit hook for group-block terms. block_info = (; block_name, idx_name, n_per_group).
+# Default errors so a term with a declaration but no emit method is caught early.
+_sb_emit_group_block_term!(stmts, data, target, f, rhs_e, block_info) =
+    error("sbimpl: `$(nameof(f))` declared a group block but has no ",
+          "`_sb_emit_group_block_term!` method — define one.")
+
+# Toy term emit: thread group_block + group_idx into sb_group_demo_slic.
+function _sb_emit_group_block_term!(stmts, data, target, ::typeof(sb_group_demo),
+                                     rhs_e, block_info)
+    (; block_name, idx_name) = block_info
+    push!(stmts, :($target ~ sb_group_demo_slic(;
+        group_block=$block_name, group_idx=$idx_name)))
+end
 
 # Built-in prior families on a missing-LHS sampling statement (e.g.
 # `coef_a ~ Horseshoe()`). Returns `true` if it consumed the binding,
@@ -822,19 +879,30 @@ _sb_prior_arg(x) = error("sbimpl: unsupported prior-arg shape $(typeof(x))")
 
 # LHS backed by real data => this is a likelihood. Record the observed values
 # under the formula name in `data` and emit `key ~ dist(args...)`.
-_sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}()) =
-    _sb_sampling_backed!(stmts, data, key, parent(lhs), rhs; id_lookup, obs_n, cv_groups)
+_sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), group_block_lookup=Dict()) =
+    _sb_sampling_backed!(stmts, data, key, parent(lhs), rhs; id_lookup, obs_n, cv_groups, group_block_lookup)
 
 _sb_sampling_backed!(stmts, data, key, backing::DataColumn, rhs; id_lookup, kwargs...) = begin
     data[key] = _sb_data_vec(key, parent(backing))
     _sb_likelihood!(stmts, key, rhs, data)
 end
 
-_sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs; id_lookup, obs_n=nothing, cv_groups=Set{Symbol}()) = begin
+_sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs;
+                     id_lookup, obs_n=nothing, cv_groups=Set{Symbol}(),
+                     group_block_lookup=Dict()) = begin
     rhs_e = _as_expr_column(rhs)
     if !isnothing(rhs_e)
-        _sb_submodel_rhs!(stmts, data, key, getf(rhs_e), rhs_e) !== nothing && return
-        _sb_emit_prior!(stmts, key, getf(rhs_e), rhs_e) && return
+        f = getf(rhs_e)
+        # Group-block terms are claimed before the generic submodel/prior hooks.
+        if !isempty(group_block_lookup)
+            block_info = _sb_find_group_block(f, rhs_e, group_block_lookup)
+            if !isnothing(block_info)
+                _sb_emit_group_block_term!(stmts, data, key, f, rhs_e, block_info)
+                return
+            end
+        end
+        _sb_submodel_rhs!(stmts, data, key, f, rhs_e) !== nothing && return
+        _sb_emit_prior!(stmts, key, f, rhs_e) && return
     end
     _sb_linear_predictor!(stmts, data, key, rhs; id_lookup, brmi_key=key, obs_n, cv_groups)
 end
@@ -853,7 +921,7 @@ _sb_sampling_backed!(stmts, data, key, backing, rhs; id_lookup, kwargs...) =
 # Stan name. Per-`typeof(f)` overrides (`mi`, future `cens`/`trunc`, …) live
 # as separate methods of `_sb_sampling!`, mirroring vimpl's
 # `vbroadcasted(::ExprColumn{typeof(F)})` extension idiom.
-_sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}()) =
+_sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), group_block_lookup=Dict()) =
     _sb_sampling_through_link!(stmts, data, key, getf(lhs), only(getargs(lhs)), rhs; id_lookup, obs_n, cv_groups)
 
 _sb_sampling_through_link!(stmts, data, key, f, inner, rhs; kwargs...) =
@@ -1402,6 +1470,74 @@ function _sb_collect_id_buckets(brmi::BRMI)
         end
     end
     buckets
+end
+
+# ---- group-block prepass (Prepass 2.5) ---------------------------------------
+#
+# Scan brmi.operations for `mu ~ f(...)` where f has a _sb_term_group_block
+# declaration and mu is a MissingColumn (parameter, not data). Collect them;
+# a subsequent emit step allocates one ranef_correlated_draws block per
+# (f, group-column) pair and builds a lookup for the emit phase.
+
+function _sb_collect_group_block_terms(brmi::BRMI)
+    result = Any[]
+    for (key, op_nc) in pairs(brmi.operations)
+        op = _as_expr_column(parent(op_nc)); isnothing(op) && continue
+        getf(op) === (~) || continue
+        lhs, rhs = getargs(op, 2)
+        lhs_nc = _as_named_column(lhs); isnothing(lhs_nc) && continue
+        isnothing(_as_missing_column(parent(lhs_nc))) && continue
+        rhs_e = _as_expr_column(rhs); isnothing(rhs_e) && continue
+        f = getf(rhs_e)
+        decl = _sb_term_group_block(f)
+        isnothing(decl) && continue
+        push!(result, (; key, f, rhs_e, decl))
+    end
+    result
+end
+
+# Allocate one ranef_correlated_draws block per (f, group-column) pair and
+# return a lookup Dict{(f, group_name) => (; block_name, idx_name, n_per_group)}.
+# Idempotent: duplicate (f, group) pairs within the same BRMI are skipped.
+function _sb_emit_group_blocks!(stmts, data, gb_terms)
+    lookup = Dict{Tuple{Any,Symbol}, NamedTuple}()
+    for (; f, rhs_e, decl) in gb_terms
+        pos = get(decl, :group_arg_pos, 1)
+        args = getargs(rhs_e)
+        pos <= length(args) || error(
+            "sbimpl: group-block term `$(nameof(f))` has group_arg_pos=$pos ",
+            "but only $(length(args)) args")
+        group_col = _as_named_column(args[pos])
+        isnothing(group_col) && error(
+            "sbimpl: group-block term `$(nameof(f))` arg $pos must be a ",
+            "NamedColumn group, got $(typeof(args[pos]))")
+        gname = name(group_col)
+        lk = (f, gname)
+        haskey(lookup, lk) && continue
+        suffix = Symbol(nameof(f), :_, gname)
+        block_name = Symbol(:b_, suffix)
+        n_terms_name = Symbol(:n_terms_, suffix)
+        data[n_terms_name] = decl.n_per_group
+        idx_name, n_name = _sb_ensure_group_data!(data, group_col)
+        push!(stmts, :($block_name ~ ranef_correlated_draws(;
+            group_idx=$idx_name, n_groups=$n_name, n_terms=$n_terms_name)))
+        lookup[lk] = (; block_name, idx_name, n_per_group=decl.n_per_group)
+    end
+    lookup
+end
+
+# Look up block_info for a group-block term call at emit time, or nothing.
+# Calls _sb_term_group_block(f) to retrieve group_arg_pos, then matches the
+# concrete group-column name against the prepass-built lookup.
+function _sb_find_group_block(f, rhs_e, group_block_lookup)
+    decl = _sb_term_group_block(f)
+    isnothing(decl) && return nothing
+    pos = get(decl, :group_arg_pos, 1)
+    args = getargs(rhs_e)
+    pos > length(args) && return nothing
+    group_col = _as_named_column(args[pos])
+    isnothing(group_col) && return nothing
+    get(group_block_lookup, (f, name(group_col)), nothing)
 end
 
 _sb_group_desc_matches(a::NamedColumn, b::NamedColumn) = name(a) === name(b)

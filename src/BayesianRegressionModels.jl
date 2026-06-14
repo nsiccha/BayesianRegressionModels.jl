@@ -27,7 +27,7 @@ include("sbimpl.jl")
 # (web-macro, bruno, tests) reaches for.
 export @brm, @n, @x, @getproperty
 export assign, doublepipe, gr, gp, offset, zscale, center, standardize, protect, factor
-export me, mi, s, ar, mo, mo1, hsgp, OrderedLogistic, Horseshoe, ZeroInflatedPoisson
+export me, mi, s, ar, mo, mo1, hsgp, OrderedLogistic, Horseshoe, ZeroInflatedPoisson, sb_group_demo
 # Logit-form Bernoulli/Binomial -- prefer these over `Bernoulli(logistic(eta))`
 # / `Binomial(N, logistic(eta))`. Both backends lower to a logit-native log-pmf
 # (Stan's `bernoulli_logit_lpmf` / `binomial_logit_lpmf`; LogExpFunctions'
@@ -62,6 +62,7 @@ export outcomes, linear_predictor_op, linear_predictors, predictors,
 # column args inside those method bodies.
 export Part, push_parts!!, nparams, lprior!
 export vbroadcasted, vmeta_sampling_rhs, _sb_submodel_rhs!
+export _sb_term_group_block, _sb_emit_group_block_term!
 
 # Internal @slic submodels from sbimpl.jl — exported so downstream
 # modules (bruno-ext via web-macro) that build their own SBBRMI-style
@@ -74,6 +75,7 @@ export popefs, cdirichlet, c0dirichlet, c01dirichlet,
        _sb_mo, _sb_cat, _sb_ar1, _sb_s, _sb_me, _sb_hsgp, _sb_horseshoe,
        _sb_mi_normal, mi_merge,
        zero_inflated_poisson, zero_inflated_poisson_lpmf,
-       zero_inflated_poisson_lpmfs, zero_inflated_poisson_rng
+       zero_inflated_poisson_lpmfs, zero_inflated_poisson_rng,
+       sb_group_demo_slic
 
 end # module
