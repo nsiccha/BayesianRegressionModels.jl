@@ -264,6 +264,14 @@ StanBlocks.@deffun begin
     end
 end
 
+function addprop end
+
+StanBlocks.@deffun begin
+    addprop(loc::vector[n], add::real, prop::real)::vector[n] = begin
+        sqrt(add^2 .+ (loc .* prop).^2)
+    end
+end
+
 StanBlocks.@deffun begin
     stratified_correlated_b(L, tau, z, stratum_idx::int[n_groups],
                             n_groups::int, n_terms::int) = begin
