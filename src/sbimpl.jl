@@ -700,8 +700,10 @@ _sb_collect_data!(data, x::NamedColumn; skip=Set{Symbol}()) = begin
     _sb_record_data!(data, x, d, skip)
     _sb_collect_data!(data, d; skip)
 end
-_sb_collect_data!(data, x::ExprColumn; skip=Set{Symbol}()) =
+_sb_collect_data!(data, x::ExprColumn; skip=Set{Symbol}()) = begin
     foreach(a -> _sb_collect_data!(data, a; skip), getargs(x))
+    foreach(v -> _sb_collect_data!(data, v; skip), values(getkwargs(x)))
+end
 
 """
     stan_code(sb::SBBRMI) -> String
@@ -2224,3 +2226,113 @@ _sb_scalar_expr(x::ExprColumn, data) = begin
     Expr(:call, op, (_sb_scalar_expr(a, data) for a in getargs(x))...)
 end
 _sb_scalar_expr(x, _) = error("sbimpl: cannot lift to Stan expression: $(typeof(x)): $x")
+
+# ==============================================================================
+# Bordet model family — BRM-side composition surface.
+#
+# Representative model formula (log_y MUST precede log_obs so sigma is in scope):
+#
+#   brmi = @brm df begin
+#       log_y ~ bordet_hierarchical_parametric(;
+#           time, dose, person_idxs, biomarker_idxs,
+#           sigma_rate, scale_rate, hierarchical_centeredness
+#       )
+#       log_obs ~ TruncatedNormal(log_y, sigma, lloq, uloq)
+#   end
+#
+# Cross-tree contract (StanBlocks:bordet, decision 1lmystf):
+#   - `truncated_normal` lpxf triad: censored normal (LLOQ→lcdf, ULOQ→lccdf)
+#   - `bordet_time_response(log_time, loc, log_slope, mag)::vector` bell kernel
+#   - `bordet_dose_response(log_dose, loc, log_slope)::vector` — returns LOG
+#   - Transdata builtins: `linear_idxs`, `broadcasted_max`, `broadcasted_gt`
+#   All registered in StanBlocks' builtin module; reachable with no import.
+# ==============================================================================
+
+"""
+    TruncatedNormal
+
+BRM formula marker for the bordet censored-normal observation model.
+`log_obs ~ TruncatedNormal(log_y, sigma, lloq, uloq)` — `sigma` is a
+biomarker-level parameter declared inside `bordet_hierarchical_parametric`;
+`lloq`/`uloq` are biomarker-level data columns.
+Emits: `log_obs ~ truncated_normal(log_y, sigma[biomarker_idxs], lloq[biomarker_idxs], uloq[biomarker_idxs])`.
+Censoring math lives in StanBlocks:bordet's lpxf triad (not Stan T[,] truncation).
+"""
+function TruncatedNormal end
+
+"""
+    bordet_hierarchical_parametric
+
+BRM formula marker for the bordet hierarchical parametric mean submodel.
+All data columns and hyperparameters are passed as keyword arguments.
+Emits (in order): sizes (n_biomarkers, n_persons, n_series), sigma prior
+(biomarker-level exponential), transdata (series_idxs, log_time, log_dose,
+affectable), 6 per-series parameter priors, and log_y via StanBlocks:bordet
+kernel builtins (bordet_time_response + bordet_dose_response).
+"""
+function bordet_hierarchical_parametric end
+
+# TruncatedNormal custom likelihood.
+# Emits: target ~ truncated_normal(mean, sigma[biomarker_idxs], lloq[biomarker_idxs], uloq[biomarker_idxs])
+# biomarker_idxs is in scope because bordet_hierarchical_parametric emits it as data.
+function _sb_lik_family!(stmts, target, ::typeof(TruncatedNormal), args, data)
+    length(args) == 4 || error(
+        "sbimpl: TruncatedNormal likelihood expects 4 positional args ",
+        "(mean, sigma, lloq, uloq), got $(length(args))")
+    mean_arg, sigma_arg, lloq_arg, uloq_arg = args
+    mean_sym  = _sb_scalar_expr(mean_arg, data)
+    sigma_sym = _sb_scalar_expr(sigma_arg, data)
+    lloq_sym  = _sb_scalar_expr(lloq_arg, data)
+    uloq_sym  = _sb_scalar_expr(uloq_arg, data)
+    push!(stmts, :($target ~ truncated_normal(
+        $mean_sym,
+        $(sigma_sym)[biomarker_idxs],
+        $(lloq_sym)[biomarker_idxs],
+        $(uloq_sym)[biomarker_idxs])))
+end
+
+# bordet_hierarchical_parametric submodel RHS.
+# All kwargs are data/hyperparameter columns; collected here because the generic
+# prepass only walks positional args (ExprColumn kwargs fix is a targeted local
+# collect, plus the global fix above for future terms).
+function _sb_submodel_rhs!(stmts, data, target,
+                           ::typeof(bordet_hierarchical_parametric), rhs)
+    kw = getkwargs(rhs)
+    for v in values(kw)
+        _sb_collect_data!(data, v)
+    end
+    # Sizes in transformed_data (deterministic from int[] index arrays)
+    push!(stmts, :(n_biomarkers = max(biomarker_idxs)))
+    push!(stmts, :(n_persons    = max(person_idxs)))
+    push!(stmts, :(n_series     = n_biomarkers * n_persons))
+    # G3: sigma is biomarker-level — bypasses _sb_emit_prior! which emits scalar only
+    push!(stmts, :(sigma ~ exponential(sigma_rate; n=n_biomarkers, lower=0.)))
+    # Derived transdata: obs-level index + input transforms
+    push!(stmts, :(series_idxs = linear_idxs(biomarker_idxs, person_idxs)))
+    push!(stmts, :(log_time    = log(broadcasted_max(time, 0.001))))
+    push!(stmts, :(log_dose    = log(broadcasted_max(dose, 0.1))))
+    push!(stmts, :(affectable  = broadcasted_gt(time .* dose, 0.0)))
+    # 6 per-(biomarker×person) parameter priors.
+    # TODO(bordet-floor): swap std_normal stubs for adaptive hierarchical prior
+    # (pending supervisor clarification on adaptive_vector_hierarchical builtin /
+    # group-block floor pattern for 2-level biomarker×person hierarchy).
+    push!(stmts, :(baseline       ~ std_normal(; n=n_series)))
+    push!(stmts, :(time_loc       ~ std_normal(; n=n_series)))
+    push!(stmts, :(time_log_slope ~ std_normal(; n=n_series)))
+    push!(stmts, :(time_mag       ~ std_normal(; n=n_series)))
+    push!(stmts, :(dose_loc       ~ std_normal(; n=n_series)))
+    push!(stmts, :(dose_log_slope ~ std_normal(; n=n_series)))
+    # log_y via StanBlocks:bordet kernel builtins (decomposed into intermediates)
+    push!(stmts, :(time_response = bordet_time_response(
+        log_time,
+        time_loc[series_idxs],
+        time_log_slope[series_idxs],
+        time_mag[series_idxs])))
+    push!(stmts, :(dose_response = exp(bordet_dose_response(
+        log_dose,
+        dose_loc[series_idxs],
+        dose_log_slope[series_idxs]))))
+    push!(stmts, :($target = baseline[series_idxs]
+        + affectable .* time_response .* dose_response))
+    :emitted
+end
