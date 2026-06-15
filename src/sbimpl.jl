@@ -708,8 +708,10 @@ _sb_collect_data!(data, x::NamedColumn; skip=Set{Symbol}()) = begin
     _sb_record_data!(data, x, d, skip)
     _sb_collect_data!(data, d; skip)
 end
-_sb_collect_data!(data, x::ExprColumn; skip=Set{Symbol}()) =
+_sb_collect_data!(data, x::ExprColumn; skip=Set{Symbol}()) = begin
     foreach(a -> _sb_collect_data!(data, a; skip), getargs(x))
+    foreach(v -> _sb_collect_data!(data, v; skip), values(getkwargs(x)))
+end
 
 """
     stan_code(sb::SBBRMI) -> String
@@ -781,10 +783,15 @@ _sb_submodel_rhs!(stmts, data, target, f, rhs) = nothing
 # block per (term-function, group-column) pair, and threads the un-expanded
 # n_groups×K matrix into the term at emit time via `_sb_emit_group_block_term!`.
 #
-# Declaration shape: (; n_per_group::Int, group_arg_pos::Int)
-#   n_per_group   — K params per group (fixed by the term, not user-adjustable)
-#   group_arg_pos — which positional arg of the term call is the grouping column
-#                   (defaults to 1 when reading via `get(decl, :group_arg_pos, 1)`)
+# Declaration shape: (; n_per_group::Int, group_arg_pos|group_fn, group_fn_name)
+#   n_per_group    — K params per group (fixed by the term, not user-adjustable)
+#   group_arg_pos  — which positional arg of the term call is the grouping column
+#                    (defaults to 1; mutually exclusive with group_fn)
+#   group_fn       — fn (rhs_e, data) -> NamedColumn for kwarg-only terms that
+#                    synthesise a computed group column (e.g. series_idxs from
+#                    biomarker_idxs × person_idxs); mutually exclusive with group_arg_pos
+#   group_fn_name  — Symbol key used to look up the prepass-built block_info at
+#                    emit time; required when group_fn is provided
 #
 # Use `import BayesianRegressionModels: _sb_emit_group_block_term!` when adding
 # methods from a downstream module so the binding is extended, not shadowed.
@@ -1510,15 +1517,20 @@ end
 function _sb_emit_group_blocks!(stmts, data, gb_terms)
     lookup = Dict{Tuple{Any,Symbol}, NamedTuple}()
     for (; f, rhs_e, decl) in gb_terms
-        pos = get(decl, :group_arg_pos, 1)
-        args = getargs(rhs_e)
-        pos <= length(args) || error(
-            "sbimpl: group-block term `$(nameof(f))` has group_arg_pos=$pos ",
-            "but only $(length(args)) args")
-        group_col = _as_named_column(args[pos])
-        isnothing(group_col) && error(
-            "sbimpl: group-block term `$(nameof(f))` arg $pos must be a ",
-            "NamedColumn group, got $(typeof(args[pos]))")
+        group_col = if haskey(decl, :group_fn)
+            decl.group_fn(rhs_e, data)
+        else
+            pos = get(decl, :group_arg_pos, 1)
+            args = getargs(rhs_e)
+            pos <= length(args) || error(
+                "sbimpl: group-block term `$(nameof(f))` has group_arg_pos=$pos ",
+                "but only $(length(args)) args")
+            nc = _as_named_column(args[pos])
+            isnothing(nc) && error(
+                "sbimpl: group-block term `$(nameof(f))` arg $pos must be a ",
+                "NamedColumn group, got $(typeof(args[pos]))")
+            nc
+        end
         gname = name(group_col)
         lk = (f, gname)
         haskey(lookup, lk) && continue
@@ -1535,11 +1547,14 @@ function _sb_emit_group_blocks!(stmts, data, gb_terms)
 end
 
 # Look up block_info for a group-block term call at emit time, or nothing.
-# Calls _sb_term_group_block(f) to retrieve group_arg_pos, then matches the
-# concrete group-column name against the prepass-built lookup.
+# For group_fn terms, uses group_fn_name (fixed Symbol) as the lookup key.
+# For group_arg_pos terms, extracts the NamedColumn from the positional arg.
 function _sb_find_group_block(f, rhs_e, group_block_lookup)
     decl = _sb_term_group_block(f)
     isnothing(decl) && return nothing
+    if haskey(decl, :group_fn_name)
+        return get(group_block_lookup, (f, decl.group_fn_name), nothing)
+    end
     pos = get(decl, :group_arg_pos, 1)
     args = getargs(rhs_e)
     pos > length(args) && return nothing
@@ -2232,3 +2247,117 @@ _sb_scalar_expr(x::ExprColumn, data) = begin
     Expr(:call, op, (_sb_scalar_expr(a, data) for a in getargs(x))...)
 end
 _sb_scalar_expr(x, _) = error("sbimpl: cannot lift to Stan expression: $(typeof(x)): $x")
+
+# ==============================================================================
+# Bordet model family — BRM-side composition surface.
+#
+# Representative model formula (log_y MUST precede log_obs so sigma is in scope):
+#
+#   brmi = @brm df begin
+#       log_y ~ bordet_hierarchical_parametric(;
+#           time, dose, person_idxs, biomarker_idxs,
+#           sigma_rate, scale_rate, hierarchical_centeredness
+#       )
+#       log_obs ~ TruncatedNormal(log_y, sigma, lloq, uloq)
+#   end
+#
+# Cross-tree contract (StanBlocks:bordet, decision 1lmystf):
+#   - `truncated_normal` lpxf triad: censored normal (LLOQ→lcdf, ULOQ→lccdf)
+#   - `bordet_time_response(log_time, loc, log_slope, mag)::vector` bell kernel
+#   - `bordet_dose_response(log_dose, loc, log_slope)::vector` — returns LOG
+#   - Transdata builtins: `linear_idxs`, `broadcasted_max`, `broadcasted_gt`
+#   All registered in StanBlocks' builtin module; reachable with no import.
+# ==============================================================================
+
+"""
+    TruncatedNormal
+
+BRM formula marker for the bordet censored-normal observation model.
+`log_obs ~ TruncatedNormal(log_y, sigma, lloq, uloq)` — `sigma` is a
+biomarker-level parameter declared inside `bordet_hierarchical_parametric`;
+`lloq`/`uloq` are biomarker-level data columns.
+Emits: `log_obs ~ truncated_normal(log_y, sigma[biomarker_idxs], lloq[biomarker_idxs], uloq[biomarker_idxs])`.
+Censoring math lives in StanBlocks:bordet's lpxf triad (not Stan T[,] truncation).
+"""
+function TruncatedNormal end
+
+"""
+    bordet_hierarchical_parametric
+
+BRM formula marker for the bordet hierarchical parametric mean submodel.
+All data columns and hyperparameters are passed as keyword arguments.
+Emits (in order): sizes (n_biomarkers, n_persons, n_series), sigma prior
+(biomarker-level exponential), transdata (series_idxs, log_time, log_dose,
+affectable), 6 per-series parameter priors, and log_y via StanBlocks:bordet
+kernel builtins (bordet_time_response + bordet_dose_response).
+"""
+function bordet_hierarchical_parametric end
+
+# TruncatedNormal custom likelihood.
+# Emits: target ~ truncated_normal(mean, sigma[biomarker_idxs], lloq[biomarker_idxs], uloq[biomarker_idxs])
+# biomarker_idxs is in scope because bordet_hierarchical_parametric emits it as data.
+function _sb_lik_family!(stmts, target, ::typeof(TruncatedNormal), args, data)
+    length(args) == 4 || error(
+        "sbimpl: TruncatedNormal likelihood expects 4 positional args ",
+        "(mean, sigma, lloq, uloq), got $(length(args))")
+    mean_arg, sigma_arg, lloq_arg, uloq_arg = args
+    mean_sym  = _sb_scalar_expr(mean_arg, data)
+    sigma_sym = _sb_scalar_expr(sigma_arg, data)
+    lloq_sym  = _sb_scalar_expr(lloq_arg, data)
+    uloq_sym  = _sb_scalar_expr(uloq_arg, data)
+    push!(stmts, :($target ~ truncated_normal(
+        $mean_sym,
+        $(sigma_sym)[biomarker_idxs],
+        $(lloq_sym)[biomarker_idxs],
+        $(uloq_sym)[biomarker_idxs])))
+end
+
+# Group-block declaration for bordet_hierarchical_parametric.
+# The 6 per-(biomarker×person) params (baseline, time_loc, time_log_slope,
+# time_mag, dose_loc, dose_log_slope) are correlated normals via BRM's
+# ranef_correlated_draws floor. The group is series_idxs = linear_idxs(bm, pn)
+# — a computed column, so group_fn synthesises it from the kwargs in data.
+_sb_term_group_block(::typeof(bordet_hierarchical_parametric)) = (;
+    n_per_group  = 6,
+    group_fn     = (rhs_e, data) -> begin
+        bm   = data[:biomarker_idxs]
+        pn   = data[:person_idxs]
+        n_bm = maximum(bm)
+        series = bm .+ (pn .- 1) .* n_bm
+        NamedColumn(:series_idxs, DataColumn(series))
+    end,
+    group_fn_name = :series_idxs,
+)
+
+# Emit hook: allocates sigma, transdata, and log_y from the group-block matrix.
+# block_info = (; block_name, idx_name, n_per_group)
+#   block_name  — n_series × 6 matrix from ranef_correlated_draws (col order
+#                 matches the param order below)
+#   idx_name    — per-obs integer index into block rows (= series_idxs_idx)
+function _sb_emit_group_block_term!(stmts, data, target,
+                                     ::typeof(bordet_hierarchical_parametric),
+                                     rhs_e, block_info)
+    (; block_name, idx_name) = block_info
+    # Sizes: deterministic transdata from int[] index arrays
+    push!(stmts, :(n_biomarkers = max(biomarker_idxs)))
+    push!(stmts, :(n_persons    = max(person_idxs)))
+    push!(stmts, :(n_series     = n_biomarkers * n_persons))
+    # sigma: biomarker-level exponential prior
+    push!(stmts, :(sigma ~ exponential(sigma_rate; n=n_biomarkers, lower=0.)))
+    # Derived transdata: obs-level index + input transforms
+    push!(stmts, :(series_idxs = linear_idxs(biomarker_idxs, person_idxs)))
+    push!(stmts, :(log_time    = log(broadcasted_max(time, 0.001))))
+    push!(stmts, :(log_dose    = log(broadcasted_max(dose, 0.1))))
+    push!(stmts, :(affectable  = broadcasted_gt(time .* dose, 0.0)))
+    # Extract 6 per-series params from the group-block matrix (row = series, col = param)
+    push!(stmts, :(baseline       = $(block_name)[$(idx_name), 1]))
+    push!(stmts, :(time_loc       = $(block_name)[$(idx_name), 2]))
+    push!(stmts, :(time_log_slope = $(block_name)[$(idx_name), 3]))
+    push!(stmts, :(time_mag       = $(block_name)[$(idx_name), 4]))
+    push!(stmts, :(dose_loc       = $(block_name)[$(idx_name), 5]))
+    push!(stmts, :(dose_log_slope = $(block_name)[$(idx_name), 6]))
+    # log_y via StanBlocks:bordet kernel builtins
+    push!(stmts, :(time_response = bordet_time_response(log_time, time_loc, time_log_slope, time_mag)))
+    push!(stmts, :(dose_response = exp(bordet_dose_response(log_dose, dose_loc, dose_log_slope))))
+    push!(stmts, :($target = baseline + affectable .* time_response .* dose_response))
+end
