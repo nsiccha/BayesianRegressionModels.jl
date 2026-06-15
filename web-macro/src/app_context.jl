@@ -150,15 +150,19 @@ y1 ~ Normal(loc, err)
         # `@param (; label) = __parent__` needed (and declaring it explicitly
         # collides with the auto-forward → "method overwritten" error).
 
-        # ExampleEntry is constructed with `__parent__=__parent__` (this
+        # ExampleEntry is constructed with `__parent__=__self__` (this
         # examples include) so each entry's rendering methods can build URLs
-        # via its parent chain (`__parent__.__parent__.pipeline/...`).
+        # via its parent chain (`__parent__.__parent__.pipeline/...`): the
+        # entry's parent is this examples include, whose parent is AppContext
+        # (which holds `.pipeline`). Passing bare `__parent__` here would set
+        # the entry's parent to AppContext, so `__parent__.__parent__` would
+        # be AppContext's (nothing) parent — a 500 on every gallery render.
         files() = begin
             isdir(examples_dir) || mkpath(examples_dir)
             sort(filter(endswith(".jl"), readdir(examples_dir; join=true));
                  by=mtime, rev=true)
         end
-        entries() = ExampleEntry[ExampleEntry(f; __parent__) for f in files()]
+        entries() = ExampleEntry[ExampleEntry(f; __parent__=__self__) for f in files()]
         find(label)        = findfirstelement(e -> e.label == label, entries())
         find_by_slug(slug) = findfirstelement(e -> e.slug == slug,   entries())
         persist!(label, formula) = begin
