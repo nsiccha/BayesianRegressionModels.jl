@@ -775,10 +775,15 @@ _sb_submodel_rhs!(stmts, data, target, f, rhs) = nothing
 # block per (term-function, group-column) pair, and threads the un-expanded
 # n_groups×K matrix into the term at emit time via `_sb_emit_group_block_term!`.
 #
-# Declaration shape: (; n_per_group::Int, group_arg_pos::Int)
-#   n_per_group   — K params per group (fixed by the term, not user-adjustable)
-#   group_arg_pos — which positional arg of the term call is the grouping column
-#                   (defaults to 1 when reading via `get(decl, :group_arg_pos, 1)`)
+# Declaration shape: (; n_per_group::Int, group_arg_pos|group_fn, group_fn_name)
+#   n_per_group    — K params per group (fixed by the term, not user-adjustable)
+#   group_arg_pos  — which positional arg of the term call is the grouping column
+#                    (defaults to 1; mutually exclusive with group_fn)
+#   group_fn       — fn (rhs_e, data) -> NamedColumn for kwarg-only terms that
+#                    synthesise a computed group column (e.g. series_idxs from
+#                    biomarker_idxs × person_idxs); mutually exclusive with group_arg_pos
+#   group_fn_name  — Symbol key used to look up the prepass-built block_info at
+#                    emit time; required when group_fn is provided
 #
 # Use `import BayesianRegressionModels: _sb_emit_group_block_term!` when adding
 # methods from a downstream module so the binding is extended, not shadowed.
@@ -1504,15 +1509,20 @@ end
 function _sb_emit_group_blocks!(stmts, data, gb_terms)
     lookup = Dict{Tuple{Any,Symbol}, NamedTuple}()
     for (; f, rhs_e, decl) in gb_terms
-        pos = get(decl, :group_arg_pos, 1)
-        args = getargs(rhs_e)
-        pos <= length(args) || error(
-            "sbimpl: group-block term `$(nameof(f))` has group_arg_pos=$pos ",
-            "but only $(length(args)) args")
-        group_col = _as_named_column(args[pos])
-        isnothing(group_col) && error(
-            "sbimpl: group-block term `$(nameof(f))` arg $pos must be a ",
-            "NamedColumn group, got $(typeof(args[pos]))")
+        group_col = if haskey(decl, :group_fn)
+            decl.group_fn(rhs_e, data)
+        else
+            pos = get(decl, :group_arg_pos, 1)
+            args = getargs(rhs_e)
+            pos <= length(args) || error(
+                "sbimpl: group-block term `$(nameof(f))` has group_arg_pos=$pos ",
+                "but only $(length(args)) args")
+            nc = _as_named_column(args[pos])
+            isnothing(nc) && error(
+                "sbimpl: group-block term `$(nameof(f))` arg $pos must be a ",
+                "NamedColumn group, got $(typeof(args[pos]))")
+            nc
+        end
         gname = name(group_col)
         lk = (f, gname)
         haskey(lookup, lk) && continue
@@ -1529,11 +1539,14 @@ function _sb_emit_group_blocks!(stmts, data, gb_terms)
 end
 
 # Look up block_info for a group-block term call at emit time, or nothing.
-# Calls _sb_term_group_block(f) to retrieve group_arg_pos, then matches the
-# concrete group-column name against the prepass-built lookup.
+# For group_fn terms, uses group_fn_name (fixed Symbol) as the lookup key.
+# For group_arg_pos terms, extracts the NamedColumn from the positional arg.
 function _sb_find_group_block(f, rhs_e, group_block_lookup)
     decl = _sb_term_group_block(f)
     isnothing(decl) && return nothing
+    if haskey(decl, :group_fn_name)
+        return get(group_block_lookup, (f, decl.group_fn_name), nothing)
+    end
     pos = get(decl, :group_arg_pos, 1)
     args = getargs(rhs_e)
     pos > length(args) && return nothing
@@ -2291,48 +2304,52 @@ function _sb_lik_family!(stmts, target, ::typeof(TruncatedNormal), args, data)
         $(uloq_sym)[biomarker_idxs])))
 end
 
-# bordet_hierarchical_parametric submodel RHS.
-# All kwargs are data/hyperparameter columns; collected here because the generic
-# prepass only walks positional args (ExprColumn kwargs fix is a targeted local
-# collect, plus the global fix above for future terms).
-function _sb_submodel_rhs!(stmts, data, target,
-                           ::typeof(bordet_hierarchical_parametric), rhs)
-    kw = getkwargs(rhs)
-    for v in values(kw)
-        _sb_collect_data!(data, v)
-    end
-    # Sizes in transformed_data (deterministic from int[] index arrays)
+# Group-block declaration for bordet_hierarchical_parametric.
+# The 6 per-(biomarker×person) params (baseline, time_loc, time_log_slope,
+# time_mag, dose_loc, dose_log_slope) are correlated normals via BRM's
+# ranef_correlated_draws floor. The group is series_idxs = linear_idxs(bm, pn)
+# — a computed column, so group_fn synthesises it from the kwargs in data.
+_sb_term_group_block(::typeof(bordet_hierarchical_parametric)) = (;
+    n_per_group  = 6,
+    group_fn     = (rhs_e, data) -> begin
+        bm   = data[:biomarker_idxs]
+        pn   = data[:person_idxs]
+        n_bm = maximum(bm)
+        series = bm .+ (pn .- 1) .* n_bm
+        NamedColumn(:series_idxs, DataColumn(series))
+    end,
+    group_fn_name = :series_idxs,
+)
+
+# Emit hook: allocates sigma, transdata, and log_y from the group-block matrix.
+# block_info = (; block_name, idx_name, n_per_group)
+#   block_name  — n_series × 6 matrix from ranef_correlated_draws (col order
+#                 matches the param order below)
+#   idx_name    — per-obs integer index into block rows (= series_idxs_idx)
+function _sb_emit_group_block_term!(stmts, data, target,
+                                     ::typeof(bordet_hierarchical_parametric),
+                                     rhs_e, block_info)
+    (; block_name, idx_name) = block_info
+    # Sizes: deterministic transdata from int[] index arrays
     push!(stmts, :(n_biomarkers = max(biomarker_idxs)))
     push!(stmts, :(n_persons    = max(person_idxs)))
     push!(stmts, :(n_series     = n_biomarkers * n_persons))
-    # G3: sigma is biomarker-level — bypasses _sb_emit_prior! which emits scalar only
+    # sigma: biomarker-level exponential prior
     push!(stmts, :(sigma ~ exponential(sigma_rate; n=n_biomarkers, lower=0.)))
     # Derived transdata: obs-level index + input transforms
     push!(stmts, :(series_idxs = linear_idxs(biomarker_idxs, person_idxs)))
     push!(stmts, :(log_time    = log(broadcasted_max(time, 0.001))))
     push!(stmts, :(log_dose    = log(broadcasted_max(dose, 0.1))))
     push!(stmts, :(affectable  = broadcasted_gt(time .* dose, 0.0)))
-    # 6 per-(biomarker×person) parameter priors.
-    # TODO(bordet-floor): swap std_normal stubs for adaptive hierarchical prior
-    # (pending supervisor clarification on adaptive_vector_hierarchical builtin /
-    # group-block floor pattern for 2-level biomarker×person hierarchy).
-    push!(stmts, :(baseline       ~ std_normal(; n=n_series)))
-    push!(stmts, :(time_loc       ~ std_normal(; n=n_series)))
-    push!(stmts, :(time_log_slope ~ std_normal(; n=n_series)))
-    push!(stmts, :(time_mag       ~ std_normal(; n=n_series)))
-    push!(stmts, :(dose_loc       ~ std_normal(; n=n_series)))
-    push!(stmts, :(dose_log_slope ~ std_normal(; n=n_series)))
-    # log_y via StanBlocks:bordet kernel builtins (decomposed into intermediates)
-    push!(stmts, :(time_response = bordet_time_response(
-        log_time,
-        time_loc[series_idxs],
-        time_log_slope[series_idxs],
-        time_mag[series_idxs])))
-    push!(stmts, :(dose_response = exp(bordet_dose_response(
-        log_dose,
-        dose_loc[series_idxs],
-        dose_log_slope[series_idxs]))))
-    push!(stmts, :($target = baseline[series_idxs]
-        + affectable .* time_response .* dose_response))
-    :emitted
+    # Extract 6 per-series params from the group-block matrix (row = series, col = param)
+    push!(stmts, :(baseline       = $(block_name)[$(idx_name), 1]))
+    push!(stmts, :(time_loc       = $(block_name)[$(idx_name), 2]))
+    push!(stmts, :(time_log_slope = $(block_name)[$(idx_name), 3]))
+    push!(stmts, :(time_mag       = $(block_name)[$(idx_name), 4]))
+    push!(stmts, :(dose_loc       = $(block_name)[$(idx_name), 5]))
+    push!(stmts, :(dose_log_slope = $(block_name)[$(idx_name), 6]))
+    # log_y via StanBlocks:bordet kernel builtins
+    push!(stmts, :(time_response = bordet_time_response(log_time, time_loc, time_log_slope, time_mag)))
+    push!(stmts, :(dose_response = exp(bordet_dose_response(log_dose, dose_loc, dose_log_slope))))
+    push!(stmts, :($target = baseline + affectable .* time_response .* dose_response))
 end
