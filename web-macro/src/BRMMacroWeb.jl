@@ -1,7 +1,7 @@
 module BRMMacroWeb
 
 using HTMXObjects
-using DynamicObjects: fetchindex!, clear_mem_caches!
+using DynamicObjects: fetchindex!, clear_mem_caches!, @memo!
 using Treebars: polling_fetchindex, initialize_progress!,
                 prepare_progress!, with_prepared_progress,
                 htmx_treebar_styles, htmx_treebar_script,

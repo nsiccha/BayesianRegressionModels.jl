@@ -27,7 +27,7 @@ include("sbimpl.jl")
 # (web-macro, bruno, tests) reaches for.
 export @brm, @n, @x, @getproperty
 export assign, doublepipe, gr, gp, offset, zscale, center, standardize, protect, factor
-export me, mi, s, ar, mo, mo1, hsgp, OrderedLogistic, Horseshoe, ZeroInflatedPoisson, sb_group_demo
+export me, mi, s, ar, mo, mo1, hsgp, OrderedLogistic, Horseshoe, ZeroInflatedPoisson, sb_group_demo, addprop
 # Bordet model family — formula-surface markers for custom likelihood + submodel
 export TruncatedNormal, bordet_hierarchical_parametric
 # Logit-form Bernoulli/Binomial -- prefer these over `Bernoulli(logistic(eta))`
