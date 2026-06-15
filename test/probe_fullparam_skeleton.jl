@@ -134,7 +134,7 @@ println("\n=== Check 2: PD-param disposition (parameters block vs generated_quan
 params_block_start = findfirst(l -> occursin("parameters {", l), lines)
 params_block_end   = params_block_start === nothing ? nothing :
     findnext(l -> strip(l) == "}" && !occursin("//", l), lines, params_block_start+1)
-gq_block_start = findfirst(l -> occursin("generated_quantities {", l), lines)
+gq_block_start = findfirst(l -> occursin("generated quantities {", l), lines)
 
 println("  parameters block: lines $(params_block_start)–$(params_block_end)")
 println("  generated_quantities block starts: line $(gq_block_start)")
