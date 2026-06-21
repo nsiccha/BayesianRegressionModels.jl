@@ -92,10 +92,14 @@ function __init__()
     route!(AppContext())
 end
 
-# Bruno-specific extensions (gitignored); load if present. Adds a
-# `dataset_extras(::Val{:bruno}, df)` method and optionally more.
-let path = joinpath(@__DIR__, "bruno-ext.jl")
-    isfile(path) && include(path)
+# Confidential client-project extensions (gitignored); load each if present.
+# Each `<prefix>-ext.jl` adds a `dataset_extras(::Val{:<prefix>}, df)` method and
+# pushes its formula calls into `_ALLOWED_CALLS`. Keep this list in sync with
+# `_CONFIDENTIAL_EXT` in example_entry.jl (which hides examples whose ext is absent).
+for _ext in ("bruno-ext.jl", "bordet-ext.jl")
+    let path = joinpath(@__DIR__, _ext)
+        isfile(path) && include(path)
+    end
 end
 
 end # module

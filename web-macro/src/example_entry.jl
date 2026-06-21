@@ -134,11 +134,18 @@
 
 
     # Whether this entry should appear in gallery / preset UIs. Markdown-only
-    # notes (no formula body) are skipped. `bruno-*` examples depend on
-    # `bruno-ext.jl` registering their datasets; without that file on disk
-    # they would error at compile, so they're hidden too.
-    shown = !isnothing(formula) &&
-            (isfile(joinpath(@__DIR__, "bruno-ext.jl")) || !startswith(slug, "bruno-"))
+    # notes (no formula body) are skipped. Confidential client-project examples
+    # (`<prefix>-*`) depend on their gitignored `<prefix>-ext.jl` registering the
+    # dataset + allowlist; without that file on disk they'd error at compile, so
+    # they're hidden too. Add a new confidential prefix to `_CONFIDENTIAL_EXT` —
+    # the gate generalizes over the tuple rather than special-casing each one.
+    _CONFIDENTIAL_EXT = ("bruno", "bordet")
+    shown = begin
+        gated = findfirst(p -> startswith(slug, "$p-"), _CONFIDENTIAL_EXT)
+        !isnothing(formula) &&
+            (isnothing(gated) ||
+             isfile(joinpath(@__DIR__, "$(_CONFIDENTIAL_EXT[gated])-ext.jl")))
+    end
 
     # Placeholder card emitted by the gallery shell: auto-fetches its body
     # via `hx-trigger="load"` against `pipeline/gallery/card/<slug>`. The
