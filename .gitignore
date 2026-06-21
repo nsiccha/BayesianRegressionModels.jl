@@ -34,3 +34,5 @@ JuliaLocalPreferences.toml
 # Confidential client-project examples (local-only, never commit)
 web-macro/examples/bruno-*.jl
 web-macro/src/bruno-*.jl
+web-macro/examples/bordet-*.jl
+web-macro/src/bordet-*.jl
