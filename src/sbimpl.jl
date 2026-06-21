@@ -1580,12 +1580,13 @@ end
 # parameter submodel (`mu ~ f(...)`, like bordet) OR as a predictor summand
 # (`y ~ 1 + gp(t, by=g)`). We walk every `~` op's RHS summands (`_sb_terms`),
 # which covers both: bordet is a single summand of its RHS, gp is one of several.
-# A subsequent emit step allocates one block per declared field and builds a
-# lookup for the emit phase. Dedup is by (key, f) so a term that is both the
-# whole RHS and (trivially) its sole summand is collected exactly once.
+# Every declaring summand is its own term INSTANCE — there is no `(key, f)`
+# dedup, so N instances of the same term (e.g. `gp(t, by=g) + gp(s, by=g)`)
+# each get collected and allocated their own block. Identical instances (same
+# block name) are coalesced later, at emit time. A subsequent emit step
+# allocates one block per declared field and builds the lookup.
 function _sb_collect_group_block_terms(brmi::BRMI)
     result = Any[]
-    seen = Set{Tuple{Symbol,Any}}()
     for (key, op_nc) in pairs(brmi.operations)
         op = _as_expr_column(parent(op_nc)); isnothing(op) && continue
         getf(op) === (~) || continue
@@ -1595,9 +1596,6 @@ function _sb_collect_group_block_terms(brmi::BRMI)
             f = getf(te)
             fields = _sb_structured_fields(_sb_term_group_block(f, te), f)
             isnothing(fields) && continue
-            k = (key, f)
-            (k in seen) && continue
-            push!(seen, k)
             push!(result, (; key, f, rhs_e=te, fields))
         end
     end
@@ -1625,6 +1623,16 @@ function _sb_resolve_group_col(gspec, rhs_e, data)
         "sbimpl: structured-latent group arg $pos must be a NamedColumn, got $(typeof(args[pos]))")
     nc
 end
+
+# The grouping column's NAME, without materialising data. Used to build the
+# disambiguating block name (`b_<field>_<gname>`) in BOTH the emit pass and the
+# find pass so they agree on the per-instance block. For a `group_fn` spec this
+# is `fn_name` by construction (the synthesised column is named `fn_name`), so
+# `data` is never needed here — only `_sb_resolve_group_col` (emit) needs it.
+_sb_group_name(gspec, rhs_e) =
+    haskey(gspec, :fn)    ? gspec.fn_name :
+    haskey(gspec, :kwarg) ? name(_as_named_column(getkwargs(rhs_e)[gspec.kwarg])) :
+                            name(_as_named_column(getargs(rhs_e)[gspec.arg_pos]))
 
 # Emit the per-group block draw for one field, dispatching on its prior spec.
 # Each block is an n_groups × n_per_group matrix referenced by row = group.
@@ -1657,40 +1665,45 @@ function _sb_emit_block_draw!(stmts, prior::NamedTuple, block_name, idx_name, n_
 end
 
 # Allocate one block per declared field and return a lookup
-# Dict{(f, field_name) => (; block_name, idx_name, n_per_group)}.
-# Idempotent: duplicate (f, field) pairs within the same BRMI are skipped.
+# Dict{block_name::Symbol => (; block_name, idx_name, n_per_group)}.
+# Keyed by the fully-disambiguated block NAME (`b_<field>_<gname>`), so N
+# distinct instances (different x and/or group) each get their own block and
+# only genuinely identical instances (same block name) are coalesced.
 function _sb_emit_group_blocks!(stmts, data, gb_terms)
-    lookup = Dict{Tuple{Any,Symbol}, NamedTuple}()
+    lookup = Dict{Symbol, NamedTuple}()
     for (; f, rhs_e, fields) in gb_terms
         for fld in fields
-            lk = (f, fld.name)
-            haskey(lookup, lk) && continue
             group_col = _sb_resolve_group_col(fld.group, rhs_e, data)
             gname = name(group_col)
-            # Block name `b_<field>_<group>`; for legacy single-field terms
-            # field == nameof(f), so this is byte-for-byte the old name.
+            # Block name `b_<field>_<gname>`; for legacy single-field terms
+            # field == nameof(f), so this is byte-for-byte the old name. For gp
+            # the field name embeds x, so two GPs on the same group never collide.
             suffix = Symbol(fld.name, :_, gname)
             block_name = Symbol(:b_, suffix)
+            haskey(lookup, block_name) && continue   # identical instance already allocated
             n_terms_name = Symbol(:n_terms_, suffix)
             data[n_terms_name] = fld.n_per_group
             idx_name, n_name = _sb_ensure_group_data!(data, group_col)
             _sb_emit_block_draw!(stmts, fld.prior, block_name, idx_name, n_name, n_terms_name, suffix)
-            lookup[lk] = (; block_name, idx_name, n_per_group=fld.n_per_group)
+            lookup[block_name] = (; block_name, idx_name, n_per_group=fld.n_per_group)
         end
     end
     lookup
 end
 
-# Look up block_info for a declaring term call at emit time, or nothing.
-# Returns a NamedTuple carrying a `fields` map (field-name => per-field info);
-# for single-field terms the lone field's keys are also spliced at top level so
-# legacy consumers that destructure `(; block_name, idx_name)` keep working.
+# Look up block_info for a declaring term call at emit time, or nothing. Rebuilds
+# each field's block name (via `_sb_group_name`, matching the emit pass) and
+# resolves it against the block-name-keyed lookup. Returns a NamedTuple carrying
+# a `fields` map (field-name => per-field info); for single-field terms the lone
+# field's keys are also spliced at top level so legacy consumers that destructure
+# `(; block_name, idx_name)` keep working.
 function _sb_find_group_block(f, rhs_e, group_block_lookup)
     fields = _sb_structured_fields(_sb_term_group_block(f, rhs_e), f)
     isnothing(fields) && return nothing
     fmap = Dict{Symbol,NamedTuple}()
     for fld in fields
-        info = get(group_block_lookup, (f, fld.name), nothing)
+        block_name = Symbol(:b_, fld.name, :_, _sb_group_name(fld.group, rhs_e))
+        info = get(group_block_lookup, block_name, nothing)
         isnothing(info) && return nothing
         fmap[fld.name] = info
     end
@@ -2108,7 +2121,8 @@ _sb_predictor_term!(stmts, data, ::typeof(gp), t; group_block_lookup=Dict(), kwa
         isnothing(block_info) && error(
             "sbimpl: `gp($xname, by=...)` found no allocated per-group weight ",
             "block — prepass 2.5 should have allocated it")
-        info = block_info.fields[:gpw]
+        # Single field: read the spliced top-level block info (no field-name key).
+        info = block_info
         gname = name(_sb_resolve_group_col((; kwarg=:by), t, data))
         PHI_name    = Symbol(:PHI_, xname, :_by_, gname)
         lambda_name = Symbol(:lambda_, xname, :_by_, gname)
@@ -2137,7 +2151,10 @@ function _sb_term_group_block(::typeof(gp), call)
     kw = getkwargs(call)
     haskey(kw, :by) || return nothing
     K = get(kw, :k, 20)
-    (; fields=[(; name=:gpw, n_per_group=K, group=(; kwarg=:by), prior=:iid_normal)])
+    # Field name embeds x so two GPs on the SAME group but different x variables
+    # (`gp(t, by=g) + gp(s, by=g)`) get distinct blocks `b_gpw_t_g` / `b_gpw_s_g`.
+    fname = Symbol(:gpw_, name(_sb_named_inner(:gp, only(getargs(call)))))
+    (; fields=[(; name=fname, n_per_group=K, group=(; kwarg=:by), prior=:iid_normal)])
 end
 
 # `_hsgp_basis` is defined in vimpl.jl; reuse rather than redefine here

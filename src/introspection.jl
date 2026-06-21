@@ -316,8 +316,10 @@ end
 # genuine grouping factor (web-macro auto-PPC facets on these), even though it
 # rides on a predictor summand rather than a `(... | g)` term. Surfaced via a
 # dispatched helper (no `getf(...) === :sym` branch inside the walker).
-_gp_by_group(s::ExprColumn) = getf(s) === gp ? _gp_by_group_kw(get(getkwargs(s), :by, nothing)) : nothing
+_gp_by_group(s::ExprColumn) = _gp_by_group_f(getf(s), s)
 _gp_by_group(_s) = nothing
+_gp_by_group_f(::typeof(gp), s) = _gp_by_group_kw(get(getkwargs(s), :by, nothing))
+_gp_by_group_f(::Any, _s) = nothing
 _gp_by_group_kw(by::NamedColumn) = name(by)
 _gp_by_group_kw(_by) = nothing
 
