@@ -209,6 +209,20 @@ sb_group_demo_slic = StanBlocks.@slic begin
     return group_block[group_idx, 1] + group_block[group_idx, 2]
 end
 
+# sb_group_clamped_demo: proves the general structured-latent floor's
+# clamped / non-normal element-wise prior path (decision 10uz10q, the obs_scale
+# shape). Declares a `matrix<lower=0>[n_groups, 2]` latent with an element-wise
+# Exponential prior — exactly varyingsource2's `matrix<lower=0>[n_assays,2]`
+# obs_scale. Not a wired consumer; it exists so a transpile probe can confirm
+# the floor emits a valid positively-constrained matrix param with a non-normal
+# prior. Returns the per-obs sum of both clamped per-group params.
+# No docstring (docstring → @deffun AssertionError gotcha; see primer).
+function sb_group_clamped_demo end
+
+sb_group_clamped_demo_slic = StanBlocks.@slic begin
+    return group_block[group_idx, 1] + group_block[group_idx, 2]
+end
+
 # Zero-inflated Poisson lpmf (per-element + vectorised). Per element:
 #   y == 0 -> log_sum_exp(log(zi),  log1m(zi) + poisson_lpmf(0  | lambda))
 #   y >  0 ->                       log1m(zi) + poisson_lpmf(y  | lambda)
@@ -509,6 +523,25 @@ _sb_hsgp = StanBlocks.@slic begin
     return PHI * (sqrt_spd .* beta_raw)
 end
 
+# Per-group HSGP for `gp(x, by=g)` (gp-as-random-effect). SHARED length-scale /
+# marginal-SD hyperparameters across groups (decision 7p44fo); only the basis
+# weights vary per group. `beta` is the per-group basis-weight matrix
+# (n_groups x n_basis) supplied by the general structured-latent floor with an
+# iid-std-normal prior. Per obs i the GP value is
+#   PHI[i, :] . (sqrt_spd .* beta[group_idx[i], :]).
+# We fold sqrt_spd into PHI's columns via diag_post_multiply (= PHI * diag(spd))
+# so the per-obs value is a single rows_dot_product over the group-gathered
+# weights. No docstring (docstring -> @deffun AssertionError gotcha; see primer).
+_sb_hsgp_by = StanBlocks.@slic begin
+    log_rho   ~ std_normal()
+    log_sigma ~ std_normal()
+    rho   = exp(log_rho)
+    sigma = exp(log_sigma)
+    sqrt_spd = sigma * sqrt(rho * 2.5066282746310002) * exp(-0.25 * rho * rho * lambda)
+    PHI_scaled = diag_post_multiply(PHI, sqrt_spd)
+    return rows_dot_product(PHI_scaled, beta[group_idx, :])
+end
+
 # Categorical -> (n_levels::Int, per-row level index::Vector{Int}). Mirrors
 # vimpl._level_index so the integer indices the walker stashes in `data`
 # agree with what the cimpl-side uses.
@@ -775,37 +808,81 @@ extended rather than shadowed.
 """
 _sb_submodel_rhs!(stmts, data, target, f, rhs) = nothing
 
-# ---- group-block declaration + emit API -------------------------------------
+# ---- structured-latent (group-block) declaration + emit API -----------------
 #
-# A submodel term author declares K normally-distributed correlated per-group
-# params by defining a `_sb_term_group_block(::typeof(term))` method. BRM's
-# Prepass 2.5 reads the declaration, allocates one ranef_correlated_draws
-# block per (term-function, group-column) pair, and threads the un-expanded
-# n_groups×K matrix into the term at emit time via `_sb_emit_group_block_term!`.
+# This is BRM's GENERAL structured-latent floor (KB todo ez6anl; user resolved
+# `1o7se36` to build the general mechanism, not a one-off). A term author
+# declares one-or-more STRUCTURED latent fields — matrix-valued per-group blocks,
+# each with its OWN prior (correlated-normal, iid-normal, or an element-wise
+# possibly-clamped / non-normal distribution) — by defining a
+# `_sb_term_group_block` method. Prepass 2.5 reads the declaration, allocates one
+# block per field, and threads the un-expanded n_groups×K matrices into the term
+# at emit time via `_sb_emit_group_block_term!`. Basis evaluation stays in-term.
 #
-# Declaration shape: (; n_per_group::Int, group_arg_pos|group_fn, group_fn_name)
-#   n_per_group    — K params per group (fixed by the term, not user-adjustable)
-#   group_arg_pos  — which positional arg of the term call is the grouping column
-#                    (defaults to 1; mutually exclusive with group_fn)
-#   group_fn       — fn (rhs_e, data) -> NamedColumn for kwarg-only terms that
-#                    synthesise a computed group column (e.g. series_idxs from
-#                    biomarker_idxs × person_idxs); mutually exclusive with group_arg_pos
-#   group_fn_name  — Symbol key used to look up the prepass-built block_info at
-#                    emit time; required when group_fn is provided
+# Three consumers shape this API: gp(x, by=g) (per-group iid-normal HSGP weights,
+# the deliverable), obs_scale (matrix<lower=0> element-wise Exponential, decision
+# 10uz10q — proven via `sb_group_clamped_demo`, not yet wired), and future
+# splines-by-group (per-group normal spline coefficients).
 #
-# Use `import BayesianRegressionModels: _sb_emit_group_block_term!` when adding
-# methods from a downstream module so the binding is extended, not shadowed.
+# Declaration shape — the 2-arg `_sb_term_group_block(f, call)` form receives the
+# term CALL so a term can declare fields conditional on its actual arguments
+# (gp only declares a block when called with `by=`). It returns EITHER:
+#   (a) legacy single correlated-normal block:
+#       (; n_per_group::Int, group_arg_pos|group_fn, group_fn_name)
+#   (b) general field list:
+#       (; fields = [ (; name, n_per_group, group, prior), ... ])
+# where, per field:
+#   name         — Symbol; unique per term; names the emitted block `b_<name>_<g>`
+#   n_per_group  — K columns per group (the matrix is n_groups × K)
+#   group        — (; arg_pos=Int) | (; kwarg=Symbol) | (; fn, fn_name=Symbol)
+#                    how to find the grouping column (positional arg / kwarg /
+#                    a synthesised computed column)
+#   prior        — :correlated_normal (LKJ across columns, std_normal across
+#                    groups; via ranef_correlated_draws)
+#                | :iid_normal        (iid std_normal weights; via std_normal)
+#                | (; dist, args, [lower], [upper])  element-wise prior over the
+#                    matrix, reusing the scalar-prior dist-name table
+#                    (`_sb_stan_dist_name`); `lower`/`upper` clamp the matrix.
+#
+# Use `import BayesianRegressionModels: _sb_term_group_block, _sb_emit_group_block_term!`
+# when adding methods from a downstream module so the binding is extended.
 
-# Default: no group block. Override for declaring terms.
+# Default: no group block. Override for declaring terms. The 2-arg form defaults
+# to the legacy type-only 1-arg form so existing declarations keep working.
 _sb_term_group_block(_) = nothing
+_sb_term_group_block(f, _call) = _sb_term_group_block(f)
 
 # Toy term declaration: 2 correlated params per group, first arg is the group.
 _sb_term_group_block(::typeof(sb_group_demo)) = (; n_per_group=2, group_arg_pos=1)
 
-# Emit hook for group-block terms. block_info = (; block_name, idx_name, n_per_group).
+# Clamped / non-normal demo (the obs_scale shape, decision 10uz10q): a
+# matrix<lower=0>[n_groups, 2] field with an element-wise Exponential prior.
+_sb_term_group_block(::typeof(sb_group_clamped_demo)) = (; fields=[
+    (; name=:obs_scale_demo, n_per_group=2, group=(; arg_pos=1),
+       prior=(; dist=Exponential, args=(1.0,), lower=0.)),
+])
+
+# Normalize a term's declaration (legacy single-block NT or general `fields` NT)
+# into a uniform Vector of field specs, or `nothing` if the term declares none.
+_sb_structured_fields(::Nothing, _f) = nothing
+function _sb_structured_fields(decl::NamedTuple, f)
+    haskey(decl, :fields) && return decl.fields
+    # Legacy single correlated-normal block -> one normalized field. The field
+    # name is `nameof(f)` so the emitted block name (`b_<name>_<g>`) is
+    # byte-for-byte identical to the pre-generalization floor.
+    group = haskey(decl, :group_fn) ?
+        (; fn=decl.group_fn, fn_name=decl.group_fn_name) :
+        (; arg_pos=get(decl, :group_arg_pos, 1))
+    [(; name=nameof(f), n_per_group=decl.n_per_group, group, prior=:correlated_normal)]
+end
+
+# Emit hook for structured-latent terms. `block_info` carries a `fields` map
+# (field-name => (; block_name, idx_name, n_per_group)); for single-field terms
+# the lone field's keys are ALSO spliced at top level so legacy consumers that
+# destructure `(; block_name, idx_name)` keep working unchanged.
 # Default errors so a term with a declaration but no emit method is caught early.
 _sb_emit_group_block_term!(stmts, data, target, f, rhs_e, block_info) =
-    error("sbimpl: `$(nameof(f))` declared a group block but has no ",
+    error("sbimpl: `$(nameof(f))` declared a structured-latent block but has no ",
           "`_sb_emit_group_block_term!` method — define one.")
 
 # Toy term emit: thread group_block + group_idx into sb_group_demo_slic.
@@ -814,6 +891,14 @@ function _sb_emit_group_block_term!(stmts, data, target, ::typeof(sb_group_demo)
     (; block_name, idx_name) = block_info
     push!(stmts, :($target ~ sb_group_demo_slic(;
         group_block=$block_name, group_idx=$idx_name)))
+end
+
+# Clamped-demo emit: thread the matrix<lower=0> exponential block into the slic.
+function _sb_emit_group_block_term!(stmts, data, target, ::typeof(sb_group_clamped_demo),
+                                     rhs_e, block_info)
+    info = block_info.fields[:obs_scale_demo]
+    push!(stmts, :($target ~ sb_group_clamped_demo_slic(;
+        group_block=$(info.block_name), group_idx=$(info.idx_name))))
 end
 
 # Built-in prior families on a missing-LHS sampling statement (e.g.
@@ -919,7 +1004,7 @@ _sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs;
         _sb_submodel_rhs!(stmts, data, key, f, rhs_e) !== nothing && return
         _sb_emit_prior!(stmts, key, f, rhs_e) && return
     end
-    _sb_linear_predictor!(stmts, data, key, rhs; id_lookup, brmi_key=key, obs_n, cv_groups)
+    _sb_linear_predictor!(stmts, data, key, rhs; id_lookup, brmi_key=key, obs_n, cv_groups, group_block_lookup)
 end
 
 _sb_sampling_backed!(stmts, data, key, backing, rhs; id_lookup, kwargs...) =
@@ -937,15 +1022,15 @@ _sb_sampling_backed!(stmts, data, key, backing, rhs; id_lookup, kwargs...) =
 # as separate methods of `_sb_sampling!`, mirroring vimpl's
 # `vbroadcasted(::ExprColumn{typeof(F)})` extension idiom.
 _sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), group_block_lookup=Dict()) =
-    _sb_sampling_through_link!(stmts, data, key, getf(lhs), only(getargs(lhs)), rhs; id_lookup, obs_n, cv_groups)
+    _sb_sampling_through_link!(stmts, data, key, getf(lhs), only(getargs(lhs)), rhs; id_lookup, obs_n, cv_groups, group_block_lookup)
 
 _sb_sampling_through_link!(stmts, data, key, f, inner, rhs; kwargs...) =
     error("sbimpl: expected NamedColumn inside link `$f(...)`, got $(typeof(inner))")
-function _sb_sampling_through_link!(stmts, data, key, f, inner::NamedColumn, rhs; id_lookup, obs_n=nothing, cv_groups=Set{Symbol}())
+function _sb_sampling_through_link!(stmts, data, key, f, inner::NamedColumn, rhs; id_lookup, obs_n=nothing, cv_groups=Set{Symbol}(), group_block_lookup=Dict())
     inv_f = InverseFunctions.inverse(f)
     inner_name = name(inner)
     pre_name = Symbol(nameof(f), :_, inner_name)
-    _sb_linear_predictor!(stmts, data, pre_name, rhs; id_lookup, brmi_key=key, obs_n, cv_groups)
+    _sb_linear_predictor!(stmts, data, pre_name, rhs; id_lookup, brmi_key=key, obs_n, cv_groups, group_block_lookup)
     push!(stmts, :($inner_name = $(_sb_julia_to_stan_fn(inv_f))($pre_name)))
 end
 
@@ -1109,7 +1194,8 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
                                 id_lookup=_sb_empty_id_lookup(),
                                 brmi_key::Symbol=target,
                                 obs_n::Union{Symbol,Nothing}=nothing,
-                                cv_groups=Set{Symbol}())
+                                cv_groups=Set{Symbol}(),
+                                group_block_lookup=Dict())
     terms = _sb_terms(rhs)
     pop_terms    = Any[]
     ran_terms    = Any[]  # `(expr | group)` -> collected per-group below
@@ -1125,7 +1211,7 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     if !isempty(pop_terms)
         col_exprs = Any[]
         for t in pop_terms
-            _sb_pop_cols!(col_exprs, t, data, stmts, pop_terms; obs_n)
+            _sb_pop_cols!(col_exprs, t, data, stmts, pop_terms; obs_n, group_block_lookup)
         end
         X_name = Symbol(:X_, target)
         pop_name = Symbol(:pop_, target)
@@ -1489,78 +1575,141 @@ end
 
 # ---- group-block prepass (Prepass 2.5) ---------------------------------------
 #
-# Scan brmi.operations for `mu ~ f(...)` where f has a _sb_term_group_block
-# declaration and mu is a MissingColumn (parameter, not data). Collect them;
-# a subsequent emit step allocates one ranef_correlated_draws block per
-# (f, group-column) pair and builds a lookup for the emit phase.
-
+# Scan brmi.operations for declaring terms anywhere in the model: a term `f`
+# with a `_sb_term_group_block` declaration, appearing EITHER as a whole-RHS
+# parameter submodel (`mu ~ f(...)`, like bordet) OR as a predictor summand
+# (`y ~ 1 + gp(t, by=g)`). We walk every `~` op's RHS summands (`_sb_terms`),
+# which covers both: bordet is a single summand of its RHS, gp is one of several.
+# Every declaring summand is its own term INSTANCE — there is no `(key, f)`
+# dedup, so N instances of the same term (e.g. `gp(t, by=g) + gp(s, by=g)`)
+# each get collected and allocated their own block. Identical instances (same
+# block name) are coalesced later, at emit time. A subsequent emit step
+# allocates one block per declared field and builds the lookup.
 function _sb_collect_group_block_terms(brmi::BRMI)
     result = Any[]
     for (key, op_nc) in pairs(brmi.operations)
         op = _as_expr_column(parent(op_nc)); isnothing(op) && continue
         getf(op) === (~) || continue
-        lhs, rhs = getargs(op, 2)
-        lhs_nc = _as_named_column(lhs); isnothing(lhs_nc) && continue
-        isnothing(_as_missing_column(parent(lhs_nc))) && continue
-        rhs_e = _as_expr_column(rhs); isnothing(rhs_e) && continue
-        f = getf(rhs_e)
-        decl = _sb_term_group_block(f)
-        isnothing(decl) && continue
-        push!(result, (; key, f, rhs_e, decl))
+        _, rhs = getargs(op, 2)
+        for t in _sb_terms(rhs)
+            te = _as_expr_column(t); isnothing(te) && continue
+            f = getf(te)
+            fields = _sb_structured_fields(_sb_term_group_block(f, te), f)
+            isnothing(fields) && continue
+            push!(result, (; key, f, rhs_e=te, fields))
+        end
     end
     result
 end
 
-# Allocate one ranef_correlated_draws block per (f, group-column) pair and
-# return a lookup Dict{(f, group_name) => (; block_name, idx_name, n_per_group)}.
-# Idempotent: duplicate (f, group) pairs within the same BRMI are skipped.
-function _sb_emit_group_blocks!(stmts, data, gb_terms)
-    lookup = Dict{Tuple{Any,Symbol}, NamedTuple}()
-    for (; f, rhs_e, decl) in gb_terms
-        group_col = if haskey(decl, :group_fn)
-            decl.group_fn(rhs_e, data)
-        else
-            pos = get(decl, :group_arg_pos, 1)
-            args = getargs(rhs_e)
-            pos <= length(args) || error(
-                "sbimpl: group-block term `$(nameof(f))` has group_arg_pos=$pos ",
-                "but only $(length(args)) args")
-            nc = _as_named_column(args[pos])
-            isnothing(nc) && error(
-                "sbimpl: group-block term `$(nameof(f))` arg $pos must be a ",
-                "NamedColumn group, got $(typeof(args[pos]))")
-            nc
-        end
-        gname = name(group_col)
-        lk = (f, gname)
-        haskey(lookup, lk) && continue
-        suffix = Symbol(nameof(f), :_, gname)
-        block_name = Symbol(:b_, suffix)
-        n_terms_name = Symbol(:n_terms_, suffix)
-        data[n_terms_name] = decl.n_per_group
-        idx_name, n_name = _sb_ensure_group_data!(data, group_col)
+# Resolve a field's grouping column from its group spec + the term call.
+function _sb_resolve_group_col(gspec, rhs_e, data)
+    haskey(gspec, :fn) && return gspec.fn(rhs_e, data)
+    if haskey(gspec, :kwarg)
+        kw = getkwargs(rhs_e)
+        haskey(kw, gspec.kwarg) || error(
+            "sbimpl: structured-latent group kwarg `$(gspec.kwarg)=` missing in `$(nameof(getf(rhs_e)))` call")
+        nc = _as_named_column(kw[gspec.kwarg])
+        isnothing(nc) && error(
+            "sbimpl: `$(gspec.kwarg)=` must be a NamedColumn group, got $(typeof(kw[gspec.kwarg]))")
+        return nc
+    end
+    pos = gspec.arg_pos
+    args = getargs(rhs_e)
+    pos <= length(args) || error(
+        "sbimpl: structured-latent group_arg_pos=$pos but `$(nameof(getf(rhs_e)))` has $(length(args)) args")
+    nc = _as_named_column(args[pos])
+    isnothing(nc) && error(
+        "sbimpl: structured-latent group arg $pos must be a NamedColumn, got $(typeof(args[pos]))")
+    nc
+end
+
+# The grouping column's NAME, without materialising data. Used to build the
+# disambiguating block name (`b_<field>_<gname>`) in BOTH the emit pass and the
+# find pass so they agree on the per-instance block. For a `group_fn` spec this
+# is `fn_name` by construction (the synthesised column is named `fn_name`), so
+# `data` is never needed here — only `_sb_resolve_group_col` (emit) needs it.
+_sb_group_name(gspec, rhs_e) =
+    haskey(gspec, :fn)    ? gspec.fn_name :
+    haskey(gspec, :kwarg) ? name(_as_named_column(getkwargs(rhs_e)[gspec.kwarg])) :
+                            name(_as_named_column(getargs(rhs_e)[gspec.arg_pos]))
+
+# Emit the per-group block draw for one field, dispatching on its prior spec.
+# Each block is an n_groups × n_per_group matrix referenced by row = group.
+_sb_emit_block_draw!(stmts, prior::Symbol, block_name, idx_name, n_name, n_terms_name, suffix) = begin
+    if prior === :correlated_normal
         push!(stmts, :($block_name ~ ranef_correlated_draws(;
             group_idx=$idx_name, n_groups=$n_name, n_terms=$n_terms_name)))
-        lookup[lk] = (; block_name, idx_name, n_per_group=decl.n_per_group)
+    elseif prior === :iid_normal
+        flat_name = Symbol(:zflat_, suffix)
+        push!(stmts, :($flat_name ~ std_normal(; n=$n_name * $n_terms_name)))
+        push!(stmts, :($block_name = reshape($flat_name, $n_terms_name, $n_name)'))
+    else
+        error("sbimpl: unknown structured-latent prior symbol `:$prior` ",
+              "(expected :correlated_normal or :iid_normal)")
+    end
+end
+# Element-wise prior over the matrix, reusing the scalar-prior dist-name table.
+function _sb_emit_block_draw!(stmts, prior::NamedTuple, block_name, idx_name, n_name, n_terms_name, suffix)
+    stan_name = _sb_stan_dist_name(prior.dist)
+    isnothing(stan_name) && error(
+        "sbimpl: structured-latent prior dist `$(prior.dist)` has no `_sb_stan_dist_name` mapping")
+    pos_args = map(_sb_prior_arg, get(prior, :args, ()))
+    flat_name = Symbol(:zflat_, suffix)
+    kw = Any[Expr(:kw, :n, :($n_name * $n_terms_name))]
+    haskey(prior, :lower) && push!(kw, Expr(:kw, :lower, prior.lower))
+    haskey(prior, :upper) && push!(kw, Expr(:kw, :upper, prior.upper))
+    rhs_call = Expr(:call, stan_name, pos_args..., Expr(:parameters, kw...))
+    push!(stmts, Expr(:call, :~, flat_name, rhs_call))
+    push!(stmts, :($block_name = reshape($flat_name, $n_terms_name, $n_name)'))
+end
+
+# Allocate one block per declared field and return a lookup
+# Dict{block_name::Symbol => (; block_name, idx_name, n_per_group)}.
+# Keyed by the fully-disambiguated block NAME (`b_<field>_<gname>`), so N
+# distinct instances (different x and/or group) each get their own block and
+# only genuinely identical instances (same block name) are coalesced.
+function _sb_emit_group_blocks!(stmts, data, gb_terms)
+    lookup = Dict{Symbol, NamedTuple}()
+    for (; f, rhs_e, fields) in gb_terms
+        for fld in fields
+            group_col = _sb_resolve_group_col(fld.group, rhs_e, data)
+            gname = name(group_col)
+            # Block name `b_<field>_<gname>`; for legacy single-field terms
+            # field == nameof(f), so this is byte-for-byte the old name. For gp
+            # the field name embeds x, so two GPs on the same group never collide.
+            suffix = Symbol(fld.name, :_, gname)
+            block_name = Symbol(:b_, suffix)
+            haskey(lookup, block_name) && continue   # identical instance already allocated
+            n_terms_name = Symbol(:n_terms_, suffix)
+            data[n_terms_name] = fld.n_per_group
+            idx_name, n_name = _sb_ensure_group_data!(data, group_col)
+            _sb_emit_block_draw!(stmts, fld.prior, block_name, idx_name, n_name, n_terms_name, suffix)
+            lookup[block_name] = (; block_name, idx_name, n_per_group=fld.n_per_group)
+        end
     end
     lookup
 end
 
-# Look up block_info for a group-block term call at emit time, or nothing.
-# For group_fn terms, uses group_fn_name (fixed Symbol) as the lookup key.
-# For group_arg_pos terms, extracts the NamedColumn from the positional arg.
+# Look up block_info for a declaring term call at emit time, or nothing. Rebuilds
+# each field's block name (via `_sb_group_name`, matching the emit pass) and
+# resolves it against the block-name-keyed lookup. Returns a NamedTuple carrying
+# a `fields` map (field-name => per-field info); for single-field terms the lone
+# field's keys are also spliced at top level so legacy consumers that destructure
+# `(; block_name, idx_name)` keep working.
 function _sb_find_group_block(f, rhs_e, group_block_lookup)
-    decl = _sb_term_group_block(f)
-    isnothing(decl) && return nothing
-    if haskey(decl, :group_fn_name)
-        return get(group_block_lookup, (f, decl.group_fn_name), nothing)
+    fields = _sb_structured_fields(_sb_term_group_block(f, rhs_e), f)
+    isnothing(fields) && return nothing
+    fmap = Dict{Symbol,NamedTuple}()
+    for fld in fields
+        block_name = Symbol(:b_, fld.name, :_, _sb_group_name(fld.group, rhs_e))
+        info = get(group_block_lookup, block_name, nothing)
+        isnothing(info) && return nothing
+        fmap[fld.name] = info
     end
-    pos = get(decl, :group_arg_pos, 1)
-    args = getargs(rhs_e)
-    pos > length(args) && return nothing
-    group_col = _as_named_column(args[pos])
-    isnothing(group_col) && return nothing
-    get(group_block_lookup, (f, name(group_col)), nothing)
+    isempty(fmap) && return nothing
+    first_info = fmap[first(fields).name]
+    (; first_info..., fields=fmap)
 end
 
 _sb_group_desc_matches(a::NamedColumn, b::NamedColumn) = name(a) === name(b)
@@ -1774,12 +1923,12 @@ _sb_collect_terms_expr!(acc, _, x) = push!(acc, x)
 # `pop_terms` is threaded so the intercept emitter can borrow N from a
 # data-backed peer in the same formula (deterministic) rather than
 # probing the shared `data` dict in hash order.
-_sb_pop_cols!(cols, t, data, stmts, pop_terms=(); obs_n=nothing) =
-    push!(cols, _sb_predictor_col(t, data, stmts, pop_terms; obs_n))
-_sb_pop_cols!(cols, t::ExprColumn, data, stmts, pop_terms=(); obs_n=nothing) =
-    _sb_pop_cols_expr!(cols, getf(t), t, data, stmts, pop_terms; obs_n)
-_sb_pop_cols_expr!(cols, ::Any, t, data, stmts, pop_terms=(); obs_n=nothing) =
-    push!(cols, _sb_predictor_col(t, data, stmts, pop_terms; obs_n))
+_sb_pop_cols!(cols, t, data, stmts, pop_terms=(); obs_n=nothing, group_block_lookup=Dict()) =
+    push!(cols, _sb_predictor_col(t, data, stmts, pop_terms; obs_n, group_block_lookup))
+_sb_pop_cols!(cols, t::ExprColumn, data, stmts, pop_terms=(); obs_n=nothing, group_block_lookup=Dict()) =
+    _sb_pop_cols_expr!(cols, getf(t), t, data, stmts, pop_terms; obs_n, group_block_lookup)
+_sb_pop_cols_expr!(cols, ::Any, t, data, stmts, pop_terms=(); obs_n=nothing, group_block_lookup=Dict()) =
+    push!(cols, _sb_predictor_col(t, data, stmts, pop_terms; obs_n, group_block_lookup))
 _sb_pop_cols_expr!(cols, ::typeof(&), t, data, stmts, _pop_terms=(); kwargs...) =
     _sb_interaction_cols!(cols, t, data, stmts)
 
@@ -1861,7 +2010,7 @@ end
 # `~` statement (e.g. `mo(c)`) can push before returning their column symbol.
 # Integer `1` -> intercept, NamedColumn -> reference by name, ExprColumn(mo, c)
 # -> submodel-sampled contrast column.
-_sb_predictor_col(t::Int, data, _stmts, pop_terms=(); obs_n::Union{Symbol,Nothing}=nothing) = begin
+_sb_predictor_col(t::Int, data, _stmts, pop_terms=(); obs_n::Union{Symbol,Nothing}=nothing, kwargs...) = begin
     t == 1 || error("sbimpl: integer term must be `1` for intercept, got `$t`")
     # Three-tier length probe, in priority order:
     #   1. A data-backed peer in the same formula's terms (`_sb_n_obs_probe`).
@@ -1893,13 +2042,13 @@ function _predictor_col_for(t, d::DataColumn, data)
     name(t)
 end
 _predictor_col_for(t, d, _) = error("sbimpl: expected data-backed NamedColumn for `$(name(t))`, got $(typeof(d))")
-_sb_predictor_col(t::ExprColumn, data, stmts, _pop_terms=(); kwargs...) = _sb_predictor_term!(stmts, data, getf(t), t)
+_sb_predictor_col(t::ExprColumn, data, stmts, _pop_terms=(); kwargs...) = _sb_predictor_term!(stmts, data, getf(t), t; kwargs...)
 _sb_predictor_col(t, _data, _stmts, _pop_terms=(); kwargs...) = error("sbimpl: unsupported predictor term $(typeof(t)): $t")
 
 # Monotonic-effect predictor: emit `mo_<c> ~ _sb_mo(; x=<c>_idx)` and return
 # `mo_<c>` as the column. Scope: single NamedColumn inner arg backed by raw
 # data; `mo1`, `mm`, `s` etc. fall through the default error.
-_sb_predictor_term!(stmts, data, ::typeof(mo), t) = begin
+_sb_predictor_term!(stmts, data, ::typeof(mo), t; kwargs...) = begin
     inner_name, raw = _sb_inner_data(:mo, only(getargs(t)))
     n_levels, idx = _sb_level_index(raw)
     n_levels >= 2 || error("sbimpl: `mo($inner_name)` needs >= 2 levels (got $n_levels)")
@@ -1914,7 +2063,7 @@ end
 # likelihood `x_obs ~ normal(me_<x>, sd_x)`. Returns `me_<x>` as the predictor
 # column so popefs supplies a free beta. `sd_x` must be a positive constant;
 # per-row error sizes would require a vector kwarg and a tweaked submodel.
-_sb_predictor_term!(stmts, data, ::typeof(me), t) = begin
+_sb_predictor_term!(stmts, data, ::typeof(me), t; kwargs...) = begin
     args = getargs(t)
     length(args) == 2 || error("sbimpl: `me(x, sd)` expects 2 args, got $(length(args))")
     inner, sd_arg = args
@@ -1937,7 +2086,7 @@ end
 # a single column (so popefs multiplies by an overall beta). Only the default
 # basis is supported right now -- `bs`, `t2`, and kwargs like `k=` or
 # `knots=` will need extra dispatches.
-_sb_predictor_term!(stmts, data, ::typeof(s), t) = begin
+_sb_predictor_term!(stmts, data, ::typeof(s), t; kwargs...) = begin
     args = getargs(t)
     length(args) == 1 || error("sbimpl: `s(x)` expects 1 positional arg, got $(length(args))")
     xname, raw = _sb_inner_data(:s, only(args))
@@ -1955,14 +2104,35 @@ end
 # log_sigma, beta_raw and returns a length-N smooth contribution. popefs
 # multiplies by an overall beta -- harmless extra slope but conventional.
 # Defaults match vimpl's: K=20 basis fns, c=1.5 boundary factor.
-_sb_predictor_term!(stmts, data, ::typeof(gp), t) = begin
+_sb_predictor_term!(stmts, data, ::typeof(gp), t; group_block_lookup=Dict(), kwargs...) = begin
     args = getargs(t); kw = getkwargs(t)
-    length(args) == 1 || error("sbimpl: `gp(x; k=K, c=C)` expects 1 positional arg, got $(length(args))")
+    length(args) == 1 || error("sbimpl: `gp(x; by=g, k=K, c=C)` expects 1 positional arg, got $(length(args))")
     xname, raw_col = _sb_inner_data(:gp, only(args))
     raw = _sb_real_vec(:gp, xname, raw_col)
     K = get(kw, :k, 20)
     c = get(kw, :c, 1.5)
     PHI, lambda = _hsgp_basis(raw, K, c)
+    if haskey(kw, :by)
+        # gp-as-random-effect (gp(x, by=g)): per-group basis weights come from
+        # the general structured-latent floor (prepass 2.5 allocated the
+        # n_groups×K iid-normal block `b_gpw_<g>`); shared length-scale /
+        # marginal-SD hyperparameters live inside `_sb_hsgp_by` (decision 7p44fo).
+        block_info = _sb_find_group_block(gp, t, group_block_lookup)
+        isnothing(block_info) && error(
+            "sbimpl: `gp($xname, by=...)` found no allocated per-group weight ",
+            "block — prepass 2.5 should have allocated it")
+        # Single field: read the spliced top-level block info (no field-name key).
+        info = block_info
+        gname = name(_sb_resolve_group_col((; kwarg=:by), t, data))
+        PHI_name    = Symbol(:PHI_, xname, :_by_, gname)
+        lambda_name = Symbol(:lambda_, xname, :_by_, gname)
+        data[PHI_name]    = PHI
+        data[lambda_name] = lambda
+        col_name = Symbol(:gp_, xname, :_by_, gname)
+        push!(stmts, :($col_name ~ _sb_hsgp_by(; PHI=$PHI_name, lambda=$lambda_name,
+            beta=$(info.block_name), group_idx=$(info.idx_name))))
+        return col_name
+    end
     PHI_name    = Symbol(:PHI_, xname)
     lambda_name = Symbol(:lambda_, xname)
     data[PHI_name]    = PHI
@@ -1972,6 +2142,21 @@ _sb_predictor_term!(stmts, data, ::typeof(gp), t) = begin
     col_name
 end
 
+# gp-as-random-effect declaration: when `gp(x, by=g)` is called WITH `by=`, it
+# declares one structured-latent field — the per-group basis-weight matrix
+# (n_groups × K) with an iid-normal prior. Without `by=`, no block (the term
+# stays the population HSGP path above). K must match the basis count used when
+# building PHI/lambda in the emit hook (both read `get(kw, :k, 20)`).
+function _sb_term_group_block(::typeof(gp), call)
+    kw = getkwargs(call)
+    haskey(kw, :by) || return nothing
+    K = get(kw, :k, 20)
+    # Field name embeds x so two GPs on the SAME group but different x variables
+    # (`gp(t, by=g) + gp(s, by=g)`) get distinct blocks `b_gpw_t_g` / `b_gpw_s_g`.
+    fname = Symbol(:gpw_, name(_sb_named_inner(:gp, only(getargs(call)))))
+    (; fields=[(; name=fname, n_per_group=K, group=(; kwarg=:by), prior=:iid_normal)])
+end
+
 # `_hsgp_basis` is defined in vimpl.jl; reuse rather than redefine here
 # to avoid method-overwriting precompile errors.
 
@@ -1979,7 +2164,7 @@ end
 # phi / epsilon parameters and returns the per-row u[t] as a single length-N
 # column. popefs multiplies by an overall beta -- harmless, but a direct-
 # summand variant would skip it.
-_sb_predictor_term!(stmts, data, ::typeof(ar), t) = begin
+_sb_predictor_term!(stmts, data, ::typeof(ar), t; kwargs...) = begin
     args = getargs(t)
     kw = getkwargs(t)
     p = get(kw, :p, 1)
@@ -2005,7 +2190,7 @@ for (fn, transform) in (
         (:standardize, :_sb_zscale),
         (:center,      :_sb_center),
     )
-    @eval function _sb_predictor_term!(stmts, data, ::typeof($fn), t)
+    @eval function _sb_predictor_term!(stmts, data, ::typeof($fn), t; kwargs...)
         inner = only(getargs(t))
         v = collect(Float64, _sb_materialize_vec(inner))
         v_t = $transform(v)
@@ -2020,7 +2205,7 @@ end
 # subtree to a Stan data vector and let popefs supply the beta. Errors out
 # if any leaf isn't a raw data column (e.g. references a sampled parameter
 # directly), preserving the old "unsupported" diagnostic.
-function _sb_predictor_term!(stmts, data, f::Function, t)
+function _sb_predictor_term!(stmts, data, f::Function, t; kwargs...)
     try
         v = collect(Float64, _sb_materialize_vec(t))
         cn = _sb_wrapper_col_name(Symbol(f), t)
