@@ -48,7 +48,7 @@ export name, getf, getargs, getkwargs, getbroadcast, getop
 
 # Macro plumbing + compiled-output accessors used by downstream code
 # (web-macro's Formula struct, bruno's direct pipeline calls).
-export parse!, _brm, stan_code
+export parse!, _brm, stan_code, reprocess, restan_data
 
 # Introspection -- model-shape questions answered without re-walking
 # the operations dict.
