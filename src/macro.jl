@@ -186,20 +186,27 @@ _brm(x::Expr; df=nothing) = begin
     x = parse!(x; info)
     nonlocals = [key for (key, value) in pairs(alllocals) if value == :nonlocal]
     maybelocals = [key for (key, value) in pairs(alllocals) if value == :maybelocal]
-    init = quote
-        (;$(nonlocals...)) = data(__df__)
-        (;$(maybelocals...)) = maybedata(__df__)
-    end
-    finalize = quote
-        $BRMI(;$(keys(alllocals)...))
-    end
+    finalize = :($BRMI(;$(keys(alllocals)...)))
+    # ONE shared builder body, parameterised on the `__df__` symbol. Nonlocals
+    # bind via the @getproperty (hasproperty→MissingColumn) fallback so a name
+    # that isn't a df column (e.g. a multi-equation predictor/param like
+    # `loc`/`err`) becomes a MissingColumn instead of erroring; `data` and
+    # `maybedata` are interpolated as values so the generated code resolves in
+    # ANY consumer scope (`data` is unexported). Both forms below reuse THIS
+    # body, so the two builder forms cannot diverge.
+    body = Expr(:block,
+        :(__ddf__ = $data(__df__)),
+        [:($nonlocal = @getproperty __ddf__.$nonlocal) for nonlocal in nonlocals]...,
+        :((;$(maybelocals...)) = $maybedata(__df__)),
+        x,
+        finalize,
+    )
     if isnothing(df)
-        Expr(:(=), lhs, Expr(:block, init, x, finalize))
+        # no-df: `gensym_model(__df__) = body` — a reusable `df -> BRMI` builder.
+        Expr(:(=), lhs, body)
     else
-        Expr(:let, 
-            Expr(:block, :(__df__ = $df), :(__ddf__ = $data(__df__)), [:($nonlocal = @getproperty __ddf__.$nonlocal) for nonlocal in nonlocals]...), 
-            Expr(:block, :((;$(maybelocals...)) = maybedata(__df__)), x, finalize)
-        )
+        # baked: the SAME body with `__df__` bound to the literal df.
+        Expr(:let, Expr(:block, :(__df__ = $df)), body)
     end
 end
 brm(df, formula::AbstractString) = eval(_brm(formula; df))
