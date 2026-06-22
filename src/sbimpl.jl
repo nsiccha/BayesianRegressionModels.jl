@@ -891,6 +891,137 @@ Base.show(io::IO, sb::SBBRMI) = begin
 end
 
 
+# ---- reprocess / restan_data (decision nr3v8n A) ----------------------------
+
+_sb_df_has_column(df, k::Symbol) = hasproperty(df, k)
+
+# Recompute one transform-output data key against `df`. `freeze=true` applies
+# the stored training constant (prediction-replay); `freeze=false` re-derives
+# the constant from `df`, then applies (fresh-fit semantics). Writes the
+# regenerated key(s) into `new_data`, the (possibly re-derived) record into
+# `new_preproc`, and marks every key it owns in `handled`.
+function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::PreprocEntry, df, freeze::Bool)
+    if e.kind === :zscale || e.kind === :standardize
+        v = collect(Float64, _sb_rematerialize_vec(e.raw_ref, df))
+        c = freeze ? e.const_ : _sb_fit_zscale(v)
+        new_data[key] = _sb_apply_zscale(c, v)
+        new_preproc[key] = PreprocEntry(e.kind, c, e.raw_ref, false)
+    elseif e.kind === :center
+        v = collect(Float64, _sb_rematerialize_vec(e.raw_ref, df))
+        c = freeze ? e.const_ : _sb_fit_center(v)
+        new_data[key] = _sb_apply_center(c, v)
+        new_preproc[key] = PreprocEntry(:center, c, e.raw_ref, false)
+    elseif e.kind === :protect
+        # No fitted constant — re-materialise the same expr tree on `df`.
+        new_data[key] = collect(Float64, _sb_rematerialize_vec(e.raw_ref, df))
+        new_preproc[key] = e
+    elseif e.kind === :spline
+        v = collect(Float64, _sb_df_column(df, e.raw_ref))
+        knots = freeze ? e.const_ : _sb_fit_spline(v; n_interior=2)
+        basis, _ = _sb_apply_spline(knots, v)
+        new_data[key] = basis
+        new_preproc[key] = PreprocEntry(:spline, knots, e.raw_ref, false)
+    elseif e.kind === :gp
+        v = collect(Float64, _sb_df_column(df, e.raw_ref))
+        K = e.const_.K
+        mu_L = freeze ? e.const_.mu_L : _sb_fit_hsgp(v, K, e.const_.c)
+        PHI, lambda = _sb_apply_hsgp(mu_L, v, K)
+        new_data[key] = PHI
+        new_data[e.const_.lambda_key] = lambda
+        push!(handled, e.const_.lambda_key)
+        new_preproc[key] = PreprocEntry(:gp, (; mu_L=mu_L, K=K, c=e.const_.c, lambda_key=e.const_.lambda_key), e.raw_ref, false)
+    elseif e.kind === :factor || e.kind === :mo
+        v = _sb_df_column(df, e.raw_ref)
+        levels = freeze ? e.const_ : _sb_fit_levels(v)
+        new_data[key] = _sb_apply_levels(levels, v)   # errors loudly on an unseen level
+        new_preproc[key] = PreprocEntry(e.kind, levels, e.raw_ref, true)
+        if e.kind === :factor
+            # The `<x>_n_levels` count key co-emitted by `_sb_emit_cat!`: frozen
+            # training count under freeze=true, re-counted under freeze=false.
+            n_name = Symbol(e.raw_ref, :_n_levels)
+            new_data[n_name] = length(levels)
+            push!(handled, n_name)
+        end
+    else
+        error("sbimpl: reprocess: unknown preproc kind `$(e.kind)` for key `$key`")
+    end
+    push!(handled, key)
+    nothing
+end
+
+"""
+    reprocess(sb::SBBRMI, new_df; freeze_constants=true) -> SBBRMI
+
+Re-materialise the SBBRMI's Stan data dict against `new_df`, **re-running** the
+Julia-side preprocessing (decision nr3v8n A) — so the silent-stale-constant bug
+of a naive per-column `sb.model(; col=…)` rebind is avoided. Returns a NEW
+`SBBRMI` that REUSES the already-transpiled Stan model (byte-identical
+`stan_code` when shapes are stable) with the new data dict.
+
+- `freeze_constants=true` (default — prediction / replay): apply the **training**
+  constant to `new_df` (z-score with training mean/sd, map factor codes via the
+  training level set, rebuild the spline/HSGP basis on the training
+  knots/(mean, L)). This is the operation Bruno hand-rolls outside BRM.
+- `freeze_constants=false` (fresh-fit semantics): re-derive each constant from
+  `new_df`, then apply.
+
+Covered: the 7 Julia-side transforms (`zscale`/`standardize`/`center`/`factor`/
+`mo`/`s`/`gp`), `protect`/implicit-fn columns (re-materialised on `new_df`), and
+pass-through raw columns (plain data, `me` obs values, `ar` time). Errors loudly
+on a `factor`/`mo` **unseen level** and on any derived data key it cannot account
+for (e.g. random-effects group indices from `(1|g)`) rather than silently
+copying a stale vector — rebuild from `new_df` for those models.
+"""
+function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true)
+    new_data = Dict{Symbol,Any}()
+    new_preproc = Dict{Symbol,PreprocEntry}()
+    handled = Set{Symbol}()
+    # 1. Regenerate every transform-output key from its preproc record.
+    for (key, e) in sb.preproc
+        _sb_reprocess_entry!(new_data, new_preproc, handled, key, e, new_df, freeze_constants)
+    end
+    # 2. Account for every remaining old data key: pass-through raw columns, or
+    #    frozen structural scalars; ERROR on any unaccounted derived structure.
+    for (k, v) in sb.data
+        k in handled && continue
+        if v isa AbstractVector
+            if _sb_df_has_column(new_df, k)
+                new_data[k] = _sb_df_column(new_df, k)   # pass-through (plain / me obs / ar time)
+            else
+                error(
+                    "sbimpl: reprocess: data key `$k` is a derived vector with no ",
+                    "preprocessing record and is not a column of the new DataFrame. ",
+                    "reprocess covers the 7 Julia-side predictor transforms ",
+                    "(zscale/standardize/center/factor/mo/s/gp), protect/implicit-fn ",
+                    "columns and pass-through raw columns; models with random-effects ",
+                    "group indices (e.g. `(1|g)`) are not yet supported — rebuild the ",
+                    "SBBRMI from the new DataFrame instead.")
+            end
+        elseif v isa Number || v isa AbstractString || v isa Bool
+            new_data[k] = v   # frozen structural scalar / formula literal (e.g. me `sd_<x>`)
+        else
+            error(
+                "sbimpl: reprocess: data key `$k` (::$(typeof(v))) is a derived ",
+                "structure with no preprocessing record. reprocess cannot safely ",
+                "regenerate it on the new DataFrame — rebuild the SBBRMI instead.")
+        end
+    end
+    new_model = StanBlocks.SlicModel(sb.model.model, new_data, sb.model.mod)
+    SBBRMI(sb.parent, new_model, new_data, new_preproc)
+end
+
+"""
+    restan_data(sb::SBBRMI, new_df; freeze_constants=true) -> Dict
+
+Thin convenience over [`reprocess`](@ref): the prepared Stan **data dict** for
+`new_df`, ready for a `param_constrain!` replay. Equivalent to
+`StanBlocks.stan_data(reprocess(sb, new_df; freeze_constants).model)`. Same
+`freeze_constants` semantics (default `true` = training constants applied to new
+data). See [`reprocess`](@ref) for the covered-terms list and error cases.
+"""
+restan_data(sb::SBBRMI, new_df; freeze_constants::Bool=true) =
+    StanBlocks.stan_data(reprocess(sb, new_df; freeze_constants).model)
+
 # ---- top-level op dispatch ---------------------------------------------------
 
 _sb_emit!(stmts, data, key, op::ExprColumn; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), group_block_lookup=Dict()) =
