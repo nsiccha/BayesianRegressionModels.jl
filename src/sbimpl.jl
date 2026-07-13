@@ -1495,6 +1495,94 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     end
 end
 
+# ---- consumer helper: name the `beta_pop` columns -------------------------
+#
+# `popcoefnames(brmi, lhs)` lets a downstream consumer relabel raw
+# `pop_<lhs>_beta_pop.N` posterior columns WITHOUT re-parsing the formula and
+# WITHOUT re-deriving the (data-dependent) pop-vs-cat-vs-ranef classification.
+# It mirrors the emitter EXACTLY by driving the SAME `_sb_classify_term!` +
+# `_sb_pop_cols!` used to build the design matrix `X` — so the returned labels
+# can never drift from what `popefs` actually multiplies. Standard fixed-effect
+# terms only (covers the whole regression-covariate surface); group-structured
+# terms whose columns need prepass context (e.g. `gp(x, by=g)`) are out of
+# scope in v1 and raise a clear, actionable error rather than mis-counting.
+
+"""
+    popcoefnames(brmi::BRMI, lhs::Symbol) -> Union{Vector{Symbol}, Nothing}
+
+Ordered labels of the population-level `beta_pop` coefficient columns for
+linear predictor `lhs`, as emitted by the sbimpl backend (`SBBRMI`). The
+k-th returned symbol labels the parameter column `pop_<lhs>_beta_pop.k`
+1:1, so a consumer can turn raw `pop_<lhs>_beta_pop.N` posterior columns
+into human-readable names without re-parsing the formula.
+
+Only terms that sbimpl folds into the `popefs` design matrix appear, in
+formula (left-to-right) order:
+
+- the intercept `1` is INCLUDED (labelled `:Intercept`), at its formula
+  position — conventionally first, `1 + …`; there is NO separate
+  `pop_<lhs>_Intercept` parameter;
+- plain continuous (`Real`, non-integer) predictors — one column each,
+  labelled by the column name;
+- single-`beta` wrapped terms (`mo`, `me`, `s`, `gp` population, `protect`,
+  `log(x)`, `x^2`, …) — one column each, labelled by the emitted design key;
+- an interaction `a & b` — one label per expanded treatment-contrast column.
+
+EXCLUDED — emitted as their OWN parameters, NOT `beta_pop`, so they never
+appear in `pop_<lhs>_beta_pop`:
+
+- integer- or `CategoricalVector`-typed bare predictors → `cat_<name>`
+  (K−1 treatment contrasts);
+- `mo1(c)` → `mo1_<c>`; explicit-coefficient `coef * a` (own scalar);
+- random-effects blocks `(… | g)` → per-group ranef parameters.
+
+Needs a data-bound `BRMI` (any fitted model has one): the population-vs-
+categorical split reads each predictor's element type. Returns `Symbol[]`
+when `lhs` has no population columns (e.g. `loc ~ (1 | g)`), and `nothing`
+when `lhs` is not a linear predictor of `brmi`.
+"""
+function popcoefnames(brmi::BRMI, lhs::Symbol)
+    op = linear_predictor_op(brmi, lhs)
+    isnothing(op) && return nothing
+    _, rhs = getargs(op, 2)
+    pop_terms = Any[]; ran_terms = Any[]; direct_terms = Any[]
+    for t in _sb_terms(rhs)
+        _sb_classify_term!(t, pop_terms, ran_terms, direct_terms)
+    end
+    labels = Symbol[]
+    # Scratch data/stmts: `_sb_pop_cols!` materialises columns into these as a
+    # side effect; we only read back the pushed column reference(s) as labels.
+    scratch = Dict{Symbol,Any}(); scratch_stmts = Any[]
+    for t in pop_terms
+        # The intercept is always exactly one all-ones column; skip the
+        # emitter's length probe (irrelevant to naming) and label it directly.
+        if t isa Integer
+            push!(labels, :Intercept)
+            continue
+        end
+        cols = Any[]
+        try
+            _sb_pop_cols!(cols, t, scratch, scratch_stmts, pop_terms)
+        catch err
+            error("popcoefnames: cannot resolve the `beta_pop` column(s) for term ",
+                  "`$(_popcoef_show(t))` in predictor `$lhs` without full model context ",
+                  "($(sprint(showerror, err))). This helper covers the standard ",
+                  "fixed-effect terms; for group-structured terms (e.g. `gp(x, by=g)`) ",
+                  "read the parameter names off the transpiled `SBBRMI` instead.")
+        end
+        for c in cols
+            # Non-intercept pop columns are Symbol references; a stray Expr
+            # (only the intercept probe emits one) maps back to :Intercept.
+            push!(labels, c isa Symbol ? c : :Intercept)
+        end
+    end
+    labels
+end
+
+_popcoef_show(t::ExprColumn) = string(getf(t))
+_popcoef_show(t::NamedColumn) = string(name(t))
+_popcoef_show(t) = string(t)
+
 # Classify a predictor term as "direct" (allocates its own parameters, no
 # popefs multiplication). Matches vimpl: integer-backed NamedColumns are
 # treated as treatment-coded categoricals; floats go through popefs.
