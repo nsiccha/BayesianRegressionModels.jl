@@ -55,7 +55,7 @@ export parse!, _brm, stan_code, reprocess, restan_data
 export outcomes, linear_predictor_op, linear_predictors, predictors,
        grouping_factors, column_data, data_columns, dependencies,
        hierarchical_outcomes,
-       linear_predictor_args, data_args, primary_lp
+       linear_predictor_args, data_args, primary_lp, popcoefnames
 
 # Extension API. Downstream packages (bruno) add their own formula terms
 # by defining methods on `vmeta_sampling_rhs` + `_sb_submodel_rhs!` and
