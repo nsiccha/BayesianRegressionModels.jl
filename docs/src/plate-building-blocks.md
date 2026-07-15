@@ -1,12 +1,11 @@
 # Complete-PLATE blueprint
 
 !!! warning "Design catalog, not deployed API"
-    This page separates three states: the implementation deployed on
-    StanBlocks `devibe`, newer work on the
-    `kb-impl/StanBlocks-plate-promote-emit` feature branch, and the complete
-    target contract. Feature-branch support is not a deployment claim. Broader
-    constrained values per cell, general ragged inputs and results, and
-    optional parallel likelihood lowering remain target capabilities.
+    This page separates the hardened PLATE implementation deployed on
+    StanBlocks `devibe` from the complete target contract. Broader constrained
+    values per cell, general ragged inputs and results, arbitrary result-shape
+    inference, CV/replay propagation, and optional parallel likelihood
+    lowering remain target capabilities.
 
 The purpose of this catalog is to give StanBlocks a concrete consumer contract
 and give BRM one migration target. It is not a proposal to replace already-good
@@ -14,50 +13,37 @@ vectorized Stan with loops everywhere.
 
 ## Current deployment baseline
 
-As of 2026-07-16, StanBlocks `devibe` contains:
+As of 2026-07-16, StanBlocks `devibe` contains the hardened PLATE and ragged
+constrained-parameter line landed by merge `bd06936` (parents `d9b0aeb` and
+`ba7156d`):
 
 - the public one-dimensional do-block PLATE with scalar-per-cell fresh values,
   direct top-level sampling/assignment multiplexing, scalar results, and Stan
   block routing (`5de175c`);
-- vector-per-cell fresh parameters and vector cell results (`0f21383`). A
-  `vector[K]` cell is collected by column as `matrix[K,N]`, so cell `i` is
-  addressed as `value[:, i]`. The deployed implementation currently requires
-  a typed result LHS, `value::vector[K] ~ plate(...)`; it does not infer `K`
-  from the trailing expression. That annotation is a temporary deployed
-  limitation and intentionally absent from the complete contract below;
-- ragged constrained simplex lowering and its `RaggedVector` view. Using that
-  feature at runtime requires BridgeStan 2.9 / Stan 2.39; the currently deployed
-  web environment remains on BridgeStan 2.7 and therefore fails its guard until
-  the user-owned dependency bump;
-- the corrected scope contract: a called `@slic` submodel's internal sampling
-  statements are not yet promoted. Authors must inline the cell body today.
+- vector-per-cell fresh parameters and inferred scalar or vector cell results.
+  A one-dimensional `vector[K]` cell is collected by column as
+  `matrix[K,N]`, so cell `i` is addressed as `value[:, i]`; additional outer
+  axes use array-wrapped matrices;
+- trace-then-promote lowering for ordinary called `@slic` submodels, including
+  inferred scalar and vector results from the traced trailing expression;
+- integer or tuple-valued N-dimensional `outer` shapes with nested Stan-block
+  routing;
+- ragged `simplex`, `ordered`, `positive_ordered`, and Cholesky parameter
+  carriers. The integration uses `devibe`'s bare free-parameter declarations
+  for both ragged vector and matrix carriers. Using these carriers at runtime
+  requires BridgeStan 2.9 / Stan 2.39; the currently deployed web environment
+  remains on BridgeStan 2.7 and fails its guard until the user-owned dependency
+  bump;
 - corrected typed-LHS constraint propagation (`c672062`): `lower`, `upper`,
   `offset`, and `multiplier` on the sampling RHS now reach typed declarations.
   Earlier StanBlocks revisions could silently turn a typed half-normal into an
   unconstrained Normal.
 
-The six-vector Bordet hierarchy is BRM's first vector-cell migration target.
-The restrictions above remain accurate for the deployed branch, but they are
-not the implementation frontier described next.
-
-### Feature-branch progress, not yet integrated
-
-StanBlocks' `kb-impl/StanBlocks-plate-promote-emit` branch currently adds:
-
-- trace-then-promote lowering for ordinary called `@slic` submodels and
-  inference of an untyped plate result from the traced trailing expression,
-  including vector results (`df8f91b`);
-- hardened scalar- and vector-result cases for called submodels (`93dc1ee`);
-- integer or tuple-valued N-dimensional `outer` shapes with nested Stan-block
-  routing (`e2fc8a8`). One-dimensional vector cells remain column-first;
-  additional outer axes use array-wrapped matrices; and
-- branch implementations for ragged `simplex`, `ordered`,
-  `positive_ordered`, and Cholesky cells.
-
-The N-dimensional path is still in automated hardening and the branch has not
-been integrated into `devibe`. Thus scalar-only, typed-result-only,
-called-submodel-unsupported, and one-dimensional-only are **deployment**
-limitations, not accurate descriptions of the feature branch. General ragged
+The merge retains the public, called-submodel, N-dimensional, ragged, and
+block-routing hardening coverage, and the combined tree loads cleanly. Thus
+scalar-only, typed-result-only, called-submodel-unsupported, and
+one-dimensional-only are no longer deployment limitations. The six-vector
+Bordet hierarchy is BRM's first vector-cell migration target. General ragged
 iteration/results, arbitrary shape-polymorphic collection, CV/replay taint,
 and parallel likelihood lowering remain part of the complete target below.
 
@@ -72,7 +58,7 @@ result ~ plate(iterable_1, iterable_2; outer=(n_cells,)) do cell_1, cell_2
 end
 ```
 
-A complete implementation has the following semantics. The feature branch
+A complete implementation has the following semantics. The deployed line
 implements a substantial subset of items 3--6, but this list remains the
 acceptance contract rather than a statement about deployed behavior.
 
@@ -490,11 +476,10 @@ end
 # Existing vectorized Bordet response and likelihood remain unchanged.
 ```
 
-The complete-target spelling above relies on inferred result type. On current
-`devibe`, the first line must temporarily read
-`theta::vector[6] ~ plate(; outer=(n_series,)) do series`. The feature branch
-infers the vector result from the trailing expression, so the untyped spelling
-is already the branch form; integration is still pending.
+The deployed `bd06936` line infers this vector result from the trailing
+expression, so the untyped spelling above is now valid on `devibe`. Older
+deployments required
+`theta::vector[6] ~ plate(; outer=(n_series,)) do series`.
 
 This is the first real migration unlocked by fixed-vector cell results; it does
 not require ragged inputs.
@@ -607,12 +592,13 @@ Even a complete implementation has a useful boundary.
 
 ## Migration and acceptance sequence
 
-1. **Integrate and harden the feature branch:** verify untyped scalar/vector
+1. **Validate the deployed PLATE line in BRM:** exercise untyped scalar/vector
    results, called-submodel promotion, integer and N-dimensional outer shapes,
-   nested block routing, and the one-dimensional versus extra-axis layouts.
+   nested block routing, and the one-dimensional versus extra-axis layouts in
+   real BRM emitters.
 2. **Fixed vector BRM migration:** rewrite the six-vector Bordet floor and
    generic `ranef_correlated_draws`; compare emitted parameter shapes and log
-   density on the integrated implementation.
+   density on the deployed implementation.
 3. **Hygienic submodel acceptance:** express the same cell as a named `@slic`
    building block and verify per-call names, captures, and return substitution.
 4. **Constrained cell values:** replace `ranef_correlated_by*` and the `multi_*`
