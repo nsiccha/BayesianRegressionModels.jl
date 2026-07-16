@@ -2,10 +2,10 @@
 
 !!! warning "Design catalog, not deployed API"
     This page separates the hardened PLATE implementation deployed on
-    StanBlocks `devibe` from the complete target contract. Broader constrained
-    values per cell, general ragged inputs and results, arbitrary result-shape
-    inference, CV/replay propagation, and optional parallel likelihood
-    lowering remain target capabilities.
+    StanBlocks `devibe` from the complete target contract. Constrained matrix
+    and ragged-constrained values per cell, general ragged results, arbitrary
+    result-shape inference, CV/replay propagation, and optional parallel
+    likelihood lowering remain target capabilities.
 
 The purpose of this catalog is to give StanBlocks a concrete consumer contract
 and give BRM one migration target. It is not a proposal to replace already-good
@@ -13,7 +13,7 @@ vectorized Stan with loops everywhere.
 
 ## Current deployment baseline
 
-As of 2026-07-16, StanBlocks `devibe` at `820b7eb` contains the hardened PLATE
+As of 2026-07-16, StanBlocks `devibe` at `9645dfc` contains the hardened PLATE
 and ragged constrained-parameter line (principally merged through `a5dc1d5`),
 plus an in-source statement of the current consumer contract:
 
@@ -30,6 +30,10 @@ plus an in-source statement of the current consumer contract:
   cells (`3a47a63`), including typed called-cell dispatch and BridgeStan runtime;
 - integer or tuple-valued N-dimensional `outer` shapes with nested Stan-block
   routing;
+- dense native-constrained vector cells (`simplex`, `ordered`, and
+  `positive_ordered`) for fixed `K` and any outer rank (`921afb1`). They emit
+  native Stan constrained arrays, preserving each cell's transform and
+  Jacobian;
 - ragged `simplex`, `ordered`, `positive_ordered`, and Cholesky parameter
   carriers. The integration uses `devibe`'s bare free-parameter declarations
   for both ragged vector and matrix carriers. Using these carriers at runtime
@@ -62,17 +66,16 @@ It is green for scalar likelihood cells, fixed correlated vector cells, dense
 N-dimensional vector cells, crossed independent factors with distinct local
 names, one-dimensional ragged input slices, and the heterogeneous `K[g]`
 result composed with top-level informative ragged Cholesky factors and a called
-submodel.
+submodel. Dense simplex cells also pass BridgeStan with the expected sum of
+per-cell free coordinates.
 
 Expected-failure probes preserve the current boundary: matrix-valued cells,
-constrained parameters created inside a plate, reuse of a cell-local name across
-two plates, vararg do-block parameters, and automatic `reduce_sum` lowering. In
-particular, a constrained cell currently gets as far
-as SLIC transpilation but emits an invalid `anything ..._lpdfs` helper. Rejecting
-that form loudly is a worthwhile interim safety guard, but it does **not** close
-the capability gap: acceptance still requires a constraint-preserving per-cell
-carrier that transpiles, passes `stanc`, and runs with correct transforms and
-Jacobians in BridgeStan.
+constrained matrix and ragged-constrained cells, reuse of a cell-local name
+across two plates, vararg do-block parameters, and automatic `reduce_sum`
+lowering. Unsupported constrained families must continue to fail loudly, but
+that guard remains only an interim safety property: each capability closes only
+when its constraint-preserving carrier transpiles, passes `stanc`, and runs
+with correct transforms and Jacobians in BridgeStan.
 
 ## Assumed complete contract
 
