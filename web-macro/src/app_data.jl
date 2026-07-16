@@ -584,5 +584,4 @@
     end
 end
 
-APPDATA = AppData(; cache_type=:parallel)
-
+APPDATA = AppData()
