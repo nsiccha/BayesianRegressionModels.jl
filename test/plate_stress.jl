@@ -30,7 +30,7 @@ end
 # `(1 + x | ID | group)` buckets and fixed-width Bordet parameter vectors.
 StanBlocks.@slic brm_fixed_correlated_cell(
     k::int,
-    L::cholesky_factor_corr[k],
+    L::matrix[k, k],
     tau::vector[k],
 ) = begin
     z::vector[k] ~ std_normal()
