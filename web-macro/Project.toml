@@ -30,3 +30,6 @@ Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 TestModules = "63c02187-99fd-4e5c-aaf0-4d6bfebc181c"
 Treebars = "e1e568c4-3a56-40a4-95fa-9b9c6c16fccb"
 WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
+
+[compat]
+BridgeStan = "2.9"
