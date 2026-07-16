@@ -276,7 +276,7 @@
                     type="button",
                     class="brm-branch-btn",
                     data_stage_id=string(stage_id),
-                    hx_get=string(query_url(pipeline/"stage/$stage_id"; force=true)),
+                    hx_get=string(query_url(__parent__.__parent__.__parent__.pipeline/"stage/$stage_id"; force=true)),
                     hx_include="closest form",
                     hx_target="#$result_id",
                     hx_swap="innerHTML",
@@ -290,7 +290,7 @@
                 stage_btns...,
                 h.button("SB repro ▶";
                     type="submit",
-                    formaction=string(pipeline/"sb_repro"),
+                    formaction=string(__parent__.__parent__.__parent__.pipeline/"sb_repro"),
                     class="secondary"),
             )
         end
@@ -307,7 +307,7 @@
                 push!(children, formula_form(force_open))
                 result_children = Any[]
                 isempty(preload_stage) || push!(result_children,
-                    lazy(query_url(pipeline/"stage/$preload_stage"; formula, label)))
+                    lazy(query_url(__parent__.__parent__.__parent__.pipeline/"stage/$preload_stage"; formula, label)))
                 push!(children, h.div(; id=result_id)(result_children...))
             end
             h.article(;
