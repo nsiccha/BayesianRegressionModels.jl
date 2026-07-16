@@ -117,18 +117,31 @@ end
 # Non-centered parameterization:
 #   L   ~ lkj_corr_cholesky(1, K)            # K x K Cholesky factor
 #   tau ~ half-std_normal(; n=K)             # per-term marginal scales
-#   z   ~ std_normal(; n=K, m=n_groups)      # K x n_groups std normal
-#   b   = (diag_pre_multiply(tau, L) * z)'   # n_groups x K correlated draws
+#   b_cols ~ plate(; outer=(n_groups,)) do g   # one correlated K-vector per group
+#       z::vector[K] ~ std_normal(); diag_pre_multiply(tau, L) * z
+#   end                                         # collects matrix[K, n_groups]
+#   b   = b_cols'                               # n_groups x K correlated draws
 # Per-row contribution = Z[i, :] . b[group_idx[i], :], returned as a length-n
 # vector via rows_dot_product. Note: `(1 | g) + (0 + x | g)` and `(1 + x | g)`
 # are equivalent -- the walker merges everything sharing a group symbol into
 # one correlated block.
+#
+# PLATE migration (StanBlocks devibe 9210b05, snag plate-submodel-c fix): the
+# per-group correlated draw is now a `plate` over an inline correlated cell
+# instead of one flat `z_flat` + reshape. The column-major layout is preserved
+# (cell g -> column g of the collected matrix[n_terms, n_groups], same order as
+# reshape(z_flat, ...)), so BridgeStan log-density/gradient parity holds by
+# value. `ranef_correlated_cv` (CV-taint via outer size) and `ranef_correlated_by`
+# (per-stratum Cholesky = constrained-matrix-per-cell) stay flat-reshape until
+# their StanBlocks gaps close.
 ranef_correlated = StanBlocks.@slic begin
-    L      ~ lkj_corr_cholesky(1.; n=n_terms)
-    tau    ~ std_normal(; n=n_terms, lower=0.)
-    z_flat ~ std_normal(; n=n_terms * n_groups)
-    z = reshape(z_flat, n_terms, n_groups)
-    b = (diag_pre_multiply(tau, L) * z)'   # n_groups x n_terms
+    L   ~ lkj_corr_cholesky(1.; n=n_terms)
+    tau ~ std_normal(; n=n_terms, lower=0.)
+    b_cols ~ plate(; outer=(n_groups,)) do g
+        z::vector[n_terms] ~ std_normal()
+        diag_pre_multiply(tau, L) * z
+    end
+    b = b_cols'   # n_groups x n_terms
     return rows_dot_product(Z, b[group_idx, :])
 end
 
@@ -137,11 +150,13 @@ end
 # matrix `b` (n_groups x n_terms) so multiple sub-formulas can each slice out
 # their own column(s) and apply their own Z separately.
 ranef_correlated_draws = StanBlocks.@slic begin
-    L      ~ lkj_corr_cholesky(1.; n=n_terms)
-    tau    ~ std_normal(; n=n_terms, lower=0.)
-    z_flat ~ std_normal(; n=n_terms * n_groups)
-    z = reshape(z_flat, n_terms, n_groups)
-    return (diag_pre_multiply(tau, L) * z)'   # n_groups x n_terms
+    L   ~ lkj_corr_cholesky(1.; n=n_terms)
+    tau ~ std_normal(; n=n_terms, lower=0.)
+    b_cols ~ plate(; outer=(n_groups,)) do g
+        z::vector[n_terms] ~ std_normal()
+        diag_pre_multiply(tau, L) * z
+    end
+    return b_cols'   # n_groups x n_terms
 end
 
 # ---- cv-contagious ranef variants (opt-in; for out-of-sample / CV models) ----
