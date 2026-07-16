@@ -15,7 +15,7 @@ function stanc_accepts(model)
     result.ok
 end
 
-function bridgestan_accepts(model)
+function bridgestan_accepts(model; expected_dimension=nothing)
     code = StanBlocks.stan_code(model)
     path = joinpath(STRESS_CACHE, string(hash(code)) * ".stan")
     problem = StanBlocks.stan_instantiate(model; path)
@@ -23,7 +23,9 @@ function bridgestan_accepts(model)
     q = zeros(dimension)
     lp = LogDensityProblems.logdensity(problem, q)
     lp_grad, gradient = LogDensityProblems.logdensity_and_gradient(problem, q)
-    isfinite(lp) && isfinite(lp_grad) && length(gradient) == dimension && all(isfinite, gradient)
+    dimension_ok = isnothing(expected_dimension) || dimension == expected_dimension
+    dimension_ok && isfinite(lp) && isfinite(lp_grad) &&
+        length(gradient) == dimension && all(isfinite, gradient)
 end
 
 # Fixed-width correlated group effect: the first BRM migration target for
@@ -123,7 +125,7 @@ const matrix_cell_gap = StanBlocks.@slic (;n=3, k=2) begin
     end
 end
 
-const constrained_cell_gap = StanBlocks.@slic (;n=3, k=3) begin
+const constrained_vector = StanBlocks.@slic (;n=3, k=3) begin
     p ~ plate(; outer=(n,)) do g
         cell::simplex[k] ~ dirichlet(rep_vector(1.0, k))
         cell
@@ -191,6 +193,7 @@ end
             "fixed correlated" => fixed_correlated,
             "ragged correlated" => ragged_correlated,
             "ragged input" => ragged_input,
+            "constrained vector" => constrained_vector,
             "N-D vector" => nd_vector,
             "crossed groups" => crossed_groups,
         )
@@ -211,10 +214,12 @@ end
                 "fixed correlated" => fixed_correlated,
                 "ragged correlated" => ragged_correlated,
                 "ragged input" => ragged_input,
+                "constrained vector" => constrained_vector,
             )
                 STRESS_CASE == "all" || STRESS_CASE == name || continue
                 @info "Running BRM PLATE BridgeStan case" name
-                @test bridgestan_accepts(model)
+                expected_dimension = name == "constrained vector" ? 6 : nothing
+                @test bridgestan_accepts(model; expected_dimension)
             end
         else
             @info "Skipping BridgeStan runtime gate (BRM_PLATE_STRESS_RUNTIME=0)"
@@ -225,8 +230,6 @@ end
         if RUN_GAPS
             @test_broken StanBlocks.transpiles(matrix_cell_gap; re=false)
             @test_broken StanBlocks.transpiles(crossed_name_gap; re=false)
-            @test StanBlocks.transpiles(constrained_cell_gap; re=false)
-            @test_broken stanc_accepts(constrained_cell_gap)
             @test_broken StanBlocks.transpiles(vararg_cell_gap; re=false)
             @test_broken occursin("reduce_sum", StanBlocks.stan_code(scalar_likelihood))
         else
