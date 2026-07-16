@@ -26,9 +26,9 @@ function me end
 """
     s(x)
 
-Smooth-term marker (cubic-spline predictor). brms-style `s(x)` — the
-backend builds a natural cubic-spline basis with default interior knots
-and emits a linear-in-basis predictor. Dispatch tag — see `_sb_s`.
+Smooth-term marker. brms-style `s(x)` — the sbimpl backend builds a
+penalized one-dimensional thin-plate regression spline with the mgcv default
+basis dimension. Dispatch tag — see `_sb_s`.
 """
 function s end
 
@@ -386,62 +386,81 @@ _sb_ar1 = StanBlocks.@slic begin
     return ar1_recurse(phi, epsilon, n_obs)
 end
 
-# Minimal `s(x)` cubic-spline predictor. Uses a truncated-power basis for a
-# natural cubic spline with n_interior interior knots placed at equally-spaced
-# quantiles of `x`. The submodel takes the precomputed N x n_basis matrix
-# `X_basis` (raw columns: x, x^2, x^3, (x - k_j)^3_+ for each interior knot)
-# and returns `X_basis * coefs` -- a length-N smooth contribution. The caller
-# emits `s_<x> ~ _sb_s(; X_basis=..., n_basis=...)` and hands `s_<x>` to
-# popefs as a single design-matrix column (so there is one extra overall beta
-# multiplying the smooth; a direct-summand variant would drop that beta).
-# This is a first-pass implementation: no penalty / smoothness prior beyond
-# std_normal on the basis coefficients, no tensor products, no bs/t2/gp.
+# Penalized 1-D thin-plate regression spline. `Xnull` contains the unpenalized
+# polynomial null space {1, x}; `Zpen` is the range-space basis after the
+# wiggliness penalty has been diagonalized and absorbed into the columns. The
+# standardized range coefficients therefore have one iid Gaussian scale `sds`,
+# matching the mixed-model parameterization used by mgcv/brms. The caller adds
+# the resulting length-N contribution directly to the linear predictor.
 _sb_s = StanBlocks.@slic begin
-    n_basis = dims(X_basis)[2]
-    coefs ~ std_normal(; n=n_basis)
-    return X_basis * coefs
+    n_pen = dims(Zpen)[2]
+    b_fixed::vector[2]
+    sds ~ std_normal(; lower=0.)
+    b_pen_raw ~ std_normal(; n=n_pen)
+    b_pen = sds * b_pen_raw
+    return Xnull * b_fixed + Zpen * b_pen
 end
 
-# Fit/apply split for the natural-cubic-spline basis. `_sb_fit_spline` derives
-# the empirical-quantile interior knots (the data-dependent constant);
-# `_sb_apply_spline` builds the truncated-power basis matrix against a
-# (possibly frozen) knot vector. `_sb_spline_basis_ncs` (the construct-time
-# entry) = fit∘apply and is byte-identical to the old one-pass.
-function _sb_fit_spline(x::AbstractVector{<:Real}; n_interior::Int=2)
-    n_interior >= 0 || error("sbimpl: `s(x)` needs n_interior >= 0 (got $n_interior)")
-    xs = collect(Float64, x)
-    n = length(xs)
-    sorted = sort(xs)
-    # Equally-spaced quantiles at 1/(n_interior+1), ..., n_interior/(n_interior+1)
-    knots = Float64[]
-    for j in 1:n_interior
-        q = j / (n_interior + 1)
-        pos = 1 + q * (n - 1)
-        lo  = floor(Int, pos); hi = ceil(Int, pos)
-        val = lo == hi ? sorted[lo] : sorted[lo] + (pos - lo) * (sorted[hi] - sorted[lo])
-        push!(knots, val)
+# Fit/apply split for Wood's rank-k thin-plate regression spline (d=1, m=2).
+# The radial kernel is eta(r)=r^3/12 (Wood 2003, eq. 7). We keep the k largest-
+# magnitude eigenvectors of the full kernel matrix, impose the T' * delta = 0
+# side constraint, and diagonalize the resulting range-space penalty. Applying
+# the fitted object to new x values needs only the frozen training centers,
+# shift, and penalty-whitened range projection.
+function _sb_tps_kernel(x::AbstractVector{<:Real}, centers::AbstractVector{<:Real})
+    E = Matrix{Float64}(undef, length(x), length(centers))
+    for j in eachindex(centers), i in eachindex(x)
+        E[i, j] = abs(Float64(x[i]) - Float64(centers[j]))^3 / 12
     end
-    knots
+    E
 end
-function _sb_apply_spline(knots::AbstractVector{<:Real}, x::AbstractVector{<:Real})
+
+function _sb_fit_spline(x::AbstractVector{<:Real}; k::Int=10)
+    k > 2 || error("sbimpl: `s(x)` needs basis dimension k > 2 (got $k)")
     xs = collect(Float64, x)
-    n = length(xs)
-    n_basis = 3 + length(knots)
-    M = zeros(Float64, n, n_basis)
-    for i in 1:n
-        xi = xs[i]
-        M[i, 1] = xi
-        M[i, 2] = xi * xi
-        M[i, 3] = xi * xi * xi
-        for (j, k) in enumerate(knots)
-            d = xi - k
-            M[i, 3 + j] = d > 0 ? d^3 : 0.0
-        end
-    end
-    M, n_basis
+    all(isfinite, xs) || error("sbimpl: `s(x)` requires finite numeric data")
+    length(unique(xs)) >= k || error(
+        "sbimpl: `s(x)` needs at least $k unique x values for the default ",
+        "thin-plate basis (got $(length(unique(xs))))")
+
+    shift = sum(xs) / length(xs)
+    centers = xs .- shift
+    E = _sb_tps_kernel(centers, centers)
+    eig_E = eigen(Symmetric(E))
+    keep = sortperm(abs.(eig_E.values); rev=true)[1:k]
+    U = eig_E.vectors[:, keep]
+    D = eig_E.values[keep]
+
+    T = hcat(ones(Float64, length(xs)), centers)
+    Z = nullspace(transpose(T) * U)
+    size(Z, 2) == k - 2 || error(
+        "sbimpl: `s(x)` could not isolate the two-dimensional TPS null space")
+
+    S = Symmetric(transpose(Z) * Diagonal(D) * Z)
+    eig_S = eigen(S)
+    penalty_scale = maximum(abs, eig_S.values)
+    penalty_scale > 0 || error("sbimpl: `s(x)` produced a zero range-space penalty")
+    tol = penalty_scale * eps(Float64) * 100
+    minimum(eig_S.values) >= -tol || error(
+        "sbimpl: `s(x)` produced a non-positive range-space penalty")
+    penalty_values = max.(eig_S.values, tol)
+    penalty_whitener = eig_S.vectors * Diagonal(inv.(sqrt.(penalty_values)))
+    range_projection = U * Z * penalty_whitener
+
+    (; shift, centers, range_projection, k)
 end
-_sb_spline_basis_ncs(x::AbstractVector{<:Real}; n_interior::Int=2) =
-    _sb_apply_spline(_sb_fit_spline(x; n_interior), x)
+
+function _sb_apply_spline(fit, x::AbstractVector{<:Real})
+    xs = collect(Float64, x)
+    all(isfinite, xs) || error("sbimpl: `s(x)` requires finite numeric data")
+    centered = xs .- fit.shift
+    Xnull = hcat(ones(Float64, length(xs)), centered)
+    Zpen = _sb_tps_kernel(centered, fit.centers) * fit.range_projection
+    Xnull, Zpen
+end
+
+_sb_spline_basis_tps(x::AbstractVector{<:Real}; k::Int=10) =
+    _sb_apply_spline(_sb_fit_spline(x; k), x)
 
 # brms-style `me(x_obs, sd_x)` measurement-error predictor. The submodel
 # allocates a length-N latent `x_true` vector with prior `std_normal` and
@@ -669,7 +688,7 @@ src   = stan_code(sbbrmi)
 # data key, how to regenerate that key from a new df:
 #   kind         -- which transform (:zscale/:standardize/:center/:factor/:mo/
 #                   :spline/:gp/:protect)
-#   const_       -- the fitted constant: (μ,σ) / μ / level-vector / knots /
+#   const_       -- the fitted constant: (μ,σ) / μ / level-vector / TPS basis /
 #                   (μ,L,K) / nothing (protect)
 #   raw_ref      -- the source: a column-node tree (zscale/center/standardize/
 #                   protect, re-materialised via `_sb_rematerialize_vec`) or a
@@ -917,10 +936,14 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         new_preproc[key] = e
     elseif e.kind === :spline
         v = collect(Float64, _sb_df_column(df, e.raw_ref))
-        knots = freeze ? e.const_ : _sb_fit_spline(v; n_interior=2)
-        basis, _ = _sb_apply_spline(knots, v)
-        new_data[key] = basis
-        new_preproc[key] = PreprocEntry(:spline, knots, e.raw_ref, false)
+        old_fit = e.const_.fit
+        fit = freeze ? old_fit : _sb_fit_spline(v; k=old_fit.k)
+        Xnull, Zpen = _sb_apply_spline(fit, v)
+        new_data[key] = Xnull
+        new_data[e.const_.zpen_key] = Zpen
+        push!(handled, e.const_.zpen_key)
+        new_preproc[key] = PreprocEntry(
+            :spline, (; fit, zpen_key=e.const_.zpen_key), e.raw_ref, false)
     elseif e.kind === :gp
         v = collect(Float64, _sb_df_column(df, e.raw_ref))
         K = e.const_.K
@@ -961,7 +984,7 @@ of a naive per-column `sb.model(; col=…)` rebind is avoided. Returns a NEW
 - `freeze_constants=true` (default — prediction / replay): apply the **training**
   constant to `new_df` (z-score with training mean/sd, map factor codes via the
   training level set, rebuild the spline/HSGP basis on the training
-  knots/(mean, L)). This is the operation Bruno hand-rolls outside BRM.
+  eigenbasis/(mean, L)). This is the operation Bruno hand-rolls outside BRM.
 - `freeze_constants=false` (fresh-fit semantics): re-derive each constant from
   `new_df`, then apply.
 
@@ -1444,7 +1467,7 @@ _sb_real_vec(label::Symbol, n::Symbol, v) =
 _sb_classify_term!(t::ExprColumn, pop_terms, ran_terms, direct_terms) = begin
     f = getf(t)
     f === (|) && (push!(ran_terms, t); return)
-    f === mo1 && (push!(direct_terms, t); return)
+    (f === mo1 || f === s) && (push!(direct_terms, t); return)
     push!(pop_terms, t)
 end
 _sb_classify_term!(t, pop_terms, ran_terms, direct_terms) =
@@ -1459,7 +1482,7 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     terms = _sb_terms(rhs)
     pop_terms    = Any[]
     ran_terms    = Any[]  # `(expr | group)` -> collected per-group below
-    direct_terms = Any[]  # e.g. `mo1(c)` -> direct summand, no popefs beta
+    direct_terms = Any[]  # e.g. `mo1(c)` / `s(x)` -> direct summand, no popefs beta
     for t in terms
         _sb_classify_term!(t, pop_terms, ran_terms, direct_terms)
     end
@@ -1524,7 +1547,7 @@ formula (left-to-right) order:
   `pop_<lhs>_Intercept` parameter;
 - plain continuous (`Real`, non-integer) predictors — one column each,
   labelled by the column name;
-- single-`beta` wrapped terms (`mo`, `me`, `s`, `gp` population, `protect`,
+- single-`beta` wrapped terms (`mo`, `me`, `gp` population, `protect`,
   `log(x)`, `x^2`, …) — one column each, labelled by the emitted design key;
 - an interaction `a & b` — one label per expanded treatment-contrast column.
 
@@ -1533,7 +1556,8 @@ appear in `pop_<lhs>_beta_pop`:
 
 - integer- or `CategoricalVector`-typed bare predictors → `cat_<name>`
   (K−1 treatment contrasts);
-- `mo1(c)` → `mo1_<c>`; explicit-coefficient `coef * a` (own scalar);
+- `mo1(c)` → `mo1_<c>`; `s(x)` → its own fixed/range coefficients and `sds`;
+- explicit-coefficient `coef * a` (own scalar);
 - random-effects blocks `(… | g)` → per-group ranef parameters.
 
 Needs a data-bound `BRMI` (any fitted model has one): the population-vs-
@@ -1601,14 +1625,15 @@ _sb_cat_levels_vec(v::AbstractVector{<:Integer}) = v
 _sb_cat_levels_vec(v::CA.CategoricalVector) = v
 _sb_cat_levels_vec(_v) = nothing
 
-# Free-summand terms (no popefs beta): `mo1(c)`, categorical NamedColumns.
+# Free-summand terms (no popefs beta): `mo1(c)`, `s(x)`, categorical NamedColumns.
 # Categoricals emit `cat_<c> ~ _sb_cat(; x=<c>_idx, n_levels=<c>_n_levels)`.
-# `mo1(c)` reuses the `_sb_mo` submodel already used for free-beta `mo(c)`.
+# `mo1(c)` reuses `_sb_mo`; `s(x)` owns its complete fixed + penalized basis.
 _sb_emit_direct!(stmts, data, target::Symbol, t::NamedColumn, summands) =
     _sb_emit_cat!(stmts, data, t, summands)
 function _sb_emit_direct!(stmts, data, target::Symbol, t::ExprColumn, summands)
-    f = getf(t)
-    f === mo1 || error("sbimpl: unsupported direct-summand term `$f`")
+    _sb_emit_direct_expr!(stmts, data, target, getf(t), t, summands)
+end
+function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(mo1), t, summands)
     inner_name, raw = _sb_inner_data(:mo1, only(getargs(t)))
     n_levels, idx = _sb_level_index(raw)
     n_levels >= 2 || error("sbimpl: `mo1($inner_name)` needs >= 2 levels (got $n_levels)")
@@ -1618,6 +1643,11 @@ function _sb_emit_direct!(stmts, data, target::Symbol, t::ExprColumn, summands)
     push!(stmts, :($col_name ~ _sb_mo(; x=$idx_name)))
     push!(summands, col_name)
 end
+function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(s), t, summands)
+    push!(summands, _sb_predictor_term!(stmts, data, s, t))
+end
+_sb_emit_direct_expr!(_stmts, _data, _target::Symbol, f, _t, _summands) =
+    error("sbimpl: unsupported direct-summand term `$f`")
 
 # Categorical population-level predictor. Allocates K-1 betas via `_sb_cat`
 # and pushes the per-row contribution column into `summands`. K == 1 (single
@@ -2400,7 +2430,7 @@ _sb_predictor_col(t, _data, _stmts, _pop_terms=(); kwargs...) = error("sbimpl: u
 
 # Monotonic-effect predictor: emit `mo_<c> ~ _sb_mo(; x=<c>_idx)` and return
 # `mo_<c>` as the column. Scope: single NamedColumn inner arg backed by raw
-# data; `mo1`, `mm`, `s` etc. fall through the default error.
+# data. Other wrapped terms dispatch to their own methods below.
 _sb_predictor_term!(stmts, data, ::typeof(mo), t; kwargs...) = begin
     inner_name, raw = _sb_inner_data(:mo, only(getargs(t)))
     n_levels, idx = _sb_level_index(raw)
@@ -2436,26 +2466,30 @@ _sb_predictor_term!(stmts, data, ::typeof(me), t; kwargs...) = begin
     push!(stmts, :($col_name ~ _sb_me(; x_obs=$xname, sd_x=$sd_name)))
     col_name
 end
-# Cubic-spline predictor `s(x)`. Precomputes the basis matrix from the raw
-# data column and stashes it under `X_basis_<x>`; the submodel `_sb_s` owns
-# the coefficient vector + prior. Returns the per-row smooth contribution as
-# a single column (so popefs multiplies by an overall beta). Only the default
-# basis is supported right now -- `bs`, `t2`, and kwargs like `k=` or
-# `knots=` will need extra dispatches.
+# Penalized thin-plate predictor `s(x)`. Fits a frozen rank-10 TPS eigenbasis
+# from the raw training column, then stashes its two-column null-space matrix
+# and eight-column penalty-whitened range matrix as Stan data. `_sb_s` owns the
+# flat null-space coefficients, penalized coefficients, and smoothing SD; the
+# returned contribution is a direct summand (no extra `popefs` beta). Only
+# the default basis is supported -- `bs`, `t2`, and `k=`/`knots=` are follow-ons.
 _sb_predictor_term!(stmts, data, ::typeof(s), t; kwargs...) = begin
     args = getargs(t)
     length(args) == 1 || error("sbimpl: `s(x)` expects 1 positional arg, got $(length(args))")
+    isempty(getkwargs(t)) || error("sbimpl: `s(x)` does not support keyword arguments yet")
     xname, raw = _sb_inner_data(:s, only(args))
     v = _sb_real_vec(:s, xname, raw)
-    knots = _sb_fit_spline(v; n_interior=2)
-    basis, _ = _sb_apply_spline(knots, v)
-    X_name = Symbol(:X_basis_, xname)
-    data[X_name] = basis
-    # Frozen empirical-quantile knots → fixed basis dimension (stable); a new df
-    # is re-mapped through the same knots at reprocess time.
-    _sb_record_preproc!(data, X_name, PreprocEntry(:spline, knots, xname, false))
+    fit = _sb_fit_spline(v)
+    Xnull, Zpen = _sb_apply_spline(fit, v)
+    Xnull_name = Symbol(:Xnull_, xname)
+    Zpen_name = Symbol(:Zpen_, xname)
+    data[Xnull_name] = Xnull
+    data[Zpen_name] = Zpen
+    # Frozen training centers/eigenbasis → fixed dimension. Reprocess evaluates
+    # both matrices at new x values against these constants.
+    _sb_record_preproc!(data, Xnull_name,
+        PreprocEntry(:spline, (; fit, zpen_key=Zpen_name), xname, false))
     col_name = Symbol(:s_, xname)
-    push!(stmts, :($col_name ~ _sb_s(; X_basis=$X_name)))
+    push!(stmts, :($col_name ~ _sb_s(; Xnull=$Xnull_name, Zpen=$Zpen_name)))
     col_name
 end
 # `gp(x; k=K, c=C)` HSGP predictor. Precomputes the Riutort-Mayol eigen-basis
