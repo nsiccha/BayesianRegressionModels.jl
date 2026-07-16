@@ -13,7 +13,7 @@ vectorized Stan with loops everywhere.
 
 ## Current deployment baseline
 
-As of 2026-07-16, StanBlocks `devibe` at `9645dfc` contains the hardened PLATE
+As of 2026-07-17, StanBlocks `devibe` at `73ebc3f` contains the hardened PLATE
 and ragged constrained-parameter line (principally merged through `a5dc1d5`),
 plus an in-source statement of the current consumer contract:
 
@@ -30,6 +30,9 @@ plus an in-source statement of the current consumer contract:
   cells (`3a47a63`), including typed called-cell dispatch and BridgeStan runtime;
 - integer or tuple-valued N-dimensional `outer` shapes with nested Stan-block
   routing;
+- hygienic fresh cell-locals across independent plates (`73ebc3f`): repeated
+  source names such as `z` are namespaced by each plate result and remain
+  distinct parameter carriers;
 - dense native-constrained vector cells (`simplex`, `ordered`, and
   `positive_ordered`) for fixed `K` and any outer rank (`921afb1`). They emit
   native Stan constrained arrays, preserving each cell's transform and
@@ -63,19 +66,19 @@ julia --project=web-macro --startup-file=no test/plate_stress.jl
 ```
 
 It is green for scalar likelihood cells, fixed correlated vector cells, dense
-N-dimensional vector cells, crossed independent factors with distinct local
-names, one-dimensional ragged input slices, and the heterogeneous `K[g]`
-result composed with top-level informative ragged Cholesky factors and a called
-submodel. Dense simplex cells also pass BridgeStan with the expected sum of
-per-cell free coordinates.
+N-dimensional vector cells, crossed independent factors with either distinct
+or reused cell-local names, one-dimensional ragged input slices, and the
+heterogeneous `K[g]` result composed with top-level informative ragged Cholesky
+factors and a called submodel. Dense simplex cells also pass BridgeStan with
+the expected sum of per-cell free coordinates.
 
 Expected-failure probes preserve the current boundary: matrix-valued cells,
-constrained matrix and ragged-constrained cells, reuse of a cell-local name
-across two plates, vararg do-block parameters, and automatic `reduce_sum`
-lowering. Unsupported constrained families must continue to fail loudly, but
-that guard remains only an interim safety property: each capability closes only
-when its constraint-preserving carrier transpiles, passes `stanc`, and runs
-with correct transforms and Jacobians in BridgeStan.
+constrained matrix and ragged-constrained cells, vararg do-block parameters,
+and automatic `reduce_sum` lowering. Unsupported constrained families must
+continue to fail loudly, but that guard remains only an interim safety
+property: each capability closes only when its constraint-preserving carrier
+transpiles, passes `stanc`, and runs with correct transforms and Jacobians in
+BridgeStan.
 
 ## Assumed complete contract
 
