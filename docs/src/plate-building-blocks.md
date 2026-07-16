@@ -65,9 +65,11 @@ Expected-failure probes preserve the current boundary: matrix-valued cells,
 ragged input slices, constrained parameters created inside a plate, reuse of a
 cell-local name across two plates, vararg do-block parameters, and automatic
 `reduce_sum` lowering. In particular, a constrained cell currently gets as far
-as SLIC transpilation but emits an invalid `anything ..._lpdfs` helper; the
-StanBlocks fix is to reject that unsupported form loudly until the full
-constrained-cell carrier exists.
+as SLIC transpilation but emits an invalid `anything ..._lpdfs` helper. Rejecting
+that form loudly is a worthwhile interim safety guard, but it does **not** close
+the capability gap: acceptance still requires a constraint-preserving per-cell
+carrier that transpiles, passes `stanc`, and runs with correct transforms and
+Jacobians in BridgeStan.
 
 ## Assumed complete contract
 
