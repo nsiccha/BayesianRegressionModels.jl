@@ -13,7 +13,7 @@ vectorized Stan with loops everywhere.
 
 ## Current deployment baseline
 
-As of 2026-07-16, StanBlocks `devibe` at `dd07dbd` contains the hardened PLATE
+As of 2026-07-16, StanBlocks `devibe` at `820b7eb` contains the hardened PLATE
 and ragged constrained-parameter line (principally merged through `a5dc1d5`),
 plus an in-source statement of the current consumer contract:
 
@@ -26,6 +26,8 @@ plus an in-source statement of the current consumer contract:
   axes use array-wrapped matrices;
 - trace-then-promote lowering for ordinary called `@slic` submodels, including
   inferred scalar and vector results from the traced trailing expression;
+- plate-scoped slicing of one-dimensional ragged data inputs into typed vector
+  cells (`3a47a63`), including typed called-cell dispatch and BridgeStan runtime;
 - integer or tuple-valued N-dimensional `outer` shapes with nested Stan-block
   routing;
 - ragged `simplex`, `ordered`, `positive_ordered`, and Cholesky parameter
@@ -58,13 +60,14 @@ julia --project=web-macro --startup-file=no test/plate_stress.jl
 
 It is green for scalar likelihood cells, fixed correlated vector cells, dense
 N-dimensional vector cells, crossed independent factors with distinct local
-names, and the one-dimensional heterogeneous `K[g]` result composed with
-top-level informative ragged Cholesky factors and a called submodel.
+names, one-dimensional ragged input slices, and the heterogeneous `K[g]`
+result composed with top-level informative ragged Cholesky factors and a called
+submodel.
 
 Expected-failure probes preserve the current boundary: matrix-valued cells,
-ragged input slices, constrained parameters created inside a plate, reuse of a
-cell-local name across two plates, vararg do-block parameters, and automatic
-`reduce_sum` lowering. In particular, a constrained cell currently gets as far
+constrained parameters created inside a plate, reuse of a cell-local name across
+two plates, vararg do-block parameters, and automatic `reduce_sum` lowering. In
+particular, a constrained cell currently gets as far
 as SLIC transpilation but emits an invalid `anything ..._lpdfs` helper. Rejecting
 that form loudly is a worthwhile interim safety guard, but it does **not** close
 the capability gap: acceptance still requires a constraint-preserving per-cell
