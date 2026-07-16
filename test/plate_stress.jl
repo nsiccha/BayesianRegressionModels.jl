@@ -140,8 +140,8 @@ const vararg_cell_gap = StanBlocks.@slic (;
     end
 end
 
-# Ragged PLATE results work, but a ragged *input slice* is currently inferred
-# as `anything`, so it cannot feed the typed BRM subject/series likelihood cell.
+# Ragged PLATE input slices are typed as per-cell vectors, so they can feed a
+# typed BRM subject/series likelihood cell alongside ragged constrained inputs.
 StanBlocks.@slic brm_ragged_observed_cell(
     k::int,
     L::matrix[k, k],
@@ -153,7 +153,7 @@ StanBlocks.@slic brm_ragged_observed_cell(
     return b
 end
 
-const ragged_input_gap = StanBlocks.@slic (;
+const ragged_input = StanBlocks.@slic (;
     K=[1, 2, 4],
     groups=[1, 2, 3],
     y=[[0.2], [-0.1, 0.3], [0.0, 0.4, -0.2, 0.1]],
@@ -190,6 +190,7 @@ end
             "scalar likelihood" => scalar_likelihood,
             "fixed correlated" => fixed_correlated,
             "ragged correlated" => ragged_correlated,
+            "ragged input" => ragged_input,
             "N-D vector" => nd_vector,
             "crossed groups" => crossed_groups,
         )
@@ -209,6 +210,7 @@ end
                 "scalar likelihood" => scalar_likelihood,
                 "fixed correlated" => fixed_correlated,
                 "ragged correlated" => ragged_correlated,
+                "ragged input" => ragged_input,
             )
                 STRESS_CASE == "all" || STRESS_CASE == name || continue
                 @info "Running BRM PLATE BridgeStan case" name
@@ -222,7 +224,6 @@ end
     @testset "known capability gaps" begin
         if RUN_GAPS
             @test_broken StanBlocks.transpiles(matrix_cell_gap; re=false)
-            @test_broken StanBlocks.transpiles(ragged_input_gap; re=false)
             @test_broken StanBlocks.transpiles(crossed_name_gap; re=false)
             @test StanBlocks.transpiles(constrained_cell_gap; re=false)
             @test_broken stanc_accepts(constrained_cell_gap)
