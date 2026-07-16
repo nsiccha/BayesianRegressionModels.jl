@@ -1,6 +1,7 @@
 module BRMMacroWeb
 
 using HTMXObjects
+import HTMX
 using DynamicObjects: fetchindex!, clear_mem_caches!, @memo!
 using Treebars: polling_fetchindex, initialize_progress!,
                 prepare_progress!, with_prepared_progress,

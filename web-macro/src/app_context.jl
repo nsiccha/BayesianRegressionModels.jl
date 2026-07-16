@@ -51,7 +51,7 @@ y1 ~ Normal(loc, err)
         pico_version="2",
         extra_head=(
             h.title("BRM macro action"),
-            h.style(css),
+            h.style(HTMX.Raw(css)),
             htmxo_gallery_styles(),
             htmxo_syntax_head()...,
             htmx_treebar_styles(),
@@ -361,7 +361,7 @@ y1 ~ Normal(loc, err)
             h.div(; id="brm-examples-list")(
                 [e.card.default for e in entries()]...,
             ),
-            h.script(_sort_script),
+            h.script(HTMX.Raw(_sort_script)),
         )
 
         _index(slug::AbstractString, stage::AbstractString) = h.div(
