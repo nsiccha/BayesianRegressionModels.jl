@@ -13,9 +13,9 @@ vectorized Stan with loops everywhere.
 
 ## Current deployment baseline
 
-As of 2026-07-16, StanBlocks `devibe` contains the hardened PLATE and ragged
-constrained-parameter line landed by merge `bd06936` (parents `d9b0aeb` and
-`ba7156d`):
+As of 2026-07-16, StanBlocks `devibe` at `dd07dbd` contains the hardened PLATE
+and ragged constrained-parameter line (principally merged through `a5dc1d5`),
+plus an in-source statement of the current consumer contract:
 
 - the public one-dimensional do-block PLATE with scalar-per-cell fresh values,
   direct top-level sampling/assignment multiplexing, scalar results, and Stan
@@ -31,9 +31,8 @@ constrained-parameter line landed by merge `bd06936` (parents `d9b0aeb` and
 - ragged `simplex`, `ordered`, `positive_ordered`, and Cholesky parameter
   carriers. The integration uses `devibe`'s bare free-parameter declarations
   for both ragged vector and matrix carriers. Using these carriers at runtime
-  requires BridgeStan 2.9 / Stan 2.39; the currently deployed web environment
-  remains on BridgeStan 2.7 and fails its guard until the user-owned dependency
-  bump;
+  requires BridgeStan 2.9 / Stan 2.39. BRM's web and app environments resolve
+  BridgeStan 2.9.0, with the requirement recorded by BRM commit `a085ecb`;
 - corrected typed-LHS constraint propagation (`c672062`): `lower`, `upper`,
   `offset`, and `multiplier` on the sampling RHS now reach typed declarations.
   Earlier StanBlocks revisions could silently turn a typed half-normal into an
@@ -46,6 +45,29 @@ one-dimensional-only are no longer deployment limitations. The six-vector
 Bordet hierarchy is BRM's first vector-cell migration target. General ragged
 iteration/results, arbitrary shape-polymorphic collection, CV/replay taint,
 and parallel likelihood lowering remain part of the complete target below.
+
+### BRM stress verdict
+
+The executable acceptance matrix is
+[`test/plate_stress.jl`](../../test/plate_stress.jl). Run the full compiler,
+`stanc`, and BridgeStan 2.9 log-density/gradient gate with:
+
+```sh
+julia --project=web-macro --startup-file=no test/plate_stress.jl
+```
+
+It is green for scalar likelihood cells, fixed correlated vector cells, dense
+N-dimensional vector cells, crossed independent factors with distinct local
+names, and the one-dimensional heterogeneous `K[g]` result composed with
+top-level informative ragged Cholesky factors and a called submodel.
+
+Expected-failure probes preserve the current boundary: matrix-valued cells,
+ragged input slices, constrained parameters created inside a plate, reuse of a
+cell-local name across two plates, vararg do-block parameters, and automatic
+`reduce_sum` lowering. In particular, a constrained cell currently gets as far
+as SLIC transpilation but emits an invalid `anything ..._lpdfs` helper; the
+StanBlocks fix is to reject that unsupported form loudly until the full
+constrained-cell carrier exists.
 
 ## Assumed complete contract
 
@@ -181,7 +203,7 @@ The PLATE boundary is ragged, while the event recurrence or ODE remains inside
 | Grouped basis model | `gp(x; by=g)`, grouped splines | `_sb_hsgp_by` and term-specific basis-weight floors |
 | Inferred-observation cell | `me`, missing values, calibration and censoring cells | One SLIC model per observation family merely to vectorize scalar latent draws |
 | Ragged longitudinal kernel | Bruno PK/PKPD and Bordet biomarker series | Prefix/gather scaffolding and one custom vector wrapper for every kernel |
-| Per-cell likelihood | mixture, hurdle, zero-inflated, censored, custom user likelihoods | Hand-written vector `lpmf`, `lpmfs`, and RNG wrapper loops |
+| Per-cell likelihood | mixture, hurdle, zero-inflated, censored, custom user likelihoods | PLATE owns the per-cell density (`lpdf`/`lpmf`) loop today; observation posterior-predictive RNG synthesis remains target work |
 | Parallel subject/series likelihood | expensive PK/PD, ODE, GP, and longitudinal models | Separate threaded model variants; the compiler may choose `reduce_sum` |
 | Crossed independent plates | subject and item effects, multiple group factors | A combined monolithic random-effect allocator |
 
@@ -592,10 +614,12 @@ Even a complete implementation has a useful boundary.
 
 ## Migration and acceptance sequence
 
-1. **Validate the deployed PLATE line in BRM:** exercise untyped scalar/vector
+1. **Validate the deployed PLATE line in BRM (acceptance suite landed):** exercise untyped scalar/vector
    results, called-submodel promotion, integer and N-dimensional outer shapes,
    nested block routing, and the one-dimensional versus extra-axis layouts in
-   real BRM emitters.
+   BRM-shaped models. `test/plate_stress.jl` now gates SLIC, `stanc`, and
+   BridgeStan log-density/gradient behavior and retains unsupported forms as
+   expected failures.
 2. **Fixed vector BRM migration:** rewrite the six-vector Bordet floor and
    generic `ranef_correlated_draws`; compare emitted parameter shapes and log
    density on the deployed implementation.
