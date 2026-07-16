@@ -167,7 +167,7 @@ const ragged_input = StanBlocks.@slic (;
     end
 end
 
-const crossed_name_gap = StanBlocks.@slic (;
+const crossed_local_reuse = StanBlocks.@slic (;
     y=[0.2, -0.1, 0.3, 0.0],
     subject=[1, 1, 2, 2],
     item=[1, 2, 1, 2],
@@ -196,6 +196,7 @@ end
             "constrained vector" => constrained_vector,
             "N-D vector" => nd_vector,
             "crossed groups" => crossed_groups,
+            "crossed local reuse" => crossed_local_reuse,
         )
             STRESS_CASE == "all" || STRESS_CASE == name || continue
             @testset "$name" begin
@@ -215,6 +216,7 @@ end
                 "ragged correlated" => ragged_correlated,
                 "ragged input" => ragged_input,
                 "constrained vector" => constrained_vector,
+                "crossed local reuse" => crossed_local_reuse,
             )
                 STRESS_CASE == "all" || STRESS_CASE == name || continue
                 @info "Running BRM PLATE BridgeStan case" name
@@ -229,7 +231,6 @@ end
     @testset "known capability gaps" begin
         if RUN_GAPS
             @test_broken StanBlocks.transpiles(matrix_cell_gap; re=false)
-            @test_broken StanBlocks.transpiles(crossed_name_gap; re=false)
             @test_broken StanBlocks.transpiles(vararg_cell_gap; re=false)
             @test_broken occursin("reduce_sum", StanBlocks.stan_code(scalar_likelihood))
         else
