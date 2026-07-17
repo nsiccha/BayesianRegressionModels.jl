@@ -22,7 +22,7 @@ using BayesianRegressionModels
 using StanBlocks
 using BridgeStan
 using LogDensityProblems
-using Distributions: Exponential
+using Distributions: Exponential, Normal
 
 const KERNEL_CACHE = joinpath(tempdir(), "brm-kernel-term")
 const RUN_BRIDGESTAN = get(ENV, "BRM_KERNEL_RUNTIME", "1") != "0"
@@ -44,6 +44,18 @@ function bridgestan_accepts(model)
     lp_grad, gradient = LogDensityProblems.logdensity_and_gradient(problem, q)
     isfinite(lp) && isfinite(lp_grad) && length(gradient) == dimension &&
         all(isfinite, gradient)
+end
+
+# Log-density + gradient at a deterministic fixed point, for the cleaner-cut ≡
+# obs-in-cell equivalence check. Reproducible q so the two forms compare exactly.
+function kernel_lp_grad(model)
+    isdir(KERNEL_CACHE) || mkpath(KERNEL_CACHE)
+    path = joinpath(KERNEL_CACHE, string(hash(StanBlocks.stan_code(model))) * ".stan")
+    problem = StanBlocks.stan_instantiate(model; path)
+    dim = LogDensityProblems.dimension(problem)
+    q = [0.1 * ((i % 5) - 2) for i in 1:dim]
+    lp, g = LogDensityProblems.logdensity_and_gradient(problem, q)
+    (dim, lp, g)
 end
 
 # Consumer-side deterministic structural cell: 1-compartment depot analytical
@@ -90,6 +102,22 @@ kernel_doblock_model(df) = @brm df begin
         yy ~ normal(mu, sigma)
         mu
     end
+end
+
+# The "cleaner cut": the kernel returns mu ONLY; the observation model is applied
+# OUTSIDE, as an ordinary top-level `dv ~ Normal(pred, sigma)`. With ragged-dist-arg
+# (StanBlocks `9f4b0fa`) the ragged plate-result `pred` broadcasts the distribution
+# ACROSS subject groups (`for g: dv[g] ~ Normal(pred[g], sigma)`), so a vector-valued
+# response would correctly keep each subject as one obs. This form is bit-for-bit
+# log-density-equivalent to the obs-in-cell `kernel_doblock_model` (asserted below).
+kernel_muout_model(df) = @brm df begin
+    sigma ~ Exponential(1)
+    pred  ~ kernel(t, dose; by = subject, n_eta = 3) do ts, d, eta
+        CL = 1.0 * exp(eta[1]); Vc = 10.0 * exp(eta[2]); Ka = 1.5 * exp(eta[3])
+        ke = CL / Vc
+        d * Ka / (Vc * (Ka - ke)) * (exp(-ke * ts) - exp(-Ka * ts))
+    end
+    dv ~ Normal(pred, sigma)
 end
 
 # A marker that is deliberately NOT a registered obs family — pins the
@@ -180,6 +208,37 @@ end
             @test bridgestan_accepts(sb.model)
         else
             @info "Skipping BridgeStan runtime gate (BRM_KERNEL_RUNTIME=0)"
+        end
+    end
+end
+
+@testset "kernel(...) do-block — cleaner cut (obs outside) ≡ obs-in-cell" begin
+    df = kernel_df()
+
+    @testset "build + transpile + stanc" begin
+        sb = SBBRMI(kernel_muout_model(df); mod=@__MODULE__)
+        transpiles = StanBlocks.stan.transpiles(sb.model)
+        @test transpiles
+        code = StanBlocks.stan_code(sb.model)
+        @test !occursin(r"(^|[^A-Za-z0-9_])_[A-Za-z]", code)
+        @test !occursin("vector[\"", code)
+        transpiles && @test stanc_accepts(sb.model)
+    end
+
+    # The two forms emit different Stan (obs inside the plate vs. a top-level ragged
+    # broadcast) but are the SAME density. Assert identical dimension, log-density,
+    # and gradient at a fixed point — observed Δ = 0 exactly (StanBlocks `9f4b0fa`).
+    @testset "log-density equivalence to obs-in-cell" begin
+        if RUN_BRIDGESTAN
+            sb_out = SBBRMI(kernel_muout_model(df);   mod=@__MODULE__)
+            sb_cell = SBBRMI(kernel_doblock_model(df); mod=@__MODULE__)
+            dO, lpO, gO = kernel_lp_grad(sb_out.model)
+            dC, lpC, gC = kernel_lp_grad(sb_cell.model)
+            @test dO == dC
+            @test isapprox(lpO, lpC; atol=1e-8, rtol=0)
+            @test dO == dC && isapprox(gO, gC; atol=1e-8, rtol=0)
+        else
+            @info "Skipping equivalence gate (BRM_KERNEL_RUNTIME=0)"
         end
     end
 end
