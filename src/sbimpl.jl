@@ -1195,27 +1195,31 @@ function _sb_submodel_rhs!(stmts, data, target::Symbol, ::typeof(kernel), rhs)
         error("sbimpl: kernel(...) `obs=`'s first argument must be the observation data column")
     obs_name = name(obs_col); data[obs_name] = parent(parent(obs_col))
 
-    # n_subjects from the grouping column
+    # n_subjects from the grouping column. NOTE: all generated names use a
+    # LETTER-leading prefix (`kernel_`), never `_kernel_` — Stan identifiers may
+    # not start with an underscore, and stanc rejects them with a bare lexing
+    # error while StanBlocks' transpiles() (a weak check) passes silently
+    # (stanblocks-use §5). Matches the codebase convention (`X_`, `r_`, `b_`, …).
     by_vals = parent(parent(kw[:by]))
-    nsub_sym = Symbol("_kernel_nsub_", target); data[nsub_sym] = Int(maximum(by_vals))
+    nsub_sym = Symbol("kernel_nsub_", target); data[nsub_sym] = Int(maximum(by_vals))
 
     # auto-introduced correlated eta block (shared captures)
-    Lsym  = Symbol("_kernel_L_", target)
-    omsym = Symbol("_kernel_om_", target)
+    Lsym  = Symbol("kernel_L_", target)
+    omsym = Symbol("kernel_om_", target)
     push!(stmts, :($Lsym  ~ lkj_corr_cholesky(1.; n=$n_eta)))
     push!(stmts, :($omsym ~ std_normal(; n=$n_eta, lower=0.)))
 
     # per-subject plate: slice data + obs, draw eta, call the cell, apply obs
-    slice_syms = [Symbol("_kernel_s", i) for i in 1:length(dcol_names)]
-    obs_sym    = :_kernel_y
-    mu_expr    = Expr(:call, cell, slice_syms..., :_kernel_eta)
-    obs_rhs    = _sb_kernel_obs_expr(getf(obs), :_kernel_mu, obs_args[2:end])
+    slice_syms = [Symbol("kernel_s", i) for i in 1:length(dcol_names)]
+    obs_sym    = :kernel_y
+    mu_expr    = Expr(:call, cell, slice_syms..., :kernel_eta)
+    obs_rhs    = _sb_kernel_obs_expr(getf(obs), :kernel_mu, obs_args[2:end])
     body = quote
-        _kernel_z::vector[$n_eta] ~ std_normal()
-        _kernel_eta = diag_pre_multiply($omsym, $Lsym) * _kernel_z
-        _kernel_mu = $mu_expr
+        kernel_z::vector[$n_eta] ~ std_normal()
+        kernel_eta = diag_pre_multiply($omsym, $Lsym) * kernel_z
+        kernel_mu = $mu_expr
         $obs_sym ~ $obs_rhs
-        _kernel_mu
+        kernel_mu
     end
     plate_call = Expr(:call, :plate,
         Expr(:parameters, Expr(:kw, :outer, Expr(:tuple, nsub_sym))),
