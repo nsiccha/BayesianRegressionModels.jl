@@ -1106,6 +1106,95 @@ extended rather than shadowed.
 """
 _sb_submodel_rhs!(stmts, data, target, f, rhs) = nothing
 
+# ============================================================================
+# kernel(...) — general group-local submodel HoF term (decision `1vwycxb`).
+#
+#   pred ~ kernel(datacol...; by=g, model=cell, n_eta=K, obs=Family(obs_col, p...))
+#
+# Broadcasts a consumer-declared DETERMINISTIC @deffun `cell(sliced..., eta)`
+# over the groups in `by`, auto-introducing a correlated eta block (LKJ + half-
+# normal scales), and applies the obs family per group INSIDE the plate. This
+# generalises the hand-written per-kernel `_sb_submodel_rhs!` seam (e.g. Bruno's
+# `twocmt_superposition`) into one term.
+#
+# obs-as-kwarg is PROVISIONAL (decision `qswzw9`, user 2026-07-17 — "ship now,
+# revisit tomorrow"). v1 scope: pre-ragged per-subject data (one ragged/scalar
+# value per subject), a deterministic @deffun cell (eta -> per-subject
+# prediction vector), and the CombinedError (add+prop Normal) obs family. The
+# LHS `pred` is a latent collecting the per-subject predictions.
+function kernel end
+function CombinedError end   # obs family: CombinedError(obs_col, add, prop)
+
+# Translate an obs-family call into the per-cell `~` RHS applied to `mu`.
+_sb_kernel_obs_arg(x::NamedColumn) = name(x)   # a param/data reference -> its name
+_sb_kernel_obs_arg(x) = x                      # a literal -> itself
+_sb_kernel_obs_expr(::typeof(CombinedError), mu, params) = begin
+    length(params) == 2 ||
+        error("sbimpl: kernel obs `CombinedError(obs_col, add, prop)` expects 2 params after the obs column")
+    add, prop = _sb_kernel_obs_arg.(params)
+    :(normal($mu, sqrt($add^2 .+ ($mu .* $prop).^2)))
+end
+_sb_kernel_obs_expr(fam, mu, params) =
+    error("sbimpl: kernel obs family `$fam` not supported (v1 has CombinedError)")
+
+function _sb_submodel_rhs!(stmts, data, target::Symbol, ::typeof(kernel), rhs)
+    dcols = getargs(rhs)
+    kw = getkwargs(rhs)
+    for req in (:by, :model, :n_eta, :obs)
+        haskey(kw, req) || error("sbimpl: kernel(...) missing required kwarg `$req`")
+    end
+    cell  = name(kw[:model])
+    n_eta = kw[:n_eta]
+    n_eta isa Integer || error("sbimpl: kernel(...) `n_eta` must be an integer literal")
+
+    # positional per-subject data columns (sliced in the plate)
+    dcol_names = Symbol[]
+    for c in dcols
+        (c isa NamedColumn && parent(c) isa DataColumn) ||
+            error("sbimpl: kernel(...) positional args must be raw data columns")
+        k = name(c); data[k] = parent(parent(c)); push!(dcol_names, k)
+    end
+
+    # obs = Family(obs_col, params...): register the obs column, keep the params
+    obs = kw[:obs]
+    obs_args = getargs(obs)
+    isempty(obs_args) && error("sbimpl: kernel(...) `obs=` needs an observation column")
+    obs_col = obs_args[1]
+    (obs_col isa NamedColumn && parent(obs_col) isa DataColumn) ||
+        error("sbimpl: kernel(...) `obs=`'s first argument must be the observation data column")
+    obs_name = name(obs_col); data[obs_name] = parent(parent(obs_col))
+
+    # n_subjects from the grouping column
+    by_vals = parent(parent(kw[:by]))
+    nsub_sym = Symbol("_kernel_nsub_", target); data[nsub_sym] = Int(maximum(by_vals))
+
+    # auto-introduced correlated eta block (shared captures)
+    Lsym  = Symbol("_kernel_L_", target)
+    omsym = Symbol("_kernel_om_", target)
+    push!(stmts, :($Lsym  ~ lkj_corr_cholesky(1.; n=$n_eta)))
+    push!(stmts, :($omsym ~ std_normal(; n=$n_eta, lower=0.)))
+
+    # per-subject plate: slice data + obs, draw eta, call the cell, apply obs
+    slice_syms = [Symbol("_kernel_s", i) for i in 1:length(dcol_names)]
+    obs_sym    = :_kernel_y
+    mu_expr    = Expr(:call, cell, slice_syms..., :_kernel_eta)
+    obs_rhs    = _sb_kernel_obs_expr(getf(obs), :_kernel_mu, obs_args[2:end])
+    body = quote
+        _kernel_z::vector[$n_eta] ~ std_normal()
+        _kernel_eta = diag_pre_multiply($omsym, $Lsym) * _kernel_z
+        _kernel_mu = $mu_expr
+        $obs_sym ~ $obs_rhs
+        _kernel_mu
+    end
+    plate_call = Expr(:call, :plate,
+        Expr(:parameters, Expr(:kw, :outer, Expr(:tuple, nsub_sym))),
+        dcol_names..., obs_name)
+    plate_do = Expr(:do, plate_call,
+        Expr(:->, Expr(:tuple, slice_syms..., obs_sym), body))
+    push!(stmts, :($target ~ $plate_do))
+    :done
+end
+
 # ---- structured-latent (group-block) declaration + emit API -----------------
 #
 # This is BRM's GENERAL structured-latent floor (KB todo ez6anl; user resolved
