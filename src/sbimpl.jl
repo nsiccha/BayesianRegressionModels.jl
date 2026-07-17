@@ -1128,6 +1128,11 @@ function CombinedError end   # obs family: CombinedError(obs_col, add, prop)
 # as a top-level likelihood family in the bordet section below). Forward-declared
 # here so the kernel obs method can dispatch on it at this earlier file position.
 function TruncatedNormal end
+# `LogNormalError` is the multiplicative-lognormal residual marker (stanpmx `_exp`
+# error model). Named `...Error` (not bare `LogNormal`) on purpose: a bare
+# `LogNormal` collides with `Distributions.LogNormal`, which model authors import,
+# so `getf(obs)` would resolve to the Distributions type and miss this dispatch.
+function LogNormalError end
 
 # Translate an obs-family call into the per-cell `~` RHS applied to `mu`.
 _sb_kernel_obs_arg(x::NamedColumn) = name(x)   # a param/data reference -> its name
@@ -1149,8 +1154,19 @@ _sb_kernel_obs_expr(::typeof(TruncatedNormal), mu, params) = begin
     sigma, lloq, uloq = _sb_kernel_obs_arg.(params)
     :(truncated_normal($mu, $sigma, $lloq, $uloq))
 end
+# LogNormalError(obs_col, sigma) — multiplicative lognormal residual (stanpmx `_exp`
+# error model): observations on the natural scale, log-normal about the prediction.
+# `mu` is the per-cell prediction vector; `log(mu)` is elementwise. Not reachable
+# via CombinedError's degenerate cases (which are additive/proportional on the
+# natural scale), so it's a genuinely distinct family.
+_sb_kernel_obs_expr(::typeof(LogNormalError), mu, params) = begin
+    length(params) == 1 ||
+        error("sbimpl: kernel obs `LogNormalError(obs_col, sigma)` expects 1 param after the obs column")
+    sigma, = _sb_kernel_obs_arg.(params)
+    :(lognormal(log($mu), $sigma))
+end
 _sb_kernel_obs_expr(fam, mu, params) =
-    error("sbimpl: kernel obs family `$fam` not supported (v1: CombinedError, TruncatedNormal)")
+    error("sbimpl: kernel obs family `$fam` not supported (v1: CombinedError, TruncatedNormal, LogNormalError)")
 
 function _sb_submodel_rhs!(stmts, data, target::Symbol, ::typeof(kernel), rhs)
     dcols = getargs(rhs)
