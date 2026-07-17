@@ -74,6 +74,24 @@ kernel_model(df) = @brm df begin
                      obs = CombinedError(dv, sigma_a, sigma_p))
 end
 
+# The do-block surface (commit `cdf60a5`): the per-subject cell is written INLINE
+# as a plate-style do-block, obs as `~` statements in the body — no `model=`/`obs=`
+# DSL, no separately-declared @deffun cell. Whole-vector locals need NO size
+# annotation since the infer-vector-loc fix (StanBlocks `853a321`): a bare
+# `mu = <broadcast>` emits valid Stan with an UNQUOTED size (before the fix it
+# emitted `vector["dims(ts)[1]"]`, which stanc rejects). This is the concise
+# surface the do-block design targeted.
+kernel_doblock_model(df) = @brm df begin
+    sigma ~ Exponential(1)
+    pred  ~ kernel(t, dose, dv; by = subject, n_eta = 3) do ts, d, yy, eta
+        CL = 1.0 * exp(eta[1]); Vc = 10.0 * exp(eta[2]); Ka = 1.5 * exp(eta[3])
+        ke = CL / Vc
+        mu = d * Ka / (Vc * (Ka - ke)) * (exp(-ke * ts) - exp(-Ka * ts))
+        yy ~ normal(mu, sigma)
+        mu
+    end
+end
+
 # A marker that is deliberately NOT a registered obs family — pins the
 # `_sb_kernel_obs_expr` fallback path independently of which families ship
 # (CombinedError/TruncatedNormal/LogNormalError are all supported).
@@ -135,5 +153,33 @@ function unknown_obs_family end
                              obs = CombinedError(dv, sigma_a, sigma_p))
         end
         @test_throws "pre-grouped per-subject data" SBBRMI(m_long; mod=@__MODULE__)
+    end
+end
+
+@testset "kernel(...) do-block surface — bare-local cell" begin
+    df = kernel_df()
+
+    @testset "build + transpile + stanc" begin
+        sb = SBBRMI(kernel_doblock_model(df); mod=@__MODULE__)
+        transpiles = StanBlocks.stan.transpiles(sb.model)
+        @test transpiles
+        code = StanBlocks.stan_code(sb.model)
+        # Leading-underscore guard (shared with the regression form): Stan rejects
+        # any identifier starting with `_` (`cf8b218`).
+        @test !occursin(r"(^|[^A-Za-z0-9_])_[A-Za-z]", code)
+        # infer-vector-loc regression guard (StanBlocks `853a321`): a bare
+        # whole-vector local (`mu = <broadcast>`) must emit an UNQUOTED size —
+        # never the pre-fix invalid `vector["dims(ts)[1]"]`.
+        @test !occursin("vector[\"", code)
+        transpiles && @test stanc_accepts(sb.model)
+    end
+
+    @testset "BridgeStan runtime" begin
+        if RUN_BRIDGESTAN
+            sb = SBBRMI(kernel_doblock_model(df); mod=@__MODULE__)
+            @test bridgestan_accepts(sb.model)
+        else
+            @info "Skipping BridgeStan runtime gate (BRM_KERNEL_RUNTIME=0)"
+        end
     end
 end
