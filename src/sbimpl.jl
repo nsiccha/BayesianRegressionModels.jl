@@ -1209,8 +1209,17 @@ function _sb_submodel_rhs!(stmts, data, target::Symbol, ::typeof(kernel), rhs)
     # not start with an underscore, and stanc rejects them with a bare lexing
     # error while StanBlocks' transpiles() (a weak check) passes silently
     # (stanblocks-use §5). Matches the codebase convention (`X_`, `r_`, `b_`, …).
+    # v1 contract: data is pre-grouped to one row per subject, so the plate
+    # slices the positional columns BY ROW and uses `by` only for the subject
+    # count. Long-format (multi-row-per-subject) data would silently drop rows,
+    # so require `by` to list subjects 1:n_sub in order and reject anything else.
     by_vals = parent(parent(kw[:by]))
-    nsub_sym = Symbol("kernel_nsub_", target); data[nsub_sym] = Int(maximum(by_vals))
+    nsub = length(by_vals)
+    by_vals == 1:nsub || error(
+        "sbimpl: kernel(...) v1 needs pre-grouped per-subject data — `by` must " *
+        "list subjects 1:n_subjects in order (one row each); got $(by_vals). " *
+        "Gather multi-row-per-subject data into ragged per-subject columns first.")
+    nsub_sym = Symbol("kernel_nsub_", target); data[nsub_sym] = nsub
 
     # auto-introduced correlated eta block(s) — one per n_eta entry, each with its
     # own LKJ Cholesky + scale (shared captures). Single-block keeps un-indexed
