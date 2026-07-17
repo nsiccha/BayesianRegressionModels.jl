@@ -1124,6 +1124,10 @@ _sb_submodel_rhs!(stmts, data, target, f, rhs) = nothing
 # LHS `pred` is a latent collecting the per-subject predictions.
 function kernel end
 function CombinedError end   # obs family: CombinedError(obs_col, add, prop)
+# `TruncatedNormal` is the shared censored-Normal marker (also declared + wired
+# as a top-level likelihood family in the bordet section below). Forward-declared
+# here so the kernel obs method can dispatch on it at this earlier file position.
+function TruncatedNormal end
 
 # Translate an obs-family call into the per-cell `~` RHS applied to `mu`.
 _sb_kernel_obs_arg(x::NamedColumn) = name(x)   # a param/data reference -> its name
@@ -1134,8 +1138,19 @@ _sb_kernel_obs_expr(::typeof(CombinedError), mu, params) = begin
     add, prop = _sb_kernel_obs_arg.(params)
     :(normal($mu, sqrt($add^2 .+ ($mu .* $prop).^2)))
 end
+# TruncatedNormal(obs_col, sigma, lloq, uloq) — censored/truncated Normal: the
+# universal stanpmx residual (truncate at 0 + LOQ) and bordet's obs family.
+# Reuses the shipped `truncated_normal` builtin. `sigma`/`lloq`/`uloq` are shared
+# captures (scalar params/literals); per-observation ragged LOQ bounds are a
+# follow-up (todo `13mczrs`).
+_sb_kernel_obs_expr(::typeof(TruncatedNormal), mu, params) = begin
+    length(params) == 3 ||
+        error("sbimpl: kernel obs `TruncatedNormal(obs_col, sigma, lloq, uloq)` expects 3 params after the obs column")
+    sigma, lloq, uloq = _sb_kernel_obs_arg.(params)
+    :(truncated_normal($mu, $sigma, $lloq, $uloq))
+end
 _sb_kernel_obs_expr(fam, mu, params) =
-    error("sbimpl: kernel obs family `$fam` not supported (v1 has CombinedError)")
+    error("sbimpl: kernel obs family `$fam` not supported (v1: CombinedError, TruncatedNormal)")
 
 function _sb_submodel_rhs!(stmts, data, target::Symbol, ::typeof(kernel), rhs)
     dcols = getargs(rhs)
