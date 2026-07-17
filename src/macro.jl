@@ -264,7 +264,13 @@ end
 _quote_ranef_id(_, x::Expr) = Expr(x.head, rewrite_ranef_ids.(x.args)...)
 parselocals!(x; kwargs...) = x
 parselocals!(x::Symbol; info, val) = get!(info.alllocals, x, val)
-parselocals!(x::Expr; info, val) = if Meta.isexpr(x, (:call, :kw))
+parselocals!(x::Expr; info, val) = if Meta.isexpr(x, :->)
+    # Shield a `do`-block lambda (see `_x`): its params are bound inside the
+    # block and its body is verbatim SLIC — registering those symbols as data
+    # columns would be wrong. Genuine outer params are registered by their own
+    # `~`/`=` lines.
+    x
+elseif Meta.isexpr(x, (:call, :kw))
     parselocals!.(x.args[2:end]; info, val)
 else
     parselocals!.(x.args; info, val)
@@ -305,6 +311,25 @@ _x(x::Expr) = if x.head == :call
     Expr(:call, ExprColumn, _x.(x.args)...) |> fixcall
 elseif x.head ==  :||
     Expr(:call, ExprColumn, doublepipe, _x.(x.args)...)
+elseif x.head == :do
+    # At macro-expansion time `term(args...) do params ... end` is
+    # `Expr(:do, term(args...), lambda)` (the lambda-first-arg lowering happens
+    # LATER). Fold the lambda in as the term's FIRST positional arg, then process
+    # the resulting call normally — so the term ExprColumn carries the do-block.
+    call, lambda = x.args
+    if Meta.isexpr(call, :call)
+        newargs = copy(call.args)
+        pos = (length(newargs) >= 2 && Meta.isexpr(newargs[2], :parameters)) ? 3 : 2
+        insert!(newargs, pos, lambda)
+        _x(Expr(:call, newargs...))
+    else
+        Expr(x.head, _x.(x.args)...)
+    end
+elseif x.head == :->
+    # The folded-in do-block lambda: capture it VERBATIM as an Expr rather than
+    # recursing — its body is SLIC to splice into the emitted plate, NOT more @brm
+    # formula. No existing formula uses a bare lambda (regression-safe).
+    Meta.quot(x)
 else
     Expr(x.head, _x.(x.args)...)
 end

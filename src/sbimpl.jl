@@ -1168,9 +1168,105 @@ end
 _sb_kernel_obs_expr(fam, mu, params) =
     error("sbimpl: kernel obs family `$fam` not supported (v1: CombinedError, TruncatedNormal, LogNormalError)")
 
+# do-block kernel surface (decision z9vkkf, User chose B): the consumer writes the
+# per-subject cell body INLINE as a plate-style do-block, with the obs likelihood as
+# ordinary `~` statements in the body (no `obs=` family DSL). The term still auto-
+# introduces the correlated eta block(s) and the per-subject plate.
+#
+#   pred ~ kernel(time, dose, cmt, dv; by=subject, n_eta=(3,2)) do t, d, c, y, eta_pk, eta_pd
+#       ... deterministic prediction (conc from eta_pk; resp from eta_pd + conc) ...
+#       y[c .== 1] ~ normal(conc[c .== 1], sd)   # obs are just statements
+#       y[c .== 2] ~ normal(resp[c .== 2], sd)
+#       mu                                        # last expr = collected result
+#   end
+#
+# Leading do-params bind to the sliced positional data columns (one each, in order);
+# trailing do-params bind to the auto-drawn eta blocks (one per n_eta entry). Outer
+# params (sd, covariates) are reached by lexical scope. No `model=`/`obs=`.
+function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
+    for req in (:by, :n_eta)
+        haskey(kw, req) || error("sbimpl: kernel(...) do-block form needs kwarg `$req`")
+    end
+    haskey(kw, :model) &&
+        error("sbimpl: kernel(...) do-block form takes an inline do-block, not `model=`")
+
+    lam = first(dcols)
+    ptuple = lam.args[1]
+    params = ptuple isa Symbol ? Symbol[ptuple] :
+        (Meta.isexpr(ptuple, :tuple) && all(p -> p isa Symbol, ptuple.args) ?
+            Symbol[ptuple.args...] :
+            error("sbimpl: kernel(...) do-block params must be plain names (no types/defaults)"))
+    body = lam.args[2]
+    body_stmts = Meta.isexpr(body, :block) ? body.args : Any[body]
+
+    # n_eta -> block sizes (single Int or tuple/vector of Ints)
+    n_eta = kw[:n_eta]
+    block_sizes = n_eta isa Integer ? [Int(n_eta)] :
+        (n_eta isa Union{Tuple,AbstractVector} && all(x -> x isa Integer, n_eta) ?
+            [Int(x) for x in n_eta] :
+            error("sbimpl: kernel(...) `n_eta` must be an integer or a tuple/vector of integers"))
+    all(k -> k >= 1, block_sizes) ||
+        error("sbimpl: kernel(...) `n_eta` block sizes must each be >= 1")
+    nblk = length(block_sizes)
+
+    # positional data columns (everything after the do-block); sliced in the plate
+    dcol_names = Symbol[]
+    for c in dcols[2:end]
+        (c isa NamedColumn && parent(c) isa DataColumn) ||
+            error("sbimpl: kernel(...) positional args (after the do-block) must be data columns")
+        k = name(c); data[k] = parent(parent(c)); push!(dcol_names, k)
+    end
+    ndata = length(dcol_names)
+
+    length(params) == ndata + nblk || error(
+        "sbimpl: kernel(...) do-block has $(length(params)) params but expects $ndata ",
+        "(one per positional data column) + $nblk (one per n_eta block) = $(ndata + nblk)")
+    slice_params = params[1:ndata]
+    eta_params   = params[ndata+1:end]
+
+    # n_subjects + long-format guard (v1: pre-grouped, one row per subject)
+    by_vals = parent(parent(kw[:by]))
+    nsub = length(by_vals)
+    by_vals == 1:nsub || error(
+        "sbimpl: kernel(...) v1 needs pre-grouped per-subject data — `by` must list ",
+        "subjects 1:n_subjects in order (one row each); got $(by_vals).")
+    nsub_sym = Symbol("kernel_nsub_", target); data[nsub_sym] = nsub
+
+    # auto-introduced correlated eta block(s); each per-subject draw is bound to the
+    # matching trailing do-param inside the plate. Single-block keeps un-indexed names.
+    block_body = Any[]
+    for (bi, (k, ep)) in enumerate(zip(block_sizes, eta_params))
+        sfx   = nblk == 1 ? "" : string(bi)
+        Lsym  = Symbol("kernel_L",  sfx, "_", target)
+        omsym = Symbol("kernel_om", sfx, "_", target)
+        push!(stmts, :($Lsym  ~ lkj_corr_cholesky(1.; n=$k)))
+        push!(stmts, :($omsym ~ std_normal(; n=$k, lower=0.)))
+        zsym = Symbol("kernel_z", sfx)
+        push!(block_body, :($zsym::vector[$k] ~ std_normal()))
+        push!(block_body, :($ep = diag_pre_multiply($omsym, $Lsym) * $zsym))
+    end
+
+    # per-subject plate: slice params bind the data columns; eta draws + the user's
+    # inline body (obs `~` statements and all) run inside; last body expr is collected.
+    plate_body = Expr(:block, block_body..., body_stmts...)
+    plate_call = Expr(:call, :plate,
+        Expr(:parameters, Expr(:kw, :outer, Expr(:tuple, nsub_sym))),
+        dcol_names...)
+    plate_do = Expr(:do, plate_call,
+        Expr(:->, Expr(:tuple, slice_params...), plate_body))
+    push!(stmts, :($target ~ $plate_do))
+    :done
+end
+
 function _sb_submodel_rhs!(stmts, data, target::Symbol, ::typeof(kernel), rhs)
     dcols = getargs(rhs)
     kw = getkwargs(rhs)
+    # do-block form (decision z9vkkf, User chose B): `kernel(datacols...; by, n_eta)
+    # do slices..., etas... <body> end`. @brm captures the do-block as a verbatim
+    # lambda first-arg (macro.jl `_x`); dispatch to the inline-body emitter.
+    if !isempty(dcols) && first(dcols) isa Expr && first(dcols).head == :->
+        return _sb_kernel_doblock!(stmts, data, target, dcols, kw)
+    end
     for req in (:by, :model, :n_eta, :obs)
         haskey(kw, req) || error("sbimpl: kernel(...) missing required kwarg `$req`")
     end
