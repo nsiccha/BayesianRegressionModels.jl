@@ -1176,7 +1176,16 @@ function _sb_submodel_rhs!(stmts, data, target::Symbol, ::typeof(kernel), rhs)
     end
     cell  = name(kw[:model])
     n_eta = kw[:n_eta]
-    n_eta isa Integer || error("sbimpl: kernel(...) `n_eta` must be an integer literal")
+    # n_eta: a single Int (one correlated eta block) OR a tuple/vector of Ints —
+    # one correlated block per entry (e.g. n_eta=(3,2) for a PK+PD block pair over
+    # one subject-plate; decision z9vkkf). The cell then receives one eta arg per
+    # block, in order, after the sliced data columns.
+    block_sizes = n_eta isa Integer ? [Int(n_eta)] :
+        (n_eta isa Union{Tuple,AbstractVector} && all(x -> x isa Integer, n_eta) ?
+            [Int(x) for x in n_eta] :
+            error("sbimpl: kernel(...) `n_eta` must be an integer or a tuple/vector of integers"))
+    all(k -> k >= 1, block_sizes) ||
+        error("sbimpl: kernel(...) `n_eta` block sizes must each be >= 1")
 
     # positional per-subject data columns (sliced in the plate)
     dcol_names = Symbol[]
@@ -1203,24 +1212,37 @@ function _sb_submodel_rhs!(stmts, data, target::Symbol, ::typeof(kernel), rhs)
     by_vals = parent(parent(kw[:by]))
     nsub_sym = Symbol("kernel_nsub_", target); data[nsub_sym] = Int(maximum(by_vals))
 
-    # auto-introduced correlated eta block (shared captures)
-    Lsym  = Symbol("kernel_L_", target)
-    omsym = Symbol("kernel_om_", target)
-    push!(stmts, :($Lsym  ~ lkj_corr_cholesky(1.; n=$n_eta)))
-    push!(stmts, :($omsym ~ std_normal(; n=$n_eta, lower=0.)))
-
-    # per-subject plate: slice data + obs, draw eta, call the cell, apply obs
+    # auto-introduced correlated eta block(s) — one per n_eta entry, each with its
+    # own LKJ Cholesky + scale (shared captures). Single-block keeps un-indexed
+    # names (`kernel_L_`, `kernel_z`, `kernel_eta`) so the emitted Stan is
+    # byte-identical to the pre-multiblock v1; multi-block appends the block index.
+    nblocks    = length(block_sizes)
     slice_syms = [Symbol("kernel_s", i) for i in 1:length(dcol_names)]
     obs_sym    = :kernel_y
-    mu_expr    = Expr(:call, cell, slice_syms..., :kernel_eta)
     obs_rhs    = _sb_kernel_obs_expr(getf(obs), :kernel_mu, obs_args[2:end])
-    body = quote
-        kernel_z::vector[$n_eta] ~ std_normal()
-        kernel_eta = diag_pre_multiply($omsym, $Lsym) * kernel_z
-        kernel_mu = $mu_expr
-        $obs_sym ~ $obs_rhs
-        kernel_mu
+    eta_syms   = Symbol[]
+    block_body = Any[]
+    for (bi, k) in enumerate(block_sizes)
+        sfx   = nblocks == 1 ? "" : string(bi)
+        Lsym  = Symbol("kernel_L",  sfx, "_", target)
+        omsym = Symbol("kernel_om", sfx, "_", target)
+        push!(stmts, :($Lsym  ~ lkj_corr_cholesky(1.; n=$k)))
+        push!(stmts, :($omsym ~ std_normal(; n=$k, lower=0.)))
+        zsym   = Symbol("kernel_z",   sfx)
+        etasym = Symbol("kernel_eta", sfx)
+        push!(block_body, :($zsym::vector[$k] ~ std_normal()))
+        push!(block_body, :($etasym = diag_pre_multiply($omsym, $Lsym) * $zsym))
+        push!(eta_syms, etasym)
     end
+
+    # per-subject plate: slice data + obs, draw eta(s), call the cell, apply obs.
+    # The cell receives one eta arg per block, in order, after the sliced columns.
+    mu_expr = Expr(:call, cell, slice_syms..., eta_syms...)
+    body = Expr(:block,
+        block_body...,
+        :(kernel_mu = $mu_expr),
+        :($obs_sym ~ $obs_rhs),
+        :kernel_mu)
     plate_call = Expr(:call, :plate,
         Expr(:parameters, Expr(:kw, :outer, Expr(:tuple, nsub_sym))),
         dcol_names..., obs_name)
