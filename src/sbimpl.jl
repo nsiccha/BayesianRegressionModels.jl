@@ -1152,7 +1152,31 @@ _sb_kernel_obs_expr(::typeof(TruncatedNormal), mu, params) = begin
     length(params) == 3 ||
         error("sbimpl: kernel obs `TruncatedNormal(obs_col, sigma, lloq, uloq)` expects 3 params after the obs column")
     sigma, lloq, uloq = _sb_kernel_obs_arg.(params)
-    :(truncated_normal($mu, $sigma, $lloq, $uloq))
+    # StanBlocks' `truncated_normal` sampling lpxf is registered ONLY in the
+    # all-vector shape (`truncated_normal_lpdf(obs::vector, loc::vector,
+    # scale::vector, lloq::vector, uloq::vector)`, builtin.jl). `mu` is the
+    # per-cell prediction vector, but `sigma`/`lloq`/`uloq` are scalar captures,
+    # so broadcast each to `mu`'s length with `rep_vector(_, dims(mu)[1])` — the
+    # documented idiom (StanBlocks `docs/examples/private/_private.qmd`; `dims(x)[1]`
+    # is SLIC's canonical length op, as in the cell body itself). Without this the
+    # emitted `~ truncated_normal(vec, scalar, scalar, scalar)` matches no
+    # registered lpdf, so `fetch_functions!` never collects `truncated_normal_lpdf`
+    # into the Stan functions block and stanc rejects the model with
+    # `No function "truncated_normal_lpdf" was found`. `dims(x)[1]` is SLIC's
+    # canonical length op (as in the cell body itself).
+    #
+    # NOTE: this arg-shape fix is NECESSARY but not yet SUFFICIENT — full
+    # compilation is BLOCKED on StanBlocks snag `truncated-normal-5afff891`: the
+    # auto-synthesized `truncated_normal_rng` GQ builtin (builtin.jl:1182,
+    # `draws::vector[n] = to_vector(normal_rng(loc, scale))`) fails type-checking
+    # for EVERY `obs ~ truncated_normal(...)` on data (reproduced pure-StanBlocks,
+    # every arg shape). Once that StanBlocks bug lands, this fix carries the
+    # kernel TruncatedNormal obs through stanc; verify then.
+    n = :(dims($mu)[1])
+    :(truncated_normal($mu,
+        rep_vector($sigma, $n),
+        rep_vector($lloq, $n),
+        rep_vector($uloq, $n)))
 end
 # LogNormalError(obs_col, sigma) — multiplicative lognormal residual (stanpmx `_exp`
 # error model): observations on the natural scale, log-normal about the prediction.
