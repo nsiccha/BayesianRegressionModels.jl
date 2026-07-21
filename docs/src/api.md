@@ -75,6 +75,11 @@ BayesianRegressionModels.BinomialLogit
 BayesianRegressionModels.VBRMI
 BayesianRegressionModels.SBBRMI
 BayesianRegressionModels.stan_code
+BayesianRegressionModels.GenerativeDeclaration
+BayesianRegressionModels.GenerativePlan
+BayesianRegressionModels.generative_plan
+BayesianRegressionModels.reprocess
+BayesianRegressionModels.restan_data
 ```
 
 ## Introspection

@@ -925,6 +925,213 @@ Base.show(io::IO, sb::SBBRMI) = begin
 end
 
 
+# ---- declaration-driven generative plans -----------------------------------
+
+"""
+    GenerativeDeclaration
+
+One emitted sampling declaration in a [`GenerativePlan`](@ref).
+
+- `role` is `:prior` or `:observation`. A `:prior` includes structured latent
+  submodels such as `popefs`, `ranef_correlated`, and `plate`, not only scalar
+  distribution calls.
+- `target` and `family` are the emitted SLIC binding and RHS head.
+- `data_source` is the original data key for an observation (including a
+  plate-local alias such as `kernel_y => dv`), otherwise `nothing`.
+- `draw` is the canonical binding a generative executor should use for an
+  observation, otherwise `nothing`. For top-level observations this matches
+  StanBlocks' current posterior-predictive `*_gen` name; nested plate
+  observations are inventoried even though StanBlocks does not yet emit their
+  generated quantity.
+- `context` names enclosing plate results, outermost first.
+- `expression` is an exact snapshot of the emitted `~` expression.
+
+The declaration is intentionally backend-level: it describes what BRM really
+emitted after formula terms introduced their latent blocks, rather than a
+second model-specific interpretation of the `@brm` source.
+"""
+struct GenerativeDeclaration
+    role::Symbol
+    target::Symbol
+    family::Any
+    data_source::Union{Nothing,Symbol}
+    draw::Union{Nothing,Symbol}
+    context::Tuple{Vararg{Symbol}}
+    expression::Expr
+end
+
+"""
+    GenerativePlan
+
+An introspectable, replayable snapshot of an `SBBRMI`'s actual emitted
+declarations. `model`, `data`, and `preproc` are copied together at plan
+construction, while `declarations` inventories every emitted sampling site,
+including priors introduced inside `kernel(...)` plates and every observation
+in a multi-output model.
+
+Construct with [`generative_plan`](@ref). [`stan_code`](@ref) accepts a plan,
+and [`reprocess`](@ref) preserves the existing SBBRMI replay contract (including
+its correct-or-loud unsupported cases).
+Plans constructed from a reusable `@brm` builder also retain that builder so
+`generative_plan(plan, new_df)` can rebuild the same declarations for genuinely
+new groups.
+
+This is a declaration plan, not an RNG executor: it does not claim that a
+component-wise consumer draw is prior-predictive. Its purpose is to expose the
+one authoritative program and provenance an executor must consume.
+"""
+struct GenerativePlan{P,M,D,PP,DS,B,CV}
+    parent::P
+    model::M
+    data::D
+    preproc::PP
+    declarations::DS
+    builder::B
+    cv_groups::CV
+end
+
+_sb_plan_lhs_name(x::Symbol) = x
+_sb_plan_lhs_name(x::Expr) =
+    x.head === :(::) && !isempty(x.args) ? _sb_plan_lhs_name(x.args[1]) : nothing
+_sb_plan_lhs_name(_) = nothing
+
+_sb_plan_family(x::Expr) = begin
+    if x.head === :call && !isempty(x.args)
+        x.args[1]
+    elseif x.head === :do && !isempty(x.args)
+        _sb_plan_family(x.args[1])
+    else
+        x.head
+    end
+end
+_sb_plan_family(x) = x
+
+_sb_plan_generated(context, target) =
+    Symbol(join((context..., target), "_"), "_gen")
+
+_sb_plan_param_names(x::Symbol) = (x,)
+_sb_plan_param_names(x::Expr) = if x.head === :tuple
+    Tuple(filter(!isnothing, map(_sb_plan_lhs_name, x.args)))
+else
+    name = _sb_plan_lhs_name(x)
+    isnothing(name) ? () : (name,)
+end
+_sb_plan_param_names(_) = ()
+
+_sb_plan_plate_parts(x) = nothing
+function _sb_plan_plate_parts(x::Expr)
+    x.head === :do || return nothing
+    length(x.args) == 2 || return nothing
+    call, lambda = x.args
+    call isa Expr && call.head === :call && !isempty(call.args) &&
+        call.args[1] === :plate || return nothing
+    lambda isa Expr && lambda.head === :-> && length(lambda.args) == 2 ||
+        return nothing
+    iterables = filter(a -> !(a isa Expr && a.head === :parameters), call.args[2:end])
+    params = _sb_plan_param_names(lambda.args[1])
+    (; iterables=Tuple(iterables), params, body=lambda.args[2])
+end
+
+function _sb_plan_collect!(declarations, x, data_scope, context=())
+    x isa Expr || return nothing
+    if x.head === :block
+        foreach(stmt -> _sb_plan_collect!(declarations, stmt, data_scope, context), x.args)
+        return nothing
+    end
+    if x.head === :call && length(x.args) >= 3 && x.args[1] === :~
+        target = _sb_plan_lhs_name(x.args[2])
+        isnothing(target) && error(
+            "generative_plan: cannot identify emitted sampling LHS `$(x.args[2])`")
+        rhs = x.args[3]
+        data_source = get(data_scope, target, nothing)
+        role = isnothing(data_source) ? :prior : :observation
+        draw = role === :observation ? _sb_plan_generated(context, target) : nothing
+        push!(declarations, GenerativeDeclaration(
+            role, target, _sb_plan_family(rhs), data_source, draw,
+            Tuple(context), deepcopy(x)))
+
+        plate = _sb_plan_plate_parts(rhs)
+        if !isnothing(plate)
+            nested_scope = copy(data_scope)
+            for (param, iterable) in zip(plate.params, plate.iterables)
+                iterable isa Symbol || continue
+                source = get(data_scope, iterable, nothing)
+                isnothing(source) || (nested_scope[param] = source)
+            end
+            _sb_plan_collect!(declarations, plate.body, nested_scope, (context..., target))
+        end
+        return nothing
+    end
+    nothing
+end
+
+function _generative_plan(sb::SBBRMI, builder, cv_groups)
+    parent = deepcopy(sb.parent)
+    data = deepcopy(sb.data)
+    preproc = deepcopy(sb.preproc)
+    body = deepcopy(sb.model.model)
+    model = StanBlocks.SlicModel(body, data, sb.model.mod)
+    declarations = GenerativeDeclaration[]
+    data_scope = Dict{Symbol,Union{Nothing,Symbol}}(k => k for k in keys(data))
+    _sb_plan_collect!(declarations, body, data_scope)
+    GenerativePlan(parent, model, data, preproc, Tuple(declarations), builder,
+                   copy(cv_groups))
+end
+
+"""
+    generative_plan(sb::SBBRMI) -> GenerativePlan
+    generative_plan(builder::Function, df; mod=@__MODULE__, cv_groups=Set()) -> GenerativePlan
+    generative_plan(plan::GenerativePlan, new_df; cv_groups=Set()) -> GenerativePlan
+
+Snapshot the declarations BRM actually emitted. The inventory is derived from
+`sb.model.model`, so auto-introduced population coefficients, random-effect
+blocks, `kernel(...)` eta blocks, observation families, and multiple outputs
+cannot drift from the fitted model.
+
+Use the reusable-builder form when future schedules may contain new groups:
+
+```julia
+builder = @brm begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + (1 | subject)
+    y ~ Normal(mu, sigma)
+end
+plan = generative_plan(builder, schedule; mod=@__MODULE__)
+new_population_plan = generative_plan(plan, new_schedule)
+```
+
+The `SBBRMI` form has no reusable formula builder to apply to genuinely new
+groups; use [`reprocess`](@ref) on that plan for the existing frozen-constant
+replay semantics instead.
+"""
+generative_plan(sb::SBBRMI) = _generative_plan(sb, nothing, Set{Symbol}())
+
+function generative_plan(builder::Function, df;
+                         mod::Module=@__MODULE__, cv_groups=Set{Symbol}())
+    brmi = Base.invokelatest(builder, df)
+    brmi isa BRMI || error(
+        "generative_plan: builder returned $(typeof(brmi)); expected a BRMI from `@brm begin ... end`")
+    cv_groups = cv_groups isa Set ? cv_groups : Set{Symbol}(cv_groups)
+    _generative_plan(SBBRMI(brmi; mod, cv_groups), builder, cv_groups)
+end
+
+function generative_plan(plan::GenerativePlan, new_df;
+                         cv_groups=plan.cv_groups)
+    isnothing(plan.builder) && error(
+        "generative_plan: this plan was built from an SBBRMI and has no reusable `@brm` builder. " *
+        "Construct it with `generative_plan(builder, df)` to rebuild the same declarations for new groups.")
+    generative_plan(plan.builder, new_df; mod=plan.model.mod, cv_groups)
+end
+
+stan_code(plan::GenerativePlan) = StanBlocks.stan_code(plan.model)
+
+Base.show(io::IO, plan::GenerativePlan) = begin
+    nprior = count(d -> d.role === :prior, plan.declarations)
+    nobs = count(d -> d.role === :observation, plan.declarations)
+    print(io, "GenerativePlan with $nprior prior/latent and $nobs observation declarations")
+end
+
+
 # ---- reprocess / restan_data (decision nr3v8n A) ----------------------------
 
 _sb_df_has_column(df, k::Symbol) = hasproperty(df, k)
@@ -1046,6 +1253,12 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true)
     end
     new_model = StanBlocks.SlicModel(sb.model.model, new_data, sb.model.mod)
     SBBRMI(sb.parent, new_model, new_data, new_preproc)
+end
+
+function reprocess(plan::GenerativePlan, new_df; freeze_constants::Bool=true)
+    sb = SBBRMI(plan.parent, plan.model, plan.data, plan.preproc)
+    _generative_plan(reprocess(sb, new_df; freeze_constants), plan.builder,
+                     plan.cv_groups)
 end
 
 """
