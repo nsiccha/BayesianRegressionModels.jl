@@ -1461,12 +1461,17 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     slice_params = params[1:ndata]
     eta_params   = params[ndata+1:end]
 
-    # n_subjects + long-format guard (v1: pre-grouped, one row per subject)
-    by_vals = parent(parent(kw[:by]))
+    # n_subjects + long-format guard (v1: pre-grouped, one row per subject).
+    # The labels identify groups to Julia callers but never enter the emitted
+    # Stan program: only their count and row order do. Accept arbitrary unique
+    # labels so a reusable generative-plan builder can rebuild on genuinely new
+    # subject ids without app-local recoding to 1:n.
+    by_vals = collect(parent(parent(kw[:by])))
     nsub = length(by_vals)
-    by_vals == 1:nsub || error(
+    !isempty(by_vals) && !any(ismissing, by_vals) && allunique(by_vals) || error(
         "sbimpl: kernel(...) v1 needs pre-grouped per-subject data — `by` must list ",
-        "subjects 1:n_subjects in order (one row each); got $(by_vals).")
+        "one non-missing unique subject per row; repeated levels indicate " *
+        "long-format data. Got $(by_vals).")
     nsub_sym = Symbol("kernel_nsub_", target); data[nsub_sym] = nsub
 
     # auto-introduced correlated eta block(s); each per-subject draw is bound to the
@@ -1545,12 +1550,14 @@ function _sb_submodel_rhs!(stmts, data, target::Symbol, ::typeof(kernel), rhs)
     # v1 contract: data is pre-grouped to one row per subject, so the plate
     # slices the positional columns BY ROW and uses `by` only for the subject
     # count. Long-format (multi-row-per-subject) data would silently drop rows,
-    # so require `by` to list subjects 1:n_sub in order and reject anything else.
-    by_vals = parent(parent(kw[:by]))
+    # so require one unique label per row; the labels themselves may be arbitrary
+    # new-subject ids because they do not enter Stan.
+    by_vals = collect(parent(parent(kw[:by])))
     nsub = length(by_vals)
-    by_vals == 1:nsub || error(
+    !isempty(by_vals) && !any(ismissing, by_vals) && allunique(by_vals) || error(
         "sbimpl: kernel(...) v1 needs pre-grouped per-subject data — `by` must " *
-        "list subjects 1:n_subjects in order (one row each); got $(by_vals). " *
+        "list one non-missing unique subject per row; repeated levels indicate " *
+        "long-format data. Got $(by_vals). " *
         "Gather multi-row-per-subject data into ragged per-subject columns first.")
     nsub_sym = Symbol("kernel_nsub_", target); data[nsub_sym] = nsub
 

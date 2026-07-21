@@ -67,11 +67,11 @@ kernel_doblock_builder = @brm begin
     end
 end
 
-kernel_schedule(n) = (;
+kernel_schedule(n; subject=collect(1:n)) = (;
     t=[collect(1.0:3.0) for _ in 1:n],
     dose=fill(100.0, n),
     dv=[zeros(3) for _ in 1:n],
-    subject=collect(1:n),
+    subject,
 )
 
 @testset "generative plan — kernel eta block and new groups" begin
@@ -95,9 +95,13 @@ kernel_schedule(n) = (;
               plan.declarations)
     @test stanc_ok(plan.model)
 
-    rebuilt = generative_plan(plan, kernel_schedule(4))
+    rebuilt = generative_plan(plan,
+        kernel_schedule(4; subject=collect(10_001:10_004)))
     @test rebuilt.data[:kernel_nsub_pred] == 4
     @test only(filter(d -> d.role === :observation, rebuilt.declarations)).data_source === :dv
+
+    repeated = kernel_schedule(4; subject=[10_001, 10_001, 10_002, 10_002])
+    @test_throws "pre-grouped per-subject data" generative_plan(plan, repeated)
 
     doblock = generative_plan(kernel_doblock_builder, kernel_schedule(2);
                               mod=@__MODULE__)
