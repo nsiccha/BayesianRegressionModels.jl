@@ -946,6 +946,35 @@ One emitted sampling declaration in a [`GenerativePlan`](@ref).
 - `context` names enclosing plate results, outermost first.
 - `expression` is an exact snapshot of the emitted `~` expression.
 
+The remaining fields decompose that RHS call so an executor never has to parse
+the snapshot itself:
+
+- `arguments` are the RHS call's positional arguments, in order (the rate of
+  `exponential(1)`, the eta of `lkj_corr_cholesky(1.)`).
+- `keywords` is a `NamedTuple` of every RHS keyword argument, verbatim.
+- `annotation` is the LHS type annotation (`:(vector[3])` for
+  `kernel_z::vector[3] ~ ...`), or `nothing` for a bare LHS.
+- `dimension` normalises the *two* ways a declaration can spell its size into
+  one tuple: the `m`/`n`/`o` (or `size`) keyword that StanBlocks' `autotype`
+  reads, and the LHS `::T[s...]` annotation, which wins when both are present.
+  `()` means the declaration spells no size of its own — it is a scalar, or its
+  extent comes from the data or from a submodel's internals (`popefs`,
+  `ranef_correlated`) rather than from this declaration.
+- `constraints` is the subset of `keywords` StanBlocks folds into the declared
+  type: `lower`, `upper`, `offset`, `multiplier`. **This is the field that makes
+  a half-normal visible**: `std_normal(; n=3, lower=0.)` and `std_normal(; n=3)`
+  differ only here.
+
+Entries of `arguments`, `dimension`, and `constraints` are the emitted
+expressions, not evaluated values: an entry may be a literal, or a `Symbol` that
+is a key of the plan's `data`, or a larger `Expr`. Resolve symbolic sizes
+against `plan.data`.
+
+`constraints` reports only the constraints spelled **on this declaration**.
+Families carry their own implied support (`exponential` is positive,
+`beta` lives on `[0, 1]`) — that is a property of `family`, held in StanBlocks'
+`autokwargs` table, and BRM deliberately does not duplicate it here.
+
 The declaration is intentionally backend-level: it describes what BRM really
 emitted after formula terms introduced their latent blocks, rather than a
 second model-specific interpretation of the `@brm` source.
@@ -958,6 +987,11 @@ struct GenerativeDeclaration
     draw::Union{Nothing,Symbol}
     context::Tuple{Vararg{Symbol}}
     expression::Expr
+    arguments::Tuple
+    keywords::NamedTuple
+    annotation::Union{Nothing,Symbol,Expr}
+    dimension::Tuple
+    constraints::NamedTuple
 end
 
 """
@@ -1009,6 +1043,58 @@ _sb_plan_family(x) = x
 _sb_plan_generated(context, target) =
     Symbol(join((context..., target), "_"), "_gen")
 
+# The LHS type annotation, if any: `z::vector[3] ~ rhs` -> `:(vector[3])`.
+_sb_plan_annotation(x::Expr) =
+    x.head === :(::) && length(x.args) == 2 ? deepcopy(x.args[2]) : nothing
+_sb_plan_annotation(_) = nothing
+
+# Split the emitted RHS call into positional args and keyword args. `do`-block
+# RHSs (`plate(...) do ...`) split on the underlying call, matching `family`.
+_sb_plan_as_kw(x::Expr) = x.head === :kw && length(x.args) == 2 ?
+    (x.args[1]::Symbol => deepcopy(x.args[2])) : nothing
+_sb_plan_as_kw(_) = nothing
+
+_sb_plan_call_parts(x) = ((), NamedTuple())
+function _sb_plan_call_parts(x::Expr)
+    x.head === :do && !isempty(x.args) && return _sb_plan_call_parts(x.args[1])
+    x.head === :call && !isempty(x.args) || return ((), NamedTuple())
+    args, kws = Any[], Pair{Symbol,Any}[]
+    for a in x.args[2:end]
+        if a isa Expr && a.head === :parameters
+            for p in a.args
+                kw = _sb_plan_as_kw(p)
+                isnothing(kw) || push!(kws, kw)
+            end
+            continue
+        end
+        kw = _sb_plan_as_kw(a)
+        isnothing(kw) ? push!(args, deepcopy(a)) : push!(kws, kw)
+    end
+    (Tuple(args), (; kws...))
+end
+
+# StanBlocks' `autotype` reads sizes from `m`/`n`/`o` in that order, else `size`
+# (functions.jl `autotype`), and folds these four keywords into the declared
+# type's constraints (forward.jl typed-LHS path).
+_sb_plan_size_kwargs() = (:m, :n, :o)
+_sb_plan_constraint_kwargs() = (:lower, :upper, :offset, :multiplier)
+
+# One tuple for both spellings of a declared size. The LHS `::T[s...]`
+# annotation is the declared type's own size, so it wins over the keyword form.
+function _sb_plan_dimension(annotation, kwargs)
+    if annotation isa Expr && annotation.head === :ref && length(annotation.args) >= 2
+        return Tuple(deepcopy.(annotation.args[2:end]))
+    end
+    sizes = Any[kwargs[k] for k in _sb_plan_size_kwargs() if haskey(kwargs, k)]
+    isempty(sizes) || return Tuple(sizes)
+    haskey(kwargs, :size) || return ()
+    s = kwargs[:size]
+    s isa Expr && s.head === :tuple ? Tuple(deepcopy.(s.args)) : (deepcopy(s),)
+end
+
+_sb_plan_constraints(kwargs) = (;
+    (k => kwargs[k] for k in _sb_plan_constraint_kwargs() if haskey(kwargs, k))...)
+
 _sb_plan_param_names(x::Symbol) = (x,)
 _sb_plan_param_names(x::Expr) = if x.head === :tuple
     Tuple(filter(!isnothing, map(_sb_plan_lhs_name, x.args)))
@@ -1046,9 +1132,13 @@ function _sb_plan_collect!(declarations, x, data_scope, context=())
         data_source = get(data_scope, target, nothing)
         role = isnothing(data_source) ? :prior : :observation
         draw = role === :observation ? _sb_plan_generated(context, target) : nothing
+        annotation = _sb_plan_annotation(x.args[2])
+        arguments, keywords = _sb_plan_call_parts(rhs)
         push!(declarations, GenerativeDeclaration(
             role, target, _sb_plan_family(rhs), data_source, draw,
-            Tuple(context), deepcopy(x)))
+            Tuple(context), deepcopy(x), arguments, keywords, annotation,
+            _sb_plan_dimension(annotation, keywords),
+            _sb_plan_constraints(keywords)))
 
         plate = _sb_plan_plate_parts(rhs)
         if !isnothing(plate)
