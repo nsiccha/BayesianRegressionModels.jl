@@ -110,3 +110,57 @@ kernel_schedule(n; subject=collect(1:n)) = (;
     @test doblock_obs.data_source === :dv
     @test doblock_obs.context == (:pred,)
 end
+
+@testset "generative plan — structured RHS parameters, dimension, constraints" begin
+    plan = generative_plan(kernel_builder, kernel_schedule(2); mod=@__MODULE__)
+    decl(t) = only(filter(d -> d.target === t, plan.declarations))
+
+    # positional distribution arguments, no AST parsing required
+    @test decl(:sigma_a).arguments == (1,)
+    @test decl(:sigma_a).keywords == NamedTuple()
+    @test decl(:kernel_L_pred).arguments == (1.0,)
+    @test decl(:kernel_om_pred).arguments == ()
+
+    # the two spellings of a declared size collapse to ONE field: the same
+    # `std_normal` family carries its dimension as an `n=` kwarg in one
+    # declaration and as an LHS `::vector[k]` annotation in the other.
+    @test decl(:kernel_om_pred).keywords == (; n=2, lower=0.0)
+    @test decl(:kernel_om_pred).annotation === nothing
+    @test decl(:kernel_om_pred).dimension == (2,)
+    @test decl(:kernel_z).keywords == NamedTuple()
+    @test decl(:kernel_z).annotation == :(vector[2])
+    @test decl(:kernel_z).dimension == (2,)
+    @test decl(:kernel_L_pred).dimension == (2,)
+
+    # the constraint that silently makes one of them a HALF-normal is the only
+    # thing distinguishing the two `std_normal` declarations.
+    @test decl(:kernel_om_pred).constraints == (; lower=0.0)
+    @test decl(:kernel_z).constraints == NamedTuple()
+    @test decl(:kernel_L_pred).constraints == NamedTuple()
+
+    # declarations that spell no size of their own report `()` rather than
+    # guessing: scalars, and extents owned by data or by a submodel.
+    @test decl(:sigma_a).dimension == ()
+    @test decl(:pred).dimension == ()
+    @test decl(:kernel_y).dimension == ()
+    @test decl(:kernel_y).arguments[1] === :kernel_mu
+
+    # a `do`-block RHS decomposes on its underlying call, matching `family`
+    @test decl(:pred).family === :plate
+    @test decl(:pred).arguments == (:t, :dose, :dv)
+    @test haskey(decl(:pred).keywords, :outer)
+
+    # structured latent submodels keep their keywords verbatim; a submodel's
+    # own sizing kwargs are NOT mistaken for a declared dimension.
+    df = (; x=randn(20), y=randn(20), subject=repeat(1:5, 4))
+    ranef_plan = generative_plan((@brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 + x | subject)
+        y ~ Normal(mu, sigma)
+    end), df; mod=@__MODULE__)
+    r = only(filter(d -> d.family === :ranef_correlated, ranef_plan.declarations))
+    @test keys(r.keywords) == (:Z, :group_idx, :n_groups, :n_terms)
+    @test r.dimension == ()
+    @test r.constraints == NamedTuple()
+    @test stanc_ok(ranef_plan.model)
+end
