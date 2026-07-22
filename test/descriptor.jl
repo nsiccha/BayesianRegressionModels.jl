@@ -231,23 +231,41 @@ kernel_schedule(n; subject=collect(1:n)) = (;
     @test byname[:kernel_om_pred].declaration.family === :std_normal
     @test byname[:sigma_a].role === :parameter
 
+    # The plate's transformed-parameter carriers. StanBlocks dropped EVERY bare
+    # declaration from `outputs` before 42fd83a (merged 825776e), so this set
+    # was quietly short for every plate model — a gap in a place nobody was
+    # looking, since the parameters it did report looked complete. Pin it.
+    @test any(o -> o.name === :pred_kernel_eta, d.outputs)
+    @test byname[:pred_kernel_eta].kind === :transformed_parameter
+    @test byname[:pred_kernel_eta].role === :group_block
+    @test !isempty([o for o in d.outputs
+                    if o.kind === :transformed_parameter && o.role === :group_block])
+
     @test :dv in d.columns && :subject in d.columns && :dose in d.columns
 
-    # BRM knows `dv` is conditioned on because it emitted the declaration —
-    # even though StanBlocks' traced-`~` walk does not currently see a ragged
-    # plate-sliced observation (snag built-brm-s-desc-55d6d48c).
+    # The ragged plate-sliced observation is recognised as conditioned-on, and
+    # the model is fittable. Both were briefly wrong upstream — the traced-`~`
+    # walk stopped at the `getfield` in `dv.mem[start:end]` — and BRM carried
+    # workarounds for them until `44f58fa` fixed the walk. These now assert
+    # PLAIN DELEGATION: if a future regression reintroduces that blind spot,
+    # these fail rather than being silently absorbed.
     @test Dict(i.name => i for i in d.inputs)[:dv].observed
 
     ops = Symbol[op.name for op in d.operations]
-
-    # ...and for the same reason it offers :fit on a model that fits fine.
-    # This must hold whether or not StanBlocks' walk is fixed: once it is,
-    # :fit simply arrives from the delegation instead of the compensation.
     @test :fit in ops
     prob = brm_execute(d, :fit)
     n = StanBlocks.LogDensityProblems.dimension(prob)
     @test n > 0
     @test isfinite(StanBlocks.LogDensityProblems.logdensity(prob, 0.1 .* randn(n)))
+
+    # :reprocess and :replay are OFFERED on a kernel model, so they must RUN.
+    # The reprocess gate keys on the absence of a `ranef_*` block, and a
+    # kernel's eta block is a plate rather than a ranef — so a kernel model
+    # sails through that gate. That is only correct if reprocess genuinely
+    # supports a plate model; offering one that errors would be this
+    # descriptor committing the exact failure it exists to prevent.
+    @test brm_execute(d, :reprocess, kernel_schedule(3)) isa BRMDescriptor
+    @test brm_execute(d, :replay, kernel_schedule(5)) isa BRMDescriptor
 
     # Whether a plate-nested observation gets a predictive draw is StanBlocks'
     # call, not BRM's — a ragged observation base gets no `_gen`
@@ -261,6 +279,55 @@ kernel_schedule(n; subject=collect(1:n)) = (;
         @test :predict ∉ ops
         @test :kernel_y in d.unpredictable
     end
+end
+
+StanBlocks.@deffun begin
+    descriptor_scalar_cell(dd::real, eta::vector[ne])::real =
+        (dd / 10.0) * exp(eta[1])
+end
+
+scalar_kernel_builder = @brm begin
+    sigma_a ~ Exponential(1)
+    sigma_p ~ Exponential(1)
+    pred ~ kernel(dose; by=subject, model=descriptor_scalar_cell, n_eta=2,
+                  obs=CombinedError(dv, sigma_a, sigma_p))
+end
+
+scalar_schedule(n) = (; dose=fill(100.0, n), dv=collect(1.0:n) ./ 10,
+                        subject=collect(1:n))
+
+# A plate observation on a NON-RAGGED (scalar-per-subject) base. Stan really
+# does emit `<data_source>_gen` here, but `stan_descriptor` collects neither a
+# bare gq declaration nor a for-loop fill, so the twin is absent from its
+# `outputs` (StanBlocks snag `descriptor-misse-1149b397`).
+#
+# This closes the question brm-use §3 leaves explicitly open ("I did NOT verify
+# `:predict` on a plate model against it"). What must hold is the INVARIANT,
+# not either branch of it: a `:predict` that is offered must be executable, and
+# an observation with no reachable draw must be named in `unpredictable`. That
+# way this test keeps holding when the snag lands and the branch flips.
+@testset "non-ragged plate observation — :predict stays consistent" begin
+    d = brm_descriptor(scalar_kernel_builder, scalar_schedule(4);
+                       mod=@__MODULE__, name=:pk_scalar)
+    ops = Symbol[op.name for op in d.operations]
+
+    @test :fit in ops
+    if :predict in ops
+        # offered => there is a real draw behind it, and it runs
+        @test !isempty(brm_operation(d, :predict).outputs)
+        @test isempty(d.unpredictable)
+        prob = brm_execute(d, :fit)
+        n = StanBlocks.LogDensityProblems.dimension(prob)
+        out = brm_execute(d, :predict; problem=prob, draws=0.1 .* randn(n), seed=7)
+        @test !isempty(keys(out))
+    else
+        # withheld => the observation is named, so nobody silently loses it
+        @test !isempty(d.unpredictable)
+        @test :kernel_y in d.unpredictable
+        @test_throws ErrorException brm_execute(d, :predict)
+    end
+
+    @test brm_execute(d, :reprocess, scalar_schedule(4)) isa BRMDescriptor
 end
 
 @testset "fail closed" begin

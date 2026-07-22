@@ -428,20 +428,9 @@ function _brm_descriptor(plan, stan, operations, titles)
     # response: an observation declaration's `data_source` IS its dataframe
     # column (including a plate-local alias, `kernel_y => dv`).
     df_columns = Set{Symbol}(data_columns(brmi))
-    # Everything this model CONDITIONS ON, per BRM's own declarations. BRM does
-    # not simply take StanBlocks' word for `observed`: its traced-`~` walk does
-    # not currently see an observation whose LHS is a ragged, plate-sliced data
-    # base, so it reports `observed = false` for the response of every
-    # `kernel(...)` model (snag `built-brm-s-desc-55d6d48c`). BRM knows
-    # authoritatively — it emitted the declaration — so it OR's the two. Once
-    # the walk is fixed this becomes a no-op, not a conflict.
-    observed_keys = Set{Symbol}()
     for d in plan.declarations
-        d.role === :observation || continue
-        push!(observed_keys, d.target)
-        isnothing(d.data_source) && continue
-        push!(observed_keys, d.data_source)
-        push!(df_columns, d.data_source)
+        d.role === :observation && !isnothing(d.data_source) &&
+            push!(df_columns, d.data_source)
     end
 
     # --- inputs: the Stan data block + its dataframe provenance -------------
@@ -449,8 +438,8 @@ function _brm_descriptor(plan, stan, operations, titles)
     for i in stan.inputs
         col, tf = _brm_input_schema(plan, i.name, df_columns)
         push!(inputs, BRMInput(i.name, i.type, i.size, i.constraints,
-                               i.observed || i.name in observed_keys,
-                               i.held_out, i.derived, i.inlined, col, tf))
+                               i.observed, i.held_out, i.derived, i.inlined,
+                               col, tf))
         isnothing(col) || push!(df_columns, col)   # e.g. a zscale()'d raw column
     end
     input_names = Set{Symbol}(i.name for i in stan.inputs)
@@ -558,29 +547,6 @@ function _brm_derive_operations(plan, stan, outputs, columns)
                                     d.stan, so.name; kwargs...)))
     end
 
-    # `:fit`, when BRM knows the model is fittable and StanBlocks did not say so.
-    #
-    # StanBlocks gates `:fit` on its traced-`~` walk finding a likelihood in the
-    # model block. That walk does not currently see an observation whose LHS is
-    # a ragged, plate-sliced data base, so it withholds `:fit` from every
-    # `kernel(...)` PKPD model — on a program that fits perfectly well (snag
-    # `built-brm-s-desc-55d6d48c`). Withholding a good operation is the
-    # fail-closed contract inverting: a UI would render no Fit button at all.
-    #
-    # BRM does not need to infer this. Its OWN declarations are authoritative:
-    # it emitted the observations, so it knows the likelihood exists. The runner
-    # goes through `:instantiate`, which stanblocks-use §30 documents as
-    # returning the same `StanProblem` as `:fit`. When the walk is fixed this
-    # branch simply stops firing.
-    if !any(o -> o.name === :fit, ops) &&
-       any(d -> d.role === :observation, plan.declarations) &&
-       any(o -> o.kind === :parameter, outputs)
-        inst = findfirst(o -> o.name === :instantiate, ops)
-        isnothing(inst) || push!(ops, BRMOperation(
-            :fit, "Fit", ops[inst].inputs,
-            Tuple(o.name for o in outputs if o.kind === :parameter), :stan,
-            (d; kwargs...) -> StanBlocks.stan_execute(d.stan, :instantiate; kwargs...)))
-    end
     if !isnothing(plan.builder)
         push!(ops, BRMOperation(
             :replay, "Rebuild the declaration on a new dataframe", columns, (), :brm,
