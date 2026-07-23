@@ -40,7 +40,7 @@ export BernoulliLogit, BinomialLogit
 export Data, MaybeData, maybedata
 export AbstractColumn, MissingColumn, DataColumn, NamedColumn,
        ExprColumn, LikelihoodColumn, MaterializedColumn
-export BRMI, VBRMI, SBBRMI
+export BRMI, VBRMI, SBBRMI, GenerativeDeclaration, GenerativePlan
 
 # Accessor helpers for column types — used unqualified by html renderers,
 # sbimpl dispatch logic, and downstream extension hooks like bruno-ext.
@@ -48,7 +48,7 @@ export name, getf, getargs, getkwargs, getbroadcast, getop
 
 # Macro plumbing + compiled-output accessors used by downstream code
 # (web-macro's Formula struct, bruno's direct pipeline calls).
-export parse!, _brm, stan_code, reprocess, restan_data
+export parse!, _brm, stan_code, reprocess, restan_data, generative_plan
 
 # Introspection -- model-shape questions answered without re-walking
 # the operations dict.

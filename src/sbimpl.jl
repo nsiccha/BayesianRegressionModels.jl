@@ -925,6 +925,303 @@ Base.show(io::IO, sb::SBBRMI) = begin
 end
 
 
+# ---- declaration-driven generative plans -----------------------------------
+
+"""
+    GenerativeDeclaration
+
+One emitted sampling declaration in a [`GenerativePlan`](@ref).
+
+- `role` is `:prior` or `:observation`. A `:prior` includes structured latent
+  submodels such as `popefs`, `ranef_correlated`, and `plate`, not only scalar
+  distribution calls.
+- `target` and `family` are the emitted SLIC binding and RHS head.
+- `data_source` is the original data key for an observation (including a
+  plate-local alias such as `kernel_y => dv`), otherwise `nothing`.
+- `draw` is the canonical binding a generative executor should use for an
+  observation, otherwise `nothing`. For top-level observations this matches
+  StanBlocks' current posterior-predictive `*_gen` name; nested plate
+  observations are inventoried even though StanBlocks does not yet emit their
+  generated quantity.
+- `context` names enclosing plate results, outermost first.
+- `expression` is an exact snapshot of the emitted `~` expression.
+
+The remaining fields decompose that RHS call so an executor never has to parse
+the snapshot itself:
+
+- `arguments` are the RHS call's positional arguments, in order (the rate of
+  `exponential(1)`, the eta of `lkj_corr_cholesky(1.)`).
+- `keywords` is a `NamedTuple` of every RHS keyword argument, verbatim.
+- `annotation` is the LHS type annotation (`:(vector[3])` for
+  `kernel_z::vector[3] ~ ...`), or `nothing` for a bare LHS.
+- `dimension` normalises the *two* ways a declaration can spell its size into
+  one tuple: the `m`/`n`/`o` (or `size`) keyword that StanBlocks' `autotype`
+  reads, and the LHS `::T[s...]` annotation, which wins when both are present.
+  `()` means the declaration spells no size of its own — it is a scalar, or its
+  extent comes from the data or from a submodel's internals (`popefs`,
+  `ranef_correlated`) rather than from this declaration.
+- `constraints` is the subset of `keywords` StanBlocks folds into the declared
+  type: `lower`, `upper`, `offset`, `multiplier`. **This is the field that makes
+  a half-normal visible**: `std_normal(; n=3, lower=0.)` and `std_normal(; n=3)`
+  differ only here.
+
+Entries of `arguments`, `dimension`, and `constraints` are the emitted
+expressions, not evaluated values: an entry may be a literal, or a `Symbol` that
+is a key of the plan's `data`, or a larger `Expr`. Resolve symbolic sizes
+against `plan.data`.
+
+`constraints` reports only the constraints spelled **on this declaration**.
+Families carry their own implied support (`exponential` is positive,
+`beta` lives on `[0, 1]`) — that is a property of `family`, held in StanBlocks'
+`autokwargs` table, and BRM deliberately does not duplicate it here.
+
+The declaration is intentionally backend-level: it describes what BRM really
+emitted after formula terms introduced their latent blocks, rather than a
+second model-specific interpretation of the `@brm` source.
+"""
+struct GenerativeDeclaration
+    role::Symbol
+    target::Symbol
+    family::Any
+    data_source::Union{Nothing,Symbol}
+    draw::Union{Nothing,Symbol}
+    context::Tuple{Vararg{Symbol}}
+    expression::Expr
+    arguments::Tuple
+    keywords::NamedTuple
+    annotation::Union{Nothing,Symbol,Expr}
+    dimension::Tuple
+    constraints::NamedTuple
+end
+
+"""
+    GenerativePlan
+
+An introspectable, replayable snapshot of an `SBBRMI`'s actual emitted
+declarations. `model`, `data`, and `preproc` are copied together at plan
+construction, while `declarations` inventories every emitted sampling site,
+including priors introduced inside `kernel(...)` plates and every observation
+in a multi-output model.
+
+Construct with [`generative_plan`](@ref). [`stan_code`](@ref) accepts a plan,
+and [`reprocess`](@ref) preserves the existing SBBRMI replay contract (including
+its correct-or-loud unsupported cases).
+Plans constructed from a reusable `@brm` builder also retain that builder so
+`generative_plan(plan, new_df)` can rebuild the same declarations for genuinely
+new groups.
+
+This is a declaration plan, not an RNG executor: it does not claim that a
+component-wise consumer draw is prior-predictive. Its purpose is to expose the
+one authoritative program and provenance an executor must consume.
+"""
+struct GenerativePlan{P,M,D,PP,DS,B,CV}
+    parent::P
+    model::M
+    data::D
+    preproc::PP
+    declarations::DS
+    builder::B
+    cv_groups::CV
+end
+
+_sb_plan_lhs_name(x::Symbol) = x
+_sb_plan_lhs_name(x::Expr) =
+    x.head === :(::) && !isempty(x.args) ? _sb_plan_lhs_name(x.args[1]) : nothing
+_sb_plan_lhs_name(_) = nothing
+
+_sb_plan_family(x::Expr) = begin
+    if x.head === :call && !isempty(x.args)
+        x.args[1]
+    elseif x.head === :do && !isempty(x.args)
+        _sb_plan_family(x.args[1])
+    else
+        x.head
+    end
+end
+_sb_plan_family(x) = x
+
+_sb_plan_generated(context, target) =
+    Symbol(join((context..., target), "_"), "_gen")
+
+# The LHS type annotation, if any: `z::vector[3] ~ rhs` -> `:(vector[3])`.
+_sb_plan_annotation(x::Expr) =
+    x.head === :(::) && length(x.args) == 2 ? deepcopy(x.args[2]) : nothing
+_sb_plan_annotation(_) = nothing
+
+# Split the emitted RHS call into positional args and keyword args. `do`-block
+# RHSs (`plate(...) do ...`) split on the underlying call, matching `family`.
+_sb_plan_as_kw(x::Expr) = x.head === :kw && length(x.args) == 2 ?
+    (x.args[1]::Symbol => deepcopy(x.args[2])) : nothing
+_sb_plan_as_kw(_) = nothing
+
+_sb_plan_call_parts(x) = ((), NamedTuple())
+function _sb_plan_call_parts(x::Expr)
+    x.head === :do && !isempty(x.args) && return _sb_plan_call_parts(x.args[1])
+    x.head === :call && !isempty(x.args) || return ((), NamedTuple())
+    args, kws = Any[], Pair{Symbol,Any}[]
+    for a in x.args[2:end]
+        if a isa Expr && a.head === :parameters
+            for p in a.args
+                kw = _sb_plan_as_kw(p)
+                isnothing(kw) || push!(kws, kw)
+            end
+            continue
+        end
+        kw = _sb_plan_as_kw(a)
+        isnothing(kw) ? push!(args, deepcopy(a)) : push!(kws, kw)
+    end
+    (Tuple(args), (; kws...))
+end
+
+# StanBlocks' `autotype` reads sizes from `m`/`n`/`o` in that order, else `size`
+# (functions.jl `autotype`), and folds these four keywords into the declared
+# type's constraints (forward.jl typed-LHS path).
+_sb_plan_size_kwargs() = (:m, :n, :o)
+_sb_plan_constraint_kwargs() = (:lower, :upper, :offset, :multiplier)
+
+# One tuple for both spellings of a declared size. The LHS `::T[s...]`
+# annotation is the declared type's own size, so it wins over the keyword form.
+function _sb_plan_dimension(annotation, kwargs)
+    if annotation isa Expr && annotation.head === :ref && length(annotation.args) >= 2
+        return Tuple(deepcopy.(annotation.args[2:end]))
+    end
+    sizes = Any[kwargs[k] for k in _sb_plan_size_kwargs() if haskey(kwargs, k)]
+    isempty(sizes) || return Tuple(sizes)
+    haskey(kwargs, :size) || return ()
+    s = kwargs[:size]
+    s isa Expr && s.head === :tuple ? Tuple(deepcopy.(s.args)) : (deepcopy(s),)
+end
+
+_sb_plan_constraints(kwargs) = (;
+    (k => kwargs[k] for k in _sb_plan_constraint_kwargs() if haskey(kwargs, k))...)
+
+_sb_plan_param_names(x::Symbol) = (x,)
+_sb_plan_param_names(x::Expr) = if x.head === :tuple
+    Tuple(filter(!isnothing, map(_sb_plan_lhs_name, x.args)))
+else
+    name = _sb_plan_lhs_name(x)
+    isnothing(name) ? () : (name,)
+end
+_sb_plan_param_names(_) = ()
+
+_sb_plan_plate_parts(x) = nothing
+function _sb_plan_plate_parts(x::Expr)
+    x.head === :do || return nothing
+    length(x.args) == 2 || return nothing
+    call, lambda = x.args
+    call isa Expr && call.head === :call && !isempty(call.args) &&
+        call.args[1] === :plate || return nothing
+    lambda isa Expr && lambda.head === :-> && length(lambda.args) == 2 ||
+        return nothing
+    iterables = filter(a -> !(a isa Expr && a.head === :parameters), call.args[2:end])
+    params = _sb_plan_param_names(lambda.args[1])
+    (; iterables=Tuple(iterables), params, body=lambda.args[2])
+end
+
+function _sb_plan_collect!(declarations, x, data_scope, context=())
+    x isa Expr || return nothing
+    if x.head === :block
+        foreach(stmt -> _sb_plan_collect!(declarations, stmt, data_scope, context), x.args)
+        return nothing
+    end
+    if x.head === :call && length(x.args) >= 3 && x.args[1] === :~
+        target = _sb_plan_lhs_name(x.args[2])
+        isnothing(target) && error(
+            "generative_plan: cannot identify emitted sampling LHS `$(x.args[2])`")
+        rhs = x.args[3]
+        data_source = get(data_scope, target, nothing)
+        role = isnothing(data_source) ? :prior : :observation
+        draw = role === :observation ? _sb_plan_generated(context, target) : nothing
+        annotation = _sb_plan_annotation(x.args[2])
+        arguments, keywords = _sb_plan_call_parts(rhs)
+        push!(declarations, GenerativeDeclaration(
+            role, target, _sb_plan_family(rhs), data_source, draw,
+            Tuple(context), deepcopy(x), arguments, keywords, annotation,
+            _sb_plan_dimension(annotation, keywords),
+            _sb_plan_constraints(keywords)))
+
+        plate = _sb_plan_plate_parts(rhs)
+        if !isnothing(plate)
+            nested_scope = copy(data_scope)
+            for (param, iterable) in zip(plate.params, plate.iterables)
+                iterable isa Symbol || continue
+                source = get(data_scope, iterable, nothing)
+                isnothing(source) || (nested_scope[param] = source)
+            end
+            _sb_plan_collect!(declarations, plate.body, nested_scope, (context..., target))
+        end
+        return nothing
+    end
+    nothing
+end
+
+function _generative_plan(sb::SBBRMI, builder, cv_groups)
+    parent = deepcopy(sb.parent)
+    data = deepcopy(sb.data)
+    preproc = deepcopy(sb.preproc)
+    body = deepcopy(sb.model.model)
+    model = StanBlocks.SlicModel(body, data, sb.model.mod)
+    declarations = GenerativeDeclaration[]
+    data_scope = Dict{Symbol,Union{Nothing,Symbol}}(k => k for k in keys(data))
+    _sb_plan_collect!(declarations, body, data_scope)
+    GenerativePlan(parent, model, data, preproc, Tuple(declarations), builder,
+                   copy(cv_groups))
+end
+
+"""
+    generative_plan(sb::SBBRMI) -> GenerativePlan
+    generative_plan(builder::Function, df; mod=@__MODULE__, cv_groups=Set()) -> GenerativePlan
+    generative_plan(plan::GenerativePlan, new_df; cv_groups=Set()) -> GenerativePlan
+
+Snapshot the declarations BRM actually emitted. The inventory is derived from
+`sb.model.model`, so auto-introduced population coefficients, random-effect
+blocks, `kernel(...)` eta blocks, observation families, and multiple outputs
+cannot drift from the fitted model.
+
+Use the reusable-builder form when future schedules may contain new groups:
+
+```julia
+builder = @brm begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + (1 | subject)
+    y ~ Normal(mu, sigma)
+end
+plan = generative_plan(builder, schedule; mod=@__MODULE__)
+new_population_plan = generative_plan(plan, new_schedule)
+```
+
+The `SBBRMI` form has no reusable formula builder to apply to genuinely new
+groups; use [`reprocess`](@ref) on that plan for the existing frozen-constant
+replay semantics instead.
+"""
+generative_plan(sb::SBBRMI) = _generative_plan(sb, nothing, Set{Symbol}())
+
+function generative_plan(builder::Function, df;
+                         mod::Module=@__MODULE__, cv_groups=Set{Symbol}())
+    brmi = Base.invokelatest(builder, df)
+    brmi isa BRMI || error(
+        "generative_plan: builder returned $(typeof(brmi)); expected a BRMI from `@brm begin ... end`")
+    cv_groups = cv_groups isa Set ? cv_groups : Set{Symbol}(cv_groups)
+    _generative_plan(SBBRMI(brmi; mod, cv_groups), builder, cv_groups)
+end
+
+function generative_plan(plan::GenerativePlan, new_df;
+                         cv_groups=plan.cv_groups)
+    isnothing(plan.builder) && error(
+        "generative_plan: this plan was built from an SBBRMI and has no reusable `@brm` builder. " *
+        "Construct it with `generative_plan(builder, df)` to rebuild the same declarations for new groups.")
+    generative_plan(plan.builder, new_df; mod=plan.model.mod, cv_groups)
+end
+
+stan_code(plan::GenerativePlan) = StanBlocks.stan_code(plan.model)
+
+Base.show(io::IO, plan::GenerativePlan) = begin
+    nprior = count(d -> d.role === :prior, plan.declarations)
+    nobs = count(d -> d.role === :observation, plan.declarations)
+    print(io, "GenerativePlan with $nprior prior/latent and $nobs observation declarations")
+end
+
+
 # ---- reprocess / restan_data (decision nr3v8n A) ----------------------------
 
 _sb_df_has_column(df, k::Symbol) = hasproperty(df, k)
@@ -1046,6 +1343,12 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true)
     end
     new_model = StanBlocks.SlicModel(sb.model.model, new_data, sb.model.mod)
     SBBRMI(sb.parent, new_model, new_data, new_preproc)
+end
+
+function reprocess(plan::GenerativePlan, new_df; freeze_constants::Bool=true)
+    sb = SBBRMI(plan.parent, plan.model, plan.data, plan.preproc)
+    _generative_plan(reprocess(sb, new_df; freeze_constants), plan.builder,
+                     plan.cv_groups)
 end
 
 """
@@ -1265,12 +1568,17 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     slice_params = params[1:ndata]
     eta_params   = params[ndata+1:end]
 
-    # n_subjects + long-format guard (v1: pre-grouped, one row per subject)
-    by_vals = parent(parent(kw[:by]))
+    # n_subjects + long-format guard (v1: pre-grouped, one row per subject).
+    # The labels identify groups to Julia callers but never enter the emitted
+    # Stan program: only their count and row order do. Accept arbitrary unique
+    # labels so a reusable generative-plan builder can rebuild on genuinely new
+    # subject ids without app-local recoding to 1:n.
+    by_vals = collect(parent(parent(kw[:by])))
     nsub = length(by_vals)
-    by_vals == 1:nsub || error(
+    !isempty(by_vals) && !any(ismissing, by_vals) && allunique(by_vals) || error(
         "sbimpl: kernel(...) v1 needs pre-grouped per-subject data — `by` must list ",
-        "subjects 1:n_subjects in order (one row each); got $(by_vals).")
+        "one non-missing unique subject per row; repeated levels indicate " *
+        "long-format data. Got $(by_vals).")
     nsub_sym = Symbol("kernel_nsub_", target); data[nsub_sym] = nsub
 
     # auto-introduced correlated eta block(s); each per-subject draw is bound to the
@@ -1349,12 +1657,14 @@ function _sb_submodel_rhs!(stmts, data, target::Symbol, ::typeof(kernel), rhs)
     # v1 contract: data is pre-grouped to one row per subject, so the plate
     # slices the positional columns BY ROW and uses `by` only for the subject
     # count. Long-format (multi-row-per-subject) data would silently drop rows,
-    # so require `by` to list subjects 1:n_sub in order and reject anything else.
-    by_vals = parent(parent(kw[:by]))
+    # so require one unique label per row; the labels themselves may be arbitrary
+    # new-subject ids because they do not enter Stan.
+    by_vals = collect(parent(parent(kw[:by])))
     nsub = length(by_vals)
-    by_vals == 1:nsub || error(
+    !isempty(by_vals) && !any(ismissing, by_vals) && allunique(by_vals) || error(
         "sbimpl: kernel(...) v1 needs pre-grouped per-subject data — `by` must " *
-        "list subjects 1:n_subjects in order (one row each); got $(by_vals). " *
+        "list one non-missing unique subject per row; repeated levels indicate " *
+        "long-format data. Got $(by_vals). " *
         "Gather multi-row-per-subject data into ragged per-subject columns first.")
     nsub_sym = Symbol("kernel_nsub_", target); data[nsub_sym] = nsub
 
