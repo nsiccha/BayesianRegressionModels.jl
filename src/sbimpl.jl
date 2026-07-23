@@ -1553,12 +1553,33 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         error("sbimpl: kernel(...) `n_eta` block sizes must each be >= 1")
     nblk = length(block_sizes)
 
-    # positional data columns (everything after the do-block); sliced in the plate
+    # positional args (everything after the do-block); sliced in the plate.
+    # Two admissible kinds, both `NamedColumn` and both length-n_subjects under
+    # the pre-grouped contract below, so `plate` slices either one identically:
+    #
+    #   - a RAW DATA column   -> register its vector in `data`;
+    #   - a LATENT per-subject LINEAR PREDICTOR declared by an earlier formula
+    #     statement (`log_CL ~ 1 + weight + (1|p|subject)`) -> emit NOTHING here.
+    #     `_sb_linear_predictor!` has already assigned that name in the SLIC body,
+    #     so the plate can slice it by name. Registering it as data would shadow
+    #     the parameter with a constant (v2, decision `0dnesv9`).
+    #
+    # The per-subject LP needs no reshaping: the kernel contract is one row per
+    # subject, so an ordinary LP over that frame is ALREADY length n_subjects.
     dcol_names = Symbol[]
+    lp_names   = Symbol[]
     for c in dcols[2:end]
-        (c isa NamedColumn && parent(c) isa DataColumn) ||
-            error("sbimpl: kernel(...) positional args (after the do-block) must be data columns")
-        k = name(c); data[k] = parent(parent(c)); push!(dcol_names, k)
+        c isa NamedColumn || error(
+            "sbimpl: kernel(...) positional args (after the do-block) must be a data ",
+            "column or a per-subject linear predictor declared in this @brm block; ",
+            "got a bare $(typeof(c)).")
+        k = name(c)
+        if parent(c) isa DataColumn
+            data[k] = parent(parent(c))
+        else
+            push!(lp_names, k)
+        end
+        push!(dcol_names, k)
     end
     ndata = length(dcol_names)
 
