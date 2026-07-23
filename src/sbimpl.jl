@@ -1525,8 +1525,12 @@ _sb_kernel_obs_expr(fam, mu, params) =
 # index as a per-cell local ("scalar or vector[K] only (MVP)", StanBlocks
 # `_plate_cell_shape`). Until that substrate lands, use separate per-output columns
 # (above), or sub-select OUTSIDE the plate with a top-level integer index column over
-# the collected result (`conc_pred[obs_idx] ~ ...`). The cmt-keyed obs family is the
-# OPEN capability tracked by decision z9vkkf.
+# the collected result (`conc_pred[obs_idx] ~ ...`). This is NOT pending work: decision
+# z9vkkf ("what @brm surface for cmt-keyed PK-PD obs?") was RESOLVED 2026-07-22 as
+# "None of the above" — the ByCmt/obs-family extension, the defer, and the coupled
+# `driver=` terms were ALL declined. So no cmt-keyed obs surface is being built; the
+# per-output-column do-block form above is the answer, and it is the form that survives
+# the in-progress removal of `model=`/`obs=` (todo 0gc8ni6).
 function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     for req in (:by, :n_eta)
         haskey(kw, req) || error("sbimpl: kernel(...) do-block form needs kwarg `$req`")
