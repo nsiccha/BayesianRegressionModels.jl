@@ -1500,16 +1500,33 @@ _sb_kernel_obs_expr(fam, mu, params) =
 # ordinary `~` statements in the body (no `obs=` family DSL). The term still auto-
 # introduces the correlated eta block(s) and the per-subject plate.
 #
-#   pred ~ kernel(time, dose, cmt, dv; by=subject, n_eta=(3,2)) do t, d, c, y, eta_pk, eta_pd
-#       ... deterministic prediction (conc from eta_pk; resp from eta_pd + conc) ...
-#       y[c .== 1] ~ normal(conc[c .== 1], sd)   # obs are just statements
-#       y[c .== 2] ~ normal(resp[c .== 2], sd)
-#       mu                                        # last expr = collected result
+# Multi-output (e.g. joint PK-PD, two correlated eta blocks). Give EACH output its
+# OWN ragged observation column + time grid and observe it as a WHOLE column:
+#
+#   pred ~ kernel(t_pk, t_pd, dose, dv_pk, dv_pd; by=subject, n_eta=(2,2)) do tpk, tpd, d, ypk, ypd, eta_pk, eta_pd
+#       conc = <PK prediction from eta_pk over tpk>
+#       resp = <PD prediction from eta_pd (+ conc at tpd) over tpd>
+#       ypk ~ normal(conc, sd)   # obs are just statements, one per output
+#       ypd ~ normal(resp, sd)
+#       conc                      # last expr = collected result
 #   end
 #
 # Leading do-params bind to the sliced positional data columns (one each, in order);
 # trailing do-params bind to the auto-drawn eta blocks (one per n_eta entry). Outer
 # params (sd, covariates) are reached by lexical scope. No `model=`/`obs=`.
+#
+# NOT YET SUPPORTED — in-cell cmt/compartment masking. Keying ONE interleaved obs
+# column by a cmt column INSIDE the cell —
+#     y[c .== 1] ~ normal(conc[c .== 1], sd)   # <- does NOT transpile
+# — is blocked in the StanBlocks substrate two ways: (1) a real ragged column slices
+# to a native Stan `vector`, and `.==` on a native vector yields a real vector, not
+# the `array[] int` mask boolean-mask indexing needs; (2) with an integer cmt column
+# the mask + `findall` work, but the plate cannot hold the resulting `array[] int`
+# index as a per-cell local ("scalar or vector[K] only (MVP)", StanBlocks
+# `_plate_cell_shape`). Until that substrate lands, use separate per-output columns
+# (above), or sub-select OUTSIDE the plate with a top-level integer index column over
+# the collected result (`conc_pred[obs_idx] ~ ...`). The cmt-keyed obs family is the
+# OPEN capability tracked by decision z9vkkf.
 function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     for req in (:by, :n_eta)
         haskey(kw, req) || error("sbimpl: kernel(...) do-block form needs kwarg `$req`")

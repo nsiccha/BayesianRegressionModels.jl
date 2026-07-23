@@ -120,6 +120,37 @@ kernel_muout_model(df) = @brm df begin
     dv ~ Normal(pred, sigma)
 end
 
+# Multi-output do-block (two correlated eta blocks, n_eta=(2,2)) — the documented
+# joint PK-PD surface (sbimpl.jl `_sb_kernel_doblock!` docstring). Each output gets
+# its OWN ragged obs column + time grid and is observed as a WHOLE column (`ypk`,
+# `ypd`); NO in-cell cmt masking (which the StanBlocks substrate does not yet lower —
+# a real ragged slice is a native `vector` so `.== ` yields no mask, and an integer
+# cmt column's `findall` index cannot be a per-cell `array[] int` local). This is the
+# committed evidence that the corrected docstring example actually transpiles.
+kernel_doblock_multiout_model(df) = @brm df begin
+    sd ~ Exponential(1)
+    pred ~ kernel(t_pk, t_pd, dose, dv_pk, dv_pd; by = subject, n_eta = (2, 2)) do tpk, tpd, d, ypk, ypd, eta_pk, eta_pd
+        CL = 1.0 * exp(eta_pk[1]); Vc = 10.0 * exp(eta_pk[2]); ke = CL / Vc
+        conc_pk = d / Vc * exp(-ke * tpk)
+        conc_pd = d / Vc * exp(-ke * tpd)
+        Emax = 1.0 * exp(eta_pd[1]); EC50 = 1.0 * exp(eta_pd[2])
+        resp = Emax * conc_pd ./ (EC50 .+ conc_pd)
+        ypk ~ normal(conc_pk, sd)
+        ypd ~ normal(resp, sd)
+        conc_pk
+    end
+end
+
+# Per-subject data for the multi-output form: separate PK/PD ragged columns + grids.
+kernel_multiout_df() = (;
+    t_pk    = [abs.(sin.(1:3)) .+ 0.5 for _ in 1:KERNEL_N],
+    t_pd    = [abs.(cos.(1:3)) .+ 0.5 for _ in 1:KERNEL_N],
+    dose    = fill(100.0, KERNEL_N),
+    dv_pk   = [abs.(cos.(1:3)) .+ 0.1 for _ in 1:KERNEL_N],
+    dv_pd   = [abs.(sin.(1:3)) .+ 0.1 for _ in 1:KERNEL_N],
+    subject = collect(1:KERNEL_N),
+)
+
 # A marker that is deliberately NOT a registered obs family — pins the
 # `_sb_kernel_obs_expr` fallback path independently of which families ship
 # (CombinedError/TruncatedNormal/LogNormalError are all supported).
@@ -239,6 +270,29 @@ end
             @test dO == dC && isapprox(gO, gC; atol=1e-8, rtol=0)
         else
             @info "Skipping equivalence gate (BRM_KERNEL_RUNTIME=0)"
+        end
+    end
+end
+
+@testset "kernel(...) do-block — multi-output (two eta blocks, per-output columns)" begin
+    df = kernel_multiout_df()
+
+    @testset "build + transpile + stanc" begin
+        sb = SBBRMI(kernel_doblock_multiout_model(df); mod=@__MODULE__)
+        transpiles = StanBlocks.stan.transpiles(sb.model)
+        @test transpiles
+        code = StanBlocks.stan_code(sb.model)
+        @test !occursin(r"(^|[^A-Za-z0-9_])_[A-Za-z]", code)
+        @test !occursin("vector[\"", code)
+        transpiles && @test stanc_accepts(sb.model)
+    end
+
+    @testset "BridgeStan runtime" begin
+        if RUN_BRIDGESTAN
+            sb = SBBRMI(kernel_doblock_multiout_model(df); mod=@__MODULE__)
+            @test bridgestan_accepts(sb.model)
+        else
+            @info "Skipping BridgeStan runtime gate (BRM_KERNEL_RUNTIME=0)"
         end
     end
 end
