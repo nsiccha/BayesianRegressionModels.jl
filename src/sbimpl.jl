@@ -1527,10 +1527,39 @@ _sb_kernel_obs_expr(fam, mu, params) =
 # (above), or sub-select OUTSIDE the plate with a top-level integer index column over
 # the collected result (`conc_pred[obs_idx] ~ ...`). The cmt-keyed obs family is the
 # OPEN capability tracked by decision z9vkkf.
-function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
-    for req in (:by, :n_eta)
-        haskey(kw, req) || error("sbimpl: kernel(...) do-block form needs kwarg `$req`")
+# Walk a per-subject linear predictor to the `(id, group)` ranef bucket that
+# defines its grouping — what lets `kernel(...)` DERIVE its plate grouping from
+# the LPs handed in instead of being told via `by=` (v2, GO `0dnesv9`). `by=`
+# only ever contributed the subject COUNT, restating a fact the ranef already
+# knows, and was checked against nothing.
+#
+# Returns `(id_sym, group_key, group_col)`.
+function _sb_kernel_lp_bucket(lp_col)
+    decl = parent(lp_col)
+    (decl isa ExprColumn && getf(decl) === ~) || error(
+        "sbimpl: kernel(...) positional arg `$(name(lp_col))` is not a formula ",
+        "statement; expected `$(name(lp_col)) ~ <terms>` in this @brm block.")
+    rhs = getargs(decl)[2]
+    pop_terms, ran_terms, direct_terms = Any[], Any[], Any[]
+    for t in _sb_terms(rhs)
+        _sb_classify_term!(t, pop_terms, ran_terms, direct_terms)
     end
+    isempty(ran_terms) && error(
+        "sbimpl: kernel(...) per-subject linear predictor `$(name(lp_col))` has no ",
+        "random-effect term, so it defines no grouping. Give it one, e.g. ",
+        "`$(name(lp_col)) ~ 1 + (1 | p | subject)`.")
+    parts = map(_sb_ranef_parts, ran_terms)
+    buckets = unique([(p[1], _sb_group_key(p[3])) for p in parts])
+    length(buckets) == 1 || error(
+        "sbimpl: kernel(...) per-subject linear predictor `$(name(lp_col))` spans ",
+        "several ranef buckets ($(buckets)); a kernel cell needs exactly one grouping.")
+    id_sym, gkey = only(buckets)
+    desc = parts[1][3]
+    (id_sym, gkey, desc isa NamedColumn ? desc : first(desc))
+end
+
+function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
+    haskey(kw, :n_eta) || error("sbimpl: kernel(...) do-block form needs kwarg `n_eta`")
     haskey(kw, :model) &&
         error("sbimpl: kernel(...) do-block form takes an inline do-block, not `model=`")
 
@@ -1567,7 +1596,7 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     # The per-subject LP needs no reshaping: the kernel contract is one row per
     # subject, so an ordinary LP over that frame is ALREADY length n_subjects.
     dcol_names = Symbol[]
-    lp_names   = Symbol[]
+    lp_cols    = Any[]
     for c in dcols[2:end]
         c isa NamedColumn || error(
             "sbimpl: kernel(...) positional args (after the do-block) must be a data ",
@@ -1577,7 +1606,7 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         if parent(c) isa DataColumn
             data[k] = parent(parent(c))
         else
-            push!(lp_names, k)
+            push!(lp_cols, c)
         end
         push!(dcol_names, k)
     end
@@ -1589,17 +1618,54 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     slice_params = params[1:ndata]
     eta_params   = params[ndata+1:end]
 
-    # n_subjects + long-format guard (v1: pre-grouped, one row per subject).
+    # n_subjects + long-format guard (pre-grouped: one row per subject).
+    #
+    # v2 (`0xuaz0k`): when per-subject LPs are passed, the GROUPING IS DERIVED
+    # from their ranef bucket — `by=` only ever restated a fact the ranef
+    # already knew (the subject count) and was cross-checked against nothing, so
+    # it could silently disagree with the ranef the LP was actually built from.
+    # `by=` stays accepted for the LP-less v1 form, and is cross-checked when
+    # both are supplied.
+    #
+    # ORDER: cells stay in ROW order, deliberately. `_sb_linear_predictor!`
+    # returns `popefs(X) + rows_dot_product(Z, b[group_idx,:])`, i.e. a
+    # ROW-ordered vector of length n_rows — it has already mapped level -> row.
+    # Reordering cells to the ranef's LEVEL order (which `_sb_level_index` sorts)
+    # would therefore MIS-align the LP against its own subjects whenever the
+    # labels are not sorted. The only thing that must hold is the bijection
+    # below: one level per row.
+    local group_col
+    if !isempty(lp_cols)
+        buckets = unique([_sb_kernel_lp_bucket(c)[1:2] for c in lp_cols])
+        length(buckets) == 1 || error(
+            "sbimpl: kernel(...) per-subject linear predictors disagree on their ",
+            "grouping — got buckets $(buckets) across $(Tuple(name(c) for c in lp_cols)). ",
+            "All LPs handed to one kernel must share a single ranef bucket, since ",
+            "they describe the same subjects.")
+        group_col = _sb_kernel_lp_bucket(first(lp_cols))[3]
+        if haskey(kw, :by)
+            name(kw[:by]) === name(group_col) || error(
+                "sbimpl: kernel(...) `by = $(name(kw[:by]))` contradicts the grouping ",
+                "derived from the per-subject linear predictors (`$(name(group_col))`). ",
+                "Drop `by=` — it is derived from the LPs now.")
+        end
+    else
+        haskey(kw, :by) || error(
+            "sbimpl: kernel(...) needs either a per-subject linear predictor ",
+            "positional arg (which supplies the grouping) or the legacy `by=` kwarg.")
+        group_col = kw[:by]
+    end
+
     # The labels identify groups to Julia callers but never enter the emitted
     # Stan program: only their count and row order do. Accept arbitrary unique
     # labels so a reusable generative-plan builder can rebuild on genuinely new
     # subject ids without app-local recoding to 1:n.
-    by_vals = collect(parent(parent(kw[:by])))
-    nsub = length(by_vals)
-    !isempty(by_vals) && !any(ismissing, by_vals) && allunique(by_vals) || error(
-        "sbimpl: kernel(...) v1 needs pre-grouped per-subject data — `by` must list ",
-        "one non-missing unique subject per row; repeated levels indicate " *
-        "long-format data. Got $(by_vals).")
+    g_vals = collect(parent(parent(group_col)))
+    nsub, g_idx = _sb_level_index(g_vals)
+    (!isempty(g_vals) && !any(ismissing, g_vals) && nsub == length(g_idx)) || error(
+        "sbimpl: kernel(...) needs pre-grouped per-subject data — `$(name(group_col))` ",
+        "must list one non-missing unique subject per row; repeated levels indicate ",
+        "long-format data. Got $(g_vals).")
     nsub_sym = Symbol("kernel_nsub_", target); data[nsub_sym] = nsub
 
     # auto-introduced correlated eta block(s); each per-subject draw is bound to the
