@@ -1412,85 +1412,15 @@ _sb_submodel_rhs!(stmts, data, target, f, rhs) = nothing
 # ============================================================================
 # kernel(...) — general group-local submodel HoF term (decision `1vwycxb`).
 #
-#   pred ~ kernel(datacol...; by=g, model=cell, n_eta=K, obs=Family(obs_col, p...))
+#   pred ~ kernel(data..., per_subject_lps...) do slices..., lp_values...
+#       ...
+#   end
 #
-# Broadcasts a consumer-declared DETERMINISTIC @deffun `cell(sliced..., eta)`
-# over the groups in `by`, auto-introducing a correlated eta block (LKJ + half-
-# normal scales), and applies the obs family per group INSIDE the plate. This
-# generalises the hand-written per-kernel `_sb_submodel_rhs!` seam (e.g. Bruno's
-# `twocmt_superposition`) into one term.
-#
-# obs-as-kwarg is PROVISIONAL (decision `qswzw9`, user 2026-07-17 — "ship now,
-# revisit tomorrow"). v1 scope: pre-ragged per-subject data (one ragged/scalar
-# value per subject), a deterministic @deffun cell (eta -> per-subject
-# prediction vector), and the CombinedError (add+prop Normal) obs family. The
-# LHS `pred` is a latent collecting the per-subject predictions.
+# The per-subject LP formulas own population effects, covariates, links and
+# random-effect buckets. `kernel` derives one shared grouping from those LPs and
+# only broadcasts the inline cell. The legacy `model=`/`obs=` spelling and its
+# anonymous `n_eta` block were removed by user decision `130c904`.
 function kernel end
-function CombinedError end   # obs family: CombinedError(obs_col, add, prop)
-# `TruncatedNormal` is the shared censored-Normal marker (also declared + wired
-# as a top-level likelihood family in the bordet section below). Forward-declared
-# here so the kernel obs method can dispatch on it at this earlier file position.
-function TruncatedNormal end
-# `LogNormalError` is the multiplicative-lognormal residual marker (stanpmx `_exp`
-# error model). Named `...Error` (not bare `LogNormal`) on purpose: a bare
-# `LogNormal` collides with `Distributions.LogNormal`, which model authors import,
-# so `getf(obs)` would resolve to the Distributions type and miss this dispatch.
-function LogNormalError end
-
-# Translate an obs-family call into the per-cell `~` RHS applied to `mu`.
-_sb_kernel_obs_arg(x::NamedColumn) = name(x)   # a param/data reference -> its name
-_sb_kernel_obs_arg(x) = x                      # a literal -> itself
-_sb_kernel_obs_expr(::typeof(CombinedError), mu, params) = begin
-    length(params) == 2 ||
-        error("sbimpl: kernel obs `CombinedError(obs_col, add, prop)` expects 2 params after the obs column")
-    add, prop = _sb_kernel_obs_arg.(params)
-    :(normal($mu, sqrt($add^2 .+ ($mu .* $prop).^2)))
-end
-# TruncatedNormal(obs_col, sigma, lloq, uloq) — censored/truncated Normal: the
-# universal stanpmx residual (truncate at 0 + LOQ) and bordet's obs family.
-# Reuses the shipped `truncated_normal` builtin. `sigma`/`lloq`/`uloq` are shared
-# captures (scalar params/literals); per-observation ragged LOQ bounds are a
-# follow-up (todo `13mczrs`).
-_sb_kernel_obs_expr(::typeof(TruncatedNormal), mu, params) = begin
-    length(params) == 3 ||
-        error("sbimpl: kernel obs `TruncatedNormal(obs_col, sigma, lloq, uloq)` expects 3 params after the obs column")
-    sigma, lloq, uloq = _sb_kernel_obs_arg.(params)
-    # StanBlocks' `truncated_normal` sampling lpxf is registered ONLY in the
-    # all-vector shape (`truncated_normal_lpdf(obs::vector, loc::vector,
-    # scale::vector, lloq::vector, uloq::vector)`, builtin.jl). `mu` is the
-    # per-cell prediction vector, but `sigma`/`lloq`/`uloq` are scalar captures,
-    # so broadcast each to `mu`'s length with `rep_vector(_, dims(mu)[1])` — the
-    # documented idiom (StanBlocks `docs/examples/private/_private.qmd`; `dims(x)[1]`
-    # is SLIC's canonical length op, as in the cell body itself). Without this the
-    # emitted `~ truncated_normal(vec, scalar, scalar, scalar)` matches no
-    # registered lpdf, so `fetch_functions!` never collects `truncated_normal_lpdf`
-    # into the Stan functions block and stanc rejects the model with
-    # `No function "truncated_normal_lpdf" was found`. `dims(x)[1]` is SLIC's
-    # canonical length op (as in the cell body itself).
-    #
-    # This exact-shape rule also applies to a hand-written do-block likelihood:
-    # unlike native Stan distributions, an `@deffun`-backed distribution does not
-    # broadcast scalar arguments while selecting a registered signature. See the
-    # all-vector do-block acceptance in `test/kernel_term.jl`.
-    n = :(dims($mu)[1])
-    :(truncated_normal($mu,
-        rep_vector($sigma, $n),
-        rep_vector($lloq, $n),
-        rep_vector($uloq, $n)))
-end
-# LogNormalError(obs_col, sigma) — multiplicative lognormal residual (stanpmx `_exp`
-# error model): observations on the natural scale, log-normal about the prediction.
-# `mu` is the per-cell prediction vector; `log(mu)` is elementwise. Not reachable
-# via CombinedError's degenerate cases (which are additive/proportional on the
-# natural scale), so it's a genuinely distinct family.
-_sb_kernel_obs_expr(::typeof(LogNormalError), mu, params) = begin
-    length(params) == 1 ||
-        error("sbimpl: kernel obs `LogNormalError(obs_col, sigma)` expects 1 param after the obs column")
-    sigma, = _sb_kernel_obs_arg.(params)
-    :(lognormal(log($mu), $sigma))
-end
-_sb_kernel_obs_expr(fam, mu, params) =
-    error("sbimpl: kernel obs family `$fam` not supported (v1: CombinedError, TruncatedNormal, LogNormalError)")
 
 # do-block kernel surface (decision z9vkkf, User chose B): the consumer writes the
 # per-subject cell body INLINE as a plate-style do-block, with the obs likelihood as
@@ -1588,6 +1518,8 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         "those LPs positionally.")
     haskey(kw, :model) &&
         error("sbimpl: kernel(...) do-block form takes an inline do-block, not `model=`")
+    haskey(kw, :obs) &&
+        error("sbimpl: kernel(...) do-block form takes ordinary `~` statements, not `obs=`")
 
     lam = first(dcols)
     ptuple = lam.args[1]
@@ -1701,96 +1633,10 @@ function _sb_submodel_rhs!(stmts, data, target::Symbol, ::typeof(kernel), rhs)
     if !isempty(dcols) && first(dcols) isa Expr && first(dcols).head == :->
         return _sb_kernel_doblock!(stmts, data, target, dcols, kw)
     end
-    for req in (:by, :model, :n_eta, :obs)
-        haskey(kw, req) || error("sbimpl: kernel(...) missing required kwarg `$req`")
-    end
-    cell  = name(kw[:model])
-    n_eta = kw[:n_eta]
-    # n_eta: a single Int (one correlated eta block) OR a tuple/vector of Ints —
-    # one correlated block per entry (e.g. n_eta=(3,2) for a PK+PD block pair over
-    # one subject-plate; decision z9vkkf). The cell then receives one eta arg per
-    # block, in order, after the sliced data columns.
-    block_sizes = n_eta isa Integer ? [Int(n_eta)] :
-        (n_eta isa Union{Tuple,AbstractVector} && all(x -> x isa Integer, n_eta) ?
-            [Int(x) for x in n_eta] :
-            error("sbimpl: kernel(...) `n_eta` must be an integer or a tuple/vector of integers"))
-    all(k -> k >= 1, block_sizes) ||
-        error("sbimpl: kernel(...) `n_eta` block sizes must each be >= 1")
-
-    # positional per-subject data columns (sliced in the plate)
-    dcol_names = Symbol[]
-    for c in dcols
-        (c isa NamedColumn && parent(c) isa DataColumn) ||
-            error("sbimpl: kernel(...) positional args must be raw data columns")
-        k = name(c); data[k] = parent(parent(c)); push!(dcol_names, k)
-    end
-
-    # obs = Family(obs_col, params...): register the obs column, keep the params
-    obs = kw[:obs]
-    obs_args = getargs(obs)
-    isempty(obs_args) && error("sbimpl: kernel(...) `obs=` needs an observation column")
-    obs_col = obs_args[1]
-    (obs_col isa NamedColumn && parent(obs_col) isa DataColumn) ||
-        error("sbimpl: kernel(...) `obs=`'s first argument must be the observation data column")
-    obs_name = name(obs_col); data[obs_name] = parent(parent(obs_col))
-
-    # n_subjects from the grouping column. NOTE: all generated names use a
-    # LETTER-leading prefix (`kernel_`), never `_kernel_` — Stan identifiers may
-    # not start with an underscore, and stanc rejects them with a bare lexing
-    # error while StanBlocks' transpiles() (a weak check) passes silently
-    # (stanblocks-use §5). Matches the codebase convention (`X_`, `r_`, `b_`, …).
-    # v1 contract: data is pre-grouped to one row per subject, so the plate
-    # slices the positional columns BY ROW and uses `by` only for the subject
-    # count. Long-format (multi-row-per-subject) data would silently drop rows,
-    # so require one unique label per row; the labels themselves may be arbitrary
-    # new-subject ids because they do not enter Stan.
-    by_vals = collect(parent(parent(kw[:by])))
-    nsub = length(by_vals)
-    !isempty(by_vals) && !any(ismissing, by_vals) && allunique(by_vals) || error(
-        "sbimpl: kernel(...) v1 needs pre-grouped per-subject data — `by` must " *
-        "list one non-missing unique subject per row; repeated levels indicate " *
-        "long-format data. Got $(by_vals). " *
-        "Gather multi-row-per-subject data into ragged per-subject columns first.")
-    nsub_sym = Symbol("kernel_nsub_", target); data[nsub_sym] = nsub
-
-    # auto-introduced correlated eta block(s) — one per n_eta entry, each with its
-    # own LKJ Cholesky + scale (shared captures). Single-block keeps un-indexed
-    # names (`kernel_L_`, `kernel_z`, `kernel_eta`) so the emitted Stan is
-    # byte-identical to the pre-multiblock v1; multi-block appends the block index.
-    nblocks    = length(block_sizes)
-    slice_syms = [Symbol("kernel_s", i) for i in 1:length(dcol_names)]
-    obs_sym    = :kernel_y
-    obs_rhs    = _sb_kernel_obs_expr(getf(obs), :kernel_mu, obs_args[2:end])
-    eta_syms   = Symbol[]
-    block_body = Any[]
-    for (bi, k) in enumerate(block_sizes)
-        sfx   = nblocks == 1 ? "" : string(bi)
-        Lsym  = Symbol("kernel_L",  sfx, "_", target)
-        omsym = Symbol("kernel_om", sfx, "_", target)
-        push!(stmts, :($Lsym  ~ lkj_corr_cholesky(1.; n=$k)))
-        push!(stmts, :($omsym ~ std_normal(; n=$k, lower=0.)))
-        zsym   = Symbol("kernel_z",   sfx)
-        etasym = Symbol("kernel_eta", sfx)
-        push!(block_body, :($zsym::vector[$k] ~ std_normal()))
-        push!(block_body, :($etasym = diag_pre_multiply($omsym, $Lsym) * $zsym))
-        push!(eta_syms, etasym)
-    end
-
-    # per-subject plate: slice data + obs, draw eta(s), call the cell, apply obs.
-    # The cell receives one eta arg per block, in order, after the sliced columns.
-    mu_expr = Expr(:call, cell, slice_syms..., eta_syms...)
-    body = Expr(:block,
-        block_body...,
-        :(kernel_mu = $mu_expr),
-        :($obs_sym ~ $obs_rhs),
-        :kernel_mu)
-    plate_call = Expr(:call, :plate,
-        Expr(:parameters, Expr(:kw, :outer, Expr(:tuple, nsub_sym))),
-        dcol_names..., obs_name)
-    plate_do = Expr(:do, plate_call,
-        Expr(:->, Expr(:tuple, slice_syms..., obs_sym), body))
-    push!(stmts, :($target ~ $plate_do))
-    :done
+    error(
+        "sbimpl: kernel(...) only accepts the inline do-block form; the legacy ",
+        "`model=`/`obs=` surface was removed. Declare per-subject linear predictors, ",
+        "pass them positionally, and write observation `~` statements in the cell.")
 end
 
 # ---- structured-latent (group-block) declaration + emit API -----------------
