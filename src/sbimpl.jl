@@ -1503,7 +1503,8 @@ _sb_kernel_obs_expr(fam, mu, params) =
 # Multi-output (e.g. joint PK-PD, two correlated eta blocks). Give EACH output its
 # OWN ragged observation column + time grid and observe it as a WHOLE column:
 #
-#   pred ~ kernel(t_pk, t_pd, dose, dv_pk, dv_pd; by=subject, n_eta=(2,2)) do tpk, tpd, d, ypk, ypd, eta_pk, eta_pd
+#   log_CL ~ 1 + (1 | p | subject)
+#   pred ~ kernel(t_pk, t_pd, dose, dv_pk, dv_pd, log_CL; n_eta=(2,2)) do tpk, tpd, d, ypk, ypd, lCL, eta_pk, eta_pd
 #       conc = <PK prediction from eta_pk over tpk>
 #       resp = <PD prediction from eta_pd (+ conc at tpd) over tpd>
 #       ypk ~ normal(conc, sd)   # obs are just statements, one per output
@@ -1559,6 +1560,9 @@ function _sb_kernel_lp_bucket(lp_col)
 end
 
 function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
+    haskey(kw, :by) && error(
+        "sbimpl: kernel(...) do-block form no longer accepts `by=`; grouping is ",
+        "derived from its per-subject linear-predictor positional args.")
     haskey(kw, :n_eta) || error("sbimpl: kernel(...) do-block form needs kwarg `n_eta`")
     haskey(kw, :model) &&
         error("sbimpl: kernel(...) do-block form takes an inline do-block, not `model=`")
@@ -1620,12 +1624,10 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
 
     # n_subjects + long-format guard (pre-grouped: one row per subject).
     #
-    # v2 (`0xuaz0k`): when per-subject LPs are passed, the GROUPING IS DERIVED
-    # from their ranef bucket — `by=` only ever restated a fact the ranef
-    # already knew (the subject count) and was cross-checked against nothing, so
-    # it could silently disagree with the ranef the LP was actually built from.
-    # `by=` stays accepted for the LP-less v1 form, and is cross-checked when
-    # both are supplied.
+    # v2 (`0xuaz0k`): the GROUPING IS DERIVED from the per-subject LPs' ranef
+    # bucket. `by=` only ever restated a fact the ranef already knew (the subject
+    # count), and a kernel with no per-subject LP now fails loudly because there
+    # is no authoritative grouping to derive.
     #
     # ORDER: cells stay in ROW order, deliberately. `_sb_linear_predictor!`
     # returns `popefs(X) + rows_dot_product(Z, b[group_idx,:])`, i.e. a
@@ -1634,27 +1636,18 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     # would therefore MIS-align the LP against its own subjects whenever the
     # labels are not sorted. The only thing that must hold is the bijection
     # below: one level per row.
-    local group_col
-    if !isempty(lp_cols)
-        buckets = unique([_sb_kernel_lp_bucket(c)[1:2] for c in lp_cols])
-        length(buckets) == 1 || error(
-            "sbimpl: kernel(...) per-subject linear predictors disagree on their ",
-            "grouping — got buckets $(buckets) across $(Tuple(name(c) for c in lp_cols)). ",
-            "All LPs handed to one kernel must share a single ranef bucket, since ",
-            "they describe the same subjects.")
-        group_col = _sb_kernel_lp_bucket(first(lp_cols))[3]
-        if haskey(kw, :by)
-            name(kw[:by]) === name(group_col) || error(
-                "sbimpl: kernel(...) `by = $(name(kw[:by]))` contradicts the grouping ",
-                "derived from the per-subject linear predictors (`$(name(group_col))`). ",
-                "Drop `by=` — it is derived from the LPs now.")
-        end
-    else
-        haskey(kw, :by) || error(
-            "sbimpl: kernel(...) needs either a per-subject linear predictor ",
-            "positional arg (which supplies the grouping) or the legacy `by=` kwarg.")
-        group_col = kw[:by]
-    end
+    isempty(lp_cols) && error(
+        "sbimpl: kernel(...) needs at least one per-subject linear-predictor ",
+        "positional arg with a random-effect term; without one there is no grouping ",
+        "to derive.")
+    lp_buckets = [_sb_kernel_lp_bucket(c) for c in lp_cols]
+    buckets = unique([b[1:2] for b in lp_buckets])
+    length(buckets) == 1 || error(
+        "sbimpl: kernel(...) per-subject linear predictors disagree on their ",
+        "grouping — got buckets $(buckets) across $(Tuple(name(c) for c in lp_cols)). ",
+        "All LPs handed to one kernel must share a single ranef bucket, since ",
+        "they describe the same subjects.")
+    group_col = first(lp_buckets)[3]
 
     # The labels identify groups to Julia callers but never enter the emitted
     # Stan program: only their count and row order do. Accept arbitrary unique
@@ -1697,9 +1690,10 @@ end
 function _sb_submodel_rhs!(stmts, data, target::Symbol, ::typeof(kernel), rhs)
     dcols = getargs(rhs)
     kw = getkwargs(rhs)
-    # do-block form (decision z9vkkf, User chose B): `kernel(datacols...; by, n_eta)
-    # do slices..., etas... <body> end`. @brm captures the do-block as a verbatim
-    # lambda first-arg (macro.jl `_x`); dispatch to the inline-body emitter.
+    # do-block form (decision z9vkkf, User chose B):
+    # `kernel(datacols..., per_subject_lps...; n_eta) do slices..., lps..., etas...
+    # <body> end`. @brm captures the do-block as a verbatim lambda first-arg
+    # (macro.jl `_x`); dispatch to the inline-body emitter.
     if !isempty(dcols) && first(dcols) isa Expr && first(dcols).head == :->
         return _sb_kernel_doblock!(stmts, data, target, dcols, kw)
     end

@@ -95,8 +95,9 @@ end
 # surface the do-block design targeted.
 kernel_doblock_model(df) = @brm df begin
     sigma ~ Exponential(1)
-    pred  ~ kernel(t, dose, dv; by = subject, n_eta = 3) do ts, d, yy, eta
-        CL = 1.0 * exp(eta[1]); Vc = 10.0 * exp(eta[2]); Ka = 1.5 * exp(eta[3])
+    log_CL ~ 1 + (1 | p | subject)
+    pred  ~ kernel(t, dose, dv, log_CL; n_eta = 3) do ts, d, yy, lCL, eta
+        CL = exp(lCL + eta[1]); Vc = 10.0 * exp(eta[2]); Ka = 1.5 * exp(eta[3])
         ke = CL / Vc
         mu = d * Ka / (Vc * (Ka - ke)) * (exp(-ke * ts) - exp(-Ka * ts))
         yy ~ normal(mu, sigma)
@@ -112,8 +113,9 @@ end
 # log-density-equivalent to the obs-in-cell `kernel_doblock_model` (asserted below).
 kernel_muout_model(df) = @brm df begin
     sigma ~ Exponential(1)
-    pred  ~ kernel(t, dose; by = subject, n_eta = 3) do ts, d, eta
-        CL = 1.0 * exp(eta[1]); Vc = 10.0 * exp(eta[2]); Ka = 1.5 * exp(eta[3])
+    log_CL ~ 1 + (1 | p | subject)
+    pred  ~ kernel(t, dose, log_CL; n_eta = 3) do ts, d, lCL, eta
+        CL = exp(lCL + eta[1]); Vc = 10.0 * exp(eta[2]); Ka = 1.5 * exp(eta[3])
         ke = CL / Vc
         d * Ka / (Vc * (Ka - ke)) * (exp(-ke * ts) - exp(-Ka * ts))
     end
@@ -129,8 +131,9 @@ end
 # committed evidence that the corrected docstring example actually transpiles.
 kernel_doblock_multiout_model(df) = @brm df begin
     sd ~ Exponential(1)
-    pred ~ kernel(t_pk, t_pd, dose, dv_pk, dv_pd; by = subject, n_eta = (2, 2)) do tpk, tpd, d, ypk, ypd, eta_pk, eta_pd
-        CL = 1.0 * exp(eta_pk[1]); Vc = 10.0 * exp(eta_pk[2]); ke = CL / Vc
+    log_CL ~ 1 + (1 | p | subject)
+    pred ~ kernel(t_pk, t_pd, dose, dv_pk, dv_pd, log_CL; n_eta = (2, 2)) do tpk, tpd, d, ypk, ypd, lCL, eta_pk, eta_pd
+        CL = exp(lCL + eta_pk[1]); Vc = 10.0 * exp(eta_pk[2]); ke = CL / Vc
         conc_pk = d / Vc * exp(-ke * tpk)
         conc_pd = d / Vc * exp(-ke * tpd)
         Emax = 1.0 * exp(eta_pd[1]); EC50 = 1.0 * exp(eta_pd[2])

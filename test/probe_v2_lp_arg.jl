@@ -13,9 +13,9 @@
 # checks cannot see it. Absence from `sb.data` plus a finite BridgeStan GRADIENT
 # is what actually pins the parameter as live.
 #
-# This still passes `by=`; deriving the grouping from the LPs' bucket and
-# dropping `by=` is the next step (`0xuaz0k`), and a kernel with NO per-subject
-# LP becomes a loud error then (decision `1kg5340`).
+# Grouping is derived from the LPs' shared ranef bucket (`0xuaz0k`): `by=` is
+# gone, disagreeing LP buckets fail loudly, and a kernel with NO per-subject LP
+# fails loudly (decision `1kg5340`).
 
 using Test
 using BayesianRegressionModels
@@ -33,13 +33,14 @@ v2_df() = (;
     dv      = [abs.(cos.(1:4)) .+ 0.1 for _ in 1:V2_N],
     weight  = collect(range(60.0, 90.0; length = V2_N)),
     subject = collect(1:V2_N),
+    site    = collect(V2_N:-1:1),
 )
 
 v2_lp_model(df) = @brm df begin
     sigma  ~ Exponential(1)
     log_CL ~ 1 + weight + (1 | p | subject)
     log_V  ~ 1 + (1 | p | subject)
-    pred   ~ kernel(t, dose, dv, log_CL, log_V; by = subject, n_eta = 1) do ts, d, yy, lCL, lV, eta
+    pred   ~ kernel(t, dose, dv, log_CL, log_V; n_eta = 1) do ts, d, yy, lCL, lV, eta
         CL = exp(lCL); Vc = exp(lV); Ka = 1.5 * exp(eta[1])
         ke = CL / Vc
         mu = d * Ka / (Vc * (Ka - ke)) * (exp(-ke * ts) - exp(-Ka * ts))
@@ -48,9 +49,48 @@ v2_lp_model(df) = @brm df begin
     end
 end
 
+v2_no_lp_model(df) = @brm df begin
+    sigma ~ Exponential(1)
+    pred  ~ kernel(t, dose, dv; n_eta = 1) do ts, d, yy, eta
+        mu = d * exp(-exp(eta[1]) * ts)
+        yy ~ normal(mu, sigma)
+        mu
+    end
+end
+
+v2_by_model(df) = @brm df begin
+    sigma  ~ Exponential(1)
+    log_CL ~ 1 + weight + (1 | p | subject)
+    pred   ~ kernel(t, dose, dv, log_CL; by = subject, n_eta = 1) do ts, d, yy, lCL, eta
+        mu = d * exp(-exp(lCL + eta[1]) * ts)
+        yy ~ normal(mu, sigma)
+        mu
+    end
+end
+
+v2_disagreeing_model(df) = @brm df begin
+    sigma  ~ Exponential(1)
+    log_CL ~ 1 + weight + (1 | p | subject)
+    log_V  ~ 1 + (1 | q | site)
+    pred   ~ kernel(t, dose, dv, log_CL, log_V; n_eta = 1) do ts, d, yy, lCL, lV, eta
+        mu = d * exp(-exp(lCL - lV + eta[1]) * ts)
+        yy ~ normal(mu, sigma)
+        mu
+    end
+end
+
 @testset "kernel(...) v2 — latent per-subject LP as a positional arg" begin
     df = v2_df()
     sb = SBBRMI(v2_lp_model(df); mod = @__MODULE__)
+
+    @testset "grouping is derived from one shared LP bucket" begin
+        @test_throws "needs at least one per-subject linear-predictor" SBBRMI(
+            v2_no_lp_model(df); mod = @__MODULE__)
+        @test_throws "no longer accepts `by=`" SBBRMI(
+            v2_by_model(df); mod = @__MODULE__)
+        @test_throws "disagree on their grouping" SBBRMI(
+            v2_disagreeing_model(df); mod = @__MODULE__)
+    end
 
     @testset "LPs are parameters, not data" begin
         for nm in (:log_CL, :log_V)
