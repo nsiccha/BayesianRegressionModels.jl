@@ -1494,23 +1494,30 @@ _sb_kernel_obs_expr(fam, mu, params) =
 
 # do-block kernel surface (decision z9vkkf, User chose B): the consumer writes the
 # per-subject cell body INLINE as a plate-style do-block, with the obs likelihood as
-# ordinary `~` statements in the body (no `obs=` family DSL). The term still auto-
-# introduces the correlated eta block(s) and the per-subject plate.
+# ordinary `~` statements in the body (no `obs=` family DSL). Per-subject LPs own
+# their random-effect blocks; the kernel only broadcasts the cell over their shared
+# grouping.
 #
-# Multi-output (e.g. joint PK-PD, two correlated eta blocks). Give EACH output its
+# Multi-output (e.g. joint PK-PD, two correlated LP buckets). Give EACH output its
 # OWN ragged observation column + time grid and observe it as a WHOLE column:
 #
-#   pred ~ kernel(t_pk, t_pd, dose, dv_pk, dv_pd; by=subject, n_eta=(2,2)) do tpk, tpd, d, ypk, ypd, eta_pk, eta_pd
-#       conc = <PK prediction from eta_pk over tpk>
-#       resp = <PD prediction from eta_pd (+ conc at tpd) over tpd>
+#   log_CL   ~ 1 + (1 | p | subject)
+#   log_V    ~ 1 + (1 | p | subject)
+#   log_Emax ~ 1 + (1 | q | subject)
+#   log_EC50 ~ 1 + (1 | q | subject)
+#   pred ~ kernel(
+#       t_pk, t_pd, dose, dv_pk, dv_pd, log_CL, log_V, log_Emax, log_EC50,
+#   ) do tpk, tpd, d, ypk, ypd, lCL, lV, lEmax, lEC50
+#       conc = <PK prediction from lCL/lV over tpk>
+#       resp = <PD prediction from lEmax/lEC50 (+ conc at tpd) over tpd>
 #       ypk ~ normal(conc, sd)   # obs are just statements, one per output
 #       ypd ~ normal(resp, sd)
 #       conc                      # last expr = collected result
 #   end
 #
-# Leading do-params bind to the sliced positional data columns (one each, in order);
-# trailing do-params bind to the auto-drawn eta blocks (one per n_eta entry). Outer
-# params (sd, covariates) are reached by lexical scope. No `model=`/`obs=`.
+# Do-params bind to sliced positional data/LP args one-for-one, in order. Outer
+# params (sd, covariates) are reached by lexical scope. No `by=`/`n_eta=`/
+# `model=`/`obs=`.
 #
 # A custom `@deffun`-backed distribution must match one of its declared
 # signatures exactly. For `truncated_normal`, a vector observation and location
@@ -1538,12 +1545,47 @@ _sb_kernel_obs_expr(fam, mu, params) =
 # z9vkkf ("what @brm surface for cmt-keyed PK-PD obs?") was RESOLVED 2026-07-22 as
 # "None of the above" — the ByCmt/obs-family extension, the defer, and the coupled
 # `driver=` terms were ALL declined. So no cmt-keyed obs surface is being built; the
-# per-output-column do-block form above is the answer, and it is the form that survives
-# the in-progress removal of `model=`/`obs=` (todo 0gc8ni6).
-function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
-    for req in (:by, :n_eta)
-        haskey(kw, req) || error("sbimpl: kernel(...) do-block form needs kwarg `$req`")
+# per-output-column do-block form above is the answer.
+#
+# Walk a per-subject linear predictor to the `(id, group)` ranef bucket that
+# defines its grouping — what lets `kernel(...)` DERIVE its plate grouping from
+# the LPs handed in instead of being told via `by=` (v2, GO `0dnesv9`). `by=`
+# only ever contributed the subject COUNT, restating a fact the ranef already
+# knows, and was checked against nothing.
+#
+# Returns `(id_sym, group_key, group_col)`.
+function _sb_kernel_lp_bucket(lp_col)
+    decl = parent(lp_col)
+    (decl isa ExprColumn && getf(decl) === ~) || error(
+        "sbimpl: kernel(...) positional arg `$(name(lp_col))` is not a formula ",
+        "statement; expected `$(name(lp_col)) ~ <terms>` in this @brm block.")
+    rhs = getargs(decl)[2]
+    pop_terms, ran_terms, direct_terms = Any[], Any[], Any[]
+    for t in _sb_terms(rhs)
+        _sb_classify_term!(t, pop_terms, ran_terms, direct_terms)
     end
+    isempty(ran_terms) && error(
+        "sbimpl: kernel(...) per-subject linear predictor `$(name(lp_col))` has no ",
+        "random-effect term, so it defines no grouping. Give it one, e.g. ",
+        "`$(name(lp_col)) ~ 1 + (1 | p | subject)`.")
+    parts = map(_sb_ranef_parts, ran_terms)
+    buckets = unique([(p[1], _sb_group_key(p[3])) for p in parts])
+    length(buckets) == 1 || error(
+        "sbimpl: kernel(...) per-subject linear predictor `$(name(lp_col))` spans ",
+        "several ranef buckets ($(buckets)); a kernel cell needs exactly one grouping.")
+    id_sym, gkey = only(buckets)
+    desc = parts[1][3]
+    (id_sym, gkey, desc isa NamedColumn ? desc : first(desc))
+end
+
+function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
+    haskey(kw, :by) && error(
+        "sbimpl: kernel(...) do-block form no longer accepts `by=`; grouping is ",
+        "derived from its per-subject linear-predictor positional args.")
+    haskey(kw, :n_eta) && error(
+        "sbimpl: kernel(...) do-block form no longer accepts `n_eta=`; declare ",
+        "per-subject linear predictors with `(1 | ID | group)` terms and pass ",
+        "those LPs positionally.")
     haskey(kw, :model) &&
         error("sbimpl: kernel(...) do-block form takes an inline do-block, not `model=`")
 
@@ -1556,61 +1598,90 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     body = lam.args[2]
     body_stmts = Meta.isexpr(body, :block) ? body.args : Any[body]
 
-    # n_eta -> block sizes (single Int or tuple/vector of Ints)
-    n_eta = kw[:n_eta]
-    block_sizes = n_eta isa Integer ? [Int(n_eta)] :
-        (n_eta isa Union{Tuple,AbstractVector} && all(x -> x isa Integer, n_eta) ?
-            [Int(x) for x in n_eta] :
-            error("sbimpl: kernel(...) `n_eta` must be an integer or a tuple/vector of integers"))
-    all(k -> k >= 1, block_sizes) ||
-        error("sbimpl: kernel(...) `n_eta` block sizes must each be >= 1")
-    nblk = length(block_sizes)
-
-    # positional data columns (everything after the do-block); sliced in the plate
+    # positional args (everything after the do-block); sliced in the plate.
+    # Two admissible kinds, both `NamedColumn` and both length-n_subjects under
+    # the pre-grouped contract below, so `plate` slices either one identically:
+    #
+    #   - a RAW DATA column   -> register its vector in `data`;
+    #   - a LATENT per-subject LINEAR PREDICTOR declared by an earlier formula
+    #     statement (`log_CL ~ 1 + weight + (1|p|subject)`) -> emit NOTHING here.
+    #     `_sb_linear_predictor!` has already assigned that name in the SLIC body,
+    #     so the plate can slice it by name. Registering it as data would shadow
+    #     the parameter with a constant (v2, decision `0dnesv9`).
+    #
+    # The per-subject LP needs no reshaping: the kernel contract is one row per
+    # subject, so an ordinary LP over that frame is ALREADY length n_subjects.
     dcol_names = Symbol[]
+    lp_cols    = Any[]
     for c in dcols[2:end]
-        (c isa NamedColumn && parent(c) isa DataColumn) ||
-            error("sbimpl: kernel(...) positional args (after the do-block) must be data columns")
-        k = name(c); data[k] = parent(parent(c)); push!(dcol_names, k)
+        c isa NamedColumn || error(
+            "sbimpl: kernel(...) positional args (after the do-block) must be a data ",
+            "column or a per-subject linear predictor declared in this @brm block; ",
+            "got a bare $(typeof(c)).")
+        k = name(c)
+        if parent(c) isa DataColumn
+            data[k] = parent(parent(c))
+        else
+            push!(lp_cols, c)
+        end
+        push!(dcol_names, k)
     end
     ndata = length(dcol_names)
 
-    length(params) == ndata + nblk || error(
-        "sbimpl: kernel(...) do-block has $(length(params)) params but expects $ndata ",
-        "(one per positional data column) + $nblk (one per n_eta block) = $(ndata + nblk)")
-    slice_params = params[1:ndata]
-    eta_params   = params[ndata+1:end]
+    length(params) == ndata || error(
+        "sbimpl: kernel(...) do-block has $(length(params)) params but expects ",
+        "$ndata — exactly one per positional data/LP arg.")
+    slice_params = params
 
-    # n_subjects + long-format guard (v1: pre-grouped, one row per subject).
+    # n_subjects + long-format guard (pre-grouped: one row per subject).
+    #
+    # v2 (`0xuaz0k`): the GROUPING IS DERIVED from the per-subject LPs' ranef
+    # bucket. `by=` only ever restated a fact the ranef already knew (the subject
+    # count), and a kernel with no per-subject LP now fails loudly because there
+    # is no authoritative grouping to derive.
+    #
+    # ORDER: cells stay in ROW order, deliberately. `_sb_linear_predictor!`
+    # returns `popefs(X) + rows_dot_product(Z, b[group_idx,:])`, i.e. a
+    # ROW-ordered vector of length n_rows — it has already mapped level -> row.
+    # Reordering cells to the ranef's LEVEL order (which `_sb_level_index` sorts)
+    # would therefore MIS-align the LP against its own subjects whenever the
+    # labels are not sorted. The only thing that must hold is the bijection
+    # below: one level per row.
+    isempty(lp_cols) && error(
+        "sbimpl: kernel(...) needs at least one per-subject linear-predictor ",
+        "positional arg with a random-effect term; without one there is no grouping ",
+        "to derive.")
+    lp_buckets = [_sb_kernel_lp_bucket(c) for c in lp_cols]
+    groups = unique([b[2] for b in lp_buckets])
+    length(groups) == 1 || error(
+        "sbimpl: kernel(...) per-subject linear predictors disagree on their ",
+        "grouping — got groups $(groups) across $(Tuple(name(c) for c in lp_cols)). ",
+        "LPs may use distinct `|ID|` buckets, but every LP handed to one kernel ",
+        "must describe the same subjects.")
+    group_col = first(lp_buckets)[3]
+
     # The labels identify groups to Julia callers but never enter the emitted
     # Stan program: only their count and row order do. Accept arbitrary unique
     # labels so a reusable generative-plan builder can rebuild on genuinely new
     # subject ids without app-local recoding to 1:n.
-    by_vals = collect(parent(parent(kw[:by])))
-    nsub = length(by_vals)
-    !isempty(by_vals) && !any(ismissing, by_vals) && allunique(by_vals) || error(
-        "sbimpl: kernel(...) v1 needs pre-grouped per-subject data — `by` must list ",
-        "one non-missing unique subject per row; repeated levels indicate " *
-        "long-format data. Got $(by_vals).")
+    g_vals = collect(parent(parent(group_col)))
+    nsub, g_idx = _sb_level_index(g_vals)
+    (!isempty(g_vals) && !any(ismissing, g_vals) && nsub == length(g_idx)) || error(
+        "sbimpl: kernel(...) needs pre-grouped per-subject data — `$(name(group_col))` ",
+        "must list one non-missing unique subject per row; repeated levels indicate ",
+        "long-format data. Got $(g_vals).")
+    # Arbitrary labels identify rows on the Julia side; the emitted Stan program
+    # consumes only their integer index/count. The generic data prepass has
+    # already materialised the raw column, so discard it when Stan cannot type it
+    # (e.g. `Vector{String}`). Numeric group labels remain available in case the
+    # consumer also passed that column to the cell as ordinary numeric data.
+    all(v -> v isa Real, g_vals) || pop!(data, name(group_col), nothing)
     nsub_sym = Symbol("kernel_nsub_", target); data[nsub_sym] = nsub
 
-    # auto-introduced correlated eta block(s); each per-subject draw is bound to the
-    # matching trailing do-param inside the plate. Single-block keeps un-indexed names.
-    block_body = Any[]
-    for (bi, (k, ep)) in enumerate(zip(block_sizes, eta_params))
-        sfx   = nblk == 1 ? "" : string(bi)
-        Lsym  = Symbol("kernel_L",  sfx, "_", target)
-        omsym = Symbol("kernel_om", sfx, "_", target)
-        push!(stmts, :($Lsym  ~ lkj_corr_cholesky(1.; n=$k)))
-        push!(stmts, :($omsym ~ std_normal(; n=$k, lower=0.)))
-        zsym = Symbol("kernel_z", sfx)
-        push!(block_body, :($zsym::vector[$k] ~ std_normal()))
-        push!(block_body, :($ep = diag_pre_multiply($omsym, $Lsym) * $zsym))
-    end
-
-    # per-subject plate: slice params bind the data columns; eta draws + the user's
-    # inline body (obs `~` statements and all) run inside; last body expr is collected.
-    plate_body = Expr(:block, block_body..., body_stmts...)
+    # Per-subject plate: slice params bind the data columns and already-emitted LPs;
+    # the user's inline body (obs `~` statements and all) runs inside; its last
+    # expression is collected.
+    plate_body = Expr(:block, body_stmts...)
     plate_call = Expr(:call, :plate,
         Expr(:parameters, Expr(:kw, :outer, Expr(:tuple, nsub_sym))),
         dcol_names...)
@@ -1623,9 +1694,10 @@ end
 function _sb_submodel_rhs!(stmts, data, target::Symbol, ::typeof(kernel), rhs)
     dcols = getargs(rhs)
     kw = getkwargs(rhs)
-    # do-block form (decision z9vkkf, User chose B): `kernel(datacols...; by, n_eta)
-    # do slices..., etas... <body> end`. @brm captures the do-block as a verbatim
-    # lambda first-arg (macro.jl `_x`); dispatch to the inline-body emitter.
+    # do-block form (decision z9vkkf, User chose B):
+    # `kernel(datacols..., per_subject_lps...) do slices..., lps... <body> end`.
+    # @brm captures the do-block as a verbatim lambda first-arg (macro.jl `_x`);
+    # dispatch to the inline-body emitter.
     if !isempty(dcols) && first(dcols) isa Expr && first(dcols).head == :->
         return _sb_kernel_doblock!(stmts, data, target, dcols, kw)
     end
