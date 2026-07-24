@@ -103,6 +103,23 @@ v2_two_bucket_model(df) = @brm df begin
     end
 end
 
+v2_link_contract_model(df) = @brm df begin
+    sigma             ~ Exponential(1)
+    eta_additive      ~ 0 + (1 | p | subject)
+    eta_log_location  ~ 0 + (1 | q | subject)
+    eta_log_slope     ~ 0 + (1 | r | subject)
+    eta_raw_magnitude ~ 0 + (1 | s | subject)
+    eta_shifted       ~ 1 + (1 | u | subject)
+    pred ~ kernel(
+        dv,
+        eta_additive, eta_log_location, eta_log_slope, eta_raw_magnitude, eta_shifted,
+    ) do yy, additive, log_location, log_slope, raw_magnitude, shifted
+        mu = additive + exp(log_location) + exp(log_slope) + raw_magnitude + shifted
+        yy ~ normal(mu, sigma)
+        mu
+    end
+end
+
 @testset "kernel(...) v2 — latent per-subject LP as a positional arg" begin
     df = v2_df()
     sb = SBBRMI(v2_lp_model(df); mod = @__MODULE__)
@@ -117,6 +134,28 @@ end
         @test_throws "disagree on their grouping" SBBRMI(
             v2_disagreeing_model(df); mod = @__MODULE__)
         @test SBBRMI(v2_two_bucket_model(df); mod = @__MODULE__) isa SBBRMI
+    end
+
+    @testset "LPs have no implicit link; zero-mean ranef-only LPs stay zero-mean" begin
+        link_brmi = v2_link_contract_model(df)
+        for nm in (:eta_additive, :eta_log_location, :eta_log_slope, :eta_raw_magnitude)
+            @test BayesianRegressionModels.popcoefnames(link_brmi, nm) == Symbol[]
+        end
+        @test BayesianRegressionModels.popcoefnames(link_brmi, :eta_shifted) == [:Intercept]
+
+        link_code = StanBlocks.stan_code(SBBRMI(link_brmi; mod = @__MODULE__).model)
+        @test occursin(r"eta_additive\s*=\s*r_eta_additive_p_subject", link_code)
+        @test occursin(r"eta_log_location\s*=\s*r_eta_log_location_q_subject", link_code)
+        @test occursin(r"eta_log_slope\s*=\s*r_eta_log_slope_r_subject", link_code)
+        @test occursin(r"eta_raw_magnitude\s*=\s*r_eta_raw_magnitude_s_subject", link_code)
+        @test occursin(
+            r"eta_shifted\s*=\s*pop_eta_shifted\s*\+\s*r_eta_shifted_u_subject",
+            link_code,
+        )
+        @test occursin("exp(log_location)", link_code)
+        @test occursin("exp(log_slope)", link_code)
+        @test !occursin("exp(additive)", link_code)
+        @test !occursin("exp(raw_magnitude)", link_code)
     end
 
     @testset "LPs are parameters, not data" begin
