@@ -158,10 +158,13 @@ end
         @test !occursin("exp(raw_magnitude)", link_code)
     end
 
-    @testset "LPs are parameters, not data" begin
+    @testset "LPs and structural string labels are not Stan data" begin
         for nm in (:log_CL, :log_V)
             @test !haskey(sb.data, nm)
         end
+        @test !haskey(sb.data, :subject)
+        @test sb.data[:subject_idx] == collect(1:V2_N)
+        @test sb.data[:n_subject] == V2_N
     end
 
     @testset "transpile + stanc" begin

@@ -1670,6 +1670,12 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         "sbimpl: kernel(...) needs pre-grouped per-subject data — `$(name(group_col))` ",
         "must list one non-missing unique subject per row; repeated levels indicate ",
         "long-format data. Got $(g_vals).")
+    # Arbitrary labels identify rows on the Julia side; the emitted Stan program
+    # consumes only their integer index/count. The generic data prepass has
+    # already materialised the raw column, so discard it when Stan cannot type it
+    # (e.g. `Vector{String}`). Numeric group labels remain available in case the
+    # consumer also passed that column to the cell as ordinary numeric data.
+    all(v -> v isa Real, g_vals) || pop!(data, name(group_col), nothing)
     nsub_sym = Symbol("kernel_nsub_", target); data[nsub_sym] = nsub
 
     # Per-subject plate: slice params bind the data columns and already-emitted LPs;
