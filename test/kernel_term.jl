@@ -96,8 +96,10 @@ end
 kernel_doblock_model(df) = @brm df begin
     sigma ~ Exponential(1)
     log_CL ~ 1 + (1 | p | subject)
-    pred  ~ kernel(t, dose, dv, log_CL; n_eta = 3) do ts, d, yy, lCL, eta
-        CL = exp(lCL + eta[1]); Vc = 10.0 * exp(eta[2]); Ka = 1.5 * exp(eta[3])
+    log_V  ~ 1 + (1 | p | subject)
+    log_Ka ~ 1 + (1 | p | subject)
+    pred  ~ kernel(t, dose, dv, log_CL, log_V, log_Ka) do ts, d, yy, lCL, lV, lKa
+        CL = exp(lCL); Vc = exp(lV); Ka = exp(lKa)
         ke = CL / Vc
         mu = d * Ka / (Vc * (Ka - ke)) * (exp(-ke * ts) - exp(-Ka * ts))
         yy ~ normal(mu, sigma)
@@ -114,29 +116,37 @@ end
 kernel_muout_model(df) = @brm df begin
     sigma ~ Exponential(1)
     log_CL ~ 1 + (1 | p | subject)
-    pred  ~ kernel(t, dose, log_CL; n_eta = 3) do ts, d, lCL, eta
-        CL = exp(lCL + eta[1]); Vc = 10.0 * exp(eta[2]); Ka = 1.5 * exp(eta[3])
+    log_V  ~ 1 + (1 | p | subject)
+    log_Ka ~ 1 + (1 | p | subject)
+    pred  ~ kernel(t, dose, log_CL, log_V, log_Ka) do ts, d, lCL, lV, lKa
+        CL = exp(lCL); Vc = exp(lV); Ka = exp(lKa)
         ke = CL / Vc
         d * Ka / (Vc * (Ka - ke)) * (exp(-ke * ts) - exp(-Ka * ts))
     end
     dv ~ Normal(pred, sigma)
 end
 
-# Multi-output do-block (two correlated eta blocks, n_eta=(2,2)) — the documented
-# joint PK-PD surface (sbimpl.jl `_sb_kernel_doblock!` docstring). Each output gets
-# its OWN ragged obs column + time grid and is observed as a WHOLE column (`ypk`,
-# `ypd`); NO in-cell cmt masking (which the StanBlocks substrate does not yet lower —
+# Multi-output do-block (two correlated LP buckets, `|p|` and `|q|`) — the
+# documented joint PK-PD surface (sbimpl.jl `_sb_kernel_doblock!` docstring).
+# Each output gets its OWN ragged obs column + time grid and is observed as a
+# WHOLE column (`ypk`, `ypd`); NO in-cell cmt masking (which the StanBlocks
+# substrate does not yet lower —
 # a real ragged slice is a native `vector` so `.== ` yields no mask, and an integer
 # cmt column's `findall` index cannot be a per-cell `array[] int` local). This is the
 # committed evidence that the corrected docstring example actually transpiles.
 kernel_doblock_multiout_model(df) = @brm df begin
     sd ~ Exponential(1)
     log_CL ~ 1 + (1 | p | subject)
-    pred ~ kernel(t_pk, t_pd, dose, dv_pk, dv_pd, log_CL; n_eta = (2, 2)) do tpk, tpd, d, ypk, ypd, lCL, eta_pk, eta_pd
-        CL = exp(lCL + eta_pk[1]); Vc = 10.0 * exp(eta_pk[2]); ke = CL / Vc
+    log_V ~ 1 + (1 | p | subject)
+    log_Emax ~ 1 + (1 | q | subject)
+    log_EC50 ~ 1 + (1 | q | subject)
+    pred ~ kernel(
+        t_pk, t_pd, dose, dv_pk, dv_pd, log_CL, log_V, log_Emax, log_EC50,
+    ) do tpk, tpd, d, ypk, ypd, lCL, lV, lEmax, lEC50
+        CL = exp(lCL); Vc = exp(lV); ke = CL / Vc
         conc_pk = d / Vc * exp(-ke * tpk)
         conc_pd = d / Vc * exp(-ke * tpd)
-        Emax = 1.0 * exp(eta_pd[1]); EC50 = 1.0 * exp(eta_pd[2])
+        Emax = exp(lEmax); EC50 = exp(lEC50)
         resp = Emax * conc_pd ./ (EC50 .+ conc_pd)
         ypk ~ normal(conc_pk, sd)
         ypd ~ normal(resp, sd)
