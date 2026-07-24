@@ -107,6 +107,31 @@ kernel_doblock_model(df) = @brm df begin
     end
 end
 
+# `truncated_normal` is an `@deffun`-backed distribution, so signature selection
+# does not apply native Stan's scalar broadcasting. The plate slices `log_obs`
+# and `mu` to vectors; explicitly lift the shared scalar sigma/bounds to the
+# registered all-vector signature. This is the consumer-critical do-block form
+# that replaces `obs=TruncatedNormal(...)`.
+kernel_doblock_truncated_model(df) = @brm df begin
+    sigma ~ Exponential(1)
+    log_CL ~ 1 + (1 | p | subject)
+    log_V  ~ 1 + (1 | p | subject)
+    log_Ka ~ 1 + (1 | p | subject)
+    pred  ~ kernel(
+        t, dose, dv, log_CL, log_V, log_Ka,
+    ) do ts, d, log_obs, lCL, lV, lKa
+        CL = exp(lCL); Vc = exp(lV); Ka = exp(lKa)
+        ke = CL / Vc
+        mu = d * Ka / (Vc * (Ka - ke)) * (exp(-ke * ts) - exp(-Ka * ts))
+        log_obs ~ truncated_normal(
+            mu,
+            rep_vector(sigma, dims(mu)[1]),
+            rep_vector(-10.0, dims(mu)[1]),
+            rep_vector(10.0, dims(mu)[1]))
+        mu
+    end
+end
+
 # The "cleaner cut": the kernel returns mu ONLY; the observation model is applied
 # OUTSIDE, as an ordinary top-level `dv ~ Normal(pred, sigma)`. With ragged-dist-arg
 # (StanBlocks `9f4b0fa`) the ragged plate-result `pred` broadcasts the distribution
@@ -254,6 +279,15 @@ end
             @info "Skipping BridgeStan runtime gate (BRM_KERNEL_RUNTIME=0)"
         end
     end
+end
+
+@testset "kernel(...) do-block surface — truncated_normal exact signature" begin
+    df = kernel_df()
+    sb = SBBRMI(kernel_doblock_truncated_model(df); mod=@__MODULE__)
+    @test StanBlocks.stan.transpiles(sb.model)
+    code = StanBlocks.stan_code(sb.model)
+    @test occursin("truncated_normal_lpdf", code)
+    @test stanc_accepts(sb.model)
 end
 
 @testset "kernel(...) do-block — cleaner cut (obs outside) ≡ obs-in-cell" begin

@@ -1468,13 +1468,10 @@ _sb_kernel_obs_expr(::typeof(TruncatedNormal), mu, params) = begin
     # `No function "truncated_normal_lpdf" was found`. `dims(x)[1]` is SLIC's
     # canonical length op (as in the cell body itself).
     #
-    # NOTE: this arg-shape fix is NECESSARY but not yet SUFFICIENT — full
-    # compilation is BLOCKED on StanBlocks snag `truncated-normal-5afff891`: the
-    # auto-synthesized `truncated_normal_rng` GQ builtin (builtin.jl:1182,
-    # `draws::vector[n] = to_vector(normal_rng(loc, scale))`) fails type-checking
-    # for EVERY `obs ~ truncated_normal(...)` on data (reproduced pure-StanBlocks,
-    # every arg shape). Once that StanBlocks bug lands, this fix carries the
-    # kernel TruncatedNormal obs through stanc; verify then.
+    # This exact-shape rule also applies to a hand-written do-block likelihood:
+    # unlike native Stan distributions, an `@deffun`-backed distribution does not
+    # broadcast scalar arguments while selecting a registered signature. See the
+    # all-vector do-block acceptance in `test/kernel_term.jl`.
     n = :(dims($mu)[1])
     :(truncated_normal($mu,
         rep_vector($sigma, $n),
@@ -1522,6 +1519,18 @@ _sb_kernel_obs_expr(fam, mu, params) =
 # params (sd, covariates) are reached by lexical scope. No `by=`/`n_eta=`/
 # `model=`/`obs=`.
 #
+# A custom `@deffun`-backed distribution must match one of its declared
+# signatures exactly. For `truncated_normal`, a vector observation and location
+# therefore require vector scale/bounds too; scalar captures must be lifted:
+#
+#   y ~ truncated_normal(mu,
+#       rep_vector(sigma, dims(mu)[1]),
+#       rep_vector(lloq, dims(mu)[1]),
+#       rep_vector(uloq, dims(mu)[1]))
+#
+# Keep the `dims(mu)[1]` query inline: assigning it to an untyped plate-local
+# name currently loses the integer type needed by `rep_vector`.
+#
 # NOT YET SUPPORTED — in-cell cmt/compartment masking. Keying ONE interleaved obs
 # column by a cmt column INSIDE the cell —
 #     y[c .== 1] ~ normal(conc[c .== 1], sd)   # <- does NOT transpile
@@ -1532,8 +1541,12 @@ _sb_kernel_obs_expr(fam, mu, params) =
 # index as a per-cell local ("scalar or vector[K] only (MVP)", StanBlocks
 # `_plate_cell_shape`). Until that substrate lands, use separate per-output columns
 # (above), or sub-select OUTSIDE the plate with a top-level integer index column over
-# the collected result (`conc_pred[obs_idx] ~ ...`). The cmt-keyed obs family is the
-# OPEN capability tracked by decision z9vkkf.
+# the collected result (`conc_pred[obs_idx] ~ ...`). This is NOT pending work: decision
+# z9vkkf ("what @brm surface for cmt-keyed PK-PD obs?") was RESOLVED 2026-07-22 as
+# "None of the above" — the ByCmt/obs-family extension, the defer, and the coupled
+# `driver=` terms were ALL declined. So no cmt-keyed obs surface is being built; the
+# per-output-column do-block form above is the answer.
+#
 # Walk a per-subject linear predictor to the `(id, group)` ranef bucket that
 # defines its grouping — what lets `kernel(...)` DERIVE its plate grouping from
 # the LPs handed in instead of being told via `by=` (v2, GO `0dnesv9`). `by=`
