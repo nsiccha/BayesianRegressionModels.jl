@@ -41,26 +41,13 @@ stanc_ok(model) = StanBlocks.stanc_check(
     @test rebuilt.data[:x] == [5.0, 6.0, 7.0, 8.0]
 end
 
-StanBlocks.@deffun begin
-    generative_kernel_cell(ts::vector[nt], d::real, eta::vector[ne])::vector[nt] = begin
-        CL = 1.0 * exp(eta[1])
-        V = 10.0 * exp(eta[2])
-        d / V * exp(-(CL / V) * ts)
-    end
-end
-
 kernel_builder = @brm begin
-    sigma_a ~ Exponential(1)
-    sigma_p ~ Exponential(1)
-    pred ~ kernel(t, dose; by=subject, model=generative_kernel_cell, n_eta=2,
-                  obs=CombinedError(dv, sigma_a, sigma_p))
-end
-
-kernel_doblock_builder = @brm begin
     sigma ~ Exponential(1)
-    pred ~ kernel(t, dose, dv; by=subject, n_eta=2) do ts, d, yy, eta
-        CL = 1.0 * exp(eta[1])
-        V = 10.0 * exp(eta[2])
+    log_CL ~ 1 + (1 | p | subject)
+    log_V  ~ 1 + (1 | p | subject)
+    pred ~ kernel(t, dose, dv, log_CL, log_V) do ts, d, yy, lCL, lV
+        CL = exp(lCL)
+        V = exp(lV)
         mu = d / V * exp(-(CL / V) * ts)
         yy ~ normal(mu, sigma)
         mu
@@ -74,41 +61,35 @@ kernel_schedule(n; subject=collect(1:n)) = (;
     subject,
 )
 
-@testset "generative plan — kernel eta block and new groups" begin
+@testset "generative plan — kernel formula LPs and new groups" begin
     plan = generative_plan(kernel_builder, kernel_schedule(2); mod=@__MODULE__)
     obs = only(filter(d -> d.role === :observation, plan.declarations))
 
-    @test obs.target === :kernel_y
+    @test obs.target === :yy
     @test obs.family === :normal
     @test obs.data_source === :dv
     @test obs.context == (:pred,)
-    @test obs.draw === :pred_kernel_y_gen
+    @test obs.draw === :pred_yy_gen
     # StanBlocks currently emits no generated quantity for an observation
     # nested inside a plate. The plan still assigns it a stable executor-facing
     # draw name instead of pretending the posterior model already produces it.
     @test !occursin(string(obs.draw), BayesianRegressionModels.stan_code(plan))
-    @test any(d -> d.target === :kernel_L_pred && d.family === :lkj_corr_cholesky,
-              plan.declarations)
-    @test any(d -> d.target === :kernel_om_pred && d.family === :std_normal,
-              plan.declarations)
-    @test any(d -> d.target === :kernel_z && d.context == (:pred,),
+    @test count(d -> d.family === :popefs, plan.declarations) == 2
+    @test any(d -> d.family === :ranef_correlated_draws, plan.declarations)
+    @test !any(d -> startswith(string(d.target), "kernel_L_") ||
+                    startswith(string(d.target), "kernel_om_") ||
+                    startswith(string(d.target), "kernel_z"),
               plan.declarations)
     @test stanc_ok(plan.model)
 
     rebuilt = generative_plan(plan,
-        kernel_schedule(4; subject=collect(10_001:10_004)))
+        kernel_schedule(4; subject=["s4", "s2", "s3", "s1"]))
     @test rebuilt.data[:kernel_nsub_pred] == 4
     @test only(filter(d -> d.role === :observation, rebuilt.declarations)).data_source === :dv
+    @test !haskey(rebuilt.data, :subject)
 
     repeated = kernel_schedule(4; subject=[10_001, 10_001, 10_002, 10_002])
     @test_throws "pre-grouped per-subject data" generative_plan(plan, repeated)
-
-    doblock = generative_plan(kernel_doblock_builder, kernel_schedule(2);
-                              mod=@__MODULE__)
-    doblock_obs = only(filter(d -> d.role === :observation, doblock.declarations))
-    @test doblock_obs.target === :yy
-    @test doblock_obs.data_source === :dv
-    @test doblock_obs.context == (:pred,)
 end
 
 @testset "generative plan — structured RHS parameters, dimension, constraints" begin
@@ -116,38 +97,19 @@ end
     decl(t) = only(filter(d -> d.target === t, plan.declarations))
 
     # positional distribution arguments, no AST parsing required
-    @test decl(:sigma_a).arguments == (1,)
-    @test decl(:sigma_a).keywords == NamedTuple()
-    @test decl(:kernel_L_pred).arguments == (1.0,)
-    @test decl(:kernel_om_pred).arguments == ()
-
-    # the two spellings of a declared size collapse to ONE field: the same
-    # `std_normal` family carries its dimension as an `n=` kwarg in one
-    # declaration and as an LHS `::vector[k]` annotation in the other.
-    @test decl(:kernel_om_pred).keywords == (; n=2, lower=0.0)
-    @test decl(:kernel_om_pred).annotation === nothing
-    @test decl(:kernel_om_pred).dimension == (2,)
-    @test decl(:kernel_z).keywords == NamedTuple()
-    @test decl(:kernel_z).annotation == :(vector[2])
-    @test decl(:kernel_z).dimension == (2,)
-    @test decl(:kernel_L_pred).dimension == (2,)
-
-    # the constraint that silently makes one of them a HALF-normal is the only
-    # thing distinguishing the two `std_normal` declarations.
-    @test decl(:kernel_om_pred).constraints == (; lower=0.0)
-    @test decl(:kernel_z).constraints == NamedTuple()
-    @test decl(:kernel_L_pred).constraints == NamedTuple()
+    @test decl(:sigma).arguments == (1,)
+    @test decl(:sigma).keywords == NamedTuple()
 
     # declarations that spell no size of their own report `()` rather than
     # guessing: scalars, and extents owned by data or by a submodel.
-    @test decl(:sigma_a).dimension == ()
+    @test decl(:sigma).dimension == ()
     @test decl(:pred).dimension == ()
-    @test decl(:kernel_y).dimension == ()
-    @test decl(:kernel_y).arguments[1] === :kernel_mu
+    @test decl(:yy).dimension == ()
+    @test decl(:yy).arguments[1] === :mu
 
     # a `do`-block RHS decomposes on its underlying call, matching `family`
     @test decl(:pred).family === :plate
-    @test decl(:pred).arguments == (:t, :dose, :dv)
+    @test decl(:pred).arguments == (:t, :dose, :dv, :log_CL, :log_V)
     @test haskey(decl(:pred).keywords, :outer)
 
     # structured latent submodels keep their keywords verbatim; a submodel's
