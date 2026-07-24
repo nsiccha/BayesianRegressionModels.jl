@@ -149,11 +149,11 @@ end
         @test occursin(r"eta_log_slope\s*=\s*r_eta_log_slope_r_subject", link_code)
         @test occursin(r"eta_raw_magnitude\s*=\s*r_eta_raw_magnitude_s_subject", link_code)
         @test occursin(
-            r"eta_shifted\s*=\s*pop_eta_shifted\s*\+\s*r_eta_shifted_u_subject",
+            r"eta_shifted\s*=\s*\(?\s*pop_eta_shifted\s*\+\s*r_eta_shifted_u_subject\s*\)?",
             link_code,
         )
-        @test occursin("exp(log_location)", link_code)
-        @test occursin("exp(log_slope)", link_code)
+        @test occursin(r"exp\s*\(\s*eta_log_location(?:\[[^\]]+\])?\s*\)", link_code)
+        @test occursin(r"exp\s*\(\s*eta_log_slope(?:\[[^\]]+\])?\s*\)", link_code)
         @test !occursin("exp(additive)", link_code)
         @test !occursin("exp(raw_magnitude)", link_code)
     end
