@@ -1468,13 +1468,10 @@ _sb_kernel_obs_expr(::typeof(TruncatedNormal), mu, params) = begin
     # `No function "truncated_normal_lpdf" was found`. `dims(x)[1]` is SLIC's
     # canonical length op (as in the cell body itself).
     #
-    # NOTE: this arg-shape fix is NECESSARY but not yet SUFFICIENT — full
-    # compilation is BLOCKED on StanBlocks snag `truncated-normal-5afff891`: the
-    # auto-synthesized `truncated_normal_rng` GQ builtin (builtin.jl:1182,
-    # `draws::vector[n] = to_vector(normal_rng(loc, scale))`) fails type-checking
-    # for EVERY `obs ~ truncated_normal(...)` on data (reproduced pure-StanBlocks,
-    # every arg shape). Once that StanBlocks bug lands, this fix carries the
-    # kernel TruncatedNormal obs through stanc; verify then.
+    # This exact-shape rule also applies to a hand-written do-block likelihood:
+    # unlike native Stan distributions, an `@deffun`-backed distribution does not
+    # broadcast scalar arguments while selecting a registered signature. See the
+    # all-vector do-block acceptance in `test/kernel_term.jl`.
     n = :(dims($mu)[1])
     :(truncated_normal($mu,
         rep_vector($sigma, $n),
@@ -1514,6 +1511,18 @@ _sb_kernel_obs_expr(fam, mu, params) =
 # Leading do-params bind to the sliced positional data columns (one each, in order);
 # trailing do-params bind to the auto-drawn eta blocks (one per n_eta entry). Outer
 # params (sd, covariates) are reached by lexical scope. No `model=`/`obs=`.
+#
+# A custom `@deffun`-backed distribution must match one of its declared
+# signatures exactly. For `truncated_normal`, a vector observation and location
+# therefore require vector scale/bounds too; scalar captures must be lifted:
+#
+#   y ~ truncated_normal(mu,
+#       rep_vector(sigma, dims(mu)[1]),
+#       rep_vector(lloq, dims(mu)[1]),
+#       rep_vector(uloq, dims(mu)[1]))
+#
+# Keep the `dims(mu)[1]` query inline: assigning it to an untyped plate-local
+# name currently loses the integer type needed by `rep_vector`.
 #
 # NOT YET SUPPORTED — in-cell cmt/compartment masking. Keying ONE interleaved obs
 # column by a cmt column INSIDE the cell —
