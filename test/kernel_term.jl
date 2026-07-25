@@ -182,14 +182,34 @@ kernel_multiout_df() = (;
 
 @testset "kernel(...) legacy model=/obs= surface is retired" begin
     df = kernel_df()
-    legacy = @brm df begin
+    # The retired keywords are refused while the model is BUILT — the `@brm`
+    # block below never yields a BRMI at all. It used to build fine and only
+    # `SBBRMI(...)` complained, which let the v1 spelling look alive to any gate
+    # that stopped at construction (snag `by-and-n-eta-are-3625f645`).
+    @test_throws "no longer accepts `by=`" (@brm df begin
         pred ~ kernel(
             t, dose;
             by=subject, model=kernel_depot_cell, n_eta=3, obs=Normal(dv, 1.0),
         )
+    end)
+    # Each retired keyword is refused on its own, so the check does not depend on
+    # `by=` happening to be present to shadow the others.
+    @test_throws "no longer accepts `n_eta=`" (@brm df begin
+        pred ~ kernel(t, dose; n_eta=3)
+    end)
+    @test_throws "no longer accepts `model=`" (@brm df begin
+        pred ~ kernel(t, dose; model=kernel_depot_cell)
+    end)
+    @test_throws "no longer accepts `obs=`" (@brm df begin
+        pred ~ kernel(t, dose; obs=Normal(dv, 1.0))
+    end)
+    # A kernel with NO do-block and no retired keyword still has to reach the
+    # lowering-time guard, so that backstop stays genuinely exercised.
+    no_doblock = @brm df begin
+        pred ~ kernel(t, dose)
     end
     @test_throws "only accepts the inline do-block form" SBBRMI(
-        legacy; mod=@__MODULE__)
+        no_doblock; mod=@__MODULE__)
     @test !isdefined(BayesianRegressionModels, :CombinedError)
     @test !isdefined(BayesianRegressionModels, :LogNormalError)
     @test isdefined(BayesianRegressionModels, :TruncatedNormal)

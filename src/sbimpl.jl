@@ -1422,6 +1422,47 @@ _sb_submodel_rhs!(stmts, data, target, f, rhs) = nothing
 # anonymous `n_eta` block were removed by user decision `130c904`.
 function kernel end
 
+# Reject the retired keyword surface at CONSTRUCTION — i.e. at the `@brm` /
+# `kernel(...)` call the consumer actually wrote — not merely when the model is
+# lowered.
+#
+# The loud rejections further down (`_sb_kernel_doblock!`, `_sb_submodel_rhs!`)
+# run inside `SBBRMI(...)`, and `@brm` is a pure parser that captured `by=` /
+# `n_eta=` / `model=` / `obs=` into the term's `getkwargs()` without looking at
+# them. So a model written in the retired v1 spelling BUILT cleanly and objected
+# only once someone lowered it. A consumer whose compatibility gate stops at
+# BRMI construction — a reasonable gate, since it needs no Stan toolchain — saw
+# retired syntax keep passing, and carried `by=`/`n_eta=` across 13 executable
+# kernel sites for eight days after the removal landed while `brm-use` told them
+# the keywords were rejected loudly (snag `by-and-n-eta-are-3625f645`).
+#
+# Checked in the same order the lowering-time guards use, so the reported
+# keyword does not change when several are present. Keys off the `kernel`
+# function object, so `gp(x; by=g)` — where `by=` is live — is unaffected, and
+# an aliased `kernel` is still caught. The lowering-time guards stay as the
+# backstop for a BRMI assembled without the macro.
+_check_term_kwargs(::typeof(kernel), kwargs) = for (k, replacement) in (
+        (:by, "Grouping is DERIVED from the ranef bucket of the per-subject \
+               linear-predictor positional args."),
+        (:n_eta, "Declare per-subject linear predictors with `(1 | ID | group)` \
+                  terms and pass those LPs positionally."),
+        (:model, "Write the per-subject cell INLINE as a `do`-block."),
+        (:obs, "Write observation likelihoods as ordinary `~` statements inside \
+                the cell body."),
+    )
+    haskey(kwargs, k) && error(
+        "@brm: kernel(...) no longer accepts `$k=`. ", replacement,
+        "\nThe surface is formula linear predictors plus one inline do-block:\n",
+        "    log_CL ~ 1 + weight + (1 | p | subject)\n",
+        "    log_V  ~ 1 +          (1 | p | subject)\n",
+        "    pred ~ kernel(t, dose, dv, log_CL, log_V) do ts, d, yy, lCL, lV\n",
+        "        mu = <prediction from exp(lCL), exp(lV) over ts, d>\n",
+        "        yy ~ normal(mu, sigma)\n",
+        "        mu\n",
+        "    end\n",
+        "See the `brm-use` skill, `kernel(...)` section.")
+end
+
 # do-block kernel surface (decision z9vkkf, User chose B): the consumer writes the
 # per-subject cell body INLINE as a plate-style do-block, with the obs likelihood as
 # ordinary `~` statements in the body (no `obs=` family DSL). Per-subject LPs own
