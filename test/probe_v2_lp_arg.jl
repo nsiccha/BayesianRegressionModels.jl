@@ -127,10 +127,17 @@ end
     @testset "grouping is derived from one shared LP grouping" begin
         @test_throws "needs at least one per-subject linear-predictor" SBBRMI(
             v2_no_lp_model(df); mod = @__MODULE__)
-        @test_throws "no longer accepts `by=`" SBBRMI(
-            v2_by_model(df); mod = @__MODULE__)
-        @test_throws "no longer accepts `n_eta=`" SBBRMI(
-            v2_neta_model(df); mod = @__MODULE__)
+        # Retired kwargs are rejected at CONSTRUCTION, not at lowering: these
+        # assert the builder call itself throws, with NO `SBBRMI` in sight.
+        # Previously only `SBBRMI(...)` objected, so a consumer gate that stopped
+        # at BRMI construction saw the retired v1 spelling pass silently for days
+        # (snag `by-and-n-eta-are-3625f645`).
+        @test_throws "no longer accepts `by=`" v2_by_model(df)
+        @test_throws "no longer accepts `n_eta=`" v2_neta_model(df)
+        # `by=` is retired for `kernel(...)` ONLY — it stays live elsewhere.
+        @test (@brm df begin
+            y ~ 1 + gp(weight; by = subject)
+        end) isa BRMI
         @test_throws "disagree on their grouping" SBBRMI(
             v2_disagreeing_model(df); mod = @__MODULE__)
         @test SBBRMI(v2_two_bucket_model(df); mod = @__MODULE__) isa SBBRMI

@@ -427,19 +427,44 @@ name(x::NamedColumn) = getfield(x, :name)
 Base.parent(x::NamedColumn) = getfield(x, :parent)
 
 """
+    _check_term_kwargs(f, kwargs) -> nothing
+
+Per-term keyword validation, run for EVERY [`ExprColumn`](@ref) as it is
+constructed — i.e. while `@brm` builds the model, which is the first moment a
+consumer can be told anything at all. The default method accepts everything;
+a term that has retired part of its keyword surface adds a method next to the
+term itself (see `kernel(...)` in `sbimpl.jl`).
+
+Why here and not only in the backend: `@brm` is a pure parser, so a keyword it
+does not recognise is captured into [`getkwargs`](@ref) unexamined and only the
+backend emitter ever objects — which means a model written with retired syntax
+constructs cleanly and complains solely once it is LOWERED (`SBBRMI(...)`).
+A consumer whose compatibility gate stops at BRMI construction then sees
+retired syntax pass silently.
+"""
+_check_term_kwargs(f, kwargs) = nothing
+
+"""
     ExprColumn(f, args...; kwargs...)
 
 Represents an `f(args...; kwargs...)` formula RHS — the leaves the
 `@brm` parser builds for every `:call` Expr (e.g. `Normal(loc, err)`,
 `1 + a + (1|g)`, `mo(c)`). Access via [`getf`](@ref) / [`getargs`](@ref)
 / [`getkwargs`](@ref) / [`getop`](@ref).
+
+Construction runs [`_check_term_kwargs`](@ref) so a term can reject a retired
+keyword at the `@brm` call site rather than in the backend.
 """
 struct ExprColumn{F,A<:Tuple,K<:NamedTuple} <: AbstractColumn
     f::F
     args::A
     kwargs::K
-    ExprColumn(f, args...; kwargs...) = new{typeof(f),typeof(args),typeof((;kwargs...))}(f,args,(;kwargs...))
-    ExprColumn(f::Type, args...; kwargs...) = new{Type{f},typeof(args),typeof((;kwargs...))}(f,args,(;kwargs...))
+    ExprColumn(f, args...; kwargs...) =
+        (_check_term_kwargs(f, (;kwargs...));
+         new{typeof(f),typeof(args),typeof((;kwargs...))}(f,args,(;kwargs...)))
+    ExprColumn(f::Type, args...; kwargs...) =
+        (_check_term_kwargs(f, (;kwargs...));
+         new{Type{f},typeof(args),typeof((;kwargs...))}(f,args,(;kwargs...)))
 end
 
 """
