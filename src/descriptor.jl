@@ -203,9 +203,9 @@ _brm_declaration_role(d::GenerativeDeclaration) = begin
     d.role === :observation && return :observation
     # A non-empty `context` means the declaration lives INSIDE a plate cell —
     # a per-group parameter of a `kernel(...)` block, whatever its family.
-    # Note the block's shared captures (`kernel_L_*`, `kernel_om_*`) are emitted
-    # at TOP level, so they read as ordinary `:parameter`s, which is what they
-    # are: one correlation matrix and one scale vector for the whole model.
+    # Formula-declared BSV is emitted by the ordinary top-level `ranef_*`
+    # declarations and therefore keeps its `:random_effect` role. Only values
+    # declared by the plate cell itself belong to this `:group_block` context.
     isempty(d.context) || return :group_block
     f = d.family
     f isa Symbol || return :parameter
