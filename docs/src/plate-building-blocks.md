@@ -224,14 +224,23 @@ user-supplied group-local kernel:
 
 ```julia
 @brm df begin
-    y ~ Normal(mu, sigma)
-    mu ~ 1 + kernel(time, dose; by=subject, model=my_pk_cell)
-    sigma ~ Exponential(1)
+    sigma  ~ Exponential(1)
+    log_CL ~ 1 + weight + (1 | p | subject)
+    log_V  ~ 1 +          (1 | p | subject)
+    pred ~ kernel(time, dose, dv, log_CL, log_V) do ts, d, yy, lCL, lV
+        mu = <prediction from exp(lCL), exp(lV) over ts, d>
+        yy ~ normal(mu, sigma)
+        mu
+    end
 end
 ```
 
-The exact public spelling is a separate BRM API decision. The backend contract
-is simply “inline this cell model under a plate keyed by the grouping column.”
+The public spelling has since been decided and shipped: per-subject quantities
+are ordinary formula linear predictors, the cell is an inline `do`-block, and
+observations are `~` statements inside it. The retired `by=` / `n_eta=` /
+`model=` / `obs=` keywords are rejected loudly. The backend
+contract is simply “inline this cell model under a plate keyed by the grouping
+derived from those linear predictors.”
 
 ## Rewriting shipped components
 
