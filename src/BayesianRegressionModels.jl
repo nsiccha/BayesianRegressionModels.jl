@@ -23,6 +23,14 @@ include("vimpl.jl")
 using StanBlocks
 include("sbimpl.jl")
 
+# BRMDescriptor — ONE authoritative executable semantic model descriptor.
+# Collapses the GenerativePlan (what BRM emitted), introspection.jl (the
+# formula shape), the preproc record (dataframe provenance) and StanBlocks'
+# own `stan_descriptor` (the executable half) into one reflectable value with
+# derived operations, so a consumer mounts a declaration without keeping any
+# parallel registry of its own.
+include("descriptor.jl")
+
 # Public surface. The macros and value types everything downstream
 # (web-macro, bruno, tests) reaches for.
 export @brm, @n, @x, @getproperty
@@ -41,6 +49,9 @@ export Data, MaybeData, maybedata
 export AbstractColumn, MissingColumn, DataColumn, NamedColumn,
        ExprColumn, LikelihoodColumn, MaterializedColumn
 export BRMI, VBRMI, SBBRMI, GenerativeDeclaration, GenerativePlan
+export BRMDescriptor, BRMInput, BRMOutput, BRMOperation
+export brm_descriptor, brm_operation, brm_execute, brm_columns,
+       required_brm_inputs
 
 # Accessor helpers for column types — used unqualified by html renderers,
 # sbimpl dispatch logic, and downstream extension hooks like bruno-ext.
