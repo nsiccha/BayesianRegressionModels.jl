@@ -187,9 +187,12 @@ end
 # change. The typed-LHS `_by`/stratified path (`z::vector[n_groups, n_terms] ~
 # multi_std_normal()`) cannot -- StanBlocks' typed-LHS forward (forward.jl:355)
 # derives cv from the RHS call-args, not the declared-size, so a cv size there
-# yields a cv *parameter*, not a `:quantities` re-draw. Making `gr(g, by=b)`
-# blocks and `(e | ID | g)` buckets cv-contagious needs either a StanBlocks
-# typed-LHS fix or a bare-`z` rewrite, and neither is in QT's current use case.
+# yields a cv *parameter*, not a `:quantities` re-draw. Nor can the PLATE form:
+# cv taint does not reach a plate-internal fresh parameter (stanblocks-use §28),
+# which is why every `_cv` variant below is the flat-`z_flat` + reshape shape
+# rather than the plate shape its non-cv sibling now uses. So `gr(g, by=b)`
+# blocks stay unsupported; `(e | ID | g)` buckets are supported via
+# `ranef_correlated_draws_cv` below.
 ranef_intercept_cv = StanBlocks.@slic begin
     log_scale ~ std_normal()
     xi ~ std_normal(; n=maximum(group_idx))
@@ -204,6 +207,112 @@ ranef_correlated_cv = StanBlocks.@slic begin
     z = reshape(z_flat, n_terms, n_g)
     b = (diag_pre_multiply(tau, L) * z)'   # n_groups x n_terms
     return rows_dot_product(Z, b[group_idx, :])
+end
+
+# cv-contagious sibling of `ranef_correlated_draws`, for brms-style
+# `(e | ID | g)` cross-formula buckets whose group is opted into `cv_groups`.
+# Identical in *value* to `ranef_correlated_draws` (same column-major layout,
+# same `b = (diag_pre_multiply(tau, L) * z)'` map), but sizes `z_flat` from
+# `maximum(group_idx)` so the cv taint on `group_idx` reaches the draw and
+# flips the whole per-group block to a generated-quantities re-draw. `L`/`tau`
+# keep their untainted `n_terms` sizing, so under `maybecv(:<g>_idx)` only the
+# standardised draw is re-drawn -- a leave-all-out population re-draw from the
+# fitted covariance, exactly as for the plain `(… | g)` `_cv` path above.
+#
+# Flat-reshape rather than plate for the reason in the block comment above: cv
+# taint does not reach a plate-internal fresh parameter, so the plate form its
+# non-cv sibling uses cannot be made cv-contagious.
+ranef_correlated_draws_cv = StanBlocks.@slic begin
+    n_g    = maximum(group_idx)
+    L      ~ lkj_corr_cholesky(1.; n=n_terms)
+    tau    ~ std_normal(; n=n_terms, lower=0.)
+    z_flat ~ std_normal(; n=n_terms * n_g)
+    z = reshape(z_flat, n_terms, n_g)
+    return (diag_pre_multiply(tau, L) * z)'   # n_groups x n_terms
+end
+
+# ---- centered ranef variants (opt-in; for strong per-group likelihoods) ------
+#
+# The default (and `_cv`) submodels above are NON-CENTERED: the sampled
+# parameter is a standardised `z ~ std_normal()` and the scale is applied
+# downstream (`diag_pre_multiply(tau, L) * z`). That geometry is the right
+# default for weak per-group likelihoods (few observations per level), which is
+# brms' default and the shape every existing BRM model was fitted under.
+#
+# It is the WRONG choice when the per-group likelihood is strong -- dense
+# repeated measurement per level, e.g. a PK model with many samples per subject.
+# There the non-centered funnel inverts and the centered parameterization, in
+# which the per-group effect IS the sampled parameter with the covariance as its
+# prior, samples better. These variants emit that form:
+#
+#   b_cols ~ plate(; outer=(n_groups,)) do g
+#       bc::vector[n_terms] ~ multi_normal_cholesky(0, diag_pre_multiply(tau, L))
+#       bc
+#   end
+#
+# They are OPT-IN per grouping factor via `SBBRMI(...; centered_groups=[:g])`,
+# so the default build is emitted byte-for-byte unchanged and no committed model
+# recompiles. The returned VALUE is identical in distribution to the non-centered
+# sibling's -- only the parameterization (and hence the unconstrained coordinate
+# system) differs, so fitted draws are NOT interchangeable between the two.
+#
+# Shape: the per-group effect is declared typed-LHS as `array[n_groups]
+# vector[n_terms]` and sampled with ONE vectorised `multi_normal_cholesky` call,
+# rather than as a plate over a per-cell `multi_normal_cholesky`. Both transpile
+# and both are stanc-clean, but the plate spelling emits `n_groups` separate
+# lpdf calls plus a second `matrix[n_terms, n_groups]` carrier in transformed
+# parameters; the typed-LHS spelling emits one lpdf (Stan's own vectorisation
+# over `array[] vector` factors the triangular solve once) and one carrier.
+# For the use case centered exists to serve -- many groups, each with a strong
+# likelihood -- that difference is the whole point.
+#
+# Scope: centered emission is NOT combinable with cv-contagious sizing. A
+# centered block's sampled parameter is the per-group effect itself, which under
+# either available spelling (plate cell, or the typed-LHS form below) sits behind
+# the same StanBlocks gap the `_cv` comment above describes -- so there is no
+# centered shape whose size can carry a cv taint. `SBBRMI` rejects the
+# combination explicitly rather than silently emitting an in-sample block.
+
+# `@stanonly` because `vector[m, n]` (an `array[m] vector[n]`) has no Julia
+# emission; both helpers exist only to be called from the SLIC bodies below,
+# so they are never invoked from Julia. `multi_normal_cholesky0` is the zero-mean
+# array-vectorised MVN-Cholesky the typed-LHS `~` routes to (a distinctly-named
+# `@lhs @lpxf` UDF, exactly as `multi_std_normal` is for `ranef_correlated_by`);
+# `ranef_b_matrix` rebuilds the `n_groups × n_terms` matrix the public contract
+# promises. The loop is why it is a `@deffun` -- Stan's `to_matrix` has no
+# `array[] vector` overload, and `@slic` bodies cannot contain control flow.
+StanBlocks.@deffun begin
+    @lhs @lpxf multi_normal_cholesky0_lpdf(x::vector[m, n], scale::matrix[n, n])::real =
+        multi_normal_cholesky_lpdf(x, rep_vector(0., n), scale)
+    @stanonly ranef_b_matrix(b::vector[m, n])::matrix[m, n] = begin
+        rv::matrix[m, n]
+        for i in 1:m
+            rv[i, :] = b[i]'
+        end
+        rv
+    end
+end
+
+ranef_intercept_centered = StanBlocks.@slic begin
+    log_scale ~ std_normal()
+    xi ~ normal(0., exp(log_scale); n=n_groups)
+    return xi[group_idx]
+end
+
+ranef_correlated_centered = StanBlocks.@slic begin
+    L   ~ lkj_corr_cholesky(1.; n=n_terms)
+    tau ~ std_normal(; n=n_terms, lower=0.)
+    b::vector[n_groups, n_terms] ~ multi_normal_cholesky0(diag_pre_multiply(tau, L))
+    bm = ranef_b_matrix(b)   # n_groups x n_terms
+    return rows_dot_product(Z, bm[group_idx, :])
+end
+
+# Centered sibling of `ranef_correlated_draws` for `(e | ID | g)` buckets.
+ranef_correlated_draws_centered = StanBlocks.@slic begin
+    L   ~ lkj_corr_cholesky(1.; n=n_terms)
+    tau ~ std_normal(; n=n_terms, lower=0.)
+    b::vector[n_groups, n_terms] ~ multi_normal_cholesky0(diag_pre_multiply(tau, L))
+    return ranef_b_matrix(b)   # n_groups x n_terms
 end
 
 # Stratified gather + Cholesky scale, kept as a Stan function (loops are not
@@ -667,7 +776,8 @@ end
 # ==============================================================================
 
 """
-    SBBRMI(brmi::BRMI; mod=@__MODULE__, cv_groups=Set{Symbol}()) -> SBBRMI
+    SBBRMI(brmi::BRMI; mod=@__MODULE__, cv_groups=Set{Symbol}(),
+           centered_groups=Set{Symbol}()) -> SBBRMI
 
 StanBlocks backend: walks `brmi`, emits a `StanBlocks.SlicModel`, and
 materialises the data dict. Pass `mod` if you're constructing the model
@@ -681,9 +791,26 @@ the standalone data scalar `n_<g>`, so marking the group index with
 `maybecv(:<g>_idx)` at trace time flips that RE to a generated-quantities
 population re-draw (leave-all-out / out-of-sample). This is used when
 generating a CV model artifact; the default (empty `cv_groups`) emits the
-group RE byte-for-byte as before, so committed models never recompile. Only
-plain `(… | g)` ranefs are supported; stratified `gr(g, by=b)` and
-cross-formula `(… |ID| g)` buckets error if opted-in (see `ranef_*_cv`).
+group RE byte-for-byte as before, so committed models never recompile.
+Plain `(… | g)` ranefs and cross-formula `(… |ID| g)` buckets are both
+supported; stratified `gr(g, by=b)` errors if opted-in (see `ranef_*_cv`).
+
+`centered_groups` is an opt-in set of grouping-factor names whose per-group
+random effect should be emitted in the **centered** parameterization -- the
+per-group effect itself is the sampled parameter, with the covariance as its
+prior (`bc ~ multi_normal_cholesky(0, diag_pre_multiply(tau, L))`), instead of
+the default non-centered standardised draw plus downstream scaling. Centered
+is the better geometry when the per-group likelihood is strong (dense repeated
+measurement per level, e.g. many PK samples per subject); non-centered stays
+the default, so committed models are unaffected. Plain `(… | g)` ranefs and
+`(… |ID| g)` buckets are supported; stratified `gr(g, by=b)` is not.
+
+The two sets are **mutually exclusive per group**: a centered block's sampled
+parameter is the per-group effect itself, and no available spelling of that
+can carry a cv taint in its size, so `SBBRMI` rejects a group named in both
+rather than silently emitting an in-sample block. Note also that centered and
+non-centered emissions use different unconstrained coordinates, so fitted
+draws are not interchangeable between them.
 
 Use [`stan_code`](@ref) to extract the transpiled Stan source. For
 sampling, load `StanLogDensityProblems` + `BridgeStan` and wrap the
@@ -757,8 +884,19 @@ struct SBBRMI{P<:BRMI, M, D<:AbstractDict, PP<:AbstractDict}
     preproc::PP
 end
 
-SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}()) = begin
+SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
+       centered_groups=Set{Symbol}()) = begin
     cv_groups = cv_groups isa Set ? cv_groups : Set{Symbol}(cv_groups)
+    centered_groups = centered_groups isa Set ? centered_groups : Set{Symbol}(centered_groups)
+    both = intersect(cv_groups, centered_groups)
+    isempty(both) || error(
+        "sbimpl: group(s) $(join(sort!(collect(both)), ", ")) named in BOTH ",
+        "`cv_groups` and `centered_groups`. A centered block's sampled ",
+        "parameter is the per-group effect itself, whose size cannot carry a ",
+        "cv taint (StanBlocks: cv does not reach a plate-internal fresh ",
+        "parameter, and typed-LHS derives cv from RHS call-args rather than ",
+        "the declared size). Emit the CV artifact non-centered, or drop the ",
+        "group from `cv_groups`.")
     stmts = Any[]
     data = Dict{Symbol,Any}()
     # Side-channel: transform emitters record their fit-time constant + raw
@@ -791,7 +929,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}()) = begin
     # `(brmi_key, (id_sym, group_key)) => (bucket_name, col_range, idx_name, suffix)`
     # for per-sub-formula emission below.
     id_buckets = _sb_collect_id_buckets(brmi)
-    id_lookup = _sb_emit_id_buckets!(stmts, data, id_buckets)
+    id_lookup = _sb_emit_id_buckets!(stmts, data, id_buckets; cv_groups, centered_groups)
     # Prepass 2.5: group-block terms. For each `mu ~ f(...)` where f has a
     # _sb_term_group_block declaration, allocate one ranef_correlated_draws
     # block per (f, group-column) pair. The lookup is threaded into _sb_emit!
@@ -808,7 +946,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}()) = begin
         nc = _as_named_column(op)
         isnothing(nc) && error("sbimpl: top-level op `$key` is not a NamedColumn")
         obs_n = get(target_obs, key, nothing)
-        _sb_emit!(stmts, data, key, parent(nc); id_lookup, obs_n, cv_groups, group_block_lookup)
+        _sb_emit!(stmts, data, key, parent(nc); id_lookup, obs_n, cv_groups, centered_groups, group_block_lookup)
     end
     # Pop the preproc side-channel BEFORE building the SlicModel so it never
     # pollutes Stan's data dict.
@@ -1365,8 +1503,8 @@ restan_data(sb::SBBRMI, new_df; freeze_constants::Bool=true) =
 
 # ---- top-level op dispatch ---------------------------------------------------
 
-_sb_emit!(stmts, data, key, op::ExprColumn; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), group_block_lookup=Dict()) =
-    _sb_emit_expr!(stmts, data, key, getf(op), op; id_lookup, obs_n, cv_groups, group_block_lookup)
+_sb_emit!(stmts, data, key, op::ExprColumn; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict()) =
+    _sb_emit_expr!(stmts, data, key, getf(op), op; id_lookup, obs_n, cv_groups, centered_groups, group_block_lookup)
 # Raw data / missing columns appear as top-level ops when the formula mentions
 # them as bare references (e.g. `c2` in `loc ~ 1 + c2`). Nothing to emit — the
 # prepass already stashed data columns in `data`.
@@ -1374,9 +1512,9 @@ _sb_emit!(stmts, data, key, ::DataColumn; kwargs...) = nothing
 _sb_emit!(stmts, data, key, ::MissingColumn; kwargs...) = nothing
 _sb_emit!(stmts, data, key, op; kwargs...) = error("sbimpl: top-level op for `$key` not an ExprColumn (got $(typeof(op)))")
 
-_sb_emit_expr!(stmts, data, key, ::typeof(~), op; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), group_block_lookup=Dict()) = begin
+_sb_emit_expr!(stmts, data, key, ::typeof(~), op; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict()) = begin
     lhs, rhs = getargs(op, 2)
-    _sb_sampling!(stmts, data, key, lhs, rhs; id_lookup, obs_n, cv_groups, group_block_lookup)
+    _sb_sampling!(stmts, data, key, lhs, rhs; id_lookup, obs_n, cv_groups, centered_groups, group_block_lookup)
 end
 _sb_emit_expr!(stmts, data, key, ::typeof(assign), op; id_lookup=_sb_empty_id_lookup(), kwargs...) = begin
     _, rhs = getargs(op, 2)
@@ -1851,8 +1989,8 @@ _sb_prior_arg(x) = error("sbimpl: unsupported prior-arg shape $(typeof(x))")
 
 # LHS backed by real data => this is a likelihood. Record the observed values
 # under the formula name in `data` and emit `key ~ dist(args...)`.
-_sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), group_block_lookup=Dict()) =
-    _sb_sampling_backed!(stmts, data, key, parent(lhs), rhs; id_lookup, obs_n, cv_groups, group_block_lookup)
+_sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict()) =
+    _sb_sampling_backed!(stmts, data, key, parent(lhs), rhs; id_lookup, obs_n, cv_groups, centered_groups, group_block_lookup)
 
 _sb_sampling_backed!(stmts, data, key, backing::DataColumn, rhs; id_lookup, kwargs...) = begin
     data[key] = _sb_data_vec(key, parent(backing))
@@ -1861,6 +1999,7 @@ end
 
 _sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs;
                      id_lookup, obs_n=nothing, cv_groups=Set{Symbol}(),
+                     centered_groups=Set{Symbol}(),
                      group_block_lookup=Dict()) = begin
     rhs_e = _as_expr_column(rhs)
     if !isnothing(rhs_e)
@@ -1876,7 +2015,7 @@ _sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs;
         _sb_submodel_rhs!(stmts, data, key, f, rhs_e) !== nothing && return
         _sb_emit_prior!(stmts, key, f, rhs_e) && return
     end
-    _sb_linear_predictor!(stmts, data, key, rhs; id_lookup, brmi_key=key, obs_n, cv_groups, group_block_lookup)
+    _sb_linear_predictor!(stmts, data, key, rhs; id_lookup, brmi_key=key, obs_n, cv_groups, centered_groups, group_block_lookup)
 end
 
 _sb_sampling_backed!(stmts, data, key, backing, rhs; id_lookup, kwargs...) =
@@ -1893,16 +2032,16 @@ _sb_sampling_backed!(stmts, data, key, backing, rhs; id_lookup, kwargs...) =
 # Stan name. Per-`typeof(f)` overrides (`mi`, future `cens`/`trunc`, …) live
 # as separate methods of `_sb_sampling!`, mirroring vimpl's
 # `vbroadcasted(::ExprColumn{typeof(F)})` extension idiom.
-_sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), group_block_lookup=Dict()) =
-    _sb_sampling_through_link!(stmts, data, key, getf(lhs), only(getargs(lhs)), rhs; id_lookup, obs_n, cv_groups, group_block_lookup)
+_sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict()) =
+    _sb_sampling_through_link!(stmts, data, key, getf(lhs), only(getargs(lhs)), rhs; id_lookup, obs_n, cv_groups, centered_groups, group_block_lookup)
 
 _sb_sampling_through_link!(stmts, data, key, f, inner, rhs; kwargs...) =
     error("sbimpl: expected NamedColumn inside link `$f(...)`, got $(typeof(inner))")
-function _sb_sampling_through_link!(stmts, data, key, f, inner::NamedColumn, rhs; id_lookup, obs_n=nothing, cv_groups=Set{Symbol}(), group_block_lookup=Dict())
+function _sb_sampling_through_link!(stmts, data, key, f, inner::NamedColumn, rhs; id_lookup, obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict())
     inv_f = InverseFunctions.inverse(f)
     inner_name = name(inner)
     pre_name = Symbol(nameof(f), :_, inner_name)
-    _sb_linear_predictor!(stmts, data, pre_name, rhs; id_lookup, brmi_key=key, obs_n, cv_groups, group_block_lookup)
+    _sb_linear_predictor!(stmts, data, pre_name, rhs; id_lookup, brmi_key=key, obs_n, cv_groups, centered_groups, group_block_lookup)
     push!(stmts, :($inner_name = $(_sb_julia_to_stan_fn(inv_f))($pre_name)))
 end
 
@@ -2067,6 +2206,7 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
                                 brmi_key::Symbol=target,
                                 obs_n::Union{Symbol,Nothing}=nothing,
                                 cv_groups=Set{Symbol}(),
+                                centered_groups=Set{Symbol}(),
                                 group_block_lookup=Dict())
     terms = _sb_terms(rhs)
     pop_terms    = Any[]
@@ -2098,7 +2238,7 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
         _sb_emit_direct!(stmts, data, target, dt, summands)
     end
 
-    _sb_emit_ranefs!(stmts, data, target, ran_terms, summands; id_lookup, brmi_key, cv_groups)
+    _sb_emit_ranefs!(stmts, data, target, ran_terms, summands; id_lookup, brmi_key, cv_groups, centered_groups)
 
     if length(summands) == 1
         push!(stmts, :($target = $(only(summands))))
@@ -2377,7 +2517,8 @@ end
 function _sb_emit_ranefs!(stmts, data, target::Symbol, ran_terms, summands;
                            id_lookup=_sb_empty_id_lookup(),
                            brmi_key::Symbol=target,
-                           cv_groups=Set{Symbol}())
+                           cv_groups=Set{Symbol}(),
+                           centered_groups=Set{Symbol}())
     isempty(ran_terms) && return
     # Partition: ID'd terms route to the pre-emitted shared bucket; plain terms
     # coalesce per-target via the existing `ranef_correlated` block. Bare-
@@ -2403,20 +2544,15 @@ function _sb_emit_ranefs!(stmts, data, target::Symbol, ran_terms, summands;
         gterms = plain_by_group[k]
         desc = plain_descs[k]
         isempty(gterms) && error("sbimpl: ranef `(… | $k)` has no terms after dropping `0`")
-        _sb_emit_ranef_block!(stmts, data, target, desc, gterms, summands; cv_groups)
+        _sb_emit_ranef_block!(stmts, data, target, desc, gterms, summands; cv_groups, centered_groups)
     end
     for k in id_keys_seen
         gterms = id_terms_by_bucket[k]
         isempty(gterms) && error("sbimpl: ranef `(… | $(k[1]) | $(k[2]))` has no terms after dropping `0`")
-        # The `|ID|` bucket path shares one pre-emitted `ranef_correlated_draws`
-        # block (prepass 2, before cv_groups is known) -- not yet cv-contagious.
-        # Error rather than silently emit an in-sample RE for an opted-in group.
-        k[2] in cv_groups && error(
-            "sbimpl: cv-contagious sizing requested for group `$(k[2])`, but it ",
-            "appears in a `(… |$(k[1])| $(k[2]))` cross-formula ID bucket, whose ",
-            "shared draws block is emitted in a prepass and is not yet cv-aware. ",
-            "Use a plain `(… | $(k[2]))` ranef for the cv group, or extend the ",
-            "bucket emitter -- not yet supported.")
+        # The `|ID|` bucket's shared draws block is emitted in prepass 2, which
+        # receives `cv_groups` / `centered_groups` and picks the matching
+        # `ranef_correlated_draws{,_cv,_centered}` variant there. Nothing to do
+        # here beyond slicing it per sub-formula.
         info = get(id_lookup, (brmi_key, k), nothing)
         info === nothing && error("sbimpl: internal — no pre-emitted bucket for (target=$brmi_key, id=$(k[1]), group=$(k[2]))")
         _sb_emit_id_ranef_block!(stmts, data, target, info, gterms, summands)
@@ -2429,11 +2565,12 @@ end
 # flips the RE to a generated-quantities population re-draw. Empty by default,
 # in which case the emitted Stan is byte-identical to before.
 function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, gterms, summands;
-                                cv_groups=Set{Symbol}())
+                                cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}())
     g_backing = _as_data_column(parent(group))
     isnothing(g_backing) && error("sbimpl: group `$(name(group))` must be a raw data column")
     g = name(group)
     is_cv = g in cv_groups
+    is_centered = g in centered_groups
     n_levels, g_idx = _sb_level_index(parent(g_backing))
     idx_name = Symbol(g, :_idx)
     n_name   = Symbol(:n_, g)
@@ -2446,6 +2583,8 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, 
         # variant sizes `xi` from `maximum(group_idx)` and takes no `n_groups`.
         if is_cv
             push!(stmts, :($r_name ~ ranef_intercept_cv(; group_idx=$idx_name)))
+        elseif is_centered
+            push!(stmts, :($r_name ~ ranef_intercept_centered(; group_idx=$idx_name, n_groups=$n_name)))
         else
             push!(stmts, :($r_name ~ ranef_intercept(; group_idx=$idx_name, n_groups=$n_name)))
         end
@@ -2461,6 +2600,10 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, 
         if is_cv
             push!(stmts, :($r_name ~ ranef_correlated_cv(;
                 Z=$Z_name, group_idx=$idx_name, n_terms=$k_name)))
+        elseif is_centered
+            push!(stmts, :($r_name ~ ranef_correlated_centered(;
+                Z=$Z_name, group_idx=$idx_name,
+                n_groups=$n_name, n_terms=$k_name)))
         else
             push!(stmts, :($r_name ~ ranef_correlated(;
                 Z=$Z_name, group_idx=$idx_name,
@@ -2471,7 +2614,7 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, 
 end
 
 function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::Tuple{NamedColumn,NamedColumn}, gterms, summands;
-                                cv_groups=Set{Symbol}())
+                                cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}())
     gcol, bcol = group
     g_backing = _as_data_column(parent(gcol))
     b_backing = _as_data_column(parent(bcol))
@@ -2485,6 +2628,13 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::Tuple{NamedCo
         "declared size, so a cv size yields a cv *parameter*, not a generated-",
         "quantities re-draw. Making `by=` blocks cv-contagious needs a bare-`z` ",
         "rewrite or a StanBlocks typed-LHS fix -- not yet supported.")
+    g in centered_groups && error(
+        "sbimpl: centered parameterization requested for group `$g`, but `$g` is ",
+        "a stratified `gr($g, by=$b)` ranef whose per-group draw goes through the ",
+        "typed-LHS `ranef_correlated_by` path (one Cholesky per stratum). The ",
+        "centered variants emit a plate over a single shared covariance and have ",
+        "no per-stratum form -- not yet supported. Use a plain `(… | $g)` or ",
+        "`(… |ID| $g)` ranef, or leave `$g` non-centered.")
     n_groups, g_idx = _sb_level_index(parent(g_backing))
     n_strata, b_idx = _sb_level_index(parent(b_backing))
     stratum_idx = _sb_stratum_idx(g_idx, b_idx, g, b)
@@ -2702,7 +2852,14 @@ _sb_ranef_term_ncols(t, _) = error("sbimpl: unsupported ranef term $(typeof(t)):
 # Emit one shared `b_<id>_<g> ~ ranef_correlated_draws(...)` per bucket, compute
 # per-target column ranges, stash `group_idx` / `n_groups` / `n_terms_<id>_<g>`
 # in `data`, and return the lookup table consumed by `_sb_emit_ranefs!`.
-function _sb_emit_id_buckets!(stmts, data, buckets)
+#
+# `cv_groups` / `centered_groups` select the `_cv` / `_centered` draws variant
+# for a bucket whose grouping factor is opted in. Both are known at `SBBRMI`
+# construction, i.e. BEFORE this prepass runs, so there is no ordering obstacle
+# to threading them here -- only the plain-group spelling has a variant, and the
+# stratified `gr(g, by=b)` bucket still errors (see `_sb_emit_id_bucket_sampling!`).
+function _sb_emit_id_buckets!(stmts, data, buckets;
+                              cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}())
     lookup = _sb_empty_id_lookup()
     for (k, bucket) in pairs(buckets)
         id_sym, _ = k
@@ -2721,7 +2878,8 @@ function _sb_emit_id_buckets!(stmts, data, buckets)
         n_terms_total = cursor
         n_terms_total >= 1 || error("sbimpl: `|$id_sym|` bucket has zero terms")
         data[n_terms_name] = n_terms_total
-        idx_name = _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, desc)
+        idx_name = _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, desc;
+                                                cv_groups, centered_groups, id_sym)
         for (brmi_key, cols) in per_target_ranges
             lookup[(brmi_key, k)] = (; bucket_name, cols, idx_name, suffix)
         end
@@ -2734,17 +2892,50 @@ _sb_id_bucket_suffix(id_sym, g::Tuple{NamedColumn,NamedColumn}) =
     Symbol(id_sym, :_, name(g[1]), :__by__, name(g[2]))
 
 # Emit the shared `b_<suffix> ~ …_draws(...)` statement for one ID bucket.
-# Plain group -> `ranef_correlated_draws`; `gr(g, by=b)` group -> stratified
-# `ranef_correlated_by_draws`. Returns the idx_name callers use to slice the
-# draw matrix per sub-formula.
-function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g::NamedColumn)
+# Plain group -> `ranef_correlated_draws` (or its `_cv` / `_centered` variant
+# when the group is opted in); `gr(g, by=b)` group -> stratified
+# `ranef_correlated_by_draws`, which has neither variant. Returns the idx_name
+# callers use to slice the draw matrix per sub-formula.
+function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g::NamedColumn;
+                                      cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
+                                      id_sym=nothing)
     idx_name, n_name = _sb_ensure_group_data!(data, g)
-    push!(stmts, :($bucket_name ~ ranef_correlated_draws(;
-        group_idx=$idx_name, n_groups=$n_name, n_terms=$n_terms_name)))
+    gname = name(g)
+    if gname in cv_groups
+        # cv variant sizes `z_flat` from `maximum(group_idx)` and takes no
+        # `n_groups`, so the cv taint reaches the draw. Same value, same layout.
+        push!(stmts, :($bucket_name ~ ranef_correlated_draws_cv(;
+            group_idx=$idx_name, n_terms=$n_terms_name)))
+    elseif gname in centered_groups
+        push!(stmts, :($bucket_name ~ ranef_correlated_draws_centered(;
+            group_idx=$idx_name, n_groups=$n_name, n_terms=$n_terms_name)))
+    else
+        push!(stmts, :($bucket_name ~ ranef_correlated_draws(;
+            group_idx=$idx_name, n_groups=$n_name, n_terms=$n_terms_name)))
+    end
     idx_name
 end
 function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name,
-                                       g::Tuple{NamedColumn,NamedColumn})
+                                       g::Tuple{NamedColumn,NamedColumn};
+                                       cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
+                                       id_sym=nothing)
+    gname, bname = name(g[1]), name(g[2])
+    id_str = isnothing(id_sym) ? "ID" : String(id_sym)
+    gname in cv_groups && error(
+        "sbimpl: cv-contagious sizing requested for group `$gname`, but it ",
+        "appears in a `(… |$id_str| gr($gname, by=$bname))` stratified ID bucket, ",
+        "whose shared draws block goes through the typed-LHS ",
+        "`ranef_correlated_by_draws` path. StanBlocks' typed-LHS forward derives ",
+        "cv from RHS call-args, not the declared size, so a cv size there yields ",
+        "a cv *parameter*, not a generated-quantities re-draw. Use a plain ",
+        "`(… |$id_str| $gname)` bucket for the cv group -- `by=` is not yet supported.")
+    gname in centered_groups && error(
+        "sbimpl: centered parameterization requested for group `$gname`, but it ",
+        "appears in a `(… |$id_str| gr($gname, by=$bname))` stratified ID bucket ",
+        "(one Cholesky per stratum). The centered variants emit a plate over a ",
+        "single shared covariance and have no per-stratum form -- not yet ",
+        "supported. Use a plain `(… |$id_str| $gname)` bucket, or leave ",
+        "`$gname` non-centered.")
     info = _sb_ensure_group_data!(data, g)
     push!(stmts, :($bucket_name ~ ranef_correlated_by_draws(;
         group_idx=$(info.idx_name), n_groups=$(info.n_name),
