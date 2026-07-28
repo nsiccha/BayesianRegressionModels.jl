@@ -1,0 +1,310 @@
+# test/ranef_cv_centered.jl — cv-contagious `(… |ID| g)` buckets + centered
+# ranef emission.
+#
+# Two opt-in emission modes on `SBBRMI`, both keyed by grouping-factor name:
+#
+#   cv_groups       -- size the per-group draw from `maximum(<g>_idx)` so a
+#                      `maybecv(:<g>_idx)` mark flips the block to a
+#                      generated-quantities population re-draw. Previously
+#                      supported for plain `(… | g)` ranefs only; this suite
+#                      pins the `(… |ID| g)` cross-formula bucket path.
+#   centered_groups -- emit the centered parameterization (the per-group effect
+#                      IS the sampled parameter, covariance as its prior)
+#                      instead of the default non-centered standardised draw.
+#
+# The load-bearing invariant across both: the DEFAULT build is byte-for-byte
+# unchanged, so no committed model recompiles.
+
+using Test
+using BayesianRegressionModels
+using StanBlocks
+using Distributions: Normal
+
+stanc_ok(code) = StanBlocks.stanc_check(code; warn_pedantic=false).ok
+blocks(code) = code[first(findfirst("data {", code)):end]
+
+# A five-sub-formula model whose random effects all share ONE correlated
+# `|p|` bucket — the shape the plain `(… | g)` path cannot express, because
+# dropping the ID would discard the cross-parameter RE correlation.
+bucket_builder = @brm begin
+    eta_CL ~ 0 + male + zage + diseased + (1 | p | subject)
+    eta_Vc ~ 0 + male + zage + diseased + (1 | p | subject)
+    eta_Q  ~ 0 + diseased + (1 | p | subject)
+    eta_ka ~ 0 + (1 | p | subject)
+    y ~ Normal(eta_CL + eta_Vc + eta_Q + eta_ka, 1.0)
+end
+
+bucket_df(; n_subj=6, per=4) = begin
+    n = n_subj * per
+    (; subject = repeat(1:n_subj, inner=per),
+       male     = Float64.(repeat([0, 1], outer=n ÷ 2)),
+       zage     = range(-1.0, 1.0, length=n) |> collect,
+       diseased = Float64.(repeat([1, 0], outer=n ÷ 2)),
+       y        = range(-0.5, 0.5, length=n) |> collect)
+end
+
+# Plain `(… | g)` counterpart, for the centered non-bucket path.
+plain_builder = @brm begin
+    mu ~ 1 + zage + (1 + zage | subject)
+    y ~ Normal(mu, 1.0)
+end
+intercept_builder = @brm begin
+    mu ~ 1 + zage + (1 | subject)
+    y ~ Normal(mu, 1.0)
+end
+
+@testset "cv-contagious `(… |ID| g)` buckets" begin
+    df = bucket_df()
+    brmi = bucket_builder(df)
+
+    base = StanBlocks.stan_code(SBBRMI(brmi; mod=@__MODULE__).model)
+    sb   = SBBRMI(brmi; mod=@__MODULE__, cv_groups=[:subject])
+    code = StanBlocks.stan_code(sb.model)
+
+    @test stanc_ok(code)
+    # Opting in changes the emission (it must, or the cv mark cannot bite) ...
+    @test code != base
+    # ... only in its SIZE EXPRESSION: the SAME `ranef_correlated_draws`
+    # submodel is called, sized from `max(subject_idx)` rather than the
+    # untainted standalone `n_subject` data scalar. There is no separate `_cv`
+    # submodel to keep in step -- that duplication is the thing this path
+    # deliberately does not have.
+    @test occursin("b_p_subject_n_g = max(subject_idx)", code)
+    @test occursin("b_p_subject_z_flat", code)
+    # Default and cv emissions differ ONLY in the size expression: same
+    # parameter names, same statement shapes.
+    @test occursin("b_p_subject_z_flat ~ std_normal()", base)
+    @test occursin("b_p_subject_z_flat ~ std_normal()", code)
+    # The bucket is still ONE shared block sliced per sub-formula, so the
+    # cross-formula correlation the `|p|` ID exists for is preserved.
+    @test occursin("cholesky_factor_corr[n_terms_p_subject] b_p_subject_L", code)
+    @test count(==("b_p_subject_z_flat"),
+                [m.match for m in eachmatch(r"b_p_subject_z_flat", code)]) >= 1
+    for t in (:eta_CL, :eta_Vc, :eta_Q, :eta_ka)
+        @test occursin("r_$(t)_p_subject = b_p_subject[subject_idx,", code)
+    end
+
+    # Untouched groups keep the default sizing.
+    @test !occursin("max(subject_idx)", base)
+end
+
+@testset "cv mark flips the bucket to a GQ population re-draw" begin
+    df = bucket_df()
+    sb = SBBRMI(bucket_builder(df); mod=@__MODULE__, cv_groups=[:subject])
+
+    tainted = Dict{Symbol,Any}(sb.data)
+    tainted[:subject_idx] = StanBlocks.stan.maybecv(:subject_idx, tainted[:subject_idx])
+    code = StanBlocks.stan_code(
+        StanBlocks.SlicModel(sb.model.model, tainted, sb.model.mod))
+
+    @test stanc_ok(code)
+    params = code[first(findfirst("parameters {", code)):first(findfirst("model {", code))]
+    gq     = code[first(findfirst("generated quantities {", code)):end]
+
+    # The whole per-subject block left the parameter space ...
+    @test !occursin("b_p_subject_z_flat", params)
+    # ... and is re-drawn in generated quantities from the FITTED covariance,
+    # which itself stays a parameter. That is the leave-all-out semantics.
+    @test occursin("b_p_subject_z_flat = std_normal_vector_rng", gq)
+    @test occursin("diag_pre_multiply(b_p_subject_tau, b_p_subject_L)", gq)
+    @test occursin("b_p_subject_L", params)
+    @test occursin("b_p_subject_tau", params)
+    # Population coefficients are unaffected — only the RE is held out.
+    @test occursin("pop_eta_CL_beta_pop", params)
+end
+
+@testset "centered emission — plain `(… | g)`" begin
+    df = bucket_df()
+    brmi = plain_builder(df)
+
+    base = StanBlocks.stan_code(SBBRMI(brmi; mod=@__MODULE__).model)
+    code = StanBlocks.stan_code(
+        SBBRMI(brmi; mod=@__MODULE__, centered_groups=[:subject]).model)
+
+    @test stanc_ok(code)
+    @test code != base
+    # Default is non-centered: a standardised plate draw, scaled downstream.
+    @test occursin("~ std_normal()", base)
+    # Centered: the per-group effect itself is the parameter, declared as an
+    # array of vectors and sampled with ONE vectorised MVN-Cholesky call.
+    @test occursin("array[n_subject] vector[n_terms_mu_subject]", code)
+    @test occursin("~ multi_normal_cholesky0(", code)
+    # ... not a per-group loop of lpdf calls.
+    @test !occursin("multi_normal_cholesky(rep_vector", code)
+    # The public n_groups x n_terms contract is preserved.
+    @test occursin("matrix[n_subject, n_terms_mu_subject]", code)
+end
+
+@testset "centered emission — `(1 | g)` intercept fast path" begin
+    df = bucket_df()
+    brmi = intercept_builder(df)
+
+    base = StanBlocks.stan_code(SBBRMI(brmi; mod=@__MODULE__).model)
+    code = StanBlocks.stan_code(
+        SBBRMI(brmi; mod=@__MODULE__, centered_groups=[:subject]).model)
+
+    @test stanc_ok(code)
+    @test code != base
+    # Non-centered: xi ~ std_normal(), scaled by exp(log_scale) downstream.
+    @test occursin("exp(", base)
+    # Centered: the scale moves into the prior.
+    @test occursin("normal(0.0, exp(", code)
+end
+
+@testset "centered emission — `(… |ID| g)` bucket" begin
+    df = bucket_df()
+    brmi = bucket_builder(df)
+
+    base = StanBlocks.stan_code(SBBRMI(brmi; mod=@__MODULE__).model)
+    code = StanBlocks.stan_code(
+        SBBRMI(brmi; mod=@__MODULE__, centered_groups=[:subject]).model)
+
+    @test stanc_ok(code)
+    @test code != base
+    @test occursin("array[n_subject] vector[n_terms_p_subject]", code)
+    @test occursin("~ multi_normal_cholesky0(", code)
+    # Still one shared bucket, still sliced per sub-formula.
+    for t in (:eta_CL, :eta_Vc, :eta_Q, :eta_ka)
+        @test occursin("r_$(t)_p_subject = b_p_subject[subject_idx,", code)
+    end
+end
+
+@testset "default emission is unchanged by the new kwargs" begin
+    df = bucket_df()
+    for builder in (bucket_builder, plain_builder, intercept_builder)
+        brmi = builder(df)
+        a = StanBlocks.stan_code(SBBRMI(brmi; mod=@__MODULE__).model)
+        b = StanBlocks.stan_code(
+            SBBRMI(brmi; mod=@__MODULE__,
+                   cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}()).model)
+        # An empty opt-in is not merely equivalent — it is the same bytes.
+        @test a == b
+        # An opt-in naming a group this model does not have is also a no-op.
+        @test a == StanBlocks.stan_code(
+            SBBRMI(brmi; mod=@__MODULE__, cv_groups=[:nosuchgroup],
+                   centered_groups=[:alsonone]).model)
+    end
+end
+
+@testset "rejected combinations error loudly" begin
+    df = bucket_df()
+    brmi = bucket_builder(df)
+
+    # cv and centered are mutually exclusive per group: a centered block's
+    # sampled parameter cannot carry a cv taint in its size.
+    err = try
+        SBBRMI(brmi; mod=@__MODULE__, cv_groups=[:subject], centered_groups=[:subject])
+        nothing
+    catch e; e end
+    @test err isa ErrorException
+    @test occursin("BOTH", err.msg)
+    @test occursin("cv_groups", err.msg)
+
+    # Disjoint groups are fine even when both sets are non-empty.
+    @test SBBRMI(brmi; mod=@__MODULE__, cv_groups=[:subject],
+                 centered_groups=[:othergroup]) isa SBBRMI
+end
+
+@testset "stratified `gr(g, by=b)` stays unsupported for both modes" begin
+    n_subj, per = 6, 4
+    n = n_subj * per
+    df = (; subject = repeat(1:n_subj, inner=per),
+            arm     = repeat([1, 2], inner=n ÷ 2),
+            zage    = collect(range(-1.0, 1.0, length=n)),
+            y       = collect(range(-0.5, 0.5, length=n)))
+    by_builder = @brm begin
+        mu ~ 1 + zage + (1 + zage | gr(subject, by = arm))
+        y ~ Normal(mu, 1.0)
+    end
+    brmi = by_builder(df)
+
+    # It still emits fine when not opted in.
+    @test stanc_ok(StanBlocks.stan_code(SBBRMI(brmi; mod=@__MODULE__).model))
+
+    for (kw, needle) in ((:cv_groups, "cv-contagious"),
+                         (:centered_groups, "centered parameterization"))
+        err = try
+            SBBRMI(brmi; mod=@__MODULE__, kw => [:subject])
+            nothing
+        catch e; e end
+        @test err isa ErrorException
+        @test occursin(needle, err.msg)
+        @test occursin("gr(subject, by=arm)", err.msg)
+    end
+end
+
+@testset "runtime — both emissions compile and differentiate" begin
+    df = bucket_df()
+    brmi = bucket_builder(df)
+    LDP = StanBlocks.LogDensityProblems
+
+    fitprob(sb) = brm_execute(brm_descriptor(sb), :fit)
+    lp_and_grad(prob) = begin
+        n = LDP.dimension(prob)
+        theta = 0.1 .* collect(range(-1.0, 1.0, length=n))
+        lp = LDP.logdensity(prob, theta)
+        (n, lp)
+    end
+
+    base_prob = fitprob(SBBRMI(brmi; mod=@__MODULE__))
+    n_base, lp_base = lp_and_grad(base_prob)
+    @test isfinite(lp_base)
+
+    # Centered is a REPARAMETERIZATION: same posterior, same coordinate count.
+    cen_prob = fitprob(SBBRMI(brmi; mod=@__MODULE__, centered_groups=[:subject]))
+    n_cen, lp_cen = lp_and_grad(cen_prob)
+    @test isfinite(lp_cen)
+    @test n_cen == n_base
+
+    # The cv model, UNMARKED, is also just a reparameterization of the sizing —
+    # same coordinate count, still a fittable posterior.
+    cv_prob = fitprob(SBBRMI(brmi; mod=@__MODULE__, cv_groups=[:subject]))
+    n_cv, lp_cv = lp_and_grad(cv_prob)
+    @test isfinite(lp_cv)
+    @test n_cv == n_base
+
+    # MARKED, the per-subject block leaves the parameter space entirely — and
+    # because EVERY observation is a held-out subject's, the likelihood goes
+    # with it. So the marked artifact is a leave-ALL-out predictor: it offers
+    # `:predict` / `:pointwise_loglik` and NOT `:fit`, exactly the operation
+    # gating StanBlocks documents for a fully-held-out model. This is the
+    # property the whole cv path exists to produce, and stanc cannot see it.
+    sb = SBBRMI(brmi; mod=@__MODULE__, cv_groups=[:subject])
+    tainted = Dict{Symbol,Any}(sb.data)
+    tainted[:subject_idx] = StanBlocks.stan.maybecv(:subject_idx, tainted[:subject_idx])
+    # NOTE: the tainted dict must go in BOTH slots — `generative_plan` rebuilds
+    # the SlicModel from `sb.data`, so passing it only in the model is silently
+    # discarded and the mark never reaches the trace.
+    held_sb = SBBRMI(sb.parent,
+                     StanBlocks.SlicModel(sb.model.model, tainted, sb.model.mod),
+                     tainted, sb.preproc)
+    held_d = brm_descriptor(held_sb)
+    offered = [op.name for op in held_d.operations]
+    @test :predict in offered
+    @test :pointwise_loglik in offered
+    @test !(:fit in offered)
+    # The population parameters it conditions ON are still there to be fed in;
+    # only the subject block became a generated quantity.
+    outs = Dict(o.name => o for o in held_d.stan.outputs)
+    @test outs[:b_p_subject].kind === :generated_quantity
+    @test outs[:b_p_subject_L].kind === :parameter
+    @test outs[:b_p_subject_tau].kind === :parameter
+    # ... and the unmarked sibling keeps the very same block as a parameter,
+    # so the difference is the mark and nothing else.
+    unmarked_outs = Dict(o.name => o
+                         for o in brm_descriptor(sb).stan.outputs)
+    @test unmarked_outs[:b_p_subject].kind !== :generated_quantity
+end
+
+@testset "generative_plan snapshots a cv / centered model" begin
+    df = bucket_df()
+    brmi = bucket_builder(df)
+
+    for kwargs in ((; cv_groups=[:subject]), (; centered_groups=[:subject]))
+        sb = SBBRMI(brmi; mod=@__MODULE__, kwargs...)
+        plan = generative_plan(sb)
+        @test BayesianRegressionModels.stan_code(plan) ==
+              BayesianRegressionModels.stan_code(sb)
+        @test any(d -> d.role === :observation && d.target === :y, plan.declarations)
+    end
+end
