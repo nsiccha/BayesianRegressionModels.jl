@@ -89,6 +89,17 @@ const _RANEF_FAMILIES = Dict{Symbol,NamedTuple}(
     :ranef_correlated_draws    => (; z = :z_flat, layout = :flat_term_group, noncentered = true),
     :ranef_correlated_by       => (; z = :z,      layout = :group_term,      noncentered = true),
     :ranef_correlated_by_draws => (; z = :z,      layout = :group_term,      noncentered = true),
+    # Centered emissions — the opt-in `SBBRMI(...; centered_groups = [:g])` path,
+    # which SHIPS. They are DESCRIBED here so `ranef_blocks` can list them, and
+    # refused at the operation by `_ranef_assert_noncentered`: the coordinate is
+    # the effect ITSELF, so zeroing or re-drawing it would silently return a
+    # different quantity. Describing is always safe; substituting is not. Layouts
+    # measured against `param_unc_names` with n_terms=3, n_groups=2 so `.g.t` and
+    # `.t.g` are distinguishable, against the `ranef_correlated_by` control in
+    # the same capture.
+    :ranef_intercept_centered        => (; z = :xi, layout = :group,      noncentered = false),
+    :ranef_correlated_centered       => (; z = :b,  layout = :group_term, noncentered = false),
+    :ranef_correlated_draws_centered => (; z = :b,  layout = :group_term, noncentered = false),
 )
 
 """
@@ -109,9 +120,12 @@ address its draws without reading the generated Stan.
   `CategoricalVector`). `levels[g]` is the label of column `g` of the block.
 - `n_terms` / `n_groups` — the block's shape.
 - `z` — the emitted Stan parameter carrying the STANDARDISED draw.
-- `noncentered` — see [`population_draws`](@ref). Currently true for every
-  emitted family; it is reported rather than assumed so that a future centered
-  emission fails loudly here instead of silently downstream.
+- `noncentered` — see [`population_draws`](@ref). **Not always true**, and not a
+  formality: `centered_groups = [:g]` emits the three `*_centered` families with
+  `noncentered = false`. Those blocks are DESCRIBED normally — listing them,
+  reading `levels`, resolving coordinates all work — and it is
+  `population_draws` / `transport_draws` that refuse them. So a successful
+  `ranef_blocks` is NOT clearance to zero or transport; branch on this flag.
 
 Obtain with [`ranef_blocks`](@ref); resolve to unconstrained coordinates with
 [`ranef_coordinates`](@ref).
