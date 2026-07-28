@@ -1,8 +1,8 @@
-# Adaptive partial centering for correlated random-effect blocks.
+# Adaptive partial centering for ordinary random-effect blocks.
 #
 # This file owns only BRM/Stan emission semantics: which unconstrained
-# coordinates are one block's effects, LKJ-Cholesky free values, and positive
-# scales, plus the pure-Julia reconstruction of C = diag(tau) * L.  WarmupHMC
+# coordinates are one block's effects, optional LKJ-Cholesky free values, and
+# positive scales, plus the pure-Julia reconstruction of C.  WarmupHMC
 # owns the online candidate accumulators and window lifecycle through the
 # optional extension method of `adaptive_centering_problem`.
 
@@ -13,6 +13,11 @@ const _ADAPTIVE_CORRELATED_FAMILIES = Set((
     :ranef_correlated_draws_centered,
 ))
 
+const _ADAPTIVE_INTERCEPT_FAMILIES = Set((
+    :ranef_intercept,
+    :ranef_intercept_centered,
+))
+
 const _ADAPTIVE_STRATIFIED_FAMILIES = Set((
     :ranef_correlated_by,
     :ranef_correlated_by_draws,
@@ -21,7 +26,7 @@ const _ADAPTIVE_STRATIFIED_FAMILIES = Set((
 """
     AdaptiveCenteringBlock
 
-The unconstrained-coordinate description needed to adapt one correlated
+The unconstrained-coordinate description needed to adapt one ordinary
 random-effect block without parsing generated Stan.
 
 - `ranef` is BRM's emitted [`RanefBlock`](@ref).
@@ -29,10 +34,10 @@ random-effect block without parsing generated Stan.
   standardised `z` emission and `1.0` for a `centered_groups=` emission.
 - `effects[k,g]` indexes term `k`, group `g` in the compiled model's
   unconstrained vector.
-- `cholesky_free` indexes Stan's `K(K-1)/2` unconstrained values for the
-  block's `cholesky_factor_corr[K] L`.
-- `log_scales` indexes the unconstrained values underlying the positive
-  marginal scales `tau` (Stan constrains them with `exp`).
+- `cholesky_free` indexes Stan's `K(K-1)/2` unconstrained values for a
+  correlated block's `cholesky_factor_corr[K] L`; it is empty at `K=1`.
+- `log_scales` indexes the unconstrained values underlying the positive scale:
+  `tau` for a correlated emission, or `log_scale` for the `(1 | g)` fast path.
 
 Construct with [`adaptive_centering_blocks`](@ref).  Indices are resolved by
 name against the caller-supplied unconstrained-name vector; no ordering of the
@@ -72,8 +77,8 @@ end
 """
     adaptive_centering_blocks(model, unc_names) -> Vector{AdaptiveCenteringBlock}
 
-Describe every ordinary correlated random-effect block in `model` for adaptive
-partial centering. `model` is an [`SBBRMI`](@ref) or [`GenerativePlan`](@ref),
+Describe every ordinary random-effect block in `model` for adaptive partial
+centering. `model` is an [`SBBRMI`](@ref) or [`GenerativePlan`](@ref),
 and `unc_names` is the compiled model's unconstrained parameter-name vector
 (for example BridgeStan's `param_unc_names`).
 
@@ -85,13 +90,13 @@ Every intermediate source uses the triangular term-wise map
 u[k] = c[k] * sum(C[k,l] * z[l] for l < k) + C[k,k]^c[k] * z[k]
 ```
 
-with `C = diag(tau) * L`.  Consequently `c=0` is the literal standardised
-draw and `c=1` is the literal model-scale correlated effect.
+with `C = diag(tau) * L`. At `K=1`, this reduces to `u = s^c * z` with
+`s = exp(log_scale)` and no Cholesky coordinates. Consequently `c=0` is the
+literal standardised draw and `c=1` is the literal model-scale effect.
 
 Stratified `gr(g, by=b)` blocks currently raise rather than being silently
 left fixed: they carry one `L,tau` frame per stratum and need a separate indexed
-metadata contract. Random intercepts are scalar rather than correlated and are
-not returned.
+metadata contract.
 """
 function adaptive_centering_blocks(model, unc_names)
     pos = _ranef_name_positions(unc_names)
@@ -104,13 +109,16 @@ function adaptive_centering_blocks(model, unc_names)
             "Cholesky/scale frame per stratum and must not be treated as an ",
             "ordinary single-frame block.",
         )
-        ranef.family in _ADAPTIVE_CORRELATED_FAMILIES || continue
+        is_intercept = ranef.family in _ADAPTIVE_INTERCEPT_FAMILIES
+        is_correlated = ranef.family in _ADAPTIVE_CORRELATED_FAMILIES
+        (is_intercept || is_correlated) || continue
         K = ranef.n_terms
-        K > 1 || continue
         n_cholesky = K * (K - 1) ÷ 2
         binding = ranef.binding
-        cholesky_names = ["$(binding)_L.$i" for i in 1:n_cholesky]
-        scale_names = ["$(binding)_tau.$i" for i in 1:K]
+        cholesky_names = is_intercept ? String[] :
+            ["$(binding)_L.$i" for i in 1:n_cholesky]
+        scale_names = is_intercept ? ["$(binding)_log_scale"] :
+            ["$(binding)_tau.$i" for i in 1:K]
         target_c = ranef.noncentered ? 0.0 : 1.0
         push!(out, AdaptiveCenteringBlock(
             ranef,
@@ -171,7 +179,7 @@ end
     adaptive_centering_problem(model, problem, ad_backend; kwargs...)
 
 Wrap a compiled BRM `problem` in WarmupHMC's strictly-online adaptive
-correlated-centering transform. This method is supplied by BRM's WarmupHMC
+centering transform. This method is supplied by BRM's WarmupHMC
 extension when `WarmupHMC` is loaded; calling it without that optional package
 raises a normal `MethodError`.
 """

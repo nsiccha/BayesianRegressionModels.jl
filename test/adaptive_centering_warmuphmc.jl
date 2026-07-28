@@ -64,6 +64,71 @@ function source_observation(x, block, controls, innovations, invariant_gradient)
     position, gradient
 end
 
+@testset "scalar random intercept transform and scores are source invariant" begin
+    names = [
+        "r_mu_subject_log_scale",
+        "r_mu_subject_xi.1",
+        "r_mu_subject_xi.2",
+    ]
+    sb = SBBRMI(intercept_builder(df); mod=@__MODULE__)
+    block = only(adaptive_centering_blocks(sb, names))
+    state, ir = AC_EXT._adaptive_centering_reparametrizer([block])
+    @test first.(ir.pairs) == [2, 3]
+
+    controls = [0.2, 0.8]
+    set_adaptive_sources!(state, ir, controls)
+    x = [log(1.7), -0.4, 0.9]
+    expected_ljac, expected = manual_adaptive_map(x, block, controls)
+    ljac, mapped = ir(x)
+    @test ljac ≈ expected_ljac atol=1e-15
+    @test mapped ≈ expected atol=1e-15
+    inverse_ljac, roundtrip = WarmupHMC._inverse_with_logabsdet_jacobian(ir, mapped)
+    @test inverse_ljac ≈ -ljac atol=1e-15
+    @test roundtrip ≈ x atol=1e-15
+
+    centered = SBBRMI(
+        intercept_builder(df); mod=@__MODULE__, centered_groups=[:subject],
+    )
+    centered_block = only(adaptive_centering_blocks(centered, names))
+    centered_state, centered_ir =
+        AC_EXT._adaptive_centering_reparametrizer([centered_block])
+    set_adaptive_sources!(centered_state, centered_ir, controls)
+    expected_centered_ljac, expected_centered =
+        manual_adaptive_map(x, centered_block, controls)
+    centered_ljac, centered_mapped = centered_ir(x)
+    @test centered_ljac ≈ expected_centered_ljac atol=1e-15
+    @test centered_mapped ≈ expected_centered atol=1e-15
+    centered_inverse_ljac, centered_roundtrip =
+        WarmupHMC._inverse_with_logabsdet_jacobian(centered_ir, centered_mapped)
+    @test centered_inverse_ljac ≈ -centered_ljac atol=1e-15
+    @test centered_roundtrip ≈ x atol=1e-15
+
+    innovations = reshape([0.3, -0.8], 1, 2)
+    invariant_gradient = reshape([-0.4, 0.9], 1, 2)
+    frames = map((zeros(2), controls, ones(2))) do source_controls
+        set_adaptive_sources!(state, ir, source_controls)
+        position, gradient = source_observation(
+            x, block, source_controls, innovations, invariant_gradient,
+        )
+        AC_EXT._prepare_frame(state, ir, position, gradient)
+    end
+    for frame in frames
+        @test frame.location == zeros(2)
+        @test frame.innovation ≈ vec(innovations) atol=2e-15
+        @test frame.invariant_gradient ≈ vec(invariant_gradient) atol=2e-15
+    end
+    for p in eachindex(ir.pairs), t in 0.0:0.1:1.0
+        candidate = WarmupHMC.PartiallyCentered(t)
+        observations = [AC_EXT._score_candidate(
+            frame, p, first(ir.pairs[p]), last(ir.pairs[p]), candidate,
+        ) for frame in frames]
+        @test all(isapprox(obs[2], observations[1][2]; atol=2e-15)
+                  for obs in observations)
+        @test all(isapprox(obs[3], observations[1][3]; atol=2e-15)
+                  for obs in observations)
+    end
+end
+
 @testset "WarmupHMC correlated transform is exact at both BRM endpoints" begin
     @test !isnothing(AC_EXT)
     sb = SBBRMI(builder(df); mod=@__MODULE__)
