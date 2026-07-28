@@ -84,7 +84,7 @@ export _sb_term_group_block, _sb_emit_group_block_term!
 export popefs, cdirichlet, c0dirichlet, c01dirichlet,
        ranef_intercept, ranef_correlated, ranef_correlated_by,
        ranef_correlated_draws, ranef_correlated_by_draws,
-       ranef_intercept_cv, ranef_correlated_cv, ranef_correlated_draws_cv,
+       ranef_intercept_cv, ranef_correlated_cv,
        ranef_intercept_centered, ranef_correlated_centered,
        ranef_correlated_draws_centered,
        _sb_mo, _sb_cat, _sb_ar1, _sb_s, _sb_me, _sb_hsgp, _sb_hsgp_by, _sb_horseshoe,

@@ -149,14 +149,30 @@ end
 # Same parameterization as `ranef_correlated` but returns the raw per-group
 # matrix `b` (n_groups x n_terms) so multiple sub-formulas can each slice out
 # their own column(s) and apply their own Z separately.
+#
+# FLAT, not a plate, and there is deliberately NO `_cv` sibling: `n_groups` is
+# an ordinary kwarg, so the CALLER picks the size expression and the cv taint
+# rides in with it. `_sb_emit_id_bucket_sampling!` passes the data scalar
+# `n_<g>` by default and `maximum(<g>_idx)` for a group in `cv_groups`; in the
+# latter case a `maybecv(:<g>_idx)` mark reaches the declared size and the whole
+# block flips to a generated-quantities re-draw. One submodel serves both.
+#
+# A plate CANNOT serve the cv case, which is why this one is flat. StanBlocks'
+# plate branch (`forward.jl`, `forward!(::SamplingExpr{Symbol,<:StanExpr})`)
+# returns before the `cv ? :quantities : :parameter` decision, so a plate-
+# internal fresh parameter never consults cv -- even when the plate's OUTER size
+# is itself cv-tainted the promoted parameter stays in `parameters` while the
+# likelihood is dropped, i.e. it fails SILENTLY into a model that still samples
+# per-group effects nothing informs. Measured, not assumed. Flat is also the
+# faster Stan here: one vectorised `z_flat ~ std_normal()` instead of n_groups
+# per-cell calls in a loop (1.6x fewer us/gradient at n_groups=200, 3.3x at
+# n_groups=1000; identical log-density and gradients to ~1e-14).
 ranef_correlated_draws = StanBlocks.@slic begin
-    L   ~ lkj_corr_cholesky(1.; n=n_terms)
-    tau ~ std_normal(; n=n_terms, lower=0.)
-    b_cols ~ plate(; outer=(n_groups,)) do g
-        z::vector[n_terms] ~ std_normal()
-        diag_pre_multiply(tau, L) * z
-    end
-    return b_cols'   # n_groups x n_terms
+    L      ~ lkj_corr_cholesky(1.; n=n_terms)
+    tau    ~ std_normal(; n=n_terms, lower=0.)
+    z_flat ~ std_normal(; n=n_terms * n_groups)
+    z = reshape(z_flat, n_terms, n_groups)
+    return (diag_pre_multiply(tau, L) * z)'   # n_groups x n_terms
 end
 
 # ---- cv-contagious ranef variants (opt-in; for out-of-sample / CV models) ----
@@ -187,12 +203,23 @@ end
 # change. The typed-LHS `_by`/stratified path (`z::vector[n_groups, n_terms] ~
 # multi_std_normal()`) cannot -- StanBlocks' typed-LHS forward (forward.jl:355)
 # derives cv from the RHS call-args, not the declared-size, so a cv size there
-# yields a cv *parameter*, not a `:quantities` re-draw. Nor can the PLATE form:
-# cv taint does not reach a plate-internal fresh parameter (stanblocks-use §28),
-# which is why every `_cv` variant below is the flat-`z_flat` + reshape shape
-# rather than the plate shape its non-cv sibling now uses. So `gr(g, by=b)`
-# blocks stay unsupported; `(e | ID | g)` buckets are supported via
-# `ranef_correlated_draws_cv` below.
+# yields a cv *parameter*, not a `:quantities` re-draw. Nor can the PLATE form,
+# for a sharper reason than "the taint does not arrive": StanBlocks'
+# `forward!(::SamplingExpr{Symbol,<:StanExpr})` (forward.jl) dispatches to the
+# plate promotion and RETURNS before reaching the `cv ? :quantities : :parameter`
+# decision, so a plate-internal fresh parameter never consults cv AT ALL. Making
+# the plate's OUTER size cv-tainted does not help: the promoted parameter stays
+# in `parameters` while the likelihood is dropped -- a model that still samples
+# per-group effects nothing informs. Measured, not inferred. So `gr(g, by=b)`
+# blocks stay unsupported.
+#
+# These two `_cv` submodels are a MAINTENANCE WART, not a design: they duplicate
+# their siblings' bodies to change one size expression. The `(e | ID | g)` bucket
+# path no longer has one -- `ranef_correlated_draws` takes `n_groups` as an
+# ordinary kwarg and the emitter passes `maximum(<g>_idx)` at the call site. The
+# same collapse applies here as soon as `ranef_correlated` / `ranef_intercept`
+# stop going through a plate; that is a separate change to the plain `(… | g)`
+# path and is deliberately not bundled into this one.
 ranef_intercept_cv = StanBlocks.@slic begin
     log_scale ~ std_normal()
     xi ~ std_normal(; n=maximum(group_idx))
@@ -209,27 +236,12 @@ ranef_correlated_cv = StanBlocks.@slic begin
     return rows_dot_product(Z, b[group_idx, :])
 end
 
-# cv-contagious sibling of `ranef_correlated_draws`, for brms-style
-# `(e | ID | g)` cross-formula buckets whose group is opted into `cv_groups`.
-# Identical in *value* to `ranef_correlated_draws` (same column-major layout,
-# same `b = (diag_pre_multiply(tau, L) * z)'` map), but sizes `z_flat` from
-# `maximum(group_idx)` so the cv taint on `group_idx` reaches the draw and
-# flips the whole per-group block to a generated-quantities re-draw. `L`/`tau`
-# keep their untainted `n_terms` sizing, so under `maybecv(:<g>_idx)` only the
-# standardised draw is re-drawn -- a leave-all-out population re-draw from the
-# fitted covariance, exactly as for the plain `(… | g)` `_cv` path above.
-#
-# Flat-reshape rather than plate for the reason in the block comment above: cv
-# taint does not reach a plate-internal fresh parameter, so the plate form its
-# non-cv sibling uses cannot be made cv-contagious.
-ranef_correlated_draws_cv = StanBlocks.@slic begin
-    n_g    = maximum(group_idx)
-    L      ~ lkj_corr_cholesky(1.; n=n_terms)
-    tau    ~ std_normal(; n=n_terms, lower=0.)
-    z_flat ~ std_normal(; n=n_terms * n_g)
-    z = reshape(z_flat, n_terms, n_g)
-    return (diag_pre_multiply(tau, L) * z)'   # n_groups x n_terms
-end
+# NOTE: there is deliberately no `ranef_correlated_draws_cv`. The `(e | ID | g)`
+# bucket path gets its cv sizing from the call site (see the note on
+# `ranef_correlated_draws`), so one submodel covers both. The two `_cv`
+# submodels that remain above (`ranef_intercept_cv`, `ranef_correlated_cv`)
+# could collapse the same way once `ranef_correlated` also drops its plate;
+# that is a separate, larger change to the plain `(… | g)` path.
 
 # ---- centered ranef variants (opt-in; for strong per-group likelihoods) ------
 #
@@ -2902,10 +2914,17 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g:
     idx_name, n_name = _sb_ensure_group_data!(data, g)
     gname = name(g)
     if gname in cv_groups
-        # cv variant sizes `z_flat` from `maximum(group_idx)` and takes no
-        # `n_groups`, so the cv taint reaches the draw. Same value, same layout.
-        push!(stmts, :($bucket_name ~ ranef_correlated_draws_cv(;
-            group_idx=$idx_name, n_terms=$n_terms_name)))
+        # Same submodel as the default branch; only the SIZE EXPRESSION differs.
+        # Tracing `maximum(<g>_idx)` at the CALL SITE carries the cv taint on
+        # `<g>_idx` into the submodel's declared size, so a `maybecv(:<g>_idx)`
+        # mark flips the whole block to a generated-quantities re-draw. Value and
+        # column-major layout are unchanged. Bound to a named local first so the
+        # size appears once as `int <b>_n_g = max(<g>_idx);` instead of being
+        # inlined into every declaration.
+        n_cv_name = Symbol(bucket_name, :_n_g)
+        push!(stmts, :($n_cv_name = maximum($idx_name)))
+        push!(stmts, :($bucket_name ~ ranef_correlated_draws(;
+            group_idx=$idx_name, n_groups=$n_cv_name, n_terms=$n_terms_name)))
     elseif gname in centered_groups
         push!(stmts, :($bucket_name ~ ranef_correlated_draws_centered(;
             group_idx=$idx_name, n_groups=$n_name, n_terms=$n_terms_name)))

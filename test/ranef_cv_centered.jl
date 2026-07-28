@@ -64,10 +64,17 @@ end
     @test stanc_ok(code)
     # Opting in changes the emission (it must, or the cv mark cannot bite) ...
     @test code != base
-    # ... to the flat-`z_flat` cv shape, sized from `max(subject_idx)` rather
-    # than the untainted standalone `n_subject` data scalar.
+    # ... only in its SIZE EXPRESSION: the SAME `ranef_correlated_draws`
+    # submodel is called, sized from `max(subject_idx)` rather than the
+    # untainted standalone `n_subject` data scalar. There is no separate `_cv`
+    # submodel to keep in step -- that duplication is the thing this path
+    # deliberately does not have.
     @test occursin("b_p_subject_n_g = max(subject_idx)", code)
     @test occursin("b_p_subject_z_flat", code)
+    # Default and cv emissions differ ONLY in the size expression: same
+    # parameter names, same statement shapes.
+    @test occursin("b_p_subject_z_flat ~ std_normal()", base)
+    @test occursin("b_p_subject_z_flat ~ std_normal()", code)
     # The bucket is still ONE shared block sliced per sub-formula, so the
     # cross-formula correlation the `|p|` ID exists for is preserved.
     @test occursin("cholesky_factor_corr[n_terms_p_subject] b_p_subject_L", code)
