@@ -72,14 +72,14 @@ train_sb = SBBRMI(mixed_builder(train_df); mod = @__MODULE__)
     @test bucket.by === nothing
     @test bucket.levels == train_subjects      # index order == sort(unique(raw))
     @test (bucket.n_terms, bucket.n_groups) == (2, 4)
-    @test bucket.z === :b_p_subject_b_cols_z   # the standardised draw, not `b`
+    @test bucket.z === :b_p_subject_z_flat     # the standardised draw, not `b`
     @test bucket.noncentered
 
     plain = by_binding[:r_mu_subject]
     @test plain.family === :ranef_correlated
     @test plain.id === nothing                 # not a bucket
     @test (plain.n_terms, plain.n_groups) == (2, 4)
-    @test plain.z === :r_mu_subject_b_cols_z
+    @test plain.z === :r_mu_subject_z_flat
 
     site = by_binding[:r_mu_site]
     @test site.family === :ranef_intercept
@@ -93,6 +93,23 @@ train_sb = SBBRMI(mixed_builder(train_df); mod = @__MODULE__)
           [b.binding for b in blocks]
 end
 
+# `_RANEF_FAMILIES` is a hand-maintained mirror of the `@slic` submodels, and it
+# has drifted once: 2ffac3c collapsed `ranef_correlated_draws` from a plate
+# (`b_cols_z`) to a flat reshape (`z_flat`) without updating the table, which
+# made `ranef_coordinates` error on every bucket model. That drift was only
+# reachable by compiling a model — §3 below catches it, but §3 needs BridgeStan
+# and was not run before the landing. This check needs neither: the emitted Stan
+# SOURCE names the parameter, so declaring the wrong one is caught here.
+@testset "block z names exist in the emitted Stan source" begin
+    code = StanBlocks.stan_code(train_sb.model)
+    for b in ranef_blocks(train_sb)
+        @test occursin(string(b.z), code)
+    end
+    # The check discriminates: a name of the right shape that is NOT emitted
+    # must fail it, otherwise `occursin` is passing on a substring accident.
+    @test !occursin("b_p_subject_b_cols_z", code)
+end
+
 @testset "ranef_blocks — cv and stratified emissions" begin
     cv_builder = @brm begin
         sigma ~ Exponential(1)
@@ -101,18 +118,42 @@ end
     end
     cv_sb = SBBRMI(cv_builder(train_df); mod = @__MODULE__, cv_groups = [:subject])
     cv = only(ranef_blocks(cv_sb))
-    @test cv.family === :ranef_correlated_cv
-    @test cv.z === :r_mu_subject_z_flat        # the cv variant is flat-reshape
+    # cv is NOT a distinct family any more — same submodel, different size
+    # expression at the call site. So the block description is identical to the
+    # ordinary build's, and what has to be asserted is the emitted SIZE.
+    @test cv.family === :ranef_correlated
+    @test cv.z === :r_mu_subject_z_flat
     @test (cv.n_terms, cv.n_groups) == (2, 4)  # sized from maximum(group_idx)
+    cv_code = StanBlocks.stan_code(cv_sb.model)
+    @test occursin("r_mu_subject_n_g = max(subject_idx)", cv_code)
+    plain_code = StanBlocks.stan_code(
+        SBBRMI(cv_builder(train_df); mod = @__MODULE__).model)
+    @test !occursin("max(subject_idx)", plain_code)   # the default keeps n_subject
 
-    int_cv = only(ranef_blocks(
-        SBBRMI((@brm begin
-            sigma ~ Exponential(1)
-            mu    ~ 1 + x + (1 | subject)
-            y     ~ Normal(mu, sigma)
-        end)(train_df); mod = @__MODULE__, cv_groups = [:subject])))
-    @test int_cv.family === :ranef_intercept_cv
+    # REGRESSION. A cv-sized block's `n_groups=` names a Stan-side local
+    # (`<binding>_n_g = maximum(<g>_idx)`), NOT a data key — that indirection is
+    # what carries the taint. `ranef_blocks` used to look it up in `data` and
+    # error out. The `(… |ID| g)` bucket path has passed such a local since
+    # 2ffac3c, so `ranef_blocks` errored on every cv bucket model; no test
+    # covered it because the only cv fixture was a plain ranef, which still
+    # sized from `n_<g>` back then. Both paths are covered here now.
+    bucket_cv_sb = SBBRMI(mixed_builder(train_df); mod = @__MODULE__,
+                          cv_groups = [:subject])
+    bucket_cv = only(filter(b -> b.id === :p, ranef_blocks(bucket_cv_sb)))
+    @test bucket_cv.binding === :b_p_subject
+    @test bucket_cv.n_groups == 4                      # from maximum(subject_idx)
+    @test bucket_cv.z === :b_p_subject_z_flat
+
+    int_cv_sb = SBBRMI((@brm begin
+        sigma ~ Exponential(1)
+        mu    ~ 1 + x + (1 | subject)
+        y     ~ Normal(mu, sigma)
+    end)(train_df); mod = @__MODULE__, cv_groups = [:subject])
+    int_cv = only(ranef_blocks(int_cv_sb))
+    @test int_cv.family === :ranef_intercept
     @test int_cv.z === :r_mu_subject_xi
+    @test occursin("r_mu_subject_n_g = max(subject_idx)",
+                   StanBlocks.stan_code(int_cv_sb.model))
 
     by_df = merge(train_df, (; stratum = repeat([1, 2]; inner = length(train_df.x) ÷ 2)))
     by_sb = SBBRMI((@brm begin

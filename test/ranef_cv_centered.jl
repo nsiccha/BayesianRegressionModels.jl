@@ -12,8 +12,11 @@
 #                      IS the sampled parameter, covariance as its prior)
 #                      instead of the default non-centered standardised draw.
 #
-# The load-bearing invariant across both: the DEFAULT build is byte-for-byte
-# unchanged, so no committed model recompiles.
+# The load-bearing invariant across both: an EMPTY opt-in is byte-for-byte the
+# same emission as passing no kwarg at all, and naming a group the model does
+# not have is a no-op. (That is a statement about the kwargs, not a promise that
+# the default emission never moves — the plain `(… | g)` path was flattened off
+# its plate deliberately, which does change it.)
 
 using Test
 using BayesianRegressionModels
@@ -111,6 +114,43 @@ end
     @test occursin("b_p_subject_tau", params)
     # Population coefficients are unaffected — only the RE is held out.
     @test occursin("pop_eta_CL_beta_pop", params)
+end
+
+# The plain `(… | g)` path used to reach cv through its own `ranef_correlated_cv`
+# / `ranef_intercept_cv` submodels, which computed `maximum(group_idx)` inside
+# the body. Those are deleted; the plain path now takes the size from the call
+# site exactly as the bucket path does. This pins that the BEHAVIOUR survived the
+# deletion — same GQ flip, same leave-all-out semantics — on both plain shapes.
+@testset "cv mark flips a plain `(… | g)` block to a GQ population re-draw" begin
+    df = bucket_df()
+    for (builder, zname) in ((plain_builder, "r_mu_subject_z_flat"),
+                             (intercept_builder, "r_mu_subject_xi"))
+        sb = SBBRMI(builder(df); mod=@__MODULE__, cv_groups=[:subject])
+        code = StanBlocks.stan_code(sb.model)
+        @test stanc_ok(code)
+        @test occursin("r_mu_subject_n_g = max(subject_idx)", code)
+
+        tainted = Dict{Symbol,Any}(sb.data)
+        tainted[:subject_idx] = StanBlocks.stan.maybecv(:subject_idx, tainted[:subject_idx])
+        tcode = StanBlocks.stan_code(
+            StanBlocks.SlicModel(sb.model.model, tainted, sb.model.mod))
+        @test stanc_ok(tcode)
+        params = tcode[first(findfirst("parameters {", tcode)):first(findfirst("model {", tcode))]
+        gq     = tcode[first(findfirst("generated quantities {", tcode)):end]
+        @test !occursin(zname, params)          # left the parameter space ...
+        @test occursin(zname, gq)               # ... re-drawn in GQ
+    end
+    # The scale hyperparameters stay FITTED parameters in the correlated case --
+    # that is what makes the re-draw come from the fitted covariance rather than
+    # from the prior. Checked on the correlated shape, which has both.
+    sb = SBBRMI(plain_builder(df); mod=@__MODULE__, cv_groups=[:subject])
+    tainted = Dict{Symbol,Any}(sb.data)
+    tainted[:subject_idx] = StanBlocks.stan.maybecv(:subject_idx, tainted[:subject_idx])
+    tcode = StanBlocks.stan_code(
+        StanBlocks.SlicModel(sb.model.model, tainted, sb.model.mod))
+    params = tcode[first(findfirst("parameters {", tcode)):first(findfirst("model {", tcode))]
+    @test occursin("r_mu_subject_tau", params)
+    @test occursin("r_mu_subject_L", params)
 end
 
 @testset "centered emission — plain `(… | g)`" begin

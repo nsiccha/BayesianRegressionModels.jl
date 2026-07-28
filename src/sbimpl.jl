@@ -107,6 +107,10 @@ end
 # collapse: Part{chol}(1x1) -> log_scale ~ N(0,1), L[1,1] = exp(log_scale);
 # Part{grouped_normal}(n_groups, 1) -> xi ~ N(0,1), values = L[1,1] * xi;
 # per-obs contribution is values[group_idx]. No LKJ needed at n=1.
+#
+# `n_groups` is an ordinary kwarg, so the CALLER picks the size expression and
+# any cv taint rides in with it -- see the cv-contagion note below
+# `ranef_correlated_draws`. That is why there is no `_cv` sibling.
 ranef_intercept = StanBlocks.@slic begin
     log_scale ~ std_normal()
     xi ~ std_normal(; n=n_groups)
@@ -115,44 +119,48 @@ end
 
 # Correlated random effects for K terms x G groups. brms-style (1 + x + y | g).
 # Non-centered parameterization:
-#   L   ~ lkj_corr_cholesky(1, K)            # K x K Cholesky factor
-#   tau ~ half-std_normal(; n=K)             # per-term marginal scales
-#   b_cols ~ plate(; outer=(n_groups,)) do g   # one correlated K-vector per group
-#       z::vector[K] ~ std_normal(); diag_pre_multiply(tau, L) * z
-#   end                                         # collects matrix[K, n_groups]
-#   b   = b_cols'                               # n_groups x K correlated draws
+#   L      ~ lkj_corr_cholesky(1, K)         # K x K Cholesky factor
+#   tau    ~ half-std_normal(; n=K)          # per-term marginal scales
+#   z_flat ~ std_normal(; n=K*n_groups)      # one standardised vector
+#   z      = reshape(z_flat, K, n_groups)
+#   b      = (diag_pre_multiply(tau, L) * z)'   # n_groups x K correlated draws
 # Per-row contribution = Z[i, :] . b[group_idx[i], :], returned as a length-n
 # vector via rows_dot_product. Note: `(1 | g) + (0 + x | g)` and `(1 + x | g)`
 # are equivalent -- the walker merges everything sharing a group symbol into
 # one correlated block.
 #
-# PLATE migration (StanBlocks devibe 9210b05, snag plate-submodel-c fix): the
-# per-group correlated draw is now a `plate` over an inline correlated cell
-# instead of one flat `z_flat` + reshape. The column-major layout is preserved
-# (cell g -> column g of the collected matrix[n_terms, n_groups], same order as
-# reshape(z_flat, ...)), so BridgeStan log-density/gradient parity holds by
-# value. `ranef_correlated_cv` (CV-taint via outer size) and `ranef_correlated_by`
-# (per-stratum Cholesky = constrained-matrix-per-cell) stay flat-reshape until
-# their StanBlocks gaps close.
+# FLAT, not a plate, and `n_groups` is an ordinary kwarg -- the same shape
+# `ranef_correlated_draws` below uses, for the same two reasons (see the
+# cv-contagion note there): the CALLER picks the size expression so one submodel
+# serves both the ordinary and the cv-contagious case, and the flat spelling
+# samples `z` in one vectorised `std_normal()` call rather than `n_groups`
+# per-cell calls in a loop.
 #
-# KNOWN COST, not fixed here: `diag_pre_multiply(tau, L)` below is written inside
-# the cell body, so it is emitted inside the generated per-cell loop where it is
-# loop-invariant and gets recomputed (and AD-taped) `n_groups` times per leapfrog
-# step. Measured at n_terms=5, n_groups=1000: 742.9 us/gradient as written, 407.9
-# if the scale is bound to a local BEFORE the plate (the emitter hoists correctly
-# when you do), 221.9 for the flat/vectorised spelling. Fixing it here is a
-# one-line authoring change, but it alters this path's emitted Stan and every
-# committed model on it recompiles, so it is deliberately left out of the snag
-# that touched the `(e | ID | g)` bucket path only. StanBlocks snag
-# `benchmarked-brm-20aa0361` asks for the hoist to happen in the emitter instead.
+# This path WAS a plate (StanBlocks devibe 9210b05). It is not any more. The
+# plate could not carry cv sizing -- StanBlocks' plate branch returns before the
+# `cv ? :quantities : :parameter` decision, so a plate-internal fresh parameter
+# never consults cv at all and fails SILENTLY into a model that still samples
+# per-group effects nothing informs -- which forced a duplicate
+# `ranef_correlated_cv` whose body differed from this one in exactly one size
+# expression. Collapsing to flat deletes that duplicate. It also costs nothing:
+# StanBlocks now hoists loop-invariants out of plate bodies itself (snag
+# `benchmarked-brm-20aa0361` item 1, landed `94a71a0`), which closed about half
+# of the measured plate gap, and the residual is the per-call Cholesky logdet
+# that a plate cannot avoid at all (item 2, still open).
+#
+# EMITTED-STAN CHANGE: the sampled parameter is now `<binding>_z_flat`
+# (`vector[K*n_groups]`) where it was `<binding>_b_cols_z`
+# (`matrix[K, n_groups]`). Models on this path recompile, and their unconstrained
+# coordinate NAMES change from `<p>.<t>.<g>` to `<p>.<i>`, i = t + (g-1)*K.
+# Consumers that resolve coordinates through `ranef_blocks` / `ranef_coordinates`
+# (src/prediction.jl) follow automatically; one that hardcoded the parameter name
+# does not. The column-major layout is unchanged, so the VALUES are the same.
 ranef_correlated = StanBlocks.@slic begin
-    L   ~ lkj_corr_cholesky(1.; n=n_terms)
-    tau ~ std_normal(; n=n_terms, lower=0.)
-    b_cols ~ plate(; outer=(n_groups,)) do g
-        z::vector[n_terms] ~ std_normal()
-        diag_pre_multiply(tau, L) * z
-    end
-    b = b_cols'   # n_groups x n_terms
+    L      ~ lkj_corr_cholesky(1.; n=n_terms)
+    tau    ~ std_normal(; n=n_terms, lower=0.)
+    z_flat ~ std_normal(; n=n_terms * n_groups)
+    z = reshape(z_flat, n_terms, n_groups)
+    b = (diag_pre_multiply(tau, L) * z)'   # n_groups x n_terms
     return rows_dot_product(Z, b[group_idx, :])
 end
 
@@ -186,73 +194,52 @@ ranef_correlated_draws = StanBlocks.@slic begin
     return (diag_pre_multiply(tau, L) * z)'   # n_groups x n_terms
 end
 
-# ---- cv-contagious ranef variants (opt-in; for out-of-sample / CV models) ----
+# ---- cv-contagious sizing (opt-in; for out-of-sample / CV models) ------------
+#
+# There are NO `_cv` submodels. There used to be three; all three are gone. The
+# behaviour is not: it is now a property of the CALL SITE, because every
+# non-centered submodel above takes `n_groups` as an ordinary kwarg.
 #
 # StanBlocks' cv-contagion (see StanBlocks forward.jl:321 + types.jl:215):
 # a parameter taints to a `:quantities` (generated-quantities re-draw) qual iff
 # its TYPE is cv, and a type is cv iff its own flag OR *any element of its size*
 # is cv. So a random effect flips to a GQ population re-draw exactly when its
-# SIZE traces from a cv-marked input. The default `ranef_*` submodels above size
-# the std-normal draw from the standalone data scalar `n_groups`, which carries
-# no taint -- so `maybecv(:<group>_idx)` reaches `group_idx` but never the RE's
-# size, and the RE stays a fitted parameter (the QT out-of-sample FAIL).
+# SIZE traces from a cv-marked input.
 #
-# These `_cv` variants are identical in *value* but size the std-normal draw
-# from `maximum(group_idx)` instead, computed INSIDE the body so the cv taint on
-# `group_idx` propagates into the size (`maximum` -> `cv` via passes.jl:23) and
-# flips the draw to a generated-quantities re-draw. `L`/`tau` keep their
-# `n_terms` (untainted) sizing, so under marking ONLY the standardised draw `z`
-# is re-drawn -- a leave-all-out population re-draw from the fitted covariance,
-# the semantics confirmed for QT's `source` knob.
+# The emitters therefore pass, for a group `g`:
 #
-# They are OPT-IN: emitted only for groups passed in `SBBRMI(...; cv_groups=...)`
-# (used when generating a CV model artifact, e.g. qt_cv.stan). The default build
-# keeps the `n_groups`-sized submodels above, so committed models are emitted
-# byte-for-byte unchanged and never recompile.
+#   n_groups = n_<g>              (a standalone data scalar -- no taint; the RE
+#                                  stays a fitted parameter: the ordinary build)
+#   n_groups = maximum(<g>_idx)   (for `g in cv_groups`; `maximum` propagates the
+#                                  taint from `maybecv(:<g>_idx)` into the
+#                                  declared size via passes.jl:23, flipping the
+#                                  draw to a generated-quantities re-draw)
 #
-# Scope: only the clean `std_normal(; n=...)` forms below can flip via a size
-# change. The typed-LHS `_by`/stratified path (`z::vector[n_groups, n_terms] ~
-# multi_std_normal()`) cannot -- StanBlocks' typed-LHS forward (forward.jl:355)
-# derives cv from the RHS call-args, not the declared-size, so a cv size there
-# yields a cv *parameter*, not a `:quantities` re-draw. Nor can the PLATE form,
-# for a sharper reason than "the taint does not arrive": StanBlocks'
-# `forward!(::SamplingExpr{Symbol,<:StanExpr})` (forward.jl) dispatches to the
-# plate promotion and RETURNS before reaching the `cv ? :quantities : :parameter`
-# decision, so a plate-internal fresh parameter never consults cv AT ALL. Making
-# the plate's OUTER size cv-tainted does not help: the promoted parameter stays
-# in `parameters` while the likelihood is dropped -- a model that still samples
-# per-group effects nothing informs. Measured, not inferred. So `gr(g, by=b)`
-# blocks stay unsupported.
+# `L`/`tau` keep their `n_terms` (untainted) sizing either way, so under marking
+# ONLY the standardised draw is re-drawn -- a leave-all-out population re-draw
+# from the fitted covariance, the semantics confirmed for QT's `source` knob.
+# It stays OPT-IN via `SBBRMI(...; cv_groups=...)`; a build without it emits the
+# `n_<g>` form.
 #
-# These two `_cv` submodels are a MAINTENANCE WART, not a design: they duplicate
-# their siblings' bodies to change one size expression. The `(e | ID | g)` bucket
-# path no longer has one -- `ranef_correlated_draws` takes `n_groups` as an
-# ordinary kwarg and the emitter passes `maximum(<g>_idx)` at the call site. The
-# same collapse applies here as soon as `ranef_correlated` / `ranef_intercept`
-# stop going through a plate; that is a separate change to the plain `(… | g)`
-# path and is deliberately not bundled into this one.
-ranef_intercept_cv = StanBlocks.@slic begin
-    log_scale ~ std_normal()
-    xi ~ std_normal(; n=maximum(group_idx))
-    return exp(log_scale) * xi[group_idx]
-end
-
-ranef_correlated_cv = StanBlocks.@slic begin
-    n_g    = maximum(group_idx)
-    L      ~ lkj_corr_cholesky(1.; n=n_terms)
-    tau    ~ std_normal(; n=n_terms, lower=0.)
-    z_flat ~ std_normal(; n=n_terms * n_g)
-    z = reshape(z_flat, n_terms, n_g)
-    b = (diag_pre_multiply(tau, L) * z)'   # n_groups x n_terms
-    return rows_dot_product(Z, b[group_idx, :])
-end
-
-# NOTE: there is deliberately no `ranef_correlated_draws_cv`. The `(e | ID | g)`
-# bucket path gets its cv sizing from the call site (see the note on
-# `ranef_correlated_draws`), so one submodel covers both. The two `_cv`
-# submodels that remain above (`ranef_intercept_cv`, `ranef_correlated_cv`)
-# could collapse the same way once `ranef_correlated` also drops its plate;
-# that is a separate, larger change to the plain `(… | g)` path.
+# WHY THE DUPLICATES EXISTED, AND WHY THEY DO NOT NOW. A `_cv` sibling was only
+# ever needed where the size expression could not be supplied by the caller --
+# i.e. where the submodel computed it internally because it was a plate. A plate
+# cannot carry cv sizing for a sharper reason than "the taint does not arrive":
+# StanBlocks' `forward!(::SamplingExpr{Symbol,<:StanExpr})` (forward.jl)
+# dispatches to the plate promotion and RETURNS before reaching the
+# `cv ? :quantities : :parameter` decision, so a plate-internal fresh parameter
+# never consults cv AT ALL. Making the plate's OUTER size cv-tainted does not
+# help: the promoted parameter stays in `parameters` while the likelihood is
+# dropped -- a model that still samples per-group effects nothing informs, with
+# no error. Measured, not inferred. Once the non-centered paths stopped being
+# plates, each duplicate collapsed into its sibling.
+#
+# STILL UNSUPPORTED: the typed-LHS `_by`/stratified path
+# (`z::vector[n_groups, n_terms] ~ multi_std_normal()`). StanBlocks' typed-LHS
+# forward (forward.jl:355) derives cv from the RHS call-args, not the declared
+# size, so a cv size there yields a cv *parameter*, not a `:quantities` re-draw.
+# `gr(g, by=b)` in `cv_groups` is rejected loudly rather than emitted wrong.
+# Centered emission is likewise not combinable with cv sizing -- see below.
 
 # ---- centered ranef variants (opt-in; for strong per-group likelihoods) ------
 #
@@ -273,11 +260,12 @@ end
 #       bc
 #   end
 #
-# They are OPT-IN per grouping factor via `SBBRMI(...; centered_groups=[:g])`,
-# so the default build is emitted byte-for-byte unchanged and no committed model
-# recompiles. The returned VALUE is identical in distribution to the non-centered
-# sibling's -- only the parameterization (and hence the unconstrained coordinate
-# system) differs, so fitted draws are NOT interchangeable between the two.
+# They are OPT-IN per grouping factor via `SBBRMI(...; centered_groups=[:g])`:
+# a group not named here is emitted by the non-centered path above, untouched by
+# anything in this section. The returned VALUE is identical in distribution to
+# the non-centered sibling's -- only the parameterization (and hence the
+# unconstrained coordinate system) differs, so fitted draws are NOT
+# interchangeable between the two.
 #
 # Shape: the per-group effect is declared typed-LHS as `array[n_groups]
 # vector[n_terms]` and sampled with ONE vectorised `multi_normal_cholesky` call,
@@ -297,14 +285,24 @@ end
 #   plate, invariants hoisted          138.7          537.4
 #   typed-LHS (this file)               85.0          348.7
 #
-# Note what the middle row says: MOST of the naive plate's disadvantage is not
-# the plate concept, it is that `diag_pre_multiply(tau, L)` and `rep_vector(0.,
-# n_terms)` are emitted INSIDE the per-cell loop where they are loop-invariant
-# (StanBlocks snag `benchmarked-brm-20aa0361`; the emitter does hoist correctly
-# when the value is bound to a local outside the plate). The residual 1.5-1.6x
-# after hoisting is the logdet, and it is the whole justification for spelling
-# this one differently from the plate-based paths above. It is a real cost in
-# idiom uniformity, accepted deliberately, not an oversight.
+# Note what the middle row says: MOST of the naive plate's disadvantage was not
+# the plate concept, it was that `diag_pre_multiply(tau, L)` and `rep_vector(0.,
+# n_terms)` were emitted INSIDE the per-cell loop where they are loop-invariant.
+# That is FIXED UPSTREAM as of StanBlocks `94a71a0` (snag
+# `benchmarked-brm-20aa0361` item 1): the emitter now hoists loop-invariants out
+# of plate bodies itself, so the top row collapses onto the middle one and the
+# rows above are kept only as the record of how the gap was decomposed.
+# StanBlocks re-measured it at n_groups=1000 as 728.8 -> 476.9 us/grad centered,
+# 626.3 -> 308.4 non-centered, both matching a hand-hoisted control exactly.
+#
+# The residual 1.5-1.6x is the logdet, and it is the whole justification for
+# spelling this one differently from the rest of the file. It is a real cost in
+# idiom uniformity, accepted deliberately, not an oversight. Closing it needs
+# StanBlocks to collapse a plate whose cell body is a single `~` over a
+# multivariate distribution with cell-invariant parameters into one
+# array-vectorised call -- item 2 of that same snag, still open and not yet
+# filed as its own row. If it lands, this submodel can go back to a plate and
+# this whole comment can go with it.
 #
 # Scope: centered emission is NOT combinable with cv-contagious sizing. A
 # centered block's sampled parameter is the per-group effect itself, which under
@@ -830,10 +828,11 @@ sizing** -- the std-normal draw is sized from `maximum(<g>_idx)` instead of
 the standalone data scalar `n_<g>`, so marking the group index with
 `maybecv(:<g>_idx)` at trace time flips that RE to a generated-quantities
 population re-draw (leave-all-out / out-of-sample). This is used when
-generating a CV model artifact; the default (empty `cv_groups`) emits the
-group RE byte-for-byte as before, so committed models never recompile.
-Plain `(… | g)` ranefs and cross-formula `(… |ID| g)` buckets are both
-supported; stratified `gr(g, by=b)` errors if opted-in (see `ranef_*_cv`).
+generating a CV model artifact; the default (empty `cv_groups`) sizes the
+same submodel from `n_<g>` and leaves the RE a fitted parameter. There are no
+separate `_cv` submodels — the size expression passed at the call site is the
+entire difference. Plain `(… | g)` ranefs and cross-formula `(… |ID| g)`
+buckets are both supported; stratified `gr(g, by=b)` errors if opted-in.
 
 `centered_groups` is an opt-in set of grouping-factor names whose per-group
 random effect should be emitted in the **centered** parameterization -- the
@@ -842,8 +841,9 @@ prior (`bc ~ multi_normal_cholesky(0, diag_pre_multiply(tau, L))`), instead of
 the default non-centered standardised draw plus downstream scaling. Centered
 is the better geometry when the per-group likelihood is strong (dense repeated
 measurement per level, e.g. many PK samples per subject); non-centered stays
-the default, so committed models are unaffected. Plain `(… | g)` ranefs and
-`(… |ID| g)` buckets are supported; stratified `gr(g, by=b)` is not.
+the default, and a group not named here is untouched by this kwarg. Plain
+`(… | g)` ranefs and `(… |ID| g)` buckets are supported; stratified
+`gr(g, by=b)` is not.
 
 The two sets are **mutually exclusive per group**: a centered block's sampled
 parameter is the per-group effect itself, and no available spelling of that
@@ -2601,9 +2601,11 @@ end
 
 # Emit a single ranef block for one normalized group descriptor.
 # `cv_groups`: groups whose RE should be sized cv-contagiously (opt-in, for CV
-# model artifacts) -- emits the `_cv` submodel variants so `maybecv(:<g>_idx)`
-# flips the RE to a generated-quantities population re-draw. Empty by default,
-# in which case the emitted Stan is byte-identical to before.
+# model artifacts). There is no separate `_cv` submodel -- the SIZE EXPRESSION
+# passed here is the whole mechanism: `maximum(<g>_idx)` instead of the data
+# scalar `n_<g>` carries the taint from `maybecv(:<g>_idx)` into the declared
+# size and flips the RE to a generated-quantities population re-draw. Empty by
+# default. See the cv-contagion note above `ranef_intercept` in this file.
 function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, gterms, summands;
                                 cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}())
     g_backing = _as_data_column(parent(group))
@@ -2617,16 +2619,22 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, 
     data[idx_name] = g_idx
     data[n_name]   = n_levels
     r_name = Symbol(:r_, target, :_, g)
+    # The size expression the non-centered submodels are given. Bound to a named
+    # local in the cv case so it appears once as `int <r>_n_g = max(<g>_idx);`
+    # rather than being inlined into every declaration -- same shape as
+    # `_sb_emit_id_bucket_sampling!`.
+    n_groups_expr = n_name
+    if is_cv
+        n_groups_expr = Symbol(r_name, :_n_g)
+        push!(stmts, :($n_groups_expr = maximum($idx_name)))
+    end
     if length(gterms) == 1 && gterms[1] === 1
         # (1 | g) fast/equivalent path -- stays on ranef_intercept so the
-        # emitted Stan matches existing sb.3 smoke tests bit for bit. The cv
-        # variant sizes `xi` from `maximum(group_idx)` and takes no `n_groups`.
-        if is_cv
-            push!(stmts, :($r_name ~ ranef_intercept_cv(; group_idx=$idx_name)))
-        elseif is_centered
+        # emitted Stan matches existing sb.3 smoke tests bit for bit.
+        if is_centered
             push!(stmts, :($r_name ~ ranef_intercept_centered(; group_idx=$idx_name, n_groups=$n_name)))
         else
-            push!(stmts, :($r_name ~ ranef_intercept(; group_idx=$idx_name, n_groups=$n_name)))
+            push!(stmts, :($r_name ~ ranef_intercept(; group_idx=$idx_name, n_groups=$n_groups_expr)))
         end
     else
         col_exprs = Any[]
@@ -2637,17 +2645,14 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, 
         k_name = Symbol(:n_terms_, target, :_, g)
         data[k_name] = length(col_exprs)
         push!(stmts, :($Z_name = $(Expr(:call, :hcat, col_exprs...))))
-        if is_cv
-            push!(stmts, :($r_name ~ ranef_correlated_cv(;
-                Z=$Z_name, group_idx=$idx_name, n_terms=$k_name)))
-        elseif is_centered
+        if is_centered
             push!(stmts, :($r_name ~ ranef_correlated_centered(;
                 Z=$Z_name, group_idx=$idx_name,
                 n_groups=$n_name, n_terms=$k_name)))
         else
             push!(stmts, :($r_name ~ ranef_correlated(;
                 Z=$Z_name, group_idx=$idx_name,
-                n_groups=$n_name, n_terms=$k_name)))
+                n_groups=$n_groups_expr, n_terms=$k_name)))
         end
     end
     push!(summands, r_name)

@@ -74,14 +74,21 @@
 # Every layout below was measured against BridgeStan's `param_unc_names`, not
 # inferred from the Stan type. Keep this table in lockstep with the `@slic`
 # submodel definitions at the top of sbimpl.jl.
+#
+# THAT LOCKSTEP IS NOT FREE, AND IT HAS BROKEN ONCE. Commit 2ffac3c collapsed
+# `ranef_correlated_draws` from a plate (`b_cols_z`, `matrix[K, G]`) to a flat
+# reshape (`z_flat`, `vector[K*G]`) and did not touch this file, so every entry
+# here kept describing the old emission. `ranef_coordinates` errored loudly on
+# the bucket path -- correct behaviour, but only reachable by RUNNING a compiled
+# model, which is why it survived a landing. `probe_prediction_modes.jl` now
+# additionally asserts each block's `z` against the EMITTED STAN SOURCE, which
+# needs no BridgeStan and catches this drift at declaration level.
 const _RANEF_FAMILIES = Dict{Symbol,NamedTuple}(
-    :ranef_intercept           => (; z = :xi,       layout = :group,           noncentered = true),
-    :ranef_intercept_cv        => (; z = :xi,       layout = :group,           noncentered = true),
-    :ranef_correlated          => (; z = :b_cols_z, layout = :term_group,      noncentered = true),
-    :ranef_correlated_draws    => (; z = :b_cols_z, layout = :term_group,      noncentered = true),
-    :ranef_correlated_cv       => (; z = :z_flat,   layout = :flat_term_group, noncentered = true),
-    :ranef_correlated_by       => (; z = :z,        layout = :group_term,      noncentered = true),
-    :ranef_correlated_by_draws => (; z = :z,        layout = :group_term,      noncentered = true),
+    :ranef_intercept           => (; z = :xi,     layout = :group,           noncentered = true),
+    :ranef_correlated          => (; z = :z_flat, layout = :flat_term_group, noncentered = true),
+    :ranef_correlated_draws    => (; z = :z_flat, layout = :flat_term_group, noncentered = true),
+    :ranef_correlated_by       => (; z = :z,      layout = :group_term,      noncentered = true),
+    :ranef_correlated_by_draws => (; z = :z,      layout = :group_term,      noncentered = true),
 )
 
 """
@@ -239,9 +246,20 @@ function ranef_blocks(model)
         # name derived from `idx_key` is wrong (or the level coding drifted) and
         # every coordinate below would be addressed against the wrong column.
         n_groups = if haskey(d.keywords, :n_groups) && d.keywords.n_groups isa Symbol
-            _ranef_data_int(data, d.keywords.n_groups, d.target, fam)
+            ng_key = d.keywords.n_groups
+            if ng_key === Symbol(d.target, :_n_g)
+                # cv-contagious sizing: the emitter passed a Stan-side local
+                # `<binding>_n_g = maximum(<g>_idx)`, not a data key, precisely so
+                # the `maximum` carries the cv taint into the declared size. It is
+                # not in `data` and must not be looked for there — evaluate the
+                # same expression on the training index instead. Matched by exact
+                # name rather than by "absent from data" so a genuinely missing
+                # data key still errors loudly below.
+                maximum(_ranef_data_vec(data, idx_key, d.target, fam))
+            else
+                _ranef_data_int(data, ng_key, d.target, fam)
+            end
         else
-            # `_cv` variants size from `maximum(group_idx)` and pass no n_groups.
             maximum(_ranef_data_vec(data, idx_key, d.target, fam))
         end
         length(levels) == n_groups || error(
