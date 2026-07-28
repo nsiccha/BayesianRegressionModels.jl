@@ -38,6 +38,7 @@ include("descriptor.jl")
 # rather than being re-derived (differently) in every consumer.
 using Random
 include("prediction.jl")
+include("adaptive_centering.jl")
 
 # Public surface. The macros and value types everything downstream
 # (web-macro, bruno, tests) reaches for.
@@ -73,6 +74,8 @@ export parse!, _brm, stan_code, reprocess, restan_data, generative_plan
 # ("recov") modes, plus the random-effect block description both stand on.
 export RanefBlock, ranef_blocks, ranef_coordinates,
        population_draws, transport_draws
+export AdaptiveCenteringBlock, adaptive_centering_blocks,
+       adaptive_centering_problem
 
 # Introspection -- model-shape questions answered without re-walking
 # the operations dict.

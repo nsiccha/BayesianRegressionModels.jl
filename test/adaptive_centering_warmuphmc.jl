@@ -1,0 +1,171 @@
+include(joinpath(@__DIR__, "adaptive_centering.jl"))
+
+using WarmupHMC
+using ForwardDiff
+
+const AC_EXT = Base.get_extension(
+    BayesianRegressionModels, :BayesianRegressionModelsWarmupHMCExt,
+)
+
+function set_adaptive_sources!(state, ir, controls)
+    length(controls) == length(ir.pairs) || throw(DimensionMismatch())
+    ir.pairs .= map(ir.pairs, controls) do (idx, value), c
+        idx => WarmupHMC.Reparametrization(
+            value.target, WarmupHMC.PartiallyCentered(c), value.args...,
+        )
+    end
+    AC_EXT._sync_sources!(state, ir)
+end
+
+function manual_adaptive_map(x, block, controls)
+    y = copy(x)
+    C = BayesianRegressionModels._adaptive_block_cholesky(x, block)
+    ljac = zero(eltype(x))
+    p = 1
+    for g in 1:block.ranef.n_groups
+        z = similar(C, block.ranef.n_terms)
+        for k in 1:block.ranef.n_terms
+            c = controls[p]
+            m = sum(C[k, l] * z[l] for l in 1:k-1; init=zero(eltype(x)))
+            s = C[k, k]
+            u = x[block.effects[k, g]]
+            z[k] = (u - c * m) / s^c
+            y[block.effects[k, g]] =
+                block.target_c * m + s^block.target_c * z[k]
+            ljac += (block.target_c - c) * log(s)
+            p += 1
+        end
+    end
+    ljac, y
+end
+
+function source_observation(x, block, controls, innovations, invariant_gradient)
+    position = copy(x)
+    gradient = zeros(eltype(x), length(x))
+    C = BayesianRegressionModels._adaptive_block_cholesky(x, block)
+    p = 1
+    for g in 1:block.ranef.n_groups
+        A = zeros(eltype(x), block.ranef.n_terms, block.ranef.n_terms)
+        for k in 1:block.ranef.n_terms
+            c = controls[p]
+            m = sum(C[k, l] * innovations[l, g] for l in 1:k-1;
+                    init=zero(eltype(x)))
+            s = C[k, k]
+            position[block.effects[k, g]] = c * m + s^c * innovations[k, g]
+            A[k, k] = s^c
+            for l in 1:k-1
+                A[k, l] = c * C[k, l]
+            end
+            p += 1
+        end
+        gradient[block.effects[:, g]] .=
+            transpose(A) \ invariant_gradient[:, g]
+    end
+    position, gradient
+end
+
+@testset "WarmupHMC correlated transform is exact at both BRM endpoints" begin
+    @test !isnothing(AC_EXT)
+    sb = SBBRMI(builder(df); mod=@__MODULE__)
+    block = only(adaptive_centering_blocks(sb, UNC_NONCENTERED))
+    state, ir = AC_EXT._adaptive_centering_reparametrizer([block])
+    @test first.(ir.pairs) == vec(block.effects)
+
+    controls = [0.2, 0.6, 0.9, 0.8, 0.1, 0.5]
+    set_adaptive_sources!(state, ir, controls)
+    x = collect(range(-0.7, 0.9, length=length(UNC_NONCENTERED)))
+    x[block.cholesky_free] .= [0.2, -0.4, 0.7]
+    x[block.log_scales] .= log.([0.5, 1.5, 3.0])
+
+    expected_ljac, expected = manual_adaptive_map(x, block, controls)
+    ljac, mapped = ir(x)
+    @test ljac ≈ expected_ljac atol=1e-13
+    @test mapped ≈ expected atol=1e-13
+    inverse_ljac, roundtrip = WarmupHMC._inverse_with_logabsdet_jacobian(ir, mapped)
+    @test inverse_ljac ≈ -ljac atol=1e-13
+    @test roundtrip ≈ x atol=1e-13
+
+    weight = collect(range(0.3, 1.7, length=length(x)))
+    objective(v) = ((j, q) = ir(v); j + dot(weight, q))
+    gradient = ForwardDiff.gradient(objective, x)
+    step = 1e-6
+    finite_difference = [begin
+        plus, minus = copy(x), copy(x)
+        plus[i] += step
+        minus[i] -= step
+        (objective(plus) - objective(minus)) / (2step)
+    end for i in eachindex(x)]
+    @test gradient ≈ finite_difference atol=2e-8 rtol=2e-8
+
+    centered = SBBRMI(builder(df); mod=@__MODULE__, centered_groups=[:subject])
+    unc_centered = vcat(
+        UNC_NONCENTERED[1:9],
+        ["r_mu_subject_b.$g.$k" for g in 1:2 for k in 1:3],
+    )
+    centered_block = only(adaptive_centering_blocks(centered, unc_centered))
+    centered_state, centered_ir =
+        AC_EXT._adaptive_centering_reparametrizer([centered_block])
+    set_adaptive_sources!(centered_state, centered_ir, controls)
+    centered_ljac, centered_map = centered_ir(x)
+    expected_centered_ljac, expected_centered =
+        manual_adaptive_map(x, centered_block, controls)
+    @test centered_ljac ≈ expected_centered_ljac atol=1e-13
+    @test centered_map ≈ expected_centered atol=1e-13
+
+    copied = deepcopy(ir)
+    copied_state = copied.pairs[1][2].args[1].state
+    @test copied_state !== state
+    @test all(pair[2].args[1].state === copied_state for pair in copied.pairs)
+    set_adaptive_sources!(copied_state, copied, zeros(length(controls)))
+    @test state.sources == controls
+    @test copied_state.sources == zeros(length(controls))
+end
+
+@testset "candidate scores remove the installed source controls" begin
+    sb = SBBRMI(builder(df); mod=@__MODULE__)
+    block = only(adaptive_centering_blocks(sb, UNC_NONCENTERED))
+    state, ir = AC_EXT._adaptive_centering_reparametrizer([block])
+    x = collect(range(-0.7, 0.9, length=length(UNC_NONCENTERED)))
+    x[block.cholesky_free] .= [0.2, -0.4, 0.7]
+    x[block.log_scales] .= log.([0.5, 1.5, 3.0])
+    innovations = [0.3 -0.8; 1.1 0.4; -0.6 1.3]
+    invariant_gradient = [-0.4 0.9; 0.7 -1.2; 1.4 0.2]
+    source_controls = (
+        zeros(6),
+        [0.2, 0.6, 0.9, 0.8, 0.1, 0.5],
+        ones(6),
+    )
+
+    frames = map(source_controls) do controls
+        set_adaptive_sources!(state, ir, controls)
+        position, gradient = source_observation(
+            x, block, controls, innovations, invariant_gradient,
+        )
+        AC_EXT._prepare_frame(state, ir, position, gradient)
+    end
+    for frame in frames
+        @test frame.innovation ≈ vec(innovations) atol=2e-15
+        @test frame.invariant_gradient ≈ vec(invariant_gradient) atol=2e-15
+    end
+
+    for p in eachindex(ir.pairs), t in 0.0:0.1:1.0
+        candidate = WarmupHMC.PartiallyCentered(t)
+        observations = [AC_EXT._score_candidate(
+            frame, p, first(ir.pairs[p]), last(ir.pairs[p]), candidate,
+        ) for frame in frames]
+        @test all(isapprox(obs[2], observations[1][2]; atol=2e-15)
+                  for obs in observations)
+        @test all(isapprox(obs[3], observations[1][3]; atol=2e-15)
+                  for obs in observations)
+        # The source-dependent Jacobian offset is constant across candidates;
+        # its difference from t=0 is therefore source invariant too.
+        baselines = [AC_EXT._score_candidate(
+            frame, p, first(ir.pairs[p]), last(ir.pairs[p]),
+            WarmupHMC.PartiallyCentered(0.0),
+        )[1] for frame in frames]
+        @test all(isapprox(
+            observations[i][1] - baselines[i],
+            observations[1][1] - baselines[1]; atol=2e-15,
+        ) for i in eachindex(observations))
+    end
+end
