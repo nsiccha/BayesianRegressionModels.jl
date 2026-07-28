@@ -67,10 +67,18 @@ struct Horseshoe end
 
 Zero-inflated Poisson likelihood marker — a mixture of a point-mass at
 zero (with probability `zi`) and `Poisson(lambda)`. Surfaces as
-`y ~ ZeroInflatedPoisson(lambda, zi)`; sbimpl routes through
-`zero_inflated_poisson_lpmf`. Marker struct only.
+`y ~ ZeroInflatedPoisson(lambda, zi)` in the SBBRMI backend.
 """
 struct ZeroInflatedPoisson end
+
+"""
+    NegativeBinomial2(mu, phi)
+
+Negative-binomial likelihood marker parameterised by mean `mu` and positive
+shape/precision `phi`, matching Stan's `neg_binomial_2(mu, phi)`. This is
+deliberately distinct from Distributions.jl's `NegativeBinomial(r, p)`.
+"""
+struct NegativeBinomial2 end
 
 popefs = StanBlocks.@slic begin
     n_covariates = dims(X)[2]
@@ -409,6 +417,15 @@ StanBlocks.@deffun begin
         end
         rv
     end
+    zero_inflated_poisson_lpmf(y::int[n], lambda::vector[n], zi::real)::real = begin
+        zero_inflated_poisson_lpmf(y, lambda, rep_vector(zi, n))
+    end
+    zero_inflated_poisson_lpmf(y::int[n], lambda::real, zi::vector[n])::real = begin
+        zero_inflated_poisson_lpmf(y, rep_vector(lambda, n), zi)
+    end
+    zero_inflated_poisson_lpmf(y::int[n], lambda::real, zi::real)::real = begin
+        zero_inflated_poisson_lpmf(y, rep_vector(lambda, n), rep_vector(zi, n))
+    end
     # Hand-rolled per-element loop returning vector[n]. Mirrors the
     # `ordered_logistic_lpmfs` pattern in StanBlocks/builtin.jl --
     # avoids `jbroadcasted` which lives in `StanBlocks.builtin` and may
@@ -416,12 +433,21 @@ StanBlocks.@deffun begin
     zero_inflated_poisson_lpmfs(args...) = begin
         zero_inflated_poisson_lpmf(args...)
     end
-    zero_inflated_poisson_lpmfs(y::int[n], lambda, zi) = begin
+    zero_inflated_poisson_lpmfs(y::int[n], lambda::vector[n], zi::vector[n]) = begin
         rv::vector[n]
         for i in 1:n
             rv[i] = zero_inflated_poisson_lpmf(y[i], lambda[i], zi[i])
         end
         rv
+    end
+    zero_inflated_poisson_lpmfs(y::int[n], lambda::vector[n], zi::real)::vector[n] = begin
+        zero_inflated_poisson_lpmfs(y, lambda, rep_vector(zi, n))
+    end
+    zero_inflated_poisson_lpmfs(y::int[n], lambda::real, zi::vector[n])::vector[n] = begin
+        zero_inflated_poisson_lpmfs(y, rep_vector(lambda, n), zi)
+    end
+    zero_inflated_poisson_lpmfs(y::int[n], lambda::real, zi::real)::vector[n] = begin
+        zero_inflated_poisson_lpmfs(y, rep_vector(lambda, n), rep_vector(zi, n))
     end
     # Synthetic-data RNG used by SLIC's generated_quantities. Mirrors the
     # `binomial_logit_rng(int[n], …)` token-path pattern from
@@ -434,6 +460,39 @@ StanBlocks.@deffun begin
                 rv[i] = 0
             else
                 rv[i] = poisson_rng(lambda[i])
+            end
+        end
+        rv
+    end
+    zero_inflated_poisson_rng(int[n], lambda::vector[n], zi::real)::int[n] = begin
+        rv::int[n]
+        for i in 1:n
+            if bernoulli_rng(zi) == 1
+                rv[i] = 0
+            else
+                rv[i] = poisson_rng(lambda[i])
+            end
+        end
+        rv
+    end
+    zero_inflated_poisson_rng(int[n], lambda::real, zi::vector[n])::int[n] = begin
+        rv::int[n]
+        for i in 1:n
+            if bernoulli_rng(zi[i]) == 1
+                rv[i] = 0
+            else
+                rv[i] = poisson_rng(lambda)
+            end
+        end
+        rv
+    end
+    zero_inflated_poisson_rng(int[n], lambda::real, zi::real)::int[n] = begin
+        rv::int[n]
+        for i in 1:n
+            if bernoulli_rng(zi) == 1
+                rv[i] = 0
+            else
+                rv[i] = poisson_rng(lambda)
             end
         end
         rv
@@ -3611,6 +3670,38 @@ function _sb_lik_family!(stmts, target, ::Type{<:OrderedLogistic}, args::Tuple{A
     eta_expr = _sb_scalar_expr(args[1], data)
     push!(stmts, :($target ~ ordered_logistic($eta_expr, $cut_name)))
 end
+
+_sb_lik_family!(stmts, target, ::Type{<:ZeroInflatedPoisson},
+                args::Tuple{Any,Any}, data) =
+    _sb_lik_stan!(stmts, target, :zero_inflated_poisson, args, data)
+
+_sb_lik_family!(stmts, target, ::Type{<:NegativeBinomial2},
+                args::Tuple{Any,Any}, data) =
+    _sb_lik_stan!(stmts, target, :neg_binomial_2, args, data)
+
+# Distributions.jl expresses a location-scale Student-t as
+# `LocationScale(loc, scale, TDist(nu))`. The prior path already supports this
+# composition; likelihoods use the same lowering to Stan's
+# `student_t(nu, loc, scale)` rather than rejecting the wrapper family.
+function _sb_lik_family!(stmts, target, ::Type{<:LocationScale},
+                         args::Tuple{Any,Any,Any}, data)
+    loc, scale, base = args
+    base_e = _as_expr_column(base)
+    isnothing(base_e) && error(
+        "sbimpl: `LocationScale(...)` third arg must be a distribution call, got $(typeof(base))")
+    base_fam = getf(base_e)
+    isnothing(_as_distribution_type(base_fam)) && error(
+        "sbimpl: `LocationScale` base must be a Distribution type, got $(base_fam)")
+    stan_name = _sb_stan_dist_name(base_fam)
+    isnothing(stan_name) && error(
+        "sbimpl: `LocationScale` over `$(base_fam)` -- no Stan-name mapping for the base.")
+    base_args = _sb_stan_dist_args(base_fam, getargs(base_e))
+    length(base_args) >= 3 || error(
+        "sbimpl: `LocationScale` over `$(base_fam)`: base lowers to ",
+        "$(length(base_args)) Stan args, need >= 3 for location/scale slots.")
+    composed = (base_args[1], loc, scale, base_args[4:end]...)
+    _sb_lik_stan!(stmts, target, stan_name, composed, data)
+end
 # Single source of truth: Julia Distribution type -> Stan distribution
 # function name. Both the likelihood path (`_sb_lik_family!` below) and
 # the scalar-prior path (`_sb_emit_prior!` above) consult this. Adding
@@ -3634,7 +3725,6 @@ _sb_stan_dist_name(::Type{<:BernoulliLogit})      = :bernoulli_logit
 _sb_stan_dist_name(::Type{<:Binomial})            = :binomial
 _sb_stan_dist_name(::Type{<:BinomialLogit})       = :binomial_logit
 _sb_stan_dist_name(::Type{<:Poisson})             = :poisson
-_sb_stan_dist_name(::Type{<:ZeroInflatedPoisson}) = :zero_inflated_poisson
 _sb_stan_dist_name(::Type{<:NegativeBinomial})    = :neg_binomial
 _sb_stan_dist_name(::Type) = nothing
 

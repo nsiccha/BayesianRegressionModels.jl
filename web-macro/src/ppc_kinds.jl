@@ -94,7 +94,7 @@ function _ppc_kinds(brmi::BRMI)
     for o in outcomes(brmi)
         o.family in (Normal, Poisson, Bernoulli, BernoulliLogit,
                      Binomial, BinomialLogit, OrderedLogistic,
-                     ZeroInflatedPoisson) || continue
+                     ZeroInflatedPoisson, NegativeBinomial2) || continue
         # Trials column ONLY for Binomial / BinomialLogit -- other
         # families that happen to take a data-arg (none today, but e.g.
         # an exposure offset someday) shouldn't be misread as trials.

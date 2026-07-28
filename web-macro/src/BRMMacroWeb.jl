@@ -45,7 +45,7 @@ using BayesianRegressionModels: AbstractColumn, MissingColumn, DataColumn,
     # so the lookup succeeds.
     zero_inflated_poisson, zero_inflated_poisson_lpmf,
     zero_inflated_poisson_lpmfs, zero_inflated_poisson_rng,
-    Horseshoe, ZeroInflatedPoisson,
+    Horseshoe, ZeroInflatedPoisson, NegativeBinomial2,
     # Accessors used unqualified by html_expr.jl and stan_compile code.
     name, getargs, getf, getkwargs, getbroadcast, getop,
     # Macro / pipeline entry points called by Formula + stan_code.
