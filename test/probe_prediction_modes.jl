@@ -110,6 +110,79 @@ end
     @test !occursin("b_p_subject_b_cols_z", code)
 end
 
+# The check above can only reach families that `ranef_blocks` SUCCEEDS on, so an
+# emission with no table row is invisible to it — `ranef_blocks` raises before
+# the loop ever sees the block. That is the shape of the drift, so close it
+# directly: compare the table's keys against the `ranef_*` submodels the package
+# actually exports. Needs no model, no data and no BridgeStan.
+@testset "_RANEF_FAMILIES covers every emitted ranef_* submodel" begin
+    emitted = Set(nm for nm in names(BayesianRegressionModels; all = true)
+                  if startswith(String(nm), "ranef_") &&
+                     isdefined(BayesianRegressionModels, nm) &&
+                     getproperty(BayesianRegressionModels, nm) isa StanBlocks.SlicModel)
+    tabled = Set(keys(BayesianRegressionModels._RANEF_FAMILIES))
+    @test isempty(setdiff(emitted, tabled))   # an emission with no row
+    @test isempty(setdiff(tabled, emitted))   # a row for a submodel that is gone
+    # Pin the count too: both setdiffs stay empty if a submodel and its row are
+    # deleted together, which is fine, but a silent DROP should still be read.
+    @test length(emitted) == 8
+end
+
+# The centered families are the reason `noncentered` is reported rather than
+# assumed. `centered_groups=` ships, so a consumer may be handed one. Assert the
+# designed split: DESCRIBED by `ranef_blocks` (you can list it and read its
+# shape), REFUSED by the operations (the coordinate is the effect itself, so
+# zeroing it would silently mean something else).
+@testset "centered emissions — described, then refused at the operation" begin
+    centered_int_builder = @brm begin
+        sigma ~ Exponential(1)
+        mu    ~ 1 + x + (1 | subject)
+        y     ~ Normal(mu, sigma)
+    end
+    centered_corr_builder = @brm begin
+        sigma ~ Exponential(1)
+        mu    ~ 1 + x + (1 + x + t | subject)
+        y     ~ Normal(mu, sigma)
+    end
+    centered_bucket_builder = @brm begin
+        sigma  ~ Exponential(1)
+        eta_CL ~ 0 + x + (1 | p | subject)
+        eta_V  ~ 0 + x + (1 | p | subject)
+        eta_Q  ~ 0 + x + (1 | p | subject)
+        y      ~ Normal(eta_CL + eta_V + eta_Q, sigma)
+    end
+
+    # n_terms = 3 and n_groups = 2 throughout, so `.g.t` and `.t.g` are
+    # DISTINGUISHABLE — a square fixture cannot discriminate the two layouts.
+    cdf = mixed_df([11, 12])
+    for (builder, family, binding, z, n_terms) in (
+            (centered_int_builder,    :ranef_intercept_centered,        :r_mu_subject, :r_mu_subject_xi, 1),
+            (centered_corr_builder,   :ranef_correlated_centered,       :r_mu_subject, :r_mu_subject_b,  3),
+            (centered_bucket_builder, :ranef_correlated_draws_centered, :b_p_subject,  :b_p_subject_b,   3),
+        )
+        csb = SBBRMI(builder(cdf); mod = @__MODULE__, centered_groups = [:subject])
+        blocks = ranef_blocks(csb)                  # DESCRIBES — must not raise
+        b = only(filter(bb -> bb.binding === binding, blocks))
+        @test b.family === family
+        @test b.z === z
+        @test b.n_terms == n_terms
+        @test b.n_groups == 2
+        @test !b.noncentered
+        @test occursin(string(b.z), StanBlocks.stan_code(csb.model))
+
+        # ...and REFUSES, naming the block and why.
+        err = try
+            population_draws(csb, zeros(1, 2), ["a", "b"]; groups = :subject)
+            nothing
+        catch e
+            e
+        end
+        @test err isa ErrorException
+        @test occursin("NON-CENTERED", err.msg)
+        @test occursin(string(binding), err.msg)
+    end
+end
+
 @testset "ranef_blocks — cv and stratified emissions" begin
     cv_builder = @brm begin
         sigma ~ Exponential(1)
