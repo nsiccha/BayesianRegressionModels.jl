@@ -1,0 +1,4 @@
+https://raw.githubusercontent.com/ASKurz/Doing-Bayesian-Data-Analysis-in-brms-and-the-tidyverse/master/data.R/HtWtData30.csv
+https://raw.githubusercontent.com/ASKurz/Doing-Bayesian-Data-Analysis-in-brms-and-the-tidyverse/master/data.R/SoftmaxRegData2.csv
+https://vincentarelbundock.github.io/Rdatasets/csv/MCMCglmm/BTped.csv
+synthetic
