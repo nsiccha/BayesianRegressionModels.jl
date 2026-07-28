@@ -283,7 +283,12 @@ end
 
 A complete implementation must propagate CV taint through the plate's outer
 shape so the standardized group draws move to generated quantities exactly as
-`ranef_intercept_cv` does today.
+passing `n_groups=maximum(group_idx)` to `ranef_intercept` does today. That
+propagation is the blocker, not a detail: StanBlocks' plate branch returns
+before the `cv ? :quantities : :parameter` decision, so a plate-internal fresh
+parameter never consults cv at all and a cv outer size silently yields an
+in-sample block. Until that changes, the flat spelling is the only one that can
+serve both.
 
 ### Correlated random slopes and cross-formula draws
 
@@ -310,8 +315,10 @@ end
 
 One collected `matrix[n_terms,n_groups]` now serves ordinary random slopes,
 `|ID|` cross-formula buckets, Bordet parameter blocks, and any future custom
-group kernel. `ranef_correlated_cv` again changes only the cell count and relies
-on taint propagation.
+group kernel. The CV form again changes only the cell count and relies on taint
+propagation — which is exactly what the flat spelling gets for free by taking
+`n_groups` as a caller-supplied kwarg, and why there are no `_cv` submodels any
+more.
 
 ### Stratified correlated random effects
 
