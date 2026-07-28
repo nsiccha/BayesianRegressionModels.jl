@@ -31,6 +31,14 @@ include("sbimpl.jl")
 # parallel registry of its own.
 include("descriptor.jl")
 
+# Post-fit prediction modes — population-level ("no random effects") and
+# transported ("same draws, new covariates / new group levels") prediction.
+# Both are unconstrained-draw-matrix operations whose correctness depends on
+# the emitted random-effect parameterization, so they live next to the emitter
+# rather than being re-derived (differently) in every consumer.
+using Random
+include("prediction.jl")
+
 # Public surface. The macros and value types everything downstream
 # (web-macro, bruno, tests) reaches for.
 export @brm, @n, @x, @getproperty
@@ -60,6 +68,11 @@ export name, getf, getargs, getkwargs, getbroadcast, getop
 # Macro plumbing + compiled-output accessors used by downstream code
 # (web-macro's Formula struct, bruno's direct pipeline calls).
 export parse!, _brm, stan_code, reprocess, restan_data, generative_plan
+
+# Post-fit prediction — the population-level ("nore") and transported
+# ("recov") modes, plus the random-effect block description both stand on.
+export RanefBlock, ranef_blocks, ranef_coordinates,
+       population_draws, transport_draws
 
 # Introspection -- model-shape questions answered without re-walking
 # the operations dict.
