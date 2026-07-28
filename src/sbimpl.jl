@@ -134,6 +134,17 @@ end
 # value. `ranef_correlated_cv` (CV-taint via outer size) and `ranef_correlated_by`
 # (per-stratum Cholesky = constrained-matrix-per-cell) stay flat-reshape until
 # their StanBlocks gaps close.
+#
+# KNOWN COST, not fixed here: `diag_pre_multiply(tau, L)` below is written inside
+# the cell body, so it is emitted inside the generated per-cell loop where it is
+# loop-invariant and gets recomputed (and AD-taped) `n_groups` times per leapfrog
+# step. Measured at n_terms=5, n_groups=1000: 742.9 us/gradient as written, 407.9
+# if the scale is bound to a local BEFORE the plate (the emitter hoists correctly
+# when you do), 221.9 for the flat/vectorised spelling. Fixing it here is a
+# one-line authoring change, but it alters this path's emitted Stan and every
+# committed model on it recompiles, so it is deliberately left out of the snag
+# that touched the `(e | ID | g)` bucket path only. StanBlocks snag
+# `benchmarked-brm-20aa0361` asks for the hoist to happen in the emitter instead.
 ranef_correlated = StanBlocks.@slic begin
     L   ~ lkj_corr_cholesky(1.; n=n_terms)
     tau ~ std_normal(; n=n_terms, lower=0.)
@@ -271,12 +282,29 @@ end
 # Shape: the per-group effect is declared typed-LHS as `array[n_groups]
 # vector[n_terms]` and sampled with ONE vectorised `multi_normal_cholesky` call,
 # rather than as a plate over a per-cell `multi_normal_cholesky`. Both transpile
-# and both are stanc-clean, but the plate spelling emits `n_groups` separate
-# lpdf calls plus a second `matrix[n_terms, n_groups]` carrier in transformed
-# parameters; the typed-LHS spelling emits one lpdf (Stan's own vectorisation
-# over `array[] vector` factors the triangular solve once) and one carrier.
-# For the use case centered exists to serve -- many groups, each with a strong
-# likelihood -- that difference is the whole point.
+# and both are stanc-clean. The reason to prefer the typed-LHS spelling is the
+# Cholesky LOG-DETERMINANT: Stan evaluates `log(diagonal(L))` once per
+# `multi_normal_cholesky` CALL, so `n_groups` per-cell calls pay it `n_groups`
+# times where one array-vectorised call pays it once. A plate cannot express a
+# vectorised MVN, so this is a floor the plate spelling cannot reach.
+#
+# Measured (BridgeStan us/gradient, n_terms=5, identical posterior -- gradients
+# agree to 2.6e-13, log-densities differ by exactly the dropped normalisation
+# constant n_groups*K/2*log(2pi)):
+#
+#                                     n_groups=200   n_groups=1000
+#   plate, cell body written inline    198.3          859.4
+#   plate, invariants hoisted          138.7          537.4
+#   typed-LHS (this file)               85.0          348.7
+#
+# Note what the middle row says: MOST of the naive plate's disadvantage is not
+# the plate concept, it is that `diag_pre_multiply(tau, L)` and `rep_vector(0.,
+# n_terms)` are emitted INSIDE the per-cell loop where they are loop-invariant
+# (StanBlocks snag `benchmarked-brm-20aa0361`; the emitter does hoist correctly
+# when the value is bound to a local outside the plate). The residual 1.5-1.6x
+# after hoisting is the logdet, and it is the whole justification for spelling
+# this one differently from the plate-based paths above. It is a real cost in
+# idiom uniformity, accepted deliberately, not an oversight.
 #
 # Scope: centered emission is NOT combinable with cv-contagious sizing. A
 # centered block's sampled parameter is the per-group effect itself, which under
