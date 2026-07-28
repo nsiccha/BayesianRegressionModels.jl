@@ -193,7 +193,7 @@ end
     adaptive_centering_problem(model, problem, ad_backend; unc_names=nothing)
 
 Wrap a compiled BRM log-density in WarmupHMC's strictly-online adaptive
-centering for every ordinary correlated random-effect block.
+centering for every ordinary scalar or correlated random-effect block.
 
 `model` is the `SBBRMI` or `GenerativePlan` that emitted `problem`. When
 `problem` is StanBlocks' `StanProblem`, unconstrained names are read from its
@@ -217,8 +217,8 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
     names = isnothing(unc_names) ? _problem_unc_names(problem) : unc_names
     blocks = BRM.adaptive_centering_blocks(model, names)
     isempty(blocks) && error(
-        "BRM adaptive centering: this model has no supported correlated " *
-        "random-effect blocks (ordinary K≥2 blocks are required).",
+        "BRM adaptive centering: this model has no supported ordinary " *
+        "random-effect blocks (ordinary K≥1 blocks are required).",
     )
     state, ir = _adaptive_centering_reparametrizer(blocks)
     plan = WarmupHMC.CandidateScoringPlan(

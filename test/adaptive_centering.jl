@@ -9,6 +9,18 @@ builder = @brm begin
     y ~ Normal(mu, sigma)
 end
 
+intercept_builder = @brm begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + (1 | subject)
+    y ~ Normal(mu, sigma)
+end
+
+single_bucket_builder = @brm begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + (1 | p | subject)
+    y ~ Normal(mu, sigma)
+end
+
 df = (; subject = repeat([11, 12], inner=3),
       x = collect(range(-1.0, 1.0, length=6)),
       t = repeat([0.0, 1.0, 2.0], 2),
@@ -59,6 +71,77 @@ const UNC_NONCENTERED = [
     end
     @test err isa ErrorException
     @test occursin("r_mu_subject_L.2", err.msg)
+end
+
+@testset "adaptive centering includes scalar random intercepts" begin
+    names = [
+        "r_mu_subject_log_scale",
+        "r_mu_subject_xi.1",
+        "r_mu_subject_xi.2",
+    ]
+    sb = SBBRMI(intercept_builder(df); mod=@__MODULE__)
+    block = only(adaptive_centering_blocks(sb, names))
+    @test block.ranef.family === :ranef_intercept
+    @test block.ranef.n_terms == 1
+    @test block.target_c == 0.0
+    @test block.effects == reshape(2:3, 1, 2)
+    @test isempty(block.cholesky_free)
+    @test block.log_scales == [1]
+
+    centered = SBBRMI(
+        intercept_builder(df); mod=@__MODULE__, centered_groups=[:subject],
+    )
+    centered_block = only(adaptive_centering_blocks(centered, names))
+    @test centered_block.ranef.family === :ranef_intercept_centered
+    @test centered_block.target_c == 1.0
+    @test centered_block.effects == block.effects
+    @test isempty(centered_block.cholesky_free)
+    @test centered_block.log_scales == [1]
+
+    C = BayesianRegressionModels._adaptive_block_cholesky(
+        [log(2.5), -0.3, 0.7], block,
+    )
+    @test C ≈ reshape([2.5], 1, 1) atol=1e-15
+
+    err = try
+        adaptive_centering_blocks(sb, names[2:3])
+        nothing
+    catch e
+        e
+    end
+    @test err isa ErrorException
+    @test occursin("r_mu_subject_log_scale", err.msg)
+end
+
+@testset "adaptive centering includes one-term correlated buckets" begin
+    names = [
+        "b_p_subject_tau.1",
+        "b_p_subject_z_flat.1",
+        "b_p_subject_z_flat.2",
+    ]
+    sb = SBBRMI(single_bucket_builder(df); mod=@__MODULE__)
+    block = only(adaptive_centering_blocks(sb, names))
+    @test block.ranef.family === :ranef_correlated_draws
+    @test block.ranef.n_terms == 1
+    @test block.target_c == 0.0
+    @test block.effects == reshape(2:3, 1, 2)
+    @test isempty(block.cholesky_free)
+    @test block.log_scales == [1]
+
+    centered_names = [
+        "b_p_subject_tau.1",
+        "b_p_subject_b.1.1",
+        "b_p_subject_b.2.1",
+    ]
+    centered = SBBRMI(
+        single_bucket_builder(df); mod=@__MODULE__, centered_groups=[:subject],
+    )
+    centered_block = only(adaptive_centering_blocks(centered, centered_names))
+    @test centered_block.ranef.family === :ranef_correlated_draws_centered
+    @test centered_block.target_c == 1.0
+    @test centered_block.effects == reshape(2:3, 1, 2)
+    @test isempty(centered_block.cholesky_free)
+    @test centered_block.log_scales == [1]
 end
 
 @testset "Stan cholesky_factor_corr reconstruction" begin
