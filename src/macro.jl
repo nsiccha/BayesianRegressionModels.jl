@@ -12,6 +12,8 @@ name is gensym-ed). The two-argument form bakes `df` in and returns the
 
 - `lhs ~ rhs` — a sampling statement (likelihood or linear predictor).
 - `lhs = rhs` — a literal binding (named intermediate).
+- `effect(lp, coefficient) ~ Normal(location, scale)` — an SBBRMI
+  population-coefficient prior override.
 
 Multiple `~` lines produce a multi-response / distributional model.
 Inside an observed family's argument expression, nested `@brm(expr)` is the
@@ -97,6 +99,28 @@ else
 end
 """Marker function for literal-binding (`lhs = rhs`) operations in a `@brm` block. Dispatch tag only — never called."""
 function assign end
+
+"""
+    effect(coefficient)
+    effect(linear_predictor, coefficient)
+
+Address a population-level formula coefficient in a separate prior statement:
+
+```julia
+@brm begin
+    log_ka ~ 1 + weight + (1 | pk | subject)
+    effect(log_ka, Intercept) ~ Normal(log(1 / 8), 0.8)
+    effect(log_ka, weight) ~ Normal(0, 0.1)
+end
+```
+
+The two-argument form is explicit and is preferred for multi-predictor models.
+The one-argument form is accepted when the coefficient label occurs in exactly
+one linear predictor. `effect` is an address marker, not a callable function;
+the SBBRMI backend currently supports `Normal` overrides. Use
+[`effect_priors`](@ref) to inspect the captured statements.
+"""
+function effect end
 
 """Marker function for the brms `||` zero-correlation random-effects operator. Dispatch tag only — never called."""
 function doublepipe end
@@ -278,6 +302,9 @@ elseif x.head == :(=)
     parselocals!(rhs; info, val=:nonlocal)
     parselocals!(lhs; info, val=:local)
     :(@n $lhs = @x $assign($(xname(lhs)), $rhs))
+elseif isxcall(x, :~) && _is_effect_lhs(x.args[2])
+    _, lhs, rhs = x.args
+    _parse_effect!(lhs, rhs; info)
 elseif isxcall(x, :~)
     _, lhs, rhs = x.args
     # Shield brms-style `(e | ID | g)` ranef IDs from parselocals! so the bare
@@ -293,6 +320,28 @@ elseif isxcall(x, :~)
 else
     dump(x)
     error("Don't know how to handle parse!($x)!")
+end
+
+_is_effect_lhs(x) = isxcall(x, :effect)
+_effect_address_symbol(x::Symbol) = x
+_effect_address_symbol(x::QuoteNode) = x.value isa Symbol ? x.value : error(
+    "@brm: `effect(...)` addresses must be symbols, got $(repr(x.value))")
+_effect_address_symbol(x) = error(
+    "@brm: `effect(...)` addresses must be bare symbols, got $(repr(x))")
+
+function _parse_effect!(lhs::Expr, rhs; info)
+    raw_args = lhs.args[2:end]
+    length(raw_args) in (1, 2) || error(
+        "@brm: `effect(...)` expects `effect(coefficient)` or " *
+        "`effect(linear_predictor, coefficient)`, got $(length(raw_args)) arguments")
+    args = map(_effect_address_symbol, raw_args)
+    key = Symbol("__effect__", join(string.(args), "__"))
+    haskey(info.alllocals, key) && error(
+        "@brm: duplicate `effect($(join(args, ", ")))` prior statement")
+    info.alllocals[key] = :local
+    parselocals!(rhs; info, val=:nonlocal)
+    quoted_lhs = Expr(:call, :effect, map(QuoteNode, args)...)
+    :(@n $key = @x $(Expr(:call, :~, quoted_lhs, rhs)))
 end
 rewrite_ranef_ids(x) = x
 rewrite_ranef_ids(x::Expr) = if isxcall(x, :|) && length(x.args) == 3 &&

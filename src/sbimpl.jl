@@ -129,6 +129,17 @@ popefs = StanBlocks.@slic begin
     return X * beta_pop
 end
 
+# Population effects with coefficient-specific Normal priors. Kept as a
+# sibling of `popefs` so the default submodel (and every downstream direct use
+# of it) remains byte-for-byte unchanged. The caller supplies one location and
+# scale per design column; StanBlocks keeps the same prefixed `beta_pop` vector
+# parameter name as the default submodel.
+_popefs_normal = StanBlocks.@slic begin
+    n_covariates = dims(X)[2]
+    beta_pop ~ normal(beta_loc, beta_scale; n=n_covariates)
+    return X * beta_pop
+end
+
 cdirichlet = StanBlocks.@slic begin
     increments ~ dirichlet(alpha)
     return cumulative_sum(increments)
@@ -1983,6 +1994,97 @@ struct SBBRMI{P<:BRMI, M, D<:AbstractDict, PP<:AbstractDict}
     preproc::PP
 end
 
+# Resolve formula-level `effect(...) ~ Normal(...)` statements against the
+# authoritative population-column labels before emission. The returned vector
+# for each LP is aligned 1:1 with `popcoefnames`; `nothing` means retain the
+# default Normal(0, 1) for that column.
+function _sb_effect_prior_overrides(brmi::BRMI)
+    specs = effect_priors(brmi)
+    isempty(specs) && return Dict{Symbol,Vector{Any}}()
+
+    lp_names = Symbol[x.name for x in linear_predictors(brmi)]
+    labels_by_lp = Dict{Symbol,Vector{Symbol}}()
+    for lp in lp_names
+        labels = try
+            popcoefnames(brmi, lp)
+        catch err
+            error("sbimpl: cannot resolve population-effect labels for predictor `$lp` ",
+                  "while applying `effect(...)`: $(sprint(showerror, err))")
+        end
+        isnothing(labels) || (labels_by_lp[lp] = labels)
+    end
+
+    overrides = Dict{Symbol,Vector{Any}}()
+    for spec in specs
+        T = _as_distribution_type(spec.family)
+        (!isnothing(T) && T <: Normal) || error(
+            "sbimpl: population `effect(...)` overrides currently support only " *
+            "`Normal(location, scale)`; got `$(spec.family)`. Ordinary scalar " *
+            "parameter priors remain available for other supported families.")
+        isempty(spec.keywords) || error(
+            "sbimpl: `effect(...) ~ Normal(...)` does not accept distribution " *
+            "keywords; put bounds on an explicitly declared scalar parameter instead")
+
+        target = spec.predictor
+        if isnothing(target)
+            candidates = Symbol[lp for lp in lp_names
+                                if spec.coefficient in get(labels_by_lp, lp, Symbol[])]
+            isempty(candidates) && error(
+                "sbimpl: `effect($(spec.coefficient))` matches no population " *
+                "coefficient. Inspect `popcoefnames(brmi, lp)` for valid labels.")
+            length(candidates) == 1 || error(
+                "sbimpl: `effect($(spec.coefficient))` is ambiguous across linear " *
+                "predictors $(join(candidates, ", ")); use " *
+                "`effect(linear_predictor, $(spec.coefficient))`.")
+            target = only(candidates)
+        end
+
+        haskey(labels_by_lp, target) || error(
+            "sbimpl: `effect($target, $(spec.coefficient))` names no linear " *
+            "predictor with population coefficients. Available predictors: " *
+            "$(join(sort!(collect(keys(labels_by_lp))), ", ")).")
+        labels = labels_by_lp[target]
+        idx = findfirst(==(spec.coefficient), labels)
+        isnothing(idx) && error(
+            "sbimpl: `$(spec.coefficient)` is not a population coefficient of " *
+            "`$target`. Available labels: $(join(labels, ", ")).")
+        target_overrides = get!(overrides, target) do
+            Any[nothing for _ in labels]
+        end
+        isnothing(target_overrides[idx]) || error(
+            "sbimpl: duplicate prior override for " *
+            "`effect($target, $(spec.coefficient))`")
+        target_overrides[idx] = spec.expression
+    end
+    overrides
+end
+
+function _sb_effect_normal_args(rhs::ExprColumn)
+    args = _sb_stan_dist_args(getf(rhs), map(_sb_effect_prior_arg, getargs(rhs)))
+    length(args) == 2 || error(
+        "sbimpl: `effect(...) ~ Normal(...)` must lower to exactly location and " *
+        "scale arguments, got $(length(args))")
+    args
+end
+
+_sb_effect_prior_arg(x) = _sb_prior_arg(x)
+function _sb_effect_prior_arg(x::ExprColumn)
+    args = map(_sb_effect_prior_arg, getargs(x))
+    # Formula parsing captures literal arithmetic as ExprColumns. Evaluate an
+    # all-numeric effect-prior hyperparameter in Julia so `log(1 / 8)` retains
+    # Julia's floating division semantics instead of becoming Stan integer
+    # division. Symbol-bearing expressions stay as Stan expressions.
+    if all(a -> a isa Real, args)
+        value = try
+            getf(x)(args...)
+        catch
+            nothing
+        end
+        value isa Real && return value
+    end
+    Expr(:call, getf(x), args...)
+end
+
 SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
        centered_groups=Set{Symbol}()) = begin
     cv_groups = cv_groups isa Set ? cv_groups : Set{Symbol}(cv_groups)
@@ -2014,6 +2116,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     for (_, op) in pairs(brmi.operations)
         _sb_visit_op!(prepass, op)
     end
+    effect_overrides = _sb_effect_prior_overrides(brmi)
     # Prepass 1: stash every data-backed NamedColumn so later intercept-only
     # predictors have a length probe to hang `rep_vector(1., num_elements(...))`
     # off, regardless of iteration order. Decorators that materialise their
@@ -2053,7 +2156,8 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
         nc = _as_named_column(op)
         isnothing(nc) && error("sbimpl: top-level op `$key` is not a NamedColumn")
         obs_n = get(target_obs, key, nothing)
-        _sb_emit!(stmts, data, key, parent(nc); id_lookup, obs_n, cv_groups, centered_groups, group_block_lookup)
+        _sb_emit!(stmts, data, key, parent(nc); id_lookup, obs_n, cv_groups,
+                  centered_groups, group_block_lookup, effect_overrides)
     end
     # Pop the preproc side-channel BEFORE building the SlicModel so it never
     # pollutes Stan's data dict.
@@ -2726,8 +2830,8 @@ restan_data(sb::SBBRMI, new_df; freeze_constants::Bool=true) =
 
 # ---- top-level op dispatch ---------------------------------------------------
 
-_sb_emit!(stmts, data, key, op::ExprColumn; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict()) =
-    _sb_emit_expr!(stmts, data, key, getf(op), op; id_lookup, obs_n, cv_groups, centered_groups, group_block_lookup)
+_sb_emit!(stmts, data, key, op::ExprColumn; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Vector{Any}}()) =
+    _sb_emit_expr!(stmts, data, key, getf(op), op; id_lookup, obs_n, cv_groups, centered_groups, group_block_lookup, effect_overrides)
 # Raw data / missing columns appear as top-level ops when the formula mentions
 # them as bare references (e.g. `c2` in `loc ~ 1 + c2`). Nothing to emit — the
 # prepass already stashed data columns in `data`.
@@ -2735,9 +2839,10 @@ _sb_emit!(stmts, data, key, ::DataColumn; kwargs...) = nothing
 _sb_emit!(stmts, data, key, ::MissingColumn; kwargs...) = nothing
 _sb_emit!(stmts, data, key, op; kwargs...) = error("sbimpl: top-level op for `$key` not an ExprColumn (got $(typeof(op)))")
 
-_sb_emit_expr!(stmts, data, key, ::typeof(~), op; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict()) = begin
+_sb_emit_expr!(stmts, data, key, ::typeof(~), op; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Vector{Any}}()) = begin
     lhs, rhs = getargs(op, 2)
-    _sb_sampling!(stmts, data, key, lhs, rhs; id_lookup, obs_n, cv_groups, centered_groups, group_block_lookup)
+    _sb_sampling!(stmts, data, key, lhs, rhs; id_lookup, obs_n, cv_groups,
+                  centered_groups, group_block_lookup, effect_overrides)
 end
 _sb_emit_expr!(stmts, data, key, ::typeof(assign), op; id_lookup=_sb_empty_id_lookup(), kwargs...) = begin
     _, rhs = getargs(op, 2)
@@ -3227,8 +3332,15 @@ _sb_prior_arg(x) = error("sbimpl: unsupported prior-arg shape $(typeof(x))")
 
 # LHS backed by real data => this is a likelihood. Record the observed values
 # under the formula name in `data` and emit `key ~ dist(args...)`.
-_sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict()) =
-    _sb_sampling_backed!(stmts, data, key, parent(lhs), rhs; id_lookup, obs_n, cv_groups, centered_groups, group_block_lookup)
+_sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Vector{Any}}()) =
+    _sb_sampling_backed!(stmts, data, key, parent(lhs), rhs; id_lookup, obs_n,
+                         cv_groups, centered_groups, group_block_lookup,
+                         effect_overrides)
+
+# `effect(...) ~ Normal(...)` is metadata consumed by the constructor prepass;
+# it deliberately emits no independent parameter or likelihood statement.
+_sb_sampling!(_stmts, _data, _key, _lhs::ExprColumn{typeof(effect)}, _rhs;
+              kwargs...) = nothing
 
 _sb_sampling_backed!(stmts, data, key, backing::DataColumn, rhs; id_lookup, kwargs...) = begin
     data[key] = _sb_data_vec(key, parent(backing))
@@ -3238,7 +3350,8 @@ end
 _sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs;
                      id_lookup, obs_n=nothing, cv_groups=Set{Symbol}(),
                      centered_groups=Set{Symbol}(),
-                     group_block_lookup=Dict()) = begin
+                     group_block_lookup=Dict(),
+                     effect_overrides=Dict{Symbol,Vector{Any}}()) = begin
     rhs_e = _as_expr_column(rhs)
     if !isnothing(rhs_e)
         f = getf(rhs_e)
@@ -3253,7 +3366,9 @@ _sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs;
         _sb_submodel_rhs!(stmts, data, key, f, rhs_e) !== nothing && return
         _sb_emit_prior!(stmts, key, f, rhs_e) && return
     end
-    _sb_linear_predictor!(stmts, data, key, rhs; id_lookup, brmi_key=key, obs_n, cv_groups, centered_groups, group_block_lookup)
+    _sb_linear_predictor!(stmts, data, key, rhs; id_lookup, brmi_key=key, obs_n,
+                          cv_groups, centered_groups, group_block_lookup,
+                          effect_overrides)
 end
 
 _sb_sampling_backed!(stmts, data, key, backing, rhs; id_lookup, kwargs...) =
@@ -3270,16 +3385,20 @@ _sb_sampling_backed!(stmts, data, key, backing, rhs; id_lookup, kwargs...) =
 # Stan name. Per-`typeof(f)` overrides (`mi`, future `cens`/`trunc`, …) live
 # as separate methods of `_sb_sampling!`, mirroring vimpl's
 # `vbroadcasted(::ExprColumn{typeof(F)})` extension idiom.
-_sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict()) =
-    _sb_sampling_through_link!(stmts, data, key, getf(lhs), only(getargs(lhs)), rhs; id_lookup, obs_n, cv_groups, centered_groups, group_block_lookup)
+_sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Vector{Any}}()) =
+    _sb_sampling_through_link!(stmts, data, key, getf(lhs), only(getargs(lhs)), rhs;
+                               id_lookup, obs_n, cv_groups, centered_groups,
+                               group_block_lookup, effect_overrides)
 
 _sb_sampling_through_link!(stmts, data, key, f, inner, rhs; kwargs...) =
     error("sbimpl: expected NamedColumn inside link `$f(...)`, got $(typeof(inner))")
-function _sb_sampling_through_link!(stmts, data, key, f, inner::NamedColumn, rhs; id_lookup, obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict())
+function _sb_sampling_through_link!(stmts, data, key, f, inner::NamedColumn, rhs; id_lookup, obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Vector{Any}}())
     inv_f = InverseFunctions.inverse(f)
     inner_name = name(inner)
     pre_name = Symbol(nameof(f), :_, inner_name)
-    _sb_linear_predictor!(stmts, data, pre_name, rhs; id_lookup, brmi_key=key, obs_n, cv_groups, centered_groups, group_block_lookup)
+    _sb_linear_predictor!(stmts, data, pre_name, rhs; id_lookup, brmi_key=key,
+                          obs_n, cv_groups, centered_groups, group_block_lookup,
+                          effect_overrides)
     push!(stmts, :($inner_name = $(_sb_julia_to_stan_fn(inv_f))($pre_name)))
 end
 
@@ -3446,7 +3565,8 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
                                 obs_n::Union{Symbol,Nothing}=nothing,
                                 cv_groups=Set{Symbol}(),
                                 centered_groups=Set{Symbol}(),
-                                group_block_lookup=Dict())
+                                group_block_lookup=Dict(),
+                                effect_overrides=Dict{Symbol,Vector{Any}}())
     terms = _sb_terms(rhs)
     pop_terms    = Any[]
     ran_terms    = Any[]  # `(expr | group)` -> collected per-group below
@@ -3472,7 +3592,24 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
         # StanBlocks `hcat` promotes a lone vector to matrix[n,1] and folds to
         # append_col for two-or-more columns, so we can always just emit hcat.
         push!(stmts, :($X_name = $(Expr(:call, :hcat, col_exprs...))))
-        push!(stmts, :($pop_name ~ popefs(; X=$X_name)))
+        overrides = get(effect_overrides, brmi_key, nothing)
+        if isnothing(overrides)
+            push!(stmts, :($pop_name ~ popefs(; X=$X_name)))
+        else
+            length(overrides) == length(col_exprs) || error(
+                "sbimpl: internal effect-prior alignment error for `$brmi_key`: " *
+                "$(length(overrides)) priors for $(length(col_exprs)) columns")
+            beta_loc = Any[0.0 for _ in overrides]
+            beta_scale = Any[1.0 for _ in overrides]
+            for i in eachindex(overrides)
+                isnothing(overrides[i]) && continue
+                beta_loc[i], beta_scale[i] = _sb_effect_normal_args(overrides[i])
+            end
+            loc_expr = Expr(:vect, beta_loc...)
+            scale_expr = Expr(:vect, beta_scale...)
+            push!(stmts, :($pop_name ~ _popefs_normal(;
+                X=$X_name, beta_loc=$loc_expr, beta_scale=$scale_expr)))
+        end
         push!(summands, pop_name)
     end
 
