@@ -45,10 +45,10 @@ These are kept separate from new modeling semantics.
 
 ### A5. Completed at `11031f2`: `LocationScale(..., TDist(nu))` dispatcher
 
-- Relevance: 5 rows, 5 distinct historical formulas. Four plain Student-t rows have 4 distinct current translation candidates; the fifth also needs known-SE-plus-residual composition.
+- Relevance: 5 rows, 5 distinct historical formulas. Four are plain Student-t rows; the fifth uses the executable known-SE-plus-residual composition.
 - Plain rows: `bambi:t_regression_t`, `kruschke:guber1999_base`, `kruschke:guber1999_complement`, `kruschke:guber1999_interaction`.
 - Composed-SE row: `kruschke:income_famsize`.
-- The surface control is green, but no row is promoted merely from that shared control: the four plain rows still need authoritative historical degrees-of-freedom/prior recovery, and `kruschke:income_famsize` additionally needs the B7 response-uncertainty adapter.
+- The surface control is green, and the row-varying known-SE plus fitted-residual composition for `kruschke:income_famsize` is also stanc- and BridgeStan-green. All five rows remain semantic rewrites rather than executable historical translations until their authoritative degrees-of-freedom value/prior is recovered.
 
 ### A6. Completed at `11031f2`: `ZeroInflatedPoisson` dispatcher
 
@@ -69,7 +69,7 @@ These are stock-BRM surface gaps for which the source audit found StanBlocks pri
 | 3 | Fixed covariance / phylogenetic group adapter | 6 | 6 | 4 | 5 | 5 | 2 | 3 | **19** |
 | 4 | Categorical-outcome family and vector predictor | 5 | 5 | 4 | 5 | 5 | 3 | 2 | **19** |
 | 5 | Multi-axis/anisotropic HSGP term | 5 | 5 | 4 | 5 | 4 | 2 | 3 | **18** |
-| 6 | Row-varying measurement error / known-SE-plus-residual composition | 3 | 3 | 3 | 3 | 5 | 2 | 3 | **16** |
+| 6 | Row-varying predictor measurement error | 2 | 2 | 3 | 3 | 5 | 2 | 3 | **16** |
 | 7 | Multi-membership group term | 2 | 2 | 2 | 2 | 5 | 3 | 4 | **16** |
 | 8 | Likelihood/frequency weights | 2 | 2 | 2 | 2 | 5 | 3 | 4 | **16** |
 | 9 | Beta-binomial family adapter | 2 | 2 | 2 | 2 | 4 | 3 | 4 | **15** |
@@ -81,7 +81,7 @@ These are stock-BRM surface gaps for which the source audit found StanBlocks pri
 
 The numerical total is a prioritization aid, not a substitute for dependency order. The `B1`--`B14` section identifiers follow the audit taxonomy; the table's `Rank` column is the score order. For example, B9 and B10 outscore B6 because their semantics and substrate path are clearer despite covering fewer rows. Exact row receipts follow.
 
-The corrected inferred matrix's 29 rows classified `genuinely-missing-brm-surface` are exactly the row lists in B4, B5, B6, B7, B8, B9, B10, B11, the immediate row in B12, B13, and B14. B1--B3 and B12's basis-dependent follow-ons are conditional leverage: their formulas are recovered, but the current matrix correctly keeps their historical semantics unresolved until the D-section prerequisites are settled.
+The corrected inferred matrix's 28 rows classified `genuinely-missing-brm-surface` are exactly the row lists in B4, B5, B6, B7, B8, B9, B10, B11, the immediate row in B12, B13, and B14. B1--B3 and B12's basis-dependent follow-ons are conditional leverage: their formulas are recovered, but the current matrix correctly keeps their historical semantics unresolved until the D-section prerequisites are settled.
 
 The reuse/risk judgments are: B1 is reusable across survival and bounded-outcome families but needs family-specific normalizers and censor-code validation; B2 applies to multivariate regression generally but has high covariance/GQ risk; B3 generalizes to relationship-matrix random effects but needs robust level/matrix alignment; B4 is a broadly reusable nominal-response family with a new vector-predictor/GQ contract; B5 is reusable for spatial GP models but requires new multi-axis basis construction; B6 serves ordinal regression beyond proportional odds but is family/link-specific; B7 serves measurement-error models broadly but changes the latent-data and residual-scale contract; B8 is reusable across GAMs but basis construction is substantial; B9 and B10 are general-purpose terms with a clear plate/density substrate; B11, B12, B13 and B14 are bounded family adapters whose main risks are parameterization plus RNG/pointwise consistency.
 
@@ -123,9 +123,9 @@ There are 4 rows but only 3 distinct formulas because the two `condlog` rows sha
 
 ### B7. Measurement error and response uncertainty
 
-Exact rows: `mcelreath:waffle_divorce_meas_err`, `kruschke:income_famsize`, `vasishth:indiv_diff_me`.
+Exact rows: `mcelreath:waffle_divorce_meas_err`, `vasishth:indiv_diff_me`.
 
-Constant-scalar predictor `me` and known-SE Normal response rewriting already work. These rows require predictor-side/row-varying uncertainty, a Student-t residual-plus-known-SE composition, or both. The adapter must not silently replace posterior uncertainty with a fixed scale.
+Constant-scalar predictor `me`, known-SE Normal response rewriting, and the Student-t residual-plus-known-SE composition already work. These two rows still require predictor-side/row-varying uncertainty. The adapter must not silently replace posterior uncertainty with a fixed scale.
 
 ### B8. Tensor-product smooth
 
@@ -214,11 +214,11 @@ Exact rows: `bambi:ordinal_hr_years`, `mcelreath:trolley_intercept`, `mcelreath:
 
 Recover link, threshold, discrimination and monotonic-predictor conventions. Stock proportional-odds `OrderedLogistic` passing is not evidence for these rows. The four rows needing known non-stock surfaces are separately scored in B6.
 
-### D4. Student-t degrees of freedom and prior -- 4 rows, 4 programs
+### D4. Student-t degrees of freedom and prior -- 5 rows, 5 programs
 
-Exact rows: `bambi:t_regression_t`, `kruschke:guber1999_base`, `kruschke:guber1999_complement`, `kruschke:guber1999_interaction`.
+Exact rows: `bambi:t_regression_t`, `kruschke:income_famsize`, `kruschke:guber1999_base`, `kruschke:guber1999_complement`, `kruschke:guber1999_interaction`.
 
-The `LocationScale` dispatcher is landed, but an arbitrary `nu` inserted by the translator would change the historical model. Recover the exact fixed or prior-modeled degrees of freedom before direct row execution.
+The `LocationScale` dispatcher and `income_famsize`'s known-SE-plus-residual scale composition are executable, but an arbitrary `nu` inserted by the translator would change the historical model. Recover the exact fixed or prior-modeled degrees of freedom before direct row execution.
 
 ### D5. Split ZIP component pairing -- 3 rows, 2 formulas
 

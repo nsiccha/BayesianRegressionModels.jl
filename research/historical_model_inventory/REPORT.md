@@ -128,11 +128,11 @@ Route classification over the 359 rows is:
 | `brm_kernel` | 19 | faithful group-local/ragged/censoring cell requires a row-specific kernel |
 | `stanblocks_plate` | 47 | structured latent/covariance/time-series cell requires a plate |
 
-In the inferred-family variant, 173 rows are direct executable candidates, 68
+In the inferred-family variant, 173 rows are direct executable candidates, 69
 are semantics-preserving rewrites that still require a row-specific historical
 constant/prior/declaration choice, 66 are route-specific kernel/plate designs,
-51 are unsupported, and one is family-unresolved. The independent surface audit
-classifies 116 rows as expressible verbatim, 125 through a semantic rewrite, 29
+50 are unsupported, and one is family-unresolved. The independent surface audit
+classifies 116 rows as expressible verbatim, 126 through a semantic rewrite, 28
 as genuinely missing a BRM surface, none as a proven StanBlocks substrate gap
 at the row level, and 89 as historically unresolved. These categories are
 exhaustive and row-keyed in `model_matrix.tsv`.
@@ -284,7 +284,9 @@ and focused BinomialLogit artifact at
 deployments and were not touched). Root checks returned HTTP 200 with exactly
 359 cards. The focused filters returned 154 confirmed-source cards, 171
 finite-BridgeStan cards, and 51 ordinary unsupported cards, matching the matrix
-exactly. The listener contained one `htmxo-semantic-app` and all four option
+at that receipt. The current matrix reduces the unsupported count to 50 after
+the known-SE Student-t correction. The listener contained one
+`htmxo-semantic-app` and all four option
 controls. Exact UTC times, source/matrix hashes, paths, statuses, and counts are
 in `gallery/served_smoke.tsv`; the final landed listener receipt is also filed
 durably after broker integration.
