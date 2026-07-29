@@ -7,6 +7,7 @@ const CAPABILITY = joinpath(ROOT, "capability_results.tsv")
 const RECEIPTS = joinpath(ROOT, "receipts", "row_receipt_audit.tsv")
 const MANUAL_RECEIPTS = joinpath(ROOT, "receipts", "manual_review.tsv")
 const DATASET_RECEIPTS = joinpath(ROOT, "receipts", "row_dataset_receipts.tsv")
+const CANDIDATE_FAMILY_CONTROLS = joinpath(ROOT, "candidate_family_controls.tsv")
 const ALL_OUTPUT = joinpath(ROOT, "all_source_rows_matrix.tsv")
 const DEPLOYED_OUTPUT = joinpath(ROOT, "model_matrix.tsv")
 const SOURCE_SUMMARY_OUTPUT = joinpath(ROOT, "final_summary_by_source.tsv")
@@ -61,6 +62,8 @@ capabilities = read_tsv(CAPABILITY)
 receipts = read_tsv(RECEIPTS; escaped=false)
 manual_receipts = read_tsv(MANUAL_RECEIPTS; escaped=false)
 dataset_receipts = read_tsv(DATASET_RECEIPTS; escaped=false)
+candidate_family_control = only(read_tsv(CANDIDATE_FAMILY_CONTROLS; escaped=false))
+candidate_control_families = Set(["zero_inflated_poisson", "negativebinomial", "student_t"])
 
 translation_by = Dict((row["row_index"], row["variant"]) => row for row in translations)
 capability_by = Dict((row["row_index"], row["variant"]) => row for row in capabilities)
@@ -84,9 +87,12 @@ for historical_row in historical
     dataset_rows = get(datasets_by, row_key, Dict{String,String}[])
 
     inferred_family = inferred["family_selected"]
+    candidate_family_applies = inferred_family in candidate_control_families
     renderer_family = receipt["deployed_renderer_family_claim"]
     family_discrepancy = if receipt["deployed_family_provenance"] == "explicit_metadata"
         inferred_family == renderer_family ? "none" : "explicit-metadata-vs-inference-review"
+    elseif inferred["family_selected_provenance"] == "authoritative-audit-genuinely-indeterminate"
+        "renderer-default-unsubstantiated; authoritative audit genuinely indeterminate"
     elseif isempty(inferred_family)
         "renderer-default-unsubstantiated; semantic family unresolved"
     elseif inferred_family == renderer_family
@@ -115,6 +121,18 @@ for historical_row in historical
         "renderer_family_provenance" => receipt["deployed_family_provenance"],
         "inferred_family" => inferred_family,
         "inferred_family_provenance" => inferred["family_selected_provenance"],
+        "family_audit_evidence_class" => inferred["family_audit_evidence_class"],
+        "family_audit_evidence_strength" => inferred["family_audit_evidence_strength"],
+        "family_audit_authoritative_surface" => inferred["family_audit_authoritative_surface"],
+        "family_audit_authoritative_revision" => inferred["family_audit_authoritative_revision"],
+        "family_audit_authoritative_path_anchor" => inferred["family_audit_authoritative_path_anchor"],
+        "family_audit_retrieved_at_utc" => inferred["family_audit_retrieved_at_utc"],
+        "family_audit_http_status" => inferred["family_audit_http_status"],
+        "family_audit_explicit_evidence" => inferred["family_audit_explicit_evidence"],
+        "family_audit_semantic_evidence" => inferred["family_audit_semantic_evidence"],
+        "family_audit_dataset_evidence" => inferred["family_audit_dataset_evidence"],
+        "family_audit_negative_evidence" => inferred["family_audit_negative_evidence"],
+        "family_audit_decision_rationale" => inferred["family_audit_decision_rationale"],
         "family_discrepancy" => family_discrepancy,
         "row_source_claim" => historical_row["row_source_claim"],
         "receipt_retrieved_at" => receipt["retrieved_at"],
@@ -137,12 +155,22 @@ for historical_row in historical
         "semantic_route" => inferred["semantic_route"],
         "semantic_route_note" => inferred["route_note"],
         "exact_translation_status" => exact["translation_status"],
+        "exact_surface_support_class" => exact["surface_support_class"],
+        "exact_surface_secondary_gap" => exact["surface_secondary_gap"],
         "exact_translation_note" => exact["translation_note"],
         "exact_current_brm_body" => exact["current_brm_body"],
         "exact_capability_tier" => capability_tier(exact, exact_cap),
         "exact_probe_id" => exact_cap["probe_id"],
         "exact_evidence_kind" => exact_cap["evidence_kind"],
         "inferred_translation_status" => inferred["translation_status"],
+        "inferred_surface_support_class" => inferred["surface_support_class"],
+        "inferred_surface_secondary_gap" => inferred["surface_secondary_gap"],
+        "family_adapter_landed_applies" => string(candidate_family_applies),
+        "family_adapter_validation_sha" => candidate_family_applies ? candidate_family_control["candidate_sha"] : "",
+        "family_adapter_clean_reviewed_sha" => candidate_family_applies ? "a707af21d138b0019810f8dce9d655109dc97ff6" : "",
+        "family_adapter_canonical_sha" => candidate_family_applies ? "11031f2d3bbd0c9cad42bed53a4a8dd193ab9d2e" : "",
+        "family_adapter_control_tier" => candidate_family_applies ? "landed-surface-control-stanc-bridgestan-finite-predict-pointwise" : "",
+        "family_adapter_control_scope" => candidate_family_applies ? "combined synthetic family-surface control only; never inherited as row validation" : "",
         "inferred_translation_note" => inferred["translation_note"],
         "inferred_current_brm_body" => inferred["current_brm_body"],
         "inferred_capability_tier" => capability_tier(inferred, inferred_cap),
@@ -196,6 +224,14 @@ for source in sort(unique(get.(deployed, "source", "")))
         "ready_translation" => string(count(row -> row["inferred_translation_status"] == "ready", source_rows)),
         "stanc_accepted" => string(count(row -> row["stanc"] == "pass", source_rows)),
         "finite_density_gradient" => string(count(row -> row["gradient_finite"] == "true", source_rows)),
+        "surface_verbatim" => string(count(row -> row["inferred_surface_support_class"] == "already-expressible-verbatim", source_rows)),
+        "surface_semantic_rewrite" => string(count(row -> row["inferred_surface_support_class"] == "already-expressible-via-semantic-rewrite", source_rows)),
+        "surface_missing_brm" => string(count(row -> row["inferred_surface_support_class"] == "genuinely-missing-brm-surface", source_rows)),
+        "surface_missing_stanblocks" => string(count(row -> row["inferred_surface_support_class"] == "genuinely-missing-stanblocks-substrate", source_rows)),
+        "surface_historical_unresolved" => string(count(row -> row["inferred_surface_support_class"] == "historical-semantics-unresolved", source_rows)),
+        "audit_explicit_family_recovery" => string(count(row -> row["family_audit_evidence_class"] == "explicit-family-recovery", source_rows)),
+        "audit_defensible_semantic_inference" => string(count(row -> row["family_audit_evidence_class"] == "defensible-semantic-inference", source_rows)),
+        "audit_genuinely_indeterminate" => string(count(row -> row["family_audit_evidence_class"] == "genuinely-indeterminate", source_rows)),
     ))
 end
 source_columns = collect(keys(first(source_summary)))
@@ -215,4 +251,6 @@ println("source_fidelity=" * counts(get.(deployed, "source_fidelity_verdict", ""
 println("semantic_routes=" * counts(get.(deployed, "semantic_route", "")))
 println("inferred_translation=" * counts(get.(deployed, "inferred_translation_status", "")))
 println("inferred_capability=" * counts(get.(deployed, "inferred_capability_tier", "")))
+println("surface_support=" * counts(get.(deployed, "inferred_surface_support_class", "")))
+println("family_audit=" * counts(get.(deployed, "family_audit_evidence_class", "")))
 println("output=$(abspath(DEPLOYED_OUTPUT))")

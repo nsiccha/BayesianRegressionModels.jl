@@ -1,20 +1,20 @@
-ordinary_brm	finite_density_gradient	dead_source	stanblocks_plate	stanc_accepted	unverifiable	adapted_but_defensible	brm_kernel	mismatch	confirmed	source	rows	ready_translation
-6	0	0	0	0	0	0	0	4	2	action_models	6	0
-100	43	0	0	43	13	2	0	1	84	bambi	100	43
-0	0	0	0	0	0	0	4	0	4	bmm	4	0
-20	1	0	5	1	1	1	0	4	19	brms	25	1
-14	2	0	0	2	7	0	0	0	7	burkner_papers	14	2
-2	0	0	0	0	0	0	0	0	2	epidist	2	0
-0	0	0	6	0	0	0	0	4	2	epinowcast	6	0
-0	0	0	6	0	2	0	0	0	4	flocker	6	0
-6	4	0	0	4	3	0	0	0	3	glm_jl	6	4
-7	0	7	2	0	0	0	0	0	2	glmmtmb	9	0
-2	1	0	10	1	1	2	0	7	2	inla	12	1
-41	10	0	0	10	41	0	0	0	0	kruschke	41	12
-8	5	0	0	5	8	0	0	0	0	lme4	8	5
-57	13	3	1	13	55	0	0	0	0	mcelreath	58	16
-4	0	7	3	0	0	0	0	0	0	mcmcglmm	7	0
-7	6	0	0	6	0	3	0	1	3	mixed_models_jl	7	6
-0	0	0	6	0	0	0	0	2	4	mvgam	6	0
-22	15	0	0	15	2	2	0	2	16	rstanarm	22	15
-20	6	0	0	6	20	0	0	0	0	vasishth	20	6
+ordinary_brm	finite_density_gradient	dead_source	stanblocks_plate	surface_missing_brm	stanc_accepted	unverifiable	adapted_but_defensible	brm_kernel	mismatch	surface_verbatim	surface_semantic_rewrite	confirmed	source	rows	audit_defensible_semantic_inference	ready_translation	audit_explicit_family_recovery	audit_genuinely_indeterminate	surface_missing_stanblocks	surface_historical_unresolved
+0	0	0	0	0	0	0	0	6	4	0	0	2	action_models	6	0	0	6	0	0	6
+95	50	0	0	11	50	13	2	5	1	34	35	84	bambi	100	0	52	0	0	0	20
+0	0	0	0	0	0	0	0	4	0	0	0	4	bmm	4	0	0	4	0	0	4
+17	10	0	8	1	10	1	1	0	4	4	12	19	brms	25	4	10	16	0	0	8
+10	5	0	2	6	5	7	0	2	0	2	4	7	burkner_papers	14	1	5	3	0	0	2
+2	0	0	0	2	0	0	0	0	0	0	0	2	epidist	2	0	0	0	0	0	0
+0	0	0	6	0	0	0	0	0	4	0	0	2	epinowcast	6	0	0	3	0	0	6
+0	0	0	6	0	0	2	0	0	0	0	0	4	flocker	6	0	0	5	0	0	6
+6	5	0	0	0	5	3	0	0	0	4	1	3	glm_jl	6	0	5	0	0	0	1
+7	0	7	2	0	0	0	0	0	0	0	7	2	glmmtmb	9	0	0	2	0	0	2
+2	1	0	10	0	1	1	2	0	7	1	1	2	inla	12	0	1	6	0	0	10
+39	16	0	0	6	16	41	0	2	0	13	16	0	kruschke	41	0	18	13	1	0	6
+8	5	0	0	0	5	8	0	0	0	4	2	0	lme4	8	0	5	0	0	0	2
+54	30	3	4	2	30	55	0	0	0	24	25	0	mcelreath	58	0	33	35	0	0	7
+4	0	7	3	0	0	0	0	0	0	0	4	0	mcmcglmm	7	0	0	1	0	0	3
+7	6	0	0	0	6	0	3	0	1	6	1	3	mixed_models_jl	7	0	6	0	0	0	0
+0	0	0	6	0	0	0	0	0	2	0	0	4	mvgam	6	0	0	3	0	0	6
+22	20	0	0	0	20	2	2	0	2	9	13	16	rstanarm	22	0	20	5	0	0	0
+20	18	0	0	1	18	20	0	0	0	15	4	0	vasishth	20	0	18	14	0	0	0

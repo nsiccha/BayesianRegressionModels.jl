@@ -1,0 +1,26 @@
+feature	expected	outcome	built	transpiles	stanc	error
+linked_distributional_multiresp	pass	pass	true	true	true	
+meta_known_se_rewrite	pass	pass	true	true	true	
+measurement_error_me	pass	pass	true	true	true	
+spline_s	pass	pass	true	true	true	
+hsgp_gp	pass	pass	true	true	true	
+grouped_hsgp	pass	pass	true	true	true	
+ar1	pass	pass	true	true	true	
+interaction_cont_cat	pass	pass	true	true	true	
+gr_by	pass	pass	true	true	true	
+response_mi_normal	pass	pass	true	true	true	
+zip	pass	pass	true	true	true	
+negative_binomial_2	pass	pass	true	true	true	
+ordinal	pass	pass	true	true	true	
+student_t	pass	pass	true	true	true	
+offset_semantic_rewrite	pass	pass	true	true	true	
+three_way_derived_rewrite	pass	pass	true	true	true	
+composite_group_derived_rewrite	pass	pass	true	true	true	
+response_expression_derived_rewrite	pass	pass	true	true	true	
+multi_membership_mm	raise	raise	false	false	false	UndefVarError: `mm` not defined
+hsgp_multi_axis	raise	raise	false	false	false	sbimpl: `gp(x; by=g, k=K, c=C)` expects 1 positional arg, got 2
+ar2	raise	raise	false	false	false	sbimpl: `ar(time; p=2)` only supports p=1 so far
+offset_wrapper	raise	raise	false	false	false	MethodError: no method matching offset(::Float64)
+predictor_mi	raise	raise	false	false	false	sbimpl: data column `xm` contains `missing` values. BRM never silently drops rows. Either (a) drop / impute the missing values in your dataframe before passing it, or (b) for the response, wrap the LHS in `mi(...)` to model the missing values as parameters (see TODO for support).
+three_way_native	raise	raise	false	false	false	sbimpl: interaction operand must be a raw-data NamedColumn, got ExprColumn{typeof(&), Tuple{NamedColumn{Symbol, DataColumn{Vector{Float64}}}, NamedColumn{Symbol, DataColumn{Vector{Float64}}}}, @NamedTuple{}}; interactions with `mo` / `me` / `s` / `ar` are not supported yet
+categorical_likelihood	raise	raise	false	false	false	sbimpl: likelihood family `Categorical{P} where P<:Real` not supported yet -- no `_sb_stan_dist_name` entry. Add one (and a `_sb_stan_dist_args` override if its args don't lower verbatim).

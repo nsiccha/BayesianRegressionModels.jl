@@ -77,11 +77,18 @@ The matrix therefore carries three independent fields:
 
 Exact-metadata and inferred-family translations were validated separately.
 WarmupHMC's independent HTML pass found 33 formulas that visibly contradict a
-Gaussian badge; that is a useful strict lower bound. Across all 338 defaulted
-rows, this semantic pass infers 142 non-Gaussian families, 74 Gaussian families,
-and leaves 122 unresolved. Because those 142 are inferences rather than source
-metadata, the matrix preserves both numbers and provenance instead of replacing
-the badge silently.
+Gaussian badge; that is a useful strict lower bound. The initial conservative
+pass still left 122 deployed rows unresolved. Every one of those 122 was then
+audited across the exact historical Git source, the cited project's
+authoritative repository/docs/code and relevant historical revisions, and
+dataset schema or values as supporting—but never sole—evidence. That second
+pass recovered 116 explicit families and five defensible semantic inferences.
+Only `kruschke:calcium` remains genuinely indeterminate: the historical row and
+matching authoritative code supply no unique likelihood, its prose names two
+incompatible alternatives, and the cited live dataset does not match the
+claimed schema. `family_audit.tsv` records searched surfaces and negative
+evidence for all 122 rows. The matrix preserves the renderer claim, exact
+metadata, recovered family, recovery class, and evidence independently.
 
 The defect is also an operational selection hazard, not only a display issue.
 An independent WarmupHMC catalogue benchmark found that tag-based Gaussian
@@ -117,41 +124,73 @@ Route classification over the 359 rows is:
 
 | route | rows | meaning |
 |---|---:|---|
-| `ordinary_brm` | 316 | ordinary current descriptor candidate |
-| `brm_kernel` | 4 | faithful group-local/ragged cell requires a row-specific kernel |
-| `stanblocks_plate` | 39 | structured latent/covariance/time-series cell requires a plate |
+| `ordinary_brm` | 293 | ordinary current descriptor candidate |
+| `brm_kernel` | 19 | faithful group-local/ragged/censoring cell requires a row-specific kernel |
+| `stanblocks_plate` | 47 | structured latent/covariance/time-series cell requires a plate |
 
-In the inferred-family variant, 111 rows have executable ordinary BRM bodies,
-14 have both a known family and a route-specific design, 122 remain
-family-unresolved, and 112 are explicit unsupported translations. These
-categories are exhaustive and row-keyed in `model_matrix.tsv`.
+In the inferred-family variant, 173 rows are direct executable candidates, 68
+are semantics-preserving rewrites that still require a row-specific historical
+constant/prior/declaration choice, 66 are route-specific kernel/plate designs,
+51 are unsupported, and one is family-unresolved. The independent surface audit
+classifies 116 rows as expressible verbatim, 125 through a semantic rewrite, 29
+as genuinely missing a BRM surface, none as a proven StanBlocks substrate gap
+at the row level, and 89 as historically unresolved. These categories are
+exhaustive and row-keyed in `model_matrix.tsv`.
 
-The most frequent unresolved/unsupported reasons are:
-
-- family unresolved: 122;
-- multi-formula/nonlinear brms declaration: 18;
-- multiple component formulas requiring a joint declaration: 11;
-- nested/composite grouping needing a derived id or reviewed `gr(...; by=...)`: 10;
-- multi-axis or multi-argument old HSGP: 9;
-- non-mechanical term, NegativeBinomial parameterization boundary,
-  censor/truncation, or non-default spline semantics: 7 each.
+This correction matters: the first translator blocklist was not trustworthy.
+Current BRM already supports native linked predictors, independent
+multi-response declarations, scalar `me`, Normal response `mi`, known Gaussian
+response-SE rewrites, smooths, one-dimensional/grouped GPs, AR(1), categorical
+predictors/interactions, `gr(; by/id)`, derived interaction/group/response
+columns, and proportional-odds `OrderedLogistic`. Those are no longer reported
+as absent. The remaining gaps are narrower and are ranked with exact row keys,
+scope, dependency order, and reuse in `GAP_RANKING.md`.
 
 ## Current compiler and runtime evidence
 
-The 111 executable inferred-family rows and 15 executable exact-metadata rows
-collapse to 103 unique normalized bodies/data schemas. The static gate runs
-BRMI evaluation, SBBRMI lowering, `brm_descriptor`, `brm_execute(:transpile)`,
-and stanc. Ninety-eight unique programs pass stanc. Each of those 98 also
-instantiates under BridgeStan 2.9.0 and has finite log density and gradient at
-the synthetic-data zero point; no stanc-accepted program fails the runtime
-gate. Byte-identical fan-out maps those 98 programs to 106 deployed rows. These
-results are capability evidence, not posterior-correctness claims.
+The re-audit also produced and landed three quick SBBRMI-only family repairs at
+canonical `11031f2d3bbd0c9cad42bed53a4a8dd193ab9d2e`:
 
-The five static failures are one concrete current substrate seam: grouped
+- `ZeroInflatedPoisson` now has real likelihood/RNG dispatch;
+- `NegativeBinomial2(mu, phi)` lowers to Stan's non-log
+  `neg_binomial_2(mu, phi)` while native `log(mu) ~ ...` and
+  `log(phi) ~ ...` linked predictors remain authoritative;
+- `LocationScale(loc, scale, TDist(nu))` lowers as a Student-t likelihood.
+
+The accepted control uses native linked-LHS syntax and passes stanc, BridgeStan
+finite density/gradient, prediction, and pointwise log likelihood for all three
+families. It was run at validation tip `4d8f565...`; that tip and clean reviewed
+commit `a707af2...` have identical Git tree `309028b...`, and only the clean
+commit was landed. No VBRMI change survived. This shared control is displayed
+beside applicable rows but is never inherited as row validation. Historical ZIP
+cards still need their separately catalogued mean/zero-inflation components
+paired; Student-t rows still need a sourced degrees-of-freedom value/prior; and
+the working census uses the non-log route. The separate
+`neg_binomial_2_log` trace defect found during the audit was subsequently fixed
+in StanBlocks canonical `144188a808308177807ceb47f08749a335a0ef70`
+(`negative-binomia-fd397aa0`); the corpus run remains pinned to `329a178...`
+because its non-log path is unaffected.
+
+The 173 executable inferred-family rows and 16 executable exact-metadata rows
+collapse to 159 unique normalized bodies/data schemas. The static gate runs
+BRMI evaluation, SBBRMI lowering, `brm_descriptor`,
+`brm_execute(:transpile)`, and stanc. On the exact landed tree, 153 unique
+programs pass stanc. Every one of those 153 also instantiates under BridgeStan
+2.9.0 and has finite log density and gradient at the synthetic-data zero point;
+there are no post-stanc runtime failures. Byte-identical evidence fan-out maps
+those programs onto 166 deployed rows. The remaining seven executable rows are
+the five descriptor failures and two rows sharing the one transformed-
+interaction lowering failure described below. These results are capability
+evidence, not posterior-correctness claims.
+
+Five static failures are one concrete current substrate seam: scalar-trials
 BinomialLogit translations fail generated-quantity tracing at
 `binomial_logit_rng(::array[] tokenof, ::int, ::vector)`. They are
 `mcelreath/{chimpanzees_intercept,chimpanzees_slopes,moralizing_gods}` and
-`kruschke/{recall_conditions,recall_pooled}`.
+`kruschke/{recall_conditions,recall_pooled}`. This is tracked upstream as
+StanBlocks snag `binomial-logit-r-2d7c76b2`. One additional program,
+`bambi:negative_binomial_interaction`, correctly fails earlier because current
+BRM interactions require raw operands and do not accept `prog & zscale(math)`.
 
 An earlier probe version bound vector-valued Beta shape expressions to
 intermediate names and exposed a missing `lpxf_expr`. Re-checking the native
@@ -170,7 +209,8 @@ with the peer control, `Reaction` is divided by 100 and raw subject ids are
 densely recoded. The scaling is a capability-test choice, not a catalogue
 claim or a validated historical fit.
 
-On BRM `784712998ea67f6429d0a3b5a3241fe9cb690e64`, StanBlocks
+On the clean reviewed BRM tree `a707af21d138b0019810f8dce9d655109dc97ff6`
+(landed as canonical `11031f2d3bbd0c9cad42bed53a4a8dd193ab9d2e`), StanBlocks
 `329a178a7ad7877da0b58ad2c360d417ddd663f9`, and current-host WarmupHMC
 `b185eedbbeeef6fb3327afb30dc995c98591af02`, that control reproduces the peer
 dimension (42) and zero-point log density (`-832.3603659550055`), has a finite
@@ -219,17 +259,38 @@ Every matrix mount recommendation is therefore marked experimental. A future
 adapter should consume the descriptor; it should not re-parse formula text or
 create a second declaration graph.
 
+The updated gallery is executable rather than a mock. One mounted
+`HistoricalInventory` graph owns the 359 runtime matrix rows, all four filter
+parameters, their `@options` domains, filtered rows, semantic cards, and the GET
+operation. Its thin page host calls `semantic_app` on that graph; it has no
+manual route/form mirror, `AppData`/`AppContext`, or DynamicObjects/HTMXObjects
+shadow model. Cards expose source fidelity, family provenance, translation
+route, surface class, and the actual audited validation tier. Unsupported and
+unresolved rows render `SemanticUnavailable`; historical badges are never
+treated as current receipts.
+
+The committed gallery at `7b6a091ab6d240ec3fcfbd8f34248d2a78f3373b`
+was served on Strato2 at `http://127.0.0.1:8129/` (ports 8127--8128 were
+occupied by unrelated deployments and were not touched). The initial listener
+and a clean restart both returned HTTP 200 with exactly 359 cards. Served
+filter checks returned 154 confirmed-source cards, 166 finite-BridgeStan cards,
+and 51 ordinary unsupported cards, matching the matrix exactly. The listener
+contained one `htmxo-semantic-app` and all four option controls. Exact UTC
+times, source/matrix hashes, paths, statuses, and counts are in
+`gallery/served_smoke.tsv`.
+
 ## What remains genuinely open
 
-- Resolve or source-correct the 122 rows whose response family cannot be
-  defended from exact metadata and primary evidence.
-- Implement row-specific kernel/plate translations for the 43 structured-route
+- Resolve or source-correct the one genuinely indeterminate family row,
+  `kruschke:calcium`, and preserve the 121 recovered family receipts.
+- Implement row-specific kernel/plate translations for the 66 structured-route
   candidates; representative substrate controls are not substitutes.
 - Address the BinomialLogit generated-quantity seam above before claiming the
   five currently failing ordinary translations.
-- Decide semantics for unsupported joint, multivariate, categorical,
-  zero-inflated/hurdle, censored, survival, and historical smooth/GP models.
+- Resolve the transformed-interaction failure and row-specific historical
+  choices for Student-t degrees of freedom, ZIP component pairing, ordinal
+  links, binomial trial sizes, and old spline/GP configuration.
+- Implement the genuinely missing BRM adapters and route declarations ranked in
+  `GAP_RANKING.md`; do not convert route controls into row evidence.
 - Ship the BRMDescriptor→semantic_app adapter, keeping the descriptor as the
   single authoritative graph.
-
-No server was started or restarted for this inventory.
