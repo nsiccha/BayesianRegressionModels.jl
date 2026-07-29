@@ -188,6 +188,40 @@ end
 
     d2 = brm_execute(d, :reprocess, (; x=[9.0, 10.0], y=[0.0, 0.0]))
     @test d2.plan.data[:x] == [9.0, 10.0]
+
+    mm_builder = @brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + (1 | mm(g1, g2; weights=(w1, w2)))
+        y ~ Normal(mu, sigma)
+    end
+    mm_df = (;
+        g1=["a", "a", "b"],
+        g2=["b", "c", "c"],
+        w1=[2.0, 1.0, 0.0],
+        w2=[1.0, 1.0, 3.0],
+        y=[0.1, 0.2, 0.3],
+    )
+    mm_d = brm_descriptor(mm_builder, mm_df; mod=@__MODULE__)
+    @test :reprocess in Symbol[op.name for op in mm_d.operations]
+
+    changed = merge(mm_df, (; w1=[9.0, 1.0, 1.0], w2=[1.0, 3.0, 1.0]))
+    changed_d = brm_execute(mm_d, :reprocess, changed)
+    idx_key, entry = only((k, e) for (k, e) in mm_d.plan.preproc
+                          if e.kind === :multi_membership)
+    @test changed_d.plan.data[idx_key] == mm_d.plan.data[idx_key]
+    @test changed_d.plan.data[entry.const_.weight_key] ≈
+          [0.9, 0.1, 0.25, 0.75, 0.5, 0.5]
+
+    # One ordinary grouping block keeps a mixed model outside the safe replay
+    # subset even when its other random-effect block is typed multi-membership.
+    mixed_builder = @brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + (1 | mm(g1, g2; weights=(w1, w2))) + (1 | g)
+        y ~ Normal(mu, sigma)
+    end
+    mixed_df = merge(mm_df, (; g=[1, 1, 2]))
+    mixed_d = brm_descriptor(mixed_builder, mixed_df; mod=@__MODULE__)
+    @test :reprocess ∉ Symbol[op.name for op in mixed_d.operations]
 end
 
 kernel_builder = @brm begin
