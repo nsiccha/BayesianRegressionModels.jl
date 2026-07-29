@@ -299,3 +299,33 @@ written explicitly rather than silently changing Distributions.jl semantics.
 In particular, `Distributions.Gamma` takes a **scale**, whereas Stan/brms gamma
 syntax takes a **rate**: the brms prior `gamma(2, 0.01)` is spelled
 `Gamma(2, 100.0)` in a BRM formula.
+## Typed observation weights
+
+Observation weights live in the `@brm` model beside the observation
+distribution:
+
+```julia
+model = @brm begin
+    y ~ weighted(Normal(mu, sigma), aweights(replicate_k))
+    mu ~ 1 + x
+    log(sigma) ~ 1
+end
+```
+
+The StatsBase constructor determines the statistical meaning:
+
+- `aweights(k)` uses analytic/precision semantics. For a Normal response BRM
+  emits `Normal(mu, sigma / sqrt(k))`; model density, pointwise likelihood, and
+  predictive draws all use that adjusted scale.
+- `fweights(n)` uses frequency/repeat semantics. BRM multiplies each model and
+  pointwise log-likelihood contribution by `n`; predictive draws remain from
+  the original distribution.
+- `weights(w)` opts into a power likelihood with the same density/pointwise
+  scaling and unchanged predictive distribution.
+
+The current analytic-weight implementation supports Normal observations.
+Frequency and power weights support likelihood families that lower through
+BRM's native Distributions.jl-to-Stan family map. Probability weights and
+unsupported family/type combinations error instead of silently changing
+meaning. Weight columns are rebuilt from each dataframe by the reusable
+`@brm` builder and by `reprocess`.
