@@ -726,6 +726,7 @@ end
 
 composed_numeric_df = (;
     y_truncated=[-0.6, 0.1, 1.1],
+    y_lower_truncated=[-0.25, 0.2, 1.8],
     y_censored=[-0.5, 0.2, 1.0],
     count_truncated=[1, 2, 4],
     count_censored=[0, 2, 4],
@@ -737,6 +738,7 @@ composed_numeric_df = (;
 
 composed_numeric_builder = @brm begin
     y_truncated ~ truncated(Normal(0.2, 1.1); lower=-0.75, upper=1.25)
+    y_lower_truncated ~ truncated(Normal(0.2, 1.1); lower=-0.25)
     y_censored ~ censored(Normal(0.2, 1.1); lower=-0.5, upper=1.0)
     count_truncated ~ truncated(Poisson(2.2); lower=1, upper=4)
     count_censored ~ censored(Poisson(2.2); lower=0, upper=4)
@@ -766,6 +768,9 @@ end
         y_truncated=logpdf.(
             Ref(truncated(normal; lower=-0.75, upper=1.25)),
             composed_numeric_df.y_truncated),
+        y_lower_truncated=logpdf.(
+            Ref(truncated(normal; lower=-0.25, upper=nothing)),
+            composed_numeric_df.y_lower_truncated),
         y_censored=logpdf.(
             Ref(censored(normal; lower=-0.5, upper=1.0)),
             composed_numeric_df.y_censored),
@@ -791,6 +796,7 @@ end
         descriptor, :predict;
         problem, draws=zeros(0, 128), seed=20260729)
     @test all(-0.75 .<= predictions.y_truncated_gen .<= 1.25)
+    @test all(predictions.y_lower_truncated_gen .>= -0.25)
     @test all(-0.5 .<= predictions.y_censored_gen .<= 1.0)
     @test all(1 .<= predictions.count_truncated_gen .<= 4)
     @test all(0 .<= predictions.count_censored_gen .<= 4)
