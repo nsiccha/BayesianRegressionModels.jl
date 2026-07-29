@@ -319,6 +319,87 @@ ranef_correlated_draws_effect = StanBlocks.@slic begin
     return (diag_pre_multiply(tau, L) * z)'
 end
 
+# ---- R2D2: derived random-effect scales -----------------------------------
+#
+# The `effect(..., :) ~ r2d2(...)` family DERIVES the marginal scale
+# `sqrt((1 - R2) * tau_bsv^2)` instead of sampling it, so these siblings take
+# `tau` (resp. `scale`) as an ordinary caller-supplied kwarg. Everything else --
+# the LKJ factor, the standardised draws, the column-major layout -- is
+# identical to the sampled-scale families above, which is what keeps the
+# all-or-nothing rule of decision `1db6zkr` cheap: a bucket either passes a
+# fully derived `tau` vector here, or keeps sampling it over there. `L` stays
+# free and shared in both: R2D2 constrains marginal variances and says nothing
+# about cross-predictor correlation.
+ranef_correlated_draws_r2d2 = StanBlocks.@slic begin
+    L      ~ lkj_corr_cholesky(lkj_eta; n=n_terms)
+    z_flat ~ std_normal(; n=n_terms * n_groups)
+    z = reshape(z_flat, n_terms, n_groups)
+    return (diag_pre_multiply(tau, L) * z)'
+end
+
+# Plain `(1 | g)` with a derived scale. Sibling of `ranef_intercept`, whose
+# `log_scale ~ std_normal()` is exactly the sampled degree of freedom R2D2
+# replaces.
+ranef_intercept_r2d2 = StanBlocks.@slic begin
+    xi ~ std_normal(; n=n_groups)
+    return scale * xi[group_idx]
+end
+
+# Plain `(1 + x | g)` with a derived `tau`. Sibling of `ranef_correlated`.
+ranef_correlated_r2d2 = StanBlocks.@slic begin
+    L      ~ lkj_corr_cholesky(lkj_eta; n=n_terms)
+    z_flat ~ std_normal(; n=n_terms * n_groups)
+    z = reshape(z_flat, n_terms, n_groups)
+    b = (diag_pre_multiply(tau, L) * z)'
+    return rows_dot_product(Z, b[group_idx, :])
+end
+
+# Per-column empirical variance of the population design matrix. R2D2 weights
+# each coefficient's share by `Var(x_k)` so the decomposition is a statement
+# about explained VARIANCE rather than about raw coefficient magnitudes, which
+# is what lets un-standardised and Bernoulli columns enter without the user
+# pre-scaling anything (decision `kx8wkd`). Emitted from `X` rather than
+# precomputed in Julia because the design columns are built as StanBlocks
+# expressions -- categorical contrasts, `zscale`, splines -- not materialised
+# vectors. When every column is data this lands in transformed data and is
+# computed once.
+StanBlocks.@deffun begin
+    brm_col_variances(X::matrix[m, n], m::int, n::int)::vector[n] = begin
+        rv = rep_vector(1., n)
+        for k in 1:n
+            rv[k] = variance(col(X, k))
+        end
+        rv
+    end
+end
+
+# Assemble the population prior-scale vector for one R2D2-scoped predictor.
+# `share_idx[j] == 0` means column `j` is NOT part of the decomposition -- the
+# intercept always, plus any column carrying its own `effect(lp, coef) ~
+# Normal(...)` override -- and keeps `fallback[j]`. Otherwise column `j` takes
+# the Dirichlet share `phi[share_idx[j]]` of the explained variance:
+#
+#     scale[j] = sqrt(phi[share_idx[j]] * R2 * tau_bsv^2 / varx[j])
+#
+# One function rather than a broadcast expression so the decomposed and
+# non-decomposed columns compose in a single pass with no index arithmetic at
+# the call site.
+StanBlocks.@deffun begin
+    brm_r2d2_scale(share_idx::int[n], fallback::vector[n], varx::vector[n],
+                   phi::vector[k], R2::real, tau_bsv::real,
+                   n::int, k::int)::vector[n] = begin
+        rv = rep_vector(0., n)
+        for j in 1:n
+            if share_idx[j] == 0
+                rv[j] = fallback[j]
+            else
+                rv[j] = sqrt(phi[share_idx[j]] * R2 * tau_bsv^2 / varx[j])
+            end
+        end
+        rv
+    end
+end
+
 # Multi-membership gathers. Membership indices and weights are row-major flat
 # vectors: entries `(i-1)*n_memberships + m` describe observation `i`, member
 # slot `m`. Keeping indices flat avoids relying on a Stan array-of-int matrix
@@ -2276,8 +2357,14 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     # for per-sub-formula emission below.
     id_buckets = _sb_collect_id_buckets(brmi)
     ranef_effect_overrides = _sb_ranef_effect_overrides(brmi, id_buckets)
+    # Prepass 2a: whole-predictor R2D2 decompositions. Resolved and emitted
+    # BEFORE the bucket statement below, which consumes the derived residual
+    # scales. Empty unless the formula carries an `effect(..., :) ~ r2d2(...)`
+    # statement, so every other model's emission is untouched.
+    r2d2_overrides = _sb_r2d2_overrides(brmi, id_buckets, effect_overrides)
+    r2d2_names = _sb_emit_r2d2_params!(stmts, data, r2d2_overrides)
     id_lookup = _sb_emit_id_buckets!(stmts, data, id_buckets;
-        cv_groups, centered_groups, ranef_effect_overrides)
+        cv_groups, centered_groups, ranef_effect_overrides, r2d2_names)
     # Prepass 2.5: group-block terms. For each `mu ~ f(...)` where f has a
     # _sb_term_group_block declaration, allocate one ranef_correlated_draws
     # block per (f, group-column) pair. The lookup is threaded into _sb_emit!
@@ -2295,7 +2382,8 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
         isnothing(nc) && error("sbimpl: top-level op `$key` is not a NamedColumn")
         obs_n = get(target_obs, key, nothing)
         _sb_emit!(stmts, data, key, parent(nc); id_lookup, obs_n, cv_groups,
-                  centered_groups, group_block_lookup, effect_overrides)
+                  centered_groups, group_block_lookup, effect_overrides,
+                  r2d2=(; overrides=r2d2_overrides, names=r2d2_names))
     end
     # Pop the preproc side-channel BEFORE building the SlicModel so it never
     # pollutes Stan's data dict.
@@ -2968,8 +3056,8 @@ restan_data(sb::SBBRMI, new_df; freeze_constants::Bool=true) =
 
 # ---- top-level op dispatch ---------------------------------------------------
 
-_sb_emit!(stmts, data, key, op::ExprColumn; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Vector{Any}}()) =
-    _sb_emit_expr!(stmts, data, key, getf(op), op; id_lookup, obs_n, cv_groups, centered_groups, group_block_lookup, effect_overrides)
+_sb_emit!(stmts, data, key, op::ExprColumn; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Vector{Any}}(), r2d2=_sb_empty_r2d2()) =
+    _sb_emit_expr!(stmts, data, key, getf(op), op; id_lookup, obs_n, cv_groups, centered_groups, group_block_lookup, effect_overrides, r2d2)
 # Raw data / missing columns appear as top-level ops when the formula mentions
 # them as bare references (e.g. `c2` in `loc ~ 1 + c2`). Nothing to emit — the
 # prepass already stashed data columns in `data`.
@@ -2977,10 +3065,10 @@ _sb_emit!(stmts, data, key, ::DataColumn; kwargs...) = nothing
 _sb_emit!(stmts, data, key, ::MissingColumn; kwargs...) = nothing
 _sb_emit!(stmts, data, key, op; kwargs...) = error("sbimpl: top-level op for `$key` not an ExprColumn (got $(typeof(op)))")
 
-_sb_emit_expr!(stmts, data, key, ::typeof(~), op; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Vector{Any}}()) = begin
+_sb_emit_expr!(stmts, data, key, ::typeof(~), op; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Vector{Any}}(), r2d2=_sb_empty_r2d2()) = begin
     lhs, rhs = getargs(op, 2)
     _sb_sampling!(stmts, data, key, lhs, rhs; id_lookup, obs_n, cv_groups,
-                  centered_groups, group_block_lookup, effect_overrides)
+                  centered_groups, group_block_lookup, effect_overrides, r2d2)
 end
 _sb_emit_expr!(stmts, data, key, ::typeof(assign), op; id_lookup=_sb_empty_id_lookup(), kwargs...) = begin
     _, rhs = getargs(op, 2)
@@ -3470,10 +3558,10 @@ _sb_prior_arg(x) = error("sbimpl: unsupported prior-arg shape $(typeof(x))")
 
 # LHS backed by real data => this is a likelihood. Record the observed values
 # under the formula name in `data` and emit `key ~ dist(args...)`.
-_sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Vector{Any}}()) =
+_sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Vector{Any}}(), r2d2=_sb_empty_r2d2()) =
     _sb_sampling_backed!(stmts, data, key, parent(lhs), rhs; id_lookup, obs_n,
                          cv_groups, centered_groups, group_block_lookup,
-                         effect_overrides)
+                         effect_overrides, r2d2)
 
 # `effect(...) ~ Distribution(...)` is metadata consumed by constructor prepasses;
 # it deliberately emits no independent parameter or likelihood statement.
@@ -3489,7 +3577,7 @@ _sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs;
                      id_lookup, obs_n=nothing, cv_groups=Set{Symbol}(),
                      centered_groups=Set{Symbol}(),
                      group_block_lookup=Dict(),
-                     effect_overrides=Dict{Symbol,Vector{Any}}()) = begin
+                     effect_overrides=Dict{Symbol,Vector{Any}}(), r2d2=_sb_empty_r2d2()) = begin
     rhs_e = _as_expr_column(rhs)
     if !isnothing(rhs_e)
         f = getf(rhs_e)
@@ -3506,7 +3594,7 @@ _sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs;
     end
     _sb_linear_predictor!(stmts, data, key, rhs; id_lookup, brmi_key=key, obs_n,
                           cv_groups, centered_groups, group_block_lookup,
-                          effect_overrides)
+                          effect_overrides, r2d2)
 end
 
 _sb_sampling_backed!(stmts, data, key, backing, rhs; id_lookup, kwargs...) =
@@ -3523,20 +3611,20 @@ _sb_sampling_backed!(stmts, data, key, backing, rhs; id_lookup, kwargs...) =
 # Stan name. Per-`typeof(f)` overrides (`mi`, future `cens`/`trunc`, …) live
 # as separate methods of `_sb_sampling!`, mirroring vimpl's
 # `vbroadcasted(::ExprColumn{typeof(F)})` extension idiom.
-_sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Vector{Any}}()) =
+_sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Vector{Any}}(), r2d2=_sb_empty_r2d2()) =
     _sb_sampling_through_link!(stmts, data, key, getf(lhs), only(getargs(lhs)), rhs;
                                id_lookup, obs_n, cv_groups, centered_groups,
-                               group_block_lookup, effect_overrides)
+                               group_block_lookup, effect_overrides, r2d2)
 
 _sb_sampling_through_link!(stmts, data, key, f, inner, rhs; kwargs...) =
     error("sbimpl: expected NamedColumn inside link `$f(...)`, got $(typeof(inner))")
-function _sb_sampling_through_link!(stmts, data, key, f, inner::NamedColumn, rhs; id_lookup, obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Vector{Any}}())
+function _sb_sampling_through_link!(stmts, data, key, f, inner::NamedColumn, rhs; id_lookup, obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Vector{Any}}(), r2d2=_sb_empty_r2d2())
     inv_f = InverseFunctions.inverse(f)
     inner_name = name(inner)
     pre_name = Symbol(nameof(f), :_, inner_name)
     _sb_linear_predictor!(stmts, data, pre_name, rhs; id_lookup, brmi_key=key,
                           obs_n, cv_groups, centered_groups, group_block_lookup,
-                          effect_overrides)
+                          effect_overrides, r2d2)
     push!(stmts, :($inner_name = $(_sb_julia_to_stan_fn(inv_f))($pre_name)))
 end
 
@@ -3704,7 +3792,7 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
                                 cv_groups=Set{Symbol}(),
                                 centered_groups=Set{Symbol}(),
                                 group_block_lookup=Dict(),
-                                effect_overrides=Dict{Symbol,Vector{Any}}())
+                                effect_overrides=Dict{Symbol,Vector{Any}}(), r2d2=_sb_empty_r2d2())
     terms = _sb_terms(rhs)
     pop_terms    = Any[]
     ran_terms    = Any[]  # `(expr | group)` -> collected per-group below
@@ -3731,7 +3819,12 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
         # append_col for two-or-more columns, so we can always just emit hcat.
         push!(stmts, :($X_name = $(Expr(:call, :hcat, col_exprs...))))
         overrides = get(effect_overrides, brmi_key, nothing)
-        if isnothing(overrides)
+        r2d2_spec = get(r2d2.overrides, brmi_key, nothing)
+        if !isnothing(r2d2_spec) && r2d2_spec.n_shares > 0
+            _sb_emit_r2d2_popefs!(stmts, data, brmi_key, X_name, pop_name,
+                                  length(col_exprs), r2d2_spec,
+                                  r2d2.names[brmi_key], overrides)
+        elseif isnothing(overrides)
             push!(stmts, :($pop_name ~ popefs(; X=$X_name)))
         else
             length(overrides) == length(col_exprs) || error(
@@ -3755,7 +3848,14 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
         _sb_emit_direct!(stmts, data, target, dt, summands; group_block_lookup)
     end
 
-    _sb_emit_ranefs!(stmts, data, target, ran_terms, summands; id_lookup, brmi_key, cv_groups, centered_groups)
+    # A plain (un-`|ID|`'d) random effect under an `r2d2` decomposition IS the
+    # residual: its scale is the derived `sqrt((1 - R2) * tau_bsv^2)` rather
+    # than a sampled SD. `|ID|`'d terms get the same scale via the bucket
+    # prepass, so this only reaches the plain path.
+    r2d2_scale = haskey(r2d2.names, brmi_key) ?
+        _sb_r2d2_resid_scale(r2d2.names[brmi_key]) : nothing
+    _sb_emit_ranefs!(stmts, data, target, ran_terms, summands;
+                     id_lookup, brmi_key, cv_groups, centered_groups, r2d2_scale)
 
     if length(summands) == 1
         push!(stmts, :($target = $(only(summands))))
@@ -4084,7 +4184,8 @@ function _sb_emit_ranefs!(stmts, data, target::Symbol, ran_terms, summands;
                            id_lookup=_sb_empty_id_lookup(),
                            brmi_key::Symbol=target,
                            cv_groups=Set{Symbol}(),
-                           centered_groups=Set{Symbol}())
+                           centered_groups=Set{Symbol}(),
+                           r2d2_scale=nothing)
     isempty(ran_terms) && return
     # Partition: ID'd terms route to the pre-emitted shared bucket; plain terms
     # coalesce per-target via the existing `ranef_correlated` block. Bare-
@@ -4110,7 +4211,8 @@ function _sb_emit_ranefs!(stmts, data, target::Symbol, ran_terms, summands;
         gterms = plain_by_group[k]
         desc = plain_descs[k]
         isempty(gterms) && error("sbimpl: ranef `(… | $k)` has no terms after dropping `0`")
-        _sb_emit_ranef_block!(stmts, data, target, desc, gterms, summands; cv_groups, centered_groups)
+        _sb_emit_ranef_block!(stmts, data, target, desc, gterms, summands;
+                              cv_groups, centered_groups, r2d2_scale)
     end
     for k in id_keys_seen
         gterms = id_terms_by_bucket[k]
@@ -4133,7 +4235,8 @@ end
 # size and flips the RE to a generated-quantities population re-draw. Empty by
 # default. See the cv-contagion note above `ranef_intercept` in this file.
 function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, gterms, summands;
-                                cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}())
+                                cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
+                                r2d2_scale=nothing)
     g_backing = _as_data_column(parent(group))
     isnothing(g_backing) && error("sbimpl: group `$(name(group))` must be a raw data column")
     g = name(group)
@@ -4153,6 +4256,33 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, 
     if is_cv
         n_groups_expr = Symbol(r_name, :_n_g)
         push!(stmts, :($n_groups_expr = maximum($idx_name)))
+    end
+    if !isnothing(r2d2_scale)
+        # Derived residual scale. cv / centered are refused for the same reason
+        # as in `_sb_emit_id_bucket_sampling!`: both interact with a derived
+        # scale in ways nobody has designed, so they fail loudly rather than
+        # silently sampling something else.
+        is_cv && error(
+            "sbimpl: group `$g` is in `cv_groups` and also carries an `r2d2` " *
+            "decomposition; the cv re-draw path for a derived residual scale " *
+            "is not implemented")
+        is_centered && error(
+            "sbimpl: group `$g` is in `centered_groups` and also carries an " *
+            "`r2d2` decomposition; the centered path for a derived residual " *
+            "scale is not implemented")
+        length(gterms) == 1 && gterms[1] === 1 || error(
+            "sbimpl: `r2d2` currently requires the random effect playing the " *
+            "residual role to be a single intercept — `(1 | $g)`. Predictor " *
+            "`$target` has $(length(gterms)) random-effect terms on `$g`, and " *
+            "splitting the derived residual variance `(1 - R2) * tau_bsv^2` " *
+            "among several margins needs a second simplex that the flat " *
+            "decomposition does not build.")
+        scale_name = Symbol(r_name, :_r2d2_scale)
+        push!(stmts, :($scale_name = $r2d2_scale))
+        push!(stmts, :($r_name ~ ranef_intercept_r2d2(;
+            group_idx=$idx_name, n_groups=$n_groups_expr, scale=$scale_name)))
+        push!(summands, r_name)
+        return
     end
     if length(gterms) == 1 && gterms[1] === 1
         # (1 | g) fast/equivalent path -- stays on ranef_intercept so the
@@ -4186,7 +4316,11 @@ end
 
 function _sb_emit_ranef_block!(stmts, data, target::Symbol,
                                 term::MultiMembershipTerm, gterms, summands;
-                                cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}())
+                                cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
+                                r2d2_scale=nothing)
+    isnothing(r2d2_scale) || error(
+        "sbimpl: `r2d2` decompositions over typed `mm(...)` multi-membership " *
+        "random effects are not yet supported")
     group_names = _sb_mm_group_names(term)
     weight_names = _sb_mm_weight_names(term)
     cv_hit = intersect(Set(group_names), cv_groups)
@@ -4264,7 +4398,11 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol,
 end
 
 function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::Tuple{NamedColumn,NamedColumn}, gterms, summands;
-                                cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}())
+                                cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
+                                r2d2_scale=nothing)
+    isnothing(r2d2_scale) || error(
+        "sbimpl: `r2d2` decompositions over stratified `gr(g, by=b)` random " *
+        "effects are not yet supported")
     gcol, bcol = group
     g_backing = _as_data_column(parent(gcol))
     b_backing = _as_data_column(parent(bcol))
@@ -4545,6 +4683,251 @@ function _sb_ranef_effect_overrides(brmi::BRMI, id_buckets)
     out
 end
 
+# ---- R2D2 whole-predictor variance decomposition ----------------------------
+#
+# `effect(lp, :) ~ r2d2(...)` puts ONE joint prior on a predictor's population
+# columns and its random-effect margins, by splitting a total scale `tau_bsv`
+# into an explained part (allocated across columns by a Dirichlet simplex) and
+# a residual part (the random effect). Design record: decisions `kx8wkd`
+# (nested R2-partition family), `x0ea1e` (`effect(...)` surface), `1bbq22v`
+# (scope), `1db6zkr` (all-or-nothing per shared bucket).
+#
+# The INTERCEPT is deliberately never decomposed: it is a location, not a
+# source of explained variance, and its design column is constant so `Var(x_k)`
+# would be zero. It keeps the ordinary standard-Normal prior unless an explicit
+# `effect(lp, Intercept) ~ Normal(...)` statement overrides it -- which composes,
+# because a column carrying its own override is likewise excluded from the
+# simplex rather than fought over.
+
+_sb_r2d2_kwarg(::Nothing, _default) = _default
+_sb_r2d2_kwarg(x, _default) = x
+
+function _sb_r2d2_beta(kw, lp)
+    isnothing(kw) && return (1.0, 1.0)
+    e = _as_expr_column(kw)
+    isnothing(e) && error(
+        "sbimpl: `r2d2(R2 = ...)` for `$lp` expects a `Beta(a, b)` prior on the " *
+        "explained fraction, got $(repr(kw))")
+    T = _as_distribution_type(getf(e))
+    (!isnothing(T) && T <: Beta) || error(
+        "sbimpl: `r2d2(R2 = ...)` for `$lp` currently supports only `Beta(a, b)`; " *
+        "got `$(getf(e))`")
+    isempty(getkwargs(e)) || error(
+        "sbimpl: `r2d2(R2 = Beta(...))` does not accept distribution keywords")
+    args = map(_sb_effect_prior_arg, getargs(e))
+    length(args) == 2 || error(
+        "sbimpl: `r2d2(R2 = Beta(a, b))` requires both Beta shape parameters")
+    all(a -> a isa Real && isfinite(a) && a > 0, args) || error(
+        "sbimpl: `r2d2(R2 = Beta(a, b))` shape parameters must be finite, " *
+        "strictly positive numeric formula constants, got $(repr(args))")
+    (Float64(args[1]), Float64(args[2]))
+end
+
+function _sb_r2d2_positive(x, what, lp)
+    x isa Real || error(
+        "sbimpl: `r2d2($what = ...)` for `$lp` must be a numeric formula " *
+        "constant, got $(repr(x))")
+    isfinite(x) && x > 0 || error(
+        "sbimpl: `r2d2($what = ...)` for `$lp` must be finite and strictly " *
+        "positive, got $x")
+    Float64(x)
+end
+
+# Resolve every `effect(..., :) ~ r2d2(...)` statement onto its linear
+# predictor, decide which population columns take a Dirichlet share, and check
+# the shared-bucket all-or-nothing rule. Returns a Dict keyed by predictor; an
+# empty Dict when the formula contains no r2d2 statement, which keeps every
+# other model's emission byte for byte unchanged.
+function _sb_r2d2_overrides(brmi::BRMI, id_buckets, effect_overrides)
+    specs = r2d2_priors(brmi)
+    isempty(specs) && return Dict{Symbol,NamedTuple}()
+
+    lp_names = Symbol[x.name for x in linear_predictors(brmi)]
+    labels_of(lp) = _sb_is_prior_declaration(brmi, lp) ? nothing :
+        try popcoefnames(brmi, lp) catch; nothing end
+
+    out = Dict{Symbol,NamedTuple}()
+    for spec in specs
+        target = spec.predictor
+        if isnothing(target)
+            candidates = Symbol[lp for lp in lp_names
+                                if !isnothing(labels_of(lp))]
+            isempty(candidates) && error(
+                "sbimpl: `effect(:) ~ r2d2(...)` matches no linear predictor " *
+                "with population coefficients")
+            length(candidates) == 1 || error(
+                "sbimpl: `effect(:) ~ r2d2(...)` is ambiguous across linear " *
+                "predictors $(join(candidates, ", ")); use " *
+                "`effect(<linear_predictor>, :) ~ r2d2(...)`.")
+            target = only(candidates)
+        end
+        haskey(out, target) && error(
+            "sbimpl: duplicate `r2d2` statement for linear predictor `$target`")
+
+        labels = labels_of(target)
+        isnothing(labels) && error(
+            "sbimpl: `effect($target, :) ~ r2d2(...)` names no linear predictor " *
+            "with population coefficients. Available predictors: " *
+            "$(join([lp for lp in lp_names if !isnothing(labels_of(lp))], ", ")).")
+
+        getf(spec.expression) === r2d2 || error(
+            "sbimpl: a `Colon` effect address currently supports only the " *
+            "`r2d2(...)` family; got `$(spec.family)`")
+        isempty(spec.arguments) || error(
+            "sbimpl: `r2d2(...)` takes keyword arguments only " *
+            "(`R2`, `tau_bsv`, `alpha`); got $(length(spec.arguments)) positional")
+        kw = spec.keywords
+        known = (:R2, :tau_bsv, :alpha)
+        for k in keys(kw)
+            k in known || error(
+                "sbimpl: unknown `r2d2` keyword `$k` for `$target`; supported " *
+                "keywords are $(join(known, ", "))")
+        end
+        r2_a, r2_b = _sb_r2d2_beta(get(kw, :R2, nothing), target)
+        alpha = _sb_r2d2_positive(get(kw, :alpha, 1.0), "alpha", target)
+        raw_tau = get(kw, :tau_bsv, nothing)
+        tau_bsv = isnothing(raw_tau) ? nothing :
+                  _sb_r2d2_positive(raw_tau, "tau_bsv", target)
+
+        # Which columns enter the simplex. The intercept never does; neither
+        # does a column that already carries its own `effect(lp, coef) ~
+        # Normal(...)` statement -- that override wins and the column keeps its
+        # own scale, rather than being double-prioried.
+        col_overrides = get(effect_overrides, target, nothing)
+        share_idx = zeros(Int, length(labels))
+        n_shares = 0
+        for (i, label) in pairs(labels)
+            label === :Intercept && continue
+            isnothing(col_overrides) || isnothing(col_overrides[i]) || continue
+            n_shares += 1
+            share_idx[i] = n_shares
+        end
+        out[target] = (; labels, share_idx, n_shares, alpha, r2_a, r2_b, tau_bsv)
+    end
+
+    _sb_r2d2_check_buckets(id_buckets, out)
+    out
+end
+
+# Decision `1db6zkr`, all-or-nothing per bucket: within one shared brms `|ID|`
+# block a margin's `tau` is either DERIVED for every margin or SAMPLED for every
+# margin. A part-derived vector would mean one submodel whose scale is half
+# transformed parameter and half free parameter, which is not built -- and a
+# partly-decomposed correlated block is statistically odd anyway.
+function _sb_r2d2_check_buckets(id_buckets, r2d2_overrides)
+    isempty(r2d2_overrides) && return
+    for (key, bucket) in id_buckets
+        margins = _sb_id_bucket_margins(bucket)
+        scoped = unique(Symbol[m.predictor for m in margins
+                               if haskey(r2d2_overrides, m.predictor)])
+        isempty(scoped) && continue
+        missing_lps = unique(Symbol[m.predictor for m in margins
+                                    if !haskey(r2d2_overrides, m.predictor)])
+        isempty(missing_lps) || error(
+            "sbimpl: `r2d2` scopes $(join(sort(scoped), ", ")) in the shared " *
+            "`|$(first(key))|` random-effect block, but " *
+            "$(join(sort(missing_lps), ", ")) also slice that block without an " *
+            "`r2d2` statement. Within one shared bucket the decomposition is " *
+            "all-or-nothing: give every linear predictor in the bucket its own " *
+            "`effect(<lp>, :) ~ r2d2(...)`, or none of them.")
+    end
+end
+
+# Emit the shared per-predictor R2D2 parameters. This runs BEFORE the `|ID|`
+# bucket prepass because a bucket's derived `tau` references `R2` / `tau_bsv`.
+# Returns a name table keyed by predictor; `r2_name === nothing` marks the
+# degenerate no-covariate case, where there is nothing to allocate and the
+# random effect simply keeps the free total scale (decision `1db6zkr`).
+function _sb_emit_r2d2_params!(stmts, data, r2d2_overrides)
+    names = Dict{Symbol,NamedTuple}()
+    for target in sort!(collect(keys(r2d2_overrides)))
+        spec = r2d2_overrides[target]
+        r2_name  = Symbol(:r2d2_, target, :_R2)
+        tau_name = Symbol(:r2d2_, target, :_tau_bsv)
+        phi_name = Symbol(:r2d2_, target, :_phi)
+        if isnothing(spec.tau_bsv)
+            # No user anchor. A latent per-subject predictor has no observed
+            # response to derive a total scale from, so the honest default is a
+            # sampled half-standard-normal rather than a fabricated constant.
+            push!(stmts, :($tau_name ~ std_normal(; lower=0.)))
+        else
+            data[tau_name] = spec.tau_bsv
+        end
+        if spec.n_shares == 0
+            names[target] = (; r2_name=nothing, phi_name=nothing, tau_name)
+            continue
+        end
+        push!(stmts, :($r2_name ~ beta($(spec.r2_a), $(spec.r2_b))))
+        if spec.n_shares == 1
+            # A one-element simplex is deterministically [1]; emitting a
+            # Dirichlet over it would add a degenerate constrained parameter.
+            data[phi_name] = [1.0]
+        else
+            alpha_name = Symbol(:r2d2_, target, :_alpha)
+            data[alpha_name] = fill(spec.alpha, spec.n_shares)
+            push!(stmts, :($phi_name ~ dirichlet($alpha_name)))
+        end
+        names[target] = (; r2_name, phi_name, tau_name)
+    end
+    names
+end
+
+# The residual scale a predictor's random-effect margins take:
+# `sqrt((1 - R2) * tau_bsv^2)`, or the bare total scale when the predictor has
+# no covariates to explain anything (R2 unused).
+_sb_r2d2_resid_scale(nm) = isnothing(nm.r2_name) ? nm.tau_name :
+    :(sqrt((1. - $(nm.r2_name)) * $(nm.tau_name)^2))
+
+# The neutral bundle threaded through every emission path. Both Dicts empty
+# means "no r2d2 statement in this formula", which every call site tests with
+# `haskey(r2d2.overrides, target)` before changing anything it emits.
+_sb_empty_r2d2() = (; overrides=Dict{Symbol,NamedTuple}(),
+                      names=Dict{Symbol,NamedTuple}())
+
+# Population half of an R2D2-scoped predictor. Every column keeps its position
+# in the same `beta_pop` vector the ordinary path emits -- only the SCALE
+# changes, and only for columns the simplex covers. Columns it does not cover
+# (the intercept; anything with its own `effect(lp, coef) ~ Normal(...)`) keep
+# their loc/scale in `beta_loc` / the `fallback` vector, so the two prior
+# surfaces compose in one emission instead of fighting over `beta_pop`.
+function _sb_emit_r2d2_popefs!(stmts, data, target, X_name, pop_name,
+                                n_cols, spec, names, overrides)
+    n_cols == length(spec.labels) || error(
+        "sbimpl: internal r2d2 alignment error for `$target`: " *
+        "$(length(spec.labels)) population labels for $n_cols design columns")
+    beta_loc = Float64[0.0 for _ in spec.labels]
+    fallback = Float64[1.0 for _ in spec.labels]
+    if !isnothing(overrides)
+        for i in eachindex(overrides)
+            isnothing(overrides[i]) && continue
+            loc, scale = _sb_effect_normal_args(overrides[i])
+            (loc isa Real && scale isa Real) || error(
+                "sbimpl: `effect($target, $(spec.labels[i])) ~ Normal(...)` " *
+                "combined with `effect($target, :) ~ r2d2(...)` requires " *
+                "numeric location and scale constants, got " *
+                "$(repr(loc)), $(repr(scale))")
+            beta_loc[i] = Float64(loc)
+            fallback[i] = Float64(scale)
+        end
+    end
+    share_name = Symbol(:r2d2_, target, :_share_idx)
+    fall_name  = Symbol(:r2d2_, target, :_fallback)
+    loc_name   = Symbol(:r2d2_, target, :_beta_loc)
+    varx_name  = Symbol(:r2d2_, target, :_varx)
+    scale_name = Symbol(:r2d2_, target, :_beta_scale)
+    data[share_name] = spec.share_idx
+    data[fall_name]  = fallback
+    data[loc_name]   = beta_loc
+    push!(stmts, :($varx_name = brm_col_variances(
+        $X_name, dims($X_name)[1], dims($X_name)[2])))
+    push!(stmts, :($scale_name = brm_r2d2_scale(
+        $share_name, $fall_name, $varx_name, $(names.phi_name),
+        $(names.r2_name), $(names.tau_name),
+        dims($X_name)[2], $(spec.n_shares))))
+    push!(stmts, :($pop_name ~ _popefs_normal(;
+        X=$X_name, beta_loc=$loc_name, beta_scale=$scale_name)))
+end
+
 # ---- group-block prepass (Prepass 2.5) ---------------------------------------
 #
 # Scan brmi.operations for declaring terms anywhere in the model: a term `f`
@@ -4711,7 +5094,8 @@ _sb_ranef_term_ncols(t, _) = error("sbimpl: unsupported ranef term $(typeof(t)):
 # stratified `gr(g, by=b)` bucket still errors (see `_sb_emit_id_bucket_sampling!`).
 function _sb_emit_id_buckets!(stmts, data, buckets;
                               cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
-                              ranef_effect_overrides=Dict{Tuple{Symbol,Any},NamedTuple}())
+                              ranef_effect_overrides=Dict{Tuple{Symbol,Any},NamedTuple}(),
+                              r2d2_names=Dict{Symbol,NamedTuple}())
     lookup = _sb_empty_id_lookup()
     for (k, bucket) in pairs(buckets)
         id_sym, _ = k
@@ -4731,9 +5115,40 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
         n_terms_total >= 1 || error("sbimpl: `|$id_sym|` bucket has zero terms")
         data[n_terms_name] = n_terms_total
         ranef_effect = get(ranef_effect_overrides, k, nothing)
+        # Derived-`tau` vector for an R2D2-scoped bucket. `_sb_r2d2_check_buckets`
+        # has already guaranteed all-or-nothing, so either every margin resolves
+        # here or none does.
+        margins = _sb_id_bucket_margins(bucket)
+        r2d2_tau = nothing
+        if !isempty(r2d2_names) &&
+           all(m -> haskey(r2d2_names, m.predictor), margins)
+            isnothing(ranef_effect) || error(
+                "sbimpl: `|$id_sym|` carries both an `r2d2` decomposition and an " *
+                "`effect(sd|cor, $id_sym, ...)` statement. The decomposition " *
+                "DERIVES the block's marginal scales, so a sampled SD prior on " *
+                "the same block has nothing to apply to; drop one of the two. " *
+                "(An `effect(cor, $id_sym)` LKJ prior is planned but not built: " *
+                "an r2d2 block currently keeps LKJ eta 1.)")
+            # One margin per predictor, for the same reason the plain path
+            # insists on `(1 | g)`: each predictor contributes exactly one
+            # derived residual scale `sqrt((1 - R2) * tau_bsv^2)`, and handing
+            # that same scalar to two margins of one predictor would double its
+            # random-effect variance instead of partitioning it.
+            for m in margins
+                count(x -> x.predictor === m.predictor, margins) == 1 || error(
+                    "sbimpl: `|$id_sym|` gives predictor `$(m.predictor)` " *
+                    "$(count(x -> x.predictor === m.predictor, margins)) " *
+                    "random-effect margins, but its `r2d2` decomposition " *
+                    "derives a single residual scale. Splitting " *
+                    "`(1 - R2) * tau_bsv^2` among several margins needs a " *
+                    "second simplex that the flat decomposition does not build.")
+            end
+            r2d2_tau = Expr(:vect,
+                [_sb_r2d2_resid_scale(r2d2_names[m.predictor]) for m in margins]...)
+        end
         idx_name = _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, desc;
                                                 cv_groups, centered_groups, id_sym,
-                                                ranef_effect)
+                                                ranef_effect, r2d2_tau)
         for (brmi_key, cols) in per_target_ranges
             lookup[(brmi_key, k)] = (; bucket_name, cols, idx_name, suffix)
         end
@@ -4752,9 +5167,30 @@ _sb_id_bucket_suffix(id_sym, g::Tuple{NamedColumn,NamedColumn}) =
 # callers use to slice the draw matrix per sub-formula.
 function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g::NamedColumn;
                                       cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
-                                      id_sym=nothing, ranef_effect=nothing)
+                                      id_sym=nothing, ranef_effect=nothing, r2d2_tau=nothing)
     idx_name, n_name = _sb_ensure_group_data!(data, g)
     gname = name(g)
+    if !isnothing(r2d2_tau)
+        # R2D2 bucket: the marginal scales are a transformed parameter, so the
+        # block goes to the derived-`tau` sibling. Centered and cv variants are
+        # deliberately not wired -- a derived scale interacts with both, and
+        # neither has been designed, so they fail loudly rather than silently
+        # sampling something else.
+        gname in cv_groups && error(
+            "sbimpl: group `$gname` is in `cv_groups` and also carries an " *
+            "`r2d2` decomposition; the cv re-draw path for derived marginal " *
+            "scales is not implemented")
+        gname in centered_groups && error(
+            "sbimpl: group `$gname` is in `centered_groups` and also carries an " *
+            "`r2d2` decomposition; the centered path for derived marginal " *
+            "scales is not implemented")
+        tau_name = Symbol(bucket_name, :_r2d2_tau)
+        push!(stmts, :($tau_name = $r2d2_tau))
+        push!(stmts, :($bucket_name ~ ranef_correlated_draws_r2d2(;
+            group_idx=$idx_name, n_groups=$n_name, n_terms=$n_terms_name,
+            tau=$tau_name, lkj_eta=1.)))
+        return idx_name
+    end
     sd_family = isnothing(ranef_effect) ? nothing : Expr(:vect, ranef_effect.sd_family...)
     sd_rate = isnothing(ranef_effect) ? nothing : Expr(:vect, ranef_effect.sd_rate...)
     lkj_eta = isnothing(ranef_effect) ? nothing : ranef_effect.lkj_eta
@@ -4800,9 +5236,12 @@ end
 function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name,
                                        g::Tuple{NamedColumn,NamedColumn};
                                        cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
-                                       id_sym=nothing, ranef_effect=nothing)
+                                       id_sym=nothing, ranef_effect=nothing, r2d2_tau=nothing)
     gname, bname = name(g[1]), name(g[2])
     id_str = isnothing(id_sym) ? "ID" : String(id_sym)
+    isnothing(r2d2_tau) || error(
+        "sbimpl: `r2d2` decompositions for stratified `|$id_str| " *
+        "gr($gname, by=$bname)` buckets are not yet supported")
     isnothing(ranef_effect) || error(
         "sbimpl: covariance-prior effects for stratified `|$id_str| " *
         "gr($gname, by=$bname)` buckets are not yet supported")

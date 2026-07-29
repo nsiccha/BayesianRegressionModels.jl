@@ -100,3 +100,94 @@ knots, penalty decomposition, and intercept constraint. Passing
 `freeze_constants=false` re-estimates them from `new_df`. Like [`s`](@ref),
 `t2` is implemented only by the StanBlocks backend and is not available to
 `VBRMI`.
+
+## R²-induced variance decomposition: `effect(:) ~ r2d2(...)`
+
+[`r2d2`](@ref) replaces the independent per-coefficient priors on a linear
+predictor's population block with a *joint* prior induced by a prior on that
+predictor's coefficient of determination. It is a separate statement in the
+formula block — addressed with [`effect`](@ref), never with a per-column
+`effect(lp, coef) ~ Normal(...)` — and is implemented only by the `SBBRMI`
+StanBlocks backend.
+
+```julia
+using BayesianRegressionModels, Distributions
+
+brmi = @brm df begin
+    log_CL ~ 1 + wt + age + (1 | p | subject)
+    log_V  ~ 1 + wt + (1 | p | subject)
+
+    effect(log_CL, :) ~ r2d2(R2=Beta(1, 1), tau_bsv=0.5)
+    effect(log_V, :)  ~ r2d2(R2=Beta(2, 3), tau_bsv=0.25)
+
+    conc ~ Normal(exp(log_CL - log_V) * time, 1)
+end
+```
+
+`effect(lp, :)` addresses every population coefficient of `lp` at once; the
+bare `effect(:)` is shorthand that resolves only when the model has exactly one
+population predictor. The `Colon` address is deliberately invisible to
+[`effect_priors`](@ref) — it names no single labelled column — and is read back
+with [`r2d2_priors`](@ref) instead.
+
+### What it emits
+
+Writing `tau_bsv` for the predictor's total scale, the decomposition is
+
+```
+R2               ~ Beta(a, b)                                 # parameter
+phi              ~ Dirichlet(alpha)                           # simplex
+beta_scale[k]     = sqrt(phi[k] * R2 * tau_bsv^2 / Var(x_k))  # transformed
+tau_resid         = sqrt((1 - R2) * tau_bsv^2)                # transformed
+```
+
+`beta_scale` is injected into the shipped `_popefs_normal` seam, so the
+population block still samples as `beta_pop ~ normal(beta_loc, beta_scale)`;
+`tau_resid` becomes the random effect's standard deviation. The column
+variances `Var(x_k)` depend on data alone and hoist to Stan's transformed-data
+block.
+
+The intercept is excluded from the simplex. Its design column is constant, so
+`Var(x_k) = 0` there, and an intercept is a location rather than explained
+variance. A predictor whose only non-intercept column count is one needs no
+simplex parameter at all: `phi = [1]` becomes a data constant.
+
+### The random effect plays the residual role
+
+The inciting shape is population PK: `log_CL` is a *latent* per-subject
+parameter with no residual term of its own, so its subject random effect **is**
+the unexplained half of `tau_bsv^2`. That is why `r2d2` derives the
+random-effect SD rather than sampling it, and why an
+`effect(sd, ID, ...)` statement on the same block is rejected — the
+decomposition already determines those scales.
+
+### Keywords
+
+| keyword | default | meaning |
+|---|---|---|
+| `R2` | required | `Beta(a, b)` prior on the coefficient of determination |
+| `tau_bsv` | sampled half-standard-normal | the predictor's total scale; pass a number to fix it |
+| `alpha` | `1` | Dirichlet concentration over the non-intercept columns |
+
+`tau_bsv` has no data-derived default. A latent per-subject parameter has no
+observed response to derive a scale from, so an omitted `tau_bsv` becomes a
+sampled `real<lower=0>` with a half-standard-normal prior. Fix it whenever you
+have a defensible scale — it is the quantity the whole decomposition is
+relative to.
+
+### Current limits
+
+All of these fail loudly rather than silently sampling something else:
+
+- The random effect playing the residual role must be a single intercept —
+  `(1 | g)` or one margin per predictor inside a `(1 | ID | g)` bucket.
+  Splitting `(1 - R2) * tau_bsv^2` over several margins needs a second simplex
+  that this decomposition does not build.
+- A shared `(… | ID | g)` bucket is all-or-nothing: either every margin's
+  predictor carries an `r2d2` statement or none does.
+- `effect(cor, ID)` is not yet composable; an `r2d2` block keeps LKJ `eta = 1`.
+- Adaptive centering (`centered_groups`), cv-contagious sizing (`cv_groups`),
+  stratified `gr(g, by=b)` groups, and `mm(...)` multi-membership terms are all
+  unsupported in combination with `r2d2`.
+- A column that also carries its own `effect(lp, coef) ~ Normal(loc, scale)`
+  statement is dropped from the simplex and keeps that explicit prior.
