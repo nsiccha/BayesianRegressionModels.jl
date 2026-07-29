@@ -1,5 +1,28 @@
 # Formula terms
 
+## Fixed-one contribution: `offset(x)`
+
+[`offset`](@ref) adds `x` directly to a population-level linear predictor with
+coefficient one. It never allocates a `beta_pop` column. The argument may be a
+raw-data expression, as in an exposure offset, or an already-declared sampled
+scalar:
+
+```julia
+brmi = @brm df begin
+    log_ka_pop ~ Normal(-2.08, 1.0)
+    sigma ~ Exponential(1.0)
+    eta_ka ~ offset(log_ka_pop) + (1 | p | subject)
+    concentration ~ Normal(exp(eta_ka), sigma)
+end
+```
+
+Use [`protect`](@ref) for literal data transformations whose resulting column
+should receive an estimated population coefficient. `protect(log_ka_pop)` is
+therefore not an alternative spelling: `protect` materializes raw-data
+expressions, while `offset` preserves a model-value reference and fixes its
+coefficient to one. Offsets are population-level terms and are rejected inside
+`(... | group)` random-effects terms.
+
 ## Penalized smooth: `s(x)`
 
 [`s`](@ref) adds a penalized one-dimensional thin-plate regression spline to a
