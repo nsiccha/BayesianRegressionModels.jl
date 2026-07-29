@@ -61,7 +61,7 @@ BayesianRegressionModels.mo
 BayesianRegressionModels.mo1
 ```
 
-## Likelihood / prior markers
+## Likelihood distributions / prior markers
 
 ```@docs
 BayesianRegressionModels.OrderedLogistic

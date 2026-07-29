@@ -78,7 +78,7 @@ surface is usually not the right choice for observations encoded once on a
 fixed principal interval.
 
 For conventional circular regression on a fixed interval, use the distinct
-BRM marker `CircularVonMises`:
+BRM distribution `CircularVonMises`:
 
 ```julia
 circular_model = @brm data begin
@@ -93,6 +93,9 @@ defaults to `(-pi, pi)`. Observations must lie in the half-open interval
 `[lo, hi)`. BRM wraps `mu` and generated draws into that interval, while the
 density itself remains Stan's native `von_mises_lpdf`. Both arguments are
 ordinary distributional parameters: BRM supplies no implicit link or prior.
+Outside a formula, `CircularVonMises(mu, kappa; interval=...)` is an executable
+`ContinuousUnivariateDistribution`: `params`, `logpdf`, and `rand` preserve the
+same fixed-interval contract used by the Stan lowering.
 
 For comparison, `brms` uses a fixed `(-pi, pi)` response convention and makes
 both `mu` and `kappa` distributional, with default `tan_half` and `log` links.
