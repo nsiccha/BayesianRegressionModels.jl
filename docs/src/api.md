@@ -43,6 +43,7 @@ BayesianRegressionModels.getbroadcast
 ```@docs
 BayesianRegressionModels.assign
 BayesianRegressionModels.doublepipe
+BayesianRegressionModels.weighted
 BayesianRegressionModels.gr
 BayesianRegressionModels.gp
 BayesianRegressionModels.hsgp
