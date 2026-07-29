@@ -724,6 +724,83 @@ end
         missing_bounds(df); mod=@__MODULE__)
 end
 
+composed_numeric_df = (;
+    y_truncated=[-0.6, 0.1, 1.1],
+    y_censored=[-0.5, 0.2, 1.0],
+    count_truncated=[1, 2, 4],
+    count_censored=[0, 2, 4],
+    interval_lower=[-0.4, 0.0, 0.5],
+    interval_upper=[-0.1, 0.4, 1.0],
+    count_interval_lower=[0, 1, 3],
+    count_interval_upper=[1, 3, 5],
+)
+
+composed_numeric_builder = @brm begin
+    y_truncated ~ truncated(Normal(0.2, 1.1); lower=-0.75, upper=1.25)
+    y_censored ~ censored(Normal(0.2, 1.1); lower=-0.5, upper=1.0)
+    count_truncated ~ truncated(Poisson(2.2); lower=1, upper=4)
+    count_censored ~ censored(Poisson(2.2); lower=0, upper=4)
+    interval_lower ~ interval_censored(Normal(0.2, 1.1); upper=interval_upper)
+    count_interval_lower ~ interval_censored(
+        Poisson(2.2); upper=count_interval_upper)
+end
+
+@testset "wrapper pointwise and predictive semantics match Distributions" begin
+    descriptor = brm_descriptor(
+        composed_numeric_builder, composed_numeric_df; mod=@__MODULE__)
+    code = brm_execute(descriptor, :transpile)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+
+    mkpath(FAMILY_SURFACE_CACHE)
+    problem = brm_execute(
+        descriptor, :instantiate;
+        path=joinpath(FAMILY_SURFACE_CACHE, string(descriptor.id) * ".stan"))
+    @test LogDensityProblems.dimension(problem) == 0
+    pointwise = brm_execute(
+        descriptor, :pointwise_loglik;
+        problem, draws=Float64[], seed=20260729)
+
+    normal = Normal(0.2, 1.1)
+    poisson = Poisson(2.2)
+    expected = (;
+        y_truncated=logpdf.(
+            Ref(truncated(normal; lower=-0.75, upper=1.25)),
+            composed_numeric_df.y_truncated),
+        y_censored=logpdf.(
+            Ref(censored(normal; lower=-0.5, upper=1.0)),
+            composed_numeric_df.y_censored),
+        count_truncated=logpdf.(
+            Ref(truncated(poisson; lower=1, upper=4)),
+            composed_numeric_df.count_truncated),
+        count_censored=logpdf.(
+            Ref(censored(poisson; lower=0, upper=4)),
+            composed_numeric_df.count_censored),
+        interval_lower=log.(
+            cdf.(Ref(normal), composed_numeric_df.interval_upper) .-
+            cdf.(Ref(normal), composed_numeric_df.interval_lower)),
+        count_interval_lower=log.(
+            cdf.(Ref(poisson), composed_numeric_df.count_interval_upper) .-
+            cdf.(Ref(poisson), composed_numeric_df.count_interval_lower)),
+    )
+    for (target, values) in pairs(expected)
+        actual = getproperty(pointwise, Symbol(target, :_likelihood))
+        @test actual ≈ values atol=1e-10
+    end
+
+    predictions = brm_execute(
+        descriptor, :predict;
+        problem, draws=zeros(0, 128), seed=20260729)
+    @test all(-0.75 .<= predictions.y_truncated_gen .<= 1.25)
+    @test all(-0.5 .<= predictions.y_censored_gen .<= 1.0)
+    @test all(1 .<= predictions.count_truncated_gen .<= 4)
+    @test all(0 .<= predictions.count_censored_gen .<= 4)
+    # Interval evidence changes the likelihood only: predictive draws remain
+    # on the uncoarsened base-family scale and therefore need not lie inside
+    # any observed interval.
+    @test any(predictions.interval_lower_gen .< minimum(composed_numeric_df.interval_lower))
+    @test all(predictions.count_interval_lower_gen .>= 0)
+end
+
 @testset "wrapper families execute through BridgeStan" begin
     sb = SBBRMI(family_builder(df); mod=@__MODULE__)
     mkpath(FAMILY_SURFACE_CACHE)

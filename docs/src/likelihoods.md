@@ -33,8 +33,8 @@ Bounds may be numeric literals or observed row-wise columns. The initial
 family-gated surface covers `Normal`, `LogNormal`, `Exponential`, `Weibull`,
 and `Poisson`; BRM rejects other base families until their aggregate density,
 pointwise likelihood, CDF/CCDF, generated prediction, and stanc paths are all
-tested. This composition is currently implemented by [`SBBRMI`](@ref), not
-[`VBRMI`](@ref). The legacy `TruncatedNormal` Bordet marker remains a separate
+tested. This composition is currently implemented by the `SBBRMI` Stan
+backend, not `VBRMI`. The legacy `TruncatedNormal` Bordet marker remains a separate
 censored-Normal compatibility surface.
 
 ## Concise categorical regression
