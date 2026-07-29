@@ -1104,33 +1104,36 @@ _sb_mi_normal = StanBlocks.@slic begin
                     num_elements(Jobs) + n_mis)
 end
 
-# Squared-exponential GP helpers. The remaining axis loops live in Stan
-# functions because top-level @slic bodies are deliberately control-flow free.
+# Squared-exponential GP helpers. The data-layout conversion loop lives in a
+# Stan function because top-level @slic bodies are deliberately control-flow
+# free.
 #
-# `brm_exp_quad_cov` builds the full covariance used by exact `gp(...)` as the
-# product of Stan's one-dimensional `gp_exp_quad_cov` factors. This is exactly
-# the separable multidimensional exponentiated-quadratic kernel, and delegates
-# the O(n^2) covariance work plus diagonal jitter to Stan's built-ins. `rho` is
-# always a vector: isotropic calls repeat their one length scale, while
-# anisotropic calls sample one value per predictor axis.
+# BRM records exact-GP inputs as an N x d matrix so replay and descriptors keep
+# their ordinary dense-data shape. `brm_gp_locations` converts its rows to
+# Stan's native `array[N] vector[d]` GP carrier once in transformed data.
+# `brm_exp_quad_cov` then delegates the whole multidimensional covariance and
+# diagonal jitter to Stan's `gp_exp_quad_cov` / `add_diag` built-ins.
 #
 # `brm_hsgp_sqrt_spd` evaluates the separable d-dimensional squared-exponential
 # spectral density at every tensor-product HSGP frequency. `omega2[b, j]` is
 # the squared angular frequency for basis row b and predictor axis j.
 StanBlocks.@deffun begin
-    @stanonly brm_exp_quad_cov(X::matrix[n, d], sigma::real,
-                               rho::vector[d], jitter::real)::matrix[n, n] = begin
-        K = rep_matrix(sigma * sigma, n, n)
-        for axis in 1:d
-            K_axis = gp_exp_quad_cov(
-                to_array_1d(X[:, axis]), 1., rho[axis])
-            for i in 1:n
-                for j in 1:n
-                    K[i, j] = K[i, j] * K_axis[i, j]
-                end
-            end
+    @stanonly brm_gp_locations(X::matrix[n, d])::vector[n, d] = begin
+        locations::vector[n, d]
+        for i in 1:n
+            locations[i] = to_vector(X[i, :])
         end
-        return add_diag(K, jitter)
+        return locations
+    end
+
+    @stanonly brm_exp_quad_cov(X::vector[n, d], sigma::real,
+                               rho::real, jitter::real)::matrix[n, n] = begin
+        return add_diag(gp_exp_quad_cov(X, sigma, rho), jitter)
+    end
+
+    @stanonly brm_exp_quad_cov(X::vector[n, d], sigma::real,
+                               rho::vector[d], jitter::real)::matrix[n, n] = begin
+        return add_diag(gp_exp_quad_cov(X, sigma, rho), jitter)
     end
 
     @stanonly brm_hsgp_sqrt_spd(omega2::matrix[m, d], sigma::real,
@@ -1156,23 +1159,23 @@ end
 # there is no redundant population beta multiplying the returned draw.
 _sb_gp = StanBlocks.@slic begin
     n_obs = dims(X)[1]
-    n_axes = dims(X)[2]
+    X_gp = brm_gp_locations(X)
     log_rho   ~ std_normal()
     log_sigma ~ std_normal()
     z         ~ std_normal(; n=n_obs)
-    rho = rep_vector(exp(log_rho), n_axes)
-    K = brm_exp_quad_cov(X, exp(log_sigma), rho, jitter)
+    K = brm_exp_quad_cov(X_gp, exp(log_sigma), exp(log_rho), jitter)
     return cholesky_decompose(K) * z
 end
 
 _sb_gp_aniso = StanBlocks.@slic begin
     n_obs = dims(X)[1]
     n_axes = dims(X)[2]
+    X_gp = brm_gp_locations(X)
     log_rho :: vector[n_axes] ~ std_normal()
     log_sigma ~ std_normal()
     z         ~ std_normal(; n=n_obs)
     rho = exp(log_rho)
-    K = brm_exp_quad_cov(X, exp(log_sigma), rho, jitter)
+    K = brm_exp_quad_cov(X_gp, exp(log_sigma), rho, jitter)
     return cholesky_decompose(K) * z
 end
 
