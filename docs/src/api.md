@@ -101,6 +101,21 @@ BayesianRegressionModels.reprocess
 BayesianRegressionModels.restan_data
 ```
 
+## Executable descriptors
+
+```@docs
+BayesianRegressionModels.BRMDescriptor
+BayesianRegressionModels.BRMInput
+BayesianRegressionModels.BRMOutput
+BayesianRegressionModels.BRMOperation
+BayesianRegressionModels.BRMHighlight
+BayesianRegressionModels.brm_descriptor
+BayesianRegressionModels.brm_columns
+BayesianRegressionModels.brm_operation
+BayesianRegressionModels.brm_execute
+BayesianRegressionModels.required_brm_inputs
+```
+
 ## Introspection
 
 ```@docs

@@ -80,7 +80,7 @@ export Data, MaybeData, maybedata
 export AbstractColumn, MissingColumn, DataColumn, NamedColumn,
        ExprColumn, LikelihoodColumn, MaterializedColumn
 export BRMI, VBRMI, SBBRMI, GenerativeDeclaration, GenerativePlan
-export BRMDescriptor, BRMInput, BRMOutput, BRMOperation
+export BRMDescriptor, BRMInput, BRMOutput, BRMOperation, BRMHighlight
 export brm_descriptor, brm_operation, brm_execute, brm_columns,
        required_brm_inputs
 
