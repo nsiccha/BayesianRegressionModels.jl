@@ -26,11 +26,38 @@ function me end
 """
     s(x)
 
-Smooth-term marker. brms-style `s(x)` — the sbimpl backend builds a
-penalized one-dimensional thin-plate regression spline with the mgcv default
-basis dimension. Dispatch tag — see `_sb_s`.
+Add a penalized one-dimensional thin-plate regression spline to an `SBBRMI`
+linear predictor. The fixed rank-10 basis contains the
+unpenalized null space `{1, x}` and eight penalty-whitened range columns whose
+shared smoothing standard deviation has a standard half-normal prior.
+
+The public syntax is exactly one finite numeric predictor, `s(x)`. At least ten
+unique training values are required; keyword arguments such as `k=` and
+`knots=` are not supported. The term owns its complete smooth contribution and
+does not receive an additional population coefficient.
+
+Prediction and replay through [`reprocess`](@ref) or [`restan_data`](@ref) use
+the frozen training basis by default. This marker is implemented only by the
+StanBlocks backend; it is not a deterministic B-spline expansion and is not
+available to `VBRMI`.
+
+See [Formula terms](@ref) for an example and a comparison with
+`bs(...)` formulas. Dispatch tag — see `_sb_s`.
 """
 function s end
+
+"""
+    t2(x, z; k=(5, 5), basis=(:cr, :cr), full=false)
+
+Tensor-product smooth marker. The StanBlocks backend builds cubic-regression-
+spline margins, separates their null and penalized spaces, and gives the RR,
+RN, and NR tensor blocks independent smoothing scales. The current surface is
+two-dimensional, supports only `basis=(:cr, :cr)`, and requires `full=false`.
+Prediction/replay freezes the training knots and penalty decomposition by
+default. See [Formula terms](@ref) for the full contract. Dispatch tag — see
+`_sb_t2`.
+"""
+function t2 end
 
 """
     ar(time; p=1)
@@ -42,17 +69,6 @@ emitter. Dispatch tag — see `_sb_ar1`.
 function ar end
 
 """
-    OrderedLogistic
-
-Cumulative-link ordinal-likelihood marker. Use as a family on the RHS:
-`y ~ OrderedLogistic(eta)`. The sbimpl backend lowers to Stan's
-`ordered_logistic_lpmf`. Marker struct only — Distributions.jl does not
-ship an `OrderedLogistic`, and the `@brm` parser never constructs an
-instance, so the empty struct is sufficient.
-"""
-struct OrderedLogistic end
-
-"""
     Horseshoe
 
 Carvalho-Polson-Scott horseshoe shrinkage prior marker. Use as a prior
@@ -62,23 +78,51 @@ only — the `@brm` parser never constructs an instance.
 """
 struct Horseshoe end
 
-"""
-    ZeroInflatedPoisson(lambda, zi)
+_sb_interval_literal(x::Real) = Float64(x)
+_sb_interval_literal(x::NamedColumn) = begin
+    parent(x) isa MissingColumn && name(x) in (:pi, :π) || error(
+        "CircularVonMises: `interval` must be a compile-time numeric pair; " *
+        "got formula symbol `$(name(x))`")
+    Float64(pi)
+end
+function _sb_interval_literal(x::ExprColumn)
+    args = getargs(x)
+    length(args) == 1 && getf(x) === (-) && return -_sb_interval_literal(args[1])
+    length(args) == 1 && getf(x) === (+) && return _sb_interval_literal(args[1])
+    error("CircularVonMises: `interval` must be a compile-time numeric pair; got $(x)")
+end
+_sb_interval_literal(x) = error(
+    "CircularVonMises: `interval` must be a compile-time numeric pair; got $(typeof(x))")
 
-Zero-inflated Poisson likelihood marker — a mixture of a point-mass at
-zero (with probability `zi`) and `Poisson(lambda)`. Surfaces as
-`y ~ ZeroInflatedPoisson(lambda, zi)` in the SBBRMI backend.
-"""
-struct ZeroInflatedPoisson end
+function _sb_circular_interval(kwargs)
+    interval = get(kwargs, :interval, (-Float64(pi), Float64(pi)))
+    interval isa Tuple && length(interval) == 2 || error(
+        "CircularVonMises: `interval` must be a 2-tuple `(lo, hi)`, got $(repr(interval))")
+    lo, hi = map(_sb_interval_literal, interval)
+    all(isfinite, (lo, hi)) && lo < hi || error(
+        "CircularVonMises: `interval` endpoints must be finite with lo < hi, got $(repr((lo, hi)))")
+    isapprox(hi - lo, 2 * Float64(pi); rtol=8eps(Float64), atol=8eps(Float64)) || error(
+        "CircularVonMises: `interval` must have length 2pi, got $(hi - lo)")
+    (lo, hi)
+end
 
-"""
-    NegativeBinomial2(mu, phi)
+function _check_term_kwargs(::Type{<:CircularVonMises}, kwargs)
+    unknown = filter(!=(:interval), keys(kwargs))
+    isempty(unknown) || error(
+        "CircularVonMises: unsupported keyword(s): $(join(unknown, ", ")); " *
+        "the only supported keyword is `interval`")
+    _sb_circular_interval(kwargs)
+    nothing
+end
 
-Negative-binomial likelihood marker parameterised by mean `mu` and positive
-shape/precision `phi`, matching Stan's `neg_binomial_2(mu, phi)`. This is
-deliberately distinct from Distributions.jl's `NegativeBinomial(r, p)`.
-"""
-struct NegativeBinomial2 end
+function _check_term_kwargs(::Type{<:Ordinal}, kwargs)
+    allowed = (:discrimination, :per_threshold)
+    unknown = filter(k -> k ∉ allowed, keys(kwargs))
+    isempty(unknown) || error(
+        "Ordinal: unsupported keyword(s): $(join(unknown, ", ")); " *
+        "supported keywords are `discrimination` and `per_threshold`")
+    nothing
+end
 
 """
     interval_censored(base; upper)
@@ -523,6 +567,384 @@ StanBlocks.@deffun begin
     end
 end
 
+# One internal Stan family serves the public typed ordinal composition. The
+# integer tags are emitted compile-time literals (structure: cumulative=1,
+# stopping-ratio=2; link: logit=1, probit=2, cloglog=3). Keeping the tags inside
+# one private UDF avoids a Cartesian product of public pair names while still
+# giving StanBlocks the complete lpmf / pointwise-lpmf / RNG triad.
+#
+# For cumulative-logit the scalar density delegates to Stan's native
+# ordered_logistic_lpmf after applying discrimination to both eta and the
+# cutpoints. Probit and cloglog use their exact native CDF/log-CDF primitives.
+# Stopping-ratio has no native Stan distribution, so its sequential hazards are
+# accumulated directly in log space.
+StanBlocks.@deffun begin
+    @stanonly brm_ordinal_logcdf(z::real, link::int)::real = begin
+        if link == 1
+            log_inv_logit(z)
+        else
+            if link == 2
+                normal_lcdf(z, 0., 1.)
+            else
+                log1m_exp(-exp(z))
+            end
+        end
+    end
+    @stanonly brm_ordinal_logccdf(z::real, link::int)::real = begin
+        if link == 1
+            log_inv_logit(-z)
+        else
+            if link == 2
+                normal_lccdf(z, 0., 1.)
+            else
+                -exp(z)
+            end
+        end
+    end
+    @stanonly brm_ordinal_cdf(z::real, link::int)::real = begin
+        if link == 1
+            inv_logit(z)
+        else
+            if link == 2
+                Phi(z)
+            else
+                -expm1(-exp(z))
+            end
+        end
+    end
+
+    @stanonly @lpxf brm_ordinal_lpmf(y::int, eta::real, thresholds::vector[k],
+                           discrimination::real, structure::int, link::int,
+                           threshold_effect::vector[k])::real = begin
+        K = k + 1
+        if discrimination <= 0.
+            negative_infinity()
+        else
+            if y < 1
+                negative_infinity()
+            else
+                if y > K
+                    negative_infinity()
+                else
+                    if structure == 1
+                        if link == 1
+                            ordered_logistic_lpmf(
+                                y,
+                                discrimination * eta,
+                                discrimination .* thresholds,
+                            )
+                        else
+                            if y == 1
+                                z_first = discrimination * (thresholds[1] - eta)
+                                brm_ordinal_logcdf(z_first, link)
+                            else
+                                if y == K
+                                    z_last = discrimination * (thresholds[k] - eta)
+                                    brm_ordinal_logccdf(z_last, link)
+                                else
+                                    z_hi = discrimination * (thresholds[y] - eta)
+                                    z_lo = discrimination * (thresholds[y - 1] - eta)
+                                    log_diff_exp(
+                                        brm_ordinal_logcdf(z_hi, link),
+                                        brm_ordinal_logcdf(z_lo, link),
+                                    )
+                                end
+                            end
+                        end
+                    else
+                        rv = 0.
+                        for j in 1:k
+                            z_stage = discrimination *
+                                (thresholds[j] - eta - threshold_effect[j])
+                            if j < y
+                                rv += brm_ordinal_logccdf(z_stage, link)
+                            else
+                                if j == y
+                                    rv += brm_ordinal_logcdf(z_stage, link)
+                                end
+                            end
+                        end
+                        rv
+                    end
+                end
+            end
+        end
+    end
+
+    @stanonly brm_ordinal_lpmf(y::int[n], eta::vector[n], thresholds::vector[k],
+                     discrimination::vector[n], structure::int, link::int,
+                     threshold_effect::matrix[n,k])::real = begin
+        rv = 0.
+        for i in 1:n
+            rv += brm_ordinal_lpmf(
+                y[i], eta[i], thresholds, discrimination[i], structure, link,
+                to_vector(threshold_effect[i, :]),
+            )
+        end
+        rv
+    end
+    @stanonly brm_ordinal_lpmf(y::int[n], eta::vector[n], thresholds::vector[k],
+                     discrimination::real, structure::int, link::int,
+                     threshold_effect::matrix[n,k])::real = begin
+        brm_ordinal_lpmf(
+            y, eta, thresholds, rep_vector(discrimination, n), structure, link,
+            threshold_effect,
+        )
+    end
+    @stanonly brm_ordinal_lpmf(y::int[n], eta::real, thresholds::vector[k],
+                     discrimination::vector[n], structure::int, link::int,
+                     threshold_effect::matrix[n,k])::real = begin
+        brm_ordinal_lpmf(
+            y, rep_vector(eta, n), thresholds, discrimination, structure, link,
+            threshold_effect,
+        )
+    end
+    @stanonly brm_ordinal_lpmf(y::int[n], eta::real, thresholds::vector[k],
+                     discrimination::real, structure::int, link::int,
+                     threshold_effect::matrix[n,k])::real = begin
+        brm_ordinal_lpmf(
+            y, rep_vector(eta, n), thresholds, rep_vector(discrimination, n),
+            structure, link, threshold_effect,
+        )
+    end
+
+    @stanonly brm_ordinal_lpmfs(args...) = begin
+        brm_ordinal_lpmf(args...)
+    end
+    @stanonly brm_ordinal_lpmfs(y::int[n], eta::vector[n], thresholds::vector[k],
+                      discrimination::vector[n], structure::int, link::int,
+                      threshold_effect::matrix[n,k])::vector[n] = begin
+        rv::vector[n]
+        for i in 1:n
+            rv[i] = brm_ordinal_lpmf(
+                y[i], eta[i], thresholds, discrimination[i], structure, link,
+                to_vector(threshold_effect[i, :]),
+            )
+        end
+        rv
+    end
+    @stanonly brm_ordinal_lpmfs(y::int[n], eta::vector[n], thresholds::vector[k],
+                      discrimination::real, structure::int, link::int,
+                      threshold_effect::matrix[n,k])::vector[n] = begin
+        brm_ordinal_lpmfs(
+            y, eta, thresholds, rep_vector(discrimination, n), structure, link,
+            threshold_effect,
+        )
+    end
+    @stanonly brm_ordinal_lpmfs(y::int[n], eta::real, thresholds::vector[k],
+                      discrimination::vector[n], structure::int, link::int,
+                      threshold_effect::matrix[n,k])::vector[n] = begin
+        brm_ordinal_lpmfs(
+            y, rep_vector(eta, n), thresholds, discrimination, structure, link,
+            threshold_effect,
+        )
+    end
+    @stanonly brm_ordinal_lpmfs(y::int[n], eta::real, thresholds::vector[k],
+                      discrimination::real, structure::int, link::int,
+                      threshold_effect::matrix[n,k])::vector[n] = begin
+        brm_ordinal_lpmfs(
+            y, rep_vector(eta, n), thresholds, rep_vector(discrimination, n),
+            structure, link, threshold_effect,
+        )
+    end
+
+    @stanonly brm_ordinal_rng(eta::real, thresholds::vector[k], discrimination::real,
+                    structure::int, link::int,
+                    threshold_effect::vector[k])::int = begin
+        K = k + 1
+        rv = K
+        if structure == 1
+            u = uniform_rng(0., 1.)
+            for j in 1:k
+                if rv == K
+                    z_cumulative = discrimination * (thresholds[j] - eta)
+                    if u <= brm_ordinal_cdf(z_cumulative, link)
+                        rv += j - rv
+                    end
+                end
+            end
+        else
+            for j in 1:k
+                if rv == K
+                    z_stopping = discrimination *
+                        (thresholds[j] - eta - threshold_effect[j])
+                    if bernoulli_rng(brm_ordinal_cdf(z_stopping, link)) == 1
+                        rv += j - rv
+                    end
+                end
+            end
+        end
+        rv
+    end
+    @stanonly brm_ordinal_rng(int[n], eta::vector[n], thresholds::vector[k],
+                    discrimination::vector[n], structure::int, link::int,
+                    threshold_effect::matrix[n,k])::int[n] = begin
+        rv::int[n]
+        for i in 1:n
+            rv[i] = brm_ordinal_rng(
+                eta[i], thresholds, discrimination[i], structure, link,
+                to_vector(threshold_effect[i, :]),
+            )
+        end
+        rv
+    end
+    @stanonly brm_ordinal_rng(int[n], eta::vector[n], thresholds::vector[k],
+                    discrimination::real, structure::int, link::int,
+                    threshold_effect::matrix[n,k])::int[n] = begin
+        brm_ordinal_rng(
+            int[n], eta, thresholds, rep_vector(discrimination, n), structure,
+            link, threshold_effect,
+        )
+    end
+    @stanonly brm_ordinal_rng(int[n], eta::real, thresholds::vector[k],
+                    discrimination::vector[n], structure::int, link::int,
+                    threshold_effect::matrix[n,k])::int[n] = begin
+        brm_ordinal_rng(
+            int[n], rep_vector(eta, n), thresholds, discrimination, structure,
+            link, threshold_effect,
+        )
+    end
+    @stanonly brm_ordinal_rng(int[n], eta::real, thresholds::vector[k],
+                    discrimination::real, structure::int, link::int,
+                    threshold_effect::matrix[n,k])::int[n] = begin
+        brm_ordinal_rng(
+            int[n], rep_vector(eta, n), thresholds,
+            rep_vector(discrimination, n), structure, link, threshold_effect,
+        )
+    end
+end
+
+# Native-Stan von-Mises density with the two public BRM support contracts made
+# explicit. `principal == 0` is Distributions.jl's `VonMises`: moving inclusive
+# support `[mu - pi, mu + pi]`. `principal == 1` is `CircularVonMises`: fixed
+# half-open support `[lo, hi)`, with `mu` and generated draws wrapped into it.
+# The scalar density always delegates its in-support value to Stan's native
+# `von_mises_lpdf`; the wrappers only add support/domain semantics.
+StanBlocks.@deffun begin
+    @lpxf brm_von_mises_lpdf(y::real, mu::real, kappa::real,
+                             lo::real, hi::real, principal::int)::real = begin
+        if kappa <= 0.
+            negative_infinity()
+        else
+            if principal == 1
+                if y < lo
+                    negative_infinity()
+                else
+                    if y >= hi
+                        negative_infinity()
+                    else
+                        wrapped_mu = lo + fmod(fmod(mu - lo, hi - lo) + hi - lo, hi - lo)
+                        von_mises_lpdf(y, wrapped_mu, kappa)
+                    end
+                end
+            else
+                if y < mu - 3.141592653589793
+                    negative_infinity()
+                else
+                    if y > mu + 3.141592653589793
+                        negative_infinity()
+                    else
+                        von_mises_lpdf(y, mu, kappa)
+                    end
+                end
+            end
+        end
+    end
+    brm_von_mises_lpdf(y::vector[n], mu::vector[n], kappa::vector[n],
+                       lo::real, hi::real, principal::int)::real = begin
+        rv = 0.
+        for i in 1:n
+            rv += brm_von_mises_lpdf(y[i], mu[i], kappa[i], lo, hi, principal)::real
+        end
+        rv
+    end
+    brm_von_mises_lpdf(y::vector[n], mu::vector[n], kappa::real,
+                       lo::real, hi::real, principal::int)::real = begin
+        brm_von_mises_lpdf(y, mu, rep_vector(kappa, n), lo, hi, principal)
+    end
+    brm_von_mises_lpdf(y::vector[n], mu::real, kappa::vector[n],
+                       lo::real, hi::real, principal::int)::real = begin
+        brm_von_mises_lpdf(y, rep_vector(mu, n), kappa, lo, hi, principal)
+    end
+    brm_von_mises_lpdf(y::vector[n], mu::real, kappa::real,
+                       lo::real, hi::real, principal::int)::real = begin
+        brm_von_mises_lpdf(y, rep_vector(mu, n), rep_vector(kappa, n), lo, hi, principal)
+    end
+
+    brm_von_mises_lpdfs(args...) = begin
+        brm_von_mises_lpdf(args...)
+    end
+    brm_von_mises_lpdfs(y::vector[n], mu::vector[n], kappa::vector[n],
+                        lo::real, hi::real, principal::int)::vector[n] = begin
+        rv::vector[n]
+        for i in 1:n
+            rv[i] = brm_von_mises_lpdf(y[i], mu[i], kappa[i], lo, hi, principal)
+        end
+        rv
+    end
+    brm_von_mises_lpdfs(y::vector[n], mu::vector[n], kappa::real,
+                        lo::real, hi::real, principal::int)::vector[n] = begin
+        brm_von_mises_lpdfs(y, mu, rep_vector(kappa, n), lo, hi, principal)
+    end
+    brm_von_mises_lpdfs(y::vector[n], mu::real, kappa::vector[n],
+                        lo::real, hi::real, principal::int)::vector[n] = begin
+        brm_von_mises_lpdfs(y, rep_vector(mu, n), kappa, lo, hi, principal)
+    end
+    brm_von_mises_lpdfs(y::vector[n], mu::real, kappa::real,
+                        lo::real, hi::real, principal::int)::vector[n] = begin
+        brm_von_mises_lpdfs(y, rep_vector(mu, n), rep_vector(kappa, n), lo, hi, principal)
+    end
+
+    brm_von_mises_rng(mu::real, kappa::real,
+                      lo::real, hi::real, principal::int)::real = begin
+        if kappa <= 0.
+            reject("brm_von_mises_rng: kappa must be strictly positive")
+            0.
+        else
+            draw = von_mises_rng(mu, kappa)
+            if principal == 1
+                lo + fmod(fmod(draw - lo, hi - lo) + hi - lo, hi - lo)
+            else
+                support_lo = mu - 3.141592653589793
+                support_lo + fmod(fmod(draw - support_lo, 6.283185307179586) +
+                                  6.283185307179586, 6.283185307179586)
+            end
+        end
+    end
+    brm_von_mises_rng(vector[n], mu::vector[n], kappa::vector[n],
+                      lo::real, hi::real, principal::int)::vector[n] = begin
+        rv::vector[n]
+        for i in 1:n
+            rv[i] = brm_von_mises_rng(mu[i], kappa[i], lo, hi, principal)
+        end
+        rv
+    end
+    brm_von_mises_rng(vector[n], mu::vector[n], kappa::real,
+                      lo::real, hi::real, principal::int)::vector[n] = begin
+        rv::vector[n]
+        for i in 1:n
+            rv[i] = brm_von_mises_rng(mu[i], kappa, lo, hi, principal)
+        end
+        rv
+    end
+    brm_von_mises_rng(vector[n], mu::real, kappa::vector[n],
+                      lo::real, hi::real, principal::int)::vector[n] = begin
+        rv::vector[n]
+        for i in 1:n
+            rv[i] = brm_von_mises_rng(mu, kappa[i], lo, hi, principal)
+        end
+        rv
+    end
+    brm_von_mises_rng(vector[n], mu::real, kappa::real,
+                      lo::real, hi::real, principal::int)::vector[n] = begin
+        rv::vector[n]
+        for i in 1:n
+            rv[i] = brm_von_mises_rng(mu, kappa, lo, hi, principal)
+        end
+        rv
+    end
+end
+
 function addprop end
 
 StanBlocks.@deffun begin
@@ -646,6 +1068,28 @@ _sb_s = StanBlocks.@slic begin
     return Xnull * b_fixed + Zpen * b_pen
 end
 
+# Two-margin tensor-product smooth. With cubic-regression-spline margins each
+# null space has dimension two. Removing the tensor intercept leaves three
+# unpenalized NN columns. The remaining RR, RN, and NR blocks correspond to the
+# three penalties used by mgcv/brms `t2(..., full=FALSE)` and deliberately get
+# distinct smoothing scales.
+_sb_t2 = StanBlocks.@slic begin
+    n_rr = dims(Zrr)[2]
+    n_rn = dims(Zrn)[2]
+    n_nr = dims(Znr)[2]
+    b_fixed::vector[3]
+    sd_rr ~ std_normal(; lower=0.)
+    sd_rn ~ std_normal(; lower=0.)
+    sd_nr ~ std_normal(; lower=0.)
+    b_rr_raw ~ std_normal(; n=n_rr)
+    b_rn_raw ~ std_normal(; n=n_rn)
+    b_nr_raw ~ std_normal(; n=n_nr)
+    b_rr = sd_rr * b_rr_raw
+    b_rn = sd_rn * b_rn_raw
+    b_nr = sd_nr * b_nr_raw
+    return Xfixed * b_fixed + Zrr * b_rr + Zrn * b_rn + Znr * b_nr
+end
+
 # Fit/apply split for Wood's rank-k thin-plate regression spline (d=1, m=2).
 # The radial kernel is eta(r)=r^3/12 (Wood 2003, eq. 7). We keep the k largest-
 # magnitude eigenvectors of the full kernel matrix, impose the T' * delta = 0
@@ -706,6 +1150,173 @@ end
 
 _sb_spline_basis_tps(x::AbstractVector{<:Real}; k::Int=10) =
     _sb_apply_spline(_sb_fit_spline(x; k), x)
+
+# Cubic regression spline margin used by `t2`. Knots follow R's default
+# quantile algorithm (type 7) over the sorted unique training values. `F` maps
+# knot values to the natural cubic spline's second derivatives, while `S` is
+# the integrated-squared-second-derivative penalty. The positive eigenspace of
+# `S` is penalty-whitened without mixing in the null space, so tensoring the
+# marginal range/null pieces preserves the three `t2(full=false)` penalties.
+function _sb_type7_knots(x::AbstractVector{<:Real}, k::Int)
+    values = sort!(unique(collect(Float64, x)))
+    length(values) >= k || error(
+        "sbimpl: `t2` margin needs at least $k unique values (got $(length(values)))")
+    n = length(values)
+    knots = Vector{Float64}(undef, k)
+    for i in 1:k
+        pos = 1 + (n - 1) * (i - 1) / (k - 1)
+        lo = clamp(floor(Int, pos), 1, n)
+        hi = clamp(ceil(Int, pos), 1, n)
+        weight = pos - lo
+        knots[i] = (1 - weight) * values[lo] + weight * values[hi]
+    end
+    all(diff(knots) .> 0) || error(
+        "sbimpl: `t2` margin produced non-distinct cubic-regression-spline knots")
+    knots
+end
+
+function _sb_cr_second_derivative_map(knots::AbstractVector{<:Real})
+    k = length(knots)
+    h = diff(knots)
+    all(h .> 0) || error("sbimpl: `t2` cubic-regression-spline knots must increase")
+    D = zeros(Float64, k - 2, k)
+    B = zeros(Float64, k - 2, k - 2)
+    for i in 1:(k - 2)
+        D[i, i] = inv(h[i])
+        D[i, i + 1] = -inv(h[i]) - inv(h[i + 1])
+        D[i, i + 2] = inv(h[i + 1])
+        B[i, i] = (h[i] + h[i + 1]) / 3
+        if i < k - 2
+            B[i, i + 1] = h[i + 1] / 6
+            B[i + 1, i] = B[i, i + 1]
+        end
+    end
+    interior = B \ D
+    F = zeros(Float64, k, k)
+    F[2:(k - 1), :] .= interior
+    F, transpose(D) * interior
+end
+
+function _sb_cr_basis(knots, F, x::AbstractVector{<:Real})
+    k = length(knots)
+    X = zeros(Float64, length(x), k)
+    for (i, raw_x) in enumerate(x)
+        xi = Float64(raw_x)
+        if xi < knots[1]
+            h = knots[2] - knots[1]
+            xik = xi - knots[1]
+            cjm = -xik * h / 3
+            cjp = -xik * h / 6
+            for q in 1:k
+                X[i, q] = cjm * F[1, q] + cjp * F[2, q]
+            end
+            X[i, 1] += 1 - xik / h
+            X[i, 2] += xik / h
+        elseif xi > knots[k]
+            h = knots[k] - knots[k - 1]
+            xik = xi - knots[k]
+            cjm = xik * h / 6
+            cjp = xik * h / 3
+            for q in 1:k
+                X[i, q] = cjm * F[k - 1, q] + cjp * F[k, q]
+            end
+            X[i, k - 1] -= xik / h
+            X[i, k] += 1 + xik / h
+        else
+            j = clamp(searchsortedlast(knots, xi), 1, k - 1)
+            h = knots[j + 1] - knots[j]
+            ajm = knots[j + 1] - xi
+            ajp = xi - knots[j]
+            cjm = ajm * (ajm * ajm / h - h) / 6
+            cjp = ajp * (ajp * ajp / h - h) / 6
+            for q in 1:k
+                X[i, q] = cjm * F[j, q] + cjp * F[j + 1, q]
+            end
+            X[i, j] += ajm / h
+            X[i, j + 1] += ajp / h
+        end
+    end
+    X
+end
+
+function _sb_fit_cr_spline(x::AbstractVector{<:Real}; k::Int=5)
+    k > 2 || error("sbimpl: `t2` basis dimensions must be integers greater than 2 (got $k)")
+    xs = collect(Float64, x)
+    isempty(xs) && error("sbimpl: `t2` cannot use an empty margin")
+    all(isfinite, xs) || error("sbimpl: `t2` margins require finite numeric data")
+    shift = sum(xs) / length(xs)
+    scale = maximum(xs) - minimum(xs)
+    scale > 0 || error("sbimpl: `t2` margin is degenerate (all values equal)")
+    normalized = (xs .- shift) ./ scale
+    knots = _sb_type7_knots(normalized, k)
+    F, penalty = _sb_cr_second_derivative_map(knots)
+
+    eig_penalty = eigen(Symmetric(penalty))
+    order = sortperm(eig_penalty.values; rev=true)
+    keep = order[1:(k - 2)]
+    penalty_scale = maximum(abs, eig_penalty.values)
+    tol = penalty_scale * eps(Float64) * 100
+    minimum(eig_penalty.values) >= -tol || error(
+        "sbimpl: `t2` cubic-regression-spline penalty is not positive semidefinite")
+    minimum(eig_penalty.values[keep]) > tol || error(
+        "sbimpl: `t2` could not isolate the two-dimensional marginal null space")
+    range_projection = eig_penalty.vectors[:, keep] *
+                       Diagonal(inv.(sqrt.(eig_penalty.values[keep])))
+
+    null_const_scale = inv(sqrt(length(xs)))
+    slope_norm = norm(normalized)
+    slope_norm > 0 || error("sbimpl: `t2` margin has a zero linear null-space norm")
+
+    (; shift, scale, knots, F, range_projection, null_const_scale, slope_norm, k)
+end
+
+function _sb_apply_cr_spline(fit, x::AbstractVector{<:Real})
+    xs = collect(Float64, x)
+    all(isfinite, xs) || error("sbimpl: `t2` margins require finite numeric data")
+    normalized = (xs .- fit.shift) ./ fit.scale
+    Xnull = hcat(fill(fit.null_const_scale, length(xs)),
+                 normalized ./ fit.slope_norm)
+    range = _sb_cr_basis(fit.knots, fit.F, normalized) * fit.range_projection
+    Xnull, range
+end
+
+function _sb_row_tensor(A::AbstractMatrix, B::AbstractMatrix)
+    size(A, 1) == size(B, 1) || error(
+        "sbimpl: `t2` marginal basis row counts differ ($(size(A, 1)) vs $(size(B, 1)))")
+    out = Matrix{Float64}(undef, size(A, 1), size(A, 2) * size(B, 2))
+    for i in axes(out, 1), a in axes(A, 2), b in axes(B, 2)
+        out[i, (a - 1) * size(B, 2) + b] = A[i, a] * B[i, b]
+    end
+    out
+end
+
+function _sb_t2_raw_blocks(margins, x, z)
+    N1, R1 = _sb_apply_cr_spline(margins[1], x)
+    N2, R2 = _sb_apply_cr_spline(margins[2], z)
+    NN = _sb_row_tensor(N1, N2)
+    (fixed=Matrix(NN[:, 2:end]), rr=_sb_row_tensor(R1, R2),
+     rn=_sb_row_tensor(R1, N2), nr=_sb_row_tensor(N1, R2))
+end
+
+_sb_block_center(A::AbstractMatrix) = vec(sum(A; dims=1)) ./ size(A, 1)
+_sb_center_block(A::AbstractMatrix, center) = A .- reshape(center, 1, :)
+
+function _sb_fit_t2(x::AbstractVector{<:Real}, z::AbstractVector{<:Real};
+                    k::Tuple{Int,Int}=(5, 5))
+    length(x) == length(z) || error(
+        "sbimpl: `t2(x, z)` margins must have equal lengths ($(length(x)) vs $(length(z)))")
+    margins = (_sb_fit_cr_spline(x; k=k[1]), _sb_fit_cr_spline(z; k=k[2]))
+    raw = _sb_t2_raw_blocks(margins, x, z)
+    fixed_center = _sb_block_center(raw.fixed)
+    (; margins, fixed_center, k)
+end
+
+function _sb_apply_t2(fit, x::AbstractVector{<:Real}, z::AbstractVector{<:Real})
+    length(x) == length(z) || error(
+        "sbimpl: `t2(x, z)` margins must have equal lengths ($(length(x)) vs $(length(z)))")
+    raw = _sb_t2_raw_blocks(fit.margins, x, z)
+    (_sb_center_block(raw.fixed, fit.fixed_center), raw.rr, raw.rn, raw.nr)
+end
 
 # brms-style `me(x_obs, sd_x)` measurement-error predictor. The submodel
 # allocates a length-N latent `x_true` vector with prior `std_normal` and
@@ -774,46 +1385,125 @@ _sb_mi_normal = StanBlocks.@slic begin
                     num_elements(Jobs) + n_mis)
 end
 
-# Hilbert-space approximate Gaussian process (Riutort-Mayol et al. 2022),
-# 1D squared-exponential kernel. Inputs precomputed by the caller:
-#   PHI    : N x K eigen-basis matrix (sin terms)
-#   lambda : length-K squared eigenvalues
-# Parameters:
-#   log_rho   -- log length-scale
-#   log_sigma -- log marginal sd
-#   beta_raw  -- length-K standard-normal basis weights
-# Spectral-density-scaled basis weights `sqrt_spd .* beta_raw` give the
-# usual GP draw f(x) = PHI * (sqrt_spd .* beta_raw). Returns f as a
-# length-N column the caller (popefs) multiplies by an overall beta.
+# Squared-exponential GP helpers. The data-layout conversion loop lives in a
+# Stan function because top-level @slic bodies are deliberately control-flow
+# free.
+#
+# BRM records exact-GP inputs as an N x d matrix so replay and descriptors keep
+# their ordinary dense-data shape. `brm_gp_locations` converts its rows to
+# Stan's native `array[N] vector[d]` GP carrier once in transformed data.
+# `brm_exp_quad_cov` then delegates the whole multidimensional covariance and
+# diagonal jitter to Stan's `gp_exp_quad_cov` / `add_diag` built-ins.
+#
+# `brm_hsgp_sqrt_spd` evaluates the separable d-dimensional squared-exponential
+# spectral density at every tensor-product HSGP frequency. `omega2[b, j]` is
+# the squared angular frequency for basis row b and predictor axis j.
+StanBlocks.@deffun begin
+    @stanonly brm_gp_locations(X::matrix[n, d])::vector[n, d] = begin
+        locations::vector[n, d]
+        for i in 1:n
+            locations[i] = to_vector(X[i, :])
+        end
+        return locations
+    end
+
+    @stanonly brm_exp_quad_cov(X::vector[n, d], sigma::real,
+                               rho::real, jitter::real)::matrix[n, n] = begin
+        return add_diag(gp_exp_quad_cov(X, sigma, rho), jitter)
+    end
+
+    @stanonly brm_exp_quad_cov(X::vector[n, d], sigma::real,
+                               rho::vector[d], jitter::real)::matrix[n, n] = begin
+        return add_diag(gp_exp_quad_cov(X, sigma, rho), jitter)
+    end
+
+    @stanonly brm_hsgp_sqrt_spd(omega2::matrix[m, d], sigma::real,
+                                 rho::vector[d])::vector[m] = begin
+        rv::vector[m]
+        scale = sigma
+        for axis in 1:d
+            scale *= sqrt(rho[axis] * 2.5066282746310002)
+        end
+        for b in 1:m
+            exponent = 0.
+            for axis in 1:d
+                exponent += rho[axis] * rho[axis] * omega2[b, axis]
+            end
+            rv[b] = scale * exp(-0.25 * exponent)
+        end
+        return rv
+    end
+end
+
+# Exact latent squared-exponential GP. The non-centred draw keeps the geometry
+# explicit: f = cholesky(K(X, X)) * z. These are direct predictor summands, so
+# there is no redundant population beta multiplying the returned draw.
+_sb_gp = StanBlocks.@slic begin
+    n_obs = dims(X)[1]
+    X_gp = brm_gp_locations(X)
+    log_rho   ~ std_normal()
+    log_sigma ~ std_normal()
+    z         ~ std_normal(; n=n_obs)
+    K = brm_exp_quad_cov(X_gp, exp(log_sigma), exp(log_rho), jitter)
+    return cholesky_decompose(K) * z
+end
+
+_sb_gp_aniso = StanBlocks.@slic begin
+    n_obs = dims(X)[1]
+    n_axes = dims(X)[2]
+    X_gp = brm_gp_locations(X)
+    log_rho :: vector[n_axes] ~ std_normal()
+    log_sigma ~ std_normal()
+    z         ~ std_normal(; n=n_obs)
+    rho = exp(log_rho)
+    K = brm_exp_quad_cov(X_gp, exp(log_sigma), rho, jitter)
+    return cholesky_decompose(K) * z
+end
+
+# Hilbert-space approximate GP (Riutort-Mayol et al. 2022). `PHI` and
+# `omega2` are tensor-product basis data precomputed by Julia. Isotropic and
+# anisotropic variants differ only in whether one or d log length scales are
+# sampled. As with exact GP, the returned draw is a direct predictor summand.
 _sb_hsgp = StanBlocks.@slic begin
-    n_basis = num_elements(lambda)
+    n_basis = dims(omega2)[1]
+    n_axes = dims(omega2)[2]
     log_rho   ~ std_normal()
     log_sigma ~ std_normal()
     beta_raw  ~ std_normal(; n=n_basis)
-    rho   = exp(log_rho)
-    sigma = exp(log_sigma)
-    # sqrt(spectral density of squared-exp kernel) at omega = sqrt(lambda).
-    # = sigma * sqrt(rho * sqrt(2*pi)) * exp(-0.25 * rho^2 * lambda).
-    # Inlined sqrt(2*pi) constant since SLIC has no `pi` builtin.
-    sqrt_spd = sigma * sqrt(rho * 2.5066282746310002) * exp(-0.25 * rho * rho * lambda)
+    rho = rep_vector(exp(log_rho), n_axes)
+    sqrt_spd = brm_hsgp_sqrt_spd(omega2, exp(log_sigma), rho)
     return PHI * (sqrt_spd .* beta_raw)
 end
 
-# Per-group HSGP for `gp(x, by=g)` (gp-as-random-effect). SHARED length-scale /
-# marginal-SD hyperparameters across groups (decision 7p44fo); only the basis
-# weights vary per group. `beta` is the per-group basis-weight matrix
-# (n_groups x n_basis) supplied by the general structured-latent floor with an
-# iid-std-normal prior. Per obs i the GP value is
-#   PHI[i, :] . (sqrt_spd .* beta[group_idx[i], :]).
-# We fold sqrt_spd into PHI's columns via diag_post_multiply (= PHI * diag(spd))
-# so the per-obs value is a single rows_dot_product over the group-gathered
-# weights. No docstring (docstring -> @deffun AssertionError gotcha; see primer).
+_sb_hsgp_aniso = StanBlocks.@slic begin
+    n_basis = dims(omega2)[1]
+    n_axes = dims(omega2)[2]
+    log_rho :: vector[n_axes] ~ std_normal()
+    log_sigma ~ std_normal()
+    beta_raw  ~ std_normal(; n=n_basis)
+    rho = exp(log_rho)
+    sqrt_spd = brm_hsgp_sqrt_spd(omega2, exp(log_sigma), rho)
+    return PHI * (sqrt_spd .* beta_raw)
+end
+
+# Per-group HSGP. Length-scale/marginal-SD hyperparameters are shared across
+# groups (decision 7p44fo); only tensor-basis weights vary by group.
 _sb_hsgp_by = StanBlocks.@slic begin
+    n_axes = dims(omega2)[2]
     log_rho   ~ std_normal()
     log_sigma ~ std_normal()
-    rho   = exp(log_rho)
-    sigma = exp(log_sigma)
-    sqrt_spd = sigma * sqrt(rho * 2.5066282746310002) * exp(-0.25 * rho * rho * lambda)
+    rho = rep_vector(exp(log_rho), n_axes)
+    sqrt_spd = brm_hsgp_sqrt_spd(omega2, exp(log_sigma), rho)
+    PHI_scaled = diag_post_multiply(PHI, sqrt_spd)
+    return rows_dot_product(PHI_scaled, beta[group_idx, :])
+end
+
+_sb_hsgp_by_aniso = StanBlocks.@slic begin
+    n_axes = dims(omega2)[2]
+    log_rho :: vector[n_axes] ~ std_normal()
+    log_sigma ~ std_normal()
+    rho = exp(log_rho)
+    sqrt_spd = brm_hsgp_sqrt_spd(omega2, exp(log_sigma), rho)
     PHI_scaled = diag_post_multiply(PHI, sqrt_spd)
     return rows_dot_product(PHI_scaled, beta[group_idx, :])
 end
@@ -836,8 +1526,8 @@ end
 # for a CategoricalVector the level position == `CA.levelcode`; for a plain
 # vector `sort(unique)` gives the same ordering. `_sb_level_index` (the
 # construct-time entry) is unchanged.
-_sb_fit_levels(raw::CA.CategoricalVector) = CA.levels(raw)
-_sb_fit_levels(raw::AbstractVector) = sort(unique(raw))
+_brm_fit_levels(raw::CA.CategoricalVector) = CA.levels(raw)
+_sb_fit_levels(raw::AbstractVector) = _brm_fit_levels(raw)
 _sb_apply_levels(levels, raw::CA.CategoricalVector) = _sb_apply_levels(levels, CA.unwrap.(raw))
 _sb_apply_levels(levels, raw::AbstractVector) = begin
     lm = Dict(l => i for (i, l) in enumerate(levels))
@@ -853,21 +1543,121 @@ _sb_apply_levels(levels, raw::AbstractVector) = begin
     idx
 end
 
-# gp/HSGP fit/apply split — MIRRORS vimpl `_hsgp_basis` (vimpl.jl:827) EXACTLY.
-# vimpl is off-limits to edit, so the gp emitter keeps calling `_hsgp_basis` at
-# construct-time (byte-identical PHI/lambda) and only RECORDS the fit constant
-# (mean, L) via `_sb_fit_hsgp`; `_sb_apply_hsgp` lets `reprocess` rebuild
-# PHI/lambda on a frozen (mean, L) for prediction-replay.
-# ⚠ LOCKSTEP: if the eigenbasis formula in `_hsgp_basis` (vimpl.jl:827) ever
-# changes, update `_sb_apply_hsgp` here in lockstep — the self-consistency
-# probe assertion (reprocess(sb, df; freeze=true) == sb.data) will catch a
-# silent drift, but this comment is the first line of defence.
+# GP input helpers. Both public terms accept one-or-more raw real-valued axes
+# and lower them to an N x d matrix. Keeping the raw column names in the
+# preprocessing record lets `reprocess` rebuild that matrix on new data.
+function _sb_gp_axes(label::Symbol, args::Tuple)
+    isempty(args) && error("sbimpl: `$label(x...)` expects at least one positional axis")
+    names = Symbol[]
+    axes = Vector{Float64}[]
+    for a in args
+        n, raw = _sb_inner_data(label, a)
+        v = collect(Float64, _sb_real_vec(label, n, raw))
+        isempty(v) && error("sbimpl: `$label($n)` cannot use an empty axis")
+        all(isfinite, v) || error("sbimpl: `$label($n)` requires finite values")
+        push!(names, n)
+        push!(axes, v)
+    end
+    n = length(first(axes))
+    all(v -> length(v) == n, axes) || error(
+        "sbimpl: `$label(x...)` axes must have equal lengths (got $(length.(axes)))")
+    Tuple(names), Tuple(axes)
+end
+
+_sb_gp_matrix(axes::Tuple) = Matrix{Float64}(hcat(axes...))
+
+function _sb_axis_option(label::Symbol, key::Symbol, value, n_axes::Int, pred, expectation::String)
+    values = value isa Tuple || value isa AbstractVector ? Tuple(value) : ntuple(_ -> value, n_axes)
+    length(values) == n_axes || error(
+        "sbimpl: `$label(...; $key=...)` needs one value per axis ($n_axes), got $(length(values))")
+    all(pred, values) || error(
+        "sbimpl: `$label(...; $key=...)` expects $expectation, got $values")
+    values
+end
+
+_sb_hsgp_options(kw, n_axes::Int) = begin
+    K = _sb_axis_option(:hsgp, :k, get(kw, :k, 20), n_axes,
+        x -> x isa Integer && !(x isa Bool) && x >= 1, "positive integers")
+    c = _sb_axis_option(:hsgp, :c, get(kw, :c, 1.5), n_axes,
+        x -> x isa Real && isfinite(x) && x > 1, "finite real values greater than 1")
+    Tuple(Int(x) for x in K), Tuple(Float64(x) for x in c)
+end
+
+_sb_gp_iso(kw, label::Symbol) = begin
+    iso = get(kw, :iso, true)
+    iso isa Bool || error("sbimpl: `$label(...; iso=...)` expects Bool, got $(typeof(iso))")
+    iso
+end
+
+_sb_gp_cov(kw, label::Symbol) = begin
+    cov = get(kw, :cov, :exp_quad)
+    cov === :exp_quad || error(
+        "sbimpl: `$label(...; cov=...)` currently supports only `:exp_quad`, got $(repr(cov))")
+    cov
+end
+
+function _check_term_kwargs(::typeof(gp), kw)
+    allowed = (:cov, :iso, :jitter)
+    unknown = filter(k -> k ∉ allowed, keys(kw))
+    isempty(unknown) || error(
+        "gp: exact GP accepts only `cov`, `iso`, and `jitter`; unsupported keyword(s): $(join(unknown, ", ")). " *
+        "Use `hsgp(...; k=..., c=..., by=...)` for the Hilbert-space approximation.")
+    _sb_gp_cov(kw, :gp)
+    _sb_gp_iso(kw, :gp)
+    jitter = get(kw, :jitter, 1e-9)
+    jitter isa Real && isfinite(jitter) && jitter > 0 || error(
+        "gp: `jitter` must be a finite positive real, got $(repr(jitter))")
+    nothing
+end
+
+function _check_term_kwargs(::typeof(hsgp), kw)
+    allowed = (:cov, :iso, :k, :c, :by)
+    unknown = filter(k -> k ∉ allowed, keys(kw))
+    isempty(unknown) || error(
+        "hsgp: unsupported keyword(s): $(join(unknown, ", ")); " *
+        "supported keywords are `cov`, `iso`, `k`, `c`, and `by`")
+    _sb_gp_cov(kw, :hsgp)
+    _sb_gp_iso(kw, :hsgp)
+    nothing
+end
+
+function _sb_t2_options(kw)
+    kval = get(kw, :k, (5, 5))
+    kval isa Tuple && length(kval) == 2 || error(
+        "t2: `k` must be a 2-tuple of integers greater than 2, got $(repr(kval))")
+    all(x -> x isa Integer && !(x isa Bool) && x > 2, kval) || error(
+        "t2: `k` must be a 2-tuple of integers greater than 2, got $(repr(kval))")
+
+    basis = get(kw, :basis, (:cr, :cr))
+    basis isa Tuple && length(basis) == 2 || error(
+        "t2: `basis` must be a 2-tuple; only `(:cr, :cr)` is currently supported")
+    basis == (:cr, :cr) || error(
+        "t2: only cubic-regression-spline margins `basis=(:cr, :cr)` are currently supported, got $(repr(basis))")
+
+    full = get(kw, :full, false)
+    full isa Bool || error("t2: `full` must be Bool, got $(typeof(full))")
+    full && error("t2: `full=true` is not supported yet; use `full=false`")
+    (Tuple(Int(x) for x in kval), basis, full)
+end
+
+function _check_term_kwargs(::typeof(t2), kw)
+    allowed = (:k, :basis, :full)
+    unknown = filter(k -> k ∉ allowed, keys(kw))
+    isempty(unknown) || error(
+        "t2: unsupported keyword(s): $(join(unknown, ", ")); " *
+        "supported keywords are `k`, `basis`, and `full`")
+    _sb_t2_options(kw)
+    nothing
+end
+
+# HSGP fit/apply split. The scalar methods reproduce the historical 1D basis;
+# the tuple methods form its tensor product for variadic `hsgp(x...)`.
 _sb_fit_hsgp(raw::AbstractVector{<:Real}, K::Integer, c::Real) = begin
-    K >= 1 || error("gp: k must be >= 1 (got $K)")
-    c > 1  || error("gp: c must be > 1 (got $c)")
+    K >= 1 || error("hsgp: k must be >= 1 (got $K)")
+    c > 1  || error("hsgp: c must be > 1 (got $c)")
     mu = sum(raw) / length(raw)
     L = c * maximum(abs, raw .- mu)
-    L > 0 || error("gp: degenerate input (all x equal)")
+    L > 0 || error("hsgp: degenerate input (all x equal)")
     (mu, L)
 end
 _sb_apply_hsgp(c::Tuple, raw::AbstractVector{<:Real}, K::Integer) = begin
@@ -880,6 +1670,32 @@ _sb_apply_hsgp(c::Tuple, raw::AbstractVector{<:Real}, K::Integer) = begin
         PHI[i, k] = inv_sqrt_L * sin(sqrt(lambda[k]) * (x_c[i] + L))
     end
     PHI, lambda
+end
+
+_sb_fit_hsgp(axes::Tuple, K::Tuple, c::Tuple) =
+    ntuple(j -> _sb_fit_hsgp(axes[j], K[j], c[j]), length(axes))
+
+function _sb_apply_hsgp(fits::Tuple, axes::Tuple, K::Tuple)
+    n_axes = length(axes)
+    length(fits) == n_axes == length(K) || error("hsgp: internal axis-count mismatch")
+    axis_basis = ntuple(j -> _sb_apply_hsgp(fits[j], axes[j], K[j]), n_axes)
+    n_obs = length(first(axes))
+    n_basis = prod(K)
+    PHI = Matrix{Float64}(undef, n_obs, n_basis)
+    omega2 = Matrix{Float64}(undef, n_basis, n_axes)
+    for (b, I) in enumerate(CartesianIndices(K))
+        for i in 1:n_obs
+            value = 1.0
+            for axis in 1:n_axes
+                value *= axis_basis[axis][1][i, I[axis]]
+            end
+            PHI[i, b] = value
+        end
+        for axis in 1:n_axes
+            omega2[b, axis] = axis_basis[axis][2][I[axis]]
+        end
+    end
+    PHI, omega2
 end
 
 
@@ -946,19 +1762,24 @@ src   = stan_code(sbbrmi)
 ```
 """
 # ---- preprocessing-constant provenance (decision nr3v8n A) ------------------
-# Each Category-A transform (zscale/standardize/center/factor/mo/s/gp) and the
+# Each Category-A transform (zscale/standardize/center/factor/mo/s/t2/gp/hsgp) and the
 # element-wise `protect`/implicit-fn fallback compute a data-derived constant in
 # Julia at construct-time and land only the TRANSFORMED result in `data`. To
 # support `reprocess`/`restan_data` on a new DataFrame we record, per EMITTED
 # data key, how to regenerate that key from a new df:
 #   kind         -- which transform (:zscale/:standardize/:center/:factor/:mo/
-#                   :spline/:gp/:protect)
+#                   :spline/:tensor_spline/:gp/:hsgp/:protect/:interaction/
+#                   :categorical_outcome/:ordinal_outcome/
+#                   :ordinal_threshold_predictor)
 #   const_       -- the fitted constant: (μ,σ) / μ / level-vector / TPS basis /
-#                   (μ,L,K) / nothing (protect)
+#                   tensor-spline margins/centers / exact-GP axis metadata /
+#                   HSGP (μ,L,K,c) / categorical
+#                   outcome levels / nothing (protect)
 #   raw_ref      -- the source: a column-node tree (zscale/center/standardize/
 #                   protect, re-materialised via `_sb_rematerialize_vec`) or a
-#                   column NAME Symbol (factor/mo/spline/gp)
-#   dim_coupled  -- true for factor/mo (the level set drives parameter dim)
+#                   column NAME Symbol (factor/mo/spline) or axis-name Tuple
+#                   (gp/hsgp)
+#   dim_coupled  -- true when a fitted level set drives parameter dimension
 struct PreprocEntry
     kind::Symbol
     const_::Any
@@ -998,6 +1819,21 @@ _sb_df_column(df, col::Symbol) = begin
     d = _as_data_column(parent(nc))
     isnothing(d) && error("sbimpl: reprocess: new DataFrame has no column `$col`")
     parent(d)
+end
+
+function _sb_gp_axes_from_df(df, raw_ref, label::Symbol)
+    names = raw_ref isa Symbol ? (raw_ref,) : Tuple(raw_ref)
+    axes = ntuple(length(names)) do j
+        v = collect(Float64, _sb_df_column(df, names[j]))
+        isempty(v) && error("sbimpl: reprocess: `$label($(names[j]))` cannot use an empty axis")
+        all(isfinite, v) || error(
+            "sbimpl: reprocess: `$label($(names[j]))` requires finite values")
+        v
+    end
+    n = length(first(axes))
+    all(v -> length(v) == n, axes) || error(
+        "sbimpl: reprocess: `$label(x...)` axes must have equal lengths (got $(length.(axes)))")
+    axes
 end
 
 struct SBBRMI{P<:BRMI, M, D<:AbstractDict, PP<:AbstractDict}
@@ -1507,6 +2343,19 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         # No fitted constant — re-materialise the same expr tree on `df`.
         new_data[key] = collect(Float64, _sb_rematerialize_vec(e.raw_ref, df))
         new_preproc[key] = e
+    elseif e.kind === :interaction
+        left_key, right_key = e.raw_ref
+        haskey(new_data, left_key) || error(
+            "sbimpl: reprocess: interaction `$key` is missing regenerated operand `$left_key`")
+        haskey(new_data, right_key) || error(
+            "sbimpl: reprocess: interaction `$key` is missing regenerated operand `$right_key`")
+        left = new_data[left_key]
+        right = new_data[right_key]
+        length(left) == length(right) || error(
+            "sbimpl: reprocess: interaction `$key` operand lengths mismatch ",
+            "($(length(left)) vs $(length(right)))")
+        new_data[key] = collect(Float64, left .* right)
+        new_preproc[key] = e
     elseif e.kind === :spline
         v = collect(Float64, _sb_df_column(df, e.raw_ref))
         old_fit = e.const_.fit
@@ -1517,15 +2366,73 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         push!(handled, e.const_.zpen_key)
         new_preproc[key] = PreprocEntry(
             :spline, (; fit, zpen_key=e.const_.zpen_key), e.raw_ref, false)
+    elseif e.kind === :tensor_spline
+        axes = _sb_gp_axes_from_df(df, e.raw_ref, :t2)
+        length(axes) == 2 || error("sbimpl: reprocess: `t2` needs exactly two margins")
+        old_fit = e.const_.fit
+        fit = freeze ? old_fit : _sb_fit_t2(axes[1], axes[2]; k=old_fit.k)
+        Xfixed, Zrr, Zrn, Znr = _sb_apply_t2(fit, axes[1], axes[2])
+        new_data[key] = Xfixed
+        new_data[e.const_.zrr_key] = Zrr
+        new_data[e.const_.zrn_key] = Zrn
+        new_data[e.const_.znr_key] = Znr
+        push!(handled, e.const_.zrr_key)
+        push!(handled, e.const_.zrn_key)
+        push!(handled, e.const_.znr_key)
+        new_preproc[key] = PreprocEntry(:tensor_spline,
+            (; fit, zrr_key=e.const_.zrr_key, zrn_key=e.const_.zrn_key,
+             znr_key=e.const_.znr_key), e.raw_ref, false)
     elseif e.kind === :gp
-        v = collect(Float64, _sb_df_column(df, e.raw_ref))
+        axes = _sb_gp_axes_from_df(df, e.raw_ref, :gp)
+        new_data[key] = _sb_gp_matrix(axes)
+        new_preproc[key] = PreprocEntry(:gp, e.const_, e.raw_ref, false)
+    elseif e.kind === :hsgp
+        axes = _sb_gp_axes_from_df(df, e.raw_ref, :hsgp)
         K = e.const_.K
-        mu_L = freeze ? e.const_.mu_L : _sb_fit_hsgp(v, K, e.const_.c)
-        PHI, lambda = _sb_apply_hsgp(mu_L, v, K)
+        fits = freeze ? e.const_.fits : _sb_fit_hsgp(axes, K, e.const_.c)
+        PHI, omega2 = _sb_apply_hsgp(fits, axes, K)
         new_data[key] = PHI
-        new_data[e.const_.lambda_key] = lambda
-        push!(handled, e.const_.lambda_key)
-        new_preproc[key] = PreprocEntry(:gp, (; mu_L=mu_L, K=K, c=e.const_.c, lambda_key=e.const_.lambda_key), e.raw_ref, false)
+        new_data[e.const_.omega2_key] = omega2
+        push!(handled, e.const_.omega2_key)
+        new_preproc[key] = PreprocEntry(:hsgp,
+            (; fits, K, c=e.const_.c, omega2_key=e.const_.omega2_key), e.raw_ref, false)
+    elseif e.kind === :categorical_outcome
+        v = _sb_df_column(df, e.raw_ref)
+        fitted_levels = e.const_.levels
+        expected_n_levels = e.const_.n_levels
+        levels = freeze ? fitted_levels : _sb_fit_levels(v)
+        length(levels) == expected_n_levels || error(
+            "sbimpl: reprocess: categorical outcome `$key` has $(length(levels)) levels, " *
+            "but the fitted `CategoricalLogit` has $expected_n_levels. " *
+            "Preserve the fitted level set/order or rebuild the model with one " *
+            "linear predictor per non-reference class.")
+        new_data[key] = _sb_apply_levels(levels, v)
+        new_preproc[key] = PreprocEntry(
+            :categorical_outcome, (; levels, n_levels=expected_n_levels),
+            e.raw_ref, true)
+    elseif e.kind === :ordinal_outcome
+        v = _sb_df_column(df, e.raw_ref)
+        fitted_levels = e.const_.levels
+        expected_n_levels = e.const_.n_levels
+        levels = freeze ? fitted_levels : _sb_fit_levels(v)
+        length(levels) == expected_n_levels || error(
+            "sbimpl: reprocess: ordinal outcome `$key` has $(length(levels)) levels, " *
+            "but the fitted `Ordinal` model has $expected_n_levels. Preserve the " *
+            "fitted ordered level set or rebuild the model.")
+        new_data[key] = _sb_apply_levels(levels, v)
+        new_preproc[key] = PreprocEntry(
+            :ordinal_outcome, (; levels, n_levels=expected_n_levels),
+            e.raw_ref, true)
+    elseif e.kind === :ordinal_threshold_predictor
+        v = _sb_df_column(df, e.raw_ref)
+        v isa AbstractVector{<:Real} || error(
+            "sbimpl: reprocess: ordinal threshold predictor `$key` must be numeric, " *
+            "got $(typeof(v))")
+        all(isfinite, v) || error(
+            "sbimpl: reprocess: ordinal threshold predictor `$key` contains " *
+            "non-finite values")
+        new_data[key] = collect(Float64, v)
+        new_preproc[key] = e
     elseif e.kind === :factor || e.kind === :mo
         v = _sb_df_column(df, e.raw_ref)
         levels = freeze ? e.const_ : _sb_fit_levels(v)
@@ -1561,9 +2468,10 @@ of a naive per-column `sb.model(; col=…)` rebind is avoided. Returns a NEW
 - `freeze_constants=false` (fresh-fit semantics): re-derive each constant from
   `new_df`, then apply.
 
-Covered: the 7 Julia-side transforms (`zscale`/`standardize`/`center`/`factor`/
-`mo`/`s`/`gp`), `protect`/implicit-fn columns (re-materialised on `new_df`), and
-pass-through raw columns (plain data, `me` obs values, `ar` time). Errors loudly
+Covered: the Julia-side transforms (`zscale`/`standardize`/`center`/`factor`/
+`mo`/`s`/`t2`/`gp`/`hsgp`), `protect`/implicit-fn columns (re-materialised on
+`new_df`), continuous × continuous interaction columns, categorical outcomes,
+and pass-through raw columns (plain data, `me` obs values, `ar` time). Errors loudly
 on a `factor`/`mo` **unseen level** and on any derived data key it cannot account
 for (e.g. random-effects group indices from `(1|g)`) rather than silently
 copying a stale vector — rebuild from `new_df` for those models.
@@ -1572,14 +2480,18 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true)
     new_data = Dict{Symbol,Any}()
     new_preproc = Dict{Symbol,PreprocEntry}()
     handled = Set{Symbol}()
-    # 1. Regenerate every transform-output key from its preproc record.
+    interaction_keys = Set(k for (k, e) in sb.preproc if e.kind === :interaction)
+    # 1. Regenerate every independent transform-output key from its preproc
+    #    record. Interactions wait until their raw/transformed operands exist.
     for (key, e) in sb.preproc
+        e.kind === :interaction && continue
         _sb_reprocess_entry!(new_data, new_preproc, handled, key, e, new_df, freeze_constants)
     end
     # 2. Account for every remaining old data key: pass-through raw columns, or
     #    frozen structural scalars; ERROR on any unaccounted derived structure.
     for (k, v) in sb.data
         k in handled && continue
+        k in interaction_keys && continue
         if v isa AbstractVector
             if _sb_df_has_column(new_df, k)
                 new_data[k] = _sb_df_column(new_df, k)   # pass-through (plain / me obs / ar time)
@@ -1587,8 +2499,8 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true)
                 error(
                     "sbimpl: reprocess: data key `$k` is a derived vector with no ",
                     "preprocessing record and is not a column of the new DataFrame. ",
-                    "reprocess covers the 7 Julia-side predictor transforms ",
-                    "(zscale/standardize/center/factor/mo/s/gp), protect/implicit-fn ",
+                    "reprocess covers the Julia-side predictor transforms ",
+                    "(zscale/standardize/center/factor/mo/s/t2/gp/hsgp), protect/implicit-fn ",
                     "columns and pass-through raw columns; models with random-effects ",
                     "group indices (e.g. `(1|g)`) are not yet supported — rebuild the ",
                     "SBBRMI from the new DataFrame instead.")
@@ -1601,6 +2513,11 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true)
                 "structure with no preprocessing record. reprocess cannot safely ",
                 "regenerate it on the new DataFrame — rebuild the SBBRMI instead.")
         end
+    end
+    # 3. Derived interactions depend on operands regenerated in steps 1-2.
+    for (key, e) in sb.preproc
+        e.kind === :interaction || continue
+        _sb_reprocess_entry!(new_data, new_preproc, handled, key, e, new_df, freeze_constants)
     end
     new_model = StanBlocks.SlicModel(sb.model.model, new_data, sb.model.mod)
     SBBRMI(sb.parent, new_model, new_data, new_preproc)
@@ -1699,7 +2616,7 @@ function kernel end
 #
 # Checked in the same order the lowering-time guards use, so the reported
 # keyword does not change when several are present. Keys off the `kernel`
-# function object, so `gp(x; by=g)` — where `by=` is live — is unaffected, and
+# function object, so `hsgp(x; by=g)` — where `by=` is live — is unaffected, and
 # an aliased `kernel` is still caught. The lowering-time guards stay as the
 # backstop for a BRMI assembled without the macro.
 _check_term_kwargs(::typeof(kernel), kwargs) = for (k, replacement) in (
@@ -1952,14 +2869,14 @@ end
 # block per field, and threads the un-expanded n_groups×K matrices into the term
 # at emit time via `_sb_emit_group_block_term!`. Basis evaluation stays in-term.
 #
-# Three consumers shape this API: gp(x, by=g) (per-group iid-normal HSGP weights,
+# Three consumers shape this API: hsgp(x, by=g) (per-group iid-normal HSGP weights,
 # the deliverable), obs_scale (matrix<lower=0> element-wise Exponential, decision
 # 10uz10q — proven via `sb_group_clamped_demo`, not yet wired), and future
 # splines-by-group (per-group normal spline coefficients).
 #
 # Declaration shape — the 2-arg `_sb_term_group_block(f, call)` form receives the
 # term CALL so a term can declare fields conditional on its actual arguments
-# (gp only declares a block when called with `by=`). It returns EITHER:
+# (hsgp only declares a block when called with `by=`). It returns EITHER:
 #   (a) legacy single correlated-normal block:
 #       (; n_per_group::Int, group_arg_pos|group_fn, group_fn_name)
 #   (b) general field list:
@@ -2041,6 +2958,16 @@ _sb_emit_prior!(stmts, target, ::Type{<:Horseshoe}, _) = begin
     push!(stmts, :($target ~ _sb_horseshoe()))
     true
 end
+
+# A Distributions.jl `VonMises(mu, kappa)` prior has moving parameter support
+# `[mu - pi, mu + pi]`. Stan cannot faithfully declare that support when `mu`
+# is itself a parameter, so do not silently lower it to an unconstrained native
+# `von_mises` prior. Observation likelihoods are handled separately below.
+_sb_emit_prior!(_, target, ::Type{<:VonMises}, _) = error(
+    "sbimpl: `VonMises` is supported as an observation likelihood, but not as " *
+    "a parameter prior: preserving Distributions.jl's moving support " *
+    "`[mu - pi, mu + pi]` requires a Stan parameterization chosen explicitly. " *
+    "Use a real-valued latent parameter and transform/wrap it deliberately.")
 # Generic scalar prior via a Distributions.jl constructor on the RHS
 # (e.g. `coef_a ~ Normal(0, 0.1)`). Reuses the same family -> Stan-name
 # table the likelihood path uses (`_sb_stan_dist_name`), so adding a
@@ -2051,7 +2978,11 @@ end
 function _sb_emit_prior!(stmts, target, ::Type{D}, op) where {D <: Distribution}
     stan_name = _sb_stan_dist_name(D)
     isnothing(stan_name) && return false
-    arg_exprs = map(_sb_prior_arg, _sb_stan_dist_args(D, getargs(op)))
+    # Lower Julia-side formula nodes first, then normalize constructor defaults
+    # and parameterizations.  Some translations (scale -> inverse scale,
+    # probability -> odds) create Stan expressions, so applying `_sb_prior_arg`
+    # afterwards would mistake those already-lowered Exprs for formula nodes.
+    arg_exprs = _sb_stan_dist_args(D, map(_sb_prior_arg, getargs(op)))
     push!(stmts, Expr(:call, :~, target, Expr(:call, stan_name, arg_exprs...)))
     true
 end
@@ -2078,7 +3009,7 @@ function _sb_emit_prior!(stmts, target, ::Type{<:LocationScale}, op)
     isnothing(stan_name) && error(
         "sbimpl: `LocationScale` over `$(base_fam)` -- no Stan-name mapping ",
         "for the base. Add a `_sb_stan_dist_name(::Type{<:$(base_fam)})` entry.")
-    base_args = _sb_stan_dist_args(base_fam, getargs(base))
+    base_args = _sb_stan_dist_args(base_fam, map(_sb_prior_arg, getargs(base)))
     # Stan's standard univariate dists put (location, scale) at
     # positions 2-3 (e.g. `student_t(nu, mu, sigma)`). The arg-shape
     # transform on the base already pads to that layout (TDist(nu) ->
@@ -2089,8 +3020,9 @@ function _sb_emit_prior!(stmts, target, ::Type{<:LocationScale}, op)
     length(base_args) >= 3 || error(
         "sbimpl: `LocationScale` over `$(base_fam)`: base lowers to ",
         "$(length(base_args)) Stan args, need >= 3 for location/scale slots.")
-    composed = (base_args[1], mu, sigma, base_args[4:end]...)
-    arg_exprs = map(_sb_prior_arg, composed)
+    composed = (base_args[1], _sb_prior_arg(mu), _sb_prior_arg(sigma),
+                base_args[4:end]...)
+    arg_exprs = composed
     push!(stmts, Expr(:call, :~, target, Expr(:call, stan_name, arg_exprs...)))
     true
 end
@@ -2293,7 +3225,7 @@ _sb_mi_kwarg_value(x, _) = error("sbimpl: unsupported `mi(...)` family arg shape
 _sb_julia_to_stan_fn(f) = f === LogExpFunctions.logistic ? :inv_logit : Symbol(nameof(f))
 
 # Inner-arg unwrap helpers shared by `_sb_predictor_term!` overloads (mo, me,
-# s, gp, ar, mo1) and a few `mi`-style sites. Each step is a tiny dispatch
+# s, t2, gp, hsgp, ar, mo1) and a few `mi`-style sites. Each step is a tiny dispatch
 # pair so a wrong call shape errors with the wrapping function's name in the
 # message rather than a generic `isa` failure.
 _sb_named_inner(label::Symbol, x::NamedColumn) = x
@@ -2318,7 +3250,8 @@ _sb_real_vec(label::Symbol, n::Symbol, v) =
 _sb_classify_term!(t::ExprColumn, pop_terms, ran_terms, direct_terms) = begin
     f = getf(t)
     f === (|) && (push!(ran_terms, t); return)
-    (f === mo1 || f === s) && (push!(direct_terms, t); return)
+    (f === mo1 || f === s || f === t2 || f === gp || f === hsgp) &&
+        (push!(direct_terms, t); return)
     push!(pop_terms, t)
 end
 _sb_classify_term!(t, pop_terms, ran_terms, direct_terms) =
@@ -2334,7 +3267,7 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     terms = _sb_terms(rhs)
     pop_terms    = Any[]
     ran_terms    = Any[]  # `(expr | group)` -> collected per-group below
-    direct_terms = Any[]  # e.g. `mo1(c)` / `s(x)` -> direct summand, no popefs beta
+    direct_terms = Any[]  # e.g. `mo1(c)` / `s(x)` / `t2(x,z)` -> direct summand
     for t in terms
         _sb_classify_term!(t, pop_terms, ran_terms, direct_terms)
     end
@@ -2358,7 +3291,7 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     end
 
     for dt in direct_terms
-        _sb_emit_direct!(stmts, data, target, dt, summands)
+        _sb_emit_direct!(stmts, data, target, dt, summands; group_block_lookup)
     end
 
     _sb_emit_ranefs!(stmts, data, target, ran_terms, summands; id_lookup, brmi_key, cv_groups, centered_groups)
@@ -2379,7 +3312,7 @@ end
 # `_sb_pop_cols!` used to build the design matrix `X` — so the returned labels
 # can never drift from what `popefs` actually multiplies. Standard fixed-effect
 # terms only (covers the whole regression-covariate surface); group-structured
-# terms whose columns need prepass context (e.g. `gp(x, by=g)`) are out of
+# terms whose columns need prepass context (e.g. `hsgp(x, by=g)`) are out of
 # scope in v1 and raise a clear, actionable error rather than mis-counting.
 
 """
@@ -2399,7 +3332,7 @@ formula (left-to-right) order:
   `pop_<lhs>_Intercept` parameter;
 - plain continuous (`Real`, non-integer) predictors — one column each,
   labelled by the column name;
-- single-`beta` wrapped terms (`mo`, `me`, `gp` population, `protect`,
+- single-`beta` wrapped terms (`mo`, `me`, `protect`,
   `log(x)`, `x^2`, …) — one column each, labelled by the emitted design key;
 - an interaction `a & b` — one label per expanded treatment-contrast column.
 
@@ -2408,7 +3341,8 @@ appear in `pop_<lhs>_beta_pop`:
 
 - integer- or `CategoricalVector`-typed bare predictors → `cat_<name>`
   (K−1 treatment contrasts);
-- `mo1(c)` → `mo1_<c>`; `s(x)` → its own fixed/range coefficients and `sds`;
+- `mo1(c)` → `mo1_<c>`; `s(x)` and `t2(x,z)` → their own fixed/range
+  coefficients and smoothing scales;
 - explicit-coefficient `coef * a` (own scalar);
 - random-effects blocks `(… | g)` → per-group ranef parameters.
 
@@ -2443,7 +3377,7 @@ function popcoefnames(brmi::BRMI, lhs::Symbol)
             error("popcoefnames: cannot resolve the `beta_pop` column(s) for term ",
                   "`$(_popcoef_show(t))` in predictor `$lhs` without full model context ",
                   "($(sprint(showerror, err))). This helper covers the standard ",
-                  "fixed-effect terms; for group-structured terms (e.g. `gp(x, by=g)`) ",
+                  "fixed-effect terms; for group-structured terms (e.g. `hsgp(x, by=g)`) ",
                   "read the parameter names off the transpiled `SBBRMI` instead.")
         end
         for c in cols
@@ -2477,12 +3411,18 @@ _sb_cat_levels_vec(v::AbstractVector{<:Integer}) = v
 _sb_cat_levels_vec(v::CA.CategoricalVector) = v
 _sb_cat_levels_vec(_v) = nothing
 
-# Free-summand terms (no popefs beta): `mo1(c)`, `s(x)`, categorical NamedColumns.
+# Free-summand terms (no popefs beta): `mo1(c)`, `s(x)`, `t2(x,z)`, categoricals.
 # Categoricals emit `cat_<c> ~ _sb_cat(; x=<c>_idx, n_levels=<c>_n_levels)`.
-# `mo1(c)` reuses `_sb_mo`; `s(x)` owns its complete fixed + penalized basis.
-_sb_emit_direct!(stmts, data, target::Symbol, t::NamedColumn, summands) =
+# `mo1(c)` reuses `_sb_mo`; smooths own their complete fixed + penalized bases.
+_sb_emit_direct!(stmts, data, target::Symbol, t::NamedColumn, summands; kwargs...) =
     _sb_emit_cat!(stmts, data, t, summands)
-function _sb_emit_direct!(stmts, data, target::Symbol, t::ExprColumn, summands)
+function _sb_emit_direct!(stmts, data, target::Symbol, t::ExprColumn, summands;
+                          group_block_lookup=Dict())
+    f = getf(t)
+    if f === gp || f === hsgp
+        push!(summands, _sb_predictor_term!(stmts, data, f, t; group_block_lookup))
+        return
+    end
     _sb_emit_direct_expr!(stmts, data, target, getf(t), t, summands)
 end
 function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(mo1), t, summands)
@@ -2497,6 +3437,9 @@ function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(mo1), t, su
 end
 function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(s), t, summands)
     push!(summands, _sb_predictor_term!(stmts, data, s, t))
+end
+function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(t2), t, summands)
+    push!(summands, _sb_predictor_term!(stmts, data, t2, t; target))
 end
 _sb_emit_direct_expr!(_stmts, _data, _target::Symbol, f, _t, _summands) =
     error("sbimpl: unsupported direct-summand term `$f`")
@@ -2828,10 +3771,10 @@ end
 # Scan brmi.operations for declaring terms anywhere in the model: a term `f`
 # with a `_sb_term_group_block` declaration, appearing EITHER as a whole-RHS
 # parameter submodel (`mu ~ f(...)`, like bordet) OR as a predictor summand
-# (`y ~ 1 + gp(t, by=g)`). We walk every `~` op's RHS summands (`_sb_terms`),
-# which covers both: bordet is a single summand of its RHS, gp is one of several.
+# (`y ~ 1 + hsgp(t, by=g)`). We walk every `~` op's RHS summands (`_sb_terms`),
+# which covers both: bordet is a single summand of its RHS, hsgp is one of several.
 # Every declaring summand is its own term INSTANCE — there is no `(key, f)`
-# dedup, so N instances of the same term (e.g. `gp(t, by=g) + gp(s, by=g)`)
+# dedup, so N instances of the same term (e.g. `hsgp(t, by=g) + hsgp(s, by=g)`)
 # each get collected and allocated their own block. Identical instances (same
 # block name) are coalesced later, at emit time. A subsequent emit step
 # allocates one block per declared field and builds the lookup.
@@ -2904,7 +3847,8 @@ function _sb_emit_block_draw!(stmts, prior::NamedTuple, block_name, idx_name, n_
     stan_name = _sb_stan_dist_name(prior.dist)
     isnothing(stan_name) && error(
         "sbimpl: structured-latent prior dist `$(prior.dist)` has no `_sb_stan_dist_name` mapping")
-    pos_args = map(_sb_prior_arg, get(prior, :args, ()))
+    pos_args = _sb_stan_dist_args(
+        prior.dist, map(_sb_prior_arg, get(prior, :args, ())))
     flat_name = Symbol(:zflat_, suffix)
     kw = Any[Expr(:kw, :n, :($n_name * $n_terms_name))]
     haskey(prior, :lower) && push!(kw, Expr(:kw, :lower, prior.lower))
@@ -2926,8 +3870,8 @@ function _sb_emit_group_blocks!(stmts, data, gb_terms)
             group_col = _sb_resolve_group_col(fld.group, rhs_e, data)
             gname = name(group_col)
             # Block name `b_<field>_<gname>`; for legacy single-field terms
-            # field == nameof(f), so this is byte-for-byte the old name. For gp
-            # the field name embeds x, so two GPs on the same group never collide.
+            # field == nameof(f), so this is byte-for-byte the old name. For hsgp
+            # the field name embeds x, so two HSGPs on the same group never collide.
             suffix = Symbol(fld.name, :_, gname)
             block_name = Symbol(:b_, suffix)
             haskey(lookup, block_name) && continue   # identical instance already allocated
@@ -3089,6 +4033,10 @@ function _sb_ensure_group_data!(data, g::NamedColumn)
     idx_name = Symbol(gname, :_idx)
     n_name   = Symbol(:n_, gname)
     n_levels, g_idx = _sb_level_index(parent(g_backing))
+    # The generic data prepass sees grouping columns too. Stan consumes only
+    # their dense integer code, never the raw labels (which may be strings and
+    # therefore are not valid Stan data at all).
+    delete!(data, gname)
     data[idx_name] = g_idx
     data[n_name]   = n_levels
     idx_name, n_name
@@ -3106,6 +4054,8 @@ function _sb_ensure_group_data!(data, g::Tuple{NamedColumn,NamedColumn})
     gname, bname = name(gcol), name(bcol)
     n_groups, g_idx = _sb_level_index(parent(g_backing))
     n_strata, b_idx = _sb_level_index(parent(b_backing))
+    delete!(data, gname)
+    delete!(data, bname)
     stratum_idx = _sb_stratum_idx(g_idx, b_idx, gname, bname)
     suffix = Symbol(gname, :__by__, bname)
     idx_name       = Symbol(suffix, :_idx)
@@ -3242,12 +4192,12 @@ function _sb_interaction_cols!(cols, t::ExprColumn, data, stmts)
     args = getargs(t)
     length(args) == 2 ||
         error("sbimpl: interaction `&` expects exactly 2 operands, got $(length(args))")
-    l = _sb_interaction_operand(args[1])
-    r = _sb_interaction_operand(args[2])
+    l = _sb_interaction_operand(args[1], data, stmts)
+    r = _sb_interaction_operand(args[2], data, stmts)
     _sb_interaction_expand!(cols, data, l, r)
 end
 
-_sb_interaction_operand(t::NamedColumn) = begin
+_sb_interaction_operand(t::NamedColumn, _data, _stmts) = begin
     d_raw = parent(t)
     d = _as_data_column(d_raw)
     isnothing(d) && error(
@@ -3255,6 +4205,26 @@ _sb_interaction_operand(t::NamedColumn) = begin
     )
     v = parent(d)
     _sb_interaction_operand_kind(t, v, _sb_cat_levels(t))
+end
+# A transformed raw-data term (for example `zscale(math)`) first uses the
+# ordinary predictor-term lowering. Pure/data-derived terms leave a concrete
+# vector in `data`; parameter-owning terms (`mo`, `me`, `s`, `gp`, `ar`, ...)
+# return a Stan variable name instead and are rejected below. This keeps
+# transformed interactions on the same fit/reprocess constants as their
+# standalone term without ever snapshotting a latent parameter as data.
+_sb_interaction_operand(t::ExprColumn, data, stmts) = begin
+    col_name = _sb_predictor_col(t, data, stmts)
+    haskey(data, col_name) || error(
+        "sbimpl: interaction operand `$(getf(t))(...)` is parameter-owning, not a data-materialized transform; ",
+        "supported transformed operands include `zscale`, `standardize`, `center`, `protect`, ",
+        "and pure expressions in raw data columns"
+    )
+    v = data[col_name]
+    rv = _as_real_vec(v)
+    isnothing(rv) && error(
+        "sbimpl: transformed interaction operand `$col_name` has unsupported eltype $(eltype(v))"
+    )
+    (; kind=:cont, name=col_name, vec=collect(Float64, rv))
 end
 _sb_interaction_operand_kind(t, v, levels) = begin
     n_levels, idx = _sb_level_index(levels)
@@ -3268,9 +4238,9 @@ _sb_interaction_operand_kind(t, v, ::Nothing) = begin
     isnothing(rv) && error("sbimpl: interaction operand `$(name(t))` has unsupported eltype $(eltype(v))")
     (; kind=:cont, name=name(t), vec=collect(Float64, rv))
 end
-_sb_interaction_operand(t) = error(
-    "sbimpl: interaction operand must be a raw-data NamedColumn, got $(typeof(t)); ",
-    "interactions with `mo` / `me` / `s` / `ar` are not supported yet"
+_sb_interaction_operand(t, _data, _stmts) = error(
+    "sbimpl: interaction operand must be a raw-data NamedColumn or data-materialized ExprColumn, got $(typeof(t)); ",
+    "interactions with parameter-owning terms such as `mo` / `me` / `s` / `gp` / `ar` are not supported"
 )
 
 # cont x cont
@@ -3278,6 +4248,8 @@ _sb_interaction_expand!(cols, data, l::NamedTuple{<:Any,<:Tuple}, r::NamedTuple{
     if l.kind === :cont && r.kind === :cont
         col_name = Symbol(:int_, l.name, :_x_, r.name)
         data[col_name] = l.vec .* r.vec
+        _sb_record_preproc!(data, col_name,
+            PreprocEntry(:interaction, nothing, (l.name, r.name), false))
         push!(cols, col_name)
     elseif l.kind === :cont && r.kind === :cat
         for lvl in 2:r.n_levels
@@ -3386,7 +4358,7 @@ end
 # and eight-column penalty-whitened range matrix as Stan data. `_sb_s` owns the
 # flat null-space coefficients, penalized coefficients, and smoothing SD; the
 # returned contribution is a direct summand (no extra `popefs` beta). Only
-# the default basis is supported -- `bs`, `t2`, and `k=`/`knots=` are follow-ons.
+# the default basis is supported -- `bs` and `k=`/`knots=` are follow-ons.
 _sb_predictor_term!(stmts, data, ::typeof(s), t; kwargs...) = begin
     args = getargs(t)
     length(args) == 1 || error("sbimpl: `s(x)` expects 1 positional arg, got $(length(args))")
@@ -3407,76 +4379,117 @@ _sb_predictor_term!(stmts, data, ::typeof(s), t; kwargs...) = begin
     push!(stmts, :($col_name ~ _sb_s(; Xnull=$Xnull_name, Zpen=$Zpen_name)))
     col_name
 end
-# `gp(x; k=K, c=C)` HSGP predictor. Precomputes the Riutort-Mayol eigen-basis
-# from the raw data (matrix PHI of size N x K, vector lambda of length K) and
-# stashes them in the data dict. The submodel `_sb_hsgp` owns log_rho,
-# log_sigma, beta_raw and returns a length-N smooth contribution. popefs
-# multiplies by an overall beta -- harmless extra slope but conventional.
-# Defaults match vimpl's: K=20 basis fns, c=1.5 boundary factor.
-_sb_predictor_term!(stmts, data, ::typeof(gp), t; group_block_lookup=Dict(), kwargs...) = begin
-    args = getargs(t); kw = getkwargs(t)
-    length(args) == 1 || error("sbimpl: `gp(x; by=g, k=K, c=C)` expects 1 positional arg, got $(length(args))")
-    xname, raw_col = _sb_inner_data(:gp, only(args))
-    raw = _sb_real_vec(:gp, xname, raw_col)
-    K = get(kw, :k, 20)
-    c = get(kw, :c, 1.5)
-    PHI, lambda = _hsgp_basis(raw, K, c)
-    if haskey(kw, :by)
-        # gp-as-random-effect (gp(x, by=g)): per-group basis weights come from
-        # the general structured-latent floor (prepass 2.5 allocated the
-        # n_groups×K iid-normal block `b_gpw_<g>`); shared length-scale /
-        # marginal-SD hyperparameters live inside `_sb_hsgp_by` (decision 7p44fo).
-        block_info = _sb_find_group_block(gp, t, group_block_lookup)
-        isnothing(block_info) && error(
-            "sbimpl: `gp($xname, by=...)` found no allocated per-group weight ",
-            "block — prepass 2.5 should have allocated it")
-        # Single field: read the spliced top-level block info (no field-name key).
-        info = block_info
-        gname = name(_sb_resolve_group_col((; kwarg=:by), t, data))
-        PHI_name    = Symbol(:PHI_, xname, :_by_, gname)
-        lambda_name = Symbol(:lambda_, xname, :_by_, gname)
-        data[PHI_name]    = PHI
-        data[lambda_name] = lambda
-        # Record the frozen (mean, L) so reprocess can rebuild PHI/lambda on a
-        # new df. (The per-group weight block / group_idx are ranef-style derived
-        # keys — reprocess errors loudly on them until ranef re-coding lands.)
-        _sb_record_preproc!(data, PHI_name,
-            PreprocEntry(:gp, (; mu_L=_sb_fit_hsgp(raw, K, c), K=K, c=c, lambda_key=lambda_name), xname, false))
-        col_name = Symbol(:gp_, xname, :_by_, gname)
-        push!(stmts, :($col_name ~ _sb_hsgp_by(; PHI=$PHI_name, lambda=$lambda_name,
-            beta=$(info.block_name), group_idx=$(info.idx_name))))
-        return col_name
-    end
-    PHI_name    = Symbol(:PHI_, xname)
-    lambda_name = Symbol(:lambda_, xname)
-    data[PHI_name]    = PHI
-    data[lambda_name] = lambda
-    # Frozen (mean, L) → reprocess rebuilds PHI/lambda on a new df with the
-    # training boundary (dimension-stable; K fixed).
-    _sb_record_preproc!(data, PHI_name,
-        PreprocEntry(:gp, (; mu_L=_sb_fit_hsgp(raw, K, c), K=K, c=c, lambda_key=lambda_name), xname, false))
-    col_name = Symbol(:gp_, xname)
-    push!(stmts, :($col_name ~ _sb_hsgp(; PHI=$PHI_name, lambda=$lambda_name)))
+
+# Two-margin tensor-product cubic-regression spline. The Julia-side fit records
+# the marginal knot/penalty decomposition and training centering constants;
+# `_sb_t2` owns the three unpenalized NN coefficients plus independent RR/RN/NR
+# smoothing scales and standardized range coefficients. It is therefore a
+# direct summand, never multiplied by an additional `popefs` beta.
+_sb_predictor_term!(stmts, data, ::typeof(t2), t;
+                    target::Union{Symbol,Nothing}=nothing, kwargs...) = begin
+    args = getargs(t)
+    length(args) == 2 || error(
+        "sbimpl: `t2(x, z)` expects exactly 2 positional margins, got $(length(args))")
+    kw = getkwargs(t)
+    _check_term_kwargs(t2, kw)
+    k, _, _ = _sb_t2_options(kw)
+    names, axes = _sb_gp_axes(:t2, args)
+    fit = _sb_fit_t2(axes[1], axes[2]; k)
+    Xfixed, Zrr, Zrn, Znr = _sb_apply_t2(fit, axes[1], axes[2])
+    axes_suffix = join(string.(names), "_")
+    suffix = isnothing(target) ? axes_suffix : string(target, "_", axes_suffix)
+    Xfixed_name = Symbol(:Xfixed_t2_, suffix)
+    Zrr_name = Symbol(:Zrr_t2_, suffix)
+    Zrn_name = Symbol(:Zrn_t2_, suffix)
+    Znr_name = Symbol(:Znr_t2_, suffix)
+    data[Xfixed_name] = Xfixed
+    data[Zrr_name] = Zrr
+    data[Zrn_name] = Zrn
+    data[Znr_name] = Znr
+    _sb_record_preproc!(data, Xfixed_name, PreprocEntry(:tensor_spline,
+        (; fit, zrr_key=Zrr_name, zrn_key=Zrn_name, znr_key=Znr_name),
+        names, false))
+    col_name = Symbol(:t2_, suffix)
+    push!(stmts, :($col_name ~ _sb_t2(;
+        Xfixed=$Xfixed_name, Zrr=$Zrr_name, Zrn=$Zrn_name, Znr=$Znr_name)))
     col_name
 end
 
-# gp-as-random-effect declaration: when `gp(x, by=g)` is called WITH `by=`, it
-# declares one structured-latent field — the per-group basis-weight matrix
-# (n_groups × K) with an iid-normal prior. Without `by=`, no block (the term
-# stays the population HSGP path above). K must match the basis count used when
-# building PHI/lambda in the emit hook (both read `get(kw, :k, 20)`).
-function _sb_term_group_block(::typeof(gp), call)
-    kw = getkwargs(call)
-    haskey(kw, :by) || return nothing
-    K = get(kw, :k, 20)
-    # Field name embeds x so two GPs on the SAME group but different x variables
-    # (`gp(t, by=g) + gp(s, by=g)`) get distinct blocks `b_gpw_t_g` / `b_gpw_s_g`.
-    fname = Symbol(:gpw_, name(_sb_named_inner(:gp, only(getargs(call)))))
-    (; fields=[(; name=fname, n_per_group=K, group=(; kwarg=:by), prior=:iid_normal)])
+# `gp(x...)` is the exact GP term. It records an N x d predictor matrix and
+# delegates covariance construction + non-centred sampling to `_sb_gp` (one
+# shared length scale) or `_sb_gp_aniso` (one per axis).
+_sb_predictor_term!(stmts, data, ::typeof(gp), t; group_block_lookup=Dict(), kwargs...) = begin
+    args = getargs(t); kw = getkwargs(t)
+    _check_term_kwargs(gp, kw)
+    names, axes = _sb_gp_axes(:gp, args)
+    suffix = join(string.(names), "_")
+    X_name = Symbol(:X_gp_, suffix)
+    col_name = Symbol(:gp_, suffix)
+    data[X_name] = _sb_gp_matrix(axes)
+    _sb_record_preproc!(data, X_name, PreprocEntry(:gp, nothing, names, false))
+    submodel = _sb_gp_iso(kw, :gp) ? :_sb_gp : :_sb_gp_aniso
+    jitter = Float64(get(kw, :jitter, 1e-9))
+    push!(stmts, :($col_name ~ $submodel(; X=$X_name, jitter=$jitter)))
+    col_name
 end
 
-# `_hsgp_basis` is defined in vimpl.jl; reuse rather than redefine here
-# to avoid method-overwriting precompile errors.
+# `hsgp(x...; k, c, by, iso)` is the Hilbert-space approximation. Scalar `k`
+# and `c` broadcast across axes; tuples/vectors specify one value per axis.
+# The tensor basis has `prod(k)` columns. With `by=`, only those basis weights
+# vary per group; length-scale and marginal-SD hyperparameters stay shared.
+_sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(), kwargs...) = begin
+    args = getargs(t); kw = getkwargs(t)
+    _check_term_kwargs(hsgp, kw)
+    names, axes = _sb_gp_axes(:hsgp, args)
+    K, c = _sb_hsgp_options(kw, length(axes))
+    fits = _sb_fit_hsgp(axes, K, c)
+    PHI, omega2 = _sb_apply_hsgp(fits, axes, K)
+    suffix = join(string.(names), "_")
+    iso = _sb_gp_iso(kw, :hsgp)
+
+    if haskey(kw, :by)
+        block_info = _sb_find_group_block(hsgp, t, group_block_lookup)
+        isnothing(block_info) && error(
+            "sbimpl: `hsgp($suffix, by=...)` found no allocated per-group weight ",
+            "block — prepass 2.5 should have allocated it")
+        info = block_info
+        gname = name(_sb_resolve_group_col((; kwarg=:by), t, data))
+        PHI_name = Symbol(:PHI_hsgp_, suffix, :_by_, gname)
+        omega2_name = Symbol(:omega2_hsgp_, suffix, :_by_, gname)
+        data[PHI_name] = PHI
+        data[omega2_name] = omega2
+        _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp,
+            (; fits, K, c, omega2_key=omega2_name), names, false))
+        col_name = Symbol(:hsgp_, suffix, :_by_, gname)
+        submodel = iso ? :_sb_hsgp_by : :_sb_hsgp_by_aniso
+        push!(stmts, :($col_name ~ $submodel(; PHI=$PHI_name, omega2=$omega2_name,
+            beta=$(info.block_name), group_idx=$(info.idx_name))))
+        return col_name
+    end
+
+    PHI_name = Symbol(:PHI_hsgp_, suffix)
+    omega2_name = Symbol(:omega2_hsgp_, suffix)
+    data[PHI_name] = PHI
+    data[omega2_name] = omega2
+    _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp,
+        (; fits, K, c, omega2_key=omega2_name), names, false))
+    col_name = Symbol(:hsgp_, suffix)
+    submodel = iso ? :_sb_hsgp : :_sb_hsgp_aniso
+    push!(stmts, :($col_name ~ $submodel(; PHI=$PHI_name, omega2=$omega2_name)))
+    col_name
+end
+
+function _sb_term_group_block(::typeof(hsgp), call)
+    kw = getkwargs(call)
+    haskey(kw, :by) || return nothing
+    _check_term_kwargs(hsgp, kw)
+    args = getargs(call)
+    isempty(args) && error("sbimpl: `hsgp(x...; by=...)` expects at least one positional axis")
+    names = Tuple(name(_sb_named_inner(:hsgp, a)) for a in args)
+    K, _ = _sb_hsgp_options(kw, length(args))
+    fname = Symbol(:hsgpw_, join(string.(names), "_"))
+    (; fields=[(; name=fname, n_per_group=prod(K), group=(; kwarg=:by), prior=:iid_normal)])
+end
 
 # `ar(time; p=1)` AR(1) residual submodel. Routes to `_sb_ar1`, which owns the
 # phi / epsilon parameters and returns the per-row u[t] as a single length-N
@@ -3680,13 +4693,16 @@ _sb_lik_family!(stmts, target, fam, args, ::NamedTuple, data) =
     _sb_lik_family!(stmts, target, fam, args, data)
 
 # One dispatch per likelihood family. Each method states the Stan name and
-# implicitly the arity (by destructuring `args`). Caveat on NegativeBinomial:
-# Distributions.jl parameterizes by (r, p); Stan's neg_binomial is (alpha, beta)
-# — the emitted model is NOT posterior-identical to the Julia side. Convert
-# upstream if that matters.
+# implicitly the arity (by destructuring `args`). Julia constructor arguments
+# are normalized centrally by `_sb_stan_dist_args` before they reach the Stan
+# call, so model density, predictive RNG and pointwise log-likelihood all see
+# the same exact parameterization.
+_sb_lik_stan_exprs!(stmts, target, name::Symbol, arg_exprs) =
+    push!(stmts, Expr(:call, :~, target, Expr(:call, name, arg_exprs...)))
+
 _sb_lik_stan!(stmts, target, name::Symbol, args, data) =
-    push!(stmts, Expr(:call, :~, target,
-        Expr(:call, name, (_sb_scalar_expr(a, data) for a in args)...)))
+    _sb_lik_stan_exprs!(
+        stmts, target, name, map(a -> _sb_scalar_expr(a, data), args))
 
 # `y ~ OrderedLogistic(eta)`: cumulative-link ordinal likelihood. Allocates
 # `ordered[K-1]` cutpoints (K = max(y)) with a std_normal prior via typed-LHS,
@@ -3707,6 +4723,169 @@ function _sb_lik_family!(stmts, target, ::Type{<:OrderedLogistic}, args::Tuple{A
     push!(stmts, :($target ~ ordered_logistic($eta_expr, $cut_name)))
 end
 
+_sb_ordinal_structure_code(::Cumulative) = 1
+_sb_ordinal_structure_code(::StoppingRatio) = 2
+_sb_ordinal_structure_code(::Type{Cumulative}) = 1
+_sb_ordinal_structure_code(::Type{StoppingRatio}) = 2
+function _sb_ordinal_structure_code(x::ExprColumn)
+    isempty(getargs(x)) && isempty(getkwargs(x)) || error(
+        "sbimpl: ordinal structure tags take no arguments; use `Cumulative()` " *
+        "or `StoppingRatio()`")
+    f = getf(x)
+    f === Cumulative && return 1
+    f === StoppingRatio && return 2
+    error("sbimpl: unsupported ordinal structure `$f`; use `Cumulative()` or " *
+          "`StoppingRatio()`")
+end
+_sb_ordinal_structure_code(x) = error(
+    "sbimpl: ordinal structure must be `Cumulative()` or `StoppingRatio()`, " *
+    "got $(typeof(x))")
+
+_sb_ordinal_link_code(::LogitLink) = 1
+_sb_ordinal_link_code(::ProbitLink) = 2
+_sb_ordinal_link_code(::CloglogLink) = 3
+_sb_ordinal_link_code(::Type{LogitLink}) = 1
+_sb_ordinal_link_code(::Type{ProbitLink}) = 2
+_sb_ordinal_link_code(::Type{CloglogLink}) = 3
+function _sb_ordinal_link_code(x::ExprColumn)
+    isempty(getargs(x)) && isempty(getkwargs(x)) || error(
+        "sbimpl: ordinal link tags take no arguments; use `LogitLink()`, " *
+        "`ProbitLink()`, or `CloglogLink()`")
+    f = getf(x)
+    f === LogitLink && return 1
+    f === ProbitLink && return 2
+    f === CloglogLink && return 3
+    error("sbimpl: unsupported ordinal link `$f`; use `LogitLink()`, " *
+          "`ProbitLink()`, or `CloglogLink()`")
+end
+_sb_ordinal_link_code(x) = error(
+    "sbimpl: ordinal link must be `LogitLink()`, `ProbitLink()`, or " *
+    "`CloglogLink()`, got $(typeof(x))")
+
+_sb_ordinal_has_fixed_intercept(x::Real) = !iszero(x)
+_sb_ordinal_has_fixed_intercept(x::NamedColumn) =
+    _sb_ordinal_has_fixed_intercept_parent(parent(x))
+_sb_ordinal_has_fixed_intercept(_) = false
+_sb_ordinal_has_fixed_intercept_parent(p::ExprColumn) = begin
+    getf(p) === (~) || return false
+    _, rhs = getargs(p, 2)
+    any(t -> t isa Integer && t == 1, _sb_terms(rhs))
+end
+_sb_ordinal_has_fixed_intercept_parent(_) = false
+
+function _sb_ordinal_threshold_predictors!(data, target, raw, n_obs)
+    raw isa Tuple || error(
+        "sbimpl: `Ordinal(...; per_threshold=...)` expects a tuple of raw " *
+        "numeric columns, for example `per_threshold=(treat,)`")
+    names = Symbol[]
+    for term in raw
+        term isa NamedColumn && parent(term) isa DataColumn || error(
+            "sbimpl: `Ordinal(...; per_threshold=...)` currently accepts only " *
+            "raw numeric data columns; got $(typeof(term))")
+        key = name(term)
+        values = parent(parent(term))
+        values isa AbstractVector{<:Real} || error(
+            "sbimpl: ordinal threshold predictor `$key` must be numeric, got " *
+            "$(typeof(values))")
+        length(values) == n_obs || error(
+            "sbimpl: ordinal threshold predictor `$key` has $(length(values)) " *
+            "rows; outcome `$target` has $n_obs")
+        all(isfinite, values) || error(
+            "sbimpl: ordinal threshold predictor `$key` contains non-finite values")
+        data[key] = collect(Float64, values)
+        _sb_record_preproc!(data, key, PreprocEntry(
+            :ordinal_threshold_predictor, nothing, key, false))
+        push!(names, key)
+    end
+    Tuple(names)
+end
+
+function _sb_ordinal_discrimination_expr(raw, data)
+    if raw isa Real
+        isfinite(raw) && raw > 0 || error(
+            "sbimpl: ordinal discrimination must be finite and strictly " *
+            "positive, got $(repr(raw))")
+    elseif raw isa NamedColumn && parent(raw) isa DataColumn
+        values = parent(parent(raw))
+        values isa AbstractVector{<:Real} && all(x -> isfinite(x) && x > 0, values) ||
+            error("sbimpl: ordinal discrimination data `$(name(raw))` must " *
+                  "contain only finite positive values")
+    end
+    _sb_scalar_expr(raw, data)
+end
+
+# Typed structure/link composition. Cumulative thresholds are ordered;
+# stopping-ratio stage intercepts are deliberately unconstrained by ordering.
+# A fixed eta intercept is non-identifiable with either threshold vector, so
+# the new surface rejects it (the legacy OrderedLogistic shorthand remains
+# unchanged for compatibility).
+function _sb_lik_family!(stmts, target, ::Type{<:Ordinal},
+                         args::Tuple{Any,Any,Any}, kwargs, data)
+    structure_raw, link_raw, eta_raw = args
+    structure = _sb_ordinal_structure_code(structure_raw)
+    link = _sb_ordinal_link_code(link_raw)
+    _sb_ordinal_has_fixed_intercept(eta_raw) && error(
+        "sbimpl: `Ordinal($target)` cannot include a fixed intercept in `eta`; " *
+        "the estimated thresholds already supply the location. Use `eta ~ 0 + ...`.")
+
+    raw = get(data, target, nothing)
+    raw isa AbstractVector || error(
+        "sbimpl: `Ordinal` expects an observed outcome vector for `$target`, " *
+        "got $(typeof(raw))")
+    levels = _sb_fit_levels(raw)
+    n_levels = length(levels)
+    n_levels >= 2 || error(
+        "sbimpl: `Ordinal($target)` needs at least two observed levels " *
+        "(got $n_levels)")
+    n_cut = n_levels - 1
+    data[target] = _sb_apply_levels(levels, raw)
+    _sb_record_preproc!(data, target, PreprocEntry(
+        :ordinal_outcome, (; levels, n_levels), target, true))
+
+    cut_name = Symbol(target, :_thresholds)
+    if structure == 1
+        push!(stmts, :($cut_name::ordered[$n_cut] ~ std_normal()))
+    else
+        push!(stmts, :($cut_name::vector[$n_cut] ~ std_normal()))
+    end
+
+    per_threshold_raw = get(kwargs, :per_threshold, ())
+    per_threshold = _sb_ordinal_threshold_predictors!(
+        data, target, per_threshold_raw, length(raw))
+    structure == 1 && !isempty(per_threshold) && error(
+        "sbimpl: `per_threshold` is currently supported for " *
+        "`StoppingRatio()` only; unrestricted cumulative category-specific " *
+        "effects can make cumulative probabilities non-monotone")
+
+    effect_name = Symbol(target, :_threshold_effect)
+    if isempty(per_threshold)
+        push!(stmts, :($effect_name = rep_matrix(
+            0., num_elements($target), $n_cut)))
+    else
+        X_name = Symbol(target, :_threshold_X)
+        beta_name = Symbol(target, :_threshold_beta)
+        n_terms = length(per_threshold)
+        push!(stmts, Expr(:(=), X_name, Expr(:call, :hcat, per_threshold...)))
+        # Stan's std_normal_lpdf is not matrix-vectorised. Reuse BRM's
+        # array-of-vectors standard-normal prior, then rebuild a K-1 by p matrix
+        # through the measured ranef_b_matrix helper for the design multiply.
+        push!(stmts, :($beta_name::vector[$n_cut,$n_terms] ~ multi_std_normal()))
+        beta_matrix = Expr(:call, :adjoint,
+            Expr(:call, :ranef_b_matrix, beta_name))
+        push!(stmts, Expr(:(=), effect_name,
+            Expr(:call, :*, X_name, beta_matrix)))
+    end
+
+    eta = _sb_scalar_expr(eta_raw, data)
+    discrimination = _sb_ordinal_discrimination_expr(
+        get(kwargs, :discrimination, 1.0), data)
+    _sb_lik_stan_exprs!(stmts, target, :brm_ordinal,
+        (eta, cut_name, discrimination, structure, link, effect_name))
+end
+_sb_lik_family!(_, target, ::Type{<:Ordinal}, args, _, _) = error(
+    "sbimpl: `Ordinal($target)` expects exactly three positional arguments " *
+    "`(structure, link, eta)`, got $(length(args))")
+
 _sb_lik_family!(stmts, target, ::Type{<:ZeroInflatedPoisson},
                 args::Tuple{Any,Any}, data) =
     _sb_lik_stan!(stmts, target, :zero_inflated_poisson, args, data)
@@ -3714,6 +4893,123 @@ _sb_lik_family!(stmts, target, ::Type{<:ZeroInflatedPoisson},
 _sb_lik_family!(stmts, target, ::Type{<:NegativeBinomial2},
                 args::Tuple{Any,Any}, data) =
     _sb_lik_stan!(stmts, target, :neg_binomial_2, args, data)
+
+_sb_von_mises_observations(data, target) = begin
+    raw = get(data, target, nothing)
+    raw isa AbstractVector || error(
+        "sbimpl: von-Mises likelihood expects an observed vector for `$target`, " *
+        "got $(typeof(raw))")
+    all(y -> y isa Real && isfinite(y), raw) || error(
+        "sbimpl: von-Mises outcome `$target` must contain only finite real values")
+    raw
+end
+
+function _sb_validate_von_mises!(data, target, mu, kappa;
+                                 interval=nothing, principal=false)
+    raw = _sb_von_mises_observations(data, target)
+    if kappa isa Real
+        isfinite(kappa) && kappa > 0 || error(
+            "sbimpl: von-Mises concentration `kappa` must be finite and strictly " *
+            "positive, got $(repr(kappa))")
+    end
+    if principal
+        lo, hi = interval
+        bad = findfirst(y -> !(lo <= y < hi), raw)
+        isnothing(bad) || error(
+            "sbimpl: `CircularVonMises($target)` observation $(repr(raw[bad])) " *
+            "at index $bad is outside the half-open interval " *
+            "[$lo, $hi)")
+    elseif mu isa Real
+        lo, hi = mu - Float64(pi), mu + Float64(pi)
+        bad = findfirst(y -> !(lo <= y <= hi), raw)
+        isnothing(bad) || error(
+            "sbimpl: `VonMises($target)` observation $(repr(raw[bad])) at index " *
+            "$bad is outside Distributions.jl support [$lo, $hi] for mu=$mu")
+    end
+    nothing
+end
+
+# Distributions.jl's exact constructor semantics. One positional argument is
+# kappa (mu defaults to zero), while the two-argument form is `(mu, kappa)`.
+# The custom lpxf adds the moving-support/strict-domain guards before calling
+# native Stan `von_mises_lpdf`, and supplies matching pointwise/RNG hooks.
+function _sb_lik_family!(stmts, target, ::Type{<:VonMises}, args, data)
+    length(args) in (1, 2) || error(
+        "sbimpl: `VonMises` expects `VonMises(kappa)` or " *
+        "`VonMises(mu, kappa)`, got $(length(args)) positional arguments")
+    arg_exprs = map(a -> _sb_scalar_expr(a, data), args)
+    mu, kappa = _sb_stan_dist_args(VonMises, arg_exprs)
+    _sb_validate_von_mises!(data, target, mu, kappa)
+    _sb_lik_stan_exprs!(
+        stmts, target, :brm_von_mises, (mu, kappa, 0.0, 0.0, 0))
+end
+
+function _sb_lik_family!(stmts, target, ::Type{<:CircularVonMises},
+                         args::Tuple{Any,Any}, kwargs, data)
+    mu, kappa = map(a -> _sb_scalar_expr(a, data), args)
+    interval = _sb_circular_interval(kwargs)
+    _sb_validate_von_mises!(data, target, mu, kappa;
+                            interval, principal=true)
+    lo, hi = interval
+    _sb_lik_stan_exprs!(
+        stmts, target, :brm_von_mises, (mu, kappa, lo, hi, 1))
+end
+_sb_lik_family!(_, target, ::Type{<:CircularVonMises}, args, _, _) = error(
+    "sbimpl: `CircularVonMises($target)` expects exactly two positional " *
+    "arguments `(mu, kappa)`, got $(length(args))")
+
+# Reference-class categorical regression. The user supplies one named scalar
+# LP per non-reference class; the fitted outcome level order determines which
+# class each argument owns. A leading all-zero row fixes class 1 as the
+# reference. StanBlocks' categorical-logit contract is matrix[K, N], one
+# observation's K logits per column, so transpose the row-wise hcat carrier.
+function _sb_lik_family!(stmts, target, ::Type{<:CategoricalLogit},
+                         args::Tuple, data)
+    isempty(args) && error(
+        "sbimpl: `CategoricalLogit($target)` needs at least one non-reference " *
+        "linear predictor")
+    all(a -> a isa NamedColumn && !(parent(a) isa DataColumn), args) || error(
+        "sbimpl: `CategoricalLogit($target)` expects one existing scalar linear " *
+        "predictor per non-reference class, got $(args)")
+
+    raw = get(data, target, nothing)
+    raw isa AbstractVector || error(
+        "sbimpl: `CategoricalLogit` expects an observed outcome vector for " *
+        "`$target`, got $(typeof(raw))")
+    levels = _sb_fit_levels(raw)
+    n_levels = length(levels)
+    n_levels >= 2 || error(
+        "sbimpl: `CategoricalLogit($target)` needs >= 2 outcome levels " *
+        "(got $n_levels)")
+    expected_n_levels = length(args) + 1
+    n_levels == expected_n_levels || error(
+        "sbimpl: `CategoricalLogit($target)` observed $n_levels outcome levels " *
+        "but received $(length(args)) non-reference predictors; expected " *
+        "$(n_levels - 1). Outcome level order is $(collect(levels)).")
+
+    data[target] = _sb_apply_levels(levels, raw)
+    _sb_record_preproc!(data, target, PreprocEntry(
+        :categorical_outcome, (; levels, n_levels), target, true))
+
+    logits_name = Symbol(target, :_categorical_logits)
+    zero_reference = :(rep_vector(0., num_elements($target)))
+    eta_exprs = map(a -> _sb_scalar_expr(a, data), args)
+    row_logits = Expr(:call, :hcat, zero_reference, eta_exprs...)
+    push!(stmts, Expr(:(=), logits_name, Expr(:call, :adjoint, row_logits)))
+    push!(stmts, :($target ~ categorical_logit($logits_name)))
+end
+
+# Mean/precision Beta-binomial convenience surface. Shape lowering stays in
+# the emitted expression so scalar, vector, and linked-predictor arguments all
+# share one method and StanBlocks can synthesize matching lpmfs/RNG paths.
+function _sb_lik_family!(stmts, target, ::Type{<:BetaBinomial2},
+                         args::Tuple{Any,Any,Any}, data)
+    trials, mean, precision = map(a -> _sb_scalar_expr(a, data), args)
+    alpha = Expr(:call, Symbol(".*"), mean, precision)
+    beta = Expr(:call, Symbol(".*"), Expr(:call, :-, 1, mean), precision)
+    push!(stmts, Expr(:call, :~, target,
+        Expr(:call, :beta_binomial, trials, alpha, beta)))
+end
 
 # Distributions.jl expresses a location-scale Student-t as
 # `LocationScale(loc, scale, TDist(nu))`. The prior path already supports this
@@ -3731,12 +5027,14 @@ function _sb_lik_family!(stmts, target, ::Type{<:LocationScale},
     stan_name = _sb_stan_dist_name(base_fam)
     isnothing(stan_name) && error(
         "sbimpl: `LocationScale` over `$(base_fam)` -- no Stan-name mapping for the base.")
-    base_args = _sb_stan_dist_args(base_fam, getargs(base_e))
+    base_args = _sb_stan_dist_args(
+        base_fam, map(a -> _sb_scalar_expr(a, data), getargs(base_e)))
     length(base_args) >= 3 || error(
         "sbimpl: `LocationScale` over `$(base_fam)`: base lowers to ",
         "$(length(base_args)) Stan args, need >= 3 for location/scale slots.")
-    composed = (base_args[1], loc, scale, base_args[4:end]...)
-    _sb_lik_stan!(stmts, target, stan_name, composed, data)
+    composed = (base_args[1], _sb_scalar_expr(loc, data),
+                _sb_scalar_expr(scale, data), base_args[4:end]...)
+    _sb_lik_stan_exprs!(stmts, target, stan_name, composed)
 end
 # Single source of truth: Julia Distribution type -> Stan distribution
 # function name. Both the likelihood path (`_sb_lik_family!` below) and
@@ -3754,21 +5052,35 @@ _sb_stan_dist_name(::Type{<:Beta})                = :beta
 _sb_stan_dist_name(::Type{<:Uniform})             = :uniform
 _sb_stan_dist_name(::Type{<:LogNormal})           = :lognormal
 _sb_stan_dist_name(::Type{<:Laplace})             = :double_exponential
+_sb_stan_dist_name(::Type{<:SkewDoubleExponential}) = :skew_double_exponential
+_sb_stan_dist_name(::Type{<:SkewedExponentialPower}) = :skew_double_exponential
 _sb_stan_dist_name(::Type{<:Weibull})             = :weibull
 _sb_stan_dist_name(::Type{<:InverseGamma})        = :inv_gamma
 _sb_stan_dist_name(::Type{<:Bernoulli})           = :bernoulli
 _sb_stan_dist_name(::Type{<:BernoulliLogit})      = :bernoulli_logit
 _sb_stan_dist_name(::Type{<:Binomial})            = :binomial
 _sb_stan_dist_name(::Type{<:BinomialLogit})       = :binomial_logit
+_sb_stan_dist_name(::Type{<:BetaBinomial})        = :beta_binomial
 _sb_stan_dist_name(::Type{<:Poisson})             = :poisson
 _sb_stan_dist_name(::Type{<:NegativeBinomial})    = :neg_binomial
 _sb_stan_dist_name(::Type) = nothing
 
-# Per-family arg shape adjustment between Julia call args and Stan call
-# args. Default: pass through unchanged. Override when Julia's
-# constructor signature differs from Stan's distribution signature.
+# Per-family argument normalization between Julia constructors and native Stan
+# distributions.  Inputs here are already-lowered Stan expressions.  Besides
+# parameterization changes, preserve Distributions.jl's shorter constructor
+# forms rather than emitting an invalid native-Stan arity.
 _sb_stan_dist_args(::Type, args) = args
-# `TDist(nu)` -> Stan `student_t(nu, 0, 1)`. Pads location/scale defaults.
+
+_sb_stan_reciprocal(x) = Expr(:call, Symbol("./"), 1.0, x)
+_sb_stan_success_odds(p) =
+    Expr(:call, Symbol("./"), p, Expr(:call, :-, 1.0, p))
+
+_sb_stan_dist_args(::Type{<:Normal}, ::Tuple{}) = (0.0, 1.0)
+_sb_stan_dist_args(::Type{<:Normal}, args::Tuple{Any}) = (args[1], 1.0)
+_sb_stan_dist_args(::Type{<:Cauchy}, ::Tuple{}) = (0.0, 1.0)
+_sb_stan_dist_args(::Type{<:Cauchy}, args::Tuple{Any}) = (args[1], 1.0)
+
+# `TDist(nu)` is standard Student-t; Stan requires explicit location/scale.
 _sb_stan_dist_args(::Type{<:TDist}, args::Tuple{Any}) = (args[1], 0, 1)
 
 # Explicit capability gate for Julia distribution composition. A Stan density
@@ -3805,7 +5117,7 @@ function _sb_composed_family(wrapper, args)
         "sbimpl: `$wrapper` base family `$D` has no generic CDF/CCDF composition ",
         "capability; add and test its density, pointwise, predictive, lcdf and ",
         "lccdf paths before advertising it")
-    (; stan_name, stan_args=_sb_stan_dist_args(D, getargs(base)), kind)
+    (; family=D, stan_name, stan_args=getargs(base), kind)
 end
 
 function _sb_wrapper_bounds(wrapper, args, kwargs::NamedTuple)
@@ -3885,8 +5197,11 @@ end
 # StanBlocks decision 1wd43wt: one base-family token plus compile-time optional
 # `lower` / `upper` kwargs. BRM always spells both; an absent bound is the Julia
 # value `nothing`, which the HOF consumes before Stan name/type resolution.
+_sb_composed_stan_args(base, data) = _sb_stan_dist_args(
+    base.family, map(a -> _sb_scalar_expr(a, data), base.stan_args))
+
 function _sb_emit_optional_family!(stmts, target, producer, base, lower, upper, data)
-    family_args = map(a -> _sb_scalar_expr(a, data), base.stan_args)
+    family_args = _sb_composed_stan_args(base, data)
     lower_expr = isnothing(lower) ? nothing : _sb_scalar_expr(lower, data)
     upper_expr = isnothing(upper) ? nothing : _sb_scalar_expr(upper, data)
     rhs = Expr(:call, producer,
@@ -3937,9 +5252,72 @@ function _sb_lik_family!(stmts, target, ::typeof(interval_censored),
         lo[i] < (hi isa AbstractVector ? hi[i] : hi)
     end || error(
         "sbimpl: `interval_censored` lower endpoints must be strictly below upper endpoints")
-    _sb_lik_stan!(stmts, target, :interval_evidence,
-                  (base.stan_name, target, upper, base.stan_args...), data)
+    family_args = _sb_composed_stan_args(base, data)
+    upper_expr = _sb_scalar_expr(upper, data)
+    _sb_lik_stan_exprs!(stmts, target, :interval_evidence,
+                        (base.stan_name, target, upper_expr, family_args...))
 end
+
+# Distributions.jl uses scale `theta`; Stan uses inverse scale (rate) `beta`.
+_sb_stan_dist_args(::Type{<:Exponential}, ::Tuple{}) = (1.0,)
+_sb_stan_dist_args(::Type{<:Exponential}, args::Tuple{Any}) =
+    (_sb_stan_reciprocal(args[1]),)
+_sb_stan_dist_args(::Type{<:Gamma}, ::Tuple{}) = (1.0, 1.0)
+_sb_stan_dist_args(::Type{<:Gamma}, args::Tuple{Any}) = (args[1], 1.0)
+_sb_stan_dist_args(::Type{<:Gamma}, args::Tuple{Any,Any}) =
+    (args[1], _sb_stan_reciprocal(args[2]))
+
+_sb_stan_dist_args(::Type{<:Beta}, ::Tuple{}) = (1.0, 1.0)
+_sb_stan_dist_args(::Type{<:Beta}, args::Tuple{Any}) = (args[1], args[1])
+_sb_stan_dist_args(::Type{<:Uniform}, ::Tuple{}) = (0.0, 1.0)
+_sb_stan_dist_args(::Type{<:LogNormal}, ::Tuple{}) = (0.0, 1.0)
+_sb_stan_dist_args(::Type{<:LogNormal}, args::Tuple{Any}) = (args[1], 1.0)
+_sb_stan_dist_args(::Type{<:Laplace}, ::Tuple{}) = (0.0, 1.0)
+_sb_stan_dist_args(::Type{<:Laplace}, args::Tuple{Any}) = (args[1], 1.0)
+
+# Distributions.jl's asymmetric-Laplace special case keeps its own scale.
+# Only an explicit literal p=1 is accepted: the general SEPD has no faithful
+# native Stan analogue. All three Stan paths consume this one translation.
+function _sb_stan_dist_args(
+    ::Type{<:SkewedExponentialPower},
+    args::Tuple{Any,Any,Any,Any},
+)
+    mu, sigma_sepd, p, alpha = args
+    p isa Real && p == one(p) || throw(ArgumentError(
+        "sbimpl: `SkewedExponentialPower` is supported only with the explicit " *
+        "literal shape `p = 1`; got $(repr(p))"))
+    one_minus_alpha = Expr(:call, :-, 1.0, alpha)
+    stan_scale = Expr(:call, Symbol(".*"),
+        Expr(:call, Symbol(".*"),
+            Expr(:call, Symbol(".*"), 4.0, sigma_sepd), alpha),
+        one_minus_alpha)
+    (mu, stan_scale, alpha)
+end
+_sb_stan_dist_args(::Type{<:SkewedExponentialPower}, args) =
+    throw(ArgumentError(
+        "sbimpl: `SkewedExponentialPower` requires four explicit arguments " *
+        "`(mu, sigma, 1, alpha)`; got $(length(args))"))
+
+_sb_stan_dist_args(::Type{<:Weibull}, ::Tuple{}) = (1.0, 1.0)
+_sb_stan_dist_args(::Type{<:Weibull}, args::Tuple{Any}) = (args[1], 1.0)
+_sb_stan_dist_args(::Type{<:InverseGamma}, ::Tuple{}) = (1.0, 1.0)
+_sb_stan_dist_args(::Type{<:InverseGamma}, args::Tuple{Any}) = (args[1], 1.0)
+_sb_stan_dist_args(::Type{<:Bernoulli}, ::Tuple{}) = (0.5,)
+_sb_stan_dist_args(::Type{<:BernoulliLogit}, ::Tuple{}) = (0.0,)
+_sb_stan_dist_args(::Type{<:Binomial}, ::Tuple{}) = (1, 0.5)
+_sb_stan_dist_args(::Type{<:Binomial}, args::Tuple{Any}) = (args[1], 0.5)
+_sb_stan_dist_args(::Type{<:Poisson}, ::Tuple{}) = (1.0,)
+
+_sb_stan_dist_args(::Type{<:VonMises}, args::Tuple{Any}) = (0.0, args[1])
+
+# Distributions.jl `NegativeBinomial(r, p)` counts failures before `r`
+# successes.  Native Stan `neg_binomial(alpha, beta)` uses shape and inverse
+# scale, with the exact translation alpha=r, beta=p/(1-p).
+_sb_stan_dist_args(::Type{<:NegativeBinomial}, ::Tuple{}) = (1.0, 1.0)
+_sb_stan_dist_args(::Type{<:NegativeBinomial}, args::Tuple{Any}) =
+    (args[1], 1.0)
+_sb_stan_dist_args(::Type{<:NegativeBinomial}, args::Tuple{Any,Any}) =
+    (args[1], _sb_stan_success_odds(args[2]))
 
 # Default: look up the Stan name from the table and emit
 # `target ~ <stan-name>(<lowered-args>...)` via `_sb_lik_stan!`. Families
@@ -3952,7 +5330,9 @@ _sb_lik_family!(stmts, target, ::Type{D}, args, data) where {D <: Distribution} 
             "sbimpl: likelihood family `$(D)` not supported yet -- ",
             "no `_sb_stan_dist_name` entry. Add one (and a `_sb_stan_dist_args` ",
             "override if its args don't lower verbatim).")
-        _sb_lik_stan!(stmts, target, stan_name, _sb_stan_dist_args(D, args), data)
+        arg_exprs = map(a -> _sb_scalar_expr(a, data), args)
+        _sb_lik_stan_exprs!(
+            stmts, target, stan_name, _sb_stan_dist_args(D, arg_exprs))
     end
 
 _sb_lik_family!(stmts, target, fam, args, _) =
@@ -4004,18 +5384,6 @@ _sb_scalar_expr(x, _) = error("sbimpl: cannot lift to Stan expression: $(typeof(
 #   - Transdata builtins: `linear_idxs`, `broadcasted_max`, `broadcasted_gt`
 #   All registered in StanBlocks' builtin module; reachable with no import.
 # ==============================================================================
-
-"""
-    TruncatedNormal
-
-BRM formula marker for the bordet censored-normal observation model.
-`log_obs ~ TruncatedNormal(log_y, sigma, lloq, uloq)` — `sigma` is a
-biomarker-level parameter declared inside `bordet_hierarchical_parametric`;
-`lloq`/`uloq` are biomarker-level data columns.
-Emits: `log_obs ~ truncated_normal(log_y, sigma[biomarker_idxs], lloq[biomarker_idxs], uloq[biomarker_idxs])`.
-Censoring math lives in StanBlocks:bordet's lpxf triad (not Stan T[,] truncation).
-"""
-function TruncatedNormal end
 
 """
     bordet_hierarchical_parametric

@@ -312,13 +312,13 @@ _walk_pred_grouped!(re_terms, s) = begin
     true
 end
 
-# `gp(x, by=g)` is a per-group random effect, so its `by=` grouping column is a
+# `hsgp(x, by=g)` is a per-group random effect, so its `by=` grouping column is a
 # genuine grouping factor (web-macro auto-PPC facets on these), even though it
 # rides on a predictor summand rather than a `(... | g)` term. Surfaced via a
 # dispatched helper (no `getf(...) === :sym` branch inside the walker).
 _gp_by_group(s::ExprColumn) = _gp_by_group_f(getf(s), s)
 _gp_by_group(_s) = nothing
-_gp_by_group_f(::typeof(gp), s) = _gp_by_group_kw(get(getkwargs(s), :by, nothing))
+_gp_by_group_f(::typeof(hsgp), s) = _gp_by_group_kw(get(getkwargs(s), :by, nothing))
 _gp_by_group_f(::Any, _s) = nothing
 _gp_by_group_kw(by::NamedColumn) = name(by)
 _gp_by_group_kw(_by) = nothing
@@ -327,7 +327,7 @@ _gp_by_group_kw(_by) = nothing
     grouping_factors(brmi::BRMI, lhs::Symbol) -> Vector{Symbol}
 
 The grouping-factor symbols in `<lhs> ~ ...`: the last arg of every
-`(... | g)` term plus the `by=` group of every `gp(x, by=g)` term. Empty if
+`(... | g)` term plus the `by=` group of every `hsgp(x, by=g)` term. Empty if
 no grouping term or the LP isn't introspectable.
 """
 function grouping_factors(brmi::BRMI, lhs::Symbol)

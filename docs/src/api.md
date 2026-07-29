@@ -45,6 +45,7 @@ BayesianRegressionModels.assign
 BayesianRegressionModels.doublepipe
 BayesianRegressionModels.gr
 BayesianRegressionModels.gp
+BayesianRegressionModels.hsgp
 BayesianRegressionModels.offset
 BayesianRegressionModels.zscale
 BayesianRegressionModels.center
@@ -54,20 +55,34 @@ BayesianRegressionModels.factor
 BayesianRegressionModels.mi
 BayesianRegressionModels.me
 BayesianRegressionModels.s
+BayesianRegressionModels.t2
 BayesianRegressionModels.ar
 BayesianRegressionModels.mo
 BayesianRegressionModels.mo1
-BayesianRegressionModels.hsgp
 ```
 
-## Likelihood / prior markers
+## Likelihood distributions / prior markers
 
 ```@docs
 BayesianRegressionModels.OrderedLogistic
+BayesianRegressionModels.Ordinal
+BayesianRegressionModels.OrdinalStructure
+BayesianRegressionModels.Cumulative
+BayesianRegressionModels.StoppingRatio
+BayesianRegressionModels.OrdinalLink
+BayesianRegressionModels.LogitLink
+BayesianRegressionModels.ProbitLink
+BayesianRegressionModels.CloglogLink
+BayesianRegressionModels.CategoricalLogit
 BayesianRegressionModels.Horseshoe
 BayesianRegressionModels.ZeroInflatedPoisson
+BayesianRegressionModels.NegativeBinomial2
+BayesianRegressionModels.BetaBinomial
+BayesianRegressionModels.BetaBinomial2
 BayesianRegressionModels.BinomialLogit
 BayesianRegressionModels.interval_censored
+BayesianRegressionModels.CircularVonMises
+BayesianRegressionModels.SkewDoubleExponential
 ```
 
 ## Backends

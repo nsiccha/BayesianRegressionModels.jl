@@ -23,12 +23,14 @@ _ALLOWED_CALLS = Set{Symbol}([
     :log_abs_tanh, :log_square_tanh,
     :Normal, :Poisson, :Binomial, :BinomialLogit, :Bernoulli, :BernoulliLogit, :Beta, :Gamma,
     :Exponential, :Cauchy, :TDist, :LocationScale, :LogNormal, :Weibull,
-    :NegativeBinomial, :NegativeBinomial2, :Geometric, :Laplace, :Uniform,
+    :NegativeBinomial, :NegativeBinomial2, :BetaBinomial, :BetaBinomial2,
+    :Geometric, :Laplace, :Uniform,
     :MvNormal, :MixtureModel, :Dirichlet,
-    :InverseGamma, :InverseGaussian, :VonMises, :Pareto,
-    :OrderedLogistic, :Categorical,
+    :InverseGamma, :InverseGaussian, :VonMises, :CircularVonMises, :Pareto,
+    :OrderedLogistic, :Ordinal, :Cumulative, :StoppingRatio,
+    :LogitLink, :ProbitLink, :CloglogLink, :Categorical, :CategoricalLogit,
     :zscale, :center, :standardize, :factor, :offset, :protect,
-    :s, :bs, :t2, :gp, :ar, :ar1, :mo, :mo1, :mi,
+    :s, :bs, :t2, :gp, :hsgp, :ar, :ar1, :mo, :mo1, :mi,
     :cbind, :mvbind, :mm, :gr, :dp, :me, :centered,
     :Horseshoe, :ZeroInflatedPoisson, :weighted,
     :length, :unique, :sort, :size, :eltype, :nrow, :ncol,
@@ -39,13 +41,30 @@ _SAFE_HEADS = Set{Symbol}([
     :kw, :parameters, :(...),
     :comparison, :&&,
 ])
-walk(x) = begin
+walk(x) = _walk(x, false)
+_walk(x, inside_nested_brm::Bool) = begin
     x isa Union{Number, AbstractString, Symbol, LineNumberNode,
                 Nothing, Bool, QuoteNode} && return nothing
     x isa Expr || return nothing
-    x.head == :macrocall &&
-        return FormulaSecurityError(
-            "macro calls are not allowed in formulas (got $(x.args[1]))")
+    if x.head == :macrocall
+        x.args[1] === Symbol("@brm") ||
+            return FormulaSecurityError(
+                "macro calls are not allowed in formulas (got $(x.args[1]))")
+        inside_nested_brm &&
+            return FormulaSecurityError(
+                "a nested predictor formula cannot contain another nested `@brm`")
+        length(x.args) == 3 ||
+            return FormulaSecurityError(
+                "nested `@brm` requires exactly one parenthesized predictor expression")
+        payload = x.args[3]
+        if payload isa Expr &&
+           (payload.head == :block || payload.head == :(=) ||
+            (payload.head == :call && !isempty(payload.args) && payload.args[1] === :~))
+            return FormulaSecurityError(
+                "nested `@brm(...)` accepts one predictor expression, not a block or statement")
+        end
+        return _walk(payload, true)
+    end
     x.head in (:cmd, :string) &&
         return FormulaSecurityError(
             "`$(x.head)` expressions are not allowed in formulas")
@@ -70,7 +89,7 @@ walk(x) = begin
         return FormulaSecurityError(
             "expression type `:$(x.head)` is not allowed in formulas")
     for arg in x.args
-        v = walk(arg); v === nothing || return v
+        v = _walk(arg, inside_nested_brm); v === nothing || return v
     end
     nothing
 end

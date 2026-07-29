@@ -1,6 +1,6 @@
-# label: GP (HSGP)
+# label: exact GP
 # tier: 0
-# status: open
+# status: done (sbimpl)
 
-loc ~ 1 + a + gp(b; k=20, c=1.5)
+loc ~ 1 + a + gp(b)
 y1 ~ Normal(loc, 1)

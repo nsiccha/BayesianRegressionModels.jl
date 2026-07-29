@@ -347,7 +347,7 @@ end
 
 function support_class(status, note, formula, family, route)
     if status == "ready"
-        rewritten = occursin(r"\b(?:bf|hsgp|scale|offset|trials|cbind|I|S|C)\s*\(", formula) ||
+        rewritten = occursin(r"\b(?:bf|hsgp|scale|offset|trials|vint|cbind|I|S|C)\s*\(", formula) ||
                     occursin(':', formula) || occursin('*', formula) ||
                     family == "negativebinomial"
         return (rewritten ? "already-expressible-via-semantic-rewrite" : "already-expressible-verbatim", "")
@@ -489,7 +489,7 @@ function translate_formula(formula, family, route)
 
     outcome = lhs
     trials = ""
-    if (tm = match(r"^([A-Za-z_]\w*)\s*\|\s*trials\((.+)\)$", lhs)) !== nothing
+    if (tm = match(r"^([A-Za-z_]\w*)\s*\|\s*(?:trials|vint)\((.+)\)$", lhs)) !== nothing
         outcome, trials = tm.captures
     elseif (pm = match(r"^p\(([^,]+),\s*([^)]+)\)$", lhs)) !== nothing
         outcome, trials = strip.(pm.captures)
@@ -588,7 +588,14 @@ function translate_formula(formula, family, route)
         return ("semantic-rewrite", "loc ~ $rhs\nlog(scale) ~ 1\n$outcome ~ LocationScale(loc, scale, TDist(nu))",
                 "the SBBRMI-only LocationScale Student-t dispatcher landed at canonical 11031f2 and is executable; each row still needs its historical degrees-of-freedom value/prior recovered before this symbolic `nu` body is faithful")
     elseif family == "beta_binomial"
-        return ("unsupported", "", "beta-binomial likelihood has StanBlocks building blocks but no stock BRM family marker/lowering")
+        isempty(trials) && return ("unsupported", "", "beta-binomial trials are absent; refusing to guess the grouped count denominator")
+        unsupported_auxiliary = setdiff(Set(keys(normalized_auxiliary)), Set(["phi"]))
+        isempty(unsupported_auxiliary) ||
+            return ("unsupported", "", "BetaBinomial2 translation does not implement auxiliary predictors: $(join(sort(collect(unsupported_auxiliary)), ','))")
+        phi_rhs = get(normalized_auxiliary, "phi", "1")
+        body = "logit(mu) ~ $rhs\nlog(phi) ~ $phi_rhs\n$outcome ~ BetaBinomial2($trials, mu, phi)"
+        return ("ready", body,
+                "response trials/vint lowered to the reviewed BetaBinomial2(trials, mean, precision) surface; shape-form BetaBinomial remains available for Julia-native formulas")
     elseif family == "asymmetriclaplace"
         return ("unsupported", "", "asymmetric-Laplace quantile likelihood has no stock BRM family adapter")
     elseif family in ("categorical", "multivariate_gaussian", "multivariate_lognormal", "multivariate_skew_normal_gaussian")

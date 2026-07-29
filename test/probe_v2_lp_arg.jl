@@ -136,7 +136,7 @@ end
         @test_throws "no longer accepts `n_eta=`" v2_neta_model(df)
         # `by=` is retired for `kernel(...)` ONLY — it stays live elsewhere.
         @test (@brm df begin
-            y ~ 1 + gp(weight; by = subject)
+            y ~ 1 + hsgp(weight; by = subject)
         end) isa BRMI
         @test_throws "disagree on their grouping" SBBRMI(
             v2_disagreeing_model(df); mod = @__MODULE__)

@@ -22,6 +22,11 @@ Validate without opening a network listener:
 julia --project=web-macro research/historical_model_inventory/gallery/validate.jl
 ```
 
+The browser route uses HTMXObjects' standard runtime and default operation
+policy: ordinary navigation returns the framework's HTMX-enabled page shell,
+whose load operation mounts the complete semantic surface. Subsequent filter
+submissions use the same authoritative graph and its inferred option domains.
+
 Serve explicitly when desired:
 
 ```sh

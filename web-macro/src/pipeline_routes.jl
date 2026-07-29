@@ -443,6 +443,10 @@
                         h.li(h.code("OrderedLogistic(eta)"), " -- integer outcome with K = ",
                              h.code("max(y)"), " levels; allocates K-1 ",
                              h.code("ordered"), " cutpoints with a ", h.code("std_normal"), " prior"),
+                        h.li(h.code("Ordinal(Cumulative(), ProbitLink(), eta)"),
+                             " or ",
+                             h.code("Ordinal(StoppingRatio(), CloglogLink(), eta; per_threshold=(x,))"),
+                             " -- typed ordinal structure/link composition; use an intercept-free eta"),
                     ),
                     h.h4("Link transforms on the LHS"),
                     h.p(h.small(
