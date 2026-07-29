@@ -330,8 +330,8 @@ function modifier_lhs(lhs, family)
     lhs = strip(lhs)
     if (m = match(r"^([A-Za-z_]\w*)\s*\|\s*(?:se|resp_se)\(([^,()]+)(?:,\s*sigma\s*=\s*(TRUE|True|true|FALSE|False|false))?\)$", lhs)) !== nothing
         outcome, scale, residual = strip(m.captures[1]), strip(m.captures[2]), something(m.captures[3], "false")
-        family == "gaussian" ||
-            return (outcome, "", "", "known response SE is only translated here for a Gaussian likelihood")
+        family in ("gaussian", "student_t") ||
+            return (outcome, "", "", "known response SE is only translated here for Gaussian or Student-t likelihoods")
         return (outcome, scale, lowercase(residual), "")
     end
     if (m = match(r"^([A-Za-z_]\w*)\s*\|\s*mi\(\s*\)$", lhs)) !== nothing
@@ -575,6 +575,16 @@ function translate_formula(formula, family, route)
     elseif family == "zero_inflated_poisson"
         return ("unsupported", "", "the SBBRMI-only ZeroInflatedPoisson likelihood/RNG surface landed at canonical 11031f2, but these historical rows split mean and zero-inflation components across separate catalogue cards; their pairing and joint declaration remain unresolved")
     elseif family == "student_t"
+        if !isempty(known_se)
+            scale = residual_se == "true" ?
+                "sqrt($known_se * $known_se + sigma * sigma)" : known_se
+            sigma_decl = residual_se == "true" ? "log(sigma) ~ 1\n" : ""
+            return (
+                "semantic-rewrite",
+                "loc ~ $rhs\n$(sigma_decl)$outcome ~ LocationScale(loc, $scale, TDist(nu))",
+                "row-varying known response SE composes with the fitted residual sigma inside the LocationScale Student-t scale; the surface is executable, but `nu` remains symbolic until the historical degrees-of-freedom value/prior is recovered",
+            )
+        end
         return ("semantic-rewrite", "loc ~ $rhs\nlog(scale) ~ 1\n$outcome ~ LocationScale(loc, scale, TDist(nu))",
                 "the SBBRMI-only LocationScale Student-t dispatcher landed at canonical 11031f2 and is executable; each row still needs its historical degrees-of-freedom value/prior recovered before this symbolic `nu` body is faithful")
     elseif family == "beta_binomial"
