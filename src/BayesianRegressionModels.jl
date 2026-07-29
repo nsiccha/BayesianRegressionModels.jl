@@ -15,6 +15,9 @@ include("introspection.jl")
 # likelihood into a LogDensityProblems-compatible object.
 using LogExpFunctions, InverseFunctions, Distributions, ElasticArrays,
       LogDensityProblems, LinearAlgebra, SpecialFunctions, Random
+using StatsBase: AbstractWeights, AnalyticWeights, FrequencyWeights,
+                 ProbabilityWeights, UnitWeights, Weights,
+                 aweights, fweights, pweights, uweights, weights
 import CategoricalArrays as CA
 include("likelihood_distributions.jl")
 include("vimpl.jl")
@@ -44,6 +47,9 @@ include("adaptive_centering.jl")
 # (web-macro, bruno, tests) reaches for.
 export @brm, @n, @x, @getproperty
 export assign, doublepipe, gr, gp, offset, zscale, center, standardize, protect, factor
+export weighted, AbstractWeights, AnalyticWeights, FrequencyWeights,
+       ProbabilityWeights, UnitWeights, Weights,
+       aweights, fweights, pweights, uweights, weights
 export me, mi, s, t2, ar, mo, mo1, hsgp, OrderedLogistic, Ordinal,
        OrdinalStructure, Cumulative, StoppingRatio,
        OrdinalLink, LogitLink, ProbitLink, CloglogLink, Horseshoe,
