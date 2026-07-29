@@ -108,6 +108,8 @@ function assign end
     effect(linear_predictor, coefficient)
     effect(sd, id[, linear_predictor[, coefficient]])
     effect(cor, id)
+    effect(:)
+    effect(linear_predictor, :)
 
 Address a population formula coefficient or shared `|ID|` random-effect block
 in a separate prior statement:
@@ -127,11 +129,65 @@ The one-argument form is accepted when the coefficient label occurs in exactly
 one linear predictor. `sd` and `cor` are reserved first-position classes for
 random-effect addresses. An SD margin may be selected by predictor plus
 coefficient, or by predictor alone when it contributes exactly one margin.
+
+The `Colon` address is the *whole-predictor* form used by the joint
+variance-decomposition family [`r2d2`](@ref): `effect(lp, :)` addresses every
+population coefficient of `lp` at once, and bare `effect(:)` does the same for
+the model's single population predictor.
+
 `effect` is an address marker, not a callable function. Use
-[`effect_priors`](@ref), [`ranef_effect_priors`](@ref), and
-[`ranefcoefnames`](@ref) to inspect the captured statements and margin labels.
+[`effect_priors`](@ref), [`ranef_effect_priors`](@ref), [`r2d2_priors`](@ref),
+and [`ranefcoefnames`](@ref) to inspect the captured statements and margin
+labels.
 """
 function effect end
+
+"""
+    r2d2(; R2=Beta(1, 1), tau_bsv=nothing, alpha=1)
+
+R²-induced Dirichlet Decomposition prior for a whole linear predictor, applied
+through a [`effect`](@ref) `Colon` address:
+
+```julia
+@brm begin
+    log_CL ~ 1 + weight + age + (1 | p | subject)
+    effect(log_CL, :) ~ r2d2(R2 = Beta(1, 1), tau_bsv = 0.5)
+end
+```
+
+One total between-subject scale `tau_bsv` is split by `R2` into an explained
+and a residual part. The explained part is allocated across the predictor's
+population columns by a Dirichlet simplex `phi ~ Dirichlet(alpha)`, giving
+column `k` the derived prior scale
+
+```
+beta_scale[k] = sqrt(phi[k] * R2 * tau_bsv^2 / Var(x_k))
+```
+
+while the predictor's random-effect margins take the residual scale
+`sqrt((1 - R2) * tau_bsv^2)` — for a latent per-subject parameter the random
+effect *is* the residual, which is the motivating PK reading (decision
+`kx8wkd`).
+
+Keywords:
+
+- `R2` — a `Beta` prior on the explained fraction. Defaults to `Beta(1, 1)`.
+- `tau_bsv` — the total scale. A positive number fixes it; omitted, it becomes
+  a sampled half-standard-normal parameter, which is the only option for a
+  latent predictor with no observed response to anchor it.
+- `alpha` — the symmetric Dirichlet concentration over population columns.
+
+Within a shared brms-style `|ID|` bucket the decomposition is all-or-nothing:
+if any linear predictor slicing the bucket is `r2d2`-scoped, all of them must
+be, so the bucket's `tau` is one wholly derived vector rather than a
+part-sampled hybrid (decision `1db6zkr`). The correlation factor `L` stays free
+and shared — `r2d2` constrains marginal variances and says nothing about
+cross-predictor correlation.
+
+`r2d2` is a formula marker, not a callable function; the SBBRMI backend lowers
+it. Inspect captured statements with [`r2d2_priors`](@ref).
+"""
+function r2d2 end
 
 """Marker function for the brms `||` zero-correlation random-effects operator. Dispatch tag only — never called."""
 function doublepipe end
@@ -334,6 +390,10 @@ else
 end
 
 _is_effect_lhs(x) = isxcall(x, :effect)
+# `effect(:)` parses to `Expr(:call, :effect, Symbol(":"))` -- Julia's bare
+# colon reaches the macro as an ordinary Symbol, so the address vector stays
+# homogeneous and no separate Colon carrier is needed.
+const _EFFECT_COLON = Symbol(":")
 _effect_address_symbol(x::Symbol) = x
 _effect_address_symbol(x::QuoteNode) = x.value isa Symbol ? x.value : error(
     "@brm: `effect(...)` addresses must be symbols, got $(repr(x.value))")
@@ -343,7 +403,19 @@ _effect_address_symbol(x) = error(
 function _parse_effect!(lhs::Expr, rhs; info)
     raw_args = lhs.args[2:end]
     args = map(_effect_address_symbol, raw_args)
-    if !isempty(args) && first(args) === :sd
+    if _EFFECT_COLON in args
+        # Whole-predictor address: `effect(:)` or `effect(lp, :)`. The Colon is
+        # only ever legal LAST -- `effect(:, x)` would read as "every predictor's
+        # `x` coefficient", which is not a supported address.
+        last(args) === _EFFECT_COLON || error(
+            "@brm: `:` is only valid as the LAST `effect(...)` address " *
+            "argument; got `effect($(join(args, ", ")))`")
+        count(==(_EFFECT_COLON), args) == 1 || error(
+            "@brm: `effect(...)` accepts at most one `:` address argument")
+        length(args) in (1, 2) || error(
+            "@brm: whole-predictor priors expect `effect(:)` or " *
+            "`effect(linear_predictor, :)`, got $(length(args)) arguments")
+    elseif !isempty(args) && first(args) === :sd
         length(args) in (2, 3, 4) || error(
             "@brm: random-effect SD priors expect `effect(sd, ID)`, " *
             "`effect(sd, ID, linear_predictor)`, or " *

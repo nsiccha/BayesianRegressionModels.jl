@@ -46,7 +46,7 @@ include("adaptive_centering.jl")
 # Public surface. The macros and value types everything downstream
 # (web-macro, bruno, tests) reaches for.
 export @brm, @n, @x, @getproperty
-export assign, effect, doublepipe, gr, mm, gp, offset, zscale, center, standardize, protect, factor
+export assign, effect, r2d2, doublepipe, gr, mm, gp, offset, zscale, center, standardize, protect, factor
 export weighted, AbstractWeights, AnalyticWeights, FrequencyWeights,
        ProbabilityWeights, UnitWeights, Weights,
        aweights, fweights, pweights, uweights, weights
@@ -106,7 +106,7 @@ export outcomes, linear_predictor_op, linear_predictors, predictors,
        grouping_factors, column_data, data_columns, dependencies,
        hierarchical_outcomes,
        linear_predictor_args, data_args, primary_lp, popcoefnames, effect_priors,
-       ranef_effect_priors, ranefcoefnames
+       ranef_effect_priors, r2d2_priors, ranefcoefnames
 
 # Extension API. Downstream packages (bruno) add their own formula terms
 # by defining methods on `vmeta_sampling_rhs` + `_sb_submodel_rhs!` and
@@ -128,6 +128,8 @@ export popefs, _popefs_normal, cdirichlet, c0dirichlet, c01dirichlet,
        ranef_correlated_draws_centered,
        ranef_correlated_draws_effect,
        ranef_correlated_draws_centered_effect,
+       ranef_correlated_draws_r2d2, ranef_intercept_r2d2, ranef_correlated_r2d2,
+       brm_col_variances, brm_r2d2_scale,
        multi_membership_intercept, multi_membership_correlated,
        _sb_mo, _sb_cat, _sb_ar1, _sb_s, _sb_t2, _sb_me,
        _sb_gp, _sb_gp_aniso, _sb_hsgp, _sb_hsgp_aniso,
