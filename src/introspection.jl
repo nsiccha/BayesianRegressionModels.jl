@@ -227,6 +227,10 @@ function effect_priors(brmi::BRMI)
         getf(lhs_e) === effect || continue
         address = getargs(lhs_e)
         !isempty(address) && first(address) in (:sd, :cor) && continue
+        # Whole-predictor `Colon` addresses belong to `r2d2_priors`, not here:
+        # they name every population coefficient of a predictor at once rather
+        # than one labelled column.
+        _EFFECT_COLON in address && continue
         length(address) in (1, 2) || error(
             "effect_priors: malformed effect address with $(length(address)) arguments")
         rhs_e = _as_expr_column(rhs)
@@ -282,6 +286,57 @@ function ranef_effect_priors(brmi::BRMI)
         coefficient = length(address) == 4 ? address[4] : nothing
         push!(out, (; class, id=address[2], predictor, coefficient,
                      family=getf(rhs_e), arguments=getargs(rhs_e),
+                     keywords=getkwargs(rhs_e), expression=rhs_e))
+    end
+    out
+end
+
+# ---- whole-predictor variance-decomposition statements ---------------------
+
+"""
+    r2d2_priors(brmi::BRMI) -> Vector{NamedTuple}
+
+Return the whole-predictor variance-decomposition statements captured by
+[`@brm`](@ref) — the `effect(:) ~ r2d2(...)` / `effect(lp, :) ~ r2d2(...)`
+family — in formula order. Each entry has
+
+```julia
+(; predictor, family, arguments, keywords, expression)
+```
+
+`predictor` is a `Symbol` for the explicit `effect(lp, :)` form and `nothing`
+for the bare `effect(:)` form, which the SBBRMI backend resolves only when the
+model has exactly one population predictor. `family` is the marker function
+([`r2d2`](@ref)); `keywords` carries the decomposition's `R2` / `tau_bsv` /
+`alpha` settings.
+
+These statements are deliberately separate from [`effect_priors`](@ref): a
+`Colon` address configures a joint prior over *every* population column of its
+predictor plus that predictor's random-effect margins, rather than overriding
+one labelled coefficient.
+"""
+function r2d2_priors(brmi::BRMI)
+    out = NamedTuple[]
+    for op_nc in values(brmi.operations)
+        op = _named_op(op_nc)
+        isnothing(op) && continue
+        getf(op) === (~) || continue
+        lhs, rhs = getargs(op, 2)
+        lhs_e = _as_expr_column(lhs)
+        isnothing(lhs_e) && continue
+        getf(lhs_e) === effect || continue
+        address = getargs(lhs_e)
+        _EFFECT_COLON in address || continue
+        last(address) === _EFFECT_COLON || error(
+            "r2d2_priors: `:` is only valid as the last effect address argument")
+        length(address) in (1, 2) || error(
+            "r2d2_priors: malformed whole-predictor address with " *
+            "$(length(address)) arguments")
+        rhs_e = _as_expr_column(rhs)
+        isnothing(rhs_e) && error(
+            "r2d2_priors: `effect(..., :)` RHS is not a distribution expression")
+        predictor = length(address) == 2 ? address[1] : nothing
+        push!(out, (; predictor, family=getf(rhs_e), arguments=getargs(rhs_e),
                      keywords=getkwargs(rhs_e), expression=rhs_e))
     end
     out

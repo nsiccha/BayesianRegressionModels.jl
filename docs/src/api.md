@@ -43,6 +43,7 @@ BayesianRegressionModels.getbroadcast
 ```@docs
 BayesianRegressionModels.assign
 BayesianRegressionModels.effect
+BayesianRegressionModels.r2d2
 BayesianRegressionModels.doublepipe
 BayesianRegressionModels.weighted
 BayesianRegressionModels.gr
@@ -133,6 +134,9 @@ BayesianRegressionModels.data_args
 BayesianRegressionModels.primary_lp
 BayesianRegressionModels.popcoefnames
 BayesianRegressionModels.effect_priors
+BayesianRegressionModels.ranef_effect_priors
+BayesianRegressionModels.r2d2_priors
+BayesianRegressionModels.ranefcoefnames
 ```
 
 ## Extension API
