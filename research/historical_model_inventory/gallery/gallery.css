@@ -18,16 +18,6 @@
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--paper); color: var(--ink); }
 .inventory-shell { width: min(1560px, 100%); margin: 0 auto; padding: 3rem clamp(1rem, 3vw, 3.5rem); }
-.htmxo-operation-load {
-  display: grid;
-  min-height: 12rem;
-  place-items: center;
-  color: var(--muted);
-  font-weight: 700;
-}
-.htmxo-operation-load::before {
-  content: "Loading 359 audited model cards…";
-}
 .inventory-shell > div > header { max-width: 76rem; margin-bottom: 2.5rem; }
 h1 { margin: .2rem 0 .75rem; font-family: Georgia, "Times New Roman", serif; font-size: clamp(2.2rem, 5vw, 5.4rem); font-weight: 500; line-height: .98; letter-spacing: -.04em; }
 h2 { font-family: Georgia, "Times New Roman", serif; font-weight: 500; }
