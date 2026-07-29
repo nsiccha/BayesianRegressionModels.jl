@@ -45,6 +45,13 @@ model; `interval_censored` may fail only when the density is evaluated. A
 legacy `TruncatedNormal` Bordet marker remains a separate censored-Normal
 compatibility surface.
 
+The backend compatibility floor for this surface is StanBlocks
+`0eaebfae904d3bffab150dfa2c59632ac783b992`, where the public distribution-HOF
+tokens became `truncated`, `censored`, and `interval_censored` with no aliases.
+BRM revisions containing this lowering must be co-pinned with that StanBlocks
+commit or later; the preceding StanBlocks `9b879d5e` expects the older internal
+token spellings and is intentionally incompatible.
+
 ## Concise categorical regression
 
 `CategoricalLogit` accepts an explicit nested `@brm(...)` predictor formula:
