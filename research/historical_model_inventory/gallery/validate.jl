@@ -162,7 +162,10 @@ using .HistoricalInventoryGallery
         fidelity = drive(
             "/surface/?source_fidelity=confirmed&family_provenance=all" *
             "&translation_route=all&validation_tier=all";
-            headers=vcat(browser_headers, ["HX-Request" => "true"]),
+            headers=vcat(browser_headers, [
+                "HX-Request" => "true",
+                "X-Forwarded-Prefix" => "/p/HistoricalBRM",
+            ]),
         )
         fidelity_body = String(fidelity.body)
         @test fidelity.status == 200
