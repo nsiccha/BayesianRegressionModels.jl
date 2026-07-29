@@ -522,35 +522,6 @@ StanBlocks.@deffun begin
     end
 end
 
-# Observation-varying categorical logits. Stan's scalar primitive consumes one
-# vector of class logits, while BRM owns an N x K matrix (one row per outcome),
-# so the triad loops explicitly and gives StanBlocks one coherent density / GQ
-# / pointwise family. `@lpxf` registers the public sampling base name
-# `brm_categorical_logit` used by the likelihood emitter below.
-StanBlocks.@deffun begin
-    @lpxf brm_categorical_logit_lpmf(y::int[n], logits::matrix[n, k])::real = begin
-        rv = 0.
-        for i in 1:n
-            rv += categorical_logit_lpmf(y[i], to_vector(logits[i, :]))::real
-        end
-        rv
-    end
-    brm_categorical_logit_lpmfs(y::int[n], logits::matrix[n, k])::vector[n] = begin
-        rv::vector[n]
-        for i in 1:n
-            rv[i] = categorical_logit_lpmf(y[i], to_vector(logits[i, :]))
-        end
-        rv
-    end
-    brm_categorical_logit_rng(int[n], logits::matrix[n, k])::int[n] = begin
-        rv::int[n]
-        for i in 1:n
-            rv[i] = categorical_logit_rng(to_vector(logits[i, :]))
-        end
-        rv
-    end
-end
-
 function addprop end
 
 StanBlocks.@deffun begin
@@ -3792,8 +3763,9 @@ _sb_lik_family!(stmts, target, ::Type{<:NegativeBinomial2},
 
 # Reference-class categorical regression. The user supplies one named scalar
 # LP per non-reference class; the fitted outcome level order determines which
-# class each argument owns. A leading all-zero column fixes class 1 as the
-# reference and makes the N x K logit matrix explicit in emitted SLIC.
+# class each argument owns. A leading all-zero row fixes class 1 as the
+# reference. StanBlocks' categorical-logit contract is matrix[K, N], one
+# observation's K logits per column, so transpose the row-wise hcat carrier.
 function _sb_lik_family!(stmts, target, ::Type{<:CategoricalLogit},
                          args::Tuple, data)
     isempty(args) && error(
@@ -3825,8 +3797,9 @@ function _sb_lik_family!(stmts, target, ::Type{<:CategoricalLogit},
     logits_name = Symbol(target, :_categorical_logits)
     zero_reference = :(rep_vector(0., num_elements($target)))
     eta_exprs = map(a -> _sb_scalar_expr(a, data), args)
-    push!(stmts, :($logits_name = $(Expr(:call, :hcat, zero_reference, eta_exprs...))))
-    push!(stmts, :($target ~ brm_categorical_logit($logits_name)))
+    row_logits = Expr(:call, :hcat, zero_reference, eta_exprs...)
+    push!(stmts, Expr(:(=), logits_name, Expr(:call, :adjoint, row_logits)))
+    push!(stmts, :($target ~ categorical_logit($logits_name)))
 end
 
 # Mean/precision Beta-binomial convenience surface. Shape lowering stays in

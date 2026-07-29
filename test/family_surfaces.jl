@@ -58,9 +58,11 @@ end
     @test occursin("beta_binomial(", code)
     @test occursin("bb_mean .* bb_precision", code)
     @test occursin("(1 - bb_mean) .* bb_precision", code)
-    @test occursin("brm_categorical_logit(", code)
+    @test occursin("y_cat ~ categorical_logit(y_cat_categorical_logits);", code)
     @test occursin("categorical_logit_lpmf(", code)
     @test occursin("y_cat_categorical_logits", code)
+    @test occursin(r"matrix\[\(2 \+ 1\), [^]]+\] y_cat_categorical_logits", code)
+    @test !occursin("brm_categorical_logit", code)
     @test occursin("int_prog_x_zscale_math", code)
 
     sb = SBBRMI(family_builder(df); mod=@__MODULE__)
@@ -98,5 +100,5 @@ end
     @test families[:y_t] === :student_t
     @test families[:y_bb_shapes] === :beta_binomial
     @test families[:y_bb_mean_precision] === :beta_binomial
-    @test families[:y_cat] === :brm_categorical_logit
+    @test families[:y_cat] === :categorical_logit
 end
