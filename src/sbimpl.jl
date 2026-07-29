@@ -989,12 +989,15 @@ _sb_mi_normal = StanBlocks.@slic begin
                     num_elements(Jobs) + n_mis)
 end
 
-# Squared-exponential GP helpers. The loops live in Stan functions because
-# top-level @slic bodies are deliberately control-flow free.
+# Squared-exponential GP helpers. The remaining axis loops live in Stan
+# functions because top-level @slic bodies are deliberately control-flow free.
 #
-# `brm_exp_quad_cov` builds the full covariance used by the exact `gp(...)`
-# term. `rho` is always a vector: isotropic calls repeat their one length scale,
-# while anisotropic calls sample one value per predictor axis.
+# `brm_exp_quad_cov` builds the full covariance used by exact `gp(...)` as the
+# product of Stan's one-dimensional `gp_exp_quad_cov` factors. This is exactly
+# the separable multidimensional exponentiated-quadratic kernel, and delegates
+# the O(n^2) covariance work plus diagonal jitter to Stan's built-ins. `rho` is
+# always a vector: isotropic calls repeat their one length scale, while
+# anisotropic calls sample one value per predictor axis.
 #
 # `brm_hsgp_sqrt_spd` evaluates the separable d-dimensional squared-exponential
 # spectral density at every tensor-product HSGP frequency. `omega2[b, j]` is
@@ -1002,21 +1005,17 @@ end
 StanBlocks.@deffun begin
     @stanonly brm_exp_quad_cov(X::matrix[n, d], sigma::real,
                                rho::vector[d], jitter::real)::matrix[n, n] = begin
-        K::matrix[n, n]
-        for i in 1:n
-            for j in 1:n
-                sqdist = 0.
-                for axis in 1:d
-                    delta = (X[i, axis] - X[j, axis]) / rho[axis]
-                    sqdist += delta * delta
+        K = rep_matrix(sigma * sigma, n, n)
+        for axis in 1:d
+            K_axis = gp_exp_quad_cov(
+                to_array_1d(X[:, axis]), 1., rho[axis])
+            for i in 1:n
+                for j in 1:n
+                    K[i, j] = K[i, j] * K_axis[i, j]
                 end
-                K[i, j] = sigma * sigma * exp(-0.5 * sqdist)
             end
         end
-        for i in 1:n
-            K[i, i] += jitter
-        end
-        return K
+        return add_diag(K, jitter)
     end
 
     @stanonly brm_hsgp_sqrt_spd(omega2::matrix[m, d], sigma::real,
