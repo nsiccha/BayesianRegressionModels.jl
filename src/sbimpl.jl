@@ -2512,6 +2512,15 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             "non-finite values")
         new_data[key] = collect(Float64, v)
         new_preproc[key] = e
+    elseif e.kind === :observation_weight
+        raw = _sb_df_column(df, e.raw_ref)
+        response = _sb_df_column(df, e.const_.response)
+        response isa AbstractVector || error(
+            "sbimpl: reprocess: weighted response `$(e.const_.response)` must " *
+            "be a vector, got $(typeof(response))")
+        new_data[key] = _sb_prepare_weight_values(
+            e.const_.kind, raw, length(response), e.const_.response, e.raw_ref)
+        new_preproc[key] = e
     elseif e.kind === :factor || e.kind === :mo
         v = _sb_df_column(df, e.raw_ref)
         levels = freeze ? e.const_ : _sb_fit_levels(v)
@@ -2549,8 +2558,9 @@ of a naive per-column `sb.model(; col=…)` rebind is avoided. Returns a NEW
 
 Covered: the Julia-side transforms (`zscale`/`standardize`/`center`/`factor`/
 `mo`/`s`/`t2`/`gp`/`hsgp`), `protect`/implicit-fn columns (re-materialised on
-`new_df`), continuous × continuous interaction columns, categorical outcomes,
-and pass-through raw columns (plain data, `me` obs values, `ar` time). Errors loudly
+`new_df`), continuous × continuous interaction columns, typed observation
+weights, categorical outcomes, and pass-through raw columns (plain data, `me`
+obs values, `ar` time). Errors loudly
 on a `factor`/`mo` **unseen level** and on any derived data key it cannot account
 for (e.g. random-effects group indices from `(1|g)`) rather than silently
 copying a stale vector — rebuild from `new_df` for those models.
@@ -3344,7 +3354,7 @@ _sb_real_vec(label::Symbol, n::Symbol, v) =
 _sb_classify_term!(t::ExprColumn, pop_terms, ran_terms, direct_terms) = begin
     f = getf(t)
     f === (|) && (push!(ran_terms, t); return)
-    (f === mo1 || f === s || f === t2 || f === gp || f === hsgp) &&
+    (f === offset || f === mo1 || f === s || f === t2 || f === gp || f === hsgp) &&
         (push!(direct_terms, t); return)
     push!(pop_terms, t)
 end
@@ -3369,7 +3379,10 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     isempty(pop_terms) && isempty(ran_terms) && isempty(direct_terms) &&
         error("sbimpl: empty RHS for `$target` — no predictor terms")
 
-    summands = Symbol[]
+    # Direct fixed-slope terms such as `offset(log(exposure))` may contribute
+    # an expression rather than a named emitted column. Keep the summand
+    # carrier expression-capable; sampled/direct submodels still push Symbols.
+    summands = Any[]
 
     if !isempty(pop_terms)
         col_exprs = Any[]
@@ -3453,6 +3466,7 @@ appear in `pop_<lhs>_beta_pop`:
 
 - integer- or `CategoricalVector`-typed bare predictors → `cat_<name>`
   (K−1 treatment contrasts);
+- `offset(x)` → `x` itself, with fixed coefficient one;
 - `mo1(c)` → `mo1_<c>`; `s(x)` and `t2(x,z)` → their own fixed/range
   coefficients and smoothing scales;
 - explicit-coefficient `coef * a` (own scalar);
@@ -3537,6 +3551,18 @@ function _sb_emit_direct!(stmts, data, target::Symbol, t::ExprColumn, summands;
     end
     _sb_emit_direct_expr!(stmts, data, target, getf(t), t, summands)
 end
+function _sb_emit_direct_expr!(_stmts, data, _target::Symbol,
+                               ::typeof(offset), t, summands)
+    args = getargs(t)
+    length(args) == 1 || error(
+        "sbimpl: `offset(x)` expects exactly one positional argument, got $(length(args))")
+    isempty(getkwargs(t)) || error("sbimpl: `offset(x)` does not accept keyword arguments")
+    # Unlike `protect`, offset is a direct model expression: it may reference
+    # raw data, an already-declared sampled scalar, or a composition of either.
+    # `_sb_scalar_expr` preserves that provenance in the emitted Stan expression
+    # and, critically, introduces no `popefs` coefficient.
+    push!(summands, _sb_scalar_expr(only(args), data))
+end
 function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(mo1), t, summands)
     inner_name, raw = _sb_inner_data(:mo1, only(getargs(t)))
     n_levels, idx = _sb_level_index(raw)
@@ -3600,6 +3626,8 @@ end
 function _sb_ranef_cols!(cols, data, stmts, t, gterms=())
     _sb_ranef_cols_dispatch!(cols, data, stmts, t, _sb_cat_levels(t), gterms)
 end
+_sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(offset)}, gterms=()) =
+    error("sbimpl: `offset(...)` is a population-level fixed contribution and cannot appear inside a random-effects term")
 _sb_ranef_cols_dispatch!(cols, data, stmts, t, ::Nothing, gterms=()) =
     push!(cols, _sb_predictor_col(t, data, stmts, gterms))
 function _sb_ranef_cols_dispatch!(cols, data, _stmts, t, levels, _gterms=())
@@ -4791,6 +4819,151 @@ function _sb_likelihood!(stmts, target::Symbol, rhs::ExprColumn, data)
         _sb_lik_family!(stmts, target, f, getargs(rhs), getkwargs(rhs), data)
     else
         _sb_lik_family!(stmts, target, f, getargs(rhs), data)
+    end
+end
+
+_sb_weight_kind(f) =
+    f === aweights || f === AnalyticWeights ? :analytic :
+    f === fweights || f === FrequencyWeights ? :frequency :
+    f === weights || f === Weights ? :power :
+    f === pweights || f === ProbabilityWeights ? :probability :
+    f === uweights || f === UnitWeights ? :unit : nothing
+
+function _sb_weight_source(target::Symbol, weight::ExprColumn)
+    isempty(getkwargs(weight)) || error(
+        "sbimpl: `weighted(..., $(getf(weight))(...))` does not accept weight " *
+        "constructor keywords")
+    args = getargs(weight)
+    length(args) == 1 || error(
+        "sbimpl: `weighted` expects a one-column StatsBase weight constructor " *
+        "such as `aweights(k)`, `fweights(n)`, or `weights(w)`; got " *
+        "$(length(args)) arguments for response `$target`")
+    source = only(args)
+    source isa NamedColumn && parent(source) isa DataColumn || error(
+        "sbimpl: weights for response `$target` must be built from one raw " *
+        "dataframe column, got $(typeof(source))")
+    name(source), parent(parent(source))
+end
+
+function _sb_prepare_weight_values(kind::Symbol, raw, nobs::Int, target::Symbol,
+                                   source::Symbol)
+    raw isa AbstractVector{<:Real} || error(
+        "sbimpl: weight column `$source` for response `$target` must be a real " *
+        "vector, got $(typeof(raw))")
+    length(raw) == nobs || error(
+        "sbimpl: weight column `$source` has length $(length(raw)) but response " *
+        "`$target` has length $nobs")
+    values = collect(Float64, raw)
+    all(isfinite, values) || error(
+        "sbimpl: weight column `$source` for response `$target` contains " *
+        "non-finite values")
+    if kind === :analytic
+        all(>(0), values) || error(
+            "sbimpl: analytic/precision weights for response `$target` must be " *
+            "strictly positive")
+    elseif kind === :frequency
+        all(x -> x >= 0 && isinteger(x), values) || error(
+            "sbimpl: frequency weights for response `$target` must be " *
+            "nonnegative integer-valued counts")
+    elseif kind === :power
+        all(>=(0), values) || error(
+            "sbimpl: power-likelihood weights for response `$target` must be " *
+            "nonnegative")
+    else
+        error("sbimpl: internal unsupported observation-weight kind `$kind`")
+    end
+    values
+end
+
+_sb_weight_data_key(target::Symbol) = Symbol(:brm_weight_, target)
+
+function _sb_weight_data!(data, target::Symbol, kind::Symbol,
+                          weight::ExprColumn)
+    source, raw = _sb_weight_source(target, weight)
+    response = get(data, target, nothing)
+    response isa AbstractVector || error(
+        "sbimpl: weighted response `$target` must be an observed vector, got " *
+        "$(typeof(response))")
+    key = _sb_weight_data_key(target)
+    haskey(data, key) && error(
+        "sbimpl: reserved derived weight key `$key` collides with a model/data " *
+        "column; rename that column")
+    data[key] = _sb_prepare_weight_values(kind, raw, length(response), target, source)
+    _sb_record_preproc!(data, key, PreprocEntry(
+        :observation_weight, (; kind, response=target), source, false))
+    key
+end
+
+function _sb_weighted_distribution(rhs, target::Symbol)
+    rhs isa ExprColumn || error(
+        "sbimpl: first argument of `weighted` for response `$target` must be a " *
+        "distribution call, got $(typeof(rhs))")
+    isempty(getkwargs(rhs)) || error(
+        "sbimpl: weighted distribution `$target` does not currently support " *
+        "distribution constructor keywords")
+    rhs
+end
+
+function _sb_analytic_weighted_likelihood!(stmts, target::Symbol,
+                                           distribution::ExprColumn,
+                                           weight_key::Symbol, data)
+    family = getf(distribution)
+    family isa Type && family <: Normal || error(
+        "sbimpl: `AnalyticWeights` currently support only `Normal` observations; " *
+        "response `$target` uses `$family`")
+    args = map(a -> _sb_scalar_expr(a, data), getargs(distribution))
+    normal_args = _sb_stan_dist_args(family, args)
+    length(normal_args) == 2 || error(
+        "sbimpl: internal Normal lowering for analytic weights expected two " *
+        "arguments, got $(length(normal_args))")
+    location, scale = normal_args
+    weighted_scale = Expr(:call, Symbol("./"), scale,
+                          Expr(:call, :sqrt, weight_key))
+    _sb_lik_stan_exprs!(stmts, target, :normal, (location, weighted_scale))
+end
+
+function _sb_objective_weighted_likelihood!(stmts, target::Symbol,
+                                            distribution::ExprColumn,
+                                            weight_key::Symbol, data)
+    family = getf(distribution)
+    family isa Type && family <: Distribution || error(
+        "sbimpl: frequency/power weights currently require a Distributions.jl " *
+        "family call for response `$target`, got `$family`")
+    stan_name = _sb_stan_dist_name(family)
+    isnothing(stan_name) && error(
+        "sbimpl: weighted likelihood family `$family` is not supported yet")
+    args = map(a -> _sb_scalar_expr(a, data), getargs(distribution))
+    stan_args = _sb_stan_dist_args(family, args)
+    weighted_rhs = Expr(:call, :weighted, stan_name, weight_key, stan_args...)
+    push!(stmts, Expr(:call, :~, target, weighted_rhs))
+end
+
+function _sb_likelihood!(stmts, target::Symbol,
+                         rhs::ExprColumn{typeof(weighted)}, data)
+    isempty(getkwargs(rhs)) || error(
+        "sbimpl: `weighted(distribution, weights)` accepts no keywords")
+    distribution_raw, weight_raw = getargs(rhs, 2)
+    distribution = _sb_weighted_distribution(distribution_raw, target)
+    weight_raw isa ExprColumn || error(
+        "sbimpl: second argument of `weighted` must be a StatsBase weight " *
+        "constructor, got $(typeof(weight_raw))")
+    kind = _sb_weight_kind(getf(weight_raw))
+    isnothing(kind) && error(
+        "sbimpl: unsupported weight constructor `$(getf(weight_raw))`; use " *
+        "`aweights`, `fweights`, or `weights`")
+    kind === :probability && error(
+        "sbimpl: `ProbabilityWeights` sampling-weight semantics are not " *
+        "implemented; they are not interchangeable with likelihood weights")
+    kind === :unit && error(
+        "sbimpl: omit `weighted(...)` for unit weights; write the base " *
+        "distribution directly")
+    weight_key = _sb_weight_data!(data, target, kind, weight_raw)
+    if kind === :analytic
+        _sb_analytic_weighted_likelihood!(
+            stmts, target, distribution, weight_key, data)
+    else
+        _sb_objective_weighted_likelihood!(
+            stmts, target, distribution, weight_key, data)
     end
 end
 _sb_likelihood!(stmts, target, rhs, _) =

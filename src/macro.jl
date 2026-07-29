@@ -126,6 +126,21 @@ function effect end
 function doublepipe end
 
 """
+    weighted(distribution, weights)
+
+Formula marker for a typed observation weight. The second argument is a
+StatsBase weight constructor over a dataframe column, for example
+`aweights(replicate_k)`, `fweights(repeats)`, or `weights(power)`.
+
+The weight type is semantic. Analytic weights modify a supported observation
+distribution's precision (currently `Normal`); frequency and generic weights
+scale model and pointwise log-likelihood contributions while preserving the
+base distribution's predictive RNG. Lowering is implemented by the StanBlocks
+backend; this marker is never called directly.
+"""
+function weighted end
+
+"""
     gr(group; by=strata)
 
 brms-style stratified grouping marker. `(1 | gr(subj, by=diagnosis))`
