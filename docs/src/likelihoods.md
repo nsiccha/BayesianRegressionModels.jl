@@ -60,6 +60,98 @@ formula in brms (`y ~ 1 + x`, `family = categorical(link = "logit")`) or Bambi
 reference-level selection are package-specific; BRM does not import those
 defaults implicitly.
 
+## Ordinal structure and link composition
+
+BRM treats the ordinal probability construction and inverse link as separate
+typed choices. A cumulative probit model is:
+
+```julia
+ordinal_model = @brm data begin
+    eta ~ 0 + x
+    y ~ Ordinal(Cumulative(), ProbitLink(), eta)
+end
+```
+
+The accepted structures are `Cumulative()` and `StoppingRatio()`. Each composes
+with `LogitLink()`, `ProbitLink()`, or `CloglogLink()`. This is intentionally a
+Julia-native typed surface: BRM does not copy R formula helper names or encode
+every structure/link pair in a new family type.
+
+For `Cumulative()`, BRM estimates strictly ordered thresholds ``c_1 < \cdots <
+c_{K-1}`` and uses
+
+```math
+P(Y \le k) = F\!\left(d(c_k - \eta)\right).
+```
+
+For `StoppingRatio()`, the estimated stage intercepts need not be ordered and
+
+```math
+q_k = P(Y=k \mid Y\ge k)
+    = F\!\left(d(c_k - \eta_k)\right),\qquad
+P(Y=k)=q_k\prod_{j<k}(1-q_j),
+```
+
+with the final category equal to the probability of continuing through every
+stage. `F` is logistic, standard normal, or complementary-log-log according to
+the link tag. Both threshold vectors currently receive element-wise standard
+normal priors.
+
+The thresholds already supply the model location, so the composed surface
+requires an intercept-free common predictor (`eta ~ 0 + ...`). A positive
+discrimination parameter is explicit:
+
+```julia
+ordinal_disc = @brm data begin
+    eta ~ 0 + x
+    log(disc) ~ 0 + group
+    y ~ Ordinal(Cumulative(), ProbitLink(), eta;
+                discrimination=disc)
+end
+```
+
+`discrimination` defaults to one. Literal or data-supplied values are checked
+for finiteness and strict positivity; a modeled value should use a
+positive-support prior or a link such as `log(disc) ~ ...`.
+
+Stopping-ratio models may add non-proportional effects with a tuple of raw
+numeric predictors:
+
+```julia
+sequential = @brm data begin
+    eta ~ 0 + period + carry
+    y ~ Ordinal(StoppingRatio(), CloglogLink(), eta;
+                per_threshold=(treat,))
+end
+```
+
+BRM estimates one coefficient per predictor and non-terminal stage, so here
+``\eta_k = \eta + \mathtt{treat}\,\beta_k``. `per_threshold` is deliberately
+restricted to stopping-ratio models for now: unrestricted cumulative
+category-specific effects can make cumulative probabilities non-monotone.
+The predictors must currently be raw numeric data columns.
+
+Outcome categories follow the declared order of a `CategoricalVector`; plain
+vectors use sorted unique values. That fitted order is frozen for replay and
+prediction. The legacy `OrderedLogistic(eta)` spelling remains supported and
+continues to lower directly to Stan's native ordered-logistic distribution.
+The composed cumulative-logit kernel also delegates its scalar density to that
+native primitive; the other links use Stan's native stable CDF/log-CDF
+functions. Stopping ratio has no native Stan distribution, so BRM supplies the
+matching stable lpmf, pointwise log-likelihood, and RNG.
+
+Outside `@brm`, `Ordinal(structure, link, eta, thresholds;
+discrimination=1)` is an executable `DiscreteUnivariateDistribution` with
+`params`, `probs`, `logpdf`, and `rand`. A stopping-ratio `eta` may be scalar or
+a vector with one stage-specific value per threshold.
+
+For neutral comparison, brms exposes the same statistical axes through
+families such as cumulative-probit and stopping-ratio complementary-log-log,
+and calls threshold-varying terms category-specific effects. BRM preserves
+that statistical contract while using the typed composition and
+`per_threshold=(...)` tuple above rather than importing brms's R formula
+helpers.
+
 ## Median regression with `Laplace`
 
 The StanBlocks backend accepts `Distributions.Laplace` as an ordinary

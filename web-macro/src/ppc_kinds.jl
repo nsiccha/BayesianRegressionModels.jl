@@ -93,7 +93,7 @@ function _ppc_kinds(brmi::BRMI)
     out = PPCKind[]
     for o in outcomes(brmi)
         o.family in (Normal, Poisson, Bernoulli, BernoulliLogit,
-                     Binomial, BinomialLogit, OrderedLogistic,
+                     Binomial, BinomialLogit, OrderedLogistic, Ordinal,
                      ZeroInflatedPoisson, NegativeBinomial2) || continue
         # Trials column ONLY for Binomial / BinomialLogit -- other
         # families that happen to take a data-arg (none today, but e.g.
