@@ -35,8 +35,16 @@ end
         function_annotation=Enzyme.Const,
     )
     reparametrized = WarmupHMC.ReparametrizedProblem(ir, problem, backend)
+    materialized_ir = materialized_reparametrizer(state, ir)
+    materialized = WarmupHMC.ReparametrizedProblem(
+        materialized_ir, problem, backend,
+    )
 
     lp, gradient = LogDensityProblems.logdensity_and_gradient(reparametrized, x)
+    materialized_lp, materialized_gradient =
+        LogDensityProblems.logdensity_and_gradient(materialized, x)
+    @test isequal(lp, materialized_lp)
+    @test isequal(gradient, materialized_gradient)
     ljac, model_position = ir(x)
     inner_lp, _ = LogDensityProblems.logdensity_and_gradient(problem, model_position)
     @test lp ≈ ljac + inner_lp atol=2e-12
