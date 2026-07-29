@@ -5418,13 +5418,13 @@ function _sb_lik_family!(stmts, target, ::typeof(interval_censored),
     upper = kwargs.upper
     _sb_validate_bounds(:interval_censored, target, data[target], upper, data;
                         check_order=false)
-    _sb_validate_composed_support(:interval_censored, target, data[target],
-                                  upper, base.kind, data)
     lo, hi = data[target], _sb_bound_data(upper)
     all(eachindex(lo)) do i
         lo[i] < (hi isa AbstractVector ? hi[i] : hi)
     end || error(
         "sbimpl: `interval_censored` lower endpoints must be strictly below upper endpoints")
+    _sb_validate_composed_support(:interval_censored, target, data[target],
+                                  upper, base.kind, data)
     family_args = _sb_composed_stan_args(base, data)
     upper_expr = _sb_scalar_expr(upper, data)
     _sb_lik_stan_exprs!(stmts, target, :interval_evidence,
