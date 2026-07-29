@@ -96,8 +96,10 @@ end
     plan = generative_plan(kernel_builder, kernel_schedule(2); mod=@__MODULE__)
     decl(t) = only(filter(d -> d.target === t, plan.declarations))
 
-    # positional distribution arguments, no AST parsing required
-    @test decl(:sigma).arguments == (1,)
+    # Positional arguments describe the backend expression BRM actually emits.
+    # Julia `Exponential(theta)` uses scale while Stan `exponential(beta)` uses
+    # rate, so the declaration exposes the exact translated expression.
+    @test decl(:sigma).arguments == (:(1.0 ./ 1),)
     @test decl(:sigma).keywords == NamedTuple()
 
     # declarations that spell no size of their own report `()` rather than

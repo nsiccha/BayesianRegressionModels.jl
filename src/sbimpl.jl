@@ -2027,7 +2027,11 @@ end
 function _sb_emit_prior!(stmts, target, ::Type{D}, op) where {D <: Distribution}
     stan_name = _sb_stan_dist_name(D)
     isnothing(stan_name) && return false
-    arg_exprs = map(_sb_prior_arg, _sb_stan_dist_args(D, getargs(op)))
+    # Lower Julia-side formula nodes first, then normalize constructor defaults
+    # and parameterizations.  Some translations (scale -> inverse scale,
+    # probability -> odds) create Stan expressions, so applying `_sb_prior_arg`
+    # afterwards would mistake those already-lowered Exprs for formula nodes.
+    arg_exprs = _sb_stan_dist_args(D, map(_sb_prior_arg, getargs(op)))
     push!(stmts, Expr(:call, :~, target, Expr(:call, stan_name, arg_exprs...)))
     true
 end
@@ -2054,7 +2058,7 @@ function _sb_emit_prior!(stmts, target, ::Type{<:LocationScale}, op)
     isnothing(stan_name) && error(
         "sbimpl: `LocationScale` over `$(base_fam)` -- no Stan-name mapping ",
         "for the base. Add a `_sb_stan_dist_name(::Type{<:$(base_fam)})` entry.")
-    base_args = _sb_stan_dist_args(base_fam, getargs(base))
+    base_args = _sb_stan_dist_args(base_fam, map(_sb_prior_arg, getargs(base)))
     # Stan's standard univariate dists put (location, scale) at
     # positions 2-3 (e.g. `student_t(nu, mu, sigma)`). The arg-shape
     # transform on the base already pads to that layout (TDist(nu) ->
@@ -2065,8 +2069,9 @@ function _sb_emit_prior!(stmts, target, ::Type{<:LocationScale}, op)
     length(base_args) >= 3 || error(
         "sbimpl: `LocationScale` over `$(base_fam)`: base lowers to ",
         "$(length(base_args)) Stan args, need >= 3 for location/scale slots.")
-    composed = (base_args[1], mu, sigma, base_args[4:end]...)
-    arg_exprs = map(_sb_prior_arg, composed)
+    composed = (base_args[1], _sb_prior_arg(mu), _sb_prior_arg(sigma),
+                base_args[4:end]...)
+    arg_exprs = composed
     push!(stmts, Expr(:call, :~, target, Expr(:call, stan_name, arg_exprs...)))
     true
 end
@@ -2880,7 +2885,8 @@ function _sb_emit_block_draw!(stmts, prior::NamedTuple, block_name, idx_name, n_
     stan_name = _sb_stan_dist_name(prior.dist)
     isnothing(stan_name) && error(
         "sbimpl: structured-latent prior dist `$(prior.dist)` has no `_sb_stan_dist_name` mapping")
-    pos_args = map(_sb_prior_arg, get(prior, :args, ()))
+    pos_args = _sb_stan_dist_args(
+        prior.dist, map(_sb_prior_arg, get(prior, :args, ())))
     flat_name = Symbol(:zflat_, suffix)
     kw = Any[Expr(:kw, :n, :($n_name * $n_terms_name))]
     haskey(prior, :lower) && push!(kw, Expr(:kw, :lower, prior.lower))
@@ -3644,13 +3650,16 @@ _sb_likelihood!(stmts, target, rhs, _) =
     error("sbimpl: likelihood RHS for `$target` must be an ExprColumn (got $(typeof(rhs)))")
 
 # One dispatch per likelihood family. Each method states the Stan name and
-# implicitly the arity (by destructuring `args`). Caveat on NegativeBinomial:
-# Distributions.jl parameterizes by (r, p); Stan's neg_binomial is (alpha, beta)
-# — the emitted model is NOT posterior-identical to the Julia side. Convert
-# upstream if that matters.
+# implicitly the arity (by destructuring `args`). Julia constructor arguments
+# are normalized centrally by `_sb_stan_dist_args` before they reach the Stan
+# call, so model density, predictive RNG and pointwise log-likelihood all see
+# the same exact parameterization.
+_sb_lik_stan_exprs!(stmts, target, name::Symbol, arg_exprs) =
+    push!(stmts, Expr(:call, :~, target, Expr(:call, name, arg_exprs...)))
+
 _sb_lik_stan!(stmts, target, name::Symbol, args, data) =
-    push!(stmts, Expr(:call, :~, target,
-        Expr(:call, name, (_sb_scalar_expr(a, data) for a in args)...)))
+    _sb_lik_stan_exprs!(
+        stmts, target, name, map(a -> _sb_scalar_expr(a, data), args))
 
 # `y ~ OrderedLogistic(eta)`: cumulative-link ordinal likelihood. Allocates
 # `ordered[K-1]` cutpoints (K = max(y)) with a std_normal prior via typed-LHS,
@@ -3695,12 +3704,14 @@ function _sb_lik_family!(stmts, target, ::Type{<:LocationScale},
     stan_name = _sb_stan_dist_name(base_fam)
     isnothing(stan_name) && error(
         "sbimpl: `LocationScale` over `$(base_fam)` -- no Stan-name mapping for the base.")
-    base_args = _sb_stan_dist_args(base_fam, getargs(base_e))
+    base_args = _sb_stan_dist_args(
+        base_fam, map(a -> _sb_scalar_expr(a, data), getargs(base_e)))
     length(base_args) >= 3 || error(
         "sbimpl: `LocationScale` over `$(base_fam)`: base lowers to ",
         "$(length(base_args)) Stan args, need >= 3 for location/scale slots.")
-    composed = (base_args[1], loc, scale, base_args[4:end]...)
-    _sb_lik_stan!(stmts, target, stan_name, composed, data)
+    composed = (base_args[1], _sb_scalar_expr(loc, data),
+                _sb_scalar_expr(scale, data), base_args[4:end]...)
+    _sb_lik_stan_exprs!(stmts, target, stan_name, composed)
 end
 # Single source of truth: Julia Distribution type -> Stan distribution
 # function name. Both the likelihood path (`_sb_lik_family!` below) and
@@ -3728,12 +3739,58 @@ _sb_stan_dist_name(::Type{<:Poisson})             = :poisson
 _sb_stan_dist_name(::Type{<:NegativeBinomial})    = :neg_binomial
 _sb_stan_dist_name(::Type) = nothing
 
-# Per-family arg shape adjustment between Julia call args and Stan call
-# args. Default: pass through unchanged. Override when Julia's
-# constructor signature differs from Stan's distribution signature.
+# Per-family argument normalization between Julia constructors and native Stan
+# distributions.  Inputs here are already-lowered Stan expressions.  Besides
+# parameterization changes, preserve Distributions.jl's shorter constructor
+# forms rather than emitting an invalid native-Stan arity.
 _sb_stan_dist_args(::Type, args) = args
-# `TDist(nu)` -> Stan `student_t(nu, 0, 1)`. Pads location/scale defaults.
+
+_sb_stan_reciprocal(x) = Expr(:call, Symbol("./"), 1.0, x)
+_sb_stan_success_odds(p) =
+    Expr(:call, Symbol("./"), p, Expr(:call, :-, 1.0, p))
+
+_sb_stan_dist_args(::Type{<:Normal}, ::Tuple{}) = (0.0, 1.0)
+_sb_stan_dist_args(::Type{<:Normal}, args::Tuple{Any}) = (args[1], 1.0)
+_sb_stan_dist_args(::Type{<:Cauchy}, ::Tuple{}) = (0.0, 1.0)
+_sb_stan_dist_args(::Type{<:Cauchy}, args::Tuple{Any}) = (args[1], 1.0)
+
+# `TDist(nu)` is standard Student-t; Stan requires explicit location/scale.
 _sb_stan_dist_args(::Type{<:TDist}, args::Tuple{Any}) = (args[1], 0, 1)
+
+# Distributions.jl uses scale `theta`; Stan uses inverse scale (rate) `beta`.
+_sb_stan_dist_args(::Type{<:Exponential}, ::Tuple{}) = (1.0,)
+_sb_stan_dist_args(::Type{<:Exponential}, args::Tuple{Any}) =
+    (_sb_stan_reciprocal(args[1]),)
+_sb_stan_dist_args(::Type{<:Gamma}, ::Tuple{}) = (1.0, 1.0)
+_sb_stan_dist_args(::Type{<:Gamma}, args::Tuple{Any}) = (args[1], 1.0)
+_sb_stan_dist_args(::Type{<:Gamma}, args::Tuple{Any,Any}) =
+    (args[1], _sb_stan_reciprocal(args[2]))
+
+_sb_stan_dist_args(::Type{<:Beta}, ::Tuple{}) = (1.0, 1.0)
+_sb_stan_dist_args(::Type{<:Beta}, args::Tuple{Any}) = (args[1], args[1])
+_sb_stan_dist_args(::Type{<:Uniform}, ::Tuple{}) = (0.0, 1.0)
+_sb_stan_dist_args(::Type{<:LogNormal}, ::Tuple{}) = (0.0, 1.0)
+_sb_stan_dist_args(::Type{<:LogNormal}, args::Tuple{Any}) = (args[1], 1.0)
+_sb_stan_dist_args(::Type{<:Laplace}, ::Tuple{}) = (0.0, 1.0)
+_sb_stan_dist_args(::Type{<:Laplace}, args::Tuple{Any}) = (args[1], 1.0)
+_sb_stan_dist_args(::Type{<:Weibull}, ::Tuple{}) = (1.0, 1.0)
+_sb_stan_dist_args(::Type{<:Weibull}, args::Tuple{Any}) = (args[1], 1.0)
+_sb_stan_dist_args(::Type{<:InverseGamma}, ::Tuple{}) = (1.0, 1.0)
+_sb_stan_dist_args(::Type{<:InverseGamma}, args::Tuple{Any}) = (args[1], 1.0)
+_sb_stan_dist_args(::Type{<:Bernoulli}, ::Tuple{}) = (0.5,)
+_sb_stan_dist_args(::Type{<:BernoulliLogit}, ::Tuple{}) = (0.0,)
+_sb_stan_dist_args(::Type{<:Binomial}, ::Tuple{}) = (1, 0.5)
+_sb_stan_dist_args(::Type{<:Binomial}, args::Tuple{Any}) = (args[1], 0.5)
+_sb_stan_dist_args(::Type{<:Poisson}, ::Tuple{}) = (1.0,)
+
+# Distributions.jl `NegativeBinomial(r, p)` counts failures before `r`
+# successes.  Native Stan `neg_binomial(alpha, beta)` uses shape and inverse
+# scale, with the exact translation alpha=r, beta=p/(1-p).
+_sb_stan_dist_args(::Type{<:NegativeBinomial}, ::Tuple{}) = (1.0, 1.0)
+_sb_stan_dist_args(::Type{<:NegativeBinomial}, args::Tuple{Any}) =
+    (args[1], 1.0)
+_sb_stan_dist_args(::Type{<:NegativeBinomial}, args::Tuple{Any,Any}) =
+    (args[1], _sb_stan_success_odds(args[2]))
 
 # Default: look up the Stan name from the table and emit
 # `target ~ <stan-name>(<lowered-args>...)` via `_sb_lik_stan!`. Families
@@ -3746,7 +3803,9 @@ _sb_lik_family!(stmts, target, ::Type{D}, args, data) where {D <: Distribution} 
             "sbimpl: likelihood family `$(D)` not supported yet -- ",
             "no `_sb_stan_dist_name` entry. Add one (and a `_sb_stan_dist_args` ",
             "override if its args don't lower verbatim).")
-        _sb_lik_stan!(stmts, target, stan_name, _sb_stan_dist_args(D, args), data)
+        arg_exprs = map(a -> _sb_scalar_expr(a, data), args)
+        _sb_lik_stan_exprs!(
+            stmts, target, stan_name, _sb_stan_dist_args(D, arg_exprs))
     end
 
 _sb_lik_family!(stmts, target, fam, args, _) =

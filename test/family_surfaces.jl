@@ -5,17 +5,23 @@
 
 using Test
 using BayesianRegressionModels
-using Distributions: LocationScale, TDist
+using Distributions
+using LogDensityProblems
+using Statistics
 using StanBlocks
 
 df = (;
     x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
     y_zip=[0, 1, 0, 2, 3, 0],
     y_nb=[0, 1, 2, 4, 3, 6],
+    y_ord=[1, 2, 3, 1, 2, 3],
     y_t=[-0.8, -0.2, 0.1, 0.7, 1.0, 1.4],
 )
 
 family_builder = @brm begin
+    exp_prior ~ Exponential(2.5)
+    gamma_prior ~ Gamma(3.0, 2.5)
+
     log(lambda) ~ 1 + x
     y_zip ~ ZeroInflatedPoisson(lambda, 0.25)
 
@@ -23,9 +29,287 @@ family_builder = @brm begin
     log(phi) ~ 1
     y_nb ~ NegativeBinomial2(mu, phi)
 
+    eta_ord ~ 1 + x
+    y_ord ~ OrderedLogistic(eta_ord)
+
     loc ~ 1 + x
     log(scale) ~ 1
     y_t ~ LocationScale(loc, scale, TDist(4.0))
+end
+
+const BRM = BayesianRegressionModels
+
+@testset "Distributions.jl constructor semantics map to native Stan" begin
+    expected_names = (
+        Normal=:normal,
+        Cauchy=:cauchy,
+        TDist=:student_t,
+        Exponential=:exponential,
+        Gamma=:gamma,
+        Beta=:beta,
+        Uniform=:uniform,
+        LogNormal=:lognormal,
+        Laplace=:double_exponential,
+        Weibull=:weibull,
+        InverseGamma=:inv_gamma,
+        Bernoulli=:bernoulli,
+        BernoulliLogit=:bernoulli_logit,
+        Binomial=:binomial,
+        BinomialLogit=:binomial_logit,
+        Poisson=:poisson,
+        NegativeBinomial=:neg_binomial,
+    )
+    for (julia_name, stan_name) in pairs(expected_names)
+        @test BRM._sb_stan_dist_name(getfield(@__MODULE__, julia_name)) === stan_name
+    end
+
+    # Full-arity constructors: only the three scale/probability mismatches and
+    # standard T need argument translation.  Everything else reaches the
+    # faithful native Stan analogue unchanged.
+    @test BRM._sb_stan_dist_args(Normal, (:mu, :sigma)) == (:mu, :sigma)
+    @test BRM._sb_stan_dist_args(Cauchy, (:mu, :sigma)) == (:mu, :sigma)
+    @test BRM._sb_stan_dist_args(TDist, (:nu,)) == (:nu, 0, 1)
+    @test BRM._sb_stan_dist_args(Exponential, (:theta,)) == (:(1.0 ./ theta),)
+    @test BRM._sb_stan_dist_args(Gamma, (:alpha, :theta)) ==
+          (:alpha, :(1.0 ./ theta))
+    @test BRM._sb_stan_dist_args(Beta, (:alpha, :beta)) == (:alpha, :beta)
+    @test BRM._sb_stan_dist_args(Uniform, (:a, :b)) == (:a, :b)
+    @test BRM._sb_stan_dist_args(LogNormal, (:mu, :sigma)) == (:mu, :sigma)
+    @test BRM._sb_stan_dist_args(Laplace, (:mu, :theta)) == (:mu, :theta)
+    @test BRM._sb_stan_dist_args(Weibull, (:alpha, :theta)) == (:alpha, :theta)
+    @test BRM._sb_stan_dist_args(InverseGamma, (:alpha, :theta)) == (:alpha, :theta)
+    @test BRM._sb_stan_dist_args(Bernoulli, (:p,)) == (:p,)
+    @test BRM._sb_stan_dist_args(BernoulliLogit, (:logitp,)) == (:logitp,)
+    @test BRM._sb_stan_dist_args(Binomial, (:n, :p)) == (:n, :p)
+    @test BRM._sb_stan_dist_args(BinomialLogit, (:n, :logitp)) == (:n, :logitp)
+    @test BRM._sb_stan_dist_args(Poisson, (:lambda,)) == (:lambda,)
+    @test BRM._sb_stan_dist_args(NegativeBinomial, (:r, :p)) ==
+          (:r, :(p ./ (1.0 - p)))
+
+    # Preserve every shorter constructor that Distributions.jl 0.25 exposes.
+    # The assertions use `params` as the executable Julia-side receipt.
+    default_cases = (
+        (Normal, (), params(Normal())),
+        (Normal, (:mu,), (:mu, 1.0)),
+        (Cauchy, (), params(Cauchy())),
+        (Cauchy, (:mu,), (:mu, 1.0)),
+        (Exponential, (), (1.0,)),
+        (Gamma, (), params(Gamma())),
+        (Gamma, (:alpha,), (:alpha, 1.0)),
+        (Beta, (), params(Beta())),
+        (Beta, (:alpha,), (:alpha, :alpha)),
+        (Uniform, (), params(Uniform())),
+        (LogNormal, (), params(LogNormal())),
+        (LogNormal, (:mu,), (:mu, 1.0)),
+        (Laplace, (), params(Laplace())),
+        (Laplace, (:mu,), (:mu, 1.0)),
+        (Weibull, (), params(Weibull())),
+        (Weibull, (:alpha,), (:alpha, 1.0)),
+        (InverseGamma, (), params(InverseGamma())),
+        (InverseGamma, (:alpha,), (:alpha, 1.0)),
+        (Bernoulli, (), params(Bernoulli())),
+        (BernoulliLogit, (), params(BernoulliLogit())),
+        (Binomial, (), params(Binomial())),
+        (Binomial, (:n,), (:n, 0.5)),
+        (Poisson, (), params(Poisson())),
+        # p=0.5 in both shorter NegativeBinomial constructors, hence beta=1.
+        (NegativeBinomial, (), (1.0, 1.0)),
+        (NegativeBinomial, (:r,), (:r, 1.0)),
+    )
+    for (D, args, expected) in default_cases
+        @test BRM._sb_stan_dist_args(D, args) == expected
+    end
+end
+
+generic_df = (;
+    y_normal=[-0.8, 0.1, 1.4],
+    y_cauchy=[-1.2, 0.3, 2.1],
+    y_t=[-0.9, 0.2, 1.7],
+    y_exp=[0.2, 1.3, 3.1],
+    y_gamma=[0.4, 2.0, 5.5],
+    y_beta=[0.1, 0.5, 0.9],
+    y_uniform=[-0.5, 0.25, 1.5],
+    y_lognormal=[0.3, 1.2, 4.0],
+    y_laplace=[-1.1, 0.4, 2.2],
+    y_weibull=[0.2, 1.5, 3.8],
+    y_invgamma=[0.3, 1.4, 5.0],
+    y_bernoulli=[0, 1, 1],
+    y_bernoulli_logit=[1, 0, 1],
+    y_binomial_logit=[1, 3, 4],
+    y_poisson=[0, 2, 6],
+    y_nb=[0, 3, 7],
+)
+
+generic_builder = @brm begin
+    y_normal ~ Normal(0.3, 1.2)
+    y_cauchy ~ Cauchy(-0.2, 1.4)
+    y_t ~ TDist(4.5)
+    y_exp ~ Exponential(2.5)
+    y_gamma ~ Gamma(3.0, 2.5)
+    y_beta ~ Beta(2.0, 4.0)
+    y_uniform ~ Uniform(-1.0, 2.0)
+    y_lognormal ~ LogNormal(0.2, 0.8)
+    y_laplace ~ Laplace(-0.1, 1.3)
+    y_weibull ~ Weibull(1.7, 2.2)
+    y_invgamma ~ InverseGamma(3.2, 1.8)
+    y_bernoulli ~ Bernoulli(0.65)
+    y_bernoulli_logit ~ BernoulliLogit(-0.4)
+    y_binomial_logit ~ BinomialLogit(5, -0.3)
+    y_poisson ~ Poisson(2.3)
+    y_nb ~ NegativeBinomial(2.5, 0.4)
+end
+
+@testset "generic native-Stan mappings with complete GQ hooks are exact" begin
+    descriptor = brm_descriptor(generic_builder, generic_df; mod=@__MODULE__)
+    code = brm_execute(descriptor, :transpile)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+
+    cache = joinpath(tempdir(), "brm-distribution-semantics")
+    isdir(cache) || mkpath(cache)
+    problem = brm_execute(
+        descriptor, :instantiate;
+        path=joinpath(cache, string(descriptor.id) * ".stan"))
+    pointwise = brm_execute(
+        descriptor, :pointwise_loglik;
+        problem, draws=Float64[], seed=20260729)
+
+    expected = (;
+        y_normal=Normal(0.3, 1.2),
+        y_cauchy=Cauchy(-0.2, 1.4),
+        y_t=TDist(4.5),
+        y_exp=Exponential(2.5),
+        y_gamma=Gamma(3.0, 2.5),
+        y_beta=Beta(2.0, 4.0),
+        y_uniform=Uniform(-1.0, 2.0),
+        y_lognormal=LogNormal(0.2, 0.8),
+        y_laplace=Laplace(-0.1, 1.3),
+        y_weibull=Weibull(1.7, 2.2),
+        y_invgamma=InverseGamma(3.2, 1.8),
+        y_bernoulli=Bernoulli(0.65),
+        y_bernoulli_logit=BernoulliLogit(-0.4),
+        y_binomial_logit=BinomialLogit(5, -0.3),
+        y_poisson=Poisson(2.3),
+        y_nb=NegativeBinomial(2.5, 0.4),
+    )
+    for (target, dist) in pairs(expected)
+        actual = getproperty(pointwise, Symbol(target, :_likelihood))
+        observed = getproperty(generic_df, target)
+        @test actual ≈ logpdf.(dist, observed) atol=1e-10
+    end
+end
+
+semantic_df = (;
+    y_exp=[0.2, 1.3, 3.1],
+    y_gamma=[0.4, 2.0, 5.5],
+    y_nb=[0, 3, 7],
+)
+
+semantic_builder = @brm begin
+    y_exp ~ Exponential(2.5)
+    y_gamma ~ Gamma(3.0, 2.5)
+    y_nb ~ NegativeBinomial(2.5, 0.4)
+end
+
+@testset "translated scale and probability semantics reach every Stan path" begin
+    descriptor = brm_descriptor(semantic_builder, semantic_df; mod=@__MODULE__)
+    code = brm_execute(descriptor, :transpile)
+
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    @test occursin("y_exp ~ exponential((1.0 ./ 2.5));", code)
+    @test occursin(
+        "y_exp_likelihood = exponential_lpdfs(y_exp, (1.0 ./ 2.5));", code)
+    @test occursin(
+        "y_exp_gen = exponential_vector_rng(y_exp_n, (1.0 ./ 2.5));", code)
+    @test occursin("y_gamma ~ gamma(3.0, (1.0 ./ 2.5));", code)
+    @test occursin(
+        "y_gamma_likelihood = gamma_lpdfs(y_gamma, 3.0, (1.0 ./ 2.5));", code)
+    @test occursin(
+        "y_gamma_gen = gamma_vector_rng(y_gamma_n, 3.0, (1.0 ./ 2.5));", code)
+    @test occursin(
+        "y_nb ~ neg_binomial(2.5, (0.4 ./ (1.0 - 0.4)));", code)
+    @test occursin(
+        "y_nb_likelihood = neg_binomial_lpmfs(y_nb, 2.5, (0.4 ./ (1.0 - 0.4)));",
+        code)
+    @test occursin(
+        "y_nb_gen = neg_binomial_int_rng(y_nb_n, 2.5, (0.4 ./ (1.0 - 0.4)));",
+        code)
+
+    cache = joinpath(tempdir(), "brm-distribution-semantics")
+    isdir(cache) || mkpath(cache)
+    problem = brm_execute(
+        descriptor, :instantiate;
+        path=joinpath(cache, string(descriptor.id) * ".stan"))
+    theta = Float64[]
+
+    expected_pointwise = (;
+        y_exp=logpdf.(Exponential(2.5), semantic_df.y_exp),
+        y_gamma=logpdf.(Gamma(3.0, 2.5), semantic_df.y_gamma),
+        y_nb=logpdf.(NegativeBinomial(2.5, 0.4), semantic_df.y_nb),
+    )
+    @test LogDensityProblems.dimension(problem) == 0
+    # Stan sampling statements intentionally drop parameter-independent
+    # constants, so the zero-parameter target is not the normalized Julia
+    # density.  Exact normalized equality is checked through the pointwise
+    # lpdf/lpmf outputs below; the parameter-dependent model target gets its
+    # own gradient-equivalence test afterwards.
+    @test isfinite(LogDensityProblems.logdensity(problem, theta))
+
+    pointwise = brm_execute(
+        descriptor, :pointwise_loglik; problem, draws=theta, seed=20260729)
+    @test pointwise.y_exp_likelihood ≈ expected_pointwise.y_exp atol=1e-10
+    @test pointwise.y_gamma_likelihood ≈ expected_pointwise.y_gamma atol=1e-10
+    @test pointwise.y_nb_likelihood ≈ expected_pointwise.y_nb atol=1e-10
+
+    # Exercise native Stan RNGs on the exact same translated arguments.  A
+    # deterministic large generated-quantities batch checks the Julia mean and
+    # variance contracts without requiring the two libraries' RNG streams to
+    # be byte-identical.
+    predictions = brm_execute(
+        descriptor, :predict; problem, draws=zeros(0, 4096), seed=20260729)
+    for (draws, dist, mean_atol, var_atol) in (
+        (predictions.y_exp_gen, Exponential(2.5), 0.12, 0.5),
+        (predictions.y_gamma_gen, Gamma(3.0, 2.5), 0.25, 1.5),
+        (predictions.y_nb_gen, NegativeBinomial(2.5, 0.4), 0.2, 0.9),
+    )
+        @test mean(draws) ≈ mean(dist) atol=mean_atol
+        @test var(vec(draws)) ≈ var(dist) atol=var_atol
+    end
+end
+
+nb_density_builder = @brm begin
+    log(r) ~ 1
+    y_nb ~ NegativeBinomial(r, p)
+end
+
+@testset "NegativeBinomial model-density gradient matches Julia semantics" begin
+    df_a = (; y_nb=[0, 3, 7], p=fill(0.4, 3))
+    df_b = (; y_nb=[1, 2, 4], p=fill(0.4, 3))
+    desc_a = brm_descriptor(nb_density_builder, df_a; mod=@__MODULE__)
+    desc_b = brm_descriptor(nb_density_builder, df_b; mod=@__MODULE__)
+    @test desc_a.id == desc_b.id
+    @test occursin("p ./ (1.0 - p)", brm_execute(desc_a, :transpile))
+
+    cache = joinpath(tempdir(), "brm-distribution-semantics")
+    isdir(cache) || mkpath(cache)
+    path = joinpath(cache, string(desc_a.id) * ".stan")
+    problem_a = brm_execute(desc_a, :fit; path)
+    problem_b = brm_execute(desc_b, :fit; path)
+    @test LogDensityProblems.dimension(problem_a) == 1
+    q = [0.3]
+    _, grad_a = LogDensityProblems.logdensity_and_gradient(problem_a, q)
+    _, grad_b = LogDensityProblems.logdensity_and_gradient(problem_b, q)
+
+    loglik_delta(x) = begin
+        d = NegativeBinomial(exp(only(x)), 0.4)
+        sum(logpdf.(d, df_a.y_nb)) - sum(logpdf.(d, df_b.y_nb))
+    end
+    h = 1e-6
+    julia_gradient =
+        (loglik_delta(q .+ h) - loglik_delta(q .- h)) / (2h)
+    # Priors and transforms are identical across the two data bindings, so
+    # subtracting BridgeStan gradients isolates the model likelihood while
+    # cancelling every unrelated target contribution and Jacobian.
+    @test only(grad_a .- grad_b) ≈ julia_gradient atol=2e-6
 end
 
 @testset "SBBRMI lowers density, pointwise log-lik and RNG paths" begin
@@ -33,11 +317,17 @@ end
     code = BayesianRegressionModels.stan_code(plan)
 
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    # These unused prior-only variables are correctly moved to generated
+    # quantities by SLIC; their native RNG calls still prove the shared prior
+    # path consumed the same scale -> rate normalization.
+    @test occursin("exp_prior = exponential_rng((1.0 ./ 2.5));", code)
+    @test occursin("gamma_prior = gamma_rng(3.0, (1.0 ./ 2.5));", code)
     @test occursin("zero_inflated_poisson(", code)
     @test occursin("neg_binomial_2(", code)
+    @test occursin("ordered_logistic(", code)
     @test occursin("student_t(", code)
 
-    for target in (:y_zip, :y_nb, :y_t)
+    for target in (:y_zip, :y_nb, :y_ord, :y_t)
         declaration = only(d for d in plan.declarations if d.target === target)
         @test declaration.role === :observation
         @test !isnothing(declaration.draw)
@@ -49,5 +339,6 @@ end
                     if d.role === :observation)
     @test families[:y_zip] === :zero_inflated_poisson
     @test families[:y_nb] === :neg_binomial_2
+    @test families[:y_ord] === :ordered_logistic
     @test families[:y_t] === :student_t
 end
