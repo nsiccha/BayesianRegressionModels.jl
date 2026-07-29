@@ -45,8 +45,10 @@ using BayesianRegressionModels: AbstractColumn, MissingColumn, DataColumn,
     # so the lookup succeeds.
     zero_inflated_poisson, zero_inflated_poisson_lpmf,
     zero_inflated_poisson_lpmfs, zero_inflated_poisson_rng,
+    brm_von_mises, brm_von_mises_lpdf,
+    brm_von_mises_lpdfs, brm_von_mises_rng,
     Horseshoe, CategoricalLogit, ZeroInflatedPoisson, NegativeBinomial2,
-    BetaBinomial, BetaBinomial2,
+    BetaBinomial, BetaBinomial2, CircularVonMises,
     # Accessors used unqualified by html_expr.jl and stan_compile code.
     name, getargs, getf, getkwargs, getbroadcast, getop,
     # Macro / pipeline entry points called by Formula + stan_code.

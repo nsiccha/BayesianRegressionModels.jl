@@ -115,6 +115,93 @@ Random.rand(rng::Random.AbstractRNG, d::CategoricalLogit) =
     rand(rng, Categorical(Distributions.probs(d)))
 
 """
+    CircularVonMises(mu, kappa; interval=(-pi, pi))
+
+Von-Mises distribution represented on one fixed half-open principal interval.
+`interval` must be a finite pair `(lo, hi)` with `hi - lo == 2pi`.  The density
+is exactly Distributions.jl's `VonMises(mu, kappa)` after mapping both the mean
+and observation to equivalent angles, while `rand` maps native von-Mises draws
+back into `[lo, hi)`.
+
+This surface is deliberately distinct from [`VonMises`](@ref), whose support
+moves with `mu`.  In an `@brm` formula the StanBlocks backend uses the same
+fixed-interval contract and lowers density and RNG evaluation to Stan's native
+`von_mises_lpdf` and `von_mises_rng`.
+"""
+struct CircularVonMises{T<:Real,S<:Real} <:
+       Distributions.ContinuousUnivariateDistribution
+    mu::T
+    kappa::T
+    lo::S
+    hi::S
+
+    CircularVonMises{T,S}(mu::T, kappa::T, lo::S, hi::S) where {T<:Real,S<:Real} =
+        new{T,S}(mu, kappa, lo, hi)
+end
+
+function CircularVonMises(mu::Real, kappa::Real;
+                          interval=(-Float64(pi), Float64(pi)),
+                          check_args::Bool=true)
+    interval isa Tuple && length(interval) == 2 || throw(ArgumentError(
+        "CircularVonMises: `interval` must be a 2-tuple `(lo, hi)`"))
+    lo_raw, hi_raw = interval
+    lo_raw isa Real && hi_raw isa Real || throw(ArgumentError(
+        "CircularVonMises: `interval` endpoints must be real numbers"))
+
+    mu_p, kappa_p = promote(float(mu), float(kappa))
+    lo, hi = promote(float(lo_raw), float(hi_raw))
+    width = hi - lo
+    interval_tol = 8eps(typeof(width))
+    circumference = 2 * oftype(width, pi)
+    Distributions.@check_args(CircularVonMises,
+        (mu_p, isfinite(mu_p), "mu must be finite"),
+        (kappa_p, kappa_p > zero(kappa_p), "kappa must be positive"),
+        ((lo, hi), all(isfinite, (lo, hi)) && lo < hi,
+         "interval endpoints must be finite with lo < hi"),
+        (width, isapprox(width, circumference;
+                         rtol=interval_tol, atol=interval_tol),
+         "interval must have length 2pi"),
+    )
+    CircularVonMises{typeof(mu_p),typeof(lo)}(mu_p, kappa_p, lo, hi)
+end
+
+CircularVonMises(mu::Real, kappa::Real, interval::Tuple;
+                 check_args::Bool=true) =
+    CircularVonMises(mu, kappa; interval, check_args)
+
+Distributions.params(d::CircularVonMises) =
+    (d.mu, d.kappa, (d.lo, d.hi))
+Distributions.partype(::CircularVonMises{T,S}) where {T,S} = promote_type(T, S)
+Base.minimum(d::CircularVonMises) = d.lo
+Base.maximum(d::CircularVonMises) = d.hi
+Distributions.insupport(d::CircularVonMises, x::Real) = d.lo <= x < d.hi
+
+_circular_von_mises_mean(d::CircularVonMises) =
+    d.lo + mod(d.mu - d.lo, d.hi - d.lo)
+
+function _circular_von_mises_base(d::CircularVonMises)
+    VonMises(_circular_von_mises_mean(d), d.kappa; check_args=false)
+end
+
+function _circular_von_mises_representative(d::CircularVonMises, x::Real)
+    wrapped_mu = _circular_von_mises_mean(d)
+    moving_lo = wrapped_mu - oftype(wrapped_mu, pi)
+    moving_lo + mod(x - moving_lo, 2 * oftype(wrapped_mu, pi))
+end
+
+function Distributions.logpdf(d::CircularVonMises, x::Real)
+    Distributions.insupport(d, x) ||
+        return oftype(float(d.mu + d.kappa + d.lo + d.hi), -Inf)
+    logpdf(_circular_von_mises_base(d),
+           _circular_von_mises_representative(d, x))
+end
+
+function Random.rand(rng::Random.AbstractRNG, d::CircularVonMises)
+    draw = rand(rng, _circular_von_mises_base(d))
+    d.lo + mod(draw - d.lo, d.hi - d.lo)
+end
+
+"""
     ZeroInflatedPoisson(lambda, zi)
 
 Mixture of a point mass at zero (probability `zi`) and `Poisson(lambda)`.
