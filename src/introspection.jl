@@ -193,6 +193,53 @@ function linear_predictors(brmi::BRMI)
     out
 end
 
+# ---- population-effect prior statements -----------------------------------
+
+"""
+    effect_priors(brmi::BRMI) -> Vector{NamedTuple}
+
+Return the population-coefficient prior statements captured by [`@brm`](@ref),
+in formula order. Each entry has
+
+```julia
+(; predictor, coefficient, family, arguments, keywords, expression)
+```
+
+`predictor` is a `Symbol` for the explicit
+`effect(linear_predictor, coefficient)` form and `nothing` for the concise
+`effect(coefficient)` form. `coefficient` uses the same labels as
+[`popcoefnames`](@ref), including `:Intercept`. `expression` is the exact
+parsed RHS [`ExprColumn`](@ref); `family`, `arguments`, and `keywords` are its
+decomposed, directly inspectable parts.
+
+The SBBRMI backend resolves a concise address only when the label belongs to
+exactly one linear predictor, and rejects ambiguous or unknown labels.
+"""
+function effect_priors(brmi::BRMI)
+    out = NamedTuple[]
+    for op_nc in values(brmi.operations)
+        op = _named_op(op_nc)
+        isnothing(op) && continue
+        getf(op) === (~) || continue
+        lhs, rhs = getargs(op, 2)
+        lhs_e = _as_expr_column(lhs)
+        isnothing(lhs_e) && continue
+        getf(lhs_e) === effect || continue
+        address = getargs(lhs_e)
+        length(address) in (1, 2) || error(
+            "effect_priors: malformed effect address with $(length(address)) arguments")
+        rhs_e = _as_expr_column(rhs)
+        isnothing(rhs_e) && error(
+            "effect_priors: `effect(...)` RHS is not a distribution expression")
+        predictor = length(address) == 2 ? address[1] : nothing
+        coefficient = address[end]
+        push!(out, (; predictor, coefficient, family=getf(rhs_e),
+                     arguments=getargs(rhs_e), keywords=getkwargs(rhs_e),
+                     expression=rhs_e))
+    end
+    out
+end
+
 # ---- predictors of a single LP --------------------------------------------
 
 """
