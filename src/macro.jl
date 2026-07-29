@@ -109,14 +109,25 @@ Dispatch tag only — backend interpretation lives in `vmeta_sampling_rhs`
 function gr end
 
 """
-    gp(x; k=K, c=C)
+    gp(x...; cov=:exp_quad, iso=true, jitter=1e-9)
 
-Hilbert-space-approx 1D Gaussian-process predictor (Riutort-Mayol et al.
-2022). Allocates a K-basis squared-exponential GP over `x`. Dispatch
-tag — see `vmeta_sampling_rhs(::ExprColumn{typeof(gp)}, …)` (vimpl) and
-`_sb_hsgp` (sbimpl).
+Exact latent Gaussian-process predictor for the StanBlocks backend. Accepts
+one-or-more real-valued axes, with an isotropic squared-exponential kernel by
+default; set `iso=false` for one length scale per axis. `jitter` stabilizes the
+covariance Cholesky factor. Dispatch tag — lowering lives in `_sb_gp` /
+`_sb_gp_aniso` (sbimpl).
 """
 function gp end
+
+"""
+    hsgp(x...; k=20, c=1.5, cov=:exp_quad, iso=true, by=nothing)
+
+Hilbert-space approximate Gaussian-process predictor. The StanBlocks backend
+supports variadic axes, per-axis `k`/`c` tuples, isotropic or anisotropic length
+scales, and optional group-specific basis weights via `by=`. In formulas this
+method is used only as a dispatch tag.
+"""
+hsgp(args...; kwargs...) = error("hsgp is a formula marker and cannot be called directly")
 
 """
     offset(x)
@@ -493,7 +504,7 @@ getargs(::typeof(+), x) = (x,)
 """
     getkwargs(x::ExprColumn) -> NamedTuple
 
-The keyword args of an [`ExprColumn`](@ref). E.g. `gp(x; k=20, c=1.5)`
+The keyword args of an [`ExprColumn`](@ref). E.g. `hsgp(x; k=20, c=1.5)`
 exposes `(; k=20, c=1.5)`.
 """
 getkwargs(x::ExprColumn) = getfield(x, :kwargs)

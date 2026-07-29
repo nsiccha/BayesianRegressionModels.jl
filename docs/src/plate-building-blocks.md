@@ -211,7 +211,7 @@ The PLATE boundary is ragged, while the event recurrence or ODE remains inside
 | Stratified covariance | `(1 + x | gr(g, by=s))` | `multi_lkj_corr_cholesky_lpdf`, `multi_std_normal_lpdf`, `stratified_correlated_b` |
 | Independent structured fields | Bruno `obs_scale`, per-assay add/prop noise | The general `ez6anl` structured-latent allocation floor for fixed fields |
 | Grouped constrained parameter | `mo(x; by=g)`, group-specific thresholds and mixture weights | Manual flat unconstrained storage, offset tables, and constrain loops in BRM |
-| Grouped basis model | `gp(x; by=g)`, grouped splines | `_sb_hsgp_by` and term-specific basis-weight floors |
+| Grouped basis model | `hsgp(x; by=g)`, grouped splines | `_sb_hsgp_by` and term-specific basis-weight floors |
 | Inferred-observation cell | `me`, missing values, calibration and censoring cells | One SLIC model per observation family merely to vectorize scalar latent draws |
 | Ragged longitudinal kernel | Bruno PK/PKPD and Bordet biomarker series | Prefix/gather scaffolding and one custom vector wrapper for every kernel |
 | Per-cell likelihood | mixture, hurdle, zero-inflated, censored, custom user likelihoods | PLATE owns the per-cell density (`lpdf`/`lpmf`) loop today; observation posterior-predictive RNG synthesis remains target work |
