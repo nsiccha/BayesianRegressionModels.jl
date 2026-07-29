@@ -129,7 +129,9 @@ using .HistoricalInventoryGallery
         shell_body = String(shell.body)
         @test shell.status == 200
         @test occursin("text/html", HTTP.header(shell, "Content-Type", ""))
-        @test occursin("htmx.min.js", shell_body)
+        @test occursin("var htmx=function()", shell_body)
+        @test !occursin("cdn.jsdelivr.net/npm/htmx", shell_body)
+        @test occursin("Loading 359 audited model cards", shell_body)
         @test occursin("hx-get=\"/\"", shell_body)
         @test occursin("hx-trigger=\"load\"", shell_body)
 
