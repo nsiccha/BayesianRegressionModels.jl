@@ -2076,20 +2076,66 @@ end
 # authoritative population-column labels before emission. The returned vector
 # for each LP is aligned 1:1 with `popcoefnames`; `nothing` means retain the
 # default Normal(0, 1) for that column.
+#
+# A `~` statement whose RHS is a distribution call is a SCALAR PARAMETER PRIOR
+# (`log_F_bottle ~ Normal(0, 0.5)`) that `_sb_emit_prior!` claims at emission
+# time -- it is NOT a population formula. `linear_predictors` reports it all the
+# same (its LHS is a non-data `NamedColumn`), so effect-prior resolution has to
+# recognise the shape itself: `popcoefnames` has no `beta_pop` columns to name
+# there, and asking it anyway either throws or mislabels the distribution call
+# as a population column.
+function _sb_is_prior_declaration(brmi::BRMI, lp::Symbol)
+    op = linear_predictor_op(brmi, lp)
+    isnothing(op) && return false
+    _, rhs = getargs(op, 2)
+    rhs_e = _as_expr_column(rhs)
+    isnothing(rhs_e) && return false
+    f = getf(rhs_e)
+    f === Horseshoe || !isnothing(_as_distribution_type(f))
+end
+
+# Names of the predictors an `effect(...)` address may legitimately reach.
+_sb_effect_available_predictors(lp_names, labels_of) =
+    sort!(Symbol[lp for lp in lp_names if !isnothing(labels_of(lp))])
+
+# Trailing hint for the concise-address miss: a predictor whose labels could not
+# be resolved was skipped rather than considered, so say so instead of leaving
+# "matches no population coefficient" looking exhaustive. The explicit
+# `effect(linear_predictor, coefficient)` form reports the underlying reason in
+# full, so keep this note bounded to the names.
+_sb_effect_unresolved_note(unresolved) =
+    isempty(unresolved) ? "" :
+    " Predictor(s) " *
+    join(("`$lp`" for lp in sort!(collect(keys(unresolved)))), ", ") *
+    " were skipped because `popcoefnames` cannot name their columns; address " *
+    "such a coefficient explicitly with `effect(linear_predictor, coefficient)` " *
+    "to see why."
+
 function _sb_effect_prior_overrides(brmi::BRMI)
     specs = effect_priors(brmi)
     isempty(specs) && return Dict{Symbol,Vector{Any}}()
 
     lp_names = Symbol[x.name for x in linear_predictors(brmi)]
-    labels_by_lp = Dict{Symbol,Vector{Symbol}}()
-    for lp in lp_names
-        labels = try
+    # LAZY, memoised label resolution: `popcoefnames` is only ever asked about a
+    # predictor an `effect(...)` statement actually reaches, and a predictor it
+    # cannot name is SKIPPED rather than fatal. Naming every `linear_predictors`
+    # entry eagerly made one unrelated scalar prior (`log_F_bottle ~ Normal(0,
+    # 0.5)`) fatal for the whole model as soon as any effect prior existed.
+    resolved = Dict{Symbol,Union{Vector{Symbol},Nothing}}()
+    unresolved = Dict{Symbol,String}()
+    labels_of(lp::Symbol) = get!(resolved, lp) do
+        # Not a population formula at all -- there is nothing to name.
+        _sb_is_prior_declaration(brmi, lp) && return nothing
+        try
             popcoefnames(brmi, lp)
         catch err
-            error("sbimpl: cannot resolve population-effect labels for predictor `$lp` ",
-                  "while applying `effect(...)`: $(sprint(showerror, err))")
+            # `popcoefnames` covers the standard fixed-effect surface and errors
+            # on shapes that need full model context (`hsgp(x, by=g)`, ...).
+            # That is no reason to reject an `effect(...)` addressed elsewhere;
+            # keep the diagnostic for the messages that do need it.
+            unresolved[lp] = sprint(showerror, err)
+            nothing
         end
-        isnothing(labels) || (labels_by_lp[lp] = labels)
     end
 
     overrides = Dict{Symbol,Vector{Any}}()
@@ -2105,11 +2151,15 @@ function _sb_effect_prior_overrides(brmi::BRMI)
 
         target = spec.predictor
         if isnothing(target)
+            # The concise `effect(coefficient)` form is the ONLY one that needs
+            # candidate population formulas, so it is the only one that pays for
+            # naming every predictor -- tolerantly, skipping the unnameable.
             candidates = Symbol[lp for lp in lp_names
-                                if spec.coefficient in get(labels_by_lp, lp, Symbol[])]
+                                if spec.coefficient in something(labels_of(lp), Symbol[])]
             isempty(candidates) && error(
                 "sbimpl: `effect($(spec.coefficient))` matches no population " *
-                "coefficient. Inspect `popcoefnames(brmi, lp)` for valid labels.")
+                "coefficient. Inspect `popcoefnames(brmi, lp)` for valid labels." *
+                _sb_effect_unresolved_note(unresolved))
             length(candidates) == 1 || error(
                 "sbimpl: `effect($(spec.coefficient))` is ambiguous across linear " *
                 "predictors $(join(candidates, ", ")); use " *
@@ -2117,11 +2167,18 @@ function _sb_effect_prior_overrides(brmi::BRMI)
             target = only(candidates)
         end
 
-        haskey(labels_by_lp, target) || error(
-            "sbimpl: `effect($target, $(spec.coefficient))` names no linear " *
-            "predictor with population coefficients. Available predictors: " *
-            "$(join(sort!(collect(keys(labels_by_lp))), ", ")).")
-        labels = labels_by_lp[target]
+        labels = labels_of(target)
+        if isnothing(labels)
+            # An EXPLICITLY addressed target that cannot be named is a genuine
+            # error -- just not one an unrelated predictor may raise on its behalf.
+            haskey(unresolved, target) && error(
+                "sbimpl: cannot resolve population-effect labels for predictor ",
+                "`$target` while applying `effect($target, $(spec.coefficient))`: ",
+                unresolved[target])
+            error("sbimpl: `effect($target, $(spec.coefficient))` names no linear " *
+                  "predictor with population coefficients. Available predictors: " *
+                  "$(join(_sb_effect_available_predictors(lp_names, labels_of), ", ")).")
+        end
         idx = findfirst(==(spec.coefficient), labels)
         isnothing(idx) && error(
             "sbimpl: `$(spec.coefficient)` is not a population coefficient of " *
