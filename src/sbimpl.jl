@@ -3235,7 +3235,7 @@ _sb_real_vec(label::Symbol, n::Symbol, v) =
 _sb_classify_term!(t::ExprColumn, pop_terms, ran_terms, direct_terms) = begin
     f = getf(t)
     f === (|) && (push!(ran_terms, t); return)
-    (f === mo1 || f === s || f === t2 || f === gp || f === hsgp) &&
+    (f === offset || f === mo1 || f === s || f === t2 || f === gp || f === hsgp) &&
         (push!(direct_terms, t); return)
     push!(pop_terms, t)
 end
@@ -3259,7 +3259,10 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     isempty(pop_terms) && isempty(ran_terms) && isempty(direct_terms) &&
         error("sbimpl: empty RHS for `$target` — no predictor terms")
 
-    summands = Symbol[]
+    # Direct fixed-slope terms such as `offset(log(exposure))` may contribute
+    # an expression rather than a named emitted column. Keep the summand
+    # carrier expression-capable; sampled/direct submodels still push Symbols.
+    summands = Any[]
 
     if !isempty(pop_terms)
         col_exprs = Any[]
@@ -3326,6 +3329,7 @@ appear in `pop_<lhs>_beta_pop`:
 
 - integer- or `CategoricalVector`-typed bare predictors → `cat_<name>`
   (K−1 treatment contrasts);
+- `offset(x)` → `x` itself, with fixed coefficient one;
 - `mo1(c)` → `mo1_<c>`; `s(x)` and `t2(x,z)` → their own fixed/range
   coefficients and smoothing scales;
 - explicit-coefficient `coef * a` (own scalar);
@@ -3410,6 +3414,18 @@ function _sb_emit_direct!(stmts, data, target::Symbol, t::ExprColumn, summands;
     end
     _sb_emit_direct_expr!(stmts, data, target, getf(t), t, summands)
 end
+function _sb_emit_direct_expr!(_stmts, data, _target::Symbol,
+                               ::typeof(offset), t, summands)
+    args = getargs(t)
+    length(args) == 1 || error(
+        "sbimpl: `offset(x)` expects exactly one positional argument, got $(length(args))")
+    isempty(getkwargs(t)) || error("sbimpl: `offset(x)` does not accept keyword arguments")
+    # Unlike `protect`, offset is a direct model expression: it may reference
+    # raw data, an already-declared sampled scalar, or a composition of either.
+    # `_sb_scalar_expr` preserves that provenance in the emitted Stan expression
+    # and, critically, introduces no `popefs` coefficient.
+    push!(summands, _sb_scalar_expr(only(args), data))
+end
 function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(mo1), t, summands)
     inner_name, raw = _sb_inner_data(:mo1, only(getargs(t)))
     n_levels, idx = _sb_level_index(raw)
@@ -3473,6 +3489,8 @@ end
 function _sb_ranef_cols!(cols, data, stmts, t, gterms=())
     _sb_ranef_cols_dispatch!(cols, data, stmts, t, _sb_cat_levels(t), gterms)
 end
+_sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(offset)}, gterms=()) =
+    error("sbimpl: `offset(...)` is a population-level fixed contribution and cannot appear inside a random-effects term")
 _sb_ranef_cols_dispatch!(cols, data, stmts, t, ::Nothing, gterms=()) =
     push!(cols, _sb_predictor_col(t, data, stmts, gterms))
 function _sb_ranef_cols_dispatch!(cols, data, _stmts, t, levels, _gterms=())
