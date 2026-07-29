@@ -47,6 +47,19 @@ See [Formula terms](@ref) for an example and a comparison with
 function s end
 
 """
+    t2(x, z; k=(5, 5), basis=(:cr, :cr), full=false)
+
+Tensor-product smooth marker. The StanBlocks backend builds cubic-regression-
+spline margins, separates their null and penalized spaces, and gives the RR,
+RN, and NR tensor blocks independent smoothing scales. The current surface is
+two-dimensional, supports only `basis=(:cr, :cr)`, and requires `full=false`.
+Prediction/replay freezes the training knots and penalty decomposition by
+default. See [Formula terms](@ref) for the full contract. Dispatch tag — see
+`_sb_t2`.
+"""
+function t2 end
+
+"""
     ar(time; p=1)
 
 Autoregressive-noise predictor marker. Adds an AR(p) noise process
@@ -659,6 +672,28 @@ _sb_s = StanBlocks.@slic begin
     return Xnull * b_fixed + Zpen * b_pen
 end
 
+# Two-margin tensor-product smooth. With cubic-regression-spline margins each
+# null space has dimension two. Removing the tensor intercept leaves three
+# unpenalized NN columns. The remaining RR, RN, and NR blocks correspond to the
+# three penalties used by mgcv/brms `t2(..., full=FALSE)` and deliberately get
+# distinct smoothing scales.
+_sb_t2 = StanBlocks.@slic begin
+    n_rr = dims(Zrr)[2]
+    n_rn = dims(Zrn)[2]
+    n_nr = dims(Znr)[2]
+    b_fixed::vector[3]
+    sd_rr ~ std_normal(; lower=0.)
+    sd_rn ~ std_normal(; lower=0.)
+    sd_nr ~ std_normal(; lower=0.)
+    b_rr_raw ~ std_normal(; n=n_rr)
+    b_rn_raw ~ std_normal(; n=n_rn)
+    b_nr_raw ~ std_normal(; n=n_nr)
+    b_rr = sd_rr * b_rr_raw
+    b_rn = sd_rn * b_rn_raw
+    b_nr = sd_nr * b_nr_raw
+    return Xfixed * b_fixed + Zrr * b_rr + Zrn * b_rn + Znr * b_nr
+end
+
 # Fit/apply split for Wood's rank-k thin-plate regression spline (d=1, m=2).
 # The radial kernel is eta(r)=r^3/12 (Wood 2003, eq. 7). We keep the k largest-
 # magnitude eigenvectors of the full kernel matrix, impose the T' * delta = 0
@@ -719,6 +754,173 @@ end
 
 _sb_spline_basis_tps(x::AbstractVector{<:Real}; k::Int=10) =
     _sb_apply_spline(_sb_fit_spline(x; k), x)
+
+# Cubic regression spline margin used by `t2`. Knots follow R's default
+# quantile algorithm (type 7) over the sorted unique training values. `F` maps
+# knot values to the natural cubic spline's second derivatives, while `S` is
+# the integrated-squared-second-derivative penalty. The positive eigenspace of
+# `S` is penalty-whitened without mixing in the null space, so tensoring the
+# marginal range/null pieces preserves the three `t2(full=false)` penalties.
+function _sb_type7_knots(x::AbstractVector{<:Real}, k::Int)
+    values = sort!(unique(collect(Float64, x)))
+    length(values) >= k || error(
+        "sbimpl: `t2` margin needs at least $k unique values (got $(length(values)))")
+    n = length(values)
+    knots = Vector{Float64}(undef, k)
+    for i in 1:k
+        pos = 1 + (n - 1) * (i - 1) / (k - 1)
+        lo = clamp(floor(Int, pos), 1, n)
+        hi = clamp(ceil(Int, pos), 1, n)
+        weight = pos - lo
+        knots[i] = (1 - weight) * values[lo] + weight * values[hi]
+    end
+    all(diff(knots) .> 0) || error(
+        "sbimpl: `t2` margin produced non-distinct cubic-regression-spline knots")
+    knots
+end
+
+function _sb_cr_second_derivative_map(knots::AbstractVector{<:Real})
+    k = length(knots)
+    h = diff(knots)
+    all(h .> 0) || error("sbimpl: `t2` cubic-regression-spline knots must increase")
+    D = zeros(Float64, k - 2, k)
+    B = zeros(Float64, k - 2, k - 2)
+    for i in 1:(k - 2)
+        D[i, i] = inv(h[i])
+        D[i, i + 1] = -inv(h[i]) - inv(h[i + 1])
+        D[i, i + 2] = inv(h[i + 1])
+        B[i, i] = (h[i] + h[i + 1]) / 3
+        if i < k - 2
+            B[i, i + 1] = h[i + 1] / 6
+            B[i + 1, i] = B[i, i + 1]
+        end
+    end
+    interior = B \ D
+    F = zeros(Float64, k, k)
+    F[2:(k - 1), :] .= interior
+    F, transpose(D) * interior
+end
+
+function _sb_cr_basis(knots, F, x::AbstractVector{<:Real})
+    k = length(knots)
+    X = zeros(Float64, length(x), k)
+    for (i, raw_x) in enumerate(x)
+        xi = Float64(raw_x)
+        if xi < knots[1]
+            h = knots[2] - knots[1]
+            xik = xi - knots[1]
+            cjm = -xik * h / 3
+            cjp = -xik * h / 6
+            for q in 1:k
+                X[i, q] = cjm * F[1, q] + cjp * F[2, q]
+            end
+            X[i, 1] += 1 - xik / h
+            X[i, 2] += xik / h
+        elseif xi > knots[k]
+            h = knots[k] - knots[k - 1]
+            xik = xi - knots[k]
+            cjm = xik * h / 6
+            cjp = xik * h / 3
+            for q in 1:k
+                X[i, q] = cjm * F[k - 1, q] + cjp * F[k, q]
+            end
+            X[i, k - 1] -= xik / h
+            X[i, k] += 1 + xik / h
+        else
+            j = clamp(searchsortedlast(knots, xi), 1, k - 1)
+            h = knots[j + 1] - knots[j]
+            ajm = knots[j + 1] - xi
+            ajp = xi - knots[j]
+            cjm = ajm * (ajm * ajm / h - h) / 6
+            cjp = ajp * (ajp * ajp / h - h) / 6
+            for q in 1:k
+                X[i, q] = cjm * F[j, q] + cjp * F[j + 1, q]
+            end
+            X[i, j] += ajm / h
+            X[i, j + 1] += ajp / h
+        end
+    end
+    X
+end
+
+function _sb_fit_cr_spline(x::AbstractVector{<:Real}; k::Int=5)
+    k > 2 || error("sbimpl: `t2` basis dimensions must be integers greater than 2 (got $k)")
+    xs = collect(Float64, x)
+    isempty(xs) && error("sbimpl: `t2` cannot use an empty margin")
+    all(isfinite, xs) || error("sbimpl: `t2` margins require finite numeric data")
+    shift = sum(xs) / length(xs)
+    scale = maximum(xs) - minimum(xs)
+    scale > 0 || error("sbimpl: `t2` margin is degenerate (all values equal)")
+    normalized = (xs .- shift) ./ scale
+    knots = _sb_type7_knots(normalized, k)
+    F, penalty = _sb_cr_second_derivative_map(knots)
+
+    eig_penalty = eigen(Symmetric(penalty))
+    order = sortperm(eig_penalty.values; rev=true)
+    keep = order[1:(k - 2)]
+    penalty_scale = maximum(abs, eig_penalty.values)
+    tol = penalty_scale * eps(Float64) * 100
+    minimum(eig_penalty.values) >= -tol || error(
+        "sbimpl: `t2` cubic-regression-spline penalty is not positive semidefinite")
+    minimum(eig_penalty.values[keep]) > tol || error(
+        "sbimpl: `t2` could not isolate the two-dimensional marginal null space")
+    range_projection = eig_penalty.vectors[:, keep] *
+                       Diagonal(inv.(sqrt.(eig_penalty.values[keep])))
+
+    null_const_scale = inv(sqrt(length(xs)))
+    slope_norm = norm(normalized)
+    slope_norm > 0 || error("sbimpl: `t2` margin has a zero linear null-space norm")
+
+    (; shift, scale, knots, F, range_projection, null_const_scale, slope_norm, k)
+end
+
+function _sb_apply_cr_spline(fit, x::AbstractVector{<:Real})
+    xs = collect(Float64, x)
+    all(isfinite, xs) || error("sbimpl: `t2` margins require finite numeric data")
+    normalized = (xs .- fit.shift) ./ fit.scale
+    Xnull = hcat(fill(fit.null_const_scale, length(xs)),
+                 normalized ./ fit.slope_norm)
+    range = _sb_cr_basis(fit.knots, fit.F, normalized) * fit.range_projection
+    Xnull, range
+end
+
+function _sb_row_tensor(A::AbstractMatrix, B::AbstractMatrix)
+    size(A, 1) == size(B, 1) || error(
+        "sbimpl: `t2` marginal basis row counts differ ($(size(A, 1)) vs $(size(B, 1)))")
+    out = Matrix{Float64}(undef, size(A, 1), size(A, 2) * size(B, 2))
+    for i in axes(out, 1), a in axes(A, 2), b in axes(B, 2)
+        out[i, (a - 1) * size(B, 2) + b] = A[i, a] * B[i, b]
+    end
+    out
+end
+
+function _sb_t2_raw_blocks(margins, x, z)
+    N1, R1 = _sb_apply_cr_spline(margins[1], x)
+    N2, R2 = _sb_apply_cr_spline(margins[2], z)
+    NN = _sb_row_tensor(N1, N2)
+    (fixed=Matrix(NN[:, 2:end]), rr=_sb_row_tensor(R1, R2),
+     rn=_sb_row_tensor(R1, N2), nr=_sb_row_tensor(N1, R2))
+end
+
+_sb_block_center(A::AbstractMatrix) = vec(sum(A; dims=1)) ./ size(A, 1)
+_sb_center_block(A::AbstractMatrix, center) = A .- reshape(center, 1, :)
+
+function _sb_fit_t2(x::AbstractVector{<:Real}, z::AbstractVector{<:Real};
+                    k::Tuple{Int,Int}=(5, 5))
+    length(x) == length(z) || error(
+        "sbimpl: `t2(x, z)` margins must have equal lengths ($(length(x)) vs $(length(z)))")
+    margins = (_sb_fit_cr_spline(x; k=k[1]), _sb_fit_cr_spline(z; k=k[2]))
+    raw = _sb_t2_raw_blocks(margins, x, z)
+    fixed_center = _sb_block_center(raw.fixed)
+    (; margins, fixed_center, k)
+end
+
+function _sb_apply_t2(fit, x::AbstractVector{<:Real}, z::AbstractVector{<:Real})
+    length(x) == length(z) || error(
+        "sbimpl: `t2(x, z)` margins must have equal lengths ($(length(x)) vs $(length(z)))")
+    raw = _sb_t2_raw_blocks(fit.margins, x, z)
+    (_sb_center_block(raw.fixed, fit.fixed_center), raw.rr, raw.rn, raw.nr)
+end
 
 # brms-style `me(x_obs, sd_x)` measurement-error predictor. The submodel
 # allocates a length-N latent `x_true` vector with prior `std_normal` and
@@ -1021,6 +1223,35 @@ function _check_term_kwargs(::typeof(hsgp), kw)
     nothing
 end
 
+function _sb_t2_options(kw)
+    kval = get(kw, :k, (5, 5))
+    kval isa Tuple && length(kval) == 2 || error(
+        "t2: `k` must be a 2-tuple of integers greater than 2, got $(repr(kval))")
+    all(x -> x isa Integer && !(x isa Bool) && x > 2, kval) || error(
+        "t2: `k` must be a 2-tuple of integers greater than 2, got $(repr(kval))")
+
+    basis = get(kw, :basis, (:cr, :cr))
+    basis isa Tuple && length(basis) == 2 || error(
+        "t2: `basis` must be a 2-tuple; only `(:cr, :cr)` is currently supported")
+    basis == (:cr, :cr) || error(
+        "t2: only cubic-regression-spline margins `basis=(:cr, :cr)` are currently supported, got $(repr(basis))")
+
+    full = get(kw, :full, false)
+    full isa Bool || error("t2: `full` must be Bool, got $(typeof(full))")
+    full && error("t2: `full=true` is not supported yet; use `full=false`")
+    (Tuple(Int(x) for x in kval), basis, full)
+end
+
+function _check_term_kwargs(::typeof(t2), kw)
+    allowed = (:k, :basis, :full)
+    unknown = filter(k -> k ∉ allowed, keys(kw))
+    isempty(unknown) || error(
+        "t2: unsupported keyword(s): $(join(unknown, ", ")); " *
+        "supported keywords are `k`, `basis`, and `full`")
+    _sb_t2_options(kw)
+    nothing
+end
+
 # HSGP fit/apply split. The scalar methods reproduce the historical 1D basis;
 # the tuple methods form its tensor product for variadic `hsgp(x...)`.
 _sb_fit_hsgp(raw::AbstractVector{<:Real}, K::Integer, c::Real) = begin
@@ -1133,16 +1364,17 @@ src   = stan_code(sbbrmi)
 ```
 """
 # ---- preprocessing-constant provenance (decision nr3v8n A) ------------------
-# Each Category-A transform (zscale/standardize/center/factor/mo/s/gp/hsgp) and the
+# Each Category-A transform (zscale/standardize/center/factor/mo/s/t2/gp/hsgp) and the
 # element-wise `protect`/implicit-fn fallback compute a data-derived constant in
 # Julia at construct-time and land only the TRANSFORMED result in `data`. To
 # support `reprocess`/`restan_data` on a new DataFrame we record, per EMITTED
 # data key, how to regenerate that key from a new df:
 #   kind         -- which transform (:zscale/:standardize/:center/:factor/:mo/
-#                   :spline/:gp/:hsgp/:protect/:interaction/
+#                   :spline/:tensor_spline/:gp/:hsgp/:protect/:interaction/
 #                   :categorical_outcome)
 #   const_       -- the fitted constant: (μ,σ) / μ / level-vector / TPS basis /
-#                   exact-GP axis metadata / HSGP (μ,L,K,c) / categorical
+#                   tensor-spline margins/centers / exact-GP axis metadata /
+#                   HSGP (μ,L,K,c) / categorical
 #                   outcome levels / nothing (protect)
 #   raw_ref      -- the source: a column-node tree (zscale/center/standardize/
 #                   protect, re-materialised via `_sb_rematerialize_vec`) or a
@@ -1735,6 +1967,22 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         push!(handled, e.const_.zpen_key)
         new_preproc[key] = PreprocEntry(
             :spline, (; fit, zpen_key=e.const_.zpen_key), e.raw_ref, false)
+    elseif e.kind === :tensor_spline
+        axes = _sb_gp_axes_from_df(df, e.raw_ref, :t2)
+        length(axes) == 2 || error("sbimpl: reprocess: `t2` needs exactly two margins")
+        old_fit = e.const_.fit
+        fit = freeze ? old_fit : _sb_fit_t2(axes[1], axes[2]; k=old_fit.k)
+        Xfixed, Zrr, Zrn, Znr = _sb_apply_t2(fit, axes[1], axes[2])
+        new_data[key] = Xfixed
+        new_data[e.const_.zrr_key] = Zrr
+        new_data[e.const_.zrn_key] = Zrn
+        new_data[e.const_.znr_key] = Znr
+        push!(handled, e.const_.zrr_key)
+        push!(handled, e.const_.zrn_key)
+        push!(handled, e.const_.znr_key)
+        new_preproc[key] = PreprocEntry(:tensor_spline,
+            (; fit, zrr_key=e.const_.zrr_key, zrn_key=e.const_.zrn_key,
+             znr_key=e.const_.znr_key), e.raw_ref, false)
     elseif e.kind === :gp
         axes = _sb_gp_axes_from_df(df, e.raw_ref, :gp)
         new_data[key] = _sb_gp_matrix(axes)
@@ -1799,7 +2047,7 @@ of a naive per-column `sb.model(; col=…)` rebind is avoided. Returns a NEW
   `new_df`, then apply.
 
 Covered: the Julia-side transforms (`zscale`/`standardize`/`center`/`factor`/
-`mo`/`s`/`gp`/`hsgp`), `protect`/implicit-fn columns (re-materialised on
+`mo`/`s`/`t2`/`gp`/`hsgp`), `protect`/implicit-fn columns (re-materialised on
 `new_df`), continuous × continuous interaction columns, categorical outcomes,
 and pass-through raw columns (plain data, `me` obs values, `ar` time). Errors loudly
 on a `factor`/`mo` **unseen level** and on any derived data key it cannot account
@@ -1829,8 +2077,8 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true)
                 error(
                     "sbimpl: reprocess: data key `$k` is a derived vector with no ",
                     "preprocessing record and is not a column of the new DataFrame. ",
-                    "reprocess covers the 7 Julia-side predictor transforms ",
-                    "(zscale/standardize/center/factor/mo/s/gp/hsgp), protect/implicit-fn ",
+                    "reprocess covers the Julia-side predictor transforms ",
+                    "(zscale/standardize/center/factor/mo/s/t2/gp/hsgp), protect/implicit-fn ",
                     "columns and pass-through raw columns; models with random-effects ",
                     "group indices (e.g. `(1|g)`) are not yet supported — rebuild the ",
                     "SBBRMI from the new DataFrame instead.")
@@ -2545,7 +2793,7 @@ _sb_mi_kwarg_value(x, _) = error("sbimpl: unsupported `mi(...)` family arg shape
 _sb_julia_to_stan_fn(f) = f === LogExpFunctions.logistic ? :inv_logit : Symbol(nameof(f))
 
 # Inner-arg unwrap helpers shared by `_sb_predictor_term!` overloads (mo, me,
-# s, gp, hsgp, ar, mo1) and a few `mi`-style sites. Each step is a tiny dispatch
+# s, t2, gp, hsgp, ar, mo1) and a few `mi`-style sites. Each step is a tiny dispatch
 # pair so a wrong call shape errors with the wrapping function's name in the
 # message rather than a generic `isa` failure.
 _sb_named_inner(label::Symbol, x::NamedColumn) = x
@@ -2570,7 +2818,7 @@ _sb_real_vec(label::Symbol, n::Symbol, v) =
 _sb_classify_term!(t::ExprColumn, pop_terms, ran_terms, direct_terms) = begin
     f = getf(t)
     f === (|) && (push!(ran_terms, t); return)
-    (f === mo1 || f === s || f === gp || f === hsgp) &&
+    (f === mo1 || f === s || f === t2 || f === gp || f === hsgp) &&
         (push!(direct_terms, t); return)
     push!(pop_terms, t)
 end
@@ -2587,7 +2835,7 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     terms = _sb_terms(rhs)
     pop_terms    = Any[]
     ran_terms    = Any[]  # `(expr | group)` -> collected per-group below
-    direct_terms = Any[]  # e.g. `mo1(c)` / `s(x)` -> direct summand, no popefs beta
+    direct_terms = Any[]  # e.g. `mo1(c)` / `s(x)` / `t2(x,z)` -> direct summand
     for t in terms
         _sb_classify_term!(t, pop_terms, ran_terms, direct_terms)
     end
@@ -2661,7 +2909,8 @@ appear in `pop_<lhs>_beta_pop`:
 
 - integer- or `CategoricalVector`-typed bare predictors → `cat_<name>`
   (K−1 treatment contrasts);
-- `mo1(c)` → `mo1_<c>`; `s(x)` → its own fixed/range coefficients and `sds`;
+- `mo1(c)` → `mo1_<c>`; `s(x)` and `t2(x,z)` → their own fixed/range
+  coefficients and smoothing scales;
 - explicit-coefficient `coef * a` (own scalar);
 - random-effects blocks `(… | g)` → per-group ranef parameters.
 
@@ -2730,9 +2979,9 @@ _sb_cat_levels_vec(v::AbstractVector{<:Integer}) = v
 _sb_cat_levels_vec(v::CA.CategoricalVector) = v
 _sb_cat_levels_vec(_v) = nothing
 
-# Free-summand terms (no popefs beta): `mo1(c)`, `s(x)`, categorical NamedColumns.
+# Free-summand terms (no popefs beta): `mo1(c)`, `s(x)`, `t2(x,z)`, categoricals.
 # Categoricals emit `cat_<c> ~ _sb_cat(; x=<c>_idx, n_levels=<c>_n_levels)`.
-# `mo1(c)` reuses `_sb_mo`; `s(x)` owns its complete fixed + penalized basis.
+# `mo1(c)` reuses `_sb_mo`; smooths own their complete fixed + penalized bases.
 _sb_emit_direct!(stmts, data, target::Symbol, t::NamedColumn, summands; kwargs...) =
     _sb_emit_cat!(stmts, data, t, summands)
 function _sb_emit_direct!(stmts, data, target::Symbol, t::ExprColumn, summands;
@@ -2756,6 +3005,9 @@ function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(mo1), t, su
 end
 function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(s), t, summands)
     push!(summands, _sb_predictor_term!(stmts, data, s, t))
+end
+function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(t2), t, summands)
+    push!(summands, _sb_predictor_term!(stmts, data, t2, t; target))
 end
 _sb_emit_direct_expr!(_stmts, _data, _target::Symbol, f, _t, _summands) =
     error("sbimpl: unsupported direct-summand term `$f`")
@@ -3674,7 +3926,7 @@ end
 # and eight-column penalty-whitened range matrix as Stan data. `_sb_s` owns the
 # flat null-space coefficients, penalized coefficients, and smoothing SD; the
 # returned contribution is a direct summand (no extra `popefs` beta). Only
-# the default basis is supported -- `bs`, `t2`, and `k=`/`knots=` are follow-ons.
+# the default basis is supported -- `bs` and `k=`/`knots=` are follow-ons.
 _sb_predictor_term!(stmts, data, ::typeof(s), t; kwargs...) = begin
     args = getargs(t)
     length(args) == 1 || error("sbimpl: `s(x)` expects 1 positional arg, got $(length(args))")
@@ -3695,6 +3947,42 @@ _sb_predictor_term!(stmts, data, ::typeof(s), t; kwargs...) = begin
     push!(stmts, :($col_name ~ _sb_s(; Xnull=$Xnull_name, Zpen=$Zpen_name)))
     col_name
 end
+
+# Two-margin tensor-product cubic-regression spline. The Julia-side fit records
+# the marginal knot/penalty decomposition and training centering constants;
+# `_sb_t2` owns the three unpenalized NN coefficients plus independent RR/RN/NR
+# smoothing scales and standardized range coefficients. It is therefore a
+# direct summand, never multiplied by an additional `popefs` beta.
+_sb_predictor_term!(stmts, data, ::typeof(t2), t;
+                    target::Union{Symbol,Nothing}=nothing, kwargs...) = begin
+    args = getargs(t)
+    length(args) == 2 || error(
+        "sbimpl: `t2(x, z)` expects exactly 2 positional margins, got $(length(args))")
+    kw = getkwargs(t)
+    _check_term_kwargs(t2, kw)
+    k, _, _ = _sb_t2_options(kw)
+    names, axes = _sb_gp_axes(:t2, args)
+    fit = _sb_fit_t2(axes[1], axes[2]; k)
+    Xfixed, Zrr, Zrn, Znr = _sb_apply_t2(fit, axes[1], axes[2])
+    axes_suffix = join(string.(names), "_")
+    suffix = isnothing(target) ? axes_suffix : string(target, "_", axes_suffix)
+    Xfixed_name = Symbol(:Xfixed_t2_, suffix)
+    Zrr_name = Symbol(:Zrr_t2_, suffix)
+    Zrn_name = Symbol(:Zrn_t2_, suffix)
+    Znr_name = Symbol(:Znr_t2_, suffix)
+    data[Xfixed_name] = Xfixed
+    data[Zrr_name] = Zrr
+    data[Zrn_name] = Zrn
+    data[Znr_name] = Znr
+    _sb_record_preproc!(data, Xfixed_name, PreprocEntry(:tensor_spline,
+        (; fit, zrr_key=Zrr_name, zrn_key=Zrn_name, znr_key=Znr_name),
+        names, false))
+    col_name = Symbol(:t2_, suffix)
+    push!(stmts, :($col_name ~ _sb_t2(;
+        Xfixed=$Xfixed_name, Zrr=$Zrr_name, Zrn=$Zrn_name, Znr=$Znr_name)))
+    col_name
+end
+
 # `gp(x...)` is the exact GP term. It records an N x d predictor matrix and
 # delegates covariance construction + non-centred sampling to `_sb_gp` (one
 # shared length scale) or `_sb_gp_aniso` (one per axis).
