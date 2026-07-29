@@ -45,7 +45,30 @@ function synthetic_adaptive_block(K, G)
     )
 end
 
-@testset "small-block pullback is exact, bounded, and GC-stable" begin
+# Accessor contract across the whole supported K range.
+#
+# Two DIFFERENT bars are asserted here, and the split is deliberate:
+#
+#   * the FORWARD map (`ir(x)`, every location/log_scale accessor value) is
+#     bit-exact against the materialized semantic reference at every K.  The
+#     arbitrary-K accessor walks Stan's stick recursion inline rather than
+#     materializing `L` and `C`, but it preserves that graph's multiplication
+#     association exactly, so no primal value moves.
+#
+#   * the GRADIENT is bit-exact only for K<=2, which is the hand-rolled Enzyme
+#     reverse pass this change does not touch.  At K>=3 it agrees to ~1 ulp.
+#     The materialized reference accumulates every `dC[i,j]` into an adjoint
+#     MATRIX and only then reduces it into `dtau`/`dL` in one fixed pass; an
+#     accessor that never builds `C` has no such buffer to defer into, so
+#     Enzyme associates the same terms in a different order.  Float addition is
+#     not associative, so this is structural, not a spelling defect: a per-row
+#     `C`-buffer restructuring, a `tau` broadcast hoist, and a phased
+#     `L`-then-`tau` build were all measured and all reproduce the same 1-ulp
+#     difference.  Preserving the reverse order exactly REQUIRES materializing
+#     the matrix, which is precisely the cost this accessor removes.
+const ADAPTIVE_GRADIENT_ATOL = 1e-10
+
+@testset "adaptive-centering accessors are exact, bounded, and GC-stable" begin
     @test !isnothing(Base.get_extension(
         BayesianRegressionModels,
         :BayesianRegressionModelsWarmupHMCEnzymeExt,
@@ -54,25 +77,54 @@ end
         mode=Enzyme.set_runtime_activity(Enzyme.Reverse),
         function_annotation=Enzyme.Const,
     )
-    for (K, G, allocation_limit) in ((1, 6, 4_096), (2, 18, 16_384))
+    for (K, G, allocation_limit) in (
+        (1, 6, 4_096), (2, 18, 16_384), (3, 18, 96_000),
+        (4, 12, 96_000), (8, 6, 128_000),
+    )
         block = synthetic_adaptive_block(K, G)
         state, ir = AC_EXT._adaptive_centering_reparametrizer([block])
-        @test state isa AC_EXT.BRMAdaptiveCenteringState{true}
+        # The K<=2 hand-rolled Enzyme reverse pass stays gated on this type
+        # parameter; wider blocks keep the generic DifferentiationInterface path.
+        @test (state isa AC_EXT.BRMAdaptiveCenteringState{true}) == (K <= 2)
         controls = collect(range(0.17, 0.83, length=K * G))
         set_adaptive_sources!(state, ir, controls)
         reference_ir = materialized_reparametrizer(state, ir)
         x = collect(range(-0.63, 0.81, length=maximum(vec(block.effects))))
-        if !isempty(block.cholesky_free)
-            x[block.cholesky_free] .= -0.27
+        n_free = length(block.cholesky_free)
+        if n_free > 0
+            # Distinct per-coordinate values: an all-equal fill cannot separate a
+            # transposed or mis-offset row walk from a correct one.  The K=2
+            # spelling is unchanged (one free coordinate, still -0.27).
+            x[block.cholesky_free] .=
+                [-0.27 + 0.31 * ((i - 1) % 5) for i in 1:n_free]
         end
-        x[block.log_scales] .= K == 1 ? [-0.31] : [-0.31, 0.44]
+        x[block.log_scales] .=
+            K == 1 ? [-0.31] : collect(range(-0.31, 0.44, length=K))
         target = AdaptiveCenteringQuadraticTarget(length(x))
         wrapped = WarmupHMC.ReparametrizedProblem(ir, target, backend)
         reference = WarmupHMC.ReparametrizedProblem(reference_ir, target, backend)
 
+        # Forward map: bit-exact at every K, including the log-Jacobian.
+        ljac, y = ir(x)
+        reference_ljac, reference_y = reference_ir(x)
+        @test isequal(ljac, reference_ljac)
+        @test isequal(y, reference_y)
+        for p in eachindex(ir.pairs), a in 1:2
+            @test isequal(
+                ir.pairs[p].second.args[a](x),
+                reference_ir.pairs[p].second.args[a](x),
+            )
+        end
+
         actual = LogDensityProblems.logdensity_and_gradient(wrapped, x)
         expected = LogDensityProblems.logdensity_and_gradient(reference, x)
-        @test isequal(actual, expected)
+        @test isequal(actual[1], expected[1])
+        if K <= 2
+            @test isequal(actual[2], expected[2])
+        else
+            @test actual[2] ≈ expected[2] atol=ADAPTIVE_GRADIENT_ATOL rtol=ADAPTIVE_GRADIENT_ATOL
+        end
+
         allocated = @allocated LogDensityProblems.logdensity_and_gradient(wrapped, x)
         reference_allocated =
             @allocated LogDensityProblems.logdensity_and_gradient(reference, x)
@@ -141,8 +193,14 @@ end
     materialized_lp, materialized_gradient =
         LogDensityProblems.logdensity_and_gradient(materialized, x)
     @test isequal(lp, materialized_lp)
-    @test isequal(gradient, materialized_gradient)
+    # K=3 is on the arbitrary-K accessor, so the gradient bar here is ~1 ulp, not
+    # `isequal` — see the accessor contract above the synthetic testset.  The
+    # forward map below is still asserted bit-exact.
+    @test gradient ≈ materialized_gradient atol=ADAPTIVE_GRADIENT_ATOL rtol=ADAPTIVE_GRADIENT_ATOL
     ljac, model_position = ir(x)
+    materialized_ljac, materialized_position = materialized_ir(x)
+    @test isequal(ljac, materialized_ljac)
+    @test isequal(model_position, materialized_position)
     inner_lp, _ = LogDensityProblems.logdensity_and_gradient(problem, model_position)
     @test lp ≈ ljac + inner_lp atol=2e-12
     @test isfinite(lp)
