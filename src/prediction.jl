@@ -88,6 +88,7 @@ const _RANEF_FAMILIES = Dict{Symbol,NamedTuple}(
     :ranef_intercept_draws     => (; z = :xi,     layout = :group,           noncentered = true),
     :ranef_correlated          => (; z = :z_flat, layout = :flat_term_group, noncentered = true),
     :ranef_correlated_draws    => (; z = :z_flat, layout = :flat_term_group, noncentered = true),
+    :ranef_correlated_draws_effect => (; z = :z_flat, layout = :flat_term_group, noncentered = true),
     :ranef_correlated_by       => (; z = :z,      layout = :group_term,      noncentered = true),
     :ranef_correlated_by_draws => (; z = :z,      layout = :group_term,      noncentered = true),
     # Centered emissions — the opt-in `SBBRMI(...; centered_groups = [:g])` path,
@@ -101,6 +102,7 @@ const _RANEF_FAMILIES = Dict{Symbol,NamedTuple}(
     :ranef_intercept_centered        => (; z = :xi, layout = :group,      noncentered = false),
     :ranef_correlated_centered       => (; z = :b,  layout = :group_term, noncentered = false),
     :ranef_correlated_draws_centered => (; z = :b,  layout = :group_term, noncentered = false),
+    :ranef_correlated_draws_centered_effect => (; z = :b_cols_bc, layout = :group_term, noncentered = false),
 )
 
 """

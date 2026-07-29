@@ -1,0 +1,284 @@
+# test/ranef_effect_priors.jl — effect-DSL covariance priors for shared |ID| blocks.
+#
+# Run: julia --project=. test/ranef_effect_priors.jl
+# Set BRM_RANEF_EFFECT_RUNTIME=0 to skip the BridgeStan density/gradient probe.
+
+using Test
+using BayesianRegressionModels
+using StanBlocks
+using LogDensityProblems
+using Distributions: Cauchy, Exponential, LKJCholesky, Normal
+
+const RANEF_EFFECT_CACHE = joinpath(tempdir(), "brm-ranef-effect-priors")
+const RANEF_EFFECT_RUNTIME = get(ENV, "BRM_RANEF_EFFECT_RUNTIME", "1") != "0"
+
+df = (;
+    x = [-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+    cat = [1, 2, 3, 1, 2, 3],
+    subject = [1, 1, 2, 2, 3, 3],
+    y = [-2.4, -2.2, -2.0, -1.8, -1.7, -1.5],
+)
+
+builder = @brm begin
+    eta_CL ~ 1 + (1 | p | subject)
+    eta_Vc ~ 1 + x + cat + (1 + x + cat | p | subject)
+    eta_Q  ~ x + (0 + x | p | subject)
+
+    effect(eta_Vc, x) ~ Normal(0, 0.25)
+    effect(sd, p) ~ Exponential(2 / 3)
+    effect(sd, p, eta_Vc, x) ~ Exponential(1 / 3)
+    effect(sd, p, eta_Vc, cat_dummy_3) ~ Exponential(1 / 5)
+    effect(sd, p, eta_Q) ~ Exponential(1 / 4)
+    effect(cor, p) ~ LKJCholesky(6, 2)
+
+    y ~ Normal(eta_CL + eta_Vc + eta_Q, 1)
+end
+
+@testset "ranef effect capture, margin names, and lowering" begin
+    brmi = builder(df)
+    @test [(p.predictor, p.coefficient) for p in effect_priors(brmi)] ==
+          [(:eta_Vc, :x)]
+
+    specs = ranef_effect_priors(brmi)
+    @test length(specs) == 5
+    @test [s.class for s in specs] == [:sd, :sd, :sd, :sd, :cor]
+    @test all(s -> s.id === :p, specs)
+    @test [(s.predictor, s.coefficient) for s in specs] ==
+          [(nothing, nothing), (:eta_Vc, :x),
+           (:eta_Vc, :cat_dummy_3), (:eta_Q, nothing),
+           (nothing, nothing)]
+
+    margins = ranefcoefnames(brmi, :p)
+    @test margins == [
+        (; predictor=:eta_CL, coefficient=:Intercept),
+        (; predictor=:eta_Vc, coefficient=:Intercept),
+        (; predictor=:eta_Vc, coefficient=:x),
+        (; predictor=:eta_Vc, coefficient=:cat_dummy_2),
+        (; predictor=:eta_Vc, coefficient=:cat_dummy_3),
+        (; predictor=:eta_Q, coefficient=:x),
+    ]
+    @test isnothing(ranefcoefnames(brmi, :absent))
+
+    sb = SBBRMI(brmi; mod=@__MODULE__)
+    code = BayesianRegressionModels.stan_code(sb)
+    @test StanBlocks.stan.transpiles(sb.model)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    @test occursin("b_p_subject_L ~ lkj_corr_cholesky(2.0);", code)
+    @test occursin(
+        "b_p_subject_tau ~ brm_ranef_sd([1, 1, 1, 1, 1, 1]', " *
+        "[1.5, 1.5, 3.0, 1.5, 5.0, 4.0]');",
+        code,
+    )
+
+    plan = generative_plan(sb)
+    decl = only(d for d in plan.declarations if d.target === :b_p_subject)
+    @test decl.family === :ranef_correlated_draws_effect
+    @test decl.keywords.sd_family == Expr(:vect, 1, 1, 1, 1, 1, 1)
+    @test decl.keywords.sd_rate == Expr(:vect, 1.5, 1.5, 3.0, 1.5, 5.0, 4.0)
+    @test decl.keywords.lkj_eta == 2.0
+
+    block = only(ranef_blocks(sb))
+    @test block.family === :ranef_correlated_draws_effect
+    @test block.id === :p
+    @test (block.n_terms, block.n_groups) == (6, 3)
+    @test brm_descriptor(sb) isa BRMDescriptor
+
+    n_l = block.n_terms * (block.n_terms - 1) ÷ 2
+    unc_names = vcat(
+        ["b_p_subject_L.$i" for i in 1:n_l],
+        ["b_p_subject_tau.$i" for i in 1:block.n_terms],
+        ["b_p_subject_z_flat.$i" for i in 1:(block.n_terms * block.n_groups)],
+    )
+    adaptive = only(adaptive_centering_blocks(sb, unc_names))
+    @test adaptive.ranef.binding === block.binding
+    @test adaptive.ranef.family === block.family
+    @test adaptive.target_c == 0.0
+    @test size(adaptive.effects) == (6, 3)
+    @test length(adaptive.cholesky_free) == n_l
+    @test length(adaptive.log_scales) == 6
+    fake_draws = ones(2, length(unc_names))
+    population = population_draws(sb, fake_draws, unc_names; groups=:subject)
+    z_indices = vec(ranef_coordinates(block, unc_names))
+    @test all(iszero, population[:, z_indices])
+    @test all(isone, population[:, setdiff(eachindex(unc_names), z_indices)])
+
+    if RANEF_EFFECT_RUNTIME
+        isdir(RANEF_EFFECT_CACHE) || mkpath(RANEF_EFFECT_CACHE)
+        problem = StanBlocks.stan_instantiate(
+            sb.model;
+            path=joinpath(RANEF_EFFECT_CACHE, string(hash(code)) * ".stan"),
+        )
+        dimension = LogDensityProblems.dimension(problem)
+        q = [0.03 * ((i % 7) - 3) for i in 1:dimension]
+        lp, gradient = LogDensityProblems.logdensity_and_gradient(problem, q)
+        @test isfinite(lp)
+        @test length(gradient) == dimension
+        @test all(isfinite, gradient)
+    else
+        @info "Skipping ranef-effect BridgeStan gate (BRM_RANEF_EFFECT_RUNTIME=0)"
+    end
+end
+
+@testset "partial margins, CV, centered, and historical default" begin
+    partial_builder = @brm begin
+        eta_CL ~ 1 + (1 | p | subject)
+        eta_Vc ~ 1 + x + (1 + x | p | subject)
+        effect(sd, p, eta_Vc, x) ~ Exponential(1 / 4)
+        y ~ Normal(eta_CL + eta_Vc, 1)
+    end
+    partial_brmi = partial_builder(df)
+    partial = SBBRMI(partial_brmi; mod=@__MODULE__)
+    partial_code = BayesianRegressionModels.stan_code(partial)
+    @test StanBlocks.stanc_check(partial_code; warn_pedantic=false).ok
+    @test occursin(
+        "b_p_subject_tau ~ brm_ranef_sd([0, 0, 1]', [1.0, 1.0, 4.0]');",
+        partial_code,
+    )
+    partial_decl = only(d for d in generative_plan(partial).declarations
+                        if d.target === :b_p_subject)
+    @test partial_decl.keywords.lkj_eta == 1.0
+
+    centered = SBBRMI(partial_brmi; mod=@__MODULE__, centered_groups=[:subject])
+    centered_code = BayesianRegressionModels.stan_code(centered)
+    @test StanBlocks.stanc_check(centered_code; warn_pedantic=false).ok
+    centered_block = only(ranef_blocks(centered))
+    @test centered_block.family === :ranef_correlated_draws_centered_effect
+    centered_unc_names = vcat(
+        ["b_p_subject_L.$i" for i in 1:3],
+        ["b_p_subject_tau.$i" for i in 1:3],
+        ["b_p_subject_b_cols_bc.$g.$k" for g in 1:3 for k in 1:3],
+    )
+    centered_adaptive = only(adaptive_centering_blocks(centered, centered_unc_names))
+    @test centered_adaptive.target_c == 1.0
+    @test size(centered_adaptive.effects) == (3, 3)
+    @test_throws "NON-CENTERED" population_draws(
+        centered, ones(1, length(centered_unc_names)), centered_unc_names;
+        groups=:subject,
+    )
+    if RANEF_EFFECT_RUNTIME
+        isdir(RANEF_EFFECT_CACHE) || mkpath(RANEF_EFFECT_CACHE)
+        centered_problem = StanBlocks.stan_instantiate(
+            centered.model;
+            path=joinpath(RANEF_EFFECT_CACHE, string(hash(centered_code)) * ".stan"),
+        )
+        centered_names = StanBlocks.BridgeStan.param_unc_names(centered_problem.model)
+        compiled_adaptive = only(adaptive_centering_blocks(centered, centered_names))
+        centered_q = zeros(LogDensityProblems.dimension(centered_problem))
+        centered_lp, centered_gradient =
+            LogDensityProblems.logdensity_and_gradient(centered_problem, centered_q)
+        @test compiled_adaptive.target_c == 1.0
+        @test size(compiled_adaptive.effects) == (3, 3)
+        @test isfinite(centered_lp)
+        @test all(isfinite, centered_gradient)
+    end
+
+    cv = SBBRMI(partial_brmi; mod=@__MODULE__, cv_groups=[:subject])
+    cv_code = BayesianRegressionModels.stan_code(cv)
+    @test StanBlocks.stanc_check(cv_code; warn_pedantic=false).ok
+    cv_decl = only(d for d in generative_plan(cv).declarations
+                   if d.target === :b_p_subject)
+    @test cv_decl.family === :ranef_correlated_draws_effect
+    @test cv_decl.keywords.n_groups === :b_p_subject_n_g
+
+    default_builder = @brm begin
+        eta_CL ~ 1 + (1 | p | subject)
+        eta_Vc ~ 1 + x + (1 + x | p | subject)
+        y ~ Normal(eta_CL + eta_Vc, 1)
+    end
+    default_sb = SBBRMI(default_builder(df); mod=@__MODULE__)
+    default_code = BayesianRegressionModels.stan_code(default_sb)
+    default_decl = only(d for d in generative_plan(default_sb).declarations
+                        if d.target === :b_p_subject)
+    @test default_decl.family === :ranef_correlated_draws
+    @test !occursin("brm_ranef_sd", default_code)
+    @test occursin("b_p_subject_L ~ lkj_corr_cholesky(1.0);", default_code)
+    @test occursin("b_p_subject_tau ~ std_normal();", default_code)
+
+    new_df = merge(df, (; x=reverse(df.x), y=reverse(df.y)))
+    # Ordinary ranef indices are an existing loud `reprocess` edge; replay must
+    # rebuild from the retained builder instead of pretending those indices are
+    # portable.
+    @test_throws "ordinary random-effects group indices" reprocess(partial, new_df)
+
+    reusable = generative_plan(partial_builder, df; mod=@__MODULE__)
+    rebuilt = generative_plan(reusable, new_df)
+    rebuilt_decl = only(d for d in rebuilt.declarations if d.target === :b_p_subject)
+    @test rebuilt_decl.family === :ranef_correlated_draws_effect
+    @test rebuilt_decl.keywords.sd_rate == Expr(:vect, 1.0, 1.0, 4.0)
+end
+
+@testset "ranef effect validation fails closed" begin
+    wrong_dimension = @brm begin
+        eta ~ 1 + (1 + x | p | subject)
+        effect(cor, p) ~ LKJCholesky(3, 2)
+        y ~ Normal(eta, 1)
+    end
+    @test_throws "does not match" SBBRMI(wrong_dimension(df); mod=@__MODULE__)
+
+    ambiguous_shorthand = @brm begin
+        eta ~ 1 + (1 + x | p | subject)
+        effect(sd, p, eta) ~ Exponential(1)
+        y ~ Normal(eta, 1)
+    end
+    @test_throws "is ambiguous" SBBRMI(ambiguous_shorthand(df); mod=@__MODULE__)
+
+    duplicate_resolution = @brm begin
+        eta ~ x + (0 + x | p | subject)
+        effect(sd, p, eta) ~ Exponential(1)
+        effect(sd, p, eta, x) ~ Exponential(2)
+        y ~ Normal(eta, 1)
+    end
+    @test_throws "multiple SD prior statements" SBBRMI(duplicate_resolution(df); mod=@__MODULE__)
+
+    unknown_margin = @brm begin
+        eta ~ 1 + (1 | p | subject)
+        effect(sd, p, eta, nope) ~ Exponential(1)
+        y ~ Normal(eta, 1)
+    end
+    @test_throws "matches no random-effect margin" SBBRMI(unknown_margin(df); mod=@__MODULE__)
+
+    unknown_id = @brm begin
+        eta ~ 1 + (1 | p | subject)
+        effect(sd, q) ~ Exponential(1)
+        y ~ Normal(eta, 1)
+    end
+    @test_throws "matches no shared" SBBRMI(unknown_id(df); mod=@__MODULE__)
+
+    bad_sd_family = @brm begin
+        eta ~ 1 + (1 | p | subject)
+        effect(sd, p) ~ Normal(0, 1)
+        y ~ Normal(eta, 1)
+    end
+    @test_throws "currently supports `Exponential" SBBRMI(bad_sd_family(df); mod=@__MODULE__)
+
+    bad_cor_family = @brm begin
+        eta ~ 1 + (1 | p | subject)
+        effect(cor, p) ~ Cauchy(0, 1)
+        y ~ Normal(eta, 1)
+    end
+    @test_throws "expects `LKJCholesky" SBBRMI(bad_cor_family(df); mod=@__MODULE__)
+
+    ambiguous_id = @brm begin
+        eta_a ~ 1 + (1 | p | subject)
+        eta_b ~ 1 + (1 | p | cat)
+        effect(sd, p) ~ Exponential(1)
+        y ~ Normal(eta_a + eta_b, 1)
+    end
+    @test_throws "addresses 2 blocks" SBBRMI(ambiguous_id(df); mod=@__MODULE__)
+    @test_throws "ambiguous" ranefcoefnames(ambiguous_id(df), :p)
+
+    stratified_df = merge(df, (; stratum=[1, 1, 1, 2, 2, 2]))
+    stratified = @brm begin
+        eta ~ 1 + (1 | p | gr(subject, by=stratum))
+        effect(sd, p) ~ Exponential(1)
+        y ~ Normal(eta, 1)
+    end
+    @test_throws "stratified" SBBRMI(stratified(stratified_df); mod=@__MODULE__)
+
+    @test_throws LoadError eval(quote
+        @brm begin
+            eta ~ 1
+            effect(cor, p, eta) ~ LKJCholesky(1, 1)
+        end
+    end)
+end

@@ -14,6 +14,9 @@ name is gensym-ed). The two-argument form bakes `df` in and returns the
 - `lhs = rhs` — a literal binding (named intermediate).
 - `effect(lp, coefficient) ~ Normal(location, scale)` — an SBBRMI
   population-coefficient prior override.
+- `effect(sd, ID, [lp, [coefficient]]) ~ Exponential(scale)` and
+  `effect(cor, ID) ~ LKJCholesky(K, eta)` — SBBRMI priors for a shared
+  `|ID|` random-effect block.
 
 Multiple `~` lines produce a multi-response / distributional model.
 Inside an observed family's argument expression, nested `@brm(expr)` is the
@@ -103,22 +106,30 @@ function assign end
 """
     effect(coefficient)
     effect(linear_predictor, coefficient)
+    effect(sd, id[, linear_predictor[, coefficient]])
+    effect(cor, id)
 
-Address a population-level formula coefficient in a separate prior statement:
+Address a population formula coefficient or shared `|ID|` random-effect block
+in a separate prior statement:
 
 ```julia
 @brm begin
     log_ka ~ 1 + weight + (1 | pk | subject)
     effect(log_ka, Intercept) ~ Normal(log(1 / 8), 0.8)
     effect(log_ka, weight) ~ Normal(0, 0.1)
+    effect(sd, pk) ~ Exponential(2 / 3)
+    effect(cor, pk) ~ LKJCholesky(2, 2)
 end
 ```
 
 The two-argument form is explicit and is preferred for multi-predictor models.
 The one-argument form is accepted when the coefficient label occurs in exactly
-one linear predictor. `effect` is an address marker, not a callable function;
-the SBBRMI backend currently supports `Normal` overrides. Use
-[`effect_priors`](@ref) to inspect the captured statements.
+one linear predictor. `sd` and `cor` are reserved first-position classes for
+random-effect addresses. An SD margin may be selected by predictor plus
+coefficient, or by predictor alone when it contributes exactly one margin.
+`effect` is an address marker, not a callable function. Use
+[`effect_priors`](@ref), [`ranef_effect_priors`](@ref), and
+[`ranefcoefnames`](@ref) to inspect the captured statements and margin labels.
 """
 function effect end
 
@@ -331,10 +342,22 @@ _effect_address_symbol(x) = error(
 
 function _parse_effect!(lhs::Expr, rhs; info)
     raw_args = lhs.args[2:end]
-    length(raw_args) in (1, 2) || error(
-        "@brm: `effect(...)` expects `effect(coefficient)` or " *
-        "`effect(linear_predictor, coefficient)`, got $(length(raw_args)) arguments")
     args = map(_effect_address_symbol, raw_args)
+    if !isempty(args) && first(args) === :sd
+        length(args) in (2, 3, 4) || error(
+            "@brm: random-effect SD priors expect `effect(sd, ID)`, " *
+            "`effect(sd, ID, linear_predictor)`, or " *
+            "`effect(sd, ID, linear_predictor, coefficient)`, got " *
+            "$(length(args)) arguments")
+    elseif !isempty(args) && first(args) === :cor
+        length(args) == 2 || error(
+            "@brm: random-effect correlation priors expect exactly " *
+            "`effect(cor, ID)`, got $(length(args)) arguments")
+    else
+        length(args) in (1, 2) || error(
+            "@brm: population-effect priors expect `effect(coefficient)` or " *
+            "`effect(linear_predictor, coefficient)`, got $(length(args)) arguments")
+    end
     key = Symbol("__effect__", join(string.(args), "__"))
     haskey(info.alllocals, key) && error(
         "@brm: duplicate `effect($(join(args, ", ")))` prior statement")
