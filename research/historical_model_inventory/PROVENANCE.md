@@ -52,8 +52,11 @@ bodies; the override TSV has SHA-256
   the discarded VBRMI-mutating ancestry is not part of the reviewed or landed
   line.
 - StanBlocks.jl:
-  `329a178a7ad7877da0b58ad2c360d417ddd663f9` (local active checkout selected
-  by the canonical resolver). The separately discovered
+  `329a178a7ad7877da0b58ad2c360d417ddd663f9` for the original exhaustive
+  census (local active checkout selected by the canonical resolver). The five
+  BinomialLogit rows were subsequently rerun only against exact canonical
+  `277f23334fab9f2f88b53cd10f38f5d6bb1118c2`; their focused receipt preserves
+  both SHAs and the old failure signature. The separately discovered
   `neg_binomial_2_log` trace defect was fixed after this pinned run in
   StanBlocks canonical `144188a808308177807ceb47f08749a335a0ef70`
   (`negative-binomia-fd397aa0`); the inventory's working non-log NB2 route is
@@ -126,16 +129,18 @@ HTMXObjects semantic lock for the recorded SbPMX release:
 
 ## Served gallery receipt
 
-- Application commit:
-  `7b6a091ab6d240ec3fcfbd8f34248d2a78f3373b`.
+- Gallery source commit:
+  `7b6a091ab6d240ec3fcfbd8f34248d2a78f3373b`; focused BinomialLogit evidence
+  artifact `e8f1ab97df5435e0cf5d8b5605f1309ba5b28d7f`.
 - Gallery source SHA-256:
   `40934aa56fc86b56684d8a8ebfa903b5117c44f2639f124308f86728d35663e3`.
 - Matrix SHA-256:
-  `b0482710d53d0d0f501831366f8a5f3c3a0874f5725aeed3d79e80d31bdef037`.
+  `929dbc0a131a8ae9fa108e287c9080574eab4784309c3607d0a219ada9b43ca7`.
 - Deployment: `strato2`, `http://127.0.0.1:8129/`; unrelated listeners on
   8127--8128 were left untouched.
-- Initial and post-restart root checks returned HTTP 200 with exactly 359
-  semantic cards. Confirmed-source, finite-BridgeStan, and unsupported-ordinary
-  filters returned 154, 166, and 51 cards respectively.
+- Initial, post-restart, and focused pre-landing root checks returned HTTP 200
+  with exactly 359 semantic cards. The focused artifact's confirmed-source,
+  finite-BridgeStan, and unsupported-ordinary filters returned 154, 171, and 51
+  cards respectively; the original 166-card finite receipt remains in the TSV.
 - Row-by-row request times, paths, statuses, and counts:
   `gallery/served_smoke.tsv`.

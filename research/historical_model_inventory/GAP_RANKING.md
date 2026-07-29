@@ -14,13 +14,13 @@ For reproducibility, `R` bins coverage as 0 = none, 1 = one, 2 = two, 3 = three 
 
 These are kept separate from new modeling semantics.
 
-### A1. Remaining: scalar-trials/vector-logits Binomial generated quantity -- 23/25
+### A1. Completed upstream: scalar-trials/vector-logits Binomial generated quantity -- 23/25
 
 - Coverage: 5 rows, 5 distinct current programs (`R=4`, `U=5`).
 - Exact rows: `mcelreath:chimpanzees_intercept`, `mcelreath:chimpanzees_slopes`, `mcelreath:moralizing_gods`, `kruschke:recall_conditions`, `kruschke:recall_pooled`.
-- Observed failure: generated-quantity trace inference has no signature for `binomial_logit_rng(::array[] tokenof, ::int, ::vector)`. The density-side model is not the defect.
+- Historical failure at StanBlocks `329a178...`: generated-quantity trace inference had no signature for `binomial_logit_rng(::array[] tokenof, ::int, ::vector)`. The density-side model was not the defect.
 - Reuse/scope/dependencies: common grouped-Binomial shape (`X=4`), narrow trace/signature repair (`E=5`), no semantic dependency (`D=5`).
-- Upstream cross-link: [[StanBlocks:snag.binomial-logit-r-2d7c76b2]] (`binomial-logit-r-2d7c76b2`).
+- Resolution: StanBlocks canonical `277f23334fab9f2f88b53cd10f38f5d6bb1118c2` resolves [[StanBlocks:snag.binomial-logit-r-2d7c76b2]] (`binomial-logit-r-2d7c76b2`). The focused Strato2 receipt runs exactly the five probe ids through descriptor, stanc, BridgeStan finite density/gradient, prediction/generated quantities, and pointwise likelihood; all five pass. `binomial_logit_refresh.tsv` retains the `329a178...` failure signature rather than overwriting its provenance.
 
 ### A2. Remaining: transformed-column interaction lowering -- 17/25
 
@@ -56,7 +56,7 @@ These are kept separate from new modeling semantics.
 - Exact rows: `bambi:zip_mu`, `bambi:zip_psi`, `bambi:plot_comp_zip`.
 - The combined family-surface control passes, but these split catalogue records do not identify an authoritative mean/zero-inflation pairing. They therefore produce 0 row-level normalized programs and remain in D5. This is evidence-honest: the software defect is fixed; the historical source reconstruction is not.
 
-The final landed-tree corpus run found no additional execution failures: every failed row is named in A1 or A2, and every failed normalized program is the Binomial GQ signature or transformed-interaction program described there.
+After the focused `277f233...` refresh, the only failed normalized program is A2, shared by its two named rows.
 
 ## B. Existing-substrate BRM adapters
 
@@ -171,12 +171,12 @@ The code/test audit caught an earlier translator false-positive: it labeled both
 
 ## C. True StanBlocks substrate gaps
 
-The corrected inferred matrix classifies **0 deployed rows** as presently blocked solely by StanBlocks substrate. That zero has an exact row list: none. One narrow substrate shape remains; the other defect found by the audit has already landed upstream.
+The corrected inferred matrix classifies **0 deployed rows** as presently blocked solely by StanBlocks substrate. That zero has an exact row list: none. One narrow substrate shape remains; both concrete trace defects found by the audit have landed upstream.
 
 1. **Completed: `neg_binomial_2_log` lpxf trace support.** Direct increment: 0 rows; relevance is the same 7 rows/5 programs listed in A3. The audit's failure is an exact receipt for StanBlocks `329a178a`, not current canonical: the repair landed at `144188a8`. Non-log NB2 at BRM `11031f2` remains the corpus route, and a BRM log-family marker is not implied by the substrate repair.
 2. **Remaining: ragged plate in-cell outcome masking.** Direct deployed keys: none; distinct catalogue programs: 0. Separate-column ragged/multi-output plates are green, but the audited masked-within-cell form is unavailable. Reuse is high for PK/PD and structured multi-output kernels (`X=5`), while implementation and shape risk are high (`E=1`) and a concrete model contract is prerequisite (`D=2`), so its score is 8/25. It belongs after a real consumer supplies the exact mask and generated-quantity requirements.
 
-The Binomial RNG trace defect in A1 is also a StanBlocks defect, but it is a narrow existing-family defect rather than absent modeling substrate; track it through [[StanBlocks:snag.binomial-logit-r-2d7c76b2]].
+3. **Completed: scalar-trials/vector-logits Binomial RNG trace support.** Direct increment: the five A1 rows and five programs. The old receipt is exact for StanBlocks `329a178...`; the focused all-stage pass is exact for canonical `277f233...`.
 
 ## D. Metadata and source-semantics work
 
@@ -252,7 +252,7 @@ This is the only family left genuinely indeterminate after the 122-row family au
 
 ## Recommended dependency order
 
-1. Land A1 and the translator-sized A2; rerun only the exact affected probe IDs plus generated quantities and pointwise log-likelihood.
+1. Preserve the completed A1 receipt and implement the translator-sized A2; rerun only A2's exact probe id plus generated quantities and pointwise log-likelihood.
 2. Preserve the completed `11031f2` family controls, then close D4 and D5 with source evidence so the Student-t and ZIP surfaces gain row-level receipts.
 3. Implement B9/B10/B14 before the larger structured-model program: they have clear semantics, existing substrate and broad reuse.
 4. Implement B4 and B5 as focused reusable terms/families; neither requires a new declaration graph.
