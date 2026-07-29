@@ -64,8 +64,12 @@ BayesianRegressionModels.hsgp
 
 ```@docs
 BayesianRegressionModels.OrderedLogistic
+BayesianRegressionModels.CategoricalLogit
 BayesianRegressionModels.Horseshoe
 BayesianRegressionModels.ZeroInflatedPoisson
+BayesianRegressionModels.NegativeBinomial2
+BayesianRegressionModels.BetaBinomial
+BayesianRegressionModels.BetaBinomial2
 BayesianRegressionModels.BinomialLogit
 ```
 
