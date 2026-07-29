@@ -63,7 +63,7 @@ descriptor provenance. Inspect the captured formula statements with
 `effect_priors(brmi)`. This surface belongs to `SBBRMI`; `VBRMI` does not
 implement it.
 
-See [Formula terms](@ref) for the supported predictor syntax and
+See [Formula terms](@ref) and [Likelihoods](@ref) for the supported syntax and
 backend-specific contracts. The [Gallery](/gallery) provides live, interactive examples — input
 formula, the SLIC submodel body, the transpiled Stan source, and the
 auto-generated posterior-predictive check, all in one card. The

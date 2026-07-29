@@ -123,6 +123,31 @@ function _check_term_kwargs(::Type{<:Ordinal}, kwargs)
         "supported keywords are `discrimination` and `per_threshold`")
     nothing
 end
+
+"""
+    interval_censored(base; upper)
+
+Formula-only RHS wrapper for genuine interval evidence. The observed response
+column supplies each interval's lower endpoint and `upper` supplies its upper
+endpoint:
+
+```julia
+y_lower ~ interval_censored(Normal(mu, sigma); upper=y_upper)
+```
+
+Each row contributes the base family's probability over `(y_lower, y_upper]`,
+exactly `CDF(y_upper) - CDF(y_lower)`. The lower endpoint is open for discrete
+families too; unlike inclusive truncation it receives no predecessor shift.
+Posterior prediction remains on the uncoarsened base-response scale. This is
+separate from Distributions.jl's `censored`, which is the distribution
+of `clamp(X, lower, upper)` and therefore has atoms at its thresholds.
+
+The marker is intentionally formula-local: unlike `truncated` and `censored`,
+there is no existing Distributions.jl value with these per-row evidence
+semantics for BRM to construct outside `@brm`.
+"""
+function interval_censored end
+
 popefs = StanBlocks.@slic begin
     n_covariates = dims(X)[2]
     beta_pop ~ std_normal(; n=n_covariates)
@@ -5086,10 +5111,16 @@ end
 # into `target_obs` keyed back to `obs_name`. `get!` ensures first-write
 # wins so the BRMI's natural iteration order picks the source.
 _sb_collect_rhs_refs!(_target_obs, _x, _obs_name) = nothing
-_sb_collect_rhs_refs!(target_obs, x::NamedColumn, obs_name) =
-    (get!(target_obs, name(x), obs_name); nothing)
-_sb_collect_rhs_refs!(target_obs, x::ExprColumn, obs_name) =
+_sb_is_nothing_column(x::NamedColumn) =
+    name(x) === :nothing && parent(x) isa MissingColumn
+_sb_collect_rhs_refs!(target_obs, x::NamedColumn, obs_name) = begin
+    !_sb_is_nothing_column(x) && get!(target_obs, name(x), obs_name)
+    nothing
+end
+_sb_collect_rhs_refs!(target_obs, x::ExprColumn, obs_name) = begin
     foreach(a -> _sb_collect_rhs_refs!(target_obs, a, obs_name), getargs(x))
+    foreach(v -> _sb_collect_rhs_refs!(target_obs, v, obs_name), values(getkwargs(x)))
+end
 _sb_any_data_symbol(data) = begin
     isempty(data) && error("sbimpl: can't emit `rep_vector(1., n)` — no data column seen yet. Make sure an observed `~` comes before the intercept-only predictor, or add a concrete covariate.")
     # Prefer a flat length-N vector (numeric / integer) so `num_elements(...)` in
@@ -5116,11 +5147,7 @@ _flat_vec_key(_k, _v) = nothing
 
 function _sb_likelihood!(stmts, target::Symbol, rhs::ExprColumn, data)
     f = getf(rhs)
-    if f === CircularVonMises || f === Ordinal
-        _sb_lik_family!(stmts, target, f, getargs(rhs), getkwargs(rhs), data)
-    else
-        _sb_lik_family!(stmts, target, f, getargs(rhs), data)
-    end
+    _sb_lik_family!(stmts, target, f, getargs(rhs), getkwargs(rhs), data)
 end
 
 _sb_weight_kind(f) =
@@ -5269,6 +5296,12 @@ function _sb_likelihood!(stmts, target::Symbol,
 end
 _sb_likelihood!(stmts, target, rhs, _) =
     error("sbimpl: likelihood RHS for `$target` must be an ExprColumn (got $(typeof(rhs)))")
+
+# Existing ordinary families remain positional and retain their prior behavior.
+# Wrapper families override this six-argument seam below so only the new public
+# compositions interpret formula keywords.
+_sb_lik_family!(stmts, target, fam, args, ::NamedTuple, data) =
+    _sb_lik_family!(stmts, target, fam, args, data)
 
 # One dispatch per likelihood family. Each method states the Stan name and
 # implicitly the arity (by destructuring `args`). Julia constructor arguments
@@ -5660,6 +5693,181 @@ _sb_stan_dist_args(::Type{<:Cauchy}, args::Tuple{Any}) = (args[1], 1.0)
 
 # `TDist(nu)` is standard Student-t; Stan requires explicit location/scale.
 _sb_stan_dist_args(::Type{<:TDist}, args::Tuple{Any}) = (args[1], 0, 1)
+
+# Explicit capability gate for Julia distribution composition. A Stan density
+# name alone is insufficient: generic truncation/censoring additionally needs
+# lcdf/lccdf companions with the same parameterization. Keep this list honest
+# and executable rather than implicitly advertising every name-table entry.
+_sb_cdf_family_kind(::Type) = nothing
+_sb_cdf_family_kind(::Type{<:Normal})       = :continuous
+_sb_cdf_family_kind(::Type{<:Exponential})  = :continuous
+_sb_cdf_family_kind(::Type{<:LogNormal})    = :continuous
+_sb_cdf_family_kind(::Type{<:Weibull})      = :continuous
+_sb_cdf_family_kind(::Type{<:Poisson})      = :discrete
+
+function _sb_composed_family(wrapper, args)
+    length(args) in (1, 3) || error(
+        "sbimpl: `$wrapper` expects a base distribution and either keyword ",
+        "bounds or positional `(lower, upper)` bounds, got $(length(args)) arguments")
+    base = _as_expr_column(first(args))
+    isnothing(base) && error(
+        "sbimpl: `$wrapper` first argument must be a distribution call, got ",
+        "$(typeof(first(args)))")
+    isempty(getkwargs(base)) || error(
+        "sbimpl: `$wrapper` base distribution `$(getf(base))` cannot use formula keywords")
+    family = getf(base)
+    D = _as_distribution_type(family)
+    isnothing(D) && error(
+        "sbimpl: `$wrapper` base must be a Distributions.jl distribution type, ",
+        "got `$family`")
+    stan_name = _sb_stan_dist_name(D)
+    isnothing(stan_name) && error(
+        "sbimpl: `$wrapper` base family `$D` has no Stan distribution-name mapping")
+    kind = _sb_cdf_family_kind(D)
+    isnothing(kind) && error(
+        "sbimpl: `$wrapper` base family `$D` has no generic CDF/CCDF composition ",
+        "capability; add and test its density, pointwise, predictive, lcdf and ",
+        "lccdf paths before advertising it")
+    (; family=D, stan_name, stan_args=getargs(base), kind)
+end
+
+function _sb_wrapper_bounds(wrapper, args, kwargs::NamedTuple)
+    if length(args) == 3
+        isempty(kwargs) || error(
+            "sbimpl: `$wrapper` cannot mix positional bounds with keyword bounds")
+        return _sb_normalize_bound(args[2]), _sb_normalize_bound(args[3])
+    end
+    unknown = setdiff(collect(keys(kwargs)), [:lower, :upper])
+    isempty(unknown) || error(
+        "sbimpl: `$wrapper` accepts only `lower` and `upper` keywords, got $unknown")
+    _sb_normalize_bound(get(kwargs, :lower, nothing)),
+        _sb_normalize_bound(get(kwargs, :upper, nothing))
+end
+
+_sb_normalize_bound(::Nothing) = nothing
+_sb_normalize_bound(x::NamedColumn) = _sb_is_nothing_column(x) ? nothing : x
+_sb_normalize_bound(x) = x
+
+_sb_bound_data(x::Real) = x
+_sb_bound_data(x::AbstractVector{<:Real}) = x
+_sb_bound_data(x::NamedColumn) = _sb_bound_data_named(x, parent(x))
+_sb_bound_data_named(_x, d::DataColumn) = parent(d)
+_sb_bound_data_named(x, backing) = error(
+    "sbimpl: bound `$(name(x))` must be backed by observed data, got $(typeof(backing))")
+_sb_bound_data(x) = error(
+    "sbimpl: bounds must be numeric literals or observed data columns, got $(typeof(x))")
+
+function _sb_validate_bounds(wrapper, target, lower, upper, data; check_order=true)
+    y = data[target]
+    for (label, bound) in ((:lower, lower), (:upper, upper))
+        isnothing(bound) && continue
+        b = _sb_bound_data(bound)
+        b isa AbstractVector && length(b) != length(y) && error(
+            "sbimpl: `$wrapper` $label bound has $(length(b)) rows but response ",
+            "`$target` has $(length(y))")
+    end
+    if check_order && !isnothing(lower) && !isnothing(upper)
+        lo, hi = _sb_bound_data(lower), _sb_bound_data(upper)
+        ok = if lo isa AbstractVector || hi isa AbstractVector
+            all(eachindex(y)) do i
+                (lo isa AbstractVector ? lo[i] : lo) <=
+                    (hi isa AbstractVector ? hi[i] : hi)
+            end
+        else
+            lo <= hi
+        end
+        ok || error("sbimpl: `$wrapper` lower bounds must not exceed upper bounds")
+    end
+    nothing
+end
+
+function _sb_validate_composed_support(wrapper, target, lower, upper, kind, data)
+    y = data[target]
+    lo = isnothing(lower) ? nothing : _sb_bound_data(lower)
+    hi = isnothing(upper) ? nothing : _sb_bound_data(upper)
+    if kind === :discrete
+        (eltype(y) <: Integer && !(eltype(y) <: Bool)) || error(
+            "sbimpl: `$wrapper` discrete base family requires an integer response, ",
+            "got $(eltype(y)) for `$target`")
+        for (label, bound) in ((:lower, lower), (:upper, upper))
+            isnothing(bound) && continue
+            b = _sb_bound_data(bound)
+            all(v -> v isa Integer && !(v isa Bool), b isa AbstractVector ? b : (b,)) ||
+                error("sbimpl: `$wrapper` discrete $label bounds must be integers")
+        end
+    end
+    all(eachindex(y)) do i
+        lov = lo isa AbstractVector ? lo[i] : lo
+        hiv = hi isa AbstractVector ? hi[i] : hi
+        (isnothing(lov) || lov <= y[i]) && (isnothing(hiv) || y[i] <= hiv)
+    end || error(
+        "sbimpl: `$wrapper` response `$target` contains values outside its bounds")
+    nothing
+end
+
+# StanBlocks decision 1wd43wt: one base-family token plus compile-time optional
+# `lower` / `upper` kwargs. BRM always spells both; an absent bound is the Julia
+# value `nothing`, which the HOF consumes before Stan name/type resolution.
+_sb_composed_stan_args(base, data) = _sb_stan_dist_args(
+    base.family, map(a -> _sb_scalar_expr(a, data), base.stan_args))
+
+function _sb_emit_optional_family!(stmts, target, producer, base, lower, upper, data)
+    family_args = _sb_composed_stan_args(base, data)
+    lower_expr = isnothing(lower) ? nothing : _sb_scalar_expr(lower, data)
+    upper_expr = isnothing(upper) ? nothing : _sb_scalar_expr(upper, data)
+    rhs = Expr(:call, producer,
+        Expr(:parameters,
+            Expr(:kw, :lower, lower_expr),
+            Expr(:kw, :upper, upper_expr)),
+        base.stan_name, family_args...)
+    push!(stmts, Expr(:call, :~, target, rhs))
+end
+
+function _sb_lik_composed!(stmts, target, wrapper, producer,
+                           args, kwargs::NamedTuple, data)
+    base = _sb_composed_family(wrapper, args)
+    lower, upper = _sb_wrapper_bounds(wrapper, args, kwargs)
+
+    isnothing(lower) && isnothing(upper) && error(
+        "sbimpl: `$wrapper` needs at least one non-`nothing` bound")
+
+    _sb_validate_bounds(wrapper, target, lower, upper, data)
+    _sb_validate_composed_support(wrapper, target, lower, upper, base.kind, data)
+    _sb_emit_optional_family!(stmts, target, producer, base, lower, upper, data)
+end
+
+_sb_lik_family!(stmts, target, ::typeof(truncated), args, kwargs::NamedTuple, data) =
+    _sb_lik_composed!(stmts, target, :truncated, :conditioned, args, kwargs, data)
+
+_sb_lik_family!(stmts, target, ::typeof(censored), args, kwargs::NamedTuple, data) =
+    _sb_lik_composed!(stmts, target, :censored, :clamped, args, kwargs, data)
+
+# Genuine interval evidence uses the observed response as the lower endpoint.
+# Its producer call has no optional-bound encoding, so it is independent of the
+# one-sided truncation/censoring producer decision.
+function _sb_lik_family!(stmts, target, ::typeof(interval_censored),
+                         args, kwargs::NamedTuple, data)
+    length(args) == 1 || error(
+        "sbimpl: `interval_censored` expects one base distribution argument")
+    keys(kwargs) == (:upper,) || error(
+        "sbimpl: `interval_censored` requires exactly the `upper` keyword; ",
+        "the response column is the interval lower endpoint")
+    base = _sb_composed_family(:interval_censored, args)
+    upper = kwargs.upper
+    _sb_validate_bounds(:interval_censored, target, data[target], upper, data;
+                        check_order=false)
+    lo, hi = data[target], _sb_bound_data(upper)
+    all(eachindex(lo)) do i
+        lo[i] < (hi isa AbstractVector ? hi[i] : hi)
+    end || error(
+        "sbimpl: `interval_censored` lower endpoints must be strictly below upper endpoints")
+    _sb_validate_composed_support(:interval_censored, target, data[target],
+                                  upper, base.kind, data)
+    family_args = _sb_composed_stan_args(base, data)
+    upper_expr = _sb_scalar_expr(upper, data)
+    _sb_lik_stan_exprs!(stmts, target, :interval_evidence,
+                        (base.stan_name, target, upper_expr, family_args...))
+end
 
 # Distributions.jl uses scale `theta`; Stan uses inverse scale (rate) `beta`.
 _sb_stan_dist_args(::Type{<:Exponential}, ::Tuple{}) = (1.0,)

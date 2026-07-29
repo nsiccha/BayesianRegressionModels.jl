@@ -1,5 +1,42 @@
 # Likelihoods
 
+## Truncation and censoring
+
+BRM preserves the standard Distributions.jl RHS composition for mathematical
+truncation and threshold censoring:
+
+```julia
+model = @brm begin
+    mu ~ 1 + x
+    log(sigma) ~ 1
+
+    y_truncated ~ truncated(Normal(mu, sigma); lower=0.0, upper=2.0)
+    y_clamped ~ censored(LogNormal(mu, sigma); lower=0.25, upper=1.8)
+
+    # Genuine interval evidence: y_lower stores the open lower endpoint and
+    # y_upper stores the closed upper endpoint.
+    y_lower ~ interval_censored(Normal(mu, sigma); upper=y_upper)
+end
+```
+
+These are three different likelihood contracts:
+
+- `truncated(d; lower, upper)` conditions `d` on the inclusive bounds and
+  predicts from that conditional distribution;
+- `censored(d; lower, upper)` is the distribution of
+  `clamp(X, lower, upper)` and predicts clamped values;
+- `interval_censored(d; upper)` contributes
+  `log(CDF(upper) - CDF(response))` for the genuine interval observation
+  `(response, upper]`, while prediction remains on the uncoarsened base scale.
+
+Bounds may be numeric literals or observed row-wise columns. The initial
+family-gated surface covers `Normal`, `LogNormal`, `Exponential`, `Weibull`,
+and `Poisson`; BRM rejects other base families until their aggregate density,
+pointwise likelihood, CDF/CCDF, generated prediction, and stanc paths are all
+tested. This composition is currently implemented by the `SBBRMI` Stan
+backend, not `VBRMI`. The legacy `TruncatedNormal` Bordet marker remains a separate
+censored-Normal compatibility surface.
+
 ## Concise categorical regression
 
 `CategoricalLogit` accepts an explicit nested `@brm(...)` predictor formula:

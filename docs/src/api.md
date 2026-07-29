@@ -83,6 +83,7 @@ BayesianRegressionModels.NegativeBinomial2
 BayesianRegressionModels.BetaBinomial
 BayesianRegressionModels.BetaBinomial2
 BayesianRegressionModels.BinomialLogit
+BayesianRegressionModels.interval_censored
 BayesianRegressionModels.CircularVonMises
 BayesianRegressionModels.SkewDoubleExponential
 ```
