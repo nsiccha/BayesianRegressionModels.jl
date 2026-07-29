@@ -33,9 +33,17 @@ Bounds may be numeric literals or observed row-wise columns. The initial
 family-gated surface covers `Normal`, `LogNormal`, `Exponential`, `Weibull`,
 and `Poisson`; BRM rejects other base families until their aggregate density,
 pointwise likelihood, CDF/CCDF, generated prediction, and stanc paths are all
-tested. This composition is currently implemented by the `SBBRMI` Stan
-backend, not `VBRMI`. The legacy `TruncatedNormal` Bordet marker remains a separate
-censored-Normal compatibility surface.
+tested. BRM's eager two-sided bound check accepts `lower <= upper`, while the
+StanBlocks producer requires a non-degenerate interval with `lower < upper`;
+equal bounds are therefore rejected during Stan lowering.
+
+This composition is implemented only by the `SBBRMI` Stan backend. **Do not
+use `VBRMI` for these formulas:** it currently does not reject `truncated` or
+`censored` at construction and can return log densities for a misinterpreted
+model; `interval_censored` may fail only when the density is evaluated. A
+`VBRMI` result is therefore not a valid cross-check of an `SBBRMI` fit. The
+legacy `TruncatedNormal` Bordet marker remains a separate censored-Normal
+compatibility surface.
 
 ## Concise categorical regression
 
