@@ -10,6 +10,8 @@ using StanBlocks
 
 df = (;
     x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+    prog=[0.0, 0.0, 1.0, 1.0, 2.0, 2.0],
+    math=[41.0, 48.0, 52.0, 57.0, 63.0, 69.0],
     y_zip=[0, 1, 0, 2, 3, 0],
     y_nb=[0, 1, 2, 4, 3, 6],
     y_t=[-0.8, -0.2, 0.1, 0.7, 1.0, 1.4],
@@ -19,7 +21,9 @@ family_builder = @brm begin
     log(lambda) ~ 1 + x
     y_zip ~ ZeroInflatedPoisson(lambda, 0.25)
 
-    log(mu) ~ 1 + x
+    # Exact catalogue shape for bambi:negative_binomial_interaction and
+    # bambi:plot_pred_nb: the interaction includes a transformed operand.
+    log(mu) ~ 0 + prog + zscale(math) + prog & zscale(math)
     log(phi) ~ 1
     y_nb ~ NegativeBinomial2(mu, phi)
 
@@ -36,6 +40,21 @@ end
     @test occursin("zero_inflated_poisson(", code)
     @test occursin("neg_binomial_2(", code)
     @test occursin("student_t(", code)
+    @test occursin("int_prog_x_zscale_math", code)
+
+    sb = SBBRMI(family_builder(df); mod=@__MODULE__)
+    math_mu = sum(df.math) / length(df.math)
+    math_sd = sqrt(sum((x - math_mu)^2 for x in df.math) / length(df.math))
+    expected_interaction = df.prog .* ((df.math .- math_mu) ./ math_sd)
+    @test sb.data[:int_prog_x_zscale_math] ≈ expected_interaction
+
+    new_df = merge(df, (;
+        prog=[2.0, 1.0, 0.0, 0.0, 1.0, 2.0],
+        math=[45.0, 50.0, 55.0, 60.0, 65.0, 70.0],
+    ))
+    replayed = reprocess(sb, new_df)
+    expected_replayed = new_df.prog .* ((new_df.math .- math_mu) ./ math_sd)
+    @test replayed.data[:int_prog_x_zscale_math] ≈ expected_replayed
 
     for target in (:y_zip, :y_nb, :y_t)
         declaration = only(d for d in plan.declarations if d.target === target)

@@ -928,7 +928,7 @@ src   = stan_code(sbbrmi)
 # support `reprocess`/`restan_data` on a new DataFrame we record, per EMITTED
 # data key, how to regenerate that key from a new df:
 #   kind         -- which transform (:zscale/:standardize/:center/:factor/:mo/
-#                   :spline/:gp/:protect)
+#                   :spline/:gp/:protect/:interaction)
 #   const_       -- the fitted constant: (μ,σ) / μ / level-vector / TPS basis /
 #                   (μ,L,K) / nothing (protect)
 #   raw_ref      -- the source: a column-node tree (zscale/center/standardize/
@@ -1483,6 +1483,19 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         # No fitted constant — re-materialise the same expr tree on `df`.
         new_data[key] = collect(Float64, _sb_rematerialize_vec(e.raw_ref, df))
         new_preproc[key] = e
+    elseif e.kind === :interaction
+        left_key, right_key = e.raw_ref
+        haskey(new_data, left_key) || error(
+            "sbimpl: reprocess: interaction `$key` is missing regenerated operand `$left_key`")
+        haskey(new_data, right_key) || error(
+            "sbimpl: reprocess: interaction `$key` is missing regenerated operand `$right_key`")
+        left = new_data[left_key]
+        right = new_data[right_key]
+        length(left) == length(right) || error(
+            "sbimpl: reprocess: interaction `$key` operand lengths mismatch ",
+            "($(length(left)) vs $(length(right)))")
+        new_data[key] = collect(Float64, left .* right)
+        new_preproc[key] = e
     elseif e.kind === :spline
         v = collect(Float64, _sb_df_column(df, e.raw_ref))
         old_fit = e.const_.fit
@@ -1538,8 +1551,9 @@ of a naive per-column `sb.model(; col=…)` rebind is avoided. Returns a NEW
   `new_df`, then apply.
 
 Covered: the 7 Julia-side transforms (`zscale`/`standardize`/`center`/`factor`/
-`mo`/`s`/`gp`), `protect`/implicit-fn columns (re-materialised on `new_df`), and
-pass-through raw columns (plain data, `me` obs values, `ar` time). Errors loudly
+`mo`/`s`/`gp`), `protect`/implicit-fn columns (re-materialised on `new_df`),
+continuous × continuous interaction columns, and pass-through raw columns
+(plain data, `me` obs values, `ar` time). Errors loudly
 on a `factor`/`mo` **unseen level** and on any derived data key it cannot account
 for (e.g. random-effects group indices from `(1|g)`) rather than silently
 copying a stale vector — rebuild from `new_df` for those models.
@@ -1548,14 +1562,18 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true)
     new_data = Dict{Symbol,Any}()
     new_preproc = Dict{Symbol,PreprocEntry}()
     handled = Set{Symbol}()
-    # 1. Regenerate every transform-output key from its preproc record.
+    interaction_keys = Set(k for (k, e) in sb.preproc if e.kind === :interaction)
+    # 1. Regenerate every independent transform-output key from its preproc
+    #    record. Interactions wait until their raw/transformed operands exist.
     for (key, e) in sb.preproc
+        e.kind === :interaction && continue
         _sb_reprocess_entry!(new_data, new_preproc, handled, key, e, new_df, freeze_constants)
     end
     # 2. Account for every remaining old data key: pass-through raw columns, or
     #    frozen structural scalars; ERROR on any unaccounted derived structure.
     for (k, v) in sb.data
         k in handled && continue
+        k in interaction_keys && continue
         if v isa AbstractVector
             if _sb_df_has_column(new_df, k)
                 new_data[k] = _sb_df_column(new_df, k)   # pass-through (plain / me obs / ar time)
@@ -1577,6 +1595,11 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true)
                 "structure with no preprocessing record. reprocess cannot safely ",
                 "regenerate it on the new DataFrame — rebuild the SBBRMI instead.")
         end
+    end
+    # 3. Derived interactions depend on operands regenerated in steps 1-2.
+    for (key, e) in sb.preproc
+        e.kind === :interaction || continue
+        _sb_reprocess_entry!(new_data, new_preproc, handled, key, e, new_df, freeze_constants)
     end
     new_model = StanBlocks.SlicModel(sb.model.model, new_data, sb.model.mod)
     SBBRMI(sb.parent, new_model, new_data, new_preproc)
@@ -3218,12 +3241,12 @@ function _sb_interaction_cols!(cols, t::ExprColumn, data, stmts)
     args = getargs(t)
     length(args) == 2 ||
         error("sbimpl: interaction `&` expects exactly 2 operands, got $(length(args))")
-    l = _sb_interaction_operand(args[1])
-    r = _sb_interaction_operand(args[2])
+    l = _sb_interaction_operand(args[1], data, stmts)
+    r = _sb_interaction_operand(args[2], data, stmts)
     _sb_interaction_expand!(cols, data, l, r)
 end
 
-_sb_interaction_operand(t::NamedColumn) = begin
+_sb_interaction_operand(t::NamedColumn, _data, _stmts) = begin
     d_raw = parent(t)
     d = _as_data_column(d_raw)
     isnothing(d) && error(
@@ -3231,6 +3254,26 @@ _sb_interaction_operand(t::NamedColumn) = begin
     )
     v = parent(d)
     _sb_interaction_operand_kind(t, v, _sb_cat_levels(t))
+end
+# A transformed raw-data term (for example `zscale(math)`) first uses the
+# ordinary predictor-term lowering. Pure/data-derived terms leave a concrete
+# vector in `data`; parameter-owning terms (`mo`, `me`, `s`, `gp`, `ar`, ...)
+# return a Stan variable name instead and are rejected below. This keeps
+# transformed interactions on the same fit/reprocess constants as their
+# standalone term without ever snapshotting a latent parameter as data.
+_sb_interaction_operand(t::ExprColumn, data, stmts) = begin
+    col_name = _sb_predictor_col(t, data, stmts)
+    haskey(data, col_name) || error(
+        "sbimpl: interaction operand `$(getf(t))(...)` is parameter-owning, not a data-materialized transform; ",
+        "supported transformed operands include `zscale`, `standardize`, `center`, `protect`, ",
+        "and pure expressions in raw data columns"
+    )
+    v = data[col_name]
+    rv = _as_real_vec(v)
+    isnothing(rv) && error(
+        "sbimpl: transformed interaction operand `$col_name` has unsupported eltype $(eltype(v))"
+    )
+    (; kind=:cont, name=col_name, vec=collect(Float64, rv))
 end
 _sb_interaction_operand_kind(t, v, levels) = begin
     n_levels, idx = _sb_level_index(levels)
@@ -3244,9 +3287,9 @@ _sb_interaction_operand_kind(t, v, ::Nothing) = begin
     isnothing(rv) && error("sbimpl: interaction operand `$(name(t))` has unsupported eltype $(eltype(v))")
     (; kind=:cont, name=name(t), vec=collect(Float64, rv))
 end
-_sb_interaction_operand(t) = error(
-    "sbimpl: interaction operand must be a raw-data NamedColumn, got $(typeof(t)); ",
-    "interactions with `mo` / `me` / `s` / `ar` are not supported yet"
+_sb_interaction_operand(t, _data, _stmts) = error(
+    "sbimpl: interaction operand must be a raw-data NamedColumn or data-materialized ExprColumn, got $(typeof(t)); ",
+    "interactions with parameter-owning terms such as `mo` / `me` / `s` / `gp` / `ar` are not supported"
 )
 
 # cont x cont
@@ -3254,6 +3297,8 @@ _sb_interaction_expand!(cols, data, l::NamedTuple{<:Any,<:Tuple}, r::NamedTuple{
     if l.kind === :cont && r.kind === :cont
         col_name = Symbol(:int_, l.name, :_x_, r.name)
         data[col_name] = l.vec .* r.vec
+        _sb_record_preproc!(data, col_name,
+            PreprocEntry(:interaction, nothing, (l.name, r.name), false))
         push!(cols, col_name)
     elseif l.kind === :cont && r.kind === :cat
         for lvl in 2:r.n_levels

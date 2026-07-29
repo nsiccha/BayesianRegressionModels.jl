@@ -19,6 +19,8 @@ stanblocks_sha = readchomp(`git -C $stanblocks_root rev-parse HEAD`)
 
 data = (;
     x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+    prog=[0.0, 0.0, 1.0, 1.0, 2.0, 2.0],
+    math=[41.0, 48.0, 52.0, 57.0, 63.0, 69.0],
     y_zip=[0, 1, 0, 2, 3, 0],
     y_nb=[0, 1, 2, 4, 3, 6],
     y_t=[-0.8, -0.2, 0.1, 0.7, 1.0, 1.4],
@@ -28,7 +30,7 @@ builder = @brm begin
     log(lambda) ~ 1 + x
     y_zip ~ ZeroInflatedPoisson(lambda, 0.25)
 
-    log(mu) ~ 1 + x
+    log(mu) ~ 0 + prog + zscale(math) + prog & zscale(math)
     log(phi) ~ 1
     y_nb ~ NegativeBinomial2(mu, phi)
 
