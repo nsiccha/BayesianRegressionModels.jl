@@ -112,17 +112,28 @@ using .HistoricalInventoryGallery
     @test !occursin("AppContext", inventory_md)
 
     # Exercise the registered HTTP route entirely in process. This opens no
-    # socket, but proves that the page wrapper retains every semantic card and
-    # that query context reaches the same authoritative graph.
+    # socket, but reproduces the browser shell -> HTMX fragment sequence and
+    # proves that query context reaches the same authoritative graph.
     route!(graph)
-    drive(path) = begin
-        request = HTTP.Request("GET", path)
+    drive(path; headers=Pair{String,String}[]) = begin
+        request = HTTP.Request("GET", path, headers)
         handler = first(HTTP.Handlers.gethandler(
             HTMXObjects.CONTEXT[].service.router, request))
         handler(request)
     end
     try
-        full = drive("/")
+        browser_headers = [
+            "Accept" => "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        ]
+        shell = drive("/"; headers=browser_headers)
+        shell_body = String(shell.body)
+        @test shell.status == 200
+        @test occursin("text/html", HTTP.header(shell, "Content-Type", ""))
+        @test occursin("htmx.min.js", shell_body)
+        @test occursin("hx-get=\"/\"", shell_body)
+        @test occursin("hx-trigger=\"load\"", shell_body)
+
+        full = drive("/"; headers=vcat(browser_headers, ["HX-Request" => "true"]))
         full_body = String(full.body)
         @test full.status == 200
         @test occursin("text/html", HTTP.header(full, "Content-Type", ""))
@@ -132,8 +143,11 @@ using .HistoricalInventoryGallery
                   ("source_fidelity", "family_provenance",
                    "translation_route", "validation_tier"))
 
-        fidelity = drive("/surface/?source_fidelity=confirmed&family_provenance=all" *
-                         "&translation_route=all&validation_tier=all")
+        fidelity = drive(
+            "/surface/?source_fidelity=confirmed&family_provenance=all" *
+            "&translation_route=all&validation_tier=all";
+            headers=vcat(browser_headers, ["HX-Request" => "true"]),
+        )
         fidelity_body = String(fidelity.body)
         @test fidelity.status == 200
         @test length(findall(
