@@ -3,6 +3,177 @@
 # type/function and its expression arguments separate, so these numeric
 # constructors do not change formula syntax.
 
+"""Supertype for the ordinal probability construction used by [`Ordinal`](@ref)."""
+abstract type OrdinalStructure end
+
+"""Cumulative-link ordinal probabilities, `P(Y <= k) = F(d * (cut[k] - eta))`."""
+struct Cumulative <: OrdinalStructure end
+
+"""Stopping-ratio ordinal probabilities, `P(Y = k | Y >= k) = F(d * (cut[k] - eta[k]))`."""
+struct StoppingRatio <: OrdinalStructure end
+
+"""Supertype for typed ordinal inverse-link choices used by [`Ordinal`](@ref)."""
+abstract type OrdinalLink end
+
+"""Logistic inverse link for [`Ordinal`](@ref)."""
+struct LogitLink <: OrdinalLink end
+
+"""Standard-normal inverse link for [`Ordinal`](@ref)."""
+struct ProbitLink <: OrdinalLink end
+
+"""Complementary-log-log inverse link for [`Ordinal`](@ref)."""
+struct CloglogLink <: OrdinalLink end
+
+"""
+    Ordinal(structure, link, eta, thresholds; discrimination=1)
+
+Executable ordinal distribution with independently typed probability
+`structure` and inverse `link`. `structure` is [`Cumulative`](@ref) or
+[`StoppingRatio`](@ref); `link` is [`LogitLink`](@ref), [`ProbitLink`](@ref),
+or [`CloglogLink`](@ref). `discrimination` is finite and strictly positive.
+
+For a cumulative model, `thresholds` must be strictly increasing and `eta`
+must be scalar. For a stopping-ratio model the thresholds are stage-specific
+intercepts and need not be ordered; `eta` may be either one shared scalar or a
+vector with one value per non-terminal stage. The support is
+`1:(length(thresholds) + 1)`.
+
+Inside `@brm`, omit `thresholds`: for example,
+`y ~ Ordinal(Cumulative(), ProbitLink(), eta)`. The StanBlocks backend owns
+and estimates the thresholds. Formula-only keywords `discrimination=` and
+`per_threshold=` are documented in the likelihood guide.
+"""
+struct Ordinal{S<:OrdinalStructure,L<:OrdinalLink,T<:Real,E} <:
+       Distributions.DiscreteUnivariateDistribution
+    structure::S
+    link::L
+    eta::E
+    thresholds::Vector{T}
+    discrimination::T
+end
+
+_ordinal_eta_values(eta::Real) = (eta,)
+_ordinal_eta_values(eta::AbstractVector{<:Real}) = Tuple(eta)
+_ordinal_eta_values(eta) = throw(ArgumentError(
+    "Ordinal: `eta` must be a real scalar or a real vector, got $(typeof(eta))"))
+
+function Ordinal(structure::S, link::L, eta,
+                 thresholds::AbstractVector{<:Real}, discrimination::Real;
+                 check_args::Bool=true) where {S<:OrdinalStructure,L<:OrdinalLink}
+    isempty(thresholds) && throw(ArgumentError(
+        "Ordinal: at least one threshold is required"))
+    raw_eta = _ordinal_eta_values(eta)
+    T = promote_type(map(typeof, map(float,
+        (raw_eta..., thresholds..., discrimination)))...)
+    eta_p = eta isa Real ? convert(T, float(eta)) :
+            collect(T, map(float, eta))
+    cuts = collect(T, map(float, thresholds))
+    disc = convert(T, float(discrimination))
+
+    Distributions.@check_args(
+        Ordinal,
+        (eta_p, all(isfinite, raw_eta), "eta must be finite"),
+        (cuts, all(isfinite, cuts), "thresholds must be finite"),
+        (disc, isfinite(disc) && disc > zero(disc),
+         "discrimination must be finite and strictly positive"),
+    )
+    if structure isa Cumulative
+        eta_p isa Real || throw(ArgumentError(
+            "Ordinal(Cumulative(), ...): `eta` must be scalar"))
+        all(cuts[i] < cuts[i + 1] for i in 1:length(cuts)-1) ||
+            throw(DomainError(cuts,
+                "Ordinal(Cumulative(), ...): thresholds must be strictly increasing"))
+    elseif eta_p isa AbstractVector
+        length(eta_p) == length(cuts) || throw(DimensionMismatch(
+            "Ordinal(StoppingRatio(), ...): vector eta has length $(length(eta_p)); " *
+            "expected $(length(cuts)), one value per threshold"))
+    end
+    Ordinal{S,L,T,typeof(eta_p)}(structure, link, eta_p, cuts, disc)
+end
+
+Ordinal(structure::OrdinalStructure, link::OrdinalLink, eta,
+        thresholds::AbstractVector{<:Real}; discrimination::Real=1,
+        check_args::Bool=true) =
+    Ordinal(structure, link, eta, thresholds, discrimination; check_args)
+
+Distributions.params(d::Ordinal) =
+    (d.structure, d.link, d.eta, d.thresholds, d.discrimination)
+Distributions.partype(::Ordinal{S,L,T}) where {S,L,T} = T
+Distributions.@distr_support Ordinal 1 (length(d.thresholds) + 1)
+
+_ordinal_link_cdf(::LogitLink, z) = logistic(z)
+_ordinal_link_logcdf(::LogitLink, z) = loglogistic(z)
+_ordinal_link_logccdf(::LogitLink, z) = log1mlogistic(z)
+
+const _ORDINAL_STANDARD_NORMAL = Normal()
+_ordinal_link_cdf(::ProbitLink, z) = cdf(_ORDINAL_STANDARD_NORMAL, z)
+_ordinal_link_logcdf(::ProbitLink, z) = logcdf(_ORDINAL_STANDARD_NORMAL, z)
+_ordinal_link_logccdf(::ProbitLink, z) = logccdf(_ORDINAL_STANDARD_NORMAL, z)
+
+_ordinal_link_cdf(::CloglogLink, z) = -expm1(-exp(z))
+_ordinal_link_logcdf(::CloglogLink, z) = log1mexp(-exp(z))
+_ordinal_link_logccdf(::CloglogLink, z) = -exp(z)
+
+_ordinal_stage_eta(eta::Real, _k) = eta
+_ordinal_stage_eta(eta::AbstractVector, k) = eta[k]
+
+function Distributions.probs(d::Ordinal{<:Cumulative})
+    cumulative = map(d.thresholds) do cut
+        _ordinal_link_cdf(d.link, d.discrimination * (cut - d.eta))
+    end
+    [first(cumulative); diff(cumulative);
+     one(eltype(cumulative)) - last(cumulative)]
+end
+
+function Distributions.probs(d::Ordinal{<:StoppingRatio})
+    T = partype(d)
+    rv = Vector{T}(undef, length(d.thresholds) + 1)
+    remaining = one(T)
+    for k in eachindex(d.thresholds)
+        q = _ordinal_link_cdf(
+            d.link,
+            d.discrimination *
+            (d.thresholds[k] - _ordinal_stage_eta(d.eta, k)),
+        )
+        rv[k] = remaining * q
+        remaining *= one(T) - q
+    end
+    rv[end] = remaining
+    rv
+end
+
+function Distributions.logpdf(d::Ordinal{<:Cumulative}, k::Real)
+    K = length(d.thresholds) + 1
+    (!isinteger(k) || k < 1 || k > K) &&
+        return oftype(float(first(d.thresholds)), -Inf)
+    i = Int(k)
+    z(j) = d.discrimination * (d.thresholds[j] - d.eta)
+    i == 1 && return _ordinal_link_logcdf(d.link, z(1))
+    i == K && return _ordinal_link_logccdf(d.link, z(K - 1))
+    logsubexp(
+        _ordinal_link_logcdf(d.link, z(i)),
+        _ordinal_link_logcdf(d.link, z(i - 1)),
+    )
+end
+
+function Distributions.logpdf(d::Ordinal{<:StoppingRatio}, k::Real)
+    K = length(d.thresholds) + 1
+    (!isinteger(k) || k < 1 || k > K) &&
+        return oftype(float(first(d.thresholds)), -Inf)
+    i = Int(k)
+    rv = zero(partype(d))
+    for j in 1:min(i, K - 1)
+        z = d.discrimination *
+            (d.thresholds[j] - _ordinal_stage_eta(d.eta, j))
+        rv += j == i ? _ordinal_link_logcdf(d.link, z) :
+                       _ordinal_link_logccdf(d.link, z)
+    end
+    rv
+end
+
+Random.rand(rng::Random.AbstractRNG, d::Ordinal) =
+    rand(rng, Categorical(Distributions.probs(d)))
+
 """
     OrderedLogistic(eta, cutpoints)
 
@@ -62,10 +233,15 @@ Random.rand(rng::Random.AbstractRNG, d::OrderedLogistic) =
 
 """
     CategoricalLogit(eta2, eta3, ...)
+    CategoricalLogit(@brm(formula))
 
 Reference-class categorical distribution.  Class 1 has logit zero and each
 argument is the logit for one subsequent class.  The support is
 `1:(length(params(d)) + 1)`.
+
+Inside an outer `@brm` model, the concise nested-`@brm` form is normalised to
+one ordinary scalar linear predictor per non-reference outcome class. Those
+predictors share formula structure while fitting distinct coefficients.
 """
 struct CategoricalLogit{T<:Real} <: Distributions.DiscreteUnivariateDistribution
     nonreference_logits::Vector{T}
@@ -200,6 +376,64 @@ function Random.rand(rng::Random.AbstractRNG, d::CircularVonMises)
     draw = rand(rng, _circular_von_mises_base(d))
     d.lo + mod(draw - d.lo, d.hi - d.lo)
 end
+
+"""
+    SkewDoubleExponential(mu, sigma, tau)
+
+Asymmetric double-exponential distribution with the exact parameterization of
+Stan's native `skew_double_exponential(mu, sigma, tau)`. `sigma` is the native
+Stan scale and `tau` is the probability mass at or below `mu`, so
+`cdf(d, mu) == tau`. At `tau == 0.5`, this is exactly `Laplace(mu, sigma)`.
+
+Distributions.jl represents the same family as
+`SkewedExponentialPower(mu, sigma_sepd, 1, tau)`, with
+`sigma == 4sigma_sepd*tau*(1-tau)`. BRM uses that identity as the executable
+Julia receipt while lowering this type directly to Stan's native family.
+"""
+struct SkewDoubleExponential{T<:Real} <:
+       Distributions.ContinuousUnivariateDistribution
+    mu::T
+    sigma::T
+    tau::T
+
+    SkewDoubleExponential{T}(mu::T, sigma::T, tau::T) where {T<:Real} =
+        new{T}(mu, sigma, tau)
+end
+
+function SkewDoubleExponential(mu::Real, sigma::Real, tau::Real;
+                               check_args::Bool=true)
+    mu_p, sigma_p, tau_p = promote(float(mu), float(sigma), float(tau))
+    Distributions.@check_args(SkewDoubleExponential,
+        (mu_p, isfinite(mu_p), "mu must be finite"),
+        (sigma_p, isfinite(sigma_p) && sigma_p > zero(sigma_p),
+         "sigma must be finite and positive"),
+        (tau_p, isfinite(tau_p) && zero(tau_p) < tau_p < one(tau_p),
+         "tau must lie strictly between zero and one"),
+    )
+    SkewDoubleExponential{typeof(mu_p)}(mu_p, sigma_p, tau_p)
+end
+
+Distributions.params(d::SkewDoubleExponential) = (d.mu, d.sigma, d.tau)
+Distributions.partype(::SkewDoubleExponential{T}) where {T} = T
+Distributions.location(d::SkewDoubleExponential) = d.mu
+Distributions.scale(d::SkewDoubleExponential) = d.sigma
+Distributions.@distr_support SkewDoubleExponential -Inf Inf
+
+_skew_double_exponential_sepd(d::SkewDoubleExponential) =
+    SkewedExponentialPower(
+        d.mu, d.sigma / (4 * d.tau * (one(d.tau) - d.tau)),
+        one(d.tau), d.tau; check_args=false)
+
+Distributions.logpdf(d::SkewDoubleExponential, x::Real) =
+    logpdf(_skew_double_exponential_sepd(d), x)
+Distributions.cdf(d::SkewDoubleExponential, x::Real) =
+    cdf(_skew_double_exponential_sepd(d), x)
+Distributions.logcdf(d::SkewDoubleExponential, x::Real) =
+    logcdf(_skew_double_exponential_sepd(d), x)
+Distributions.quantile(d::SkewDoubleExponential, q::Real) =
+    quantile(_skew_double_exponential_sepd(d), q)
+Random.rand(rng::Random.AbstractRNG, d::SkewDoubleExponential) =
+    rand(rng, _skew_double_exponential_sepd(d))
 
 """
     ZeroInflatedPoisson(lambda, zi)

@@ -12,6 +12,8 @@ using Random
 using Statistics
 using StanBlocks
 
+const FAMILY_SURFACE_CACHE = joinpath(tempdir(), "brm-family-surfaces")
+
 df = (;
     x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
     prog=[0.0, 0.0, 1.0, 1.0, 2.0, 2.0],
@@ -20,6 +22,21 @@ df = (;
     y_nb=[0, 1, 2, 4, 3, 6],
     y_ord=[1, 2, 3, 1, 2, 3],
     y_t=[-0.8, -0.2, 0.1, 0.7, 1.0, 1.4],
+    y_truncated=[-0.7, -0.2, 0.1, 0.7, 1.0, 1.2],
+    y_censored=[-0.5, -0.2, 0.1, 0.7, 1.0, 1.0],
+    y_lognormal_censored=[0.25, 0.35, 0.60, 1.10, 1.80, 1.80],
+    y_exponential_censored=[0.10, 0.30, 0.70, 1.10, 1.50, 1.50],
+    y_weibull_censored=[0.20, 0.45, 0.75, 1.20, 1.60, 1.60],
+    count_truncated=[1, 1, 2, 4, 3, 4],
+    count_censored=[0, 1, 2, 4, 4, 4],
+    # Genuine interval evidence: the response is the lower endpoint, while the
+    # wrapper carries the row-wise upper endpoint.
+    y_interval=[0.10, 0.25, 0.40, 0.70, 0.95, 1.20],
+    y_interval_upper=[0.30, 0.50, 0.75, 1.05, 1.35, 1.70],
+    y_interval_bad_upper=[0.05, 0.20, 0.35, 0.60, 0.90, 1.10],
+    count_interval=[0, 0, 1, 2, 3, 4],
+    count_interval_upper=[1, 2, 2, 4, 5, 6],
+    y_bernoulli=[0, 1, 0, 1, 1, 0],
     trials=[8, 8, 10, 10, 12, 12],
     y_bb_shapes=[1, 2, 3, 4, 5, 7],
     y_bb_mean_precision=[0, 1, 4, 6, 8, 11],
@@ -45,6 +62,16 @@ family_builder = @brm begin
     loc ~ 1 + x
     log(scale) ~ 1
     y_t ~ LocationScale(loc, scale, TDist(4.0))
+
+    y_truncated ~ truncated(Normal(loc, scale); lower=-0.75, upper=1.25)
+    y_censored ~ censored(Normal(loc, scale); lower=-0.5, upper=1.0)
+    y_lognormal_censored ~ censored(LogNormal(loc, scale); lower=0.25, upper=1.8)
+    y_exponential_censored ~ censored(Exponential(lambda); lower=nothing, upper=1.5)
+    y_weibull_censored ~ censored(Weibull(1.4, 1.1); upper=1.6)
+    count_truncated ~ truncated(Poisson(lambda), 1, 4)
+    count_censored ~ censored(Poisson(lambda); lower=0, upper=4)
+    y_interval ~ interval_censored(Normal(loc, scale); upper=y_interval_upper)
+    count_interval ~ interval_censored(Poisson(lambda); upper=count_interval_upper)
 
     y_bb_shapes ~ BetaBinomial(trials, 2.0, 4.0)
 
@@ -116,6 +143,19 @@ const BRM = BayesianRegressionModels
     @test rand(MersenneTwister(42), binomial_logit, 64) ==
           rand(MersenneTwister(42), binomial_base, 64)
 
+    skew_double_exponential = SkewDoubleExponential(0.3, 1.4, 0.25)
+    skew_sepd = SkewedExponentialPower(
+        0.3, 1.4 / (4 * 0.25 * (1 - 0.25)), 1.0, 0.25)
+    @test skew_double_exponential isa ContinuousUnivariateDistribution
+    @test params(skew_double_exponential) == (0.3, 1.4, 0.25)
+    @test SkewDoubleExponential(params(skew_double_exponential)...) isa
+          SkewDoubleExponential
+    @test cdf(skew_double_exponential, 0.3) ≈ 0.25
+    @test logpdf.(Ref(skew_double_exponential), -2.0:0.5:2.0) ≈
+          logpdf.(Ref(skew_sepd), -2.0:0.5:2.0)
+    @test rand(MersenneTwister(42), skew_double_exponential, 64) ==
+          rand(MersenneTwister(42), skew_sepd, 64)
+
     censored_normal = TruncatedNormal(0.1, 1.2, -1.0, 2.0)
     censored_base = censored(Normal(0.1, 1.2), -1.0, 2.0)
     @test censored_normal isa UnivariateDistribution
@@ -126,7 +166,8 @@ const BRM = BayesianRegressionModels
     @test rand(MersenneTwister(42), censored_normal, 64) ==
           rand(MersenneTwister(42), censored_base, 64)
 
-    for d in (ordered, categorical, zip, nb2, bb2, binomial_logit, censored_normal)
+    for d in (ordered, categorical, zip, nb2, bb2, binomial_logit,
+              skew_double_exponential, censored_normal)
         draws = rand(MersenneTwister(20260729), d, 32)
         @test length(draws) == 32
         @test all(insupport.(Ref(d), draws))
@@ -138,6 +179,8 @@ const BRM = BayesianRegressionModels
     @test_throws DomainError NegativeBinomial2(0.0, 1.0)
     @test_throws DomainError BetaBinomial2(5, 1.0, 2.0)
     @test_throws DomainError BinomialLogit(-1, 0.0)
+    @test_throws DomainError SkewDoubleExponential(0.0, 0.0, 0.5)
+    @test_throws DomainError SkewDoubleExponential(0.0, 1.0, 1.0)
     @test_throws DomainError TruncatedNormal(0.0, 1.0, 2.0, -2.0)
 end
 
@@ -148,6 +191,7 @@ end
         y_bb2=[1, 3, 7],
         y_cat=[1, 2, 3],
         y_blogit=[0, 2, 5],
+        y_skew=[-1.2, 0.1, 2.0],
     )
     builder_v = @brm begin
         y_zip ~ ZeroInflatedPoisson(2.3, 0.25)
@@ -155,6 +199,7 @@ end
         y_bb2 ~ BetaBinomial2(8, 0.4, 5.0)
         y_cat ~ CategoricalLogit(-0.3, 1.2)
         y_blogit ~ BinomialLogit(5, -0.3)
+        y_skew ~ SkewDoubleExponential(0.3, 1.4, 0.25)
     end
     vbrmi = VBRMI(builder_v(df_v))
     expected =
@@ -162,7 +207,8 @@ end
         sum(logpdf.(NegativeBinomial2(3.2, 1.7), df_v.y_nb2)) +
         sum(logpdf.(BetaBinomial2(8, 0.4, 5.0), df_v.y_bb2)) +
         sum(logpdf.(CategoricalLogit(-0.3, 1.2), df_v.y_cat)) +
-        sum(logpdf.(BinomialLogit(5, -0.3), df_v.y_blogit))
+        sum(logpdf.(BinomialLogit(5, -0.3), df_v.y_blogit)) +
+        sum(logpdf.(SkewDoubleExponential(0.3, 1.4, 0.25), df_v.y_skew))
     @test LogDensityProblems.dimension(vbrmi) == 0
     @test logpdf(vbrmi, Float64[]) ≈ expected
 end
@@ -178,6 +224,8 @@ end
         Uniform=:uniform,
         LogNormal=:lognormal,
         Laplace=:double_exponential,
+        SkewDoubleExponential=:skew_double_exponential,
+        SkewedExponentialPower=:skew_double_exponential,
         Weibull=:weibull,
         InverseGamma=:inv_gamma,
         Bernoulli=:bernoulli,
@@ -204,6 +252,13 @@ end
     @test BRM._sb_stan_dist_args(Uniform, (:a, :b)) == (:a, :b)
     @test BRM._sb_stan_dist_args(LogNormal, (:mu, :sigma)) == (:mu, :sigma)
     @test BRM._sb_stan_dist_args(Laplace, (:mu, :theta)) == (:mu, :theta)
+    @test BRM._sb_stan_dist_args(
+        SkewDoubleExponential, (:mu, :sigma, :tau)) == (:mu, :sigma, :tau)
+    @test BRM._sb_stan_dist_args(
+        SkewedExponentialPower, (:mu, :sigma, 1.0, :alpha)) ==
+        (:mu, :(((4.0 .* sigma) .* alpha) .* (1.0 - alpha)), :alpha)
+    @test_throws ArgumentError BRM._sb_stan_dist_args(
+        SkewedExponentialPower, (:mu, :sigma, 2.0, :alpha))
     @test BRM._sb_stan_dist_args(Weibull, (:alpha, :theta)) == (:alpha, :theta)
     @test BRM._sb_stan_dist_args(InverseGamma, (:alpha, :theta)) == (:alpha, :theta)
     @test BRM._sb_stan_dist_args(Bernoulli, (:p,)) == (:p,)
@@ -316,6 +371,8 @@ generic_df = (;
     y_binomial_logit=[1, 3, 4],
     y_poisson=[0, 2, 6],
     y_nb=[0, 3, 7],
+    y_skew=[-1.2, 0.1, 2.0],
+    y_sepd=[-0.8, 0.4, 1.7],
 )
 
 generic_builder = @brm begin
@@ -336,6 +393,8 @@ generic_builder = @brm begin
     y_binomial_logit ~ BinomialLogit(5, -0.3)
     y_poisson ~ Poisson(2.3)
     y_nb ~ NegativeBinomial(2.5, 0.4)
+    y_skew ~ SkewDoubleExponential(0.3, 1.4, 0.25)
+    y_sepd ~ SkewedExponentialPower(-0.1, 0.8, 1.0, 0.7)
 end
 
 @testset "generic native-Stan mappings with complete GQ hooks are exact" begin
@@ -370,6 +429,8 @@ end
         y_binomial_logit=BinomialLogit(5, -0.3),
         y_poisson=Poisson(2.3),
         y_nb=NegativeBinomial(2.5, 0.4),
+        y_skew=SkewDoubleExponential(0.3, 1.4, 0.25),
+        y_sepd=SkewedExponentialPower(-0.1, 0.8, 1.0, 0.7),
     )
     for (target, dist) in pairs(expected)
         actual = getproperty(pointwise, Symbol(target, :_likelihood))
@@ -383,6 +444,10 @@ end
     binomial_draws = predictions.y_binomial_gen
     @test length(binomial_draws) == length(generic_df.y_binomial) * 32
     @test all(0 .<= binomial_draws .<= 5)
+    @test length(predictions.y_skew_gen) == length(generic_df.y_skew) * 32
+    @test length(predictions.y_sepd_gen) == length(generic_df.y_sepd) * 32
+    @test all(isfinite, predictions.y_skew_gen)
+    @test all(isfinite, predictions.y_sepd_gen)
 end
 
 @testset "Laplace is the q=0.5 asymmetric-Laplace special case" begin
@@ -521,6 +586,10 @@ end
 
 @testset "SBBRMI lowers density, pointwise log-lik and RNG paths" begin
     plan = generative_plan(family_builder, df; mod=@__MODULE__)
+    # StanBlocks 0eaebfa renamed the public HOF tokens without aliases. This
+    # guard therefore also pins the exact compatibility boundary: the model
+    # must resolve all three BRM wrappers against that public vocabulary.
+    @test StanBlocks.stan.transpiles(plan.model)
     code = BayesianRegressionModels.stan_code(plan)
 
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
@@ -563,7 +632,10 @@ end
     @test_throws "not a training level" reprocess(sb, unseen_cat)
 
     for target in (:y_zip, :y_nb, :y_ord, :y_t, :y_bb_shapes,
-                   :y_bb_mean_precision, :y_cat)
+                   :y_bb_mean_precision, :y_cat, :y_truncated, :y_censored,
+                   :y_lognormal_censored, :y_exponential_censored,
+                   :y_weibull_censored, :count_truncated, :count_censored,
+                   :y_interval, :count_interval)
         declaration = only(d for d in plan.declarations if d.target === target)
         @test declaration.role === :observation
         @test !isnothing(declaration.draw)
@@ -580,4 +652,175 @@ end
     @test families[:y_bb_shapes] === :beta_binomial
     @test families[:y_bb_mean_precision] === :beta_binomial
     @test families[:y_cat] === :categorical_logit
+    @test families[:y_truncated] === :truncated
+    @test families[:y_censored] === :censored
+    @test families[:y_lognormal_censored] === :censored
+    @test families[:y_exponential_censored] === :censored
+    @test families[:y_weibull_censored] === :censored
+    @test families[:count_truncated] === :truncated
+    @test families[:count_censored] === :censored
+    @test families[:y_interval] === :interval_censored
+    @test families[:count_interval] === :interval_censored
+end
+
+@testset "Julia-native wrapper surface and capability gate" begin
+    brmi = family_builder(df)
+    rhs_for(target) = begin
+        op = parent(getproperty(brmi.operations, target))
+        only(a for a in getargs(op) if a isa ExprColumn)
+    end
+
+    truncated_rhs = rhs_for(:y_truncated)
+    @test getf(truncated_rhs) === truncated
+    @test keys(getkwargs(truncated_rhs)) == (:lower, :upper)
+    @test getf(only(getargs(truncated_rhs))) === Normal
+
+    censored_rhs = rhs_for(:y_censored)
+    @test getf(censored_rhs) === censored
+    @test getf(only(getargs(censored_rhs))) === Normal
+
+    exponential_rhs = rhs_for(:y_exponential_censored)
+    @test BayesianRegressionModels._sb_normalize_bound(
+        getkwargs(exponential_rhs).lower) === nothing
+
+    interval_rhs = rhs_for(:y_interval)
+    @test getf(interval_rhs) === interval_censored
+    @test keys(getkwargs(interval_rhs)) == (:upper,)
+
+    unsupported_builder = @brm begin
+        eta ~ 1 + x
+        y_bernoulli ~ censored(BernoulliLogit(eta); lower=0, upper=1)
+    end
+    @test_throws "no generic CDF/CCDF composition capability" SBBRMI(
+        unsupported_builder(df); mod=@__MODULE__)
+end
+
+@testset "wrapper bounds fail before Stan" begin
+    bad_interval = @brm begin
+        loc ~ 1 + x
+        log(scale) ~ 1
+        y_interval ~ interval_censored(Normal(loc, scale); upper=y_interval_bad_upper)
+    end
+    @test_throws "lower endpoints must be strictly below upper endpoints" SBBRMI(
+        bad_interval(df); mod=@__MODULE__)
+
+    bad_keyword = @brm begin
+        loc ~ 1 + x
+        log(scale) ~ 1
+        y_truncated ~ truncated(Normal(loc, scale); lower=-1.0, typo=1.0)
+    end
+    @test_throws "accepts only `lower` and `upper` keywords" SBBRMI(
+        bad_keyword(df); mod=@__MODULE__)
+
+    bad_discrete_bounds = @brm begin
+        log(lambda) ~ 1 + x
+        count_truncated ~ truncated(Poisson(lambda); lower=1.5, upper=4.0)
+    end
+    @test_throws "discrete lower bounds must be integers" SBBRMI(
+        bad_discrete_bounds(df); mod=@__MODULE__)
+
+    missing_bounds = @brm begin
+        loc ~ 1 + x
+        log(scale) ~ 1
+        y_truncated ~ truncated(Normal(loc, scale))
+    end
+    @test_throws "needs at least one non-`nothing` bound" SBBRMI(
+        missing_bounds(df); mod=@__MODULE__)
+end
+
+composed_numeric_df = (;
+    y_truncated=[-0.6, 0.1, 1.1],
+    y_lower_truncated=[-0.25, 0.2, 1.8],
+    y_censored=[-0.5, 0.2, 1.0],
+    count_truncated=[1, 2, 4],
+    count_censored=[0, 2, 4],
+    interval_lower=[-0.4, 0.0, 0.5],
+    interval_upper=[-0.1, 0.4, 1.0],
+    count_interval_lower=[0, 1, 3],
+    count_interval_upper=[1, 3, 5],
+)
+
+composed_numeric_builder = @brm begin
+    y_truncated ~ truncated(Normal(0.2, 1.1); lower=-0.75, upper=1.25)
+    y_lower_truncated ~ truncated(Normal(0.2, 1.1); lower=-0.25)
+    y_censored ~ censored(Normal(0.2, 1.1); lower=-0.5, upper=1.0)
+    count_truncated ~ truncated(Poisson(2.2); lower=1, upper=4)
+    count_censored ~ censored(Poisson(2.2); lower=0, upper=4)
+    interval_lower ~ interval_censored(Normal(0.2, 1.1); upper=interval_upper)
+    count_interval_lower ~ interval_censored(
+        Poisson(2.2); upper=count_interval_upper)
+end
+
+@testset "wrapper pointwise and predictive semantics match Distributions" begin
+    descriptor = brm_descriptor(
+        composed_numeric_builder, composed_numeric_df; mod=@__MODULE__)
+    code = brm_execute(descriptor, :transpile)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+
+    mkpath(FAMILY_SURFACE_CACHE)
+    problem = brm_execute(
+        descriptor, :instantiate;
+        path=joinpath(FAMILY_SURFACE_CACHE, string(descriptor.id) * ".stan"))
+    @test LogDensityProblems.dimension(problem) == 0
+    pointwise = brm_execute(
+        descriptor, :pointwise_loglik;
+        problem, draws=Float64[], seed=20260729)
+
+    normal = Normal(0.2, 1.1)
+    poisson = Poisson(2.2)
+    expected = (;
+        y_truncated=logpdf.(
+            Ref(truncated(normal; lower=-0.75, upper=1.25)),
+            composed_numeric_df.y_truncated),
+        y_lower_truncated=logpdf.(
+            Ref(truncated(normal; lower=-0.25, upper=nothing)),
+            composed_numeric_df.y_lower_truncated),
+        y_censored=logpdf.(
+            Ref(censored(normal; lower=-0.5, upper=1.0)),
+            composed_numeric_df.y_censored),
+        count_truncated=logpdf.(
+            Ref(truncated(poisson; lower=1, upper=4)),
+            composed_numeric_df.count_truncated),
+        count_censored=logpdf.(
+            Ref(censored(poisson; lower=0, upper=4)),
+            composed_numeric_df.count_censored),
+        interval_lower=log.(
+            cdf.(Ref(normal), composed_numeric_df.interval_upper) .-
+            cdf.(Ref(normal), composed_numeric_df.interval_lower)),
+        count_interval_lower=log.(
+            cdf.(Ref(poisson), composed_numeric_df.count_interval_upper) .-
+            cdf.(Ref(poisson), composed_numeric_df.count_interval_lower)),
+    )
+    for (target, values) in pairs(expected)
+        actual = getproperty(pointwise, Symbol(target, :_likelihood))
+        @test actual ≈ values atol=1e-10
+    end
+
+    predictions = brm_execute(
+        descriptor, :predict;
+        problem, draws=zeros(0, 128), seed=20260729)
+    @test all(-0.75 .<= predictions.y_truncated_gen .<= 1.25)
+    @test all(predictions.y_lower_truncated_gen .>= -0.25)
+    @test all(-0.5 .<= predictions.y_censored_gen .<= 1.0)
+    @test all(1 .<= predictions.count_truncated_gen .<= 4)
+    @test all(0 .<= predictions.count_censored_gen .<= 4)
+    # Interval evidence changes the likelihood only: predictive draws remain
+    # on the uncoarsened base-family scale and therefore need not lie inside
+    # any observed interval.
+    @test any(predictions.interval_lower_gen .< minimum(composed_numeric_df.interval_lower))
+    @test all(predictions.count_interval_lower_gen .>= 0)
+end
+
+@testset "wrapper families execute through BridgeStan" begin
+    sb = SBBRMI(family_builder(df); mod=@__MODULE__)
+    mkpath(FAMILY_SURFACE_CACHE)
+    path = joinpath(FAMILY_SURFACE_CACHE,
+                    string(hash(BayesianRegressionModels.stan_code(sb))) * ".stan")
+    problem = StanBlocks.stan_instantiate(sb.model; path)
+    n = LogDensityProblems.dimension(problem)
+    q = [0.05 * ((i % 5) - 2) for i in 1:n]
+    lp, gradient = LogDensityProblems.logdensity_and_gradient(problem, q)
+    @test isfinite(lp)
+    @test length(gradient) == n
+    @test all(isfinite, gradient)
 end

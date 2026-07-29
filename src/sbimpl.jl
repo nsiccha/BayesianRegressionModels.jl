@@ -114,9 +114,54 @@ function _check_term_kwargs(::Type{<:CircularVonMises}, kwargs)
     _sb_circular_interval(kwargs)
     nothing
 end
+
+function _check_term_kwargs(::Type{<:Ordinal}, kwargs)
+    allowed = (:discrimination, :per_threshold)
+    unknown = filter(k -> k ∉ allowed, keys(kwargs))
+    isempty(unknown) || error(
+        "Ordinal: unsupported keyword(s): $(join(unknown, ", ")); " *
+        "supported keywords are `discrimination` and `per_threshold`")
+    nothing
+end
+
+"""
+    interval_censored(base; upper)
+
+Formula-only RHS wrapper for genuine interval evidence. The observed response
+column supplies each interval's lower endpoint and `upper` supplies its upper
+endpoint:
+
+```julia
+y_lower ~ interval_censored(Normal(mu, sigma); upper=y_upper)
+```
+
+Each row contributes the base family's probability over `(y_lower, y_upper]`,
+exactly `CDF(y_upper) - CDF(y_lower)`. The lower endpoint is open for discrete
+families too; unlike inclusive truncation it receives no predecessor shift.
+Posterior prediction remains on the uncoarsened base-response scale. This is
+separate from Distributions.jl's `censored`, which is the distribution
+of `clamp(X, lower, upper)` and therefore has atoms at its thresholds.
+
+The marker is intentionally formula-local: unlike `truncated` and `censored`,
+there is no existing Distributions.jl value with these per-row evidence
+semantics for BRM to construct outside `@brm`.
+"""
+function interval_censored end
+
 popefs = StanBlocks.@slic begin
     n_covariates = dims(X)[2]
     beta_pop ~ std_normal(; n=n_covariates)
+    return X * beta_pop
+end
+
+# Population effects with coefficient-specific Normal priors. Kept as a
+# sibling of `popefs` so the default submodel (and every downstream direct use
+# of it) remains byte-for-byte unchanged. The caller supplies one location and
+# scale per design column; StanBlocks keeps the same prefixed `beta_pop` vector
+# parameter name as the default submodel.
+_popefs_normal = StanBlocks.@slic begin
+    n_covariates = dims(X)[2]
+    beta_pop ~ normal(beta_loc, beta_scale; n=n_covariates)
     return X * beta_pop
 end
 
@@ -157,6 +202,15 @@ ranef_intercept = StanBlocks.@slic begin
     log_scale ~ std_normal()
     xi ~ std_normal(; n=n_groups)
     return exp(log_scale) * xi[group_idx]
+end
+
+# Draw-returning sibling used by multi-membership intercepts. The caller keeps
+# `group_idx=` in the declaration metadata (for ranef_blocks) but performs the
+# many-to-one weighted gather with `multi_membership_intercept` below.
+ranef_intercept_draws = StanBlocks.@slic begin
+    log_scale ~ std_normal()
+    xi ~ std_normal(; n=n_groups)
+    return exp(log_scale) * xi
 end
 
 # Correlated random effects for K terms x G groups. brms-style (1 + x + y | g).
@@ -234,6 +288,73 @@ ranef_correlated_draws = StanBlocks.@slic begin
     z_flat ~ std_normal(; n=n_terms * n_groups)
     z = reshape(z_flat, n_terms, n_groups)
     return (diag_pre_multiply(tau, L) * z)'   # n_groups x n_terms
+end
+
+# Heterogeneous marginal-SD prior used only when an `effect(sd, ID, ...)`
+# statement targets a shared `|ID|` bucket. `family[i] == 0` retains BRM's
+# historical half-standard-normal density for that margin; `family[i] == 1`
+# selects an Exponential whose `rate[i]` is already in Stan's rate
+# parameterization. A single vector density lets block defaults and
+# margin-specific overrides compose without double-prioring any element.
+StanBlocks.@deffun begin
+    @lhs @lpxf brm_ranef_sd_lpdf(tau::vector[n], family::vector[n],
+                                  rate::vector[n])::real = begin
+        rv = 0.
+        for i in 1:n
+            if family[i] == 0
+                rv += std_normal_lpdf(tau[i])::real
+            else
+                rv += exponential_lpdf(tau[i], rate[i])::real
+            end
+        end
+        rv
+    end
+end
+
+ranef_correlated_draws_effect = StanBlocks.@slic begin
+    L      ~ lkj_corr_cholesky(lkj_eta; n=n_terms)
+    tau    ~ brm_ranef_sd(sd_family, sd_rate; n=n_terms, lower=0.)
+    z_flat ~ std_normal(; n=n_terms * n_groups)
+    z = reshape(z_flat, n_terms, n_groups)
+    return (diag_pre_multiply(tau, L) * z)'
+end
+
+# Multi-membership gathers. Membership indices and weights are row-major flat
+# vectors: entries `(i-1)*n_memberships + m` describe observation `i`, member
+# slot `m`. Keeping indices flat avoids relying on a Stan array-of-int matrix
+# spelling while retaining a single validated preprocessing record in Julia.
+StanBlocks.@deffun begin
+    multi_membership_intercept(b::vector[n_groups],
+                               group_idx::int[n_mm],
+                               weights::vector[n_mm],
+                               n_obs::int,
+                               n_memberships::int)::vector[n_obs] = begin
+        rv = rep_vector(0., n_obs)
+        for i in 1:n_obs
+            for m in 1:n_memberships
+                j = (i - 1) * n_memberships + m
+                rv[i] += weights[j] * b[group_idx[j]]
+            end
+        end
+        rv
+    end
+    multi_membership_correlated(Z::matrix[n_obs, n_terms],
+                                b::matrix[n_groups, n_terms],
+                                group_idx::int[n_mm],
+                                weights::vector[n_mm],
+                                n_obs::int,
+                                n_memberships::int)::vector[n_obs] = begin
+        rv = rep_vector(0., n_obs)
+        for i in 1:n_obs
+            for m in 1:n_memberships
+                j = (i - 1) * n_memberships + m
+                for k in 1:n_terms
+                    rv[i] += weights[j] * Z[i, k] * b[group_idx[j], k]
+                end
+            end
+        end
+        rv
+    end
 end
 
 # ---- cv-contagious sizing (opt-in; for out-of-sample / CV models) ------------
@@ -395,6 +516,22 @@ ranef_correlated_draws_centered = StanBlocks.@slic begin
     return ranef_b_matrix(b)   # n_groups x n_terms
 end
 
+# Configured centered blocks use a plate of native MVN-Cholesky draws. With the
+# heterogeneous custom `tau` density in the same submodel, the array-vector
+# `multi_normal_cholesky0` tracetype cannot recover its free outer dimension;
+# the plate carries that dimension explicitly and emits the model-scale effect
+# parameter as `<binding>_b_cols_bc`. Keep prediction.jl's family table aligned.
+ranef_correlated_draws_centered_effect = StanBlocks.@slic begin
+    L   ~ lkj_corr_cholesky(lkj_eta; n=n_terms)
+    tau ~ brm_ranef_sd(sd_family, sd_rate; n=n_terms, lower=0.)
+    b_cols ~ plate(; outer=(n_groups,)) do g
+        bc::vector[n_terms] ~ multi_normal_cholesky(
+            rep_vector(0., n_terms), diag_pre_multiply(tau, L))
+        bc
+    end
+    return b_cols'
+end
+
 # Stratified gather + Cholesky scale, kept as a Stan function (loops are not
 # allowed in @slic bodies, but they are allowed in @deffun bodies). For each
 # group g, pick the stratum s = stratum_idx[g] and compute
@@ -530,6 +667,253 @@ StanBlocks.@deffun begin
             end
         end
         rv
+    end
+end
+
+# One internal Stan family serves the public typed ordinal composition. The
+# integer tags are emitted compile-time literals (structure: cumulative=1,
+# stopping-ratio=2; link: logit=1, probit=2, cloglog=3). Keeping the tags inside
+# one private UDF avoids a Cartesian product of public pair names while still
+# giving StanBlocks the complete lpmf / pointwise-lpmf / RNG triad.
+#
+# For cumulative-logit the scalar density delegates to Stan's native
+# ordered_logistic_lpmf after applying discrimination to both eta and the
+# cutpoints. Probit and cloglog use their exact native CDF/log-CDF primitives.
+# Stopping-ratio has no native Stan distribution, so its sequential hazards are
+# accumulated directly in log space.
+StanBlocks.@deffun begin
+    @stanonly brm_ordinal_logcdf(z::real, link::int)::real = begin
+        if link == 1
+            log_inv_logit(z)
+        else
+            if link == 2
+                normal_lcdf(z, 0., 1.)
+            else
+                log1m_exp(-exp(z))
+            end
+        end
+    end
+    @stanonly brm_ordinal_logccdf(z::real, link::int)::real = begin
+        if link == 1
+            log_inv_logit(-z)
+        else
+            if link == 2
+                normal_lccdf(z, 0., 1.)
+            else
+                -exp(z)
+            end
+        end
+    end
+    @stanonly brm_ordinal_cdf(z::real, link::int)::real = begin
+        if link == 1
+            inv_logit(z)
+        else
+            if link == 2
+                Phi(z)
+            else
+                -expm1(-exp(z))
+            end
+        end
+    end
+
+    @stanonly @lpxf brm_ordinal_lpmf(y::int, eta::real, thresholds::vector[k],
+                           discrimination::real, structure::int, link::int,
+                           threshold_effect::vector[k])::real = begin
+        K = k + 1
+        if discrimination <= 0.
+            negative_infinity()
+        else
+            if y < 1
+                negative_infinity()
+            else
+                if y > K
+                    negative_infinity()
+                else
+                    if structure == 1
+                        if link == 1
+                            ordered_logistic_lpmf(
+                                y,
+                                discrimination * eta,
+                                discrimination .* thresholds,
+                            )
+                        else
+                            if y == 1
+                                z_first = discrimination * (thresholds[1] - eta)
+                                brm_ordinal_logcdf(z_first, link)
+                            else
+                                if y == K
+                                    z_last = discrimination * (thresholds[k] - eta)
+                                    brm_ordinal_logccdf(z_last, link)
+                                else
+                                    z_hi = discrimination * (thresholds[y] - eta)
+                                    z_lo = discrimination * (thresholds[y - 1] - eta)
+                                    log_diff_exp(
+                                        brm_ordinal_logcdf(z_hi, link),
+                                        brm_ordinal_logcdf(z_lo, link),
+                                    )
+                                end
+                            end
+                        end
+                    else
+                        rv = 0.
+                        for j in 1:k
+                            z_stage = discrimination *
+                                (thresholds[j] - eta - threshold_effect[j])
+                            if j < y
+                                rv += brm_ordinal_logccdf(z_stage, link)
+                            else
+                                if j == y
+                                    rv += brm_ordinal_logcdf(z_stage, link)
+                                end
+                            end
+                        end
+                        rv
+                    end
+                end
+            end
+        end
+    end
+
+    @stanonly brm_ordinal_lpmf(y::int[n], eta::vector[n], thresholds::vector[k],
+                     discrimination::vector[n], structure::int, link::int,
+                     threshold_effect::matrix[n,k])::real = begin
+        rv = 0.
+        for i in 1:n
+            rv += brm_ordinal_lpmf(
+                y[i], eta[i], thresholds, discrimination[i], structure, link,
+                to_vector(threshold_effect[i, :]),
+            )
+        end
+        rv
+    end
+    @stanonly brm_ordinal_lpmf(y::int[n], eta::vector[n], thresholds::vector[k],
+                     discrimination::real, structure::int, link::int,
+                     threshold_effect::matrix[n,k])::real = begin
+        brm_ordinal_lpmf(
+            y, eta, thresholds, rep_vector(discrimination, n), structure, link,
+            threshold_effect,
+        )
+    end
+    @stanonly brm_ordinal_lpmf(y::int[n], eta::real, thresholds::vector[k],
+                     discrimination::vector[n], structure::int, link::int,
+                     threshold_effect::matrix[n,k])::real = begin
+        brm_ordinal_lpmf(
+            y, rep_vector(eta, n), thresholds, discrimination, structure, link,
+            threshold_effect,
+        )
+    end
+    @stanonly brm_ordinal_lpmf(y::int[n], eta::real, thresholds::vector[k],
+                     discrimination::real, structure::int, link::int,
+                     threshold_effect::matrix[n,k])::real = begin
+        brm_ordinal_lpmf(
+            y, rep_vector(eta, n), thresholds, rep_vector(discrimination, n),
+            structure, link, threshold_effect,
+        )
+    end
+
+    @stanonly brm_ordinal_lpmfs(args...) = begin
+        brm_ordinal_lpmf(args...)
+    end
+    @stanonly brm_ordinal_lpmfs(y::int[n], eta::vector[n], thresholds::vector[k],
+                      discrimination::vector[n], structure::int, link::int,
+                      threshold_effect::matrix[n,k])::vector[n] = begin
+        rv::vector[n]
+        for i in 1:n
+            rv[i] = brm_ordinal_lpmf(
+                y[i], eta[i], thresholds, discrimination[i], structure, link,
+                to_vector(threshold_effect[i, :]),
+            )
+        end
+        rv
+    end
+    @stanonly brm_ordinal_lpmfs(y::int[n], eta::vector[n], thresholds::vector[k],
+                      discrimination::real, structure::int, link::int,
+                      threshold_effect::matrix[n,k])::vector[n] = begin
+        brm_ordinal_lpmfs(
+            y, eta, thresholds, rep_vector(discrimination, n), structure, link,
+            threshold_effect,
+        )
+    end
+    @stanonly brm_ordinal_lpmfs(y::int[n], eta::real, thresholds::vector[k],
+                      discrimination::vector[n], structure::int, link::int,
+                      threshold_effect::matrix[n,k])::vector[n] = begin
+        brm_ordinal_lpmfs(
+            y, rep_vector(eta, n), thresholds, discrimination, structure, link,
+            threshold_effect,
+        )
+    end
+    @stanonly brm_ordinal_lpmfs(y::int[n], eta::real, thresholds::vector[k],
+                      discrimination::real, structure::int, link::int,
+                      threshold_effect::matrix[n,k])::vector[n] = begin
+        brm_ordinal_lpmfs(
+            y, rep_vector(eta, n), thresholds, rep_vector(discrimination, n),
+            structure, link, threshold_effect,
+        )
+    end
+
+    @stanonly brm_ordinal_rng(eta::real, thresholds::vector[k], discrimination::real,
+                    structure::int, link::int,
+                    threshold_effect::vector[k])::int = begin
+        K = k + 1
+        rv = K
+        if structure == 1
+            u = uniform_rng(0., 1.)
+            for j in 1:k
+                if rv == K
+                    z_cumulative = discrimination * (thresholds[j] - eta)
+                    if u <= brm_ordinal_cdf(z_cumulative, link)
+                        rv += j - rv
+                    end
+                end
+            end
+        else
+            for j in 1:k
+                if rv == K
+                    z_stopping = discrimination *
+                        (thresholds[j] - eta - threshold_effect[j])
+                    if bernoulli_rng(brm_ordinal_cdf(z_stopping, link)) == 1
+                        rv += j - rv
+                    end
+                end
+            end
+        end
+        rv
+    end
+    @stanonly brm_ordinal_rng(int[n], eta::vector[n], thresholds::vector[k],
+                    discrimination::vector[n], structure::int, link::int,
+                    threshold_effect::matrix[n,k])::int[n] = begin
+        rv::int[n]
+        for i in 1:n
+            rv[i] = brm_ordinal_rng(
+                eta[i], thresholds, discrimination[i], structure, link,
+                to_vector(threshold_effect[i, :]),
+            )
+        end
+        rv
+    end
+    @stanonly brm_ordinal_rng(int[n], eta::vector[n], thresholds::vector[k],
+                    discrimination::real, structure::int, link::int,
+                    threshold_effect::matrix[n,k])::int[n] = begin
+        brm_ordinal_rng(
+            int[n], eta, thresholds, rep_vector(discrimination, n), structure,
+            link, threshold_effect,
+        )
+    end
+    @stanonly brm_ordinal_rng(int[n], eta::real, thresholds::vector[k],
+                    discrimination::vector[n], structure::int, link::int,
+                    threshold_effect::matrix[n,k])::int[n] = begin
+        brm_ordinal_rng(
+            int[n], rep_vector(eta, n), thresholds, discrimination, structure,
+            link, threshold_effect,
+        )
+    end
+    @stanonly brm_ordinal_rng(int[n], eta::real, thresholds::vector[k],
+                    discrimination::real, structure::int, link::int,
+                    threshold_effect::matrix[n,k])::int[n] = begin
+        brm_ordinal_rng(
+            int[n], rep_vector(eta, n), thresholds,
+            rep_vector(discrimination, n), structure, link, threshold_effect,
+        )
     end
 end
 
@@ -1245,8 +1629,8 @@ end
 # for a CategoricalVector the level position == `CA.levelcode`; for a plain
 # vector `sort(unique)` gives the same ordering. `_sb_level_index` (the
 # construct-time entry) is unchanged.
-_sb_fit_levels(raw::CA.CategoricalVector) = CA.levels(raw)
-_sb_fit_levels(raw::AbstractVector) = sort(unique(raw))
+_brm_fit_levels(raw::CA.CategoricalVector) = CA.levels(raw)
+_sb_fit_levels(raw::AbstractVector) = _brm_fit_levels(raw)
 _sb_apply_levels(levels, raw::CA.CategoricalVector) = _sb_apply_levels(levels, CA.unwrap.(raw))
 _sb_apply_levels(levels, raw::AbstractVector) = begin
     lm = Dict(l => i for (i, l) in enumerate(levels))
@@ -1369,6 +1753,97 @@ function _check_term_kwargs(::typeof(t2), kw)
     nothing
 end
 
+_sb_mm_values(raw::CA.CategoricalVector) = CA.unwrap.(raw)
+_sb_mm_values(raw::AbstractVector) = raw
+_sb_mm_level_pool(raw::CA.CategoricalVector) = collect(CA.levels(raw))
+_sb_mm_level_pool(raw::AbstractVector) = collect(unique(raw))
+
+function _sb_mm_fit_levels(raw_groups)
+    pooled = Any[]
+    for raw in raw_groups
+        append!(pooled, _sb_mm_level_pool(raw))
+    end
+    unique!(pooled)
+    try
+        sort!(pooled)
+    catch
+        error("sbimpl: `mm(...)` grouping levels must be mutually orderable so ",
+              "one shared level index can be fitted (got $(repr(pooled)))")
+    end
+    pooled
+end
+
+function _sb_prepare_mm(raw_groups::Tuple, raw_weights, normalize::Bool;
+                        levels=nothing,
+                        group_names=ntuple(i -> Symbol(:group_, i), length(raw_groups)),
+                        weight_names=nothing)
+    M = length(raw_groups)
+    M >= 2 || error("sbimpl: internal — multi-membership preprocessing received $M groups")
+    all(v -> v isa AbstractVector, raw_groups) || error(
+        "sbimpl: every `mm(...)` group must resolve to a vector column")
+    N = length(first(raw_groups))
+    group_values = map(_sb_mm_values, raw_groups)
+    for m in 1:M
+        v = group_values[m]
+        length(v) == N || error(
+            "sbimpl: `mm(...)` group column `$(group_names[m])` has $(length(v)) rows; ",
+            "expected $N to match `$(group_names[1])`")
+        bad = findfirst(ismissing, v)
+        isnothing(bad) || error(
+            "sbimpl: `mm(...)` group column `$(group_names[m])` is missing at row $bad")
+    end
+
+    fitted_levels = isnothing(levels) ? _sb_mm_fit_levels(raw_groups) : collect(levels)
+    isempty(fitted_levels) && error("sbimpl: `mm(...)` grouping columns contain no levels")
+    level_map = Dict(l => i for (i, l) in enumerate(fitted_levels))
+    group_idx = Vector{Int}(undef, N * M)
+    for i in 1:N, m in 1:M
+        l = group_values[m][i]
+        haskey(level_map, l) || error(
+            "sbimpl: reprocess: `mm(...)` group column `$(group_names[m])` has ",
+            "unseen level `$(l)` at row $i (training levels: $(fitted_levels)). ",
+            "Re-fit with `freeze_constants=false` to derive a new shared level set.")
+        group_idx[(i - 1) * M + m] = level_map[l]
+    end
+
+    weights = Vector{Float64}(undef, N * M)
+    if isnothing(raw_weights)
+        fill!(weights, inv(Float64(M)))
+    else
+        length(raw_weights) == M || error(
+            "sbimpl: internal — `mm(...)` has $M groups but $(length(raw_weights)) weights")
+        names = isnothing(weight_names) ? ntuple(i -> Symbol(:weight_, i), M) : weight_names
+        for m in 1:M
+            v = raw_weights[m]
+            v isa AbstractVector || error(
+                "sbimpl: `mm(...)` weight `$(names[m])` must resolve to a vector column")
+            length(v) == N || error(
+                "sbimpl: `mm(...)` weight column `$(names[m])` has $(length(v)) rows; expected $N")
+            for i in 1:N
+                x = v[i]
+                x isa Real || error(
+                    "sbimpl: `mm(...)` weight `$(names[m])` at row $i must be real; got $(repr(x))")
+                isfinite(x) || error(
+                    "sbimpl: `mm(...)` weight `$(names[m])` at row $i must be finite; got $(repr(x))")
+                x >= 0 || error(
+                    "sbimpl: `mm(...)` weight `$(names[m])` at row $i must be nonnegative; got $(repr(x))")
+                xf = Float64(x)
+                isfinite(xf) || error(
+                    "sbimpl: `mm(...)` weight `$(names[m])` at row $i cannot be represented as finite Float64")
+                weights[(i - 1) * M + m] = xf
+            end
+        end
+        for i in 1:N
+            row = ((i - 1) * M + 1):(i * M)
+            total = sum(@view weights[row])
+            isfinite(total) || error("sbimpl: `mm(...)` weights have a non-finite total at row $i")
+            total > 0 || error("sbimpl: `mm(...)` weights must have a positive total at row $i")
+            normalize && (@views weights[row] ./= total)
+        end
+    end
+    (; levels=fitted_levels, group_idx, weights, n_obs=N, n_memberships=M)
+end
+
 # HSGP fit/apply split. The scalar methods reproduce the historical 1D basis;
 # the tuple methods form its tensor product for variadic `hsgp(x...)`.
 _sb_fit_hsgp(raw::AbstractVector{<:Real}, K::Integer, c::Real) = begin
@@ -1470,6 +1945,14 @@ rather than silently emitting an in-sample block. Note also that centered and
 non-centered emissions use different unconstrained coordinates, so fitted
 draws are not interchangeable between them.
 
+Formula statements `effect(sd, ID) ~ Exponential(scale)` and
+`effect(cor, ID) ~ LKJCholesky(K, eta)` configure a shared `|ID|` block.
+An SD statement can instead select one emitted margin with
+`effect(sd, ID, predictor, coefficient)`, or use the three-argument shorthand
+when that predictor contributes exactly one margin. See [`ranefcoefnames`](@ref)
+for the authoritative ordered addresses. Omitted statements retain historical
+defaults; Julia's Exponential scale is converted to Stan's rate.
+
 Use [`stan_code`](@ref) to extract the transpiled Stan source. For
 sampling, load `StanLogDensityProblems` + `BridgeStan` and wrap the
 emitted `SlicModel` in a `StanProblem`.
@@ -1488,7 +1971,8 @@ src   = stan_code(sbbrmi)
 # data key, how to regenerate that key from a new df:
 #   kind         -- which transform (:zscale/:standardize/:center/:factor/:mo/
 #                   :spline/:tensor_spline/:gp/:hsgp/:protect/:interaction/
-#                   :categorical_outcome)
+#                   :categorical_outcome/:ordinal_outcome/
+#                   :ordinal_threshold_predictor)
 #   const_       -- the fitted constant: (μ,σ) / μ / level-vector / TPS basis /
 #                   tensor-spline margins/centers / exact-GP axis metadata /
 #                   HSGP (μ,L,K,c) / categorical
@@ -1554,11 +2038,129 @@ function _sb_gp_axes_from_df(df, raw_ref, label::Symbol)
     axes
 end
 
+# `mm`-only source columns are consumed entirely by Julia preprocessing. Find
+# them before the generic data collector so raw labels (including strings) do
+# not become unused Stan data. A source ALSO referenced outside `mm` is retained
+# normally (e.g. `w1 + (1 | mm(...; weights=(w1,w2)))`).
+_sb_collect_mm_sources!(_, _) = nothing
+_sb_collect_mm_sources!(out, x::NamedColumn) = _sb_collect_mm_sources!(out, parent(x))
+_sb_collect_mm_sources!(out, x::ExprColumn) = begin
+    foreach(a -> _sb_collect_mm_sources!(out, a), getargs(x))
+    foreach(v -> _sb_collect_mm_sources!(out, v), values(getkwargs(x)))
+end
+_sb_collect_mm_sources!(out, x::MultiMembershipTerm) = begin
+    foreach(g -> push!(out, name(g)), getargs(x))
+    weights = getfield(x, :weights)
+    isnothing(weights) || foreach(w -> push!(out, name(w)), weights)
+end
+
+_sb_collect_non_mm_sources!(_, _) = nothing
+_sb_collect_non_mm_sources!(out, x::NamedColumn) = begin
+    parent(x) isa DataColumn && push!(out, name(x))
+    nothing
+end
+_sb_collect_non_mm_sources!(out, x::ExprColumn) = begin
+    foreach(a -> _sb_collect_non_mm_sources!(out, a), getargs(x))
+    foreach(v -> _sb_collect_non_mm_sources!(out, v), values(getkwargs(x)))
+end
+_sb_collect_non_mm_sources!(_, ::MultiMembershipTerm) = nothing
+
 struct SBBRMI{P<:BRMI, M, D<:AbstractDict, PP<:AbstractDict}
     parent::P
     model::M
     data::D
     preproc::PP
+end
+
+# Resolve formula-level `effect(...) ~ Normal(...)` statements against the
+# authoritative population-column labels before emission. The returned vector
+# for each LP is aligned 1:1 with `popcoefnames`; `nothing` means retain the
+# default Normal(0, 1) for that column.
+function _sb_effect_prior_overrides(brmi::BRMI)
+    specs = effect_priors(brmi)
+    isempty(specs) && return Dict{Symbol,Vector{Any}}()
+
+    lp_names = Symbol[x.name for x in linear_predictors(brmi)]
+    labels_by_lp = Dict{Symbol,Vector{Symbol}}()
+    for lp in lp_names
+        labels = try
+            popcoefnames(brmi, lp)
+        catch err
+            error("sbimpl: cannot resolve population-effect labels for predictor `$lp` ",
+                  "while applying `effect(...)`: $(sprint(showerror, err))")
+        end
+        isnothing(labels) || (labels_by_lp[lp] = labels)
+    end
+
+    overrides = Dict{Symbol,Vector{Any}}()
+    for spec in specs
+        T = _as_distribution_type(spec.family)
+        (!isnothing(T) && T <: Normal) || error(
+            "sbimpl: population `effect(...)` overrides currently support only " *
+            "`Normal(location, scale)`; got `$(spec.family)`. Ordinary scalar " *
+            "parameter priors remain available for other supported families.")
+        isempty(spec.keywords) || error(
+            "sbimpl: `effect(...) ~ Normal(...)` does not accept distribution " *
+            "keywords; put bounds on an explicitly declared scalar parameter instead")
+
+        target = spec.predictor
+        if isnothing(target)
+            candidates = Symbol[lp for lp in lp_names
+                                if spec.coefficient in get(labels_by_lp, lp, Symbol[])]
+            isempty(candidates) && error(
+                "sbimpl: `effect($(spec.coefficient))` matches no population " *
+                "coefficient. Inspect `popcoefnames(brmi, lp)` for valid labels.")
+            length(candidates) == 1 || error(
+                "sbimpl: `effect($(spec.coefficient))` is ambiguous across linear " *
+                "predictors $(join(candidates, ", ")); use " *
+                "`effect(linear_predictor, $(spec.coefficient))`.")
+            target = only(candidates)
+        end
+
+        haskey(labels_by_lp, target) || error(
+            "sbimpl: `effect($target, $(spec.coefficient))` names no linear " *
+            "predictor with population coefficients. Available predictors: " *
+            "$(join(sort!(collect(keys(labels_by_lp))), ", ")).")
+        labels = labels_by_lp[target]
+        idx = findfirst(==(spec.coefficient), labels)
+        isnothing(idx) && error(
+            "sbimpl: `$(spec.coefficient)` is not a population coefficient of " *
+            "`$target`. Available labels: $(join(labels, ", ")).")
+        target_overrides = get!(overrides, target) do
+            Any[nothing for _ in labels]
+        end
+        isnothing(target_overrides[idx]) || error(
+            "sbimpl: duplicate prior override for " *
+            "`effect($target, $(spec.coefficient))`")
+        target_overrides[idx] = spec.expression
+    end
+    overrides
+end
+
+function _sb_effect_normal_args(rhs::ExprColumn)
+    args = _sb_stan_dist_args(getf(rhs), map(_sb_effect_prior_arg, getargs(rhs)))
+    length(args) == 2 || error(
+        "sbimpl: `effect(...) ~ Normal(...)` must lower to exactly location and " *
+        "scale arguments, got $(length(args))")
+    args
+end
+
+_sb_effect_prior_arg(x) = _sb_prior_arg(x)
+function _sb_effect_prior_arg(x::ExprColumn)
+    args = map(_sb_effect_prior_arg, getargs(x))
+    # Formula parsing captures literal arithmetic as ExprColumns. Evaluate an
+    # all-numeric effect-prior hyperparameter in Julia so `log(1 / 8)` retains
+    # Julia's floating division semantics instead of becoming Stan integer
+    # division. Symbol-bearing expressions stay as Stan expressions.
+    if all(a -> a isa Real, args)
+        value = try
+            getf(x)(args...)
+        catch
+            nothing
+        end
+        value isa Real && return value
+    end
+    Expr(:call, getf(x), args...)
 end
 
 SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
@@ -1592,12 +2194,21 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     for (_, op) in pairs(brmi.operations)
         _sb_visit_op!(prepass, op)
     end
+    effect_overrides = _sb_effect_prior_overrides(brmi)
     # Prepass 1: stash every data-backed NamedColumn so later intercept-only
     # predictors have a length probe to hang `rep_vector(1., num_elements(...))`
     # off, regardless of iteration order. Decorators that materialise their
     # own columns (e.g. `mi`'s `_sb_emit_mi!`) claim them via the prepass'
     # `:skip_data` bucket; the data-collection pass honours that.
     skip_data = get(prepass, :skip_data, Set{Symbol}())
+    mm_sources = Set{Symbol}()
+    non_mm_sources = Set{Symbol}()
+    for (_, op) in pairs(brmi.operations)
+        p = op isa NamedColumn ? parent(op) : op
+        _sb_collect_mm_sources!(mm_sources, p)
+        _sb_collect_non_mm_sources!(non_mm_sources, p)
+    end
+    union!(skip_data, setdiff(mm_sources, non_mm_sources))
     for (_, op) in pairs(brmi.operations)
         _sb_collect_data!(data, op; skip=skip_data)
     end
@@ -1606,7 +2217,9 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     # `(brmi_key, (id_sym, group_key)) => (bucket_name, col_range, idx_name, suffix)`
     # for per-sub-formula emission below.
     id_buckets = _sb_collect_id_buckets(brmi)
-    id_lookup = _sb_emit_id_buckets!(stmts, data, id_buckets; cv_groups, centered_groups)
+    ranef_effect_overrides = _sb_ranef_effect_overrides(brmi, id_buckets)
+    id_lookup = _sb_emit_id_buckets!(stmts, data, id_buckets;
+        cv_groups, centered_groups, ranef_effect_overrides)
     # Prepass 2.5: group-block terms. For each `mu ~ f(...)` where f has a
     # _sb_term_group_block declaration, allocate one ranef_correlated_draws
     # block per (f, group-column) pair. The lookup is threaded into _sb_emit!
@@ -1623,7 +2236,8 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
         nc = _as_named_column(op)
         isnothing(nc) && error("sbimpl: top-level op `$key` is not a NamedColumn")
         obs_n = get(target_obs, key, nothing)
-        _sb_emit!(stmts, data, key, parent(nc); id_lookup, obs_n, cv_groups, centered_groups, group_block_lookup)
+        _sb_emit!(stmts, data, key, parent(nc); id_lookup, obs_n, cv_groups,
+                  centered_groups, group_block_lookup, effect_overrides)
     end
     # Pop the preproc side-channel BEFORE building the SlicModel so it never
     # pollutes Stan's data dict.
@@ -1722,6 +2336,11 @@ end
 _sb_collect_data!(data, x::ExprColumn; skip=Set{Symbol}()) = begin
     foreach(a -> _sb_collect_data!(data, a; skip), getargs(x))
     foreach(v -> _sb_collect_data!(data, v; skip), values(getkwargs(x)))
+end
+_sb_collect_data!(data, x::MultiMembershipTerm; skip=Set{Symbol}()) = begin
+    foreach(a -> _sb_collect_data!(data, a; skip), getargs(x))
+    weights = getfield(x, :weights)
+    isnothing(weights) || foreach(a -> _sb_collect_data!(data, a; skip), weights)
 end
 
 """
@@ -2074,6 +2693,26 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             "($(length(left)) vs $(length(right)))")
         new_data[key] = collect(Float64, left .* right)
         new_preproc[key] = e
+    elseif e.kind === :multi_membership
+        group_names = e.raw_ref.groups
+        weight_names = e.raw_ref.weights
+        raw_groups = Tuple(_sb_df_column(df, n) for n in group_names)
+        raw_weights = isnothing(weight_names) ? nothing :
+                      Tuple(_sb_df_column(df, n) for n in weight_names)
+        levels = freeze ? e.const_.levels : nothing
+        prepared = _sb_prepare_mm(raw_groups, raw_weights, e.const_.normalize;
+                                  levels, group_names, weight_names)
+        new_data[key] = prepared.group_idx
+        new_data[e.const_.weight_key] = prepared.weights
+        new_data[e.const_.n_groups_key] = length(prepared.levels)
+        new_data[e.const_.n_obs_key] = prepared.n_obs
+        new_data[e.const_.n_memberships_key] = prepared.n_memberships
+        for owned in (e.const_.weight_key, e.const_.n_groups_key,
+                      e.const_.n_obs_key, e.const_.n_memberships_key)
+            push!(handled, owned)
+        end
+        const_ = merge(e.const_, (; levels=prepared.levels))
+        new_preproc[key] = PreprocEntry(:multi_membership, const_, e.raw_ref, true)
     elseif e.kind === :spline
         v = collect(Float64, _sb_df_column(df, e.raw_ref))
         old_fit = e.const_.fit
@@ -2128,6 +2767,38 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         new_preproc[key] = PreprocEntry(
             :categorical_outcome, (; levels, n_levels=expected_n_levels),
             e.raw_ref, true)
+    elseif e.kind === :ordinal_outcome
+        v = _sb_df_column(df, e.raw_ref)
+        fitted_levels = e.const_.levels
+        expected_n_levels = e.const_.n_levels
+        levels = freeze ? fitted_levels : _sb_fit_levels(v)
+        length(levels) == expected_n_levels || error(
+            "sbimpl: reprocess: ordinal outcome `$key` has $(length(levels)) levels, " *
+            "but the fitted `Ordinal` model has $expected_n_levels. Preserve the " *
+            "fitted ordered level set or rebuild the model.")
+        new_data[key] = _sb_apply_levels(levels, v)
+        new_preproc[key] = PreprocEntry(
+            :ordinal_outcome, (; levels, n_levels=expected_n_levels),
+            e.raw_ref, true)
+    elseif e.kind === :ordinal_threshold_predictor
+        v = _sb_df_column(df, e.raw_ref)
+        v isa AbstractVector{<:Real} || error(
+            "sbimpl: reprocess: ordinal threshold predictor `$key` must be numeric, " *
+            "got $(typeof(v))")
+        all(isfinite, v) || error(
+            "sbimpl: reprocess: ordinal threshold predictor `$key` contains " *
+            "non-finite values")
+        new_data[key] = collect(Float64, v)
+        new_preproc[key] = e
+    elseif e.kind === :observation_weight
+        raw = _sb_df_column(df, e.raw_ref)
+        response = _sb_df_column(df, e.const_.response)
+        response isa AbstractVector || error(
+            "sbimpl: reprocess: weighted response `$(e.const_.response)` must " *
+            "be a vector, got $(typeof(response))")
+        new_data[key] = _sb_prepare_weight_values(
+            e.const_.kind, raw, length(response), e.const_.response, e.raw_ref)
+        new_preproc[key] = e
     elseif e.kind === :factor || e.kind === :mo
         v = _sb_df_column(df, e.raw_ref)
         levels = freeze ? e.const_ : _sb_fit_levels(v)
@@ -2165,11 +2836,12 @@ of a naive per-column `sb.model(; col=…)` rebind is avoided. Returns a NEW
 
 Covered: the Julia-side transforms (`zscale`/`standardize`/`center`/`factor`/
 `mo`/`s`/`t2`/`gp`/`hsgp`), `protect`/implicit-fn columns (re-materialised on
-`new_df`), continuous × continuous interaction columns, categorical outcomes,
-and pass-through raw columns (plain data, `me` obs values, `ar` time). Errors loudly
-on a `factor`/`mo` **unseen level** and on any derived data key it cannot account
-for (e.g. random-effects group indices from `(1|g)`) rather than silently
-copying a stale vector — rebuild from `new_df` for those models.
+`new_df`), typed `mm(...)` group indices and weights, continuous × continuous
+interaction columns, typed observation weights, categorical outcomes, and
+pass-through raw columns (plain data, `me` obs values, `ar` time). Errors loudly
+on a `factor`/`mo`/`mm` **unseen level** and on any derived data key it cannot
+account for (ordinary `(1|g)` indices remain outside this replay path) rather
+than silently copying a stale vector — rebuild from `new_df` for those models.
 """
 function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true)
     new_data = Dict{Symbol,Any}()
@@ -2196,9 +2868,9 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true)
                     "preprocessing record and is not a column of the new DataFrame. ",
                     "reprocess covers the Julia-side predictor transforms ",
                     "(zscale/standardize/center/factor/mo/s/t2/gp/hsgp), protect/implicit-fn ",
-                    "columns and pass-through raw columns; models with random-effects ",
-                    "group indices (e.g. `(1|g)`) are not yet supported — rebuild the ",
-                    "SBBRMI from the new DataFrame instead.")
+                    "columns, typed `mm(...)`, and pass-through raw columns; ordinary ",
+                    "random-effects group indices (e.g. `(1|g)`) are not yet supported — ",
+                    "rebuild the SBBRMI from the new DataFrame instead.")
             end
         elseif v isa Number || v isa AbstractString || v isa Bool
             new_data[k] = v   # frozen structural scalar / formula literal (e.g. me `sd_<x>`)
@@ -2238,8 +2910,8 @@ restan_data(sb::SBBRMI, new_df; freeze_constants::Bool=true) =
 
 # ---- top-level op dispatch ---------------------------------------------------
 
-_sb_emit!(stmts, data, key, op::ExprColumn; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict()) =
-    _sb_emit_expr!(stmts, data, key, getf(op), op; id_lookup, obs_n, cv_groups, centered_groups, group_block_lookup)
+_sb_emit!(stmts, data, key, op::ExprColumn; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Vector{Any}}()) =
+    _sb_emit_expr!(stmts, data, key, getf(op), op; id_lookup, obs_n, cv_groups, centered_groups, group_block_lookup, effect_overrides)
 # Raw data / missing columns appear as top-level ops when the formula mentions
 # them as bare references (e.g. `c2` in `loc ~ 1 + c2`). Nothing to emit — the
 # prepass already stashed data columns in `data`.
@@ -2247,9 +2919,10 @@ _sb_emit!(stmts, data, key, ::DataColumn; kwargs...) = nothing
 _sb_emit!(stmts, data, key, ::MissingColumn; kwargs...) = nothing
 _sb_emit!(stmts, data, key, op; kwargs...) = error("sbimpl: top-level op for `$key` not an ExprColumn (got $(typeof(op)))")
 
-_sb_emit_expr!(stmts, data, key, ::typeof(~), op; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict()) = begin
+_sb_emit_expr!(stmts, data, key, ::typeof(~), op; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Vector{Any}}()) = begin
     lhs, rhs = getargs(op, 2)
-    _sb_sampling!(stmts, data, key, lhs, rhs; id_lookup, obs_n, cv_groups, centered_groups, group_block_lookup)
+    _sb_sampling!(stmts, data, key, lhs, rhs; id_lookup, obs_n, cv_groups,
+                  centered_groups, group_block_lookup, effect_overrides)
 end
 _sb_emit_expr!(stmts, data, key, ::typeof(assign), op; id_lookup=_sb_empty_id_lookup(), kwargs...) = begin
     _, rhs = getargs(op, 2)
@@ -2739,8 +3412,15 @@ _sb_prior_arg(x) = error("sbimpl: unsupported prior-arg shape $(typeof(x))")
 
 # LHS backed by real data => this is a likelihood. Record the observed values
 # under the formula name in `data` and emit `key ~ dist(args...)`.
-_sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict()) =
-    _sb_sampling_backed!(stmts, data, key, parent(lhs), rhs; id_lookup, obs_n, cv_groups, centered_groups, group_block_lookup)
+_sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Vector{Any}}()) =
+    _sb_sampling_backed!(stmts, data, key, parent(lhs), rhs; id_lookup, obs_n,
+                         cv_groups, centered_groups, group_block_lookup,
+                         effect_overrides)
+
+# `effect(...) ~ Distribution(...)` is metadata consumed by constructor prepasses;
+# it deliberately emits no independent parameter or likelihood statement.
+_sb_sampling!(_stmts, _data, _key, _lhs::ExprColumn{typeof(effect)}, _rhs;
+              kwargs...) = nothing
 
 _sb_sampling_backed!(stmts, data, key, backing::DataColumn, rhs; id_lookup, kwargs...) = begin
     data[key] = _sb_data_vec(key, parent(backing))
@@ -2750,7 +3430,8 @@ end
 _sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs;
                      id_lookup, obs_n=nothing, cv_groups=Set{Symbol}(),
                      centered_groups=Set{Symbol}(),
-                     group_block_lookup=Dict()) = begin
+                     group_block_lookup=Dict(),
+                     effect_overrides=Dict{Symbol,Vector{Any}}()) = begin
     rhs_e = _as_expr_column(rhs)
     if !isnothing(rhs_e)
         f = getf(rhs_e)
@@ -2765,7 +3446,9 @@ _sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs;
         _sb_submodel_rhs!(stmts, data, key, f, rhs_e) !== nothing && return
         _sb_emit_prior!(stmts, key, f, rhs_e) && return
     end
-    _sb_linear_predictor!(stmts, data, key, rhs; id_lookup, brmi_key=key, obs_n, cv_groups, centered_groups, group_block_lookup)
+    _sb_linear_predictor!(stmts, data, key, rhs; id_lookup, brmi_key=key, obs_n,
+                          cv_groups, centered_groups, group_block_lookup,
+                          effect_overrides)
 end
 
 _sb_sampling_backed!(stmts, data, key, backing, rhs; id_lookup, kwargs...) =
@@ -2782,16 +3465,20 @@ _sb_sampling_backed!(stmts, data, key, backing, rhs; id_lookup, kwargs...) =
 # Stan name. Per-`typeof(f)` overrides (`mi`, future `cens`/`trunc`, …) live
 # as separate methods of `_sb_sampling!`, mirroring vimpl's
 # `vbroadcasted(::ExprColumn{typeof(F)})` extension idiom.
-_sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict()) =
-    _sb_sampling_through_link!(stmts, data, key, getf(lhs), only(getargs(lhs)), rhs; id_lookup, obs_n, cv_groups, centered_groups, group_block_lookup)
+_sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Vector{Any}}()) =
+    _sb_sampling_through_link!(stmts, data, key, getf(lhs), only(getargs(lhs)), rhs;
+                               id_lookup, obs_n, cv_groups, centered_groups,
+                               group_block_lookup, effect_overrides)
 
 _sb_sampling_through_link!(stmts, data, key, f, inner, rhs; kwargs...) =
     error("sbimpl: expected NamedColumn inside link `$f(...)`, got $(typeof(inner))")
-function _sb_sampling_through_link!(stmts, data, key, f, inner::NamedColumn, rhs; id_lookup, obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict())
+function _sb_sampling_through_link!(stmts, data, key, f, inner::NamedColumn, rhs; id_lookup, obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Vector{Any}}())
     inv_f = InverseFunctions.inverse(f)
     inner_name = name(inner)
     pre_name = Symbol(nameof(f), :_, inner_name)
-    _sb_linear_predictor!(stmts, data, pre_name, rhs; id_lookup, brmi_key=key, obs_n, cv_groups, centered_groups, group_block_lookup)
+    _sb_linear_predictor!(stmts, data, pre_name, rhs; id_lookup, brmi_key=key,
+                          obs_n, cv_groups, centered_groups, group_block_lookup,
+                          effect_overrides)
     push!(stmts, :($inner_name = $(_sb_julia_to_stan_fn(inv_f))($pre_name)))
 end
 
@@ -2945,7 +3632,7 @@ _sb_real_vec(label::Symbol, n::Symbol, v) =
 _sb_classify_term!(t::ExprColumn, pop_terms, ran_terms, direct_terms) = begin
     f = getf(t)
     f === (|) && (push!(ran_terms, t); return)
-    (f === mo1 || f === s || f === t2 || f === gp || f === hsgp) &&
+    (f === offset || f === mo1 || f === s || f === t2 || f === gp || f === hsgp) &&
         (push!(direct_terms, t); return)
     push!(pop_terms, t)
 end
@@ -2958,7 +3645,8 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
                                 obs_n::Union{Symbol,Nothing}=nothing,
                                 cv_groups=Set{Symbol}(),
                                 centered_groups=Set{Symbol}(),
-                                group_block_lookup=Dict())
+                                group_block_lookup=Dict(),
+                                effect_overrides=Dict{Symbol,Vector{Any}}())
     terms = _sb_terms(rhs)
     pop_terms    = Any[]
     ran_terms    = Any[]  # `(expr | group)` -> collected per-group below
@@ -2969,7 +3657,10 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     isempty(pop_terms) && isempty(ran_terms) && isempty(direct_terms) &&
         error("sbimpl: empty RHS for `$target` — no predictor terms")
 
-    summands = Symbol[]
+    # Direct fixed-slope terms such as `offset(log(exposure))` may contribute
+    # an expression rather than a named emitted column. Keep the summand
+    # carrier expression-capable; sampled/direct submodels still push Symbols.
+    summands = Any[]
 
     if !isempty(pop_terms)
         col_exprs = Any[]
@@ -2981,7 +3672,24 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
         # StanBlocks `hcat` promotes a lone vector to matrix[n,1] and folds to
         # append_col for two-or-more columns, so we can always just emit hcat.
         push!(stmts, :($X_name = $(Expr(:call, :hcat, col_exprs...))))
-        push!(stmts, :($pop_name ~ popefs(; X=$X_name)))
+        overrides = get(effect_overrides, brmi_key, nothing)
+        if isnothing(overrides)
+            push!(stmts, :($pop_name ~ popefs(; X=$X_name)))
+        else
+            length(overrides) == length(col_exprs) || error(
+                "sbimpl: internal effect-prior alignment error for `$brmi_key`: " *
+                "$(length(overrides)) priors for $(length(col_exprs)) columns")
+            beta_loc = Any[0.0 for _ in overrides]
+            beta_scale = Any[1.0 for _ in overrides]
+            for i in eachindex(overrides)
+                isnothing(overrides[i]) && continue
+                beta_loc[i], beta_scale[i] = _sb_effect_normal_args(overrides[i])
+            end
+            loc_expr = Expr(:vect, beta_loc...)
+            scale_expr = Expr(:vect, beta_scale...)
+            push!(stmts, :($pop_name ~ _popefs_normal(;
+                X=$X_name, beta_loc=$loc_expr, beta_scale=$scale_expr)))
+        end
         push!(summands, pop_name)
     end
 
@@ -3036,6 +3744,7 @@ appear in `pop_<lhs>_beta_pop`:
 
 - integer- or `CategoricalVector`-typed bare predictors → `cat_<name>`
   (K−1 treatment contrasts);
+- `offset(x)` → `x` itself, with fixed coefficient one;
 - `mo1(c)` → `mo1_<c>`; `s(x)` and `t2(x,z)` → their own fixed/range
   coefficients and smoothing scales;
 - explicit-coefficient `coef * a` (own scalar);
@@ -3120,6 +3829,18 @@ function _sb_emit_direct!(stmts, data, target::Symbol, t::ExprColumn, summands;
     end
     _sb_emit_direct_expr!(stmts, data, target, getf(t), t, summands)
 end
+function _sb_emit_direct_expr!(_stmts, data, _target::Symbol,
+                               ::typeof(offset), t, summands)
+    args = getargs(t)
+    length(args) == 1 || error(
+        "sbimpl: `offset(x)` expects exactly one positional argument, got $(length(args))")
+    isempty(getkwargs(t)) || error("sbimpl: `offset(x)` does not accept keyword arguments")
+    # Unlike `protect`, offset is a direct model expression: it may reference
+    # raw data, an already-declared sampled scalar, or a composition of either.
+    # `_sb_scalar_expr` preserves that provenance in the emitted Stan expression
+    # and, critically, introduces no `popefs` coefficient.
+    push!(summands, _sb_scalar_expr(only(args), data))
+end
 function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(mo1), t, summands)
     inner_name, raw = _sb_inner_data(:mo1, only(getargs(t)))
     n_levels, idx = _sb_level_index(raw)
@@ -3183,6 +3904,8 @@ end
 function _sb_ranef_cols!(cols, data, stmts, t, gterms=())
     _sb_ranef_cols_dispatch!(cols, data, stmts, t, _sb_cat_levels(t), gterms)
 end
+_sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(offset)}, gterms=()) =
+    error("sbimpl: `offset(...)` is a population-level fixed contribution and cannot appear inside a random-effects term")
 _sb_ranef_cols_dispatch!(cols, data, stmts, t, ::Nothing, gterms=()) =
     push!(cols, _sb_predictor_col(t, data, stmts, gterms))
 function _sb_ranef_cols_dispatch!(cols, data, _stmts, t, levels, _gterms=())
@@ -3215,6 +3938,7 @@ _sb_id_sym(s::AbstractString) = Symbol(s)
 _sb_id_sym(x) = error("sbimpl: `gr(...; id=...)` expects a Symbol or String, got $(typeof(x))")
 
 _sb_normalize_group(g::NamedColumn) = (g, nothing)
+_sb_normalize_group(g::MultiMembershipTerm) = (g, nothing)
 _sb_normalize_group(g::ExprColumn) = begin
     getf(g) === gr || error("sbimpl: expected NamedColumn or `gr(...)` on RHS of `|`, got `$(getf(g))`")
     args = getargs(g); kw = getkwargs(g)
@@ -3235,6 +3959,23 @@ _sb_normalize_group(g) = error("sbimpl: expected NamedColumn or `gr(...)` on RHS
 # `gr(g, by=b)` -> `(Symbol, Symbol)` so the two don't accidentally merge.
 _sb_group_key(g::NamedColumn) = name(g)
 _sb_group_key(g::Tuple{NamedColumn,NamedColumn}) = (name(g[1]), name(g[2]))
+_sb_group_key(g::MultiMembershipTerm) =
+    (:mm, Tuple(name(x) for x in getargs(g)),
+     isnothing(getfield(g, :weights)) ? nothing : Tuple(name(x) for x in getfield(g, :weights)),
+     getfield(g, :normalize))
+
+_sb_mm_group_names(g::MultiMembershipTerm) = Tuple(name(x) for x in getargs(g))
+_sb_mm_weight_names(g::MultiMembershipTerm) = begin
+    weights = getfield(g, :weights)
+    isnothing(weights) ? nothing : Tuple(name(x) for x in weights)
+end
+function _sb_mm_suffix(g::MultiMembershipTerm)
+    groups = join(String.(_sb_mm_group_names(g)), "__")
+    weights = _sb_mm_weight_names(g)
+    weighted = isnothing(weights) ? "" : "__w__$(join(String.(weights), "__"))"
+    raw = getfield(g, :normalize) ? "" : "__raw"
+    Symbol("mm__", groups, weighted, raw)
+end
 
 # Normalize `(expr | group)` vs `(expr | id | group)` into (id_sym, lhs, descriptor)
 # where id_sym === nothing signals the plain (non-ID'd) case. Surface-level
@@ -3246,12 +3987,18 @@ function _sb_ranef_parts(rt::ExprColumn)
     if length(args) == 2
         lhs, raw_group = args
         desc, id_sym = _sb_normalize_group(raw_group)
+        desc isa MultiMembershipTerm && id_sym !== nothing && error(
+            "sbimpl: `mm(...)` cannot be combined with `gr(...; id=...)`; ",
+            "multi-membership terms already define one shared coefficient block")
         (id_sym, lhs, desc)
     elseif length(args) == 3
         lhs, id_sym_raw, raw_group = args
         id_sym = _as_symbol(id_sym_raw)
         isnothing(id_sym) && error("sbimpl: `(e | ID | g)` middle must be a Symbol, got $(typeof(id_sym_raw))")
         desc, gr_id_sym = _sb_normalize_group(raw_group)
+        desc isa MultiMembershipTerm && error(
+            "sbimpl: `(e | ID | mm(...))` is not supported; `mm(...)` already ",
+            "defines one shared coefficient block across its membership columns")
         gr_id_sym === nothing ||
             error("sbimpl: `(e | ID | g)` cannot also carry `gr(g, id=...)` (got `$gr_id_sym`)")
         (id_sym, lhs, desc)
@@ -3379,6 +4126,85 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, 
     push!(summands, r_name)
 end
 
+function _sb_emit_ranef_block!(stmts, data, target::Symbol,
+                                term::MultiMembershipTerm, gterms, summands;
+                                cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}())
+    group_names = _sb_mm_group_names(term)
+    weight_names = _sb_mm_weight_names(term)
+    cv_hit = intersect(Set(group_names), cv_groups)
+    isempty(cv_hit) || error(
+        "sbimpl: cv-contagious sizing for `mm(...)` is not yet supported ",
+        "(requested membership columns: $(collect(cv_hit)))")
+    centered_hit = intersect(Set(group_names), centered_groups)
+    isempty(centered_hit) || error(
+        "sbimpl: centered parameterization for `mm(...)` is not supported ",
+        "(requested membership columns: $(collect(centered_hit))); leave this ",
+        "shared block non-centered")
+
+    raw_groups = Tuple(begin
+        backing = _as_data_column(parent(g))
+        isnothing(backing) && error(
+            "sbimpl: `mm(...)` group `$(name(g))` must be a raw data column")
+        parent(backing)
+    end for g in getargs(term))
+    raw_weights = if isnothing(getfield(term, :weights))
+        nothing
+    else
+        Tuple(begin
+            backing = _as_data_column(parent(w))
+            isnothing(backing) && error(
+                "sbimpl: `mm(...)` weight `$(name(w))` must be a raw data column")
+            parent(backing)
+        end for w in getfield(term, :weights))
+    end
+    prepared = _sb_prepare_mm(raw_groups, raw_weights, getfield(term, :normalize);
+                              group_names, weight_names)
+
+    suffix = _sb_mm_suffix(term)
+    idx_name = Symbol(suffix, :_idx)
+    weight_name = Symbol(suffix, :_weights)
+    n_name = Symbol(:n_, suffix)
+    n_obs_name = Symbol(:n_obs_, suffix)
+    n_memberships_name = Symbol(:n_memberships_, suffix)
+    data[idx_name] = prepared.group_idx
+    data[weight_name] = prepared.weights
+    data[n_name] = length(prepared.levels)
+    data[n_obs_name] = prepared.n_obs
+    data[n_memberships_name] = prepared.n_memberships
+    const_ = (; levels=prepared.levels, weight_key=weight_name,
+              n_groups_key=n_name, n_obs_key=n_obs_name,
+              n_memberships_key=n_memberships_name,
+              normalize=getfield(term, :normalize))
+    raw_ref = (; groups=group_names, weights=weight_names)
+    _sb_record_preproc!(data, idx_name,
+        PreprocEntry(:multi_membership, const_, raw_ref, true))
+
+    b_name = Symbol(:b_, target, :_, suffix)
+    r_name = Symbol(:r_, target, :_, suffix)
+    if length(gterms) == 1 && gterms[1] === 1
+        push!(stmts, :($b_name ~ ranef_intercept_draws(;
+            group_idx=$idx_name, n_groups=$n_name)))
+        push!(stmts, :($r_name = multi_membership_intercept(
+            $b_name, $idx_name, $weight_name, $n_obs_name, $n_memberships_name)))
+    else
+        col_exprs = Any[]
+        for t in gterms
+            _sb_ranef_cols!(col_exprs, data, stmts, t, gterms)
+        end
+        Z_name = Symbol(:Z_, target, :_, suffix)
+        k_name = Symbol(:n_terms_, target, :_, suffix)
+        data[k_name] = length(col_exprs)
+        push!(stmts, :($Z_name = $(Expr(:call, :hcat, col_exprs...))))
+        push!(stmts, :($b_name ~ ranef_correlated_draws(;
+            Z=$Z_name, group_idx=$idx_name,
+            n_groups=$n_name, n_terms=$k_name)))
+        push!(stmts, :($r_name = multi_membership_correlated(
+            $Z_name, $b_name, $idx_name, $weight_name,
+            $n_obs_name, $n_memberships_name)))
+    end
+    push!(summands, r_name)
+end
+
 function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::Tuple{NamedColumn,NamedColumn}, gterms, summands;
                                 cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}())
     gcol, bcol = group
@@ -3459,6 +4285,206 @@ function _sb_collect_id_buckets(brmi::BRMI)
         end
     end
     buckets
+end
+
+# Expand one collected `|ID|` bucket with the exact ranef-column emitter used
+# by Stan lowering. This is the single source of truth for public margin
+# addresses: categorical terms therefore expose their emitted dummy-column
+# labels, and formula order is preserved across predictors and terms.
+function _sb_id_bucket_margins(bucket)
+    out = NamedTuple[]
+    scratch_data = Dict{Symbol,Any}()
+    scratch_stmts = Any[]
+    for (predictor, terms) in bucket.per_target
+        for t in terms
+            if t isa Integer
+                t == 1 || error(
+                    "ranefcoefnames: unsupported integer random-effect term `$t`")
+                push!(out, (; predictor, coefficient=:Intercept))
+                continue
+            end
+            cols = Any[]
+            try
+                _sb_ranef_cols!(cols, scratch_data, scratch_stmts, t, terms)
+            catch err
+                error("ranefcoefnames: cannot resolve random-effect column(s) for " *
+                      "predictor `$predictor`: $(sprint(showerror, err))")
+            end
+            for col in cols
+                col isa Symbol || error(
+                    "ranefcoefnames: random-effect column for predictor " *
+                    "`$predictor` is not symbol-addressable: $(repr(col))")
+                push!(out, (; predictor, coefficient=col))
+            end
+        end
+    end
+    out
+end
+
+"""
+    ranefcoefnames(brmi::BRMI, id::Symbol) -> Union{Vector{NamedTuple},Nothing}
+
+Ordered `(predictor, coefficient)` addresses of the marginal SDs in the
+shared random-effect block selected by public `|ID|` symbol `id`. The k-th
+entry labels the k-th `tau` element emitted by the SBBRMI backend. Categorical
+random slopes use the exact treatment-contrast column symbols emitted into the
+random-effect design matrix.
+
+Returns `nothing` when `id` is absent. Reusing one ID with multiple grouping
+factors is ambiguous on the public ID-only surface and raises.
+"""
+function ranefcoefnames(brmi::BRMI, id::Symbol)
+    buckets = _sb_collect_id_buckets(brmi)
+    matches = Pair[k => bucket for (k, bucket) in pairs(buckets) if first(k) === id]
+    isempty(matches) && return nothing
+    length(matches) == 1 || error(
+        "ranefcoefnames: `|$id|` identifies $(length(matches)) random-effect " *
+        "blocks with different grouping factors; the ID-only address is ambiguous")
+    _sb_id_bucket_margins(last(only(matches)))
+end
+
+function _sb_ranef_sd_rate(spec)
+    T = _as_distribution_type(spec.family)
+    (!isnothing(T) && T <: Exponential) || error(
+        "sbimpl: `effect(sd, ...)` currently supports `Exponential(scale)`; " *
+        "got `$(spec.family)`. Unmentioned margins retain the historical " *
+        "half-standard-normal prior.")
+    isempty(spec.keywords) || error(
+        "sbimpl: `effect(sd, ...) ~ Exponential(...)` does not accept keywords")
+    args = map(_sb_effect_prior_arg, spec.arguments)
+    length(args) in (0, 1) || error(
+        "sbimpl: `Exponential` SD priors expect zero or one Julia scale argument")
+    scale = isempty(args) ? 1.0 : only(args)
+    scale isa Real || error(
+        "sbimpl: random-effect SD prior scale must be a numeric formula " *
+        "constant, got $(repr(scale))")
+    isfinite(scale) && scale > 0 || error(
+        "sbimpl: random-effect SD prior scale must be finite and strictly " *
+        "positive, got $scale")
+    # Distributions.Exponential uses scale; Stan's exponential_lpdf uses rate.
+    Float64(1.0 / scale)
+end
+
+function _sb_ranef_lkj(spec, n_terms::Int)
+    T = _as_distribution_type(spec.family)
+    (!isnothing(T) && T <: LKJCholesky) || error(
+        "sbimpl: `effect(cor, ID)` expects `LKJCholesky(K, eta)`; " *
+        "got `$(spec.family)`")
+    isempty(spec.keywords) || error(
+        "sbimpl: `effect(cor, ID) ~ LKJCholesky(...)` does not accept keywords")
+    args = map(_sb_effect_prior_arg, spec.arguments)
+    length(args) == 2 || error(
+        "sbimpl: `LKJCholesky` correlation priors require dimension K and eta")
+    k, eta = args
+    k isa Integer || error(
+        "sbimpl: `LKJCholesky(K, eta)` dimension K must be an integer " *
+        "formula constant, got $(repr(k))")
+    k == n_terms || error(
+        "sbimpl: `LKJCholesky($k, ...)` does not match the addressed " *
+        "random-effect block width $n_terms")
+    eta isa Real || error(
+        "sbimpl: LKJ eta must be a numeric formula constant, got $(repr(eta))")
+    isfinite(eta) && eta > 0 || error(
+        "sbimpl: LKJ eta must be finite and strictly positive, got $eta")
+    Float64(eta)
+end
+
+function _sb_ranef_margin_index(spec, margins)
+    if isnothing(spec.predictor)
+        return nothing
+    elseif isnothing(spec.coefficient)
+        hits = findall(m -> m.predictor === spec.predictor, margins)
+        isempty(hits) && error(
+            "sbimpl: `effect(sd, $(spec.id), $(spec.predictor))` matches no " *
+            "random-effect margin. Inspect `ranefcoefnames(brmi, :$(spec.id))`.")
+        length(hits) == 1 || error(
+            "sbimpl: `effect(sd, $(spec.id), $(spec.predictor))` is ambiguous " *
+            "because that predictor contributes $(length(hits)) margins; use " *
+            "`effect(sd, $(spec.id), $(spec.predictor), coefficient)`.")
+        return only(hits)
+    else
+        hits = findall(m -> m.predictor === spec.predictor &&
+                            m.coefficient === spec.coefficient, margins)
+        isempty(hits) && error(
+            "sbimpl: `effect(sd, $(spec.id), $(spec.predictor), " *
+            "$(spec.coefficient))` matches no random-effect margin. Inspect " *
+            "`ranefcoefnames(brmi, :$(spec.id))` for valid addresses.")
+        length(hits) == 1 || error(
+            "sbimpl: `effect(sd, $(spec.id), $(spec.predictor), " *
+            "$(spec.coefficient))` matches $(length(hits)) margins and is " *
+            "therefore ambiguous")
+        return only(hits)
+    end
+end
+
+# Resolve formula-level random-effect prior statements onto collected ID
+# buckets. The result is keyed exactly like `id_buckets`; entries are present
+# only for explicitly configured buckets, preserving default emission byte for
+# byte when the formula contains no ranef effect statements.
+function _sb_ranef_effect_overrides(brmi::BRMI, id_buckets)
+    specs = ranef_effect_priors(brmi)
+    isempty(specs) && return Dict{Tuple{Symbol,Any},NamedTuple}()
+
+    states = Dict{Tuple{Symbol,Any},Dict{Symbol,Any}}()
+    for spec in specs
+        matches = Any[k for k in keys(id_buckets) if first(k) === spec.id]
+        isempty(matches) && error(
+            "sbimpl: `effect($(spec.class), $(spec.id), ...)` matches no shared " *
+            "`|$(spec.id)|` random-effect block")
+        length(matches) == 1 || error(
+            "sbimpl: public `|$(spec.id)|` addresses $(length(matches)) blocks " *
+            "with different grouping factors; use a unique ID")
+        key = only(matches)
+        bucket = id_buckets[key]
+        bucket.group_desc isa Tuple && error(
+            "sbimpl: covariance-prior effects for stratified " *
+            "`|$(spec.id)| gr(..., by=...)` buckets are not yet supported")
+        margins = _sb_id_bucket_margins(bucket)
+        state = get!(states, key) do
+            Dict{Symbol,Any}(
+                :margins => margins,
+                :sd_default => nothing,
+                :sd_overrides => Dict{Int,Float64}(),
+                :lkj_eta => nothing,
+            )
+        end
+
+        if spec.class === :cor
+            state[:lkj_eta] === nothing || error(
+                "sbimpl: duplicate correlation prior for `effect(cor, $(spec.id))`")
+            state[:lkj_eta] = _sb_ranef_lkj(spec, length(margins))
+            continue
+        end
+
+        rate = _sb_ranef_sd_rate(spec)
+        idx = _sb_ranef_margin_index(spec, margins)
+        if isnothing(idx)
+            state[:sd_default] === nothing || error(
+                "sbimpl: duplicate block SD prior for `effect(sd, $(spec.id))`")
+            state[:sd_default] = rate
+        else
+            haskey(state[:sd_overrides], idx) && error(
+                "sbimpl: multiple SD prior statements resolve to margin " *
+                "$(margins[idx]) of `|$(spec.id)|`")
+            state[:sd_overrides][idx] = rate
+        end
+    end
+
+    out = Dict{Tuple{Symbol,Any},NamedTuple}()
+    for (key, state) in states
+        margins = state[:margins]
+        default_rate = state[:sd_default]
+        sd_family = fill(isnothing(default_rate) ? 0 : 1, length(margins))
+        sd_rate = fill(isnothing(default_rate) ? 1.0 : default_rate, length(margins))
+        for (idx, rate) in state[:sd_overrides]
+            sd_family[idx] = 1
+            sd_rate[idx] = rate
+        end
+        out[key] = (; sd_family, sd_rate,
+                    lkj_eta=isnothing(state[:lkj_eta]) ? 1.0 : state[:lkj_eta],
+                    margins)
+    end
+    out
 end
 
 # ---- group-block prepass (Prepass 2.5) ---------------------------------------
@@ -3626,7 +4652,8 @@ _sb_ranef_term_ncols(t, _) = error("sbimpl: unsupported ranef term $(typeof(t)):
 # to threading them here -- only the plain-group spelling has a variant, and the
 # stratified `gr(g, by=b)` bucket still errors (see `_sb_emit_id_bucket_sampling!`).
 function _sb_emit_id_buckets!(stmts, data, buckets;
-                              cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}())
+                              cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
+                              ranef_effect_overrides=Dict{Tuple{Symbol,Any},NamedTuple}())
     lookup = _sb_empty_id_lookup()
     for (k, bucket) in pairs(buckets)
         id_sym, _ = k
@@ -3645,8 +4672,10 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
         n_terms_total = cursor
         n_terms_total >= 1 || error("sbimpl: `|$id_sym|` bucket has zero terms")
         data[n_terms_name] = n_terms_total
+        ranef_effect = get(ranef_effect_overrides, k, nothing)
         idx_name = _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, desc;
-                                                cv_groups, centered_groups, id_sym)
+                                                cv_groups, centered_groups, id_sym,
+                                                ranef_effect)
         for (brmi_key, cols) in per_target_ranges
             lookup[(brmi_key, k)] = (; bucket_name, cols, idx_name, suffix)
         end
@@ -3665,9 +4694,12 @@ _sb_id_bucket_suffix(id_sym, g::Tuple{NamedColumn,NamedColumn}) =
 # callers use to slice the draw matrix per sub-formula.
 function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g::NamedColumn;
                                       cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
-                                      id_sym=nothing)
+                                      id_sym=nothing, ranef_effect=nothing)
     idx_name, n_name = _sb_ensure_group_data!(data, g)
     gname = name(g)
+    sd_family = isnothing(ranef_effect) ? nothing : Expr(:vect, ranef_effect.sd_family...)
+    sd_rate = isnothing(ranef_effect) ? nothing : Expr(:vect, ranef_effect.sd_rate...)
+    lkj_eta = isnothing(ranef_effect) ? nothing : ranef_effect.lkj_eta
     if gname in cv_groups
         # Same submodel as the default branch; only the SIZE EXPRESSION differs.
         # Tracing `maximum(<g>_idx)` at the CALL SITE carries the cv taint on
@@ -3678,23 +4710,44 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g:
         # inlined into every declaration.
         n_cv_name = Symbol(bucket_name, :_n_g)
         push!(stmts, :($n_cv_name = maximum($idx_name)))
-        push!(stmts, :($bucket_name ~ ranef_correlated_draws(;
-            group_idx=$idx_name, n_groups=$n_cv_name, n_terms=$n_terms_name)))
+        if isnothing(ranef_effect)
+            push!(stmts, :($bucket_name ~ ranef_correlated_draws(;
+                group_idx=$idx_name, n_groups=$n_cv_name, n_terms=$n_terms_name)))
+        else
+            push!(stmts, :($bucket_name ~ ranef_correlated_draws_effect(;
+                group_idx=$idx_name, n_groups=$n_cv_name, n_terms=$n_terms_name,
+                sd_family=$sd_family, sd_rate=$sd_rate, lkj_eta=$lkj_eta)))
+        end
     elseif gname in centered_groups
-        push!(stmts, :($bucket_name ~ ranef_correlated_draws_centered(;
-            group_idx=$idx_name, n_groups=$n_name, n_terms=$n_terms_name)))
+        if isnothing(ranef_effect)
+            push!(stmts, :($bucket_name ~ ranef_correlated_draws_centered(;
+                group_idx=$idx_name, n_groups=$n_name, n_terms=$n_terms_name)))
+        else
+            push!(stmts, :($bucket_name ~ ranef_correlated_draws_centered_effect(;
+                group_idx=$idx_name, n_groups=$n_name, n_terms=$n_terms_name,
+                sd_family=$sd_family, sd_rate=$sd_rate, lkj_eta=$lkj_eta)))
+        end
     else
-        push!(stmts, :($bucket_name ~ ranef_correlated_draws(;
-            group_idx=$idx_name, n_groups=$n_name, n_terms=$n_terms_name)))
+        if isnothing(ranef_effect)
+            push!(stmts, :($bucket_name ~ ranef_correlated_draws(;
+                group_idx=$idx_name, n_groups=$n_name, n_terms=$n_terms_name)))
+        else
+            push!(stmts, :($bucket_name ~ ranef_correlated_draws_effect(;
+                group_idx=$idx_name, n_groups=$n_name, n_terms=$n_terms_name,
+                sd_family=$sd_family, sd_rate=$sd_rate, lkj_eta=$lkj_eta)))
+        end
     end
     idx_name
 end
 function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name,
                                        g::Tuple{NamedColumn,NamedColumn};
                                        cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
-                                       id_sym=nothing)
+                                       id_sym=nothing, ranef_effect=nothing)
     gname, bname = name(g[1]), name(g[2])
     id_str = isnothing(id_sym) ? "ID" : String(id_sym)
+    isnothing(ranef_effect) || error(
+        "sbimpl: covariance-prior effects for stratified `|$id_str| " *
+        "gr($gname, by=$bname)` buckets are not yet supported")
     gname in cv_groups && error(
         "sbimpl: cv-contagious sizing requested for group `$gname`, but it ",
         "appears in a `(… |$id_str| gr($gname, by=$bname))` stratified ID bucket, ",
@@ -4340,10 +5393,16 @@ end
 # into `target_obs` keyed back to `obs_name`. `get!` ensures first-write
 # wins so the BRMI's natural iteration order picks the source.
 _sb_collect_rhs_refs!(_target_obs, _x, _obs_name) = nothing
-_sb_collect_rhs_refs!(target_obs, x::NamedColumn, obs_name) =
-    (get!(target_obs, name(x), obs_name); nothing)
-_sb_collect_rhs_refs!(target_obs, x::ExprColumn, obs_name) =
+_sb_is_nothing_column(x::NamedColumn) =
+    name(x) === :nothing && parent(x) isa MissingColumn
+_sb_collect_rhs_refs!(target_obs, x::NamedColumn, obs_name) = begin
+    !_sb_is_nothing_column(x) && get!(target_obs, name(x), obs_name)
+    nothing
+end
+_sb_collect_rhs_refs!(target_obs, x::ExprColumn, obs_name) = begin
     foreach(a -> _sb_collect_rhs_refs!(target_obs, a, obs_name), getargs(x))
+    foreach(v -> _sb_collect_rhs_refs!(target_obs, v, obs_name), values(getkwargs(x)))
+end
 _sb_any_data_symbol(data) = begin
     isempty(data) && error("sbimpl: can't emit `rep_vector(1., n)` — no data column seen yet. Make sure an observed `~` comes before the intercept-only predictor, or add a concrete covariate.")
     # Prefer a flat length-N vector (numeric / integer) so `num_elements(...)` in
@@ -4370,14 +5429,161 @@ _flat_vec_key(_k, _v) = nothing
 
 function _sb_likelihood!(stmts, target::Symbol, rhs::ExprColumn, data)
     f = getf(rhs)
-    if f === CircularVonMises
-        _sb_lik_family!(stmts, target, f, getargs(rhs), getkwargs(rhs), data)
+    _sb_lik_family!(stmts, target, f, getargs(rhs), getkwargs(rhs), data)
+end
+
+_sb_weight_kind(f) =
+    f === aweights || f === AnalyticWeights ? :analytic :
+    f === fweights || f === FrequencyWeights ? :frequency :
+    f === weights || f === Weights ? :power :
+    f === pweights || f === ProbabilityWeights ? :probability :
+    f === uweights || f === UnitWeights ? :unit : nothing
+
+function _sb_weight_source(target::Symbol, weight::ExprColumn)
+    isempty(getkwargs(weight)) || error(
+        "sbimpl: `weighted(..., $(getf(weight))(...))` does not accept weight " *
+        "constructor keywords")
+    args = getargs(weight)
+    length(args) == 1 || error(
+        "sbimpl: `weighted` expects a one-column StatsBase weight constructor " *
+        "such as `aweights(k)`, `fweights(n)`, or `weights(w)`; got " *
+        "$(length(args)) arguments for response `$target`")
+    source = only(args)
+    source isa NamedColumn && parent(source) isa DataColumn || error(
+        "sbimpl: weights for response `$target` must be built from one raw " *
+        "dataframe column, got $(typeof(source))")
+    name(source), parent(parent(source))
+end
+
+function _sb_prepare_weight_values(kind::Symbol, raw, nobs::Int, target::Symbol,
+                                   source::Symbol)
+    raw isa AbstractVector{<:Real} || error(
+        "sbimpl: weight column `$source` for response `$target` must be a real " *
+        "vector, got $(typeof(raw))")
+    length(raw) == nobs || error(
+        "sbimpl: weight column `$source` has length $(length(raw)) but response " *
+        "`$target` has length $nobs")
+    values = collect(Float64, raw)
+    all(isfinite, values) || error(
+        "sbimpl: weight column `$source` for response `$target` contains " *
+        "non-finite values")
+    if kind === :analytic
+        all(>(0), values) || error(
+            "sbimpl: analytic/precision weights for response `$target` must be " *
+            "strictly positive")
+    elseif kind === :frequency
+        all(x -> x >= 0 && isinteger(x), values) || error(
+            "sbimpl: frequency weights for response `$target` must be " *
+            "nonnegative integer-valued counts")
+    elseif kind === :power
+        all(>=(0), values) || error(
+            "sbimpl: power-likelihood weights for response `$target` must be " *
+            "nonnegative")
     else
-        _sb_lik_family!(stmts, target, f, getargs(rhs), data)
+        error("sbimpl: internal unsupported observation-weight kind `$kind`")
+    end
+    values
+end
+
+_sb_weight_data_key(target::Symbol) = Symbol(:brm_weight_, target)
+
+function _sb_weight_data!(data, target::Symbol, kind::Symbol,
+                          weight::ExprColumn)
+    source, raw = _sb_weight_source(target, weight)
+    response = get(data, target, nothing)
+    response isa AbstractVector || error(
+        "sbimpl: weighted response `$target` must be an observed vector, got " *
+        "$(typeof(response))")
+    key = _sb_weight_data_key(target)
+    haskey(data, key) && error(
+        "sbimpl: reserved derived weight key `$key` collides with a model/data " *
+        "column; rename that column")
+    data[key] = _sb_prepare_weight_values(kind, raw, length(response), target, source)
+    _sb_record_preproc!(data, key, PreprocEntry(
+        :observation_weight, (; kind, response=target), source, false))
+    key
+end
+
+function _sb_weighted_distribution(rhs, target::Symbol)
+    rhs isa ExprColumn || error(
+        "sbimpl: first argument of `weighted` for response `$target` must be a " *
+        "distribution call, got $(typeof(rhs))")
+    isempty(getkwargs(rhs)) || error(
+        "sbimpl: weighted distribution `$target` does not currently support " *
+        "distribution constructor keywords")
+    rhs
+end
+
+function _sb_analytic_weighted_likelihood!(stmts, target::Symbol,
+                                           distribution::ExprColumn,
+                                           weight_key::Symbol, data)
+    family = getf(distribution)
+    family isa Type && family <: Normal || error(
+        "sbimpl: `AnalyticWeights` currently support only `Normal` observations; " *
+        "response `$target` uses `$family`")
+    args = map(a -> _sb_scalar_expr(a, data), getargs(distribution))
+    normal_args = _sb_stan_dist_args(family, args)
+    length(normal_args) == 2 || error(
+        "sbimpl: internal Normal lowering for analytic weights expected two " *
+        "arguments, got $(length(normal_args))")
+    location, scale = normal_args
+    weighted_scale = Expr(:call, Symbol("./"), scale,
+                          Expr(:call, :sqrt, weight_key))
+    _sb_lik_stan_exprs!(stmts, target, :normal, (location, weighted_scale))
+end
+
+function _sb_objective_weighted_likelihood!(stmts, target::Symbol,
+                                            distribution::ExprColumn,
+                                            weight_key::Symbol, data)
+    family = getf(distribution)
+    family isa Type && family <: Distribution || error(
+        "sbimpl: frequency/power weights currently require a Distributions.jl " *
+        "family call for response `$target`, got `$family`")
+    stan_name = _sb_stan_dist_name(family)
+    isnothing(stan_name) && error(
+        "sbimpl: weighted likelihood family `$family` is not supported yet")
+    args = map(a -> _sb_scalar_expr(a, data), getargs(distribution))
+    stan_args = _sb_stan_dist_args(family, args)
+    weighted_rhs = Expr(:call, :weighted, stan_name, weight_key, stan_args...)
+    push!(stmts, Expr(:call, :~, target, weighted_rhs))
+end
+
+function _sb_likelihood!(stmts, target::Symbol,
+                         rhs::ExprColumn{typeof(weighted)}, data)
+    isempty(getkwargs(rhs)) || error(
+        "sbimpl: `weighted(distribution, weights)` accepts no keywords")
+    distribution_raw, weight_raw = getargs(rhs, 2)
+    distribution = _sb_weighted_distribution(distribution_raw, target)
+    weight_raw isa ExprColumn || error(
+        "sbimpl: second argument of `weighted` must be a StatsBase weight " *
+        "constructor, got $(typeof(weight_raw))")
+    kind = _sb_weight_kind(getf(weight_raw))
+    isnothing(kind) && error(
+        "sbimpl: unsupported weight constructor `$(getf(weight_raw))`; use " *
+        "`aweights`, `fweights`, or `weights`")
+    kind === :probability && error(
+        "sbimpl: `ProbabilityWeights` sampling-weight semantics are not " *
+        "implemented; they are not interchangeable with likelihood weights")
+    kind === :unit && error(
+        "sbimpl: omit `weighted(...)` for unit weights; write the base " *
+        "distribution directly")
+    weight_key = _sb_weight_data!(data, target, kind, weight_raw)
+    if kind === :analytic
+        _sb_analytic_weighted_likelihood!(
+            stmts, target, distribution, weight_key, data)
+    else
+        _sb_objective_weighted_likelihood!(
+            stmts, target, distribution, weight_key, data)
     end
 end
 _sb_likelihood!(stmts, target, rhs, _) =
     error("sbimpl: likelihood RHS for `$target` must be an ExprColumn (got $(typeof(rhs)))")
+
+# Existing ordinary families remain positional and retain their prior behavior.
+# Wrapper families override this six-argument seam below so only the new public
+# compositions interpret formula keywords.
+_sb_lik_family!(stmts, target, fam, args, ::NamedTuple, data) =
+    _sb_lik_family!(stmts, target, fam, args, data)
 
 # One dispatch per likelihood family. Each method states the Stan name and
 # implicitly the arity (by destructuring `args`). Julia constructor arguments
@@ -4409,6 +5615,169 @@ function _sb_lik_family!(stmts, target, ::Type{<:OrderedLogistic}, args::Tuple{A
     eta_expr = _sb_scalar_expr(args[1], data)
     push!(stmts, :($target ~ ordered_logistic($eta_expr, $cut_name)))
 end
+
+_sb_ordinal_structure_code(::Cumulative) = 1
+_sb_ordinal_structure_code(::StoppingRatio) = 2
+_sb_ordinal_structure_code(::Type{Cumulative}) = 1
+_sb_ordinal_structure_code(::Type{StoppingRatio}) = 2
+function _sb_ordinal_structure_code(x::ExprColumn)
+    isempty(getargs(x)) && isempty(getkwargs(x)) || error(
+        "sbimpl: ordinal structure tags take no arguments; use `Cumulative()` " *
+        "or `StoppingRatio()`")
+    f = getf(x)
+    f === Cumulative && return 1
+    f === StoppingRatio && return 2
+    error("sbimpl: unsupported ordinal structure `$f`; use `Cumulative()` or " *
+          "`StoppingRatio()`")
+end
+_sb_ordinal_structure_code(x) = error(
+    "sbimpl: ordinal structure must be `Cumulative()` or `StoppingRatio()`, " *
+    "got $(typeof(x))")
+
+_sb_ordinal_link_code(::LogitLink) = 1
+_sb_ordinal_link_code(::ProbitLink) = 2
+_sb_ordinal_link_code(::CloglogLink) = 3
+_sb_ordinal_link_code(::Type{LogitLink}) = 1
+_sb_ordinal_link_code(::Type{ProbitLink}) = 2
+_sb_ordinal_link_code(::Type{CloglogLink}) = 3
+function _sb_ordinal_link_code(x::ExprColumn)
+    isempty(getargs(x)) && isempty(getkwargs(x)) || error(
+        "sbimpl: ordinal link tags take no arguments; use `LogitLink()`, " *
+        "`ProbitLink()`, or `CloglogLink()`")
+    f = getf(x)
+    f === LogitLink && return 1
+    f === ProbitLink && return 2
+    f === CloglogLink && return 3
+    error("sbimpl: unsupported ordinal link `$f`; use `LogitLink()`, " *
+          "`ProbitLink()`, or `CloglogLink()`")
+end
+_sb_ordinal_link_code(x) = error(
+    "sbimpl: ordinal link must be `LogitLink()`, `ProbitLink()`, or " *
+    "`CloglogLink()`, got $(typeof(x))")
+
+_sb_ordinal_has_fixed_intercept(x::Real) = !iszero(x)
+_sb_ordinal_has_fixed_intercept(x::NamedColumn) =
+    _sb_ordinal_has_fixed_intercept_parent(parent(x))
+_sb_ordinal_has_fixed_intercept(_) = false
+_sb_ordinal_has_fixed_intercept_parent(p::ExprColumn) = begin
+    getf(p) === (~) || return false
+    _, rhs = getargs(p, 2)
+    any(t -> t isa Integer && t == 1, _sb_terms(rhs))
+end
+_sb_ordinal_has_fixed_intercept_parent(_) = false
+
+function _sb_ordinal_threshold_predictors!(data, target, raw, n_obs)
+    raw isa Tuple || error(
+        "sbimpl: `Ordinal(...; per_threshold=...)` expects a tuple of raw " *
+        "numeric columns, for example `per_threshold=(treat,)`")
+    names = Symbol[]
+    for term in raw
+        term isa NamedColumn && parent(term) isa DataColumn || error(
+            "sbimpl: `Ordinal(...; per_threshold=...)` currently accepts only " *
+            "raw numeric data columns; got $(typeof(term))")
+        key = name(term)
+        values = parent(parent(term))
+        values isa AbstractVector{<:Real} || error(
+            "sbimpl: ordinal threshold predictor `$key` must be numeric, got " *
+            "$(typeof(values))")
+        length(values) == n_obs || error(
+            "sbimpl: ordinal threshold predictor `$key` has $(length(values)) " *
+            "rows; outcome `$target` has $n_obs")
+        all(isfinite, values) || error(
+            "sbimpl: ordinal threshold predictor `$key` contains non-finite values")
+        data[key] = collect(Float64, values)
+        _sb_record_preproc!(data, key, PreprocEntry(
+            :ordinal_threshold_predictor, nothing, key, false))
+        push!(names, key)
+    end
+    Tuple(names)
+end
+
+function _sb_ordinal_discrimination_expr(raw, data)
+    if raw isa Real
+        isfinite(raw) && raw > 0 || error(
+            "sbimpl: ordinal discrimination must be finite and strictly " *
+            "positive, got $(repr(raw))")
+    elseif raw isa NamedColumn && parent(raw) isa DataColumn
+        values = parent(parent(raw))
+        values isa AbstractVector{<:Real} && all(x -> isfinite(x) && x > 0, values) ||
+            error("sbimpl: ordinal discrimination data `$(name(raw))` must " *
+                  "contain only finite positive values")
+    end
+    _sb_scalar_expr(raw, data)
+end
+
+# Typed structure/link composition. Cumulative thresholds are ordered;
+# stopping-ratio stage intercepts are deliberately unconstrained by ordering.
+# A fixed eta intercept is non-identifiable with either threshold vector, so
+# the new surface rejects it (the legacy OrderedLogistic shorthand remains
+# unchanged for compatibility).
+function _sb_lik_family!(stmts, target, ::Type{<:Ordinal},
+                         args::Tuple{Any,Any,Any}, kwargs, data)
+    structure_raw, link_raw, eta_raw = args
+    structure = _sb_ordinal_structure_code(structure_raw)
+    link = _sb_ordinal_link_code(link_raw)
+    _sb_ordinal_has_fixed_intercept(eta_raw) && error(
+        "sbimpl: `Ordinal($target)` cannot include a fixed intercept in `eta`; " *
+        "the estimated thresholds already supply the location. Use `eta ~ 0 + ...`.")
+
+    raw = get(data, target, nothing)
+    raw isa AbstractVector || error(
+        "sbimpl: `Ordinal` expects an observed outcome vector for `$target`, " *
+        "got $(typeof(raw))")
+    levels = _sb_fit_levels(raw)
+    n_levels = length(levels)
+    n_levels >= 2 || error(
+        "sbimpl: `Ordinal($target)` needs at least two observed levels " *
+        "(got $n_levels)")
+    n_cut = n_levels - 1
+    data[target] = _sb_apply_levels(levels, raw)
+    _sb_record_preproc!(data, target, PreprocEntry(
+        :ordinal_outcome, (; levels, n_levels), target, true))
+
+    cut_name = Symbol(target, :_thresholds)
+    if structure == 1
+        push!(stmts, :($cut_name::ordered[$n_cut] ~ std_normal()))
+    else
+        push!(stmts, :($cut_name::vector[$n_cut] ~ std_normal()))
+    end
+
+    per_threshold_raw = get(kwargs, :per_threshold, ())
+    per_threshold = _sb_ordinal_threshold_predictors!(
+        data, target, per_threshold_raw, length(raw))
+    structure == 1 && !isempty(per_threshold) && error(
+        "sbimpl: `per_threshold` is currently supported for " *
+        "`StoppingRatio()` only; unrestricted cumulative category-specific " *
+        "effects can make cumulative probabilities non-monotone")
+
+    effect_name = Symbol(target, :_threshold_effect)
+    if isempty(per_threshold)
+        push!(stmts, :($effect_name = rep_matrix(
+            0., num_elements($target), $n_cut)))
+    else
+        X_name = Symbol(target, :_threshold_X)
+        beta_name = Symbol(target, :_threshold_beta)
+        n_terms = length(per_threshold)
+        push!(stmts, Expr(:(=), X_name, Expr(:call, :hcat, per_threshold...)))
+        # Stan's std_normal_lpdf is not matrix-vectorised. Reuse BRM's
+        # array-of-vectors standard-normal prior, then rebuild a K-1 by p matrix
+        # through the measured ranef_b_matrix helper for the design multiply.
+        push!(stmts, :($beta_name::vector[$n_cut,$n_terms] ~ multi_std_normal()))
+        beta_matrix = Expr(:call, :adjoint,
+            Expr(:call, :ranef_b_matrix, beta_name))
+        push!(stmts, Expr(:(=), effect_name,
+            Expr(:call, :*, X_name, beta_matrix)))
+    end
+
+    eta = _sb_scalar_expr(eta_raw, data)
+    discrimination = _sb_ordinal_discrimination_expr(
+        get(kwargs, :discrimination, 1.0), data)
+    _sb_lik_stan_exprs!(stmts, target, :brm_ordinal,
+        (eta, cut_name, discrimination, structure, link, effect_name))
+end
+_sb_lik_family!(_, target, ::Type{<:Ordinal}, args, _, _) = error(
+    "sbimpl: `Ordinal($target)` expects exactly three positional arguments " *
+    "`(structure, link, eta)`, got $(length(args))")
 
 _sb_lik_family!(stmts, target, ::Type{<:ZeroInflatedPoisson},
                 args::Tuple{Any,Any}, data) =
@@ -4576,6 +5945,8 @@ _sb_stan_dist_name(::Type{<:Beta})                = :beta
 _sb_stan_dist_name(::Type{<:Uniform})             = :uniform
 _sb_stan_dist_name(::Type{<:LogNormal})           = :lognormal
 _sb_stan_dist_name(::Type{<:Laplace})             = :double_exponential
+_sb_stan_dist_name(::Type{<:SkewDoubleExponential}) = :skew_double_exponential
+_sb_stan_dist_name(::Type{<:SkewedExponentialPower}) = :skew_double_exponential
 _sb_stan_dist_name(::Type{<:Weibull})             = :weibull
 _sb_stan_dist_name(::Type{<:InverseGamma})        = :inv_gamma
 _sb_stan_dist_name(::Type{<:Bernoulli})           = :bernoulli
@@ -4605,6 +5976,181 @@ _sb_stan_dist_args(::Type{<:Cauchy}, args::Tuple{Any}) = (args[1], 1.0)
 # `TDist(nu)` is standard Student-t; Stan requires explicit location/scale.
 _sb_stan_dist_args(::Type{<:TDist}, args::Tuple{Any}) = (args[1], 0, 1)
 
+# Explicit capability gate for Julia distribution composition. A Stan density
+# name alone is insufficient: generic truncation/censoring additionally needs
+# lcdf/lccdf companions with the same parameterization. Keep this list honest
+# and executable rather than implicitly advertising every name-table entry.
+_sb_cdf_family_kind(::Type) = nothing
+_sb_cdf_family_kind(::Type{<:Normal})       = :continuous
+_sb_cdf_family_kind(::Type{<:Exponential})  = :continuous
+_sb_cdf_family_kind(::Type{<:LogNormal})    = :continuous
+_sb_cdf_family_kind(::Type{<:Weibull})      = :continuous
+_sb_cdf_family_kind(::Type{<:Poisson})      = :discrete
+
+function _sb_composed_family(wrapper, args)
+    length(args) in (1, 3) || error(
+        "sbimpl: `$wrapper` expects a base distribution and either keyword ",
+        "bounds or positional `(lower, upper)` bounds, got $(length(args)) arguments")
+    base = _as_expr_column(first(args))
+    isnothing(base) && error(
+        "sbimpl: `$wrapper` first argument must be a distribution call, got ",
+        "$(typeof(first(args)))")
+    isempty(getkwargs(base)) || error(
+        "sbimpl: `$wrapper` base distribution `$(getf(base))` cannot use formula keywords")
+    family = getf(base)
+    D = _as_distribution_type(family)
+    isnothing(D) && error(
+        "sbimpl: `$wrapper` base must be a Distributions.jl distribution type, ",
+        "got `$family`")
+    stan_name = _sb_stan_dist_name(D)
+    isnothing(stan_name) && error(
+        "sbimpl: `$wrapper` base family `$D` has no Stan distribution-name mapping")
+    kind = _sb_cdf_family_kind(D)
+    isnothing(kind) && error(
+        "sbimpl: `$wrapper` base family `$D` has no generic CDF/CCDF composition ",
+        "capability; add and test its density, pointwise, predictive, lcdf and ",
+        "lccdf paths before advertising it")
+    (; family=D, stan_name, stan_args=getargs(base), kind)
+end
+
+function _sb_wrapper_bounds(wrapper, args, kwargs::NamedTuple)
+    if length(args) == 3
+        isempty(kwargs) || error(
+            "sbimpl: `$wrapper` cannot mix positional bounds with keyword bounds")
+        return _sb_normalize_bound(args[2]), _sb_normalize_bound(args[3])
+    end
+    unknown = setdiff(collect(keys(kwargs)), [:lower, :upper])
+    isempty(unknown) || error(
+        "sbimpl: `$wrapper` accepts only `lower` and `upper` keywords, got $unknown")
+    _sb_normalize_bound(get(kwargs, :lower, nothing)),
+        _sb_normalize_bound(get(kwargs, :upper, nothing))
+end
+
+_sb_normalize_bound(::Nothing) = nothing
+_sb_normalize_bound(x::NamedColumn) = _sb_is_nothing_column(x) ? nothing : x
+_sb_normalize_bound(x) = x
+
+_sb_bound_data(x::Real) = x
+_sb_bound_data(x::AbstractVector{<:Real}) = x
+_sb_bound_data(x::NamedColumn) = _sb_bound_data_named(x, parent(x))
+_sb_bound_data_named(_x, d::DataColumn) = parent(d)
+_sb_bound_data_named(x, backing) = error(
+    "sbimpl: bound `$(name(x))` must be backed by observed data, got $(typeof(backing))")
+_sb_bound_data(x) = error(
+    "sbimpl: bounds must be numeric literals or observed data columns, got $(typeof(x))")
+
+function _sb_validate_bounds(wrapper, target, lower, upper, data; check_order=true)
+    y = data[target]
+    for (label, bound) in ((:lower, lower), (:upper, upper))
+        isnothing(bound) && continue
+        b = _sb_bound_data(bound)
+        b isa AbstractVector && length(b) != length(y) && error(
+            "sbimpl: `$wrapper` $label bound has $(length(b)) rows but response ",
+            "`$target` has $(length(y))")
+    end
+    if check_order && !isnothing(lower) && !isnothing(upper)
+        lo, hi = _sb_bound_data(lower), _sb_bound_data(upper)
+        ok = if lo isa AbstractVector || hi isa AbstractVector
+            all(eachindex(y)) do i
+                (lo isa AbstractVector ? lo[i] : lo) <=
+                    (hi isa AbstractVector ? hi[i] : hi)
+            end
+        else
+            lo <= hi
+        end
+        ok || error("sbimpl: `$wrapper` lower bounds must not exceed upper bounds")
+    end
+    nothing
+end
+
+function _sb_validate_composed_support(wrapper, target, lower, upper, kind, data)
+    y = data[target]
+    lo = isnothing(lower) ? nothing : _sb_bound_data(lower)
+    hi = isnothing(upper) ? nothing : _sb_bound_data(upper)
+    if kind === :discrete
+        (eltype(y) <: Integer && !(eltype(y) <: Bool)) || error(
+            "sbimpl: `$wrapper` discrete base family requires an integer response, ",
+            "got $(eltype(y)) for `$target`")
+        for (label, bound) in ((:lower, lower), (:upper, upper))
+            isnothing(bound) && continue
+            b = _sb_bound_data(bound)
+            all(v -> v isa Integer && !(v isa Bool), b isa AbstractVector ? b : (b,)) ||
+                error("sbimpl: `$wrapper` discrete $label bounds must be integers")
+        end
+    end
+    all(eachindex(y)) do i
+        lov = lo isa AbstractVector ? lo[i] : lo
+        hiv = hi isa AbstractVector ? hi[i] : hi
+        (isnothing(lov) || lov <= y[i]) && (isnothing(hiv) || y[i] <= hiv)
+    end || error(
+        "sbimpl: `$wrapper` response `$target` contains values outside its bounds")
+    nothing
+end
+
+# StanBlocks decision 1wd43wt: one base-family token plus compile-time optional
+# `lower` / `upper` kwargs. BRM always spells both; an absent bound is the Julia
+# value `nothing`, which the HOF consumes before Stan name/type resolution.
+_sb_composed_stan_args(base, data) = _sb_stan_dist_args(
+    base.family, map(a -> _sb_scalar_expr(a, data), base.stan_args))
+
+function _sb_emit_optional_family!(stmts, target, producer, base, lower, upper, data)
+    family_args = _sb_composed_stan_args(base, data)
+    lower_expr = isnothing(lower) ? nothing : _sb_scalar_expr(lower, data)
+    upper_expr = isnothing(upper) ? nothing : _sb_scalar_expr(upper, data)
+    rhs = Expr(:call, producer,
+        Expr(:parameters,
+            Expr(:kw, :lower, lower_expr),
+            Expr(:kw, :upper, upper_expr)),
+        base.stan_name, family_args...)
+    push!(stmts, Expr(:call, :~, target, rhs))
+end
+
+function _sb_lik_composed!(stmts, target, wrapper, producer,
+                           args, kwargs::NamedTuple, data)
+    base = _sb_composed_family(wrapper, args)
+    lower, upper = _sb_wrapper_bounds(wrapper, args, kwargs)
+
+    isnothing(lower) && isnothing(upper) && error(
+        "sbimpl: `$wrapper` needs at least one non-`nothing` bound")
+
+    _sb_validate_bounds(wrapper, target, lower, upper, data)
+    _sb_validate_composed_support(wrapper, target, lower, upper, base.kind, data)
+    _sb_emit_optional_family!(stmts, target, producer, base, lower, upper, data)
+end
+
+_sb_lik_family!(stmts, target, ::typeof(truncated), args, kwargs::NamedTuple, data) =
+    _sb_lik_composed!(stmts, target, :truncated, :truncated, args, kwargs, data)
+
+_sb_lik_family!(stmts, target, ::typeof(censored), args, kwargs::NamedTuple, data) =
+    _sb_lik_composed!(stmts, target, :censored, :censored, args, kwargs, data)
+
+# Genuine interval evidence uses the observed response as the lower endpoint.
+# Its producer call has no optional-bound encoding, so it is independent of the
+# one-sided truncation/censoring producer decision.
+function _sb_lik_family!(stmts, target, ::typeof(interval_censored),
+                         args, kwargs::NamedTuple, data)
+    length(args) == 1 || error(
+        "sbimpl: `interval_censored` expects one base distribution argument")
+    keys(kwargs) == (:upper,) || error(
+        "sbimpl: `interval_censored` requires exactly the `upper` keyword; ",
+        "the response column is the interval lower endpoint")
+    base = _sb_composed_family(:interval_censored, args)
+    upper = kwargs.upper
+    _sb_validate_bounds(:interval_censored, target, data[target], upper, data;
+                        check_order=false)
+    lo, hi = data[target], _sb_bound_data(upper)
+    all(eachindex(lo)) do i
+        lo[i] < (hi isa AbstractVector ? hi[i] : hi)
+    end || error(
+        "sbimpl: `interval_censored` lower endpoints must be strictly below upper endpoints")
+    _sb_validate_composed_support(:interval_censored, target, data[target],
+                                  upper, base.kind, data)
+    family_args = _sb_composed_stan_args(base, data)
+    upper_expr = _sb_scalar_expr(upper, data)
+    _sb_lik_stan_exprs!(stmts, target, :interval_censored,
+                        (base.stan_name, target, upper_expr, family_args...))
+end
+
 # Distributions.jl uses scale `theta`; Stan uses inverse scale (rate) `beta`.
 _sb_stan_dist_args(::Type{<:Exponential}, ::Tuple{}) = (1.0,)
 _sb_stan_dist_args(::Type{<:Exponential}, args::Tuple{Any}) =
@@ -4621,6 +6167,30 @@ _sb_stan_dist_args(::Type{<:LogNormal}, ::Tuple{}) = (0.0, 1.0)
 _sb_stan_dist_args(::Type{<:LogNormal}, args::Tuple{Any}) = (args[1], 1.0)
 _sb_stan_dist_args(::Type{<:Laplace}, ::Tuple{}) = (0.0, 1.0)
 _sb_stan_dist_args(::Type{<:Laplace}, args::Tuple{Any}) = (args[1], 1.0)
+
+# Distributions.jl's asymmetric-Laplace special case keeps its own scale.
+# Only an explicit literal p=1 is accepted: the general SEPD has no faithful
+# native Stan analogue. All three Stan paths consume this one translation.
+function _sb_stan_dist_args(
+    ::Type{<:SkewedExponentialPower},
+    args::Tuple{Any,Any,Any,Any},
+)
+    mu, sigma_sepd, p, alpha = args
+    p isa Real && p == one(p) || throw(ArgumentError(
+        "sbimpl: `SkewedExponentialPower` is supported only with the explicit " *
+        "literal shape `p = 1`; got $(repr(p))"))
+    one_minus_alpha = Expr(:call, :-, 1.0, alpha)
+    stan_scale = Expr(:call, Symbol(".*"),
+        Expr(:call, Symbol(".*"),
+            Expr(:call, Symbol(".*"), 4.0, sigma_sepd), alpha),
+        one_minus_alpha)
+    (mu, stan_scale, alpha)
+end
+_sb_stan_dist_args(::Type{<:SkewedExponentialPower}, args) =
+    throw(ArgumentError(
+        "sbimpl: `SkewedExponentialPower` requires four explicit arguments " *
+        "`(mu, sigma, 1, alpha)`; got $(length(args))"))
+
 _sb_stan_dist_args(::Type{<:Weibull}, ::Tuple{}) = (1.0, 1.0)
 _sb_stan_dist_args(::Type{<:Weibull}, args::Tuple{Any}) = (args[1], 1.0)
 _sb_stan_dist_args(::Type{<:InverseGamma}, ::Tuple{}) = (1.0, 1.0)

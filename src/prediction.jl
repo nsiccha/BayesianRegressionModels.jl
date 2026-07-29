@@ -85,8 +85,10 @@
 # needs no BridgeStan and catches this drift at declaration level.
 const _RANEF_FAMILIES = Dict{Symbol,NamedTuple}(
     :ranef_intercept           => (; z = :xi,     layout = :group,           noncentered = true),
+    :ranef_intercept_draws     => (; z = :xi,     layout = :group,           noncentered = true),
     :ranef_correlated          => (; z = :z_flat, layout = :flat_term_group, noncentered = true),
     :ranef_correlated_draws    => (; z = :z_flat, layout = :flat_term_group, noncentered = true),
+    :ranef_correlated_draws_effect => (; z = :z_flat, layout = :flat_term_group, noncentered = true),
     :ranef_correlated_by       => (; z = :z,      layout = :group_term,      noncentered = true),
     :ranef_correlated_by_draws => (; z = :z,      layout = :group_term,      noncentered = true),
     # Centered emissions — the opt-in `SBBRMI(...; centered_groups = [:g])` path,
@@ -100,6 +102,7 @@ const _RANEF_FAMILIES = Dict{Symbol,NamedTuple}(
     :ranef_intercept_centered        => (; z = :xi, layout = :group,      noncentered = false),
     :ranef_correlated_centered       => (; z = :b,  layout = :group_term, noncentered = false),
     :ranef_correlated_draws_centered => (; z = :b,  layout = :group_term, noncentered = false),
+    :ranef_correlated_draws_centered_effect => (; z = :b_cols_bc, layout = :group_term, noncentered = false),
 )
 
 """
@@ -111,7 +114,9 @@ address its draws without reading the generated Stan.
 - `binding` — the emitted submodel binding (`:b_p_subject` for a `(… |p| g)`
   bucket, `:r_<lhs>_<g>` for a plain `(… | g)` term).
 - `family` — the emitting `ranef_*` submodel (`:ranef_correlated_draws`, …).
-- `group` — the grouping-factor dataframe column.
+- `group` — the grouping-factor dataframe column, or the tuple of membership
+  columns for a typed `mm(...)` block. Selecting any member names that shared
+  block.
 - `id` — the brms-style `|ID|` bucket symbol, or `nothing` for a plain ranef.
   A bucket is shared across sub-formulas, so it is addressed as ONE block.
 - `by` — the `gr(g, by=b)` stratifying column, or `nothing`.
@@ -133,7 +138,7 @@ Obtain with [`ranef_blocks`](@ref); resolve to unconstrained coordinates with
 struct RanefBlock
     binding::Symbol
     family::Symbol
-    group::Symbol
+    group::Union{Symbol,Tuple{Vararg{Symbol}}}
     id::Union{Nothing,Symbol}
     by::Union{Nothing,Symbol}
     levels::Vector
@@ -176,6 +181,7 @@ function _ranef_id_of_binding(binding::Symbol, group::Symbol, by::Union{Nothing,
     id = s[3:(end - length(tail))]
     isempty(id) ? nothing : Symbol(id)
 end
+_ranef_id_of_binding(::Symbol, ::Any, ::Union{Nothing,Symbol}) = nothing
 
 _ranef_plan(sb::SBBRMI) = generative_plan(sb)
 _ranef_plan(plan::GenerativePlan) = plan
@@ -244,37 +250,39 @@ function ranef_blocks(model)
         idx_key isa Symbol || error(
             "BRM prediction: `$(d.target) ~ $(fam)(…)` has a non-symbolic ",
             "`group_idx=$(idx_key)`; expected a data key.")
-        parsed = _ranef_group_of_idx(idx_key)
-        isnothing(parsed) && error(
-            "BRM prediction: cannot read a grouping factor out of group index ",
-            "key `$(idx_key)` for `$(d.target)`.")
-        group, by = parsed
-        raw = column_data(brmi, group)
-        isnothing(raw) && error(
-            "BRM prediction: grouping factor `$group` (from `$(idx_key)`) is not ",
-            "a raw data column of this model.")
-        levels = collect(_sb_fit_levels(raw))
-        # CONTROL. `levels` is reconstructed from the training column with the
-        # same fit/apply split the emitter used; the emitted `n_groups` is the
-        # count the Stan program was built with. If those disagree, the group
-        # name derived from `idx_key` is wrong (or the level coding drifted) and
-        # every coordinate below would be addressed against the wrong column.
-        n_groups = if haskey(d.keywords, :n_groups) && d.keywords.n_groups isa Symbol
-            ng_key = d.keywords.n_groups
-            if ng_key === Symbol(d.target, :_n_g)
-                # cv-contagious sizing: the emitter passed a Stan-side local
-                # `<binding>_n_g = maximum(<g>_idx)`, not a data key, precisely so
-                # the `maximum` carries the cv taint into the declared size. It is
-                # not in `data` and must not be looked for there — evaluate the
-                # same expression on the training index instead. Matched by exact
-                # name rather than by "absent from data" so a genuinely missing
-                # data key still errors loudly below.
-                maximum(_ranef_data_vec(data, idx_key, d.target, fam))
-            else
-                _ranef_data_int(data, ng_key, d.target, fam)
-            end
+        mm_entry = get(plan.preproc, idx_key, nothing)
+        if mm_entry isa PreprocEntry && mm_entry.kind === :multi_membership
+            group = Tuple(mm_entry.raw_ref.groups)
+            by = nothing
+            levels = collect(mm_entry.const_.levels)
+            n_groups = _ranef_data_int(data, mm_entry.const_.n_groups_key,
+                                       d.target, fam)
         else
-            maximum(_ranef_data_vec(data, idx_key, d.target, fam))
+            parsed = _ranef_group_of_idx(idx_key)
+            isnothing(parsed) && error(
+                "BRM prediction: cannot read a grouping factor out of group index ",
+                "key `$(idx_key)` for `$(d.target)`.")
+            group, by = parsed
+            raw = column_data(brmi, group)
+            isnothing(raw) && error(
+                "BRM prediction: grouping factor `$group` (from `$(idx_key)`) is not ",
+                "a raw data column of this model.")
+            levels = collect(_sb_fit_levels(raw))
+            # CONTROL. `levels` is reconstructed from the training column with the
+            # same fit/apply split the emitter used; the emitted `n_groups` is the
+            # count the Stan program was built with. If those disagree, the group
+            # name derived from `idx_key` is wrong (or the level coding drifted).
+            n_groups = if haskey(d.keywords, :n_groups) && d.keywords.n_groups isa Symbol
+                ng_key = d.keywords.n_groups
+                if ng_key === Symbol(d.target, :_n_g)
+                    # cv-contagious sizing uses a Stan-side local, not a data key.
+                    maximum(_ranef_data_vec(data, idx_key, d.target, fam))
+                else
+                    _ranef_data_int(data, ng_key, d.target, fam)
+                end
+            else
+                maximum(_ranef_data_vec(data, idx_key, d.target, fam))
+            end
         end
         length(levels) == n_groups || error(
             "BRM prediction: grouping factor `$group` has $(length(levels)) ",
@@ -368,11 +376,17 @@ _ranef_name_positions(unc_names) =
 
 # Resolve a user-supplied group selector to the blocks it names, erroring on a
 # selector that matches nothing (a typo'd factor must not silently do nothing).
+_ranef_group_symbols(group::Symbol) = (group,)
+_ranef_group_symbols(group::Tuple) = group
+_ranef_group_symbols(group) = (group,)
+_ranef_group_matches(block::RanefBlock, group::Symbol) =
+    group in _ranef_group_symbols(block.group)
+
 function _ranef_select(blocks, groups)
     wanted = groups isa Symbol ? [groups] : collect(groups)
     out = RanefBlock[]
     for g in wanted
-        hits = filter(b -> b.group === g, blocks)
+        hits = filter(b -> _ranef_group_matches(b, g), blocks)
         isempty(hits) && error(
             "BRM prediction: no random-effect block on grouping factor `$g`. ",
             "This model's grouped blocks are: ",
@@ -509,7 +523,10 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
     resample_set = Set{Symbol}(resample isa Symbol ? (resample,) : resample)
     blocks_from = ranef_blocks(from)
     blocks_to   = ranef_blocks(to)
-    known_groups = Set(b.group for b in blocks_from)
+    known_groups = Set{Symbol}()
+    for b in blocks_from
+        union!(known_groups, _ranef_group_symbols(b.group))
+    end
     for g in resample_set
         g in known_groups || error(
             "BRM prediction: `resample = $g` names no random-effect block of the ",
@@ -546,7 +563,7 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
         coords_to = ranef_coordinates(bt, unc_to)
         coords_from = ranef_coordinates(bf, unc_from)
         level_pos = Dict(l => g for (g, l) in enumerate(bf.levels))
-        fresh = bt.group in resample_set
+        fresh = any(g -> g in resample_set, _ranef_group_symbols(bt.group))
         for g in 1:bt.n_groups
             gf = fresh ? 0 : get(level_pos, bt.levels[g], 0)
             for t in 1:bt.n_terms

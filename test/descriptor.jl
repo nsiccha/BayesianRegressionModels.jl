@@ -28,6 +28,24 @@ hier_builder = @brm begin
     z ~ Normal(mu, 2 * sigma)
 end
 
+module DescriptorFragments
+using BayesianRegressionModels
+using StanBlocks
+using Distributions: Exponential, Normal
+
+StanBlocks.@deffun descriptor_fragment_inner(x::vector[n])::vector[n] = x .* x
+StanBlocks.@deffun descriptor_fragment_outer(x::vector[n])::vector[n] =
+    descriptor_fragment_inner(x) .+ 1.0
+
+builder = @brm begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x
+    y ~ Normal(descriptor_fragment_outer(mu), sigma)
+end
+
+df = (; x=[0.0, 1.0, 2.0], y=[1.0, 2.0, 3.0])
+end
+
 @testset "reflection — one declaration, derived surface" begin
     d = brm_descriptor(hier_builder, df; mod=@__MODULE__, name=:hier)
 
@@ -79,6 +97,65 @@ end
     @test brm_descriptor(flat_builder, df; mod=@__MODULE__).id != a.id
 end
 
+@testset "named Stan definition highlights" begin
+    d = brm_descriptor(
+        DescriptorFragments.builder,
+        DescriptorFragments.df;
+        mod=DescriptorFragments,
+        highlights=(
+            :descriptor_fragment_outer => "Displayed model calculation",
+            "descriptor_fragment_inner",
+        ),
+    )
+
+    @test [h.name for h in d.highlights] ==
+          [:descriptor_fragment_outer, :descriptor_fragment_inner]
+    @test [h.caption for h in d.highlights] ==
+          ["Displayed model calculation", nothing]
+    inventory = Dict(def.name => def for def in d.stan.definitions)
+    @test all(h -> haskey(inventory, h.name), d.highlights)
+    @test all(h -> h.definition === inventory[h.name], d.highlights)
+    @test all(h -> StanBlocks.stan_definition(d.stan, h.name).name === h.name,
+              d.highlights)
+    @test all(h -> [def.signature for def in h.closure] ==
+                         [def.signature for def in
+                          StanBlocks.stan_definition_closure(d.stan, h.definition)],
+              d.highlights)
+    @test occursin("descriptor_fragment_inner",
+                   inventory[:descriptor_fragment_outer].source)
+    @test :descriptor_fragment_inner in
+          inventory[:descriptor_fragment_outer].dependencies
+    @test :descriptor_fragment_inner in
+          (def.name for def in first(d.highlights).closure)
+
+    # Presentation metadata does not alter the executable model identity.
+    plain = brm_descriptor(DescriptorFragments.builder, DescriptorFragments.df;
+                           mod=DescriptorFragments)
+    @test d.id == plain.id
+
+    # Replay/reprocessing resolves the same names against the NEW descriptor,
+    # preserving order and captions rather than carrying stale definition
+    # objects from the old traced model.
+    d2 = brm_execute(d, :reprocess,
+                     (; x=[3.0, 4.0], y=[4.0, 5.0]))
+    @test [(h.name, h.caption) for h in d2.highlights] ==
+          [(h.name, h.caption) for h in d.highlights]
+    inventory2 = Dict(def.name => def for def in d2.stan.definitions)
+    @test all(h -> h.definition === inventory2[h.name], d2.highlights)
+    @test all(h -> [def.signature for def in h.closure] ==
+                         [def.signature for def in
+                          StanBlocks.stan_definition_closure(d2.stan, h.definition)],
+              d2.highlights)
+
+    @test_throws ErrorException brm_descriptor(
+        DescriptorFragments.builder, DescriptorFragments.df;
+        mod=DescriptorFragments, highlights=(:not_in_this_model,))
+    @test_throws ErrorException brm_descriptor(
+        DescriptorFragments.builder, DescriptorFragments.df;
+        mod=DescriptorFragments,
+        highlights=(:descriptor_fragment_outer, :descriptor_fragment_outer))
+end
+
 @testset "schema propagation — Stan inputs carry their dataframe column" begin
     zs_builder = @brm begin
         sigma ~ Exponential(1)
@@ -118,12 +195,16 @@ end
 
     @test byname[:sigma].role === :parameter
     @test byname[:sigma].declaration.family === :exponential
+    @test byname[:sigma].logical === :sigma
 
     # The population block and its internals both resolve to the popefs
-    # declaration; the linear predictor comes from the formula, not a `~`.
+    # declaration, but only the returned block output carries its logical
+    # target. The linear predictor comes from the formula, not a `~`.
     @test byname[:pop_mu].role === :population_effect
+    @test byname[:pop_mu].logical === :pop_mu
     @test byname[:pop_mu_beta_pop].role === :population_effect
     @test byname[:pop_mu_beta_pop].declaration.target === :pop_mu
+    @test byname[:pop_mu_beta_pop].logical === nothing
     @test byname[:mu].role === :linear_predictor
     @test byname[:mu].declaration === nothing
 
@@ -188,6 +269,40 @@ end
 
     d2 = brm_execute(d, :reprocess, (; x=[9.0, 10.0], y=[0.0, 0.0]))
     @test d2.plan.data[:x] == [9.0, 10.0]
+
+    mm_builder = @brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + (1 | mm(g1, g2; weights=(w1, w2)))
+        y ~ Normal(mu, sigma)
+    end
+    mm_df = (;
+        g1=["a", "a", "b"],
+        g2=["b", "c", "c"],
+        w1=[2.0, 1.0, 0.0],
+        w2=[1.0, 1.0, 3.0],
+        y=[0.1, 0.2, 0.3],
+    )
+    mm_d = brm_descriptor(mm_builder, mm_df; mod=@__MODULE__)
+    @test :reprocess in Symbol[op.name for op in mm_d.operations]
+
+    changed = merge(mm_df, (; w1=[9.0, 1.0, 1.0], w2=[1.0, 3.0, 1.0]))
+    changed_d = brm_execute(mm_d, :reprocess, changed)
+    idx_key, entry = only((k, e) for (k, e) in mm_d.plan.preproc
+                          if e.kind === :multi_membership)
+    @test changed_d.plan.data[idx_key] == mm_d.plan.data[idx_key]
+    @test changed_d.plan.data[entry.const_.weight_key] ≈
+          [0.9, 0.1, 0.25, 0.75, 0.5, 0.5]
+
+    # One ordinary grouping block keeps a mixed model outside the safe replay
+    # subset even when its other random-effect block is typed multi-membership.
+    mixed_builder = @brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + (1 | mm(g1, g2; weights=(w1, w2))) + (1 | g)
+        y ~ Normal(mu, sigma)
+    end
+    mixed_df = merge(mm_df, (; g=[1, 1, 2]))
+    mixed_d = brm_descriptor(mixed_builder, mixed_df; mod=@__MODULE__)
+    @test :reprocess ∉ Symbol[op.name for op in mixed_d.operations]
 end
 
 kernel_builder = @brm begin
@@ -195,7 +310,7 @@ kernel_builder = @brm begin
     sigma_p ~ Exponential(1)
     log_CL ~ 1 + (1 | p | subject)
     log_V  ~ 1 + (1 | p | subject)
-    pred ~ kernel(t, dose, dv, log_CL, log_V) do ts, dd, yy, lCL, lV
+    loc ~ kernel(t, dose, dv, log_CL, log_V) do ts, dd, yy, lCL, lV
         CL = exp(lCL)
         V = exp(lV)
         mu = dd / V * exp(-(CL / V) * ts)
@@ -229,14 +344,21 @@ kernel_schedule(n; subject=collect(1:n)) = (;
     @test byname[:sigma_a].role === :parameter
 
     # The plate's transformed-parameter carriers and cell locals resolve to the
-    # plate declaration, independent of the generated carrier suffix.
+    # plate declaration, but the traced logical binding marks ONLY its collected
+    # return carrier. No compiler-owned suffix or descriptor order is parsed.
     plate_outputs = [o for o in d.outputs
                      if o.kind === :transformed_parameter && o.role === :group_block]
     @test !isempty(plate_outputs)
-    @test all(o -> o.declaration.target === :pred, plate_outputs)
-    @test any(o -> startswith(string(o.name), "pred__pl_mem_"), plate_outputs)
-    @test byname[:pred_CL].role === :group_block
-    @test byname[:pred_V].role === :group_block
+    @test all(o -> o.declaration.target === :loc, plate_outputs)
+    primary = brm_output(d, :loc)
+    @test primary.logical === :loc
+    @test primary.name in (o.name for o in plate_outputs)
+    @test startswith(string(primary.name), "loc__pl_mem_")
+    @test all(o -> o.name === primary.name || o.logical === nothing, plate_outputs)
+    @test byname[:loc_CL].role === :group_block
+    @test byname[:loc_CL].logical === nothing
+    @test byname[:loc_V].role === :group_block
+    @test byname[:loc_V].logical === nothing
 
     @test :dv in d.columns && :subject in d.columns && :dose in d.columns
 
@@ -254,6 +376,14 @@ kernel_schedule(n; subject=collect(1:n)) = (;
     n = StanBlocks.LogDensityProblems.dimension(prob)
     @test n > 0
     @test isfinite(StanBlocks.LogDensityProblems.logdensity(prob, 0.1 .* randn(n)))
+
+    constrained_names = StanBlocks.BridgeStan.param_names(
+        prob.model; include_tp=true, include_gq=true)
+    loc_coordinates = brm_output_coordinates(d, :loc, constrained_names)
+    @test length(loc_coordinates) == sum(length, kernel_schedule(3).t)
+    @test all(startswith(string(primary.name) * "."),
+              constrained_names[loc_coordinates])
+    @test_throws ErrorException brm_output_coordinates(d, :loc, ["not_loc.1"])
 
     # A builder-backed kernel can rebuild for genuinely new groups. It cannot
     # reprocess in place because its formula-declared BSV is a random-effect
@@ -291,6 +421,7 @@ scalar_schedule(n) = (; dose=fill(100.0, n), dv=collect(1.0:n) ./ 10,
 
     @test :fit in ops
     @test :predict in ops
+    @test brm_output(d, :pred).name === :pred
     @test brm_operation(d, :predict).outputs == (:dv_gen,)
     @test isempty(d.unpredictable)
     prob = brm_execute(d, :fit)

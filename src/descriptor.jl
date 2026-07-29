@@ -53,7 +53,7 @@ The last two are BRM's addition — the **schema link** back to the dataframe:
   when it has no single raw column (a design matrix, a level count, a size).
 - `transform` — the BRM preprocessing kind applied on the way (`:zscale`,
   `:center`, `:standardize`, `:factor`, `:mo`, `:spline`, `:gp`, `:hsgp`,
-  `:protect`),
+  `:multi_membership`, `:protect`),
   or `nothing` when the column is passed through untransformed.
 
 `column`/`transform` are read from the plan's `preproc` record and the BRMI's
@@ -105,6 +105,13 @@ BRM adds:
   on [`GenerativeDeclaration`](@ref); reach for them instead of re-parsing.
   An output whose `name` differs from `declaration.target` is one of that
   block's *internals* (`pop_mu_beta_pop` under `pop_mu`).
+- `logical` — the declaration target whose returned value this emitted Stan
+  output physically carries, or `nothing` for an internal. This is deliberately
+  narrower than `declaration`: every `kernel(...)` cell local belongs to the
+  plate declaration, but only its collected result carries the logical target.
+  For a ragged result, `logical == :loc` can therefore accompany an emitted
+  `name` such as `:loc__pl_mem_1`; consumers keep the logical identity while
+  addressing BridgeStan through the emitted name.
 - `labels` — per-element labels when BRM can name them (population
   coefficients, via [`popcoefnames`](@ref)), otherwise `nothing`. A UI that
   would otherwise print `beta_pop.1`, `beta_pop.2` can print `x`, `g`.
@@ -122,8 +129,17 @@ struct BRMOutput
     source::Union{Nothing,Symbol}
     role::Symbol
     declaration::Union{Nothing,GenerativeDeclaration}
+    logical::Union{Nothing,Symbol}
     labels::Union{Nothing,Vector{Symbol}}
 end
+
+# Preserve the original positional constructor for downstream code that creates
+# display-only BRMOutput values. Descriptor-derived values always supply the
+# semantic `logical` field explicitly below.
+BRMOutput(name, kind, type, size, constraints, generative, source, role,
+          declaration, labels) =
+    BRMOutput(name, kind, type, size, constraints, generative, source, role,
+              declaration, nothing, labels)
 
 # ---- operations -------------------------------------------------------------
 
@@ -158,6 +174,35 @@ struct BRMOperation
     run::Any
 end
 
+# ---- highlighted Stan definitions ------------------------------------------
+
+"""
+    BRMHighlight
+
+One caller-selected Stan definition to feature when presenting a
+[`BRMDescriptor`](@ref).
+
+- `name` is the stable definition name resolved by StanBlocks.
+- `caption` is optional presentation text supplied by the caller.
+- `definition` is StanBlocks' authoritative definition descriptor, including
+  its emitted source and direct dependency links.
+- `closure` is that definition plus its exact transitive included dependencies
+  in StanBlocks' authoritative emission order.
+
+BRM never copies or parses the generated Stan source to construct either.
+
+Pass symbols and/or `name => caption` pairs through the ordered `highlights=`
+keyword of [`brm_descriptor`](@ref). The full executable definition inventory
+remains available on `d.stan.definitions`; `d.highlights` is only the selected,
+ordered presentation layer.
+"""
+struct BRMHighlight
+    name::Symbol
+    caption::Union{Nothing,String}
+    definition::StanBlocks.ModelDefinition
+    closure::Tuple{Vararg{StanBlocks.ModelDefinition}}
+end
+
 # ---- the descriptor ---------------------------------------------------------
 
 """
@@ -173,6 +218,7 @@ Construct with [`brm_descriptor`](@ref).
 | `formula` | the canonical rendering of the parsed declaration (`show` of the `BRMI`). Not the literal characters you typed — it is *derived* from the declaration, so unlike a hand-kept `formula_src` string it cannot drift from the model that runs |
 | `plan` | the [`GenerativePlan`](@ref) — every emitted `~` site, in order |
 | `stan` | StanBlocks' `ModelDescriptor` for the same model, if you need the Stan-level view verbatim |
+| `highlights` | ordered caller-selected [`BRMHighlight`](@ref)s, resolved by stable name against `stan.definitions`; the full included-definition inventory remains on `stan` |
 | `inputs` | `Tuple` of [`BRMInput`](@ref) — the data block plus its dataframe provenance |
 | `outputs` | `Tuple` of [`BRMOutput`](@ref) — everything the model produces, with BRM roles |
 | `operations` | `Tuple` of [`BRMOperation`](@ref) — derived, not listed |
@@ -188,6 +234,7 @@ struct BRMDescriptor{P,S}
     formula::String
     plan::P
     stan::S
+    highlights::Tuple{Vararg{BRMHighlight}}
     inputs::Tuple{Vararg{BRMInput}}
     outputs::Tuple{Vararg{BRMOutput}}
     operations::Tuple{Vararg{BRMOperation}}
@@ -210,7 +257,7 @@ _brm_declaration_role(d::GenerativeDeclaration) = begin
     isempty(d.context) || return :group_block
     f = d.family
     f isa Symbol || return :parameter
-    f === :popefs && return :population_effect
+    f in (:popefs, :_popefs_normal) && return :population_effect
     startswith(String(f), "ranef") && return :random_effect
     f === :plate && return :group_block
     :parameter
@@ -254,6 +301,34 @@ end
 
 _brm_plan_of(plan::GenerativePlan) = plan
 _brm_plan_of(sb::SBBRMI) = generative_plan(sb)
+
+_brm_highlight_spec(x::Union{Symbol,AbstractString}) =
+    (Symbol(x), nothing, nothing)
+_brm_highlight_spec(x::Pair{<:Union{Symbol,AbstractString}}) =
+    (Symbol(first(x)), isnothing(last(x)) ? nothing : String(last(x)), nothing)
+_brm_highlight_spec(x::BRMHighlight) =
+    (x.name, x.caption, x.definition.signature)
+_brm_highlight_spec(x) = error(
+    "brm_descriptor: each `highlights` entry must be a definition name, a " *
+    "`name => caption` pair, or a BRMHighlight; got $(repr(x)).")
+
+function _brm_highlights(stan, specs)
+    entries = specs isa Union{Symbol,AbstractString,Pair,BRMHighlight} ?
+              (specs,) : specs
+    selected = BRMHighlight[]
+    seen = Set{Symbol}()
+    for spec in entries
+        name, caption, signature = _brm_highlight_spec(spec)
+        name in seen && error(
+            "brm_descriptor: definition `$name` is selected more than once in " *
+            "`highlights`; each highlight must be unique.")
+        push!(seen, name)
+        definition = StanBlocks.stan_definition(stan, name; signature)
+        closure = StanBlocks.stan_definition_closure(stan, definition)
+        push!(selected, BRMHighlight(name, caption, definition, closure))
+    end
+    Tuple(selected)
+end
 
 # Label a population-effect output's elements, when BRM can. `popcoefnames`
 # already owns this (and is the documented way not to re-parse `beta_pop.N`);
@@ -304,6 +379,55 @@ function _brm_owner(o, by_name, targets)
     isnothing(best) ? nothing : by_name[best]
 end
 
+# Find the emitted Stan outputs referenced by a traced logical binding. This
+# walks StanBlocks' traced expression graph, not rendered identifiers: a ragged
+# plate result is a compile-time `RaggedVector(mem, ends)` view, and only `mem`
+# is a posterior-producing descriptor output. Cell locals do not occur in that
+# binding even though `_brm_owner` correctly assigns them to the same plate
+# declaration.
+_brm_output_leaves!(found, x::Symbol, candidates) =
+    x in candidates && push!(found, x)
+_brm_output_leaves!(found, x::StanBlocks.StanExpr, candidates) =
+    _brm_output_leaves!(found, StanBlocks.expr(x), candidates)
+_brm_output_leaves!(found, x::StanBlocks.CanonicalExpr, candidates) =
+    foreach(a -> _brm_output_leaves!(found, a, candidates), x.args)
+_brm_output_leaves!(found, x::Expr, candidates) =
+    foreach(a -> _brm_output_leaves!(found, a, candidates), x.args)
+_brm_output_leaves!(found, x::Tuple, candidates) =
+    foreach(a -> _brm_output_leaves!(found, a, candidates), x)
+_brm_output_leaves!(_found, _x, _candidates) = nothing
+
+function _brm_logical_outputs(stan, by_name, targets)
+    logical = Dict{Symbol,Symbol}()
+    output_names = Set{Symbol}(o.name for o in stan.outputs)
+    model_names = Set{Symbol}(keys(stan.model))
+
+    for (resolved, decl) in by_name
+        decl.role === :observation && continue
+        owned = Set{Symbol}(o.name for o in stan.outputs
+                            if _brm_owner(o, by_name, targets) === decl)
+        isempty(owned) && continue
+
+        found = Set{Symbol}()
+        if resolved in output_names
+            push!(found, resolved)
+        elseif resolved in model_names
+            _brm_output_leaves!(found, stan.model[resolved], owned)
+        end
+
+        for emitted in found
+            if haskey(logical, emitted) && logical[emitted] !== decl.target
+                error(
+                    "brm_descriptor: emitted output `$emitted` carries two logical " *
+                    "targets (`$(logical[emitted])` and `$(decl.target)`). The traced " *
+                    "model is ambiguous; give the declarations distinct results.")
+            end
+            logical[emitted] = decl.target
+        end
+    end
+    logical
+end
+
 # Attach coefficient labels to the population block's coefficient vector.
 #
 # `popefs` (sbimpl.jl) declares exactly ONE parameter, `beta_pop`, so within a
@@ -322,13 +446,14 @@ function _brm_label_population!(outputs, brmi, pop_lp)
         isnothing(labels) && continue
         o = outputs[idx[1]]
         outputs[idx[1]] = BRMOutput(o.name, o.kind, o.type, o.size, o.constraints,
-                                    o.generative, o.source, o.role, o.declaration, labels)
+                                    o.generative, o.source, o.role, o.declaration,
+                                    o.logical, labels)
     end
     outputs
 end
 
 """
-    brm_descriptor(sb::SBBRMI; name=nothing, operations=Dict(), titles=Dict())
+    brm_descriptor(sb::SBBRMI; name=nothing, operations=Dict(), titles=Dict(), highlights=())
     brm_descriptor(plan::GenerativePlan; …)
     brm_descriptor(builder::Function, df; mod=@__MODULE__, cv_groups=Set(), …)
 
@@ -361,7 +486,7 @@ hand, so an operation that appears can be executed.
 | `:predict` | `:stan` | the Stan program emits ≥1 posterior-predictive draw **and** ≥1 BRM observation resolves to it |
 | `:pointwise_loglik` | `:stan` | the Stan program emits ≥1 pointwise log-likelihood |
 | `:replay` | `:brm` | the descriptor was built from a `@brm` builder (rebuild on a new dataframe, e.g. new subjects) |
-| `:reprocess` | `:brm` | the declaration has no random-effect block (BRM's documented `reprocess` boundary) |
+| `:reprocess` | `:brm` | the declaration has no random-effect block, or every random-effect block uses typed `mm(...)` preprocessing |
 
 `:replay` / `:reprocess` take the new dataframe positionally and return a NEW
 `BRMDescriptor`; their `inputs` are the dataframe columns in `d.columns`, not
@@ -369,7 +494,8 @@ Stan data keys.
 
 # Extension points
 
-Both are keywords on this constructor, so a consumer extends rather than forks:
+These three keywords let a consumer extend presentation and operations rather
+than fork the descriptor:
 
 - `operations` — a `name => …` mapping applied AFTER derivation:
   * a callable `(d; kwargs...) -> result` adds a new operation (or replaces an
@@ -378,6 +504,10 @@ Both are keywords on this constructor, so a consumer extends rather than forks:
   * `nothing` **suppresses** a derived operation (hide a button the surface
     should not show).
 - `titles` — a `name => String` mapping relabelling any operation.
+- `highlights` — an ordered collection of included Stan definition names, or
+  `name => caption` pairs. Names resolve through StanBlocks' authoritative
+  definition inventory and fail closed when absent; order and captions are
+  presentation metadata only and do not change `d.id` or the executable model.
 
 Overriding a name the model does not offer is allowed (that is how you *add*
 one); suppressing a name that was never derived is a loud error, because it
@@ -386,7 +516,7 @@ registry this type exists to remove.
 
 # Failing closed
 
-Four cases raise rather than degrade, because each is unrecoverable in a
+Five cases raise rather than degrade, because each is unrecoverable in a
 consumer that keys on names:
 
 1. **A declaration target that is also a Stan data input.** Every consumer
@@ -398,6 +528,8 @@ consumer that keys on names:
    errors and names the operations it *does* offer, so the discovery never
    moves into the consumer.
 4. **Suppressing an operation that was not derived** (see above).
+5. **Selecting an absent or duplicate Stan definition highlight.** BRM accepts
+   only names that StanBlocks reports in the executable definition inventory.
 
 One case deliberately does **not** raise, because it is a legitimate model:
 an observation whose predictive draw the Stan program does not emit is
@@ -408,24 +540,27 @@ sees a predict button that would fail — which is the point.
 function brm_descriptor(plan_or_sb::Union{GenerativePlan,SBBRMI};
                         name::Union{Nothing,Symbol}=nothing,
                         operations=Dict{Symbol,Any}(),
-                        titles=Dict{Symbol,String}())
+                        titles=Dict{Symbol,String}(),
+                        highlights=())
     plan = _brm_plan_of(plan_or_sb)
     stan = isnothing(name) ? StanBlocks.stan_descriptor(plan.model) :
                              StanBlocks.stan_descriptor(plan.model; name)
-    _brm_descriptor(plan, stan, operations, titles)
+    _brm_descriptor(plan, stan, operations, titles, highlights)
 end
 
 function brm_descriptor(builder::Function, df;
                         mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
                         name::Union{Nothing,Symbol}=nothing,
                         operations=Dict{Symbol,Any}(),
-                        titles=Dict{Symbol,String}())
+                        titles=Dict{Symbol,String}(),
+                        highlights=())
     brm_descriptor(generative_plan(builder, df; mod, cv_groups);
-                   name, operations, titles)
+                   name, operations, titles, highlights)
 end
 
-function _brm_descriptor(plan, stan, operations, titles)
+function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
     brmi = plan.parent
+    highlights = _brm_highlights(stan, highlight_specs)
 
     # --- the dataframe columns this declaration reads -----------------------
     # `data_columns` covers every column the formula references as a bare
@@ -491,6 +626,7 @@ function _brm_descriptor(plan, stan, operations, titles)
         by_name[sname] = d
     end
     targets = collect(keys(by_name))
+    logical_outputs = _brm_logical_outputs(stan, by_name, targets)
 
     # Linear-predictor names come from the FORMULA, not from the emitted body:
     # `mu = pop_mu + r_mu_g` is an `=`, so no declaration binds it, yet it is
@@ -519,7 +655,8 @@ function _brm_descriptor(plan, stan, operations, titles)
             :stan_derived
         end
         push!(outputs, BRMOutput(o.name, o.kind, o.type, o.size, o.constraints,
-                                 o.generative, o.source, role, decl, nothing))
+                                 o.generative, o.source, role, decl,
+                                 get(logical_outputs, o.name, nothing), nothing))
     end
     outputs = _brm_label_population!(outputs, brmi, pop_lp)
 
@@ -530,7 +667,7 @@ function _brm_descriptor(plan, stan, operations, titles)
     ops = _brm_derive_operations(plan, stan, outputs, columns)
     ops = _brm_apply_overrides(ops, operations, titles)
 
-    BRMDescriptor(stan.id, stan.name, sprint(show, brmi), plan, stan,
+    BRMDescriptor(stan.id, stan.name, sprint(show, brmi), plan, stan, highlights,
                   Tuple(inputs), Tuple(outputs), Tuple(ops), columns,
                   Tuple(unpredictable))
 end
@@ -539,6 +676,22 @@ end
 # replay operations. Nothing is listed: `stan.operations` is itself derived from
 # what the traced model supports, and the two BRM ones are gated on the
 # declaration.
+function _brm_reprocess_supported(plan, outputs)
+    any(o -> o.role === :random_effect, outputs) || return true
+
+    ranef_declarations = [d for d in plan.declarations
+                          if _brm_declaration_role(d) === :random_effect]
+    isempty(ranef_declarations) && return false
+
+    all(ranef_declarations) do d
+        haskey(d.keywords, :group_idx) || return false
+        idx_key = d.keywords.group_idx
+        idx_key isa Symbol || return false
+        entry = get(plan.preproc, idx_key, nothing)
+        entry isa PreprocEntry && entry.kind === :multi_membership
+    end
+end
+
 function _brm_derive_operations(plan, stan, outputs, columns)
     ops = BRMOperation[]
     predictive = Symbol[o.name for o in outputs if o.role === :posterior_predictive]
@@ -556,14 +709,15 @@ function _brm_derive_operations(plan, stan, outputs, columns)
     if !isnothing(plan.builder)
         push!(ops, BRMOperation(
             :replay, "Rebuild the declaration on a new dataframe", columns, (), :brm,
-            (d, new_df; kwargs...) -> brm_descriptor(
-                generative_plan(d.plan, new_df); kwargs...)))
+            (d, new_df; highlights=d.highlights, kwargs...) -> brm_descriptor(
+                generative_plan(d.plan, new_df); highlights, kwargs...)))
     end
-    if !any(o -> o.role === :random_effect, outputs)
+    if _brm_reprocess_supported(plan, outputs)
         push!(ops, BRMOperation(
             :reprocess, "Re-run preprocessing on a new dataframe", columns, (), :brm,
-            (d, new_df; freeze_constants::Bool=true, kwargs...) -> brm_descriptor(
-                reprocess(d.plan, new_df; freeze_constants); kwargs...)))
+            (d, new_df; freeze_constants::Bool=true, highlights=d.highlights,
+             kwargs...) -> brm_descriptor(
+                reprocess(d.plan, new_df; freeze_constants); highlights, kwargs...)))
     end
     ops
 end
@@ -620,6 +774,59 @@ collect for a `:replay` / `:reprocess`. Equivalent to `d.columns`.
 brm_columns(d::BRMDescriptor) = d.columns
 
 """
+    brm_output(d::BRMDescriptor, logical::Symbol) -> BRMOutput
+
+Return the unique emitted output that physically carries declaration target
+`logical`. This resolves BRM meaning to Stan representation without parsing an
+emitter-owned name. For example, a ragged `loc ~ kernel(...)` result can resolve
+to an output named `loc__pl_mem_1` while retaining `logical == :loc`.
+
+Fails loudly when the target has no emitted carrier or maps to several carriers;
+the caller must never guess from descriptor order in either case.
+"""
+function brm_output(d::BRMDescriptor, logical::Symbol)
+    found = BRMOutput[o for o in d.outputs if o.logical === logical]
+    length(found) == 1 && return only(found)
+    if isempty(found)
+        error("brm_descriptor: logical output `$logical` has no emitted posterior " *
+              "carrier in model `$(d.name)`.")
+    end
+    error("brm_descriptor: logical output `$logical` spans several emitted carriers " *
+          "$(Tuple(o.name for o in found)); request an explicit emitted output.")
+end
+
+"""
+    brm_output_coordinates(d::BRMDescriptor, logical::Symbol, constrained_names)
+        -> Vector{Int}
+
+Resolve a logical BRM output to its columns in BridgeStan's constrained
+`param_names` (or an equivalent posterior name vector). Resolution first uses
+[`brm_output`](@ref) to obtain the descriptor's emitted name, then matches only
+that exact name or its documented container coordinates (`name.1`,
+`name.1.1`, …). It never parses a compiler-owned plate suffix.
+
+The returned integers index `constrained_names` in their existing order. A
+missing carrier is an error, which catches descriptor/artifact drift instead of
+returning an empty posterior slice.
+"""
+function brm_output_coordinates(d::BRMDescriptor, logical::Symbol,
+                                constrained_names)
+    output = brm_output(d, logical)
+    stem = String(output.name)
+    prefix = stem * "."
+    coordinates = Int[]
+    for (i, name) in enumerate(constrained_names)
+        rendered = string(name)
+        (rendered == stem || startswith(rendered, prefix)) && push!(coordinates, i)
+    end
+    isempty(coordinates) && error(
+        "brm_descriptor: logical output `$logical` resolves to emitted " *
+        "`$(output.name)`, but that carrier is absent from the supplied constrained " *
+        "names. Re-reflect the model that produced the posterior draws.")
+    coordinates
+end
+
+"""
     brm_operation(d::BRMDescriptor, name::Symbol) -> BRMOperation
 
 The named operation. **Fails closed**: an operation this model does not offer
@@ -662,10 +869,13 @@ Base.show(io::IO, d::BRMDescriptor) = begin
     print(io, "  columns:    ", join(d.columns, ", "), "\n")
     print(io, "  inputs:     ", join(required_brm_inputs(d), ", "), "\n")
     print(io, "  operations: ", join((op.name for op in d.operations), ", "), "\n")
+    isempty(d.highlights) ||
+        print(io, "  highlights: ", join((h.name for h in d.highlights), ", "), "\n")
     isempty(d.unpredictable) ||
         print(io, "  no predictive draw for: ", join(d.unpredictable, ", "), "\n")
     for o in d.outputs
         print(io, "  ", o.name, " :: ", o.role, " (", o.kind, "/", o.generative, ")")
+        isnothing(o.logical) || o.name === o.logical || print(io, " => ", o.logical)
         isnothing(o.labels) || print(io, " [", join(o.labels, ", "), "]")
         print(io, "\n")
     end

@@ -15,6 +15,9 @@ include("introspection.jl")
 # likelihood into a LogDensityProblems-compatible object.
 using LogExpFunctions, InverseFunctions, Distributions, ElasticArrays,
       LogDensityProblems, LinearAlgebra, SpecialFunctions, Random
+using StatsBase: AbstractWeights, AnalyticWeights, FrequencyWeights,
+                 ProbabilityWeights, UnitWeights, Weights,
+                 aweights, fweights, pweights, uweights, weights
 import CategoricalArrays as CA
 include("likelihood_distributions.jl")
 include("vimpl.jl")
@@ -43,13 +46,22 @@ include("adaptive_centering.jl")
 # Public surface. The macros and value types everything downstream
 # (web-macro, bruno, tests) reaches for.
 export @brm, @n, @x, @getproperty
-export assign, doublepipe, gr, gp, offset, zscale, center, standardize, protect, factor
-export me, mi, s, t2, ar, mo, mo1, hsgp, OrderedLogistic, Horseshoe,
+export assign, effect, doublepipe, gr, mm, gp, offset, zscale, center, standardize, protect, factor
+export weighted, AbstractWeights, AnalyticWeights, FrequencyWeights,
+       ProbabilityWeights, UnitWeights, Weights,
+       aweights, fweights, pweights, uweights, weights
+export me, mi, s, t2, ar, mo, mo1, hsgp, OrderedLogistic, Ordinal,
+       OrdinalStructure, Cumulative, StoppingRatio,
+       OrdinalLink, LogitLink, ProbitLink, CloglogLink, Horseshoe,
        CategoricalLogit, ZeroInflatedPoisson, NegativeBinomial2,
-       BetaBinomial, BetaBinomial2, CircularVonMises,
+       BetaBinomial, BetaBinomial2, CircularVonMises, SkewDoubleExponential,
        sb_group_demo, addprop
 # Bordet model family — formula-surface markers for custom likelihood + submodel
 export TruncatedNormal, bordet_hierarchical_parametric, kernel
+# Julia-native response-family composition. `truncated` and `censored` are the
+# exact Distributions.jl functions; `interval_censored` is BRM's narrow formula
+# shim for evidence that a latent response lies between two row-wise bounds.
+export truncated, censored, interval_censored
 # Logit-form Bernoulli/Binomial -- prefer these over `Bernoulli(logistic(eta))`
 # / `Binomial(N, logistic(eta))`. Both backends lower to a logit-native log-pmf
 # (Stan's `bernoulli_logit_lpmf` / `binomial_logit_lpmf`; LogExpFunctions'
@@ -58,13 +70,20 @@ export TruncatedNormal, bordet_hierarchical_parametric, kernel
 # is re-exported from Distributions; `BinomialLogit` is defined alongside the
 # other executable likelihood contracts in likelihood_distributions.jl.
 export BernoulliLogit, BinomialLogit
+# SLIC custom-family bindings must be visible in a caller-supplied model module
+# (`brm_descriptor(...; mod=@__MODULE__)`), matching the existing exported
+# zero-inflated-Poisson and von-Mises UDF triads.
+export brm_ordinal, brm_ordinal_lpmf, brm_ordinal_lpmfs, brm_ordinal_rng,
+       brm_ordinal_logcdf, brm_ordinal_logccdf, brm_ordinal_cdf,
+       multi_std_normal, multi_std_normal_lpdf, ranef_b_matrix,
+       brm_ranef_sd, brm_ranef_sd_lpdf
 export Data, MaybeData, maybedata
 export AbstractColumn, MissingColumn, DataColumn, NamedColumn,
        ExprColumn, LikelihoodColumn, MaterializedColumn
 export BRMI, VBRMI, SBBRMI, GenerativeDeclaration, GenerativePlan
-export BRMDescriptor, BRMInput, BRMOutput, BRMOperation
-export brm_descriptor, brm_operation, brm_execute, brm_columns,
-       required_brm_inputs
+export BRMDescriptor, BRMInput, BRMOutput, BRMOperation, BRMHighlight
+export brm_descriptor, brm_output, brm_output_coordinates, brm_operation,
+       brm_execute, brm_columns, required_brm_inputs
 
 # Accessor helpers for column types — used unqualified by html renderers,
 # sbimpl dispatch logic, and downstream extension hooks like bruno-ext.
@@ -86,7 +105,8 @@ export AdaptiveCenteringBlock, adaptive_centering_blocks,
 export outcomes, linear_predictor_op, linear_predictors, predictors,
        grouping_factors, column_data, data_columns, dependencies,
        hierarchical_outcomes,
-       linear_predictor_args, data_args, primary_lp, popcoefnames
+       linear_predictor_args, data_args, primary_lp, popcoefnames, effect_priors,
+       ranef_effect_priors, ranefcoefnames
 
 # Extension API. Downstream packages (bruno) add their own formula terms
 # by defining methods on `vmeta_sampling_rhs` + `_sb_submodel_rhs!` and
@@ -101,11 +121,14 @@ export _sb_term_group_block, _sb_emit_group_block_term!
 # modules (bruno-ext via web-macro) that build their own SBBRMI-style
 # models with `StanBlocks.SlicModel(body, data, mod)` where `mod` is the
 # caller's namespace can still resolve the BRM built-in submodel names.
-export popefs, cdirichlet, c0dirichlet, c01dirichlet,
-       ranef_intercept, ranef_correlated, ranef_correlated_by,
+export popefs, _popefs_normal, cdirichlet, c0dirichlet, c01dirichlet,
+       ranef_intercept, ranef_intercept_draws, ranef_correlated, ranef_correlated_by,
        ranef_correlated_draws, ranef_correlated_by_draws,
        ranef_intercept_centered, ranef_correlated_centered,
        ranef_correlated_draws_centered,
+       ranef_correlated_draws_effect,
+       ranef_correlated_draws_centered_effect,
+       multi_membership_intercept, multi_membership_correlated,
        _sb_mo, _sb_cat, _sb_ar1, _sb_s, _sb_t2, _sb_me,
        _sb_gp, _sb_gp_aniso, _sb_hsgp, _sb_hsgp_aniso,
        _sb_hsgp_by, _sb_hsgp_by_aniso,

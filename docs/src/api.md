@@ -42,8 +42,11 @@ BayesianRegressionModels.getbroadcast
 
 ```@docs
 BayesianRegressionModels.assign
+BayesianRegressionModels.effect
 BayesianRegressionModels.doublepipe
+BayesianRegressionModels.weighted
 BayesianRegressionModels.gr
+BayesianRegressionModels.mm
 BayesianRegressionModels.gp
 BayesianRegressionModels.hsgp
 BayesianRegressionModels.offset
@@ -65,6 +68,14 @@ BayesianRegressionModels.mo1
 
 ```@docs
 BayesianRegressionModels.OrderedLogistic
+BayesianRegressionModels.Ordinal
+BayesianRegressionModels.OrdinalStructure
+BayesianRegressionModels.Cumulative
+BayesianRegressionModels.StoppingRatio
+BayesianRegressionModels.OrdinalLink
+BayesianRegressionModels.LogitLink
+BayesianRegressionModels.ProbitLink
+BayesianRegressionModels.CloglogLink
 BayesianRegressionModels.CategoricalLogit
 BayesianRegressionModels.Horseshoe
 BayesianRegressionModels.ZeroInflatedPoisson
@@ -72,7 +83,9 @@ BayesianRegressionModels.NegativeBinomial2
 BayesianRegressionModels.BetaBinomial
 BayesianRegressionModels.BetaBinomial2
 BayesianRegressionModels.BinomialLogit
+BayesianRegressionModels.interval_censored
 BayesianRegressionModels.CircularVonMises
+BayesianRegressionModels.SkewDoubleExponential
 ```
 
 ## Backends
@@ -86,6 +99,21 @@ BayesianRegressionModels.GenerativePlan
 BayesianRegressionModels.generative_plan
 BayesianRegressionModels.reprocess
 BayesianRegressionModels.restan_data
+```
+
+## Executable descriptors
+
+```@docs
+BayesianRegressionModels.BRMDescriptor
+BayesianRegressionModels.BRMInput
+BayesianRegressionModels.BRMOutput
+BayesianRegressionModels.BRMOperation
+BayesianRegressionModels.BRMHighlight
+BayesianRegressionModels.brm_descriptor
+BayesianRegressionModels.brm_columns
+BayesianRegressionModels.brm_operation
+BayesianRegressionModels.brm_execute
+BayesianRegressionModels.required_brm_inputs
 ```
 
 ## Introspection
@@ -103,6 +131,8 @@ BayesianRegressionModels.hierarchical_outcomes
 BayesianRegressionModels.linear_predictor_args
 BayesianRegressionModels.data_args
 BayesianRegressionModels.primary_lp
+BayesianRegressionModels.popcoefnames
+BayesianRegressionModels.effect_priors
 ```
 
 ## Extension API

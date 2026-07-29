@@ -193,6 +193,100 @@ function linear_predictors(brmi::BRMI)
     out
 end
 
+# ---- population-effect prior statements -----------------------------------
+
+"""
+    effect_priors(brmi::BRMI) -> Vector{NamedTuple}
+
+Return the population-coefficient prior statements captured by [`@brm`](@ref),
+in formula order. Each entry has
+
+```julia
+(; predictor, coefficient, family, arguments, keywords, expression)
+```
+
+`predictor` is a `Symbol` for the explicit
+`effect(linear_predictor, coefficient)` form and `nothing` for the concise
+`effect(coefficient)` form. `coefficient` uses the same labels as
+[`popcoefnames`](@ref), including `:Intercept`. `expression` is the exact
+parsed RHS [`ExprColumn`](@ref); `family`, `arguments`, and `keywords` are its
+decomposed, directly inspectable parts.
+
+The SBBRMI backend resolves a concise address only when the label belongs to
+exactly one linear predictor, and rejects ambiguous or unknown labels.
+"""
+function effect_priors(brmi::BRMI)
+    out = NamedTuple[]
+    for op_nc in values(brmi.operations)
+        op = _named_op(op_nc)
+        isnothing(op) && continue
+        getf(op) === (~) || continue
+        lhs, rhs = getargs(op, 2)
+        lhs_e = _as_expr_column(lhs)
+        isnothing(lhs_e) && continue
+        getf(lhs_e) === effect || continue
+        address = getargs(lhs_e)
+        !isempty(address) && first(address) in (:sd, :cor) && continue
+        length(address) in (1, 2) || error(
+            "effect_priors: malformed effect address with $(length(address)) arguments")
+        rhs_e = _as_expr_column(rhs)
+        isnothing(rhs_e) && error(
+            "effect_priors: `effect(...)` RHS is not a distribution expression")
+        predictor = length(address) == 2 ? address[1] : nothing
+        coefficient = address[end]
+        push!(out, (; predictor, coefficient, family=getf(rhs_e),
+                     arguments=getargs(rhs_e), keywords=getkwargs(rhs_e),
+                     expression=rhs_e))
+    end
+    out
+end
+
+"""
+    ranef_effect_priors(brmi::BRMI) -> Vector{NamedTuple}
+
+Return random-effect covariance-prior statements captured by [`@brm`](@ref),
+in formula order. Each entry has
+
+```julia
+(; class, id, predictor, coefficient, family, arguments, keywords, expression)
+```
+
+`class` is `:sd` or `:cor`. A block-wide statement has `predictor === nothing`
+and `coefficient === nothing`; the unique-predictor SD shorthand has only
+`coefficient === nothing`. The fully explicit SD address carries both symbols.
+Use [`ranefcoefnames`](@ref) for the authoritative ordered margin addresses of
+a shared `|ID|` block.
+"""
+function ranef_effect_priors(brmi::BRMI)
+    out = NamedTuple[]
+    for op_nc in values(brmi.operations)
+        op = _named_op(op_nc)
+        isnothing(op) && continue
+        getf(op) === (~) || continue
+        lhs, rhs = getargs(op, 2)
+        lhs_e = _as_expr_column(lhs)
+        isnothing(lhs_e) && continue
+        getf(lhs_e) === effect || continue
+        address = getargs(lhs_e)
+        isempty(address) && continue
+        class = first(address)
+        class in (:sd, :cor) || continue
+        valid = class === :sd ? length(address) in (2, 3, 4) : length(address) == 2
+        valid || error(
+            "ranef_effect_priors: malformed random-effect address " *
+            "`effect($(join(address, ", ")))`")
+        rhs_e = _as_expr_column(rhs)
+        isnothing(rhs_e) && error(
+            "ranef_effect_priors: `effect(...)` RHS is not a distribution expression")
+        predictor = length(address) >= 3 ? address[3] : nothing
+        coefficient = length(address) == 4 ? address[4] : nothing
+        push!(out, (; class, id=address[2], predictor, coefficient,
+                     family=getf(rhs_e), arguments=getargs(rhs_e),
+                     keywords=getkwargs(rhs_e), expression=rhs_e))
+    end
+    out
+end
+
 # ---- predictors of a single LP --------------------------------------------
 
 """
@@ -205,7 +299,9 @@ For a linear-predictor LHS, classify the RHS into:
 - `categorical::Vector{Symbol}` -- bare predictors over `Integer` data columns.
 - `re_terms::Vector{(; group, inner)}` -- random-effects blocks, with
   `inner` recursively the same shape so callers can reach RE-internal
-  predictors.
+  predictors. A typed `mm(...)` term additionally carries `groups`, the tuple
+  of all membership columns, while `group` remains its first column for
+  compatibility with scalar-axis consumers.
 
 Works for both bare-LHS LPs (`loc ~ 1 + a`) and link-transformed-LHS
 LPs (`log(err) ~ 1 + b`); the link is captured separately via
@@ -237,6 +333,20 @@ function _walk_pred_leaf(x::ExprColumn)
     for a in getargs(x)
         leaf = _walk_pred_leaf(a)
         leaf === nothing || return leaf
+    end
+    nothing
+end
+function _walk_pred_leaf(x::MultiMembershipTerm)
+    for a in getargs(x)
+        leaf = _walk_pred_leaf(a)
+        leaf === nothing || return leaf
+    end
+    weights = getfield(x, :weights)
+    if !isnothing(weights)
+        for a in weights
+            leaf = _walk_pred_leaf(a)
+            leaf === nothing || return leaf
+        end
     end
     nothing
 end
@@ -304,13 +414,26 @@ _walk_pred_grouped!(re_terms, s) = begin
     ra = getargs(s)
     length(ra) >= 2 || return false
     last_arg = ra[end]
-    isnothing(_data_backed_or_nothing(last_arg)) && return false
-    grp = name(last_arg)
     inner = _walk_predictors(_sum_summands(ra[1]))
     isnothing(inner) && return false
-    push!(re_terms, (; group=grp, inner))
+    _push_pred_group!(re_terms, last_arg, inner)
+end
+
+_push_pred_group!(re_terms, group::NamedColumn, inner) = begin
+    isnothing(_data_backed_or_nothing(group)) && return false
+    push!(re_terms, (; group=name(group), inner))
     true
 end
+_push_pred_group!(re_terms, term::MultiMembershipTerm, inner) = begin
+    groups = getargs(term)
+    all(g -> !isnothing(_data_backed_or_nothing(g)), groups) || return false
+    names = Tuple(name(g) for g in groups)
+    # Preserve the long-standing scalar `group` field for PPC consumers while
+    # exposing the complete membership set structurally to richer consumers.
+    push!(re_terms, (; group=first(names), groups=names, inner))
+    true
+end
+_push_pred_group!(_, _, _) = false
 
 # `hsgp(x, by=g)` is a per-group random effect, so its `by=` grouping column is a
 # genuine grouping factor (web-macro auto-PPC facets on these), even though it
@@ -332,7 +455,12 @@ no grouping term or the LP isn't introspectable.
 """
 function grouping_factors(brmi::BRMI, lhs::Symbol)
     p = predictors(brmi, lhs)
-    re_groups = isnothing(p) ? Symbol[] : Symbol[t.group for t in p.re_terms]
+    re_groups = Symbol[]
+    if !isnothing(p)
+        for t in p.re_terms
+            append!(re_groups, hasproperty(t, :groups) ? collect(t.groups) : [t.group])
+        end
+    end
     op = linear_predictor_op(brmi, lhs)
     isnothing(op) && return unique!(re_groups)
     _, rhs_expr = getargs(op, 2)
@@ -400,6 +528,17 @@ _trace_named!(_, _, _, _, _, _) = nothing
 function _trace_expr!(brmi, expr::ExprColumn, data, intermediates, seen)
     for a in getargs(expr)
         _trace_expr!(brmi, a, data, intermediates, seen)
+    end
+end
+function _trace_expr!(brmi, expr::MultiMembershipTerm, data, intermediates, seen)
+    for a in getargs(expr)
+        _trace_expr!(brmi, a, data, intermediates, seen)
+    end
+    weights = getfield(expr, :weights)
+    if !isnothing(weights)
+        for a in weights
+            _trace_expr!(brmi, a, data, intermediates, seen)
+        end
     end
 end
 _trace_expr!(_, _, _, _, _) = nothing

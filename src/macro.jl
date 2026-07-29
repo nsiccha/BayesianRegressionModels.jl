@@ -12,8 +12,16 @@ name is gensym-ed). The two-argument form bakes `df` in and returns the
 
 - `lhs ~ rhs` — a sampling statement (likelihood or linear predictor).
 - `lhs = rhs` — a literal binding (named intermediate).
+- `effect(lp, coefficient) ~ Normal(location, scale)` — an SBBRMI
+  population-coefficient prior override.
+- `effect(sd, ID, [lp, [coefficient]]) ~ Exponential(scale)` and
+  `effect(cor, ID) ~ LKJCholesky(K, eta)` — SBBRMI priors for a shared
+  `|ID|` random-effect block.
 
 Multiple `~` lines produce a multi-response / distributional model.
+Inside an observed family's argument expression, nested `@brm(expr)` is the
+explicit opt-in for a coefficient-bearing predictor formula. Unmarked family
+arguments remain ordinary expressions.
 
 ```julia
 brmi = @brm df begin
@@ -95,8 +103,53 @@ end
 """Marker function for literal-binding (`lhs = rhs`) operations in a `@brm` block. Dispatch tag only — never called."""
 function assign end
 
+"""
+    effect(coefficient)
+    effect(linear_predictor, coefficient)
+    effect(sd, id[, linear_predictor[, coefficient]])
+    effect(cor, id)
+
+Address a population formula coefficient or shared `|ID|` random-effect block
+in a separate prior statement:
+
+```julia
+@brm begin
+    log_ka ~ 1 + weight + (1 | pk | subject)
+    effect(log_ka, Intercept) ~ Normal(log(1 / 8), 0.8)
+    effect(log_ka, weight) ~ Normal(0, 0.1)
+    effect(sd, pk) ~ Exponential(2 / 3)
+    effect(cor, pk) ~ LKJCholesky(2, 2)
+end
+```
+
+The two-argument form is explicit and is preferred for multi-predictor models.
+The one-argument form is accepted when the coefficient label occurs in exactly
+one linear predictor. `sd` and `cor` are reserved first-position classes for
+random-effect addresses. An SD margin may be selected by predictor plus
+coefficient, or by predictor alone when it contributes exactly one margin.
+`effect` is an address marker, not a callable function. Use
+[`effect_priors`](@ref), [`ranef_effect_priors`](@ref), and
+[`ranefcoefnames`](@ref) to inspect the captured statements and margin labels.
+"""
+function effect end
+
 """Marker function for the brms `||` zero-correlation random-effects operator. Dispatch tag only — never called."""
 function doublepipe end
+
+"""
+    weighted(distribution, weights)
+
+Formula marker for a typed observation weight. The second argument is a
+StatsBase weight constructor over a dataframe column, for example
+`aweights(replicate_k)`, `fweights(repeats)`, or `weights(power)`.
+
+The weight type is semantic. Analytic weights modify a supported observation
+distribution's precision (currently `Normal`); frequency and generic weights
+scale model and pointwise log-likelihood contributions while preserving the
+base distribution's predictive RNG. Lowering is implemented by the StanBlocks
+backend; this marker is never called directly.
+"""
+function weighted end
 
 """
     gr(group; by=strata)
@@ -107,6 +160,22 @@ Dispatch tag only — backend interpretation lives in `vmeta_sampling_rhs`
 (vimpl) / the sbimpl ranef walker.
 """
 function gr end
+
+"""
+    mm(group1, group2, ...; weights=nothing, normalize=true)
+
+Multi-membership grouping marker for random effects. Each observation belongs
+to two or more grouping levels and receives the weighted sum of their shared
+random-effect coefficients. `weights` is either omitted (equal `1/M` weights)
+or a tuple of one data column per group. Supplied weights must be finite,
+nonnegative, and have a positive row total; by default each row is normalized
+to sum to one. Set `normalize=false` to preserve valid supplied magnitudes.
+
+`@brm` lowers this surface immediately to a typed
+`MultiMembershipTerm`; the Stan backend validates and materializes it, including
+when data are replayed through [`reprocess`](@ref).
+"""
+function mm end
 
 """
     gp(x...; cov=:exp_quad, iso=true, jitter=1e-9)
@@ -191,13 +260,17 @@ begin
 end
 """); kwargs...)
 _brm(x::Expr; df=nothing) = begin
+    (x.head == :block || x.head == :(=) || isxcall(x, :~)) || error(
+        "@brm: a standalone predictor fragment such as `@brm(1 + x)` is " *
+        "not implemented. Use nested `@brm(1 + x)` inside an outer `@brm` " *
+        "likelihood, or write a top-level `lhs ~ rhs` formula.")
     lhs, x = x.head == :(=) ? x.args : (:($(gensym("model"))(__df__)), x)
     alllocals = OrderedDict{Symbol,Symbol}()
     info = (;alllocals)
     x = parse!(x; info)
     nonlocals = [key for (key, value) in pairs(alllocals) if value == :nonlocal]
     maybelocals = [key for (key, value) in pairs(alllocals) if value == :maybelocal]
-    finalize = :($BRMI(;$(keys(alllocals)...)))
+    finalize = :($_expand_nested_predictor_formulas((;$(keys(alllocals)...))))
     # ONE shared builder body, parameterised on the `__df__` symbol. Nonlocals
     # bind via the @getproperty (hasproperty→MissingColumn) fallback so a name
     # that isn't a df column (e.g. a multi-equation predictor/param like
@@ -240,6 +313,9 @@ elseif x.head == :(=)
     parselocals!(rhs; info, val=:nonlocal)
     parselocals!(lhs; info, val=:local)
     :(@n $lhs = @x $assign($(xname(lhs)), $rhs))
+elseif isxcall(x, :~) && _is_effect_lhs(x.args[2])
+    _, lhs, rhs = x.args
+    _parse_effect!(lhs, rhs; info)
 elseif isxcall(x, :~)
     _, lhs, rhs = x.args
     # Shield brms-style `(e | ID | g)` ranef IDs from parselocals! so the bare
@@ -255,6 +331,40 @@ elseif isxcall(x, :~)
 else
     dump(x)
     error("Don't know how to handle parse!($x)!")
+end
+
+_is_effect_lhs(x) = isxcall(x, :effect)
+_effect_address_symbol(x::Symbol) = x
+_effect_address_symbol(x::QuoteNode) = x.value isa Symbol ? x.value : error(
+    "@brm: `effect(...)` addresses must be symbols, got $(repr(x.value))")
+_effect_address_symbol(x) = error(
+    "@brm: `effect(...)` addresses must be bare symbols, got $(repr(x))")
+
+function _parse_effect!(lhs::Expr, rhs; info)
+    raw_args = lhs.args[2:end]
+    args = map(_effect_address_symbol, raw_args)
+    if !isempty(args) && first(args) === :sd
+        length(args) in (2, 3, 4) || error(
+            "@brm: random-effect SD priors expect `effect(sd, ID)`, " *
+            "`effect(sd, ID, linear_predictor)`, or " *
+            "`effect(sd, ID, linear_predictor, coefficient)`, got " *
+            "$(length(args)) arguments")
+    elseif !isempty(args) && first(args) === :cor
+        length(args) == 2 || error(
+            "@brm: random-effect correlation priors expect exactly " *
+            "`effect(cor, ID)`, got $(length(args)) arguments")
+    else
+        length(args) in (1, 2) || error(
+            "@brm: population-effect priors expect `effect(coefficient)` or " *
+            "`effect(linear_predictor, coefficient)`, got $(length(args)) arguments")
+    end
+    key = Symbol("__effect__", join(string.(args), "__"))
+    haskey(info.alllocals, key) && error(
+        "@brm: duplicate `effect($(join(args, ", ")))` prior statement")
+    info.alllocals[key] = :local
+    parselocals!(rhs; info, val=:nonlocal)
+    quoted_lhs = Expr(:call, :effect, map(QuoteNode, args)...)
+    :(@n $key = @x $(Expr(:call, :~, quoted_lhs, rhs)))
 end
 rewrite_ranef_ids(x) = x
 rewrite_ranef_ids(x::Expr) = if isxcall(x, :|) && length(x.args) == 3 &&
@@ -273,6 +383,28 @@ _quote_ranef_id(id_sym::Symbol, x::Expr) = begin
     Expr(:call, :|, lhs, QuoteNode(id_sym), g)
 end
 _quote_ranef_id(_, x::Expr) = Expr(x.head, rewrite_ranef_ids.(x.args)...)
+
+_is_nested_brm(x) = Meta.isexpr(x, :macrocall) &&
+                    !isempty(x.args) && x.args[1] === Symbol("@brm")
+_contains_nested_brm_syntax(x) = false
+_contains_nested_brm_syntax(x::Expr) =
+    _is_nested_brm(x) || any(_contains_nested_brm_syntax, x.args)
+function _nested_brm_payload(x::Expr)
+    _is_nested_brm(x) || error("@brm: expected a nested `@brm(expr)` marker")
+    length(x.args) == 3 || error(
+        "@brm: nested `@brm` accepts exactly one parenthesized predictor " *
+        "expression, got $(max(length(x.args) - 2, 0)) payloads")
+    payload = x.args[3]
+    if payload isa Expr &&
+       (payload.head == :block || payload.head == :(=) || isxcall(payload, :~))
+        error("@brm: nested `@brm(...)` marks one predictor expression; " *
+              "blocks, assignments, and `~` statements belong in the outer model")
+    end
+    _contains_nested_brm_syntax(payload) && error(
+        "@brm: a nested predictor formula cannot contain another nested `@brm`")
+    payload
+end
+
 parselocals!(x; kwargs...) = x
 parselocals!(x::Symbol; info, val) = get!(info.alllocals, x, val)
 parselocals!(x::Expr; info, val) = if Meta.isexpr(x, :->)
@@ -281,6 +413,8 @@ parselocals!(x::Expr; info, val) = if Meta.isexpr(x, :->)
     # columns would be wrong. Genuine outer params are registered by their own
     # `~`/`=` lines.
     x
+elseif _is_nested_brm(x)
+    parselocals!(_nested_brm_payload(x); info, val)
 elseif Meta.isexpr(x, (:call, :kw))
     parselocals!.(x.args[2:end]; info, val)
 else
@@ -320,6 +454,8 @@ _x(x) = x
 _x(x::Symbol) = x
 _x(x::Expr) = if x.head == :call
     Expr(:call, ExprColumn, _x.(x.args)...) |> fixcall
+elseif _is_nested_brm(x)
+    Expr(:call, NestedPredictorFormula, _x(_nested_brm_payload(x)))
 elseif x.head ==  :||
     Expr(:call, ExprColumn, doublepipe, _x.(x.args)...)
 elseif x.head == :do
@@ -387,9 +523,9 @@ maybedata(x) = MaybeData(x)
     AbstractColumn
 
 Supertype of every column-shape token the `@brm` parser produces.
-Subtypes: [`MissingColumn`](@ref), [`DataColumn`](@ref),
-[`NamedColumn`](@ref), [`ExprColumn`](@ref), [`LikelihoodColumn`](@ref),
-[`MaterializedColumn`](@ref).
+Subtypes include [`MissingColumn`](@ref), [`DataColumn`](@ref),
+[`NamedColumn`](@ref), [`ExprColumn`](@ref), `MultiMembershipTerm`,
+[`LikelihoodColumn`](@ref), and [`MaterializedColumn`](@ref).
 
 Backend dispatchers (`vmeta_sampling_rhs`, `_sb_emit!`, the
 introspection walkers) branch on this hierarchy rather than on
@@ -415,6 +551,19 @@ struct DataColumn{P} <: AbstractColumn
     parent::P
 end
 Base.parent(d::DataColumn) = getfield(d, :parent)
+
+"""
+    NestedPredictorFormula(parent)
+
+Internal parser node for an explicit nested `@brm(expr)` predictor formula.
+The outer builder consumes every such node before returning a [`BRMI`](@ref),
+replacing it with ordinary named `~` operations. It is intentionally not
+exported and never reaches a backend.
+"""
+struct NestedPredictorFormula{P} <: AbstractColumn
+    parent::P
+end
+Base.parent(x::NestedPredictorFormula) = getfield(x, :parent)
 
 """
     NamedColumn(name, parent)
@@ -477,6 +626,50 @@ struct ExprColumn{F,A<:Tuple,K<:NamedTuple} <: AbstractColumn
         (_check_term_kwargs(f, (;kwargs...));
          new{Type{f},typeof(args),typeof((;kwargs...))}(f,args,(;kwargs...)))
 end
+
+"""
+    MultiMembershipTerm
+
+Typed internal column node produced by `mm(...)`. It deliberately does not use
+the generic `ExprColumn` representation: grouping columns, optional weight
+columns, and the normalization policy are structural parts of one random-effect
+term and must survive preprocessing/replay together.
+"""
+struct MultiMembershipTerm{G<:Tuple,W} <: AbstractColumn
+    groups::G
+    weights::W
+    normalize::Bool
+end
+
+function MultiMembershipTerm(groups...; weights=nothing, normalize=true)
+    length(groups) >= 2 || throw(ArgumentError(
+        "`mm(...)` requires at least two grouping columns; got $(length(groups))"))
+    all(g -> g isa NamedColumn, groups) || throw(ArgumentError(
+        "every positional argument to `mm(...)` must be a data-column name"))
+    normalize isa Bool || throw(ArgumentError(
+        "`mm(...; normalize=...)` expects `true` or `false`, got $(repr(normalize))"))
+    if weights !== nothing
+        weights isa Tuple || throw(ArgumentError(
+            "`mm(...; weights=...)` expects a tuple with one weight column per group"))
+        length(weights) == length(groups) || throw(ArgumentError(
+            "`mm(...)` has $(length(groups)) groups but $(length(weights)) weight columns"))
+        all(w -> w isa NamedColumn, weights) || throw(ArgumentError(
+            "every entry of `mm(...; weights=(...))` must be a data-column name"))
+    end
+    MultiMembershipTerm(tuple(groups...), weights, normalize)
+end
+
+# Specialised outer constructor: `_x` continues to lower every call through
+# `ExprColumn(...)`, while dispatch turns only `mm(...)` into the typed node.
+ExprColumn(::typeof(mm), groups...; kwargs...) = MultiMembershipTerm(groups...; kwargs...)
+
+getf(::MultiMembershipTerm) = mm
+getargs(x::MultiMembershipTerm) = getfield(x, :groups)
+getargs(x::MultiMembershipTerm, n) =
+    (rv = getargs(x); @assert length(rv) == n; rv)
+getkwargs(x::MultiMembershipTerm) =
+    (; weights=getfield(x, :weights), normalize=getfield(x, :normalize))
+getop(::MultiMembershipTerm) = mm
 
 """
     getf(x::ExprColumn) -> F
@@ -554,6 +747,139 @@ struct BRMI{O<:NamedTuple}
     operations::O
 end
 BRMI(;kwargs...) = BRMI((;kwargs...))
+
+# Nested predictor formulas are normalised at builder execution time, after
+# data columns have values (categorical K is therefore known) but before a BRMI
+# becomes public. Downstream introspection, replay, descriptors, and both
+# backends see only the existing explicit `eta ~ formula` representation.
+_brm_fit_levels(raw::AbstractVector) = sort(unique(raw))
+
+_nested_contains(::Any) = false
+_nested_contains(::NestedPredictorFormula) = true
+_nested_contains(x::NamedColumn) = _nested_contains(parent(x))
+_nested_contains(x::ExprColumn) =
+    any(_nested_contains, getargs(x)) || any(_nested_contains, values(getkwargs(x)))
+
+_nested_path_token(kind::Symbol, value) = Symbol(kind, value)
+_nested_predictor_name(target::Symbol, path::Tuple) =
+    Symbol(target, :_nested_, join(string.(path), "_"))
+
+function _nested_predictor!(pending, occupied, target, path, formula)
+    n = _nested_predictor_name(target, path)
+    n in occupied && error(
+        "@brm: generated nested-predictor name `$n` collides with an existing " *
+        "formula/data name. Rename that binding or write the predictor as an " *
+        "explicit top-level `eta ~ ...` statement.")
+    lhs = NamedColumn(n, MissingColumn())
+    op = NamedColumn(n, ExprColumn(~, lhs, formula))
+    push!(pending, n => op)
+    push!(occupied, n)
+    op
+end
+
+function _nested_rewrite!(x::NestedPredictorFormula, target, path,
+                          pending, occupied)
+    _nested_predictor!(pending, occupied, target, path, parent(x))
+end
+function _nested_rewrite!(x::ExprColumn, target, path, pending, occupied)
+    args = getargs(x)
+    new_args = ntuple(length(args)) do i
+        token = _nested_path_token(:arg, i)
+        _nested_rewrite!(args[i], target, (path..., token), pending, occupied)
+    end
+    kwargs = getkwargs(x)
+    kw_names = keys(kwargs)
+    new_kw_values = ntuple(length(kw_names)) do i
+        key = kw_names[i]
+        token = _nested_path_token(:kw_, key)
+        _nested_rewrite!(getfield(kwargs, key), target, (path..., token),
+                         pending, occupied)
+    end
+    new_kwargs = NamedTuple{kw_names}(new_kw_values)
+    ExprColumn(getf(x), new_args...; new_kwargs...)
+end
+_nested_rewrite!(x, _target, _path, _pending, _occupied) = x
+
+_nested_observed_values(lhs::NamedColumn) =
+    parent(lhs) isa DataColumn ? parent(parent(lhs)) : nothing
+function _nested_observed_values(lhs::ExprColumn)
+    args = getargs(lhs)
+    length(args) == 1 ? _nested_observed_values(only(args)) : nothing
+end
+_nested_observed_values(_) = nothing
+
+function _nested_rewrite_categorical!(target, lhs, rhs, pending, occupied)
+    args = getargs(rhs)
+    kwargs = getkwargs(rhs)
+    has_marker = any(_nested_contains, args) || any(_nested_contains, values(kwargs))
+    has_marker || return rhs
+    (length(args) == 1 && only(args) isa NestedPredictorFormula && isempty(kwargs)) ||
+        error("@brm: concise `CategoricalLogit` requires exactly one direct " *
+              "marker: `CategoricalLogit(@brm(formula))`. Do not mix marked " *
+              "and explicit class predictors.")
+
+    raw = _nested_observed_values(lhs)
+    raw isa AbstractVector || error(
+        "@brm: `CategoricalLogit(@brm(...))` needs an observed outcome vector " *
+        "to determine its non-reference classes; use explicit predictors when " *
+        "the outcome schema is unavailable.")
+    levels = _brm_fit_levels(raw)
+    length(levels) >= 2 || error(
+        "@brm: `CategoricalLogit(@brm(...))` needs at least two observed " *
+        "outcome levels (got $(length(levels))).")
+
+    formula = parent(only(args))
+    refs = ntuple(length(levels) - 1) do j
+        class_token = _nested_path_token(:class, j + 1)
+        _nested_predictor!(pending, occupied, target,
+                           (_nested_path_token(:arg, 1), class_token), formula)
+    end
+    ExprColumn(getf(rhs), refs...)
+end
+
+function _nested_rewrite_likelihood!(target, lhs, rhs::ExprColumn,
+                                     pending, occupied)
+    if isdefined(@__MODULE__, :CategoricalLogit) && getf(rhs) === CategoricalLogit
+        return _nested_rewrite_categorical!(target, lhs, rhs, pending, occupied)
+    end
+    _nested_rewrite!(rhs, target, (), pending, occupied)
+end
+_nested_rewrite_likelihood!(target, _lhs, rhs, pending, occupied) =
+    rhs isa NestedPredictorFormula ? error(
+        "@brm: nested `@brm(...)` must be an argument of the observed " *
+        "family, for example `y ~ Normal(@brm(1 + x), 1)`.") : rhs
+
+function _expand_nested_top!(key, value, pending, occupied)
+    value isa NamedColumn || return value
+    op = parent(value)
+    op isa ExprColumn || return value
+    _nested_contains(op) || return value
+    getf(op) === (~) || error(
+        "@brm: nested `@brm(...)` is only valid inside an observed likelihood " *
+        "argument, not inside `$key = ...`.")
+    lhs, rhs = getargs(op, 2)
+    isnothing(_nested_observed_values(lhs)) && error(
+        "@brm: nested `@brm(...)` is only valid inside an observed likelihood " *
+        "argument, not the linear predictor `$key ~ ...`.")
+    new_rhs = _nested_rewrite_likelihood!(key, lhs, rhs, pending, occupied)
+    NamedColumn(name(value), ExprColumn(~, lhs, new_rhs))
+end
+
+function _expand_nested_predictor_formulas(operations::NamedTuple)
+    any(_nested_contains, values(operations)) || return BRMI(operations)
+    occupied = Set{Symbol}(keys(operations))
+    expanded = Pair{Symbol,Any}[]
+    for (key, value) in pairs(operations)
+        pending = Pair{Symbol,Any}[]
+        new_value = _expand_nested_top!(key, value, pending, occupied)
+        append!(expanded, pending)
+        push!(expanded, key => new_value)
+    end
+    names = Tuple(first.(expanded))
+    values_ = Tuple(last.(expanded))
+    BRMI(NamedTuple{names}(values_))
+end
+
 Base.show(io::IO, (;operations)::BRMI) = begin
     print(io, "BRMI:\n")
     for (key, value::NamedColumn) in pairs(operations)
@@ -586,6 +912,14 @@ Base.show(io::IO, x::ExprColumn) = begin
     print(io, getf(x), "(", )
     join(io, getargs(x), ", ")
     nonemptyjoin(io, ["$key=$value" for (key, value) in pairs(getkwargs(x))], ", "; first="; ")
+    print(io, ")")
+end
+Base.show(io::IO, x::MultiMembershipTerm) = begin
+    print(io, "mm(")
+    join(io, getfield(x, :groups), ", ")
+    weights = getfield(x, :weights)
+    isnothing(weights) || (print(io, "; weights=("); join(io, weights, ", "); print(io, ")"))
+    getfield(x, :normalize) || print(io, isnothing(weights) ? "; normalize=false" : ", normalize=false")
     print(io, ")")
 end
 Base.show(io::IO, x::NamedColumn) = print(io, name(x))
