@@ -44,10 +44,20 @@ bodies; the override TSV has SHA-256
 ## Current execution environment
 
 - BayesianRegressionModels.jl:
-  `784712998ea67f6429d0a3b5a3241fe9cb690e64` (`ns/devibe`).
+  reviewed clean tree `a707af21d138b0019810f8dce9d655109dc97ff6`,
+  landed as canonical `ns/devibe`
+  `11031f2d3bbd0c9cad42bed53a4a8dd193ab9d2e`. The validation candidate
+  `4d8f565b1cf4b347b3d0e93a0b6499c2561dc42d` has the same Git tree
+  (`309028b731f07c9c8dd17a42e74022b66fc23f9e`) as the clean reviewed commit;
+  the discarded VBRMI-mutating ancestry is not part of the reviewed or landed
+  line.
 - StanBlocks.jl:
   `329a178a7ad7877da0b58ad2c360d417ddd663f9` (local active checkout selected
-  by the canonical resolver).
+  by the canonical resolver). The separately discovered
+  `neg_binomial_2_log` trace defect was fixed after this pinned run in
+  StanBlocks canonical `144188a808308177807ceb47f08749a335a0ef70`
+  (`negative-binomia-fd397aa0`); the inventory's working non-log NB2 route is
+  unaffected and the running exact-SHA census was not restarted.
 - WarmupHMC.jl:
   `b185eedbbeeef6fb3327afb30dc995c98591af02` for this rerun. The independent
   peer sleepstudy control used
@@ -59,6 +69,18 @@ bodies; the override TSV has SHA-256
 The corpus probe records generated Stan and Stan-data hashes. A result is fanned
 out only when the normalized current BRM body, declared data columns, grouping
 columns, selected family, generated Stan, and data schema are identical.
+
+## Family recovery audit
+
+The 122 deployed rows left unresolved by the first renderer/receipt pass were
+audited again on 2026-07-28 against the exact historical BRM source, the cited
+project's repository/docs/code (including relevant historical revisions), and
+dataset schema or values as supporting but never sole evidence. The row-keyed
+ledger is `family_audit.tsv`: 116 explicit family recoveries, five defensible
+semantic inferences, and one genuinely indeterminate row (`kruschke:calcium`).
+Each row records the searched surfaces, exact revisions and path anchors,
+retrieval status/time, positive evidence, dataset corroboration, and negative
+evidence. No renderer default or response name was accepted as family evidence.
 
 ## SbPMX semantic HTMXO baseline
 

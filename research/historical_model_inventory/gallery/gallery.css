@@ -1,0 +1,56 @@
+:root {
+  --paper: #f4efe4;
+  --ink: #18221f;
+  --muted: #5e6963;
+  --line: #c9c2b3;
+  --panel: #fffdf7;
+  --accent: #9d3f2a;
+  --accent-soft: #efd8cc;
+  --ok: #1d6b50;
+  --warn: #9a5b13;
+  --fail: #9d2f2f;
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--paper); color: var(--ink); }
+.inventory-shell { width: min(1560px, 100%); margin: 0 auto; padding: 3rem clamp(1rem, 3vw, 3.5rem); }
+.inventory-shell > div > header { max-width: 76rem; margin-bottom: 2.5rem; }
+h1 { margin: .2rem 0 .75rem; font-family: Georgia, "Times New Roman", serif; font-size: clamp(2.2rem, 5vw, 5.4rem); font-weight: 500; line-height: .98; letter-spacing: -.04em; }
+h2 { font-family: Georgia, "Times New Roman", serif; font-weight: 500; }
+.eyebrow { margin: 0; color: var(--accent); font-size: .78rem; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }
+.lede { max-width: 58rem; color: var(--muted); font-size: 1.1rem; line-height: 1.6; }
+.inventory-layout { display: grid; grid-template-columns: minmax(15rem, 20rem) minmax(0, 1fr); gap: clamp(1.5rem, 3vw, 3rem); align-items: start; }
+.filter-panel { position: sticky; top: 1rem; padding: 1.2rem; border: 1px solid var(--line); border-radius: .35rem; background: color-mix(in srgb, var(--panel) 92%, transparent); box-shadow: 0 18px 50px rgba(48, 35, 20, .08); }
+.filter-panel h2 { margin-top: 0; }
+.inventory-filters fieldset { min-width: 0; margin: 0 0 1rem; padding: 0; border: 0; }
+.inventory-filters label { display: block; margin: .75rem 0 .25rem; font-size: .78rem; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; }
+.inventory-filters select, .inventory-filters input { width: 100%; min-height: 2.5rem; padding: .45rem .55rem; border: 1px solid var(--line); border-radius: .25rem; background: white; color: var(--ink); }
+.inventory-filters button { width: 100%; margin-top: .9rem; padding: .7rem 1rem; border: 0; border-radius: .25rem; background: var(--ink); color: white; font-weight: 750; cursor: pointer; }
+.adapter-note { margin: 1rem 0 0; padding-top: 1rem; border-top: 1px solid var(--line); color: var(--muted); font-size: .8rem; line-height: 1.5; }
+.inventory-results > section > header { margin-bottom: 1.2rem; padding-bottom: 1rem; border-bottom: 1px solid var(--line); }
+.inventory-results > section > header h2 { margin: 0 0 .6rem; font-size: clamp(1.5rem, 2vw, 2.2rem); }
+.inventory-results > section > div { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 31rem), 1fr)); gap: 1rem; }
+.htmxo-semantic-card-body { min-width: 0; padding: 1.1rem; border: 1px solid var(--line); border-top: .28rem solid var(--accent); border-radius: .3rem; background: var(--panel); box-shadow: 0 9px 24px rgba(48, 35, 20, .055); }
+.htmxo-semantic-card-body > header { margin-bottom: 1rem; font-family: Georgia, "Times New Roman", serif; font-size: 1.2rem; }
+.htmxo-semantic-card-body dl { display: grid; grid-template-columns: minmax(8rem, .6fr) minmax(0, 1.4fr); gap: .35rem .75rem; margin: 0; font-size: .82rem; }
+.htmxo-semantic-card-body dt { color: var(--muted); font-weight: 700; overflow-wrap: anywhere; }
+.htmxo-semantic-card-body dd { margin: 0; overflow-wrap: anywhere; }
+.htmxo-semantic-status { display: block; margin: .8rem 0; font-size: .84rem; }
+.htmxo-semantic-status.status-available, .htmxo-semantic-status.status-ok { color: var(--ok); }
+.htmxo-semantic-status.status-blocked, .htmxo-semantic-status.status-warn { color: var(--warn); }
+.htmxo-semantic-status.status-fail { color: var(--fail); }
+.htmxo-semantic-unavailable { padding: .7rem .8rem; border-left: .22rem solid var(--fail); background: #f8e7e2; color: #72251f; font-size: .84rem; line-height: 1.45; }
+details { margin-top: 1rem; border-top: 1px solid var(--line); padding-top: .8rem; }
+summary { color: var(--accent); font-weight: 750; cursor: pointer; }
+pre { max-height: 26rem; overflow: auto; padding: .85rem; border-radius: .25rem; background: #202825; color: #eef1e7; font-size: .76rem; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+
+@media (max-width: 860px) {
+  .inventory-shell { padding-top: 1.5rem; }
+  .inventory-layout { grid-template-columns: 1fr; }
+  .filter-panel { position: static; }
+}

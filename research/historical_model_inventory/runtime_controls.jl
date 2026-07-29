@@ -11,7 +11,7 @@ using WarmupHMC
 
 const OUT = joinpath(@__DIR__, "runtime_controls.tsv")
 const CACHE = joinpath(tempdir(), "brm-historical-runtime-controls")
-const BRM_SHA = "784712998ea67f6429d0a3b5a3241fe9cb690e64"
+const BRM_SHA = "a707af21d138b0019810f8dce9d655109dc97ff6"
 const STANBLOCKS_SHA = "329a178a7ad7877da0b58ad2c360d417ddd663f9"
 const WARMUPHMC_SHA = "b185eedbbeeef6fb3327afb30dc995c98591af02"
 const PEER_WARMUPHMC_SHA = "38398527e0406ad31aeaec3efe24d581a18a269e"
