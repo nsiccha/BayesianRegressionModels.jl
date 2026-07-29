@@ -2,6 +2,19 @@
 
 const DEFAULT_INPUT = joinpath(@__DIR__, "historical_catalog.tsv")
 const DEFAULT_OUTPUT = joinpath(@__DIR__, "translations.tsv")
+const DEFAULT_FAMILY_AUDIT = joinpath(@__DIR__, "family_audit.tsv")
+const FAMILY_AUDIT_CLASSES = Set([
+    "explicit-family-recovery",
+    "defensible-semantic-inference",
+    "genuinely-indeterminate",
+])
+const SUPPORT_CLASSES = Set([
+    "already-expressible-verbatim",
+    "already-expressible-via-semantic-rewrite",
+    "genuinely-missing-brm-surface",
+    "genuinely-missing-stanblocks-substrate",
+    "historical-semantics-unresolved",
+])
 
 tsv_unescape(value) = replace(value,
     "\\t" => "\t", "\\n" => "\n", "\\r" => "\r", "\\\\" => "\\")
@@ -35,16 +48,63 @@ function normalize_family(family)
         "zip" => "zero_inflated_poisson",
         "ordered_logistic" => "ordered_logistic",
         "ordinal" => "ordered_logistic",
+        "cumulative" => "ordered_logistic",
         "logistic" => "bernoulli",
+        "t" => "student_t",
+        "student" => "student_t",
+        "student-t" => "student_t",
+        "student_t" => "student_t",
+        "asym_laplace" => "asymmetriclaplace",
     )
     get(aliases, family, family)
 end
 
-function infer_family(row)
+function load_family_audit(path)
+    rows = read_tsv(path)
+    required = Set([
+        "row_key", "recovered_family", "evidence_class", "evidence_strength",
+        "authoritative_surface", "authoritative_revision",
+        "authoritative_path_anchor", "retrieved_at_utc", "http_status",
+        "explicit_evidence", "semantic_evidence", "dataset_evidence",
+        "negative_evidence", "decision_rationale",
+    ])
+    missing = setdiff(required, Set(keys(first(rows))))
+    isempty(missing) || error("family audit is missing columns: $(join(sort(collect(missing)), ','))")
+    by_key = Dict{String,Dict{String,String}}()
+    for row in rows
+        key = row["row_key"]
+        haskey(by_key, key) && error("duplicate family-audit row: $key")
+        row["evidence_class"] in FAMILY_AUDIT_CLASSES ||
+            error("invalid family-audit class for $key: $(row["evidence_class"])")
+        if row["evidence_class"] == "genuinely-indeterminate"
+            isempty(row["recovered_family"]) ||
+                error("indeterminate family-audit row must not select a family: $key")
+            isempty(row["negative_evidence"]) &&
+                error("indeterminate family-audit row lacks negative evidence: $key")
+        else
+            isempty(row["recovered_family"]) &&
+                error("resolved family-audit row lacks a family: $key")
+        end
+        by_key[key] = row
+    end
+    by_key
+end
+
+function infer_family(row, family_audit)
     explicit = normalize_family(row["family_claim"])
     !isempty(explicit) && return (explicit, "explicit")
     description = normalize_family(row["family_text_claim"])
     !isempty(description) && return (description, "inferred-from-description")
+
+    row_key = row["source"] * ":" * row["key"]
+    if haskey(family_audit, row_key)
+        audit = family_audit[row_key]
+        class = audit["evidence_class"]
+        class == "genuinely-indeterminate" &&
+            return ("", "authoritative-audit-genuinely-indeterminate")
+        return (normalize_family(audit["recovered_family"]),
+                "authoritative-audit-" * class)
+    end
 
     formula = lowercase(row["formula_claim"])
     name = lowercase(row["name_claim"])
@@ -63,11 +123,17 @@ function infer_family(row)
     occursin("hurdle", evidence) && return ("hurdle_poisson", "inferred-from-name")
     occursin("poisson", evidence) && return ("poisson", "inferred-from-name")
     occursin("bernoulli", evidence) && return ("bernoulli", "inferred-from-name")
+    occursin("heteroscedastic gaussian comparison", evidence) &&
+        return ("gaussian", "inferred-from-catalog-title/formula")
+    occursin("ordinal probit", evidence) &&
+        return ("ordinal_probit", "inferred-from-catalog-title")
+    (occursin("ordinal logistic", evidence) || occursin("polr", evidence)) &&
+        return ("ordered_logistic", "inferred-from-catalog-title")
+    (occursin("ordinal", evidence) || occursin("cumulative", evidence) ||
+     occursin("trolley", evidence)) &&
+        return ("ordinal_unresolved", "historical-link-unresolved")
     (occursin("logistic", evidence) || occursin("binary", evidence)) &&
         return ("bernoulli", "inferred-from-name")
-    (occursin("ordinal", evidence) || occursin("trolley", evidence) ||
-     occursin("polr", evidence) || occursin("cumulative", evidence)) &&
-        return ("ordered_logistic", "inferred-from-name")
     occursin("weibull", evidence) && return ("weibull", "inferred-from-name")
     occursin("lognormal", evidence) && return ("lognormal", "inferred-from-name")
     occursin("gamma", evidence) && return ("gamma", "inferred-from-name")
@@ -88,6 +154,9 @@ function semantic_route(row)
     if source == "bmm"
         return ("brm_kernel", "faithful-candidate: group-local measurement-model parameters; likelihood cell still bespoke")
     end
+    if source == "action_models"
+        return ("brm_kernel", "faithful-candidate: formula is a linked population model for latent cognitive parameters; the observed-data action likelihood and trial-state update must remain in one kernel")
+    end
     if source in ("epinowcast", "flocker", "mvgam")
         return ("stanblocks_plate", "faithful-candidate: structured latent/time-series cells exceed an ordinary population formula")
     end
@@ -96,6 +165,16 @@ function semantic_route(row)
     end
     if source == "mcmcglmm" && (occursin("animal", formula) || occursin("bivariate", name))
         return ("stanblocks_plate", "faithful-candidate: relationship/cross-response covariance")
+    end
+    if occursin(r"\bmm\s*\(", formula)
+        return ("stanblocks_plate", "faithful-candidate: weighted multi-membership effects need an explicit plate adapter; the stock BRM term is missing")
+    end
+    if occursin(r"\b(?:cens|censored|trunc)\s*\(", formula)
+        return ("brm_kernel", "faithful-candidate: censoring/truncation needs a row-specific density or survival contribution; no generic response modifier is shipped")
+    end
+    if occursin("set_rescor(TRUE)", row["formula_claim"]) ||
+       (occursin(r"\bmvbind\s*\(", formula) && !occursin("set_rescor(FALSE)", row["formula_claim"]))
+        return ("stanblocks_plate", "faithful-candidate: correlated multivariate outcome requires explicit covariance and packed likelihood")
     end
     if occursin("gr(phylo", formula) || occursin("fcor(", formula) ||
        (source == "glmmtmb" && occursin(r"ar1\(|exp\([^|]*\|", formula))
@@ -128,18 +207,177 @@ end
 
 function normalize_rhs(rhs)
     rhs = replace(rhs, "**" => "^", "True" => "true", "False" => "false")
+    rhs = replace(rhs, r"^\s*-1\s*\+" => "0 +")
     rhs = replace(rhs, r"\bI\(" => "protect(")
     rhs = replace(rhs, r"\bscale\(" => "zscale(")
     # `S(x)` / `C(x)` are source-language type annotations. Current BRM is
     # dtype-driven, so preserve the raw column and require integer/categorical
     # data instead of wrapping a term that interaction/random-effect emitters
     # cannot consume.
-    rhs = replace(rhs, r"\b(?:C|S)\(\s*([A-Za-z_]\w*)\s*\)" => s"\1")
+    rhs = replace(rhs, r"\b(?:C|S|factor)\(\s*([A-Za-z_]\w*)\s*\)" => s"\1")
     rhs = replace(rhs, r"\bzerocorr\(\s*([^()]*)\|\s*([^()]*)\)" => s"(\1 || \2)")
     rhs = replace(rhs, r"\boffset\((log\([^()]+\))\)" => s"\1")
+    rhs = replace(rhs, r"\bar\(\s*time\s*=\s*([A-Za-z_]\w*)\s*,\s*p\s*=\s*1\s*\)" => s"ar(\1; p=1)")
     rhs = replace(rhs, r"\{([^{}]+)\}" => s"protect(\1)")
     rhs = replace_uncorrelated(rhs)
     rhs
+end
+
+function split_top_level_commas(value)
+    parts = String[]
+    depth = 0
+    start = firstindex(value)
+    for index in eachindex(value)
+        char = value[index]
+        char == '(' && (depth += 1)
+        char == ')' && (depth -= 1)
+        if char == ',' && depth == 0
+            push!(parts, strip(value[start:prevind(value, index)]))
+            start = nextind(value, index)
+        end
+    end
+    push!(parts, strip(value[start:lastindex(value)]))
+    parts
+end
+
+function unwrap_distributional_formula(formula)
+    stripped = strip(formula)
+    !startswith(stripped, "bf(") && return (stripped, Dict{String,String}(), "")
+    length(collect(eachmatch(r"\bbf\(", stripped))) == 1 ||
+        return (stripped, Dict{String,String}(), "joint/multivariate bf declarations require a structured design")
+    endswith(stripped, ')') ||
+        return (stripped, Dict{String,String}(), "bf declaration has trailing joint-model terms")
+    inner = stripped[nextind(stripped, firstindex(stripped), 3):prevind(stripped, lastindex(stripped))]
+    parts = split_top_level_commas(inner)
+    isempty(parts) && return (stripped, Dict{String,String}(), "empty bf declaration")
+    count(==('~'), first(parts)) == 1 ||
+        return (stripped, Dict{String,String}(), "bf main response formula is not a single declaration")
+    auxiliary = Dict{String,String}()
+    for part in Iterators.drop(parts, 1)
+        if (match_result = match(r"^(sigma|phi|shape|alpha|zi|hu)\s*~\s*(.*)$", part)) !== nothing
+            auxiliary[match_result.captures[1]] = strip(match_result.captures[2])
+        elseif occursin('~', part)
+            return (stripped, Dict{String,String}(), "nonlinear parameter formulas need an explicit current linked-predictor design")
+        else
+            return (stripped, Dict{String,String}(), "bf attribute `$part` needs family-specific semantic review")
+        end
+    end
+    (first(parts), auxiliary, "")
+end
+
+function unwrap_inline_distributional_formula(formula)
+    match_result = match(
+        r"^\s*([A-Za-z_]\w*(?:\s*\|\s*(?:trials|se|resp_se)\([^)]*\))?)\s*~\s*(.*?)\s+\+\s+(sigma|phi|shape|alpha|zi|hu)\s*~\s*(.*?)\s*$",
+        formula,
+    )
+    isnothing(match_result) && return (formula, Dict{String,String}())
+    main_lhs, main_rhs, parameter, parameter_rhs = match_result.captures
+    ("$(strip(main_lhs)) ~ $(strip(main_rhs))",
+     Dict(parameter => strip(parameter_rhs)))
+end
+
+function rewrite_hsgp(rhs)
+    matches = collect(eachmatch(r"\bhsgp\(([^()]*)\)", rhs))
+    isempty(matches) && return (rhs, "")
+    length(matches) == 1 || return (rhs, "multiple HSGP terms require a reviewed current GP design")
+    match_result = only(matches)
+    parts = split_top_level_commas(match_result.captures[1])
+    positional = filter(part -> !occursin('=', part), parts)
+    length(positional) == 1 ||
+        return (rhs, "multi-axis HSGP is absent from the current one-input gp(...) surface")
+    options = Dict{String,String}()
+    for part in filter(part -> occursin('=', part), parts)
+        kv = split(part, '='; limit=2)
+        length(kv) == 2 || return (rhs, "could not parse HSGP option `$part`")
+        options[strip(kv[1])] = strip(kv[2])
+    end
+    unknown = setdiff(Set(keys(options)), Set(["m", "c", "by", "centered", "share_cov"]))
+    isempty(unknown) ||
+        return (rhs, "HSGP options need semantic review: $(join(sort(collect(unknown)), ','))")
+    get(options, "centered", "false") == "true" &&
+        return (rhs, "historical centered HSGP semantics are not established as current gp(...) semantics")
+    get(options, "share_cov", "true") == "false" &&
+        return (rhs, "historical share_cov=false HSGP semantics are not established as current gp(...) semantics")
+    current_options = String[]
+    haskey(options, "m") && push!(current_options, "k=$(options["m"])")
+    haskey(options, "c") && push!(current_options, "c=$(options["c"])")
+    haskey(options, "by") && push!(current_options, "by=$(options["by"])")
+    replacement = "gp($(only(positional))" *
+        (isempty(current_options) ? "" : "; " * join(current_options, ", ")) * ")"
+    before = match_result.offset == firstindex(rhs) ? "" : rhs[firstindex(rhs):prevind(rhs, match_result.offset)]
+    after_start = nextind(rhs, match_result.offset, length(match_result.match))
+    after = after_start > lastindex(rhs) ? "" : rhs[after_start:lastindex(rhs)]
+    (string(before, replacement, after), "")
+end
+
+function normalize_predictor(rhs)
+    rhs = normalize_rhs(rhs)
+    rhs, hsgp_error = rewrite_hsgp(rhs)
+    !isempty(hsgp_error) && return (rhs, hsgp_error)
+    rhs, interaction_error = normalize_interactions(rhs)
+    !isempty(interaction_error) && return (rhs, interaction_error)
+    occursin(':', rhs) &&
+        return (rhs, "source `:` interaction has a transformed/non-atomic operand; current `&` accepts raw columns only")
+    occursin(r"\b[A-Za-z_]\w*\s*/\s*[A-Za-z_]\w*\b", rhs) &&
+        return (rhs, "source fixed-effect `/` expansion needs explicit main/interaction or prederived contrast columns")
+    occursin(r"\bbs\([^)]*,", rhs) &&
+        return (rhs, "bs(...) arguments do not map mechanically to current s(...) semantics")
+    rhs = replace(rhs, r"\bbs\(([^(),]+)\)" => s"s(\1)")
+    (rhs, "")
+end
+
+function modifier_lhs(lhs, family)
+    lhs = strip(lhs)
+    if (m = match(r"^([A-Za-z_]\w*)\s*\|\s*(?:se|resp_se)\(([^,()]+)(?:,\s*sigma\s*=\s*(TRUE|True|true|FALSE|False|false))?\)$", lhs)) !== nothing
+        outcome, scale, residual = strip(m.captures[1]), strip(m.captures[2]), something(m.captures[3], "false")
+        family == "gaussian" ||
+            return (outcome, "", "", "known response SE is only translated here for a Gaussian likelihood")
+        return (outcome, scale, lowercase(residual), "")
+    end
+    if (m = match(r"^([A-Za-z_]\w*)\s*\|\s*mi\(\s*\)$", lhs)) !== nothing
+        family == "gaussian" ||
+            return (lhs, "", "", "non-Normal response imputation is absent from the stock BRM mi surface")
+        return ("mi($(m.captures[1]))", "", "", "")
+    end
+    if occursin(r"\|\s*mi\(", lhs)
+        return (lhs, "", "", "predictor/measurement-error or argument-bearing mi semantics are not supported by the stock response-mi adapter")
+    end
+    (lhs, "", "", "")
+end
+
+function support_class(status, note, formula, family, route)
+    if status == "ready"
+        rewritten = occursin(r"\b(?:bf|hsgp|scale|offset|trials|cbind|I|S|C)\s*\(", formula) ||
+                    occursin(':', formula) || occursin('*', formula) ||
+                    family == "negativebinomial"
+        return (rewritten ? "already-expressible-via-semantic-rewrite" : "already-expressible-verbatim", "")
+    elseif status == "semantic-rewrite"
+        return ("already-expressible-via-semantic-rewrite", "")
+    elseif status == "route-specific"
+        if occursin("stock BRM term is missing", note)
+            return ("genuinely-missing-brm-surface", "StanBlocks plate substrate exists")
+        end
+        return ("historical-semantics-unresolved", "kernel/plate substrate control is separately probed")
+    elseif status == "unresolved-family"
+        return ("historical-semantics-unresolved", "family evidence remains indeterminate")
+    end
+
+    if occursin("NegativeBinomial2", note)
+        return ("genuinely-missing-brm-surface", "neg_binomial_2_log additionally has a StanBlocks lpxf spelling/trace defect; ordinary neg_binomial_2 substrate is stanc-green")
+    elseif occursin("LocationScale Student-t", note)
+        return ("genuinely-missing-brm-surface", "reviewed SBBRMI-only adapter candidate is tracked separately; historical degrees-of-freedom semantics remain row-specific")
+    elseif occursin("pairing remains historically unresolved", note)
+        return ("historical-semantics-unresolved", "ZeroInflatedPoisson surface is landed; historical paired declaration remains unresolved")
+    elseif occursin("basis", note) || occursin("bs(...)", note) ||
+           occursin("does not map mechanically", note) || occursin("historical", note) ||
+           occursin("size is absent", note) || occursin("Wald", note) ||
+           occursin("ordinal link", note)
+        return ("historical-semantics-unresolved", "")
+    elseif occursin("ragged masked", note)
+        return ("genuinely-missing-stanblocks-substrate", "")
+    else
+        return ("genuinely-missing-brm-surface", "StanBlocks building blocks may exist; see surface audits")
+    end
 end
 
 function formula_columns(formula)
@@ -153,7 +391,9 @@ function formula_columns(formula)
     end
     reserved = union(function_names, named_arguments, Set([
         "true", "false", "missing", "nothing", "Inf", "pi", "nl", "family",
-        "sigma", "zi", "disc", "cmc", "cor", "intercept", "centered",
+        "sigma", "phi", "shape", "alpha", "mu", "loc", "rate",
+        "log_rate", "log_odds", "log_mu", "log_phi", "nu_minus_two",
+        "zi", "disc", "cmc", "cor", "intercept", "centered",
     ]))
     columns = String[]
     for m in eachmatch(r"\b[A-Za-z_]\w*\b", formula)
@@ -181,16 +421,23 @@ function translate_formula(formula, family, route)
     isempty(family) && return ("unresolved-family", "", "family is not explicit or defensibly inferred")
     route != "ordinary_brm" && return ("route-specific", "", "requires a faithful $route implementation; no ordinary-formula substitute")
 
+    formula, auxiliary, distributional_error = unwrap_distributional_formula(formula)
+    if !isempty(distributional_error)
+        if occursin("nonlinear parameter formulas", distributional_error) ||
+           occursin("joint/multivariate", distributional_error)
+            return ("semantic-rewrite", "", distributional_error * "; current linked-predictor/kernel machinery exists, but this historical declaration needs a row-specific rewrite")
+        end
+        return ("unsupported", "", distributional_error)
+    end
+    formula, inline_auxiliary = unwrap_inline_distributional_formula(formula)
+    merge!(auxiliary, inline_auxiliary)
+
     lower = lowercase(formula)
     blocked = Pair[
-        r"\bbf\(" => "multi-formula/nonlinear brms declaration",
-        r"\bmvbind\(" => "multivariate response declaration",
-        r"\bmi\(" => "missing-value submodel",
-        r"\bme\(" => "measurement-error submodel",
-        r"\b(?:se|resp_se|weights|vreal)\(" => "weighted/error-aware response",
-        r"\b(?:cens|censored|trunc)\(" => "censored/truncated response",
-        r"\b(?:fcor|gr)\(" => "structured covariance",
-        r"\b(?:cs|poly|t2|te|dynamic)\(" => "term has no semantics-preserving mechanical alias",
+        r"\b(?:weights|vreal)\(" => "likelihood/frequency weights or vreal payload have no stock BRM emitter; known response SE is a separate supported rewrite",
+        r"\bfcor\(" => "fixed/phylogenetic covariance has no stock BRM term adapter",
+        r"\bgr\([^)]*\bcov\s*=" => "gr(...; by/id) exists, but fixed cov= structured covariance has no stock BRM adapter",
+        r"\b(?:cs|t2|te|dynamic)\(" => "term has no semantics-preserving mechanical alias",
         r"\bmm\(" => "multi-membership term has no current emitter",
         r"\b(?:enw_|rw\()" => "domain-specific latent process",
         r"\b(?:occ|det|col|ex|trend)\s*:" => "multi-component domain model",
@@ -198,30 +445,47 @@ function translate_formula(formula, family, route)
     for (pattern, reason) in blocked
         occursin(pattern, lower) && return ("unsupported", "", reason)
     end
+    occursin(r"\bpoly\s*\(", lower) &&
+        return ("semantic-rewrite", "", "polynomial basis is expressible through explicitly prederived columns, but raw/orthogonal basis identity and degree must be recovered")
     occursin(r"\|[^)]*(?::|/)[^)]*\)", formula) &&
-        return ("unsupported", "", "nested/composite grouping factors require an explicit derived group id or reviewed gr(...; by=...) design")
-    occursin(';', formula) && return ("unsupported", "", "multiple component formulas require an explicit joint declaration")
-    count(==('~'), formula) == 1 || return ("unsupported", "", "formula is not one top-level response formula")
+        return ("semantic-rewrite", "", "nested/composite grouping factors are expressible after deriving stable integer group ids or expanding nesting; exact source identity must be reviewed")
+    occursin(';', formula) &&
+        return ("semantic-rewrite", "", "multiple components can live in one current declaration/kernel, but this source DSL needs a row-specific semantic rewrite")
+    count(==('~'), formula) == 1 ||
+        return ("semantic-rewrite", "", "multiple native linked declarations are supported; this source spelling needs a row-specific split")
 
     m = match(r"^\s*(.*?)\s*~\s*(.*?)\s*$", formula)
     isnothing(m) && return ("unsupported", "", "could not split response and population formula")
-    lhs, rhs = strip(m.captures[1]), normalize_rhs(strip(m.captures[2]))
+    lhs = strip(m.captures[1])
+    rhs, predictor_error = normalize_predictor(strip(m.captures[2]))
+    if !isempty(predictor_error)
+        if occursin("transformed/non-atomic", predictor_error) ||
+           occursin("three-way/chained", predictor_error) ||
+           occursin("fixed-effect `/`", predictor_error)
+            return ("semantic-rewrite", "", predictor_error * "; prederive the exact interaction/design columns")
+        elseif occursin("basis", predictor_error) || occursin("historical", predictor_error)
+            return ("unsupported", "", predictor_error)
+        end
+        return ("unsupported", "", predictor_error)
+    end
 
-    rhs, interaction_error = normalize_interactions(rhs)
-    !isempty(interaction_error) && return ("unsupported", "", interaction_error)
-    occursin(':', rhs) &&
-        return ("unsupported", "", "source `:` interaction has a transformed/non-atomic operand; current `&` accepts raw columns only")
+    occursin(r"\bmi\s*\(", rhs) &&
+        return ("unsupported", "", "predictor-side mi is not implemented; response-side Normal mi is supported")
+    for match_result in eachmatch(r"\bme\(\s*[^,()]+\s*,\s*([^()]+)\)", rhs)
+        tryparse(Float64, strip(match_result.captures[1])) === nothing &&
+            return ("unsupported", "", "me(...) supports a positive scalar SD only; this row uses a per-row or nonliteral uncertainty")
+    end
 
-    # Old spline/HSGP call signatures carried backend-specific arguments. Only
-    # the argument-free aliases are mechanical; anything richer needs review.
-    occursin(r"\bbs\([^)]*,", rhs) &&
-        return ("unsupported", "", "bs(...) arguments do not map mechanically to current s(...) semantics")
-    occursin(r"\bhsgp\([^)]*,", rhs) &&
-        return ("unsupported", "", "multi-axis/multi-argument hsgp does not map to current one-input gp(...)")
-    occursin(r"\bhsgp\([^)]*(?:by|share_cov|iso|centered)\s*=", rhs) &&
-        return ("unsupported", "", "hsgp options require a current gp(...) semantic redesign")
-    rhs = replace(rhs, r"\bbs\(([^(),]+)\)" => s"s(\1)")
-    rhs = replace(rhs, r"\bhsgp\(" => "gp(", r"\bm\s*=" => "k=")
+    normalized_auxiliary = Dict{String,String}()
+    for (parameter, predictor) in auxiliary
+        normalized, auxiliary_error = normalize_predictor(predictor)
+        !isempty(auxiliary_error) &&
+            return ("unsupported", "", "$parameter predictor: $auxiliary_error")
+        normalized_auxiliary[parameter] = normalized
+    end
+
+    lhs, known_se, residual_se, modifier_error = modifier_lhs(lhs, family)
+    !isempty(modifier_error) && return ("unsupported", "", modifier_error)
 
     outcome = lhs
     trials = ""
@@ -233,12 +497,33 @@ function translate_formula(formula, family, route)
         outcome = strip(cm.captures[1])
         trials = "$(strip(cm.captures[1])) + $(strip(cm.captures[2]))"
     elseif !occursin(r"^[A-Za-z_]\w*$", lhs)
-        return ("unsupported", "", "response expression needs an explicit data-derivation step")
+        if startswith(lhs, "mi(") && endswith(lhs, ')')
+            outcome = lhs
+        elseif family in (
+            "gaussian", "lognormal", "bernoulli", "binomial", "poisson",
+            "ordered_logistic", "beta", "gamma", "weibull",
+            "negativebinomial", "zero_inflated_poisson", "student_t",
+        )
+            return ("semantic-rewrite", "", "response expression is supported after an explicit named data-derivation step; transformed-response Jacobian/conditioning semantics still require review")
+        end
     end
 
     if family == "gaussian"
-        return ("ready", "loc ~ $rhs\nlog(sigma) ~ 1\n$outcome ~ Normal(loc, sigma)",
-                "explicit Normal likelihood; residual scale estimated on log scale")
+        unsupported_auxiliary = setdiff(Set(keys(normalized_auxiliary)), Set(["sigma"]))
+        isempty(unsupported_auxiliary) ||
+            return ("unsupported", "", "Gaussian translation does not implement auxiliary predictors: $(join(sort(collect(unsupported_auxiliary)), ','))")
+        sigma_rhs = get(normalized_auxiliary, "sigma", "1")
+        if !isempty(known_se)
+            if residual_se == "true"
+                return ("semantic-rewrite",
+                        "loc ~ $rhs\nlog(sigma) ~ $sigma_rhs\n$outcome ~ Normal(loc, sqrt($known_se^2 + sigma^2))",
+                        "known response SE plus residual sigma is semantically expressible, but this exact historical scale combination needs a fresh executable row probe")
+            end
+            return ("ready", "loc ~ $rhs\n$outcome ~ Normal(loc, $known_se)",
+                    "known response SE moved into the explicit Normal scale; no fractional likelihood weighting implied")
+        end
+        return ("ready", "loc ~ $rhs\nlog(sigma) ~ $sigma_rhs\n$outcome ~ Normal(loc, sigma)",
+                "explicit Normal likelihood; named log-scale sigma predictor uses native linked-predictor syntax")
     elseif family == "lognormal"
         return ("ready", "loc ~ $rhs\nlog(sigma) ~ 1\n$outcome ~ LogNormal(loc, sigma)",
                 "explicit LogNormal likelihood")
@@ -253,39 +538,86 @@ function translate_formula(formula, family, route)
         return ("ready", "log_rate ~ $rhs\n$outcome ~ Poisson(exp(log_rate))",
                 "explicit log-link Poisson likelihood; offset(...) becomes ordinary log exposure")
     elseif family == "ordered_logistic"
+        strip(rhs) == "0" && return (
+            "semantic-rewrite", "loc = 0\n$outcome ~ OrderedLogistic(loc)",
+            "zero linear predictor is semantically available, but current population lowering rejects an empty `loc ~ 0` predictor; use an explicit vector/scalar binding after a row probe",
+        )
         return ("ready", "loc ~ $rhs\n$outcome ~ OrderedLogistic(loc)",
                 "current proportional-odds likelihood; non-logit historical links need separate review")
     elseif family == "beta"
+        unsupported_auxiliary = setdiff(Set(keys(normalized_auxiliary)), Set(["phi"]))
+        isempty(unsupported_auxiliary) ||
+            return ("unsupported", "", "Beta translation does not implement auxiliary predictors: $(join(sort(collect(unsupported_auxiliary)), ','))")
         # Keep the vector-valued shape expressions inline. Binding them to
         # intermediate names currently loses StanBlocks' lpxf expression
         # provenance even though the same inline Beta likelihood is valid.
-        body = "logit(mu) ~ $rhs\nlog(phi) ~ 1\n$outcome ~ Beta(mu * phi, (1 - mu) * phi)"
+        phi_rhs = get(normalized_auxiliary, "phi", "1")
+        body = "logit(mu) ~ $rhs\nlog(phi) ~ $phi_rhs\n$outcome ~ Beta(mu * phi, (1 - mu) * phi)"
         return ("ready", body, "mean/precision beta parameterization written explicitly with inline shape expressions")
     elseif family == "gamma"
-        body = "log(mu) ~ $rhs\nlog(shape) ~ 1\nrate = shape / mu\n$outcome ~ Gamma(shape, rate)"
+        unsupported_auxiliary = setdiff(Set(keys(normalized_auxiliary)), Set(["shape", "alpha"]))
+        isempty(unsupported_auxiliary) ||
+            return ("unsupported", "", "Gamma translation does not implement auxiliary predictors: $(join(sort(collect(unsupported_auxiliary)), ','))")
+        shape_rhs = get(normalized_auxiliary, "shape", get(normalized_auxiliary, "alpha", "1"))
+        body = "log(mu) ~ $rhs\nlog(shape) ~ $shape_rhs\nrate = shape / mu\n$outcome ~ Gamma(shape, rate)"
         return ("ready", body, "mean/shape gamma model converted to Distributions shape/rate")
     elseif family == "weibull"
         body = "log(scale) ~ $rhs\nlog(shape) ~ 1\n$outcome ~ Weibull(shape, scale)"
         return ("ready", body, "explicit Weibull shape/scale likelihood; censoring remains unsupported")
     elseif family == "negativebinomial"
-        return ("unsupported", "", "current NegativeBinomial Julia/Stan parameterizations are documented as non-identical")
+        unsupported_auxiliary = setdiff(Set(keys(normalized_auxiliary)), Set(["phi"]))
+        isempty(unsupported_auxiliary) ||
+            return ("unsupported", "", "NegativeBinomial2 design does not implement auxiliary predictors: $(join(sort(collect(unsupported_auxiliary)), ','))")
+        phi_rhs = get(normalized_auxiliary, "phi", "1")
+        proposed = "log(mu) ~ $rhs\nlog(phi) ~ $phi_rhs\n$outcome ~ NegativeBinomial2(mu, phi)"
+        return ("ready", proposed,
+                "native linked predictors and the SBBRMI-only NegativeBinomial2(mu,phi) adapter landed at canonical 11031f2; this exact census uses the non-log neg_binomial_2 path on StanBlocks 329a178, while the formerly broken neg_binomial_2_log trace was subsequently fixed in StanBlocks 144188a")
     elseif family == "zero_inflated_poisson"
-        return ("unsupported", "", "row does not authoritatively pair the mean and zero-inflation submodels")
+        return ("unsupported", "", "the SBBRMI-only ZeroInflatedPoisson likelihood/RNG surface landed at canonical 11031f2, but these historical rows split mean and zero-inflation components across separate catalogue cards; their pairing and joint declaration remain unresolved")
+    elseif family == "student_t"
+        return ("semantic-rewrite", "loc ~ $rhs\nlog(scale) ~ 1\n$outcome ~ LocationScale(loc, scale, TDist(nu))",
+                "the SBBRMI-only LocationScale Student-t dispatcher landed at canonical 11031f2 and is executable; each row still needs its historical degrees-of-freedom value/prior recovered before this symbolic `nu` body is faithful")
+    elseif family == "beta_binomial"
+        return ("unsupported", "", "beta-binomial likelihood has StanBlocks building blocks but no stock BRM family marker/lowering")
+    elseif family == "asymmetriclaplace"
+        return ("unsupported", "", "asymmetric-Laplace quantile likelihood has no stock BRM family adapter")
+    elseif family in ("categorical", "multivariate_gaussian", "multivariate_lognormal", "multivariate_skew_normal_gaussian")
+        return ("unsupported", "", "outcome family `$family` has no stock ordinary BRM likelihood adapter; independent responses may be split only when authoritative residual independence is established")
+    elseif family in ("sratio", "ordinal_probit", "ordinal_unresolved")
+        return ("unsupported", "", "historical ordinal link/threshold semantics are not equivalent to stock OrderedLogistic")
+    elseif family == "wald"
+        return ("unsupported", "", "historical Wald/inverse-Gaussian parameterization is unresolved and no stock BRM likelihood mapping is audited")
     end
     ("unsupported", "", "likelihood family `$family` has no semantics-preserving current translation")
 end
 
-function translate_catalog(; input=DEFAULT_INPUT, output=DEFAULT_OUTPUT)
+function translate_catalog(; input=DEFAULT_INPUT, output=DEFAULT_OUTPUT,
+                           family_audit=DEFAULT_FAMILY_AUDIT)
     historical = read_tsv(input)
+    family_audit_by_key = load_family_audit(family_audit)
+    historical_keys = Set(row["source"] * ":" * row["key"] for row in historical)
+    unknown_audit_keys = setdiff(Set(keys(family_audit_by_key)), historical_keys)
+    isempty(unknown_audit_keys) ||
+        error("family audit contains unknown rows: $(join(sort(collect(unknown_audit_keys)), ','))")
     rows = Dict{String,String}[]
     for row in historical
         route, route_note = semantic_route(row)
-        inferred_family, inferred_provenance = infer_family(row)
+        inferred_family, inferred_provenance = infer_family(row, family_audit_by_key)
+        row_key = row["source"] * ":" * row["key"]
+        audit = get(family_audit_by_key, row_key, Dict{String,String}())
         for variant in ("exact-metadata", "inferred-family")
             family = variant == "exact-metadata" ? normalize_family(row["family_claim"]) : inferred_family
             family_provenance = variant == "exact-metadata" ?
                 (isempty(family) ? "unresolved" : "explicit") : inferred_provenance
             status, body, translation_note = translate_formula(row["formula_claim"], family, route)
+            class, secondary_gap = support_class(
+                status,
+                string(translation_note, "; ", route_note),
+                row["formula_claim"],
+                family,
+                route,
+            )
+            class in SUPPORT_CLASSES || error("invalid support class for $row_key: $class")
             columns = formula_columns(row["formula_claim"])
             groups = group_columns(row["formula_claim"])
             out = copy(row)
@@ -293,9 +625,23 @@ function translate_catalog(; input=DEFAULT_INPUT, output=DEFAULT_OUTPUT)
                 "variant" => variant,
                 "family_selected" => family,
                 "family_selected_provenance" => family_provenance,
+                "family_audit_evidence_class" => get(audit, "evidence_class", ""),
+                "family_audit_evidence_strength" => get(audit, "evidence_strength", ""),
+                "family_audit_authoritative_surface" => get(audit, "authoritative_surface", ""),
+                "family_audit_authoritative_revision" => get(audit, "authoritative_revision", ""),
+                "family_audit_authoritative_path_anchor" => get(audit, "authoritative_path_anchor", ""),
+                "family_audit_retrieved_at_utc" => get(audit, "retrieved_at_utc", ""),
+                "family_audit_http_status" => get(audit, "http_status", ""),
+                "family_audit_explicit_evidence" => get(audit, "explicit_evidence", ""),
+                "family_audit_semantic_evidence" => get(audit, "semantic_evidence", ""),
+                "family_audit_dataset_evidence" => get(audit, "dataset_evidence", ""),
+                "family_audit_negative_evidence" => get(audit, "negative_evidence", ""),
+                "family_audit_decision_rationale" => get(audit, "decision_rationale", ""),
                 "semantic_route" => route,
                 "route_note" => route_note,
                 "translation_status" => status,
+                "surface_support_class" => class,
+                "surface_secondary_gap" => secondary_gap,
                 "current_brm_body" => body,
                 "translation_note" => translation_note,
                 "data_columns" => join(columns, ','),
@@ -307,7 +653,14 @@ function translate_catalog(; input=DEFAULT_INPUT, output=DEFAULT_OUTPUT)
     end
     columns = vcat(collect(keys(first(historical))), [
         "variant", "family_selected", "family_selected_provenance",
-        "semantic_route", "route_note", "translation_status", "current_brm_body",
+        "family_audit_evidence_class", "family_audit_evidence_strength",
+        "family_audit_authoritative_surface", "family_audit_authoritative_revision",
+        "family_audit_authoritative_path_anchor", "family_audit_retrieved_at_utc",
+        "family_audit_http_status", "family_audit_explicit_evidence",
+        "family_audit_semantic_evidence", "family_audit_dataset_evidence",
+        "family_audit_negative_evidence", "family_audit_decision_rationale",
+        "semantic_route", "route_note", "translation_status",
+        "surface_support_class", "surface_secondary_gap", "current_brm_body",
         "translation_note", "data_columns", "group_columns", "data_shape_assumptions",
     ])
     write_tsv(output, columns, rows)
@@ -327,6 +680,18 @@ function translate_catalog(; input=DEFAULT_INPUT, output=DEFAULT_OUTPUT)
                         for route in sort(unique(row["semantic_route"] for row in rows)))
     route_summary = join((string(key, ':', value) for (key, value) in sort(collect(route_counts))), ',')
     println("routes=$route_summary")
+    inferred_visible = filter(row -> row["variant"] == "inferred-family" &&
+                                     row["deployed"] == "true", rows)
+    support_counts = Dict(class => count(row -> row["surface_support_class"] == class,
+                                         inferred_visible)
+                          for class in sort(collect(SUPPORT_CLASSES)))
+    println("surface_support=" * join((string(key, ':', value)
+                                       for (key, value) in sort(collect(support_counts))), ','))
+    audit_class_counts = Dict(class => count(row -> row["evidence_class"] == class,
+                                             values(family_audit_by_key))
+                              for class in sort(collect(FAMILY_AUDIT_CLASSES)))
+    println("family_audit=" * join((string(key, ':', value)
+                                    for (key, value) in sort(collect(audit_class_counts))), ','))
     println("output=$(abspath(output))")
     rows
 end
@@ -334,5 +699,6 @@ end
 if abspath(PROGRAM_FILE) == @__FILE__
     input = length(ARGS) >= 1 ? ARGS[1] : DEFAULT_INPUT
     output = length(ARGS) >= 2 ? ARGS[2] : DEFAULT_OUTPUT
-    translate_catalog(; input, output)
+    family_audit = length(ARGS) >= 3 ? ARGS[3] : DEFAULT_FAMILY_AUDIT
+    translate_catalog(; input, output, family_audit)
 end

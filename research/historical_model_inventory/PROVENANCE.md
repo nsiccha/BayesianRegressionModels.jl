@@ -44,10 +44,20 @@ bodies; the override TSV has SHA-256
 ## Current execution environment
 
 - BayesianRegressionModels.jl:
-  `784712998ea67f6429d0a3b5a3241fe9cb690e64` (`ns/devibe`).
+  reviewed clean tree `a707af21d138b0019810f8dce9d655109dc97ff6`,
+  landed as canonical `ns/devibe`
+  `11031f2d3bbd0c9cad42bed53a4a8dd193ab9d2e`. The validation candidate
+  `4d8f565b1cf4b347b3d0e93a0b6499c2561dc42d` has the same Git tree
+  (`309028b731f07c9c8dd17a42e74022b66fc23f9e`) as the clean reviewed commit;
+  the discarded VBRMI-mutating ancestry is not part of the reviewed or landed
+  line.
 - StanBlocks.jl:
   `329a178a7ad7877da0b58ad2c360d417ddd663f9` (local active checkout selected
-  by the canonical resolver).
+  by the canonical resolver). The separately discovered
+  `neg_binomial_2_log` trace defect was fixed after this pinned run in
+  StanBlocks canonical `144188a808308177807ceb47f08749a335a0ef70`
+  (`negative-binomia-fd397aa0`); the inventory's working non-log NB2 route is
+  unaffected and the running exact-SHA census was not restarted.
 - WarmupHMC.jl:
   `b185eedbbeeef6fb3327afb30dc995c98591af02` for this rerun. The independent
   peer sleepstudy control used
@@ -59,6 +69,18 @@ bodies; the override TSV has SHA-256
 The corpus probe records generated Stan and Stan-data hashes. A result is fanned
 out only when the normalized current BRM body, declared data columns, grouping
 columns, selected family, generated Stan, and data schema are identical.
+
+## Family recovery audit
+
+The 122 deployed rows left unresolved by the first renderer/receipt pass were
+audited again on 2026-07-28 against the exact historical BRM source, the cited
+project's repository/docs/code (including relevant historical revisions), and
+dataset schema or values as supporting but never sole evidence. The row-keyed
+ledger is `family_audit.tsv`: 116 explicit family recoveries, five defensible
+semantic inferences, and one genuinely indeterminate row (`kruschke:calcium`).
+Each row records the searched surfaces, exact revisions and path anchors,
+retrieval status/time, positive evidence, dataset corroboration, and negative
+evidence. No renderer default or response name was accepted as family evidence.
 
 ## SbPMX semantic HTMXO baseline
 
@@ -101,3 +123,19 @@ authoritative application graph.
 
 HTMXObjects semantic lock for the recorded SbPMX release:
 `3a75633a5d9e50da844b1d553b037560ae1312f2`.
+
+## Served gallery receipt
+
+- Application commit:
+  `7b6a091ab6d240ec3fcfbd8f34248d2a78f3373b`.
+- Gallery source SHA-256:
+  `40934aa56fc86b56684d8a8ebfa903b5117c44f2639f124308f86728d35663e3`.
+- Matrix SHA-256:
+  `b0482710d53d0d0f501831366f8a5f3c3a0874f5725aeed3d79e80d31bdef037`.
+- Deployment: `strato2`, `http://127.0.0.1:8129/`; unrelated listeners on
+  8127--8128 were left untouched.
+- Initial and post-restart root checks returned HTTP 200 with exactly 359
+  semantic cards. Confirmed-source, finite-BridgeStan, and unsupported-ordinary
+  filters returned 154, 166, and 51 cards respectively.
+- Row-by-row request times, paths, statuses, and counts:
+  `gallery/served_smoke.tsv`.

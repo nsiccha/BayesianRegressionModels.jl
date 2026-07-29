@@ -20,8 +20,12 @@ julia --startup-file=no --project=web-macro \
 julia --startup-file=no --project=web-macro \
   research/historical_model_inventory/probe.jl --runtime
 julia --startup-file=no --project=web-macro \
+  research/historical_model_inventory/surface_controls.jl
+julia --startup-file=no --project=web-macro \
   research/historical_model_inventory/runtime_controls.jl
 julia --startup-file=no research/historical_model_inventory/assemble.jl
+julia --startup-file=no --project=web-macro \
+  research/historical_model_inventory/gallery/validate.jl
 ```
 
 The static probe builds BRMI and SBBRMI objects, derives the executable
@@ -41,6 +45,13 @@ source checkout.
   return values, and hidden/deployed scope.
 - `translations.tsv`: exact-metadata and inferred-family translations, each
   with provenance and an explicit ordinary/kernel/plate/unsupported route.
+- `family_audit.tsv`: the second-pass authoritative family recovery for every
+  one of the 122 rows left unresolved by the catalogue metadata/receipt pass,
+  including searched surfaces and negative evidence.
+- `brm_surface_audit.tsv` and `stanblocks_surface_audit.tsv`: source- and
+  test-backed classification of every previously claimed missing component.
+- `surface_controls.tsv`: executable representative pass/raise controls for
+  the audited current BRM surface.
 - `capability_results.tsv`: row-expanded stage evidence; inherited results are
   only from an identical normalized probe.
 - `runtime_controls.tsv`: real-data sleepstudy plus executable BRM-kernel and
@@ -55,6 +66,10 @@ source checkout.
   non-Bayesian baseline row.
 - `PROVENANCE.md`: exact historical/current/SbPMX branch, commit, path, and blob
   provenance.
+- `GAP_RANKING.md`: row-keyed leverage ranking, separated into quick defects,
+  BRM adapters over existing substrate, true substrate work, and metadata work.
+- `gallery/`: executable single-graph `semantic_app` gallery using `@options`
+  and `option_domain`/`option_records`; it reads all 359 matrix rows at runtime.
 - `REPORT.md`: findings, gaps, and interpretation boundaries.
 
 ## Interpretation boundaries
@@ -67,3 +82,6 @@ source checkout.
   onto historical rows without an exact row-specific implementation.
 - The current SbPMX pattern is descriptor-driven, but the BRM-to-HTMXObjects
   mount adapter is not shipped. Mount projections here are experimental.
+- `semantic-rewrite` means the current surface exists but a row-specific
+  historical constant, prior, or declaration choice is still required; it is
+  never displayed as an executed row.

@@ -46,7 +46,7 @@ split_csv(value) = isempty(value) ? String[] : split(value, ',')
 
 function outcome_name(body)
     matches = collect(eachmatch(
-        r"(?m)^\s*([A-Za-z_]\w*)\s*~\s*(?:Normal|LogNormal|BernoulliLogit|BinomialLogit|Poisson|OrderedLogistic|Beta|Gamma|Weibull)\(",
+        r"(?m)^\s*([A-Za-z_]\w*)\s*~\s*(?:Normal|LogNormal|BernoulliLogit|BinomialLogit|Poisson|ZeroInflatedPoisson|NegativeBinomial2|OrderedLogistic|Beta|Gamma|Weibull|LocationScale)\(",
         body,
     ))
     isempty(matches) ? "" : last(matches).captures[1]
@@ -101,7 +101,7 @@ function synthetic_data(row)
             collect(Int, isodd.(1:n))
         elseif family == "binomial"
             fill(2, n)
-        elseif family == "poisson"
+        elseif family in ("poisson", "negativebinomial", "zero_inflated_poisson")
             collect(mod.(1:n, 4))
         elseif family == "ordered_logistic"
             repeat(1:4, inner=3)
@@ -285,6 +285,8 @@ function expanded_results(rows, states, direct_rows)
             "family_selected_provenance" => row["family_selected_provenance"],
             "semantic_route" => row["semantic_route"],
             "translation_status" => row["translation_status"],
+            "surface_support_class" => row["surface_support_class"],
+            "surface_secondary_gap" => row["surface_secondary_gap"],
             "historical_formula" => row["formula_claim"],
             "current_brm_body" => row["current_brm_body"],
             "data_shape_assumptions" => row["data_shape_assumptions"],
