@@ -46,7 +46,7 @@ export @brm, @n, @x, @getproperty
 export assign, doublepipe, gr, gp, offset, zscale, center, standardize, protect, factor
 export me, mi, s, t2, ar, mo, mo1, hsgp, OrderedLogistic, Horseshoe,
        CategoricalLogit, ZeroInflatedPoisson, NegativeBinomial2,
-       BetaBinomial, BetaBinomial2,
+       BetaBinomial, BetaBinomial2, CircularVonMises,
        sb_group_demo, addprop
 # Bordet model family — formula-surface markers for custom likelihood + submodel
 export TruncatedNormal, bordet_hierarchical_parametric, kernel
@@ -112,6 +112,8 @@ export popefs, cdirichlet, c0dirichlet, c01dirichlet,
        _sb_mi_normal, mi_merge,
        zero_inflated_poisson, zero_inflated_poisson_lpmf,
        zero_inflated_poisson_lpmfs, zero_inflated_poisson_rng,
+       brm_von_mises, brm_von_mises_lpdf,
+       brm_von_mises_lpdfs, brm_von_mises_rng,
        sb_group_demo_slic, sb_group_clamped_demo, sb_group_clamped_demo_slic
 
 end # module

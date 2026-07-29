@@ -130,6 +130,72 @@ parameters are already the natural model parameters.
 """
 struct BetaBinomial2 end
 
+"""
+    CircularVonMises(mu, kappa; interval=(-pi, pi))
+
+Von-Mises regression on one fixed principal interval. `interval` must be a
+compile-time pair `(lo, hi)` of finite numbers with `hi - lo == 2pi`; the
+default is `[-pi, pi)`. The StanBlocks backend wraps `mu` and predictive draws
+into that half-open interval, rejects observations outside it, requires
+`kappa > 0`, and evaluates Stan's native `von_mises_lpdf`.
+
+This marker is deliberately distinct from Distributions.jl's
+`VonMises(mu, kappa)`. Use that constructor when its Julia semantics are
+intended: argument order `(mu, kappa)`, one-argument shorthand
+`VonMises(kappa) == VonMises(0, kappa)`, and moving support
+`[mu - pi, mu + pi]`. Neither family applies a hidden link or prior; model
+`mu` and `kappa` explicitly, for example:
+
+```julia
+@brm begin
+    mu ~ 1 + distance
+    kappa ~ Gamma(2, 100.0) # Julia scale 100 == brms rate 0.01
+    direction ~ CircularVonMises(mu, kappa; interval=(-pi, pi))
+end
+```
+
+`CircularVonMises` is a StanBlocks-backend marker and is not implemented by
+`VBRMI`.
+"""
+struct CircularVonMises end
+
+_sb_interval_literal(x::Real) = Float64(x)
+_sb_interval_literal(x::NamedColumn) = begin
+    parent(x) isa MissingColumn && name(x) in (:pi, :π) || error(
+        "CircularVonMises: `interval` must be a compile-time numeric pair; " *
+        "got formula symbol `$(name(x))`")
+    Float64(pi)
+end
+function _sb_interval_literal(x::ExprColumn)
+    args = getargs(x)
+    length(args) == 1 && getf(x) === (-) && return -_sb_interval_literal(args[1])
+    length(args) == 1 && getf(x) === (+) && return _sb_interval_literal(args[1])
+    error("CircularVonMises: `interval` must be a compile-time numeric pair; got $(x)")
+end
+_sb_interval_literal(x) = error(
+    "CircularVonMises: `interval` must be a compile-time numeric pair; got $(typeof(x))")
+
+function _sb_circular_interval(kwargs)
+    interval = get(kwargs, :interval, (-Float64(pi), Float64(pi)))
+    interval isa Tuple && length(interval) == 2 || error(
+        "CircularVonMises: `interval` must be a 2-tuple `(lo, hi)`, got $(repr(interval))")
+    lo, hi = map(_sb_interval_literal, interval)
+    all(isfinite, (lo, hi)) && lo < hi || error(
+        "CircularVonMises: `interval` endpoints must be finite with lo < hi, got $(repr((lo, hi)))")
+    isapprox(hi - lo, 2 * Float64(pi); rtol=8eps(Float64), atol=8eps(Float64)) || error(
+        "CircularVonMises: `interval` must have length 2pi, got $(hi - lo)")
+    (lo, hi)
+end
+
+function _check_term_kwargs(::Type{<:CircularVonMises}, kwargs)
+    unknown = filter(!=(:interval), keys(kwargs))
+    isempty(unknown) || error(
+        "CircularVonMises: unsupported keyword(s): $(join(unknown, ", ")); " *
+        "the only supported keyword is `interval`")
+    _sb_circular_interval(kwargs)
+    nothing
+end
+
 popefs = StanBlocks.@slic begin
     n_covariates = dims(X)[2]
     beta_pop ~ std_normal(; n=n_covariates)
@@ -544,6 +610,137 @@ StanBlocks.@deffun begin
             else
                 rv[i] = poisson_rng(lambda)
             end
+        end
+        rv
+    end
+end
+
+# Native-Stan von-Mises density with the two public BRM support contracts made
+# explicit. `principal == 0` is Distributions.jl's `VonMises`: moving inclusive
+# support `[mu - pi, mu + pi]`. `principal == 1` is `CircularVonMises`: fixed
+# half-open support `[lo, hi)`, with `mu` and generated draws wrapped into it.
+# The scalar density always delegates its in-support value to Stan's native
+# `von_mises_lpdf`; the wrappers only add support/domain semantics.
+StanBlocks.@deffun begin
+    @lpxf brm_von_mises_lpdf(y::real, mu::real, kappa::real,
+                             lo::real, hi::real, principal::int)::real = begin
+        if kappa <= 0.
+            negative_infinity()
+        else
+            if principal == 1
+                if y < lo
+                    negative_infinity()
+                else
+                    if y >= hi
+                        negative_infinity()
+                    else
+                        wrapped_mu = lo + fmod(fmod(mu - lo, hi - lo) + hi - lo, hi - lo)
+                        von_mises_lpdf(y, wrapped_mu, kappa)
+                    end
+                end
+            else
+                if y < mu - 3.141592653589793
+                    negative_infinity()
+                else
+                    if y > mu + 3.141592653589793
+                        negative_infinity()
+                    else
+                        von_mises_lpdf(y, mu, kappa)
+                    end
+                end
+            end
+        end
+    end
+    brm_von_mises_lpdf(y::vector[n], mu::vector[n], kappa::vector[n],
+                       lo::real, hi::real, principal::int)::real = begin
+        rv = 0.
+        for i in 1:n
+            rv += brm_von_mises_lpdf(y[i], mu[i], kappa[i], lo, hi, principal)::real
+        end
+        rv
+    end
+    brm_von_mises_lpdf(y::vector[n], mu::vector[n], kappa::real,
+                       lo::real, hi::real, principal::int)::real = begin
+        brm_von_mises_lpdf(y, mu, rep_vector(kappa, n), lo, hi, principal)
+    end
+    brm_von_mises_lpdf(y::vector[n], mu::real, kappa::vector[n],
+                       lo::real, hi::real, principal::int)::real = begin
+        brm_von_mises_lpdf(y, rep_vector(mu, n), kappa, lo, hi, principal)
+    end
+    brm_von_mises_lpdf(y::vector[n], mu::real, kappa::real,
+                       lo::real, hi::real, principal::int)::real = begin
+        brm_von_mises_lpdf(y, rep_vector(mu, n), rep_vector(kappa, n), lo, hi, principal)
+    end
+
+    brm_von_mises_lpdfs(args...) = begin
+        brm_von_mises_lpdf(args...)
+    end
+    brm_von_mises_lpdfs(y::vector[n], mu::vector[n], kappa::vector[n],
+                        lo::real, hi::real, principal::int)::vector[n] = begin
+        rv::vector[n]
+        for i in 1:n
+            rv[i] = brm_von_mises_lpdf(y[i], mu[i], kappa[i], lo, hi, principal)
+        end
+        rv
+    end
+    brm_von_mises_lpdfs(y::vector[n], mu::vector[n], kappa::real,
+                        lo::real, hi::real, principal::int)::vector[n] = begin
+        brm_von_mises_lpdfs(y, mu, rep_vector(kappa, n), lo, hi, principal)
+    end
+    brm_von_mises_lpdfs(y::vector[n], mu::real, kappa::vector[n],
+                        lo::real, hi::real, principal::int)::vector[n] = begin
+        brm_von_mises_lpdfs(y, rep_vector(mu, n), kappa, lo, hi, principal)
+    end
+    brm_von_mises_lpdfs(y::vector[n], mu::real, kappa::real,
+                        lo::real, hi::real, principal::int)::vector[n] = begin
+        brm_von_mises_lpdfs(y, rep_vector(mu, n), rep_vector(kappa, n), lo, hi, principal)
+    end
+
+    brm_von_mises_rng(mu::real, kappa::real,
+                      lo::real, hi::real, principal::int)::real = begin
+        if kappa <= 0.
+            reject("brm_von_mises_rng: kappa must be strictly positive")
+            0.
+        else
+            draw = von_mises_rng(mu, kappa)
+            if principal == 1
+                lo + fmod(fmod(draw - lo, hi - lo) + hi - lo, hi - lo)
+            else
+                support_lo = mu - 3.141592653589793
+                support_lo + fmod(fmod(draw - support_lo, 6.283185307179586) +
+                                  6.283185307179586, 6.283185307179586)
+            end
+        end
+    end
+    brm_von_mises_rng(vector[n], mu::vector[n], kappa::vector[n],
+                      lo::real, hi::real, principal::int)::vector[n] = begin
+        rv::vector[n]
+        for i in 1:n
+            rv[i] = brm_von_mises_rng(mu[i], kappa[i], lo, hi, principal)
+        end
+        rv
+    end
+    brm_von_mises_rng(vector[n], mu::vector[n], kappa::real,
+                      lo::real, hi::real, principal::int)::vector[n] = begin
+        rv::vector[n]
+        for i in 1:n
+            rv[i] = brm_von_mises_rng(mu[i], kappa, lo, hi, principal)
+        end
+        rv
+    end
+    brm_von_mises_rng(vector[n], mu::real, kappa::vector[n],
+                      lo::real, hi::real, principal::int)::vector[n] = begin
+        rv::vector[n]
+        for i in 1:n
+            rv[i] = brm_von_mises_rng(mu, kappa[i], lo, hi, principal)
+        end
+        rv
+    end
+    brm_von_mises_rng(vector[n], mu::real, kappa::real,
+                      lo::real, hi::real, principal::int)::vector[n] = begin
+        rv::vector[n]
+        for i in 1:n
+            rv[i] = brm_von_mises_rng(mu, kappa, lo, hi, principal)
         end
         rv
     end
@@ -2535,6 +2732,16 @@ _sb_emit_prior!(stmts, target, ::Type{<:Horseshoe}, _) = begin
     push!(stmts, :($target ~ _sb_horseshoe()))
     true
 end
+
+# A Distributions.jl `VonMises(mu, kappa)` prior has moving parameter support
+# `[mu - pi, mu + pi]`. Stan cannot faithfully declare that support when `mu`
+# is itself a parameter, so do not silently lower it to an unconstrained native
+# `von_mises` prior. Observation likelihoods are handled separately below.
+_sb_emit_prior!(_, target, ::Type{<:VonMises}, _) = error(
+    "sbimpl: `VonMises` is supported as an observation likelihood, but not as " *
+    "a parameter prior: preserving Distributions.jl's moving support " *
+    "`[mu - pi, mu + pi]` requires a Stan parameterization chosen explicitly. " *
+    "Use a real-valued latent parameter and transform/wrap it deliberately.")
 # Generic scalar prior via a Distributions.jl constructor on the RHS
 # (e.g. `coef_a ~ Normal(0, 0.1)`). Reuses the same family -> Stan-name
 # table the likelihood path uses (`_sb_stan_dist_name`), so adding a
@@ -4242,7 +4449,11 @@ _flat_vec_key(_k, _v) = nothing
 
 function _sb_likelihood!(stmts, target::Symbol, rhs::ExprColumn, data)
     f = getf(rhs)
-    _sb_lik_family!(stmts, target, f, getargs(rhs), data)
+    if f === CircularVonMises
+        _sb_lik_family!(stmts, target, f, getargs(rhs), getkwargs(rhs), data)
+    else
+        _sb_lik_family!(stmts, target, f, getargs(rhs), data)
+    end
 end
 _sb_likelihood!(stmts, target, rhs, _) =
     error("sbimpl: likelihood RHS for `$target` must be an ExprColumn (got $(typeof(rhs)))")
@@ -4285,6 +4496,70 @@ _sb_lik_family!(stmts, target, ::Type{<:ZeroInflatedPoisson},
 _sb_lik_family!(stmts, target, ::Type{<:NegativeBinomial2},
                 args::Tuple{Any,Any}, data) =
     _sb_lik_stan!(stmts, target, :neg_binomial_2, args, data)
+
+_sb_von_mises_observations(data, target) = begin
+    raw = get(data, target, nothing)
+    raw isa AbstractVector || error(
+        "sbimpl: von-Mises likelihood expects an observed vector for `$target`, " *
+        "got $(typeof(raw))")
+    all(y -> y isa Real && isfinite(y), raw) || error(
+        "sbimpl: von-Mises outcome `$target` must contain only finite real values")
+    raw
+end
+
+function _sb_validate_von_mises!(data, target, mu, kappa;
+                                 interval=nothing, principal=false)
+    raw = _sb_von_mises_observations(data, target)
+    if kappa isa Real
+        isfinite(kappa) && kappa > 0 || error(
+            "sbimpl: von-Mises concentration `kappa` must be finite and strictly " *
+            "positive, got $(repr(kappa))")
+    end
+    if principal
+        lo, hi = interval
+        bad = findfirst(y -> !(lo <= y < hi), raw)
+        isnothing(bad) || error(
+            "sbimpl: `CircularVonMises($target)` observation $(repr(raw[bad])) " *
+            "at index $bad is outside the half-open interval " *
+            "[$lo, $hi)")
+    elseif mu isa Real
+        lo, hi = mu - Float64(pi), mu + Float64(pi)
+        bad = findfirst(y -> !(lo <= y <= hi), raw)
+        isnothing(bad) || error(
+            "sbimpl: `VonMises($target)` observation $(repr(raw[bad])) at index " *
+            "$bad is outside Distributions.jl support [$lo, $hi] for mu=$mu")
+    end
+    nothing
+end
+
+# Distributions.jl's exact constructor semantics. One positional argument is
+# kappa (mu defaults to zero), while the two-argument form is `(mu, kappa)`.
+# The custom lpxf adds the moving-support/strict-domain guards before calling
+# native Stan `von_mises_lpdf`, and supplies matching pointwise/RNG hooks.
+function _sb_lik_family!(stmts, target, ::Type{<:VonMises}, args, data)
+    length(args) in (1, 2) || error(
+        "sbimpl: `VonMises` expects `VonMises(kappa)` or " *
+        "`VonMises(mu, kappa)`, got $(length(args)) positional arguments")
+    arg_exprs = map(a -> _sb_scalar_expr(a, data), args)
+    mu, kappa = _sb_stan_dist_args(VonMises, arg_exprs)
+    _sb_validate_von_mises!(data, target, mu, kappa)
+    _sb_lik_stan_exprs!(
+        stmts, target, :brm_von_mises, (mu, kappa, 0.0, 0.0, 0))
+end
+
+function _sb_lik_family!(stmts, target, ::Type{<:CircularVonMises},
+                         args::Tuple{Any,Any}, kwargs, data)
+    mu, kappa = map(a -> _sb_scalar_expr(a, data), args)
+    interval = _sb_circular_interval(kwargs)
+    _sb_validate_von_mises!(data, target, mu, kappa;
+                            interval, principal=true)
+    lo, hi = interval
+    _sb_lik_stan_exprs!(
+        stmts, target, :brm_von_mises, (mu, kappa, lo, hi, 1))
+end
+_sb_lik_family!(_, target, ::Type{<:CircularVonMises}, args, _, _) = error(
+    "sbimpl: `CircularVonMises($target)` expects exactly two positional " *
+    "arguments `(mu, kappa)`, got $(length(args))")
 
 # Reference-class categorical regression. The user supplies one named scalar
 # LP per non-reference class; the fitted outcome level order determines which
@@ -4434,6 +4709,8 @@ _sb_stan_dist_args(::Type{<:BernoulliLogit}, ::Tuple{}) = (0.0,)
 _sb_stan_dist_args(::Type{<:Binomial}, ::Tuple{}) = (1, 0.5)
 _sb_stan_dist_args(::Type{<:Binomial}, args::Tuple{Any}) = (args[1], 0.5)
 _sb_stan_dist_args(::Type{<:Poisson}, ::Tuple{}) = (1.0,)
+
+_sb_stan_dist_args(::Type{<:VonMises}, args::Tuple{Any}) = (0.0, args[1])
 
 # Distributions.jl `NegativeBinomial(r, p)` counts failures before `r`
 # successes.  Native Stan `neg_binomial(alpha, beta)` uses shape and inverse

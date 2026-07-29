@@ -72,6 +72,7 @@ BayesianRegressionModels.NegativeBinomial2
 BayesianRegressionModels.BetaBinomial
 BayesianRegressionModels.BetaBinomial2
 BayesianRegressionModels.BinomialLogit
+BayesianRegressionModels.CircularVonMises
 ```
 
 ## Backends
