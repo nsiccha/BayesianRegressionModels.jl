@@ -225,7 +225,6 @@ const GALLERY_CSS = read(joinpath(@__DIR__, "gallery.css"), String)
 function _gallery_shell(content)
     htmx(
         h.main(content; class="inventory-shell");
-        htmx_version=nothing,
         hyperscript_version=nothing,
         pico_version=nothing,
         feedback=false,
