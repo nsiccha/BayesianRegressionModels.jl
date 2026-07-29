@@ -5,7 +5,8 @@
 
 using Test
 using BayesianRegressionModels
-using Distributions: LocationScale, TDist
+using Distributions: BetaBinomial, LocationScale, TDist
+using LogExpFunctions: logit
 using StanBlocks
 
 df = (;
@@ -15,6 +16,9 @@ df = (;
     y_zip=[0, 1, 0, 2, 3, 0],
     y_nb=[0, 1, 2, 4, 3, 6],
     y_t=[-0.8, -0.2, 0.1, 0.7, 1.0, 1.4],
+    trials=[8, 8, 10, 10, 12, 12],
+    y_bb_shapes=[1, 2, 3, 4, 5, 7],
+    y_bb_mean_precision=[0, 1, 4, 6, 8, 11],
 )
 
 family_builder = @brm begin
@@ -30,6 +34,12 @@ family_builder = @brm begin
     loc ~ 1 + x
     log(scale) ~ 1
     y_t ~ LocationScale(loc, scale, TDist(4.0))
+
+    y_bb_shapes ~ BetaBinomial(trials, 2.0, 4.0)
+
+    logit(bb_mean) ~ 1 + x
+    log(bb_precision) ~ 1
+    y_bb_mean_precision ~ BetaBinomial2(trials, bb_mean, bb_precision)
 end
 
 @testset "SBBRMI lowers density, pointwise log-lik and RNG paths" begin
@@ -40,6 +50,9 @@ end
     @test occursin("zero_inflated_poisson(", code)
     @test occursin("neg_binomial_2(", code)
     @test occursin("student_t(", code)
+    @test occursin("beta_binomial(", code)
+    @test occursin("bb_mean .* bb_precision", code)
+    @test occursin("(1 - bb_mean) .* bb_precision", code)
     @test occursin("int_prog_x_zscale_math", code)
 
     sb = SBBRMI(family_builder(df); mod=@__MODULE__)
@@ -56,7 +69,7 @@ end
     expected_replayed = new_df.prog .* ((new_df.math .- math_mu) ./ math_sd)
     @test replayed.data[:int_prog_x_zscale_math] ≈ expected_replayed
 
-    for target in (:y_zip, :y_nb, :y_t)
+    for target in (:y_zip, :y_nb, :y_t, :y_bb_shapes, :y_bb_mean_precision)
         declaration = only(d for d in plan.declarations if d.target === target)
         @test declaration.role === :observation
         @test !isnothing(declaration.draw)
@@ -69,4 +82,6 @@ end
     @test families[:y_zip] === :zero_inflated_poisson
     @test families[:y_nb] === :neg_binomial_2
     @test families[:y_t] === :student_t
+    @test families[:y_bb_shapes] === :beta_binomial
+    @test families[:y_bb_mean_precision] === :beta_binomial
 end

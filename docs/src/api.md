@@ -66,6 +66,9 @@ BayesianRegressionModels.hsgp
 BayesianRegressionModels.OrderedLogistic
 BayesianRegressionModels.Horseshoe
 BayesianRegressionModels.ZeroInflatedPoisson
+BayesianRegressionModels.NegativeBinomial2
+BayesianRegressionModels.BetaBinomial
+BayesianRegressionModels.BetaBinomial2
 BayesianRegressionModels.BinomialLogit
 ```
 

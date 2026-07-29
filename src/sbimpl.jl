@@ -80,6 +80,18 @@ deliberately distinct from Distributions.jl's `NegativeBinomial(r, p)`.
 """
 struct NegativeBinomial2 end
 
+"""
+    BetaBinomial2(trials, mean, precision)
+
+Beta-binomial likelihood marker parameterised by success probability `mean`
+and positive concentration `precision`. The sbimpl backend lowers to Stan's
+`beta_binomial(trials, mean * precision, (1 - mean) * precision)`.
+
+Use Distributions.jl's `BetaBinomial(trials, alpha, beta)` when the two shape
+parameters are already the natural model parameters.
+"""
+struct BetaBinomial2 end
+
 popefs = StanBlocks.@slic begin
     n_covariates = dims(X)[2]
     beta_pop ~ std_normal(; n=n_covariates)
@@ -3724,6 +3736,18 @@ _sb_lik_family!(stmts, target, ::Type{<:NegativeBinomial2},
                 args::Tuple{Any,Any}, data) =
     _sb_lik_stan!(stmts, target, :neg_binomial_2, args, data)
 
+# Mean/precision Beta-binomial convenience surface. Shape lowering stays in
+# the emitted expression so scalar, vector, and linked-predictor arguments all
+# share one method and StanBlocks can synthesize matching lpmfs/RNG paths.
+function _sb_lik_family!(stmts, target, ::Type{<:BetaBinomial2},
+                         args::Tuple{Any,Any,Any}, data)
+    trials, mean, precision = map(a -> _sb_scalar_expr(a, data), args)
+    alpha = Expr(:call, Symbol(".*"), mean, precision)
+    beta = Expr(:call, Symbol(".*"), Expr(:call, :-, 1, mean), precision)
+    push!(stmts, Expr(:call, :~, target,
+        Expr(:call, :beta_binomial, trials, alpha, beta)))
+end
+
 # Distributions.jl expresses a location-scale Student-t as
 # `LocationScale(loc, scale, TDist(nu))`. The prior path already supports this
 # composition; likelihoods use the same lowering to Stan's
@@ -3769,6 +3793,7 @@ _sb_stan_dist_name(::Type{<:Bernoulli})           = :bernoulli
 _sb_stan_dist_name(::Type{<:BernoulliLogit})      = :bernoulli_logit
 _sb_stan_dist_name(::Type{<:Binomial})            = :binomial
 _sb_stan_dist_name(::Type{<:BinomialLogit})       = :binomial_logit
+_sb_stan_dist_name(::Type{<:BetaBinomial})        = :beta_binomial
 _sb_stan_dist_name(::Type{<:Poisson})             = :poisson
 _sb_stan_dist_name(::Type{<:NegativeBinomial})    = :neg_binomial
 _sb_stan_dist_name(::Type) = nothing
