@@ -6119,10 +6119,10 @@ function _sb_lik_composed!(stmts, target, wrapper, producer,
 end
 
 _sb_lik_family!(stmts, target, ::typeof(truncated), args, kwargs::NamedTuple, data) =
-    _sb_lik_composed!(stmts, target, :truncated, :conditioned, args, kwargs, data)
+    _sb_lik_composed!(stmts, target, :truncated, :truncated, args, kwargs, data)
 
 _sb_lik_family!(stmts, target, ::typeof(censored), args, kwargs::NamedTuple, data) =
-    _sb_lik_composed!(stmts, target, :censored, :clamped, args, kwargs, data)
+    _sb_lik_composed!(stmts, target, :censored, :censored, args, kwargs, data)
 
 # Genuine interval evidence uses the observed response as the lower endpoint.
 # Its producer call has no optional-bound encoding, so it is independent of the
@@ -6147,7 +6147,7 @@ function _sb_lik_family!(stmts, target, ::typeof(interval_censored),
                                   upper, base.kind, data)
     family_args = _sb_composed_stan_args(base, data)
     upper_expr = _sb_scalar_expr(upper, data)
-    _sb_lik_stan_exprs!(stmts, target, :interval_evidence,
+    _sb_lik_stan_exprs!(stmts, target, :interval_censored,
                         (base.stan_name, target, upper_expr, family_args...))
 end
 

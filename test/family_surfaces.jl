@@ -586,6 +586,10 @@ end
 
 @testset "SBBRMI lowers density, pointwise log-lik and RNG paths" begin
     plan = generative_plan(family_builder, df; mod=@__MODULE__)
+    # StanBlocks 0eaebfa renamed the public HOF tokens without aliases. This
+    # guard therefore also pins the exact compatibility boundary: the model
+    # must resolve all three BRM wrappers against that public vocabulary.
+    @test StanBlocks.stan.transpiles(plan.model)
     code = BayesianRegressionModels.stan_code(plan)
 
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
@@ -648,15 +652,15 @@ end
     @test families[:y_bb_shapes] === :beta_binomial
     @test families[:y_bb_mean_precision] === :beta_binomial
     @test families[:y_cat] === :categorical_logit
-    @test families[:y_truncated] === :conditioned
-    @test families[:y_censored] === :clamped
-    @test families[:y_lognormal_censored] === :clamped
-    @test families[:y_exponential_censored] === :clamped
-    @test families[:y_weibull_censored] === :clamped
-    @test families[:count_truncated] === :conditioned
-    @test families[:count_censored] === :clamped
-    @test families[:y_interval] === :interval_evidence
-    @test families[:count_interval] === :interval_evidence
+    @test families[:y_truncated] === :truncated
+    @test families[:y_censored] === :censored
+    @test families[:y_lognormal_censored] === :censored
+    @test families[:y_exponential_censored] === :censored
+    @test families[:y_weibull_censored] === :censored
+    @test families[:count_truncated] === :truncated
+    @test families[:count_censored] === :censored
+    @test families[:y_interval] === :interval_censored
+    @test families[:count_interval] === :interval_censored
 end
 
 @testset "Julia-native wrapper surface and capability gate" begin
