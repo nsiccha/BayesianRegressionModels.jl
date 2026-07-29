@@ -22,6 +22,7 @@ makedocs(
     pages = [
         "Home" => "index.md",
         "Formula terms" => "formula-terms.md",
+        "Likelihoods" => "likelihoods.md",
         "Gallery" => "gallery.md",
         "Complete-PLATE blueprint" => "plate-building-blocks.md",
         "API" => "api.md",
