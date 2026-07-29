@@ -129,9 +129,10 @@ using .HistoricalInventoryGallery
     @test !occursin("AppContext", inventory_md)
 
     # Exercise the registered HTTP route entirely in process. This opens no
-    # socket, but reproduces the browser shell -> HTMX fragment sequence and
-    # proves that query context reaches the same authoritative graph.
-    route!(graph)
+    # socket, but reproduces the production blocking policy: the first browser
+    # response is complete, while later HTMX filters still reach the same
+    # authoritative graph.
+    route!(graph; operation_policy=OperationPolicy(:blocking))
     drive(path; headers=Pair{String,String}[]) = begin
         request = HTTP.Request("GET", path, headers)
         handler = first(HTTP.Handlers.gethandler(
@@ -142,13 +143,28 @@ using .HistoricalInventoryGallery
         browser_headers = [
             "Accept" => "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         ]
-        shell = drive("/"; headers=browser_headers)
-        shell_body = String(shell.body)
-        @test shell.status == 200
-        @test occursin("text/html", HTTP.header(shell, "Content-Type", ""))
-        @test occursin("htmx.min.js", shell_body)
-        @test occursin("hx-get=\"/\"", shell_body)
-        @test occursin("hx-trigger=\"load\"", shell_body)
+        initial = drive("/"; headers=browser_headers)
+        initial_body = String(initial.body)
+        @test initial.status == 200
+        @test occursin("text/html", HTTP.header(initial, "Content-Type", ""))
+        @test occursin("var htmx=function()", initial_body)
+        @test !occursin("cdn.jsdelivr.net/npm/htmx", initial_body)
+        @test length(findall(
+            "<article class=\"htmxo-semantic-card-body\"", initial_body)) == 359
+        @test !occursin("data-htmxo-operation-load", initial_body)
+        @test !occursin("hx-trigger=\"load\"", initial_body)
+        @test occursin("hx-get=\"/surface/\"", initial_body)
+
+        prefixed = drive("/"; headers=vcat(browser_headers, [
+            "X-Forwarded-Prefix" => "/p/HistoricalBRM",
+        ]))
+        prefixed_body = String(prefixed.body)
+        @test prefixed.status == 200
+        @test length(findall(
+            "<article class=\"htmxo-semantic-card-body\"", prefixed_body)) == 359
+        @test !occursin("data-htmxo-operation-load", prefixed_body)
+        @test !occursin("hx-trigger=\"load\"", prefixed_body)
+        @test occursin("hx-get=\"/p/HistoricalBRM/surface/\"", prefixed_body)
 
         full = drive("/"; headers=vcat(browser_headers, ["HX-Request" => "true"]))
         full_body = String(full.body)
@@ -163,7 +179,10 @@ using .HistoricalInventoryGallery
         fidelity = drive(
             "/surface/?source_fidelity=confirmed&family_provenance=all" *
             "&translation_route=all&validation_tier=all";
-            headers=vcat(browser_headers, ["HX-Request" => "true"]),
+            headers=vcat(browser_headers, [
+                "HX-Request" => "true",
+                "X-Forwarded-Prefix" => "/p/HistoricalBRM",
+            ]),
         )
         fidelity_body = String(fidelity.body)
         @test fidelity.status == 200
