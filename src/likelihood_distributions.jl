@@ -62,10 +62,15 @@ Random.rand(rng::Random.AbstractRNG, d::OrderedLogistic) =
 
 """
     CategoricalLogit(eta2, eta3, ...)
+    CategoricalLogit(@brm(formula))
 
 Reference-class categorical distribution.  Class 1 has logit zero and each
 argument is the logit for one subsequent class.  The support is
 `1:(length(params(d)) + 1)`.
+
+Inside an outer `@brm` model, the concise nested-`@brm` form is normalised to
+one ordinary scalar linear predictor per non-reference outcome class. Those
+predictors share formula structure while fitting distinct coefficients.
 """
 struct CategoricalLogit{T<:Real} <: Distributions.DiscreteUnivariateDistribution
     nonreference_logits::Vector{T}

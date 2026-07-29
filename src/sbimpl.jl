@@ -1245,8 +1245,8 @@ end
 # for a CategoricalVector the level position == `CA.levelcode`; for a plain
 # vector `sort(unique)` gives the same ordering. `_sb_level_index` (the
 # construct-time entry) is unchanged.
-_sb_fit_levels(raw::CA.CategoricalVector) = CA.levels(raw)
-_sb_fit_levels(raw::AbstractVector) = sort(unique(raw))
+_brm_fit_levels(raw::CA.CategoricalVector) = CA.levels(raw)
+_sb_fit_levels(raw::AbstractVector) = _brm_fit_levels(raw)
 _sb_apply_levels(levels, raw::CA.CategoricalVector) = _sb_apply_levels(levels, CA.unwrap.(raw))
 _sb_apply_levels(levels, raw::AbstractVector) = begin
     lm = Dict(l => i for (i, l) in enumerate(levels))
