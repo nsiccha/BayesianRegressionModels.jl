@@ -5,13 +5,14 @@ using WarmupHMC
 
 const BRM = BayesianRegressionModels
 
-mutable struct BRMAdaptiveCenteringState
+mutable struct BRMAdaptiveCenteringState{SMALL_BLOCKS}
     blocks::Vector{BRM.AdaptiveCenteringBlock}
     pair_blocks::Vector{Int}
     pair_terms::Vector{Int}
     pair_groups::Vector{Int}
     pair_lookup::Vector{Matrix{Int}}
     sources::Vector{Float64}
+    effect_indices::BitSet
 end
 
 function BRMAdaptiveCenteringState(blocks)
@@ -28,19 +29,30 @@ function BRMAdaptiveCenteringState(blocks)
         push!(sources, block.target_c)
         pair_lookup[bi][k, g] = length(sources)
     end
-    BRMAdaptiveCenteringState(
+    small_blocks = all(b.ranef.n_terms <= 2 for b in blocks)
+    effect_indices = BitSet(Iterators.flatten(vec(b.effects) for b in blocks))
+    BRMAdaptiveCenteringState{small_blocks}(
         collect(blocks), pair_blocks, pair_terms, pair_groups, pair_lookup, sources,
+        effect_indices,
     )
 end
 
-# One concrete callable type for BOTH PartiallyCentered arguments and every
-# pair. Keeping the vector element type concrete is a hard WarmupHMC/AD
-# requirement; `kind` is a value branch rather than two closure types for that
-# reason.
-struct BRMAdaptiveCenteringArgument <: Function
-    state::BRMAdaptiveCenteringState
+# The kind is a type parameter so Enzyme sees only the accessor branch it is
+# differentiating.  Every pair still has the same concrete
+# `(location, log_scale)` argument-tuple type, keeping WarmupHMC's pair vector
+# concrete.
+struct BRMAdaptiveCenteringArgument{KIND,SMALL_BLOCKS} <: Function
+    state::BRMAdaptiveCenteringState{SMALL_BLOCKS}
     pair_number::Int
-    kind::Symbol
+end
+
+function BRMAdaptiveCenteringArgument(
+    state::BRMAdaptiveCenteringState{SMALL_BLOCKS}, pair_number, kind::Symbol,
+) where {SMALL_BLOCKS}
+    kind in (:location, :log_scale) || error(
+        "unknown BRM adaptive-centering argument kind $kind",
+    )
+    BRMAdaptiveCenteringArgument{kind,SMALL_BLOCKS}(state, pair_number)
 end
 
 function _pair_location(state, pair_number)
@@ -54,12 +66,28 @@ function _pair_index(state, pair_number)
     state.blocks[bi].effects[k, g]
 end
 
-# Preserve the legacy `L`-then-`tau .* L` graph exactly: WarmupHMC's discrete
-# window winners can change after a one-ulp gradient drift.  For the common
-# K=1:4 blocks, views remove both indexed input copies and scalar `tau` values
-# remove the broadcast temporary.  Writing C in column-major order retains the
-# broadcast's Enzyme accumulation order while avoiding the recursive scalar
-# callable that corrupted the GC under sustained gradients.
+# Return one entry of `C = diag(tau) * L` without allocating.  This spelling is
+# bit-identical to the legacy matrix graph for K=1:2, including its
+# multiplication association: first `stick * z`, then `tau * L[i,j]`.
+function _small_block_cholesky_entry(x, block, i, j)
+    tau = exp(x[block.log_scales[i]])
+    stick = one(eltype(x))
+    offset = (i - 1) * (i - 2) ÷ 2
+    for l in 1:i-1
+        z = tanh(x[block.cholesky_free[offset + l]])
+        l == j && return tau * (stick * z)
+        stick *= sqrt(one(eltype(x)) - z * z)
+    end
+    j == i || throw(BoundsError((i, j)))
+    tau * stick
+end
+
+# Preserve the legacy `L`-then-`tau .* L` graph exactly for K>=3: WarmupHMC's
+# discrete window winners can change after a one-ulp gradient drift.  Views
+# remove both indexed input copies and scalar `tau` values remove the broadcast
+# temporary.  Writing C in column-major order retains the broadcast's Enzyme
+# accumulation order while avoiding the recursive scalar callable that
+# corrupted the GC under sustained gradients.
 function _accessor_block_cholesky(x, block)
     K = block.ranef.n_terms
     L = BRM._adaptive_cholesky_corr(view(x, block.cholesky_free), K)
@@ -80,7 +108,29 @@ function _accessor_block_cholesky(x, block)
     tau .* L
 end
 
-function _block_location(x, state, pair_number)
+function _small_block_location(x, state, bi, k, g)
+    k == 1 && return zero(eltype(x))
+    k == 2 || throw(BoundsError(1:2, k))
+    block = state.blocks[bi]
+    m = zero(eltype(x))
+    c = state.sources[state.pair_lookup[bi][1, g]]
+    s = _small_block_cholesky_entry(x, block, 1, 1)
+    z = (x[block.effects[1, g]] - c * m) / s^c
+    m = zero(eltype(x))
+    m += _small_block_cholesky_entry(x, block, 2, 1) * z
+    m
+end
+
+function _block_location(
+    x, state::BRMAdaptiveCenteringState{true}, pair_number,
+)
+    bi, k, g = _pair_location(state, pair_number)
+    _small_block_location(x, state, bi, k, g)
+end
+
+function _block_location(
+    x, state::BRMAdaptiveCenteringState{false}, pair_number,
+)
     bi, k, g = _pair_location(state, pair_number)
     block = state.blocks[bi]
     C = _accessor_block_cholesky(x, block)
@@ -102,15 +152,20 @@ function _block_location(x, state, pair_number)
     m
 end
 
-function (arg::BRMAdaptiveCenteringArgument)(x)
-    arg.kind === :location &&
-        return _block_location(x, arg.state, arg.pair_number)
-    if arg.kind === :log_scale
-        bi, k, _ = _pair_location(arg.state, arg.pair_number)
-        block = arg.state.blocks[bi]
-        return log(_accessor_block_cholesky(x, block)[k, k])
-    end
-    error("unknown BRM adaptive-centering argument kind $(arg.kind)")
+function (arg::BRMAdaptiveCenteringArgument{:location})(x)
+    _block_location(x, arg.state, arg.pair_number)
+end
+
+function (arg::BRMAdaptiveCenteringArgument{:log_scale,true})(x)
+    bi, k, _ = _pair_location(arg.state, arg.pair_number)
+    block = arg.state.blocks[bi]
+    log(_small_block_cholesky_entry(x, block, k, k))
+end
+
+function (arg::BRMAdaptiveCenteringArgument{:log_scale,false})(x)
+    bi, k, _ = _pair_location(arg.state, arg.pair_number)
+    block = arg.state.blocks[bi]
+    log(_accessor_block_cholesky(x, block)[k, k])
 end
 
 function _sync_sources!(state, ir)
