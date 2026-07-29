@@ -5771,7 +5771,7 @@ end
 # the new surface rejects it (the legacy OrderedLogistic shorthand remains
 # unchanged for compatibility).
 function _sb_lik_family!(stmts, target, ::Type{<:Ordinal},
-                         args::Tuple{Any,Any,Any}, kwargs, data)
+                         args::Tuple{Any,Any,Any}, kwargs::NamedTuple, data)
     structure_raw, link_raw, eta_raw = args
     structure = _sb_ordinal_structure_code(structure_raw)
     link = _sb_ordinal_link_code(link_raw)
