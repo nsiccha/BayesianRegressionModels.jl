@@ -23,7 +23,7 @@ _ALLOWED_CALLS = Set{Symbol}([
     :log_abs_tanh, :log_square_tanh,
     :Normal, :Poisson, :Binomial, :BinomialLogit, :Bernoulli, :BernoulliLogit, :Beta, :Gamma,
     :Exponential, :Cauchy, :TDist, :LocationScale, :LogNormal, :Weibull,
-    :NegativeBinomial, :Geometric, :Laplace, :Uniform,
+    :NegativeBinomial, :NegativeBinomial2, :Geometric, :Laplace, :Uniform,
     :MvNormal, :MixtureModel, :Dirichlet,
     :InverseGamma, :InverseGaussian, :VonMises, :Pareto,
     :OrderedLogistic, :Categorical,
