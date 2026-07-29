@@ -227,6 +227,26 @@ end
     @test all(0 .<= binomial_draws .<= 5)
 end
 
+@testset "Laplace is the q=0.5 asymmetric-Laplace special case" begin
+    mu = 0.3
+    quantile_scale = 0.7
+    q = 0.5
+
+    for y in (-1.1, 0.0, mu, 0.9, 2.2)
+        u = (y - mu) / quantile_scale
+        rho = u * (q - (u < 0))
+        check_loss_logpdf = log(q * (1 - q)) - log(quantile_scale) - rho
+
+        # brms/check-loss scale s maps to Laplace scale theta = 2s.
+        @test logpdf(Laplace(mu, 2quantile_scale), y) ≈ check_loss_logpdf
+
+        # Bambi/PyMC uses kappa=1 at q=0.5 and b as inverse Laplace scale.
+        b = inv(2quantile_scale)
+        bambi_logpdf = log(b / 2) - b * abs(y - mu)
+        @test logpdf(Laplace(mu, inv(b)), y) ≈ bambi_logpdf
+    end
+end
+
 semantic_df = (;
     y_exp=[0.2, 1.3, 3.1],
     y_gamma=[0.4, 2.0, 5.5],
