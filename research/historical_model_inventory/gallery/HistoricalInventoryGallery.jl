@@ -221,12 +221,10 @@ function semantic_inventory(rows::AbstractVector{InventoryRow}, total::Integer)
 end
 
 const GALLERY_CSS = read(joinpath(@__DIR__, "gallery.css"), String)
-const HTMX_RUNTIME = read(joinpath(@__DIR__, "vendor", "htmx-2.0.8.min.js"), String)
 
 function _gallery_shell(content)
     htmx(
         h.main(content; class="inventory-shell");
-        htmx_version=nothing,
         hyperscript_version=nothing,
         pico_version=nothing,
         feedback=false,
@@ -234,7 +232,6 @@ function _gallery_shell(content)
         overlay=false,
         extra_head=(
             h.title("Historical BRM inventory"),
-            h.script(Raw(HTMX_RUNTIME)),
             h.style(Raw(GALLERY_CSS)),
         ),
     )
