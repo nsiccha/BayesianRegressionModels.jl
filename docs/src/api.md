@@ -73,6 +73,7 @@ BayesianRegressionModels.BetaBinomial
 BayesianRegressionModels.BetaBinomial2
 BayesianRegressionModels.BinomialLogit
 BayesianRegressionModels.CircularVonMises
+BayesianRegressionModels.SkewDoubleExponential
 ```
 
 ## Backends

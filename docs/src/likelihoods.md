@@ -53,6 +53,49 @@ unresolved formula-semantic question. Thus the response-family component of
 the catalogue's `quantile_p50` model is available, while the complete
 historical model remains unsupported.
 
+## Quantile regression with `SkewDoubleExponential`
+
+For a non-median quantile, BRM exposes the executable distribution
+`SkewDoubleExponential(mu, sigma, tau)`. Its arguments and scale exactly match
+Stan's native `skew_double_exponential` family:
+
+```math
+f(y \mid \mu, \sigma, \tau)
+= \frac{2\tau(1-\tau)}{\sigma}
+  \exp\!\left[-\frac{2}{\sigma}
+  \left((1-\tau)\mathbf{1}_{y<\mu}(\mu-y)
+        +\tau\mathbf{1}_{y>\mu}(y-\mu)\right)\right].
+```
+
+Thus `cdf(SkewDoubleExponential(mu, sigma, tau), mu) == tau`, and
+`SkewDoubleExponential(mu, sigma, 0.5)` is exactly `Laplace(mu, sigma)`.
+There is no hidden brms-scale conversion on this primary Julia surface.
+
+```julia
+quantile_model = @brm data begin
+    q25_y ~ 1 + x
+    log(native_scale) ~ 1
+    y ~ SkewDoubleExponential(q25_y, native_scale, 0.25)
+end
+```
+
+The brms/check-loss scale ``s`` translates explicitly as
+``\sigma = 2s``. Distributions.jl's existing exact special case also remains
+available in formulas:
+
+```julia
+using Distributions: SkewedExponentialPower
+
+y ~ SkewedExponentialPower(mu, sigma_sepd, 1, tau)
+```
+
+BRM lowers that spelling with
+``\sigma = 4\,\mathtt{sigma\_sepd}\,\tau(1-\tau)``. The shape must be the
+literal value `1`; other `SkewedExponentialPower` shapes are rejected because
+Stan's asymmetric double-exponential family is not a native implementation of
+the general SEPD. Density, pointwise log likelihood, and predictive RNG all
+use the same translation.
+
 ## Circular regression with `VonMises`
 
 BRM exposes two deliberately different von-Mises likelihoods. Use

@@ -4576,6 +4576,8 @@ _sb_stan_dist_name(::Type{<:Beta})                = :beta
 _sb_stan_dist_name(::Type{<:Uniform})             = :uniform
 _sb_stan_dist_name(::Type{<:LogNormal})           = :lognormal
 _sb_stan_dist_name(::Type{<:Laplace})             = :double_exponential
+_sb_stan_dist_name(::Type{<:SkewDoubleExponential}) = :skew_double_exponential
+_sb_stan_dist_name(::Type{<:SkewedExponentialPower}) = :skew_double_exponential
 _sb_stan_dist_name(::Type{<:Weibull})             = :weibull
 _sb_stan_dist_name(::Type{<:InverseGamma})        = :inv_gamma
 _sb_stan_dist_name(::Type{<:Bernoulli})           = :bernoulli
@@ -4621,6 +4623,30 @@ _sb_stan_dist_args(::Type{<:LogNormal}, ::Tuple{}) = (0.0, 1.0)
 _sb_stan_dist_args(::Type{<:LogNormal}, args::Tuple{Any}) = (args[1], 1.0)
 _sb_stan_dist_args(::Type{<:Laplace}, ::Tuple{}) = (0.0, 1.0)
 _sb_stan_dist_args(::Type{<:Laplace}, args::Tuple{Any}) = (args[1], 1.0)
+
+# Distributions.jl's asymmetric-Laplace special case keeps its own scale.
+# Only an explicit literal p=1 is accepted: the general SEPD has no faithful
+# native Stan analogue. All three Stan paths consume this one translation.
+function _sb_stan_dist_args(
+    ::Type{<:SkewedExponentialPower},
+    args::Tuple{Any,Any,Any,Any},
+)
+    mu, sigma_sepd, p, alpha = args
+    p isa Real && p == one(p) || throw(ArgumentError(
+        "sbimpl: `SkewedExponentialPower` is supported only with the explicit " *
+        "literal shape `p = 1`; got $(repr(p))"))
+    one_minus_alpha = Expr(:call, :-, 1.0, alpha)
+    stan_scale = Expr(:call, Symbol(".*"),
+        Expr(:call, Symbol(".*"),
+            Expr(:call, Symbol(".*"), 4.0, sigma_sepd), alpha),
+        one_minus_alpha)
+    (mu, stan_scale, alpha)
+end
+_sb_stan_dist_args(::Type{<:SkewedExponentialPower}, args) =
+    throw(ArgumentError(
+        "sbimpl: `SkewedExponentialPower` requires four explicit arguments " *
+        "`(mu, sigma, 1, alpha)`; got $(length(args))"))
+
 _sb_stan_dist_args(::Type{<:Weibull}, ::Tuple{}) = (1.0, 1.0)
 _sb_stan_dist_args(::Type{<:Weibull}, args::Tuple{Any}) = (args[1], 1.0)
 _sb_stan_dist_args(::Type{<:InverseGamma}, ::Tuple{}) = (1.0, 1.0)
