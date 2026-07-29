@@ -154,6 +154,7 @@ generic_df = (;
     y_invgamma=[0.3, 1.4, 5.0],
     y_bernoulli=[0, 1, 1],
     y_bernoulli_logit=[1, 0, 1],
+    y_binomial=[1, 3, 4],
     y_binomial_logit=[1, 3, 4],
     y_poisson=[0, 2, 6],
     y_nb=[0, 3, 7],
@@ -173,6 +174,7 @@ generic_builder = @brm begin
     y_invgamma ~ InverseGamma(3.2, 1.8)
     y_bernoulli ~ Bernoulli(0.65)
     y_bernoulli_logit ~ BernoulliLogit(-0.4)
+    y_binomial ~ Binomial(5, 0.35)
     y_binomial_logit ~ BinomialLogit(5, -0.3)
     y_poisson ~ Poisson(2.3)
     y_nb ~ NegativeBinomial(2.5, 0.4)
@@ -206,6 +208,7 @@ end
         y_invgamma=InverseGamma(3.2, 1.8),
         y_bernoulli=Bernoulli(0.65),
         y_bernoulli_logit=BernoulliLogit(-0.4),
+        y_binomial=Binomial(5, 0.35),
         y_binomial_logit=BinomialLogit(5, -0.3),
         y_poisson=Poisson(2.3),
         y_nb=NegativeBinomial(2.5, 0.4),
@@ -215,6 +218,13 @@ end
         observed = getproperty(generic_df, target)
         @test actual ≈ logpdf.(dist, observed) atol=1e-10
     end
+
+    predictions = brm_execute(
+        descriptor, :predict;
+        problem, draws=zeros(0, 32), seed=20260729)
+    binomial_draws = predictions.y_binomial_gen
+    @test length(binomial_draws) == length(generic_df.y_binomial) * 32
+    @test all(0 .<= binomial_draws .<= 5)
 end
 
 semantic_df = (;
