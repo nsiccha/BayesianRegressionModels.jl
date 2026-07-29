@@ -41,6 +41,62 @@ function manual_adaptive_map(x, block, controls)
     ljac, y
 end
 
+# Frozen reference for the pre-bd9ca2d accessor.  Keep this materialized form
+# in the test: the optimized hot path must preserve its floating-point operation
+# order, not merely agree to a tolerance.  WarmupHMC selects a discrete winner
+# after every window, so a one-ulp accessor drift can redirect the rest of an
+# otherwise deterministic run.
+function materialized_block_location(x, state, pair_number)
+    bi, k, g = AC_EXT._pair_location(state, pair_number)
+    block = state.blocks[bi]
+    C = BayesianRegressionModels._adaptive_block_cholesky(x, block)
+    z = Vector{eltype(C)}(undef, k)
+    m = zero(eltype(C))
+    for i in 1:k
+        m = zero(eltype(C))
+        for l in 1:i-1
+            m += C[i, l] * z[l]
+        end
+        if i < k
+            p = state.pair_lookup[bi][i, g]
+            c = state.sources[p]
+            z[i] = (x[block.effects[i, g]] - c * m) / C[i, i]^c
+        end
+    end
+    m
+end
+
+struct MaterializedAdaptiveCenteringArgument{S} <: Function
+    state::S
+    pair_number::Int
+    kind::Symbol
+end
+
+function (arg::MaterializedAdaptiveCenteringArgument)(x)
+    arg.kind === :location &&
+        return materialized_block_location(x, arg.state, arg.pair_number)
+    if arg.kind === :log_scale
+        bi, k, _ = AC_EXT._pair_location(arg.state, arg.pair_number)
+        C = BayesianRegressionModels._adaptive_block_cholesky(
+            x, arg.state.blocks[bi],
+        )
+        return log(C[k, k])
+    end
+    error("unknown materialized adaptive-centering argument kind $(arg.kind)")
+end
+
+function materialized_reparametrizer(state, ir)
+    pairs = map(enumerate(ir.pairs)) do (p, (idx, value))
+        idx => WarmupHMC.Reparametrization(
+            value.target,
+            value.source,
+            MaterializedAdaptiveCenteringArgument(state, p, :location),
+            MaterializedAdaptiveCenteringArgument(state, p, :log_scale),
+        )
+    end
+    WarmupHMC.IndexedReparametrization(pairs)
+end
+
 function source_observation(x, block, controls, innovations, invariant_gradient)
     position = copy(x)
     gradient = zeros(eltype(x), length(x))
@@ -144,15 +200,21 @@ end
     x[block.cholesky_free] .= [0.2, -0.4, 0.7]
     x[block.log_scales] .= log.([0.5, 1.5, 3.0])
 
-    # The K=1:4 hot path is deliberately scalar: rebuilding a small C and an
-    # innovation vector inside every accessor made Enzyme tape thousands of
-    # short-lived arrays per gradient evaluation.
+    # The optimized path keeps the legacy matrix graph but elides its indexed
+    # input copies and temporary scale vector.
     location = ir.pairs[end][2].args[1]
     log_scale = ir.pairs[end][2].args[2]
+    reference_ir = materialized_reparametrizer(state, ir)
+    reference_location = reference_ir.pairs[end][2].args[1]
+    reference_log_scale = reference_ir.pairs[end][2].args[2]
     location(x)
     log_scale(x)
-    @test accessor_allocations(location, x) == 0
-    @test accessor_allocations(log_scale, x) == 0
+    reference_location(x)
+    reference_log_scale(x)
+    @test accessor_allocations(location, x) <
+          accessor_allocations(reference_location, x)
+    @test accessor_allocations(log_scale, x) <
+          accessor_allocations(reference_log_scale, x)
 
     expected_ljac, expected = manual_adaptive_map(x, block, controls)
     ljac, mapped = ir(x)
@@ -198,7 +260,57 @@ end
     @test copied_state.sources == zeros(length(controls))
 end
 
-@testset "four-term bounded-scalar and wide polynomial accessors are exact" begin
+@testset "adaptive accessors preserve legacy K=1:4 arithmetic exactly" begin
+    for K in 1:4
+        G = 2
+        n_cholesky = K * (K - 1) ÷ 2
+        ranef = BayesianRegressionModels.RanefBlock(
+            :r_mu_subject, :ranef_correlated, :subject, nothing, nothing,
+            string.(1:G), K, G, :r_mu_subject_z_flat, true,
+        )
+        block = AdaptiveCenteringBlock(
+            ranef,
+            0.0,
+            reshape(
+                (n_cholesky + K + 1):(n_cholesky + K + K * G), K, G,
+            ),
+            collect(1:n_cholesky),
+            collect((n_cholesky + 1):(n_cholesky + K)),
+        )
+        state, ir = AC_EXT._adaptive_centering_reparametrizer([block])
+        x = collect(range(-0.6, 0.8, length=n_cholesky + K + K * G))
+        source_controls = (
+            zeros(K * G),
+            collect(range(0.1, 0.9, length=K * G)),
+            ones(K * G),
+        )
+        weight = collect(range(0.3, 1.7, length=length(x)))
+        for controls in source_controls
+            set_adaptive_sources!(state, ir, controls)
+            reference_ir = materialized_reparametrizer(state, ir)
+
+            for p in eachindex(ir.pairs)
+                for arg in 1:2
+                    actual = ir.pairs[p][2].args[arg](x)
+                    expected = reference_ir.pairs[p][2].args[arg](x)
+                    @test isequal(actual, expected)
+                end
+            end
+
+            @test isequal(ir(x), reference_ir(x))
+            objective(v, transform) = begin
+                ljac, mapped = transform(v)
+                ljac + dot(weight, mapped)
+            end
+            @test isequal(
+                ForwardDiff.gradient(v -> objective(v, ir), x),
+                ForwardDiff.gradient(v -> objective(v, reference_ir), x),
+            )
+        end
+    end
+end
+
+@testset "four-term optimized and wide fallback accessors are exact" begin
     for K in (4, 5)
         G = 2
         n_cholesky = K * (K - 1) ÷ 2
@@ -229,9 +341,14 @@ end
 
         if K == 4
             location = ir.pairs[K][2].args[1]
+            reference_ir = materialized_reparametrizer(state, ir)
+            reference_location = reference_ir.pairs[K][2].args[1]
             location(x)
-            @test accessor_allocations(location, x) == 0
+            reference_location(x)
+            @test accessor_allocations(location, x) <
+                  accessor_allocations(reference_location, x)
         end
+
     end
 end
 
