@@ -61,7 +61,7 @@ BayesianRegressionModels.mo
 BayesianRegressionModels.mo1
 ```
 
-## Likelihood / prior markers
+## Likelihood distributions / prior markers
 
 ```@docs
 BayesianRegressionModels.OrderedLogistic
@@ -73,6 +73,7 @@ BayesianRegressionModels.BetaBinomial
 BayesianRegressionModels.BetaBinomial2
 BayesianRegressionModels.BinomialLogit
 BayesianRegressionModels.CircularVonMises
+BayesianRegressionModels.SkewDoubleExponential
 ```
 
 ## Backends

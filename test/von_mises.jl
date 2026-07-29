@@ -6,6 +6,7 @@
 using Test
 using BayesianRegressionModels
 using Distributions
+using Random
 using StanBlocks
 
 const BRM = BayesianRegressionModels
@@ -14,6 +15,31 @@ const BRM = BayesianRegressionModels
     @test BRM._sb_stan_dist_name(VonMises) === nothing
     @test BRM._sb_stan_dist_args(VonMises, (:kappa,)) == (0.0, :kappa)
     @test BRM._sb_stan_dist_args(VonMises, (:mu, :kappa)) == (:mu, :kappa)
+end
+
+@testset "CircularVonMises has an executable Julia distribution contract" begin
+    circular = CircularVonMises(7.0, 2.1; interval=(0.0, 2pi))
+    @test circular isa ContinuousUnivariateDistribution
+    @test params(circular) == (7.0, 2.1, (0.0, 2pi))
+    @test CircularVonMises(params(circular)...) isa CircularVonMises
+    @test minimum(circular) == 0.0
+    @test maximum(circular) == 2pi
+    @test insupport(circular, 0.0)
+    @test !insupport(circular, 2pi)
+    @test logpdf(circular, 2pi) == -Inf
+
+    wrapped_mu = mod(7.0, 2pi)
+    moving_lo = wrapped_mu - pi
+    observations = [0.0, 2.0, 6.0]
+    representatives = moving_lo .+ mod.(observations .- moving_lo, 2pi)
+    @test logpdf.(Ref(circular), observations) ≈
+          logpdf.(VonMises(wrapped_mu, 2.1), representatives)
+
+    draws = rand(MersenneTwister(20260729), circular, 128)
+    @test all(insupport.(Ref(circular), draws))
+    @test_throws DomainError CircularVonMises(0.0, 0.0)
+    @test_throws DomainError CircularVonMises(0.0, 1.0; interval=(0.0, 1.0))
+    @test_throws ArgumentError CircularVonMises(0.0, 1.0; interval=0.0)
 end
 
 semantic_df = (;

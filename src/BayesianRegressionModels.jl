@@ -14,8 +14,9 @@ include("introspection.jl")
 # VBRMI — vectorized implementation. Materializes predictors and
 # likelihood into a LogDensityProblems-compatible object.
 using LogExpFunctions, InverseFunctions, Distributions, ElasticArrays,
-      LogDensityProblems, LinearAlgebra, SpecialFunctions
+      LogDensityProblems, LinearAlgebra, SpecialFunctions, Random
 import CategoricalArrays as CA
+include("likelihood_distributions.jl")
 include("vimpl.jl")
 
 # SBBRMI — StanBlocks backend. Lowers a BRMI into a StanBlocks SlicModel
@@ -36,7 +37,6 @@ include("descriptor.jl")
 # Both are unconstrained-draw-matrix operations whose correctness depends on
 # the emitted random-effect parameterization, so they live next to the emitter
 # rather than being re-derived (differently) in every consumer.
-using Random
 include("prediction.jl")
 include("adaptive_centering.jl")
 
@@ -46,7 +46,7 @@ export @brm, @n, @x, @getproperty
 export assign, doublepipe, gr, gp, offset, zscale, center, standardize, protect, factor
 export me, mi, s, t2, ar, mo, mo1, hsgp, OrderedLogistic, Horseshoe,
        CategoricalLogit, ZeroInflatedPoisson, NegativeBinomial2,
-       BetaBinomial, BetaBinomial2, CircularVonMises,
+       BetaBinomial, BetaBinomial2, CircularVonMises, SkewDoubleExponential,
        sb_group_demo, addprop
 # Bordet model family — formula-surface markers for custom likelihood + submodel
 export TruncatedNormal, bordet_hierarchical_parametric, kernel
@@ -55,7 +55,8 @@ export TruncatedNormal, bordet_hierarchical_parametric, kernel
 # (Stan's `bernoulli_logit_lpmf` / `binomial_logit_lpmf`; LogExpFunctions'
 # `loglogistic` / `log1mlogistic` on the Julia side), avoiding the `inv_logit`
 # round-trip and staying numerically stable for large |eta|. `BernoulliLogit`
-# is re-exported from Distributions; `BinomialLogit` is defined in vimpl.jl.
+# is re-exported from Distributions; `BinomialLogit` is defined alongside the
+# other executable likelihood contracts in likelihood_distributions.jl.
 export BernoulliLogit, BinomialLogit
 export Data, MaybeData, maybedata
 export AbstractColumn, MissingColumn, DataColumn, NamedColumn,

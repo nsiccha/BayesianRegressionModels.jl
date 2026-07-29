@@ -69,31 +69,6 @@ emitter. Dispatch tag — see `_sb_ar1`.
 function ar end
 
 """
-    OrderedLogistic
-
-Cumulative-link ordinal-likelihood marker. Use as a family on the RHS:
-`y ~ OrderedLogistic(eta)`. The sbimpl backend lowers to Stan's
-`ordered_logistic_lpmf`. Marker struct only — Distributions.jl does not
-ship an `OrderedLogistic`, and the `@brm` parser never constructs an
-instance, so the empty struct is sufficient.
-"""
-struct OrderedLogistic end
-
-"""
-    CategoricalLogit(eta2, eta3, ...)
-    CategoricalLogit(@brm(formula))
-
-Reference-class categorical likelihood marker. Each positional argument is an
-existing scalar linear predictor for one non-reference outcome class; class 1
-has fixed logit zero. The sbimpl backend freezes the observed outcome-level
-order, constructs the per-row logit matrix, and lowers to a categorical-logit
-likelihood with prediction and pointwise-log-likelihood support. The concise
-nested-`@brm` form is normalised by the outer builder into that same explicit
-argument list, sharing formula structure while fitting distinct coefficients.
-"""
-struct CategoricalLogit end
-
-"""
     Horseshoe
 
 Carvalho-Polson-Scott horseshoe shrinkage prior marker. Use as a prior
@@ -102,65 +77,6 @@ reparameterised hierarchy `beta = raw * lambda * tau`. Marker struct
 only — the `@brm` parser never constructs an instance.
 """
 struct Horseshoe end
-
-"""
-    ZeroInflatedPoisson(lambda, zi)
-
-Zero-inflated Poisson likelihood marker — a mixture of a point-mass at
-zero (with probability `zi`) and `Poisson(lambda)`. Surfaces as
-`y ~ ZeroInflatedPoisson(lambda, zi)` in the SBBRMI backend.
-"""
-struct ZeroInflatedPoisson end
-
-"""
-    NegativeBinomial2(mu, phi)
-
-Negative-binomial likelihood marker parameterised by mean `mu` and positive
-shape/precision `phi`, matching Stan's `neg_binomial_2(mu, phi)`. This is
-deliberately distinct from Distributions.jl's `NegativeBinomial(r, p)`.
-"""
-struct NegativeBinomial2 end
-
-"""
-    BetaBinomial2(trials, mean, precision)
-
-Beta-binomial likelihood marker parameterised by success probability `mean`
-and positive concentration `precision`. The sbimpl backend lowers to Stan's
-`beta_binomial(trials, mean * precision, (1 - mean) * precision)`.
-
-Use Distributions.jl's `BetaBinomial(trials, alpha, beta)` when the two shape
-parameters are already the natural model parameters.
-"""
-struct BetaBinomial2 end
-
-"""
-    CircularVonMises(mu, kappa; interval=(-pi, pi))
-
-Von-Mises regression on one fixed principal interval. `interval` must be a
-compile-time pair `(lo, hi)` of finite numbers with `hi - lo == 2pi`; the
-default is `[-pi, pi)`. The StanBlocks backend wraps `mu` and predictive draws
-into that half-open interval, rejects observations outside it, requires
-`kappa > 0`, and evaluates Stan's native `von_mises_lpdf`.
-
-This marker is deliberately distinct from Distributions.jl's
-`VonMises(mu, kappa)`. Use that constructor when its Julia semantics are
-intended: argument order `(mu, kappa)`, one-argument shorthand
-`VonMises(kappa) == VonMises(0, kappa)`, and moving support
-`[mu - pi, mu + pi]`. Neither family applies a hidden link or prior; model
-`mu` and `kappa` explicitly, for example:
-
-```julia
-@brm begin
-    mu ~ 1 + distance
-    kappa ~ Gamma(2, 100.0) # Julia scale 100 == brms rate 0.01
-    direction ~ CircularVonMises(mu, kappa; interval=(-pi, pi))
-end
-```
-
-`CircularVonMises` is a StanBlocks-backend marker and is not implemented by
-`VBRMI`.
-"""
-struct CircularVonMises end
 
 _sb_interval_literal(x::Real) = Float64(x)
 _sb_interval_literal(x::NamedColumn) = begin
@@ -198,7 +114,6 @@ function _check_term_kwargs(::Type{<:CircularVonMises}, kwargs)
     _sb_circular_interval(kwargs)
     nothing
 end
-
 popefs = StanBlocks.@slic begin
     n_covariates = dims(X)[2]
     beta_pop ~ std_normal(; n=n_covariates)
@@ -1189,33 +1104,36 @@ _sb_mi_normal = StanBlocks.@slic begin
                     num_elements(Jobs) + n_mis)
 end
 
-# Squared-exponential GP helpers. The remaining axis loops live in Stan
-# functions because top-level @slic bodies are deliberately control-flow free.
+# Squared-exponential GP helpers. The data-layout conversion loop lives in a
+# Stan function because top-level @slic bodies are deliberately control-flow
+# free.
 #
-# `brm_exp_quad_cov` builds the full covariance used by exact `gp(...)` as the
-# product of Stan's one-dimensional `gp_exp_quad_cov` factors. This is exactly
-# the separable multidimensional exponentiated-quadratic kernel, and delegates
-# the O(n^2) covariance work plus diagonal jitter to Stan's built-ins. `rho` is
-# always a vector: isotropic calls repeat their one length scale, while
-# anisotropic calls sample one value per predictor axis.
+# BRM records exact-GP inputs as an N x d matrix so replay and descriptors keep
+# their ordinary dense-data shape. `brm_gp_locations` converts its rows to
+# Stan's native `array[N] vector[d]` GP carrier once in transformed data.
+# `brm_exp_quad_cov` then delegates the whole multidimensional covariance and
+# diagonal jitter to Stan's `gp_exp_quad_cov` / `add_diag` built-ins.
 #
 # `brm_hsgp_sqrt_spd` evaluates the separable d-dimensional squared-exponential
 # spectral density at every tensor-product HSGP frequency. `omega2[b, j]` is
 # the squared angular frequency for basis row b and predictor axis j.
 StanBlocks.@deffun begin
-    @stanonly brm_exp_quad_cov(X::matrix[n, d], sigma::real,
-                               rho::vector[d], jitter::real)::matrix[n, n] = begin
-        K = rep_matrix(sigma * sigma, n, n)
-        for axis in 1:d
-            K_axis = gp_exp_quad_cov(
-                to_array_1d(X[:, axis]), 1., rho[axis])
-            for i in 1:n
-                for j in 1:n
-                    K[i, j] = K[i, j] * K_axis[i, j]
-                end
-            end
+    @stanonly brm_gp_locations(X::matrix[n, d])::vector[n, d] = begin
+        locations::vector[n, d]
+        for i in 1:n
+            locations[i] = to_vector(X[i, :])
         end
-        return add_diag(K, jitter)
+        return locations
+    end
+
+    @stanonly brm_exp_quad_cov(X::vector[n, d], sigma::real,
+                               rho::real, jitter::real)::matrix[n, n] = begin
+        return add_diag(gp_exp_quad_cov(X, sigma, rho), jitter)
+    end
+
+    @stanonly brm_exp_quad_cov(X::vector[n, d], sigma::real,
+                               rho::vector[d], jitter::real)::matrix[n, n] = begin
+        return add_diag(gp_exp_quad_cov(X, sigma, rho), jitter)
     end
 
     @stanonly brm_hsgp_sqrt_spd(omega2::matrix[m, d], sigma::real,
@@ -1241,23 +1159,23 @@ end
 # there is no redundant population beta multiplying the returned draw.
 _sb_gp = StanBlocks.@slic begin
     n_obs = dims(X)[1]
-    n_axes = dims(X)[2]
+    X_gp = brm_gp_locations(X)
     log_rho   ~ std_normal()
     log_sigma ~ std_normal()
     z         ~ std_normal(; n=n_obs)
-    rho = rep_vector(exp(log_rho), n_axes)
-    K = brm_exp_quad_cov(X, exp(log_sigma), rho, jitter)
+    K = brm_exp_quad_cov(X_gp, exp(log_sigma), exp(log_rho), jitter)
     return cholesky_decompose(K) * z
 end
 
 _sb_gp_aniso = StanBlocks.@slic begin
     n_obs = dims(X)[1]
     n_axes = dims(X)[2]
+    X_gp = brm_gp_locations(X)
     log_rho :: vector[n_axes] ~ std_normal()
     log_sigma ~ std_normal()
     z         ~ std_normal(; n=n_obs)
     rho = exp(log_rho)
-    K = brm_exp_quad_cov(X, exp(log_sigma), rho, jitter)
+    K = brm_exp_quad_cov(X_gp, exp(log_sigma), rho, jitter)
     return cholesky_decompose(K) * z
 end
 
@@ -4658,6 +4576,8 @@ _sb_stan_dist_name(::Type{<:Beta})                = :beta
 _sb_stan_dist_name(::Type{<:Uniform})             = :uniform
 _sb_stan_dist_name(::Type{<:LogNormal})           = :lognormal
 _sb_stan_dist_name(::Type{<:Laplace})             = :double_exponential
+_sb_stan_dist_name(::Type{<:SkewDoubleExponential}) = :skew_double_exponential
+_sb_stan_dist_name(::Type{<:SkewedExponentialPower}) = :skew_double_exponential
 _sb_stan_dist_name(::Type{<:Weibull})             = :weibull
 _sb_stan_dist_name(::Type{<:InverseGamma})        = :inv_gamma
 _sb_stan_dist_name(::Type{<:Bernoulli})           = :bernoulli
@@ -4703,6 +4623,30 @@ _sb_stan_dist_args(::Type{<:LogNormal}, ::Tuple{}) = (0.0, 1.0)
 _sb_stan_dist_args(::Type{<:LogNormal}, args::Tuple{Any}) = (args[1], 1.0)
 _sb_stan_dist_args(::Type{<:Laplace}, ::Tuple{}) = (0.0, 1.0)
 _sb_stan_dist_args(::Type{<:Laplace}, args::Tuple{Any}) = (args[1], 1.0)
+
+# Distributions.jl's asymmetric-Laplace special case keeps its own scale.
+# Only an explicit literal p=1 is accepted: the general SEPD has no faithful
+# native Stan analogue. All three Stan paths consume this one translation.
+function _sb_stan_dist_args(
+    ::Type{<:SkewedExponentialPower},
+    args::Tuple{Any,Any,Any,Any},
+)
+    mu, sigma_sepd, p, alpha = args
+    p isa Real && p == one(p) || throw(ArgumentError(
+        "sbimpl: `SkewedExponentialPower` is supported only with the explicit " *
+        "literal shape `p = 1`; got $(repr(p))"))
+    one_minus_alpha = Expr(:call, :-, 1.0, alpha)
+    stan_scale = Expr(:call, Symbol(".*"),
+        Expr(:call, Symbol(".*"),
+            Expr(:call, Symbol(".*"), 4.0, sigma_sepd), alpha),
+        one_minus_alpha)
+    (mu, stan_scale, alpha)
+end
+_sb_stan_dist_args(::Type{<:SkewedExponentialPower}, args) =
+    throw(ArgumentError(
+        "sbimpl: `SkewedExponentialPower` requires four explicit arguments " *
+        "`(mu, sigma, 1, alpha)`; got $(length(args))"))
+
 _sb_stan_dist_args(::Type{<:Weibull}, ::Tuple{}) = (1.0, 1.0)
 _sb_stan_dist_args(::Type{<:Weibull}, args::Tuple{Any}) = (args[1], 1.0)
 _sb_stan_dist_args(::Type{<:InverseGamma}, ::Tuple{}) = (1.0, 1.0)
@@ -4789,18 +4733,6 @@ _sb_scalar_expr(x, _) = error("sbimpl: cannot lift to Stan expression: $(typeof(
 #   - Transdata builtins: `linear_idxs`, `broadcasted_max`, `broadcasted_gt`
 #   All registered in StanBlocks' builtin module; reachable with no import.
 # ==============================================================================
-
-"""
-    TruncatedNormal
-
-BRM formula marker for the bordet censored-normal observation model.
-`log_obs ~ TruncatedNormal(log_y, sigma, lloq, uloq)` — `sigma` is a
-biomarker-level parameter declared inside `bordet_hierarchical_parametric`;
-`lloq`/`uloq` are biomarker-level data columns.
-Emits: `log_obs ~ truncated_normal(log_y, sigma[biomarker_idxs], lloq[biomarker_idxs], uloq[biomarker_idxs])`.
-Censoring math lives in StanBlocks:bordet's lpxf triad (not Stan T[,] truncation).
-"""
-function TruncatedNormal end
 
 """
     bordet_hierarchical_parametric

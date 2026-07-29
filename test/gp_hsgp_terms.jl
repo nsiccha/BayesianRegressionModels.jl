@@ -98,7 +98,9 @@ end
             if label === :exact
                 @test occursin("gp_exp_quad_cov", code)
                 @test occursin("add_diag", code)
+                @test occursin("brm_gp_locations", code)
                 @test !occursin("sqdist", code)
+                @test !occursin("K_axis", code)
             end
             @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
         end
