@@ -202,6 +202,64 @@ function Random.rand(rng::Random.AbstractRNG, d::CircularVonMises)
 end
 
 """
+    SkewDoubleExponential(mu, sigma, tau)
+
+Asymmetric double-exponential distribution with the exact parameterization of
+Stan's native `skew_double_exponential(mu, sigma, tau)`. `sigma` is the native
+Stan scale and `tau` is the probability mass at or below `mu`, so
+`cdf(d, mu) == tau`. At `tau == 0.5`, this is exactly `Laplace(mu, sigma)`.
+
+Distributions.jl represents the same family as
+`SkewedExponentialPower(mu, sigma_sepd, 1, tau)`, with
+`sigma == 4sigma_sepd*tau*(1-tau)`. BRM uses that identity as the executable
+Julia receipt while lowering this type directly to Stan's native family.
+"""
+struct SkewDoubleExponential{T<:Real} <:
+       Distributions.ContinuousUnivariateDistribution
+    mu::T
+    sigma::T
+    tau::T
+
+    SkewDoubleExponential{T}(mu::T, sigma::T, tau::T) where {T<:Real} =
+        new{T}(mu, sigma, tau)
+end
+
+function SkewDoubleExponential(mu::Real, sigma::Real, tau::Real;
+                               check_args::Bool=true)
+    mu_p, sigma_p, tau_p = promote(float(mu), float(sigma), float(tau))
+    Distributions.@check_args(SkewDoubleExponential,
+        (mu_p, isfinite(mu_p), "mu must be finite"),
+        (sigma_p, isfinite(sigma_p) && sigma_p > zero(sigma_p),
+         "sigma must be finite and positive"),
+        (tau_p, isfinite(tau_p) && zero(tau_p) < tau_p < one(tau_p),
+         "tau must lie strictly between zero and one"),
+    )
+    SkewDoubleExponential{typeof(mu_p)}(mu_p, sigma_p, tau_p)
+end
+
+Distributions.params(d::SkewDoubleExponential) = (d.mu, d.sigma, d.tau)
+Distributions.partype(::SkewDoubleExponential{T}) where {T} = T
+Distributions.location(d::SkewDoubleExponential) = d.mu
+Distributions.scale(d::SkewDoubleExponential) = d.sigma
+Distributions.@distr_support SkewDoubleExponential -Inf Inf
+
+_skew_double_exponential_sepd(d::SkewDoubleExponential) =
+    SkewedExponentialPower(
+        d.mu, d.sigma / (4 * d.tau * (one(d.tau) - d.tau)),
+        one(d.tau), d.tau; check_args=false)
+
+Distributions.logpdf(d::SkewDoubleExponential, x::Real) =
+    logpdf(_skew_double_exponential_sepd(d), x)
+Distributions.cdf(d::SkewDoubleExponential, x::Real) =
+    cdf(_skew_double_exponential_sepd(d), x)
+Distributions.logcdf(d::SkewDoubleExponential, x::Real) =
+    logcdf(_skew_double_exponential_sepd(d), x)
+Distributions.quantile(d::SkewDoubleExponential, q::Real) =
+    quantile(_skew_double_exponential_sepd(d), q)
+Random.rand(rng::Random.AbstractRNG, d::SkewDoubleExponential) =
+    rand(rng, _skew_double_exponential_sepd(d))
+
+"""
     ZeroInflatedPoisson(lambda, zi)
 
 Mixture of a point mass at zero (probability `zi`) and `Poisson(lambda)`.

@@ -116,6 +116,19 @@ const BRM = BayesianRegressionModels
     @test rand(MersenneTwister(42), binomial_logit, 64) ==
           rand(MersenneTwister(42), binomial_base, 64)
 
+    skew_double_exponential = SkewDoubleExponential(0.3, 1.4, 0.25)
+    skew_sepd = SkewedExponentialPower(
+        0.3, 1.4 / (4 * 0.25 * (1 - 0.25)), 1.0, 0.25)
+    @test skew_double_exponential isa ContinuousUnivariateDistribution
+    @test params(skew_double_exponential) == (0.3, 1.4, 0.25)
+    @test SkewDoubleExponential(params(skew_double_exponential)...) isa
+          SkewDoubleExponential
+    @test cdf(skew_double_exponential, 0.3) ≈ 0.25
+    @test logpdf.(Ref(skew_double_exponential), -2.0:0.5:2.0) ≈
+          logpdf.(Ref(skew_sepd), -2.0:0.5:2.0)
+    @test rand(MersenneTwister(42), skew_double_exponential, 64) ==
+          rand(MersenneTwister(42), skew_sepd, 64)
+
     censored_normal = TruncatedNormal(0.1, 1.2, -1.0, 2.0)
     censored_base = censored(Normal(0.1, 1.2), -1.0, 2.0)
     @test censored_normal isa UnivariateDistribution
@@ -126,7 +139,8 @@ const BRM = BayesianRegressionModels
     @test rand(MersenneTwister(42), censored_normal, 64) ==
           rand(MersenneTwister(42), censored_base, 64)
 
-    for d in (ordered, categorical, zip, nb2, bb2, binomial_logit, censored_normal)
+    for d in (ordered, categorical, zip, nb2, bb2, binomial_logit,
+              skew_double_exponential, censored_normal)
         draws = rand(MersenneTwister(20260729), d, 32)
         @test length(draws) == 32
         @test all(insupport.(Ref(d), draws))
@@ -138,6 +152,8 @@ const BRM = BayesianRegressionModels
     @test_throws DomainError NegativeBinomial2(0.0, 1.0)
     @test_throws DomainError BetaBinomial2(5, 1.0, 2.0)
     @test_throws DomainError BinomialLogit(-1, 0.0)
+    @test_throws DomainError SkewDoubleExponential(0.0, 0.0, 0.5)
+    @test_throws DomainError SkewDoubleExponential(0.0, 1.0, 1.0)
     @test_throws DomainError TruncatedNormal(0.0, 1.0, 2.0, -2.0)
 end
 
@@ -148,6 +164,7 @@ end
         y_bb2=[1, 3, 7],
         y_cat=[1, 2, 3],
         y_blogit=[0, 2, 5],
+        y_skew=[-1.2, 0.1, 2.0],
     )
     builder_v = @brm begin
         y_zip ~ ZeroInflatedPoisson(2.3, 0.25)
@@ -155,6 +172,7 @@ end
         y_bb2 ~ BetaBinomial2(8, 0.4, 5.0)
         y_cat ~ CategoricalLogit(-0.3, 1.2)
         y_blogit ~ BinomialLogit(5, -0.3)
+        y_skew ~ SkewDoubleExponential(0.3, 1.4, 0.25)
     end
     vbrmi = VBRMI(builder_v(df_v))
     expected =
@@ -162,7 +180,8 @@ end
         sum(logpdf.(NegativeBinomial2(3.2, 1.7), df_v.y_nb2)) +
         sum(logpdf.(BetaBinomial2(8, 0.4, 5.0), df_v.y_bb2)) +
         sum(logpdf.(CategoricalLogit(-0.3, 1.2), df_v.y_cat)) +
-        sum(logpdf.(BinomialLogit(5, -0.3), df_v.y_blogit))
+        sum(logpdf.(BinomialLogit(5, -0.3), df_v.y_blogit)) +
+        sum(logpdf.(SkewDoubleExponential(0.3, 1.4, 0.25), df_v.y_skew))
     @test LogDensityProblems.dimension(vbrmi) == 0
     @test logpdf(vbrmi, Float64[]) ≈ expected
 end
@@ -178,6 +197,8 @@ end
         Uniform=:uniform,
         LogNormal=:lognormal,
         Laplace=:double_exponential,
+        SkewDoubleExponential=:skew_double_exponential,
+        SkewedExponentialPower=:skew_double_exponential,
         Weibull=:weibull,
         InverseGamma=:inv_gamma,
         Bernoulli=:bernoulli,
@@ -204,6 +225,13 @@ end
     @test BRM._sb_stan_dist_args(Uniform, (:a, :b)) == (:a, :b)
     @test BRM._sb_stan_dist_args(LogNormal, (:mu, :sigma)) == (:mu, :sigma)
     @test BRM._sb_stan_dist_args(Laplace, (:mu, :theta)) == (:mu, :theta)
+    @test BRM._sb_stan_dist_args(
+        SkewDoubleExponential, (:mu, :sigma, :tau)) == (:mu, :sigma, :tau)
+    @test BRM._sb_stan_dist_args(
+        SkewedExponentialPower, (:mu, :sigma, 1.0, :alpha)) ==
+        (:mu, :(((4.0 .* sigma) .* alpha) .* (1.0 - alpha)), :alpha)
+    @test_throws ArgumentError BRM._sb_stan_dist_args(
+        SkewedExponentialPower, (:mu, :sigma, 2.0, :alpha))
     @test BRM._sb_stan_dist_args(Weibull, (:alpha, :theta)) == (:alpha, :theta)
     @test BRM._sb_stan_dist_args(InverseGamma, (:alpha, :theta)) == (:alpha, :theta)
     @test BRM._sb_stan_dist_args(Bernoulli, (:p,)) == (:p,)
@@ -316,6 +344,8 @@ generic_df = (;
     y_binomial_logit=[1, 3, 4],
     y_poisson=[0, 2, 6],
     y_nb=[0, 3, 7],
+    y_skew=[-1.2, 0.1, 2.0],
+    y_sepd=[-0.8, 0.4, 1.7],
 )
 
 generic_builder = @brm begin
@@ -336,6 +366,8 @@ generic_builder = @brm begin
     y_binomial_logit ~ BinomialLogit(5, -0.3)
     y_poisson ~ Poisson(2.3)
     y_nb ~ NegativeBinomial(2.5, 0.4)
+    y_skew ~ SkewDoubleExponential(0.3, 1.4, 0.25)
+    y_sepd ~ SkewedExponentialPower(-0.1, 0.8, 1.0, 0.7)
 end
 
 @testset "generic native-Stan mappings with complete GQ hooks are exact" begin
@@ -370,6 +402,8 @@ end
         y_binomial_logit=BinomialLogit(5, -0.3),
         y_poisson=Poisson(2.3),
         y_nb=NegativeBinomial(2.5, 0.4),
+        y_skew=SkewDoubleExponential(0.3, 1.4, 0.25),
+        y_sepd=SkewedExponentialPower(-0.1, 0.8, 1.0, 0.7),
     )
     for (target, dist) in pairs(expected)
         actual = getproperty(pointwise, Symbol(target, :_likelihood))
@@ -383,6 +417,10 @@ end
     binomial_draws = predictions.y_binomial_gen
     @test length(binomial_draws) == length(generic_df.y_binomial) * 32
     @test all(0 .<= binomial_draws .<= 5)
+    @test length(predictions.y_skew_gen) == length(generic_df.y_skew) * 32
+    @test length(predictions.y_sepd_gen) == length(generic_df.y_sepd) * 32
+    @test all(isfinite, predictions.y_skew_gen)
+    @test all(isfinite, predictions.y_sepd_gen)
 end
 
 @testset "Laplace is the q=0.5 asymmetric-Laplace special case" begin
