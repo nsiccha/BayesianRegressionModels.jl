@@ -37,7 +37,7 @@ using BayesianRegressionModels
 using BayesianRegressionModels: AbstractColumn, MissingColumn, DataColumn,
     NamedColumn, ExprColumn, LikelihoodColumn, MaterializedColumn,
     Data, MaybeData, BRMI, VBRMI, SBBRMI,
-    assign, doublepipe, gr, gp, offset, zscale, center, standardize, protect,
+    assign, doublepipe, gr, gp, hsgp, offset, zscale, center, standardize, protect,
     me, s, ar, OrderedLogistic,
     # Custom-distribution stub names. SLIC's symbol resolver checks
     # `isdefined(BRMMacroWeb, :name)`, which is false for names only
