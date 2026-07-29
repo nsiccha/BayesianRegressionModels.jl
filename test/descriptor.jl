@@ -28,6 +28,24 @@ hier_builder = @brm begin
     z ~ Normal(mu, 2 * sigma)
 end
 
+module DescriptorFragments
+using BayesianRegressionModels
+using StanBlocks
+using Distributions: Exponential, Normal
+
+StanBlocks.@deffun descriptor_fragment_inner(x::vector[n])::vector[n] = x .* x
+StanBlocks.@deffun descriptor_fragment_outer(x::vector[n])::vector[n] =
+    descriptor_fragment_inner(x) .+ 1.0
+
+builder = @brm begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x
+    y ~ Normal(descriptor_fragment_outer(mu), sigma)
+end
+
+df = (; x=[0.0, 1.0, 2.0], y=[1.0, 2.0, 3.0])
+end
+
 @testset "reflection — one declaration, derived surface" begin
     d = brm_descriptor(hier_builder, df; mod=@__MODULE__, name=:hier)
 
@@ -77,6 +95,65 @@ end
         y ~ Normal(mu, sigma)
     end
     @test brm_descriptor(flat_builder, df; mod=@__MODULE__).id != a.id
+end
+
+@testset "named Stan definition highlights" begin
+    d = brm_descriptor(
+        DescriptorFragments.builder,
+        DescriptorFragments.df;
+        mod=DescriptorFragments,
+        highlights=(
+            :descriptor_fragment_outer => "Displayed model calculation",
+            "descriptor_fragment_inner",
+        ),
+    )
+
+    @test [h.name for h in d.highlights] ==
+          [:descriptor_fragment_outer, :descriptor_fragment_inner]
+    @test [h.caption for h in d.highlights] ==
+          ["Displayed model calculation", nothing]
+    inventory = Dict(def.name => def for def in d.stan.definitions)
+    @test all(h -> haskey(inventory, h.name), d.highlights)
+    @test all(h -> h.definition === inventory[h.name], d.highlights)
+    @test all(h -> StanBlocks.stan_definition(d.stan, h.name).name === h.name,
+              d.highlights)
+    @test all(h -> [def.signature for def in h.closure] ==
+                         [def.signature for def in
+                          StanBlocks.stan_definition_closure(d.stan, h.definition)],
+              d.highlights)
+    @test occursin("descriptor_fragment_inner",
+                   inventory[:descriptor_fragment_outer].source)
+    @test :descriptor_fragment_inner in
+          inventory[:descriptor_fragment_outer].dependencies
+    @test :descriptor_fragment_inner in
+          (def.name for def in first(d.highlights).closure)
+
+    # Presentation metadata does not alter the executable model identity.
+    plain = brm_descriptor(DescriptorFragments.builder, DescriptorFragments.df;
+                           mod=DescriptorFragments)
+    @test d.id == plain.id
+
+    # Replay/reprocessing resolves the same names against the NEW descriptor,
+    # preserving order and captions rather than carrying stale definition
+    # objects from the old traced model.
+    d2 = brm_execute(d, :reprocess,
+                     (; x=[3.0, 4.0], y=[4.0, 5.0]))
+    @test [(h.name, h.caption) for h in d2.highlights] ==
+          [(h.name, h.caption) for h in d.highlights]
+    inventory2 = Dict(def.name => def for def in d2.stan.definitions)
+    @test all(h -> h.definition === inventory2[h.name], d2.highlights)
+    @test all(h -> [def.signature for def in h.closure] ==
+                         [def.signature for def in
+                          StanBlocks.stan_definition_closure(d2.stan, h.definition)],
+              d2.highlights)
+
+    @test_throws ErrorException brm_descriptor(
+        DescriptorFragments.builder, DescriptorFragments.df;
+        mod=DescriptorFragments, highlights=(:not_in_this_model,))
+    @test_throws ErrorException brm_descriptor(
+        DescriptorFragments.builder, DescriptorFragments.df;
+        mod=DescriptorFragments,
+        highlights=(:descriptor_fragment_outer, :descriptor_fragment_outer))
 end
 
 @testset "schema propagation — Stan inputs carry their dataframe column" begin
