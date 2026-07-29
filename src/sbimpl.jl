@@ -483,8 +483,31 @@ end
 # promises. The loop is why it is a `@deffun` -- Stan's `to_matrix` has no
 # `array[] vector` overload, and `@slic` bodies cannot contain control flow.
 StanBlocks.@deffun begin
-    @lhs @lpxf multi_normal_cholesky0_lpdf(x::vector[m, n], scale::matrix[n, n])::real =
+    # `n_rows = m` is LOAD-BEARING, not dead code -- do not "clean it up".
+    # `@deffun` binds a signature dimension only when it is duplicated across
+    # args or MENTIONED by the body / return annotation (`required_fun_sizes`,
+    # StanBlocks `src/slic_stan/functions.jl` §1418); everything else lands in
+    # `hidden_size_names` and is destructured to `_`. But `@lhs` ALSO emits a
+    # base (non-`_lpdf`) `tracetype` whose body is `xsig_expr(vector[m, n])`,
+    # which REFERENCES `m`. Here `m` is the obs array's outer dim and appears
+    # nowhere else (`scale` carries only `n`, and the return is `::real`), so
+    # without this mention the base tracetype dies with `UndefVarError: m` the
+    # moment `b ~ multi_normal_cholesky0(...)` below is traced -- i.e. every
+    # centered correlated emission fails to transpile. StanBlocks' own `@lhs`
+    # UDFs never hit this because they DUPLICATE every obs dim across another
+    # argument (`truncated_normal_lpdf(obs::vector[n], loc::vector[n], ...)`),
+    # which binds it by a different route. The same latent gap DOES sit on
+    # `multi_std_normal_lpdf` / `multi_lkj_corr_cholesky_lpdf` below, whose `n`
+    # is likewise unmentioned -- that one breaks `gr(g, by=b)` and is left
+    # alone here deliberately (out of this snag's scope). The mention costs one
+    # `int n_rows = m;` in the emitted Stan function and no autodiff work; it
+    # deliberately does NOT touch `x`, because slicing an `array[] vector`
+    # parameter would copy it on every gradient and defeat the whole reason
+    # this helper is array-vectorised (see the measurements above).
+    @lhs @lpxf multi_normal_cholesky0_lpdf(x::vector[m, n], scale::matrix[n, n])::real = begin
+        n_rows = m
         multi_normal_cholesky_lpdf(x, rep_vector(0., n), scale)
+    end
     @stanonly ranef_b_matrix(b::vector[m, n])::matrix[m, n] = begin
         rv::matrix[m, n]
         for i in 1:m
