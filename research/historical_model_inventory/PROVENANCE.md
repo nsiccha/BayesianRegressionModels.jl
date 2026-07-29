@@ -51,6 +51,12 @@ bodies; the override TSV has SHA-256
   (`309028b731f07c9c8dd17a42e74022b66fc23f9e`) as the clean reviewed commit;
   the discarded VBRMI-mutating ancestry is not part of the reviewed or landed
   line.
+- The Beta-binomial surface control is pinned to exact reviewed checkpoint
+  `98d54fb413e3994eb3e4c9ea76d659cddce433c5`, imported intact onto this lane as
+  `457199ddb76703685d98bd3bdc011f419e57f536`. Its combined control covers both
+  `BetaBinomial(trials, alpha, beta)` and
+  `BetaBinomial2(trials, mean, precision)`; the two historical rows have
+  separate direct receipts in `beta_binomial_refresh.tsv`.
 - StanBlocks.jl:
   `329a178a7ad7877da0b58ad2c360d417ddd663f9` for the original exhaustive
   census (local active checkout selected by the canonical resolver). The five
@@ -61,6 +67,8 @@ bodies; the override TSV has SHA-256
   StanBlocks canonical `144188a808308177807ceb47f08749a335a0ef70`
   (`negative-binomia-fd397aa0`); the inventory's working non-log NB2 route is
   unaffected and the running exact-SHA census was not restarted.
+  The Beta-binomial combined and row-specific controls use exact
+  `b77d5b0172970e0eb414f59d746fc2f96b71d363`.
 - WarmupHMC.jl:
   `b185eedbbeeef6fb3327afb30dc995c98591af02` for this rerun. The independent
   peer sleepstudy control used
@@ -142,5 +150,8 @@ HTMXObjects semantic lock for the recorded SbPMX release:
   with exactly 359 semantic cards. The focused artifact's confirmed-source,
   finite-BridgeStan, and unsupported-ordinary filters returned 154, 171, and 51
   cards respectively; the original 166-card finite receipt remains in the TSV.
+  The refreshed offline matrix now contains 173 finite-BridgeStan cards and 48
+  unsupported ordinary rows after adding the two direct Beta-binomial receipts;
+  no new served-deployment receipt is inferred from the offline validation.
 - Row-by-row request times, paths, statuses, and counts:
   `gallery/served_smoke.tsv`.

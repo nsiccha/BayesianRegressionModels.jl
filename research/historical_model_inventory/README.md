@@ -25,6 +25,8 @@ julia --startup-file=no --project=web-macro \
   research/historical_model_inventory/runtime_controls.jl
 julia --startup-file=no --project=web-macro \
   research/historical_model_inventory/refresh_binomial_logit.jl <expected-brm-sha>
+julia --startup-file=no --project=web-macro \
+  research/historical_model_inventory/refresh_beta_binomial.jl <expected-brm-sha>
 julia --startup-file=no research/historical_model_inventory/assemble.jl
 julia --startup-file=no --project=web-macro \
   research/historical_model_inventory/gallery/validate.jl
@@ -59,6 +61,11 @@ source checkout.
 - `binomial_logit_refresh.tsv`: exact five-row before/after receipt for the
   StanBlocks `329a178...` → `277f233...` scalar-trials RNG trace repair,
   including prediction/generated quantities and pointwise likelihood.
+- `beta_binomial_surface_control.tsv`: exact reviewed-SHA control for both
+  shape and mean/precision Beta-binomial formula surfaces.
+- `beta_binomial_refresh.tsv`: exact two-row receipts for the translated
+  historical mean/precision formulas, including prediction/generated
+  quantities and pointwise likelihood.
 - `runtime_controls.tsv`: real-data sleepstudy plus executable BRM-kernel and
   StanBlocks-plate controls.
 - `receipts/`: model and dataset retrieval evidence, conservative source

@@ -45,7 +45,7 @@ using .HistoricalInventoryGallery
     exact = HistoricalInventory(;
         matrix_path=DEFAULT_MATRIX_PATH,
         validation_tier="bridgestan-finite-density-gradient")
-    @test length(filtered_rows(exact)) == 171 == count(
+    @test length(filtered_rows(exact)) == 173 == count(
         row -> row["inferred_capability_tier"] == "bridgestan-finite-density-gradient",
         surface.rows,
     )
@@ -64,6 +64,23 @@ using .HistoricalInventoryGallery
         row["bridgestan_instantiate"] == "pass" &&
         row["gradient_finite"] == "true" && isempty(row["failure_stage"]),
         refreshed,
+    )
+    beta_binomial_keys = Set([
+        "brms:cbpp_beta_binomial",
+        "mcelreath:ucbadmit_beta_binomial",
+    ])
+    beta_binomial = filter(row -> row["row_key"] in beta_binomial_keys, surface.rows)
+    @test length(beta_binomial) == length(beta_binomial_keys)
+    @test all(row ->
+        row["inferred_translation_status"] == "ready" &&
+        row["inferred_capability_tier"] == "bridgestan-finite-density-gradient" &&
+        occursin("BetaBinomial2", row["inferred_current_brm_body"]) &&
+        row["family_adapter_validation_sha"] ==
+            "98d54fb413e3994eb3e4c9ea76d659cddce433c5" &&
+        row["descriptor"] == "pass" && row["stanc"] == "pass" &&
+        row["bridgestan_instantiate"] == "pass" &&
+        row["gradient_finite"] == "true" && isempty(row["failure_stage"]),
+        beta_binomial,
     )
     combined = HistoricalInventory(;
         matrix_path=DEFAULT_MATRIX_PATH,
@@ -112,17 +129,44 @@ using .HistoricalInventoryGallery
     @test !occursin("AppContext", inventory_md)
 
     # Exercise the registered HTTP route entirely in process. This opens no
-    # socket, but proves that the page wrapper retains every semantic card and
-    # that query context reaches the same authoritative graph.
-    route!(graph)
-    drive(path) = begin
-        request = HTTP.Request("GET", path)
+    # socket, but reproduces the production blocking policy: the first browser
+    # response is complete, while later HTMX filters still reach the same
+    # authoritative graph.
+    route!(graph; operation_policy=OperationPolicy(:blocking))
+    drive(path; headers=Pair{String,String}[]) = begin
+        request = HTTP.Request("GET", path, headers)
         handler = first(HTTP.Handlers.gethandler(
             HTMXObjects.CONTEXT[].service.router, request))
         handler(request)
     end
     try
-        full = drive("/")
+        browser_headers = [
+            "Accept" => "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        ]
+        initial = drive("/"; headers=browser_headers)
+        initial_body = String(initial.body)
+        @test initial.status == 200
+        @test occursin("text/html", HTTP.header(initial, "Content-Type", ""))
+        @test occursin("var htmx=function()", initial_body)
+        @test !occursin("cdn.jsdelivr.net/npm/htmx", initial_body)
+        @test length(findall(
+            "<article class=\"htmxo-semantic-card-body\"", initial_body)) == 359
+        @test !occursin("data-htmxo-operation-load", initial_body)
+        @test !occursin("hx-trigger=\"load\"", initial_body)
+        @test occursin("hx-get=\"/surface/\"", initial_body)
+
+        prefixed = drive("/"; headers=vcat(browser_headers, [
+            "X-Forwarded-Prefix" => "/p/HistoricalBRM",
+        ]))
+        prefixed_body = String(prefixed.body)
+        @test prefixed.status == 200
+        @test length(findall(
+            "<article class=\"htmxo-semantic-card-body\"", prefixed_body)) == 359
+        @test !occursin("data-htmxo-operation-load", prefixed_body)
+        @test !occursin("hx-trigger=\"load\"", prefixed_body)
+        @test occursin("hx-get=\"/p/HistoricalBRM/surface/\"", prefixed_body)
+
+        full = drive("/"; headers=vcat(browser_headers, ["HX-Request" => "true"]))
         full_body = String(full.body)
         @test full.status == 200
         @test occursin("text/html", HTTP.header(full, "Content-Type", ""))
@@ -132,8 +176,14 @@ using .HistoricalInventoryGallery
                   ("source_fidelity", "family_provenance",
                    "translation_route", "validation_tier"))
 
-        fidelity = drive("/surface/?source_fidelity=confirmed&family_provenance=all" *
-                         "&translation_route=all&validation_tier=all")
+        fidelity = drive(
+            "/surface/?source_fidelity=confirmed&family_provenance=all" *
+            "&translation_route=all&validation_tier=all";
+            headers=vcat(browser_headers, [
+                "HX-Request" => "true",
+                "X-Forwarded-Prefix" => "/p/HistoricalBRM",
+            ]),
+        )
         fidelity_body = String(fidelity.body)
         @test fidelity.status == 200
         @test length(findall(
