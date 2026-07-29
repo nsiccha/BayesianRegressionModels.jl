@@ -210,7 +210,7 @@ _brm_declaration_role(d::GenerativeDeclaration) = begin
     isempty(d.context) || return :group_block
     f = d.family
     f isa Symbol || return :parameter
-    f === :popefs && return :population_effect
+    f in (:popefs, :_popefs_normal) && return :population_effect
     startswith(String(f), "ranef") && return :random_effect
     f === :plate && return :group_block
     :parameter
