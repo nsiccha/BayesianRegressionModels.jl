@@ -105,6 +105,13 @@ BRM adds:
   on [`GenerativeDeclaration`](@ref); reach for them instead of re-parsing.
   An output whose `name` differs from `declaration.target` is one of that
   block's *internals* (`pop_mu_beta_pop` under `pop_mu`).
+- `logical` — the declaration target whose returned value this emitted Stan
+  output physically carries, or `nothing` for an internal. This is deliberately
+  narrower than `declaration`: every `kernel(...)` cell local belongs to the
+  plate declaration, but only its collected result carries the logical target.
+  For a ragged result, `logical == :loc` can therefore accompany an emitted
+  `name` such as `:loc__pl_mem_1`; consumers keep the logical identity while
+  addressing BridgeStan through the emitted name.
 - `labels` — per-element labels when BRM can name them (population
   coefficients, via [`popcoefnames`](@ref)), otherwise `nothing`. A UI that
   would otherwise print `beta_pop.1`, `beta_pop.2` can print `x`, `g`.
@@ -122,8 +129,17 @@ struct BRMOutput
     source::Union{Nothing,Symbol}
     role::Symbol
     declaration::Union{Nothing,GenerativeDeclaration}
+    logical::Union{Nothing,Symbol}
     labels::Union{Nothing,Vector{Symbol}}
 end
+
+# Preserve the original positional constructor for downstream code that creates
+# display-only BRMOutput values. Descriptor-derived values always supply the
+# semantic `logical` field explicitly below.
+BRMOutput(name, kind, type, size, constraints, generative, source, role,
+          declaration, labels) =
+    BRMOutput(name, kind, type, size, constraints, generative, source, role,
+              declaration, nothing, labels)
 
 # ---- operations -------------------------------------------------------------
 
@@ -304,6 +320,55 @@ function _brm_owner(o, by_name, targets)
     isnothing(best) ? nothing : by_name[best]
 end
 
+# Find the emitted Stan outputs referenced by a traced logical binding. This
+# walks StanBlocks' traced expression graph, not rendered identifiers: a ragged
+# plate result is a compile-time `RaggedVector(mem, ends)` view, and only `mem`
+# is a posterior-producing descriptor output. Cell locals do not occur in that
+# binding even though `_brm_owner` correctly assigns them to the same plate
+# declaration.
+_brm_output_leaves!(found, x::Symbol, candidates) =
+    x in candidates && push!(found, x)
+_brm_output_leaves!(found, x::StanBlocks.StanExpr, candidates) =
+    _brm_output_leaves!(found, StanBlocks.expr(x), candidates)
+_brm_output_leaves!(found, x::StanBlocks.CanonicalExpr, candidates) =
+    foreach(a -> _brm_output_leaves!(found, a, candidates), x.args)
+_brm_output_leaves!(found, x::Expr, candidates) =
+    foreach(a -> _brm_output_leaves!(found, a, candidates), x.args)
+_brm_output_leaves!(found, x::Tuple, candidates) =
+    foreach(a -> _brm_output_leaves!(found, a, candidates), x)
+_brm_output_leaves!(_found, _x, _candidates) = nothing
+
+function _brm_logical_outputs(stan, by_name, targets)
+    logical = Dict{Symbol,Symbol}()
+    output_names = Set{Symbol}(o.name for o in stan.outputs)
+    model_names = Set{Symbol}(keys(stan.model))
+
+    for (resolved, decl) in by_name
+        decl.role === :observation && continue
+        owned = Set{Symbol}(o.name for o in stan.outputs
+                            if _brm_owner(o, by_name, targets) === decl)
+        isempty(owned) && continue
+
+        found = Set{Symbol}()
+        if resolved in output_names
+            push!(found, resolved)
+        elseif resolved in model_names
+            _brm_output_leaves!(found, stan.model[resolved], owned)
+        end
+
+        for emitted in found
+            if haskey(logical, emitted) && logical[emitted] !== decl.target
+                error(
+                    "brm_descriptor: emitted output `$emitted` carries two logical " *
+                    "targets (`$(logical[emitted])` and `$(decl.target)`). The traced " *
+                    "model is ambiguous; give the declarations distinct results.")
+            end
+            logical[emitted] = decl.target
+        end
+    end
+    logical
+end
+
 # Attach coefficient labels to the population block's coefficient vector.
 #
 # `popefs` (sbimpl.jl) declares exactly ONE parameter, `beta_pop`, so within a
@@ -322,7 +387,8 @@ function _brm_label_population!(outputs, brmi, pop_lp)
         isnothing(labels) && continue
         o = outputs[idx[1]]
         outputs[idx[1]] = BRMOutput(o.name, o.kind, o.type, o.size, o.constraints,
-                                    o.generative, o.source, o.role, o.declaration, labels)
+                                    o.generative, o.source, o.role, o.declaration,
+                                    o.logical, labels)
     end
     outputs
 end
@@ -491,6 +557,7 @@ function _brm_descriptor(plan, stan, operations, titles)
         by_name[sname] = d
     end
     targets = collect(keys(by_name))
+    logical_outputs = _brm_logical_outputs(stan, by_name, targets)
 
     # Linear-predictor names come from the FORMULA, not from the emitted body:
     # `mu = pop_mu + r_mu_g` is an `=`, so no declaration binds it, yet it is
@@ -519,7 +586,8 @@ function _brm_descriptor(plan, stan, operations, titles)
             :stan_derived
         end
         push!(outputs, BRMOutput(o.name, o.kind, o.type, o.size, o.constraints,
-                                 o.generative, o.source, role, decl, nothing))
+                                 o.generative, o.source, role, decl,
+                                 get(logical_outputs, o.name, nothing), nothing))
     end
     outputs = _brm_label_population!(outputs, brmi, pop_lp)
 
@@ -620,6 +688,59 @@ collect for a `:replay` / `:reprocess`. Equivalent to `d.columns`.
 brm_columns(d::BRMDescriptor) = d.columns
 
 """
+    brm_output(d::BRMDescriptor, logical::Symbol) -> BRMOutput
+
+Return the unique emitted output that physically carries declaration target
+`logical`. This resolves BRM meaning to Stan representation without parsing an
+emitter-owned name. For example, a ragged `loc ~ kernel(...)` result can resolve
+to an output named `loc__pl_mem_1` while retaining `logical == :loc`.
+
+Fails loudly when the target has no emitted carrier or maps to several carriers;
+the caller must never guess from descriptor order in either case.
+"""
+function brm_output(d::BRMDescriptor, logical::Symbol)
+    found = BRMOutput[o for o in d.outputs if o.logical === logical]
+    length(found) == 1 && return only(found)
+    if isempty(found)
+        error("brm_descriptor: logical output `$logical` has no emitted posterior " *
+              "carrier in model `$(d.name)`.")
+    end
+    error("brm_descriptor: logical output `$logical` spans several emitted carriers " *
+          "$(Tuple(o.name for o in found)); request an explicit emitted output.")
+end
+
+"""
+    brm_output_coordinates(d::BRMDescriptor, logical::Symbol, constrained_names)
+        -> Vector{Int}
+
+Resolve a logical BRM output to its columns in BridgeStan's constrained
+`param_names` (or an equivalent posterior name vector). Resolution first uses
+[`brm_output`](@ref) to obtain the descriptor's emitted name, then matches only
+that exact name or its documented container coordinates (`name.1`,
+`name.1.1`, …). It never parses a compiler-owned plate suffix.
+
+The returned integers index `constrained_names` in their existing order. A
+missing carrier is an error, which catches descriptor/artifact drift instead of
+returning an empty posterior slice.
+"""
+function brm_output_coordinates(d::BRMDescriptor, logical::Symbol,
+                                constrained_names)
+    output = brm_output(d, logical)
+    stem = String(output.name)
+    prefix = stem * "."
+    coordinates = Int[]
+    for (i, name) in enumerate(constrained_names)
+        rendered = string(name)
+        (rendered == stem || startswith(rendered, prefix)) && push!(coordinates, i)
+    end
+    isempty(coordinates) && error(
+        "brm_descriptor: logical output `$logical` resolves to emitted " *
+        "`$(output.name)`, but that carrier is absent from the supplied constrained " *
+        "names. Re-reflect the model that produced the posterior draws.")
+    coordinates
+end
+
+"""
     brm_operation(d::BRMDescriptor, name::Symbol) -> BRMOperation
 
 The named operation. **Fails closed**: an operation this model does not offer
@@ -666,6 +787,7 @@ Base.show(io::IO, d::BRMDescriptor) = begin
         print(io, "  no predictive draw for: ", join(d.unpredictable, ", "), "\n")
     for o in d.outputs
         print(io, "  ", o.name, " :: ", o.role, " (", o.kind, "/", o.generative, ")")
+        isnothing(o.logical) || o.name === o.logical || print(io, " => ", o.logical)
         isnothing(o.labels) || print(io, " [", join(o.labels, ", "), "]")
         print(io, "\n")
     end

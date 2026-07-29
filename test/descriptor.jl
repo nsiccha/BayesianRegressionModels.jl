@@ -118,12 +118,16 @@ end
 
     @test byname[:sigma].role === :parameter
     @test byname[:sigma].declaration.family === :exponential
+    @test byname[:sigma].logical === :sigma
 
     # The population block and its internals both resolve to the popefs
-    # declaration; the linear predictor comes from the formula, not a `~`.
+    # declaration, but only the returned block output carries its logical
+    # target. The linear predictor comes from the formula, not a `~`.
     @test byname[:pop_mu].role === :population_effect
+    @test byname[:pop_mu].logical === :pop_mu
     @test byname[:pop_mu_beta_pop].role === :population_effect
     @test byname[:pop_mu_beta_pop].declaration.target === :pop_mu
+    @test byname[:pop_mu_beta_pop].logical === nothing
     @test byname[:mu].role === :linear_predictor
     @test byname[:mu].declaration === nothing
 
@@ -195,7 +199,7 @@ kernel_builder = @brm begin
     sigma_p ~ Exponential(1)
     log_CL ~ 1 + (1 | p | subject)
     log_V  ~ 1 + (1 | p | subject)
-    pred ~ kernel(t, dose, dv, log_CL, log_V) do ts, dd, yy, lCL, lV
+    loc ~ kernel(t, dose, dv, log_CL, log_V) do ts, dd, yy, lCL, lV
         CL = exp(lCL)
         V = exp(lV)
         mu = dd / V * exp(-(CL / V) * ts)
@@ -229,14 +233,21 @@ kernel_schedule(n; subject=collect(1:n)) = (;
     @test byname[:sigma_a].role === :parameter
 
     # The plate's transformed-parameter carriers and cell locals resolve to the
-    # plate declaration, independent of the generated carrier suffix.
+    # plate declaration, but the traced logical binding marks ONLY its collected
+    # return carrier. No compiler-owned suffix or descriptor order is parsed.
     plate_outputs = [o for o in d.outputs
                      if o.kind === :transformed_parameter && o.role === :group_block]
     @test !isempty(plate_outputs)
-    @test all(o -> o.declaration.target === :pred, plate_outputs)
-    @test any(o -> startswith(string(o.name), "pred__pl_mem_"), plate_outputs)
-    @test byname[:pred_CL].role === :group_block
-    @test byname[:pred_V].role === :group_block
+    @test all(o -> o.declaration.target === :loc, plate_outputs)
+    primary = brm_output(d, :loc)
+    @test primary.logical === :loc
+    @test primary.name in (o.name for o in plate_outputs)
+    @test startswith(string(primary.name), "loc__pl_mem_")
+    @test all(o -> o.name === primary.name || o.logical === nothing, plate_outputs)
+    @test byname[:loc_CL].role === :group_block
+    @test byname[:loc_CL].logical === nothing
+    @test byname[:loc_V].role === :group_block
+    @test byname[:loc_V].logical === nothing
 
     @test :dv in d.columns && :subject in d.columns && :dose in d.columns
 
@@ -254,6 +265,14 @@ kernel_schedule(n; subject=collect(1:n)) = (;
     n = StanBlocks.LogDensityProblems.dimension(prob)
     @test n > 0
     @test isfinite(StanBlocks.LogDensityProblems.logdensity(prob, 0.1 .* randn(n)))
+
+    constrained_names = StanBlocks.BridgeStan.param_names(
+        prob.model; include_tp=true, include_gq=true)
+    loc_coordinates = brm_output_coordinates(d, :loc, constrained_names)
+    @test length(loc_coordinates) == sum(length, kernel_schedule(3).t)
+    @test all(startswith(string(primary.name) * "."),
+              constrained_names[loc_coordinates])
+    @test_throws ErrorException brm_output_coordinates(d, :loc, ["not_loc.1"])
 
     # A builder-backed kernel can rebuild for genuinely new groups. It cannot
     # reprocess in place because its formula-declared BSV is a random-effect
@@ -291,6 +310,7 @@ scalar_schedule(n) = (; dose=fill(100.0, n), dv=collect(1.0:n) ./ 10,
 
     @test :fit in ops
     @test :predict in ops
+    @test brm_output(d, :pred).name === :pred
     @test brm_operation(d, :predict).outputs == (:dv_gen,)
     @test isempty(d.unpredictable)
     prob = brm_execute(d, :fit)
