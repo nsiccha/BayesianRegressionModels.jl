@@ -1108,16 +1108,47 @@ end
 # `L ~ multi_lkj_corr_cholesky(1.)` resolves; `@lhs` registers the base
 # tracetype so the 2-arg call dispatches to this lpdf with `m, n` bound from
 # the declared LHS shape.
+#
+# `n_dim = n` / `n_cols = n` below are LOAD-BEARING, not dead code -- do not
+# "clean them up". `@deffun` binds a signature dimension only when it is
+# duplicated across args or MENTIONED by the body / return annotation
+# (`required_fun_sizes`, StanBlocks `src/slic_stan/functions.jl` §1418);
+# everything else lands in `hidden_size_names` and is destructured to `_`. But
+# `@lhs` ALSO emits a base (non-`_lpdf`) `tracetype` whose body is
+# `xsig_expr(<declared LHS shape>)`, which REFERENCES the full shape. In both
+# helpers here the loop needs only `m`, so the inner `n` -- the correlation
+# dimension / per-row vector length -- appears nowhere else (`x::real` and the
+# `::real` returns carry no size), and without these mentions the base
+# tracetype dies with `UndefVarError: n` the moment `ranef_correlated_by` /
+# `ranef_correlated_by_draws` below are traced. That made the ENTIRE stratified
+# `gr(g, by=b)` surface untranspilable -- an ordinary
+# `mu ~ 1 + zage + (1 + zage | gr(subject, by=arm))`, with no `cv_groups` or
+# `centered_groups` opt-in, failed outright. StanBlocks' own `@lhs` UDFs never
+# hit this because they DUPLICATE every obs dim across another argument
+# (`truncated_normal_lpdf(obs::vector[n], loc::vector[n], ...)`), binding it by
+# a different route. Each mention costs one `int` in the emitted Stan function
+# and no autodiff work; both deliberately avoid touching `x` / `L`, because
+# slicing an `array[] vector` parameter would copy it on every gradient and
+# defeat the array-vectorised spelling these helpers exist for.
+#
+# `multi_normal_cholesky0_lpdf` above carries the same defect class on its `m`
+# (it breaks centered correlated emission rather than `gr(g, by=b)`) and is
+# already fixed the same way -- see its `n_rows = m` and the longer note there,
+# landed as `181f519`. These two are the complete set of `@lhs @lpxf` bases in
+# this file whose declared shape is not fully rebound by the body; any NEW one
+# must mention every size symbol it declares or it will fail the same way.
 StanBlocks.@deffun begin
     @lhs @lpxf multi_lkj_corr_cholesky_lpdf(L::cholesky_factor_corr[m, n], x::real)::real = begin
         rv = 0.
+        n_dim = n
         for i in 1:m
             rv += lkj_corr_cholesky_lpdf(L[i, :, :], x)::real
-        end 
+        end
         rv
     end
     @lhs @lpxf multi_std_normal_lpdf(x::vector[m, n])::real = begin
         rv = 0.
+        n_cols = n
         for i in 1:m
             rv += std_normal_lpdf(x[i, :])::real
         end
