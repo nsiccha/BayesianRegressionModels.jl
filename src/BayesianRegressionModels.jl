@@ -58,6 +58,10 @@ export me, mi, s, t2, ar, mo, mo1, hsgp, OrderedLogistic, Ordinal,
        sb_group_demo, addprop
 # Bordet model family — formula-surface markers for custom likelihood + submodel
 export TruncatedNormal, bordet_hierarchical_parametric, kernel
+# Julia-native response-family composition. `truncated` and `censored` are the
+# exact Distributions.jl functions; `interval_censored` is BRM's narrow formula
+# shim for evidence that a latent response lies between two row-wise bounds.
+export truncated, censored, interval_censored
 # Logit-form Bernoulli/Binomial -- prefer these over `Bernoulli(logistic(eta))`
 # / `Binomial(N, logistic(eta))`. Both backends lower to a logit-native log-pmf
 # (Stan's `bernoulli_logit_lpmf` / `binomial_logit_lpmf`; LogExpFunctions'
@@ -78,8 +82,8 @@ export AbstractColumn, MissingColumn, DataColumn, NamedColumn,
        ExprColumn, LikelihoodColumn, MaterializedColumn
 export BRMI, VBRMI, SBBRMI, GenerativeDeclaration, GenerativePlan
 export BRMDescriptor, BRMInput, BRMOutput, BRMOperation, BRMHighlight
-export brm_descriptor, brm_operation, brm_execute, brm_columns,
-       required_brm_inputs
+export brm_descriptor, brm_output, brm_output_coordinates, brm_operation,
+       brm_execute, brm_columns, required_brm_inputs
 
 # Accessor helpers for column types — used unqualified by html renderers,
 # sbimpl dispatch logic, and downstream extension hooks like bruno-ext.
