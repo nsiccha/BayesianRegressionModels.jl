@@ -773,46 +773,123 @@ _sb_mi_normal = StanBlocks.@slic begin
                     num_elements(Jobs) + n_mis)
 end
 
-# Hilbert-space approximate Gaussian process (Riutort-Mayol et al. 2022),
-# 1D squared-exponential kernel. Inputs precomputed by the caller:
-#   PHI    : N x K eigen-basis matrix (sin terms)
-#   lambda : length-K squared eigenvalues
-# Parameters:
-#   log_rho   -- log length-scale
-#   log_sigma -- log marginal sd
-#   beta_raw  -- length-K standard-normal basis weights
-# Spectral-density-scaled basis weights `sqrt_spd .* beta_raw` give the
-# usual GP draw f(x) = PHI * (sqrt_spd .* beta_raw). Returns f as a
-# length-N column the caller (popefs) multiplies by an overall beta.
+# Squared-exponential GP helpers. The loops live in Stan functions because
+# top-level @slic bodies are deliberately control-flow free.
+#
+# `brm_exp_quad_cov` builds the full covariance used by the exact `gp(...)`
+# term. `rho` is always a vector: isotropic calls repeat their one length scale,
+# while anisotropic calls sample one value per predictor axis.
+#
+# `brm_hsgp_sqrt_spd` evaluates the separable d-dimensional squared-exponential
+# spectral density at every tensor-product HSGP frequency. `omega2[b, j]` is
+# the squared angular frequency for basis row b and predictor axis j.
+StanBlocks.@deffun begin
+    @stanonly brm_exp_quad_cov(X::matrix[n, d], sigma::real,
+                               rho::vector[d], jitter::real)::matrix[n, n] = begin
+        K::matrix[n, n]
+        for i in 1:n
+            for j in 1:n
+                sqdist = 0.
+                for axis in 1:d
+                    delta = (X[i, axis] - X[j, axis]) / rho[axis]
+                    sqdist += delta * delta
+                end
+                K[i, j] = sigma * sigma * exp(-0.5 * sqdist)
+            end
+        end
+        for i in 1:n
+            K[i, i] += jitter
+        end
+        return K
+    end
+
+    @stanonly brm_hsgp_sqrt_spd(omega2::matrix[m, d], sigma::real,
+                                 rho::vector[d])::vector[m] = begin
+        rv::vector[m]
+        scale = sigma
+        for axis in 1:d
+            scale *= sqrt(rho[axis] * 2.5066282746310002)
+        end
+        for b in 1:m
+            exponent = 0.
+            for axis in 1:d
+                exponent += rho[axis] * rho[axis] * omega2[b, axis]
+            end
+            rv[b] = scale * exp(-0.25 * exponent)
+        end
+        return rv
+    end
+end
+
+# Exact latent squared-exponential GP. The non-centred draw keeps the geometry
+# explicit: f = cholesky(K(X, X)) * z. These are direct predictor summands, so
+# there is no redundant population beta multiplying the returned draw.
+_sb_gp = StanBlocks.@slic begin
+    n_obs = dims(X)[1]
+    n_axes = dims(X)[2]
+    log_rho   ~ std_normal()
+    log_sigma ~ std_normal()
+    z         ~ std_normal(; n=n_obs)
+    rho = rep_vector(exp(log_rho), n_axes)
+    K = brm_exp_quad_cov(X, exp(log_sigma), rho, jitter)
+    return cholesky_decompose(K) * z
+end
+
+_sb_gp_aniso = StanBlocks.@slic begin
+    n_obs = dims(X)[1]
+    n_axes = dims(X)[2]
+    log_rho :: vector[n_axes] ~ std_normal()
+    log_sigma ~ std_normal()
+    z         ~ std_normal(; n=n_obs)
+    rho = exp(log_rho)
+    K = brm_exp_quad_cov(X, exp(log_sigma), rho, jitter)
+    return cholesky_decompose(K) * z
+end
+
+# Hilbert-space approximate GP (Riutort-Mayol et al. 2022). `PHI` and
+# `omega2` are tensor-product basis data precomputed by Julia. Isotropic and
+# anisotropic variants differ only in whether one or d log length scales are
+# sampled. As with exact GP, the returned draw is a direct predictor summand.
 _sb_hsgp = StanBlocks.@slic begin
-    n_basis = num_elements(lambda)
+    n_basis = dims(omega2)[1]
+    n_axes = dims(omega2)[2]
     log_rho   ~ std_normal()
     log_sigma ~ std_normal()
     beta_raw  ~ std_normal(; n=n_basis)
-    rho   = exp(log_rho)
-    sigma = exp(log_sigma)
-    # sqrt(spectral density of squared-exp kernel) at omega = sqrt(lambda).
-    # = sigma * sqrt(rho * sqrt(2*pi)) * exp(-0.25 * rho^2 * lambda).
-    # Inlined sqrt(2*pi) constant since SLIC has no `pi` builtin.
-    sqrt_spd = sigma * sqrt(rho * 2.5066282746310002) * exp(-0.25 * rho * rho * lambda)
+    rho = rep_vector(exp(log_rho), n_axes)
+    sqrt_spd = brm_hsgp_sqrt_spd(omega2, exp(log_sigma), rho)
     return PHI * (sqrt_spd .* beta_raw)
 end
 
-# Per-group HSGP for `gp(x, by=g)` (gp-as-random-effect). SHARED length-scale /
-# marginal-SD hyperparameters across groups (decision 7p44fo); only the basis
-# weights vary per group. `beta` is the per-group basis-weight matrix
-# (n_groups x n_basis) supplied by the general structured-latent floor with an
-# iid-std-normal prior. Per obs i the GP value is
-#   PHI[i, :] . (sqrt_spd .* beta[group_idx[i], :]).
-# We fold sqrt_spd into PHI's columns via diag_post_multiply (= PHI * diag(spd))
-# so the per-obs value is a single rows_dot_product over the group-gathered
-# weights. No docstring (docstring -> @deffun AssertionError gotcha; see primer).
+_sb_hsgp_aniso = StanBlocks.@slic begin
+    n_basis = dims(omega2)[1]
+    n_axes = dims(omega2)[2]
+    log_rho :: vector[n_axes] ~ std_normal()
+    log_sigma ~ std_normal()
+    beta_raw  ~ std_normal(; n=n_basis)
+    rho = exp(log_rho)
+    sqrt_spd = brm_hsgp_sqrt_spd(omega2, exp(log_sigma), rho)
+    return PHI * (sqrt_spd .* beta_raw)
+end
+
+# Per-group HSGP. Length-scale/marginal-SD hyperparameters are shared across
+# groups (decision 7p44fo); only tensor-basis weights vary by group.
 _sb_hsgp_by = StanBlocks.@slic begin
+    n_axes = dims(omega2)[2]
     log_rho   ~ std_normal()
     log_sigma ~ std_normal()
-    rho   = exp(log_rho)
-    sigma = exp(log_sigma)
-    sqrt_spd = sigma * sqrt(rho * 2.5066282746310002) * exp(-0.25 * rho * rho * lambda)
+    rho = rep_vector(exp(log_rho), n_axes)
+    sqrt_spd = brm_hsgp_sqrt_spd(omega2, exp(log_sigma), rho)
+    PHI_scaled = diag_post_multiply(PHI, sqrt_spd)
+    return rows_dot_product(PHI_scaled, beta[group_idx, :])
+end
+
+_sb_hsgp_by_aniso = StanBlocks.@slic begin
+    n_axes = dims(omega2)[2]
+    log_rho :: vector[n_axes] ~ std_normal()
+    log_sigma ~ std_normal()
+    rho = exp(log_rho)
+    sqrt_spd = brm_hsgp_sqrt_spd(omega2, exp(log_sigma), rho)
     PHI_scaled = diag_post_multiply(PHI, sqrt_spd)
     return rows_dot_product(PHI_scaled, beta[group_idx, :])
 end
@@ -852,21 +929,92 @@ _sb_apply_levels(levels, raw::AbstractVector) = begin
     idx
 end
 
-# gp/HSGP fit/apply split — MIRRORS vimpl `_hsgp_basis` (vimpl.jl:827) EXACTLY.
-# vimpl is off-limits to edit, so the gp emitter keeps calling `_hsgp_basis` at
-# construct-time (byte-identical PHI/lambda) and only RECORDS the fit constant
-# (mean, L) via `_sb_fit_hsgp`; `_sb_apply_hsgp` lets `reprocess` rebuild
-# PHI/lambda on a frozen (mean, L) for prediction-replay.
-# ⚠ LOCKSTEP: if the eigenbasis formula in `_hsgp_basis` (vimpl.jl:827) ever
-# changes, update `_sb_apply_hsgp` here in lockstep — the self-consistency
-# probe assertion (reprocess(sb, df; freeze=true) == sb.data) will catch a
-# silent drift, but this comment is the first line of defence.
+# GP input helpers. Both public terms accept one-or-more raw real-valued axes
+# and lower them to an N x d matrix. Keeping the raw column names in the
+# preprocessing record lets `reprocess` rebuild that matrix on new data.
+function _sb_gp_axes(label::Symbol, args::Tuple)
+    isempty(args) && error("sbimpl: `$label(x...)` expects at least one positional axis")
+    names = Symbol[]
+    axes = Vector{Float64}[]
+    for a in args
+        n, raw = _sb_inner_data(label, a)
+        v = collect(Float64, _sb_real_vec(label, n, raw))
+        isempty(v) && error("sbimpl: `$label($n)` cannot use an empty axis")
+        all(isfinite, v) || error("sbimpl: `$label($n)` requires finite values")
+        push!(names, n)
+        push!(axes, v)
+    end
+    n = length(first(axes))
+    all(v -> length(v) == n, axes) || error(
+        "sbimpl: `$label(x...)` axes must have equal lengths (got $(length.(axes)))")
+    Tuple(names), Tuple(axes)
+end
+
+_sb_gp_matrix(axes::Tuple) = Matrix{Float64}(hcat(axes...))
+
+function _sb_axis_option(label::Symbol, key::Symbol, value, n_axes::Int, pred, expectation::String)
+    values = value isa Tuple || value isa AbstractVector ? Tuple(value) : ntuple(_ -> value, n_axes)
+    length(values) == n_axes || error(
+        "sbimpl: `$label(...; $key=...)` needs one value per axis ($n_axes), got $(length(values))")
+    all(pred, values) || error(
+        "sbimpl: `$label(...; $key=...)` expects $expectation, got $values")
+    values
+end
+
+_sb_hsgp_options(kw, n_axes::Int) = begin
+    K = _sb_axis_option(:hsgp, :k, get(kw, :k, 20), n_axes,
+        x -> x isa Integer && !(x isa Bool) && x >= 1, "positive integers")
+    c = _sb_axis_option(:hsgp, :c, get(kw, :c, 1.5), n_axes,
+        x -> x isa Real && isfinite(x) && x > 1, "finite real values greater than 1")
+    Tuple(Int(x) for x in K), Tuple(Float64(x) for x in c)
+end
+
+_sb_gp_iso(kw, label::Symbol) = begin
+    iso = get(kw, :iso, true)
+    iso isa Bool || error("sbimpl: `$label(...; iso=...)` expects Bool, got $(typeof(iso))")
+    iso
+end
+
+_sb_gp_cov(kw, label::Symbol) = begin
+    cov = get(kw, :cov, :exp_quad)
+    cov === :exp_quad || error(
+        "sbimpl: `$label(...; cov=...)` currently supports only `:exp_quad`, got $(repr(cov))")
+    cov
+end
+
+function _check_term_kwargs(::typeof(gp), kw)
+    allowed = (:cov, :iso, :jitter)
+    unknown = filter(k -> k ∉ allowed, keys(kw))
+    isempty(unknown) || error(
+        "gp: exact GP accepts only `cov`, `iso`, and `jitter`; unsupported keyword(s): $(join(unknown, ", ")). " *
+        "Use `hsgp(...; k=..., c=..., by=...)` for the Hilbert-space approximation.")
+    _sb_gp_cov(kw, :gp)
+    _sb_gp_iso(kw, :gp)
+    jitter = get(kw, :jitter, 1e-9)
+    jitter isa Real && isfinite(jitter) && jitter > 0 || error(
+        "gp: `jitter` must be a finite positive real, got $(repr(jitter))")
+    nothing
+end
+
+function _check_term_kwargs(::typeof(hsgp), kw)
+    allowed = (:cov, :iso, :k, :c, :by)
+    unknown = filter(k -> k ∉ allowed, keys(kw))
+    isempty(unknown) || error(
+        "hsgp: unsupported keyword(s): $(join(unknown, ", ")); " *
+        "supported keywords are `cov`, `iso`, `k`, `c`, and `by`")
+    _sb_gp_cov(kw, :hsgp)
+    _sb_gp_iso(kw, :hsgp)
+    nothing
+end
+
+# HSGP fit/apply split. The scalar methods reproduce the historical 1D basis;
+# the tuple methods form its tensor product for variadic `hsgp(x...)`.
 _sb_fit_hsgp(raw::AbstractVector{<:Real}, K::Integer, c::Real) = begin
-    K >= 1 || error("gp: k must be >= 1 (got $K)")
-    c > 1  || error("gp: c must be > 1 (got $c)")
+    K >= 1 || error("hsgp: k must be >= 1 (got $K)")
+    c > 1  || error("hsgp: c must be > 1 (got $c)")
     mu = sum(raw) / length(raw)
     L = c * maximum(abs, raw .- mu)
-    L > 0 || error("gp: degenerate input (all x equal)")
+    L > 0 || error("hsgp: degenerate input (all x equal)")
     (mu, L)
 end
 _sb_apply_hsgp(c::Tuple, raw::AbstractVector{<:Real}, K::Integer) = begin
@@ -879,6 +1027,32 @@ _sb_apply_hsgp(c::Tuple, raw::AbstractVector{<:Real}, K::Integer) = begin
         PHI[i, k] = inv_sqrt_L * sin(sqrt(lambda[k]) * (x_c[i] + L))
     end
     PHI, lambda
+end
+
+_sb_fit_hsgp(axes::Tuple, K::Tuple, c::Tuple) =
+    ntuple(j -> _sb_fit_hsgp(axes[j], K[j], c[j]), length(axes))
+
+function _sb_apply_hsgp(fits::Tuple, axes::Tuple, K::Tuple)
+    n_axes = length(axes)
+    length(fits) == n_axes == length(K) || error("hsgp: internal axis-count mismatch")
+    axis_basis = ntuple(j -> _sb_apply_hsgp(fits[j], axes[j], K[j]), n_axes)
+    n_obs = length(first(axes))
+    n_basis = prod(K)
+    PHI = Matrix{Float64}(undef, n_obs, n_basis)
+    omega2 = Matrix{Float64}(undef, n_basis, n_axes)
+    for (b, I) in enumerate(CartesianIndices(K))
+        for i in 1:n_obs
+            value = 1.0
+            for axis in 1:n_axes
+                value *= axis_basis[axis][1][i, I[axis]]
+            end
+            PHI[i, b] = value
+        end
+        for axis in 1:n_axes
+            omega2[b, axis] = axis_basis[axis][2][I[axis]]
+        end
+    end
+    PHI, omega2
 end
 
 
@@ -945,19 +1119,22 @@ src   = stan_code(sbbrmi)
 ```
 """
 # ---- preprocessing-constant provenance (decision nr3v8n A) ------------------
-# Each Category-A transform (zscale/standardize/center/factor/mo/s/gp) and the
+# Each Category-A transform (zscale/standardize/center/factor/mo/s/gp/hsgp) and the
 # element-wise `protect`/implicit-fn fallback compute a data-derived constant in
 # Julia at construct-time and land only the TRANSFORMED result in `data`. To
 # support `reprocess`/`restan_data` on a new DataFrame we record, per EMITTED
 # data key, how to regenerate that key from a new df:
 #   kind         -- which transform (:zscale/:standardize/:center/:factor/:mo/
-#                   :spline/:gp/:protect/:interaction)
+#                   :spline/:gp/:hsgp/:protect/:interaction/
+#                   :categorical_outcome)
 #   const_       -- the fitted constant: (μ,σ) / μ / level-vector / TPS basis /
-#                   (μ,L,K) / nothing (protect)
+#                   exact-GP axis metadata / HSGP (μ,L,K,c) / categorical
+#                   outcome levels / nothing (protect)
 #   raw_ref      -- the source: a column-node tree (zscale/center/standardize/
 #                   protect, re-materialised via `_sb_rematerialize_vec`) or a
-#                   column NAME Symbol (factor/mo/spline/gp)
-#   dim_coupled  -- true for factor/mo (the level set drives parameter dim)
+#                   column NAME Symbol (factor/mo/spline) or axis-name Tuple
+#                   (gp/hsgp)
+#   dim_coupled  -- true when a fitted level set drives parameter dimension
 struct PreprocEntry
     kind::Symbol
     const_::Any
@@ -997,6 +1174,21 @@ _sb_df_column(df, col::Symbol) = begin
     d = _as_data_column(parent(nc))
     isnothing(d) && error("sbimpl: reprocess: new DataFrame has no column `$col`")
     parent(d)
+end
+
+function _sb_gp_axes_from_df(df, raw_ref, label::Symbol)
+    names = raw_ref isa Symbol ? (raw_ref,) : Tuple(raw_ref)
+    axes = ntuple(length(names)) do j
+        v = collect(Float64, _sb_df_column(df, names[j]))
+        isempty(v) && error("sbimpl: reprocess: `$label($(names[j]))` cannot use an empty axis")
+        all(isfinite, v) || error(
+            "sbimpl: reprocess: `$label($(names[j]))` requires finite values")
+        v
+    end
+    n = length(first(axes))
+    all(v -> length(v) == n, axes) || error(
+        "sbimpl: reprocess: `$label(x...)` axes must have equal lengths (got $(length.(axes)))")
+    axes
 end
 
 struct SBBRMI{P<:BRMI, M, D<:AbstractDict, PP<:AbstractDict}
@@ -1530,14 +1722,19 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         new_preproc[key] = PreprocEntry(
             :spline, (; fit, zpen_key=e.const_.zpen_key), e.raw_ref, false)
     elseif e.kind === :gp
-        v = collect(Float64, _sb_df_column(df, e.raw_ref))
+        axes = _sb_gp_axes_from_df(df, e.raw_ref, :gp)
+        new_data[key] = _sb_gp_matrix(axes)
+        new_preproc[key] = PreprocEntry(:gp, e.const_, e.raw_ref, false)
+    elseif e.kind === :hsgp
+        axes = _sb_gp_axes_from_df(df, e.raw_ref, :hsgp)
         K = e.const_.K
-        mu_L = freeze ? e.const_.mu_L : _sb_fit_hsgp(v, K, e.const_.c)
-        PHI, lambda = _sb_apply_hsgp(mu_L, v, K)
+        fits = freeze ? e.const_.fits : _sb_fit_hsgp(axes, K, e.const_.c)
+        PHI, omega2 = _sb_apply_hsgp(fits, axes, K)
         new_data[key] = PHI
-        new_data[e.const_.lambda_key] = lambda
-        push!(handled, e.const_.lambda_key)
-        new_preproc[key] = PreprocEntry(:gp, (; mu_L=mu_L, K=K, c=e.const_.c, lambda_key=e.const_.lambda_key), e.raw_ref, false)
+        new_data[e.const_.omega2_key] = omega2
+        push!(handled, e.const_.omega2_key)
+        new_preproc[key] = PreprocEntry(:hsgp,
+            (; fits, K, c=e.const_.c, omega2_key=e.const_.omega2_key), e.raw_ref, false)
     elseif e.kind === :categorical_outcome
         v = _sb_df_column(df, e.raw_ref)
         fitted_levels = e.const_.levels
@@ -1587,10 +1784,10 @@ of a naive per-column `sb.model(; col=…)` rebind is avoided. Returns a NEW
 - `freeze_constants=false` (fresh-fit semantics): re-derive each constant from
   `new_df`, then apply.
 
-Covered: the 7 Julia-side transforms (`zscale`/`standardize`/`center`/`factor`/
-`mo`/`s`/`gp`), `protect`/implicit-fn columns (re-materialised on `new_df`),
-continuous × continuous interaction columns, and pass-through raw columns
-(plain data, `me` obs values, `ar` time). Errors loudly
+Covered: the Julia-side transforms (`zscale`/`standardize`/`center`/`factor`/
+`mo`/`s`/`gp`/`hsgp`), `protect`/implicit-fn columns (re-materialised on
+`new_df`), continuous × continuous interaction columns, categorical outcomes,
+and pass-through raw columns (plain data, `me` obs values, `ar` time). Errors loudly
 on a `factor`/`mo` **unseen level** and on any derived data key it cannot account
 for (e.g. random-effects group indices from `(1|g)`) rather than silently
 copying a stale vector — rebuild from `new_df` for those models.
@@ -1619,7 +1816,7 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true)
                     "sbimpl: reprocess: data key `$k` is a derived vector with no ",
                     "preprocessing record and is not a column of the new DataFrame. ",
                     "reprocess covers the 7 Julia-side predictor transforms ",
-                    "(zscale/standardize/center/factor/mo/s/gp), protect/implicit-fn ",
+                    "(zscale/standardize/center/factor/mo/s/gp/hsgp), protect/implicit-fn ",
                     "columns and pass-through raw columns; models with random-effects ",
                     "group indices (e.g. `(1|g)`) are not yet supported — rebuild the ",
                     "SBBRMI from the new DataFrame instead.")
@@ -1735,7 +1932,7 @@ function kernel end
 #
 # Checked in the same order the lowering-time guards use, so the reported
 # keyword does not change when several are present. Keys off the `kernel`
-# function object, so `gp(x; by=g)` — where `by=` is live — is unaffected, and
+# function object, so `hsgp(x; by=g)` — where `by=` is live — is unaffected, and
 # an aliased `kernel` is still caught. The lowering-time guards stay as the
 # backstop for a BRMI assembled without the macro.
 _check_term_kwargs(::typeof(kernel), kwargs) = for (k, replacement) in (
@@ -1988,14 +2185,14 @@ end
 # block per field, and threads the un-expanded n_groups×K matrices into the term
 # at emit time via `_sb_emit_group_block_term!`. Basis evaluation stays in-term.
 #
-# Three consumers shape this API: gp(x, by=g) (per-group iid-normal HSGP weights,
+# Three consumers shape this API: hsgp(x, by=g) (per-group iid-normal HSGP weights,
 # the deliverable), obs_scale (matrix<lower=0> element-wise Exponential, decision
 # 10uz10q — proven via `sb_group_clamped_demo`, not yet wired), and future
 # splines-by-group (per-group normal spline coefficients).
 #
 # Declaration shape — the 2-arg `_sb_term_group_block(f, call)` form receives the
 # term CALL so a term can declare fields conditional on its actual arguments
-# (gp only declares a block when called with `by=`). It returns EITHER:
+# (hsgp only declares a block when called with `by=`). It returns EITHER:
 #   (a) legacy single correlated-normal block:
 #       (; n_per_group::Int, group_arg_pos|group_fn, group_fn_name)
 #   (b) general field list:
@@ -2334,7 +2531,7 @@ _sb_mi_kwarg_value(x, _) = error("sbimpl: unsupported `mi(...)` family arg shape
 _sb_julia_to_stan_fn(f) = f === LogExpFunctions.logistic ? :inv_logit : Symbol(nameof(f))
 
 # Inner-arg unwrap helpers shared by `_sb_predictor_term!` overloads (mo, me,
-# s, gp, ar, mo1) and a few `mi`-style sites. Each step is a tiny dispatch
+# s, gp, hsgp, ar, mo1) and a few `mi`-style sites. Each step is a tiny dispatch
 # pair so a wrong call shape errors with the wrapping function's name in the
 # message rather than a generic `isa` failure.
 _sb_named_inner(label::Symbol, x::NamedColumn) = x
@@ -2359,7 +2556,8 @@ _sb_real_vec(label::Symbol, n::Symbol, v) =
 _sb_classify_term!(t::ExprColumn, pop_terms, ran_terms, direct_terms) = begin
     f = getf(t)
     f === (|) && (push!(ran_terms, t); return)
-    (f === mo1 || f === s) && (push!(direct_terms, t); return)
+    (f === mo1 || f === s || f === gp || f === hsgp) &&
+        (push!(direct_terms, t); return)
     push!(pop_terms, t)
 end
 _sb_classify_term!(t, pop_terms, ran_terms, direct_terms) =
@@ -2399,7 +2597,7 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     end
 
     for dt in direct_terms
-        _sb_emit_direct!(stmts, data, target, dt, summands)
+        _sb_emit_direct!(stmts, data, target, dt, summands; group_block_lookup)
     end
 
     _sb_emit_ranefs!(stmts, data, target, ran_terms, summands; id_lookup, brmi_key, cv_groups, centered_groups)
@@ -2420,7 +2618,7 @@ end
 # `_sb_pop_cols!` used to build the design matrix `X` — so the returned labels
 # can never drift from what `popefs` actually multiplies. Standard fixed-effect
 # terms only (covers the whole regression-covariate surface); group-structured
-# terms whose columns need prepass context (e.g. `gp(x, by=g)`) are out of
+# terms whose columns need prepass context (e.g. `hsgp(x, by=g)`) are out of
 # scope in v1 and raise a clear, actionable error rather than mis-counting.
 
 """
@@ -2440,7 +2638,7 @@ formula (left-to-right) order:
   `pop_<lhs>_Intercept` parameter;
 - plain continuous (`Real`, non-integer) predictors — one column each,
   labelled by the column name;
-- single-`beta` wrapped terms (`mo`, `me`, `gp` population, `protect`,
+- single-`beta` wrapped terms (`mo`, `me`, `protect`,
   `log(x)`, `x^2`, …) — one column each, labelled by the emitted design key;
 - an interaction `a & b` — one label per expanded treatment-contrast column.
 
@@ -2484,7 +2682,7 @@ function popcoefnames(brmi::BRMI, lhs::Symbol)
             error("popcoefnames: cannot resolve the `beta_pop` column(s) for term ",
                   "`$(_popcoef_show(t))` in predictor `$lhs` without full model context ",
                   "($(sprint(showerror, err))). This helper covers the standard ",
-                  "fixed-effect terms; for group-structured terms (e.g. `gp(x, by=g)`) ",
+                  "fixed-effect terms; for group-structured terms (e.g. `hsgp(x, by=g)`) ",
                   "read the parameter names off the transpiled `SBBRMI` instead.")
         end
         for c in cols
@@ -2521,9 +2719,15 @@ _sb_cat_levels_vec(_v) = nothing
 # Free-summand terms (no popefs beta): `mo1(c)`, `s(x)`, categorical NamedColumns.
 # Categoricals emit `cat_<c> ~ _sb_cat(; x=<c>_idx, n_levels=<c>_n_levels)`.
 # `mo1(c)` reuses `_sb_mo`; `s(x)` owns its complete fixed + penalized basis.
-_sb_emit_direct!(stmts, data, target::Symbol, t::NamedColumn, summands) =
+_sb_emit_direct!(stmts, data, target::Symbol, t::NamedColumn, summands; kwargs...) =
     _sb_emit_cat!(stmts, data, t, summands)
-function _sb_emit_direct!(stmts, data, target::Symbol, t::ExprColumn, summands)
+function _sb_emit_direct!(stmts, data, target::Symbol, t::ExprColumn, summands;
+                          group_block_lookup=Dict())
+    f = getf(t)
+    if f === gp || f === hsgp
+        push!(summands, _sb_predictor_term!(stmts, data, f, t; group_block_lookup))
+        return
+    end
     _sb_emit_direct_expr!(stmts, data, target, getf(t), t, summands)
 end
 function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(mo1), t, summands)
@@ -2869,10 +3073,10 @@ end
 # Scan brmi.operations for declaring terms anywhere in the model: a term `f`
 # with a `_sb_term_group_block` declaration, appearing EITHER as a whole-RHS
 # parameter submodel (`mu ~ f(...)`, like bordet) OR as a predictor summand
-# (`y ~ 1 + gp(t, by=g)`). We walk every `~` op's RHS summands (`_sb_terms`),
-# which covers both: bordet is a single summand of its RHS, gp is one of several.
+# (`y ~ 1 + hsgp(t, by=g)`). We walk every `~` op's RHS summands (`_sb_terms`),
+# which covers both: bordet is a single summand of its RHS, hsgp is one of several.
 # Every declaring summand is its own term INSTANCE — there is no `(key, f)`
-# dedup, so N instances of the same term (e.g. `gp(t, by=g) + gp(s, by=g)`)
+# dedup, so N instances of the same term (e.g. `hsgp(t, by=g) + hsgp(s, by=g)`)
 # each get collected and allocated their own block. Identical instances (same
 # block name) are coalesced later, at emit time. A subsequent emit step
 # allocates one block per declared field and builds the lookup.
@@ -2968,8 +3172,8 @@ function _sb_emit_group_blocks!(stmts, data, gb_terms)
             group_col = _sb_resolve_group_col(fld.group, rhs_e, data)
             gname = name(group_col)
             # Block name `b_<field>_<gname>`; for legacy single-field terms
-            # field == nameof(f), so this is byte-for-byte the old name. For gp
-            # the field name embeds x, so two GPs on the same group never collide.
+            # field == nameof(f), so this is byte-for-byte the old name. For hsgp
+            # the field name embeds x, so two HSGPs on the same group never collide.
             suffix = Symbol(fld.name, :_, gname)
             block_name = Symbol(:b_, suffix)
             haskey(lookup, block_name) && continue   # identical instance already allocated
@@ -3131,6 +3335,10 @@ function _sb_ensure_group_data!(data, g::NamedColumn)
     idx_name = Symbol(gname, :_idx)
     n_name   = Symbol(:n_, gname)
     n_levels, g_idx = _sb_level_index(parent(g_backing))
+    # The generic data prepass sees grouping columns too. Stan consumes only
+    # their dense integer code, never the raw labels (which may be strings and
+    # therefore are not valid Stan data at all).
+    delete!(data, gname)
     data[idx_name] = g_idx
     data[n_name]   = n_levels
     idx_name, n_name
@@ -3148,6 +3356,8 @@ function _sb_ensure_group_data!(data, g::Tuple{NamedColumn,NamedColumn})
     gname, bname = name(gcol), name(bcol)
     n_groups, g_idx = _sb_level_index(parent(g_backing))
     n_strata, b_idx = _sb_level_index(parent(b_backing))
+    delete!(data, gname)
+    delete!(data, bname)
     stratum_idx = _sb_stratum_idx(g_idx, b_idx, gname, bname)
     suffix = Symbol(gname, :__by__, bname)
     idx_name       = Symbol(suffix, :_idx)
@@ -3471,76 +3681,81 @@ _sb_predictor_term!(stmts, data, ::typeof(s), t; kwargs...) = begin
     push!(stmts, :($col_name ~ _sb_s(; Xnull=$Xnull_name, Zpen=$Zpen_name)))
     col_name
 end
-# `gp(x; k=K, c=C)` HSGP predictor. Precomputes the Riutort-Mayol eigen-basis
-# from the raw data (matrix PHI of size N x K, vector lambda of length K) and
-# stashes them in the data dict. The submodel `_sb_hsgp` owns log_rho,
-# log_sigma, beta_raw and returns a length-N smooth contribution. popefs
-# multiplies by an overall beta -- harmless extra slope but conventional.
-# Defaults match vimpl's: K=20 basis fns, c=1.5 boundary factor.
+# `gp(x...)` is the exact GP term. It records an N x d predictor matrix and
+# delegates covariance construction + non-centred sampling to `_sb_gp` (one
+# shared length scale) or `_sb_gp_aniso` (one per axis).
 _sb_predictor_term!(stmts, data, ::typeof(gp), t; group_block_lookup=Dict(), kwargs...) = begin
     args = getargs(t); kw = getkwargs(t)
-    length(args) == 1 || error("sbimpl: `gp(x; by=g, k=K, c=C)` expects 1 positional arg, got $(length(args))")
-    xname, raw_col = _sb_inner_data(:gp, only(args))
-    raw = _sb_real_vec(:gp, xname, raw_col)
-    K = get(kw, :k, 20)
-    c = get(kw, :c, 1.5)
-    PHI, lambda = _hsgp_basis(raw, K, c)
-    if haskey(kw, :by)
-        # gp-as-random-effect (gp(x, by=g)): per-group basis weights come from
-        # the general structured-latent floor (prepass 2.5 allocated the
-        # n_groups×K iid-normal block `b_gpw_<g>`); shared length-scale /
-        # marginal-SD hyperparameters live inside `_sb_hsgp_by` (decision 7p44fo).
-        block_info = _sb_find_group_block(gp, t, group_block_lookup)
-        isnothing(block_info) && error(
-            "sbimpl: `gp($xname, by=...)` found no allocated per-group weight ",
-            "block — prepass 2.5 should have allocated it")
-        # Single field: read the spliced top-level block info (no field-name key).
-        info = block_info
-        gname = name(_sb_resolve_group_col((; kwarg=:by), t, data))
-        PHI_name    = Symbol(:PHI_, xname, :_by_, gname)
-        lambda_name = Symbol(:lambda_, xname, :_by_, gname)
-        data[PHI_name]    = PHI
-        data[lambda_name] = lambda
-        # Record the frozen (mean, L) so reprocess can rebuild PHI/lambda on a
-        # new df. (The per-group weight block / group_idx are ranef-style derived
-        # keys — reprocess errors loudly on them until ranef re-coding lands.)
-        _sb_record_preproc!(data, PHI_name,
-            PreprocEntry(:gp, (; mu_L=_sb_fit_hsgp(raw, K, c), K=K, c=c, lambda_key=lambda_name), xname, false))
-        col_name = Symbol(:gp_, xname, :_by_, gname)
-        push!(stmts, :($col_name ~ _sb_hsgp_by(; PHI=$PHI_name, lambda=$lambda_name,
-            beta=$(info.block_name), group_idx=$(info.idx_name))))
-        return col_name
-    end
-    PHI_name    = Symbol(:PHI_, xname)
-    lambda_name = Symbol(:lambda_, xname)
-    data[PHI_name]    = PHI
-    data[lambda_name] = lambda
-    # Frozen (mean, L) → reprocess rebuilds PHI/lambda on a new df with the
-    # training boundary (dimension-stable; K fixed).
-    _sb_record_preproc!(data, PHI_name,
-        PreprocEntry(:gp, (; mu_L=_sb_fit_hsgp(raw, K, c), K=K, c=c, lambda_key=lambda_name), xname, false))
-    col_name = Symbol(:gp_, xname)
-    push!(stmts, :($col_name ~ _sb_hsgp(; PHI=$PHI_name, lambda=$lambda_name)))
+    _check_term_kwargs(gp, kw)
+    names, axes = _sb_gp_axes(:gp, args)
+    suffix = join(string.(names), "_")
+    X_name = Symbol(:X_gp_, suffix)
+    col_name = Symbol(:gp_, suffix)
+    data[X_name] = _sb_gp_matrix(axes)
+    _sb_record_preproc!(data, X_name, PreprocEntry(:gp, nothing, names, false))
+    submodel = _sb_gp_iso(kw, :gp) ? :_sb_gp : :_sb_gp_aniso
+    jitter = Float64(get(kw, :jitter, 1e-9))
+    push!(stmts, :($col_name ~ $submodel(; X=$X_name, jitter=$jitter)))
     col_name
 end
 
-# gp-as-random-effect declaration: when `gp(x, by=g)` is called WITH `by=`, it
-# declares one structured-latent field — the per-group basis-weight matrix
-# (n_groups × K) with an iid-normal prior. Without `by=`, no block (the term
-# stays the population HSGP path above). K must match the basis count used when
-# building PHI/lambda in the emit hook (both read `get(kw, :k, 20)`).
-function _sb_term_group_block(::typeof(gp), call)
-    kw = getkwargs(call)
-    haskey(kw, :by) || return nothing
-    K = get(kw, :k, 20)
-    # Field name embeds x so two GPs on the SAME group but different x variables
-    # (`gp(t, by=g) + gp(s, by=g)`) get distinct blocks `b_gpw_t_g` / `b_gpw_s_g`.
-    fname = Symbol(:gpw_, name(_sb_named_inner(:gp, only(getargs(call)))))
-    (; fields=[(; name=fname, n_per_group=K, group=(; kwarg=:by), prior=:iid_normal)])
+# `hsgp(x...; k, c, by, iso)` is the Hilbert-space approximation. Scalar `k`
+# and `c` broadcast across axes; tuples/vectors specify one value per axis.
+# The tensor basis has `prod(k)` columns. With `by=`, only those basis weights
+# vary per group; length-scale and marginal-SD hyperparameters stay shared.
+_sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(), kwargs...) = begin
+    args = getargs(t); kw = getkwargs(t)
+    _check_term_kwargs(hsgp, kw)
+    names, axes = _sb_gp_axes(:hsgp, args)
+    K, c = _sb_hsgp_options(kw, length(axes))
+    fits = _sb_fit_hsgp(axes, K, c)
+    PHI, omega2 = _sb_apply_hsgp(fits, axes, K)
+    suffix = join(string.(names), "_")
+    iso = _sb_gp_iso(kw, :hsgp)
+
+    if haskey(kw, :by)
+        block_info = _sb_find_group_block(hsgp, t, group_block_lookup)
+        isnothing(block_info) && error(
+            "sbimpl: `hsgp($suffix, by=...)` found no allocated per-group weight ",
+            "block — prepass 2.5 should have allocated it")
+        info = block_info
+        gname = name(_sb_resolve_group_col((; kwarg=:by), t, data))
+        PHI_name = Symbol(:PHI_hsgp_, suffix, :_by_, gname)
+        omega2_name = Symbol(:omega2_hsgp_, suffix, :_by_, gname)
+        data[PHI_name] = PHI
+        data[omega2_name] = omega2
+        _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp,
+            (; fits, K, c, omega2_key=omega2_name), names, false))
+        col_name = Symbol(:hsgp_, suffix, :_by_, gname)
+        submodel = iso ? :_sb_hsgp_by : :_sb_hsgp_by_aniso
+        push!(stmts, :($col_name ~ $submodel(; PHI=$PHI_name, omega2=$omega2_name,
+            beta=$(info.block_name), group_idx=$(info.idx_name))))
+        return col_name
+    end
+
+    PHI_name = Symbol(:PHI_hsgp_, suffix)
+    omega2_name = Symbol(:omega2_hsgp_, suffix)
+    data[PHI_name] = PHI
+    data[omega2_name] = omega2
+    _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp,
+        (; fits, K, c, omega2_key=omega2_name), names, false))
+    col_name = Symbol(:hsgp_, suffix)
+    submodel = iso ? :_sb_hsgp : :_sb_hsgp_aniso
+    push!(stmts, :($col_name ~ $submodel(; PHI=$PHI_name, omega2=$omega2_name)))
+    col_name
 end
 
-# `_hsgp_basis` is defined in vimpl.jl; reuse rather than redefine here
-# to avoid method-overwriting precompile errors.
+function _sb_term_group_block(::typeof(hsgp), call)
+    kw = getkwargs(call)
+    haskey(kw, :by) || return nothing
+    _check_term_kwargs(hsgp, kw)
+    args = getargs(call)
+    isempty(args) && error("sbimpl: `hsgp(x...; by=...)` expects at least one positional axis")
+    names = Tuple(name(_sb_named_inner(:hsgp, a)) for a in args)
+    K, _ = _sb_hsgp_options(kw, length(args))
+    fname = Symbol(:hsgpw_, join(string.(names), "_"))
+    (; fields=[(; name=fname, n_per_group=prod(K), group=(; kwarg=:by), prior=:iid_normal)])
+end
 
 # `ar(time; p=1)` AR(1) residual submodel. Routes to `_sb_ar1`, which owns the
 # phi / epsilon parameters and returns the per-row u[t] as a single length-N

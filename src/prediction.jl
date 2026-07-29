@@ -166,7 +166,7 @@ end
 # The `|ID|` bucket symbol for a binding, or `nothing`. Bucket bindings are
 # `b_<id>_<group>` / `b_<id>_<group>__by__<by>` (`_sb_id_bucket_suffix`); plain
 # per-target blocks are `r_<lhs>_<group>`. Structured-latent blocks
-# (`gp(x, by=g)`) also use the `b_` prefix but carry a field name rather than a
+# (`hsgp(x, by=g)`) also use the `b_` prefix but carry a field name rather than a
 # bucket id, so the id is only claimed when the trailing part matches the group.
 function _ranef_id_of_binding(binding::Symbol, group::Symbol, by::Union{Nothing,Symbol})
     s = String(binding)
@@ -202,7 +202,7 @@ Structured-latent blocks whose prior is `:iid_normal` or an element-wise
 non-normal (`_sb_emit_block_draw!`) emit an ordinary `std_normal` / dist
 declaration rather than a `ranef_*` submodel, and are deliberately NOT reported
 — there is nothing in the emission that distinguishes them from any other
-vector prior. `gp(x, by=g)` and any other structured field whose prior is
+vector prior. `hsgp(x, by=g)` and any other structured field whose prior is
 `:correlated_normal` goes through `ranef_correlated_draws` and IS reported,
 with `id === nothing`.
 

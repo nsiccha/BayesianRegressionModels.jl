@@ -45,6 +45,7 @@ BayesianRegressionModels.assign
 BayesianRegressionModels.doublepipe
 BayesianRegressionModels.gr
 BayesianRegressionModels.gp
+BayesianRegressionModels.hsgp
 BayesianRegressionModels.offset
 BayesianRegressionModels.zscale
 BayesianRegressionModels.center
