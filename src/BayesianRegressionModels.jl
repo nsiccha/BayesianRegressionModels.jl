@@ -45,7 +45,9 @@ include("adaptive_centering.jl")
 export @brm, @n, @x, @getproperty
 export assign, doublepipe, gr, gp, offset, zscale, center, standardize, protect, factor
 export me, mi, s, ar, mo, mo1, hsgp, OrderedLogistic, Horseshoe,
-       ZeroInflatedPoisson, NegativeBinomial2, sb_group_demo, addprop
+       CategoricalLogit, ZeroInflatedPoisson, NegativeBinomial2,
+       BetaBinomial, BetaBinomial2,
+       sb_group_demo, addprop
 # Bordet model family — formula-surface markers for custom likelihood + submodel
 export TruncatedNormal, bordet_hierarchical_parametric, kernel
 # Logit-form Bernoulli/Binomial -- prefer these over `Bernoulli(logistic(eta))`
@@ -107,6 +109,8 @@ export popefs, cdirichlet, c0dirichlet, c01dirichlet,
        _sb_mi_normal, mi_merge,
        zero_inflated_poisson, zero_inflated_poisson_lpmf,
        zero_inflated_poisson_lpmfs, zero_inflated_poisson_rng,
+       brm_categorical_logit, brm_categorical_logit_lpmf,
+       brm_categorical_logit_lpmfs, brm_categorical_logit_rng,
        sb_group_demo_slic, sb_group_clamped_demo, sb_group_clamped_demo_slic
 
 end # module
