@@ -8,6 +8,7 @@ const RECEIPTS = joinpath(ROOT, "receipts", "row_receipt_audit.tsv")
 const MANUAL_RECEIPTS = joinpath(ROOT, "receipts", "manual_review.tsv")
 const DATASET_RECEIPTS = joinpath(ROOT, "receipts", "row_dataset_receipts.tsv")
 const CANDIDATE_FAMILY_CONTROLS = joinpath(ROOT, "candidate_family_controls.tsv")
+const BETA_BINOMIAL_SURFACE_CONTROL = joinpath(ROOT, "beta_binomial_surface_control.tsv")
 const ALL_OUTPUT = joinpath(ROOT, "all_source_rows_matrix.tsv")
 const DEPLOYED_OUTPUT = joinpath(ROOT, "model_matrix.tsv")
 const SOURCE_SUMMARY_OUTPUT = joinpath(ROOT, "final_summary_by_source.tsv")
@@ -63,7 +64,25 @@ receipts = read_tsv(RECEIPTS; escaped=false)
 manual_receipts = read_tsv(MANUAL_RECEIPTS; escaped=false)
 dataset_receipts = read_tsv(DATASET_RECEIPTS; escaped=false)
 candidate_family_control = only(read_tsv(CANDIDATE_FAMILY_CONTROLS; escaped=false))
-candidate_control_families = Set(["zero_inflated_poisson", "negativebinomial", "student_t"])
+beta_binomial_surface_control = only(read_tsv(BETA_BINOMIAL_SURFACE_CONTROL; escaped=false))
+candidate_family_shas = Dict(
+    "zero_inflated_poisson" => (
+        reviewed="a707af21d138b0019810f8dce9d655109dc97ff6",
+        canonical="11031f2d3bbd0c9cad42bed53a4a8dd193ab9d2e",
+    ),
+    "negativebinomial" => (
+        reviewed="a707af21d138b0019810f8dce9d655109dc97ff6",
+        canonical="11031f2d3bbd0c9cad42bed53a4a8dd193ab9d2e",
+    ),
+    "student_t" => (
+        reviewed="a707af21d138b0019810f8dce9d655109dc97ff6",
+        canonical="11031f2d3bbd0c9cad42bed53a4a8dd193ab9d2e",
+    ),
+    "beta_binomial" => (
+        reviewed="98d54fb413e3994eb3e4c9ea76d659cddce433c5",
+        canonical="457199ddb76703685d98bd3bdc011f419e57f536",
+    ),
+)
 
 translation_by = Dict((row["row_index"], row["variant"]) => row for row in translations)
 capability_by = Dict((row["row_index"], row["variant"]) => row for row in capabilities)
@@ -87,7 +106,11 @@ for historical_row in historical
     dataset_rows = get(datasets_by, row_key, Dict{String,String}[])
 
     inferred_family = inferred["family_selected"]
-    candidate_family_applies = inferred_family in candidate_control_families
+    candidate_family_applies = haskey(candidate_family_shas, inferred_family)
+    candidate_family_sha = get(candidate_family_shas, inferred_family,
+                               (reviewed="", canonical=""))
+    candidate_control = inferred_family == "beta_binomial" ?
+        beta_binomial_surface_control : candidate_family_control
     renderer_family = receipt["deployed_renderer_family_claim"]
     family_discrepancy = if receipt["deployed_family_provenance"] == "explicit_metadata"
         inferred_family == renderer_family ? "none" : "explicit-metadata-vs-inference-review"
@@ -166,9 +189,9 @@ for historical_row in historical
         "inferred_surface_support_class" => inferred["surface_support_class"],
         "inferred_surface_secondary_gap" => inferred["surface_secondary_gap"],
         "family_adapter_landed_applies" => string(candidate_family_applies),
-        "family_adapter_validation_sha" => candidate_family_applies ? candidate_family_control["candidate_sha"] : "",
-        "family_adapter_clean_reviewed_sha" => candidate_family_applies ? "a707af21d138b0019810f8dce9d655109dc97ff6" : "",
-        "family_adapter_canonical_sha" => candidate_family_applies ? "11031f2d3bbd0c9cad42bed53a4a8dd193ab9d2e" : "",
+        "family_adapter_validation_sha" => candidate_family_applies ? candidate_control["candidate_sha"] : "",
+        "family_adapter_clean_reviewed_sha" => candidate_family_sha.reviewed,
+        "family_adapter_canonical_sha" => candidate_family_sha.canonical,
         "family_adapter_control_tier" => candidate_family_applies ? "landed-surface-control-stanc-bridgestan-finite-predict-pointwise" : "",
         "family_adapter_control_scope" => candidate_family_applies ? "combined synthetic family-surface control only; never inherited as row validation" : "",
         "inferred_translation_note" => inferred["translation_note"],

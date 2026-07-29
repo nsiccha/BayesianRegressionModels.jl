@@ -72,7 +72,7 @@ These are stock-BRM surface gaps for which the source audit found StanBlocks pri
 | 6 | Row-varying predictor measurement error | 2 | 2 | 3 | 3 | 5 | 2 | 3 | **16** |
 | 7 | Multi-membership group term | 2 | 2 | 2 | 2 | 5 | 3 | 4 | **16** |
 | 8 | Likelihood/frequency weights | 2 | 2 | 2 | 2 | 5 | 3 | 4 | **16** |
-| 9 | Beta-binomial family adapter | 2 | 2 | 2 | 2 | 4 | 3 | 4 | **15** |
+| 9 | Completed: Beta-binomial family adapter | 2 | 2 | 2 | 2 | 4 | 3 | 4 | **15** |
 | 10 | Non-proportional/other-link ordinal surface | 4 | 3 | 3 | 3 | 4 | 2 | 2 | **14** |
 | 11 | Tensor-product smooth term (`t2`) | 2 | 2 | 2 | 2 | 5 | 2 | 3 | **14** |
 | 12 | Hurdle-Poisson family adapter | 2 | 2 | 2 | 2 | 4 | 3 | 3 | **14** |
@@ -81,7 +81,7 @@ These are stock-BRM surface gaps for which the source audit found StanBlocks pri
 
 The numerical total is a prioritization aid, not a substitute for dependency order. The `B1`--`B14` section identifiers follow the audit taxonomy; the table's `Rank` column is the score order. For example, B9 and B10 outscore B6 because their semantics and substrate path are clearer despite covering fewer rows. Exact row receipts follow.
 
-The corrected inferred matrix's 28 rows classified `genuinely-missing-brm-surface` are exactly the row lists in B4, B5, B6, B7, B8, B9, B10, B11, the immediate row in B12, B13, and B14. B1--B3 and B12's basis-dependent follow-ons are conditional leverage: their formulas are recovered, but the current matrix correctly keeps their historical semantics unresolved until the D-section prerequisites are settled.
+The corrected inferred matrix's 26 rows classified `genuinely-missing-brm-surface` are exactly the row lists in B4, B5, B6, B7, B8, B9, B10, B11, the immediate row in B12, and B13. B1--B3 and B12's basis-dependent follow-ons are conditional leverage: their formulas are recovered, but the current matrix correctly keeps their historical semantics unresolved until the D-section prerequisites are settled.
 
 The reuse/risk judgments are: B1 is reusable across survival and bounded-outcome families but needs family-specific normalizers and censor-code validation; B2 applies to multivariate regression generally but has high covariance/GQ risk; B3 generalizes to relationship-matrix random effects but needs robust level/matrix alignment; B4 is a broadly reusable nominal-response family with a new vector-predictor/GQ contract; B5 is reusable for spatial GP models but requires new multi-axis basis construction; B6 serves ordinal regression beyond proportional odds but is family/link-specific; B7 serves measurement-error models broadly but changes the latent-data and residual-scale contract; B8 is reusable across GAMs but basis construction is substantial; B9 and B10 are general-purpose terms with a clear plate/density substrate; B11, B12, B13 and B14 are bounded family adapters whose main risks are parameterization plus RNG/pointwise consistency.
 
@@ -163,11 +163,11 @@ Exact row: `bambi:circular_vonmises`.
 
 Stan has the density; the missing work is BRM argument mapping, constraints, RNG and pointwise log-likelihood. This is one catalogue row but reusable for circular-response models and for later BMM kernels.
 
-### B14. Beta-binomial outcome
+### B14. Completed at `98d54fb`: Beta-binomial outcome
 
 Exact rows: `brms:cbpp_beta_binomial`, `mcelreath:ucbadmit_beta_binomial` (2 rows, 2 formulas).
 
-The code/test audit caught an earlier translator false-positive: it labeled both as an already-expressible response rewrite while emitting no `current_brm_body`. The corrected matrix now marks them `unsupported` / `genuinely-missing-brm-surface`. BRM has no audited BetaBinomial family marker/lowering; StanBlocks already exposes `beta_binomial_lpmf` and scalar/vector RNG building blocks. Implement a trials/shape family adapter with generated quantities and pointwise log-likelihood.
+The earlier translator false-positive is now closed by two explicit surfaces: Julia-native `BetaBinomial(trials, alpha, beta)` and brms-aligned `BetaBinomial2(trials, mean, precision)`. The exact `98d54fb` control passes stanc, finite BridgeStan density/gradient, prediction/generated quantities, and pointwise likelihood for both. Focused receipts separately run the two historical `vint(...)` formulas through the mean/precision surface; both pass all stages and appear as finite-BridgeStan gallery rows.
 
 ## C. True StanBlocks substrate gaps
 
@@ -254,7 +254,7 @@ This is the only family left genuinely indeterminate after the 122-row family au
 
 1. Preserve the completed A1 receipt and implement the translator-sized A2; rerun only A2's exact probe id plus generated quantities and pointwise log-likelihood.
 2. Preserve the completed `11031f2` family controls, then close D4 and D5 with source evidence so the Student-t and ZIP surfaces gain row-level receipts.
-3. Implement B9/B10/B14 before the larger structured-model program: they have clear semantics, existing substrate and broad reuse.
+3. Preserve the completed B14 receipts, then implement B9/B10 before the larger structured-model program: they have clear semantics, existing substrate and broad reuse.
 4. Implement B4 and B5 as focused reusable terms/families; neither requires a new declaration graph.
 5. Recover D2/D3 semantics before building smooth/ordinal surfaces, then implement B6/B8/B12 against those recovered contracts.
 6. Treat B1--B3 and D1 as explicit kernel/plate projects with per-row generated-quantity and BridgeStan gates. Do not fan one analogue's badge across them.

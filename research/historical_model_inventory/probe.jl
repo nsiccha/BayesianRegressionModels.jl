@@ -46,7 +46,7 @@ split_csv(value) = isempty(value) ? String[] : split(value, ',')
 
 function outcome_name(body)
     matches = collect(eachmatch(
-        r"(?m)^\s*([A-Za-z_]\w*)\s*~\s*(?:Normal|LogNormal|BernoulliLogit|BinomialLogit|Poisson|ZeroInflatedPoisson|NegativeBinomial2|OrderedLogistic|Beta|Gamma|Weibull|LocationScale)\(",
+        r"(?m)^\s*([A-Za-z_]\w*)\s*~\s*(?:Normal|LogNormal|BernoulliLogit|BinomialLogit|BetaBinomial2|Poisson|ZeroInflatedPoisson|NegativeBinomial2|OrderedLogistic|Beta|Gamma|Weibull|LocationScale)\(",
         body,
     ))
     isempty(matches) ? "" : last(matches).captures[1]
@@ -62,7 +62,7 @@ function categorical_columns(formula)
 end
 
 function trial_columns(body)
-    m = match(r"BinomialLogit\((.*?),\s*log_odds\)", body)
+    m = match(r"(?:BinomialLogit|BetaBinomial2)\(\s*([^,]+),", body)
     isnothing(m) && return String[]
     unique([x.match for x in eachmatch(r"\b[A-Za-z_]\w*\b", m.captures[1])])
 end
@@ -109,6 +109,8 @@ function synthetic_data(row)
             isnothing(scalar_trial_count) ? fill(2, n) :
                 scalar_trial_count == 1 ? collect(Int, isodd.(1:n)) :
                 fill(min(2, scalar_trial_count), n)
+        elseif family == "beta_binomial"
+            fill(2, n)
         elseif family in ("poisson", "negativebinomial", "zero_inflated_poisson")
             collect(mod.(1:n, 4))
         elseif family == "ordered_logistic"

@@ -128,11 +128,11 @@ Route classification over the 359 rows is:
 | `brm_kernel` | 19 | faithful group-local/ragged/censoring cell requires a row-specific kernel |
 | `stanblocks_plate` | 47 | structured latent/covariance/time-series cell requires a plate |
 
-In the inferred-family variant, 173 rows are direct executable candidates, 69
+In the inferred-family variant, 175 rows are direct executable candidates, 69
 are semantics-preserving rewrites that still require a row-specific historical
 constant/prior/declaration choice, 66 are route-specific kernel/plate designs,
-50 are unsupported, and one is family-unresolved. The independent surface audit
-classifies 116 rows as expressible verbatim, 126 through a semantic rewrite, 28
+48 are unsupported, and one is family-unresolved. The independent surface audit
+classifies 116 rows as expressible verbatim, 128 through a semantic rewrite, 26
 as genuinely missing a BRM surface, none as a proven StanBlocks substrate gap
 at the row level, and 89 as historically unresolved. These categories are
 exhaustive and row-keyed in `model_matrix.tsv`.
@@ -171,15 +171,15 @@ in StanBlocks canonical `144188a808308177807ceb47f08749a335a0ef70`
 (`negative-binomia-fd397aa0`); the corpus run remains pinned to `329a178...`
 because its non-log path is unaffected.
 
-The 173 executable inferred-family rows and 16 executable exact-metadata rows
-collapse to 159 unique normalized bodies/data schemas. The static gate runs
+The 175 executable inferred-family rows and 16 executable exact-metadata rows
+collapse to 161 unique normalized bodies/data schemas. The static gate runs
 BRMI evaluation, SBBRMI lowering, `brm_descriptor`,
 `brm_execute(:transpile)`, and stanc. On the exact landed tree plus the focused
-StanBlocks `277f233...` refresh described below, 158 unique programs pass stanc.
-Every one of those 158 also instantiates under BridgeStan
+StanBlocks `277f233...` and Beta-binomial `98d54fb...` refreshes described below,
+160 unique programs pass stanc. Every one of those 160 also instantiates under BridgeStan
 2.9.0 and has finite log density and gradient at the synthetic-data zero point;
 there are no post-stanc runtime failures. Byte-identical evidence fan-out maps
-those programs onto 171 deployed rows. The only remaining executable failure is
+those programs onto 173 deployed rows. The only remaining executable failure is
 one transformed-interaction program shared by two deployed rows. These results
 are capability evidence, not posterior-correctness claims.
 
@@ -199,6 +199,13 @@ multi-trial value `2`.
 The sole remaining failed program,
 `bambi:negative_binomial_interaction`, correctly fails earlier because current
 BRM interactions require raw operands and do not accept `prog & zscale(math)`.
+
+The exact Beta-binomial checkpoint `98d54fb...` passes a combined control for
+both the shapes surface and the brms-aligned mean/precision surface, including
+finite BridgeStan density/gradient, prediction/generated quantities, and
+pointwise likelihood. Focused direct receipts then run
+`brms:cbpp_beta_binomial` and `mcelreath:ucbadmit_beta_binomial` separately;
+both pass all stages with 12 finite prediction and pointwise values.
 
 An earlier probe version bound vector-valued Beta shape expressions to
 intermediate names and exposed a missing `lpxf_expr`. Re-checking the native
@@ -284,8 +291,9 @@ and focused BinomialLogit artifact at
 deployments and were not touched). Root checks returned HTTP 200 with exactly
 359 cards. The focused filters returned 154 confirmed-source cards, 171
 finite-BridgeStan cards, and 51 ordinary unsupported cards, matching the matrix
-at that receipt. The current matrix reduces the unsupported count to 50 after
-the known-SE Student-t correction. The listener contained one
+at that receipt. The current offline matrix increases the finite count to 173
+and reduces unsupported rows to 48 after the known-SE Student-t correction and
+the two Beta-binomial receipts. The listener contained one
 `htmxo-semantic-app` and all four option
 controls. Exact UTC times, source/matrix hashes, paths, statuses, and counts are
 in `gallery/served_smoke.tsv`; the final landed listener receipt is also filed
