@@ -41,7 +41,8 @@ sbbrmi = SBBRMI(brmi)
 src    = stan_code(sbbrmi)
 ```
 
-See the [Gallery](/gallery) for live, interactive examples — input
+See [Formula terms](@ref) for the supported predictor syntax and
+backend-specific contracts. The [Gallery](/gallery) provides live, interactive examples — input
 formula, the SLIC submodel body, the transpiled Stan source, and the
 auto-generated posterior-predictive check, all in one card. The
 [API](/api) page lists every public binding.
