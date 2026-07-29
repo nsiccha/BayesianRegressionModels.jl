@@ -66,10 +66,15 @@ function _pair_index(state, pair_number)
     state.blocks[bi].effects[k, g]
 end
 
-# Return one entry of `C = diag(tau) * L` without allocating.  This spelling is
-# bit-identical to the legacy matrix graph for K=1:2, including its
-# multiplication association: first `stick * z`, then `tau * L[i,j]`.
-function _small_block_cholesky_entry(x, block, i, j)
+# Return one entry of `C = diag(tau) * L` without allocating, for any K.  Stan's
+# `cholesky_factor_corr` stick recursion is walked inline along row `i` instead
+# of materializing `L`, so this is one nonrecursive loop over that row's free
+# coordinates.  The spelling is bit-identical to the legacy `_adaptive_cholesky_corr`
+# + `tau .* L` matrix graph, including its multiplication association: first
+# `stick * z`, then `tau * L[i,j]`.  WarmupHMC's discrete window winners can
+# change after a one-ulp gradient drift, so operation order — not just the
+# limiting value — is the contract.
+function _block_cholesky_entry(x, block, i, j)
     tau = exp(x[block.log_scales[i]])
     stick = one(eltype(x))
     offset = (i - 1) * (i - 2) ÷ 2
@@ -82,70 +87,41 @@ function _small_block_cholesky_entry(x, block, i, j)
     tau * stick
 end
 
-# Preserve the legacy `L`-then-`tau .* L` graph exactly for K>=3: WarmupHMC's
-# discrete window winners can change after a one-ulp gradient drift.  Views
-# remove both indexed input copies and scalar `tau` values remove the broadcast
-# temporary.  Writing C in column-major order retains the broadcast's Enzyme
-# accumulation order while avoiding the recursive scalar callable that
-# corrupted the GC under sustained gradients.
-function _accessor_block_cholesky(x, block)
-    K = block.ranef.n_terms
-    L = BRM._adaptive_cholesky_corr(view(x, block.cholesky_free), K)
-    if K <= 4
-        T = eltype(x)
-        tau1 = exp(x[block.log_scales[1]])
-        tau2 = K >= 2 ? exp(x[block.log_scales[2]]) : zero(T)
-        tau3 = K >= 3 ? exp(x[block.log_scales[3]]) : zero(T)
-        tau4 = K >= 4 ? exp(x[block.log_scales[4]]) : zero(T)
-        C = similar(L)
-        for j in axes(C, 2), i in axes(C, 1)
-            tau = i == 1 ? tau1 : i == 2 ? tau2 : i == 3 ? tau3 : tau4
-            C[i, j] = tau * L[i, j]
-        end
-        return C
-    end
-    tau = exp.(view(x, block.log_scales))
-    tau .* L
-end
-
-function _small_block_location(x, state, bi, k, g)
-    k == 1 && return zero(eltype(x))
-    k == 2 || throw(BoundsError(1:2, k))
-    block = state.blocks[bi]
-    m = zero(eltype(x))
-    c = state.sources[state.pair_lookup[bi][1, g]]
-    s = _small_block_cholesky_entry(x, block, 1, 1)
-    z = (x[block.effects[1, g]] - c * m) / s^c
-    m = zero(eltype(x))
-    m += _small_block_cholesky_entry(x, block, 2, 1) * z
-    m
-end
-
-function _block_location(
-    x, state::BRMAdaptiveCenteringState{true}, pair_number,
-)
+# One arbitrary-K location accessor, differentiated by the ordinary Enzyme path.
+#
+# `u[k] = c[k] * sum(C[k,l] * z[l] for l < k) + C[k,k]^c[k] * z[k]` is triangular,
+# so recovering `z` is a forward substitution: row `i` needs the `i-1`
+# innovations below it.  That O(k) state is irreducible, and it is the only
+# allocation left here — the whole `K x K` `L` and `C` rebuild per pair is gone,
+# replaced by the same inline stick walk as `_block_cholesky_entry`.  The
+# innovation buffer cannot become an `NTuple`: `IndexedReparametrization` needs a
+# concrete pair element type, so making K a type parameter would widen the pair
+# vector's `eltype` and throw on any plan mixing block widths.  It cannot be
+# cached on the state either, because accessors run under `Enzyme.Const`.
+# Recursion is deliberately avoided: a recursive scalar callable here corrupted
+# Julia's GC after ~1,750 sustained gradients (fixed by ade46ac/bd9ca2d/b5f4a86).
+function _block_location(x, state::BRMAdaptiveCenteringState, pair_number)
     bi, k, g = _pair_location(state, pair_number)
-    _small_block_location(x, state, bi, k, g)
-end
-
-function _block_location(
-    x, state::BRMAdaptiveCenteringState{false}, pair_number,
-)
-    bi, k, g = _pair_location(state, pair_number)
+    T = eltype(x)
+    k == 1 && return zero(T)
     block = state.blocks[bi]
-    C = _accessor_block_cholesky(x, block)
-    innovations = Vector{eltype(C)}(undef, k)
-    m = zero(eltype(x))
+    lookup = state.pair_lookup[bi]
+    innovations = Vector{T}(undef, k - 1)
+    m = zero(T)
     for i in 1:k
-        m = zero(eltype(x))
+        m = zero(T)
+        tau = exp(x[block.log_scales[i]])
+        stick = one(T)
+        offset = (i - 1) * (i - 2) ÷ 2
         for l in 1:i-1
-            m += C[i, l] * innovations[l]
+            z = tanh(x[block.cholesky_free[offset + l]])
+            m += (tau * (stick * z)) * innovations[l]
+            stick *= sqrt(one(T) - z * z)
         end
         if i < k
-            p = state.pair_lookup[bi][i, g]
-            c = state.sources[p]
+            c = state.sources[lookup[i, g]]
             u = x[block.effects[i, g]]
-            s = C[i, i]
+            s = tau * stick
             innovations[i] = (u - c * m) / s^c
         end
     end
@@ -156,16 +132,10 @@ function (arg::BRMAdaptiveCenteringArgument{:location})(x)
     _block_location(x, arg.state, arg.pair_number)
 end
 
-function (arg::BRMAdaptiveCenteringArgument{:log_scale,true})(x)
+function (arg::BRMAdaptiveCenteringArgument{:log_scale})(x)
     bi, k, _ = _pair_location(arg.state, arg.pair_number)
     block = arg.state.blocks[bi]
-    log(_small_block_cholesky_entry(x, block, k, k))
-end
-
-function (arg::BRMAdaptiveCenteringArgument{:log_scale,false})(x)
-    bi, k, _ = _pair_location(arg.state, arg.pair_number)
-    block = arg.state.blocks[bi]
-    log(_accessor_block_cholesky(x, block)[k, k])
+    log(_block_cholesky_entry(x, block, k, k))
 end
 
 function _sync_sources!(state, ir)
