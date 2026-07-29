@@ -28,6 +28,7 @@ data = (;
     trials=[8, 8, 10, 10, 12, 12],
     y_bb_shapes=[1, 2, 3, 4, 5, 7],
     y_bb_mean_precision=[0, 1, 4, 6, 8, 11],
+    y_cat=[20, 10, 30, 20, 30, 10],
 )
 
 builder = @brm begin
@@ -47,6 +48,10 @@ builder = @brm begin
     logit(bb_mean) ~ 1 + x
     log(bb_precision) ~ 1
     y_bb_mean_precision ~ BetaBinomial2(trials, bb_mean, bb_precision)
+
+    cat_eta2 ~ 1 + x
+    cat_eta3 ~ 1 + prog
+    y_cat ~ CategoricalLogit(cat_eta2, cat_eta3)
 end
 
 descriptor = brm_descriptor(builder, data; mod=@__MODULE__, name=:family_surfaces)
@@ -69,10 +74,12 @@ pointwise = brm_execute(descriptor, :pointwise_loglik; problem, draws=q, seed=20
 expected_prediction = Set([
     :y_zip_gen, :y_nb_gen, :y_t_gen,
     :y_bb_shapes_gen, :y_bb_mean_precision_gen,
+    :y_cat_gen,
 ])
 expected_pointwise = Set([
     :y_zip_likelihood, :y_nb_likelihood, :y_t_likelihood,
     :y_bb_shapes_likelihood, :y_bb_mean_precision_likelihood,
+    :y_cat_likelihood,
 ])
 Set(keys(prediction)) == expected_prediction ||
     error("unexpected prediction outputs: $(keys(prediction))")

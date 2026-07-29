@@ -53,6 +53,17 @@ instance, so the empty struct is sufficient.
 struct OrderedLogistic end
 
 """
+    CategoricalLogit(eta2, eta3, ...)
+
+Reference-class categorical likelihood marker. Each positional argument is an
+existing scalar linear predictor for one non-reference outcome class; class 1
+has fixed logit zero. The sbimpl backend freezes the observed outcome-level
+order, constructs the per-row logit matrix, and lowers to a categorical-logit
+likelihood with prediction and pointwise-log-likelihood support.
+"""
+struct CategoricalLogit end
+
+"""
     Horseshoe
 
 Carvalho-Polson-Scott horseshoe shrinkage prior marker. Use as a prior
@@ -506,6 +517,35 @@ StanBlocks.@deffun begin
             else
                 rv[i] = poisson_rng(lambda)
             end
+        end
+        rv
+    end
+end
+
+# Observation-varying categorical logits. Stan's scalar primitive consumes one
+# vector of class logits, while BRM owns an N x K matrix (one row per outcome),
+# so the triad loops explicitly and gives StanBlocks one coherent density / GQ
+# / pointwise family. `@lpxf` registers the public sampling base name
+# `brm_categorical_logit` used by the likelihood emitter below.
+StanBlocks.@deffun begin
+    @lpxf brm_categorical_logit_lpmf(y::int[n], logits::matrix[n, k])::real = begin
+        rv = 0.
+        for i in 1:n
+            rv += categorical_logit_lpmf(y[i], to_vector(logits[i, :]))::real
+        end
+        rv
+    end
+    brm_categorical_logit_lpmfs(y::int[n], logits::matrix[n, k])::vector[n] = begin
+        rv::vector[n]
+        for i in 1:n
+            rv[i] = categorical_logit_lpmf(y[i], to_vector(logits[i, :]))
+        end
+        rv
+    end
+    brm_categorical_logit_rng(int[n], logits::matrix[n, k])::int[n] = begin
+        rv::int[n]
+        for i in 1:n
+            rv[i] = categorical_logit_rng(to_vector(logits[i, :]))
         end
         rv
     end
@@ -1527,6 +1567,20 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         new_data[e.const_.lambda_key] = lambda
         push!(handled, e.const_.lambda_key)
         new_preproc[key] = PreprocEntry(:gp, (; mu_L=mu_L, K=K, c=e.const_.c, lambda_key=e.const_.lambda_key), e.raw_ref, false)
+    elseif e.kind === :categorical_outcome
+        v = _sb_df_column(df, e.raw_ref)
+        fitted_levels = e.const_.levels
+        expected_n_levels = e.const_.n_levels
+        levels = freeze ? fitted_levels : _sb_fit_levels(v)
+        length(levels) == expected_n_levels || error(
+            "sbimpl: reprocess: categorical outcome `$key` has $(length(levels)) levels, " *
+            "but the fitted `CategoricalLogit` has $expected_n_levels. " *
+            "Preserve the fitted level set/order or rebuild the model with one " *
+            "linear predictor per non-reference class.")
+        new_data[key] = _sb_apply_levels(levels, v)
+        new_preproc[key] = PreprocEntry(
+            :categorical_outcome, (; levels, n_levels=expected_n_levels),
+            e.raw_ref, true)
     elseif e.kind === :factor || e.kind === :mo
         v = _sb_df_column(df, e.raw_ref)
         levels = freeze ? e.const_ : _sb_fit_levels(v)
@@ -3735,6 +3789,45 @@ _sb_lik_family!(stmts, target, ::Type{<:ZeroInflatedPoisson},
 _sb_lik_family!(stmts, target, ::Type{<:NegativeBinomial2},
                 args::Tuple{Any,Any}, data) =
     _sb_lik_stan!(stmts, target, :neg_binomial_2, args, data)
+
+# Reference-class categorical regression. The user supplies one named scalar
+# LP per non-reference class; the fitted outcome level order determines which
+# class each argument owns. A leading all-zero column fixes class 1 as the
+# reference and makes the N x K logit matrix explicit in emitted SLIC.
+function _sb_lik_family!(stmts, target, ::Type{<:CategoricalLogit},
+                         args::Tuple, data)
+    isempty(args) && error(
+        "sbimpl: `CategoricalLogit($target)` needs at least one non-reference " *
+        "linear predictor")
+    all(a -> a isa NamedColumn && !(parent(a) isa DataColumn), args) || error(
+        "sbimpl: `CategoricalLogit($target)` expects one existing scalar linear " *
+        "predictor per non-reference class, got $(args)")
+
+    raw = get(data, target, nothing)
+    raw isa AbstractVector || error(
+        "sbimpl: `CategoricalLogit` expects an observed outcome vector for " *
+        "`$target`, got $(typeof(raw))")
+    levels = _sb_fit_levels(raw)
+    n_levels = length(levels)
+    n_levels >= 2 || error(
+        "sbimpl: `CategoricalLogit($target)` needs >= 2 outcome levels " *
+        "(got $n_levels)")
+    expected_n_levels = length(args) + 1
+    n_levels == expected_n_levels || error(
+        "sbimpl: `CategoricalLogit($target)` observed $n_levels outcome levels " *
+        "but received $(length(args)) non-reference predictors; expected " *
+        "$(n_levels - 1). Outcome level order is $(collect(levels)).")
+
+    data[target] = _sb_apply_levels(levels, raw)
+    _sb_record_preproc!(data, target, PreprocEntry(
+        :categorical_outcome, (; levels, n_levels), target, true))
+
+    logits_name = Symbol(target, :_categorical_logits)
+    zero_reference = :(rep_vector(0., num_elements($target)))
+    eta_exprs = map(a -> _sb_scalar_expr(a, data), args)
+    push!(stmts, :($logits_name = $(Expr(:call, :hcat, zero_reference, eta_exprs...))))
+    push!(stmts, :($target ~ brm_categorical_logit($logits_name)))
+end
 
 # Mean/precision Beta-binomial convenience surface. Shape lowering stays in
 # the emitted expression so scalar, vector, and linked-predictor arguments all

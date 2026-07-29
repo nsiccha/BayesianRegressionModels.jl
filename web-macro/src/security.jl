@@ -27,7 +27,7 @@ _ALLOWED_CALLS = Set{Symbol}([
     :Geometric, :Laplace, :Uniform,
     :MvNormal, :MixtureModel, :Dirichlet,
     :InverseGamma, :InverseGaussian, :VonMises, :Pareto,
-    :OrderedLogistic, :Categorical,
+    :OrderedLogistic, :Categorical, :CategoricalLogit,
     :zscale, :center, :standardize, :factor, :offset, :protect,
     :s, :bs, :t2, :gp, :ar, :ar1, :mo, :mo1, :mi,
     :cbind, :mvbind, :mm, :gr, :dp, :me, :centered,
