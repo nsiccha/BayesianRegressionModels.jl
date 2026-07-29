@@ -23,6 +23,8 @@ julia --startup-file=no --project=web-macro \
   research/historical_model_inventory/surface_controls.jl
 julia --startup-file=no --project=web-macro \
   research/historical_model_inventory/runtime_controls.jl
+julia --startup-file=no --project=web-macro \
+  research/historical_model_inventory/refresh_binomial_logit.jl <expected-brm-sha>
 julia --startup-file=no research/historical_model_inventory/assemble.jl
 julia --startup-file=no --project=web-macro \
   research/historical_model_inventory/gallery/validate.jl
@@ -54,6 +56,9 @@ source checkout.
   the audited current BRM surface.
 - `capability_results.tsv`: row-expanded stage evidence; inherited results are
   only from an identical normalized probe.
+- `binomial_logit_refresh.tsv`: exact five-row before/after receipt for the
+  StanBlocks `329a178...` → `277f233...` scalar-trials RNG trace repair,
+  including prediction/generated quantities and pointwise likelihood.
 - `runtime_controls.tsv`: real-data sleepstudy plus executable BRM-kernel and
   StanBlocks-plate controls.
 - `receipts/`: model and dataset retrieval evidence, conservative source

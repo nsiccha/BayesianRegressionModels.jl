@@ -67,11 +67,17 @@ function trial_columns(body)
     unique([x.match for x in eachmatch(r"\b[A-Za-z_]\w*\b", m.captures[1])])
 end
 
+function scalar_trials(body)
+    m = match(r"BinomialLogit\(\s*(\d+)\s*,\s*log_odds\)", body)
+    isnothing(m) ? nothing : parse(Int, m.captures[1])
+end
+
 function synthetic_data(row)
     columns = sort(unique(split_csv(row["data_columns"])))
     groups = Set(split_csv(row["group_columns"]))
     categoricals = Set(categorical_columns(row["formula_claim"]))
     trials = Set(trial_columns(row["current_brm_body"]))
+    scalar_trial_count = scalar_trials(row["current_brm_body"])
     outcome = outcome_name(row["current_brm_body"])
     family = row["family_selected"]
     n = 12
@@ -100,7 +106,9 @@ function synthetic_data(row)
         elseif family == "bernoulli"
             collect(Int, isodd.(1:n))
         elseif family == "binomial"
-            fill(2, n)
+            isnothing(scalar_trial_count) ? fill(2, n) :
+                scalar_trial_count == 1 ? collect(Int, isodd.(1:n)) :
+                fill(min(2, scalar_trial_count), n)
         elseif family in ("poisson", "negativebinomial", "zero_inflated_poisson")
             collect(mod.(1:n, 4))
         elseif family == "ordered_logistic"

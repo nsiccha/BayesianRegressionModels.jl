@@ -174,21 +174,29 @@ because its non-log path is unaffected.
 The 173 executable inferred-family rows and 16 executable exact-metadata rows
 collapse to 159 unique normalized bodies/data schemas. The static gate runs
 BRMI evaluation, SBBRMI lowering, `brm_descriptor`,
-`brm_execute(:transpile)`, and stanc. On the exact landed tree, 153 unique
-programs pass stanc. Every one of those 153 also instantiates under BridgeStan
+`brm_execute(:transpile)`, and stanc. On the exact landed tree plus the focused
+StanBlocks `277f233...` refresh described below, 158 unique programs pass stanc.
+Every one of those 158 also instantiates under BridgeStan
 2.9.0 and has finite log density and gradient at the synthetic-data zero point;
 there are no post-stanc runtime failures. Byte-identical evidence fan-out maps
-those programs onto 166 deployed rows. The remaining seven executable rows are
-the five descriptor failures and two rows sharing the one transformed-
-interaction lowering failure described below. These results are capability
-evidence, not posterior-correctness claims.
+those programs onto 171 deployed rows. The only remaining executable failure is
+one transformed-interaction program shared by two deployed rows. These results
+are capability evidence, not posterior-correctness claims.
 
-Five static failures are one concrete current substrate seam: scalar-trials
-BinomialLogit translations fail generated-quantity tracing at
-`binomial_logit_rng(::array[] tokenof, ::int, ::vector)`. They are
+At the historical StanBlocks pin `329a178...`, five scalar-trials BinomialLogit
+translations failed descriptor generation at
+`binomial_logit_rng(::array[] tokenof, ::int, ::vector)`:
 `mcelreath/{chimpanzees_intercept,chimpanzees_slopes,moralizing_gods}` and
-`kruschke/{recall_conditions,recall_pooled}`. This is tracked upstream as
-StanBlocks snag `binomial-logit-r-2d7c76b2`. One additional program,
+`kruschke/{recall_conditions,recall_pooled}`. StanBlocks canonical
+`277f23334fab9f2f88b53cd10f38f5d6bb1118c2` resolves that snag. A focused
+Strato2 rerun of exactly those five probe ids now passes descriptor, stanc,
+BridgeStan finite density/gradient, prediction/generated quantities, and
+pointwise log likelihood. The focused receipt retains the old SHA and failure
+signature in `binomial_logit_refresh.tsv`. That rerun also corrected a probe-data
+bug: scalar one-trial rows must use outcomes in `0:1`, not the generic
+multi-trial value `2`.
+
+The sole remaining failed program,
 `bambi:negative_binomial_interaction`, correctly fails earlier because current
 BRM interactions require raw operands and do not accept `prog & zscale(math)`.
 
@@ -273,7 +281,7 @@ The committed gallery at `7b6a091ab6d240ec3fcfbd8f34248d2a78f3373b`
 was served on Strato2 at `http://127.0.0.1:8129/` (ports 8127--8128 were
 occupied by unrelated deployments and were not touched). The initial listener
 and a clean restart both returned HTTP 200 with exactly 359 cards. Served
-filter checks returned 154 confirmed-source cards, 166 finite-BridgeStan cards,
+filter checks returned 154 confirmed-source cards, 171 finite-BridgeStan cards,
 and 51 ordinary unsupported cards, matching the matrix exactly. The listener
 contained one `htmxo-semantic-app` and all four option controls. Exact UTC
 times, source/matrix hashes, paths, statuses, and counts are in
@@ -285,8 +293,6 @@ times, source/matrix hashes, paths, statuses, and counts are in
   `kruschke:calcium`, and preserve the 121 recovered family receipts.
 - Implement row-specific kernel/plate translations for the 66 structured-route
   candidates; representative substrate controls are not substitutes.
-- Address the BinomialLogit generated-quantity seam above before claiming the
-  five currently failing ordinary translations.
 - Resolve the transformed-interaction failure and row-specific historical
   choices for Student-t degrees of freedom, ZIP component pairing, ordinal
   links, binomial trial sizes, and old spline/GP configuration.

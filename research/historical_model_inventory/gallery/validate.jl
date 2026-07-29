@@ -45,9 +45,25 @@ using .HistoricalInventoryGallery
     exact = HistoricalInventory(;
         matrix_path=DEFAULT_MATRIX_PATH,
         validation_tier="bridgestan-finite-density-gradient")
-    @test length(filtered_rows(exact)) == count(
+    @test length(filtered_rows(exact)) == 171 == count(
         row -> row["inferred_capability_tier"] == "bridgestan-finite-density-gradient",
         surface.rows,
+    )
+    refreshed_keys = Set([
+        "mcelreath:chimpanzees_intercept",
+        "mcelreath:chimpanzees_slopes",
+        "mcelreath:moralizing_gods",
+        "kruschke:recall_conditions",
+        "kruschke:recall_pooled",
+    ])
+    refreshed = filter(row -> row["row_key"] in refreshed_keys, surface.rows)
+    @test length(refreshed) == length(refreshed_keys)
+    @test all(row ->
+        row["inferred_capability_tier"] == "bridgestan-finite-density-gradient" &&
+        row["descriptor"] == "pass" && row["stanc"] == "pass" &&
+        row["bridgestan_instantiate"] == "pass" &&
+        row["gradient_finite"] == "true" && isempty(row["failure_stage"]),
+        refreshed,
     )
     combined = HistoricalInventory(;
         matrix_path=DEFAULT_MATRIX_PATH,

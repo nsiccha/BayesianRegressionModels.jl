@@ -52,8 +52,11 @@ bodies; the override TSV has SHA-256
   the discarded VBRMI-mutating ancestry is not part of the reviewed or landed
   line.
 - StanBlocks.jl:
-  `329a178a7ad7877da0b58ad2c360d417ddd663f9` (local active checkout selected
-  by the canonical resolver). The separately discovered
+  `329a178a7ad7877da0b58ad2c360d417ddd663f9` for the original exhaustive
+  census (local active checkout selected by the canonical resolver). The five
+  BinomialLogit rows were subsequently rerun only against exact canonical
+  `277f23334fab9f2f88b53cd10f38f5d6bb1118c2`; their focused receipt preserves
+  both SHAs and the old failure signature. The separately discovered
   `neg_binomial_2_log` trace defect was fixed after this pinned run in
   StanBlocks canonical `144188a808308177807ceb47f08749a335a0ef70`
   (`negative-binomia-fd397aa0`); the inventory's working non-log NB2 route is
