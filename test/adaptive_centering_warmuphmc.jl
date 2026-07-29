@@ -7,6 +7,8 @@ const AC_EXT = Base.get_extension(
     BayesianRegressionModels, :BayesianRegressionModelsWarmupHMCExt,
 )
 
+accessor_allocations(f::F, x::X) where {F,X} = @allocated f(x)
+
 function set_adaptive_sources!(state, ir, controls)
     length(controls) == length(ir.pairs) || throw(DimensionMismatch())
     ir.pairs .= map(ir.pairs, controls) do (idx, value), c
@@ -142,6 +144,16 @@ end
     x[block.cholesky_free] .= [0.2, -0.4, 0.7]
     x[block.log_scales] .= log.([0.5, 1.5, 3.0])
 
+    # The K=1:4 hot path is deliberately scalar: rebuilding a small C and an
+    # innovation vector inside every accessor made Enzyme tape thousands of
+    # short-lived arrays per gradient evaluation.
+    location = ir.pairs[end][2].args[1]
+    log_scale = ir.pairs[end][2].args[2]
+    location(x)
+    log_scale(x)
+    @test accessor_allocations(location, x) == 0
+    @test accessor_allocations(log_scale, x) == 0
+
     expected_ljac, expected = manual_adaptive_map(x, block, controls)
     ljac, mapped = ir(x)
     @test ljac ≈ expected_ljac atol=1e-13
@@ -184,6 +196,34 @@ end
     set_adaptive_sources!(copied_state, copied, zeros(length(controls)))
     @test state.sources == controls
     @test copied_state.sources == zeros(length(controls))
+end
+
+@testset "wide correlated blocks use the polynomial accessor fallback" begin
+    K, G = 5, 2
+    n_cholesky = K * (K - 1) ÷ 2
+    ranef = BayesianRegressionModels.RanefBlock(
+        :r_mu_subject, :ranef_correlated, :subject, nothing, nothing,
+        ["a", "b"], K, G, :r_mu_subject_z_flat, true,
+    )
+    block = AdaptiveCenteringBlock(
+        ranef,
+        0.0,
+        reshape((n_cholesky + K + 1):(n_cholesky + K + K * G), K, G),
+        collect(1:n_cholesky),
+        collect((n_cholesky + 1):(n_cholesky + K)),
+    )
+    state, ir = AC_EXT._adaptive_centering_reparametrizer([block])
+    controls = collect(range(0.1, 0.9, length=K * G))
+    set_adaptive_sources!(state, ir, controls)
+    x = collect(range(-0.6, 0.8, length=n_cholesky + K + K * G))
+
+    expected_ljac, expected = manual_adaptive_map(x, block, controls)
+    ljac, mapped = ir(x)
+    @test ljac ≈ expected_ljac atol=2e-13
+    @test mapped ≈ expected atol=2e-13
+    inverse_ljac, roundtrip = WarmupHMC._inverse_with_logabsdet_jacobian(ir, mapped)
+    @test inverse_ljac ≈ -ljac atol=2e-13
+    @test roundtrip ≈ x atol=2e-13
 end
 
 @testset "candidate scores remove the installed source controls" begin

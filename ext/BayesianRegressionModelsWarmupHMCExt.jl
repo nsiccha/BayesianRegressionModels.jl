@@ -54,26 +54,66 @@ function _pair_index(state, pair_number)
     state.blocks[bi].effects[k, g]
 end
 
-function _block_location(x, state, pair_number)
-    bi, k, g = _pair_location(state, pair_number)
+# Return one entry of C = diag(tau) * L directly from Stan's unconstrained
+# coordinates.  Accessors call this scalar form instead of materialising C:
+# Enzyme otherwise has to shadow and tape four short-lived arrays for every
+# location and log-scale evaluation.
+function _block_cholesky_entry(x, block, i, j)
+    tau = exp(x[block.log_scales[i]])
+    stick = one(eltype(x))
+    offset = (i - 1) * (i - 2) ÷ 2
+    for l in 1:i-1
+        z = tanh(x[block.cholesky_free[offset + l]])
+        l == j && return tau * stick * z
+        stick *= sqrt(one(eltype(x)) - z * z)
+    end
+    j == i || throw(BoundsError((i, j)))
+    tau * stick
+end
+
+# Reconstruct a preceding innovation without a mutable workspace.  The common
+# K=1:4 BRM blocks stay allocation-free under reverse-mode AD; the public
+# contract remains general, so larger blocks switch to the polynomial fallback
+# below instead of paying this recursion's exponential recomputation.
+function _recursive_block_location(x, state, bi, k, g)
     block = state.blocks[bi]
-    C = BRM._adaptive_block_cholesky(x, block)
-    T = eltype(C)
-    z = Vector{T}(undef, k)
-    m = zero(T)
+    m = zero(eltype(x))
+    for l in 1:k-1
+        previous = state.pair_lookup[bi][l, g]
+        previous_location = _recursive_block_location(x, state, bi, l, g)
+        c = state.sources[previous]
+        s = _block_cholesky_entry(x, block, l, l)
+        innovation =
+            (x[block.effects[l, g]] - c * previous_location) / s^c
+        m += _block_cholesky_entry(x, block, k, l) * innovation
+    end
+    m
+end
+
+function _iterative_block_location(x, state, bi, k, g)
+    block = state.blocks[bi]
+    innovations = Vector{eltype(x)}(undef, k - 1)
+    m = zero(eltype(x))
     for i in 1:k
-        m = zero(T)
+        m = zero(eltype(x))
         for l in 1:i-1
-            m += C[i, l] * z[l]
+            m += _block_cholesky_entry(x, block, i, l) * innovations[l]
         end
         if i < k
             p = state.pair_lookup[bi][i, g]
             c = state.sources[p]
             u = x[block.effects[i, g]]
-            z[i] = (u - c * m) / C[i, i]^c
+            s = _block_cholesky_entry(x, block, i, i)
+            innovations[i] = (u - c * m) / s^c
         end
     end
     m
+end
+
+function _block_location(x, state, pair_number)
+    bi, k, g = _pair_location(state, pair_number)
+    k <= 4 && return _recursive_block_location(x, state, bi, k, g)
+    _iterative_block_location(x, state, bi, k, g)
 end
 
 function (arg::BRMAdaptiveCenteringArgument)(x)
@@ -81,8 +121,8 @@ function (arg::BRMAdaptiveCenteringArgument)(x)
         return _block_location(x, arg.state, arg.pair_number)
     if arg.kind === :log_scale
         bi, k, _ = _pair_location(arg.state, arg.pair_number)
-        C = BRM._adaptive_block_cholesky(x, arg.state.blocks[bi])
-        return log(C[k, k])
+        block = arg.state.blocks[bi]
+        return log(_block_cholesky_entry(x, block, k, k))
     end
     error("unknown BRM adaptive-centering argument kind $(arg.kind)")
 end
