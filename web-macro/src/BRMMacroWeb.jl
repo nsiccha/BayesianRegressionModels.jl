@@ -38,13 +38,17 @@ using BayesianRegressionModels: AbstractColumn, MissingColumn, DataColumn,
     NamedColumn, ExprColumn, LikelihoodColumn, MaterializedColumn,
     Data, MaybeData, BRMI, VBRMI, SBBRMI,
     assign, doublepipe, gr, gp, hsgp, offset, zscale, center, standardize, protect,
-    me, s, ar, OrderedLogistic,
+    me, s, ar, OrderedLogistic, Ordinal, Cumulative, StoppingRatio,
+    LogitLink, ProbitLink, CloglogLink,
     # Custom-distribution stub names. SLIC's symbol resolver checks
     # `isdefined(BRMMacroWeb, :name)`, which is false for names only
     # brought in via plain `using`; explicit-name imports register them
     # so the lookup succeeds.
     zero_inflated_poisson, zero_inflated_poisson_lpmf,
     zero_inflated_poisson_lpmfs, zero_inflated_poisson_rng,
+    brm_ordinal, brm_ordinal_lpmf, brm_ordinal_lpmfs, brm_ordinal_rng,
+    brm_ordinal_logcdf, brm_ordinal_logccdf, brm_ordinal_cdf,
+    multi_std_normal, multi_std_normal_lpdf, ranef_b_matrix,
     brm_von_mises, brm_von_mises_lpdf,
     brm_von_mises_lpdfs, brm_von_mises_rng,
     Horseshoe, CategoricalLogit, ZeroInflatedPoisson, NegativeBinomial2,

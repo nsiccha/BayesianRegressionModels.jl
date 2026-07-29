@@ -114,6 +114,15 @@ function _check_term_kwargs(::Type{<:CircularVonMises}, kwargs)
     _sb_circular_interval(kwargs)
     nothing
 end
+
+function _check_term_kwargs(::Type{<:Ordinal}, kwargs)
+    allowed = (:discrimination, :per_threshold)
+    unknown = filter(k -> k ∉ allowed, keys(kwargs))
+    isempty(unknown) || error(
+        "Ordinal: unsupported keyword(s): $(join(unknown, ", ")); " *
+        "supported keywords are `discrimination` and `per_threshold`")
+    nothing
+end
 popefs = StanBlocks.@slic begin
     n_covariates = dims(X)[2]
     beta_pop ~ std_normal(; n=n_covariates)
@@ -530,6 +539,253 @@ StanBlocks.@deffun begin
             end
         end
         rv
+    end
+end
+
+# One internal Stan family serves the public typed ordinal composition. The
+# integer tags are emitted compile-time literals (structure: cumulative=1,
+# stopping-ratio=2; link: logit=1, probit=2, cloglog=3). Keeping the tags inside
+# one private UDF avoids a Cartesian product of public pair names while still
+# giving StanBlocks the complete lpmf / pointwise-lpmf / RNG triad.
+#
+# For cumulative-logit the scalar density delegates to Stan's native
+# ordered_logistic_lpmf after applying discrimination to both eta and the
+# cutpoints. Probit and cloglog use their exact native CDF/log-CDF primitives.
+# Stopping-ratio has no native Stan distribution, so its sequential hazards are
+# accumulated directly in log space.
+StanBlocks.@deffun begin
+    @stanonly brm_ordinal_logcdf(z::real, link::int)::real = begin
+        if link == 1
+            log_inv_logit(z)
+        else
+            if link == 2
+                normal_lcdf(z, 0., 1.)
+            else
+                log1m_exp(-exp(z))
+            end
+        end
+    end
+    @stanonly brm_ordinal_logccdf(z::real, link::int)::real = begin
+        if link == 1
+            log_inv_logit(-z)
+        else
+            if link == 2
+                normal_lccdf(z, 0., 1.)
+            else
+                -exp(z)
+            end
+        end
+    end
+    @stanonly brm_ordinal_cdf(z::real, link::int)::real = begin
+        if link == 1
+            inv_logit(z)
+        else
+            if link == 2
+                Phi(z)
+            else
+                -expm1(-exp(z))
+            end
+        end
+    end
+
+    @stanonly @lpxf brm_ordinal_lpmf(y::int, eta::real, thresholds::vector[k],
+                           discrimination::real, structure::int, link::int,
+                           threshold_effect::vector[k])::real = begin
+        K = k + 1
+        if discrimination <= 0.
+            negative_infinity()
+        else
+            if y < 1
+                negative_infinity()
+            else
+                if y > K
+                    negative_infinity()
+                else
+                    if structure == 1
+                        if link == 1
+                            ordered_logistic_lpmf(
+                                y,
+                                discrimination * eta,
+                                discrimination .* thresholds,
+                            )
+                        else
+                            if y == 1
+                                z_first = discrimination * (thresholds[1] - eta)
+                                brm_ordinal_logcdf(z_first, link)
+                            else
+                                if y == K
+                                    z_last = discrimination * (thresholds[k] - eta)
+                                    brm_ordinal_logccdf(z_last, link)
+                                else
+                                    z_hi = discrimination * (thresholds[y] - eta)
+                                    z_lo = discrimination * (thresholds[y - 1] - eta)
+                                    log_diff_exp(
+                                        brm_ordinal_logcdf(z_hi, link),
+                                        brm_ordinal_logcdf(z_lo, link),
+                                    )
+                                end
+                            end
+                        end
+                    else
+                        rv = 0.
+                        for j in 1:k
+                            z_stage = discrimination *
+                                (thresholds[j] - eta - threshold_effect[j])
+                            if j < y
+                                rv += brm_ordinal_logccdf(z_stage, link)
+                            else
+                                if j == y
+                                    rv += brm_ordinal_logcdf(z_stage, link)
+                                end
+                            end
+                        end
+                        rv
+                    end
+                end
+            end
+        end
+    end
+
+    @stanonly brm_ordinal_lpmf(y::int[n], eta::vector[n], thresholds::vector[k],
+                     discrimination::vector[n], structure::int, link::int,
+                     threshold_effect::matrix[n,k])::real = begin
+        rv = 0.
+        for i in 1:n
+            rv += brm_ordinal_lpmf(
+                y[i], eta[i], thresholds, discrimination[i], structure, link,
+                to_vector(threshold_effect[i, :]),
+            )
+        end
+        rv
+    end
+    @stanonly brm_ordinal_lpmf(y::int[n], eta::vector[n], thresholds::vector[k],
+                     discrimination::real, structure::int, link::int,
+                     threshold_effect::matrix[n,k])::real = begin
+        brm_ordinal_lpmf(
+            y, eta, thresholds, rep_vector(discrimination, n), structure, link,
+            threshold_effect,
+        )
+    end
+    @stanonly brm_ordinal_lpmf(y::int[n], eta::real, thresholds::vector[k],
+                     discrimination::vector[n], structure::int, link::int,
+                     threshold_effect::matrix[n,k])::real = begin
+        brm_ordinal_lpmf(
+            y, rep_vector(eta, n), thresholds, discrimination, structure, link,
+            threshold_effect,
+        )
+    end
+    @stanonly brm_ordinal_lpmf(y::int[n], eta::real, thresholds::vector[k],
+                     discrimination::real, structure::int, link::int,
+                     threshold_effect::matrix[n,k])::real = begin
+        brm_ordinal_lpmf(
+            y, rep_vector(eta, n), thresholds, rep_vector(discrimination, n),
+            structure, link, threshold_effect,
+        )
+    end
+
+    @stanonly brm_ordinal_lpmfs(args...) = begin
+        brm_ordinal_lpmf(args...)
+    end
+    @stanonly brm_ordinal_lpmfs(y::int[n], eta::vector[n], thresholds::vector[k],
+                      discrimination::vector[n], structure::int, link::int,
+                      threshold_effect::matrix[n,k])::vector[n] = begin
+        rv::vector[n]
+        for i in 1:n
+            rv[i] = brm_ordinal_lpmf(
+                y[i], eta[i], thresholds, discrimination[i], structure, link,
+                to_vector(threshold_effect[i, :]),
+            )
+        end
+        rv
+    end
+    @stanonly brm_ordinal_lpmfs(y::int[n], eta::vector[n], thresholds::vector[k],
+                      discrimination::real, structure::int, link::int,
+                      threshold_effect::matrix[n,k])::vector[n] = begin
+        brm_ordinal_lpmfs(
+            y, eta, thresholds, rep_vector(discrimination, n), structure, link,
+            threshold_effect,
+        )
+    end
+    @stanonly brm_ordinal_lpmfs(y::int[n], eta::real, thresholds::vector[k],
+                      discrimination::vector[n], structure::int, link::int,
+                      threshold_effect::matrix[n,k])::vector[n] = begin
+        brm_ordinal_lpmfs(
+            y, rep_vector(eta, n), thresholds, discrimination, structure, link,
+            threshold_effect,
+        )
+    end
+    @stanonly brm_ordinal_lpmfs(y::int[n], eta::real, thresholds::vector[k],
+                      discrimination::real, structure::int, link::int,
+                      threshold_effect::matrix[n,k])::vector[n] = begin
+        brm_ordinal_lpmfs(
+            y, rep_vector(eta, n), thresholds, rep_vector(discrimination, n),
+            structure, link, threshold_effect,
+        )
+    end
+
+    @stanonly brm_ordinal_rng(eta::real, thresholds::vector[k], discrimination::real,
+                    structure::int, link::int,
+                    threshold_effect::vector[k])::int = begin
+        K = k + 1
+        rv = K
+        if structure == 1
+            u = uniform_rng(0., 1.)
+            for j in 1:k
+                if rv == K
+                    z_cumulative = discrimination * (thresholds[j] - eta)
+                    if u <= brm_ordinal_cdf(z_cumulative, link)
+                        rv += j - rv
+                    end
+                end
+            end
+        else
+            for j in 1:k
+                if rv == K
+                    z_stopping = discrimination *
+                        (thresholds[j] - eta - threshold_effect[j])
+                    if bernoulli_rng(brm_ordinal_cdf(z_stopping, link)) == 1
+                        rv += j - rv
+                    end
+                end
+            end
+        end
+        rv
+    end
+    @stanonly brm_ordinal_rng(int[n], eta::vector[n], thresholds::vector[k],
+                    discrimination::vector[n], structure::int, link::int,
+                    threshold_effect::matrix[n,k])::int[n] = begin
+        rv::int[n]
+        for i in 1:n
+            rv[i] = brm_ordinal_rng(
+                eta[i], thresholds, discrimination[i], structure, link,
+                to_vector(threshold_effect[i, :]),
+            )
+        end
+        rv
+    end
+    @stanonly brm_ordinal_rng(int[n], eta::vector[n], thresholds::vector[k],
+                    discrimination::real, structure::int, link::int,
+                    threshold_effect::matrix[n,k])::int[n] = begin
+        brm_ordinal_rng(
+            int[n], eta, thresholds, rep_vector(discrimination, n), structure,
+            link, threshold_effect,
+        )
+    end
+    @stanonly brm_ordinal_rng(int[n], eta::real, thresholds::vector[k],
+                    discrimination::vector[n], structure::int, link::int,
+                    threshold_effect::matrix[n,k])::int[n] = begin
+        brm_ordinal_rng(
+            int[n], rep_vector(eta, n), thresholds, discrimination, structure,
+            link, threshold_effect,
+        )
+    end
+    @stanonly brm_ordinal_rng(int[n], eta::real, thresholds::vector[k],
+                    discrimination::real, structure::int, link::int,
+                    threshold_effect::matrix[n,k])::int[n] = begin
+        brm_ordinal_rng(
+            int[n], rep_vector(eta, n), thresholds,
+            rep_vector(discrimination, n), structure, link, threshold_effect,
+        )
     end
 end
 
@@ -1488,7 +1744,8 @@ src   = stan_code(sbbrmi)
 # data key, how to regenerate that key from a new df:
 #   kind         -- which transform (:zscale/:standardize/:center/:factor/:mo/
 #                   :spline/:tensor_spline/:gp/:hsgp/:protect/:interaction/
-#                   :categorical_outcome)
+#                   :categorical_outcome/:ordinal_outcome/
+#                   :ordinal_threshold_predictor)
 #   const_       -- the fitted constant: (μ,σ) / μ / level-vector / TPS basis /
 #                   tensor-spline margins/centers / exact-GP axis metadata /
 #                   HSGP (μ,L,K,c) / categorical
@@ -2128,6 +2385,29 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         new_preproc[key] = PreprocEntry(
             :categorical_outcome, (; levels, n_levels=expected_n_levels),
             e.raw_ref, true)
+    elseif e.kind === :ordinal_outcome
+        v = _sb_df_column(df, e.raw_ref)
+        fitted_levels = e.const_.levels
+        expected_n_levels = e.const_.n_levels
+        levels = freeze ? fitted_levels : _sb_fit_levels(v)
+        length(levels) == expected_n_levels || error(
+            "sbimpl: reprocess: ordinal outcome `$key` has $(length(levels)) levels, " *
+            "but the fitted `Ordinal` model has $expected_n_levels. Preserve the " *
+            "fitted ordered level set or rebuild the model.")
+        new_data[key] = _sb_apply_levels(levels, v)
+        new_preproc[key] = PreprocEntry(
+            :ordinal_outcome, (; levels, n_levels=expected_n_levels),
+            e.raw_ref, true)
+    elseif e.kind === :ordinal_threshold_predictor
+        v = _sb_df_column(df, e.raw_ref)
+        v isa AbstractVector{<:Real} || error(
+            "sbimpl: reprocess: ordinal threshold predictor `$key` must be numeric, " *
+            "got $(typeof(v))")
+        all(isfinite, v) || error(
+            "sbimpl: reprocess: ordinal threshold predictor `$key` contains " *
+            "non-finite values")
+        new_data[key] = collect(Float64, v)
+        new_preproc[key] = e
     elseif e.kind === :factor || e.kind === :mo
         v = _sb_df_column(df, e.raw_ref)
         levels = freeze ? e.const_ : _sb_fit_levels(v)
@@ -4370,7 +4650,7 @@ _flat_vec_key(_k, _v) = nothing
 
 function _sb_likelihood!(stmts, target::Symbol, rhs::ExprColumn, data)
     f = getf(rhs)
-    if f === CircularVonMises
+    if f === CircularVonMises || f === Ordinal
         _sb_lik_family!(stmts, target, f, getargs(rhs), getkwargs(rhs), data)
     else
         _sb_lik_family!(stmts, target, f, getargs(rhs), data)
@@ -4409,6 +4689,169 @@ function _sb_lik_family!(stmts, target, ::Type{<:OrderedLogistic}, args::Tuple{A
     eta_expr = _sb_scalar_expr(args[1], data)
     push!(stmts, :($target ~ ordered_logistic($eta_expr, $cut_name)))
 end
+
+_sb_ordinal_structure_code(::Cumulative) = 1
+_sb_ordinal_structure_code(::StoppingRatio) = 2
+_sb_ordinal_structure_code(::Type{Cumulative}) = 1
+_sb_ordinal_structure_code(::Type{StoppingRatio}) = 2
+function _sb_ordinal_structure_code(x::ExprColumn)
+    isempty(getargs(x)) && isempty(getkwargs(x)) || error(
+        "sbimpl: ordinal structure tags take no arguments; use `Cumulative()` " *
+        "or `StoppingRatio()`")
+    f = getf(x)
+    f === Cumulative && return 1
+    f === StoppingRatio && return 2
+    error("sbimpl: unsupported ordinal structure `$f`; use `Cumulative()` or " *
+          "`StoppingRatio()`")
+end
+_sb_ordinal_structure_code(x) = error(
+    "sbimpl: ordinal structure must be `Cumulative()` or `StoppingRatio()`, " *
+    "got $(typeof(x))")
+
+_sb_ordinal_link_code(::LogitLink) = 1
+_sb_ordinal_link_code(::ProbitLink) = 2
+_sb_ordinal_link_code(::CloglogLink) = 3
+_sb_ordinal_link_code(::Type{LogitLink}) = 1
+_sb_ordinal_link_code(::Type{ProbitLink}) = 2
+_sb_ordinal_link_code(::Type{CloglogLink}) = 3
+function _sb_ordinal_link_code(x::ExprColumn)
+    isempty(getargs(x)) && isempty(getkwargs(x)) || error(
+        "sbimpl: ordinal link tags take no arguments; use `LogitLink()`, " *
+        "`ProbitLink()`, or `CloglogLink()`")
+    f = getf(x)
+    f === LogitLink && return 1
+    f === ProbitLink && return 2
+    f === CloglogLink && return 3
+    error("sbimpl: unsupported ordinal link `$f`; use `LogitLink()`, " *
+          "`ProbitLink()`, or `CloglogLink()`")
+end
+_sb_ordinal_link_code(x) = error(
+    "sbimpl: ordinal link must be `LogitLink()`, `ProbitLink()`, or " *
+    "`CloglogLink()`, got $(typeof(x))")
+
+_sb_ordinal_has_fixed_intercept(x::Real) = !iszero(x)
+_sb_ordinal_has_fixed_intercept(x::NamedColumn) =
+    _sb_ordinal_has_fixed_intercept_parent(parent(x))
+_sb_ordinal_has_fixed_intercept(_) = false
+_sb_ordinal_has_fixed_intercept_parent(p::ExprColumn) = begin
+    getf(p) === (~) || return false
+    _, rhs = getargs(p, 2)
+    any(t -> t isa Integer && t == 1, _sb_terms(rhs))
+end
+_sb_ordinal_has_fixed_intercept_parent(_) = false
+
+function _sb_ordinal_threshold_predictors!(data, target, raw, n_obs)
+    raw isa Tuple || error(
+        "sbimpl: `Ordinal(...; per_threshold=...)` expects a tuple of raw " *
+        "numeric columns, for example `per_threshold=(treat,)`")
+    names = Symbol[]
+    for term in raw
+        term isa NamedColumn && parent(term) isa DataColumn || error(
+            "sbimpl: `Ordinal(...; per_threshold=...)` currently accepts only " *
+            "raw numeric data columns; got $(typeof(term))")
+        key = name(term)
+        values = parent(parent(term))
+        values isa AbstractVector{<:Real} || error(
+            "sbimpl: ordinal threshold predictor `$key` must be numeric, got " *
+            "$(typeof(values))")
+        length(values) == n_obs || error(
+            "sbimpl: ordinal threshold predictor `$key` has $(length(values)) " *
+            "rows; outcome `$target` has $n_obs")
+        all(isfinite, values) || error(
+            "sbimpl: ordinal threshold predictor `$key` contains non-finite values")
+        data[key] = collect(Float64, values)
+        _sb_record_preproc!(data, key, PreprocEntry(
+            :ordinal_threshold_predictor, nothing, key, false))
+        push!(names, key)
+    end
+    Tuple(names)
+end
+
+function _sb_ordinal_discrimination_expr(raw, data)
+    if raw isa Real
+        isfinite(raw) && raw > 0 || error(
+            "sbimpl: ordinal discrimination must be finite and strictly " *
+            "positive, got $(repr(raw))")
+    elseif raw isa NamedColumn && parent(raw) isa DataColumn
+        values = parent(parent(raw))
+        values isa AbstractVector{<:Real} && all(x -> isfinite(x) && x > 0, values) ||
+            error("sbimpl: ordinal discrimination data `$(name(raw))` must " *
+                  "contain only finite positive values")
+    end
+    _sb_scalar_expr(raw, data)
+end
+
+# Typed structure/link composition. Cumulative thresholds are ordered;
+# stopping-ratio stage intercepts are deliberately unconstrained by ordering.
+# A fixed eta intercept is non-identifiable with either threshold vector, so
+# the new surface rejects it (the legacy OrderedLogistic shorthand remains
+# unchanged for compatibility).
+function _sb_lik_family!(stmts, target, ::Type{<:Ordinal},
+                         args::Tuple{Any,Any,Any}, kwargs, data)
+    structure_raw, link_raw, eta_raw = args
+    structure = _sb_ordinal_structure_code(structure_raw)
+    link = _sb_ordinal_link_code(link_raw)
+    _sb_ordinal_has_fixed_intercept(eta_raw) && error(
+        "sbimpl: `Ordinal($target)` cannot include a fixed intercept in `eta`; " *
+        "the estimated thresholds already supply the location. Use `eta ~ 0 + ...`.")
+
+    raw = get(data, target, nothing)
+    raw isa AbstractVector || error(
+        "sbimpl: `Ordinal` expects an observed outcome vector for `$target`, " *
+        "got $(typeof(raw))")
+    levels = _sb_fit_levels(raw)
+    n_levels = length(levels)
+    n_levels >= 2 || error(
+        "sbimpl: `Ordinal($target)` needs at least two observed levels " *
+        "(got $n_levels)")
+    n_cut = n_levels - 1
+    data[target] = _sb_apply_levels(levels, raw)
+    _sb_record_preproc!(data, target, PreprocEntry(
+        :ordinal_outcome, (; levels, n_levels), target, true))
+
+    cut_name = Symbol(target, :_thresholds)
+    if structure == 1
+        push!(stmts, :($cut_name::ordered[$n_cut] ~ std_normal()))
+    else
+        push!(stmts, :($cut_name::vector[$n_cut] ~ std_normal()))
+    end
+
+    per_threshold_raw = get(kwargs, :per_threshold, ())
+    per_threshold = _sb_ordinal_threshold_predictors!(
+        data, target, per_threshold_raw, length(raw))
+    structure == 1 && !isempty(per_threshold) && error(
+        "sbimpl: `per_threshold` is currently supported for " *
+        "`StoppingRatio()` only; unrestricted cumulative category-specific " *
+        "effects can make cumulative probabilities non-monotone")
+
+    effect_name = Symbol(target, :_threshold_effect)
+    if isempty(per_threshold)
+        push!(stmts, :($effect_name = rep_matrix(
+            0., num_elements($target), $n_cut)))
+    else
+        X_name = Symbol(target, :_threshold_X)
+        beta_name = Symbol(target, :_threshold_beta)
+        n_terms = length(per_threshold)
+        push!(stmts, Expr(:(=), X_name, Expr(:call, :hcat, per_threshold...)))
+        # Stan's std_normal_lpdf is not matrix-vectorised. Reuse BRM's
+        # array-of-vectors standard-normal prior, then rebuild a K-1 by p matrix
+        # through the measured ranef_b_matrix helper for the design multiply.
+        push!(stmts, :($beta_name::vector[$n_cut,$n_terms] ~ multi_std_normal()))
+        beta_matrix = Expr(:call, :adjoint,
+            Expr(:call, :ranef_b_matrix, beta_name))
+        push!(stmts, Expr(:(=), effect_name,
+            Expr(:call, :*, X_name, beta_matrix)))
+    end
+
+    eta = _sb_scalar_expr(eta_raw, data)
+    discrimination = _sb_ordinal_discrimination_expr(
+        get(kwargs, :discrimination, 1.0), data)
+    _sb_lik_stan_exprs!(stmts, target, :brm_ordinal,
+        (eta, cut_name, discrimination, structure, link, effect_name))
+end
+_sb_lik_family!(_, target, ::Type{<:Ordinal}, args, _, _) = error(
+    "sbimpl: `Ordinal($target)` expects exactly three positional arguments " *
+    "`(structure, link, eta)`, got $(length(args))")
 
 _sb_lik_family!(stmts, target, ::Type{<:ZeroInflatedPoisson},
                 args::Tuple{Any,Any}, data) =

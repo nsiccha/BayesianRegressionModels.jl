@@ -44,7 +44,9 @@ include("adaptive_centering.jl")
 # (web-macro, bruno, tests) reaches for.
 export @brm, @n, @x, @getproperty
 export assign, doublepipe, gr, gp, offset, zscale, center, standardize, protect, factor
-export me, mi, s, t2, ar, mo, mo1, hsgp, OrderedLogistic, Horseshoe,
+export me, mi, s, t2, ar, mo, mo1, hsgp, OrderedLogistic, Ordinal,
+       OrdinalStructure, Cumulative, StoppingRatio,
+       OrdinalLink, LogitLink, ProbitLink, CloglogLink, Horseshoe,
        CategoricalLogit, ZeroInflatedPoisson, NegativeBinomial2,
        BetaBinomial, BetaBinomial2, CircularVonMises, SkewDoubleExponential,
        sb_group_demo, addprop
@@ -58,6 +60,12 @@ export TruncatedNormal, bordet_hierarchical_parametric, kernel
 # is re-exported from Distributions; `BinomialLogit` is defined alongside the
 # other executable likelihood contracts in likelihood_distributions.jl.
 export BernoulliLogit, BinomialLogit
+# SLIC custom-family bindings must be visible in a caller-supplied model module
+# (`brm_descriptor(...; mod=@__MODULE__)`), matching the existing exported
+# zero-inflated-Poisson and von-Mises UDF triads.
+export brm_ordinal, brm_ordinal_lpmf, brm_ordinal_lpmfs, brm_ordinal_rng,
+       brm_ordinal_logcdf, brm_ordinal_logccdf, brm_ordinal_cdf,
+       multi_std_normal, multi_std_normal_lpdf, ranef_b_matrix
 export Data, MaybeData, maybedata
 export AbstractColumn, MissingColumn, DataColumn, NamedColumn,
        ExprColumn, LikelihoodColumn, MaterializedColumn

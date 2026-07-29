@@ -3,6 +3,177 @@
 # type/function and its expression arguments separate, so these numeric
 # constructors do not change formula syntax.
 
+"""Supertype for the ordinal probability construction used by [`Ordinal`](@ref)."""
+abstract type OrdinalStructure end
+
+"""Cumulative-link ordinal probabilities, `P(Y <= k) = F(d * (cut[k] - eta))`."""
+struct Cumulative <: OrdinalStructure end
+
+"""Stopping-ratio ordinal probabilities, `P(Y = k | Y >= k) = F(d * (cut[k] - eta[k]))`."""
+struct StoppingRatio <: OrdinalStructure end
+
+"""Supertype for typed ordinal inverse-link choices used by [`Ordinal`](@ref)."""
+abstract type OrdinalLink end
+
+"""Logistic inverse link for [`Ordinal`](@ref)."""
+struct LogitLink <: OrdinalLink end
+
+"""Standard-normal inverse link for [`Ordinal`](@ref)."""
+struct ProbitLink <: OrdinalLink end
+
+"""Complementary-log-log inverse link for [`Ordinal`](@ref)."""
+struct CloglogLink <: OrdinalLink end
+
+"""
+    Ordinal(structure, link, eta, thresholds; discrimination=1)
+
+Executable ordinal distribution with independently typed probability
+`structure` and inverse `link`. `structure` is [`Cumulative`](@ref) or
+[`StoppingRatio`](@ref); `link` is [`LogitLink`](@ref), [`ProbitLink`](@ref),
+or [`CloglogLink`](@ref). `discrimination` is finite and strictly positive.
+
+For a cumulative model, `thresholds` must be strictly increasing and `eta`
+must be scalar. For a stopping-ratio model the thresholds are stage-specific
+intercepts and need not be ordered; `eta` may be either one shared scalar or a
+vector with one value per non-terminal stage. The support is
+`1:(length(thresholds) + 1)`.
+
+Inside `@brm`, omit `thresholds`: for example,
+`y ~ Ordinal(Cumulative(), ProbitLink(), eta)`. The StanBlocks backend owns
+and estimates the thresholds. Formula-only keywords `discrimination=` and
+`per_threshold=` are documented in the likelihood guide.
+"""
+struct Ordinal{S<:OrdinalStructure,L<:OrdinalLink,T<:Real,E} <:
+       Distributions.DiscreteUnivariateDistribution
+    structure::S
+    link::L
+    eta::E
+    thresholds::Vector{T}
+    discrimination::T
+end
+
+_ordinal_eta_values(eta::Real) = (eta,)
+_ordinal_eta_values(eta::AbstractVector{<:Real}) = Tuple(eta)
+_ordinal_eta_values(eta) = throw(ArgumentError(
+    "Ordinal: `eta` must be a real scalar or a real vector, got $(typeof(eta))"))
+
+function Ordinal(structure::S, link::L, eta,
+                 thresholds::AbstractVector{<:Real}, discrimination::Real;
+                 check_args::Bool=true) where {S<:OrdinalStructure,L<:OrdinalLink}
+    isempty(thresholds) && throw(ArgumentError(
+        "Ordinal: at least one threshold is required"))
+    raw_eta = _ordinal_eta_values(eta)
+    T = promote_type(map(typeof, map(float,
+        (raw_eta..., thresholds..., discrimination)))...)
+    eta_p = eta isa Real ? convert(T, float(eta)) :
+            collect(T, map(float, eta))
+    cuts = collect(T, map(float, thresholds))
+    disc = convert(T, float(discrimination))
+
+    Distributions.@check_args(
+        Ordinal,
+        (eta_p, all(isfinite, raw_eta), "eta must be finite"),
+        (cuts, all(isfinite, cuts), "thresholds must be finite"),
+        (disc, isfinite(disc) && disc > zero(disc),
+         "discrimination must be finite and strictly positive"),
+    )
+    if structure isa Cumulative
+        eta_p isa Real || throw(ArgumentError(
+            "Ordinal(Cumulative(), ...): `eta` must be scalar"))
+        all(cuts[i] < cuts[i + 1] for i in 1:length(cuts)-1) ||
+            throw(DomainError(cuts,
+                "Ordinal(Cumulative(), ...): thresholds must be strictly increasing"))
+    elseif eta_p isa AbstractVector
+        length(eta_p) == length(cuts) || throw(DimensionMismatch(
+            "Ordinal(StoppingRatio(), ...): vector eta has length $(length(eta_p)); " *
+            "expected $(length(cuts)), one value per threshold"))
+    end
+    Ordinal{S,L,T,typeof(eta_p)}(structure, link, eta_p, cuts, disc)
+end
+
+Ordinal(structure::OrdinalStructure, link::OrdinalLink, eta,
+        thresholds::AbstractVector{<:Real}; discrimination::Real=1,
+        check_args::Bool=true) =
+    Ordinal(structure, link, eta, thresholds, discrimination; check_args)
+
+Distributions.params(d::Ordinal) =
+    (d.structure, d.link, d.eta, d.thresholds, d.discrimination)
+Distributions.partype(::Ordinal{S,L,T}) where {S,L,T} = T
+Distributions.@distr_support Ordinal 1 (length(d.thresholds) + 1)
+
+_ordinal_link_cdf(::LogitLink, z) = logistic(z)
+_ordinal_link_logcdf(::LogitLink, z) = loglogistic(z)
+_ordinal_link_logccdf(::LogitLink, z) = log1mlogistic(z)
+
+const _ORDINAL_STANDARD_NORMAL = Normal()
+_ordinal_link_cdf(::ProbitLink, z) = cdf(_ORDINAL_STANDARD_NORMAL, z)
+_ordinal_link_logcdf(::ProbitLink, z) = logcdf(_ORDINAL_STANDARD_NORMAL, z)
+_ordinal_link_logccdf(::ProbitLink, z) = logccdf(_ORDINAL_STANDARD_NORMAL, z)
+
+_ordinal_link_cdf(::CloglogLink, z) = -expm1(-exp(z))
+_ordinal_link_logcdf(::CloglogLink, z) = log1mexp(-exp(z))
+_ordinal_link_logccdf(::CloglogLink, z) = -exp(z)
+
+_ordinal_stage_eta(eta::Real, _k) = eta
+_ordinal_stage_eta(eta::AbstractVector, k) = eta[k]
+
+function Distributions.probs(d::Ordinal{<:Cumulative})
+    cumulative = map(d.thresholds) do cut
+        _ordinal_link_cdf(d.link, d.discrimination * (cut - d.eta))
+    end
+    [first(cumulative); diff(cumulative);
+     one(eltype(cumulative)) - last(cumulative)]
+end
+
+function Distributions.probs(d::Ordinal{<:StoppingRatio})
+    T = partype(d)
+    rv = Vector{T}(undef, length(d.thresholds) + 1)
+    remaining = one(T)
+    for k in eachindex(d.thresholds)
+        q = _ordinal_link_cdf(
+            d.link,
+            d.discrimination *
+            (d.thresholds[k] - _ordinal_stage_eta(d.eta, k)),
+        )
+        rv[k] = remaining * q
+        remaining *= one(T) - q
+    end
+    rv[end] = remaining
+    rv
+end
+
+function Distributions.logpdf(d::Ordinal{<:Cumulative}, k::Real)
+    K = length(d.thresholds) + 1
+    (!isinteger(k) || k < 1 || k > K) &&
+        return oftype(float(first(d.thresholds)), -Inf)
+    i = Int(k)
+    z(j) = d.discrimination * (d.thresholds[j] - d.eta)
+    i == 1 && return _ordinal_link_logcdf(d.link, z(1))
+    i == K && return _ordinal_link_logccdf(d.link, z(K - 1))
+    logsubexp(
+        _ordinal_link_logcdf(d.link, z(i)),
+        _ordinal_link_logcdf(d.link, z(i - 1)),
+    )
+end
+
+function Distributions.logpdf(d::Ordinal{<:StoppingRatio}, k::Real)
+    K = length(d.thresholds) + 1
+    (!isinteger(k) || k < 1 || k > K) &&
+        return oftype(float(first(d.thresholds)), -Inf)
+    i = Int(k)
+    rv = zero(partype(d))
+    for j in 1:min(i, K - 1)
+        z = d.discrimination *
+            (d.thresholds[j] - _ordinal_stage_eta(d.eta, j))
+        rv += j == i ? _ordinal_link_logcdf(d.link, z) :
+                       _ordinal_link_logccdf(d.link, z)
+    end
+    rv
+end
+
+Random.rand(rng::Random.AbstractRNG, d::Ordinal) =
+    rand(rng, Categorical(Distributions.probs(d)))
+
 """
     OrderedLogistic(eta, cutpoints)
 

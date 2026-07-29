@@ -65,6 +65,14 @@ BayesianRegressionModels.mo1
 
 ```@docs
 BayesianRegressionModels.OrderedLogistic
+BayesianRegressionModels.Ordinal
+BayesianRegressionModels.OrdinalStructure
+BayesianRegressionModels.Cumulative
+BayesianRegressionModels.StoppingRatio
+BayesianRegressionModels.OrdinalLink
+BayesianRegressionModels.LogitLink
+BayesianRegressionModels.ProbitLink
+BayesianRegressionModels.CloglogLink
 BayesianRegressionModels.CategoricalLogit
 BayesianRegressionModels.Horseshoe
 BayesianRegressionModels.ZeroInflatedPoisson
