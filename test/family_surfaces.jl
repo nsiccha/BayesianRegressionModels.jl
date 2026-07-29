@@ -7,7 +7,8 @@ using Test
 using BayesianRegressionModels
 using Distributions
 using LogDensityProblems
-using LogExpFunctions: logit
+using LogExpFunctions: logistic, logit
+using Random
 using Statistics
 using StanBlocks
 
@@ -57,6 +58,114 @@ family_builder = @brm begin
 end
 
 const BRM = BayesianRegressionModels
+
+@testset "public numeric likelihood constructors are executable distributions" begin
+    ordered = OrderedLogistic(0.2, [-1.0, 0.5])
+    ordered_probs = [
+        logistic(-1.0 - 0.2),
+        logistic(0.5 - 0.2) - logistic(-1.0 - 0.2),
+        logistic(0.2 - 0.5),
+    ]
+    @test ordered isa DiscreteUnivariateDistribution
+    @test params(ordered) == (0.2, [-1.0, 0.5])
+    @test OrderedLogistic(params(ordered)...) isa OrderedLogistic
+    @test exp.(logpdf.(Ref(ordered), 1:3)) ≈ ordered_probs
+    @test logpdf(ordered, 1.5) == -Inf
+
+    categorical = CategoricalLogit(-0.3, 1.2)
+    categorical_weights = exp.([0.0, -0.3, 1.2])
+    categorical_probs = categorical_weights ./ sum(categorical_weights)
+    @test categorical isa DiscreteUnivariateDistribution
+    @test params(categorical) == (-0.3, 1.2)
+    @test CategoricalLogit(params(categorical)...) isa CategoricalLogit
+    @test exp.(logpdf.(Ref(categorical), 1:3)) ≈ categorical_probs
+    @test logpdf(categorical, 0) == -Inf
+
+    zip = ZeroInflatedPoisson(2.3, 0.25)
+    poisson = Poisson(2.3)
+    @test zip isa DiscreteUnivariateDistribution
+    @test params(zip) == (2.3, 0.25)
+    @test ZeroInflatedPoisson(params(zip)...) isa ZeroInflatedPoisson
+    @test pdf(zip, 0) ≈ 0.25 + 0.75 * pdf(poisson, 0)
+    @test pdf(zip, 4) ≈ 0.75 * pdf(poisson, 4)
+
+    nb2 = NegativeBinomial2(3.2, 1.7)
+    nb2_base = NegativeBinomial(1.7, 1.7 / (1.7 + 3.2))
+    @test nb2 isa DiscreteUnivariateDistribution
+    @test params(nb2) == (3.2, 1.7)
+    @test NegativeBinomial2(params(nb2)...) isa NegativeBinomial2
+    @test logpdf.(Ref(nb2), 0:10) ≈ logpdf.(Ref(nb2_base), 0:10)
+    @test rand(MersenneTwister(42), nb2, 64) ==
+          rand(MersenneTwister(42), nb2_base, 64)
+
+    bb2 = BetaBinomial2(8, 0.4, 5.0)
+    bb2_base = BetaBinomial(8, 2.0, 3.0)
+    @test bb2 isa DiscreteUnivariateDistribution
+    @test params(bb2) == (8, 0.4, 5.0)
+    @test BetaBinomial2(params(bb2)...) isa BetaBinomial2
+    @test logpdf.(Ref(bb2), 0:8) ≈ logpdf.(Ref(bb2_base), 0:8)
+    @test rand(MersenneTwister(42), bb2, 64) ==
+          rand(MersenneTwister(42), bb2_base, 64)
+
+    binomial_logit = BinomialLogit(5, -0.3)
+    binomial_base = Binomial(5, logistic(-0.3))
+    @test binomial_logit isa DiscreteUnivariateDistribution
+    @test params(binomial_logit) == (5, -0.3)
+    @test BinomialLogit(params(binomial_logit)...) isa BinomialLogit
+    @test logpdf.(Ref(binomial_logit), 0:5) ≈ logpdf.(Ref(binomial_base), 0:5)
+    @test rand(MersenneTwister(42), binomial_logit, 64) ==
+          rand(MersenneTwister(42), binomial_base, 64)
+
+    censored_normal = TruncatedNormal(0.1, 1.2, -1.0, 2.0)
+    censored_base = censored(Normal(0.1, 1.2), -1.0, 2.0)
+    @test censored_normal isa UnivariateDistribution
+    @test params(censored_normal) == (0.1, 1.2, -1.0, 2.0)
+    @test TruncatedNormal(params(censored_normal)...) isa Distributions.Censored
+    @test logpdf.(Ref(censored_normal), [-1.0, 0.2, 2.0]) ≈
+          logpdf.(Ref(censored_base), [-1.0, 0.2, 2.0])
+    @test rand(MersenneTwister(42), censored_normal, 64) ==
+          rand(MersenneTwister(42), censored_base, 64)
+
+    for d in (ordered, categorical, zip, nb2, bb2, binomial_logit, censored_normal)
+        draws = rand(MersenneTwister(20260729), d, 32)
+        @test length(draws) == 32
+        @test all(insupport.(Ref(d), draws))
+    end
+
+    @test_throws DomainError OrderedLogistic(0.0, [1.0, -1.0])
+    @test_throws DomainError CategoricalLogit(Inf)
+    @test_throws DomainError ZeroInflatedPoisson(-1.0, 0.2)
+    @test_throws DomainError NegativeBinomial2(0.0, 1.0)
+    @test_throws DomainError BetaBinomial2(5, 1.0, 2.0)
+    @test_throws DomainError BinomialLogit(-1, 0.0)
+    @test_throws DomainError TruncatedNormal(0.0, 1.0, 2.0, -2.0)
+end
+
+@testset "real likelihood distributions share the VBRMI contract" begin
+    df_v = (;
+        y_zip=[0, 1, 3],
+        y_nb2=[0, 2, 5],
+        y_bb2=[1, 3, 7],
+        y_cat=[1, 2, 3],
+        y_blogit=[0, 2, 5],
+    )
+    builder_v = @brm begin
+        y_zip ~ ZeroInflatedPoisson(2.3, 0.25)
+        y_nb2 ~ NegativeBinomial2(3.2, 1.7)
+        y_bb2 ~ BetaBinomial2(8, 0.4, 5.0)
+        y_cat ~ CategoricalLogit(-0.3, 1.2)
+        y_blogit ~ BinomialLogit(5, -0.3)
+    end
+    vbrmi = VBRMI(builder_v(df_v))
+    expected =
+        sum(logpdf.(ZeroInflatedPoisson(2.3, 0.25), df_v.y_zip)) +
+        sum(logpdf.(NegativeBinomial2(3.2, 1.7), df_v.y_nb2)) +
+        sum(logpdf.(BetaBinomial2(8, 0.4, 5.0), df_v.y_bb2)) +
+        sum(logpdf.(CategoricalLogit(-0.3, 1.2), df_v.y_cat)) +
+        sum(logpdf.(BinomialLogit(5, -0.3), df_v.y_blogit))
+    @test LogDensityProblems.dimension(vbrmi) == 0
+    @test logpdf(vbrmi, Float64[]) ≈ expected
+end
 
 @testset "Distributions.jl constructor semantics map to native Stan" begin
     expected_names = (
@@ -137,6 +246,55 @@ const BRM = BayesianRegressionModels
     )
     for (D, args, expected) in default_cases
         @test BRM._sb_stan_dist_args(D, args) == expected
+    end
+end
+
+special_numeric_df = (;
+    y_zip=[0, 1, 3],
+    y_nb2=[0, 2, 5],
+    trials=fill(8, 3),
+    y_bb2=[1, 3, 7],
+)
+
+special_numeric_builder = @brm begin
+    y_zip ~ ZeroInflatedPoisson(2.3, 0.25)
+    y_nb2 ~ NegativeBinomial2(3.2, 1.7)
+    y_bb2 ~ BetaBinomial2(trials, 0.4, 5.0)
+end
+
+@testset "numeric special distributions agree with native Stan paths" begin
+    descriptor = brm_descriptor(
+        special_numeric_builder, special_numeric_df; mod=@__MODULE__)
+    code = brm_execute(descriptor, :transpile)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+
+    cache = joinpath(tempdir(), "brm-distribution-semantics")
+    isdir(cache) || mkpath(cache)
+    problem = brm_execute(
+        descriptor, :instantiate;
+        path=joinpath(cache, string(descriptor.id) * ".stan"))
+    pointwise = brm_execute(
+        descriptor, :pointwise_loglik;
+        problem, draws=Float64[], seed=20260729)
+
+    expected = (;
+        y_zip=ZeroInflatedPoisson(2.3, 0.25),
+        y_nb2=NegativeBinomial2(3.2, 1.7),
+        y_bb2=BetaBinomial2(8, 0.4, 5.0),
+    )
+    for (target, dist) in pairs(expected)
+        actual = getproperty(pointwise, Symbol(target, :_likelihood))
+        observed = getproperty(special_numeric_df, target)
+        @test actual ≈ logpdf.(dist, observed) atol=1e-10
+    end
+
+    predictions = brm_execute(
+        descriptor, :predict;
+        problem, draws=zeros(0, 32), seed=20260729)
+    for (target, dist) in pairs(expected)
+        draws = getproperty(predictions, Symbol(target, :_gen))
+        @test length(draws) == length(getproperty(special_numeric_df, target)) * 32
+        @test all(insupport.(Ref(dist), draws))
     end
 end
 

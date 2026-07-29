@@ -1,0 +1,283 @@
+# Executable Julia contracts for public likelihood surfaces whose formula
+# lowering is implemented by sbimpl.  The @brm parser keeps the distribution
+# type/function and its expression arguments separate, so these numeric
+# constructors do not change formula syntax.
+
+"""
+    OrderedLogistic(eta, cutpoints)
+
+Ordered-logistic distribution with location `eta` and strictly increasing
+`cutpoints`.  The support is `1:(length(cutpoints) + 1)`.
+
+Inside `@brm`, `y ~ OrderedLogistic(eta)` remains the cumulative-link formula
+shorthand: sbimpl owns and estimates the cutpoints.  A standalone numeric
+distribution must supply them explicitly.
+"""
+struct OrderedLogistic{T<:Real} <: Distributions.DiscreteUnivariateDistribution
+    eta::T
+    cutpoints::Vector{T}
+
+    OrderedLogistic{T}(eta::T, cutpoints::Vector{T}) where {T<:Real} =
+        new{T}(eta, cutpoints)
+end
+
+function OrderedLogistic(eta::Real, cutpoints::AbstractVector{<:Real};
+                         check_args::Bool=true)
+    values = promote(float(eta), map(float, cutpoints)...)
+    eta_p = first(values)
+    cuts = collect(Base.tail(values))
+    Distributions.@check_args(OrderedLogistic,
+        (eta_p, isfinite(eta_p), "eta must be finite"),
+        (cuts, !isempty(cuts), "at least one cutpoint is required"),
+        (cuts, all(isfinite, cuts), "cutpoints must be finite"),
+        (cuts, all(cuts[i] < cuts[i + 1] for i in 1:length(cuts)-1),
+         "cutpoints must be strictly increasing"),
+    )
+    OrderedLogistic{typeof(eta_p)}(eta_p, cuts)
+end
+
+Distributions.params(d::OrderedLogistic) = (d.eta, d.cutpoints)
+Distributions.partype(::OrderedLogistic{T}) where {T} = T
+Distributions.@distr_support OrderedLogistic 1 (length(d.cutpoints) + 1)
+
+function Distributions.probs(d::OrderedLogistic)
+    cumulative = logistic.(d.cutpoints .- d.eta)
+    [first(cumulative); diff(cumulative); one(eltype(cumulative)) - last(cumulative)]
+end
+
+function Distributions.logpdf(d::OrderedLogistic, k::Real)
+    K = length(d.cutpoints) + 1
+    (!isinteger(k) || k < 1 || k > K) && return oftype(float(d.eta), -Inf)
+    i = Int(k)
+    i == 1 && return loglogistic(first(d.cutpoints) - d.eta)
+    i == K && return log1mlogistic(last(d.cutpoints) - d.eta)
+    logsubexp(
+        loglogistic(d.cutpoints[i] - d.eta),
+        loglogistic(d.cutpoints[i - 1] - d.eta),
+    )
+end
+
+Random.rand(rng::Random.AbstractRNG, d::OrderedLogistic) =
+    rand(rng, Categorical(Distributions.probs(d)))
+
+"""
+    CategoricalLogit(eta2, eta3, ...)
+
+Reference-class categorical distribution.  Class 1 has logit zero and each
+argument is the logit for one subsequent class.  The support is
+`1:(length(params(d)) + 1)`.
+"""
+struct CategoricalLogit{T<:Real} <: Distributions.DiscreteUnivariateDistribution
+    nonreference_logits::Vector{T}
+
+    CategoricalLogit{T}(eta::Vector{T}) where {T<:Real} = new{T}(eta)
+end
+
+function CategoricalLogit(eta::Real...; check_args::Bool=true)
+    isempty(eta) && throw(ArgumentError(
+        "CategoricalLogit needs at least one non-reference logit"))
+    promoted = promote(map(float, eta)...)
+    logits = collect(promoted)
+    Distributions.@check_args(
+        CategoricalLogit,
+        (logits, all(isfinite, logits), "logits must be finite"),
+    )
+    CategoricalLogit{eltype(logits)}(logits)
+end
+
+CategoricalLogit(eta::AbstractVector{<:Real}; check_args::Bool=true) =
+    CategoricalLogit(eta...; check_args=check_args)
+
+Distributions.params(d::CategoricalLogit) = Tuple(d.nonreference_logits)
+Distributions.partype(::CategoricalLogit{T}) where {T} = T
+Distributions.ncategories(d::CategoricalLogit) = length(d.nonreference_logits) + 1
+Distributions.@distr_support CategoricalLogit 1 Distributions.ncategories(d)
+
+_categorical_logit_values(d::CategoricalLogit{T}) where {T} =
+    [zero(T); d.nonreference_logits]
+
+function Distributions.probs(d::CategoricalLogit)
+    logits = _categorical_logit_values(d)
+    m = maximum(logits)
+    weights = exp.(logits .- m)
+    weights ./ sum(weights)
+end
+
+function Distributions.logpdf(d::CategoricalLogit, k::Real)
+    K = Distributions.ncategories(d)
+    (!isinteger(k) || k < 1 || k > K) &&
+        return oftype(float(first(d.nonreference_logits)), -Inf)
+    logits = _categorical_logit_values(d)
+    logits[Int(k)] - logsumexp(logits)
+end
+
+Random.rand(rng::Random.AbstractRNG, d::CategoricalLogit) =
+    rand(rng, Categorical(Distributions.probs(d)))
+
+"""
+    ZeroInflatedPoisson(lambda, zi)
+
+Mixture of a point mass at zero (probability `zi`) and `Poisson(lambda)`.
+"""
+struct ZeroInflatedPoisson{T<:Real} <: Distributions.DiscreteUnivariateDistribution
+    lambda::T
+    zi::T
+
+    ZeroInflatedPoisson{T}(lambda::T, zi::T) where {T<:Real} =
+        new{T}(lambda, zi)
+end
+
+function ZeroInflatedPoisson(lambda::Real, zi::Real; check_args::Bool=true)
+    lambda_p, zi_p = promote(float(lambda), float(zi))
+    Distributions.@check_args(ZeroInflatedPoisson,
+        (lambda_p, lambda_p >= zero(lambda_p), "lambda must be nonnegative"),
+        (zi_p, zero(zi_p) <= zi_p <= one(zi_p),
+         "zero-inflation probability must lie in [0, 1]"),
+    )
+    ZeroInflatedPoisson{typeof(lambda_p)}(lambda_p, zi_p)
+end
+
+Distributions.params(d::ZeroInflatedPoisson) = (d.lambda, d.zi)
+Distributions.partype(::ZeroInflatedPoisson{T}) where {T} = T
+Distributions.@distr_support ZeroInflatedPoisson 0 Inf
+
+function Distributions.logpdf(d::ZeroInflatedPoisson, k::Real)
+    (!isinteger(k) || k < 0) && return oftype(float(d.lambda), -Inf)
+    poisson_lp = logpdf(Poisson(d.lambda), Int(k))
+    k == 0 && return logaddexp(log(d.zi), log1p(-d.zi) + poisson_lp)
+    log1p(-d.zi) + poisson_lp
+end
+
+Random.rand(rng::Random.AbstractRNG, d::ZeroInflatedPoisson) =
+    rand(rng) < d.zi ? 0 : rand(rng, Poisson(d.lambda))
+
+"""
+    NegativeBinomial2(mu, phi)
+
+Negative-binomial distribution parameterised by positive mean `mu` and
+positive shape/precision `phi`, matching Stan's `neg_binomial_2(mu, phi)`.
+"""
+struct NegativeBinomial2{T<:Real} <: Distributions.DiscreteUnivariateDistribution
+    mu::T
+    phi::T
+
+    NegativeBinomial2{T}(mu::T, phi::T) where {T<:Real} = new{T}(mu, phi)
+end
+
+function NegativeBinomial2(mu::Real, phi::Real; check_args::Bool=true)
+    mu_p, phi_p = promote(float(mu), float(phi))
+    Distributions.@check_args(NegativeBinomial2,
+        (mu_p, mu_p > zero(mu_p), "mu must be positive"),
+        (phi_p, phi_p > zero(phi_p), "phi must be positive"),
+    )
+    NegativeBinomial2{typeof(mu_p)}(mu_p, phi_p)
+end
+
+Distributions.params(d::NegativeBinomial2) = (d.mu, d.phi)
+Distributions.partype(::NegativeBinomial2{T}) where {T} = T
+Distributions.@distr_support NegativeBinomial2 0 Inf
+
+_negative_binomial2_base(d::NegativeBinomial2) =
+    NegativeBinomial(d.phi, d.phi / (d.phi + d.mu))
+Distributions.logpdf(d::NegativeBinomial2, k::Real) =
+    logpdf(_negative_binomial2_base(d), k)
+Random.rand(rng::Random.AbstractRNG, d::NegativeBinomial2) =
+    rand(rng, _negative_binomial2_base(d))
+
+"""
+    BetaBinomial2(trials, mean, precision)
+
+Beta-binomial distribution parameterised by success probability `mean` and
+positive concentration `precision`.
+"""
+struct BetaBinomial2{T<:Real} <: Distributions.DiscreteUnivariateDistribution
+    trials::Int
+    mean::T
+    precision::T
+
+    BetaBinomial2{T}(trials::Int, mean::T, precision::T) where {T<:Real} =
+        new{T}(trials, mean, precision)
+end
+
+function BetaBinomial2(trials::Integer, mean::Real, precision::Real;
+                       check_args::Bool=true)
+    mean_p, precision_p = promote(float(mean), float(precision))
+    n = Int(trials)
+    Distributions.@check_args(BetaBinomial2,
+        (n, n >= 0, "trials must be nonnegative"),
+        (mean_p, zero(mean_p) < mean_p < one(mean_p),
+         "mean must lie strictly between zero and one"),
+        (precision_p, precision_p > zero(precision_p),
+         "precision must be positive"),
+    )
+    BetaBinomial2{typeof(mean_p)}(n, mean_p, precision_p)
+end
+
+Distributions.params(d::BetaBinomial2) = (d.trials, d.mean, d.precision)
+Distributions.partype(::BetaBinomial2{T}) where {T} = T
+Distributions.@distr_support BetaBinomial2 0 d.trials
+
+_beta_binomial2_base(d::BetaBinomial2) = BetaBinomial(
+    d.trials, d.mean * d.precision, (one(d.mean) - d.mean) * d.precision)
+Distributions.logpdf(d::BetaBinomial2, k::Real) = logpdf(_beta_binomial2_base(d), k)
+Random.rand(rng::Random.AbstractRNG, d::BetaBinomial2) =
+    rand(rng, _beta_binomial2_base(d))
+
+"""
+    BinomialLogit(n, logitp)
+
+Binomial distribution parameterised on the logit scale.  Both BRM backends
+use a logit-native log-pmf and avoid an inverse-logit round trip for density
+evaluation.
+"""
+struct BinomialLogit{T<:Real} <: Distributions.DiscreteUnivariateDistribution
+    n::Int
+    logitp::T
+
+    BinomialLogit{T}(n::Int, logitp::T) where {T<:Real} = new{T}(n, logitp)
+end
+
+function BinomialLogit(n::Integer, logitp::Real; check_args::Bool=true)
+    eta = float(logitp)
+    n_int = Int(n)
+    Distributions.@check_args(BinomialLogit,
+        (n_int, n_int >= 0, "n must be nonnegative"),
+        (eta, isfinite(eta), "logitp must be finite"),
+    )
+    BinomialLogit{typeof(eta)}(n_int, eta)
+end
+
+Distributions.params(d::BinomialLogit) = (d.n, d.logitp)
+Distributions.partype(::BinomialLogit{T}) where {T} = T
+Distributions.ntrials(d::BinomialLogit) = d.n
+Distributions.succprob(d::BinomialLogit) = logistic(d.logitp)
+Distributions.@distr_support BinomialLogit 0 d.n
+
+function Distributions.logpdf(d::BinomialLogit, k::Real)
+    (!isinteger(k) || k < 0 || k > d.n) &&
+        return oftype(float(d.logitp), -Inf)
+    k_int = Int(k)
+    SpecialFunctions.logabsbinomial(d.n, k_int)[1] +
+        k_int * loglogistic(d.logitp) +
+        (d.n - k_int) * log1mlogistic(d.logitp)
+end
+
+Random.rand(rng::Random.AbstractRNG, d::BinomialLogit) =
+    rand(rng, Binomial(d.n, logistic(d.logitp)))
+
+"""
+    TruncatedNormal(mu, sigma, lloq, uloq)
+
+Historical BRM spelling for the bordet **censored** normal observation model.
+Numeric arguments construct Distributions.jl's exact
+`Censored(Normal(mu, sigma), lloq, uloq)` distribution, including its boundary
+atoms.  The name is retained for formula compatibility.
+"""
+function TruncatedNormal end
+
+function TruncatedNormal(mu::Real, sigma::Real, lloq::Real, uloq::Real;
+                         check_args::Bool=true)
+    lower, upper = promote(float(lloq), float(uloq))
+    base = Normal(mu, sigma; check_args=check_args)
+    Distributions.Censored(base, lower, upper; check_args=check_args)
+end

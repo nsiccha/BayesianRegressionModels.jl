@@ -69,28 +69,6 @@ emitter. Dispatch tag — see `_sb_ar1`.
 function ar end
 
 """
-    OrderedLogistic
-
-Cumulative-link ordinal-likelihood marker. Use as a family on the RHS:
-`y ~ OrderedLogistic(eta)`. The sbimpl backend lowers to Stan's
-`ordered_logistic_lpmf`. Marker struct only — Distributions.jl does not
-ship an `OrderedLogistic`, and the `@brm` parser never constructs an
-instance, so the empty struct is sufficient.
-"""
-struct OrderedLogistic end
-
-"""
-    CategoricalLogit(eta2, eta3, ...)
-
-Reference-class categorical likelihood marker. Each positional argument is an
-existing scalar linear predictor for one non-reference outcome class; class 1
-has fixed logit zero. The sbimpl backend freezes the observed outcome-level
-order, constructs the per-row logit matrix, and lowers to a categorical-logit
-likelihood with prediction and pointwise-log-likelihood support.
-"""
-struct CategoricalLogit end
-
-"""
     Horseshoe
 
 Carvalho-Polson-Scott horseshoe shrinkage prior marker. Use as a prior
@@ -99,36 +77,6 @@ reparameterised hierarchy `beta = raw * lambda * tau`. Marker struct
 only — the `@brm` parser never constructs an instance.
 """
 struct Horseshoe end
-
-"""
-    ZeroInflatedPoisson(lambda, zi)
-
-Zero-inflated Poisson likelihood marker — a mixture of a point-mass at
-zero (with probability `zi`) and `Poisson(lambda)`. Surfaces as
-`y ~ ZeroInflatedPoisson(lambda, zi)` in the SBBRMI backend.
-"""
-struct ZeroInflatedPoisson end
-
-"""
-    NegativeBinomial2(mu, phi)
-
-Negative-binomial likelihood marker parameterised by mean `mu` and positive
-shape/precision `phi`, matching Stan's `neg_binomial_2(mu, phi)`. This is
-deliberately distinct from Distributions.jl's `NegativeBinomial(r, p)`.
-"""
-struct NegativeBinomial2 end
-
-"""
-    BetaBinomial2(trials, mean, precision)
-
-Beta-binomial likelihood marker parameterised by success probability `mean`
-and positive concentration `precision`. The sbimpl backend lowers to Stan's
-`beta_binomial(trials, mean * precision, (1 - mean) * precision)`.
-
-Use Distributions.jl's `BetaBinomial(trials, alpha, beta)` when the two shape
-parameters are already the natural model parameters.
-"""
-struct BetaBinomial2 end
 
 popefs = StanBlocks.@slic begin
     n_covariates = dims(X)[2]
@@ -4510,18 +4458,6 @@ _sb_scalar_expr(x, _) = error("sbimpl: cannot lift to Stan expression: $(typeof(
 #   - Transdata builtins: `linear_idxs`, `broadcasted_max`, `broadcasted_gt`
 #   All registered in StanBlocks' builtin module; reachable with no import.
 # ==============================================================================
-
-"""
-    TruncatedNormal
-
-BRM formula marker for the bordet censored-normal observation model.
-`log_obs ~ TruncatedNormal(log_y, sigma, lloq, uloq)` — `sigma` is a
-biomarker-level parameter declared inside `bordet_hierarchical_parametric`;
-`lloq`/`uloq` are biomarker-level data columns.
-Emits: `log_obs ~ truncated_normal(log_y, sigma[biomarker_idxs], lloq[biomarker_idxs], uloq[biomarker_idxs])`.
-Censoring math lives in StanBlocks:bordet's lpxf triad (not Stan T[,] truncation).
-"""
-function TruncatedNormal end
 
 """
     bordet_hierarchical_parametric
