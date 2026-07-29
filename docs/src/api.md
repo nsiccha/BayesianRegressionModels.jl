@@ -59,7 +59,6 @@ BayesianRegressionModels.t2
 BayesianRegressionModels.ar
 BayesianRegressionModels.mo
 BayesianRegressionModels.mo1
-BayesianRegressionModels.hsgp
 ```
 
 ## Likelihood / prior markers
