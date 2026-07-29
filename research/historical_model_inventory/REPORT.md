@@ -269,6 +269,16 @@ route, surface class, and the actual audited validation tier. Unsupported and
 unresolved rows render `SemanticUnavailable`; historical badges are never
 treated as current receipts.
 
+The committed gallery at `7b6a091ab6d240ec3fcfbd8f34248d2a78f3373b`
+was served on Strato2 at `http://127.0.0.1:8129/` (ports 8127--8128 were
+occupied by unrelated deployments and were not touched). The initial listener
+and a clean restart both returned HTTP 200 with exactly 359 cards. Served
+filter checks returned 154 confirmed-source cards, 166 finite-BridgeStan cards,
+and 51 ordinary unsupported cards, matching the matrix exactly. The listener
+contained one `htmxo-semantic-app` and all four option controls. Exact UTC
+times, source/matrix hashes, paths, statuses, and counts are in
+`gallery/served_smoke.tsv`.
+
 ## What remains genuinely open
 
 - Resolve or source-correct the one genuinely indeterminate family row,

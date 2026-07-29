@@ -29,3 +29,5 @@ julia --project=web-macro research/historical_model_inventory/gallery/serve.jl 8
 ```
 
 The optional third serving argument selects another compatible matrix path.
+`served_smoke.tsv` records the exact Strato2 commit, matrix/source hashes,
+listener URL, restart, HTTP statuses, and observed card/filter counts.
