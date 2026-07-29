@@ -15,6 +15,12 @@ intercept_builder = @brm begin
     y ~ Normal(mu, sigma)
 end
 
+slope_builder = @brm begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + (1 + x | subject)
+    y ~ Normal(mu, sigma)
+end
+
 single_bucket_builder = @brm begin
     sigma ~ Exponential(1)
     mu ~ 1 + x + (1 | p | subject)

@@ -5,7 +5,7 @@ using DifferentiationInterface: AutoEnzyme
 using LogDensityProblems
 using StanBlocks
 
-function enzyme_gradient_stress(problem, initial; n=2_000)
+function enzyme_gradient_stress(problem, initial; n=5_000)
     x = copy(initial)
     checksum = zero(eltype(x))
     for i in 1:n
@@ -14,6 +14,103 @@ function enzyme_gradient_stress(problem, initial; n=2_000)
         checksum += lp + gradient[1]
     end
     checksum
+end
+
+struct AdaptiveCenteringQuadraticTarget
+    dimension::Int
+end
+
+LogDensityProblems.dimension(target::AdaptiveCenteringQuadraticTarget) =
+    target.dimension
+LogDensityProblems.capabilities(::Type{AdaptiveCenteringQuadraticTarget}) =
+    LogDensityProblems.LogDensityOrder{1}()
+LogDensityProblems.logdensity(::AdaptiveCenteringQuadraticTarget, x) =
+    -sum(abs2, x) / 2
+LogDensityProblems.logdensity_and_gradient(
+    target::AdaptiveCenteringQuadraticTarget, x,
+) = (LogDensityProblems.logdensity(target, x), -x)
+
+function synthetic_adaptive_block(K, G)
+    n_cholesky = K * (K - 1) ÷ 2
+    ranef = BayesianRegressionModels.RanefBlock(
+        :r_mu_subject, :ranef_correlated, :subject, nothing, nothing,
+        string.(1:G), K, G, :r_mu_subject_z_flat, true,
+    )
+    AdaptiveCenteringBlock(
+        ranef,
+        0.0,
+        reshape((n_cholesky + K + 1):(n_cholesky + K + K * G), K, G),
+        collect(1:n_cholesky),
+        collect((n_cholesky + 1):(n_cholesky + K)),
+    )
+end
+
+@testset "small-block pullback is exact, bounded, and GC-stable" begin
+    @test !isnothing(Base.get_extension(
+        BayesianRegressionModels,
+        :BayesianRegressionModelsWarmupHMCEnzymeExt,
+    ))
+    backend = AutoEnzyme(;
+        mode=Enzyme.set_runtime_activity(Enzyme.Reverse),
+        function_annotation=Enzyme.Const,
+    )
+    for (K, G, allocation_limit) in ((1, 6, 4_096), (2, 18, 16_384))
+        block = synthetic_adaptive_block(K, G)
+        state, ir = AC_EXT._adaptive_centering_reparametrizer([block])
+        @test state isa AC_EXT.BRMAdaptiveCenteringState{true}
+        controls = collect(range(0.17, 0.83, length=K * G))
+        set_adaptive_sources!(state, ir, controls)
+        reference_ir = materialized_reparametrizer(state, ir)
+        x = collect(range(-0.63, 0.81, length=maximum(vec(block.effects))))
+        if !isempty(block.cholesky_free)
+            x[block.cholesky_free] .= -0.27
+        end
+        x[block.log_scales] .= K == 1 ? [-0.31] : [-0.31, 0.44]
+        target = AdaptiveCenteringQuadraticTarget(length(x))
+        wrapped = WarmupHMC.ReparametrizedProblem(ir, target, backend)
+        reference = WarmupHMC.ReparametrizedProblem(reference_ir, target, backend)
+
+        actual = LogDensityProblems.logdensity_and_gradient(wrapped, x)
+        expected = LogDensityProblems.logdensity_and_gradient(reference, x)
+        @test isequal(actual, expected)
+        allocated = @allocated LogDensityProblems.logdensity_and_gradient(wrapped, x)
+        reference_allocated =
+            @allocated LogDensityProblems.logdensity_and_gradient(reference, x)
+        @test allocated <= allocation_limit
+        @test allocated < reference_allocated
+        @test isfinite(enzyme_gradient_stress(wrapped, x))
+    end
+end
+
+@testset "two-term BridgeStan target is bit-exact" begin
+    sb = SBBRMI(slope_builder(df); mod=@__MODULE__)
+    problem = StanBlocks.stan_instantiate(sb.model)
+    unc_names = StanBlocks.BridgeStan.param_unc_names(problem.model)
+    block = only(adaptive_centering_blocks(sb, unc_names))
+    @test block.ranef.n_terms == 2
+
+    state, ir = AC_EXT._adaptive_centering_reparametrizer([block])
+    controls = collect(range(0.17, 0.83, length=length(block.effects)))
+    set_adaptive_sources!(state, ir, controls)
+    materialized_ir = materialized_reparametrizer(state, ir)
+
+    x = zeros(length(unc_names))
+    x[only(block.cholesky_free)] = -0.27
+    x[block.log_scales] .= [-0.31, 0.44]
+    x[vec(block.effects)] .=
+        collect(range(-0.63, 0.81, length=length(block.effects)))
+    backend = AutoEnzyme(;
+        mode=Enzyme.set_runtime_activity(Enzyme.Reverse),
+        function_annotation=Enzyme.Const,
+    )
+    wrapped = WarmupHMC.ReparametrizedProblem(ir, problem, backend)
+    materialized = WarmupHMC.ReparametrizedProblem(
+        materialized_ir, problem, backend,
+    )
+
+    actual = LogDensityProblems.logdensity_and_gradient(wrapped, x)
+    expected = LogDensityProblems.logdensity_and_gradient(materialized, x)
+    @test isequal(actual, expected)
 end
 
 @testset "BridgeStan target differentiates through the mixed correlated frame" begin
@@ -125,6 +222,7 @@ end
     lp, gradient = LogDensityProblems.logdensity_and_gradient(wrapped, x)
     @test isfinite(lp)
     @test all(isfinite, gradient)
+    @test isfinite(enzyme_gradient_stress(wrapped, x))
 
     step = 1e-5
     finite_difference = [begin
