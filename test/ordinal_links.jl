@@ -155,6 +155,13 @@ end
             Cumulative(), ProbitLink(), eta; category_specific=(treat,))
     end
     @test_throws ErrorException bad_keyword_builder(ordinal_df)
+
+    bad_arity_keyword_builder = @brm begin
+        y_cumulative ~ Ordinal(
+            Cumulative(), LogitLink(); discrimination=1.0)
+    end
+    @test_throws ErrorException SBBRMI(
+        bad_arity_keyword_builder(ordinal_df); mod=@__MODULE__)
 end
 
 const RUN_ORDINAL_BRIDGESTAN =

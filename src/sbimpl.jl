@@ -5833,7 +5833,7 @@ function _sb_lik_family!(stmts, target, ::Type{<:Ordinal},
     _sb_lik_stan_exprs!(stmts, target, :brm_ordinal,
         (eta, cut_name, discrimination, structure, link, effect_name))
 end
-_sb_lik_family!(_, target, ::Type{<:Ordinal}, args, _, _) = error(
+_sb_lik_family!(_, target, ::Type{<:Ordinal}, args, ::NamedTuple, _) = error(
     "sbimpl: `Ordinal($target)` expects exactly three positional arguments " *
     "`(structure, link, eta)`, got $(length(args))")
 
@@ -5896,7 +5896,7 @@ function _sb_lik_family!(stmts, target, ::Type{<:VonMises}, args, data)
 end
 
 function _sb_lik_family!(stmts, target, ::Type{<:CircularVonMises},
-                         args::Tuple{Any,Any}, kwargs, data)
+                         args::Tuple{Any,Any}, kwargs::NamedTuple, data)
     mu, kappa = map(a -> _sb_scalar_expr(a, data), args)
     interval = _sb_circular_interval(kwargs)
     _sb_validate_von_mises!(data, target, mu, kappa;
@@ -5905,7 +5905,7 @@ function _sb_lik_family!(stmts, target, ::Type{<:CircularVonMises},
     _sb_lik_stan_exprs!(
         stmts, target, :brm_von_mises, (mu, kappa, lo, hi, 1))
 end
-_sb_lik_family!(_, target, ::Type{<:CircularVonMises}, args, _, _) = error(
+_sb_lik_family!(_, target, ::Type{<:CircularVonMises}, args, ::NamedTuple, _) = error(
     "sbimpl: `CircularVonMises($target)` expects exactly two positional " *
     "arguments `(mu, kappa)`, got $(length(args))")
 

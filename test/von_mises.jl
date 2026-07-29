@@ -151,6 +151,12 @@ end
     end
     @test_throws ErrorException bad_keyword((; y=[0.5]))
 
+    bad_arity_keyword = @brm begin
+        y ~ CircularVonMises(1.0; interval=(-pi, pi))
+    end
+    @test_throws ErrorException SBBRMI(
+        bad_arity_keyword((; y=[0.5])); mod=@__MODULE__)
+
     prior = @brm begin
         theta ~ VonMises(0.0, 1.0)
     end
