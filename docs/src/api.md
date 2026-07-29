@@ -55,6 +55,7 @@ BayesianRegressionModels.factor
 BayesianRegressionModels.mi
 BayesianRegressionModels.me
 BayesianRegressionModels.s
+BayesianRegressionModels.t2
 BayesianRegressionModels.ar
 BayesianRegressionModels.mo
 BayesianRegressionModels.mo1

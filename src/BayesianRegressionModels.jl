@@ -44,7 +44,7 @@ include("adaptive_centering.jl")
 # (web-macro, bruno, tests) reaches for.
 export @brm, @n, @x, @getproperty
 export assign, doublepipe, gr, gp, offset, zscale, center, standardize, protect, factor
-export me, mi, s, ar, mo, mo1, hsgp, OrderedLogistic, Horseshoe,
+export me, mi, s, t2, ar, mo, mo1, hsgp, OrderedLogistic, Horseshoe,
        CategoricalLogit, ZeroInflatedPoisson, NegativeBinomial2,
        BetaBinomial, BetaBinomial2,
        sb_group_demo, addprop
@@ -105,7 +105,7 @@ export popefs, cdirichlet, c0dirichlet, c01dirichlet,
        ranef_correlated_draws, ranef_correlated_by_draws,
        ranef_intercept_centered, ranef_correlated_centered,
        ranef_correlated_draws_centered,
-       _sb_mo, _sb_cat, _sb_ar1, _sb_s, _sb_me,
+       _sb_mo, _sb_cat, _sb_ar1, _sb_s, _sb_t2, _sb_me,
        _sb_gp, _sb_gp_aniso, _sb_hsgp, _sb_hsgp_aniso,
        _sb_hsgp_by, _sb_hsgp_by_aniso,
        brm_exp_quad_cov, brm_hsgp_sqrt_spd, _sb_horseshoe,
