@@ -45,7 +45,7 @@ using .HistoricalInventoryGallery
     exact = HistoricalInventory(;
         matrix_path=DEFAULT_MATRIX_PATH,
         validation_tier="bridgestan-finite-density-gradient")
-    @test length(filtered_rows(exact)) == 171 == count(
+    @test length(filtered_rows(exact)) == 173 == count(
         row -> row["inferred_capability_tier"] == "bridgestan-finite-density-gradient",
         surface.rows,
     )
@@ -64,6 +64,23 @@ using .HistoricalInventoryGallery
         row["bridgestan_instantiate"] == "pass" &&
         row["gradient_finite"] == "true" && isempty(row["failure_stage"]),
         refreshed,
+    )
+    beta_binomial_keys = Set([
+        "brms:cbpp_beta_binomial",
+        "mcelreath:ucbadmit_beta_binomial",
+    ])
+    beta_binomial = filter(row -> row["row_key"] in beta_binomial_keys, surface.rows)
+    @test length(beta_binomial) == length(beta_binomial_keys)
+    @test all(row ->
+        row["inferred_translation_status"] == "ready" &&
+        row["inferred_capability_tier"] == "bridgestan-finite-density-gradient" &&
+        occursin("BetaBinomial2", row["inferred_current_brm_body"]) &&
+        row["family_adapter_validation_sha"] ==
+            "98d54fb413e3994eb3e4c9ea76d659cddce433c5" &&
+        row["descriptor"] == "pass" && row["stanc"] == "pass" &&
+        row["bridgestan_instantiate"] == "pass" &&
+        row["gradient_finite"] == "true" && isempty(row["failure_stage"]),
+        beta_binomial,
     )
     combined = HistoricalInventory(;
         matrix_path=DEFAULT_MATRIX_PATH,
