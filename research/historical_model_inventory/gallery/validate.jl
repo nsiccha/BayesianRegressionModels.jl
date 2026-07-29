@@ -129,10 +129,10 @@ using .HistoricalInventoryGallery
     @test !occursin("AppContext", inventory_md)
 
     # Exercise the registered HTTP route entirely in process. This opens no
-    # socket, but reproduces the production blocking policy: the first browser
-    # response is complete, while later HTMX filters still reach the same
+    # socket, but reproduces HTMXObjects' standard browser-shell -> HTMX
+    # fragment sequence and proves that later filters reach the same
     # authoritative graph.
-    route!(graph; operation_policy=OperationPolicy(:blocking))
+    route!(graph)
     drive(path; headers=Pair{String,String}[]) = begin
         request = HTTP.Request("GET", path, headers)
         handler = first(HTTP.Handlers.gethandler(
@@ -147,24 +147,27 @@ using .HistoricalInventoryGallery
         initial_body = String(initial.body)
         @test initial.status == 200
         @test occursin("text/html", HTTP.header(initial, "Content-Type", ""))
-        @test occursin("var htmx=function()", initial_body)
-        @test !occursin("cdn.jsdelivr.net/npm/htmx", initial_body)
-        @test length(findall(
-            "<article class=\"htmxo-semantic-card-body\"", initial_body)) == 359
-        @test !occursin("data-htmxo-operation-load", initial_body)
-        @test !occursin("hx-trigger=\"load\"", initial_body)
-        @test occursin("hx-get=\"/surface/\"", initial_body)
+        @test occursin(
+            "https://cdn.jsdelivr.net/npm/htmx.org@2.0.8/dist/htmx.min.js",
+            initial_body,
+        )
+        @test !occursin("var htmx=function()", initial_body)
+        @test isempty(findall(
+            "<article class=\"htmxo-semantic-card-body\"", initial_body))
+        @test occursin("data-htmxo-operation-load", initial_body)
+        @test occursin("hx-trigger=\"load\"", initial_body)
+        @test occursin("hx-get=\"/\"", initial_body)
 
         prefixed = drive("/"; headers=vcat(browser_headers, [
             "X-Forwarded-Prefix" => "/p/HistoricalBRM",
         ]))
         prefixed_body = String(prefixed.body)
         @test prefixed.status == 200
-        @test length(findall(
-            "<article class=\"htmxo-semantic-card-body\"", prefixed_body)) == 359
-        @test !occursin("data-htmxo-operation-load", prefixed_body)
-        @test !occursin("hx-trigger=\"load\"", prefixed_body)
-        @test occursin("hx-get=\"/p/HistoricalBRM/surface/\"", prefixed_body)
+        @test isempty(findall(
+            "<article class=\"htmxo-semantic-card-body\"", prefixed_body))
+        @test occursin("data-htmxo-operation-load", prefixed_body)
+        @test occursin("hx-trigger=\"load\"", prefixed_body)
+        @test occursin("hx-get=\"/p/HistoricalBRM/\"", prefixed_body)
 
         full = drive("/"; headers=vcat(browser_headers, ["HX-Request" => "true"]))
         full_body = String(full.body)
