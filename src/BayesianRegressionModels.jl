@@ -48,6 +48,10 @@ export me, mi, s, ar, mo, mo1, hsgp, OrderedLogistic, Horseshoe,
        ZeroInflatedPoisson, NegativeBinomial2, sb_group_demo, addprop
 # Bordet model family — formula-surface markers for custom likelihood + submodel
 export TruncatedNormal, bordet_hierarchical_parametric, kernel
+# Julia-native response-family composition. `truncated` and `censored` are the
+# exact Distributions.jl functions; `interval_censored` is BRM's narrow formula
+# shim for evidence that a latent response lies between two row-wise bounds.
+export truncated, censored, interval_censored
 # Logit-form Bernoulli/Binomial -- prefer these over `Bernoulli(logistic(eta))`
 # / `Binomial(N, logistic(eta))`. Both backends lower to a logit-native log-pmf
 # (Stan's `bernoulli_logit_lpmf` / `binomial_logit_lpmf`; LogExpFunctions'

@@ -67,6 +67,7 @@ BayesianRegressionModels.OrderedLogistic
 BayesianRegressionModels.Horseshoe
 BayesianRegressionModels.ZeroInflatedPoisson
 BayesianRegressionModels.BinomialLogit
+BayesianRegressionModels.interval_censored
 ```
 
 ## Backends
