@@ -290,6 +290,35 @@ ranef_correlated_draws = StanBlocks.@slic begin
     return (diag_pre_multiply(tau, L) * z)'   # n_groups x n_terms
 end
 
+# Heterogeneous marginal-SD prior used only when an `effect(sd, ID, ...)`
+# statement targets a shared `|ID|` bucket. `family[i] == 0` retains BRM's
+# historical half-standard-normal density for that margin; `family[i] == 1`
+# selects an Exponential whose `rate[i]` is already in Stan's rate
+# parameterization. A single vector density lets block defaults and
+# margin-specific overrides compose without double-prioring any element.
+StanBlocks.@deffun begin
+    @lhs @lpxf brm_ranef_sd_lpdf(tau::vector[n], family::vector[n],
+                                  rate::vector[n])::real = begin
+        rv = 0.
+        for i in 1:n
+            if family[i] == 0
+                rv += std_normal_lpdf(tau[i])::real
+            else
+                rv += exponential_lpdf(tau[i], rate[i])::real
+            end
+        end
+        rv
+    end
+end
+
+ranef_correlated_draws_effect = StanBlocks.@slic begin
+    L      ~ lkj_corr_cholesky(lkj_eta; n=n_terms)
+    tau    ~ brm_ranef_sd(sd_family, sd_rate; n=n_terms, lower=0.)
+    z_flat ~ std_normal(; n=n_terms * n_groups)
+    z = reshape(z_flat, n_terms, n_groups)
+    return (diag_pre_multiply(tau, L) * z)'
+end
+
 # Multi-membership gathers. Membership indices and weights are row-major flat
 # vectors: entries `(i-1)*n_memberships + m` describe observation `i`, member
 # slot `m`. Keeping indices flat avoids relying on a Stan array-of-int matrix
@@ -485,6 +514,22 @@ ranef_correlated_draws_centered = StanBlocks.@slic begin
     tau ~ std_normal(; n=n_terms, lower=0.)
     b::vector[n_groups, n_terms] ~ multi_normal_cholesky0(diag_pre_multiply(tau, L))
     return ranef_b_matrix(b)   # n_groups x n_terms
+end
+
+# Configured centered blocks use a plate of native MVN-Cholesky draws. With the
+# heterogeneous custom `tau` density in the same submodel, the array-vector
+# `multi_normal_cholesky0` tracetype cannot recover its free outer dimension;
+# the plate carries that dimension explicitly and emits the model-scale effect
+# parameter as `<binding>_b_cols_bc`. Keep prediction.jl's family table aligned.
+ranef_correlated_draws_centered_effect = StanBlocks.@slic begin
+    L   ~ lkj_corr_cholesky(lkj_eta; n=n_terms)
+    tau ~ brm_ranef_sd(sd_family, sd_rate; n=n_terms, lower=0.)
+    b_cols ~ plate(; outer=(n_groups,)) do g
+        bc::vector[n_terms] ~ multi_normal_cholesky(
+            rep_vector(0., n_terms), diag_pre_multiply(tau, L))
+        bc
+    end
+    return b_cols'
 end
 
 # Stratified gather + Cholesky scale, kept as a Stan function (loops are not
@@ -1900,6 +1945,14 @@ rather than silently emitting an in-sample block. Note also that centered and
 non-centered emissions use different unconstrained coordinates, so fitted
 draws are not interchangeable between them.
 
+Formula statements `effect(sd, ID) ~ Exponential(scale)` and
+`effect(cor, ID) ~ LKJCholesky(K, eta)` configure a shared `|ID|` block.
+An SD statement can instead select one emitted margin with
+`effect(sd, ID, predictor, coefficient)`, or use the three-argument shorthand
+when that predictor contributes exactly one margin. See [`ranefcoefnames`](@ref)
+for the authoritative ordered addresses. Omitted statements retain historical
+defaults; Julia's Exponential scale is converted to Stan's rate.
+
 Use [`stan_code`](@ref) to extract the transpiled Stan source. For
 sampling, load `StanLogDensityProblems` + `BridgeStan` and wrap the
 emitted `SlicModel` in a `StanProblem`.
@@ -2164,7 +2217,9 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     # `(brmi_key, (id_sym, group_key)) => (bucket_name, col_range, idx_name, suffix)`
     # for per-sub-formula emission below.
     id_buckets = _sb_collect_id_buckets(brmi)
-    id_lookup = _sb_emit_id_buckets!(stmts, data, id_buckets; cv_groups, centered_groups)
+    ranef_effect_overrides = _sb_ranef_effect_overrides(brmi, id_buckets)
+    id_lookup = _sb_emit_id_buckets!(stmts, data, id_buckets;
+        cv_groups, centered_groups, ranef_effect_overrides)
     # Prepass 2.5: group-block terms. For each `mu ~ f(...)` where f has a
     # _sb_term_group_block declaration, allocate one ranef_correlated_draws
     # block per (f, group-column) pair. The lookup is threaded into _sb_emit!
@@ -3362,7 +3417,7 @@ _sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lo
                          cv_groups, centered_groups, group_block_lookup,
                          effect_overrides)
 
-# `effect(...) ~ Normal(...)` is metadata consumed by the constructor prepass;
+# `effect(...) ~ Distribution(...)` is metadata consumed by constructor prepasses;
 # it deliberately emits no independent parameter or likelihood statement.
 _sb_sampling!(_stmts, _data, _key, _lhs::ExprColumn{typeof(effect)}, _rhs;
               kwargs...) = nothing
@@ -4232,6 +4287,206 @@ function _sb_collect_id_buckets(brmi::BRMI)
     buckets
 end
 
+# Expand one collected `|ID|` bucket with the exact ranef-column emitter used
+# by Stan lowering. This is the single source of truth for public margin
+# addresses: categorical terms therefore expose their emitted dummy-column
+# labels, and formula order is preserved across predictors and terms.
+function _sb_id_bucket_margins(bucket)
+    out = NamedTuple[]
+    scratch_data = Dict{Symbol,Any}()
+    scratch_stmts = Any[]
+    for (predictor, terms) in bucket.per_target
+        for t in terms
+            if t isa Integer
+                t == 1 || error(
+                    "ranefcoefnames: unsupported integer random-effect term `$t`")
+                push!(out, (; predictor, coefficient=:Intercept))
+                continue
+            end
+            cols = Any[]
+            try
+                _sb_ranef_cols!(cols, scratch_data, scratch_stmts, t, terms)
+            catch err
+                error("ranefcoefnames: cannot resolve random-effect column(s) for " *
+                      "predictor `$predictor`: $(sprint(showerror, err))")
+            end
+            for col in cols
+                col isa Symbol || error(
+                    "ranefcoefnames: random-effect column for predictor " *
+                    "`$predictor` is not symbol-addressable: $(repr(col))")
+                push!(out, (; predictor, coefficient=col))
+            end
+        end
+    end
+    out
+end
+
+"""
+    ranefcoefnames(brmi::BRMI, id::Symbol) -> Union{Vector{NamedTuple},Nothing}
+
+Ordered `(predictor, coefficient)` addresses of the marginal SDs in the
+shared random-effect block selected by public `|ID|` symbol `id`. The k-th
+entry labels the k-th `tau` element emitted by the SBBRMI backend. Categorical
+random slopes use the exact treatment-contrast column symbols emitted into the
+random-effect design matrix.
+
+Returns `nothing` when `id` is absent. Reusing one ID with multiple grouping
+factors is ambiguous on the public ID-only surface and raises.
+"""
+function ranefcoefnames(brmi::BRMI, id::Symbol)
+    buckets = _sb_collect_id_buckets(brmi)
+    matches = Pair[k => bucket for (k, bucket) in pairs(buckets) if first(k) === id]
+    isempty(matches) && return nothing
+    length(matches) == 1 || error(
+        "ranefcoefnames: `|$id|` identifies $(length(matches)) random-effect " *
+        "blocks with different grouping factors; the ID-only address is ambiguous")
+    _sb_id_bucket_margins(last(only(matches)))
+end
+
+function _sb_ranef_sd_rate(spec)
+    T = _as_distribution_type(spec.family)
+    (!isnothing(T) && T <: Exponential) || error(
+        "sbimpl: `effect(sd, ...)` currently supports `Exponential(scale)`; " *
+        "got `$(spec.family)`. Unmentioned margins retain the historical " *
+        "half-standard-normal prior.")
+    isempty(spec.keywords) || error(
+        "sbimpl: `effect(sd, ...) ~ Exponential(...)` does not accept keywords")
+    args = map(_sb_effect_prior_arg, spec.arguments)
+    length(args) in (0, 1) || error(
+        "sbimpl: `Exponential` SD priors expect zero or one Julia scale argument")
+    scale = isempty(args) ? 1.0 : only(args)
+    scale isa Real || error(
+        "sbimpl: random-effect SD prior scale must be a numeric formula " *
+        "constant, got $(repr(scale))")
+    isfinite(scale) && scale > 0 || error(
+        "sbimpl: random-effect SD prior scale must be finite and strictly " *
+        "positive, got $scale")
+    # Distributions.Exponential uses scale; Stan's exponential_lpdf uses rate.
+    Float64(1.0 / scale)
+end
+
+function _sb_ranef_lkj(spec, n_terms::Int)
+    T = _as_distribution_type(spec.family)
+    (!isnothing(T) && T <: LKJCholesky) || error(
+        "sbimpl: `effect(cor, ID)` expects `LKJCholesky(K, eta)`; " *
+        "got `$(spec.family)`")
+    isempty(spec.keywords) || error(
+        "sbimpl: `effect(cor, ID) ~ LKJCholesky(...)` does not accept keywords")
+    args = map(_sb_effect_prior_arg, spec.arguments)
+    length(args) == 2 || error(
+        "sbimpl: `LKJCholesky` correlation priors require dimension K and eta")
+    k, eta = args
+    k isa Integer || error(
+        "sbimpl: `LKJCholesky(K, eta)` dimension K must be an integer " *
+        "formula constant, got $(repr(k))")
+    k == n_terms || error(
+        "sbimpl: `LKJCholesky($k, ...)` does not match the addressed " *
+        "random-effect block width $n_terms")
+    eta isa Real || error(
+        "sbimpl: LKJ eta must be a numeric formula constant, got $(repr(eta))")
+    isfinite(eta) && eta > 0 || error(
+        "sbimpl: LKJ eta must be finite and strictly positive, got $eta")
+    Float64(eta)
+end
+
+function _sb_ranef_margin_index(spec, margins)
+    if isnothing(spec.predictor)
+        return nothing
+    elseif isnothing(spec.coefficient)
+        hits = findall(m -> m.predictor === spec.predictor, margins)
+        isempty(hits) && error(
+            "sbimpl: `effect(sd, $(spec.id), $(spec.predictor))` matches no " *
+            "random-effect margin. Inspect `ranefcoefnames(brmi, :$(spec.id))`.")
+        length(hits) == 1 || error(
+            "sbimpl: `effect(sd, $(spec.id), $(spec.predictor))` is ambiguous " *
+            "because that predictor contributes $(length(hits)) margins; use " *
+            "`effect(sd, $(spec.id), $(spec.predictor), coefficient)`.")
+        return only(hits)
+    else
+        hits = findall(m -> m.predictor === spec.predictor &&
+                            m.coefficient === spec.coefficient, margins)
+        isempty(hits) && error(
+            "sbimpl: `effect(sd, $(spec.id), $(spec.predictor), " *
+            "$(spec.coefficient))` matches no random-effect margin. Inspect " *
+            "`ranefcoefnames(brmi, :$(spec.id))` for valid addresses.")
+        length(hits) == 1 || error(
+            "sbimpl: `effect(sd, $(spec.id), $(spec.predictor), " *
+            "$(spec.coefficient))` matches $(length(hits)) margins and is " *
+            "therefore ambiguous")
+        return only(hits)
+    end
+end
+
+# Resolve formula-level random-effect prior statements onto collected ID
+# buckets. The result is keyed exactly like `id_buckets`; entries are present
+# only for explicitly configured buckets, preserving default emission byte for
+# byte when the formula contains no ranef effect statements.
+function _sb_ranef_effect_overrides(brmi::BRMI, id_buckets)
+    specs = ranef_effect_priors(brmi)
+    isempty(specs) && return Dict{Tuple{Symbol,Any},NamedTuple}()
+
+    states = Dict{Tuple{Symbol,Any},Dict{Symbol,Any}}()
+    for spec in specs
+        matches = Any[k for k in keys(id_buckets) if first(k) === spec.id]
+        isempty(matches) && error(
+            "sbimpl: `effect($(spec.class), $(spec.id), ...)` matches no shared " *
+            "`|$(spec.id)|` random-effect block")
+        length(matches) == 1 || error(
+            "sbimpl: public `|$(spec.id)|` addresses $(length(matches)) blocks " *
+            "with different grouping factors; use a unique ID")
+        key = only(matches)
+        bucket = id_buckets[key]
+        bucket.group_desc isa Tuple && error(
+            "sbimpl: covariance-prior effects for stratified " *
+            "`|$(spec.id)| gr(..., by=...)` buckets are not yet supported")
+        margins = _sb_id_bucket_margins(bucket)
+        state = get!(states, key) do
+            Dict{Symbol,Any}(
+                :margins => margins,
+                :sd_default => nothing,
+                :sd_overrides => Dict{Int,Float64}(),
+                :lkj_eta => nothing,
+            )
+        end
+
+        if spec.class === :cor
+            state[:lkj_eta] === nothing || error(
+                "sbimpl: duplicate correlation prior for `effect(cor, $(spec.id))`")
+            state[:lkj_eta] = _sb_ranef_lkj(spec, length(margins))
+            continue
+        end
+
+        rate = _sb_ranef_sd_rate(spec)
+        idx = _sb_ranef_margin_index(spec, margins)
+        if isnothing(idx)
+            state[:sd_default] === nothing || error(
+                "sbimpl: duplicate block SD prior for `effect(sd, $(spec.id))`")
+            state[:sd_default] = rate
+        else
+            haskey(state[:sd_overrides], idx) && error(
+                "sbimpl: multiple SD prior statements resolve to margin " *
+                "$(margins[idx]) of `|$(spec.id)|`")
+            state[:sd_overrides][idx] = rate
+        end
+    end
+
+    out = Dict{Tuple{Symbol,Any},NamedTuple}()
+    for (key, state) in states
+        margins = state[:margins]
+        default_rate = state[:sd_default]
+        sd_family = fill(isnothing(default_rate) ? 0 : 1, length(margins))
+        sd_rate = fill(isnothing(default_rate) ? 1.0 : default_rate, length(margins))
+        for (idx, rate) in state[:sd_overrides]
+            sd_family[idx] = 1
+            sd_rate[idx] = rate
+        end
+        out[key] = (; sd_family, sd_rate,
+                    lkj_eta=isnothing(state[:lkj_eta]) ? 1.0 : state[:lkj_eta],
+                    margins)
+    end
+    out
+end
+
 # ---- group-block prepass (Prepass 2.5) ---------------------------------------
 #
 # Scan brmi.operations for declaring terms anywhere in the model: a term `f`
@@ -4397,7 +4652,8 @@ _sb_ranef_term_ncols(t, _) = error("sbimpl: unsupported ranef term $(typeof(t)):
 # to threading them here -- only the plain-group spelling has a variant, and the
 # stratified `gr(g, by=b)` bucket still errors (see `_sb_emit_id_bucket_sampling!`).
 function _sb_emit_id_buckets!(stmts, data, buckets;
-                              cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}())
+                              cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
+                              ranef_effect_overrides=Dict{Tuple{Symbol,Any},NamedTuple}())
     lookup = _sb_empty_id_lookup()
     for (k, bucket) in pairs(buckets)
         id_sym, _ = k
@@ -4416,8 +4672,10 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
         n_terms_total = cursor
         n_terms_total >= 1 || error("sbimpl: `|$id_sym|` bucket has zero terms")
         data[n_terms_name] = n_terms_total
+        ranef_effect = get(ranef_effect_overrides, k, nothing)
         idx_name = _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, desc;
-                                                cv_groups, centered_groups, id_sym)
+                                                cv_groups, centered_groups, id_sym,
+                                                ranef_effect)
         for (brmi_key, cols) in per_target_ranges
             lookup[(brmi_key, k)] = (; bucket_name, cols, idx_name, suffix)
         end
@@ -4436,9 +4694,12 @@ _sb_id_bucket_suffix(id_sym, g::Tuple{NamedColumn,NamedColumn}) =
 # callers use to slice the draw matrix per sub-formula.
 function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g::NamedColumn;
                                       cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
-                                      id_sym=nothing)
+                                      id_sym=nothing, ranef_effect=nothing)
     idx_name, n_name = _sb_ensure_group_data!(data, g)
     gname = name(g)
+    sd_family = isnothing(ranef_effect) ? nothing : Expr(:vect, ranef_effect.sd_family...)
+    sd_rate = isnothing(ranef_effect) ? nothing : Expr(:vect, ranef_effect.sd_rate...)
+    lkj_eta = isnothing(ranef_effect) ? nothing : ranef_effect.lkj_eta
     if gname in cv_groups
         # Same submodel as the default branch; only the SIZE EXPRESSION differs.
         # Tracing `maximum(<g>_idx)` at the CALL SITE carries the cv taint on
@@ -4449,23 +4710,44 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g:
         # inlined into every declaration.
         n_cv_name = Symbol(bucket_name, :_n_g)
         push!(stmts, :($n_cv_name = maximum($idx_name)))
-        push!(stmts, :($bucket_name ~ ranef_correlated_draws(;
-            group_idx=$idx_name, n_groups=$n_cv_name, n_terms=$n_terms_name)))
+        if isnothing(ranef_effect)
+            push!(stmts, :($bucket_name ~ ranef_correlated_draws(;
+                group_idx=$idx_name, n_groups=$n_cv_name, n_terms=$n_terms_name)))
+        else
+            push!(stmts, :($bucket_name ~ ranef_correlated_draws_effect(;
+                group_idx=$idx_name, n_groups=$n_cv_name, n_terms=$n_terms_name,
+                sd_family=$sd_family, sd_rate=$sd_rate, lkj_eta=$lkj_eta)))
+        end
     elseif gname in centered_groups
-        push!(stmts, :($bucket_name ~ ranef_correlated_draws_centered(;
-            group_idx=$idx_name, n_groups=$n_name, n_terms=$n_terms_name)))
+        if isnothing(ranef_effect)
+            push!(stmts, :($bucket_name ~ ranef_correlated_draws_centered(;
+                group_idx=$idx_name, n_groups=$n_name, n_terms=$n_terms_name)))
+        else
+            push!(stmts, :($bucket_name ~ ranef_correlated_draws_centered_effect(;
+                group_idx=$idx_name, n_groups=$n_name, n_terms=$n_terms_name,
+                sd_family=$sd_family, sd_rate=$sd_rate, lkj_eta=$lkj_eta)))
+        end
     else
-        push!(stmts, :($bucket_name ~ ranef_correlated_draws(;
-            group_idx=$idx_name, n_groups=$n_name, n_terms=$n_terms_name)))
+        if isnothing(ranef_effect)
+            push!(stmts, :($bucket_name ~ ranef_correlated_draws(;
+                group_idx=$idx_name, n_groups=$n_name, n_terms=$n_terms_name)))
+        else
+            push!(stmts, :($bucket_name ~ ranef_correlated_draws_effect(;
+                group_idx=$idx_name, n_groups=$n_name, n_terms=$n_terms_name,
+                sd_family=$sd_family, sd_rate=$sd_rate, lkj_eta=$lkj_eta)))
+        end
     end
     idx_name
 end
 function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name,
                                        g::Tuple{NamedColumn,NamedColumn};
                                        cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
-                                       id_sym=nothing)
+                                       id_sym=nothing, ranef_effect=nothing)
     gname, bname = name(g[1]), name(g[2])
     id_str = isnothing(id_sym) ? "ID" : String(id_sym)
+    isnothing(ranef_effect) || error(
+        "sbimpl: covariance-prior effects for stratified `|$id_str| " *
+        "gr($gname, by=$bname)` buckets are not yet supported")
     gname in cv_groups && error(
         "sbimpl: cv-contagious sizing requested for group `$gname`, but it ",
         "appears in a `(… |$id_str| gr($gname, by=$bname))` stratified ID bucket, ",

@@ -75,7 +75,8 @@ export BernoulliLogit, BinomialLogit
 # zero-inflated-Poisson and von-Mises UDF triads.
 export brm_ordinal, brm_ordinal_lpmf, brm_ordinal_lpmfs, brm_ordinal_rng,
        brm_ordinal_logcdf, brm_ordinal_logccdf, brm_ordinal_cdf,
-       multi_std_normal, multi_std_normal_lpdf, ranef_b_matrix
+       multi_std_normal, multi_std_normal_lpdf, ranef_b_matrix,
+       brm_ranef_sd, brm_ranef_sd_lpdf
 export Data, MaybeData, maybedata
 export AbstractColumn, MissingColumn, DataColumn, NamedColumn,
        ExprColumn, LikelihoodColumn, MaterializedColumn
@@ -104,7 +105,8 @@ export AdaptiveCenteringBlock, adaptive_centering_blocks,
 export outcomes, linear_predictor_op, linear_predictors, predictors,
        grouping_factors, column_data, data_columns, dependencies,
        hierarchical_outcomes,
-       linear_predictor_args, data_args, primary_lp, popcoefnames, effect_priors
+       linear_predictor_args, data_args, primary_lp, popcoefnames, effect_priors,
+       ranef_effect_priors, ranefcoefnames
 
 # Extension API. Downstream packages (bruno) add their own formula terms
 # by defining methods on `vmeta_sampling_rhs` + `_sb_submodel_rhs!` and
@@ -124,6 +126,8 @@ export popefs, _popefs_normal, cdirichlet, c0dirichlet, c01dirichlet,
        ranef_correlated_draws, ranef_correlated_by_draws,
        ranef_intercept_centered, ranef_correlated_centered,
        ranef_correlated_draws_centered,
+       ranef_correlated_draws_effect,
+       ranef_correlated_draws_centered_effect,
        multi_membership_intercept, multi_membership_correlated,
        _sb_mo, _sb_cat, _sb_ar1, _sb_s, _sb_t2, _sb_me,
        _sb_gp, _sb_gp_aniso, _sb_hsgp, _sb_hsgp_aniso,

@@ -226,6 +226,7 @@ function effect_priors(brmi::BRMI)
         isnothing(lhs_e) && continue
         getf(lhs_e) === effect || continue
         address = getargs(lhs_e)
+        !isempty(address) && first(address) in (:sd, :cor) && continue
         length(address) in (1, 2) || error(
             "effect_priors: malformed effect address with $(length(address)) arguments")
         rhs_e = _as_expr_column(rhs)
@@ -236,6 +237,52 @@ function effect_priors(brmi::BRMI)
         push!(out, (; predictor, coefficient, family=getf(rhs_e),
                      arguments=getargs(rhs_e), keywords=getkwargs(rhs_e),
                      expression=rhs_e))
+    end
+    out
+end
+
+"""
+    ranef_effect_priors(brmi::BRMI) -> Vector{NamedTuple}
+
+Return random-effect covariance-prior statements captured by [`@brm`](@ref),
+in formula order. Each entry has
+
+```julia
+(; class, id, predictor, coefficient, family, arguments, keywords, expression)
+```
+
+`class` is `:sd` or `:cor`. A block-wide statement has `predictor === nothing`
+and `coefficient === nothing`; the unique-predictor SD shorthand has only
+`coefficient === nothing`. The fully explicit SD address carries both symbols.
+Use [`ranefcoefnames`](@ref) for the authoritative ordered margin addresses of
+a shared `|ID|` block.
+"""
+function ranef_effect_priors(brmi::BRMI)
+    out = NamedTuple[]
+    for op_nc in values(brmi.operations)
+        op = _named_op(op_nc)
+        isnothing(op) && continue
+        getf(op) === (~) || continue
+        lhs, rhs = getargs(op, 2)
+        lhs_e = _as_expr_column(lhs)
+        isnothing(lhs_e) && continue
+        getf(lhs_e) === effect || continue
+        address = getargs(lhs_e)
+        isempty(address) && continue
+        class = first(address)
+        class in (:sd, :cor) || continue
+        valid = class === :sd ? length(address) in (2, 3, 4) : length(address) == 2
+        valid || error(
+            "ranef_effect_priors: malformed random-effect address " *
+            "`effect($(join(address, ", ")))`")
+        rhs_e = _as_expr_column(rhs)
+        isnothing(rhs_e) && error(
+            "ranef_effect_priors: `effect(...)` RHS is not a distribution expression")
+        predictor = length(address) >= 3 ? address[3] : nothing
+        coefficient = length(address) == 4 ? address[4] : nothing
+        push!(out, (; class, id=address[2], predictor, coefficient,
+                     family=getf(rhs_e), arguments=getargs(rhs_e),
+                     keywords=getkwargs(rhs_e), expression=rhs_e))
     end
     out
 end
