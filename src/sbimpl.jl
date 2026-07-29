@@ -168,6 +168,15 @@ ranef_intercept = StanBlocks.@slic begin
     return exp(log_scale) * xi[group_idx]
 end
 
+# Draw-returning sibling used by multi-membership intercepts. The caller keeps
+# `group_idx=` in the declaration metadata (for ranef_blocks) but performs the
+# many-to-one weighted gather with `multi_membership_intercept` below.
+ranef_intercept_draws = StanBlocks.@slic begin
+    log_scale ~ std_normal()
+    xi ~ std_normal(; n=n_groups)
+    return exp(log_scale) * xi
+end
+
 # Correlated random effects for K terms x G groups. brms-style (1 + x + y | g).
 # Non-centered parameterization:
 #   L      ~ lkj_corr_cholesky(1, K)         # K x K Cholesky factor
@@ -243,6 +252,44 @@ ranef_correlated_draws = StanBlocks.@slic begin
     z_flat ~ std_normal(; n=n_terms * n_groups)
     z = reshape(z_flat, n_terms, n_groups)
     return (diag_pre_multiply(tau, L) * z)'   # n_groups x n_terms
+end
+
+# Multi-membership gathers. Membership indices and weights are row-major flat
+# vectors: entries `(i-1)*n_memberships + m` describe observation `i`, member
+# slot `m`. Keeping indices flat avoids relying on a Stan array-of-int matrix
+# spelling while retaining a single validated preprocessing record in Julia.
+StanBlocks.@deffun begin
+    multi_membership_intercept(b::vector[n_groups],
+                               group_idx::int[n_mm],
+                               weights::vector[n_mm],
+                               n_obs::int,
+                               n_memberships::int)::vector[n_obs] = begin
+        rv = rep_vector(0., n_obs)
+        for i in 1:n_obs
+            for m in 1:n_memberships
+                j = (i - 1) * n_memberships + m
+                rv[i] += weights[j] * b[group_idx[j]]
+            end
+        end
+        rv
+    end
+    multi_membership_correlated(Z::matrix[n_obs, n_terms],
+                                b::matrix[n_groups, n_terms],
+                                group_idx::int[n_mm],
+                                weights::vector[n_mm],
+                                n_obs::int,
+                                n_memberships::int)::vector[n_obs] = begin
+        rv = rep_vector(0., n_obs)
+        for i in 1:n_obs
+            for m in 1:n_memberships
+                j = (i - 1) * n_memberships + m
+                for k in 1:n_terms
+                    rv[i] += weights[j] * Z[i, k] * b[group_idx[j], k]
+                end
+            end
+        end
+        rv
+    end
 end
 
 # ---- cv-contagious sizing (opt-in; for out-of-sample / CV models) ------------
@@ -1625,6 +1672,97 @@ function _check_term_kwargs(::typeof(t2), kw)
     nothing
 end
 
+_sb_mm_values(raw::CA.CategoricalVector) = CA.unwrap.(raw)
+_sb_mm_values(raw::AbstractVector) = raw
+_sb_mm_level_pool(raw::CA.CategoricalVector) = collect(CA.levels(raw))
+_sb_mm_level_pool(raw::AbstractVector) = collect(unique(raw))
+
+function _sb_mm_fit_levels(raw_groups)
+    pooled = Any[]
+    for raw in raw_groups
+        append!(pooled, _sb_mm_level_pool(raw))
+    end
+    unique!(pooled)
+    try
+        sort!(pooled)
+    catch
+        error("sbimpl: `mm(...)` grouping levels must be mutually orderable so ",
+              "one shared level index can be fitted (got $(repr(pooled)))")
+    end
+    pooled
+end
+
+function _sb_prepare_mm(raw_groups::Tuple, raw_weights, normalize::Bool;
+                        levels=nothing,
+                        group_names=ntuple(i -> Symbol(:group_, i), length(raw_groups)),
+                        weight_names=nothing)
+    M = length(raw_groups)
+    M >= 2 || error("sbimpl: internal — multi-membership preprocessing received $M groups")
+    all(v -> v isa AbstractVector, raw_groups) || error(
+        "sbimpl: every `mm(...)` group must resolve to a vector column")
+    N = length(first(raw_groups))
+    group_values = map(_sb_mm_values, raw_groups)
+    for m in 1:M
+        v = group_values[m]
+        length(v) == N || error(
+            "sbimpl: `mm(...)` group column `$(group_names[m])` has $(length(v)) rows; ",
+            "expected $N to match `$(group_names[1])`")
+        bad = findfirst(ismissing, v)
+        isnothing(bad) || error(
+            "sbimpl: `mm(...)` group column `$(group_names[m])` is missing at row $bad")
+    end
+
+    fitted_levels = isnothing(levels) ? _sb_mm_fit_levels(raw_groups) : collect(levels)
+    isempty(fitted_levels) && error("sbimpl: `mm(...)` grouping columns contain no levels")
+    level_map = Dict(l => i for (i, l) in enumerate(fitted_levels))
+    group_idx = Vector{Int}(undef, N * M)
+    for i in 1:N, m in 1:M
+        l = group_values[m][i]
+        haskey(level_map, l) || error(
+            "sbimpl: reprocess: `mm(...)` group column `$(group_names[m])` has ",
+            "unseen level `$(l)` at row $i (training levels: $(fitted_levels)). ",
+            "Re-fit with `freeze_constants=false` to derive a new shared level set.")
+        group_idx[(i - 1) * M + m] = level_map[l]
+    end
+
+    weights = Vector{Float64}(undef, N * M)
+    if isnothing(raw_weights)
+        fill!(weights, inv(Float64(M)))
+    else
+        length(raw_weights) == M || error(
+            "sbimpl: internal — `mm(...)` has $M groups but $(length(raw_weights)) weights")
+        names = isnothing(weight_names) ? ntuple(i -> Symbol(:weight_, i), M) : weight_names
+        for m in 1:M
+            v = raw_weights[m]
+            v isa AbstractVector || error(
+                "sbimpl: `mm(...)` weight `$(names[m])` must resolve to a vector column")
+            length(v) == N || error(
+                "sbimpl: `mm(...)` weight column `$(names[m])` has $(length(v)) rows; expected $N")
+            for i in 1:N
+                x = v[i]
+                x isa Real || error(
+                    "sbimpl: `mm(...)` weight `$(names[m])` at row $i must be real; got $(repr(x))")
+                isfinite(x) || error(
+                    "sbimpl: `mm(...)` weight `$(names[m])` at row $i must be finite; got $(repr(x))")
+                x >= 0 || error(
+                    "sbimpl: `mm(...)` weight `$(names[m])` at row $i must be nonnegative; got $(repr(x))")
+                xf = Float64(x)
+                isfinite(xf) || error(
+                    "sbimpl: `mm(...)` weight `$(names[m])` at row $i cannot be represented as finite Float64")
+                weights[(i - 1) * M + m] = xf
+            end
+        end
+        for i in 1:N
+            row = ((i - 1) * M + 1):(i * M)
+            total = sum(@view weights[row])
+            isfinite(total) || error("sbimpl: `mm(...)` weights have a non-finite total at row $i")
+            total > 0 || error("sbimpl: `mm(...)` weights must have a positive total at row $i")
+            normalize && (@views weights[row] ./= total)
+        end
+    end
+    (; levels=fitted_levels, group_idx, weights, n_obs=N, n_memberships=M)
+end
+
 # HSGP fit/apply split. The scalar methods reproduce the historical 1D basis;
 # the tuple methods form its tensor product for variadic `hsgp(x...)`.
 _sb_fit_hsgp(raw::AbstractVector{<:Real}, K::Integer, c::Real) = begin
@@ -1811,6 +1949,33 @@ function _sb_gp_axes_from_df(df, raw_ref, label::Symbol)
     axes
 end
 
+# `mm`-only source columns are consumed entirely by Julia preprocessing. Find
+# them before the generic data collector so raw labels (including strings) do
+# not become unused Stan data. A source ALSO referenced outside `mm` is retained
+# normally (e.g. `w1 + (1 | mm(...; weights=(w1,w2)))`).
+_sb_collect_mm_sources!(_, _) = nothing
+_sb_collect_mm_sources!(out, x::NamedColumn) = _sb_collect_mm_sources!(out, parent(x))
+_sb_collect_mm_sources!(out, x::ExprColumn) = begin
+    foreach(a -> _sb_collect_mm_sources!(out, a), getargs(x))
+    foreach(v -> _sb_collect_mm_sources!(out, v), values(getkwargs(x)))
+end
+_sb_collect_mm_sources!(out, x::MultiMembershipTerm) = begin
+    foreach(g -> push!(out, name(g)), getargs(x))
+    weights = getfield(x, :weights)
+    isnothing(weights) || foreach(w -> push!(out, name(w)), weights)
+end
+
+_sb_collect_non_mm_sources!(_, _) = nothing
+_sb_collect_non_mm_sources!(out, x::NamedColumn) = begin
+    parent(x) isa DataColumn && push!(out, name(x))
+    nothing
+end
+_sb_collect_non_mm_sources!(out, x::ExprColumn) = begin
+    foreach(a -> _sb_collect_non_mm_sources!(out, a), getargs(x))
+    foreach(v -> _sb_collect_non_mm_sources!(out, v), values(getkwargs(x)))
+end
+_sb_collect_non_mm_sources!(_, ::MultiMembershipTerm) = nothing
+
 struct SBBRMI{P<:BRMI, M, D<:AbstractDict, PP<:AbstractDict}
     parent::P
     model::M
@@ -1855,6 +2020,14 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     # own columns (e.g. `mi`'s `_sb_emit_mi!`) claim them via the prepass'
     # `:skip_data` bucket; the data-collection pass honours that.
     skip_data = get(prepass, :skip_data, Set{Symbol}())
+    mm_sources = Set{Symbol}()
+    non_mm_sources = Set{Symbol}()
+    for (_, op) in pairs(brmi.operations)
+        p = op isa NamedColumn ? parent(op) : op
+        _sb_collect_mm_sources!(mm_sources, p)
+        _sb_collect_non_mm_sources!(non_mm_sources, p)
+    end
+    union!(skip_data, setdiff(mm_sources, non_mm_sources))
     for (_, op) in pairs(brmi.operations)
         _sb_collect_data!(data, op; skip=skip_data)
     end
@@ -1979,6 +2152,11 @@ end
 _sb_collect_data!(data, x::ExprColumn; skip=Set{Symbol}()) = begin
     foreach(a -> _sb_collect_data!(data, a; skip), getargs(x))
     foreach(v -> _sb_collect_data!(data, v; skip), values(getkwargs(x)))
+end
+_sb_collect_data!(data, x::MultiMembershipTerm; skip=Set{Symbol}()) = begin
+    foreach(a -> _sb_collect_data!(data, a; skip), getargs(x))
+    weights = getfield(x, :weights)
+    isnothing(weights) || foreach(a -> _sb_collect_data!(data, a; skip), weights)
 end
 
 """
@@ -2331,6 +2509,26 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             "($(length(left)) vs $(length(right)))")
         new_data[key] = collect(Float64, left .* right)
         new_preproc[key] = e
+    elseif e.kind === :multi_membership
+        group_names = e.raw_ref.groups
+        weight_names = e.raw_ref.weights
+        raw_groups = Tuple(_sb_df_column(df, n) for n in group_names)
+        raw_weights = isnothing(weight_names) ? nothing :
+                      Tuple(_sb_df_column(df, n) for n in weight_names)
+        levels = freeze ? e.const_.levels : nothing
+        prepared = _sb_prepare_mm(raw_groups, raw_weights, e.const_.normalize;
+                                  levels, group_names, weight_names)
+        new_data[key] = prepared.group_idx
+        new_data[e.const_.weight_key] = prepared.weights
+        new_data[e.const_.n_groups_key] = length(prepared.levels)
+        new_data[e.const_.n_obs_key] = prepared.n_obs
+        new_data[e.const_.n_memberships_key] = prepared.n_memberships
+        for owned in (e.const_.weight_key, e.const_.n_groups_key,
+                      e.const_.n_obs_key, e.const_.n_memberships_key)
+            push!(handled, owned)
+        end
+        const_ = merge(e.const_, (; levels=prepared.levels))
+        new_preproc[key] = PreprocEntry(:multi_membership, const_, e.raw_ref, true)
     elseif e.kind === :spline
         v = collect(Float64, _sb_df_column(df, e.raw_ref))
         old_fit = e.const_.fit
@@ -2454,12 +2652,12 @@ of a naive per-column `sb.model(; col=…)` rebind is avoided. Returns a NEW
 
 Covered: the Julia-side transforms (`zscale`/`standardize`/`center`/`factor`/
 `mo`/`s`/`t2`/`gp`/`hsgp`), `protect`/implicit-fn columns (re-materialised on
-`new_df`), continuous × continuous interaction columns, typed observation
-weights, categorical outcomes, and pass-through raw columns (plain data, `me`
-obs values, `ar` time). Errors loudly
-on a `factor`/`mo` **unseen level** and on any derived data key it cannot account
-for (e.g. random-effects group indices from `(1|g)`) rather than silently
-copying a stale vector — rebuild from `new_df` for those models.
+`new_df`), typed `mm(...)` group indices and weights, continuous × continuous
+interaction columns, typed observation weights, categorical outcomes, and
+pass-through raw columns (plain data, `me` obs values, `ar` time). Errors loudly
+on a `factor`/`mo`/`mm` **unseen level** and on any derived data key it cannot
+account for (ordinary `(1|g)` indices remain outside this replay path) rather
+than silently copying a stale vector — rebuild from `new_df` for those models.
 """
 function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true)
     new_data = Dict{Symbol,Any}()
@@ -2486,9 +2684,9 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true)
                     "preprocessing record and is not a column of the new DataFrame. ",
                     "reprocess covers the Julia-side predictor transforms ",
                     "(zscale/standardize/center/factor/mo/s/t2/gp/hsgp), protect/implicit-fn ",
-                    "columns and pass-through raw columns; models with random-effects ",
-                    "group indices (e.g. `(1|g)`) are not yet supported — rebuild the ",
-                    "SBBRMI from the new DataFrame instead.")
+                    "columns, typed `mm(...)`, and pass-through raw columns; ordinary ",
+                    "random-effects group indices (e.g. `(1|g)`) are not yet supported — ",
+                    "rebuild the SBBRMI from the new DataFrame instead.")
             end
         elseif v isa Number || v isa AbstractString || v isa Bool
             new_data[k] = v   # frozen structural scalar / formula literal (e.g. me `sd_<x>`)
@@ -3523,6 +3721,7 @@ _sb_id_sym(s::AbstractString) = Symbol(s)
 _sb_id_sym(x) = error("sbimpl: `gr(...; id=...)` expects a Symbol or String, got $(typeof(x))")
 
 _sb_normalize_group(g::NamedColumn) = (g, nothing)
+_sb_normalize_group(g::MultiMembershipTerm) = (g, nothing)
 _sb_normalize_group(g::ExprColumn) = begin
     getf(g) === gr || error("sbimpl: expected NamedColumn or `gr(...)` on RHS of `|`, got `$(getf(g))`")
     args = getargs(g); kw = getkwargs(g)
@@ -3543,6 +3742,23 @@ _sb_normalize_group(g) = error("sbimpl: expected NamedColumn or `gr(...)` on RHS
 # `gr(g, by=b)` -> `(Symbol, Symbol)` so the two don't accidentally merge.
 _sb_group_key(g::NamedColumn) = name(g)
 _sb_group_key(g::Tuple{NamedColumn,NamedColumn}) = (name(g[1]), name(g[2]))
+_sb_group_key(g::MultiMembershipTerm) =
+    (:mm, Tuple(name(x) for x in getargs(g)),
+     isnothing(getfield(g, :weights)) ? nothing : Tuple(name(x) for x in getfield(g, :weights)),
+     getfield(g, :normalize))
+
+_sb_mm_group_names(g::MultiMembershipTerm) = Tuple(name(x) for x in getargs(g))
+_sb_mm_weight_names(g::MultiMembershipTerm) = begin
+    weights = getfield(g, :weights)
+    isnothing(weights) ? nothing : Tuple(name(x) for x in weights)
+end
+function _sb_mm_suffix(g::MultiMembershipTerm)
+    groups = join(String.(_sb_mm_group_names(g)), "__")
+    weights = _sb_mm_weight_names(g)
+    weighted = isnothing(weights) ? "" : "__w__$(join(String.(weights), "__"))"
+    raw = getfield(g, :normalize) ? "" : "__raw"
+    Symbol("mm__", groups, weighted, raw)
+end
 
 # Normalize `(expr | group)` vs `(expr | id | group)` into (id_sym, lhs, descriptor)
 # where id_sym === nothing signals the plain (non-ID'd) case. Surface-level
@@ -3554,12 +3770,18 @@ function _sb_ranef_parts(rt::ExprColumn)
     if length(args) == 2
         lhs, raw_group = args
         desc, id_sym = _sb_normalize_group(raw_group)
+        desc isa MultiMembershipTerm && id_sym !== nothing && error(
+            "sbimpl: `mm(...)` cannot be combined with `gr(...; id=...)`; ",
+            "multi-membership terms already define one shared coefficient block")
         (id_sym, lhs, desc)
     elseif length(args) == 3
         lhs, id_sym_raw, raw_group = args
         id_sym = _as_symbol(id_sym_raw)
         isnothing(id_sym) && error("sbimpl: `(e | ID | g)` middle must be a Symbol, got $(typeof(id_sym_raw))")
         desc, gr_id_sym = _sb_normalize_group(raw_group)
+        desc isa MultiMembershipTerm && error(
+            "sbimpl: `(e | ID | mm(...))` is not supported; `mm(...)` already ",
+            "defines one shared coefficient block across its membership columns")
         gr_id_sym === nothing ||
             error("sbimpl: `(e | ID | g)` cannot also carry `gr(g, id=...)` (got `$gr_id_sym`)")
         (id_sym, lhs, desc)
@@ -3683,6 +3905,85 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, 
                 Z=$Z_name, group_idx=$idx_name,
                 n_groups=$n_groups_expr, n_terms=$k_name)))
         end
+    end
+    push!(summands, r_name)
+end
+
+function _sb_emit_ranef_block!(stmts, data, target::Symbol,
+                                term::MultiMembershipTerm, gterms, summands;
+                                cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}())
+    group_names = _sb_mm_group_names(term)
+    weight_names = _sb_mm_weight_names(term)
+    cv_hit = intersect(Set(group_names), cv_groups)
+    isempty(cv_hit) || error(
+        "sbimpl: cv-contagious sizing for `mm(...)` is not yet supported ",
+        "(requested membership columns: $(collect(cv_hit)))")
+    centered_hit = intersect(Set(group_names), centered_groups)
+    isempty(centered_hit) || error(
+        "sbimpl: centered parameterization for `mm(...)` is not supported ",
+        "(requested membership columns: $(collect(centered_hit))); leave this ",
+        "shared block non-centered")
+
+    raw_groups = Tuple(begin
+        backing = _as_data_column(parent(g))
+        isnothing(backing) && error(
+            "sbimpl: `mm(...)` group `$(name(g))` must be a raw data column")
+        parent(backing)
+    end for g in getargs(term))
+    raw_weights = if isnothing(getfield(term, :weights))
+        nothing
+    else
+        Tuple(begin
+            backing = _as_data_column(parent(w))
+            isnothing(backing) && error(
+                "sbimpl: `mm(...)` weight `$(name(w))` must be a raw data column")
+            parent(backing)
+        end for w in getfield(term, :weights))
+    end
+    prepared = _sb_prepare_mm(raw_groups, raw_weights, getfield(term, :normalize);
+                              group_names, weight_names)
+
+    suffix = _sb_mm_suffix(term)
+    idx_name = Symbol(suffix, :_idx)
+    weight_name = Symbol(suffix, :_weights)
+    n_name = Symbol(:n_, suffix)
+    n_obs_name = Symbol(:n_obs_, suffix)
+    n_memberships_name = Symbol(:n_memberships_, suffix)
+    data[idx_name] = prepared.group_idx
+    data[weight_name] = prepared.weights
+    data[n_name] = length(prepared.levels)
+    data[n_obs_name] = prepared.n_obs
+    data[n_memberships_name] = prepared.n_memberships
+    const_ = (; levels=prepared.levels, weight_key=weight_name,
+              n_groups_key=n_name, n_obs_key=n_obs_name,
+              n_memberships_key=n_memberships_name,
+              normalize=getfield(term, :normalize))
+    raw_ref = (; groups=group_names, weights=weight_names)
+    _sb_record_preproc!(data, idx_name,
+        PreprocEntry(:multi_membership, const_, raw_ref, true))
+
+    b_name = Symbol(:b_, target, :_, suffix)
+    r_name = Symbol(:r_, target, :_, suffix)
+    if length(gterms) == 1 && gterms[1] === 1
+        push!(stmts, :($b_name ~ ranef_intercept_draws(;
+            group_idx=$idx_name, n_groups=$n_name)))
+        push!(stmts, :($r_name = multi_membership_intercept(
+            $b_name, $idx_name, $weight_name, $n_obs_name, $n_memberships_name)))
+    else
+        col_exprs = Any[]
+        for t in gterms
+            _sb_ranef_cols!(col_exprs, data, stmts, t, gterms)
+        end
+        Z_name = Symbol(:Z_, target, :_, suffix)
+        k_name = Symbol(:n_terms_, target, :_, suffix)
+        data[k_name] = length(col_exprs)
+        push!(stmts, :($Z_name = $(Expr(:call, :hcat, col_exprs...))))
+        push!(stmts, :($b_name ~ ranef_correlated_draws(;
+            Z=$Z_name, group_idx=$idx_name,
+            n_groups=$n_name, n_terms=$k_name)))
+        push!(stmts, :($r_name = multi_membership_correlated(
+            $Z_name, $b_name, $idx_name, $weight_name,
+            $n_obs_name, $n_memberships_name)))
     end
     push!(summands, r_name)
 end

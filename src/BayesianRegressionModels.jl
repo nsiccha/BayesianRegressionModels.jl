@@ -46,7 +46,7 @@ include("adaptive_centering.jl")
 # Public surface. The macros and value types everything downstream
 # (web-macro, bruno, tests) reaches for.
 export @brm, @n, @x, @getproperty
-export assign, doublepipe, gr, gp, offset, zscale, center, standardize, protect, factor
+export assign, doublepipe, gr, mm, gp, offset, zscale, center, standardize, protect, factor
 export weighted, AbstractWeights, AnalyticWeights, FrequencyWeights,
        ProbabilityWeights, UnitWeights, Weights,
        aweights, fweights, pweights, uweights, weights
@@ -116,10 +116,11 @@ export _sb_term_group_block, _sb_emit_group_block_term!
 # models with `StanBlocks.SlicModel(body, data, mod)` where `mod` is the
 # caller's namespace can still resolve the BRM built-in submodel names.
 export popefs, cdirichlet, c0dirichlet, c01dirichlet,
-       ranef_intercept, ranef_correlated, ranef_correlated_by,
+       ranef_intercept, ranef_intercept_draws, ranef_correlated, ranef_correlated_by,
        ranef_correlated_draws, ranef_correlated_by_draws,
        ranef_intercept_centered, ranef_correlated_centered,
        ranef_correlated_draws_centered,
+       multi_membership_intercept, multi_membership_correlated,
        _sb_mo, _sb_cat, _sb_ar1, _sb_s, _sb_t2, _sb_me,
        _sb_gp, _sb_gp_aniso, _sb_hsgp, _sb_hsgp_aniso,
        _sb_hsgp_by, _sb_hsgp_by_aniso,
