@@ -12,7 +12,7 @@ host = length(ARGS) >= 2 ? ARGS[2] : "127.0.0.1"
 matrix = length(ARGS) >= 3 ? ARGS[3] : DEFAULT_MATRIX_PATH
 
 app = build_gallery(matrix)
-route!(app; operation_policy=OperationPolicy(:blocking))
+route!(app)
 
 println("Historical inventory: $(length(app.surface.rows)) rows from $(abspath(matrix))")
 println("Serving on http://$host:$port")
