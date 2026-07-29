@@ -151,6 +151,22 @@ Dispatch tag only — backend interpretation lives in `vmeta_sampling_rhs`
 function gr end
 
 """
+    mm(group1, group2, ...; weights=nothing, normalize=true)
+
+Multi-membership grouping marker for random effects. Each observation belongs
+to two or more grouping levels and receives the weighted sum of their shared
+random-effect coefficients. `weights` is either omitted (equal `1/M` weights)
+or a tuple of one data column per group. Supplied weights must be finite,
+nonnegative, and have a positive row total; by default each row is normalized
+to sum to one. Set `normalize=false` to preserve valid supplied magnitudes.
+
+`@brm` lowers this surface immediately to a typed
+`MultiMembershipTerm`; the Stan backend validates and materializes it, including
+when data are replayed through [`reprocess`](@ref).
+"""
+function mm end
+
+"""
     gp(x...; cov=:exp_quad, iso=true, jitter=1e-9)
 
 Exact latent Gaussian-process predictor for the StanBlocks backend. Accepts
@@ -484,9 +500,9 @@ maybedata(x) = MaybeData(x)
     AbstractColumn
 
 Supertype of every column-shape token the `@brm` parser produces.
-Subtypes: [`MissingColumn`](@ref), [`DataColumn`](@ref),
-[`NamedColumn`](@ref), [`ExprColumn`](@ref), [`LikelihoodColumn`](@ref),
-[`MaterializedColumn`](@ref).
+Subtypes include [`MissingColumn`](@ref), [`DataColumn`](@ref),
+[`NamedColumn`](@ref), [`ExprColumn`](@ref), `MultiMembershipTerm`,
+[`LikelihoodColumn`](@ref), and [`MaterializedColumn`](@ref).
 
 Backend dispatchers (`vmeta_sampling_rhs`, `_sb_emit!`, the
 introspection walkers) branch on this hierarchy rather than on
@@ -587,6 +603,50 @@ struct ExprColumn{F,A<:Tuple,K<:NamedTuple} <: AbstractColumn
         (_check_term_kwargs(f, (;kwargs...));
          new{Type{f},typeof(args),typeof((;kwargs...))}(f,args,(;kwargs...)))
 end
+
+"""
+    MultiMembershipTerm
+
+Typed internal column node produced by `mm(...)`. It deliberately does not use
+the generic `ExprColumn` representation: grouping columns, optional weight
+columns, and the normalization policy are structural parts of one random-effect
+term and must survive preprocessing/replay together.
+"""
+struct MultiMembershipTerm{G<:Tuple,W} <: AbstractColumn
+    groups::G
+    weights::W
+    normalize::Bool
+end
+
+function MultiMembershipTerm(groups...; weights=nothing, normalize=true)
+    length(groups) >= 2 || throw(ArgumentError(
+        "`mm(...)` requires at least two grouping columns; got $(length(groups))"))
+    all(g -> g isa NamedColumn, groups) || throw(ArgumentError(
+        "every positional argument to `mm(...)` must be a data-column name"))
+    normalize isa Bool || throw(ArgumentError(
+        "`mm(...; normalize=...)` expects `true` or `false`, got $(repr(normalize))"))
+    if weights !== nothing
+        weights isa Tuple || throw(ArgumentError(
+            "`mm(...; weights=...)` expects a tuple with one weight column per group"))
+        length(weights) == length(groups) || throw(ArgumentError(
+            "`mm(...)` has $(length(groups)) groups but $(length(weights)) weight columns"))
+        all(w -> w isa NamedColumn, weights) || throw(ArgumentError(
+            "every entry of `mm(...; weights=(...))` must be a data-column name"))
+    end
+    MultiMembershipTerm(tuple(groups...), weights, normalize)
+end
+
+# Specialised outer constructor: `_x` continues to lower every call through
+# `ExprColumn(...)`, while dispatch turns only `mm(...)` into the typed node.
+ExprColumn(::typeof(mm), groups...; kwargs...) = MultiMembershipTerm(groups...; kwargs...)
+
+getf(::MultiMembershipTerm) = mm
+getargs(x::MultiMembershipTerm) = getfield(x, :groups)
+getargs(x::MultiMembershipTerm, n) =
+    (rv = getargs(x); @assert length(rv) == n; rv)
+getkwargs(x::MultiMembershipTerm) =
+    (; weights=getfield(x, :weights), normalize=getfield(x, :normalize))
+getop(::MultiMembershipTerm) = mm
 
 """
     getf(x::ExprColumn) -> F
@@ -829,6 +889,14 @@ Base.show(io::IO, x::ExprColumn) = begin
     print(io, getf(x), "(", )
     join(io, getargs(x), ", ")
     nonemptyjoin(io, ["$key=$value" for (key, value) in pairs(getkwargs(x))], ", "; first="; ")
+    print(io, ")")
+end
+Base.show(io::IO, x::MultiMembershipTerm) = begin
+    print(io, "mm(")
+    join(io, getfield(x, :groups), ", ")
+    weights = getfield(x, :weights)
+    isnothing(weights) || (print(io, "; weights=("); join(io, weights, ", "); print(io, ")"))
+    getfield(x, :normalize) || print(io, isnothing(weights) ? "; normalize=false" : ", normalize=false")
     print(io, ")")
 end
 Base.show(io::IO, x::NamedColumn) = print(io, name(x))

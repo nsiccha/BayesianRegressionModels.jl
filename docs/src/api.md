@@ -46,6 +46,7 @@ BayesianRegressionModels.effect
 BayesianRegressionModels.doublepipe
 BayesianRegressionModels.weighted
 BayesianRegressionModels.gr
+BayesianRegressionModels.mm
 BayesianRegressionModels.gp
 BayesianRegressionModels.hsgp
 BayesianRegressionModels.offset
