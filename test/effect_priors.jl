@@ -7,7 +7,7 @@ using Test
 using BayesianRegressionModels
 using StanBlocks
 using LogDensityProblems
-using Distributions: Cauchy, Normal
+using Distributions: Cauchy, Exponential, Normal
 
 const EFFECT_PRIOR_CACHE = joinpath(tempdir(), "brm-effect-priors")
 const EFFECT_PRIOR_RUNTIME = get(ENV, "BRM_EFFECT_RUNTIME", "1") != "0"
@@ -109,4 +109,103 @@ end
         y ~ Normal(mu, 1)
     end
     @test_throws "support only `Normal" SBBRMI(unsupported; mod=@__MODULE__)
+end
+
+# `linear_predictors` reports EVERY non-data `~` binding, not just population
+# formulas: a scalar parameter prior (`log_F_bottle ~ Normal(0, 0.5)`) and a
+# submodel binding (`pred ~ kernel(...) do … end`) are both in it, and neither
+# has `beta_pop` columns for `popcoefnames` to name. Resolving labels for every
+# entry the moment ANY effect prior existed therefore made one unrelated
+# statement fatal for the whole model — `effect(...)` overrides and ordinary
+# scalar priors could not coexist. Labels are now resolved lazily, per address.
+@testset "unrelated statements do not block effect-prior resolution" begin
+    explicit = @brm df begin
+        log_F_bottle ~ Normal(0, 0.5)
+        mu ~ 1 + x
+        effect(mu, x) ~ Normal(0, 0.25)
+        y ~ Normal(mu + log_F_bottle, 1)
+    end
+    @test [lp.name for lp in linear_predictors(explicit)] == [:log_F_bottle, :mu]
+    @test popcoefnames(explicit, :mu) == [:Intercept, :x]
+    # The scalar prior is exactly the entry `popcoefnames` cannot name.
+    @test_throws "cannot resolve the `beta_pop` column(s)" popcoefnames(explicit, :log_F_bottle)
+
+    sb = SBBRMI(explicit; mod=@__MODULE__)
+    code = BayesianRegressionModels.stan_code(sb)
+    @test StanBlocks.stan.transpiles(sb.model)
+    # The scalar prior stays an ordinary parameter…
+    @test occursin("real log_F_bottle;", code)
+    @test occursin("log_F_bottle ~ normal(0, 0.5);", code)
+    # …and the override still reaches only the addressed population column.
+    @test occursin("pop_mu_beta_pop ~ normal([0.0, 0]', [1.0, 0.25]');", code)
+
+    # The concise form is the path that enumerates candidates, so it must skip
+    # the unnameable entries rather than fail on them.
+    concise = @brm df begin
+        log_F_bottle ~ Normal(0, 0.5)
+        mu ~ 1 + x
+        effect(x) ~ Normal(0, 0.25)
+        y ~ Normal(mu + log_F_bottle, 1)
+    end
+    @test occursin("pop_mu_beta_pop ~ normal([0.0, 0]', [1.0, 0.25]');",
+                   BayesianRegressionModels.stan_code(SBBRMI(concise; mod=@__MODULE__)))
+
+    # Addressing the scalar prior itself is still an error, and names what IS
+    # addressable instead of leaking `popcoefnames`' internal failure.
+    at_prior = @brm df begin
+        log_F_bottle ~ Normal(0, 0.5)
+        mu ~ 1 + x
+        effect(log_F_bottle, x) ~ Normal(0, 0.25)
+        y ~ Normal(mu + log_F_bottle, 1)
+    end
+    @test_throws "names no linear predictor with population coefficients" SBBRMI(
+        at_prior; mod=@__MODULE__)
+
+    # An unknown concise label is still rejected — tolerance must not mute this.
+    unknown = @brm df begin
+        log_F_bottle ~ Normal(0, 0.5)
+        mu ~ 1 + x
+        effect(nope) ~ Normal(0, 0.25)
+        y ~ Normal(mu + log_F_bottle, 1)
+    end
+    @test_throws "matches no population coefficient" SBBRMI(unknown; mod=@__MODULE__)
+end
+
+# The PMX shape the snag was reported against: a population PK model carries a
+# scalar prior (`sigma ~ Exponential(1)`) AND a `kernel(...)` submodel binding
+# whose columns `popcoefnames` cannot name — two distinct unnameable entries —
+# alongside `effect(...)` overrides on the per-subject linear predictors.
+@testset "effect priors coexist with a kernel(...) PMX model" begin
+    n = 6
+    pk_df = (; t       = [abs.(sin.(1:4)) .+ 0.5 for _ in 1:n],
+               dose    = fill(100.0, n),
+               dv      = [abs.(cos.(1:4)) .+ 0.1 for _ in 1:n],
+               subject = collect(1:n))
+
+    pk = @brm pk_df begin
+        sigma ~ Exponential(1)
+        log_CL ~ 1 + (1 | p | subject)
+        log_V  ~ 1 + (1 | p | subject)
+        log_Ka ~ 1 + (1 | p | subject)
+        effect(log_CL, Intercept) ~ Normal(log(1 / 8), 0.8)
+        pred ~ kernel(t, dose, dv, log_CL, log_V, log_Ka) do ts, d, yy, lCL, lV, lKa
+            CL = exp(lCL); Vc = exp(lV); Ka = exp(lKa)
+            ke = CL / Vc
+            mu = d * Ka / (Vc * (Ka - ke)) * (exp(-ke * ts) - exp(-Ka * ts))
+            yy ~ normal(mu, sigma)
+            mu
+        end
+    end
+    @test_throws "cannot resolve the `beta_pop` column(s)" popcoefnames(pk, :sigma)
+    @test_throws "cannot resolve the `beta_pop` column(s)" popcoefnames(pk, :pred)
+    @test popcoefnames(pk, :log_CL) == [:Intercept]
+
+    sb = SBBRMI(pk; mod=@__MODULE__)
+    code = BayesianRegressionModels.stan_code(sb)
+    @test StanBlocks.stan.transpiles(sb.model)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    @test occursin("pop_log_CL_beta_pop ~ normal([$(log(1 / 8))]', [0.8]');", code)
+    # Unaddressed predictors keep the default, and the scalar prior is untouched.
+    @test occursin("pop_log_V_beta_pop ~ std_normal();", code)
+    @test occursin("sigma ~ exponential(", code)
 end
