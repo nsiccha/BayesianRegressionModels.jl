@@ -26,7 +26,7 @@ _ALLOWED_CALLS = Set{Symbol}([
     :NegativeBinomial, :NegativeBinomial2, :BetaBinomial, :BetaBinomial2,
     :Geometric, :Laplace, :Uniform,
     :MvNormal, :MixtureModel, :Dirichlet,
-    :InverseGamma, :InverseGaussian, :VonMises, :Pareto,
+    :InverseGamma, :InverseGaussian, :VonMises, :CircularVonMises, :Pareto,
     :OrderedLogistic, :Categorical, :CategoricalLogit,
     :zscale, :center, :standardize, :factor, :offset, :protect,
     :s, :bs, :t2, :gp, :hsgp, :ar, :ar1, :mo, :mo1, :mi,
