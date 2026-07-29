@@ -41,6 +41,28 @@ sbbrmi = SBBRMI(brmi)
 src    = stan_code(sbbrmi)
 ```
 
+Population coefficients use independent standard-normal priors by default.
+Override selected coefficients with separate `effect(...)` statements; the
+coefficient names are exactly those returned by `popcoefnames`:
+
+```julia
+pk = @brm df begin
+    log_ka ~ 1 + weight + (1 | pk | subject)
+    effect(log_ka, Intercept) ~ Normal(log(1 / 8), 0.8)
+    effect(log_ka, weight) ~ Normal(0, 0.1)
+end
+```
+
+The explicit two-argument address is recommended when a model has several
+linear predictors. `effect(weight) ~ Normal(0, 0.1)` is a convenience only
+when `:weight` names a population coefficient in exactly one predictor;
+ambiguous and unknown addresses error. The first shipped lowering supports
+`Normal(location, scale)` overrides and retains the existing
+`pop_<predictor>_beta_pop` vector parameter, its `popcoefnames` labels, and
+descriptor provenance. Inspect the captured formula statements with
+`effect_priors(brmi)`. This surface belongs to `SBBRMI`; `VBRMI` does not
+implement it.
+
 See [Formula terms](@ref) and [Likelihoods](@ref) for the supported syntax and
 backend-specific contracts. The [Gallery](/gallery) provides live, interactive examples — input
 formula, the SLIC submodel body, the transpiled Stan source, and the

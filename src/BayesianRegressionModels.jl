@@ -46,7 +46,7 @@ include("adaptive_centering.jl")
 # Public surface. The macros and value types everything downstream
 # (web-macro, bruno, tests) reaches for.
 export @brm, @n, @x, @getproperty
-export assign, doublepipe, gr, mm, gp, offset, zscale, center, standardize, protect, factor
+export assign, effect, doublepipe, gr, mm, gp, offset, zscale, center, standardize, protect, factor
 export weighted, AbstractWeights, AnalyticWeights, FrequencyWeights,
        ProbabilityWeights, UnitWeights, Weights,
        aweights, fweights, pweights, uweights, weights
@@ -104,7 +104,7 @@ export AdaptiveCenteringBlock, adaptive_centering_blocks,
 export outcomes, linear_predictor_op, linear_predictors, predictors,
        grouping_factors, column_data, data_columns, dependencies,
        hierarchical_outcomes,
-       linear_predictor_args, data_args, primary_lp, popcoefnames
+       linear_predictor_args, data_args, primary_lp, popcoefnames, effect_priors
 
 # Extension API. Downstream packages (bruno) add their own formula terms
 # by defining methods on `vmeta_sampling_rhs` + `_sb_submodel_rhs!` and
@@ -119,7 +119,7 @@ export _sb_term_group_block, _sb_emit_group_block_term!
 # modules (bruno-ext via web-macro) that build their own SBBRMI-style
 # models with `StanBlocks.SlicModel(body, data, mod)` where `mod` is the
 # caller's namespace can still resolve the BRM built-in submodel names.
-export popefs, cdirichlet, c0dirichlet, c01dirichlet,
+export popefs, _popefs_normal, cdirichlet, c0dirichlet, c01dirichlet,
        ranef_intercept, ranef_intercept_draws, ranef_correlated, ranef_correlated_by,
        ranef_correlated_draws, ranef_correlated_by_draws,
        ranef_intercept_centered, ranef_correlated_centered,

@@ -42,6 +42,7 @@ BayesianRegressionModels.getbroadcast
 
 ```@docs
 BayesianRegressionModels.assign
+BayesianRegressionModels.effect
 BayesianRegressionModels.doublepipe
 BayesianRegressionModels.weighted
 BayesianRegressionModels.gr
@@ -115,6 +116,8 @@ BayesianRegressionModels.hierarchical_outcomes
 BayesianRegressionModels.linear_predictor_args
 BayesianRegressionModels.data_args
 BayesianRegressionModels.primary_lp
+BayesianRegressionModels.popcoefnames
+BayesianRegressionModels.effect_priors
 ```
 
 ## Extension API
