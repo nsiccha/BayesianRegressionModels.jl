@@ -71,23 +71,46 @@ function _block_cholesky_entry(x, block, i, j)
     tau * stick
 end
 
-# Reconstruct a preceding innovation without a mutable workspace.  The common
-# K=1:4 BRM blocks stay allocation-free under reverse-mode AD; the public
-# contract remains general, so larger blocks switch to the polynomial fallback
-# below instead of paying this recursion's exponential recomputation.
-function _recursive_block_location(x, state, bi, k, g)
+# Reconstruct preceding innovations without a mutable workspace.  Keep the
+# common K=1:4 BRM blocks allocation-free and non-recursive: Enzyme's reverse
+# pass corrupts Julia's GC state after sustained calls through a recursive
+# callable, even though that recursion is only four levels deep.  K=1 returns
+# directly; K=2:4 use the bounded scalar loop below.  Larger blocks keep the
+# polynomial fallback.
+function _small_block_location(x, state, bi, k, g)
     block = state.blocks[bi]
-    m = zero(eltype(x))
-    for l in 1:k-1
-        previous = state.pair_lookup[bi][l, g]
-        previous_location = _recursive_block_location(x, state, bi, l, g)
-        c = state.sources[previous]
-        s = _block_cholesky_entry(x, block, l, l)
-        innovation =
-            (x[block.effects[l, g]] - c * previous_location) / s^c
-        m += _block_cholesky_entry(x, block, k, l) * innovation
+    T = eltype(x)
+    k == 1 && return zero(T)
+    z1 = z2 = z3 = zero(T)
+    for i in 1:k
+        m = if i == 1
+            zero(T)
+        elseif i == 2
+            _block_cholesky_entry(x, block, 2, 1) * z1
+        elseif i == 3
+            _block_cholesky_entry(x, block, 3, 1) * z1 +
+            _block_cholesky_entry(x, block, 3, 2) * z2
+        elseif i == 4
+            _block_cholesky_entry(x, block, 4, 1) * z1 +
+            _block_cholesky_entry(x, block, 4, 2) * z2 +
+            _block_cholesky_entry(x, block, 4, 3) * z3
+        else
+            throw(BoundsError(1:4, i))
+        end
+        i == k && return m
+
+        c = state.sources[state.pair_lookup[bi][i, g]]
+        s = _block_cholesky_entry(x, block, i, i)
+        z = (x[block.effects[i, g]] - c * m) / s^c
+        if i == 1
+            z1 = z
+        elseif i == 2
+            z2 = z
+        else
+            z3 = z
+        end
     end
-    m
+    throw(BoundsError(1:4, k))
 end
 
 function _iterative_block_location(x, state, bi, k, g)
@@ -112,7 +135,7 @@ end
 
 function _block_location(x, state, pair_number)
     bi, k, g = _pair_location(state, pair_number)
-    k <= 4 && return _recursive_block_location(x, state, bi, k, g)
+    k <= 4 && return _small_block_location(x, state, bi, k, g)
     _iterative_block_location(x, state, bi, k, g)
 end
 

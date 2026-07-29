@@ -5,6 +5,17 @@ using DifferentiationInterface: AutoEnzyme
 using LogDensityProblems
 using StanBlocks
 
+function enzyme_gradient_stress(problem, initial; n=2_000)
+    x = copy(initial)
+    checksum = zero(eltype(x))
+    for i in 1:n
+        x[1] = initial[1] + 1e-6 * (i % 11)
+        lp, gradient = LogDensityProblems.logdensity_and_gradient(problem, x)
+        checksum += lp + gradient[1]
+    end
+    checksum
+end
+
 @testset "BridgeStan target differentiates through the mixed correlated frame" begin
     sb = SBBRMI(builder(df); mod=@__MODULE__)
     problem = StanBlocks.stan_instantiate(sb.model)
@@ -41,6 +52,12 @@ using StanBlocks
          LogDensityProblems.logdensity(reparametrized, minus)) / (2step)
     end for i in eachindex(x)]
     @test gradient ≈ finite_difference atol=2e-5 rtol=2e-5
+
+    # One Enzyme gradient stayed green after bd9ca2d, but sustained calls through
+    # its recursive K<=4 accessor corrupted Julia's GC after about 1,750 calls.
+    # Keep this above the measured threshold so that process-level failure cannot
+    # hide behind the otherwise-correct single-gradient assertion.
+    @test isfinite(enzyme_gradient_stress(reparametrized, x))
 
     wrapped = adaptive_centering_problem(sb, problem, backend)
     wrapped_ir = WarmupHMC.reparametrizer(wrapped)
