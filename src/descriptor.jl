@@ -53,7 +53,7 @@ The last two are BRM's addition — the **schema link** back to the dataframe:
   when it has no single raw column (a design matrix, a level count, a size).
 - `transform` — the BRM preprocessing kind applied on the way (`:zscale`,
   `:center`, `:standardize`, `:factor`, `:mo`, `:spline`, `:gp`, `:hsgp`,
-  `:protect`),
+  `:multi_membership`, `:protect`),
   or `nothing` when the column is passed through untransformed.
 
 `column`/`transform` are read from the plan's `preproc` record and the BRMI's
@@ -427,7 +427,7 @@ hand, so an operation that appears can be executed.
 | `:predict` | `:stan` | the Stan program emits ≥1 posterior-predictive draw **and** ≥1 BRM observation resolves to it |
 | `:pointwise_loglik` | `:stan` | the Stan program emits ≥1 pointwise log-likelihood |
 | `:replay` | `:brm` | the descriptor was built from a `@brm` builder (rebuild on a new dataframe, e.g. new subjects) |
-| `:reprocess` | `:brm` | the declaration has no random-effect block (BRM's documented `reprocess` boundary) |
+| `:reprocess` | `:brm` | the declaration has no random-effect block, or every random-effect block uses typed `mm(...)` preprocessing |
 
 `:replay` / `:reprocess` take the new dataframe positionally and return a NEW
 `BRMDescriptor`; their `inputs` are the dataframe columns in `d.columns`, not
@@ -607,6 +607,22 @@ end
 # replay operations. Nothing is listed: `stan.operations` is itself derived from
 # what the traced model supports, and the two BRM ones are gated on the
 # declaration.
+function _brm_reprocess_supported(plan, outputs)
+    any(o -> o.role === :random_effect, outputs) || return true
+
+    ranef_declarations = [d for d in plan.declarations
+                          if _brm_declaration_role(d) === :random_effect]
+    isempty(ranef_declarations) && return false
+
+    all(ranef_declarations) do d
+        haskey(d.keywords, :group_idx) || return false
+        idx_key = d.keywords.group_idx
+        idx_key isa Symbol || return false
+        entry = get(plan.preproc, idx_key, nothing)
+        entry isa PreprocEntry && entry.kind === :multi_membership
+    end
+end
+
 function _brm_derive_operations(plan, stan, outputs, columns)
     ops = BRMOperation[]
     predictive = Symbol[o.name for o in outputs if o.role === :posterior_predictive]
@@ -627,7 +643,7 @@ function _brm_derive_operations(plan, stan, outputs, columns)
             (d, new_df; kwargs...) -> brm_descriptor(
                 generative_plan(d.plan, new_df); kwargs...)))
     end
-    if !any(o -> o.role === :random_effect, outputs)
+    if _brm_reprocess_supported(plan, outputs)
         push!(ops, BRMOperation(
             :reprocess, "Re-run preprocessing on a new dataframe", columns, (), :brm,
             (d, new_df; freeze_constants::Bool=true, kwargs...) -> brm_descriptor(
