@@ -52,7 +52,8 @@ The last two are BRM's addition — the **schema link** back to the dataframe:
 - `column` — the dataframe column this Stan input was built from, or `nothing`
   when it has no single raw column (a design matrix, a level count, a size).
 - `transform` — the BRM preprocessing kind applied on the way (`:zscale`,
-  `:center`, `:standardize`, `:factor`, `:mo`, `:spline`, `:gp`, `:protect`),
+  `:center`, `:standardize`, `:factor`, `:mo`, `:spline`, `:gp`, `:hsgp`,
+  `:protect`),
   or `nothing` when the column is passed through untransformed.
 
 `column`/`transform` are read from the plan's `preproc` record and the BRMI's
@@ -218,7 +219,8 @@ end
 # ---- schema: which dataframe column does this Stan input come from? ---------
 
 # A preproc record names its source either directly (a column NAME Symbol, for
-# factor/mo/spline/gp) or as a column-node tree (zscale/center/standardize and
+# factor/mo/spline) or as an axis-name tuple (gp/hsgp), or as a column-node tree
+# (zscale/center/standardize and
 # the protect/implicit-fn fallback). Walk the tree to its single data leaf; a
 # tree touching several columns has no single source column, and we say so
 # rather than picking one.
@@ -233,6 +235,10 @@ _brm_raw_column(x::ExprColumn) = begin
         isnothing(c) || push!(found, c)
     end
     unique!(found)
+    length(found) == 1 ? only(found) : nothing
+end
+_brm_raw_column(x::Tuple) = begin
+    found = unique(Symbol[c for a in x for c in (_brm_raw_column(a),) if !isnothing(c)])
     length(found) == 1 ? only(found) : nothing
 end
 _brm_raw_column(_) = nothing
@@ -252,7 +258,7 @@ _brm_plan_of(sb::SBBRMI) = generative_plan(sb)
 # Label a population-effect output's elements, when BRM can. `popcoefnames`
 # already owns this (and is the documented way not to re-parse `beta_pop.N`);
 # it can legitimately return `nothing`, and it errors on shapes it cannot
-# resolve (`gp(x, by=g)` and friends) — neither is a reason to fail descriptor
+# resolve (`hsgp(x, by=g)` and friends) — neither is a reason to fail descriptor
 # construction, so an unlabelled output simply carries `labels = nothing`.
 _brm_labels(brmi, lp::Symbol) =
     try
