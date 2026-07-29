@@ -81,12 +81,15 @@ struct OrderedLogistic end
 
 """
     CategoricalLogit(eta2, eta3, ...)
+    CategoricalLogit(@brm(formula))
 
 Reference-class categorical likelihood marker. Each positional argument is an
 existing scalar linear predictor for one non-reference outcome class; class 1
 has fixed logit zero. The sbimpl backend freezes the observed outcome-level
 order, constructs the per-row logit matrix, and lowers to a categorical-logit
-likelihood with prediction and pointwise-log-likelihood support.
+likelihood with prediction and pointwise-log-likelihood support. The concise
+nested-`@brm` form is normalised by the outer builder into that same explicit
+argument list, sharing formula structure while fitting distinct coefficients.
 """
 struct CategoricalLogit end
 
@@ -1324,8 +1327,8 @@ end
 # for a CategoricalVector the level position == `CA.levelcode`; for a plain
 # vector `sort(unique)` gives the same ordering. `_sb_level_index` (the
 # construct-time entry) is unchanged.
-_sb_fit_levels(raw::CA.CategoricalVector) = CA.levels(raw)
-_sb_fit_levels(raw::AbstractVector) = sort(unique(raw))
+_brm_fit_levels(raw::CA.CategoricalVector) = CA.levels(raw)
+_sb_fit_levels(raw::AbstractVector) = _brm_fit_levels(raw)
 _sb_apply_levels(levels, raw::CA.CategoricalVector) = _sb_apply_levels(levels, CA.unwrap.(raw))
 _sb_apply_levels(levels, raw::AbstractVector) = begin
     lm = Dict(l => i for (i, l) in enumerate(levels))

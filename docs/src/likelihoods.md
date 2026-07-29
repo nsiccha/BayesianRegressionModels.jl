@@ -1,5 +1,65 @@
 # Likelihoods
 
+## Concise categorical regression
+
+`CategoricalLogit` accepts an explicit nested `@brm(...)` predictor formula:
+
+```julia
+data = (;
+    x = [-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+    y = ["b", "a", "c", "b", "c", "a"],
+)
+
+categorical_model = @brm data begin
+    y ~ CategoricalLogit(@brm(1 + x))
+end
+```
+
+For an outcome with ``K`` levels, BRM expands the marked formula to ``K-1``
+ordinary scalar linear predictors with distinct coefficients, then calls the
+same reference-class categorical lowering as the fully explicit form. The
+first fitted level has logit zero. Plain vectors use `sort(unique(y))` for the
+fitted order; a `CategoricalVector` uses its declared level order. The latter is
+the way to select a reference level deliberately.
+
+For example, a three-level outcome above is equivalent in model structure to:
+
+```julia
+explicit_model = @brm data begin
+    y_nested_arg1_class2 ~ 1 + x
+    y_nested_arg1_class3 ~ 1 + x
+    y ~ CategoricalLogit(y_nested_arg1_class2, y_nested_arg1_class3)
+end
+```
+
+The generated names are deterministic implementation names; use the explicit
+form when those predictor names are part of another formula. Only nested
+`@brm(...)` opts into predictor-formula interpretation. Thus
+`CategoricalLogit(1 + x)` remains an ordinary expression and is rejected by
+the categorical backend, rather than silently acquiring coefficients.
+
+The marker is not categorical-specific. It selects formula interpretation at
+one family-argument position while surrounding expressions retain their usual
+meaning. For example, a distributional Normal model can make both predictors
+concise while keeping the positive scale link explicit:
+
+```julia
+distributional_model = @brm data begin
+    y ~ Normal(@brm(1 + x), exp(@brm(1)))
+end
+```
+
+This introduces distinct scalar predictors for location and log-scale, then
+passes `exp(log_scale)` to `Normal`; nested `@brm` never inserts a link. A
+standalone fragment such as `@brm(1 + x)` is not yet a first-class value and
+produces a targeted error outside an enclosing model.
+
+This is the same broad model structure expressed by a top-level categorical
+formula in brms (`y ~ 1 + x`, `family = categorical(link = "logit")`) or Bambi
+(`"y ~ 1 + x"`, `family="categorical"`). Defaults for priors, contrasts, and
+reference-level selection are package-specific; BRM does not import those
+defaults implicitly.
+
 ## Median regression with `Laplace`
 
 The StanBlocks backend accepts `Distributions.Laplace` as an ordinary
