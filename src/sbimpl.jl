@@ -26,9 +26,23 @@ function me end
 """
     s(x)
 
-Smooth-term marker. brms-style `s(x)` — the sbimpl backend builds a
-penalized one-dimensional thin-plate regression spline with the mgcv default
-basis dimension. Dispatch tag — see `_sb_s`.
+Add a penalized one-dimensional thin-plate regression spline to an `SBBRMI`
+linear predictor. The fixed rank-10 basis contains the
+unpenalized null space `{1, x}` and eight penalty-whitened range columns whose
+shared smoothing standard deviation has a standard half-normal prior.
+
+The public syntax is exactly one finite numeric predictor, `s(x)`. At least ten
+unique training values are required; keyword arguments such as `k=` and
+`knots=` are not supported. The term owns its complete smooth contribution and
+does not receive an additional population coefficient.
+
+Prediction and replay through [`reprocess`](@ref) or [`restan_data`](@ref) use
+the frozen training basis by default. This marker is implemented only by the
+StanBlocks backend; it is not a deterministic B-spline expansion and is not
+available to `VBRMI`.
+
+See [Formula terms](@ref) for an example and a comparison with
+`bs(...)` formulas. Dispatch tag — see `_sb_s`.
 """
 function s end
 
