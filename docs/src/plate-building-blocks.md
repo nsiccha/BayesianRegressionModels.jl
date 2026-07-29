@@ -58,7 +58,7 @@ and parallel likelihood lowering remain part of the complete target below.
 ### BRM stress verdict
 
 The executable acceptance matrix is
-`test/plate_stress.jl`. Run the full compiler,
+[`test/plate_stress.jl`](https://github.com/JuliaBayes/BayesianRegressionModels.jl/blob/main/test/plate_stress.jl). Run the full compiler,
 `stanc`, and BridgeStan 2.9 log-density/gradient gate with:
 
 ```sh
