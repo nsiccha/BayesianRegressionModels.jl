@@ -53,6 +53,17 @@ instance, so the empty struct is sufficient.
 struct OrderedLogistic end
 
 """
+    CategoricalLogit(eta2, eta3, ...)
+
+Reference-class categorical likelihood marker. Each positional argument is an
+existing scalar linear predictor for one non-reference outcome class; class 1
+has fixed logit zero. The sbimpl backend freezes the observed outcome-level
+order, constructs the per-row logit matrix, and lowers to a categorical-logit
+likelihood with prediction and pointwise-log-likelihood support.
+"""
+struct CategoricalLogit end
+
+"""
     Horseshoe
 
 Carvalho-Polson-Scott horseshoe shrinkage prior marker. Use as a prior
@@ -79,6 +90,18 @@ shape/precision `phi`, matching Stan's `neg_binomial_2(mu, phi)`. This is
 deliberately distinct from Distributions.jl's `NegativeBinomial(r, p)`.
 """
 struct NegativeBinomial2 end
+
+"""
+    BetaBinomial2(trials, mean, precision)
+
+Beta-binomial likelihood marker parameterised by success probability `mean`
+and positive concentration `precision`. The sbimpl backend lowers to Stan's
+`beta_binomial(trials, mean * precision, (1 - mean) * precision)`.
+
+Use Distributions.jl's `BetaBinomial(trials, alpha, beta)` when the two shape
+parameters are already the natural model parameters.
+"""
+struct BetaBinomial2 end
 
 popefs = StanBlocks.@slic begin
     n_covariates = dims(X)[2]
@@ -928,7 +951,7 @@ src   = stan_code(sbbrmi)
 # support `reprocess`/`restan_data` on a new DataFrame we record, per EMITTED
 # data key, how to regenerate that key from a new df:
 #   kind         -- which transform (:zscale/:standardize/:center/:factor/:mo/
-#                   :spline/:gp/:protect)
+#                   :spline/:gp/:protect/:interaction)
 #   const_       -- the fitted constant: (μ,σ) / μ / level-vector / TPS basis /
 #                   (μ,L,K) / nothing (protect)
 #   raw_ref      -- the source: a column-node tree (zscale/center/standardize/
@@ -1483,6 +1506,19 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         # No fitted constant — re-materialise the same expr tree on `df`.
         new_data[key] = collect(Float64, _sb_rematerialize_vec(e.raw_ref, df))
         new_preproc[key] = e
+    elseif e.kind === :interaction
+        left_key, right_key = e.raw_ref
+        haskey(new_data, left_key) || error(
+            "sbimpl: reprocess: interaction `$key` is missing regenerated operand `$left_key`")
+        haskey(new_data, right_key) || error(
+            "sbimpl: reprocess: interaction `$key` is missing regenerated operand `$right_key`")
+        left = new_data[left_key]
+        right = new_data[right_key]
+        length(left) == length(right) || error(
+            "sbimpl: reprocess: interaction `$key` operand lengths mismatch ",
+            "($(length(left)) vs $(length(right)))")
+        new_data[key] = collect(Float64, left .* right)
+        new_preproc[key] = e
     elseif e.kind === :spline
         v = collect(Float64, _sb_df_column(df, e.raw_ref))
         old_fit = e.const_.fit
@@ -1502,6 +1538,20 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         new_data[e.const_.lambda_key] = lambda
         push!(handled, e.const_.lambda_key)
         new_preproc[key] = PreprocEntry(:gp, (; mu_L=mu_L, K=K, c=e.const_.c, lambda_key=e.const_.lambda_key), e.raw_ref, false)
+    elseif e.kind === :categorical_outcome
+        v = _sb_df_column(df, e.raw_ref)
+        fitted_levels = e.const_.levels
+        expected_n_levels = e.const_.n_levels
+        levels = freeze ? fitted_levels : _sb_fit_levels(v)
+        length(levels) == expected_n_levels || error(
+            "sbimpl: reprocess: categorical outcome `$key` has $(length(levels)) levels, " *
+            "but the fitted `CategoricalLogit` has $expected_n_levels. " *
+            "Preserve the fitted level set/order or rebuild the model with one " *
+            "linear predictor per non-reference class.")
+        new_data[key] = _sb_apply_levels(levels, v)
+        new_preproc[key] = PreprocEntry(
+            :categorical_outcome, (; levels, n_levels=expected_n_levels),
+            e.raw_ref, true)
     elseif e.kind === :factor || e.kind === :mo
         v = _sb_df_column(df, e.raw_ref)
         levels = freeze ? e.const_ : _sb_fit_levels(v)
@@ -1538,8 +1588,9 @@ of a naive per-column `sb.model(; col=…)` rebind is avoided. Returns a NEW
   `new_df`, then apply.
 
 Covered: the 7 Julia-side transforms (`zscale`/`standardize`/`center`/`factor`/
-`mo`/`s`/`gp`), `protect`/implicit-fn columns (re-materialised on `new_df`), and
-pass-through raw columns (plain data, `me` obs values, `ar` time). Errors loudly
+`mo`/`s`/`gp`), `protect`/implicit-fn columns (re-materialised on `new_df`),
+continuous × continuous interaction columns, and pass-through raw columns
+(plain data, `me` obs values, `ar` time). Errors loudly
 on a `factor`/`mo` **unseen level** and on any derived data key it cannot account
 for (e.g. random-effects group indices from `(1|g)`) rather than silently
 copying a stale vector — rebuild from `new_df` for those models.
@@ -1548,14 +1599,18 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true)
     new_data = Dict{Symbol,Any}()
     new_preproc = Dict{Symbol,PreprocEntry}()
     handled = Set{Symbol}()
-    # 1. Regenerate every transform-output key from its preproc record.
+    interaction_keys = Set(k for (k, e) in sb.preproc if e.kind === :interaction)
+    # 1. Regenerate every independent transform-output key from its preproc
+    #    record. Interactions wait until their raw/transformed operands exist.
     for (key, e) in sb.preproc
+        e.kind === :interaction && continue
         _sb_reprocess_entry!(new_data, new_preproc, handled, key, e, new_df, freeze_constants)
     end
     # 2. Account for every remaining old data key: pass-through raw columns, or
     #    frozen structural scalars; ERROR on any unaccounted derived structure.
     for (k, v) in sb.data
         k in handled && continue
+        k in interaction_keys && continue
         if v isa AbstractVector
             if _sb_df_has_column(new_df, k)
                 new_data[k] = _sb_df_column(new_df, k)   # pass-through (plain / me obs / ar time)
@@ -1577,6 +1632,11 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true)
                 "structure with no preprocessing record. reprocess cannot safely ",
                 "regenerate it on the new DataFrame — rebuild the SBBRMI instead.")
         end
+    end
+    # 3. Derived interactions depend on operands regenerated in steps 1-2.
+    for (key, e) in sb.preproc
+        e.kind === :interaction || continue
+        _sb_reprocess_entry!(new_data, new_preproc, handled, key, e, new_df, freeze_constants)
     end
     new_model = StanBlocks.SlicModel(sb.model.model, new_data, sb.model.mod)
     SBBRMI(sb.parent, new_model, new_data, new_preproc)
@@ -3218,12 +3278,12 @@ function _sb_interaction_cols!(cols, t::ExprColumn, data, stmts)
     args = getargs(t)
     length(args) == 2 ||
         error("sbimpl: interaction `&` expects exactly 2 operands, got $(length(args))")
-    l = _sb_interaction_operand(args[1])
-    r = _sb_interaction_operand(args[2])
+    l = _sb_interaction_operand(args[1], data, stmts)
+    r = _sb_interaction_operand(args[2], data, stmts)
     _sb_interaction_expand!(cols, data, l, r)
 end
 
-_sb_interaction_operand(t::NamedColumn) = begin
+_sb_interaction_operand(t::NamedColumn, _data, _stmts) = begin
     d_raw = parent(t)
     d = _as_data_column(d_raw)
     isnothing(d) && error(
@@ -3231,6 +3291,26 @@ _sb_interaction_operand(t::NamedColumn) = begin
     )
     v = parent(d)
     _sb_interaction_operand_kind(t, v, _sb_cat_levels(t))
+end
+# A transformed raw-data term (for example `zscale(math)`) first uses the
+# ordinary predictor-term lowering. Pure/data-derived terms leave a concrete
+# vector in `data`; parameter-owning terms (`mo`, `me`, `s`, `gp`, `ar`, ...)
+# return a Stan variable name instead and are rejected below. This keeps
+# transformed interactions on the same fit/reprocess constants as their
+# standalone term without ever snapshotting a latent parameter as data.
+_sb_interaction_operand(t::ExprColumn, data, stmts) = begin
+    col_name = _sb_predictor_col(t, data, stmts)
+    haskey(data, col_name) || error(
+        "sbimpl: interaction operand `$(getf(t))(...)` is parameter-owning, not a data-materialized transform; ",
+        "supported transformed operands include `zscale`, `standardize`, `center`, `protect`, ",
+        "and pure expressions in raw data columns"
+    )
+    v = data[col_name]
+    rv = _as_real_vec(v)
+    isnothing(rv) && error(
+        "sbimpl: transformed interaction operand `$col_name` has unsupported eltype $(eltype(v))"
+    )
+    (; kind=:cont, name=col_name, vec=collect(Float64, rv))
 end
 _sb_interaction_operand_kind(t, v, levels) = begin
     n_levels, idx = _sb_level_index(levels)
@@ -3244,9 +3324,9 @@ _sb_interaction_operand_kind(t, v, ::Nothing) = begin
     isnothing(rv) && error("sbimpl: interaction operand `$(name(t))` has unsupported eltype $(eltype(v))")
     (; kind=:cont, name=name(t), vec=collect(Float64, rv))
 end
-_sb_interaction_operand(t) = error(
-    "sbimpl: interaction operand must be a raw-data NamedColumn, got $(typeof(t)); ",
-    "interactions with `mo` / `me` / `s` / `ar` are not supported yet"
+_sb_interaction_operand(t, _data, _stmts) = error(
+    "sbimpl: interaction operand must be a raw-data NamedColumn or data-materialized ExprColumn, got $(typeof(t)); ",
+    "interactions with parameter-owning terms such as `mo` / `me` / `s` / `gp` / `ar` are not supported"
 )
 
 # cont x cont
@@ -3254,6 +3334,8 @@ _sb_interaction_expand!(cols, data, l::NamedTuple{<:Any,<:Tuple}, r::NamedTuple{
     if l.kind === :cont && r.kind === :cont
         col_name = Symbol(:int_, l.name, :_x_, r.name)
         data[col_name] = l.vec .* r.vec
+        _sb_record_preproc!(data, col_name,
+            PreprocEntry(:interaction, nothing, (l.name, r.name), false))
         push!(cols, col_name)
     elseif l.kind === :cont && r.kind === :cat
         for lvl in 2:r.n_levels
@@ -3679,6 +3761,59 @@ _sb_lik_family!(stmts, target, ::Type{<:NegativeBinomial2},
                 args::Tuple{Any,Any}, data) =
     _sb_lik_stan!(stmts, target, :neg_binomial_2, args, data)
 
+# Reference-class categorical regression. The user supplies one named scalar
+# LP per non-reference class; the fitted outcome level order determines which
+# class each argument owns. A leading all-zero row fixes class 1 as the
+# reference. StanBlocks' categorical-logit contract is matrix[K, N], one
+# observation's K logits per column, so transpose the row-wise hcat carrier.
+function _sb_lik_family!(stmts, target, ::Type{<:CategoricalLogit},
+                         args::Tuple, data)
+    isempty(args) && error(
+        "sbimpl: `CategoricalLogit($target)` needs at least one non-reference " *
+        "linear predictor")
+    all(a -> a isa NamedColumn && !(parent(a) isa DataColumn), args) || error(
+        "sbimpl: `CategoricalLogit($target)` expects one existing scalar linear " *
+        "predictor per non-reference class, got $(args)")
+
+    raw = get(data, target, nothing)
+    raw isa AbstractVector || error(
+        "sbimpl: `CategoricalLogit` expects an observed outcome vector for " *
+        "`$target`, got $(typeof(raw))")
+    levels = _sb_fit_levels(raw)
+    n_levels = length(levels)
+    n_levels >= 2 || error(
+        "sbimpl: `CategoricalLogit($target)` needs >= 2 outcome levels " *
+        "(got $n_levels)")
+    expected_n_levels = length(args) + 1
+    n_levels == expected_n_levels || error(
+        "sbimpl: `CategoricalLogit($target)` observed $n_levels outcome levels " *
+        "but received $(length(args)) non-reference predictors; expected " *
+        "$(n_levels - 1). Outcome level order is $(collect(levels)).")
+
+    data[target] = _sb_apply_levels(levels, raw)
+    _sb_record_preproc!(data, target, PreprocEntry(
+        :categorical_outcome, (; levels, n_levels), target, true))
+
+    logits_name = Symbol(target, :_categorical_logits)
+    zero_reference = :(rep_vector(0., num_elements($target)))
+    eta_exprs = map(a -> _sb_scalar_expr(a, data), args)
+    row_logits = Expr(:call, :hcat, zero_reference, eta_exprs...)
+    push!(stmts, Expr(:(=), logits_name, Expr(:call, :adjoint, row_logits)))
+    push!(stmts, :($target ~ categorical_logit($logits_name)))
+end
+
+# Mean/precision Beta-binomial convenience surface. Shape lowering stays in
+# the emitted expression so scalar, vector, and linked-predictor arguments all
+# share one method and StanBlocks can synthesize matching lpmfs/RNG paths.
+function _sb_lik_family!(stmts, target, ::Type{<:BetaBinomial2},
+                         args::Tuple{Any,Any,Any}, data)
+    trials, mean, precision = map(a -> _sb_scalar_expr(a, data), args)
+    alpha = Expr(:call, Symbol(".*"), mean, precision)
+    beta = Expr(:call, Symbol(".*"), Expr(:call, :-, 1, mean), precision)
+    push!(stmts, Expr(:call, :~, target,
+        Expr(:call, :beta_binomial, trials, alpha, beta)))
+end
+
 # Distributions.jl expresses a location-scale Student-t as
 # `LocationScale(loc, scale, TDist(nu))`. The prior path already supports this
 # composition; likelihoods use the same lowering to Stan's
@@ -3724,6 +3859,7 @@ _sb_stan_dist_name(::Type{<:Bernoulli})           = :bernoulli
 _sb_stan_dist_name(::Type{<:BernoulliLogit})      = :bernoulli_logit
 _sb_stan_dist_name(::Type{<:Binomial})            = :binomial
 _sb_stan_dist_name(::Type{<:BinomialLogit})       = :binomial_logit
+_sb_stan_dist_name(::Type{<:BetaBinomial})        = :beta_binomial
 _sb_stan_dist_name(::Type{<:Poisson})             = :poisson
 _sb_stan_dist_name(::Type{<:NegativeBinomial})    = :neg_binomial
 _sb_stan_dist_name(::Type) = nothing

@@ -4,8 +4,9 @@
 # candidate checkout as the active project and pass its exact reviewed SHA.
 
 using BayesianRegressionModels
-using Distributions: LocationScale, TDist
+using Distributions: BetaBinomial, LocationScale, TDist
 using LogDensityProblems
+using LogExpFunctions: logit
 using StanBlocks
 
 length(ARGS) >= 1 || error("usage: candidate_family_controls.jl <expected-brm-sha> [output.tsv]")
@@ -19,22 +20,38 @@ stanblocks_sha = readchomp(`git -C $stanblocks_root rev-parse HEAD`)
 
 data = (;
     x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+    prog=[0.0, 0.0, 1.0, 1.0, 2.0, 2.0],
+    math=[41.0, 48.0, 52.0, 57.0, 63.0, 69.0],
     y_zip=[0, 1, 0, 2, 3, 0],
     y_nb=[0, 1, 2, 4, 3, 6],
     y_t=[-0.8, -0.2, 0.1, 0.7, 1.0, 1.4],
+    trials=[8, 8, 10, 10, 12, 12],
+    y_bb_shapes=[1, 2, 3, 4, 5, 7],
+    y_bb_mean_precision=[0, 1, 4, 6, 8, 11],
+    y_cat=[20, 10, 30, 20, 30, 10],
 )
 
 builder = @brm begin
     log(lambda) ~ 1 + x
     y_zip ~ ZeroInflatedPoisson(lambda, 0.25)
 
-    log(mu) ~ 1 + x
+    log(mu) ~ 0 + prog + zscale(math) + prog & zscale(math)
     log(phi) ~ 1
     y_nb ~ NegativeBinomial2(mu, phi)
 
     loc ~ 1 + x
     log(scale) ~ 1
     y_t ~ LocationScale(loc, scale, TDist(4.0))
+
+    y_bb_shapes ~ BetaBinomial(trials, 2.0, 4.0)
+
+    logit(bb_mean) ~ 1 + x
+    log(bb_precision) ~ 1
+    y_bb_mean_precision ~ BetaBinomial2(trials, bb_mean, bb_precision)
+
+    cat_eta2 ~ 1 + x
+    cat_eta3 ~ 1 + prog
+    y_cat ~ CategoricalLogit(cat_eta2, cat_eta3)
 end
 
 descriptor = brm_descriptor(builder, data; mod=@__MODULE__, name=:family_surfaces)
@@ -54,8 +71,16 @@ finite || error("non-finite density/gradient at zero")
 
 prediction = brm_execute(descriptor, :predict; problem, draws=q, seed=20260728)
 pointwise = brm_execute(descriptor, :pointwise_loglik; problem, draws=q, seed=20260728)
-expected_prediction = Set([:y_zip_gen, :y_nb_gen, :y_t_gen])
-expected_pointwise = Set([:y_zip_likelihood, :y_nb_likelihood, :y_t_likelihood])
+expected_prediction = Set([
+    :y_zip_gen, :y_nb_gen, :y_t_gen,
+    :y_bb_shapes_gen, :y_bb_mean_precision_gen,
+    :y_cat_gen,
+])
+expected_pointwise = Set([
+    :y_zip_likelihood, :y_nb_likelihood, :y_t_likelihood,
+    :y_bb_shapes_likelihood, :y_bb_mean_precision_likelihood,
+    :y_cat_likelihood,
+])
 Set(keys(prediction)) == expected_prediction ||
     error("unexpected prediction outputs: $(keys(prediction))")
 Set(keys(pointwise)) == expected_pointwise ||
