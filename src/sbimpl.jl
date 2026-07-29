@@ -53,7 +53,9 @@ Tensor-product smooth marker. The StanBlocks backend builds cubic-regression-
 spline margins, separates their null and penalized spaces, and gives the RR,
 RN, and NR tensor blocks independent smoothing scales. The current surface is
 two-dimensional, supports only `basis=(:cr, :cr)`, and requires `full=false`.
-Dispatch tag -- see `_sb_t2`.
+Prediction/replay freezes the training knots and penalty decomposition by
+default. See [Formula terms](@ref) for the full contract. Dispatch tag — see
+`_sb_t2`.
 """
 function t2 end
 
