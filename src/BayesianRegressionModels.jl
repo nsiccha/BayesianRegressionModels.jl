@@ -57,7 +57,7 @@ export me, mi, s, t2, ar, mo, mo1, hsgp, OrderedLogistic, Ordinal,
        BetaBinomial, BetaBinomial2, CircularVonMises, SkewDoubleExponential,
        sb_group_demo, addprop
 # Bordet model family — formula-surface markers for custom likelihood + submodel
-export TruncatedNormal, bordet_hierarchical_parametric, kernel
+export TruncatedNormal, bordet_hierarchical_parametric, kernel, ragged
 # Julia-native response-family composition. `truncated` and `censored` are the
 # exact Distributions.jl functions; `interval_censored` is BRM's narrow formula
 # shim for evidence that a latent response lies between two row-wise bounds.
