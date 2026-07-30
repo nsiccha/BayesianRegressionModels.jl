@@ -191,3 +191,94 @@ All of these fail loudly rather than silently sampling something else:
   unsupported in combination with `r2d2`.
 - A column that also carries its own `effect(lp, coef) ~ Normal(loc, scale)`
   statement is dropped from the simplex and keeps that explicit prior.
+
+## Simplex-valued parameter: `s ~ Dirichlet(...)`
+
+A non-data left-hand side with a `Dirichlet` right-hand side declares a
+**simplex-valued parameter** — Stan's `simplex[K]` — rather than a linear
+predictor. Like every other scalar-parameter prior declaration it is addressable
+by name anywhere later in the formula block, `kernel(...)` cells included. It is
+implemented only by the `SBBRMI` StanBlocks backend.
+
+```julia
+using BayesianRegressionModels, Distributions
+
+brmi = @brm df begin
+    sigma ~ Exponential(1)
+    diet_share ~ Dirichlet(3, 1.0)
+    log_CL ~ 1 + (1 | p | subject)
+
+    pred ~ kernel(t, dose, diet, dv, log_CL) do ts, d, di, yy, lCL
+        mu = d * diet_share[di] * exp(-exp(lCL) * ts)
+        yy ~ normal(mu, sigma)
+        mu
+    end
+end
+```
+
+The inciting shape is a per-**event** multiplier: `diet` scales dose
+bioavailability inside the cell, so what the model needs is a `K`-simplex
+parameter indexed by an ordinal level — not a per-observation design column.
+
+### What it emits
+
+For `diet_share ~ Dirichlet(3, 1.0)`:
+
+```stan
+data        { int diet_share_alpha_n;
+              vector[diet_share_alpha_n] diet_share_alpha; }   // [1.0, 1.0, 1.0]
+parameters  { simplex[diet_share_alpha_n] diet_share; }
+model       { diet_share ~ dirichlet(diet_share_alpha); }
+```
+
+The concentration is registered as **data** under `<name>_alpha`, which is what
+sizes the simplex; the name is reserved, so a collision is rejected rather than
+overwritten. A `simplex[K]` costs `K - 1` unconstrained coordinates and reports
+`K` constrained ones.
+
+Because the concentration is data, Stan drops the Dirichlet log-normalizer — a
+function of `alpha` alone — from `target`, exactly as it does for any other `~`
+statement with data-only hyperparameters. The sampled distribution is unchanged.
+
+### Accepted spellings
+
+Only the two genuine `Distributions.Dirichlet` constructors, with Julia's
+parameterization preserved:
+
+| spelling | meaning |
+|---|---|
+| `Dirichlet(alpha)` | concentration vector literal, e.g. `Dirichlet([2.0, 1.5, 3.0])` |
+| `Dirichlet(K, a)` | symmetric: `K` components, each concentration `a` |
+
+`@brm` is a macro over the formula block, so a bare Julia symbol on the
+right-hand side is parsed as a formula **local**, not interpolated —
+`Dirichlet(3, alpha)` with a captured `alpha` reaches the backend as a column
+carrier and is rejected by name. Spell the concentration as a literal; there is
+no `$` escape (`$` outside a quote is a Julia syntax error, so the macro never
+sees it). This matches the rest of the formula surface — `r2d2`'s `alpha=` and
+`effect(x) ~ Normal(0, 0.25)` are literals for the same reason.
+
+Concentrations must be finite and strictly positive, and `K >= 2`: a
+one-element simplex is deterministically `[1.0]`, so there is no parameter to
+sample.
+
+### Difference from `mo(c)` / `mo1(c)`
+
+[`mo`](@ref) and [`mo1`](@ref) are population linear-predictor terms. Their
+Dirichlet increments live inside a submodel and are not addressable from the
+formula; what a bare `share ~ mo1(c)` hands back is a per-**row** monotonic
+contrast vector of length `nrow(df)`. Indexing that by an ordinal level is a
+silent double indirection — it transpiles and `stanc`-checks, but computes
+something else. Use `Dirichlet` when you want the simplex itself.
+
+### Current limits
+
+- The left-hand side must be a non-data name. A data-backed response with a
+  `Dirichlet` right-hand side is a simplex-valued *likelihood*, which has no
+  density/pointwise/predictive support and is rejected by the family path.
+- The concentration is a constant, not a hyperprior: `Dirichlet(alpha)` with
+  `alpha` a sampled parameter is not supported.
+- `Dirichlet(K)` — no concentration — is not a `Distributions.jl` constructor
+  and is rejected; write `Dirichlet(K, 1.0)` for the flat case.
+- StanBlocks-only, like [`s`](@ref), [`t2`](@ref) and [`r2d2`](@ref); not
+  available to `VBRMI`.

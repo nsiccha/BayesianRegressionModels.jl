@@ -152,4 +152,5 @@ BayesianRegressionModels.lprior!
 BayesianRegressionModels.vbroadcasted
 BayesianRegressionModels.vmeta_sampling_rhs
 BayesianRegressionModels._sb_submodel_rhs!
+BayesianRegressionModels._sb_emit_vector_prior!
 ```

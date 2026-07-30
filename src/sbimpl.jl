@@ -3502,6 +3502,110 @@ function _sb_emit_prior!(stmts, target, ::Type{D}, op) where {D <: Distribution}
 end
 _sb_emit_prior!(_, _, _, _) = false
 
+"""
+    _sb_emit_vector_prior!(stmts, data, target, f, op)
+
+sbimpl extension hook for a VECTOR-valued parameter prior on a non-data LHS
+(`diet_share ~ Dirichlet(3, 1.0)`). Return `true` to claim the binding, `false`
+to fall through to the scalar `_sb_emit_prior!` seam and then to the
+linear-predictor path.
+
+It exists alongside `_sb_emit_prior!` rather than inside it because a
+multivariate family's *shape* comes from its hyperparameters: Stan sizes
+`simplex[K]` from the Dirichlet concentration, so the concentration has to be
+registered in `data` — which the four-argument scalar seam has no access to.
+Keeping the two seams separate also leaves every existing downstream
+`_sb_emit_prior!` method's arity untouched.
+
+**Use `import BayesianRegressionModels: _sb_emit_vector_prior!`** (not `using`)
+when adding methods from a downstream module.
+"""
+_sb_emit_vector_prior!(_stmts, _data, _target, _f, _op) = false
+
+# `s ~ Dirichlet(alpha)` / `s ~ Dirichlet(K, a)` declares a SIMPLEX PARAMETER.
+#
+# This is the vector-valued sibling of the scalar-parameter prior path: the LHS
+# is a non-data name, so the statement declares a new parameter rather than an
+# observation. StanBlocks types the LHS of `~ dirichlet(alpha)` as
+# `simplex[dims(alpha)[1]]` (`slic_stan/builtin.jl`, `dirichlet_lpdf(w::simplex[n],
+# alpha::vector[n])`), so the declaration needs no size annotation of its own.
+#
+# The concentration goes into `data` under `<target>_alpha`, exactly as the R2D2
+# prepass does for its explained-variance shares (`_sb_emit_r2d2_params!`). That
+# keeps the emitted program's simplex size a data-block int rather than an
+# inlined literal, and it is the shape whose stanc/BridgeStan acceptance R2D2
+# already established.
+#
+# `Dirichlet` is deliberately NOT added to `_sb_stan_dist_name`: that table is
+# shared with the observation-likelihood path, and a simplex-valued RESPONSE has
+# no density/pointwise/predictive support here. A data-backed LHS therefore still
+# reaches the loud "no `_sb_stan_dist_name` entry" family error.
+function _sb_emit_vector_prior!(stmts, data, target, ::Type{<:Dirichlet}, op)
+    alpha = _sb_dirichlet_alpha(target, getargs(op), getkwargs(op))
+    alpha_name = Symbol(target, :_alpha)
+    haskey(data, alpha_name) && error(
+        "sbimpl: `$target ~ Dirichlet(...)` needs the data name `$alpha_name` for ",
+        "its concentration, but that name is already taken. Rename the parameter.")
+    data[alpha_name] = alpha
+    push!(stmts, :($target ~ dirichlet($alpha_name)))
+    true
+end
+
+# Both Distributions.jl constructor forms, and nothing invented on top of them:
+# `Dirichlet(alpha::AbstractVector)` and the symmetric `Dirichlet(K::Int, a::Real)`.
+# Concentrations are hyperparameters, so they must be literals here for the same
+# reason `_sb_prior_arg` rejects data-backed scalars: a Dirichlet whose alpha is
+# itself a parameter is a different model that needs its own emission.
+function _sb_dirichlet_alpha(target, args, kwargs)
+    isempty(kwargs) || error(
+        "sbimpl: `$target ~ Dirichlet(...)` takes no keywords, got ",
+        "$(collect(keys(kwargs))).")
+    alpha = if length(args) == 1
+        a = only(args)
+        a isa AbstractVector{<:Real} || error(
+            "sbimpl: `$target ~ Dirichlet(alpha)` needs a numeric concentration ",
+            "vector literal, got $(typeof(a)). Concentrations are hyperparameters: ",
+            "use `Dirichlet([a1, a2, ...])` or the symmetric `Dirichlet(K, a)`.",
+            _sb_dirichlet_column_hint(a))
+        collect(Float64, a)
+    elseif length(args) == 2
+        K, a = args
+        (K isa Integer && a isa Real) || error(
+            "sbimpl: symmetric `$target ~ Dirichlet(K, a)` needs an integer ",
+            "dimension and a real concentration, got ($(typeof(K)), $(typeof(a))).",
+            _sb_dirichlet_column_hint(K), _sb_dirichlet_column_hint(a))
+        fill(Float64(a), K)
+    else
+        error("sbimpl: `$target ~ Dirichlet(...)` takes either a concentration ",
+              "vector `Dirichlet(alpha)` or a symmetric `Dirichlet(K, a)`; got ",
+              "$(length(args)) positional arguments.")
+    end
+    length(alpha) >= 2 || error(
+        "sbimpl: `$target ~ Dirichlet(...)` needs dimension >= 2, got ",
+        "$(length(alpha)). A one-element simplex is deterministically `[1.0]` — ",
+        "there is no parameter to sample; use the constant directly.")
+    all(x -> isfinite(x) && x > 0, alpha) || error(
+        "sbimpl: `$target ~ Dirichlet(...)` concentrations must be finite and ",
+        "strictly positive, got $alpha.")
+    alpha
+end
+
+# `@brm` is a MACRO over the formula block, so a bare Julia symbol on the RHS is
+# parsed as a formula LOCAL (`@getproperty` falls back to a `NamedColumn`) rather
+# than interpolated -- and `$` cannot rescue it, since `$` outside a quote is a
+# Julia syntax error the macro never gets to see. `Dirichlet(3, alpha)` with a
+# captured `alpha` therefore arrives here as a column carrier, and the bare type
+# name in the message above reads like a BRM bug instead of the spelling trap it
+# is. Name the trap when, and only when, that is what happened.
+_sb_dirichlet_column_hint(_) = ""
+_sb_dirichlet_column_hint(x::AbstractColumn) = string(
+    " `$(_sb_dirichlet_arg_label(x))` is a formula-local column here, not the ",
+    "surrounding Julia value: `@brm` is a macro over the block, so a bare symbol ",
+    "is never interpolated (and there is no `\$` escape). Spell the concentration ",
+    "as a literal.")
+
+_sb_dirichlet_arg_label(x::AbstractColumn) = x isa NamedColumn ? name(x) : "that argument"
+
 # `LocationScale(mu, sigma, base)` is Distributions.jl's generic
 # location-scale wrapper (alias for `AffineDistribution`). Useful
 # specifically for distributions that don't take location/scale args
@@ -3590,6 +3694,10 @@ _sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs;
             end
         end
         _sb_submodel_rhs!(stmts, data, key, f, rhs_e) !== nothing && return
+        # Vector-valued parameter priors first: they need `data` (a multivariate
+        # family's hyperparameters carry the declared size), so they cannot ride
+        # the four-argument scalar seam below.
+        _sb_emit_vector_prior!(stmts, data, key, f, rhs_e) && return
         _sb_emit_prior!(stmts, key, f, rhs_e) && return
     end
     _sb_linear_predictor!(stmts, data, key, rhs; id_lookup, brmi_key=key, obs_n,
