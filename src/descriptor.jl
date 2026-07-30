@@ -634,8 +634,18 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
     # block sbimpl emits for `lp` (sbimpl.jl `_sb_linear_predictor!`), which is
     # how a population declaration gets back to the LP whose coefficients it
     # holds — derived forwards from the formula, never parsed off the name.
-    lps = Set{Symbol}(l.name for l in linear_predictors(brmi))
-    pop_lp = Dict{Symbol,Symbol}(Symbol(:pop_, l) => l for l in lps)
+    # `pop_<emitted>` is keyed by the name sbimpl EMITS the design under, which
+    # is the LINKED spelling for an LHS link transformation (`log(Vc) ~ 1 + x`
+    # emits `pop_log_Vc_beta_pop`), while the value stays the PUBLIC LP name
+    # `popcoefnames` takes (`:Vc`). Deriving it as `Symbol(:pop_, l.name)`
+    # matched no emitted block for a linked LHS, so the coefficient vector
+    # silently lost its `labels` — the one thing a consumer mounts a descriptor
+    # for — while the same model written with an inert `log_Vc` name kept them.
+    lp_list = linear_predictors(brmi)
+    lps = Set{Symbol}(l.name for l in lp_list)
+    pop_lp = Dict{Symbol,Symbol}(
+        Symbol(:pop_, _sb_lp_emitted_name(l.name, l.link_lhs_fn)) => l.name
+        for l in lp_list)
 
     # --- outputs ------------------------------------------------------------
     outputs = BRMOutput[]
