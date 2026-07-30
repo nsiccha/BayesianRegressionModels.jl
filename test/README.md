@@ -11,10 +11,12 @@ julia --project=test test/adaptive_centering_bridgestan.jl
 that any `test/*.jl` loads, so no test file fails at its own `using` line the way
 three of them do under `--project=.` (see below).
 
-One exception, deliberately: **`ForwardDiff` is not in this environment.**
-`test/adaptive_centering_warmuphmc.jl` still loads it, so that file — and
-`test/adaptive_centering_bridgestan.jl`, which includes it — does not run until
-that use is resolved. Everything else the two files need is present.
+One deliberate absence, and it is a standing rule rather than a gap:
+**`ForwardDiff` is not in this environment and is not coming back.** BRM
+differentiates with Enzyme only — every gradient in this suite goes through
+`AutoEnzyme()` via `DifferentiationInterface`. No test file loads ForwardDiff,
+so there is nothing here to work around; do not add it back to make a new
+gradient site easier.
 
 ## One-time bootstrap
 
@@ -78,7 +80,7 @@ Three files are the reason this environment exists — they fail at their own
 | file | needs beyond the root project |
 | --- | --- |
 | `test/adaptive_centering_bridgestan.jl` | `WarmupHMC`, `Enzyme` |
-| `test/adaptive_centering_warmuphmc.jl` | `WarmupHMC` (and, for now, `ForwardDiff`) |
+| `test/adaptive_centering_warmuphmc.jl` | `WarmupHMC`, `Enzyme`, `DifferentiationInterface` |
 | `test/plate_stress.jl` | `BridgeStan` |
 
 There is no CI workflow for these on purpose: they need `stanc` and a BridgeStan
