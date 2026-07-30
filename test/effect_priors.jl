@@ -7,7 +7,7 @@ using Test
 using BayesianRegressionModels
 using StanBlocks
 using LogDensityProblems
-using Distributions: Cauchy, Exponential, Normal
+using Distributions: Cauchy, Exponential, LKJCholesky, Normal
 
 const EFFECT_PRIOR_CACHE = joinpath(tempdir(), "brm-effect-priors")
 const EFFECT_PRIOR_RUNTIME = get(ENV, "BRM_EFFECT_RUNTIME", "1") != "0"
@@ -208,4 +208,155 @@ end
     # Unaddressed predictors keep the default, and the scalar prior is untouched.
     @test occursin("pop_log_V_beta_pop ~ std_normal();", code)
     @test occursin("sigma ~ exponential(", code)
+end
+
+# An LHS LINK TRANSFORMATION (`log(Vc) ~ 1 + x`, §2 of `brm-use`) and the
+# `effect(...)` prior surface each had their own coverage, and NOTHING composed
+# them — so the coefficient label for a linked declaration was undocumented and
+# a consumer moving off the inert-name spelling had to guess between
+# `effect(Vc, …)`, `effect(log(Vc), …)` and `effect(log_Vc, …)`
+# (snag `how-do-you-attac-a30ba40b`, `Bruno:arv393`). Two names are in play and
+# they are NOT interchangeable:
+#
+#   PUBLIC  address  = the bare inner name `Vc` — what `linear_predictors`
+#                      reports, and what `popcoefnames` / `effect(...)` /
+#                      `ranefcoefnames` take.
+#   EMITTED artefact = the LINKED spelling `log_Vc` — `pop_log_Vc_beta_pop`,
+#                      `X_log_Vc`, `Z_log_Vc_p_subject`.
+#
+# The emitted half is what makes the switch posterior-preserving: it is
+# byte-identical to the inert-name twin, so the same priors attach to the same
+# coefficients and a cache keyed on emitted source keeps its identity.
+@testset "LHS link transformation composes with `effect(...)`" begin
+    link_df = (; x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+                 subject=[1, 1, 2, 2, 3, 3],
+                 y=[-2.4, -2.2, -2.0, -1.8, -1.7, -1.5])
+
+    linked = @brm link_df begin
+        log(Vc) ~ 1 + x + (1 + x | p | subject)
+        effect(Vc, Intercept) ~ Normal(log(10), 0.8)
+        effect(Vc, x) ~ Normal(0, 0.1)
+        effect(sd, p) ~ Exponential(0.3)
+        effect(cor, p) ~ LKJCholesky(2, 2.0)
+        y ~ Normal(log(Vc), 0.2)
+    end
+
+    # The public address is the BARE name; the link is reported beside it.
+    @test [(l.name, l.link_lhs_fn) for l in linear_predictors(linked)] == [(:Vc, log)]
+    @test popcoefnames(linked, :Vc) == [:Intercept, :x]
+    # The linked spelling is NOT a public address — it names no linear predictor.
+    @test popcoefnames(linked, :log_Vc) === nothing
+    @test [(p.predictor, p.coefficient) for p in effect_priors(linked)] ==
+          [(:Vc, :Intercept), (:Vc, :x)]
+
+    linked_sb = @test_nowarn SBBRMI(linked; mod=@__MODULE__)
+    linked_code = BayesianRegressionModels.stan_code(linked_sb)
+    @test StanBlocks.stan.transpiles(linked_sb.model)
+    @test StanBlocks.stanc_check(linked_code; warn_pedantic=false).ok
+    # Emitted under the LINKED spelling, and the inverse link is bound for the
+    # declared quantity — so `Vc` is usable downstream on its natural scale.
+    @test occursin("pop_log_Vc_beta_pop ~ normal([$(log(10)), 0]', [0.8, 0.1]');",
+                   linked_code)
+    @test occursin("Vc = exp(log_Vc);", linked_code)
+
+    # The descriptor's population labels survive the link. This is the whole
+    # point of mounting a descriptor, and it silently regressed to `nothing`
+    # because `pop_lp` derived the block name from the PUBLIC name.
+    linked_byname = Dict(o.name => o for o in brm_descriptor(linked_sb).outputs)
+    @test linked_byname[:pop_log_Vc_beta_pop].role === :population_effect
+    @test linked_byname[:pop_log_Vc_beta_pop].labels == [:Intercept, :x]
+
+    # Ranef addresses are keyed by the `|ID|` bucket, never by the LP name, so
+    # `effect(sd|cor, p)` is untouched by the switch — but `ranefcoefnames`
+    # margins are labelled with the PUBLIC predictor name.
+    @test ranefcoefnames(linked, :p) ==
+          [(predictor=:Vc, coefficient=:Intercept), (predictor=:Vc, coefficient=:x)]
+    @test occursin("b_p_subject_L ~ lkj_corr_cholesky(2.0);", linked_code)
+    @test occursin("b_p_subject_tau ~ brm_ranef_sd(", linked_code)
+
+    # Same model with the quantity declared as an INERT name and the link undone
+    # by hand: identical parameter block, so the posterior is the same fit.
+    inert = @brm link_df begin
+        log_Vc ~ 1 + x + (1 + x | p | subject)
+        effect(log_Vc, Intercept) ~ Normal(log(10), 0.8)
+        effect(log_Vc, x) ~ Normal(0, 0.1)
+        effect(sd, p) ~ Exponential(0.3)
+        effect(cor, p) ~ LKJCholesky(2, 2.0)
+        y ~ Normal(log_Vc, 0.2)
+    end
+    inert_code = BayesianRegressionModels.stan_code(SBBRMI(inert; mod=@__MODULE__))
+    params(code) = begin
+        i = findfirst("parameters {", code)
+        code[first(i):findnext("}", code, last(i))[end]]
+    end
+    @test params(linked_code) == params(inert_code)
+    @test popcoefnames(inert, :log_Vc) == popcoefnames(linked, :Vc)
+
+    # The two wrong guesses fail LOUDLY, and the population one names the right
+    # address in its message — neither can silently attach elsewhere.
+    wrong_underscore = @brm link_df begin
+        log(Vc) ~ 1 + x
+        effect(log_Vc, Intercept) ~ Normal(log(10), 0.8)
+        y ~ Normal(log(Vc), 0.2)
+    end
+    @test_throws "Available predictors: Vc" SBBRMI(wrong_underscore; mod=@__MODULE__)
+    @test_throws "must be bare symbols" @eval @brm $link_df begin
+        log(Vc) ~ 1 + x
+        effect(log(Vc), Intercept) ~ Normal(log(10), 0.8)
+        y ~ Normal(log(Vc), 0.2)
+    end
+end
+
+# The consumer shape the snag was reported for (`bruno` `web-pkpd`,
+# `linear_pk_brm5`): the PK model declares its per-subject quantities with LHS
+# links so the cell no longer spells `exp(...)` itself, and `kernel(...)` is fed
+# the NATURAL-scale bindings. The population priors stay on the log scale and
+# keep their bare-name addresses.
+@testset "LHS link transformation feeds `kernel(...)` on its natural scale" begin
+    n = 6
+    pk_df = (; t       = [abs.(sin.(1:4)) .+ 0.5 for _ in 1:n],
+               dose    = fill(100.0, n),
+               dv      = [abs.(cos.(1:4)) .+ 0.1 for _ in 1:n],
+               weight  = collect(range(-1.0, 1.0; length=n)),
+               subject = collect(1:n))
+
+    pk = @brm pk_df begin
+        sigma ~ Exponential(1)
+        log(CL) ~ 1 + weight + (1 | p | subject)
+        log(Vc) ~ 1 + (1 | p | subject)
+        log(Ka) ~ 1 + (1 | p | subject)
+        effect(CL, Intercept) ~ Normal(log(1 / 8), 0.8)
+        effect(CL, weight) ~ Normal(0, 0.1)
+        pred ~ kernel(t, dose, dv, CL, Vc, Ka) do ts, d, yy, CLi, Vci, Kai
+            ke = CLi / Vci
+            mu = d * Kai / (Vci * (Kai - ke)) * (exp(-ke * ts) - exp(-Kai * ts))
+            yy ~ normal(mu, sigma)
+            mu
+        end
+    end
+
+    @test popcoefnames(pk, :CL) == [:Intercept, :weight]
+    @test popcoefnames(pk, :log_CL) === nothing
+    # One shared `|p|` block over three link-declared predictors: the margins are
+    # labelled with the bare names, in formula order.
+    @test ranefcoefnames(pk, :p) == [(predictor=:CL, coefficient=:Intercept),
+                                     (predictor=:Vc, coefficient=:Intercept),
+                                     (predictor=:Ka, coefficient=:Intercept)]
+
+    sb = SBBRMI(pk; mod=@__MODULE__)
+    code = BayesianRegressionModels.stan_code(sb)
+    @test StanBlocks.stan.transpiles(sb.model)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    @test occursin("pop_log_CL_beta_pop ~ normal([$(log(1 / 8)), 0]', [0.8, 0.1]');",
+                   code)
+    @test occursin("pop_log_Vc_beta_pop ~ std_normal();", code)
+    # Every declared quantity reaches the cell on its natural scale.
+    for q in (:CL, :Vc, :Ka)
+        @test occursin("$q = exp(log_$q);", code)
+    end
+
+    byname = Dict(o.name => o for o in brm_descriptor(sb).outputs)
+    @test byname[:pop_log_CL_beta_pop].labels == [:Intercept, :weight]
+    @test byname[:pop_log_Vc_beta_pop].labels == [:Intercept]
+    @test byname[:pop_log_Ka_beta_pop].labels == [:Intercept]
 end
