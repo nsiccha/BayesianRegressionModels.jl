@@ -3972,10 +3972,33 @@ _sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_loo
 
 _sb_sampling_through_link!(stmts, data, key, f, inner, rhs; kwargs...) =
     error("sbimpl: expected NamedColumn inside link `$f(...)`, got $(typeof(inner))")
+
+# The name a linear predictor's population design is EMITTED under. A bare
+# `loc ~ 1 + x` emits under `loc`; an LHS link transformation `log(Vc) ~ 1 + x`
+# emits the LINKED scale under `log_Vc` and then binds `Vc = exp(log_Vc)`. So
+# every emitted artefact of the design carries the LINKED spelling
+# (`X_log_Vc`, `pop_log_Vc`, `pop_log_Vc_beta_pop`, `Z_log_Vc_<id>_<g>`) while
+# the PUBLIC address stays the bare `Vc` that `linear_predictors` reports and
+# `popcoefnames` / `effect(...)` / `ranefcoefnames` take.
+#
+# Mapping the emitted name back to the public one is not derivable by string
+# surgery (`pop_log_Vc` is equally `pop_` + an inert LP literally named
+# `log_Vc`), so it is derived FORWARDS from the formula through this function.
+# LOCKSTEP: `_sb_sampling_through_link!` below is the only emitter of the
+# linked form, and `brm_descriptor`'s `pop_lp` map (`descriptor.jl`) is its
+# only other caller — keep the three in step.
+#
+# `identity` is `linear_predictors`' marker for an UNWRAPPED LHS (`loc ~ 1 + x`),
+# which emits under its own name. A literal `identity(loc) ~ 1 + x` reaches the
+# link path instead and takes the same branch — harmless, because Stan has no
+# `identity` function, so that spelling has never transpiled either way.
+_sb_lp_emitted_name(lp_name::Symbol, link_lhs_fn) =
+    link_lhs_fn === identity ? lp_name : Symbol(nameof(link_lhs_fn), :_, lp_name)
+
 function _sb_sampling_through_link!(stmts, data, key, f, inner::NamedColumn, rhs; id_lookup, obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Vector{Any}}(), r2d2=_sb_empty_r2d2())
     inv_f = InverseFunctions.inverse(f)
     inner_name = name(inner)
-    pre_name = Symbol(nameof(f), :_, inner_name)
+    pre_name = _sb_lp_emitted_name(inner_name, f)
     _sb_linear_predictor!(stmts, data, pre_name, rhs; id_lookup, brmi_key=key,
                           obs_n, cv_groups, centered_groups, group_block_lookup,
                           effect_overrides, r2d2)
