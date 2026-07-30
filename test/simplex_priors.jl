@@ -104,6 +104,45 @@ simplex_kernel_flat_vec(df) = @brm df begin
     end
 end
 
+# The ORIGIN shape the simplex path was asked for: a MONOTONIC per-level effect,
+# `beta * cumulative_sum(simplex)`, ported from Stan's `simo ~ dirichlet(...)` plus
+# `beta * append_row(0.0, cumulative_sum(simo))` (Buerkner & Charpentier 2018;
+# `varyingsource4.stan`). There is no separate monotonic surface to reach for: the
+# declared `simplex[K]` is an ordinary Stan `vector` at every use site, so the cell
+# composes it with `cumulative_sum` / `append_row` exactly as the hand-written Stan
+# program does. These two spellings pin that.
+#
+# `Dirichlet(3, 1.0)` + a bare `cumulative_sum`: three ordinal levels whose top
+# level rides the simplex's own `sum == 1`, so the magnitude enters undamped there.
+simplex_kernel_monotonic(df) = @brm df begin
+    sigma                ~ Exponential(1)
+    log_F_diet_magnitude ~ Normal(0.0, 0.5)
+    diet_share           ~ Dirichlet(3, 1.0)
+    log_CL               ~ 1 + (1 | p | subject)
+    pred ~ kernel(t, dose, diet, dv, log_CL) do ts, d, di, yy, lCL
+        diet_cum = cumulative_sum(diet_share)
+        mu = d * exp(log_F_diet_magnitude * diet_cum[di]) * exp(-exp(lCL) * ts)
+        yy ~ normal(mu, sigma)
+        mu
+    end
+end
+
+# `Dirichlet(K - 1, 1.0)` + `append_row(0.0, ...)`: the same three levels with an
+# explicit ZERO reference level, which is the exact `varyingsource4` construction.
+# A K-level monotonic effect needs a (K-1)-simplex under this spelling.
+simplex_kernel_monotonic_ref(df) = @brm df begin
+    sigma                ~ Exponential(1)
+    log_F_diet_magnitude ~ Normal(0.0, 0.5)
+    diet_share           ~ Dirichlet(2, 1.0)
+    log_CL               ~ 1 + (1 | p | subject)
+    pred ~ kernel(t, dose, diet, dv, log_CL) do ts, d, di, yy, lCL
+        diet_cum = append_row(0.0, cumulative_sum(diet_share))
+        mu = d * exp(log_F_diet_magnitude * diet_cum[di]) * exp(-exp(lCL) * ts)
+        yy ~ normal(mu, sigma)
+        mu
+    end
+end
+
 # No simplex statement: the negative control for dimension accounting and for
 # "the new path never fires unasked".
 plain_kernel_model(df) = @brm df begin
@@ -166,6 +205,32 @@ end
     # `mo1(c)` per-row contrast could not express.
     @test occursin("diet_share[diet[plate_i__pl_1]]", code)
     @test stanc_accepts(sb.model)
+end
+
+@testset "composes with cumulative_sum / append_row inside the cell" begin
+    # The monotonic construction is the reason a SIMPLEX was wanted rather than K
+    # free contrasts, so "declared and indexable" is not the whole claim: the cell
+    # must be able to run Stan's own vector functions over it. Nothing in the
+    # emission path special-cases that -- which is exactly what needs pinning, so a
+    # future change to how the declaration reaches the cell cannot quietly break it.
+    sb = SBBRMI(simplex_kernel_monotonic(simplex_df()))
+    code = code_of(sb)
+    @test occursin("simplex[diet_share_alpha_n] diet_share;", code)
+    # The cumulative sum is a cell-local vector of the simplex's own length, and it
+    # is indexed by the per-event ordinal level -- not by a row position.
+    @test occursin("vector[diet_share_alpha_n] pred_diet_cum = cumulative_sum(diet_share);", code)
+    @test occursin("pred_diet_cum[diet[plate_i__pl_1]]", code)
+    @test stanc_accepts(sb.model)
+
+    # The zero-reference spelling: `append_row` widens the cell-local vector by one,
+    # and the emitted size expression tracks that rather than being pinned to K.
+    ref = SBBRMI(simplex_kernel_monotonic_ref(simplex_df()))
+    ref_code = code_of(ref)
+    @test ref.data[:diet_share_alpha] == [1.0, 1.0]
+    @test occursin("vector[(diet_share_alpha_n + 1)] pred_diet_cum = append_row(0.0, cumulative_sum(diet_share));",
+                   ref_code)
+    @test occursin("pred_diet_cum[diet[plate_i__pl_1]]", ref_code)
+    @test stanc_accepts(ref.model)
 end
 
 @testset "the new path never fires unasked" begin
@@ -291,6 +356,20 @@ if SIMPLEX_RUNTIME
         names = StanBlocks.BridgeStan.param_names(p_with.model)
         shares = findall(n -> startswith(n, "diet_share"), names)
         @test length(shares) == 3
+
+        # --------------------------------------------- monotonic composition
+        # `stanc` accepts the cumulative-sum cell above; this is the half stanc
+        # cannot answer -- that the composed expression compiles and DIFFERENTIATES
+        # through the simplex's own constraining transform, which is the whole
+        # reason the monotonic prior wants a simplex rather than K free contrasts.
+        p_mono = instantiate(SBBRMI(simplex_kernel_monotonic(simplex_df())).model)
+        dim_mono = LogDensityProblems.dimension(p_mono)
+        # simplex[3] -> 2 unconstrained coordinates, plus the scalar magnitude.
+        @test dim_mono == LogDensityProblems.dimension(p_without) + 3
+        lp_mono, grad_mono = LogDensityProblems.logdensity_and_gradient(p_mono, fixed_q(dim_mono))
+        @test isfinite(lp_mono)
+        @test length(grad_mono) == dim_mono
+        @test all(isfinite, grad_mono)
 
         # -------------------------------------------------- semantic parity
         # `Dirichlet(alpha)`'s Julia parameterization IS Stan's, so changing ONLY
