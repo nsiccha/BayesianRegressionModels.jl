@@ -73,10 +73,7 @@ const ADAPTIVE_GRADIENT_ATOL = 1e-10
         BayesianRegressionModels,
         :BayesianRegressionModelsWarmupHMCEnzymeExt,
     ))
-    backend = AutoEnzyme(;
-        mode=Enzyme.set_runtime_activity(Enzyme.Reverse),
-        function_annotation=Enzyme.Const,
-    )
+    backend = AutoEnzyme()
     for (K, G, allocation_limit) in (
         (1, 6, 4_096), (2, 18, 16_384), (3, 18, 96_000),
         (4, 12, 96_000), (8, 6, 128_000),
@@ -151,10 +148,7 @@ end
     x[block.log_scales] .= [-0.31, 0.44]
     x[vec(block.effects)] .=
         collect(range(-0.63, 0.81, length=length(block.effects)))
-    backend = AutoEnzyme(;
-        mode=Enzyme.set_runtime_activity(Enzyme.Reverse),
-        function_annotation=Enzyme.Const,
-    )
+    backend = AutoEnzyme()
     wrapped = WarmupHMC.ReparametrizedProblem(ir, problem, backend)
     materialized = WarmupHMC.ReparametrizedProblem(
         materialized_ir, problem, backend,
@@ -179,10 +173,7 @@ end
     x[block.log_scales] .= log.([0.5, 1.5, 3.0])
     x[vec(block.effects)] .=
         collect(range(-0.8, 0.9, length=length(block.effects)))
-    backend = AutoEnzyme(;
-        mode=Enzyme.set_runtime_activity(Enzyme.Reverse),
-        function_annotation=Enzyme.Const,
-    )
+    backend = AutoEnzyme()
     reparametrized = WarmupHMC.ReparametrizedProblem(ir, problem, backend)
     materialized_ir = materialized_reparametrizer(state, ir)
     materialized = WarmupHMC.ReparametrizedProblem(
@@ -264,10 +255,7 @@ end
     @test block.ranef.n_terms == 1
     @test isempty(block.cholesky_free)
 
-    backend = AutoEnzyme(;
-        mode=Enzyme.set_runtime_activity(Enzyme.Reverse),
-        function_annotation=Enzyme.Const,
-    )
+    backend = AutoEnzyme()
     wrapped = adaptive_centering_problem(sb, problem, backend)
     ir = WarmupHMC.reparametrizer(wrapped)
     state = ir.pairs[1][2].args[1].state
