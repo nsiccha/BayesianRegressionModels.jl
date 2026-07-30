@@ -226,6 +226,14 @@ end
     @test inverse_ljac ≈ -ljac atol=1e-13
     @test roundtrip ≈ x atol=1e-13
 
+    # Differentiate with the backend BRM actually ships, against a reference that
+    # cannot be wrong in the same direction: central differences, not a second AD
+    # engine.  `ir` and `weight` ride as `Constant` contexts rather than captures
+    # because `ir` holds a mutable `BRMAdaptiveCenteringState`; closing over it is
+    # what raised `EnzymeMutabilityException`, and contexts are the fix — not a
+    # whole-backend `function_annotation=Enzyme.Const`.  The tolerance answers to
+    # the finite-difference floor (~eps/step at step=1e-6), not to Enzyme, so a
+    # trip here is a real gradient error: Richardson-extrapolate, do not widen it.
     weight = collect(range(0.3, 1.7, length=length(x)))
     objective(v, transform, w) = ((j, q) = transform(v); j + dot(w, q))
     ad_gradient = DifferentiationInterface.gradient(
@@ -301,6 +309,16 @@ end
             end
 
             @test isequal(ir(x), reference_ir(x))
+
+            # Those two `isequal`s are the whole invariant, and they are load
+            # bearing: every accessor individually, then the composed transform,
+            # bit-identical to the materialized reference.  Do not weaken either to
+            # `≈`, and do not restore a gradient-vs-gradient comparison here — equal
+            # primals from equal operation orders is strictly stronger than equal
+            # derivatives, and reverse-mode accuracy is gated separately in
+            # `adaptive_centering_bridgestan.jl` (exact for K<=2, ADAPTIVE_GRADIENT_
+            # ATOL for K>=3).  An AD-vs-AD check here would only add a weaker
+            # duplicate: this loop runs K in 1:4, where Enzyme reassociates.
         end
     end
 end
