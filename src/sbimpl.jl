@@ -3115,38 +3115,51 @@ _sb_submodel_rhs!(stmts, data, target, f, rhs) = nothing
 function kernel end
 
 """
-    ragged(lp, group)
+    ragged(x, group)
 
-Mark a linear predictor declared on a SECONDARY row axis so `kernel(...)` can
-take it as a positional argument. `lp` is the name of a `lp ~ <terms>` statement
-in the same `@brm` block whose design lives on some other frame than the
-kernel's one-row-per-subject frame — a dose-event table, say — and `group` is a
-raw data column naming, for every row of that frame, which subject it belongs
-to. The cell receives `lp` as a RAGGED per-subject vector, exactly like a raw
-ragged data column:
+Group a FLAT secondary row axis into the ragged per-subject view `kernel(...)`
+slices. `x` lives on some frame other than the kernel's one-row-per-subject
+frame — a dose-event table, say — and `group` is a raw data column naming, for
+every row of that frame, which subject it belongs to. The cell receives `x` as a
+RAGGED per-subject vector.
+
+`x` may be either a linear predictor declared in the same `@brm` block, or a raw
+flat data column. It is the same grouping either way:
 
 ```julia
 log_F  ~ 1 + vessel + mo(diet) + hsgp(log_dose)     # rows = dose events
 log_CL ~ 1 + weight + (1 | p | subject)             # rows = subjects
 
-pred ~ kernel(t_obs, dv, dose_amount, ragged(log_F, dose_subject), log_CL) do ts, yy, doses, lF, lCL
+pred ~ kernel(t_obs, dv,
+              ragged(dose_amount, dose_subject),    # flat column -> grouped here
+              ragged(log_F, dose_subject),          # predictor   -> indexed in Stan
+              log_CL) do ts, yy, doses, lF, lCL
     effective_dose = doses .* exp(lF)
     ...
 end
 ```
 
+Only the REALIZATION differs, and the difference is forced: a linear predictor
+is a Stan parameter, so it cannot be gathered on the Julia side — the plate
+takes an index column and the cell fancy-indexes the unsliced predictor
+(`log_F[rows]`). A data column is Julia data, so it is gathered directly into a
+`Vector{Vector{T}}`, which StanBlocks ingests as a ragged column natively —
+exactly what a hand-prepared per-subject view would have been. Wrapping a column
+does not consume the flat original: a term that names it on its own axis
+(`hsgp(log_dose)` above) still sees it.
+
 Why the grouping is an explicit argument rather than derived: an ordinary
 per-subject LP is grouped by the ranef bucket it already carries
-(`_sb_kernel_lp_bucket`), but an event-axis population LP like the one above has
-no random-effect term at all, so there is nothing to derive a grouping from. The
-axis it slices on has to be declared, and `group` is that declaration.
+(`_sb_kernel_lp_bucket`), but a secondary-axis population LP like the one above
+has no random-effect term at all, and a raw column carries no grouping
+whatsoever. The axis has to be declared, and `group` is that declaration.
 
-ONE VALUE PER ROW OF `lp`'s OWN FRAME — no expansion happens anywhere. If the
+ONE VALUE PER ROW OF `x`'s OWN FRAME — no expansion happens anywhere. If the
 event table stores a compact schedule (one row per dose OP, carrying an interval
-and a count) then `lp` has one value per OP, which is what aligns with the
-ragged columns the cell walks. Lowering enforces that: every raw ragged
-positional whose total length equals `lp`'s row count must ALSO agree with it
-per subject, or the model is rejected.
+and a count) then `x` has one value per OP, which is what aligns with the ragged
+columns the cell walks. Lowering enforces that: every ALREADY-ragged positional
+whose total length equals `x`'s row count must ALSO agree with it per subject,
+or the model is rejected.
 
 Dispatch tag only — lowering lives in `_sb_kernel_doblock!` (sbimpl).
 """
@@ -3154,7 +3167,7 @@ function ragged end
 
 _check_term_kwargs(::typeof(ragged), kwargs) = isempty(kwargs) || error(
     "@brm: ragged(...) takes no keywords, got $(keys(kwargs)). The spelling is ",
-    "`ragged(<linear predictor>, <grouping column>)`.")
+    "`ragged(<linear predictor or flat column>, <grouping column>)`.")
 
 # Reject the retired keyword surface at CONSTRUCTION — i.e. at the `@brm` /
 # `kernel(...)` call the consumer actually wrote — not merely when the model is
@@ -3284,7 +3297,7 @@ function _sb_kernel_lp_bucket(lp_col)
 end
 
 # Collect `(name, length)` for every RAW data column reachable from a formula
-# RHS. Used to check that a `ragged(lp, group)` LP really is declared over the
+# RHS. Used to check that a `ragged(x, group)` LP really is declared over the
 # same row axis its grouping column describes. Descent stops at a nested `~`
 # ExprColumn: that is a REFERENCE to another formula's value, not part of this
 # one's design, so its data belongs to the other row axis.
@@ -3320,45 +3333,64 @@ _sb_subst_sym(x::Expr, from::Symbol, to) =
         Expr(x.head, (_sb_subst_sym(a, from, to) for a in x.args)...)
     end
 
-# Turn one `ragged(lp, group)` positional into the per-subject index column the
-# plate slices, and enforce the contract that makes it meaningful.
+# `ragged(x, group)` does ONE thing, whatever `x` is: take a flat row axis and a
+# key naming each of its rows' subject, and produce the ragged per-subject view.
+# This helper computes that grouping — the row indices — and enforces the
+# contract that makes it meaningful. Realizing the view is the caller's job,
+# because a parameter and a data column can only be grouped in different places:
+#
+#   - a LINEAR PREDICTOR is a Stan parameter, so it cannot be grouped Julia-side
+#     at all. The plate takes this index column and the cell fancy-indexes into
+#     the (unsliced, event-length) predictor: `lp[rows]`.
+#   - a RAW DATA column is Julia data, so it is simply gathered here into a
+#     `Vector{Vector{T}}` and registered — StanBlocks ingests that as a ragged
+#     column natively, exactly like a hand-prepared per-subject view.
+#
+# Same grouping either way; only the realization differs.
 #
 # `g_vals` is the kernel's per-subject label column IN ROW ORDER, because
 # `_sb_kernel_doblock!` keeps cells in row order (see the ORDER note there).
-# Cell `i` therefore gets the rows of the event frame whose group label equals
+# Cell `i` therefore gets the rows of the flat frame whose group label equals
 # `g_vals[i]` — a LABEL join, not a level-index join, so it cannot silently
 # disagree with the row-ordered linear predictors sharing the same plate.
-#
-# The result is a `Vector{Vector{Int}}`, which StanBlocks ingests as a ragged
-# `tuple(array[] int, array[] int)`; the cell then reads `lp[rows]`, one Stan
-# fancy-index. Nothing requires a subject's rows to be CONTIGUOUS in the event
-# frame, and nothing is reordered.
-function _sb_kernel_event_rows(data, lp_col, grp_arg, g_vals, raw_cols)
-    lp_name = name(lp_col)
-    decl = parent(lp_col)
-    (decl isa ExprColumn && getf(decl) === (~)) || error(
-        "sbimpl: kernel(...) positional `ragged($lp_name, …)` must wrap a linear ",
-        "predictor declared in this @brm block (`$lp_name ~ <terms>`). A raw ragged ",
-        "data column is already per-subject and is passed directly, without ",
-        "`ragged(...)`.")
+# Nothing requires a subject's rows to be CONTIGUOUS, and nothing is reordered.
+function _sb_kernel_ragged_rows(data, arg_col, grp_arg, g_vals, raw_cols)
+    a_name = name(arg_col)
+    decl = parent(arg_col)
+    is_lp = decl isa ExprColumn && getf(decl) === (~)
+    is_lp || decl isa DataColumn || error(
+        "sbimpl: kernel(...) positional `ragged($a_name, …)`: `$a_name` must be either a ",
+        "linear predictor declared in this @brm block (`$a_name ~ <terms>`) or a raw ",
+        "data column; got $(typeof(decl)).")
     (grp_arg isa NamedColumn && parent(grp_arg) isa DataColumn) || error(
-        "sbimpl: kernel(...) `ragged($lp_name, …)` needs a raw data column naming the ",
-        "subject of every row of `$lp_name`'s row axis; got $(typeof(grp_arg)).")
+        "sbimpl: kernel(...) `ragged($a_name, …)` needs a raw data column naming the ",
+        "subject of every row of `$a_name`'s row axis; got $(typeof(grp_arg)).")
     grp_name = name(grp_arg)
     ev_vals = collect(parent(parent(grp_arg)))
     (!isempty(ev_vals) && !any(ismissing, ev_vals)) || error(
-        "sbimpl: kernel(...) `ragged($lp_name, $grp_name)`: `$grp_name` must be a ",
+        "sbimpl: kernel(...) `ragged($a_name, $grp_name)`: `$grp_name` must be a ",
         "non-empty column with no missing labels.")
     n_ev = length(ev_vals)
 
+    # The frame `$a_name` lives on must be the one `$grp_name` describes. For an
+    # LP that means every data column its terms name; for a raw column, itself.
     lens = Tuple{Symbol,Int}[]
-    _sb_collect_data_lengths!(lens, getargs(decl)[2])
+    if is_lp
+        _sb_collect_data_lengths!(lens, getargs(decl)[2])
+    else
+        v = parent(decl)
+        v isa AbstractVector{<:AbstractVector} && error(
+            "sbimpl: kernel(...) `ragged($a_name, $grp_name)`: `$a_name` is ALREADY a ",
+            "ragged per-subject column, so there is nothing to group. Pass it directly, ",
+            "without `ragged(...)`.")
+        push!(lens, (a_name, length(v)))
+    end
     for (nm, L) in lens
         L == n_ev || error(
-            "sbimpl: kernel(...) `ragged($lp_name, $grp_name)`: `$lp_name` is declared ",
+            "sbimpl: kernel(...) `ragged($a_name, $grp_name)`: `$a_name` is declared ",
             "over a $L-row axis (data column `$nm`) but `$grp_name` has $n_ev rows. ",
-            "The grouping column must name the subject of EVERY row of the linear ",
-            "predictor's own frame.")
+            "The grouping column must name the subject of EVERY row of ",
+            "`$a_name`'s own frame.")
     end
 
     pos = Dict{Any,Int}()
@@ -3370,21 +3402,21 @@ function _sb_kernel_event_rows(data, lp_col, grp_arg, g_vals, raw_cols)
         i == 0 ? push!(unknown, v) : push!(rows[i], r)
     end
     isempty(unknown) || error(
-        "sbimpl: kernel(...) `ragged($lp_name, $grp_name)`: label(s) $(unique(unknown)) ",
+        "sbimpl: kernel(...) `ragged($a_name, $grp_name)`: label(s) $(unique(unknown)) ",
         "in `$grp_name` name no subject in the kernel's per-subject frame. Every row ",
-        "of `$lp_name`'s frame must belong to a subject this kernel walks.")
+        "of `$a_name`'s frame must belong to a subject this kernel walks.")
 
     # Alignment to the OP STREAM the cell walks (not to some expanded event
-    # table): any ragged positional with the same TOTAL length is claiming the
-    # same axis, so it must agree per subject too.
+    # table): any ALREADY-ragged positional with the same TOTAL length is
+    # claiming the same axis, so it must agree per subject too.
     counts = length.(rows)
     for (nm, v) in raw_cols
         v isa AbstractVector{<:AbstractVector} || continue
         sum(length, v; init = 0) == n_ev || continue
         collect(length.(v)) == counts || error(
-            "sbimpl: kernel(...) `ragged($lp_name, $grp_name)` does not align with the ",
+            "sbimpl: kernel(...) `ragged($a_name, $grp_name)` does not align with the ",
             "ragged column `$nm` the cell walks: per-subject lengths $(counts) vs ",
-            "$(collect(length.(v))). One row of `$lp_name`'s frame is one OP of the ",
+            "$(collect(length.(v))). One row of `$a_name`'s frame is one OP of the ",
             "event stream — the same thing one element of `$nm` is — and nothing is ",
             "expanded on the way in, so the two must match subject by subject. If `$nm` ",
             "is genuinely a DIFFERENT axis that only happens to have the same total ",
@@ -3396,7 +3428,7 @@ function _sb_kernel_event_rows(data, lp_col, grp_arg, g_vals, raw_cols)
     # column when Stan cannot type it (`Vector{String}`). Numeric labels stay,
     # in case the consumer also handed that column to the cell as real data.
     all(v -> v isa Real, ev_vals) || pop!(data, grp_name, nothing)
-    rows
+    (rows, is_lp)
 end
 
 function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
@@ -3432,37 +3464,40 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     #     the parameter with a constant (v2, decision `0dnesv9`).
     #     Such an LP needs no reshaping: the kernel contract is one row per
     #     subject, so an ordinary LP over that frame is ALREADY length n_subjects.
-    #   - `ragged(lp, group)` -> an EVENT-AXIS linear predictor: `lp` is declared
-    #     over a secondary frame (one row per dose event / op), `group` names the
-    #     subject of each of those rows. The first two kinds are both length
-    #     n_subjects and slice to a SCALAR per cell; this one slices to a ragged
-    #     VECTOR, the same shape a ragged raw data column gives. What the plate
-    #     actually takes is a per-subject index column derived below; the cell's
-    #     parameter is then rewritten to `lp[<those rows>]`.
-    dcol_names  = Symbol[]
-    lp_cols     = Any[]
-    raw_cols    = Tuple{Symbol,Any}[]
-    event_specs = Any[]
+    #   - `ragged(x, group)` -> a SECONDARY row axis: `x` lives on some other frame
+    #     (one row per dose event / op), `group` names the subject of each of its
+    #     rows. The first two kinds are both length n_subjects and slice to a
+    #     SCALAR per cell; this one slices to a ragged VECTOR. `x` may be a linear
+    #     predictor OR a raw flat data column — it is the same grouping either
+    #     way, and only the realization differs (see `_sb_kernel_ragged_rows`):
+    #     a predictor is a parameter, so the plate takes an index column and the
+    #     cell parameter is rewritten to `x[<those rows>]`; a data column is
+    #     gathered Julia-side into a ragged column and registered under a derived
+    #     name, leaving the flat original in place for any term that still needs it.
+    dcol_names    = Symbol[]
+    lp_cols       = Any[]
+    raw_cols      = Tuple{Symbol,Any}[]
+    ragged_specs  = Any[]
     for (i, c) in enumerate(dcols[2:end])
         if c isa ExprColumn && getf(c) === ragged
             length(getargs(c)) == 2 || error(
                 "sbimpl: kernel(...) `ragged(...)` takes exactly two positional args — ",
-                "the linear predictor and its grouping column — got ",
+                "the thing to group and its grouping column — got ",
                 "$(length(getargs(c))).")
-            lp_arg, grp_arg = getargs(c)
-            lp_arg isa NamedColumn || error(
+            arg_col, grp_arg = getargs(c)
+            arg_col isa NamedColumn || error(
                 "sbimpl: kernel(...) `ragged(...)`: the first argument must name a ",
-                "linear predictor declared in this @brm block; got a bare ",
-                "$(typeof(lp_arg)).")
-            rows_sym = Symbol("kernel_", target, "_", name(lp_arg), "_rows")
-            push!(event_specs, (i, lp_arg, grp_arg, rows_sym))
-            push!(dcol_names, rows_sym)
+                "linear predictor declared in this @brm block, or a raw data column; ",
+                "got a bare $(typeof(arg_col)).")
+            gath_sym = Symbol("kernel_", target, "_", name(arg_col), "_ragged")
+            push!(ragged_specs, (i, arg_col, grp_arg, gath_sym))
+            push!(dcol_names, gath_sym)
             continue
         end
         c isa NamedColumn || error(
             "sbimpl: kernel(...) positional args (after the do-block) must be a data ",
             "column, a per-subject linear predictor declared in this @brm block, or ",
-            "an event-axis linear predictor wrapped as `ragged(lp, group)`; got a ",
+            "a secondary-axis predictor/column wrapped as `ragged(x, group)`; got a ",
             "bare $(typeof(c)).")
         k = name(c)
         if parent(c) isa DataColumn
@@ -3526,17 +3561,32 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     all(v -> v isa Real, g_vals) || pop!(data, name(group_col), nothing)
     nsub_sym = Symbol("kernel_nsub_", target); data[nsub_sym] = nsub
 
-    # Event-axis LPs, now that the subject row order is known. The plate takes a
-    # per-subject INDEX column in the arg's place, and the cell parameter the
-    # consumer wrote is rewritten to the fancy-index `lp[<rows>]` wherever it
-    # appears in the body — so `exp(lF)` reads the event-axis parameter directly
-    # instead of a redundant per-cell copy of it.
-    for (i, lp_arg, grp_arg, rows_sym) in event_specs
-        data[rows_sym] = _sb_kernel_event_rows(data, lp_arg, grp_arg, g_vals, raw_cols)
-        rows_param = Symbol("kernel_rows_", params[i])
-        slice_params[i] = rows_param
-        sliced = :($(name(lp_arg))[$rows_param])
-        body_stmts = Any[_sb_subst_sym(s, params[i], sliced) for s in body_stmts]
+    # `ragged(x, group)` positionals, now that the subject row order is known.
+    #
+    # A PREDICTOR cannot be grouped Julia-side, so the plate takes a per-subject
+    # INDEX column in the arg's place and the cell parameter the consumer wrote is
+    # rewritten to the fancy-index `x[<rows>]` wherever it appears in the body —
+    # `exp(lF)` then reads the secondary-axis parameter directly instead of a
+    # redundant per-cell copy of it.
+    #
+    # A DATA column is just gathered here, and registered under the DERIVED name
+    # rather than its own. Wrapping it for the cell must not claim the flat
+    # column: something else may name it on its own axis — `hsgp(log_dose)` over
+    # the event frame, say — and that term registers it through its own path.
+    for (i, arg_col, grp_arg, gath_sym) in ragged_specs
+        rows, is_lp = _sb_kernel_ragged_rows(data, arg_col, grp_arg, g_vals, raw_cols)
+        if is_lp
+            data[gath_sym] = rows
+            rows_param = Symbol("kernel_rows_", params[i])
+            slice_params[i] = rows_param
+            sliced = :($(name(arg_col))[$rows_param])
+            body_stmts = Any[_sb_subst_sym(s, params[i], sliced) for s in body_stmts]
+        else
+            flat = parent(parent(arg_col))
+            gathered = [flat[r] for r in rows]
+            data[gath_sym] = gathered
+            push!(raw_cols, (gath_sym, gathered))
+        end
     end
 
     # Per-subject plate: slice params bind the data columns and already-emitted LPs;
@@ -5840,7 +5890,7 @@ _sb_predictor_col(t::Int, data, _stmts, pop_terms=(); obs_n::Union{Symbol,Nothin
     #      tier 1 returns nothing even though the formula names its own row axis
     #      plainly. Tiers 2 and 3 then guess an axis, which is right only while
     #      every frame in the model has the same length: an intercept on a
-    #      SECONDARY frame (`ragged(lp, group)`) got `rep_vector(1., num_elements(weight))`
+    #      SECONDARY frame (`ragged(x, group)`) got `rep_vector(1., num_elements(weight))`
     #      — the SUBJECT axis — inside an `X` matrix sized by the event axis.
     #      stanc accepts that (both extents are runtime), so it fails as a
     #      dimension error at instantiation rather than at lowering.

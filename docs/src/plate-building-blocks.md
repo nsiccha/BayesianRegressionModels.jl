@@ -214,7 +214,7 @@ The PLATE boundary is ragged, while the event recurrence or ODE remains inside
 | Grouped basis model | `hsgp(x; by=g)`, grouped splines | `_sb_hsgp_by` and term-specific basis-weight floors |
 | Inferred-observation cell | `me`, missing values, calibration and censoring cells | One SLIC model per observation family merely to vectorize scalar latent draws |
 | Ragged longitudinal kernel | Bruno PK/PKPD and Bordet biomarker series | Prefix/gather scaffolding and one custom vector wrapper for every kernel |
-| Secondary-axis linear predictor | `kernel(..., ragged(lp, group), ...)` | One hand-written scalar prior + basis per event-level covariate |
+| Secondary row axis (events, doses) | `kernel(..., ragged(x, group), ...)` | Hand-built per-subject views of every flat column, plus one hand-written scalar prior + basis per event-level covariate |
 | Per-cell likelihood | mixture, hurdle, zero-inflated, censored, custom user likelihoods | PLATE owns the per-cell density (`lpdf`/`lpmf`) loop today; observation posterior-predictive RNG synthesis remains target work |
 | Parallel subject/series likelihood | expensive PK/PD, ODE, GP, and longitudinal models | Separate threaded model variants; the compiler may choose `reduce_sum` |
 | Crossed independent plates | subject and item effects, multiple group factors | A combined monolithic random-effect allocator |
@@ -243,22 +243,20 @@ observations are `~` statements inside it. The retired `by=` / `n_eta=` /
 contract is simply “inline this cell model under a plate keyed by the grouping
 derived from those linear predictors.”
 
-### Linear predictors on a secondary row axis
+### Secondary row axes — `ragged(x, group)`
 
-The kernel dataframe is one row per subject, so an ordinary formula linear
-predictor handed to `kernel(...)` contributes exactly one value per cell. That
-is the wrong shape for anything defined per EVENT — bioavailability of a dose,
-an infusion's vessel, the diet in force at that administration. Those quantities
-vary within a subject, and their design lives on a different frame entirely: a
-dose-event table with its own row count, its own categorical columns, its own
-continuous covariates to smooth over.
+The kernel dataframe is one row per subject, so everything `kernel(...)` slices
+is either already per-subject (a scalar per cell) or already a per-subject view
+(a ragged column). Dose events are neither. They live on a frame of their own —
+one row per administration, with its own row count, its own categorical columns,
+its own continuous covariates — and the consumer has to reconcile that frame
+with the subject frame before `kernel(...)` will look at it.
 
-`ragged(lp, group)` is the argument kind that carries such a predictor into the
-cell. `lp` names a `lp ~ <terms>` statement in the same `@brm` block whose terms
-resolve against the secondary frame; `group` is a raw data column naming, for
-every row of that frame, the subject it belongs to. The cell receives `lp` as a
-ragged per-subject vector — the same shape a ragged raw data column already
-arrives in, and aligned to it element for element:
+`ragged(x, group)` does exactly that reconciliation, and only that: `group` is a
+raw data column naming, for every row of the flat frame, the subject it belongs
+to, and the cell receives `x` as the ragged per-subject vector that grouping
+implies. It is a general operation on axes; nothing about it is specific to what
+`x` is:
 
 ```julia
 @brm df begin
@@ -266,8 +264,11 @@ arrives in, and aligned to it element for element:
     log_F  ~ 1 + vessel + mo(diet) + hsgp(log_dose)   # rows = dose events
     log_CL ~ 1 + weight + (1 | p | subject)           # rows = subjects
 
-    pred ~ kernel(t_obs, dv, dose_time, dose_amount,
-                  ragged(log_F, dose_subject), log_CL) do ts, yy, dts, doses, lF, lCL
+    pred ~ kernel(t_obs, dv,
+                  ragged(dose_time, dose_subject),    # flat column
+                  ragged(dose_amount, dose_subject),  # flat column
+                  ragged(log_F, dose_subject),        # linear predictor
+                  log_CL) do ts, yy, dts, doses, lF, lCL
         effective_dose = doses .* exp(lF)
         mu = <prediction from effective_dose over dts, ts, exp(lCL)>
         yy ~ normal(mu, sigma)
@@ -276,30 +277,41 @@ arrives in, and aligned to it element for element:
 end
 ```
 
+`x` may therefore be either a linear predictor declared in the same `@brm` block
+or a raw flat data column. Only the REALIZATION differs, and the difference is
+forced by what the thing is: a linear predictor is a Stan parameter, so it
+cannot be gathered on the Julia side at all — the plate takes a per-subject
+index column and the cell fancy-indexes the unsliced predictor (`log_F[rows]`).
+A data column is Julia data, so it is gathered directly into a
+`Vector{Vector{T}}`, which StanBlocks ingests as a ragged column natively —
+exactly what the hand-prepared per-subject view would have been. Wrapping a
+column does not consume the flat original: a term that names it on its own axis
+(`hsgp(log_dose)` above) still sees it.
+
 Two contract points make this well-defined:
 
 - **The axis is declared, never derived.** A per-subject linear predictor is
   grouped by the random-effect bucket it already carries, which is how
   `kernel(...)` resolves its ordinary LP arguments. An event-axis population
-  predictor like `log_F` above has no random-effect term at all, so there is
-  nothing to derive a grouping from — `group` is that declaration, and it is
+  predictor like `log_F` has no random-effect term at all, and a raw column
+  carries no grouping whatsoever — `group` is that declaration, and it is
   required.
-- **One value per row of `lp`'s own frame, with no expansion anywhere.** If the
+- **One value per row of `x`'s own frame, with no expansion anywhere.** If the
   event table stores a compact schedule — one row per dose OP, carrying an
-  interval and a repeat count — then `lp` has one value per OP, which is exactly
+  interval and a repeat count — then `x` has one value per OP, which is exactly
   what aligns with the ragged columns the cell walks. Lowering enforces this:
-  every raw ragged positional whose total length matches `lp`'s row count must
-  also agree with it subject by subject, or the model is rejected with both
+  every already-ragged positional whose total length matches `x`'s row count
+  must also agree with it subject by subject, or the model is rejected with both
   length vectors named.
 
-The emitted program keeps the predictor on its own axis. `log_F` stays a single
-event-length quantity in `transformed parameters`; the plate takes a per-subject
-index column in the argument's place and the cell reads `log_F[<rows>]`, so no
-per-cell copy of the predictor is materialized and the rows need not be
-contiguous or sorted. Every ordinary population term lowers unchanged on that
-frame — contrasts, `mo(...)`, `hsgp(...)`, `s(...)` — because nothing about the
-term emitters is axis-specific; only the intercept's length probe had to learn
-to size itself from the frame the terms actually name.
+The emitted program keeps a wrapped predictor on its own axis. `log_F` stays a
+single event-length quantity in `transformed parameters`; the plate takes a
+per-subject index column in the argument's place and the cell reads
+`log_F[<rows>]`, so no per-cell copy of the predictor is materialized and the
+rows need not be contiguous or sorted. Every ordinary population term lowers
+unchanged on that frame — contrasts, `mo(...)`, `hsgp(...)`, `s(...)` — because
+nothing about the term emitters is axis-specific; only the intercept's length
+probe had to learn to size itself from the frame the terms actually name.
 
 ## Rewriting shipped components
 

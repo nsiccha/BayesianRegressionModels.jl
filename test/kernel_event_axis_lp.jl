@@ -1,7 +1,6 @@
-# test/kernel_event_axis_lp.jl — `ragged(lp, group)`: a population linear
-# predictor declared on a SECONDARY row axis, handed to `kernel(...)`
-# positionally and arriving in the cell as a ragged per-subject vector
-# (snag `a-bioavailabilit-28aeb46c`).
+# test/kernel_event_axis_lp.jl — `ragged(x, group)`: take a FLAT secondary row
+# axis and the column naming each of its rows' subject, and hand `kernel(...)`
+# the ragged per-subject view (snag `a-bioavailabilit-28aeb46c`).
 #
 # Before this, `kernel(...)` admitted exactly two positional kinds, both length
 # n_subjects: a raw data column and a per-subject LP. An LP over a DOSE-EVENT
@@ -10,6 +9,14 @@
 # grouping from. The only shipped spelling for event-level effects was one
 # scalar prior per non-reference contrast addressed lexically in the cell, which
 # cannot express `mo()` or `hsgp()` over dose.
+#
+# `x` may be a LINEAR PREDICTOR or a RAW FLAT COLUMN — one operation either way.
+# Only the realization differs, and the difference is forced: a predictor is a
+# Stan parameter, so it cannot be gathered Julia-side (the plate takes an index
+# column and the cell fancy-indexes `log_F[rows]`); a data column is Julia data,
+# so it is gathered into a `Vector{Vector{T}}` StanBlocks ingests natively —
+# exactly the hand-prepared per-subject view a consumer would otherwise build
+# before calling `kernel(...)` at all.
 #
 # WHAT THE LOAD-BEARING ASSERTIONS ARE:
 #
@@ -29,6 +36,9 @@
 #      block-permuted event frame must give the same density at the same point.
 #      Within one subject, event-frame order is what pairs with the ragged data
 #      columns the cell walks.
+#   4. Grouping a flat DATA column must land the same partition the predictor
+#      gets, and must reproduce the hand-built ragged column byte for byte —
+#      same density, same gradient, same dimension as the hand-built fixture.
 
 using Test
 using BayesianRegressionModels
@@ -57,6 +67,9 @@ function ev_df(; sub_order = collect(1:3), ev_order = collect(1:7),
         vessel   = [1, 2, 1, 2, 2, 1, 2],
         diet     = [1, 2, 1, 3, 2, 3, 1],
         log_dose = log.([100.0, 100.0, 50.0, 50.0, 50.0, 200.0, 200.0]),
+        # The same amounts as `dose_amount`, but FLAT on the event axis — what a
+        # consumer's dose table actually holds before anyone groups it by hand.
+        dose_amount_flat = [100.0, 100.0, 50.0, 50.0, 50.0, 200.0, 200.0],
     )
     (; (k => v[sub_order] for (k, v) in pairs(subj))...,
        (k => v[ev_order]  for (k, v) in pairs(ev))...)
@@ -100,12 +113,29 @@ ev_only_model(df) = @brm df begin
     end
 end
 
-# `ragged(...)` over a RAW data column — already per-subject, passed directly.
-ev_raw_model(df) = @brm df begin
+# `ragged(...)` over an ALREADY-ragged per-subject column: nothing to group.
+ev_preragged_model(df) = @brm df begin
     sigma  ~ Exponential(1)
     log_CL ~ 1 + weight + (1 | p | subject)
     pred   ~ kernel(t_obs, dv, ragged(dose_amount, dose_subject), log_CL) do ts, yy, doses, lCL
         mu = sum(doses) .* exp(-exp(lCL) .* ts)
+        yy ~ normal(mu, sigma)
+        mu
+    end
+end
+
+# `ragged(...)` over a FLAT raw data column — the same grouping the LP gets, but
+# realized Julia-side. `dose_amount_flat` is the event frame's own amount column;
+# grouping it here is exactly the hand-prepared per-subject view the consumer
+# would otherwise have had to build before calling `kernel(...)` at all.
+ev_flatcol_model(df) = @brm df begin
+    sigma  ~ Exponential(1)
+    log_F  ~ 1 + factor(vessel) + mo(diet) + hsgp(log_dose; k = 5)
+    log_CL ~ 1 + weight + (1 | p | subject)
+    pred   ~ kernel(t_obs, dv, ragged(dose_amount_flat, dose_subject),
+                    ragged(log_F, dose_subject), log_CL) do ts, yy, doses, lF, lCL
+        effective_dose = sum(doses .* exp(lF))
+        mu = effective_dose .* exp(-exp(lCL) .* ts)
         yy ~ normal(mu, sigma)
         mu
     end
@@ -151,14 +181,14 @@ ev_problem(sb, tag) = begin
     StanBlocks.stan_instantiate(sb.model; path = joinpath(EV_CACHE, "$(tag)_$(hash(code)).stan"))
 end
 
-@testset "kernel(...) — event-axis LP via ragged(lp, group)" begin
+@testset "kernel(...) — secondary row axis via ragged(x, group)" begin
     df = ev_df()
     sb = SBBRMI(ev_model(df); mod = @__MODULE__)
 
     @testset "the LP stays a parameter; the plate gets an index column" begin
         @test !haskey(sb.data, :log_F)
         # Row indices into the event frame, one group per SUBJECT ROW.
-        @test sb.data[:kernel_pred_log_F_rows] == [[1, 2], [3, 4, 5], [6, 7]]
+        @test sb.data[:kernel_pred_log_F_ragged] == [[1, 2], [3, 4, 5], [6, 7]]
         # String labels join rows on the Julia side only; Stan cannot type them.
         @test !haskey(sb.data, :dose_subject)
         @test !haskey(sb.data, :subject)
@@ -168,7 +198,7 @@ end
         @test StanBlocks.stan.transpiles(sb.model)
         code = StanBlocks.stan_code(sb.model)
         # One Stan fancy-index, not a per-cell copy of the predictor.
-        @test occursin(r"log_F\[\s*kernel_pred_log_F_rows\.1\[", code)
+        @test occursin(r"log_F\[\s*kernel_pred_log_F_ragged\.1\[", code)
         # The event-axis intercept must be sized off the EVENT axis (`diet`),
         # never off the subject axis (`weight`) — see header note 2.
         @test occursin("X_log_F = hcat(rep_vector(1.0, num_elements(diet))", code)
@@ -209,7 +239,7 @@ end
             # more. Nothing about the fix requires them to be.
             ev_perm_df = ev_df(; ev_order = [6, 1, 3, 2, 4, 7, 5])
             ev_perm = SBBRMI(ev_model(ev_perm_df); mod = @__MODULE__)
-            @test ev_perm.data[:kernel_pred_log_F_rows] == [[2, 4], [3, 5, 7], [1, 6]]
+            @test ev_perm.data[:kernel_pred_log_F_ragged] == [[2, 4], [3, 5, 7], [1, 6]]
             ev_lp, ev_g = LogDensityProblems.logdensity_and_gradient(
                 ev_problem(ev_perm, "evperm"), q)
             @test isapprox(ev_lp, lp; atol = 1e-8, rtol = 0)
@@ -223,9 +253,9 @@ end
         # `ragged(...)` does not supply the kernel's subject axis.
         @test_throws "needs at least one per-subject linear-predictor" SBBRMI(
             ev_only_model(df); mod = @__MODULE__)
-        # A raw ragged data column is already per-subject; it is passed directly.
-        @test_throws "must wrap a linear predictor" SBBRMI(
-            ev_raw_model(df); mod = @__MODULE__)
+        # An ALREADY-ragged per-subject column has nothing left to group.
+        @test_throws "ALREADY a ragged per-subject column" SBBRMI(
+            ev_preragged_model(df); mod = @__MODULE__)
         # The grouping column must cover the predictor's OWN frame.
         @test_throws "row axis" SBBRMI(ev_wrong_axis_model(df); mod = @__MODULE__)
         # Arity and keywords are rejected at @brm construction / lowering.
@@ -243,5 +273,47 @@ end
         skewed = ev_df(; dose_amount = [[100.0, 100.0, 100.0], [50.0, 50.0], [200.0, 200.0]])
         @test_throws "does not align with the ragged column `dose_amount`" SBBRMI(
             ev_model(skewed); mod = @__MODULE__)
+    end
+
+    # `ragged(x, group)` is ONE operation — group a flat axis by a key — and `x`
+    # being a parameter or data changes only WHERE that happens. This testset
+    # pins the data half: same grouping, gathered Julia-side into a ragged column
+    # instead of indexed in Stan, and equal to the hand-prepared view it replaces.
+    @testset "ragged(...) groups a flat DATA column too, not just a predictor" begin
+        flat = SBBRMI(ev_flatcol_model(df); mod = @__MODULE__)
+
+        # Gathered here, so it IS data — unlike the predictor, which must not be.
+        @test flat.data[:kernel_pred_dose_amount_flat_ragged] ==
+              [[100.0, 100.0], [50.0, 50.0, 50.0], [200.0, 200.0]]
+        # ...and it is exactly the hand-built per-subject view in the fixture.
+        @test flat.data[:kernel_pred_dose_amount_flat_ragged] == df.dose_amount
+        @test !haskey(flat.data, :log_F)
+
+        # Wrapping a column for the cell must NOT consume the flat original: the
+        # event-axis `hsgp(log_dose)` still names its own axis, and `X_log_F` is
+        # still sized off it.
+        code = StanBlocks.stan_code(flat.model)
+        @test occursin("X_log_F = hcat(rep_vector(1.0, num_elements(diet))", code)
+        @test StanBlocks.stanc_check(code; warn_pedantic = false).ok
+
+        # Same grouping key, so the gathered column and the predictor's index
+        # column must describe the same per-subject split.
+        @test length.(flat.data[:kernel_pred_dose_amount_flat_ragged]) ==
+              length.(flat.data[:kernel_pred_log_F_ragged])
+
+        if EV_RUN_BRIDGESTAN
+            # The flat-column spelling is the SAME MODEL as the hand-grouped one:
+            # `ev_model` passes `dose_amount` pre-grouped, `ev_flatcol_model` lets
+            # BRM group `dose_amount_flat`. Identical density at the same point.
+            base = ev_problem(SBBRMI(ev_model(df); mod = @__MODULE__), "base")
+            dim = LogDensityProblems.dimension(base)
+            q = [0.1 * ((i % 5) - 2) for i in 1:dim]
+            b_lp, b_g = LogDensityProblems.logdensity_and_gradient(base, q)
+            f_prob = ev_problem(flat, "flatcol")
+            @test LogDensityProblems.dimension(f_prob) == dim
+            f_lp, f_g = LogDensityProblems.logdensity_and_gradient(f_prob, q)
+            @test isapprox(f_lp, b_lp; atol = 1e-8, rtol = 0)
+            @test isapprox(f_g, b_g; atol = 1e-8, rtol = 0)
+        end
     end
 end
