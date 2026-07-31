@@ -199,12 +199,14 @@ end
 # `effect_priors` and `r2d2_priors` both walk the one `effect(...)` carrier, so
 # both skip on this list rather than on a hand-copied tuple that can drift as
 # classes are added.
-const _NON_EFFECT_CLASSES = (:sd, :cor, :term_sd, :term_simplex, :term_latent)
+const _NON_EFFECT_CLASSES =
+    (:sd, :cor, :term_sd, :term_simplex, :term_latent, :term_length_scale)
 
-# The three classes that address a TERM's own parameters, as built by
+# The classes that address a TERM's own parameters, as built by
 # `_prior_address`. Kept beside `_NON_EFFECT_CLASSES` so adding a class means
 # editing one place.
-const _TERM_PRIOR_CLASSES = (:term_sd, :term_simplex, :term_latent)
+const _TERM_PRIOR_CLASSES =
+    (:term_sd, :term_simplex, :term_latent, :term_length_scale)
 
 """
     effect_priors(brmi::BRMI) -> Vector{NamedTuple}
@@ -319,21 +321,22 @@ end
     term_priors(brmi::BRMI) -> Vector{NamedTuple}
 
 Return the prior statements captured by [`@brm`](@ref) that address a *term's
-own* parameters — the `sd`, `simplex` and `latent` heads applied to a term
-rather than to a coefficient or a grouping factor — in formula order. Each
-entry has
+own* parameters — the `sd`, `simplex`, `latent` and `length_scale` heads
+applied to a term rather than to a coefficient or a grouping factor — in
+formula order. Each entry has
 
 ```julia
 (; class, term, predictor, component, family, arguments, keywords, expression)
 ```
 
-`class` is `:term_sd`, `:term_simplex` or `:term_latent`. `term` is the
-canonicalised term key: the term as the formula spells it, minus numeric and
-keyword arguments, so `me(x, 0.5)` and `me(x)` both key as `Symbol("me(x)")`.
-`predictor === nothing` means the statement is the default layer for every
-linear predictor carrying that term; a `Symbol` restricts it to one.
-`component` is `nothing` except for `sd(lp, t2(x, z), rr)`, where it names one
-of the tensor smooth's three penalty blocks.
+`class` is `:term_sd`, `:term_simplex`, `:term_latent` or
+`:term_length_scale`. `term` is the canonicalised term key: the term as the
+formula spells it, minus numeric and keyword arguments, so `me(x, 0.5)` and
+`me(x)` both key as `Symbol("me(x)")`, and `hsgp(x; k=20)` keys as
+`Symbol("hsgp(x)")`. `predictor === nothing` means the statement is the default
+layer for every linear predictor carrying that term; a `Symbol` restricts it to
+one. `component` is `nothing` except for `sd(lp, t2(x, z), rr)`, where it names
+one of the tensor smooth's three penalty blocks.
 
 Which parameter each class reaches:
 
@@ -343,6 +346,8 @@ Which parameter each class reaches:
 | `sd(lp, t2(x, z), rr\\|rn\\|nr)` | one of the three tensor smoothing SDs |
 | `simplex(lp, mo1(c))` | the monotonic-increment Dirichlet concentration |
 | `latent(lp, me(x))` | the latent true covariate `x_true` |
+| `sd(lp, gp(x))` / `sd(lp, hsgp(x))` | the GP marginal amplitude `sigma` |
+| `length_scale(lp, gp(x))` / `length_scale(lp, hsgp(x))` | the GP length scale `rho` |
 
 Standardized raw innovations (`b_pen_raw`, `z`, `beta_raw`, `epsilon`) are
 deliberately NOT addressable: they carry no independent scale, and giving them

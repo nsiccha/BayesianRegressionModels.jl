@@ -108,11 +108,12 @@ knots, penalty decomposition, and intercept constraint. Passing
 ## Term-internal priors
 
 Some terms own parameters that no coefficient address can reach. `s(x)`'s
-smoothing scale, `mo(c)`'s Dirichlet increments, and `me(x, sd)`'s latent true
-covariate all live inside the term's own submodel, and none of them is a
-`beta_pop` column or a grouping-factor margin. They are addressed by naming the
-term itself in the target slot, in the same head-position grammar the rest of
-the prior surface uses:
+smoothing scale, `mo(c)`'s Dirichlet increments, `me(x, sd)`'s latent true
+covariate and a Gaussian process's length scale and amplitude all live inside
+the term's own submodel, and none of them is a `beta_pop` column or a
+grouping-factor margin. They are addressed by naming the term itself in the
+target slot, in the same head-position grammar the rest of the prior surface
+uses:
 
 ```
 <quantity>(<linear predictor | :>, <term>[, <component>]) ~ <distribution>
@@ -121,13 +122,15 @@ the prior surface uses:
 ```julia
 @brm df begin
     y ~ Normal(mu, sigma)
-    mu ~ 1 + s(age) + t2(x, z) + mo(dose) + me(w_obs, 0.3)
+    mu ~ 1 + s(age) + t2(x, z) + mo(dose) + me(w_obs, 0.3) + hsgp(conc; k=5)
     sigma ~ Exponential(1)
 
-    sd(:, s(age))            ~ Exponential(2)      # smoothing scale
-    sd(mu, t2(x, z), rr)     ~ Exponential(3)      # one tensor penalty
-    simplex(:, mo(dose))     ~ Dirichlet(2)        # monotonic increments
-    latent(mu, me(w_obs))    ~ Normal(0, 5)        # latent true covariate
+    sd(:, s(age))               ~ Exponential(2)     # smoothing scale
+    sd(mu, t2(x, z), rr)        ~ Exponential(3)     # one tensor penalty
+    simplex(:, mo(dose))        ~ Dirichlet(2)       # monotonic increments
+    latent(mu, me(w_obs))       ~ Normal(0, 5)       # latent true covariate
+    length_scale(:, hsgp(conc)) ~ Uniform(0.84, 2)   # GP length scale
+    sd(:, hsgp(conc))           ~ Normal(0, 0.5)     # GP marginal amplitude
 end
 ```
 
@@ -137,6 +140,8 @@ end
 | `sd` | `t2(x, z)` | one of the `rr` / `rn` / `nr` penalty SDs | half-standard-normal |
 | `simplex` | `mo(c)`, `mo1(c)` | Dirichlet concentration | `Dirichlet(1)` |
 | `latent` | `me(x, sd)` | latent true covariate | `Normal(0, 1)` |
+| `length_scale` | `gp(x…)`, `hsgp(x…)` | GP length scale `rho` | `LogNormal(0, 1)` |
+| `sd` | `gp(x…)`, `hsgp(x…)` | GP marginal amplitude `sigma` | `LogNormal(0, 1)` |
 
 **Spell the term the way the formula does, minus numeric and keyword
 arguments.** `me(w_obs, 0.3)` is addressed as `me(w_obs)` and `t2(x, z; k=(5,5))`
@@ -164,7 +169,7 @@ scale.
 
 ### Current limits
 
-- `sd` on a term accepts `Exponential(scale)` only, matching the
+- `sd` on `s(x)` / `t2(x, z)` accepts `Exponential(scale)` only, matching the
   grouping-factor SD surface. `Distributions.Exponential` is
   scale-parameterized while Stan's `exponential_lpdf` takes a rate; BRM
   performs the conversion.
@@ -175,8 +180,17 @@ scale.
   parameter is not accepted here.
 - `latent` accepts `Normal(location, scale)`. The observation likelihood
   `x_obs ~ Normal(x_true, sd)` is never configurable.
-- `gp` / `hsgp` length scales and amplitudes, and `ar`'s autocorrelation, have
-  no address yet.
+- `length_scale` and `sd` on a `gp` / `hsgp` term accept `LogNormal`,
+  `InverseGamma`, `Gamma`, `Exponential`, `Normal` and `Uniform`, with numeric
+  hyperparameters. Both parameters are strictly positive, so every family
+  except `Uniform` is emitted truncated at zero (`Normal(0, s)` is therefore a
+  half-normal); `Uniform(a, b)` additionally declares `<lower=a, upper=b>` so
+  the declaration and the density's support agree. An **anisotropic** term
+  (`iso=false`) has one length scale per axis and the statement sets all of
+  them; the isotropic form has a single shared one. With `by=g` the length
+  scale and amplitude are shared across groups, so one statement configures the
+  whole term.
+- `ar`'s autocorrelation has no address yet.
 
 ## R²-induced variance decomposition: `effect(lp, :) ~ r2d2(...)`
 

@@ -1674,6 +1674,13 @@ end
 # Exact latent squared-exponential GP. The non-centred draw keeps the geometry
 # explicit: f = cholesky(K(X, X)) * z. These are direct predictor summands, so
 # there is no redundant population beta multiplying the returned draw.
+#
+# LOCKSTEP: `length_scale(lp, gp(x))` / `sd(lp, gp(x))` override these two
+# statements through `Base.merge`, which replaces a matching-named statement
+# WHOLESALE -- so `_sb_gp_rho_lhs` reproduces each submodel's `rho` LHS
+# character-for-character. Rename `rho`/`rho_iso`, or change its declared type,
+# and that table has to change with it. `_sb_gp_submodel` likewise maps each
+# submodel NAME back to the value below.
 _sb_gp = StanBlocks.@slic begin
     n_obs = dims(X)[1]
     X_gp = brm_gp_locations(X)
@@ -4639,7 +4646,7 @@ _sb_t2_sd_index(c::Symbol) = findfirst(==(c), _SB_T2_BLOCKS)
 # spellings of one key in one predictor (`s(x) + s(x)`) make the address
 # ambiguous — the resolver reports that as its own error rather than silently
 # configuring whichever copy the walker reached first.
-const _SB_PRIOR_TERMS = (mo, mo1, me, s, t2)
+const _SB_PRIOR_TERMS = (mo, mo1, me, s, t2, gp, hsgp)
 function _sb_term_address_map(brmi::BRMI, lhs::Symbol)
     out = Dict{Symbol,Vector{Any}}()
     op = linear_predictor_op(brmi, lhs)
@@ -4654,7 +4661,8 @@ end
 
 _sb_term_spelling(spec) = begin
     head = spec.class === :term_sd ? "sd" :
-           spec.class === :term_simplex ? "simplex" : "latent"
+           spec.class === :term_simplex ? "simplex" :
+           spec.class === :term_length_scale ? "length_scale" : "latent"
     lp = isnothing(spec.predictor) ? ":" : string(spec.predictor)
     comp = isnothing(spec.component) ? "" : ", $(spec.component)"
     "$head($lp, $(spec.term)$comp)"
@@ -4681,9 +4689,26 @@ function _sb_term_config(spec, t, spelling)
                 "sbimpl: `$spelling` names no penalty block of `$(spec.term)`; " *
                 "valid blocks are " * join(("`$b`" for b in _SB_T2_BLOCKS), ", ") * ".")
             return (Symbol(:sd_, spec.component), (; rate=_sb_ranef_sd_rate(spec, spelling)))
+        elseif f === gp || f === hsgp
+            # A GP's `sigma` is its marginal amplitude -- the standard deviation
+            # of the latent function -- so it rides the same `sd` head as every
+            # other scale, and takes the general positive-scale family set rather
+            # than `brm_ranef_sd`'s Exponential-only switch.
+            isnothing(spec.component) || error(
+                "sbimpl: `$spelling` names a component, but `$(nameof(f))(...)` " *
+                "has exactly one marginal amplitude.")
+            return (:sigma, _sb_gp_scale_prior(spec, spelling))
         end
-        error("sbimpl: `$spelling` — `$(nameof(f))` has no smoothing scale to " *
-              "configure. `sd(...)` on a term applies to `s(x)` and `t2(x, z)`.")
+        error("sbimpl: `$spelling` — `$(nameof(f))` has no scale to configure. " *
+              "`sd(...)` on a term applies to `s(x)`, `t2(x, z)`, `gp(x...)` " *
+              "and `hsgp(x...)`.")
+    elseif spec.class === :term_length_scale
+        (f === gp || f === hsgp) || error(
+            "sbimpl: `$spelling` — `$(nameof(f))` has no length scale to " *
+            "configure. `length_scale(...)` applies to `gp(x...)` and " *
+            "`hsgp(x...)`.")
+        isnothing(spec.component) || error("sbimpl: `$spelling` takes no component slot")
+        return (:length_scale, _sb_gp_scale_prior(spec, spelling))
     elseif spec.class === :term_simplex
         (f === mo || f === mo1) || error(
             "sbimpl: `$spelling` — `$(nameof(f))` has no simplex to configure. " *
@@ -4840,6 +4865,96 @@ end
 function _sb_me_latent_args(term_overrides, t)
     cfg = _sb_term_cfg(term_overrides, t, :latent)
     isnothing(cfg) ? (0.0, 1.0) : (cfg.loc, cfg.scale)
+end
+
+# ---- gp / hsgp length scale and marginal amplitude --------------------------
+#
+# `rho` and `sigma` are both strictly positive scales of the same latent
+# function, so they share ONE family set rather than carrying a per-parameter
+# one. The returned record keeps the DECLARATION bounds beside the density
+# because an override must reproduce the whole base statement: `Base.merge`
+# replaces a matching-named statement wholesale, so a dropped `lower=` leaves
+# the parameter unconstrained and a `Uniform` density whose declaration does
+# not match its support is -Inf everywhere the sampler starts.
+const _SB_GP_SCALE_FAMILIES =
+    (LogNormal, InverseGamma, Gamma, Exponential, Normal, Uniform)
+
+# `_sb_stan_dist_args` maps Distributions' parameterisation onto Stan's. On this
+# family set the only non-literal it can build from numeric inputs is the
+# scale -> rate reciprocal, which folds back to a constant here so the emitted
+# declaration bound and the density argument are both plain numbers.
+_sb_gp_scale_const(x::Real) = Float64(x)
+function _sb_gp_scale_const(x)
+    (Meta.isexpr(x, :call) && length(x.args) == 3 && x.args[1] === Symbol("./") &&
+     x.args[2] isa Real && x.args[3] isa Real) || error(
+        "sbimpl: a gp/hsgp scale prior takes numeric formula constants, " *
+        "got $(repr(x))")
+    Float64(x.args[2] / x.args[3])
+end
+
+function _sb_gp_scale_prior(spec, spelling::AbstractString)
+    T = _as_distribution_type(spec.family)
+    (!isnothing(T) && any(F -> T <: F, _SB_GP_SCALE_FAMILIES)) || error(
+        "sbimpl: `$spelling` supports " *
+        join(("`$(nameof(F))`" for F in _SB_GP_SCALE_FAMILIES), ", ") *
+        "; got `$(spec.family)`. An unmentioned scale keeps `LogNormal(0, 1)` " *
+        "truncated to be positive.")
+    isempty(spec.keywords) || error(
+        "sbimpl: `$spelling ~ $(spec.family)(...)` does not accept keywords; " *
+        "the declaration bounds follow from the family.")
+    args = map(_sb_effect_prior_arg, spec.arguments)
+    all(a -> a isa Real && isfinite(a), args) || error(
+        "sbimpl: `$spelling` hyperparameters must be finite numeric formula " *
+        "constants, got $(repr(args))")
+    stan_args = map(_sb_gp_scale_const, _sb_stan_dist_args(T, Tuple(args)))
+    rhs = Expr(:call, _sb_stan_dist_name(T), stan_args...)
+    T <: Uniform || return (; rhs, lower=0.0, upper=nothing)
+    lower, upper = stan_args
+    (lower >= 0 && upper > lower) || error(
+        "sbimpl: `$spelling ~ Uniform($lower, $upper)` bounds a positive scale, " *
+        "so it needs `0 <= lower < upper`.")
+    (; rhs, lower, upper)
+end
+
+# The base SLIC behind each submodel name, and the exact LHS each declares `rho`
+# with -- three of the six type it per-axis, three leave it a plain scalar. Val
+# dispatch with NO fallback method makes a renamed or newly added submodel a
+# MethodError at emission time rather than a silently unconfigured prior.
+_sb_gp_submodel(::Val{:_sb_gp}) = _sb_gp
+_sb_gp_submodel(::Val{:_sb_gp_aniso}) = _sb_gp_aniso
+_sb_gp_submodel(::Val{:_sb_hsgp}) = _sb_hsgp
+_sb_gp_submodel(::Val{:_sb_hsgp_aniso}) = _sb_hsgp_aniso
+_sb_gp_submodel(::Val{:_sb_hsgp_by}) = _sb_hsgp_by
+_sb_gp_submodel(::Val{:_sb_hsgp_by_aniso}) = _sb_hsgp_by_aniso
+
+_sb_gp_rho_lhs(::Val{:_sb_gp}) = :rho
+_sb_gp_rho_lhs(::Val{:_sb_gp_aniso}) = :(rho :: vector[n_axes])
+_sb_gp_rho_lhs(::Val{:_sb_hsgp}) = :rho_iso
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_aniso}) = :(rho :: vector[n_axes])
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_by}) = :rho_iso
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_by_aniso}) = :(rho :: vector[n_axes])
+
+function _sb_gp_prior_stmt(lhs, cfg)
+    rhs = copy(cfg.rhs)
+    kws = Any[Expr(:kw, :lower, cfg.lower)]
+    isnothing(cfg.upper) || push!(kws, Expr(:kw, :upper, cfg.upper))
+    insert!(rhs.args, 2, Expr(:parameters, kws...))
+    Expr(:call, :~, lhs, rhs)
+end
+
+# Symbol in, Symbol out when nothing is configured: an unconfigured formula keeps
+# emitting the bare submodel name its transpile module resolves, and only a
+# configured one pays for a merged `SlicModel` VALUE spliced into the generated
+# call site.
+function _sb_gp_submodel_expr(submodel::Symbol, term_overrides, t)
+    rho_cfg = _sb_term_cfg(term_overrides, t, :length_scale)
+    sigma_cfg = _sb_term_cfg(term_overrides, t, :sigma)
+    (isnothing(rho_cfg) && isnothing(sigma_cfg)) && return submodel
+    v = Val(submodel)
+    stmts = Any[]
+    isnothing(rho_cfg) || push!(stmts, _sb_gp_prior_stmt(_sb_gp_rho_lhs(v), rho_cfg))
+    isnothing(sigma_cfg) || push!(stmts, _sb_gp_prior_stmt(:sigma, sigma_cfg))
+    Base.merge(_sb_gp_submodel(v), stmts...)
 end
 
 # The single carrier every prior surface rides on. Folding the term dict into
@@ -6711,7 +6826,8 @@ end
 # `gp(x...)` is the exact GP term. It records an N x d predictor matrix and
 # delegates covariance construction + non-centred sampling to `_sb_gp` (one
 # shared length scale) or `_sb_gp_aniso` (one per axis).
-_sb_predictor_term!(stmts, data, ::typeof(gp), t; group_block_lookup=Dict(), kwargs...) = begin
+_sb_predictor_term!(stmts, data, ::typeof(gp), t; group_block_lookup=Dict(),
+                    term_overrides=Dict{Symbol,Any}(), kwargs...) = begin
     args = getargs(t); kw = getkwargs(t)
     _check_term_kwargs(gp, kw)
     names, axes = _sb_gp_axes(:gp, args)
@@ -6720,7 +6836,8 @@ _sb_predictor_term!(stmts, data, ::typeof(gp), t; group_block_lookup=Dict(), kwa
     col_name = Symbol(:gp_, suffix)
     data[X_name] = _sb_gp_matrix(axes)
     _sb_record_preproc!(data, X_name, PreprocEntry(:gp, nothing, names, false))
-    submodel = _sb_gp_iso(kw, :gp) ? :_sb_gp : :_sb_gp_aniso
+    submodel = _sb_gp_submodel_expr(
+        _sb_gp_iso(kw, :gp) ? :_sb_gp : :_sb_gp_aniso, term_overrides, t)
     jitter = Float64(get(kw, :jitter, 1e-9))
     push!(stmts, :($col_name ~ $submodel(; X=$X_name, jitter=$jitter)))
     col_name
@@ -6730,7 +6847,8 @@ end
 # and `c` broadcast across axes; tuples/vectors specify one value per axis.
 # The tensor basis has `prod(k)` columns. With `by=`, only those basis weights
 # vary per group; length-scale and marginal-SD hyperparameters stay shared.
-_sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(), kwargs...) = begin
+_sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
+                    term_overrides=Dict{Symbol,Any}(), kwargs...) = begin
     args = getargs(t); kw = getkwargs(t)
     _check_term_kwargs(hsgp, kw)
     names, axes = _sb_gp_axes(:hsgp, args)
@@ -6754,7 +6872,8 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(), k
         _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp,
             (; fits, K, c, omega2_key=omega2_name), names, false))
         col_name = Symbol(:hsgp_, suffix, :_by_, gname)
-        submodel = iso ? :_sb_hsgp_by : :_sb_hsgp_by_aniso
+        submodel = _sb_gp_submodel_expr(
+            iso ? :_sb_hsgp_by : :_sb_hsgp_by_aniso, term_overrides, t)
         push!(stmts, :($col_name ~ $submodel(; PHI=$PHI_name, omega2=$omega2_name,
             beta=$(info.block_name), group_idx=$(info.idx_name))))
         return col_name
@@ -6767,7 +6886,8 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(), k
     _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp,
         (; fits, K, c, omega2_key=omega2_name), names, false))
     col_name = Symbol(:hsgp_, suffix)
-    submodel = iso ? :_sb_hsgp : :_sb_hsgp_aniso
+    submodel = _sb_gp_submodel_expr(
+        iso ? :_sb_hsgp : :_sb_hsgp_aniso, term_overrides, t)
     push!(stmts, :($col_name ~ $submodel(; PHI=$PHI_name, omega2=$omega2_name)))
     col_name
 end

@@ -407,7 +407,7 @@ end
 # macro rewrites the head before `@x` ever evaluates it, so the user never
 # needs them bound -- and exporting `cor` would collide with `Statistics.cor`
 # for anyone doing `using BayesianRegressionModels, Statistics`.
-const _PRIOR_HEADS = (:effect, :sd, :cor, :simplex, :latent)
+const _PRIOR_HEADS = (:effect, :sd, :cor, :simplex, :latent, :length_scale)
 
 _is_effect_lhs(x) = any(h -> isxcall(x, h), _PRIOR_HEADS)
 # A bare `:` reaches the macro as an ordinary Symbol, so the address vector
@@ -476,10 +476,17 @@ _is_term_key(s::Symbol) = occursin('(', string(s))
 
 _prior_slot(x) = _is_term_address(x) ? _term_address_key(x) : _effect_address_symbol(x)
 
-# Public head -> internal class for the three term-parameter heads. `sd` is
-# absent because it is shared with the random-effect surface and is classified
-# by whether its target slot holds a term key.
-const _TERM_PRIOR_HEAD_CLASS = (; simplex=:term_simplex, latent=:term_latent)
+# Public head -> internal class for the term-parameter heads whose target slot
+# is ALWAYS a term. `sd` is absent because it is shared with the random-effect
+# surface and is classified by whether its target slot holds a term key.
+const _TERM_PRIOR_HEAD_CLASS =
+    (; simplex=:term_simplex, latent=:term_latent, length_scale=:term_length_scale)
+
+# One representative term per head, so a mis-slotted address gets told what a
+# CORRECT `length_scale(...)` looks like rather than a `mo1(...)` example that
+# its own head would refuse.
+const _TERM_PRIOR_HEAD_EXAMPLE =
+    (; simplex="mo1(x)", latent="me(x)", length_scale="hsgp(x)")
 
 # Public head + slots -> the internal `effect(...)` address vector.
 #
@@ -489,6 +496,7 @@ const _TERM_PRIOR_HEAD_CLASS = (; simplex=:term_simplex, latent=:term_latent)
 #     sd(<lp|:>, <term>[, <block>])     -> [:term_sd, key, lp[, block]]
 #     simplex(<lp|:>, <term>)           -> [:term_simplex, key, lp]
 #     latent(<lp|:>, <term>)            -> [:term_latent, key, lp]
+#     length_scale(<lp|:>, <term>)      -> [:term_length_scale, key, lp]
 #
 # Every slot is one name, one term, or `:`. A trailing `sd` slot may be omitted
 # and means `:`; that is a deterministic DEFAULT, not the predictor INFERENCE
@@ -504,8 +512,8 @@ function _prior_address(head::Symbol, args::Vector{Symbol})
     term_slots = findall(_is_term_key, args)
     if !isempty(term_slots) && (head === :effect || head === :cor)
         error("@brm: `$head` addresses a coefficient or a grouping factor, not " *
-              "a term's own parameters; got `$spelling`. Use `sd`, `simplex` or " *
-              "`latent` with the term in the target slot.")
+              "a term's own parameters; got `$spelling`. Use `sd`, `simplex`, " *
+              "`latent` or `length_scale` with the term in the target slot.")
     elseif !isempty(term_slots) && term_slots != [2]
         error("@brm: a term belongs in the TARGET slot — " *
               "`$head(<linear_predictor|:>, <term>)`; got `$spelling`.")
@@ -518,7 +526,7 @@ function _prior_address(head::Symbol, args::Vector{Symbol})
         _is_term_key(args[2]) || error(
             "@brm: `$head` addresses a term's own parameter, so its target slot " *
             "must be a term as the formula spells it — `$head($(args[1]), " *
-            "mo1(x))`, not `$spelling`.")
+            "$(_TERM_PRIOR_HEAD_EXAMPLE[head]))`, not `$spelling`.")
         return Symbol[_TERM_PRIOR_HEAD_CLASS[head], args[2], args[1]]
     end
 
