@@ -25,11 +25,11 @@ builder = @brm begin
     eta_Q  ~ x + (0 + x | p | subject)
 
     effect(eta_Vc, x) ~ Normal(0, 0.25)
-    effect(sd, p) ~ Exponential(2 / 3)
-    effect(sd, p, eta_Vc, x) ~ Exponential(1 / 3)
-    effect(sd, p, eta_Vc, cat_dummy_3) ~ Exponential(1 / 5)
-    effect(sd, p, eta_Q) ~ Exponential(1 / 4)
-    effect(cor, p) ~ LKJCholesky(6, 2)
+    sd(:, p) ~ Exponential(2 / 3)
+    sd(eta_Vc, p, x) ~ Exponential(1 / 3)
+    sd(eta_Vc, p, cat_dummy_3) ~ Exponential(1 / 5)
+    sd(eta_Q, p) ~ Exponential(1 / 4)
+    cor(:, p) ~ LKJCholesky(6, 2)
 
     y ~ Normal(eta_CL + eta_Vc + eta_Q, 1)
 end
@@ -123,7 +123,7 @@ end
     partial_builder = @brm begin
         eta_CL ~ 1 + (1 | p | subject)
         eta_Vc ~ 1 + x + (1 + x | p | subject)
-        effect(sd, p, eta_Vc, x) ~ Exponential(1 / 4)
+        sd(eta_Vc, p, x) ~ Exponential(1 / 4)
         y ~ Normal(eta_CL + eta_Vc, 1)
     end
     partial_brmi = partial_builder(df)
@@ -210,50 +210,56 @@ end
 @testset "ranef effect validation fails closed" begin
     wrong_dimension = @brm begin
         eta ~ 1 + (1 + x | p | subject)
-        effect(cor, p) ~ LKJCholesky(3, 2)
+        cor(:, p) ~ LKJCholesky(3, 2)
         y ~ Normal(eta, 1)
     end
     @test_throws "does not match" SBBRMI(wrong_dimension(df); mod=@__MODULE__)
 
     ambiguous_shorthand = @brm begin
         eta ~ 1 + (1 + x | p | subject)
-        effect(sd, p, eta) ~ Exponential(1)
+        sd(eta, p) ~ Exponential(1)
         y ~ Normal(eta, 1)
     end
     @test_throws "is ambiguous" SBBRMI(ambiguous_shorthand(df); mod=@__MODULE__)
 
-    duplicate_resolution = @brm begin
+    # `sd(eta, p)` and `sd(eta, p, x)` reach the same single margin, but they
+    # are NOT a duplicate: naming the coefficient is strictly more specific, so
+    # the margin statement wins. (This was an error before `:` became the
+    # default layer and specificity became the ordering rule.)
+    layered_resolution = @brm begin
         eta ~ x + (0 + x | p | subject)
-        effect(sd, p, eta) ~ Exponential(1)
-        effect(sd, p, eta, x) ~ Exponential(2)
+        sd(eta, p) ~ Exponential(1)
+        sd(eta, p, x) ~ Exponential(2)
         y ~ Normal(eta, 1)
     end
-    @test_throws "multiple SD prior statements" SBBRMI(duplicate_resolution(df); mod=@__MODULE__)
+    layered_code = BayesianRegressionModels.stan_code(
+        SBBRMI(layered_resolution(df); mod=@__MODULE__))
+    @test occursin("b_p_subject_tau ~ brm_ranef_sd([1]', [0.5]');", layered_code)
 
     unknown_margin = @brm begin
         eta ~ 1 + (1 | p | subject)
-        effect(sd, p, eta, nope) ~ Exponential(1)
+        sd(eta, p, nope) ~ Exponential(1)
         y ~ Normal(eta, 1)
     end
     @test_throws "matches no random-effect margin" SBBRMI(unknown_margin(df); mod=@__MODULE__)
 
     unknown_id = @brm begin
         eta ~ 1 + (1 | p | subject)
-        effect(sd, q) ~ Exponential(1)
+        sd(:, q) ~ Exponential(1)
         y ~ Normal(eta, 1)
     end
     @test_throws "matches no shared" SBBRMI(unknown_id(df); mod=@__MODULE__)
 
     bad_sd_family = @brm begin
         eta ~ 1 + (1 | p | subject)
-        effect(sd, p) ~ Normal(0, 1)
+        sd(:, p) ~ Normal(0, 1)
         y ~ Normal(eta, 1)
     end
     @test_throws "currently supports `Exponential" SBBRMI(bad_sd_family(df); mod=@__MODULE__)
 
     bad_cor_family = @brm begin
         eta ~ 1 + (1 | p | subject)
-        effect(cor, p) ~ Cauchy(0, 1)
+        cor(:, p) ~ Cauchy(0, 1)
         y ~ Normal(eta, 1)
     end
     @test_throws "expects `LKJCholesky" SBBRMI(bad_cor_family(df); mod=@__MODULE__)
@@ -261,7 +267,7 @@ end
     ambiguous_id = @brm begin
         eta_a ~ 1 + (1 | p | subject)
         eta_b ~ 1 + (1 | p | cat)
-        effect(sd, p) ~ Exponential(1)
+        sd(:, p) ~ Exponential(1)
         y ~ Normal(eta_a + eta_b, 1)
     end
     @test_throws "addresses 2 blocks" SBBRMI(ambiguous_id(df); mod=@__MODULE__)
@@ -270,7 +276,7 @@ end
     stratified_df = merge(df, (; stratum=[1, 1, 1, 2, 2, 2]))
     stratified = @brm begin
         eta ~ 1 + (1 | p | gr(subject, by=stratum))
-        effect(sd, p) ~ Exponential(1)
+        sd(:, p) ~ Exponential(1)
         y ~ Normal(eta, 1)
     end
     @test_throws "stratified" SBBRMI(stratified(stratified_df); mod=@__MODULE__)
@@ -278,7 +284,64 @@ end
     @test_throws LoadError eval(quote
         @brm begin
             eta ~ 1
-            effect(cor, p, eta) ~ LKJCholesky(1, 1)
+            cor(eta, p) ~ LKJCholesky(1, 1)
         end
     end)
+end
+
+# `sd(:, ID, coefficient)` — ONE margin across EVERY predictor that slices the
+# block — is spellable only under the head-position grammar: the old
+# `effect(sd, ID, lp, coef)` shape had no way to leave the predictor slot open
+# while naming a coefficient. It sits between the block-wide default and a
+# fully explicit margin address, and the same most-specific-wins rule as the
+# population surface orders the three.
+@testset "`:` predictor claims one margin across every predictor" begin
+    margin_names(b) = ranefcoefnames(b, :p)
+    rates(b) = BayesianRegressionModels.stan_code(SBBRMI(b; mod=@__MODULE__))
+
+    cross = @brm begin
+        eta_Vc ~ 1 + x + (1 + x | p | subject)
+        eta_Q  ~ x + (0 + x | p | subject)
+        sd(:, p) ~ Exponential(2)
+        sd(:, p, x) ~ Exponential(1 / 3)
+        y ~ Normal(eta_Vc + eta_Q, 1)
+    end
+    brmi = cross(df)
+    @test margin_names(brmi) == [
+        (; predictor=:eta_Vc, coefficient=:Intercept),
+        (; predictor=:eta_Vc, coefficient=:x),
+        (; predictor=:eta_Q, coefficient=:x),
+    ]
+    # Block default 1/2 on the intercept margin; BOTH `x` margins take 3.
+    @test occursin("[0.5, 3.0, 3.0]'", rates(brmi))
+
+    # A more specific address overrides the `:`-predictor one on its margin.
+    refined = @brm begin
+        eta_Vc ~ 1 + x + (1 + x | p | subject)
+        eta_Q  ~ x + (0 + x | p | subject)
+        sd(:, p) ~ Exponential(2)
+        sd(:, p, x) ~ Exponential(1 / 3)
+        sd(eta_Q, p, x) ~ Exponential(1 / 5)
+        y ~ Normal(eta_Vc + eta_Q, 1)
+    end
+    @test occursin("[0.5, 3.0, 5.0]'", rates(refined(df)))
+
+    # Two addresses of EQUAL specificity reaching one margin have no winner.
+    tied = @brm begin
+        eta_Vc ~ 1 + x + (1 + x | p | subject)
+        eta_Q  ~ x + (0 + x | p | subject)
+        sd(:, p, x) ~ Exponential(1 / 3)
+        sd(eta_Q, p) ~ Exponential(1 / 5)
+        y ~ Normal(eta_Vc + eta_Q, 1)
+    end
+    @test_throws "equally specific" SBBRMI(tied(df); mod=@__MODULE__)
+
+    # An unmatched coefficient still fails loudly rather than falling back to
+    # the block default.
+    unknown = @brm begin
+        eta_Vc ~ 1 + x + (1 + x | p | subject)
+        sd(:, p, nope) ~ Exponential(1)
+        y ~ Normal(eta_Vc, 1)
+    end
+    @test_throws "matches no random-effect margin" SBBRMI(unknown(df); mod=@__MODULE__)
 end

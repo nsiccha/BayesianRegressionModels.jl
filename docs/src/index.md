@@ -53,10 +53,11 @@ pk = @brm df begin
 end
 ```
 
-The explicit two-argument address is recommended when a model has several
-linear predictors. `effect(weight) ~ Normal(0, 0.1)` is a convenience only
-when `:weight` names a population coefficient in exactly one predictor;
-ambiguous and unknown addresses error. The first shipped lowering supports
+Both slots are mandatory, and `:` is the wildcard for either.
+`effect(:, weight) ~ Normal(0, 0.1)` is the *default layer* for `:weight` — it
+reaches that column in every predictor owning it, and a more specific address
+such as `effect(log_ka, weight)` overrides it. Two addresses of equal
+specificity reaching one parameter, and unknown addresses, error. The first shipped lowering supports
 `Normal(location, scale)` overrides and retains the existing
 `pop_<predictor>_beta_pop` vector parameter, its `popcoefnames` labels, and
 descriptor provenance. Inspect the captured formula statements with
@@ -82,8 +83,8 @@ end
 ```
 
 One shared `(location, scale)` covers every contrast in the block; per-level
-scales are not expressible here. The concise `effect(g)` form resolves the
-same way, and the statement composes with population overrides on the same
+scales are not expressible here. The `:`-predictor form `effect(:, g)` reaches
+the same block in every predictor owning it, and the statement composes with population overrides on the same
 predictor (`effect(mu, x) ~ Normal(0, 0.25)`) — each addresses its own
 parameter. A non-default reference level emits `cat_<column>__ref_<k>_beta`,
 which the plain column name still addresses whenever that is unambiguous;
