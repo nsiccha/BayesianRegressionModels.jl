@@ -143,6 +143,25 @@ simplex_kernel_monotonic_ref(df) = @brm df begin
     end
 end
 
+# The same monotonic construction hoisted OUT of the cell to BODY level. Stan
+# vector functions are reachable there when written QUALIFIED -- StanBlocks
+# declares `cumulative_sum` but does not export the bare name, and a body-level
+# `=` RHS is evaluated as ordinary Julia, so the qualified spelling is what
+# resolves. The resulting vector is a top-level model value (no `pred_` prefix)
+# that the cell then indexes by the per-event ordinal level.
+simplex_body_qualified(df) = @brm df begin
+    sigma                ~ Exponential(1)
+    log_F_diet_magnitude ~ Normal(0.0, 0.5)
+    diet_share           ~ Dirichlet(3, 1.0)
+    diet_cum = StanBlocks.cumulative_sum(diet_share)
+    log_CL               ~ 1 + (1 | p | subject)
+    pred ~ kernel(t, dose, diet, dv, log_CL) do ts, d, di, yy, lCL
+        mu = d * exp(log_F_diet_magnitude * diet_cum[di]) * exp(-exp(lCL) * ts)
+        yy ~ normal(mu, sigma)
+        mu
+    end
+end
+
 # No simplex statement: the negative control for dimension accounting and for
 # "the new path never fires unasked".
 plain_kernel_model(df) = @brm df begin
@@ -231,6 +250,54 @@ end
                    ref_code)
     @test occursin("pred_diet_cum[diet[plate_i__pl_1]]", ref_code)
     @test stanc_accepts(ref.model)
+end
+
+@testset "the body/cell boundary: what works there, and what says so" begin
+    # HALF ONE -- Stan vector functions ARE reachable in a formula BODY, qualified.
+    # `cumulative_sum` is not exported by StanBlocks, so the BARE name in a body is
+    # an UndefVarError; the qualified spelling resolves and lowers. This is a pin on
+    # a property the emission path already had, not on new machinery -- the snag
+    # report read the UndefVarError as a missing capability, and it is not one.
+    body = SBBRMI(simplex_body_qualified(simplex_df()))
+    body_code = code_of(body)
+    @test occursin("simplex[diet_share_alpha_n] diet_share;", body_code)
+    @test occursin("vector[diet_share_alpha_n] diet_cum = cumulative_sum(diet_share);", body_code)
+    # Hoisted out of the plate, so it carries NO `pred_` prefix and is a named BRMI
+    # operation -- the one thing the body-level spelling buys over the in-cell one.
+    @test !occursin("pred_diet_cum", body_code)
+    @test occursin("diet_cum[diet[plate_i__pl_1]]", body_code)
+    @test :diet_cum in keys(body.parent.operations)
+    @test stanc_accepts(body.model)
+
+    # The in-cell form is NOT a lesser one: `simplex_kernel_monotonic` is this same
+    # model with the derivation left in the cell. Rename its prefix away and the two
+    # programs have the SAME SET of lines -- both declare `diet_cum` in transformed
+    # parameters, so both are present in every posterior draw, and neither loses the
+    # value to a plate temporary. They differ only in WHERE the declaration sits: a
+    # body-level `=` emits at its body position (before `pop_log_CL` here), the
+    # in-cell one at the plate site. Semantically identical, textually not, which is
+    # why this is a set comparison and not a byte comparison.
+    cell_code = code_of(SBBRMI(simplex_kernel_monotonic(simplex_df())))
+    cell_lines = sort(split(replace(cell_code, "pred_diet_cum" => "diet_cum"), '\n'))
+    @test cell_lines == sort(split(body_code, '\n'))
+    @test occursin("vector[diet_share_alpha_n] pred_diet_cum = cumulative_sum(diet_share);", cell_code)
+
+    # HALF TWO -- INDEXING a model value in a body has no such spelling, and the
+    # failure must SAY so rather than surfacing a bare MethodError about internal
+    # column types. This is the whole of what snag `indexing-a-simpl-addabf26` gets.
+    nc = BRM.NamedColumn(:diet_share, BRM.MissingColumn())
+    err = try; nc[1]; nothing; catch e; e; end
+    @test err isa ErrorException
+    msg = sprint(showerror, err)
+    @test occursin("formula BODY expression", msg)
+    @test occursin("`diet_share`", msg)          # names the offending value
+    @test occursin("kernel(", msg)               # points at the place that works
+    @test occursin("pred_log_F_diet_2", msg)     # and says the name is not lost
+    @test occursin("StanBlocks.cumulative_sum", msg)  # and gives the qualified escape
+    # Same treatment for a derived term, which has no name of its own.
+    @test_throws ErrorException BRM.ExprColumn(*, nc, 2.0)[1]
+    # NOT extended to concrete data: a MethodError there is the honest answer.
+    @test_throws MethodError BRM.DataColumn([1.0, 2.0])[1]
 end
 
 @testset "the new path never fires unasked" begin
