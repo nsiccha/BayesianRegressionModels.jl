@@ -52,6 +52,35 @@ transpiles_and_stanc(brmi) = begin
         StanBlocks.stanc_check(StanBlocks.stan_code(sb.model); warn_pedantic=false).ok
 end
 
+# The DECLARATION of the length-scale parameter itself -- the line whose
+# declared identifier ends `_rho` or `_rho_iso`, which excludes both the
+# `rho_lower_*` data and the `<name>_rho = rep_vector(...)` transformed value.
+# Asserting against a bare `<lower=...>` substring of the whole program does
+# not work: `sigma` carries one too, so such a test keeps passing after `rho`'s
+# bound changes and reports on a parameter nobody asked about.
+_rho_declaration(code::AbstractString, label=nothing) = begin
+    hits = collect(m.match for m in eachmatch(r"^[^\n]*\b\w*_rho(?:_iso)?;[ \t]*$"m, code))
+    length(hits) == 1 || error(
+        "gp_hsgp_priors: expected exactly one `rho` declaration for $label, got " *
+        "$(length(hits)): $(hits). Did the parameter get renamed?")
+    only(hits)
+end
+
+# The paper's bound, recomputed here from the raw axis rather than read back
+# out of BRM, so the test cannot agree with the implementation by construction.
+hsgp_validity_bound(x, k, c) = begin
+    mu = sum(x) / length(x)
+    L = c * maximum(abs, x .- mu)
+    (4 * L / pi) * sqrt(log(100.0) / (k^2 - 1))
+end
+
+rho_lower_data(brmi) = begin
+    d = SBBRMI(brmi; mod=@__MODULE__).data
+    keys_ = filter(k -> startswith(String(k), "rho_lower_"), collect(keys(d)))
+    length(keys_) == 1 || error("gp_hsgp_priors: expected one rho_lower entry, got $keys_")
+    d[only(keys_)]
+end
+
 # --------------------------------------------------------------------- default
 
 @testset "unconfigured gp/hsgp keep their historical density" begin
@@ -84,9 +113,89 @@ end
         @test !occursin("uniform(", code)
         @test transpiles_and_stanc(m)
         @test isempty(term_priors(m))
-        label === :gp_aniso || label === :hsgp_aniso ||
-            @test occursin("<lower=0.0>", code)
+        # Assert the bound on `rho` ITSELF, by name. A bare `<lower=0.0>`
+        # substring test passes on `sigma` alone, so it stayed green after
+        # `hsgp` gained its validity floor and silently stopped observing the
+        # thing it was written to observe.
+        rho_decl = _rho_declaration(code, label)
+        if startswith(String(label), "hsgp")
+            # An hsgp length scale is bounded below by the approximation's
+            # validity threshold, supplied as data (decision 13keyez).
+            @test occursin("<lower=rho_lower_", rho_decl)
+        else
+            @test occursin("<lower=0.0>", rho_decl)
+        end
     end
+end
+
+# ------------------------------------------- the hsgp validity floor (13keyez)
+
+# An HSGP whose length scale falls below `(4L/pi)*sqrt(log(100)/(k^2-1))` is no
+# longer approximating the kernel it was asked for -- and it fails SILENTLY: it
+# transpiles, samples and returns finite draws. `hsgp` therefore declares `rho`
+# with that floor by DEFAULT. Exact `gp` has no basis truncation and is
+# untouched.
+@testset "an unconfigured hsgp is bounded by its approximation-validity floor" begin
+    df = gp_prior_df()
+
+    m = @brm df begin
+        y ~ Normal(mu, 1.)
+        mu ~ hsgp(x; k=5, c=1.5)
+    end
+    code = code_of(m)
+    @test occursin("<lower=rho_lower_hsgp_x>", _rho_declaration(code, :hsgp))
+    # Passed as DATA, not baked into the source: `L` comes from the covariate,
+    # so a non-frozen `reprocess` has to be able to move it.
+    @test occursin(r"^\s*real rho_lower_hsgp_x;"m, code)
+    @test rho_lower_data(m) ≈ hsgp_validity_bound(df.x, 5, 1.5)
+    @test transpiles_and_stanc(m)
+
+    # The default is a DEFAULT: an explicit declaration replaces the whole
+    # statement, bound included, and the floor does not apply.
+    over = @brm df begin
+        y ~ Normal(mu, 1.)
+        mu ~ hsgp(x; k=5, c=1.5)
+        length_scale(:, hsgp(x)) ~ LogNormal(0, 1)
+    end
+    over_code = code_of(over)
+    @test occursin("<lower=0.0>", _rho_declaration(over_code, :hsgp_overridden))
+    @test !occursin("rho_lower", over_code)   # not even as unused data
+    @test transpiles_and_stanc(over)
+
+    # One shared `rho` across several axes must satisfy the STRICTEST axis.
+    iso2 = @brm df begin
+        y ~ Normal(mu, 1.)
+        mu ~ hsgp(x, x2; k=5, c=1.5)
+    end
+    @test rho_lower_data(iso2) ≈ max(hsgp_validity_bound(df.x, 5, 1.5),
+                                     hsgp_validity_bound(df.x2, 5, 1.5))
+
+    # The anisotropic spelling bounds each axis separately.
+    aniso = @brm df begin
+        y ~ Normal(mu, 1.)
+        mu ~ hsgp(x, x2; k=5, c=1.5, iso=false)
+    end
+    @test rho_lower_data(aniso) ≈ [hsgp_validity_bound(df.x, 5, 1.5),
+                                   hsgp_validity_bound(df.x2, 5, 1.5)]
+    @test occursin("<lower=rho_lower_hsgp_x_x2>", _rho_declaration(code_of(aniso), :aniso))
+    @test transpiles_and_stanc(aniso)
+
+    # `k = 1` puts the formula at infinity, which is not a declarable bound;
+    # that degenerate basis stays unbounded instead of emitting an
+    # impossible-to-satisfy declaration.
+    k1 = @brm df begin
+        y ~ Normal(mu, 1.)
+        mu ~ hsgp(x; k=1, c=1.5)
+    end
+    @test rho_lower_data(k1) == 0.0
+    @test transpiles_and_stanc(k1)
+
+    # Exact GP has no truncation and so no floor.
+    exact = @brm df begin
+        y ~ Normal(mu, 1.)
+        mu ~ gp(x)
+    end
+    @test !occursin("rho_lower", code_of(exact))
 end
 
 # --------------------------------------------- length_scale, isotropic (scalar)

@@ -88,6 +88,28 @@ end
         @test replay_hsgp.data[:PHI_hsgp_x_x2] != sb_hsgp.data[:PHI_hsgp_x_x2]
         @test StanBlocks.stan_code(replay_exact.model) == StanBlocks.stan_code(sb_exact.model)
         @test StanBlocks.stan_code(replay_hsgp.model) == StanBlocks.stan_code(sb_hsgp.model)
+
+        # The hsgp validity floor (decision 13keyez) is a function of the
+        # fitted `L = c*max|x - mean(x)|`, so it tracks the BASIS, not the
+        # source. Note `replay_df` is a pure SHIFT and `L` is shift-invariant,
+        # so the bound is unchanged there even under a re-fit -- moving it
+        # needs a covariate whose SPREAD changes.
+        floor_key = :rho_lower_hsgp_x_x2
+        @test replay_hsgp.data[floor_key] == sb_hsgp.data[floor_key]
+        @test reprocess(sb_hsgp, replay_df; freeze_constants=false).data[floor_key] ==
+              sb_hsgp.data[floor_key]
+
+        # Doubling every axis doubles `L`, and so the floor -- but only on a
+        # re-fit. This is the whole reason the bound is DATA and not a literal
+        # in the emitted source: a literal could not track the new basis, and
+        # would go on bounding `rho` for a basis this data no longer has.
+        wide_df = let b = gp_term_df()
+            (; x = 2 .* b.x, x2 = 2 .* b.x2, y = b.y, g = b.g)
+        end
+        refit_wide = reprocess(sb_hsgp, wide_df; freeze_constants=false)
+        @test refit_wide.data[floor_key] ≈ 2 .* sb_hsgp.data[floor_key]
+        @test reprocess(sb_hsgp, wide_df).data[floor_key] == sb_hsgp.data[floor_key]
+        @test StanBlocks.stan_code(refit_wide.model) == StanBlocks.stan_code(sb_hsgp.model)
     end
 
     @testset "transpile and stanc" begin
