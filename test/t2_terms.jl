@@ -152,9 +152,11 @@ end
         for candidate in (sb, sb_custom, sb_distributional)
             @test StanBlocks.stan.transpiles(candidate.model)
             code = StanBlocks.stan_code(candidate.model)
-            @test occursin("real<lower=0.0> t2_loc_x_z_sd_rr;", code)
-            @test occursin("real<lower=0.0> t2_loc_x_z_sd_rn;", code)
-            @test occursin("real<lower=0.0> t2_loc_x_z_sd_nr;", code)
+            # One `vector[3]` in (rr, rn, nr) order rather than three scalars,
+            # so a per-block `sd(<lp|:>, t2(x, z), <block>)` statement can
+            # configure any subset through `brm_ranef_sd`'s family switch.
+            @test occursin("vector<lower=0.0>[3] t2_loc_x_z_sd_pen;", code)
+            @test occursin("t2_loc_x_z_sd_pen ~ brm_ranef_sd([0, 0, 0]', [1.0, 1.0, 1.0]');", code)
             @test occursin("vector[3] t2_loc_x_z_b_fixed;", code)
             @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
         end

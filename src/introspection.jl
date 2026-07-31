@@ -195,6 +195,17 @@ end
 
 # ---- population-effect prior statements -----------------------------------
 
+# Every internal address class that is NOT a population-coefficient address.
+# `effect_priors` and `r2d2_priors` both walk the one `effect(...)` carrier, so
+# both skip on this list rather than on a hand-copied tuple that can drift as
+# classes are added.
+const _NON_EFFECT_CLASSES = (:sd, :cor, :term_sd, :term_simplex, :term_latent)
+
+# The three classes that address a TERM's own parameters, as built by
+# `_prior_address`. Kept beside `_NON_EFFECT_CLASSES` so adding a class means
+# editing one place.
+const _TERM_PRIOR_CLASSES = (:term_sd, :term_simplex, :term_latent)
+
 """
     effect_priors(brmi::BRMI) -> Vector{NamedTuple}
 
@@ -229,7 +240,7 @@ function effect_priors(brmi::BRMI)
         isnothing(lhs_e) && continue
         getf(lhs_e) === effect || continue
         address = getargs(lhs_e)
-        !isempty(address) && first(address) in (:sd, :cor) && continue
+        !isempty(address) && first(address) in _NON_EFFECT_CLASSES && continue
         rhs_e = _as_expr_column(rhs)
         isnothing(rhs_e) && error(
             "effect_priors: `effect(...)` RHS is not a distribution expression")
@@ -302,6 +313,72 @@ function ranef_effect_priors(brmi::BRMI)
     out
 end
 
+# ---- term-parameter prior statements ---------------------------------------
+
+"""
+    term_priors(brmi::BRMI) -> Vector{NamedTuple}
+
+Return the prior statements captured by [`@brm`](@ref) that address a *term's
+own* parameters — the `sd`, `simplex` and `latent` heads applied to a term
+rather than to a coefficient or a grouping factor — in formula order. Each
+entry has
+
+```julia
+(; class, term, predictor, component, family, arguments, keywords, expression)
+```
+
+`class` is `:term_sd`, `:term_simplex` or `:term_latent`. `term` is the
+canonicalised term key: the term as the formula spells it, minus numeric and
+keyword arguments, so `me(x, 0.5)` and `me(x)` both key as `Symbol("me(x)")`.
+`predictor === nothing` means the statement is the default layer for every
+linear predictor carrying that term; a `Symbol` restricts it to one.
+`component` is `nothing` except for `sd(lp, t2(x, z), rr)`, where it names one
+of the tensor smooth's three penalty blocks.
+
+Which parameter each class reaches:
+
+| spelling | parameter |
+|---|---|
+| `sd(lp, s(x))` | the smoothing SD `sds` |
+| `sd(lp, t2(x, z), rr\\|rn\\|nr)` | one of the three tensor smoothing SDs |
+| `simplex(lp, mo1(c))` | the monotonic-increment Dirichlet concentration |
+| `latent(lp, me(x))` | the latent true covariate `x_true` |
+
+Standardized raw innovations (`b_pen_raw`, `z`, `beta_raw`, `epsilon`) are
+deliberately NOT addressable: they carry no independent scale, and giving them
+a prior would duplicate or confound the model-scale parameter above
+(decision `145tp0o`).
+"""
+function term_priors(brmi::BRMI)
+    out = NamedTuple[]
+    for op_nc in values(brmi.operations)
+        op = _named_op(op_nc)
+        isnothing(op) && continue
+        getf(op) === (~) || continue
+        lhs, rhs = getargs(op, 2)
+        lhs_e = _as_expr_column(lhs)
+        isnothing(lhs_e) && continue
+        getf(lhs_e) === effect || continue
+        address = getargs(lhs_e)
+        isempty(address) && continue
+        class = first(address)
+        class in _TERM_PRIOR_CLASSES || continue
+        valid = class === :term_sd ? length(address) in (3, 4) : length(address) == 3
+        valid || error(
+            "term_priors: malformed term address " *
+            "`effect($(join(address, ", ")))`")
+        rhs_e = _as_expr_column(rhs)
+        isnothing(rhs_e) && error(
+            "term_priors: term prior RHS is not a distribution expression")
+        predictor = address[3] === _EFFECT_COLON ? nothing : address[3]
+        component = length(address) == 4 ? address[4] : nothing
+        push!(out, (; class, term=address[2], predictor, component,
+                     family=getf(rhs_e), arguments=getargs(rhs_e),
+                     keywords=getkwargs(rhs_e), expression=rhs_e))
+    end
+    out
+end
+
 # ---- whole-predictor variance-decomposition statements ---------------------
 
 """
@@ -338,7 +415,7 @@ function r2d2_priors(brmi::BRMI)
         isnothing(lhs_e) && continue
         getf(lhs_e) === effect || continue
         address = getargs(lhs_e)
-        !isempty(address) && first(address) in (:sd, :cor) && continue
+        !isempty(address) && first(address) in _NON_EFFECT_CLASSES && continue
         rhs_e = _as_expr_column(rhs)
         isnothing(rhs_e) && error(
             "r2d2_priors: `effect(..., :)` RHS is not a distribution expression")

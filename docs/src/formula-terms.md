@@ -47,9 +47,11 @@ The supported public call has exactly one numeric predictor and no keyword
 arguments. Training values must be finite and contain at least 10 unique
 values. Internally, `s(x)` uses a fixed rank-10 basis: two unpenalized
 null-space columns for `{1, x}` and eight penalty-whitened range columns. The
-range coefficients share a smoothing standard deviation with a standard
-half-normal prior. The term contributes this complete smooth directly to the
-linear predictor, so it does not receive an additional population coefficient.
+range coefficients share a smoothing standard deviation whose default prior is
+a standard half-normal; `sd(<lp|:>, s(x)) ~ Exponential(scale)` replaces it (see
+[Term-internal priors](@ref)). The term contributes this complete smooth
+directly to the linear predictor, so it does not receive an additional
+population coefficient.
 
 For prediction or posterior replay on new data, the default
 `reprocess(sb, new_df)` and `restan_data(sb, new_df)` calls evaluate `x` against
@@ -92,14 +94,89 @@ penalty-whitened range space. Their tensor product has three unpenalized
 null×null columns after the intercept constraint, plus independently scaled
 range×range, range×null, and null×range blocks. At the default `k=(5, 5)`,
 those penalized blocks have 9, 6, and 6 coefficients. Each block has its own
-standard half-normal smoothing scale, and the complete smooth is added directly
-without an extra population coefficient.
+smoothing scale, defaulting to a standard half-normal and addressable
+individually as `sd(<lp|:>, t2(x, z), <block>)` with `<block>` one of `rr`,
+`rn`, `nr` (see [Term-internal priors](@ref)). The complete smooth is added
+directly without an extra population coefficient.
 
 `reprocess(sb, new_df)` evaluates all four blocks against the frozen training
 knots, penalty decomposition, and intercept constraint. Passing
 `freeze_constants=false` re-estimates them from `new_df`. Like [`s`](@ref),
 `t2` is implemented only by the StanBlocks backend and is not available to
 `VBRMI`.
+
+## Term-internal priors
+
+Some terms own parameters that no coefficient address can reach. `s(x)`'s
+smoothing scale, `mo(c)`'s Dirichlet increments, and `me(x, sd)`'s latent true
+covariate all live inside the term's own submodel, and none of them is a
+`beta_pop` column or a grouping-factor margin. They are addressed by naming the
+term itself in the target slot, in the same head-position grammar the rest of
+the prior surface uses:
+
+```
+<quantity>(<linear predictor | :>, <term>[, <component>]) ~ <distribution>
+```
+
+```julia
+@brm df begin
+    y ~ Normal(mu, sigma)
+    mu ~ 1 + s(age) + t2(x, z) + mo(dose) + me(w_obs, 0.3)
+    sigma ~ Exponential(1)
+
+    sd(:, s(age))            ~ Exponential(2)      # smoothing scale
+    sd(mu, t2(x, z), rr)     ~ Exponential(3)      # one tensor penalty
+    simplex(:, mo(dose))     ~ Dirichlet(2)        # monotonic increments
+    latent(mu, me(w_obs))    ~ Normal(0, 5)        # latent true covariate
+end
+```
+
+| head | term | parameter | default |
+| --- | --- | --- | --- |
+| `sd` | `s(x)` | smoothing SD | half-standard-normal |
+| `sd` | `t2(x, z)` | one of the `rr` / `rn` / `nr` penalty SDs | half-standard-normal |
+| `simplex` | `mo(c)`, `mo1(c)` | Dirichlet concentration | `Dirichlet(1)` |
+| `latent` | `me(x, sd)` | latent true covariate | `Normal(0, 1)` |
+
+**Spell the term the way the formula does, minus numeric and keyword
+arguments.** `me(w_obs, 0.3)` is addressed as `me(w_obs)` and `t2(x, z; k=(5,5))`
+as `t2(x, z)` — the address names a term, not a call. A `:` in the predictor
+slot is THE DEFAULT: it is the base layer that a statement naming a concrete
+predictor overrides, exactly as on the coefficient and grouping-factor
+surfaces. Specificity counts concrete slots, so an exact tie is an error rather
+than a silent winner.
+
+An address that cannot be honoured is refused by name while the model is
+lowered — an unknown term, a term with no such parameter, a `t2` component slot
+that is missing or names no penalty block, or two terms in one predictor
+spelled identically. `term_priors(brmi)` returns the captured statements
+(`class`, `term`, `predictor`, `component`, `family`, `arguments`, `keywords`,
+`expression`) for formula-level provenance.
+
+### Only model-scale quantities are exposed
+
+The standardized raw innovations these submodels sample — `b_pen_raw`, `z`,
+`beta_raw` — stay iid standard normal and are deliberately NOT configurable.
+For a smooth, `Cov(f_pen | sd) = sd² Zpen Zpen'`, so a scale on the raw
+coefficients would simply duplicate the smoothing SD and confound the two. The
+configurable parameters are the ones that mean something on the model's own
+scale.
+
+### Current limits
+
+- `sd` on a term accepts `Exponential(scale)` only, matching the
+  grouping-factor SD surface. `Distributions.Exponential` is
+  scale-parameterized while Stan's `exponential_lpdf` takes a rate; BRM
+  performs the conversion.
+- `simplex` accepts `Dirichlet(a)` (one concentration, broadcast over every
+  increment) or `Dirichlet(a₁, …, a_{K-1})` (one per increment of a `K`-level
+  factor). The dimension comes from the data, so the
+  `Dirichlet(dimension, concentration)` spelling used for a standalone simplex
+  parameter is not accepted here.
+- `latent` accepts `Normal(location, scale)`. The observation likelihood
+  `x_obs ~ Normal(x_true, sd)` is never configurable.
+- `gp` / `hsgp` length scales and amplitudes, and `ar`'s autocorrelation, have
+  no address yet.
 
 ## R²-induced variance decomposition: `effect(lp, :) ~ r2d2(...)`
 
