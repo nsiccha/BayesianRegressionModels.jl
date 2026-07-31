@@ -836,6 +836,49 @@ getop(::ExprColumn{typeof(doublepipe)}) = :||
 getop(::ExprColumn{typeof(assign)}) = :(=)
 
 """
+    _body_index_error(what, idx)
+
+Raise the actionable error for `x[i]` applied to a model value in a `@brm`
+**body** expression.
+
+A body-level `lhs = rhs` is evaluated as ordinary Julia, so `s[1]` lands on the
+[`NamedColumn`](@ref) / [`ExprColumn`](@ref) the formula built as a real Julia
+`getindex` — Stan is nowhere in sight yet. Without these methods that is a bare
+`MethodError: no method matching getindex(::NamedColumn{…}, ::Int64)` at
+`@brm`-eval time, before any backend runs, which says nothing about the
+body-versus-cell boundary that actually caused it (snag
+`indexing-a-simpl-addabf26`).
+
+Defined only on `NamedColumn` / `ExprColumn`, the two column types that carry
+model values. A `DataColumn` / `MaterializedColumn` wraps concrete Julia data,
+where a `MethodError` on `getindex` remains the honest answer.
+"""
+_body_index_error(what, idx) = error("""
+@brm: cannot index $(what === nothing ? "a derived model value" : "the model value `$what`") in a formula BODY expression$(isempty(idx) ? "" : " (`[$(join(idx, ", "))]`)").
+
+A body-level `lhs = rhs` is evaluated as ordinary JULIA, so this index lands on
+the column object the formula built rather than becoming Stan's `[`. Only a
+`kernel(...)` do-block is transpiled to Stan, so that is where an index belongs:
+
+    pred ~ kernel(t, dose, dv, log_CL) do ts, d, yy, lCL
+        log_F_diet_2 = log_F_magnitude * $(what === nothing ? "s" : what)[1]
+        ...
+    end
+
+Deriving it there does NOT cost you the name: it is emitted as a named
+transformed parameter `pred_log_F_diet_2` and is present in every posterior
+draw — only the `pred_` prefix differs from a body-level binding.
+
+Note that Stan vector FUNCTIONS do work in a body, written qualified —
+`StanBlocks.cumulative_sum(s)`, `StanBlocks.append_row(0.0, s)` — because
+StanBlocks declares them but does not export the bare names. Indexing has no
+such spelling; use the cell.
+""")
+
+Base.getindex(x::NamedColumn, i...) = _body_index_error(name(x), i)
+Base.getindex(x::ExprColumn, i...) = _body_index_error(nothing, i)
+
+"""
     LikelihoodColumn(parent, rhs)
 
 Pairs an observed-response `parent` ([`NamedColumn`](@ref) over a
