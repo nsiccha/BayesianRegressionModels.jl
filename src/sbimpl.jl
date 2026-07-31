@@ -1212,6 +1212,17 @@ _sb_cat = StanBlocks.@slic begin
     return append_row(0., beta)[x]
 end
 
+# Treatment-coded categorical predictor with a caller-supplied Normal prior on
+# the K-1 contrasts. Kept as a SIBLING of `_sb_cat` (exactly as `_popefs_normal`
+# is of `popefs`) so an unconfigured model's emission stays byte-for-byte
+# unchanged. One shared `(location, scale)` covers every contrast; the reference
+# level still contributes 0. The sampled parameter keeps the same `beta` name,
+# so the Stan parameter remains `cat_<c>_beta` either way.
+_sb_cat_normal = StanBlocks.@slic begin
+    beta ~ normal(beta_loc, beta_scale; n=n_levels - 1)
+    return append_row(0., beta)[x]
+end
+
 # Minimal `ar(time, p=1)` autoregressive submodel. Adds an AR(1) noise process
 # `u[t] = phi * u[t-1] + epsilon[t]` (with `u[1] = epsilon[1]`; no stationary
 # init) to the linear predictor. `phi` is parameterized via `tanh(phi_raw)` so
@@ -2195,7 +2206,7 @@ _sb_effect_unresolved_note(unresolved) =
 
 function _sb_effect_prior_overrides(brmi::BRMI)
     specs = effect_priors(brmi)
-    isempty(specs) && return Dict{Symbol,Vector{Any}}()
+    isempty(specs) && return Dict{Symbol,Any}()
 
     lp_names = Symbol[x.name for x in linear_predictors(brmi)]
     # LAZY, memoised label resolution: `popcoefnames` is only ever asked about a
@@ -2220,7 +2231,22 @@ function _sb_effect_prior_overrides(brmi::BRMI)
         end
     end
 
-    overrides = Dict{Symbol,Vector{Any}}()
+    # Categorical addresses are resolved from the SAME lazy/memoised discipline:
+    # a predictor is asked for its `cat_<c>` blocks only when an `effect(...)`
+    # statement could reach it, and a shape that cannot be walked is skipped
+    # rather than made fatal for the whole model.
+    resolved_cat = Dict{Symbol,Dict{Symbol,Symbol}}()
+    cat_map_of(lp::Symbol) = get!(resolved_cat, lp) do
+        _sb_is_prior_declaration(brmi, lp) && return Dict{Symbol,Symbol}()
+        try
+            _sb_cat_address_map(brmi, lp)
+        catch
+            Dict{Symbol,Symbol}()
+        end
+    end
+
+    pop_overrides = Dict{Symbol,Vector{Any}}()
+    cat_overrides = Dict{Symbol,Dict{Symbol,Any}}()
     for spec in specs
         T = _as_distribution_type(spec.family)
         (!isnothing(T) && T <: Normal) || error(
@@ -2237,16 +2263,37 @@ function _sb_effect_prior_overrides(brmi::BRMI)
             # candidate population formulas, so it is the only one that pays for
             # naming every predictor -- tolerantly, skipping the unnameable.
             candidates = Symbol[lp for lp in lp_names
-                                if spec.coefficient in something(labels_of(lp), Symbol[])]
+                                if spec.coefficient in something(labels_of(lp), Symbol[]) ||
+                                   haskey(cat_map_of(lp), spec.coefficient)]
             isempty(candidates) && error(
                 "sbimpl: `effect($(spec.coefficient))` matches no population " *
-                "coefficient. Inspect `popcoefnames(brmi, lp)` for valid labels." *
+                "coefficient or categorical contrast block. Inspect " *
+                "`popcoefnames(brmi, lp)` for valid labels." *
                 _sb_effect_unresolved_note(unresolved))
             length(candidates) == 1 || error(
                 "sbimpl: `effect($(spec.coefficient))` is ambiguous across linear " *
                 "predictors $(join(candidates, ", ")); use " *
                 "`effect(linear_predictor, $(spec.coefficient))`.")
             target = only(candidates)
+        end
+
+        # A categorical / integer-coded predictor owns its own K-1 contrast
+        # block (`cat_<c>_beta`) instead of `beta_pop` columns, so it is
+        # structurally absent from `popcoefnames`. Resolve it FIRST: nothing in
+        # `popcoefnames` can ever collide with a name only `_sb_cat_address_map`
+        # knows, and this keeps the block reachable even for an intercept-less
+        # `mu ~ 0 + factor(g)` whose `labels` are legitimately empty.
+        cat_map = cat_map_of(target)
+        if haskey(cat_map, spec.coefficient)
+            emitted = cat_map[spec.coefficient]
+            target_cat = get!(cat_overrides, target) do
+                Dict{Symbol,Any}()
+            end
+            haskey(target_cat, emitted) && error(
+                "sbimpl: duplicate prior override for the categorical contrast " *
+                "block `effect($target, $(spec.coefficient))`")
+            target_cat[emitted] = spec.expression
+            continue
         end
 
         labels = labels_of(target)
@@ -2264,8 +2311,9 @@ function _sb_effect_prior_overrides(brmi::BRMI)
         idx = findfirst(==(spec.coefficient), labels)
         isnothing(idx) && error(
             "sbimpl: `$(spec.coefficient)` is not a population coefficient of " *
-            "`$target`. Available labels: $(join(labels, ", ")).")
-        target_overrides = get!(overrides, target) do
+            "`$target`. Available labels: $(join(labels, ", "))." *
+            _sb_effect_cat_note(cat_map))
+        target_overrides = get!(pop_overrides, target) do
             Any[nothing for _ in labels]
         end
         isnothing(target_overrides[idx]) || error(
@@ -2273,7 +2321,41 @@ function _sb_effect_prior_overrides(brmi::BRMI)
             "`effect($target, $(spec.coefficient))`")
         target_overrides[idx] = spec.expression
     end
-    overrides
+
+    # One entry per predictor that any `effect(...)` statement reached. `pop` is
+    # `nothing` when only categorical blocks were addressed, so an untouched
+    # `beta_pop` keeps the plain `popefs` emission byte for byte.
+    out = Dict{Symbol,Any}()
+    for lp in union(keys(pop_overrides), keys(cat_overrides))
+        out[lp] = (; pop = get(pop_overrides, lp, nothing),
+                     cat = get(cat_overrides, lp, Dict{Symbol,Any}()))
+    end
+    out
+end
+
+# Trailing hint for a coefficient that IS in this predictor, just not as a
+# `beta_pop` column. `cat_g` (the emitted Stan parameter prefix) is the natural
+# wrong guess once a user has read the transpiled code, so name the address that
+# does work rather than leaving "Available labels" looking exhaustive.
+function _sb_effect_cat_note(cat_map)
+    isempty(cat_map) && return ""
+    " Categorical contrast block(s) " *
+    join(("`$a`" for a in sort!(collect(keys(cat_map)))), ", ") *
+    " own their own `cat_<c>_beta` parameters rather than `beta_pop` columns; " *
+    "address one by that name to set its contrast prior."
+end
+
+# Readers for the `_sb_effect_prior_overrides` value shape. Kept as functions so
+# every consumer of the threaded `effect_overrides` dict agrees on it, and so a
+# default/empty dict (`Dict{Symbol,Any}()`) reads back as "no override" without
+# each call site knowing the entry is a `(; pop, cat)` NamedTuple.
+function _sb_pop_effect_overrides(effect_overrides, lp::Symbol)
+    e = get(effect_overrides, lp, nothing)
+    isnothing(e) ? nothing : e.pop
+end
+function _sb_cat_effect_overrides(effect_overrides, lp::Symbol)
+    e = get(effect_overrides, lp, nothing)
+    isnothing(e) ? Dict{Symbol,Any}() : e.cat
 end
 
 function _sb_effect_normal_args(rhs::ExprColumn)
@@ -3056,7 +3138,7 @@ restan_data(sb::SBBRMI, new_df; freeze_constants::Bool=true) =
 
 # ---- top-level op dispatch ---------------------------------------------------
 
-_sb_emit!(stmts, data, key, op::ExprColumn; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Vector{Any}}(), r2d2=_sb_empty_r2d2()) =
+_sb_emit!(stmts, data, key, op::ExprColumn; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2()) =
     _sb_emit_expr!(stmts, data, key, getf(op), op; id_lookup, obs_n, cv_groups, centered_groups, group_block_lookup, effect_overrides, r2d2)
 # Raw data / missing columns appear as top-level ops when the formula mentions
 # them as bare references (e.g. `c2` in `loc ~ 1 + c2`). Nothing to emit — the
@@ -3065,7 +3147,7 @@ _sb_emit!(stmts, data, key, ::DataColumn; kwargs...) = nothing
 _sb_emit!(stmts, data, key, ::MissingColumn; kwargs...) = nothing
 _sb_emit!(stmts, data, key, op; kwargs...) = error("sbimpl: top-level op for `$key` not an ExprColumn (got $(typeof(op)))")
 
-_sb_emit_expr!(stmts, data, key, ::typeof(~), op; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Vector{Any}}(), r2d2=_sb_empty_r2d2()) = begin
+_sb_emit_expr!(stmts, data, key, ::typeof(~), op; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2()) = begin
     lhs, rhs = getargs(op, 2)
     _sb_sampling!(stmts, data, key, lhs, rhs; id_lookup, obs_n, cv_groups,
                   centered_groups, group_block_lookup, effect_overrides, r2d2)
@@ -3908,7 +3990,7 @@ _sb_prior_arg(x) = error("sbimpl: unsupported prior-arg shape $(typeof(x))")
 
 # LHS backed by real data => this is a likelihood. Record the observed values
 # under the formula name in `data` and emit `key ~ dist(args...)`.
-_sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Vector{Any}}(), r2d2=_sb_empty_r2d2()) =
+_sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2()) =
     _sb_sampling_backed!(stmts, data, key, parent(lhs), rhs; id_lookup, obs_n,
                          cv_groups, centered_groups, group_block_lookup,
                          effect_overrides, r2d2)
@@ -3927,7 +4009,7 @@ _sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs;
                      id_lookup, obs_n=nothing, cv_groups=Set{Symbol}(),
                      centered_groups=Set{Symbol}(),
                      group_block_lookup=Dict(),
-                     effect_overrides=Dict{Symbol,Vector{Any}}(), r2d2=_sb_empty_r2d2()) = begin
+                     effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2()) = begin
     rhs_e = _as_expr_column(rhs)
     if !isnothing(rhs_e)
         f = getf(rhs_e)
@@ -3965,7 +4047,7 @@ _sb_sampling_backed!(stmts, data, key, backing, rhs; id_lookup, kwargs...) =
 # Stan name. Per-`typeof(f)` overrides (`mi`, future `cens`/`trunc`, …) live
 # as separate methods of `_sb_sampling!`, mirroring vimpl's
 # `vbroadcasted(::ExprColumn{typeof(F)})` extension idiom.
-_sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Vector{Any}}(), r2d2=_sb_empty_r2d2()) =
+_sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2()) =
     _sb_sampling_through_link!(stmts, data, key, getf(lhs), only(getargs(lhs)), rhs;
                                id_lookup, obs_n, cv_groups, centered_groups,
                                group_block_lookup, effect_overrides, r2d2)
@@ -3995,7 +4077,7 @@ _sb_sampling_through_link!(stmts, data, key, f, inner, rhs; kwargs...) =
 _sb_lp_emitted_name(lp_name::Symbol, link_lhs_fn) =
     link_lhs_fn === identity ? lp_name : Symbol(nameof(link_lhs_fn), :_, lp_name)
 
-function _sb_sampling_through_link!(stmts, data, key, f, inner::NamedColumn, rhs; id_lookup, obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Vector{Any}}(), r2d2=_sb_empty_r2d2())
+function _sb_sampling_through_link!(stmts, data, key, f, inner::NamedColumn, rhs; id_lookup, obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2())
     inv_f = InverseFunctions.inverse(f)
     inner_name = name(inner)
     pre_name = _sb_lp_emitted_name(inner_name, f)
@@ -4169,7 +4251,7 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
                                 cv_groups=Set{Symbol}(),
                                 centered_groups=Set{Symbol}(),
                                 group_block_lookup=Dict(),
-                                effect_overrides=Dict{Symbol,Vector{Any}}(), r2d2=_sb_empty_r2d2())
+                                effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2())
     terms = _sb_terms(rhs)
     pop_terms    = Any[]
     ran_terms    = Any[]  # `(expr | group)` -> collected per-group below
@@ -4195,7 +4277,7 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
         # StanBlocks `hcat` promotes a lone vector to matrix[n,1] and folds to
         # append_col for two-or-more columns, so we can always just emit hcat.
         push!(stmts, :($X_name = $(Expr(:call, :hcat, col_exprs...))))
-        overrides = get(effect_overrides, brmi_key, nothing)
+        overrides = _sb_pop_effect_overrides(effect_overrides, brmi_key)
         r2d2_spec = get(r2d2.overrides, brmi_key, nothing)
         if !isnothing(r2d2_spec) && r2d2_spec.n_shares > 0
             _sb_emit_r2d2_popefs!(stmts, data, brmi_key, X_name, pop_name,
@@ -4221,8 +4303,10 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
         push!(summands, pop_name)
     end
 
+    cat_overrides = _sb_cat_effect_overrides(effect_overrides, brmi_key)
     for dt in direct_terms
-        _sb_emit_direct!(stmts, data, target, dt, summands; group_block_lookup)
+        _sb_emit_direct!(stmts, data, target, dt, summands;
+                         group_block_lookup, cat_overrides)
     end
 
     # A plain (un-`|ID|`'d) random effect under an `r2d2` decomposition IS the
@@ -4289,6 +4373,14 @@ Needs a data-bound `BRMI` (any fitted model has one): the population-vs-
 categorical split reads each predictor's element type. Returns `Symbol[]`
 when `lhs` has no population columns (e.g. `loc ~ (1 | g)`), and `nothing`
 when `lhs` is not a linear predictor of `brmi`.
+
+These are the labels the `effect(lhs, label) ~ Normal(...)` prior address
+resolves against — with ONE addition that is deliberately not listed here,
+because it is not a `beta_pop` column: a categorical / integer-coded
+predictor (bare, or wrapped in `factor(...)`) is addressable by its COLUMN
+name, which sets one shared Normal prior over its K-1 treatment contrasts
+(`cat_<c>_beta`). Everything else in the EXCLUDED list above still owns
+parameters no `effect(...)` address reaches.
 """
 function popcoefnames(brmi::BRMI, lhs::Symbol)
     op = linear_predictor_op(brmi, lhs)
@@ -4328,6 +4420,72 @@ function popcoefnames(brmi::BRMI, lhs::Symbol)
     labels
 end
 
+# ---- consumer helper: name the `cat_<c>_beta` contrast blocks ---------------
+#
+# The categorical counterpart of `popcoefnames`. A categorical / integer-coded
+# predictor (bare, or wrapped in `factor(...)`) is EXCLUDED from `beta_pop` and
+# owns its own K-1 treatment-contrast block `cat_<c>_beta`, so it can never
+# appear in `popcoefnames`. This walker drives the SAME `_sb_terms` +
+# `_sb_classify_term!` the emitter does, so the returned names can never drift
+# from what `_sb_emit_cat!` actually emits.
+#
+# Returns the ordered EMITTED term names (`nothing` when `lhs` is not a linear
+# predictor). `factor(c; ref=k)` recodes into a synthetic `c__ref_k` column, so
+# the emitted name and the name the user wrote differ there; see
+# `_sb_cat_addresses` for the address spellings that resolve onto it.
+function _sb_cat_coefnames(brmi::BRMI, lhs::Symbol)
+    op = linear_predictor_op(brmi, lhs)
+    isnothing(op) && return nothing
+    _, rhs = getargs(op, 2)
+    pop_terms = Any[]; ran_terms = Any[]; direct_terms = Any[]
+    for t in _sb_terms(rhs)
+        _sb_classify_term!(t, pop_terms, ran_terms, direct_terms)
+    end
+    Symbol[name(t) for t in direct_terms
+           if t isa NamedColumn && !isnothing(_sb_cat_levels(t))]
+end
+
+# `factor(c; ref=k)` is re-encoded at term-collection time into a synthetic
+# `c__ref_k` NamedColumn (see `_sb_collect_terms_expr!(::typeof(factor), ...)`),
+# and that synthetic name is what reaches the emitted `cat_c__ref_k_beta`.
+# Requiring the user to spell the internal suffix would leak an implementation
+# detail into a public prior address, so BOTH the emitted name and the column
+# the formula names resolve onto the same block.
+const _SB_REF_SUFFIX = r"__ref_[0-9]+$"
+function _sb_cat_addresses(emitted::Symbol)
+    s = String(emitted)
+    m = match(_SB_REF_SUFFIX, s)
+    isnothing(m) && return (emitted,)
+    (emitted, Symbol(s[1:prevind(s, m.offset)]))
+end
+
+# address Symbol -> emitted `cat_<name>` term name, for one linear predictor.
+# An address that would name two different blocks (only reachable by writing
+# both `factor(c)` and `factor(c; ref=k)` in one predictor) is dropped rather
+# than silently resolving to the first, so `effect(...)` fails loudly instead.
+function _sb_cat_address_map(brmi::BRMI, lhs::Symbol)
+    emitted = _sb_cat_coefnames(brmi, lhs)
+    out = Dict{Symbol,Symbol}()
+    isnothing(emitted) && return out
+    # Exact emitted names bind first and are never displaced: a `mu ~ factor(g) +
+    # factor(g; ref=3)` emits `g` AND `g__ref_3`, and the latter's stripped alias
+    # `g` must not steal the former's own name. Aliases then fill in only where
+    # they are unambiguous -- an alias wanted by two blocks binds to neither, so
+    # such a model refuses the address instead of silently priming one block.
+    exact = Set{Symbol}(emitted)
+    for nm in emitted
+        out[nm] = nm
+    end
+    clashes = Set{Symbol}()
+    for nm in emitted, a in _sb_cat_addresses(nm)
+        a in exact && continue
+        haskey(out, a) && out[a] !== nm && (push!(clashes, a); continue)
+        out[a] = nm
+    end
+    foreach(a -> delete!(out, a), clashes)
+    out
+end
+
 _popcoef_show(t::ExprColumn) = string(getf(t))
 _popcoef_show(t::NamedColumn) = string(name(t))
 _popcoef_show(t) = string(t)
@@ -4353,10 +4511,12 @@ _sb_cat_levels_vec(_v) = nothing
 # Free-summand terms (no popefs beta): `mo1(c)`, `s(x)`, `t2(x,z)`, categoricals.
 # Categoricals emit `cat_<c> ~ _sb_cat(; x=<c>_idx, n_levels=<c>_n_levels)`.
 # `mo1(c)` reuses `_sb_mo`; smooths own their complete fixed + penalized bases.
-_sb_emit_direct!(stmts, data, target::Symbol, t::NamedColumn, summands; kwargs...) =
-    _sb_emit_cat!(stmts, data, t, summands)
+_sb_emit_direct!(stmts, data, target::Symbol, t::NamedColumn, summands;
+                 cat_overrides=Dict{Symbol,Any}(), kwargs...) =
+    _sb_emit_cat!(stmts, data, t, summands;
+                  prior=get(cat_overrides, name(t), nothing))
 function _sb_emit_direct!(stmts, data, target::Symbol, t::ExprColumn, summands;
-                          group_block_lookup=Dict())
+                          group_block_lookup=Dict(), cat_overrides=Dict{Symbol,Any}())
     f = getf(t)
     if f === gp || f === hsgp
         push!(summands, _sb_predictor_term!(stmts, data, f, t; group_block_lookup))
@@ -4398,7 +4558,7 @@ _sb_emit_direct_expr!(_stmts, _data, _target::Symbol, f, _t, _summands) =
 # Categorical population-level predictor. Allocates K-1 betas via `_sb_cat`
 # and pushes the per-row contribution column into `summands`. K == 1 (single
 # level) degenerates to a zero column instead of erroring — see the in-body note.
-function _sb_emit_cat!(stmts, data, t::NamedColumn, summands)
+function _sb_emit_cat!(stmts, data, t::NamedColumn, summands; prior=nothing)
     backing = parent(t)
     n_levels, idx = _sb_level_index(parent(backing))
     col_name = Symbol(:cat_, name(t))
@@ -4411,6 +4571,11 @@ function _sb_emit_cat!(stmts, data, t::NamedColumn, summands)
         # no-intercept `b ~ c` ≡ 0, at K == 1. (`_sb_cat` already degenerates via
         # `std_normal(; n=0)`, but the assembler has no zero-summand branch —
         # `length(summands)==0` would emit `+()` — so we contribute a column, not skip.)
+        #
+        # A K == 1 block has NO free contrast, so an `effect(...)` prior on it
+        # has nothing to apply to. It stays inert rather than raising, for the
+        # same reason the term itself degenerates instead of erroring: a caller
+        # must not need an `n_levels > 1 ?` conditional around its prior either.
         data[col_name] = zeros(Float64, length(idx))
         push!(summands, col_name)
         return
@@ -4424,7 +4589,13 @@ function _sb_emit_cat!(stmts, data, t::NamedColumn, summands)
     # (derived from raw_ref). Dimension-coupled (unseen level / changed count).
     _sb_record_preproc!(data, idx_name,
         PreprocEntry(:factor, _sb_fit_levels(parent(backing)), name(t), true))
-    push!(stmts, :($col_name ~ _sb_cat(; x=$idx_name, n_levels=$n_name)))
+    if isnothing(prior)
+        push!(stmts, :($col_name ~ _sb_cat(; x=$idx_name, n_levels=$n_name)))
+    else
+        loc, scale = _sb_effect_normal_args(prior)
+        push!(stmts, :($col_name ~ _sb_cat_normal(;
+            x=$idx_name, n_levels=$n_name, beta_loc=$loc, beta_scale=$scale)))
+    end
     push!(summands, col_name)
 end
 
@@ -5170,7 +5341,7 @@ function _sb_r2d2_overrides(brmi::BRMI, id_buckets, effect_overrides)
         # does a column that already carries its own `effect(lp, coef) ~
         # Normal(...)` statement -- that override wins and the column keeps its
         # own scale, rather than being double-prioried.
-        col_overrides = get(effect_overrides, target, nothing)
+        col_overrides = _sb_pop_effect_overrides(effect_overrides, target)
         share_idx = zeros(Int, length(labels))
         n_shares = 0
         for (i, label) in pairs(labels)

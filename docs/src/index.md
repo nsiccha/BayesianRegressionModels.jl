@@ -63,6 +63,34 @@ descriptor provenance. Inspect the captured formula statements with
 `effect_priors(brmi)`. This surface belongs to `SBBRMI`; `VBRMI` does not
 implement it.
 
+### Categorical contrasts
+
+A categorical predictor — a bare integer/`CategoricalArray` column, or one
+wrapped in `factor(...)` — is *not* a `beta_pop` column, so `popcoefnames`
+deliberately never lists it: it owns a separate `cat_<column>_beta` vector
+holding its K−1 treatment contrasts, with the reference level pinned at 0.
+Those contrasts also default to `std_normal()`, and the same `effect(...)`
+address changes them — keyed by the **column** name, not the emitted
+`cat_<column>` parameter name:
+
+```julia
+m = @brm df begin
+    mu ~ 1 + factor(g) + x
+    effect(mu, g) ~ Normal(0.0, 0.5)   # ⇒ cat_g_beta ~ normal(0.0, 0.5);
+    y ~ Normal(mu, sigma)
+end
+```
+
+One shared `(location, scale)` covers every contrast in the block; per-level
+scales are not expressible here. The concise `effect(g)` form resolves the
+same way, and the statement composes with population overrides on the same
+predictor (`effect(mu, x) ~ Normal(0, 0.25)`) — each addresses its own
+parameter. A non-default reference level emits `cat_<column>__ref_<k>_beta`,
+which the plain column name still addresses whenever that is unambiguous;
+when two `factor(g; ref=…)` blocks of one column would both claim it, the
+bare address is refused and each block is addressed by its exact emitted
+name. Models with no such statement emit byte-identical Stan to before.
+
 See [Formula terms](@ref) and [Likelihoods](@ref) for the supported syntax and
 backend-specific contracts. The [Gallery](/gallery) provides live, interactive examples — input
 formula, the SLIC submodel body, the transpiled Stan source, and the
