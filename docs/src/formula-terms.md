@@ -192,6 +192,46 @@ All of these fail loudly rather than silently sampling something else:
 - A column that also carries its own `effect(lp, coef) ~ Normal(loc, scale)`
   statement is dropped from the simplex and keeps that explicit prior.
 
+## Scalar horseshoe prior: `coef ~ Horseshoe(...)`
+
+[`Horseshoe`](@ref) attaches a scalar Carvalho–Polson–Scott shrinkage
+hierarchy to an explicitly named coefficient:
+
+```julia
+brmi = @brm df begin
+    beta_sparse ~ Horseshoe(local_scale=0.5, global_scale=0.1)
+    sigma ~ Exponential(1)
+    mu ~ 0 + beta_sparse * x
+    y ~ Normal(mu, sigma)
+end
+```
+
+The emitted non-centered hierarchy is
+
+```text
+raw    ~ Normal(0, 1)
+lambda ~ half-Cauchy(0, local_scale)
+tau    ~ half-Cauchy(0, global_scale)
+beta_sparse = raw * lambda * tau
+```
+
+`local_scale` and `global_scale` are optional positive finite formula
+constants. Both default to `1.0`; the no-keyword spelling
+`Horseshoe()` retains the historical emission byte for byte. Literal
+arithmetic such as `local_scale=1/2` is evaluated with Julia semantics.
+Positional arguments, unknown keywords, nonnumeric values, zero, negative,
+and non-finite scales are rejected during `SBBRMI` construction.
+
+The current surface is scalar and each `coef ~ Horseshoe(...)` call owns its
+own `(raw, lambda, tau)` triple. Consequently `tau` is “global” only within
+that scalar hierarchy; it is not shared across several coefficients. A
+genuinely shared global scale requires a vector/group horseshoe declaration,
+which this marker does not imply. The standardized `raw` draw is intentionally
+not configurable because its scale would duplicate `lambda`/`tau`.
+
+Like other sbimpl prior surfaces, this is implemented by `SBBRMI`; do not
+assume `VBRMI` has the same marker-specific lowering.
+
 ## Simplex-valued parameter: `s ~ Dirichlet(...)`
 
 A non-data left-hand side with a `Dirichlet` right-hand side declares a

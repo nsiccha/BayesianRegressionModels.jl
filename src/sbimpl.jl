@@ -72,9 +72,18 @@ function ar end
     Horseshoe
 
 Carvalho-Polson-Scott horseshoe shrinkage prior marker. Use as a prior
-on a coefficient: `coef ~ Horseshoe()`. sbimpl emits the standard
-reparameterised hierarchy `beta = raw * lambda * tau`. Marker struct
-only — the `@brm` parser never constructs an instance.
+on a coefficient:
+
+```julia
+coef ~ Horseshoe()
+coef ~ Horseshoe(local_scale=0.5, global_scale=0.1)
+```
+
+`local_scale` and `global_scale` are positive finite formula constants and
+default to one. sbimpl emits the standard reparameterised hierarchy
+`beta = raw * lambda * tau`. Each scalar call owns its own `tau`; "global"
+means global only within that call, not shared across several coefficients.
+Marker struct only — the `@brm` parser never constructs an instance.
 """
 struct Horseshoe end
 
@@ -1537,6 +1546,17 @@ _sb_horseshoe = StanBlocks.@slic begin
     raw    ~ std_normal()
     lambda ~ cauchy(0., 1.; lower=0.)
     tau    ~ cauchy(0., 1.; lower=0.)
+    return raw * lambda * tau
+end
+
+# Configured sibling. The no-keyword formula path deliberately keeps calling
+# `_sb_horseshoe`, so an unconfigured model retains its historical SLIC body
+# and emitted Stan byte for byte. The raw draw stays standardized: changing it
+# would duplicate the local/global scales and alter the advertised hierarchy.
+_sb_horseshoe_scaled = StanBlocks.@slic begin
+    raw    ~ std_normal()
+    lambda ~ cauchy(0., local_scale; lower=0.)
+    tau    ~ cauchy(0., global_scale; lower=0.)
     return raw * lambda * tau
 end
 
@@ -3796,8 +3816,39 @@ end
 # Built-in prior families on a missing-LHS sampling statement (e.g.
 # `coef_a ~ Horseshoe()`). Returns `true` if it consumed the binding,
 # `false` otherwise (then `_sb_linear_predictor!` runs).
-_sb_emit_prior!(stmts, target, ::Type{<:Horseshoe}, _) = begin
-    push!(stmts, :($target ~ _sb_horseshoe()))
+const _SB_HORSESHOE_KWARGS = (:local_scale, :global_scale)
+
+function _sb_horseshoe_scale(target, key::Symbol, value)
+    resolved = _sb_effect_prior_arg(value)
+    (resolved isa Real && !(resolved isa Bool)) || error(
+        "sbimpl: `$target ~ Horseshoe($key=...)` must be a numeric formula " *
+        "constant, got $(repr(resolved))")
+    isfinite(resolved) && resolved > 0 || error(
+        "sbimpl: `$target ~ Horseshoe($key=...)` must be finite and strictly " *
+        "positive, got $resolved")
+    Float64(resolved)
+end
+
+function _sb_emit_prior!(stmts, target, ::Type{<:Horseshoe}, op)
+    args = getargs(op)
+    isempty(args) || error(
+        "sbimpl: `$target ~ Horseshoe(...)` accepts no positional arguments; " *
+        "use `local_scale=` and/or `global_scale=`")
+    kw = getkwargs(op)
+    unknown = Symbol[k for k in keys(kw) if !(k in _SB_HORSESHOE_KWARGS)]
+    isempty(unknown) || error(
+        "sbimpl: `$target ~ Horseshoe(...)` accepts only `local_scale` and " *
+        "`global_scale` keywords, got $unknown")
+    if isempty(kw)
+        push!(stmts, :($target ~ _sb_horseshoe()))
+    else
+        local_scale = _sb_horseshoe_scale(
+            target, :local_scale, get(kw, :local_scale, 1.0))
+        global_scale = _sb_horseshoe_scale(
+            target, :global_scale, get(kw, :global_scale, 1.0))
+        push!(stmts, :($target ~ _sb_horseshoe_scaled(;
+            local_scale=$local_scale, global_scale=$global_scale)))
+    end
     true
 end
 
