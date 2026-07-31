@@ -160,19 +160,30 @@ end
         end
     end)
 
-    # Exactly three heads are reserved as prior addresses (`effect`, `sd`,
-    # `cor`). Anything else is NOT claimed by the prior grammar — it falls
-    # through to ordinary formula handling and fails there, on its own terms,
-    # naming the unknown function rather than any prior-address diagnostic.
-    # That is deliberate: it keeps the follow-on term-internal vocabulary
-    # (`length_scale`, `simplex`, `latent`, …) purely additive, instead of
-    # something this migration has to reserve up front.
+    # The reserved prior-address heads are exactly `effect`, `sd`, `cor`,
+    # `simplex`, `latent` and `length_scale`. Anything else is NOT claimed by
+    # the prior grammar — it falls through to ordinary formula handling and
+    # fails there, on its own terms, naming the unknown function rather than any
+    # prior-address diagnostic. That is deliberate, and it is what made each
+    # term-internal head purely additive as it arrived: `simplex` / `latent`
+    # with `cf6ebfb`, `length_scale` with the gp/hsgp scale surface.
     not_a_prior_head = @brm begin
         mu ~ 1 + x
-        length_scale(mu, x) ~ InverseGamma(5, 5)
+        nugget(mu, x) ~ InverseGamma(5, 5)
         y ~ Normal(mu, 1)
     end
-    @test_throws "length_scale" not_a_prior_head(df)
+    @test_throws "nugget" not_a_prior_head(df)
+
+    # A claimed head, in contrast, is refused BY the grammar: `length_scale`
+    # addresses a term's own parameter, so a bare coefficient in its target slot
+    # fails at parse time with a diagnostic naming the shape it wanted.
+    @test_throws "must be a term as the formula spells it" eval(quote
+        @brm begin
+            mu ~ 1 + x
+            length_scale(mu, x) ~ InverseGamma(5, 5)
+            y ~ Normal(mu, 1)
+        end
+    end)
 end
 
 # `linear_predictors` reports EVERY non-data `~` binding, not just population
