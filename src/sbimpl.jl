@@ -4410,12 +4410,13 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     if !isempty(pop_terms)
         col_exprs = Any[]
         for t in pop_terms
-            # `ran_terms` rides along for the intercept's tier-1c length probe:
-            # a group term names this formula's row axis, which is the only
+            # `direct_terms` / `ran_terms` ride along for the intercept's
+            # tier-1d / tier-1c length probes: a categorical peer or a group
+            # term names this formula's row axis, and one of them is the only
             # signal available when the intercept is the sole population term.
             _sb_pop_cols!(col_exprs, t, data, stmts, pop_terms;
-                          obs_n, ran_terms, target, group_block_lookup,
-                          term_overrides)
+                          obs_n, ran_terms, direct_terms, target,
+                          group_block_lookup, term_overrides)
         end
         X_name = Symbol(:X_, target)
         pop_name = Symbol(:pop_, target)
@@ -6400,12 +6401,12 @@ _sb_collect_terms_expr!(acc, _, x) = push!(acc, x)
 # `pop_terms` is threaded so the intercept emitter can borrow N from a
 # data-backed peer in the same formula (deterministic) rather than
 # probing the shared `data` dict in hash order.
-_sb_pop_cols!(cols, t, data, stmts, pop_terms=(); obs_n=nothing, ran_terms=(), target=nothing, group_block_lookup=Dict(), term_overrides=Dict{Symbol,Any}()) =
-    push!(cols, _sb_predictor_col(t, data, stmts, pop_terms; obs_n, ran_terms, target, group_block_lookup, term_overrides))
-_sb_pop_cols!(cols, t::ExprColumn, data, stmts, pop_terms=(); obs_n=nothing, ran_terms=(), target=nothing, group_block_lookup=Dict(), term_overrides=Dict{Symbol,Any}()) =
-    _sb_pop_cols_expr!(cols, getf(t), t, data, stmts, pop_terms; obs_n, ran_terms, target, group_block_lookup, term_overrides)
-_sb_pop_cols_expr!(cols, ::Any, t, data, stmts, pop_terms=(); obs_n=nothing, ran_terms=(), target=nothing, group_block_lookup=Dict(), term_overrides=Dict{Symbol,Any}()) =
-    push!(cols, _sb_predictor_col(t, data, stmts, pop_terms; obs_n, ran_terms, target, group_block_lookup, term_overrides))
+_sb_pop_cols!(cols, t, data, stmts, pop_terms=(); obs_n=nothing, ran_terms=(), direct_terms=(), target=nothing, group_block_lookup=Dict(), term_overrides=Dict{Symbol,Any}()) =
+    push!(cols, _sb_predictor_col(t, data, stmts, pop_terms; obs_n, ran_terms, direct_terms, target, group_block_lookup, term_overrides))
+_sb_pop_cols!(cols, t::ExprColumn, data, stmts, pop_terms=(); obs_n=nothing, ran_terms=(), direct_terms=(), target=nothing, group_block_lookup=Dict(), term_overrides=Dict{Symbol,Any}()) =
+    _sb_pop_cols_expr!(cols, getf(t), t, data, stmts, pop_terms; obs_n, ran_terms, direct_terms, target, group_block_lookup, term_overrides)
+_sb_pop_cols_expr!(cols, ::Any, t, data, stmts, pop_terms=(); obs_n=nothing, ran_terms=(), direct_terms=(), target=nothing, group_block_lookup=Dict(), term_overrides=Dict{Symbol,Any}()) =
+    push!(cols, _sb_predictor_col(t, data, stmts, pop_terms; obs_n, ran_terms, direct_terms, target, group_block_lookup, term_overrides))
 _sb_pop_cols_expr!(cols, ::typeof(&), t, data, stmts, _pop_terms=(); kwargs...) =
     _sb_interaction_cols!(cols, t, data, stmts)
 
@@ -6509,7 +6510,7 @@ end
 # `~` statement (e.g. `mo(c)`) can push before returning their column symbol.
 # Integer `1` -> intercept, NamedColumn -> reference by name, ExprColumn(mo, c)
 # -> submodel-sampled contrast column.
-_sb_predictor_col(t::Int, data, _stmts, pop_terms=(); obs_n::Union{Symbol,Nothing}=nothing, ran_terms=(), group_idx=nothing, target=nothing, kwargs...) = begin
+_sb_predictor_col(t::Int, data, _stmts, pop_terms=(); obs_n::Union{Symbol,Nothing}=nothing, ran_terms=(), direct_terms=(), group_idx=nothing, target=nothing, kwargs...) = begin
     t == 1 || error("sbimpl: integer term must be `1` for intercept, got `$t`")
     # Five-tier length probe, in priority order:
     #   1. A data-backed peer in the same formula's terms (`_sb_n_obs_probe`).
@@ -6524,6 +6525,20 @@ _sb_predictor_col(t::Int, data, _stmts, pop_terms=(); obs_n::Union{Symbol,Nothin
     #      — the SUBJECT axis — inside an `X` matrix sized by the event axis.
     #      stanc accepts that (both extents are runtime), so it fails as a
     #      dimension error at instantiation rather than at lowering.
+    #   1d. A CATEGORICAL peer in the same formula (`direct_terms`). The term
+    #      classifier (`_sb_classify_term!`) routes a bare integer-backed
+    #      `NamedColumn` — `log(y_scale) ~ 1 + source` — into `direct_terms`,
+    #      not `pop_terms`, because it expands to dummy columns. Tiers 1/1b see
+    #      only `pop_terms`, so before this tier `pop_terms == [1]` and every
+    #      deterministic probe came up empty even though the formula names its
+    #      row axis in plain sight. On a multi-axis model that then hit tier 3
+    #      and refused, telling the user to add a group term when `source` was
+    #      already right there (reported against `Bruno:qt`).
+    #      Uses the tier-1b probe rather than tier 1a's: a direct term may be
+    #      backed by STRINGS, and `_sb_n_obs_probe` would hand back that raw
+    #      name unguarded, emitting `num_elements(<string column>)` — which
+    #      StanBlocks cannot type. `_sb_n_obs_probe_deep`'s live-numeric-vector
+    #      guard admits the integer case and correctly skips the string one.
     #   1c. The formula's own GROUP term (`_sb_group_n_obs_probe`). A formula
     #      whose only population term IS the intercept — `log_ka ~ 1 + (1|p|subject)`
     #      — has no top-level peer for tier 1 and nothing wrapped for tier 1b,
@@ -6551,11 +6566,13 @@ _sb_predictor_col(t::Int, data, _stmts, pop_terms=(); obs_n::Union{Symbol,Nothin
     #      length matches the observed `~` target consuming `loc`.
     #   3. Hash-order fallback (`_sb_any_data_symbol`). Last resort; lossy
     #      for composite models with multi-length data and reachable only
-    #      when none of (1), (1b), (1c) or (2) yields a name (e.g. a `~ 1`
-    #      formula with no group term whose target isn't referenced by any
-    #      observed likelihood).
+    #      when none of (1), (1b), (1d), (1c) or (2) yields a name — i.e. a
+    #      formula whose ONLY term is the intercept (no covariate of any kind,
+    #      no group term) and whose target no observed likelihood references.
+    #      A formula naming any live numeric data column resolves above.
     probe = _sb_n_obs_probe(pop_terms)
     isnothing(probe) && (probe = _sb_n_obs_probe_deep(pop_terms, data))
+    isnothing(probe) && (probe = _sb_n_obs_probe_deep(direct_terms, data))
     isnothing(probe) && (probe = group_idx)
     isnothing(probe) && (probe = _sb_group_n_obs_probe(data, ran_terms))
     isnothing(probe) && !isnothing(obs_n) && (probe = obs_n)
@@ -7031,14 +7048,16 @@ _sb_any_data_symbol(data, target=nothing) = begin
         where_ = isnothing(target) ? "an intercept-only predictor" : "predictor `$target`"
         frames = join(("$n (e.g. `$k`)" for (n, k) in sort!(collect(by_len); by=first)), ", ")
         error(
-            "sbimpl: cannot determine the row axis for $where_. Its formula names no ",
-            "population covariate, no group term, and no observed likelihood references ",
-            "its target, so there is nothing in the formula to size the intercept from — ",
-            "and this model spans SEVERAL row axes, with candidate lengths $frames. ",
-            "Picking one would be a guess that stanc accepts and that then fails as a ",
-            "dimension error on every log-density evaluation. Say which frame the ",
-            "predictor lives on: add a group term (`$(isnothing(target) ? "loc" : target) ~ 1 + (1 | <group>)`) ",
-            "naming that frame's grouping column, or a population covariate from it.")
+            "sbimpl: cannot determine the row axis for $where_. The intercept is its ",
+            "ONLY term — no covariate of any kind, no group term — and no observed ",
+            "likelihood references its target, so there is nothing in the formula to ",
+            "size the intercept from, and this model spans SEVERAL row axes, with ",
+            "candidate lengths $frames. Picking one would be a guess that stanc accepts ",
+            "and that then fails as a dimension error on every log-density evaluation. ",
+            "Say which frame the predictor lives on by naming any column from it: a ",
+            "covariate (continuous or categorical) is enough — ",
+            "`$(isnothing(target) ? "loc" : target) ~ 1 + <column>` — or a group term ",
+            "`(1 | <group>)` if the frame has no natural covariate.")
     end
     isnothing(first_hit) || return first_hit
     first(k for k in keys(data) if k !== _SB_PREPROC_KEY)
