@@ -360,3 +360,136 @@ end
     @test byname[:pop_log_Vc_beta_pop].labels == [:Intercept]
     @test byname[:pop_log_Ka_beta_pop].labels == [:Intercept]
 end
+
+# A categorical / `factor(...)` predictor does NOT live in `beta_pop`: it owns a
+# `cat_<c>_beta` contrast vector emitted by its own submodel, which is exactly
+# why `popcoefnames` excludes it. Before this, that vector's `std_normal()` was
+# hardcoded with no seam at all — the only way to change it was to hand-build
+# K-1 dummy columns, which loses `factor()`'s frozen training levels (and so its
+# unseen-level guard in `reprocess`), `ref=`, and the `:factor` preprocessing
+# record. The address is the COLUMN name, never the emitted `cat_` name.
+@testset "categorical contrast priors via `effect(lp, column)`" begin
+    cat_df = (; x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+                g=[1, 2, 3, 1, 2, 3],
+                y=[-2.4, -2.2, -2.0, -1.8, -1.7, -1.5])
+
+    code_of(m) = BayesianRegressionModels.stan_code(SBBRMI(m; mod=@__MODULE__))
+
+    # Unconfigured: the hardcoded default, byte for byte as before.
+    plain = @brm cat_df begin
+        mu ~ 1 + factor(g) + x
+        y ~ Normal(mu, 1)
+    end
+    @test occursin("cat_g_beta ~ std_normal();", code_of(plain))
+    # The categorical is still deliberately absent from `beta_pop`'s labels.
+    @test popcoefnames(plain, :mu) == [:Intercept, :x]
+
+    configured = @brm cat_df begin
+        mu ~ 1 + factor(g) + x
+        effect(mu, g) ~ Normal(0.0, 0.5)
+        y ~ Normal(mu, 1)
+    end
+    sb = SBBRMI(configured; mod=@__MODULE__)
+    code = BayesianRegressionModels.stan_code(sb)
+    @test StanBlocks.stan.transpiles(sb.model)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    @test occursin("cat_g_beta ~ normal(0.0, 0.5);", code)
+    # One shared `(location, scale)` over the K-1 contrasts; `beta_pop` untouched.
+    @test occursin("pop_mu_beta_pop ~ std_normal();", code)
+    @test popcoefnames(configured, :mu) == [:Intercept, :x]
+
+    # Concise `effect(g)` resolves to the same block, and a bare integer column
+    # (no `factor(...)` wrapper) is the same term downstream.
+    concise = @brm cat_df begin
+        mu ~ 1 + factor(g) + x
+        effect(g) ~ Normal(0.0, 0.5)
+        y ~ Normal(mu, 1)
+    end
+    bare = @brm cat_df begin
+        mu ~ 1 + g + x
+        effect(mu, g) ~ Normal(0.0, 0.5)
+        y ~ Normal(mu, 1)
+    end
+    @test code_of(concise) == code
+    @test code_of(bare) == code
+
+    # A non-default reference level renames the emitted block; the COLUMN name
+    # still addresses it, and the renamed block is addressable too.
+    reffed = @brm cat_df begin
+        mu ~ 1 + factor(g; ref=3) + x
+        effect(mu, g) ~ Normal(0.0, 0.5)
+        y ~ Normal(mu, 1)
+    end
+    @test occursin("cat_g__ref_3_beta ~ normal(0.0, 0.5);", code_of(reffed))
+
+    # An intercept-less formula has no `beta_pop` labels at all; the contrast
+    # block must stay reachable anyway.
+    no_intercept = @brm cat_df begin
+        mu ~ 0 + factor(g)
+        effect(mu, g) ~ Normal(0.0, 0.5)
+        y ~ Normal(mu, 1)
+    end
+    @test popcoefnames(no_intercept, :mu) == Symbol[]
+    @test occursin("cat_g_beta ~ normal(0.0, 0.5);", code_of(no_intercept))
+
+    # Same column at two reference levels: each EXACT emitted name binds to its
+    # own block, so the plain block never loses its name to the other's alias.
+    both = @brm cat_df begin
+        mu ~ 1 + factor(g) + factor(g; ref=3)
+        effect(mu, g) ~ Normal(0.0, 0.5)
+        effect(mu, g__ref_3) ~ Normal(0.0, 0.25)
+        y ~ Normal(mu, 1)
+    end
+    both_code = code_of(both)
+    @test occursin("cat_g_beta ~ normal(0.0, 0.5);", both_code)
+    @test occursin("cat_g__ref_3_beta ~ normal(0.0, 0.25);", both_code)
+
+    # But an alias wanted by two blocks binds to neither — refuse, never guess.
+    ambiguous_ref = @brm cat_df begin
+        mu ~ 1 + factor(g; ref=2) + factor(g; ref=3)
+        effect(mu, g) ~ Normal(0.0, 0.5)
+        y ~ Normal(mu, 1)
+    end
+    @test_throws "g__ref_2" SBBRMI(ambiguous_ref; mod=@__MODULE__)
+
+    # The EMITTED name is not the address — and the error says which name is.
+    emitted_guess = @brm cat_df begin
+        mu ~ 1 + factor(g) + x
+        effect(mu, cat_g) ~ Normal(0.0, 0.5)
+        y ~ Normal(mu, 1)
+    end
+    @test_throws "address one by that name" SBBRMI(emitted_guess; mod=@__MODULE__)
+
+    # Concise + explicit reach the same block; that is a duplicate, not a merge.
+    duplicated = @brm cat_df begin
+        mu ~ 1 + factor(g) + x
+        effect(g) ~ Normal(0.0, 0.5)
+        effect(mu, g) ~ Normal(0.0, 0.25)
+        y ~ Normal(mu, 1)
+    end
+    @test_throws "duplicate prior override" SBBRMI(duplicated; mod=@__MODULE__)
+
+    # Only `Normal` is supported here, same as the population surface.
+    wrong_family = @brm cat_df begin
+        mu ~ 1 + factor(g) + x
+        effect(mu, g) ~ Cauchy(0, 1)
+        y ~ Normal(mu, 1)
+    end
+    @test_throws "support only `Normal" SBBRMI(wrong_family; mod=@__MODULE__)
+
+    # A configured contrast block and a configured `beta_pop` coexist.
+    mixed = @brm cat_df begin
+        mu ~ 1 + factor(g) + x
+        effect(mu, g) ~ Normal(0.0, 0.5)
+        effect(mu, x) ~ Normal(0.0, 0.25)
+        y ~ Normal(mu, 1)
+    end
+    mixed_code = code_of(mixed)
+    @test occursin("cat_g_beta ~ normal(0.0, 0.5);", mixed_code)
+    @test occursin("[1.0, 0.25]'", mixed_code)
+
+    # `factor()`'s frozen training levels — the guard the hand-built-dummy
+    # workaround silently gives up — still fire on the configured model.
+    @test_throws "not a training level" BayesianRegressionModels.reprocess(
+        sb, (; x=[0.0, 1.0], g=[1, 9], y=[0.0, 0.0]))
+end
