@@ -101,7 +101,7 @@ knots, penalty decomposition, and intercept constraint. Passing
 `t2` is implemented only by the StanBlocks backend and is not available to
 `VBRMI`.
 
-## R²-induced variance decomposition: `effect(:) ~ r2d2(...)`
+## R²-induced variance decomposition: `effect(lp, :) ~ r2d2(...)`
 
 [`r2d2`](@ref) replaces the independent per-coefficient priors on a linear
 predictor's population block with a *joint* prior induced by a prior on that
@@ -124,11 +124,12 @@ brmi = @brm df begin
 end
 ```
 
-`effect(lp, :)` addresses every population coefficient of `lp` at once; the
-bare `effect(:)` is shorthand that resolves only when the model has exactly one
-population predictor. The `Colon` address is deliberately invisible to
-[`effect_priors`](@ref) — it names no single labelled column — and is read back
-with [`r2d2_priors`](@ref) instead.
+`effect(lp, :)` addresses every population coefficient of `lp` at once, and
+`effect(:, :)` addresses them across every predictor — which for an `r2d2`
+decomposition resolves only when the model has exactly one population
+predictor, since the decomposition is per-predictor. An `r2d2` statement is
+deliberately invisible to [`effect_priors`](@ref) — it names no single labelled
+column — and is read back with [`r2d2_priors`](@ref) instead.
 
 ### What it emits
 
@@ -158,7 +159,7 @@ The inciting shape is population PK: `log_CL` is a *latent* per-subject
 parameter with no residual term of its own, so its subject random effect **is**
 the unexplained half of `tau_bsv^2`. That is why `r2d2` derives the
 random-effect SD rather than sampling it, and why an
-`effect(sd, ID, ...)` statement on the same block is rejected — the
+`sd(...)` statement on the same block is rejected — the
 decomposition already determines those scales.
 
 ### Keywords
@@ -185,7 +186,7 @@ All of these fail loudly rather than silently sampling something else:
   that this decomposition does not build.
 - A shared `(… | ID | g)` bucket is all-or-nothing: either every margin's
   predictor carries an `r2d2` statement or none does.
-- `effect(cor, ID)` is not yet composable; an `r2d2` block keeps LKJ `eta = 1`.
+- `cor(:, ID)` is not yet composable; an `r2d2` block keeps LKJ `eta = 1`.
 - Adaptive centering (`centered_groups`), cv-contagious sizing (`cv_groups`),
   stratified `gr(g, by=b)` groups, and `mm(...)` multi-membership terms are all
   unsupported in combination with `r2d2`.
@@ -296,7 +297,7 @@ right-hand side is parsed as a formula **local**, not interpolated —
 carrier and is rejected by name. Spell the concentration as a literal; there is
 no `$` escape (`$` outside a quote is a Julia syntax error, so the macro never
 sees it). This matches the rest of the formula surface — `r2d2`'s `alpha=` and
-`effect(x) ~ Normal(0, 0.25)` are literals for the same reason.
+`effect(:, x) ~ Normal(0, 0.25)` are literals for the same reason.
 
 Concentrations must be finite and strictly positive, and `K >= 2`: a
 one-element simplex is deterministically `[1.0]`, so there is no parameter to

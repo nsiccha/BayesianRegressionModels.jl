@@ -72,7 +72,7 @@ end
     end
 end
 
-@testset "defaults, concise address, and validation" begin
+@testset "defaults, `:` default layer, and validation" begin
     default = @brm df begin
         mu ~ 1 + x
         y ~ Normal(mu, 1)
@@ -80,21 +80,28 @@ end
     @test occursin("pop_mu_beta_pop ~ std_normal();",
                    BayesianRegressionModels.stan_code(SBBRMI(default; mod=@__MODULE__)))
 
-    concise = @brm df begin
+    # `:` in the predictor slot is the default layer: it reaches every
+    # predictor owning that column, so a single-predictor model reads exactly
+    # like the removed concise form did.
+    colon_lp = @brm df begin
         mu ~ 1 + x
-        effect(x) ~ Normal(0, 0.25)
+        effect(:, x) ~ Normal(0, 0.25)
         y ~ Normal(mu, 1)
     end
     @test occursin("[1.0, 0.25]'",
-                   BayesianRegressionModels.stan_code(SBBRMI(concise; mod=@__MODULE__)))
+                   BayesianRegressionModels.stan_code(SBBRMI(colon_lp; mod=@__MODULE__)))
 
-    ambiguous = @brm df begin
+    # Reaching several predictors is the POINT of `:`, not an ambiguity: the old
+    # concise form errored here, the default layer sets both.
+    both = @brm df begin
         a ~ 1
         b ~ 1
-        effect(Intercept) ~ Normal(0, 2)
+        effect(:, Intercept) ~ Normal(0, 2)
         y ~ Normal(a + b, 1)
     end
-    @test_throws "ambiguous" SBBRMI(ambiguous; mod=@__MODULE__)
+    both_code = BayesianRegressionModels.stan_code(SBBRMI(both; mod=@__MODULE__))
+    @test occursin("pop_a_beta_pop ~ normal([0]', [2]');", both_code)
+    @test occursin("pop_b_beta_pop ~ normal([0]', [2]');", both_code)
 
     excluded = @brm df begin
         mu ~ 1 + x + (1 | subject)
@@ -109,6 +116,63 @@ end
         y ~ Normal(mu, 1)
     end
     @test_throws "support only `Normal" SBBRMI(unsupported; mod=@__MODULE__)
+end
+
+# The head-position grammar's refusals all fire in the PARSER, before any
+# backend runs, so a mis-shaped address can never reach lowering.
+@testset "prior-address grammar refusals" begin
+    # Both `effect` slots are mandatory; the concise predictor-inferring form
+    # is gone, and its removal is what the diagnostic must say.
+    @test_throws "concise predictor-inferring form was removed" eval(quote
+        @brm begin
+            mu ~ 1 + x
+            effect(x) ~ Normal(0, 1)
+            y ~ Normal(mu, 1)
+        end
+    end)
+
+    # Correlation priors are block-wide by construction: one shared `|ID|`
+    # covariance block spans every predictor that slices it, so there is no
+    # per-predictor correlation to address.
+    @test_throws "correlation priors are block-wide" eval(quote
+        @brm begin
+            eta ~ 1 + (1 + x | p | subject)
+            cor(eta, p) ~ LKJCholesky(2, 2)
+            y ~ Normal(eta, 1)
+        end
+    end)
+
+    # Collections in an address slot are DEFERRED, not rejected on principle,
+    # so they must fail by name rather than fall through to the generic
+    # bare-symbol error -- adding them later stays purely additive.
+    @test_throws "are not supported yet" eval(quote
+        @brm begin
+            mu ~ 1 + x + z
+            effect(mu, (x, z)) ~ Normal(0, 1)
+            y ~ Normal(mu, 1)
+        end
+    end)
+    @test_throws "are not supported yet" eval(quote
+        @brm begin
+            mu ~ 1 + x + z
+            effect(mu, [x, z]) ~ Normal(0, 1)
+            y ~ Normal(mu, 1)
+        end
+    end)
+
+    # Exactly three heads are reserved as prior addresses (`effect`, `sd`,
+    # `cor`). Anything else is NOT claimed by the prior grammar — it falls
+    # through to ordinary formula handling and fails there, on its own terms,
+    # naming the unknown function rather than any prior-address diagnostic.
+    # That is deliberate: it keeps the follow-on term-internal vocabulary
+    # (`length_scale`, `simplex`, `latent`, …) purely additive, instead of
+    # something this migration has to reserve up front.
+    not_a_prior_head = @brm begin
+        mu ~ 1 + x
+        length_scale(mu, x) ~ InverseGamma(5, 5)
+        y ~ Normal(mu, 1)
+    end
+    @test_throws "length_scale" not_a_prior_head(df)
 end
 
 # `linear_predictors` reports EVERY non-data `~` binding, not just population
@@ -139,16 +203,16 @@ end
     # …and the override still reaches only the addressed population column.
     @test occursin("pop_mu_beta_pop ~ normal([0.0, 0]', [1.0, 0.25]');", code)
 
-    # The concise form is the path that enumerates candidates, so it must skip
-    # the unnameable entries rather than fail on them.
-    concise = @brm df begin
+    # `:` is the path that enumerates candidates, so it must skip the
+    # unnameable entries rather than fail on them.
+    colon_lp = @brm df begin
         log_F_bottle ~ Normal(0, 0.5)
         mu ~ 1 + x
-        effect(x) ~ Normal(0, 0.25)
+        effect(:, x) ~ Normal(0, 0.25)
         y ~ Normal(mu + log_F_bottle, 1)
     end
     @test occursin("pop_mu_beta_pop ~ normal([0.0, 0]', [1.0, 0.25]');",
-                   BayesianRegressionModels.stan_code(SBBRMI(concise; mod=@__MODULE__)))
+                   BayesianRegressionModels.stan_code(SBBRMI(colon_lp; mod=@__MODULE__)))
 
     # Addressing the scalar prior itself is still an error, and names what IS
     # addressable instead of leaking `popcoefnames`' internal failure.
@@ -161,11 +225,11 @@ end
     @test_throws "names no linear predictor with population coefficients" SBBRMI(
         at_prior; mod=@__MODULE__)
 
-    # An unknown concise label is still rejected — tolerance must not mute this.
+    # An unknown label is still rejected — tolerance must not mute this.
     unknown = @brm df begin
         log_F_bottle ~ Normal(0, 0.5)
         mu ~ 1 + x
-        effect(nope) ~ Normal(0, 0.25)
+        effect(:, nope) ~ Normal(0, 0.25)
         y ~ Normal(mu + log_F_bottle, 1)
     end
     @test_throws "matches no population coefficient" SBBRMI(unknown; mod=@__MODULE__)
@@ -236,8 +300,8 @@ end
         log(Vc) ~ 1 + x + (1 + x | p | subject)
         effect(Vc, Intercept) ~ Normal(log(10), 0.8)
         effect(Vc, x) ~ Normal(0, 0.1)
-        effect(sd, p) ~ Exponential(0.3)
-        effect(cor, p) ~ LKJCholesky(2, 2.0)
+        sd(:, p) ~ Exponential(0.3)
+        cor(:, p) ~ LKJCholesky(2, 2.0)
         y ~ Normal(log(Vc), 0.2)
     end
 
@@ -267,7 +331,7 @@ end
     @test linked_byname[:pop_log_Vc_beta_pop].labels == [:Intercept, :x]
 
     # Ranef addresses are keyed by the `|ID|` bucket, never by the LP name, so
-    # `effect(sd|cor, p)` is untouched by the switch — but `ranefcoefnames`
+    # `sd(:, p)` / `cor(:, p)` are untouched by the switch — but `ranefcoefnames`
     # margins are labelled with the PUBLIC predictor name.
     @test ranefcoefnames(linked, :p) ==
           [(predictor=:Vc, coefficient=:Intercept), (predictor=:Vc, coefficient=:x)]
@@ -280,8 +344,8 @@ end
         log_Vc ~ 1 + x + (1 + x | p | subject)
         effect(log_Vc, Intercept) ~ Normal(log(10), 0.8)
         effect(log_Vc, x) ~ Normal(0, 0.1)
-        effect(sd, p) ~ Exponential(0.3)
-        effect(cor, p) ~ LKJCholesky(2, 2.0)
+        sd(:, p) ~ Exponential(0.3)
+        cor(:, p) ~ LKJCholesky(2, 2.0)
         y ~ Normal(log_Vc, 0.2)
     end
     inert_code = BayesianRegressionModels.stan_code(SBBRMI(inert; mod=@__MODULE__))
@@ -398,11 +462,11 @@ end
     @test occursin("pop_mu_beta_pop ~ std_normal();", code)
     @test popcoefnames(configured, :mu) == [:Intercept, :x]
 
-    # Concise `effect(g)` resolves to the same block, and a bare integer column
+    # A `:` predictor slot reaches the same block, and a bare integer column
     # (no `factor(...)` wrapper) is the same term downstream.
     concise = @brm cat_df begin
         mu ~ 1 + factor(g) + x
-        effect(g) ~ Normal(0.0, 0.5)
+        effect(:, g) ~ Normal(0.0, 0.5)
         y ~ Normal(mu, 1)
     end
     bare = @brm cat_df begin
@@ -460,14 +524,27 @@ end
     end
     @test_throws "address one by that name" SBBRMI(emitted_guess; mod=@__MODULE__)
 
-    # Concise + explicit reach the same block; that is a duplicate, not a merge.
-    duplicated = @brm cat_df begin
+    # `:` and an explicit predictor reach the same block, but they are NOT a
+    # duplicate: `:` is the default layer and the more specific address wins.
+    layered = @brm cat_df begin
         mu ~ 1 + factor(g) + x
-        effect(g) ~ Normal(0.0, 0.5)
+        effect(:, g) ~ Normal(0.0, 0.5)
         effect(mu, g) ~ Normal(0.0, 0.25)
         y ~ Normal(mu, 1)
     end
-    @test_throws "duplicate prior override" SBBRMI(duplicated; mod=@__MODULE__)
+    layered_code = BayesianRegressionModels.stan_code(SBBRMI(layered; mod=@__MODULE__))
+    @test occursin("cat_g_beta ~ normal(0.0, 0.25);", layered_code)
+    @test !occursin("cat_g_beta ~ normal(0.0, 0.5);", layered_code)
+
+    # Two addresses of EQUAL specificity reaching one block have no winner, and
+    # that is an error rather than a silent last-writer-wins.
+    tied = @brm cat_df begin
+        mu ~ 1 + factor(g) + x
+        effect(:, g) ~ Normal(0.0, 0.5)
+        effect(mu, :) ~ Normal(0.0, 0.25)
+        y ~ Normal(mu, 1)
+    end
+    @test_throws "equally specific" SBBRMI(tied; mod=@__MODULE__)
 
     # Only `Normal` is supported here, same as the population surface.
     wrong_family = @brm cat_df begin

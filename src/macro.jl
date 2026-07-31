@@ -14,8 +14,8 @@ name is gensym-ed). The two-argument form bakes `df` in and returns the
 - `lhs = rhs` — a literal binding (named intermediate).
 - `effect(lp, coefficient) ~ Normal(location, scale)` — an SBBRMI
   population-coefficient prior override.
-- `effect(sd, ID, [lp, [coefficient]]) ~ Exponential(scale)` and
-  `effect(cor, ID) ~ LKJCholesky(K, eta)` — SBBRMI priors for a shared
+- `sd(lp, ID[, coefficient]) ~ Exponential(scale)` and
+  `cor(:, ID) ~ LKJCholesky(K, eta)` — SBBRMI priors for a shared
   `|ID|` random-effect block.
 
 Multiple `~` lines produce a multi-response / distributional model.
@@ -104,38 +104,46 @@ end
 function assign end
 
 """
-    effect(coefficient)
     effect(linear_predictor, coefficient)
-    effect(sd, id[, linear_predictor[, coefficient]])
-    effect(cor, id)
-    effect(:)
-    effect(linear_predictor, :)
+    sd(linear_predictor, id[, coefficient])
+    cor(:, id)
 
-Address a population formula coefficient or shared `|ID|` random-effect block
-in a separate prior statement:
+Address a prior BRM owns, by naming the **parameter** as the head and the
+target in the slots. Every slot is one name or `:`, and `:` means *the
+default* — the base layer that a more specific statement overrides:
 
 ```julia
 @brm begin
     log_ka ~ 1 + weight + (1 | pk | subject)
     effect(log_ka, Intercept) ~ Normal(log(1 / 8), 0.8)
-    effect(log_ka, weight) ~ Normal(0, 0.1)
-    effect(sd, pk) ~ Exponential(2 / 3)
-    effect(cor, pk) ~ LKJCholesky(2, 2)
+    effect(log_ka, weight)    ~ Normal(0, 0.1)
+    sd(:, pk)                 ~ Exponential(2 / 3)
+    cor(:, pk)                ~ LKJCholesky(2, 2)
 end
 ```
 
-The two-argument form is explicit and is preferred for multi-predictor models.
-The one-argument form is accepted when the coefficient label occurs in exactly
-one linear predictor. `sd` and `cor` are reserved first-position classes for
-random-effect addresses. An SD margin may be selected by predictor plus
-coefficient, or by predictor alone when it contributes exactly one margin.
+The grammar is `<quantity>(<linear predictor | :>, <target…>)`. `effect`
+addresses a population coefficient or a categorical column's `K-1` treatment
+contrasts; `sd` and `cor` address a shared `|ID|` random-effect covariance
+block. `sd`'s trailing coefficient slot may be omitted and means `:`, so
+`sd(:, pk)` is the block-wide scale and `sd(log_ka, pk, weight)` is one
+margin. Because `:` is positional rather than a trailing omission,
+`sd(:, pk, weight)` addresses the `weight` margin across *every* predictor
+slicing the block. Correlation priors are block-wide by construction — one
+shared `|ID|` covariance spans every predictor that slices it — so `cor`
+takes `:` in the predictor slot.
 
-The `Colon` address is the *whole-predictor* form used by the joint
-variance-decomposition family [`r2d2`](@ref): `effect(lp, :)` addresses every
-population coefficient of `lp` at once, and bare `effect(:)` does the same for
-the model's single population predictor.
+There is deliberately no concise, predictor-inferring form: name the linear
+predictor or write `:`. Two statements reaching the same parameter resolve
+most-specific-wins — fewer `:` slots wins — and an exact tie is an error.
 
-`effect` is an address marker, not a callable function. Use
+The whole-predictor `Colon` address is also how the joint
+variance-decomposition family [`r2d2`](@ref) attaches: `effect(lp, :) ~
+r2d2(...)` decomposes every population coefficient of `lp` at once, while
+`effect(lp, :) ~ Normal(...)` is simply the default layer for those columns.
+
+`effect` is an address marker, not a callable function; `sd` and `cor` are
+rewritten onto it by the macro and are not exported. Use
 [`effect_priors`](@ref), [`ranef_effect_priors`](@ref), [`r2d2_priors`](@ref),
 and [`ranefcoefnames`](@ref) to inspect the captured statements and margin
 labels.
@@ -389,53 +397,94 @@ else
     error("Don't know how to handle parse!($x)!")
 end
 
-_is_effect_lhs(x) = isxcall(x, :effect)
-# `effect(:)` parses to `Expr(:call, :effect, Symbol(":"))` -- Julia's bare
-# colon reaches the macro as an ordinary Symbol, so the address vector stays
-# homogeneous and no separate Colon carrier is needed.
+# Public prior-address heads. The user writes the PARAMETER as the head --
+# `effect(mu, weight)`, `sd(:, p)`, `cor(:, p)` -- and every head normalises
+# onto the ONE internal `effect(<role>, ...)` carrier built by
+# `_prior_address`, so the introspection walkers and the SBBRMI resolver keep a
+# single representation of an address.
+#
+# Keeping that carrier internal is also why `sd`/`cor` are NOT exported: the
+# macro rewrites the head before `@x` ever evaluates it, so the user never
+# needs them bound -- and exporting `cor` would collide with `Statistics.cor`
+# for anyone doing `using BayesianRegressionModels, Statistics`.
+const _PRIOR_HEADS = (:effect, :sd, :cor)
+
+_is_effect_lhs(x) = any(h -> isxcall(x, h), _PRIOR_HEADS)
+# A bare `:` reaches the macro as an ordinary Symbol, so the address vector
+# stays homogeneous and no separate Colon carrier is needed. `:` means "the
+# default" -- the base layer that a more specific statement overrides.
 const _EFFECT_COLON = Symbol(":")
 _effect_address_symbol(x::Symbol) = x
 _effect_address_symbol(x::QuoteNode) = x.value isa Symbol ? x.value : error(
-    "@brm: `effect(...)` addresses must be symbols, got $(repr(x.value))")
+    "@brm: prior addresses must be symbols, got $(repr(x.value))")
+# Collections in a slot are deliberately reserved, not merely unparseable:
+# decision `06lrbib` deferred them ("we might want to add it at some later
+# point"), so refuse them by NAME rather than letting them fall through to the
+# generic bare-symbol error. Adding them later is then purely additive.
+_effect_address_symbol(x::Expr) =
+    (Meta.isexpr(x, :tuple) || Meta.isexpr(x, :vect)) ? error(
+        "@brm: a prior address slot names ONE target or `:`; collections such " *
+        "as `$x` are not supported yet. Write one statement per target, or " *
+        "use `:` for the default that more specific statements override.") :
+    error("@brm: prior addresses must be bare symbols, got $(repr(x))")
 _effect_address_symbol(x) = error(
-    "@brm: `effect(...)` addresses must be bare symbols, got $(repr(x))")
+    "@brm: prior addresses must be bare symbols, got $(repr(x))")
+
+# Public head + slots -> the internal `effect(...)` address vector.
+#
+#     effect(<lp|:>, <coefficient|:>)   -> [lp, coefficient]
+#     sd(<lp|:>, <ID>[, <coefficient>]) -> [:sd, ID, lp[, coefficient]]
+#     cor(:, <ID>)                      -> [:cor, ID]
+#
+# Every slot is one name or `:`. A trailing `sd` slot may be omitted and means
+# `:`; that is a deterministic DEFAULT, not the predictor INFERENCE removed
+# with the concise one-slot form -- nothing is searched here and nothing can
+# fail to resolve.
+function _prior_address(head::Symbol, args::Vector{Symbol})
+    spelling = "$head($(join(args, ", ")))"
+    if head === :effect
+        length(args) == 2 || error(
+            "@brm: `effect` takes exactly two slots — " *
+            "`effect(<linear_predictor|:>, <coefficient|:>)`; got `$spelling`. " *
+            "The concise predictor-inferring form was removed: name the linear " *
+            "predictor explicitly, or write `:` for the default.")
+        return copy(args)
+    elseif head === :sd
+        length(args) in (2, 3) || error(
+            "@brm: `sd` takes `sd(<linear_predictor|:>, <ID>)` or " *
+            "`sd(<linear_predictor|:>, <ID>, <coefficient>)`; got `$spelling`.")
+        # Build the full internal 4-slot form, then strip trailing `:` so the
+        # common block-wide and per-predictor spellings normalise onto the
+        # address shapes the walkers and backend already understand.
+        full = Symbol[:sd, args[2], args[1], length(args) == 3 ? args[3] : _EFFECT_COLON]
+        while length(full) > 2 && last(full) === _EFFECT_COLON
+            pop!(full)
+        end
+        return full
+    elseif head === :cor
+        length(args) == 2 || error(
+            "@brm: `cor` takes exactly `cor(:, <ID>)`; got `$spelling`.")
+        args[1] === _EFFECT_COLON || error(
+            "@brm: correlation priors are block-wide — one shared `|ID|` " *
+            "covariance block spans every linear predictor that slices it, so " *
+            "there is no per-predictor correlation to address. Write " *
+            "`cor(:, $(args[2]))`, not `$spelling`.")
+        return Symbol[:cor, args[2]]
+    end
+    error("@brm: unknown prior-address head `$head`; valid heads are " *
+          join(("`$h`" for h in _PRIOR_HEADS), ", ") * ".")
+end
 
 function _parse_effect!(lhs::Expr, rhs; info)
-    raw_args = lhs.args[2:end]
-    args = map(_effect_address_symbol, raw_args)
-    if _EFFECT_COLON in args
-        # Whole-predictor address: `effect(:)` or `effect(lp, :)`. The Colon is
-        # only ever legal LAST -- `effect(:, x)` would read as "every predictor's
-        # `x` coefficient", which is not a supported address.
-        last(args) === _EFFECT_COLON || error(
-            "@brm: `:` is only valid as the LAST `effect(...)` address " *
-            "argument; got `effect($(join(args, ", ")))`")
-        count(==(_EFFECT_COLON), args) == 1 || error(
-            "@brm: `effect(...)` accepts at most one `:` address argument")
-        length(args) in (1, 2) || error(
-            "@brm: whole-predictor priors expect `effect(:)` or " *
-            "`effect(linear_predictor, :)`, got $(length(args)) arguments")
-    elseif !isempty(args) && first(args) === :sd
-        length(args) in (2, 3, 4) || error(
-            "@brm: random-effect SD priors expect `effect(sd, ID)`, " *
-            "`effect(sd, ID, linear_predictor)`, or " *
-            "`effect(sd, ID, linear_predictor, coefficient)`, got " *
-            "$(length(args)) arguments")
-    elseif !isempty(args) && first(args) === :cor
-        length(args) == 2 || error(
-            "@brm: random-effect correlation priors expect exactly " *
-            "`effect(cor, ID)`, got $(length(args)) arguments")
-    else
-        length(args) in (1, 2) || error(
-            "@brm: population-effect priors expect `effect(coefficient)` or " *
-            "`effect(linear_predictor, coefficient)`, got $(length(args)) arguments")
-    end
-    key = Symbol("__effect__", join(string.(args), "__"))
+    head = lhs.args[1]::Symbol
+    args = map(_effect_address_symbol, lhs.args[2:end])
+    address = _prior_address(head, args)
+    key = Symbol("__effect__", join(string.(address), "__"))
     haskey(info.alllocals, key) && error(
-        "@brm: duplicate `effect($(join(args, ", ")))` prior statement")
+        "@brm: duplicate `$head($(join(args, ", ")))` prior statement")
     info.alllocals[key] = :local
     parselocals!(rhs; info, val=:nonlocal)
-    quoted_lhs = Expr(:call, :effect, map(QuoteNode, args)...)
+    quoted_lhs = Expr(:call, :effect, map(QuoteNode, address)...)
     :(@n $key = @x $(Expr(:call, :~, quoted_lhs, rhs)))
 end
 rewrite_ranef_ids(x) = x

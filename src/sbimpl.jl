@@ -299,7 +299,7 @@ ranef_correlated_draws = StanBlocks.@slic begin
     return (diag_pre_multiply(tau, L) * z)'   # n_groups x n_terms
 end
 
-# Heterogeneous marginal-SD prior used only when an `effect(sd, ID, ...)`
+# Heterogeneous marginal-SD prior used only when an `sd(...)`
 # statement targets a shared `|ID|` bucket. `family[i] == 0` retains BRM's
 # historical half-standard-normal density for that margin; `family[i] == 1`
 # selects an Exponential whose `rate[i]` is already in Stan's rate
@@ -2058,11 +2058,11 @@ rather than silently emitting an in-sample block. Note also that centered and
 non-centered emissions use different unconstrained coordinates, so fitted
 draws are not interchangeable between them.
 
-Formula statements `effect(sd, ID) ~ Exponential(scale)` and
-`effect(cor, ID) ~ LKJCholesky(K, eta)` configure a shared `|ID|` block.
+Formula statements `sd(:, ID) ~ Exponential(scale)` and
+`cor(:, ID) ~ LKJCholesky(K, eta)` configure a shared `|ID|` block.
 An SD statement can instead select one emitted margin with
-`effect(sd, ID, predictor, coefficient)`, or use the three-argument shorthand
-when that predictor contributes exactly one margin. See [`ranefcoefnames`](@ref)
+`sd(predictor, ID, coefficient)`, or write `sd(predictor, ID)` when that
+predictor contributes exactly one margin. See [`ranefcoefnames`](@ref)
 for the authoritative ordered addresses. Omitted statements retain historical
 defaults; Julia's Exponential scale is converted to Stan's rate.
 
@@ -2211,8 +2211,8 @@ end
 _sb_effect_available_predictors(lp_names, labels_of) =
     sort!(Symbol[lp for lp in lp_names if !isnothing(labels_of(lp))])
 
-# Trailing hint for the concise-address miss: a predictor whose labels could not
-# be resolved was skipped rather than considered, so say so instead of leaving
+# Trailing hint for a `:`-predictor miss: a predictor whose labels could not be
+# resolved was skipped rather than considered, so say so instead of leaving
 # "matches no population coefficient" looking exhaustive. The explicit
 # `effect(linear_predictor, coefficient)` form reports the underlying reason in
 # full, so keep this note bounded to the names.
@@ -2265,8 +2265,35 @@ function _sb_effect_prior_overrides(brmi::BRMI)
         end
     end
 
+    # Every slot is a name or `:`, and `:` means THE DEFAULT: a broader
+    # statement is the base layer that a more specific one overrides. So a cell
+    # carries the winning expression AND the specificity that won it, and
+    # assignment is a comparison rather than a first-writer-wins store.
+    # Specificity counts CONCRETE SLOTS, not how many parameters an address
+    # happens to reach -- `effect(:, weight)` and `effect(mu, :)` are equally
+    # specific and collide on `mu`'s `weight` column, which is the tie error.
     pop_overrides = Dict{Symbol,Vector{Any}}()
     cat_overrides = Dict{Symbol,Dict{Symbol,Any}}()
+    _rank(spec) = (spec.predictor === _EFFECT_COLON ? 0 : 1) +
+                  (spec.coefficient === _EFFECT_COLON ? 0 : 1)
+    _spelling(spec) = "effect($(spec.predictor), $(spec.coefficient))"
+    # `slot` is a 0-argument getter / 1-argument setter pair over whichever
+    # container owns the cell, so pop columns and categorical blocks share one
+    # precedence rule instead of two drifting copies.
+    function _claim!(get_cell, set_cell!, spec, rank, what)
+        held = get_cell()
+        if isnothing(held)
+            set_cell!((; expression=spec.expression, rank, spelling=_spelling(spec)))
+        elseif rank > held.rank
+            set_cell!((; expression=spec.expression, rank, spelling=_spelling(spec)))
+        elseif rank == held.rank
+            error("sbimpl: `$(_spelling(spec))` and `$(held.spelling)` are equally " *
+                  "specific and both set the prior for $what. Neither wins — make " *
+                  "one of them more specific, or drop it.")
+        end
+        nothing
+    end
+
     for spec in specs
         T = _as_distribution_type(spec.family)
         (!isnothing(T) && T <: Normal) || error(
@@ -2277,78 +2304,111 @@ function _sb_effect_prior_overrides(brmi::BRMI)
             "sbimpl: `effect(...) ~ Normal(...)` does not accept distribution " *
             "keywords; put bounds on an explicitly declared scalar parameter instead")
 
-        target = spec.predictor
-        if isnothing(target)
-            # The concise `effect(coefficient)` form is the ONLY one that needs
-            # candidate population formulas, so it is the only one that pays for
-            # naming every predictor -- tolerantly, skipping the unnameable.
-            candidates = Symbol[lp for lp in lp_names
-                                if spec.coefficient in something(labels_of(lp), Symbol[]) ||
-                                   haskey(cat_map_of(lp), spec.coefficient)]
-            isempty(candidates) && error(
-                "sbimpl: `effect($(spec.coefficient))` matches no population " *
-                "coefficient or categorical contrast block. Inspect " *
+        rank = _rank(spec)
+        all_predictors = spec.predictor === _EFFECT_COLON
+        all_coefficients = spec.coefficient === _EFFECT_COLON
+
+        if all_predictors
+            # `:` in the predictor slot fans out over every predictor this
+            # address can legitimately reach -- tolerantly, skipping the
+            # unnameable, since a default layer must not be made fatal by an
+            # unrelated scalar prior declaration.
+            targets = Symbol[lp for lp in lp_names
+                             if all_coefficients ?
+                                (!isnothing(labels_of(lp)) || !isempty(cat_map_of(lp))) :
+                                (spec.coefficient in something(labels_of(lp), Symbol[]) ||
+                                 haskey(cat_map_of(lp), spec.coefficient))]
+            isempty(targets) && error(
+                "sbimpl: `$(_spelling(spec))` matches no population coefficient " *
+                "or categorical contrast block in any linear predictor. Inspect " *
                 "`popcoefnames(brmi, lp)` for valid labels." *
                 _sb_effect_unresolved_note(unresolved))
-            length(candidates) == 1 || error(
-                "sbimpl: `effect($(spec.coefficient))` is ambiguous across linear " *
-                "predictors $(join(candidates, ", ")); use " *
-                "`effect(linear_predictor, $(spec.coefficient))`.")
-            target = only(candidates)
+        else
+            targets = Symbol[spec.predictor]
         end
 
-        # A categorical / integer-coded predictor owns its own K-1 contrast
-        # block (`cat_<c>_beta`) instead of `beta_pop` columns, so it is
-        # structurally absent from `popcoefnames`. Resolve it FIRST: nothing in
-        # `popcoefnames` can ever collide with a name only `_sb_cat_address_map`
-        # knows, and this keeps the block reachable even for an intercept-less
-        # `mu ~ 0 + factor(g)` whose `labels` are legitimately empty.
-        cat_map = cat_map_of(target)
-        if haskey(cat_map, spec.coefficient)
-            emitted = cat_map[spec.coefficient]
-            target_cat = get!(cat_overrides, target) do
-                Dict{Symbol,Any}()
+        for target in targets
+            cat_map = cat_map_of(target)
+            labels = labels_of(target)
+
+            if all_coefficients
+                # The default layer for this predictor: every `beta_pop` column
+                # and every categorical contrast block it owns.
+                if !isnothing(labels) && !isempty(labels)
+                    cells = get!(pop_overrides, target) do
+                        Any[nothing for _ in labels]
+                    end
+                    for idx in eachindex(labels)
+                        _claim!(() -> cells[idx], v -> (cells[idx] = v), spec, rank,
+                                "`$target`'s `$(labels[idx])` column")
+                    end
+                end
+                for emitted in values(cat_map)
+                    target_cat = get!(cat_overrides, target) do
+                        Dict{Symbol,Any}()
+                    end
+                    _claim!(() -> get(target_cat, emitted, nothing),
+                            v -> (target_cat[emitted] = v), spec, rank,
+                            "`$target`'s `$emitted` contrast block")
+                end
+                continue
             end
-            haskey(target_cat, emitted) && error(
-                "sbimpl: duplicate prior override for the categorical contrast " *
-                "block `effect($target, $(spec.coefficient))`")
-            target_cat[emitted] = spec.expression
-            continue
-        end
 
-        labels = labels_of(target)
-        if isnothing(labels)
-            # An EXPLICITLY addressed target that cannot be named is a genuine
-            # error -- just not one an unrelated predictor may raise on its behalf.
-            haskey(unresolved, target) && error(
-                "sbimpl: cannot resolve population-effect labels for predictor ",
-                "`$target` while applying `effect($target, $(spec.coefficient))`: ",
-                unresolved[target])
-            error("sbimpl: `effect($target, $(spec.coefficient))` names no linear " *
-                  "predictor with population coefficients. Available predictors: " *
-                  "$(join(_sb_effect_available_predictors(lp_names, labels_of), ", ")).")
+            # A categorical / integer-coded predictor owns its own K-1 contrast
+            # block (`cat_<c>_beta`) instead of `beta_pop` columns, so it is
+            # structurally absent from `popcoefnames`. Resolve it FIRST: nothing
+            # in `popcoefnames` can ever collide with a name only
+            # `_sb_cat_address_map` knows, and this keeps the block reachable
+            # even for an intercept-less `mu ~ 0 + factor(g)` whose `labels` are
+            # legitimately empty.
+            if haskey(cat_map, spec.coefficient)
+                emitted = cat_map[spec.coefficient]
+                target_cat = get!(cat_overrides, target) do
+                    Dict{Symbol,Any}()
+                end
+                _claim!(() -> get(target_cat, emitted, nothing),
+                        v -> (target_cat[emitted] = v), spec, rank,
+                        "`$target`'s `$emitted` contrast block")
+                continue
+            end
+
+            if isnothing(labels)
+                # An EXPLICITLY addressed target that cannot be named is a
+                # genuine error -- just not one an unrelated predictor may raise
+                # on its behalf.
+                haskey(unresolved, target) && error(
+                    "sbimpl: cannot resolve population-effect labels for predictor ",
+                    "`$target` while applying `$(_spelling(spec))`: ",
+                    unresolved[target])
+                error("sbimpl: `$(_spelling(spec))` names no linear " *
+                      "predictor with population coefficients. Available predictors: " *
+                      "$(join(_sb_effect_available_predictors(lp_names, labels_of), ", ")).")
+            end
+            idx = findfirst(==(spec.coefficient), labels)
+            isnothing(idx) && error(
+                "sbimpl: `$(spec.coefficient)` is not a population coefficient of " *
+                "`$target`. Available labels: $(join(labels, ", "))." *
+                _sb_effect_cat_note(cat_map))
+            cells = get!(pop_overrides, target) do
+                Any[nothing for _ in labels]
+            end
+            _claim!(() -> cells[idx], v -> (cells[idx] = v), spec, rank,
+                    "`$target`'s `$(spec.coefficient)` column")
         end
-        idx = findfirst(==(spec.coefficient), labels)
-        isnothing(idx) && error(
-            "sbimpl: `$(spec.coefficient)` is not a population coefficient of " *
-            "`$target`. Available labels: $(join(labels, ", "))." *
-            _sb_effect_cat_note(cat_map))
-        target_overrides = get!(pop_overrides, target) do
-            Any[nothing for _ in labels]
-        end
-        isnothing(target_overrides[idx]) || error(
-            "sbimpl: duplicate prior override for " *
-            "`effect($target, $(spec.coefficient))`")
-        target_overrides[idx] = spec.expression
     end
 
     # One entry per predictor that any `effect(...)` statement reached. `pop` is
     # `nothing` when only categorical blocks were addressed, so an untouched
-    # `beta_pop` keeps the plain `popefs` emission byte for byte.
+    # `beta_pop` keeps the plain `popefs` emission byte for byte. The winning
+    # expression is unwrapped here so every downstream consumer keeps seeing a
+    # bare expression-or-`nothing`, unaware of the precedence bookkeeping.
+    _unwrap(cell) = isnothing(cell) ? nothing : cell.expression
     out = Dict{Symbol,Any}()
     for lp in union(keys(pop_overrides), keys(cat_overrides))
-        out[lp] = (; pop = get(pop_overrides, lp, nothing),
-                     cat = get(cat_overrides, lp, Dict{Symbol,Any}()))
+        pop = get(pop_overrides, lp, nothing)
+        cat = get(cat_overrides, lp, Dict{Symbol,Any}())
+        out[lp] = (; pop = isnothing(pop) ? nothing : Any[_unwrap(c) for c in pop],
+                     cat = Dict{Symbol,Any}(k => _unwrap(v) for (k, v) in cat))
     end
     out
 end
@@ -5141,11 +5201,11 @@ end
 function _sb_ranef_sd_rate(spec)
     T = _as_distribution_type(spec.family)
     (!isnothing(T) && T <: Exponential) || error(
-        "sbimpl: `effect(sd, ...)` currently supports `Exponential(scale)`; " *
+        "sbimpl: `sd(:, ...)` currently supports `Exponential(scale)`; " *
         "got `$(spec.family)`. Unmentioned margins retain the historical " *
         "half-standard-normal prior.")
     isempty(spec.keywords) || error(
-        "sbimpl: `effect(sd, ...) ~ Exponential(...)` does not accept keywords")
+        "sbimpl: `sd(:, ...) ~ Exponential(...)` does not accept keywords")
     args = map(_sb_effect_prior_arg, spec.arguments)
     length(args) in (0, 1) || error(
         "sbimpl: `Exponential` SD priors expect zero or one Julia scale argument")
@@ -5163,10 +5223,10 @@ end
 function _sb_ranef_lkj(spec, n_terms::Int)
     T = _as_distribution_type(spec.family)
     (!isnothing(T) && T <: LKJCholesky) || error(
-        "sbimpl: `effect(cor, ID)` expects `LKJCholesky(K, eta)`; " *
+        "sbimpl: `cor(:, ID)` expects `LKJCholesky(K, eta)`; " *
         "got `$(spec.family)`")
     isempty(spec.keywords) || error(
-        "sbimpl: `effect(cor, ID) ~ LKJCholesky(...)` does not accept keywords")
+        "sbimpl: `cor(:, ID) ~ LKJCholesky(...)` does not accept keywords")
     args = map(_sb_effect_prior_arg, spec.arguments)
     length(args) == 2 || error(
         "sbimpl: `LKJCholesky` correlation priors require dimension K and eta")
@@ -5184,31 +5244,46 @@ function _sb_ranef_lkj(spec, n_terms::Int)
     Float64(eta)
 end
 
+# Resolve one SD statement onto the margins it claims. `nothing` means the
+# whole block -- the base layer every unclaimed margin falls through to.
+# Otherwise the return is the claimed margin indices plus the statement's
+# SPECIFICITY, counted in concrete (non-`:`) slots beyond the ID exactly as on
+# the population surface, so a more specific statement can override a broader
+# one and an exact tie is an error rather than last-writer-wins.
 function _sb_ranef_margin_index(spec, margins)
-    if isnothing(spec.predictor)
+    spelling = "sd($(isnothing(spec.predictor) ? ":" : spec.predictor), " *
+               "$(spec.id)" *
+               (isnothing(spec.coefficient) ? "" : ", $(spec.coefficient)") * ")"
+    if isnothing(spec.predictor) && isnothing(spec.coefficient)
         return nothing
+    elseif isnothing(spec.predictor)
+        # `sd(:, ID, coefficient)` -- one margin across EVERY predictor that
+        # slices this block. Only spellable since the head-position grammar.
+        hits = findall(m -> m.coefficient === spec.coefficient, margins)
+        isempty(hits) && error(
+            "sbimpl: `$spelling` matches no random-effect margin. Inspect " *
+            "`ranefcoefnames(brmi, :$(spec.id))` for valid addresses.")
+        return (hits, 1)
     elseif isnothing(spec.coefficient)
         hits = findall(m -> m.predictor === spec.predictor, margins)
         isempty(hits) && error(
-            "sbimpl: `effect(sd, $(spec.id), $(spec.predictor))` matches no " *
+            "sbimpl: `$spelling` matches no " *
             "random-effect margin. Inspect `ranefcoefnames(brmi, :$(spec.id))`.")
         length(hits) == 1 || error(
-            "sbimpl: `effect(sd, $(spec.id), $(spec.predictor))` is ambiguous " *
+            "sbimpl: `$spelling` is ambiguous " *
             "because that predictor contributes $(length(hits)) margins; use " *
-            "`effect(sd, $(spec.id), $(spec.predictor), coefficient)`.")
-        return only(hits)
+            "`sd($(spec.predictor), $(spec.id), coefficient)`.")
+        return (hits, 1)
     else
         hits = findall(m -> m.predictor === spec.predictor &&
                             m.coefficient === spec.coefficient, margins)
         isempty(hits) && error(
-            "sbimpl: `effect(sd, $(spec.id), $(spec.predictor), " *
-            "$(spec.coefficient))` matches no random-effect margin. Inspect " *
+            "sbimpl: `$spelling` matches no random-effect margin. Inspect " *
             "`ranefcoefnames(brmi, :$(spec.id))` for valid addresses.")
         length(hits) == 1 || error(
-            "sbimpl: `effect(sd, $(spec.id), $(spec.predictor), " *
-            "$(spec.coefficient))` matches $(length(hits)) margins and is " *
+            "sbimpl: `$spelling` matches $(length(hits)) margins and is " *
             "therefore ambiguous")
-        return only(hits)
+        return (hits, 2)
     end
 end
 
@@ -5224,7 +5299,7 @@ function _sb_ranef_effect_overrides(brmi::BRMI, id_buckets)
     for spec in specs
         matches = Any[k for k in keys(id_buckets) if first(k) === spec.id]
         isempty(matches) && error(
-            "sbimpl: `effect($(spec.class), $(spec.id), ...)` matches no shared " *
+            "sbimpl: `$(spec.class)(:, $(spec.id))` matches no shared " *
             "`|$(spec.id)|` random-effect block")
         length(matches) == 1 || error(
             "sbimpl: public `|$(spec.id)|` addresses $(length(matches)) blocks " *
@@ -5239,29 +5314,37 @@ function _sb_ranef_effect_overrides(brmi::BRMI, id_buckets)
             Dict{Symbol,Any}(
                 :margins => margins,
                 :sd_default => nothing,
-                :sd_overrides => Dict{Int,Float64}(),
+                :sd_overrides => Dict{Int,Tuple{Float64,Int}}(),
                 :lkj_eta => nothing,
             )
         end
 
         if spec.class === :cor
             state[:lkj_eta] === nothing || error(
-                "sbimpl: duplicate correlation prior for `effect(cor, $(spec.id))`")
+                "sbimpl: duplicate correlation prior for `cor(:, $(spec.id))`")
             state[:lkj_eta] = _sb_ranef_lkj(spec, length(margins))
             continue
         end
 
         rate = _sb_ranef_sd_rate(spec)
-        idx = _sb_ranef_margin_index(spec, margins)
-        if isnothing(idx)
+        claim = _sb_ranef_margin_index(spec, margins)
+        if isnothing(claim)
             state[:sd_default] === nothing || error(
-                "sbimpl: duplicate block SD prior for `effect(sd, $(spec.id))`")
+                "sbimpl: duplicate block SD prior for `sd(:, $(spec.id))`")
             state[:sd_default] = rate
         else
-            haskey(state[:sd_overrides], idx) && error(
-                "sbimpl: multiple SD prior statements resolve to margin " *
-                "$(margins[idx]) of `|$(spec.id)|`")
-            state[:sd_overrides][idx] = rate
+            idxs, rank = claim
+            for idx in idxs
+                held = get(state[:sd_overrides], idx, nothing)
+                if isnothing(held) || rank > held[2]
+                    state[:sd_overrides][idx] = (rate, rank)
+                elseif rank == held[2]
+                    error("sbimpl: two SD prior statements are equally " *
+                          "specific and both set the prior for margin " *
+                          "$(margins[idx]) of `|$(spec.id)|`. Neither wins — " *
+                          "make one of them more specific, or drop it.")
+                end
+            end
         end
     end
 
@@ -5271,7 +5354,7 @@ function _sb_ranef_effect_overrides(brmi::BRMI, id_buckets)
         default_rate = state[:sd_default]
         sd_family = fill(isnothing(default_rate) ? 0 : 1, length(margins))
         sd_rate = fill(isnothing(default_rate) ? 1.0 : default_rate, length(margins))
-        for (idx, rate) in state[:sd_overrides]
+        for (idx, (rate, _)) in state[:sd_overrides]
             sd_family[idx] = 1
             sd_rate[idx] = rate
         end
@@ -5352,10 +5435,10 @@ function _sb_r2d2_overrides(brmi::BRMI, id_buckets, effect_overrides)
             candidates = Symbol[lp for lp in lp_names
                                 if !isnothing(labels_of(lp))]
             isempty(candidates) && error(
-                "sbimpl: `effect(:) ~ r2d2(...)` matches no linear predictor " *
+                "sbimpl: `effect(:, :) ~ r2d2(...)` matches no linear predictor " *
                 "with population coefficients")
             length(candidates) == 1 || error(
-                "sbimpl: `effect(:) ~ r2d2(...)` is ambiguous across linear " *
+                "sbimpl: `effect(:, :) ~ r2d2(...)` is ambiguous across linear " *
                 "predictors $(join(candidates, ", ")); use " *
                 "`effect(<linear_predictor>, :) ~ r2d2(...)`.")
             target = only(candidates)
@@ -5723,10 +5806,10 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
            all(m -> haskey(r2d2_names, m.predictor), margins)
             isnothing(ranef_effect) || error(
                 "sbimpl: `|$id_sym|` carries both an `r2d2` decomposition and an " *
-                "`effect(sd|cor, $id_sym, ...)` statement. The decomposition " *
+                "`sd(...)` / `cor(...)` statement on `$id_sym`. The decomposition " *
                 "DERIVES the block's marginal scales, so a sampled SD prior on " *
                 "the same block has nothing to apply to; drop one of the two. " *
-                "(An `effect(cor, $id_sym)` LKJ prior is planned but not built: " *
+                "(An `cor(:, $id_sym)` LKJ prior is planned but not built: " *
                 "an r2d2 block currently keeps LKJ eta 1.)")
             # One margin per predictor, for the same reason the plain path
             # insists on `(1 | g)`: each predictor contributes exactly one

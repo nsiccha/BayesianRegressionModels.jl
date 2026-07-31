@@ -1,4 +1,4 @@
-# test/r2d2_priors.jl — R2D2 variance-decomposition priors (`effect(:) ~ r2d2(...)`).
+# test/r2d2_priors.jl — R2D2 variance-decomposition priors (`effect(lp, :) ~ r2d2(...)`).
 #
 # Run: julia --project=. test/r2d2_priors.jl
 # Set BRM_R2D2_RUNTIME=0 to skip the BridgeStan density/gradient probe.
@@ -122,7 +122,7 @@ end
     # response to derive a scale from, so there is nothing else to default to.
     plain_builder = @brm begin
         eta ~ 1 + wt + age + (1 | subject)
-        effect(:) ~ r2d2(R2=Beta(1, 1))
+        effect(:, :) ~ r2d2(R2=Beta(1, 1))
         conc ~ Normal(eta, 1)
     end
     plain = SBBRMI(plain_builder(df); mod=@__MODULE__)
@@ -149,21 +149,22 @@ end
 end
 
 @testset "rejected shapes error loudly" begin
-    # `:` must be the LAST address argument.
-    @test_throws LoadError eval(quote
-        @brm begin
-            eta ~ 1 + wt
-            effect(:, eta) ~ r2d2(R2=Beta(1, 1))
-            conc ~ Normal(eta, 1)
-        end
-    end)
+    # `:` is positional in every slot now, so `effect(:, eta)` parses — but an
+    # r2d2 decomposition is whole-predictor by construction, so its address
+    # still has to END in `:`. The refusal moved from the parser to the walker.
+    not_whole = @brm begin
+        eta ~ 1 + wt
+        effect(:, eta) ~ r2d2(R2=Beta(1, 1))
+        conc ~ Normal(eta, 1)
+    end
+    @test_throws "must end in" SBBRMI(not_whole(df); mod=@__MODULE__)
 
-    # A bare `effect(:)` only resolves when there is exactly one population
-    # predictor to address.
+    # `effect(:, :) ~ r2d2(...)` only resolves when there is exactly one
+    # population predictor to decompose.
     ambiguous = @brm begin
         eta_a ~ 1 + wt
         eta_b ~ 1 + age
-        effect(:) ~ r2d2(R2=Beta(1, 1))
+        effect(:, :) ~ r2d2(R2=Beta(1, 1))
         conc ~ Normal(eta_a + eta_b, 1)
     end
     @test_throws "linear predictor" SBBRMI(ambiguous(df); mod=@__MODULE__)
@@ -185,11 +186,11 @@ end
     end
     @test_throws "all-or-nothing" SBBRMI(partial_bucket(df); mod=@__MODULE__)
 
-    # An `effect(sd, ...)` prior on an r2d2 block has nothing to apply to.
+    # An `sd(:, ...)` prior on an r2d2 block has nothing to apply to.
     sd_conflict = @brm begin
         eta ~ 1 + wt + (1 | p | subject)
         effect(eta, :) ~ r2d2(R2=Beta(1, 1), tau_bsv=0.5)
-        effect(sd, p) ~ Exponential(1)
+        sd(:, p) ~ Exponential(1)
         conc ~ Normal(eta, 1)
     end
     @test_throws "DERIVES" SBBRMI(sd_conflict(df); mod=@__MODULE__)

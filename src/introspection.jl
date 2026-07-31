@@ -205,15 +205,18 @@ in formula order. Each entry has
 (; predictor, coefficient, family, arguments, keywords, expression)
 ```
 
-`predictor` is a `Symbol` for the explicit
-`effect(linear_predictor, coefficient)` form and `nothing` for the concise
-`effect(coefficient)` form. `coefficient` uses the same labels as
-[`popcoefnames`](@ref), including `:Intercept`. `expression` is the exact
-parsed RHS [`ExprColumn`](@ref); `family`, `arguments`, and `keywords` are its
-decomposed, directly inspectable parts.
+Both slots are always present: `predictor` and `coefficient` are each either
+a `Symbol` or `Symbol(":")`, the wildcard meaning *every value of this slot*.
+`coefficient` uses the same labels as [`popcoefnames`](@ref), including
+`:Intercept`. `expression` is the exact parsed RHS [`ExprColumn`](@ref);
+`family`, `arguments`, and `keywords` are its decomposed, directly inspectable
+parts.
 
-The SBBRMI backend resolves a concise address only when the label belongs to
-exactly one linear predictor, and rejects ambiguous or unknown labels.
+A `Symbol(":")` slot is the *default layer*: the SBBRMI backend applies such a
+statement to every parameter it reaches, and lets a more specific statement —
+one with fewer wildcard slots — override it. Two statements of equal
+specificity reaching one parameter have no winner and error, as do addresses
+matching no parameter at all.
 """
 function effect_priors(brmi::BRMI)
     out = NamedTuple[]
@@ -227,17 +230,18 @@ function effect_priors(brmi::BRMI)
         getf(lhs_e) === effect || continue
         address = getargs(lhs_e)
         !isempty(address) && first(address) in (:sd, :cor) && continue
-        # Whole-predictor `Colon` addresses belong to `r2d2_priors`, not here:
-        # they name every population coefficient of a predictor at once rather
-        # than one labelled column.
-        _EFFECT_COLON in address && continue
-        length(address) in (1, 2) || error(
-            "effect_priors: malformed effect address with $(length(address)) arguments")
         rhs_e = _as_expr_column(rhs)
         isnothing(rhs_e) && error(
             "effect_priors: `effect(...)` RHS is not a distribution expression")
-        predictor = length(address) == 2 ? address[1] : nothing
-        coefficient = address[end]
+        # A `Colon` coefficient slot is shared: with an `r2d2(...)` RHS it is the
+        # joint variance decomposition and belongs to `r2d2_priors`; with an
+        # ordinary distribution it is simply the DEFAULT layer for those columns,
+        # which is an effect prior like any other. The RHS disambiguates.
+        getf(rhs_e) === r2d2 && continue
+        length(address) == 2 || error(
+            "effect_priors: malformed effect address with $(length(address)) arguments")
+        predictor = address[1]
+        coefficient = address[2]
         push!(out, (; predictor, coefficient, family=getf(rhs_e),
                      arguments=getargs(rhs_e), keywords=getkwargs(rhs_e),
                      expression=rhs_e))
@@ -255,9 +259,11 @@ in formula order. Each entry has
 (; class, id, predictor, coefficient, family, arguments, keywords, expression)
 ```
 
-`class` is `:sd` or `:cor`. A block-wide statement has `predictor === nothing`
-and `coefficient === nothing`; the unique-predictor SD shorthand has only
-`coefficient === nothing`. The fully explicit SD address carries both symbols.
+`class` is `:sd` or `:cor`. `predictor === nothing` means the statement is not
+predictor-specific — `sd(:, ID)`, and always `cor(:, ID)`, since a shared
+`|ID|` covariance block spans every predictor that slices it. `coefficient ===
+nothing` means the whole block rather than one margin. `sd(lp, ID, coef)`
+carries both symbols.
 Use [`ranefcoefnames`](@ref) for the authoritative ordered margin addresses of
 a shared `|ID|` block.
 """
@@ -282,7 +288,12 @@ function ranef_effect_priors(brmi::BRMI)
         rhs_e = _as_expr_column(rhs)
         isnothing(rhs_e) && error(
             "ranef_effect_priors: `effect(...)` RHS is not a distribution expression")
-        predictor = length(address) >= 3 ? address[3] : nothing
+        # `nothing` uniformly means "every linear predictor slicing the block":
+        # both the block-wide `sd(:, ID)` (two-symbol address) and the margin
+        # form `sd(:, ID, coef)` (an explicit Colon in slot 3) reach every
+        # predictor, and the backend should not have to distinguish them.
+        predictor = length(address) >= 3 && address[3] !== _EFFECT_COLON ?
+                    address[3] : nothing
         coefficient = length(address) == 4 ? address[4] : nothing
         push!(out, (; class, id=address[2], predictor, coefficient,
                      family=getf(rhs_e), arguments=getargs(rhs_e),
@@ -297,7 +308,7 @@ end
     r2d2_priors(brmi::BRMI) -> Vector{NamedTuple}
 
 Return the whole-predictor variance-decomposition statements captured by
-[`@brm`](@ref) — the `effect(:) ~ r2d2(...)` / `effect(lp, :) ~ r2d2(...)`
+[`@brm`](@ref) — the `effect(lp, :) ~ r2d2(...)` / `effect(:, :) ~ r2d2(...)`
 family — in formula order. Each entry has
 
 ```julia
@@ -305,8 +316,9 @@ family — in formula order. Each entry has
 ```
 
 `predictor` is a `Symbol` for the explicit `effect(lp, :)` form and `nothing`
-for the bare `effect(:)` form, which the SBBRMI backend resolves only when the
-model has exactly one population predictor. `family` is the marker function
+for the wildcard `effect(:, :)` form, which the SBBRMI backend resolves only
+when the model has exactly one population predictor — a decomposition is
+per-predictor, so there is nothing to share. `family` is the marker function
 ([`r2d2`](@ref)); `keywords` carries the decomposition's `R2` / `tau_bsv` /
 `alpha` settings.
 
@@ -326,16 +338,21 @@ function r2d2_priors(brmi::BRMI)
         isnothing(lhs_e) && continue
         getf(lhs_e) === effect || continue
         address = getargs(lhs_e)
-        _EFFECT_COLON in address || continue
-        last(address) === _EFFECT_COLON || error(
-            "r2d2_priors: `:` is only valid as the last effect address argument")
-        length(address) in (1, 2) || error(
-            "r2d2_priors: malformed whole-predictor address with " *
-            "$(length(address)) arguments")
+        !isempty(address) && first(address) in (:sd, :cor) && continue
         rhs_e = _as_expr_column(rhs)
         isnothing(rhs_e) && error(
             "r2d2_priors: `effect(..., :)` RHS is not a distribution expression")
-        predictor = length(address) == 2 ? address[1] : nothing
+        # The marker function is the discriminator, not the address shape: an
+        # ordinary distribution on a Colon address is a default-layer effect
+        # prior and belongs to `effect_priors`.
+        getf(rhs_e) === r2d2 || continue
+        length(address) == 2 || error(
+            "r2d2_priors: malformed whole-predictor address with " *
+            "$(length(address)) arguments")
+        last(address) === _EFFECT_COLON || error(
+            "r2d2_priors: `r2d2(...)` decomposes a whole predictor; its address " *
+            "must end in `:`, got `effect($(join(address, ", ")))`")
+        predictor = address[1] === _EFFECT_COLON ? nothing : address[1]
         push!(out, (; predictor, family=getf(rhs_e), arguments=getargs(rhs_e),
                      keywords=getkwargs(rhs_e), expression=rhs_e))
     end
