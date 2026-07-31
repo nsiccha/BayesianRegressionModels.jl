@@ -4412,8 +4412,12 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     if !isempty(pop_terms)
         col_exprs = Any[]
         for t in pop_terms
+            # `ran_terms` rides along for the intercept's tier-1c length probe:
+            # a group term names this formula's row axis, which is the only
+            # signal available when the intercept is the sole population term.
             _sb_pop_cols!(col_exprs, t, data, stmts, pop_terms;
-                          obs_n, group_block_lookup, term_overrides)
+                          obs_n, ran_terms, target, group_block_lookup,
+                          term_overrides)
         end
         X_name = Symbol(:X_, target)
         pop_name = Symbol(:pop_, target)
@@ -5008,14 +5012,20 @@ end
 # an intercept term (`t === 1`) can probe peer terms in the same block for a
 # deterministic length probe (analogous to how `pop_terms` is threaded on the
 # population path; see `_sb_pop_cols!`).
-function _sb_ranef_cols!(cols, data, stmts, t, gterms=())
-    _sb_ranef_cols_dispatch!(cols, data, stmts, t, _sb_cat_levels(t), gterms)
+# `group_idx` names this block's per-row grouping index. A Z column's row axis
+# IS the grouping factor's by construction, so passing it settles the intercept
+# length probe outright (tier 1c) instead of leaving it to guess — see
+# `_sb_predictor_col(::Int, ...)`. Callers that have no flat per-row index in
+# hand omit it; `mm(...)`'s `<mm>_idx` is an n_obs x n_memberships MATRIX, so
+# `num_elements` would give it rows*cols and it is deliberately NOT threaded.
+function _sb_ranef_cols!(cols, data, stmts, t, gterms=(); group_idx=nothing)
+    _sb_ranef_cols_dispatch!(cols, data, stmts, t, _sb_cat_levels(t), gterms; group_idx)
 end
-_sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(offset)}, gterms=()) =
+_sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(offset)}, gterms=(); kwargs...) =
     error("sbimpl: `offset(...)` is a population-level fixed contribution and cannot appear inside a random-effects term")
-_sb_ranef_cols_dispatch!(cols, data, stmts, t, ::Nothing, gterms=()) =
-    push!(cols, _sb_predictor_col(t, data, stmts, gterms))
-function _sb_ranef_cols_dispatch!(cols, data, _stmts, t, levels, _gterms=())
+_sb_ranef_cols_dispatch!(cols, data, stmts, t, ::Nothing, gterms=(); group_idx=nothing) =
+    push!(cols, _sb_predictor_col(t, data, stmts, gterms; group_idx))
+function _sb_ranef_cols_dispatch!(cols, data, _stmts, t, levels, _gterms=(); group_idx=nothing)
     n_levels, idx = _sb_level_index(levels)
     n_levels >= 2 || error("sbimpl: categorical ranef term `$(name(t))` needs >= 2 levels (got $n_levels)")
     for lvl in 2:n_levels
@@ -5244,7 +5254,7 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, 
     else
         col_exprs = Any[]
         for t in gterms
-            _sb_ranef_cols!(col_exprs, data, stmts, t, gterms)
+            _sb_ranef_cols!(col_exprs, data, stmts, t, gterms; group_idx=idx_name)
         end
         Z_name = Symbol(:Z_, target, :_, g)
         k_name = Symbol(:n_terms_, target, :_, g)
@@ -5389,7 +5399,7 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::Tuple{NamedCo
     r_name = Symbol(:r_, target, :_, suffix)
     col_exprs = Any[]
     for t in gterms
-        _sb_ranef_cols!(col_exprs, data, stmts, t, gterms)
+        _sb_ranef_cols!(col_exprs, data, stmts, t, gterms; group_idx=idx_name)
     end
     Z_name = Symbol(:Z_, target, :_, suffix)
     k_name = Symbol(:n_terms_, target, :_, suffix)
@@ -6298,7 +6308,7 @@ function _sb_emit_id_ranef_block!(stmts, data, target::Symbol, info, gterms, sum
     r_name = Symbol(:r_, target, :_, suffix)
     col_exprs = Any[]
     for t in gterms
-        _sb_ranef_cols!(col_exprs, data, stmts, t, gterms)
+        _sb_ranef_cols!(col_exprs, data, stmts, t, gterms; group_idx=idx_name)
     end
     length(col_exprs) == length(cols) ||
         error("sbimpl: id-bucket `$suffix` for target `$target`: expanded $(length(col_exprs)) columns but reserved $(length(cols)) — internal mismatch")
@@ -6392,12 +6402,12 @@ _sb_collect_terms_expr!(acc, _, x) = push!(acc, x)
 # `pop_terms` is threaded so the intercept emitter can borrow N from a
 # data-backed peer in the same formula (deterministic) rather than
 # probing the shared `data` dict in hash order.
-_sb_pop_cols!(cols, t, data, stmts, pop_terms=(); obs_n=nothing, group_block_lookup=Dict(), term_overrides=Dict{Symbol,Any}()) =
-    push!(cols, _sb_predictor_col(t, data, stmts, pop_terms; obs_n, group_block_lookup, term_overrides))
-_sb_pop_cols!(cols, t::ExprColumn, data, stmts, pop_terms=(); obs_n=nothing, group_block_lookup=Dict(), term_overrides=Dict{Symbol,Any}()) =
-    _sb_pop_cols_expr!(cols, getf(t), t, data, stmts, pop_terms; obs_n, group_block_lookup, term_overrides)
-_sb_pop_cols_expr!(cols, ::Any, t, data, stmts, pop_terms=(); obs_n=nothing, group_block_lookup=Dict(), term_overrides=Dict{Symbol,Any}()) =
-    push!(cols, _sb_predictor_col(t, data, stmts, pop_terms; obs_n, group_block_lookup, term_overrides))
+_sb_pop_cols!(cols, t, data, stmts, pop_terms=(); obs_n=nothing, ran_terms=(), target=nothing, group_block_lookup=Dict(), term_overrides=Dict{Symbol,Any}()) =
+    push!(cols, _sb_predictor_col(t, data, stmts, pop_terms; obs_n, ran_terms, target, group_block_lookup, term_overrides))
+_sb_pop_cols!(cols, t::ExprColumn, data, stmts, pop_terms=(); obs_n=nothing, ran_terms=(), target=nothing, group_block_lookup=Dict(), term_overrides=Dict{Symbol,Any}()) =
+    _sb_pop_cols_expr!(cols, getf(t), t, data, stmts, pop_terms; obs_n, ran_terms, target, group_block_lookup, term_overrides)
+_sb_pop_cols_expr!(cols, ::Any, t, data, stmts, pop_terms=(); obs_n=nothing, ran_terms=(), target=nothing, group_block_lookup=Dict(), term_overrides=Dict{Symbol,Any}()) =
+    push!(cols, _sb_predictor_col(t, data, stmts, pop_terms; obs_n, ran_terms, target, group_block_lookup, term_overrides))
 _sb_pop_cols_expr!(cols, ::typeof(&), t, data, stmts, _pop_terms=(); kwargs...) =
     _sb_interaction_cols!(cols, t, data, stmts)
 
@@ -6501,9 +6511,9 @@ end
 # `~` statement (e.g. `mo(c)`) can push before returning their column symbol.
 # Integer `1` -> intercept, NamedColumn -> reference by name, ExprColumn(mo, c)
 # -> submodel-sampled contrast column.
-_sb_predictor_col(t::Int, data, _stmts, pop_terms=(); obs_n::Union{Symbol,Nothing}=nothing, kwargs...) = begin
+_sb_predictor_col(t::Int, data, _stmts, pop_terms=(); obs_n::Union{Symbol,Nothing}=nothing, ran_terms=(), group_idx=nothing, target=nothing, kwargs...) = begin
     t == 1 || error("sbimpl: integer term must be `1` for intercept, got `$t`")
-    # Four-tier length probe, in priority order:
+    # Five-tier length probe, in priority order:
     #   1. A data-backed peer in the same formula's terms (`_sb_n_obs_probe`).
     #      Deterministic for any mixed-intercept formula like `y ~ 1 + x`.
     #   1b. A data-backed column NESTED inside one of those terms
@@ -6516,17 +6526,42 @@ _sb_predictor_col(t::Int, data, _stmts, pop_terms=(); obs_n::Union{Symbol,Nothin
     #      — the SUBJECT axis — inside an `X` matrix sized by the event axis.
     #      stanc accepts that (both extents are runtime), so it fails as a
     #      dimension error at instantiation rather than at lowering.
+    #   1c. The formula's own GROUP term (`_sb_group_n_obs_probe`). A formula
+    #      whose only population term IS the intercept — `log_ka ~ 1 + (1|p|subject)`
+    #      — has no top-level peer for tier 1 and nothing wrapped for tier 1b,
+    #      yet it still names its row axis unambiguously: the grouping factor
+    #      IS the frame, so its per-row index column has exactly this formula's
+    #      length. Deterministic, and it cannot pick a wrong frame the way
+    #      tiers 2/3 can. This is the two-axis (`ragged(x, group)`) failure of
+    #      tier 1b in the OPPOSITE direction: the per-SUBJECT `log_ka` was
+    #      sized off an EVENT-axis column found in hash order, so
+    #      `pop_log_ka + r_log_ka_p_subject` added an 11-vector to a 2-vector
+    #      and every log-density evaluation threw (snag
+    #      `two-axis-brm-an-9881c01b`, reported by `Bruno:arv393`).
+    #      Deliberately ranked BELOW tiers 1/1b rather than ahead of them: a
+    #      population peer in the same formula is on that same row axis by
+    #      construction, so promoting the group probe would rewrite the emitted
+    #      extent for every ordinary mixed model (`y ~ 1 + x + (1|g)`) while
+    #      fixing nothing.
+    #      A caller EMITTING a ranef block's Z columns passes `group_idx`
+    #      directly instead: it already holds the block's per-row index, and a Z
+    #      column's row axis is the grouping factor's by construction. The two
+    #      spellings are the same tier and never both apply — the population
+    #      path has `ran_terms` and no `group_idx`, the ranef path the reverse.
     #   2. The observation column threaded from the likelihood walker
     #      (`obs_n`). Covers purely-intercept formulas like `loc ~ 1` whose
     #      length matches the observed `~` target consuming `loc`.
     #   3. Hash-order fallback (`_sb_any_data_symbol`). Last resort; lossy
     #      for composite models with multi-length data and reachable only
-    #      when neither (1) nor (2) yields a name (e.g. a `~ 1` formula
-    #      whose target isn't referenced by any observed likelihood).
+    #      when none of (1), (1b), (1c) or (2) yields a name (e.g. a `~ 1`
+    #      formula with no group term whose target isn't referenced by any
+    #      observed likelihood).
     probe = _sb_n_obs_probe(pop_terms)
     isnothing(probe) && (probe = _sb_n_obs_probe_deep(pop_terms, data))
+    isnothing(probe) && (probe = group_idx)
+    isnothing(probe) && (probe = _sb_group_n_obs_probe(data, ran_terms))
     isnothing(probe) && !isnothing(obs_n) && (probe = obs_n)
-    isnothing(probe) && (probe = _sb_any_data_symbol(data))
+    isnothing(probe) && (probe = _sb_any_data_symbol(data, target))
     :(rep_vector(1., num_elements($probe)))
 end
 _sb_predictor_col(t::NamedColumn, data, _stmts, _pop_terms=(); kwargs...) = _predictor_col_for(t, parent(t), data)
@@ -6885,6 +6920,35 @@ _n_obs_name_deep(t::ExprColumn, data) = begin
     nothing
 end
 
+# Tier 1c of the intercept length probe (see `_sb_predictor_col(::Int, …)`):
+# a `(… | g)` term names this formula's row axis outright. The grouping factor
+# IS the frame, so `g`'s per-row index column — the same `<g>_idx` the ranef
+# block itself is about to consume — has exactly the formula's length. That is
+# the whole fix for an intercept-only per-subject formula in a two-axis model:
+# the answer was already a local in `_sb_linear_predictor!`, one `ran_terms`
+# away, while the probe fell through to guessing.
+#
+# Sizing goes through `_sb_ensure_group_data!`, NOT a re-derivation of the
+# index name: that helper is the single source of truth both the ID prepass and
+# the plain-block emitter already call, it is idempotent by contract, and
+# routing through it is what keeps this probe from drifting out of lockstep
+# with the name the ranef block actually declares.
+#
+# Group shapes with no single per-row index column fall through to the later
+# tiers rather than guessing: `mm(...)` spreads each row across several
+# memberships, so it has no `<g>_idx` of the formula's length to offer.
+_sb_group_n_obs_probe(data, ran_terms) = begin
+    for rt in ran_terms
+        _, _, desc = _sb_ranef_parts(rt)
+        n = _sb_group_row_idx(data, desc)
+        isnothing(n) || return n
+    end
+    nothing
+end
+_sb_group_row_idx(data, g::NamedColumn) = first(_sb_ensure_group_data!(data, g))
+_sb_group_row_idx(data, g::Tuple{NamedColumn,NamedColumn}) = _sb_ensure_group_data!(data, g).idx_name
+_sb_group_row_idx(_data, _g) = nothing
+
 # Prepass: build a `target -> observation` map. For each `~` op whose LHS is
 # observed (a data-backed NamedColumn directly, or wrapped in a link like
 # `log(y)` over a data-backed NamedColumn), walk the RHS recursively and
@@ -6934,17 +6998,51 @@ _sb_collect_rhs_refs!(target_obs, x::ExprColumn, obs_name) = begin
     foreach(a -> _sb_collect_rhs_refs!(target_obs, a, obs_name), getargs(x))
     foreach(v -> _sb_collect_rhs_refs!(target_obs, v, obs_name), values(getkwargs(x)))
 end
-_sb_any_data_symbol(data) = begin
+_sb_any_data_symbol(data, target=nothing) = begin
     isempty(data) && error("sbimpl: can't emit `rep_vector(1., n)` — no data column seen yet. Make sure an observed `~` comes before the intercept-only predictor, or add a concrete covariate.")
     # Prefer a flat length-N vector (numeric / integer) so `num_elements(...)` in
     # Stan resolves to an int. Skip ragged `Vector{<:AbstractVector}` layouts
     # (bruno-ext's `dose_times`) which StanBlocks serializes as a
     # `tuple(vector, array[] int)` that Stan's `num_elements` rejects.
+    #
+    # The pick is `Dict` HASH ORDER, so it is only meaningful when every
+    # candidate has the same length — i.e. a single-frame model, where any
+    # answer is right and real `~ 1` formulas depend on this tier. Once the
+    # candidates span SEVERAL lengths the model has more than one row axis and
+    # this is a coin flip: `num_elements(...)` is a runtime extent, so stanc
+    # accepts the losing side and it dies as a dimension error on every
+    # log-density evaluation instead of at lowering. Measured while handling
+    # snag `two-axis-brm-an-9881c01b`: the same two-axis fixture picked the
+    # RIGHT axis, then the WRONG one, after dropping a single unrelated column
+    # from a NEIGHBOURING formula. So refuse rather than guess (decision
+    # `0mt4q2s`) — the earlier tiers already resolve every case a formula can
+    # state for itself, and this message names the frames it could not choose
+    # between.
+    first_hit = nothing
+    # Keyed by length, so the message names each distinct row axis once. Hash
+    # order does not leak into it: the entries are sorted by length below.
+    by_len = Dict{Int,Symbol}()
     for (k, v) in data
         k === _SB_PREPROC_KEY && continue
         hit = _flat_vec_key(k, v)
-        isnothing(hit) || return hit
+        isnothing(hit) && continue
+        isnothing(first_hit) && (first_hit = hit)
+        get!(by_len, length(v), hit)
     end
+    if length(by_len) > 1
+        where_ = isnothing(target) ? "an intercept-only predictor" : "predictor `$target`"
+        frames = join(("$n (e.g. `$k`)" for (n, k) in sort!(collect(by_len); by=first)), ", ")
+        error(
+            "sbimpl: cannot determine the row axis for $where_. Its formula names no ",
+            "population covariate, no group term, and no observed likelihood references ",
+            "its target, so there is nothing in the formula to size the intercept from — ",
+            "and this model spans SEVERAL row axes, with candidate lengths $frames. ",
+            "Picking one would be a guess that stanc accepts and that then fails as a ",
+            "dimension error on every log-density evaluation. Say which frame the ",
+            "predictor lives on: add a group term (`$(isnothing(target) ? "loc" : target) ~ 1 + (1 | <group>)`) ",
+            "naming that frame's grouping column, or a population covariate from it.")
+    end
+    isnothing(first_hit) || return first_hit
     first(k for k in keys(data) if k !== _SB_PREPROC_KEY)
 end
 
