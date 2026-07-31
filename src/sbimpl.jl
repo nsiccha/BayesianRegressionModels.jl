@@ -193,9 +193,12 @@ end
 # contrast vector; the walker hcat's it as one column of X_pop so popefs
 # supplies the free beta (matches vimpl's free-beta `mo` variant, not `mo1`).
 # Named `_sb_mo` to avoid clashing with vimpl's marker function `mo`.
+# The Dirichlet concentration arrives as DATA rather than being built inline,
+# so `simplex(<lp|:>, mo1(c)) ~ Dirichlet(...)` configures this ONE submodel
+# instead of selecting a second copy of it. Julia supplies `rep_vector(1., K-1)`
+# when the formula says nothing, which is the density the inline form had.
 _sb_mo = StanBlocks.@slic begin
-    n_levels = maximum(x)
-    simplex_incr ~ dirichlet(rep_vector(1., n_levels - 1))
+    simplex_incr ~ dirichlet(alpha)
     return cumulative_sum(append_row(0., simplex_incr))[x]
 end
 
@@ -319,6 +322,7 @@ StanBlocks.@deffun begin
         rv
     end
 end
+
 
 ranef_correlated_draws_effect = StanBlocks.@slic begin
     L      ~ lkj_corr_cholesky(lkj_eta; n=n_terms)
@@ -1261,15 +1265,23 @@ end
 # Penalized 1-D thin-plate regression spline. `Xnull` contains the unpenalized
 # polynomial null space {1, x}; `Zpen` is the range-space basis after the
 # wiggliness penalty has been diagonalized and absorbed into the columns. The
-# standardized range coefficients therefore have one iid Gaussian scale `sds`,
+# standardized range coefficients therefore have one iid Gaussian scale,
 # matching the mixed-model parameterization used by mgcv/brms. The caller adds
 # the resulting length-N contribution directly to the linear predictor.
+#
+# That scale is `sd_pen[1]` rather than a bare `sds` so `sd(<lp|:>, s(x)) ~
+# Exponential(scale)` configures THIS submodel instead of selecting a second
+# copy of it: `brm_ranef_sd` carries a family switch, `family == 0` being the
+# half-standard-normal the formula gets when it says nothing. Only the scale is
+# configurable — `b_pen_raw` stays standardized, because scaling it would
+# duplicate the smoothing SD and change the advertised parameterization
+# (decision `145tp0o`).
 _sb_s = StanBlocks.@slic begin
     n_pen = dims(Zpen)[2]
     b_fixed::vector[2]
-    sds ~ std_normal(; lower=0.)
+    sd_pen ~ brm_ranef_sd(sd_family, sd_rate; n=1, lower=0.)
     b_pen_raw ~ std_normal(; n=n_pen)
-    b_pen = sds * b_pen_raw
+    b_pen = sd_pen[1] * b_pen_raw
     return Xnull * b_fixed + Zpen * b_pen
 end
 
@@ -1278,20 +1290,23 @@ end
 # unpenalized NN columns. The remaining RR, RN, and NR blocks correspond to the
 # three penalties used by mgcv/brms `t2(..., full=FALSE)` and deliberately get
 # distinct smoothing scales.
+#
+# The three scales are one `vector[3]` in fixed (rr, rn, nr) order so a per-block
+# `sd(<lp|:>, t2(x, z), <block>)` statement can configure any subset of them
+# through `brm_ranef_sd`'s family switch, leaving the rest half-standard-normal.
+# `_sb_t2_sd_index` owns the name -> index mapping.
 _sb_t2 = StanBlocks.@slic begin
     n_rr = dims(Zrr)[2]
     n_rn = dims(Zrn)[2]
     n_nr = dims(Znr)[2]
     b_fixed::vector[3]
-    sd_rr ~ std_normal(; lower=0.)
-    sd_rn ~ std_normal(; lower=0.)
-    sd_nr ~ std_normal(; lower=0.)
+    sd_pen ~ brm_ranef_sd(sd_family, sd_rate; n=3, lower=0.)
     b_rr_raw ~ std_normal(; n=n_rr)
     b_rn_raw ~ std_normal(; n=n_rn)
     b_nr_raw ~ std_normal(; n=n_nr)
-    b_rr = sd_rr * b_rr_raw
-    b_rn = sd_rn * b_rn_raw
-    b_nr = sd_nr * b_nr_raw
+    b_rr = sd_pen[1] * b_rr_raw
+    b_rn = sd_pen[2] * b_rn_raw
+    b_nr = sd_pen[3] * b_nr_raw
     return Xfixed * b_fixed + Zrr * b_rr + Zrn * b_rn + Znr * b_nr
 end
 
@@ -1531,8 +1546,13 @@ end
 # The linear predictor uses `x_true` via popefs's free beta, so `me` behaves
 # like a regular continuous covariate except the predictor values themselves
 # are parameters.
+# `x_true` is a genuine model-scale quantity — the latent TRUE covariate, on
+# the same scale as the observed one — so unlike a standardized innovation it
+# takes a prior directly, via `latent(<lp|:>, me(x)) ~ Normal(loc, scale)`.
+# Location/scale are data, defaulting to (0, 1): the standard normal the
+# inline form had. The observation likelihood is never configurable.
 _sb_me = StanBlocks.@slic begin
-    x_true ~ std_normal(; n=num_elements(x_obs))
+    x_true ~ normal(x_true_loc, x_true_scale; n=num_elements(x_obs))
     x_obs ~ normal(x_true, sd_x)
     return x_true
 end
@@ -1657,10 +1677,10 @@ end
 _sb_gp = StanBlocks.@slic begin
     n_obs = dims(X)[1]
     X_gp = brm_gp_locations(X)
-    log_rho   ~ std_normal()
-    log_sigma ~ std_normal()
-    z         ~ std_normal(; n=n_obs)
-    K = brm_exp_quad_cov(X_gp, exp(log_sigma), exp(log_rho), jitter)
+    rho   ~ lognormal(0., 1.; lower=0.)
+    sigma ~ lognormal(0., 1.; lower=0.)
+    z     ~ std_normal(; n=n_obs)
+    K = brm_exp_quad_cov(X_gp, sigma, rho, jitter)
     return cholesky_decompose(K) * z
 end
 
@@ -1668,11 +1688,10 @@ _sb_gp_aniso = StanBlocks.@slic begin
     n_obs = dims(X)[1]
     n_axes = dims(X)[2]
     X_gp = brm_gp_locations(X)
-    log_rho :: vector[n_axes] ~ std_normal()
-    log_sigma ~ std_normal()
-    z         ~ std_normal(; n=n_obs)
-    rho = exp(log_rho)
-    K = brm_exp_quad_cov(X_gp, exp(log_sigma), rho, jitter)
+    rho :: vector[n_axes] ~ lognormal(0., 1.; lower=0.)
+    sigma ~ lognormal(0., 1.; lower=0.)
+    z     ~ std_normal(; n=n_obs)
+    K = brm_exp_quad_cov(X_gp, sigma, rho, jitter)
     return cholesky_decompose(K) * z
 end
 
@@ -1683,22 +1702,21 @@ end
 _sb_hsgp = StanBlocks.@slic begin
     n_basis = dims(omega2)[1]
     n_axes = dims(omega2)[2]
-    log_rho   ~ std_normal()
-    log_sigma ~ std_normal()
-    beta_raw  ~ std_normal(; n=n_basis)
-    rho = rep_vector(exp(log_rho), n_axes)
-    sqrt_spd = brm_hsgp_sqrt_spd(omega2, exp(log_sigma), rho)
+    rho_iso  ~ lognormal(0., 1.; lower=0.)
+    sigma    ~ lognormal(0., 1.; lower=0.)
+    beta_raw ~ std_normal(; n=n_basis)
+    rho = rep_vector(rho_iso, n_axes)
+    sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma, rho)
     return PHI * (sqrt_spd .* beta_raw)
 end
 
 _sb_hsgp_aniso = StanBlocks.@slic begin
     n_basis = dims(omega2)[1]
     n_axes = dims(omega2)[2]
-    log_rho :: vector[n_axes] ~ std_normal()
-    log_sigma ~ std_normal()
-    beta_raw  ~ std_normal(; n=n_basis)
-    rho = exp(log_rho)
-    sqrt_spd = brm_hsgp_sqrt_spd(omega2, exp(log_sigma), rho)
+    rho :: vector[n_axes] ~ lognormal(0., 1.; lower=0.)
+    sigma    ~ lognormal(0., 1.; lower=0.)
+    beta_raw ~ std_normal(; n=n_basis)
+    sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma, rho)
     return PHI * (sqrt_spd .* beta_raw)
 end
 
@@ -1706,20 +1724,19 @@ end
 # groups (decision 7p44fo); only tensor-basis weights vary by group.
 _sb_hsgp_by = StanBlocks.@slic begin
     n_axes = dims(omega2)[2]
-    log_rho   ~ std_normal()
-    log_sigma ~ std_normal()
-    rho = rep_vector(exp(log_rho), n_axes)
-    sqrt_spd = brm_hsgp_sqrt_spd(omega2, exp(log_sigma), rho)
+    rho_iso ~ lognormal(0., 1.; lower=0.)
+    sigma   ~ lognormal(0., 1.; lower=0.)
+    rho = rep_vector(rho_iso, n_axes)
+    sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma, rho)
     PHI_scaled = diag_post_multiply(PHI, sqrt_spd)
     return rows_dot_product(PHI_scaled, beta[group_idx, :])
 end
 
 _sb_hsgp_by_aniso = StanBlocks.@slic begin
     n_axes = dims(omega2)[2]
-    log_rho :: vector[n_axes] ~ std_normal()
-    log_sigma ~ std_normal()
-    rho = exp(log_rho)
-    sqrt_spd = brm_hsgp_sqrt_spd(omega2, exp(log_sigma), rho)
+    rho :: vector[n_axes] ~ lognormal(0., 1.; lower=0.)
+    sigma ~ lognormal(0., 1.; lower=0.)
+    sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma, rho)
     PHI_scaled = diag_post_multiply(PHI, sqrt_spd)
     return rows_dot_product(PHI_scaled, beta[group_idx, :])
 end
@@ -2437,6 +2454,13 @@ function _sb_cat_effect_overrides(effect_overrides, lp::Symbol)
     e = get(effect_overrides, lp, nothing)
     isnothing(e) ? Dict{Symbol,Any}() : e.cat
 end
+# `term` is absent from the record when no term-parameter statement exists, so
+# the population/categorical assembly stays untouched and every consumer that
+# never asks for it keeps its old value shape.
+function _sb_term_effect_overrides(effect_overrides, lp::Symbol)
+    e = get(effect_overrides, lp, nothing)
+    (isnothing(e) || !hasproperty(e, :term)) ? Dict{Symbol,Any}() : e.term
+end
 
 function _sb_effect_normal_args(rhs::ExprColumn)
     args = _sb_stan_dist_args(getf(rhs), map(_sb_effect_prior_arg, getargs(rhs)))
@@ -2495,7 +2519,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     for (_, op) in pairs(brmi.operations)
         _sb_visit_op!(prepass, op)
     end
-    effect_overrides = _sb_effect_prior_overrides(brmi)
+    effect_overrides = _sb_prior_overrides(brmi)
     # Prepass 1: stash every data-backed NamedColumn so later intercept-only
     # predictors have a length probe to hang `rep_vector(1., num_elements(...))`
     # off, regardless of iteration order. Decorators that materialise their
@@ -4378,6 +4402,11 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     # carrier expression-capable; sampled/direct submodels still push Symbols.
     summands = Any[]
 
+    # Term-internal parameter priors are addressed per TERM, not per column, so
+    # they ride down to the emitter that owns the term's submodel call rather
+    # than being resolved into a per-column vector the way `pop` is.
+    term_overrides = _sb_term_effect_overrides(effect_overrides, brmi_key)
+
     if !isempty(pop_terms)
         col_exprs = Any[]
         for t in pop_terms
@@ -4385,7 +4414,9 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
             # tier-1d / tier-1c length probes: a categorical peer or a group
             # term names this formula's row axis, and one of them is the only
             # signal available when the intercept is the sole population term.
-            _sb_pop_cols!(col_exprs, t, data, stmts, pop_terms; obs_n, ran_terms, direct_terms, target, group_block_lookup)
+            _sb_pop_cols!(col_exprs, t, data, stmts, pop_terms;
+                          obs_n, ran_terms, direct_terms, target,
+                          group_block_lookup, term_overrides)
         end
         X_name = Symbol(:X_, target)
         pop_name = Symbol(:pop_, target)
@@ -4421,7 +4452,7 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     cat_overrides = _sb_cat_effect_overrides(effect_overrides, brmi_key)
     for dt in direct_terms
         _sb_emit_direct!(stmts, data, target, dt, summands;
-                         group_block_lookup, cat_overrides)
+                         group_block_lookup, cat_overrides, term_overrides)
     end
 
     # A plain (un-`|ID|`'d) random effect under an `r2d2` decomposition IS the
@@ -4578,6 +4609,258 @@ end
 # An address that would name two different blocks (only reachable by writing
 # both `factor(c)` and `factor(c; ref=k)` in one predictor) is dropped rather
 # than silently resolving to the first, so `effect(...)` fails loudly instead.
+# ---- term-parameter prior resolution ---------------------------------------
+#
+# `term_priors` yields statements addressed by TERM KEY — `Symbol("s(age)")`,
+# the term as the formula spells it. Resolution walks each linear predictor's
+# own terms, keys them the SAME way, and hands the winning statement to the
+# emitter as a per-predictor `Dict{Symbol,Any}`, exactly like `cat_overrides`.
+
+# Canonical key for a term as the BACKEND sees it. Must agree character for
+# character with `_term_address_key` in `macro.jl`, which builds the same key
+# from surface syntax — that agreement IS the address resolution. Numeric and
+# keyword arguments are excluded on both sides, so `me(x, 0.5)` and `me(x)`
+# name one term.
+_sb_term_arg_name(x::NamedColumn) = name(x)
+_sb_term_arg_name(_x) = nothing
+_sb_term_key(t) = Symbol(nameof(getf(t)), "(",
+    join((n for n in (_sb_term_arg_name(a) for a in getargs(t)) if !isnothing(n)), ","), ")")
+
+# The three penalty blocks of a tensor smooth, in the order `_sb_t2` samples
+# them. Fixed here so the public component name and the vector index cannot
+# drift apart.
+const _SB_T2_BLOCKS = (:rr, :rn, :nr)
+_sb_t2_sd_index(c::Symbol) = findfirst(==(c), _SB_T2_BLOCKS)
+
+# term key -> the terms carrying it, for one linear predictor. Only terms that
+# own configurable parameters are listed; anything else is simply absent, so an
+# address naming it fails with "matches no term" rather than resolving to
+# something that has nothing to configure. The value is a VECTOR because two
+# spellings of one key in one predictor (`s(x) + s(x)`) make the address
+# ambiguous — the resolver reports that as its own error rather than silently
+# configuring whichever copy the walker reached first.
+const _SB_PRIOR_TERMS = (mo, mo1, me, s, t2)
+function _sb_term_address_map(brmi::BRMI, lhs::Symbol)
+    out = Dict{Symbol,Vector{Any}}()
+    op = linear_predictor_op(brmi, lhs)
+    isnothing(op) && return out
+    for t in _sb_terms(getargs(op, 2)[2])
+        t isa ExprColumn || continue
+        any(f -> getf(t) === f, _SB_PRIOR_TERMS) || continue
+        push!(get!(() -> Any[], out, _sb_term_key(t)), t)
+    end
+    out
+end
+
+_sb_term_spelling(spec) = begin
+    head = spec.class === :term_sd ? "sd" :
+           spec.class === :term_simplex ? "simplex" : "latent"
+    lp = isnothing(spec.predictor) ? ":" : string(spec.predictor)
+    comp = isnothing(spec.component) ? "" : ", $(spec.component)"
+    "$head($lp, $(spec.term)$comp)"
+end
+
+# One spec -> the emission-ready configuration for the term it reached, with
+# every class/term/component mismatch refused by name. Returns a pair so the
+# caller can key several statements onto ONE term (the three `t2` blocks) while
+# keeping precedence per addressed parameter rather than per term.
+function _sb_term_config(spec, t, spelling)
+    f = getf(t)
+    if spec.class === :term_sd
+        if f === s
+            isnothing(spec.component) || error(
+                "sbimpl: `$spelling` names a component, but `s(x)` has exactly " *
+                "one smoothing scale. Write `sd($(isnothing(spec.predictor) ? ":" : spec.predictor), $(spec.term))`.")
+            return (:sd, (; rate=_sb_ranef_sd_rate(spec, spelling)))
+        elseif f === t2
+            isnothing(spec.component) && error(
+                "sbimpl: `$spelling` is ambiguous — a tensor smooth has three " *
+                "independent smoothing scales. Name one of " *
+                join(("`$b`" for b in _SB_T2_BLOCKS), ", ") * ".")
+            isnothing(_sb_t2_sd_index(spec.component)) && error(
+                "sbimpl: `$spelling` names no penalty block of `$(spec.term)`; " *
+                "valid blocks are " * join(("`$b`" for b in _SB_T2_BLOCKS), ", ") * ".")
+            return (Symbol(:sd_, spec.component), (; rate=_sb_ranef_sd_rate(spec, spelling)))
+        end
+        error("sbimpl: `$spelling` — `$(nameof(f))` has no smoothing scale to " *
+              "configure. `sd(...)` on a term applies to `s(x)` and `t2(x, z)`.")
+    elseif spec.class === :term_simplex
+        (f === mo || f === mo1) || error(
+            "sbimpl: `$spelling` — `$(nameof(f))` has no simplex to configure. " *
+            "`simplex(...)` applies to `mo(c)` and `mo1(c)`.")
+        isnothing(spec.component) || error("sbimpl: `$spelling` takes no component slot")
+        T = _as_distribution_type(spec.family)
+        (!isnothing(T) && T <: Dirichlet) || error(
+            "sbimpl: `$spelling` expects `Dirichlet(...)`; got `$(spec.family)`")
+        isempty(spec.keywords) || error(
+            "sbimpl: `$spelling ~ Dirichlet(...)` does not accept keywords")
+        return (:simplex, (; alpha=map(_sb_effect_prior_arg, spec.arguments)))
+    end
+    f === me || error(
+        "sbimpl: `$spelling` — `$(nameof(f))` has no latent covariate to " *
+        "configure. `latent(...)` applies to `me(x, sd)`.")
+    isnothing(spec.component) || error("sbimpl: `$spelling` takes no component slot")
+    T = _as_distribution_type(spec.family)
+    (!isnothing(T) && T <: Normal) || error(
+        "sbimpl: `$spelling` expects `Normal(location, scale)`; got `$(spec.family)`")
+    isempty(spec.keywords) || error(
+        "sbimpl: `$spelling ~ Normal(...)` does not accept keywords")
+    loc, scale = _sb_effect_normal_args(spec.expression)
+    (:latent, (; loc, scale))
+end
+
+# Resolve every term-parameter statement onto `lp -> term key -> config`.
+# Empty when the formula has none, so an unconfigured model never pays for the
+# walk and its emission is decided entirely by the Julia-side defaults.
+function _sb_term_prior_overrides(brmi::BRMI)
+    specs = term_priors(brmi)
+    isempty(specs) && return Dict{Symbol,Dict{Symbol,Any}}()
+
+    lp_names = Symbol[x.name for x in linear_predictors(brmi)]
+    # Same lazy/memoised discipline as the population and categorical paths: a
+    # predictor is walked only when a statement could reach it, and a shape
+    # that cannot be walked is skipped rather than made fatal for the model.
+    resolved = Dict{Symbol,Dict{Symbol,Vector{Any}}}()
+    map_of(lp::Symbol) = get!(resolved, lp) do
+        _sb_is_prior_declaration(brmi, lp) && return Dict{Symbol,Vector{Any}}()
+        try
+            _sb_term_address_map(brmi, lp)
+        catch
+            Dict{Symbol,Vector{Any}}()
+        end
+    end
+
+    # `:` in the predictor slot is the DEFAULT layer, exactly as everywhere
+    # else on this surface: rank 0, overridden by a named predictor at rank 1,
+    # and an exact tie is an error rather than a silent winner.
+    staged = Dict{Symbol,Dict{Symbol,Dict{Symbol,Any}}}()
+    for spec in specs
+        spelling = _sb_term_spelling(spec)
+        rank = isnothing(spec.predictor) ? 0 : 1
+        targets = if isnothing(spec.predictor)
+            hits = Symbol[lp for lp in lp_names if haskey(map_of(lp), spec.term)]
+            isempty(hits) && error(
+                "sbimpl: `$spelling` matches no `$(spec.term)` term in any " *
+                "linear predictor.")
+            hits
+        else
+            haskey(map_of(spec.predictor), spec.term) || error(
+                "sbimpl: `$spelling` matches no `$(spec.term)` term in `" *
+                "$(spec.predictor)`. Terms carrying configurable parameters " *
+                "there: " * (isempty(map_of(spec.predictor)) ? "(none)" :
+                join(("`$k`" for k in sort!(collect(keys(map_of(spec.predictor))), by=string)), ", ")) * ".")
+            Symbol[spec.predictor]
+        end
+        for lp in targets
+            hits = map_of(lp)[spec.term]
+            length(hits) == 1 || error(
+                "sbimpl: `$spelling` is ambiguous — `$lp` carries $(length(hits)) " *
+                "terms spelled `$(spec.term)`, and a prior address cannot tell " *
+                "them apart. Give them distinguishable arguments, or drop the " *
+                "statement.")
+            slot, cfg = _sb_term_config(spec, only(hits), spelling)
+            cells = get!(staged, lp) do
+                Dict{Symbol,Dict{Symbol,Any}}()
+            end
+            per_term = get!(cells, spec.term) do
+                Dict{Symbol,Any}()
+            end
+            held = get(per_term, slot, nothing)
+            if isnothing(held) || rank > held.rank
+                per_term[slot] = (; cfg, rank, spelling)
+            elseif rank == held.rank
+                error("sbimpl: `$spelling` and `$(held.spelling)` are equally " *
+                      "specific and both set the same parameter of `$(spec.term)` " *
+                      "in `$lp`. Neither wins — make one of them more specific, " *
+                      "or drop it.")
+            end
+        end
+    end
+
+    out = Dict{Symbol,Dict{Symbol,Any}}()
+    for (lp, cells) in staged
+        out[lp] = Dict{Symbol,Any}(
+            k => Dict{Symbol,Any}(slot => held.cfg for (slot, held) in per_term)
+            for (k, per_term) in cells)
+    end
+    out
+end
+
+# ---- readers for the resolved term dict -------------------------------------
+#
+# One function per configurable parameter. Each returns the EMISSION expression
+# for both cases, so the default an unconfigured formula gets is written down
+# exactly once instead of once per call site.
+
+_sb_term_cfg(term_overrides, t, slot) = begin
+    per_term = get(term_overrides, _sb_term_key(t), nothing)
+    isnothing(per_term) ? nothing : get(per_term, slot, nothing)
+end
+
+# `brm_ranef_sd`'s two data vectors for a smoothing term: family 0 is the
+# half-standard-normal an unmentioned scale keeps, family 1 the exponential.
+# `slots` fixes both the length and the block order, so the addressed component
+# and the sampled vector index cannot drift apart.
+_sb_term_sd_slots(::typeof(s)) = (:sd,)
+_sb_term_sd_slots(::typeof(t2)) = map(c -> Symbol(:sd_, c), _SB_T2_BLOCKS)
+function _sb_term_sd_args(term_overrides, t)
+    slots = _sb_term_sd_slots(getf(t))
+    family = Any[0 for _ in slots]
+    rate = Any[1.0 for _ in slots]
+    for (i, slot) in pairs(slots)
+        cfg = _sb_term_cfg(term_overrides, t, slot)
+        isnothing(cfg) && continue
+        family[i] = 1
+        rate[i] = cfg.rate
+    end
+    Expr(:vect, family...), Expr(:vect, rate...)
+end
+
+# Dirichlet concentration for a `mo`/`mo1` term with `n_levels` levels, hence a
+# length `n_levels - 1` increment simplex. One argument is broadcast over the
+# whole simplex; `n_levels - 1` of them set it elementwise.
+function _sb_mo_alpha_expr(term_overrides, t, n_levels)
+    k = n_levels - 1
+    cfg = _sb_term_cfg(term_overrides, t, :simplex)
+    isnothing(cfg) && return :(rep_vector(1., $k))
+    a = cfg.alpha
+    all(x -> x isa Real && isfinite(x) && x > 0, a) || error(
+        "sbimpl: `simplex(..., $(_sb_term_key(t))) ~ Dirichlet(...)` expects " *
+        "finite positive numeric concentrations, got $(repr(a))")
+    length(a) == 1 && return :(rep_vector($(Float64(only(a))), $k))
+    length(a) == k || error(
+        "sbimpl: `simplex(..., $(_sb_term_key(t))) ~ Dirichlet(...)` expects " *
+        "either one concentration or $k of them (one per increment of a " *
+        "$n_levels-level monotonic effect), got $(length(a)).")
+    Expr(:vect, map(Float64, a)...)
+end
+
+# Location/scale of a `me` term's latent true covariate. The (0, 1) default is
+# the standard normal the unconfigured submodel has always used.
+function _sb_me_latent_args(term_overrides, t)
+    cfg = _sb_term_cfg(term_overrides, t, :latent)
+    isnothing(cfg) ? (0.0, 1.0) : (cfg.loc, cfg.scale)
+end
+
+# The single carrier every prior surface rides on. Folding the term dict into
+# the record `_sb_effect_prior_overrides` already produces keeps the whole
+# threading path — nine `_sb_emit!`/`_sb_sampling!` signatures deep — unchanged,
+# and lets a formula that configures ONLY a term parameter still reach
+# `_sb_linear_predictor!`.
+function _sb_prior_overrides(brmi::BRMI)
+    effects = _sb_effect_prior_overrides(brmi)
+    terms = _sb_term_prior_overrides(brmi)
+    isempty(terms) && return effects
+    out = Dict{Symbol,Any}()
+    for lp in union(keys(effects), keys(terms))
+        e = get(effects, lp, nothing)
+        out[lp] = (; pop = isnothing(e) ? nothing : e.pop,
+                     cat = isnothing(e) ? Dict{Symbol,Any}() : e.cat,
+                     term = get(terms, lp, Dict{Symbol,Any}()))
+    end
+    out
+end
+
 function _sb_cat_address_map(brmi::BRMI, lhs::Symbol)
     emitted = _sb_cat_coefnames(brmi, lhs)
     out = Dict{Symbol,Symbol}()
@@ -4631,16 +4914,18 @@ _sb_emit_direct!(stmts, data, target::Symbol, t::NamedColumn, summands;
     _sb_emit_cat!(stmts, data, t, summands;
                   prior=get(cat_overrides, name(t), nothing))
 function _sb_emit_direct!(stmts, data, target::Symbol, t::ExprColumn, summands;
-                          group_block_lookup=Dict(), cat_overrides=Dict{Symbol,Any}())
+                          group_block_lookup=Dict(), cat_overrides=Dict{Symbol,Any}(),
+                          term_overrides=Dict{Symbol,Any}())
     f = getf(t)
     if f === gp || f === hsgp
-        push!(summands, _sb_predictor_term!(stmts, data, f, t; group_block_lookup))
+        push!(summands, _sb_predictor_term!(stmts, data, f, t;
+                                            group_block_lookup, term_overrides))
         return
     end
-    _sb_emit_direct_expr!(stmts, data, target, getf(t), t, summands)
+    _sb_emit_direct_expr!(stmts, data, target, getf(t), t, summands; term_overrides)
 end
 function _sb_emit_direct_expr!(_stmts, data, _target::Symbol,
-                               ::typeof(offset), t, summands)
+                               ::typeof(offset), t, summands; kwargs...)
     args = getargs(t)
     length(args) == 1 || error(
         "sbimpl: `offset(x)` expects exactly one positional argument, got $(length(args))")
@@ -4651,23 +4936,27 @@ function _sb_emit_direct_expr!(_stmts, data, _target::Symbol,
     # and, critically, introduces no `popefs` coefficient.
     push!(summands, _sb_scalar_expr(only(args), data))
 end
-function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(mo1), t, summands)
+function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(mo1), t, summands;
+                               term_overrides=Dict{Symbol,Any}())
     inner_name, raw = _sb_inner_data(:mo1, only(getargs(t)))
     n_levels, idx = _sb_level_index(raw)
     n_levels >= 2 || error("sbimpl: `mo1($inner_name)` needs >= 2 levels (got $n_levels)")
     idx_name = Symbol(inner_name, :_idx)
     col_name = Symbol(:mo1_, inner_name)
     data[idx_name] = idx
-    push!(stmts, :($col_name ~ _sb_mo(; x=$idx_name)))
+    alpha = _sb_mo_alpha_expr(term_overrides, t, n_levels)
+    push!(stmts, :($col_name ~ _sb_mo(; x=$idx_name, alpha=$alpha)))
     push!(summands, col_name)
 end
-function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(s), t, summands)
-    push!(summands, _sb_predictor_term!(stmts, data, s, t))
+function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(s), t, summands;
+                               term_overrides=Dict{Symbol,Any}())
+    push!(summands, _sb_predictor_term!(stmts, data, s, t; term_overrides))
 end
-function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(t2), t, summands)
-    push!(summands, _sb_predictor_term!(stmts, data, t2, t; target))
+function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(t2), t, summands;
+                               term_overrides=Dict{Symbol,Any}())
+    push!(summands, _sb_predictor_term!(stmts, data, t2, t; target, term_overrides))
 end
-_sb_emit_direct_expr!(_stmts, _data, _target::Symbol, f, _t, _summands) =
+_sb_emit_direct_expr!(_stmts, _data, _target::Symbol, f, _t, _summands; kwargs...) =
     error("sbimpl: unsupported direct-summand term `$f`")
 
 # Categorical population-level predictor. Allocates K-1 betas via `_sb_cat`
@@ -5208,24 +5497,28 @@ function ranefcoefnames(brmi::BRMI, id::Symbol)
     _sb_id_bucket_margins(last(only(matches)))
 end
 
-function _sb_ranef_sd_rate(spec)
+# Shared by the random-effect margins and the smoothing scales of `s`/`t2`:
+# both sample their SD through `brm_ranef_sd`, so both accept exactly the same
+# family. `spelling` is the address as the formula wrote it, so the message
+# names the statement the user can actually edit.
+function _sb_ranef_sd_rate(spec, spelling::AbstractString="sd(:, ...)")
     T = _as_distribution_type(spec.family)
     (!isnothing(T) && T <: Exponential) || error(
-        "sbimpl: `sd(:, ...)` currently supports `Exponential(scale)`; " *
-        "got `$(spec.family)`. Unmentioned margins retain the historical " *
-        "half-standard-normal prior.")
+        "sbimpl: `$spelling` currently supports `Exponential(scale)`; " *
+        "got `$(spec.family)`. An unmentioned scale keeps the half-standard-" *
+        "normal prior.")
     isempty(spec.keywords) || error(
-        "sbimpl: `sd(:, ...) ~ Exponential(...)` does not accept keywords")
+        "sbimpl: `$spelling ~ Exponential(...)` does not accept keywords")
     args = map(_sb_effect_prior_arg, spec.arguments)
     length(args) in (0, 1) || error(
-        "sbimpl: `Exponential` SD priors expect zero or one Julia scale argument")
+        "sbimpl: `$spelling ~ Exponential` expects zero or one Julia scale argument")
     scale = isempty(args) ? 1.0 : only(args)
     scale isa Real || error(
-        "sbimpl: random-effect SD prior scale must be a numeric formula " *
-        "constant, got $(repr(scale))")
+        "sbimpl: `$spelling` scale must be a numeric formula constant, " *
+        "got $(repr(scale))")
     isfinite(scale) && scale > 0 || error(
-        "sbimpl: random-effect SD prior scale must be finite and strictly " *
-        "positive, got $scale")
+        "sbimpl: `$spelling` scale must be finite and strictly positive, " *
+        "got $scale")
     # Distributions.Exponential uses scale; Stan's exponential_lpdf uses rate.
     Float64(1.0 / scale)
 end
@@ -5336,7 +5629,7 @@ function _sb_ranef_effect_overrides(brmi::BRMI, id_buckets)
             continue
         end
 
-        rate = _sb_ranef_sd_rate(spec)
+        rate = _sb_ranef_sd_rate(spec, "sd(:, $(spec.id))")
         claim = _sb_ranef_margin_index(spec, margins)
         if isnothing(claim)
             state[:sd_default] === nothing || error(
@@ -6108,12 +6401,12 @@ _sb_collect_terms_expr!(acc, _, x) = push!(acc, x)
 # `pop_terms` is threaded so the intercept emitter can borrow N from a
 # data-backed peer in the same formula (deterministic) rather than
 # probing the shared `data` dict in hash order.
-_sb_pop_cols!(cols, t, data, stmts, pop_terms=(); obs_n=nothing, ran_terms=(), direct_terms=(), target=nothing, group_block_lookup=Dict()) =
-    push!(cols, _sb_predictor_col(t, data, stmts, pop_terms; obs_n, ran_terms, direct_terms, target, group_block_lookup))
-_sb_pop_cols!(cols, t::ExprColumn, data, stmts, pop_terms=(); obs_n=nothing, ran_terms=(), direct_terms=(), target=nothing, group_block_lookup=Dict()) =
-    _sb_pop_cols_expr!(cols, getf(t), t, data, stmts, pop_terms; obs_n, ran_terms, direct_terms, target, group_block_lookup)
-_sb_pop_cols_expr!(cols, ::Any, t, data, stmts, pop_terms=(); obs_n=nothing, ran_terms=(), direct_terms=(), target=nothing, group_block_lookup=Dict()) =
-    push!(cols, _sb_predictor_col(t, data, stmts, pop_terms; obs_n, ran_terms, direct_terms, target, group_block_lookup))
+_sb_pop_cols!(cols, t, data, stmts, pop_terms=(); obs_n=nothing, ran_terms=(), direct_terms=(), target=nothing, group_block_lookup=Dict(), term_overrides=Dict{Symbol,Any}()) =
+    push!(cols, _sb_predictor_col(t, data, stmts, pop_terms; obs_n, ran_terms, direct_terms, target, group_block_lookup, term_overrides))
+_sb_pop_cols!(cols, t::ExprColumn, data, stmts, pop_terms=(); obs_n=nothing, ran_terms=(), direct_terms=(), target=nothing, group_block_lookup=Dict(), term_overrides=Dict{Symbol,Any}()) =
+    _sb_pop_cols_expr!(cols, getf(t), t, data, stmts, pop_terms; obs_n, ran_terms, direct_terms, target, group_block_lookup, term_overrides)
+_sb_pop_cols_expr!(cols, ::Any, t, data, stmts, pop_terms=(); obs_n=nothing, ran_terms=(), direct_terms=(), target=nothing, group_block_lookup=Dict(), term_overrides=Dict{Symbol,Any}()) =
+    push!(cols, _sb_predictor_col(t, data, stmts, pop_terms; obs_n, ran_terms, direct_terms, target, group_block_lookup, term_overrides))
 _sb_pop_cols_expr!(cols, ::typeof(&), t, data, stmts, _pop_terms=(); kwargs...) =
     _sb_interaction_cols!(cols, t, data, stmts)
 
@@ -6307,7 +6600,8 @@ _sb_predictor_col(t, _data, _stmts, _pop_terms=(); kwargs...) = error("sbimpl: u
 # Monotonic-effect predictor: emit `mo_<c> ~ _sb_mo(; x=<c>_idx)` and return
 # `mo_<c>` as the column. Scope: single NamedColumn inner arg backed by raw
 # data. Other wrapped terms dispatch to their own methods below.
-_sb_predictor_term!(stmts, data, ::typeof(mo), t; kwargs...) = begin
+_sb_predictor_term!(stmts, data, ::typeof(mo), t;
+                    term_overrides=Dict{Symbol,Any}(), kwargs...) = begin
     inner_name, raw = _sb_inner_data(:mo, only(getargs(t)))
     n_levels, idx = _sb_level_index(raw)
     n_levels >= 2 || error("sbimpl: `mo($inner_name)` needs >= 2 levels (got $n_levels)")
@@ -6317,7 +6611,8 @@ _sb_predictor_term!(stmts, data, ::typeof(mo), t; kwargs...) = begin
     # Frozen level set drives the monotonic-effect simplex dimension; re-coding
     # a new df against it is dimension-coupled (unseen level / changed count).
     _sb_record_preproc!(data, idx_name, PreprocEntry(:mo, _sb_fit_levels(raw), inner_name, true))
-    push!(stmts, :($col_name ~ _sb_mo(; x=$idx_name)))
+    alpha = _sb_mo_alpha_expr(term_overrides, t, n_levels)
+    push!(stmts, :($col_name ~ _sb_mo(; x=$idx_name, alpha=$alpha)))
     col_name
 end
 # Measurement-error predictor `me(x_obs, sd_x)`: emit a submodel that allocates
@@ -6325,7 +6620,8 @@ end
 # likelihood `x_obs ~ normal(me_<x>, sd_x)`. Returns `me_<x>` as the predictor
 # column so popefs supplies a free beta. `sd_x` must be a positive constant;
 # per-row error sizes would require a vector kwarg and a tweaked submodel.
-_sb_predictor_term!(stmts, data, ::typeof(me), t; kwargs...) = begin
+_sb_predictor_term!(stmts, data, ::typeof(me), t;
+                    term_overrides=Dict{Symbol,Any}(), kwargs...) = begin
     args = getargs(t)
     length(args) == 2 || error("sbimpl: `me(x, sd)` expects 2 args, got $(length(args))")
     inner, sd_arg = args
@@ -6339,7 +6635,9 @@ _sb_predictor_term!(stmts, data, ::typeof(me), t; kwargs...) = begin
     sd_name = Symbol(:sd_, xname)
     data[sd_name] = Float64(sd_arg)
     col_name = Symbol(:me_, xname)
-    push!(stmts, :($col_name ~ _sb_me(; x_obs=$xname, sd_x=$sd_name)))
+    loc, scale = _sb_me_latent_args(term_overrides, t)
+    push!(stmts, :($col_name ~ _sb_me(; x_obs=$xname, sd_x=$sd_name,
+                                        x_true_loc=$loc, x_true_scale=$scale)))
     col_name
 end
 # Penalized thin-plate predictor `s(x)`. Fits a frozen rank-10 TPS eigenbasis
@@ -6348,7 +6646,8 @@ end
 # flat null-space coefficients, penalized coefficients, and smoothing SD; the
 # returned contribution is a direct summand (no extra `popefs` beta). Only
 # the default basis is supported -- `bs` and `k=`/`knots=` are follow-ons.
-_sb_predictor_term!(stmts, data, ::typeof(s), t; kwargs...) = begin
+_sb_predictor_term!(stmts, data, ::typeof(s), t;
+                    term_overrides=Dict{Symbol,Any}(), kwargs...) = begin
     args = getargs(t)
     length(args) == 1 || error("sbimpl: `s(x)` expects 1 positional arg, got $(length(args))")
     isempty(getkwargs(t)) || error("sbimpl: `s(x)` does not support keyword arguments yet")
@@ -6365,7 +6664,9 @@ _sb_predictor_term!(stmts, data, ::typeof(s), t; kwargs...) = begin
     _sb_record_preproc!(data, Xnull_name,
         PreprocEntry(:spline, (; fit, zpen_key=Zpen_name), xname, false))
     col_name = Symbol(:s_, xname)
-    push!(stmts, :($col_name ~ _sb_s(; Xnull=$Xnull_name, Zpen=$Zpen_name)))
+    sd_family, sd_rate = _sb_term_sd_args(term_overrides, t)
+    push!(stmts, :($col_name ~ _sb_s(; Xnull=$Xnull_name, Zpen=$Zpen_name,
+                                       sd_family=$sd_family, sd_rate=$sd_rate)))
     col_name
 end
 
@@ -6375,7 +6676,8 @@ end
 # smoothing scales and standardized range coefficients. It is therefore a
 # direct summand, never multiplied by an additional `popefs` beta.
 _sb_predictor_term!(stmts, data, ::typeof(t2), t;
-                    target::Union{Symbol,Nothing}=nothing, kwargs...) = begin
+                    target::Union{Symbol,Nothing}=nothing,
+                    term_overrides=Dict{Symbol,Any}(), kwargs...) = begin
     args = getargs(t)
     length(args) == 2 || error(
         "sbimpl: `t2(x, z)` expects exactly 2 positional margins, got $(length(args))")
@@ -6399,8 +6701,10 @@ _sb_predictor_term!(stmts, data, ::typeof(t2), t;
         (; fit, zrr_key=Zrr_name, zrn_key=Zrn_name, znr_key=Znr_name),
         names, false))
     col_name = Symbol(:t2_, suffix)
+    sd_family, sd_rate = _sb_term_sd_args(term_overrides, t)
     push!(stmts, :($col_name ~ _sb_t2(;
-        Xfixed=$Xfixed_name, Zrr=$Zrr_name, Zrn=$Zrn_name, Znr=$Znr_name)))
+        Xfixed=$Xfixed_name, Zrr=$Zrr_name, Zrn=$Zrn_name, Znr=$Znr_name,
+        sd_family=$sd_family, sd_rate=$sd_rate)))
     col_name
 end
 

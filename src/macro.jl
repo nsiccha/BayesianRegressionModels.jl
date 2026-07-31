@@ -407,7 +407,7 @@ end
 # macro rewrites the head before `@x` ever evaluates it, so the user never
 # needs them bound -- and exporting `cor` would collide with `Statistics.cor`
 # for anyone doing `using BayesianRegressionModels, Statistics`.
-const _PRIOR_HEADS = (:effect, :sd, :cor)
+const _PRIOR_HEADS = (:effect, :sd, :cor, :simplex, :latent)
 
 _is_effect_lhs(x) = any(h -> isxcall(x, h), _PRIOR_HEADS)
 # A bare `:` reaches the macro as an ordinary Symbol, so the address vector
@@ -430,18 +430,98 @@ _effect_address_symbol(x::Expr) =
 _effect_address_symbol(x) = error(
     "@brm: prior addresses must be bare symbols, got $(repr(x))")
 
+# ---- term-address slots -----------------------------------------------------
+#
+# A prior on a term's OWN parameter names the term the way the formula spells
+# it: `sd(log_ka, s(age))`, `simplex(mu, mo1(dose))`, `latent(mu, me(x))`. That
+# slot is a call, not a bare symbol, so it gets its own tokenizer and is
+# canonicalised to `Symbol("s(age)")` -- the address vector stays homogeneous
+# (plain Symbols, one QuoteNode per slot) and the backend matches the key
+# against the terms it walks without re-parsing an `Expr`.
+#
+# Only the SYMBOL arguments are part of the key: `me(x, 0.5)` and `me(x)` name
+# the same term, because the measurement SD is a constant OF the term, not part
+# of its identity. Keyword arguments are likewise excluded -- `hsgp(x; k=20)`
+# and `hsgp(x)` are the same term with different tuning.
+const _TERM_HEADS = (:s, :t2, :mo, :mo1, :me, :gp, :hsgp, :ar)
+
+_is_term_address(x) = Meta.isexpr(x, :call) && !isempty(x.args) &&
+                      x.args[1] isa Symbol && x.args[1] in _TERM_HEADS
+
+function _term_address_key(x::Expr)
+    head = x.args[1]::Symbol
+    names = Symbol[]
+    for a in x.args[2:end]
+        (Meta.isexpr(a, :parameters) || Meta.isexpr(a, :kw)) && continue
+        a isa Number && continue
+        if a isa Symbol
+            push!(names, a)
+        elseif a isa QuoteNode && a.value isa Symbol
+            push!(names, a.value)
+        else
+            error("@brm: `$head(...)` in a prior address takes plain column " *
+                  "names; got $(repr(a)). Address the term the way the formula " *
+                  "spells it, minus any numeric or keyword arguments.")
+        end
+    end
+    isempty(names) && error(
+        "@brm: `$x` names no data column, so it does not identify a term to " *
+        "put a prior on.")
+    Symbol(head, "(", join(names, ","), ")")
+end
+
+# A canonicalised term key is the one address symbol that can contain `(`, so
+# it needs no separate carrier to be told apart from a coefficient or group id.
+_is_term_key(s::Symbol) = occursin('(', string(s))
+
+_prior_slot(x) = _is_term_address(x) ? _term_address_key(x) : _effect_address_symbol(x)
+
+# Public head -> internal class for the three term-parameter heads. `sd` is
+# absent because it is shared with the random-effect surface and is classified
+# by whether its target slot holds a term key.
+const _TERM_PRIOR_HEAD_CLASS = (; simplex=:term_simplex, latent=:term_latent)
+
 # Public head + slots -> the internal `effect(...)` address vector.
 #
 #     effect(<lp|:>, <coefficient|:>)   -> [lp, coefficient]
 #     sd(<lp|:>, <ID>[, <coefficient>]) -> [:sd, ID, lp[, coefficient]]
 #     cor(:, <ID>)                      -> [:cor, ID]
+#     sd(<lp|:>, <term>[, <block>])     -> [:term_sd, key, lp[, block]]
+#     simplex(<lp|:>, <term>)           -> [:term_simplex, key, lp]
+#     latent(<lp|:>, <term>)            -> [:term_latent, key, lp]
 #
-# Every slot is one name or `:`. A trailing `sd` slot may be omitted and means
-# `:`; that is a deterministic DEFAULT, not the predictor INFERENCE removed
-# with the concise one-slot form -- nothing is searched here and nothing can
-# fail to resolve.
+# Every slot is one name, one term, or `:`. A trailing `sd` slot may be omitted
+# and means `:`; that is a deterministic DEFAULT, not the predictor INFERENCE
+# removed with the concise one-slot form -- nothing is searched here and
+# nothing can fail to resolve.
+#
+# `sd` is deliberately ONE head across both surfaces: the marginal scale of a
+# random-effect block and the smoothing scale of `s(x)` are both standard
+# deviations, and the target slot says which is meant. A group id is a bare
+# symbol, a term is a call, so the two can never be confused.
 function _prior_address(head::Symbol, args::Vector{Symbol})
     spelling = "$head($(join(args, ", ")))"
+    term_slots = findall(_is_term_key, args)
+    if !isempty(term_slots) && (head === :effect || head === :cor)
+        error("@brm: `$head` addresses a coefficient or a grouping factor, not " *
+              "a term's own parameters; got `$spelling`. Use `sd`, `simplex` or " *
+              "`latent` with the term in the target slot.")
+    elseif !isempty(term_slots) && term_slots != [2]
+        error("@brm: a term belongs in the TARGET slot — " *
+              "`$head(<linear_predictor|:>, <term>)`; got `$spelling`.")
+    end
+
+    if haskey(_TERM_PRIOR_HEAD_CLASS, head)
+        length(args) == 2 || error(
+            "@brm: `$head` takes exactly `$head(<linear_predictor|:>, <term>)`; " *
+            "got `$spelling`.")
+        _is_term_key(args[2]) || error(
+            "@brm: `$head` addresses a term's own parameter, so its target slot " *
+            "must be a term as the formula spells it — `$head($(args[1]), " *
+            "mo1(x))`, not `$spelling`.")
+        return Symbol[_TERM_PRIOR_HEAD_CLASS[head], args[2], args[1]]
+    end
+
     if head === :effect
         length(args) == 2 || error(
             "@brm: `effect` takes exactly two slots — " *
@@ -449,6 +529,13 @@ function _prior_address(head::Symbol, args::Vector{Symbol})
             "The concise predictor-inferring form was removed: name the linear " *
             "predictor explicitly, or write `:` for the default.")
         return copy(args)
+    elseif head === :sd && length(args) >= 2 && _is_term_key(args[2])
+        length(args) in (2, 3) || error(
+            "@brm: `sd` on a term takes `sd(<linear_predictor|:>, <term>)` or " *
+            "`sd(<linear_predictor|:>, <term>, <block>)`; got `$spelling`.")
+        return length(args) == 3 ?
+            Symbol[:term_sd, args[2], args[1], args[3]] :
+            Symbol[:term_sd, args[2], args[1]]
     elseif head === :sd
         length(args) in (2, 3) || error(
             "@brm: `sd` takes `sd(<linear_predictor|:>, <ID>)` or " *
@@ -477,9 +564,17 @@ end
 
 function _parse_effect!(lhs::Expr, rhs; info)
     head = lhs.args[1]::Symbol
-    args = map(_effect_address_symbol, lhs.args[2:end])
+    args = map(_prior_slot, lhs.args[2:end])
     address = _prior_address(head, args)
-    key = Symbol("__effect__", join(string.(address), "__"))
+    # The key becomes a generated LOCAL NAME. A term key carries `(`/`)`/`,`,
+    # which are legal inside a `Symbol` but not in emitted Julia source, so
+    # those three characters are folded out. Nothing else is touched -- `:`
+    # already rode through this key before term addresses existed, and
+    # rewriting it would move the generated name of every ALREADY-configured
+    # model. The ADDRESS itself is untouched, so diagnostics stay spelled the
+    # way the user wrote them.
+    key = Symbol("__effect__", replace(join(string.(address), "__"),
+                                       "(" => "_", ")" => "", "," => "_"))
     haskey(info.alllocals, key) && error(
         "@brm: duplicate `$head($(join(args, ", ")))` prior statement")
     info.alllocals[key] = :local

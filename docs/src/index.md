@@ -92,6 +92,30 @@ when two `factor(g; ref=…)` blocks of one column would both claim it, the
 bare address is refused and each block is addressed by its exact emitted
 name. Models with no such statement emit byte-identical Stan to before.
 
+### Term-internal parameters
+
+Some terms own parameters no coefficient address can reach — `s(x)`'s smoothing
+scale, `mo(c)`'s Dirichlet increments, `me(x, sd)`'s latent true covariate. They
+are addressed by naming the term itself in the target slot, under the same
+head-position grammar:
+
+```julia
+m = @brm df begin
+    y ~ Normal(mu, 1.)
+    mu ~ 1 + s(age) + mo(dose) + me(w_obs, 0.3)
+
+    sd(:, s(age))         ~ Exponential(2)   # smoothing SD
+    simplex(mu, mo(dose)) ~ Dirichlet(2)     # monotonic increments
+    latent(:, me(w_obs))  ~ Normal(0, 5)     # latent true covariate
+end
+```
+
+The term is spelled the way the formula spells it, minus numeric and keyword
+arguments — `me(w_obs, 0.3)` is addressed as `me(w_obs)`. `term_priors(brmi)`
+returns the captured statements. See
+[Term-internal priors](@ref) for the full table, the `t2` component slot, and
+why the standardized raw innovations are deliberately not configurable.
+
 See [Formula terms](@ref) and [Likelihoods](@ref) for the supported syntax and
 backend-specific contracts. The [Gallery](/gallery) provides live, interactive examples — input
 formula, the SLIC submodel body, the transpiled Stan source, and the
