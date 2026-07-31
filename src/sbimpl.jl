@@ -323,42 +323,6 @@ StanBlocks.@deffun begin
     end
 end
 
-# Positive covariance-hyperparameter prior for `gp`/`hsgp`. The parameter is
-# declared on the NATURAL scale (`vector<lower=0>`), so a statement such as
-# `lengthscale(:, gp(x)) ~ InverseGamma(5, 5)` reads the way it is written and
-# Stan supplies the `log` Jacobian.
-#
-# `family[i] == 0` is the historical default and is EXACTLY the old
-# `log_rho ~ std_normal(); rho = exp(log_rho)`: with `y = log(rho)` the
-# unconstrained coordinate Stan actually samples, `lognormal_lpdf(rho | 0, 1)`
-# contributes `-y - y^2/2` and the constraint Jacobian adds `+y`, leaving the
-# same `-y^2/2`. So an unconfigured model has an identical posterior and
-# identical warmup geometry to before, only different Stan source.
-#
-# `b` is unused by the one-parameter families; the emitter still fills it so
-# both vectors stay the same length as the parameter.
-StanBlocks.@deffun begin
-    @lhs @lpxf brm_gp_scale_lpdf(x::vector[n], family::vector[n],
-                                 a::vector[n], b::vector[n])::real = begin
-        rv = 0.
-        for i in 1:n
-            if family[i] == 0
-                rv += lognormal_lpdf(x[i], 0., 1.)::real
-            elseif family[i] == 1
-                rv += inv_gamma_lpdf(x[i], a[i], b[i])::real
-            elseif family[i] == 2
-                rv += gamma_lpdf(x[i], a[i], b[i])::real
-            elseif family[i] == 3
-                rv += lognormal_lpdf(x[i], a[i], b[i])::real
-            elseif family[i] == 4
-                rv += normal_lpdf(x[i], a[i], b[i])::real
-            else
-                rv += exponential_lpdf(x[i], a[i])::real
-            end
-        end
-        rv
-    end
-end
 
 ranef_correlated_draws_effect = StanBlocks.@slic begin
     L      ~ lkj_corr_cholesky(lkj_eta; n=n_terms)
@@ -1713,10 +1677,10 @@ end
 _sb_gp = StanBlocks.@slic begin
     n_obs = dims(X)[1]
     X_gp = brm_gp_locations(X)
-    rho   ~ brm_gp_scale(rho_family, rho_a, rho_b; n=1, lower=0.)
-    sigma ~ brm_gp_scale(sigma_family, sigma_a, sigma_b; n=1, lower=0.)
+    rho   ~ lognormal(0., 1.; lower=0.)
+    sigma ~ lognormal(0., 1.; lower=0.)
     z     ~ std_normal(; n=n_obs)
-    K = brm_exp_quad_cov(X_gp, sigma[1], rho[1], jitter)
+    K = brm_exp_quad_cov(X_gp, sigma, rho, jitter)
     return cholesky_decompose(K) * z
 end
 
@@ -1724,10 +1688,10 @@ _sb_gp_aniso = StanBlocks.@slic begin
     n_obs = dims(X)[1]
     n_axes = dims(X)[2]
     X_gp = brm_gp_locations(X)
-    rho   ~ brm_gp_scale(rho_family, rho_a, rho_b; n=n_axes, lower=0.)
-    sigma ~ brm_gp_scale(sigma_family, sigma_a, sigma_b; n=1, lower=0.)
+    rho :: vector[n_axes] ~ lognormal(0., 1.; lower=0.)
+    sigma ~ lognormal(0., 1.; lower=0.)
     z     ~ std_normal(; n=n_obs)
-    K = brm_exp_quad_cov(X_gp, sigma[1], rho, jitter)
+    K = brm_exp_quad_cov(X_gp, sigma, rho, jitter)
     return cholesky_decompose(K) * z
 end
 
@@ -1738,21 +1702,21 @@ end
 _sb_hsgp = StanBlocks.@slic begin
     n_basis = dims(omega2)[1]
     n_axes = dims(omega2)[2]
-    rho_iso  ~ brm_gp_scale(rho_family, rho_a, rho_b; n=1, lower=0.)
-    sigma    ~ brm_gp_scale(sigma_family, sigma_a, sigma_b; n=1, lower=0.)
+    rho_iso  ~ lognormal(0., 1.; lower=0.)
+    sigma    ~ lognormal(0., 1.; lower=0.)
     beta_raw ~ std_normal(; n=n_basis)
-    rho = rep_vector(rho_iso[1], n_axes)
-    sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma[1], rho)
+    rho = rep_vector(rho_iso, n_axes)
+    sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma, rho)
     return PHI * (sqrt_spd .* beta_raw)
 end
 
 _sb_hsgp_aniso = StanBlocks.@slic begin
     n_basis = dims(omega2)[1]
     n_axes = dims(omega2)[2]
-    rho      ~ brm_gp_scale(rho_family, rho_a, rho_b; n=n_axes, lower=0.)
-    sigma    ~ brm_gp_scale(sigma_family, sigma_a, sigma_b; n=1, lower=0.)
+    rho :: vector[n_axes] ~ lognormal(0., 1.; lower=0.)
+    sigma    ~ lognormal(0., 1.; lower=0.)
     beta_raw ~ std_normal(; n=n_basis)
-    sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma[1], rho)
+    sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma, rho)
     return PHI * (sqrt_spd .* beta_raw)
 end
 
@@ -1760,19 +1724,19 @@ end
 # groups (decision 7p44fo); only tensor-basis weights vary by group.
 _sb_hsgp_by = StanBlocks.@slic begin
     n_axes = dims(omega2)[2]
-    rho_iso ~ brm_gp_scale(rho_family, rho_a, rho_b; n=1, lower=0.)
-    sigma   ~ brm_gp_scale(sigma_family, sigma_a, sigma_b; n=1, lower=0.)
-    rho = rep_vector(rho_iso[1], n_axes)
-    sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma[1], rho)
+    rho_iso ~ lognormal(0., 1.; lower=0.)
+    sigma   ~ lognormal(0., 1.; lower=0.)
+    rho = rep_vector(rho_iso, n_axes)
+    sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma, rho)
     PHI_scaled = diag_post_multiply(PHI, sqrt_spd)
     return rows_dot_product(PHI_scaled, beta[group_idx, :])
 end
 
 _sb_hsgp_by_aniso = StanBlocks.@slic begin
     n_axes = dims(omega2)[2]
-    rho   ~ brm_gp_scale(rho_family, rho_a, rho_b; n=n_axes, lower=0.)
-    sigma ~ brm_gp_scale(sigma_family, sigma_a, sigma_b; n=1, lower=0.)
-    sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma[1], rho)
+    rho :: vector[n_axes] ~ lognormal(0., 1.; lower=0.)
+    sigma ~ lognormal(0., 1.; lower=0.)
+    sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma, rho)
     PHI_scaled = diag_post_multiply(PHI, sqrt_spd)
     return rows_dot_product(PHI_scaled, beta[group_idx, :])
 end
