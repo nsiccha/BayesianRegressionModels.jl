@@ -1706,10 +1706,16 @@ end
 # `omega2` are tensor-product basis data precomputed by Julia. Isotropic and
 # anisotropic variants differ only in whether one or d log length scales are
 # sampled. As with exact GP, the returned draw is a direct predictor summand.
+#
+# `rho_lower` is the approximation's validity floor (`_sb_hsgp_rho_lower`),
+# supplied as data by the emitter -- scalar here, one entry per axis in the
+# `_aniso` spellings. It is the DEFAULT bound only: `length_scale(lp, hsgp(x))`
+# replaces this whole statement through `Base.merge`, so an explicit
+# declaration sets its own support and this floor does not apply.
 _sb_hsgp = StanBlocks.@slic begin
     n_basis = dims(omega2)[1]
     n_axes = dims(omega2)[2]
-    rho_iso  ~ lognormal(0., 1.; lower=0.)
+    rho_iso  ~ lognormal(0., 1.; lower=rho_lower)
     sigma    ~ lognormal(0., 1.; lower=0.)
     beta_raw ~ std_normal(; n=n_basis)
     rho = rep_vector(rho_iso, n_axes)
@@ -1720,7 +1726,7 @@ end
 _sb_hsgp_aniso = StanBlocks.@slic begin
     n_basis = dims(omega2)[1]
     n_axes = dims(omega2)[2]
-    rho :: vector[n_axes] ~ lognormal(0., 1.; lower=0.)
+    rho :: vector[n_axes] ~ lognormal(0., 1.; lower=rho_lower)
     sigma    ~ lognormal(0., 1.; lower=0.)
     beta_raw ~ std_normal(; n=n_basis)
     sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma, rho)
@@ -1731,7 +1737,7 @@ end
 # groups (decision 7p44fo); only tensor-basis weights vary by group.
 _sb_hsgp_by = StanBlocks.@slic begin
     n_axes = dims(omega2)[2]
-    rho_iso ~ lognormal(0., 1.; lower=0.)
+    rho_iso ~ lognormal(0., 1.; lower=rho_lower)
     sigma   ~ lognormal(0., 1.; lower=0.)
     rho = rep_vector(rho_iso, n_axes)
     sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma, rho)
@@ -1741,7 +1747,7 @@ end
 
 _sb_hsgp_by_aniso = StanBlocks.@slic begin
     n_axes = dims(omega2)[2]
-    rho :: vector[n_axes] ~ lognormal(0., 1.; lower=0.)
+    rho :: vector[n_axes] ~ lognormal(0., 1.; lower=rho_lower)
     sigma ~ lognormal(0., 1.; lower=0.)
     sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma, rho)
     PHI_scaled = diag_post_multiply(PHI, sqrt_spd)
@@ -2005,6 +2011,43 @@ end
 
 _sb_fit_hsgp(axes::Tuple, K::Tuple, c::Tuple) =
     ntuple(j -> _sb_fit_hsgp(axes[j], K[j], c[j]), length(axes))
+
+# The weight threshold `w` in the validity bound below. 100 is the value the
+# reference port uses; it is not reachable from the formula.
+const _SB_HSGP_WEIGHT_THRESHOLD = 100.0
+
+# Riutort-Mayol et al. (2022) bound where the Hilbert-space approximation stops
+# representing the kernel: with `k` basis functions on a domain of half-width
+# `L`, a length scale below
+#
+#     (4L/pi) * sqrt(log(w) / (k^2 - 1))
+#
+# is not approximated, and the model silently becomes a GP nobody asked for --
+# it still transpiles, still samples, still returns finite draws. Both inputs
+# are known here, so `hsgp` declares `rho` with this as its lower bound by
+# DEFAULT (decision 13keyez).
+#
+# It is passed as DATA rather than baked into the emitted Stan because `L`
+# comes from the covariate: a `reprocess` with `freeze_constants=false`
+# re-fits the basis on new data, and a literal would leave the bound describing
+# the OLD basis while `PHI`/`omega2` describe the new one.
+#
+# `k == 1` has no usable floor (`k^2 - 1 == 0` puts the bound at infinity), so
+# that degenerate basis stays unbounded rather than emitting an
+# impossible-to-satisfy declaration.
+_sb_hsgp_rho_lower(fit::Tuple, K::Integer) = begin
+    K > 1 || return 0.0
+    _, L = fit
+    (4 * L / pi) * sqrt(log(_SB_HSGP_WEIGHT_THRESHOLD) / (K^2 - 1))
+end
+
+# Per-axis bounds for the anisotropic spelling; the isotropic one shares a
+# single `rho` across every axis, so it must satisfy the STRICTEST of them.
+_sb_hsgp_rho_lowers(fits::Tuple, K::Tuple) =
+    [_sb_hsgp_rho_lower(fits[j], K[j]) for j in eachindex(fits)]
+
+_sb_hsgp_rho_lower_data(fits::Tuple, K::Tuple, iso::Bool) =
+    iso ? maximum(_sb_hsgp_rho_lowers(fits, K)) : _sb_hsgp_rho_lowers(fits, K)
 
 function _sb_apply_hsgp(fits::Tuple, axes::Tuple, K::Tuple)
     n_axes = length(axes)
@@ -3090,8 +3133,15 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         new_data[key] = PHI
         new_data[e.const_.omega2_key] = omega2
         push!(handled, e.const_.omega2_key)
+        # The validity floor is a function of the fitted `L`, so it has to move
+        # with the basis: a non-frozen re-fit that left it behind would bound
+        # `rho` for a basis this data no longer has.
+        iso = e.const_.iso
+        new_data[e.const_.rho_lower_key] = _sb_hsgp_rho_lower_data(fits, K, iso)
+        push!(handled, e.const_.rho_lower_key)
         new_preproc[key] = PreprocEntry(:hsgp,
-            (; fits, K, c=e.const_.c, omega2_key=e.const_.omega2_key), e.raw_ref, false)
+            (; fits, K, c=e.const_.c, iso, omega2_key=e.const_.omega2_key,
+             rho_lower_key=e.const_.rho_lower_key), e.raw_ref, false)
     elseif e.kind === :categorical_outcome
         v = _sb_df_column(df, e.raw_ref)
         fitted_levels = e.const_.levels
@@ -6867,28 +6917,36 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         gname = name(_sb_resolve_group_col((; kwarg=:by), t, data))
         PHI_name = Symbol(:PHI_hsgp_, suffix, :_by_, gname)
         omega2_name = Symbol(:omega2_hsgp_, suffix, :_by_, gname)
+        rho_lower_name = Symbol(:rho_lower_hsgp_, suffix, :_by_, gname)
         data[PHI_name] = PHI
         data[omega2_name] = omega2
+        data[rho_lower_name] = _sb_hsgp_rho_lower_data(fits, K, iso)
         _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp,
-            (; fits, K, c, omega2_key=omega2_name), names, false))
+            (; fits, K, c, iso, omega2_key=omega2_name,
+             rho_lower_key=rho_lower_name), names, false))
         col_name = Symbol(:hsgp_, suffix, :_by_, gname)
         submodel = _sb_gp_submodel_expr(
             iso ? :_sb_hsgp_by : :_sb_hsgp_by_aniso, term_overrides, t)
         push!(stmts, :($col_name ~ $submodel(; PHI=$PHI_name, omega2=$omega2_name,
+            rho_lower=$rho_lower_name,
             beta=$(info.block_name), group_idx=$(info.idx_name))))
         return col_name
     end
 
     PHI_name = Symbol(:PHI_hsgp_, suffix)
     omega2_name = Symbol(:omega2_hsgp_, suffix)
+    rho_lower_name = Symbol(:rho_lower_hsgp_, suffix)
     data[PHI_name] = PHI
     data[omega2_name] = omega2
+    data[rho_lower_name] = _sb_hsgp_rho_lower_data(fits, K, iso)
     _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp,
-        (; fits, K, c, omega2_key=omega2_name), names, false))
+        (; fits, K, c, iso, omega2_key=omega2_name,
+         rho_lower_key=rho_lower_name), names, false))
     col_name = Symbol(:hsgp_, suffix)
     submodel = _sb_gp_submodel_expr(
         iso ? :_sb_hsgp : :_sb_hsgp_aniso, term_overrides, t)
-    push!(stmts, :($col_name ~ $submodel(; PHI=$PHI_name, omega2=$omega2_name)))
+    push!(stmts, :($col_name ~ $submodel(; PHI=$PHI_name, omega2=$omega2_name,
+        rho_lower=$rho_lower_name)))
     col_name
 end
 
