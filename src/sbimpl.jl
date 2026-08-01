@@ -2859,15 +2859,27 @@ _sb_plan_family(x) = x
 _sb_plan_generated(context, target) =
     Symbol(join((context..., target), "_"), "_gen")
 
+# A configured term prior is spliced into the emitted body as a `SlicModel`
+# value.  Its `mod` field is the stable namespace where the submodel was
+# defined, not mutable model state, and Julia deliberately refuses to
+# `deepcopy` a `Module`.  Copy the model payload while retaining that namespace
+# by identity; ordinary emitted leaves keep the historical `deepcopy` path.
+_sb_plan_copy(x) = deepcopy(x)
+_sb_plan_copy(x::Module) = x
+_sb_plan_copy(x::QuoteNode) = QuoteNode(_sb_plan_copy(x.value))
+_sb_plan_copy(x::Expr) = Expr(x.head, map(_sb_plan_copy, x.args)...)
+_sb_plan_copy(x::StanBlocks.SlicModel) = StanBlocks.SlicModel(
+    _sb_plan_copy(x.model), deepcopy(x.data), x.mod)
+
 # The LHS type annotation, if any: `z::vector[3] ~ rhs` -> `:(vector[3])`.
 _sb_plan_annotation(x::Expr) =
-    x.head === :(::) && length(x.args) == 2 ? deepcopy(x.args[2]) : nothing
+    x.head === :(::) && length(x.args) == 2 ? _sb_plan_copy(x.args[2]) : nothing
 _sb_plan_annotation(_) = nothing
 
 # Split the emitted RHS call into positional args and keyword args. `do`-block
 # RHSs (`plate(...) do ...`) split on the underlying call, matching `family`.
 _sb_plan_as_kw(x::Expr) = x.head === :kw && length(x.args) == 2 ?
-    (x.args[1]::Symbol => deepcopy(x.args[2])) : nothing
+    (x.args[1]::Symbol => _sb_plan_copy(x.args[2])) : nothing
 _sb_plan_as_kw(_) = nothing
 
 _sb_plan_call_parts(x) = ((), NamedTuple())
@@ -2884,7 +2896,7 @@ function _sb_plan_call_parts(x::Expr)
             continue
         end
         kw = _sb_plan_as_kw(a)
-        isnothing(kw) ? push!(args, deepcopy(a)) : push!(kws, kw)
+        isnothing(kw) ? push!(args, _sb_plan_copy(a)) : push!(kws, kw)
     end
     (Tuple(args), (; kws...))
 end
@@ -2899,13 +2911,13 @@ _sb_plan_constraint_kwargs() = (:lower, :upper, :offset, :multiplier)
 # annotation is the declared type's own size, so it wins over the keyword form.
 function _sb_plan_dimension(annotation, kwargs)
     if annotation isa Expr && annotation.head === :ref && length(annotation.args) >= 2
-        return Tuple(deepcopy.(annotation.args[2:end]))
+        return Tuple(_sb_plan_copy.(annotation.args[2:end]))
     end
     sizes = Any[kwargs[k] for k in _sb_plan_size_kwargs() if haskey(kwargs, k)]
     isempty(sizes) || return Tuple(sizes)
     haskey(kwargs, :size) || return ()
     s = kwargs[:size]
-    s isa Expr && s.head === :tuple ? Tuple(deepcopy.(s.args)) : (deepcopy(s),)
+    s isa Expr && s.head === :tuple ? Tuple(_sb_plan_copy.(s.args)) : (_sb_plan_copy(s),)
 end
 
 _sb_plan_constraints(kwargs) = (;
@@ -2952,7 +2964,7 @@ function _sb_plan_collect!(declarations, x, data_scope, context=())
         arguments, keywords = _sb_plan_call_parts(rhs)
         push!(declarations, GenerativeDeclaration(
             role, target, _sb_plan_family(rhs), data_source, draw,
-            Tuple(context), deepcopy(x), arguments, keywords, annotation,
+            Tuple(context), _sb_plan_copy(x), arguments, keywords, annotation,
             _sb_plan_dimension(annotation, keywords),
             _sb_plan_constraints(keywords)))
 
@@ -2975,7 +2987,7 @@ function _generative_plan(sb::SBBRMI, builder, cv_groups)
     parent = deepcopy(sb.parent)
     data = deepcopy(sb.data)
     preproc = deepcopy(sb.preproc)
-    body = deepcopy(sb.model.model)
+    body = _sb_plan_copy(sb.model.model)
     model = StanBlocks.SlicModel(body, data, sb.model.mod)
     declarations = GenerativeDeclaration[]
     data_scope = Dict{Symbol,Union{Nothing,Symbol}}(k => k for k in keys(data))
