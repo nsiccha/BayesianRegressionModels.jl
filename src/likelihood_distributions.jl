@@ -299,7 +299,7 @@ is exactly Distributions.jl's `VonMises(mu, kappa)` after mapping both the mean
 and observation to equivalent angles, while `rand` maps native von-Mises draws
 back into `[lo, hi)`.
 
-This surface is deliberately distinct from [`VonMises`](@ref), whose support
+This surface is deliberately distinct from Distributions' `VonMises`, whose support
 moves with `mu`.  In an `@brm` formula the StanBlocks backend uses the same
 fixed-interval contract and lowers density and RNG evaluation to Stan's native
 `von_mises_lpdf` and `von_mises_rng`.

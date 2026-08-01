@@ -794,7 +794,7 @@ Base.parent(x::NestedPredictorFormula) = getfield(x, :parent)
 
 Assigns a formula-local symbol `name` to its `parent` column. Every
 `lhs ~ rhs` and `lhs = rhs` line produces a `NamedColumn` keyed by
-`lhs`. Access via [`name`](@ref) / [`parent`](@ref).
+`lhs`. Access via [`name`](@ref) / `parent`.
 """
 struct NamedColumn{N,P} <: AbstractColumn
     name::N
@@ -836,7 +836,7 @@ Represents an `f(args...; kwargs...)` formula RHS — the leaves the
 `1 + a + (1|g)`, `mo(c)`). Access via [`getf`](@ref) / [`getargs`](@ref)
 / [`getkwargs`](@ref) / [`getop`](@ref).
 
-Construction runs [`_check_term_kwargs`](@ref) so a term can reject a retired
+Construction runs `_check_term_kwargs` so a term can reject a retired
 keyword at the `@brm` call site rather than in the backend.
 """
 struct ExprColumn{F,A<:Tuple,K<:NamedTuple} <: AbstractColumn
