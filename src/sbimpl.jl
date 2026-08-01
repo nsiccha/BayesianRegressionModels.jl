@@ -1,4 +1,5 @@
 using StanBlocks
+import StanBlocks: RaggedVector
 
 
 # ==============================================================================
@@ -1148,6 +1149,9 @@ function addprop end
 StanBlocks.@deffun begin
     addprop(loc::vector[n], add::real, prop::real)::vector[n] = begin
         sqrt(add^2 .+ (loc .* prop).^2)
+    end
+    @inline addprop(loc::RaggedVector, add::real, prop::real) = begin
+        RaggedVector(addprop(loc.mem, add, prop), loc.ends)
     end
 end
 
@@ -4275,7 +4279,7 @@ function _sb_ragged_rhs_kernel_groups!(acc, x::ExprColumn)
     nothing
 end
 
-function _sb_ragged_lhs_values(key::Symbol, lhs::ExprColumn, rhs)
+function _sb_ragged_lhs_layout(key::Symbol, lhs::ExprColumn, rhs)
     args = getargs(lhs)
     length(args) == 2 || error(
         "sbimpl: `ragged(...)` observation LHS takes exactly two arguments — " *
@@ -4334,8 +4338,51 @@ function _sb_ragged_lhs_values(key::Symbol, lhs::ExprColumn, rhs)
     isempty(unknown) || error(
         "sbimpl: `ragged($key, $(name(group)))` contains label(s) " *
         "$(unique(unknown)) that name no subject in the referenced kernel.")
-    [raw[r] for r in rows]
+    (; values=[raw[r] for r in rows], rows, nrows=length(raw))
 end
+
+# A data-backed bound on a ragged formula-LHS lives on the same flat observed
+# frame as the response. Group it through the LHS's already-validated row map,
+# but bind it under a likelihood-local derived key: the original flat column may
+# still be used by another formula term on its native axis.
+function _sb_ragged_bound(data, key::Symbol, label::Symbol, bound, layout)
+    bound isa NamedColumn && parent(bound) isa DataColumn || return bound
+    raw = _sb_data_vec(name(bound), parent(parent(bound)))
+    grouped = if raw isa AbstractVector{<:AbstractVector}
+        raw
+    else
+        length(raw) == layout.nrows || error(
+            "sbimpl: `$(key)` $label bound `$(name(bound))` has $(length(raw)) " *
+            "rows but the flat response has $(layout.nrows)")
+        [raw[r] for r in layout.rows]
+    end
+    derived = Symbol(key, :_, label, :_, name(bound), :_ragged)
+    if haskey(data, derived)
+        data[derived] == grouped || error(
+            "sbimpl: derived ragged-bound data key `$derived` collides with " *
+            "different observed data")
+    else
+        data[derived] = grouped
+    end
+    NamedColumn(derived, DataColumn(grouped))
+end
+
+function _sb_ragged_likelihood_rhs(data, key::Symbol, rhs::ExprColumn, layout)
+    f = getf(rhs)
+    if f === truncated || f === censored
+        lower, upper = _sb_wrapper_bounds(f, getargs(rhs), getkwargs(rhs))
+        lower = _sb_ragged_bound(data, key, :lower, lower, layout)
+        upper = _sb_ragged_bound(data, key, :upper, upper, layout)
+        return ExprColumn(f, first(getargs(rhs)); lower, upper)
+    elseif f === interval_censored && length(getargs(rhs)) == 1 &&
+           keys(getkwargs(rhs)) == (:upper,)
+        upper = _sb_ragged_bound(
+            data, key, :upper, getkwargs(rhs).upper, layout)
+        return ExprColumn(f, first(getargs(rhs)); upper)
+    end
+    rhs
+end
+_sb_ragged_likelihood_rhs(_data, _key, rhs, _layout) = rhs
 
 # Formula-boundary grouping for a flat observed frame. The emitted likelihood
 # keeps the logical response name (`key`), so StanBlocks' existing top-level
@@ -4344,8 +4391,10 @@ end
 function _sb_sampling!(stmts, data, key,
                        lhs::ExprColumn{typeof(ragged)}, rhs;
                        id_lookup=_sb_empty_id_lookup(), kwargs...)
-    data[key] = _sb_ragged_lhs_values(key, lhs, rhs)
-    _sb_likelihood!(stmts, key, rhs, data)
+    layout = _sb_ragged_lhs_layout(key, lhs, rhs)
+    data[key] = layout.values
+    grouped_rhs = _sb_ragged_likelihood_rhs(data, key, rhs, layout)
+    _sb_likelihood!(stmts, key, grouped_rhs, data)
 end
 
 _sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs;
@@ -8007,26 +8056,47 @@ _sb_normalize_bound(::Nothing) = nothing
 _sb_normalize_bound(x::NamedColumn) = _sb_is_nothing_column(x) ? nothing : x
 _sb_normalize_bound(x) = x
 
-_sb_bound_data(x::Real) = x
-_sb_bound_data(x::AbstractVector{<:Real}) = x
-_sb_bound_data(x::NamedColumn) = _sb_bound_data_named(x, parent(x))
-_sb_bound_data_named(_x, d::DataColumn) = parent(d)
-_sb_bound_data_named(x, backing) = error(
+_sb_bound_data(x::Real, _data) = x
+_sb_bound_data(x::AbstractVector{<:Real}, _data) = x
+_sb_bound_data(x::AbstractVector{<:AbstractVector{<:Real}}, _data) = x
+_sb_bound_data(x::NamedColumn, data) = _sb_bound_data_named(x, parent(x), data)
+_sb_bound_data_named(_x, d::DataColumn, _data) = parent(d)
+_sb_bound_data_named(x, backing, _data) = error(
     "sbimpl: bound `$(name(x))` must be backed by observed data, got $(typeof(backing))")
-_sb_bound_data(x) = error(
+_sb_bound_data(x, _data) = error(
     "sbimpl: bounds must be numeric literals or observed data columns, got $(typeof(x))")
 
+_sb_composed_values(x::AbstractVector{<:AbstractVector}) =
+    collect(Iterators.flatten(x))
+_sb_composed_values(x) = x
+
+function _sb_validate_bound_segments(wrapper, target, label, y, b)
+    y isa AbstractVector{<:AbstractVector} || return nothing
+    b isa Real && return nothing
+    b isa AbstractVector{<:AbstractVector} || error(
+        "sbimpl: `$wrapper` $label bound for ragged response `$target` must " *
+        "be scalar or have the same ragged grouping")
+    length(b) == length(y) && length.(b) == length.(y) || error(
+        "sbimpl: `$wrapper` $label bound for ragged response `$target` has " *
+        "group lengths $(length.(b)); expected $(length.(y))")
+    nothing
+end
+
 function _sb_validate_bounds(wrapper, target, lower, upper, data; check_order=true)
-    y = data[target]
+    raw_y = data[target]
+    y = _sb_composed_values(raw_y)
     for (label, bound) in ((:lower, lower), (:upper, upper))
         isnothing(bound) && continue
-        b = _sb_bound_data(bound)
+        raw_b = _sb_bound_data(bound, data)
+        _sb_validate_bound_segments(wrapper, target, label, raw_y, raw_b)
+        b = _sb_composed_values(raw_b)
         b isa AbstractVector && length(b) != length(y) && error(
             "sbimpl: `$wrapper` $label bound has $(length(b)) rows but response ",
             "`$target` has $(length(y))")
     end
     if check_order && !isnothing(lower) && !isnothing(upper)
-        lo, hi = _sb_bound_data(lower), _sb_bound_data(upper)
+        lo = _sb_composed_values(_sb_bound_data(lower, data))
+        hi = _sb_composed_values(_sb_bound_data(upper, data))
         ok = if lo isa AbstractVector || hi isa AbstractVector
             all(eachindex(y)) do i
                 (lo isa AbstractVector ? lo[i] : lo) <=
@@ -8041,16 +8111,18 @@ function _sb_validate_bounds(wrapper, target, lower, upper, data; check_order=tr
 end
 
 function _sb_validate_composed_support(wrapper, target, lower, upper, kind, data)
-    y = data[target]
-    lo = isnothing(lower) ? nothing : _sb_bound_data(lower)
-    hi = isnothing(upper) ? nothing : _sb_bound_data(upper)
+    y = _sb_composed_values(data[target])
+    lo = isnothing(lower) ? nothing :
+        _sb_composed_values(_sb_bound_data(lower, data))
+    hi = isnothing(upper) ? nothing :
+        _sb_composed_values(_sb_bound_data(upper, data))
     if kind === :discrete
         (eltype(y) <: Integer && !(eltype(y) <: Bool)) || error(
             "sbimpl: `$wrapper` discrete base family requires an integer response, ",
             "got $(eltype(y)) for `$target`")
         for (label, bound) in ((:lower, lower), (:upper, upper))
             isnothing(bound) && continue
-            b = _sb_bound_data(bound)
+            b = _sb_composed_values(_sb_bound_data(bound, data))
             all(v -> v isa Integer && !(v isa Bool), b isa AbstractVector ? b : (b,)) ||
                 error("sbimpl: `$wrapper` discrete $label bounds must be integers")
         end
@@ -8065,19 +8137,22 @@ function _sb_validate_composed_support(wrapper, target, lower, upper, kind, data
 end
 
 # StanBlocks decision 1wd43wt: one base-family token plus compile-time optional
-# `lower` / `upper` kwargs. BRM always spells both; an absent bound is the Julia
-# value `nothing`, which the HOF consumes before Stan name/type resolution.
+# `lower` / `upper` kwargs. Spell only PRESENT bounds. This is semantically the
+# same HOF call as an explicit `nothing`, and it matters for a ragged response:
+# the producer groups every supplied kwarg before resolving the HOF variant, so
+# asking it to group literal `nothing` has no Stan type and cannot transpile.
 _sb_composed_stan_args(base, data) = _sb_stan_dist_args(
     base.family, map(a -> _sb_scalar_expr(a, data), base.stan_args))
 
 function _sb_emit_optional_family!(stmts, target, producer, base, lower, upper, data)
     family_args = _sb_composed_stan_args(base, data)
-    lower_expr = isnothing(lower) ? nothing : _sb_scalar_expr(lower, data)
-    upper_expr = isnothing(upper) ? nothing : _sb_scalar_expr(upper, data)
+    bound_kwargs = Any[]
+    isnothing(lower) || push!(bound_kwargs,
+        Expr(:kw, :lower, _sb_scalar_expr(lower, data)))
+    isnothing(upper) || push!(bound_kwargs,
+        Expr(:kw, :upper, _sb_scalar_expr(upper, data)))
     rhs = Expr(:call, producer,
-        Expr(:parameters,
-            Expr(:kw, :lower, lower_expr),
-            Expr(:kw, :upper, upper_expr)),
+        Expr(:parameters, bound_kwargs...),
         base.stan_name, family_args...)
     push!(stmts, Expr(:call, :~, target, rhs))
 end
@@ -8115,7 +8190,8 @@ function _sb_lik_family!(stmts, target, ::typeof(interval_censored),
     upper = kwargs.upper
     _sb_validate_bounds(:interval_censored, target, data[target], upper, data;
                         check_order=false)
-    lo, hi = data[target], _sb_bound_data(upper)
+    lo = _sb_composed_values(data[target])
+    hi = _sb_composed_values(_sb_bound_data(upper, data))
     all(eachindex(lo)) do i
         lo[i] < (hi isa AbstractVector ? hi[i] : hi)
     end || error(
