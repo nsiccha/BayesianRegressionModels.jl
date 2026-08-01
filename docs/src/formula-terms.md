@@ -192,6 +192,54 @@ scale.
   whole term.
 - `ar`'s autocorrelation has no address yet.
 
+### `hsgp` bounds its length scale by default
+
+An HSGP with `k` basis functions over a domain of half-width
+`L = c·max|x − mean(x)|` stops approximating the kernel it was asked for once
+the length scale falls below
+
+```
+(4L/π)·√(log(100)/(k² − 1))
+```
+
+and the failure is **silent**: the model transpiles, passes `stanc`, samples,
+and returns finite draws that simply are not that Gaussian process. On the
+default `LogNormal(0, 1)` at `L = 1.5` that region holds 42.9 % of the prior
+mass at `k = 5`, 18.8 % at `k = 10` and 5.7 % at `k = 20`.
+
+Every `hsgp` term therefore declares `rho` with that floor as its lower bound.
+The density is unchanged — only the support moves. Exact `gp` has no basis
+truncation and is untouched.
+
+The floor is emitted as **data** (`rho_lower_hsgp_<axes>`), not as a literal,
+because `L` comes from the covariate: `reprocess(sb, df2; freeze_constants=false)`
+re-derives it alongside `PHI` / `omega2` while the Stan source stays
+byte-identical. Isotropic spellings share one `rho` across axes and take the
+strictest per-axis floor; `iso=false` bounds each axis separately. `k = 1` puts
+the formula at infinity, so that degenerate basis stays unbounded.
+
+**An explicit `length_scale` statement replaces the whole declaration, floor
+included:**
+
+```julia
+mu ~ hsgp(x; k=5, c=1.5)                     # real<lower=rho_lower_hsgp_x>
+length_scale(:, hsgp(x)) ~ LogNormal(0, 1)   # real<lower=0.0> — floor gone
+```
+
+That is deliberate. It is how a pre-floor posterior is reproduced, and it is
+what keeps `Uniform(a, b)` self-consistent — an unconditional floor would
+overwrite `lower=a` while the density stayed `uniform(a, b)`, leaving the
+declaration and the support disagreeing. The consequence is that the guarantee
+is **default-on, not absolute**: an override with mass below the floor restores
+the silent approximation error, with no warning. Either keep the floor in the
+overriding bounds (`Uniform(0.84, 2)`) or accept the error knowingly.
+
+!!! warning "This changes the posterior of existing unedited `hsgp` models"
+    Models that never named `length_scale` sampled an unbounded `rho` before
+    this default landed. If you version models by their emitted Stan plus
+    data, treat the change as a new model version rather than a refresh of the
+    old one.
+
 ## R²-induced variance decomposition: `effect(lp, :) ~ r2d2(...)`
 
 [`r2d2`](@ref) replaces the independent per-coefficient priors on a linear

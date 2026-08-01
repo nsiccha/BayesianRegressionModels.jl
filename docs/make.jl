@@ -1,10 +1,28 @@
 using Documenter, DocumenterVitepress, BayesianRegressionModels
 
-# Note: BRM is published from JuliaBayes/, which can't access the private
-# HTMXObjects.jl repo from CI. So `htmxo-embed.ts` is committed in-tree
-# (see docs/src/.vitepress/theme/) rather than synced from HTMXObjects via
-# `HTMXObjects.vitepress_theme_install` at build time. Local edits to the
-# canonical upstream file should be hand-copied; see /docs-vitepress §8.
+# Which GitHub repository these docs are built FOR. Documenter's
+# `GitHubActions` deploy config requires `ENV["GITHUB_REPOSITORY"]` to occur in
+# `deploydocs(repo=…)` — it is a hard deployment criterion, not a hint — so a
+# workflow can only ever publish to its OWN repository's `gh-pages`. Reading
+# the environment therefore lets one `make.jl` serve both homes:
+#
+#   * `nsiccha/BayesianRegressionModels.jl`  -> nsiccha.github.io/…   (current)
+#   * `JuliaBayes/BayesianRegressionModels.jl` -> juliabayes.github.io/… (legacy)
+#
+# whichever runs it, with no per-fork edit and no cross-repo token. Locally the
+# fallback picks the current home, which is what edit links should point at.
+const DOCS_REPO = get(ENV, "GITHUB_REPOSITORY", "nsiccha/BayesianRegressionModels.jl")
+
+# The branch whose build lands under `dev/`. `ns/devibe` is the active line
+# (dev §11.5); the legacy JuliaBayes home only ever published from `main`.
+const DOCS_DEVBRANCH = startswith(DOCS_REPO, "JuliaBayes/") ? "main" : "ns/devibe"
+
+# Note: BRM's docs must build without the private HTMXObjects.jl repo — the
+# legacy JuliaBayes home could not clone it from CI at all. So `htmxo-embed.ts`
+# is committed in-tree (see docs/src/.vitepress/theme/) rather than synced from
+# HTMXObjects via `HTMXObjects.vitepress_theme_install` at build time. Local
+# edits to the canonical upstream file should be hand-copied; see
+# /docs-vitepress §8.
 @static if Base.find_package("HTMXObjects") !== nothing
     @eval import HTMXObjects
     @eval HTMXObjects.vitepress_theme_install(joinpath(@__DIR__, "src", ".vitepress", "theme"))
@@ -14,9 +32,9 @@ makedocs(
     sitename = "BayesianRegressionModels.jl",
     modules  = [BayesianRegressionModels],
     format   = DocumenterVitepress.MarkdownVitepress(
-        repo = "github.com/JuliaBayes/BayesianRegressionModels.jl",
+        repo = "github.com/$DOCS_REPO",
         devurl = "dev",
-        devbranch = "main",
+        devbranch = DOCS_DEVBRANCH,
         build_vitepress = false,
     ),
     pages = [
@@ -54,7 +72,7 @@ let redirect = joinpath(@__DIR__, "build", "index.html")
 end
 
 DocumenterVitepress.deploydocs(
-    repo = "github.com/JuliaBayes/BayesianRegressionModels.jl",
-    devbranch = "main",
+    repo = "github.com/$DOCS_REPO",
+    devbranch = DOCS_DEVBRANCH,
     push_preview = true,
 )
