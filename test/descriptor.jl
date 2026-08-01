@@ -439,14 +439,19 @@ kernel_schedule(n; subject=collect(1:n)) = (;
               constrained_names[loc_coordinates])
     @test_throws ErrorException brm_output_coordinates(d, :loc, ["not_loc.1"])
 
-    # A RAGGED observation currently has NO posterior-predictive carrier at all:
-    # this model emits zero generated quantities, so `dv` owns no `_gen` twin —
-    # unlike the SCALAR plate observation below, whose `:predict` yields
-    # `dv_gen`. Asserted rather than skipped, because the failure must stay
-    # fail-CLOSED: a consumer asking for a predictive slice of a ragged
-    # observation has to get an error, never an empty or wrong slice. When
-    # ragged twins do appear upstream, this flips and the assertion below is
-    # what tells us.
+    # A ragged observation left INSIDE the plate cell (`yy ~ normal(...)` above)
+    # emits no twins at all — this model produces zero generated quantities.
+    # That is StanBlocks' DOCUMENTED boundary, not a gap (brm-use, the "`draw`
+    # is a NAME" table): the density is valid but the nested ragged form stays
+    # model-only. The preferred spelling is TOP-LEVEL ragged — return the
+    # kernel's ragged result and write `dv ~ Normal(pred, sigma)` — which does
+    # emit a flat `dv_gen`, an aggregate `dv_likelihood`, and `segments` on
+    # both; the scalar-in-cell form below emits `dv_gen` alone.
+    #
+    # Asserted rather than skipped because the query must stay fail-CLOSED
+    # here: a consumer asking for a predictive slice of a nested ragged
+    # observation has to get an error naming the problem, never an empty or
+    # partial slice that silently misaligns with its subjects.
     @test isempty(brm_outputs(d; logical=:dv))
     @test isempty(brm_outputs(d; role=:posterior_predictive))
     @test_throws ErrorException brm_output(d, :dv; role=:posterior_predictive)
@@ -470,6 +475,56 @@ kernel_schedule(n; subject=collect(1:n)) = (;
     # BRM therefore names it in `unpredictable` and withholds `:predict`.
     @test :predict ∉ ops
     @test d.unpredictable == (:yy,)
+end
+
+# The PREFERRED ragged spelling (brm-use, the "`draw` is a NAME" table): return
+# the kernel's ragged result, then apply the family at TOP LEVEL. Unlike the
+# in-cell form, this one owns a flat `dv_gen`, an aggregate `dv_likelihood`,
+# and per-subject `segments` on both — which is what makes a posterior slice
+# addressable by subject without consumer-side length bookkeeping.
+toplevel_ragged_builder = @brm begin
+    sigma ~ Exponential(1)
+    log_CL ~ 1 + (1 | p | subject)
+    log_V  ~ 1 + (1 | p | subject)
+    pred ~ kernel(t, dose, log_CL, log_V) do ts, dd, lCL, lV
+        CL = exp(lCL)
+        V = exp(lV)
+        dd / V * exp(-(CL / V) * ts)
+    end
+    dv ~ Normal(pred, sigma)
+end
+
+@testset "top-level ragged observation — carrier and segments by role" begin
+    sched = kernel_schedule(3)
+    d = brm_descriptor(toplevel_ragged_builder, sched; mod=@__MODULE__, name=:pk_flat)
+
+    draw = brm_output(d, :dv; role=:posterior_predictive)
+    loglik = brm_output(d, :dv; role=:pointwise_loglik)
+    @test draw.logical === :dv && loglik.logical === :dv
+    @test draw.source === :dv && loglik.source === :dv
+    @test draw.name !== loglik.name
+    # Two carriers, so unqualified must refuse rather than pick.
+    @test_throws ErrorException brm_output(d, :dv)
+    @test Set(o.name for o in brm_outputs(d; logical=:dv)) ==
+          Set([draw.name, loglik.name])
+
+    # `segments` is the metadata BRM used to drop. Inclusive per-subject ends
+    # on the flat predictive carrier; the aggregate likelihood has one entry
+    # per subject, so it is NOT the same length.
+    @test draw.segments == cumsum(length.(sched.t))
+    @test last(draw.segments) == sum(length, sched.t)
+
+    # ...and it composes directly with the coordinates, which is the whole
+    # point: subject g's posterior columns without re-deriving boundaries.
+    prob = brm_execute(d, :fit)
+    constrained = StanBlocks.BridgeStan.param_names(
+        prob.model; include_tp=true, include_gq=true)
+    cols = brm_output_coordinates(d, :dv, constrained; role=:posterior_predictive)
+    @test length(cols) == last(draw.segments)
+    starts = [1; draw.segments[1:end-1] .+ 1]
+    per_subject = [cols[s:e] for (s, e) in zip(starts, draw.segments)]
+    @test length.(per_subject) == length.(sched.t)
+    @test reduce(vcat, per_subject) == cols
 end
 
 scalar_kernel_builder = @brm begin
