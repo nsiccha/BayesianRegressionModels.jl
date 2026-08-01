@@ -47,8 +47,17 @@ jobs:
         # Clone the public source and Pkg.develop in a single batch
         # (see /ci §5). HTMXObjects is private and not needed by the
         # docs build — see make.jl's conditional theme install.
+        #
+        # `devibe`, NOT `dev`. StanBlocks' active line moved to `devibe`
+        # and `dev` is now a strict ancestor 303 commits behind it
+        # (`git rev-list --left-right --count origin/dev...origin/devibe`
+        # → `0 303`). BRM's HEAD uses macros that only exist on `devibe`,
+        # so `-b dev` fails at `using BayesianRegressionModels` with e.g.
+        # `UndefVarError: @stanonly not defined` — the first run on
+        # nsiccha/BayesianRegressionModels.jl died exactly there
+        # (run 30708357301).
         run: |
-          git clone -b dev https://github.com/nsiccha/StanBlocks.jl.git
+          git clone -b devibe https://github.com/nsiccha/StanBlocks.jl.git
           julia --project=docs -e 'using Pkg; Pkg.develop([
             PackageSpec(path=pwd()),
             PackageSpec(path="StanBlocks.jl"),

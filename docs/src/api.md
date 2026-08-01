@@ -63,7 +63,13 @@ BayesianRegressionModels.t2
 BayesianRegressionModels.ar
 BayesianRegressionModels.mo
 BayesianRegressionModels.mo1
+BayesianRegressionModels.kernel
+BayesianRegressionModels.ragged
 ```
+
+`truncated` and `censored` are re-exported unchanged from Distributions.jl and
+documented there; only `interval_censored` below is BRM's own. See
+[Likelihoods](@ref) for how the three compose on a response.
 
 ## Likelihood distributions / prior markers
 
@@ -81,13 +87,15 @@ BayesianRegressionModels.CategoricalLogit
 BayesianRegressionModels.Horseshoe
 BayesianRegressionModels.ZeroInflatedPoisson
 BayesianRegressionModels.NegativeBinomial2
-BayesianRegressionModels.BetaBinomial
 BayesianRegressionModels.BetaBinomial2
 BayesianRegressionModels.BinomialLogit
 BayesianRegressionModels.interval_censored
 BayesianRegressionModels.CircularVonMises
 BayesianRegressionModels.SkewDoubleExponential
 ```
+
+`BetaBinomial` is re-exported unchanged from Distributions.jl and documented
+there; `BetaBinomial2` above is BRM's own mean/precision parameterization.
 
 ## Backends
 
@@ -100,6 +108,11 @@ BayesianRegressionModels.GenerativePlan
 BayesianRegressionModels.generative_plan
 BayesianRegressionModels.reprocess
 BayesianRegressionModels.restan_data
+BayesianRegressionModels.population_draws
+BayesianRegressionModels.transport_draws
+BayesianRegressionModels.RanefBlock
+BayesianRegressionModels.ranef_blocks
+BayesianRegressionModels.ranef_coordinates
 ```
 
 ## Executable descriptors
@@ -134,6 +147,7 @@ BayesianRegressionModels.data_args
 BayesianRegressionModels.primary_lp
 BayesianRegressionModels.popcoefnames
 BayesianRegressionModels.effect_priors
+BayesianRegressionModels.term_priors
 BayesianRegressionModels.ranef_effect_priors
 BayesianRegressionModels.r2d2_priors
 BayesianRegressionModels.ranefcoefnames

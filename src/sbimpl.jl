@@ -2086,63 +2086,6 @@ end
 # data / parameters / model).
 # ==============================================================================
 
-"""
-    SBBRMI(brmi::BRMI; mod=@__MODULE__, cv_groups=Set{Symbol}(),
-           centered_groups=Set{Symbol}()) -> SBBRMI
-
-StanBlocks backend: walks `brmi`, emits a `StanBlocks.SlicModel`, and
-materialises the data dict. Pass `mod` if you're constructing the model
-from a module other than `BayesianRegressionModels` so SLIC's symbol
-resolver finds your locally-defined submodels.
-
-`cv_groups` is an opt-in set of grouping-factor names (e.g. `[:subject]`)
-whose per-group random effect should be emitted with **cv-contagious
-sizing** -- the std-normal draw is sized from `maximum(<g>_idx)` instead of
-the standalone data scalar `n_<g>`, so marking the group index with
-`maybecv(:<g>_idx)` at trace time flips that RE to a generated-quantities
-population re-draw (leave-all-out / out-of-sample). This is used when
-generating a CV model artifact; the default (empty `cv_groups`) sizes the
-same submodel from `n_<g>` and leaves the RE a fitted parameter. There are no
-separate `_cv` submodels — the size expression passed at the call site is the
-entire difference. Plain `(… | g)` ranefs and cross-formula `(… |ID| g)`
-buckets are both supported; stratified `gr(g, by=b)` errors if opted-in.
-
-`centered_groups` is an opt-in set of grouping-factor names whose per-group
-random effect should be emitted in the **centered** parameterization -- the
-per-group effect itself is the sampled parameter, with the covariance as its
-prior (`bc ~ multi_normal_cholesky(0, diag_pre_multiply(tau, L))`), instead of
-the default non-centered standardised draw plus downstream scaling. Centered
-is the better geometry when the per-group likelihood is strong (dense repeated
-measurement per level, e.g. many PK samples per subject); non-centered stays
-the default, and a group not named here is untouched by this kwarg. Plain
-`(… | g)` ranefs and `(… |ID| g)` buckets are supported; stratified
-`gr(g, by=b)` is not.
-
-The two sets are **mutually exclusive per group**: a centered block's sampled
-parameter is the per-group effect itself, and no available spelling of that
-can carry a cv taint in its size, so `SBBRMI` rejects a group named in both
-rather than silently emitting an in-sample block. Note also that centered and
-non-centered emissions use different unconstrained coordinates, so fitted
-draws are not interchangeable between them.
-
-Formula statements `sd(:, ID) ~ Exponential(scale)` and
-`cor(:, ID) ~ LKJCholesky(K, eta)` configure a shared `|ID|` block.
-An SD statement can instead select one emitted margin with
-`sd(predictor, ID, coefficient)`, or write `sd(predictor, ID)` when that
-predictor contributes exactly one margin. See [`ranefcoefnames`](@ref)
-for the authoritative ordered addresses. Omitted statements retain historical
-defaults; Julia's Exponential scale is converted to Stan's rate.
-
-Use [`stan_code`](@ref) to extract the transpiled Stan source. For
-sampling, load `StanLogDensityProblems` + `BridgeStan` and wrap the
-emitted `SlicModel` in a `StanProblem`.
-
-```julia
-brmi  = @brm df (y ~ 1 + a + (1|g))
-sbbrmi = SBBRMI(brmi)
-src   = stan_code(sbbrmi)
-```
-"""
 # ---- preprocessing-constant provenance (decision nr3v8n A) ------------------
 # Each Category-A transform (zscale/standardize/center/factor/mo/s/t2/gp/hsgp) and the
 # element-wise `protect`/implicit-fn fallback compute a data-derived constant in
@@ -2245,6 +2188,63 @@ _sb_collect_non_mm_sources!(out, x::ExprColumn) = begin
 end
 _sb_collect_non_mm_sources!(_, ::MultiMembershipTerm) = nothing
 
+"""
+    SBBRMI(brmi::BRMI; mod=@__MODULE__, cv_groups=Set{Symbol}(),
+           centered_groups=Set{Symbol}()) -> SBBRMI
+
+StanBlocks backend: walks `brmi`, emits a `StanBlocks.SlicModel`, and
+materialises the data dict. Pass `mod` if you're constructing the model
+from a module other than `BayesianRegressionModels` so SLIC's symbol
+resolver finds your locally-defined submodels.
+
+`cv_groups` is an opt-in set of grouping-factor names (e.g. `[:subject]`)
+whose per-group random effect should be emitted with **cv-contagious
+sizing** -- the std-normal draw is sized from `maximum(<g>_idx)` instead of
+the standalone data scalar `n_<g>`, so marking the group index with
+`maybecv(:<g>_idx)` at trace time flips that RE to a generated-quantities
+population re-draw (leave-all-out / out-of-sample). This is used when
+generating a CV model artifact; the default (empty `cv_groups`) sizes the
+same submodel from `n_<g>` and leaves the RE a fitted parameter. There are no
+separate `_cv` submodels — the size expression passed at the call site is the
+entire difference. Plain `(… | g)` ranefs and cross-formula `(… |ID| g)`
+buckets are both supported; stratified `gr(g, by=b)` errors if opted-in.
+
+`centered_groups` is an opt-in set of grouping-factor names whose per-group
+random effect should be emitted in the **centered** parameterization -- the
+per-group effect itself is the sampled parameter, with the covariance as its
+prior (`bc ~ multi_normal_cholesky(0, diag_pre_multiply(tau, L))`), instead of
+the default non-centered standardised draw plus downstream scaling. Centered
+is the better geometry when the per-group likelihood is strong (dense repeated
+measurement per level, e.g. many PK samples per subject); non-centered stays
+the default, and a group not named here is untouched by this kwarg. Plain
+`(… | g)` ranefs and `(… |ID| g)` buckets are supported; stratified
+`gr(g, by=b)` is not.
+
+The two sets are **mutually exclusive per group**: a centered block's sampled
+parameter is the per-group effect itself, and no available spelling of that
+can carry a cv taint in its size, so `SBBRMI` rejects a group named in both
+rather than silently emitting an in-sample block. Note also that centered and
+non-centered emissions use different unconstrained coordinates, so fitted
+draws are not interchangeable between them.
+
+Formula statements `sd(:, ID) ~ Exponential(scale)` and
+`cor(:, ID) ~ LKJCholesky(K, eta)` configure a shared `|ID|` block.
+An SD statement can instead select one emitted margin with
+`sd(predictor, ID, coefficient)`, or write `sd(predictor, ID)` when that
+predictor contributes exactly one margin. See [`ranefcoefnames`](@ref)
+for the authoritative ordered addresses. Omitted statements retain historical
+defaults; Julia's Exponential scale is converted to Stan's rate.
+
+Use [`stan_code`](@ref) to extract the transpiled Stan source. For
+sampling, load `StanLogDensityProblems` + `BridgeStan` and wrap the
+emitted `SlicModel` in a `StanProblem`.
+
+```julia
+brmi  = @brm df (y ~ 1 + a + (1|g))
+sbbrmi = SBBRMI(brmi)
+src   = stan_code(sbbrmi)
+```
+"""
 struct SBBRMI{P<:BRMI, M, D<:AbstractDict, PP<:AbstractDict}
     parent::P
     model::M
@@ -3345,16 +3345,37 @@ extended rather than shadowed.
 _sb_submodel_rhs!(stmts, data, target, f, rhs) = nothing
 
 # ============================================================================
-# kernel(...) — general group-local submodel HoF term (decision `1vwycxb`).
-#
-#   pred ~ kernel(data..., per_subject_lps...) do slices..., lp_values...
-#       ...
-#   end
-#
-# The per-subject LP formulas own population effects, covariates, links and
-# random-effect buckets. `kernel` derives one shared grouping from those LPs and
-# only broadcasts the inline cell. The legacy `model=`/`obs=` spelling and its
-# anonymous `n_eta` block were removed by user decision `130c904`.
+"""
+    pred ~ kernel(data..., per_subject_lps...) do slices..., lp_values...
+        ...
+    end
+
+General group-local submodel term: broadcast an inline cell over the groups of
+the linear predictors it is given.
+
+The per-subject LP formulas own the population effects, covariates, links and
+random-effect buckets — they are ordinary `@brm` formulas declared in the same
+block. `kernel` derives ONE shared grouping from those LPs and evaluates the
+`do` block once per group, with each positional passed in as that group's slice:
+
+```julia
+log_CL ~ 1 + weight + (1 | p | subject)
+log_Vc ~ 1 + (1 | p | subject)
+
+conc ~ kernel(t_obs, ragged(dose, dose_subject), log_CL, log_Vc) do ts, doses, lCL, lVc
+    ...                                    # runs per subject, in Stan
+end
+```
+
+Positionals split by kind. A raw data column on the kernel's own
+one-row-per-subject frame is gathered into a per-group slice. A column living on
+a DIFFERENT frame — a dose-event table, say — must declare its grouping with
+[`ragged`](@ref). A linear predictor is passed as that group's scalar value.
+
+Dispatch tag only — lowering lives in `_sb_kernel_doblock!` (sbimpl). The legacy
+`model=` / `obs=` spelling and its anonymous `n_eta` block were removed by user
+decision `130c904`; the `do`-block form above is the only one.
+"""
 function kernel end
 
 """
