@@ -12,6 +12,8 @@ name is gensym-ed). The two-argument form bakes `df` in and returns the
 
 - `lhs ~ rhs` — a sampling statement (likelihood or linear predictor).
 - `lhs = rhs` — a literal binding (named intermediate).
+- `ragged(y, group) ~ rhs` — group a flat observed response at the formula
+  boundary, aligned to the `kernel(...)` result referenced by `rhs`.
 - `effect(lp, coefficient) ~ Normal(location, scale)` — an SBBRMI
   population-coefficient prior override.
 - `sd(lp, ID[, coefficient]) ~ Exponential(scale)` and
@@ -309,6 +311,11 @@ likelihood, missing rows become parameters drawn from the same family.
 See `_sb_emit_mi!` (sbimpl) for backend dispatch.
 """
 function mi end
+
+# Structural formula marker shared by the parser and sbimpl. Its full public
+# contract is documented beside the lowering in `sbimpl.jl`.
+function ragged end
+
 """
     _brm(formula::Union{Expr,AbstractString}; df=nothing) -> Expr
 
@@ -654,6 +661,13 @@ end
 xassignable(x::Symbol) = x
 xassignable(x::Expr) = if Meta.isexpr(x, (:tuple, :vect))
     Expr(x.head, xassignable.(x.args)...)
+elseif isxcall(x, :ragged) && length(x.args) >= 2
+    # `ragged(y, group) ~ family(...)` is an observation decorator, not a
+    # two-argument assignment target. Keep the formula operation keyed by the
+    # logical response (`y`); sbimpl groups its flat backing at the likelihood
+    # boundary. This mirrors the one-argument link/decorator spelling below,
+    # while retaining `group` on the parsed LHS for backend validation.
+    xassignable(x.args[2])
 elseif x.head == :call 
     if length(x.args) == 2
         xassignable(x.args[2])
@@ -1073,6 +1087,8 @@ function _nested_observed_values(lhs::ExprColumn)
     args = getargs(lhs)
     length(args) == 1 ? _nested_observed_values(only(args)) : nothing
 end
+_nested_observed_values(lhs::ExprColumn{typeof(ragged)}) =
+    _nested_observed_values(first(getargs(lhs)))
 _nested_observed_values(_) = nothing
 
 function _nested_rewrite_categorical!(target, lhs, rhs, pending, occupied)

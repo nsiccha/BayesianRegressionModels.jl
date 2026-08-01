@@ -2672,6 +2672,16 @@ _sb_register_mi_inner!(_, _) = nothing
 _sb_register_mi_inner!(ctx::AbstractDict, inner::NamedColumn) =
     (push!(get!(ctx, :skip_data, Set{Symbol}()), name(inner)); nothing)
 
+# `ragged(y, group) ~ rhs` materialises `y` itself as grouped data in the
+# sampling handler below. Do not let the generic data prepass first register
+# the flat backing under the same logical response name.
+_sb_register_sampling_lhs!(ctx::AbstractDict,
+                           lhs::ExprColumn{typeof(ragged)}) =
+    _sb_register_ragged_lhs_inner!(ctx, first(getargs(lhs)))
+_sb_register_ragged_lhs_inner!(_, _) = nothing
+_sb_register_ragged_lhs_inner!(ctx::AbstractDict, inner::NamedColumn) =
+    (push!(get!(ctx, :skip_data, Set{Symbol}()), name(inner)); nothing)
+
 
 _as_data_column(x::DataColumn) = x
 _as_data_column(_) = nothing
@@ -3381,11 +3391,24 @@ function kernel end
 """
     ragged(x, group)
 
-Group a FLAT secondary row axis into the ragged per-subject view `kernel(...)`
-slices. `x` lives on some frame other than the kernel's one-row-per-subject
-frame — a dose-event table, say — and `group` is a raw data column naming, for
-every row of that frame, which subject it belongs to. The cell receives `x` as a
-RAGGED per-subject vector.
+Group a FLAT secondary row axis by a raw data column that names the subject of
+every row. The marker has two formula positions:
+
+- As a `kernel(...)` positional, `ragged(x, group)` gives the cell a ragged
+  per-subject vector. `x` may be a flat data column or an event-axis linear
+  predictor.
+- As an observation LHS, `ragged(y, group) ~ Family(pred, ...)` groups a flat
+  response before applying the top-level likelihood. The referenced
+  `kernel(...)` result supplies the authoritative subject row order, so labels
+  are joined rather than sorted or inferred from first occurrence. The emitted
+  observation keeps the logical name `y` and therefore uses StanBlocks' normal
+  top-level ragged outputs: flat `y_gen`, group-aggregate `y_likelihood`, and
+  descriptor `segments`. This formula-boundary grouping is SBBRMI/sbimpl-only.
+
+For the kernel-positional form, `x` lives on some frame other than the kernel's
+one-row-per-subject frame — a dose-event table, say — and `group` names, for
+every row of that frame, which subject it belongs to. The cell receives `x` as
+a RAGGED per-subject vector.
 
 `x` may be either a linear predictor declared in the same `@brm` block, or a raw
 flat data column. It is the same grouping either way:
@@ -3426,8 +3449,9 @@ whose total length equals `x`'s row count must ALSO agree with it per subject,
 or the model is rejected.
 
 Dispatch tag only — lowering lives in `_sb_kernel_doblock!` (sbimpl).
+Observation-LHS lowering lives in `_sb_sampling!`.
 """
-function ragged end
+ragged
 
 _check_term_kwargs(::typeof(ragged), kwargs) = isempty(kwargs) || error(
     "@brm: ragged(...) takes no keywords, got $(keys(kwargs)). The spelling is ",
@@ -4215,6 +4239,112 @@ _sb_sampling!(_stmts, _data, _key, _lhs::ExprColumn{typeof(effect)}, _rhs;
 
 _sb_sampling_backed!(stmts, data, key, backing::DataColumn, rhs; id_lookup, kwargs...) = begin
     data[key] = _sb_data_vec(key, parent(backing))
+    _sb_likelihood!(stmts, key, rhs, data)
+end
+
+# Find the per-subject group column of every `kernel(...)` result referenced by
+# a likelihood RHS. The formula node retains the producer declaration on the
+# referenced NamedColumn, so the observation boundary can align a flat response
+# to the kernel's ROW-ordered subject axis without guessing from first-seen or
+# sorted labels.
+_sb_ragged_rhs_kernel_groups!(_acc, _x) = nothing
+function _sb_ragged_rhs_kernel_groups!(acc, x::NamedColumn)
+    decl = parent(x)
+    decl isa ExprColumn && getf(decl) === (~) || return nothing
+    _, producer_rhs = getargs(decl, 2)
+    producer_rhs isa ExprColumn && getf(producer_rhs) === kernel || return nothing
+
+    buckets = Any[]
+    for arg in getargs(producer_rhs)
+        arg isa NamedColumn || continue
+        arg_decl = parent(arg)
+        arg_decl isa ExprColumn && getf(arg_decl) === (~) || continue
+        push!(buckets, _sb_kernel_lp_bucket(arg))
+    end
+    isempty(buckets) && return nothing
+    groups = unique(b[2] for b in buckets)
+    length(groups) == 1 || error(
+        "sbimpl: kernel result `$(name(x))` has no single subject grouping; " *
+        "its per-subject predictors name groups $(collect(groups)).")
+    push!(acc, (name(x), first(buckets)[3]))
+    nothing
+end
+function _sb_ragged_rhs_kernel_groups!(acc, x::ExprColumn)
+    foreach(a -> _sb_ragged_rhs_kernel_groups!(acc, a), getargs(x))
+    foreach(v -> _sb_ragged_rhs_kernel_groups!(acc, v), values(getkwargs(x)))
+    nothing
+end
+
+function _sb_ragged_lhs_values(key::Symbol, lhs::ExprColumn, rhs)
+    args = getargs(lhs)
+    length(args) == 2 || error(
+        "sbimpl: `ragged(...)` observation LHS takes exactly two arguments — " *
+        "the flat response and its grouping column — got $(length(args)).")
+    response, group = args
+    response isa NamedColumn && parent(response) isa DataColumn || error(
+        "sbimpl: `ragged(...)` observation LHS needs a flat data-backed response " *
+        "as its first argument; got $(typeof(response)).")
+    name(response) === key || error(
+        "sbimpl: `ragged(...)` observation LHS is keyed as `$key` but names " *
+        "response `$(name(response))`.")
+    group isa NamedColumn && parent(group) isa DataColumn || error(
+        "sbimpl: `ragged($key, ...)` observation LHS needs a raw data grouping " *
+        "column as its second argument; got $(typeof(group)).")
+
+    raw = _sb_data_vec(key, parent(parent(response)))
+    raw isa AbstractVector{<:AbstractVector} && error(
+        "sbimpl: `ragged($key, $(name(group)))` observation LHS received an " *
+        "ALREADY-ragged response; write `$key ~ <family>(...)` directly.")
+    group_values = collect(parent(parent(group)))
+    length(group_values) == length(raw) || error(
+        "sbimpl: `ragged($key, $(name(group)))` has $(length(raw)) response rows " *
+        "but $(length(group_values)) grouping rows. The grouping column must name " *
+        "the subject of every response row.")
+    (!isempty(group_values) && !any(ismissing, group_values)) || error(
+        "sbimpl: `ragged($key, $(name(group)))` needs a non-empty grouping column " *
+        "with no missing labels.")
+
+    producers = Tuple{Symbol,Any}[]
+    _sb_ragged_rhs_kernel_groups!(producers, rhs)
+    isempty(producers) && error(
+        "sbimpl: `ragged($key, $(name(group))) ~ ...` needs a `kernel(...)` result " *
+        "on the likelihood RHS so BRM can align groups to the kernel's subject " *
+        "row order without guessing.")
+    subject_values = collect(parent(parent(first(producers)[2])))
+    for (producer, subject_col) in producers[2:end]
+        candidate = collect(parent(parent(subject_col)))
+        candidate == subject_values || error(
+            "sbimpl: `ragged($key, $(name(group)))` combines kernel result " *
+            "`$producer` with a different subject row order. Every kernel result " *
+            "in one likelihood must describe the same subjects in the same order.")
+    end
+    (!isempty(subject_values) && !any(ismissing, subject_values) &&
+     length(unique(subject_values)) == length(subject_values)) || error(
+        "sbimpl: `ragged($key, $(name(group)))` needs the referenced kernel's " *
+        "subject column to contain one non-missing unique label per row; got " *
+        "$(subject_values).")
+
+    positions = Dict{Any,Int}(v => i for (i, v) in enumerate(subject_values))
+    rows = [Int[] for _ in subject_values]
+    unknown = Any[]
+    for (row, label) in enumerate(group_values)
+        i = get(positions, label, 0)
+        i == 0 ? push!(unknown, label) : push!(rows[i], row)
+    end
+    isempty(unknown) || error(
+        "sbimpl: `ragged($key, $(name(group)))` contains label(s) " *
+        "$(unique(unknown)) that name no subject in the referenced kernel.")
+    [raw[r] for r in rows]
+end
+
+# Formula-boundary grouping for a flat observed frame. The emitted likelihood
+# keeps the logical response name (`key`), so StanBlocks' existing top-level
+# RaggedVector path owns the flat predictive draw, group-aggregate likelihood,
+# and descriptor `segments` exactly as it does for a pre-grouped response.
+function _sb_sampling!(stmts, data, key,
+                       lhs::ExprColumn{typeof(ragged)}, rhs;
+                       id_lookup=_sb_empty_id_lookup(), kwargs...)
+    data[key] = _sb_ragged_lhs_values(key, lhs, rhs)
     _sb_likelihood!(stmts, key, rhs, data)
 end
 
@@ -7193,6 +7323,8 @@ end
 # data-backed NamedColumn and one-arg link wrappers (`log(y)`, `mi(y)`, etc.).
 _sb_observation_name(_) = nothing
 _sb_observation_name(lhs::NamedColumn) = _n_obs_named_data(lhs, parent(lhs))
+_sb_observation_name(lhs::ExprColumn{typeof(ragged)}) =
+    _sb_observation_name(first(getargs(lhs)))
 _sb_observation_name(lhs::ExprColumn) = begin
     args = getargs(lhs)
     length(args) == 1 ? _sb_observation_name(args[1]) : nothing
