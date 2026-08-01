@@ -105,16 +105,30 @@ BRM adds:
   on [`GenerativeDeclaration`](@ref); reach for them instead of re-parsing.
   An output whose `name` differs from `declaration.target` is one of that
   block's *internals* (`pop_mu_beta_pop` under `pop_mu`).
-- `logical` — the declaration target whose returned value this emitted Stan
-  output physically carries, or `nothing` for an internal. This is deliberately
+- `logical` — the BRM-level quantity whose value this emitted Stan output
+  physically carries, or `nothing` for an internal. This is deliberately
   narrower than `declaration`: every `kernel(...)` cell local belongs to the
   plate declaration, but only its collected result carries the logical target.
   For a ragged result, `logical == :loc` can therefore accompany an emitted
   `name` such as `:loc__pl_mem_1`; consumers keep the logical identity while
   addressing BridgeStan through the emitted name.
+
+  For a predictive or pointwise-loglik twin it is StanBlocks' `source` — the
+  OBSERVED QUANTITY — which is not always a declaration target. A top-level
+  `y ~ Normal(mu, sigma)` gives `y_gen` `logical == :y`, where `:y` is also the
+  declaration; a plate-nested `yy ~ normal(...)` over column `dv` gives
+  `dv_gen` `logical == :dv`, where the declaration is the cell-local `yy` and
+  `:dv` is a data column. Both twins of one observation share it, so
+  [`brm_output`](@ref) needs `role=` to pick between them.
 - `labels` — per-element labels when BRM can name them (population
   coefficients, via [`popcoefnames`](@ref)), otherwise `nothing`. A UI that
   would otherwise print `beta_pop.1`, `beta_pop.2` can print `x`, `g`.
+- `segments` — group boundaries for a RAGGED quantity, carried through from
+  StanBlocks' `ModelOutput.segments`, otherwise `nothing`. Group `g` occupies
+  `segments[g-1]+1 : segments[g]` (with `segments[0] ≡ 0`) *within this
+  output's own coordinates* — so it composes directly with the vector
+  [`brm_output_coordinates`](@ref) returns, and a consumer never re-derives
+  per-subject boundaries from a length column.
 
 `role` is derived from the declaration, never from the output's name — a user
 variable may legitimately be called `beta_pop` or end in `_gen`.
@@ -131,15 +145,21 @@ struct BRMOutput
     declaration::Union{Nothing,GenerativeDeclaration}
     logical::Union{Nothing,Symbol}
     labels::Union{Nothing,Vector{Symbol}}
+    segments::Union{Nothing,Vector{Int}}
 end
 
-# Preserve the original positional constructor for downstream code that creates
-# display-only BRMOutput values. Descriptor-derived values always supply the
-# semantic `logical` field explicitly below.
+# Preserve the earlier positional constructors for downstream code that creates
+# display-only BRMOutput values. `segments` and `logical` are appended rather
+# than inserted precisely so those calls keep compiling; descriptor-derived
+# values always supply both explicitly below.
+BRMOutput(name, kind, type, size, constraints, generative, source, role,
+          declaration, logical, labels) =
+    BRMOutput(name, kind, type, size, constraints, generative, source, role,
+              declaration, logical, labels, nothing)
 BRMOutput(name, kind, type, size, constraints, generative, source, role,
           declaration, labels) =
     BRMOutput(name, kind, type, size, constraints, generative, source, role,
-              declaration, nothing, labels)
+              declaration, nothing, labels, nothing)
 
 # ---- operations -------------------------------------------------------------
 
@@ -402,6 +422,45 @@ function _brm_logical_outputs(stan, by_name, targets)
     output_names = Set{Symbol}(o.name for o in stan.outputs)
     model_names = Set{Symbol}(keys(stan.model))
 
+    # One assignment point, so every branch below gets the same conflict check.
+    # Assigning directly would let a second claim silently overwrite the first,
+    # which is precisely the ambiguity this error exists to refuse.
+    claim! = (emitted, target) -> begin
+        if haskey(logical, emitted) && logical[emitted] !== target
+            error(
+                "brm_descriptor: emitted output `$emitted` carries two logical " *
+                "targets (`$(logical[emitted])` and `$target`). The traced " *
+                "model is ambiguous; give the declarations distinct results.")
+        end
+        logical[emitted] = target
+    end
+
+    # StanBlocks' `source` link IS the logical identity of a predictive or
+    # pointwise-loglik twin, and it is authoritative — the same link
+    # `_brm_owner` trusts first. Resolve on it DIRECTLY rather than through a
+    # declaration, because the observed quantity is not always a declaration:
+    #
+    #   y ~ Normal(mu, sigma)            ->  `y_gen.source === :y`, and `:y` IS
+    #                                        a declaration target.
+    #
+    #   pred ~ kernel(dose, dv, ...) do dd, yy, ls
+    #       yy ~ normal(mu, sigma)       ->  `dv_gen.source === :dv`, but the
+    #   end                                  declaration is the CELL-LOCAL `yy`
+    #                                        (context `(:pred,)`), and `:dv` is
+    #                                        a data COLUMN, not a target.
+    #
+    # Keying off declarations covered only the first shape, so every
+    # plate-nested observation's predictive carrier had no logical target at
+    # all — which is exactly why a consumer had to filter
+    # `descriptor.stan.outputs` and hardcode the emitter-owned `_gen` suffix.
+    #
+    # Both twins of one observation share a logical target; `role`
+    # (`:posterior_predictive` vs `:pointwise_loglik`) separates them, so the
+    # query takes `role` to disambiguate.
+    for o in stan.outputs
+        isnothing(o.source) || claim!(o.name, o.source)
+    end
+
     for (resolved, decl) in by_name
         decl.role === :observation && continue
         owned = Set{Symbol}(o.name for o in stan.outputs
@@ -415,15 +474,7 @@ function _brm_logical_outputs(stan, by_name, targets)
             _brm_output_leaves!(found, stan.model[resolved], owned)
         end
 
-        for emitted in found
-            if haskey(logical, emitted) && logical[emitted] !== decl.target
-                error(
-                    "brm_descriptor: emitted output `$emitted` carries two logical " *
-                    "targets (`$(logical[emitted])` and `$(decl.target)`). The traced " *
-                    "model is ambiguous; give the declarations distinct results.")
-            end
-            logical[emitted] = decl.target
-        end
+        foreach(emitted -> claim!(emitted, decl.target), found)
     end
     logical
 end
@@ -447,10 +498,19 @@ function _brm_label_population!(outputs, brmi, pop_lp)
         o = outputs[idx[1]]
         outputs[idx[1]] = BRMOutput(o.name, o.kind, o.type, o.size, o.constraints,
                                     o.generative, o.source, o.role, o.declaration,
-                                    o.logical, labels)
+                                    o.logical, labels, o.segments)
     end
     outputs
 end
+
+# Ragged group boundaries, read from StanBlocks' `ModelOutput.segments` when the
+# pinned StanBlocks emits them. Guarded by `hasproperty` rather than a version
+# check: BRM is developed against a moving StanBlocks, and a hard field access
+# would turn "your pin predates segments" into a MethodError at descriptor
+# construction — i.e. an unrelated model would stop reflecting at all — instead
+# of the honest "this consumer has no segment metadata yet".
+_brm_output_segments(o) =
+    hasproperty(o, :segments) ? getproperty(o, :segments) : nothing
 
 """
     brm_descriptor(sb::SBBRMI; name=nothing, operations=Dict(), titles=Dict(), highlights=())
@@ -666,7 +726,8 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
         end
         push!(outputs, BRMOutput(o.name, o.kind, o.type, o.size, o.constraints,
                                  o.generative, o.source, role, decl,
-                                 get(logical_outputs, o.name, nothing), nothing))
+                                 get(logical_outputs, o.name, nothing), nothing,
+                                 _brm_output_segments(o)))
     end
     outputs = _brm_label_population!(outputs, brmi, pop_lp)
 
@@ -784,30 +845,79 @@ collect for a `:replay` / `:reprocess`. Equivalent to `d.columns`.
 brm_columns(d::BRMDescriptor) = d.columns
 
 """
-    brm_output(d::BRMDescriptor, logical::Symbol) -> BRMOutput
+    brm_outputs(d::BRMDescriptor; logical=nothing, role=nothing, kind=nothing)
+        -> Vector{BRMOutput}
+
+Every emitted output matching the given semantic filters, in descriptor order.
+Each filter accepts a `Symbol` or any collection of them, and an omitted filter
+does not constrain. This is the **discovery** query — it can legitimately return
+zero, one, or many; use [`brm_output`](@ref) when exactly one is required.
+
+```julia
+brm_outputs(d; role=:posterior_predictive)          # every predictive carrier
+brm_outputs(d; logical=:pk_conc)                    # every carrier of one target
+brm_outputs(d; role=(:parameter, :random_effect))   # either role
+```
+
+Filtering here is on BRM meaning (`logical` / `role`) or Stan representation
+(`kind`) — never on the emitted NAME, which the compiler owns.
+"""
+function brm_outputs(d::BRMDescriptor; logical=nothing, role=nothing, kind=nothing)
+    BRMOutput[o for o in d.outputs
+              if _brm_matches(o.logical, logical) &&
+                 _brm_matches(o.role, role) &&
+                 _brm_matches(o.kind, kind)]
+end
+
+_brm_matches(_value, ::Nothing) = true
+_brm_matches(value, wanted::Symbol) = value === wanted
+_brm_matches(value, wanted) = any(w -> value === w, wanted)
+
+"""
+    brm_output(d::BRMDescriptor, logical::Symbol; role=nothing) -> BRMOutput
 
 Return the unique emitted output that physically carries declaration target
 `logical`. This resolves BRM meaning to Stan representation without parsing an
 emitter-owned name. For example, a ragged `loc ~ kernel(...)` result can resolve
 to an output named `loc__pl_mem_1` while retaining `logical == :loc`.
 
-Fails loudly when the target has no emitted carrier or maps to several carriers;
-the caller must never guess from descriptor order in either case.
+**One logical target legitimately has several carriers, and `role` is how you
+pick one.** An observation `pk_conc ~ Normal(loc, sigma)` emits a
+posterior-predictive twin *and* a pointwise-log-likelihood twin, both carrying
+`logical === :pk_conc`. Ask for the one you mean:
+
+```julia
+brm_output(d, :pk_conc; role=:posterior_predictive)   # the *_gen carrier
+brm_output(d, :pk_conc; role=:pointwise_loglik)       # the per-element loglik
+```
+
+The emitted names (`pk_conc_gen`, …) are StanBlocks' to choose and are NOT part
+of this contract; that is the whole point of asking by role.
+
+Fails loudly when the target has no emitted carrier or still maps to several;
+the caller must never guess from descriptor order in either case. The
+several-carriers message lists each candidate WITH its role, so the fix is the
+`role=` to add rather than a name to hardcode.
 """
-function brm_output(d::BRMDescriptor, logical::Symbol)
-    found = BRMOutput[o for o in d.outputs if o.logical === logical]
+function brm_output(d::BRMDescriptor, logical::Symbol; role=nothing)
+    found = brm_outputs(d; logical, role)
     length(found) == 1 && return only(found)
+    qualifier = isnothing(role) ? "" : " with role `$role`"
     if isempty(found)
-        error("brm_descriptor: logical output `$logical` has no emitted posterior " *
-              "carrier in model `$(d.name)`.")
+        available = unique!(Symbol[o.role for o in d.outputs if o.logical === logical])
+        hint = isempty(available) ? "" :
+            " That target does emit carriers with role(s) $(Tuple(available))."
+        error("brm_descriptor: logical output `$logical`$qualifier has no emitted " *
+              "posterior carrier in model `$(d.name)`.$hint")
     end
-    error("brm_descriptor: logical output `$logical` spans several emitted carriers " *
-          "$(Tuple(o.name for o in found)); request an explicit emitted output.")
+    error("brm_descriptor: logical output `$logical`$qualifier spans several emitted " *
+          "carriers $(Tuple((o.name, o.role) for o in found)); pass `role=` to select " *
+          "one, or use `brm_outputs` to take them all.")
 end
 
 """
-    brm_output_coordinates(d::BRMDescriptor, logical::Symbol, constrained_names)
-        -> Vector{Int}
+    brm_output_coordinates(d::BRMDescriptor, logical::Symbol, constrained_names;
+                           role=nothing) -> Vector{Int}
 
 Resolve a logical BRM output to its columns in BridgeStan's constrained
 `param_names` (or an equivalent posterior name vector). Resolution first uses
@@ -815,13 +925,23 @@ Resolve a logical BRM output to its columns in BridgeStan's constrained
 that exact name or its documented container coordinates (`name.1`,
 `name.1.1`, …). It never parses a compiler-owned plate suffix.
 
-The returned integers index `constrained_names` in their existing order. A
-missing carrier is an error, which catches descriptor/artifact drift instead of
-returning an empty posterior slice.
+`role` disambiguates a target with several carriers, exactly as on
+[`brm_output`](@ref) — a posterior-predictive slice of an observation is
+
+```julia
+brm_output_coordinates(d, :pk_conc, param_names; role=:posterior_predictive)
+```
+
+The returned integers index `constrained_names` in their existing order. For a
+ragged carrier they compose with that output's `segments`: group `g` is
+`coordinates[segments[g-1]+1 : segments[g]]`.
+
+A missing carrier is an error, which catches descriptor/artifact drift instead
+of returning an empty posterior slice.
 """
 function brm_output_coordinates(d::BRMDescriptor, logical::Symbol,
-                                constrained_names)
-    output = brm_output(d, logical)
+                                constrained_names; role=nothing)
+    output = brm_output(d, logical; role)
     stem = String(output.name)
     prefix = stem * "."
     coordinates = Int[]

@@ -222,6 +222,60 @@ end
     @test byname[:mu].labels === nothing
 end
 
+@testset "semantic output query — role, not emitted name" begin
+    d = brm_descriptor(hier_builder, df; mod=@__MODULE__)
+    byname = Dict(o.name => o for o in d.outputs)
+
+    # An OBSERVATION's twins carry its logical target. This is the case a
+    # consumer previously could not reach semantically: `y_gen` is StanBlocks'
+    # name for the predictive carrier of `y`, so anyone wanting that slice had
+    # to filter `descriptor.stan.outputs` and hardcode the `_gen` suffix.
+    @test byname[:y_gen].logical === :y
+    @test byname[:y_likelihood].logical === :y
+    @test byname[:z_gen].logical === :z
+
+    # ...and the emitted name is exactly what is NOT part of the contract.
+    @test brm_output(d, :y; role=:posterior_predictive).name === :y_gen
+    @test brm_output(d, :y; role=:pointwise_loglik).name === :y_likelihood
+    @test brm_output(d, :z; role=:posterior_predictive).name === :z_gen
+
+    # Two carriers, one target: unqualified must FAIL rather than pick one by
+    # descriptor order, and the message must name the roles to choose from.
+    @test_throws ErrorException brm_output(d, :y)
+    msg = try; brm_output(d, :y); catch e; sprint(showerror, e); end
+    @test occursin("posterior_predictive", msg) && occursin("pointwise_loglik", msg)
+    @test occursin("role=", msg)
+
+    # A single-carrier target is unaffected by the new keyword, and a role that
+    # does not apply to it fails closed naming the roles that do.
+    @test brm_output(d, :sigma).name === :sigma
+    @test brm_output(d, :sigma; role=:parameter).name === :sigma
+    @test_throws ErrorException brm_output(d, :sigma; role=:posterior_predictive)
+    miss = try
+        brm_output(d, :sigma; role=:posterior_predictive)
+    catch e; sprint(showerror, e); end
+    @test occursin("parameter", miss)
+
+    # The plural query is the discovery half: zero, one or many are all valid.
+    predictive = brm_outputs(d; role=:posterior_predictive)
+    @test Set(o.name for o in predictive) == Set([:y_gen, :z_gen])
+    @test Set(o.logical for o in predictive) == Set([:y, :z])
+    @test Set(o.name for o in brm_outputs(d; logical=:y)) == Set([:y_gen, :y_likelihood])
+    @test isempty(brm_outputs(d; role=:no_such_role))
+    # A collection filter means "any of these".
+    @test length(brm_outputs(d; role=(:posterior_predictive, :pointwise_loglik))) == 4
+    # An omitted filter does not constrain.
+    @test length(brm_outputs(d)) == length(d.outputs)
+    @test all(o -> o.kind === :parameter, brm_outputs(d; kind=:parameter))
+
+    # Coordinates resolve through the same role, so a consumer never needs the
+    # emitted name to slice BridgeStan's constrained vector.
+    names = ["sigma", "y_gen.1", "y_gen.2", "z_gen.1"]
+    @test brm_output_coordinates(d, :y, names; role=:posterior_predictive) == [2, 3]
+    @test brm_output_coordinates(d, :sigma, names) == [1]
+    @test_throws ErrorException brm_output_coordinates(d, :y, names)
+end
+
 @testset "execution — BRM -> StanBlocks -> BridgeStan" begin
     d = brm_descriptor(hier_builder, df; mod=@__MODULE__)
 
@@ -385,6 +439,26 @@ kernel_schedule(n; subject=collect(1:n)) = (;
               constrained_names[loc_coordinates])
     @test_throws ErrorException brm_output_coordinates(d, :loc, ["not_loc.1"])
 
+    # A RAGGED observation currently has NO posterior-predictive carrier at all:
+    # this model emits zero generated quantities, so `dv` owns no `_gen` twin —
+    # unlike the SCALAR plate observation below, whose `:predict` yields
+    # `dv_gen`. Asserted rather than skipped, because the failure must stay
+    # fail-CLOSED: a consumer asking for a predictive slice of a ragged
+    # observation has to get an error, never an empty or wrong slice. When
+    # ragged twins do appear upstream, this flips and the assertion below is
+    # what tells us.
+    @test isempty(brm_outputs(d; logical=:dv))
+    @test isempty(brm_outputs(d; role=:posterior_predictive))
+    @test_throws ErrorException brm_output(d, :dv; role=:posterior_predictive)
+    @test_throws ErrorException brm_output_coordinates(
+        d, :dv, constrained_names; role=:posterior_predictive)
+
+    # `segments` is plumbed from StanBlocks either way. The plate's collected
+    # return carrier is a plate member, not an observation twin, so it carries
+    # none — this asserts the field exists and stays honest rather than
+    # inventing boundaries.
+    @test primary.segments === nothing
+
     # A builder-backed kernel can rebuild for genuinely new groups. It cannot
     # reprocess in place because its formula-declared BSV is a random-effect
     # block, exactly the documented reprocess boundary.
@@ -423,6 +497,19 @@ scalar_schedule(n) = (; dose=fill(100.0, n), dv=collect(1.0:n) ./ 10,
     @test :predict in ops
     @test brm_output(d, :pred).name === :pred
     @test brm_operation(d, :predict).outputs == (:dv_gen,)
+
+    # THE plate case that does have a predictive carrier, reached by role rather
+    # than by the `_gen` suffix. `:predict` names `dv_gen` above; a consumer
+    # should never have to read that name off an operation to slice a posterior.
+    predictive = brm_output(d, :dv; role=:posterior_predictive)
+    @test predictive.name === :dv_gen
+    @test predictive.logical === :dv
+    @test predictive.source === :dv
+    @test brm_outputs(d; role=:posterior_predictive) == [predictive]
+    @test brm_output_coordinates(d, :dv, ["sigma_a", "dv_gen.1", "dv_gen.2"];
+                                 role=:posterior_predictive) == [2, 3]
+    # Non-ragged, so no group boundaries — `segments` stays honest.
+    @test predictive.segments === nothing
     @test isempty(d.unpredictable)
     prob = brm_execute(d, :fit)
     n = StanBlocks.LogDensityProblems.dimension(prob)
