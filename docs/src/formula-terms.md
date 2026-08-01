@@ -1,5 +1,83 @@
 # Formula terms
 
+## Catalogue
+
+Every term below lowers on the StanBlocks backend (`SBBRMI`); the
+`VBRMI` column marks the ones the pure-Julia backend also implements. The pages
+that follow document the terms whose behaviour is not obvious from the
+signature — the rest are covered by their docstrings on the [API](@ref) page.
+
+### Predictor terms
+
+| Term | What it contributes | `VBRMI` |
+| --- | --- | --- |
+| `offset(x)` | `x` added with coefficient one — no `beta_pop` column | ✓ |
+| `s(x)` | rank-10 penalized thin-plate regression spline | — |
+| `t2(x, z)` | two-margin tensor-product smooth | — |
+| `gp(x…; cov=:exp_quad, iso=true, jitter=1e-9)` | exact latent Gaussian process, noncentered Cholesky draw | — |
+| `hsgp(x…; k=20, c=1.5, iso=true, by=nothing)` | Hilbert-space GP approximation over `prod(k)` basis functions | — |
+| `ar(time; p=1)` | AR(p) noise process ordered by `time`; only `p=1` is emitted | — |
+| `mo(c)`, `mo1(c)` | monotonic effect of an ordered factor via Dirichlet increments | — |
+| `me(x, sd)` | measurement-error covariate — `x` is observed with known `sd` | — |
+| `factor(c; ref=k)` | treatment contrasts for a categorical column, reference level `k` | ✓ |
+| `protect(x)` | materialize a raw data expression as one literal column | ✓ |
+
+A plain RHS expression in raw data columns (`log(exposure)`, `x^2`) is treated
+as an implicit `protect(...)` and materialized the same way.
+
+`gp` and `hsgp` are distinct terms with no compatibility alias. Both are direct
+predictor summands carrying their own latent draws and hyperparameters, so
+neither contributes a `beta_pop` coefficient. `jitter` belongs only to `gp`;
+`k`, `c` and `by` only to `hsgp`. Both currently support `cov=:exp_quad` only.
+
+### Column transforms
+
+Applied to a raw column before it enters the design matrix. The constants are
+fitted on the training frame and frozen, so [`reprocess`](@ref) replays them
+rather than re-deriving them — see the replay contract below.
+
+| Term | What it does |
+| --- | --- |
+| `zscale(x)` | subtract the mean, divide by the SD |
+| `center(x)` | subtract the mean |
+| `standardize(x)` | mean/SD standardisation |
+
+### Grouping factors
+
+Used on the right of `|` in a random-effect block.
+
+| Term | What it does |
+| --- | --- |
+| `gr(g)` | ordinary grouping factor / strata |
+| `mm(g1, g2, …; weights=(w1, w2, …), normalize=true)` | multi-membership — one coefficient block shared across two or more levels per row |
+
+`mm` needs at least two group columns; omitting `weights` gives exact equal
+weights `1/M`. Supplied weights must be present, real, finite, nonnegative and
+sum to something positive on every row. It does not combine with `|ID|`,
+`cv_groups` or `centered_groups`, which error explicitly.
+
+### Response-level wrappers
+
+| Term | What it does |
+| --- | --- |
+| `mi(y)` | brms-style observed/imputed split — missing rows become parameters drawn from the same family |
+| [`weighted(y, w)`](@ref) | typed observation weights on the likelihood |
+| `truncated`, `censored`, [`interval_censored`](@ref) | truncation and censoring — see [Likelihoods](@ref) |
+
+`mm`'s membership weights are part of the random-effect contribution and are a
+different thing from `weighted(...)`, which scales the likelihood.
+
+### Group-local kernels
+
+| Term | What it does |
+| --- | --- |
+| `kernel(args…) do …` | a per-subject model cell — the PMX/PKPD surface |
+| `ragged(x, group)` | group a flat secondary row axis into the ragged per-subject view a `kernel` cell slices |
+
+`ragged`'s `x` may be a linear predictor declared in the same `@brm` block or a
+raw flat data column; `group` names, for every row of that frame, which subject
+the row belongs to.
+
 ## Fixed-one contribution: `offset(x)`
 
 [`offset`](@ref) adds `x` directly to a population-level linear predictor with
