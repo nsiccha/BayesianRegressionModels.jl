@@ -102,15 +102,16 @@ different linear predictors in one model may be defined on different axes:
 
 ```julia
 @brm schedule begin
+    sigma  ~ Exponential(1)
     log_F  ~ 1 + factor(vessel) + mo(diet)   # one row per dose EVENT
     log_CL ~ 1 + weight + (1 | pk | subject) # one row per SUBJECT
 
     pred ~ kernel(t_obs, y,
-                  ragged(dose_time,   dose_subject),
                   ragged(dose_amount, dose_subject),
                   ragged(log_F,       dose_subject),
-                  log_CL) do ts, yy, dts, doses, lF, lCL
-        mu = pk_prediction(ts, dts, doses .* exp(lF), exp(lCL))
+                  log_CL) do ts, yy, doses, lF, lCL
+        effective_dose = sum(doses .* exp(lF))
+        mu = effective_dose .* exp(-exp(lCL) .* ts)
         yy ~ normal(mu, sigma)
         mu
     end
