@@ -393,11 +393,12 @@ end
 
 function _native_ppl_copy_input(::Type{T}, input, role::Symbol, name::Symbol) where {T<:AbstractFloat}
     output = Vector{T}(undef, length(input))
-    for i in eachindex(input)
-        value = input[i]
+    for (i, value) in enumerate(input)
         value isa Real && isfinite(value) || throw(ArgumentError(
             "native PPL $role `$name` contains a non-finite or non-real value at row $i"))
         output[i] = value
+        isfinite(output[i]) || throw(ArgumentError(
+            "native PPL $role `$name` cannot be represented as $T at row $i"))
     end
     output
 end
@@ -428,12 +429,19 @@ function _native_ppl_check_execution(workspace::NativePPLWorkspace,
                                      prepared::NativePPLPrepared,
                                      position::AbstractVector)
     dimension = LogDensityProblems.dimension(prepared)
+    observations = length(prepared.response)
     length(position) == dimension || throw(DimensionMismatch(
         "native PPL position has length $(length(position)); expected $dimension"))
     length(workspace.gradient) == dimension || throw(DimensionMismatch(
         "native PPL workspace gradient has length $(length(workspace.gradient)); expected $dimension"))
-    length(workspace.primal.location) == length(prepared.response) ||
-        throw(DimensionMismatch("native PPL workspace observation axis does not match prepared data"))
+    length(prepared.predictor) == observations || throw(DimensionMismatch(
+        "native PPL prepared predictor has $(length(prepared.predictor)) rows; expected $observations"))
+    length(workspace.primal.location) == observations || throw(DimensionMismatch(
+        "native PPL workspace location has $(length(workspace.primal.location)) rows; expected $observations"))
+    length(workspace.primal.pointwise_loglikelihood) == observations ||
+        throw(DimensionMismatch(
+            "native PPL workspace pointwise likelihood has " *
+            "$(length(workspace.primal.pointwise_loglikelihood)) rows; expected $observations"))
     eltype(position) === eltype(workspace) || throw(ArgumentError(
         "native PPL position eltype $(eltype(position)) does not match workspace eltype $(eltype(workspace))"))
     eltype(prepared) === eltype(workspace) || throw(ArgumentError(
@@ -463,7 +471,7 @@ const _NATIVE_PPL_LOG2PI = log(2π)
     density += -log(prior_scale) - scale / prior_scale + log_scale
 
     inverse_scale = inv(scale)
-    for i in eachindex(prepared.predictor, prepared.response)
+    for i in eachindex(prepared.response)
         location = intercept + slope * prepared.predictor[i]
         residual = (prepared.response[i] - location) * inverse_scale
         pointwise = -log_scale - normalizer - half * residual * residual

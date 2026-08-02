@@ -1,6 +1,8 @@
 using Test
 using BayesianRegressionModels
-using Distributions: Exponential, Normal, Poisson
+import DifferentiationInterface as DI
+using Distributions: Exponential, Normal, Poisson, logpdf
+using Enzyme
 using LogDensityProblems
 
 const BRM = BayesianRegressionModels
@@ -13,6 +15,15 @@ function capability_error(f)
         return err
     end
     error("expected NativePPLCapabilityError")
+end
+
+function steady_state_allocations(workspace, prepared, position)
+    BRM._native_ppl_logdensity!(workspace, prepared, position)
+    BRM._native_ppl_logdensity_and_gradient!(workspace, prepared, position)
+    primal = @allocated(BRM._native_ppl_logdensity!(workspace, prepared, position))
+    gradient = @allocated(
+        BRM._native_ppl_logdensity_and_gradient!(workspace, prepared, position))
+    (; primal, gradient)
 end
 
 @testset "typed native Gaussian plan" begin
@@ -77,6 +88,137 @@ end
         "  nodes: location\n" *
         "  factors: NativePPLStandardNormalFactor, " *
         "NativePPLExponentialFactor, NativePPLNormalFactor"
+end
+
+
+@testset "prepared native Gaussian execution" begin
+    data = (;
+        dose=[-1.0, 0.0, 2.0],
+        response=Float32[0.5, 1.0, 2.5],
+    )
+    brmi = @brm data begin
+        residual ~ Exponential(2.5)
+        location ~ 1 + dose
+        response ~ Normal(location, residual)
+    end
+    plan = BRM._native_ppl_plan(brmi)
+    prepared = BRM._native_ppl_prepare(plan)
+    workspace = BRM.NativePPL.workspace(prepared, Float64, DI.AutoEnzyme())
+
+    @test Base.get_extension(
+        BRM, :BayesianRegressionModelsDifferentiationInterfaceExt) !== nothing
+    @test prepared isa BRM.NativePPLPrepared
+    @test eltype(prepared) == Float64
+    @test LogDensityProblems.dimension(prepared) == 3
+    @test prepared.predictor == data.dose
+    @test prepared.predictor !== data.dose
+    @test prepared.response == data.response
+    @test prepared.response !== data.response
+    @test prepared.workspace_spec.observation_axis === plan.axes.observation
+    @test prepared.workspace_spec.gradient_length == 3
+    @test sprint(show, prepared) == "NativePPLPrepared(3 observations, eltype=Float64)"
+
+    @test workspace isa BRM.NativePPLWorkspace
+    @test eltype(workspace) == Float64
+    @test workspace.derivative !== nothing
+    @test length(workspace.gradient) == 3
+    @test sprint(show, workspace) ==
+        "NativePPLWorkspace(eltype=Float64, location=3, " *
+        "pointwise_loglikelihood=3, gradient=3)"
+
+    position = [0.1, -0.2, log(1.3)]
+    location = position[1] .+ position[2] .* prepared.predictor
+    scale = exp(position[3])
+    pointwise = logpdf.(Normal.(location, scale), prepared.response)
+    expected_density =
+        logpdf(Normal(), position[1]) +
+        logpdf(Normal(), position[2]) +
+        logpdf(Exponential(2.5), scale) + position[3] + sum(pointwise)
+    expected_gradient = [
+        -position[1] + sum((prepared.response .- location) ./ scale^2),
+        -position[2] +
+            sum(prepared.predictor .* (prepared.response .- location) ./ scale^2),
+        1 - scale / 2.5 +
+            sum(-1 .+ ((prepared.response .- location) ./ scale) .^ 2),
+    ]
+
+    density = BRM._native_ppl_logdensity!(workspace, prepared, position)
+    @test density ≈ expected_density
+    @test workspace.primal.location ≈ location
+    @test workspace.primal.pointwise_loglikelihood ≈ pointwise
+
+    gradient_density, gradient =
+        BRM._native_ppl_logdensity_and_gradient!(workspace, prepared, position)
+    @test gradient_density ≈ expected_density
+    @test gradient === workspace.gradient
+    @test gradient ≈ expected_gradient
+    @test workspace.primal.location ≈ location
+    @test workspace.primal.pointwise_loglikelihood ≈ pointwise
+
+    allocations = steady_state_allocations(workspace, prepared, position)
+    @test allocations == (; primal=0, gradient=0)
+
+    prepared32 = BRM._native_ppl_prepare(plan; T=Float32)
+    workspace32 = BRM.NativePPL.workspace(prepared32, Float32, DI.AutoEnzyme())
+    density32, gradient32 = BRM._native_ppl_logdensity_and_gradient!(
+        workspace32, prepared32, Float32.(position))
+    @test density32 ≈ Float32(expected_density)
+    @test gradient32 ≈ Float32.(expected_gradient)
+end
+
+
+@testset "prepared native execution fails closed" begin
+    data = (; x=[-1.0, 0.0, 2.0], y=[0.5, 1.0, 2.5])
+    brmi = @brm data begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x
+        y ~ Normal(mu, sigma)
+    end
+    plan = BRM._native_ppl_plan(brmi)
+    prepared = BRM._native_ppl_prepare(plan)
+    workspace = BRM.NativePPL.workspace(prepared, Float64, DI.AutoEnzyme())
+    position = zeros(3)
+
+    @test_throws DimensionMismatch BRM._native_ppl_logdensity!(
+        workspace, prepared, zeros(2))
+    @test_throws ArgumentError BRM._native_ppl_logdensity!(
+        workspace, prepared, zeros(Float32, 3))
+    @test_throws ArgumentError BRM._native_ppl_logdensity_and_gradient!(
+        workspace, prepared, @view(position[:]))
+
+    bad_gradient = BRM.NativePPLWorkspace(prepared)
+    pop!(bad_gradient.gradient)
+    @test_throws DimensionMismatch BRM._native_ppl_logdensity!(
+        bad_gradient, prepared, position)
+
+    bad_pointwise = BRM.NativePPLWorkspace(prepared)
+    pop!(bad_pointwise.primal.pointwise_loglikelihood)
+    @test_throws DimensionMismatch BRM._native_ppl_logdensity!(
+        bad_pointwise, prepared, position)
+
+    bad_location = BRM.NativePPL.workspace(prepared, Float64, DI.AutoEnzyme())
+    pop!(bad_location.primal.location)
+    @test_throws DimensionMismatch BRM._native_ppl_logdensity_and_gradient!(
+        bad_location, prepared, position)
+
+    bad_prepared = BRM._native_ppl_prepare(plan)
+    pop!(bad_prepared.predictor)
+    @test_throws DimensionMismatch BRM._native_ppl_logdensity!(
+        BRM.NativePPLWorkspace(prepared), bad_prepared, position)
+
+    nonfinite = @brm (x=[-1.0, NaN, 2.0], y=data.y) begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x
+        y ~ Normal(mu, sigma)
+    end
+    @test_throws ArgumentError BRM._native_ppl_prepare(BRM._native_ppl_plan(nonfinite))
+
+    overflow = @brm (x=BigFloat[big"1e1000", 0, 2], y=BigFloat.(data.y)) begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x
+        y ~ Normal(mu, sigma)
+    end
+    @test_throws ArgumentError BRM._native_ppl_prepare(BRM._native_ppl_plan(overflow))
 end
 
 @testset "native Gaussian lowering fails closed" begin
