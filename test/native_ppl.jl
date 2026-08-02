@@ -24,6 +24,65 @@ function bundle_execution_allocated(
         outputs, workspace, prepared, positions, queries)
 end
 
+function check_centered_execution(centered_plan, explicit_plan, position)
+    centered = BRM.NativePPL.prepare(centered_plan)
+    explicit = BRM.NativePPL.prepare(explicit_plan)
+    centered_work = BRM.NativePPL.workspace(
+        centered, Float64, DI.AutoEnzyme())
+    explicit_work = BRM.NativePPL.workspace(
+        explicit, Float64, DI.AutoEnzyme())
+    linear = BRM.NativePPL.LinearPredictor()
+    pointwise = BRM.NativePPL.PointwiseLogLikelihood()
+    predictive = BRM.NativePPL.PosteriorPredictive()
+
+    @test BRM.NativePPL.logdensity!(centered_work, centered, position) ≈
+          BRM.NativePPL.logdensity!(explicit_work, explicit, position)
+    centered_density, centered_gradient =
+        BRM.NativePPL.logdensity_and_gradient!(
+            centered_work, centered, position)
+    explicit_density, explicit_gradient =
+        BRM.NativePPL.logdensity_and_gradient!(
+            explicit_work, explicit, position)
+    @test centered_density ≈ explicit_density
+    @test centered_gradient ≈ explicit_gradient
+    @test BRM.NativePPL.evaluate(
+        centered_work, centered, position, linear) ≈
+          BRM.NativePPL.evaluate(explicit_work, explicit, position, linear)
+    @test BRM.NativePPL.evaluate(
+        centered_work, centered, position, pointwise) ≈
+          BRM.NativePPL.evaluate(explicit_work, explicit, position, pointwise)
+    @test BRM.NativePPL.simulate(
+        MersenneTwister(901), centered_work, centered, position, predictive) ==
+          BRM.NativePPL.simulate(
+              MersenneTwister(901), explicit_work, explicit, position, predictive)
+
+    positions = permutedims(hcat(position, position ./ 2))
+    queries = (; location=linear, pointwise, prediction=predictive)
+    centered_signatures = BRM.NativePPL.batch_output_signature(
+        centered, positions, queries)
+    explicit_signatures = BRM.NativePPL.batch_output_signature(
+        explicit, positions, queries)
+    @test map(BRM.NativePPL.output_axes, centered_signatures) ==
+          map(BRM.NativePPL.output_axes, explicit_signatures)
+    centered_outputs = BRM.NativePPL.allocate_output(
+        centered_signatures, centered)
+    explicit_outputs = BRM.NativePPL.allocate_output(
+        explicit_signatures, explicit)
+    BRM.NativePPL.execute_draws!(
+        MersenneTwister(902), centered_outputs, centered_work, centered,
+        positions, queries)
+    BRM.NativePPL.execute_draws!(
+        MersenneTwister(902), explicit_outputs, explicit_work, explicit,
+        positions, queries)
+    @test centered_outputs.location ≈ explicit_outputs.location
+    @test centered_outputs.pointwise ≈ explicit_outputs.pointwise
+    @test centered_outputs.prediction == explicit_outputs.prediction
+    @test bundle_execution_allocated(
+        MersenneTwister(903), centered_outputs, centered_work, centered,
+        positions, queries) == 0
+    centered
+end
+
 function bundle_execution_allocated(
     rng, outputs, workspace, prepared, positions, queries)
     @allocated BRM.NativePPL.execute_draws!(
@@ -1055,6 +1114,127 @@ end
         bernoulli_signatures, bernoulli_prepared).prediction isa Matrix{Bool}
     @test BRM.NativePPL.allocate_output(
         poisson_signatures, poisson_prepared).prediction isa Matrix{Int}
+end
+
+
+@testset "native PPL fitted centering and replay" begin
+    gaussian_data = (;
+        x=[1.0, 2.0, 3.0, 4.0], y=[0.2, -0.1, 1.1, 0.7])
+    gaussian_centered = BRM.NativePPL.compile(@brm gaussian_data begin
+        sigma ~ Exponential(2.0)
+        center_x ~ 1 + center(x)
+        y ~ Normal(center_x, sigma)
+    end)
+    gaussian_explicit_data = (;
+        xc=[-1.5, -0.5, 0.5, 1.5], y=gaussian_data.y)
+    gaussian_explicit = BRM.NativePPL.compile(@brm gaussian_explicit_data begin
+        sigma ~ Exponential(2.0)
+        center_x ~ 1 + xc
+        y ~ Normal(center_x, sigma)
+    end)
+    gaussian = check_centered_execution(
+        gaussian_centered, gaussian_explicit, [0.2, -0.4, log(0.8)])
+
+    @test hasproperty(gaussian_centered.nodes, :transform)
+    transform = gaussian_centered.nodes.transform
+    @test transform isa BRM.NativePPLCenterNode
+    @test BRM.native_center_input(transform) === :x
+    @test transform.mean == 2.5
+    @test transform.axis === gaussian_centered.axes.observation
+    @test BRM.native_node_name(transform) !==
+          BRM.native_node_name(gaussian_centered.nodes.location)
+    @test BRM.native_affine_input(gaussian_centered.nodes.location) ===
+          BRM.native_node_name(transform)
+    @test gaussian_centered.bindings.x === gaussian_data.x
+    @test gaussian.predictor == gaussian_explicit_data.xc
+    @test gaussian.predictor !== gaussian_data.x
+
+    bernoulli_data = (;
+        x=[1.0, 2.0, 3.0, 4.0], y=Bool[false, false, true, true])
+    bernoulli_centered = BRM.NativePPL.compile(@brm bernoulli_data begin
+        eta ~ 1 + center(x)
+        y ~ BernoulliLogit(eta)
+    end)
+    bernoulli_explicit_data = (;
+        xc=[-1.5, -0.5, 0.5, 1.5], y=bernoulli_data.y)
+    bernoulli_explicit = BRM.NativePPL.compile(@brm bernoulli_explicit_data begin
+        eta ~ 1 + xc
+        y ~ BernoulliLogit(eta)
+    end)
+    bernoulli = check_centered_execution(
+        bernoulli_centered, bernoulli_explicit, [-0.3, 0.6])
+
+    poisson_data = (;
+        x=[1.0, 2.0, 3.0, 4.0], y=[0, 1, 3, 6])
+    poisson_centered = BRM.NativePPL.compile(@brm poisson_data begin
+        log_rate ~ 1 + center(x)
+        y ~ Poisson(exp(log_rate))
+    end)
+    poisson_explicit_data = (;
+        xc=[-1.5, -0.5, 0.5, 1.5], y=poisson_data.y)
+    poisson_explicit = BRM.NativePPL.compile(@brm poisson_explicit_data begin
+        log_rate ~ 1 + xc
+        y ~ Poisson(exp(log_rate))
+    end)
+    poisson = check_centered_execution(
+        poisson_centered, poisson_explicit, [0.1, 0.2])
+
+    new_x = [10.0, 14.0]
+    frozen = BRM.NativePPL.rebind(
+        gaussian, (; x=new_x, y=[0.4, 0.9]))
+    refitted = BRM.NativePPL.rebind(
+        gaussian, (; x=new_x, y=[0.4, 0.9]); freeze_constants=false)
+    @test frozen.plan.nodes.transform.mean == 2.5
+    @test frozen.predictor == [7.5, 11.5]
+    @test refitted.plan.nodes.transform.mean == 12.0
+    @test refitted.predictor == [-2.0, 2.0]
+    @test frozen.plan.bindings.x === new_x
+    @test frozen.plan.nodes.transform.axis === frozen.plan.axes.observation
+    @test frozen.plan.nodes.location.axis === frozen.plan.axes.observation
+    @test frozen.plan.factors.likelihood.axis === frozen.plan.axes.observation
+
+    position = [0.2, -0.4, log(0.8)]
+    linear = BRM.NativePPL.LinearPredictor()
+    @test BRM.NativePPL.evaluate(
+        BRM.NativePPL.workspace(frozen), frozen, position, linear) ≈
+          0.2 .- 0.4 .* [7.5, 11.5]
+    @test BRM.NativePPL.evaluate(
+        BRM.NativePPL.workspace(refitted), refitted, position, linear) ≈
+          0.2 .- 0.4 .* [-2.0, 2.0]
+
+    for (prepared, family_position) in
+        ((gaussian, [0.2, -0.4, log(0.8)]),
+         (bernoulli, [-0.3, 0.6]),
+         (poisson, [0.1, 0.2]))
+        prediction_only = BRM.NativePPL.rebind(prepared, (; x=new_x))
+        refit_prediction_only = BRM.NativePPL.rebind(
+            prepared, (; x=new_x); freeze_constants=false)
+        @test !BRM.NativePPL.has_response(prediction_only)
+        @test prediction_only.predictor == [7.5, 11.5]
+        @test refit_prediction_only.predictor == [-2.0, 2.0]
+        @test length(BRM.NativePPL.simulate(
+            MersenneTwister(904), BRM.NativePPL.workspace(prediction_only),
+            prediction_only, family_position)) == 2
+        @test_throws ArgumentError BRM.NativePPL.evaluate(
+            BRM.NativePPL.workspace(prediction_only), prediction_only,
+            family_position, BRM.NativePPL.PointwiseLogLikelihood())
+    end
+
+    extreme = floatmax(Float64)
+    extreme_data = (; x=[extreme, extreme], y=[0.0, 1.0])
+    extreme_plan = BRM.NativePPL.compile(@brm extreme_data begin
+        sigma ~ Exponential(1.0)
+        mu ~ 1 + center(x)
+        y ~ Normal(mu, sigma)
+    end)
+    @test extreme_plan.nodes.transform.mean == extreme
+    @test BRM.NativePPL.prepare(extreme_plan).predictor == [0.0, 0.0]
+
+    @test_throws ArgumentError BRM.NativePPL.rebind(
+        gaussian, (; x=[1, 2], y=[0.0, 1.0]))
+    @test_throws BRM.NativePPLCapabilityError BRM.NativePPL.rebind(
+        gaussian, (; x=[1.0, NaN], y=[0.0, 1.0]);
+        freeze_constants=false)
 end
 
 

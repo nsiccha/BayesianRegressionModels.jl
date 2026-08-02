@@ -481,11 +481,17 @@ function _native_ppl_fit_center(values::AbstractVector, name::Symbol)
         throw(NativePPLCapabilityError(
             :predictor_transform,
             "`center($name)` requires finite real training values"))
-    mean = sum(values) / length(values)
-    isfinite(mean) || throw(NativePPLCapabilityError(
+    fitted_mean = float(first(values))
+    for (offset, value) in enumerate(Iterators.drop(values, 1))
+        count = offset + 1
+        # Dividing before subtracting avoids overflow for finite values near
+        # `floatmax`, including samples spanning both signs.
+        fitted_mean += float(value) / count - fitted_mean / count
+    end
+    isfinite(fitted_mean) || throw(NativePPLCapabilityError(
         :predictor_transform,
         "`center($name)` produced a non-finite fitted mean"))
-    mean
+    fitted_mean
 end
 
 """
@@ -624,7 +630,8 @@ function _native_ppl_plan(brmi::BRMI)
         coefficient_axis, 1:2)
     transform_node = predictor_term.transform === :center ?
         NativePPLCenterNode(
-            Symbol(:center_, predictor_name), predictor_name,
+            Symbol("#native_ppl_center#", location, "#", predictor_name),
+            predictor_name,
             observation_axis, center_mean) : nothing
     location_input = transform_node === nothing ?
         predictor_name : native_node_name(transform_node)
