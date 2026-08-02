@@ -50,6 +50,11 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   silently ignored on 1.10, which is this package's compat floor.
 - **`StanBlocks` must be a checkout, not a release.** BRM does not precompile
   against registered StanBlocks; it fails inside a `@deffun` in `src/sbimpl.jl`.
+  Configured `gp` / `hsgp` term priors additionally require StanBlocks
+  `10529af04d42a330df383864059c2b61a11d9480` or later. Older checkouts trace
+  the spliced term model before its keyword data are bound and fail on an
+  unresolved `omega2`. StanBlocks is unregistered and both sides of this floor
+  report version `0.1.5`, so verify the checkout SHA rather than its version.
 - **`Treebars` is here even though no test uses it.** It is an unregistered
   *transitive* dependency of WarmupHMC, which pins it with a `[sources]` entry —
   ignored on 1.10, same as above. Without a path the resolve fails outright with
