@@ -224,6 +224,16 @@ end
         Uniform=:uniform,
         LogNormal=:lognormal,
         Laplace=:double_exponential,
+        Logistic=:logistic,
+        Gumbel=:gumbel,
+        Chisq=:chi_square,
+        Frechet=:frechet,
+        Rayleigh=:rayleigh,
+        SkewNormal=:skew_normal,
+        Pareto=:pareto,
+        Erlang=:gamma,
+        Arcsine=:beta,
+        NormalCanon=:normal,
         SkewDoubleExponential=:skew_double_exponential,
         SkewedExponentialPower=:skew_double_exponential,
         Weibull=:weibull,
@@ -232,6 +242,7 @@ end
         BernoulliLogit=:bernoulli_logit,
         Binomial=:binomial,
         BinomialLogit=:binomial_logit,
+        BetaBinomial=:beta_binomial,
         Poisson=:poisson,
         NegativeBinomial=:neg_binomial,
     )
@@ -252,6 +263,20 @@ end
     @test BRM._sb_stan_dist_args(Uniform, (:a, :b)) == (:a, :b)
     @test BRM._sb_stan_dist_args(LogNormal, (:mu, :sigma)) == (:mu, :sigma)
     @test BRM._sb_stan_dist_args(Laplace, (:mu, :theta)) == (:mu, :theta)
+    @test BRM._sb_stan_dist_args(Logistic, (:mu, :theta)) == (:mu, :theta)
+    @test BRM._sb_stan_dist_args(Gumbel, (:mu, :theta)) == (:mu, :theta)
+    @test BRM._sb_stan_dist_args(Chisq, (:nu,)) == (:nu,)
+    @test BRM._sb_stan_dist_args(Frechet, (:alpha, :theta)) == (:alpha, :theta)
+    @test BRM._sb_stan_dist_args(Rayleigh, (:sigma,)) == (:sigma,)
+    @test BRM._sb_stan_dist_args(SkewNormal, (:xi, :omega, :alpha)) ==
+          (:xi, :omega, :alpha)
+    @test BRM._sb_stan_dist_args(Pareto, (:alpha, :theta)) == (:theta, :alpha)
+    @test BRM._sb_stan_dist_args(Erlang, (:alpha, :theta)) ==
+          (:alpha, :(1.0 ./ theta))
+    @test BRM._sb_stan_dist_args(Arcsine, ()) == (0.5, 0.5)
+    @test_throws ArgumentError BRM._sb_stan_dist_args(Arcsine, (:a, :b))
+    @test BRM._sb_stan_dist_args(NormalCanon, (:eta, :lambda)) ==
+          (:(eta ./ lambda), :(inv(sqrt(lambda))))
     @test BRM._sb_stan_dist_args(
         SkewDoubleExponential, (:mu, :sigma, :tau)) == (:mu, :sigma, :tau)
     @test BRM._sb_stan_dist_args(
@@ -286,6 +311,21 @@ end
         (LogNormal, (:mu,), (:mu, 1.0)),
         (Laplace, (), params(Laplace())),
         (Laplace, (:mu,), (:mu, 1.0)),
+        (Logistic, (), params(Logistic())),
+        (Logistic, (:mu,), (:mu, 1.0)),
+        (Gumbel, (), params(Gumbel())),
+        (Gumbel, (:mu,), (:mu, 1.0)),
+        (Frechet, (), params(Frechet())),
+        (Frechet, (:alpha,), (:alpha, 1.0)),
+        (Rayleigh, (), params(Rayleigh())),
+        (SkewNormal, (), params(SkewNormal())),
+        (SkewNormal, (:alpha,), (0.0, 1.0, :alpha)),
+        (Pareto, (), reverse(params(Pareto()))),
+        (Pareto, (:alpha,), (1.0, :alpha)),
+        (Erlang, (), (1.0, 1.0)),
+        (Erlang, (:alpha,), (:alpha, 1.0)),
+        (Arcsine, (), (0.5, 0.5)),
+        (NormalCanon, (), params(Normal())),
         (Weibull, (), params(Weibull())),
         (Weibull, (:alpha,), (:alpha, 1.0)),
         (InverseGamma, (), params(InverseGamma())),
@@ -363,6 +403,16 @@ generic_df = (;
     y_uniform=[-0.5, 0.25, 1.5],
     y_lognormal=[0.3, 1.2, 4.0],
     y_laplace=[-1.1, 0.4, 2.2],
+    y_logistic=[-1.3, 0.2, 2.1],
+    y_gumbel=[-0.8, 0.4, 2.3],
+    y_chisq=[0.2, 1.3, 4.2],
+    y_frechet=[0.4, 1.5, 4.0],
+    y_rayleigh=[0.2, 1.1, 3.2],
+    y_skew_normal=[-1.0, 0.3, 2.2],
+    y_pareto=[1.0, 1.8, 4.5],
+    y_erlang=[0.3, 1.4, 4.2],
+    y_arcsine=[0.1, 0.5, 0.9],
+    y_normal_canon=[-0.8, 0.2, 1.4],
     y_weibull=[0.2, 1.5, 3.8],
     y_invgamma=[0.3, 1.4, 5.0],
     y_bernoulli=[0, 1, 1],
@@ -385,6 +435,16 @@ generic_builder = @brm begin
     y_uniform ~ Uniform(-1.0, 2.0)
     y_lognormal ~ LogNormal(0.2, 0.8)
     y_laplace ~ Laplace(-0.1, 1.3)
+    y_logistic ~ Logistic(0.2, 1.1)
+    y_gumbel ~ Gumbel(0.2, 1.1)
+    y_chisq ~ Chisq(3.5)
+    y_frechet ~ Frechet(2.2, 1.4)
+    y_rayleigh ~ Rayleigh(1.5)
+    y_skew_normal ~ SkewNormal(0.2, 1.1, 2.0)
+    y_pareto ~ Pareto(2.2, 1.0)
+    y_erlang ~ Erlang(3, 1.5)
+    y_arcsine ~ Arcsine()
+    y_normal_canon ~ NormalCanon(0.2, 1.1)
     y_weibull ~ Weibull(1.7, 2.2)
     y_invgamma ~ InverseGamma(3.2, 1.8)
     y_bernoulli ~ Bernoulli(0.65)
@@ -421,6 +481,16 @@ end
         y_uniform=Uniform(-1.0, 2.0),
         y_lognormal=LogNormal(0.2, 0.8),
         y_laplace=Laplace(-0.1, 1.3),
+        y_logistic=Logistic(0.2, 1.1),
+        y_gumbel=Gumbel(0.2, 1.1),
+        y_chisq=Chisq(3.5),
+        y_frechet=Frechet(2.2, 1.4),
+        y_rayleigh=Rayleigh(1.5),
+        y_skew_normal=SkewNormal(0.2, 1.1, 2.0),
+        y_pareto=Pareto(2.2, 1.0),
+        y_erlang=Erlang(3, 1.5),
+        y_arcsine=Arcsine(),
+        y_normal_canon=NormalCanon(0.2, 1.1),
         y_weibull=Weibull(1.7, 2.2),
         y_invgamma=InverseGamma(3.2, 1.8),
         y_bernoulli=Bernoulli(0.65),
@@ -441,13 +511,11 @@ end
     predictions = brm_execute(
         descriptor, :predict;
         problem, draws=zeros(0, 32), seed=20260729)
-    binomial_draws = predictions.y_binomial_gen
-    @test length(binomial_draws) == length(generic_df.y_binomial) * 32
-    @test all(0 .<= binomial_draws .<= 5)
-    @test length(predictions.y_skew_gen) == length(generic_df.y_skew) * 32
-    @test length(predictions.y_sepd_gen) == length(generic_df.y_sepd) * 32
-    @test all(isfinite, predictions.y_skew_gen)
-    @test all(isfinite, predictions.y_sepd_gen)
+    for (target, dist) in pairs(expected)
+        draws = getproperty(predictions, Symbol(target, :_gen))
+        @test length(draws) == length(getproperty(generic_df, target)) * 32
+        @test all(insupport.(Ref(dist), draws))
+    end
 end
 
 @testset "Laplace is the q=0.5 asymmetric-Laplace special case" begin

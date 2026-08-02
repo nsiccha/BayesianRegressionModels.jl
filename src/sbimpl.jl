@@ -7983,6 +7983,16 @@ _sb_stan_dist_name(::Type{<:Beta})                = :beta
 _sb_stan_dist_name(::Type{<:Uniform})             = :uniform
 _sb_stan_dist_name(::Type{<:LogNormal})           = :lognormal
 _sb_stan_dist_name(::Type{<:Laplace})             = :double_exponential
+_sb_stan_dist_name(::Type{<:Logistic})            = :logistic
+_sb_stan_dist_name(::Type{<:Gumbel})              = :gumbel
+_sb_stan_dist_name(::Type{<:Chisq})               = :chi_square
+_sb_stan_dist_name(::Type{<:Frechet})             = :frechet
+_sb_stan_dist_name(::Type{<:Rayleigh})            = :rayleigh
+_sb_stan_dist_name(::Type{<:SkewNormal})          = :skew_normal
+_sb_stan_dist_name(::Type{<:Pareto})              = :pareto
+_sb_stan_dist_name(::Type{<:Erlang})              = :gamma
+_sb_stan_dist_name(::Type{<:Arcsine})             = :beta
+_sb_stan_dist_name(::Type{<:NormalCanon})         = :normal
 _sb_stan_dist_name(::Type{<:SkewDoubleExponential}) = :skew_double_exponential
 _sb_stan_dist_name(::Type{<:SkewedExponentialPower}) = :skew_double_exponential
 _sb_stan_dist_name(::Type{<:Weibull})             = :weibull
@@ -8232,6 +8242,45 @@ _sb_stan_dist_args(::Type{<:LogNormal}, ::Tuple{}) = (0.0, 1.0)
 _sb_stan_dist_args(::Type{<:LogNormal}, args::Tuple{Any}) = (args[1], 1.0)
 _sb_stan_dist_args(::Type{<:Laplace}, ::Tuple{}) = (0.0, 1.0)
 _sb_stan_dist_args(::Type{<:Laplace}, args::Tuple{Any}) = (args[1], 1.0)
+_sb_stan_dist_args(::Type{<:Logistic}, ::Tuple{}) = (0.0, 1.0)
+_sb_stan_dist_args(::Type{<:Logistic}, args::Tuple{Any}) = (args[1], 1.0)
+_sb_stan_dist_args(::Type{<:Gumbel}, ::Tuple{}) = (0.0, 1.0)
+_sb_stan_dist_args(::Type{<:Gumbel}, args::Tuple{Any}) = (args[1], 1.0)
+_sb_stan_dist_args(::Type{<:Frechet}, ::Tuple{}) = (1.0, 1.0)
+_sb_stan_dist_args(::Type{<:Frechet}, args::Tuple{Any}) = (args[1], 1.0)
+_sb_stan_dist_args(::Type{<:Rayleigh}, ::Tuple{}) = (1.0,)
+_sb_stan_dist_args(::Type{<:SkewNormal}, ::Tuple{}) = (0.0, 1.0, 0.0)
+_sb_stan_dist_args(::Type{<:SkewNormal}, args::Tuple{Any}) =
+    (0.0, 1.0, args[1])
+
+# Distributions.jl orders Pareto parameters as `(shape, scale)`, while Stan
+# orders them as `(minimum, shape)`.
+_sb_stan_dist_args(::Type{<:Pareto}, ::Tuple{}) = (1.0, 1.0)
+_sb_stan_dist_args(::Type{<:Pareto}, args::Tuple{Any}) = (1.0, args[1])
+_sb_stan_dist_args(::Type{<:Pareto}, args::Tuple{Any,Any}) =
+    (args[2], args[1])
+
+# Erlang is an integer-shape Gamma in Distributions.jl and uses the same scale
+# convention, so it shares Gamma's scale-to-rate translation.
+_sb_stan_dist_args(::Type{<:Erlang}, ::Tuple{}) = (1.0, 1.0)
+_sb_stan_dist_args(::Type{<:Erlang}, args::Tuple{Any}) = (args[1], 1.0)
+_sb_stan_dist_args(::Type{<:Erlang}, args::Tuple{Any,Any}) =
+    (args[1], _sb_stan_reciprocal(args[2]))
+
+# Only the standard [0, 1] Arcsine constructor is a native Beta(1/2, 1/2).
+# Shifted/scaled constructors need a Jacobian-aware custom distribution triad.
+_sb_stan_dist_args(::Type{<:Arcsine}, ::Tuple{}) = (0.5, 0.5)
+_sb_stan_dist_args(::Type{<:Arcsine}, args) = throw(ArgumentError(
+    "sbimpl: `Arcsine` is supported only as the standard `Arcsine()` on " *
+    "[0, 1]; got $(length(args)) positional arguments"))
+
+# NormalCanon stores natural parameters `(eta, lambda)`, where
+# `mu = eta / lambda` and `sigma = inv(sqrt(lambda))`.
+_sb_stan_dist_args(::Type{<:NormalCanon}, ::Tuple{}) = (0.0, 1.0)
+_sb_stan_dist_args(::Type{<:NormalCanon}, args::Tuple{Any,Any}) = (
+    Expr(:call, Symbol("./"), args[1], args[2]),
+    Expr(:call, :inv, Expr(:call, :sqrt, args[2])),
+)
 
 # Distributions.jl's asymmetric-Laplace special case keeps its own scale.
 # Only an explicit literal p=1 is accepted: the general SEPD has no faithful

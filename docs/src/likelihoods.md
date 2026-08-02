@@ -13,15 +13,20 @@ response wrapper below.
 
 | Outcome | Accepted constructors |
 | --- | --- |
-| Continuous | `Normal`, `Cauchy`, `TDist`, `Exponential`, `Gamma`, `Beta`, `Uniform`, `LogNormal`, `Laplace`, `Weibull`, `InverseGamma`, `VonMises` |
-| Continuous, restricted parameterization | `SkewedExponentialPower(mu, sigma, 1, alpha)` — only the literal shape `1` |
+| Continuous | `Normal`, `NormalCanon`, `Cauchy`, `TDist`, `Logistic`, `Gumbel`, `Chisq`, `Exponential`, `Gamma`, `Erlang`, `Beta`, `Uniform`, `LogNormal`, `Laplace`, `Frechet`, `Rayleigh`, `SkewNormal`, `Pareto`, `Weibull`, `InverseGamma`, `VonMises` |
+| Continuous, restricted parameterization | `Arcsine()` — the standard `[0, 1]` form only; `SkewedExponentialPower(mu, sigma, 1, alpha)` — only the literal shape `1` |
 | Discrete | `Bernoulli`, `BernoulliLogit`, `Binomial`, `BinomialLogit`, `BetaBinomial`, `Poisson`, `NegativeBinomial` |
 
 BRM normalizes constructor conventions where Julia and Stan differ. In
-particular, `Exponential` and `Gamma` use scale in `Distributions.jl` but rate
-in Stan, `NegativeBinomial(r, p)` is translated to Stan's shape/inverse-scale
-form, `TDist(nu)` becomes `student_t(nu, 0, 1)`, and `Laplace` becomes Stan's
-`double_exponential`.
+particular, `Exponential`, `Gamma`, and `Erlang` use scale in
+`Distributions.jl` but rate in Stan; `Pareto(shape, scale)` is reordered to
+Stan's `(minimum, shape)` convention; `NormalCanon(eta, lambda)` becomes
+`normal(eta / lambda, inv(sqrt(lambda)))`; `NegativeBinomial(r, p)` is
+translated to Stan's shape/inverse-scale form; `TDist(nu)` becomes
+`student_t(nu, 0, 1)`; and `Laplace` becomes Stan's `double_exponential`.
+The standard `Arcsine()` is exactly `beta(1/2, 1/2)`. Shifted/scaled
+`Arcsine(a, b)` constructors need a Jacobian-aware custom implementation and
+are rejected rather than silently treated as a standard beta likelihood.
 
 ### BRM families and structured likelihoods
 
