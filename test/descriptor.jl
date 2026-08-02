@@ -14,7 +14,7 @@
 using Test
 using BayesianRegressionModels
 using StanBlocks
-using Distributions: Exponential, Normal
+using Distributions: Exponential, LogNormal, Normal
 
 df = (; x=[0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
         g=[1, 1, 2, 2, 3, 3],
@@ -95,6 +95,34 @@ end
         y ~ Normal(mu, sigma)
     end
     @test brm_descriptor(flat_builder, df; mod=@__MODULE__).id != a.id
+end
+
+@testset "configured hsgp term priors keep both descriptor entry points" begin
+    hsgp_df = (;
+        y=sin.(1:12),
+        op_log_dose=collect(range(-1.0, 1.0; length=12)),
+    )
+    hsgp_builder = @brm begin
+        y ~ Normal(mu, 1.0)
+        mu ~ 1 + hsgp(op_log_dose; k=5)
+        length_scale(:, hsgp(op_log_dose)) ~ LogNormal(0, 1)
+        sd(:, hsgp(op_log_dose)) ~ LogNormal(0, 1)
+    end
+    sb = SBBRMI(hsgp_builder(hsgp_df); mod=@__MODULE__)
+
+    from_sb = brm_descriptor(sb; name=:hsgp_term_priors, highlights=())
+    from_builder = brm_descriptor(
+        hsgp_builder, hsgp_df;
+        mod=@__MODULE__, name=:hsgp_term_priors, highlights=())
+
+    code = BayesianRegressionModels.stan_code(sb)
+    @test BayesianRegressionModels.stan_code(from_sb.plan) == code
+    @test BayesianRegressionModels.stan_code(from_builder.plan) == code
+    @test from_sb.id == from_builder.id
+    @test from_sb.plan.model.model !== sb.model.model
+    @test Set(from_sb.columns) == Set((:y, :op_log_dose))
+    @test brm_output(from_sb, :y; role=:posterior_predictive).logical === :y
+    @test :fit in (op.name for op in from_builder.operations)
 end
 
 @testset "named Stan definition highlights" begin

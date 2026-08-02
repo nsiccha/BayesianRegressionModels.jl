@@ -1,5 +1,76 @@
 # Likelihoods
 
+## Complete built-in catalogue
+
+This is the exhaustive public likelihood catalogue for the default
+[`SBBRMI`](@ref) Stan backend. A `Distributions.jl` subtype not named here is
+not accepted merely because it is a distribution: BRM rejects it until its
+Julia constructor has an explicit Stan mapping. The pure-Julia [`VBRMI`](@ref)
+backend is independent and does not implement every specialized family or
+response wrapper below.
+
+### Direct `Distributions.jl` families
+
+| Outcome | Accepted constructors |
+| --- | --- |
+| Continuous | `Normal`, `Cauchy`, `TDist`, `Exponential`, `Gamma`, `Beta`, `Uniform`, `LogNormal`, `Laplace`, `Weibull`, `InverseGamma`, `VonMises` |
+| Continuous, restricted parameterization | `SkewedExponentialPower(mu, sigma, 1, alpha)` — only the literal shape `1` |
+| Discrete | `Bernoulli`, `BernoulliLogit`, `Binomial`, `BinomialLogit`, `BetaBinomial`, `Poisson`, `NegativeBinomial` |
+
+BRM normalizes constructor conventions where Julia and Stan differ. In
+particular, `Exponential` and `Gamma` use scale in `Distributions.jl` but rate
+in Stan, `NegativeBinomial(r, p)` is translated to Stan's shape/inverse-scale
+form, `TDist(nu)` becomes `student_t(nu, 0, 1)`, and `Laplace` becomes Stan's
+`double_exponential`.
+
+### BRM families and structured likelihoods
+
+| Constructor | Meaning / boundary |
+| --- | --- |
+| `SkewDoubleExponential(mu, sigma, tau)` | Stan-native asymmetric-Laplace parameterization |
+| `LocationScale(mu, sigma, TDist(nu))` | location-scale Student-t regression |
+| `ZeroInflatedPoisson(lambda, zi)` | zero-inflated Poisson |
+| `NegativeBinomial2(mu, phi)` | mean/precision negative binomial |
+| `BetaBinomial2(n, mean, precision)` | mean/precision beta-binomial |
+| `CategoricalLogit(eta2, eta3, ...)` or `CategoricalLogit(@brm(...))` | reference-class categorical logit |
+| `OrderedLogistic(eta)` | legacy cumulative-logit ordinal model |
+| `Ordinal(structure, link, eta; ...)` | `Cumulative()` or `StoppingRatio()` crossed with `LogitLink()`, `ProbitLink()`, or `CloglogLink()` |
+| `CircularVonMises(mu, kappa; interval=(-pi, pi))` | von Mises on a fixed principal interval |
+| `TruncatedNormal(mu, sigma, lower, upper)` | legacy Bordet-only censored-Normal marker; new models should use `censored` below |
+
+### Response compositions and modifiers
+
+| Form | Exact supported surface |
+| --- | --- |
+| `truncated(d; lower, upper)` | base family `Normal`, `LogNormal`, `Exponential`, `Weibull`, or `Poisson` |
+| `censored(d; lower, upper)` | the same five base families |
+| `interval_censored(d; upper)` | the same five base families; the response is the lower endpoint |
+| `weighted(d, aweights(w))` | analytic/precision weights for `Normal` only |
+| `weighted(d, fweights(w))` | frequency weights for direct mapped families in the first table |
+| `weighted(d, weights(w))` | power-likelihood weights for direct mapped families in the first table |
+| `mi(y) ~ d` | partly-missing continuous response imputation |
+
+Every specialized family is expected to supply the fitted density, pointwise
+log likelihood, and posterior-predictive RNG used by BRM's generated
+quantities. Truncation and censoring additionally require matching CDF/CCDF
+paths; ragged observations additionally require a sized RNG.
+
+## Adding another likelihood
+
+Yes—when Stan already has the distribution, adding it is usually small. BRM
+needs an explicit Julia-type-to-Stan-name entry, plus an argument translation
+when the two libraries use different parameterizations. It then inherits the
+ordinary model, pointwise-log-likelihood, and predictive-RNG paths from
+StanBlocks.
+
+The work becomes larger when Stan has no native family: the implementation
+must provide and test a density/mass function, a pointwise companion, and an
+RNG. Supporting `truncated` or `censored` also needs the relevant CDF/CCDF
+functions, and ragged responses need a vector-sized RNG. These are finite
+implementation tasks, not an architectural prohibition; the explicit gates
+prevent a family from appearing to fit while prediction or likelihood
+diagnostics silently mean something else.
+
 ## Truncation and censoring
 
 BRM preserves the standard Distributions.jl RHS composition for mathematical
