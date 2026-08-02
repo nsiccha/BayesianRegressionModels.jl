@@ -445,6 +445,205 @@ end
 end
 
 
+@testset "native Poisson-log workflow" begin
+    data = (;
+        x=[-1.0, 0.0, 1.0, 2.0],
+        y=[0, 1, 4, 10],
+    )
+    brmi = @brm data begin
+        eta ~ 1 + x
+        y ~ Poisson(exp(eta))
+    end
+    plan = BRM.NativePPL.compile(brmi)
+
+    @test LogDensityProblems.dimension(plan) == 2
+    @test keys(plan.axes) == (:observation, :coefficient)
+    @test keys(plan.parameters) == (:coefficients,)
+    @test keys(plan.nodes) == (:location, :rate)
+    @test keys(plan.factors) == (:coefficient_prior, :likelihood)
+    @test plan.factors.likelihood isa BRM.NativePPLPoissonFactor
+    @test plan.factors.likelihood.axis === plan.axes.observation
+    @test plan.nodes.rate isa BRM.NativePPLExpNode
+    @test BRM.native_node_name(plan.nodes.rate) == :exp_eta
+    @test BRM.native_exp_input(plan.nodes.rate) == :eta
+    @test plan.nodes.rate.axis === plan.axes.observation
+
+    linear_query = BRM.NativePPL.LinearPredictor()
+    pointwise_query = BRM.NativePPL.PointwiseLogLikelihood()
+    predictive_query = BRM.NativePPL.PosteriorPredictive()
+    predictive_signature = BRM.NativePPL.output_signature(plan, predictive_query)
+    @test BRM.NativePPL.output_eltype(predictive_signature, Float32) === Int
+    @test BRM.NativePPL.output_axis(predictive_signature) === plan.axes.observation
+
+    prepared = BRM.NativePPL.prepare(plan)
+    workspace = BRM.NativePPL.workspace(
+        prepared, Float64, DI.AutoEnzyme())
+    position = [0.2, 0.6]
+    log_rate = position[1] .+ position[2] .* data.x
+    rate = exp.(log_rate)
+    pointwise = logpdf.(Poisson.(rate), data.y)
+    expected_density =
+        logpdf(Normal(), position[1]) +
+        logpdf(Normal(), position[2]) + sum(pointwise)
+    expected_gradient = [
+        -position[1] + sum(data.y .- rate),
+        -position[2] + sum(data.x .* (data.y .- rate)),
+    ]
+
+    density = BRM.NativePPL.logdensity!(workspace, prepared, position)
+    @test density ≈ expected_density
+    @test workspace.primal.location ≈ log_rate
+    @test workspace.primal.pointwise_loglikelihood ≈ pointwise
+    gradient_density, gradient = BRM.NativePPL.logdensity_and_gradient!(
+        workspace, prepared, position)
+    @test gradient_density ≈ expected_density
+    @test gradient ≈ expected_gradient
+    @test steady_state_allocations(workspace, prepared, position) ==
+          (; primal=0, gradient=0)
+
+    likelihood = BRM._native_ppl_factor_logdensity!(
+        plan.factors.likelihood, plan.inputs.response, plan.nodes.rate,
+        plan.nodes.location, position, prepared, workspace.primal)
+    @test likelihood ≈ sum(pointwise)
+    mismatched_likelihood = BRM.NativePPLPoissonFactor(
+        :y, :wrong_rate, plan.axes.observation)
+    @test_throws MethodError BRM._native_ppl_factor_logdensity!(
+        mismatched_likelihood, plan.inputs.response, plan.nodes.rate,
+        plan.nodes.location, position, prepared, workspace.primal)
+
+    location_output = BRM.NativePPL.allocate_output(prepared, linear_query)
+    pointwise_output = BRM.NativePPL.allocate_output(prepared, pointwise_query)
+    prediction_output = BRM.NativePPL.allocate_output(prepared, predictive_query)
+    @test location_output isa Vector{Float64}
+    @test pointwise_output isa Vector{Float64}
+    @test prediction_output isa Vector{Int}
+    @test BRM.NativePPL.evaluate!(
+        location_output, workspace, prepared, position, linear_query) ===
+          location_output
+    @test location_output ≈ log_rate
+    @test BRM.NativePPL.evaluate!(
+        pointwise_output, workspace, prepared, position, pointwise_query) ===
+          pointwise_output
+    @test pointwise_output ≈ pointwise
+    prediction_a = BRM.NativePPL.simulate(
+        MersenneTwister(81), workspace, prepared, position)
+    prediction_b = BRM.NativePPL.simulate(
+        MersenneTwister(81), workspace, prepared, position)
+    @test prediction_a == prediction_b
+    @test prediction_a isa Vector{Int}
+    @test all(>=(0), prediction_a)
+    @test_throws ArgumentError BRM.NativePPL.simulate!(
+        MersenneTwister(81), zeros(length(data.y)), workspace, prepared,
+        position)
+
+    BRM.NativePPL.evaluate!(
+        location_output, workspace, prepared, position, linear_query)
+    BRM.NativePPL.evaluate!(
+        pointwise_output, workspace, prepared, position, pointwise_query)
+    rng = MersenneTwister(82)
+    BRM.NativePPL.simulate!(
+        rng, prediction_output, workspace, prepared, position)
+    @test @allocated(BRM.NativePPL.evaluate!(
+        location_output, workspace, prepared, position, linear_query)) == 0
+    @test @allocated(BRM.NativePPL.evaluate!(
+        pointwise_output, workspace, prepared, position, pointwise_query)) == 0
+    rng = MersenneTwister(82)
+    @test @allocated(BRM.NativePPL.simulate!(
+        rng, prediction_output, workspace, prepared, position)) == 0
+    predictive_allocation = @allocated(
+        BRM.NativePPL.allocate_output(prepared, predictive_query))
+    rng = MersenneTwister(82)
+    predictive_wrapper_allocation = @allocated(
+        BRM.NativePPL.simulate(rng, workspace, prepared, position))
+    @test predictive_wrapper_allocation == predictive_allocation
+
+    large_count = Float32(1_000_000_000)
+    large_log_rate = log(large_count)
+    large_pointwise = BRM._native_ppl_poisson_logdensity(
+        large_count, large_log_rate)
+    large_reference =
+        -Float32(0.5) * log(Float32(2π) * large_count) -
+        BRM._native_ppl_stirling_correction(large_count)
+    @test large_pointwise ≈ large_reference rtol=4eps(Float32)
+    @test -20 < large_pointwise < -10
+    @test BRM._native_ppl_poisson_logdensity(0.0, 1000.0) == -Inf
+    @test BRM._native_ppl_poisson_logdensity(1.0, -Inf) == -Inf
+
+    @test BRM._native_ppl_rand_poisson(
+        MersenneTwister(83), Float64, -Inf) == 0
+    @test_throws DomainError BRM._native_ppl_rand_poisson(
+        MersenneTwister(83), Float64, NaN)
+    @test_throws DomainError BRM._native_ppl_rand_poisson(
+        MersenneTwister(83), Float64, Inf)
+    @test_throws DomainError BRM._native_ppl_rand_poisson(
+        MersenneTwister(83), Float32,
+        log(maxintfloat(Float32) / Float32(2)))
+
+    rng = MersenneTwister(84)
+    draw_sum = 0
+    draw_square_sum = 0
+    draws = 20_000
+    for _ in 1:draws
+        draw = BRM._native_ppl_rand_poisson(rng, Float64, log(20.0))
+        draw_sum += draw
+        draw_square_sum += draw * draw
+    end
+    draw_mean = draw_sum / draws
+    draw_variance =
+        (draw_square_sum - draws * draw_mean * draw_mean) / (draws - 1)
+    @test draw_mean ≈ 20 atol=0.2
+    @test draw_variance ≈ 20 atol=1.0
+
+    rebound = BRM.NativePPL.rebind(
+        prepared, (; x=Float32[-1, 2], y=Float32[2, 3]); T=Float32)
+    @test BRM.NativePPL.has_response(rebound)
+    @test rebound.response == Float32[2, 3]
+    @test BRM.NativePPL.output_eltype(
+        BRM.NativePPL.output_signature(rebound, predictive_query), rebound) === Int
+    @test BRM.NativePPL.logdensity!(
+        BRM.NativePPL.workspace(rebound), rebound, Float32.(position)) isa Float32
+
+    prediction_only = BRM.NativePPL.rebind(
+        prepared, (; x=Float32[-1, 2]); T=Float32)
+    @test !BRM.NativePPL.has_response(prediction_only)
+    prediction_only_workspace = BRM.NativePPL.workspace(prediction_only)
+    @test BRM.NativePPL.evaluate(
+        prediction_only_workspace, prediction_only, Float32.(position),
+        linear_query) isa Vector{Float32}
+    @test BRM.NativePPL.simulate(
+        MersenneTwister(85), prediction_only_workspace, prediction_only,
+        Float32.(position)) isa Vector{Int}
+    @test_throws ArgumentError BRM.NativePPL.logdensity!(
+        prediction_only_workspace, prediction_only, Float32.(position))
+
+    @test_throws ArgumentError BRM.NativePPL.rebind(
+        prepared, (; x=[-1.0, 2.0], y=[0, -1]))
+    imprecise_data = (; x=Float32[0.5], y=[16_777_217])
+    imprecise_plan = BRM.NativePPL.compile(@brm imprecise_data begin
+        eta ~ 1 + x
+        y ~ Poisson(exp(eta))
+    end)
+    err = argument_error(() -> BRM.NativePPL.prepare(
+        imprecise_plan; T=Float32))
+    @test occursin("cannot be represented exactly as Float32", err.msg)
+
+    invalid_data = (; x=[-1.0, 2.0], y=[0.0, 1.5])
+    invalid_brmi = @brm invalid_data begin
+        eta ~ 1 + x
+        y ~ Poisson(exp(eta))
+    end
+    @test capability_error(() -> BRM.NativePPL.compile(invalid_brmi)).capability ==
+          :response_support
+    unlinked_data = (; x=[-1.0, 2.0], y=[0, 1])
+    unlinked_brmi = @brm unlinked_data begin
+        eta ~ 1 + x
+        y ~ Poisson(eta)
+    end
+    @test capability_error(() -> BRM.NativePPL.compile(unlinked_brmi)).capability ==
+          :likelihood_link
+end
+
+
 @testset "native PPL workflow queries and replay" begin
     data = (; x=[-1.0, 0.0, 2.0], y=[0.5, 1.0, 2.5])
     brmi = @brm data begin
@@ -813,7 +1012,7 @@ end
 
     wrong_likelihood = @brm data begin
         mu ~ 1 + x
-        y ~ Poisson(exp(mu))
+        y ~ Exponential(exp(mu))
     end
     @test capability_error(() -> BRM._native_ppl_plan(wrong_likelihood)).capability ==
           :likelihood

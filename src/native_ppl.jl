@@ -712,8 +712,16 @@ _native_ppl_prepare_response(::Type{<:AbstractFloat},
 _native_ppl_validate_response(::NativePPLNormalFactor, ::AbstractVector, ::Symbol) =
     nothing
 
-_native_ppl_is_count(value) = value isa Real && isfinite(value) &&
-    value >= zero(value) && isinteger(value) && value <= typemax(Int)
+function _native_ppl_is_count(value)
+    value isa Real && isfinite(value) && value >= zero(value) &&
+        isinteger(value) || return false
+    try
+        Int(value)
+        true
+    catch
+        false
+    end
+end
 
 function _native_ppl_validate_response(::NativePPLBernoulliLogitFactor,
                                        response::AbstractVector, name::Symbol)
@@ -759,6 +767,23 @@ function _native_ppl_apply_predictor!(plan::NativePPLPlan,
         plan.nodes.transform, plan.inputs.predictor, predictor)
 end
 
+_native_ppl_validate_response_conversion(
+    ::NativePPLFactor, ::Any, ::Any, ::Symbol,
+) = nothing
+function _native_ppl_validate_response_conversion(
+    ::NativePPLPoissonFactor,
+    response::AbstractVector,
+    prepared_response::AbstractVector,
+    name::Symbol,
+)
+    for i in eachindex(response, prepared_response)
+        prepared_response[i] == response[i] || throw(ArgumentError(
+            "native PPL Poisson response `$name` count $(response[i]) at row $i " *
+            "cannot be represented exactly as $(eltype(prepared_response))"))
+    end
+    nothing
+end
+
 function _native_ppl_prepare_bindings(plan::NativePPLPlan, predictor,
                                       response, ::Type{T}) where {T<:AbstractFloat}
     isconcretetype(T) || throw(ArgumentError(
@@ -777,6 +802,8 @@ function _native_ppl_prepare_bindings(plan::NativePPLPlan, predictor,
         plan.factors.likelihood, response, response_name)
     prepared_response = _native_ppl_prepare_response(
         T, response, response_name, length(prepared_predictor))
+    _native_ppl_validate_response_conversion(
+        plan.factors.likelihood, response, prepared_response, response_name)
     workspace_spec = NativePPLWorkspaceSpec(
         plan.axes.observation, LogDensityProblems.dimension(plan))
     NativePPLPrepared(plan, prepared_predictor, prepared_response, workspace_spec)
@@ -935,6 +962,16 @@ end
     density
 end
 
+@inline function _native_ppl_stirling_correction(value::T) where {T}
+    inverse = inv(value)
+    inverse2 = inverse * inverse
+    inverse * (
+        T(1 / 12) + inverse2 * (
+            T(-1 / 360) + inverse2 * (
+                T(1 / 1260) + inverse2 * (
+                    T(-1 / 1680) + inverse2 * T(1 / 1188)))))
+end
+
 @inline function _native_ppl_logfactorial(::Type{T}, count::Int) where {T}
     count < 2 && return zero(T)
     if count < 32
@@ -946,19 +983,41 @@ end
     end
 
     value = T(count)
-    inverse = inv(value)
-    inverse2 = inverse * inverse
-    correction = inverse * (
-        T(1 / 12) + inverse2 * (
-            T(-1 / 360) + inverse2 * (
-                T(1 / 1260) + inverse2 * (
-                    T(-1 / 1680) + inverse2 * T(1 / 1188)))))
+    correction = _native_ppl_stirling_correction(value)
     (value + T(0.5)) * log(value) - value +
         T(_NATIVE_PPL_HALF_LOG2PI) + correction
 end
 
 @inline _native_ppl_logfactorial(value::T) where {T<:AbstractFloat} =
     _native_ppl_logfactorial(T, Int(value))
+
+@inline function _native_ppl_delta_minus_expm1(value::T) where {T}
+    abs(value) > T(0.01) && return value - expm1(value)
+    series = T(1 / 479001600)
+    series = T(1 / 39916800) + value * series
+    series = T(1 / 3628800) + value * series
+    series = T(1 / 362880) + value * series
+    series = T(1 / 40320) + value * series
+    series = T(1 / 5040) + value * series
+    series = T(1 / 720) + value * series
+    series = T(1 / 120) + value * series
+    series = T(1 / 24) + value * series
+    series = T(1 / 6) + value * series
+    series = T(1 / 2) + value * series
+    -(value * value) * series
+end
+
+@inline function _native_ppl_poisson_logdensity(count::T, log_rate::T) where {T}
+    iszero(count) && return -exp(log_rate)
+    count_int = Int(count)
+    count_int < 32 && return count * log_rate - exp(log_rate) -
+        _native_ppl_logfactorial(T, count_int)
+
+    delta = log_rate - log(count)
+    count * _native_ppl_delta_minus_expm1(delta) -
+        T(0.5) * log(count) - T(_NATIVE_PPL_HALF_LOG2PI) -
+        _native_ppl_stirling_correction(count)
+end
 
 @inline function _native_ppl_factor_logdensity!(
     ::NativePPLPoissonFactor{Response,Rate},
@@ -973,8 +1032,7 @@ end
     for i in eachindex(prepared.response)
         count = prepared.response[i]
         log_rate = buffers.location[i]
-        count_term = iszero(count) ? zero(T) : count * log_rate
-        pointwise = count_term - exp(log_rate) - _native_ppl_logfactorial(count)
+        pointwise = _native_ppl_poisson_logdensity(count, log_rate)
         buffers.pointwise_loglikelihood[i] = pointwise
         density += pointwise
     end
@@ -999,7 +1057,7 @@ end
         log_rate, "native PPL Poisson log-rate must not be NaN"))
     log_rate == -T(Inf) && return 0
     rate = exp(log_rate)
-    max_rate = T(typemax(Int)) / T(4)
+    max_rate = min(T(typemax(Int)), maxintfloat(T)) / T(4)
     isfinite(rate) && rate <= max_rate || throw(DomainError(
         log_rate,
         "native PPL Poisson rate is too large for an Int predictive output"))
@@ -1038,8 +1096,7 @@ end
         (us < T(0.013) && v > us) && continue
         acceptance = log(
             v * inverse_alpha / (a / (us * us) + b))
-        target = -rate + T(count) * log(rate) -
-            _native_ppl_logfactorial(T, count)
+        target = _native_ppl_poisson_logdensity(T(count), log_rate)
         acceptance <= target && return count
     end
 end
