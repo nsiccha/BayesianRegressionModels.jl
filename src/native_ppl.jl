@@ -590,6 +590,74 @@ function _native_ppl_check_execution(workspace::NativePPLWorkspace,
 end
 
 const _NATIVE_PPL_LOG2PI = log(2π)
+const _NATIVE_PPL_HALF_LOG2PI = _NATIVE_PPL_LOG2PI / 2
+
+@inline function _native_ppl_factor_logdensity(
+    factor::NativePPLStandardNormalFactor,
+    parameter::NativePPLParameter,
+    position::AbstractVector{T},
+) where {T}
+    half = T(0.5)
+    normalizer = T(_NATIVE_PPL_HALF_LOG2PI)
+    density = zero(T)
+    for coordinate in factor.unconstrained
+        value = native_parameter_value(parameter, position, coordinate)
+        logjac = native_parameter_logabsdetjac(parameter, position, coordinate)
+        density += -half * value * value - normalizer + logjac
+    end
+    density
+end
+
+@inline function _native_ppl_factor_logdensity(
+    factor::NativePPLExponentialFactor,
+    parameter::NativePPLParameter,
+    position::AbstractVector{T},
+) where {T}
+    coordinate = factor.unconstrained_index
+    value = native_parameter_value(parameter, position, coordinate)
+    logjac = native_parameter_logabsdetjac(parameter, position, coordinate)
+    prior_scale = T(factor.scale)
+    -log(prior_scale) - value / prior_scale + logjac
+end
+
+@inline function _native_ppl_factor_logdensity!(
+    ::NativePPLNormalFactor,
+    scale_parameter::NativePPLParameter,
+    position::AbstractVector{T},
+    prepared::NativePPLPrepared,
+    buffers::NativePPLBuffers{T},
+) where {T}
+    scale = native_parameter_value(scale_parameter, position)
+    log_scale = native_parameter_logvalue(scale_parameter, position)
+    inverse_scale = inv(scale)
+    half = T(0.5)
+    normalizer = T(_NATIVE_PPL_HALF_LOG2PI)
+    density = zero(T)
+    for i in eachindex(prepared.response)
+        difference = prepared.response[i] - buffers.location[i]
+        residual = iszero(difference) ? zero(T) : difference * inverse_scale
+        pointwise = -log_scale - normalizer - half * residual * residual
+        buffers.pointwise_loglikelihood[i] = pointwise
+        density += pointwise
+    end
+    density
+end
+
+
+@inline function _native_ppl_factor_simulate!(
+    rng::AbstractRNG,
+    ::NativePPLNormalFactor,
+    output::AbstractVector,
+    scale_parameter::NativePPLParameter,
+    position::AbstractVector,
+    buffers::NativePPLBuffers{T},
+) where {T}
+    scale = native_parameter_value(scale_parameter, position)
+    for i in eachindex(output)
+        output[i] = buffers.location[i] + scale * randn(rng, T)
+    end
+    output
+end
 
 @inline function _native_ppl_location_kernel!(position::AbstractVector{T},
                                               prepared::NativePPLPrepared,
@@ -603,42 +671,24 @@ const _NATIVE_PPL_LOG2PI = log(2π)
     for i in eachindex(prepared.predictor)
         buffers.location[i] = intercept + slope * prepared.predictor[i]
     end
-    intercept, slope
+    nothing
 end
 
 @inline function _native_ppl_logdensity_kernel(position::AbstractVector{T},
                                                prepared::NativePPLPrepared,
                                                buffers::NativePPLBuffers{T}) where {T}
-    node = prepared.plan.nodes.location
     scale_factor = prepared.plan.factors.scale_prior
+    likelihood_factor = prepared.plan.factors.likelihood
+    coefficient_factor = prepared.plan.factors.coefficient_prior
     coefficient_parameter = prepared.plan.parameters.coefficients
     scale_parameter = prepared.plan.parameters.scale
-    intercept, slope = _native_ppl_location_kernel!(position, prepared, buffers)
-    intercept_logjac = native_parameter_logabsdetjac(
-        coefficient_parameter, position, node.intercept_index)
-    slope_logjac = native_parameter_logabsdetjac(
-        coefficient_parameter, position, node.slope_index)
-    scale = native_parameter_value(scale_parameter, position)
-    log_scale = native_parameter_logvalue(scale_parameter, position)
-    scale_logjac = native_parameter_logabsdetjac(scale_parameter, position)
-    prior_scale = T(scale_factor.scale)
-    half = T(0.5)
-    normalizer = T(_NATIVE_PPL_LOG2PI) * half
-
-    # Standard-normal population coefficients, then Exponential(scale_prior)
-    # over the constrained scale, including its parameter-owned log Jacobian.
-    density = -half * intercept * intercept - normalizer + intercept_logjac
-    density += -half * slope * slope - normalizer + slope_logjac
-    density += -log(prior_scale) - scale / prior_scale + scale_logjac
-
-    inverse_scale = inv(scale)
-    for i in eachindex(prepared.response)
-        location = buffers.location[i]
-        residual = (prepared.response[i] - location) * inverse_scale
-        pointwise = -log_scale - normalizer - half * residual * residual
-        buffers.pointwise_loglikelihood[i] = pointwise
-        density += pointwise
-    end
+    _native_ppl_location_kernel!(position, prepared, buffers)
+    density = _native_ppl_factor_logdensity(
+        coefficient_factor, coefficient_parameter, position)
+    density += _native_ppl_factor_logdensity(
+        scale_factor, scale_parameter, position)
+    density += _native_ppl_factor_logdensity!(
+        likelihood_factor, scale_parameter, position, prepared, buffers)
     density
 end
 
@@ -829,12 +879,9 @@ function _native_ppl_simulate!(rng::AbstractRNG,
                                query::NativePPLPosteriorPredictive)
     _native_ppl_check_query_output(output, prepared, query)
     _native_ppl_location!(workspace, prepared, position)
-    scale = native_parameter_value(prepared.plan.parameters.scale, position)
-    T = eltype(workspace)
-    for i in eachindex(output)
-        output[i] = workspace.primal.location[i] + scale * randn(rng, T)
-    end
-    output
+    _native_ppl_factor_simulate!(
+        rng, prepared.plan.factors.likelihood, output,
+        prepared.plan.parameters.scale, position, workspace.primal)
 end
 
 """
