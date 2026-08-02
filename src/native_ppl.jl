@@ -1609,6 +1609,13 @@ function _native_ppl_check_batch_execution(
             "native PPL batch output must not alias the workspace pointwise buffer"))
     Base.mightalias(output, workspace.gradient) && throw(ArgumentError(
         "native PPL batch output must not alias the workspace gradient buffer"))
+    Base.mightalias(positions, workspace.primal.location) && throw(ArgumentError(
+        "native PPL draw matrix must not alias the workspace location buffer"))
+    Base.mightalias(positions, workspace.primal.pointwise_loglikelihood) &&
+        throw(ArgumentError(
+            "native PPL draw matrix must not alias the workspace pointwise buffer"))
+    Base.mightalias(positions, workspace.gradient) && throw(ArgumentError(
+        "native PPL draw matrix must not alias the workspace gradient buffer"))
     signature
 end
 
