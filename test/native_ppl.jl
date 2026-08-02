@@ -59,12 +59,26 @@ end
 
     @test BRM.native_parameter_name(plan.parameters.coefficients) == :beta_location
     @test plan.parameters.coefficients.support isa BRM.NativePPLRealSupport
+    @test plan.parameters.coefficients.transform isa BRM.NativePPLIdentityTransform
     @test plan.parameters.coefficients.axis === plan.axes.coefficient
     @test plan.parameters.coefficients.unconstrained == 1:2
     @test BRM.native_parameter_name(plan.parameters.scale) == :residual
     @test plan.parameters.scale.support isa BRM.NativePPLPositiveSupport
+    @test plan.parameters.scale.transform isa BRM.NativePPLExpTransform
     @test plan.parameters.scale.axis === plan.axes.scale
     @test plan.parameters.scale.unconstrained == 3:3
+
+    position = [0.25, -0.5, -2.0]
+    @test BRM.native_parameter_value(
+        plan.parameters.coefficients, position, 1) == position[1]
+    @test BRM.native_parameter_logabsdetjac(
+        plan.parameters.coefficients, position, 2) == 0.0
+    @test BRM.native_parameter_value(plan.parameters.scale, position) == exp(-2.0)
+    @test BRM.native_parameter_logvalue(plan.parameters.scale, position) == -2.0
+    @test BRM.native_parameter_logabsdetjac(plan.parameters.scale, position) == -2.0
+    @test_throws TypeError BRM.NativePPLParameter(
+        :invalid, BRM.NativePPLPositiveSupport(), BRM.NativePPLIdentityTransform(),
+        plan.axes.scale, 3:3)
 
     @test BRM.native_node_name(plan.nodes.location) == :location
     @test BRM.native_affine_input(plan.nodes.location) == :dose
@@ -179,6 +193,11 @@ end
 
     allocations = steady_state_allocations(workspace, prepared, position)
     @test allocations == (; primal=0, gradient=0)
+
+    underflow_density = BRM._native_ppl_logdensity!(
+        workspace, prepared, [0.0, 0.0, -1000.0])
+    @test underflow_density == -Inf
+    @test all(==(-Inf), workspace.primal.pointwise_loglikelihood)
 
     prepared32 = BRM._native_ppl_prepare(plan; T=Float32)
     workspace32 = BRM.NativePPL.workspace(prepared32, Float32, DI.AutoEnzyme())

@@ -29,6 +29,9 @@ struct NativePPLExpTransform <: NativePPLTransform{NativePPLPositiveSupport} end
 
 @inline native_transform_forward(::NativePPLIdentityTransform, value) = value
 @inline native_transform_forward(::NativePPLExpTransform, value) = exp(value)
+@inline native_transform_logforward(transform::NativePPLTransform, value) =
+    log(native_transform_forward(transform, value))
+@inline native_transform_logforward(::NativePPLExpTransform, value) = value
 @inline native_transform_logabsdetjac(::NativePPLIdentityTransform, value) = zero(value)
 @inline native_transform_logabsdetjac(::NativePPLExpTransform, value) = value
 
@@ -59,6 +62,12 @@ end
     native_transform_logabsdetjac(parameter.transform, position[coordinate])
 end
 
+@inline function native_parameter_logvalue(parameter::NativePPLParameter,
+                                           position::AbstractVector,
+                                           coordinate::Int)
+    native_transform_logforward(parameter.transform, position[coordinate])
+end
+
 @inline native_parameter_value(parameter::NativePPLParameter,
                                position::AbstractVector) =
     native_parameter_value(parameter, position, first(parameter.unconstrained))
@@ -66,6 +75,9 @@ end
                                       position::AbstractVector) =
     native_parameter_logabsdetjac(
         parameter, position, first(parameter.unconstrained))
+@inline native_parameter_logvalue(parameter::NativePPLParameter,
+                                  position::AbstractVector) =
+    native_parameter_logvalue(parameter, position, first(parameter.unconstrained))
 
 abstract type NativePPLNode end
 abstract type NativePPLFactor end
@@ -540,8 +552,8 @@ const _NATIVE_PPL_LOG2PI = log(2π)
     slope_logjac = native_parameter_logabsdetjac(
         coefficient_parameter, position, node.slope_index)
     scale = native_parameter_value(scale_parameter, position)
+    log_scale = native_parameter_logvalue(scale_parameter, position)
     scale_logjac = native_parameter_logabsdetjac(scale_parameter, position)
-    log_scale = log(scale)
     prior_scale = T(scale_factor.scale)
     half = T(0.5)
     normalizer = T(_NATIVE_PPL_LOG2PI) * half
