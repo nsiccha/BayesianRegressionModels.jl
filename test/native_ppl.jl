@@ -4,7 +4,7 @@ import DifferentiationInterface as DI
 using Distributions: Exponential, Normal, Poisson, logpdf
 using Enzyme
 using LogDensityProblems
-using Random: MersenneTwister, randn
+using Random: MersenneTwister, rand, randn
 
 const BRM = BayesianRegressionModels
 
@@ -16,6 +16,77 @@ function capability_error(f)
         return err
     end
     error("expected NativePPLCapabilityError")
+end
+
+function bundle_execution_allocated(
+    outputs, workspace, prepared, positions, queries)
+    @allocated BRM.NativePPL.execute_draws!(
+        outputs, workspace, prepared, positions, queries)
+end
+
+function check_centered_execution(centered_plan, explicit_plan, position)
+    centered = BRM.NativePPL.prepare(centered_plan)
+    explicit = BRM.NativePPL.prepare(explicit_plan)
+    centered_work = BRM.NativePPL.workspace(
+        centered, Float64, DI.AutoEnzyme())
+    explicit_work = BRM.NativePPL.workspace(
+        explicit, Float64, DI.AutoEnzyme())
+    linear = BRM.NativePPL.LinearPredictor()
+    pointwise = BRM.NativePPL.PointwiseLogLikelihood()
+    predictive = BRM.NativePPL.PosteriorPredictive()
+
+    @test BRM.NativePPL.logdensity!(centered_work, centered, position) ≈
+          BRM.NativePPL.logdensity!(explicit_work, explicit, position)
+    centered_density, centered_gradient =
+        BRM.NativePPL.logdensity_and_gradient!(
+            centered_work, centered, position)
+    explicit_density, explicit_gradient =
+        BRM.NativePPL.logdensity_and_gradient!(
+            explicit_work, explicit, position)
+    @test centered_density ≈ explicit_density
+    @test centered_gradient ≈ explicit_gradient
+    @test BRM.NativePPL.evaluate(
+        centered_work, centered, position, linear) ≈
+          BRM.NativePPL.evaluate(explicit_work, explicit, position, linear)
+    @test BRM.NativePPL.evaluate(
+        centered_work, centered, position, pointwise) ≈
+          BRM.NativePPL.evaluate(explicit_work, explicit, position, pointwise)
+    @test BRM.NativePPL.simulate(
+        MersenneTwister(901), centered_work, centered, position, predictive) ==
+          BRM.NativePPL.simulate(
+              MersenneTwister(901), explicit_work, explicit, position, predictive)
+
+    positions = permutedims(hcat(position, position ./ 2))
+    queries = (; location=linear, pointwise, prediction=predictive)
+    centered_signatures = BRM.NativePPL.batch_output_signature(
+        centered, positions, queries)
+    explicit_signatures = BRM.NativePPL.batch_output_signature(
+        explicit, positions, queries)
+    @test map(BRM.NativePPL.output_axes, centered_signatures) ==
+          map(BRM.NativePPL.output_axes, explicit_signatures)
+    centered_outputs = BRM.NativePPL.allocate_output(
+        centered_signatures, centered)
+    explicit_outputs = BRM.NativePPL.allocate_output(
+        explicit_signatures, explicit)
+    BRM.NativePPL.execute_draws!(
+        MersenneTwister(902), centered_outputs, centered_work, centered,
+        positions, queries)
+    BRM.NativePPL.execute_draws!(
+        MersenneTwister(902), explicit_outputs, explicit_work, explicit,
+        positions, queries)
+    @test centered_outputs.location ≈ explicit_outputs.location
+    @test centered_outputs.pointwise ≈ explicit_outputs.pointwise
+    @test centered_outputs.prediction == explicit_outputs.prediction
+    @test bundle_execution_allocated(
+        MersenneTwister(903), centered_outputs, centered_work, centered,
+        positions, queries) == 0
+    centered
+end
+
+function bundle_execution_allocated(
+    rng, outputs, workspace, prepared, positions, queries)
+    @allocated BRM.NativePPL.execute_draws!(
+        rng, outputs, workspace, prepared, positions, queries)
 end
 
 function argument_error(f)
@@ -445,6 +516,728 @@ end
 end
 
 
+@testset "native Poisson-log workflow" begin
+    data = (;
+        x=[-1.0, 0.0, 1.0, 2.0],
+        y=[0, 1, 4, 10],
+    )
+    brmi = @brm data begin
+        eta ~ 1 + x
+        y ~ Poisson(exp(eta))
+    end
+    plan = BRM.NativePPL.compile(brmi)
+
+    @test LogDensityProblems.dimension(plan) == 2
+    @test keys(plan.axes) == (:observation, :coefficient)
+    @test keys(plan.parameters) == (:coefficients,)
+    @test keys(plan.nodes) == (:location, :rate)
+    @test keys(plan.factors) == (:coefficient_prior, :likelihood)
+    @test plan.factors.likelihood isa BRM.NativePPLPoissonFactor
+    @test plan.factors.likelihood.axis === plan.axes.observation
+    @test plan.nodes.rate isa BRM.NativePPLExpNode
+    @test BRM.native_node_name(plan.nodes.rate) == :exp_eta
+    @test BRM.native_exp_input(plan.nodes.rate) == :eta
+    @test plan.nodes.rate.axis === plan.axes.observation
+
+    linear_query = BRM.NativePPL.LinearPredictor()
+    pointwise_query = BRM.NativePPL.PointwiseLogLikelihood()
+    predictive_query = BRM.NativePPL.PosteriorPredictive()
+    predictive_signature = BRM.NativePPL.output_signature(plan, predictive_query)
+    @test BRM.NativePPL.output_eltype(predictive_signature, Float32) === Int
+    @test BRM.NativePPL.output_axis(predictive_signature) === plan.axes.observation
+
+    prepared = BRM.NativePPL.prepare(plan)
+    workspace = BRM.NativePPL.workspace(
+        prepared, Float64, DI.AutoEnzyme())
+    position = [0.2, 0.6]
+    log_rate = position[1] .+ position[2] .* data.x
+    rate = exp.(log_rate)
+    pointwise = logpdf.(Poisson.(rate), data.y)
+    expected_density =
+        logpdf(Normal(), position[1]) +
+        logpdf(Normal(), position[2]) + sum(pointwise)
+    expected_gradient = [
+        -position[1] + sum(data.y .- rate),
+        -position[2] + sum(data.x .* (data.y .- rate)),
+    ]
+
+    density = BRM.NativePPL.logdensity!(workspace, prepared, position)
+    @test density ≈ expected_density
+    @test workspace.primal.location ≈ log_rate
+    @test workspace.primal.pointwise_loglikelihood ≈ pointwise
+    gradient_density, gradient = BRM.NativePPL.logdensity_and_gradient!(
+        workspace, prepared, position)
+    @test gradient_density ≈ expected_density
+    @test gradient ≈ expected_gradient
+    @test steady_state_allocations(workspace, prepared, position) ==
+          (; primal=0, gradient=0)
+
+    likelihood = BRM._native_ppl_factor_logdensity!(
+        plan.factors.likelihood, plan.inputs.response, plan.nodes.rate,
+        plan.nodes.location, position, prepared, workspace.primal)
+    @test likelihood ≈ sum(pointwise)
+    mismatched_likelihood = BRM.NativePPLPoissonFactor(
+        :y, :wrong_rate, plan.axes.observation)
+    @test_throws MethodError BRM._native_ppl_factor_logdensity!(
+        mismatched_likelihood, plan.inputs.response, plan.nodes.rate,
+        plan.nodes.location, position, prepared, workspace.primal)
+
+    location_output = BRM.NativePPL.allocate_output(prepared, linear_query)
+    pointwise_output = BRM.NativePPL.allocate_output(prepared, pointwise_query)
+    prediction_output = BRM.NativePPL.allocate_output(prepared, predictive_query)
+    @test location_output isa Vector{Float64}
+    @test pointwise_output isa Vector{Float64}
+    @test prediction_output isa Vector{Int}
+    @test BRM.NativePPL.evaluate!(
+        location_output, workspace, prepared, position, linear_query) ===
+          location_output
+    @test location_output ≈ log_rate
+    @test BRM.NativePPL.evaluate!(
+        pointwise_output, workspace, prepared, position, pointwise_query) ===
+          pointwise_output
+    @test pointwise_output ≈ pointwise
+    prediction_a = BRM.NativePPL.simulate(
+        MersenneTwister(81), workspace, prepared, position)
+    prediction_b = BRM.NativePPL.simulate(
+        MersenneTwister(81), workspace, prepared, position)
+    @test prediction_a == prediction_b
+    @test prediction_a isa Vector{Int}
+    @test all(>=(0), prediction_a)
+    @test_throws ArgumentError BRM.NativePPL.simulate!(
+        MersenneTwister(81), zeros(length(data.y)), workspace, prepared,
+        position)
+
+    BRM.NativePPL.evaluate!(
+        location_output, workspace, prepared, position, linear_query)
+    BRM.NativePPL.evaluate!(
+        pointwise_output, workspace, prepared, position, pointwise_query)
+    rng = MersenneTwister(82)
+    BRM.NativePPL.simulate!(
+        rng, prediction_output, workspace, prepared, position)
+    @test @allocated(BRM.NativePPL.evaluate!(
+        location_output, workspace, prepared, position, linear_query)) == 0
+    @test @allocated(BRM.NativePPL.evaluate!(
+        pointwise_output, workspace, prepared, position, pointwise_query)) == 0
+    rng = MersenneTwister(82)
+    @test @allocated(BRM.NativePPL.simulate!(
+        rng, prediction_output, workspace, prepared, position)) == 0
+    predictive_allocation = @allocated(
+        BRM.NativePPL.allocate_output(prepared, predictive_query))
+    rng = MersenneTwister(82)
+    predictive_wrapper_allocation = @allocated(
+        BRM.NativePPL.simulate(rng, workspace, prepared, position))
+    @test predictive_wrapper_allocation == predictive_allocation
+
+    large_count = Float32(1_000_000_000)
+    large_log_rate = log(large_count)
+    large_pointwise = BRM._native_ppl_poisson_logdensity(
+        large_count, large_log_rate)
+    large_reference =
+        -Float32(0.5) * log(Float32(2π) * large_count) -
+        BRM._native_ppl_stirling_correction(large_count)
+    @test large_pointwise ≈ large_reference rtol=4eps(Float32)
+    @test -20 < large_pointwise < -10
+    @test BRM._native_ppl_poisson_logdensity(0.0, 1000.0) == -Inf
+    @test BRM._native_ppl_poisson_logdensity(1.0, -Inf) == -Inf
+
+    @test BRM._native_ppl_rand_poisson(
+        MersenneTwister(83), Float64, -Inf) == 0
+    @test_throws DomainError BRM._native_ppl_rand_poisson(
+        MersenneTwister(83), Float64, NaN)
+    @test_throws DomainError BRM._native_ppl_rand_poisson(
+        MersenneTwister(83), Float64, Inf)
+    @test_throws DomainError BRM._native_ppl_rand_poisson(
+        MersenneTwister(83), Float32,
+        log(maxintfloat(Float32) / Float32(2)))
+
+    rng = MersenneTwister(84)
+    draw_sum = 0
+    draw_square_sum = 0
+    draws = 20_000
+    for _ in 1:draws
+        draw = BRM._native_ppl_rand_poisson(rng, Float64, log(20.0))
+        draw_sum += draw
+        draw_square_sum += draw * draw
+    end
+    draw_mean = draw_sum / draws
+    draw_variance =
+        (draw_square_sum - draws * draw_mean * draw_mean) / (draws - 1)
+    @test draw_mean ≈ 20 atol=0.2
+    @test draw_variance ≈ 20 atol=1.0
+
+    rebound = BRM.NativePPL.rebind(
+        prepared, (; x=Float32[-1, 2], y=Float32[2, 3]); T=Float32)
+    @test BRM.NativePPL.has_response(rebound)
+    @test rebound.response == Float32[2, 3]
+    @test BRM.NativePPL.output_eltype(
+        BRM.NativePPL.output_signature(rebound, predictive_query), rebound) === Int
+    @test BRM.NativePPL.logdensity!(
+        BRM.NativePPL.workspace(rebound), rebound, Float32.(position)) isa Float32
+
+    prediction_only = BRM.NativePPL.rebind(
+        prepared, (; x=Float32[-1, 2]); T=Float32)
+    @test !BRM.NativePPL.has_response(prediction_only)
+    prediction_only_workspace = BRM.NativePPL.workspace(prediction_only)
+    @test BRM.NativePPL.evaluate(
+        prediction_only_workspace, prediction_only, Float32.(position),
+        linear_query) isa Vector{Float32}
+    @test BRM.NativePPL.simulate(
+        MersenneTwister(85), prediction_only_workspace, prediction_only,
+        Float32.(position)) isa Vector{Int}
+    @test_throws ArgumentError BRM.NativePPL.logdensity!(
+        prediction_only_workspace, prediction_only, Float32.(position))
+
+    @test_throws ArgumentError BRM.NativePPL.rebind(
+        prepared, (; x=[-1.0, 2.0], y=[0, -1]))
+    imprecise_data = (; x=Float32[0.5], y=[16_777_217])
+    imprecise_plan = BRM.NativePPL.compile(@brm imprecise_data begin
+        eta ~ 1 + x
+        y ~ Poisson(exp(eta))
+    end)
+    err = argument_error(() -> BRM.NativePPL.prepare(
+        imprecise_plan; T=Float32))
+    @test occursin("cannot be represented exactly as Float32", err.msg)
+
+    invalid_data = (; x=[-1.0, 2.0], y=[0.0, 1.5])
+    invalid_brmi = @brm invalid_data begin
+        eta ~ 1 + x
+        y ~ Poisson(exp(eta))
+    end
+    @test capability_error(() -> BRM.NativePPL.compile(invalid_brmi)).capability ==
+          :response_support
+    unlinked_data = (; x=[-1.0, 2.0], y=[0, 1])
+    unlinked_brmi = @brm unlinked_data begin
+        eta ~ 1 + x
+        y ~ Poisson(eta)
+    end
+    @test capability_error(() -> BRM.NativePPL.compile(unlinked_brmi)).capability ==
+          :likelihood_link
+end
+
+
+@testset "native PPL batched draw queries" begin
+    data = (; x=[-1.0, 0.0, 2.0], y=[0.5, 1.0, 2.5])
+    plan = BRM.NativePPL.compile(@brm data begin
+        sigma ~ Exponential(2.5)
+        mu ~ 1 + x
+        y ~ Normal(mu, sigma)
+    end)
+    prepared = BRM.NativePPL.prepare(plan)
+    workspace = BRM.NativePPL.workspace(prepared)
+    positions = [
+        0.1 -0.2 log(1.3)
+        -0.4 0.7 log(0.8)
+        1.0 0.0 log(2.0)
+    ]
+    linear_query = BRM.NativePPL.LinearPredictor()
+    pointwise_query = BRM.NativePPL.PointwiseLogLikelihood()
+    predictive_query = BRM.NativePPL.PosteriorPredictive()
+
+    linear_signature = BRM.NativePPL.batch_output_signature(
+        prepared, positions, linear_query)
+    @test linear_signature isa BRM.NativePPL.BatchOutputSignature
+    @test BRM.native_axis_name(
+        BRM.NativePPL.output_draw_axis(linear_signature)) == :draw
+    @test BRM.NativePPL.output_draw_axis(linear_signature).keys == Base.OneTo(3)
+    @test BRM.NativePPL.output_axis(linear_signature) === plan.axes.observation
+    @test BRM.NativePPL.output_axes(linear_signature) ==
+          (BRM.NativePPL.output_draw_axis(linear_signature), plan.axes.observation)
+    @test BRM.NativePPL.output_eltype(linear_signature, prepared) === Float64
+    @test BRM.NativePPL.output_layout(linear_signature) isa
+          BRM.NativePPL.DenseMatrixLayout
+
+    expected_location = Matrix{Float64}(undef, 3, 3)
+    expected_pointwise = similar(expected_location)
+    for draw in axes(positions, 1)
+        expected_location[draw, :] .=
+            positions[draw, 1] .+ positions[draw, 2] .* prepared.predictor
+        expected_pointwise[draw, :] .= logpdf.(
+            Normal.(expected_location[draw, :], exp(positions[draw, 3])),
+            prepared.response)
+    end
+
+    location_output = BRM.NativePPL.allocate_output(linear_signature, prepared)
+    pointwise_signature = BRM.NativePPL.batch_output_signature(
+        prepared, positions, pointwise_query)
+    pointwise_output = BRM.NativePPL.allocate_output(
+        pointwise_signature, prepared)
+    @test location_output isa Matrix{Float64}
+    @test size(location_output) == (3, 3)
+    @test BRM.NativePPL.evaluate_draws!(
+        location_output, workspace, prepared, positions, linear_query) ===
+          location_output
+    @test location_output ≈ expected_location
+    @test BRM.NativePPL.evaluate_draws!(
+        pointwise_output, workspace, prepared, positions, pointwise_query) ===
+          pointwise_output
+    @test pointwise_output ≈ expected_pointwise
+
+    BRM.NativePPL.evaluate_draws!(
+        location_output, workspace, prepared, positions, linear_query)
+    BRM.NativePPL.evaluate_draws!(
+        pointwise_output, workspace, prepared, positions, pointwise_query)
+    @test @allocated(BRM.NativePPL.evaluate_draws!(
+        location_output, workspace, prepared, positions, linear_query)) == 0
+    @test @allocated(BRM.NativePPL.evaluate_draws!(
+        pointwise_output, workspace, prepared, positions, pointwise_query)) == 0
+    allocation = @allocated(
+        BRM.NativePPL.allocate_output(linear_signature, prepared))
+    BRM.NativePPL.evaluate_draws(workspace, prepared, positions, linear_query)
+    wrapper_allocation = @allocated(
+        BRM.NativePPL.evaluate_draws(
+            workspace, prepared, positions, linear_query))
+    @test wrapper_allocation == allocation
+
+    predictive_signature = BRM.NativePPL.batch_output_signature(
+        prepared, positions, predictive_query)
+    prediction_output = BRM.NativePPL.allocate_output(
+        predictive_signature, prepared)
+    @test prediction_output isa Matrix{Float64}
+    prediction_a = BRM.NativePPL.simulate_draws(
+        MersenneTwister(91), workspace, prepared, positions)
+    prediction_b = BRM.NativePPL.simulate_draws(
+        MersenneTwister(91), workspace, prepared, positions)
+    @test prediction_a == prediction_b
+    manual_prediction = similar(prediction_a)
+    manual_rng = MersenneTwister(91)
+    for draw in axes(positions, 1)
+        manual_prediction[draw, :] .= BRM.NativePPL.simulate(
+            manual_rng, workspace, prepared, collect(positions[draw, :]))
+    end
+    @test prediction_a == manual_prediction
+    rng = MersenneTwister(92)
+    BRM.NativePPL.simulate_draws!(
+        rng, prediction_output, workspace, prepared, positions)
+    rng = MersenneTwister(92)
+    @test @allocated(BRM.NativePPL.simulate_draws!(
+        rng, prediction_output, workspace, prepared, positions)) == 0
+    predictive_allocation = @allocated(
+        BRM.NativePPL.allocate_output(predictive_signature, prepared))
+    rng = MersenneTwister(92)
+    BRM.NativePPL.simulate_draws(
+        rng, workspace, prepared, positions)
+    rng = MersenneTwister(92)
+    predictive_wrapper_allocation = @allocated(
+        BRM.NativePPL.simulate_draws(
+            rng, workspace, prepared, positions))
+    @test predictive_wrapper_allocation == predictive_allocation
+
+    bernoulli_data = (; x=[-1.0, 0.5, 2.0], y=Bool[false, true, true])
+    bernoulli_prepared = BRM.NativePPL.prepare(
+        BRM.NativePPL.compile(@brm bernoulli_data begin
+            eta ~ 1 + x
+            y ~ BernoulliLogit(eta)
+        end))
+    bernoulli_workspace = BRM.NativePPL.workspace(bernoulli_prepared)
+    binary_positions = [0.2 -0.4; -1.0 0.7]
+    binary_signature = BRM.NativePPL.batch_output_signature(
+        bernoulli_prepared, binary_positions, predictive_query)
+    @test BRM.NativePPL.output_eltype(binary_signature, bernoulli_prepared) === Bool
+    binary_prediction = BRM.NativePPL.simulate_draws(
+        MersenneTwister(93), bernoulli_workspace, bernoulli_prepared,
+        binary_positions)
+    @test binary_prediction isa Matrix{Bool}
+    @test binary_prediction == BRM.NativePPL.simulate_draws(
+        MersenneTwister(93), bernoulli_workspace, bernoulli_prepared,
+        binary_positions)
+
+    poisson_data = (; x=[-1.0, 0.5, 2.0], y=[0, 2, 5])
+    poisson_prepared = BRM.NativePPL.prepare(
+        BRM.NativePPL.compile(@brm poisson_data begin
+            eta ~ 1 + x
+            y ~ Poisson(exp(eta))
+        end))
+    poisson_workspace = BRM.NativePPL.workspace(poisson_prepared)
+    poisson_signature = BRM.NativePPL.batch_output_signature(
+        poisson_prepared, binary_positions, predictive_query)
+    @test BRM.NativePPL.output_eltype(poisson_signature, poisson_prepared) === Int
+    poisson_prediction = BRM.NativePPL.simulate_draws(
+        MersenneTwister(94), poisson_workspace, poisson_prepared,
+        binary_positions)
+    @test poisson_prediction isa Matrix{Int}
+    @test all(>=(0), poisson_prediction)
+    @test poisson_prediction == BRM.NativePPL.simulate_draws(
+        MersenneTwister(94), poisson_workspace, poisson_prepared,
+        binary_positions)
+
+    prediction_only = BRM.NativePPL.rebind(prepared, (; x=data.x))
+    prediction_only_workspace = BRM.NativePPL.workspace(prediction_only)
+    @test BRM.NativePPL.evaluate_draws(
+        prediction_only_workspace, prediction_only, positions,
+        linear_query) ≈ expected_location
+    @test BRM.NativePPL.simulate_draws(
+        MersenneTwister(95), prediction_only_workspace, prediction_only,
+        positions) isa Matrix{Float64}
+    unavailable = fill(123.0, size(expected_pointwise))
+    @test_throws ArgumentError BRM.NativePPL.evaluate_draws!(
+        unavailable, prediction_only_workspace, prediction_only, positions,
+        pointwise_query)
+    @test all(==(123.0), unavailable)
+
+    @test_throws DimensionMismatch BRM.NativePPL.batch_output_signature(
+        prepared, zeros(2, 2), linear_query)
+    @test_throws DimensionMismatch BRM.NativePPL.evaluate_draws!(
+        zeros(2, 3), workspace, prepared, positions, linear_query)
+    @test_throws ArgumentError BRM.NativePPL.evaluate_draws!(
+        zeros(Float32, 3, 3), workspace, prepared, positions, linear_query)
+    output_view = @view zeros(3, 4)[:, 1:3]
+    @test_throws ArgumentError BRM.NativePPL.evaluate_draws!(
+        output_view, workspace, prepared, positions, linear_query)
+    @test_throws ArgumentError BRM.NativePPL.evaluate_draws!(
+        positions, workspace, prepared, positions, linear_query)
+    @test_throws ArgumentError BRM.NativePPL.evaluate_draws!(
+        zeros(3, 3), workspace, prepared, Float32.(positions), linear_query)
+
+    alias_workspace = BRM.NativePPL.workspace(prepared)
+    aliased_positions = reshape(alias_workspace.primal.location, 1, :)
+    @test_throws ArgumentError BRM.NativePPL.evaluate_draws!(
+        zeros(1, 3), alias_workspace, prepared, aliased_positions,
+        linear_query)
+
+    sliced_workspace = BRM.NativePPL.workspace(prepared)
+    pop!(sliced_workspace.gradient)
+    @test BRM.NativePPL.evaluate_draws!(
+        zeros(3, 3), sliced_workspace, prepared, positions, linear_query) isa
+          Matrix{Float64}
+    @test_throws DimensionMismatch BRM.NativePPL.evaluate_draws!(
+        zeros(3, 3), sliced_workspace, prepared, positions, pointwise_query)
+
+    empty_positions = zeros(0, 3)
+    empty_signature = BRM.NativePPL.batch_output_signature(
+        prepared, empty_positions, linear_query)
+    @test BRM.NativePPL.output_draw_axis(empty_signature).keys == Base.OneTo(0)
+    @test size(BRM.NativePPL.evaluate_draws(
+        workspace, prepared, empty_positions, linear_query)) == (0, 3)
+end
+
+
+@testset "native PPL fused query bundles" begin
+    data = (; x=[-1.0, 0.0, 2.0], y=[0.5, 1.0, 2.5])
+    plan = BRM.NativePPL.compile(@brm data begin
+        sigma ~ Exponential(2.5)
+        mu ~ 1 + x
+        y ~ Normal(mu, sigma)
+    end)
+    prepared = BRM.NativePPL.prepare(plan)
+    workspace = BRM.NativePPL.workspace(prepared)
+    positions = [0.1 -0.2 log(1.3); -0.4 0.7 log(0.8)]
+    linear_query = BRM.NativePPL.LinearPredictor()
+    pointwise_query = BRM.NativePPL.PointwiseLogLikelihood()
+    predictive_query = BRM.NativePPL.PosteriorPredictive()
+
+    deterministic_queries = (;
+        location=linear_query,
+        pointwise=pointwise_query,
+    )
+    signatures = BRM.NativePPL.batch_output_signature(
+        prepared, positions, deterministic_queries)
+    @test keys(signatures) == keys(deterministic_queries)
+    @test all(
+        signature isa BRM.NativePPL.BatchOutputSignature
+        for signature in signatures)
+    @test all(
+        BRM.NativePPL.output_axes(signature) ==
+            (BRM.NativePPL.output_draw_axis(signature), plan.axes.observation)
+        for signature in signatures)
+    outputs = BRM.NativePPL.allocate_output(signatures, prepared)
+    @test keys(outputs) == keys(deterministic_queries)
+    @test outputs.location isa Matrix{Float64}
+    @test outputs.pointwise isa Matrix{Float64}
+    @test !Base.mightalias(outputs.location, outputs.pointwise)
+
+    expected_location = BRM.NativePPL.evaluate_draws(
+        workspace, prepared, positions, linear_query)
+    expected_pointwise = BRM.NativePPL.evaluate_draws(
+        workspace, prepared, positions, pointwise_query)
+    @test BRM.NativePPL.execute_draws!(
+        outputs, workspace, prepared, positions, deterministic_queries) === outputs
+    @test outputs.location ≈ expected_location
+    @test outputs.pointwise ≈ expected_pointwise
+    BRM.NativePPL.execute_draws!(
+        outputs, workspace, prepared, positions, deterministic_queries)
+    @test bundle_execution_allocated(
+        outputs, workspace, prepared, positions, deterministic_queries) == 0
+
+    allocation = @allocated(BRM.NativePPL.allocate_output(signatures, prepared))
+    BRM.NativePPL.execute_draws(
+        workspace, prepared, positions, deterministic_queries)
+    wrapper_allocation = @allocated(BRM.NativePPL.execute_draws(
+        workspace, prepared, positions, deterministic_queries))
+    @test wrapper_allocation == allocation
+
+    mixed_queries = (;
+        location=linear_query,
+        prediction=predictive_query,
+        pointwise=pointwise_query,
+    )
+    mixed_signatures = BRM.NativePPL.batch_output_signature(
+        prepared, positions, mixed_queries)
+    mixed_outputs = BRM.NativePPL.allocate_output(mixed_signatures, prepared)
+    fill!(mixed_outputs.location, -999)
+    fill!(mixed_outputs.prediction, -999)
+    fill!(mixed_outputs.pointwise, -999)
+    @test_throws ArgumentError BRM.NativePPL.execute_draws!(
+        mixed_outputs, workspace, prepared, positions, mixed_queries)
+    @test all(==(-999), mixed_outputs.location)
+    @test all(==(-999), mixed_outputs.prediction)
+    @test all(==(-999), mixed_outputs.pointwise)
+
+    mixed_rng = MersenneTwister(101)
+    @test BRM.NativePPL.execute_draws!(
+        mixed_rng, mixed_outputs, workspace, prepared, positions,
+        mixed_queries) === mixed_outputs
+    @test mixed_outputs.location ≈ expected_location
+    @test mixed_outputs.pointwise ≈ expected_pointwise
+    @test mixed_outputs.prediction == BRM.NativePPL.simulate_draws(
+        MersenneTwister(101), workspace, prepared, positions)
+    mixed_rng = MersenneTwister(102)
+    BRM.NativePPL.execute_draws!(
+        mixed_rng, mixed_outputs, workspace, prepared, positions,
+        mixed_queries)
+    mixed_rng = MersenneTwister(102)
+    @test bundle_execution_allocated(
+        mixed_rng, mixed_outputs, workspace, prepared, positions,
+        mixed_queries) == 0
+
+    mixed_allocation = @allocated(
+        BRM.NativePPL.allocate_output(mixed_signatures, prepared))
+    mixed_rng = MersenneTwister(102)
+    BRM.NativePPL.execute_draws(
+        mixed_rng, workspace, prepared, positions, mixed_queries)
+    mixed_rng = MersenneTwister(102)
+    mixed_wrapper_allocation = @allocated(BRM.NativePPL.execute_draws(
+        mixed_rng, workspace, prepared, positions, mixed_queries))
+    @test mixed_wrapper_allocation == mixed_allocation
+
+    deterministic_rng = MersenneTwister(103)
+    untouched_rng = MersenneTwister(103)
+    BRM.NativePPL.execute_draws!(
+        deterministic_rng, outputs, workspace, prepared, positions,
+        deterministic_queries)
+    @test rand(deterministic_rng) == rand(untouched_rng)
+
+    prediction_only = BRM.NativePPL.rebind(prepared, (; x=data.x))
+    prediction_only_workspace = BRM.NativePPL.workspace(prediction_only)
+    prediction_queries = (; location=linear_query, prediction=predictive_query)
+    prediction_signatures = BRM.NativePPL.batch_output_signature(
+        prediction_only, positions, prediction_queries)
+    prediction_outputs = BRM.NativePPL.allocate_output(
+        prediction_signatures, prediction_only)
+    @test BRM.NativePPL.execute_draws!(
+        MersenneTwister(104), prediction_outputs,
+        prediction_only_workspace, prediction_only, positions,
+        prediction_queries) === prediction_outputs
+    @test prediction_outputs.location ≈ expected_location
+
+    unavailable_queries = (;
+        location=linear_query,
+        pointwise=pointwise_query,
+        prediction=predictive_query,
+    )
+    unavailable_signatures = BRM.NativePPL.batch_output_signature(
+        prediction_only, positions, unavailable_queries)
+    unavailable_outputs = BRM.NativePPL.allocate_output(
+        unavailable_signatures, prediction_only)
+    for output in unavailable_outputs
+        fill!(output, 7)
+    end
+    @test_throws ArgumentError BRM.NativePPL.execute_draws!(
+        MersenneTwister(105), unavailable_outputs,
+        prediction_only_workspace, prediction_only, positions,
+        unavailable_queries)
+    @test all(output -> all(==(7), output), unavailable_outputs)
+
+    wrong_keys = (; other=zeros(2, 3), pointwise=zeros(2, 3))
+    @test_throws ArgumentError BRM.NativePPL.execute_draws!(
+        wrong_keys, workspace, prepared, positions, deterministic_queries)
+    malformed_output = (; location=zeros(6), pointwise=zeros(2, 3))
+    @test_throws ArgumentError BRM.NativePPL.execute_draws!(
+        malformed_output, workspace, prepared, positions,
+        deterministic_queries)
+    malformed_queries = (; location=linear_query, pointwise=1)
+    @test_throws ArgumentError BRM.NativePPL.batch_output_signature(
+        prepared, positions, malformed_queries)
+    aliased = zeros(2, 3)
+    aliased_outputs = (; first=aliased, second=aliased)
+    aliased_queries = (; first=linear_query, second=linear_query)
+    @test_throws ArgumentError BRM.NativePPL.execute_draws!(
+        aliased_outputs, workspace, prepared, positions, aliased_queries)
+
+    sliced_workspace = BRM.NativePPL.workspace(prepared)
+    empty!(sliced_workspace.primal.pointwise_loglikelihood)
+    location_only = (; location=linear_query,)
+    location_signature = BRM.NativePPL.batch_output_signature(
+        prepared, positions, location_only)
+    location_only_output = BRM.NativePPL.allocate_output(
+        location_signature, prepared)
+    @test BRM.NativePPL.execute_draws!(
+        location_only_output, sliced_workspace, prepared, positions,
+        location_only) === location_only_output
+    @test_throws DimensionMismatch BRM.NativePPL.execute_draws!(
+        outputs, sliced_workspace, prepared, positions, deterministic_queries)
+
+    empty_queries = NamedTuple()
+    empty_outputs = NamedTuple()
+    @test BRM.NativePPL.batch_output_signature(
+        prepared, positions, empty_queries) == empty_queries
+    @test BRM.NativePPL.execute_draws!(
+        empty_outputs, workspace, prepared, positions, empty_queries) ==
+          empty_outputs
+    @test_throws DimensionMismatch BRM.NativePPL.batch_output_signature(
+        prepared, zeros(2, 2), empty_queries)
+    @test_throws DimensionMismatch BRM.NativePPL.execute_draws!(
+        empty_outputs, workspace, prepared, zeros(2, 2), empty_queries)
+
+    bernoulli_data = (; x=[-1.0, 1.0], y=Bool[false, true])
+    bernoulli_prepared = BRM.NativePPL.prepare(
+        BRM.NativePPL.compile(@brm bernoulli_data begin
+            eta ~ 1 + x
+            y ~ BernoulliLogit(eta)
+        end))
+    poisson_data = (; x=[-1.0, 1.0], y=[0, 3])
+    poisson_prepared = BRM.NativePPL.prepare(
+        BRM.NativePPL.compile(@brm poisson_data begin
+            eta ~ 1 + x
+            y ~ Poisson(exp(eta))
+        end))
+    family_positions = [0.2 -0.3; 0.5 0.1]
+    family_queries = (; location=linear_query, prediction=predictive_query)
+    bernoulli_signatures = BRM.NativePPL.batch_output_signature(
+        bernoulli_prepared, family_positions, family_queries)
+    poisson_signatures = BRM.NativePPL.batch_output_signature(
+        poisson_prepared, family_positions, family_queries)
+    @test BRM.NativePPL.output_eltype(
+        bernoulli_signatures.prediction, bernoulli_prepared) === Bool
+    @test BRM.NativePPL.output_eltype(
+        poisson_signatures.prediction, poisson_prepared) === Int
+    @test BRM.NativePPL.allocate_output(
+        bernoulli_signatures, bernoulli_prepared).prediction isa Matrix{Bool}
+    @test BRM.NativePPL.allocate_output(
+        poisson_signatures, poisson_prepared).prediction isa Matrix{Int}
+end
+
+
+@testset "native PPL fitted centering and replay" begin
+    gaussian_data = (;
+        x=[1.0, 2.0, 3.0, 4.0], y=[0.2, -0.1, 1.1, 0.7])
+    gaussian_centered = BRM.NativePPL.compile(@brm gaussian_data begin
+        sigma ~ Exponential(2.0)
+        center_x ~ 1 + center(x)
+        y ~ Normal(center_x, sigma)
+    end)
+    gaussian_explicit_data = (;
+        xc=[-1.5, -0.5, 0.5, 1.5], y=gaussian_data.y)
+    gaussian_explicit = BRM.NativePPL.compile(@brm gaussian_explicit_data begin
+        sigma ~ Exponential(2.0)
+        center_x ~ 1 + xc
+        y ~ Normal(center_x, sigma)
+    end)
+    gaussian = check_centered_execution(
+        gaussian_centered, gaussian_explicit, [0.2, -0.4, log(0.8)])
+
+    @test hasproperty(gaussian_centered.nodes, :transform)
+    transform = gaussian_centered.nodes.transform
+    @test transform isa BRM.NativePPLCenterNode
+    @test BRM.native_center_input(transform) === :x
+    @test transform.mean == 2.5
+    @test transform.axis === gaussian_centered.axes.observation
+    @test BRM.native_node_name(transform) !==
+          BRM.native_node_name(gaussian_centered.nodes.location)
+    @test BRM.native_affine_input(gaussian_centered.nodes.location) ===
+          BRM.native_node_name(transform)
+    @test gaussian_centered.bindings.x === gaussian_data.x
+    @test gaussian.predictor == gaussian_explicit_data.xc
+    @test gaussian.predictor !== gaussian_data.x
+
+    bernoulli_data = (;
+        x=[1.0, 2.0, 3.0, 4.0], y=Bool[false, false, true, true])
+    bernoulli_centered = BRM.NativePPL.compile(@brm bernoulli_data begin
+        eta ~ 1 + center(x)
+        y ~ BernoulliLogit(eta)
+    end)
+    bernoulli_explicit_data = (;
+        xc=[-1.5, -0.5, 0.5, 1.5], y=bernoulli_data.y)
+    bernoulli_explicit = BRM.NativePPL.compile(@brm bernoulli_explicit_data begin
+        eta ~ 1 + xc
+        y ~ BernoulliLogit(eta)
+    end)
+    bernoulli = check_centered_execution(
+        bernoulli_centered, bernoulli_explicit, [-0.3, 0.6])
+
+    poisson_data = (;
+        x=[1.0, 2.0, 3.0, 4.0], y=[0, 1, 3, 6])
+    poisson_centered = BRM.NativePPL.compile(@brm poisson_data begin
+        log_rate ~ 1 + center(x)
+        y ~ Poisson(exp(log_rate))
+    end)
+    poisson_explicit_data = (;
+        xc=[-1.5, -0.5, 0.5, 1.5], y=poisson_data.y)
+    poisson_explicit = BRM.NativePPL.compile(@brm poisson_explicit_data begin
+        log_rate ~ 1 + xc
+        y ~ Poisson(exp(log_rate))
+    end)
+    poisson = check_centered_execution(
+        poisson_centered, poisson_explicit, [0.1, 0.2])
+
+    new_x = [10.0, 14.0]
+    frozen = BRM.NativePPL.rebind(
+        gaussian, (; x=new_x, y=[0.4, 0.9]))
+    refitted = BRM.NativePPL.rebind(
+        gaussian, (; x=new_x, y=[0.4, 0.9]); freeze_constants=false)
+    @test frozen.plan.nodes.transform.mean == 2.5
+    @test frozen.predictor == [7.5, 11.5]
+    @test refitted.plan.nodes.transform.mean == 12.0
+    @test refitted.predictor == [-2.0, 2.0]
+    @test frozen.plan.bindings.x === new_x
+    @test frozen.plan.nodes.transform.axis === frozen.plan.axes.observation
+    @test frozen.plan.nodes.location.axis === frozen.plan.axes.observation
+    @test frozen.plan.factors.likelihood.axis === frozen.plan.axes.observation
+
+    position = [0.2, -0.4, log(0.8)]
+    linear = BRM.NativePPL.LinearPredictor()
+    @test BRM.NativePPL.evaluate(
+        BRM.NativePPL.workspace(frozen), frozen, position, linear) ≈
+          0.2 .- 0.4 .* [7.5, 11.5]
+    @test BRM.NativePPL.evaluate(
+        BRM.NativePPL.workspace(refitted), refitted, position, linear) ≈
+          0.2 .- 0.4 .* [-2.0, 2.0]
+
+    for (prepared, family_position) in
+        ((gaussian, [0.2, -0.4, log(0.8)]),
+         (bernoulli, [-0.3, 0.6]),
+         (poisson, [0.1, 0.2]))
+        prediction_only = BRM.NativePPL.rebind(prepared, (; x=new_x))
+        refit_prediction_only = BRM.NativePPL.rebind(
+            prepared, (; x=new_x); freeze_constants=false)
+        @test !BRM.NativePPL.has_response(prediction_only)
+        @test prediction_only.predictor == [7.5, 11.5]
+        @test refit_prediction_only.predictor == [-2.0, 2.0]
+        @test length(BRM.NativePPL.simulate(
+            MersenneTwister(904), BRM.NativePPL.workspace(prediction_only),
+            prediction_only, family_position)) == 2
+        @test_throws ArgumentError BRM.NativePPL.evaluate(
+            BRM.NativePPL.workspace(prediction_only), prediction_only,
+            family_position, BRM.NativePPL.PointwiseLogLikelihood())
+    end
+
+    extreme = floatmax(Float64)
+    extreme_data = (; x=[extreme, extreme], y=[0.0, 1.0])
+    extreme_plan = BRM.NativePPL.compile(@brm extreme_data begin
+        sigma ~ Exponential(1.0)
+        mu ~ 1 + center(x)
+        y ~ Normal(mu, sigma)
+    end)
+    @test extreme_plan.nodes.transform.mean == extreme
+    @test BRM.NativePPL.prepare(extreme_plan).predictor == [0.0, 0.0]
+
+    @test_throws ArgumentError BRM.NativePPL.rebind(
+        gaussian, (; x=[1, 2], y=[0.0, 1.0]))
+    @test_throws BRM.NativePPLCapabilityError BRM.NativePPL.rebind(
+        gaussian, (; x=[1.0, NaN], y=[0.0, 1.0]);
+        freeze_constants=false)
+end
+
+
 @testset "native PPL workflow queries and replay" begin
     data = (; x=[-1.0, 0.0, 2.0], y=[0.5, 1.0, 2.5])
     brmi = @brm data begin
@@ -813,7 +1606,7 @@ end
 
     wrong_likelihood = @brm data begin
         mu ~ 1 + x
-        y ~ Poisson(exp(mu))
+        y ~ Exponential(exp(mu))
     end
     @test capability_error(() -> BRM._native_ppl_plan(wrong_likelihood)).capability ==
           :likelihood

@@ -95,6 +95,27 @@ NativePPLAffineNode(name::Symbol, input::Symbol, axis::A,
 native_node_name(::NativePPLAffineNode{Name}) where {Name} = Name
 native_affine_input(::NativePPLAffineNode{Name,Input}) where {Name,Input} = Input
 
+"""A staged elementwise exponential link over one named deterministic node."""
+struct NativePPLExpNode{Name,Input,A} <: NativePPLNode
+    axis::A
+end
+
+NativePPLExpNode(name::Symbol, input::Symbol, axis::A) where {A} =
+    NativePPLExpNode{name,input,A}(axis)
+native_node_name(::NativePPLExpNode{Name}) where {Name} = Name
+native_exp_input(::NativePPLExpNode{Name,Input}) where {Name,Input} = Input
+
+"""A fitted mean-centering transform over one raw input column."""
+struct NativePPLCenterNode{Name,Input,A,T} <: NativePPLNode
+    axis::A
+    mean::T
+end
+
+NativePPLCenterNode(name::Symbol, input::Symbol, axis::A, mean::T) where {A,T} =
+    NativePPLCenterNode{name,input,A,T}(axis, mean)
+native_node_name(::NativePPLCenterNode{Name}) where {Name} = Name
+native_center_input(::NativePPLCenterNode{Name,Input}) where {Name,Input} = Input
+
 """Independent standard-normal prior over an unconstrained parameter range."""
 struct NativePPLStandardNormalFactor{Parameter,R} <: NativePPLFactor
     unconstrained::R
@@ -128,6 +149,14 @@ end
 NativePPLBernoulliLogitFactor(response::Symbol, logit::Symbol, axis::A) where {A} =
     NativePPLBernoulliLogitFactor{response,logit,A}(axis)
 
+"""Row-wise Poisson observation factor linked to a staged positive rate."""
+struct NativePPLPoissonFactor{Response,Rate,A} <: NativePPLFactor
+    axis::A
+end
+
+NativePPLPoissonFactor(response::Symbol, rate::Symbol, axis::A) where {A} =
+    NativePPLPoissonFactor{response,rate,A}(axis)
+
 abstract type NativePPLQuery end
 struct NativePPLLinearPredictor <: NativePPLQuery end
 struct NativePPLPointwiseLogLikelihood <: NativePPLQuery end
@@ -142,6 +171,9 @@ struct NativePPLFixedElementType{T} end
 """Dense, one-dimensional caller-owned output layout."""
 struct NativePPLDenseVectorLayout end
 
+"""Dense draw-by-observation output owned by the caller."""
+struct NativePPLDenseMatrixLayout end
+
 """Pre-execution semantic axis, element-type rule, and layout for one output."""
 struct NativePPLOutputSignature{A,E,L}
     axis::A
@@ -149,15 +181,35 @@ struct NativePPLOutputSignature{A,E,L}
     layout::L
 end
 
+"""Pre-execution signature for a draw-by-observation query block."""
+struct NativePPLBatchOutputSignature{D,A,E,L}
+    draw_axis::D
+    observation_axis::A
+    element_type::E
+    layout::L
+end
+
 native_output_axis(signature::NativePPLOutputSignature) = signature.axis
+native_output_axis(signature::NativePPLBatchOutputSignature) =
+    signature.observation_axis
+native_output_axes(signature::NativePPLOutputSignature) = (signature.axis,)
+native_output_axes(signature::NativePPLBatchOutputSignature) =
+    (signature.draw_axis, signature.observation_axis)
+native_output_draw_axis(signature::NativePPLBatchOutputSignature) =
+    signature.draw_axis
 native_output_eltype(signature::NativePPLOutputSignature, prepared) =
+    native_output_eltype(signature.element_type, prepared)
+native_output_eltype(signature::NativePPLBatchOutputSignature, prepared) =
     native_output_eltype(signature.element_type, prepared)
 native_output_eltype(::NativePPLPreparedElementType, prepared) = eltype(prepared)
 native_output_eltype(::NativePPLPreparedElementType, ::Type{T}) where {T<:AbstractFloat} = T
 native_output_eltype(::NativePPLFixedElementType{T}, _) where {T} = T
 native_output_layout(signature::NativePPLOutputSignature) = signature.layout
+native_output_layout(signature::NativePPLBatchOutputSignature) = signature.layout
 native_output_layout_accepts(::NativePPLDenseVectorLayout, output) =
     output isa DenseVector
+native_output_layout_accepts(::NativePPLDenseMatrixLayout, output) =
+    output isa DenseMatrix
 
 """
 Output, frequency, effect, and lifetime contract for one graph query.
@@ -173,6 +225,8 @@ NativePPLQuerySpec(kind::Symbol, stage::Symbol, effect::Symbol,
                    lifetime::Symbol, output::S) where {S} =
     NativePPLQuerySpec{kind,stage,effect,lifetime,S}(output)
 native_query_name(::NativePPLQuerySpec{Kind}) where {Kind} = Kind
+native_query_effect(::NativePPLQuerySpec{Kind,Stage,Effect}) where {Kind,Stage,Effect} =
+    Effect
 native_query_output(spec::NativePPLQuerySpec) = spec.output
 
 function _native_ppl_queries(
@@ -201,6 +255,8 @@ _native_ppl_queries(observation_axis, ::NativePPLNormalFactor) =
     _native_ppl_queries(observation_axis)
 _native_ppl_queries(observation_axis, ::NativePPLBernoulliLogitFactor) =
     _native_ppl_queries(observation_axis, NativePPLFixedElementType{Bool}())
+_native_ppl_queries(observation_axis, ::NativePPLPoissonFactor) =
+    _native_ppl_queries(observation_axis, NativePPLFixedElementType{Int}())
 
 """
     NativePPLPlan
@@ -353,6 +409,31 @@ function _native_ppl_sampling_rhs(brmi::BRMI, key::Symbol)
     getargs(operation, 2)
 end
 
+function _native_ppl_predictor_term(term, key::Symbol)
+    if term isa NamedColumn && parent(term) isa DataColumn
+        return (; column=term, transform=:identity)
+    end
+    if term isa ExprColumn && getf(term) === center
+        isempty(getkwargs(term)) || throw(NativePPLCapabilityError(
+            :predictor_transform,
+            "`center` in predictor `$key` cannot have keywords"))
+        args = getargs(term)
+        length(args) == 1 || throw(NativePPLCapabilityError(
+            :predictor_transform,
+            "`center` in predictor `$key` needs one raw data column"))
+        column = only(args)
+        column isa NamedColumn && parent(column) isa DataColumn ||
+            throw(NativePPLCapabilityError(
+                :predictor_transform,
+                "`center` in predictor `$key` must wrap one raw data column"))
+        return (; column, transform=:center)
+    end
+    throw(NativePPLCapabilityError(
+        :predictor_terms,
+        "`$key` must be exactly `1 + x` or `1 + center(x)`; " *
+        "offsets, interactions, groups, and other transforms are not lowered yet"))
+end
+
 function _native_ppl_affine_predictor(brmi::BRMI, key::Symbol)
     lhs, predictor = _native_ppl_sampling_rhs(brmi, key)
     _native_ppl_ref_name(lhs) === key || throw(NativePPLCapabilityError(
@@ -367,11 +448,14 @@ function _native_ppl_affine_predictor(brmi::BRMI, key::Symbol)
         "`$key` must have exactly an intercept and one continuous predictor"))
 
     intercepts = filter(term -> term isa Number && term == 1, terms)
-    data_terms = filter(term -> term isa NamedColumn && parent(term) isa DataColumn, terms)
-    length(intercepts) == 1 && length(data_terms) == 1 ||
+    length(intercepts) == 1 ||
         throw(NativePPLCapabilityError(:predictor_terms,
-            "`$key` must be exactly `1 + x`; offsets, interactions, and groups are not lowered yet"))
-    only(data_terms)
+            "`$key` must contain exactly one intercept"))
+    predictor_terms = filter(
+        term -> !(term isa Number && term == 1), terms)
+    length(predictor_terms) == 1 || throw(NativePPLCapabilityError(
+        :predictor_terms, "`$key` must contain exactly one predictor term"))
+    _native_ppl_predictor_term(only(predictor_terms), key)
 end
 
 function _native_ppl_exponential_prior(brmi::BRMI, key::Symbol)
@@ -392,6 +476,24 @@ function _native_ppl_exponential_prior(brmi::BRMI, key::Symbol)
     scale
 end
 
+function _native_ppl_fit_center(values::AbstractVector, name::Symbol)
+    all(value -> value isa Real && isfinite(value), values) ||
+        throw(NativePPLCapabilityError(
+            :predictor_transform,
+            "`center($name)` requires finite real training values"))
+    fitted_mean = float(first(values))
+    for (offset, value) in enumerate(Iterators.drop(values, 1))
+        count = offset + 1
+        # Dividing before subtracting avoids overflow for finite values near
+        # `floatmax`, including samples spanning both signs.
+        fitted_mean += float(value) / count - fitted_mean / count
+    end
+    isfinite(fitted_mean) || throw(NativePPLCapabilityError(
+        :predictor_transform,
+        "`center($name)` produced a non-finite fitted mean"))
+    fitted_mean
+end
+
 """
     _native_ppl_plan(brmi::BRMI) -> NativePPLPlan
 
@@ -406,6 +508,11 @@ sigma ~ Exponential(scale)
 
 y     ~ BernoulliLogit(eta)
 eta   ~ 1 + x
+
+# or
+
+y     ~ Poisson(exp(eta))
+eta   ~ 1 + x
 ```
 
 Names may vary, but the structure may not. Unsupported structure raises a
@@ -417,11 +524,11 @@ function _native_ppl_plan(brmi::BRMI)
         :outcomes, "expected exactly one observed response, got $(length(observed))"))
     outcome = only(observed)
     family = outcome.family
-    family === Normal || family === BernoulliLogit ||
+    family === Normal || family === BernoulliLogit || family === Poisson ||
         throw(NativePPLCapabilityError(
             :likelihood,
-            "expected `Normal(location, scale)` or `BernoulliLogit(logit)`, " *
-            "got `$family`"))
+            "expected `Normal(location, scale)`, `BernoulliLogit(logit)`, " *
+            "or `Poisson(exp(log_rate))`, got `$family`"))
 
     response = outcome.response
     response_lhs, likelihood = _native_ppl_sampling_rhs(brmi, response)
@@ -439,7 +546,27 @@ function _native_ppl_plan(brmi::BRMI)
         throw(NativePPLCapabilityError(
             :likelihood,
             "$family likelihood for `$response` needs $expected_arguments argument(s)"))
-    location = _native_ppl_ref_name(likelihood_args[1])
+    rate = nothing
+    location = if family === Poisson
+        rate_expression = only(likelihood_args)
+        rate_expression isa ExprColumn && getf(rate_expression) === exp ||
+            throw(NativePPLCapabilityError(
+                :likelihood_link,
+                "Poisson response `$response` must use `Poisson(exp(log_rate))`"))
+        isempty(getkwargs(rate_expression)) || throw(NativePPLCapabilityError(
+            :likelihood_link, "Poisson `exp` link cannot have keywords"))
+        rate_arguments = getargs(rate_expression)
+        length(rate_arguments) == 1 || throw(NativePPLCapabilityError(
+            :likelihood_link, "Poisson `exp` link needs one named predictor"))
+        log_rate = _native_ppl_ref_name(only(rate_arguments))
+        log_rate === nothing && throw(NativePPLCapabilityError(
+            :likelihood_location,
+            "Poisson `exp` link must consume one named linear predictor"))
+        rate = Symbol(:exp_, log_rate)
+        log_rate
+    else
+        _native_ppl_ref_name(likelihood_args[1])
+    end
     location === nothing && throw(NativePPLCapabilityError(
         :likelihood_location, "$family predictor must be one named linear predictor"))
     scale_parameter = family === Normal ? _native_ppl_ref_name(likelihood_args[2]) : nothing
@@ -447,7 +574,8 @@ function _native_ppl_plan(brmi::BRMI)
         throw(NativePPLCapabilityError(
             :likelihood_scale, "Normal scale must be one named scalar parameter"))
 
-    predictor = _native_ppl_affine_predictor(brmi, location)
+    predictor_term = _native_ppl_affine_predictor(brmi, location)
+    predictor = predictor_term.column
     predictor_name = name(predictor)
     predictor_name === response && throw(NativePPLCapabilityError(
         :input_roles,
@@ -464,12 +592,19 @@ function _native_ppl_plan(brmi::BRMI)
             throw(NativePPLCapabilityError(
                 :response_support,
                 "BernoulliLogit response `$response` must contain only Bool/0/1 values"))
+    elseif family === Poisson
+        all(_native_ppl_is_count, y) ||
+            throw(NativePPLCapabilityError(
+                :response_support,
+                "Poisson response `$response` must contain nonnegative integer-valued counts representable as Int"))
     end
     length(x) == length(y) || throw(NativePPLCapabilityError(
         :observation_axis,
         "predictor `$predictor_name` has $(length(x)) rows but `$response` has $(length(y))"))
     !isempty(y) || throw(NativePPLCapabilityError(
         :observation_axis, "the observation axis cannot be empty"))
+    center_mean = predictor_term.transform === :center ?
+        _native_ppl_fit_center(x, predictor_name) : nothing
 
     prior_scale = family === Normal ?
         _native_ppl_exponential_prior(brmi, scale_parameter) : nothing
@@ -493,8 +628,18 @@ function _native_ppl_plan(brmi::BRMI)
     coefficients = NativePPLParameter(
         coefficient_name, NativePPLRealSupport(), NativePPLIdentityTransform(),
         coefficient_axis, 1:2)
-    location_node = NativePPLAffineNode(location, predictor_name,
+    transform_node = predictor_term.transform === :center ?
+        NativePPLCenterNode(
+            Symbol("#native_ppl_center#", location, "#", predictor_name),
+            predictor_name,
+            observation_axis, center_mean) : nothing
+    location_input = transform_node === nothing ?
+        predictor_name : native_node_name(transform_node)
+    location_node = NativePPLAffineNode(location, location_input,
                                         observation_axis, 1, 2)
+    nodes = transform_node === nothing ?
+        (; location=location_node) :
+        (; transform=transform_node, location=location_node)
 
     coefficient_prior = NativePPLStandardNormalFactor(coefficient_name, 1:2)
     bindings = NamedTuple{(predictor_name, response)}((x, y))
@@ -513,19 +658,32 @@ function _native_ppl_plan(brmi::BRMI)
                scale=scale_axis),
             (; predictor=predictor_input, response=response_input),
             (; coefficients, scale),
-            (; location=location_node),
+            nodes,
             (; coefficient_prior, scale_prior, likelihood=likelihood_factor),
             _native_ppl_queries(observation_axis, likelihood_factor),
             bindings,
         )
-    else
+    elseif family === BernoulliLogit
         likelihood_factor = NativePPLBernoulliLogitFactor(
             response, location, observation_axis)
         NativePPLPlan(
             (; observation=observation_axis, coefficient=coefficient_axis),
             (; predictor=predictor_input, response=response_input),
             (; coefficients),
-            (; location=location_node),
+            nodes,
+            (; coefficient_prior, likelihood=likelihood_factor),
+            _native_ppl_queries(observation_axis, likelihood_factor),
+            bindings,
+        )
+    else
+        rate_node = NativePPLExpNode(rate, location, observation_axis)
+        likelihood_factor = NativePPLPoissonFactor(
+            response, rate, observation_axis)
+        NativePPLPlan(
+            (; observation=observation_axis, coefficient=coefficient_axis),
+            (; predictor=predictor_input, response=response_input),
+            (; coefficients),
+            merge(nodes, (; rate=rate_node)),
             (; coefficient_prior, likelihood=likelihood_factor),
             _native_ppl_queries(observation_axis, likelihood_factor),
             bindings,
@@ -560,6 +718,18 @@ _native_ppl_prepare_response(::Type{<:AbstractFloat},
 
 _native_ppl_validate_response(::NativePPLNormalFactor, ::AbstractVector, ::Symbol) =
     nothing
+
+function _native_ppl_is_count(value)
+    value isa Real && isfinite(value) && value >= zero(value) &&
+        isinteger(value) || return false
+    try
+        Int(value)
+        true
+    catch
+        false
+    end
+end
+
 function _native_ppl_validate_response(::NativePPLBernoulliLogitFactor,
                                        response::AbstractVector, name::Symbol)
     for (i, value) in enumerate(response)
@@ -569,8 +739,57 @@ function _native_ppl_validate_response(::NativePPLBernoulliLogitFactor,
     end
     nothing
 end
+function _native_ppl_validate_response(::NativePPLPoissonFactor,
+                                       response::AbstractVector, name::Symbol)
+    for (i, value) in enumerate(response)
+        _native_ppl_is_count(value) || throw(ArgumentError(
+            "native PPL Poisson response `$name` must be a nonnegative " *
+            "integer-valued count representable as Int; got $value at row $i"))
+    end
+    nothing
+end
 _native_ppl_validate_response(::NativePPLFactor, ::NativePPLNoResponse, ::Symbol) =
     nothing
+
+function _native_ppl_apply_predictor!(
+    node::NativePPLCenterNode{Name,Input},
+    ::NativePPLInput{Input},
+    predictor::Vector{T},
+) where {Name,Input,T}
+    mean = T(node.mean)
+    isfinite(mean) || throw(ArgumentError(
+        "native PPL fitted center mean for `$Input` cannot be represented as $T"))
+    for i in eachindex(predictor)
+        predictor[i] -= mean
+        isfinite(predictor[i]) || throw(ArgumentError(
+            "native PPL centered predictor `$Input` is non-finite at row $i"))
+    end
+    predictor
+end
+
+function _native_ppl_apply_predictor!(plan::NativePPLPlan,
+                                      predictor::Vector)
+    hasproperty(plan.nodes, :transform) || return predictor
+    _native_ppl_apply_predictor!(
+        plan.nodes.transform, plan.inputs.predictor, predictor)
+end
+
+_native_ppl_validate_response_conversion(
+    ::NativePPLFactor, ::Any, ::Any, ::Symbol,
+) = nothing
+function _native_ppl_validate_response_conversion(
+    ::NativePPLPoissonFactor,
+    response::AbstractVector,
+    prepared_response::AbstractVector,
+    name::Symbol,
+)
+    for i in eachindex(response, prepared_response)
+        prepared_response[i] == response[i] || throw(ArgumentError(
+            "native PPL Poisson response `$name` count $(response[i]) at row $i " *
+            "cannot be represented exactly as $(eltype(prepared_response))"))
+    end
+    nothing
+end
 
 function _native_ppl_prepare_bindings(plan::NativePPLPlan, predictor,
                                       response, ::Type{T}) where {T<:AbstractFloat}
@@ -585,10 +804,13 @@ function _native_ppl_prepare_bindings(plan::NativePPLPlan, predictor,
             "native PPL predictor `$predictor_name` has " *
             "$(length(prepared_predictor)) rows but the observation axis has " *
             "$(length(plan.axes.observation))"))
+    _native_ppl_apply_predictor!(plan, prepared_predictor)
     _native_ppl_validate_response(
         plan.factors.likelihood, response, response_name)
     prepared_response = _native_ppl_prepare_response(
         T, response, response_name, length(prepared_predictor))
+    _native_ppl_validate_response_conversion(
+        plan.factors.likelihood, response, prepared_response, response_name)
     workspace_spec = NativePPLWorkspaceSpec(
         plan.axes.observation, LogDensityProblems.dimension(plan))
     NativePPLPrepared(plan, prepared_predictor, prepared_response, workspace_spec)
@@ -747,6 +969,83 @@ end
     density
 end
 
+@inline function _native_ppl_stirling_correction(value::T) where {T}
+    inverse = inv(value)
+    inverse2 = inverse * inverse
+    inverse * (
+        T(1 / 12) + inverse2 * (
+            T(-1 / 360) + inverse2 * (
+                T(1 / 1260) + inverse2 * (
+                    T(-1 / 1680) + inverse2 * T(1 / 1188)))))
+end
+
+@inline function _native_ppl_logfactorial(::Type{T}, count::Int) where {T}
+    count < 2 && return zero(T)
+    if count < 32
+        value = zero(T)
+        for k in 2:count
+            value += log(T(k))
+        end
+        return value
+    end
+
+    value = T(count)
+    correction = _native_ppl_stirling_correction(value)
+    (value + T(0.5)) * log(value) - value +
+        T(_NATIVE_PPL_HALF_LOG2PI) + correction
+end
+
+@inline _native_ppl_logfactorial(value::T) where {T<:AbstractFloat} =
+    _native_ppl_logfactorial(T, Int(value))
+
+@inline function _native_ppl_delta_minus_expm1(value::T) where {T}
+    abs(value) > T(0.01) && return value - expm1(value)
+    series = T(1 / 479001600)
+    series = T(1 / 39916800) + value * series
+    series = T(1 / 3628800) + value * series
+    series = T(1 / 362880) + value * series
+    series = T(1 / 40320) + value * series
+    series = T(1 / 5040) + value * series
+    series = T(1 / 720) + value * series
+    series = T(1 / 120) + value * series
+    series = T(1 / 24) + value * series
+    series = T(1 / 6) + value * series
+    series = T(1 / 2) + value * series
+    -(value * value) * series
+end
+
+@inline function _native_ppl_poisson_logdensity(count::T, log_rate::T) where {T}
+    iszero(count) && return -exp(log_rate)
+    count_int = Int(count)
+    count_int < 32 && return count * log_rate - exp(log_rate) -
+        _native_ppl_logfactorial(T, count_int)
+
+    delta = log_rate - log(count)
+    count * _native_ppl_delta_minus_expm1(delta) -
+        T(0.5) * log(count) - T(_NATIVE_PPL_HALF_LOG2PI) -
+        _native_ppl_stirling_correction(count)
+end
+
+@inline function _native_ppl_factor_logdensity!(
+    ::NativePPLPoissonFactor{Response,Rate},
+    ::NativePPLInput{Response},
+    ::NativePPLExpNode{Rate,LogRate},
+    ::NativePPLAffineNode{LogRate},
+    position::AbstractVector{T},
+    prepared::NativePPLPrepared,
+    buffers::NativePPLBuffers{T},
+) where {Response,Rate,LogRate,T}
+    density = zero(T)
+    for i in eachindex(prepared.response)
+        count = prepared.response[i]
+        log_rate = buffers.location[i]
+        pointwise = _native_ppl_poisson_logdensity(count, log_rate)
+        buffers.pointwise_loglikelihood[i] = pointwise
+        density += pointwise
+    end
+    density
+end
+
 
 @inline function _native_ppl_logistic(value)
     if value >= zero(value)
@@ -755,6 +1054,57 @@ end
     else
         forward = exp(value)
         forward / (one(value) + forward)
+    end
+end
+
+@inline function _native_ppl_rand_poisson(
+    rng::AbstractRNG, ::Type{T}, log_rate::T,
+) where {T<:AbstractFloat}
+    isnan(log_rate) && throw(DomainError(
+        log_rate, "native PPL Poisson log-rate must not be NaN"))
+    log_rate == -T(Inf) && return 0
+    rate = exp(log_rate)
+    max_rate = min(T(typemax(Int)), maxintfloat(T)) / T(4)
+    isfinite(rate) && rate <= max_rate || throw(DomainError(
+        log_rate,
+        "native PPL Poisson rate is too large for an Int predictive output"))
+    iszero(rate) && return 0
+
+    if rate < T(10)
+        threshold = exp(-rate)
+        count = 0
+        product = rand(rng, T)
+        while product > threshold
+            count += 1
+            product *= rand(rng, T)
+        end
+        return count
+    end
+
+    # PTRS transformed rejection. This branch avoids the underflow and linear
+    # work of product inversion for moderate and large rates.
+    root_rate = sqrt(rate)
+    b = T(0.931) + T(2.53) * root_rate
+    a = T(-0.059) + T(0.02483) * b
+    inverse_alpha = T(1.1239) + T(1.1328) / (b - T(3.4))
+    squeeze = T(0.9277) - T(3.6224) / (b - T(2))
+    while true
+        u = rand(rng, T) - T(0.5)
+        v = rand(rng, T)
+        us = T(0.5) - abs(u)
+        iszero(us) && continue
+        candidate_value = floor((T(2) * a / us + b) * u + rate + T(0.43))
+        candidate_value < zero(T) && continue
+        candidate_value <= T(typemax(Int)) || throw(DomainError(
+            candidate_value,
+            "native PPL Poisson draw is too large for an Int predictive output"))
+        count = Int(candidate_value)
+        us >= T(0.07) && v <= squeeze && return count
+        (us < T(0.013) && v > us) && continue
+        acceptance = log(
+            v * inverse_alpha / (a / (us * us) + b))
+        target = _native_ppl_poisson_logdensity(T(count), log_rate)
+        acceptance <= target && return count
     end
 end
 
@@ -772,6 +1122,22 @@ end
     scale = native_parameter_value(scale_parameter, position)
     for i in eachindex(output)
         output[i] = buffers.location[i] + scale * randn(rng, T)
+    end
+    output
+end
+
+@inline function _native_ppl_factor_simulate!(
+    rng::AbstractRNG,
+    ::NativePPLPoissonFactor{Response,Rate},
+    ::NativePPLInput{Response},
+    ::NativePPLExpNode{Rate,LogRate},
+    ::NativePPLAffineNode{LogRate},
+    output::AbstractVector{Int},
+    position::AbstractVector,
+    buffers::NativePPLBuffers{T},
+) where {Response,Rate,LogRate,T}
+    for i in eachindex(output)
+        output[i] = _native_ppl_rand_poisson(rng, T, buffers.location[i])
     end
     output
 end
@@ -817,6 +1183,20 @@ end
     _native_ppl_factor_simulate!(
         rng, factor, prepared.plan.inputs.response,
         prepared.plan.nodes.location, output, position, buffers)
+end
+
+@inline function _native_ppl_model_simulate!(
+    rng::AbstractRNG,
+    factor::NativePPLPoissonFactor,
+    output::AbstractVector{Int},
+    prepared::NativePPLPrepared,
+    position::AbstractVector,
+    buffers::NativePPLBuffers,
+)
+    _native_ppl_factor_simulate!(
+        rng, factor, prepared.plan.inputs.response,
+        prepared.plan.nodes.rate, prepared.plan.nodes.location,
+        output, position, buffers)
 end
 
 @inline function _native_ppl_location_kernel!(position::AbstractVector{T},
@@ -869,6 +1249,23 @@ end
     density += _native_ppl_factor_logdensity!(
         likelihood_factor, prepared.plan.inputs.response,
         prepared.plan.nodes.location, position, prepared, buffers)
+    density
+end
+
+@inline function _native_ppl_model_logdensity!(
+    likelihood_factor::NativePPLPoissonFactor,
+    position::AbstractVector{T},
+    prepared::NativePPLPrepared,
+    buffers::NativePPLBuffers{T},
+) where {T}
+    density = _native_ppl_factor_logdensity(
+        prepared.plan.factors.coefficient_prior,
+        prepared.plan.parameters.coefficients,
+        position)
+    density += _native_ppl_factor_logdensity!(
+        likelihood_factor, prepared.plan.inputs.response,
+        prepared.plan.nodes.rate, prepared.plan.nodes.location,
+        position, prepared, buffers)
     density
 end
 
@@ -942,17 +1339,65 @@ _native_ppl_rebind_likelihood(
     ::NativePPLBernoulliLogitFactor{Response,Logit}, axis,
 ) where {Response,Logit} =
     NativePPLBernoulliLogitFactor(Response, Logit, axis)
+_native_ppl_rebind_likelihood(
+    ::NativePPLPoissonFactor{Response,Rate}, axis,
+) where {Response,Rate} =
+    NativePPLPoissonFactor(Response, Rate, axis)
+
+function _native_ppl_rebind_nodes(plan::NativePPLPlan, observation_axis,
+                                  predictor_name::Symbol, predictor,
+                                  freeze_constants::Bool)
+    old_location = plan.nodes.location
+    location_name = native_node_name(old_location)
+    transform = if hasproperty(plan.nodes, :transform)
+        old_transform = plan.nodes.transform
+        native_center_input(old_transform) === predictor_name ||
+            throw(NativePPLCapabilityError(
+                :graph_identity,
+                "rebound centering node must consume the compiled raw predictor"))
+        mean = freeze_constants ? old_transform.mean :
+            _native_ppl_fit_center(predictor, predictor_name)
+        NativePPLCenterNode(
+            native_node_name(old_transform), predictor_name,
+            observation_axis, mean)
+    else
+        nothing
+    end
+    location_input = transform === nothing ?
+        predictor_name : native_node_name(transform)
+    native_affine_input(old_location) === location_input ||
+        throw(NativePPLCapabilityError(
+            :graph_identity,
+            "rebound affine node must consume the compiled predictor transform"))
+    location = NativePPLAffineNode(
+        location_name, location_input, observation_axis,
+        old_location.intercept_index, old_location.slope_index)
+    nodes = transform === nothing ? (; location) : (; transform, location)
+    hasproperty(plan.nodes, :rate) || return nodes
+
+    old_rate = plan.nodes.rate
+    native_exp_input(old_rate) === location_name || throw(NativePPLCapabilityError(
+        :graph_identity,
+        "rebound exponential node must consume the compiled affine predictor"))
+    rate = NativePPLExpNode(
+        native_node_name(old_rate), location_name, observation_axis)
+    merge(nodes, (; rate))
+end
 
 """
-    _native_ppl_rebind(prepared, bindings; T=eltype(prepared))
+    _native_ppl_rebind(prepared, bindings;
+                       T=eltype(prepared), freeze_constants=true)
 
 Rebind the same graph semantics to compatible predictor and optional response
 vectors. Omitting the response creates an explicit prediction-only prepared
 value. The observation axis and every node/factor/query carrying it are rebuilt
 from the new row count; parameter coordinates and semantic identities are reused.
+Fitted preprocessing constants are reused by default. Pass
+`freeze_constants=false` to refit them from the rebound predictor.
 """
 function _native_ppl_rebind(prepared::NativePPLPrepared, bindings;
-                            T::Type{<:AbstractFloat}=eltype(prepared))
+                            T::Type{<:AbstractFloat}=eltype(prepared),
+                            freeze_constants::Bool=true)
     plan = prepared.plan
     predictor_name = native_input_name(plan.inputs.predictor)
     response_name = native_input_name(plan.inputs.response)
@@ -981,11 +1426,8 @@ function _native_ppl_rebind(prepared::NativePPLPrepared, bindings;
     response_input = NativePPLInput(
         response_name, :response, observation_axis, response_eltype)
 
-    old_node = plan.nodes.location
-    location_name = native_node_name(old_node)
-    location_node = NativePPLAffineNode(
-        location_name, predictor_name, observation_axis,
-        old_node.intercept_index, old_node.slope_index)
+    nodes = _native_ppl_rebind_nodes(
+        plan, observation_axis, predictor_name, predictor, freeze_constants)
     likelihood = _native_ppl_rebind_likelihood(
         plan.factors.likelihood, observation_axis)
     new_bindings = response isa AbstractVector ?
@@ -996,7 +1438,7 @@ function _native_ppl_rebind(prepared::NativePPLPrepared, bindings;
         merge(plan.axes, (; observation=observation_axis)),
         (; predictor=predictor_input, response=response_input),
         plan.parameters,
-        (; location=location_node),
+        nodes,
         merge(plan.factors, (; likelihood)),
         _native_ppl_queries(observation_axis, likelihood),
         new_bindings,
@@ -1012,6 +1454,74 @@ _native_ppl_query_spec(plan::NativePPLPlan, ::NativePPLPosteriorPredictive) =
     plan.queries.posterior_predictive
 _native_ppl_query_spec(prepared::NativePPLPrepared, query::NativePPLQuery) =
     _native_ppl_query_spec(prepared.plan, query)
+
+function _native_ppl_check_batch_positions(
+    prepared::NativePPLPrepared,
+    positions::AbstractMatrix,
+)
+    dimension = LogDensityProblems.dimension(prepared)
+    size(positions, 2) == dimension || throw(DimensionMismatch(
+        "native PPL draw matrix has $(size(positions, 2)) coordinate columns; " *
+        "expected $dimension"))
+    axes(positions, 1) == Base.OneTo(size(positions, 1)) ||
+        throw(ArgumentError(
+            "native PPL batch queries require a one-based draw axis; got " *
+            "$(axes(positions, 1))"))
+    axes(positions, 2) == Base.OneTo(dimension) || throw(ArgumentError(
+        "native PPL batch queries require one-based coordinate columns; got " *
+        "$(axes(positions, 2))"))
+    nothing
+end
+
+function _native_ppl_batch_output_signature_unchecked(
+    prepared::NativePPLPrepared,
+    positions::AbstractMatrix,
+    query::NativePPLQuery,
+)
+    element_signature = native_query_output(
+        _native_ppl_query_spec(prepared, query))
+    NativePPLBatchOutputSignature(
+        NativePPLAxis(:draw, Base.OneTo(size(positions, 1))),
+        native_output_axis(element_signature),
+        element_signature.element_type,
+        NativePPLDenseMatrixLayout(),
+    )
+end
+
+function _native_ppl_batch_output_signature(
+    prepared::NativePPLPrepared,
+    positions::AbstractMatrix,
+    query::NativePPLQuery,
+)
+    _native_ppl_check_batch_positions(prepared, positions)
+    _native_ppl_batch_output_signature_unchecked(prepared, positions, query)
+end
+
+function _native_ppl_named_map(f, values::NamedTuple{Names}) where {Names}
+    NamedTuple{Names}(map(f, Tuple(values)))
+end
+
+function _native_ppl_check_bundle_queries(queries::NamedTuple)
+    for (name, query) in pairs(queries)
+        query isa NativePPLQuery || throw(ArgumentError(
+            "native PPL bundle query `$name` must be a typed graph query; " *
+            "got $(typeof(query))"))
+    end
+    nothing
+end
+
+function _native_ppl_batch_output_signature(
+    prepared::NativePPLPrepared,
+    positions::AbstractMatrix,
+    queries::NamedTuple,
+)
+    _native_ppl_check_batch_positions(prepared, positions)
+    _native_ppl_check_bundle_queries(queries)
+    _native_ppl_named_map(
+        query -> _native_ppl_batch_output_signature_unchecked(
+            prepared, positions, query),
+        queries)
+end
 
 function _native_ppl_allocate_output(signature::NativePPLOutputSignature,
                                      prepared::NativePPLPrepared)
@@ -1030,6 +1540,37 @@ function _native_ppl_allocate_output(::NativePPLDenseVectorLayout,
     T = native_output_eltype(signature, prepared)
     Vector{T}(undef, length(axis))
 end
+
+function _native_ppl_allocate_output(signature::NativePPLBatchOutputSignature,
+                                     prepared::NativePPLPrepared)
+    _native_ppl_allocate_output(
+        native_output_layout(signature), signature, prepared)
+end
+
+function _native_ppl_allocate_output(::NativePPLDenseMatrixLayout,
+                                     signature::NativePPLBatchOutputSignature,
+                                     prepared::NativePPLPrepared)
+    draw_axis, observation_axis = native_output_axes(signature)
+    draw_axis.keys == Base.OneTo(length(draw_axis)) ||
+        throw(NativePPLCapabilityError(
+            :output_layout,
+            "dense-matrix allocation requires a one-based draw axis; got " *
+            "$(draw_axis.keys)"))
+    observation_axis.keys == Base.OneTo(length(observation_axis)) ||
+        throw(NativePPLCapabilityError(
+            :output_layout,
+            "dense-matrix allocation requires a one-based observation axis; got " *
+            "$(observation_axis.keys)"))
+    T = native_output_eltype(signature, prepared)
+    Matrix{T}(undef, length(draw_axis), length(observation_axis))
+end
+
+
+_native_ppl_allocate_output(signatures::NamedTuple,
+                            prepared::NativePPLPrepared) =
+    _native_ppl_named_map(
+        signature -> _native_ppl_allocate_output(signature, prepared),
+        signatures)
 
 function _native_ppl_check_query_output(output::AbstractVector,
                                         prepared::NativePPLPrepared,
@@ -1053,6 +1594,87 @@ function _native_ppl_check_query_output(output::AbstractVector,
         "native PPL `$query_name` output has length $(length(output)); expected " *
         "$(length(expected_axis)) for the observation axis"))
     output
+end
+
+function _native_ppl_check_batch_execution(
+    output::AbstractMatrix,
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+    positions::AbstractMatrix,
+    query::NativePPLQuery,
+)
+    signature = _native_ppl_batch_output_signature(prepared, positions, query)
+    draw_axis, observation_axis = native_output_axes(signature)
+    axes(output) == (draw_axis.keys, observation_axis.keys) ||
+        throw(DimensionMismatch(
+            "native PPL batch output axes $(axes(output)) do not match " *
+            "declared draw-by-observation axes " *
+            "$((draw_axis.keys, observation_axis.keys))"))
+    expected_eltype = native_output_eltype(signature, prepared)
+    eltype(output) === expected_eltype || throw(ArgumentError(
+        "native PPL batch output eltype $(eltype(output)) does not match " *
+        "declared output eltype $expected_eltype"))
+    native_output_layout_accepts(native_output_layout(signature), output) ||
+        throw(ArgumentError(
+            "native PPL batch output $(typeof(output)) does not satisfy " *
+            "declared layout $(typeof(native_output_layout(signature)))"))
+    eltype(positions) === eltype(workspace) || throw(ArgumentError(
+        "native PPL draw matrix eltype $(eltype(positions)) does not match " *
+        "workspace eltype $(eltype(workspace))"))
+    eltype(prepared) === eltype(workspace) || throw(ArgumentError(
+        "native PPL prepared eltype $(eltype(prepared)) does not match " *
+        "workspace eltype $(eltype(workspace))"))
+    length(workspace.primal.location) == length(observation_axis) ||
+        throw(DimensionMismatch(
+            "native PPL workspace location has " *
+            "$(length(workspace.primal.location)) rows; expected " *
+            "$(length(observation_axis))"))
+    Base.mightalias(output, positions) && throw(ArgumentError(
+        "native PPL batch output must not alias the draw matrix"))
+    Base.mightalias(positions, workspace.primal.location) && throw(ArgumentError(
+        "native PPL draw matrix must not alias the workspace location buffer"))
+    Base.mightalias(positions, workspace.primal.pointwise_loglikelihood) &&
+        throw(ArgumentError(
+            "native PPL draw matrix must not alias the workspace pointwise buffer"))
+    Base.mightalias(positions, workspace.gradient) && throw(ArgumentError(
+        "native PPL draw matrix must not alias the workspace gradient buffer"))
+    Base.mightalias(output, workspace.primal.location) && throw(ArgumentError(
+        "native PPL batch output must not alias the workspace location buffer"))
+    Base.mightalias(output, workspace.primal.pointwise_loglikelihood) &&
+        throw(ArgumentError(
+            "native PPL batch output must not alias the workspace pointwise buffer"))
+    Base.mightalias(output, workspace.gradient) && throw(ArgumentError(
+        "native PPL batch output must not alias the workspace gradient buffer"))
+    signature
+end
+
+_native_ppl_check_batch_query_state(
+    ::NativePPLWorkspace, ::NativePPLPrepared, ::NativePPLLinearPredictor,
+) = nothing
+_native_ppl_check_batch_query_state(
+    ::NativePPLWorkspace, ::NativePPLPrepared, ::NativePPLPosteriorPredictive,
+) = nothing
+function _native_ppl_check_batch_query_state(
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+    ::NativePPLPointwiseLogLikelihood,
+)
+    response = _native_ppl_require_response(
+        prepared, "batched pointwise log likelihood")
+    observations = length(prepared.plan.axes.observation)
+    length(response) == observations || throw(DimensionMismatch(
+        "native PPL prepared response has $(length(response)) rows; expected " *
+        "$observations"))
+    length(workspace.primal.pointwise_loglikelihood) == observations ||
+        throw(DimensionMismatch(
+            "native PPL workspace pointwise likelihood has " *
+            "$(length(workspace.primal.pointwise_loglikelihood)) rows; expected " *
+            "$observations"))
+    length(workspace.gradient) == LogDensityProblems.dimension(prepared) ||
+        throw(DimensionMismatch(
+            "native PPL workspace gradient has $(length(workspace.gradient)) " *
+            "coordinates; expected $(LogDensityProblems.dimension(prepared))"))
+    nothing
 end
 
 function _native_ppl_evaluate!(output::AbstractVector,
@@ -1089,6 +1711,230 @@ function _native_ppl_simulate!(rng::AbstractRNG,
         prepared, position, workspace.primal)
 end
 
+function _native_ppl_evaluate_draws!(
+    output::AbstractMatrix,
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+    positions::AbstractMatrix,
+    query::NativePPLLinearPredictor,
+)
+    _native_ppl_check_batch_execution(
+        output, workspace, prepared, positions, query)
+    _native_ppl_check_batch_query_state(workspace, prepared, query)
+    for draw in axes(positions, 1)
+        _native_ppl_location!(
+            workspace, prepared, @view(positions[draw, :]))
+        for observation in axes(output, 2)
+            @inbounds output[draw, observation] =
+                workspace.primal.location[observation]
+        end
+    end
+    output
+end
+
+function _native_ppl_evaluate_draws!(
+    output::AbstractMatrix,
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+    positions::AbstractMatrix,
+    query::NativePPLPointwiseLogLikelihood,
+)
+    _native_ppl_check_batch_execution(
+        output, workspace, prepared, positions, query)
+    _native_ppl_check_batch_query_state(workspace, prepared, query)
+    for draw in axes(positions, 1)
+        _native_ppl_logdensity!(
+            workspace, prepared, @view(positions[draw, :]))
+        for observation in axes(output, 2)
+            @inbounds output[draw, observation] =
+                workspace.primal.pointwise_loglikelihood[observation]
+        end
+    end
+    output
+end
+
+function _native_ppl_simulate_draws!(
+    rng::AbstractRNG,
+    output::AbstractMatrix,
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+    positions::AbstractMatrix,
+    query::NativePPLPosteriorPredictive,
+)
+    _native_ppl_check_batch_execution(
+        output, workspace, prepared, positions, query)
+    _native_ppl_check_batch_query_state(workspace, prepared, query)
+    for draw in axes(positions, 1)
+        position = @view positions[draw, :]
+        _native_ppl_location!(workspace, prepared, position)
+        _native_ppl_model_simulate!(
+            rng, prepared.plan.factors.likelihood,
+            @view(output[draw, :]), prepared, position, workspace.primal)
+    end
+    output
+end
+
+function _native_ppl_check_bundle_outputs(
+    outputs::NamedTuple{Names},
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+    positions::AbstractMatrix,
+    queries::NamedTuple{Names},
+) where {Names}
+    _native_ppl_check_batch_positions(prepared, positions)
+    _native_ppl_check_bundle_queries(queries)
+    output_values = Tuple(outputs)
+    query_values = Tuple(queries)
+    for i in eachindex(output_values)
+        output_values[i] isa AbstractMatrix || throw(ArgumentError(
+            "native PPL bundle output `$((Names[i]))` must be an " *
+            "AbstractMatrix; got $(typeof(output_values[i]))"))
+        _native_ppl_check_batch_execution(
+            output_values[i], workspace, prepared, positions, query_values[i])
+        _native_ppl_check_batch_query_state(
+            workspace, prepared, query_values[i])
+    end
+    for i in eachindex(output_values), j in (i + 1):length(output_values)
+        Base.mightalias(output_values[i], output_values[j]) &&
+            throw(ArgumentError(
+                "native PPL bundle outputs `$((Names[i]))` and `$((Names[j]))` " *
+                "must not alias"))
+    end
+    nothing
+end
+
+function _native_ppl_check_bundle_outputs(
+    outputs::NamedTuple,
+    ::NativePPLWorkspace,
+    ::NativePPLPrepared,
+    ::AbstractMatrix,
+    queries::NamedTuple,
+)
+    throw(ArgumentError(
+        "native PPL bundle output keys $(keys(outputs)) do not match " *
+        "query keys $(keys(queries))"))
+end
+
+function _native_ppl_bundle_requires_rng(prepared::NativePPLPrepared,
+                                         queries::NamedTuple)
+    _native_ppl_check_bundle_queries(queries)
+    for query in Tuple(queries)
+        native_query_effect(_native_ppl_query_spec(prepared, query)) === :rng &&
+            return true
+    end
+    false
+end
+
+function _native_ppl_bundle_has_pointwise(queries::NamedTuple)
+    for query in Tuple(queries)
+        query isa NativePPLPointwiseLogLikelihood && return true
+    end
+    false
+end
+
+@inline function _native_ppl_write_bundle_query!(
+    rng,
+    output::AbstractMatrix,
+    draw::Int,
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+    position::AbstractVector,
+    ::NativePPLLinearPredictor,
+)
+    for observation in axes(output, 2)
+        @inbounds output[draw, observation] =
+            workspace.primal.location[observation]
+    end
+    nothing
+end
+
+@inline function _native_ppl_write_bundle_query!(
+    rng,
+    output::AbstractMatrix,
+    draw::Int,
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+    position::AbstractVector,
+    ::NativePPLPointwiseLogLikelihood,
+)
+    for observation in axes(output, 2)
+        @inbounds output[draw, observation] =
+            workspace.primal.pointwise_loglikelihood[observation]
+    end
+    nothing
+end
+
+@inline function _native_ppl_write_bundle_query!(
+    rng::AbstractRNG,
+    output::AbstractMatrix,
+    draw::Int,
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+    position::AbstractVector,
+    ::NativePPLPosteriorPredictive,
+)
+    _native_ppl_model_simulate!(
+        rng, prepared.plan.factors.likelihood, @view(output[draw, :]),
+        prepared, position, workspace.primal)
+    nothing
+end
+
+@inline _native_ppl_write_bundle_queries!(
+    rng, ::Tuple{}, ::Tuple{}, draw::Int,
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+    position::AbstractVector,
+) = nothing
+
+@inline function _native_ppl_write_bundle_queries!(
+    rng,
+    outputs::Tuple,
+    queries::Tuple,
+    draw::Int,
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+    position::AbstractVector,
+)
+    _native_ppl_write_bundle_query!(
+        rng, first(outputs), draw, workspace, prepared, position,
+        first(queries))
+    _native_ppl_write_bundle_queries!(
+        rng, Base.tail(outputs), Base.tail(queries), draw,
+        workspace, prepared, position)
+end
+
+function _native_ppl_execute_draws!(
+    rng,
+    outputs::NamedTuple,
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+    positions::AbstractMatrix,
+    queries::NamedTuple,
+)
+    rng === nothing && _native_ppl_bundle_requires_rng(prepared, queries) &&
+        throw(ArgumentError(
+            "native PPL query bundle contains an RNG-effect query; " *
+            "call `execute_draws!` with an explicit RNG"))
+    _native_ppl_check_bundle_outputs(
+        outputs, workspace, prepared, positions, queries)
+    isempty(queries) && return outputs
+
+    pointwise = _native_ppl_bundle_has_pointwise(queries)
+    output_values = Tuple(outputs)
+    query_values = Tuple(queries)
+    for draw in axes(positions, 1)
+        position = @view positions[draw, :]
+        _native_ppl_location!(workspace, prepared, position)
+        pointwise && _native_ppl_model_logdensity!(
+            prepared.plan.factors.likelihood, position, prepared,
+            workspace.primal)
+        _native_ppl_write_bundle_queries!(
+            rng, output_values, query_values, draw,
+            workspace, prepared, position)
+    end
+    outputs
+end
+
 """
 Namespaced walking-skeleton API for the native PPL.
 
@@ -1105,7 +1951,9 @@ const Prepared = BRM.NativePPLPrepared
 const Workspace = BRM.NativePPLWorkspace
 const CapabilityError = BRM.NativePPLCapabilityError
 const OutputSignature = BRM.NativePPLOutputSignature
+const BatchOutputSignature = BRM.NativePPLBatchOutputSignature
 const DenseVectorLayout = BRM.NativePPLDenseVectorLayout
+const DenseMatrixLayout = BRM.NativePPLDenseMatrixLayout
 const LinearPredictor = BRM.NativePPLLinearPredictor
 const PointwiseLogLikelihood = BRM.NativePPLPointwiseLogLikelihood
 const PosteriorPredictive = BRM.NativePPLPosteriorPredictive
@@ -1123,14 +1971,34 @@ output_signature(plan::Plan, query::BRM.NativePPLQuery) =
     BRM.native_query_output(BRM._native_ppl_query_spec(plan, query))
 output_signature(prepared::Prepared, query::BRM.NativePPLQuery) =
     output_signature(prepared.plan, query)
+batch_output_signature(prepared::Prepared, positions::AbstractMatrix,
+                       query::BRM.NativePPLQuery) =
+    BRM._native_ppl_batch_output_signature(prepared, positions, query)
+batch_output_signature(prepared::Prepared, positions::AbstractMatrix,
+                       queries::NamedTuple) =
+    BRM._native_ppl_batch_output_signature(prepared, positions, queries)
 output_axis(signature::OutputSignature) = BRM.native_output_axis(signature)
+output_axis(signature::BatchOutputSignature) = BRM.native_output_axis(signature)
+output_axes(signature::Union{OutputSignature,BatchOutputSignature}) =
+    BRM.native_output_axes(signature)
+output_draw_axis(signature::BatchOutputSignature) =
+    BRM.native_output_draw_axis(signature)
 output_eltype(signature::OutputSignature, prepared::Prepared) =
+    BRM.native_output_eltype(signature, prepared)
+output_eltype(signature::BatchOutputSignature, prepared::Prepared) =
     BRM.native_output_eltype(signature, prepared)
 output_eltype(signature::OutputSignature, ::Type{T}) where {T<:AbstractFloat} =
     BRM.native_output_eltype(signature, T)
+output_eltype(signature::BatchOutputSignature, ::Type{T}) where {T<:AbstractFloat} =
+    BRM.native_output_eltype(signature, T)
 output_layout(signature::OutputSignature) = BRM.native_output_layout(signature)
+output_layout(signature::BatchOutputSignature) = BRM.native_output_layout(signature)
 allocate_output(signature::OutputSignature, prepared::Prepared) =
     BRM._native_ppl_allocate_output(signature, prepared)
+allocate_output(signature::BatchOutputSignature, prepared::Prepared) =
+    BRM._native_ppl_allocate_output(signature, prepared)
+allocate_output(signatures::NamedTuple, prepared::Prepared) =
+    BRM._native_ppl_allocate_output(signatures, prepared)
 allocate_output(prepared::Prepared, query::BRM.NativePPLQuery) =
     allocate_output(output_signature(prepared, query), prepared)
 logdensity!(work::Workspace, prepared::Prepared, position::AbstractVector) =
@@ -1156,13 +2024,67 @@ function simulate(rng::BRM.AbstractRNG, work::Workspace, prepared::Prepared,
     output = allocate_output(prepared, query)
     simulate!(rng, output, work, prepared, position, query)
 end
+evaluate_draws!(output::AbstractMatrix, work::Workspace, prepared::Prepared,
+                positions::AbstractMatrix, query::BRM.NativePPLQuery) =
+    BRM._native_ppl_evaluate_draws!(
+        output, work, prepared, positions, query)
+function evaluate_draws(work::Workspace, prepared::Prepared,
+                        positions::AbstractMatrix,
+                        query::BRM.NativePPLQuery)
+    signature = batch_output_signature(prepared, positions, query)
+    output = allocate_output(signature, prepared)
+    evaluate_draws!(output, work, prepared, positions, query)
+end
+simulate_draws!(rng::BRM.AbstractRNG, output::AbstractMatrix,
+                work::Workspace, prepared::Prepared,
+                positions::AbstractMatrix,
+                query::BRM.NativePPLQuery=PosteriorPredictive()) =
+    BRM._native_ppl_simulate_draws!(
+        rng, output, work, prepared, positions, query)
+function simulate_draws(rng::BRM.AbstractRNG, work::Workspace,
+                        prepared::Prepared, positions::AbstractMatrix,
+                        query::BRM.NativePPLQuery=PosteriorPredictive())
+    signature = batch_output_signature(prepared, positions, query)
+    output = allocate_output(signature, prepared)
+    simulate_draws!(rng, output, work, prepared, positions, query)
+end
+execute_draws!(outputs::NamedTuple, work::Workspace, prepared::Prepared,
+               positions::AbstractMatrix, queries::NamedTuple) =
+    BRM._native_ppl_execute_draws!(
+        nothing, outputs, work, prepared, positions, queries)
+execute_draws!(rng::BRM.AbstractRNG, outputs::NamedTuple, work::Workspace,
+               prepared::Prepared, positions::AbstractMatrix,
+               queries::NamedTuple) =
+    BRM._native_ppl_execute_draws!(
+        rng, outputs, work, prepared, positions, queries)
+function execute_draws(work::Workspace, prepared::Prepared,
+                       positions::AbstractMatrix, queries::NamedTuple)
+    BRM._native_ppl_bundle_requires_rng(prepared, queries) &&
+        throw(ArgumentError(
+            "native PPL query bundle contains an RNG-effect query; " *
+            "call `execute_draws` with an explicit RNG"))
+    signatures = batch_output_signature(prepared, positions, queries)
+    outputs = allocate_output(signatures, prepared)
+    execute_draws!(outputs, work, prepared, positions, queries)
+end
+function execute_draws(rng::BRM.AbstractRNG, work::Workspace,
+                       prepared::Prepared, positions::AbstractMatrix,
+                       queries::NamedTuple)
+    signatures = batch_output_signature(prepared, positions, queries)
+    outputs = allocate_output(signatures, prepared)
+    execute_draws!(rng, outputs, work, prepared, positions, queries)
+end
 
-export Plan, Prepared, Workspace, CapabilityError, OutputSignature
-export DenseVectorLayout
+export Plan, Prepared, Workspace, CapabilityError
+export OutputSignature, BatchOutputSignature
+export DenseVectorLayout, DenseMatrixLayout
 export LinearPredictor, PointwiseLogLikelihood, PosteriorPredictive
 export compile, prepare, workspace, rebind, has_response
-export output_signature, output_axis, output_eltype, output_layout
+export output_signature, batch_output_signature
+export output_axis, output_axes, output_draw_axis, output_eltype, output_layout
 export allocate_output, evaluate, simulate
+export evaluate_draws, simulate_draws, execute_draws
 export logdensity!, logdensity_and_gradient!, evaluate!, simulate!
+export evaluate_draws!, simulate_draws!, execute_draws!
 
 end
