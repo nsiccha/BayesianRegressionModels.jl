@@ -503,11 +503,11 @@ function _native_ppl_prepare(plan::NativePPLPlan; T::Type{<:AbstractFloat}=Float
     NativePPLPrepared(plan, predictor, response, workspace_spec)
 end
 
-function _native_ppl_check_execution(workspace::NativePPLWorkspace,
-                                     prepared::NativePPLPrepared,
-                                     position::AbstractVector)
+function _native_ppl_check_location_execution(workspace::NativePPLWorkspace,
+                                              prepared::NativePPLPrepared,
+                                              position::AbstractVector)
     dimension = LogDensityProblems.dimension(prepared)
-    observations = length(prepared.response)
+    observations = length(prepared.plan.axes.observation)
     length(position) == dimension || throw(DimensionMismatch(
         "native PPL position has length $(length(position)); expected $dimension"))
     length(workspace.gradient) == dimension || throw(DimensionMismatch(
@@ -516,10 +516,6 @@ function _native_ppl_check_execution(workspace::NativePPLWorkspace,
         "native PPL prepared predictor has $(length(prepared.predictor)) rows; expected $observations"))
     length(workspace.primal.location) == observations || throw(DimensionMismatch(
         "native PPL workspace location has $(length(workspace.primal.location)) rows; expected $observations"))
-    length(workspace.primal.pointwise_loglikelihood) == observations ||
-        throw(DimensionMismatch(
-            "native PPL workspace pointwise likelihood has " *
-            "$(length(workspace.primal.pointwise_loglikelihood)) rows; expected $observations"))
     eltype(position) === eltype(workspace) || throw(ArgumentError(
         "native PPL position eltype $(eltype(position)) does not match workspace eltype $(eltype(workspace))"))
     eltype(prepared) === eltype(workspace) || throw(ArgumentError(
@@ -528,6 +524,20 @@ function _native_ppl_check_execution(workspace::NativePPLWorkspace,
         "native PPL position must not alias the workspace gradient"))
     Base.mightalias(position, workspace.primal.location) && throw(ArgumentError(
         "native PPL position must not alias the workspace location buffer"))
+    nothing
+end
+
+function _native_ppl_check_execution(workspace::NativePPLWorkspace,
+                                     prepared::NativePPLPrepared,
+                                     position::AbstractVector)
+    _native_ppl_check_location_execution(workspace, prepared, position)
+    observations = length(prepared.plan.axes.observation)
+    length(prepared.response) == observations || throw(DimensionMismatch(
+        "native PPL prepared response has $(length(prepared.response)) rows; expected $observations"))
+    length(workspace.primal.pointwise_loglikelihood) == observations ||
+        throw(DimensionMismatch(
+            "native PPL workspace pointwise likelihood has " *
+            "$(length(workspace.primal.pointwise_loglikelihood)) rows; expected $observations"))
     Base.mightalias(position, workspace.primal.pointwise_loglikelihood) &&
         throw(ArgumentError(
             "native PPL position must not alias the workspace pointwise likelihood buffer"))
@@ -536,6 +546,21 @@ end
 
 const _NATIVE_PPL_LOG2PI = log(2π)
 
+@inline function _native_ppl_location_kernel!(position::AbstractVector{T},
+                                              prepared::NativePPLPrepared,
+                                              buffers::NativePPLBuffers{T}) where {T}
+    node = prepared.plan.nodes.location
+    coefficient_parameter = prepared.plan.parameters.coefficients
+    intercept = native_parameter_value(
+        coefficient_parameter, position, node.intercept_index)
+    slope = native_parameter_value(
+        coefficient_parameter, position, node.slope_index)
+    for i in eachindex(prepared.predictor)
+        buffers.location[i] = intercept + slope * prepared.predictor[i]
+    end
+    intercept, slope
+end
+
 @inline function _native_ppl_logdensity_kernel(position::AbstractVector{T},
                                                prepared::NativePPLPrepared,
                                                buffers::NativePPLBuffers{T}) where {T}
@@ -543,10 +568,7 @@ const _NATIVE_PPL_LOG2PI = log(2π)
     scale_factor = prepared.plan.factors.scale_prior
     coefficient_parameter = prepared.plan.parameters.coefficients
     scale_parameter = prepared.plan.parameters.scale
-    intercept = native_parameter_value(
-        coefficient_parameter, position, node.intercept_index)
-    slope = native_parameter_value(
-        coefficient_parameter, position, node.slope_index)
+    intercept, slope = _native_ppl_location_kernel!(position, prepared, buffers)
     intercept_logjac = native_parameter_logabsdetjac(
         coefficient_parameter, position, node.intercept_index)
     slope_logjac = native_parameter_logabsdetjac(
@@ -566,14 +588,21 @@ const _NATIVE_PPL_LOG2PI = log(2π)
 
     inverse_scale = inv(scale)
     for i in eachindex(prepared.response)
-        location = intercept + slope * prepared.predictor[i]
+        location = buffers.location[i]
         residual = (prepared.response[i] - location) * inverse_scale
         pointwise = -log_scale - normalizer - half * residual * residual
-        buffers.location[i] = location
         buffers.pointwise_loglikelihood[i] = pointwise
         density += pointwise
     end
     density
+end
+
+function _native_ppl_location!(workspace::NativePPLWorkspace,
+                               prepared::NativePPLPrepared,
+                               position::AbstractVector)
+    _native_ppl_check_location_execution(workspace, prepared, position)
+    _native_ppl_location_kernel!(position, prepared, workspace.primal)
+    workspace.primal.location
 end
 
 """
@@ -707,9 +736,9 @@ function _native_ppl_check_query_output(output::AbstractVector,
         throw(ArgumentError(
             "native PPL `$query_name` output $(typeof(output)) does not satisfy " *
             "declared layout $(typeof(native_output_layout(signature)))"))
-    length(output) == length(prepared.response) || throw(DimensionMismatch(
+    length(output) == length(expected_axis) || throw(DimensionMismatch(
         "native PPL `$query_name` output has length $(length(output)); expected " *
-        "$(length(prepared.response)) for the observation axis"))
+        "$(length(expected_axis)) for the observation axis"))
     output
 end
 
@@ -719,7 +748,7 @@ function _native_ppl_evaluate!(output::AbstractVector,
                                position::AbstractVector,
                                query::NativePPLLinearPredictor)
     _native_ppl_check_query_output(output, prepared, query)
-    _native_ppl_logdensity!(workspace, prepared, position)
+    _native_ppl_location!(workspace, prepared, position)
     copyto!(output, workspace.primal.location)
 end
 
@@ -740,7 +769,7 @@ function _native_ppl_simulate!(rng::AbstractRNG,
                                position::AbstractVector,
                                query::NativePPLPosteriorPredictive)
     _native_ppl_check_query_output(output, prepared, query)
-    _native_ppl_logdensity!(workspace, prepared, position)
+    _native_ppl_location!(workspace, prepared, position)
     scale = native_parameter_value(prepared.plan.parameters.scale, position)
     T = eltype(workspace)
     for i in eachindex(output)
