@@ -3459,12 +3459,13 @@ whatsoever. The axis has to be declared, and `group` is that declaration.
 
 ONE VALUE PER ROW OF `x`'s OWN FRAME — no expansion happens anywhere. If the
 event table stores a compact schedule (one row per dose OP, carrying an interval
-and a count) then `x` has one value per OP. Lowering validates `x` against its
-own explicit `group` column and the kernel's subject labels. Different explicit
-grouping columns declare independent secondary axes, even when their flat totals
-happen to match. A direct already-ragged positional carries segment lengths but
-no flat-frame provenance, so an equal total is never used to infer that it is
-the same axis as `ragged(x, group)`.
+and a count) then `x` has one value per OP. Constructing `ragged(x, group)`
+requires one `group` key per row of `x` and joins those keys to the kernel's
+outer subject labels. That is local validation of the grouping operation, not
+an inner-shape contract between cell arguments. Kernel compares no totals or
+per-subject inner lengths across positionals; once each positional supplies one
+outer cell per subject, relationships among the values inside a cell belong to
+the cell body.
 
 Dispatch tag only — lowering lives in `_sb_kernel_doblock!` (sbimpl).
 Observation-LHS lowering lives in `_sb_sampling!`.
@@ -3660,7 +3661,7 @@ _sb_subst_sym(x::Expr, from::Symbol, to) =
 # `g_vals[i]` — a LABEL join, not a level-index join, so it cannot silently
 # disagree with the row-ordered linear predictors sharing the same plate.
 # Nothing requires a subject's rows to be CONTIGUOUS, and nothing is reordered.
-function _sb_kernel_ragged_rows(data, arg_col, grp_arg, g_vals, ragged_axes)
+function _sb_kernel_ragged_rows(data, arg_col, grp_arg, g_vals)
     a_name = name(arg_col)
     decl = parent(arg_col)
     is_lp = decl isa ExprColumn && getf(decl) === (~)
@@ -3711,29 +3712,6 @@ function _sb_kernel_ragged_rows(data, arg_col, grp_arg, g_vals, ragged_axes)
         "sbimpl: kernel(...) `ragged($a_name, $grp_name)`: label(s) $(unique(unknown)) ",
         "in `$grp_name` name no subject in the kernel's per-subject frame. Every row ",
         "of `$a_name`'s frame must belong to a subject this kernel walks.")
-
-    # Axis identity comes from the EXPLICIT grouping column, never from a
-    # coincident flat total. A direct already-ragged positional records only its
-    # per-subject segments; it carries no flat-frame/group provenance, so BRM
-    # cannot prove that it is the same axis as `ragged(x, group)`. Comparing the
-    # two merely because their totals match makes valid multi-axis kernels
-    # data-shape-dependent (e.g. PK [4,3,0] and ECG [3,2,2], both totaling 7).
-    #
-    # Multiple `ragged(...)` positionals naming this SAME grouping column do
-    # carry explicit shared provenance. Record that contract so later specs are
-    # checked against the declared axis rather than against unrelated ragged
-    # values the cell also happens to walk.
-    counts = length.(rows)
-    prior = get(ragged_axes, grp_name, nothing)
-    if isnothing(prior)
-        ragged_axes[grp_name] = a_name => counts
-    else
-        prior_name, prior_counts = prior
-        prior_counts == counts || error(
-            "sbimpl: kernel(...) `ragged($a_name, $grp_name)` disagrees with ",
-            "`ragged($prior_name, $grp_name)` on their explicitly shared row axis: ",
-            "per-subject lengths $(counts) vs $(prior_counts).")
-    end
 
     # Same treatment the per-subject group column gets: the labels join rows on
     # the Julia side and never enter the emitted Stan program, so drop the raw
@@ -3788,7 +3766,6 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     #     name, leaving the flat original in place for any term that still needs it.
     dcol_names    = Symbol[]
     lp_cols       = Any[]
-    ragged_axes   = Dict{Symbol,Pair{Symbol,Vector{Int}}}()
     ragged_specs  = Any[]
     for (i, c) in enumerate(dcols[2:end])
         if c isa ExprColumn && getf(c) === ragged
@@ -3885,7 +3862,7 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     # column: something else may name it on its own axis — `hsgp(log_dose)` over
     # the event frame, say — and that term registers it through its own path.
     for (i, arg_col, grp_arg, gath_sym) in ragged_specs
-        rows, is_lp = _sb_kernel_ragged_rows(data, arg_col, grp_arg, g_vals, ragged_axes)
+        rows, is_lp = _sb_kernel_ragged_rows(data, arg_col, grp_arg, g_vals)
         if is_lp
             data[gath_sym] = rows
             rows_param = Symbol("kernel_rows_", params[i])

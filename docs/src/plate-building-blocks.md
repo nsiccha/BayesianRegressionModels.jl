@@ -298,12 +298,13 @@ Two contract points make this well-defined:
   required.
 - **One value per row of `x`'s own frame, with no expansion anywhere.** If the
   event table stores a compact schedule — one row per dose OP, carrying an
-  interval and a repeat count — then `x` has one value per OP. Lowering checks
-  that frame against the explicit `group` column and the kernel's subject
-  labels. Each grouping column is its own axis declaration: two independent
-  axes may have the same flat total and different per-subject lengths. A direct
-  already-ragged positional has no flat-frame provenance, so total-length
-  coincidence is never treated as proof that it shares this axis.
+  interval and a repeat count — then `x` has one value per OP. Constructing
+  `ragged(x, group)` requires one `group` key per row of `x` and joins those keys
+  to the kernel's outer subject labels. That is the grouping operation's own
+  validity check. Kernel does not compare totals or per-subject inner lengths
+  across positionals: after every positional supplies one outer cell per
+  subject, any relationship among the values inside a cell is the cell body's
+  responsibility.
 
 The emitted program keeps a wrapped predictor on its own axis. `log_F` stays a
 single event-length quantity in `transformed parameters`; the plate takes a

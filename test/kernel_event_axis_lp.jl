@@ -141,11 +141,10 @@ ev_flatcol_model(df) = @brm df begin
     end
 end
 
-# Two independent ragged axes may legitimately have the same flat total.  The
-# PK index axis is already grouped per subject, while the ECG predictor axis is
-# declared from its own flat frame by `ragged(qt_fixed, ecg_subject)`.  Their
-# segment lengths differ ([4, 3, 0] vs [3, 2, 2]), and neither axis is evidence
-# about the other's grouping contract.
+# Kernel zips only the OUTER subject cells. The PK index axis is already grouped
+# per subject, while `ragged(qt_fixed, ecg_subject)` constructs an independent
+# ECG value for each outer cell. Their inner segment lengths differ ([4, 3, 0]
+# vs [3, 2, 2]); even their matching flat total is irrelevant to kernel.
 function ev_independent_axes_df()
     (;
         subject = ["s1", "s2", "s3"],
@@ -295,13 +294,16 @@ end
 
     end
 
-    @testset "independent ragged axes may share a flat total" begin
+    @testset "kernel constrains only the outer subject axis" begin
         axes = ev_independent_axes_df()
         @test length.(axes.pk_idx) == [4, 3, 0]
         @test [count(==(s), axes.ecg_subject) for s in axes.subject] == [3, 2, 2]
         @test sum(length, axes.pk_idx) == length(axes.ecg_subject) == 7
 
         independent = SBBRMI(ev_independent_axes_model(axes); mod = @__MODULE__)
+        @test length(independent.data[:pk_idx]) ==
+              length(independent.data[:kernel_pred_qt_fixed_ragged]) ==
+              length(axes.subject)
         @test length.(independent.data[:pk_idx]) == [4, 3, 0]
         @test length.(independent.data[:kernel_pred_qt_fixed_ragged]) == [3, 2, 2]
         @test StanBlocks.stan.transpiles(independent.model)
