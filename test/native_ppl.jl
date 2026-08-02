@@ -119,6 +119,23 @@ end
     @test plan.factors.likelihood isa BRM.NativePPLNormalFactor
     @test plan.factors.likelihood.axis === plan.axes.observation
 
+    coefficient_prior = BRM._native_ppl_factor_logdensity(
+        plan.factors.coefficient_prior, plan.parameters.coefficients, position)
+    @test coefficient_prior ≈
+          logpdf(Normal(), position[1]) + logpdf(Normal(), position[2])
+    scale_prior = BRM._native_ppl_factor_logdensity(
+        plan.factors.scale_prior, plan.parameters.scale, position)
+    @test scale_prior ≈
+          logpdf(Exponential(2.5), exp(position[3])) + position[3]
+    mismatched_coefficient_factor =
+        BRM.NativePPLStandardNormalFactor(:wrong_parameter, 1:2)
+    @test_throws MethodError BRM._native_ppl_factor_logdensity(
+        mismatched_coefficient_factor, plan.parameters.coefficients, position)
+    mismatched_scale_factor =
+        BRM.NativePPLExponentialFactor(:wrong_parameter, 3, 2.5)
+    @test_throws MethodError BRM._native_ppl_factor_logdensity(
+        mismatched_scale_factor, plan.parameters.scale, position)
+
     @test plan.bindings.dose === data.dose
     @test plan.bindings.response === data.response
     @test sprint(show, plan) ==
@@ -214,6 +231,16 @@ end
     @test density ≈ expected_density
     @test workspace.primal.location ≈ location
     @test workspace.primal.pointwise_loglikelihood ≈ pointwise
+
+    likelihood = BRM._native_ppl_factor_logdensity!(
+        plan.factors.likelihood, plan.inputs.response, plan.nodes.location,
+        plan.parameters.scale, position, prepared, workspace.primal)
+    @test likelihood ≈ sum(pointwise)
+    mismatched_likelihood = BRM.NativePPLNormalFactor(
+        :wrong_response, :location, :residual, plan.axes.observation)
+    @test_throws MethodError BRM._native_ppl_factor_logdensity!(
+        mismatched_likelihood, plan.inputs.response, plan.nodes.location,
+        plan.parameters.scale, position, prepared, workspace.primal)
 
     gradient_density, gradient =
         BRM._native_ppl_logdensity_and_gradient!(workspace, prepared, position)
