@@ -33,9 +33,12 @@ end
 function BRM._native_ppl_logdensity_and_gradient!(
     workspace::BRM.NativePPLWorkspace{T,B,G,<:NativePPLDIState},
     prepared::BRM.NativePPLPrepared,
-    position::AbstractVector{T},
+    position::AbstractVector,
 ) where {T<:AbstractFloat,B,G}
     BRM._native_ppl_check_execution(workspace, prepared, position)
+    position isa Vector{T} || throw(ArgumentError(
+        "native PPL DifferentiationInterface gradients require a Vector{$T} " *
+        "position; got $(typeof(position))"))
     state = workspace.derivative
     DI.value_and_gradient!(
         BRM._native_ppl_logdensity_kernel,

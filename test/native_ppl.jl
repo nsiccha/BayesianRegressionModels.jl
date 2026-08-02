@@ -4,6 +4,7 @@ import DifferentiationInterface as DI
 using Distributions: Exponential, Normal, Poisson, logpdf
 using Enzyme
 using LogDensityProblems
+using Random: MersenneTwister, randn
 
 const BRM = BayesianRegressionModels
 
@@ -87,7 +88,28 @@ end
         "  parameters: beta_location, residual\n" *
         "  nodes: location\n" *
         "  factors: NativePPLStandardNormalFactor, " *
-        "NativePPLExponentialFactor, NativePPLNormalFactor"
+        "NativePPLExponentialFactor, NativePPLNormalFactor\n" *
+        "  queries: linear_predictor, pointwise_loglikelihood, posterior_predictive"
+
+    @test BRM.native_query_name(plan.queries.linear_predictor) == :linear_predictor
+    @test plan.queries.linear_predictor isa
+        BRM.NativePPLQuerySpec{
+            :linear_predictor, :per_draw, :workspace, :until_next_evaluation,
+        }
+    @test BRM.native_query_name(plan.queries.pointwise_loglikelihood) ==
+          :pointwise_loglikelihood
+    @test plan.queries.pointwise_loglikelihood isa
+        BRM.NativePPLQuerySpec{
+            :pointwise_loglikelihood, :per_draw, :workspace,
+            :until_next_evaluation,
+        }
+    @test BRM.native_query_name(plan.queries.posterior_predictive) ==
+          :posterior_predictive
+    @test plan.queries.posterior_predictive isa
+        BRM.NativePPLQuerySpec{
+            :posterior_predictive, :per_draw, :rng, :caller_owned,
+        }
+    @test all(query.axis === plan.axes.observation for query in plan.queries)
 end
 
 
@@ -167,6 +189,96 @@ end
 end
 
 
+@testset "native PPL workflow queries and replay" begin
+    data = (; x=[-1.0, 0.0, 2.0], y=[0.5, 1.0, 2.5])
+    brmi = @brm data begin
+        sigma ~ Exponential(2.5)
+        mu ~ 1 + x
+        y ~ Normal(mu, sigma)
+    end
+    plan = BRM.NativePPL.compile(brmi)
+    prepared = BRM.NativePPL.prepare(plan)
+    workspace = BRM.NativePPL.workspace(prepared)
+    position = [0.1, -0.2, log(1.3)]
+    location = position[1] .+ position[2] .* prepared.predictor
+    pointwise = logpdf.(Normal.(location, exp(position[3])), prepared.response)
+
+    @test plan isa BRM.NativePPL.Plan
+    @test prepared isa BRM.NativePPL.Prepared
+    @test workspace isa BRM.NativePPL.Workspace
+    @test BRM.NativePPL.logdensity!(workspace, prepared, position) ≈
+          BRM._native_ppl_logdensity!(workspace, prepared, position)
+    @test_throws ArgumentError BRM.NativePPL.logdensity_and_gradient!(
+        workspace, prepared, position)
+
+    linear_output = similar(prepared.response)
+    @test BRM.NativePPL.evaluate!(
+        linear_output, workspace, prepared, position,
+        BRM.NativePPL.LinearPredictor()) === linear_output
+    @test linear_output ≈ location
+
+    pointwise_output = similar(prepared.response)
+    @test BRM.NativePPL.evaluate!(
+        pointwise_output, workspace, prepared, position,
+        BRM.NativePPL.PointwiseLogLikelihood()) === pointwise_output
+    @test pointwise_output ≈ pointwise
+
+    predictive = similar(prepared.response)
+    expected_predictive = copy(location)
+    expected_rng = MersenneTwister(41)
+    for i in eachindex(expected_predictive)
+        expected_predictive[i] += exp(position[3]) * randn(expected_rng, Float64)
+    end
+    @test BRM.NativePPL.simulate!(
+        MersenneTwister(41), predictive, workspace, prepared, position) === predictive
+    @test predictive ≈ expected_predictive
+
+    BRM.NativePPL.evaluate!(
+        linear_output, workspace, prepared, position,
+        BRM.NativePPL.LinearPredictor())
+    query_allocations = @allocated(BRM.NativePPL.evaluate!(
+        linear_output, workspace, prepared, position,
+        BRM.NativePPL.LinearPredictor()))
+    BRM.NativePPL.simulate!(
+        MersenneTwister(7), predictive, workspace, prepared, position)
+    rng = MersenneTwister(7)
+    simulation_allocations = @allocated(BRM.NativePPL.simulate!(
+        rng, predictive, workspace, prepared, position))
+    @test (; query_allocations, simulation_allocations) ==
+          (; query_allocations=0, simulation_allocations=0)
+
+    rebound = BRM.NativePPL.rebind(
+        prepared, (; x=Float32[3, 4], y=Float32[2, 3]); T=Float32)
+    @test rebound isa BRM.NativePPL.Prepared
+    @test eltype(rebound) == Float32
+    @test rebound.predictor == Float32[3, 4]
+    @test rebound.response == Float32[2, 3]
+    @test rebound.plan.parameters === prepared.plan.parameters
+    @test rebound.plan.axes.observation.keys == Base.OneTo(2)
+    @test rebound.plan.nodes.location.axis === rebound.plan.axes.observation
+    @test rebound.plan.factors.likelihood.axis === rebound.plan.axes.observation
+    @test all(query.axis === rebound.plan.axes.observation for query in rebound.plan.queries)
+    @test prepared.plan.axes.observation.keys == Base.OneTo(3)
+
+    @test_throws ArgumentError BRM.NativePPL.rebind(prepared, (; y=data.y))
+    @test_throws ArgumentError BRM.NativePPL.rebind(
+        prepared, (; x=1.0, y=data.y))
+    @test_throws DimensionMismatch BRM.NativePPL.rebind(
+        prepared, (; x=[1.0, 2.0], y=data.y))
+    @test_throws DimensionMismatch BRM.NativePPL.rebind(
+        prepared, (; x=Float64[], y=Float64[]))
+    @test_throws ArgumentError BRM.NativePPL.rebind(
+        prepared, (; x=[1, 2, 3], y=data.y))
+
+    @test_throws DimensionMismatch BRM.NativePPL.evaluate!(
+        zeros(2), workspace, prepared, position,
+        BRM.NativePPL.LinearPredictor())
+    @test_throws ArgumentError BRM.NativePPL.evaluate!(
+        zeros(Float32, 3), workspace, prepared, position,
+        BRM.NativePPL.LinearPredictor())
+end
+
+
 @testset "prepared native execution fails closed" begin
     data = (; x=[-1.0, 0.0, 2.0], y=[0.5, 1.0, 2.5])
     brmi = @brm data begin
@@ -185,6 +297,14 @@ end
         workspace, prepared, zeros(Float32, 3))
     @test_throws ArgumentError BRM._native_ppl_logdensity_and_gradient!(
         workspace, prepared, @view(position[:]))
+    @test_throws ArgumentError BRM._native_ppl_logdensity_and_gradient!(
+        workspace, prepared, zeros(Float32, 3))
+    @test_throws ArgumentError BRM._native_ppl_logdensity!(
+        workspace, prepared, workspace.gradient)
+    @test_throws ArgumentError BRM._native_ppl_logdensity!(
+        workspace, prepared, workspace.primal.location)
+    @test_throws ArgumentError BRM._native_ppl_prepare(plan; T=AbstractFloat)
+    @test_throws ArgumentError BRM.NativePPLWorkspace(prepared, AbstractFloat)
 
     bad_gradient = BRM.NativePPLWorkspace(prepared)
     pop!(bad_gradient.gradient)

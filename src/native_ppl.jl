@@ -169,6 +169,8 @@ end
 Base.eltype(::NativePPLWorkspace{T}) where {T} = T
 
 function NativePPLWorkspace(prepared::NativePPLPrepared, ::Type{T}=eltype(prepared)) where {T<:AbstractFloat}
+    isconcretetype(T) || throw(ArgumentError(
+        "native PPL workspace element type must be concrete; got $T"))
     n = length(prepared.workspace_spec.observation_axis)
     buffers() = NativePPLBuffers(zeros(T, n), zeros(T, n))
     NativePPLWorkspace{T,NativePPLBuffers{T,Vector{T}},Vector{T},Nothing}(
@@ -411,6 +413,8 @@ storage. The returned value is shareable; mutable evaluation state is supplied
 separately by `NativePPLWorkspace`.
 """
 function _native_ppl_prepare(plan::NativePPLPlan; T::Type{<:AbstractFloat}=Float64)
+    isconcretetype(T) || throw(ArgumentError(
+        "native PPL prepared element type must be concrete; got $T"))
     predictor_name = native_input_name(plan.inputs.predictor)
     response_name = native_input_name(plan.inputs.response)
     predictor = _native_ppl_copy_input(
@@ -446,6 +450,13 @@ function _native_ppl_check_execution(workspace::NativePPLWorkspace,
         "native PPL position eltype $(eltype(position)) does not match workspace eltype $(eltype(workspace))"))
     eltype(prepared) === eltype(workspace) || throw(ArgumentError(
         "native PPL prepared eltype $(eltype(prepared)) does not match workspace eltype $(eltype(workspace))"))
+    Base.mightalias(position, workspace.gradient) && throw(ArgumentError(
+        "native PPL position must not alias the workspace gradient"))
+    Base.mightalias(position, workspace.primal.location) && throw(ArgumentError(
+        "native PPL position must not alias the workspace location buffer"))
+    Base.mightalias(position, workspace.primal.pointwise_loglikelihood) &&
+        throw(ArgumentError(
+            "native PPL position must not alias the workspace pointwise likelihood buffer"))
     nothing
 end
 
@@ -527,6 +538,13 @@ function _native_ppl_rebind(prepared::NativePPLPrepared, bindings;
     response_name = native_input_name(plan.inputs.response)
     predictor = _native_ppl_required_binding(bindings, predictor_name, :predictor)
     response = _native_ppl_required_binding(bindings, response_name, :response)
+    eltype(predictor) <: Real && !(eltype(predictor) <: Integer) ||
+        throw(ArgumentError(
+            "native PPL predictor `$predictor_name` must preserve the compiled " *
+            "continuous real input role; got eltype $(eltype(predictor))"))
+    eltype(response) <: Real || throw(ArgumentError(
+        "native PPL response `$response_name` must preserve its compiled real input role; " *
+        "got eltype $(eltype(response))"))
     length(predictor) == length(response) || throw(DimensionMismatch(
         "native PPL predictor `$predictor_name` has $(length(predictor)) rows but " *
         "response `$response_name` has $(length(response))"))
@@ -561,11 +579,27 @@ function _native_ppl_rebind(prepared::NativePPLPrepared, bindings;
     _native_ppl_prepare(rebound_plan; T)
 end
 
+_native_ppl_query_spec(prepared::NativePPLPrepared, ::NativePPLLinearPredictor) =
+    prepared.plan.queries.linear_predictor
+_native_ppl_query_spec(prepared::NativePPLPrepared, ::NativePPLPointwiseLogLikelihood) =
+    prepared.plan.queries.pointwise_loglikelihood
+_native_ppl_query_spec(prepared::NativePPLPrepared, ::NativePPLPosteriorPredictive) =
+    prepared.plan.queries.posterior_predictive
+
 function _native_ppl_check_query_output(output::AbstractVector,
                                         prepared::NativePPLPrepared,
-                                        query::Symbol)
+                                        query::NativePPLQuery)
+    query_spec = _native_ppl_query_spec(prepared, query)
+    query_name = native_query_name(query_spec)
+    expected_axis = query_spec.axis.keys
+    axes(output, 1) == expected_axis || throw(DimensionMismatch(
+        "native PPL `$query_name` output axis $(axes(output, 1)) does not match " *
+        "the declared observation axis $expected_axis"))
+    eltype(output) === eltype(prepared) || throw(ArgumentError(
+        "native PPL `$query_name` output eltype $(eltype(output)) does not match " *
+        "prepared eltype $(eltype(prepared))"))
     length(output) == length(prepared.response) || throw(DimensionMismatch(
-        "native PPL `$query` output has length $(length(output)); expected " *
+        "native PPL `$query_name` output has length $(length(output)); expected " *
         "$(length(prepared.response)) for the observation axis"))
     output
 end
@@ -574,8 +608,8 @@ function _native_ppl_evaluate!(output::AbstractVector,
                                workspace::NativePPLWorkspace,
                                prepared::NativePPLPrepared,
                                position::AbstractVector,
-                               ::NativePPLLinearPredictor)
-    _native_ppl_check_query_output(output, prepared, :linear_predictor)
+                               query::NativePPLLinearPredictor)
+    _native_ppl_check_query_output(output, prepared, query)
     _native_ppl_logdensity!(workspace, prepared, position)
     copyto!(output, workspace.primal.location)
 end
@@ -584,8 +618,8 @@ function _native_ppl_evaluate!(output::AbstractVector,
                                workspace::NativePPLWorkspace,
                                prepared::NativePPLPrepared,
                                position::AbstractVector,
-                               ::NativePPLPointwiseLogLikelihood)
-    _native_ppl_check_query_output(output, prepared, :pointwise_loglikelihood)
+                               query::NativePPLPointwiseLogLikelihood)
+    _native_ppl_check_query_output(output, prepared, query)
     _native_ppl_logdensity!(workspace, prepared, position)
     copyto!(output, workspace.primal.pointwise_loglikelihood)
 end
@@ -595,13 +629,13 @@ function _native_ppl_simulate!(rng::AbstractRNG,
                                workspace::NativePPLWorkspace,
                                prepared::NativePPLPrepared,
                                position::AbstractVector,
-                               ::NativePPLPosteriorPredictive)
-    _native_ppl_check_query_output(output, prepared, :posterior_predictive)
+                               query::NativePPLPosteriorPredictive)
+    _native_ppl_check_query_output(output, prepared, query)
     _native_ppl_logdensity!(workspace, prepared, position)
     scale_index = prepared.plan.factors.scale_prior.unconstrained_index
     scale = exp(position[scale_index])
     T = eltype(workspace)
-    for i in eachindex(output, workspace.primal.location)
+    for i in eachindex(output)
         output[i] = workspace.primal.location[i] + scale * randn(rng, T)
     end
     output
