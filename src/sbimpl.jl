@@ -3019,7 +3019,8 @@ end
 
 Snapshot the declarations BRM actually emitted. The inventory is derived from
 `sb.model.model`, so auto-introduced population coefficients, random-effect
-blocks, `kernel(...)` eta blocks, observation families, and multiple outputs
+blocks, named linear predictors consumed by `kernel(...)`, observation
+families, and multiple outputs
 cannot drift from the fitted model.
 
 Use the reusable-builder form when future schedules may contain new groups:
@@ -3402,7 +3403,9 @@ a DIFFERENT frame — a dose-event table, say — must declare its grouping with
 
 Dispatch tag only — lowering lives in `_sb_kernel_doblock!` (sbimpl). The legacy
 `model=` / `obs=` spelling and its anonymous `n_eta` block were removed by user
-decision `130c904`; the `do`-block form above is the only one.
+decision `130c904`; the `do`-block form above is the only one. A name such as
+`eta_CL` is merely a user-chosen ordinary linear-predictor name—there is no
+kernel-owned eta vector or positional eta-index contract in the current API.
 """
 function kernel end
 
