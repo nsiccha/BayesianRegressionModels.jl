@@ -95,6 +95,16 @@ NativePPLAffineNode(name::Symbol, input::Symbol, axis::A,
 native_node_name(::NativePPLAffineNode{Name}) where {Name} = Name
 native_affine_input(::NativePPLAffineNode{Name,Input}) where {Name,Input} = Input
 
+"""A staged elementwise exponential link over one named deterministic node."""
+struct NativePPLExpNode{Name,Input,A} <: NativePPLNode
+    axis::A
+end
+
+NativePPLExpNode(name::Symbol, input::Symbol, axis::A) where {A} =
+    NativePPLExpNode{name,input,A}(axis)
+native_node_name(::NativePPLExpNode{Name}) where {Name} = Name
+native_exp_input(::NativePPLExpNode{Name,Input}) where {Name,Input} = Input
+
 """Independent standard-normal prior over an unconstrained parameter range."""
 struct NativePPLStandardNormalFactor{Parameter,R} <: NativePPLFactor
     unconstrained::R
@@ -127,6 +137,14 @@ end
 
 NativePPLBernoulliLogitFactor(response::Symbol, logit::Symbol, axis::A) where {A} =
     NativePPLBernoulliLogitFactor{response,logit,A}(axis)
+
+"""Row-wise Poisson observation factor linked to a staged positive rate."""
+struct NativePPLPoissonFactor{Response,Rate,A} <: NativePPLFactor
+    axis::A
+end
+
+NativePPLPoissonFactor(response::Symbol, rate::Symbol, axis::A) where {A} =
+    NativePPLPoissonFactor{response,rate,A}(axis)
 
 abstract type NativePPLQuery end
 struct NativePPLLinearPredictor <: NativePPLQuery end
@@ -201,6 +219,8 @@ _native_ppl_queries(observation_axis, ::NativePPLNormalFactor) =
     _native_ppl_queries(observation_axis)
 _native_ppl_queries(observation_axis, ::NativePPLBernoulliLogitFactor) =
     _native_ppl_queries(observation_axis, NativePPLFixedElementType{Bool}())
+_native_ppl_queries(observation_axis, ::NativePPLPoissonFactor) =
+    _native_ppl_queries(observation_axis, NativePPLFixedElementType{Int}())
 
 """
     NativePPLPlan
@@ -406,6 +426,11 @@ sigma ~ Exponential(scale)
 
 y     ~ BernoulliLogit(eta)
 eta   ~ 1 + x
+
+# or
+
+y     ~ Poisson(exp(eta))
+eta   ~ 1 + x
 ```
 
 Names may vary, but the structure may not. Unsupported structure raises a
@@ -417,11 +442,11 @@ function _native_ppl_plan(brmi::BRMI)
         :outcomes, "expected exactly one observed response, got $(length(observed))"))
     outcome = only(observed)
     family = outcome.family
-    family === Normal || family === BernoulliLogit ||
+    family === Normal || family === BernoulliLogit || family === Poisson ||
         throw(NativePPLCapabilityError(
             :likelihood,
-            "expected `Normal(location, scale)` or `BernoulliLogit(logit)`, " *
-            "got `$family`"))
+            "expected `Normal(location, scale)`, `BernoulliLogit(logit)`, " *
+            "or `Poisson(exp(log_rate))`, got `$family`"))
 
     response = outcome.response
     response_lhs, likelihood = _native_ppl_sampling_rhs(brmi, response)
@@ -439,7 +464,27 @@ function _native_ppl_plan(brmi::BRMI)
         throw(NativePPLCapabilityError(
             :likelihood,
             "$family likelihood for `$response` needs $expected_arguments argument(s)"))
-    location = _native_ppl_ref_name(likelihood_args[1])
+    rate = nothing
+    location = if family === Poisson
+        rate_expression = only(likelihood_args)
+        rate_expression isa ExprColumn && getf(rate_expression) === exp ||
+            throw(NativePPLCapabilityError(
+                :likelihood_link,
+                "Poisson response `$response` must use `Poisson(exp(log_rate))`"))
+        isempty(getkwargs(rate_expression)) || throw(NativePPLCapabilityError(
+            :likelihood_link, "Poisson `exp` link cannot have keywords"))
+        rate_arguments = getargs(rate_expression)
+        length(rate_arguments) == 1 || throw(NativePPLCapabilityError(
+            :likelihood_link, "Poisson `exp` link needs one named predictor"))
+        log_rate = _native_ppl_ref_name(only(rate_arguments))
+        log_rate === nothing && throw(NativePPLCapabilityError(
+            :likelihood_location,
+            "Poisson `exp` link must consume one named linear predictor"))
+        rate = Symbol(:exp_, log_rate)
+        log_rate
+    else
+        _native_ppl_ref_name(likelihood_args[1])
+    end
     location === nothing && throw(NativePPLCapabilityError(
         :likelihood_location, "$family predictor must be one named linear predictor"))
     scale_parameter = family === Normal ? _native_ppl_ref_name(likelihood_args[2]) : nothing
@@ -464,6 +509,11 @@ function _native_ppl_plan(brmi::BRMI)
             throw(NativePPLCapabilityError(
                 :response_support,
                 "BernoulliLogit response `$response` must contain only Bool/0/1 values"))
+    elseif family === Poisson
+        all(_native_ppl_is_count, y) ||
+            throw(NativePPLCapabilityError(
+                :response_support,
+                "Poisson response `$response` must contain nonnegative integer-valued counts representable as Int"))
     end
     length(x) == length(y) || throw(NativePPLCapabilityError(
         :observation_axis,
@@ -518,7 +568,7 @@ function _native_ppl_plan(brmi::BRMI)
             _native_ppl_queries(observation_axis, likelihood_factor),
             bindings,
         )
-    else
+    elseif family === BernoulliLogit
         likelihood_factor = NativePPLBernoulliLogitFactor(
             response, location, observation_axis)
         NativePPLPlan(
@@ -526,6 +576,19 @@ function _native_ppl_plan(brmi::BRMI)
             (; predictor=predictor_input, response=response_input),
             (; coefficients),
             (; location=location_node),
+            (; coefficient_prior, likelihood=likelihood_factor),
+            _native_ppl_queries(observation_axis, likelihood_factor),
+            bindings,
+        )
+    else
+        rate_node = NativePPLExpNode(rate, location, observation_axis)
+        likelihood_factor = NativePPLPoissonFactor(
+            response, rate, observation_axis)
+        NativePPLPlan(
+            (; observation=observation_axis, coefficient=coefficient_axis),
+            (; predictor=predictor_input, response=response_input),
+            (; coefficients),
+            (; location=location_node, rate=rate_node),
             (; coefficient_prior, likelihood=likelihood_factor),
             _native_ppl_queries(observation_axis, likelihood_factor),
             bindings,
@@ -560,12 +623,25 @@ _native_ppl_prepare_response(::Type{<:AbstractFloat},
 
 _native_ppl_validate_response(::NativePPLNormalFactor, ::AbstractVector, ::Symbol) =
     nothing
+
+_native_ppl_is_count(value) = value isa Real && isfinite(value) &&
+    value >= zero(value) && isinteger(value) && value <= typemax(Int)
+
 function _native_ppl_validate_response(::NativePPLBernoulliLogitFactor,
                                        response::AbstractVector, name::Symbol)
     for (i, value) in enumerate(response)
         value == 0 || value == 1 || throw(ArgumentError(
             "native PPL BernoulliLogit response `$name` must be Bool/0/1; " *
             "got $value at row $i"))
+    end
+    nothing
+end
+function _native_ppl_validate_response(::NativePPLPoissonFactor,
+                                       response::AbstractVector, name::Symbol)
+    for (i, value) in enumerate(response)
+        _native_ppl_is_count(value) || throw(ArgumentError(
+            "native PPL Poisson response `$name` must be a nonnegative " *
+            "integer-valued count representable as Int; got $value at row $i"))
     end
     nothing
 end
@@ -747,6 +823,52 @@ end
     density
 end
 
+@inline function _native_ppl_logfactorial(::Type{T}, count::Int) where {T}
+    count < 2 && return zero(T)
+    if count < 32
+        value = zero(T)
+        for k in 2:count
+            value += log(T(k))
+        end
+        return value
+    end
+
+    value = T(count)
+    inverse = inv(value)
+    inverse2 = inverse * inverse
+    correction = inverse * (
+        T(1 / 12) + inverse2 * (
+            T(-1 / 360) + inverse2 * (
+                T(1 / 1260) + inverse2 * (
+                    T(-1 / 1680) + inverse2 * T(1 / 1188)))))
+    (value + T(0.5)) * log(value) - value +
+        T(_NATIVE_PPL_HALF_LOG2PI) + correction
+end
+
+@inline _native_ppl_logfactorial(value::T) where {T<:AbstractFloat} =
+    _native_ppl_logfactorial(T, Int(value))
+
+@inline function _native_ppl_factor_logdensity!(
+    ::NativePPLPoissonFactor{Response,Rate},
+    ::NativePPLInput{Response},
+    ::NativePPLExpNode{Rate,LogRate},
+    ::NativePPLAffineNode{LogRate},
+    position::AbstractVector{T},
+    prepared::NativePPLPrepared,
+    buffers::NativePPLBuffers{T},
+) where {Response,Rate,LogRate,T}
+    density = zero(T)
+    for i in eachindex(prepared.response)
+        count = prepared.response[i]
+        log_rate = buffers.location[i]
+        count_term = iszero(count) ? zero(T) : count * log_rate
+        pointwise = count_term - exp(log_rate) - _native_ppl_logfactorial(count)
+        buffers.pointwise_loglikelihood[i] = pointwise
+        density += pointwise
+    end
+    density
+end
+
 
 @inline function _native_ppl_logistic(value)
     if value >= zero(value)
@@ -755,6 +877,58 @@ end
     else
         forward = exp(value)
         forward / (one(value) + forward)
+    end
+end
+
+@inline function _native_ppl_rand_poisson(
+    rng::AbstractRNG, ::Type{T}, log_rate::T,
+) where {T<:AbstractFloat}
+    isnan(log_rate) && throw(DomainError(
+        log_rate, "native PPL Poisson log-rate must not be NaN"))
+    log_rate == -T(Inf) && return 0
+    rate = exp(log_rate)
+    max_rate = T(typemax(Int)) / T(4)
+    isfinite(rate) && rate <= max_rate || throw(DomainError(
+        log_rate,
+        "native PPL Poisson rate is too large for an Int predictive output"))
+    iszero(rate) && return 0
+
+    if rate < T(10)
+        threshold = exp(-rate)
+        count = 0
+        product = rand(rng, T)
+        while product > threshold
+            count += 1
+            product *= rand(rng, T)
+        end
+        return count
+    end
+
+    # PTRS transformed rejection. This branch avoids the underflow and linear
+    # work of product inversion for moderate and large rates.
+    root_rate = sqrt(rate)
+    b = T(0.931) + T(2.53) * root_rate
+    a = T(-0.059) + T(0.02483) * b
+    inverse_alpha = T(1.1239) + T(1.1328) / (b - T(3.4))
+    squeeze = T(0.9277) - T(3.6224) / (b - T(2))
+    while true
+        u = rand(rng, T) - T(0.5)
+        v = rand(rng, T)
+        us = T(0.5) - abs(u)
+        iszero(us) && continue
+        candidate_value = floor((T(2) * a / us + b) * u + rate + T(0.43))
+        candidate_value < zero(T) && continue
+        candidate_value <= T(typemax(Int)) || throw(DomainError(
+            candidate_value,
+            "native PPL Poisson draw is too large for an Int predictive output"))
+        count = Int(candidate_value)
+        us >= T(0.07) && v <= squeeze && return count
+        (us < T(0.013) && v > us) && continue
+        acceptance = log(
+            v * inverse_alpha / (a / (us * us) + b))
+        target = -rate + T(count) * log(rate) -
+            _native_ppl_logfactorial(T, count)
+        acceptance <= target && return count
     end
 end
 
@@ -772,6 +946,22 @@ end
     scale = native_parameter_value(scale_parameter, position)
     for i in eachindex(output)
         output[i] = buffers.location[i] + scale * randn(rng, T)
+    end
+    output
+end
+
+@inline function _native_ppl_factor_simulate!(
+    rng::AbstractRNG,
+    ::NativePPLPoissonFactor{Response,Rate},
+    ::NativePPLInput{Response},
+    ::NativePPLExpNode{Rate,LogRate},
+    ::NativePPLAffineNode{LogRate},
+    output::AbstractVector{Int},
+    position::AbstractVector,
+    buffers::NativePPLBuffers{T},
+) where {Response,Rate,LogRate,T}
+    for i in eachindex(output)
+        output[i] = _native_ppl_rand_poisson(rng, T, buffers.location[i])
     end
     output
 end
@@ -817,6 +1007,20 @@ end
     _native_ppl_factor_simulate!(
         rng, factor, prepared.plan.inputs.response,
         prepared.plan.nodes.location, output, position, buffers)
+end
+
+@inline function _native_ppl_model_simulate!(
+    rng::AbstractRNG,
+    factor::NativePPLPoissonFactor,
+    output::AbstractVector{Int},
+    prepared::NativePPLPrepared,
+    position::AbstractVector,
+    buffers::NativePPLBuffers,
+)
+    _native_ppl_factor_simulate!(
+        rng, factor, prepared.plan.inputs.response,
+        prepared.plan.nodes.rate, prepared.plan.nodes.location,
+        output, position, buffers)
 end
 
 @inline function _native_ppl_location_kernel!(position::AbstractVector{T},
@@ -869,6 +1073,23 @@ end
     density += _native_ppl_factor_logdensity!(
         likelihood_factor, prepared.plan.inputs.response,
         prepared.plan.nodes.location, position, prepared, buffers)
+    density
+end
+
+@inline function _native_ppl_model_logdensity!(
+    likelihood_factor::NativePPLPoissonFactor,
+    position::AbstractVector{T},
+    prepared::NativePPLPrepared,
+    buffers::NativePPLBuffers{T},
+) where {T}
+    density = _native_ppl_factor_logdensity(
+        prepared.plan.factors.coefficient_prior,
+        prepared.plan.parameters.coefficients,
+        position)
+    density += _native_ppl_factor_logdensity!(
+        likelihood_factor, prepared.plan.inputs.response,
+        prepared.plan.nodes.rate, prepared.plan.nodes.location,
+        position, prepared, buffers)
     density
 end
 
@@ -942,6 +1163,28 @@ _native_ppl_rebind_likelihood(
     ::NativePPLBernoulliLogitFactor{Response,Logit}, axis,
 ) where {Response,Logit} =
     NativePPLBernoulliLogitFactor(Response, Logit, axis)
+_native_ppl_rebind_likelihood(
+    ::NativePPLPoissonFactor{Response,Rate}, axis,
+) where {Response,Rate} =
+    NativePPLPoissonFactor(Response, Rate, axis)
+
+function _native_ppl_rebind_nodes(plan::NativePPLPlan, observation_axis,
+                                  predictor_name::Symbol)
+    old_location = plan.nodes.location
+    location_name = native_node_name(old_location)
+    location = NativePPLAffineNode(
+        location_name, predictor_name, observation_axis,
+        old_location.intercept_index, old_location.slope_index)
+    hasproperty(plan.nodes, :rate) || return (; location)
+
+    old_rate = plan.nodes.rate
+    native_exp_input(old_rate) === location_name || throw(NativePPLCapabilityError(
+        :graph_identity,
+        "rebound exponential node must consume the compiled affine predictor"))
+    rate = NativePPLExpNode(
+        native_node_name(old_rate), location_name, observation_axis)
+    (; location, rate)
+end
 
 """
     _native_ppl_rebind(prepared, bindings; T=eltype(prepared))
@@ -981,11 +1224,7 @@ function _native_ppl_rebind(prepared::NativePPLPrepared, bindings;
     response_input = NativePPLInput(
         response_name, :response, observation_axis, response_eltype)
 
-    old_node = plan.nodes.location
-    location_name = native_node_name(old_node)
-    location_node = NativePPLAffineNode(
-        location_name, predictor_name, observation_axis,
-        old_node.intercept_index, old_node.slope_index)
+    nodes = _native_ppl_rebind_nodes(plan, observation_axis, predictor_name)
     likelihood = _native_ppl_rebind_likelihood(
         plan.factors.likelihood, observation_axis)
     new_bindings = response isa AbstractVector ?
@@ -996,7 +1235,7 @@ function _native_ppl_rebind(prepared::NativePPLPrepared, bindings;
         merge(plan.axes, (; observation=observation_axis)),
         (; predictor=predictor_input, response=response_input),
         plan.parameters,
-        (; location=location_node),
+        nodes,
         merge(plan.factors, (; likelihood)),
         _native_ppl_queries(observation_axis, likelihood),
         new_bindings,
