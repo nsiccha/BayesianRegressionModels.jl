@@ -214,6 +214,8 @@ NativePPLQuerySpec(kind::Symbol, stage::Symbol, effect::Symbol,
                    lifetime::Symbol, output::S) where {S} =
     NativePPLQuerySpec{kind,stage,effect,lifetime,S}(output)
 native_query_name(::NativePPLQuerySpec{Kind}) where {Kind} = Kind
+native_query_effect(::NativePPLQuerySpec{Kind,Stage,Effect}) where {Kind,Stage,Effect} =
+    Effect
 native_query_output(spec::NativePPLQuerySpec) = spec.output
 
 function _native_ppl_queries(
@@ -1302,6 +1304,18 @@ function _native_ppl_batch_output_signature(
     )
 end
 
+function _native_ppl_named_map(f, values::NamedTuple{Names}) where {Names}
+    NamedTuple{Names}(map(f, Tuple(values)))
+end
+
+_native_ppl_batch_output_signature(
+    prepared::NativePPLPrepared,
+    positions::AbstractMatrix,
+    queries::NamedTuple,
+) = _native_ppl_named_map(
+    query -> _native_ppl_batch_output_signature(prepared, positions, query),
+    queries)
+
 function _native_ppl_allocate_output(signature::NativePPLOutputSignature,
                                      prepared::NativePPLPrepared)
     _native_ppl_allocate_output(
@@ -1343,6 +1357,13 @@ function _native_ppl_allocate_output(::NativePPLDenseMatrixLayout,
     T = native_output_eltype(signature, prepared)
     Matrix{T}(undef, length(draw_axis), length(observation_axis))
 end
+
+
+_native_ppl_allocate_output(signatures::NamedTuple,
+                            prepared::NativePPLPrepared) =
+    _native_ppl_named_map(
+        signature -> _native_ppl_allocate_output(signature, prepared),
+        signatures)
 
 function _native_ppl_check_query_output(output::AbstractVector,
                                         prepared::NativePPLPrepared,
@@ -1403,6 +1424,13 @@ function _native_ppl_check_batch_execution(
             "$(length(observation_axis))"))
     Base.mightalias(output, positions) && throw(ArgumentError(
         "native PPL batch output must not alias the draw matrix"))
+    Base.mightalias(positions, workspace.primal.location) && throw(ArgumentError(
+        "native PPL draw matrix must not alias the workspace location buffer"))
+    Base.mightalias(positions, workspace.primal.pointwise_loglikelihood) &&
+        throw(ArgumentError(
+            "native PPL draw matrix must not alias the workspace pointwise buffer"))
+    Base.mightalias(positions, workspace.gradient) && throw(ArgumentError(
+        "native PPL draw matrix must not alias the workspace gradient buffer"))
     Base.mightalias(output, workspace.primal.location) && throw(ArgumentError(
         "native PPL batch output must not alias the workspace location buffer"))
     Base.mightalias(output, workspace.primal.pointwise_loglikelihood) &&
@@ -1539,6 +1567,161 @@ function _native_ppl_simulate_draws!(
     output
 end
 
+function _native_ppl_check_bundle_outputs(
+    outputs::NamedTuple{Names},
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+    positions::AbstractMatrix,
+    queries::NamedTuple{Names},
+) where {Names}
+    output_values = Tuple(outputs)
+    query_values = Tuple(queries)
+    for i in eachindex(output_values)
+        _native_ppl_check_batch_execution(
+            output_values[i], workspace, prepared, positions, query_values[i])
+        _native_ppl_check_batch_query_state(
+            workspace, prepared, query_values[i])
+    end
+    for i in eachindex(output_values), j in (i + 1):length(output_values)
+        Base.mightalias(output_values[i], output_values[j]) &&
+            throw(ArgumentError(
+                "native PPL bundle outputs `$((Names[i]))` and `$((Names[j]))` " *
+                "must not alias"))
+    end
+    nothing
+end
+
+function _native_ppl_check_bundle_outputs(
+    outputs::NamedTuple,
+    ::NativePPLWorkspace,
+    ::NativePPLPrepared,
+    ::AbstractMatrix,
+    queries::NamedTuple,
+)
+    throw(ArgumentError(
+        "native PPL bundle output keys $(keys(outputs)) do not match " *
+        "query keys $(keys(queries))"))
+end
+
+function _native_ppl_bundle_requires_rng(prepared::NativePPLPrepared,
+                                         queries::NamedTuple)
+    for query in Tuple(queries)
+        native_query_effect(_native_ppl_query_spec(prepared, query)) === :rng &&
+            return true
+    end
+    false
+end
+
+function _native_ppl_bundle_has_pointwise(queries::NamedTuple)
+    for query in Tuple(queries)
+        query isa NativePPLPointwiseLogLikelihood && return true
+    end
+    false
+end
+
+@inline function _native_ppl_write_bundle_query!(
+    rng,
+    output::AbstractMatrix,
+    draw::Int,
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+    position::AbstractVector,
+    ::NativePPLLinearPredictor,
+)
+    for observation in axes(output, 2)
+        @inbounds output[draw, observation] =
+            workspace.primal.location[observation]
+    end
+    nothing
+end
+
+@inline function _native_ppl_write_bundle_query!(
+    rng,
+    output::AbstractMatrix,
+    draw::Int,
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+    position::AbstractVector,
+    ::NativePPLPointwiseLogLikelihood,
+)
+    for observation in axes(output, 2)
+        @inbounds output[draw, observation] =
+            workspace.primal.pointwise_loglikelihood[observation]
+    end
+    nothing
+end
+
+@inline function _native_ppl_write_bundle_query!(
+    rng::AbstractRNG,
+    output::AbstractMatrix,
+    draw::Int,
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+    position::AbstractVector,
+    ::NativePPLPosteriorPredictive,
+)
+    _native_ppl_model_simulate!(
+        rng, prepared.plan.factors.likelihood, @view(output[draw, :]),
+        prepared, position, workspace.primal)
+    nothing
+end
+
+@inline _native_ppl_write_bundle_queries!(
+    rng, ::Tuple{}, ::Tuple{}, draw::Int,
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+    position::AbstractVector,
+) = nothing
+
+@inline function _native_ppl_write_bundle_queries!(
+    rng,
+    outputs::Tuple,
+    queries::Tuple,
+    draw::Int,
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+    position::AbstractVector,
+)
+    _native_ppl_write_bundle_query!(
+        rng, first(outputs), draw, workspace, prepared, position,
+        first(queries))
+    _native_ppl_write_bundle_queries!(
+        rng, Base.tail(outputs), Base.tail(queries), draw,
+        workspace, prepared, position)
+end
+
+function _native_ppl_execute_draws!(
+    rng,
+    outputs::NamedTuple,
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+    positions::AbstractMatrix,
+    queries::NamedTuple,
+)
+    rng === nothing && _native_ppl_bundle_requires_rng(prepared, queries) &&
+        throw(ArgumentError(
+            "native PPL query bundle contains an RNG-effect query; " *
+            "call `execute_draws!` with an explicit RNG"))
+    _native_ppl_check_bundle_outputs(
+        outputs, workspace, prepared, positions, queries)
+    isempty(queries) && return outputs
+
+    pointwise = _native_ppl_bundle_has_pointwise(queries)
+    output_values = Tuple(outputs)
+    query_values = Tuple(queries)
+    for draw in axes(positions, 1)
+        position = @view positions[draw, :]
+        _native_ppl_location!(workspace, prepared, position)
+        pointwise && _native_ppl_model_logdensity!(
+            prepared.plan.factors.likelihood, position, prepared,
+            workspace.primal)
+        _native_ppl_write_bundle_queries!(
+            rng, output_values, query_values, draw,
+            workspace, prepared, position)
+    end
+    outputs
+end
+
 """
 Namespaced walking-skeleton API for the native PPL.
 
@@ -1578,6 +1761,9 @@ output_signature(prepared::Prepared, query::BRM.NativePPLQuery) =
 batch_output_signature(prepared::Prepared, positions::AbstractMatrix,
                        query::BRM.NativePPLQuery) =
     BRM._native_ppl_batch_output_signature(prepared, positions, query)
+batch_output_signature(prepared::Prepared, positions::AbstractMatrix,
+                       queries::NamedTuple) =
+    BRM._native_ppl_batch_output_signature(prepared, positions, queries)
 output_axis(signature::OutputSignature) = BRM.native_output_axis(signature)
 output_axis(signature::BatchOutputSignature) = BRM.native_output_axis(signature)
 output_axes(signature::Union{OutputSignature,BatchOutputSignature}) =
@@ -1598,6 +1784,8 @@ allocate_output(signature::OutputSignature, prepared::Prepared) =
     BRM._native_ppl_allocate_output(signature, prepared)
 allocate_output(signature::BatchOutputSignature, prepared::Prepared) =
     BRM._native_ppl_allocate_output(signature, prepared)
+allocate_output(signatures::NamedTuple, prepared::Prepared) =
+    BRM._native_ppl_allocate_output(signatures, prepared)
 allocate_output(prepared::Prepared, query::BRM.NativePPLQuery) =
     allocate_output(output_signature(prepared, query), prepared)
 logdensity!(work::Workspace, prepared::Prepared, position::AbstractVector) =
@@ -1647,6 +1835,32 @@ function simulate_draws(rng::BRM.AbstractRNG, work::Workspace,
     output = allocate_output(signature, prepared)
     simulate_draws!(rng, output, work, prepared, positions, query)
 end
+execute_draws!(outputs::NamedTuple, work::Workspace, prepared::Prepared,
+               positions::AbstractMatrix, queries::NamedTuple) =
+    BRM._native_ppl_execute_draws!(
+        nothing, outputs, work, prepared, positions, queries)
+execute_draws!(rng::BRM.AbstractRNG, outputs::NamedTuple, work::Workspace,
+               prepared::Prepared, positions::AbstractMatrix,
+               queries::NamedTuple) =
+    BRM._native_ppl_execute_draws!(
+        rng, outputs, work, prepared, positions, queries)
+function execute_draws(work::Workspace, prepared::Prepared,
+                       positions::AbstractMatrix, queries::NamedTuple)
+    BRM._native_ppl_bundle_requires_rng(prepared, queries) &&
+        throw(ArgumentError(
+            "native PPL query bundle contains an RNG-effect query; " *
+            "call `execute_draws` with an explicit RNG"))
+    signatures = batch_output_signature(prepared, positions, queries)
+    outputs = allocate_output(signatures, prepared)
+    execute_draws!(outputs, work, prepared, positions, queries)
+end
+function execute_draws(rng::BRM.AbstractRNG, work::Workspace,
+                       prepared::Prepared, positions::AbstractMatrix,
+                       queries::NamedTuple)
+    signatures = batch_output_signature(prepared, positions, queries)
+    outputs = allocate_output(signatures, prepared)
+    execute_draws!(rng, outputs, work, prepared, positions, queries)
+end
 
 export Plan, Prepared, Workspace, CapabilityError
 export OutputSignature, BatchOutputSignature
@@ -1656,8 +1870,8 @@ export compile, prepare, workspace, rebind, has_response
 export output_signature, batch_output_signature
 export output_axis, output_axes, output_draw_axis, output_eltype, output_layout
 export allocate_output, evaluate, simulate
-export evaluate_draws, simulate_draws
+export evaluate_draws, simulate_draws, execute_draws
 export logdensity!, logdensity_and_gradient!, evaluate!, simulate!
-export evaluate_draws!, simulate_draws!
+export evaluate_draws!, simulate_draws!, execute_draws!
 
 end
