@@ -84,6 +84,14 @@ _data_backed_or_nothing(_) = nothing
 _data_backed_inner(x, ::DataColumn) = x
 _data_backed_inner(_x, _) = nothing
 
+# Observation decorators whose LHS carries structural arguments still own the
+# inner data-backed response. Keep this deliberately narrower than a generic
+# call peel: ordinary unary calls on the LHS are link declarations for a linear
+# predictor, whereas `ragged(y, group)` is explicitly a likelihood boundary.
+_observed_lhs_or_nothing(x) = _data_backed_or_nothing(x)
+_observed_lhs_or_nothing(x::ExprColumn{typeof(ragged)}) =
+    _data_backed_or_nothing(first(getargs(x)))
+
 # ---- outcomes ---------------------------------------------------------------
 
 """
@@ -111,7 +119,7 @@ function outcomes(brmi::BRMI)
         op === nothing && continue
         getf(op) === (~) || continue
         lhs, rh = getargs(op, 2)
-        isnothing(_data_backed_or_nothing(lhs)) && continue
+        isnothing(_observed_lhs_or_nothing(lhs)) && continue
         isnothing(_as_expr_column(rh)) && continue
         family = getf(rh)
         args = [_classify_arg(a) for a in getargs(rh)]
@@ -184,7 +192,7 @@ function linear_predictors(brmi::BRMI)
         getf(op) === (~) || continue
         lhs, _ = getargs(op, 2)
         # Skip data-bound LHS (those are likelihoods).
-        isnothing(_data_backed_or_nothing(lhs)) || continue
+        isnothing(_observed_lhs_or_nothing(lhs)) || continue
         peeled = _peel_lp_lhs(lhs)
         isnothing(peeled) && continue
         link_lhs_fn, lp_name = peeled
