@@ -270,6 +270,21 @@ scale.
   whole term.
 - `ar`'s autocorrelation has no address yet.
 
+The backend compatibility floor for configured `gp` / `hsgp` term priors is
+StanBlocks `10529af04d42a330df383864059c2b61a11d9480`. These statements splice
+a configured `SlicModel` value into BRM's generated model body. Earlier
+StanBlocks revisions, including `c30d3a158ae6c996dee2423023ab6b35d2756fc9`,
+trace that value before its `PHI` / `omega2` keyword data are bound and fail
+with `Could not find omega2 ...`. Co-pin BRM revisions containing this surface
+with `10529af` or later. Because StanBlocks is unregistered and both revisions
+identify as version `0.1.5`, the commit SHA—not the package version—is the
+effective compatibility check.
+
+Omitting an explicit HSGP prior is not a model-preserving workaround. In
+particular, removing `length_scale(:, hsgp(x)) ~ LogNormal(0, 1)` restores the
+default approximation-validity floor described below, changing the parameter
+support and the emitted Stan program.
+
 ### `hsgp` bounds its length scale by default
 
 An HSGP with `k` basis functions over a domain of half-width
