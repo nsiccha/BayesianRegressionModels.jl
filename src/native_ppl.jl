@@ -227,7 +227,10 @@ function Base.showerror(io::IO, err::NativePPLCapabilityError)
           "` in the walking skeleton: ", err.detail)
 end
 
-_native_ppl_ref_name(x::NamedColumn{<:Any,<:MissingColumn}) = name(x)
+_native_ppl_ref_name(x::NamedColumn) = _native_ppl_ref_name(x, parent(x))
+_native_ppl_ref_name(x::NamedColumn, ::MissingColumn) = name(x)
+_native_ppl_ref_name(x::NamedColumn, operation::ExprColumn{typeof(~)}) = name(x)
+_native_ppl_ref_name(_, _) = nothing
 _native_ppl_ref_name(_) = nothing
 
 function _native_ppl_sampling_rhs(brmi::BRMI, key::Symbol)
@@ -329,6 +332,9 @@ function _native_ppl_plan(brmi::BRMI)
 
     predictor = _native_ppl_affine_predictor(brmi, location)
     predictor_name = name(predictor)
+    predictor_name === response && throw(NativePPLCapabilityError(
+        :input_roles,
+        "predictor `$predictor_name` is also the observed response; the first native plan requires distinct input roles"))
     x = parent(parent(predictor))
     y = parent(parent(response_lhs))
     x isa AbstractVector{<:Real} && !(eltype(x) <: Integer) ||
