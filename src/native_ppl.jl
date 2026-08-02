@@ -94,6 +94,19 @@ NativePPLQuerySpec(kind::Symbol, stage::Symbol, effect::Symbol,
     NativePPLQuerySpec{kind,stage,effect,lifetime,A}(axis)
 native_query_name(::NativePPLQuerySpec{Kind}) where {Kind} = Kind
 
+function _native_ppl_queries(observation_axis)
+    linear_predictor = NativePPLQuerySpec(
+        :linear_predictor, :per_draw, :workspace, :until_next_evaluation,
+        observation_axis)
+    pointwise_loglikelihood = NativePPLQuerySpec(
+        :pointwise_loglikelihood, :per_draw, :workspace,
+        :until_next_evaluation, observation_axis)
+    posterior_predictive = NativePPLQuerySpec(
+        :posterior_predictive, :per_draw, :rng, :caller_owned,
+        observation_axis)
+    (; linear_predictor, pointwise_loglikelihood, posterior_predictive)
+end
+
 """
     NativePPLPlan
 
@@ -357,15 +370,7 @@ function _native_ppl_plan(brmi::BRMI)
     scale_prior = NativePPLExponentialFactor(scale_parameter, 3, prior_scale)
     likelihood_factor = NativePPLNormalFactor(response, location,
                                               scale_parameter, observation_axis)
-    linear_predictor_query = NativePPLQuerySpec(
-        :linear_predictor, :per_draw, :workspace, :until_next_evaluation,
-        observation_axis)
-    pointwise_loglikelihood_query = NativePPLQuerySpec(
-        :pointwise_loglikelihood, :per_draw, :workspace,
-        :until_next_evaluation, observation_axis)
-    posterior_predictive_query = NativePPLQuerySpec(
-        :posterior_predictive, :per_draw, :rng, :caller_owned,
-        observation_axis)
+    queries = _native_ppl_queries(observation_axis)
     bindings = NamedTuple{(predictor_name, response)}((x, y))
 
     NativePPLPlan(
@@ -375,9 +380,7 @@ function _native_ppl_plan(brmi::BRMI)
         (; coefficients, scale),
         (; location=location_node),
         (; coefficient_prior, scale_prior, likelihood=likelihood_factor),
-        (; linear_predictor=linear_predictor_query,
-           pointwise_loglikelihood=pointwise_loglikelihood_query,
-           posterior_predictive=posterior_predictive_query),
+        queries,
         bindings,
     )
 end
@@ -486,3 +489,153 @@ function _native_ppl_logdensity_and_gradient! end
 _native_ppl_logdensity_and_gradient!(args...) = throw(ArgumentError(
     "native PPL gradients require a DifferentiationInterface-prepared workspace; " *
     "construct one with AutoEnzyme() for the supported path"))
+
+function _native_ppl_required_binding(bindings, name::Symbol, role::Symbol)
+    hasproperty(bindings, name) || throw(ArgumentError(
+        "native PPL rebind is missing required $role input `$name`"))
+    value = getproperty(bindings, name)
+    value isa AbstractVector || throw(ArgumentError(
+        "native PPL $role input `$name` must be an AbstractVector; got $(typeof(value))"))
+    value
+end
+
+"""
+    _native_ppl_rebind(prepared, bindings; T=eltype(prepared))
+
+Rebind the same graph semantics to compatible predictor and response vectors.
+The observation axis and every node/factor/query carrying it are rebuilt from
+the new row count; parameter coordinates and semantic identities are reused.
+"""
+function _native_ppl_rebind(prepared::NativePPLPrepared, bindings;
+                            T::Type{<:AbstractFloat}=eltype(prepared))
+    plan = prepared.plan
+    predictor_name = native_input_name(plan.inputs.predictor)
+    response_name = native_input_name(plan.inputs.response)
+    predictor = _native_ppl_required_binding(bindings, predictor_name, :predictor)
+    response = _native_ppl_required_binding(bindings, response_name, :response)
+    length(predictor) == length(response) || throw(DimensionMismatch(
+        "native PPL predictor `$predictor_name` has $(length(predictor)) rows but " *
+        "response `$response_name` has $(length(response))"))
+    !isempty(response) || throw(DimensionMismatch(
+        "native PPL rebound observation axis cannot be empty"))
+
+    observation_axis = NativePPLAxis(:observation, Base.OneTo(length(response)))
+    predictor_input = NativePPLInput(
+        predictor_name, :predictor, observation_axis, eltype(predictor))
+    response_input = NativePPLInput(
+        response_name, :response, observation_axis, eltype(response))
+
+    old_node = plan.nodes.location
+    location_name = native_node_name(old_node)
+    location_node = NativePPLAffineNode(
+        location_name, predictor_name, observation_axis,
+        old_node.intercept_index, old_node.slope_index)
+    scale_name = native_parameter_name(plan.parameters.scale)
+    likelihood = NativePPLNormalFactor(
+        response_name, location_name, scale_name, observation_axis)
+    new_bindings = NamedTuple{(predictor_name, response_name)}((predictor, response))
+
+    rebound_plan = NativePPLPlan(
+        merge(plan.axes, (; observation=observation_axis)),
+        (; predictor=predictor_input, response=response_input),
+        plan.parameters,
+        (; location=location_node),
+        merge(plan.factors, (; likelihood)),
+        _native_ppl_queries(observation_axis),
+        new_bindings,
+    )
+    _native_ppl_prepare(rebound_plan; T)
+end
+
+function _native_ppl_check_query_output(output::AbstractVector,
+                                        prepared::NativePPLPrepared,
+                                        query::Symbol)
+    length(output) == length(prepared.response) || throw(DimensionMismatch(
+        "native PPL `$query` output has length $(length(output)); expected " *
+        "$(length(prepared.response)) for the observation axis"))
+    output
+end
+
+function _native_ppl_evaluate!(output::AbstractVector,
+                               workspace::NativePPLWorkspace,
+                               prepared::NativePPLPrepared,
+                               position::AbstractVector,
+                               ::NativePPLLinearPredictor)
+    _native_ppl_check_query_output(output, prepared, :linear_predictor)
+    _native_ppl_logdensity!(workspace, prepared, position)
+    copyto!(output, workspace.primal.location)
+end
+
+function _native_ppl_evaluate!(output::AbstractVector,
+                               workspace::NativePPLWorkspace,
+                               prepared::NativePPLPrepared,
+                               position::AbstractVector,
+                               ::NativePPLPointwiseLogLikelihood)
+    _native_ppl_check_query_output(output, prepared, :pointwise_loglikelihood)
+    _native_ppl_logdensity!(workspace, prepared, position)
+    copyto!(output, workspace.primal.pointwise_loglikelihood)
+end
+
+function _native_ppl_simulate!(rng::AbstractRNG,
+                               output::AbstractVector,
+                               workspace::NativePPLWorkspace,
+                               prepared::NativePPLPrepared,
+                               position::AbstractVector,
+                               ::NativePPLPosteriorPredictive)
+    _native_ppl_check_query_output(output, prepared, :posterior_predictive)
+    _native_ppl_logdensity!(workspace, prepared, position)
+    scale_index = prepared.plan.factors.scale_prior.unconstrained_index
+    scale = exp(position[scale_index])
+    T = eltype(workspace)
+    for i in eachindex(output, workspace.primal.location)
+        output[i] = workspace.primal.location[i] + scale * randn(rng, T)
+    end
+    output
+end
+
+"""
+Namespaced walking-skeleton API for the native PPL.
+
+`DifferentiationInterface.AutoEnzyme()` is the sole tested, recommended, and
+guaranteed derivative backend. Other DI backends are outside this prototype's
+compatibility contract even when they happen to execute.
+"""
+module NativePPL
+
+const BRM = parentmodule(@__MODULE__)
+
+const Plan = BRM.NativePPLPlan
+const Prepared = BRM.NativePPLPrepared
+const Workspace = BRM.NativePPLWorkspace
+const CapabilityError = BRM.NativePPLCapabilityError
+const LinearPredictor = BRM.NativePPLLinearPredictor
+const PointwiseLogLikelihood = BRM.NativePPLPointwiseLogLikelihood
+const PosteriorPredictive = BRM.NativePPLPosteriorPredictive
+
+compile(brmi::BRM.BRMI) = BRM._native_ppl_plan(brmi)
+prepare(plan::Plan; kwargs...) = BRM._native_ppl_prepare(plan; kwargs...)
+workspace(prepared::Prepared, ::Type{T}=eltype(prepared)) where {T<:AbstractFloat} =
+    BRM._native_ppl_workspace(prepared, T)
+workspace(prepared::Prepared, ::Type{T}, backend) where {T<:AbstractFloat} =
+    BRM._native_ppl_workspace(prepared, T, backend)
+rebind(prepared::Prepared, bindings; kwargs...) =
+    BRM._native_ppl_rebind(prepared, bindings; kwargs...)
+logdensity!(work::Workspace, prepared::Prepared, position::AbstractVector) =
+    BRM._native_ppl_logdensity!(work, prepared, position)
+logdensity_and_gradient!(work::Workspace, prepared::Prepared,
+                         position::AbstractVector) =
+    BRM._native_ppl_logdensity_and_gradient!(work, prepared, position)
+evaluate!(output::AbstractVector, work::Workspace, prepared::Prepared,
+          position::AbstractVector, query::BRM.NativePPLQuery) =
+    BRM._native_ppl_evaluate!(output, work, prepared, position, query)
+simulate!(rng::BRM.AbstractRNG, output::AbstractVector, work::Workspace,
+          prepared::Prepared, position::AbstractVector,
+          query::BRM.NativePPLQuery=PosteriorPredictive()) =
+    BRM._native_ppl_simulate!(rng, output, work, prepared, position, query)
+
+export Plan, Prepared, Workspace, CapabilityError
+export LinearPredictor, PointwiseLogLikelihood, PosteriorPredictive
+export compile, prepare, workspace, rebind
+export logdensity!, logdensity_and_gradient!, evaluate!, simulate!
+
+end
