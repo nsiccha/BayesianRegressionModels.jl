@@ -113,31 +113,57 @@ struct NativePPLLinearPredictor <: NativePPLQuery end
 struct NativePPLPointwiseLogLikelihood <: NativePPLQuery end
 struct NativePPLPosteriorPredictive <: NativePPLQuery end
 
+"""Rule selecting the prepared executor's numeric scalar as an output eltype."""
+struct NativePPLPreparedElementType end
+
+"""Dense, one-dimensional caller-owned output layout."""
+struct NativePPLDenseVectorLayout end
+
+"""Pre-execution semantic axis, element-type rule, and layout for one output."""
+struct NativePPLOutputSignature{A,E,L}
+    axis::A
+    element_type::E
+    layout::L
+end
+
+native_output_axis(signature::NativePPLOutputSignature) = signature.axis
+native_output_eltype(signature::NativePPLOutputSignature, prepared) =
+    native_output_eltype(signature.element_type, prepared)
+native_output_eltype(::NativePPLPreparedElementType, prepared) = eltype(prepared)
+native_output_eltype(::NativePPLPreparedElementType, ::Type{T}) where {T} = T
+native_output_layout(signature::NativePPLOutputSignature) = signature.layout
+native_output_layout_accepts(::NativePPLDenseVectorLayout, output) =
+    output isa DenseVector
+
 """
 Output, frequency, effect, and lifetime contract for one graph query.
 
 The query kind and execution properties are type parameters so query planning
 does not depend on a post-hoc name registry.
 """
-struct NativePPLQuerySpec{Kind,Stage,Effect,Lifetime,A}
-    axis::A
+struct NativePPLQuerySpec{Kind,Stage,Effect,Lifetime,S}
+    output::S
 end
 
 NativePPLQuerySpec(kind::Symbol, stage::Symbol, effect::Symbol,
-                   lifetime::Symbol, axis::A) where {A} =
-    NativePPLQuerySpec{kind,stage,effect,lifetime,A}(axis)
+                   lifetime::Symbol, output::S) where {S} =
+    NativePPLQuerySpec{kind,stage,effect,lifetime,S}(output)
 native_query_name(::NativePPLQuerySpec{Kind}) where {Kind} = Kind
+native_query_output(spec::NativePPLQuerySpec) = spec.output
 
 function _native_ppl_queries(observation_axis)
+    output = NativePPLOutputSignature(
+        observation_axis, NativePPLPreparedElementType(),
+        NativePPLDenseVectorLayout())
     linear_predictor = NativePPLQuerySpec(
         :linear_predictor, :per_draw, :workspace, :until_next_evaluation,
-        observation_axis)
+        output)
     pointwise_loglikelihood = NativePPLQuerySpec(
         :pointwise_loglikelihood, :per_draw, :workspace,
-        :until_next_evaluation, observation_axis)
+        :until_next_evaluation, output)
     posterior_predictive = NativePPLQuerySpec(
         :posterior_predictive, :per_draw, :rng, :caller_owned,
-        observation_axis)
+        output)
     (; linear_predictor, pointwise_loglikelihood, posterior_predictive)
 end
 
@@ -624,25 +650,33 @@ function _native_ppl_rebind(prepared::NativePPLPrepared, bindings;
     _native_ppl_prepare(rebound_plan; T)
 end
 
-_native_ppl_query_spec(prepared::NativePPLPrepared, ::NativePPLLinearPredictor) =
-    prepared.plan.queries.linear_predictor
-_native_ppl_query_spec(prepared::NativePPLPrepared, ::NativePPLPointwiseLogLikelihood) =
-    prepared.plan.queries.pointwise_loglikelihood
-_native_ppl_query_spec(prepared::NativePPLPrepared, ::NativePPLPosteriorPredictive) =
-    prepared.plan.queries.posterior_predictive
+_native_ppl_query_spec(plan::NativePPLPlan, ::NativePPLLinearPredictor) =
+    plan.queries.linear_predictor
+_native_ppl_query_spec(plan::NativePPLPlan, ::NativePPLPointwiseLogLikelihood) =
+    plan.queries.pointwise_loglikelihood
+_native_ppl_query_spec(plan::NativePPLPlan, ::NativePPLPosteriorPredictive) =
+    plan.queries.posterior_predictive
+_native_ppl_query_spec(prepared::NativePPLPrepared, query::NativePPLQuery) =
+    _native_ppl_query_spec(prepared.plan, query)
 
 function _native_ppl_check_query_output(output::AbstractVector,
                                         prepared::NativePPLPrepared,
                                         query::NativePPLQuery)
     query_spec = _native_ppl_query_spec(prepared, query)
     query_name = native_query_name(query_spec)
-    expected_axis = query_spec.axis.keys
+    signature = native_query_output(query_spec)
+    expected_axis = native_output_axis(signature).keys
     axes(output, 1) == expected_axis || throw(DimensionMismatch(
         "native PPL `$query_name` output axis $(axes(output, 1)) does not match " *
         "the declared observation axis $expected_axis"))
-    eltype(output) === eltype(prepared) || throw(ArgumentError(
+    expected_eltype = native_output_eltype(signature, prepared)
+    eltype(output) === expected_eltype || throw(ArgumentError(
         "native PPL `$query_name` output eltype $(eltype(output)) does not match " *
-        "prepared eltype $(eltype(prepared))"))
+        "declared output eltype $expected_eltype"))
+    native_output_layout_accepts(native_output_layout(signature), output) ||
+        throw(ArgumentError(
+            "native PPL `$query_name` output $(typeof(output)) does not satisfy " *
+            "declared layout $(typeof(native_output_layout(signature)))"))
     length(output) == length(prepared.response) || throw(DimensionMismatch(
         "native PPL `$query_name` output has length $(length(output)); expected " *
         "$(length(prepared.response)) for the observation axis"))
@@ -700,6 +734,8 @@ const Plan = BRM.NativePPLPlan
 const Prepared = BRM.NativePPLPrepared
 const Workspace = BRM.NativePPLWorkspace
 const CapabilityError = BRM.NativePPLCapabilityError
+const OutputSignature = BRM.NativePPLOutputSignature
+const DenseVectorLayout = BRM.NativePPLDenseVectorLayout
 const LinearPredictor = BRM.NativePPLLinearPredictor
 const PointwiseLogLikelihood = BRM.NativePPLPointwiseLogLikelihood
 const PosteriorPredictive = BRM.NativePPLPosteriorPredictive
@@ -712,6 +748,14 @@ workspace(prepared::Prepared, ::Type{T}, backend) where {T<:AbstractFloat} =
     BRM._native_ppl_workspace(prepared, T, backend)
 rebind(prepared::Prepared, bindings; kwargs...) =
     BRM._native_ppl_rebind(prepared, bindings; kwargs...)
+output_signature(plan::Plan, query::BRM.NativePPLQuery) =
+    BRM.native_query_output(BRM._native_ppl_query_spec(plan, query))
+output_signature(prepared::Prepared, query::BRM.NativePPLQuery) =
+    output_signature(prepared.plan, query)
+output_axis(signature::OutputSignature) = BRM.native_output_axis(signature)
+output_eltype(signature::OutputSignature, source) =
+    BRM.native_output_eltype(signature, source)
+output_layout(signature::OutputSignature) = BRM.native_output_layout(signature)
 logdensity!(work::Workspace, prepared::Prepared, position::AbstractVector) =
     BRM._native_ppl_logdensity!(work, prepared, position)
 logdensity_and_gradient!(work::Workspace, prepared::Prepared,
@@ -725,9 +769,11 @@ simulate!(rng::BRM.AbstractRNG, output::AbstractVector, work::Workspace,
           query::BRM.NativePPLQuery=PosteriorPredictive()) =
     BRM._native_ppl_simulate!(rng, output, work, prepared, position, query)
 
-export Plan, Prepared, Workspace, CapabilityError
+export Plan, Prepared, Workspace, CapabilityError, OutputSignature
+export DenseVectorLayout
 export LinearPredictor, PointwiseLogLikelihood, PosteriorPredictive
 export compile, prepare, workspace, rebind
+export output_signature, output_axis, output_eltype, output_layout
 export logdensity!, logdensity_and_gradient!, evaluate!, simulate!
 
 end
