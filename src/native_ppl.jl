@@ -671,6 +671,24 @@ _native_ppl_query_spec(plan::NativePPLPlan, ::NativePPLPosteriorPredictive) =
 _native_ppl_query_spec(prepared::NativePPLPrepared, query::NativePPLQuery) =
     _native_ppl_query_spec(prepared.plan, query)
 
+function _native_ppl_allocate_output(signature::NativePPLOutputSignature,
+                                     prepared::NativePPLPrepared)
+    _native_ppl_allocate_output(
+        native_output_layout(signature), signature, prepared)
+end
+
+function _native_ppl_allocate_output(::NativePPLDenseVectorLayout,
+                                     signature::NativePPLOutputSignature,
+                                     prepared::NativePPLPrepared)
+    axis = native_output_axis(signature)
+    axis.keys == Base.OneTo(length(axis)) || throw(NativePPLCapabilityError(
+        :output_layout,
+        "dense-vector allocation requires a one-based semantic axis; " *
+        "got $(axis.keys)"))
+    T = native_output_eltype(signature, prepared)
+    Vector{T}(undef, length(axis))
+end
+
 function _native_ppl_check_query_output(output::AbstractVector,
                                         prepared::NativePPLPrepared,
                                         query::NativePPLQuery)
@@ -768,6 +786,10 @@ output_axis(signature::OutputSignature) = BRM.native_output_axis(signature)
 output_eltype(signature::OutputSignature, source) =
     BRM.native_output_eltype(signature, source)
 output_layout(signature::OutputSignature) = BRM.native_output_layout(signature)
+allocate_output(signature::OutputSignature, prepared::Prepared) =
+    BRM._native_ppl_allocate_output(signature, prepared)
+allocate_output(prepared::Prepared, query::BRM.NativePPLQuery) =
+    allocate_output(output_signature(prepared, query), prepared)
 logdensity!(work::Workspace, prepared::Prepared, position::AbstractVector) =
     BRM._native_ppl_logdensity!(work, prepared, position)
 logdensity_and_gradient!(work::Workspace, prepared::Prepared,
@@ -776,16 +798,28 @@ logdensity_and_gradient!(work::Workspace, prepared::Prepared,
 evaluate!(output::AbstractVector, work::Workspace, prepared::Prepared,
           position::AbstractVector, query::BRM.NativePPLQuery) =
     BRM._native_ppl_evaluate!(output, work, prepared, position, query)
+function evaluate(work::Workspace, prepared::Prepared,
+                  position::AbstractVector, query::BRM.NativePPLQuery)
+    output = allocate_output(prepared, query)
+    evaluate!(output, work, prepared, position, query)
+end
 simulate!(rng::BRM.AbstractRNG, output::AbstractVector, work::Workspace,
           prepared::Prepared, position::AbstractVector,
           query::BRM.NativePPLQuery=PosteriorPredictive()) =
     BRM._native_ppl_simulate!(rng, output, work, prepared, position, query)
+function simulate(rng::BRM.AbstractRNG, work::Workspace, prepared::Prepared,
+                  position::AbstractVector,
+                  query::BRM.NativePPLQuery=PosteriorPredictive())
+    output = allocate_output(prepared, query)
+    simulate!(rng, output, work, prepared, position, query)
+end
 
 export Plan, Prepared, Workspace, CapabilityError, OutputSignature
 export DenseVectorLayout
 export LinearPredictor, PointwiseLogLikelihood, PosteriorPredictive
 export compile, prepare, workspace, rebind
 export output_signature, output_axis, output_eltype, output_layout
+export allocate_output, evaluate, simulate
 export logdensity!, logdensity_and_gradient!, evaluate!, simulate!
 
 end
