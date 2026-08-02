@@ -1448,10 +1448,9 @@ _native_ppl_query_spec(plan::NativePPLPlan, ::NativePPLPosteriorPredictive) =
 _native_ppl_query_spec(prepared::NativePPLPrepared, query::NativePPLQuery) =
     _native_ppl_query_spec(prepared.plan, query)
 
-function _native_ppl_batch_output_signature(
+function _native_ppl_check_batch_positions(
     prepared::NativePPLPrepared,
     positions::AbstractMatrix,
-    query::NativePPLQuery,
 )
     dimension = LogDensityProblems.dimension(prepared)
     size(positions, 2) == dimension || throw(DimensionMismatch(
@@ -1464,7 +1463,14 @@ function _native_ppl_batch_output_signature(
     axes(positions, 2) == Base.OneTo(dimension) || throw(ArgumentError(
         "native PPL batch queries require one-based coordinate columns; got " *
         "$(axes(positions, 2))"))
+    nothing
+end
 
+function _native_ppl_batch_output_signature_unchecked(
+    prepared::NativePPLPrepared,
+    positions::AbstractMatrix,
+    query::NativePPLQuery,
+)
     element_signature = native_query_output(
         _native_ppl_query_spec(prepared, query))
     NativePPLBatchOutputSignature(
@@ -1475,17 +1481,40 @@ function _native_ppl_batch_output_signature(
     )
 end
 
+function _native_ppl_batch_output_signature(
+    prepared::NativePPLPrepared,
+    positions::AbstractMatrix,
+    query::NativePPLQuery,
+)
+    _native_ppl_check_batch_positions(prepared, positions)
+    _native_ppl_batch_output_signature_unchecked(prepared, positions, query)
+end
+
 function _native_ppl_named_map(f, values::NamedTuple{Names}) where {Names}
     NamedTuple{Names}(map(f, Tuple(values)))
 end
 
-_native_ppl_batch_output_signature(
+function _native_ppl_check_bundle_queries(queries::NamedTuple)
+    for (name, query) in pairs(queries)
+        query isa NativePPLQuery || throw(ArgumentError(
+            "native PPL bundle query `$name` must be a typed graph query; " *
+            "got $(typeof(query))"))
+    end
+    nothing
+end
+
+function _native_ppl_batch_output_signature(
     prepared::NativePPLPrepared,
     positions::AbstractMatrix,
     queries::NamedTuple,
-) = _native_ppl_named_map(
-    query -> _native_ppl_batch_output_signature(prepared, positions, query),
-    queries)
+)
+    _native_ppl_check_batch_positions(prepared, positions)
+    _native_ppl_check_bundle_queries(queries)
+    _native_ppl_named_map(
+        query -> _native_ppl_batch_output_signature_unchecked(
+            prepared, positions, query),
+        queries)
+end
 
 function _native_ppl_allocate_output(signature::NativePPLOutputSignature,
                                      prepared::NativePPLPrepared)
@@ -1609,13 +1638,6 @@ function _native_ppl_check_batch_execution(
             "native PPL batch output must not alias the workspace pointwise buffer"))
     Base.mightalias(output, workspace.gradient) && throw(ArgumentError(
         "native PPL batch output must not alias the workspace gradient buffer"))
-    Base.mightalias(positions, workspace.primal.location) && throw(ArgumentError(
-        "native PPL draw matrix must not alias the workspace location buffer"))
-    Base.mightalias(positions, workspace.primal.pointwise_loglikelihood) &&
-        throw(ArgumentError(
-            "native PPL draw matrix must not alias the workspace pointwise buffer"))
-    Base.mightalias(positions, workspace.gradient) && throw(ArgumentError(
-        "native PPL draw matrix must not alias the workspace gradient buffer"))
     signature
 end
 
@@ -1752,9 +1774,14 @@ function _native_ppl_check_bundle_outputs(
     positions::AbstractMatrix,
     queries::NamedTuple{Names},
 ) where {Names}
+    _native_ppl_check_batch_positions(prepared, positions)
+    _native_ppl_check_bundle_queries(queries)
     output_values = Tuple(outputs)
     query_values = Tuple(queries)
     for i in eachindex(output_values)
+        output_values[i] isa AbstractMatrix || throw(ArgumentError(
+            "native PPL bundle output `$((Names[i]))` must be an " *
+            "AbstractMatrix; got $(typeof(output_values[i]))"))
         _native_ppl_check_batch_execution(
             output_values[i], workspace, prepared, positions, query_values[i])
         _native_ppl_check_batch_query_state(
@@ -1783,6 +1810,7 @@ end
 
 function _native_ppl_bundle_requires_rng(prepared::NativePPLPrepared,
                                          queries::NamedTuple)
+    _native_ppl_check_bundle_queries(queries)
     for query in Tuple(queries)
         native_query_effect(_native_ppl_query_spec(prepared, query)) === :rng &&
             return true
