@@ -43,7 +43,7 @@
 using Test
 using BayesianRegressionModels
 using StanBlocks
-using Distributions: Exponential
+using Distributions: Exponential, Normal
 
 const EV_RUN_BRIDGESTAN = get(ENV, "BRM_KERNEL_RUNTIME", "1") != "0"
 const EV_CACHE = joinpath(tempdir(), "brm-kernel-event-axis")
@@ -139,6 +139,32 @@ ev_flatcol_model(df) = @brm df begin
         yy ~ normal(mu, sigma)
         mu
     end
+end
+
+# Two independent ragged axes may legitimately have the same flat total.  The
+# PK index axis is already grouped per subject, while the ECG predictor axis is
+# declared from its own flat frame by `ragged(qt_fixed, ecg_subject)`.  Their
+# segment lengths differ ([4, 3, 0] vs [3, 2, 2]), and neither axis is evidence
+# about the other's grouping contract.
+function ev_independent_axes_df()
+    (;
+        subject = ["s1", "s2", "s3"],
+        weight = [60.0, 75.0, 90.0],
+        pk_idx = [collect(1.0:4.0), collect(1.0:3.0), Float64[]],
+        pk_y = [fill(0.2, 4), fill(0.3, 3), Float64[]],
+        ecg_subject = ["s1", "s1", "s1", "s2", "s2", "s3", "s3"],
+        qt_x = collect(range(-1.0, 1.0; length = 7)),
+    )
+end
+
+ev_independent_axes_model(df) = @brm df begin
+    sigma ~ Exponential(1)
+    qt_fixed ~ 1 + qt_x
+    log_CL ~ 1 + weight + (1 | p | subject)
+    pred ~ kernel(pk_idx, ragged(qt_fixed, ecg_subject), log_CL) do idx, qt, lCL
+        rep_vector(sum(qt) + lCL, dims(idx)[1])
+    end
+    pk_y ~ Normal(pred, sigma)
 end
 
 # Grouping column on the WRONG axis (3 subject rows vs a 7-row predictor).
@@ -267,12 +293,31 @@ end
         stray = ev_df(; dose_subject = ["s1", "s1", "s2", "s2", "s9", "s3", "s3"])
         @test_throws "name no subject" SBBRMI(ev_model(stray); mod = @__MODULE__)
 
-        # Alignment to the OP STREAM: same total length, different per-subject
-        # split. This is the check that stops one LP value per EXPANDED dose row
-        # from being mistaken for one per op.
-        skewed = ev_df(; dose_amount = [[100.0, 100.0, 100.0], [50.0, 50.0], [200.0, 200.0]])
-        @test_throws "does not align with the ragged column `dose_amount`" SBBRMI(
-            ev_model(skewed); mod = @__MODULE__)
+    end
+
+    @testset "independent ragged axes may share a flat total" begin
+        axes = ev_independent_axes_df()
+        @test length.(axes.pk_idx) == [4, 3, 0]
+        @test [count(==(s), axes.ecg_subject) for s in axes.subject] == [3, 2, 2]
+        @test sum(length, axes.pk_idx) == length(axes.ecg_subject) == 7
+
+        independent = SBBRMI(ev_independent_axes_model(axes); mod = @__MODULE__)
+        @test length.(independent.data[:pk_idx]) == [4, 3, 0]
+        @test length.(independent.data[:kernel_pred_qt_fixed_ragged]) == [3, 2, 2]
+        @test StanBlocks.stan.transpiles(independent.model)
+        @test StanBlocks.stanc_check(
+            StanBlocks.stan_code(independent.model); warn_pedantic = false).ok
+
+        if EV_RUN_BRIDGESTAN
+            using LogDensityProblems
+            prob = ev_problem(independent, "independent_axes")
+            dim = LogDensityProblems.dimension(prob)
+            q = [0.05 * ((i % 5) - 2) for i in 1:dim]
+            lp, g = LogDensityProblems.logdensity_and_gradient(prob, q)
+            @test isfinite(lp)
+            @test length(g) == dim
+            @test all(isfinite, g)
+        end
     end
 
     # `ragged(x, group)` is ONE operation — group a flat axis by a key — and `x`
