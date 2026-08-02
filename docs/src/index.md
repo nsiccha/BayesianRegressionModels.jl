@@ -1,10 +1,11 @@
+````@raw html
 ---
 layout: home
 
 hero:
   name: BayesianRegressionModels.jl
-  text: brms-style formula DSL on top of Stan
-  tagline: Compose linear-predictor formulas, custom priors, and likelihoods; transpile to Stan via StanBlocks; fit via Pathfinder / NUTS.
+  text: A brms-shaped formula DSL for Julia
+  tagline: Same formula grammar, but your columns do not all have to come from one equal-length data frame. Transpiles to Stan via StanBlocks; fits via Pathfinder / NUTS.
   actions:
     - theme: brand
       text: Gallery
@@ -16,6 +17,7 @@ hero:
       text: GitHub
       link: https://github.com/JuliaBayes/BayesianRegressionModels.jl
 ---
+````
 
 # BayesianRegressionModels.jl
 
@@ -40,6 +42,110 @@ end
 sbbrmi = SBBRMI(brmi)
 src    = stan_code(sbbrmi)
 ```
+
+## Coming from brms
+
+BRM is deliberately brms-shaped, so most of what you know transfers. The
+differences worth knowing up front are one structural gain and a genuinely
+shorter feature list.
+
+### What carries over
+
+Formula grammar, random-effect syntax, and the two features people usually
+reach brms for:
+
+| brms | `@brm` |
+|---|---|
+| `y ~ 1 + age + sex` | `y ~ 1 + age + sex` |
+| `(1 + age \| subj)` | `(1 + age \| subj)` |
+| `(1 + age \|p\| subj)` — correlated across formulas | `(1 + age \|p\| subj)` |
+| `(1 \| gr(subj, by = diagnosis))` | `(1 \| gr(subj, by = diagnosis))` |
+| `bf(y1) + bf(y2)` | two `~` lines in the same block |
+| **Distributional regression** — `bf(y ~ x, sigma ~ x)` | every distributional parameter is just another `~` line |
+| **Nonlinear terms** — `bf(y ~ a * exp(-b * x), a ~ 1, b ~ 1, nl = TRUE)` | the same, with **no `nl` switch** |
+
+Distributional regression needs no special form: give the parameter its own
+formula, and apply the link yourself where you want one.
+
+```julia
+@brm df begin
+    y        ~ Normal(mu, sigma)
+    mu       ~ 1 + age
+    log(sigma) ~ 1 + age          # explicit link, addressed as `sigma`
+end
+```
+
+Nonlinear models need no `nl = TRUE` and no `nlf()`. A declaration is a named
+value, so composing declarations into an arbitrary Julia expression is the
+whole feature:
+
+```julia
+@brm df begin
+    a     ~ 1 + (1 | g)           # ordinary linear predictors …
+    b     ~ 1
+    y     ~ Normal(a * exp(-b * x), sigma)   # … composed nonlinearly
+    sigma ~ Exponential(1)
+end
+```
+
+That lowers to `y ~ normal(a .* exp(-b .* x), sigma)` in the generated Stan,
+and — as with any BRM response — you also get the pointwise log-likelihood
+`y_likelihood` and predictive draws `y_gen` for free.
+
+### Where BRM goes further
+
+**Your data does not have to be one data frame with equal-length columns.**
+This is the main structural difference. brms takes a single `data.frame`, so
+every column shares one row axis. `@brm` takes any column collection — a
+`NamedTuple` is fine — whose columns may live on *different* row axes, and
+different linear predictors in one model may be defined on different axes:
+
+```julia
+@brm schedule begin
+    sigma  ~ Exponential(1)
+    log_F  ~ 1 + factor(vessel) + mo(diet)   # one row per dose EVENT
+    log_CL ~ 1 + weight + (1 | pk | subject) # one row per SUBJECT
+
+    pred ~ kernel(t_obs, y,
+                  ragged(dose_amount, dose_subject),
+                  ragged(log_F,       dose_subject),
+                  log_CL) do ts, yy, doses, lF, lCL
+        effective_dose = sum(doses .* exp(lF))
+        mu = effective_dose .* exp(-exp(lCL) .* ts)
+        yy ~ normal(mu, sigma)
+        mu
+    end
+end
+```
+
+[`ragged`](@ref)`(x, group)` attaches a flat secondary frame to the grouping
+axis, and [`kernel`](@ref) broadcasts a do-block *cell* — arbitrary Julia,
+including a structural or ODE-like time course — over pre-grouped rows, taking
+the per-group values of ordinary linear predictors as arguments. In brms this
+class of model is `nlf()` plus manual `data2` bookkeeping, or Stan by hand.
+
+Two smaller gains: [`VBRMI`](@ref) gives you a pure-Julia
+`LogDensityProblems` object with no Stan toolchain in the loop, and
+[`brm_descriptor`](@ref) exposes one reflectable description of everything the
+model emits, so a consumer mounts a fitted model without keeping a parallel
+registry of parameter names.
+
+### Where BRM is behind
+
+Not feature-complete against brms. The gaps a brms user is most likely to hit:
+
+- **No residual correlation between responses.** Several responses in one
+  block are modelled independently; there is no `set_rescor(TRUE)`.
+- **No fixed / known covariance groups.** `by=` is the only [`gr`](@ref)
+  option — no `cov=`, so no phylogenetic or pedigree random effects.
+- **Autocorrelation is AR(1) only.** [`ar`](@ref)`(time; p=1)` is the entire
+  surface: no MA, ARMA, compound symmetry, unstructured, CAR or SAR.
+- **Fewer families.** [Likelihoods](@ref) is the complete list, and it is
+  considerably shorter than brms'.
+
+[Formula terms](@ref) has the full catalogue of what *is* supported.
+
+## Configuring priors
 
 Population coefficients use independent standard-normal priors by default.
 Override selected coefficients with separate `effect(...)` statements; the
