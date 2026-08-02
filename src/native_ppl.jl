@@ -105,6 +105,17 @@ NativePPLExpNode(name::Symbol, input::Symbol, axis::A) where {A} =
 native_node_name(::NativePPLExpNode{Name}) where {Name} = Name
 native_exp_input(::NativePPLExpNode{Name,Input}) where {Name,Input} = Input
 
+"""A fitted mean-centering transform over one raw input column."""
+struct NativePPLCenterNode{Name,Input,A,T} <: NativePPLNode
+    axis::A
+    mean::T
+end
+
+NativePPLCenterNode(name::Symbol, input::Symbol, axis::A, mean::T) where {A,T} =
+    NativePPLCenterNode{name,input,A,T}(axis, mean)
+native_node_name(::NativePPLCenterNode{Name}) where {Name} = Name
+native_center_input(::NativePPLCenterNode{Name,Input}) where {Name,Input} = Input
+
 """Independent standard-normal prior over an unconstrained parameter range."""
 struct NativePPLStandardNormalFactor{Parameter,R} <: NativePPLFactor
     unconstrained::R
@@ -398,6 +409,31 @@ function _native_ppl_sampling_rhs(brmi::BRMI, key::Symbol)
     getargs(operation, 2)
 end
 
+function _native_ppl_predictor_term(term, key::Symbol)
+    if term isa NamedColumn && parent(term) isa DataColumn
+        return (; column=term, transform=:identity)
+    end
+    if term isa ExprColumn && getf(term) === center
+        isempty(getkwargs(term)) || throw(NativePPLCapabilityError(
+            :predictor_transform,
+            "`center` in predictor `$key` cannot have keywords"))
+        args = getargs(term)
+        length(args) == 1 || throw(NativePPLCapabilityError(
+            :predictor_transform,
+            "`center` in predictor `$key` needs one raw data column"))
+        column = only(args)
+        column isa NamedColumn && parent(column) isa DataColumn ||
+            throw(NativePPLCapabilityError(
+                :predictor_transform,
+                "`center` in predictor `$key` must wrap one raw data column"))
+        return (; column, transform=:center)
+    end
+    throw(NativePPLCapabilityError(
+        :predictor_terms,
+        "`$key` must be exactly `1 + x` or `1 + center(x)`; " *
+        "offsets, interactions, groups, and other transforms are not lowered yet"))
+end
+
 function _native_ppl_affine_predictor(brmi::BRMI, key::Symbol)
     lhs, predictor = _native_ppl_sampling_rhs(brmi, key)
     _native_ppl_ref_name(lhs) === key || throw(NativePPLCapabilityError(
@@ -412,11 +448,14 @@ function _native_ppl_affine_predictor(brmi::BRMI, key::Symbol)
         "`$key` must have exactly an intercept and one continuous predictor"))
 
     intercepts = filter(term -> term isa Number && term == 1, terms)
-    data_terms = filter(term -> term isa NamedColumn && parent(term) isa DataColumn, terms)
-    length(intercepts) == 1 && length(data_terms) == 1 ||
+    length(intercepts) == 1 ||
         throw(NativePPLCapabilityError(:predictor_terms,
-            "`$key` must be exactly `1 + x`; offsets, interactions, and groups are not lowered yet"))
-    only(data_terms)
+            "`$key` must contain exactly one intercept"))
+    predictor_terms = filter(
+        term -> !(term isa Number && term == 1), terms)
+    length(predictor_terms) == 1 || throw(NativePPLCapabilityError(
+        :predictor_terms, "`$key` must contain exactly one predictor term"))
+    _native_ppl_predictor_term(only(predictor_terms), key)
 end
 
 function _native_ppl_exponential_prior(brmi::BRMI, key::Symbol)
@@ -435,6 +474,18 @@ function _native_ppl_exponential_prior(brmi::BRMI, key::Symbol)
     isfinite(scale) && scale > 0 || throw(NativePPLCapabilityError(
         :scale_prior, "`Exponential` scale for `$key` must be finite and positive"))
     scale
+end
+
+function _native_ppl_fit_center(values::AbstractVector, name::Symbol)
+    all(value -> value isa Real && isfinite(value), values) ||
+        throw(NativePPLCapabilityError(
+            :predictor_transform,
+            "`center($name)` requires finite real training values"))
+    mean = sum(values) / length(values)
+    isfinite(mean) || throw(NativePPLCapabilityError(
+        :predictor_transform,
+        "`center($name)` produced a non-finite fitted mean"))
+    mean
 end
 
 """
@@ -517,7 +568,8 @@ function _native_ppl_plan(brmi::BRMI)
         throw(NativePPLCapabilityError(
             :likelihood_scale, "Normal scale must be one named scalar parameter"))
 
-    predictor = _native_ppl_affine_predictor(brmi, location)
+    predictor_term = _native_ppl_affine_predictor(brmi, location)
+    predictor = predictor_term.column
     predictor_name = name(predictor)
     predictor_name === response && throw(NativePPLCapabilityError(
         :input_roles,
@@ -545,6 +597,8 @@ function _native_ppl_plan(brmi::BRMI)
         "predictor `$predictor_name` has $(length(x)) rows but `$response` has $(length(y))"))
     !isempty(y) || throw(NativePPLCapabilityError(
         :observation_axis, "the observation axis cannot be empty"))
+    center_mean = predictor_term.transform === :center ?
+        _native_ppl_fit_center(x, predictor_name) : nothing
 
     prior_scale = family === Normal ?
         _native_ppl_exponential_prior(brmi, scale_parameter) : nothing
@@ -568,8 +622,17 @@ function _native_ppl_plan(brmi::BRMI)
     coefficients = NativePPLParameter(
         coefficient_name, NativePPLRealSupport(), NativePPLIdentityTransform(),
         coefficient_axis, 1:2)
-    location_node = NativePPLAffineNode(location, predictor_name,
+    transform_node = predictor_term.transform === :center ?
+        NativePPLCenterNode(
+            Symbol(:center_, predictor_name), predictor_name,
+            observation_axis, center_mean) : nothing
+    location_input = transform_node === nothing ?
+        predictor_name : native_node_name(transform_node)
+    location_node = NativePPLAffineNode(location, location_input,
                                         observation_axis, 1, 2)
+    nodes = transform_node === nothing ?
+        (; location=location_node) :
+        (; transform=transform_node, location=location_node)
 
     coefficient_prior = NativePPLStandardNormalFactor(coefficient_name, 1:2)
     bindings = NamedTuple{(predictor_name, response)}((x, y))
@@ -588,7 +651,7 @@ function _native_ppl_plan(brmi::BRMI)
                scale=scale_axis),
             (; predictor=predictor_input, response=response_input),
             (; coefficients, scale),
-            (; location=location_node),
+            nodes,
             (; coefficient_prior, scale_prior, likelihood=likelihood_factor),
             _native_ppl_queries(observation_axis, likelihood_factor),
             bindings,
@@ -600,7 +663,7 @@ function _native_ppl_plan(brmi::BRMI)
             (; observation=observation_axis, coefficient=coefficient_axis),
             (; predictor=predictor_input, response=response_input),
             (; coefficients),
-            (; location=location_node),
+            nodes,
             (; coefficient_prior, likelihood=likelihood_factor),
             _native_ppl_queries(observation_axis, likelihood_factor),
             bindings,
@@ -613,7 +676,7 @@ function _native_ppl_plan(brmi::BRMI)
             (; observation=observation_axis, coefficient=coefficient_axis),
             (; predictor=predictor_input, response=response_input),
             (; coefficients),
-            (; location=location_node, rate=rate_node),
+            merge(nodes, (; rate=rate_node)),
             (; coefficient_prior, likelihood=likelihood_factor),
             _native_ppl_queries(observation_axis, likelihood_factor),
             bindings,
@@ -673,6 +736,29 @@ end
 _native_ppl_validate_response(::NativePPLFactor, ::NativePPLNoResponse, ::Symbol) =
     nothing
 
+function _native_ppl_apply_predictor!(
+    node::NativePPLCenterNode{Name,Input},
+    ::NativePPLInput{Input},
+    predictor::Vector{T},
+) where {Name,Input,T}
+    mean = T(node.mean)
+    isfinite(mean) || throw(ArgumentError(
+        "native PPL fitted center mean for `$Input` cannot be represented as $T"))
+    for i in eachindex(predictor)
+        predictor[i] -= mean
+        isfinite(predictor[i]) || throw(ArgumentError(
+            "native PPL centered predictor `$Input` is non-finite at row $i"))
+    end
+    predictor
+end
+
+function _native_ppl_apply_predictor!(plan::NativePPLPlan,
+                                      predictor::Vector)
+    hasproperty(plan.nodes, :transform) || return predictor
+    _native_ppl_apply_predictor!(
+        plan.nodes.transform, plan.inputs.predictor, predictor)
+end
+
 function _native_ppl_prepare_bindings(plan::NativePPLPlan, predictor,
                                       response, ::Type{T}) where {T<:AbstractFloat}
     isconcretetype(T) || throw(ArgumentError(
@@ -686,6 +772,7 @@ function _native_ppl_prepare_bindings(plan::NativePPLPlan, predictor,
             "native PPL predictor `$predictor_name` has " *
             "$(length(prepared_predictor)) rows but the observation axis has " *
             "$(length(plan.axes.observation))"))
+    _native_ppl_apply_predictor!(plan, prepared_predictor)
     _native_ppl_validate_response(
         plan.factors.likelihood, response, response_name)
     prepared_response = _native_ppl_prepare_response(
@@ -1194,13 +1281,35 @@ _native_ppl_rebind_likelihood(
     NativePPLPoissonFactor(Response, Rate, axis)
 
 function _native_ppl_rebind_nodes(plan::NativePPLPlan, observation_axis,
-                                  predictor_name::Symbol)
+                                  predictor_name::Symbol, predictor,
+                                  freeze_constants::Bool)
     old_location = plan.nodes.location
     location_name = native_node_name(old_location)
+    transform = if hasproperty(plan.nodes, :transform)
+        old_transform = plan.nodes.transform
+        native_center_input(old_transform) === predictor_name ||
+            throw(NativePPLCapabilityError(
+                :graph_identity,
+                "rebound centering node must consume the compiled raw predictor"))
+        mean = freeze_constants ? old_transform.mean :
+            _native_ppl_fit_center(predictor, predictor_name)
+        NativePPLCenterNode(
+            native_node_name(old_transform), predictor_name,
+            observation_axis, mean)
+    else
+        nothing
+    end
+    location_input = transform === nothing ?
+        predictor_name : native_node_name(transform)
+    native_affine_input(old_location) === location_input ||
+        throw(NativePPLCapabilityError(
+            :graph_identity,
+            "rebound affine node must consume the compiled predictor transform"))
     location = NativePPLAffineNode(
-        location_name, predictor_name, observation_axis,
+        location_name, location_input, observation_axis,
         old_location.intercept_index, old_location.slope_index)
-    hasproperty(plan.nodes, :rate) || return (; location)
+    nodes = transform === nothing ? (; location) : (; transform, location)
+    hasproperty(plan.nodes, :rate) || return nodes
 
     old_rate = plan.nodes.rate
     native_exp_input(old_rate) === location_name || throw(NativePPLCapabilityError(
@@ -1208,19 +1317,23 @@ function _native_ppl_rebind_nodes(plan::NativePPLPlan, observation_axis,
         "rebound exponential node must consume the compiled affine predictor"))
     rate = NativePPLExpNode(
         native_node_name(old_rate), location_name, observation_axis)
-    (; location, rate)
+    merge(nodes, (; rate))
 end
 
 """
-    _native_ppl_rebind(prepared, bindings; T=eltype(prepared))
+    _native_ppl_rebind(prepared, bindings;
+                       T=eltype(prepared), freeze_constants=true)
 
 Rebind the same graph semantics to compatible predictor and optional response
 vectors. Omitting the response creates an explicit prediction-only prepared
 value. The observation axis and every node/factor/query carrying it are rebuilt
 from the new row count; parameter coordinates and semantic identities are reused.
+Fitted preprocessing constants are reused by default. Pass
+`freeze_constants=false` to refit them from the rebound predictor.
 """
 function _native_ppl_rebind(prepared::NativePPLPrepared, bindings;
-                            T::Type{<:AbstractFloat}=eltype(prepared))
+                            T::Type{<:AbstractFloat}=eltype(prepared),
+                            freeze_constants::Bool=true)
     plan = prepared.plan
     predictor_name = native_input_name(plan.inputs.predictor)
     response_name = native_input_name(plan.inputs.response)
@@ -1249,7 +1362,8 @@ function _native_ppl_rebind(prepared::NativePPLPrepared, bindings;
     response_input = NativePPLInput(
         response_name, :response, observation_axis, response_eltype)
 
-    nodes = _native_ppl_rebind_nodes(plan, observation_axis, predictor_name)
+    nodes = _native_ppl_rebind_nodes(
+        plan, observation_axis, predictor_name, predictor, freeze_constants)
     likelihood = _native_ppl_rebind_likelihood(
         plan.factors.likelihood, observation_axis)
     new_bindings = response isa AbstractVector ?
