@@ -123,7 +123,14 @@ end
         BRM.NativePPLQuerySpec{
             :posterior_predictive, :per_draw, :rng, :caller_owned,
         }
-    @test all(query.axis === plan.axes.observation for query in plan.queries)
+    @test all(
+        BRM.native_output_axis(BRM.native_query_output(query)) ===
+            plan.axes.observation
+        for query in plan.queries)
+    @test all(
+        BRM.native_output_layout(BRM.native_query_output(query)) isa
+            BRM.NativePPLDenseVectorLayout
+        for query in plan.queries)
 end
 
 
@@ -225,6 +232,22 @@ end
     @test plan isa BRM.NativePPL.Plan
     @test prepared isa BRM.NativePPL.Prepared
     @test workspace isa BRM.NativePPL.Workspace
+
+    linear_query = BRM.NativePPL.LinearPredictor()
+    linear_signature = BRM.NativePPL.output_signature(plan, linear_query)
+    @test linear_signature isa BRM.NativePPL.OutputSignature
+    @test BRM.NativePPL.output_signature(prepared, linear_query) === linear_signature
+    @test BRM.NativePPL.output_axis(linear_signature) === plan.axes.observation
+    @test BRM.NativePPL.output_eltype(linear_signature, prepared) == Float64
+    @test BRM.NativePPL.output_eltype(linear_signature, Float32) == Float32
+    @test BRM.NativePPL.output_layout(linear_signature) isa
+          BRM.NativePPL.DenseVectorLayout
+    @test_throws MethodError BRM.NativePPL.output_eltype(linear_signature, Int)
+
+    @test BRM.NativePPL.output_signature(
+        plan, BRM.NativePPL.PointwiseLogLikelihood()) === linear_signature
+    @test BRM.NativePPL.output_signature(
+        plan, BRM.NativePPL.PosteriorPredictive()) === linear_signature
     @test BRM.NativePPL.logdensity!(workspace, prepared, position) ≈
           BRM._native_ppl_logdensity!(workspace, prepared, position)
     @test_throws ArgumentError BRM.NativePPL.logdensity_and_gradient!(
@@ -233,7 +256,7 @@ end
     linear_output = similar(prepared.response)
     @test BRM.NativePPL.evaluate!(
         linear_output, workspace, prepared, position,
-        BRM.NativePPL.LinearPredictor()) === linear_output
+        linear_query) === linear_output
     @test linear_output ≈ location
 
     pointwise_output = similar(prepared.response)
@@ -254,10 +277,10 @@ end
 
     BRM.NativePPL.evaluate!(
         linear_output, workspace, prepared, position,
-        BRM.NativePPL.LinearPredictor())
+        linear_query)
     query_allocations = @allocated(BRM.NativePPL.evaluate!(
         linear_output, workspace, prepared, position,
-        BRM.NativePPL.LinearPredictor()))
+        linear_query))
     BRM.NativePPL.simulate!(
         MersenneTwister(7), predictive, workspace, prepared, position)
     rng = MersenneTwister(7)
@@ -276,7 +299,14 @@ end
     @test rebound.plan.axes.observation.keys == Base.OneTo(2)
     @test rebound.plan.nodes.location.axis === rebound.plan.axes.observation
     @test rebound.plan.factors.likelihood.axis === rebound.plan.axes.observation
-    @test all(query.axis === rebound.plan.axes.observation for query in rebound.plan.queries)
+    @test all(
+        BRM.NativePPL.output_axis(BRM.NativePPL.output_signature(rebound, query)) ===
+            rebound.plan.axes.observation
+        for query in (
+            BRM.NativePPL.LinearPredictor(),
+            BRM.NativePPL.PointwiseLogLikelihood(),
+            BRM.NativePPL.PosteriorPredictive(),
+        ))
     @test prepared.plan.axes.observation.keys == Base.OneTo(3)
 
     @test_throws ArgumentError BRM.NativePPL.rebind(prepared, (; y=data.y))
@@ -294,6 +324,9 @@ end
         BRM.NativePPL.LinearPredictor())
     @test_throws ArgumentError BRM.NativePPL.evaluate!(
         zeros(Float32, 3), workspace, prepared, position,
+        BRM.NativePPL.LinearPredictor())
+    @test_throws ArgumentError BRM.NativePPL.evaluate!(
+        @view(zeros(3)[:]), workspace, prepared, position,
         BRM.NativePPL.LinearPredictor())
 end
 

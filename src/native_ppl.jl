@@ -142,7 +142,7 @@ native_output_axis(signature::NativePPLOutputSignature) = signature.axis
 native_output_eltype(signature::NativePPLOutputSignature, prepared) =
     native_output_eltype(signature.element_type, prepared)
 native_output_eltype(::NativePPLPreparedElementType, prepared) = eltype(prepared)
-native_output_eltype(::NativePPLPreparedElementType, ::Type{T}) where {T} = T
+native_output_eltype(::NativePPLPreparedElementType, ::Type{T}) where {T<:AbstractFloat} = T
 native_output_layout(signature::NativePPLOutputSignature) = signature.layout
 native_output_layout_accepts(::NativePPLDenseVectorLayout, output) =
     output isa DenseVector
@@ -871,8 +871,10 @@ output_signature(plan::Plan, query::BRM.NativePPLQuery) =
 output_signature(prepared::Prepared, query::BRM.NativePPLQuery) =
     output_signature(prepared.plan, query)
 output_axis(signature::OutputSignature) = BRM.native_output_axis(signature)
-output_eltype(signature::OutputSignature, source) =
-    BRM.native_output_eltype(signature, source)
+output_eltype(signature::OutputSignature, prepared::Prepared) =
+    BRM.native_output_eltype(signature, prepared)
+output_eltype(signature::OutputSignature, ::Type{T}) where {T<:AbstractFloat} =
+    BRM.native_output_eltype(signature, T)
 output_layout(signature::OutputSignature) = BRM.native_output_layout(signature)
 allocate_output(signature::OutputSignature, prepared::Prepared) =
     BRM._native_ppl_allocate_output(signature, prepared)
