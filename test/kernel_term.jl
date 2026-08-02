@@ -54,13 +54,13 @@ function kernel_lp_grad(model)
     (dim, lp, g)
 end
 
-# Consumer-side deterministic structural cell: 1-compartment depot analytical
-# solution. eta -> per-subject prediction vector over the subject's time grid.
+# Retired-v1 rejection fixture only. Current kernel models declare named BRM
+# linear predictors and write the structural cell inline; this helper exists so
+# the tests below can prove that the old `model=` keyword is rejected. It is not
+# an example of current SbPMX/BRM authoring syntax.
 StanBlocks.@deffun begin
-    kernel_depot_cell(ts::vector[nt], d::real, eta::vector[ne])::vector[nt] = begin
-        CL = 1.0 * exp(eta[1]); Vc = 10.0 * exp(eta[2]); Ka = 1.5 * exp(eta[3])
-        ke = CL / Vc
-        d * Ka / (Vc * (Ka - ke)) * (exp(-ke * ts) - exp(-Ka * ts))
+    retired_kernel_model_fixture(ts::vector[nt], d::real)::vector[nt] = begin
+        d * exp(-ts)
     end
 end
 
@@ -189,7 +189,8 @@ kernel_multiout_df() = (;
     @test_throws "no longer accepts `by=`" (@brm df begin
         pred ~ kernel(
             t, dose;
-            by=subject, model=kernel_depot_cell, n_eta=3, obs=Normal(dv, 1.0),
+            by=subject, model=retired_kernel_model_fixture, n_eta=3,
+            obs=Normal(dv, 1.0),
         )
     end)
     # Each retired keyword is refused on its own, so the check does not depend on
@@ -198,7 +199,7 @@ kernel_multiout_df() = (;
         pred ~ kernel(t, dose; n_eta=3)
     end)
     @test_throws "no longer accepts `model=`" (@brm df begin
-        pred ~ kernel(t, dose; model=kernel_depot_cell)
+        pred ~ kernel(t, dose; model=retired_kernel_model_fixture)
     end)
     @test_throws "no longer accepts `obs=`" (@brm df begin
         pred ~ kernel(t, dose; obs=Normal(dv, 1.0))
@@ -283,7 +284,7 @@ end
     end
 end
 
-@testset "kernel(...) do-block — multi-output (two eta blocks, per-output columns)" begin
+@testset "kernel(...) do-block — multi-output (two named BSV buckets, per-output columns)" begin
     df = kernel_multiout_df()
 
     @testset "build + transpile + stanc" begin

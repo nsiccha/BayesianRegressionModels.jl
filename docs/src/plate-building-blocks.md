@@ -236,7 +236,8 @@ user-supplied group-local kernel:
 end
 ```
 
-The public spelling has since been decided and shipped: per-subject quantities
+**Current syntax:** the public spelling has been decided and shipped:
+per-subject quantities
 are ordinary formula linear predictors, the cell is an inline `do`-block, and
 observations are `~` statements inside it. The retired `by=` / `n_eta=` /
 `model=` / `obs=` keywords are rejected loudly. The backend
@@ -244,7 +245,10 @@ contract is simply “inline this cell model under a plate keyed by the grouping
 derived from those linear predictors.” A ragged observation in that cell emits
 a flat predictive draw and one aggregate log likelihood per subject; descriptor
 `segments` carries the inclusive subject boundaries. A dense per-cell
-observation emits its predictive draw but still has no pointwise companion.
+observation emits its predictive draw but still has no pointwise companion. A
+predictor may be named `eta_CL` if that is scientifically natural, but that is
+only the LP's name: there is no eta-vector API and no positional `eta[i]`
+convention in the current kernel contract.
 
 ### Secondary row axes — `ragged(x, group)`
 
