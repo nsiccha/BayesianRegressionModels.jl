@@ -26,10 +26,10 @@ const SmallIndexedReparametrization = WarmupHMC.IndexedReparametrization{
 # retain WarmupHMC's generic DifferentiationInterface path.
 function LogDensityProblems.logdensity_and_gradient(
     problem::WarmupHMC.ReparametrizedProblem{
-        SmallIndexedReparametrization,P,B,S,
+        SmallIndexedReparametrization,P,B,
     },
     x::AbstractVector,
-) where {P,B,S}
+) where {P,B}
     ljac, y = problem.reparametrizer(x)
     ld, model_gradient =
         LogDensityProblems.logdensity_and_gradient(problem.problem, y)
