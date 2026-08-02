@@ -553,8 +553,6 @@ function _native_ppl_check_location_execution(workspace::NativePPLWorkspace,
     observations = length(prepared.plan.axes.observation)
     length(position) == dimension || throw(DimensionMismatch(
         "native PPL position has length $(length(position)); expected $dimension"))
-    length(workspace.gradient) == dimension || throw(DimensionMismatch(
-        "native PPL workspace gradient has length $(length(workspace.gradient)); expected $dimension"))
     length(prepared.predictor) == observations || throw(DimensionMismatch(
         "native PPL prepared predictor has $(length(prepared.predictor)) rows; expected $observations"))
     length(workspace.primal.location) == observations || throw(DimensionMismatch(
@@ -563,8 +561,6 @@ function _native_ppl_check_location_execution(workspace::NativePPLWorkspace,
         "native PPL position eltype $(eltype(position)) does not match workspace eltype $(eltype(workspace))"))
     eltype(prepared) === eltype(workspace) || throw(ArgumentError(
         "native PPL prepared eltype $(eltype(prepared)) does not match workspace eltype $(eltype(workspace))"))
-    Base.mightalias(position, workspace.gradient) && throw(ArgumentError(
-        "native PPL position must not alias the workspace gradient"))
     Base.mightalias(position, workspace.primal.location) && throw(ArgumentError(
         "native PPL position must not alias the workspace location buffer"))
     nothing
@@ -575,13 +571,18 @@ function _native_ppl_check_execution(workspace::NativePPLWorkspace,
                                      position::AbstractVector)
     _native_ppl_check_location_execution(workspace, prepared, position)
     response = _native_ppl_require_response(prepared, "log density")
+    dimension = LogDensityProblems.dimension(prepared)
     observations = length(prepared.plan.axes.observation)
+    length(workspace.gradient) == dimension || throw(DimensionMismatch(
+        "native PPL workspace gradient has length $(length(workspace.gradient)); expected $dimension"))
     length(response) == observations || throw(DimensionMismatch(
         "native PPL prepared response has $(length(response)) rows; expected $observations"))
     length(workspace.primal.pointwise_loglikelihood) == observations ||
         throw(DimensionMismatch(
             "native PPL workspace pointwise likelihood has " *
             "$(length(workspace.primal.pointwise_loglikelihood)) rows; expected $observations"))
+    Base.mightalias(position, workspace.gradient) && throw(ArgumentError(
+        "native PPL position must not alias the workspace gradient"))
     Base.mightalias(position, workspace.primal.pointwise_loglikelihood) &&
         throw(ArgumentError(
             "native PPL position must not alias the workspace pointwise likelihood buffer"))

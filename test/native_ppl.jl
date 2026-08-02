@@ -27,6 +27,21 @@ function steady_state_allocations(workspace, prepared, position)
     (; primal, gradient)
 end
 
+function allocating_query_bytes(workspace, prepared, position)
+    linear = BRM.NativePPL.LinearPredictor()
+    predictive = BRM.NativePPL.PosteriorPredictive()
+    BRM.NativePPL.evaluate(workspace, prepared, position, linear)
+    BRM.NativePPL.simulate(
+        MersenneTwister(9), workspace, prepared, position, predictive)
+    allocation = @allocated(BRM.NativePPL.allocate_output(prepared, linear))
+    evaluation = @allocated(
+        BRM.NativePPL.evaluate(workspace, prepared, position, linear))
+    rng = MersenneTwister(9)
+    simulation = @allocated(
+        BRM.NativePPL.simulate(rng, workspace, prepared, position, predictive))
+    (; allocation, evaluation, simulation)
+end
+
 @testset "typed native Gaussian plan" begin
     data = (;
         dose=[-1.0, 0.0, 2.0],
@@ -248,6 +263,20 @@ end
         plan, BRM.NativePPL.PointwiseLogLikelihood()) === linear_signature
     @test BRM.NativePPL.output_signature(
         plan, BRM.NativePPL.PosteriorPredictive()) === linear_signature
+
+    allocated_output = BRM.NativePPL.allocate_output(prepared, linear_query)
+    @test allocated_output isa Vector{Float64}
+    @test axes(allocated_output, 1) == plan.axes.observation.keys
+    @test length(allocated_output) == length(plan.axes.observation)
+    @test BRM.NativePPL.allocate_output(linear_signature, prepared) isa
+          Vector{Float64}
+
+    bad_signature = BRM.NativePPL.OutputSignature(
+        BRM.NativePPLAxis(:observation, (:a, :b)),
+        linear_signature.element_type, linear_signature.layout)
+    err = capability_error(
+        () -> BRM.NativePPL.allocate_output(bad_signature, prepared))
+    @test err.capability == :output_layout
     @test BRM.NativePPL.logdensity!(workspace, prepared, position) ≈
           BRM._native_ppl_logdensity!(workspace, prepared, position)
     @test_throws ArgumentError BRM.NativePPL.logdensity_and_gradient!(
@@ -258,6 +287,12 @@ end
         linear_output, workspace, prepared, position,
         linear_query) === linear_output
     @test linear_output ≈ location
+
+    allocated_linear = BRM.NativePPL.evaluate(
+        workspace, prepared, position, linear_query)
+    @test allocated_linear isa Vector{Float64}
+    @test allocated_linear ≈ location
+    @test allocated_linear !== linear_output
 
     pointwise_output = similar(prepared.response)
     @test BRM.NativePPL.evaluate!(
@@ -274,6 +309,16 @@ end
     @test BRM.NativePPL.simulate!(
         MersenneTwister(41), predictive, workspace, prepared, position) === predictive
     @test predictive ≈ expected_predictive
+
+    allocated_predictive = BRM.NativePPL.simulate(
+        MersenneTwister(41), workspace, prepared, position)
+    @test allocated_predictive isa Vector{Float64}
+    @test allocated_predictive ≈ expected_predictive
+    @test allocated_predictive !== predictive
+
+    allocating_bytes = allocating_query_bytes(workspace, prepared, position)
+    @test allocating_bytes.evaluation == allocating_bytes.allocation
+    @test allocating_bytes.simulation == allocating_bytes.allocation
 
     BRM.NativePPL.evaluate!(
         linear_output, workspace, prepared, position,
@@ -308,6 +353,36 @@ end
             BRM.NativePPL.PosteriorPredictive(),
         ))
     @test prepared.plan.axes.observation.keys == Base.OneTo(3)
+
+    rebound_output = BRM.NativePPL.allocate_output(
+        rebound, BRM.NativePPL.LinearPredictor())
+    @test rebound_output isa Vector{Float32}
+    @test length(rebound_output) == 2
+
+    sliced = BRM.NativePPL.prepare(plan)
+    pop!(sliced.response)
+    sliced_workspace = BRM.NativePPL.workspace(sliced)
+    pop!(sliced_workspace.primal.pointwise_loglikelihood)
+    sliced_location = BRM.NativePPL.allocate_output(sliced, linear_query)
+    location_only_position = [position[1], position[2], NaN]
+    @test BRM.NativePPL.evaluate!(
+        sliced_location, sliced_workspace, sliced, location_only_position,
+        linear_query) === sliced_location
+    @test sliced_location ≈ location
+    sliced_prediction = BRM.NativePPL.simulate(
+        MersenneTwister(41), sliced_workspace, sliced, position)
+    @test sliced_prediction ≈ expected_predictive
+    @test_throws DimensionMismatch BRM.NativePPL.evaluate!(
+        similar(sliced_location), sliced_workspace, sliced, position,
+        BRM.NativePPL.PointwiseLogLikelihood())
+
+    gradient_independent_workspace = BRM.NativePPL.workspace(prepared)
+    empty!(gradient_independent_workspace.gradient)
+    @test BRM.NativePPL.evaluate!(
+        similar(location), gradient_independent_workspace, prepared,
+        location_only_position, linear_query) ≈ location
+    @test_throws DimensionMismatch BRM.NativePPL.logdensity!(
+        gradient_independent_workspace, prepared, position)
 
     @test_throws ArgumentError BRM.NativePPL.rebind(prepared, (; y=data.y))
     @test_throws ArgumentError BRM.NativePPL.rebind(
