@@ -22,16 +22,50 @@ abstract type NativePPLSupport end
 struct NativePPLRealSupport <: NativePPLSupport end
 struct NativePPLPositiveSupport <: NativePPLSupport end
 
+"""A typed map from an unconstrained coordinate to a parameter's support."""
+abstract type NativePPLTransform{S<:NativePPLSupport} end
+struct NativePPLIdentityTransform <: NativePPLTransform{NativePPLRealSupport} end
+struct NativePPLExpTransform <: NativePPLTransform{NativePPLPositiveSupport} end
+
+@inline native_transform_forward(::NativePPLIdentityTransform, value) = value
+@inline native_transform_forward(::NativePPLExpTransform, value) = exp(value)
+@inline native_transform_logabsdetjac(::NativePPLIdentityTransform, value) = zero(value)
+@inline native_transform_logabsdetjac(::NativePPLExpTransform, value) = value
+
 """A parameter block and its coordinates in the flat unconstrained vector."""
-struct NativePPLParameter{Name,S<:NativePPLSupport,A,R}
+struct NativePPLParameter{
+    Name,S<:NativePPLSupport,Tr<:NativePPLTransform{S},A,R,
+}
     support::S
+    transform::Tr
     axis::A
     unconstrained::R
 end
 
-NativePPLParameter(name::Symbol, support::S, axis::A, unconstrained::R) where {S,A,R} =
-    NativePPLParameter{name,S,A,R}(support, axis, unconstrained)
+NativePPLParameter(name::Symbol, support::S, transform::Tr,
+                   axis::A, unconstrained::R) where {S,Tr,A,R} =
+    NativePPLParameter{name,S,Tr,A,R}(support, transform, axis, unconstrained)
 native_parameter_name(::NativePPLParameter{Name}) where {Name} = Name
+
+@inline function native_parameter_value(parameter::NativePPLParameter,
+                                         position::AbstractVector,
+                                         coordinate::Int)
+    native_transform_forward(parameter.transform, position[coordinate])
+end
+
+@inline function native_parameter_logabsdetjac(parameter::NativePPLParameter,
+                                               position::AbstractVector,
+                                               coordinate::Int)
+    native_transform_logabsdetjac(parameter.transform, position[coordinate])
+end
+
+@inline native_parameter_value(parameter::NativePPLParameter,
+                               position::AbstractVector) =
+    native_parameter_value(parameter, position, first(parameter.unconstrained))
+@inline native_parameter_logabsdetjac(parameter::NativePPLParameter,
+                                      position::AbstractVector) =
+    native_parameter_logabsdetjac(
+        parameter, position, first(parameter.unconstrained))
 
 abstract type NativePPLNode end
 abstract type NativePPLFactor end
@@ -57,7 +91,7 @@ end
 NativePPLStandardNormalFactor(parameter::Symbol, unconstrained::R) where {R} =
     NativePPLStandardNormalFactor{parameter,R}(unconstrained)
 
-"""Exponential prior on an exp-transformed scalar, including its Jacobian."""
+"""Exponential prior on a constrained scalar; its parameter owns the transform."""
 struct NativePPLExponentialFactor{Parameter,T} <: NativePPLFactor
     unconstrained_index::Int
     scale::T
@@ -367,10 +401,12 @@ function _native_ppl_plan(brmi::BRMI)
     response_input = NativePPLInput(response, :response,
                                     observation_axis, eltype(y))
     coefficient_name = Symbol(:beta_, location)
-    coefficients = NativePPLParameter(coefficient_name, NativePPLRealSupport(),
-                                      coefficient_axis, 1:2)
-    scale = NativePPLParameter(scale_parameter, NativePPLPositiveSupport(),
-                               scale_axis, 3:3)
+    coefficients = NativePPLParameter(
+        coefficient_name, NativePPLRealSupport(), NativePPLIdentityTransform(),
+        coefficient_axis, 1:2)
+    scale = NativePPLParameter(
+        scale_parameter, NativePPLPositiveSupport(), NativePPLExpTransform(),
+        scale_axis, 3:3)
     location_node = NativePPLAffineNode(location, predictor_name,
                                         observation_axis, 1, 2)
 
@@ -467,19 +503,28 @@ const _NATIVE_PPL_LOG2PI = log(2π)
                                                buffers::NativePPLBuffers{T}) where {T}
     node = prepared.plan.nodes.location
     scale_factor = prepared.plan.factors.scale_prior
-    intercept = position[node.intercept_index]
-    slope = position[node.slope_index]
-    log_scale = position[scale_factor.unconstrained_index]
-    scale = exp(log_scale)
+    coefficient_parameter = prepared.plan.parameters.coefficients
+    scale_parameter = prepared.plan.parameters.scale
+    intercept = native_parameter_value(
+        coefficient_parameter, position, node.intercept_index)
+    slope = native_parameter_value(
+        coefficient_parameter, position, node.slope_index)
+    intercept_logjac = native_parameter_logabsdetjac(
+        coefficient_parameter, position, node.intercept_index)
+    slope_logjac = native_parameter_logabsdetjac(
+        coefficient_parameter, position, node.slope_index)
+    scale = native_parameter_value(scale_parameter, position)
+    scale_logjac = native_parameter_logabsdetjac(scale_parameter, position)
+    log_scale = log(scale)
     prior_scale = T(scale_factor.scale)
     half = T(0.5)
     normalizer = T(_NATIVE_PPL_LOG2PI) * half
 
     # Standard-normal population coefficients, then Exponential(scale_prior)
-    # over exp(log_scale), including the positive transform's log Jacobian.
-    density = -half * intercept * intercept - normalizer
-    density += -half * slope * slope - normalizer
-    density += -log(prior_scale) - scale / prior_scale + log_scale
+    # over the constrained scale, including its parameter-owned log Jacobian.
+    density = -half * intercept * intercept - normalizer + intercept_logjac
+    density += -half * slope * slope - normalizer + slope_logjac
+    density += -log(prior_scale) - scale / prior_scale + scale_logjac
 
     inverse_scale = inv(scale)
     for i in eachindex(prepared.response)
@@ -632,8 +677,7 @@ function _native_ppl_simulate!(rng::AbstractRNG,
                                query::NativePPLPosteriorPredictive)
     _native_ppl_check_query_output(output, prepared, query)
     _native_ppl_logdensity!(workspace, prepared, position)
-    scale_index = prepared.plan.factors.scale_prior.unconstrained_index
-    scale = exp(position[scale_index])
+    scale = native_parameter_value(prepared.plan.parameters.scale, position)
     T = eltype(workspace)
     for i in eachindex(output)
         output[i] = workspace.primal.location[i] + scale * randn(rng, T)
