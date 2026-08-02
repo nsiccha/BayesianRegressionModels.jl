@@ -160,6 +160,9 @@ struct NativePPLFixedElementType{T} end
 """Dense, one-dimensional caller-owned output layout."""
 struct NativePPLDenseVectorLayout end
 
+"""Dense draw-by-observation output owned by the caller."""
+struct NativePPLDenseMatrixLayout end
+
 """Pre-execution semantic axis, element-type rule, and layout for one output."""
 struct NativePPLOutputSignature{A,E,L}
     axis::A
@@ -167,15 +170,35 @@ struct NativePPLOutputSignature{A,E,L}
     layout::L
 end
 
+"""Pre-execution signature for a draw-by-observation query block."""
+struct NativePPLBatchOutputSignature{D,A,E,L}
+    draw_axis::D
+    observation_axis::A
+    element_type::E
+    layout::L
+end
+
 native_output_axis(signature::NativePPLOutputSignature) = signature.axis
+native_output_axis(signature::NativePPLBatchOutputSignature) =
+    signature.observation_axis
+native_output_axes(signature::NativePPLOutputSignature) = (signature.axis,)
+native_output_axes(signature::NativePPLBatchOutputSignature) =
+    (signature.draw_axis, signature.observation_axis)
+native_output_draw_axis(signature::NativePPLBatchOutputSignature) =
+    signature.draw_axis
 native_output_eltype(signature::NativePPLOutputSignature, prepared) =
+    native_output_eltype(signature.element_type, prepared)
+native_output_eltype(signature::NativePPLBatchOutputSignature, prepared) =
     native_output_eltype(signature.element_type, prepared)
 native_output_eltype(::NativePPLPreparedElementType, prepared) = eltype(prepared)
 native_output_eltype(::NativePPLPreparedElementType, ::Type{T}) where {T<:AbstractFloat} = T
 native_output_eltype(::NativePPLFixedElementType{T}, _) where {T} = T
 native_output_layout(signature::NativePPLOutputSignature) = signature.layout
+native_output_layout(signature::NativePPLBatchOutputSignature) = signature.layout
 native_output_layout_accepts(::NativePPLDenseVectorLayout, output) =
     output isa DenseVector
+native_output_layout_accepts(::NativePPLDenseMatrixLayout, output) =
+    output isa DenseMatrix
 
 """
 Output, frequency, effect, and lifetime contract for one graph query.
@@ -1252,6 +1275,33 @@ _native_ppl_query_spec(plan::NativePPLPlan, ::NativePPLPosteriorPredictive) =
 _native_ppl_query_spec(prepared::NativePPLPrepared, query::NativePPLQuery) =
     _native_ppl_query_spec(prepared.plan, query)
 
+function _native_ppl_batch_output_signature(
+    prepared::NativePPLPrepared,
+    positions::AbstractMatrix,
+    query::NativePPLQuery,
+)
+    dimension = LogDensityProblems.dimension(prepared)
+    size(positions, 2) == dimension || throw(DimensionMismatch(
+        "native PPL draw matrix has $(size(positions, 2)) coordinate columns; " *
+        "expected $dimension"))
+    axes(positions, 1) == Base.OneTo(size(positions, 1)) ||
+        throw(ArgumentError(
+            "native PPL batch queries require a one-based draw axis; got " *
+            "$(axes(positions, 1))"))
+    axes(positions, 2) == Base.OneTo(dimension) || throw(ArgumentError(
+        "native PPL batch queries require one-based coordinate columns; got " *
+        "$(axes(positions, 2))"))
+
+    element_signature = native_query_output(
+        _native_ppl_query_spec(prepared, query))
+    NativePPLBatchOutputSignature(
+        NativePPLAxis(:draw, Base.OneTo(size(positions, 1))),
+        native_output_axis(element_signature),
+        element_signature.element_type,
+        NativePPLDenseMatrixLayout(),
+    )
+end
+
 function _native_ppl_allocate_output(signature::NativePPLOutputSignature,
                                      prepared::NativePPLPrepared)
     _native_ppl_allocate_output(
@@ -1268,6 +1318,30 @@ function _native_ppl_allocate_output(::NativePPLDenseVectorLayout,
         "got $(axis.keys)"))
     T = native_output_eltype(signature, prepared)
     Vector{T}(undef, length(axis))
+end
+
+function _native_ppl_allocate_output(signature::NativePPLBatchOutputSignature,
+                                     prepared::NativePPLPrepared)
+    _native_ppl_allocate_output(
+        native_output_layout(signature), signature, prepared)
+end
+
+function _native_ppl_allocate_output(::NativePPLDenseMatrixLayout,
+                                     signature::NativePPLBatchOutputSignature,
+                                     prepared::NativePPLPrepared)
+    draw_axis, observation_axis = native_output_axes(signature)
+    draw_axis.keys == Base.OneTo(length(draw_axis)) ||
+        throw(NativePPLCapabilityError(
+            :output_layout,
+            "dense-matrix allocation requires a one-based draw axis; got " *
+            "$(draw_axis.keys)"))
+    observation_axis.keys == Base.OneTo(length(observation_axis)) ||
+        throw(NativePPLCapabilityError(
+            :output_layout,
+            "dense-matrix allocation requires a one-based observation axis; got " *
+            "$(observation_axis.keys)"))
+    T = native_output_eltype(signature, prepared)
+    Matrix{T}(undef, length(draw_axis), length(observation_axis))
 end
 
 function _native_ppl_check_query_output(output::AbstractVector,
@@ -1292,6 +1366,80 @@ function _native_ppl_check_query_output(output::AbstractVector,
         "native PPL `$query_name` output has length $(length(output)); expected " *
         "$(length(expected_axis)) for the observation axis"))
     output
+end
+
+function _native_ppl_check_batch_execution(
+    output::AbstractMatrix,
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+    positions::AbstractMatrix,
+    query::NativePPLQuery,
+)
+    signature = _native_ppl_batch_output_signature(prepared, positions, query)
+    draw_axis, observation_axis = native_output_axes(signature)
+    axes(output) == (draw_axis.keys, observation_axis.keys) ||
+        throw(DimensionMismatch(
+            "native PPL batch output axes $(axes(output)) do not match " *
+            "declared draw-by-observation axes " *
+            "$((draw_axis.keys, observation_axis.keys))"))
+    expected_eltype = native_output_eltype(signature, prepared)
+    eltype(output) === expected_eltype || throw(ArgumentError(
+        "native PPL batch output eltype $(eltype(output)) does not match " *
+        "declared output eltype $expected_eltype"))
+    native_output_layout_accepts(native_output_layout(signature), output) ||
+        throw(ArgumentError(
+            "native PPL batch output $(typeof(output)) does not satisfy " *
+            "declared layout $(typeof(native_output_layout(signature)))"))
+    eltype(positions) === eltype(workspace) || throw(ArgumentError(
+        "native PPL draw matrix eltype $(eltype(positions)) does not match " *
+        "workspace eltype $(eltype(workspace))"))
+    eltype(prepared) === eltype(workspace) || throw(ArgumentError(
+        "native PPL prepared eltype $(eltype(prepared)) does not match " *
+        "workspace eltype $(eltype(workspace))"))
+    length(workspace.primal.location) == length(observation_axis) ||
+        throw(DimensionMismatch(
+            "native PPL workspace location has " *
+            "$(length(workspace.primal.location)) rows; expected " *
+            "$(length(observation_axis))"))
+    Base.mightalias(output, positions) && throw(ArgumentError(
+        "native PPL batch output must not alias the draw matrix"))
+    Base.mightalias(output, workspace.primal.location) && throw(ArgumentError(
+        "native PPL batch output must not alias the workspace location buffer"))
+    Base.mightalias(output, workspace.primal.pointwise_loglikelihood) &&
+        throw(ArgumentError(
+            "native PPL batch output must not alias the workspace pointwise buffer"))
+    Base.mightalias(output, workspace.gradient) && throw(ArgumentError(
+        "native PPL batch output must not alias the workspace gradient buffer"))
+    signature
+end
+
+_native_ppl_check_batch_query_state(
+    ::NativePPLWorkspace, ::NativePPLPrepared, ::NativePPLLinearPredictor,
+) = nothing
+_native_ppl_check_batch_query_state(
+    ::NativePPLWorkspace, ::NativePPLPrepared, ::NativePPLPosteriorPredictive,
+) = nothing
+function _native_ppl_check_batch_query_state(
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+    ::NativePPLPointwiseLogLikelihood,
+)
+    response = _native_ppl_require_response(
+        prepared, "batched pointwise log likelihood")
+    observations = length(prepared.plan.axes.observation)
+    length(response) == observations || throw(DimensionMismatch(
+        "native PPL prepared response has $(length(response)) rows; expected " *
+        "$observations"))
+    length(workspace.primal.pointwise_loglikelihood) == observations ||
+        throw(DimensionMismatch(
+            "native PPL workspace pointwise likelihood has " *
+            "$(length(workspace.primal.pointwise_loglikelihood)) rows; expected " *
+            "$observations"))
+    length(workspace.gradient) == LogDensityProblems.dimension(prepared) ||
+        throw(DimensionMismatch(
+            "native PPL workspace gradient has $(length(workspace.gradient)) " *
+            "coordinates; expected $(LogDensityProblems.dimension(prepared))"))
+    nothing
 end
 
 function _native_ppl_evaluate!(output::AbstractVector,
@@ -1328,6 +1476,69 @@ function _native_ppl_simulate!(rng::AbstractRNG,
         prepared, position, workspace.primal)
 end
 
+function _native_ppl_evaluate_draws!(
+    output::AbstractMatrix,
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+    positions::AbstractMatrix,
+    query::NativePPLLinearPredictor,
+)
+    _native_ppl_check_batch_execution(
+        output, workspace, prepared, positions, query)
+    _native_ppl_check_batch_query_state(workspace, prepared, query)
+    for draw in axes(positions, 1)
+        _native_ppl_location!(
+            workspace, prepared, @view(positions[draw, :]))
+        for observation in axes(output, 2)
+            @inbounds output[draw, observation] =
+                workspace.primal.location[observation]
+        end
+    end
+    output
+end
+
+function _native_ppl_evaluate_draws!(
+    output::AbstractMatrix,
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+    positions::AbstractMatrix,
+    query::NativePPLPointwiseLogLikelihood,
+)
+    _native_ppl_check_batch_execution(
+        output, workspace, prepared, positions, query)
+    _native_ppl_check_batch_query_state(workspace, prepared, query)
+    for draw in axes(positions, 1)
+        _native_ppl_logdensity!(
+            workspace, prepared, @view(positions[draw, :]))
+        for observation in axes(output, 2)
+            @inbounds output[draw, observation] =
+                workspace.primal.pointwise_loglikelihood[observation]
+        end
+    end
+    output
+end
+
+function _native_ppl_simulate_draws!(
+    rng::AbstractRNG,
+    output::AbstractMatrix,
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+    positions::AbstractMatrix,
+    query::NativePPLPosteriorPredictive,
+)
+    _native_ppl_check_batch_execution(
+        output, workspace, prepared, positions, query)
+    _native_ppl_check_batch_query_state(workspace, prepared, query)
+    for draw in axes(positions, 1)
+        position = @view positions[draw, :]
+        _native_ppl_location!(workspace, prepared, position)
+        _native_ppl_model_simulate!(
+            rng, prepared.plan.factors.likelihood,
+            @view(output[draw, :]), prepared, position, workspace.primal)
+    end
+    output
+end
+
 """
 Namespaced walking-skeleton API for the native PPL.
 
@@ -1344,7 +1555,9 @@ const Prepared = BRM.NativePPLPrepared
 const Workspace = BRM.NativePPLWorkspace
 const CapabilityError = BRM.NativePPLCapabilityError
 const OutputSignature = BRM.NativePPLOutputSignature
+const BatchOutputSignature = BRM.NativePPLBatchOutputSignature
 const DenseVectorLayout = BRM.NativePPLDenseVectorLayout
+const DenseMatrixLayout = BRM.NativePPLDenseMatrixLayout
 const LinearPredictor = BRM.NativePPLLinearPredictor
 const PointwiseLogLikelihood = BRM.NativePPLPointwiseLogLikelihood
 const PosteriorPredictive = BRM.NativePPLPosteriorPredictive
@@ -1362,13 +1575,28 @@ output_signature(plan::Plan, query::BRM.NativePPLQuery) =
     BRM.native_query_output(BRM._native_ppl_query_spec(plan, query))
 output_signature(prepared::Prepared, query::BRM.NativePPLQuery) =
     output_signature(prepared.plan, query)
+batch_output_signature(prepared::Prepared, positions::AbstractMatrix,
+                       query::BRM.NativePPLQuery) =
+    BRM._native_ppl_batch_output_signature(prepared, positions, query)
 output_axis(signature::OutputSignature) = BRM.native_output_axis(signature)
+output_axis(signature::BatchOutputSignature) = BRM.native_output_axis(signature)
+output_axes(signature::Union{OutputSignature,BatchOutputSignature}) =
+    BRM.native_output_axes(signature)
+output_draw_axis(signature::BatchOutputSignature) =
+    BRM.native_output_draw_axis(signature)
 output_eltype(signature::OutputSignature, prepared::Prepared) =
+    BRM.native_output_eltype(signature, prepared)
+output_eltype(signature::BatchOutputSignature, prepared::Prepared) =
     BRM.native_output_eltype(signature, prepared)
 output_eltype(signature::OutputSignature, ::Type{T}) where {T<:AbstractFloat} =
     BRM.native_output_eltype(signature, T)
+output_eltype(signature::BatchOutputSignature, ::Type{T}) where {T<:AbstractFloat} =
+    BRM.native_output_eltype(signature, T)
 output_layout(signature::OutputSignature) = BRM.native_output_layout(signature)
+output_layout(signature::BatchOutputSignature) = BRM.native_output_layout(signature)
 allocate_output(signature::OutputSignature, prepared::Prepared) =
+    BRM._native_ppl_allocate_output(signature, prepared)
+allocate_output(signature::BatchOutputSignature, prepared::Prepared) =
     BRM._native_ppl_allocate_output(signature, prepared)
 allocate_output(prepared::Prepared, query::BRM.NativePPLQuery) =
     allocate_output(output_signature(prepared, query), prepared)
@@ -1395,13 +1623,41 @@ function simulate(rng::BRM.AbstractRNG, work::Workspace, prepared::Prepared,
     output = allocate_output(prepared, query)
     simulate!(rng, output, work, prepared, position, query)
 end
+evaluate_draws!(output::AbstractMatrix, work::Workspace, prepared::Prepared,
+                positions::AbstractMatrix, query::BRM.NativePPLQuery) =
+    BRM._native_ppl_evaluate_draws!(
+        output, work, prepared, positions, query)
+function evaluate_draws(work::Workspace, prepared::Prepared,
+                        positions::AbstractMatrix,
+                        query::BRM.NativePPLQuery)
+    signature = batch_output_signature(prepared, positions, query)
+    output = allocate_output(signature, prepared)
+    evaluate_draws!(output, work, prepared, positions, query)
+end
+simulate_draws!(rng::BRM.AbstractRNG, output::AbstractMatrix,
+                work::Workspace, prepared::Prepared,
+                positions::AbstractMatrix,
+                query::BRM.NativePPLQuery=PosteriorPredictive()) =
+    BRM._native_ppl_simulate_draws!(
+        rng, output, work, prepared, positions, query)
+function simulate_draws(rng::BRM.AbstractRNG, work::Workspace,
+                        prepared::Prepared, positions::AbstractMatrix,
+                        query::BRM.NativePPLQuery=PosteriorPredictive())
+    signature = batch_output_signature(prepared, positions, query)
+    output = allocate_output(signature, prepared)
+    simulate_draws!(rng, output, work, prepared, positions, query)
+end
 
-export Plan, Prepared, Workspace, CapabilityError, OutputSignature
-export DenseVectorLayout
+export Plan, Prepared, Workspace, CapabilityError
+export OutputSignature, BatchOutputSignature
+export DenseVectorLayout, DenseMatrixLayout
 export LinearPredictor, PointwiseLogLikelihood, PosteriorPredictive
 export compile, prepare, workspace, rebind, has_response
-export output_signature, output_axis, output_eltype, output_layout
+export output_signature, batch_output_signature
+export output_axis, output_axes, output_draw_axis, output_eltype, output_layout
 export allocate_output, evaluate, simulate
+export evaluate_draws, simulate_draws
 export logdensity!, logdensity_and_gradient!, evaluate!, simulate!
+export evaluate_draws!, simulate_draws!
 
 end
