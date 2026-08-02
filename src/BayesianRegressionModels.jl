@@ -20,6 +20,7 @@ using StatsBase: AbstractWeights, AnalyticWeights, FrequencyWeights,
                  aweights, fweights, pweights, uweights, weights
 import CategoricalArrays as CA
 include("likelihood_distributions.jl")
+include("native_ppl.jl")
 include("vimpl.jl")
 
 # SBBRMI — StanBlocks backend. Lowers a BRMI into a StanBlocks SlicModel
@@ -81,6 +82,7 @@ export Data, MaybeData, maybedata
 export AbstractColumn, MissingColumn, DataColumn, NamedColumn,
        ExprColumn, LikelihoodColumn, MaterializedColumn
 export BRMI, VBRMI, SBBRMI, GenerativeDeclaration, GenerativePlan
+export NativePPL
 export BRMDescriptor, BRMInput, BRMOutput, BRMOperation, BRMHighlight
 export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
        brm_operation, brm_execute, brm_columns, required_brm_inputs
