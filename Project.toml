@@ -22,6 +22,7 @@ Enzyme = "7da242da-08ed-463a-9acd-ee780be4f1d9"
 WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 
 [extensions]
+BayesianRegressionModelsEnzymeExt = "Enzyme"
 BayesianRegressionModelsWarmupHMCEnzymeExt = ["WarmupHMC", "Enzyme"]
 BayesianRegressionModelsWarmupHMCExt = "WarmupHMC"
 

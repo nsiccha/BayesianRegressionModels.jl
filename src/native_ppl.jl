@@ -94,6 +94,53 @@ struct NativePPLPlan{A,I,P,N,F,B}
     bindings::B
 end
 
+"""Buffers required by one primal native-PPL evaluation."""
+mutable struct NativePPLBuffers{T,V<:Vector{T}}
+    location::V
+    pointwise_loglikelihood::V
+end
+
+"""Inspectable allocation contract for a prepared native PPL plan."""
+struct NativePPLWorkspaceSpec{A}
+    observation_axis::A
+    gradient_length::Int
+end
+
+"""Validated, numeric input binding for a native PPL plan."""
+struct NativePPLPrepared{P,X,Y,S}
+    plan::P
+    predictor::X
+    response::Y
+    workspace_spec::S
+end
+
+Base.eltype(prepared::NativePPLPrepared) = eltype(prepared.response)
+LogDensityProblems.dimension(prepared::NativePPLPrepared) =
+    LogDensityProblems.dimension(prepared.plan)
+
+"""
+Reusable storage for density and reverse-mode gradient execution.
+
+The returned gradient and pointwise buffers alias this workspace. Callers that
+need to retain a result across another evaluation must copy it. A workspace is
+single-task state; concurrent callers use separate workspaces over the same
+immutable `NativePPLPrepared` value.
+"""
+struct NativePPLWorkspace{T,B,G}
+    primal::B
+    adjoint::B
+    gradient::G
+end
+
+Base.eltype(::NativePPLWorkspace{T}) where {T} = T
+
+function NativePPLWorkspace(prepared::NativePPLPrepared, ::Type{T}=eltype(prepared)) where {T<:AbstractFloat}
+    n = length(prepared.workspace_spec.observation_axis)
+    buffers() = NativePPLBuffers(zeros(T, n), zeros(T, n))
+    NativePPLWorkspace{T,NativePPLBuffers{T,Vector{T}},Vector{T}}(
+        buffers(), buffers(), zeros(T, prepared.workspace_spec.gradient_length))
+end
+
 LogDensityProblems.dimension(plan::NativePPLPlan) =
     sum(length(parameter.unconstrained) for parameter in plan.parameters)
 
@@ -110,6 +157,19 @@ function Base.show(io::IO, plan::NativePPLPlan)
           join((string(native_node_name(node)) for node in plan.nodes), ", "), "\n")
     print(io, "  factors: ",
           join((string(nameof(typeof(factor))) for factor in plan.factors), ", "))
+end
+
+function Base.show(io::IO, prepared::NativePPLPrepared)
+    print(io, "NativePPLPrepared(", length(prepared.response),
+          " observations, eltype=", eltype(prepared), ")")
+end
+
+function Base.show(io::IO, workspace::NativePPLWorkspace)
+    print(io, "NativePPLWorkspace(eltype=", eltype(workspace),
+          ", location=", length(workspace.primal.location),
+          ", pointwise_loglikelihood=",
+          length(workspace.primal.pointwise_loglikelihood),
+          ", gradient=", length(workspace.gradient), ")")
 end
 
 """Fail-closed diagnostic for a formula capability not yet in the native PPL."""
@@ -278,3 +338,106 @@ function _native_ppl_plan(brmi::BRMI)
         bindings,
     )
 end
+
+function _native_ppl_copy_input(::Type{T}, input, role::Symbol, name::Symbol) where {T<:AbstractFloat}
+    output = Vector{T}(undef, length(input))
+    for i in eachindex(input)
+        value = input[i]
+        value isa Real && isfinite(value) || throw(ArgumentError(
+            "native PPL $role `$name` contains a non-finite or non-real value at row $i"))
+        output[i] = value
+    end
+    output
+end
+
+"""
+    _native_ppl_prepare(plan; T=Float64) -> NativePPLPrepared
+
+Validate and copy the plan's initial input binding into numeric, executor-owned
+storage. The returned value is shareable; mutable evaluation state is supplied
+separately by `NativePPLWorkspace`.
+"""
+function _native_ppl_prepare(plan::NativePPLPlan; T::Type{<:AbstractFloat}=Float64)
+    predictor_name = native_input_name(plan.inputs.predictor)
+    response_name = native_input_name(plan.inputs.response)
+    predictor = _native_ppl_copy_input(
+        T, getproperty(plan.bindings, predictor_name), :predictor, predictor_name)
+    response = _native_ppl_copy_input(
+        T, getproperty(plan.bindings, response_name), :response, response_name)
+    length(predictor) == length(response) || throw(DimensionMismatch(
+        "native PPL predictor `$predictor_name` has $(length(predictor)) rows but " *
+        "response `$response_name` has $(length(response))"))
+    workspace_spec = NativePPLWorkspaceSpec(
+        plan.axes.observation, LogDensityProblems.dimension(plan))
+    NativePPLPrepared(plan, predictor, response, workspace_spec)
+end
+
+function _native_ppl_check_execution(workspace::NativePPLWorkspace,
+                                     prepared::NativePPLPrepared,
+                                     position::AbstractVector)
+    dimension = LogDensityProblems.dimension(prepared)
+    length(position) == dimension || throw(DimensionMismatch(
+        "native PPL position has length $(length(position)); expected $dimension"))
+    length(workspace.gradient) == dimension || throw(DimensionMismatch(
+        "native PPL workspace gradient has length $(length(workspace.gradient)); expected $dimension"))
+    length(workspace.primal.location) == length(prepared.response) ||
+        throw(DimensionMismatch("native PPL workspace observation axis does not match prepared data"))
+    eltype(position) === eltype(workspace) || throw(ArgumentError(
+        "native PPL position eltype $(eltype(position)) does not match workspace eltype $(eltype(workspace))"))
+    eltype(prepared) === eltype(workspace) || throw(ArgumentError(
+        "native PPL prepared eltype $(eltype(prepared)) does not match workspace eltype $(eltype(workspace))"))
+    nothing
+end
+
+const _NATIVE_PPL_LOG2PI = log(2π)
+
+@inline function _native_ppl_logdensity_kernel(position::AbstractVector{T},
+                                               prepared::NativePPLPrepared,
+                                               buffers::NativePPLBuffers{T}) where {T}
+    node = prepared.plan.nodes.location
+    scale_factor = prepared.plan.factors.scale_prior
+    intercept = position[node.intercept_index]
+    slope = position[node.slope_index]
+    log_scale = position[scale_factor.unconstrained_index]
+    scale = exp(log_scale)
+    prior_scale = T(scale_factor.scale)
+    half = T(0.5)
+    normalizer = T(_NATIVE_PPL_LOG2PI) * half
+
+    # Standard-normal population coefficients, then Exponential(scale_prior)
+    # over exp(log_scale), including the positive transform's log Jacobian.
+    density = -half * intercept * intercept - normalizer
+    density += -half * slope * slope - normalizer
+    density += -log(prior_scale) - scale / prior_scale + log_scale
+
+    inverse_scale = inv(scale)
+    for i in eachindex(prepared.predictor, prepared.response)
+        location = intercept + slope * prepared.predictor[i]
+        residual = (prepared.response[i] - location) * inverse_scale
+        pointwise = -log_scale - normalizer - half * residual * residual
+        buffers.location[i] = location
+        buffers.pointwise_loglikelihood[i] = pointwise
+        density += pointwise
+    end
+    density
+end
+
+"""
+    _native_ppl_logdensity!(workspace, prepared, position)
+
+Evaluate in the caller-owned reusable workspace. Derived locations and
+pointwise likelihoods are refreshed as part of the same graph execution.
+"""
+function _native_ppl_logdensity!(workspace::NativePPLWorkspace,
+                                 prepared::NativePPLPrepared,
+                                 position::AbstractVector)
+    _native_ppl_check_execution(workspace, prepared, position)
+    _native_ppl_logdensity_kernel(position, prepared, workspace.primal)
+end
+
+# Enzyme is an optional dependency. Its extension installs the concrete typed
+# method; this catch-all keeps the core package's failure actionable without
+# claiming a second AD implementation.
+function _native_ppl_logdensity_and_gradient! end
+_native_ppl_logdensity_and_gradient!(args...) = throw(ArgumentError(
+    "native PPL gradients require loading Enzyme"))
