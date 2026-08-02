@@ -569,8 +569,8 @@ end
 function _native_ppl_check_execution(workspace::NativePPLWorkspace,
                                      prepared::NativePPLPrepared,
                                      position::AbstractVector)
-    _native_ppl_check_location_execution(workspace, prepared, position)
     response = _native_ppl_require_response(prepared, "log density")
+    _native_ppl_check_location_execution(workspace, prepared, position)
     dimension = LogDensityProblems.dimension(prepared)
     observations = length(prepared.plan.axes.observation)
     length(workspace.gradient) == dimension || throw(DimensionMismatch(
@@ -718,6 +718,14 @@ end
 # this package tests, recommends, or guarantees; other DI backends remain
 # outside the compatibility contract.
 function _native_ppl_logdensity_and_gradient! end
+function _native_ppl_logdensity_and_gradient!(workspace::NativePPLWorkspace,
+                                              prepared::NativePPLPrepared,
+                                              position::AbstractVector)
+    _native_ppl_require_response(prepared, "gradient")
+    throw(ArgumentError(
+        "native PPL gradients require a DifferentiationInterface-prepared workspace; " *
+        "construct one with AutoEnzyme() for the supported path"))
+end
 _native_ppl_logdensity_and_gradient!(args...) = throw(ArgumentError(
     "native PPL gradients require a DifferentiationInterface-prepared workspace; " *
     "construct one with AutoEnzyme() for the supported path"))

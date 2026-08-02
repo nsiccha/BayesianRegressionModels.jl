@@ -18,6 +18,16 @@ function capability_error(f)
     error("expected NativePPLCapabilityError")
 end
 
+function argument_error(f)
+    try
+        f()
+    catch err
+        err isa ArgumentError || rethrow()
+        return err
+    end
+    error("expected ArgumentError")
+end
+
 function steady_state_allocations(workspace, prepared, position)
     BRM._native_ppl_logdensity!(workspace, prepared, position)
     BRM._native_ppl_logdensity_and_gradient!(workspace, prepared, position)
@@ -358,6 +368,57 @@ end
         rebound, BRM.NativePPL.LinearPredictor())
     @test rebound_output isa Vector{Float32}
     @test length(rebound_output) == 2
+
+    prediction_only = BRM.NativePPL.rebind(
+        prepared, (; x=Float32[3, 4]); T=Float32)
+    @test !BRM.NativePPL.has_response(prediction_only)
+    @test prediction_only.response isa BRM.NativePPLNoResponse
+    @test eltype(prediction_only) == Float32
+    @test prediction_only.plan.axes.observation.keys == Base.OneTo(2)
+    @test keys(prediction_only.plan.bindings) == (:x,)
+    @test sprint(show, prediction_only) ==
+          "NativePPLPrepared(2 observations, eltype=Float32, prediction-only)"
+    prediction_only_workspace = BRM.NativePPL.workspace(prediction_only)
+    prediction_only_position = Float32.(position)
+    prediction_only_location = BRM.NativePPL.evaluate(
+        prediction_only_workspace, prediction_only, prediction_only_position,
+        BRM.NativePPL.LinearPredictor())
+    @test prediction_only_location ≈
+          prediction_only_position[1] .+
+          prediction_only_position[2] .* prediction_only.predictor
+    prediction_a = BRM.NativePPL.simulate(
+        MersenneTwister(52), prediction_only_workspace, prediction_only,
+        prediction_only_position)
+    prediction_b = BRM.NativePPL.simulate(
+        MersenneTwister(52), prediction_only_workspace, prediction_only,
+        prediction_only_position)
+    @test prediction_a == prediction_b
+    @test prediction_a isa Vector{Float32}
+
+    err = argument_error(() -> BRM.NativePPL.logdensity!(
+        prediction_only_workspace, prediction_only, Float32[]))
+    @test occursin("requires an observed response binding", err.msg)
+    err = argument_error(() -> BRM.NativePPL.logdensity_and_gradient!(
+        prediction_only_workspace, prediction_only, prediction_only_position))
+    @test occursin("gradient requires an observed response binding", err.msg)
+    err = argument_error(() -> BRM.NativePPL.evaluate!(
+        BRM.NativePPL.allocate_output(
+            prediction_only, BRM.NativePPL.PointwiseLogLikelihood()),
+        prediction_only_workspace, prediction_only, prediction_only_position,
+        BRM.NativePPL.PointwiseLogLikelihood()))
+    @test occursin("pointwise log likelihood requires an observed response", err.msg)
+    err = argument_error(() -> BRM.NativePPL.workspace(
+        prediction_only, Float32, DI.AutoEnzyme()))
+    @test occursin(
+        "DifferentiationInterface gradient preparation requires an observed response",
+        err.msg)
+
+    restored = BRM.NativePPL.rebind(
+        prediction_only, (; x=Float32[3, 4], y=Float32[2, 3]))
+    @test BRM.NativePPL.has_response(restored)
+    @test BRM.NativePPL.logdensity!(
+        BRM.NativePPL.workspace(restored), restored, prediction_only_position) isa
+          Float32
 
     sliced = BRM.NativePPL.prepare(plan)
     pop!(sliced.response)
