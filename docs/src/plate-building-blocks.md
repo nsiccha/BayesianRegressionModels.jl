@@ -215,7 +215,7 @@ The PLATE boundary is ragged, while the event recurrence or ODE remains inside
 | Inferred-observation cell | `me`, missing values, calibration and censoring cells | One SLIC model per observation family merely to vectorize scalar latent draws |
 | Ragged longitudinal kernel | Bruno PK/PKPD and Bordet biomarker series | Prefix/gather scaffolding and one custom vector wrapper for every kernel |
 | Secondary row axis (events, doses) | `kernel(..., ragged(x, group), ...)` | Hand-built per-subject views of every flat column, plus one hand-written scalar prior + basis per event-level covariate |
-| Per-cell likelihood | mixture, hurdle, zero-inflated, censored, custom user likelihoods | PLATE owns the per-cell density (`lpdf`/`lpmf`) loop today; observation posterior-predictive RNG synthesis remains target work |
+| Per-cell likelihood | mixture, hurdle, zero-inflated, censored, custom user likelihoods | PLATE owns the per-cell density (`lpdf`/`lpmf`) loop and predictive draw; a ragged observation also gets one aggregate log likelihood per cell, while dense per-cell pointwise synthesis remains target work |
 | Parallel subject/series likelihood | expensive PK/PD, ODE, GP, and longitudinal models | Separate threaded model variants; the compiler may choose `reduce_sum` |
 | Crossed independent plates | subject and item effects, multiple group factors | A combined monolithic random-effect allocator |
 
@@ -241,7 +241,10 @@ are ordinary formula linear predictors, the cell is an inline `do`-block, and
 observations are `~` statements inside it. The retired `by=` / `n_eta=` /
 `model=` / `obs=` keywords are rejected loudly. The backend
 contract is simply “inline this cell model under a plate keyed by the grouping
-derived from those linear predictors.”
+derived from those linear predictors.” A ragged observation in that cell emits
+a flat predictive draw and one aggregate log likelihood per subject; descriptor
+`segments` carries the inclusive subject boundaries. A dense per-cell
+observation emits its predictive draw but still has no pointwise companion.
 
 ### Secondary row axes — `ragged(x, group)`
 
