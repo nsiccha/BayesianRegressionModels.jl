@@ -301,11 +301,13 @@ Two contract points make this well-defined:
   required.
 - **One value per row of `x`'s own frame, with no expansion anywhere.** If the
   event table stores a compact schedule — one row per dose OP, carrying an
-  interval and a repeat count — then `x` has one value per OP, which is exactly
-  what aligns with the ragged columns the cell walks. Lowering enforces this:
-  every already-ragged positional whose total length matches `x`'s row count
-  must also agree with it subject by subject, or the model is rejected with both
-  length vectors named.
+  interval and a repeat count — then `x` has one value per OP. Constructing
+  `ragged(x, group)` requires one `group` key per row of `x` and joins those keys
+  to the kernel's outer subject labels. That is the grouping operation's own
+  validity check. Kernel does not compare totals or per-subject inner lengths
+  across positionals: after every positional supplies one outer cell per
+  subject, any relationship among the values inside a cell is the cell body's
+  responsibility.
 
 The emitted program keeps a wrapped predictor on its own axis. `log_F` stays a
 single event-length quantity in `transformed parameters`; the plate takes a
