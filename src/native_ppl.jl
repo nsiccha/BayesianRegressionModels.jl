@@ -74,6 +74,26 @@ end
 NativePPLNormalFactor(response::Symbol, location::Symbol, scale::Symbol, axis::A) where {A} =
     NativePPLNormalFactor{response,location,scale,A}(axis)
 
+abstract type NativePPLQuery end
+struct NativePPLLinearPredictor <: NativePPLQuery end
+struct NativePPLPointwiseLogLikelihood <: NativePPLQuery end
+struct NativePPLPosteriorPredictive <: NativePPLQuery end
+
+"""
+Output, frequency, effect, and lifetime contract for one graph query.
+
+The query kind and execution properties are type parameters so query planning
+does not depend on a post-hoc name registry.
+"""
+struct NativePPLQuerySpec{Kind,Stage,Effect,Lifetime,A}
+    axis::A
+end
+
+NativePPLQuerySpec(kind::Symbol, stage::Symbol, effect::Symbol,
+                   lifetime::Symbol, axis::A) where {A} =
+    NativePPLQuerySpec{kind,stage,effect,lifetime,A}(axis)
+native_query_name(::NativePPLQuerySpec{Kind}) where {Kind} = Kind
+
 """
     NativePPLPlan
 
@@ -85,12 +105,13 @@ This is deliberately internal while the public native-PPL naming is unsettled.
 The first lowering accepts one structural model shape and fails closed for all
 other formula capabilities.
 """
-struct NativePPLPlan{A,I,P,N,F,B}
+struct NativePPLPlan{A,I,P,N,F,Q,B}
     axes::A
     inputs::I
     parameters::P
     nodes::N
     factors::F
+    queries::Q
     bindings::B
 end
 
@@ -126,10 +147,10 @@ need to retain a result across another evaluation must copy it. A workspace is
 single-task state; concurrent callers use separate workspaces over the same
 immutable `NativePPLPrepared` value.
 """
-struct NativePPLWorkspace{T,B,G}
+struct NativePPLWorkspace{T,B,G,D}
     primal::B
-    adjoint::B
     gradient::G
+    derivative::D
 end
 
 Base.eltype(::NativePPLWorkspace{T}) where {T} = T
@@ -137,9 +158,17 @@ Base.eltype(::NativePPLWorkspace{T}) where {T} = T
 function NativePPLWorkspace(prepared::NativePPLPrepared, ::Type{T}=eltype(prepared)) where {T<:AbstractFloat}
     n = length(prepared.workspace_spec.observation_axis)
     buffers() = NativePPLBuffers(zeros(T, n), zeros(T, n))
-    NativePPLWorkspace{T,NativePPLBuffers{T,Vector{T}},Vector{T}}(
-        buffers(), buffers(), zeros(T, prepared.workspace_spec.gradient_length))
+    NativePPLWorkspace{T,NativePPLBuffers{T,Vector{T}},Vector{T},Nothing}(
+        buffers(), zeros(T, prepared.workspace_spec.gradient_length), nothing)
 end
+
+function _native_ppl_workspace end
+_native_ppl_workspace(prepared::NativePPLPrepared, ::Type{T}) where {T<:AbstractFloat} =
+    NativePPLWorkspace(prepared, T)
+_native_ppl_workspace(::NativePPLPrepared, ::Type{<:AbstractFloat}, backend) =
+    throw(ArgumentError(
+        "native PPL derivative workspaces require loading DifferentiationInterface; " *
+        "only AutoEnzyme is tested, recommended, and guaranteed"))
 
 LogDensityProblems.dimension(plan::NativePPLPlan) =
     sum(length(parameter.unconstrained) for parameter in plan.parameters)
@@ -156,7 +185,9 @@ function Base.show(io::IO, plan::NativePPLPlan)
     print(io, "  nodes: ",
           join((string(native_node_name(node)) for node in plan.nodes), ", "), "\n")
     print(io, "  factors: ",
-          join((string(nameof(typeof(factor))) for factor in plan.factors), ", "))
+          join((string(nameof(typeof(factor))) for factor in plan.factors), ", "), "\n")
+    print(io, "  queries: ",
+          join((string(native_query_name(query)) for query in plan.queries), ", "))
 end
 
 function Base.show(io::IO, prepared::NativePPLPrepared)
@@ -326,6 +357,15 @@ function _native_ppl_plan(brmi::BRMI)
     scale_prior = NativePPLExponentialFactor(scale_parameter, 3, prior_scale)
     likelihood_factor = NativePPLNormalFactor(response, location,
                                               scale_parameter, observation_axis)
+    linear_predictor_query = NativePPLQuerySpec(
+        :linear_predictor, :per_draw, :workspace, :until_next_evaluation,
+        observation_axis)
+    pointwise_loglikelihood_query = NativePPLQuerySpec(
+        :pointwise_loglikelihood, :per_draw, :workspace,
+        :until_next_evaluation, observation_axis)
+    posterior_predictive_query = NativePPLQuerySpec(
+        :posterior_predictive, :per_draw, :rng, :caller_owned,
+        observation_axis)
     bindings = NamedTuple{(predictor_name, response)}((x, y))
 
     NativePPLPlan(
@@ -335,6 +375,9 @@ function _native_ppl_plan(brmi::BRMI)
         (; coefficients, scale),
         (; location=location_node),
         (; coefficient_prior, scale_prior, likelihood=likelihood_factor),
+        (; linear_predictor=linear_predictor_query,
+           pointwise_loglikelihood=pointwise_loglikelihood_query,
+           posterior_predictive=posterior_predictive_query),
         bindings,
     )
 end
@@ -435,9 +478,11 @@ function _native_ppl_logdensity!(workspace::NativePPLWorkspace,
     _native_ppl_logdensity_kernel(position, prepared, workspace.primal)
 end
 
-# Enzyme is an optional dependency. Its extension installs the concrete typed
-# method; this catch-all keeps the core package's failure actionable without
-# claiming a second AD implementation.
+# DifferentiationInterface is optional. Its extension installs the concrete
+# typed method and owns derivative preparation. AutoEnzyme is the sole backend
+# this package tests, recommends, or guarantees; other DI backends remain
+# outside the compatibility contract.
 function _native_ppl_logdensity_and_gradient! end
 _native_ppl_logdensity_and_gradient!(args...) = throw(ArgumentError(
-    "native PPL gradients require loading Enzyme"))
+    "native PPL gradients require a DifferentiationInterface-prepared workspace; " *
+    "construct one with AutoEnzyme() for the supported path"))
