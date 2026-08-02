@@ -120,6 +120,14 @@ end
 NativePPLNormalFactor(response::Symbol, location::Symbol, scale::Symbol, axis::A) where {A} =
     NativePPLNormalFactor{response,location,scale,A}(axis)
 
+"""Row-wise Bernoulli observation factor parameterized by logits."""
+struct NativePPLBernoulliLogitFactor{Response,Logit,A} <: NativePPLFactor
+    axis::A
+end
+
+NativePPLBernoulliLogitFactor(response::Symbol, logit::Symbol, axis::A) where {A} =
+    NativePPLBernoulliLogitFactor{response,logit,A}(axis)
+
 abstract type NativePPLQuery end
 struct NativePPLLinearPredictor <: NativePPLQuery end
 struct NativePPLPointwiseLogLikelihood <: NativePPLQuery end
@@ -127,6 +135,9 @@ struct NativePPLPosteriorPredictive <: NativePPLQuery end
 
 """Rule selecting the prepared executor's numeric scalar as an output eltype."""
 struct NativePPLPreparedElementType end
+
+"""Rule selecting a fixed semantic output element type."""
+struct NativePPLFixedElementType{T} end
 
 """Dense, one-dimensional caller-owned output layout."""
 struct NativePPLDenseVectorLayout end
@@ -143,6 +154,7 @@ native_output_eltype(signature::NativePPLOutputSignature, prepared) =
     native_output_eltype(signature.element_type, prepared)
 native_output_eltype(::NativePPLPreparedElementType, prepared) = eltype(prepared)
 native_output_eltype(::NativePPLPreparedElementType, ::Type{T}) where {T<:AbstractFloat} = T
+native_output_eltype(::NativePPLFixedElementType{T}, _) where {T} = T
 native_output_layout(signature::NativePPLOutputSignature) = signature.layout
 native_output_layout_accepts(::NativePPLDenseVectorLayout, output) =
     output isa DenseVector
@@ -163,21 +175,32 @@ NativePPLQuerySpec(kind::Symbol, stage::Symbol, effect::Symbol,
 native_query_name(::NativePPLQuerySpec{Kind}) where {Kind} = Kind
 native_query_output(spec::NativePPLQuerySpec) = spec.output
 
-function _native_ppl_queries(observation_axis)
-    output = NativePPLOutputSignature(
+function _native_ppl_queries(
+    observation_axis,
+    predictive_element=NativePPLPreparedElementType(),
+)
+    numeric_output = NativePPLOutputSignature(
         observation_axis, NativePPLPreparedElementType(),
         NativePPLDenseVectorLayout())
+    predictive_output = predictive_element isa NativePPLPreparedElementType ?
+        numeric_output : NativePPLOutputSignature(
+            observation_axis, predictive_element, NativePPLDenseVectorLayout())
     linear_predictor = NativePPLQuerySpec(
         :linear_predictor, :per_draw, :workspace, :until_next_evaluation,
-        output)
+        numeric_output)
     pointwise_loglikelihood = NativePPLQuerySpec(
         :pointwise_loglikelihood, :per_draw, :workspace,
-        :until_next_evaluation, output)
+        :until_next_evaluation, numeric_output)
     posterior_predictive = NativePPLQuerySpec(
         :posterior_predictive, :per_draw, :rng, :caller_owned,
-        output)
+        predictive_output)
     (; linear_predictor, pointwise_loglikelihood, posterior_predictive)
 end
+
+_native_ppl_queries(observation_axis, ::NativePPLNormalFactor) =
+    _native_ppl_queries(observation_axis)
+_native_ppl_queries(observation_axis, ::NativePPLBernoulliLogitFactor) =
+    _native_ppl_queries(observation_axis, NativePPLFixedElementType{Bool}())
 
 """
     NativePPLPlan
@@ -372,12 +395,17 @@ end
 """
     _native_ppl_plan(brmi::BRMI) -> NativePPLPlan
 
-Lower the initial workflow-complete model family:
+Lower either initial workflow-complete model family:
 
 ```julia
 y     ~ Normal(mu, sigma)
 mu    ~ 1 + x
 sigma ~ Exponential(scale)
+
+# or
+
+y     ~ BernoulliLogit(eta)
+eta   ~ 1 + x
 ```
 
 Names may vary, but the structure may not. Unsupported structure raises a
@@ -388,28 +416,36 @@ function _native_ppl_plan(brmi::BRMI)
     length(observed) == 1 || throw(NativePPLCapabilityError(
         :outcomes, "expected exactly one observed response, got $(length(observed))"))
     outcome = only(observed)
-    outcome.family === Normal || throw(NativePPLCapabilityError(
-        :likelihood, "expected `Normal(location, scale)`, got `$(outcome.family)`"))
+    family = outcome.family
+    family === Normal || family === BernoulliLogit ||
+        throw(NativePPLCapabilityError(
+            :likelihood,
+            "expected `Normal(location, scale)` or `BernoulliLogit(logit)`, " *
+            "got `$family`"))
 
     response = outcome.response
     response_lhs, likelihood = _native_ppl_sampling_rhs(brmi, response)
     response_lhs isa NamedColumn && parent(response_lhs) isa DataColumn ||
         throw(NativePPLCapabilityError(:response_decorator,
             "response `$response` must be a bare observed data column"))
-    likelihood isa ExprColumn && getf(likelihood) === Normal ||
+    likelihood isa ExprColumn && getf(likelihood) === family ||
         throw(NativePPLCapabilityError(:likelihood,
-            "response `$response` must use `Normal(location, scale)`"))
+            "response `$response` must use `$family` consistently"))
     isempty(getkwargs(likelihood)) || throw(NativePPLCapabilityError(
-        :likelihood_keywords, "Normal likelihood for `$response` has keywords"))
+        :likelihood_keywords, "$family likelihood for `$response` has keywords"))
     likelihood_args = getargs(likelihood)
-    length(likelihood_args) == 2 || throw(NativePPLCapabilityError(
-        :likelihood, "Normal likelihood for `$response` needs two arguments"))
+    expected_arguments = family === Normal ? 2 : 1
+    length(likelihood_args) == expected_arguments ||
+        throw(NativePPLCapabilityError(
+            :likelihood,
+            "$family likelihood for `$response` needs $expected_arguments argument(s)"))
     location = _native_ppl_ref_name(likelihood_args[1])
-    scale_parameter = _native_ppl_ref_name(likelihood_args[2])
     location === nothing && throw(NativePPLCapabilityError(
-        :likelihood_location, "Normal location must be one named linear predictor"))
-    scale_parameter === nothing && throw(NativePPLCapabilityError(
-        :likelihood_scale, "Normal scale must be one named scalar parameter"))
+        :likelihood_location, "$family predictor must be one named linear predictor"))
+    scale_parameter = family === Normal ? _native_ppl_ref_name(likelihood_args[2]) : nothing
+    family === Normal && scale_parameter === nothing &&
+        throw(NativePPLCapabilityError(
+            :likelihood_scale, "Normal scale must be one named scalar parameter"))
 
     predictor = _native_ppl_affine_predictor(brmi, location)
     predictor_name = name(predictor)
@@ -422,15 +458,24 @@ function _native_ppl_plan(brmi::BRMI)
         throw(NativePPLCapabilityError(:predictor_type,
             "predictor `$predictor_name` must be a continuous real vector"))
     y isa AbstractVector{<:Real} || throw(NativePPLCapabilityError(
-        :response_type, "response `$response` must be a real vector"))
+        :response_type, "response `$response` must be a real or Bool vector"))
+    if family === BernoulliLogit
+        all(value -> value == 0 || value == 1, y) ||
+            throw(NativePPLCapabilityError(
+                :response_support,
+                "BernoulliLogit response `$response` must contain only Bool/0/1 values"))
+    end
     length(x) == length(y) || throw(NativePPLCapabilityError(
         :observation_axis,
         "predictor `$predictor_name` has $(length(x)) rows but `$response` has $(length(y))"))
     !isempty(y) || throw(NativePPLCapabilityError(
         :observation_axis, "the observation axis cannot be empty"))
 
-    prior_scale = _native_ppl_exponential_prior(brmi, scale_parameter)
-    expected = Set((location, scale_parameter, response, predictor_name))
+    prior_scale = family === Normal ?
+        _native_ppl_exponential_prior(brmi, scale_parameter) : nothing
+    expected = family === Normal ?
+        Set((location, scale_parameter, response, predictor_name)) :
+        Set((location, response, predictor_name))
     extras = setdiff(Set(keys(brmi.operations)), expected)
     isempty(extras) || throw(NativePPLCapabilityError(
         :additional_operations,
@@ -439,7 +484,6 @@ function _native_ppl_plan(brmi::BRMI)
     observation_axis = NativePPLAxis(:observation, Base.OneTo(length(y)))
     coefficient_axis = NativePPLAxis(Symbol(location, :_coefficient),
                                      (:Intercept, predictor_name))
-    scale_axis = NativePPLAxis(Symbol(scale_parameter, :_scalar), (scale_parameter,))
 
     predictor_input = NativePPLInput(predictor_name, :predictor,
                                      observation_axis, eltype(x))
@@ -449,29 +493,44 @@ function _native_ppl_plan(brmi::BRMI)
     coefficients = NativePPLParameter(
         coefficient_name, NativePPLRealSupport(), NativePPLIdentityTransform(),
         coefficient_axis, 1:2)
-    scale = NativePPLParameter(
-        scale_parameter, NativePPLPositiveSupport(), NativePPLExpTransform(),
-        scale_axis, 3:3)
     location_node = NativePPLAffineNode(location, predictor_name,
                                         observation_axis, 1, 2)
 
     coefficient_prior = NativePPLStandardNormalFactor(coefficient_name, 1:2)
-    scale_prior = NativePPLExponentialFactor(scale_parameter, 3, prior_scale)
-    likelihood_factor = NativePPLNormalFactor(response, location,
-                                              scale_parameter, observation_axis)
-    queries = _native_ppl_queries(observation_axis)
     bindings = NamedTuple{(predictor_name, response)}((x, y))
 
-    NativePPLPlan(
-        (; observation=observation_axis, coefficient=coefficient_axis,
-           scale=scale_axis),
-        (; predictor=predictor_input, response=response_input),
-        (; coefficients, scale),
-        (; location=location_node),
-        (; coefficient_prior, scale_prior, likelihood=likelihood_factor),
-        queries,
-        bindings,
-    )
+    if family === Normal
+        scale_axis = NativePPLAxis(
+            Symbol(scale_parameter, :_scalar), (scale_parameter,))
+        scale = NativePPLParameter(
+            scale_parameter, NativePPLPositiveSupport(), NativePPLExpTransform(),
+            scale_axis, 3:3)
+        scale_prior = NativePPLExponentialFactor(scale_parameter, 3, prior_scale)
+        likelihood_factor = NativePPLNormalFactor(
+            response, location, scale_parameter, observation_axis)
+        NativePPLPlan(
+            (; observation=observation_axis, coefficient=coefficient_axis,
+               scale=scale_axis),
+            (; predictor=predictor_input, response=response_input),
+            (; coefficients, scale),
+            (; location=location_node),
+            (; coefficient_prior, scale_prior, likelihood=likelihood_factor),
+            _native_ppl_queries(observation_axis, likelihood_factor),
+            bindings,
+        )
+    else
+        likelihood_factor = NativePPLBernoulliLogitFactor(
+            response, location, observation_axis)
+        NativePPLPlan(
+            (; observation=observation_axis, coefficient=coefficient_axis),
+            (; predictor=predictor_input, response=response_input),
+            (; coefficients),
+            (; location=location_node),
+            (; coefficient_prior, likelihood=likelihood_factor),
+            _native_ppl_queries(observation_axis, likelihood_factor),
+            bindings,
+        )
+    end
 end
 
 function _native_ppl_copy_input(::Type{T}, input, role::Symbol, name::Symbol) where {T<:AbstractFloat}
@@ -499,6 +558,20 @@ _native_ppl_prepare_response(::Type{<:AbstractFloat},
                              response::NativePPLNoResponse,
                              ::Symbol, ::Int) = response
 
+_native_ppl_validate_response(::NativePPLNormalFactor, ::AbstractVector, ::Symbol) =
+    nothing
+function _native_ppl_validate_response(::NativePPLBernoulliLogitFactor,
+                                       response::AbstractVector, name::Symbol)
+    for (i, value) in enumerate(response)
+        value == 0 || value == 1 || throw(ArgumentError(
+            "native PPL BernoulliLogit response `$name` must be Bool/0/1; " *
+            "got $value at row $i"))
+    end
+    nothing
+end
+_native_ppl_validate_response(::NativePPLFactor, ::NativePPLNoResponse, ::Symbol) =
+    nothing
+
 function _native_ppl_prepare_bindings(plan::NativePPLPlan, predictor,
                                       response, ::Type{T}) where {T<:AbstractFloat}
     isconcretetype(T) || throw(ArgumentError(
@@ -512,6 +585,8 @@ function _native_ppl_prepare_bindings(plan::NativePPLPlan, predictor,
             "native PPL predictor `$predictor_name` has " *
             "$(length(prepared_predictor)) rows but the observation axis has " *
             "$(length(plan.axes.observation))"))
+    _native_ppl_validate_response(
+        plan.factors.likelihood, response, response_name)
     prepared_response = _native_ppl_prepare_response(
         T, response, response_name, length(prepared_predictor))
     workspace_spec = NativePPLWorkspaceSpec(
@@ -593,10 +668,10 @@ const _NATIVE_PPL_LOG2PI = log(2π)
 const _NATIVE_PPL_HALF_LOG2PI = _NATIVE_PPL_LOG2PI / 2
 
 @inline function _native_ppl_factor_logdensity(
-    factor::NativePPLStandardNormalFactor,
-    parameter::NativePPLParameter,
+    factor::NativePPLStandardNormalFactor{Parameter},
+    parameter::NativePPLParameter{Parameter},
     position::AbstractVector{T},
-) where {T}
+) where {Parameter,T}
     half = T(0.5)
     normalizer = T(_NATIVE_PPL_HALF_LOG2PI)
     density = zero(T)
@@ -609,10 +684,10 @@ const _NATIVE_PPL_HALF_LOG2PI = _NATIVE_PPL_LOG2PI / 2
 end
 
 @inline function _native_ppl_factor_logdensity(
-    factor::NativePPLExponentialFactor,
-    parameter::NativePPLParameter,
+    factor::NativePPLExponentialFactor{Parameter},
+    parameter::NativePPLParameter{Parameter},
     position::AbstractVector{T},
-) where {T}
+) where {Parameter,T}
     coordinate = factor.unconstrained_index
     value = native_parameter_value(parameter, position, coordinate)
     logjac = native_parameter_logabsdetjac(parameter, position, coordinate)
@@ -621,12 +696,14 @@ end
 end
 
 @inline function _native_ppl_factor_logdensity!(
-    ::NativePPLNormalFactor,
-    scale_parameter::NativePPLParameter,
+    ::NativePPLNormalFactor{Response,Location,Scale},
+    ::NativePPLInput{Response},
+    ::NativePPLAffineNode{Location},
+    scale_parameter::NativePPLParameter{Scale},
     position::AbstractVector{T},
     prepared::NativePPLPrepared,
     buffers::NativePPLBuffers{T},
-) where {T}
+) where {Response,Location,Scale,T}
     scale = native_parameter_value(scale_parameter, position)
     log_scale = native_parameter_logvalue(scale_parameter, position)
     inverse_scale = inv(scale)
@@ -643,20 +720,98 @@ end
     density
 end
 
+@inline _native_ppl_softplus(value) = value > zero(value) ?
+    value + log1p(exp(-value)) : log1p(exp(value))
+
+@inline function _native_ppl_factor_logdensity!(
+    ::NativePPLBernoulliLogitFactor{Response,Logit},
+    ::NativePPLInput{Response},
+    ::NativePPLAffineNode{Logit},
+    position::AbstractVector{T},
+    prepared::NativePPLPrepared,
+    buffers::NativePPLBuffers{T},
+) where {Response,Logit,T}
+    density = zero(T)
+    for i in eachindex(prepared.response)
+        logit = buffers.location[i]
+        pointwise = isone(prepared.response[i]) ?
+            -_native_ppl_softplus(-logit) : -_native_ppl_softplus(logit)
+        buffers.pointwise_loglikelihood[i] = pointwise
+        density += pointwise
+    end
+    density
+end
+
+
+@inline function _native_ppl_logistic(value)
+    if value >= zero(value)
+        inverse = exp(-value)
+        inv(one(value) + inverse)
+    else
+        forward = exp(value)
+        forward / (one(value) + forward)
+    end
+end
+
 
 @inline function _native_ppl_factor_simulate!(
     rng::AbstractRNG,
-    ::NativePPLNormalFactor,
+    ::NativePPLNormalFactor{Response,Location,Scale},
+    ::NativePPLInput{Response},
+    ::NativePPLAffineNode{Location},
     output::AbstractVector,
-    scale_parameter::NativePPLParameter,
+    scale_parameter::NativePPLParameter{Scale},
     position::AbstractVector,
     buffers::NativePPLBuffers{T},
-) where {T}
+) where {Response,Location,Scale,T}
     scale = native_parameter_value(scale_parameter, position)
     for i in eachindex(output)
         output[i] = buffers.location[i] + scale * randn(rng, T)
     end
     output
+end
+
+@inline function _native_ppl_factor_simulate!(
+    rng::AbstractRNG,
+    ::NativePPLBernoulliLogitFactor{Response,Logit},
+    ::NativePPLInput{Response},
+    ::NativePPLAffineNode{Logit},
+    output::AbstractVector{Bool},
+    position::AbstractVector,
+    buffers::NativePPLBuffers{T},
+) where {Response,Logit,T}
+    for i in eachindex(output)
+        output[i] = rand(rng, T) < _native_ppl_logistic(buffers.location[i])
+    end
+    output
+end
+
+
+@inline function _native_ppl_model_simulate!(
+    rng::AbstractRNG,
+    factor::NativePPLNormalFactor,
+    output::AbstractVector,
+    prepared::NativePPLPrepared,
+    position::AbstractVector,
+    buffers::NativePPLBuffers,
+)
+    _native_ppl_factor_simulate!(
+        rng, factor, prepared.plan.inputs.response,
+        prepared.plan.nodes.location, output, prepared.plan.parameters.scale,
+        position, buffers)
+end
+
+@inline function _native_ppl_model_simulate!(
+    rng::AbstractRNG,
+    factor::NativePPLBernoulliLogitFactor,
+    output::AbstractVector{Bool},
+    prepared::NativePPLPrepared,
+    position::AbstractVector,
+    buffers::NativePPLBuffers,
+)
+    _native_ppl_factor_simulate!(
+        rng, factor, prepared.plan.inputs.response,
+        prepared.plan.nodes.location, output, position, buffers)
 end
 
 @inline function _native_ppl_location_kernel!(position::AbstractVector{T},
@@ -674,22 +829,51 @@ end
     nothing
 end
 
-@inline function _native_ppl_logdensity_kernel(position::AbstractVector{T},
-                                               prepared::NativePPLPrepared,
-                                               buffers::NativePPLBuffers{T}) where {T}
+@inline function _native_ppl_model_logdensity!(
+    likelihood_factor::NativePPLNormalFactor,
+    position::AbstractVector{T},
+    prepared::NativePPLPrepared,
+    buffers::NativePPLBuffers{T},
+) where {T}
     scale_factor = prepared.plan.factors.scale_prior
-    likelihood_factor = prepared.plan.factors.likelihood
     coefficient_factor = prepared.plan.factors.coefficient_prior
     coefficient_parameter = prepared.plan.parameters.coefficients
     scale_parameter = prepared.plan.parameters.scale
-    _native_ppl_location_kernel!(position, prepared, buffers)
     density = _native_ppl_factor_logdensity(
         coefficient_factor, coefficient_parameter, position)
     density += _native_ppl_factor_logdensity(
         scale_factor, scale_parameter, position)
     density += _native_ppl_factor_logdensity!(
-        likelihood_factor, scale_parameter, position, prepared, buffers)
+        likelihood_factor, prepared.plan.inputs.response,
+        prepared.plan.nodes.location, scale_parameter, position, prepared,
+        buffers)
     density
+end
+
+
+@inline function _native_ppl_model_logdensity!(
+    likelihood_factor::NativePPLBernoulliLogitFactor,
+    position::AbstractVector{T},
+    prepared::NativePPLPrepared,
+    buffers::NativePPLBuffers{T},
+) where {T}
+    density = _native_ppl_factor_logdensity(
+        prepared.plan.factors.coefficient_prior,
+        prepared.plan.parameters.coefficients,
+        position)
+    density += _native_ppl_factor_logdensity!(
+        likelihood_factor, prepared.plan.inputs.response,
+        prepared.plan.nodes.location, position, prepared, buffers)
+    density
+end
+
+
+@inline function _native_ppl_logdensity_kernel(position::AbstractVector{T},
+                                               prepared::NativePPLPrepared,
+                                               buffers::NativePPLBuffers{T}) where {T}
+    _native_ppl_location_kernel!(position, prepared, buffers)
+    _native_ppl_model_logdensity!(
+        prepared.plan.factors.likelihood, position, prepared, buffers)
 end
 
 function _native_ppl_location!(workspace::NativePPLWorkspace,
@@ -745,6 +929,15 @@ function _native_ppl_response_binding(bindings, name::Symbol)
     _native_ppl_required_binding(bindings, name, :response)
 end
 
+_native_ppl_rebind_likelihood(
+    ::NativePPLNormalFactor{Response,Location,Scale}, axis,
+) where {Response,Location,Scale} =
+    NativePPLNormalFactor(Response, Location, Scale, axis)
+_native_ppl_rebind_likelihood(
+    ::NativePPLBernoulliLogitFactor{Response,Logit}, axis,
+) where {Response,Logit} =
+    NativePPLBernoulliLogitFactor(Response, Logit, axis)
+
 """
     _native_ppl_rebind(prepared, bindings; T=eltype(prepared))
 
@@ -788,9 +981,8 @@ function _native_ppl_rebind(prepared::NativePPLPrepared, bindings;
     location_node = NativePPLAffineNode(
         location_name, predictor_name, observation_axis,
         old_node.intercept_index, old_node.slope_index)
-    scale_name = native_parameter_name(plan.parameters.scale)
-    likelihood = NativePPLNormalFactor(
-        response_name, location_name, scale_name, observation_axis)
+    likelihood = _native_ppl_rebind_likelihood(
+        plan.factors.likelihood, observation_axis)
     new_bindings = response isa AbstractVector ?
         NamedTuple{(predictor_name, response_name)}((predictor, response)) :
         NamedTuple{(predictor_name,)}((predictor,))
@@ -801,7 +993,7 @@ function _native_ppl_rebind(prepared::NativePPLPrepared, bindings;
         plan.parameters,
         (; location=location_node),
         merge(plan.factors, (; likelihood)),
-        _native_ppl_queries(observation_axis),
+        _native_ppl_queries(observation_axis, likelihood),
         new_bindings,
     )
     _native_ppl_prepare_bindings(rebound_plan, predictor, response, T)
@@ -887,9 +1079,9 @@ function _native_ppl_simulate!(rng::AbstractRNG,
                                query::NativePPLPosteriorPredictive)
     _native_ppl_check_query_output(output, prepared, query)
     _native_ppl_location!(workspace, prepared, position)
-    _native_ppl_factor_simulate!(
+    _native_ppl_model_simulate!(
         rng, prepared.plan.factors.likelihood, output,
-        prepared.plan.parameters.scale, position, workspace.primal)
+        prepared, position, workspace.primal)
 end
 
 """
