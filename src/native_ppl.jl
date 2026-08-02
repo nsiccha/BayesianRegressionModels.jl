@@ -210,8 +210,8 @@ input values captured from the source `BRMI`; execution preparation copies
 them into separately owned buffers, so the plan itself is never a workspace.
 
 This is deliberately internal while the public native-PPL naming is unsettled.
-The first lowering accepts one structural model shape and fails closed for all
-other formula capabilities.
+The initial lowerings accept two structural model shapes and fail closed for
+all other formula capabilities.
 """
 struct NativePPLPlan{A,I,P,N,F,Q,B}
     axes::A
@@ -666,6 +666,11 @@ end
 
 const _NATIVE_PPL_LOG2PI = log(2π)
 const _NATIVE_PPL_HALF_LOG2PI = _NATIVE_PPL_LOG2PI / 2
+
+# Distributions may supply formula-boundary vocabulary, but numerical execution
+# is PPL-owned. Keep these vectorized factor/transform kernels independent of
+# Distributions and Bijectors so later compiler passes (including a possible
+# Reactant lowering) see the complete executable semantics here.
 
 @inline function _native_ppl_factor_logdensity(
     factor::NativePPLStandardNormalFactor{Parameter},

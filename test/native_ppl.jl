@@ -267,6 +267,184 @@ end
 end
 
 
+@testset "native Bernoulli-logit workflow" begin
+    data = (;
+        x=[-2.0, 0.0, 1.5, 3.0],
+        y=Bool[false, true, true, false],
+    )
+    brmi = @brm data begin
+        eta ~ 1 + x
+        y ~ BernoulliLogit(eta)
+    end
+    plan = BRM.NativePPL.compile(brmi)
+
+    @test LogDensityProblems.dimension(plan) == 2
+    @test keys(plan.axes) == (:observation, :coefficient)
+    @test keys(plan.parameters) == (:coefficients,)
+    @test keys(plan.factors) == (:coefficient_prior, :likelihood)
+    @test BRM.native_parameter_name(plan.parameters.coefficients) == :beta_eta
+    @test plan.parameters.coefficients.transform isa BRM.NativePPLIdentityTransform
+    @test plan.parameters.coefficients.unconstrained == 1:2
+    @test plan.factors.likelihood isa BRM.NativePPLBernoulliLogitFactor
+    @test plan.factors.likelihood.axis === plan.axes.observation
+    @test BRM.native_node_name(plan.nodes.location) == :eta
+    @test BRM.native_affine_input(plan.nodes.location) == :x
+
+    linear_query = BRM.NativePPL.LinearPredictor()
+    pointwise_query = BRM.NativePPL.PointwiseLogLikelihood()
+    predictive_query = BRM.NativePPL.PosteriorPredictive()
+    linear_signature = BRM.NativePPL.output_signature(plan, linear_query)
+    pointwise_signature = BRM.NativePPL.output_signature(plan, pointwise_query)
+    predictive_signature = BRM.NativePPL.output_signature(plan, predictive_query)
+    @test BRM.NativePPL.output_eltype(linear_signature, Float32) === Float32
+    @test BRM.NativePPL.output_eltype(pointwise_signature, Float32) === Float32
+    @test BRM.NativePPL.output_eltype(predictive_signature, Float32) === Bool
+    @test BRM.NativePPL.output_axis(predictive_signature) === plan.axes.observation
+
+    prepared = BRM.NativePPL.prepare(plan; T=Float64)
+    @test prepared.response == Float64.(data.y)
+    @test prepared.response !== data.y
+    @test eltype(prepared) === Float64
+    workspace = BRM.NativePPL.workspace(
+        prepared, Float64, DI.AutoEnzyme())
+    position = [0.3, -0.7]
+    location = position[1] .+ position[2] .* data.x
+    probability = 1.0 ./ (1.0 .+ exp.(-location))
+    pointwise = logpdf.(BRM.BernoulliLogit.(location), data.y)
+    expected_density =
+        logpdf(Normal(), position[1]) +
+        logpdf(Normal(), position[2]) + sum(pointwise)
+    expected_gradient = [
+        -position[1] + sum(data.y .- probability),
+        -position[2] + sum(data.x .* (data.y .- probability)),
+    ]
+
+    density = BRM.NativePPL.logdensity!(workspace, prepared, position)
+    @test density ≈ expected_density
+    @test workspace.primal.location ≈ location
+    @test workspace.primal.pointwise_loglikelihood ≈ pointwise
+    gradient_density, gradient = BRM.NativePPL.logdensity_and_gradient!(
+        workspace, prepared, position)
+    @test gradient_density ≈ expected_density
+    @test gradient ≈ expected_gradient
+    @test steady_state_allocations(workspace, prepared, position) ==
+          (; primal=0, gradient=0)
+
+    likelihood = BRM._native_ppl_factor_logdensity!(
+        plan.factors.likelihood, plan.inputs.response, plan.nodes.location,
+        position, prepared, workspace.primal)
+    @test likelihood ≈ sum(pointwise)
+    mismatched_likelihood = BRM.NativePPLBernoulliLogitFactor(
+        :wrong_response, :eta, plan.axes.observation)
+    @test_throws MethodError BRM._native_ppl_factor_logdensity!(
+        mismatched_likelihood, plan.inputs.response, plan.nodes.location,
+        position, prepared, workspace.primal)
+
+    location_output = BRM.NativePPL.allocate_output(prepared, linear_query)
+    pointwise_output = BRM.NativePPL.allocate_output(prepared, pointwise_query)
+    prediction_output = BRM.NativePPL.allocate_output(prepared, predictive_query)
+    @test location_output isa Vector{Float64}
+    @test pointwise_output isa Vector{Float64}
+    @test prediction_output isa Vector{Bool}
+    @test BRM.NativePPL.evaluate!(
+        location_output, workspace, prepared, position, linear_query) ===
+          location_output
+    @test location_output ≈ location
+    @test BRM.NativePPL.evaluate!(
+        pointwise_output, workspace, prepared, position, pointwise_query) ===
+          pointwise_output
+    @test pointwise_output ≈ pointwise
+    prediction_a = BRM.NativePPL.simulate(
+        MersenneTwister(71), workspace, prepared, position)
+    prediction_b = BRM.NativePPL.simulate(
+        MersenneTwister(71), workspace, prepared, position)
+    @test prediction_a == prediction_b
+    @test prediction_a isa Vector{Bool}
+    @test_throws ArgumentError BRM.NativePPL.simulate!(
+        MersenneTwister(71), zeros(length(data.y)), workspace, prepared,
+        position)
+
+    BRM.NativePPL.evaluate!(
+        location_output, workspace, prepared, position, linear_query)
+    BRM.NativePPL.evaluate!(
+        pointwise_output, workspace, prepared, position, pointwise_query)
+    rng = MersenneTwister(72)
+    BRM.NativePPL.simulate!(
+        rng, prediction_output, workspace, prepared, position)
+    @test @allocated(BRM.NativePPL.evaluate!(
+        location_output, workspace, prepared, position, linear_query)) == 0
+    @test @allocated(BRM.NativePPL.evaluate!(
+        pointwise_output, workspace, prepared, position, pointwise_query)) == 0
+    rng = MersenneTwister(72)
+    @test @allocated(BRM.NativePPL.simulate!(
+        rng, prediction_output, workspace, prepared, position)) == 0
+    predictive_allocation = @allocated(
+        BRM.NativePPL.allocate_output(prepared, predictive_query))
+    rng = MersenneTwister(72)
+    predictive_wrapper_allocation = @allocated(
+        BRM.NativePPL.simulate(rng, workspace, prepared, position))
+    @test predictive_wrapper_allocation == predictive_allocation
+
+    extreme_data = (; x=[-1.0, 1.0], y=Bool[false, true])
+    extreme_plan = BRM.NativePPL.compile(@brm extreme_data begin
+        eta ~ 1 + x
+        y ~ BernoulliLogit(eta)
+    end)
+    extreme_prepared = BRM.NativePPL.prepare(extreme_plan)
+    extreme_workspace = BRM.NativePPL.workspace(extreme_prepared)
+    extreme_position = [0.0, 1000.0]
+    extreme_pointwise = BRM.NativePPL.evaluate(
+        extreme_workspace, extreme_prepared, extreme_position,
+        pointwise_query)
+    @test all(isfinite, extreme_pointwise)
+    @test all(iszero, extreme_pointwise)
+    @test BRM._native_ppl_softplus(1000.0) == 1000.0
+    @test BRM._native_ppl_softplus(-1000.0) == 0.0
+    @test BRM._native_ppl_logistic(1000.0) == 1.0
+    @test BRM._native_ppl_logistic(-1000.0) == 0.0
+
+    rebound = BRM.NativePPL.rebind(
+        prepared, (; x=Float32[-1, 2], y=Int[1, 0]); T=Float32)
+    @test BRM.NativePPL.has_response(rebound)
+    @test eltype(rebound) === Float32
+    @test rebound.response == Float32[1, 0]
+    @test BRM.NativePPL.output_eltype(
+        BRM.NativePPL.output_signature(rebound, predictive_query), rebound) === Bool
+    @test BRM.NativePPL.logdensity!(
+        BRM.NativePPL.workspace(rebound), rebound, Float32.(position)) isa Float32
+
+    prediction_only = BRM.NativePPL.rebind(
+        prepared, (; x=Float32[-1, 2]); T=Float32)
+    @test !BRM.NativePPL.has_response(prediction_only)
+    prediction_only_workspace = BRM.NativePPL.workspace(prediction_only)
+    @test BRM.NativePPL.evaluate(
+        prediction_only_workspace, prediction_only, Float32.(position),
+        linear_query) isa Vector{Float32}
+    @test BRM.NativePPL.simulate(
+        MersenneTwister(73), prediction_only_workspace, prediction_only,
+        Float32.(position)) isa Vector{Bool}
+    err = argument_error(() -> BRM.NativePPL.logdensity!(
+        prediction_only_workspace, prediction_only, Float32.(position)))
+    @test occursin("requires an observed response binding", err.msg)
+
+    @test_throws ArgumentError BRM.NativePPL.rebind(
+        prepared, (; x=[-1.0, 2.0], y=[0, 2]))
+    invalid_data = (; x=[-1.0, 2.0], y=[0, 2])
+    invalid_brmi = @brm invalid_data begin
+        eta ~ 1 + x
+        y ~ BernoulliLogit(eta)
+    end
+    @test capability_error(() -> BRM.NativePPL.compile(invalid_brmi)).capability ==
+          :response_support
+
+    float_data = (; x=[-1.0, 2.0], y=[0.0, 1.0])
+    @test BRM.NativePPL.compile(@brm float_data begin
+        eta ~ 1 + x
+        y ~ BernoulliLogit(eta)
+    end) isa BRM.NativePPL.Plan
+end
+
+
 @testset "native PPL workflow queries and replay" begin
     data = (; x=[-1.0, 0.0, 2.0], y=[0.5, 1.0, 2.5])
     brmi = @brm data begin
