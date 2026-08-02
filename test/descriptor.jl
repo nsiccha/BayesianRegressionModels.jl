@@ -468,23 +468,29 @@ kernel_schedule(n; subject=collect(1:n)) = (;
     @test_throws ErrorException brm_output_coordinates(d, :loc, ["not_loc.1"])
 
     # A ragged observation left INSIDE the plate cell (`yy ~ normal(...)` above)
-    # emits no twins at all — this model produces zero generated quantities.
-    # That is StanBlocks' DOCUMENTED boundary, not a gap (brm-use, the "`draw`
-    # is a NAME" table): the density is valid but the nested ragged form stays
-    # model-only. The preferred spelling is TOP-LEVEL ragged — return the
-    # kernel's ragged result and write `dv ~ Normal(pred, sigma)` — which does
-    # emit a flat `dv_gen`, an aggregate `dv_likelihood`, and `segments` on
-    # both; the scalar-in-cell form below emits `dv_gen` alone.
-    #
-    # Asserted rather than skipped because the query must stay fail-CLOSED
-    # here: a consumer asking for a predictive slice of a nested ragged
-    # observation has to get an error naming the problem, never an empty or
-    # partial slice that silently misaligns with its subjects.
-    @test isempty(brm_outputs(d; logical=:dv))
-    @test isempty(brm_outputs(d; role=:posterior_predictive))
-    @test_throws ErrorException brm_output(d, :dv; role=:posterior_predictive)
-    @test_throws ErrorException brm_output_coordinates(
+    # keeps the observed base through StanBlocks' compiler-owned loop. Its draw
+    # is flat over the ragged backing memory, its log likelihood is aggregate per
+    # subject, and both descriptor outputs carry the observed inclusive ends.
+    # The local alias `yy` is deliberately absent from the public names: BRM
+    # resolves through the upstream `source === :dv` link.
+    draw = brm_output(d, :dv; role=:posterior_predictive)
+    loglik = brm_output(d, :dv; role=:pointwise_loglik)
+    @test draw.name === :dv_gen
+    @test loglik.name === :dv_likelihood
+    @test draw.source === :dv && loglik.source === :dv
+    @test draw.logical === :dv && loglik.logical === :dv
+    @test Set(o.name for o in brm_outputs(d; logical=:dv)) ==
+          Set([:dv_gen, :dv_likelihood])
+
+    ends = cumsum(length.(kernel_schedule(3).dv))
+    @test draw.segments == ends
+    @test loglik.segments == ends
+    draw_coordinates = brm_output_coordinates(
         d, :dv, constrained_names; role=:posterior_predictive)
+    loglik_coordinates = brm_output_coordinates(
+        d, :dv, constrained_names; role=:pointwise_loglik)
+    @test length(draw_coordinates) == last(ends)
+    @test length(loglik_coordinates) == length(ends)
 
     # `segments` is plumbed from StanBlocks either way. The plate's collected
     # return carrier is a plate member, not an observation twin, so it carries
@@ -499,17 +505,15 @@ kernel_schedule(n; subject=collect(1:n)) = (;
     @test :reprocess ∉ ops
     @test brm_execute(d, :replay, kernel_schedule(5)) isa BRMDescriptor
 
-    # A ragged plate observation has no declarable generated-quantity twin.
-    # BRM therefore names it in `unpredictable` and withholds `:predict`.
-    @test :predict ∉ ops
-    @test d.unpredictable == (:yy,)
+    @test :predict in ops
+    @test :pointwise_loglik in ops
+    @test isempty(d.unpredictable)
 end
 
-# The PREFERRED ragged spelling (brm-use, the "`draw` is a NAME" table): return
-# the kernel's ragged result, then apply the family at TOP LEVEL. Unlike the
-# in-cell form, this one owns a flat `dv_gen`, an aggregate `dv_likelihood`,
-# and per-subject `segments` on both — which is what makes a posterior slice
-# addressable by subject without consumer-side length bookkeeping.
+# The equivalent top-level ragged spelling: return the kernel's ragged result,
+# then apply the family outside the cell. It owns the same flat `dv_gen`,
+# aggregate `dv_likelihood`, and per-subject `segments` contract as the in-cell
+# form above.
 toplevel_ragged_builder = @brm begin
     sigma ~ Exponential(1)
     log_CL ~ 1 + (1 | p | subject)
