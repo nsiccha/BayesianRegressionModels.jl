@@ -15,6 +15,8 @@ function BRM._native_ppl_workspace(
     ::Type{T},
     backend::DI.AbstractADType,
 ) where {T<:AbstractFloat}
+    BRM._native_ppl_require_response(
+        prepared, "DifferentiationInterface gradient preparation")
     workspace = BRM.NativePPLWorkspace(prepared, T)
     position = zeros(T, BRM.LogDensityProblems.dimension(prepared))
     preparation = DI.prepare_gradient(

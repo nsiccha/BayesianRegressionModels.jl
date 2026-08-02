@@ -220,7 +220,12 @@ struct NativePPLPrepared{P,X,Y,S}
     workspace_spec::S
 end
 
-Base.eltype(prepared::NativePPLPrepared) = eltype(prepared.response)
+"""Explicit absence of an observation binding in a prediction-only replay."""
+struct NativePPLNoResponse end
+
+Base.eltype(prepared::NativePPLPrepared) = eltype(prepared.predictor)
+native_ppl_has_response(prepared::NativePPLPrepared) =
+    !(prepared.response isa NativePPLNoResponse)
 LogDensityProblems.dimension(prepared::NativePPLPrepared) =
     LogDensityProblems.dimension(prepared.plan)
 
@@ -278,8 +283,10 @@ function Base.show(io::IO, plan::NativePPLPlan)
 end
 
 function Base.show(io::IO, prepared::NativePPLPrepared)
-    print(io, "NativePPLPrepared(", length(prepared.response),
-          " observations, eltype=", eltype(prepared), ")")
+    print(io, "NativePPLPrepared(", length(prepared.plan.axes.observation),
+          " observations, eltype=", eltype(prepared))
+    native_ppl_has_response(prepared) || print(io, ", prediction-only")
+    print(io, ")")
 end
 
 function Base.show(io::IO, workspace::NativePPLWorkspace)
@@ -479,6 +486,39 @@ function _native_ppl_copy_input(::Type{T}, input, role::Symbol, name::Symbol) wh
     output
 end
 
+function _native_ppl_prepare_response(::Type{T}, response::AbstractVector,
+                                      name::Symbol, observations::Int) where {T<:AbstractFloat}
+    output = _native_ppl_copy_input(T, response, :response, name)
+    length(output) == observations || throw(DimensionMismatch(
+        "native PPL response `$name` has $(length(output)) rows but predictor has " *
+        "$observations"))
+    output
+end
+
+_native_ppl_prepare_response(::Type{<:AbstractFloat},
+                             response::NativePPLNoResponse,
+                             ::Symbol, ::Int) = response
+
+function _native_ppl_prepare_bindings(plan::NativePPLPlan, predictor,
+                                      response, ::Type{T}) where {T<:AbstractFloat}
+    isconcretetype(T) || throw(ArgumentError(
+        "native PPL prepared element type must be concrete; got $T"))
+    predictor_name = native_input_name(plan.inputs.predictor)
+    response_name = native_input_name(plan.inputs.response)
+    prepared_predictor = _native_ppl_copy_input(
+        T, predictor, :predictor, predictor_name)
+    length(prepared_predictor) == length(plan.axes.observation) ||
+        throw(DimensionMismatch(
+            "native PPL predictor `$predictor_name` has " *
+            "$(length(prepared_predictor)) rows but the observation axis has " *
+            "$(length(plan.axes.observation))"))
+    prepared_response = _native_ppl_prepare_response(
+        T, response, response_name, length(prepared_predictor))
+    workspace_spec = NativePPLWorkspaceSpec(
+        plan.axes.observation, LogDensityProblems.dimension(plan))
+    NativePPLPrepared(plan, prepared_predictor, prepared_response, workspace_spec)
+end
+
 """
     _native_ppl_prepare(plan; T=Float64) -> NativePPLPrepared
 
@@ -491,16 +531,19 @@ function _native_ppl_prepare(plan::NativePPLPlan; T::Type{<:AbstractFloat}=Float
         "native PPL prepared element type must be concrete; got $T"))
     predictor_name = native_input_name(plan.inputs.predictor)
     response_name = native_input_name(plan.inputs.response)
-    predictor = _native_ppl_copy_input(
-        T, getproperty(plan.bindings, predictor_name), :predictor, predictor_name)
-    response = _native_ppl_copy_input(
-        T, getproperty(plan.bindings, response_name), :response, response_name)
-    length(predictor) == length(response) || throw(DimensionMismatch(
-        "native PPL predictor `$predictor_name` has $(length(predictor)) rows but " *
-        "response `$response_name` has $(length(response))"))
-    workspace_spec = NativePPLWorkspaceSpec(
-        plan.axes.observation, LogDensityProblems.dimension(plan))
-    NativePPLPrepared(plan, predictor, response, workspace_spec)
+    predictor = getproperty(plan.bindings, predictor_name)
+    response = getproperty(plan.bindings, response_name)
+    _native_ppl_prepare_bindings(plan, predictor, response, T)
+end
+
+
+function _native_ppl_require_response(prepared::NativePPLPrepared,
+                                      operation::AbstractString)
+    native_ppl_has_response(prepared) || throw(ArgumentError(
+        "native PPL $operation requires an observed response binding; " *
+        "this prepared value is prediction-only, so rebind it with both " *
+        "predictor and response inputs"))
+    prepared.response
 end
 
 function _native_ppl_check_location_execution(workspace::NativePPLWorkspace,
@@ -531,9 +574,10 @@ function _native_ppl_check_execution(workspace::NativePPLWorkspace,
                                      prepared::NativePPLPrepared,
                                      position::AbstractVector)
     _native_ppl_check_location_execution(workspace, prepared, position)
+    response = _native_ppl_require_response(prepared, "log density")
     observations = length(prepared.plan.axes.observation)
-    length(prepared.response) == observations || throw(DimensionMismatch(
-        "native PPL prepared response has $(length(prepared.response)) rows; expected $observations"))
+    length(response) == observations || throw(DimensionMismatch(
+        "native PPL prepared response has $(length(response)) rows; expected $observations"))
     length(workspace.primal.pointwise_loglikelihood) == observations ||
         throw(DimensionMismatch(
             "native PPL workspace pointwise likelihood has " *
@@ -636,12 +680,19 @@ function _native_ppl_required_binding(bindings, name::Symbol, role::Symbol)
     value
 end
 
+
+function _native_ppl_response_binding(bindings, name::Symbol)
+    hasproperty(bindings, name) || return NativePPLNoResponse()
+    _native_ppl_required_binding(bindings, name, :response)
+end
+
 """
     _native_ppl_rebind(prepared, bindings; T=eltype(prepared))
 
-Rebind the same graph semantics to compatible predictor and response vectors.
-The observation axis and every node/factor/query carrying it are rebuilt from
-the new row count; parameter coordinates and semantic identities are reused.
+Rebind the same graph semantics to compatible predictor and optional response
+vectors. Omitting the response creates an explicit prediction-only prepared
+value. The observation axis and every node/factor/query carrying it are rebuilt
+from the new row count; parameter coordinates and semantic identities are reused.
 """
 function _native_ppl_rebind(prepared::NativePPLPrepared, bindings;
                             T::Type{<:AbstractFloat}=eltype(prepared))
@@ -649,25 +700,29 @@ function _native_ppl_rebind(prepared::NativePPLPrepared, bindings;
     predictor_name = native_input_name(plan.inputs.predictor)
     response_name = native_input_name(plan.inputs.response)
     predictor = _native_ppl_required_binding(bindings, predictor_name, :predictor)
-    response = _native_ppl_required_binding(bindings, response_name, :response)
+    response = _native_ppl_response_binding(bindings, response_name)
     eltype(predictor) <: Real && !(eltype(predictor) <: Integer) ||
         throw(ArgumentError(
             "native PPL predictor `$predictor_name` must preserve the compiled " *
             "continuous real input role; got eltype $(eltype(predictor))"))
-    eltype(response) <: Real || throw(ArgumentError(
-        "native PPL response `$response_name` must preserve its compiled real input role; " *
-        "got eltype $(eltype(response))"))
-    length(predictor) == length(response) || throw(DimensionMismatch(
-        "native PPL predictor `$predictor_name` has $(length(predictor)) rows but " *
-        "response `$response_name` has $(length(response))"))
-    !isempty(response) || throw(DimensionMismatch(
+    if response isa AbstractVector
+        eltype(response) <: Real || throw(ArgumentError(
+            "native PPL response `$response_name` must preserve its compiled real input role; " *
+            "got eltype $(eltype(response))"))
+        length(predictor) == length(response) || throw(DimensionMismatch(
+            "native PPL predictor `$predictor_name` has $(length(predictor)) rows but " *
+            "response `$response_name` has $(length(response))"))
+    end
+    !isempty(predictor) || throw(DimensionMismatch(
         "native PPL rebound observation axis cannot be empty"))
 
-    observation_axis = NativePPLAxis(:observation, Base.OneTo(length(response)))
+    observation_axis = NativePPLAxis(:observation, Base.OneTo(length(predictor)))
     predictor_input = NativePPLInput(
         predictor_name, :predictor, observation_axis, eltype(predictor))
+    response_eltype = response isa AbstractVector ?
+        eltype(response) : eltype(plan.inputs.response)
     response_input = NativePPLInput(
-        response_name, :response, observation_axis, eltype(response))
+        response_name, :response, observation_axis, response_eltype)
 
     old_node = plan.nodes.location
     location_name = native_node_name(old_node)
@@ -677,7 +732,9 @@ function _native_ppl_rebind(prepared::NativePPLPrepared, bindings;
     scale_name = native_parameter_name(plan.parameters.scale)
     likelihood = NativePPLNormalFactor(
         response_name, location_name, scale_name, observation_axis)
-    new_bindings = NamedTuple{(predictor_name, response_name)}((predictor, response))
+    new_bindings = response isa AbstractVector ?
+        NamedTuple{(predictor_name, response_name)}((predictor, response)) :
+        NamedTuple{(predictor_name,)}((predictor,))
 
     rebound_plan = NativePPLPlan(
         merge(plan.axes, (; observation=observation_axis)),
@@ -688,7 +745,7 @@ function _native_ppl_rebind(prepared::NativePPLPrepared, bindings;
         _native_ppl_queries(observation_axis),
         new_bindings,
     )
-    _native_ppl_prepare(rebound_plan; T)
+    _native_ppl_prepare_bindings(rebound_plan, predictor, response, T)
 end
 
 _native_ppl_query_spec(plan::NativePPLPlan, ::NativePPLLinearPredictor) =
@@ -758,6 +815,7 @@ function _native_ppl_evaluate!(output::AbstractVector,
                                position::AbstractVector,
                                query::NativePPLPointwiseLogLikelihood)
     _native_ppl_check_query_output(output, prepared, query)
+    _native_ppl_require_response(prepared, "pointwise log likelihood")
     _native_ppl_logdensity!(workspace, prepared, position)
     copyto!(output, workspace.primal.pointwise_loglikelihood)
 end
@@ -807,6 +865,7 @@ workspace(prepared::Prepared, ::Type{T}, backend) where {T<:AbstractFloat} =
     BRM._native_ppl_workspace(prepared, T, backend)
 rebind(prepared::Prepared, bindings; kwargs...) =
     BRM._native_ppl_rebind(prepared, bindings; kwargs...)
+has_response(prepared::Prepared) = BRM.native_ppl_has_response(prepared)
 output_signature(plan::Plan, query::BRM.NativePPLQuery) =
     BRM.native_query_output(BRM._native_ppl_query_spec(plan, query))
 output_signature(prepared::Prepared, query::BRM.NativePPLQuery) =
@@ -846,7 +905,7 @@ end
 export Plan, Prepared, Workspace, CapabilityError, OutputSignature
 export DenseVectorLayout
 export LinearPredictor, PointwiseLogLikelihood, PosteriorPredictive
-export compile, prepare, workspace, rebind
+export compile, prepare, workspace, rebind, has_response
 export output_signature, output_axis, output_eltype, output_layout
 export allocate_output, evaluate, simulate
 export logdensity!, logdensity_and_gradient!, evaluate!, simulate!
