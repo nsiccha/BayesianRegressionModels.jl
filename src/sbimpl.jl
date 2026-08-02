@@ -2770,9 +2770,11 @@ One emitted sampling declaration in a [`GenerativePlan`](@ref).
   plate-local alias such as `kernel_y => dv`), otherwise `nothing`.
 - `draw` is the canonical binding a generative executor should use for an
   observation, otherwise `nothing`. For top-level observations this matches
-  StanBlocks' current posterior-predictive `*_gen` name; nested plate
-  observations are inventoried even though StanBlocks does not yet emit their
-  generated quantity.
+  StanBlocks' current posterior-predictive `*_gen` name. Nested plate
+  observations are inventoried too, but consumers must discover their actual
+  executable twins through `stan_descriptor`: the emitted names are based on
+  `data_source`, not this plate-local target. A ragged base has a flat draw and
+  a group-aggregate likelihood, both carrying the observed group boundaries.
 - `context` names enclosing plate results, outermost first.
 - `expression` is an exact snapshot of the emitted `~` expression.
 
