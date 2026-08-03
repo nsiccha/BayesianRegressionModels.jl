@@ -182,6 +182,10 @@ exp_link(input::Symbol) = ExpLink{input}()
 struct GroupGather{Values,Group} <: AbstractNodeDeclaration end
 group_gather(values::Symbol, group::Symbol) = GroupGather{values,group}()
 
+"""Multiply two named scalar-or-row values on the observation-row axis."""
+struct RowProduct{Left,Right} <: AbstractNodeDeclaration end
+row_product(left::Symbol, right::Symbol) = RowProduct{left,right}()
+
 node_input(::Center{Input}) where {Input} = Input
 node_input(::ZScale{Input}) where {Input} = Input
 node_inputs(::Affine{Inputs}) where {Inputs} = Inputs
@@ -199,6 +203,7 @@ end
 node_input(::ExpLink{Input}) where {Input} = Input
 group_values(::GroupGather{Values}) where {Values} = Values
 group_input(::GroupGather{Values,Group}) where {Values,Group} = Group
+row_product_inputs(::RowProduct{Left,Right}) where {Left,Right} = (Left, Right)
 affine_parameter(::Affine{Inputs,Coefficients}) where {Inputs,Coefficients} =
     Coefficients
 
@@ -363,6 +368,11 @@ struct GroupGatherFactorNode{V,G} <: AbstractFactorNode
     group::G
 end
 
+struct RowProductFactorNode{L,R} <: AbstractFactorNode
+    left::L
+    right::R
+end
+
 factor_node_dependencies(node::Union{
         CenterFactorNode,ZScaleFactorNode,ExpFactorNode}) =
     _factor_value_dependencies((node.input,))
@@ -371,6 +381,8 @@ factor_node_dependencies(node::AffineFactorNode) =
         node.inputs..., node.coefficients, node.offsets...))
 factor_node_dependencies(node::GroupGatherFactorNode) =
     _factor_value_dependencies((node.values, node.group))
+factor_node_dependencies(node::RowProductFactorNode) =
+    _factor_value_dependencies((node.left, node.right))
 
 abstract type AbstractSiteShape end
 struct ScalarSiteShape <: AbstractSiteShape end
@@ -523,10 +535,13 @@ function _factor_node(declaration::AbstractNodeDeclaration,
             affine_has_intercept(declaration))
     elseif declaration isa ExpLink
         ExpFactorNode(reference(node_input(declaration)))
-    else
+    elseif declaration isa GroupGather
         GroupGatherFactorNode(
             SiteValue{group_values(declaration)}(),
             InputValue{group_input(declaration)}())
+    else
+        left, right = row_product_inputs(declaration)
+        RowProductFactorNode(reference(left), reference(right))
     end
 end
 
@@ -902,12 +917,15 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
         declaration; conditions=canonical_conditions, bindings,
         group_levels, new_groups)
     for (name, node) in pairs(graph.nodes)
-        node isa Union{ExpFactorNode,AffineFactorNode,GroupGatherFactorNode} ||
+        node isa Union{
+            ExpFactorNode,AffineFactorNode,GroupGatherFactorNode,
+            RowProductFactorNode,
+        } ||
             throw(CapabilityError(
             :factor_nodes,
             "multi-latent factor node `$name` has unsupported operation " *
             "$(typeof(node)); the current executable slice accepts scalar " *
-            "exp, row-valued affine, and group-gather nodes"))
+            "exp plus row-valued affine, group-gather, and product nodes"))
         if node isa ExpFactorNode
             broadcast_input = node.input isa SiteValue &&
                 getproperty(
@@ -1254,7 +1272,9 @@ end
                                      ::Type{T}) where {Name,T}
     node_index = getproperty(plan.node_indices, Name)
     node = getproperty(plan.graph.nodes, Name)
-    node isa Union{AffineFactorNode,GroupGatherFactorNode} ?
+    node isa Union{
+        AffineFactorNode,GroupGatherFactorNode,RowProductFactorNode,
+    } ?
         buffers.node_rows[node_index, index] :
         buffers.node_values[node_index]
 end
@@ -1446,6 +1466,21 @@ end
             getproperty(prepared.conditions, site_name)[group_index]
         end
         buffers.node_rows[node_index, row] = value
+    end
+    zero(T)
+end
+
+@inline function _factor_node_logdensity!(::Val{Name},
+        node::RowProductFactorNode,
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Name,T}
+    node_index = getproperty(prepared.plan.node_indices, Name)
+    for row in prepared.plan.observation_axis.keys
+        buffers.node_rows[node_index, row] =
+            _factor_argument_at(
+                node.left, row, prepared.plan, buffers, T) *
+            _factor_argument_at(
+                node.right, row, prepared.plan, buffers, T)
     end
     zero(T)
 end
@@ -2633,6 +2668,14 @@ function _qualified_node(namespace::Symbol, declaration::GroupGather, mapping)
 end
 
 
+function _qualified_node(namespace::Symbol, declaration::RowProduct, mapping)
+    left, right = row_product_inputs(declaration)
+    row_product(
+        _mapped_name(mapping, left, namespace, "row product"),
+        _mapped_name(mapping, right, namespace, "row product"))
+end
+
+
 function _qualified_observation(namespace::Symbol, observation, mapping)
     scalar = scalar_observation(observation)
     response = qualified_name(namespace, observation_response(scalar))
@@ -3047,6 +3090,7 @@ function _validate_model_components(
             (node_inputs(declaration)..., affine_offsets(declaration)...) :
             declaration isa GroupGather ?
                 (group_values(declaration), group_input(declaration)) :
+            declaration isa RowProduct ? row_product_inputs(declaration) :
                 (node_input(declaration),)
         for dependency in dependencies
             dependency in available || throw(ArgumentError(
@@ -5057,7 +5101,7 @@ export SiteValue, InputValue, NodeValue, LiteralValue, StochasticSite
 export SiteCoordinates, GroupCoordinateKey
 export FactorGraph
 export CenterFactorNode, ZScaleFactorNode, AffineFactorNode, ExpFactorNode
-export GroupGatherFactorNode
+export GroupGatherFactorNode, RowProductFactorNode
 export FactorPlan, FactorPrepared, FactorWorkspace, FactorLogDensityProblem
 export StandardNormalSiteFactor, NormalSiteFactor, ExponentialSiteFactor
 export BernoulliLogitSiteFactor, PoissonSiteFactor
@@ -5065,12 +5109,13 @@ export ScalarSiteShape, BlockSiteShape, BroadcastSiteShape
 export FreeSite, ConditionedSite, GeneratedSite
 export RealSupport, PositiveSupport, IdentityTransform, ExpTransform
 export StandardNormal, NormalPrior, ExponentialPrior
-export Center, ZScale, Affine, ExpLink, GroupGather
+export Center, ZScale, Affine, ExpLink, GroupGather, RowProduct
 export NormalObservation, BernoulliLogitObservation, PoissonObservation
 export BroadcastObservation
 export model, input, parameter, Identity, Exp, normal_prior, Exponential
 export center, zscale, standardize, affine, exp_link
 export grouped_normal, group_gather, group_values, group_input
+export row_product, row_product_inputs
 export normal, bernoulli_logit, poisson, broadcasted
 export instantiate, substitute, condition, component, output, compose, bind, lower
 export factor_graph, site_factor_dependencies, factor_node_dependencies

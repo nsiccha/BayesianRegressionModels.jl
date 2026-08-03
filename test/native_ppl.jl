@@ -3641,6 +3641,74 @@ end
         grouped_prediction_only, grouped_position)) ==
           length(grouped_bindings.group)
 
+    row_product_declaration = NP.model(
+        inputs=(; x=NP.input(), group=NP.input()),
+        parameters=(;
+            tau=NP.parameter(
+                NP.PositiveSupport(), (:tau,); transform=NP.Exp(),
+                prior=NP.Exponential(1)),
+            varying=NP.grouped_normal(:group, 0.0, :tau),
+            sigma=NP.parameter(
+                NP.PositiveSupport(), (:sigma,); transform=NP.Exp(),
+                prior=NP.Exponential(2))),
+        nodes=(;
+            varying_by_row=NP.group_gather(:varying, :group),
+            varying_slope=NP.row_product(:varying_by_row, :x)),
+        observations=(; y=NP.broadcasted(
+            NP.normal(:y, :varying_slope, :sigma))),
+        site_order=(:tau, :varying, :sigma, :y))
+    @test NP.row_product_inputs(
+        row_product_declaration.nodes.varying_slope) ==
+          (:varying_by_row, :x)
+    row_product_bindings = (;
+        x=[0.5, -1.0, 1.5, 2.0], group=grouped_bindings.group)
+    row_product_graph = NP.factor_graph(
+        row_product_declaration; bindings=row_product_bindings,
+        conditions=(; y=sampled_offset_data.y))
+    @test row_product_graph.schedule == (
+        :tau, :varying, :sigma, :varying_by_row, :varying_slope, :y)
+    @test row_product_graph.nodes.varying_slope isa NP.RowProductFactorNode
+    @test NP.factor_node_dependencies(
+        row_product_graph.nodes.varying_slope) == (:varying_by_row,)
+    row_product_prepared = NP.prepare(NP.compile(
+        row_product_declaration, row_product_bindings;
+        conditions=(; y=sampled_offset_data.y)))
+    row_product_workspace = NP.workspace(
+        row_product_prepared, Float64, DI.AutoEnzyme())
+    row_product_mu = grouped_mu .* row_product_bindings.x
+    row_product_residuals = sampled_offset_data.y .- row_product_mu
+    row_product_expected_density =
+        logpdf(Exponential(1), grouped_tau) + grouped_position[1] +
+        sum(logpdf.(Normal(0, grouped_tau), grouped_effects)) +
+        logpdf(Exponential(2), grouped_sigma) + grouped_position[5] +
+        sum(logpdf.(Normal.(row_product_mu, grouped_sigma),
+                    sampled_offset_data.y))
+    row_product_expected_gradient = [
+        grouped_expected_gradient[1],
+        -grouped_effects[1] / grouped_tau^2 +
+            (row_product_residuals[1] * row_product_bindings.x[1] +
+             row_product_residuals[3] * row_product_bindings.x[3]) /
+                grouped_sigma^2,
+        -grouped_effects[2] / grouped_tau^2 +
+            row_product_residuals[2] * row_product_bindings.x[2] /
+                grouped_sigma^2,
+        -grouped_effects[3] / grouped_tau^2 +
+            row_product_residuals[4] * row_product_bindings.x[4] /
+                grouped_sigma^2,
+        1 - grouped_sigma / 2 - length(sampled_offset_data.y) +
+            sum(abs2, row_product_residuals) / grouped_sigma^2,
+    ]
+    row_product_density, row_product_gradient = NP.logdensity_and_gradient!(
+        row_product_workspace, row_product_prepared, grouped_position)
+    @test row_product_density ≈ row_product_expected_density
+    @test row_product_gradient ≈ row_product_expected_gradient
+    @test NP.evaluate(
+        row_product_workspace, row_product_prepared, grouped_position,
+        NP.LinearPredictor()) == row_product_mu
+    @test factor_steady_state_allocations(
+        row_product_workspace, row_product_prepared, grouped_position) ==
+          (; primal=0, gradient=0)
+
     varying_brm_data = (;
         x=sampled_offset_data.x,
         group=grouped_bindings.group,
