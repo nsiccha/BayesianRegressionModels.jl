@@ -3719,6 +3719,135 @@ end
             natural_exposure_poisson(exposure_data.x, invalid_exposure);
             y=exposure_data.y))
     end
+    exposure_predictive_rng = MersenneTwister(990)
+    exposure_expected_rng = MersenneTwister(990)
+    exposure_predictive = NP.allocate_output(
+        exposure_prepared, NP.PosteriorPredictive())
+    NP.simulate!(
+        exposure_predictive_rng, exposure_predictive,
+        exposure_workspace, exposure_prepared, exposure_position)
+    @test exposure_predictive == [
+        BRM._native_ppl_rand_poisson(
+            exposure_expected_rng, Float64, log_rate)
+        for log_rate in exposure_log_rate]
+    @test factor_query_allocations(
+        exposure_workspace, exposure_prepared, exposure_position,
+        zeros(5), zeros(5), zeros(Int, 5), zeros(2)) ==
+          (; linear=0, pointwise=0, predictive=0, prior=0)
+
+    exposure_replay_bindings = (;
+        x=Float32[1.5, -0.5, 0.25],
+        exposure=Float32[2.0, 0.75, 3.0])
+    exposure_prediction_only = NP.rebind(
+        exposure_prepared, (;); bindings=exposure_replay_bindings)
+    @test !NP.has_response(exposure_prediction_only)
+    @test eltype(exposure_prediction_only) === Float64
+    exposure_replay_position = [0.1, 0.4]
+    exposure_replay_log_rate = exposure_replay_position[1] .+
+        exposure_replay_position[2] .*
+            Float64.(exposure_replay_bindings.x) .+
+        log.(Float64.(exposure_replay_bindings.exposure))
+    exposure_replay_workspace = NP.workspace(
+        exposure_prediction_only, Float64, DI.AutoEnzyme())
+    @test NP.evaluate(
+        exposure_replay_workspace, exposure_prediction_only,
+        exposure_replay_position, NP.LinearPredictor()) ≈
+          exposure_replay_log_rate
+    exposure_replay_rng = MersenneTwister(991)
+    exposure_replay_expected_rng = MersenneTwister(991)
+    @test NP.simulate(
+        exposure_replay_rng, exposure_replay_workspace,
+        exposure_prediction_only, exposure_replay_position) == [
+            BRM._native_ppl_rand_poisson(
+                exposure_replay_expected_rng, Float64, log_rate)
+            for log_rate in exposure_replay_log_rate]
+    @test_throws ArgumentError NP.rebind(
+        exposure_prepared, (;);
+        bindings=(; x=Float32[0, 1], exposure=Float32[1, 0]))
+    exposure_rebound_response = Int[2, 0, 1]
+    exposure_rebound = NP.rebind(
+        exposure_prepared, (; y=exposure_rebound_response);
+        bindings=exposure_replay_bindings)
+    exposure_rebound_workspace = NP.workspace(
+        exposure_rebound, Float64, DI.AutoEnzyme())
+    exposure_rebound_density, exposure_rebound_gradient =
+        NP.logdensity_and_gradient!(
+            exposure_rebound_workspace, exposure_rebound,
+            exposure_replay_position)
+    @test isfinite(exposure_rebound_density)
+    @test all(isfinite, exposure_rebound_gradient)
+    @test NP.evaluate(
+        exposure_rebound_workspace, exposure_rebound,
+        exposure_replay_position, NP.PointwiseLogLikelihood()) ≈
+          BRM._native_ppl_poisson_logdensity.(
+              Float64.(exposure_rebound_response),
+              exposure_replay_log_rate)
+
+    exposure_float32 = NP.condition(
+        natural_exposure_poisson(
+            Float32.(exposure_data.x), Float32.(exposure_data.exposure));
+        y=exposure_data.y)
+    exposure_float32_prepared = NP.prepare(exposure_float32; T=Float32)
+    @test eltype(exposure_float32_prepared) === Float32
+    exposure_float32_workspace = NP.workspace(
+        exposure_float32_prepared, Float32, DI.AutoEnzyme())
+    exposure_float32_position = Float32.(exposure_position)
+    exposure_float32_density, exposure_float32_gradient =
+        NP.logdensity_and_gradient!(
+            exposure_float32_workspace, exposure_float32_prepared,
+            exposure_float32_position)
+    @test exposure_float32_density ≈ Float32(exposure_density) rtol=1f-5
+    @test exposure_float32_gradient ≈
+          Float32.(exposure_gradient) rtol=1f-5
+
+    exposure_draw_positions = [
+        exposure_position';
+        0.1 0.25]
+    exposure_draw_linear = zeros(2, 5)
+    exposure_draw_pointwise = zeros(2, 5)
+    exposure_draw_predictive = zeros(Int, 2, 5)
+    NP.evaluate_draws!(
+        exposure_draw_linear, exposure_workspace, exposure_prepared,
+        exposure_draw_positions, NP.LinearPredictor())
+    NP.evaluate_draws!(
+        exposure_draw_pointwise, exposure_workspace, exposure_prepared,
+        exposure_draw_positions, NP.PointwiseLogLikelihood())
+    exposure_draw_rng = MersenneTwister(992)
+    exposure_manual_rng = MersenneTwister(992)
+    exposure_manual_predictive = similar(exposure_draw_predictive)
+    for draw in axes(exposure_draw_positions, 1)
+        NP.simulate!(
+            exposure_manual_rng,
+            @view(exposure_manual_predictive[draw, :]),
+            exposure_workspace, exposure_prepared,
+            @view(exposure_draw_positions[draw, :]))
+    end
+    NP.simulate_draws!(
+        exposure_draw_rng, exposure_draw_predictive,
+        exposure_workspace, exposure_prepared,
+        exposure_draw_positions)
+    @test exposure_draw_predictive == exposure_manual_predictive
+    exposure_queries = (;
+        linear=NP.LinearPredictor(),
+        pointwise=NP.PointwiseLogLikelihood(),
+        predictive=NP.PosteriorPredictive())
+    exposure_bundle = (;
+        linear=zeros(2, 5),
+        pointwise=zeros(2, 5),
+        predictive=zeros(Int, 2, 5))
+    NP.execute_draws!(
+        MersenneTwister(992), exposure_bundle,
+        exposure_workspace, exposure_prepared,
+        exposure_draw_positions, exposure_queries)
+    @test exposure_bundle.linear == exposure_draw_linear
+    @test exposure_bundle.pointwise == exposure_draw_pointwise
+    @test exposure_bundle.predictive == exposure_manual_predictive
+    @test factor_batch_allocations(
+        exposure_workspace, exposure_prepared,
+        exposure_draw_positions, exposure_draw_linear,
+        exposure_draw_pointwise, exposure_draw_predictive,
+        exposure_bundle) ==
+          (; linear=0, pointwise=0, predictive=0, bundle=0)
 
     grouped_declaration = NP.model(
         inputs=(; group=NP.input()),
