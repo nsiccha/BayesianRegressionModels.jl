@@ -1165,6 +1165,9 @@ function _validate_model_components(
             name in exportable || throw(ArgumentError(
                 "native PPL model output `$alias` references unavailable " *
                 "value `$name`"))
+            alias === name || alias ∉ exportable || throw(ArgumentError(
+                "native PPL model output alias `$alias` collides with " *
+                "existing graph identity `$alias`"))
         end
     end
 

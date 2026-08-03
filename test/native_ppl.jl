@@ -3204,12 +3204,20 @@ end
         observations=(;
             downstream=NP.normal(:downstream, :upstream, :literal_tau),
             upstream=NP.normal(:upstream, :literal_mu, :literal_tau)),
+        outputs=(; public_downstream=:downstream),
         site_order=(:upstream, :downstream))
-    unordered_storage_graph = NP.factor_graph(unordered_storage_graph_model)
+    unordered_storage_graph = NP.factor_graph(
+        unordered_storage_graph_model;
+        conditions=(; public_downstream=0.3))
     @test keys(unordered_storage_graph.sites) == (:upstream, :downstream)
     @test NP.site_factor_dependencies(
         unordered_storage_graph.sites.downstream.factor) ==
           (:upstream, :literal_tau)
+    @test unordered_storage_graph.sites.downstream.activity isa
+          NP.ConditionedSite
+    @test_throws ArgumentError NP.factor_graph(
+        unordered_storage_graph_model;
+        conditions=(; downstream=0.3, public_downstream=0.3))
 
     cyclic_graph_model = NP.model(
         inputs=(; literal_tau=NP.input(),),
@@ -3374,6 +3382,13 @@ end
         inputs=(; raw=NP.input()),
         nodes=(; scaled=NP.zscale(:raw)),
         observations=(;), outputs=(; first=:scaled, second=:scaled))
+    @test_throws ArgumentError NP.model(
+        inputs=(; literal_mu=NP.input(), literal_tau=NP.input()),
+        observations=(;
+            first_site=NP.normal(:first_site, :literal_mu, :literal_tau),
+            second_site=NP.normal(
+                :second_site, :literal_mu, :literal_tau)),
+        outputs=(; first_site=:second_site))
     @test_throws ArgumentError NP.model(
         inputs=(; raw=NP.input()), observations=(;), outputs=(;))
 
