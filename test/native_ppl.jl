@@ -243,6 +243,16 @@ NP.@model function macro_multi_poisson(
     @. y ~ Poisson(exp(log_rate))
 end
 
+NP.@model function macro_multi_gaussian_dotted(
+    x::AbstractVector{<:Real}, w::AbstractVector{<:Real})
+    intercept ~ Normal()
+    beta_x ~ Normal()
+    beta_w ~ Normal()
+    sigma ~ Exponential(2.0)
+    mu = intercept .+ zscale(x) .* beta_x .+ beta_w .* center(w)
+    @. y ~ Normal(mu, sigma)
+end
+
 NP.@model function macro_bernoulli_center(
     x::AbstractVector{<:Real})
     intercept ~ Normal()
@@ -2032,6 +2042,14 @@ end
     @test NP.logdensity!(
         NP.workspace(brm_prepared), brm_prepared, position) ≈ expected_density
 
+    dotted_instance = NP.condition(
+        macro_multi_gaussian_dotted(data.x, data.w); y=data.y)
+    dotted_plan = NP.compile(dotted_instance)
+    check_plan_structure(plan, dotted_plan)
+    dotted_prepared = NP.prepare(dotted_plan)
+    @test NP.evaluate(
+        NP.workspace(dotted_prepared), dotted_prepared, position,
+        NP.LinearPredictor()) ≈ expected_mu
     @test_throws ArgumentError NP.rebind(prepared, (; x=data.x))
     @test_throws ArgumentError NP.rebind(
         prepared, (; x=data.x, w=data.w, extra=data.x))
@@ -2313,6 +2331,35 @@ end
             @. y ~ Poisson(log_rate + x)
         end)))
     @test occursin("named rate or `exp(named_log_rate)`", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function repeated_coefficient(x, w)
+            intercept ~ Normal()
+            beta ~ Normal()
+            sigma ~ Exponential(1.0)
+            mu = intercept + beta * x + beta * w
+            @. y ~ Normal(mu, sigma)
+        end)))
+    @test occursin("coefficients must be used once each", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function repeated_path(x, w)
+            intercept ~ Normal()
+            beta_x ~ Normal()
+            beta_w ~ Normal()
+            sigma ~ Exponential(1.0)
+            mu = intercept + beta_x * x + beta_w * x
+            @. y ~ Normal(mu, sigma)
+        end)))
+    @test occursin("predictor paths must be unique", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function repeated_raw_input(x, w)
+            intercept ~ Normal()
+            beta_x ~ Normal()
+            beta_centered_x ~ Normal()
+            sigma ~ Exponential(1.0)
+            mu = intercept + beta_x * x + beta_centered_x * center(x)
+            @. y ~ Normal(mu, sigma)
+        end)))
+    @test occursin("features must use distinct raw inputs", err.msg)
 end
 
 

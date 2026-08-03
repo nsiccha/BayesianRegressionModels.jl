@@ -1079,13 +1079,31 @@ function _syntax_standard_normal(statement)
     valid ? lhs : nothing
 end
 
+function _syntax_affine_terms(expression)
+    expression isa Expr && expression.head === :call &&
+        first(expression.args) in (:+, :.+) || return nothing
+    terms = Any[]
+    function append_terms!(term)
+        if term isa Expr && term.head === :call &&
+           first(term.args) in (:+, :.+)
+            for argument in term.args[2:end]
+                append_terms!(argument)
+            end
+        else
+            push!(terms, term)
+        end
+    end
+    append_terms!(expression)
+    terms
+end
+
 function _syntax_affine_assignment(statement,
                                    scalar_priors::Set{Symbol})
     lhs, rhs = statement.args
     lhs isa Symbol || return nothing
-    rhs isa Expr && rhs.head === :call &&
-        first(rhs.args) in (:+, :.+) && length(rhs.args) >= 3 || return nothing
-    terms = rhs.args[2:end]
+    terms = _syntax_affine_terms(rhs)
+    terms === nothing && return nothing
+    length(terms) >= 2 || return nothing
     intercepts = [term for term in terms
                   if term isa Symbol && term in scalar_priors]
     length(intercepts) == 1 || return nothing
@@ -1093,6 +1111,7 @@ function _syntax_affine_assignment(statement,
 
     slopes = Symbol[]
     predictor_names = Symbol[]
+    raw_predictor_names = Symbol[]
     transform_names = Symbol[]
     transform_values = Any[]
     for product in terms
@@ -1109,7 +1128,9 @@ function _syntax_affine_assignment(statement,
         coefficient_index = only(coefficient_indices)
         slope = product_terms[coefficient_index]
         predictor_expression = product_terms[3 - coefficient_index]
+        raw_predictor_name = nothing
         predictor_name = if predictor_expression isa Symbol
+            raw_predictor_name = predictor_expression
             predictor_expression
         elseif predictor_expression isa Expr &&
                predictor_expression.head === :call
@@ -1120,6 +1141,7 @@ function _syntax_affine_assignment(statement,
                 throw(ArgumentError(
                     "native PPL @model $function_name requires one named input"))
             raw_input = only(arguments)
+            raw_predictor_name = raw_input
             canonical = function_name === :center ? :center : :zscale
             transform_name = Symbol(canonical, :_, raw_input, :_for_, lhs)
             push!(transform_names, transform_name)
@@ -1131,6 +1153,7 @@ function _syntax_affine_assignment(statement,
         end
         push!(slopes, slope)
         push!(predictor_names, predictor_name)
+        push!(raw_predictor_names, raw_predictor_name)
     end
     isempty(slopes) && return nothing
     length(unique(slopes)) == length(slopes) || throw(ArgumentError(
@@ -1138,6 +1161,9 @@ function _syntax_affine_assignment(statement,
     length(unique(predictor_names)) == length(predictor_names) ||
         throw(ArgumentError(
             "native PPL @model affine predictor paths must be unique"))
+    length(unique(raw_predictor_names)) == length(raw_predictor_names) ||
+        throw(ArgumentError(
+            "native PPL @model affine features must use distinct raw inputs"))
 
     coefficient_name = Symbol(:beta_, lhs)
     parameter_value = Expr(
