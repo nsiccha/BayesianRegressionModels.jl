@@ -4518,6 +4518,132 @@ end
               (; primal=0, gradient=0)
     end
 
+    three_group_prepared = NP.prepare(three_group_brm)
+    three_known_bindings = (;
+        x=[2.5, -0.5, 1.0],
+        w=[-0.25, 1.5, 0.75],
+        group=[:c, :a, :b])
+    three_known_replay = NP.rebind(
+        three_group_prepared, (;); bindings=three_known_bindings)
+    @test three_known_replay.plan.graph.dimension == 18
+    @test three_known_replay.plan.group_indices ==
+          (; b_p_group_by_group_for_mu=(3, 1, 2))
+    three_known_mu = [
+        three_beta[1] * three_known_bindings.x[row] +
+        three_beta[2] * three_known_bindings.w[row] +
+        three_effects[[3, 1, 2][row]][1] +
+        three_effects[[3, 1, 2][row]][2] *
+            three_known_bindings.x[row] +
+        three_effects[[3, 1, 2][row]][3] *
+            three_known_bindings.w[row]
+        for row in eachindex(three_known_bindings.x)]
+    @test NP.evaluate(
+        NP.workspace(three_known_replay), three_known_replay,
+        three_coefficient_group_position,
+        NP.LinearPredictor()) ≈ three_known_mu
+
+    three_new_bindings = (;
+        x=[-1.0, 0.5, 1.5, 2.0],
+        w=[0.25, -0.75, 1.25, 0.5],
+        group=[:a, :d, :d, :c])
+    three_new_replay = NP.rebind(
+        three_group_prepared, (;); bindings=three_new_bindings,
+        new_groups=:resample)
+    @test three_new_replay.plan.graph.dimension == 18
+    @test three_new_replay.plan.generated_group_levels ==
+          (; b_p_group=(:d,))
+    @test three_new_replay.plan.generated_group_indices ==
+          (; b_p_group=1:3)
+    @test three_new_replay.plan.group_indices ==
+          (; b_p_group_by_group_for_mu=(1, -1, -1, 3))
+    three_new_workspace = NP.workspace(three_new_replay)
+    three_new_rng = MersenneTwister(970)
+    three_new_expected_rng = MersenneTwister(970)
+    three_new_z = randn(three_new_expected_rng, 3)
+    three_new_effect = three_tau .* (three_L * three_new_z)
+    three_new_effects = [
+        three_effects[1], three_new_effect,
+        three_new_effect, three_effects[3]]
+    three_new_mu = [
+        three_beta[1] * three_new_bindings.x[row] +
+        three_beta[2] * three_new_bindings.w[row] +
+        three_new_effects[row][1] +
+        three_new_effects[row][2] * three_new_bindings.x[row] +
+        three_new_effects[row][3] * three_new_bindings.w[row]
+        for row in eachindex(three_new_bindings.x)]
+    three_new_linear = zeros(4)
+    NP.evaluate!(
+        three_new_rng, three_new_linear,
+        three_new_workspace, three_new_replay,
+        three_coefficient_group_position,
+        NP.LinearPredictor())
+    @test three_new_linear ≈ three_new_mu
+    @test three_new_workspace.primal.generated_group_values ≈ three_new_z
+    @test_throws NP.CapabilityError NP.logdensity!(
+        three_new_workspace, three_new_replay,
+        three_coefficient_group_position)
+
+    three_draw_positions = [
+        three_coefficient_group_position';
+        (three_coefficient_group_position .+
+         [0.02, -0.03, 0.01, 0.04, -0.02, 0.03,
+          0.01, -0.01, 0.02, -0.02, 0.01, -0.01,
+          0.03, -0.02, 0.01, 0.04, -0.03, 0.02])']
+    three_draw_predictive = zeros(2, 4)
+    three_draw_linear = zeros(2, 4)
+    three_manual_predictive = zeros(2, 4)
+    three_manual_linear = zeros(2, 4)
+    three_manual_fused_linear = zeros(2, 4)
+    three_draw_rng = MersenneTwister(971)
+    three_manual_rng = MersenneTwister(971)
+    for draw in axes(three_draw_positions, 1)
+        NP.simulate!(
+            three_manual_rng,
+            @view(three_manual_predictive[draw, :]),
+            three_new_workspace, three_new_replay,
+            @view(three_draw_positions[draw, :]))
+        three_manual_fused_linear[draw, :] .=
+            @view three_new_workspace.primal.node_rows[2, :]
+    end
+    NP.simulate_draws!(
+        three_draw_rng, three_draw_predictive,
+        three_new_workspace, three_new_replay,
+        three_draw_positions)
+    @test three_draw_predictive == three_manual_predictive
+    NP.evaluate_draws!(
+        MersenneTwister(972), three_draw_linear,
+        three_new_workspace, three_new_replay,
+        three_draw_positions, NP.LinearPredictor())
+    three_linear_rng = MersenneTwister(972)
+    for draw in axes(three_draw_positions, 1)
+        NP.evaluate!(
+            three_linear_rng,
+            @view(three_manual_linear[draw, :]),
+            three_new_workspace, three_new_replay,
+            @view(three_draw_positions[draw, :]),
+            NP.LinearPredictor())
+    end
+    @test three_draw_linear == three_manual_linear
+    three_queries = (;
+        linear=NP.LinearPredictor(),
+        predictive=NP.PosteriorPredictive())
+    three_bundle = (;
+        linear=zeros(2, 4), predictive=zeros(2, 4))
+    NP.execute_draws!(
+        MersenneTwister(971), three_bundle,
+        three_new_workspace, three_new_replay,
+        three_draw_positions, three_queries)
+    @test three_bundle.linear == three_manual_fused_linear
+    @test three_bundle.predictive == three_manual_predictive
+    @test factor_generated_draw_allocations(
+        MersenneTwister(973), MersenneTwister(974),
+        MersenneTwister(975),
+        three_draw_predictive, three_draw_linear,
+        three_bundle, three_new_workspace,
+        three_new_replay, three_draw_positions,
+        three_queries) ==
+          (; predictive=0, linear=0, bundle=0)
+
     varying_brm_data = (;
         x=sampled_offset_data.x,
         group=grouped_bindings.group,
