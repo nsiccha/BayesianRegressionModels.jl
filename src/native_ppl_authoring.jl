@@ -219,7 +219,20 @@ identity without flattening unrelated component-local names. Kinds currently
 distinguish connected input values, parameter blocks, deterministic nodes, and
 stochastic sites; execution activity is deliberately derived later.
 """
-struct GraphRef{Namespace,Name,Kind} end
+struct GraphRef{Namespace,Name,Kind}
+    function GraphRef{Namespace,Name,Kind}() where {Namespace,Name,Kind}
+        Namespace isa Symbol || throw(ArgumentError(
+            "native PPL graph reference namespace must be a Symbol; got " *
+            "$(repr(Namespace))"))
+        Name isa Symbol || throw(ArgumentError(
+            "native PPL graph reference name must be a Symbol; got " *
+            "$(repr(Name))"))
+        Kind in (:binding, :parameter, :node, :site) || throw(ArgumentError(
+            "native PPL graph reference kind must be one of `:binding`, " *
+            "`:parameter`, `:node`, or `:site`; got $(repr(Kind))"))
+        new{Namespace,Name,Kind}()
+    end
+end
 
 graph_namespace(::GraphRef{Namespace}) where {Namespace} = Namespace
 graph_name(::GraphRef{Namespace,Name}) where {Namespace,Name} = Name
@@ -228,14 +241,20 @@ graph_kind(::GraphRef{Namespace,Name,Kind}) where {Namespace,Name,Kind} = Kind
 """One model instance under a collision-safe composition namespace."""
 struct Component{Namespace,I<:ModelInstance}
     instance::I
+    function Component{Namespace,I}(instance::I) where {Namespace,I<:ModelInstance}
+        Namespace isa Symbol || throw(ArgumentError(
+            "native PPL component namespace must be a Symbol; got " *
+            "$(repr(Namespace))"))
+        isempty(string(Namespace)) && throw(ArgumentError(
+            "native PPL component namespace must not be empty"))
+        _validate_instance(instance)
+        new{Namespace,I}(instance)
+    end
 end
 
 component_namespace(::Component{Namespace}) where {Namespace} = Namespace
 
 function component(namespace::Symbol, instance::ModelInstance)
-    isempty(string(namespace)) && throw(ArgumentError(
-        "native PPL component namespace must not be empty"))
-    _validate_instance(instance)
     Component{namespace,typeof(instance)}(instance)
 end
 
@@ -276,9 +295,17 @@ only point to an earlier component, making cycles and forward references fail
 at declaration time. Compilation of graph-valued connections is a separate
 stage from this collision-safe public composition boundary.
 """
-struct Composition{C}
+struct Composition{C<:NamedTuple}
     components::C
+    function Composition(components::C) where {C<:NamedTuple}
+        _validate_composition(components)
+        new{C}(components)
+    end
 end
+
+Composition(components) = throw(ArgumentError(
+    "native PPL composition components must be a NamedTuple; got " *
+    "$(typeof(components))"))
 
 function _validate_graph_reference(reference::GraphRef, available, components)
     namespace = graph_namespace(reference)
@@ -326,7 +353,6 @@ function compose(components::Component...)
     length(unique(namespaces)) == length(namespaces) || throw(ArgumentError(
         "native PPL component namespaces must be unique; got $namespaces"))
     values = NamedTuple{namespaces}(components)
-    _validate_composition(values)
     Composition(values)
 end
 
