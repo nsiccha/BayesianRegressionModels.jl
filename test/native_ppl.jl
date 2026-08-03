@@ -468,6 +468,26 @@ NP.@model function natural_correlated_varying_intercept_slope(x, group)
     @. y ~ Normal(mu, sigma)
 end
 
+NP.@model function natural_correlated_bernoulli_logit(x, group)
+    tau_p_group[(:Intercept, :x)] ~ Exponential(1)
+    L_p_group[(:Intercept, :x)] ~ LKJCholesky(2, 2)
+    b_p_group[group, (:Intercept, :x)] ~
+        MvNormalCholesky(tau_p_group, L_p_group)
+    beta ~ Normal()
+    mu = beta * x + dot(b_p_group[group], (1, x))
+    @. y ~ BernoulliLogit(mu)
+end
+
+NP.@model function natural_correlated_poisson_log(x, group)
+    tau_p_group[(:Intercept, :x)] ~ Exponential(1)
+    L_p_group[(:Intercept, :x)] ~ LKJCholesky(2, 2)
+    b_p_group[group, (:Intercept, :x)] ~
+        MvNormalCholesky(tau_p_group, L_p_group)
+    beta ~ Normal()
+    log_rate = beta * x + dot(b_p_group[group], (1, x))
+    @. y ~ Poisson(exp(log_rate))
+end
+
 NP.@model function monolithic_scalar_normal()
     theta ~ Normal()
     sigma ~ Exponential(2.0)
@@ -4252,6 +4272,92 @@ end
     @test factor_steady_state_allocations(
         correlated_varying_workspace, correlated_varying_prepared,
         correlated_group_position) == (; primal=0, gradient=0)
+
+    correlated_bernoulli_data = (;
+        x=sampled_offset_data.x,
+        group=grouped_bindings.group,
+        y=correlated_bernoulli_response)
+    correlated_bernoulli_brm = @brm correlated_bernoulli_data begin
+        mu ~ 0 + x + (1 + x | p | group)
+        sd(:, p) ~ Exponential(1)
+        cor(:, p) ~ LKJCholesky(2, 2)
+        y ~ BernoulliLogit(mu)
+    end
+    @test SBBRMI(correlated_bernoulli_brm; mod=@__MODULE__) isa SBBRMI
+    correlated_bernoulli_model = NP.lower(correlated_bernoulli_brm)
+    natural_correlated_bernoulli = NP.condition(
+        natural_correlated_bernoulli_logit(
+            correlated_bernoulli_data.x,
+            correlated_bernoulli_data.group);
+        y=correlated_bernoulli_data.y)
+    @test typeof(correlated_bernoulli_model) ===
+          typeof(natural_correlated_bernoulli.declaration)
+    @test sprint(show, correlated_bernoulli_model) ==
+          sprint(show, natural_correlated_bernoulli.declaration)
+    @test keys(correlated_bernoulli_model.parameters) == (
+        :beta_mu, :tau_p_group, :L_p_group, :b_p_group)
+    @test keys(correlated_bernoulli_model.nodes) ==
+          (:b_p_group_by_group_for_mu, :mu)
+    correlated_bernoulli_brm_plan = NP.compile(correlated_bernoulli_brm)
+    @test correlated_bernoulli_brm_plan.graph.schedule == (
+        :tau_p_group, :L_p_group, :b_p_group, :beta_mu,
+        :b_p_group_by_group_for_mu, :mu, :y)
+    correlated_bernoulli_brm_prepared = NP.prepare(
+        correlated_bernoulli_brm_plan)
+    correlated_bernoulli_brm_workspace = NP.workspace(
+        correlated_bernoulli_brm_prepared, Float64, DI.AutoEnzyme())
+    correlated_bernoulli_brm_density,
+    correlated_bernoulli_brm_gradient = NP.logdensity_and_gradient!(
+        correlated_bernoulli_brm_workspace,
+        correlated_bernoulli_brm_prepared, correlated_glmm_position)
+    @test correlated_bernoulli_brm_density ≈ correlated_bernoulli_density
+    @test correlated_bernoulli_brm_gradient ≈ correlated_bernoulli_gradient
+    @test NP.evaluate(
+        correlated_bernoulli_brm_workspace,
+        correlated_bernoulli_brm_prepared, correlated_glmm_position,
+        NP.LinearPredictor()) ≈ correlated_mu
+
+    correlated_poisson_data = (;
+        x=sampled_offset_data.x,
+        group=grouped_bindings.group,
+        y=correlated_poisson_response)
+    correlated_poisson_brm = @brm correlated_poisson_data begin
+        log_rate ~ 0 + x + (1 + x | p | group)
+        sd(:, p) ~ Exponential(1)
+        cor(:, p) ~ LKJCholesky(2, 2)
+        y ~ Poisson(exp(log_rate))
+    end
+    @test SBBRMI(correlated_poisson_brm; mod=@__MODULE__) isa SBBRMI
+    correlated_poisson_model = NP.lower(correlated_poisson_brm)
+    natural_correlated_poisson = NP.condition(
+        natural_correlated_poisson_log(
+            correlated_poisson_data.x, correlated_poisson_data.group);
+        y=correlated_poisson_data.y)
+    @test typeof(correlated_poisson_model) ===
+          typeof(natural_correlated_poisson.declaration)
+    @test sprint(show, correlated_poisson_model) ==
+          sprint(show, natural_correlated_poisson.declaration)
+    @test keys(correlated_poisson_model.parameters) == (
+        :beta_log_rate, :tau_p_group, :L_p_group, :b_p_group)
+    @test keys(correlated_poisson_model.nodes) == (
+        :b_p_group_by_group_for_log_rate, :log_rate, :exp_log_rate)
+    correlated_poisson_brm_plan = NP.compile(correlated_poisson_brm)
+    @test correlated_poisson_brm_plan.graph.schedule == (
+        :tau_p_group, :L_p_group, :b_p_group, :beta_log_rate,
+        :b_p_group_by_group_for_log_rate, :log_rate, :exp_log_rate, :y)
+    correlated_poisson_brm_prepared = NP.prepare(correlated_poisson_brm_plan)
+    correlated_poisson_brm_workspace = NP.workspace(
+        correlated_poisson_brm_prepared, Float64, DI.AutoEnzyme())
+    correlated_poisson_brm_density, correlated_poisson_brm_gradient =
+        NP.logdensity_and_gradient!(
+            correlated_poisson_brm_workspace,
+            correlated_poisson_brm_prepared, correlated_glmm_position)
+    @test correlated_poisson_brm_density ≈ correlated_poisson_density
+    @test correlated_poisson_brm_gradient ≈ correlated_poisson_gradient
+    @test NP.evaluate(
+        correlated_poisson_brm_workspace, correlated_poisson_brm_prepared,
+        correlated_glmm_position, NP.LinearPredictor()) ≈ correlated_mu
+
     correlated_known_bindings = (;
         x=[2.5, -0.5, 1.0], group=[:c, :a, :b])
     correlated_known_replay = NP.rebind(

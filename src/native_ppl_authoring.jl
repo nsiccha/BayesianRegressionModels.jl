@@ -4673,12 +4673,6 @@ function _lower_brmi(brmi::BRM.BRMI)
     sampled_offsets = affine_components.offsets
     varying_groups = affine_components.groups
     has_intercept = affine_components.intercept
-    (!isempty(sampled_offsets) || !isempty(varying_groups)) &&
-        family !== BRM.Normal && throw(
-        CapabilityError(
-            :predictor_offset,
-            "the first sampled-offset/grouped native-PPL slice supports " *
-            "Normal responses"))
     isempty(sampled_offsets) && isempty(varying_groups) && !has_intercept &&
         throw(CapabilityError(
         :predictor_terms,
@@ -4790,53 +4784,56 @@ function _lower_brmi(brmi::BRM.BRMI)
         transform=Identity(),
         prior=intercept_prior.operation === nothing ? StandardNormal() :
             normal_prior(intercept_prior.location, intercept_prior.scale))
+    offset_declarations = map(
+        name -> parameter(
+            RealSupport(), (name,); transform=Identity(),
+            prior=_brmi_literal_normal_prior(brmi, name)),
+        sampled_offsets)
+    group_scale_declarations = map(group_specs) do spec
+        parameter(
+            PositiveSupport(), spec.correlated ? spec.coefficient_keys :
+                (spec.scale_name,);
+            transform=Exp(), prior=Exponential(spec.prior.scale))
+    end
+    group_correlation_declarations = map(group_specs) do spec
+        spec.correlated ? cholesky_correlation(
+            spec.coefficient_keys, spec.correlation_prior.eta) : nothing
+    end
+    group_site_declarations = map(group_specs) do spec
+        spec.correlated ? grouped_standard_normal(
+            spec.group_name, spec.coefficient_keys) :
+            grouped_normal(spec.group_name, 0.0, spec.scale_name)
+    end
+    group_parameter_names = foldl(
+        (names, spec) -> spec.correlated ?
+            (names..., spec.scale_name, spec.correlation_name,
+             spec.site_name) :
+            (names..., spec.scale_name, spec.site_name),
+        group_specs; init=())
+    group_parameter_declarations = foldl(
+        (declarations, entry) -> begin
+            spec, scale, correlation, site = entry
+            spec.correlated ?
+                (declarations..., scale, correlation, site) :
+                (declarations..., scale, site)
+        end,
+        zip(group_specs, group_scale_declarations,
+            group_correlation_declarations, group_site_declarations);
+        init=())
     parameter_declarations = if family === BRM.Normal
         scale_declaration = parameter(
             PositiveSupport(), (scale_name,);
             transform=Exp(), prior=Exponential(prior_scale))
-        offset_declarations = map(
-            name -> parameter(
-                RealSupport(), (name,); transform=Identity(),
-                prior=_brmi_literal_normal_prior(brmi, name)),
-            sampled_offsets)
-        group_scale_declarations = map(group_specs) do spec
-            parameter(
-                PositiveSupport(), spec.correlated ? spec.coefficient_keys :
-                    (spec.scale_name,);
-                transform=Exp(), prior=Exponential(spec.prior.scale))
-        end
-        group_correlation_declarations = map(group_specs) do spec
-            spec.correlated ? cholesky_correlation(
-                spec.coefficient_keys, spec.correlation_prior.eta) : nothing
-        end
-        group_site_declarations = map(group_specs) do spec
-            spec.correlated ? grouped_standard_normal(
-                spec.group_name, spec.coefficient_keys) :
-                grouped_normal(spec.group_name, 0.0, spec.scale_name)
-        end
-        group_parameter_names = foldl(
-            (names, spec) -> spec.correlated ?
-                (names..., spec.scale_name, spec.correlation_name,
-                 spec.site_name) :
-                (names..., spec.scale_name, spec.site_name),
-            group_specs; init=())
-        group_parameter_declarations = foldl(
-            (declarations, entry) -> begin
-                spec, scale, correlation, site = entry
-                spec.correlated ?
-                    (declarations..., scale, correlation, site) :
-                    (declarations..., scale, site)
-            end,
-            zip(group_specs, group_scale_declarations,
-                group_correlation_declarations, group_site_declarations);
-            init=())
         _declaration_namedtuple(
             (coefficient_name, group_parameter_names..., scale_name,
              sampled_offsets...),
             (coefficient_declaration, group_parameter_declarations...,
              scale_declaration, offset_declarations...))
     else
-        NamedTuple{(coefficient_name,)}((coefficient_declaration,))
+        _declaration_namedtuple(
+            (coefficient_name, group_parameter_names..., sampled_offsets...),
+            (coefficient_declaration, group_parameter_declarations...,
+             offset_declarations...))
     end
 
     transform_names = Symbol[]
@@ -4908,7 +4905,8 @@ function _lower_brmi(brmi::BRM.BRMI)
             observations=observation_declarations,
             site_order=(sampled_offsets..., group_site_order...,
                         coefficient_name,
-                        scale_name, response))
+                        (family === BRM.Normal ? (scale_name,) : ())...,
+                        response))
     end
     bindings = _declaration_namedtuple(
         input_names, (predictors..., groups...))
