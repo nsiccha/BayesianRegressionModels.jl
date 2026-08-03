@@ -715,6 +715,7 @@ end
                                     plan, buffers) where {T}
     location = _factor_argument(factor.location, plan, buffers, T)
     scale = _factor_argument(factor.scale, plan, buffers, T)
+    scale > zero(T) || return -T(Inf)
     residual = (value - location) / scale
     -T(0.5) * residual * residual - log(scale) -
         T(BRM._NATIVE_PPL_HALF_LOG2PI)

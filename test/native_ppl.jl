@@ -3292,6 +3292,11 @@ end
           Float32.(hierarchy_expected_gradient) rtol=1f-5
     @test_throws ArgumentError NP.prepare(
         hierarchy_plan; T=AbstractFloat)
+    hierarchy_underflow_position = copy(hierarchy_position)
+    hierarchy_underflow_position[2] = -1000.0
+    @test NP.logdensity!(
+        NP.workspace(hierarchy_prepared), hierarchy_prepared,
+        hierarchy_underflow_position) == -Inf
     @test hierarchy_workspace.primal.pointwise_loglikelihood ≈
         logpdf.(Normal(
             hierarchy_individual, hierarchy_observation_scale), response)
