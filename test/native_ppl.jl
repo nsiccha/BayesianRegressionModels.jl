@@ -4001,6 +4001,167 @@ end
     @test factor_steady_state_allocations(
         correlated_varying_workspace, correlated_varying_prepared,
         correlated_group_position) == (; primal=0, gradient=0)
+    correlated_known_bindings = (;
+        x=[2.5, -0.5, 1.0], group=[:c, :a, :b])
+    correlated_known_replay = NP.rebind(
+        correlated_varying_prepared, (;);
+        bindings=correlated_known_bindings)
+    @test correlated_known_replay.plan.graph.dimension == 11
+    @test correlated_known_replay.plan.group_indices ==
+          (; b_p_group_by_group_for_mu=(3, 1, 2))
+    correlated_known_mu = [
+        correlated_beta * correlated_known_bindings.x[row] +
+        correlated_effects[[3, 1, 2][row]][1] +
+        correlated_effects[[3, 1, 2][row]][2] *
+            correlated_known_bindings.x[row]
+        for row in eachindex(correlated_known_bindings.x)]
+    @test NP.evaluate(
+        NP.workspace(correlated_known_replay), correlated_known_replay,
+        correlated_group_position, NP.LinearPredictor()) ≈
+          correlated_known_mu
+
+    correlated_new_bindings = (;
+        x=[-1.0, 0.5, 1.5, 2.0], group=[:a, :d, :d, :c])
+    correlated_new_replay = NP.rebind(
+        correlated_varying_prepared, (;);
+        bindings=correlated_new_bindings, new_groups=:resample)
+    @test correlated_new_replay.plan.graph.dimension == 11
+    @test correlated_new_replay.plan.generated_group_levels ==
+          (; b_p_group=(:d,))
+    @test correlated_new_replay.plan.generated_group_indices ==
+          (; b_p_group=1:2)
+    @test correlated_new_replay.plan.group_indices ==
+          (; b_p_group_by_group_for_mu=(1, -1, -1, 3))
+    correlated_new_workspace = NP.workspace(correlated_new_replay)
+    @test length(correlated_new_workspace.primal.generated_group_values) == 2
+    correlated_new_rng = MersenneTwister(951)
+    correlated_new_expected_rng = MersenneTwister(951)
+    correlated_new_z = (
+        randn(correlated_new_expected_rng),
+        randn(correlated_new_expected_rng))
+    correlated_new_effect = (
+        correlated_tau[1] * correlated_new_z[1],
+        correlated_tau[2] *
+            (correlated_rho * correlated_new_z[1] +
+             correlated_sech * correlated_new_z[2]))
+    correlated_new_effects = [
+        correlated_effects[1], correlated_new_effect,
+        correlated_new_effect, correlated_effects[3]]
+    correlated_new_mu = [
+        correlated_beta * correlated_new_bindings.x[row] +
+        correlated_new_effects[row][1] +
+        correlated_new_effects[row][2] * correlated_new_bindings.x[row]
+        for row in eachindex(correlated_new_bindings.x)]
+    correlated_new_expected = [
+        location + correlated_sigma * randn(correlated_new_expected_rng)
+        for location in correlated_new_mu]
+    correlated_new_output = zeros(4)
+    NP.simulate!(
+        correlated_new_rng, correlated_new_output,
+        correlated_new_workspace, correlated_new_replay,
+        correlated_group_position)
+    @test correlated_new_output ≈ correlated_new_expected
+    @test correlated_new_workspace.primal.generated_group_values ≈
+          collect(correlated_new_z)
+    @test vec(correlated_new_workspace.primal.node_rows[1, :]) ≈
+          [effect[1] + effect[2] * x for (effect, x) in
+           zip(correlated_new_effects, correlated_new_bindings.x)]
+    @test_throws NP.CapabilityError NP.logdensity!(
+        correlated_new_workspace, correlated_new_replay,
+        correlated_group_position)
+    @test_throws NP.CapabilityError NP.evaluate!(
+        similar(correlated_new_output), correlated_new_workspace,
+        correlated_new_replay, correlated_group_position,
+        NP.LinearPredictor())
+    correlated_new_linear_rng = MersenneTwister(952)
+    correlated_new_linear_expected_rng = MersenneTwister(952)
+    correlated_linear_z = (
+        randn(correlated_new_linear_expected_rng),
+        randn(correlated_new_linear_expected_rng))
+    correlated_linear_effect = (
+        correlated_tau[1] * correlated_linear_z[1],
+        correlated_tau[2] *
+            (correlated_rho * correlated_linear_z[1] +
+             correlated_sech * correlated_linear_z[2]))
+    correlated_linear_effects = [
+        correlated_effects[1], correlated_linear_effect,
+        correlated_linear_effect, correlated_effects[3]]
+    correlated_new_linear_expected = [
+        correlated_beta * correlated_new_bindings.x[row] +
+        correlated_linear_effects[row][1] +
+        correlated_linear_effects[row][2] *
+            correlated_new_bindings.x[row]
+        for row in eachindex(correlated_new_bindings.x)]
+    correlated_new_linear = zeros(4)
+    NP.evaluate!(
+        correlated_new_linear_rng, correlated_new_linear,
+        correlated_new_workspace, correlated_new_replay,
+        correlated_group_position, NP.LinearPredictor())
+    @test correlated_new_linear ≈ correlated_new_linear_expected
+    @test factor_predictive_allocations(
+        MersenneTwister(953), correlated_new_output,
+        correlated_new_workspace, correlated_new_replay,
+        correlated_group_position) == 0
+
+    correlated_draw_positions = [
+        correlated_group_position';
+        (correlated_group_position .+
+         [0.05, -0.03, 0.02, 0.01, -0.02, 0.03, -0.01,
+          0.02, -0.04, 0.06, -0.02])']
+    correlated_draw_predictive = zeros(2, 4)
+    correlated_draw_linear = zeros(2, 4)
+    correlated_manual_predictive = zeros(2, 4)
+    correlated_manual_linear = zeros(2, 4)
+    correlated_manual_fused_linear = zeros(2, 4)
+    correlated_draw_rng = MersenneTwister(954)
+    correlated_manual_rng = MersenneTwister(954)
+    for draw in axes(correlated_draw_positions, 1)
+        NP.simulate!(
+            correlated_manual_rng,
+            @view(correlated_manual_predictive[draw, :]),
+            correlated_new_workspace, correlated_new_replay,
+            @view(correlated_draw_positions[draw, :]))
+        correlated_manual_fused_linear[draw, :] .=
+            @view correlated_new_workspace.primal.node_rows[2, :]
+    end
+    NP.simulate_draws!(
+        correlated_draw_rng, correlated_draw_predictive,
+        correlated_new_workspace, correlated_new_replay,
+        correlated_draw_positions)
+    @test correlated_draw_predictive == correlated_manual_predictive
+    correlated_draw_linear_rng = MersenneTwister(955)
+    correlated_manual_linear_rng = MersenneTwister(955)
+    for draw in axes(correlated_draw_positions, 1)
+        NP.evaluate!(
+            correlated_manual_linear_rng,
+            @view(correlated_manual_linear[draw, :]),
+            correlated_new_workspace, correlated_new_replay,
+            @view(correlated_draw_positions[draw, :]),
+            NP.LinearPredictor())
+    end
+    NP.evaluate_draws!(
+        correlated_draw_linear_rng, correlated_draw_linear,
+        correlated_new_workspace, correlated_new_replay,
+        correlated_draw_positions, NP.LinearPredictor())
+    @test correlated_draw_linear == correlated_manual_linear
+    correlated_queries = (;
+        linear=NP.LinearPredictor(),
+        predictive=NP.PosteriorPredictive())
+    correlated_bundle = (;
+        linear=zeros(2, 4), predictive=zeros(2, 4))
+    NP.execute_draws!(
+        MersenneTwister(954), correlated_bundle,
+        correlated_new_workspace, correlated_new_replay,
+        correlated_draw_positions, correlated_queries)
+    @test correlated_bundle.linear == correlated_manual_fused_linear
+    @test correlated_bundle.predictive == correlated_manual_predictive
+    @test factor_generated_draw_allocations(
+        MersenneTwister(956), MersenneTwister(957), MersenneTwister(958),
+        correlated_draw_predictive, correlated_draw_linear,
+        correlated_bundle, correlated_new_workspace,
+        correlated_new_replay, correlated_draw_positions,
+        correlated_queries) ==
+          (; predictive=0, linear=0, bundle=0)
     varying_brm = @brm varying_brm_data begin
         sigma ~ Exponential(2)
         mu ~ 0 + x + (1 | p | group)

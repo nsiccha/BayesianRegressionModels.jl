@@ -1295,9 +1295,14 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
     generated_group_levels = NamedTuple{grouped_site_names}(
         generated_level_values)
     next_generated_index = 1
-    generated_index_values = map(generated_level_values) do levels
-        indices = next_generated_index:(next_generated_index + length(levels) - 1)
-        next_generated_index += length(levels)
+    generated_index_values = map(
+        grouped_site_names, generated_level_values) do site_name, levels
+        parameter = getproperty(declaration.parameters, site_name)
+        coefficient_count = parameter isa GroupedStandardNormalParameter ?
+            length(group_coefficients(parameter)) : 1
+        count = length(levels) * coefficient_count
+        indices = next_generated_index:(next_generated_index + count - 1)
+        next_generated_index += count
         indices
     end
     generated_group_indices = NamedTuple{grouped_site_names}(
@@ -1380,7 +1385,7 @@ function FactorWorkspace(prepared::FactorPrepared,
         "native PPL factor workspace element type must be concrete; got $T"))
     site_values = zeros(T, length(prepared.plan.graph.sites))
     generated_group_values = zeros(
-        T, sum(length, values(prepared.plan.generated_group_levels); init=0))
+        T, sum(length, values(prepared.plan.generated_group_indices); init=0))
     node_values = zeros(T, length(prepared.plan.graph.nodes))
     node_rows = zeros(T, length(prepared.plan.graph.nodes),
                       length(prepared.plan.observation_axis))
@@ -1786,17 +1791,23 @@ end
     residual_scale = _factor_sech(raw_correlation)
     for row in prepared.plan.observation_axis.keys
         group_index = group_indices[row]
-        group_index > 0 || throw(CapabilityError(
-            :new_group_execution,
-            "correlated grouped coefficients for unseen levels are not " *
-            "executable until their block replay slice lands"))
-        standardized_offset = (group_index - 1) * 2
-        z_intercept = _factor_coefficient(
-            node.standardized, standardized_offset + 1,
-            position, prepared, buffers)
-        z_slope = _factor_coefficient(
-            node.standardized, standardized_offset + 2,
-            position, prepared, buffers)
+        z_intercept, z_slope = if group_index < 0
+            generated_indices = getproperty(
+                prepared.plan.generated_group_indices, standardized_name)
+            standardized_offset = (-group_index - 1) * 2
+            (buffers.generated_group_values[
+                 generated_indices[standardized_offset + 1]],
+             buffers.generated_group_values[
+                 generated_indices[standardized_offset + 2]])
+        else
+            standardized_offset = (group_index - 1) * 2
+            (_factor_coefficient(
+                 node.standardized, standardized_offset + 1,
+                 position, prepared, buffers),
+             _factor_coefficient(
+                 node.standardized, standardized_offset + 2,
+                 position, prepared, buffers))
+        end
         intercept = _factor_coefficient(
             node.scales, 1, position, prepared, buffers) * z_intercept
         slope = _factor_coefficient(
@@ -1874,7 +1885,7 @@ function _factor_check_workspace_layout(workspace::FactorWorkspace,
         throw(DimensionMismatch(
             "native PPL factor workspace has the wrong site-value layout"))
     length(workspace.primal.generated_group_values) ==
-        sum(length, values(prepared.plan.generated_group_levels); init=0) ||
+        sum(length, values(prepared.plan.generated_group_indices); init=0) ||
         throw(DimensionMismatch(
             "native PPL factor workspace has the wrong generated-group layout"))
     length(workspace.primal.node_values) ==
