@@ -13,6 +13,19 @@ include("dependency_floors.jl")
 const BRM = BayesianRegressionModels
 const NP = BRM.NativePPL
 
+NP.@model function factor_hierarchy_for_warmup()
+    population ~ Normal()
+    population_scale ~ Exponential(1.0)
+    individual_1 ~ Normal(population, population_scale)
+    individual_2 ~ Normal(population, population_scale)
+    individual_3 ~ Normal(population, population_scale)
+    individual_4 ~ Normal(population, population_scale)
+    individual_5 ~ Normal(population, population_scale)
+    observation_scale ~ Exponential(2.0)
+    @. y ~ Normal(individual_1, observation_scale)
+    return y
+end
+
 require_git_ancestor(
     "WarmupHMC",
     pkgdir(WarmupHMC),
@@ -76,6 +89,45 @@ require_git_ancestor(
     draws = result.posterior_position
     @test size(draws, 1) == dimension
     @test size(draws, 2) >= 100 # n_draws is a floor for WarmupHMC.
+    @test all(isfinite, draws)
+    @test all(>(1e-6), vec(std(draws; dims=2)))
+    @test result.n_divergent_samples == 0
+end
+
+@testset "factor DAG samples end-to-end with WarmupHMC" begin
+    response = [0.28, 0.35, 0.31, 0.41, 0.26, 0.37]
+    prepared = NP.prepare(NP.compile(NP.condition(
+        factor_hierarchy_for_warmup();
+        individual_1=0.28,
+        individual_2=0.35,
+        individual_3=0.31,
+        individual_4=0.41,
+        individual_5=0.26,
+        y=response)))
+    problem = NP.LogDensityProblem(prepared, DI.AutoEnzyme())
+
+    dimension = LogDensityProblems.dimension(problem)
+    @test dimension == 3
+    density, gradient = LogDensityProblems.logdensity_and_gradient(
+        problem, zeros(dimension))
+    @test isfinite(density)
+    @test all(isfinite, gradient)
+
+    result = WarmupHMC.adaptive_warmup_mcmc(
+        Xoshiro(0x20260803),
+        problem;
+        n_draws=50,
+        n_evaluations=150,
+        stepsize_adaptation_limit=20,
+        max_tree_depth=8,
+        progress=nothing,
+        monitor_ess=false,
+        nonlinear_adapt=false,
+    )
+
+    draws = result.posterior_position
+    @test size(draws, 1) == dimension
+    @test size(draws, 2) >= 50
     @test all(isfinite, draws)
     @test all(>(1e-6), vec(std(draws; dims=2)))
     @test result.n_divergent_samples == 0
