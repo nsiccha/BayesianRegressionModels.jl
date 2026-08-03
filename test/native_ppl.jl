@@ -4,7 +4,7 @@ import DifferentiationInterface as DI
 using Distributions: Exponential, Normal, Poisson, logpdf
 using Enzyme
 using LogDensityProblems
-using Random: MersenneTwister, rand, randn
+using Random: MersenneTwister, rand, randexp, randn
 
 const BRM = BayesianRegressionModels
 const NP = BRM.NativePPL
@@ -2870,6 +2870,7 @@ end
 
 @testset "public native PPL @model semantics" begin
     raw_x = [-1.0, 0.0, 2.0, 4.0]
+    response = [0.2, -0.1, 1.1, 0.7]
     preprocessing = concise_zscale_component(raw_x)
     @test keys(preprocessing.declaration.inputs) == (:raw,)
     @test keys(preprocessing.declaration.nodes) == (:scaled,)
@@ -2935,8 +2936,8 @@ end
         latent_response_name)) == (latent_name, latent_scale_name)
     @test keys(latent_lowered.conditions) == (latent_response_name,)
     latent_plan = NP.compile(latent_composition)
-    @test keys(latent_plan.parameters) == (:coefficients, :scale)
-    @test BRM.native_parameter_name(latent_plan.parameters.coefficients) ===
+    @test keys(latent_plan.parameters) == (:site, :scale)
+    @test BRM.native_parameter_name(latent_plan.parameters.site) ===
           latent_name
     @test keys(latent_plan.factors) ==
           (:site_prior, :scale_prior, :likelihood)
@@ -2946,13 +2947,130 @@ end
           latent_name
     @test LogDensityProblems.dimension(latent_plan) == 2
 
+    latent_prepared = NP.prepare(latent_plan)
+    latent_position = [0.3, log(0.8)]
+    latent_workspace = NP.workspace(
+        latent_prepared, Float64, DI.AutoEnzyme())
+    latent_location = fill(latent_position[1], length(response))
+    latent_residuals = response .- latent_position[1]
+    latent_expected_density =
+        logpdf(Normal(0.25, 0.8), latent_position[1]) +
+        logpdf(Exponential(2.0), exp(latent_position[2])) +
+        latent_position[2] +
+        sum(logpdf.(
+            Normal.(latent_location, exp(latent_position[2])), response))
+    latent_expected_gradient = [
+        -(latent_position[1] - 0.25) / 0.8^2 +
+            sum(latent_residuals) / exp(2 * latent_position[2]),
+        1 - exp(latent_position[2]) / 2 - length(response) +
+            sum(abs2, latent_residuals) / exp(2 * latent_position[2]),
+    ]
+    latent_density, latent_gradient = NP.logdensity_and_gradient!(
+        latent_workspace, latent_prepared, latent_position)
+    @test latent_density ≈ latent_expected_density
+    @test latent_gradient ≈ latent_expected_gradient
+    @test NP.evaluate(
+        latent_workspace, latent_prepared, latent_position,
+        NP.LinearPredictor()) == latent_location
+    latent_pointwise = NP.evaluate(
+        latent_workspace, latent_prepared, latent_position,
+        NP.PointwiseLogLikelihood())
+    @test latent_density ≈
+          logpdf(Normal(0.25, 0.8), latent_position[1]) +
+          logpdf(Exponential(2.0), exp(latent_position[2])) +
+          latent_position[2] + sum(latent_pointwise)
+    @test steady_state_allocations(
+        latent_workspace, latent_prepared, latent_position) ==
+          (; primal=0, gradient=0)
+    @test NP.LogDensityProblem(
+        latent_prepared, DI.AutoEnzyme()) isa NP.LogDensityProblem
+
+    monolithic_latent = NP.prepare(NP.condition(
+        monolithic_latent_normal(0.25, 0.8); y=response))
+    monolithic_latent_workspace = NP.workspace(
+        monolithic_latent, Float64, DI.AutoEnzyme())
+    monolithic_density, monolithic_gradient = NP.logdensity_and_gradient!(
+        monolithic_latent_workspace, monolithic_latent, latent_position)
+    @test monolithic_density ≈ latent_density
+    @test monolithic_gradient ≈ latent_gradient
+    @test NP.evaluate(
+        monolithic_latent_workspace, monolithic_latent, latent_position,
+        NP.LinearPredictor()) == latent_location
+    @test NP.simulate(
+        MersenneTwister(913), monolithic_latent_workspace,
+        monolithic_latent, latent_position) == NP.simulate(
+            MersenneTwister(913), latent_workspace,
+            latent_prepared, latent_position)
+
     scale_named_plan = NP.compile(NP.condition(
         monolithic_scale_named_site(0.25, 0.8);
-        y=[0.2, -0.1, 1.1, 0.7]))
-    @test keys(scale_named_plan.parameters) == (:coefficients, :scale)
+        y=response))
+    @test keys(scale_named_plan.parameters) == (:site, :scale)
     @test BRM.native_parameter_name(
-        scale_named_plan.parameters.coefficients) === :scale
-    @test LogDensityProblems.dimension(scale_named_plan) == 2
+        scale_named_plan.parameters.site) === :scale
+    scale_named_prepared = NP.prepare(scale_named_plan)
+    scale_named_density, scale_named_gradient = NP.logdensity_and_gradient!(
+        NP.workspace(scale_named_prepared, Float64, DI.AutoEnzyme()),
+        scale_named_prepared, latent_position)
+    @test scale_named_density ≈ latent_density
+    @test scale_named_gradient ≈ latent_gradient
+
+    latent_rebound_response = [0.1, 0.4, 0.8]
+    latent_rebound = NP.rebind(
+        latent_prepared,
+        NamedTuple{(latent_response_name,)}((latent_rebound_response,)))
+    @test latent_rebound.response == latent_rebound_response
+    @test length(latent_rebound.plan.axes.observation) == 3
+    latent_prediction = NP.rebind(latent_prepared, (;))
+    @test !NP.has_response(latent_prediction)
+    @test length(latent_prediction.plan.axes.observation) == length(response)
+    @test length(NP.simulate(
+        MersenneTwister(914), NP.workspace(latent_prediction),
+        latent_prediction, latent_position)) == length(response)
+    @test_throws ArgumentError NP.evaluate(
+        NP.workspace(latent_prediction), latent_prediction, latent_position,
+        NP.PointwiseLogLikelihood())
+
+    prior_rng = MersenneTwister(915)
+    expected_site = 0.25 + 0.8 * randn(prior_rng)
+    expected_scale = 2.0 * randexp(prior_rng)
+    expected_prior_response = [
+        expected_site + expected_scale * randn(prior_rng)
+        for _ in eachindex(response)
+    ]
+    prior_position = zeros(2)
+    prior_response = similar(response)
+    @test NP.simulate_prior!(
+        MersenneTwister(915), prior_position, prior_response,
+        latent_workspace, latent_prepared) === prior_response
+    @test prior_position ≈ [expected_site, log(expected_scale)]
+    @test prior_response == expected_prior_response
+    allocated_prior = NP.simulate_prior(
+        MersenneTwister(915), latent_workspace, latent_prepared)
+    @test allocated_prior.position == prior_position
+    @test allocated_prior.response == prior_response
+    monolithic_prior = NP.simulate_prior(
+        MersenneTwister(915), monolithic_latent_workspace,
+        monolithic_latent)
+    @test monolithic_prior == allocated_prior
+    prediction_prior = NP.simulate_prior(
+        MersenneTwister(915), NP.workspace(latent_prediction),
+        latent_prediction)
+    @test prediction_prior == allocated_prior
+    allocation_rng = MersenneTwister(916)
+    NP.simulate_prior!(
+        allocation_rng, prior_position, prior_response,
+        latent_workspace, latent_prepared)
+    @test @allocated(NP.simulate_prior!(
+        allocation_rng, prior_position, prior_response,
+        latent_workspace, latent_prepared)) == 0
+
+    latent_prepared32 = NP.prepare(latent_plan; T=Float32)
+    latent_density32, latent_gradient32 = NP.logdensity_and_gradient!(
+        NP.workspace(latent_prepared32, Float32, DI.AutoEnzyme()),
+        latent_prepared32, Float32.(latent_position))
+    @test latent_density32 ≈ Float32(latent_expected_density) rtol=1f-5
+    @test latent_gradient32 ≈ Float32.(latent_expected_gradient) rtol=1f-5
 
     aliased_prior = aliased_scalar_normal_prior()
     @test keys(aliased_prior.declaration.parameters) == (:theta,)

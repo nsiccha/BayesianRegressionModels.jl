@@ -801,9 +801,10 @@ end
 @inline function _native_ppl_location_parameter(
     ::NativePPLScalarBroadcastNode{Location,Parameter}, parameters,
 ) where {Location,Parameter}
-    hasproperty(parameters, :coefficients) && return parameters.coefficients
+    hasproperty(parameters, :site) && return parameters.site
     hasproperty(parameters, Parameter) && return getproperty(
         parameters, Parameter)
+    hasproperty(parameters, :coefficients) && return parameters.coefficients
     throw(NativePPLCapabilityError(
         :graph_identity,
         "compiled scalar graph is missing parameter `$Parameter`"))
@@ -2256,6 +2257,113 @@ function _native_ppl_simulate!(rng::AbstractRNG,
         prepared, position, workspace.primal)
 end
 
+@inline function _native_ppl_draw_parameter!(
+    rng::AbstractRNG,
+    position::AbstractVector{T},
+    factor::NativePPLStandardNormalFactor{Parameter},
+    parameter::NativePPLParameter{Parameter},
+) where {T,Parameter}
+    for coordinate in factor.unconstrained
+        position[coordinate] = randn(rng, T)
+    end
+    nothing
+end
+
+
+@inline function _native_ppl_draw_parameter!(
+    rng::AbstractRNG,
+    position::AbstractVector{T},
+    factor::NativePPLScalarNormalFactor{Parameter},
+    parameter::NativePPLParameter{Parameter},
+) where {T,Parameter}
+    position[factor.unconstrained_index] =
+        T(factor.location) + T(factor.scale) * randn(rng, T)
+    nothing
+end
+
+
+@inline function _native_ppl_draw_parameter!(
+    rng::AbstractRNG,
+    position::AbstractVector{T},
+    factor::NativePPLExponentialFactor{Parameter},
+    parameter::NativePPLParameter{Parameter},
+) where {T,Parameter}
+    constrained = T(factor.scale) * randexp(rng, T)
+    position[factor.unconstrained_index] = log(constrained)
+    nothing
+end
+
+
+function _native_ppl_check_prior_predictive(
+    output::AbstractVector,
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+    position::AbstractVector,
+)
+    _native_ppl_check_query_output(
+        output, prepared, NativePPLPosteriorPredictive())
+    _native_ppl_check_location_execution(workspace, prepared, position)
+    Base.mightalias(output, position) && throw(ArgumentError(
+        "native PPL prior-predictive output must not alias its position"))
+    Base.mightalias(output, workspace.primal.location) && throw(ArgumentError(
+        "native PPL prior-predictive output must not alias the workspace " *
+        "location buffer"))
+    Base.mightalias(output, workspace.primal.pointwise_loglikelihood) &&
+        throw(ArgumentError(
+            "native PPL prior-predictive output must not alias the workspace " *
+            "pointwise buffer"))
+    Base.mightalias(output, workspace.gradient) && throw(ArgumentError(
+        "native PPL prior-predictive output must not alias the workspace " *
+        "gradient buffer"))
+
+    location_parameter = _native_ppl_location_parameter(prepared.plan)
+    location_factor = _native_ppl_location_factor(prepared.plan)
+    _native_ppl_validate_coefficient_prior(
+        location_factor, location_parameter)
+    if hasproperty(prepared.plan.factors, :scale_prior)
+        hasproperty(prepared.plan.parameters, :scale) || throw(
+            NativePPLCapabilityError(
+                :graph_identity,
+                "compiled prior-predictive schedule is missing its scale " *
+                "parameter"))
+        _native_ppl_validate_scale_prior(
+            prepared.plan.factors.scale_prior,
+            prepared.plan.parameters.scale)
+    end
+    nothing
+end
+
+
+"""
+    NativePPL.simulate_prior!(rng, position, output, workspace, prepared)
+
+Draw every currently supported free parameter/site from its generating factor,
+then simulate the response in graph order. `position` receives unconstrained
+coordinates and `output` receives the prior-predictive response. Validation is
+completed before the RNG is advanced.
+"""
+function _native_ppl_simulate_prior!(
+    rng::AbstractRNG,
+    position::AbstractVector,
+    output::AbstractVector,
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+)
+    _native_ppl_check_prior_predictive(
+        output, workspace, prepared, position)
+    _native_ppl_draw_parameter!(
+        rng, position, _native_ppl_location_factor(prepared.plan),
+        _native_ppl_location_parameter(prepared.plan))
+    if hasproperty(prepared.plan.factors, :scale_prior)
+        _native_ppl_draw_parameter!(
+            rng, position, prepared.plan.factors.scale_prior,
+            prepared.plan.parameters.scale)
+    end
+    _native_ppl_simulate!(
+        rng, output, workspace, prepared, position,
+        NativePPLPosteriorPredictive())
+end
+
 function _native_ppl_evaluate_draws!(
     output::AbstractMatrix,
     workspace::NativePPLWorkspace,
@@ -2563,11 +2671,24 @@ simulate!(rng::BRM.AbstractRNG, output::AbstractVector, work::Workspace,
           prepared::Prepared, position::AbstractVector,
           query::BRM.NativePPLQuery=PosteriorPredictive()) =
     BRM._native_ppl_simulate!(rng, output, work, prepared, position, query)
+simulate_prior!(rng::BRM.AbstractRNG, position::AbstractVector,
+                output::AbstractVector, work::Workspace,
+                prepared::Prepared) =
+    BRM._native_ppl_simulate_prior!(
+        rng, position, output, work, prepared)
 function simulate(rng::BRM.AbstractRNG, work::Workspace, prepared::Prepared,
                   position::AbstractVector,
                   query::BRM.NativePPLQuery=PosteriorPredictive())
     output = allocate_output(prepared, query)
     simulate!(rng, output, work, prepared, position, query)
+end
+function simulate_prior(rng::BRM.AbstractRNG, work::Workspace,
+                        prepared::Prepared)
+    position = Vector{eltype(work)}(
+        undef, BRM.LogDensityProblems.dimension(prepared))
+    output = allocate_output(prepared, PosteriorPredictive())
+    simulate_prior!(rng, position, output, work, prepared)
+    (; position, response=output)
 end
 evaluate_draws!(output::AbstractMatrix, work::Workspace, prepared::Prepared,
                 positions::AbstractMatrix, query::BRM.NativePPLQuery) =
@@ -2629,9 +2750,10 @@ export LinearPredictor, PointwiseLogLikelihood, PosteriorPredictive
 export compile, prepare, workspace, rebind, has_response
 export output_signature, batch_output_signature
 export output_axis, output_axes, output_draw_axis, output_eltype, output_layout
-export allocate_output, evaluate, simulate
+export allocate_output, evaluate, simulate, simulate_prior
 export evaluate_draws, simulate_draws, execute_draws
 export logdensity!, logdensity_and_gradient!, evaluate!, simulate!
+export simulate_prior!
 export evaluate_draws!, simulate_draws!, execute_draws!
 
 end
