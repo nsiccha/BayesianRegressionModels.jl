@@ -469,7 +469,7 @@ end
 function _parameter_stochastic_site(
     name::Symbol, declaration::GroupedNormalParameter,
     conditions::NamedTuple, bindings::NamedTuple,
-    fitted_levels=nothing)
+    fitted_levels=nothing, new_groups::Symbol=:error)
     group_name = group_input(declaration)
     hasproperty(bindings, group_name) || throw(ArgumentError(
         "native PPL grouped site `$name` requires binding `$group_name`"))
@@ -485,11 +485,14 @@ function _parameter_stochastic_site(
         "native PPL fitted group levels for `$group_name` must be unique"))
     unknown = Tuple(level for level in observed_levels
                     if findfirst(isequal(level), levels) === nothing)
-    isempty(unknown) || throw(CapabilityError(
-        :new_group,
-        "native PPL group input `$group_name` contains new levels " *
-        "$(unknown); this replay slice reuses fitted group effects and " *
-        "requires known levels"))
+    if !isempty(unknown) && new_groups === :error
+        throw(CapabilityError(
+            :new_group,
+            "native PPL group input `$group_name` contains new levels " *
+            "$(unknown); replay reuses fitted group effects by default; " *
+            "pass `new_groups=:resample` for prediction-only conditional " *
+            "simulation"))
+    end
     activity = hasproperty(conditions, name) ? ConditionedSite() : FreeSite()
     coordinate_keys = Tuple(
         GroupCoordinateKey(name, level) for level in levels)
@@ -628,7 +631,10 @@ schedule, then allocate semantic unconstrained coordinates for free sites.
 public mid-level semantic representation.
 """
 function factor_graph(declaration::Model; conditions=(;), bindings=(;),
-                      group_levels=(;))
+                      group_levels=(;), new_groups::Symbol=:error)
+    new_groups in (:error, :resample) || throw(ArgumentError(
+        "native PPL new-groups policy must be :error or :resample; got " *
+        "`$new_groups`"))
     _validate_model(declaration)
     canonical_conditions = _canonical_factor_conditions(
         declaration, conditions)
@@ -643,7 +649,8 @@ function factor_graph(declaration::Model; conditions=(;), bindings=(;),
                 _parameter_stochastic_site(
                     name, parameter, canonical_conditions, bindings,
                     hasproperty(group_levels, name) ?
-                        getproperty(group_levels, name) : nothing) :
+                        getproperty(group_levels, name) : nothing,
+                    new_groups) :
                 _parameter_stochastic_site(
                     name, parameter, canonical_conditions)
         else
@@ -702,7 +709,7 @@ function _canonical_factor_conditions(declaration::Model, conditions)
 end
 
 """Executable plan for an ordered continuous stochastic-site DAG."""
-struct FactorPlan{Output,M,G,B,C,I,N,J,A}
+struct FactorPlan{Output,M,G,B,C,I,N,J,K,A}
     declaration::M
     graph::G
     bindings::B
@@ -710,16 +717,19 @@ struct FactorPlan{Output,M,G,B,C,I,N,J,A}
     site_indices::I
     node_indices::N
     group_indices::J
+    generated_group_levels::K
     observation_axis::A
 end
 
 FactorPlan(declaration::M, graph::G, bindings::B, conditions::C,
            site_indices::I, node_indices::N, group_indices::J,
+           generated_group_levels::K,
            observation_axis::A,
-           output_site::Symbol) where {M,G,B,C,I,N,J,A} =
-    FactorPlan{output_site,M,G,B,C,I,N,J,A}(
+           output_site::Symbol) where {M,G,B,C,I,N,J,K,A} =
+    FactorPlan{output_site,M,G,B,C,I,N,J,K,A}(
         declaration, graph, bindings, conditions, site_indices,
-        node_indices, group_indices, observation_axis)
+        node_indices, group_indices, generated_group_levels,
+        observation_axis)
 
 factor_output_site(::FactorPlan{Output}) where {Output} = Output
 
@@ -855,7 +865,7 @@ function _validate_factor_plan_site(
 end
 
 function _bind_factor_plan(declaration::Model, bindings, conditions;
-                           group_levels=(;))
+                           group_levels=(;), new_groups::Symbol=:error)
     input_axis_length = nothing
     group_inputs = Set(_group_input_names(declaration))
     for (name, declaration_input) in pairs(declaration.inputs)
@@ -888,7 +898,7 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
         declaration, conditions)
     graph = factor_graph(
         declaration; conditions=canonical_conditions, bindings,
-        group_levels)
+        group_levels, new_groups)
     for (name, node) in pairs(graph.nodes)
         node isa Union{ExpFactorNode,AffineFactorNode,GroupGatherFactorNode} ||
             throw(CapabilityError(
@@ -997,30 +1007,59 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
         ntuple(identity, length(node_names)))
     gather_names = Tuple(name for (name, node) in pairs(graph.nodes)
                          if node isa GroupGatherFactorNode)
+    grouped_site_names = Tuple(name for (name, parameter) in pairs(
+        declaration.parameters) if parameter isa GroupedNormalParameter)
+    generated_level_values = map(grouped_site_names) do site_name
+        parameter = getproperty(declaration.parameters, site_name)
+        group_name = group_input(parameter)
+        observed_levels = _group_levels(
+            getproperty(bindings, group_name), group_name)
+        fitted_site = getproperty(graph.sites, site_name)
+        fitted_levels = Tuple(
+            key.level for key in fitted_site.coordinate_keys)
+        Tuple(level for level in observed_levels
+              if findfirst(isequal(level), fitted_levels) === nothing)
+    end
+    generated_group_levels = NamedTuple{grouped_site_names}(
+        generated_level_values)
     gather_indices = map(gather_names) do name
         node = getproperty(graph.nodes, name)
         site_name = site_value_name(node.values)
         site = getproperty(graph.sites, site_name)
         levels = Tuple(key.level for key in site.coordinate_keys)
+        generated_levels = getproperty(generated_group_levels, site_name)
         groups = getproperty(bindings, input_value_name(node.group))
         Tuple(map(groups) do group
             index = findfirst(isequal(group), levels)
-            index === nothing && throw(ArgumentError(
-                "native PPL group value `$group` is absent from fitted levels"))
-            index
+            index === nothing || return index
+            generated_index = findfirst(isequal(group), generated_levels)
+            generated_index === nothing && throw(ArgumentError(
+                "native PPL group value `$group` is absent from fitted and " *
+                "generated levels"))
+            -generated_index
         end)
     end
     group_indices = NamedTuple{gather_names}(gather_indices)
+    has_generated_groups = any(!isempty, values(generated_group_levels))
+    has_generated_groups &&
+        hasproperty(canonical_conditions, output_site) && throw(
+            CapabilityError(
+                :new_group_activity,
+                "native PPL new-group resampling is prediction-only; " *
+                "conditioned likelihood evaluation requires explicit " *
+                "group-effect coordinates"))
     FactorPlan(
         declaration, graph, bindings, canonical_conditions, site_indices,
-        node_indices, group_indices,
+        node_indices, group_indices, generated_group_levels,
         BRM.NativePPLAxis(:observation, observation_keys), output_site)
 end
 
 function Base.show(io::IO, plan::FactorPlan)
+    generated = sum(length, values(plan.generated_group_levels); init=0)
     print(io, "NativePPL.FactorPlan(", plan.graph.dimension,
           " unconstrained parameters, ", length(plan.graph.sites),
-          " stochastic sites, ", length(plan.observation_axis),
+          " stochastic sites, ", generated, " generated groups, ",
+          length(plan.observation_axis),
           " observations)")
 end
 
@@ -1503,7 +1542,8 @@ end
 
 function rebind(prepared::FactorPrepared, conditions;
                 bindings=prepared.plan.bindings,
-                T::Type{<:AbstractFloat}=eltype(prepared), kwargs...)
+                T::Type{<:AbstractFloat}=eltype(prepared),
+                new_groups::Symbol=:error, kwargs...)
     isempty(kwargs) || throw(ArgumentError(
         "native PPL factor replay does not accept keyword options yet; got " *
         "$(keys(kwargs))"))
@@ -1516,14 +1556,14 @@ function rebind(prepared::FactorPrepared, conditions;
     _validate_binding_names(prepared.plan.declaration, bindings)
     rebound = _bind_factor_plan(
         prepared.plan.declaration, bindings, conditions;
-        group_levels=_factor_group_levels(prepared.plan))
+        group_levels=_factor_group_levels(prepared.plan), new_groups)
     if !hasproperty(rebound.conditions, rebound.output_site) &&
        isempty(rebound.observation_axis.keys)
         rebound = FactorPlan(
             rebound.declaration, rebound.graph, rebound.bindings,
             rebound.conditions,
             rebound.site_indices, rebound.node_indices,
-            rebound.group_indices,
+            rebound.group_indices, rebound.generated_group_levels,
             prepared.plan.observation_axis,
             rebound.output_site)
     end

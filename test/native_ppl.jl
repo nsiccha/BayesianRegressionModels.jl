@@ -3808,7 +3808,29 @@ end
         varying_prepared, (;);
         bindings=(; x=[0.0, 1.0], group=[:a, :new_group])))
     @test new_group_error.capability == :new_group
-    @test occursin("requires known levels", new_group_error.detail)
+    @test occursin("new_groups=:resample", new_group_error.detail)
+    varying_new_group_bindings = (;
+        x=[0.0, 1.0, 2.0, 3.0],
+        group=[:a, :new_group, :newer_group, :new_group])
+    varying_new_group_replay = NP.rebind(
+        varying_prepared, (;); bindings=varying_new_group_bindings,
+        new_groups=:resample)
+    @test varying_new_group_replay.plan.graph.dimension ==
+          varying_plan.graph.dimension
+    @test varying_new_group_replay.plan.generated_group_levels ==
+          (; b_p_group=(:new_group, :newer_group))
+    @test varying_new_group_replay.plan.group_indices ==
+          (; r_mu_p_group=(1, -1, -2, -1))
+    @test occursin(
+        "2 generated groups", sprint(show, varying_new_group_replay.plan))
+    conditioned_new_group_error = capability_error(() -> NP.rebind(
+        varying_prepared, (; y=zeros(4));
+        bindings=varying_new_group_bindings, new_groups=:resample))
+    @test conditioned_new_group_error.capability == :new_group_activity
+    @test occursin("prediction-only", conditioned_new_group_error.detail)
+    @test_throws ArgumentError NP.rebind(
+        varying_prepared, (;); bindings=varying_new_group_bindings,
+        new_groups=:invent)
 
     sampled_offset_plan = NP.compile(sampled_offset_brmi)
     @test sampled_offset_plan isa NP.FactorPlan
