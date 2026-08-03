@@ -971,6 +971,8 @@ _factor_arguments(::LKJCholeskySiteFactor) = ()
 _factor_arguments(factor::NormalSiteFactor) =
     (factor.location, factor.scale)
 _factor_arguments(factor::ExponentialSiteFactor) = (factor.scale,)
+_factor_arguments(factor::BernoulliLogitSiteFactor) = (factor.logit,)
+_factor_arguments(factor::PoissonSiteFactor) = (factor.rate,)
 
 _factor_value_is_row(::LiteralValue, graph, bindings) = false
 _factor_value_is_row(::InputValue{Name}, graph, bindings) where {Name} =
@@ -997,11 +999,15 @@ function _validate_factor_plan_site(
             "multi-latent block site `$name` has an unsupported factor"))
     site.factor isa Union{
         StandardNormalSiteFactor,NormalSiteFactor,ExponentialSiteFactor,
-        LKJCholeskySiteFactor,
+        LKJCholeskySiteFactor,BernoulliLogitSiteFactor,PoissonSiteFactor,
     } || throw(CapabilityError(
         :factor_family,
         "multi-latent factor site `$name` has unsupported factor " *
         "$(typeof(site.factor))"))
+    site.factor isa Union{BernoulliLogitSiteFactor,PoissonSiteFactor} &&
+        !(site.shape isa BroadcastSiteShape) && throw(CapabilityError(
+            :factor_shape,
+            "discrete factor site `$name` must be a broadcast output"))
     if site.activity isa ConditionedSite
         value = getproperty(conditions, name)
         if site.shape isa ScalarSiteShape
@@ -2015,8 +2021,26 @@ function _factor_output_signature(plan::FactorPlan)
         BRM.NativePPLDenseVectorLayout())
 end
 
-output_signature(plan::FactorPlan, ::BRM.NativePPLQuery) =
+function _factor_predictive_output_signature(plan::FactorPlan)
+    site = getproperty(plan.graph.sites, factor_output_site(plan))
+    element_type = if site.factor isa BernoulliLogitSiteFactor
+        BRM.NativePPLFixedElementType{Bool}()
+    elseif site.factor isa PoissonSiteFactor
+        BRM.NativePPLFixedElementType{Int}()
+    else
+        BRM.NativePPLPreparedElementType()
+    end
+    BRM.NativePPLOutputSignature(
+        plan.observation_axis, element_type,
+        BRM.NativePPLDenseVectorLayout())
+end
+
+output_signature(plan::FactorPlan,
+                 ::Union{BRM.NativePPLLinearPredictor,
+                         BRM.NativePPLPointwiseLogLikelihood}) =
     _factor_output_signature(plan)
+output_signature(plan::FactorPlan, ::BRM.NativePPLPosteriorPredictive) =
+    _factor_predictive_output_signature(plan)
 output_signature(prepared::FactorPrepared, query::BRM.NativePPLQuery) =
     output_signature(prepared.plan, query)
 output_eltype(signature::BRM.NativePPLOutputSignature,

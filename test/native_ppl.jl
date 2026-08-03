@@ -3884,6 +3884,65 @@ end
         correlated_block_predictor,
         (; x=sampled_offset_data.x, group=grouped_bindings.group);
         conditions=(; y=sampled_offset_data.y))).capability == :factor_shape
+
+    correlated_glmm_parameters = (;
+        tau=correlated_group_declaration.parameters.tau,
+        correlation=correlated_group_declaration.parameters.correlation,
+        z=correlated_group_declaration.parameters.z,
+        beta=correlated_group_declaration.parameters.beta)
+    correlated_glmm_nodes = correlated_group_declaration.nodes
+    correlated_bernoulli_declaration = NP.model(
+        inputs=correlated_group_declaration.inputs,
+        parameters=correlated_glmm_parameters,
+        nodes=correlated_glmm_nodes,
+        observations=(;
+            y=NP.broadcasted(NP.bernoulli_logit(:y, :mu))),
+        site_order=(:tau, :correlation, :z, :beta, :y))
+    correlated_bernoulli_plan = NP.compile(
+        correlated_bernoulli_declaration,
+        (; x=sampled_offset_data.x, group=grouped_bindings.group);
+        conditions=(; y=Bool[true, false, true, true]))
+    @test correlated_bernoulli_plan isa NP.FactorPlan
+    @test correlated_bernoulli_plan.graph.sites.y.factor isa
+          NP.BernoulliLogitSiteFactor
+    correlated_bernoulli_prepared = NP.prepare(correlated_bernoulli_plan)
+    correlated_bernoulli_predictive_signature = NP.output_signature(
+        correlated_bernoulli_plan, NP.PosteriorPredictive())
+    @test NP.output_eltype(
+        correlated_bernoulli_predictive_signature, Float64) === Bool
+    @test NP.allocate_output(
+        correlated_bernoulli_prepared,
+        NP.PosteriorPredictive()) isa Vector{Bool}
+    @test NP.allocate_output(
+        correlated_bernoulli_prepared,
+        NP.PointwiseLogLikelihood()) isa Vector{Float64}
+
+    correlated_poisson_declaration = NP.model(
+        inputs=correlated_group_declaration.inputs,
+        parameters=correlated_glmm_parameters,
+        nodes=merge(correlated_glmm_nodes,
+                    (; rate=NP.exp_link(:mu))),
+        observations=(; y=NP.broadcasted(NP.poisson(:y, :rate))),
+        site_order=(:tau, :correlation, :z, :beta, :y))
+    correlated_poisson_plan = NP.compile(
+        correlated_poisson_declaration,
+        (; x=sampled_offset_data.x, group=grouped_bindings.group);
+        conditions=(; y=Int[2, 0, 1, 3]))
+    @test correlated_poisson_plan isa NP.FactorPlan
+    @test correlated_poisson_plan.graph.sites.y.factor isa
+          NP.PoissonSiteFactor
+    correlated_poisson_prepared = NP.prepare(correlated_poisson_plan)
+    correlated_poisson_predictive_signature = NP.output_signature(
+        correlated_poisson_plan, NP.PosteriorPredictive())
+    @test NP.output_eltype(
+        correlated_poisson_predictive_signature, Float64) === Int
+    @test NP.allocate_output(
+        correlated_poisson_prepared,
+        NP.PosteriorPredictive()) isa Vector{Int}
+    @test NP.allocate_output(
+        correlated_poisson_prepared,
+        NP.LinearPredictor()) isa Vector{Float64}
+
     correlated_group_prepared = NP.prepare(correlated_group_plan)
     correlated_group_workspace = NP.workspace(
         correlated_group_prepared, Float64, DI.AutoEnzyme())
