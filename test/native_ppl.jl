@@ -3666,6 +3666,12 @@ end
         bound_factor_declaration,
         (; latent_scale=Inf, observation_scale=0.5);
         conditions=(; y=response)))
+    for (latent_scale, observation_scale) in ((0.0, 0.5), (0.7, -0.5))
+        @test_throws ArgumentError NP.prepare(NP.compile(
+            bound_factor_declaration,
+            (; latent_scale, observation_scale);
+            conditions=(; y=response)))
+    end
     @test NP.LogDensityProblem(
         hierarchy_prepared, DI.AutoEnzyme()) isa NP.FactorLogDensityProblem
     conditioned_individual_plan = NP.compile(NP.condition(
@@ -3753,7 +3759,9 @@ end
     @test keys(unordered_storage_graph.sites) == (:upstream, :downstream)
     @test NP.site_factor_dependencies(
         unordered_storage_graph.sites.downstream.factor) ==
-          (:upstream, :literal_tau)
+          (:upstream,)
+    @test unordered_storage_graph.sites.downstream.factor.scale isa
+          NP.InputValue{:literal_tau}
     @test unordered_storage_graph.sites.downstream.activity isa
           NP.ConditionedSite
     @test_throws ArgumentError NP.factor_graph(

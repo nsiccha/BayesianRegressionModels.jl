@@ -497,6 +497,8 @@ BRM.LogDensityProblems.dimension(plan::FactorPlan) = plan.graph.dimension
 
 function _uses_factor_executor(declaration::Model, conditions)
     graph = factor_graph(declaration; conditions)
+    count(site -> site.shape isa BroadcastSiteShape,
+          Tuple(graph.sites)) == 1 || return false
     stochastic_names = Set(declaration.site_order)
     any(declaration.site_order) do name
         hasproperty(declaration.observations, name) || return false
@@ -689,11 +691,26 @@ function _factor_validate_condition_support(site::StochasticSite,
     nothing
 end
 
+function _factor_validate_binding_support(graph::FactorGraph,
+                                          value, name::Symbol)
+    for (site_name, site) in pairs(graph.sites)
+        factor = site.factor
+        factor isa NormalSiteFactor || continue
+        factor.scale isa InputValue || continue
+        input_value_name(factor.scale) === name || continue
+        value > zero(value) || throw(ArgumentError(
+            "native PPL binding `$name` supplies the Normal scale for " *
+            "site `$site_name` and must be positive"))
+    end
+    nothing
+end
+
 function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
     isconcretetype(T) || throw(ArgumentError(
         "native PPL factor prepared element type must be concrete; got $T"))
     for (name, value) in pairs(plan.bindings)
-        _factor_prepare_condition(value, name, T)
+        converted = _factor_prepare_condition(value, name, T)
+        _factor_validate_binding_support(plan.graph, converted, name)
     end
     names = Tuple(keys(plan.conditions))
     values = map(names) do name
