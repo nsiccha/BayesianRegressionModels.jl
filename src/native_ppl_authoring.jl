@@ -312,6 +312,35 @@ struct PoissonObservation{Response,Rate} <:
 poisson(response::Symbol, rate::Symbol) =
     PoissonObservation{response,rate}()
 
+"""Typed observation-weight semantics retained in the public PPL graph."""
+abstract type AbstractObservationWeight end
+
+struct ObservationWeight{Kind,Source} <: AbstractObservationWeight end
+
+function observation_weight(kind::Symbol, source::Symbol)
+    kind in (:analytic, :frequency, :power, :unit) || throw(ArgumentError(
+        "native PPL observation-weight kind must be :analytic, :frequency, " *
+        ":power, or :unit; got $kind"))
+    ObservationWeight{kind,source}()
+end
+
+observation_weight_kind(::ObservationWeight{Kind}) where {Kind} = Kind
+observation_weight_source(
+    ::ObservationWeight{Kind,Source}) where {Kind,Source} = Source
+
+"""One base observation decorated with typed observation-weight semantics."""
+struct WeightedObservation{
+        O<:AbstractObservationDeclaration,
+        W<:AbstractObservationWeight,
+    } <: AbstractObservationDeclaration
+    observation::O
+    weight::W
+end
+
+weighted_observation(observation::AbstractObservationDeclaration,
+                     weight::AbstractObservationWeight) =
+    WeightedObservation(observation, weight)
+
 """Explicit Julia-broadcast lifting of one scalar stochastic-site declaration."""
 struct BroadcastObservation{O<:AbstractObservationDeclaration} <:
        AbstractObservationDeclaration
@@ -330,6 +359,8 @@ observation_response(::NormalObservation{Response}) where {Response} = Response
 observation_response(::BernoulliLogitObservation{Response}) where {Response} =
     Response
 observation_response(::PoissonObservation{Response}) where {Response} = Response
+observation_response(observation::WeightedObservation) =
+    observation_response(observation.observation)
 observation_response(observation::BroadcastObservation) =
     observation_response(observation.scalar)
 observation_dependencies(
@@ -341,6 +372,9 @@ observation_dependencies(
 observation_dependencies(
     ::PoissonObservation{Response,Rate},
 ) where {Response,Rate} = (Rate,)
+observation_dependencies(observation::WeightedObservation) =
+    (observation_dependencies(observation.observation)...,
+     observation_weight_source(observation.weight))
 observation_dependencies(observation::BroadcastObservation) =
     observation_dependencies(observation.scalar)
 
@@ -417,6 +451,18 @@ end
 struct PoissonSiteFactor{R} <: AbstractSiteFactor
     rate::R
 end
+struct WeightedSiteFactor{
+        F<:AbstractSiteFactor,
+        W<:AbstractObservationWeight,
+        V,
+    } <: AbstractSiteFactor
+    factor::F
+    weight::W
+    values::V
+end
+
+base_site_factor(factor::AbstractSiteFactor) = factor
+base_site_factor(factor::WeightedSiteFactor) = factor.factor
 
 site_factor_dependencies(::StandardNormalSiteFactor) = ()
 site_factor_dependencies(factor::NormalSiteFactor) =
@@ -428,6 +474,8 @@ site_factor_dependencies(factor::BernoulliLogitSiteFactor) =
     _factor_value_dependencies((factor.logit,))
 site_factor_dependencies(factor::PoissonSiteFactor) =
     _factor_value_dependencies((factor.rate,))
+site_factor_dependencies(factor::WeightedSiteFactor) =
+    site_factor_dependencies(factor.factor)
 
 _factor_value_name(value::SiteValue) = site_value_name(value)
 _factor_value_name(value::NodeValue) = node_value_name(value)
@@ -765,25 +813,37 @@ function _observation_stochastic_site(
     name::Symbol, declaration::AbstractObservationDeclaration,
     inputs::NamedTuple, nodes::NamedTuple, conditions::NamedTuple)
     scalar = scalar_observation(declaration)
-    dependencies = observation_dependencies(scalar)
-    factor = if scalar isa NormalObservation
+    base_observation = scalar isa WeightedObservation ?
+        scalar.observation : scalar
+    dependencies = observation_dependencies(base_observation)
+    factor = if base_observation isa NormalObservation
         NormalSiteFactor(
             _factor_value(dependencies[1], inputs, nodes),
             _factor_value(dependencies[2], inputs, nodes))
-    elseif scalar isa BernoulliLogitObservation
+    elseif base_observation isa BernoulliLogitObservation
         BernoulliLogitSiteFactor(_factor_value(
             only(dependencies), inputs, nodes))
     else
         PoissonSiteFactor(_factor_value(
             only(dependencies), inputs, nodes))
     end
+    if scalar isa WeightedObservation
+        source = observation_weight_source(scalar.weight)
+        hasproperty(inputs, source) || throw(CapabilityError(
+            :graph_identity,
+            "weighted observation `$name` references unknown weight input " *
+            "`$source`"))
+        factor = WeightedSiteFactor(
+            factor, scalar.weight, _factor_value(source, inputs, nodes))
+    end
     shape = is_broadcast_observation(declaration) ?
         BroadcastSiteShape() : ScalarSiteShape()
+    base_factor = base_site_factor(factor)
     activity = if hasproperty(conditions, name)
         ConditionedSite()
     elseif shape isa BroadcastSiteShape
         GeneratedSite()
-    elseif factor isa NormalSiteFactor
+    elseif base_factor isa NormalSiteFactor
         FreeSite()
     else
         throw(CapabilityError(
@@ -792,8 +852,8 @@ function _observation_stochastic_site(
             "factor $(typeof(factor))"))
     end
     coordinate_keys = activity isa FreeSite ? (name,) : ()
-    support = factor isa NormalSiteFactor ? RealSupport() : nothing
-    transform = factor isa NormalSiteFactor ? Identity() : nothing
+    support = base_factor isa NormalSiteFactor ? RealSupport() : nothing
+    transform = base_factor isa NormalSiteFactor ? Identity() : nothing
     StochasticSite(
         support, transform, factor, shape, activity, coordinate_keys)
 end
@@ -991,11 +1051,57 @@ function _uses_factor_executor(declaration::Model, conditions, bindings=(;))
                               values(graph.nodes))
     row_scale = any(values(graph.sites)) do site
         site.shape isa BroadcastSiteShape &&
-            site.factor isa NormalSiteFactor &&
-            site.factor.scale isa NodeValue
+            base_site_factor(site.factor) isa NormalSiteFactor &&
+            base_site_factor(site.factor).scale isa NodeValue
+    end
+    weighted_observation = any(values(graph.sites)) do site
+        site.factor isa WeightedSiteFactor
     end
     dependent_site || sampled_offset_affine || grouped_gather ||
-        grouped_affine_node || row_scale
+        grouped_affine_node || row_scale || weighted_observation
+end
+
+function _factor_validate_weight(factor::WeightedSiteFactor,
+                                 bindings::NamedTuple,
+                                 response::Symbol, observation_count::Int)
+    factor.values isa InputValue || throw(CapabilityError(
+        :observation_weights,
+        "weighted response `$response` requires one bound weight input"))
+    source = input_value_name(factor.values)
+    raw = getproperty(bindings, source)
+    raw isa AbstractVector{<:Real} || throw(ArgumentError(
+        "native PPL weight input `$source` for response `$response` must be " *
+        "a real vector"))
+    length(raw) == observation_count || throw(DimensionMismatch(
+        "native PPL weight input `$source` has length $(length(raw)) but " *
+        "response `$response` has length $observation_count"))
+    all(isfinite, raw) || throw(ArgumentError(
+        "native PPL weight input `$source` for response `$response` must be finite"))
+    kind = observation_weight_kind(factor.weight)
+    base = factor.factor
+    if kind === :analytic
+        base isa NormalSiteFactor || throw(CapabilityError(
+            :observation_weights,
+            "analytic weights currently require a Normal response; got " *
+            "$(typeof(base)) for `$response`"))
+        all(>(0), raw) || throw(ArgumentError(
+            "native PPL analytic weights for `$response` must be strictly positive"))
+    elseif kind === :frequency
+        all(value -> value >= zero(value) && isinteger(value), raw) || throw(
+            ArgumentError(
+                "native PPL frequency weights for `$response` must be " *
+                "nonnegative integer-valued counts"))
+    elseif kind === :power
+        all(>=(0), raw) || throw(ArgumentError(
+            "native PPL power weights for `$response` must be nonnegative"))
+    else
+        kind === :unit || throw(CapabilityError(
+            :observation_weights,
+            "unsupported observation-weight kind `$kind`"))
+        all(isone, raw) || throw(ArgumentError(
+            "native PPL unit weights for `$response` must all equal one"))
+    end
+    nothing
 end
 
 function _group_input_names(declaration::Model)
@@ -1012,6 +1118,8 @@ _factor_arguments(factor::NormalSiteFactor) =
 _factor_arguments(factor::ExponentialSiteFactor) = (factor.scale,)
 _factor_arguments(factor::BernoulliLogitSiteFactor) = (factor.logit,)
 _factor_arguments(factor::PoissonSiteFactor) = (factor.rate,)
+_factor_arguments(factor::WeightedSiteFactor) =
+    (_factor_arguments(factor.factor)..., factor.values)
 
 _factor_value_is_row(::LiteralValue, graph, bindings) = false
 _factor_value_is_row(::InputValue{Name}, graph, bindings) where {Name} =
@@ -1031,7 +1139,7 @@ _factor_value_is_row(::SiteValue{Name}, graph, bindings) where {Name} =
 
 function _factor_exp_is_poisson_rate(name::Symbol, graph::FactorGraph)
     any(values(graph.sites)) do site
-        factor = site.factor
+        factor = base_site_factor(site.factor)
         factor isa PoissonSiteFactor && factor.rate isa NodeValue &&
             node_value_name(factor.rate) === name
     end
@@ -1039,7 +1147,7 @@ end
 
 function _factor_exp_is_normal_scale(name::Symbol, graph::FactorGraph)
     any(values(graph.sites)) do site
-        factor = site.factor
+        factor = base_site_factor(site.factor)
         factor isa NormalSiteFactor && factor.scale isa NodeValue &&
             node_value_name(factor.scale) === name
     end
@@ -1078,8 +1186,9 @@ function _validate_factor_plan_site(
     bindings::NamedTuple, conditions::NamedTuple,
     broadcast_sites::Set{Symbol},
 )
+    base_factor = base_site_factor(site.factor)
     site.shape isa BlockSiteShape &&
-        !(site.factor isa Union{
+        !(base_factor isa Union{
             StandardNormalSiteFactor,NormalSiteFactor,
             ExponentialSiteFactor,LKJCholeskySiteFactor}) && throw(CapabilityError(
             :factor_shape,
@@ -1087,11 +1196,12 @@ function _validate_factor_plan_site(
     site.factor isa Union{
         StandardNormalSiteFactor,NormalSiteFactor,ExponentialSiteFactor,
         LKJCholeskySiteFactor,BernoulliLogitSiteFactor,PoissonSiteFactor,
+        WeightedSiteFactor,
     } || throw(CapabilityError(
         :factor_family,
         "multi-latent factor site `$name` has unsupported factor " *
         "$(typeof(site.factor))"))
-    site.factor isa Union{BernoulliLogitSiteFactor,PoissonSiteFactor} &&
+    base_factor isa Union{BernoulliLogitSiteFactor,PoissonSiteFactor} &&
         !(site.shape isa BroadcastSiteShape) && throw(CapabilityError(
             :factor_shape,
             "discrete factor site `$name` must be a broadcast output"))
@@ -1138,25 +1248,25 @@ function _validate_factor_plan_site(
             "`$(site_value_name(argument))` directly; lower it through a " *
             "typed materializing node"))
     end
-    if site.factor isa NormalSiteFactor &&
-       site.factor.scale isa SiteValue
-        scale_name = site_value_name(site.factor.scale)
+    if base_factor isa NormalSiteFactor &&
+       base_factor.scale isa SiteValue
+        scale_name = site_value_name(base_factor.scale)
         scale_site = getproperty(graph.sites, scale_name)
         scale_site.support isa PositiveSupport || throw(CapabilityError(
             :factor_scale,
             "Normal factor for site `$name` uses stochastic scale " *
             "`$scale_name`, whose support must be PositiveSupport"))
-    elseif site.factor isa NormalSiteFactor &&
-           site.factor.scale isa NodeValue
-        scale_name = node_value_name(site.factor.scale)
+    elseif base_factor isa NormalSiteFactor &&
+           base_factor.scale isa NodeValue
+        scale_name = node_value_name(base_factor.scale)
         getproperty(graph.nodes, scale_name) isa ExpFactorNode || throw(
             CapabilityError(
                 :factor_scale,
                 "Normal factor for site `$name` uses deterministic scale " *
                 "`$scale_name`, which must currently be an exp node"))
-    elseif site.factor isa NormalSiteFactor &&
-           site.factor.scale isa InputValue
-        scale_name = input_value_name(site.factor.scale)
+    elseif base_factor isa NormalSiteFactor &&
+           base_factor.scale isa InputValue
+        scale_name = input_value_name(base_factor.scale)
         values = getproperty(bindings, scale_name)
         all(value -> value isa Real && isfinite(value) &&
                      value > zero(value),
@@ -1164,15 +1274,15 @@ function _validate_factor_plan_site(
             ArgumentError(
                 "Normal factor for site `$name` input scale `$scale_name` " *
                 "must contain finite positive values"))
-    elseif site.factor isa NormalSiteFactor &&
-           site.factor.scale isa LiteralValue
-        scale = site.factor.scale.value
+    elseif base_factor isa NormalSiteFactor &&
+           base_factor.scale isa LiteralValue
+        scale = base_factor.scale.value
         scale isa Real && isfinite(scale) && scale > zero(scale) || throw(
             ArgumentError(
                 "Normal factor for site `$name` literal scale must be " *
                 "finite and positive"))
-    elseif site.factor isa PoissonSiteFactor
-        _validate_poisson_rate_source(name, site.factor, graph)
+    elseif base_factor isa PoissonSiteFactor
+        _validate_poisson_rate_source(name, base_factor, graph)
     end
     nothing
 end
@@ -1499,6 +1609,9 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
     else
         Base.OneTo(0)
     end
+    output_factor = getproperty(graph.sites, output_site).factor
+    output_factor isa WeightedSiteFactor && _factor_validate_weight(
+        output_factor, bindings, output_site, length(observation_keys))
     site_names = Tuple(keys(graph.sites))
     site_indices = NamedTuple{site_names}(
         ntuple(identity, length(site_names)))
@@ -1678,7 +1791,7 @@ end
 function _factor_validate_binding_support(graph::FactorGraph,
                                           value, name::Symbol)
     for (site_name, site) in pairs(graph.sites)
-        factor = site.factor
+        factor = base_site_factor(site.factor)
         values = value isa AbstractVector ? value : (value,)
         if factor isa NormalSiteFactor && factor.scale isa InputValue &&
            input_value_name(factor.scale) === name
@@ -1701,6 +1814,10 @@ function _factor_validate_observation(::AbstractSiteFactor, value,
                                       name::Symbol)
     nothing
 end
+
+_factor_validate_observation(factor::WeightedSiteFactor, value,
+                             name::Symbol) =
+    _factor_validate_observation(factor.factor, value, name)
 
 function _factor_validate_observation(::BernoulliLogitSiteFactor, value,
                                       name::Symbol)
@@ -1728,6 +1845,12 @@ function _factor_validate_observation_conversion(::AbstractSiteFactor,
                                                  name::Symbol)
     nothing
 end
+
+_factor_validate_observation_conversion(factor::WeightedSiteFactor,
+                                        original, converted,
+                                        name::Symbol) =
+    _factor_validate_observation_conversion(
+        factor.factor, original, converted, name)
 
 function _factor_validate_observation_conversion(::PoissonSiteFactor,
                                                  original, converted,
@@ -1765,6 +1888,35 @@ function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
         converted
     end
     bindings = NamedTuple{binding_names}(binding_values)
+    output_factor = getproperty(
+        plan.graph.sites, factor_output_site(plan)).factor
+    if output_factor isa WeightedSiteFactor
+        source = input_value_name(output_factor.values)
+        original = getproperty(plan.bindings, source)
+        converted = getproperty(bindings, source)
+        kind = observation_weight_kind(output_factor.weight)
+        if kind === :frequency
+            all(index -> converted[index] == original[index],
+                eachindex(original)) || throw(ArgumentError(
+                    "native PPL frequency weights from `$source` cannot be " *
+                    "represented exactly as $T"))
+        elseif kind === :analytic
+            all(value -> isfinite(value) && value > zero(T), converted) ||
+                throw(ArgumentError(
+                    "native PPL analytic weights from `$source` cannot be " *
+                    "represented as finite positive $T values"))
+        elseif kind === :power
+            all(index ->
+                    isfinite(converted[index]) &&
+                    converted[index] >= zero(T) &&
+                    (iszero(original[index]) || converted[index] > zero(T)),
+                eachindex(original, converted)) ||
+                throw(ArgumentError(
+                    "native PPL power weights from `$source` cannot be " *
+                    "represented as finite nonnegative $T values without " *
+                    "underflow"))
+        end
+    end
     names = Tuple(keys(plan.conditions))
     values = map(names) do name
         original = getproperty(plan.conditions, name)
@@ -1915,6 +2067,31 @@ end
                                        index, plan, buffers) where {T}
     log_rate = _factor_poisson_log_rate(factor, index, plan, buffers, T)
     BRM._native_ppl_poisson_logdensity(value, log_rate)
+end
+
+@inline function _factor_logdensity_at(
+        factor::WeightedSiteFactor{F,ObservationWeight{:analytic,Source}},
+        value::T, index, plan, buffers) where {F,Source,T}
+    base = factor.factor
+    weight = _factor_argument_at(factor.values, index, plan, buffers, T)
+    location = _factor_argument_at(base.location, index, plan, buffers, T)
+    scale = _factor_argument_at(base.scale, index, plan, buffers, T)
+    adjusted_scale = scale / sqrt(weight)
+    residual = (value - location) / adjusted_scale
+    -T(0.5) * residual * residual - log(adjusted_scale) -
+        T(BRM._NATIVE_PPL_HALF_LOG2PI)
+end
+
+@inline function _factor_logdensity_at(
+        factor::WeightedSiteFactor{F,ObservationWeight{Kind,Source}},
+        value::T, index, plan, buffers) where {
+            F,Kind,Source,T}
+    Kind === :unit && return _factor_logdensity_at(
+        factor.factor, value, index, plan, buffers)
+    weight = _factor_argument_at(factor.values, index, plan, buffers, T)
+    iszero(weight) && return zero(T)
+    weight * _factor_logdensity_at(
+        factor.factor, value, index, plan, buffers)
 end
 
 @inline @generated function _factor_lkj_logdensity(
@@ -2561,9 +2738,10 @@ end
 
 function _factor_predictive_output_signature(plan::FactorPlan)
     site = getproperty(plan.graph.sites, factor_output_site(plan))
-    element_type = if site.factor isa BernoulliLogitSiteFactor
+    factor = base_site_factor(site.factor)
+    element_type = if factor isa BernoulliLogitSiteFactor
         BRM.NativePPLFixedElementType{Bool}()
-    elseif site.factor isa PoissonSiteFactor
+    elseif factor isa PoissonSiteFactor
         BRM.NativePPLFixedElementType{Int}()
     else
         BRM.NativePPLPreparedElementType()
@@ -2652,7 +2830,7 @@ end
                                          index::Int)
     site = getproperty(
         prepared.plan.graph.sites, factor_output_site(prepared.plan))
-    factor = site.factor
+    factor = base_site_factor(site.factor)
     T = eltype(buffers.values)
     if factor isa NormalSiteFactor
         _factor_argument_at(
@@ -2686,13 +2864,20 @@ end
                                          index::Int)
     site = getproperty(
         prepared.plan.graph.sites, factor_output_site(prepared.plan))
-    factor = site.factor
+    weighted_factor = site.factor
+    factor = base_site_factor(weighted_factor)
     T = eltype(buffers.values)
     if factor isa NormalSiteFactor
         location = _factor_argument_at(
             factor.location, index, prepared.plan, buffers, T)
         scale = _factor_argument_at(
             factor.scale, index, prepared.plan, buffers, T)
+        if weighted_factor isa WeightedSiteFactor &&
+           observation_weight_kind(weighted_factor.weight) === :analytic
+            weight = _factor_argument_at(
+                weighted_factor.values, index, prepared.plan, buffers, T)
+            scale /= sqrt(weight)
+        end
         location + scale * BRM.randn(rng, T)
     elseif factor isa BernoulliLogitSiteFactor
         logit = _factor_argument_at(
@@ -3747,39 +3932,54 @@ end
 
 function _qualified_observation(namespace::Symbol, observation, mapping)
     scalar = scalar_observation(observation)
-    response = qualified_name(namespace, observation_response(scalar))
-    declaration = if scalar isa NormalObservation
-        dependencies = observation_dependencies(scalar)
+    base_observation = scalar isa WeightedObservation ?
+        scalar.observation : scalar
+    response = qualified_name(namespace, observation_response(base_observation))
+    declaration = if base_observation isa NormalObservation
+        dependencies = observation_dependencies(base_observation)
         normal(
             response,
             _mapped_name(mapping, dependencies[1], namespace, "Normal factor"),
             _mapped_name(mapping, dependencies[2], namespace, "Normal factor"))
-    elseif scalar isa BernoulliLogitObservation
+    elseif base_observation isa BernoulliLogitObservation
         bernoulli_logit(
             response,
             _mapped_name(
-                mapping, only(observation_dependencies(scalar)),
+                mapping, only(observation_dependencies(base_observation)),
                 namespace, "Bernoulli-logit factor"))
     else
         poisson(
             response,
             _mapped_name(
-                mapping, only(observation_dependencies(scalar)),
+                mapping, only(observation_dependencies(base_observation)),
                 namespace, "Poisson factor"))
+    end
+    if scalar isa WeightedObservation
+        weight = scalar.weight
+        source = _mapped_name(
+            mapping, observation_weight_source(weight), namespace,
+            "observation weight")
+        declaration = weighted_observation(
+            declaration,
+            observation_weight(observation_weight_kind(weight), source))
     end
     is_broadcast_observation(observation) ? broadcasted(declaration) : declaration
 end
 
 function _observation_with_response(observation, response::Symbol)
     scalar = scalar_observation(observation)
-    dependencies = observation_dependencies(scalar)
-    declaration = if scalar isa NormalObservation
+    base_observation = scalar isa WeightedObservation ?
+        scalar.observation : scalar
+    dependencies = observation_dependencies(base_observation)
+    declaration = if base_observation isa NormalObservation
         normal(response, dependencies...)
-    elseif scalar isa BernoulliLogitObservation
+    elseif base_observation isa BernoulliLogitObservation
         bernoulli_logit(response, only(dependencies))
     else
         poisson(response, only(dependencies))
     end
+    scalar isa WeightedObservation && (declaration = weighted_observation(
+        declaration, scalar.weight))
     is_broadcast_observation(observation) ? broadcasted(declaration) : declaration
 end
 
@@ -5275,29 +5475,81 @@ function _lower_brmi_distributional_gaussian(
     (; declaration, bindings, conditions)
 end
 
+function _lower_brmi_observation_weight(response::Symbol, likelihood)
+    BRM.getf(likelihood) === BRM.weighted || return nothing, likelihood
+    isempty(BRM.getkwargs(likelihood)) || throw(CapabilityError(
+        :observation_weights,
+        "weighted likelihood for `$response` accepts no keywords"))
+    arguments = BRM.getargs(likelihood)
+    length(arguments) == 2 || throw(CapabilityError(
+        :observation_weights,
+        "weighted likelihood for `$response` needs a distribution and weights"))
+    distribution, weight = arguments
+    distribution isa BRM.ExprColumn || throw(CapabilityError(
+        :observation_weights,
+        "weighted likelihood for `$response` requires a distribution call"))
+    isempty(BRM.getkwargs(distribution)) || throw(CapabilityError(
+        :observation_weights,
+        "weighted distribution for `$response` accepts no keywords"))
+    weight isa BRM.ExprColumn || throw(CapabilityError(
+        :observation_weights,
+        "weighted likelihood for `$response` requires a typed StatsBase weight"))
+    isempty(BRM.getkwargs(weight)) || throw(CapabilityError(
+        :observation_weights,
+        "weight constructor for `$response` accepts no keywords"))
+    constructor = BRM.getf(weight)
+    kind = constructor === BRM.aweights || constructor === BRM.AnalyticWeights ?
+        :analytic :
+        constructor === BRM.fweights || constructor === BRM.FrequencyWeights ?
+        :frequency :
+        constructor === BRM.weights || constructor === BRM.Weights ?
+        :power :
+        constructor === BRM.uweights || constructor === BRM.UnitWeights ?
+        :unit : nothing
+    (constructor === BRM.pweights ||
+     constructor === BRM.ProbabilityWeights) && throw(CapabilityError(
+        :observation_weights,
+        "ProbabilityWeights semantics are not implemented for `$response`"))
+    kind === nothing && throw(CapabilityError(
+        :observation_weights,
+        "unsupported observation-weight constructor `$constructor` for `$response`"))
+    weight_arguments = BRM.getargs(weight)
+    length(weight_arguments) == 1 || throw(CapabilityError(
+        :observation_weights,
+        "weight constructor for `$response` requires one data column"))
+    column = only(weight_arguments)
+    column isa BRM.NamedColumn && parent(column) isa BRM.DataColumn || throw(
+        CapabilityError(
+            :observation_weights,
+            "weight constructor for `$response` requires one raw data column"))
+    source = BRM.name(column)
+    (; kind, source, column), distribution
+end
+
 function _lower_brmi(brmi::BRM.BRMI)
     observed = BRM.outcomes(brmi)
     length(observed) == 1 || throw(CapabilityError(
         :outcomes,
         "expected exactly one observed response, got $(length(observed))"))
     outcome = only(observed)
-    family = outcome.family
-    family === BRM.Normal || family === BRM.BernoulliLogit ||
-        family === BRM.Poisson || throw(CapabilityError(
-            :likelihood,
-            "expected `Normal(location, scale)`, `BernoulliLogit(logit)`, " *
-            "or `Poisson(exp(log_rate))`, got `$family`"))
-
     response = outcome.response
     response_lhs, likelihood = BRM._native_ppl_sampling_rhs(brmi, response)
     response_lhs isa BRM.NamedColumn &&
         parent(response_lhs) isa BRM.DataColumn || throw(CapabilityError(
             :response_decorator,
             "response `$response` must be a bare observed data column"))
-    likelihood isa BRM.ExprColumn && BRM.getf(likelihood) === family ||
+    likelihood isa BRM.ExprColumn ||
         throw(CapabilityError(
             :likelihood,
-            "response `$response` must use `$family` consistently"))
+            "response `$response` must use a distribution call"))
+    weight_spec, likelihood = _lower_brmi_observation_weight(
+        response, likelihood)
+    family = BRM.getf(likelihood)
+    family === BRM.Normal || family === BRM.BernoulliLogit ||
+        family === BRM.Poisson || throw(CapabilityError(
+            :likelihood,
+            "expected `Normal(location, scale)`, `BernoulliLogit(logit)`, " *
+            "or `Poisson(exp(log_rate))`, got `$family`"))
     isempty(BRM.getkwargs(likelihood)) || throw(CapabilityError(
         :likelihood_keywords,
         "$family likelihood for `$response` has keywords"))
@@ -5336,7 +5588,12 @@ function _lower_brmi(brmi::BRM.BRMI)
     if family === BRM.Normal
         distributional = _lower_brmi_distributional_gaussian(
             brmi, response, response_lhs, location, likelihood_args[2])
-        distributional === nothing || return distributional
+        if distributional !== nothing
+            weight_spec === nothing || throw(CapabilityError(
+                :observation_weights,
+                "weighted distributional Normal regression is not yet supported"))
+            return distributional
+        end
     end
     scale_name = family === BRM.Normal ?
         BRM._native_ppl_ref_name(likelihood_args[2]) : nothing
@@ -5345,7 +5602,7 @@ function _lower_brmi(brmi::BRM.BRMI)
             :likelihood_scale,
             "Normal scale must be one named scalar parameter"))
 
-    if family === BRM.Normal
+    if family === BRM.Normal && weight_spec === nothing
         factor_dag = _lower_brmi_scalar_factor_dag(
             brmi, response, response_lhs, location)
         factor_dag === nothing || return factor_dag
@@ -5404,6 +5661,11 @@ function _lower_brmi(brmi::BRM.BRMI)
     groups = map(varying_groups) do varying
         parent(parent(varying.group))
     end
+    weight_input_names = weight_spec !== nothing &&
+        weight_spec.source ∉ (input_predictor_names..., group_names...) ?
+        (weight_spec.source,) : ()
+    weight_inputs = isempty(weight_input_names) ? () :
+        (parent(parent(weight_spec.column)),)
     response_values = parent(parent(response_lhs))
 
     group_specs = map(varying_groups, group_names) do varying, group_name
@@ -5445,6 +5707,7 @@ function _lower_brmi(brmi::BRM.BRMI)
              sampled_offsets..., group_names...)) :
         Set((location, response, input_predictor_names..., sampled_offsets...,
              group_names...))
+    weight_spec === nothing || push!(expected_values, weight_spec.source)
     for spec in group_specs
         push!(expected_values, spec.prior.operation)
         spec.correlation_prior === nothing ||
@@ -5458,7 +5721,8 @@ function _lower_brmi(brmi::BRM.BRMI)
         "unsupported formula operations: " *
         join(sort!(collect(extras)), ", ")))
 
-    input_names = (input_predictor_names..., group_names...)
+    input_names = (
+        input_predictor_names..., group_names..., weight_input_names...)
     input_declarations = _declaration_namedtuple(
         input_names, map(_ -> input(), input_names))
     scalar_location && family !== BRM.Normal && throw(CapabilityError(
@@ -5606,6 +5870,11 @@ function _lower_brmi(brmi::BRM.BRMI)
             NamedTuple{(rate_name,)}((exp_link(location),)))
         poisson(response, rate_name)
     end
+    if weight_spec !== nothing
+        observation_declaration = weighted_observation(
+            observation_declaration,
+            observation_weight(weight_spec.kind, weight_spec.source))
+    end
     observation_declarations = NamedTuple{(response,)}(
         (broadcasted(observation_declaration),))
     declaration = if isempty(sampled_offsets) && isempty(group_specs)
@@ -5632,7 +5901,7 @@ function _lower_brmi(brmi::BRM.BRMI)
                         response))
     end
     bindings = _declaration_namedtuple(
-        input_names, (predictors..., groups...))
+        input_names, (predictors..., groups..., weight_inputs...))
     conditions = NamedTuple{(response,)}((response_values,))
     (; declaration, bindings, conditions)
 end
@@ -6336,10 +6605,36 @@ function _syntax_affine_assignment(statement,
        transform_values=Tuple(transform_values), affine_value)
 end
 
+function _syntax_observation_weight(rhs)
+    family, arguments = _syntax_distribution_call(
+        rhs, "observation family")
+    family === :weighted || return nothing
+    length(arguments) == 2 || throw(ArgumentError(
+        "native PPL @model weighted(distribution, weight) needs two arguments"))
+    distribution, weight = arguments
+    constructor, weight_arguments = _syntax_distribution_call(
+        weight, "observation-weight constructor")
+    kind = constructor === :aweights ? :analytic :
+        constructor === :fweights ? :frequency :
+        constructor === :weights ? :power :
+        constructor === :uweights ? :unit : nothing
+    constructor === :pweights && throw(ArgumentError(
+        "native PPL ProbabilityWeights semantics are not implemented"))
+    kind === nothing && throw(ArgumentError(
+        "native PPL @model unsupported observation-weight constructor " *
+        "`$constructor`; use aweights, fweights, weights, or uweights"))
+    length(weight_arguments) == 1 && only(weight_arguments) isa Symbol ||
+        throw(ArgumentError(
+            "native PPL @model observation weights require one named input"))
+    (; distribution, kind, source=only(weight_arguments))
+end
+
 function _syntax_observation(lhs, rhs; broadcasted::Bool)
     lhs isa Symbol || throw(ArgumentError(
         "native PPL @model stochastic-site left-hand side must be a bare " *
         "name; got `$lhs`"))
+    weight = _syntax_observation_weight(rhs)
+    weight === nothing || (rhs = weight.distribution)
     family, arguments = _syntax_distribution_call(rhs, "observation family")
     extra_node_name = nothing
     extra_node_value = nothing
@@ -6374,10 +6669,19 @@ function _syntax_observation(lhs, rhs; broadcasted::Bool)
         "native PPL @model $family observation needs $expected parameter(s)"))
     scalar_value = Expr(:call, _syntax_ref(builder), QuoteNode(lhs),
                         (QuoteNode(argument) for argument in arguments)...)
+    if weight !== nothing
+        weight_value = Expr(
+            :call, _syntax_ref(:observation_weight), QuoteNode(weight.kind),
+            QuoteNode(weight.source))
+        scalar_value = Expr(
+            :call, _syntax_ref(:weighted_observation), scalar_value,
+            weight_value)
+    end
     value = broadcasted ?
         Expr(:call, _syntax_ref(:broadcasted), scalar_value) : scalar_value
     (; name=lhs, value, extra_node_name, extra_node_value,
-       dependencies=Tuple(arguments))
+       dependencies=weight === nothing ? Tuple(arguments) :
+           (Tuple(arguments)..., weight.source))
 end
 
 function _syntax_outputs(statement)
@@ -6422,7 +6726,7 @@ end
 
 const _SYNTAX_DISTRIBUTION_NAMES =
     (:Normal, :StandardNormal, :Exponential, :LKJCholesky,
-     :MvNormalCholesky, :BernoulliLogit, :Poisson)
+     :MvNormalCholesky, :BernoulliLogit, :Poisson, :weighted)
 const _SYNTAX_DETERMINISTIC_NAMES =
     (:center, :zscale, :standardize, :affine, :exp, :exp_link, :dot)
 const _SYNTAX_OPERATOR_NAMES =
@@ -6836,7 +7140,7 @@ export GroupGatherFactorNode, RowProductFactorNode, GroupedAffineFactorNode
 export FactorPlan, FactorPrepared, FactorWorkspace, FactorLogDensityProblem
 export StandardNormalSiteFactor, NormalSiteFactor, ExponentialSiteFactor
 export LKJCholeskySiteFactor
-export BernoulliLogitSiteFactor, PoissonSiteFactor
+export BernoulliLogitSiteFactor, PoissonSiteFactor, WeightedSiteFactor
 export ScalarSiteShape, BlockSiteShape, BroadcastSiteShape
 export FreeSite, ConditionedSite, GeneratedSite
 export RealSupport, PositiveSupport, CholeskyCorrelationSupport
@@ -6845,7 +7149,8 @@ export StandardNormal, NormalPrior, ExponentialPrior
 export Center, ZScale, Affine, ExpLink, LogLink
 export GroupGather, RowProduct, GroupedAffine
 export NormalObservation, BernoulliLogitObservation, PoissonObservation
-export BroadcastObservation
+export AbstractObservationWeight, ObservationWeight
+export WeightedObservation, BroadcastObservation
 export model, input, parameter, Identity, Exp, normal_prior, Exponential
 export center, zscale, standardize, affine, exp_link, log_link
 export grouped_normal, group_gather, group_values, group_input
@@ -6854,7 +7159,9 @@ export cholesky_correlation, correlation_coefficients
 export row_product, row_product_inputs
 export grouped_affine, grouped_standardized, grouped_scales
 export grouped_correlation, grouped_predictors
-export normal, bernoulli_logit, poisson, broadcasted
+export normal, bernoulli_logit, poisson, observation_weight
+export observation_weight_kind, observation_weight_source
+export weighted_observation, broadcasted
 export instantiate, substitute, condition, component, output, compose, bind, lower
 export factor_graph, site_factor_dependencies, factor_node_dependencies
 export site_value_name, input_value_name, node_value_name
