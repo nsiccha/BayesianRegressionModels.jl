@@ -431,6 +431,24 @@ NP.@model function deterministic_scale_factor_graph(unit_scale)
     return y
 end
 
+function distributional_gaussian_factor_graph()
+    NP.model(
+        inputs=(; x=NP.input(), z=NP.input()),
+        parameters=(;
+            beta_mu=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            beta_log_sigma=NP.parameter(
+                NP.RealSupport(), (:Intercept, :z);
+                transform=NP.Identity(), prior=NP.StandardNormal())),
+        nodes=(;
+            mu=NP.affine(:x, :beta_mu),
+            log_sigma=NP.affine(:z, :beta_log_sigma),
+            sigma=NP.exp_link(:log_sigma)),
+        observations=(;
+            y=NP.broadcasted(NP.normal(:y, :mu, :sigma))))
+end
+
 NP.@model function natural_sampled_offset_regression(x)
     latent ~ Normal()
     beta ~ Normal()
@@ -3541,6 +3559,104 @@ end
           deterministic_scale_graph.schedule
     @test deterministic_scale_rebound.plan.bindings ==
           deterministic_scale_plan.bindings
+
+    distributional_z = [0.5, -1.0, 1.5, 0.25]
+    distributional_declaration = distributional_gaussian_factor_graph()
+    distributional_plan = NP.compile(
+        distributional_declaration, (; x=raw_x, z=distributional_z);
+        conditions=(; y=response))
+    @test distributional_plan isa NP.FactorPlan
+    @test distributional_plan.graph.schedule ==
+          (:beta_mu, :beta_log_sigma, :mu, :log_sigma, :sigma, :y)
+    @test distributional_plan.graph.dimension == 4
+    @test distributional_plan.graph.nodes.sigma isa NP.ExpFactorNode
+    @test distributional_plan.graph.sites.y.factor.scale isa
+          NP.NodeValue{:sigma}
+    distributional_prepared = NP.prepare(distributional_plan)
+    distributional_workspace = NP.workspace(
+        distributional_prepared, Float64, DI.AutoEnzyme())
+    distributional_position = [0.3, -0.4, -0.2, 0.25]
+    distributional_mu =
+        distributional_position[1] .+
+        distributional_position[2] .* raw_x
+    distributional_log_sigma =
+        distributional_position[3] .+
+        distributional_position[4] .* distributional_z
+    distributional_sigma = exp.(distributional_log_sigma)
+    distributional_residuals = response .- distributional_mu
+    distributional_scaled_residuals =
+        distributional_residuals ./ distributional_sigma
+    distributional_expected_density =
+        sum(logpdf.(Normal(), distributional_position)) +
+        sum(logpdf.(Normal.(distributional_mu, distributional_sigma),
+                    response))
+    distributional_scale_score =
+        abs2.(distributional_scaled_residuals) .- 1
+    distributional_expected_gradient = [
+        -distributional_position[1] +
+            sum(distributional_residuals ./ distributional_sigma .^ 2),
+        -distributional_position[2] +
+            sum(raw_x .* distributional_residuals ./
+                distributional_sigma .^ 2),
+        -distributional_position[3] + sum(distributional_scale_score),
+        -distributional_position[4] +
+            sum(distributional_z .* distributional_scale_score),
+    ]
+    distributional_density, distributional_gradient =
+        NP.logdensity_and_gradient!(
+            distributional_workspace, distributional_prepared,
+            distributional_position)
+    @test distributional_density ≈ distributional_expected_density
+    @test distributional_gradient ≈ distributional_expected_gradient
+    @test distributional_workspace.primal.node_rows[1, :] ≈
+          distributional_mu
+    @test distributional_workspace.primal.node_rows[2, :] ≈
+          distributional_log_sigma
+    @test distributional_workspace.primal.node_rows[3, :] ≈
+          distributional_sigma
+    @test NP.evaluate(
+        distributional_workspace, distributional_prepared,
+        distributional_position, NP.LinearPredictor()) ≈ distributional_mu
+    @test NP.evaluate(
+        distributional_workspace, distributional_prepared,
+        distributional_position, NP.PointwiseLogLikelihood()) ≈
+          logpdf.(Normal.(distributional_mu, distributional_sigma), response)
+    distributional_predictive_rng = MersenneTwister(933)
+    distributional_expected_predictive_rng = MersenneTwister(933)
+    @test NP.simulate(
+        distributional_predictive_rng, distributional_workspace,
+        distributional_prepared, distributional_position) ≈
+          distributional_mu .+
+          distributional_sigma .* [
+              randn(distributional_expected_predictive_rng)
+              for _ in response
+          ]
+    @test factor_steady_state_allocations(
+        distributional_workspace, distributional_prepared,
+        distributional_position) == (; primal=0, gradient=0)
+    distributional_underflow_position =
+        [0.3, -0.4, -1000.0, 0.0]
+    @test NP.logdensity!(
+        distributional_workspace, distributional_prepared,
+        distributional_underflow_position) == -Inf
+
+    invalid_scale_declaration = NP.model(
+        inputs=(; x=NP.input()),
+        parameters=(;
+            beta=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            beta_scale=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal())),
+        nodes=(;
+            mu=NP.affine(:x, :beta),
+            invalid_scale=NP.affine(:x, :beta_scale)),
+        observations=(;
+            y=NP.broadcasted(NP.normal(:y, :mu, :invalid_scale))))
+    @test capability_error(() -> NP.compile(
+        invalid_scale_declaration, (; x=raw_x);
+        conditions=(; y=response))).capability == :factor_scale
 
     sampled_offset_data = (;
         x=[-1.0, 0.0, 1.0, 2.0],

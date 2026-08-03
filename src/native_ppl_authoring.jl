@@ -976,8 +976,13 @@ function _uses_factor_executor(declaration::Model, conditions, bindings=(;))
                          values(graph.nodes))
     grouped_affine_node = any(node -> node isa GroupedAffineFactorNode,
                               values(graph.nodes))
+    row_scale = any(values(graph.sites)) do site
+        site.shape isa BroadcastSiteShape &&
+            site.factor isa NormalSiteFactor &&
+            site.factor.scale isa NodeValue
+    end
     dependent_site || sampled_offset_affine || grouped_gather ||
-        grouped_affine_node
+        grouped_affine_node || row_scale
 end
 
 function _group_input_names(declaration::Model)
@@ -998,11 +1003,14 @@ _factor_arguments(factor::PoissonSiteFactor) = (factor.rate,)
 _factor_value_is_row(::LiteralValue, graph, bindings) = false
 _factor_value_is_row(::InputValue{Name}, graph, bindings) where {Name} =
     getproperty(bindings, Name) isa AbstractVector
-_factor_value_is_row(::NodeValue{Name}, graph, bindings) where {Name} =
-    getproperty(graph.nodes, Name) isa
-        Union{
-            AffineFactorNode,GroupGatherFactorNode,RowProductFactorNode,
-            GroupedAffineFactorNode}
+function _factor_value_is_row(::NodeValue{Name}, graph, bindings) where {Name}
+    node = getproperty(graph.nodes, Name)
+    node isa Union{ExpFactorNode,LogFactorNode} &&
+        return _factor_value_is_row(node.input, graph, bindings)
+    node isa Union{
+        AffineFactorNode,GroupGatherFactorNode,RowProductFactorNode,
+        GroupedAffineFactorNode}
+end
 _factor_value_is_row(::SiteValue{Name}, graph, bindings) where {Name} =
     getproperty(graph.sites, Name).shape isa
         Union{BlockSiteShape,BroadcastSiteShape}
@@ -1012,6 +1020,14 @@ function _factor_exp_is_poisson_rate(name::Symbol, graph::FactorGraph)
         factor = site.factor
         factor isa PoissonSiteFactor && factor.rate isa NodeValue &&
             node_value_name(factor.rate) === name
+    end
+end
+
+function _factor_exp_is_normal_scale(name::Symbol, graph::FactorGraph)
+    any(values(graph.sites)) do site
+        factor = site.factor
+        factor isa NormalSiteFactor && factor.scale isa NodeValue &&
+            node_value_name(factor.scale) === name
     end
 end
 
@@ -1124,6 +1140,23 @@ function _validate_factor_plan_site(
                 :factor_scale,
                 "Normal factor for site `$name` uses deterministic scale " *
                 "`$scale_name`, which must currently be an exp node"))
+    elseif site.factor isa NormalSiteFactor &&
+           site.factor.scale isa InputValue
+        scale_name = input_value_name(site.factor.scale)
+        values = getproperty(bindings, scale_name)
+        all(value -> value isa Real && isfinite(value) &&
+                     value > zero(value),
+            values isa AbstractVector ? values : (values,)) || throw(
+            ArgumentError(
+                "Normal factor for site `$name` input scale `$scale_name` " *
+                "must contain finite positive values"))
+    elseif site.factor isa NormalSiteFactor &&
+           site.factor.scale isa LiteralValue
+        scale = site.factor.scale.value
+        scale isa Real && isfinite(scale) && scale > zero(scale) || throw(
+            ArgumentError(
+                "Normal factor for site `$name` literal scale must be " *
+                "finite and positive"))
     elseif site.factor isa PoissonSiteFactor
         _validate_poisson_rate_source(name, site.factor, graph)
     end
@@ -1195,12 +1228,16 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
                         BroadcastSiteShape
             terminal_poisson_rate =
                 _factor_exp_is_poisson_rate(name, graph)
+            terminal_normal_scale =
+                _factor_exp_is_normal_scale(name, graph)
             _factor_value_is_row(node.input, graph, bindings) &&
-                !broadcast_input && !terminal_poisson_rate && throw(
+                !broadcast_input && !terminal_poisson_rate &&
+                !terminal_normal_scale && throw(
                 CapabilityError(
                     :factor_nodes,
                     "exp node `$name` cannot consume a row-valued argument " *
-                    "unless it is the terminal Poisson log-rate link"))
+                    "unless it is a terminal Poisson log-rate link or " *
+                    "Normal scale"))
         end
         if node isa AffineFactorNode
             for offset in node.offsets
@@ -1704,7 +1741,8 @@ end
     node_index = getproperty(plan.node_indices, Name)
     node = getproperty(plan.graph.nodes, Name)
     node isa Union{
-        LogFactorNode,AffineFactorNode,GroupGatherFactorNode,RowProductFactorNode,
+        ExpFactorNode,LogFactorNode,AffineFactorNode,
+        GroupGatherFactorNode,RowProductFactorNode,
         GroupedAffineFactorNode,
     } ?
         buffers.node_rows[node_index, index] :
@@ -1923,11 +1961,29 @@ end
 @inline function _factor_node_logdensity!(::Val{Name}, node::ExpFactorNode,
         position::AbstractVector{T}, prepared::FactorPrepared,
         buffers::FactorBuffers{T}) where {Name,T}
+    normal_scale = _factor_exp_is_normal_scale(Name, prepared.plan.graph)
     _factor_exp_is_poisson_rate(Name, prepared.plan.graph) &&
+        !normal_scale && return zero(T)
+    node_index = getproperty(prepared.plan.node_indices, Name)
+    if !_factor_value_is_row(
+            node.input, prepared.plan.graph, prepared.plan.bindings)
+        value = exp(_factor_argument(
+            node.input, prepared.plan, buffers, T))
+        buffers.node_values[node_index] = value
+        for row in prepared.plan.observation_axis.keys
+            buffers.node_rows[node_index, row] = value
+        end
         return zero(T)
-    input = _factor_argument(node.input, prepared.plan, buffers, T)
-    buffers.node_values[getproperty(prepared.plan.node_indices, Name)] =
-        exp(input)
+    end
+    first_value = zero(T)
+    for row in prepared.plan.observation_axis.keys
+        value = exp(_factor_argument_at(
+            node.input, row, prepared.plan, buffers, T))
+        buffers.node_rows[node_index, row] = value
+        row == first(prepared.plan.observation_axis.keys) &&
+            (first_value = value)
+    end
+    buffers.node_values[node_index] = first_value
     zero(T)
 end
 
