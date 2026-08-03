@@ -35,8 +35,12 @@ input_role(::Input{Role}) where {Role} = Role
 
 const RealSupport = BRM.NativePPLRealSupport
 const PositiveSupport = BRM.NativePPLPositiveSupport
+const CholeskyCorrelationSupport =
+    BRM.NativePPLCholeskyCorrelationSupport
 const IdentityTransform = BRM.NativePPLIdentityTransform
 const ExpTransform = BRM.NativePPLExpTransform
+const CholeskyCorrelationTransform =
+    BRM.NativePPLCholeskyCorrelationTransform
 
 Identity() = IdentityTransform()
 Exp() = ExpTransform()
@@ -93,6 +97,49 @@ struct GroupedNormalParameter{Group,L,S} <: AbstractParameterDeclaration
     scale::S
 end
 
+"""Group-major independent standard-normal coordinates for named coefficients."""
+struct GroupedStandardNormalParameter{Group,Coefficients} <:
+       AbstractParameterDeclaration end
+
+function grouped_standard_normal(group::Symbol, coefficients::Tuple)
+    isempty(coefficients) && throw(ArgumentError(
+        "native PPL grouped standard-normal coefficients cannot be empty"))
+    all(coefficient -> coefficient isa Symbol, coefficients) || throw(
+        ArgumentError(
+            "native PPL grouped standard-normal coefficient keys must be Symbols"))
+    length(unique(coefficients)) == length(coefficients) || throw(ArgumentError(
+        "native PPL grouped standard-normal coefficient keys must be unique"))
+    GroupedStandardNormalParameter{group,coefficients}()
+end
+
+group_input(::GroupedStandardNormalParameter{Group}) where {Group} = Group
+group_coefficients(
+    ::GroupedStandardNormalParameter{Group,Coefficients},
+) where {Group,Coefficients} = Coefficients
+
+"""One LKJ prior over a named Cholesky correlation factor."""
+struct CholeskyCorrelationParameter{Coefficients,Eta} <:
+       AbstractParameterDeclaration
+    eta::Eta
+end
+
+function cholesky_correlation(coefficients::Tuple, eta::Real)
+    length(coefficients) >= 2 || throw(ArgumentError(
+        "native PPL Cholesky correlation needs at least two coefficients"))
+    all(coefficient -> coefficient isa Symbol, coefficients) || throw(
+        ArgumentError(
+            "native PPL Cholesky correlation coefficient keys must be Symbols"))
+    length(unique(coefficients)) == length(coefficients) || throw(ArgumentError(
+        "native PPL Cholesky correlation coefficient keys must be unique"))
+    isfinite(eta) && eta > zero(eta) || throw(ArgumentError(
+        "native PPL LKJ shape must be finite and positive"))
+    CholeskyCorrelationParameter{coefficients,typeof(eta)}(eta)
+end
+
+correlation_coefficients(
+    ::CholeskyCorrelationParameter{Coefficients},
+) where {Coefficients} = Coefficients
+
 _factor_declaration_value(value::Symbol) = SiteValue{value}()
 _factor_declaration_value(value::Real) = LiteralValue(value)
 
@@ -137,8 +184,6 @@ function parameter(support::S, axis_keys::Tuple;
     elseif prior isa ExponentialPrior
         support isa PositiveSupport || throw(ArgumentError(
             "native PPL Exponential prior requires PositiveSupport"))
-        length(axis_keys) == 1 || throw(ArgumentError(
-            "native PPL Exponential prior currently requires one scalar coordinate"))
     end
     Parameter(support, transform, axis_keys, prior)
 end
@@ -312,6 +357,9 @@ end
 struct ExponentialSiteFactor{S} <: AbstractSiteFactor
     scale::S
 end
+struct LKJCholeskySiteFactor{E} <: AbstractSiteFactor
+    eta::E
+end
 struct BernoulliLogitSiteFactor{L} <: AbstractSiteFactor
     logit::L
 end
@@ -324,6 +372,7 @@ site_factor_dependencies(factor::NormalSiteFactor) =
     _factor_value_dependencies((factor.location, factor.scale))
 site_factor_dependencies(factor::ExponentialSiteFactor) =
     _factor_value_dependencies((factor.scale,))
+site_factor_dependencies(::LKJCholeskySiteFactor) = ()
 site_factor_dependencies(factor::BernoulliLogitSiteFactor) =
     _factor_value_dependencies((factor.logit,))
 site_factor_dependencies(factor::PoissonSiteFactor) =
@@ -425,6 +474,20 @@ struct GroupCoordinateKey{L}
     level::L
 end
 
+"""One group-major coefficient coordinate of a structured latent block."""
+struct GroupCoefficientKey{L}
+    site::Symbol
+    level::L
+    coefficient::Symbol
+end
+
+"""One unconstrained strict-lower-triangular correlation coordinate."""
+struct CorrelationCoordinateKey
+    site::Symbol
+    row::Int
+    column::Int
+end
+
 """Typed, ordered stochastic-site graph and its free-coordinate allocation."""
 struct FactorGraph{Order,S,N,C}
     sites::S
@@ -512,6 +575,52 @@ function _parameter_stochastic_site(
         RealSupport(), Identity(),
         NormalSiteFactor(declaration.location, declaration.scale),
         BlockSiteShape(), activity, coordinate_keys)
+end
+
+function _parameter_stochastic_site(
+    name::Symbol, declaration::GroupedStandardNormalParameter,
+    conditions::NamedTuple, bindings::NamedTuple,
+    fitted_levels=nothing, new_groups::Symbol=:error)
+    group_name = group_input(declaration)
+    hasproperty(bindings, group_name) || throw(ArgumentError(
+        "native PPL grouped site `$name` requires binding `$group_name`"))
+    observed_levels = _group_levels(
+        getproperty(bindings, group_name), group_name)
+    levels = fitted_levels === nothing ? observed_levels : fitted_levels
+    unknown = Tuple(level for level in observed_levels if level ∉ levels)
+    if !isempty(unknown) && new_groups === :error
+        throw(CapabilityError(
+            :new_group,
+            "native PPL group input `$group_name` contains new levels " *
+            "$(unknown); replay reuses fitted group effects by default; " *
+            "pass `new_groups=:resample` for prediction-only conditional " *
+            "simulation"))
+    end
+    coefficients = group_coefficients(declaration)
+    activity = hasproperty(conditions, name) ? ConditionedSite() : FreeSite()
+    coordinate_keys = Tuple(
+        GroupCoefficientKey(name, level, coefficient)
+        for level in levels for coefficient in coefficients)
+    StochasticSite(
+        RealSupport(), Identity(), StandardNormalSiteFactor(),
+        BlockSiteShape(), activity, coordinate_keys)
+end
+
+function _parameter_stochastic_site(
+    name::Symbol, declaration::CholeskyCorrelationParameter,
+    conditions::NamedTuple)
+    coefficients = correlation_coefficients(declaration)
+    dimension = length(coefficients)
+    activity = hasproperty(conditions, name) ? ConditionedSite() : FreeSite()
+    coordinate_keys = activity isa FreeSite ? Tuple(
+        CorrelationCoordinateKey(name, row, column)
+        for column in 1:(dimension - 1)
+        for row in (column + 1):dimension) : ()
+    StochasticSite(
+        CholeskyCorrelationSupport{dimension}(),
+        CholeskyCorrelationTransform{dimension}(),
+        LKJCholeskySiteFactor(declaration.eta), BlockSiteShape(), activity,
+        coordinate_keys)
 end
 
 function _factor_value(name::Symbol, inputs::NamedTuple, nodes::NamedTuple)
@@ -660,7 +769,9 @@ function factor_graph(declaration::Model; conditions=(;), bindings=(;),
     for name in declaration.site_order
         site = if hasproperty(declaration.parameters, name)
             parameter = getproperty(declaration.parameters, name)
-            parameter isa GroupedNormalParameter ?
+            parameter isa Union{
+                GroupedNormalParameter,GroupedStandardNormalParameter,
+            } ?
                 _parameter_stochastic_site(
                     name, parameter, canonical_conditions, bindings,
                     hasproperty(group_levels, name) ?
@@ -5183,17 +5294,21 @@ end
 
 export Model, ModelInstance, GraphRef, Component, Composition, Input, Parameter
 export AbstractParameterDeclaration, GroupedNormalParameter
+export GroupedStandardNormalParameter, CholeskyCorrelationParameter
 export SiteValue, InputValue, NodeValue, LiteralValue, StochasticSite
-export SiteCoordinates, GroupCoordinateKey
+export SiteCoordinates, GroupCoordinateKey, GroupCoefficientKey
+export CorrelationCoordinateKey
 export FactorGraph
 export CenterFactorNode, ZScaleFactorNode, AffineFactorNode, ExpFactorNode
 export GroupGatherFactorNode, RowProductFactorNode
 export FactorPlan, FactorPrepared, FactorWorkspace, FactorLogDensityProblem
 export StandardNormalSiteFactor, NormalSiteFactor, ExponentialSiteFactor
+export LKJCholeskySiteFactor
 export BernoulliLogitSiteFactor, PoissonSiteFactor
 export ScalarSiteShape, BlockSiteShape, BroadcastSiteShape
 export FreeSite, ConditionedSite, GeneratedSite
-export RealSupport, PositiveSupport, IdentityTransform, ExpTransform
+export RealSupport, PositiveSupport, CholeskyCorrelationSupport
+export IdentityTransform, ExpTransform, CholeskyCorrelationTransform
 export StandardNormal, NormalPrior, ExponentialPrior
 export Center, ZScale, Affine, ExpLink, GroupGather, RowProduct
 export NormalObservation, BernoulliLogitObservation, PoissonObservation
@@ -5201,6 +5316,8 @@ export BroadcastObservation
 export model, input, parameter, Identity, Exp, normal_prior, Exponential
 export center, zscale, standardize, affine, exp_link
 export grouped_normal, group_gather, group_values, group_input
+export grouped_standard_normal, group_coefficients
+export cholesky_correlation, correlation_coefficients
 export row_product, row_product_inputs
 export normal, bernoulli_logit, poisson, broadcasted
 export instantiate, substitute, condition, component, output, compose, bind, lower

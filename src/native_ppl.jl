@@ -21,11 +21,14 @@ Base.eltype(::NativePPLInput{Name,Role,A,T}) where {Name,Role,A,T} = T
 abstract type NativePPLSupport end
 struct NativePPLRealSupport <: NativePPLSupport end
 struct NativePPLPositiveSupport <: NativePPLSupport end
+struct NativePPLCholeskyCorrelationSupport{K} <: NativePPLSupport end
 
 """A typed map from an unconstrained coordinate to a parameter's support."""
 abstract type NativePPLTransform{S<:NativePPLSupport} end
 struct NativePPLIdentityTransform <: NativePPLTransform{NativePPLRealSupport} end
 struct NativePPLExpTransform <: NativePPLTransform{NativePPLPositiveSupport} end
+struct NativePPLCholeskyCorrelationTransform{K} <:
+       NativePPLTransform{NativePPLCholeskyCorrelationSupport{K}} end
 
 @inline native_transform_forward(::NativePPLIdentityTransform, value) = value
 @inline native_transform_forward(::NativePPLExpTransform, value) = exp(value)

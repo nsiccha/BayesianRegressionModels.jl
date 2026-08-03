@@ -3735,6 +3735,58 @@ end
         "cannot consume block site `varying` directly",
         sprint(showerror, direct_block_product_error))
 
+    structured_group_declaration = NP.model(
+        inputs=(; x=NP.input(), group=NP.input()),
+        parameters=(;
+            tau=NP.parameter(
+                NP.PositiveSupport(), (:Intercept, :x);
+                transform=NP.Exp(), prior=NP.Exponential(1)),
+            correlation=NP.cholesky_correlation((:Intercept, :x), 2.0),
+            z=NP.grouped_standard_normal(:group, (:Intercept, :x)),
+            sigma=NP.parameter(
+                NP.PositiveSupport(), (:sigma,); transform=NP.Exp(),
+                prior=NP.Exponential(2))),
+        observations=(; y=NP.broadcasted(NP.normal(:y, :x, :sigma))),
+        site_order=(:tau, :correlation, :z, :sigma, :y))
+    @test NP.group_input(structured_group_declaration.parameters.z) === :group
+    @test NP.group_coefficients(
+        structured_group_declaration.parameters.z) == (:Intercept, :x)
+    @test NP.correlation_coefficients(
+        structured_group_declaration.parameters.correlation) ==
+          (:Intercept, :x)
+    structured_group_graph = NP.factor_graph(
+        structured_group_declaration;
+        bindings=(; x=row_product_bindings.x,
+                  group=row_product_bindings.group),
+        conditions=(; y=sampled_offset_data.y))
+    @test structured_group_graph.schedule ==
+          (:tau, :correlation, :z, :sigma, :y)
+    @test structured_group_graph.dimension == 10
+    @test structured_group_graph.sites.tau.shape isa NP.BlockSiteShape
+    @test structured_group_graph.sites.tau.factor isa NP.ExponentialSiteFactor
+    @test structured_group_graph.sites.correlation.support isa
+          NP.CholeskyCorrelationSupport{2}
+    @test structured_group_graph.sites.correlation.transform isa
+          NP.CholeskyCorrelationTransform{2}
+    @test structured_group_graph.sites.correlation.factor isa
+          NP.LKJCholeskySiteFactor
+    @test structured_group_graph.sites.correlation.factor.eta == 2.0
+    @test structured_group_graph.coordinates.correlation.keys ==
+          (NP.CorrelationCoordinateKey(:correlation, 2, 1),)
+    @test structured_group_graph.coordinates.z.keys == (
+        NP.GroupCoefficientKey(:z, :a, :Intercept),
+        NP.GroupCoefficientKey(:z, :a, :x),
+        NP.GroupCoefficientKey(:z, :b, :Intercept),
+        NP.GroupCoefficientKey(:z, :b, :x),
+        NP.GroupCoefficientKey(:z, :c, :Intercept),
+        NP.GroupCoefficientKey(:z, :c, :x))
+    @test_throws ArgumentError NP.grouped_standard_normal(:group, ())
+    @test_throws ArgumentError NP.grouped_standard_normal(
+        :group, (:x, :x))
+    @test_throws ArgumentError NP.cholesky_correlation((:x,), 2.0)
+    @test_throws ArgumentError NP.cholesky_correlation(
+        (:Intercept, :x), 0.0)
+
     varying_brm_data = (;
         x=sampled_offset_data.x,
         group=grouped_bindings.group,
