@@ -317,6 +317,11 @@ NP.@model function scalar_normal_prior()
     return theta
 end
 
+NP.@model function scalar_normal_site(mu, tau)
+    z ~ Normal(mu, tau)
+    return z
+end
+
 NP.@model function aliased_scalar_normal_prior()
     theta ~ Normal(0, 1)
     return (coefficient=theta,)
@@ -2880,6 +2885,35 @@ end
     prior_component = NP.component(:prior, scalar_prior)
     @test NP.graph_kind(NP.output(prior_component, :theta)) === :parameter
     @test capability_error(() -> NP.bind(scalar_prior)).capability == :outcomes
+
+    latent_site = scalar_normal_site(0.25, 0.8)
+    @test keys(latent_site.declaration.inputs) == (:mu, :tau)
+    @test isempty(latent_site.declaration.parameters)
+    @test isempty(latent_site.declaration.nodes)
+    @test keys(latent_site.declaration.observations) == (:z,)
+    @test latent_site.declaration.observations.z isa NP.NormalObservation
+    @test !NP.is_broadcast_observation(
+        latent_site.declaration.observations.z)
+    @test NP.observation_dependencies(
+        latent_site.declaration.observations.z) == (:mu, :tau)
+    @test latent_site.declaration.outputs == (; z=:z)
+    @test latent_site.bindings == (; mu=0.25, tau=0.8)
+    @test isempty(latent_site.conditions)
+    latent_component = NP.component(:latent, latent_site)
+    latent_output = NP.output(latent_component, :z)
+    @test NP.graph_kind(latent_output) === :site
+    @test (NP.graph_namespace(latent_output), NP.graph_name(latent_output)) ==
+          (:latent, :z)
+    latent_sink = NP.component(
+        :sink,
+        NP.condition(
+            scalar_normal_likelihood(latent_output);
+            y=[0.2, -0.1, 1.1, 0.7]))
+    latent_composition = NP.compose(latent_component, latent_sink)
+    @test latent_composition.components.sink.instance.bindings.mu ===
+          latent_output
+    @test capability_error(() -> NP.lower(latent_composition)).capability ==
+          :active_site_connection
 
     aliased_prior = aliased_scalar_normal_prior()
     @test keys(aliased_prior.declaration.parameters) == (:theta,)
