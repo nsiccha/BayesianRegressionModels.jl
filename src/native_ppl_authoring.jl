@@ -35,8 +35,12 @@ input_role(::Input{Role}) where {Role} = Role
 
 const RealSupport = BRM.NativePPLRealSupport
 const PositiveSupport = BRM.NativePPLPositiveSupport
+const CholeskyCorrelationSupport =
+    BRM.NativePPLCholeskyCorrelationSupport
 const IdentityTransform = BRM.NativePPLIdentityTransform
 const ExpTransform = BRM.NativePPLExpTransform
+const CholeskyCorrelationTransform =
+    BRM.NativePPLCholeskyCorrelationTransform
 
 Identity() = IdentityTransform()
 Exp() = ExpTransform()
@@ -93,6 +97,49 @@ struct GroupedNormalParameter{Group,L,S} <: AbstractParameterDeclaration
     scale::S
 end
 
+"""Group-major independent standard-normal coordinates for named coefficients."""
+struct GroupedStandardNormalParameter{Group,Coefficients} <:
+       AbstractParameterDeclaration end
+
+function grouped_standard_normal(group::Symbol, coefficients::Tuple)
+    isempty(coefficients) && throw(ArgumentError(
+        "native PPL grouped standard-normal coefficients cannot be empty"))
+    all(coefficient -> coefficient isa Symbol, coefficients) || throw(
+        ArgumentError(
+            "native PPL grouped standard-normal coefficient keys must be Symbols"))
+    length(unique(coefficients)) == length(coefficients) || throw(ArgumentError(
+        "native PPL grouped standard-normal coefficient keys must be unique"))
+    GroupedStandardNormalParameter{group,coefficients}()
+end
+
+group_input(::GroupedStandardNormalParameter{Group}) where {Group} = Group
+group_coefficients(
+    ::GroupedStandardNormalParameter{Group,Coefficients},
+) where {Group,Coefficients} = Coefficients
+
+"""One LKJ prior over a named Cholesky correlation factor."""
+struct CholeskyCorrelationParameter{Coefficients,Eta} <:
+       AbstractParameterDeclaration
+    eta::Eta
+end
+
+function cholesky_correlation(coefficients::Tuple, eta::Real)
+    length(coefficients) >= 2 || throw(ArgumentError(
+        "native PPL Cholesky correlation needs at least two coefficients"))
+    all(coefficient -> coefficient isa Symbol, coefficients) || throw(
+        ArgumentError(
+            "native PPL Cholesky correlation coefficient keys must be Symbols"))
+    length(unique(coefficients)) == length(coefficients) || throw(ArgumentError(
+        "native PPL Cholesky correlation coefficient keys must be unique"))
+    isfinite(eta) && eta > zero(eta) || throw(ArgumentError(
+        "native PPL LKJ shape must be finite and positive"))
+    CholeskyCorrelationParameter{coefficients,typeof(eta)}(eta)
+end
+
+correlation_coefficients(
+    ::CholeskyCorrelationParameter{Coefficients},
+) where {Coefficients} = Coefficients
+
 _factor_declaration_value(value::Symbol) = SiteValue{value}()
 _factor_declaration_value(value::Real) = LiteralValue(value)
 
@@ -137,8 +184,6 @@ function parameter(support::S, axis_keys::Tuple;
     elseif prior isa ExponentialPrior
         support isa PositiveSupport || throw(ArgumentError(
             "native PPL Exponential prior requires PositiveSupport"))
-        length(axis_keys) == 1 || throw(ArgumentError(
-            "native PPL Exponential prior currently requires one scalar coordinate"))
     end
     Parameter(support, transform, axis_keys, prior)
 end
@@ -186,6 +231,28 @@ group_gather(values::Symbol, group::Symbol) = GroupGather{values,group}()
 struct RowProduct{Left,Right} <: AbstractNodeDeclaration end
 row_product(left::Symbol, right::Symbol) = RowProduct{left,right}()
 
+"""Apply one correlated, scaled group-coefficient block on each row."""
+struct GroupedAffine{Standardized,Scales,Correlation,Group,Predictors} <:
+       AbstractNodeDeclaration end
+
+function grouped_affine(standardized::Symbol, scales::Symbol,
+                        correlation::Symbol, group::Symbol,
+                        predictors::Tuple)
+    isempty(predictors) && throw(ArgumentError(
+        "native PPL grouped affine predictors cannot be empty"))
+    all(predictor -> predictor === nothing || predictor isa Symbol,
+        predictors) || throw(ArgumentError(
+        "native PPL grouped affine predictors must be Symbols or `nothing` " *
+        "for an intercept"))
+    count(isnothing, predictors) <= 1 || throw(ArgumentError(
+        "native PPL grouped affine predictors may contain at most one intercept"))
+    named = Tuple(predictor for predictor in predictors
+                  if predictor !== nothing)
+    length(unique(named)) == length(named) || throw(ArgumentError(
+        "native PPL grouped affine predictors must be unique"))
+    GroupedAffine{standardized,scales,correlation,group,predictors}()
+end
+
 node_input(::Center{Input}) where {Input} = Input
 node_input(::ZScale{Input}) where {Input} = Input
 node_inputs(::Affine{Inputs}) where {Inputs} = Inputs
@@ -204,6 +271,21 @@ node_input(::ExpLink{Input}) where {Input} = Input
 group_values(::GroupGather{Values}) where {Values} = Values
 group_input(::GroupGather{Values,Group}) where {Values,Group} = Group
 row_product_inputs(::RowProduct{Left,Right}) where {Left,Right} = (Left, Right)
+grouped_standardized(
+    ::GroupedAffine{Standardized},
+) where {Standardized} = Standardized
+grouped_scales(
+    ::GroupedAffine{Standardized,Scales},
+) where {Standardized,Scales} = Scales
+grouped_correlation(
+    ::GroupedAffine{Standardized,Scales,Correlation},
+) where {Standardized,Scales,Correlation} = Correlation
+group_input(
+    ::GroupedAffine{Standardized,Scales,Correlation,Group},
+) where {Standardized,Scales,Correlation,Group} = Group
+grouped_predictors(
+    ::GroupedAffine{Standardized,Scales,Correlation,Group,Predictors},
+) where {Standardized,Scales,Correlation,Group,Predictors} = Predictors
 affine_parameter(::Affine{Inputs,Coefficients}) where {Inputs,Coefficients} =
     Coefficients
 
@@ -312,6 +394,9 @@ end
 struct ExponentialSiteFactor{S} <: AbstractSiteFactor
     scale::S
 end
+struct LKJCholeskySiteFactor{E} <: AbstractSiteFactor
+    eta::E
+end
 struct BernoulliLogitSiteFactor{L} <: AbstractSiteFactor
     logit::L
 end
@@ -324,6 +409,7 @@ site_factor_dependencies(factor::NormalSiteFactor) =
     _factor_value_dependencies((factor.location, factor.scale))
 site_factor_dependencies(factor::ExponentialSiteFactor) =
     _factor_value_dependencies((factor.scale,))
+site_factor_dependencies(::LKJCholeskySiteFactor) = ()
 site_factor_dependencies(factor::BernoulliLogitSiteFactor) =
     _factor_value_dependencies((factor.logit,))
 site_factor_dependencies(factor::PoissonSiteFactor) =
@@ -373,6 +459,14 @@ struct RowProductFactorNode{L,R} <: AbstractFactorNode
     right::R
 end
 
+struct GroupedAffineFactorNode{Z,S,C,G,P} <: AbstractFactorNode
+    standardized::Z
+    scales::S
+    correlation::C
+    group::G
+    predictors::P
+end
+
 factor_node_dependencies(node::Union{
         CenterFactorNode,ZScaleFactorNode,ExpFactorNode}) =
     _factor_value_dependencies((node.input,))
@@ -383,6 +477,10 @@ factor_node_dependencies(node::GroupGatherFactorNode) =
     _factor_value_dependencies((node.values, node.group))
 factor_node_dependencies(node::RowProductFactorNode) =
     _factor_value_dependencies((node.left, node.right))
+factor_node_dependencies(node::GroupedAffineFactorNode) =
+    _factor_value_dependencies((
+        node.standardized, node.scales, node.correlation,
+        node.group, node.predictors...))
 
 abstract type AbstractSiteShape end
 struct ScalarSiteShape <: AbstractSiteShape end
@@ -423,6 +521,20 @@ end
 struct GroupCoordinateKey{L}
     site::Symbol
     level::L
+end
+
+"""One group-major coefficient coordinate of a structured latent block."""
+struct GroupCoefficientKey{L}
+    site::Symbol
+    level::L
+    coefficient::Symbol
+end
+
+"""One unconstrained strict-lower-triangular correlation coordinate."""
+struct CorrelationCoordinateKey
+    site::Symbol
+    row::Int
+    column::Int
 end
 
 """Typed, ordered stochastic-site graph and its free-coordinate allocation."""
@@ -514,6 +626,60 @@ function _parameter_stochastic_site(
         BlockSiteShape(), activity, coordinate_keys)
 end
 
+function _parameter_stochastic_site(
+    name::Symbol, declaration::GroupedStandardNormalParameter,
+    conditions::NamedTuple, bindings::NamedTuple,
+    fitted_levels=nothing, new_groups::Symbol=:error)
+    group_name = group_input(declaration)
+    hasproperty(bindings, group_name) || throw(ArgumentError(
+        "native PPL grouped site `$name` requires binding `$group_name`"))
+    observed_levels = _group_levels(
+        getproperty(bindings, group_name), group_name)
+    levels = fitted_levels === nothing ? observed_levels : Tuple(fitted_levels)
+    isempty(levels) && throw(ArgumentError(
+        "native PPL fitted group levels for `$group_name` cannot be empty"))
+    any(ismissing, levels) && throw(ArgumentError(
+        "native PPL fitted group levels for `$group_name` cannot contain " *
+        "missing values"))
+    length(unique(levels)) == length(levels) || throw(ArgumentError(
+        "native PPL fitted group levels for `$group_name` must be unique"))
+    unknown = Tuple(level for level in observed_levels
+                    if findfirst(isequal(level), levels) === nothing)
+    if !isempty(unknown) && new_groups === :error
+        throw(CapabilityError(
+            :new_group,
+            "native PPL group input `$group_name` contains new levels " *
+            "$(unknown); replay reuses fitted group effects by default; " *
+            "pass `new_groups=:resample` for prediction-only conditional " *
+            "simulation"))
+    end
+    coefficients = group_coefficients(declaration)
+    activity = hasproperty(conditions, name) ? ConditionedSite() : FreeSite()
+    coordinate_keys = Tuple(
+        GroupCoefficientKey(name, level, coefficient)
+        for level in levels for coefficient in coefficients)
+    StochasticSite(
+        RealSupport(), Identity(), StandardNormalSiteFactor(),
+        BlockSiteShape(), activity, coordinate_keys)
+end
+
+function _parameter_stochastic_site(
+    name::Symbol, declaration::CholeskyCorrelationParameter,
+    conditions::NamedTuple)
+    coefficients = correlation_coefficients(declaration)
+    dimension = length(coefficients)
+    activity = hasproperty(conditions, name) ? ConditionedSite() : FreeSite()
+    coordinate_keys = activity isa FreeSite ? Tuple(
+        CorrelationCoordinateKey(name, row, column)
+        for column in 1:(dimension - 1)
+        for row in (column + 1):dimension) : ()
+    StochasticSite(
+        CholeskyCorrelationSupport{dimension}(),
+        CholeskyCorrelationTransform{dimension}(),
+        LKJCholeskySiteFactor(declaration.eta), BlockSiteShape(), activity,
+        coordinate_keys)
+end
+
 function _factor_value(name::Symbol, inputs::NamedTuple, nodes::NamedTuple)
     hasproperty(inputs, name) && return InputValue{name}()
     hasproperty(nodes, name) && return NodeValue{name}()
@@ -539,9 +705,17 @@ function _factor_node(declaration::AbstractNodeDeclaration,
         GroupGatherFactorNode(
             SiteValue{group_values(declaration)}(),
             InputValue{group_input(declaration)}())
-    else
+    elseif declaration isa RowProduct
         left, right = row_product_inputs(declaration)
         RowProductFactorNode(reference(left), reference(right))
+    else
+        GroupedAffineFactorNode(
+            SiteValue{grouped_standardized(declaration)}(),
+            SiteValue{grouped_scales(declaration)}(),
+            SiteValue{grouped_correlation(declaration)}(),
+            InputValue{group_input(declaration)}(),
+            map(predictor -> predictor === nothing ? nothing :
+                reference(predictor), grouped_predictors(declaration)))
     end
 end
 
@@ -660,7 +834,9 @@ function factor_graph(declaration::Model; conditions=(;), bindings=(;),
     for name in declaration.site_order
         site = if hasproperty(declaration.parameters, name)
             parameter = getproperty(declaration.parameters, name)
-            parameter isa GroupedNormalParameter ?
+            parameter isa Union{
+                GroupedNormalParameter,GroupedStandardNormalParameter,
+            } ?
                 _parameter_stochastic_site(
                     name, parameter, canonical_conditions, bindings,
                     hasproperty(group_levels, name) ?
@@ -777,16 +953,21 @@ function _uses_factor_executor(declaration::Model, conditions, bindings=(;))
     end
     grouped_gather = any(node -> node isa GroupGatherFactorNode,
                          values(graph.nodes))
-    dependent_site || sampled_offset_affine || grouped_gather
+    grouped_affine_node = any(node -> node isa GroupedAffineFactorNode,
+                              values(graph.nodes))
+    dependent_site || sampled_offset_affine || grouped_gather ||
+        grouped_affine_node
 end
 
 function _group_input_names(declaration::Model)
     Tuple(unique(group_input(parameter)
         for parameter in values(declaration.parameters)
-        if parameter isa GroupedNormalParameter))
+        if parameter isa Union{
+            GroupedNormalParameter,GroupedStandardNormalParameter}))
 end
 
 _factor_arguments(::StandardNormalSiteFactor) = ()
+_factor_arguments(::LKJCholeskySiteFactor) = ()
 _factor_arguments(factor::NormalSiteFactor) =
     (factor.location, factor.scale)
 _factor_arguments(factor::ExponentialSiteFactor) = (factor.scale,)
@@ -796,7 +977,9 @@ _factor_value_is_row(::InputValue{Name}, graph, bindings) where {Name} =
     getproperty(bindings, Name) isa AbstractVector
 _factor_value_is_row(::NodeValue{Name}, graph, bindings) where {Name} =
     getproperty(graph.nodes, Name) isa
-        Union{AffineFactorNode,GroupGatherFactorNode}
+        Union{
+            AffineFactorNode,GroupGatherFactorNode,RowProductFactorNode,
+            GroupedAffineFactorNode}
 _factor_value_is_row(::SiteValue{Name}, graph, bindings) where {Name} =
     getproperty(graph.sites, Name).shape isa
         Union{BlockSiteShape,BroadcastSiteShape}
@@ -808,12 +991,13 @@ function _validate_factor_plan_site(
 )
     site.shape isa BlockSiteShape &&
         !(site.factor isa Union{
-            StandardNormalSiteFactor,NormalSiteFactor}) && throw(CapabilityError(
+            StandardNormalSiteFactor,NormalSiteFactor,
+            ExponentialSiteFactor,LKJCholeskySiteFactor}) && throw(CapabilityError(
             :factor_shape,
-            "multi-latent block site `$name` must currently be standard or " *
-            "scalar-parameterized Normal"))
+            "multi-latent block site `$name` has an unsupported factor"))
     site.factor isa Union{
         StandardNormalSiteFactor,NormalSiteFactor,ExponentialSiteFactor,
+        LKJCholeskySiteFactor,
     } || throw(CapabilityError(
         :factor_family,
         "multi-latent factor site `$name` has unsupported factor " *
@@ -919,7 +1103,7 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
     for (name, node) in pairs(graph.nodes)
         node isa Union{
             ExpFactorNode,AffineFactorNode,GroupGatherFactorNode,
-            RowProductFactorNode,
+            RowProductFactorNode,GroupedAffineFactorNode,
         } ||
             throw(CapabilityError(
             :factor_nodes,
@@ -991,6 +1175,82 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
                 :factor_nodes,
                 "group gather node `$name` requires a fitted group input"))
         end
+        if node isa GroupedAffineFactorNode
+            standardized_name = site_value_name(node.standardized)
+            scales_name = site_value_name(node.scales)
+            correlation_name = site_value_name(node.correlation)
+            standardized_declaration = getproperty(
+                declaration.parameters, standardized_name)
+            scales_declaration = getproperty(
+                declaration.parameters, scales_name)
+            correlation_declaration = getproperty(
+                declaration.parameters, correlation_name)
+            standardized_declaration isa GroupedStandardNormalParameter ||
+                throw(CapabilityError(
+                    :factor_nodes,
+                    "grouped affine node `$name` requires grouped " *
+                    "standard-normal coordinates"))
+            scales_declaration isa Parameter || throw(CapabilityError(
+                :factor_nodes,
+                "grouped affine node `$name` requires a positive scale block"))
+            correlation_declaration isa CholeskyCorrelationParameter ||
+                throw(CapabilityError(
+                    :factor_nodes,
+                    "grouped affine node `$name` requires a Cholesky " *
+                    "correlation parameter"))
+            coefficients = group_coefficients(standardized_declaration)
+            length(coefficients) == 2 || throw(CapabilityError(
+                :factor_nodes,
+                "the first executable grouped affine slice requires exactly " *
+                "two correlated coefficients"))
+            scales_declaration.axis_keys == coefficients || throw(
+                CapabilityError(
+                    :factor_nodes,
+                    "grouped affine node `$name` scale keys must match its " *
+                    "group coefficient keys"))
+            correlation_coefficients(correlation_declaration) == coefficients ||
+                throw(CapabilityError(
+                    :factor_nodes,
+                    "grouped affine node `$name` correlation keys must match " *
+                    "its group coefficient keys"))
+            length(node.predictors) == length(coefficients) || throw(
+                CapabilityError(
+                    :factor_nodes,
+                    "grouped affine node `$name` needs one predictor per " *
+                    "group coefficient"))
+            for predictor in node.predictors
+                predictor isa SiteValue || continue
+                predictor_name = site_value_name(predictor)
+                predictor_site = getproperty(graph.sites, predictor_name)
+                predictor_site.shape isa BlockSiteShape || continue
+                throw(CapabilityError(
+                    :factor_shape,
+                    "grouped affine node `$name` cannot consume block site " *
+                    "`$predictor_name` as a row predictor; lower it through " *
+                    "a typed materializing node"))
+            end
+            group_input(standardized_declaration) ==
+                input_value_name(node.group) || throw(CapabilityError(
+                    :factor_nodes,
+                    "grouped affine node `$name` must use its grouped " *
+                    "coordinate site's fitted group input"))
+            scales_site = getproperty(graph.sites, scales_name)
+            scales_site.support isa PositiveSupport &&
+                scales_site.factor isa ExponentialSiteFactor &&
+                scales_site.shape isa BlockSiteShape || throw(
+                    CapabilityError(
+                        :factor_nodes,
+                        "grouped affine node `$name` scales must be a positive " *
+                        "Exponential-prior block"))
+            correlation_site = getproperty(graph.sites, correlation_name)
+            correlation_site.support isa CholeskyCorrelationSupport{2} &&
+                correlation_site.factor isa LKJCholeskySiteFactor &&
+                correlation_site.activity isa FreeSite || throw(
+                    CapabilityError(
+                        :factor_nodes,
+                        "grouped affine node `$name` currently requires one " *
+                        "free two-dimensional LKJ Cholesky factor"))
+        end
     end
     broadcast_sites = Tuple(
         name for (name, site) in pairs(graph.sites)
@@ -1037,36 +1297,44 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
     node_names = Tuple(keys(graph.nodes))
     node_indices = NamedTuple{node_names}(
         ntuple(identity, length(node_names)))
-    gather_names = Tuple(name for (name, node) in pairs(graph.nodes)
-                         if node isa GroupGatherFactorNode)
+    grouped_node_names = Tuple(name for (name, node) in pairs(graph.nodes)
+        if node isa Union{GroupGatherFactorNode,GroupedAffineFactorNode})
     grouped_site_names = Tuple(name for (name, parameter) in pairs(
-        declaration.parameters) if parameter isa GroupedNormalParameter)
+        declaration.parameters) if parameter isa Union{
+            GroupedNormalParameter,GroupedStandardNormalParameter})
     generated_level_values = map(grouped_site_names) do site_name
         parameter = getproperty(declaration.parameters, site_name)
         group_name = group_input(parameter)
         observed_levels = _group_levels(
             getproperty(bindings, group_name), group_name)
         fitted_site = getproperty(graph.sites, site_name)
-        fitted_levels = Tuple(
-            key.level for key in fitted_site.coordinate_keys)
+        fitted_levels = Tuple(unique(
+            key.level for key in fitted_site.coordinate_keys))
         Tuple(level for level in observed_levels
               if findfirst(isequal(level), fitted_levels) === nothing)
     end
     generated_group_levels = NamedTuple{grouped_site_names}(
         generated_level_values)
     next_generated_index = 1
-    generated_index_values = map(generated_level_values) do levels
-        indices = next_generated_index:(next_generated_index + length(levels) - 1)
-        next_generated_index += length(levels)
+    generated_index_values = map(
+        grouped_site_names, generated_level_values) do site_name, levels
+        parameter = getproperty(declaration.parameters, site_name)
+        coefficient_count = parameter isa GroupedStandardNormalParameter ?
+            length(group_coefficients(parameter)) : 1
+        count = length(levels) * coefficient_count
+        indices = next_generated_index:(next_generated_index + count - 1)
+        next_generated_index += count
         indices
     end
     generated_group_indices = NamedTuple{grouped_site_names}(
         generated_index_values)
-    gather_indices = map(gather_names) do name
+    grouped_indices = map(grouped_node_names) do name
         node = getproperty(graph.nodes, name)
-        site_name = site_value_name(node.values)
+        site_name = node isa GroupGatherFactorNode ?
+            site_value_name(node.values) :
+            site_value_name(node.standardized)
         site = getproperty(graph.sites, site_name)
-        levels = Tuple(key.level for key in site.coordinate_keys)
+        levels = Tuple(unique(key.level for key in site.coordinate_keys))
         generated_levels = getproperty(generated_group_levels, site_name)
         groups = getproperty(bindings, input_value_name(node.group))
         Tuple(map(groups) do group
@@ -1079,7 +1347,7 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
             -generated_index
         end)
     end
-    group_indices = NamedTuple{gather_names}(gather_indices)
+    group_indices = NamedTuple{grouped_node_names}(grouped_indices)
     has_generated_groups = any(!isempty, values(generated_group_levels))
     has_generated_groups &&
         hasproperty(canonical_conditions, output_site) && throw(
@@ -1138,7 +1406,7 @@ function FactorWorkspace(prepared::FactorPrepared,
         "native PPL factor workspace element type must be concrete; got $T"))
     site_values = zeros(T, length(prepared.plan.graph.sites))
     generated_group_values = zeros(
-        T, sum(length, values(prepared.plan.generated_group_levels); init=0))
+        T, sum(length, values(prepared.plan.generated_group_indices); init=0))
     node_values = zeros(T, length(prepared.plan.graph.nodes))
     node_rows = zeros(T, length(prepared.plan.graph.nodes),
                       length(prepared.plan.observation_axis))
@@ -1286,6 +1554,7 @@ end
     node = getproperty(plan.graph.nodes, Name)
     node isa Union{
         AffineFactorNode,GroupGatherFactorNode,RowProductFactorNode,
+        GroupedAffineFactorNode,
     } ?
         buffers.node_rows[node_index, index] :
         buffers.node_values[node_index]
@@ -1298,6 +1567,17 @@ end
     (unconstrained, zero(unconstrained))
 @inline _factor_transform(::ExpTransform, unconstrained) =
     (exp(unconstrained), unconstrained)
+
+@inline function _factor_logsech2(value::T) where {T}
+    magnitude = abs(value)
+    T(2) * (log(T(2)) - magnitude - log1p(exp(-T(2) * magnitude)))
+end
+
+@inline function _factor_sech(value::T) where {T}
+    magnitude = abs(value)
+    twice = T(2) * exp(-magnitude)
+    twice / (one(T) + exp(-T(2) * magnitude))
+end
 
 @inline function _factor_logdensity(::StandardNormalSiteFactor, value::T,
                                     plan, buffers) where {T}
@@ -1366,6 +1646,25 @@ end
             site.factor, value, prepared.plan, buffers) + logjac
     end
     density
+end
+
+@inline function _factor_site_logdensity!(::Val{Name},
+        site::StochasticSite{
+            CholeskyCorrelationSupport{2},
+            CholeskyCorrelationTransform{2},
+            F,BlockSiteShape,FreeSite},
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {
+            Name,T,F<:LKJCholeskySiteFactor}
+    coordinates = getproperty(prepared.plan.graph.coordinates, Name)
+    length(coordinates.indices) == 1 || throw(CapabilityError(
+        :factor_coordinates,
+        "two-dimensional LKJ Cholesky site `$Name` must own one coordinate"))
+    raw = position[first(coordinates.indices)]
+    eta = T(site.factor.eta)
+    log_constant = T(BRM.loggamma(site.factor.eta + 0.5) -
+        BRM.loggamma(site.factor.eta) - 0.5 * log(BRM.pi))
+    log_constant + eta * _factor_logsech2(raw)
 end
 
 @inline function _factor_site_logdensity!(::Val{Name},
@@ -1497,6 +1796,56 @@ end
     zero(T)
 end
 
+
+@inline function _factor_node_logdensity!(::Val{Name},
+        node::GroupedAffineFactorNode,
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Name,T}
+    node_index = getproperty(prepared.plan.node_indices, Name)
+    group_indices = getproperty(prepared.plan.group_indices, Name)
+    standardized_name = site_value_name(node.standardized)
+    correlation_name = site_value_name(node.correlation)
+    correlation_coordinates = getproperty(
+        prepared.plan.graph.coordinates, correlation_name).indices
+    raw_correlation = position[first(correlation_coordinates)]
+    correlation = tanh(raw_correlation)
+    residual_scale = _factor_sech(raw_correlation)
+    for row in prepared.plan.observation_axis.keys
+        group_index = group_indices[row]
+        z_intercept, z_slope = if group_index < 0
+            generated_indices = getproperty(
+                prepared.plan.generated_group_indices, standardized_name)
+            standardized_offset = (-group_index - 1) * 2
+            (buffers.generated_group_values[
+                 generated_indices[standardized_offset + 1]],
+             buffers.generated_group_values[
+                 generated_indices[standardized_offset + 2]])
+        else
+            standardized_offset = (group_index - 1) * 2
+            (_factor_coefficient(
+                 node.standardized, standardized_offset + 1,
+                 position, prepared, buffers),
+             _factor_coefficient(
+                 node.standardized, standardized_offset + 2,
+                 position, prepared, buffers))
+        end
+        intercept = _factor_coefficient(
+            node.scales, 1, position, prepared, buffers) * z_intercept
+        slope = _factor_coefficient(
+            node.scales, 2, position, prepared, buffers) *
+            (correlation * z_intercept + residual_scale * z_slope)
+        predictors = node.predictors
+        value = predictors[1] === nothing ? intercept :
+            intercept * _factor_argument_at(
+                predictors[1], row, prepared.plan, buffers, T)
+        value += predictors[2] === nothing ? slope :
+            slope * _factor_argument_at(
+                predictors[2], row, prepared.plan, buffers, T)
+        buffers.node_rows[node_index, row] = value
+    end
+    zero(T)
+end
+
 @inline _has_generated_groups(plan::FactorPlan) =
     any(!isempty, values(plan.generated_group_levels))
 
@@ -1557,7 +1906,7 @@ function _factor_check_workspace_layout(workspace::FactorWorkspace,
         throw(DimensionMismatch(
             "native PPL factor workspace has the wrong site-value layout"))
     length(workspace.primal.generated_group_values) ==
-        sum(length, values(prepared.plan.generated_group_levels); init=0) ||
+        sum(length, values(prepared.plan.generated_group_indices); init=0) ||
         throw(DimensionMismatch(
             "native PPL factor workspace has the wrong generated-group layout"))
     length(workspace.primal.node_values) ==
@@ -1620,10 +1969,11 @@ has_response(prepared::FactorPrepared) =
 function _factor_group_levels(plan::FactorPlan)
     names = Tuple(name for (name, parameter) in pairs(
         plan.declaration.parameters)
-        if parameter isa GroupedNormalParameter)
+        if parameter isa Union{
+            GroupedNormalParameter,GroupedStandardNormalParameter})
     values = map(names) do name
         site = getproperty(plan.graph.sites, name)
-        Tuple(key.level for key in site.coordinate_keys)
+        Tuple(unique(key.level for key in site.coordinate_keys))
     end
     NamedTuple{names}(values)
 end
@@ -1977,14 +2327,33 @@ end
     Expr(:block, calls..., :(output))
 end
 
+@generated function _factor_check_prior_simulation(
+        ::Val{Names}, sites::Sites) where {Names,Sites<:Tuple}
+    checks = Any[]
+    for (index, name) in enumerate(Names)
+        message = "native PPL prior simulation for LKJ Cholesky site " *
+            "`$name` is not implemented; correlated grouped models " *
+            "support fixed-draw posterior prediction and conditional " *
+            "new-group simulation"
+        push!(checks, quote
+            getfield(sites, $index).factor isa LKJCholeskySiteFactor &&
+                throw(CapabilityError(
+                    :prior_simulation, $message))
+        end)
+    end
+    Expr(:block, checks..., :(nothing))
+end
+
 function simulate_prior!(rng::BRM.AbstractRNG, position::AbstractVector,
                          output::AbstractVector, work::FactorWorkspace,
                          prepared::FactorPrepared)
     _factor_require_fixed_coordinates(prepared.plan)
+    graph = prepared.plan.graph
+    _factor_check_prior_simulation(
+        Val(Tuple(keys(graph.sites))), Tuple(graph.sites))
     _factor_check_query_output(
         output, work, prepared, position,
         BRM.NativePPLPosteriorPredictive())
-    graph = prepared.plan.graph
     _factor_sample_schedule!(
         rng, Val(graph.schedule), Val(Tuple(keys(graph.sites))),
         Tuple(graph.sites), Val(Tuple(keys(graph.nodes))), Tuple(graph.nodes),
@@ -2688,6 +3057,23 @@ function _qualified_node(namespace::Symbol, declaration::RowProduct, mapping)
 end
 
 
+function _qualified_node(namespace::Symbol, declaration::GroupedAffine, mapping)
+    grouped_affine(
+        _mapped_name(mapping, grouped_standardized(declaration), namespace,
+                     "grouped affine standardized block"),
+        _mapped_name(mapping, grouped_scales(declaration), namespace,
+                     "grouped affine scales"),
+        _mapped_name(mapping, grouped_correlation(declaration), namespace,
+                     "grouped affine correlation"),
+        _mapped_name(mapping, group_input(declaration), namespace,
+                     "grouped affine group input"),
+        map(predictor -> predictor === nothing ? nothing :
+            _mapped_name(mapping, predictor, namespace,
+                         "grouped affine predictor"),
+            grouped_predictors(declaration)))
+end
+
+
 function _qualified_observation(namespace::Symbol, observation, mapping)
     scalar = scalar_observation(observation)
     response = qualified_name(namespace, observation_response(scalar))
@@ -3103,6 +3489,13 @@ function _validate_model_components(
             declaration isa GroupGather ?
                 (group_values(declaration), group_input(declaration)) :
             declaration isa RowProduct ? row_product_inputs(declaration) :
+            declaration isa GroupedAffine ?
+                (grouped_standardized(declaration),
+                 grouped_scales(declaration),
+                 grouped_correlation(declaration),
+                 group_input(declaration),
+                 (predictor for predictor in grouped_predictors(declaration)
+                  if predictor !== nothing)...) :
                 (node_input(declaration),)
         for dependency in dependencies
             dependency in available || throw(ArgumentError(
@@ -3121,6 +3514,19 @@ function _validate_model_components(
                 "latent site `$(group_values(declaration))`"))
             group_input(declaration) in input_names || throw(ArgumentError(
                 "native PPL group gather node `$name` references unknown " *
+                "group input `$(group_input(declaration))`"))
+        end
+        if declaration isa GroupedAffine
+            for parameter in (
+                grouped_standardized(declaration),
+                grouped_scales(declaration),
+                grouped_correlation(declaration))
+                parameter in parameter_names || throw(ArgumentError(
+                    "native PPL grouped affine node `$name` references " *
+                    "unknown parameter `$parameter`"))
+            end
+            group_input(declaration) in input_names || throw(ArgumentError(
+                "native PPL grouped affine node `$name` references unknown " *
                 "group input `$(group_input(declaration))`"))
         end
         push!(available, name)
@@ -4041,6 +4447,46 @@ function _brmi_group_sd_prior(brmi::BRM.BRMI, id::Symbol)
     only(matches)
 end
 
+function _brmi_group_correlation_prior(brmi::BRM.BRMI, id::Symbol,
+                                       dimension::Int)
+    matches = NamedTuple[]
+    for (operation_name, named) in pairs(brmi.operations)
+        operation = parent(named)
+        operation isa BRM.ExprColumn && BRM.getf(operation) === (~) || continue
+        lhs, prior = BRM.getargs(operation, 2)
+        lhs isa BRM.ExprColumn && BRM.getf(lhs) === BRM.effect || continue
+        address = BRM.getargs(lhs)
+        length(address) >= 2 && address[1] === :cor && address[2] === id ||
+            continue
+        prior isa BRM.ExprColumn && BRM.getf(prior) === BRM.LKJCholesky ||
+            throw(CapabilityError(
+                :group_prior,
+                "correlation for `|$id|` must use LKJCholesky(K, eta)"))
+        isempty(BRM.getkwargs(prior)) || throw(CapabilityError(
+            :group_prior,
+            "LKJ correlation prior for `|$id|` cannot have keywords"))
+        arguments = BRM.getargs(prior)
+        length(arguments) == 2 || throw(CapabilityError(
+            :group_prior,
+            "LKJCholesky prior for `|$id|` requires dimension and eta"))
+        prior_dimension, eta = arguments
+        prior_dimension isa Integer && prior_dimension == dimension || throw(
+            CapabilityError(
+                :group_prior,
+                "LKJCholesky dimension for `|$id|` must equal $dimension"))
+        eta isa Real && isfinite(eta) && eta > zero(eta) || throw(
+            CapabilityError(
+                :group_prior,
+                "LKJ shape for `|$id|` must be finite and positive"))
+        push!(matches, (; operation=operation_name, eta))
+    end
+    length(matches) == 1 || throw(CapabilityError(
+        :group_prior,
+        "correlated `|$id|` block requires exactly one " *
+        "`cor(:, $id) ~ LKJCholesky($dimension, eta)` prior"))
+    only(matches)
+end
+
 function _lower_brmi(brmi::BRM.BRMI)
     observed = BRM.outcomes(brmi)
     length(observed) == 1 || throw(CapabilityError(
@@ -4133,12 +4579,14 @@ function _lower_brmi(brmi::BRM.BRMI)
     input_predictor_names = Symbol[predictor_names...]
     input_predictor_columns = Any[predictor_columns...]
     for varying in varying_groups
-        varying.predictor === nothing && continue
-        column = varying.predictor.column
-        name = BRM.name(column)
-        if name ∉ input_predictor_names
-            push!(input_predictor_names, name)
-            push!(input_predictor_columns, column)
+        for predictor in varying.predictors
+            predictor === nothing && continue
+            column = predictor.column
+            name = BRM.name(column)
+            if name ∉ input_predictor_names
+                push!(input_predictor_names, name)
+                push!(input_predictor_columns, column)
+            end
         end
     end
     group_names = map(varying_groups) do varying
@@ -4165,14 +4613,29 @@ function _lower_brmi(brmi::BRM.BRMI)
 
     group_specs = map(varying_groups, group_names) do varying, group_name
         prior = _brmi_group_sd_prior(brmi, varying.id)
-        predictor_name = varying.predictor === nothing ? nothing :
-            BRM.name(varying.predictor.column)
-        gather_name = Symbol(:r_, location, :_, varying.id, :_, group_name)
-        product_name = predictor_name === nothing ? nothing :
-            Symbol(gather_name, :_times_, predictor_name)
+        group_predictor_names = Tuple(predictor === nothing ? nothing :
+            BRM.name(predictor.column) for predictor in varying.predictors)
+        coefficient_keys = Tuple(predictor_name === nothing ? :Intercept :
+            predictor_name for predictor_name in group_predictor_names)
+        correlated = length(coefficient_keys) > 1
+        correlation_prior = correlated ? _brmi_group_correlation_prior(
+            brmi, varying.id, length(coefficient_keys)) : nothing
+        group_scale_name = Symbol(:tau_, varying.id, :_, group_name)
+        group_correlation_name = Symbol(:L_, varying.id, :_, group_name)
+        group_site_name = Symbol(:b_, varying.id, :_, group_name)
+        gather_name = correlated ?
+            Symbol(group_site_name, :_by_, group_name, :_for_, location) :
+            Symbol(:r_, location, :_, varying.id, :_, group_name)
+        predictor_name = length(group_predictor_names) == 1 ?
+            only(group_predictor_names) : nothing
+        product_name = !correlated && predictor_name !== nothing ?
+            Symbol(gather_name, :_times_, predictor_name) : nothing
         (; id=varying.id, group_name, prior, predictor_name,
-           scale_name=Symbol(:tau_, varying.id, :_, group_name),
-           site_name=Symbol(:b_, varying.id, :_, group_name), gather_name,
+           predictor_names=group_predictor_names, coefficient_keys,
+           correlated, correlation_prior,
+           scale_name=group_scale_name,
+           correlation_name=group_correlation_name,
+           site_name=group_site_name, gather_name,
            product_name,
            offset_name=product_name === nothing ? gather_name : product_name)
     end
@@ -4191,6 +4654,8 @@ function _lower_brmi(brmi::BRM.BRMI)
              group_names...))
     for spec in group_specs
         push!(expected_values, spec.prior.operation)
+        spec.correlation_prior === nothing ||
+            push!(expected_values, spec.correlation_prior.operation)
     end
     intercept_prior.operation === nothing ||
         push!(expected_values, intercept_prior.operation)
@@ -4226,25 +4691,39 @@ function _lower_brmi(brmi::BRM.BRMI)
             sampled_offsets)
         group_scale_declarations = map(group_specs) do spec
             parameter(
-                PositiveSupport(), (spec.scale_name,);
+                PositiveSupport(), spec.correlated ? spec.coefficient_keys :
+                    (spec.scale_name,);
                 transform=Exp(), prior=Exponential(spec.prior.scale))
         end
-        group_site_declarations = map(group_specs) do spec
-            grouped_normal(
-                spec.group_name, 0.0, spec.scale_name)
+        group_correlation_declarations = map(group_specs) do spec
+            spec.correlated ? cholesky_correlation(
+                spec.coefficient_keys, spec.correlation_prior.eta) : nothing
         end
-        group_parameter_names = Tuple(spec.scale_name for spec in group_specs)
-        group_site_names = Tuple(spec.site_name for spec in group_specs)
-        group_pair_names = foldl(
-            (names, pair) -> (names..., pair...),
-            zip(group_parameter_names, group_site_names); init=())
-        group_pair_declarations = foldl(
-            (declarations, pair) -> (declarations..., pair...),
-            zip(group_scale_declarations, group_site_declarations); init=())
+        group_site_declarations = map(group_specs) do spec
+            spec.correlated ? grouped_standard_normal(
+                spec.group_name, spec.coefficient_keys) :
+                grouped_normal(spec.group_name, 0.0, spec.scale_name)
+        end
+        group_parameter_names = foldl(
+            (names, spec) -> spec.correlated ?
+                (names..., spec.scale_name, spec.correlation_name,
+                 spec.site_name) :
+                (names..., spec.scale_name, spec.site_name),
+            group_specs; init=())
+        group_parameter_declarations = foldl(
+            (declarations, entry) -> begin
+                spec, scale, correlation, site = entry
+                spec.correlated ?
+                    (declarations..., scale, correlation, site) :
+                    (declarations..., scale, site)
+            end,
+            zip(group_specs, group_scale_declarations,
+                group_correlation_declarations, group_site_declarations);
+            init=())
         _declaration_namedtuple(
-            (coefficient_name, group_pair_names..., scale_name,
+            (coefficient_name, group_parameter_names..., scale_name,
              sampled_offsets...),
-            (coefficient_declaration, group_pair_declarations...,
+            (coefficient_declaration, group_parameter_declarations...,
              scale_declaration, offset_declarations...))
     else
         NamedTuple{(coefficient_name,)}((coefficient_declaration,))
@@ -4265,7 +4744,11 @@ function _lower_brmi(brmi::BRM.BRMI)
     end
     gather_names = Tuple(spec.gather_name for spec in group_specs)
     gather_declarations = Tuple(
-        group_gather(spec.site_name, spec.group_name) for spec in group_specs)
+        spec.correlated ? grouped_affine(
+            spec.site_name, spec.scale_name, spec.correlation_name,
+            spec.group_name, spec.predictor_names) :
+            group_gather(spec.site_name, spec.group_name)
+        for spec in group_specs)
     product_specs = Tuple(
         spec for spec in group_specs if spec.product_name !== nothing)
     product_names = Tuple(spec.product_name for spec in product_specs)
@@ -4302,9 +4785,12 @@ function _lower_brmi(brmi::BRM.BRMI)
             nodes=node_declarations,
             observations=observation_declarations)
     else
-        group_site_order = Tuple(
-            Iterators.flatten((
-                (spec.scale_name, spec.site_name) for spec in group_specs)))
+        group_site_order = foldl(
+            (order, spec) -> spec.correlated ?
+                (order..., spec.scale_name, spec.correlation_name,
+                 spec.site_name) :
+                (order..., spec.scale_name, spec.site_name),
+            group_specs; init=())
         model(
             inputs=input_declarations,
             parameters=parameter_declarations,
@@ -4401,6 +4887,19 @@ end
 
 _syntax_ref(name::Symbol) = GlobalRef(@__MODULE__, name)
 
+function _syntax_symbol_tuple(expression, context::AbstractString)
+    expression isa Expr && expression.head === :tuple || throw(ArgumentError(
+        "native PPL @model $context requires a literal tuple of Symbol keys"))
+    keys = map(expression.args) do entry
+        entry isa QuoteNode && entry.value isa Symbol || throw(ArgumentError(
+            "native PPL @model $context requires literal Symbol keys"))
+        entry.value
+    end
+    isempty(keys) && throw(ArgumentError(
+        "native PPL @model $context keys cannot be empty"))
+    Tuple(keys)
+end
+
 function _syntax_namedtuple(names::Vector{Symbol}, values::Vector)
     Expr(:call, _syntax_ref(:_declaration_namedtuple),
          QuoteNode(Tuple(names)), Expr(:tuple, values...))
@@ -4434,10 +4933,15 @@ function _syntax_parameter(statement, argument_names::Set{Symbol})
             Expr(:call, _syntax_ref(:RealSupport)), axis_keys)
         return parameter_name, value
     elseif prior_name === :Exponential
-        lhs isa Symbol || throw(ArgumentError(
-            "native PPL @model Exponential parameter must have a bare name"))
+        lhs isa Symbol ||
+            (lhs isa Expr && lhs.head === :ref && length(lhs.args) == 2 &&
+             first(lhs.args) isa Symbol) || throw(ArgumentError(
+            "native PPL @model Exponential parameter must have a bare name " *
+            "or one literal axis tuple"))
         length(prior_arguments) == 1 || throw(ArgumentError(
             "native PPL @model Exponential(scale) needs one scale"))
+        axis_keys = lhs isa Symbol ? (parameter_name,) :
+            _syntax_symbol_tuple(lhs.args[2], "Exponential parameter")
         value = Expr(
             :call, _syntax_ref(:parameter),
             Expr(:parameters,
@@ -4446,7 +4950,25 @@ function _syntax_parameter(statement, argument_names::Set{Symbol})
                       Expr(:call, _syntax_ref(:Exponential),
                            only(prior_arguments)))),
             Expr(:call, _syntax_ref(:PositiveSupport)),
-            QuoteNode((parameter_name,)))
+            QuoteNode(axis_keys))
+        return parameter_name, value
+    elseif prior_name === :LKJCholesky
+        lhs isa Expr && lhs.head === :ref && length(lhs.args) == 2 &&
+            first(lhs.args) isa Symbol || throw(ArgumentError(
+                "native PPL @model LKJCholesky parameter requires one " *
+                "literal coefficient-axis tuple"))
+        length(prior_arguments) == 2 || throw(ArgumentError(
+            "native PPL @model LKJCholesky(K, eta) needs dimension and eta"))
+        coefficient_keys = _syntax_symbol_tuple(
+            lhs.args[2], "LKJCholesky parameter")
+        dimension, eta = prior_arguments
+        dimension isa Integer && dimension == length(coefficient_keys) ||
+            throw(ArgumentError(
+                "native PPL @model LKJCholesky dimension must match its " *
+                "coefficient axis"))
+        value = Expr(
+            :call, _syntax_ref(:cholesky_correlation),
+            QuoteNode(coefficient_keys), eta)
         return parameter_name, value
     end
     throw(ArgumentError(
@@ -4457,25 +4979,52 @@ function _syntax_grouped_parameter(sampling,
                                    argument_names::Set{Symbol})
     sampling.broadcasted && return nothing
     lhs = sampling.lhs
-    lhs isa Expr && lhs.head === :ref && length(lhs.args) == 2 &&
+    lhs isa Expr && lhs.head === :ref && length(lhs.args) in (2, 3) &&
         first(lhs.args) isa Symbol && lhs.args[2] isa Symbol || return nothing
-    name, group = lhs.args
+    name, group = lhs.args[1:2]
     group in argument_names || throw(ArgumentError(
         "native PPL @model grouped site `$name` must index one function " *
         "argument; got `$group`"))
     family, arguments = _syntax_distribution_call(
         sampling.rhs, "grouped parameter prior")
-    family === :Normal && length(arguments) == 2 || throw(ArgumentError(
-        "native PPL @model grouped site `$name` requires Normal(location, scale)"))
-    location, scale = arguments
-    location isa Real || throw(ArgumentError(
-        "native PPL @model grouped Normal location must be literal"))
-    scale isa Union{Real,Symbol} || throw(ArgumentError(
-        "native PPL @model grouped Normal scale must be literal or named"))
+    if family === :Normal
+        length(lhs.args) == 2 || throw(ArgumentError(
+            "native PPL @model scalar grouped Normal site `$name` takes only " *
+            "its group index"))
+        length(arguments) == 2 || throw(ArgumentError(
+            "native PPL @model grouped site `$name` requires " *
+            "Normal(location, scale)"))
+        location, scale = arguments
+        location isa Real || throw(ArgumentError(
+            "native PPL @model grouped Normal location must be literal"))
+        scale isa Union{Real,Symbol} || throw(ArgumentError(
+            "native PPL @model grouped Normal scale must be literal or named"))
+        value = Expr(
+            :call, _syntax_ref(:grouped_normal), QuoteNode(group),
+            location, scale isa Symbol ? QuoteNode(scale) : scale)
+        return (; name, group, value, correlated=nothing)
+    end
+    length(lhs.args) == 2 && throw(ArgumentError(
+        "native PPL @model grouped site `$name` requires " *
+        "Normal(location, scale)"))
+    family === :MvNormalCholesky && length(arguments) == 2 || throw(
+        ArgumentError(
+            "native PPL @model grouped vector site `$name` requires " *
+            "MvNormalCholesky(scales, correlation)"))
+    length(lhs.args) == 3 || throw(ArgumentError(
+        "native PPL @model grouped MvNormalCholesky site `$name` requires " *
+        "a literal coefficient axis after its group index"))
+    scales, correlation = arguments
+    scales isa Symbol && correlation isa Symbol || throw(ArgumentError(
+        "native PPL @model grouped MvNormalCholesky arguments must name its " *
+        "scale and correlation sites"))
+    coefficients = _syntax_symbol_tuple(
+        lhs.args[3], "grouped MvNormalCholesky site")
     value = Expr(
-        :call, _syntax_ref(:grouped_normal), QuoteNode(group),
-        location, scale isa Symbol ? QuoteNode(scale) : scale)
-    (; name, group, value)
+        :call, _syntax_ref(:grouped_standard_normal), QuoteNode(group),
+        QuoteNode(coefficients))
+    correlated = (; scales, correlation, coefficients)
+    (; name, group, value, correlated)
 end
 
 function _syntax_node(statement)
@@ -4552,7 +5101,8 @@ end
 
 function _syntax_affine_assignment(statement,
                                    scalar_priors::Set{Symbol},
-                                   grouped_sites::Dict{Symbol,Symbol})
+                                   grouped_sites::Dict{Symbol,Symbol},
+                                   correlated_grouped_sites::Dict{Symbol,NamedTuple})
     lhs, rhs = statement.args
     lhs isa Symbol || return nothing
     terms = _syntax_affine_terms(rhs)
@@ -4561,6 +5111,7 @@ function _syntax_affine_assignment(statement,
     sampled_offsets = Symbol[]
     gathered_offsets = NamedTuple[]
     grouped_products = NamedTuple[]
+    correlated_groups = NamedTuple[]
     ordinary_terms = Any[]
     for term in terms
         if term isa Expr && term.head === :call &&
@@ -4617,6 +5168,51 @@ function _syntax_affine_assignment(statement,
             push!(grouped_products, (;
                 site_name, group_name, predictor_name, gather_name,
                 product_name))
+        elseif term isa Expr && term.head === :call &&
+               _syntax_name(first(term.args)) === :dot
+            _, arguments = _syntax_call(term, "correlated grouped dot product")
+            length(arguments) == 2 || throw(ArgumentError(
+                "native PPL @model grouped dot needs a grouped site and " *
+                "predictor tuple"))
+            grouped_ref, predictor_tuple = arguments
+            grouped_ref isa Expr && grouped_ref.head === :ref &&
+                length(grouped_ref.args) == 2 &&
+                first(grouped_ref.args) isa Symbol &&
+                grouped_ref.args[2] isa Symbol || throw(ArgumentError(
+                    "native PPL @model grouped dot must start with " *
+                    "`site[group]`"))
+            site_name, group_name = grouped_ref.args
+            haskey(correlated_grouped_sites, site_name) || throw(
+                ArgumentError(
+                    "native PPL @model grouped dot site `$site_name` must " *
+                    "have an MvNormalCholesky declaration"))
+            metadata = correlated_grouped_sites[site_name]
+            metadata.group === group_name || throw(ArgumentError(
+                "native PPL @model grouped dot must use the site's declared " *
+                "group input"))
+            predictor_tuple isa Expr && predictor_tuple.head === :tuple ||
+                throw(ArgumentError(
+                    "native PPL @model grouped dot predictors must be a tuple"))
+            predictors = Tuple(map(predictor_tuple.args) do predictor
+                predictor == 1 && return nothing
+                predictor isa Symbol || throw(ArgumentError(
+                    "native PPL @model grouped dot predictors must be `1` " *
+                    "or named row values"))
+                predictor
+            end)
+            length(predictors) == length(metadata.coefficients) || throw(
+                ArgumentError(
+                    "native PPL @model grouped dot predictor count must " *
+                    "match its coefficient axis"))
+            coefficient_keys = Tuple(predictor === nothing ? :Intercept :
+                predictor for predictor in predictors)
+            coefficient_keys == metadata.coefficients || throw(ArgumentError(
+                "native PPL @model grouped dot predictors must match its " *
+                "declared coefficient keys"))
+            node_name = Symbol(site_name, :_by_, group_name, :_for_, lhs)
+            push!(correlated_groups, (;
+                site_name, group_name, predictors, node_name,
+                scales=metadata.scales, correlation=metadata.correlation))
         else
             push!(ordinary_terms, term)
         end
@@ -4634,7 +5230,8 @@ function _syntax_affine_assignment(statement,
     length(intercepts) <= 1 || return nothing
     intercept = isempty(intercepts) ? nothing : only(intercepts)
     intercept === nothing && isempty(sampled_offsets) &&
-        isempty(gathered_offsets) && isempty(grouped_products) && return nothing
+        isempty(gathered_offsets) && isempty(grouped_products) &&
+        isempty(correlated_groups) && return nothing
 
     slopes = Symbol[]
     predictor_names = Symbol[]
@@ -4708,7 +5305,8 @@ function _syntax_affine_assignment(statement,
              Expr(:kw, :offsets, QuoteNode((
                  sampled_offsets...,
                  (gather.gather_name for gather in gathered_offsets)...,
-                 (product.product_name for product in grouped_products)...))),
+                 (product.product_name for product in grouped_products)...,
+                 (group.node_name for group in correlated_groups)...))),
              Expr(:kw, :intercept, intercept !== nothing)),
         QuoteNode(Tuple(predictor_names)),
         QuoteNode(coefficient_name))
@@ -4725,8 +5323,15 @@ function _syntax_affine_assignment(statement,
         :call, _syntax_ref(:row_product),
         QuoteNode(product.gather_name), QuoteNode(product.predictor_name))
         for product in grouped_products)
+    correlated_names = Tuple(group.node_name for group in correlated_groups)
+    correlated_values = Tuple(Expr(
+        :call, _syntax_ref(:grouped_affine),
+        QuoteNode(group.site_name), QuoteNode(group.scales),
+        QuoteNode(group.correlation), QuoteNode(group.group_name),
+        QuoteNode(group.predictors)) for group in correlated_groups)
     (; location=lhs, intercept, offsets=Tuple(sampled_offsets),
        gather_names, gather_values, product_names, product_values,
+       correlated_names, correlated_values,
        slopes=Tuple(slopes), coefficient_name,
        parameter_value, transform_names=Tuple(transform_names),
        transform_values=Tuple(transform_values), affine_value)
@@ -4817,7 +5422,8 @@ function _syntax_outputs(statement)
 end
 
 const _SYNTAX_DISTRIBUTION_NAMES =
-    (:Normal, :StandardNormal, :Exponential, :BernoulliLogit, :Poisson)
+    (:Normal, :StandardNormal, :Exponential, :LKJCholesky,
+     :MvNormalCholesky, :BernoulliLogit, :Poisson)
 const _SYNTAX_DETERMINISTIC_NAMES =
     (:center, :zscale, :standardize, :affine, :exp, :exp_link)
 const _SYNTAX_OPERATOR_NAMES =
@@ -4936,6 +5542,7 @@ function _model_function_syntax(definition)
     parameter_values = Any[]
     scalar_prior_names = Symbol[]
     grouped_sites = Dict{Symbol,Symbol}()
+    correlated_grouped_sites = Dict{Symbol,NamedTuple}()
     consumed_scalar_priors = Set{Symbol}()
     node_names = Symbol[]
     node_values = Any[]
@@ -4994,6 +5601,11 @@ function _model_function_syntax(definition)
                 push!(parameter_names, grouped_parameter.name)
                 push!(parameter_values, grouped_parameter.value)
                 grouped_sites[grouped_parameter.name] = grouped_parameter.group
+                if grouped_parameter.correlated !== nothing
+                    correlated_grouped_sites[grouped_parameter.name] = merge(
+                        (; group=grouped_parameter.group),
+                        grouped_parameter.correlated)
+                end
                 continue
             end
             scalar_prior = sampling.broadcasted ? nothing :
@@ -5001,7 +5613,7 @@ function _model_function_syntax(definition)
             prior_name = _syntax_name(
                 sampling.rhs isa Expr ? first(sampling.rhs.args) : sampling.rhs)
             is_explicit_parameter = !sampling.broadcasted &&
-                prior_name in (:StandardNormal, :Exponential)
+                prior_name in (:StandardNormal, :Exponential, :LKJCholesky)
             if scalar_prior === nothing && !is_explicit_parameter
                 observation = _syntax_observation(
                     sampling.lhs, sampling.rhs;
@@ -5027,7 +5639,8 @@ function _model_function_syntax(definition)
             end
         elseif statement isa Expr && statement.head === :(=)
             affine_declaration = _syntax_affine_assignment(
-                statement, Set(scalar_prior_names), grouped_sites)
+                statement, Set(scalar_prior_names), grouped_sites,
+                correlated_grouped_sites)
             if affine_declaration === nothing
                 name, value = _syntax_node(statement)
                 push!(node_names, name)
@@ -5057,6 +5670,12 @@ function _model_function_syntax(definition)
                     affine_declaration.product_values)
                     push!(node_names, product_name)
                     push!(node_values, product_value)
+                end
+                for (correlated_name, correlated_value) in zip(
+                    affine_declaration.correlated_names,
+                    affine_declaration.correlated_values)
+                    push!(node_names, correlated_name)
+                    push!(node_values, correlated_value)
                 end
                 push!(node_names, affine_declaration.location)
                 push!(node_values, affine_declaration.affine_value)
@@ -5183,25 +5802,33 @@ end
 
 export Model, ModelInstance, GraphRef, Component, Composition, Input, Parameter
 export AbstractParameterDeclaration, GroupedNormalParameter
+export GroupedStandardNormalParameter, CholeskyCorrelationParameter
 export SiteValue, InputValue, NodeValue, LiteralValue, StochasticSite
-export SiteCoordinates, GroupCoordinateKey
+export SiteCoordinates, GroupCoordinateKey, GroupCoefficientKey
+export CorrelationCoordinateKey
 export FactorGraph
 export CenterFactorNode, ZScaleFactorNode, AffineFactorNode, ExpFactorNode
-export GroupGatherFactorNode, RowProductFactorNode
+export GroupGatherFactorNode, RowProductFactorNode, GroupedAffineFactorNode
 export FactorPlan, FactorPrepared, FactorWorkspace, FactorLogDensityProblem
 export StandardNormalSiteFactor, NormalSiteFactor, ExponentialSiteFactor
+export LKJCholeskySiteFactor
 export BernoulliLogitSiteFactor, PoissonSiteFactor
 export ScalarSiteShape, BlockSiteShape, BroadcastSiteShape
 export FreeSite, ConditionedSite, GeneratedSite
-export RealSupport, PositiveSupport, IdentityTransform, ExpTransform
+export RealSupport, PositiveSupport, CholeskyCorrelationSupport
+export IdentityTransform, ExpTransform, CholeskyCorrelationTransform
 export StandardNormal, NormalPrior, ExponentialPrior
-export Center, ZScale, Affine, ExpLink, GroupGather, RowProduct
+export Center, ZScale, Affine, ExpLink, GroupGather, RowProduct, GroupedAffine
 export NormalObservation, BernoulliLogitObservation, PoissonObservation
 export BroadcastObservation
 export model, input, parameter, Identity, Exp, normal_prior, Exponential
 export center, zscale, standardize, affine, exp_link
 export grouped_normal, group_gather, group_values, group_input
+export grouped_standard_normal, group_coefficients
+export cholesky_correlation, correlation_coefficients
 export row_product, row_product_inputs
+export grouped_affine, grouped_standardized, grouped_scales
+export grouped_correlation, grouped_predictors
 export normal, bernoulli_logit, poisson, broadcasted
 export instantiate, substitute, condition, component, output, compose, bind, lower
 export factor_graph, site_factor_dependencies, factor_node_dependencies
