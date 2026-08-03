@@ -2042,6 +2042,27 @@ end
     @test NP.logdensity!(
         NP.workspace(brm_prepared), brm_prepared, position) ≈ expected_density
 
+    reordered_brmi = @brm data begin
+        sigma ~ Exponential(2.0)
+        mu ~ 1 + center(w) + x
+        y ~ Normal(mu, sigma)
+    end
+    reordered_lowered = NP.lower(reordered_brmi)
+    @test reordered_lowered.parameters.beta_mu.axis_keys ==
+          (:Intercept, :w, :x)
+    @test reordered_lowered.nodes.mu ==
+          NP.affine((:center_w_for_mu, :x), :beta_mu)
+    reordered_brmi_prediction = NP.prepare(NP.substitute(
+        reordered_lowered; x=data.x, w=data.w))
+    @test !NP.has_response(reordered_brmi_prediction)
+    @test keys(reordered_brmi_prediction.predictors) ==
+          (:center_w_for_mu, :x)
+    @test NP.evaluate(
+        NP.workspace(reordered_brmi_prediction),
+        reordered_brmi_prediction, [0.3, 0.2, -0.4, log(0.8)],
+        NP.LinearPredictor()) ≈
+          0.3 .+ 0.2 .* expected_w .- 0.4 .* data.x
+
     dotted_instance = NP.condition(
         macro_multi_gaussian_dotted(data.x, data.w); y=data.y)
     dotted_plan = NP.compile(dotted_instance)
@@ -2702,6 +2723,15 @@ end
         y ~ Normal(mu, sigma)
     end
     @test capability_error(() -> BRM._native_ppl_plan(duplicate_term)).capability ==
+          :predictor_terms
+
+    duplicate_raw_term = @brm data begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + center(x)
+        y ~ Normal(mu, sigma)
+    end
+    @test capability_error(
+        () -> BRM._native_ppl_plan(duplicate_raw_term)).capability ==
           :predictor_terms
 
     response_as_predictor = @brm (y=data.y,) begin

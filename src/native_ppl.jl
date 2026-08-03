@@ -493,8 +493,8 @@ function _native_ppl_predictor_term(term, key::Symbol)
     end
     throw(NativePPLCapabilityError(
         :predictor_terms,
-        "`$key` must be exactly `1 + x`, `1 + center(x)`, or " *
-        "`1 + zscale(x)` (`standardize(x)` is an alias); " *
+        "each non-intercept term in `$key` must be a raw data column, " *
+        "`center(x)`, or `zscale(x)` (`standardize(x)` is an alias); " *
         "offsets, interactions, groups, and other transforms are not lowered yet"))
 end
 
