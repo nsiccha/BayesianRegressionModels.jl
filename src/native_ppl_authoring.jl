@@ -3615,6 +3615,42 @@ function _brmi_literal_normal_prior(brmi::BRM.BRMI, name::Symbol)
         StandardNormal() : normal_prior(arguments...)
 end
 
+function _brmi_group_sd_prior(brmi::BRM.BRMI, id::Symbol)
+    matches = NamedTuple[]
+    for (operation_name, named) in pairs(brmi.operations)
+        operation = parent(named)
+        operation isa BRM.ExprColumn && BRM.getf(operation) === (~) || continue
+        lhs, prior = BRM.getargs(operation, 2)
+        lhs isa BRM.ExprColumn && BRM.getf(lhs) === BRM.effect || continue
+        address = BRM.getargs(lhs)
+        length(address) >= 2 && address[1] === :sd && address[2] === id ||
+            continue
+        prior isa BRM.ExprColumn && BRM.getf(prior) === BRM.Exponential ||
+            throw(CapabilityError(
+                :group_prior,
+                "varying-intercept SD for `|$id|` must use Exponential(scale)"))
+        isempty(BRM.getkwargs(prior)) || throw(CapabilityError(
+            :group_prior,
+            "varying-intercept SD prior for `|$id|` cannot have keywords"))
+        arguments = BRM.getargs(prior)
+        length(arguments) == 1 && only(arguments) isa Real || throw(
+            CapabilityError(
+                :group_prior,
+                "varying-intercept SD prior for `|$id|` requires one " *
+                "literal scale"))
+        scale = only(arguments)
+        isfinite(scale) && scale > zero(scale) || throw(CapabilityError(
+            :group_prior,
+            "varying-intercept SD prior for `|$id|` must be positive"))
+        push!(matches, (; operation=operation_name, scale))
+    end
+    length(matches) == 1 || throw(CapabilityError(
+        :group_prior,
+        "varying-intercept `|$id|` requires exactly one block-wide " *
+        "`sd(:, $id) ~ Exponential(scale)` prior"))
+    only(matches)
+end
+
 function _lower_brmi(brmi::BRM.BRMI)
     observed = BRM.outcomes(brmi)
     length(observed) == 1 || throw(CapabilityError(
@@ -3689,22 +3725,44 @@ function _lower_brmi(brmi::BRM.BRMI)
     affine_components = BRM._native_ppl_affine_components(brmi, location)
     predictor_terms = affine_components.predictors
     sampled_offsets = affine_components.offsets
+    varying_groups = affine_components.groups
     has_intercept = affine_components.intercept
-    !isempty(sampled_offsets) && family !== BRM.Normal && throw(
+    (!isempty(sampled_offsets) || !isempty(varying_groups)) &&
+        family !== BRM.Normal && throw(
         CapabilityError(
             :predictor_offset,
-            "the first sampled-offset native-PPL slice supports Normal responses"))
-    isempty(sampled_offsets) && !has_intercept && throw(CapabilityError(
+            "the first sampled-offset/grouped native-PPL slice supports " *
+            "Normal responses"))
+    isempty(sampled_offsets) && isempty(varying_groups) && !has_intercept &&
+        throw(CapabilityError(
         :predictor_terms,
         "the current native-PPL no-intercept affine slice requires a " *
-        "sampled scalar offset"))
+        "sampled scalar offset or varying intercept"))
     predictor_columns = map(term -> term.column, predictor_terms)
     predictor_names = map(BRM.name, predictor_columns)
+    group_names = map(varying_groups) do varying
+        BRM.name(varying.group)
+    end
+    length(unique(group_names)) == length(group_names) || throw(
+        CapabilityError(
+            :group_term,
+            "varying-intercept grouping inputs must be unique"))
     response in predictor_names && throw(CapabilityError(
         :input_roles,
         "predictor `$response` is also the observed response"))
     predictors = map(column -> parent(parent(column)), predictor_columns)
+    groups = map(varying_groups) do varying
+        parent(parent(varying.group))
+    end
     response_values = parent(parent(response_lhs))
+
+    group_specs = map(varying_groups, group_names) do varying, group_name
+        prior = _brmi_group_sd_prior(brmi, varying.id)
+        (; id=varying.id, group_name, prior,
+           scale_name=Symbol(:tau_, varying.id, :_, group_name),
+           site_name=Symbol(:b_, varying.id, :_, group_name),
+           gather_name=Symbol(:r_, location, :_, varying.id, :_, group_name))
+    end
 
     scalar_location = isempty(predictor_names)
     intercept_prior = scalar_location ?
@@ -3715,8 +3773,12 @@ function _lower_brmi(brmi::BRM.BRMI)
         BRM._native_ppl_exponential_prior(brmi, scale_name) : nothing
     expected_values = family === BRM.Normal ?
         Set((location, scale_name, response, predictor_names...,
-             sampled_offsets...)) :
-        Set((location, response, predictor_names..., sampled_offsets...))
+             sampled_offsets..., group_names...)) :
+        Set((location, response, predictor_names..., sampled_offsets...,
+             group_names...))
+    for spec in group_specs
+        push!(expected_values, spec.prior.operation)
+    end
     intercept_prior.operation === nothing ||
         push!(expected_values, intercept_prior.operation)
     extras = setdiff(Set(keys(brmi.operations)), expected_values)
@@ -3725,8 +3787,9 @@ function _lower_brmi(brmi::BRM.BRMI)
         "unsupported formula operations: " *
         join(sort!(collect(extras)), ", ")))
 
+    input_names = (predictor_names..., group_names...)
     input_declarations = _declaration_namedtuple(
-        predictor_names, map(_ -> input(), predictor_names))
+        input_names, map(_ -> input(), input_names))
     scalar_location && family !== BRM.Normal && throw(CapabilityError(
         :likelihood,
         "the first intercept-only BRM native-PPL slice supports Normal"))
@@ -3748,10 +3811,23 @@ function _lower_brmi(brmi::BRM.BRMI)
                 RealSupport(), (name,); transform=Identity(),
                 prior=_brmi_literal_normal_prior(brmi, name)),
             sampled_offsets)
+        group_scale_declarations = map(group_specs) do spec
+            parameter(
+                PositiveSupport(), (spec.scale_name,);
+                transform=Exp(), prior=Exponential(spec.prior.scale))
+        end
+        group_site_declarations = map(group_specs) do spec
+            grouped_normal(
+                spec.group_name, 0.0, spec.scale_name)
+        end
+        group_parameter_names = Tuple(spec.scale_name for spec in group_specs)
+        group_site_names = Tuple(spec.site_name for spec in group_specs)
         _declaration_namedtuple(
-            (coefficient_name, scale_name, sampled_offsets...),
+            (coefficient_name, scale_name, sampled_offsets...,
+             group_parameter_names..., group_site_names...),
             (coefficient_declaration, scale_declaration,
-             offset_declarations...))
+             offset_declarations..., group_scale_declarations...,
+             group_site_declarations...))
     else
         NamedTuple{(coefficient_name,)}((coefficient_declaration,))
     end
@@ -3769,11 +3845,16 @@ function _lower_brmi(brmi::BRM.BRMI)
         push!(transform_declarations, transform_declaration)
         transform_name
     end
-    node_names = scalar_location ? () : (Tuple(transform_names)..., location)
+    gather_names = Tuple(spec.gather_name for spec in group_specs)
+    gather_declarations = Tuple(
+        group_gather(spec.site_name, spec.group_name) for spec in group_specs)
+    affine_offsets = (sampled_offsets..., gather_names...)
+    node_names = scalar_location ? () : (
+        gather_names..., Tuple(transform_names)..., location)
     node_values = scalar_location ? () : (
-        Tuple(transform_declarations)...,
+        gather_declarations..., Tuple(transform_declarations)...,
         affine(Tuple(affine_inputs), coefficient_name;
-               offsets=sampled_offsets, intercept=has_intercept))
+               offsets=affine_offsets, intercept=has_intercept))
     node_declarations = _declaration_namedtuple(node_names, node_values)
 
     observation_declaration = if family === BRM.Normal
@@ -3788,22 +3869,27 @@ function _lower_brmi(brmi::BRM.BRMI)
     end
     observation_declarations = NamedTuple{(response,)}(
         (broadcasted(observation_declaration),))
-    declaration = if isempty(sampled_offsets)
+    declaration = if isempty(sampled_offsets) && isempty(group_specs)
         model(
             inputs=input_declarations,
             parameters=parameter_declarations,
             nodes=node_declarations,
             observations=observation_declarations)
     else
+        group_site_order = Tuple(
+            Iterators.flatten((
+                (spec.scale_name, spec.site_name) for spec in group_specs)))
         model(
             inputs=input_declarations,
             parameters=parameter_declarations,
             nodes=node_declarations,
             observations=observation_declarations,
-            site_order=(sampled_offsets..., coefficient_name,
+            site_order=(sampled_offsets..., group_site_order...,
+                        coefficient_name,
                         scale_name, response))
     end
-    bindings = _declaration_namedtuple(predictor_names, predictors)
+    bindings = _declaration_namedtuple(
+        input_names, (predictors..., groups...))
     conditions = NamedTuple{(response,)}((response_values,))
     (; declaration, bindings, conditions)
 end

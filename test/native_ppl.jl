@@ -3594,6 +3594,101 @@ end
         grouped_prediction_only, grouped_position)) ==
           length(grouped_bindings.group)
 
+    varying_brm_data = (;
+        x=sampled_offset_data.x,
+        group=grouped_bindings.group,
+        y=sampled_offset_data.y)
+    varying_brm = @brm varying_brm_data begin
+        sigma ~ Exponential(2)
+        mu ~ 0 + x + (1 | p | group)
+        sd(:, p) ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end
+    @test popcoefnames(varying_brm, :mu) == [:x]
+    @test ranefcoefnames(varying_brm, :p) == [
+        (; predictor=:mu, coefficient=:Intercept)]
+    @test SBBRMI(varying_brm; mod=@__MODULE__) isa SBBRMI
+    varying_model = NP.lower(varying_brm)
+    direct_varying_model = NP.model(
+        inputs=(; x=NP.input(), group=NP.input()),
+        parameters=(;
+            beta_mu=NP.parameter(
+                NP.RealSupport(), (:x,); transform=NP.Identity(),
+                prior=NP.StandardNormal()),
+            sigma=NP.parameter(
+                NP.PositiveSupport(), (:sigma,); transform=NP.Exp(),
+                prior=NP.Exponential(2)),
+            tau_p_group=NP.parameter(
+                NP.PositiveSupport(), (:tau_p_group,); transform=NP.Exp(),
+                prior=NP.Exponential(1)),
+            b_p_group=NP.grouped_normal(
+                :group, 0.0, :tau_p_group)),
+        nodes=(;
+            r_mu_p_group=NP.group_gather(:b_p_group, :group),
+            mu=NP.affine(
+                :x, :beta_mu; offsets=(:r_mu_p_group,),
+                intercept=false)),
+        observations=(; y=NP.broadcasted(
+            NP.normal(:y, :mu, :sigma))),
+        site_order=(:tau_p_group, :b_p_group, :beta_mu, :sigma, :y))
+    @test typeof(varying_model) === typeof(direct_varying_model)
+    @test sprint(show, varying_model) == sprint(show, direct_varying_model)
+    varying_plan = NP.compile(varying_brm)
+    @test varying_plan isa NP.FactorPlan
+    @test varying_plan.graph.schedule == (
+        :tau_p_group, :b_p_group, :beta_mu, :sigma,
+        :r_mu_p_group, :mu, :y)
+    @test varying_plan.group_indices ==
+          (; r_mu_p_group=(1, 2, 1, 3))
+    @test varying_plan.graph.dimension == 6
+    @test varying_plan.graph.coordinates.b_p_group.keys == (
+        NP.GroupCoordinateKey(:b_p_group, :a),
+        NP.GroupCoordinateKey(:b_p_group, :b),
+        NP.GroupCoordinateKey(:b_p_group, :c))
+    varying_prepared = NP.prepare(varying_plan)
+    varying_workspace = NP.workspace(
+        varying_prepared, Float64, DI.AutoEnzyme())
+    varying_position = [log(0.7), 0.2, -0.1, 0.4, -0.3, log(0.5)]
+    varying_tau = exp(varying_position[1])
+    varying_effects = varying_position[2:4]
+    varying_beta = varying_position[5]
+    varying_sigma = exp(varying_position[6])
+    varying_mu = varying_beta .* varying_brm_data.x .+
+        varying_effects[[1, 2, 1, 3]]
+    varying_residuals = varying_brm_data.y .- varying_mu
+    varying_expected_density =
+        logpdf(Exponential(1), varying_tau) + varying_position[1] +
+        sum(logpdf.(Normal(0, varying_tau), varying_effects)) +
+        logpdf(Normal(), varying_beta) +
+        logpdf(Exponential(2), varying_sigma) + varying_position[6] +
+        sum(logpdf.(Normal.(varying_mu, varying_sigma), varying_brm_data.y))
+    varying_expected_gradient = [
+        1 - varying_tau - length(varying_effects) +
+            sum(abs2, varying_effects) / varying_tau^2,
+        -varying_effects[1] / varying_tau^2 +
+            (varying_residuals[1] + varying_residuals[3]) /
+                varying_sigma^2,
+        -varying_effects[2] / varying_tau^2 +
+            varying_residuals[2] / varying_sigma^2,
+        -varying_effects[3] / varying_tau^2 +
+            varying_residuals[4] / varying_sigma^2,
+        -varying_beta +
+            sum(varying_residuals .* varying_brm_data.x) /
+                varying_sigma^2,
+        1 - varying_sigma / 2 - length(varying_brm_data.y) +
+            sum(abs2, varying_residuals) / varying_sigma^2,
+    ]
+    varying_density, varying_gradient = NP.logdensity_and_gradient!(
+        varying_workspace, varying_prepared, varying_position)
+    @test varying_density ≈ varying_expected_density
+    @test varying_gradient ≈ varying_expected_gradient
+    @test NP.evaluate(
+        varying_workspace, varying_prepared, varying_position,
+        NP.LinearPredictor()) ≈ varying_mu
+    @test factor_steady_state_allocations(
+        varying_workspace, varying_prepared, varying_position) ==
+          (; primal=0, gradient=0)
+
     sampled_offset_plan = NP.compile(sampled_offset_brmi)
     @test sampled_offset_plan isa NP.FactorPlan
     @test sampled_offset_plan.bindings.x == sampled_offset_data.x
