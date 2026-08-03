@@ -1222,6 +1222,16 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
                     "native PPL log input `$input_name` must contain finite " *
                     "positive values"))
         elseif node isa ExpFactorNode
+            if node.input isa SiteValue
+                source_name = site_value_name(node.input)
+                source_site = getproperty(graph.sites, source_name)
+                source_site.shape isa BlockSiteShape && throw(
+                    CapabilityError(
+                        :factor_shape,
+                        "exp node `$name` cannot consume block site " *
+                        "`$source_name` directly; lower it through a typed " *
+                        "materializing node"))
+            end
             broadcast_input = node.input isa SiteValue &&
                 getproperty(
                     graph.sites, site_value_name(node.input)).shape isa
@@ -2465,6 +2475,12 @@ end
 @inline function _factor_node_output_at(
     ::BRM.NativePPLNodeOutput{Name}, prepared::FactorPrepared,
     buffers::FactorBuffers, index::Int) where {Name}
+    node = getproperty(prepared.plan.graph.nodes, Name)
+    if node isa ExpFactorNode
+        return exp(_factor_argument_at(
+            node.input, index, prepared.plan, buffers,
+            eltype(buffers.values)))
+    end
     _factor_argument_at(
         NodeValue{Name}(), index, prepared.plan, buffers,
         eltype(buffers.values))

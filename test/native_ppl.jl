@@ -3838,6 +3838,19 @@ end
         invalid_scale_declaration, (; x=raw_x);
         conditions=(; y=response))).capability == :factor_scale
 
+    block_exp_scale_declaration = NP.model(
+        inputs=(; location=NP.input()),
+        parameters=(;
+            beta=NP.parameter(
+                NP.RealSupport(), (:a, :b);
+                transform=NP.Identity(), prior=NP.StandardNormal())),
+        nodes=(; scale=NP.exp_link(:beta)),
+        observations=(;
+            y=NP.broadcasted(NP.normal(:y, :location, :scale))))
+    @test capability_error(() -> NP.compile(
+        block_exp_scale_declaration, (; location=0.0);
+        conditions=(; y=response))).capability == :factor_shape
+
     sampled_offset_data = (;
         x=[-1.0, 0.0, 1.0, 2.0],
         y=[0.1, 0.4, 0.8, 1.0])
@@ -3918,9 +3931,11 @@ end
         observations=(; y=NP.broadcasted(
             NP.normal(:y, :latent, :row_scale))),
         site_order=(:latent, :beta_mu, :sigma, :y))
-    @test capability_error(() -> NP.compile(
+    row_exp_plan = NP.compile(
         row_exp_model, (; x=sampled_offset_data.x);
-        conditions=(; y=sampled_offset_data.y))).capability == :factor_nodes
+        conditions=(; y=sampled_offset_data.y))
+    @test row_exp_plan isa NP.FactorPlan
+    @test row_exp_plan.graph.nodes.row_scale isa NP.ExpFactorNode
     exposure_data = (;
         x=[-1.0, 0.0, 0.5, 1.0, 2.0],
         exposure=[0.5, 1.0, 2.0, 4.0, 1.5],
@@ -4004,6 +4019,9 @@ end
     @test NP.evaluate(
         exposure_workspace, exposure_prepared, exposure_position,
         NP.LinearPredictor()) ≈ exposure_log_rate
+    @test NP.evaluate(
+        exposure_workspace, exposure_prepared, exposure_position,
+        NP.NodeOutput(:exp_log_rate)) ≈ exposure_rate
     @test NP.evaluate(
         exposure_workspace, exposure_prepared, exposure_position,
         NP.PointwiseLogLikelihood()) ≈
