@@ -2281,8 +2281,8 @@ end
           bindings.x === stochastic
 
     err = capability_error(() -> NP.compile(composition))
-    @test err.capability == :composition_compilation
-    @test occursin("derives activity", err.detail)
+    @test err.capability == :active_graph_connection
+    @test occursin("source.mu", err.detail)
 
     @test_throws ArgumentError NP.compose(sink, source)
     @test_throws ArgumentError NP.compose(
@@ -2302,6 +2302,53 @@ end
     conditioned_composition = NP.compose(source, site_conditioned)
     @test conditioned_composition.components.site_conditioned.instance.
           conditions.y === stochastic
+
+    preprocessing_model = NP.model(
+        inputs=(; raw=NP.input()),
+        nodes=(; scaled=NP.zscale(:raw)),
+        observations=(;))
+    preprocessing = NP.component(
+        :preprocessing, NP.substitute(preprocessing_model; raw=raw_x))
+    scaled = NP.output(preprocessing, :scaled)
+    response = [0.2, -0.1, 1.1, 0.7]
+    regression = NP.component(
+        :regression,
+        NP.condition(composable_gaussian(scaled); y=response))
+    executable = NP.compose(preprocessing, regression)
+    lowered = NP.lower(executable)
+
+    raw_name = NP.qualified_name(:preprocessing, :raw)
+    scaled_name = NP.qualified_name(:preprocessing, :scaled)
+    coefficient_name = NP.qualified_name(:regression, :beta_mu)
+    location_name = NP.qualified_name(:regression, :mu)
+    response_name = NP.qualified_name(:regression, :y)
+    @test keys(lowered.declaration.inputs) == (raw_name,)
+    @test keys(lowered.declaration.parameters) ==
+          (coefficient_name, NP.qualified_name(:regression, :sigma))
+    @test keys(lowered.declaration.nodes) == (scaled_name, location_name)
+    @test keys(lowered.declaration.observations) == (response_name,)
+    @test keys(lowered.bindings) == (raw_name,)
+    @test keys(lowered.conditions) == (response_name,)
+
+    prepared = NP.prepare(executable)
+    direct = NP.prepare(NP.condition(
+        macro_gaussian_zscale(raw_x); y=response))
+    @test prepared.predictor == direct.predictor
+    position = [0.3, -0.4, log(0.8)]
+    composed_work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
+    direct_work = NP.workspace(direct, Float64, DI.AutoEnzyme())
+    composed_density, composed_gradient = NP.logdensity_and_gradient!(
+        composed_work, prepared, position)
+    direct_density, direct_gradient = NP.logdensity_and_gradient!(
+        direct_work, direct, position)
+    @test composed_density ≈ direct_density
+    @test composed_gradient ≈ direct_gradient
+    @test NP.evaluate(
+        composed_work, prepared, position, NP.LinearPredictor()) ≈
+          NP.evaluate(direct_work, direct, position, NP.LinearPredictor())
+    @test NP.simulate(
+        MersenneTwister(909), composed_work, prepared, position) ==
+          NP.simulate(MersenneTwister(909), direct_work, direct, position)
 end
 
 
