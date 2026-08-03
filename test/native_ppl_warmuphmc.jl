@@ -148,6 +148,59 @@ end
     @test result.n_divergent_samples == 0
 end
 
+@testset "weighted grouped factor DAG samples end-to-end with WarmupHMC" begin
+    groups = 6
+    replicates_per_group = 5
+    group = repeat(collect(1:groups), inner=replicates_per_group)
+    x = collect(range(-1.6, 1.8; length=groups * replicates_per_group))
+    replicates = [1 + mod(3 * row, 4) for row in eachindex(x)]
+    group_intercept = collect(range(-0.28, 0.28; length=groups))
+    mu = [
+        0.22 - 0.48 * x[row] + group_intercept[group[row]]
+        for row in eachindex(x)
+    ]
+    y = [
+        mu[row] + 0.42 / sqrt(replicates[row]) * sin(0.61 * row)
+        for row in eachindex(x)
+    ]
+    brmi = @brm (; x, group, replicates, y) begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x + (1 | g | group)
+        sd(:, g) ~ Exponential(1)
+        y ~ weighted(Normal(mu, sigma), aweights(replicates))
+    end
+    prepared = NP.prepare(NP.compile(brmi))
+    problem = NP.LogDensityProblem(prepared, DI.AutoEnzyme())
+
+    dimension = LogDensityProblems.dimension(problem)
+    @test dimension == groups + 4
+    @test NP.observation_weight_kind(
+        prepared.plan.graph.sites.y.factor.weight) === :analytic
+    density, gradient = LogDensityProblems.logdensity_and_gradient(
+        problem, zeros(dimension))
+    @test isfinite(density)
+    @test all(isfinite, gradient)
+
+    result = WarmupHMC.adaptive_warmup_mcmc(
+        Xoshiro(0x20260806),
+        problem;
+        n_draws=50,
+        n_evaluations=220,
+        stepsize_adaptation_limit=25,
+        max_tree_depth=8,
+        progress=nothing,
+        monitor_ess=false,
+        nonlinear_adapt=false,
+    )
+
+    draws = result.posterior_position
+    @test size(draws, 1) == dimension
+    @test size(draws, 2) >= 50
+    @test all(isfinite, draws)
+    @test all(>(1e-6), vec(std(draws; dims=2)))
+    @test result.n_divergent_samples == 0
+end
+
 @testset "factor DAG samples end-to-end with WarmupHMC" begin
     response = [0.28, 0.35, 0.31, 0.41, 0.26, 0.37]
     prepared = NP.prepare(NP.compile(NP.condition(
