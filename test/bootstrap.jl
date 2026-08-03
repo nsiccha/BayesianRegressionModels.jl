@@ -10,6 +10,8 @@
 
 using Pkg
 
+include("dependency_floors.jl")
+
 const REPO = dirname(@__DIR__)
 const TESTENV = @__DIR__
 
@@ -32,6 +34,12 @@ end
 
 stanblocks = dev_path("StanBlocks", "BRM_TEST_STANBLOCKS")
 warmuphmc = dev_path("WarmupHMC", "BRM_TEST_WARMUPHMC")
+require_git_ancestor(
+    "WarmupHMC",
+    warmuphmc,
+    WARMUPHMC_NATIVE_PPL_MINIMUM;
+    reason="Native PPL targets require WarmupHMC's own-gradient Pathfinder initialization.",
+)
 # Transitive: WarmupHMC depends on the unregistered Treebars and pins it with a
 # `[sources]` entry, which Julia 1.10 ignores. `Pkg.develop` can only fix a path
 # for a DIRECT dependency, so Treebars is also listed in `test/Project.toml`.

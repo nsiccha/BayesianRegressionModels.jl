@@ -8,8 +8,17 @@ using Random: Xoshiro
 using Statistics: std
 using WarmupHMC
 
+include("dependency_floors.jl")
+
 const BRM = BayesianRegressionModels
 const NP = BRM.NativePPL
+
+require_git_ancestor(
+    "WarmupHMC",
+    pkgdir(WarmupHMC),
+    WARMUPHMC_NATIVE_PPL_MINIMUM;
+    reason="Native PPL targets require WarmupHMC's own-gradient Pathfinder initialization.",
+)
 
 @testset "native PPL samples end-to-end with WarmupHMC" begin
     x = collect(range(-1.5, 1.5; length=16))
@@ -59,7 +68,6 @@ const NP = BRM.NativePPL
         n_evaluations=200,
         stepsize_adaptation_limit=25,
         max_tree_depth=8,
-        init=(; position=zeros(dimension), squared_scale=ones(dimension)),
         progress=nothing,
         monitor_ess=false,
         nonlinear_adapt=false,
