@@ -2553,9 +2553,10 @@ function _factor_check_batch_output(output::AbstractMatrix,
         throw(DimensionMismatch(
             "native PPL factor batch output axes $(axes(output)) do not " *
             "match $((draw_axis.keys, observation_axis.keys))"))
-    eltype(output) === eltype(prepared) || throw(ArgumentError(
+    expected_eltype = BRM.native_output_eltype(signature, prepared)
+    eltype(output) === expected_eltype || throw(ArgumentError(
         "native PPL factor batch output eltype $(eltype(output)) does not " *
-        "match prepared eltype $(eltype(prepared))"))
+        "match declared eltype $expected_eltype"))
     eltype(positions) === eltype(work) || throw(ArgumentError(
         "native PPL factor draw eltype $(eltype(positions)) does not match " *
         "workspace eltype $(eltype(work))"))
@@ -2737,15 +2738,18 @@ end
 
 @inline function _factor_check_bundle_matrix(
         output::AbstractMatrix, work::FactorWorkspace,
-        prepared::FactorPrepared, positions::AbstractMatrix)
+        prepared::FactorPrepared, positions::AbstractMatrix,
+        query::BRM.NativePPLQuery)
     expected_axes = (
         Base.OneTo(size(positions, 1)), prepared.plan.observation_axis.keys)
     axes(output) == expected_axes || throw(DimensionMismatch(
         "native PPL factor bundle output axes $(axes(output)) do not match " *
         "$expected_axes"))
-    eltype(output) === eltype(prepared) || throw(ArgumentError(
+    expected_eltype = BRM.native_output_eltype(
+        output_signature(prepared, query), prepared)
+    eltype(output) === expected_eltype || throw(ArgumentError(
         "native PPL factor bundle output eltype $(eltype(output)) does not " *
-        "match prepared eltype $(eltype(prepared))"))
+        "match declared eltype $expected_eltype"))
     eltype(positions) === eltype(work) || throw(ArgumentError(
         "native PPL factor draw eltype $(eltype(positions)) does not match " *
         "workspace eltype $(eltype(work))"))
@@ -2778,7 +2782,8 @@ end
     output = getfield(outputs, Index)
     output isa AbstractMatrix || throw(ArgumentError(
         "native PPL factor bundle outputs must be matrices"))
-    _factor_check_bundle_matrix(output, work, prepared, positions)
+    _factor_check_bundle_matrix(
+        output, work, prepared, positions, query)
     _factor_check_bundle_fields(
         outputs, queries, work, prepared, positions, Val(Index - 1))
 end

@@ -4519,6 +4519,156 @@ end
         correlated_new_replay, correlated_draw_positions,
         correlated_queries) ==
           (; predictive=0, linear=0, bundle=0)
+
+    correlated_glmm_known_expected = [
+        correlated_beta * correlated_known_bindings.x[row] +
+        correlated_effects[[3, 1, 2][row]][1] +
+        correlated_effects[[3, 1, 2][row]][2] *
+            correlated_known_bindings.x[row]
+        for row in eachindex(correlated_known_bindings.x)]
+    for prepared in (
+            correlated_bernoulli_brm_prepared,
+            correlated_poisson_brm_prepared)
+        known_replay = NP.rebind(
+            prepared, (;); bindings=correlated_known_bindings)
+        @test known_replay.plan.graph.dimension == 10
+        @test NP.evaluate(
+            NP.workspace(known_replay), known_replay,
+            correlated_glmm_position, NP.LinearPredictor()) ≈
+              correlated_glmm_known_expected
+    end
+
+    correlated_glmm_new_expected = function(rng, position)
+        tau = exp.(position[1:2])
+        raw = position[3]
+        rho = tanh(raw)
+        sech = 1 / cosh(raw)
+        z = reshape(position[4:9], 2, 3)
+        fitted = [
+            (tau[1] * z[1, group],
+             tau[2] * (rho * z[1, group] + sech * z[2, group]))
+            for group in 1:3]
+        generated_z = (randn(rng), randn(rng))
+        generated = (
+            tau[1] * generated_z[1],
+            tau[2] *
+                (rho * generated_z[1] + sech * generated_z[2]))
+        effects = [fitted[1], generated, generated, fitted[3]]
+        beta = position[10]
+        linear = [
+            beta * correlated_new_bindings.x[row] + effects[row][1] +
+            effects[row][2] * correlated_new_bindings.x[row]
+            for row in eachindex(correlated_new_bindings.x)]
+        (; generated_z, linear)
+    end
+
+    correlated_glmm_draw_positions = [
+        correlated_glmm_position';
+        (correlated_glmm_position .+
+         [0.05, -0.03, 0.02, 0.01, -0.02,
+          0.03, -0.01, 0.02, -0.04, 0.06])']
+    correlated_glmm_cases = (;
+        bernoulli=(;
+            prepared=correlated_bernoulli_brm_prepared,
+            seed=959,
+            sample=(rng, linear) -> [
+                rand(rng) < BRM._native_ppl_logistic(value)
+                for value in linear]),
+        poisson=(;
+            prepared=correlated_poisson_brm_prepared,
+            seed=963,
+            sample=(rng, linear) -> [
+                BRM._native_ppl_rand_poisson(rng, Float64, value)
+                for value in linear]))
+    for (family, case) in pairs(correlated_glmm_cases)
+        replay = NP.rebind(
+            case.prepared, (;); bindings=correlated_new_bindings,
+            new_groups=:resample)
+        @test replay.plan.graph.dimension == 10
+        @test replay.plan.generated_group_levels == (; b_p_group=(:d,))
+        @test replay.plan.generated_group_indices == (; b_p_group=1:2)
+        group_node = family === :bernoulli ?
+            :b_p_group_by_group_for_mu :
+            :b_p_group_by_group_for_log_rate
+        @test getproperty(replay.plan.group_indices, group_node) ==
+              (1, -1, -1, 3)
+        work = NP.workspace(replay)
+        rng = MersenneTwister(case.seed)
+        expected_rng = MersenneTwister(case.seed)
+        expected = correlated_glmm_new_expected(
+            expected_rng, correlated_glmm_position)
+        expected_predictive = case.sample(expected_rng, expected.linear)
+        predictive = NP.allocate_output(
+            replay, NP.PosteriorPredictive())
+        NP.simulate!(
+            rng, predictive, work, replay, correlated_glmm_position)
+        @test predictive == expected_predictive
+        @test work.primal.generated_group_values ≈
+              collect(expected.generated_z)
+        @test factor_predictive_allocations(
+            MersenneTwister(case.seed + 1), predictive, work, replay,
+            correlated_glmm_position) == 0
+        @test_throws NP.CapabilityError NP.logdensity!(
+            work, replay, correlated_glmm_position)
+        @test_throws ArgumentError NP.evaluate!(
+            zeros(4), work, replay, correlated_glmm_position,
+            NP.PointwiseLogLikelihood())
+
+        positions = correlated_glmm_draw_positions
+        predictive_signature = NP.batch_output_signature(
+            replay, positions, NP.PosteriorPredictive())
+        draw_predictive = NP.allocate_output(
+            predictive_signature, replay)
+        draw_linear = zeros(2, 4)
+        manual_predictive = similar(draw_predictive)
+        manual_linear = zeros(2, 4)
+        manual_fused_linear = zeros(2, 4)
+        draw_rng = MersenneTwister(case.seed + 2)
+        manual_rng = MersenneTwister(case.seed + 2)
+        for draw in axes(positions, 1)
+            NP.simulate!(
+                manual_rng, @view(manual_predictive[draw, :]),
+                work, replay, @view(positions[draw, :]))
+            for row in axes(manual_fused_linear, 2)
+                manual_fused_linear[draw, row] =
+                    NP._factor_terminal_linear(replay, work.primal, row)
+            end
+        end
+        NP.simulate_draws!(
+            draw_rng, draw_predictive, work, replay, positions)
+        @test draw_predictive == manual_predictive
+        linear_rng = MersenneTwister(case.seed + 3)
+        manual_linear_rng = MersenneTwister(case.seed + 3)
+        for draw in axes(positions, 1)
+            NP.evaluate!(
+                manual_linear_rng, @view(manual_linear[draw, :]),
+                work, replay, @view(positions[draw, :]),
+                NP.LinearPredictor())
+        end
+        NP.evaluate_draws!(
+            linear_rng, draw_linear, work, replay, positions,
+            NP.LinearPredictor())
+        @test draw_linear == manual_linear
+        queries = (;
+            linear=NP.LinearPredictor(),
+            predictive=NP.PosteriorPredictive())
+        bundle = (;
+            linear=zeros(2, 4),
+            predictive=similar(draw_predictive))
+        NP.execute_draws!(
+            MersenneTwister(case.seed + 2), bundle,
+            work, replay, positions, queries)
+        @test bundle.linear == manual_fused_linear
+        @test bundle.predictive == manual_predictive
+        @test factor_generated_draw_allocations(
+            MersenneTwister(case.seed + 4),
+            MersenneTwister(case.seed + 5),
+            MersenneTwister(case.seed + 6),
+            draw_predictive, draw_linear, bundle,
+            work, replay, positions, queries) ==
+              (; predictive=0, linear=0, bundle=0)
+    end
+
     varying_brm = @brm varying_brm_data begin
         sigma ~ Exponential(2)
         mu ~ 0 + x + (1 | p | group)
