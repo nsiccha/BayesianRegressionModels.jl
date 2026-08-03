@@ -2898,6 +2898,9 @@ end
     prior_component = NP.component(:prior, scalar_prior)
     @test NP.graph_kind(NP.output(prior_component, :theta)) === :parameter
     @test capability_error(() -> NP.bind(scalar_prior)).capability == :outcomes
+    @test_throws ArgumentError NP.NormalPrior(NaN, 1.0)
+    @test_throws ArgumentError NP.NormalPrior(0.0, 0.0)
+    @test_throws ArgumentError NP.ExponentialPrior(0.0)
 
     latent_site = scalar_normal_site(0.25, 0.8)
     @test keys(latent_site.declaration.inputs) == (:mu, :tau)
@@ -3095,6 +3098,23 @@ end
     @test @allocated(NP.simulate_prior!(
         allocation_rng, prior_position, prior_response,
         latent_workspace, latent_prepared)) == 0
+
+    two_row_latent = NP.rebind(
+        latent_prepared,
+        NamedTuple{(latent_response_name,)}(([0.1, 0.4],)))
+    two_row_workspace = NP.workspace(two_row_latent)
+    for (position_buffer, output_buffer) in (
+        (two_row_workspace.gradient, zeros(2)),
+        (two_row_latent.response, zeros(2)),
+        (zeros(2), two_row_latent.response),
+    )
+        rejected_rng = MersenneTwister(917)
+        control_rng = MersenneTwister(917)
+        @test_throws ArgumentError NP.simulate_prior!(
+            rejected_rng, position_buffer, output_buffer,
+            two_row_workspace, two_row_latent)
+        @test rand(rejected_rng) == rand(control_rng)
+    end
 
     latent_prepared32 = NP.prepare(latent_plan; T=Float32)
     latent_density32, latent_gradient32 = NP.logdensity_and_gradient!(

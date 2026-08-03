@@ -2358,6 +2358,29 @@ function _native_ppl_check_prior_predictive(
     Base.mightalias(output, workspace.gradient) && throw(ArgumentError(
         "native PPL prior-predictive output must not alias the workspace " *
         "gradient buffer"))
+    Base.mightalias(position, workspace.primal.pointwise_loglikelihood) &&
+        throw(ArgumentError(
+            "native PPL prior-predictive position must not alias the " *
+            "workspace pointwise buffer"))
+    Base.mightalias(position, workspace.gradient) && throw(ArgumentError(
+        "native PPL prior-predictive position must not alias the workspace " *
+        "gradient buffer"))
+    for (name, predictor) in pairs(prepared.predictors)
+        Base.mightalias(output, predictor) && throw(ArgumentError(
+            "native PPL prior-predictive output must not alias prepared " *
+            "predictor `$name`"))
+        Base.mightalias(position, predictor) && throw(ArgumentError(
+            "native PPL prior-predictive position must not alias prepared " *
+            "predictor `$name`"))
+    end
+    if native_ppl_has_response(prepared)
+        Base.mightalias(output, prepared.response) && throw(ArgumentError(
+            "native PPL prior-predictive output must not alias the prepared " *
+            "response"))
+        Base.mightalias(position, prepared.response) && throw(ArgumentError(
+            "native PPL prior-predictive position must not alias the prepared " *
+            "response"))
+    end
 
     location_parameter = _native_ppl_location_parameter(prepared.plan)
     location_factor = _native_ppl_location_factor(prepared.plan)

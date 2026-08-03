@@ -47,26 +47,30 @@ struct StandardNormal <: AbstractPriorDeclaration end
 struct NormalPrior{L<:Real,S<:Real} <: AbstractPriorDeclaration
     location::L
     scale::S
+
+    function NormalPrior(location::L, scale::S) where {L<:Real,S<:Real}
+        isfinite(location) || throw(ArgumentError(
+            "native PPL Normal prior location must be finite"))
+        isfinite(scale) && scale > zero(scale) || throw(ArgumentError(
+            "native PPL Normal prior scale must be finite and positive"))
+        new{L,S}(location, scale)
+    end
 end
 
-function normal_prior(location::Real, scale::Real)
-    isfinite(location) || throw(ArgumentError(
-        "native PPL Normal prior location must be finite"))
-    isfinite(scale) && scale > zero(scale) || throw(ArgumentError(
-        "native PPL Normal prior scale must be finite and positive"))
-    NormalPrior(location, scale)
-end
+normal_prior(location::Real, scale::Real) = NormalPrior(location, scale)
 
 """Exponential prior declaration parameterized by its positive scale."""
 struct ExponentialPrior{T<:Real} <: AbstractPriorDeclaration
     scale::T
+
+    function ExponentialPrior(scale::T) where {T<:Real}
+        isfinite(scale) && scale > zero(scale) || throw(ArgumentError(
+            "native PPL Exponential prior scale must be finite and positive"))
+        new{T}(scale)
+    end
 end
 
-function Exponential(scale::Real)
-    isfinite(scale) && scale > zero(scale) || throw(ArgumentError(
-        "native PPL Exponential prior scale must be finite and positive"))
-    ExponentialPrior(scale)
-end
+Exponential(scale::Real) = ExponentialPrior(scale)
 
 """
 An unbound logical parameter declaration.
