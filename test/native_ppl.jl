@@ -3053,14 +3053,12 @@ end
 
     natural_latent = natural_latent_normal(0.25, 0.8)
     @test natural_latent isa NP.ModelInstance
-    @test natural_latent.declaration.outputs ==
-          (; y=NP.qualified_name(:y, :y))
+    @test natural_latent.declaration.outputs == (; y=:y)
     @test keys(natural_latent.declaration.observations) ==
-          (NP.qualified_name(:z, :z), NP.qualified_name(:y, :y))
+          (NP.qualified_name(:z, :z), :y)
     @test isempty(natural_latent.conditions)
     conditioned_natural_latent = NP.condition(natural_latent; y=response)
-    @test keys(conditioned_natural_latent.conditions) ==
-          (NP.qualified_name(:y, :y),)
+    @test keys(conditioned_natural_latent.conditions) == (:y,)
     natural_latent_prepared = NP.prepare(conditioned_natural_latent)
     natural_latent_workspace = NP.workspace(
         natural_latent_prepared, Float64, DI.AutoEnzyme())
@@ -3068,11 +3066,27 @@ end
         natural_latent_workspace, natural_latent_prepared, latent_position)
     @test natural_density ≈ latent_density
     @test natural_gradient ≈ latent_gradient
+    @test NP.evaluate(
+        natural_latent_workspace, natural_latent_prepared, latent_position,
+        NP.LinearPredictor()) == latent_location
+    @test NP.evaluate(
+        natural_latent_workspace, natural_latent_prepared, latent_position,
+        NP.PointwiseLogLikelihood()) == latent_pointwise
     @test NP.simulate(
         MersenneTwister(913), natural_latent_workspace,
         natural_latent_prepared, latent_position) == NP.simulate(
             MersenneTwister(913), latent_workspace,
             latent_prepared, latent_position)
+    natural_rebound_response = [0.1, 0.4, 0.8]
+    natural_rebound = NP.rebind(
+        natural_latent_prepared, (; y=natural_rebound_response))
+    @test natural_rebound.response == natural_rebound_response
+    @test length(natural_rebound.plan.axes.observation) == 3
+    natural_prediction = NP.rebind(natural_latent_prepared, (;))
+    @test !NP.has_response(natural_prediction)
+    @test length(NP.simulate(
+        MersenneTwister(914), NP.workspace(natural_prediction),
+        natural_prediction, latent_position)) == length(response)
 
     qualified = qualified_nested(0.25, 0.8)
     @test qualified isa NP.ModelInstance
@@ -3207,6 +3221,9 @@ end
     @test NP.simulate_prior(
         MersenneTwister(915), latent_brm_workspace,
         latent_brm_prepared) == allocated_prior
+    @test NP.simulate_prior(
+        MersenneTwister(915), natural_latent_workspace,
+        natural_latent_prepared) == allocated_prior
     prediction_prior = NP.simulate_prior(
         MersenneTwister(915), NP.workspace(latent_prediction),
         latent_prediction)

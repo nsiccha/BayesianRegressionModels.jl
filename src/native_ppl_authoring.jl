@@ -472,6 +472,19 @@ function _qualified_observation(namespace::Symbol, observation, mapping)
     is_broadcast_observation(observation) ? broadcasted(declaration) : declaration
 end
 
+function _observation_with_response(observation, response::Symbol)
+    scalar = scalar_observation(observation)
+    dependencies = observation_dependencies(scalar)
+    declaration = if scalar isa NormalObservation
+        normal(response, dependencies...)
+    elseif scalar isa BernoulliLogitObservation
+        bernoulli_logit(response, only(dependencies))
+    else
+        poisson(response, only(dependencies))
+    end
+    is_broadcast_observation(observation) ? broadcasted(declaration) : declaration
+end
+
 function _resolved_reference(reference::GraphRef, resolved)
     key = (graph_namespace(reference), graph_name(reference))
     haskey(resolved, key) || throw(CapabilityError(
@@ -647,10 +660,32 @@ function _lower_composition(composition::Composition, public_outputs=nothing)
             ArgumentError(
                 "native PPL staged outputs must be graph values"))
         names = keys(public_outputs)
-        flattened_values = Tuple(
+        resolved_values = Tuple(
             _resolved_reference(reference, resolved)
             for reference in Base.values(public_outputs))
-        NamedTuple{names}(flattened_values)
+        flattened_values = collect(resolved_values)
+        occupied = Set((input_names..., parameter_names..., node_names...,
+                        observation_names...))
+        for index in eachindex(flattened_values)
+            resolved_name = flattened_values[index]
+            observation_index = findfirst(==(resolved_name), observation_names)
+            observation_index === nothing && continue
+            alias = names[index]
+            alias === resolved_name || alias ∉ occupied || throw(ArgumentError(
+                "native PPL public stochastic-site alias `$alias` collides " *
+                "with an existing graph identity"))
+            observation_names[observation_index] = alias
+            observation_values[observation_index] = _observation_with_response(
+                observation_values[observation_index], alias)
+            for condition_index in eachindex(condition_names)
+                condition_names[condition_index] === resolved_name &&
+                    (condition_names[condition_index] = alias)
+            end
+            delete!(occupied, resolved_name)
+            push!(occupied, alias)
+            flattened_values[index] = alias
+        end
+        NamedTuple{names}(Tuple(flattened_values))
     end
 
     declaration = model(
