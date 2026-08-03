@@ -1714,6 +1714,32 @@ function evaluate(work::FactorWorkspace, prepared::FactorPrepared,
     evaluate!(output, work, prepared, position, query)
 end
 
+function evaluate!(rng::BRM.AbstractRNG, output::AbstractVector,
+                   work::FactorWorkspace, prepared::FactorPrepared,
+                   position::AbstractVector,
+                   query::BRM.NativePPLLinearPredictor)
+    _factor_check_query_output(output, work, prepared, position, query)
+    if _has_generated_groups(prepared.plan)
+        _factor_predictive_kernel!(
+            rng, position, prepared, work.primal)
+    else
+        _factor_logdensity_kernel(position, prepared, work.primal)
+    end
+    for index in eachindex(output)
+        location, _ = _factor_terminal_arguments(
+            prepared, work.primal, index)
+        output[index] = location
+    end
+    output
+end
+
+function evaluate(rng::BRM.AbstractRNG, work::FactorWorkspace,
+                  prepared::FactorPrepared, position::AbstractVector,
+                  query::BRM.NativePPLLinearPredictor)
+    output = allocate_output(prepared, query)
+    evaluate!(rng, output, work, prepared, position, query)
+end
+
 function simulate!(rng::BRM.AbstractRNG, output::AbstractVector,
                    work::FactorWorkspace, prepared::FactorPrepared,
                    position::AbstractVector,
@@ -2005,14 +2031,14 @@ function _factor_check_batch_output(output::AbstractMatrix,
         "native PPL factor batch output must not alias draw positions"))
     for buffer in (work.gradient, work.primal.values,
                    work.primal.generated_group_values,
-                   work.primal.node_values,
+                   work.primal.node_values, work.primal.node_rows,
                    work.primal.pointwise_loglikelihood)
         Base.mightalias(output, buffer) && throw(ArgumentError(
             "native PPL factor batch output must not alias workspace storage"))
         Base.mightalias(positions, buffer) && throw(ArgumentError(
             "native PPL factor draw positions must not alias workspace storage"))
     end
-    signature
+    nothing
 end
 
 function evaluate_draws!(output::AbstractMatrix, work::FactorWorkspace,
@@ -2035,6 +2061,30 @@ function evaluate_draws(work::FactorWorkspace, prepared::FactorPrepared,
     signature = batch_output_signature(prepared, positions, query)
     output = allocate_output(signature, prepared)
     evaluate_draws!(output, work, prepared, positions, query)
+end
+
+function evaluate_draws!(rng::BRM.AbstractRNG, output::AbstractMatrix,
+                         work::FactorWorkspace,
+                         prepared::FactorPrepared,
+                         positions::AbstractMatrix,
+                         query::BRM.NativePPLLinearPredictor)
+    _factor_check_batch_output(
+        output, work, prepared, positions, query)
+    for draw in axes(positions, 1)
+        evaluate!(
+            rng, @view(output[draw, :]), work, prepared,
+            @view(positions[draw, :]), query)
+    end
+    output
+end
+
+function evaluate_draws(rng::BRM.AbstractRNG, work::FactorWorkspace,
+                        prepared::FactorPrepared,
+                        positions::AbstractMatrix,
+                        query::BRM.NativePPLLinearPredictor)
+    signature = batch_output_signature(prepared, positions, query)
+    output = allocate_output(signature, prepared)
+    evaluate_draws!(rng, output, work, prepared, positions, query)
 end
 
 function simulate_draws!(rng::BRM.AbstractRNG, output::AbstractMatrix,
@@ -2091,6 +2141,39 @@ end
     output
 end
 
+@inline function _factor_write_bundle_matrix_query!(rng,
+        output::AbstractMatrix, draw, ::BRM.NativePPLLinearPredictor,
+        work::FactorWorkspace, prepared::FactorPrepared)
+    for index in axes(output, 2)
+        location, _ = _factor_terminal_arguments(
+            prepared, work.primal, index)
+        output[draw, index] = location
+    end
+    output
+end
+
+@inline function _factor_write_bundle_matrix_query!(rng,
+        output::AbstractMatrix, draw,
+        ::BRM.NativePPLPointwiseLogLikelihood,
+        work::FactorWorkspace, prepared::FactorPrepared)
+    for index in axes(output, 2)
+        output[draw, index] = work.primal.pointwise_loglikelihood[index]
+    end
+    output
+end
+
+@inline function _factor_write_bundle_matrix_query!(rng::BRM.AbstractRNG,
+        output::AbstractMatrix, draw, ::BRM.NativePPLPosteriorPredictive,
+        work::FactorWorkspace, prepared::FactorPrepared)
+    T = eltype(work)
+    for index in axes(output, 2)
+        location, scale = _factor_terminal_arguments(
+            prepared, work.primal, index)
+        output[draw, index] = location + scale * BRM.randn(rng, T)
+    end
+    output
+end
+
 @inline _factor_bundle_requires_rng(::Tuple{}) = false
 @inline _factor_bundle_requires_rng(queries::Tuple) =
     first(queries) isa BRM.NativePPLPosteriorPredictive ||
@@ -2101,45 +2184,108 @@ end
     first(queries) isa BRM.NativePPLPointwiseLogLikelihood ||
     _factor_bundle_requires_response(Base.tail(queries))
 
-@inline function _factor_write_bundle_queries!(rng, ::Tuple{}, ::Tuple{},
-        work::FactorWorkspace, prepared::FactorPrepared)
+@inline function _factor_write_bundle_draw!(rng, ::Tuple{}, ::Tuple{},
+        draw, work::FactorWorkspace, prepared::FactorPrepared)
     nothing
 end
 
-@inline function _factor_write_bundle_queries!(rng, outputs::Tuple,
-        queries::Tuple, work::FactorWorkspace, prepared::FactorPrepared)
-    _factor_write_bundle_query!(
-        rng, first(outputs), first(queries), work, prepared)
-    _factor_write_bundle_queries!(
-        rng, Base.tail(outputs), Base.tail(queries), work, prepared)
+@inline function _factor_write_bundle_draw!(rng, outputs::Tuple,
+        queries::Tuple, draw, work::FactorWorkspace,
+        prepared::FactorPrepared)
+    _factor_write_bundle_matrix_query!(
+        rng, first(outputs), draw, first(queries), work, prepared)
+    _factor_write_bundle_draw!(
+        rng, Base.tail(outputs), Base.tail(queries), draw, work, prepared)
 end
 
-function _factor_check_bundle_outputs(outputs::NamedTuple{Names},
-                                      work::FactorWorkspace,
-                                      prepared::FactorPrepared,
-                                      positions::AbstractMatrix,
-                                      queries::NamedTuple{Names}) where {Names}
-    query_values = Tuple(queries)
-    all(query -> query isa BRM.NativePPLQuery, query_values) ||
-        throw(ArgumentError(
-            "native PPL factor query bundles require typed graph queries"))
-    output_values = Tuple(outputs)
-    for (index, (output, query)) in enumerate(zip(output_values, query_values))
-        output isa AbstractMatrix || throw(ArgumentError(
-            "native PPL factor bundle outputs must be matrices"))
-        _factor_check_batch_output(
-            output, work, prepared, positions, query)
-        for previous_index in 1:(index - 1)
-            Base.mightalias(output, output_values[previous_index]) &&
-                throw(ArgumentError(
-                    "native PPL factor bundle outputs `$(Names[index])` and " *
-                    "`$(Names[previous_index])` must not alias"))
-        end
+@inline @generated function _factor_write_bundle_draw!(rng,
+        outputs::NamedTuple{Names}, queries::NamedTuple{Names}, draw,
+        work::FactorWorkspace, prepared::FactorPrepared) where {Names}
+    calls = map(eachindex(Names)) do index
+        :(_factor_write_bundle_matrix_query!(
+            rng, getfield(outputs, $index), draw,
+            getfield(queries, $index), work, prepared))
+    end
+    Expr(:block, calls..., :(nothing))
+end
+
+@inline function _factor_check_bundle_matrix(
+        output::AbstractMatrix, work::FactorWorkspace,
+        prepared::FactorPrepared, positions::AbstractMatrix)
+    expected_axes = (
+        Base.OneTo(size(positions, 1)), prepared.plan.observation_axis.keys)
+    axes(output) == expected_axes || throw(DimensionMismatch(
+        "native PPL factor bundle output axes $(axes(output)) do not match " *
+        "$expected_axes"))
+    eltype(output) === eltype(prepared) || throw(ArgumentError(
+        "native PPL factor bundle output eltype $(eltype(output)) does not " *
+        "match prepared eltype $(eltype(prepared))"))
+    eltype(positions) === eltype(work) || throw(ArgumentError(
+        "native PPL factor draw eltype $(eltype(positions)) does not match " *
+        "workspace eltype $(eltype(work))"))
+    Base.mightalias(output, positions) && throw(ArgumentError(
+        "native PPL factor bundle output must not alias draw positions"))
+    for buffer in (work.gradient, work.primal.values,
+                   work.primal.generated_group_values,
+                   work.primal.node_values, work.primal.node_rows,
+                   work.primal.pointwise_loglikelihood)
+        Base.mightalias(output, buffer) && throw(ArgumentError(
+            "native PPL factor bundle output must not alias workspace storage"))
+        Base.mightalias(positions, buffer) && throw(ArgumentError(
+            "native PPL factor draw positions must not alias workspace storage"))
     end
     nothing
 end
 
-function _factor_execute_draws!(rng, outputs::NamedTuple{Names},
+@inline function _factor_check_bundle_fields(outputs, queries,
+        work::FactorWorkspace, prepared::FactorPrepared,
+        positions::AbstractMatrix, ::Val{0})
+    nothing
+end
+
+@inline function _factor_check_bundle_fields(outputs, queries,
+        work::FactorWorkspace, prepared::FactorPrepared,
+        positions::AbstractMatrix, ::Val{Index}) where {Index}
+    query = getfield(queries, Index)
+    query isa BRM.NativePPLQuery || throw(ArgumentError(
+        "native PPL factor query bundles require typed graph queries"))
+    output = getfield(outputs, Index)
+    output isa AbstractMatrix || throw(ArgumentError(
+        "native PPL factor bundle outputs must be matrices"))
+    _factor_check_bundle_matrix(output, work, prepared, positions)
+    _factor_check_bundle_fields(
+        outputs, queries, work, prepared, positions, Val(Index - 1))
+end
+
+@inline @generated function _factor_check_bundle_output_aliases(
+        outputs::NamedTuple{Names}) where {Names}
+    calls = Any[]
+    for left in eachindex(Names), right in (left + 1):length(Names)
+        push!(calls, quote
+            Base.mightalias(
+                getfield(outputs, $left), getfield(outputs, $right)) &&
+                throw(ArgumentError(
+                    "native PPL factor bundle outputs must not alias each other"))
+        end)
+    end
+    Expr(:block, calls..., :(nothing))
+end
+
+
+@inline function _factor_execute_bundle_draw!(rng,
+        work::FactorWorkspace, prepared::FactorPrepared,
+        position::AbstractVector)
+    _factor_check_execution(work, prepared, position)
+    if _has_generated_groups(prepared.plan)
+        _factor_predictive_kernel!(
+            rng, position, prepared, work.primal)
+    else
+        _factor_logdensity_kernel(position, prepared, work.primal)
+    end
+    nothing
+end
+
+@inline function _factor_execute_draws!(rng, outputs::NamedTuple{Names},
                                 work::FactorWorkspace,
                                 prepared::FactorPrepared,
                                 positions::AbstractMatrix,
@@ -2148,18 +2294,22 @@ function _factor_execute_draws!(rng, outputs::NamedTuple{Names},
     rng === nothing && _factor_bundle_requires_rng(query_values) &&
         throw(ArgumentError(
             "native PPL factor query bundle contains an RNG query; pass an RNG"))
+    rng === nothing && _has_generated_groups(prepared.plan) && throw(
+        ArgumentError(
+            "native PPL generated-group queries require an RNG; pass one " *
+            "even when requesting only a linear predictor"))
     _factor_bundle_requires_response(query_values) && !has_response(prepared) &&
         throw(ArgumentError(
             "native PPL factor pointwise query requires a conditioned response"))
-    _factor_check_bundle_outputs(
-        outputs, work, prepared, positions, queries)
+    _factor_check_positions(prepared, positions)
+    _factor_check_bundle_fields(
+        outputs, queries, work, prepared, positions, Val{length(Names)}())
+    _factor_check_bundle_output_aliases(outputs)
     for draw in axes(positions, 1)
-        position = @view positions[draw, :]
-        _factor_check_execution(work, prepared, position)
-        _factor_logdensity_kernel(position, prepared, work.primal)
-        output_rows = map(output -> @view(output[draw, :]), Tuple(outputs))
-        _factor_write_bundle_queries!(
-            rng, output_rows, query_values, work, prepared)
+        _factor_execute_bundle_draw!(
+            rng, work, prepared, @view(positions[draw, :]))
+        _factor_write_bundle_draw!(
+            rng, outputs, queries, draw, work, prepared)
     end
     outputs
 end

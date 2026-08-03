@@ -658,6 +658,28 @@ function factor_predictive_allocations(
         rng, output, workspace, prepared, position)
 end
 
+function factor_generated_draw_allocations(
+    predictive_rng, linear_rng, bundle_rng, predictive, linear, bundle,
+    workspace::NP.FactorWorkspace, prepared::NP.FactorPrepared,
+    positions, queries)
+    NP.simulate_draws!(
+        predictive_rng, predictive, workspace, prepared, positions)
+    NP.evaluate_draws!(
+        linear_rng, linear, workspace, prepared, positions,
+        NP.LinearPredictor())
+    NP.execute_draws!(
+        bundle_rng, bundle, workspace, prepared, positions, queries)
+    predictive_bytes = @allocated NP.simulate_draws!(
+        predictive_rng, predictive, workspace, prepared, positions)
+    linear_bytes = @allocated NP.evaluate_draws!(
+        linear_rng, linear, workspace, prepared, positions,
+        NP.LinearPredictor())
+    bundle_bytes = @allocated NP.execute_draws!(
+        bundle_rng, bundle, workspace, prepared, positions, queries)
+    (; predictive=predictive_bytes, linear=linear_bytes,
+       bundle=bundle_bytes)
+end
+
 function factor_batch_allocations(workspace::NP.FactorWorkspace,
                                   prepared::NP.FactorPrepared,
                                   positions, linear, pointwise, predictive,
@@ -3925,6 +3947,97 @@ end
         similar(varying_new_group_output), varying_new_group_workspace,
         varying_new_group_replay))
     @test new_group_prior_error.capability == :new_group_activity
+    varying_new_group_positions = [
+        varying_position';
+        log(0.9) -0.2 0.3 -0.4 0.15 log(0.6);
+    ]
+    varying_new_group_predictive = zeros(2, 4)
+    varying_new_group_manual_predictive = similar(
+        varying_new_group_predictive)
+    varying_new_group_manual_linear = similar(
+        varying_new_group_predictive)
+    varying_new_group_draw_rng = MersenneTwister(938)
+    varying_new_group_manual_rng = MersenneTwister(938)
+    for draw in axes(varying_new_group_positions, 1)
+        NP.simulate!(
+            varying_new_group_manual_rng,
+            @view(varying_new_group_manual_predictive[draw, :]),
+            varying_new_group_workspace, varying_new_group_replay,
+            @view(varying_new_group_positions[draw, :]))
+        varying_new_group_manual_linear[draw, :] .=
+            @view varying_new_group_workspace.primal.node_rows[2, :]
+    end
+    NP.simulate_draws!(
+        varying_new_group_draw_rng, varying_new_group_predictive,
+        varying_new_group_workspace, varying_new_group_replay,
+        varying_new_group_positions)
+    @test varying_new_group_predictive ==
+          varying_new_group_manual_predictive
+    varying_new_group_linear = zeros(2, 4)
+    varying_new_group_linear_manual = similar(varying_new_group_linear)
+    varying_new_group_linear_rng = MersenneTwister(939)
+    varying_new_group_linear_manual_rng = MersenneTwister(939)
+    for draw in axes(varying_new_group_positions, 1)
+        NP.evaluate!(
+            varying_new_group_linear_manual_rng,
+            @view(varying_new_group_linear_manual[draw, :]),
+            varying_new_group_workspace, varying_new_group_replay,
+            @view(varying_new_group_positions[draw, :]),
+            NP.LinearPredictor())
+    end
+    NP.evaluate_draws!(
+        varying_new_group_linear_rng, varying_new_group_linear,
+        varying_new_group_workspace, varying_new_group_replay,
+        varying_new_group_positions, NP.LinearPredictor())
+    @test varying_new_group_linear == varying_new_group_linear_manual
+    varying_new_group_queries = (;
+        linear=NP.LinearPredictor(),
+        predictive=NP.PosteriorPredictive())
+    varying_new_group_bundle = (;
+        linear=zeros(2, 4), predictive=zeros(2, 4))
+    varying_new_group_bundle_rng = MersenneTwister(938)
+    NP.execute_draws!(
+        varying_new_group_bundle_rng, varying_new_group_bundle,
+        varying_new_group_workspace, varying_new_group_replay,
+        varying_new_group_positions, varying_new_group_queries)
+    @test varying_new_group_bundle.linear == varying_new_group_manual_linear
+    @test varying_new_group_bundle.predictive ==
+          varying_new_group_manual_predictive
+    @test factor_generated_draw_allocations(
+        MersenneTwister(940), MersenneTwister(941), MersenneTwister(942),
+        varying_new_group_predictive, varying_new_group_linear,
+        varying_new_group_bundle, varying_new_group_workspace,
+        varying_new_group_replay, varying_new_group_positions,
+        varying_new_group_queries) ==
+          (; predictive=0, linear=0, bundle=0)
+    @test_throws ArgumentError NP.execute_draws!(
+        varying_new_group_bundle, varying_new_group_workspace,
+        varying_new_group_replay, varying_new_group_positions,
+        varying_new_group_queries)
+    node_rows_alias_rng = MersenneTwister(943)
+    node_rows_alias_expected_rng = MersenneTwister(943)
+    @test_throws ArgumentError NP.simulate_draws!(
+        node_rows_alias_rng,
+        varying_new_group_workspace.primal.node_rows,
+        varying_new_group_workspace, varying_new_group_replay,
+        varying_new_group_positions)
+    @test rand(node_rows_alias_rng) == rand(node_rows_alias_expected_rng)
+    pairwise_alias_output = zeros(2, 4)
+    pairwise_alias_rng = MersenneTwister(944)
+    pairwise_alias_expected_rng = MersenneTwister(944)
+    @test_throws ArgumentError NP.execute_draws!(
+        pairwise_alias_rng,
+        (; linear=pairwise_alias_output,
+           predictive=pairwise_alias_output),
+        varying_new_group_workspace, varying_new_group_replay,
+        varying_new_group_positions, varying_new_group_queries)
+    @test rand(pairwise_alias_rng) == rand(pairwise_alias_expected_rng)
+    varying_new_group_signature = NP.batch_output_signature(
+        varying_new_group_replay, varying_new_group_positions,
+        NP.LinearPredictor())
+    @test NP.output_axes(varying_new_group_signature) == (
+        BRM.NativePPLAxis(:draw, Base.OneTo(2)),
+        BRM.NativePPLAxis(:observation, Base.OneTo(4)))
 
     sampled_offset_plan = NP.compile(sampled_offset_brmi)
     @test sampled_offset_plan isa NP.FactorPlan
