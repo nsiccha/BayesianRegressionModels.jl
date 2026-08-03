@@ -534,6 +534,12 @@ function _lower_composition(composition::Composition)
             if hasproperty(instance.bindings, name)
                 value = getproperty(instance.bindings, name)
                 if value isa GraphRef
+                    graph_kind(value) === :site && throw(CapabilityError(
+                        :active_site_connection,
+                        "component `$namespace` port `$name` consumes " *
+                        "stochastic-site output " *
+                        "`$(graph_namespace(value)).$(graph_name(value))`; " *
+                        "factor-to-value schedule ordering is not available yet"))
                     _reference_active(value, components, activity)
                     mapping[name] = _resolved_reference(value, resolved)
                     resolved[(namespace, name)] = mapping[name]
@@ -932,24 +938,115 @@ function _validate_scale_parameter(name::Symbol, declaration::Parameter)
     nothing
 end
 
+function _bind_scalar_location(
+    declaration::Model, bindings::NamedTuple, conditions::NamedTuple)
+    isempty(bindings) || throw(CapabilityError(
+        :value_ports,
+        "scalar-only active composition cannot retain ordinary value bindings"))
+    isempty(declaration.nodes) || throw(CapabilityError(
+        :additional_nodes,
+        "the current scalar active compiler accepts no deterministic nodes"))
+    length(declaration.observations) == 1 || throw(CapabilityError(
+        :outcomes,
+        "the scalar active compiler requires exactly one observation declaration"))
+    response_name, lifted_observation =
+        only(collect(pairs(declaration.observations)))
+    is_broadcast_observation(lifted_observation) || throw(CapabilityError(
+        :broadcast_lifting,
+        "the scalar active compiler requires explicit dotted sampling"))
+    observation = scalar_observation(lifted_observation)
+    observation isa NormalObservation || throw(CapabilityError(
+        :likelihood,
+        "the first scalar active compiler slice supports Normal observations"))
+    observation_response(observation) === response_name || throw(
+        CapabilityError(
+            :graph_identity,
+            "scalar active stochastic-site identity must match its response"))
+    hasproperty(conditions, response_name) || throw(CapabilityError(
+        :observation_axis,
+        "a scalar-only unconditioned model has no observation-axis source; " *
+        "condition `$response_name` before compiling it"))
+    response = _binding(conditions, response_name, :conditioned_response)
+    eltype(response) <: Real || throw(CapabilityError(
+        :response_type,
+        "conditioned site `$response_name` must be a real vector"))
+    observation_count = length(response)
+    observation_count > 0 || throw(CapabilityError(
+        :observation_axis, "the observation axis cannot be empty"))
+
+    location_name, scale_name = observation_dependencies(observation)
+    location_name === scale_name && throw(CapabilityError(
+        :graph_identity,
+        "Normal location and scale must be distinct graph values"))
+    length(declaration.parameters) == 2 || throw(CapabilityError(
+        :additional_parameters,
+        "scalar Normal composition requires one location and one scale parameter"))
+    hasproperty(declaration.parameters, location_name) || throw(CapabilityError(
+        :parameter_binding,
+        "scalar Normal location references missing parameter `$location_name`"))
+    hasproperty(declaration.parameters, scale_name) || throw(CapabilityError(
+        :parameter_binding,
+        "scalar Normal scale references missing parameter `$scale_name`"))
+    location_declaration = getproperty(declaration.parameters, location_name)
+    scale_declaration = getproperty(declaration.parameters, scale_name)
+    _validate_coefficient_parameter(location_name, location_declaration, 0)
+    only(location_declaration.axis_keys) === location_name || throw(
+        CapabilityError(
+            :parameter_axis,
+            "scalar location parameter `$location_name` must use its graph " *
+            "identity as its axis key"))
+    _validate_scale_parameter(scale_name, scale_declaration)
+
+    observation_axis = BRM.NativePPLAxis(
+        :observation, Base.OneTo(observation_count))
+    coefficient_axis = BRM.NativePPLAxis(
+        Symbol(location_name, :_scalar), location_declaration.axis_keys)
+    scale_axis = BRM.NativePPLAxis(
+        Symbol(scale_name, :_scalar), scale_declaration.axis_keys)
+    response_input = BRM.NativePPLInput(
+        response_name, :response, observation_axis, eltype(response))
+    coefficients = BRM.NativePPLParameter(
+        location_name, location_declaration.support,
+        location_declaration.transform, coefficient_axis, 1:1)
+    scale = BRM.NativePPLParameter(
+        scale_name, scale_declaration.support, scale_declaration.transform,
+        scale_axis, 2:2)
+    location = BRM.NativePPLScalarBroadcastNode(
+        location_name, location_name, observation_axis, 1)
+    coefficient_prior = BRM.NativePPLStandardNormalFactor(location_name, 1:1)
+    scale_prior = BRM.NativePPLExponentialFactor(
+        scale_name, 2, scale_declaration.prior.scale)
+    likelihood = BRM.NativePPLNormalFactor(
+        response_name, location_name, scale_name, observation_axis)
+    _validated_plan(BRM.NativePPLPlan(
+        (; observation=observation_axis, coefficient=coefficient_axis,
+           scale=scale_axis),
+        (; predictors=(;), response=response_input),
+        (; coefficients, scale),
+        (; transforms=(;), location),
+        (; coefficient_prior, scale_prior, likelihood),
+        BRM._native_ppl_queries(observation_axis, likelihood),
+        NamedTuple{(response_name,)}((response,))))
+end
+
 """
     bind(model::Model, bindings; conditions=(;)) -> Plan
 
 Fit data-derived nodes and compile the current direct declaration subset into
-the same typed executable `Plan` used by BRM. This initial compiler accepts one
-or more continuous predictors, one affine node, an optional fitted
-center/zscale node per predictor, an optional exponential rate link, and one
-Normal/BernoulliLogit/Poisson stochastic site. The executor subset requires
-explicit broadcast lifting; conditions are optional so the same declaration
-can compile for generative prediction. Unsupported graph shapes fail closed.
+the same typed executable `Plan` used by BRM. The compiler accepts either one
+or more continuous predictors feeding an affine location, or an actively
+connected scalar parameter broadcast over a conditioned observation axis. The
+affine path supports optional fitted center/zscale nodes, an optional
+exponential rate link, and one Normal/BernoulliLogit/Poisson stochastic site;
+the first scalar-active path supports Normal. The executor requires explicit
+broadcast lifting. Unsupported graph shapes fail closed.
 """
 function _bind(declaration::Model, bindings, conditions)
     _validate_model(declaration)
     _validate_binding_names(declaration, bindings)
     _validate_condition_names(declaration, conditions)
-    isempty(declaration.inputs) && throw(CapabilityError(
-        :value_ports,
-        "the current affine compiler requires at least one connected value port"))
+    isempty(declaration.inputs) &&
+        return _bind_scalar_location(declaration, bindings, conditions)
     predictor_names = Tuple(keys(declaration.inputs))
     predictors = map(predictor_names) do predictor_name
         predictor_declaration = getproperty(declaration.inputs, predictor_name)

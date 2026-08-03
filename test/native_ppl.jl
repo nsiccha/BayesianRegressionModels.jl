@@ -2356,6 +2356,10 @@ end
           bindings.x === parameter
     @test stochastic_composition.components.stochastic_sink.instance.
           bindings.x === stochastic
+    @test capability_error(
+        () -> NP.lower(stochastic_composition)).capability ==
+          :active_site_connection
+
     active_lowered = NP.lower(composition)
     sink_location_name = NP.qualified_name(:sink, :mu)
     @test !hasproperty(
@@ -2479,8 +2483,56 @@ end
         scalar_response_name)) == (theta_name, sigma_name)
     @test isempty(active_scalar_lowered.bindings)
     @test keys(active_scalar_lowered.conditions) == (scalar_response_name,)
-    @test capability_error(() -> NP.compile(active_scalar)).capability ==
-          :value_ports
+    scalar_plan = NP.compile(active_scalar)
+    @test isempty(scalar_plan.inputs.predictors)
+    @test scalar_plan.nodes.location isa BRM.NativePPLScalarBroadcastNode
+    @test BRM.native_node_name(scalar_plan.nodes.location) === theta_name
+    @test BRM.native_scalar_parameter(scalar_plan.nodes.location) === theta_name
+    @test LogDensityProblems.dimension(scalar_plan) == 2
+
+    scalar_prepared = NP.prepare(scalar_plan)
+    scalar_position = [0.3, log(0.8)]
+    scalar_workspace = NP.workspace(
+        scalar_prepared, Float64, DI.AutoEnzyme())
+    expected_location = fill(scalar_position[1], length(response))
+    expected_density = logpdf(Normal(), scalar_position[1]) +
+        logpdf(Exponential(2.0), exp(scalar_position[2])) +
+        scalar_position[2] +
+        sum(logpdf.(Normal.(expected_location, exp(scalar_position[2])), response))
+    residuals = response .- scalar_position[1]
+    expected_gradient = [
+        -scalar_position[1] + sum(residuals) / exp(2 * scalar_position[2]),
+        1 - exp(scalar_position[2]) / 2 - length(response) +
+            sum(abs2, residuals) / exp(2 * scalar_position[2]),
+    ]
+    scalar_density, scalar_gradient = NP.logdensity_and_gradient!(
+        scalar_workspace, scalar_prepared, scalar_position)
+    @test scalar_density ≈ expected_density
+    @test scalar_gradient ≈ expected_gradient
+    @test NP.evaluate(
+        scalar_workspace, scalar_prepared, scalar_position,
+        NP.LinearPredictor()) == expected_location
+    @test length(NP.simulate(
+        MersenneTwister(911), scalar_workspace, scalar_prepared,
+        scalar_position)) == length(response)
+    @test steady_state_allocations(
+        scalar_workspace, scalar_prepared, scalar_position) ==
+          (; primal=0, gradient=0)
+
+    rebound_response = [0.1, 0.4, 0.8]
+    scalar_rebound = NP.rebind(
+        scalar_prepared,
+        NamedTuple{(scalar_response_name,)}((rebound_response,)))
+    @test isempty(scalar_rebound.predictors)
+    @test scalar_rebound.response == rebound_response
+    @test length(scalar_rebound.plan.axes.observation) == 3
+    @test_throws ArgumentError NP.rebind(scalar_prepared, (;))
+
+    unconditioned_scalar = NP.compose(
+        scalar_prior_component,
+        NP.component(:unconditioned, scalar_normal_likelihood(theta)))
+    @test capability_error(
+        () -> NP.compile(unconditioned_scalar)).capability == :observation_axis
 end
 
 
@@ -2730,7 +2782,7 @@ end
     @test scalar_prior.declaration.outputs == (; theta=:theta)
     prior_component = NP.component(:prior, scalar_prior)
     @test NP.graph_kind(NP.output(prior_component, :theta)) === :parameter
-    @test capability_error(() -> NP.bind(scalar_prior)).capability == :value_ports
+    @test capability_error(() -> NP.bind(scalar_prior)).capability == :outcomes
 
     aliased_prior = aliased_scalar_normal_prior()
     @test keys(aliased_prior.declaration.parameters) == (:theta,)
