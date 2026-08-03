@@ -789,16 +789,9 @@ end
         position, prepared, buffers)
 end
 
-function _factor_check_execution(workspace::FactorWorkspace,
-                                 prepared::FactorPrepared,
-                                 position::AbstractVector)
+function _factor_check_workspace_layout(workspace::FactorWorkspace,
+                                        prepared::FactorPrepared)
     dimension = BRM.LogDensityProblems.dimension(prepared)
-    length(position) == dimension || throw(DimensionMismatch(
-        "native PPL factor position has length $(length(position)); " *
-        "expected $dimension"))
-    eltype(position) === eltype(workspace) || throw(ArgumentError(
-        "native PPL factor position eltype $(eltype(position)) does not " *
-        "match workspace eltype $(eltype(workspace))"))
     eltype(prepared) === eltype(workspace) || throw(ArgumentError(
         "native PPL factor prepared eltype $(eltype(prepared)) does not " *
         "match workspace eltype $(eltype(workspace))"))
@@ -811,6 +804,20 @@ function _factor_check_execution(workspace::FactorWorkspace,
     length(workspace.primal.pointwise_loglikelihood) ==
         length(prepared.plan.observation_axis) || throw(DimensionMismatch(
             "native PPL factor workspace has the wrong observation layout"))
+    nothing
+end
+
+function _factor_check_execution(workspace::FactorWorkspace,
+                                 prepared::FactorPrepared,
+                                 position::AbstractVector)
+    dimension = BRM.LogDensityProblems.dimension(prepared)
+    length(position) == dimension || throw(DimensionMismatch(
+        "native PPL factor position has length $(length(position)); " *
+        "expected $dimension"))
+    eltype(position) === eltype(workspace) || throw(ArgumentError(
+        "native PPL factor position eltype $(eltype(position)) does not " *
+        "match workspace eltype $(eltype(workspace))"))
+    _factor_check_workspace_layout(workspace, prepared)
     for buffer in (workspace.gradient, workspace.primal.values,
                    workspace.primal.pointwise_loglikelihood)
         Base.mightalias(position, buffer) && throw(ArgumentError(
@@ -1131,6 +1138,7 @@ function _factor_check_batch_output(output::AbstractMatrix,
                                     prepared::FactorPrepared,
                                     positions::AbstractMatrix,
                                     query::BRM.NativePPLQuery)
+    _factor_check_workspace_layout(work, prepared)
     signature = batch_output_signature(prepared, positions, query)
     draw_axis, observation_axis = BRM.native_output_axes(signature)
     axes(output) == (draw_axis.keys, observation_axis.keys) ||
@@ -1254,11 +1262,22 @@ function _factor_check_bundle_outputs(outputs::NamedTuple{Names},
                                       prepared::FactorPrepared,
                                       positions::AbstractMatrix,
                                       queries::NamedTuple{Names}) where {Names}
-    for (output, query) in zip(Tuple(outputs), Tuple(queries))
+    query_values = Tuple(queries)
+    all(query -> query isa BRM.NativePPLQuery, query_values) ||
+        throw(ArgumentError(
+            "native PPL factor query bundles require typed graph queries"))
+    output_values = Tuple(outputs)
+    for (index, (output, query)) in enumerate(zip(output_values, query_values))
         output isa AbstractMatrix || throw(ArgumentError(
             "native PPL factor bundle outputs must be matrices"))
         _factor_check_batch_output(
             output, work, prepared, positions, query)
+        for previous_index in 1:(index - 1)
+            Base.mightalias(output, output_values[previous_index]) &&
+                throw(ArgumentError(
+                    "native PPL factor bundle outputs `$(Names[index])` and " *
+                    "`$(Names[previous_index])` must not alias"))
+        end
     end
     nothing
 end

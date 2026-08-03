@@ -3432,6 +3432,25 @@ end
         hierarchy_batch_linear, hierarchy_batch_pointwise,
         hierarchy_batch_predictive, hierarchy_batch_bundle) ==
           (; linear=0, pointwise=0, predictive=0, bundle=0)
+    hierarchy_aliased_bundle = similar(hierarchy_linear_draws)
+    hierarchy_aliased_bundle_rng = MersenneTwister(928)
+    hierarchy_aliased_bundle_control_rng = MersenneTwister(928)
+    @test_throws ArgumentError NP.execute_draws!(
+        hierarchy_aliased_bundle_rng,
+        (; linear=hierarchy_aliased_bundle,
+           predictive=hierarchy_aliased_bundle),
+        hierarchy_workspace, hierarchy_prepared, hierarchy_positions,
+        (; linear=NP.LinearPredictor(),
+           predictive=NP.PosteriorPredictive()))
+    @test rand(hierarchy_aliased_bundle_rng) ==
+          rand(hierarchy_aliased_bundle_control_rng)
+
+    hierarchy_empty_positions = zeros(Float32, 0, 4)
+    hierarchy_empty_output = zeros(Float64, 0, length(response))
+    @test_throws ArgumentError NP.evaluate_draws!(
+        hierarchy_empty_output,
+        NP.workspace(hierarchy_prepared, Float32), hierarchy_prepared,
+        hierarchy_empty_positions, NP.LinearPredictor())
     @test NP.LogDensityProblem(
         hierarchy_prepared, DI.AutoEnzyme()) isa NP.FactorLogDensityProblem
     conditioned_individual_plan = NP.compile(NP.condition(
