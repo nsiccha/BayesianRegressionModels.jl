@@ -480,6 +480,20 @@ NP.@model function natural_correlated_varying_three(x, w, group)
     @. y ~ Normal(mu, sigma)
 end
 
+NP.@model function natural_crossed_group_regression(x, subject, item)
+    tau_p_subject[(:Intercept, :x)] ~ Exponential(1)
+    L_p_subject[(:Intercept, :x)] ~ LKJCholesky(2, 2)
+    b_p_subject[subject, (:Intercept, :x)] ~
+        MvNormalCholesky(tau_p_subject, L_p_subject)
+    tau_q_item ~ Exponential(1)
+    b_q_item[item] ~ Normal(0.0, tau_q_item)
+    beta_mu[(:x,)] ~ StandardNormal()
+    sigma ~ Exponential(2)
+    mu = dot(beta_mu, (x,)) +
+        dot(b_p_subject[subject], (1, x)) + b_q_item[item]
+    @. y ~ Normal(mu, sigma)
+end
+
 NP.@model function natural_correlated_bernoulli_logit(x, group)
     tau_p_group[(:Intercept, :x)] ~ Exponential(1)
     L_p_group[(:Intercept, :x)] ~ LKJCholesky(2, 2)
@@ -4783,6 +4797,355 @@ end
         three_queries) ==
           (; predictive=0, linear=0, bundle=0)
 
+    crossed_group_data = (;
+        x=[-1.0, 0.0, 1.0, 2.0, -0.5, 0.5],
+        subject=[:s1, :s2, :s1, :s3, :s2, :s3],
+        item=[:i1, :i1, :i2, :i2, :i3, :i3],
+        y=[0.1, 0.4, 0.8, 1.0, 0.2, 0.7])
+    crossed_group_brm = @brm crossed_group_data begin
+        sigma ~ Exponential(2)
+        mu ~ 0 + x + (1 + x | p | subject) + (1 | q | item)
+        sd(:, p) ~ Exponential(1)
+        cor(:, p) ~ LKJCholesky(2, 2)
+        sd(:, q) ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end
+    @test SBBRMI(crossed_group_brm; mod=@__MODULE__) isa SBBRMI
+    crossed_group_model = NP.lower(crossed_group_brm)
+    @test keys(crossed_group_model.inputs) == (:x, :subject, :item)
+    @test keys(crossed_group_model.parameters) == (
+        :beta_mu, :tau_p_subject, :L_p_subject, :b_p_subject,
+        :tau_q_item, :b_q_item, :sigma)
+    @test keys(crossed_group_model.nodes) == (
+        :b_p_subject_by_subject_for_mu, :r_mu_q_item, :mu)
+    @test crossed_group_model.site_order == (
+        :tau_p_subject, :L_p_subject, :b_p_subject,
+        :tau_q_item, :b_q_item, :beta_mu, :sigma, :y)
+    crossed_group_plan = NP.compile(crossed_group_brm)
+    @test crossed_group_plan.graph.dimension == 15
+    @test crossed_group_plan.group_indices == (
+        b_p_subject_by_subject_for_mu=(1, 2, 1, 3, 2, 3),
+        r_mu_q_item=(1, 1, 2, 2, 3, 3))
+    @test crossed_group_plan.graph.schedule == (
+        :tau_p_subject, :L_p_subject, :b_p_subject,
+        :tau_q_item, :b_q_item, :beta_mu, :sigma,
+        :b_p_subject_by_subject_for_mu, :r_mu_q_item, :mu, :y)
+    crossed_group_prepared = NP.prepare(crossed_group_plan)
+    crossed_group_workspace = NP.workspace(
+        crossed_group_prepared, Float64, DI.AutoEnzyme())
+    crossed_group_position = [
+        log(0.6), log(0.4), 0.25,
+        0.2, -0.3, -0.1, 0.5, 0.4, -0.2,
+        log(0.3), 0.1, -0.2, 0.25,
+        0.5, log(0.45)]
+    crossed_subject_tau = exp.(crossed_group_position[1:2])
+    crossed_subject_raw = crossed_group_position[3]
+    crossed_subject_rho = tanh(crossed_subject_raw)
+    crossed_subject_sech = 1 / cosh(crossed_subject_raw)
+    crossed_subject_z = reshape(crossed_group_position[4:9], 2, 3)
+    crossed_subject_effects = [
+        (crossed_subject_tau[1] * crossed_subject_z[1, group],
+         crossed_subject_tau[2] *
+            (crossed_subject_rho * crossed_subject_z[1, group] +
+             crossed_subject_sech * crossed_subject_z[2, group]))
+        for group in 1:3]
+    crossed_item_tau = exp(crossed_group_position[10])
+    crossed_item_effects = crossed_group_position[11:13]
+    crossed_beta = crossed_group_position[14]
+    crossed_sigma = exp(crossed_group_position[15])
+    crossed_mu = [
+        crossed_beta * crossed_group_data.x[row] +
+        crossed_subject_effects[[1, 2, 1, 3, 2, 3][row]][1] +
+        crossed_subject_effects[[1, 2, 1, 3, 2, 3][row]][2] *
+            crossed_group_data.x[row] +
+        crossed_item_effects[[1, 1, 2, 2, 3, 3][row]]
+        for row in eachindex(crossed_group_data.x)]
+    crossed_lkj_constant = BRM.loggamma(2.5) - BRM.loggamma(2.0) -
+        0.5 * log(pi)
+    crossed_expected_density =
+        sum(logpdf.(Exponential(1), crossed_subject_tau)) +
+        sum(crossed_group_position[1:2]) +
+        crossed_lkj_constant +
+        2 * NP._factor_logsech2(crossed_subject_raw) +
+        sum(logpdf.(Normal(), crossed_subject_z)) +
+        logpdf(Exponential(1), crossed_item_tau) +
+        crossed_group_position[10] +
+        sum(logpdf.(Normal(0, crossed_item_tau), crossed_item_effects)) +
+        logpdf(Normal(), crossed_beta) +
+        logpdf(Exponential(2), crossed_sigma) +
+        crossed_group_position[15] +
+        sum(logpdf.(Normal.(crossed_mu, crossed_sigma),
+                    crossed_group_data.y))
+    crossed_density, crossed_gradient = NP.logdensity_and_gradient!(
+        crossed_group_workspace, crossed_group_prepared,
+        crossed_group_position)
+    @test crossed_density ≈ crossed_expected_density
+    @test NP.evaluate(
+        crossed_group_workspace, crossed_group_prepared,
+        crossed_group_position, NP.LinearPredictor()) ≈ crossed_mu
+    @test NP.evaluate(
+        crossed_group_workspace, crossed_group_prepared,
+        crossed_group_position, NP.PointwiseLogLikelihood()) ≈
+          logpdf.(Normal.(crossed_mu, crossed_sigma), crossed_group_data.y)
+    crossed_finite_difference = similar(crossed_gradient)
+    crossed_plus = copy(crossed_group_position)
+    crossed_minus = copy(crossed_group_position)
+    crossed_step = 1e-6
+    for coordinate in eachindex(crossed_finite_difference)
+        crossed_plus[coordinate] += crossed_step
+        crossed_minus[coordinate] -= crossed_step
+        crossed_finite_difference[coordinate] = (
+            NP.logdensity!(
+                crossed_group_workspace, crossed_group_prepared,
+                crossed_plus) -
+            NP.logdensity!(
+                crossed_group_workspace, crossed_group_prepared,
+                crossed_minus)) / (2 * crossed_step)
+        crossed_plus[coordinate] = crossed_group_position[coordinate]
+        crossed_minus[coordinate] = crossed_group_position[coordinate]
+    end
+    @test crossed_gradient ≈ crossed_finite_difference rtol=2e-5 atol=2e-6
+    @test factor_steady_state_allocations(
+        crossed_group_workspace, crossed_group_prepared,
+        crossed_group_position) == (; primal=0, gradient=0)
+    natural_crossed_group = NP.condition(
+        natural_crossed_group_regression(
+            crossed_group_data.x, crossed_group_data.subject,
+            crossed_group_data.item);
+        y=crossed_group_data.y)
+    @test natural_crossed_group.declaration == crossed_group_model
+    natural_crossed_prepared = NP.prepare(natural_crossed_group)
+    natural_crossed_workspace = NP.workspace(
+        natural_crossed_prepared, Float64, DI.AutoEnzyme())
+    natural_crossed_density, natural_crossed_gradient =
+        NP.logdensity_and_gradient!(
+            natural_crossed_workspace, natural_crossed_prepared,
+            crossed_group_position)
+    @test natural_crossed_density ≈ crossed_density
+    @test natural_crossed_gradient ≈ crossed_gradient
+    @test NP.evaluate(
+        natural_crossed_workspace, natural_crossed_prepared,
+        crossed_group_position, NP.LinearPredictor()) ≈ crossed_mu
+    @test factor_steady_state_allocations(
+        natural_crossed_workspace, natural_crossed_prepared,
+        crossed_group_position) == (; primal=0, gradient=0)
+
+    crossed_known_bindings = (;
+        x=[1.5, -0.5, 0.75, 2.0],
+        subject=[:s3, :s1, :s2, :s3],
+        item=[:i2, :i3, :i1, :i2])
+    crossed_known_replay = NP.rebind(
+        crossed_group_prepared, (;); bindings=crossed_known_bindings)
+    @test crossed_known_replay.plan.graph.dimension ==
+          crossed_group_plan.graph.dimension
+    @test crossed_known_replay.plan.group_indices == (
+        b_p_subject_by_subject_for_mu=(3, 1, 2, 3),
+        r_mu_q_item=(2, 3, 1, 2))
+    crossed_known_mu = [
+        crossed_beta * crossed_known_bindings.x[row] +
+        crossed_subject_effects[[3, 1, 2, 3][row]][1] +
+        crossed_subject_effects[[3, 1, 2, 3][row]][2] *
+            crossed_known_bindings.x[row] +
+        crossed_item_effects[[2, 3, 1, 2][row]]
+        for row in eachindex(crossed_known_bindings.x)]
+    @test NP.evaluate(
+        NP.workspace(crossed_known_replay), crossed_known_replay,
+        crossed_group_position, NP.LinearPredictor()) ≈ crossed_known_mu
+
+    crossed_subject_only_bindings = (;
+        x=[0.0, 1.0], subject=[:s4, :s1], item=[:i1, :i2])
+    crossed_subject_only = NP.rebind(
+        crossed_group_prepared, (;);
+        bindings=crossed_subject_only_bindings, new_groups=:resample)
+    @test crossed_subject_only.plan.generated_group_levels ==
+          (; b_p_subject=(:s4,), b_q_item=())
+    @test crossed_subject_only.plan.generated_group_indices.b_p_subject == 1:2
+    @test isempty(
+        crossed_subject_only.plan.generated_group_indices.b_q_item)
+    @test crossed_subject_only.plan.group_indices == (
+        b_p_subject_by_subject_for_mu=(-1, 1),
+        r_mu_q_item=(1, 2))
+
+    crossed_item_only_bindings = (;
+        x=[0.0, 1.0], subject=[:s1, :s2], item=[:i4, :i2])
+    crossed_item_only = NP.rebind(
+        crossed_group_prepared, (;);
+        bindings=crossed_item_only_bindings, new_groups=:resample)
+    @test crossed_item_only.plan.generated_group_levels ==
+          (; b_p_subject=(), b_q_item=(:i4,))
+    @test isempty(
+        crossed_item_only.plan.generated_group_indices.b_p_subject)
+    @test crossed_item_only.plan.generated_group_indices.b_q_item == 1:1
+    @test crossed_item_only.plan.group_indices == (
+        b_p_subject_by_subject_for_mu=(1, 2),
+        r_mu_q_item=(-1, 2))
+
+    crossed_new_bindings = (;
+        x=[-1.0, 0.5, 1.5, 2.0, -0.25],
+        subject=[:s1, :s4, :s4, :s3, :s2],
+        item=[:i4, :i2, :i4, :i3, :i2])
+    @test_throws NP.CapabilityError NP.rebind(
+        crossed_group_prepared, (;); bindings=crossed_new_bindings)
+    crossed_new_replay = NP.rebind(
+        crossed_group_prepared, (;); bindings=crossed_new_bindings,
+        new_groups=:resample)
+    @test crossed_new_replay.plan.graph.dimension ==
+          crossed_group_plan.graph.dimension
+    @test crossed_new_replay.plan.generated_group_levels ==
+          (; b_p_subject=(:s4,), b_q_item=(:i4,))
+    @test crossed_new_replay.plan.generated_group_indices ==
+          (; b_p_subject=1:2, b_q_item=3:3)
+    @test crossed_new_replay.plan.group_indices == (
+        b_p_subject_by_subject_for_mu=(1, -1, -1, 3, 2),
+        r_mu_q_item=(-1, 2, -1, 3, 2))
+    @test_throws NP.CapabilityError NP.rebind(
+        crossed_group_prepared, (; y=zeros(5));
+        bindings=crossed_new_bindings, new_groups=:resample)
+    crossed_new_workspace = NP.workspace(crossed_new_replay)
+    crossed_new_rng = MersenneTwister(980)
+    crossed_new_expected_rng = MersenneTwister(980)
+    crossed_new_subject_z = (
+        randn(crossed_new_expected_rng),
+        randn(crossed_new_expected_rng))
+    crossed_new_subject_effect = (
+        crossed_subject_tau[1] * crossed_new_subject_z[1],
+        crossed_subject_tau[2] *
+            (crossed_subject_rho * crossed_new_subject_z[1] +
+             crossed_subject_sech * crossed_new_subject_z[2]))
+    crossed_new_item_effect =
+        crossed_item_tau * randn(crossed_new_expected_rng)
+    crossed_new_subject_effects = [
+        crossed_subject_effects[1], crossed_new_subject_effect,
+        crossed_new_subject_effect, crossed_subject_effects[3],
+        crossed_subject_effects[2]]
+    crossed_new_item_effects = [
+        crossed_new_item_effect, crossed_item_effects[2],
+        crossed_new_item_effect, crossed_item_effects[3],
+        crossed_item_effects[2]]
+    crossed_new_mu = [
+        crossed_beta * crossed_new_bindings.x[row] +
+        crossed_new_subject_effects[row][1] +
+        crossed_new_subject_effects[row][2] *
+            crossed_new_bindings.x[row] +
+        crossed_new_item_effects[row]
+        for row in eachindex(crossed_new_bindings.x)]
+    crossed_new_expected = [
+        location + crossed_sigma * randn(crossed_new_expected_rng)
+        for location in crossed_new_mu]
+    crossed_new_output = zeros(5)
+    NP.simulate!(
+        crossed_new_rng, crossed_new_output,
+        crossed_new_workspace, crossed_new_replay,
+        crossed_group_position)
+    @test crossed_new_output ≈ crossed_new_expected
+    @test crossed_new_workspace.primal.generated_group_values ≈
+          [crossed_new_subject_z..., crossed_new_item_effect]
+    @test vec(crossed_new_workspace.primal.node_rows[3, :]) ≈
+          crossed_new_mu
+    @test factor_predictive_allocations(
+        MersenneTwister(981), crossed_new_output,
+        crossed_new_workspace, crossed_new_replay,
+        crossed_group_position) == 0
+    @test_throws NP.CapabilityError NP.logdensity!(
+        crossed_new_workspace, crossed_new_replay,
+        crossed_group_position)
+    @test_throws NP.CapabilityError NP.evaluate!(
+        similar(crossed_new_output), crossed_new_workspace,
+        crossed_new_replay, crossed_group_position,
+        NP.LinearPredictor())
+    crossed_new_linear = zeros(5)
+    NP.evaluate!(
+        MersenneTwister(982), crossed_new_linear,
+        crossed_new_workspace, crossed_new_replay,
+        crossed_group_position, NP.LinearPredictor())
+    crossed_new_linear_expected_rng = MersenneTwister(982)
+    crossed_linear_subject_z = (
+        randn(crossed_new_linear_expected_rng),
+        randn(crossed_new_linear_expected_rng))
+    crossed_linear_subject_effect = (
+        crossed_subject_tau[1] * crossed_linear_subject_z[1],
+        crossed_subject_tau[2] *
+            (crossed_subject_rho * crossed_linear_subject_z[1] +
+             crossed_subject_sech * crossed_linear_subject_z[2]))
+    crossed_linear_item_effect =
+        crossed_item_tau * randn(crossed_new_linear_expected_rng)
+    crossed_linear_subject_effects = [
+        crossed_subject_effects[1], crossed_linear_subject_effect,
+        crossed_linear_subject_effect, crossed_subject_effects[3],
+        crossed_subject_effects[2]]
+    crossed_linear_item_effects = [
+        crossed_linear_item_effect, crossed_item_effects[2],
+        crossed_linear_item_effect, crossed_item_effects[3],
+        crossed_item_effects[2]]
+    @test crossed_new_linear ≈ [
+        crossed_beta * crossed_new_bindings.x[row] +
+        crossed_linear_subject_effects[row][1] +
+        crossed_linear_subject_effects[row][2] *
+            crossed_new_bindings.x[row] +
+        crossed_linear_item_effects[row]
+        for row in eachindex(crossed_new_bindings.x)]
+
+    crossed_draw_positions = [
+        crossed_group_position';
+        (crossed_group_position .+
+         [0.02, -0.03, 0.01, 0.04, -0.02,
+          0.03, -0.01, 0.02, -0.04, 0.01,
+          0.03, -0.02, 0.01, 0.05, -0.03])']
+    crossed_draw_predictive = zeros(2, 5)
+    crossed_draw_linear = zeros(2, 5)
+    crossed_manual_predictive = zeros(2, 5)
+    crossed_manual_linear = zeros(2, 5)
+    crossed_manual_fused_linear = zeros(2, 5)
+    crossed_draw_rng = MersenneTwister(983)
+    crossed_manual_rng = MersenneTwister(983)
+    for draw in axes(crossed_draw_positions, 1)
+        NP.simulate!(
+            crossed_manual_rng,
+            @view(crossed_manual_predictive[draw, :]),
+            crossed_new_workspace, crossed_new_replay,
+            @view(crossed_draw_positions[draw, :]))
+        crossed_manual_fused_linear[draw, :] .=
+            @view crossed_new_workspace.primal.node_rows[3, :]
+    end
+    NP.simulate_draws!(
+        crossed_draw_rng, crossed_draw_predictive,
+        crossed_new_workspace, crossed_new_replay,
+        crossed_draw_positions)
+    @test crossed_draw_predictive == crossed_manual_predictive
+    NP.evaluate_draws!(
+        MersenneTwister(984), crossed_draw_linear,
+        crossed_new_workspace, crossed_new_replay,
+        crossed_draw_positions, NP.LinearPredictor())
+    crossed_linear_rng = MersenneTwister(984)
+    for draw in axes(crossed_draw_positions, 1)
+        NP.evaluate!(
+            crossed_linear_rng,
+            @view(crossed_manual_linear[draw, :]),
+            crossed_new_workspace, crossed_new_replay,
+            @view(crossed_draw_positions[draw, :]),
+            NP.LinearPredictor())
+    end
+    @test crossed_draw_linear == crossed_manual_linear
+    crossed_queries = (;
+        linear=NP.LinearPredictor(),
+        predictive=NP.PosteriorPredictive())
+    crossed_bundle = (;
+        linear=zeros(2, 5), predictive=zeros(2, 5))
+    NP.execute_draws!(
+        MersenneTwister(983), crossed_bundle,
+        crossed_new_workspace, crossed_new_replay,
+        crossed_draw_positions, crossed_queries)
+    @test crossed_bundle.linear == crossed_manual_fused_linear
+    @test crossed_bundle.predictive == crossed_manual_predictive
+    @test factor_generated_draw_allocations(
+        MersenneTwister(985), MersenneTwister(986),
+        MersenneTwister(987),
+        crossed_draw_predictive, crossed_draw_linear,
+        crossed_bundle, crossed_new_workspace,
+        crossed_new_replay, crossed_draw_positions,
+        crossed_queries) ==
+          (; predictive=0, linear=0, bundle=0)
+
     varying_brm_data = (;
         x=sampled_offset_data.x,
         group=grouped_bindings.group,
@@ -5278,17 +5641,17 @@ end
     @test keys(natural_varying.declaration.parameters) ==
           keys(varying_model.parameters)
     @test keys(natural_varying.declaration.nodes) ==
-          (:b_p_group_by_group_for_mu, :mu)
+          (:r_mu_p_group, :mu)
     @test natural_varying.declaration.site_order == varying_model.site_order
     @test natural_varying.declaration.parameters.beta_mu.axis_keys == (:beta,)
     @test varying_model.parameters.beta_mu.axis_keys == (:x,)
     @test NP.group_input(
         natural_varying.declaration.parameters.b_p_group) === :group
     @test NP.group_values(
-        natural_varying.declaration.nodes.b_p_group_by_group_for_mu) ===
+        natural_varying.declaration.nodes.r_mu_p_group) ===
           :b_p_group
     @test NP.group_input(
-        natural_varying.declaration.nodes.b_p_group_by_group_for_mu) ===
+        natural_varying.declaration.nodes.r_mu_p_group) ===
           :group
     varying_plan = NP.compile(varying_brm)
     @test varying_plan isa NP.FactorPlan
@@ -5677,8 +6040,8 @@ end
     @test keys(natural_varying_slope_instance.declaration.parameters) ==
           keys(varying_slope_model.parameters)
     @test keys(natural_varying_slope_instance.declaration.nodes) == (
-        :b_p_group_by_group_for_mu,
-        :b_p_group_by_group_for_mu_times_x,
+        :r_mu_p_group,
+        :r_mu_p_group_times_x,
         :mu)
     @test natural_varying_slope_instance.declaration.site_order ==
           varying_slope_model.site_order
@@ -6904,6 +7267,19 @@ end
             @. y ~ Normal(mu, sigma)
         end)))
     @test occursin("grouped offsets must be used once each", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function repeated_correlated_group(
+                x, group)
+            tau[(:Intercept, :x)] ~ Exponential(1)
+            L[(:Intercept, :x)] ~ LKJCholesky(2, 2)
+            b[group, (:Intercept, :x)] ~ MvNormalCholesky(tau, L)
+            beta ~ Normal()
+            sigma ~ Exponential(2)
+            mu = beta * x + dot(b[group], (1, x)) +
+                dot(b[group], (1, x))
+            @. y ~ Normal(mu, sigma)
+        end)))
+    @test occursin("distinct public node identities", err.msg)
     err = argument_error(() -> macroexpand(
         @__MODULE__, :(NP.@model function recursive_model(x)
             z ~ recursive_model(x)

@@ -5367,6 +5367,17 @@ function _syntax_affine_terms(expression)
     terms
 end
 
+function _syntax_group_gather_name(site::Symbol, group::Symbol,
+                                   location::Symbol)
+    spelling = String(site)
+    suffix = string('_', group)
+    if startswith(spelling, "b_") && endswith(spelling, suffix)
+        id = chop(spelling; head=2, tail=length(suffix))
+        isempty(id) || return Symbol(:r_, location, :_, id, :_, group)
+    end
+    Symbol(site, :_by_, group, :_for_, location)
+end
+
 function _syntax_affine_assignment(statement,
                                    scalar_priors::Set{Symbol},
                                    block_priors::Dict{Symbol,Tuple},
@@ -5381,6 +5392,7 @@ function _syntax_affine_assignment(statement,
     gathered_offsets = NamedTuple[]
     grouped_products = NamedTuple[]
     correlated_groups = NamedTuple[]
+    group_node_order = NamedTuple[]
     population_blocks = NamedTuple[]
     ordinary_terms = Any[]
     for term in terms
@@ -5403,9 +5415,11 @@ function _syntax_affine_assignment(statement,
             grouped_sites[site_name] === group_name || throw(ArgumentError(
                 "native PPL @model grouped site `$site_name` must be " *
                 "gathered with its declared group input"))
-            gather_name = Symbol(
-                site_name, :_by_, group_name, :_for_, lhs)
+            gather_name = _syntax_group_gather_name(
+                site_name, group_name, lhs)
             push!(gathered_offsets, (; site_name, group_name, gather_name))
+            push!(group_node_order, (;
+                kind=:gather, index=length(gathered_offsets)))
         elseif term isa Expr && term.head === :call &&
                first(term.args) in (:*, :.*) && length(term.args) == 3
             product_terms = term.args[2:end]
@@ -5432,12 +5446,14 @@ function _syntax_affine_assignment(statement,
             predictor_name isa Symbol || throw(ArgumentError(
                 "native PPL @model grouped slope must multiply its grouped " *
                 "site by one named predictor"))
-            gather_name = Symbol(
-                site_name, :_by_, group_name, :_for_, lhs)
+            gather_name = _syntax_group_gather_name(
+                site_name, group_name, lhs)
             product_name = Symbol(gather_name, :_times_, predictor_name)
             push!(grouped_products, (;
                 site_name, group_name, predictor_name, gather_name,
                 product_name))
+            push!(group_node_order, (;
+                kind=:product, index=length(grouped_products)))
         elseif term isa Expr && term.head === :call &&
                _syntax_name(first(term.args)) === :dot
             _, arguments = _syntax_call(term, "affine dot product")
@@ -5502,6 +5518,8 @@ function _syntax_affine_assignment(statement,
             push!(correlated_groups, (;
                 site_name, group_name, predictors, node_name,
                 scales=metadata.scales, correlation=metadata.correlation))
+            push!(group_node_order, (;
+                kind=:correlated, index=length(correlated_groups)))
         else
             push!(ordinary_terms, term)
         end
@@ -5610,9 +5628,12 @@ function _syntax_affine_assignment(statement,
         Expr(:parameters,
              Expr(:kw, :offsets, QuoteNode((
                  sampled_offsets...,
-                 (gather.gather_name for gather in gathered_offsets)...,
-                 (product.product_name for product in grouped_products)...,
-                 (group.node_name for group in correlated_groups)...))),
+                 (entry.kind === :gather ?
+                    gathered_offsets[entry.index].gather_name :
+                  entry.kind === :product ?
+                    grouped_products[entry.index].product_name :
+                    correlated_groups[entry.index].node_name
+                  for entry in group_node_order)...))),
              Expr(:kw, :intercept, intercept !== nothing)),
         QuoteNode(Tuple(predictor_names)),
         QuoteNode(coefficient_name))
@@ -5635,9 +5656,31 @@ function _syntax_affine_assignment(statement,
         QuoteNode(group.site_name), QuoteNode(group.scales),
         QuoteNode(group.correlation), QuoteNode(group.group_name),
         QuoteNode(group.predictors)) for group in correlated_groups)
+    group_names = Symbol[]
+    group_values = Any[]
+    for entry in group_node_order
+        if entry.kind === :gather
+            push!(group_names, gather_names[entry.index])
+            push!(group_values, gather_values[entry.index])
+        elseif entry.kind === :product
+            push!(group_names, gather_names[
+                length(gathered_offsets) + entry.index])
+            push!(group_values, gather_values[
+                length(gathered_offsets) + entry.index])
+            push!(group_names, product_names[entry.index])
+            push!(group_values, product_values[entry.index])
+        else
+            push!(group_names, correlated_names[entry.index])
+            push!(group_values, correlated_values[entry.index])
+        end
+    end
+    length(unique(group_names)) == length(group_names) || throw(ArgumentError(
+        "native PPL @model grouped terms must produce distinct public " *
+        "node identities; use each grouped latent site once"))
     (; location=lhs, intercept, offsets=Tuple(sampled_offsets),
        gather_names, gather_values, product_names, product_values,
        correlated_names, correlated_values,
+       group_names=Tuple(group_names), group_values=Tuple(group_values),
        slopes=Tuple(slopes), coefficient_name,
        parameter_value, transform_names=Tuple(transform_names),
        transform_values=Tuple(transform_values), affine_value)
@@ -5987,23 +6030,11 @@ function _model_function_syntax(definition)
                     push!(node_names, transform_name)
                     push!(node_values, transform_value)
                 end
-                for (gather_name, gather_value) in zip(
-                    affine_declaration.gather_names,
-                    affine_declaration.gather_values)
-                    push!(node_names, gather_name)
-                    push!(node_values, gather_value)
-                end
-                for (product_name, product_value) in zip(
-                    affine_declaration.product_names,
-                    affine_declaration.product_values)
-                    push!(node_names, product_name)
-                    push!(node_values, product_value)
-                end
-                for (correlated_name, correlated_value) in zip(
-                    affine_declaration.correlated_names,
-                    affine_declaration.correlated_values)
-                    push!(node_names, correlated_name)
-                    push!(node_values, correlated_value)
+                for (group_name, group_value) in zip(
+                    affine_declaration.group_names,
+                    affine_declaration.group_values)
+                    push!(node_names, group_name)
+                    push!(node_values, group_value)
                 end
                 push!(node_names, affine_declaration.location)
                 push!(node_values, affine_declaration.affine_value)

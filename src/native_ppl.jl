@@ -727,9 +727,6 @@ function _native_ppl_affine_components(brmi::BRMI, key::Symbol)
             :predictor_offset,
             "`$key` must use each sampled offset at most once; got " *
             "$(sampled_offsets)"))
-    length(varying_groups) <= 1 || throw(NativePPLCapabilityError(
-        :group_term,
-        "the current grouped native-PPL slice accepts one grouped term"))
     (; predictors=parsed, offsets=sampled_offsets, groups=varying_groups,
        intercept=has_intercept)
 end
