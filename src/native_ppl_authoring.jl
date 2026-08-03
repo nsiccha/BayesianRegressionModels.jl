@@ -154,6 +154,21 @@ struct Model{I,P,N,O}
     observations::O
 end
 
+"""A call of a staged `@model` function: one declaration plus its data bindings."""
+struct ModelInstance{M<:Model,B}
+    declaration::M
+    bindings::B
+end
+
+instantiate(declaration::Model, bindings) =
+    ModelInstance(declaration, bindings)
+
+function Base.show(io::IO, instance::ModelInstance)
+    print(io, "NativePPL.ModelInstance(")
+    show(io, instance.declaration)
+    print(io, ", bindings=", keys(instance.bindings), ")")
+end
+
 function _check_named_declarations(values, kind::AbstractString, type)
     values isa NamedTuple || throw(ArgumentError(
         "native PPL $kind declarations must be a NamedTuple; got $(typeof(values))"))
@@ -278,9 +293,6 @@ function _validate_coefficient_parameter(name::Symbol, declaration::Parameter)
     length(declaration.axis_keys) == 2 || throw(CapabilityError(
         :parameter_axis,
         "affine coefficient parameter `$name` must have intercept and slope coordinates"))
-    first(declaration.axis_keys) === :Intercept || throw(CapabilityError(
-        :parameter_axis,
-        "affine coefficient parameter `$name` must name its first coordinate :Intercept"))
     nothing
 end
 
@@ -497,6 +509,10 @@ end
 compile(declaration::Model, bindings) = bind(declaration, bindings)
 prepare(declaration::Model, bindings; kwargs...) =
     prepare(bind(declaration, bindings); kwargs...)
+bind(instance::ModelInstance) = bind(instance.declaration, instance.bindings)
+compile(instance::ModelInstance) = bind(instance)
+prepare(instance::ModelInstance; kwargs...) =
+    prepare(bind(instance); kwargs...)
 
 function _lower_brmi(brmi::BRM.BRMI)
     observed = BRM.outcomes(brmi)
@@ -652,7 +668,389 @@ function compile(brmi::BRM.BRMI)
     bind(lowered.declaration, lowered.bindings)
 end
 
-export Model, Input, Parameter
+_declaration_namedtuple(names::Tuple, values::Tuple) =
+    NamedTuple{names}(values)
+
+function _syntax_name(expression)
+    expression isa Symbol && return expression
+    if expression isa Expr && expression.head === :. &&
+       expression.args[end] isa QuoteNode
+        return expression.args[end].value
+    end
+    nothing
+end
+
+function _syntax_call(expression, context::AbstractString)
+    expression isa Expr && expression.head === :call || throw(ArgumentError(
+        "native PPL @model $context must be a call; got `$expression`"))
+    name = _syntax_name(first(expression.args))
+    name === nothing && throw(ArgumentError(
+        "native PPL @model cannot identify the function in `$expression`"))
+    name, expression.args[2:end]
+end
+
+function _syntax_distribution_call(expression, context::AbstractString)
+    if expression isa Expr && expression.head === :. &&
+       length(expression.args) == 2 && expression.args[2] isa Expr &&
+       expression.args[2].head === :tuple
+        name = _syntax_name(first(expression.args))
+        name === nothing && throw(ArgumentError(
+            "native PPL @model cannot identify the distribution in `$expression`"))
+        return name, expression.args[2].args
+    end
+    _syntax_call(expression, context)
+end
+
+function _syntax_argument_name(argument)
+    argument isa Symbol && return argument
+    if argument isa Expr && argument.head === :(::) &&
+       first(argument.args) isa Symbol
+        return first(argument.args)
+    end
+    throw(ArgumentError(
+        "native PPL @model currently requires plain or typed positional " *
+        "arguments; got `$argument`"))
+end
+
+_syntax_ref(name::Symbol) = GlobalRef(@__MODULE__, name)
+
+function _syntax_namedtuple(names::Vector{Symbol}, values::Vector)
+    Expr(:call, _syntax_ref(:_declaration_namedtuple),
+         QuoteNode(Tuple(names)), Expr(:tuple, values...))
+end
+
+function _syntax_parameter(statement, argument_names::Set{Symbol})
+    lhs, rhs = statement.args[2], statement.args[3]
+    prior_name, prior_arguments = _syntax_call(rhs, "parameter prior")
+    parameter_name = lhs isa Symbol ? lhs :
+        (lhs isa Expr && lhs.head === :ref && first(lhs.args) isa Symbol ?
+         first(lhs.args) : nothing)
+    parameter_name === nothing && throw(ArgumentError(
+        "native PPL @model parameter left-hand side must be a name or " *
+        "indexed name; got `$lhs`"))
+    parameter_name in argument_names && throw(ArgumentError(
+        "native PPL @model input `$parameter_name` cannot also be a parameter"))
+
+    if prior_name === :StandardNormal
+        isempty(prior_arguments) || throw(ArgumentError(
+            "native PPL @model StandardNormal() takes no arguments"))
+        lhs isa Expr && lhs.head === :ref && length(lhs.args) == 2 ||
+            throw(ArgumentError(
+                "native PPL @model StandardNormal parameters require axis " *
+                "keys, for example `beta[(:Intercept, :x)]`"))
+        axis_keys = lhs.args[2]
+        value = Expr(
+            :call, _syntax_ref(:parameter),
+            Expr(:parameters,
+                 Expr(:kw, :transform, Expr(:call, _syntax_ref(:Identity))),
+                 Expr(:kw, :prior, Expr(:call, _syntax_ref(:StandardNormal)))),
+            Expr(:call, _syntax_ref(:RealSupport)), axis_keys)
+        return parameter_name, value
+    elseif prior_name === :Exponential
+        lhs isa Symbol || throw(ArgumentError(
+            "native PPL @model Exponential parameter must have a bare name"))
+        length(prior_arguments) == 1 || throw(ArgumentError(
+            "native PPL @model Exponential(scale) needs one scale"))
+        value = Expr(
+            :call, _syntax_ref(:parameter),
+            Expr(:parameters,
+                 Expr(:kw, :transform, Expr(:call, _syntax_ref(:Exp))),
+                 Expr(:kw, :prior,
+                      Expr(:call, _syntax_ref(:Exponential),
+                           only(prior_arguments)))),
+            Expr(:call, _syntax_ref(:PositiveSupport)),
+            QuoteNode((parameter_name,)))
+        return parameter_name, value
+    end
+    throw(ArgumentError(
+        "native PPL @model unsupported parameter prior `$prior_name`"))
+end
+
+function _syntax_node(statement)
+    lhs, rhs = statement.args
+    lhs isa Symbol || throw(ArgumentError(
+        "native PPL @model deterministic node needs a bare name; got `$lhs`"))
+    function_name, arguments = _syntax_call(rhs, "deterministic assignment")
+    all(argument -> argument isa Symbol, arguments) || throw(ArgumentError(
+        "native PPL @model deterministic node `$lhs` currently accepts only " *
+        "named dependencies"))
+    builder = if function_name === :center
+        length(arguments) == 1 || throw(ArgumentError(
+            "native PPL @model center needs one input"))
+        :center
+    elseif function_name === :zscale || function_name === :standardize
+        length(arguments) == 1 || throw(ArgumentError(
+            "native PPL @model $function_name needs one input"))
+        function_name
+    elseif function_name === :affine
+        length(arguments) == 2 || throw(ArgumentError(
+            "native PPL @model affine needs input and coefficient parameter"))
+        :affine
+    elseif function_name === :exp || function_name === :exp_link
+        length(arguments) == 1 || throw(ArgumentError(
+            "native PPL @model exp needs one input"))
+        :exp_link
+    else
+        throw(ArgumentError(
+            "native PPL @model unsupported deterministic function " *
+            "`$function_name`"))
+    end
+    value = Expr(:call, _syntax_ref(builder),
+                 (QuoteNode(argument) for argument in arguments)...)
+    lhs, value
+end
+
+function _syntax_standard_normal(statement)
+    lhs, rhs = statement.args[2], statement.args[3]
+    lhs isa Symbol || return nothing
+    prior_name, prior_arguments = _syntax_call(rhs, "parameter prior")
+    prior_name === :Normal || return nothing
+    valid = isempty(prior_arguments) ||
+        (length(prior_arguments) == 2 && prior_arguments[1] == 0 &&
+         prior_arguments[2] == 1)
+    valid || throw(ArgumentError(
+        "native PPL @model currently supports scalar `Normal()` or " *
+        "`Normal(0, 1)` priors only"))
+    lhs
+end
+
+function _syntax_affine_assignment(statement,
+                                   scalar_priors::Set{Symbol})
+    lhs, rhs = statement.args
+    lhs isa Symbol || return nothing
+    rhs isa Expr && rhs.head === :call &&
+        first(rhs.args) in (:+, :.+) && length(rhs.args) == 3 || return nothing
+    terms = rhs.args[2:end]
+    intercept_index = findfirst(
+        term -> term isa Symbol && term in scalar_priors, terms)
+    intercept_index === nothing && return nothing
+    intercept = terms[intercept_index]
+    product = terms[3 - intercept_index]
+    product isa Expr && product.head === :call &&
+        first(product.args) in (:*, :.*) && length(product.args) == 3 ||
+        return nothing
+    product_terms = product.args[2:end]
+    slope_index = findfirst(
+        term -> term isa Symbol && term in scalar_priors && term !== intercept,
+        product_terms)
+    slope_index === nothing && return nothing
+    slope = product_terms[slope_index]
+    predictor_expression = product_terms[3 - slope_index]
+
+    transform_name = nothing
+    transform_value = nothing
+    predictor_name = if predictor_expression isa Symbol
+        predictor_expression
+    elseif predictor_expression isa Expr &&
+           predictor_expression.head === :call
+        function_name, arguments = _syntax_call(
+            predictor_expression, "affine predictor transform")
+        function_name in (:center, :zscale, :standardize) || return nothing
+        length(arguments) == 1 && only(arguments) isa Symbol ||
+            throw(ArgumentError(
+                "native PPL @model $function_name requires one named input"))
+        raw_input = only(arguments)
+        canonical = function_name === :center ? :center : :zscale
+        transform_name = Symbol(
+            "#native_ppl_", canonical, "#", lhs, "#", raw_input)
+        transform_value = Expr(
+            :call, _syntax_ref(canonical), QuoteNode(raw_input))
+        transform_name
+    else
+        return nothing
+    end
+
+    coefficient_name = Symbol(:beta_, lhs)
+    parameter_value = Expr(
+        :call, _syntax_ref(:parameter),
+        Expr(:parameters,
+             Expr(:kw, :transform, Expr(:call, _syntax_ref(:Identity))),
+             Expr(:kw, :prior, Expr(:call, _syntax_ref(:StandardNormal)))),
+        Expr(:call, _syntax_ref(:RealSupport)),
+        QuoteNode((intercept, slope)))
+    affine_value = Expr(
+        :call, _syntax_ref(:affine), QuoteNode(predictor_name),
+        QuoteNode(coefficient_name))
+    (; location=lhs, intercept, slope, coefficient_name, parameter_value,
+       transform_name, transform_value, affine_value)
+end
+
+function _syntax_observation(statement, argument_names::Set{Symbol})
+    lhs, rhs = statement.args[2], statement.args[3]
+    lhs isa Symbol && lhs in argument_names || throw(ArgumentError(
+        "native PPL @model observation left-hand side must be a function " *
+        "argument; got `$lhs`"))
+    family, arguments = _syntax_distribution_call(rhs, "observation family")
+    extra_node_name = nothing
+    extra_node_value = nothing
+    if family === :Poisson && length(arguments) == 1 &&
+       only(arguments) isa Expr && only(arguments).head === :call
+        link_name, link_arguments = _syntax_call(
+            only(arguments), "Poisson rate link")
+        link_name === :exp && length(link_arguments) == 1 &&
+            only(link_arguments) isa Symbol || throw(ArgumentError(
+                "native PPL @model Poisson currently supports a named rate or " *
+                "`exp(named_log_rate)`"))
+        log_rate = only(link_arguments)
+        extra_node_name = Symbol(:exp_, log_rate)
+        extra_node_value = Expr(
+            :call, _syntax_ref(:exp_link), QuoteNode(log_rate))
+        arguments = Any[extra_node_name]
+    end
+    all(argument -> argument isa Symbol, arguments) || throw(ArgumentError(
+        "native PPL @model observation `$lhs` currently accepts named " *
+        "distribution parameters"))
+    builder, expected = if family === :Normal
+        (:normal, 2)
+    elseif family === :BernoulliLogit
+        (:bernoulli_logit, 1)
+    elseif family === :Poisson
+        (:poisson, 1)
+    else
+        throw(ArgumentError(
+            "native PPL @model unsupported observation family `$family`"))
+    end
+    length(arguments) == expected || throw(ArgumentError(
+        "native PPL @model $family observation needs $expected parameter(s)"))
+    value = Expr(:call, _syntax_ref(builder), QuoteNode(lhs),
+                 (QuoteNode(argument) for argument in arguments)...)
+    (; name=lhs, value, extra_node_name, extra_node_value)
+end
+
+function _model_function_syntax(definition)
+    definition isa Expr && definition.head === :function ||
+        throw(ArgumentError(
+            "NativePPL.@model must wrap a function definition"))
+    signature, body = definition.args
+    signature isa Expr && signature.head === :call || throw(ArgumentError(
+        "NativePPL.@model requires a named function definition"))
+    function_name = first(signature.args)
+    function_name isa Symbol || throw(ArgumentError(
+        "NativePPL.@model currently requires an unqualified function name"))
+    arguments = signature.args[2:end]
+    argument_names = Symbol[_syntax_argument_name(argument)
+                            for argument in arguments]
+    length(unique(argument_names)) == length(argument_names) ||
+        throw(ArgumentError(
+            "NativePPL.@model function arguments must have unique names"))
+    argument_name_set = Set(argument_names)
+
+    parameter_names = Symbol[]
+    parameter_values = Any[]
+    scalar_prior_names = Symbol[]
+    consumed_scalar_priors = Set{Symbol}()
+    node_names = Symbol[]
+    node_values = Any[]
+    observation_names = Symbol[]
+    observation_values = Any[]
+    statements = body isa Expr && body.head === :block ? body.args : Any[body]
+    for statement in statements
+        statement isa LineNumberNode && continue
+        if statement isa Expr && statement.head === :call &&
+           first(statement.args) in (:~, :.~)
+            lhs = statement.args[2]
+            if lhs isa Symbol && lhs in argument_name_set
+                observation = _syntax_observation(
+                    statement, argument_name_set)
+                if observation.extra_node_name !== nothing
+                    push!(node_names, observation.extra_node_name)
+                    push!(node_values, observation.extra_node_value)
+                end
+                push!(observation_names, observation.name)
+                push!(observation_values, observation.value)
+            else
+                scalar_prior = _syntax_standard_normal(statement)
+                if scalar_prior === nothing
+                    name, value = _syntax_parameter(
+                        statement, argument_name_set)
+                    push!(parameter_names, name)
+                    push!(parameter_values, value)
+                else
+                    scalar_prior in scalar_prior_names && throw(ArgumentError(
+                        "native PPL @model parameter `$scalar_prior` is declared twice"))
+                    push!(scalar_prior_names, scalar_prior)
+                end
+            end
+        elseif statement isa Expr && statement.head === :(=)
+            affine_declaration = _syntax_affine_assignment(
+                statement, Set(scalar_prior_names))
+            if affine_declaration === nothing
+                name, value = _syntax_node(statement)
+                push!(node_names, name)
+                push!(node_values, value)
+            else
+                # Coefficient blocks precede support-transformed scalar
+                # parameters in the flat coordinate ABI, independent of where
+                # the deterministic affine assignment appears in source.
+                pushfirst!(
+                    parameter_names, affine_declaration.coefficient_name)
+                pushfirst!(
+                    parameter_values, affine_declaration.parameter_value)
+                if affine_declaration.transform_name !== nothing
+                    push!(node_names, affine_declaration.transform_name)
+                    push!(node_values, affine_declaration.transform_value)
+                end
+                push!(node_names, affine_declaration.location)
+                push!(node_values, affine_declaration.affine_value)
+                push!(consumed_scalar_priors, affine_declaration.intercept)
+                push!(consumed_scalar_priors, affine_declaration.slope)
+            end
+        else
+            throw(ArgumentError(
+                "native PPL @model unsupported statement `$statement`"))
+        end
+    end
+    unused_scalar_priors = setdiff(
+        Set(scalar_prior_names), consumed_scalar_priors)
+    isempty(unused_scalar_priors) || throw(ArgumentError(
+        "native PPL @model standard-normal parameters are not used by a " *
+        "supported affine expression: " *
+        join(sort!(collect(unused_scalar_priors)), ", ")))
+    length(unique(parameter_names)) == length(parameter_names) ||
+        throw(ArgumentError(
+            "native PPL @model generated duplicate parameter identities"))
+    length(unique(node_names)) == length(node_names) || throw(ArgumentError(
+        "native PPL @model generated duplicate node identities"))
+    length(observation_names) == 1 || throw(ArgumentError(
+        "native PPL @model currently requires exactly one observation"))
+    response_name = only(observation_names)
+    input_values = Any[
+        Expr(:call, _syntax_ref(:input),
+             QuoteNode(name === response_name ? :response : :predictor))
+        for name in argument_names
+    ]
+    declaration = Expr(
+        :call, _syntax_ref(:model),
+        Expr(:parameters,
+             Expr(:kw, :inputs,
+                  _syntax_namedtuple(argument_names, input_values)),
+             Expr(:kw, :parameters,
+                  _syntax_namedtuple(parameter_names, parameter_values)),
+             Expr(:kw, :nodes,
+                  _syntax_namedtuple(node_names, node_values)),
+             Expr(:kw, :observations,
+                  _syntax_namedtuple(observation_names, observation_values))))
+    bindings = _syntax_namedtuple(argument_names, Any[argument_names...])
+    instance = Expr(:call, _syntax_ref(:instantiate), declaration, bindings)
+    Expr(:function, signature, Expr(:block, Expr(:return, instance)))
+end
+
+"""
+    NativePPL.@model function name(inputs...)
+        ...
+    end
+
+Define a staged probabilistic model function. Calling it returns a
+`ModelInstance`; it does not execute density or RNG work. The current language
+slice accepts typed/bare positional inputs, standard-normal coefficient blocks,
+positive Exponential-prior scalars, fitted center/zscale nodes, affine and exp
+deterministic nodes, and one Normal/BernoulliLogit/Poisson observation.
+"""
+macro model(definition)
+    esc(_model_function_syntax(definition))
+end
+
+export Model, ModelInstance, Input, Parameter
 export RealSupport, PositiveSupport, IdentityTransform, ExpTransform
 export StandardNormal, ExponentialPrior
 export Center, ZScale, Affine, ExpLink
@@ -660,4 +1058,5 @@ export NormalObservation, BernoulliLogitObservation, PoissonObservation
 export model, input, parameter, Identity, Exp, Exponential
 export center, zscale, standardize, affine, exp_link
 export normal, bernoulli_logit, poisson
-export bind, lower
+export instantiate, bind, lower
+export @model
