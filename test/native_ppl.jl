@@ -4036,6 +4036,141 @@ end
             sum(correlated_scores .* sampled_offset_data.x),
         1 - correlated_sigma / 2 - length(sampled_offset_data.y) +
             sum(abs2, correlated_residuals) / correlated_sigma^2]
+
+    correlated_glmm_position = correlated_group_position[1:10]
+    correlated_glmm_prior_density =
+        sum(logpdf.(Exponential(1), correlated_tau)) +
+        sum(correlated_group_position[1:2]) +
+        correlated_log_constant -
+        2 * correlated_eta * log(cosh(correlated_raw)) +
+        sum(logpdf.(Normal(), correlated_z)) +
+        logpdf(Normal(), correlated_beta)
+    correlated_glmm_gradient = scores -> begin
+        intercept_scores = [
+            sum(scores[[1, 3]]), scores[2], scores[4]]
+        slope_scores = [
+            sum(scores[[1, 3]] .* sampled_offset_data.x[[1, 3]]),
+            scores[2] * sampled_offset_data.x[2],
+            scores[4] * sampled_offset_data.x[4]]
+        z1_gradients = [
+            -correlated_z[1, group] +
+            correlated_tau[1] * intercept_scores[group] +
+            correlated_tau[2] * correlated_rho * slope_scores[group]
+            for group in 1:3]
+        z2_gradients = [
+            -correlated_z[2, group] + correlated_tau[2] *
+            correlated_sech * slope_scores[group]
+            for group in 1:3]
+        [
+            1 - correlated_tau[1] + sum(
+                intercept_scores[group] * correlated_effects[group][1]
+                for group in 1:3),
+            1 - correlated_tau[2] + sum(
+                slope_scores[group] * correlated_effects[group][2]
+                for group in 1:3),
+            -2 * correlated_eta * correlated_rho + sum(
+                slope_scores[group] * correlated_tau[2] *
+                (correlated_sech^2 * correlated_z[1, group] -
+                 correlated_rho * correlated_sech *
+                    correlated_z[2, group]) for group in 1:3),
+            collect(Iterators.flatten(
+                (z1_gradients[group], z2_gradients[group])
+                for group in 1:3))...,
+            -correlated_beta + sum(scores .* sampled_offset_data.x)]
+    end
+
+    correlated_bernoulli_response = Bool[true, false, true, true]
+    correlated_bernoulli_probabilities =
+        BRM._native_ppl_logistic.(correlated_mu)
+    correlated_bernoulli_pointwise = [
+        response ? -BRM._native_ppl_softplus(-logit) :
+            -BRM._native_ppl_softplus(logit)
+        for (response, logit) in
+            zip(correlated_bernoulli_response, correlated_mu)]
+    correlated_bernoulli_scores = Float64.(correlated_bernoulli_response) .-
+        correlated_bernoulli_probabilities
+    correlated_bernoulli_workspace = NP.workspace(
+        correlated_bernoulli_prepared, Float64, DI.AutoEnzyme())
+    correlated_bernoulli_density, correlated_bernoulli_gradient =
+        NP.logdensity_and_gradient!(
+            correlated_bernoulli_workspace,
+            correlated_bernoulli_prepared, correlated_glmm_position)
+    @test correlated_bernoulli_density ≈
+          correlated_glmm_prior_density + sum(correlated_bernoulli_pointwise)
+    @test correlated_bernoulli_gradient ≈
+          correlated_glmm_gradient(correlated_bernoulli_scores)
+    @test NP.evaluate(
+        correlated_bernoulli_workspace, correlated_bernoulli_prepared,
+        correlated_glmm_position, NP.LinearPredictor()) ≈ correlated_mu
+    @test NP.evaluate(
+        correlated_bernoulli_workspace, correlated_bernoulli_prepared,
+        correlated_glmm_position, NP.PointwiseLogLikelihood()) ≈
+          correlated_bernoulli_pointwise
+    correlated_bernoulli_rng = MersenneTwister(953)
+    correlated_bernoulli_expected_rng = MersenneTwister(953)
+    correlated_bernoulli_predictive = NP.simulate(
+        correlated_bernoulli_rng, correlated_bernoulli_workspace,
+        correlated_bernoulli_prepared, correlated_glmm_position)
+    @test correlated_bernoulli_predictive == [
+        rand(correlated_bernoulli_expected_rng) < probability
+        for probability in correlated_bernoulli_probabilities]
+    @test factor_steady_state_allocations(
+        correlated_bernoulli_workspace, correlated_bernoulli_prepared,
+        correlated_glmm_position) == (; primal=0, gradient=0)
+    @test_throws ArgumentError NP.rebind(
+        correlated_bernoulli_prepared,
+        (; y=[true, false, 2, true]))
+
+    correlated_poisson_response = Int[2, 0, 1, 3]
+    correlated_poisson_pointwise = [
+        BRM._native_ppl_poisson_logdensity(Float64(count), log_rate)
+        for (count, log_rate) in
+            zip(correlated_poisson_response, correlated_mu)]
+    correlated_poisson_scores = correlated_poisson_response .-
+        exp.(correlated_mu)
+    correlated_poisson_workspace = NP.workspace(
+        correlated_poisson_prepared, Float64, DI.AutoEnzyme())
+    correlated_poisson_density, correlated_poisson_gradient =
+        NP.logdensity_and_gradient!(
+            correlated_poisson_workspace, correlated_poisson_prepared,
+            correlated_glmm_position)
+    @test correlated_poisson_density ≈
+          correlated_glmm_prior_density + sum(correlated_poisson_pointwise)
+    @test correlated_poisson_gradient ≈
+          correlated_glmm_gradient(correlated_poisson_scores)
+    @test NP.evaluate(
+        correlated_poisson_workspace, correlated_poisson_prepared,
+        correlated_glmm_position, NP.LinearPredictor()) ≈ correlated_mu
+    @test NP.evaluate(
+        correlated_poisson_workspace, correlated_poisson_prepared,
+        correlated_glmm_position, NP.PointwiseLogLikelihood()) ≈
+          correlated_poisson_pointwise
+    correlated_poisson_rng = MersenneTwister(954)
+    correlated_poisson_expected_rng = MersenneTwister(954)
+    correlated_poisson_predictive = NP.simulate(
+        correlated_poisson_rng, correlated_poisson_workspace,
+        correlated_poisson_prepared, correlated_glmm_position)
+    @test correlated_poisson_predictive == [
+        BRM._native_ppl_rand_poisson(
+            correlated_poisson_expected_rng, Float64, log_rate)
+        for log_rate in correlated_mu]
+    @test factor_steady_state_allocations(
+        correlated_poisson_workspace, correlated_poisson_prepared,
+        correlated_glmm_position) == (; primal=0, gradient=0)
+    @test_throws ArgumentError NP.rebind(
+        correlated_poisson_prepared, (; y=[2, -1, 1, 3]))
+    @test_throws ArgumentError NP.rebind(
+        correlated_poisson_prepared, (; y=[2, 0.5, 1, 3]))
+    @test_throws ArgumentError NP.rebind(
+        correlated_poisson_prepared,
+        (; y=[16_777_217, 0, 1, 3]); T=Float32)
+    correlated_poisson_extreme = copy(correlated_glmm_position)
+    correlated_poisson_extreme[10] = 1000.0
+    correlated_poisson_extreme_density = NP.logdensity!(
+        correlated_poisson_workspace, correlated_poisson_prepared,
+        correlated_poisson_extreme)
+    @test correlated_poisson_extreme_density == -Inf
+
     correlated_density, correlated_gradient = NP.logdensity_and_gradient!(
         correlated_group_workspace, correlated_group_prepared,
         correlated_group_position)

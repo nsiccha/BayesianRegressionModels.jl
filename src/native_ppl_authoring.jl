@@ -1487,6 +1487,50 @@ function _factor_validate_binding_support(graph::FactorGraph,
     nothing
 end
 
+function _factor_validate_observation(::AbstractSiteFactor, value,
+                                      name::Symbol)
+    nothing
+end
+
+function _factor_validate_observation(::BernoulliLogitSiteFactor, value,
+                                      name::Symbol)
+    for (index, element) in enumerate(value)
+        element == 0 || element == 1 || throw(ArgumentError(
+            "native PPL BernoulliLogit response `$name` must be Bool/0/1; " *
+            "got $element at row $index"))
+    end
+    nothing
+end
+
+function _factor_validate_observation(::PoissonSiteFactor, value,
+                                      name::Symbol)
+    for (index, element) in enumerate(value)
+        BRM._native_ppl_is_count(element) || throw(ArgumentError(
+            "native PPL Poisson response `$name` must be a nonnegative " *
+            "integer-valued count representable as Int; got $element at " *
+            "row $index"))
+    end
+    nothing
+end
+
+function _factor_validate_observation_conversion(::AbstractSiteFactor,
+                                                 original, converted,
+                                                 name::Symbol)
+    nothing
+end
+
+function _factor_validate_observation_conversion(::PoissonSiteFactor,
+                                                 original, converted,
+                                                 name::Symbol)
+    for index in eachindex(original, converted)
+        converted[index] == original[index] || throw(ArgumentError(
+            "native PPL Poisson response `$name` count $(original[index]) " *
+            "at row $index cannot be represented exactly as " *
+            "$(eltype(converted))"))
+    end
+    nothing
+end
+
 function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
     isconcretetype(T) || throw(ArgumentError(
         "native PPL factor prepared element type must be concrete; got $T"))
@@ -1502,9 +1546,15 @@ function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
     bindings = NamedTuple{binding_names}(binding_values)
     names = Tuple(keys(plan.conditions))
     values = map(names) do name
-        value = _factor_prepare_condition(
-            getproperty(plan.conditions, name), name, T)
+        original = getproperty(plan.conditions, name)
         site = getproperty(plan.graph.sites, name)
+        site.shape isa BroadcastSiteShape &&
+            _factor_validate_observation(site.factor, original, name)
+        value = _factor_prepare_condition(
+            original, name, T)
+        site.shape isa BroadcastSiteShape &&
+            _factor_validate_observation_conversion(
+                site.factor, original, value, name)
         if site.shape isa BlockSiteShape
             value isa AbstractVector || throw(ArgumentError(
                 "native PPL block condition `$name` must be a vector"))
@@ -1614,6 +1664,33 @@ end
     residual = (value - location) / scale
     -T(0.5) * residual * residual - log(scale) -
         T(BRM._NATIVE_PPL_HALF_LOG2PI)
+end
+
+@inline function _factor_logdensity_at(
+        factor::BernoulliLogitSiteFactor, value::T,
+        index, plan, buffers) where {T}
+    logit = _factor_argument_at(factor.logit, index, plan, buffers, T)
+    isone(value) ? -BRM._native_ppl_softplus(-logit) :
+        -BRM._native_ppl_softplus(logit)
+end
+
+@inline function _factor_poisson_log_rate(factor::PoissonSiteFactor,
+                                          index, plan, buffers,
+                                          ::Type{T}) where {T}
+    rate = factor.rate
+    if rate isa NodeValue
+        name = node_value_name(rate)
+        node = getproperty(plan.graph.nodes, name)
+        node isa ExpFactorNode && return _factor_argument_at(
+            node.input, index, plan, buffers, T)
+    end
+    log(_factor_argument_at(rate, index, plan, buffers, T))
+end
+
+@inline function _factor_logdensity_at(factor::PoissonSiteFactor, value::T,
+                                       index, plan, buffers) where {T}
+    log_rate = _factor_poisson_log_rate(factor, index, plan, buffers, T)
+    BRM._native_ppl_poisson_logdensity(value, log_rate)
 end
 
 @inline function _factor_site_logdensity!(::Val{Name},
@@ -2087,22 +2164,48 @@ function _factor_check_query_output(output::AbstractVector,
     output
 end
 
-@inline function _factor_terminal_arguments(prepared::FactorPrepared,
-                                            buffers::FactorBuffers,
-                                            index::Int)
+@inline function _factor_terminal_linear(prepared::FactorPrepared,
+                                         buffers::FactorBuffers,
+                                         index::Int)
     site = getproperty(
         prepared.plan.graph.sites, factor_output_site(prepared.plan))
     factor = site.factor
-    factor isa NormalSiteFactor || throw(CapabilityError(
-        :factor_family,
-        "terminal factor queries currently require Normal, got " *
-        "$(typeof(factor))"))
     T = eltype(buffers.values)
-    location = _factor_argument_at(
-        factor.location, index, prepared.plan, buffers, T)
-    scale = _factor_argument_at(
-        factor.scale, index, prepared.plan, buffers, T)
-    location, scale
+    if factor isa NormalSiteFactor
+        _factor_argument_at(
+            factor.location, index, prepared.plan, buffers, T)
+    elseif factor isa BernoulliLogitSiteFactor
+        _factor_argument_at(
+            factor.logit, index, prepared.plan, buffers, T)
+    else
+        _factor_poisson_log_rate(
+            factor, index, prepared.plan, buffers, T)
+    end
+end
+
+@inline function _factor_terminal_sample(rng::BRM.AbstractRNG,
+                                         prepared::FactorPrepared,
+                                         buffers::FactorBuffers,
+                                         index::Int)
+    site = getproperty(
+        prepared.plan.graph.sites, factor_output_site(prepared.plan))
+    factor = site.factor
+    T = eltype(buffers.values)
+    if factor isa NormalSiteFactor
+        location = _factor_argument_at(
+            factor.location, index, prepared.plan, buffers, T)
+        scale = _factor_argument_at(
+            factor.scale, index, prepared.plan, buffers, T)
+        location + scale * BRM.randn(rng, T)
+    elseif factor isa BernoulliLogitSiteFactor
+        logit = _factor_argument_at(
+            factor.logit, index, prepared.plan, buffers, T)
+        BRM.rand(rng, T) < BRM._native_ppl_logistic(logit)
+    else
+        log_rate = _factor_poisson_log_rate(
+            factor, index, prepared.plan, buffers, T)
+        BRM._native_ppl_rand_poisson(rng, T, log_rate)
+    end
 end
 
 function evaluate!(output::AbstractVector, work::FactorWorkspace,
@@ -2111,9 +2214,8 @@ function evaluate!(output::AbstractVector, work::FactorWorkspace,
     _factor_check_query_output(output, work, prepared, position, query)
     _factor_logdensity_kernel(position, prepared, work.primal)
     for index in eachindex(output)
-        location, _ = _factor_terminal_arguments(
+        output[index] = _factor_terminal_linear(
             prepared, work.primal, index)
-        output[index] = location
     end
     output
 end
@@ -2147,9 +2249,8 @@ function evaluate!(rng::BRM.AbstractRNG, output::AbstractVector,
         _factor_logdensity_kernel(position, prepared, work.primal)
     end
     for index in eachindex(output)
-        location, _ = _factor_terminal_arguments(
+        output[index] = _factor_terminal_linear(
             prepared, work.primal, index)
-        output[index] = location
     end
     output
 end
@@ -2173,11 +2274,9 @@ function simulate!(rng::BRM.AbstractRNG, output::AbstractVector,
     else
         _factor_logdensity_kernel(position, prepared, work.primal)
     end
-    T = eltype(work)
     for index in eachindex(output)
-        location, scale = _factor_terminal_arguments(
-            prepared, work.primal, index)
-        output[index] = location + scale * BRM.randn(rng, T)
+        output[index] = _factor_terminal_sample(
+            rng, prepared, work.primal, index)
     end
     output
 end
@@ -2308,18 +2407,11 @@ end
 
 @inline function _factor_site_sample!(rng::BRM.AbstractRNG, ::Val{Name},
         site::StochasticSite{S,Tr,F,BroadcastSiteShape,A},
-        position::AbstractVector{T}, output::AbstractVector{T},
+        position::AbstractVector{T}, output::AbstractVector,
         prepared::FactorPrepared, buffers::FactorBuffers{T}) where {Name,S,Tr,F,A,T}
-    factor = site.factor
-    factor isa NormalSiteFactor || throw(CapabilityError(
-        :factor_family,
-        "prior predictive factor `$Name` must currently be Normal"))
     for index in eachindex(output)
-        location = _factor_argument_at(
-            factor.location, index, prepared.plan, buffers, T)
-        scale = _factor_argument_at(
-            factor.scale, index, prepared.plan, buffers, T)
-        output[index] = location + scale * BRM.randn(rng, T)
+        output[index] = _factor_terminal_sample(
+            rng, prepared, buffers, index)
     end
     nothing
 end
@@ -2556,9 +2648,8 @@ end
         ::BRM.NativePPLLinearPredictor, work::FactorWorkspace,
         prepared::FactorPrepared)
     for index in eachindex(output)
-        location, _ = _factor_terminal_arguments(
+        output[index] = _factor_terminal_linear(
             prepared, work.primal, index)
-        output[index] = location
     end
     output
 end
@@ -2572,11 +2663,9 @@ end
 @inline function _factor_write_bundle_query!(rng::BRM.AbstractRNG,
         output::AbstractVector, ::BRM.NativePPLPosteriorPredictive,
         work::FactorWorkspace, prepared::FactorPrepared)
-    T = eltype(work)
     for index in eachindex(output)
-        location, scale = _factor_terminal_arguments(
-            prepared, work.primal, index)
-        output[index] = location + scale * BRM.randn(rng, T)
+        output[index] = _factor_terminal_sample(
+            rng, prepared, work.primal, index)
     end
     output
 end
@@ -2585,9 +2674,8 @@ end
         output::AbstractMatrix, draw, ::BRM.NativePPLLinearPredictor,
         work::FactorWorkspace, prepared::FactorPrepared)
     for index in axes(output, 2)
-        location, _ = _factor_terminal_arguments(
+        output[draw, index] = _factor_terminal_linear(
             prepared, work.primal, index)
-        output[draw, index] = location
     end
     output
 end
@@ -2605,11 +2693,9 @@ end
 @inline function _factor_write_bundle_matrix_query!(rng::BRM.AbstractRNG,
         output::AbstractMatrix, draw, ::BRM.NativePPLPosteriorPredictive,
         work::FactorWorkspace, prepared::FactorPrepared)
-    T = eltype(work)
     for index in axes(output, 2)
-        location, scale = _factor_terminal_arguments(
-            prepared, work.primal, index)
-        output[draw, index] = location + scale * BRM.randn(rng, T)
+        output[draw, index] = _factor_terminal_sample(
+            rng, prepared, work.primal, index)
     end
     output
 end
