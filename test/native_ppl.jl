@@ -4783,6 +4783,40 @@ end
         three_queries) ==
           (; predictive=0, linear=0, bundle=0)
 
+    crossed_group_data = (;
+        x=[-1.0, 0.0, 1.0, 2.0, -0.5, 0.5],
+        subject=[:s1, :s2, :s1, :s3, :s2, :s3],
+        item=[:i1, :i1, :i2, :i2, :i3, :i3],
+        y=[0.1, 0.4, 0.8, 1.0, 0.2, 0.7])
+    crossed_group_brm = @brm crossed_group_data begin
+        sigma ~ Exponential(2)
+        mu ~ 0 + x + (1 + x | p | subject) + (1 | q | item)
+        sd(:, p) ~ Exponential(1)
+        cor(:, p) ~ LKJCholesky(2, 2)
+        sd(:, q) ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end
+    @test SBBRMI(crossed_group_brm; mod=@__MODULE__) isa SBBRMI
+    crossed_group_model = NP.lower(crossed_group_brm)
+    @test keys(crossed_group_model.inputs) == (:x, :subject, :item)
+    @test keys(crossed_group_model.parameters) == (
+        :beta_mu, :tau_p_subject, :L_p_subject, :b_p_subject,
+        :tau_q_item, :b_q_item, :sigma)
+    @test keys(crossed_group_model.nodes) == (
+        :b_p_subject_by_subject_for_mu, :r_mu_q_item, :mu)
+    @test crossed_group_model.site_order == (
+        :tau_p_subject, :L_p_subject, :b_p_subject,
+        :tau_q_item, :b_q_item, :beta_mu, :sigma, :y)
+    crossed_group_plan = NP.compile(crossed_group_brm)
+    @test crossed_group_plan.graph.dimension == 15
+    @test crossed_group_plan.group_indices == (
+        b_p_subject_by_subject_for_mu=(1, 2, 1, 3, 2, 3),
+        r_mu_q_item=(1, 1, 2, 2, 3, 3))
+    @test crossed_group_plan.graph.schedule == (
+        :tau_p_subject, :L_p_subject, :b_p_subject,
+        :tau_q_item, :b_q_item, :beta_mu, :sigma,
+        :b_p_subject_by_subject_for_mu, :r_mu_q_item, :mu, :y)
+
     varying_brm_data = (;
         x=sampled_offset_data.x,
         group=grouped_bindings.group,
