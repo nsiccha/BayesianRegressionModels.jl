@@ -2199,6 +2199,21 @@ function _syntax_composed_model(
     all(name -> name in result_name_set, output_names) || throw(ArgumentError(
         "native PPL composed model may return only staged child outputs; got " *
         "$(output_names)"))
+    for output_name in output_names
+        output_index = findfirst(
+            connection -> connection.name === output_name, connections)
+        connection = connections[output_index]
+        connection.connection === :stochastic || continue
+        consumer_index = findfirst(
+            index -> index > output_index &&
+                     any(==(output_name), connections[index].arguments),
+            eachindex(connections))
+        consumer_index === nothing || throw(ArgumentError(
+            "native PPL cannot yet return stochastic staged output " *
+            "`$output_name` after it feeds downstream child " *
+            "`$(connections[consumer_index].name)`; public site aliases " *
+            "currently require a terminal child output"))
+    end
     public_outputs = _syntax_namedtuple(
         collect(output_aliases), Any[output_names...])
     push!(generated, Expr(

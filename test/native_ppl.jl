@@ -3090,10 +3090,8 @@ end
 
     qualified = qualified_nested(0.25, 0.8)
     @test qualified isa NP.ModelInstance
-    @test qualified.declaration.outputs ==
-          (; z=NP.qualified_name(:z, :z))
-    @test keys(NP.condition(qualified; z=0.4).conditions) ==
-          (NP.qualified_name(:z, :z),)
+    @test qualified.declaration.outputs == (; z=:z)
+    @test keys(NP.condition(qualified; z=0.4).conditions) == (:z,)
 
     natural_preprocessed = NP.condition(
         natural_preprocessed_normal(raw_x); y=response)
@@ -3478,6 +3476,13 @@ end
             z ~ scalar_normal_site(0.0, 1.0)
         end)))
     @test occursin("requires an explicit returned graph value", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function returned_upstream_site(x)
+            z ~ scalar_normal_site(0.0, 1.0)
+            y ~ scalar_normal_likelihood(z)
+            return z
+        end)))
+    @test occursin("public site aliases currently require a terminal", err.msg)
 end
 
 
