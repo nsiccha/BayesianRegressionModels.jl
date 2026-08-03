@@ -599,11 +599,51 @@ function _native_ppl_predictor_term(term, key::Symbol)
         "offsets, interactions, groups, and other transforms are not lowered yet"))
 end
 
-function _native_ppl_affine_predictors(brmi::BRMI, key::Symbol)
+function _native_ppl_sampled_offset(term, key::Symbol)
+    term isa ExprColumn && getf(term) === offset || return nothing
+    isempty(getkwargs(term)) || throw(NativePPLCapabilityError(
+        :predictor_offset,
+        "`offset(...)` in predictor `$key` cannot have keywords"))
+    arguments = getargs(term)
+    length(arguments) == 1 || throw(NativePPLCapabilityError(
+        :predictor_offset,
+        "`offset(...)` in predictor `$key` needs one sampled scalar"))
+    name = _native_ppl_ref_name(only(arguments))
+    name === nothing && throw(NativePPLCapabilityError(
+        :predictor_offset,
+        "`offset(...)` in predictor `$key` must reference one named value"))
+    name
+end
+
+function _native_ppl_varying_intercept(term, key::Symbol)
+    term isa ExprColumn && getf(term) === (|) || return nothing
+    isempty(getkwargs(term)) || throw(NativePPLCapabilityError(
+        :group_term,
+        "varying-intercept term in predictor `$key` cannot have keywords"))
+    arguments = getargs(term)
+    length(arguments) == 3 || throw(NativePPLCapabilityError(
+        :group_term,
+        "varying-intercept term in predictor `$key` must use " *
+        "`(1 | id | group)`"))
+    coefficient, id, group = arguments
+    coefficient == 1 || throw(NativePPLCapabilityError(
+        :group_term,
+        "the first grouped native-PPL slice requires a varying intercept"))
+    id isa Symbol || throw(NativePPLCapabilityError(
+        :group_term, "varying-intercept ID in `$key` must be a Symbol"))
+    group isa NamedColumn && parent(group) isa DataColumn || throw(
+        NativePPLCapabilityError(
+            :group_term,
+            "varying-intercept group in `$key` must be one raw data column"))
+    (; id, group)
+end
+
+function _native_ppl_affine_components(brmi::BRMI, key::Symbol)
     lhs, predictor = _native_ppl_sampling_rhs(brmi, key)
     _native_ppl_ref_name(lhs) === key || throw(NativePPLCapabilityError(
         :linked_predictor, "`$key` must have a bare, unlinked left-hand side"))
-    predictor isa Number && predictor == 1 && return ()
+    predictor isa Number && predictor == 1 && return (
+        ; predictors=(), offsets=(), groups=(), intercept=true)
     predictor isa ExprColumn && getf(predictor) === (+) ||
         throw(NativePPLCapabilityError(:predictor_terms,
             "`$key` must be an additive affine formula such as `1 + x + z`"))
@@ -614,11 +654,28 @@ function _native_ppl_affine_predictors(brmi::BRMI, key::Symbol)
         "`$key` must contain an intercept"))
 
     intercepts = filter(term -> term isa Number && term == 1, terms)
-    length(intercepts) == 1 ||
+    suppressions = filter(term -> term isa Number && term == 0, terms)
+    has_intercept = if length(intercepts) == 1 && isempty(suppressions)
+        true
+    elseif isempty(intercepts) && length(suppressions) == 1
+        false
+    else
         throw(NativePPLCapabilityError(:predictor_terms,
-            "`$key` must contain exactly one intercept"))
+            "`$key` must contain exactly one `1` intercept or one `0` " *
+            "intercept suppression"))
+    end
+    nonintercept_terms = filter(
+        term -> !(term isa Number && term in (0, 1)), terms)
+    sampled_offsets = Tuple(filter(!isnothing,
+        map(term -> _native_ppl_sampled_offset(term, key),
+            nonintercept_terms)))
+    varying_groups = Tuple(filter(!isnothing,
+        map(term -> _native_ppl_varying_intercept(term, key),
+            nonintercept_terms)))
     predictor_terms = filter(
-        term -> !(term isa Number && term == 1), terms)
+        term -> _native_ppl_sampled_offset(term, key) === nothing &&
+                _native_ppl_varying_intercept(term, key) === nothing,
+        nonintercept_terms)
     parsed = Tuple(_native_ppl_predictor_term(term, key)
                    for term in predictor_terms)
     predictor_names = map(term -> name(term.column), parsed)
@@ -627,7 +684,24 @@ function _native_ppl_affine_predictors(brmi::BRMI, key::Symbol)
             :predictor_terms,
             "`$key` must use each raw predictor at most once; got " *
             "$(predictor_names)"))
-    parsed
+    length(unique(sampled_offsets)) == length(sampled_offsets) || throw(
+        NativePPLCapabilityError(
+            :predictor_offset,
+            "`$key` must use each sampled offset at most once; got " *
+            "$(sampled_offsets)"))
+    length(varying_groups) <= 1 || throw(NativePPLCapabilityError(
+        :group_term,
+        "the first grouped native-PPL slice accepts one varying-intercept term"))
+    (; predictors=parsed, offsets=sampled_offsets, groups=varying_groups,
+       intercept=has_intercept)
+end
+
+function _native_ppl_affine_predictors(brmi::BRMI, key::Symbol)
+    components = _native_ppl_affine_components(brmi, key)
+    components.intercept || throw(NativePPLCapabilityError(
+        :predictor_terms,
+        "`$key` must contain an intercept in the current affine slice"))
+    components.predictors
 end
 
 function _native_ppl_exponential_prior(brmi::BRMI, key::Symbol)

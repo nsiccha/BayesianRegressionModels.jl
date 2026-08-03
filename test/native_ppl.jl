@@ -384,6 +384,70 @@ NP.@model function ambiguous_multioutput_submodel()
     return values
 end
 
+NP.@model function hierarchical_latent_graph()
+    population ~ Normal()
+    population_scale ~ Exponential(1.0)
+    individual ~ Normal(population, population_scale)
+    observation_scale ~ Exponential(2.0)
+    @. y ~ Normal(individual, observation_scale)
+    return y
+end
+
+NP.@model function hierarchy_population_source()
+    value ~ Normal()
+    return value
+end
+
+NP.@model function hierarchy_scale_source(scale)
+    value ~ Exponential(scale)
+    return value
+end
+
+NP.@model function hierarchy_individual_source(population, population_scale)
+    value ~ Normal(population, population_scale)
+    return value
+end
+
+NP.@model function hierarchy_observation_source(individual)
+    observation_scale ~ Exponential(2.0)
+    @. y ~ Normal(individual, observation_scale)
+    return y
+end
+
+NP.@model function naturally_composed_hierarchy()
+    population ~ hierarchy_population_source()
+    population_scale ~ hierarchy_scale_source(1.0)
+    individual ~ hierarchy_individual_source(
+        population, population_scale)
+    y ~ hierarchy_observation_source(individual)
+    return y
+end
+
+NP.@model function deterministic_scale_factor_graph(unit_scale)
+    population ~ Normal()
+    log_observation_scale ~ Normal(population, unit_scale)
+    observation_scale = exp(log_observation_scale)
+    @. y ~ Normal(population, observation_scale)
+    return y
+end
+
+NP.@model function natural_sampled_offset_regression(x)
+    latent ~ Normal()
+    beta ~ Normal()
+    sigma ~ Exponential(2)
+    mu = beta * x + offset(latent)
+    @. y ~ Normal(mu, sigma)
+end
+
+NP.@model function natural_varying_intercept(x, group)
+    tau_p_group ~ Exponential(1)
+    b_p_group[group] ~ Normal(0.0, tau_p_group)
+    beta ~ Normal()
+    sigma ~ Exponential(2)
+    mu = beta * x + b_p_group[group]
+    @. y ~ Normal(mu, sigma)
+end
+
 NP.@model function monolithic_scalar_normal()
     theta ~ Normal()
     sigma ~ Exponential(2.0)
@@ -548,6 +612,104 @@ function steady_state_allocations(workspace, prepared, position)
     gradient = @allocated(
         BRM._native_ppl_logdensity_and_gradient!(workspace, prepared, position))
     (; primal, gradient)
+end
+
+function factor_steady_state_allocations(workspace::NP.FactorWorkspace,
+                                         prepared::NP.FactorPrepared,
+                                         position)
+    NP.logdensity!(workspace, prepared, position)
+    NP.logdensity_and_gradient!(workspace, prepared, position)
+    primal = @allocated NP.logdensity!(workspace, prepared, position)
+    gradient = @allocated NP.logdensity_and_gradient!(
+        workspace, prepared, position)
+    (; primal, gradient)
+end
+
+function factor_query_allocations(workspace::NP.FactorWorkspace,
+                                  prepared::NP.FactorPrepared,
+                                  position, linear, pointwise, predictive,
+                                  prior_position)
+    query = NP.LinearPredictor()
+    likelihood = NP.PointwiseLogLikelihood()
+    rng = MersenneTwister(921)
+    prior_rng = MersenneTwister(922)
+    NP.evaluate!(linear, workspace, prepared, position, query)
+    NP.evaluate!(pointwise, workspace, prepared, position, likelihood)
+    NP.simulate!(rng, predictive, workspace, prepared, position)
+    NP.simulate_prior!(
+        prior_rng, prior_position, predictive, workspace, prepared)
+    linear_bytes = @allocated NP.evaluate!(
+        linear, workspace, prepared, position, query)
+    pointwise_bytes = @allocated NP.evaluate!(
+        pointwise, workspace, prepared, position, likelihood)
+    predictive_bytes = @allocated NP.simulate!(
+        rng, predictive, workspace, prepared, position)
+    prior_bytes = @allocated NP.simulate_prior!(
+        prior_rng, prior_position, predictive, workspace, prepared)
+    (; linear=linear_bytes, pointwise=pointwise_bytes,
+       predictive=predictive_bytes, prior=prior_bytes)
+end
+
+function factor_predictive_allocations(
+    rng, output, workspace::NP.FactorWorkspace,
+    prepared::NP.FactorPrepared, position)
+    NP.simulate!(rng, output, workspace, prepared, position)
+    @allocated NP.simulate!(
+        rng, output, workspace, prepared, position)
+end
+
+function factor_generated_draw_allocations(
+    predictive_rng, linear_rng, bundle_rng, predictive, linear, bundle,
+    workspace::NP.FactorWorkspace, prepared::NP.FactorPrepared,
+    positions, queries)
+    NP.simulate_draws!(
+        predictive_rng, predictive, workspace, prepared, positions)
+    NP.evaluate_draws!(
+        linear_rng, linear, workspace, prepared, positions,
+        NP.LinearPredictor())
+    NP.execute_draws!(
+        bundle_rng, bundle, workspace, prepared, positions, queries)
+    predictive_bytes = @allocated NP.simulate_draws!(
+        predictive_rng, predictive, workspace, prepared, positions)
+    linear_bytes = @allocated NP.evaluate_draws!(
+        linear_rng, linear, workspace, prepared, positions,
+        NP.LinearPredictor())
+    bundle_bytes = @allocated NP.execute_draws!(
+        bundle_rng, bundle, workspace, prepared, positions, queries)
+    (; predictive=predictive_bytes, linear=linear_bytes,
+       bundle=bundle_bytes)
+end
+
+function factor_batch_allocations(workspace::NP.FactorWorkspace,
+                                  prepared::NP.FactorPrepared,
+                                  positions, linear, pointwise, predictive,
+                                  bundle)
+    linear_query = NP.LinearPredictor()
+    pointwise_query = NP.PointwiseLogLikelihood()
+    queries = (;
+        linear=linear_query,
+        pointwise=pointwise_query,
+        predictive=NP.PosteriorPredictive())
+    rng = MersenneTwister(924)
+    bundle_rng = MersenneTwister(925)
+    NP.evaluate_draws!(
+        linear, workspace, prepared, positions, linear_query)
+    NP.evaluate_draws!(
+        pointwise, workspace, prepared, positions, pointwise_query)
+    NP.simulate_draws!(
+        rng, predictive, workspace, prepared, positions)
+    NP.execute_draws!(
+        bundle_rng, bundle, workspace, prepared, positions, queries)
+    linear_bytes = @allocated NP.evaluate_draws!(
+        linear, workspace, prepared, positions, linear_query)
+    pointwise_bytes = @allocated NP.evaluate_draws!(
+        pointwise, workspace, prepared, positions, pointwise_query)
+    predictive_bytes = @allocated NP.simulate_draws!(
+        rng, predictive, workspace, prepared, positions)
+    bundle_bytes = @allocated NP.execute_draws!(
+        bundle_rng, bundle, workspace, prepared, positions, queries)
+    (; linear=linear_bytes, pointwise=pointwise_bytes,
+       predictive=predictive_bytes, bundle=bundle_bytes)
 end
 
 function allocating_query_bytes(workspace, prepared, position)
@@ -3137,6 +3299,1387 @@ end
     @test_throws ArgumentError sampled_deterministic_submodel(raw_x)
     @test_throws ArgumentError ambiguous_multioutput_submodel()
 
+    hierarchy = hierarchical_latent_graph()
+    @test hierarchy.declaration.site_order ==
+          (:population, :population_scale, :individual,
+           :observation_scale, :y)
+    hierarchy_graph = NP.factor_graph(NP.condition(
+        hierarchy; y=response))
+    @test keys(hierarchy_graph.sites) == hierarchy.declaration.site_order
+    @test hierarchy_graph.dimension == 4
+    @test keys(hierarchy_graph.coordinates) ==
+          (:population, :population_scale, :individual, :observation_scale)
+    @test hierarchy_graph.coordinates.population.indices == 1:1
+    @test hierarchy_graph.coordinates.population_scale.indices == 2:2
+    @test hierarchy_graph.coordinates.individual.indices == 3:3
+    @test hierarchy_graph.coordinates.observation_scale.indices == 4:4
+    @test hierarchy_graph.sites.population.activity isa NP.FreeSite
+    @test hierarchy_graph.sites.population.factor isa
+          NP.StandardNormalSiteFactor
+    @test hierarchy_graph.sites.population_scale.factor isa
+          NP.ExponentialSiteFactor
+    @test hierarchy_graph.sites.individual.factor isa NP.NormalSiteFactor
+    @test NP.site_factor_dependencies(
+        hierarchy_graph.sites.individual.factor) ==
+          (:population, :population_scale)
+    @test hierarchy_graph.sites.y.activity isa NP.ConditionedSite
+    @test hierarchy_graph.sites.y.shape isa NP.BroadcastSiteShape
+    @test NP.site_factor_dependencies(hierarchy_graph.sites.y.factor) ==
+          (:individual, :observation_scale)
+
+    deterministic_scale_instance = NP.condition(
+        deterministic_scale_factor_graph(1.0); y=response)
+    deterministic_scale_graph = NP.factor_graph(
+        deterministic_scale_instance)
+    @test keys(deterministic_scale_graph.sites) ==
+          (:population, :log_observation_scale, :y)
+    @test keys(deterministic_scale_graph.nodes) == (:observation_scale,)
+    @test deterministic_scale_graph.schedule ==
+          (:population, :log_observation_scale, :observation_scale, :y)
+    @test deterministic_scale_graph.nodes.observation_scale isa
+          NP.ExpFactorNode{NP.SiteValue{:log_observation_scale}}
+    @test NP.factor_node_dependencies(
+        deterministic_scale_graph.nodes.observation_scale) ==
+          (:log_observation_scale,)
+    @test deterministic_scale_graph.sites.y.factor.location isa
+          NP.SiteValue{:population}
+    @test deterministic_scale_graph.sites.y.factor.scale isa
+          NP.NodeValue{:observation_scale}
+    @test NP.site_factor_dependencies(
+        deterministic_scale_graph.sites.y.factor) ==
+          (:population, :observation_scale)
+    @test deterministic_scale_graph.dimension == 2
+
+    cyclic_factor_declaration = NP.model(
+        inputs=(;),
+        parameters=(;
+            population=NP.parameter(
+                NP.RealSupport(), (:population,);
+                transform=NP.Identity(), prior=NP.StandardNormal())),
+        nodes=(; scale=NP.exp_link(:latent)),
+        observations=(;
+            latent=NP.normal(:latent, :population, :scale)),
+        outputs=(; latent=:latent),
+        site_order=(:population, :latent))
+    @test capability_error(
+        () -> NP.factor_graph(cyclic_factor_declaration)).capability ==
+          :factor_schedule
+
+    deterministic_scale_plan = NP.compile(deterministic_scale_instance)
+    @test deterministic_scale_plan isa NP.FactorPlan
+    @test deterministic_scale_plan.node_indices ==
+          (; observation_scale=1)
+    deterministic_scale_prepared = NP.prepare(deterministic_scale_plan)
+    deterministic_scale_workspace = NP.workspace(
+        deterministic_scale_prepared, Float64, DI.AutoEnzyme())
+    deterministic_scale_position = [0.2, log(0.5)]
+    deterministic_population = deterministic_scale_position[1]
+    deterministic_log_scale = deterministic_scale_position[2]
+    deterministic_observation_scale = exp(deterministic_log_scale)
+    deterministic_scale_latent_residual =
+        deterministic_log_scale - deterministic_population
+    deterministic_scale_observation_residuals =
+        response .- deterministic_population
+    deterministic_scale_expected_density =
+        logpdf(Normal(), deterministic_population) +
+        logpdf(Normal(deterministic_population, 1.0),
+               deterministic_log_scale) +
+        sum(logpdf.(Normal(
+            deterministic_population, deterministic_observation_scale),
+            response))
+    deterministic_scale_expected_gradient = [
+        -deterministic_population + deterministic_scale_latent_residual +
+            sum(deterministic_scale_observation_residuals) /
+                deterministic_observation_scale^2,
+        -deterministic_scale_latent_residual - length(response) +
+            sum(abs2, deterministic_scale_observation_residuals) /
+                deterministic_observation_scale^2,
+    ]
+    deterministic_scale_density, deterministic_scale_gradient =
+        NP.logdensity_and_gradient!(
+            deterministic_scale_workspace, deterministic_scale_prepared,
+            deterministic_scale_position)
+    @test deterministic_scale_density ≈
+          deterministic_scale_expected_density
+    @test deterministic_scale_gradient ≈
+          deterministic_scale_expected_gradient
+    @test deterministic_scale_workspace.primal.node_values ==
+          [deterministic_observation_scale]
+    deterministic_scale_linear = NP.evaluate(
+        deterministic_scale_workspace, deterministic_scale_prepared,
+        deterministic_scale_position, NP.LinearPredictor())
+    @test deterministic_scale_linear ==
+          fill(deterministic_population, length(response))
+    deterministic_scale_pointwise = NP.evaluate(
+        deterministic_scale_workspace, deterministic_scale_prepared,
+        deterministic_scale_position, NP.PointwiseLogLikelihood())
+    @test deterministic_scale_pointwise ≈ logpdf.(Normal(
+        deterministic_population, deterministic_observation_scale), response)
+    deterministic_scale_predictive_rng = MersenneTwister(931)
+    deterministic_scale_expected_predictive_rng = MersenneTwister(931)
+    @test NP.simulate(
+        deterministic_scale_predictive_rng,
+        deterministic_scale_workspace, deterministic_scale_prepared,
+        deterministic_scale_position) == [
+            deterministic_population + deterministic_observation_scale *
+                randn(deterministic_scale_expected_predictive_rng)
+            for _ in response
+        ]
+    deterministic_scale_prior_rng = MersenneTwister(932)
+    deterministic_scale_expected_prior_rng = MersenneTwister(932)
+    deterministic_prior_population = randn(
+        deterministic_scale_expected_prior_rng)
+    deterministic_prior_log_scale = deterministic_prior_population +
+        randn(deterministic_scale_expected_prior_rng)
+    deterministic_prior_scale = exp(deterministic_prior_log_scale)
+    deterministic_prior_response = [
+        deterministic_prior_population + deterministic_prior_scale *
+            randn(deterministic_scale_expected_prior_rng)
+        for _ in response
+    ]
+    deterministic_scale_prior = NP.simulate_prior(
+        deterministic_scale_prior_rng, deterministic_scale_workspace,
+        deterministic_scale_prepared)
+    @test deterministic_scale_prior.position ==
+          [deterministic_prior_population, deterministic_prior_log_scale]
+    @test deterministic_scale_prior.response == deterministic_prior_response
+    @test factor_steady_state_allocations(
+        deterministic_scale_workspace, deterministic_scale_prepared,
+        deterministic_scale_position) == (; primal=0, gradient=0)
+    @test factor_query_allocations(
+        deterministic_scale_workspace, deterministic_scale_prepared,
+        deterministic_scale_position, similar(response), similar(response),
+        similar(response), similar(deterministic_scale_position)) ==
+          (; linear=0, pointwise=0, predictive=0, prior=0)
+    deterministic_scale_rebound = NP.rebind(
+        deterministic_scale_prepared, (; y=[0.1, 0.4, 0.8]))
+    @test deterministic_scale_rebound.plan.graph.schedule ==
+          deterministic_scale_graph.schedule
+    @test deterministic_scale_rebound.plan.bindings ==
+          deterministic_scale_plan.bindings
+
+    sampled_offset_data = (;
+        x=[-1.0, 0.0, 1.0, 2.0],
+        y=[0.1, 0.4, 0.8, 1.0])
+    sampled_offset_brmi = @brm sampled_offset_data begin
+        latent ~ Normal(0, 1)
+        sigma ~ Exponential(2)
+        mu ~ 0 + x + offset(latent)
+        y ~ Normal(mu, sigma)
+    end
+    @test popcoefnames(sampled_offset_brmi, :mu) == [:x]
+    @test dependencies(sampled_offset_brmi, :mu).intermediates == [:latent]
+    sampled_offset_model = NP.lower(sampled_offset_brmi)
+    direct_sampled_offset_model = NP.model(
+        inputs=(; x=NP.input()),
+        parameters=(;
+            beta_mu=NP.parameter(
+                NP.RealSupport(), (:x,); transform=NP.Identity(),
+                prior=NP.StandardNormal()),
+            sigma=NP.parameter(
+                NP.PositiveSupport(), (:sigma,); transform=NP.Exp(),
+                prior=NP.Exponential(2)),
+            latent=NP.parameter(
+                NP.RealSupport(), (:latent,); transform=NP.Identity(),
+                prior=NP.StandardNormal())),
+        nodes=(; mu=NP.affine(
+            :x, :beta_mu; offsets=(:latent,), intercept=false)),
+        observations=(; y=NP.broadcasted(NP.normal(:y, :mu, :sigma))),
+        site_order=(:latent, :beta_mu, :sigma, :y))
+    @test typeof(sampled_offset_model) === typeof(direct_sampled_offset_model)
+    @test sprint(show, sampled_offset_model) ==
+          sprint(show, direct_sampled_offset_model)
+    natural_sampled_offset = NP.condition(
+        natural_sampled_offset_regression(sampled_offset_data.x);
+        y=sampled_offset_data.y)
+    @test typeof(natural_sampled_offset.declaration) ===
+          typeof(sampled_offset_model)
+    @test sprint(show, natural_sampled_offset.declaration) ==
+          sprint(show, sampled_offset_model)
+    @test SBBRMI(sampled_offset_brmi; mod=@__MODULE__) isa SBBRMI
+    sampled_offset_graph = NP.factor_graph(
+        sampled_offset_model; conditions=(; y=sampled_offset_data.y))
+    @test sampled_offset_graph.schedule ==
+          (:latent, :beta_mu, :sigma, :mu, :y)
+    @test sampled_offset_graph.dimension == 3
+    @test sampled_offset_graph.nodes.mu isa NP.AffineFactorNode
+    @test !NP.affine_has_intercept(sampled_offset_graph.nodes.mu)
+    @test sampled_offset_graph.nodes.mu.offsets ==
+          (NP.SiteValue{:latent}(),)
+    @test NP.factor_node_dependencies(sampled_offset_graph.nodes.mu) ==
+          (:beta_mu, :latent)
+
+    row_node_to_scalar_model = NP.model(
+        inputs=direct_sampled_offset_model.inputs,
+        parameters=direct_sampled_offset_model.parameters,
+        nodes=direct_sampled_offset_model.nodes,
+        observations=(;
+            z=NP.normal(:z, :mu, :sigma),
+            y=direct_sampled_offset_model.observations.y),
+        site_order=(:latent, :beta_mu, :sigma, :z, :y))
+    @test capability_error(() -> NP.compile(
+        row_node_to_scalar_model, (; x=sampled_offset_data.x);
+        conditions=(; y=sampled_offset_data.y))).capability == :factor_shape
+    affine_scale_model = NP.model(
+        inputs=direct_sampled_offset_model.inputs,
+        parameters=direct_sampled_offset_model.parameters,
+        nodes=direct_sampled_offset_model.nodes,
+        observations=(; y=NP.broadcasted(
+            NP.normal(:y, :latent, :mu))),
+        site_order=(:latent, :beta_mu, :sigma, :y))
+    @test capability_error(() -> NP.compile(
+        affine_scale_model, (; x=sampled_offset_data.x);
+        conditions=(; y=sampled_offset_data.y))).capability == :factor_scale
+    row_exp_model = NP.model(
+        inputs=direct_sampled_offset_model.inputs,
+        parameters=direct_sampled_offset_model.parameters,
+        nodes=(; mu=direct_sampled_offset_model.nodes.mu,
+                 row_scale=NP.exp_link(:mu)),
+        observations=(; y=NP.broadcasted(
+            NP.normal(:y, :latent, :row_scale))),
+        site_order=(:latent, :beta_mu, :sigma, :y))
+    @test capability_error(() -> NP.compile(
+        row_exp_model, (; x=sampled_offset_data.x);
+        conditions=(; y=sampled_offset_data.y))).capability == :factor_nodes
+
+    grouped_declaration = NP.model(
+        inputs=(; group=NP.input()),
+        parameters=(;
+            tau=NP.parameter(
+                NP.PositiveSupport(), (:tau,); transform=NP.Exp(),
+                prior=NP.Exponential(1)),
+            varying=NP.grouped_normal(:group, 0.0, :tau),
+            sigma=NP.parameter(
+                NP.PositiveSupport(), (:sigma,); transform=NP.Exp(),
+                prior=NP.Exponential(2))),
+        nodes=(; varying_by_row=NP.group_gather(:varying, :group)),
+        observations=(; y=NP.broadcasted(
+            NP.normal(:y, :varying_by_row, :sigma))),
+        site_order=(:tau, :varying, :sigma, :y))
+    grouped_bindings = (; group=[:a, :b, :a, :c])
+    grouped_graph = NP.factor_graph(
+        grouped_declaration; bindings=grouped_bindings,
+        conditions=(; y=sampled_offset_data.y))
+    @test grouped_graph.schedule ==
+          (:tau, :varying, :sigma, :varying_by_row, :y)
+    @test grouped_graph.dimension == 5
+    @test keys(grouped_graph.coordinates) == (:tau, :varying, :sigma)
+    @test grouped_graph.coordinates.varying.keys == (
+        NP.GroupCoordinateKey(:varying, :a),
+        NP.GroupCoordinateKey(:varying, :b),
+        NP.GroupCoordinateKey(:varying, :c))
+    @test grouped_graph.coordinates.varying.indices == 2:4
+    @test grouped_graph.sites.varying.shape isa NP.BlockSiteShape
+    @test grouped_graph.sites.varying.factor isa NP.NormalSiteFactor
+    @test NP.site_factor_dependencies(
+        grouped_graph.sites.varying.factor) == (:tau,)
+    @test grouped_graph.nodes.varying_by_row isa NP.GroupGatherFactorNode
+    @test NP.factor_node_dependencies(
+        grouped_graph.nodes.varying_by_row) == (:varying,)
+    @test_throws ArgumentError NP.factor_graph(
+        grouped_declaration; conditions=(; y=sampled_offset_data.y))
+    grouped_plan = NP.compile(
+        grouped_declaration, grouped_bindings;
+        conditions=(; y=sampled_offset_data.y))
+    @test grouped_plan isa NP.FactorPlan
+    @test grouped_plan.group_indices ==
+          (; varying_by_row=(1, 2, 1, 3))
+    grouped_prepared = NP.prepare(grouped_plan)
+    @test grouped_prepared.plan.bindings.group !== grouped_bindings.group
+    grouped_source = copy(grouped_bindings.group)
+    grouped_owned = NP.prepare(NP.compile(
+        grouped_declaration, (; group=grouped_source);
+        conditions=(; y=sampled_offset_data.y)))
+    grouped_source[1] = :changed_after_prepare
+    @test grouped_owned.plan.bindings.group == grouped_bindings.group
+    @test grouped_owned.plan.group_indices == grouped_plan.group_indices
+    grouped_workspace = NP.workspace(
+        grouped_prepared, Float64, DI.AutoEnzyme())
+    grouped_position = [log(0.7), 0.2, -0.1, 0.4, log(0.5)]
+    grouped_tau = exp(grouped_position[1])
+    grouped_effects = grouped_position[2:4]
+    grouped_sigma = exp(grouped_position[5])
+    grouped_mu = grouped_effects[[1, 2, 1, 3]]
+    grouped_residuals = sampled_offset_data.y .- grouped_mu
+    grouped_expected_density =
+        logpdf(Exponential(1), grouped_tau) + grouped_position[1] +
+        sum(logpdf.(Normal(0, grouped_tau), grouped_effects)) +
+        logpdf(Exponential(2), grouped_sigma) + grouped_position[5] +
+        sum(logpdf.(Normal.(grouped_mu, grouped_sigma),
+                    sampled_offset_data.y))
+    grouped_expected_gradient = [
+        1 - grouped_tau - length(grouped_effects) +
+            sum(abs2, grouped_effects) / grouped_tau^2,
+        -grouped_effects[1] / grouped_tau^2 +
+            (grouped_residuals[1] + grouped_residuals[3]) /
+                grouped_sigma^2,
+        -grouped_effects[2] / grouped_tau^2 +
+            grouped_residuals[2] / grouped_sigma^2,
+        -grouped_effects[3] / grouped_tau^2 +
+            grouped_residuals[4] / grouped_sigma^2,
+        1 - grouped_sigma / 2 - length(sampled_offset_data.y) +
+            sum(abs2, grouped_residuals) / grouped_sigma^2,
+    ]
+    grouped_density, grouped_gradient = NP.logdensity_and_gradient!(
+        grouped_workspace, grouped_prepared, grouped_position)
+    @test grouped_density ≈ grouped_expected_density
+    @test grouped_gradient ≈ grouped_expected_gradient
+    @test NP.evaluate(
+        grouped_workspace, grouped_prepared, grouped_position,
+        NP.LinearPredictor()) == grouped_mu
+    @test NP.evaluate(
+        grouped_workspace, grouped_prepared, grouped_position,
+        NP.PointwiseLogLikelihood()) ≈
+          logpdf.(Normal.(grouped_mu, grouped_sigma), sampled_offset_data.y)
+    @test factor_steady_state_allocations(
+        grouped_workspace, grouped_prepared, grouped_position) ==
+          (; primal=0, gradient=0)
+    grouped_prediction_only = NP.rebind(grouped_prepared, (;))
+    @test !NP.has_response(grouped_prediction_only)
+    @test length(NP.simulate(
+        MersenneTwister(934), NP.workspace(grouped_prediction_only),
+        grouped_prediction_only, grouped_position)) ==
+          length(grouped_bindings.group)
+
+    varying_brm_data = (;
+        x=sampled_offset_data.x,
+        group=grouped_bindings.group,
+        y=sampled_offset_data.y)
+    varying_brm = @brm varying_brm_data begin
+        sigma ~ Exponential(2)
+        mu ~ 0 + x + (1 | p | group)
+        sd(:, p) ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end
+    @test popcoefnames(varying_brm, :mu) == [:x]
+    @test ranefcoefnames(varying_brm, :p) == [
+        (; predictor=:mu, coefficient=:Intercept)]
+    @test SBBRMI(varying_brm; mod=@__MODULE__) isa SBBRMI
+    varying_model = NP.lower(varying_brm)
+    direct_varying_model = NP.model(
+        inputs=(; x=NP.input(), group=NP.input()),
+        parameters=(;
+            beta_mu=NP.parameter(
+                NP.RealSupport(), (:x,); transform=NP.Identity(),
+                prior=NP.StandardNormal()),
+            tau_p_group=NP.parameter(
+                NP.PositiveSupport(), (:tau_p_group,); transform=NP.Exp(),
+                prior=NP.Exponential(1)),
+            b_p_group=NP.grouped_normal(
+                :group, 0.0, :tau_p_group),
+            sigma=NP.parameter(
+                NP.PositiveSupport(), (:sigma,); transform=NP.Exp(),
+                prior=NP.Exponential(2))),
+        nodes=(;
+            r_mu_p_group=NP.group_gather(:b_p_group, :group),
+            mu=NP.affine(
+                :x, :beta_mu; offsets=(:r_mu_p_group,),
+                intercept=false)),
+        observations=(; y=NP.broadcasted(
+            NP.normal(:y, :mu, :sigma))),
+        site_order=(:tau_p_group, :b_p_group, :beta_mu, :sigma, :y))
+    @test typeof(varying_model) === typeof(direct_varying_model)
+    @test sprint(show, varying_model) == sprint(show, direct_varying_model)
+    natural_varying = NP.condition(
+        natural_varying_intercept(
+            varying_brm_data.x, varying_brm_data.group);
+        y=varying_brm_data.y)
+    @test keys(natural_varying.declaration.parameters) ==
+          keys(varying_model.parameters)
+    @test keys(natural_varying.declaration.nodes) ==
+          (:b_p_group_by_group_for_mu, :mu)
+    @test natural_varying.declaration.site_order == varying_model.site_order
+    @test natural_varying.declaration.parameters.beta_mu.axis_keys == (:beta,)
+    @test varying_model.parameters.beta_mu.axis_keys == (:x,)
+    @test NP.group_input(
+        natural_varying.declaration.parameters.b_p_group) === :group
+    @test NP.group_values(
+        natural_varying.declaration.nodes.b_p_group_by_group_for_mu) ===
+          :b_p_group
+    @test NP.group_input(
+        natural_varying.declaration.nodes.b_p_group_by_group_for_mu) ===
+          :group
+    varying_plan = NP.compile(varying_brm)
+    @test varying_plan isa NP.FactorPlan
+    @test varying_plan.graph.schedule == (
+        :tau_p_group, :b_p_group, :beta_mu, :sigma,
+        :r_mu_p_group, :mu, :y)
+    @test varying_plan.group_indices ==
+          (; r_mu_p_group=(1, 2, 1, 3))
+    @test varying_plan.graph.dimension == 6
+    @test varying_plan.graph.coordinates.b_p_group.keys == (
+        NP.GroupCoordinateKey(:b_p_group, :a),
+        NP.GroupCoordinateKey(:b_p_group, :b),
+        NP.GroupCoordinateKey(:b_p_group, :c))
+    varying_prepared = NP.prepare(varying_plan)
+    varying_workspace = NP.workspace(
+        varying_prepared, Float64, DI.AutoEnzyme())
+    varying_position = [log(0.7), 0.2, -0.1, 0.4, -0.3, log(0.5)]
+    varying_tau = exp(varying_position[1])
+    varying_effects = varying_position[2:4]
+    varying_beta = varying_position[5]
+    varying_sigma = exp(varying_position[6])
+    varying_mu = varying_beta .* varying_brm_data.x .+
+        varying_effects[[1, 2, 1, 3]]
+    varying_residuals = varying_brm_data.y .- varying_mu
+    varying_expected_density =
+        logpdf(Exponential(1), varying_tau) + varying_position[1] +
+        sum(logpdf.(Normal(0, varying_tau), varying_effects)) +
+        logpdf(Normal(), varying_beta) +
+        logpdf(Exponential(2), varying_sigma) + varying_position[6] +
+        sum(logpdf.(Normal.(varying_mu, varying_sigma), varying_brm_data.y))
+    varying_expected_gradient = [
+        1 - varying_tau - length(varying_effects) +
+            sum(abs2, varying_effects) / varying_tau^2,
+        -varying_effects[1] / varying_tau^2 +
+            (varying_residuals[1] + varying_residuals[3]) /
+                varying_sigma^2,
+        -varying_effects[2] / varying_tau^2 +
+            varying_residuals[2] / varying_sigma^2,
+        -varying_effects[3] / varying_tau^2 +
+            varying_residuals[4] / varying_sigma^2,
+        -varying_beta +
+            sum(varying_residuals .* varying_brm_data.x) /
+                varying_sigma^2,
+        1 - varying_sigma / 2 - length(varying_brm_data.y) +
+            sum(abs2, varying_residuals) / varying_sigma^2,
+    ]
+    varying_density, varying_gradient = NP.logdensity_and_gradient!(
+        varying_workspace, varying_prepared, varying_position)
+    @test varying_density ≈ varying_expected_density
+    @test varying_gradient ≈ varying_expected_gradient
+    @test NP.evaluate(
+        varying_workspace, varying_prepared, varying_position,
+        NP.LinearPredictor()) ≈ varying_mu
+    @test factor_steady_state_allocations(
+        varying_workspace, varying_prepared, varying_position) ==
+          (; primal=0, gradient=0)
+    varying_margin_prior = @brm varying_brm_data begin
+        sigma ~ Exponential(2)
+        mu ~ 0 + x + (1 | p | group)
+        sd(:, p, x) ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end
+    @test capability_error(
+        () -> NP.lower(varying_margin_prior)).capability == :group_prior
+    varying_no_population_data = (;
+        group=varying_brm_data.group, y=varying_brm_data.y)
+    varying_without_population = @brm varying_no_population_data begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + (1 | p | group)
+        sd(:, p) ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end
+    @test capability_error(
+        () -> NP.lower(varying_without_population)).capability ==
+          :predictor_terms
+    natural_varying_plan = NP.compile(natural_varying)
+    direct_varying_plan = NP.compile(
+        direct_varying_model,
+        (; x=varying_brm_data.x, group=varying_brm_data.group);
+        conditions=(; y=varying_brm_data.y))
+    for candidate_plan in (natural_varying_plan, direct_varying_plan)
+        canonical_schedule = map(candidate_plan.graph.schedule) do name
+            name === :b_p_group_by_group_for_mu ? :r_mu_p_group : name
+        end
+        @test canonical_schedule == varying_plan.graph.schedule
+        @test only(values(candidate_plan.group_indices)) ==
+              only(values(varying_plan.group_indices))
+        @test candidate_plan.graph.dimension == varying_plan.graph.dimension
+        candidate_prepared = NP.prepare(candidate_plan)
+        candidate_workspace = NP.workspace(
+            candidate_prepared, Float64, DI.AutoEnzyme())
+        candidate_density, candidate_gradient = NP.logdensity_and_gradient!(
+            candidate_workspace, candidate_prepared, varying_position)
+        @test candidate_density ≈ varying_density
+        @test candidate_gradient ≈ varying_gradient
+        @test NP.evaluate(
+            candidate_workspace, candidate_prepared, varying_position,
+            NP.LinearPredictor()) ≈ varying_mu
+        @test factor_steady_state_allocations(
+            candidate_workspace, candidate_prepared, varying_position) ==
+              (; primal=0, gradient=0)
+    end
+    varying_replay_bindings = (;
+        x=[3.0, -2.0, 0.5], group=[:c, :a, :c])
+    varying_replay_response = [0.2, -0.3, 0.7]
+    varying_replay = NP.rebind(
+        varying_prepared, (; y=varying_replay_response);
+        bindings=varying_replay_bindings)
+    @test varying_replay.plan.group_indices ==
+          (; r_mu_p_group=(3, 1, 3))
+    @test varying_replay.plan.graph.coordinates.b_p_group.keys ==
+          varying_plan.graph.coordinates.b_p_group.keys
+    @test varying_replay.plan.graph.dimension == varying_plan.graph.dimension
+    varying_replay_workspace = NP.workspace(
+        varying_replay, Float64, DI.AutoEnzyme())
+    @test NP.evaluate(
+        varying_replay_workspace, varying_replay, varying_position,
+        NP.LinearPredictor()) ≈
+          varying_beta .* varying_replay_bindings.x .+
+          varying_effects[[3, 1, 3]]
+    varying_prediction_only = NP.rebind(
+        varying_prepared, (;); bindings=varying_replay_bindings)
+    @test !NP.has_response(varying_prediction_only)
+    @test length(NP.simulate(
+        MersenneTwister(935), NP.workspace(varying_prediction_only),
+        varying_prediction_only, varying_position)) == 3
+    natural_varying_replay = NP.rebind(
+        NP.prepare(natural_varying_plan), (;);
+        bindings=varying_replay_bindings)
+    @test only(values(natural_varying_replay.plan.group_indices)) ==
+          only(values(varying_replay.plan.group_indices))
+    @test NP.evaluate(
+        NP.workspace(natural_varying_replay), natural_varying_replay,
+        varying_position, NP.LinearPredictor()) ≈
+          varying_beta .* varying_replay_bindings.x .+
+          varying_effects[[3, 1, 3]]
+    new_group_error = capability_error(() -> NP.rebind(
+        varying_prepared, (;);
+        bindings=(; x=[0.0, 1.0], group=[:a, :new_group])))
+    @test new_group_error.capability == :new_group
+    @test occursin("new_groups=:resample", new_group_error.detail)
+    varying_new_group_bindings = (;
+        x=[0.0, 1.0, 2.0, 3.0],
+        group=[:a, :new_group, :newer_group, :new_group])
+    varying_new_group_replay = NP.rebind(
+        varying_prepared, (;); bindings=varying_new_group_bindings,
+        new_groups=:resample)
+    @test varying_new_group_replay.plan.graph.dimension ==
+          varying_plan.graph.dimension
+    @test varying_new_group_replay.plan.generated_group_levels ==
+          (; b_p_group=(:new_group, :newer_group))
+    @test varying_new_group_replay.plan.group_indices ==
+          (; r_mu_p_group=(1, -1, -2, -1))
+    @test occursin(
+        "2 generated groups", sprint(show, varying_new_group_replay.plan))
+    conditioned_new_group_error = capability_error(() -> NP.rebind(
+        varying_prepared, (; y=zeros(4));
+        bindings=varying_new_group_bindings, new_groups=:resample))
+    @test conditioned_new_group_error.capability == :new_group_activity
+    @test occursin("prediction-only", conditioned_new_group_error.detail)
+    @test_throws ArgumentError NP.rebind(
+        varying_prepared, (;); bindings=varying_new_group_bindings,
+        new_groups=:invent)
+    varying_new_group_workspace = NP.workspace(varying_new_group_replay)
+    varying_new_group_output = zeros(4)
+    varying_new_group_rng = MersenneTwister(936)
+    varying_new_group_expected_rng = MersenneTwister(936)
+    expected_new_group_effects = [
+        varying_tau * randn(varying_new_group_expected_rng),
+        varying_tau * randn(varying_new_group_expected_rng),
+    ]
+    varying_new_group_expected_mu = [
+        varying_beta * varying_new_group_bindings.x[1] + varying_effects[1],
+        varying_beta * varying_new_group_bindings.x[2] +
+            expected_new_group_effects[1],
+        varying_beta * varying_new_group_bindings.x[3] +
+            expected_new_group_effects[2],
+        varying_beta * varying_new_group_bindings.x[4] +
+            expected_new_group_effects[1],
+    ]
+    varying_new_group_expected_response = map(
+        varying_new_group_expected_mu) do location
+        location + varying_sigma * randn(varying_new_group_expected_rng)
+    end
+    NP.simulate!(
+        varying_new_group_rng, varying_new_group_output,
+        varying_new_group_workspace, varying_new_group_replay,
+        varying_position)
+    @test varying_new_group_output == varying_new_group_expected_response
+    @test varying_new_group_workspace.primal.generated_group_values ==
+          expected_new_group_effects
+    @test vec(varying_new_group_workspace.primal.node_rows[2, :]) ==
+          varying_new_group_expected_mu
+    @test factor_predictive_allocations(
+        varying_new_group_rng, varying_new_group_output,
+        varying_new_group_workspace, varying_new_group_replay,
+        varying_position) == 0
+    multi_varying_model = NP.model(
+        inputs=(; x=NP.input(), w=NP.input(), group=NP.input()),
+        parameters=(;
+            beta_mu=NP.parameter(
+                NP.RealSupport(), (:x, :w); transform=NP.Identity(),
+                prior=NP.StandardNormal()),
+            tau_p_group=direct_varying_model.parameters.tau_p_group,
+            b_p_group=direct_varying_model.parameters.b_p_group,
+            sigma=direct_varying_model.parameters.sigma),
+        nodes=(;
+            r_mu_p_group=NP.group_gather(:b_p_group, :group),
+            mu=NP.affine(
+                (:x, :w), :beta_mu; offsets=(:r_mu_p_group,),
+                intercept=false)),
+        observations=direct_varying_model.observations,
+        site_order=direct_varying_model.site_order)
+    multi_varying_prepared = NP.prepare(NP.compile(
+        multi_varying_model,
+        (; x=varying_brm_data.x, w=reverse(varying_brm_data.x),
+           group=varying_brm_data.group);
+        conditions=(; y=varying_brm_data.y)))
+    multi_varying_replay = NP.rebind(
+        multi_varying_prepared, (;);
+        bindings=(; x=varying_new_group_bindings.x,
+                    w=reverse(varying_new_group_bindings.x),
+                    group=varying_new_group_bindings.group),
+        new_groups=:resample)
+    multi_varying_output = zeros(4)
+    multi_varying_workspace = NP.workspace(multi_varying_replay)
+    multi_varying_rng = MersenneTwister(938)
+    NP.simulate!(
+        multi_varying_rng, multi_varying_output,
+        multi_varying_workspace, multi_varying_replay,
+        [log(0.7), varying_effects..., -0.3, 0.1, log(0.5)])
+    @test all(isfinite, multi_varying_output)
+    @test factor_predictive_allocations(
+        multi_varying_rng, multi_varying_output,
+        multi_varying_workspace, multi_varying_replay,
+        [log(0.7), varying_effects..., -0.3, 0.1, log(0.5)]) == 0
+    new_group_density_error = capability_error(() -> NP.logdensity!(
+        varying_new_group_workspace, varying_new_group_replay,
+        varying_position))
+    @test new_group_density_error.capability == :new_group_activity
+    new_group_linear_error = capability_error(() -> NP.evaluate!(
+        similar(varying_new_group_output), varying_new_group_workspace,
+        varying_new_group_replay, varying_position, NP.LinearPredictor()))
+    @test new_group_linear_error.capability == :new_group_activity
+    new_group_prior_error = capability_error(() -> NP.simulate_prior!(
+        MersenneTwister(937), similar(varying_position),
+        similar(varying_new_group_output), varying_new_group_workspace,
+        varying_new_group_replay))
+    @test new_group_prior_error.capability == :new_group_activity
+    varying_new_group_positions = [
+        varying_position';
+        log(0.9) -0.2 0.3 -0.4 0.15 log(0.6);
+    ]
+    varying_new_group_predictive = zeros(2, 4)
+    varying_new_group_manual_predictive = similar(
+        varying_new_group_predictive)
+    varying_new_group_manual_linear = similar(
+        varying_new_group_predictive)
+    varying_new_group_draw_rng = MersenneTwister(938)
+    varying_new_group_manual_rng = MersenneTwister(938)
+    for draw in axes(varying_new_group_positions, 1)
+        NP.simulate!(
+            varying_new_group_manual_rng,
+            @view(varying_new_group_manual_predictive[draw, :]),
+            varying_new_group_workspace, varying_new_group_replay,
+            @view(varying_new_group_positions[draw, :]))
+        varying_new_group_manual_linear[draw, :] .=
+            @view varying_new_group_workspace.primal.node_rows[2, :]
+    end
+    NP.simulate_draws!(
+        varying_new_group_draw_rng, varying_new_group_predictive,
+        varying_new_group_workspace, varying_new_group_replay,
+        varying_new_group_positions)
+    @test varying_new_group_predictive ==
+          varying_new_group_manual_predictive
+    varying_new_group_linear = zeros(2, 4)
+    varying_new_group_linear_manual = similar(varying_new_group_linear)
+    varying_new_group_linear_rng = MersenneTwister(939)
+    varying_new_group_linear_manual_rng = MersenneTwister(939)
+    for draw in axes(varying_new_group_positions, 1)
+        NP.evaluate!(
+            varying_new_group_linear_manual_rng,
+            @view(varying_new_group_linear_manual[draw, :]),
+            varying_new_group_workspace, varying_new_group_replay,
+            @view(varying_new_group_positions[draw, :]),
+            NP.LinearPredictor())
+    end
+    NP.evaluate_draws!(
+        varying_new_group_linear_rng, varying_new_group_linear,
+        varying_new_group_workspace, varying_new_group_replay,
+        varying_new_group_positions, NP.LinearPredictor())
+    @test varying_new_group_linear == varying_new_group_linear_manual
+    varying_new_group_queries = (;
+        linear=NP.LinearPredictor(),
+        predictive=NP.PosteriorPredictive())
+    varying_new_group_bundle = (;
+        linear=zeros(2, 4), predictive=zeros(2, 4))
+    varying_new_group_bundle_rng = MersenneTwister(938)
+    NP.execute_draws!(
+        varying_new_group_bundle_rng, varying_new_group_bundle,
+        varying_new_group_workspace, varying_new_group_replay,
+        varying_new_group_positions, varying_new_group_queries)
+    @test varying_new_group_bundle.linear == varying_new_group_manual_linear
+    @test varying_new_group_bundle.predictive ==
+          varying_new_group_manual_predictive
+    @test factor_generated_draw_allocations(
+        MersenneTwister(940), MersenneTwister(941), MersenneTwister(942),
+        varying_new_group_predictive, varying_new_group_linear,
+        varying_new_group_bundle, varying_new_group_workspace,
+        varying_new_group_replay, varying_new_group_positions,
+        varying_new_group_queries) ==
+          (; predictive=0, linear=0, bundle=0)
+    @test_throws ArgumentError NP.execute_draws!(
+        varying_new_group_bundle, varying_new_group_workspace,
+        varying_new_group_replay, varying_new_group_positions,
+        varying_new_group_queries)
+    node_rows_alias_rng = MersenneTwister(943)
+    node_rows_alias_expected_rng = MersenneTwister(943)
+    @test_throws ArgumentError NP.simulate_draws!(
+        node_rows_alias_rng,
+        varying_new_group_workspace.primal.node_rows,
+        varying_new_group_workspace, varying_new_group_replay,
+        varying_new_group_positions)
+    @test rand(node_rows_alias_rng) == rand(node_rows_alias_expected_rng)
+    pairwise_alias_output = zeros(2, 4)
+    pairwise_alias_rng = MersenneTwister(944)
+    pairwise_alias_expected_rng = MersenneTwister(944)
+    @test_throws ArgumentError NP.execute_draws!(
+        pairwise_alias_rng,
+        (; linear=pairwise_alias_output,
+           predictive=pairwise_alias_output),
+        varying_new_group_workspace, varying_new_group_replay,
+        varying_new_group_positions, varying_new_group_queries)
+    @test rand(pairwise_alias_rng) == rand(pairwise_alias_expected_rng)
+    varying_new_group_signature = NP.batch_output_signature(
+        varying_new_group_replay, varying_new_group_positions,
+        NP.LinearPredictor())
+    @test NP.output_axes(varying_new_group_signature) == (
+        BRM.NativePPLAxis(:draw, Base.OneTo(2)),
+        BRM.NativePPLAxis(:observation, Base.OneTo(4)))
+
+    sampled_offset_plan = NP.compile(sampled_offset_brmi)
+    @test sampled_offset_plan isa NP.FactorPlan
+    @test sampled_offset_plan.bindings.x == sampled_offset_data.x
+    natural_sampled_offset_plan = NP.compile(natural_sampled_offset)
+    direct_sampled_offset_plan = NP.compile(
+        direct_sampled_offset_model, (; x=sampled_offset_data.x);
+        conditions=(; y=sampled_offset_data.y))
+    @test natural_sampled_offset_plan.graph.schedule ==
+          sampled_offset_plan.graph.schedule
+    @test direct_sampled_offset_plan.graph.schedule ==
+          sampled_offset_plan.graph.schedule
+    sampled_offset_prepared = NP.prepare(sampled_offset_plan)
+    sampled_offset_workspace = NP.workspace(
+        sampled_offset_prepared, Float64, DI.AutoEnzyme())
+    sampled_offset_position = [0.2, -0.3, log(0.7)]
+    sampled_offset_latent = sampled_offset_position[1]
+    sampled_offset_beta = sampled_offset_position[2]
+    sampled_offset_sigma = exp(sampled_offset_position[3])
+    sampled_offset_mu = sampled_offset_latent .+
+        sampled_offset_beta .* sampled_offset_data.x
+    sampled_offset_residuals = sampled_offset_data.y .- sampled_offset_mu
+    sampled_offset_expected_density =
+        logpdf(Normal(), sampled_offset_latent) +
+        logpdf(Normal(), sampled_offset_beta) +
+        logpdf(Exponential(2), sampled_offset_sigma) +
+        sampled_offset_position[3] +
+        sum(logpdf.(Normal.(sampled_offset_mu, sampled_offset_sigma),
+                    sampled_offset_data.y))
+    sampled_offset_expected_gradient = [
+        -sampled_offset_latent +
+            sum(sampled_offset_residuals) / sampled_offset_sigma^2,
+        -sampled_offset_beta +
+            sum(sampled_offset_residuals .* sampled_offset_data.x) /
+                sampled_offset_sigma^2,
+        1 - sampled_offset_sigma / 2 - length(sampled_offset_data.y) +
+            sum(abs2, sampled_offset_residuals) / sampled_offset_sigma^2,
+    ]
+    sampled_offset_density, sampled_offset_gradient =
+        NP.logdensity_and_gradient!(
+            sampled_offset_workspace, sampled_offset_prepared,
+            sampled_offset_position)
+    @test sampled_offset_density ≈ sampled_offset_expected_density
+    @test sampled_offset_gradient ≈ sampled_offset_expected_gradient
+    sampled_offset_underflow_position = copy(sampled_offset_position)
+    sampled_offset_underflow_position[3] = -1000.0
+    @test NP.logdensity!(
+        sampled_offset_workspace, sampled_offset_prepared,
+        sampled_offset_underflow_position) == -Inf
+    @test vec(sampled_offset_workspace.primal.node_rows[1, :]) ≈
+          sampled_offset_mu
+    @test NP.evaluate(
+        sampled_offset_workspace, sampled_offset_prepared,
+        sampled_offset_position, NP.LinearPredictor()) ≈ sampled_offset_mu
+    @test NP.evaluate(
+        sampled_offset_workspace, sampled_offset_prepared,
+        sampled_offset_position, NP.PointwiseLogLikelihood()) ≈
+          logpdf.(Normal.(sampled_offset_mu, sampled_offset_sigma),
+                  sampled_offset_data.y)
+    @test factor_steady_state_allocations(
+        sampled_offset_workspace, sampled_offset_prepared,
+        sampled_offset_position) == (; primal=0, gradient=0)
+    sampled_offset_source_x = copy(sampled_offset_data.x)
+    sampled_offset_source_y = copy(sampled_offset_data.y)
+    sampled_offset_owned = NP.prepare(NP.bind(
+        sampled_offset_model, (; x=sampled_offset_source_x);
+        conditions=(; y=sampled_offset_source_y)))
+    sampled_offset_owned_workspace = NP.workspace(sampled_offset_owned)
+    sampled_offset_owned_density = NP.logdensity!(
+        sampled_offset_owned_workspace, sampled_offset_owned,
+        sampled_offset_position)
+    @test sampled_offset_owned.plan.bindings.x !== sampled_offset_source_x
+    @test sampled_offset_owned.conditions.y !== sampled_offset_source_y
+    sampled_offset_source_x[1] = 100.0
+    sampled_offset_source_y[1] = 100.0
+    @test NP.logdensity!(
+        sampled_offset_owned_workspace, sampled_offset_owned,
+        sampled_offset_position) == sampled_offset_owned_density
+    for candidate_plan in (
+        natural_sampled_offset_plan, direct_sampled_offset_plan)
+        candidate_prepared = NP.prepare(candidate_plan)
+        candidate_workspace = NP.workspace(
+            candidate_prepared, Float64, DI.AutoEnzyme())
+        candidate_density, candidate_gradient = NP.logdensity_and_gradient!(
+            candidate_workspace, candidate_prepared,
+            sampled_offset_position)
+        @test candidate_density ≈ sampled_offset_density
+        @test candidate_gradient ≈ sampled_offset_gradient
+        @test NP.evaluate(
+            candidate_workspace, candidate_prepared,
+            sampled_offset_position, NP.LinearPredictor()) ≈
+              sampled_offset_mu
+        @test factor_steady_state_allocations(
+            candidate_workspace, candidate_prepared,
+            sampled_offset_position) == (; primal=0, gradient=0)
+    end
+    sampled_offset_prediction_only = NP.rebind(
+        sampled_offset_prepared, (;))
+    @test !NP.has_response(sampled_offset_prediction_only)
+    @test length(NP.simulate(
+        MersenneTwister(933), NP.workspace(sampled_offset_prediction_only),
+        sampled_offset_prediction_only, sampled_offset_position)) ==
+          length(sampled_offset_data.x)
+
+    hierarchy_plan = NP.compile(NP.condition(hierarchy; y=response))
+    @test hierarchy_plan isa NP.FactorPlan
+    @test LogDensityProblems.dimension(hierarchy_plan) == 4
+    @test hierarchy_plan.output_site === :y
+    hierarchy_prepared = NP.prepare(hierarchy_plan)
+    hierarchy_workspace = NP.workspace(
+        hierarchy_prepared, Float64, DI.AutoEnzyme())
+    hierarchy_position = [0.2, log(0.7), -0.1, log(0.5)]
+    hierarchy_population = hierarchy_position[1]
+    hierarchy_population_scale = exp(hierarchy_position[2])
+    hierarchy_individual = hierarchy_position[3]
+    hierarchy_observation_scale = exp(hierarchy_position[4])
+    hierarchy_residual = hierarchy_individual - hierarchy_population
+    hierarchy_observation_residuals = response .- hierarchy_individual
+    hierarchy_expected_density =
+        logpdf(Normal(), hierarchy_population) +
+        logpdf(Exponential(1.0), hierarchy_population_scale) +
+        hierarchy_position[2] +
+        logpdf(Normal(
+            hierarchy_population, hierarchy_population_scale),
+            hierarchy_individual) +
+        logpdf(Exponential(2.0), hierarchy_observation_scale) +
+        hierarchy_position[4] +
+        sum(logpdf.(Normal(
+            hierarchy_individual, hierarchy_observation_scale), response))
+    hierarchy_expected_gradient = [
+        -hierarchy_population +
+            hierarchy_residual / hierarchy_population_scale^2,
+        1 - hierarchy_population_scale - 1 +
+            hierarchy_residual^2 / hierarchy_population_scale^2,
+        -hierarchy_residual / hierarchy_population_scale^2 +
+            sum(hierarchy_observation_residuals) /
+                hierarchy_observation_scale^2,
+        1 - hierarchy_observation_scale / 2 - length(response) +
+            sum(abs2, hierarchy_observation_residuals) /
+                hierarchy_observation_scale^2,
+    ]
+    hierarchy_density, hierarchy_gradient = NP.logdensity_and_gradient!(
+        hierarchy_workspace, hierarchy_prepared, hierarchy_position)
+    @test hierarchy_density ≈ hierarchy_expected_density
+    @test hierarchy_gradient ≈ hierarchy_expected_gradient
+    hierarchy_prepared32 = NP.prepare(hierarchy_plan; T=Float32)
+    hierarchy_position32 = Float32.(hierarchy_position)
+    hierarchy_density32, hierarchy_gradient32 = NP.logdensity_and_gradient!(
+        NP.workspace(hierarchy_prepared32, Float32, DI.AutoEnzyme()),
+        hierarchy_prepared32, hierarchy_position32)
+    @test hierarchy_density32 ≈ Float32(hierarchy_expected_density) rtol=1f-5
+    @test hierarchy_gradient32 ≈
+          Float32.(hierarchy_expected_gradient) rtol=1f-5
+    @test_throws ArgumentError NP.prepare(
+        hierarchy_plan; T=AbstractFloat)
+    hierarchy_underflow_position = copy(hierarchy_position)
+    hierarchy_underflow_position[2] = -1000.0
+    @test NP.logdensity!(
+        NP.workspace(hierarchy_prepared), hierarchy_prepared,
+        hierarchy_underflow_position) == -Inf
+    @test hierarchy_workspace.primal.pointwise_loglikelihood ≈
+        logpdf.(Normal(
+            hierarchy_individual, hierarchy_observation_scale), response)
+    hierarchy_linear = NP.evaluate(
+        hierarchy_workspace, hierarchy_prepared, hierarchy_position,
+        NP.LinearPredictor())
+    @test hierarchy_linear == fill(
+        hierarchy_individual, length(response))
+    hierarchy_pointwise = NP.evaluate(
+        hierarchy_workspace, hierarchy_prepared, hierarchy_position,
+        NP.PointwiseLogLikelihood())
+    @test hierarchy_pointwise ≈ logpdf.(Normal(
+        hierarchy_individual, hierarchy_observation_scale), response)
+    hierarchy_predictive_rng = MersenneTwister(919)
+    hierarchy_expected_predictive_rng = MersenneTwister(919)
+    hierarchy_expected_predictive = [
+        hierarchy_individual + hierarchy_observation_scale *
+            randn(hierarchy_expected_predictive_rng)
+        for _ in response
+    ]
+    hierarchy_predictive = NP.simulate(
+        hierarchy_predictive_rng, hierarchy_workspace,
+        hierarchy_prepared, hierarchy_position)
+    @test hierarchy_predictive == hierarchy_expected_predictive
+
+    hierarchy_prior_rng = MersenneTwister(920)
+    hierarchy_expected_prior_rng = MersenneTwister(920)
+    expected_population = randn(hierarchy_expected_prior_rng)
+    expected_population_scale = randexp(hierarchy_expected_prior_rng)
+    expected_individual = expected_population + expected_population_scale *
+        randn(hierarchy_expected_prior_rng)
+    expected_observation_scale = 2 * randexp(hierarchy_expected_prior_rng)
+    expected_prior_response = [
+        expected_individual + expected_observation_scale *
+            randn(hierarchy_expected_prior_rng)
+        for _ in response
+    ]
+    hierarchy_prior = NP.simulate_prior(
+        hierarchy_prior_rng, hierarchy_workspace, hierarchy_prepared)
+    @test hierarchy_prior.position ≈ [
+        expected_population,
+        log(expected_population_scale),
+        expected_individual,
+        log(expected_observation_scale),
+    ]
+    @test hierarchy_prior.response == expected_prior_response
+
+    hierarchy_signature = NP.output_signature(
+        hierarchy_prepared, NP.PosteriorPredictive())
+    @test NP.output_axis(hierarchy_signature).keys ==
+          Base.OneTo(length(response))
+    @test NP.output_eltype(hierarchy_signature, hierarchy_prepared) === Float64
+    hierarchy_rebound_response = [0.1, 0.4, 0.8]
+    hierarchy_rebound = NP.rebind(
+        hierarchy_prepared, (; y=hierarchy_rebound_response))
+    @test NP.has_response(hierarchy_rebound)
+    @test hierarchy_rebound.conditions.y == hierarchy_rebound_response
+    @test length(hierarchy_rebound.plan.observation_axis) == 3
+    hierarchy_prediction_only = NP.rebind(hierarchy_prepared, (;))
+    @test !NP.has_response(hierarchy_prediction_only)
+    @test length(hierarchy_prediction_only.plan.observation_axis) ==
+          length(response)
+    @test_throws ArgumentError NP.evaluate(
+        NP.workspace(hierarchy_prediction_only), hierarchy_prediction_only,
+        hierarchy_position, NP.PointwiseLogLikelihood())
+    @test length(NP.simulate(
+        MersenneTwister(923), NP.workspace(hierarchy_prediction_only),
+        hierarchy_prediction_only, hierarchy_position)) == length(response)
+
+    hierarchy_linear_buffer = similar(response)
+    hierarchy_pointwise_buffer = similar(response)
+    hierarchy_predictive_buffer = similar(response)
+    hierarchy_prior_position = similar(hierarchy_position)
+    @test factor_steady_state_allocations(
+        hierarchy_workspace, hierarchy_prepared, hierarchy_position) ==
+          (; primal=0, gradient=0)
+    @test factor_query_allocations(
+        hierarchy_workspace, hierarchy_prepared, hierarchy_position,
+        hierarchy_linear_buffer, hierarchy_pointwise_buffer,
+        hierarchy_predictive_buffer, hierarchy_prior_position) ==
+          (; linear=0, pointwise=0, predictive=0, prior=0)
+
+    hierarchy_positions = [
+        hierarchy_position';
+        0.1 log(0.9) 0.2 log(0.7);
+        -0.3 log(1.1) 0.4 log(0.6);
+    ]
+    hierarchy_linear_draws = NP.evaluate_draws(
+        hierarchy_workspace, hierarchy_prepared, hierarchy_positions,
+        NP.LinearPredictor())
+    hierarchy_pointwise_draws = NP.evaluate_draws(
+        hierarchy_workspace, hierarchy_prepared, hierarchy_positions,
+        NP.PointwiseLogLikelihood())
+    for draw in axes(hierarchy_positions, 1)
+        draw_position = collect(@view hierarchy_positions[draw, :])
+        @test hierarchy_linear_draws[draw, :] == NP.evaluate(
+            hierarchy_workspace, hierarchy_prepared, draw_position,
+            NP.LinearPredictor())
+        @test hierarchy_pointwise_draws[draw, :] == NP.evaluate(
+            hierarchy_workspace, hierarchy_prepared, draw_position,
+            NP.PointwiseLogLikelihood())
+    end
+    hierarchy_batch_signature = NP.batch_output_signature(
+        hierarchy_prepared, hierarchy_positions, NP.LinearPredictor())
+    @test NP.output_axes(hierarchy_batch_signature) == (
+        BRM.NativePPLAxis(:draw, Base.OneTo(3)),
+        hierarchy_prepared.plan.observation_axis)
+
+    hierarchy_predictive_draws_rng = MersenneTwister(926)
+    hierarchy_predictive_scalar_rng = MersenneTwister(926)
+    hierarchy_predictive_draws = NP.simulate_draws(
+        hierarchy_predictive_draws_rng, hierarchy_workspace,
+        hierarchy_prepared, hierarchy_positions)
+    hierarchy_predictive_scalar = similar(hierarchy_predictive_draws)
+    for draw in axes(hierarchy_positions, 1)
+        NP.simulate!(
+            hierarchy_predictive_scalar_rng,
+            @view(hierarchy_predictive_scalar[draw, :]),
+            hierarchy_workspace, hierarchy_prepared,
+            @view(hierarchy_positions[draw, :]))
+    end
+    @test hierarchy_predictive_draws == hierarchy_predictive_scalar
+
+    hierarchy_bundle_queries = (;
+        linear=NP.LinearPredictor(),
+        pointwise=NP.PointwiseLogLikelihood(),
+        predictive=NP.PosteriorPredictive())
+    hierarchy_bundle_rng = MersenneTwister(927)
+    hierarchy_bundle_predictive_rng = MersenneTwister(927)
+    hierarchy_bundle = NP.execute_draws(
+        hierarchy_bundle_rng, hierarchy_workspace, hierarchy_prepared,
+        hierarchy_positions, hierarchy_bundle_queries)
+    @test hierarchy_bundle.linear == hierarchy_linear_draws
+    @test hierarchy_bundle.pointwise == hierarchy_pointwise_draws
+    @test hierarchy_bundle.predictive == NP.simulate_draws(
+        hierarchy_bundle_predictive_rng, hierarchy_workspace,
+        hierarchy_prepared, hierarchy_positions)
+
+    hierarchy_batch_linear = similar(hierarchy_linear_draws)
+    hierarchy_batch_pointwise = similar(hierarchy_pointwise_draws)
+    hierarchy_batch_predictive = similar(hierarchy_predictive_draws)
+    hierarchy_batch_bundle = (;
+        linear=similar(hierarchy_linear_draws),
+        pointwise=similar(hierarchy_pointwise_draws),
+        predictive=similar(hierarchy_predictive_draws))
+    @test factor_batch_allocations(
+        hierarchy_workspace, hierarchy_prepared, hierarchy_positions,
+        hierarchy_batch_linear, hierarchy_batch_pointwise,
+        hierarchy_batch_predictive, hierarchy_batch_bundle) ==
+          (; linear=0, pointwise=0, predictive=0, bundle=0)
+    hierarchy_aliased_bundle = similar(hierarchy_linear_draws)
+    hierarchy_aliased_bundle_rng = MersenneTwister(928)
+    hierarchy_aliased_bundle_control_rng = MersenneTwister(928)
+    @test_throws ArgumentError NP.execute_draws!(
+        hierarchy_aliased_bundle_rng,
+        (; linear=hierarchy_aliased_bundle,
+           predictive=hierarchy_aliased_bundle),
+        hierarchy_workspace, hierarchy_prepared, hierarchy_positions,
+        (; linear=NP.LinearPredictor(),
+           predictive=NP.PosteriorPredictive()))
+    @test rand(hierarchy_aliased_bundle_rng) ==
+          rand(hierarchy_aliased_bundle_control_rng)
+
+    hierarchy_empty_positions = zeros(Float32, 0, 4)
+    hierarchy_empty_output = zeros(Float64, 0, length(response))
+    @test_throws ArgumentError NP.evaluate_draws!(
+        hierarchy_empty_output,
+        NP.workspace(hierarchy_prepared, Float32), hierarchy_prepared,
+        hierarchy_empty_positions, NP.LinearPredictor())
+
+    natural_hierarchy = NP.condition(
+        naturally_composed_hierarchy(); y=response)
+    natural_hierarchy_graph = NP.factor_graph(natural_hierarchy)
+    natural_population = NP.qualified_name(:population, :value)
+    natural_population_scale = NP.qualified_name(
+        :population_scale, :value)
+    natural_individual = NP.qualified_name(:individual, :value)
+    natural_observation_scale = NP.qualified_name(
+        :y, :observation_scale)
+    @test keys(natural_hierarchy_graph.sites) == (
+        natural_population, natural_population_scale, natural_individual,
+        natural_observation_scale, :y)
+    @test NP.site_factor_dependencies(
+        natural_hierarchy_graph.sites[natural_individual].factor) ==
+          (natural_population, natural_population_scale)
+    @test NP.site_factor_dependencies(
+        natural_hierarchy_graph.sites.y.factor) ==
+          (natural_individual, natural_observation_scale)
+
+    explicit_population_component = NP.component(
+        :population, hierarchy_population_source())
+    explicit_population = NP.output(
+        explicit_population_component, :value)
+    explicit_population_scale_component = NP.component(
+        :population_scale, hierarchy_scale_source(1.0))
+    explicit_population_scale = NP.output(
+        explicit_population_scale_component, :value)
+    explicit_individual_component = NP.component(
+        :individual,
+        hierarchy_individual_source(
+            explicit_population, explicit_population_scale))
+    explicit_individual = NP.output(
+        explicit_individual_component, :value)
+    explicit_response_component = NP.component(
+        :y,
+        NP.condition(
+            hierarchy_observation_source(explicit_individual);
+            y=response))
+    explicit_hierarchy = NP.compose(
+        explicit_population_component,
+        explicit_population_scale_component,
+        explicit_individual_component,
+        explicit_response_component)
+    explicit_hierarchy_graph = NP.factor_graph(
+        NP.lower(explicit_hierarchy))
+    explicit_response = NP.qualified_name(:y, :y)
+    @test keys(explicit_hierarchy_graph.sites) == (
+        natural_population, natural_population_scale, natural_individual,
+        natural_observation_scale, explicit_response)
+    @test NP.site_factor_dependencies(
+        explicit_hierarchy_graph.sites[natural_individual].factor) ==
+          (natural_population, natural_population_scale)
+    @test NP.site_factor_dependencies(
+        explicit_hierarchy_graph.sites[explicit_response].factor) ==
+          (natural_individual, natural_observation_scale)
+
+    hierarchy_brm_data = (; y=response)
+    hierarchy_brm = @brm hierarchy_brm_data begin
+        population ~ Normal()
+        population_scale ~ Exponential(1.0)
+        individual ~ Normal(population, population_scale)
+        observation_scale ~ Exponential(2.0)
+        y ~ Normal(individual, observation_scale)
+    end
+    hierarchy_brm_model = NP.lower(hierarchy_brm)
+    @test typeof(hierarchy_brm_model) === typeof(hierarchy.declaration)
+    @test sprint(show, hierarchy_brm_model) ==
+          sprint(show, hierarchy.declaration)
+    hierarchy_brm_plan = NP.compile(hierarchy_brm)
+    @test hierarchy_brm_plan isa NP.FactorPlan
+    @test hierarchy_brm_plan.declaration.site_order ==
+          hierarchy_plan.declaration.site_order
+
+    natural_hierarchy_prepared = NP.prepare(natural_hierarchy)
+    explicit_hierarchy_prepared = NP.prepare(NP.compile(explicit_hierarchy))
+    hierarchy_brm_prepared = NP.prepare(hierarchy_brm)
+    for candidate_prepared in (
+        natural_hierarchy_prepared,
+        explicit_hierarchy_prepared,
+        hierarchy_brm_prepared)
+        candidate_workspace = NP.workspace(
+            candidate_prepared, Float64, DI.AutoEnzyme())
+        candidate_density, candidate_gradient = NP.logdensity_and_gradient!(
+            candidate_workspace, candidate_prepared, hierarchy_position)
+        @test candidate_density ≈ hierarchy_density
+        @test candidate_gradient ≈ hierarchy_gradient
+        @test NP.evaluate(
+            candidate_workspace, candidate_prepared, hierarchy_position,
+            NP.LinearPredictor()) == hierarchy_linear
+        @test NP.evaluate(
+            candidate_workspace, candidate_prepared, hierarchy_position,
+            NP.PointwiseLogLikelihood()) ≈ hierarchy_pointwise
+        @test NP.simulate(
+            MersenneTwister(928), candidate_workspace,
+            candidate_prepared, hierarchy_position) == NP.simulate(
+                MersenneTwister(928), hierarchy_workspace,
+                hierarchy_prepared, hierarchy_position)
+        candidate_prior = NP.simulate_prior(
+            MersenneTwister(929), candidate_workspace, candidate_prepared)
+        reference_prior = NP.simulate_prior(
+            MersenneTwister(929), hierarchy_workspace, hierarchy_prepared)
+        @test candidate_prior.position == reference_prior.position
+        @test candidate_prior.response == reference_prior.response
+        @test NP.execute_draws(
+            MersenneTwister(930), candidate_workspace, candidate_prepared,
+            hierarchy_positions, hierarchy_bundle_queries) ==
+              NP.execute_draws(
+                  MersenneTwister(930), hierarchy_workspace,
+                  hierarchy_prepared, hierarchy_positions,
+                  hierarchy_bundle_queries)
+        @test factor_steady_state_allocations(
+            candidate_workspace, candidate_prepared, hierarchy_position) ==
+              (; primal=0, gradient=0)
+    end
+
+    bound_factor_declaration = NP.model(
+        inputs=(; latent_scale=NP.input(), observation_scale=NP.input()),
+        parameters=(;
+            population=NP.parameter(
+                NP.RealSupport(), (:population,);
+                transform=NP.Identity(), prior=NP.StandardNormal())),
+        observations=(;
+            individual=NP.normal(
+                :individual, :population, :latent_scale),
+            y=NP.broadcasted(NP.normal(
+                :y, :individual, :observation_scale))),
+        outputs=(; y=:y),
+        site_order=(:population, :individual, :y))
+    bound_factor_plan = NP.compile(
+        bound_factor_declaration,
+        (; latent_scale=0.7, observation_scale=0.5);
+        conditions=(; y=response))
+    @test bound_factor_plan isa NP.FactorPlan
+    @test bound_factor_plan.bindings ==
+          (; latent_scale=0.7, observation_scale=0.5)
+    @test bound_factor_plan.graph.sites.individual.factor.scale isa
+          NP.InputValue{:latent_scale}
+    @test bound_factor_plan.graph.sites.y.factor.scale isa
+          NP.InputValue{:observation_scale}
+    bound_factor_prepared = NP.prepare(bound_factor_plan)
+    bound_factor_workspace = NP.workspace(
+        bound_factor_prepared, Float64, DI.AutoEnzyme())
+    bound_factor_position = [0.2, -0.1]
+    bound_factor_density, bound_factor_gradient =
+        NP.logdensity_and_gradient!(
+            bound_factor_workspace, bound_factor_prepared,
+            bound_factor_position)
+    bound_latent_residual =
+        bound_factor_position[2] - bound_factor_position[1]
+    bound_observation_residuals = response .- bound_factor_position[2]
+    @test bound_factor_density ≈
+          logpdf(Normal(), bound_factor_position[1]) +
+          logpdf(Normal(
+              bound_factor_position[1], 0.7), bound_factor_position[2]) +
+          sum(logpdf.(Normal(bound_factor_position[2], 0.5), response))
+    @test bound_factor_gradient ≈ [
+        -bound_factor_position[1] + bound_latent_residual / 0.7^2,
+        -bound_latent_residual / 0.7^2 +
+            sum(bound_observation_residuals) / 0.5^2,
+    ]
+    @test factor_steady_state_allocations(
+        bound_factor_workspace, bound_factor_prepared,
+        bound_factor_position) == (; primal=0, gradient=0)
+    @test NP.rebind(bound_factor_prepared, (;)).plan.bindings ==
+          bound_factor_plan.bindings
+    @test_throws ArgumentError NP.prepare(NP.compile(
+        bound_factor_declaration,
+        (; latent_scale=Inf, observation_scale=0.5);
+        conditions=(; y=response)))
+    for (latent_scale, observation_scale) in ((0.0, 0.5), (0.7, -0.5))
+        @test_throws ArgumentError NP.prepare(NP.compile(
+            bound_factor_declaration,
+            (; latent_scale, observation_scale);
+            conditions=(; y=response)))
+    end
+    @test NP.LogDensityProblem(
+        hierarchy_prepared, DI.AutoEnzyme()) isa NP.FactorLogDensityProblem
+    conditioned_individual_plan = NP.compile(NP.condition(
+        hierarchy; individual=0.1, y=response))
+    @test conditioned_individual_plan isa NP.FactorPlan
+    @test LogDensityProblems.dimension(conditioned_individual_plan) == 3
+    conditioned_individual_prepared = NP.prepare(conditioned_individual_plan)
+    @test isfinite(NP.logdensity!(
+        NP.workspace(conditioned_individual_prepared),
+        conditioned_individual_prepared,
+        [0.2, log(0.7), log(0.5)]))
+    @test_throws ArgumentError NP.compile(NP.condition(
+        hierarchy; individual=[0.1], y=response))
+
+    bad_scale_graph_model = NP.model(
+        inputs=(;),
+        parameters=(;
+            bad_scale=NP.parameter(
+                NP.RealSupport(), (:bad_scale,);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            likelihood_scale=NP.parameter(
+                NP.PositiveSupport(), (:likelihood_scale,);
+                transform=NP.Exp(), prior=NP.Exponential(1.0))),
+        observations=(;
+            child=NP.normal(:child, :bad_scale, :bad_scale),
+            observed=NP.broadcasted(
+                NP.normal(:observed, :child, :likelihood_scale))),
+        site_order=(:bad_scale, :child, :likelihood_scale, :observed))
+    @test capability_error(() -> NP.compile(NP.condition(
+        bad_scale_graph_model; observed=response))).capability == :factor_scale
+
+    broadcast_parent_graph_model = NP.model(
+        inputs=(;),
+        parameters=(;
+            root=NP.parameter(
+                NP.RealSupport(), (:root,);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            downstream_scale=NP.parameter(
+                NP.PositiveSupport(), (:downstream_scale,);
+                transform=NP.Exp(), prior=NP.Exponential(1.0))),
+        observations=(;
+            observed=NP.broadcasted(
+                NP.normal(:observed, :root, :downstream_scale)),
+            child=NP.normal(:child, :observed, :downstream_scale)),
+        site_order=(:root, :downstream_scale, :observed, :child))
+    @test capability_error(() -> NP.compile(NP.condition(
+        broadcast_parent_graph_model; observed=response))).capability ==
+          :factor_dependencies
+
+    broadcast_node_graph_model = NP.model(
+        inputs=(;),
+        parameters=(;
+            root=NP.parameter(
+                NP.RealSupport(), (:root,);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            likelihood_scale=NP.parameter(
+                NP.PositiveSupport(), (:likelihood_scale,);
+                transform=NP.Exp(), prior=NP.Exponential(1.0))),
+        nodes=(; derived_scale=NP.exp_link(:observed)),
+        observations=(;
+            observed=NP.broadcasted(
+                NP.normal(:observed, :root, :likelihood_scale)),
+            child=NP.normal(:child, :root, :derived_scale)),
+        site_order=(:root, :likelihood_scale, :observed, :child))
+    @test capability_error(() -> NP.compile(NP.condition(
+        broadcast_node_graph_model; observed=response))).capability ==
+          :factor_dependencies
+    @test NP.factor_graph(hierarchy).sites.y.activity isa NP.GeneratedSite
+    conditioned_population_graph = NP.factor_graph(
+        hierarchy.declaration;
+        conditions=(; population=0.1, y=response))
+    @test conditioned_population_graph.sites.population.activity isa
+          NP.ConditionedSite
+    @test conditioned_population_graph.dimension == 3
+    @test keys(conditioned_population_graph.coordinates) ==
+          (:population_scale, :individual, :observation_scale)
+
+    natural_factor_graph = NP.factor_graph(conditioned_natural_latent)
+    @test keys(natural_factor_graph.sites) ==
+          (NP.qualified_name(:z, :z), NP.qualified_name(:y, :sigma), :y)
+    @test natural_factor_graph.dimension == 2
+    @test keys(natural_factor_graph.coordinates) ==
+          (NP.qualified_name(:z, :z), NP.qualified_name(:y, :sigma))
+
+    unordered_graph_model = NP.model(
+        inputs=(; literal_mu=NP.input(), literal_tau=NP.input()),
+        observations=(;
+            upstream=NP.normal(:upstream, :literal_mu, :literal_tau),
+            downstream=NP.normal(:downstream, :upstream, :literal_tau)),
+        site_order=(:downstream, :upstream))
+    @test capability_error(
+        () -> NP.factor_graph(unordered_graph_model)).capability == :site_order
+
+    unordered_storage_graph_model = NP.model(
+        inputs=(; literal_mu=NP.input(), literal_tau=NP.input()),
+        observations=(;
+            downstream=NP.normal(:downstream, :upstream, :literal_tau),
+            upstream=NP.normal(:upstream, :literal_mu, :literal_tau)),
+        outputs=(; public_downstream=:downstream),
+        site_order=(:upstream, :downstream))
+    unordered_storage_graph = NP.factor_graph(
+        unordered_storage_graph_model;
+        conditions=(; public_downstream=0.3))
+    @test keys(unordered_storage_graph.sites) == (:upstream, :downstream)
+    @test NP.site_factor_dependencies(
+        unordered_storage_graph.sites.downstream.factor) ==
+          (:upstream,)
+    @test unordered_storage_graph.sites.downstream.factor.scale isa
+          NP.InputValue{:literal_tau}
+    @test unordered_storage_graph.sites.downstream.activity isa
+          NP.ConditionedSite
+    @test_throws ArgumentError NP.factor_graph(
+        unordered_storage_graph_model;
+        conditions=(; downstream=0.3, public_downstream=0.3))
+
+    cyclic_graph_model = NP.model(
+        inputs=(; literal_tau=NP.input(),),
+        observations=(;
+            first_site=NP.normal(:first_site, :second_site, :literal_tau),
+            second_site=NP.normal(:second_site, :first_site, :literal_tau)),
+        site_order=(:first_site, :second_site))
+    @test capability_error(
+        () -> NP.factor_graph(cyclic_graph_model)).capability == :site_order
+
+    legacy_response_graph_model = NP.model(
+        inputs=(;
+            literal_mu=NP.input(), literal_tau=NP.input(),
+            legacy_y=NP.input(:response)),
+        observations=(;
+            legacy_y=NP.broadcasted(
+                NP.normal(:legacy_y, :literal_mu, :literal_tau))))
+    legacy_response_graph = NP.factor_graph(NP.instantiate(
+        legacy_response_graph_model,
+        (; literal_mu=0.0, literal_tau=1.0, legacy_y=response)))
+    @test legacy_response_graph.sites.legacy_y.activity isa NP.ConditionedSite
+    @test legacy_response_graph.dimension == 0
+
     latent_brm_data = (; y=response)
     latent_brm = @brm latent_brm_data begin
         sigma ~ Exponential(2.0)
@@ -3278,6 +4821,13 @@ end
         inputs=(; raw=NP.input()),
         nodes=(; scaled=NP.zscale(:raw)),
         observations=(;), outputs=(; first=:scaled, second=:scaled))
+    @test_throws ArgumentError NP.model(
+        inputs=(; literal_mu=NP.input(), literal_tau=NP.input()),
+        observations=(;
+            first_site=NP.normal(:first_site, :literal_mu, :literal_tau),
+            second_site=NP.normal(
+                :second_site, :literal_mu, :literal_tau)),
+        outputs=(; first_site=:second_site))
     @test_throws ArgumentError NP.model(
         inputs=(; raw=NP.input()), observations=(;), outputs=(;))
 
@@ -3458,6 +5008,46 @@ end
             @. y ~ Normal(mu, sigma)
         end)))
     @test occursin("features must use distinct raw inputs", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function grouped_nonargument(x)
+            tau ~ Exponential(1)
+            b[group] ~ Normal(0, tau)
+            beta ~ Normal()
+            sigma ~ Exponential(2)
+            mu = beta * x + b[group]
+            @. y ~ Normal(mu, sigma)
+        end)))
+    @test occursin("must index one function argument", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function grouped_wrong_family(x, group)
+            tau ~ Exponential(1)
+            b[group] ~ Exponential(tau)
+            beta ~ Normal()
+            sigma ~ Exponential(2)
+            mu = beta * x + b[group]
+            @. y ~ Normal(mu, sigma)
+        end)))
+    @test occursin("requires Normal(location, scale)", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function grouped_wrong_gather(x, group, other)
+            tau ~ Exponential(1)
+            b[group] ~ Normal(0, tau)
+            beta ~ Normal()
+            sigma ~ Exponential(2)
+            mu = beta * x + b[other]
+            @. y ~ Normal(mu, sigma)
+        end)))
+    @test occursin("gathered with its declared group input", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function repeated_grouped_offset(x, group)
+            tau ~ Exponential(1)
+            b[group] ~ Normal(0, tau)
+            beta ~ Normal()
+            sigma ~ Exponential(2)
+            mu = beta * x + b[group] + b[group]
+            @. y ~ Normal(mu, sigma)
+        end)))
+    @test occursin("grouped offsets must be used once each", err.msg)
     err = argument_error(() -> macroexpand(
         @__MODULE__, :(NP.@model function recursive_model(x)
             z ~ recursive_model(x)

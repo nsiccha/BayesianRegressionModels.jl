@@ -9,6 +9,7 @@ existing executable `Plan`.
 
 abstract type AbstractInputDeclaration end
 abstract type AbstractPriorDeclaration end
+abstract type AbstractParameterDeclaration end
 abstract type AbstractNodeDeclaration end
 abstract type AbstractObservationDeclaration end
 
@@ -78,12 +79,38 @@ An unbound logical parameter declaration.
 `axis_keys` name the constrained scalar coordinates. Compilation assigns their
 contiguous locations in the flat unconstrained vector.
 """
-struct Parameter{S,Tr,K,P<:AbstractPriorDeclaration}
+struct Parameter{S,Tr,K,P<:AbstractPriorDeclaration} <:
+       AbstractParameterDeclaration
     support::S
     transform::Tr
     axis_keys::K
     prior::P
 end
+
+"""A group-indexed Normal latent block whose axis is fitted from one input."""
+struct GroupedNormalParameter{Group,L,S} <: AbstractParameterDeclaration
+    location::L
+    scale::S
+end
+
+_factor_declaration_value(value::Symbol) = SiteValue{value}()
+_factor_declaration_value(value::Real) = LiteralValue(value)
+
+function grouped_normal(group::Symbol, location::Union{Symbol,Real},
+                        scale::Union{Symbol,Real})
+    location isa Real && !isfinite(location) && throw(ArgumentError(
+        "native PPL grouped-Normal location must be finite"))
+    scale isa Real && !(isfinite(scale) && scale > zero(scale)) && throw(
+        ArgumentError(
+            "native PPL grouped-Normal scale must be finite and positive"))
+    GroupedNormalParameter{group,
+        typeof(_factor_declaration_value(location)),
+        typeof(_factor_declaration_value(scale))}(
+            _factor_declaration_value(location),
+            _factor_declaration_value(scale))
+end
+
+group_input(::GroupedNormalParameter{Group}) where {Group} = Group
 
 function parameter(support::S, axis_keys::Tuple;
                    transform::Tr, prior::P) where {
@@ -125,26 +152,43 @@ struct ZScale{Input} <: AbstractNodeDeclaration end
 zscale(input::Symbol) = ZScale{input}()
 standardize(input::Symbol) = zscale(input)
 
-"""Intercept plus one slope per named input/node over one parameter block."""
-struct Affine{Inputs,Coefficients} <: AbstractNodeDeclaration end
-function affine(inputs::Tuple, coefficients::Symbol)
+"""Intercept plus one slope per named input/node and optional additive offsets."""
+struct Affine{Inputs,Coefficients,Offsets,Intercept} <: AbstractNodeDeclaration end
+function affine(inputs::Tuple, coefficients::Symbol; offsets::Tuple=(),
+                intercept::Bool=true)
     isempty(inputs) && throw(ArgumentError(
         "native PPL affine declaration requires at least one input"))
     all(input -> input isa Symbol, inputs) || throw(ArgumentError(
         "native PPL affine inputs must be named Symbols; got $inputs"))
     length(unique(inputs)) == length(inputs) || throw(ArgumentError(
         "native PPL affine inputs must be unique; got $inputs"))
-    Affine{inputs,coefficients}()
+    all(offset -> offset isa Symbol, offsets) || throw(ArgumentError(
+        "native PPL affine offsets must be named Symbols; got $offsets"))
+    length(unique(offsets)) == length(offsets) || throw(ArgumentError(
+        "native PPL affine offsets must be unique; got $offsets"))
+    isempty(intersect(Set(inputs), Set(offsets))) || throw(ArgumentError(
+        "native PPL affine inputs and offsets must have distinct names"))
+    Affine{inputs,coefficients,offsets,intercept}()
 end
-affine(input::Symbol, coefficients::Symbol) = affine((input,), coefficients)
+affine(input::Symbol, coefficients::Symbol; offsets::Tuple=(),
+       intercept::Bool=true) =
+    affine((input,), coefficients; offsets, intercept)
 
 """Elementwise exponential link over one named deterministic node."""
 struct ExpLink{Input} <: AbstractNodeDeclaration end
 exp_link(input::Symbol) = ExpLink{input}()
 
+"""Gather a group-indexed latent block onto the observation-row axis."""
+struct GroupGather{Values,Group} <: AbstractNodeDeclaration end
+group_gather(values::Symbol, group::Symbol) = GroupGather{values,group}()
+
 node_input(::Center{Input}) where {Input} = Input
 node_input(::ZScale{Input}) where {Input} = Input
 node_inputs(::Affine{Inputs}) where {Inputs} = Inputs
+affine_offsets(::Affine{Inputs,Coefficients,Offsets}) where {
+    Inputs,Coefficients,Offsets} = Offsets
+affine_has_intercept(::Affine{Inputs,Coefficients,Offsets,Intercept}) where {
+    Inputs,Coefficients,Offsets,Intercept} = Intercept
 function node_input(node::Affine)
     inputs = node_inputs(node)
     length(inputs) == 1 || throw(ArgumentError(
@@ -153,6 +197,8 @@ function node_input(node::Affine)
     only(inputs)
 end
 node_input(::ExpLink{Input}) where {Input} = Input
+group_values(::GroupGather{Values}) where {Values} = Values
+group_input(::GroupGather{Values,Group}) where {Values,Group} = Group
 affine_parameter(::Affine{Inputs,Coefficients}) where {Inputs,Coefficients} =
     Coefficients
 
@@ -215,16 +261,2114 @@ output aliases to graph identities. The model owns logical graph semantics
 only; data binding, fitted transform state, axes, coordinates, output
 signatures, and workspace layout belong to compilation/preparation.
 """
-struct Model{I,P,N,O,R}
+struct Model{I,P,N,O,R,S}
     inputs::I
     parameters::P
     nodes::N
     observations::O
     outputs::R
+    site_order::S
 end
 
+_default_site_order(parameters, observations) =
+    (keys(parameters)..., keys(observations)...)
+
 Model(inputs, parameters, nodes, observations) =
-    Model(inputs, parameters, nodes, observations, nothing)
+    Model(inputs, parameters, nodes, observations, nothing,
+          _default_site_order(parameters, observations))
+
+Model(inputs, parameters, nodes, observations, outputs) =
+    Model(inputs, parameters, nodes, observations, outputs,
+          _default_site_order(parameters, observations))
+
+"""Reference one graph value as a stochastic-factor argument."""
+struct SiteValue{Name} end
+site_value_name(::SiteValue{Name}) where {Name} = Name
+
+"""Reference one bound deterministic input as a stochastic-factor argument."""
+struct InputValue{Name} end
+input_value_name(::InputValue{Name}) where {Name} = Name
+
+"""Reference one staged deterministic-node output as a factor argument."""
+struct NodeValue{Name} end
+node_value_name(::NodeValue{Name}) where {Name} = Name
+
+"""Literal stochastic-factor argument retained in the typed graph."""
+struct LiteralValue{T}
+    value::T
+end
+
+abstract type AbstractSiteFactor end
+struct StandardNormalSiteFactor <: AbstractSiteFactor end
+struct NormalSiteFactor{L,S} <: AbstractSiteFactor
+    location::L
+    scale::S
+end
+struct ExponentialSiteFactor{S} <: AbstractSiteFactor
+    scale::S
+end
+struct BernoulliLogitSiteFactor{L} <: AbstractSiteFactor
+    logit::L
+end
+struct PoissonSiteFactor{R} <: AbstractSiteFactor
+    rate::R
+end
+
+site_factor_dependencies(::StandardNormalSiteFactor) = ()
+site_factor_dependencies(factor::NormalSiteFactor) =
+    _factor_value_dependencies((factor.location, factor.scale))
+site_factor_dependencies(factor::ExponentialSiteFactor) =
+    _factor_value_dependencies((factor.scale,))
+site_factor_dependencies(factor::BernoulliLogitSiteFactor) =
+    _factor_value_dependencies((factor.logit,))
+site_factor_dependencies(factor::PoissonSiteFactor) =
+    _factor_value_dependencies((factor.rate,))
+
+_factor_value_name(value::SiteValue) = site_value_name(value)
+_factor_value_name(value::NodeValue) = node_value_name(value)
+
+function _factor_value_dependencies(values)
+    Tuple(_factor_value_name(value) for value in values
+          if value isa Union{SiteValue,NodeValue})
+end
+
+abstract type AbstractFactorNode end
+
+struct CenterFactorNode{I} <: AbstractFactorNode
+    input::I
+end
+
+struct ZScaleFactorNode{I} <: AbstractFactorNode
+    input::I
+end
+
+struct AffineFactorNode{I,C,O,H} <: AbstractFactorNode
+    inputs::I
+    coefficients::C
+    offsets::O
+end
+
+AffineFactorNode(inputs::I, coefficients::C, offsets::O,
+                 intercept::Bool) where {I,C,O} =
+    AffineFactorNode{I,C,O,intercept}(inputs, coefficients, offsets)
+
+affine_has_intercept(::AffineFactorNode{I,C,O,H}) where {I,C,O,H} = H
+
+struct ExpFactorNode{I} <: AbstractFactorNode
+    input::I
+end
+
+struct GroupGatherFactorNode{V,G} <: AbstractFactorNode
+    values::V
+    group::G
+end
+
+factor_node_dependencies(node::Union{
+        CenterFactorNode,ZScaleFactorNode,ExpFactorNode}) =
+    _factor_value_dependencies((node.input,))
+factor_node_dependencies(node::AffineFactorNode) =
+    _factor_value_dependencies((
+        node.inputs..., node.coefficients, node.offsets...))
+factor_node_dependencies(node::GroupGatherFactorNode) =
+    _factor_value_dependencies((node.values, node.group))
+
+abstract type AbstractSiteShape end
+struct ScalarSiteShape <: AbstractSiteShape end
+struct BlockSiteShape <: AbstractSiteShape end
+struct BroadcastSiteShape <: AbstractSiteShape end
+
+abstract type AbstractSiteActivity end
+struct FreeSite <: AbstractSiteActivity end
+struct ConditionedSite <: AbstractSiteActivity end
+struct GeneratedSite <: AbstractSiteActivity end
+
+"""
+One canonical stochastic site after declaration normalization.
+
+The site owns its support/transform, typed factor arguments, scalar/block/
+broadcast shape, activity after conditioning, and semantic coordinate keys.
+This is the shared representation that replaces the transitional semantic
+split between `Model.parameters` and `Model.observations`.
+"""
+struct StochasticSite{S,T,F<:AbstractSiteFactor,H<:AbstractSiteShape,
+                      A<:AbstractSiteActivity,K}
+    support::S
+    transform::T
+    factor::F
+    shape::H
+    activity::A
+    coordinate_keys::K
+end
+
+"""Contiguous unconstrained coordinates assigned to one free site."""
+struct SiteCoordinates{K,R}
+    keys::K
+    indices::R
+end
+
+
+"""One semantic coordinate of a group-indexed latent site."""
+struct GroupCoordinateKey{L}
+    site::Symbol
+    level::L
+end
+
+"""Typed, ordered stochastic-site graph and its free-coordinate allocation."""
+struct FactorGraph{Order,S,N,C}
+    sites::S
+    nodes::N
+    coordinates::C
+    dimension::Int
+end
+
+FactorGraph(sites::S, nodes::N, schedule::O, coordinates::C,
+            dimension::Int) where {S,N,O,C} =
+    FactorGraph{schedule,S,N,C}(sites, nodes, coordinates, dimension)
+
+factor_schedule(::FactorGraph{Order}) where {Order} = Order
+
+function Base.getproperty(graph::FactorGraph, name::Symbol)
+    name === :schedule && return factor_schedule(graph)
+    getfield(graph, name)
+end
+
+Base.propertynames(::FactorGraph, private::Bool=false) =
+    (fieldnames(FactorGraph)..., :schedule)
+
+function _parameter_stochastic_site(
+    name::Symbol, declaration::Parameter, conditions::NamedTuple)
+    prior = declaration.prior
+    factor = if prior isa StandardNormal
+        StandardNormalSiteFactor()
+    elseif prior isa NormalPrior
+        NormalSiteFactor(
+            LiteralValue(prior.location), LiteralValue(prior.scale))
+    else
+        ExponentialSiteFactor(LiteralValue(prior.scale))
+    end
+    shape = length(declaration.axis_keys) == 1 ?
+        ScalarSiteShape() : BlockSiteShape()
+    activity = hasproperty(conditions, name) ? ConditionedSite() : FreeSite()
+    coordinate_keys = activity isa FreeSite ? declaration.axis_keys : ()
+    StochasticSite(
+        declaration.support, declaration.transform, factor, shape,
+        activity, coordinate_keys)
+end
+
+
+function _group_levels(values, name::Symbol)
+    values isa AbstractVector || throw(ArgumentError(
+        "native PPL group input `$name` must be a vector"))
+    isempty(values) && throw(ArgumentError(
+        "native PPL group input `$name` cannot be empty"))
+    any(ismissing, values) && throw(ArgumentError(
+        "native PPL group input `$name` cannot contain missing values"))
+    Tuple(unique(values))
+end
+
+function _parameter_stochastic_site(
+    name::Symbol, declaration::GroupedNormalParameter,
+    conditions::NamedTuple, bindings::NamedTuple,
+    fitted_levels=nothing, new_groups::Symbol=:error)
+    group_name = group_input(declaration)
+    hasproperty(bindings, group_name) || throw(ArgumentError(
+        "native PPL grouped site `$name` requires binding `$group_name`"))
+    observed_levels = _group_levels(
+        getproperty(bindings, group_name), group_name)
+    levels = fitted_levels === nothing ? observed_levels : Tuple(fitted_levels)
+    isempty(levels) && throw(ArgumentError(
+        "native PPL fitted group levels for `$group_name` cannot be empty"))
+    any(ismissing, levels) && throw(ArgumentError(
+        "native PPL fitted group levels for `$group_name` cannot contain " *
+        "missing values"))
+    length(unique(levels)) == length(levels) || throw(ArgumentError(
+        "native PPL fitted group levels for `$group_name` must be unique"))
+    unknown = Tuple(level for level in observed_levels
+                    if findfirst(isequal(level), levels) === nothing)
+    if !isempty(unknown) && new_groups === :error
+        throw(CapabilityError(
+            :new_group,
+            "native PPL group input `$group_name` contains new levels " *
+            "$(unknown); replay reuses fitted group effects by default; " *
+            "pass `new_groups=:resample` for prediction-only conditional " *
+            "simulation"))
+    end
+    activity = hasproperty(conditions, name) ? ConditionedSite() : FreeSite()
+    coordinate_keys = Tuple(
+        GroupCoordinateKey(name, level) for level in levels)
+    StochasticSite(
+        RealSupport(), Identity(),
+        NormalSiteFactor(declaration.location, declaration.scale),
+        BlockSiteShape(), activity, coordinate_keys)
+end
+
+function _factor_value(name::Symbol, inputs::NamedTuple, nodes::NamedTuple)
+    hasproperty(inputs, name) && return InputValue{name}()
+    hasproperty(nodes, name) && return NodeValue{name}()
+    SiteValue{name}()
+end
+
+function _factor_node(declaration::AbstractNodeDeclaration,
+                      inputs::NamedTuple, nodes::NamedTuple)
+    reference(name) = _factor_value(name, inputs, nodes)
+    if declaration isa Center
+        CenterFactorNode(reference(node_input(declaration)))
+    elseif declaration isa ZScale
+        ZScaleFactorNode(reference(node_input(declaration)))
+    elseif declaration isa Affine
+        AffineFactorNode(
+            map(reference, node_inputs(declaration)),
+            SiteValue{affine_parameter(declaration)}(),
+            map(reference, affine_offsets(declaration)),
+            affine_has_intercept(declaration))
+    elseif declaration isa ExpLink
+        ExpFactorNode(reference(node_input(declaration)))
+    else
+        GroupGatherFactorNode(
+            SiteValue{group_values(declaration)}(),
+            InputValue{group_input(declaration)}())
+    end
+end
+
+function _factor_nodes(declaration::Model)
+    names = Tuple(keys(declaration.nodes))
+    values = map(names) do name
+        _factor_node(
+            getproperty(declaration.nodes, name), declaration.inputs,
+            declaration.nodes)
+    end
+    NamedTuple{names}(values)
+end
+
+function _observation_stochastic_site(
+    name::Symbol, declaration::AbstractObservationDeclaration,
+    inputs::NamedTuple, nodes::NamedTuple, conditions::NamedTuple)
+    scalar = scalar_observation(declaration)
+    dependencies = observation_dependencies(scalar)
+    factor = if scalar isa NormalObservation
+        NormalSiteFactor(
+            _factor_value(dependencies[1], inputs, nodes),
+            _factor_value(dependencies[2], inputs, nodes))
+    elseif scalar isa BernoulliLogitObservation
+        BernoulliLogitSiteFactor(_factor_value(
+            only(dependencies), inputs, nodes))
+    else
+        PoissonSiteFactor(_factor_value(
+            only(dependencies), inputs, nodes))
+    end
+    shape = is_broadcast_observation(declaration) ?
+        BroadcastSiteShape() : ScalarSiteShape()
+    activity = if hasproperty(conditions, name)
+        ConditionedSite()
+    elseif shape isa BroadcastSiteShape
+        GeneratedSite()
+    elseif factor isa NormalSiteFactor
+        FreeSite()
+    else
+        throw(CapabilityError(
+            :discrete_latent,
+            "unconditioned scalar site `$name` has unsupported discrete " *
+            "factor $(typeof(factor))"))
+    end
+    coordinate_keys = activity isa FreeSite ? (name,) : ()
+    support = factor isa NormalSiteFactor ? RealSupport() : nothing
+    transform = factor isa NormalSiteFactor ? Identity() : nothing
+    StochasticSite(
+        support, transform, factor, shape, activity, coordinate_keys)
+end
+
+function _factor_schedule(declaration::Model, sites::NamedTuple,
+                          nodes::NamedTuple)
+    pending = Symbol[declaration.site_order..., keys(nodes)...]
+    available = Set{Symbol}(keys(declaration.inputs))
+    schedule = Symbol[]
+    while !isempty(pending)
+        selected = nothing
+        for index in eachindex(pending)
+            name = pending[index]
+            dependencies = hasproperty(sites, name) ?
+                site_factor_dependencies(getproperty(sites, name).factor) :
+                factor_node_dependencies(getproperty(nodes, name))
+            all(dependency -> dependency in available, dependencies) ||
+                continue
+            selected = index
+            break
+        end
+        selected === nothing && throw(CapabilityError(
+            :factor_schedule,
+            "stochastic/deterministic factor graph contains a cycle or " *
+            "unavailable dependency among $(Tuple(pending))"))
+        name = pending[selected]
+        push!(schedule, name)
+        push!(available, name)
+        deleteat!(pending, selected)
+    end
+    Tuple(schedule)
+end
+
+function _site_coordinates(sites::NamedTuple)
+    names = Symbol[]
+    allocations = Any[]
+    next_index = 1
+    for (name, site) in pairs(sites)
+        site.activity isa FreeSite || continue
+        count = length(site.coordinate_keys)
+        indices = next_index:(next_index + count - 1)
+        push!(names, name)
+        push!(allocations, SiteCoordinates(site.coordinate_keys, indices))
+        next_index += count
+    end
+    NamedTuple{Tuple(names)}(Tuple(allocations)), next_index - 1
+end
+
+"""
+    factor_graph(model; conditions=(;)) -> FactorGraph
+
+Normalize parameters and stochastic observations into one ordered typed site
+graph, normalize deterministic value nodes, derive one mixed topological
+schedule, then allocate semantic unconstrained coordinates for free sites.
+`FactorPlan` executes the supported subset while preserving this graph as the
+public mid-level semantic representation.
+"""
+function factor_graph(declaration::Model; conditions=(;), bindings=(;),
+                      group_levels=(;), new_groups::Symbol=:error)
+    new_groups in (:error, :resample) || throw(ArgumentError(
+        "native PPL new-groups policy must be :error or :resample; got " *
+        "`$new_groups`"))
+    _validate_model(declaration)
+    canonical_conditions = _canonical_factor_conditions(
+        declaration, conditions)
+    names = Symbol[]
+    sites = Any[]
+    available_sites = Set{Symbol}()
+    all_sites = Set(declaration.site_order)
+    for name in declaration.site_order
+        site = if hasproperty(declaration.parameters, name)
+            parameter = getproperty(declaration.parameters, name)
+            parameter isa GroupedNormalParameter ?
+                _parameter_stochastic_site(
+                    name, parameter, canonical_conditions, bindings,
+                    hasproperty(group_levels, name) ?
+                        getproperty(group_levels, name) : nothing,
+                    new_groups) :
+                _parameter_stochastic_site(
+                    name, parameter, canonical_conditions)
+        else
+            _observation_stochastic_site(
+                name, getproperty(declaration.observations, name),
+                declaration.inputs, declaration.nodes,
+                canonical_conditions)
+        end
+        unavailable = setdiff(
+            Set(site_factor_dependencies(site.factor)), available_sites)
+        unresolved_sites = intersect(unavailable, all_sites)
+        isempty(unresolved_sites) || throw(CapabilityError(
+            :site_order,
+            "stochastic site `$name` depends on unscheduled sites " *
+            "$(sort!(collect(unresolved_sites)))"))
+        push!(names, name)
+        push!(sites, site)
+        push!(available_sites, name)
+    end
+    named_sites = NamedTuple{Tuple(names)}(Tuple(sites))
+    named_nodes = _factor_nodes(declaration)
+    schedule = _factor_schedule(declaration, named_sites, named_nodes)
+    coordinates, dimension = _site_coordinates(named_sites)
+    FactorGraph(named_sites, named_nodes, schedule, coordinates, dimension)
+end
+
+function _canonical_factor_conditions(declaration::Model, conditions)
+    conditions isa NamedTuple || throw(ArgumentError(
+        "native PPL factor-graph conditions must be a NamedTuple; got " *
+        "$(typeof(conditions))"))
+    stochastic_names = Set((keys(declaration.parameters)...,
+                            keys(declaration.observations)...))
+    names = Symbol[]
+    values = Any[]
+    for (name, value) in pairs(conditions)
+        canonical = if name in stochastic_names
+            name
+        elseif declaration.outputs !== nothing &&
+               hasproperty(declaration.outputs, name)
+            getproperty(declaration.outputs, name)
+        else
+            throw(ArgumentError(
+                "native PPL factor-graph condition `$name` does not name a " *
+                "stochastic site"))
+        end
+        canonical in stochastic_names || throw(ArgumentError(
+            "native PPL factor-graph condition `$name` resolves to " *
+            "non-stochastic output `$canonical`"))
+        canonical in names && throw(ArgumentError(
+            "native PPL factor-graph conditions name site `$canonical` more " *
+            "than once"))
+        push!(names, canonical)
+        push!(values, value)
+    end
+    NamedTuple{Tuple(names)}(Tuple(values))
+end
+
+"""Executable plan for an ordered continuous stochastic-site DAG."""
+struct FactorPlan{Output,M,G,B,C,I,N,J,K,L,A}
+    declaration::M
+    graph::G
+    bindings::B
+    conditions::C
+    site_indices::I
+    node_indices::N
+    group_indices::J
+    generated_group_levels::K
+    generated_group_indices::L
+    observation_axis::A
+end
+
+FactorPlan(declaration::M, graph::G, bindings::B, conditions::C,
+           site_indices::I, node_indices::N, group_indices::J,
+           generated_group_levels::K,
+           generated_group_indices::L,
+           observation_axis::A,
+           output_site::Symbol) where {M,G,B,C,I,N,J,K,L,A} =
+    FactorPlan{output_site,M,G,B,C,I,N,J,K,L,A}(
+        declaration, graph, bindings, conditions, site_indices,
+        node_indices, group_indices, generated_group_levels,
+        generated_group_indices, observation_axis)
+
+factor_output_site(::FactorPlan{Output}) where {Output} = Output
+
+function Base.getproperty(plan::FactorPlan, name::Symbol)
+    name === :output_site && return factor_output_site(plan)
+    getfield(plan, name)
+end
+
+Base.propertynames(::FactorPlan, private::Bool=false) =
+    (fieldnames(FactorPlan)..., :output_site)
+
+BRM.LogDensityProblems.dimension(plan::FactorPlan) = plan.graph.dimension
+
+function _uses_factor_executor(declaration::Model, conditions, bindings=(;))
+    graph = factor_graph(declaration; conditions, bindings)
+    count(site -> site.shape isa BroadcastSiteShape,
+          Tuple(graph.sites)) == 1 || return false
+    stochastic_names = Set(declaration.site_order)
+    dependent_site = any(declaration.site_order) do name
+        hasproperty(declaration.observations, name) || return false
+        site = getproperty(graph.sites, name)
+        site.shape isa ScalarSiteShape &&
+            any(dependency -> dependency in stochastic_names,
+                site_factor_dependencies(site.factor))
+    end
+    sampled_offset_affine = any(values(graph.nodes)) do node
+        node isa AffineFactorNode && !isempty(node.offsets)
+    end
+    grouped_gather = any(node -> node isa GroupGatherFactorNode,
+                         values(graph.nodes))
+    dependent_site || sampled_offset_affine || grouped_gather
+end
+
+function _group_input_names(declaration::Model)
+    Tuple(unique(group_input(parameter)
+        for parameter in values(declaration.parameters)
+        if parameter isa GroupedNormalParameter))
+end
+
+_factor_arguments(::StandardNormalSiteFactor) = ()
+_factor_arguments(factor::NormalSiteFactor) =
+    (factor.location, factor.scale)
+_factor_arguments(factor::ExponentialSiteFactor) = (factor.scale,)
+
+_factor_value_is_row(::LiteralValue, graph, bindings) = false
+_factor_value_is_row(::InputValue{Name}, graph, bindings) where {Name} =
+    getproperty(bindings, Name) isa AbstractVector
+_factor_value_is_row(::NodeValue{Name}, graph, bindings) where {Name} =
+    getproperty(graph.nodes, Name) isa
+        Union{AffineFactorNode,GroupGatherFactorNode}
+_factor_value_is_row(::SiteValue{Name}, graph, bindings) where {Name} =
+    getproperty(graph.sites, Name).shape isa
+        Union{BlockSiteShape,BroadcastSiteShape}
+
+function _validate_factor_plan_site(
+    name::Symbol, site::StochasticSite, graph::FactorGraph,
+    bindings::NamedTuple, conditions::NamedTuple,
+    broadcast_sites::Set{Symbol},
+)
+    site.shape isa BlockSiteShape &&
+        !(site.factor isa Union{
+            StandardNormalSiteFactor,NormalSiteFactor}) && throw(CapabilityError(
+            :factor_shape,
+            "multi-latent block site `$name` must currently be standard or " *
+            "scalar-parameterized Normal"))
+    site.factor isa Union{
+        StandardNormalSiteFactor,NormalSiteFactor,ExponentialSiteFactor,
+    } || throw(CapabilityError(
+        :factor_family,
+        "multi-latent factor site `$name` has unsupported factor " *
+        "$(typeof(site.factor))"))
+    if site.activity isa ConditionedSite
+        value = getproperty(conditions, name)
+        if site.shape isa ScalarSiteShape
+            value isa Real || throw(ArgumentError(
+                "native PPL scalar condition `$name` must be a real value; " *
+                "got $(typeof(value))"))
+        elseif site.shape isa BlockSiteShape
+            value isa AbstractVector || throw(ArgumentError(
+                "native PPL block condition `$name` must be a vector; got " *
+                "$(typeof(value))"))
+        elseif site.shape isa BroadcastSiteShape
+            value isa AbstractVector || throw(ArgumentError(
+                "native PPL broadcast condition `$name` must be a vector; " *
+                "got $(typeof(value))"))
+        end
+    end
+    for dependency in site_factor_dependencies(site.factor)
+        dependency in broadcast_sites && throw(CapabilityError(
+            :factor_dependencies,
+            "multi-latent factor site `$name` depends on broadcast site " *
+            "`$dependency`; broadcast outputs must remain terminal until " *
+            "their values can be materialized"))
+    end
+    if site.shape isa ScalarSiteShape
+        for argument in _factor_arguments(site.factor)
+            _factor_value_is_row(argument, graph, bindings) || continue
+            throw(CapabilityError(
+                :factor_shape,
+                "scalar factor site `$name` cannot consume a row-valued " *
+                "argument"))
+        end
+    end
+    for argument in _factor_arguments(site.factor)
+        argument isa SiteValue || continue
+        dependency = getproperty(
+            graph.sites, site_value_name(argument))
+        dependency.shape isa BlockSiteShape || continue
+        throw(CapabilityError(
+            :factor_shape,
+            "factor site `$name` cannot consume block site " *
+            "`$(site_value_name(argument))` directly; lower it through a " *
+            "typed materializing node"))
+    end
+    if site.factor isa NormalSiteFactor &&
+       site.factor.scale isa SiteValue
+        scale_name = site_value_name(site.factor.scale)
+        scale_site = getproperty(graph.sites, scale_name)
+        scale_site.support isa PositiveSupport || throw(CapabilityError(
+            :factor_scale,
+            "Normal factor for site `$name` uses stochastic scale " *
+            "`$scale_name`, whose support must be PositiveSupport"))
+    elseif site.factor isa NormalSiteFactor &&
+           site.factor.scale isa NodeValue
+        scale_name = node_value_name(site.factor.scale)
+        getproperty(graph.nodes, scale_name) isa ExpFactorNode || throw(
+            CapabilityError(
+                :factor_scale,
+                "Normal factor for site `$name` uses deterministic scale " *
+                "`$scale_name`, which must currently be an exp node"))
+    end
+    nothing
+end
+
+function _bind_factor_plan(declaration::Model, bindings, conditions;
+                           group_levels=(;), new_groups::Symbol=:error)
+    input_axis_length = nothing
+    group_inputs = Set(_group_input_names(declaration))
+    for (name, declaration_input) in pairs(declaration.inputs)
+        input_role(declaration_input) in (:value, :predictor) || throw(CapabilityError(
+            :factor_inputs,
+            "multi-latent factor input `$name` must be a generic value " *
+            "port or predictor"))
+        value = getproperty(bindings, name)
+        if value isa AbstractVector
+            isempty(value) && throw(ArgumentError(
+                "multi-latent factor input `$name` cannot be empty"))
+            if name in group_inputs
+                any(ismissing, value) && throw(ArgumentError(
+                    "multi-latent factor group input `$name` cannot contain " *
+                    "missing values"))
+            else
+                all(element -> element isa Real, value) || throw(ArgumentError(
+                    "multi-latent factor input `$name` must contain real values"))
+            end
+            input_axis_length === nothing && (input_axis_length = length(value))
+            length(value) == input_axis_length || throw(DimensionMismatch(
+                "multi-latent factor vector inputs must have equal lengths"))
+        elseif !(value isa Real)
+            throw(ArgumentError(
+                "multi-latent factor input `$name` must bind a real scalar " *
+                "or vector; got $(typeof(value))"))
+        end
+    end
+    canonical_conditions = _canonical_factor_conditions(
+        declaration, conditions)
+    graph = factor_graph(
+        declaration; conditions=canonical_conditions, bindings,
+        group_levels, new_groups)
+    for (name, node) in pairs(graph.nodes)
+        node isa Union{ExpFactorNode,AffineFactorNode,GroupGatherFactorNode} ||
+            throw(CapabilityError(
+            :factor_nodes,
+            "multi-latent factor node `$name` has unsupported operation " *
+            "$(typeof(node)); the current executable slice accepts scalar " *
+            "exp, row-valued affine, and group-gather nodes"))
+        if node isa ExpFactorNode
+            broadcast_input = node.input isa SiteValue &&
+                getproperty(
+                    graph.sites, site_value_name(node.input)).shape isa
+                        BroadcastSiteShape
+            _factor_value_is_row(node.input, graph, bindings) &&
+                !broadcast_input && throw(
+                CapabilityError(
+                    :factor_nodes,
+                    "exp node `$name` cannot consume a row-valued argument " *
+                    "until row-node materialization is implemented"))
+        elseif node isa AffineFactorNode
+            coefficient_name = site_value_name(node.coefficients)
+            coefficient_site = getproperty(graph.sites, coefficient_name)
+            coefficient_site.shape isa Union{ScalarSiteShape,BlockSiteShape} ||
+                throw(CapabilityError(
+                :factor_nodes,
+                "affine node `$name` requires a scalar or block coefficient site"))
+            coefficient_site.factor isa StandardNormalSiteFactor || throw(
+                CapabilityError(
+                    :factor_nodes,
+                    "affine node `$name` currently requires standard-normal " *
+                    "coefficients"))
+            coefficient_count = length(node.inputs) +
+                (affine_has_intercept(node) ? 1 : 0)
+            coefficient_declaration = getproperty(
+                declaration.parameters, coefficient_name)
+            length(coefficient_declaration.axis_keys) == coefficient_count ||
+                throw(CapabilityError(
+                    :factor_nodes,
+                    "affine node `$name` has the wrong coefficient count"))
+            for argument in (node.inputs..., node.offsets...)
+                argument isa SiteValue || continue
+                dependency = getproperty(
+                    graph.sites, site_value_name(argument))
+                dependency.shape isa BroadcastSiteShape && continue
+                dependency.shape isa ScalarSiteShape || throw(CapabilityError(
+                    :factor_shape,
+                    "affine node `$name` cannot consume non-scalar site " *
+                    "`$(site_value_name(argument))` directly"))
+            end
+        end
+        if node isa GroupGatherFactorNode
+            values_name = site_value_name(node.values)
+            values_site = getproperty(graph.sites, values_name)
+            values_site.shape isa BlockSiteShape || throw(CapabilityError(
+                :factor_nodes,
+                "group gather node `$name` requires a block latent site"))
+            group_name = input_value_name(node.group)
+            group_name in group_inputs || throw(CapabilityError(
+                :factor_nodes,
+                "group gather node `$name` requires a fitted group input"))
+        end
+    end
+    broadcast_sites = Tuple(
+        name for (name, site) in pairs(graph.sites)
+        if site.shape isa BroadcastSiteShape)
+    length(broadcast_sites) == 1 || throw(CapabilityError(
+        :factor_outputs,
+        "the first multi-latent factor executor requires exactly one " *
+        "broadcast stochastic output"))
+    broadcast_site_set = Set(broadcast_sites)
+    for (name, node) in pairs(graph.nodes)
+        for dependency in factor_node_dependencies(node)
+            dependency in broadcast_site_set || continue
+            throw(CapabilityError(
+                :factor_dependencies,
+                "multi-latent factor node `$name` depends on broadcast " *
+                "site `$dependency`; broadcast outputs must remain terminal " *
+                "until their values can be materialized"))
+        end
+    end
+    for (name, site) in pairs(graph.sites)
+        _validate_factor_plan_site(
+            name, site, graph, bindings, canonical_conditions,
+            broadcast_site_set)
+    end
+    output_site = only(broadcast_sites)
+    observation_keys = if hasproperty(canonical_conditions, output_site)
+        response = getproperty(canonical_conditions, output_site)
+        response isa AbstractVector || throw(ArgumentError(
+            "native PPL broadcast condition `$output_site` must be a vector"))
+        isempty(response) && throw(ArgumentError(
+            "native PPL broadcast condition `$output_site` cannot be empty"))
+        input_axis_length === nothing || length(response) == input_axis_length ||
+            throw(DimensionMismatch(
+                "native PPL response and vector inputs must have equal lengths"))
+        Base.OneTo(length(response))
+    elseif input_axis_length !== nothing
+        Base.OneTo(input_axis_length)
+    else
+        Base.OneTo(0)
+    end
+    site_names = Tuple(keys(graph.sites))
+    site_indices = NamedTuple{site_names}(
+        ntuple(identity, length(site_names)))
+    node_names = Tuple(keys(graph.nodes))
+    node_indices = NamedTuple{node_names}(
+        ntuple(identity, length(node_names)))
+    gather_names = Tuple(name for (name, node) in pairs(graph.nodes)
+                         if node isa GroupGatherFactorNode)
+    grouped_site_names = Tuple(name for (name, parameter) in pairs(
+        declaration.parameters) if parameter isa GroupedNormalParameter)
+    generated_level_values = map(grouped_site_names) do site_name
+        parameter = getproperty(declaration.parameters, site_name)
+        group_name = group_input(parameter)
+        observed_levels = _group_levels(
+            getproperty(bindings, group_name), group_name)
+        fitted_site = getproperty(graph.sites, site_name)
+        fitted_levels = Tuple(
+            key.level for key in fitted_site.coordinate_keys)
+        Tuple(level for level in observed_levels
+              if findfirst(isequal(level), fitted_levels) === nothing)
+    end
+    generated_group_levels = NamedTuple{grouped_site_names}(
+        generated_level_values)
+    next_generated_index = 1
+    generated_index_values = map(generated_level_values) do levels
+        indices = next_generated_index:(next_generated_index + length(levels) - 1)
+        next_generated_index += length(levels)
+        indices
+    end
+    generated_group_indices = NamedTuple{grouped_site_names}(
+        generated_index_values)
+    gather_indices = map(gather_names) do name
+        node = getproperty(graph.nodes, name)
+        site_name = site_value_name(node.values)
+        site = getproperty(graph.sites, site_name)
+        levels = Tuple(key.level for key in site.coordinate_keys)
+        generated_levels = getproperty(generated_group_levels, site_name)
+        groups = getproperty(bindings, input_value_name(node.group))
+        Tuple(map(groups) do group
+            index = findfirst(isequal(group), levels)
+            index === nothing || return index
+            generated_index = findfirst(isequal(group), generated_levels)
+            generated_index === nothing && throw(ArgumentError(
+                "native PPL group value `$group` is absent from fitted and " *
+                "generated levels"))
+            -generated_index
+        end)
+    end
+    group_indices = NamedTuple{gather_names}(gather_indices)
+    has_generated_groups = any(!isempty, values(generated_group_levels))
+    has_generated_groups &&
+        hasproperty(canonical_conditions, output_site) && throw(
+            CapabilityError(
+                :new_group_activity,
+                "native PPL new-group resampling is prediction-only; " *
+                "conditioned likelihood evaluation requires explicit " *
+                "group-effect coordinates"))
+    FactorPlan(
+        declaration, graph, bindings, canonical_conditions, site_indices,
+        node_indices, group_indices, generated_group_levels,
+        generated_group_indices,
+        BRM.NativePPLAxis(:observation, observation_keys), output_site)
+end
+
+function Base.show(io::IO, plan::FactorPlan)
+    generated = sum(length, values(plan.generated_group_levels); init=0)
+    print(io, "NativePPL.FactorPlan(", plan.graph.dimension,
+          " unconstrained parameters, ", length(plan.graph.sites),
+          " stochastic sites, ", generated, " generated groups, ",
+          length(plan.observation_axis),
+          " observations)")
+end
+
+"""Prepared, independently owned bindings for a `FactorPlan`."""
+struct FactorPrepared{T,P,C}
+    plan::P
+    conditions::C
+end
+
+Base.eltype(::FactorPrepared{T}) where {T} = T
+BRM.LogDensityProblems.dimension(prepared::FactorPrepared) =
+    BRM.LogDensityProblems.dimension(prepared.plan)
+
+"""Reusable primal storage for an ordered factor-graph evaluation."""
+mutable struct FactorBuffers{T,V<:Vector{T},M<:Matrix{T}}
+    values::V
+    generated_group_values::V
+    node_values::V
+    node_rows::M
+    pointwise_loglikelihood::V
+end
+
+"""Caller-owned workspace for factor-graph density and gradient execution."""
+struct FactorWorkspace{T,B,G,D}
+    primal::B
+    gradient::G
+    derivative::D
+end
+
+Base.eltype(::FactorWorkspace{T}) where {T} = T
+
+function FactorWorkspace(prepared::FactorPrepared,
+                         ::Type{T}=eltype(prepared)) where {T<:AbstractFloat}
+    isconcretetype(T) || throw(ArgumentError(
+        "native PPL factor workspace element type must be concrete; got $T"))
+    site_values = zeros(T, length(prepared.plan.graph.sites))
+    generated_group_values = zeros(
+        T, sum(length, values(prepared.plan.generated_group_levels); init=0))
+    node_values = zeros(T, length(prepared.plan.graph.nodes))
+    node_rows = zeros(T, length(prepared.plan.graph.nodes),
+                      length(prepared.plan.observation_axis))
+    pointwise = zeros(T, length(prepared.plan.observation_axis))
+    FactorWorkspace{T,typeof(FactorBuffers(
+        site_values, generated_group_values, node_values, node_rows, pointwise)),
+        Vector{T},Nothing}(
+        FactorBuffers(
+            site_values, generated_group_values, node_values, node_rows,
+            pointwise),
+        zeros(T, BRM.LogDensityProblems.dimension(prepared)), nothing)
+end
+
+function _factor_workspace end
+_factor_workspace(prepared::FactorPrepared,
+                  ::Type{T}) where {T<:AbstractFloat} =
+    FactorWorkspace(prepared, T)
+_factor_workspace(::FactorPrepared, ::Type{<:AbstractFloat}, backend) =
+    throw(ArgumentError(
+        "native PPL factor gradients require loading " *
+        "DifferentiationInterface; only AutoEnzyme is tested, recommended, " *
+        "and guaranteed"))
+
+function _factor_prepare_condition(value::Real, name::Symbol,
+                                   ::Type{T}) where {T<:AbstractFloat}
+    converted = T(value)
+    isfinite(converted) || throw(ArgumentError(
+        "native PPL condition `$name` must be finite in $T"))
+    converted
+end
+
+function _factor_prepare_condition(value::AbstractVector, name::Symbol,
+                                   ::Type{T}) where {T<:AbstractFloat}
+    isempty(value) && throw(ArgumentError(
+        "native PPL condition `$name` cannot be empty"))
+    all(element -> element isa Real, value) || throw(ArgumentError(
+        "native PPL condition `$name` must contain real values"))
+    converted = T.(value)
+    all(isfinite, converted) || throw(ArgumentError(
+        "native PPL condition `$name` must be finite in $T"))
+    converted
+end
+
+_factor_prepare_condition(value, name::Symbol, ::Type{T}) where {T} =
+    throw(ArgumentError(
+        "native PPL condition `$name` must be a real scalar or vector; got " *
+        "$(typeof(value))"))
+
+function _factor_validate_condition_support(site::StochasticSite,
+                                            value, name::Symbol)
+    scalar_values = value isa AbstractVector ? value : (value,)
+    if site.support isa PositiveSupport
+        all(element -> element > zero(element), scalar_values) ||
+            throw(ArgumentError(
+                "native PPL condition `$name` must lie in positive support"))
+    end
+    nothing
+end
+
+function _factor_validate_binding_support(graph::FactorGraph,
+                                          value, name::Symbol)
+    for (site_name, site) in pairs(graph.sites)
+        factor = site.factor
+        factor isa NormalSiteFactor || continue
+        factor.scale isa InputValue || continue
+        input_value_name(factor.scale) === name || continue
+        values = value isa AbstractVector ? value : (value,)
+        all(element -> element > zero(element), values) || throw(ArgumentError(
+            "native PPL binding `$name` supplies the Normal scale for " *
+            "site `$site_name` and must be positive"))
+    end
+    nothing
+end
+
+function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
+    isconcretetype(T) || throw(ArgumentError(
+        "native PPL factor prepared element type must be concrete; got $T"))
+    group_inputs = Set(_group_input_names(plan.declaration))
+    binding_names = Tuple(keys(plan.bindings))
+    binding_values = map(binding_names) do name
+        value = getproperty(plan.bindings, name)
+        name in group_inputs && return copy(value)
+        converted = _factor_prepare_condition(value, name, T)
+        _factor_validate_binding_support(plan.graph, converted, name)
+        converted
+    end
+    bindings = NamedTuple{binding_names}(binding_values)
+    names = Tuple(keys(plan.conditions))
+    values = map(names) do name
+        value = _factor_prepare_condition(
+            getproperty(plan.conditions, name), name, T)
+        site = getproperty(plan.graph.sites, name)
+        if site.shape isa BlockSiteShape
+            value isa AbstractVector || throw(ArgumentError(
+                "native PPL block condition `$name` must be a vector"))
+            length(value) == length(site.coordinate_keys) || throw(
+                DimensionMismatch(
+                    "native PPL block condition `$name` has the wrong length"))
+        elseif site.shape isa ScalarSiteShape
+            value isa Real || throw(ArgumentError(
+                "native PPL scalar condition `$name` must be a scalar"))
+        end
+        _factor_validate_condition_support(site, value, name)
+        value
+    end
+    conditions = NamedTuple{names}(values)
+    owned_plan = FactorPlan(
+        plan.declaration, plan.graph, bindings, conditions,
+        plan.site_indices, plan.node_indices, plan.group_indices,
+        plan.generated_group_levels,
+        plan.generated_group_indices,
+        plan.observation_axis, plan.output_site)
+    FactorPrepared{T,typeof(owned_plan),typeof(conditions)}(
+        owned_plan, conditions)
+end
+
+workspace(prepared::FactorPrepared,
+          ::Type{T}=eltype(prepared)) where {T<:AbstractFloat} =
+    _factor_workspace(prepared, T)
+workspace(prepared::FactorPrepared, ::Type{T}, backend) where {T<:AbstractFloat} =
+    _factor_workspace(prepared, T, backend)
+
+@inline _factor_argument(value::LiteralValue, plan, buffers, ::Type{T}) where {T} =
+    T(value.value)
+@inline _factor_argument(::InputValue{Name}, plan, buffers,
+                         ::Type{T}) where {Name,T} =
+    T(getproperty(plan.bindings, Name))
+@inline _factor_argument(::NodeValue{Name}, plan, buffers,
+                         ::Type{T}) where {Name,T} =
+    buffers.node_values[getproperty(plan.node_indices, Name)]
+@inline _factor_argument(::SiteValue{Name}, plan, buffers,
+                         ::Type{T}) where {Name,T} =
+    buffers.values[getproperty(plan.site_indices, Name)]
+
+@inline _factor_argument_at(value::LiteralValue, index, plan, buffers,
+                            ::Type{T}) where {T} = T(value.value)
+@inline function _factor_argument_at(::InputValue{Name}, index, plan, buffers,
+                                     ::Type{T}) where {Name,T}
+    value = getproperty(plan.bindings, Name)
+    T(value isa AbstractVector ? value[index] : value)
+end
+@inline function _factor_argument_at(::NodeValue{Name}, index, plan, buffers,
+                                     ::Type{T}) where {Name,T}
+    node_index = getproperty(plan.node_indices, Name)
+    node = getproperty(plan.graph.nodes, Name)
+    node isa Union{AffineFactorNode,GroupGatherFactorNode} ?
+        buffers.node_rows[node_index, index] :
+        buffers.node_values[node_index]
+end
+@inline _factor_argument_at(::SiteValue{Name}, index, plan, buffers,
+                            ::Type{T}) where {Name,T} =
+    buffers.values[getproperty(plan.site_indices, Name)]
+
+@inline _factor_transform(::IdentityTransform, unconstrained) =
+    (unconstrained, zero(unconstrained))
+@inline _factor_transform(::ExpTransform, unconstrained) =
+    (exp(unconstrained), unconstrained)
+
+@inline function _factor_logdensity(::StandardNormalSiteFactor, value::T,
+                                    plan, buffers) where {T}
+    -T(0.5) * value * value - T(BRM._NATIVE_PPL_HALF_LOG2PI)
+end
+
+@inline function _factor_logdensity(factor::NormalSiteFactor, value::T,
+                                    plan, buffers) where {T}
+    location = _factor_argument(factor.location, plan, buffers, T)
+    scale = _factor_argument(factor.scale, plan, buffers, T)
+    scale > zero(T) || return -T(Inf)
+    residual = (value - location) / scale
+    -T(0.5) * residual * residual - log(scale) -
+        T(BRM._NATIVE_PPL_HALF_LOG2PI)
+end
+
+@inline function _factor_logdensity(factor::ExponentialSiteFactor, value::T,
+                                    plan, buffers) where {T}
+    scale = _factor_argument(factor.scale, plan, buffers, T)
+    -log(scale) - value / scale
+end
+
+@inline function _factor_logdensity_at(factor::NormalSiteFactor, value::T,
+                                       index, plan, buffers) where {T}
+    location = _factor_argument_at(factor.location, index, plan, buffers, T)
+    scale = _factor_argument_at(factor.scale, index, plan, buffers, T)
+    scale > zero(T) || return -T(Inf)
+    residual = (value - location) / scale
+    -T(0.5) * residual * residual - log(scale) -
+        T(BRM._NATIVE_PPL_HALF_LOG2PI)
+end
+
+@inline function _factor_site_logdensity!(::Val{Name},
+        site::StochasticSite{S,Tr,F,ScalarSiteShape,FreeSite},
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
+    coordinates = getproperty(prepared.plan.graph.coordinates, Name)
+    length(coordinates.indices) == 1 || throw(CapabilityError(
+        :factor_coordinates,
+        "free scalar site `$Name` must own exactly one coordinate"))
+    unconstrained = position[first(coordinates.indices)]
+    value, logjac = _factor_transform(site.transform, unconstrained)
+    buffers.values[getproperty(prepared.plan.site_indices, Name)] = value
+    _factor_logdensity(site.factor, value, prepared.plan, buffers) + logjac
+end
+
+@inline function _factor_site_logdensity!(::Val{Name},
+        site::StochasticSite{S,Tr,F,ScalarSiteShape,ConditionedSite},
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
+    value = getproperty(prepared.conditions, Name)
+    buffers.values[getproperty(prepared.plan.site_indices, Name)] = value
+    _factor_logdensity(site.factor, value, prepared.plan, buffers)
+end
+
+@inline function _factor_site_logdensity!(::Val{Name},
+        site::StochasticSite{S,Tr,F,BlockSiteShape,FreeSite},
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
+    coordinates = getproperty(prepared.plan.graph.coordinates, Name)
+    density = zero(T)
+    for coordinate in coordinates.indices
+        value, logjac = _factor_transform(
+            site.transform, position[coordinate])
+        density += _factor_logdensity(
+            site.factor, value, prepared.plan, buffers) + logjac
+    end
+    density
+end
+
+@inline function _factor_site_logdensity!(::Val{Name},
+        site::StochasticSite{S,Tr,F,BlockSiteShape,ConditionedSite},
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
+    values = getproperty(prepared.conditions, Name)
+    density = zero(T)
+    for value in values
+        density += _factor_logdensity(
+            site.factor, value, prepared.plan, buffers)
+    end
+    density
+end
+
+@inline function _factor_site_logdensity!(::Val{Name},
+        site::StochasticSite{S,Tr,F,BroadcastSiteShape,ConditionedSite},
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
+    response = getproperty(prepared.conditions, Name)
+    density = zero(T)
+    for index in eachindex(response)
+        pointwise = _factor_logdensity_at(
+            site.factor, response[index], index, prepared.plan, buffers)
+        buffers.pointwise_loglikelihood[index] = pointwise
+        density += pointwise
+    end
+    density
+end
+
+
+@inline function _factor_coefficient(::SiteValue{Name}, coefficient_index,
+                                     position::AbstractVector{T},
+                                     prepared::FactorPrepared,
+                                     buffers::FactorBuffers{T}) where {Name,T}
+    site = getproperty(prepared.plan.graph.sites, Name)
+    if site.activity isa FreeSite
+        coordinates = getproperty(
+            prepared.plan.graph.coordinates, Name).indices
+        value, _ = _factor_transform(
+            site.transform, position[coordinates[coefficient_index]])
+        value
+    else
+        conditioned = getproperty(prepared.conditions, Name)
+        T(conditioned isa AbstractVector ?
+            conditioned[coefficient_index] : conditioned)
+    end
+end
+
+@inline _factor_site_logdensity!(::Val,
+        ::StochasticSite{S,Tr,F,BroadcastSiteShape,GeneratedSite},
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {S,Tr,F,T} = zero(T)
+
+@inline function _factor_node_logdensity!(::Val{Name}, node::ExpFactorNode,
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Name,T}
+    input = _factor_argument(node.input, prepared.plan, buffers, T)
+    buffers.node_values[getproperty(prepared.plan.node_indices, Name)] =
+        exp(input)
+    zero(T)
+end
+
+@inline function _factor_node_logdensity!(::Val{Name}, node::AffineFactorNode,
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Name,T}
+    node_index = getproperty(prepared.plan.node_indices, Name)
+    for row in prepared.plan.observation_axis.keys
+        has_intercept = affine_has_intercept(node)
+        value = has_intercept ? _factor_coefficient(
+            node.coefficients, 1, position, prepared, buffers) : zero(T)
+        for input_index in eachindex(node.inputs)
+            value += _factor_coefficient(
+                node.coefficients, input_index + (has_intercept ? 1 : 0),
+                position, prepared, buffers) *
+                _factor_argument_at(
+                    node.inputs[input_index], row,
+                    prepared.plan, buffers, T)
+        end
+        for offset in node.offsets
+            value += _factor_argument_at(
+                offset, row, prepared.plan, buffers, T)
+        end
+        buffers.node_rows[node_index, row] = value
+    end
+    zero(T)
+end
+
+@inline function _factor_node_logdensity!(::Val{Name},
+        node::GroupGatherFactorNode,
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Name,T}
+    node_index = getproperty(prepared.plan.node_indices, Name)
+    site_name = site_value_name(node.values)
+    site = getproperty(prepared.plan.graph.sites, site_name)
+    group_indices = getproperty(prepared.plan.group_indices, Name)
+    for row in prepared.plan.observation_axis.keys
+        group_index = group_indices[row]
+        value = if group_index < 0
+            generated_indices = getproperty(
+                prepared.plan.generated_group_indices, site_name)
+            buffers.generated_group_values[generated_indices[-group_index]]
+        elseif site.activity isa FreeSite
+            coordinates = getproperty(
+                prepared.plan.graph.coordinates, site_name).indices
+            transformed, _ = _factor_transform(
+                site.transform, position[coordinates[group_index]])
+            transformed
+        else
+            getproperty(prepared.conditions, site_name)[group_index]
+        end
+        buffers.node_rows[node_index, row] = value
+    end
+    zero(T)
+end
+
+@inline _has_generated_groups(plan::FactorPlan) =
+    any(!isempty, values(plan.generated_group_levels))
+
+@inline function _factor_require_fixed_coordinates(plan::FactorPlan)
+    _has_generated_groups(plan) && throw(CapabilityError(
+        :new_group_activity,
+        "native PPL density and deterministic queries require fixed group " *
+        "coordinates; this replay contains generated groups and must use " *
+        "an RNG posterior-predictive query"))
+    nothing
+end
+
+@generated function _factor_execute_schedule!(::Val{Names},
+        ::Val{SiteNames}, sites::Sites,
+        ::Val{NodeNames}, nodes::Nodes,
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {
+            Names,SiteNames,Sites<:Tuple,NodeNames,Nodes<:Tuple,T}
+    calls = Any[]
+    for name in Names
+        site_index = findfirst(==(name), SiteNames)
+        entry, callee = if site_index === nothing
+            node_index = findfirst(==(name), NodeNames)
+            node_index === nothing && error("unknown factor schedule entry $name")
+            (:(getfield(nodes, $node_index)), :_factor_node_logdensity!)
+        else
+            (:(getfield(sites, $site_index)), :_factor_site_logdensity!)
+        end
+        push!(calls, :($callee(
+            Val($(QuoteNode(name))), $entry,
+            position, prepared, buffers)))
+    end
+    isempty(calls) && return :(zero(T))
+    foldl((left, right) -> :($left + $right), calls)
+end
+
+@inline function _factor_logdensity_kernel(position::AbstractVector{T},
+                                           prepared::FactorPrepared,
+                                           buffers::FactorBuffers{T}) where {T}
+    _factor_require_fixed_coordinates(prepared.plan)
+    graph = prepared.plan.graph
+    _factor_execute_schedule!(
+        Val(graph.schedule), Val(Tuple(keys(graph.sites))),
+        Tuple(graph.sites), Val(Tuple(keys(graph.nodes))), Tuple(graph.nodes),
+        position, prepared, buffers)
+end
+
+function _factor_check_workspace_layout(workspace::FactorWorkspace,
+                                        prepared::FactorPrepared)
+    dimension = BRM.LogDensityProblems.dimension(prepared)
+    eltype(prepared) === eltype(workspace) || throw(ArgumentError(
+        "native PPL factor prepared eltype $(eltype(prepared)) does not " *
+        "match workspace eltype $(eltype(workspace))"))
+    length(workspace.gradient) == dimension || throw(DimensionMismatch(
+        "native PPL factor gradient has length $(length(workspace.gradient)); " *
+        "expected $dimension"))
+    length(workspace.primal.values) == length(prepared.plan.graph.sites) ||
+        throw(DimensionMismatch(
+            "native PPL factor workspace has the wrong site-value layout"))
+    length(workspace.primal.generated_group_values) ==
+        sum(length, values(prepared.plan.generated_group_levels); init=0) ||
+        throw(DimensionMismatch(
+            "native PPL factor workspace has the wrong generated-group layout"))
+    length(workspace.primal.node_values) ==
+        length(prepared.plan.graph.nodes) || throw(DimensionMismatch(
+            "native PPL factor workspace has the wrong node-value layout"))
+    axes(workspace.primal.node_rows) == (
+        Base.OneTo(length(prepared.plan.graph.nodes)),
+        prepared.plan.observation_axis.keys) || throw(DimensionMismatch(
+            "native PPL factor workspace has the wrong row-node layout"))
+    length(workspace.primal.pointwise_loglikelihood) ==
+        length(prepared.plan.observation_axis) || throw(DimensionMismatch(
+            "native PPL factor workspace has the wrong observation layout"))
+    nothing
+end
+
+function _factor_check_execution(workspace::FactorWorkspace,
+                                 prepared::FactorPrepared,
+                                 position::AbstractVector)
+    dimension = BRM.LogDensityProblems.dimension(prepared)
+    length(position) == dimension || throw(DimensionMismatch(
+        "native PPL factor position has length $(length(position)); " *
+        "expected $dimension"))
+    eltype(position) === eltype(workspace) || throw(ArgumentError(
+        "native PPL factor position eltype $(eltype(position)) does not " *
+        "match workspace eltype $(eltype(workspace))"))
+    _factor_check_workspace_layout(workspace, prepared)
+    for buffer in (workspace.gradient, workspace.primal.values,
+                   workspace.primal.generated_group_values,
+                   workspace.primal.node_values, workspace.primal.node_rows,
+                   workspace.primal.pointwise_loglikelihood)
+        Base.mightalias(position, buffer) && throw(ArgumentError(
+            "native PPL factor position must not alias workspace storage"))
+    end
+    nothing
+end
+
+function logdensity!(work::FactorWorkspace, prepared::FactorPrepared,
+                     position::AbstractVector)
+    _factor_check_execution(work, prepared, position)
+    _factor_logdensity_kernel(position, prepared, work.primal)
+end
+
+function _factor_logdensity_and_gradient! end
+function _factor_logdensity_and_gradient!(work::FactorWorkspace,
+                                          prepared::FactorPrepared,
+                                          position::AbstractVector)
+    throw(ArgumentError(
+        "native PPL factor gradients require a " *
+        "DifferentiationInterface-prepared workspace; construct one with " *
+        "AutoEnzyme() for the supported path"))
+end
+
+logdensity_and_gradient!(work::FactorWorkspace, prepared::FactorPrepared,
+                         position::AbstractVector) =
+    _factor_logdensity_and_gradient!(work, prepared, position)
+
+has_response(prepared::FactorPrepared) =
+    hasproperty(prepared.conditions, factor_output_site(prepared.plan))
+
+function _factor_group_levels(plan::FactorPlan)
+    names = Tuple(name for (name, parameter) in pairs(
+        plan.declaration.parameters)
+        if parameter isa GroupedNormalParameter)
+    values = map(names) do name
+        site = getproperty(plan.graph.sites, name)
+        Tuple(key.level for key in site.coordinate_keys)
+    end
+    NamedTuple{names}(values)
+end
+
+function rebind(prepared::FactorPrepared, conditions;
+                bindings=prepared.plan.bindings,
+                T::Type{<:AbstractFloat}=eltype(prepared),
+                new_groups::Symbol=:error, kwargs...)
+    isempty(kwargs) || throw(ArgumentError(
+        "native PPL factor replay does not accept keyword options yet; got " *
+        "$(keys(kwargs))"))
+    conditions isa NamedTuple || throw(ArgumentError(
+        "native PPL factor replay bindings must be a NamedTuple; got " *
+        "$(typeof(conditions))"))
+    bindings isa NamedTuple || throw(ArgumentError(
+        "native PPL factor replay value bindings must be a NamedTuple; got " *
+        "$(typeof(bindings))"))
+    _validate_binding_names(prepared.plan.declaration, bindings)
+    rebound = _bind_factor_plan(
+        prepared.plan.declaration, bindings, conditions;
+        group_levels=_factor_group_levels(prepared.plan), new_groups)
+    if !hasproperty(rebound.conditions, rebound.output_site) &&
+       isempty(rebound.observation_axis.keys)
+        rebound = FactorPlan(
+            rebound.declaration, rebound.graph, rebound.bindings,
+            rebound.conditions,
+            rebound.site_indices, rebound.node_indices,
+            rebound.group_indices, rebound.generated_group_levels,
+            rebound.generated_group_indices,
+            prepared.plan.observation_axis,
+            rebound.output_site)
+    end
+    prepare(rebound; T)
+end
+
+function _factor_output_signature(plan::FactorPlan)
+    BRM.NativePPLOutputSignature(
+        plan.observation_axis, BRM.NativePPLPreparedElementType(),
+        BRM.NativePPLDenseVectorLayout())
+end
+
+output_signature(plan::FactorPlan, ::BRM.NativePPLQuery) =
+    _factor_output_signature(plan)
+output_signature(prepared::FactorPrepared, query::BRM.NativePPLQuery) =
+    output_signature(prepared.plan, query)
+output_eltype(signature::BRM.NativePPLOutputSignature,
+              prepared::FactorPrepared) =
+    BRM.native_output_eltype(signature, prepared)
+
+function allocate_output(signature::BRM.NativePPLOutputSignature,
+                         prepared::FactorPrepared)
+    axis = BRM.native_output_axis(signature)
+    axis.keys == Base.OneTo(length(axis)) || throw(CapabilityError(
+        :output_layout,
+        "dense factor output requires a one-based semantic axis"))
+    Vector{BRM.native_output_eltype(signature, prepared)}(
+        undef, length(axis))
+end
+
+allocate_output(prepared::FactorPrepared, query::BRM.NativePPLQuery) =
+    allocate_output(output_signature(prepared, query), prepared)
+
+function _factor_check_query_output(output::AbstractVector,
+                                    work::FactorWorkspace,
+                                    prepared::FactorPrepared,
+                                    position::AbstractVector,
+                                    query::BRM.NativePPLQuery)
+    _factor_check_execution(work, prepared, position)
+    signature = output_signature(prepared, query)
+    expected_axis = BRM.native_output_axis(signature).keys
+    axes(output, 1) == expected_axis || throw(DimensionMismatch(
+        "native PPL factor output axis $(axes(output, 1)) does not match " *
+        "declared axis $expected_axis"))
+    eltype(output) === BRM.native_output_eltype(signature, prepared) ||
+        throw(ArgumentError(
+            "native PPL factor output eltype $(eltype(output)) does not " *
+            "match prepared eltype $(eltype(prepared))"))
+    for buffer in (work.gradient, work.primal.values,
+                   work.primal.generated_group_values,
+                   work.primal.node_values, work.primal.node_rows,
+                   work.primal.pointwise_loglikelihood)
+        Base.mightalias(output, buffer) && throw(ArgumentError(
+            "native PPL factor output must not alias workspace storage"))
+    end
+    Base.mightalias(output, position) && throw(ArgumentError(
+        "native PPL factor output must not alias the position"))
+    output
+end
+
+@inline function _factor_terminal_arguments(prepared::FactorPrepared,
+                                            buffers::FactorBuffers,
+                                            index::Int)
+    site = getproperty(
+        prepared.plan.graph.sites, factor_output_site(prepared.plan))
+    factor = site.factor
+    factor isa NormalSiteFactor || throw(CapabilityError(
+        :factor_family,
+        "terminal factor queries currently require Normal, got " *
+        "$(typeof(factor))"))
+    T = eltype(buffers.values)
+    location = _factor_argument_at(
+        factor.location, index, prepared.plan, buffers, T)
+    scale = _factor_argument_at(
+        factor.scale, index, prepared.plan, buffers, T)
+    location, scale
+end
+
+function evaluate!(output::AbstractVector, work::FactorWorkspace,
+                   prepared::FactorPrepared, position::AbstractVector,
+                   query::BRM.NativePPLLinearPredictor)
+    _factor_check_query_output(output, work, prepared, position, query)
+    _factor_logdensity_kernel(position, prepared, work.primal)
+    for index in eachindex(output)
+        location, _ = _factor_terminal_arguments(
+            prepared, work.primal, index)
+        output[index] = location
+    end
+    output
+end
+
+function evaluate!(output::AbstractVector, work::FactorWorkspace,
+                   prepared::FactorPrepared, position::AbstractVector,
+                   query::BRM.NativePPLPointwiseLogLikelihood)
+    _factor_check_query_output(output, work, prepared, position, query)
+    has_response(prepared) || throw(ArgumentError(
+        "native PPL pointwise log likelihood requires a conditioned " *
+        "broadcast response"))
+    _factor_logdensity_kernel(position, prepared, work.primal)
+    copyto!(output, work.primal.pointwise_loglikelihood)
+end
+
+function evaluate(work::FactorWorkspace, prepared::FactorPrepared,
+                  position::AbstractVector, query::BRM.NativePPLQuery)
+    output = allocate_output(prepared, query)
+    evaluate!(output, work, prepared, position, query)
+end
+
+function evaluate!(rng::BRM.AbstractRNG, output::AbstractVector,
+                   work::FactorWorkspace, prepared::FactorPrepared,
+                   position::AbstractVector,
+                   query::BRM.NativePPLLinearPredictor)
+    _factor_check_query_output(output, work, prepared, position, query)
+    if _has_generated_groups(prepared.plan)
+        _factor_predictive_kernel!(
+            rng, position, prepared, work.primal)
+    else
+        _factor_logdensity_kernel(position, prepared, work.primal)
+    end
+    for index in eachindex(output)
+        location, _ = _factor_terminal_arguments(
+            prepared, work.primal, index)
+        output[index] = location
+    end
+    output
+end
+
+function evaluate(rng::BRM.AbstractRNG, work::FactorWorkspace,
+                  prepared::FactorPrepared, position::AbstractVector,
+                  query::BRM.NativePPLLinearPredictor)
+    output = allocate_output(prepared, query)
+    evaluate!(rng, output, work, prepared, position, query)
+end
+
+function simulate!(rng::BRM.AbstractRNG, output::AbstractVector,
+                   work::FactorWorkspace, prepared::FactorPrepared,
+                   position::AbstractVector,
+    query::BRM.NativePPLPosteriorPredictive=
+                       BRM.NativePPLPosteriorPredictive())
+    _factor_check_query_output(output, work, prepared, position, query)
+    if _has_generated_groups(prepared.plan)
+        _factor_predictive_kernel!(
+            rng, position, prepared, work.primal)
+    else
+        _factor_logdensity_kernel(position, prepared, work.primal)
+    end
+    T = eltype(work)
+    for index in eachindex(output)
+        location, scale = _factor_terminal_arguments(
+            prepared, work.primal, index)
+        output[index] = location + scale * BRM.randn(rng, T)
+    end
+    output
+end
+
+function simulate(rng::BRM.AbstractRNG, work::FactorWorkspace,
+                  prepared::FactorPrepared, position::AbstractVector,
+                  query::BRM.NativePPLPosteriorPredictive=
+                      BRM.NativePPLPosteriorPredictive())
+    output = allocate_output(prepared, query)
+    simulate!(rng, output, work, prepared, position, query)
+end
+
+@inline _factor_inverse(::IdentityTransform, value) = value
+@inline _factor_inverse(::ExpTransform, value) = log(value)
+
+@inline _factor_rand(rng::BRM.AbstractRNG, ::StandardNormalSiteFactor,
+                     plan, buffers, ::Type{T}) where {T} =
+    BRM.randn(rng, T)
+
+@inline function _factor_rand(rng::BRM.AbstractRNG,
+        factor::NormalSiteFactor, plan, buffers, ::Type{T}) where {T}
+    location = _factor_argument(factor.location, plan, buffers, T)
+    scale = _factor_argument(factor.scale, plan, buffers, T)
+    location + scale * BRM.randn(rng, T)
+end
+
+@inline function _factor_rand(rng::BRM.AbstractRNG,
+        factor::ExponentialSiteFactor, plan, buffers, ::Type{T}) where {T}
+    scale = _factor_argument(factor.scale, plan, buffers, T)
+    scale * BRM.randexp(rng, T)
+end
+
+@inline function _factor_generated_group_sample!(rng::BRM.AbstractRNG,
+        ::Val{Name},
+        site::StochasticSite,
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Name,T}
+    hasproperty(prepared.plan.generated_group_indices, Name) || return nothing
+    generated_indices = getproperty(
+        prepared.plan.generated_group_indices, Name)
+    for index in generated_indices
+        buffers.generated_group_values[index] = _factor_rand(
+            rng, site.factor, prepared.plan, buffers, T)
+    end
+    nothing
+end
+
+@generated function _factor_predictive_schedule!(rng::BRM.AbstractRNG,
+        ::Val{Names}, ::Val{SiteNames}, sites::Sites,
+        ::Val{NodeNames}, nodes::Nodes,
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {
+            Names,SiteNames,Sites<:Tuple,NodeNames,Nodes<:Tuple,T}
+    calls = Any[]
+    for name in Names
+        site_index = findfirst(==(name), SiteNames)
+        call = if site_index === nothing
+            node_index = findfirst(==(name), NodeNames)
+            node_index === nothing && error("unknown factor schedule entry $name")
+            :(_factor_node_logdensity!(
+                Val($(QuoteNode(name))), getfield(nodes, $node_index),
+                position, prepared, buffers))
+        else
+            quote
+                _factor_site_logdensity!(
+                    Val($(QuoteNode(name))), getfield(sites, $site_index),
+                    position, prepared, buffers)
+                _factor_generated_group_sample!(
+                    rng, Val($(QuoteNode(name))),
+                    getfield(sites, $site_index), position, prepared, buffers)
+            end
+        end
+        push!(calls, call)
+    end
+    Expr(:block, calls..., :(nothing))
+end
+
+@inline function _factor_predictive_kernel!(rng::BRM.AbstractRNG,
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {T}
+    graph = prepared.plan.graph
+    _factor_predictive_schedule!(
+        rng, Val(graph.schedule), Val(Tuple(keys(graph.sites))),
+        Tuple(graph.sites), Val(Tuple(keys(graph.nodes))), Tuple(graph.nodes),
+        position, prepared, buffers)
+end
+
+@inline function _factor_site_sample!(rng::BRM.AbstractRNG, ::Val{Name},
+        site::StochasticSite{S,Tr,F,ScalarSiteShape,FreeSite},
+        position::AbstractVector{T}, output::AbstractVector{T},
+        prepared::FactorPrepared, buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
+    value = _factor_rand(rng, site.factor, prepared.plan, buffers, T)
+    coordinates = getproperty(prepared.plan.graph.coordinates, Name)
+    position[first(coordinates.indices)] = _factor_inverse(
+        site.transform, value)
+    buffers.values[getproperty(prepared.plan.site_indices, Name)] = value
+    nothing
+end
+
+@inline function _factor_site_sample!(rng::BRM.AbstractRNG, ::Val{Name},
+        site::StochasticSite{S,Tr,F,ScalarSiteShape,ConditionedSite},
+        position::AbstractVector{T}, output::AbstractVector{T},
+        prepared::FactorPrepared, buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
+    buffers.values[getproperty(prepared.plan.site_indices, Name)] =
+        getproperty(prepared.conditions, Name)
+    nothing
+end
+
+@inline function _factor_site_sample!(rng::BRM.AbstractRNG, ::Val{Name},
+        site::StochasticSite{S,Tr,F,BlockSiteShape,FreeSite},
+        position::AbstractVector{T}, output::AbstractVector{T},
+        prepared::FactorPrepared, buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
+    coordinates = getproperty(prepared.plan.graph.coordinates, Name)
+    for coordinate in coordinates.indices
+        value = _factor_rand(
+            rng, site.factor, prepared.plan, buffers, T)
+        position[coordinate] = _factor_inverse(site.transform, value)
+    end
+    nothing
+end
+
+@inline function _factor_site_sample!(rng::BRM.AbstractRNG, ::Val{Name},
+        site::StochasticSite{S,Tr,F,BlockSiteShape,ConditionedSite},
+        position::AbstractVector{T}, output::AbstractVector{T},
+        prepared::FactorPrepared, buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
+    nothing
+end
+
+@inline function _factor_site_sample!(rng::BRM.AbstractRNG, ::Val{Name},
+        site::StochasticSite{S,Tr,F,BroadcastSiteShape,A},
+        position::AbstractVector{T}, output::AbstractVector{T},
+        prepared::FactorPrepared, buffers::FactorBuffers{T}) where {Name,S,Tr,F,A,T}
+    factor = site.factor
+    factor isa NormalSiteFactor || throw(CapabilityError(
+        :factor_family,
+        "prior predictive factor `$Name` must currently be Normal"))
+    for index in eachindex(output)
+        location = _factor_argument_at(
+            factor.location, index, prepared.plan, buffers, T)
+        scale = _factor_argument_at(
+            factor.scale, index, prepared.plan, buffers, T)
+        output[index] = location + scale * BRM.randn(rng, T)
+    end
+    nothing
+end
+
+@generated function _factor_sample_schedule!(rng::BRM.AbstractRNG,
+        ::Val{Names}, ::Val{SiteNames}, sites::Sites,
+        ::Val{NodeNames}, nodes::Nodes,
+        position::AbstractVector{T},
+        output::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {
+            Names,SiteNames,Sites<:Tuple,NodeNames,Nodes<:Tuple,T}
+    calls = Any[]
+    for name in Names
+        site_index = findfirst(==(name), SiteNames)
+        call = if site_index === nothing
+            node_index = findfirst(==(name), NodeNames)
+            node_index === nothing && error("unknown factor schedule entry $name")
+            :(_factor_node_logdensity!(
+                Val($(QuoteNode(name))), getfield(nodes, $node_index),
+                position, prepared, buffers))
+        else
+            :(_factor_site_sample!(
+                rng, Val($(QuoteNode(name))),
+                getfield(sites, $site_index), position, output,
+                prepared, buffers))
+        end
+        push!(calls, call)
+    end
+    Expr(:block, calls..., :(output))
+end
+
+function simulate_prior!(rng::BRM.AbstractRNG, position::AbstractVector,
+                         output::AbstractVector, work::FactorWorkspace,
+                         prepared::FactorPrepared)
+    _factor_require_fixed_coordinates(prepared.plan)
+    _factor_check_query_output(
+        output, work, prepared, position,
+        BRM.NativePPLPosteriorPredictive())
+    graph = prepared.plan.graph
+    _factor_sample_schedule!(
+        rng, Val(graph.schedule), Val(Tuple(keys(graph.sites))),
+        Tuple(graph.sites), Val(Tuple(keys(graph.nodes))), Tuple(graph.nodes),
+        position, output, prepared, work.primal)
+end
+
+function simulate_prior(rng::BRM.AbstractRNG, work::FactorWorkspace,
+                        prepared::FactorPrepared)
+    position = Vector{eltype(work)}(
+        undef, BRM.LogDensityProblems.dimension(prepared))
+    output = allocate_output(
+        prepared, BRM.NativePPLPosteriorPredictive())
+    simulate_prior!(rng, position, output, work, prepared)
+    (; position, response=output)
+end
+
+function _factor_check_positions(prepared::FactorPrepared,
+                                 positions::AbstractMatrix)
+    dimension = BRM.LogDensityProblems.dimension(prepared)
+    size(positions, 2) == dimension || throw(DimensionMismatch(
+        "native PPL factor draw matrix has $(size(positions, 2)) columns; " *
+        "expected $dimension"))
+    axes(positions) == (Base.OneTo(size(positions, 1)),
+                        Base.OneTo(dimension)) || throw(ArgumentError(
+        "native PPL factor draw matrices require one-based axes"))
+    nothing
+end
+
+function batch_output_signature(prepared::FactorPrepared,
+                                positions::AbstractMatrix,
+                                query::BRM.NativePPLQuery)
+    _factor_check_positions(prepared, positions)
+    element = output_signature(prepared, query)
+    BRM.NativePPLBatchOutputSignature(
+        BRM.NativePPLAxis(:draw, Base.OneTo(size(positions, 1))),
+        BRM.native_output_axis(element), element.element_type,
+        BRM.NativePPLDenseMatrixLayout())
+end
+
+function batch_output_signature(prepared::FactorPrepared,
+                                positions::AbstractMatrix,
+                                queries::NamedTuple{Names}) where {Names}
+    _factor_check_positions(prepared, positions)
+    all(query -> query isa BRM.NativePPLQuery, Tuple(queries)) ||
+        throw(ArgumentError(
+            "native PPL factor query bundles require typed graph queries"))
+    NamedTuple{Names}(map(
+        query -> batch_output_signature(prepared, positions, query),
+        Tuple(queries)))
+end
+
+function allocate_output(signature::BRM.NativePPLBatchOutputSignature,
+                         prepared::FactorPrepared)
+    draw_axis, observation_axis = BRM.native_output_axes(signature)
+    draw_axis.keys == Base.OneTo(length(draw_axis)) || throw(CapabilityError(
+        :output_layout, "factor draw output requires a one-based draw axis"))
+    observation_axis.keys == Base.OneTo(length(observation_axis)) ||
+        throw(CapabilityError(
+            :output_layout,
+            "factor draw output requires a one-based observation axis"))
+    Matrix{BRM.native_output_eltype(signature, prepared)}(
+        undef, length(draw_axis), length(observation_axis))
+end
+
+function allocate_output(signatures::NamedTuple{Names},
+                         prepared::FactorPrepared) where {Names}
+    NamedTuple{Names}(map(
+        signature -> allocate_output(signature, prepared),
+        Tuple(signatures)))
+end
+
+function _factor_check_batch_output(output::AbstractMatrix,
+                                    work::FactorWorkspace,
+                                    prepared::FactorPrepared,
+                                    positions::AbstractMatrix,
+                                    query::BRM.NativePPLQuery)
+    _factor_check_workspace_layout(work, prepared)
+    signature = batch_output_signature(prepared, positions, query)
+    draw_axis, observation_axis = BRM.native_output_axes(signature)
+    axes(output) == (draw_axis.keys, observation_axis.keys) ||
+        throw(DimensionMismatch(
+            "native PPL factor batch output axes $(axes(output)) do not " *
+            "match $((draw_axis.keys, observation_axis.keys))"))
+    eltype(output) === eltype(prepared) || throw(ArgumentError(
+        "native PPL factor batch output eltype $(eltype(output)) does not " *
+        "match prepared eltype $(eltype(prepared))"))
+    eltype(positions) === eltype(work) || throw(ArgumentError(
+        "native PPL factor draw eltype $(eltype(positions)) does not match " *
+        "workspace eltype $(eltype(work))"))
+    Base.mightalias(output, positions) && throw(ArgumentError(
+        "native PPL factor batch output must not alias draw positions"))
+    for buffer in (work.gradient, work.primal.values,
+                   work.primal.generated_group_values,
+                   work.primal.node_values, work.primal.node_rows,
+                   work.primal.pointwise_loglikelihood)
+        Base.mightalias(output, buffer) && throw(ArgumentError(
+            "native PPL factor batch output must not alias workspace storage"))
+        Base.mightalias(positions, buffer) && throw(ArgumentError(
+            "native PPL factor draw positions must not alias workspace storage"))
+    end
+    nothing
+end
+
+function evaluate_draws!(output::AbstractMatrix, work::FactorWorkspace,
+                         prepared::FactorPrepared,
+                         positions::AbstractMatrix,
+                         query::BRM.NativePPLQuery)
+    _factor_check_batch_output(
+        output, work, prepared, positions, query)
+    for draw in axes(positions, 1)
+        evaluate!(
+            @view(output[draw, :]), work, prepared,
+            @view(positions[draw, :]), query)
+    end
+    output
+end
+
+function evaluate_draws(work::FactorWorkspace, prepared::FactorPrepared,
+                        positions::AbstractMatrix,
+                        query::BRM.NativePPLQuery)
+    signature = batch_output_signature(prepared, positions, query)
+    output = allocate_output(signature, prepared)
+    evaluate_draws!(output, work, prepared, positions, query)
+end
+
+function evaluate_draws!(rng::BRM.AbstractRNG, output::AbstractMatrix,
+                         work::FactorWorkspace,
+                         prepared::FactorPrepared,
+                         positions::AbstractMatrix,
+                         query::BRM.NativePPLLinearPredictor)
+    _factor_check_batch_output(
+        output, work, prepared, positions, query)
+    for draw in axes(positions, 1)
+        evaluate!(
+            rng, @view(output[draw, :]), work, prepared,
+            @view(positions[draw, :]), query)
+    end
+    output
+end
+
+function evaluate_draws(rng::BRM.AbstractRNG, work::FactorWorkspace,
+                        prepared::FactorPrepared,
+                        positions::AbstractMatrix,
+                        query::BRM.NativePPLLinearPredictor)
+    signature = batch_output_signature(prepared, positions, query)
+    output = allocate_output(signature, prepared)
+    evaluate_draws!(rng, output, work, prepared, positions, query)
+end
+
+function simulate_draws!(rng::BRM.AbstractRNG, output::AbstractMatrix,
+                         work::FactorWorkspace, prepared::FactorPrepared,
+                         positions::AbstractMatrix,
+                         query::BRM.NativePPLPosteriorPredictive=
+                             BRM.NativePPLPosteriorPredictive())
+    _factor_check_batch_output(
+        output, work, prepared, positions, query)
+    for draw in axes(positions, 1)
+        simulate!(
+            rng, @view(output[draw, :]), work, prepared,
+            @view(positions[draw, :]), query)
+    end
+    output
+end
+
+function simulate_draws(rng::BRM.AbstractRNG, work::FactorWorkspace,
+                        prepared::FactorPrepared,
+                        positions::AbstractMatrix,
+                        query::BRM.NativePPLPosteriorPredictive=
+                            BRM.NativePPLPosteriorPredictive())
+    signature = batch_output_signature(prepared, positions, query)
+    output = allocate_output(signature, prepared)
+    simulate_draws!(rng, output, work, prepared, positions, query)
+end
+
+@inline function _factor_write_bundle_query!(rng, output::AbstractVector,
+        ::BRM.NativePPLLinearPredictor, work::FactorWorkspace,
+        prepared::FactorPrepared)
+    for index in eachindex(output)
+        location, _ = _factor_terminal_arguments(
+            prepared, work.primal, index)
+        output[index] = location
+    end
+    output
+end
+
+@inline function _factor_write_bundle_query!(rng, output::AbstractVector,
+        ::BRM.NativePPLPointwiseLogLikelihood, work::FactorWorkspace,
+        prepared::FactorPrepared)
+    copyto!(output, work.primal.pointwise_loglikelihood)
+end
+
+@inline function _factor_write_bundle_query!(rng::BRM.AbstractRNG,
+        output::AbstractVector, ::BRM.NativePPLPosteriorPredictive,
+        work::FactorWorkspace, prepared::FactorPrepared)
+    T = eltype(work)
+    for index in eachindex(output)
+        location, scale = _factor_terminal_arguments(
+            prepared, work.primal, index)
+        output[index] = location + scale * BRM.randn(rng, T)
+    end
+    output
+end
+
+@inline function _factor_write_bundle_matrix_query!(rng,
+        output::AbstractMatrix, draw, ::BRM.NativePPLLinearPredictor,
+        work::FactorWorkspace, prepared::FactorPrepared)
+    for index in axes(output, 2)
+        location, _ = _factor_terminal_arguments(
+            prepared, work.primal, index)
+        output[draw, index] = location
+    end
+    output
+end
+
+@inline function _factor_write_bundle_matrix_query!(rng,
+        output::AbstractMatrix, draw,
+        ::BRM.NativePPLPointwiseLogLikelihood,
+        work::FactorWorkspace, prepared::FactorPrepared)
+    for index in axes(output, 2)
+        output[draw, index] = work.primal.pointwise_loglikelihood[index]
+    end
+    output
+end
+
+@inline function _factor_write_bundle_matrix_query!(rng::BRM.AbstractRNG,
+        output::AbstractMatrix, draw, ::BRM.NativePPLPosteriorPredictive,
+        work::FactorWorkspace, prepared::FactorPrepared)
+    T = eltype(work)
+    for index in axes(output, 2)
+        location, scale = _factor_terminal_arguments(
+            prepared, work.primal, index)
+        output[draw, index] = location + scale * BRM.randn(rng, T)
+    end
+    output
+end
+
+@inline _factor_bundle_requires_rng(::Tuple{}) = false
+@inline _factor_bundle_requires_rng(queries::Tuple) =
+    first(queries) isa BRM.NativePPLPosteriorPredictive ||
+    _factor_bundle_requires_rng(Base.tail(queries))
+
+@inline _factor_bundle_requires_response(::Tuple{}) = false
+@inline _factor_bundle_requires_response(queries::Tuple) =
+    first(queries) isa BRM.NativePPLPointwiseLogLikelihood ||
+    _factor_bundle_requires_response(Base.tail(queries))
+
+@inline function _factor_write_bundle_draw!(rng, ::Tuple{}, ::Tuple{},
+        draw, work::FactorWorkspace, prepared::FactorPrepared)
+    nothing
+end
+
+@inline function _factor_write_bundle_draw!(rng, outputs::Tuple,
+        queries::Tuple, draw, work::FactorWorkspace,
+        prepared::FactorPrepared)
+    _factor_write_bundle_matrix_query!(
+        rng, first(outputs), draw, first(queries), work, prepared)
+    _factor_write_bundle_draw!(
+        rng, Base.tail(outputs), Base.tail(queries), draw, work, prepared)
+end
+
+@inline @generated function _factor_write_bundle_draw!(rng,
+        outputs::NamedTuple{Names}, queries::NamedTuple{Names}, draw,
+        work::FactorWorkspace, prepared::FactorPrepared) where {Names}
+    calls = map(eachindex(Names)) do index
+        :(_factor_write_bundle_matrix_query!(
+            rng, getfield(outputs, $index), draw,
+            getfield(queries, $index), work, prepared))
+    end
+    Expr(:block, calls..., :(nothing))
+end
+
+@inline function _factor_check_bundle_matrix(
+        output::AbstractMatrix, work::FactorWorkspace,
+        prepared::FactorPrepared, positions::AbstractMatrix)
+    expected_axes = (
+        Base.OneTo(size(positions, 1)), prepared.plan.observation_axis.keys)
+    axes(output) == expected_axes || throw(DimensionMismatch(
+        "native PPL factor bundle output axes $(axes(output)) do not match " *
+        "$expected_axes"))
+    eltype(output) === eltype(prepared) || throw(ArgumentError(
+        "native PPL factor bundle output eltype $(eltype(output)) does not " *
+        "match prepared eltype $(eltype(prepared))"))
+    eltype(positions) === eltype(work) || throw(ArgumentError(
+        "native PPL factor draw eltype $(eltype(positions)) does not match " *
+        "workspace eltype $(eltype(work))"))
+    Base.mightalias(output, positions) && throw(ArgumentError(
+        "native PPL factor bundle output must not alias draw positions"))
+    for buffer in (work.gradient, work.primal.values,
+                   work.primal.generated_group_values,
+                   work.primal.node_values, work.primal.node_rows,
+                   work.primal.pointwise_loglikelihood)
+        Base.mightalias(output, buffer) && throw(ArgumentError(
+            "native PPL factor bundle output must not alias workspace storage"))
+        Base.mightalias(positions, buffer) && throw(ArgumentError(
+            "native PPL factor draw positions must not alias workspace storage"))
+    end
+    nothing
+end
+
+@inline function _factor_check_bundle_fields(outputs, queries,
+        work::FactorWorkspace, prepared::FactorPrepared,
+        positions::AbstractMatrix, ::Val{0})
+    nothing
+end
+
+@inline function _factor_check_bundle_fields(outputs, queries,
+        work::FactorWorkspace, prepared::FactorPrepared,
+        positions::AbstractMatrix, ::Val{Index}) where {Index}
+    query = getfield(queries, Index)
+    query isa BRM.NativePPLQuery || throw(ArgumentError(
+        "native PPL factor query bundles require typed graph queries"))
+    output = getfield(outputs, Index)
+    output isa AbstractMatrix || throw(ArgumentError(
+        "native PPL factor bundle outputs must be matrices"))
+    _factor_check_bundle_matrix(output, work, prepared, positions)
+    _factor_check_bundle_fields(
+        outputs, queries, work, prepared, positions, Val(Index - 1))
+end
+
+@inline @generated function _factor_check_bundle_output_aliases(
+        outputs::NamedTuple{Names}) where {Names}
+    calls = Any[]
+    for left in eachindex(Names), right in (left + 1):length(Names)
+        push!(calls, quote
+            Base.mightalias(
+                getfield(outputs, $left), getfield(outputs, $right)) &&
+                throw(ArgumentError(
+                    "native PPL factor bundle outputs must not alias each other"))
+        end)
+    end
+    Expr(:block, calls..., :(nothing))
+end
+
+
+@inline function _factor_execute_bundle_draw!(rng,
+        work::FactorWorkspace, prepared::FactorPrepared,
+        position::AbstractVector)
+    _factor_check_execution(work, prepared, position)
+    if _has_generated_groups(prepared.plan)
+        _factor_predictive_kernel!(
+            rng, position, prepared, work.primal)
+    else
+        _factor_logdensity_kernel(position, prepared, work.primal)
+    end
+    nothing
+end
+
+@inline function _factor_execute_draws!(rng, outputs::NamedTuple{Names},
+                                work::FactorWorkspace,
+                                prepared::FactorPrepared,
+                                positions::AbstractMatrix,
+                                queries::NamedTuple{Names}) where {Names}
+    query_values = Tuple(queries)
+    rng === nothing && _factor_bundle_requires_rng(query_values) &&
+        throw(ArgumentError(
+            "native PPL factor query bundle contains an RNG query; pass an RNG"))
+    rng === nothing && _has_generated_groups(prepared.plan) && throw(
+        ArgumentError(
+            "native PPL generated-group queries require an RNG; pass one " *
+            "even when requesting only a linear predictor"))
+    _factor_bundle_requires_response(query_values) && !has_response(prepared) &&
+        throw(ArgumentError(
+            "native PPL factor pointwise query requires a conditioned response"))
+    _factor_check_positions(prepared, positions)
+    _factor_check_bundle_fields(
+        outputs, queries, work, prepared, positions, Val{length(Names)}())
+    _factor_check_bundle_output_aliases(outputs)
+    for draw in axes(positions, 1)
+        _factor_execute_bundle_draw!(
+            rng, work, prepared, @view(positions[draw, :]))
+        _factor_write_bundle_draw!(
+            rng, outputs, queries, draw, work, prepared)
+    end
+    outputs
+end
+
+execute_draws!(outputs::NamedTuple, work::FactorWorkspace,
+               prepared::FactorPrepared, positions::AbstractMatrix,
+               queries::NamedTuple) =
+    _factor_execute_draws!(
+        nothing, outputs, work, prepared, positions, queries)
+execute_draws!(rng::BRM.AbstractRNG, outputs::NamedTuple,
+               work::FactorWorkspace, prepared::FactorPrepared,
+               positions::AbstractMatrix, queries::NamedTuple) =
+    _factor_execute_draws!(rng, outputs, work, prepared, positions, queries)
+
+function execute_draws(work::FactorWorkspace, prepared::FactorPrepared,
+                       positions::AbstractMatrix, queries::NamedTuple)
+    _factor_bundle_requires_rng(Tuple(queries)) && throw(ArgumentError(
+        "native PPL factor query bundle contains an RNG query; pass an RNG"))
+    signatures = batch_output_signature(prepared, positions, queries)
+    outputs = allocate_output(signatures, prepared)
+    execute_draws!(outputs, work, prepared, positions, queries)
+end
+
+function execute_draws(rng::BRM.AbstractRNG, work::FactorWorkspace,
+                       prepared::FactorPrepared, positions::AbstractMatrix,
+                       queries::NamedTuple)
+    signatures = batch_output_signature(prepared, positions, queries)
+    outputs = allocate_output(signatures, prepared)
+    execute_draws!(rng, outputs, work, prepared, positions, queries)
+end
+
+"""LogDensityProblems adapter for a prepared factor-graph executor."""
+struct FactorLogDensityProblem{P,W}
+    prepared::P
+    workspace::W
+end
+
+function FactorLogDensityProblem(prepared::FactorPrepared, backend)
+    work = workspace(prepared, eltype(prepared), backend)
+    FactorLogDensityProblem{typeof(prepared),typeof(work)}(prepared, work)
+end
+
+Base.eltype(problem::FactorLogDensityProblem) = eltype(problem.prepared)
+BRM.LogDensityProblems.capabilities(::Type{<:FactorLogDensityProblem}) =
+    BRM.LogDensityProblems.LogDensityOrder{1}()
+BRM.LogDensityProblems.dimension(problem::FactorLogDensityProblem) =
+    BRM.LogDensityProblems.dimension(problem.prepared)
+BRM.LogDensityProblems.logdensity(problem::FactorLogDensityProblem,
+                                  position::AbstractVector) =
+    logdensity!(problem.workspace, problem.prepared, position)
+function BRM.LogDensityProblems.logdensity_and_gradient(
+        problem::FactorLogDensityProblem, position::AbstractVector)
+    density, gradient = logdensity_and_gradient!(
+        problem.workspace, problem.prepared, position)
+    density, copy(gradient)
+end
+
+BRM.NativePPLLogDensityProblem(prepared::FactorPrepared, backend) =
+    FactorLogDensityProblem(prepared, backend)
 
 """
 A composed call of a staged `@model` function.
@@ -239,6 +2383,25 @@ struct ModelInstance{M<:Model,B,C}
     bindings::B
     conditions::C
 end
+
+function _factor_graph_instance_conditions(instance::ModelInstance)
+    _validate_instance(instance)
+    names = Symbol[keys(instance.conditions)...]
+    values = Any[getproperty(instance.conditions, name) for name in names]
+    for (name, input_declaration) in pairs(instance.declaration.inputs)
+        input_role(input_declaration) === :response || continue
+        hasproperty(instance.declaration.observations, name) || continue
+        hasproperty(instance.bindings, name) || continue
+        name in names && continue
+        push!(names, name)
+        push!(values, getproperty(instance.bindings, name))
+    end
+    NamedTuple{Tuple(names)}(Tuple(values))
+end
+
+factor_graph(instance::ModelInstance) = factor_graph(
+    instance.declaration;
+    conditions=_factor_graph_instance_conditions(instance))
 
 """
 A stable reference to one named value exported by a namespaced component.
@@ -412,6 +2575,17 @@ function _qualified_parameter(
         transform=declaration.transform, prior=declaration.prior)
 end
 
+function _qualified_parameter(
+    namespace::Symbol, name::Symbol,
+    declaration::GroupedNormalParameter)
+    qualify(value::LiteralValue) = value.value
+    qualify(value::SiteValue) = qualified_name(
+        namespace, site_value_name(value))
+    grouped_normal(
+        qualified_name(namespace, group_input(declaration)),
+        qualify(declaration.location), qualify(declaration.scale))
+end
+
 _mapped_name(mapping, name::Symbol, owner::Symbol, kind::AbstractString) =
     get(mapping, name) do
         throw(CapabilityError(
@@ -437,13 +2611,25 @@ function _qualified_node(namespace::Symbol, declaration::Affine, mapping)
     coefficients = _mapped_name(
         mapping, affine_parameter(declaration), namespace,
         "affine coefficient")
-    affine(inputs, coefficients)
+    offsets = Tuple(_mapped_name(
+        mapping, name, namespace, "affine offset")
+        for name in affine_offsets(declaration))
+    affine(inputs, coefficients;
+           offsets, intercept=affine_has_intercept(declaration))
 end
 
 
 function _qualified_node(namespace::Symbol, declaration::ExpLink, mapping)
     exp_link(_mapped_name(
         mapping, node_input(declaration), namespace, "exp node"))
+end
+
+function _qualified_node(namespace::Symbol, declaration::GroupGather, mapping)
+    group_gather(
+        _mapped_name(
+            mapping, group_values(declaration), namespace, "group gather"),
+        _mapped_name(
+            mapping, group_input(declaration), namespace, "group gather"))
 end
 
 
@@ -558,6 +2744,7 @@ function _lower_composition(composition::Composition, public_outputs=nothing)
     binding_values = Any[]
     condition_names = Symbol[]
     condition_values = Any[]
+    site_order_names = Symbol[]
     resolved = Dict{Tuple{Symbol,Symbol},Symbol}()
     activity = Dict{Tuple{Symbol,Symbol},Bool}()
 
@@ -643,6 +2830,9 @@ function _lower_composition(composition::Composition, public_outputs=nothing)
             end
         end
 
+        append!(site_order_names, (mapping[name]
+                                   for name in declaration.site_order))
+
         if declaration.outputs !== nothing
             for (alias, local_name) in pairs(declaration.outputs)
                 resolved[(namespace, alias)] = resolved[(namespace, local_name)]
@@ -681,6 +2871,10 @@ function _lower_composition(composition::Composition, public_outputs=nothing)
                 condition_names[condition_index] === resolved_name &&
                     (condition_names[condition_index] = alias)
             end
+            for site_index in eachindex(site_order_names)
+                site_order_names[site_index] === resolved_name &&
+                    (site_order_names[site_index] = alias)
+            end
             delete!(occupied, resolved_name)
             push!(occupied, alias)
             flattened_values[index] = alias
@@ -694,7 +2888,8 @@ function _lower_composition(composition::Composition, public_outputs=nothing)
         nodes=NamedTuple{Tuple(node_names)}(Tuple(node_values)),
         observations=NamedTuple{Tuple(observation_names)}(
             Tuple(observation_values)),
-        outputs=flattened_outputs)
+        outputs=flattened_outputs,
+        site_order=Tuple(site_order_names))
     ModelInstance(
         declaration,
         NamedTuple{Tuple(binding_names)}(Tuple(binding_values)),
@@ -825,11 +3020,11 @@ function _check_named_declarations(values, kind::AbstractString, type)
 end
 
 function _validate_model_components(
-    inputs, parameters, nodes, observations, outputs)
+    inputs, parameters, nodes, observations, outputs, site_order)
     _check_named_declarations(
         inputs, "input", AbstractInputDeclaration)
     _check_named_declarations(
-        parameters, "parameter", Parameter)
+        parameters, "parameter", AbstractParameterDeclaration)
     _check_named_declarations(
         nodes, "node", AbstractNodeDeclaration)
     _check_named_declarations(
@@ -845,23 +3040,38 @@ function _validate_model_components(
     isempty(intersect(parameter_names, node_names)) || throw(ArgumentError(
         "native PPL parameter and node identities must be distinct"))
 
-    available = union(input_names, parameter_names)
+    observation_names = Set(keys(observations))
+    available = union(input_names, parameter_names, observation_names)
     for (name, declaration) in pairs(nodes)
         dependencies = declaration isa Affine ?
-            node_inputs(declaration) : (node_input(declaration),)
+            (node_inputs(declaration)..., affine_offsets(declaration)...) :
+            declaration isa GroupGather ?
+                (group_values(declaration), group_input(declaration)) :
+                (node_input(declaration),)
         for dependency in dependencies
             dependency in available || throw(ArgumentError(
-                "native PPL node `$name` references unavailable input " *
-                "`$dependency`; nodes must be topologically ordered"))
+                "native PPL node `$name` references unavailable value " *
+                "`$dependency`; deterministic nodes must be ordered among " *
+                "themselves"))
         end
         declaration isa Affine &&
             affine_parameter(declaration) ∉ parameter_names &&
             throw(ArgumentError(
                 "native PPL affine node `$name` references unknown parameter " *
                 "`$(affine_parameter(declaration))`"))
+        if declaration isa GroupGather
+            group_values(declaration) in parameter_names || throw(ArgumentError(
+                "native PPL group gather node `$name` references unknown " *
+                "latent site `$(group_values(declaration))`"))
+            group_input(declaration) in input_names || throw(ArgumentError(
+                "native PPL group gather node `$name` references unknown " *
+                "group input `$(group_input(declaration))`"))
+        end
         push!(available, name)
     end
 
+    available = union(input_names, parameter_names, node_names,
+                      observation_names)
     for (name, declaration) in pairs(observations)
         response = observation_response(declaration)
         name === response || throw(ArgumentError(
@@ -880,11 +3090,11 @@ function _validate_model_components(
                 "native PPL stochastic site `$response` collides with a node identity"))
         end
         for dependency in observation_dependencies(declaration)
-            dependency in available || throw(ArgumentError(
-                "native PPL observation `$name` references unavailable dependency " *
-                "`$dependency`"))
+            dependency in available || dependency in observation_names ||
+                throw(ArgumentError(
+                    "native PPL observation `$name` references unavailable " *
+                    "dependency `$dependency`"))
         end
-        push!(available, response)
     end
 
     if outputs !== nothing
@@ -904,23 +3114,41 @@ function _validate_model_components(
             name in exportable || throw(ArgumentError(
                 "native PPL model output `$alias` references unavailable " *
                 "value `$name`"))
+            alias === name || alias ∉ exportable || throw(ArgumentError(
+                "native PPL model output alias `$alias` collides with " *
+                "existing graph identity `$alias`"))
         end
     end
+
+    site_order isa Tuple || throw(ArgumentError(
+        "native PPL stochastic-site order must be a Tuple; got " *
+        "$(typeof(site_order))"))
+    all(name -> name isa Symbol, site_order) || throw(ArgumentError(
+        "native PPL stochastic-site order must contain Symbols"))
+    length(unique(site_order)) == length(site_order) || throw(ArgumentError(
+        "native PPL stochastic-site order must contain unique identities"))
+    expected_sites = union(parameter_names, Set(keys(observations)))
+    Set(site_order) == expected_sites || throw(ArgumentError(
+        "native PPL stochastic-site order must name each parameter/site " *
+        "exactly once; expected $(sort!(collect(expected_sites))), got " *
+        "$(collect(site_order))"))
 
     nothing
 end
 
 function model(;
-    inputs, parameters=(;), nodes=(;), observations, outputs=nothing)
+    inputs, parameters=(;), nodes=(;), observations, outputs=nothing,
+    site_order=_default_site_order(parameters, observations))
     _validate_model_components(
-        inputs, parameters, nodes, observations, outputs)
-    Model(inputs, parameters, nodes, observations, outputs)
+        inputs, parameters, nodes, observations, outputs, site_order)
+    Model(inputs, parameters, nodes, observations, outputs, site_order)
 end
 
 function _validate_model(declaration::Model)
     _validate_model_components(
         declaration.inputs, declaration.parameters,
-        declaration.nodes, declaration.observations, declaration.outputs)
+        declaration.nodes, declaration.observations, declaration.outputs,
+        declaration.site_order)
     declaration
 end
 
@@ -1000,6 +3228,7 @@ function Base.show(io::IO, declaration::Model)
           ", observations=", keys(declaration.observations))
     declaration.outputs === nothing ||
         print(io, ", outputs=", keys(declaration.outputs))
+    print(io, ", site_order=", declaration.site_order)
     print(io, ")")
 end
 
@@ -1334,6 +3563,8 @@ function _bind(declaration::Model, bindings, conditions)
     _validate_model(declaration)
     _validate_binding_names(declaration, bindings)
     _validate_condition_names(declaration, conditions)
+    _uses_factor_executor(declaration, conditions, bindings) &&
+        return _bind_factor_plan(declaration, bindings, conditions)
     length(declaration.observations) > 1 && length(conditions) == 1 &&
         return _bind_scalar_site_schedule(declaration, bindings, conditions)
     isempty(declaration.inputs) &&
@@ -1599,6 +3830,161 @@ compile(instance::ModelInstance) = bind(instance)
 prepare(instance::ModelInstance; kwargs...) =
     prepare(bind(instance); kwargs...)
 
+function _lower_brmi_scalar_factor_dag(brmi::BRM.BRMI, response::Symbol,
+                                       response_lhs, location::Symbol)
+    haskey(brmi.operations, location) || return nothing
+    _, location_rhs = BRM._native_ppl_sampling_rhs(brmi, location)
+    location_rhs isa BRM.ExprColumn &&
+        BRM.getf(location_rhs) === BRM.Normal || return nothing
+
+    parameter_names = Symbol[]
+    parameter_values = Any[]
+    deferred_standard_names = Symbol[]
+    deferred_standard_values = Any[]
+    observation_names = Symbol[]
+    observation_values = Any[]
+    site_order = Symbol[]
+
+    for name in keys(brmi.operations)
+        name isa Symbol || continue
+        lhs, rhs = BRM._native_ppl_sampling_rhs(brmi, name)
+        rhs isa BRM.ExprColumn || throw(CapabilityError(
+            :factor_dag,
+            "scalar factor-DAG operation `$name` must have a distribution RHS"))
+        isempty(BRM.getkwargs(rhs)) || throw(CapabilityError(
+            :factor_dag,
+            "scalar factor-DAG operation `$name` cannot have distribution keywords"))
+        family = BRM.getf(rhs)
+        arguments = BRM.getargs(rhs)
+        push!(site_order, name)
+
+        if name === response
+            family === BRM.Normal && length(arguments) == 2 || throw(
+                CapabilityError(
+                    :factor_dag,
+                    "scalar factor-DAG response `$response` must use Normal(location, scale)"))
+            location_name = BRM._native_ppl_ref_name(arguments[1])
+            scale_name = BRM._native_ppl_ref_name(arguments[2])
+            (location_name === nothing || scale_name === nothing) && throw(
+                CapabilityError(
+                    :factor_dag,
+                    "scalar factor-DAG response arguments must be named sites"))
+            push!(observation_names, name)
+            push!(observation_values, broadcasted(
+                normal(name, location_name, scale_name)))
+            continue
+        end
+
+        if family === BRM.Exponential
+            length(arguments) == 1 && only(arguments) isa Real || throw(
+                CapabilityError(
+                    :factor_dag,
+                    "Exponential site `$name` requires one literal scale"))
+            push!(parameter_names, name)
+            push!(parameter_values, parameter(
+                PositiveSupport(), (name,); transform=Exp(),
+                prior=Exponential(only(arguments))))
+        elseif family === BRM.Normal && isempty(arguments)
+            push!(deferred_standard_names, name)
+            push!(deferred_standard_values, parameter(
+                RealSupport(), (name,); transform=Identity(),
+                prior=StandardNormal()))
+        elseif family === BRM.Normal && length(arguments) == 2 &&
+               all(argument -> argument isa Real, arguments)
+            push!(parameter_names, name)
+            push!(parameter_values, parameter(
+                RealSupport(), (name,); transform=Identity(),
+                prior=normal_prior(arguments...)))
+        elseif family === BRM.Normal && length(arguments) == 2
+            location_name = BRM._native_ppl_ref_name(arguments[1])
+            scale_name = BRM._native_ppl_ref_name(arguments[2])
+            (location_name === nothing || scale_name === nothing) && throw(
+                CapabilityError(
+                    :factor_dag,
+                    "Normal site `$name` arguments must be literals or named sites"))
+            push!(observation_names, name)
+            push!(observation_values,
+                  normal(name, location_name, scale_name))
+        else
+            throw(CapabilityError(
+                :factor_dag,
+                "unsupported scalar factor `$family` for site `$name`"))
+        end
+    end
+
+    append!(parameter_names, deferred_standard_names)
+    append!(parameter_values, deferred_standard_values)
+    declaration = model(
+        inputs=(;),
+        parameters=_declaration_namedtuple(
+            Tuple(parameter_names), Tuple(parameter_values)),
+        nodes=(;),
+        observations=_declaration_namedtuple(
+            Tuple(observation_names), Tuple(observation_values)),
+        outputs=NamedTuple{(response,)}((response,)),
+        site_order=Tuple(site_order))
+    response_values = parent(parent(response_lhs))
+    conditions = NamedTuple{(response,)}((response_values,))
+    (; declaration, bindings=(;), conditions)
+end
+
+function _brmi_literal_normal_prior(brmi::BRM.BRMI, name::Symbol)
+    lhs, prior = BRM._native_ppl_sampling_rhs(brmi, name)
+    BRM._native_ppl_ref_name(lhs) === name || throw(CapabilityError(
+        :parameter_prior,
+        "sampled offset `$name` must have a bare left-hand side"))
+    prior isa BRM.ExprColumn && BRM.getf(prior) === BRM.Normal || throw(
+        CapabilityError(
+            :parameter_prior,
+            "sampled offset `$name` must use Normal(location, scale)"))
+    isempty(BRM.getkwargs(prior)) || throw(CapabilityError(
+        :parameter_prior,
+        "Normal prior for sampled offset `$name` cannot have keywords"))
+    arguments = BRM.getargs(prior)
+    length(arguments) == 2 && all(argument -> argument isa Real, arguments) ||
+        throw(CapabilityError(
+            :parameter_prior,
+            "sampled offset `$name` requires literal Normal(location, scale)"))
+    arguments[1] == 0 && arguments[2] == 1 ?
+        StandardNormal() : normal_prior(arguments...)
+end
+
+function _brmi_group_sd_prior(brmi::BRM.BRMI, id::Symbol)
+    matches = NamedTuple[]
+    for (operation_name, named) in pairs(brmi.operations)
+        operation = parent(named)
+        operation isa BRM.ExprColumn && BRM.getf(operation) === (~) || continue
+        lhs, prior = BRM.getargs(operation, 2)
+        lhs isa BRM.ExprColumn && BRM.getf(lhs) === BRM.effect || continue
+        address = BRM.getargs(lhs)
+        length(address) == 2 && address[1] === :sd && address[2] === id ||
+            continue
+        prior isa BRM.ExprColumn && BRM.getf(prior) === BRM.Exponential ||
+            throw(CapabilityError(
+                :group_prior,
+                "varying-intercept SD for `|$id|` must use Exponential(scale)"))
+        isempty(BRM.getkwargs(prior)) || throw(CapabilityError(
+            :group_prior,
+            "varying-intercept SD prior for `|$id|` cannot have keywords"))
+        arguments = BRM.getargs(prior)
+        length(arguments) == 1 && only(arguments) isa Real || throw(
+            CapabilityError(
+                :group_prior,
+                "varying-intercept SD prior for `|$id|` requires one " *
+                "literal scale"))
+        scale = only(arguments)
+        isfinite(scale) && scale > zero(scale) || throw(CapabilityError(
+            :group_prior,
+            "varying-intercept SD prior for `|$id|` must be positive"))
+        push!(matches, (; operation=operation_name, scale))
+    end
+    length(matches) == 1 || throw(CapabilityError(
+        :group_prior,
+        "varying-intercept `|$id|` requires exactly one block-wide " *
+        "`sd(:, $id) ~ Exponential(scale)` prior"))
+    only(matches)
+end
+
 function _lower_brmi(brmi::BRM.BRMI)
     observed = BRM.outcomes(brmi)
     length(observed) == 1 || throw(CapabilityError(
@@ -1664,14 +4050,58 @@ function _lower_brmi(brmi::BRM.BRMI)
             :likelihood_scale,
             "Normal scale must be one named scalar parameter"))
 
-    predictor_terms = BRM._native_ppl_affine_predictors(brmi, location)
+    if family === BRM.Normal
+        factor_dag = _lower_brmi_scalar_factor_dag(
+            brmi, response, response_lhs, location)
+        factor_dag === nothing || return factor_dag
+    end
+
+    affine_components = BRM._native_ppl_affine_components(brmi, location)
+    predictor_terms = affine_components.predictors
+    sampled_offsets = affine_components.offsets
+    varying_groups = affine_components.groups
+    has_intercept = affine_components.intercept
+    (!isempty(sampled_offsets) || !isempty(varying_groups)) &&
+        family !== BRM.Normal && throw(
+        CapabilityError(
+            :predictor_offset,
+            "the first sampled-offset/grouped native-PPL slice supports " *
+            "Normal responses"))
+    isempty(sampled_offsets) && isempty(varying_groups) && !has_intercept &&
+        throw(CapabilityError(
+        :predictor_terms,
+        "the current native-PPL no-intercept affine slice requires a " *
+        "sampled scalar offset or varying intercept"))
     predictor_columns = map(term -> term.column, predictor_terms)
     predictor_names = map(BRM.name, predictor_columns)
+    group_names = map(varying_groups) do varying
+        BRM.name(varying.group)
+    end
+    !isempty(varying_groups) && isempty(predictor_names) && throw(
+        CapabilityError(
+            :predictor_terms,
+            "the first grouped native-PPL slice requires at least one " *
+            "ordinary population predictor"))
+    length(unique(group_names)) == length(group_names) || throw(
+        CapabilityError(
+            :group_term,
+            "varying-intercept grouping inputs must be unique"))
     response in predictor_names && throw(CapabilityError(
         :input_roles,
         "predictor `$response` is also the observed response"))
     predictors = map(column -> parent(parent(column)), predictor_columns)
+    groups = map(varying_groups) do varying
+        parent(parent(varying.group))
+    end
     response_values = parent(parent(response_lhs))
+
+    group_specs = map(varying_groups, group_names) do varying, group_name
+        prior = _brmi_group_sd_prior(brmi, varying.id)
+        (; id=varying.id, group_name, prior,
+           scale_name=Symbol(:tau_, varying.id, :_, group_name),
+           site_name=Symbol(:b_, varying.id, :_, group_name),
+           gather_name=Symbol(:r_, location, :_, varying.id, :_, group_name))
+    end
 
     scalar_location = isempty(predictor_names)
     intercept_prior = scalar_location ?
@@ -1681,8 +4111,13 @@ function _lower_brmi(brmi::BRM.BRMI)
     prior_scale = family === BRM.Normal ?
         BRM._native_ppl_exponential_prior(brmi, scale_name) : nothing
     expected_values = family === BRM.Normal ?
-        Set((location, scale_name, response, predictor_names...)) :
-        Set((location, response, predictor_names...))
+        Set((location, scale_name, response, predictor_names...,
+             sampled_offsets..., group_names...)) :
+        Set((location, response, predictor_names..., sampled_offsets...,
+             group_names...))
+    for spec in group_specs
+        push!(expected_values, spec.prior.operation)
+    end
     intercept_prior.operation === nothing ||
         push!(expected_values, intercept_prior.operation)
     extras = setdiff(Set(keys(brmi.operations)), expected_values)
@@ -1691,15 +4126,18 @@ function _lower_brmi(brmi::BRM.BRMI)
         "unsupported formula operations: " *
         join(sort!(collect(extras)), ", ")))
 
+    input_names = (predictor_names..., group_names...)
     input_declarations = _declaration_namedtuple(
-        predictor_names, map(_ -> input(), predictor_names))
+        input_names, map(_ -> input(), input_names))
     scalar_location && family !== BRM.Normal && throw(CapabilityError(
         :likelihood,
         "the first intercept-only BRM native-PPL slice supports Normal"))
     coefficient_name = scalar_location ? location : Symbol(:beta_, location)
+    coefficient_keys = has_intercept ?
+        (:Intercept, predictor_names...) : Tuple(predictor_names)
     coefficient_declaration = parameter(
         RealSupport(),
-        scalar_location ? (location,) : (:Intercept, predictor_names...);
+        scalar_location ? (location,) : coefficient_keys;
         transform=Identity(),
         prior=intercept_prior.operation === nothing ? StandardNormal() :
             normal_prior(intercept_prior.location, intercept_prior.scale))
@@ -1707,8 +4145,33 @@ function _lower_brmi(brmi::BRM.BRMI)
         scale_declaration = parameter(
             PositiveSupport(), (scale_name,);
             transform=Exp(), prior=Exponential(prior_scale))
-        NamedTuple{(coefficient_name, scale_name)}(
-            (coefficient_declaration, scale_declaration))
+        offset_declarations = map(
+            name -> parameter(
+                RealSupport(), (name,); transform=Identity(),
+                prior=_brmi_literal_normal_prior(brmi, name)),
+            sampled_offsets)
+        group_scale_declarations = map(group_specs) do spec
+            parameter(
+                PositiveSupport(), (spec.scale_name,);
+                transform=Exp(), prior=Exponential(spec.prior.scale))
+        end
+        group_site_declarations = map(group_specs) do spec
+            grouped_normal(
+                spec.group_name, 0.0, spec.scale_name)
+        end
+        group_parameter_names = Tuple(spec.scale_name for spec in group_specs)
+        group_site_names = Tuple(spec.site_name for spec in group_specs)
+        group_pair_names = foldl(
+            (names, pair) -> (names..., pair...),
+            zip(group_parameter_names, group_site_names); init=())
+        group_pair_declarations = foldl(
+            (declarations, pair) -> (declarations..., pair...),
+            zip(group_scale_declarations, group_site_declarations); init=())
+        _declaration_namedtuple(
+            (coefficient_name, group_pair_names..., scale_name,
+             sampled_offsets...),
+            (coefficient_declaration, group_pair_declarations...,
+             scale_declaration, offset_declarations...))
     else
         NamedTuple{(coefficient_name,)}((coefficient_declaration,))
     end
@@ -1726,10 +4189,16 @@ function _lower_brmi(brmi::BRM.BRMI)
         push!(transform_declarations, transform_declaration)
         transform_name
     end
-    node_names = scalar_location ? () : (Tuple(transform_names)..., location)
+    gather_names = Tuple(spec.gather_name for spec in group_specs)
+    gather_declarations = Tuple(
+        group_gather(spec.site_name, spec.group_name) for spec in group_specs)
+    affine_offsets = (sampled_offsets..., gather_names...)
+    node_names = scalar_location ? () : (
+        gather_names..., Tuple(transform_names)..., location)
     node_values = scalar_location ? () : (
-        Tuple(transform_declarations)...,
-        affine(Tuple(affine_inputs), coefficient_name))
+        gather_declarations..., Tuple(transform_declarations)...,
+        affine(Tuple(affine_inputs), coefficient_name;
+               offsets=affine_offsets, intercept=has_intercept))
     node_declarations = _declaration_namedtuple(node_names, node_values)
 
     observation_declaration = if family === BRM.Normal
@@ -1744,12 +4213,27 @@ function _lower_brmi(brmi::BRM.BRMI)
     end
     observation_declarations = NamedTuple{(response,)}(
         (broadcasted(observation_declaration),))
-    declaration = model(
-        inputs=input_declarations,
-        parameters=parameter_declarations,
-        nodes=node_declarations,
-        observations=observation_declarations)
-    bindings = _declaration_namedtuple(predictor_names, predictors)
+    declaration = if isempty(sampled_offsets) && isempty(group_specs)
+        model(
+            inputs=input_declarations,
+            parameters=parameter_declarations,
+            nodes=node_declarations,
+            observations=observation_declarations)
+    else
+        group_site_order = Tuple(
+            Iterators.flatten((
+                (spec.scale_name, spec.site_name) for spec in group_specs)))
+        model(
+            inputs=input_declarations,
+            parameters=parameter_declarations,
+            nodes=node_declarations,
+            observations=observation_declarations,
+            site_order=(sampled_offsets..., group_site_order...,
+                        coefficient_name,
+                        scale_name, response))
+    end
+    bindings = _declaration_namedtuple(
+        input_names, (predictors..., groups...))
     conditions = NamedTuple{(response,)}((response_values,))
     (; declaration, bindings, conditions)
 end
@@ -1762,6 +4246,8 @@ function compile(brmi::BRM.BRMI)
     bind(lowered.declaration, lowered.bindings;
          conditions=lowered.conditions)
 end
+
+prepare(brmi::BRM.BRMI; kwargs...) = prepare(compile(brmi); kwargs...)
 
 _declaration_namedtuple(names::Tuple, values::Tuple) =
     NamedTuple{names}(values)
@@ -1885,6 +4371,31 @@ function _syntax_parameter(statement, argument_names::Set{Symbol})
         "native PPL @model unsupported parameter prior `$prior_name`"))
 end
 
+function _syntax_grouped_parameter(sampling,
+                                   argument_names::Set{Symbol})
+    sampling.broadcasted && return nothing
+    lhs = sampling.lhs
+    lhs isa Expr && lhs.head === :ref && length(lhs.args) == 2 &&
+        first(lhs.args) isa Symbol && lhs.args[2] isa Symbol || return nothing
+    name, group = lhs.args
+    group in argument_names || throw(ArgumentError(
+        "native PPL @model grouped site `$name` must index one function " *
+        "argument; got `$group`"))
+    family, arguments = _syntax_distribution_call(
+        sampling.rhs, "grouped parameter prior")
+    family === :Normal && length(arguments) == 2 || throw(ArgumentError(
+        "native PPL @model grouped site `$name` requires Normal(location, scale)"))
+    location, scale = arguments
+    location isa Real || throw(ArgumentError(
+        "native PPL @model grouped Normal location must be literal"))
+    scale isa Union{Real,Symbol} || throw(ArgumentError(
+        "native PPL @model grouped Normal scale must be literal or named"))
+    value = Expr(
+        :call, _syntax_ref(:grouped_normal), QuoteNode(group),
+        location, scale isa Symbol ? QuoteNode(scale) : scale)
+    (; name, group, value)
+end
+
 function _syntax_node(statement)
     lhs, rhs = statement.args
     lhs isa Symbol || throw(ArgumentError(
@@ -1958,23 +4469,64 @@ function _syntax_affine_terms(expression)
 end
 
 function _syntax_affine_assignment(statement,
-                                   scalar_priors::Set{Symbol})
+                                   scalar_priors::Set{Symbol},
+                                   grouped_sites::Dict{Symbol,Symbol})
     lhs, rhs = statement.args
     lhs isa Symbol || return nothing
     terms = _syntax_affine_terms(rhs)
     terms === nothing && return nothing
     length(terms) >= 2 || return nothing
-    intercepts = [term for term in terms
+    sampled_offsets = Symbol[]
+    gathered_offsets = NamedTuple[]
+    ordinary_terms = Any[]
+    for term in terms
+        if term isa Expr && term.head === :call &&
+           _syntax_name(first(term.args)) === :offset
+            _, arguments = _syntax_call(term, "affine sampled offset")
+            length(arguments) == 1 && only(arguments) isa Symbol || throw(
+                ArgumentError(
+                    "native PPL @model offset needs one named scalar site"))
+            offset_name = only(arguments)
+            offset_name in scalar_priors || throw(ArgumentError(
+                "native PPL @model affine offset `$offset_name` must name " *
+                "a preceding standard-normal scalar site"))
+            push!(sampled_offsets, offset_name)
+        elseif term isa Expr && term.head === :ref &&
+               length(term.args) == 2 && first(term.args) isa Symbol &&
+               term.args[2] isa Symbol &&
+               haskey(grouped_sites, first(term.args))
+            site_name, group_name = term.args
+            grouped_sites[site_name] === group_name || throw(ArgumentError(
+                "native PPL @model grouped site `$site_name` must be " *
+                "gathered with its declared group input"))
+            gather_name = Symbol(
+                site_name, :_by_, group_name, :_for_, lhs)
+            push!(gathered_offsets, (; site_name, group_name, gather_name))
+        else
+            push!(ordinary_terms, term)
+        end
+    end
+    length(unique(sampled_offsets)) == length(sampled_offsets) || throw(
+        ArgumentError(
+            "native PPL @model affine offsets must be used once each"))
+    gathered_site_names = Tuple(
+        gather.site_name for gather in gathered_offsets)
+    length(unique(gathered_site_names)) == length(gathered_site_names) ||
+        throw(ArgumentError(
+            "native PPL @model grouped offsets must be used once each"))
+    intercepts = [term for term in ordinary_terms
                   if term isa Symbol && term in scalar_priors]
-    length(intercepts) == 1 || return nothing
-    intercept = only(intercepts)
+    length(intercepts) <= 1 || return nothing
+    intercept = isempty(intercepts) ? nothing : only(intercepts)
+    intercept === nothing && isempty(sampled_offsets) &&
+        isempty(gathered_offsets) && return nothing
 
     slopes = Symbol[]
     predictor_names = Symbol[]
     raw_predictor_names = Symbol[]
     transform_names = Symbol[]
     transform_values = Any[]
-    for product in terms
+    for product in ordinary_terms
         product === intercept && continue
         product isa Expr && product.head === :call &&
             first(product.args) in (:*, :.*) && length(product.args) == 3 ||
@@ -2026,17 +4578,32 @@ function _syntax_affine_assignment(statement,
             "native PPL @model affine features must use distinct raw inputs"))
 
     coefficient_name = Symbol(:beta_, lhs)
+    coefficient_keys = intercept === nothing ?
+        Tuple(slopes) : (intercept, slopes...)
     parameter_value = Expr(
         :call, _syntax_ref(:parameter),
         Expr(:parameters,
              Expr(:kw, :transform, Expr(:call, _syntax_ref(:Identity))),
              Expr(:kw, :prior, Expr(:call, _syntax_ref(:StandardNormal)))),
         Expr(:call, _syntax_ref(:RealSupport)),
-        QuoteNode((intercept, slopes...)))
+        QuoteNode(coefficient_keys))
     affine_value = Expr(
-        :call, _syntax_ref(:affine), QuoteNode(Tuple(predictor_names)),
+        :call, _syntax_ref(:affine),
+        Expr(:parameters,
+             Expr(:kw, :offsets, QuoteNode((
+                 sampled_offsets...,
+                 (gather.gather_name for gather in gathered_offsets)...))),
+             Expr(:kw, :intercept, intercept !== nothing)),
+        QuoteNode(Tuple(predictor_names)),
         QuoteNode(coefficient_name))
-    (; location=lhs, intercept, slopes=Tuple(slopes), coefficient_name,
+    gather_names = Tuple(gather.gather_name for gather in gathered_offsets)
+    gather_values = Tuple(Expr(
+        :call, _syntax_ref(:group_gather),
+        QuoteNode(gather.site_name), QuoteNode(gather.group_name))
+        for gather in gathered_offsets)
+    (; location=lhs, intercept, offsets=Tuple(sampled_offsets),
+       gather_names, gather_values,
+       slopes=Tuple(slopes), coefficient_name,
        parameter_value, transform_names=Tuple(transform_names),
        transform_values=Tuple(transform_values), affine_value)
 end
@@ -2244,12 +4811,15 @@ function _model_function_syntax(definition)
     parameter_names = Symbol[]
     parameter_values = Any[]
     scalar_prior_names = Symbol[]
+    grouped_sites = Dict{Symbol,Symbol}()
     consumed_scalar_priors = Set{Symbol}()
     node_names = Symbol[]
     node_values = Any[]
     observation_names = Symbol[]
     observation_values = Any[]
     factor_dependency_names = Set{Symbol}()
+    source_site_names = Symbol[]
+    packed_site_names = Dict{Symbol,Symbol}()
     statements = body isa Expr && body.head === :block ? body.args : Any[body]
     statements = Any[statement for statement in statements
                      if !(statement isa LineNumberNode)]
@@ -2284,6 +4854,24 @@ function _model_function_syntax(definition)
                     "cannot also be a function argument; condition it after " *
                     "constructing the model"))
             normalized = Expr(:call, :~, sampling.lhs, sampling.rhs)
+            source_site_name = sampling.lhs isa Symbol ? sampling.lhs :
+                (sampling.lhs isa Expr && sampling.lhs.head === :ref &&
+                 first(sampling.lhs.args) isa Symbol ?
+                 first(sampling.lhs.args) : nothing)
+            source_site_name === nothing || push!(
+                source_site_names, source_site_name)
+            grouped_parameter = _syntax_grouped_parameter(
+                sampling, argument_name_set)
+            if grouped_parameter !== nothing
+                haskey(grouped_sites, grouped_parameter.name) && throw(
+                    ArgumentError(
+                        "native PPL @model grouped site " *
+                        "`$(grouped_parameter.name)` is declared twice"))
+                push!(parameter_names, grouped_parameter.name)
+                push!(parameter_values, grouped_parameter.value)
+                grouped_sites[grouped_parameter.name] = grouped_parameter.group
+                continue
+            end
             scalar_prior = sampling.broadcasted ? nothing :
                 _syntax_standard_normal(normalized)
             prior_name = _syntax_name(
@@ -2315,7 +4903,7 @@ function _model_function_syntax(definition)
             end
         elseif statement isa Expr && statement.head === :(=)
             affine_declaration = _syntax_affine_assignment(
-                statement, Set(scalar_prior_names))
+                statement, Set(scalar_prior_names), grouped_sites)
             if affine_declaration === nothing
                 name, value = _syntax_node(statement)
                 push!(node_names, name)
@@ -2334,10 +4922,31 @@ function _model_function_syntax(definition)
                     push!(node_names, transform_name)
                     push!(node_values, transform_value)
                 end
+                for (gather_name, gather_value) in zip(
+                    affine_declaration.gather_names,
+                    affine_declaration.gather_values)
+                    push!(node_names, gather_name)
+                    push!(node_values, gather_value)
+                end
                 push!(node_names, affine_declaration.location)
                 push!(node_values, affine_declaration.affine_value)
-                push!(consumed_scalar_priors, affine_declaration.intercept)
+                if affine_declaration.intercept !== nothing
+                    packed_site_names[affine_declaration.intercept] =
+                        affine_declaration.coefficient_name
+                    push!(consumed_scalar_priors,
+                          affine_declaration.intercept)
+                end
+                for slope in affine_declaration.slopes
+                    packed_site_names[slope] =
+                        affine_declaration.coefficient_name
+                end
                 union!(consumed_scalar_priors, affine_declaration.slopes)
+                for offset_name in affine_declaration.offsets
+                    push!(parameter_names, offset_name)
+                    push!(parameter_values,
+                          _syntax_scalar_standard_normal_parameter(offset_name))
+                    push!(consumed_scalar_priors, offset_name)
+                end
             end
         else
             throw(ArgumentError(
@@ -2373,6 +4982,17 @@ function _model_function_syntax(definition)
             "native PPL @model generated duplicate parameter identities"))
     length(unique(node_names)) == length(node_names) || throw(ArgumentError(
         "native PPL @model generated duplicate node identities"))
+    site_names = Set((parameter_names..., observation_names...))
+    source_site_order = Symbol[]
+    for source_name in source_site_names
+        canonical_name = get(packed_site_names, source_name, source_name)
+        canonical_name in site_names || continue
+        canonical_name in source_site_order || push!(
+            source_site_order, canonical_name)
+    end
+    for name in (parameter_names..., observation_names...)
+        name in source_site_order || push!(source_site_order, name)
+    end
     explicit_outputs === nothing && isempty(observation_names) &&
         throw(ArgumentError(
             "native PPL @model without an explicit return requires at least " *
@@ -2390,6 +5010,7 @@ function _model_function_syntax(definition)
              _syntax_namedtuple(node_names, node_values)),
         Expr(:kw, :observations,
              _syntax_namedtuple(observation_names, observation_values)),
+        Expr(:kw, :site_order, QuoteNode(Tuple(source_site_order))),
     ]
     if explicit_outputs !== nothing
         output_aliases, output_names = explicit_outputs
@@ -2431,14 +5052,28 @@ macro model(definition)
 end
 
 export Model, ModelInstance, GraphRef, Component, Composition, Input, Parameter
+export AbstractParameterDeclaration, GroupedNormalParameter
+export SiteValue, InputValue, NodeValue, LiteralValue, StochasticSite
+export SiteCoordinates, GroupCoordinateKey
+export FactorGraph
+export CenterFactorNode, ZScaleFactorNode, AffineFactorNode, ExpFactorNode
+export GroupGatherFactorNode
+export FactorPlan, FactorPrepared, FactorWorkspace, FactorLogDensityProblem
+export StandardNormalSiteFactor, NormalSiteFactor, ExponentialSiteFactor
+export BernoulliLogitSiteFactor, PoissonSiteFactor
+export ScalarSiteShape, BlockSiteShape, BroadcastSiteShape
+export FreeSite, ConditionedSite, GeneratedSite
 export RealSupport, PositiveSupport, IdentityTransform, ExpTransform
 export StandardNormal, NormalPrior, ExponentialPrior
-export Center, ZScale, Affine, ExpLink
+export Center, ZScale, Affine, ExpLink, GroupGather
 export NormalObservation, BernoulliLogitObservation, PoissonObservation
 export BroadcastObservation
 export model, input, parameter, Identity, Exp, normal_prior, Exponential
 export center, zscale, standardize, affine, exp_link
+export grouped_normal, group_gather, group_values, group_input
 export normal, bernoulli_logit, poisson, broadcasted
 export instantiate, substitute, condition, component, output, compose, bind, lower
+export factor_graph, site_factor_dependencies, factor_node_dependencies
+export site_value_name, input_value_name, node_value_name
 export graph_namespace, graph_name, graph_kind, component_namespace, qualified_name
 export @model
