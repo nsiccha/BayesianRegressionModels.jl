@@ -328,6 +328,11 @@ NP.@model function named_scalar_normal_priors()
     return (; intercept, slope)
 end
 
+NP.@model function scalar_normal_likelihood(mu)
+    sigma ~ Exponential(2.0)
+    @. y ~ Normal(mu, sigma)
+end
+
 NP.@model function macro_bernoulli_center(
     x::AbstractVector{<:Real})
     intercept ~ Normal()
@@ -2351,16 +2356,15 @@ end
           bindings.x === parameter
     @test stochastic_composition.components.stochastic_sink.instance.
           bindings.x === stochastic
-    @test capability_error(
-        () -> NP.compile(parameter_composition)).capability ==
-          :active_graph_connection
-    @test capability_error(
-        () -> NP.compile(stochastic_composition)).capability ==
-          :active_graph_connection
-
-    err = capability_error(() -> NP.compile(composition))
-    @test err.capability == :active_graph_connection
-    @test occursin("source.mu", err.detail)
+    active_lowered = NP.lower(composition)
+    sink_location_name = NP.qualified_name(:sink, :mu)
+    @test !hasproperty(
+        active_lowered.declaration.inputs,
+        NP.qualified_name(:sink, :x))
+    @test NP.node_inputs(
+        getproperty(active_lowered.declaration.nodes, sink_location_name)) ==
+          (NP.qualified_name(:source, :mu),)
+    @test capability_error(() -> NP.compile(composition)).capability == :outcomes
 
     @test_throws ArgumentError NP.compose(sink, source)
     @test_throws ArgumentError NP.compose()
@@ -2455,6 +2459,28 @@ end
     aliased_composed = NP.prepare(NP.compose(
         aliased_preprocessing, aliased_regression))
     @test only(values(aliased_composed.predictors)) == direct.predictor
+
+    scalar_prior_component = NP.component(:prior, scalar_normal_prior())
+    theta = NP.output(scalar_prior_component, :theta)
+    scalar_likelihood_component = NP.component(
+        :likelihood,
+        NP.condition(scalar_normal_likelihood(theta); y=response))
+    active_scalar = NP.compose(
+        scalar_prior_component, scalar_likelihood_component)
+    active_scalar_lowered = NP.lower(active_scalar)
+    theta_name = NP.qualified_name(:prior, :theta)
+    sigma_name = NP.qualified_name(:likelihood, :sigma)
+    scalar_response_name = NP.qualified_name(:likelihood, :y)
+    @test isempty(active_scalar_lowered.declaration.inputs)
+    @test keys(active_scalar_lowered.declaration.parameters) ==
+          (theta_name, sigma_name)
+    @test NP.observation_dependencies(getproperty(
+        active_scalar_lowered.declaration.observations,
+        scalar_response_name)) == (theta_name, sigma_name)
+    @test isempty(active_scalar_lowered.bindings)
+    @test keys(active_scalar_lowered.conditions) == (scalar_response_name,)
+    @test capability_error(() -> NP.compile(active_scalar)).capability ==
+          :value_ports
 end
 
 

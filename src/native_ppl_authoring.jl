@@ -534,14 +534,7 @@ function _lower_composition(composition::Composition)
             if hasproperty(instance.bindings, name)
                 value = getproperty(instance.bindings, name)
                 if value isa GraphRef
-                    _reference_active(value, components, activity) && throw(
-                        CapabilityError(
-                            :active_graph_connection,
-                            "component `$namespace` port `$name` consumes active " *
-                            "`$(graph_kind(value))` output " *
-                            "`$(graph_namespace(value)).$(graph_name(value))`; " *
-                            "latent-coordinate activity lowering is not in the " *
-                            "current composition compiler"))
+                    _reference_active(value, components, activity)
                     mapping[name] = _resolved_reference(value, resolved)
                     resolved[(namespace, name)] = mapping[name]
                     continue
