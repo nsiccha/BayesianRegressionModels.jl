@@ -431,6 +431,14 @@ NP.@model function deterministic_scale_factor_graph(unit_scale)
     return y
 end
 
+NP.@model function natural_sampled_offset_regression(x)
+    latent ~ Normal()
+    beta ~ Normal()
+    sigma ~ Exponential(2)
+    mu = beta * x + offset(latent)
+    @. y ~ Normal(mu, sigma)
+end
+
 NP.@model function monolithic_scalar_normal()
     theta ~ Normal()
     sigma ~ Exponential(2.0)
@@ -3426,21 +3434,29 @@ end
     direct_sampled_offset_model = NP.model(
         inputs=(; x=NP.input()),
         parameters=(;
-            latent=NP.parameter(
-                NP.RealSupport(), (:latent,); transform=NP.Identity(),
-                prior=NP.normal_prior(0, 1)),
             beta_mu=NP.parameter(
                 NP.RealSupport(), (:x,); transform=NP.Identity(),
                 prior=NP.StandardNormal()),
             sigma=NP.parameter(
                 NP.PositiveSupport(), (:sigma,); transform=NP.Exp(),
-                prior=NP.Exponential(2))),
+                prior=NP.Exponential(2)),
+            latent=NP.parameter(
+                NP.RealSupport(), (:latent,); transform=NP.Identity(),
+                prior=NP.StandardNormal())),
         nodes=(; mu=NP.affine(
             :x, :beta_mu; offsets=(:latent,), intercept=false)),
-        observations=(; y=NP.broadcasted(NP.normal(:y, :mu, :sigma))))
+        observations=(; y=NP.broadcasted(NP.normal(:y, :mu, :sigma))),
+        site_order=(:latent, :beta_mu, :sigma, :y))
     @test typeof(sampled_offset_model) === typeof(direct_sampled_offset_model)
     @test sprint(show, sampled_offset_model) ==
           sprint(show, direct_sampled_offset_model)
+    natural_sampled_offset = NP.condition(
+        natural_sampled_offset_regression(sampled_offset_data.x);
+        y=sampled_offset_data.y)
+    @test typeof(natural_sampled_offset.declaration) ===
+          typeof(sampled_offset_model)
+    @test sprint(show, natural_sampled_offset.declaration) ==
+          sprint(show, sampled_offset_model)
     @test SBBRMI(sampled_offset_brmi; mod=@__MODULE__) isa SBBRMI
     sampled_offset_graph = NP.factor_graph(
         sampled_offset_model; conditions=(; y=sampled_offset_data.y))
@@ -3457,6 +3473,14 @@ end
     sampled_offset_plan = NP.compile(sampled_offset_brmi)
     @test sampled_offset_plan isa NP.FactorPlan
     @test sampled_offset_plan.bindings.x == sampled_offset_data.x
+    natural_sampled_offset_plan = NP.compile(natural_sampled_offset)
+    direct_sampled_offset_plan = NP.compile(
+        direct_sampled_offset_model, (; x=sampled_offset_data.x);
+        conditions=(; y=sampled_offset_data.y))
+    @test natural_sampled_offset_plan.graph.schedule ==
+          sampled_offset_plan.graph.schedule
+    @test direct_sampled_offset_plan.graph.schedule ==
+          sampled_offset_plan.graph.schedule
     sampled_offset_prepared = NP.prepare(sampled_offset_plan)
     sampled_offset_workspace = NP.workspace(
         sampled_offset_prepared, Float64, DI.AutoEnzyme())
@@ -3518,6 +3542,24 @@ end
     @test NP.logdensity!(
         sampled_offset_owned_workspace, sampled_offset_owned,
         sampled_offset_position) == sampled_offset_owned_density
+    for candidate_plan in (
+        natural_sampled_offset_plan, direct_sampled_offset_plan)
+        candidate_prepared = NP.prepare(candidate_plan)
+        candidate_workspace = NP.workspace(
+            candidate_prepared, Float64, DI.AutoEnzyme())
+        candidate_density, candidate_gradient = NP.logdensity_and_gradient!(
+            candidate_workspace, candidate_prepared,
+            sampled_offset_position)
+        @test candidate_density ≈ sampled_offset_density
+        @test candidate_gradient ≈ sampled_offset_gradient
+        @test NP.evaluate(
+            candidate_workspace, candidate_prepared,
+            sampled_offset_position, NP.LinearPredictor()) ≈
+              sampled_offset_mu
+        @test factor_steady_state_allocations(
+            candidate_workspace, candidate_prepared,
+            sampled_offset_position) == (; primal=0, gradient=0)
+    end
     sampled_offset_prediction_only = NP.rebind(
         sampled_offset_prepared, (;))
     @test !NP.has_response(sampled_offset_prediction_only)

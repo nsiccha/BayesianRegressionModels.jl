@@ -2039,7 +2039,11 @@ function _qualified_node(namespace::Symbol, declaration::Affine, mapping)
     coefficients = _mapped_name(
         mapping, affine_parameter(declaration), namespace,
         "affine coefficient")
-    affine(inputs, coefficients)
+    offsets = Tuple(_mapped_name(
+        mapping, name, namespace, "affine offset")
+        for name in affine_offsets(declaration))
+    affine(inputs, coefficients;
+           offsets, intercept=affine_has_intercept(declaration))
 end
 
 
@@ -2460,7 +2464,8 @@ function _validate_model_components(
     available = union(input_names, parameter_names, observation_names)
     for (name, declaration) in pairs(nodes)
         dependencies = declaration isa Affine ?
-            node_inputs(declaration) : (node_input(declaration),)
+            (node_inputs(declaration)..., affine_offsets(declaration)...) :
+            (node_input(declaration),)
         for dependency in dependencies
             dependency in available || throw(ArgumentError(
                 "native PPL node `$name` references unavailable value " *
@@ -3350,7 +3355,8 @@ function _brmi_literal_normal_prior(brmi::BRM.BRMI, name::Symbol)
         throw(CapabilityError(
             :parameter_prior,
             "sampled offset `$name` requires literal Normal(location, scale)"))
-    normal_prior(arguments...)
+    arguments[1] == 0 && arguments[2] == 1 ?
+        StandardNormal() : normal_prior(arguments...)
 end
 
 function _lower_brmi(brmi::BRM.BRMI)
@@ -3428,6 +3434,10 @@ function _lower_brmi(brmi::BRM.BRMI)
     predictor_terms = affine_components.predictors
     sampled_offsets = affine_components.offsets
     has_intercept = affine_components.intercept
+    !isempty(sampled_offsets) && family !== BRM.Normal && throw(
+        CapabilityError(
+            :predictor_offset,
+            "the first sampled-offset native-PPL slice supports Normal responses"))
     isempty(sampled_offsets) && !has_intercept && throw(CapabilityError(
         :predictor_terms,
         "the current native-PPL no-intercept affine slice requires a " *
@@ -3483,9 +3493,9 @@ function _lower_brmi(brmi::BRM.BRMI)
                 prior=_brmi_literal_normal_prior(brmi, name)),
             sampled_offsets)
         _declaration_namedtuple(
-            (sampled_offsets..., coefficient_name, scale_name),
-            (offset_declarations..., coefficient_declaration,
-             scale_declaration))
+            (coefficient_name, scale_name, sampled_offsets...),
+            (coefficient_declaration, scale_declaration,
+             offset_declarations...))
     else
         NamedTuple{(coefficient_name,)}((coefficient_declaration,))
     end
@@ -3522,11 +3532,21 @@ function _lower_brmi(brmi::BRM.BRMI)
     end
     observation_declarations = NamedTuple{(response,)}(
         (broadcasted(observation_declaration),))
-    declaration = model(
-        inputs=input_declarations,
-        parameters=parameter_declarations,
-        nodes=node_declarations,
-        observations=observation_declarations)
+    declaration = if isempty(sampled_offsets)
+        model(
+            inputs=input_declarations,
+            parameters=parameter_declarations,
+            nodes=node_declarations,
+            observations=observation_declarations)
+    else
+        model(
+            inputs=input_declarations,
+            parameters=parameter_declarations,
+            nodes=node_declarations,
+            observations=observation_declarations,
+            site_order=(sampled_offsets..., coefficient_name,
+                        scale_name, response))
+    end
     bindings = _declaration_namedtuple(predictor_names, predictors)
     conditions = NamedTuple{(response,)}((response_values,))
     (; declaration, bindings, conditions)
@@ -3744,17 +3764,39 @@ function _syntax_affine_assignment(statement,
     terms = _syntax_affine_terms(rhs)
     terms === nothing && return nothing
     length(terms) >= 2 || return nothing
-    intercepts = [term for term in terms
+    sampled_offsets = Symbol[]
+    ordinary_terms = Any[]
+    for term in terms
+        if term isa Expr && term.head === :call &&
+           _syntax_name(first(term.args)) === :offset
+            _, arguments = _syntax_call(term, "affine sampled offset")
+            length(arguments) == 1 && only(arguments) isa Symbol || throw(
+                ArgumentError(
+                    "native PPL @model offset needs one named scalar site"))
+            offset_name = only(arguments)
+            offset_name in scalar_priors || throw(ArgumentError(
+                "native PPL @model affine offset `$offset_name` must name " *
+                "a preceding standard-normal scalar site"))
+            push!(sampled_offsets, offset_name)
+        else
+            push!(ordinary_terms, term)
+        end
+    end
+    length(unique(sampled_offsets)) == length(sampled_offsets) || throw(
+        ArgumentError(
+            "native PPL @model affine offsets must be used once each"))
+    intercepts = [term for term in ordinary_terms
                   if term isa Symbol && term in scalar_priors]
-    length(intercepts) == 1 || return nothing
-    intercept = only(intercepts)
+    length(intercepts) <= 1 || return nothing
+    intercept = isempty(intercepts) ? nothing : only(intercepts)
+    intercept === nothing && isempty(sampled_offsets) && return nothing
 
     slopes = Symbol[]
     predictor_names = Symbol[]
     raw_predictor_names = Symbol[]
     transform_names = Symbol[]
     transform_values = Any[]
-    for product in terms
+    for product in ordinary_terms
         product === intercept && continue
         product isa Expr && product.head === :call &&
             first(product.args) in (:*, :.*) && length(product.args) == 3 ||
@@ -3806,17 +3848,24 @@ function _syntax_affine_assignment(statement,
             "native PPL @model affine features must use distinct raw inputs"))
 
     coefficient_name = Symbol(:beta_, lhs)
+    coefficient_keys = intercept === nothing ?
+        Tuple(slopes) : (intercept, slopes...)
     parameter_value = Expr(
         :call, _syntax_ref(:parameter),
         Expr(:parameters,
              Expr(:kw, :transform, Expr(:call, _syntax_ref(:Identity))),
              Expr(:kw, :prior, Expr(:call, _syntax_ref(:StandardNormal)))),
         Expr(:call, _syntax_ref(:RealSupport)),
-        QuoteNode((intercept, slopes...)))
+        QuoteNode(coefficient_keys))
     affine_value = Expr(
-        :call, _syntax_ref(:affine), QuoteNode(Tuple(predictor_names)),
+        :call, _syntax_ref(:affine),
+        Expr(:parameters,
+             Expr(:kw, :offsets, QuoteNode(Tuple(sampled_offsets))),
+             Expr(:kw, :intercept, intercept !== nothing)),
+        QuoteNode(Tuple(predictor_names)),
         QuoteNode(coefficient_name))
-    (; location=lhs, intercept, slopes=Tuple(slopes), coefficient_name,
+    (; location=lhs, intercept, offsets=Tuple(sampled_offsets),
+       slopes=Tuple(slopes), coefficient_name,
        parameter_value, transform_names=Tuple(transform_names),
        transform_values=Tuple(transform_values), affine_value)
 end
@@ -4124,14 +4173,23 @@ function _model_function_syntax(definition)
                 end
                 push!(node_names, affine_declaration.location)
                 push!(node_values, affine_declaration.affine_value)
-                packed_site_names[affine_declaration.intercept] =
-                    affine_declaration.coefficient_name
+                if affine_declaration.intercept !== nothing
+                    packed_site_names[affine_declaration.intercept] =
+                        affine_declaration.coefficient_name
+                    push!(consumed_scalar_priors,
+                          affine_declaration.intercept)
+                end
                 for slope in affine_declaration.slopes
                     packed_site_names[slope] =
                         affine_declaration.coefficient_name
                 end
-                push!(consumed_scalar_priors, affine_declaration.intercept)
                 union!(consumed_scalar_priors, affine_declaration.slopes)
+                for offset_name in affine_declaration.offsets
+                    push!(parameter_names, offset_name)
+                    push!(parameter_values,
+                          _syntax_scalar_standard_normal_parameter(offset_name))
+                    push!(consumed_scalar_priors, offset_name)
+                end
             end
         else
             throw(ArgumentError(
