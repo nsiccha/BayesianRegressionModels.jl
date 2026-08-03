@@ -106,12 +106,50 @@ BRM adds:
   An output whose `name` differs from `declaration.target` is one of that
   block's *internals* (`pop_mu_beta_pop` under `pop_mu`).
 - `logical` — the BRM-level quantity whose value this emitted Stan output
-  physically carries, or `nothing` for an internal. This is deliberately
-  narrower than `declaration`: every `kernel(...)` cell local belongs to the
-  plate declaration, but only its collected result carries the logical target.
-  For a ragged result, `logical == :loc` can therefore accompany an emitted
-  `name` such as `:loc__pl_mem_1`; consumers keep the logical identity while
-  addressing BridgeStan through the emitted name.
+  physically carries, or `nothing` for an internal. It is narrower than
+  `declaration`: `pop_mu_beta_pop` belongs to the `pop_mu` declaration but is
+  one of its internals, so it carries no logical target. For a ragged
+  `kernel(...)` result, `logical == :loc` can accompany an emitted `name` such
+  as `:loc__pl_mem_1`; consumers keep the logical identity while addressing
+  BridgeStan through the emitted name.
+
+  **Every named value a `kernel(...)` cell assigns carries one too** — no
+  annotation. The author bound the name and the value is in every posterior
+  draw, so it is addressable by that name:
+
+  ```julia
+  pk_loc ~ kernel(t, dv, qt_y, log_CL, qt_base) do ts, yy, qy, lCL, qbase
+      conc   = exp(-exp(lCL) .* ts)
+      qt_loc = qbase .+ slope .* conc     # a cell value, not an observation
+      qy ~ normal(qt_loc, qt_sigma)
+      conc                                 # the RETURN
+  end
+
+  brm_output(d, :qt_loc)     # BRMOutput(name = :pk_loc_qt_loc__pl_mem_1,
+                             #           logical = :qt_loc, role = :group_block, …)
+  brm_output(d, :conc)       # the same cell's other named value
+  brm_output(d, :pk_loc)     # the collected return
+  ```
+
+  Cell values are ordinary `:group_block` outputs of the plate declaration and
+  compose with `brm_outputs` / `brm_output_coordinates` / `segments` like any
+  other; their emitted `name` stays compiler-owned and unparsed. Only a
+  top-level `name = ...` counts: a slice parameter is an argument (address the
+  positional it came from), and an in-cell `~` is an observation (addressable
+  through its own column's twins, below).
+
+  Two consequences are deliberate. **Scratch is addressable too** — `CL =
+  exp(lCL)` gives `logical == :CL` — so `brm_outputs(d)` is wider than the set
+  of quantities an author would call primary. And **two cells may name a value
+  the same thing**; both are claimed, `brm_output(d, :mu)` then refuses and
+  names the candidates with their owners, and `brm_outputs(d; logical=:mu)`
+  returns both for selection on `declaration.target`. That is the same
+  one-logical-many-carriers contract an observation's two twins already use;
+  the model still builds and unambiguous names still resolve directly.
+
+  ⚠ **A predictive twin is not a substitute for the location it was drawn
+  from.** In the model above `qt_y_gen` is `normal_..._rng(qt_loc, qt_sigma)` —
+  noise ADDED — so it answers a different question than `qt_loc` does.
 
   For a predictive or pointwise-loglik twin it is StanBlocks' `source` — the
   OBSERVED QUANTITY — which is not always a declaration target. A top-level
@@ -417,7 +455,45 @@ _brm_output_leaves!(found, x::Tuple, candidates) =
     foreach(a -> _brm_output_leaves!(found, a, candidates), x)
 _brm_output_leaves!(_found, _x, _candidates) = nothing
 
-function _brm_logical_outputs(stan, by_name, targets)
+# Every named value a `kernel(...)` cell assigns: plate target => value names.
+#
+# Read from the BRM DECLARATION, not recovered from the emitted program. There
+# is nothing to recover there: the emitted plate call carries only StanBlocks'
+# own `outer=` keyword, and the promoted carrier's name is compiler-owned —
+# exactly the name a consumer is forbidden to parse, and the reason this exists.
+#
+# A cell value IS a named BRM-level quantity: the author bound it, and it is
+# saved in every posterior draw. Nothing extra is required to say so, which is
+# why this reads the body rather than an annotation (decision `1tpze5q`).
+# Top-level `name = ...` only — a slice parameter is an argument, and an in-cell
+# `~` is an observation already addressable through its own column's twins.
+#
+# Same walk shape as `_sb_collect_id_buckets` (sbimpl.jl): an operation is a
+# `NamedColumn` over a `~` `ExprColumn`, whose second argument is the RHS term.
+function _brm_kernel_cell_values(brmi)
+    cells = Pair{Symbol,Vector{Symbol}}[]
+    for (target, op_nc) in pairs(brmi.operations)
+        op = _as_expr_column(parent(op_nc)); isnothing(op) && continue
+        getf(op) === (~) || continue
+        _, rhs_raw = getargs(op, 2)
+        rhs = _as_expr_column(rhs_raw); isnothing(rhs) && continue
+        getf(rhs) === kernel || continue
+        args = getargs(rhs)
+        isempty(args) && continue
+        lam = first(args)
+        (lam isa Expr && length(lam.args) >= 2) || continue
+        body = lam.args[2]
+        stmts = Meta.isexpr(body, :block) ? body.args : Any[body]
+        # `unique` because a cell may rebind one name; both assignments are the
+        # same binding downstream, so it is one quantity, claimed once.
+        names = unique!(Symbol[s.args[1] for s in stmts
+                               if Meta.isexpr(s, :(=)) && s.args[1] isa Symbol])
+        isempty(names) || push!(cells, target => names)
+    end
+    cells
+end
+
+function _brm_logical_outputs(stan, by_name, targets, cell_values)
     logical = Dict{Symbol,Symbol}()
     output_names = Set{Symbol}(o.name for o in stan.outputs)
     model_names = Set{Symbol}(keys(stan.model))
@@ -461,20 +537,67 @@ function _brm_logical_outputs(stan, by_name, targets)
         isnothing(o.source) || claim!(o.name, o.source)
     end
 
-    for (resolved, decl) in by_name
-        decl.role === :observation && continue
-        owned = Set{Symbol}(o.name for o in stan.outputs
-                            if _brm_owner(o, by_name, targets) === decl)
-        isempty(owned) && continue
-
+    # The outputs one declaration owns, and the emitted carriers a BRM-side name
+    # resolves to within them. Two shapes, one rule: a scalar per-cell value is
+    # emitted under the context-joined name directly, while a per-cell VECTOR is
+    # promoted to plate memory and only the traced binding names the promoted
+    # carrier. Factored out because the cell-value pass below applies exactly
+    # this rule to a different name.
+    owned_by = decl -> Set{Symbol}(o.name for o in stan.outputs
+                                   if _brm_owner(o, by_name, targets) === decl)
+    carriers = (resolved, owned) -> begin
         found = Set{Symbol}()
         if resolved in output_names
             push!(found, resolved)
         elseif resolved in model_names
             _brm_output_leaves!(found, stan.model[resolved], owned)
         end
+        found
+    end
 
-        foreach(emitted -> claim!(emitted, decl.target), found)
+    for (resolved, decl) in by_name
+        decl.role === :observation && continue
+        owned = owned_by(decl)
+        isempty(owned) && continue
+        foreach(emitted -> claim!(emitted, decl.target), carriers(resolved, owned))
+    end
+
+    # ---- named `kernel(...)` cell values ------------------------------------
+    #
+    # A named deterministic cell value is OWNED by the plate declaration but
+    # never occurs in its RETURN binding, so the loop above cannot reach it. It
+    # has a binding of its own, though — the same context join BRM already owns
+    # (`_brm_stan_name`) — so it resolves through exactly the rule above, with no
+    # new naming convention and no compiler-owned suffix parsed on either side.
+    #
+    # Claimed unconditionally (decision `1tpze5q`). The author named the value
+    # and it is saved in every draw; requiring a second annotation to say so
+    # bought nothing but a keyword. Two consequences are deliberate:
+    #
+    #   * Scratch is addressable too. `CL = exp(lCL)` becomes `logical = :CL`.
+    #     Nothing resolves to the wrong carrier; `brm_outputs(d)` is simply wider
+    #     than the set of quantities an author would call primary.
+    #   * Two cells may give a value the SAME name (`mu` in a PK cell and a PD
+    #     cell). Both are claimed, and `brm_output(d, :mu)` then refuses and
+    #     names the candidates with their owners — the descriptor's existing
+    #     one-logical-many-carriers contract, the same one an observation's two
+    #     twins already use. It is NOT a construction failure: the model builds,
+    #     `brm_outputs(d; logical=:mu)` returns both, and every unambiguous name
+    #     around them still resolves directly.
+    #
+    # A cell value shadowing an existing model binding cannot reach here at all:
+    # StanBlocks' plate tracing refuses it (`AssertionError: name ∉ keys(info)`).
+    for (target, locals) in cell_values
+        decl = get(by_name, target, nothing)
+        isnothing(decl) && continue
+        owned = owned_by(decl)
+        for lc in locals
+            # An empty result is not an error: the compiler may legitimately
+            # decline to promote a value (folded away, loop-invariant). Under an
+            # unconditional rule that is an ordinary cell, not a failed request,
+            # so it stays unclaimed rather than raising on every model.
+            foreach(emitted -> claim!(emitted, lc), carriers(Symbol(target, "_", lc), owned))
+        end
     end
     logical
 end
@@ -686,7 +809,8 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
         by_name[sname] = d
     end
     targets = collect(keys(by_name))
-    logical_outputs = _brm_logical_outputs(stan, by_name, targets)
+    logical_outputs = _brm_logical_outputs(stan, by_name, targets,
+                                           _brm_kernel_cell_values(brmi))
 
     # Linear-predictor names come from the FORMULA, not from the emitted body:
     # `mu = pop_mu + r_mu_g` is an `=`, so no declaration binds it, yet it is
@@ -876,10 +1000,15 @@ _brm_matches(value, wanted) = any(w -> value === w, wanted)
 """
     brm_output(d::BRMDescriptor, logical::Symbol; role=nothing) -> BRMOutput
 
-Return the unique emitted output that physically carries declaration target
+Return the unique emitted output that physically carries the BRM quantity
 `logical`. This resolves BRM meaning to Stan representation without parsing an
 emitter-owned name. For example, a ragged `loc ~ kernel(...)` result can resolve
 to an output named `loc__pl_mem_1` while retaining `logical == :loc`.
+
+`logical` is normally a declaration target. It is also the name of any value a
+`kernel(...)` cell assigns — see the `logical` field on [`BRMOutput`](@ref) —
+which is how to address a fitted noise-free in-cell location, with no
+annotation on the term.
 
 **One logical target legitimately has several carriers, and `role` is how you
 pick one.** An observation `pk_conc ~ Normal(loc, sigma)` emits a
@@ -910,9 +1039,20 @@ function brm_output(d::BRMDescriptor, logical::Symbol; role=nothing)
         error("brm_descriptor: logical output `$logical`$qualifier has no emitted " *
               "posterior carrier in model `$(d.name)`.$hint")
     end
+    # Name the OWNING DECLARATION alongside the role. `role` separates an
+    # observation's two twins, but it cannot separate two `kernel(...)` cells
+    # that happen to give a value the same name — both are `:group_block`, and
+    # the owner is the only thing that differs. Reporting only the role there
+    # would name a discriminator that does not discriminate.
+    owners = Tuple((o.name, o.role,
+                    isnothing(o.declaration) ? nothing : o.declaration.target)
+                   for o in found)
+    distinct_roles = length(unique(o.role for o in found)) > 1
     error("brm_descriptor: logical output `$logical`$qualifier spans several emitted " *
-          "carriers $(Tuple((o.name, o.role) for o in found)); pass `role=` to select " *
-          "one, or use `brm_outputs` to take them all.")
+          "carriers (name, role, owner) $owners; " *
+          (distinct_roles ? "pass `role=` to select one, or use" : "these share a role, so " *
+           "`role=` cannot separate them — use") *
+          " `brm_outputs` to take them all and select on `declaration.target`.")
 end
 
 """

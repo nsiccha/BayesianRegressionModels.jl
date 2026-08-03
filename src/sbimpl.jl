@@ -3500,26 +3500,44 @@ _check_term_kwargs(::typeof(ragged), kwargs) = isempty(kwargs) || error(
 # function object, so `hsgp(x; by=g)` — where `by=` is live — is unaffected, and
 # an aliased `kernel` is still caught. The lowering-time guards stay as the
 # backstop for a BRMI assembled without the macro.
-_check_term_kwargs(::typeof(kernel), kwargs) = for (k, replacement) in (
-        (:by, "Grouping is DERIVED from the ranef bucket of the per-subject \
-               linear-predictor positional args."),
-        (:n_eta, "Declare per-subject linear predictors with `(1 | ID | group)` \
-                  terms and pass those LPs positionally."),
-        (:model, "Write the per-subject cell INLINE as a `do`-block."),
-        (:obs, "Write observation likelihoods as ordinary `~` statements inside \
-                the cell body."),
-    )
-    haskey(kwargs, k) && error(
-        "@brm: kernel(...) no longer accepts `$k=`. ", replacement,
-        "\nThe surface is formula linear predictors plus one inline do-block:\n",
-        "    log_CL ~ 1 + weight + (1 | p | subject)\n",
-        "    log_V  ~ 1 +          (1 | p | subject)\n",
-        "    pred ~ kernel(t, dose, dv, log_CL, log_V) do ts, d, yy, lCL, lV\n",
-        "        mu = <prediction from exp(lCL), exp(lV) over ts, d>\n",
-        "        yy ~ normal(mu, sigma)\n",
-        "        mu\n",
-        "    end\n",
-        "See the `brm-use` skill, `kernel(...)` section.")
+function _check_term_kwargs(::typeof(kernel), kwargs)
+    for (k, replacement) in (
+            (:by, "Grouping is DERIVED from the ranef bucket of the per-subject \
+                   linear-predictor positional args."),
+            (:n_eta, "Declare per-subject linear predictors with `(1 | ID | group)` \
+                      terms and pass those LPs positionally."),
+            (:model, "Write the per-subject cell INLINE as a `do`-block."),
+            (:obs, "Write observation likelihoods as ordinary `~` statements inside \
+                    the cell body."),
+        )
+        haskey(kwargs, k) && error(
+            "@brm: kernel(...) no longer accepts `$k=`. ", replacement,
+            "\nThe surface is formula linear predictors plus one inline do-block:\n",
+            "    log_CL ~ 1 + weight + (1 | p | subject)\n",
+            "    log_V  ~ 1 +          (1 | p | subject)\n",
+            "    pred ~ kernel(t, dose, dv, log_CL, log_V) do ts, d, yy, lCL, lV\n",
+            "        mu = <prediction from exp(lCL), exp(lV) over ts, d>\n",
+            "        yy ~ normal(mu, sigma)\n",
+            "        mu\n",
+            "    end\n",
+            "See the `brm-use` skill, `kernel(...)` section.")
+    end
+
+    # `kernel(...)` takes NO keywords: the cell is the do-block and everything it
+    # consumes is positional. An unrecognised keyword is therefore a typo or
+    # retired syntax, never a live option, and silently ignoring one is exactly
+    # how the retired v1 spelling kept passing a consumer's construction-time
+    # gate for eight days after its removal (snag `by-and-n-eta-are-3625f645`).
+    # The four named guards above stay because they can say what to write
+    # instead; this catches everything else.
+    for k in keys(kwargs)
+        error("@brm: kernel(...) does not accept `$k=` — it accepts no keywords. ",
+              "The cell is the do-block and everything it consumes is positional; ",
+              "named values the cell assigns are addressable from the descriptor ",
+              "without any annotation (`brm_output(d, :$k)` if `$k` is one). ",
+              "See the `brm-use` skill, `kernel(...)` section.")
+    end
+    nothing
 end
 
 # do-block kernel surface (decision z9vkkf, User chose B): the consumer writes the
