@@ -449,6 +449,15 @@ function distributional_gaussian_factor_graph()
             y=NP.broadcasted(NP.normal(:y, :mu, :sigma))))
 end
 
+NP.@model function natural_distributional_gaussian(x, z)
+    beta_mu[(:Intercept, :x)] ~ StandardNormal()
+    beta_log_sigma[(:Intercept, :z)] ~ StandardNormal()
+    mu = dot(beta_mu, (1, x))
+    log_sigma = dot(beta_log_sigma, (1, z))
+    sigma = exp(log_sigma)
+    @. y ~ Normal(mu, sigma)
+end
+
 NP.@model function natural_sampled_offset_regression(x)
     latent ~ Normal()
     beta ~ Normal()
@@ -3562,9 +3571,38 @@ end
 
     distributional_z = [0.5, -1.0, 1.5, 0.25]
     distributional_declaration = distributional_gaussian_factor_graph()
+    distributional_data = (;
+        x=raw_x, z=distributional_z, y=response)
+    distributional_brmi = @brm distributional_data begin
+        mu ~ 1 + x
+        log_sigma ~ 1 + z
+        y ~ Normal(mu, exp(log_sigma))
+    end
+    @test popcoefnames(distributional_brmi, :mu) == [:Intercept, :x]
+    @test popcoefnames(distributional_brmi, :log_sigma) ==
+          [:Intercept, :z]
+    @test SBBRMI(distributional_brmi; mod=@__MODULE__) isa SBBRMI
+    distributional_lowered = NP.lower(distributional_brmi)
+    @test distributional_lowered == distributional_declaration
+    natural_distributional = natural_distributional_gaussian(
+        raw_x, distributional_z)
+    @test natural_distributional.declaration == distributional_declaration
+    @test NP.condition(natural_distributional; y=response) ==
+          NP.instantiate(
+              distributional_declaration,
+              (; x=raw_x, z=distributional_z);
+              conditions=(; y=response))
     distributional_plan = NP.compile(
         distributional_declaration, (; x=raw_x, z=distributional_z);
         conditions=(; y=response))
+    distributional_brm_plan = NP.compile(distributional_brmi)
+    @test distributional_brm_plan.declaration ==
+          distributional_plan.declaration
+    @test distributional_brm_plan.bindings == distributional_plan.bindings
+    @test distributional_brm_plan.conditions ==
+          distributional_plan.conditions
+    @test distributional_brm_plan.graph.schedule ==
+          distributional_plan.graph.schedule
     @test distributional_plan isa NP.FactorPlan
     @test distributional_plan.graph.schedule ==
           (:beta_mu, :beta_log_sigma, :mu, :log_sigma, :sigma, :y)
