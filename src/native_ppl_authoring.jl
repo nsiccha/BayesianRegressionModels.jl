@@ -328,13 +328,6 @@ function _validate_coefficient_parameter(
     length(declaration.axis_keys) == 2 || throw(CapabilityError(
         :parameter_axis,
         "affine coefficient parameter `$name` must have intercept and slope coordinates"))
-    first(declaration.axis_keys) === :Intercept || throw(CapabilityError(
-        :parameter_axis,
-        "affine coefficient parameter `$name` must name its first coordinate :Intercept"))
-    last(declaration.axis_keys) === predictor_name || throw(CapabilityError(
-        :parameter_axis,
-        "affine coefficient parameter `$name` must name its slope coordinate " *
-        "after predictor `$predictor_name`"))
     nothing
 end
 
