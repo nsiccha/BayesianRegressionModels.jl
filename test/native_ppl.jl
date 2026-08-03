@@ -8277,6 +8277,45 @@ end
 end
 
 
+@testset "typed native PPL observation weights" begin
+    weight = NP.observation_weight(:analytic, :replicates)
+    @test NP.observation_weight_kind(weight) === :analytic
+    @test NP.observation_weight_source(weight) === :replicates
+    @test_throws ArgumentError NP.observation_weight(:probability, :weights)
+
+    weighted = NP.weighted_observation(
+        NP.normal(:y, :mu, :sigma), weight)
+    declaration = NP.model(
+        inputs=(; x=NP.input(), replicates=NP.input()),
+        parameters=(;
+            beta_mu=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            sigma=NP.parameter(
+                NP.PositiveSupport(), (:sigma,);
+                transform=NP.Exp(), prior=NP.Exponential(2.0))),
+        nodes=(; mu=NP.affine(:x, :beta_mu)),
+        observations=(; y=NP.broadcasted(weighted)))
+    graph = NP.factor_graph(
+        declaration;
+        bindings=(; x=[-1.0, 0.5], replicates=[1, 4]),
+        conditions=(; y=[-0.2, 0.8]))
+    factor = graph.sites.y.factor
+    @test factor isa NP.WeightedSiteFactor
+    @test factor.factor isa NP.NormalSiteFactor
+    @test factor.values isa NP.InputValue{:replicates}
+    @test NP.observation_weight_kind(factor.weight) === :analytic
+    @test NP.site_factor_dependencies(factor) == (:mu, :sigma)
+
+    err = capability_error(() -> NP.model(
+        inputs=(; x=NP.input()),
+        parameters=declaration.parameters,
+        nodes=declaration.nodes,
+        observations=declaration.observations))
+    @test err.capability == :graph_identity
+    @test occursin("replicates", err.detail)
+end
+
 @testset "native PPL workflow queries and replay" begin
     data = (; x=[-1.0, 0.0, 2.0], y=[0.5, 1.0, 2.5])
     brmi = @brm data begin
