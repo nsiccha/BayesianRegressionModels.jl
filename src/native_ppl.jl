@@ -584,14 +584,15 @@ function _native_ppl_affine_predictors(brmi::BRMI, key::Symbol)
     lhs, predictor = _native_ppl_sampling_rhs(brmi, key)
     _native_ppl_ref_name(lhs) === key || throw(NativePPLCapabilityError(
         :linked_predictor, "`$key` must have a bare, unlinked left-hand side"))
+    predictor isa Number && predictor == 1 && return ()
     predictor isa ExprColumn && getf(predictor) === (+) ||
         throw(NativePPLCapabilityError(:predictor_terms,
             "`$key` must be an additive affine formula such as `1 + x + z`"))
     isempty(getkwargs(predictor)) || throw(NativePPLCapabilityError(
         :predictor_keywords, "predictor `$key` has keywords"))
     terms = getargs(predictor)
-    length(terms) >= 2 || throw(NativePPLCapabilityError(:predictor_terms,
-        "`$key` must have an intercept and at least one continuous predictor"))
+    !isempty(terms) || throw(NativePPLCapabilityError(:predictor_terms,
+        "`$key` must contain an intercept"))
 
     intercepts = filter(term -> term isa Number && term == 1, terms)
     length(intercepts) == 1 ||

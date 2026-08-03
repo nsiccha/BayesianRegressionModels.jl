@@ -333,6 +333,12 @@ NP.@model function scalar_normal_likelihood(mu)
     @. y ~ Normal(mu, sigma)
 end
 
+NP.@model function monolithic_scalar_normal()
+    theta ~ Normal()
+    sigma ~ Exponential(2.0)
+    @. y ~ Normal(theta, sigma)
+end
+
 NP.@model function macro_bernoulli_center(
     x::AbstractVector{<:Real})
     intercept ~ Normal()
@@ -2568,6 +2574,56 @@ end
     @test NP.workspace(integer_prepared) isa NP.Workspace
     @test NP.LogDensityProblem(
         integer_prepared, DI.AutoEnzyme()) isa NP.LogDensityProblem
+
+    monolithic_plan = NP.compile(NP.condition(
+        monolithic_scalar_normal(); y=response))
+    scalar_data = (; y=response)
+    brm_scalar = @brm scalar_data begin
+        sigma ~ Exponential(2.0)
+        mu ~ 1
+        y ~ Normal(mu, sigma)
+    end
+    lowered_brm_scalar = NP.lower(brm_scalar)
+    @test isempty(lowered_brm_scalar.inputs)
+    @test keys(lowered_brm_scalar.parameters) == (:mu, :sigma)
+    @test isempty(lowered_brm_scalar.nodes)
+    brm_scalar_plan = NP.compile(brm_scalar)
+    for candidate_plan in (monolithic_plan, brm_scalar_plan)
+        candidate = NP.prepare(candidate_plan)
+        candidate_work = NP.workspace(
+            candidate, Float64, DI.AutoEnzyme())
+        candidate_density, candidate_gradient = NP.logdensity_and_gradient!(
+            candidate_work, candidate, scalar_position)
+        @test candidate_density ≈ scalar_density
+        @test candidate_gradient ≈ scalar_gradient
+        @test NP.evaluate(
+            candidate_work, candidate, scalar_position,
+            NP.LinearPredictor()) == expected_location
+        @test NP.simulate(
+            MersenneTwister(912), candidate_work, candidate,
+            scalar_position) == NP.simulate(
+                MersenneTwister(912), scalar_workspace, scalar_prepared,
+                scalar_position)
+    end
+
+    scalar_positions = [0.3 log(0.8); -0.2 log(1.1)]
+    scalar_queries = (;
+        location=NP.LinearPredictor(),
+        pointwise=NP.PointwiseLogLikelihood(),
+    )
+    scalar_signatures = NP.batch_output_signature(
+        scalar_prepared, scalar_positions, scalar_queries)
+    scalar_outputs = NP.allocate_output(
+        scalar_signatures, scalar_prepared)
+    NP.execute_draws!(
+        scalar_outputs, scalar_workspace, scalar_prepared,
+        scalar_positions, scalar_queries)
+    @test scalar_outputs.location[1, :] == expected_location
+    @test scalar_outputs.pointwise[1, :] ≈
+          logpdf.(Normal.(expected_location, 0.8), response)
+    @test bundle_execution_allocated(
+        scalar_outputs, scalar_workspace, scalar_prepared,
+        scalar_positions, scalar_queries) == 0
 
     unconditioned_scalar = NP.compose(
         scalar_prior_component,

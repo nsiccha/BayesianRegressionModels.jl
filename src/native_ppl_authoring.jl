@@ -1395,9 +1395,14 @@ function _lower_brmi(brmi::BRM.BRMI)
 
     input_declarations = _declaration_namedtuple(
         predictor_names, map(_ -> input(), predictor_names))
-    coefficient_name = Symbol(:beta_, location)
+    scalar_location = isempty(predictor_names)
+    scalar_location && family !== BRM.Normal && throw(CapabilityError(
+        :likelihood,
+        "the first intercept-only BRM native-PPL slice supports Normal"))
+    coefficient_name = scalar_location ? location : Symbol(:beta_, location)
     coefficient_declaration = parameter(
-        RealSupport(), (:Intercept, predictor_names...);
+        RealSupport(),
+        scalar_location ? (location,) : (:Intercept, predictor_names...);
         transform=Identity(), prior=StandardNormal())
     parameter_declarations = if family === BRM.Normal
         scale_declaration = parameter(
@@ -1422,9 +1427,10 @@ function _lower_brmi(brmi::BRM.BRMI)
         push!(transform_declarations, transform_declaration)
         transform_name
     end
-    affine_declaration = affine(Tuple(affine_inputs), coefficient_name)
-    node_names = (Tuple(transform_names)..., location)
-    node_values = (Tuple(transform_declarations)..., affine_declaration)
+    node_names = scalar_location ? () : (Tuple(transform_names)..., location)
+    node_values = scalar_location ? () : (
+        Tuple(transform_declarations)...,
+        affine(Tuple(affine_inputs), coefficient_name))
     node_declarations = _declaration_namedtuple(node_names, node_values)
 
     observation_declaration = if family === BRM.Normal
@@ -1776,7 +1782,8 @@ function _syntax_observation(lhs, rhs; broadcasted::Bool)
                         (QuoteNode(argument) for argument in arguments)...)
     value = broadcasted ?
         Expr(:call, _syntax_ref(:broadcasted), scalar_value) : scalar_value
-    (; name=lhs, value, extra_node_name, extra_node_value)
+    (; name=lhs, value, extra_node_name, extra_node_value,
+       dependencies=Tuple(arguments))
 end
 
 function _syntax_outputs(statement)
@@ -1845,6 +1852,7 @@ function _model_function_syntax(definition)
     node_values = Any[]
     observation_names = Symbol[]
     observation_values = Any[]
+    factor_dependency_names = Set{Symbol}()
     statements = body isa Expr && body.head === :block ? body.args : Any[body]
     statements = Any[statement for statement in statements
                      if !(statement isa LineNumberNode)]
@@ -1884,6 +1892,7 @@ function _model_function_syntax(definition)
                 end
                 push!(observation_names, observation.name)
                 push!(observation_values, observation.value)
+                union!(factor_dependency_names, observation.dependencies)
             else
                 if is_explicit_parameter
                     name, value = _syntax_parameter(
@@ -1929,6 +1938,7 @@ function _model_function_syntax(definition)
     end
     returned_names = explicit_outputs === nothing ? Set{Symbol}() :
         Set(last(explicit_outputs))
+    union!(returned_names, factor_dependency_names)
     standalone_scalar_priors = setdiff(
         intersect(Set(scalar_prior_names), returned_names),
         consumed_scalar_priors)
