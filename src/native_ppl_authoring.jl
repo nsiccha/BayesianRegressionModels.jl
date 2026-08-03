@@ -648,9 +648,24 @@ function _uses_factor_executor(declaration::Model, conditions)
     dependent_site || sampled_offset_affine
 end
 
+_factor_arguments(::StandardNormalSiteFactor) = ()
+_factor_arguments(factor::NormalSiteFactor) =
+    (factor.location, factor.scale)
+_factor_arguments(factor::ExponentialSiteFactor) = (factor.scale,)
+
+_factor_value_is_row(::LiteralValue, graph, bindings) = false
+_factor_value_is_row(::InputValue{Name}, graph, bindings) where {Name} =
+    getproperty(bindings, Name) isa AbstractVector
+_factor_value_is_row(::NodeValue{Name}, graph, bindings) where {Name} =
+    getproperty(graph.nodes, Name) isa AffineFactorNode
+_factor_value_is_row(::SiteValue{Name}, graph, bindings) where {Name} =
+    getproperty(graph.sites, Name).shape isa
+        Union{BlockSiteShape,BroadcastSiteShape}
+
 function _validate_factor_plan_site(
     name::Symbol, site::StochasticSite, graph::FactorGraph,
-    conditions::NamedTuple, broadcast_sites::Set{Symbol},
+    bindings::NamedTuple, conditions::NamedTuple,
+    broadcast_sites::Set{Symbol},
 )
     site.shape isa BlockSiteShape &&
         !(site.factor isa StandardNormalSiteFactor) && throw(CapabilityError(
@@ -685,6 +700,26 @@ function _validate_factor_plan_site(
             "`$dependency`; broadcast outputs must remain terminal until " *
             "their values can be materialized"))
     end
+    if site.shape isa ScalarSiteShape
+        for argument in _factor_arguments(site.factor)
+            _factor_value_is_row(argument, graph, bindings) || continue
+            throw(CapabilityError(
+                :factor_shape,
+                "scalar factor site `$name` cannot consume a row-valued " *
+                "argument"))
+        end
+    end
+    for argument in _factor_arguments(site.factor)
+        argument isa SiteValue || continue
+        dependency = getproperty(
+            graph.sites, site_value_name(argument))
+        dependency.shape isa BlockSiteShape || continue
+        throw(CapabilityError(
+            :factor_shape,
+            "factor site `$name` cannot consume block site " *
+            "`$(site_value_name(argument))` directly; lower it through a " *
+            "typed materializing node"))
+    end
     if site.factor isa NormalSiteFactor &&
        site.factor.scale isa SiteValue
         scale_name = site_value_name(site.factor.scale)
@@ -693,6 +728,14 @@ function _validate_factor_plan_site(
             :factor_scale,
             "Normal factor for site `$name` uses stochastic scale " *
             "`$scale_name`, whose support must be PositiveSupport"))
+    elseif site.factor isa NormalSiteFactor &&
+           site.factor.scale isa NodeValue
+        scale_name = node_value_name(site.factor.scale)
+        getproperty(graph.nodes, scale_name) isa ExpFactorNode || throw(
+            CapabilityError(
+                :factor_scale,
+                "Normal factor for site `$name` uses deterministic scale " *
+                "`$scale_name`, which must currently be an exp node"))
     end
     nothing
 end
@@ -728,7 +771,13 @@ function _bind_factor_plan(declaration::Model, bindings, conditions)
             "multi-latent factor node `$name` has unsupported operation " *
             "$(typeof(node)); the current executable slice accepts scalar " *
             "exp and row-valued affine nodes"))
-        if node isa AffineFactorNode
+        if node isa ExpFactorNode
+            _factor_value_is_row(node.input, graph, bindings) && throw(
+                CapabilityError(
+                    :factor_nodes,
+                    "exp node `$name` cannot consume a row-valued argument " *
+                    "until row-node materialization is implemented"))
+        else
             coefficient_name = site_value_name(node.coefficients)
             coefficient_site = getproperty(graph.sites, coefficient_name)
             coefficient_site.shape isa Union{ScalarSiteShape,BlockSiteShape} ||
@@ -742,10 +791,21 @@ function _bind_factor_plan(declaration::Model, bindings, conditions)
                     "coefficients"))
             coefficient_count = length(node.inputs) +
                 (affine_has_intercept(node) ? 1 : 0)
-            length(coefficient_site.coordinate_keys) == coefficient_count ||
+            coefficient_declaration = getproperty(
+                declaration.parameters, coefficient_name)
+            length(coefficient_declaration.axis_keys) == coefficient_count ||
                 throw(CapabilityError(
                     :factor_nodes,
                     "affine node `$name` has the wrong coefficient count"))
+            for argument in (node.inputs..., node.offsets...)
+                argument isa SiteValue || continue
+                dependency = getproperty(
+                    graph.sites, site_value_name(argument))
+                dependency.shape isa ScalarSiteShape || throw(CapabilityError(
+                    :factor_shape,
+                    "affine node `$name` cannot consume non-scalar site " *
+                    "`$(site_value_name(argument))` directly"))
+            end
         end
     end
     broadcast_sites = Tuple(
@@ -768,7 +828,8 @@ function _bind_factor_plan(declaration::Model, bindings, conditions)
     end
     for (name, site) in pairs(graph.sites)
         _validate_factor_plan_site(
-            name, site, graph, canonical_conditions, broadcast_site_set)
+            name, site, graph, bindings, canonical_conditions,
+            broadcast_site_set)
     end
     output_site = only(broadcast_sites)
     observation_keys = if hasproperty(canonical_conditions, output_site)
@@ -900,7 +961,8 @@ function _factor_validate_binding_support(graph::FactorGraph,
         factor isa NormalSiteFactor || continue
         factor.scale isa InputValue || continue
         input_value_name(factor.scale) === name || continue
-        value > zero(value) || throw(ArgumentError(
+        values = value isa AbstractVector ? value : (value,)
+        all(element -> element > zero(element), values) || throw(ArgumentError(
             "native PPL binding `$name` supplies the Normal scale for " *
             "site `$site_name` and must be positive"))
     end
@@ -1011,6 +1073,7 @@ end
                                        index, plan, buffers) where {T}
     location = _factor_argument_at(factor.location, index, plan, buffers, T)
     scale = _factor_argument_at(factor.scale, index, plan, buffers, T)
+    scale > zero(T) || return -T(Inf)
     residual = (value - location) / scale
     -T(0.5) * residual * residual - log(scale) -
         T(BRM._NATIVE_PPL_HALF_LOG2PI)

@@ -3470,6 +3470,39 @@ end
     @test NP.factor_node_dependencies(sampled_offset_graph.nodes.mu) ==
           (:beta_mu, :latent)
 
+    row_node_to_scalar_model = NP.model(
+        inputs=direct_sampled_offset_model.inputs,
+        parameters=direct_sampled_offset_model.parameters,
+        nodes=direct_sampled_offset_model.nodes,
+        observations=(;
+            z=NP.normal(:z, :mu, :sigma),
+            y=direct_sampled_offset_model.observations.y),
+        site_order=(:latent, :beta_mu, :sigma, :z, :y))
+    @test capability_error(() -> NP.compile(
+        row_node_to_scalar_model, (; x=sampled_offset_data.x);
+        conditions=(; y=sampled_offset_data.y))).capability == :factor_shape
+    affine_scale_model = NP.model(
+        inputs=direct_sampled_offset_model.inputs,
+        parameters=direct_sampled_offset_model.parameters,
+        nodes=direct_sampled_offset_model.nodes,
+        observations=(; y=NP.broadcasted(
+            NP.normal(:y, :latent, :mu))),
+        site_order=(:latent, :beta_mu, :sigma, :y))
+    @test capability_error(() -> NP.compile(
+        affine_scale_model, (; x=sampled_offset_data.x);
+        conditions=(; y=sampled_offset_data.y))).capability == :factor_scale
+    row_exp_model = NP.model(
+        inputs=direct_sampled_offset_model.inputs,
+        parameters=direct_sampled_offset_model.parameters,
+        nodes=(; mu=direct_sampled_offset_model.nodes.mu,
+                 row_scale=NP.exp_link(:mu)),
+        observations=(; y=NP.broadcasted(
+            NP.normal(:y, :latent, :row_scale))),
+        site_order=(:latent, :beta_mu, :sigma, :y))
+    @test capability_error(() -> NP.compile(
+        row_exp_model, (; x=sampled_offset_data.x);
+        conditions=(; y=sampled_offset_data.y))).capability == :factor_nodes
+
     sampled_offset_plan = NP.compile(sampled_offset_brmi)
     @test sampled_offset_plan isa NP.FactorPlan
     @test sampled_offset_plan.bindings.x == sampled_offset_data.x
@@ -3513,6 +3546,11 @@ end
             sampled_offset_position)
     @test sampled_offset_density ≈ sampled_offset_expected_density
     @test sampled_offset_gradient ≈ sampled_offset_expected_gradient
+    sampled_offset_underflow_position = copy(sampled_offset_position)
+    sampled_offset_underflow_position[3] = -1000.0
+    @test NP.logdensity!(
+        sampled_offset_workspace, sampled_offset_prepared,
+        sampled_offset_underflow_position) == -Inf
     @test vec(sampled_offset_workspace.primal.node_rows[1, :]) ≈
           sampled_offset_mu
     @test NP.evaluate(
