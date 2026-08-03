@@ -999,7 +999,7 @@ function _native_ppl_prepare(plan::NativePPLPlan; T::Type{<:AbstractFloat}=Float
     predictor_name = native_input_name(plan.inputs.predictor)
     response_name = native_input_name(plan.inputs.response)
     predictor = getproperty(plan.bindings, predictor_name)
-    response = getproperty(plan.bindings, response_name)
+    response = _native_ppl_response_binding(plan.bindings, response_name)
     _native_ppl_prepare_bindings(plan, predictor, response, T)
 end
 
