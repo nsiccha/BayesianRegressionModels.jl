@@ -3873,6 +3873,45 @@ end
         varying_new_group_rng, varying_new_group_output,
         varying_new_group_workspace, varying_new_group_replay,
         varying_position) == 0
+    multi_varying_model = NP.model(
+        inputs=(; x=NP.input(), w=NP.input(), group=NP.input()),
+        parameters=(;
+            beta_mu=NP.parameter(
+                NP.RealSupport(), (:x, :w); transform=NP.Identity(),
+                prior=NP.StandardNormal()),
+            tau_p_group=direct_varying_model.parameters.tau_p_group,
+            b_p_group=direct_varying_model.parameters.b_p_group,
+            sigma=direct_varying_model.parameters.sigma),
+        nodes=(;
+            r_mu_p_group=NP.group_gather(:b_p_group, :group),
+            mu=NP.affine(
+                (:x, :w), :beta_mu; offsets=(:r_mu_p_group,),
+                intercept=false)),
+        observations=direct_varying_model.observations,
+        site_order=direct_varying_model.site_order)
+    multi_varying_prepared = NP.prepare(NP.compile(
+        multi_varying_model,
+        (; x=varying_brm_data.x, w=reverse(varying_brm_data.x),
+           group=varying_brm_data.group);
+        conditions=(; y=varying_brm_data.y)))
+    multi_varying_replay = NP.rebind(
+        multi_varying_prepared, (;);
+        bindings=(; x=varying_new_group_bindings.x,
+                    w=reverse(varying_new_group_bindings.x),
+                    group=varying_new_group_bindings.group),
+        new_groups=:resample)
+    multi_varying_output = zeros(4)
+    multi_varying_workspace = NP.workspace(multi_varying_replay)
+    multi_varying_rng = MersenneTwister(938)
+    NP.simulate!(
+        multi_varying_rng, multi_varying_output,
+        multi_varying_workspace, multi_varying_replay,
+        [log(0.7), varying_effects..., -0.3, 0.1, log(0.5)])
+    @test all(isfinite, multi_varying_output)
+    @test factor_predictive_allocations(
+        multi_varying_rng, multi_varying_output,
+        multi_varying_workspace, multi_varying_replay,
+        [log(0.7), varying_effects..., -0.3, 0.1, log(0.5)]) == 0
     new_group_density_error = capability_error(() -> NP.logdensity!(
         varying_new_group_workspace, varying_new_group_replay,
         varying_position))

@@ -1763,15 +1763,12 @@ end
     scale * BRM.randexp(rng, T)
 end
 
-@inline _factor_generated_group_sample!(rng::BRM.AbstractRNG, ::Val,
-        site::StochasticSite, position::AbstractVector,
-        prepared::FactorPrepared, buffers::FactorBuffers) = nothing
-
 @inline function _factor_generated_group_sample!(rng::BRM.AbstractRNG,
         ::Val{Name},
-        site::StochasticSite{S,Tr,F,BlockSiteShape,FreeSite},
+        site::StochasticSite,
         position::AbstractVector{T}, prepared::FactorPrepared,
-        buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
+        buffers::FactorBuffers{T}) where {Name,T}
+    hasproperty(prepared.plan.generated_group_indices, Name) || return nothing
     generated_indices = getproperty(
         prepared.plan.generated_group_indices, Name)
     for index in generated_indices
