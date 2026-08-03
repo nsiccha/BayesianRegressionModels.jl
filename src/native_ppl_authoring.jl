@@ -472,6 +472,19 @@ function _qualified_observation(namespace::Symbol, observation, mapping)
     is_broadcast_observation(observation) ? broadcasted(declaration) : declaration
 end
 
+function _observation_with_response(observation, response::Symbol)
+    scalar = scalar_observation(observation)
+    dependencies = observation_dependencies(scalar)
+    declaration = if scalar isa NormalObservation
+        normal(response, dependencies...)
+    elseif scalar isa BernoulliLogitObservation
+        bernoulli_logit(response, only(dependencies))
+    else
+        poisson(response, only(dependencies))
+    end
+    is_broadcast_observation(observation) ? broadcasted(declaration) : declaration
+end
+
 function _resolved_reference(reference::GraphRef, resolved)
     key = (graph_namespace(reference), graph_name(reference))
     haskey(resolved, key) || throw(CapabilityError(
@@ -531,7 +544,7 @@ function _reference_active(reference::GraphRef, components, cache)
     _component_value_active(source, graph_name(reference), components, cache)
 end
 
-function _lower_composition(composition::Composition)
+function _lower_composition(composition::Composition, public_outputs=nothing)
     components = _validate_composition(composition.components)
     input_names = Symbol[]
     input_values = Any[]
@@ -637,12 +650,51 @@ function _lower_composition(composition::Composition)
         end
     end
 
+    flattened_outputs = if public_outputs === nothing
+        nothing
+    else
+        public_outputs isa NamedTuple || throw(ArgumentError(
+            "native PPL staged outputs must be a NamedTuple; got " *
+            "$(typeof(public_outputs))"))
+        all(value -> value isa GraphRef, values(public_outputs)) || throw(
+            ArgumentError(
+                "native PPL staged outputs must be graph values"))
+        names = keys(public_outputs)
+        resolved_values = Tuple(
+            _resolved_reference(reference, resolved)
+            for reference in Base.values(public_outputs))
+        flattened_values = collect(resolved_values)
+        occupied = Set((input_names..., parameter_names..., node_names...,
+                        observation_names...))
+        for index in eachindex(flattened_values)
+            resolved_name = flattened_values[index]
+            observation_index = findfirst(==(resolved_name), observation_names)
+            observation_index === nothing && continue
+            alias = names[index]
+            alias === resolved_name || alias ∉ occupied || throw(ArgumentError(
+                "native PPL public stochastic-site alias `$alias` collides " *
+                "with an existing graph identity"))
+            observation_names[observation_index] = alias
+            observation_values[observation_index] = _observation_with_response(
+                observation_values[observation_index], alias)
+            for condition_index in eachindex(condition_names)
+                condition_names[condition_index] === resolved_name &&
+                    (condition_names[condition_index] = alias)
+            end
+            delete!(occupied, resolved_name)
+            push!(occupied, alias)
+            flattened_values[index] = alias
+        end
+        NamedTuple{names}(Tuple(flattened_values))
+    end
+
     declaration = model(
         inputs=NamedTuple{Tuple(input_names)}(Tuple(input_values)),
         parameters=NamedTuple{Tuple(parameter_names)}(Tuple(parameter_values)),
         nodes=NamedTuple{Tuple(node_names)}(Tuple(node_values)),
         observations=NamedTuple{Tuple(observation_names)}(
-            Tuple(observation_values)))
+            Tuple(observation_values)),
+        outputs=flattened_outputs)
     ModelInstance(
         declaration,
         NamedTuple{Tuple(binding_names)}(Tuple(binding_values)),
@@ -650,6 +702,39 @@ function _lower_composition(composition::Composition)
 end
 
 lower(composition::Composition) = _lower_composition(composition)
+
+function _staged_component_output(
+    namespace::Symbol, value, connection::Symbol)
+    value isa ModelInstance || throw(ArgumentError(
+        "native PPL staged call `$namespace` must return a ModelInstance; " *
+        "got $(typeof(value))"))
+    _validate_instance(value)
+    outputs = value.declaration.outputs
+    outputs isa NamedTuple && length(outputs) == 1 || throw(ArgumentError(
+        "native PPL staged call `$namespace` must return exactly one named " *
+        "graph value; got $(outputs === nothing ? 0 : length(outputs))"))
+    alias = only(keys(outputs))
+    staged_component = component(namespace, value)
+    reference = output(staged_component, alias)
+    kind = graph_kind(reference)
+    valid = connection === :stochastic ? kind in (:parameter, :site) :
+        connection === :deterministic ? kind in (:binding, :node) : false
+    valid || throw(ArgumentError(
+        "native PPL `$connection` staged call `$namespace` returned a " *
+        "`$kind` graph value"))
+    staged_component, reference
+end
+
+_staged_stochastic_component(namespace::Symbol, value) =
+    _staged_component_output(namespace, value, :stochastic)
+
+_staged_deterministic_component(namespace::Symbol, value) =
+    _staged_component_output(namespace, value, :deterministic)
+
+function _staged_composition(components::Tuple, outputs::NamedTuple)
+    composition = compose(components...)
+    _lower_composition(composition, outputs)
+end
 
 function bind(composition::Composition)
     lowered = lower(composition)
@@ -682,8 +767,8 @@ ModelInstance(declaration::Model, bindings) =
 function instantiate(declaration::Model, bindings; conditions=(;))
     _validate_model(declaration)
     _validate_binding_names(declaration, bindings)
-    _validate_condition_names(declaration, conditions)
-    ModelInstance(declaration, bindings, conditions)
+    canonical_conditions = _canonical_conditions(declaration, conditions)
+    ModelInstance(declaration, bindings, canonical_conditions)
 end
 
 """Connect a subset of a model's open value ports."""
@@ -704,16 +789,17 @@ end
 """Condition stochastic sites while retaining and scoring their factors."""
 function condition(declaration::Model, conditions)
     _validate_model(declaration)
-    _validate_condition_names(declaration, conditions)
-    ModelInstance(declaration, (;), conditions)
+    canonical_conditions = _canonical_conditions(declaration, conditions)
+    ModelInstance(declaration, (;), canonical_conditions)
 end
 
 function condition(instance::ModelInstance, conditions)
     _validate_instance(instance)
-    _validate_condition_names(instance.declaration, conditions)
+    canonical_conditions = _canonical_conditions(
+        instance.declaration, conditions)
     ModelInstance(
         instance.declaration, instance.bindings,
-        merge(instance.conditions, conditions))
+        merge(instance.conditions, canonical_conditions))
 end
 
 condition(declaration::Model; kwargs...) = condition(declaration, (; kwargs...))
@@ -862,16 +948,38 @@ function _validate_substitution_names(declaration::Model, bindings)
     bindings
 end
 
-function _validate_condition_names(declaration::Model, conditions)
+function _canonical_conditions(declaration::Model, conditions)
     conditions isa NamedTuple || throw(ArgumentError(
         "native PPL conditions must be a NamedTuple; got $(typeof(conditions))"))
-    extra_conditions = setdiff(
-        Set(keys(conditions)), Set(keys(declaration.observations)))
-    isempty(extra_conditions) || throw(ArgumentError(
-        "native PPL conditions reference undeclared stochastic sites: " *
-        join(sort!(collect(extra_conditions)), ", ")))
-    conditions
+    names = Symbol[]
+    values = Any[]
+    for (name, value) in pairs(conditions)
+        canonical = if hasproperty(declaration.observations, name)
+            name
+        elseif declaration.outputs !== nothing &&
+               hasproperty(declaration.outputs, name)
+            output_name = getproperty(declaration.outputs, name)
+            hasproperty(declaration.observations, output_name) || throw(
+                ArgumentError(
+                    "native PPL condition `$name` refers to output " *
+                    "`$output_name`, which is not a stochastic site"))
+            output_name
+        else
+            throw(ArgumentError(
+                "native PPL conditions reference undeclared stochastic " *
+                "site `$name`"))
+        end
+        canonical in names && throw(ArgumentError(
+            "native PPL conditions name stochastic site `$canonical` more " *
+            "than once through public and internal identities"))
+        push!(names, canonical)
+        push!(values, value)
+    end
+    NamedTuple{Tuple(names)}(Tuple(values))
 end
+
+_validate_condition_names(declaration::Model, conditions) =
+    (_canonical_conditions(declaration, conditions); conditions)
 
 function _validate_instance(instance::ModelInstance)
     _validate_model(instance.declaration)
@@ -2017,6 +2125,104 @@ function _syntax_outputs(statement)
     Tuple(aliases), Tuple(names)
 end
 
+const _SYNTAX_DISTRIBUTION_NAMES =
+    (:Normal, :StandardNormal, :Exponential, :BernoulliLogit, :Poisson)
+const _SYNTAX_DETERMINISTIC_NAMES =
+    (:center, :zscale, :standardize, :affine, :exp, :exp_link)
+const _SYNTAX_OPERATOR_NAMES =
+    (:+, :.+, :-, :.-, :*, :.*, :/, :./, :^, :.^)
+
+function _syntax_submodel_connection(statement)
+    sampling = _syntax_sampling_statement(statement)
+    if sampling !== nothing
+        family = _syntax_name(
+            sampling.rhs isa Expr ? first(sampling.rhs.args) : sampling.rhs)
+        family in _SYNTAX_DISTRIBUTION_NAMES && return nothing
+        sampling.broadcasted && throw(ArgumentError(
+            "native PPL stochastic submodel calls use scalar `lhs ~ child(...)`; " *
+            "broadcast belongs inside the child model"))
+        sampling.lhs isa Symbol || throw(ArgumentError(
+            "native PPL stochastic submodel call needs a bare result name"))
+        callee, arguments = _syntax_call(
+            sampling.rhs, "stochastic submodel call")
+        return (; name=sampling.lhs, callee, arguments,
+                call=sampling.rhs, connection=:stochastic)
+    end
+
+    statement isa Expr && statement.head === :(=) || return nothing
+    lhs, rhs = statement.args
+    lhs isa Symbol || return nothing
+    rhs isa Expr && rhs.head === :call || return nothing
+    callee = _syntax_name(first(rhs.args))
+    callee === nothing && return nothing
+    callee in _SYNTAX_DETERMINISTIC_NAMES && return nothing
+    callee in _SYNTAX_OPERATOR_NAMES && return nothing
+    _, arguments = _syntax_call(rhs, "deterministic submodel call")
+    (; name=lhs, callee, arguments, call=rhs, connection=:deterministic)
+end
+
+function _syntax_composed_model(
+    signature, function_name::Symbol, argument_names::Vector{Symbol},
+    connections, explicit_outputs)
+    explicit_outputs === nothing && throw(ArgumentError(
+        "native PPL model composition requires an explicit returned graph value"))
+    available = Set(argument_names)
+    result_names = Symbol[]
+    component_names = Symbol[]
+    generated = Any[]
+    for connection in connections
+        first(connection.call.args) === function_name && throw(ArgumentError(
+            "native PPL model `$function_name` cannot recursively stage itself"))
+        connection.name in available && throw(ArgumentError(
+            "native PPL staged result `$(connection.name)` is already defined"))
+        for argument in connection.arguments
+            argument isa Expr && throw(ArgumentError(
+                "native PPL staged call `$(connection.name)` currently accepts " *
+                "named graph values or literal arguments; got `$argument`"))
+            argument isa Symbol && argument ∉ available && throw(ArgumentError(
+                "native PPL staged call `$(connection.name)` references " *
+                "unavailable value `$argument`"))
+        end
+        component_name = gensym(Symbol(connection.name, :_component))
+        helper = connection.connection === :stochastic ?
+            :_staged_stochastic_component : :_staged_deterministic_component
+        push!(generated, Expr(
+            :(=), Expr(:tuple, component_name, connection.name),
+            Expr(:call, _syntax_ref(helper), QuoteNode(connection.name),
+                 connection.call)))
+        push!(component_names, component_name)
+        push!(result_names, connection.name)
+        push!(available, connection.name)
+    end
+    output_aliases, output_names = explicit_outputs
+    result_name_set = Set(result_names)
+    all(name -> name in result_name_set, output_names) || throw(ArgumentError(
+        "native PPL composed model may return only staged child outputs; got " *
+        "$(output_names)"))
+    for output_name in output_names
+        output_index = findfirst(
+            connection -> connection.name === output_name, connections)
+        connection = connections[output_index]
+        connection.connection === :stochastic || continue
+        consumer_index = findfirst(
+            index -> index > output_index &&
+                     any(==(output_name), connections[index].arguments),
+            eachindex(connections))
+        consumer_index === nothing || throw(ArgumentError(
+            "native PPL cannot yet return stochastic staged output " *
+            "`$output_name` after it feeds downstream child " *
+            "`$(connections[consumer_index].name)`; public site aliases " *
+            "currently require a terminal child output"))
+    end
+    public_outputs = _syntax_namedtuple(
+        collect(output_aliases), Any[output_names...])
+    push!(generated, Expr(
+        :return,
+        Expr(:call, _syntax_ref(:_staged_composition),
+             Expr(:tuple, component_names...), public_outputs)))
+    Expr(:function, signature, Expr(:block, generated...))
+end
+
 function _model_function_syntax(definition)
     definition isa Expr && definition.head === :function ||
         throw(ArgumentError(
@@ -2057,6 +2263,17 @@ function _model_function_syntax(definition)
         only(return_indices) == length(statements) || throw(ArgumentError(
             "native PPL @model return must be the final statement"))
         explicit_outputs = _syntax_outputs(pop!(statements))
+    end
+    connections = [_syntax_submodel_connection(statement)
+                   for statement in statements]
+    if any(connection -> connection !== nothing, connections)
+        all(connection -> connection !== nothing, connections) || throw(
+            ArgumentError(
+                "native PPL cannot yet mix staged submodel connections with " *
+                "local parameters, nodes, or factors in one model"))
+        return _syntax_composed_model(
+            signature, function_name, argument_names, connections,
+            explicit_outputs)
     end
     for statement in statements
         sampling = _syntax_sampling_statement(statement)
@@ -2204,7 +2421,10 @@ center/zscale nodes, affine and exp deterministic nodes, and staged scalar or
 explicitly broadcast Normal/BernoulliLogit/Poisson stochastic sites. A final
 `return value` or named-tuple return declares component outputs and permits a
 deterministic zero-observation model. The current vector executor requires the
-explicit broadcast form (`@.` or dotted `~`).
+explicit broadcast form (`@.` or dotted `~`). Composition-only outer models
+use `site ~ stochastic_child(...)` for stochastic child outputs and
+`value = deterministic_child(...)` for deterministic child outputs; the macro
+generates the explicit namespaced graph machinery.
 """
 macro model(definition)
     esc(_model_function_syntax(definition))

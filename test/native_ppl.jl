@@ -285,6 +285,7 @@ NP.@model function composable_gaussian(x)
     sigma ~ Exponential(2.0)
     mu = intercept + slope * x
     @. y ~ Normal(mu, sigma)
+    return y
 end
 
 NP.@model function concise_zscale_component(raw)
@@ -336,6 +337,51 @@ end
 NP.@model function scalar_normal_likelihood(mu)
     sigma ~ Exponential(2.0)
     @. y ~ Normal(mu, sigma)
+    return y
+end
+
+NP.@model function natural_latent_normal(prior_mu, prior_tau)
+    z ~ scalar_normal_site(prior_mu, prior_tau)
+    y ~ scalar_normal_likelihood(z)
+    return y
+end
+
+module QualifiedStagedModels
+using BayesianRegressionModels
+using Distributions: Normal
+
+const NP = BayesianRegressionModels.NativePPL
+
+NP.@model function qualified_nested(prior_mu, prior_tau)
+    z ~ Normal(prior_mu, prior_tau)
+    return z
+end
+end
+
+NP.@model function qualified_nested(prior_mu, prior_tau)
+    z ~ QualifiedStagedModels.qualified_nested(prior_mu, prior_tau)
+    return z
+end
+
+NP.@model function natural_preprocessed_normal(raw)
+    scaled = concise_zscale_component(raw)
+    y ~ composable_gaussian(scaled)
+    return y
+end
+
+NP.@model function assigned_stochastic_submodel()
+    z = scalar_normal_site(0.0, 1.0)
+    return z
+end
+
+NP.@model function sampled_deterministic_submodel(raw)
+    scaled ~ concise_zscale_component(raw)
+    return scaled
+end
+
+NP.@model function ambiguous_multioutput_submodel()
+    values ~ named_scalar_normal_priors()
+    return values
 end
 
 NP.@model function monolithic_scalar_normal()
@@ -3005,6 +3051,92 @@ end
             MersenneTwister(913), latent_workspace,
             latent_prepared, latent_position)
 
+    natural_latent = natural_latent_normal(0.25, 0.8)
+    @test natural_latent isa NP.ModelInstance
+    @test natural_latent.declaration.outputs == (; y=:y)
+    @test keys(natural_latent.declaration.observations) ==
+          (NP.qualified_name(:z, :z), :y)
+    @test isempty(natural_latent.conditions)
+    conditioned_natural_latent = NP.condition(natural_latent; y=response)
+    @test keys(conditioned_natural_latent.conditions) == (:y,)
+    natural_latent_prepared = NP.prepare(conditioned_natural_latent)
+    natural_latent_workspace = NP.workspace(
+        natural_latent_prepared, Float64, DI.AutoEnzyme())
+    natural_density, natural_gradient = NP.logdensity_and_gradient!(
+        natural_latent_workspace, natural_latent_prepared, latent_position)
+    @test natural_density ≈ latent_density
+    @test natural_gradient ≈ latent_gradient
+    @test NP.evaluate(
+        natural_latent_workspace, natural_latent_prepared, latent_position,
+        NP.LinearPredictor()) == latent_location
+    @test NP.evaluate(
+        natural_latent_workspace, natural_latent_prepared, latent_position,
+        NP.PointwiseLogLikelihood()) == latent_pointwise
+    @test NP.simulate(
+        MersenneTwister(913), natural_latent_workspace,
+        natural_latent_prepared, latent_position) == NP.simulate(
+            MersenneTwister(913), latent_workspace,
+            latent_prepared, latent_position)
+    natural_rebound_response = [0.1, 0.4, 0.8]
+    natural_rebound = NP.rebind(
+        natural_latent_prepared, (; y=natural_rebound_response))
+    @test natural_rebound.response == natural_rebound_response
+    @test length(natural_rebound.plan.axes.observation) == 3
+    natural_prediction = NP.rebind(natural_latent_prepared, (;))
+    @test !NP.has_response(natural_prediction)
+    @test length(NP.simulate(
+        MersenneTwister(914), NP.workspace(natural_prediction),
+        natural_prediction, latent_position)) == length(response)
+
+    qualified = qualified_nested(0.25, 0.8)
+    @test qualified isa NP.ModelInstance
+    @test qualified.declaration.outputs == (; z=:z)
+    @test keys(NP.condition(qualified; z=0.4).conditions) == (:z,)
+
+    natural_preprocessed = NP.condition(
+        natural_preprocessed_normal(raw_x); y=response)
+    explicit_preprocessing_component = NP.component(
+        :scaled, concise_zscale_component(raw_x))
+    explicit_preprocessing_output = NP.output(
+        explicit_preprocessing_component, :scaled)
+    explicit_preprocessed = NP.compose(
+        explicit_preprocessing_component,
+        NP.component(
+            :y,
+            NP.condition(
+                composable_gaussian(explicit_preprocessing_output);
+                y=response)))
+    natural_preprocessed_plan = NP.compile(natural_preprocessed)
+    explicit_preprocessed_plan = NP.compile(explicit_preprocessed)
+    natural_preprocessed_prepared = NP.prepare(natural_preprocessed_plan)
+    explicit_preprocessed_prepared = NP.prepare(explicit_preprocessed_plan)
+    natural_preprocessed_workspace = NP.workspace(
+        natural_preprocessed_prepared, Float64, DI.AutoEnzyme())
+    explicit_preprocessed_workspace = NP.workspace(
+        explicit_preprocessed_prepared, Float64, DI.AutoEnzyme())
+    preprocessing_position = [0.3, -0.4, log(0.8)]
+    natural_preprocessed_density, natural_preprocessed_gradient =
+        NP.logdensity_and_gradient!(
+            natural_preprocessed_workspace, natural_preprocessed_prepared,
+            preprocessing_position)
+    explicit_preprocessed_density, explicit_preprocessed_gradient =
+        NP.logdensity_and_gradient!(
+            explicit_preprocessed_workspace, explicit_preprocessed_prepared,
+            preprocessing_position)
+    @test natural_preprocessed_density ≈ explicit_preprocessed_density
+    @test natural_preprocessed_gradient ≈ explicit_preprocessed_gradient
+    @test NP.evaluate(
+        natural_preprocessed_workspace, natural_preprocessed_prepared,
+        preprocessing_position, NP.LinearPredictor()) == NP.evaluate(
+            explicit_preprocessed_workspace, explicit_preprocessed_prepared,
+            preprocessing_position, NP.LinearPredictor())
+    @test steady_state_allocations(
+        natural_preprocessed_workspace, natural_preprocessed_prepared,
+        preprocessing_position) == (; primal=0, gradient=0)
+    @test_throws ArgumentError assigned_stochastic_submodel()
+    @test_throws ArgumentError sampled_deterministic_submodel(raw_x)
+    @test_throws ArgumentError ambiguous_multioutput_submodel()
+
     latent_brm_data = (; y=response)
     latent_brm = @brm latent_brm_data begin
         sigma ~ Exponential(2.0)
@@ -3087,6 +3219,9 @@ end
     @test NP.simulate_prior(
         MersenneTwister(915), latent_brm_workspace,
         latent_brm_prepared) == allocated_prior
+    @test NP.simulate_prior(
+        MersenneTwister(915), natural_latent_workspace,
+        natural_latent_prepared) == allocated_prior
     prediction_prior = NP.simulate_prior(
         MersenneTwister(915), NP.workspace(latent_prediction),
         latent_prediction)
@@ -3323,6 +3458,31 @@ end
             @. y ~ Normal(mu, sigma)
         end)))
     @test occursin("features must use distinct raw inputs", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function recursive_model(x)
+            z ~ recursive_model(x)
+            return z
+        end)))
+    @test occursin("cannot recursively stage itself", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function mixed_submodel(x)
+            z ~ scalar_normal_site(0.0, 1.0)
+            sigma ~ Exponential(1.0)
+            return z
+        end)))
+    @test occursin("cannot yet mix staged submodel connections", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function missing_submodel_return(x)
+            z ~ scalar_normal_site(0.0, 1.0)
+        end)))
+    @test occursin("requires an explicit returned graph value", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function returned_upstream_site(x)
+            z ~ scalar_normal_site(0.0, 1.0)
+            y ~ scalar_normal_likelihood(z)
+            return z
+        end)))
+    @test occursin("public site aliases currently require a terminal", err.msg)
 end
 
 
