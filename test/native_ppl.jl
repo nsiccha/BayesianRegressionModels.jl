@@ -4243,6 +4243,123 @@ end
             candidate_workspace, candidate_prepared, varying_position) ==
               (; primal=0, gradient=0)
     end
+    varying_slope_known_bindings = (;
+        x=[2.0, -1.5, 0.25], group=[:c, :a, :c])
+    varying_slope_known_replay = NP.rebind(
+        varying_slope_prepared, (;);
+        bindings=varying_slope_known_bindings)
+    @test varying_slope_known_replay.plan.graph.dimension ==
+          varying_slope_plan.graph.dimension
+    @test varying_slope_known_replay.plan.group_indices ==
+          (; r_mu_p_group=(3, 1, 3))
+    @test NP.evaluate(
+        NP.workspace(varying_slope_known_replay),
+        varying_slope_known_replay, varying_position,
+        NP.LinearPredictor()) ≈
+          (varying_beta .+ varying_effects[[3, 1, 3]]) .*
+          varying_slope_known_bindings.x
+    varying_slope_new_bindings = (;
+        x=[0.5, -1.0, 2.0, 1.5],
+        group=[:a, :new_slope_group, :new_slope_group, :c])
+    varying_slope_new_replay = NP.rebind(
+        varying_slope_prepared, (;);
+        bindings=varying_slope_new_bindings, new_groups=:resample)
+    @test varying_slope_new_replay.plan.generated_group_levels ==
+          (; b_p_group=(:new_slope_group,))
+    @test varying_slope_new_replay.plan.group_indices ==
+          (; r_mu_p_group=(1, -1, -1, 3))
+    varying_slope_new_workspace = NP.workspace(varying_slope_new_replay)
+    varying_slope_new_output = zeros(4)
+    varying_slope_new_rng = MersenneTwister(945)
+    varying_slope_new_expected_rng = MersenneTwister(945)
+    varying_slope_generated_effect =
+        varying_tau * randn(varying_slope_new_expected_rng)
+    varying_slope_new_effects = [
+        varying_effects[1], varying_slope_generated_effect,
+        varying_slope_generated_effect, varying_effects[3]]
+    varying_slope_new_mu = (
+        varying_beta .+ varying_slope_new_effects) .*
+        varying_slope_new_bindings.x
+    varying_slope_new_expected = map(varying_slope_new_mu) do location
+        location + varying_sigma * randn(varying_slope_new_expected_rng)
+    end
+    NP.simulate!(
+        varying_slope_new_rng, varying_slope_new_output,
+        varying_slope_new_workspace, varying_slope_new_replay,
+        varying_position)
+    @test varying_slope_new_output ≈ varying_slope_new_expected
+    @test only(varying_slope_new_workspace.primal.generated_group_values) ==
+          varying_slope_generated_effect
+    @test vec(varying_slope_new_workspace.primal.node_rows[3, :]) ≈
+          varying_slope_new_mu
+    @test factor_predictive_allocations(
+        varying_slope_new_rng, varying_slope_new_output,
+        varying_slope_new_workspace, varying_slope_new_replay,
+        varying_position) == 0
+    varying_slope_draw_positions = [
+        varying_position';
+        log(0.9) -0.2 0.3 -0.4 0.15 log(0.6);
+    ]
+    varying_slope_draw_predictive = zeros(2, 4)
+    varying_slope_draw_linear = zeros(2, 4)
+    varying_slope_manual_predictive = zeros(2, 4)
+    varying_slope_manual_linear = zeros(2, 4)
+    varying_slope_manual_fused_linear = zeros(2, 4)
+    varying_slope_draw_rng = MersenneTwister(946)
+    varying_slope_manual_rng = MersenneTwister(946)
+    for draw in axes(varying_slope_draw_positions, 1)
+        NP.simulate!(
+            varying_slope_manual_rng,
+            @view(varying_slope_manual_predictive[draw, :]),
+            varying_slope_new_workspace, varying_slope_new_replay,
+            @view(varying_slope_draw_positions[draw, :]))
+        varying_slope_manual_fused_linear[draw, :] .=
+            @view varying_slope_new_workspace.primal.node_rows[3, :]
+    end
+    NP.simulate_draws!(
+        varying_slope_draw_rng, varying_slope_draw_predictive,
+        varying_slope_new_workspace, varying_slope_new_replay,
+        varying_slope_draw_positions)
+    @test varying_slope_draw_predictive == varying_slope_manual_predictive
+    varying_slope_linear_rng = MersenneTwister(947)
+    varying_slope_linear_manual_rng = MersenneTwister(947)
+    for draw in axes(varying_slope_draw_positions, 1)
+        NP.evaluate!(
+            varying_slope_linear_manual_rng,
+            @view(varying_slope_manual_linear[draw, :]),
+            varying_slope_new_workspace, varying_slope_new_replay,
+            @view(varying_slope_draw_positions[draw, :]),
+            NP.LinearPredictor())
+    end
+    NP.evaluate_draws!(
+        varying_slope_linear_rng, varying_slope_draw_linear,
+        varying_slope_new_workspace, varying_slope_new_replay,
+        varying_slope_draw_positions, NP.LinearPredictor())
+    @test varying_slope_draw_linear == varying_slope_manual_linear
+    varying_slope_queries = (;
+        linear=NP.LinearPredictor(),
+        predictive=NP.PosteriorPredictive())
+    varying_slope_bundle = (;
+        linear=zeros(2, 4), predictive=zeros(2, 4))
+    NP.execute_draws!(
+        MersenneTwister(946), varying_slope_bundle,
+        varying_slope_new_workspace, varying_slope_new_replay,
+        varying_slope_draw_positions, varying_slope_queries)
+    @test varying_slope_bundle.linear == varying_slope_manual_fused_linear
+    @test varying_slope_bundle.predictive == varying_slope_manual_predictive
+    @test factor_generated_draw_allocations(
+        MersenneTwister(948), MersenneTwister(949), MersenneTwister(950),
+        varying_slope_draw_predictive, varying_slope_draw_linear,
+        varying_slope_bundle, varying_slope_new_workspace,
+        varying_slope_new_replay, varying_slope_draw_positions,
+        varying_slope_queries) ==
+          (; predictive=0, linear=0, bundle=0)
+    varying_slope_signature = NP.batch_output_signature(
+        varying_slope_new_replay, varying_slope_draw_positions,
+        NP.LinearPredictor())
+    @test NP.output_axes(varying_slope_signature) == (
+        BRM.NativePPLAxis(:draw, Base.OneTo(2)),
+        BRM.NativePPLAxis(:observation, Base.OneTo(4)))
 
     sampled_offset_plan = NP.compile(sampled_offset_brmi)
     @test sampled_offset_plan isa NP.FactorPlan
