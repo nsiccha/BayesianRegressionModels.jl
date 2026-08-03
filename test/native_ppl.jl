@@ -3787,6 +3787,153 @@ end
     @test_throws ArgumentError NP.cholesky_correlation(
         (:Intercept, :x), 0.0)
 
+    correlated_group_declaration = NP.model(
+        inputs=(; x=NP.input(), group=NP.input()),
+        parameters=(;
+            tau=NP.parameter(
+                NP.PositiveSupport(), (:Intercept, :x);
+                transform=NP.Exp(), prior=NP.Exponential(1)),
+            correlation=NP.cholesky_correlation((:Intercept, :x), 2.0),
+            z=NP.grouped_standard_normal(:group, (:Intercept, :x)),
+            beta=NP.parameter(
+                NP.RealSupport(), (:x,); transform=NP.Identity(),
+                prior=NP.StandardNormal()),
+            sigma=NP.parameter(
+                NP.PositiveSupport(), (:sigma,); transform=NP.Exp(),
+                prior=NP.Exponential(2))),
+        nodes=(;
+            correlated_by_row=NP.grouped_affine(
+                :z, :tau, :correlation, :group, (nothing, :x)),
+            mu=NP.affine(
+                :x, :beta; offsets=(:correlated_by_row,),
+                intercept=false)),
+        observations=(; y=NP.broadcasted(NP.normal(:y, :mu, :sigma))),
+        site_order=(:tau, :correlation, :z, :beta, :sigma, :y))
+    @test_throws ArgumentError NP.grouped_affine(
+        :z, :tau, :correlation, :group, ())
+    @test_throws ArgumentError NP.grouped_affine(
+        :z, :tau, :correlation, :group, (nothing, nothing))
+    correlated_group_node = correlated_group_declaration.nodes.correlated_by_row
+    @test NP.grouped_standardized(correlated_group_node) === :z
+    @test NP.grouped_scales(correlated_group_node) === :tau
+    @test NP.grouped_correlation(correlated_group_node) === :correlation
+    @test NP.group_input(correlated_group_node) === :group
+    @test NP.grouped_predictors(correlated_group_node) == (nothing, :x)
+    correlated_group_plan = NP.compile(
+        correlated_group_declaration,
+        (; x=sampled_offset_data.x, group=grouped_bindings.group);
+        conditions=(; y=sampled_offset_data.y))
+    @test correlated_group_plan isa NP.FactorPlan
+    @test correlated_group_plan.graph.schedule == (
+        :tau, :correlation, :z, :beta, :sigma,
+        :correlated_by_row, :mu, :y)
+    @test correlated_group_plan.graph.dimension == 11
+    @test correlated_group_plan.group_indices ==
+          (; correlated_by_row=(1, 2, 1, 3))
+    @test correlated_group_plan.graph.nodes.correlated_by_row isa
+          NP.GroupedAffineFactorNode
+    @test NP.factor_node_dependencies(
+        correlated_group_plan.graph.nodes.correlated_by_row) ==
+          (:z, :tau, :correlation)
+    correlated_group_prepared = NP.prepare(correlated_group_plan)
+    correlated_group_workspace = NP.workspace(
+        correlated_group_prepared, Float64, DI.AutoEnzyme())
+    correlated_group_position = [
+        log(0.6), log(0.4), 0.25,
+        0.2, -0.3, -0.1, 0.5, 0.4, -0.2,
+        0.7, log(0.5)]
+    correlated_tau = exp.(correlated_group_position[1:2])
+    correlated_raw = correlated_group_position[3]
+    correlated_rho = tanh(correlated_raw)
+    correlated_sech = 1 / cosh(correlated_raw)
+    correlated_z = reshape(correlated_group_position[4:9], 2, 3)
+    correlated_effects = [
+        (correlated_tau[1] * correlated_z[1, group],
+         correlated_tau[2] *
+            (correlated_rho * correlated_z[1, group] +
+             correlated_sech * correlated_z[2, group]))
+        for group in 1:3]
+    correlated_beta = correlated_group_position[10]
+    correlated_sigma = exp(correlated_group_position[11])
+    correlated_mu = [
+        correlated_beta * sampled_offset_data.x[row] +
+        correlated_effects[[1, 2, 1, 3][row]][1] +
+        correlated_effects[[1, 2, 1, 3][row]][2] *
+            sampled_offset_data.x[row]
+        for row in eachindex(sampled_offset_data.x)]
+    correlated_residuals = sampled_offset_data.y .- correlated_mu
+    correlated_eta = 2.0
+    correlated_log_constant =
+        BRM.loggamma(correlated_eta + 0.5) -
+        BRM.loggamma(correlated_eta) - 0.5 * log(pi)
+    correlated_expected_density =
+        sum(logpdf.(Exponential(1), correlated_tau)) +
+        sum(correlated_group_position[1:2]) +
+        correlated_log_constant -
+        2 * correlated_eta * log(cosh(correlated_raw)) +
+        sum(logpdf.(Normal(), correlated_z)) +
+        logpdf(Normal(), correlated_beta) +
+        logpdf(Exponential(2), correlated_sigma) +
+        correlated_group_position[11] +
+        sum(logpdf.(Normal.(correlated_mu, correlated_sigma),
+                    sampled_offset_data.y))
+    correlated_scores = correlated_residuals ./ correlated_sigma^2
+    correlated_intercept_scores = [
+        sum(correlated_scores[[1, 3]]),
+        correlated_scores[2], correlated_scores[4]]
+    correlated_slope_scores = [
+        sum(correlated_scores[[1, 3]] .*
+            sampled_offset_data.x[[1, 3]]),
+        correlated_scores[2] * sampled_offset_data.x[2],
+        correlated_scores[4] * sampled_offset_data.x[4]]
+    correlated_tau0_gradient =
+        1 - correlated_tau[1] + sum(
+            correlated_intercept_scores[group] *
+            correlated_effects[group][1] for group in 1:3)
+    correlated_tau1_gradient =
+        1 - correlated_tau[2] + sum(
+            correlated_slope_scores[group] *
+            correlated_effects[group][2] for group in 1:3)
+    correlated_raw_gradient =
+        -2 * correlated_eta * correlated_rho + sum(
+            correlated_slope_scores[group] * correlated_tau[2] *
+            (correlated_sech^2 * correlated_z[1, group] -
+             correlated_rho * correlated_sech *
+                correlated_z[2, group]) for group in 1:3)
+    correlated_z1_gradients = [
+        -correlated_z[1, group] +
+        correlated_tau[1] * correlated_intercept_scores[group] +
+        correlated_tau[2] * correlated_rho *
+            correlated_slope_scores[group]
+        for group in 1:3]
+    correlated_z2_gradients = [
+        -correlated_z[2, group] + correlated_tau[2] *
+            correlated_sech * correlated_slope_scores[group]
+        for group in 1:3]
+    correlated_interleaved_gradients = collect(Iterators.flatten(
+        (correlated_z1_gradients[group],
+         correlated_z2_gradients[group]) for group in 1:3))
+    correlated_expected_gradient = [
+        correlated_tau0_gradient,
+        correlated_tau1_gradient,
+        correlated_raw_gradient,
+        correlated_interleaved_gradients...,
+        -correlated_beta +
+            sum(correlated_scores .* sampled_offset_data.x),
+        1 - correlated_sigma / 2 - length(sampled_offset_data.y) +
+            sum(abs2, correlated_residuals) / correlated_sigma^2]
+    correlated_density, correlated_gradient = NP.logdensity_and_gradient!(
+        correlated_group_workspace, correlated_group_prepared,
+        correlated_group_position)
+    @test correlated_density ≈ correlated_expected_density
+    @test correlated_gradient ≈ correlated_expected_gradient
+    @test NP.evaluate(
+        correlated_group_workspace, correlated_group_prepared,
+        correlated_group_position, NP.LinearPredictor()) ≈ correlated_mu
+    @test factor_steady_state_allocations(
+        correlated_group_workspace, correlated_group_prepared,
+        correlated_group_position) == (; primal=0, gradient=0)
+
     varying_brm_data = (;
         x=sampled_offset_data.x,
         group=grouped_bindings.group,
