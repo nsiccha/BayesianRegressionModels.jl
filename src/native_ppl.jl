@@ -801,9 +801,9 @@ end
 @inline function _native_ppl_location_parameter(
     ::NativePPLScalarBroadcastNode{Location,Parameter}, parameters,
 ) where {Location,Parameter}
+    hasproperty(parameters, :coefficients) && return parameters.coefficients
     hasproperty(parameters, Parameter) && return getproperty(
         parameters, Parameter)
-    hasproperty(parameters, :coefficients) && return parameters.coefficients
     throw(NativePPLCapabilityError(
         :graph_identity,
         "compiled scalar graph is missing parameter `$Parameter`"))

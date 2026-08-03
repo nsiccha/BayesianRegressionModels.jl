@@ -1164,9 +1164,7 @@ function _bind_scalar_site_schedule(
         downstream_scale, 2, scale_declaration.prior.scale)
     likelihood_factor = BRM.NativePPLNormalFactor(
         response_name, site_name, downstream_scale, observation_axis)
-    parameters = merge(
-        NamedTuple{(site_name,)}((site_parameter,)),
-        (; scale=scale_parameter))
+    parameters = (; coefficients=site_parameter, scale=scale_parameter)
     _validated_plan(BRM.NativePPLPlan(
         (; observation=observation_axis, coefficient=site_axis,
            scale=scale_axis),

@@ -350,6 +350,12 @@ NP.@model function monolithic_latent_normal(prior_mu, prior_tau)
     @. y ~ Normal(z, sigma)
 end
 
+NP.@model function monolithic_scale_named_site(prior_mu, prior_tau)
+    scale ~ Normal(prior_mu, prior_tau)
+    sigma ~ Exponential(2.0)
+    @. y ~ Normal(scale, sigma)
+end
+
 NP.@model function macro_bernoulli_center(
     x::AbstractVector{<:Real})
     intercept ~ Normal()
@@ -2929,7 +2935,9 @@ end
         latent_response_name)) == (latent_name, latent_scale_name)
     @test keys(latent_lowered.conditions) == (latent_response_name,)
     latent_plan = NP.compile(latent_composition)
-    @test keys(latent_plan.parameters) == (latent_name, :scale)
+    @test keys(latent_plan.parameters) == (:coefficients, :scale)
+    @test BRM.native_parameter_name(latent_plan.parameters.coefficients) ===
+          latent_name
     @test keys(latent_plan.factors) ==
           (:site_prior, :scale_prior, :likelihood)
     @test latent_plan.factors.site_prior isa
@@ -2937,6 +2945,14 @@ end
     @test BRM.native_scalar_parameter(latent_plan.nodes.location) ===
           latent_name
     @test LogDensityProblems.dimension(latent_plan) == 2
+
+    scale_named_plan = NP.compile(NP.condition(
+        monolithic_scale_named_site(0.25, 0.8);
+        y=[0.2, -0.1, 1.1, 0.7]))
+    @test keys(scale_named_plan.parameters) == (:coefficients, :scale)
+    @test BRM.native_parameter_name(
+        scale_named_plan.parameters.coefficients) === :scale
+    @test LogDensityProblems.dimension(scale_named_plan) == 2
 
     aliased_prior = aliased_scalar_normal_prior()
     @test keys(aliased_prior.declaration.parameters) == (:theta,)
