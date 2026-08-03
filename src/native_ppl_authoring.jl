@@ -447,6 +447,17 @@ struct ZScaleFactorNode{I} <: AbstractFactorNode
     input::I
 end
 
+"""Training-set mean owned by a bound fitted-center factor node."""
+struct FittedCenter{T}
+    mean::T
+end
+
+"""Training-set mean and corrected sample SD owned by a bound zscale node."""
+struct FittedZScale{T}
+    mean::T
+    scale::T
+end
+
 struct AffineFactorNode{I,C,O,H} <: AbstractFactorNode
     inputs::I
     coefficients::C
@@ -921,9 +932,10 @@ function _canonical_factor_conditions(declaration::Model, conditions)
 end
 
 """Executable plan for an ordered continuous stochastic-site DAG."""
-struct FactorPlan{Output,M,G,B,C,I,N,J,K,L,A}
+struct FactorPlan{Output,M,G,F,B,C,I,N,J,K,L,A}
     declaration::M
     graph::G
+    fitted_nodes::F
     bindings::B
     conditions::C
     site_indices::I
@@ -934,14 +946,15 @@ struct FactorPlan{Output,M,G,B,C,I,N,J,K,L,A}
     observation_axis::A
 end
 
-FactorPlan(declaration::M, graph::G, bindings::B, conditions::C,
+FactorPlan(declaration::M, graph::G, fitted_nodes::F,
+           bindings::B, conditions::C,
            site_indices::I, node_indices::N, group_indices::J,
            generated_group_levels::K,
            generated_group_indices::L,
            observation_axis::A,
-           output_site::Symbol) where {M,G,B,C,I,N,J,K,L,A} =
-    FactorPlan{output_site,M,G,B,C,I,N,J,K,L,A}(
-        declaration, graph, bindings, conditions, site_indices,
+           output_site::Symbol) where {M,G,F,B,C,I,N,J,K,L,A} =
+    FactorPlan{output_site,M,G,F,B,C,I,N,J,K,L,A}(
+        declaration, graph, fitted_nodes, bindings, conditions, site_indices,
         node_indices, group_indices, generated_group_levels,
         generated_group_indices, observation_axis)
 
@@ -1008,7 +1021,8 @@ function _factor_value_is_row(::NodeValue{Name}, graph, bindings) where {Name}
     node isa Union{ExpFactorNode,LogFactorNode} &&
         return _factor_value_is_row(node.input, graph, bindings)
     node isa Union{
-        AffineFactorNode,GroupGatherFactorNode,RowProductFactorNode,
+        CenterFactorNode,ZScaleFactorNode,AffineFactorNode,
+        GroupGatherFactorNode,RowProductFactorNode,
         GroupedAffineFactorNode}
 end
 _factor_value_is_row(::SiteValue{Name}, graph, bindings) where {Name} =
@@ -1163,8 +1177,54 @@ function _validate_factor_plan_site(
     nothing
 end
 
+function _fit_factor_nodes(graph::FactorGraph, bindings::NamedTuple)
+    names = Tuple(name for (name, node) in pairs(graph.nodes)
+                  if node isa Union{CenterFactorNode,ZScaleFactorNode})
+    values = map(names) do name
+        node = getproperty(graph.nodes, name)
+        node.input isa InputValue || throw(CapabilityError(
+            :factor_nodes,
+            "fitted transform node `$name` requires one bound vector input"))
+        input_name = input_value_name(node.input)
+        predictor = getproperty(bindings, input_name)
+        predictor isa AbstractVector || throw(ArgumentError(
+            "fitted transform input `$input_name` must be a vector"))
+        if node isa CenterFactorNode
+            FittedCenter(BRM._native_ppl_fit_center(predictor, input_name))
+        else
+            fit = BRM._native_ppl_fit_zscale(predictor, input_name)
+            FittedZScale(fit.mean, fit.scale)
+        end
+    end
+    NamedTuple{names}(values)
+end
+
+function _factor_fitted_nodes(graph::FactorGraph, bindings::NamedTuple,
+                              fitted_nodes)
+    expected = Tuple(name for (name, node) in pairs(graph.nodes)
+                     if node isa Union{CenterFactorNode,ZScaleFactorNode})
+    fitted_nodes === nothing && return _fit_factor_nodes(graph, bindings)
+    fitted_nodes isa NamedTuple || throw(ArgumentError(
+        "native PPL fitted factor constants must be a NamedTuple"))
+    keys(fitted_nodes) == expected || throw(CapabilityError(
+        :fitted_nodes,
+        "frozen fitted-node identities $(keys(fitted_nodes)) do not match " *
+        "the rebound graph identities $expected"))
+    for name in expected
+        node = getproperty(graph.nodes, name)
+        fitted = getproperty(fitted_nodes, name)
+        node isa CenterFactorNode && fitted isa FittedCenter ||
+        node isa ZScaleFactorNode && fitted isa FittedZScale || throw(
+            CapabilityError(
+                :fitted_nodes,
+                "frozen constants for `$name` do not match its transform"))
+    end
+    fitted_nodes
+end
+
 function _bind_factor_plan(declaration::Model, bindings, conditions;
-                           group_levels=(;), new_groups::Symbol=:error)
+                           group_levels=(;), new_groups::Symbol=:error,
+                           fitted_nodes=nothing)
     input_axis_length = nothing
     group_inputs = Set(_group_input_names(declaration))
     for (name, declaration_input) in pairs(declaration.inputs)
@@ -1198,8 +1258,10 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
     graph = factor_graph(
         declaration; conditions=canonical_conditions, bindings,
         group_levels, new_groups)
+    fitted_nodes = _factor_fitted_nodes(graph, bindings, fitted_nodes)
     for (name, node) in pairs(graph.nodes)
         node isa Union{
+            CenterFactorNode,ZScaleFactorNode,
             ExpFactorNode,LogFactorNode,AffineFactorNode,GroupGatherFactorNode,
             RowProductFactorNode,GroupedAffineFactorNode,
         } ||
@@ -1207,8 +1269,13 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
             :factor_nodes,
             "multi-latent factor node `$name` has unsupported operation " *
             "$(typeof(node)); the current executable slice accepts scalar " *
-            "exp and log plus row-valued affine, group-gather, and product " *
-            "nodes"))
+            "fitted transforms and row-valued exp, log, affine, " *
+            "group-gather, product, and grouped-affine nodes"))
+        if node isa Union{CenterFactorNode,ZScaleFactorNode}
+            node.input isa InputValue || throw(CapabilityError(
+                :factor_nodes,
+                "fitted transform node `$name` requires one bound input"))
+        end
         if node isa LogFactorNode
             node.input isa InputValue || throw(CapabilityError(
                 :factor_nodes,
@@ -1498,7 +1565,8 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
                 "conditioned likelihood evaluation requires explicit " *
                 "group-effect coordinates"))
     FactorPlan(
-        declaration, graph, bindings, canonical_conditions, site_indices,
+        declaration, graph, fitted_nodes, bindings, canonical_conditions,
+        site_indices,
         node_indices, group_indices, generated_group_levels,
         generated_group_indices,
         BRM.NativePPLAxis(:observation, observation_keys), output_site)
@@ -1676,6 +1744,17 @@ end
 function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
     isconcretetype(T) || throw(ArgumentError(
         "native PPL factor prepared element type must be concrete; got $T"))
+    for (name, fitted) in pairs(plan.fitted_nodes)
+        mean = T(fitted.mean)
+        isfinite(mean) || throw(ArgumentError(
+            "native PPL fitted mean for `$name` cannot be represented as $T"))
+        if fitted isa FittedZScale
+            scale = T(fitted.scale)
+            isfinite(scale) && scale > zero(T) || throw(ArgumentError(
+                "native PPL fitted sample SD for `$name` cannot be " *
+            "represented as a finite positive $T"))
+        end
+    end
     group_inputs = Set(_group_input_names(plan.declaration))
     binding_names = Tuple(keys(plan.bindings))
     binding_values = map(binding_names) do name
@@ -1712,7 +1791,8 @@ function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
     end
     conditions = NamedTuple{names}(values)
     owned_plan = FactorPlan(
-        plan.declaration, plan.graph, bindings, conditions,
+        plan.declaration, plan.graph, plan.fitted_nodes,
+        bindings, conditions,
         plan.site_indices, plan.node_indices, plan.group_indices,
         plan.generated_group_levels,
         plan.generated_group_indices,
@@ -1751,6 +1831,7 @@ end
     node_index = getproperty(plan.node_indices, Name)
     node = getproperty(plan.graph.nodes, Name)
     node isa Union{
+        CenterFactorNode,ZScaleFactorNode,
         ExpFactorNode,LogFactorNode,AffineFactorNode,
         GroupGatherFactorNode,RowProductFactorNode,
         GroupedAffineFactorNode,
@@ -1965,8 +2046,55 @@ end
 
 @inline _factor_site_logdensity!(::Val,
         ::StochasticSite{S,Tr,F,BroadcastSiteShape,GeneratedSite},
+    position::AbstractVector{T}, prepared::FactorPrepared,
+    buffers::FactorBuffers{T}) where {S,Tr,F,T} = zero(T)
+
+@inline function _factor_node_logdensity!(::Val{Name},
+        node::CenterFactorNode,
         position::AbstractVector{T}, prepared::FactorPrepared,
-        buffers::FactorBuffers{T}) where {S,Tr,F,T} = zero(T)
+        buffers::FactorBuffers{T}) where {Name,T}
+    node_index = getproperty(prepared.plan.node_indices, Name)
+    fitted = getproperty(prepared.plan.fitted_nodes, Name)
+    mean = T(fitted.mean)
+    first_value = zero(T)
+    for row in prepared.plan.observation_axis.keys
+        value = _factor_argument_at(
+            node.input, row, prepared.plan, buffers, T) - mean
+        isfinite(value) || throw(ArgumentError(
+            "native PPL centered predictor is non-finite at row $row"))
+        buffers.node_rows[node_index, row] = value
+        row == first(prepared.plan.observation_axis.keys) &&
+            (first_value = value)
+    end
+    buffers.node_values[node_index] = first_value
+    zero(T)
+end
+
+@inline function _factor_node_logdensity!(::Val{Name},
+        node::ZScaleFactorNode,
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Name,T}
+    node_index = getproperty(prepared.plan.node_indices, Name)
+    fitted = getproperty(prepared.plan.fitted_nodes, Name)
+    mean = T(fitted.mean)
+    scale = T(fitted.scale)
+    first_value = zero(T)
+    for row in prepared.plan.observation_axis.keys
+        raw = _factor_argument_at(
+            node.input, row, prepared.plan, buffers, T)
+        value = (raw - mean) / scale
+        if !isfinite(value)
+            value = raw / scale - mean / scale
+        end
+        isfinite(value) || throw(ArgumentError(
+            "native PPL standardized predictor is non-finite at row $row"))
+        buffers.node_rows[node_index, row] = value
+        row == first(prepared.plan.observation_axis.keys) &&
+            (first_value = value)
+    end
+    buffers.node_values[node_index] = first_value
+    zero(T)
+end
 
 @inline function _factor_node_logdensity!(::Val{Name}, node::ExpFactorNode,
         position::AbstractVector{T}, prepared::FactorPrepared,
@@ -2244,6 +2372,68 @@ end
         position, prepared, buffers)
 end
 
+@inline _factor_input_only(::LiteralValue, ::FactorGraph) = true
+@inline _factor_input_only(::InputValue, ::FactorGraph) = true
+@inline _factor_input_only(::SiteValue, ::FactorGraph) = false
+@inline function _factor_input_only(::NodeValue{Name},
+                                    graph::FactorGraph) where {Name}
+    _factor_input_only(getproperty(graph.nodes, Name), graph)
+end
+
+@inline _factor_input_only(node::Union{
+        CenterFactorNode,ZScaleFactorNode,ExpFactorNode,LogFactorNode},
+        graph::FactorGraph) = _factor_input_only(node.input, graph)
+@inline _factor_input_only(node::RowProductFactorNode, graph::FactorGraph) =
+    _factor_input_only(node.left, graph) &&
+    _factor_input_only(node.right, graph)
+@inline _factor_input_only(::AbstractFactorNode, ::FactorGraph) = false
+
+@inline _factor_execute_input_only_dependency!(
+    ::Union{LiteralValue,InputValue}, position, prepared, buffers) = nothing
+@inline function _factor_execute_input_only_dependency!(
+        ::NodeValue{Name}, position::AbstractVector{T},
+        prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Name,T}
+    node = getproperty(prepared.plan.graph.nodes, Name)
+    _factor_execute_input_only_node!(
+        Val(Name), node, position, prepared, buffers)
+end
+
+@inline function _factor_execute_input_only_node!(
+        name::Val, node::Union{
+            CenterFactorNode,ZScaleFactorNode,ExpFactorNode,LogFactorNode},
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {T}
+    _factor_execute_input_only_dependency!(
+        node.input, position, prepared, buffers)
+    _factor_node_logdensity!(name, node, position, prepared, buffers)
+end
+
+@inline function _factor_execute_input_only_node!(
+        name::Val, node::RowProductFactorNode,
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {T}
+    _factor_execute_input_only_dependency!(
+        node.left, position, prepared, buffers)
+    _factor_execute_input_only_dependency!(
+        node.right, position, prepared, buffers)
+    _factor_node_logdensity!(name, node, position, prepared, buffers)
+end
+
+@inline function _factor_node_query_kernel(
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T},
+        ::BRM.NativePPLNodeOutput{Name}) where {T,Name}
+    if !_has_generated_groups(prepared.plan)
+        return _factor_logdensity_kernel(position, prepared, buffers)
+    end
+    node = getproperty(prepared.plan.graph.nodes, Name)
+    _factor_input_only(node, prepared.plan.graph) ||
+        _factor_require_fixed_coordinates(prepared.plan)
+    _factor_execute_input_only_node!(
+        Val(Name), node, position, prepared, buffers)
+end
+
 function _factor_check_workspace_layout(workspace::FactorWorkspace,
                                         prepared::FactorPrepared)
     dimension = BRM.LogDensityProblems.dimension(prepared)
@@ -2332,7 +2522,8 @@ end
 function rebind(prepared::FactorPrepared, conditions;
                 bindings=prepared.plan.bindings,
                 T::Type{<:AbstractFloat}=eltype(prepared),
-                new_groups::Symbol=:error, kwargs...)
+                new_groups::Symbol=:error,
+                freeze_constants::Bool=true, kwargs...)
     isempty(kwargs) || throw(ArgumentError(
         "native PPL factor replay does not accept keyword options yet; got " *
         "$(keys(kwargs))"))
@@ -2345,11 +2536,13 @@ function rebind(prepared::FactorPrepared, conditions;
     _validate_binding_names(prepared.plan.declaration, bindings)
     rebound = _bind_factor_plan(
         prepared.plan.declaration, bindings, conditions;
-        group_levels=_factor_group_levels(prepared.plan), new_groups)
+        group_levels=_factor_group_levels(prepared.plan), new_groups,
+        fitted_nodes=freeze_constants ? prepared.plan.fitted_nodes : nothing)
     if !hasproperty(rebound.conditions, rebound.output_site) &&
        isempty(rebound.observation_axis.keys)
         rebound = FactorPlan(
-            rebound.declaration, rebound.graph, rebound.bindings,
+            rebound.declaration, rebound.graph, rebound.fitted_nodes,
+            rebound.bindings,
             rebound.conditions,
             rebound.site_indices, rebound.node_indices,
             rebound.group_indices, rebound.generated_group_levels,
@@ -2381,7 +2574,8 @@ function _factor_predictive_output_signature(plan::FactorPlan)
 end
 
 const _FactorRowNode = Union{
-    ExpFactorNode,LogFactorNode,AffineFactorNode,GroupGatherFactorNode,
+    CenterFactorNode,ZScaleFactorNode,ExpFactorNode,LogFactorNode,
+    AffineFactorNode,GroupGatherFactorNode,
     RowProductFactorNode,GroupedAffineFactorNode,
 }
 
@@ -2527,7 +2721,7 @@ function evaluate!(output::AbstractVector, work::FactorWorkspace,
                    prepared::FactorPrepared, position::AbstractVector,
                    query::BRM.NativePPLNodeOutput)
     _factor_check_query_output(output, work, prepared, position, query)
-    _factor_logdensity_kernel(position, prepared, work.primal)
+    _factor_node_query_kernel(position, prepared, work.primal, query)
     for index in eachindex(output)
         output[index] = _factor_node_output_at(
             query, prepared, work.primal, index)
@@ -5227,18 +5421,14 @@ function _lower_brmi(brmi::BRM.BRMI)
         gather_name = correlated ?
             Symbol(group_site_name, :_by_, group_name, :_for_, location) :
             Symbol(:r_, location, :_, varying.id, :_, group_name)
-        predictor_name = length(group_predictor_names) == 1 ?
-            only(group_predictor_names) : nothing
-        product_name = !correlated && predictor_name !== nothing ?
-            Symbol(gather_name, :_times_, predictor_name) : nothing
-        (; id=varying.id, group_name, prior, predictor_name,
+        (; id=varying.id, group_name, prior,
+           predictor_terms=varying.predictors,
            predictor_names=group_predictor_names, coefficient_keys,
            correlated, correlation_prior,
            scale_name=group_scale_name,
            correlation_name=group_correlation_name,
            site_name=group_site_name, gather_name,
-           product_name,
-           offset_name=product_name === nothing ? gather_name : product_name)
+           product_name=nothing, offset_name=gather_name)
     end
 
     scalar_location = isempty(predictor_names) &&
@@ -5356,27 +5546,52 @@ function _lower_brmi(brmi::BRM.BRMI)
         push!(transform_declarations, transform_declaration)
         transform_name
     end
+    group_specs = map(group_specs) do spec
+        predictor_values = map(
+            spec.predictor_terms, spec.predictor_names) do predictor_term,
+                                                           predictor_name
+            predictor_term === nothing && return nothing
+            predictor_term.transform === :identity && return predictor_name
+            canonical = predictor_term.transform
+            transform_name = Symbol(
+                canonical, :_, predictor_name, :_for_, location)
+            if transform_name ∉ transform_names
+                transform_declaration = canonical === :center ?
+                    center(predictor_name) : zscale(predictor_name)
+                push!(transform_names, transform_name)
+                push!(transform_declarations, transform_declaration)
+            end
+            transform_name
+        end
+        predictor_value = length(predictor_values) == 1 ?
+            only(predictor_values) : nothing
+        product_name = !spec.correlated && predictor_value !== nothing ?
+            Symbol(spec.gather_name, :_times_, predictor_value) : nothing
+        merge(spec, (; predictor_values, predictor_value, product_name,
+                     offset_name=product_name === nothing ?
+                         spec.gather_name : product_name))
+    end
     gather_names = Tuple(spec.gather_name for spec in group_specs)
     gather_declarations = Tuple(
         spec.correlated ? grouped_affine(
             spec.site_name, spec.scale_name, spec.correlation_name,
-            spec.group_name, spec.predictor_names) :
+            spec.group_name, spec.predictor_values) :
             group_gather(spec.site_name, spec.group_name)
         for spec in group_specs)
     product_specs = Tuple(
         spec for spec in group_specs if spec.product_name !== nothing)
     product_names = Tuple(spec.product_name for spec in product_specs)
     product_declarations = Tuple(
-        row_product(spec.gather_name, spec.predictor_name)
+        row_product(spec.gather_name, spec.predictor_value)
         for spec in product_specs)
     affine_offsets = (
         sampled_offsets..., data_offset_names...,
         (spec.offset_name for spec in group_specs)...)
     node_names = scalar_location ? () : (
-        gather_names..., product_names..., Tuple(transform_names)..., location)
+        Tuple(transform_names)..., gather_names..., product_names..., location)
     node_values = scalar_location ? () : (
-        gather_declarations..., product_declarations...,
         Tuple(transform_declarations)...,
+        gather_declarations..., product_declarations...,
         affine(Tuple(affine_inputs), coefficient_name;
                offsets=affine_offsets, intercept=has_intercept))
     node_declarations = _declaration_namedtuple(node_names, node_values)
@@ -5754,6 +5969,33 @@ function _syntax_affine_assignment(statement,
     group_node_order = NamedTuple[]
     population_blocks = NamedTuple[]
     ordinary_terms = Any[]
+    dot_transform_names = Symbol[]
+    dot_transform_values = Any[]
+    function dot_predictor(predictor, kind::AbstractString)
+        predictor == 1 && return (; value=nothing, key=:Intercept)
+        predictor isa Symbol && return (; value=predictor, key=predictor)
+        predictor isa Expr && predictor.head === :call || throw(ArgumentError(
+            "native PPL @model $kind predictors must be `1`, named row " *
+            "values, or fitted center/zscale calls"))
+        function_name, arguments = _syntax_call(
+            predictor, "$kind predictor transform")
+        function_name in (:center, :zscale, :standardize) || throw(
+            ArgumentError(
+                "native PPL @model $kind predictors support only " *
+                "center(input) or zscale(input)"))
+        length(arguments) == 1 && only(arguments) isa Symbol || throw(
+            ArgumentError(
+                "native PPL @model $function_name requires one named input"))
+        raw_input = only(arguments)
+        canonical = function_name === :center ? :center : :zscale
+        transform_name = Symbol(canonical, :_, raw_input, :_for_, lhs)
+        if transform_name ∉ dot_transform_names
+            push!(dot_transform_names, transform_name)
+            push!(dot_transform_values, Expr(
+                :call, _syntax_ref(canonical), QuoteNode(raw_input)))
+        end
+        (; value=transform_name, key=raw_input)
+    end
     for term in terms
         if term isa Expr && term.head === :call &&
            _syntax_name(first(term.args)) === :offset
@@ -5854,27 +6096,24 @@ function _syntax_affine_assignment(statement,
                     throw(ArgumentError(
                         "native PPL @model parameter dot predictors must " *
                         "be a tuple"))
-                predictors = Tuple(map(predictor_tuple.args) do predictor
-                    predictor == 1 && return nothing
-                    predictor isa Symbol || throw(ArgumentError(
-                        "native PPL @model parameter dot predictors must " *
-                        "be `1` or named row values"))
-                    predictor
-                end)
+                parsed_predictors = Tuple(map(
+                    predictor -> dot_predictor(predictor, "parameter dot"),
+                    predictor_tuple.args))
+                predictors = Tuple(parsed.value for parsed in parsed_predictors)
                 count(isnothing, predictors) <= 1 || throw(ArgumentError(
                     "native PPL @model parameter dot may contain one intercept"))
                 any(isnothing, predictors) && first(predictors) !== nothing &&
                     throw(ArgumentError(
                         "native PPL @model parameter-dot intercept must be first"))
                 coefficient_keys = Tuple(
-                    predictor === nothing ? :Intercept : predictor
-                    for predictor in predictors)
+                    parsed.key for parsed in parsed_predictors)
                 coefficient_keys == block_priors[grouped_ref] || throw(
                     ArgumentError(
                         "native PPL @model parameter dot predictors must " *
                         "match its declared coefficient keys"))
                 push!(population_blocks, (;
-                    name=grouped_ref, predictors))
+                    name=grouped_ref, predictors,
+                    raw_predictors=coefficient_keys))
                 continue
             end
             grouped_ref isa Expr && grouped_ref.head === :ref &&
@@ -5895,19 +6134,15 @@ function _syntax_affine_assignment(statement,
             predictor_tuple isa Expr && predictor_tuple.head === :tuple ||
                 throw(ArgumentError(
                     "native PPL @model grouped dot predictors must be a tuple"))
-            predictors = Tuple(map(predictor_tuple.args) do predictor
-                predictor == 1 && return nothing
-                predictor isa Symbol || throw(ArgumentError(
-                    "native PPL @model grouped dot predictors must be `1` " *
-                    "or named row values"))
-                predictor
-            end)
+            parsed_predictors = Tuple(map(
+                predictor -> dot_predictor(predictor, "grouped dot"),
+                predictor_tuple.args))
+            predictors = Tuple(parsed.value for parsed in parsed_predictors)
             length(predictors) == length(metadata.coefficients) || throw(
                 ArgumentError(
                     "native PPL @model grouped dot predictor count must " *
                     "match its coefficient axis"))
-            coefficient_keys = Tuple(predictor === nothing ? :Intercept :
-                predictor for predictor in predictors)
+            coefficient_keys = Tuple(parsed.key for parsed in parsed_predictors)
             coefficient_keys == metadata.coefficients || throw(ArgumentError(
                 "native PPL @model grouped dot predictors must match its " *
                 "declared coefficient keys"))
@@ -5950,18 +6185,20 @@ function _syntax_affine_assignment(statement,
     slopes = Symbol[]
     predictor_names = Symbol[]
     raw_predictor_names = Symbol[]
-    transform_names = copy(offset_transform_names)
-    transform_values = copy(offset_transform_values)
+    transform_names = [offset_transform_names...; dot_transform_names...]
+    transform_values = [offset_transform_values...; dot_transform_values...]
     population_block = isempty(population_blocks) ? nothing :
         only(population_blocks)
     if population_block !== nothing
         isempty(ordinary_terms) || throw(ArgumentError(
             "native PPL @model cannot mix a parameter dot with scalar " *
             "population coefficients"))
-        for predictor in population_block.predictors
+        for (predictor, raw_predictor) in zip(
+                population_block.predictors,
+                population_block.raw_predictors)
             predictor === nothing && continue
             push!(predictor_names, predictor)
-            push!(raw_predictor_names, predictor)
+            push!(raw_predictor_names, raw_predictor)
         end
     end
     for product in ordinary_terms
@@ -5994,9 +6231,11 @@ function _syntax_affine_assignment(statement,
             raw_predictor_name = raw_input
             canonical = function_name === :center ? :center : :zscale
             transform_name = Symbol(canonical, :_, raw_input, :_for_, lhs)
-            push!(transform_names, transform_name)
-            push!(transform_values, Expr(
-                :call, _syntax_ref(canonical), QuoteNode(raw_input)))
+            if transform_name ∉ transform_names
+                push!(transform_names, transform_name)
+                push!(transform_values, Expr(
+                    :call, _syntax_ref(canonical), QuoteNode(raw_input)))
+            end
             transform_name
         else
             return nothing
@@ -6591,6 +6830,7 @@ export SiteCoordinates, GroupCoordinateKey, GroupCoefficientKey
 export CorrelationCoordinateKey
 export FactorGraph
 export CenterFactorNode, ZScaleFactorNode, AffineFactorNode, ExpFactorNode
+export FittedCenter, FittedZScale
 export LogFactorNode
 export GroupGatherFactorNode, RowProductFactorNode, GroupedAffineFactorNode
 export FactorPlan, FactorPrepared, FactorWorkspace, FactorLogDensityProblem

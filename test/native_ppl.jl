@@ -513,6 +513,18 @@ NP.@model function natural_correlated_varying_intercept_slope(x, group)
     @. y ~ Normal(mu, sigma)
 end
 
+NP.@model function natural_transformed_correlated_varying_slope(x, group)
+    tau_p_group[(:Intercept, :x)] ~ Exponential(1)
+    L_p_group[(:Intercept, :x)] ~ LKJCholesky(2, 2)
+    b_p_group[group, (:Intercept, :x)] ~
+        MvNormalCholesky(tau_p_group, L_p_group)
+    beta_mu[(:x,)] ~ StandardNormal()
+    sigma ~ Exponential(2)
+    mu = dot(beta_mu, (zscale(x),)) +
+        dot(b_p_group[group], (1, zscale(x)))
+    @. y ~ Normal(mu, sigma)
+end
+
 NP.@model function natural_correlated_varying_three(x, w, group)
     tau_p_group[(:Intercept, :x, :w)] ~ Exponential(1)
     L_p_group[(:Intercept, :x, :w)] ~ LKJCholesky(3, 2)
@@ -6813,6 +6825,346 @@ end
         BRM.NativePPLAxis(:draw, Base.OneTo(2)),
         BRM.NativePPLAxis(:observation, Base.OneTo(4)))
 
+    transformed_group_brm = @brm varying_brm_data begin
+        sigma ~ Exponential(2)
+        mu ~ 0 + zscale(x) + (1 + zscale(x) | p | group)
+        sd(:, p) ~ Exponential(1)
+        cor(:, p) ~ LKJCholesky(2, 2)
+        y ~ Normal(mu, sigma)
+    end
+    @test popcoefnames(transformed_group_brm, :mu) == [:zscale_x]
+    @test ranefcoefnames(transformed_group_brm, :p) == [
+        (; predictor=:mu, coefficient=:Intercept),
+        (; predictor=:mu, coefficient=:zscale_x)]
+    transformed_group_sb = SBBRMI(
+        transformed_group_brm; mod=@__MODULE__)
+    @test transformed_group_sb isa SBBRMI
+    @test transformed_group_sb.data[:zscale_x] ≈
+          (varying_brm_data.x .- 0.5) ./ sqrt(5 / 3)
+    transformed_group_model = NP.lower(transformed_group_brm)
+    direct_transformed_group_model = NP.model(
+        inputs=(; x=NP.input(), group=NP.input()),
+        parameters=transformed_group_model.parameters,
+        nodes=(;
+            zscale_x_for_mu=NP.zscale(:x),
+            b_p_group_by_group_for_mu=NP.grouped_affine(
+                :b_p_group, :tau_p_group, :L_p_group, :group,
+                (nothing, :zscale_x_for_mu)),
+            mu=NP.affine(
+                :zscale_x_for_mu, :beta_mu;
+                offsets=(:b_p_group_by_group_for_mu,), intercept=false)),
+        observations=(; y=NP.broadcasted(
+            NP.normal(:y, :mu, :sigma))),
+        site_order=transformed_group_model.site_order)
+    @test direct_transformed_group_model == transformed_group_model
+    natural_transformed_group = NP.condition(
+        natural_transformed_correlated_varying_slope(
+            varying_brm_data.x, varying_brm_data.group);
+        y=varying_brm_data.y)
+    @test transformed_group_model ==
+          natural_transformed_group.declaration
+    @test keys(transformed_group_model.nodes) == (
+        :zscale_x_for_mu,
+        :b_p_group_by_group_for_mu,
+        :mu)
+    @test transformed_group_model.nodes.zscale_x_for_mu isa NP.ZScale
+    @test transformed_group_model.nodes.b_p_group_by_group_for_mu isa
+          NP.GroupedAffine
+    @test NP.grouped_predictors(
+        transformed_group_model.nodes.b_p_group_by_group_for_mu) ==
+          (nothing, :zscale_x_for_mu)
+    transformed_group_plan = NP.compile(transformed_group_brm)
+    @test transformed_group_plan.graph.schedule == (
+        :tau_p_group, :L_p_group, :b_p_group, :beta_mu, :sigma,
+        :zscale_x_for_mu, :b_p_group_by_group_for_mu, :mu, :y)
+    @test transformed_group_plan.graph.nodes.zscale_x_for_mu isa
+          NP.ZScaleFactorNode
+    @test transformed_group_plan.fitted_nodes.zscale_x_for_mu.mean == 0.5
+    @test transformed_group_plan.fitted_nodes.zscale_x_for_mu.scale ≈
+          sqrt(5 / 3)
+    transformed_group_node =
+        transformed_group_plan.graph.nodes.b_p_group_by_group_for_mu
+    @test transformed_group_node isa NP.GroupedAffineFactorNode
+    @test transformed_group_node.predictors ==
+          (nothing, NP.NodeValue{:zscale_x_for_mu}())
+    @test transformed_group_plan.graph.dimension == 11
+    invalid_transformed_scalar = NP.model(
+        inputs=direct_transformed_group_model.inputs,
+        parameters=direct_transformed_group_model.parameters,
+        nodes=direct_transformed_group_model.nodes,
+        observations=(;
+            scalar=NP.normal(:scalar, :zscale_x_for_mu, :sigma),
+            y=direct_transformed_group_model.observations.y),
+        site_order=(
+            transformed_group_model.site_order[1:(end - 1)]...,
+            :scalar, :y))
+    @test capability_error(() -> NP.compile(
+        invalid_transformed_scalar,
+        (; x=varying_brm_data.x, group=varying_brm_data.group);
+        conditions=(; y=varying_brm_data.y))).capability == :factor_shape
+    nested_fitted_transform = NP.model(
+        inputs=direct_transformed_group_model.inputs,
+        parameters=direct_transformed_group_model.parameters,
+        nodes=(;
+            zscale_x_for_mu=NP.zscale(:x),
+            nested_zscale=NP.zscale(:zscale_x_for_mu),
+            b_p_group_by_group_for_mu=NP.grouped_affine(
+                :b_p_group, :tau_p_group, :L_p_group, :group,
+                (nothing, :nested_zscale)),
+            mu=NP.affine(
+                :nested_zscale, :beta_mu;
+                offsets=(:b_p_group_by_group_for_mu,), intercept=false)),
+        observations=direct_transformed_group_model.observations,
+        site_order=direct_transformed_group_model.site_order)
+    @test capability_error(() -> NP.compile(
+        nested_fitted_transform,
+        (; x=varying_brm_data.x, group=varying_brm_data.group);
+        conditions=(; y=varying_brm_data.y))).capability == :factor_nodes
+    transformed_group_prepared = NP.prepare(transformed_group_plan)
+    transformed_group_workspace = NP.workspace(
+        transformed_group_prepared, Float64, DI.AutoEnzyme())
+    transformed_x = (varying_brm_data.x .- 0.5) ./ sqrt(5 / 3)
+    transformed_group_mu = [
+        correlated_beta * transformed_x[row] +
+        correlated_effects[[1, 2, 1, 3][row]][1] +
+        correlated_effects[[1, 2, 1, 3][row]][2] * transformed_x[row]
+        for row in eachindex(transformed_x)]
+    transformed_group_expected_density =
+        correlated_expected_density -
+        sum(logpdf.(Normal.(correlated_mu, correlated_sigma),
+                    varying_brm_data.y)) +
+        sum(logpdf.(Normal.(transformed_group_mu, correlated_sigma),
+                    varying_brm_data.y))
+    transformed_group_density, transformed_group_gradient =
+        NP.logdensity_and_gradient!(
+            transformed_group_workspace, transformed_group_prepared,
+            correlated_group_position)
+    @test transformed_group_density ≈ transformed_group_expected_density
+    @test NP.evaluate(
+        transformed_group_workspace, transformed_group_prepared,
+        correlated_group_position, NP.LinearPredictor()) ≈
+          transformed_group_mu
+    @test NP.evaluate(
+        transformed_group_workspace, transformed_group_prepared,
+        correlated_group_position,
+        NP.NodeOutput(:zscale_x_for_mu)) ≈ transformed_x
+    transformed_node_output = similar(transformed_x)
+    transformed_node_query = NP.NodeOutput(:zscale_x_for_mu)
+    NP.evaluate!(
+        transformed_node_output, transformed_group_workspace,
+        transformed_group_prepared, correlated_group_position,
+        transformed_node_query)
+    @test transformed_node_output ≈ transformed_x
+    @test @allocated(NP.evaluate!(
+        transformed_node_output, transformed_group_workspace,
+        transformed_group_prepared, correlated_group_position,
+        transformed_node_query)) == 0
+    transformed_group_finite_difference = similar(
+        transformed_group_gradient)
+    transformed_group_plus = copy(correlated_group_position)
+    transformed_group_minus = copy(correlated_group_position)
+    transformed_group_step = 1e-6
+    for coordinate in eachindex(transformed_group_finite_difference)
+        transformed_group_plus[coordinate] += transformed_group_step
+        transformed_group_minus[coordinate] -= transformed_group_step
+        transformed_group_finite_difference[coordinate] = (
+            NP.logdensity!(
+                transformed_group_workspace, transformed_group_prepared,
+                transformed_group_plus) -
+            NP.logdensity!(
+                transformed_group_workspace, transformed_group_prepared,
+                transformed_group_minus)) / (2 * transformed_group_step)
+        transformed_group_plus[coordinate] = correlated_group_position[coordinate]
+        transformed_group_minus[coordinate] = correlated_group_position[coordinate]
+    end
+    @test transformed_group_gradient ≈ transformed_group_finite_difference rtol=2e-5 atol=2e-6
+    @test factor_steady_state_allocations(
+        transformed_group_workspace, transformed_group_prepared,
+        correlated_group_position) == (; primal=0, gradient=0)
+    transformed_replay_bindings = (;
+        x=[10.0, 20.0, 30.0], group=[:c, :a, :b])
+    transformed_frozen = NP.rebind(
+        transformed_group_prepared, (;);
+        bindings=transformed_replay_bindings)
+    transformed_refitted = NP.rebind(
+        transformed_group_prepared, (;);
+        bindings=transformed_replay_bindings, freeze_constants=false)
+    @test transformed_frozen.plan.fitted_nodes ==
+          transformed_group_plan.fitted_nodes
+    @test transformed_refitted.plan.fitted_nodes.zscale_x_for_mu.mean == 20.0
+    @test transformed_refitted.plan.fitted_nodes.zscale_x_for_mu.scale == 10.0
+    frozen_x = (transformed_replay_bindings.x .- 0.5) ./ sqrt(5 / 3)
+    refitted_x = [-1.0, 0.0, 1.0]
+    for (replay, transformed_values) in (
+            (transformed_frozen, frozen_x),
+            (transformed_refitted, refitted_x))
+        expected = [
+            correlated_effects[group][1] +
+            (correlated_beta + correlated_effects[group][2]) *
+                transformed_values[row]
+            for (row, group) in enumerate((3, 1, 2))]
+        replay_workspace = NP.workspace(replay)
+        @test NP.evaluate(
+            replay_workspace, replay, correlated_group_position,
+            NP.LinearPredictor()) ≈ expected
+        @test NP.evaluate(
+            replay_workspace, replay, correlated_group_position,
+            NP.NodeOutput(:zscale_x_for_mu)) ≈ transformed_values
+    end
+    transformed_positions = [
+        correlated_group_position';
+        log(0.8) log(0.5) -0.15 -0.1 0.3 0.2 -0.4 0.1 0.35 -0.2 log(0.7);
+    ]
+    transformed_mu_draws = zeros(2, 4)
+    transformed_scaled_draws = zeros(2, 4)
+    NP.evaluate_draws!(
+        transformed_mu_draws, transformed_group_workspace,
+        transformed_group_prepared, transformed_positions,
+        NP.NodeOutput(:mu))
+    NP.evaluate_draws!(
+        transformed_scaled_draws, transformed_group_workspace,
+        transformed_group_prepared, transformed_positions,
+        transformed_node_query)
+    @test transformed_mu_draws[1, :] ≈ transformed_group_mu
+    @test all(row -> row ≈ transformed_x,
+              eachrow(transformed_scaled_draws))
+    transformed_bundle_queries = (;
+        mu=NP.NodeOutput(:mu),
+        scaled=transformed_node_query,
+        pointwise=NP.PointwiseLogLikelihood(),
+        predictive=NP.PosteriorPredictive())
+    transformed_bundle = (;
+        mu=zeros(2, 4), scaled=zeros(2, 4),
+        pointwise=zeros(2, 4), predictive=zeros(2, 4))
+    transformed_draw_predictive = zeros(2, 4)
+    transformed_bundle_rng = MersenneTwister(993)
+    transformed_predictive_rng = MersenneTwister(993)
+    NP.execute_draws!(
+        transformed_bundle_rng, transformed_bundle,
+        transformed_group_workspace, transformed_group_prepared,
+        transformed_positions, transformed_bundle_queries)
+    NP.simulate_draws!(
+        transformed_predictive_rng, transformed_draw_predictive,
+        transformed_group_workspace, transformed_group_prepared,
+        transformed_positions)
+    @test transformed_bundle.mu == transformed_mu_draws
+    @test transformed_bundle.scaled == transformed_scaled_draws
+    @test transformed_bundle.predictive == transformed_draw_predictive
+    @test factor_generated_draw_allocations(
+        MersenneTwister(994), MersenneTwister(995), MersenneTwister(996),
+        transformed_draw_predictive, similar(transformed_mu_draws),
+        transformed_bundle, transformed_group_workspace,
+        transformed_group_prepared, transformed_positions,
+        transformed_bundle_queries) ==
+          (; predictive=0, linear=0, bundle=0)
+
+    transformed_new_bindings = (;
+        x=[-2.0, 0.5, 1.5, 3.0],
+        group=[:a, :new_transformed_group, :new_transformed_group, :c])
+    transformed_new = NP.rebind(
+        transformed_group_prepared, (;);
+        bindings=transformed_new_bindings, new_groups=:resample)
+    @test transformed_new.plan.generated_group_levels ==
+          (; b_p_group=(:new_transformed_group,))
+    @test transformed_new.plan.group_indices ==
+          (; b_p_group_by_group_for_mu=(1, -1, -1, 3))
+    @test transformed_new.plan.fitted_nodes ==
+          transformed_group_plan.fitted_nodes
+    transformed_new_x = (transformed_new_bindings.x .- 0.5) ./ sqrt(5 / 3)
+    transformed_new_workspace = NP.workspace(transformed_new)
+    @test capability_error(() -> NP.evaluate(
+        transformed_new_workspace, transformed_new,
+        correlated_group_position,
+        NP.NodeOutput(:mu))).capability == :new_group_activity
+    @test NP.evaluate(
+        transformed_new_workspace, transformed_new,
+        correlated_group_position,
+        transformed_node_query) ≈ transformed_new_x
+    transformed_new_rng = MersenneTwister(997)
+    transformed_new_expected_rng = MersenneTwister(997)
+    transformed_new_z = randn(transformed_new_expected_rng, 2)
+    transformed_new_effect = (
+        correlated_tau[1] * transformed_new_z[1],
+        correlated_tau[2] * (
+            correlated_rho * transformed_new_z[1] +
+            correlated_sech * transformed_new_z[2]))
+    transformed_new_effects = (
+        correlated_effects[1], transformed_new_effect,
+        transformed_new_effect, correlated_effects[3])
+    transformed_new_mu = [
+        effect[1] + (correlated_beta + effect[2]) * transformed_new_x[row]
+        for (row, effect) in enumerate(transformed_new_effects)]
+    transformed_new_output = zeros(4)
+    NP.evaluate!(
+        transformed_new_rng, transformed_new_output,
+        transformed_new_workspace, transformed_new,
+        correlated_group_position, NP.LinearPredictor())
+    @test transformed_new_output ≈ transformed_new_mu
+    @test transformed_new_workspace.primal.generated_group_values ≈
+          transformed_new_z
+
+    transformed_input_scale_model = NP.model(
+        inputs=(; x=NP.input(), log_scale=NP.input(), group=NP.input()),
+        parameters=(;
+            tau_p_group=transformed_group_model.parameters.tau_p_group,
+            L_p_group=transformed_group_model.parameters.L_p_group,
+            b_p_group=transformed_group_model.parameters.b_p_group,
+            beta_mu=transformed_group_model.parameters.beta_mu),
+        nodes=(;
+            zscale_x_for_mu=NP.zscale(:x),
+            zscale_log_scale_for_y=NP.zscale(:log_scale),
+            b_p_group_by_group_for_mu=NP.grouped_affine(
+                :b_p_group, :tau_p_group, :L_p_group, :group,
+                (nothing, :zscale_x_for_mu)),
+            mu=NP.affine(
+                :zscale_x_for_mu, :beta_mu;
+                offsets=(:b_p_group_by_group_for_mu,), intercept=false),
+            scale=NP.exp_link(:zscale_log_scale_for_y)),
+        observations=(; y=NP.broadcasted(NP.normal(:y, :mu, :scale))),
+        site_order=(
+            :tau_p_group, :L_p_group, :b_p_group, :beta_mu, :y))
+    transformed_input_scale_plan = NP.compile(
+        transformed_input_scale_model,
+        (; x=varying_brm_data.x, log_scale=[-1.0, 0.0, 1.0, 2.0],
+           group=varying_brm_data.group);
+        conditions=(; y=varying_brm_data.y))
+    transformed_input_scale_prepared = NP.prepare(
+        transformed_input_scale_plan)
+    transformed_input_scale_new = NP.rebind(
+        transformed_input_scale_prepared, (;);
+        bindings=(;
+            x=transformed_new_bindings.x,
+            log_scale=[2.0, 3.0, 4.0, 5.0],
+            group=transformed_new_bindings.group),
+        new_groups=:resample)
+    transformed_input_scale_workspace = NP.workspace(
+        transformed_input_scale_new)
+    transformed_input_scale_position = correlated_group_position[1:10]
+    transformed_input_scale_output = zeros(4)
+    transformed_input_scale_query = NP.NodeOutput(:scale)
+    NP.evaluate!(
+        transformed_input_scale_output,
+        transformed_input_scale_workspace, transformed_input_scale_new,
+        transformed_input_scale_position, transformed_input_scale_query)
+    @test transformed_input_scale_output ≈
+          exp.(([2.0, 3.0, 4.0, 5.0] .- 0.5) ./ sqrt(5 / 3))
+    @test @allocated(NP.evaluate!(
+        transformed_input_scale_output,
+        transformed_input_scale_workspace, transformed_input_scale_new,
+        transformed_input_scale_position, transformed_input_scale_query)) == 0
+
+    transformed_large = @brm (
+            x=[-1e300, 0.0, 1e300, 5e299],
+            group=varying_brm_data.group, y=varying_brm_data.y) begin
+        sigma ~ Exponential(2)
+        mu ~ 0 + zscale(x) + (1 + zscale(x) | p | group)
+        sd(:, p) ~ Exponential(1)
+        cor(:, p) ~ LKJCholesky(2, 2)
+        y ~ Normal(mu, sigma)
+    end
+    @test_throws ArgumentError NP.prepare(
+        NP.compile(transformed_large); T=Float32)
+
     sampled_offset_plan = NP.compile(sampled_offset_brmi)
     @test sampled_offset_plan isa NP.FactorPlan
     @test sampled_offset_plan.bindings.x == sampled_offset_data.x
@@ -7819,6 +8171,31 @@ end
     @test occursin(
         "cannot mix a parameter dot with scalar population coefficients",
         err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function unsupported_grouped_transform(
+                x, group)
+            tau[(:Intercept, :x)] ~ Exponential(1)
+            L[(:Intercept, :x)] ~ LKJCholesky(2, 2)
+            b[group, (:Intercept, :x)] ~ MvNormalCholesky(tau, L)
+            beta[(:x,)] ~ StandardNormal()
+            sigma ~ Exponential(2)
+            mu = dot(beta, (log(x),)) + dot(b[group], (1, log(x)))
+            @. y ~ Normal(mu, sigma)
+        end)))
+    @test occursin("support only center(input) or zscale(input)", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function expression_grouped_transform(
+                x, group)
+            tau[(:Intercept, :x)] ~ Exponential(1)
+            L[(:Intercept, :x)] ~ LKJCholesky(2, 2)
+            b[group, (:Intercept, :x)] ~ MvNormalCholesky(tau, L)
+            beta[(:x,)] ~ StandardNormal()
+            sigma ~ Exponential(2)
+            mu = dot(beta, (zscale(x + 1),)) +
+                dot(b[group], (1, zscale(x + 1)))
+            @. y ~ Normal(mu, sigma)
+        end)))
+    @test occursin("requires one named input", err.msg)
     err = argument_error(() -> macroexpand(
         @__MODULE__, :(NP.@model function grouped_nonargument(x)
             tau ~ Exponential(1)
