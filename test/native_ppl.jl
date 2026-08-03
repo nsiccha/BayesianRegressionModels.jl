@@ -423,6 +423,14 @@ NP.@model function naturally_composed_hierarchy()
     return y
 end
 
+NP.@model function deterministic_scale_factor_graph(unit_scale)
+    population ~ Normal()
+    log_observation_scale ~ Normal(population, unit_scale)
+    observation_scale = exp(log_observation_scale)
+    @. y ~ Normal(population, observation_scale)
+    return y
+end
+
 NP.@model function monolithic_scalar_normal()
     theta ~ Normal()
     sigma ~ Exponential(2.0)
@@ -3271,6 +3279,44 @@ end
     @test hierarchy_graph.sites.y.shape isa NP.BroadcastSiteShape
     @test NP.site_factor_dependencies(hierarchy_graph.sites.y.factor) ==
           (:individual, :observation_scale)
+
+    deterministic_scale_instance = NP.condition(
+        deterministic_scale_factor_graph(1.0); y=response)
+    deterministic_scale_graph = NP.factor_graph(
+        deterministic_scale_instance)
+    @test keys(deterministic_scale_graph.sites) ==
+          (:population, :log_observation_scale, :y)
+    @test keys(deterministic_scale_graph.nodes) == (:observation_scale,)
+    @test deterministic_scale_graph.schedule ==
+          (:population, :log_observation_scale, :observation_scale, :y)
+    @test deterministic_scale_graph.nodes.observation_scale isa
+          NP.ExpFactorNode{NP.SiteValue{:log_observation_scale}}
+    @test NP.factor_node_dependencies(
+        deterministic_scale_graph.nodes.observation_scale) ==
+          (:log_observation_scale,)
+    @test deterministic_scale_graph.sites.y.factor.location isa
+          NP.SiteValue{:population}
+    @test deterministic_scale_graph.sites.y.factor.scale isa
+          NP.NodeValue{:observation_scale}
+    @test NP.site_factor_dependencies(
+        deterministic_scale_graph.sites.y.factor) ==
+          (:population, :observation_scale)
+    @test deterministic_scale_graph.dimension == 2
+
+    cyclic_factor_declaration = NP.model(
+        inputs=(;),
+        parameters=(;
+            population=NP.parameter(
+                NP.RealSupport(), (:population,);
+                transform=NP.Identity(), prior=NP.StandardNormal())),
+        nodes=(; scale=NP.exp_link(:latent)),
+        observations=(;
+            latent=NP.normal(:latent, :population, :scale)),
+        outputs=(; latent=:latent),
+        site_order=(:population, :latent))
+    @test capability_error(
+        () -> NP.factor_graph(cyclic_factor_declaration)).capability ==
+          :factor_schedule
     hierarchy_plan = NP.compile(NP.condition(hierarchy; y=response))
     @test hierarchy_plan isa NP.FactorPlan
     @test LogDensityProblems.dimension(hierarchy_plan) == 4

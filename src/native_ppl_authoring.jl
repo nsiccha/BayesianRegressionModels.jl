@@ -243,6 +243,10 @@ site_value_name(::SiteValue{Name}) where {Name} = Name
 struct InputValue{Name} end
 input_value_name(::InputValue{Name}) where {Name} = Name
 
+"""Reference one staged deterministic-node output as a factor argument."""
+struct NodeValue{Name} end
+node_value_name(::NodeValue{Name}) where {Name} = Name
+
 """Literal stochastic-factor argument retained in the typed graph."""
 struct LiteralValue{T}
     value::T
@@ -266,17 +270,46 @@ end
 
 site_factor_dependencies(::StandardNormalSiteFactor) = ()
 site_factor_dependencies(factor::NormalSiteFactor) =
-    _site_value_dependencies((factor.location, factor.scale))
+    _factor_value_dependencies((factor.location, factor.scale))
 site_factor_dependencies(factor::ExponentialSiteFactor) =
-    _site_value_dependencies((factor.scale,))
+    _factor_value_dependencies((factor.scale,))
 site_factor_dependencies(factor::BernoulliLogitSiteFactor) =
-    _site_value_dependencies((factor.logit,))
+    _factor_value_dependencies((factor.logit,))
 site_factor_dependencies(factor::PoissonSiteFactor) =
-    _site_value_dependencies((factor.rate,))
+    _factor_value_dependencies((factor.rate,))
 
-function _site_value_dependencies(values)
-    Tuple(site_value_name(value) for value in values if value isa SiteValue)
+_factor_value_name(value::SiteValue) = site_value_name(value)
+_factor_value_name(value::NodeValue) = node_value_name(value)
+
+function _factor_value_dependencies(values)
+    Tuple(_factor_value_name(value) for value in values
+          if value isa Union{SiteValue,NodeValue})
 end
+
+abstract type AbstractFactorNode end
+
+struct CenterFactorNode{I} <: AbstractFactorNode
+    input::I
+end
+
+struct ZScaleFactorNode{I} <: AbstractFactorNode
+    input::I
+end
+
+struct AffineFactorNode{I,C} <: AbstractFactorNode
+    inputs::I
+    coefficients::C
+end
+
+struct ExpFactorNode{I} <: AbstractFactorNode
+    input::I
+end
+
+factor_node_dependencies(node::Union{
+        CenterFactorNode,ZScaleFactorNode,ExpFactorNode}) =
+    _factor_value_dependencies((node.input,))
+factor_node_dependencies(node::AffineFactorNode) =
+    _factor_value_dependencies((node.inputs..., node.coefficients))
 
 abstract type AbstractSiteShape end
 struct ScalarSiteShape <: AbstractSiteShape end
@@ -313,8 +346,10 @@ struct SiteCoordinates{K,R}
 end
 
 """Typed, ordered stochastic-site graph and its free-coordinate allocation."""
-struct FactorGraph{S,C}
+struct FactorGraph{S,N,O,C}
     sites::S
+    nodes::N
+    schedule::O
     coordinates::C
     dimension::Int
 end
@@ -339,22 +374,53 @@ function _parameter_stochastic_site(
         activity, coordinate_keys)
 end
 
-_factor_value(name::Symbol, inputs::NamedTuple) =
-    hasproperty(inputs, name) ? InputValue{name}() : SiteValue{name}()
+function _factor_value(name::Symbol, inputs::NamedTuple, nodes::NamedTuple)
+    hasproperty(inputs, name) && return InputValue{name}()
+    hasproperty(nodes, name) && return NodeValue{name}()
+    SiteValue{name}()
+end
+
+function _factor_node(declaration::AbstractNodeDeclaration,
+                      inputs::NamedTuple, nodes::NamedTuple)
+    reference(name) = _factor_value(name, inputs, nodes)
+    if declaration isa Center
+        CenterFactorNode(reference(node_input(declaration)))
+    elseif declaration isa ZScale
+        ZScaleFactorNode(reference(node_input(declaration)))
+    elseif declaration isa Affine
+        AffineFactorNode(
+            map(reference, node_inputs(declaration)),
+            SiteValue{affine_parameter(declaration)}())
+    else
+        ExpFactorNode(reference(node_input(declaration)))
+    end
+end
+
+function _factor_nodes(declaration::Model)
+    names = Tuple(keys(declaration.nodes))
+    values = map(names) do name
+        _factor_node(
+            getproperty(declaration.nodes, name), declaration.inputs,
+            declaration.nodes)
+    end
+    NamedTuple{names}(values)
+end
 
 function _observation_stochastic_site(
     name::Symbol, declaration::AbstractObservationDeclaration,
-    inputs::NamedTuple, conditions::NamedTuple)
+    inputs::NamedTuple, nodes::NamedTuple, conditions::NamedTuple)
     scalar = scalar_observation(declaration)
     dependencies = observation_dependencies(scalar)
     factor = if scalar isa NormalObservation
         NormalSiteFactor(
-            _factor_value(dependencies[1], inputs),
-            _factor_value(dependencies[2], inputs))
+            _factor_value(dependencies[1], inputs, nodes),
+            _factor_value(dependencies[2], inputs, nodes))
     elseif scalar isa BernoulliLogitObservation
-        BernoulliLogitSiteFactor(_factor_value(only(dependencies), inputs))
+        BernoulliLogitSiteFactor(_factor_value(
+            only(dependencies), inputs, nodes))
     else
-        PoissonSiteFactor(_factor_value(only(dependencies), inputs))
+        PoissonSiteFactor(_factor_value(
+            only(dependencies), inputs, nodes))
     end
     shape = is_broadcast_observation(declaration) ?
         BroadcastSiteShape() : ScalarSiteShape()
@@ -377,6 +443,35 @@ function _observation_stochastic_site(
         support, transform, factor, shape, activity, coordinate_keys)
 end
 
+function _factor_schedule(declaration::Model, sites::NamedTuple,
+                          nodes::NamedTuple)
+    pending = Symbol[declaration.site_order..., keys(nodes)...]
+    available = Set{Symbol}(keys(declaration.inputs))
+    schedule = Symbol[]
+    while !isempty(pending)
+        selected = nothing
+        for index in eachindex(pending)
+            name = pending[index]
+            dependencies = hasproperty(sites, name) ?
+                site_factor_dependencies(getproperty(sites, name).factor) :
+                factor_node_dependencies(getproperty(nodes, name))
+            all(dependency -> dependency in available, dependencies) ||
+                continue
+            selected = index
+            break
+        end
+        selected === nothing && throw(CapabilityError(
+            :factor_schedule,
+            "stochastic/deterministic factor graph contains a cycle or " *
+            "unavailable dependency among $(Tuple(pending))"))
+        name = pending[selected]
+        push!(schedule, name)
+        push!(available, name)
+        deleteat!(pending, selected)
+    end
+    Tuple(schedule)
+end
+
 function _site_coordinates(sites::NamedTuple)
     names = Symbol[]
     allocations = Any[]
@@ -396,9 +491,10 @@ end
     factor_graph(model; conditions=(;)) -> FactorGraph
 
 Normalize parameters and stochastic observations into one ordered typed site
-graph, then allocate semantic unconstrained coordinates for free sites. This
-is declaration/activity semantics only; the existing walking-skeleton `Plan`
-remains the executor until the next capability slice consumes `FactorGraph`.
+graph, normalize deterministic value nodes, derive one mixed topological
+schedule, then allocate semantic unconstrained coordinates for free sites.
+`FactorPlan` executes the supported subset while preserving this graph as the
+public mid-level semantic representation.
 """
 function factor_graph(declaration::Model; conditions=(;))
     _validate_model(declaration)
@@ -416,7 +512,7 @@ function factor_graph(declaration::Model; conditions=(;))
         else
             _observation_stochastic_site(
                 name, getproperty(declaration.observations, name),
-                declaration.inputs,
+                declaration.inputs, declaration.nodes,
                 canonical_conditions)
         end
         unavailable = setdiff(
@@ -431,8 +527,10 @@ function factor_graph(declaration::Model; conditions=(;))
         push!(available_sites, name)
     end
     named_sites = NamedTuple{Tuple(names)}(Tuple(sites))
+    named_nodes = _factor_nodes(declaration)
+    schedule = _factor_schedule(declaration, named_sites, named_nodes)
     coordinates, dimension = _site_coordinates(named_sites)
-    FactorGraph(named_sites, coordinates, dimension)
+    FactorGraph(named_sites, named_nodes, schedule, coordinates, dimension)
 end
 
 function _canonical_factor_conditions(declaration::Model, conditions)
@@ -2052,14 +2150,16 @@ function _validate_model_components(
     isempty(intersect(parameter_names, node_names)) || throw(ArgumentError(
         "native PPL parameter and node identities must be distinct"))
 
-    available = union(input_names, parameter_names)
+    observation_names = Set(keys(observations))
+    available = union(input_names, parameter_names, observation_names)
     for (name, declaration) in pairs(nodes)
         dependencies = declaration isa Affine ?
             node_inputs(declaration) : (node_input(declaration),)
         for dependency in dependencies
             dependency in available || throw(ArgumentError(
-                "native PPL node `$name` references unavailable input " *
-                "`$dependency`; nodes must be topologically ordered"))
+                "native PPL node `$name` references unavailable value " *
+                "`$dependency`; deterministic nodes must be ordered among " *
+                "themselves"))
         end
         declaration isa Affine &&
             affine_parameter(declaration) ∉ parameter_names &&
@@ -2069,7 +2169,8 @@ function _validate_model_components(
         push!(available, name)
     end
 
-    observation_names = Set(keys(observations))
+    available = union(input_names, parameter_names, node_names,
+                      observation_names)
     for (name, declaration) in pairs(observations)
         response = observation_response(declaration)
         name === response || throw(ArgumentError(
@@ -2093,7 +2194,6 @@ function _validate_model_components(
                     "native PPL observation `$name` references unavailable " *
                     "dependency `$dependency`"))
         end
-        push!(available, response)
     end
 
     if outputs !== nothing
@@ -3793,8 +3893,10 @@ macro model(definition)
 end
 
 export Model, ModelInstance, GraphRef, Component, Composition, Input, Parameter
-export SiteValue, InputValue, LiteralValue, StochasticSite, SiteCoordinates
+export SiteValue, InputValue, NodeValue, LiteralValue, StochasticSite
+export SiteCoordinates
 export FactorGraph
+export CenterFactorNode, ZScaleFactorNode, AffineFactorNode, ExpFactorNode
 export FactorPlan, FactorPrepared, FactorWorkspace, FactorLogDensityProblem
 export StandardNormalSiteFactor, NormalSiteFactor, ExponentialSiteFactor
 export BernoulliLogitSiteFactor, PoissonSiteFactor
@@ -3809,6 +3911,7 @@ export model, input, parameter, Identity, Exp, normal_prior, Exponential
 export center, zscale, standardize, affine, exp_link
 export normal, bernoulli_logit, poisson, broadcasted
 export instantiate, substitute, condition, component, output, compose, bind, lower
-export factor_graph, site_factor_dependencies, site_value_name, input_value_name
+export factor_graph, site_factor_dependencies, factor_node_dependencies
+export site_value_name, input_value_name, node_value_name
 export graph_namespace, graph_name, graph_kind, component_namespace, qualified_name
 export @model
