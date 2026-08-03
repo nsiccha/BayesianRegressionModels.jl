@@ -55,6 +55,21 @@ end
 conditioned(model, data) =
     NP.condition(NP.substitute(model; x=data.x); y=data.y)
 
+function direct_multi_gaussian_model()
+    coefficients = NP.parameter(
+        NP.RealSupport(), (:intercept, :beta_x, :beta_w);
+        transform=NP.Identity(), prior=NP.StandardNormal())
+    sigma = NP.parameter(
+        NP.PositiveSupport(), (:sigma,);
+        transform=NP.Exp(), prior=NP.Exponential(2.0))
+    NP.model(
+        inputs=(; x=NP.input(), w=NP.input()),
+        parameters=(; beta_mu=coefficients, sigma),
+        nodes=(; x_scaled=NP.zscale(:x), w_centered=NP.center(:w),
+               mu=NP.affine((:x_scaled, :w_centered), :beta_mu)),
+        observations=(; y=NP.broadcasted(NP.normal(:y, :mu, :sigma))))
+end
+
 function native_brmi(family::Symbol, transform::Symbol, data)
     if family === :gaussian
         transform === :identity && return @brm data begin
@@ -114,10 +129,12 @@ function check_plan_structure(left, right)
     @test map(typeof, values(left.factors)) == map(typeof, values(right.factors))
     @test map(typeof, values(left.queries)) == map(typeof, values(right.queries))
     @test sprint(show, left) == sprint(show, right)
-    if hasproperty(left.nodes, :transform)
-        @test left.nodes.transform.mean == right.nodes.transform.mean
-        if left.nodes.transform isa BRM.NativePPLZScaleNode
-            @test left.nodes.transform.scale == right.nodes.transform.scale
+    if !isempty(left.nodes.transforms)
+        left_transform = only(values(left.nodes.transforms))
+        right_transform = only(values(right.nodes.transforms))
+        @test left_transform.mean == right_transform.mean
+        if left_transform isa BRM.NativePPLZScaleNode
+            @test left_transform.scale == right_transform.scale
         end
     end
     if hasproperty(left.factors, :scale_prior)
@@ -265,6 +282,9 @@ end
 replace_plan_nodes(plan, nodes) = BRM.NativePPLPlan(
     plan.axes, plan.inputs, plan.parameters, nodes, plan.factors,
     plan.queries, plan.bindings)
+replace_plan_transform(plan, transform) = replace_plan_nodes(
+    plan, merge(plan.nodes, (; transforms=NamedTuple{
+        keys(plan.nodes.transforms)}((transform,)))))
 replace_plan_factors(plan, factors) = BRM.NativePPLPlan(
     plan.axes, plan.inputs, plan.parameters, plan.nodes, factors,
     plan.queries, plan.bindings)
@@ -335,9 +355,9 @@ end
     @test BRM.native_axis_name(plan.axes.scale) == :residual_scalar
     @test plan.axes.scale.keys == (:residual,)
 
-    @test BRM.native_input_name(plan.inputs.predictor) == :dose
-    @test BRM.native_input_role(plan.inputs.predictor) == :predictor
-    @test eltype(plan.inputs.predictor) == Float64
+    @test BRM.native_input_name(plan.inputs.predictors.dose) == :dose
+    @test BRM.native_input_role(plan.inputs.predictors.dose) == :predictor
+    @test eltype(plan.inputs.predictors.dose) == Float64
     @test BRM.native_input_name(plan.inputs.response) == :response
     @test BRM.native_input_role(plan.inputs.response) == :response
     @test eltype(plan.inputs.response) == Float32
@@ -369,7 +389,7 @@ end
     @test BRM.native_affine_input(plan.nodes.location) == :dose
     @test plan.nodes.location.axis === plan.axes.observation
     @test plan.nodes.location.intercept_index == 1
-    @test plan.nodes.location.slope_index == 2
+    @test plan.nodes.location.slope_indices == (2,)
 
     @test plan.factors.coefficient_prior isa BRM.NativePPLStandardNormalFactor
     @test plan.factors.coefficient_prior.unconstrained == 1:2
@@ -719,7 +739,8 @@ end
     @test LogDensityProblems.dimension(plan) == 2
     @test keys(plan.axes) == (:observation, :coefficient)
     @test keys(plan.parameters) == (:coefficients,)
-    @test keys(plan.nodes) == (:location, :rate)
+    @test keys(plan.nodes) == (:transforms, :location, :rate)
+    @test isempty(plan.nodes.transforms)
     @test keys(plan.factors) == (:coefficient_prior, :likelihood)
     @test plan.factors.likelihood isa BRM.NativePPLPoissonFactor
     @test plan.factors.likelihood.axis === plan.axes.observation
@@ -1324,8 +1345,8 @@ end
     gaussian = check_transformed_execution(
         gaussian_centered, gaussian_explicit, [0.2, -0.4, log(0.8)])
 
-    @test hasproperty(gaussian_centered.nodes, :transform)
-    transform = gaussian_centered.nodes.transform
+    @test length(gaussian_centered.nodes.transforms) == 1
+    transform = only(values(gaussian_centered.nodes.transforms))
     @test transform isa BRM.NativePPLCenterNode
     @test BRM.native_center_input(transform) === :x
     @test transform.mean == 2.5
@@ -1373,12 +1394,13 @@ end
         gaussian, (; x=new_x, y=[0.4, 0.9]))
     refitted = BRM.NativePPL.rebind(
         gaussian, (; x=new_x, y=[0.4, 0.9]); freeze_constants=false)
-    @test frozen.plan.nodes.transform.mean == 2.5
+    @test only(values(frozen.plan.nodes.transforms)).mean == 2.5
     @test frozen.predictor == [7.5, 11.5]
-    @test refitted.plan.nodes.transform.mean == 12.0
+    @test only(values(refitted.plan.nodes.transforms)).mean == 12.0
     @test refitted.predictor == [-2.0, 2.0]
     @test frozen.plan.bindings.x === new_x
-    @test frozen.plan.nodes.transform.axis === frozen.plan.axes.observation
+    @test only(values(frozen.plan.nodes.transforms)).axis ===
+          frozen.plan.axes.observation
     @test frozen.plan.nodes.location.axis === frozen.plan.axes.observation
     @test frozen.plan.factors.likelihood.axis === frozen.plan.axes.observation
 
@@ -1416,7 +1438,7 @@ end
         mu ~ 1 + center(x)
         y ~ Normal(mu, sigma)
     end)
-    @test extreme_plan.nodes.transform.mean == extreme
+    @test only(values(extreme_plan.nodes.transforms)).mean == extreme
     @test BRM.NativePPL.prepare(extreme_plan).predictor == [0.0, 0.0]
 
     @test_throws ArgumentError BRM.NativePPL.rebind(
@@ -1453,8 +1475,8 @@ end
         mu ~ 1 + standardize(x)
         y ~ Normal(mu, sigma)
     end)
-    transform = gaussian_scaled.nodes.transform
-    alias_transform = gaussian_standardized.nodes.transform
+    transform = only(values(gaussian_scaled.nodes.transforms))
+    alias_transform = only(values(gaussian_standardized.nodes.transforms))
     @test transform isa BRM.NativePPLZScaleNode
     @test typeof(alias_transform) === typeof(transform)
     @test BRM.native_zscale_input(transform) === :x
@@ -1508,11 +1530,13 @@ end
         @test frozen.predictor ≈ frozen_x
         @test refitted.predictor ≈ refitted_x
         @test frozen.plan.parameters === prepared.plan.parameters
-        @test frozen.plan.nodes.transform.mean == fitted_mean
-        @test frozen.plan.nodes.transform.scale ≈ fitted_scale
-        @test refitted.plan.nodes.transform.mean == 12.0
-        @test refitted.plan.nodes.transform.scale ≈ sqrt(8.0)
-        @test frozen.plan.nodes.transform.axis === frozen.plan.axes.observation
+        frozen_transform = only(values(frozen.plan.nodes.transforms))
+        refitted_transform = only(values(refitted.plan.nodes.transforms))
+        @test frozen_transform.mean == fitted_mean
+        @test frozen_transform.scale ≈ fitted_scale
+        @test refitted_transform.mean == 12.0
+        @test refitted_transform.scale ≈ sqrt(8.0)
+        @test frozen_transform.axis === frozen.plan.axes.observation
         @test frozen.plan.nodes.location.axis === frozen.plan.axes.observation
         @test frozen.plan.factors.likelihood.axis === frozen.plan.axes.observation
 
@@ -1564,8 +1588,8 @@ end
 
     extreme = floatmax(Float64)
     extreme_plan = scaled_gaussian([-extreme, extreme, extreme, extreme])
-    @test extreme_plan.nodes.transform.mean ≈ extreme / 2
-    @test extreme_plan.nodes.transform.scale ≈ extreme
+    @test only(values(extreme_plan.nodes.transforms)).mean ≈ extreme / 2
+    @test only(values(extreme_plan.nodes.transforms)).scale ≈ extreme
     @test BRM.NativePPL.prepare(extreme_plan).predictor ≈ [-1.5, 0.5, 0.5, 0.5]
     @test capability_error(() -> scaled_gaussian([-extreme, extreme])).capability ==
           :predictor_transform
@@ -1579,18 +1603,17 @@ end
     location = gaussian_scaled.nodes.location
     wrong_location = BRM.NativePPLAffineNode(
         BRM.native_node_name(location), :x, location.axis,
-        location.intercept_index, location.slope_index)
+        location.intercept_index, only(location.slope_indices))
     bad_plan = replace_plan_nodes(
-        gaussian_scaled, (; transform=gaussian_scaled.nodes.transform,
-                          location=wrong_location))
+        gaussian_scaled, merge(
+            gaussian_scaled.nodes, (; location=wrong_location)))
     @test capability_error(() -> BRM.NativePPL.prepare(bad_plan)).capability ==
           :graph_identity
 
     wrong_transform = BRM.NativePPLZScaleNode(
         BRM.native_node_name(transform), :wrong, transform.axis,
         transform.mean, transform.scale)
-    bad_plan = replace_plan_nodes(
-        gaussian_scaled, (; transform=wrong_transform, location))
+    bad_plan = replace_plan_transform(gaussian_scaled, wrong_transform)
     @test capability_error(() -> BRM.NativePPL.prepare(bad_plan)).capability ==
           :graph_identity
 
@@ -1598,8 +1621,7 @@ end
     wrong_axis_transform = BRM.NativePPLZScaleNode(
         BRM.native_node_name(transform), :x, equal_axis,
         transform.mean, transform.scale)
-    bad_plan = replace_plan_nodes(
-        gaussian_scaled, (; transform=wrong_axis_transform, location))
+    bad_plan = replace_plan_transform(gaussian_scaled, wrong_axis_transform)
     @test capability_error(() -> BRM.NativePPL.prepare(bad_plan)).capability ==
           :graph_identity
 
@@ -1608,8 +1630,7 @@ end
         BRM.native_node_name(rate), :wrong, rate.axis)
     bad_plan = replace_plan_nodes(
         poisson_scaled,
-        (; transform=poisson_scaled.nodes.transform,
-           location=poisson_scaled.nodes.location, rate=wrong_rate))
+        merge(poisson_scaled.nodes, (; rate=wrong_rate)))
     @test capability_error(() -> BRM.NativePPL.prepare(bad_plan)).capability ==
           :graph_identity
 
@@ -1841,6 +1862,58 @@ end
                 direct_native_model(:poisson, :identity);
                 x=[1.0, 2.0]); y=[0, 1.5]))).capability ==
           :response_support
+end
+
+
+@testset "public multi-predictor affine Model and executor" begin
+    data = (
+        x=[-2.0, 0.0, 1.0, 5.0],
+        w=[1.0, 2.0, 4.0, 8.0],
+        y=[0.2, -0.1, 1.1, 0.7],
+    )
+    declaration = direct_multi_gaussian_model()
+    instance = NP.condition(
+        NP.substitute(declaration; x=data.x, w=data.w); y=data.y)
+    plan = NP.compile(instance)
+    @test keys(plan.inputs.predictors) == (:x, :w)
+    @test keys(plan.nodes.transforms) == (:x_scaled, :w_centered)
+    @test BRM.native_affine_inputs(plan.nodes.location) ==
+          (:x_scaled, :w_centered)
+    @test plan.nodes.location.slope_indices == (2, 3)
+    @test plan.parameters.coefficients.unconstrained == 1:3
+    @test plan.parameters.scale.unconstrained == 4:4
+
+    prepared = NP.prepare(plan)
+    @test keys(prepared.predictors) == (:x_scaled, :w_centered)
+    expected_x = (data.x .- 1.0) ./ sqrt(26 / 3)
+    expected_w = data.w .- sum(data.w) / length(data.w)
+    @test prepared.predictors.x_scaled ≈ expected_x
+    @test prepared.predictors.w_centered ≈ expected_w
+    @test_throws ArgumentError prepared.predictor
+
+    position = [0.3, -0.4, 0.2, log(0.8)]
+    expected_mu = position[1] .+ position[2] .* expected_x .+
+        position[3] .* expected_w
+    work = NP.workspace(prepared)
+    @test NP.evaluate(work, prepared, position, NP.LinearPredictor()) ≈
+          expected_mu
+    expected_density = sum(logpdf.(Normal(), position[1:3])) +
+        logpdf(Exponential(2.0), exp(position[4])) + position[4] +
+        sum(logpdf.(Normal.(expected_mu, exp(position[4])), data.y))
+    @test NP.logdensity!(work, prepared, position) ≈ expected_density
+
+    prediction = NP.prepare(NP.substitute(
+        declaration; x=data.x, w=data.w))
+    @test !NP.has_response(prediction)
+    @test length(NP.simulate(
+        MersenneTwister(904), NP.workspace(prediction), prediction,
+        position)) == length(data.x)
+
+    rebound = NP.rebind(
+        prepared, (; x=[10.0, 14.0], w=[3.0, 9.0]);
+        freeze_constants=false)
+    @test rebound.predictors.x_scaled ≈ [-1 / sqrt(2), 1 / sqrt(2)]
+    @test rebound.predictors.w_centered == [-3.0, 3.0]
 end
 
 

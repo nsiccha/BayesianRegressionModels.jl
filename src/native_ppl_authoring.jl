@@ -102,9 +102,18 @@ struct ZScale{Input} <: AbstractNodeDeclaration end
 zscale(input::Symbol) = ZScale{input}()
 standardize(input::Symbol) = zscale(input)
 
-"""Intercept plus one slope over a named input/node and parameter block."""
-struct Affine{Input,Coefficients} <: AbstractNodeDeclaration end
-affine(input::Symbol, coefficients::Symbol) = Affine{input,coefficients}()
+"""Intercept plus one slope per named input/node over one parameter block."""
+struct Affine{Inputs,Coefficients} <: AbstractNodeDeclaration end
+function affine(inputs::Tuple, coefficients::Symbol)
+    isempty(inputs) && throw(ArgumentError(
+        "native PPL affine declaration requires at least one input"))
+    all(input -> input isa Symbol, inputs) || throw(ArgumentError(
+        "native PPL affine inputs must be named Symbols; got $inputs"))
+    length(unique(inputs)) == length(inputs) || throw(ArgumentError(
+        "native PPL affine inputs must be unique; got $inputs"))
+    Affine{inputs,coefficients}()
+end
+affine(input::Symbol, coefficients::Symbol) = affine((input,), coefficients)
 
 """Elementwise exponential link over one named deterministic node."""
 struct ExpLink{Input} <: AbstractNodeDeclaration end
@@ -112,9 +121,16 @@ exp_link(input::Symbol) = ExpLink{input}()
 
 node_input(::Center{Input}) where {Input} = Input
 node_input(::ZScale{Input}) where {Input} = Input
-node_input(::Affine{Input}) where {Input} = Input
+node_inputs(::Affine{Inputs}) where {Inputs} = Inputs
+function node_input(node::Affine)
+    inputs = node_inputs(node)
+    length(inputs) == 1 || throw(ArgumentError(
+        "native PPL affine declaration has $(length(inputs)) inputs; use " *
+        "`node_inputs`"))
+    only(inputs)
+end
 node_input(::ExpLink{Input}) where {Input} = Input
-affine_parameter(::Affine{Input,Coefficients}) where {Input,Coefficients} =
+affine_parameter(::Affine{Inputs,Coefficients}) where {Inputs,Coefficients} =
     Coefficients
 
 """One scalar Normal stochastic-site declaration."""
@@ -281,9 +297,13 @@ function _validate_model_components(inputs, parameters, nodes, observations)
 
     available = union(input_names, parameter_names)
     for (name, declaration) in pairs(nodes)
-        node_input(declaration) in available || throw(ArgumentError(
-            "native PPL node `$name` references unavailable input " *
-            "`$(node_input(declaration))`; nodes must be topologically ordered"))
+        dependencies = declaration isa Affine ?
+            node_inputs(declaration) : (node_input(declaration),)
+        for dependency in dependencies
+            dependency in available || throw(ArgumentError(
+                "native PPL node `$name` references unavailable input " *
+                "`$dependency`; nodes must be topologically ordered"))
+        end
         declaration isa Affine &&
             affine_parameter(declaration) ∉ parameter_names &&
             throw(ArgumentError(
@@ -426,7 +446,7 @@ function _compile_transform(declaration::ZScale, name::Symbol,
 end
 
 function _validate_coefficient_parameter(
-    name::Symbol, declaration::Parameter)
+    name::Symbol, declaration::Parameter, predictor_count::Int)
     declaration.support isa RealSupport || throw(CapabilityError(
         :parameter_support,
         "affine coefficient parameter `$name` must use RealSupport"))
@@ -436,9 +456,11 @@ function _validate_coefficient_parameter(
     declaration.prior isa StandardNormal || throw(CapabilityError(
         :parameter_prior,
         "affine coefficient parameter `$name` must use StandardNormal()"))
-    length(declaration.axis_keys) == 2 || throw(CapabilityError(
+    expected = predictor_count + 1
+    length(declaration.axis_keys) == expected || throw(CapabilityError(
         :parameter_axis,
-        "affine coefficient parameter `$name` must have intercept and slope coordinates"))
+        "affine coefficient parameter `$name` must have one intercept and " *
+        "$predictor_count slope coordinates; got $(length(declaration.axis_keys))"))
     nothing
 end
 
@@ -476,22 +498,34 @@ function _bind(declaration::Model, bindings, conditions)
     _validate_model(declaration)
     _validate_binding_names(declaration, bindings)
     _validate_condition_names(declaration, conditions)
-    length(declaration.inputs) == 1 || throw(CapabilityError(
+    isempty(declaration.inputs) && throw(CapabilityError(
         :value_ports,
-        "the current native compiler requires exactly one connected value port"))
-    predictor_name, predictor_declaration = only(collect(pairs(declaration.inputs)))
-    input_role(predictor_declaration) in (:value, :predictor) ||
-        throw(CapabilityError(
-            :value_ports,
-            "the affine input port `$predictor_name` must be generic or carry " *
-            "legacy predictor provenance"))
-    predictor = _binding(bindings, predictor_name, :predictor)
-    eltype(predictor) <: Real && !(eltype(predictor) <: Integer) ||
-        throw(CapabilityError(
-            :predictor_type,
-            "predictor `$predictor_name` must be a continuous real vector"))
-    isempty(predictor) && throw(CapabilityError(
+        "the current affine compiler requires at least one connected value port"))
+    predictor_names = Tuple(keys(declaration.inputs))
+    predictors = map(predictor_names) do predictor_name
+        predictor_declaration = getproperty(declaration.inputs, predictor_name)
+        input_role(predictor_declaration) in (:value, :predictor) ||
+            throw(CapabilityError(
+                :value_ports,
+                "affine input port `$predictor_name` must be generic or carry " *
+                "legacy predictor provenance"))
+        predictor = _binding(bindings, predictor_name, :predictor)
+        eltype(predictor) <: Real && !(eltype(predictor) <: Integer) ||
+            throw(CapabilityError(
+                :predictor_type,
+                "predictor `$predictor_name` must be a continuous real vector"))
+        predictor
+    end
+    observation_count = length(first(predictors))
+    observation_count > 0 || throw(CapabilityError(
         :observation_axis, "the observation axis cannot be empty"))
+    for (predictor_name, predictor) in zip(predictor_names, predictors)
+        length(predictor) == observation_count || throw(CapabilityError(
+            :observation_axis,
+            "value port `$predictor_name` has $(length(predictor)) rows; " *
+            "expected $observation_count"))
+    end
+    predictor_bindings = NamedTuple{predictor_names}(predictors)
 
     length(declaration.observations) == 1 || throw(CapabilityError(
         :outcomes,
@@ -513,10 +547,10 @@ function _bind(declaration::Model, bindings, conditions)
             :response_type,
             "conditioned site `$response_name` must be a real or Bool vector"))
     end
-    response !== nothing && length(predictor) != length(response) &&
+    response !== nothing && observation_count != length(response) &&
         throw(CapabilityError(
             :observation_axis,
-            "value port `$predictor_name` has $(length(predictor)) rows but " *
+            "predictor ports have $observation_count rows but " *
             "conditioned site `$response_name` has $(length(response))"))
 
     affine_name, affine_declaration = _one_declaration(
@@ -529,33 +563,54 @@ function _bind(declaration::Model, bindings, conditions)
             "`$coefficient_name`"))
     coefficient_declaration = getproperty(
         declaration.parameters, coefficient_name)
+    affine_inputs = node_inputs(affine_declaration)
     _validate_coefficient_parameter(
-        coefficient_name, coefficient_declaration)
+        coefficient_name, coefficient_declaration, length(affine_inputs))
 
-    transform_pairs = [(name, value) for (name, value) in pairs(declaration.nodes)
-                       if value isa Union{Center,ZScale}]
-    length(transform_pairs) <= 1 || throw(CapabilityError(
-        :predictor_transform,
-        "the current native compiler accepts at most one fitted predictor transform"))
-    transform_name, transform_declaration = isempty(transform_pairs) ?
-        (nothing, nothing) : only(transform_pairs)
-    expected_affine_input = transform_name === nothing ?
-        predictor_name : transform_name
-    node_input(affine_declaration) === expected_affine_input ||
+    transform_names = Symbol[]
+    transform_values = Any[]
+    affine_raw_inputs = Symbol[]
+    for affine_input in affine_inputs
+        if hasproperty(declaration.inputs, affine_input)
+            push!(affine_raw_inputs, affine_input)
+            continue
+        end
+        hasproperty(declaration.nodes, affine_input) || throw(CapabilityError(
+            :graph_identity,
+            "affine node `$affine_name` references unknown input `$affine_input`"))
+        transform_declaration = getproperty(declaration.nodes, affine_input)
+        transform_declaration isa Union{Center,ZScale} ||
+            throw(CapabilityError(
+                :predictor_transform,
+                "affine input `$affine_input` must be a fitted center/zscale node"))
+        raw_input = node_input(transform_declaration)
+        hasproperty(declaration.inputs, raw_input) || throw(CapabilityError(
+            :graph_identity,
+            "fitted node `$affine_input` references unknown value port `$raw_input`"))
+        push!(affine_raw_inputs, raw_input)
+        push!(transform_names, affine_input)
+        push!(transform_values, transform_declaration)
+    end
+    length(unique(affine_raw_inputs)) == length(affine_raw_inputs) ||
         throw(CapabilityError(
             :graph_identity,
-            "affine node `$affine_name` must consume `$expected_affine_input`"))
+            "each affine feature must consume a distinct raw value port"))
+    Set(affine_raw_inputs) == Set(predictor_names) || throw(CapabilityError(
+        :additional_inputs,
+        "the current affine compiler requires every value port exactly once; " *
+        "ports=$(predictor_names), affine sources=$(Tuple(affine_raw_inputs))"))
 
     observation_axis = BRM.NativePPLAxis(
-        :observation, Base.OneTo(length(predictor)))
+        :observation, Base.OneTo(observation_count))
     coefficient_axis = BRM.NativePPLAxis(
         Symbol(affine_name, :_coefficient),
         coefficient_declaration.axis_keys)
-    predictor_input = BRM.NativePPLInput(
-        predictor_name, :predictor,
-        observation_axis, eltype(predictor))
+    predictor_inputs = NamedTuple{predictor_names}(map(
+        (predictor_name, predictor) -> BRM.NativePPLInput(
+            predictor_name, :predictor, observation_axis, eltype(predictor)),
+        predictor_names, predictors))
     response_eltype = response === nothing ?
-        (observation isa NormalObservation ? eltype(predictor) :
+        (observation isa NormalObservation ? eltype(first(predictors)) :
          observation isa BernoulliLogitObservation ? Bool : Int) :
         eltype(response)
     response_input = BRM.NativePPLInput(
@@ -565,20 +620,27 @@ function _bind(declaration::Model, bindings, conditions)
         coefficient_declaration.support,
         coefficient_declaration.transform,
         coefficient_axis,
-        1:2)
-    transform = transform_name === nothing ? nothing :
-        _compile_transform(
-            transform_declaration, transform_name,
-            predictor_name, observation_axis, predictor)
+        1:(length(affine_inputs) + 1))
+    compiled_transform_values = map(
+        (name, declaration) -> begin
+            raw_input = node_input(declaration)
+            _compile_transform(
+                declaration, name, raw_input, observation_axis,
+                getproperty(predictor_bindings, raw_input))
+        end,
+        transform_names, transform_values)
+    compiled_transforms = NamedTuple{Tuple(transform_names)}(
+        Tuple(compiled_transform_values))
+    slope_indices = Tuple(2:(length(affine_inputs) + 1))
     location = BRM.NativePPLAffineNode(
-        affine_name, expected_affine_input, observation_axis, 1, 2)
-    compiled_nodes = transform === nothing ?
-        (; location) : (; transform, location)
+        affine_name, affine_inputs, observation_axis, 1, slope_indices)
+    compiled_nodes = (; transforms=compiled_transforms, location)
     coefficient_prior = BRM.NativePPLStandardNormalFactor(
-        coefficient_name, 1:2)
+        coefficient_name, 1:(length(affine_inputs) + 1))
     compiled_bindings = response === nothing ?
-        NamedTuple{(predictor_name,)}((predictor,)) :
-        NamedTuple{(predictor_name, response_name)}((predictor, response))
+        predictor_bindings : merge(
+            predictor_bindings,
+            NamedTuple{(response_name,)}((response,)))
 
     if observation isa NormalObservation
         observation_dependencies(observation)[1] === affine_name ||
@@ -595,7 +657,7 @@ function _bind(declaration::Model, bindings, conditions)
             "Normal declaration currently requires exactly coefficient and scale parameters"))
         scale_declaration = getproperty(declaration.parameters, scale_name)
         _validate_scale_parameter(scale_name, scale_declaration)
-        length(declaration.nodes) == (transform === nothing ? 1 : 2) ||
+        length(declaration.nodes) == length(compiled_transforms) + 1 ||
             throw(CapabilityError(
                 :additional_nodes,
                 "Normal declaration contains unsupported extra nodes"))
@@ -603,15 +665,17 @@ function _bind(declaration::Model, bindings, conditions)
             Symbol(scale_name, :_scalar), scale_declaration.axis_keys)
         scale = BRM.NativePPLParameter(
             scale_name, scale_declaration.support, scale_declaration.transform,
-            scale_axis, 3:3)
+            scale_axis,
+            (length(affine_inputs) + 2):(length(affine_inputs) + 2))
         scale_prior = BRM.NativePPLExponentialFactor(
-            scale_name, 3, scale_declaration.prior.scale)
+            scale_name, length(affine_inputs) + 2,
+            scale_declaration.prior.scale)
         likelihood = BRM.NativePPLNormalFactor(
             response_name, affine_name, scale_name, observation_axis)
         return _validated_plan(BRM.NativePPLPlan(
             (; observation=observation_axis, coefficient=coefficient_axis,
                scale=scale_axis),
-            (; predictor=predictor_input, response=response_input),
+            (; predictors=predictor_inputs, response=response_input),
             (; coefficients, scale),
             compiled_nodes,
             (; coefficient_prior, scale_prior, likelihood),
@@ -633,7 +697,7 @@ function _bind(declaration::Model, bindings, conditions)
                     :response_support,
                     "BernoulliLogit condition `$response_name` must contain Bool/0/1"))
         end
-        length(declaration.nodes) == (transform === nothing ? 1 : 2) ||
+        length(declaration.nodes) == length(compiled_transforms) + 1 ||
             throw(CapabilityError(
                 :additional_nodes,
                 "BernoulliLogit declaration contains unsupported extra nodes"))
@@ -641,7 +705,7 @@ function _bind(declaration::Model, bindings, conditions)
             response_name, affine_name, observation_axis)
         return _validated_plan(BRM.NativePPLPlan(
             (; observation=observation_axis, coefficient=coefficient_axis),
-            (; predictor=predictor_input, response=response_input),
+            (; predictors=predictor_inputs, response=response_input),
             (; coefficients), compiled_nodes,
             (; coefficient_prior, likelihood),
             BRM._native_ppl_queries(observation_axis, likelihood),
@@ -668,7 +732,7 @@ function _bind(declaration::Model, bindings, conditions)
     node_input(rate_declaration) === affine_name || throw(CapabilityError(
         :graph_identity,
         "Poisson rate node `$rate_name` must consume affine node `$affine_name`"))
-    length(declaration.nodes) == (transform === nothing ? 2 : 3) ||
+    length(declaration.nodes) == length(compiled_transforms) + 2 ||
         throw(CapabilityError(
             :additional_nodes,
             "Poisson declaration contains unsupported extra nodes"))
@@ -679,7 +743,7 @@ function _bind(declaration::Model, bindings, conditions)
         response_name, rate_name, observation_axis)
     _validated_plan(BRM.NativePPLPlan(
         (; observation=observation_axis, coefficient=coefficient_axis),
-        (; predictor=predictor_input, response=response_input),
+        (; predictors=predictor_inputs, response=response_input),
         (; coefficients), compiled_nodes,
         (; coefficient_prior, likelihood),
         BRM._native_ppl_queries(observation_axis, likelihood),
