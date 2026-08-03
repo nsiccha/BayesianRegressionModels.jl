@@ -3715,6 +3715,35 @@ end
     @test capability_error(
         () -> NP.lower(varying_without_population)).capability ==
           :predictor_terms
+    varying_replay_bindings = (;
+        x=[3.0, -2.0, 0.5], group=[:c, :a, :c])
+    varying_replay_response = [0.2, -0.3, 0.7]
+    varying_replay = NP.rebind(
+        varying_prepared, (; y=varying_replay_response);
+        bindings=varying_replay_bindings)
+    @test varying_replay.plan.group_indices ==
+          (; r_mu_p_group=(3, 1, 3))
+    @test varying_replay.plan.graph.coordinates.b_p_group.keys ==
+          varying_plan.graph.coordinates.b_p_group.keys
+    @test varying_replay.plan.graph.dimension == varying_plan.graph.dimension
+    varying_replay_workspace = NP.workspace(
+        varying_replay, Float64, DI.AutoEnzyme())
+    @test NP.evaluate(
+        varying_replay_workspace, varying_replay, varying_position,
+        NP.LinearPredictor()) ≈
+          varying_beta .* varying_replay_bindings.x .+
+          varying_effects[[3, 1, 3]]
+    varying_prediction_only = NP.rebind(
+        varying_prepared, (;); bindings=varying_replay_bindings)
+    @test !NP.has_response(varying_prediction_only)
+    @test length(NP.simulate(
+        MersenneTwister(935), NP.workspace(varying_prediction_only),
+        varying_prediction_only, varying_position)) == 3
+    new_group_error = capability_error(() -> NP.rebind(
+        varying_prepared, (;);
+        bindings=(; x=[0.0, 1.0], group=[:a, :new_group])))
+    @test new_group_error.capability == :new_group
+    @test occursin("requires known levels", new_group_error.detail)
 
     sampled_offset_plan = NP.compile(sampled_offset_brmi)
     @test sampled_offset_plan isa NP.FactorPlan

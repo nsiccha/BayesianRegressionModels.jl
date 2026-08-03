@@ -468,11 +468,28 @@ end
 
 function _parameter_stochastic_site(
     name::Symbol, declaration::GroupedNormalParameter,
-    conditions::NamedTuple, bindings::NamedTuple)
+    conditions::NamedTuple, bindings::NamedTuple,
+    fitted_levels=nothing)
     group_name = group_input(declaration)
     hasproperty(bindings, group_name) || throw(ArgumentError(
         "native PPL grouped site `$name` requires binding `$group_name`"))
-    levels = _group_levels(getproperty(bindings, group_name), group_name)
+    observed_levels = _group_levels(
+        getproperty(bindings, group_name), group_name)
+    levels = fitted_levels === nothing ? observed_levels : Tuple(fitted_levels)
+    isempty(levels) && throw(ArgumentError(
+        "native PPL fitted group levels for `$group_name` cannot be empty"))
+    any(ismissing, levels) && throw(ArgumentError(
+        "native PPL fitted group levels for `$group_name` cannot contain " *
+        "missing values"))
+    length(unique(levels)) == length(levels) || throw(ArgumentError(
+        "native PPL fitted group levels for `$group_name` must be unique"))
+    unknown = Tuple(level for level in observed_levels
+                    if findfirst(isequal(level), levels) === nothing)
+    isempty(unknown) || throw(CapabilityError(
+        :new_group,
+        "native PPL group input `$group_name` contains new levels " *
+        "$(unknown); this replay slice reuses fitted group effects and " *
+        "requires known levels"))
     activity = hasproperty(conditions, name) ? ConditionedSite() : FreeSite()
     coordinate_keys = Tuple(
         GroupCoordinateKey(name, level) for level in levels)
@@ -610,7 +627,8 @@ schedule, then allocate semantic unconstrained coordinates for free sites.
 `FactorPlan` executes the supported subset while preserving this graph as the
 public mid-level semantic representation.
 """
-function factor_graph(declaration::Model; conditions=(;), bindings=(;))
+function factor_graph(declaration::Model; conditions=(;), bindings=(;),
+                      group_levels=(;))
     _validate_model(declaration)
     canonical_conditions = _canonical_factor_conditions(
         declaration, conditions)
@@ -623,7 +641,9 @@ function factor_graph(declaration::Model; conditions=(;), bindings=(;))
             parameter = getproperty(declaration.parameters, name)
             parameter isa GroupedNormalParameter ?
                 _parameter_stochastic_site(
-                    name, parameter, canonical_conditions, bindings) :
+                    name, parameter, canonical_conditions, bindings,
+                    hasproperty(group_levels, name) ?
+                        getproperty(group_levels, name) : nothing) :
                 _parameter_stochastic_site(
                     name, parameter, canonical_conditions)
         else
@@ -834,7 +854,8 @@ function _validate_factor_plan_site(
     nothing
 end
 
-function _bind_factor_plan(declaration::Model, bindings, conditions)
+function _bind_factor_plan(declaration::Model, bindings, conditions;
+                           group_levels=(;))
     input_axis_length = nothing
     group_inputs = Set(_group_input_names(declaration))
     for (name, declaration_input) in pairs(declaration.inputs)
@@ -866,7 +887,8 @@ function _bind_factor_plan(declaration::Model, bindings, conditions)
     canonical_conditions = _canonical_factor_conditions(
         declaration, conditions)
     graph = factor_graph(
-        declaration; conditions=canonical_conditions, bindings)
+        declaration; conditions=canonical_conditions, bindings,
+        group_levels)
     for (name, node) in pairs(graph.nodes)
         node isa Union{ExpFactorNode,AffineFactorNode,GroupGatherFactorNode} ||
             throw(CapabilityError(
@@ -1468,7 +1490,19 @@ logdensity_and_gradient!(work::FactorWorkspace, prepared::FactorPrepared,
 has_response(prepared::FactorPrepared) =
     hasproperty(prepared.conditions, factor_output_site(prepared.plan))
 
+function _factor_group_levels(plan::FactorPlan)
+    names = Tuple(name for (name, parameter) in pairs(
+        plan.declaration.parameters)
+        if parameter isa GroupedNormalParameter)
+    values = map(names) do name
+        site = getproperty(plan.graph.sites, name)
+        Tuple(key.level for key in site.coordinate_keys)
+    end
+    NamedTuple{names}(values)
+end
+
 function rebind(prepared::FactorPrepared, conditions;
+                bindings=prepared.plan.bindings,
                 T::Type{<:AbstractFloat}=eltype(prepared), kwargs...)
     isempty(kwargs) || throw(ArgumentError(
         "native PPL factor replay does not accept keyword options yet; got " *
@@ -1476,8 +1510,13 @@ function rebind(prepared::FactorPrepared, conditions;
     conditions isa NamedTuple || throw(ArgumentError(
         "native PPL factor replay bindings must be a NamedTuple; got " *
         "$(typeof(conditions))"))
+    bindings isa NamedTuple || throw(ArgumentError(
+        "native PPL factor replay value bindings must be a NamedTuple; got " *
+        "$(typeof(bindings))"))
+    _validate_binding_names(prepared.plan.declaration, bindings)
     rebound = _bind_factor_plan(
-        prepared.plan.declaration, prepared.plan.bindings, conditions)
+        prepared.plan.declaration, bindings, conditions;
+        group_levels=_factor_group_levels(prepared.plan))
     if !hasproperty(rebound.conditions, rebound.output_site) &&
        isempty(rebound.observation_axis.keys)
         rebound = FactorPlan(
