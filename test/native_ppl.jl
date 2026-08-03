@@ -55,22 +55,45 @@ end
 conditioned(model, data) =
     NP.condition(NP.substitute(model; x=data.x); y=data.y)
 
-function direct_multi_gaussian_model()
+function direct_multi_model(family::Symbol;
+                            coefficient_keys=(:Intercept, :x, :w))
     coefficients = NP.parameter(
-        NP.RealSupport(), (:intercept, :beta_x, :beta_w);
+        NP.RealSupport(), coefficient_keys;
         transform=NP.Identity(), prior=NP.StandardNormal())
-    sigma = NP.parameter(
-        NP.PositiveSupport(), (:sigma,);
-        transform=NP.Exp(), prior=NP.Exponential(2.0))
+    location = family === :gaussian ? :mu :
+        family === :bernoulli ? :eta : :log_rate
+    parameters = NamedTuple{(Symbol(:beta_, location),)}((coefficients,))
+    if family === :gaussian
+        sigma = NP.parameter(
+            NP.PositiveSupport(), (:sigma,);
+            transform=NP.Exp(), prior=NP.Exponential(2.0))
+        parameters = merge(parameters, (; sigma))
+    end
+    transform_names = if location === :mu
+        (:zscale_x_for_mu, :center_w_for_mu)
+    else
+        (Symbol(:zscale_x_for_, location), Symbol(:center_w_for_, location))
+    end
+    nodes = NamedTuple{transform_names}((NP.zscale(:x), NP.center(:w)))
+    nodes = merge(nodes, NamedTuple{(location,)}((NP.affine(
+        transform_names, Symbol(:beta_, location)),)))
+    observation = if family === :gaussian
+        NP.normal(:y, location, :sigma)
+    elseif family === :bernoulli
+        NP.bernoulli_logit(:y, location)
+    else
+        rate = Symbol(:exp_, location)
+        nodes = merge(nodes, NamedTuple{(rate,)}((NP.exp_link(location),)))
+        NP.poisson(:y, rate)
+    end
     NP.model(
         inputs=(; x=NP.input(), w=NP.input()),
-        parameters=(; beta_mu=coefficients, sigma),
-        nodes=(; zscale_x_for_mu=NP.zscale(:x),
-               center_w_for_mu=NP.center(:w),
-               mu=NP.affine(
-                   (:zscale_x_for_mu, :center_w_for_mu), :beta_mu)),
-        observations=(; y=NP.broadcasted(NP.normal(:y, :mu, :sigma))))
+        parameters=parameters, nodes=nodes,
+        observations=(; y=NP.broadcasted(observation)))
 end
+
+direct_multi_gaussian_model() = direct_multi_model(
+    :gaussian; coefficient_keys=(:intercept, :beta_x, :beta_w))
 
 function native_brmi(family::Symbol, transform::Symbol, data)
     if family === :gaussian
@@ -113,6 +136,22 @@ function native_brmi(family::Symbol, transform::Symbol, data)
     end
     @brm data begin
         log_rate ~ 1 + zscale(x)
+        y ~ Poisson(exp(log_rate))
+    end
+end
+
+function multi_native_brmi(family::Symbol, data)
+    family === :gaussian && return @brm data begin
+        sigma ~ Exponential(2.0)
+        mu ~ 1 + zscale(x) + center(w)
+        y ~ Normal(mu, sigma)
+    end
+    family === :bernoulli && return @brm data begin
+        eta ~ 1 + zscale(x) + center(w)
+        y ~ BernoulliLogit(eta)
+    end
+    @brm data begin
+        log_rate ~ 1 + zscale(x) + center(w)
         y ~ Poisson(exp(log_rate))
     end
 end
@@ -184,6 +223,24 @@ NP.@model function macro_multi_gaussian(
     sigma ~ Exponential(2.0)
     mu = intercept + beta_x * zscale(x) + beta_w * center(w)
     @. y ~ Normal(mu, sigma)
+end
+
+NP.@model function macro_multi_bernoulli(
+    x::AbstractVector{<:Real}, w::AbstractVector{<:Real})
+    intercept ~ Normal()
+    beta_x ~ Normal()
+    beta_w ~ Normal()
+    eta = intercept + beta_x * zscale(x) + beta_w * center(w)
+    @. y ~ BernoulliLogit(eta)
+end
+
+NP.@model function macro_multi_poisson(
+    x::AbstractVector{<:Real}, w::AbstractVector{<:Real})
+    intercept ~ Normal()
+    beta_x ~ Normal()
+    beta_w ~ Normal()
+    log_rate = intercept + beta_x * zscale(x) + beta_w * center(w)
+    @. y ~ Poisson(exp(log_rate))
 end
 
 NP.@model function macro_bernoulli_center(
@@ -1969,6 +2026,90 @@ end
     @test brm_prepared.predictors == macro_prepared.predictors
     @test NP.logdensity!(
         NP.workspace(brm_prepared), brm_prepared, position) ≈ expected_density
+end
+
+
+@testset "multi-predictor family workflows and replay" begin
+    raw_x = [-2.0, 0.0, 1.0, 5.0]
+    raw_w = [1.0, 2.0, 4.0, 8.0]
+    for family in (:gaussian, :bernoulli, :poisson)
+        response = family === :gaussian ? [0.2, -0.1, 1.1, 0.7] :
+            family === :bernoulli ? Bool[false, false, true, true] :
+            [0, 1, 3, 6]
+        position = family === :gaussian ?
+            [0.3, -0.4, 0.2, log(0.8)] : [0.3, -0.4, 0.2]
+        data = (; x=raw_x, w=raw_w, y=response)
+        direct_model = direct_multi_model(family)
+        brmi = multi_native_brmi(family, data)
+        lowered_model = NP.lower(brmi)
+        @test typeof(direct_model) === typeof(lowered_model)
+        @test sprint(show, direct_model) == sprint(show, lowered_model)
+
+        direct_plan = NP.bind(NP.condition(
+            NP.substitute(direct_model; x=data.x, w=data.w); y=data.y))
+        brm_plan = NP.compile(brmi)
+        check_plan_structure(direct_plan, brm_plan)
+        prepared = check_transformed_execution(
+            direct_plan, brm_plan, position)
+        @test steady_state_allocations(
+            NP.workspace(prepared, Float64, DI.AutoEnzyme()),
+            prepared, position) == (; primal=0, gradient=0)
+
+        macro_instance = family === :gaussian ?
+            NP.condition(macro_multi_gaussian(data.x, data.w); y=data.y) :
+            family === :bernoulli ?
+            NP.condition(macro_multi_bernoulli(data.x, data.w); y=data.y) :
+            NP.condition(macro_multi_poisson(data.x, data.w); y=data.y)
+        macro_plan = NP.compile(macro_instance)
+        macro_prepared = check_transformed_execution(
+            macro_plan, brm_plan, position)
+        @test steady_state_allocations(
+            NP.workspace(macro_prepared, Float64, DI.AutoEnzyme()),
+            macro_prepared, position) == (; primal=0, gradient=0)
+
+        new_x = [10.0, 14.0, 20.0]
+        new_w = [3.0, 9.0, 15.0]
+        new_y = family === :gaussian ? [0.4, 0.9, 1.3] :
+            family === :bernoulli ? Bool[false, true, true] : [2, 4, 7]
+        for freeze_constants in (true, false)
+            direct_rebound = NP.rebind(
+                prepared, (; x=new_x, w=new_w, y=new_y); freeze_constants)
+            macro_rebound = NP.rebind(
+                macro_prepared, (; x=new_x, w=new_w, y=new_y);
+                freeze_constants)
+            @test direct_rebound.predictors == macro_rebound.predictors
+            direct_work = NP.workspace(
+                direct_rebound, Float64, DI.AutoEnzyme())
+            macro_work = NP.workspace(
+                macro_rebound, Float64, DI.AutoEnzyme())
+            direct_density, direct_gradient = NP.logdensity_and_gradient!(
+                direct_work, direct_rebound, position)
+            macro_density, macro_gradient = NP.logdensity_and_gradient!(
+                macro_work, macro_rebound, position)
+            @test direct_density ≈ macro_density
+            @test direct_gradient ≈ macro_gradient
+
+            direct_prediction = NP.rebind(
+                prepared, (; x=new_x, w=new_w); freeze_constants)
+            macro_prediction = NP.rebind(
+                macro_prepared, (; x=new_x, w=new_w); freeze_constants)
+            @test !NP.has_response(direct_prediction)
+            @test direct_prediction.predictors == macro_prediction.predictors
+            @test NP.simulate(
+                MersenneTwister(908), NP.workspace(direct_prediction),
+                direct_prediction, position) == NP.simulate(
+                    MersenneTwister(908), NP.workspace(macro_prediction),
+                    macro_prediction, position)
+        end
+
+        @test_throws ArgumentError NP.rebind(prepared, (; x=new_x, y=new_y))
+        @test_throws ArgumentError NP.rebind(
+            prepared, (; x=new_x, w=new_w, y=new_y, extra=new_x))
+        @test_throws DimensionMismatch NP.rebind(
+            prepared, (; x=new_x, w=new_w[1:2], y=new_y))
+        @test_throws ArgumentError NP.rebind(
+            prepared, (; x=new_x, w=Int.(new_w), y=new_y))
+    end
 end
 
 
