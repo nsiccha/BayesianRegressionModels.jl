@@ -761,6 +761,33 @@ function factor_query_allocations(workspace::NP.FactorWorkspace,
        predictive=predictive_bytes, prior=prior_bytes)
 end
 
+function factor_node_query_allocations(
+    workspace::NP.FactorWorkspace, prepared::NP.FactorPrepared,
+    position, mu, sigma, positions, mu_draws, sigma_draws,
+    bundle_outputs, bundle_queries)
+    mu_query = NP.NodeOutput(:mu)
+    sigma_query = NP.NodeOutput(:sigma)
+    NP.evaluate!(mu, workspace, prepared, position, mu_query)
+    NP.evaluate!(sigma, workspace, prepared, position, sigma_query)
+    NP.evaluate_draws!(
+        mu_draws, workspace, prepared, positions, mu_query)
+    NP.evaluate_draws!(
+        sigma_draws, workspace, prepared, positions, sigma_query)
+    NP.execute_draws!(
+        bundle_outputs, workspace, prepared, positions, bundle_queries)
+    scalar_mu = @allocated NP.evaluate!(
+        mu, workspace, prepared, position, mu_query)
+    scalar_sigma = @allocated NP.evaluate!(
+        sigma, workspace, prepared, position, sigma_query)
+    batch_mu = @allocated NP.evaluate_draws!(
+        mu_draws, workspace, prepared, positions, mu_query)
+    batch_sigma = @allocated NP.evaluate_draws!(
+        sigma_draws, workspace, prepared, positions, sigma_query)
+    bundle = @allocated NP.execute_draws!(
+        bundle_outputs, workspace, prepared, positions, bundle_queries)
+    (; scalar_mu, scalar_sigma, batch_mu, batch_sigma, bundle)
+end
+
 function factor_predictive_allocations(
     rng, output, workspace::NP.FactorWorkspace,
     prepared::NP.FactorPrepared, position)
@@ -3659,6 +3686,121 @@ end
         distributional_workspace, distributional_prepared,
         distributional_position, NP.PointwiseLogLikelihood()) ≈
           logpdf.(Normal.(distributional_mu, distributional_sigma), response)
+    distributional_mu_query = NP.NodeOutput(:mu)
+    distributional_log_sigma_query = NP.NodeOutput(:log_sigma)
+    distributional_sigma_query = NP.NodeOutput(:sigma)
+    @test distributional_mu_query isa
+          BRM.NativePPLNodeOutput{:mu}
+    for query in (
+        distributional_mu_query,
+        distributional_log_sigma_query,
+        distributional_sigma_query,
+    )
+        signature = NP.output_signature(distributional_prepared, query)
+        @test NP.output_axis(signature).keys == eachindex(response)
+        @test NP.output_eltype(signature, distributional_prepared) ===
+              Float64
+        @test NP.allocate_output(
+            distributional_prepared, query) isa Vector{Float64}
+    end
+    @test NP.evaluate(
+        distributional_workspace, distributional_prepared,
+        distributional_position, distributional_mu_query) ≈
+          distributional_mu
+    @test NP.evaluate(
+        distributional_workspace, distributional_prepared,
+        distributional_position, distributional_log_sigma_query) ≈
+          distributional_log_sigma
+    @test NP.evaluate(
+        distributional_workspace, distributional_prepared,
+        distributional_position, distributional_sigma_query) ≈
+          distributional_sigma
+    @test capability_error(() -> NP.output_signature(
+        distributional_prepared, NP.NodeOutput(:missing))).capability == :query
+    @test capability_error(() -> NP.output_signature(
+        distributional_prepared, NP.NodeOutput(:y))).capability == :query
+
+    distributional_positions = [
+        distributional_position';
+        [0.1, 0.2, -0.4, -0.15]'
+    ]
+    distributional_mu_draws = NP.evaluate_draws(
+        distributional_workspace, distributional_prepared,
+        distributional_positions, distributional_mu_query)
+    distributional_sigma_draws = NP.evaluate_draws(
+        distributional_workspace, distributional_prepared,
+        distributional_positions, distributional_sigma_query)
+    @test distributional_mu_draws[1, :] ≈ distributional_mu
+    @test distributional_sigma_draws[1, :] ≈ distributional_sigma
+    for draw in axes(distributional_positions, 1)
+        @test distributional_mu_draws[draw, :] ≈ NP.evaluate(
+            distributional_workspace, distributional_prepared,
+            @view(distributional_positions[draw, :]),
+            distributional_mu_query)
+        @test distributional_sigma_draws[draw, :] ≈ NP.evaluate(
+            distributional_workspace, distributional_prepared,
+            @view(distributional_positions[draw, :]),
+            distributional_sigma_query)
+    end
+    distributional_bundle_queries = (;
+        mu=distributional_mu_query,
+        log_sigma=distributional_log_sigma_query,
+        sigma=distributional_sigma_query,
+        pointwise=NP.PointwiseLogLikelihood())
+    distributional_bundle = NP.execute_draws(
+        distributional_workspace, distributional_prepared,
+        distributional_positions, distributional_bundle_queries)
+    @test distributional_bundle.mu == distributional_mu_draws
+    @test distributional_bundle.sigma == distributional_sigma_draws
+    @test distributional_bundle.log_sigma[1, :] ≈
+          distributional_log_sigma
+    @test distributional_bundle.pointwise[1, :] ≈
+          logpdf.(Normal.(distributional_mu, distributional_sigma), response)
+    @test factor_node_query_allocations(
+        distributional_workspace, distributional_prepared,
+        distributional_position, similar(response), similar(response),
+        distributional_positions, similar(distributional_mu_draws),
+        similar(distributional_sigma_draws),
+        map(similar, distributional_bundle),
+        distributional_bundle_queries) == (;
+            scalar_mu=0, scalar_sigma=0, batch_mu=0, batch_sigma=0,
+            bundle=0)
+
+    distributional_replay_x = [-0.5, 0.25, 1.5]
+    distributional_replay_z = [1.0, -0.5, 0.75]
+    distributional_prediction_only = NP.rebind(
+        distributional_prepared, (;);
+        bindings=(;
+            x=distributional_replay_x, z=distributional_replay_z))
+    @test !NP.has_response(distributional_prediction_only)
+    distributional_prediction_workspace = NP.workspace(
+        distributional_prediction_only, Float64, DI.AutoEnzyme())
+    @test NP.evaluate(
+        distributional_prediction_workspace,
+        distributional_prediction_only, distributional_position,
+        distributional_mu_query) ≈
+          distributional_position[1] .+
+          distributional_position[2] .* distributional_replay_x
+    @test NP.evaluate(
+        distributional_prediction_workspace,
+        distributional_prediction_only, distributional_position,
+        distributional_sigma_query) ≈ exp.(
+            distributional_position[3] .+
+            distributional_position[4] .* distributional_replay_z)
+    @test_throws ArgumentError NP.evaluate(
+        distributional_prediction_workspace,
+        distributional_prediction_only, distributional_position,
+        NP.PointwiseLogLikelihood())
+
+    distributional_float32 = NP.rebind(
+        distributional_prepared, (; y=response);
+        bindings=(; x=raw_x, z=distributional_z), T=Float32)
+    distributional_float32_workspace = NP.workspace(
+        distributional_float32, Float32, DI.AutoEnzyme())
+    @test NP.evaluate(
+        distributional_float32_workspace, distributional_float32,
+        Float32.(distributional_position),
+        distributional_sigma_query) isa Vector{Float32}
     distributional_predictive_rng = MersenneTwister(933)
     distributional_expected_predictive_rng = MersenneTwister(933)
     @test NP.simulate(

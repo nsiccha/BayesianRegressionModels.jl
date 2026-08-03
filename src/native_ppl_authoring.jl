@@ -2370,12 +2370,33 @@ function _factor_predictive_output_signature(plan::FactorPlan)
         BRM.NativePPLDenseVectorLayout())
 end
 
+const _FactorRowNode = Union{
+    ExpFactorNode,LogFactorNode,AffineFactorNode,GroupGatherFactorNode,
+    RowProductFactorNode,GroupedAffineFactorNode,
+}
+
+function _factor_node_output(plan::FactorPlan,
+                             ::BRM.NativePPLNodeOutput{Name}) where {Name}
+    hasproperty(plan.graph.nodes, Name) || throw(CapabilityError(
+        :query, "factor graph has no deterministic node `$Name`"))
+    node = getproperty(plan.graph.nodes, Name)
+    node isa _FactorRowNode || throw(CapabilityError(
+        :query,
+        "deterministic node `$Name` is not materialized on the observation axis"))
+    node
+end
+
 output_signature(plan::FactorPlan,
                  ::Union{BRM.NativePPLLinearPredictor,
                          BRM.NativePPLPointwiseLogLikelihood}) =
     _factor_output_signature(plan)
 output_signature(plan::FactorPlan, ::BRM.NativePPLPosteriorPredictive) =
     _factor_predictive_output_signature(plan)
+function output_signature(plan::FactorPlan,
+                          query::BRM.NativePPLNodeOutput)
+    _factor_node_output(plan, query)
+    _factor_output_signature(plan)
+end
 output_signature(prepared::FactorPrepared, query::BRM.NativePPLQuery) =
     output_signature(prepared.plan, query)
 output_eltype(signature::BRM.NativePPLOutputSignature,
@@ -2441,6 +2462,14 @@ end
     end
 end
 
+@inline function _factor_node_output_at(
+    ::BRM.NativePPLNodeOutput{Name}, prepared::FactorPrepared,
+    buffers::FactorBuffers, index::Int) where {Name}
+    _factor_argument_at(
+        NodeValue{Name}(), index, prepared.plan, buffers,
+        eltype(buffers.values))
+end
+
 @inline function _factor_terminal_sample(rng::BRM.AbstractRNG,
                                          prepared::FactorPrepared,
                                          buffers::FactorBuffers,
@@ -2474,6 +2503,18 @@ function evaluate!(output::AbstractVector, work::FactorWorkspace,
     for index in eachindex(output)
         output[index] = _factor_terminal_linear(
             prepared, work.primal, index)
+    end
+    output
+end
+
+function evaluate!(output::AbstractVector, work::FactorWorkspace,
+                   prepared::FactorPrepared, position::AbstractVector,
+                   query::BRM.NativePPLNodeOutput)
+    _factor_check_query_output(output, work, prepared, position, query)
+    _factor_logdensity_kernel(position, prepared, work.primal)
+    for index in eachindex(output)
+        output[index] = _factor_node_output_at(
+            query, prepared, work.primal, index)
     end
     output
 end
@@ -2516,6 +2557,31 @@ end
 function evaluate(rng::BRM.AbstractRNG, work::FactorWorkspace,
                   prepared::FactorPrepared, position::AbstractVector,
                   query::BRM.NativePPLLinearPredictor)
+    output = allocate_output(prepared, query)
+    evaluate!(rng, output, work, prepared, position, query)
+end
+
+function evaluate!(rng::BRM.AbstractRNG, output::AbstractVector,
+                   work::FactorWorkspace, prepared::FactorPrepared,
+                   position::AbstractVector,
+                   query::BRM.NativePPLNodeOutput)
+    _factor_check_query_output(output, work, prepared, position, query)
+    if _has_generated_groups(prepared.plan)
+        _factor_predictive_kernel!(
+            rng, position, prepared, work.primal)
+    else
+        _factor_logdensity_kernel(position, prepared, work.primal)
+    end
+    for index in eachindex(output)
+        output[index] = _factor_node_output_at(
+            query, prepared, work.primal, index)
+    end
+    output
+end
+
+function evaluate(rng::BRM.AbstractRNG, work::FactorWorkspace,
+                  prepared::FactorPrepared, position::AbstractVector,
+                  query::BRM.NativePPLNodeOutput)
     output = allocate_output(prepared, query)
     evaluate!(rng, output, work, prepared, position, query)
 end
@@ -2858,7 +2924,8 @@ function evaluate_draws!(rng::BRM.AbstractRNG, output::AbstractMatrix,
                          work::FactorWorkspace,
                          prepared::FactorPrepared,
                          positions::AbstractMatrix,
-                         query::BRM.NativePPLLinearPredictor)
+                         query::Union{BRM.NativePPLLinearPredictor,
+                                      BRM.NativePPLNodeOutput})
     _factor_check_batch_output(
         output, work, prepared, positions, query)
     for draw in axes(positions, 1)
@@ -2872,7 +2939,8 @@ end
 function evaluate_draws(rng::BRM.AbstractRNG, work::FactorWorkspace,
                         prepared::FactorPrepared,
                         positions::AbstractMatrix,
-                        query::BRM.NativePPLLinearPredictor)
+                        query::Union{BRM.NativePPLLinearPredictor,
+                                     BRM.NativePPLNodeOutput})
     signature = batch_output_signature(prepared, positions, query)
     output = allocate_output(signature, prepared)
     evaluate_draws!(rng, output, work, prepared, positions, query)
@@ -2914,6 +2982,16 @@ end
 end
 
 @inline function _factor_write_bundle_query!(rng, output::AbstractVector,
+        query::BRM.NativePPLNodeOutput, work::FactorWorkspace,
+        prepared::FactorPrepared)
+    for index in eachindex(output)
+        output[index] = _factor_node_output_at(
+            query, prepared, work.primal, index)
+    end
+    output
+end
+
+@inline function _factor_write_bundle_query!(rng, output::AbstractVector,
         ::BRM.NativePPLPointwiseLogLikelihood, work::FactorWorkspace,
         prepared::FactorPrepared)
     copyto!(output, work.primal.pointwise_loglikelihood)
@@ -2935,6 +3013,16 @@ end
     for index in axes(output, 2)
         output[draw, index] = _factor_terminal_linear(
             prepared, work.primal, index)
+    end
+    output
+end
+
+@inline function _factor_write_bundle_matrix_query!(rng,
+        output::AbstractMatrix, draw, query::BRM.NativePPLNodeOutput,
+        work::FactorWorkspace, prepared::FactorPrepared)
+    for index in axes(output, 2)
+        output[draw, index] = _factor_node_output_at(
+            query, prepared, work.primal, index)
     end
     output
 end
