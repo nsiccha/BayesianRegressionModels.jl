@@ -5336,6 +5336,7 @@ end
 
 function _syntax_affine_assignment(statement,
                                    scalar_priors::Set{Symbol},
+                                   block_priors::Dict{Symbol,Tuple},
                                    grouped_sites::Dict{Symbol,Symbol},
                                    correlated_grouped_sites::Dict{Symbol,NamedTuple})
     lhs, rhs = statement.args
@@ -5347,6 +5348,7 @@ function _syntax_affine_assignment(statement,
     gathered_offsets = NamedTuple[]
     grouped_products = NamedTuple[]
     correlated_groups = NamedTuple[]
+    population_blocks = NamedTuple[]
     ordinary_terms = Any[]
     for term in terms
         if term isa Expr && term.head === :call &&
@@ -5405,11 +5407,30 @@ function _syntax_affine_assignment(statement,
                 product_name))
         elseif term isa Expr && term.head === :call &&
                _syntax_name(first(term.args)) === :dot
-            _, arguments = _syntax_call(term, "correlated grouped dot product")
+            _, arguments = _syntax_call(term, "affine dot product")
             length(arguments) == 2 || throw(ArgumentError(
-                "native PPL @model grouped dot needs a grouped site and " *
-                "predictor tuple"))
+                "native PPL @model dot needs a parameter or grouped site " *
+                "and predictor tuple"))
             grouped_ref, predictor_tuple = arguments
+            if grouped_ref isa Symbol && haskey(block_priors, grouped_ref)
+                predictor_tuple isa Expr && predictor_tuple.head === :tuple ||
+                    throw(ArgumentError(
+                        "native PPL @model parameter dot predictors must " *
+                        "be a tuple"))
+                predictors = Tuple(map(predictor_tuple.args) do predictor
+                    predictor isa Symbol || throw(ArgumentError(
+                        "native PPL @model parameter dot predictors must " *
+                        "be named row values"))
+                    predictor
+                end)
+                predictors == block_priors[grouped_ref] || throw(
+                    ArgumentError(
+                        "native PPL @model parameter dot predictors must " *
+                        "match its declared coefficient keys"))
+                push!(population_blocks, (;
+                    name=grouped_ref, predictors))
+                continue
+            end
             grouped_ref isa Expr && grouped_ref.head === :ref &&
                 length(grouped_ref.args) == 2 &&
                 first(grouped_ref.args) isa Symbol &&
@@ -5460,19 +5481,31 @@ function _syntax_affine_assignment(statement,
     length(unique(gathered_site_names)) == length(gathered_site_names) ||
         throw(ArgumentError(
             "native PPL @model grouped offsets must be used once each"))
+    length(population_blocks) <= 1 || throw(ArgumentError(
+        "native PPL @model affine expression may use one parameter dot"))
     intercepts = [term for term in ordinary_terms
                   if term isa Symbol && term in scalar_priors]
     length(intercepts) <= 1 || return nothing
     intercept = isempty(intercepts) ? nothing : only(intercepts)
     intercept === nothing && isempty(sampled_offsets) &&
         isempty(gathered_offsets) && isempty(grouped_products) &&
-        isempty(correlated_groups) && return nothing
+        isempty(correlated_groups) && isempty(population_blocks) &&
+        return nothing
 
     slopes = Symbol[]
     predictor_names = Symbol[]
     raw_predictor_names = Symbol[]
     transform_names = Symbol[]
     transform_values = Any[]
+    population_block = isempty(population_blocks) ? nothing :
+        only(population_blocks)
+    if population_block !== nothing
+        isempty(ordinary_terms) || throw(ArgumentError(
+            "native PPL @model cannot mix a parameter dot with scalar " *
+            "population coefficients"))
+        append!(predictor_names, population_block.predictors)
+        append!(raw_predictor_names, population_block.predictors)
+    end
     for product in ordinary_terms
         product === intercept && continue
         product isa Expr && product.head === :call &&
@@ -5514,7 +5547,7 @@ function _syntax_affine_assignment(statement,
         push!(predictor_names, predictor_name)
         push!(raw_predictor_names, raw_predictor_name)
     end
-    isempty(slopes) && return nothing
+    isempty(slopes) && population_block === nothing && return nothing
     length(unique(slopes)) == length(slopes) || throw(ArgumentError(
         "native PPL @model affine coefficients must be used once each"))
     length(unique(predictor_names)) == length(predictor_names) ||
@@ -5524,16 +5557,21 @@ function _syntax_affine_assignment(statement,
         throw(ArgumentError(
             "native PPL @model affine features must use distinct raw inputs"))
 
-    coefficient_name = Symbol(:beta_, lhs)
-    coefficient_keys = intercept === nothing ?
-        Tuple(slopes) : (intercept, slopes...)
-    parameter_value = Expr(
-        :call, _syntax_ref(:parameter),
-        Expr(:parameters,
-             Expr(:kw, :transform, Expr(:call, _syntax_ref(:Identity))),
-             Expr(:kw, :prior, Expr(:call, _syntax_ref(:StandardNormal)))),
-        Expr(:call, _syntax_ref(:RealSupport)),
-        QuoteNode(coefficient_keys))
+    coefficient_name = population_block === nothing ?
+        Symbol(:beta_, lhs) : population_block.name
+    parameter_value = if population_block === nothing
+        coefficient_keys = intercept === nothing ?
+            Tuple(slopes) : (intercept, slopes...)
+        Expr(
+            :call, _syntax_ref(:parameter),
+            Expr(:parameters,
+                 Expr(:kw, :transform, Expr(:call, _syntax_ref(:Identity))),
+                 Expr(:kw, :prior, Expr(:call, _syntax_ref(:StandardNormal)))),
+            Expr(:call, _syntax_ref(:RealSupport)),
+            QuoteNode(coefficient_keys))
+    else
+        nothing
+    end
     affine_value = Expr(
         :call, _syntax_ref(:affine),
         Expr(:parameters,
@@ -5776,6 +5814,7 @@ function _model_function_syntax(definition)
     parameter_names = Symbol[]
     parameter_values = Any[]
     scalar_prior_names = Symbol[]
+    block_prior_axes = Dict{Symbol,Tuple}()
     grouped_sites = Dict{Symbol,Symbol}()
     correlated_grouped_sites = Dict{Symbol,NamedTuple}()
     consumed_scalar_priors = Set{Symbol}()
@@ -5866,6 +5905,11 @@ function _model_function_syntax(definition)
                         normalized, argument_name_set)
                     push!(parameter_names, name)
                     push!(parameter_values, value)
+                    if prior_name === :StandardNormal
+                        block_prior_axes[name] = _syntax_symbol_tuple(
+                            sampling.lhs.args[2],
+                            "StandardNormal parameter")
+                    end
                 else
                     scalar_prior in scalar_prior_names && throw(ArgumentError(
                         "native PPL @model parameter `$scalar_prior` is declared twice"))
@@ -5874,7 +5918,8 @@ function _model_function_syntax(definition)
             end
         elseif statement isa Expr && statement.head === :(=)
             affine_declaration = _syntax_affine_assignment(
-                statement, Set(scalar_prior_names), grouped_sites,
+                statement, Set(scalar_prior_names), block_prior_axes,
+                grouped_sites,
                 correlated_grouped_sites)
             if affine_declaration === nothing
                 name, value = _syntax_node(statement)
@@ -5884,10 +5929,25 @@ function _model_function_syntax(definition)
                 # Coefficient blocks precede support-transformed scalar
                 # parameters in the flat coordinate ABI, independent of where
                 # the deterministic affine assignment appears in source.
-                pushfirst!(
-                    parameter_names, affine_declaration.coefficient_name)
-                pushfirst!(
-                    parameter_values, affine_declaration.parameter_value)
+                if affine_declaration.parameter_value !== nothing
+                    pushfirst!(
+                        parameter_names, affine_declaration.coefficient_name)
+                    pushfirst!(
+                        parameter_values, affine_declaration.parameter_value)
+                else
+                    coefficient_index = findfirst(
+                        ==(affine_declaration.coefficient_name),
+                        parameter_names)
+                    coefficient_index === nothing && throw(ArgumentError(
+                        "native PPL @model affine dot references an " *
+                        "unavailable coefficient block"))
+                    coefficient_value = parameter_values[coefficient_index]
+                    deleteat!(parameter_names, coefficient_index)
+                    deleteat!(parameter_values, coefficient_index)
+                    pushfirst!(parameter_names,
+                               affine_declaration.coefficient_name)
+                    pushfirst!(parameter_values, coefficient_value)
+                end
                 for (transform_name, transform_value) in zip(
                     affine_declaration.transform_names,
                     affine_declaration.transform_values)

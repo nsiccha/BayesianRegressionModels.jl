@@ -468,6 +468,18 @@ NP.@model function natural_correlated_varying_intercept_slope(x, group)
     @. y ~ Normal(mu, sigma)
 end
 
+NP.@model function natural_correlated_varying_three(x, w, group)
+    tau_p_group[(:Intercept, :x, :w)] ~ Exponential(1)
+    L_p_group[(:Intercept, :x, :w)] ~ LKJCholesky(3, 2)
+    b_p_group[group, (:Intercept, :x, :w)] ~
+        MvNormalCholesky(tau_p_group, L_p_group)
+    beta_mu[(:x, :w)] ~ StandardNormal()
+    sigma ~ Exponential(2)
+    mu = dot(beta_mu, (x, w)) +
+        dot(b_p_group[group], (1, x, w))
+    @. y ~ Normal(mu, sigma)
+end
+
 NP.@model function natural_correlated_bernoulli_logit(x, group)
     tau_p_group[(:Intercept, :x)] ~ Exponential(1)
     L_p_group[(:Intercept, :x)] ~ LKJCholesky(2, 2)
@@ -4381,12 +4393,13 @@ end
     three_tau = exp.(three_coefficient_group_position[1:3])
     three_raw = three_coefficient_group_position[4:6]
     three_z = reshape(three_coefficient_group_position[7:15], 3, 3)
+    three_L31 = tanh(three_raw[2])
+    three_L32 = (1 / cosh(three_raw[2])) * tanh(three_raw[3])
+    three_L33 = (1 / cosh(three_raw[2])) * (1 / cosh(three_raw[3]))
     three_L = [
         1.0 0.0 0.0;
         tanh(three_raw[1]) 1 / cosh(three_raw[1]) 0.0;
-        tanh(three_raw[2])
-            (1 / cosh(three_raw[2])) * tanh(three_raw[3])
-            (1 / cosh(three_raw[2])) * (1 / cosh(three_raw[3]));]
+        three_L31 three_L32 three_L33]
     three_effects = [
         three_tau .* (three_L * three_z[:, group])
         for group in 1:3]
@@ -4456,6 +4469,54 @@ end
         three_coefficient_group_workspace,
         three_coefficient_group_prepared,
         three_coefficient_group_position) == (; primal=0, gradient=0)
+
+    three_group_data = (;
+        x=sampled_offset_data.x,
+        w=three_w,
+        group=grouped_bindings.group,
+        y=sampled_offset_data.y)
+    three_group_brm = @brm three_group_data begin
+        sigma ~ Exponential(2)
+        mu ~ 0 + x + w + (1 + x + w | p | group)
+        sd(:, p) ~ Exponential(1)
+        cor(:, p) ~ LKJCholesky(3, 2)
+        y ~ Normal(mu, sigma)
+    end
+    @test popcoefnames(three_group_brm, :mu) == [:x, :w]
+    @test ranefcoefnames(three_group_brm, :p) == [
+        (; predictor=:mu, coefficient=:Intercept),
+        (; predictor=:mu, coefficient=:x),
+        (; predictor=:mu, coefficient=:w)]
+    @test SBBRMI(three_group_brm; mod=@__MODULE__) isa SBBRMI
+    natural_three_group = NP.condition(
+        natural_correlated_varying_three(
+            three_group_data.x, three_group_data.w,
+            three_group_data.group);
+        y=three_group_data.y)
+    three_group_model = NP.lower(three_group_brm)
+    @test three_group_model == natural_three_group.declaration
+    @test three_group_model.parameters.beta_mu.axis_keys == (:x, :w)
+    @test three_group_model.parameters.tau_p_group.axis_keys ==
+          (:Intercept, :x, :w)
+    for candidate in (natural_three_group, three_group_brm)
+        candidate_prepared = NP.prepare(candidate)
+        candidate_workspace = NP.workspace(
+            candidate_prepared, Float64, DI.AutoEnzyme())
+        candidate_density, candidate_gradient =
+            NP.logdensity_and_gradient!(
+                candidate_workspace, candidate_prepared,
+                three_coefficient_group_position)
+        @test candidate_density ≈ three_density
+        @test candidate_gradient ≈ three_gradient
+        @test NP.evaluate(
+            candidate_workspace, candidate_prepared,
+            three_coefficient_group_position,
+            NP.LinearPredictor()) ≈ three_mu
+        @test factor_steady_state_allocations(
+            candidate_workspace, candidate_prepared,
+            three_coefficient_group_position) ==
+              (; primal=0, gradient=0)
+    end
 
     varying_brm_data = (;
         x=sampled_offset_data.x,
