@@ -468,6 +468,26 @@ NP.@model function natural_correlated_varying_intercept_slope(x, group)
     @. y ~ Normal(mu, sigma)
 end
 
+NP.@model function natural_correlated_bernoulli_logit(x, group)
+    tau_p_group[(:Intercept, :x)] ~ Exponential(1)
+    L_p_group[(:Intercept, :x)] ~ LKJCholesky(2, 2)
+    b_p_group[group, (:Intercept, :x)] ~
+        MvNormalCholesky(tau_p_group, L_p_group)
+    beta ~ Normal()
+    mu = beta * x + dot(b_p_group[group], (1, x))
+    @. y ~ BernoulliLogit(mu)
+end
+
+NP.@model function natural_correlated_poisson_log(x, group)
+    tau_p_group[(:Intercept, :x)] ~ Exponential(1)
+    L_p_group[(:Intercept, :x)] ~ LKJCholesky(2, 2)
+    b_p_group[group, (:Intercept, :x)] ~
+        MvNormalCholesky(tau_p_group, L_p_group)
+    beta ~ Normal()
+    log_rate = beta * x + dot(b_p_group[group], (1, x))
+    @. y ~ Poisson(exp(log_rate))
+end
+
 NP.@model function monolithic_scalar_normal()
     theta ~ Normal()
     sigma ~ Exponential(2.0)
@@ -3884,6 +3904,166 @@ end
         correlated_block_predictor,
         (; x=sampled_offset_data.x, group=grouped_bindings.group);
         conditions=(; y=sampled_offset_data.y))).capability == :factor_shape
+
+    correlated_glmm_parameters = (;
+        tau=correlated_group_declaration.parameters.tau,
+        correlation=correlated_group_declaration.parameters.correlation,
+        z=correlated_group_declaration.parameters.z,
+        beta=correlated_group_declaration.parameters.beta)
+    correlated_glmm_nodes = correlated_group_declaration.nodes
+    correlated_bernoulli_declaration = NP.model(
+        inputs=correlated_group_declaration.inputs,
+        parameters=correlated_glmm_parameters,
+        nodes=correlated_glmm_nodes,
+        observations=(;
+            y=NP.broadcasted(NP.bernoulli_logit(:y, :mu))),
+        site_order=(:tau, :correlation, :z, :beta, :y))
+    correlated_bernoulli_plan = NP.compile(
+        correlated_bernoulli_declaration,
+        (; x=sampled_offset_data.x, group=grouped_bindings.group);
+        conditions=(; y=Bool[true, false, true, true]))
+    @test correlated_bernoulli_plan isa NP.FactorPlan
+    @test correlated_bernoulli_plan.graph.sites.y.factor isa
+          NP.BernoulliLogitSiteFactor
+    correlated_bernoulli_prepared = NP.prepare(correlated_bernoulli_plan)
+    correlated_bernoulli_predictive_signature = NP.output_signature(
+        correlated_bernoulli_plan, NP.PosteriorPredictive())
+    @test NP.output_eltype(
+        correlated_bernoulli_predictive_signature, Float64) === Bool
+    @test NP.allocate_output(
+        correlated_bernoulli_prepared,
+        NP.PosteriorPredictive()) isa Vector{Bool}
+    @test NP.allocate_output(
+        correlated_bernoulli_prepared,
+        NP.PointwiseLogLikelihood()) isa Vector{Float64}
+
+    correlated_poisson_declaration = NP.model(
+        inputs=correlated_group_declaration.inputs,
+        parameters=correlated_glmm_parameters,
+        nodes=merge(correlated_glmm_nodes,
+                    (; rate=NP.exp_link(:mu))),
+        observations=(; y=NP.broadcasted(NP.poisson(:y, :rate))),
+        site_order=(:tau, :correlation, :z, :beta, :y))
+    correlated_poisson_plan = NP.compile(
+        correlated_poisson_declaration,
+        (; x=sampled_offset_data.x, group=grouped_bindings.group);
+        conditions=(; y=Int[2, 0, 1, 3]))
+    @test correlated_poisson_plan isa NP.FactorPlan
+    @test correlated_poisson_plan.graph.sites.y.factor isa
+          NP.PoissonSiteFactor
+    correlated_poisson_prepared = NP.prepare(correlated_poisson_plan)
+    correlated_poisson_predictive_signature = NP.output_signature(
+        correlated_poisson_plan, NP.PosteriorPredictive())
+    @test NP.output_eltype(
+        correlated_poisson_predictive_signature, Float64) === Int
+    @test NP.allocate_output(
+        correlated_poisson_prepared,
+        NP.PosteriorPredictive()) isa Vector{Int}
+    @test NP.allocate_output(
+        correlated_poisson_prepared,
+        NP.LinearPredictor()) isa Vector{Float64}
+
+    grouped_discrete_parameters = (;
+        tau=grouped_declaration.parameters.tau,
+        varying=grouped_declaration.parameters.varying)
+    grouped_bernoulli_declaration = NP.model(
+        inputs=grouped_declaration.inputs,
+        parameters=grouped_discrete_parameters,
+        nodes=grouped_declaration.nodes,
+        observations=(; y=NP.broadcasted(
+            NP.bernoulli_logit(:y, :varying_by_row))),
+        site_order=(:tau, :varying, :y))
+    grouped_bernoulli_prediction = NP.prepare(NP.compile(
+        grouped_bernoulli_declaration, grouped_bindings))
+    grouped_bernoulli_prior_rng = MersenneTwister(947)
+    grouped_bernoulli_expected_rng = MersenneTwister(947)
+    grouped_bernoulli_tau = randexp(grouped_bernoulli_expected_rng)
+    grouped_bernoulli_effects = grouped_bernoulli_tau .* [
+        randn(grouped_bernoulli_expected_rng) for _ in 1:3]
+    grouped_bernoulli_expected = [
+        rand(grouped_bernoulli_expected_rng) <
+            BRM._native_ppl_logistic(value)
+        for value in grouped_bernoulli_effects[[1, 2, 1, 3]]]
+    grouped_bernoulli_prior = NP.simulate_prior(
+        grouped_bernoulli_prior_rng,
+        NP.workspace(grouped_bernoulli_prediction),
+        grouped_bernoulli_prediction)
+    @test grouped_bernoulli_prior.position ≈ [
+        log(grouped_bernoulli_tau), grouped_bernoulli_effects...]
+    @test grouped_bernoulli_prior.response == grouped_bernoulli_expected
+    @test grouped_bernoulli_prior.response isa Vector{Bool}
+    grouped_bernoulli_prior_position = zeros(4)
+    grouped_bernoulli_prior_response = falses(4)
+    grouped_bernoulli_prior_work = NP.workspace(
+        grouped_bernoulli_prediction)
+    NP.simulate_prior!(
+        MersenneTwister(948), grouped_bernoulli_prior_position,
+        grouped_bernoulli_prior_response, grouped_bernoulli_prior_work,
+        grouped_bernoulli_prediction)
+    grouped_bernoulli_allocation_rng = MersenneTwister(949)
+    @test @allocated(NP.simulate_prior!(
+        grouped_bernoulli_allocation_rng, grouped_bernoulli_prior_position,
+        grouped_bernoulli_prior_response, grouped_bernoulli_prior_work,
+        grouped_bernoulli_prediction)) == 0
+
+    grouped_poisson_declaration = NP.model(
+        inputs=grouped_declaration.inputs,
+        parameters=grouped_discrete_parameters,
+        nodes=merge(grouped_declaration.nodes,
+                    (; rate=NP.exp_link(:varying_by_row))),
+        observations=(; y=NP.broadcasted(NP.poisson(:y, :rate))),
+        site_order=(:tau, :varying, :y))
+    grouped_poisson_prediction = NP.prepare(NP.compile(
+        grouped_poisson_declaration, grouped_bindings))
+    grouped_poisson_prior_rng = MersenneTwister(950)
+    grouped_poisson_expected_rng = MersenneTwister(950)
+    grouped_poisson_tau = randexp(grouped_poisson_expected_rng)
+    grouped_poisson_effects = grouped_poisson_tau .* [
+        randn(grouped_poisson_expected_rng) for _ in 1:3]
+    grouped_poisson_expected = [
+        BRM._native_ppl_rand_poisson(
+            grouped_poisson_expected_rng, Float64, value)
+        for value in grouped_poisson_effects[[1, 2, 1, 3]]]
+    grouped_poisson_prior = NP.simulate_prior(
+        grouped_poisson_prior_rng, NP.workspace(grouped_poisson_prediction),
+        grouped_poisson_prediction)
+    @test grouped_poisson_prior.position ≈ [
+        log(grouped_poisson_tau), grouped_poisson_effects...]
+    @test grouped_poisson_prior.response == grouped_poisson_expected
+    @test grouped_poisson_prior.response isa Vector{Int}
+    grouped_poisson_prior_position = zeros(4)
+    grouped_poisson_prior_response = zeros(Int, 4)
+    grouped_poisson_prior_work = NP.workspace(grouped_poisson_prediction)
+    NP.simulate_prior!(
+        MersenneTwister(951), grouped_poisson_prior_position,
+        grouped_poisson_prior_response, grouped_poisson_prior_work,
+        grouped_poisson_prediction)
+    grouped_poisson_allocation_rng = MersenneTwister(952)
+    @test @allocated(NP.simulate_prior!(
+        grouped_poisson_allocation_rng, grouped_poisson_prior_position,
+        grouped_poisson_prior_response, grouped_poisson_prior_work,
+        grouped_poisson_prediction)) == 0
+
+    invalid_poisson_rate_node = NP.model(
+        inputs=grouped_declaration.inputs,
+        parameters=grouped_discrete_parameters,
+        nodes=grouped_declaration.nodes,
+        observations=(; y=NP.broadcasted(
+            NP.poisson(:y, :varying_by_row))),
+        site_order=(:tau, :varying, :y))
+    @test capability_error(() -> NP.compile(
+        invalid_poisson_rate_node, grouped_bindings)).capability == :factor_rate
+    invalid_poisson_rate_input = NP.model(
+        inputs=(; group=NP.input(), rate=NP.input()),
+        parameters=grouped_discrete_parameters,
+        nodes=grouped_declaration.nodes,
+        observations=(; y=NP.broadcasted(NP.poisson(:y, :rate))),
+        site_order=(:tau, :varying, :y))
+    invalid_poisson_rate_plan = NP.compile(
+        invalid_poisson_rate_input,
+        (; group=grouped_bindings.group, rate=[1.0, -1.0, 2.0, 3.0]))
+    @test_throws ArgumentError NP.prepare(invalid_poisson_rate_plan)
+
     correlated_group_prepared = NP.prepare(correlated_group_plan)
     correlated_group_workspace = NP.workspace(
         correlated_group_prepared, Float64, DI.AutoEnzyme())
@@ -3977,6 +4157,141 @@ end
             sum(correlated_scores .* sampled_offset_data.x),
         1 - correlated_sigma / 2 - length(sampled_offset_data.y) +
             sum(abs2, correlated_residuals) / correlated_sigma^2]
+
+    correlated_glmm_position = correlated_group_position[1:10]
+    correlated_glmm_prior_density =
+        sum(logpdf.(Exponential(1), correlated_tau)) +
+        sum(correlated_group_position[1:2]) +
+        correlated_log_constant -
+        2 * correlated_eta * log(cosh(correlated_raw)) +
+        sum(logpdf.(Normal(), correlated_z)) +
+        logpdf(Normal(), correlated_beta)
+    correlated_glmm_gradient = scores -> begin
+        intercept_scores = [
+            sum(scores[[1, 3]]), scores[2], scores[4]]
+        slope_scores = [
+            sum(scores[[1, 3]] .* sampled_offset_data.x[[1, 3]]),
+            scores[2] * sampled_offset_data.x[2],
+            scores[4] * sampled_offset_data.x[4]]
+        z1_gradients = [
+            -correlated_z[1, group] +
+            correlated_tau[1] * intercept_scores[group] +
+            correlated_tau[2] * correlated_rho * slope_scores[group]
+            for group in 1:3]
+        z2_gradients = [
+            -correlated_z[2, group] + correlated_tau[2] *
+            correlated_sech * slope_scores[group]
+            for group in 1:3]
+        [
+            1 - correlated_tau[1] + sum(
+                intercept_scores[group] * correlated_effects[group][1]
+                for group in 1:3),
+            1 - correlated_tau[2] + sum(
+                slope_scores[group] * correlated_effects[group][2]
+                for group in 1:3),
+            -2 * correlated_eta * correlated_rho + sum(
+                slope_scores[group] * correlated_tau[2] *
+                (correlated_sech^2 * correlated_z[1, group] -
+                 correlated_rho * correlated_sech *
+                    correlated_z[2, group]) for group in 1:3),
+            collect(Iterators.flatten(
+                (z1_gradients[group], z2_gradients[group])
+                for group in 1:3))...,
+            -correlated_beta + sum(scores .* sampled_offset_data.x)]
+    end
+
+    correlated_bernoulli_response = Bool[true, false, true, true]
+    correlated_bernoulli_probabilities =
+        BRM._native_ppl_logistic.(correlated_mu)
+    correlated_bernoulli_pointwise = [
+        response ? -BRM._native_ppl_softplus(-logit) :
+            -BRM._native_ppl_softplus(logit)
+        for (response, logit) in
+            zip(correlated_bernoulli_response, correlated_mu)]
+    correlated_bernoulli_scores = Float64.(correlated_bernoulli_response) .-
+        correlated_bernoulli_probabilities
+    correlated_bernoulli_workspace = NP.workspace(
+        correlated_bernoulli_prepared, Float64, DI.AutoEnzyme())
+    correlated_bernoulli_density, correlated_bernoulli_gradient =
+        NP.logdensity_and_gradient!(
+            correlated_bernoulli_workspace,
+            correlated_bernoulli_prepared, correlated_glmm_position)
+    @test correlated_bernoulli_density ≈
+          correlated_glmm_prior_density + sum(correlated_bernoulli_pointwise)
+    @test correlated_bernoulli_gradient ≈
+          correlated_glmm_gradient(correlated_bernoulli_scores)
+    @test NP.evaluate(
+        correlated_bernoulli_workspace, correlated_bernoulli_prepared,
+        correlated_glmm_position, NP.LinearPredictor()) ≈ correlated_mu
+    @test NP.evaluate(
+        correlated_bernoulli_workspace, correlated_bernoulli_prepared,
+        correlated_glmm_position, NP.PointwiseLogLikelihood()) ≈
+          correlated_bernoulli_pointwise
+    correlated_bernoulli_rng = MersenneTwister(953)
+    correlated_bernoulli_expected_rng = MersenneTwister(953)
+    correlated_bernoulli_predictive = NP.simulate(
+        correlated_bernoulli_rng, correlated_bernoulli_workspace,
+        correlated_bernoulli_prepared, correlated_glmm_position)
+    @test correlated_bernoulli_predictive == [
+        rand(correlated_bernoulli_expected_rng) < probability
+        for probability in correlated_bernoulli_probabilities]
+    @test factor_steady_state_allocations(
+        correlated_bernoulli_workspace, correlated_bernoulli_prepared,
+        correlated_glmm_position) == (; primal=0, gradient=0)
+    @test_throws ArgumentError NP.rebind(
+        correlated_bernoulli_prepared,
+        (; y=[true, false, 2, true]))
+
+    correlated_poisson_response = Int[2, 0, 1, 3]
+    correlated_poisson_pointwise = [
+        BRM._native_ppl_poisson_logdensity(Float64(count), log_rate)
+        for (count, log_rate) in
+            zip(correlated_poisson_response, correlated_mu)]
+    correlated_poisson_scores = correlated_poisson_response .-
+        exp.(correlated_mu)
+    correlated_poisson_workspace = NP.workspace(
+        correlated_poisson_prepared, Float64, DI.AutoEnzyme())
+    correlated_poisson_density, correlated_poisson_gradient =
+        NP.logdensity_and_gradient!(
+            correlated_poisson_workspace, correlated_poisson_prepared,
+            correlated_glmm_position)
+    @test correlated_poisson_density ≈
+          correlated_glmm_prior_density + sum(correlated_poisson_pointwise)
+    @test correlated_poisson_gradient ≈
+          correlated_glmm_gradient(correlated_poisson_scores)
+    @test NP.evaluate(
+        correlated_poisson_workspace, correlated_poisson_prepared,
+        correlated_glmm_position, NP.LinearPredictor()) ≈ correlated_mu
+    @test NP.evaluate(
+        correlated_poisson_workspace, correlated_poisson_prepared,
+        correlated_glmm_position, NP.PointwiseLogLikelihood()) ≈
+          correlated_poisson_pointwise
+    correlated_poisson_rng = MersenneTwister(954)
+    correlated_poisson_expected_rng = MersenneTwister(954)
+    correlated_poisson_predictive = NP.simulate(
+        correlated_poisson_rng, correlated_poisson_workspace,
+        correlated_poisson_prepared, correlated_glmm_position)
+    @test correlated_poisson_predictive == [
+        BRM._native_ppl_rand_poisson(
+            correlated_poisson_expected_rng, Float64, log_rate)
+        for log_rate in correlated_mu]
+    @test factor_steady_state_allocations(
+        correlated_poisson_workspace, correlated_poisson_prepared,
+        correlated_glmm_position) == (; primal=0, gradient=0)
+    @test_throws ArgumentError NP.rebind(
+        correlated_poisson_prepared, (; y=[2, -1, 1, 3]))
+    @test_throws ArgumentError NP.rebind(
+        correlated_poisson_prepared, (; y=[2, 0.5, 1, 3]))
+    @test_throws ArgumentError NP.rebind(
+        correlated_poisson_prepared,
+        (; y=[16_777_217, 0, 1, 3]); T=Float32)
+    correlated_poisson_extreme = copy(correlated_glmm_position)
+    correlated_poisson_extreme[10] = 1000.0
+    correlated_poisson_extreme_density = NP.logdensity!(
+        correlated_poisson_workspace, correlated_poisson_prepared,
+        correlated_poisson_extreme)
+    @test correlated_poisson_extreme_density == -Inf
+
     correlated_density, correlated_gradient = NP.logdensity_and_gradient!(
         correlated_group_workspace, correlated_group_prepared,
         correlated_group_position)
@@ -4058,6 +4373,92 @@ end
     @test factor_steady_state_allocations(
         correlated_varying_workspace, correlated_varying_prepared,
         correlated_group_position) == (; primal=0, gradient=0)
+
+    correlated_bernoulli_data = (;
+        x=sampled_offset_data.x,
+        group=grouped_bindings.group,
+        y=correlated_bernoulli_response)
+    correlated_bernoulli_brm = @brm correlated_bernoulli_data begin
+        mu ~ 0 + x + (1 + x | p | group)
+        sd(:, p) ~ Exponential(1)
+        cor(:, p) ~ LKJCholesky(2, 2)
+        y ~ BernoulliLogit(mu)
+    end
+    @test SBBRMI(correlated_bernoulli_brm; mod=@__MODULE__) isa SBBRMI
+    correlated_bernoulli_model = NP.lower(correlated_bernoulli_brm)
+    natural_correlated_bernoulli = NP.condition(
+        natural_correlated_bernoulli_logit(
+            correlated_bernoulli_data.x,
+            correlated_bernoulli_data.group);
+        y=correlated_bernoulli_data.y)
+    @test typeof(correlated_bernoulli_model) ===
+          typeof(natural_correlated_bernoulli.declaration)
+    @test sprint(show, correlated_bernoulli_model) ==
+          sprint(show, natural_correlated_bernoulli.declaration)
+    @test keys(correlated_bernoulli_model.parameters) == (
+        :beta_mu, :tau_p_group, :L_p_group, :b_p_group)
+    @test keys(correlated_bernoulli_model.nodes) ==
+          (:b_p_group_by_group_for_mu, :mu)
+    correlated_bernoulli_brm_plan = NP.compile(correlated_bernoulli_brm)
+    @test correlated_bernoulli_brm_plan.graph.schedule == (
+        :tau_p_group, :L_p_group, :b_p_group, :beta_mu,
+        :b_p_group_by_group_for_mu, :mu, :y)
+    correlated_bernoulli_brm_prepared = NP.prepare(
+        correlated_bernoulli_brm_plan)
+    correlated_bernoulli_brm_workspace = NP.workspace(
+        correlated_bernoulli_brm_prepared, Float64, DI.AutoEnzyme())
+    correlated_bernoulli_brm_density,
+    correlated_bernoulli_brm_gradient = NP.logdensity_and_gradient!(
+        correlated_bernoulli_brm_workspace,
+        correlated_bernoulli_brm_prepared, correlated_glmm_position)
+    @test correlated_bernoulli_brm_density ≈ correlated_bernoulli_density
+    @test correlated_bernoulli_brm_gradient ≈ correlated_bernoulli_gradient
+    @test NP.evaluate(
+        correlated_bernoulli_brm_workspace,
+        correlated_bernoulli_brm_prepared, correlated_glmm_position,
+        NP.LinearPredictor()) ≈ correlated_mu
+
+    correlated_poisson_data = (;
+        x=sampled_offset_data.x,
+        group=grouped_bindings.group,
+        y=correlated_poisson_response)
+    correlated_poisson_brm = @brm correlated_poisson_data begin
+        log_rate ~ 0 + x + (1 + x | p | group)
+        sd(:, p) ~ Exponential(1)
+        cor(:, p) ~ LKJCholesky(2, 2)
+        y ~ Poisson(exp(log_rate))
+    end
+    @test SBBRMI(correlated_poisson_brm; mod=@__MODULE__) isa SBBRMI
+    correlated_poisson_model = NP.lower(correlated_poisson_brm)
+    natural_correlated_poisson = NP.condition(
+        natural_correlated_poisson_log(
+            correlated_poisson_data.x, correlated_poisson_data.group);
+        y=correlated_poisson_data.y)
+    @test typeof(correlated_poisson_model) ===
+          typeof(natural_correlated_poisson.declaration)
+    @test sprint(show, correlated_poisson_model) ==
+          sprint(show, natural_correlated_poisson.declaration)
+    @test keys(correlated_poisson_model.parameters) == (
+        :beta_log_rate, :tau_p_group, :L_p_group, :b_p_group)
+    @test keys(correlated_poisson_model.nodes) == (
+        :b_p_group_by_group_for_log_rate, :log_rate, :exp_log_rate)
+    correlated_poisson_brm_plan = NP.compile(correlated_poisson_brm)
+    @test correlated_poisson_brm_plan.graph.schedule == (
+        :tau_p_group, :L_p_group, :b_p_group, :beta_log_rate,
+        :b_p_group_by_group_for_log_rate, :log_rate, :exp_log_rate, :y)
+    correlated_poisson_brm_prepared = NP.prepare(correlated_poisson_brm_plan)
+    correlated_poisson_brm_workspace = NP.workspace(
+        correlated_poisson_brm_prepared, Float64, DI.AutoEnzyme())
+    correlated_poisson_brm_density, correlated_poisson_brm_gradient =
+        NP.logdensity_and_gradient!(
+            correlated_poisson_brm_workspace,
+            correlated_poisson_brm_prepared, correlated_glmm_position)
+    @test correlated_poisson_brm_density ≈ correlated_poisson_density
+    @test correlated_poisson_brm_gradient ≈ correlated_poisson_gradient
+    @test NP.evaluate(
+        correlated_poisson_brm_workspace, correlated_poisson_brm_prepared,
+        correlated_glmm_position, NP.LinearPredictor()) ≈ correlated_mu
+
     correlated_known_bindings = (;
         x=[2.5, -0.5, 1.0], group=[:c, :a, :b])
     correlated_known_replay = NP.rebind(
@@ -4219,6 +4620,156 @@ end
         correlated_new_replay, correlated_draw_positions,
         correlated_queries) ==
           (; predictive=0, linear=0, bundle=0)
+
+    correlated_glmm_known_expected = [
+        correlated_beta * correlated_known_bindings.x[row] +
+        correlated_effects[[3, 1, 2][row]][1] +
+        correlated_effects[[3, 1, 2][row]][2] *
+            correlated_known_bindings.x[row]
+        for row in eachindex(correlated_known_bindings.x)]
+    for prepared in (
+            correlated_bernoulli_brm_prepared,
+            correlated_poisson_brm_prepared)
+        known_replay = NP.rebind(
+            prepared, (;); bindings=correlated_known_bindings)
+        @test known_replay.plan.graph.dimension == 10
+        @test NP.evaluate(
+            NP.workspace(known_replay), known_replay,
+            correlated_glmm_position, NP.LinearPredictor()) ≈
+              correlated_glmm_known_expected
+    end
+
+    correlated_glmm_new_expected = function(rng, position)
+        tau = exp.(position[1:2])
+        raw = position[3]
+        rho = tanh(raw)
+        sech = 1 / cosh(raw)
+        z = reshape(position[4:9], 2, 3)
+        fitted = [
+            (tau[1] * z[1, group],
+             tau[2] * (rho * z[1, group] + sech * z[2, group]))
+            for group in 1:3]
+        generated_z = (randn(rng), randn(rng))
+        generated = (
+            tau[1] * generated_z[1],
+            tau[2] *
+                (rho * generated_z[1] + sech * generated_z[2]))
+        effects = [fitted[1], generated, generated, fitted[3]]
+        beta = position[10]
+        linear = [
+            beta * correlated_new_bindings.x[row] + effects[row][1] +
+            effects[row][2] * correlated_new_bindings.x[row]
+            for row in eachindex(correlated_new_bindings.x)]
+        (; generated_z, linear)
+    end
+
+    correlated_glmm_draw_positions = [
+        correlated_glmm_position';
+        (correlated_glmm_position .+
+         [0.05, -0.03, 0.02, 0.01, -0.02,
+          0.03, -0.01, 0.02, -0.04, 0.06])']
+    correlated_glmm_cases = (;
+        bernoulli=(;
+            prepared=correlated_bernoulli_brm_prepared,
+            seed=959,
+            sample=(rng, linear) -> [
+                rand(rng) < BRM._native_ppl_logistic(value)
+                for value in linear]),
+        poisson=(;
+            prepared=correlated_poisson_brm_prepared,
+            seed=963,
+            sample=(rng, linear) -> [
+                BRM._native_ppl_rand_poisson(rng, Float64, value)
+                for value in linear]))
+    for (family, case) in pairs(correlated_glmm_cases)
+        replay = NP.rebind(
+            case.prepared, (;); bindings=correlated_new_bindings,
+            new_groups=:resample)
+        @test replay.plan.graph.dimension == 10
+        @test replay.plan.generated_group_levels == (; b_p_group=(:d,))
+        @test replay.plan.generated_group_indices == (; b_p_group=1:2)
+        group_node = family === :bernoulli ?
+            :b_p_group_by_group_for_mu :
+            :b_p_group_by_group_for_log_rate
+        @test getproperty(replay.plan.group_indices, group_node) ==
+              (1, -1, -1, 3)
+        work = NP.workspace(replay)
+        rng = MersenneTwister(case.seed)
+        expected_rng = MersenneTwister(case.seed)
+        expected = correlated_glmm_new_expected(
+            expected_rng, correlated_glmm_position)
+        expected_predictive = case.sample(expected_rng, expected.linear)
+        predictive = NP.allocate_output(
+            replay, NP.PosteriorPredictive())
+        NP.simulate!(
+            rng, predictive, work, replay, correlated_glmm_position)
+        @test predictive == expected_predictive
+        @test work.primal.generated_group_values ≈
+              collect(expected.generated_z)
+        @test factor_predictive_allocations(
+            MersenneTwister(case.seed + 1), predictive, work, replay,
+            correlated_glmm_position) == 0
+        @test_throws NP.CapabilityError NP.logdensity!(
+            work, replay, correlated_glmm_position)
+        @test_throws ArgumentError NP.evaluate!(
+            zeros(4), work, replay, correlated_glmm_position,
+            NP.PointwiseLogLikelihood())
+
+        positions = correlated_glmm_draw_positions
+        predictive_signature = NP.batch_output_signature(
+            replay, positions, NP.PosteriorPredictive())
+        draw_predictive = NP.allocate_output(
+            predictive_signature, replay)
+        draw_linear = zeros(2, 4)
+        manual_predictive = similar(draw_predictive)
+        manual_linear = zeros(2, 4)
+        manual_fused_linear = zeros(2, 4)
+        draw_rng = MersenneTwister(case.seed + 2)
+        manual_rng = MersenneTwister(case.seed + 2)
+        for draw in axes(positions, 1)
+            NP.simulate!(
+                manual_rng, @view(manual_predictive[draw, :]),
+                work, replay, @view(positions[draw, :]))
+            for row in axes(manual_fused_linear, 2)
+                manual_fused_linear[draw, row] =
+                    NP._factor_terminal_linear(replay, work.primal, row)
+            end
+        end
+        NP.simulate_draws!(
+            draw_rng, draw_predictive, work, replay, positions)
+        @test draw_predictive == manual_predictive
+        linear_rng = MersenneTwister(case.seed + 3)
+        manual_linear_rng = MersenneTwister(case.seed + 3)
+        for draw in axes(positions, 1)
+            NP.evaluate!(
+                manual_linear_rng, @view(manual_linear[draw, :]),
+                work, replay, @view(positions[draw, :]),
+                NP.LinearPredictor())
+        end
+        NP.evaluate_draws!(
+            linear_rng, draw_linear, work, replay, positions,
+            NP.LinearPredictor())
+        @test draw_linear == manual_linear
+        queries = (;
+            linear=NP.LinearPredictor(),
+            predictive=NP.PosteriorPredictive())
+        bundle = (;
+            linear=zeros(2, 4),
+            predictive=similar(draw_predictive))
+        NP.execute_draws!(
+            MersenneTwister(case.seed + 2), bundle,
+            work, replay, positions, queries)
+        @test bundle.linear == manual_fused_linear
+        @test bundle.predictive == manual_predictive
+        @test factor_generated_draw_allocations(
+            MersenneTwister(case.seed + 4),
+            MersenneTwister(case.seed + 5),
+            MersenneTwister(case.seed + 6),
+            draw_predictive, draw_linear, bundle,
+            work, replay, positions, queries) ==
+              (; predictive=0, linear=0, bundle=0)
+    end
+
     varying_brm = @brm varying_brm_data begin
         sigma ~ Exponential(2)
         mu ~ 0 + x + (1 | p | group)
