@@ -3282,6 +3282,16 @@ end
         hierarchy_workspace, hierarchy_prepared, hierarchy_position)
     @test hierarchy_density ≈ hierarchy_expected_density
     @test hierarchy_gradient ≈ hierarchy_expected_gradient
+    hierarchy_prepared32 = NP.prepare(hierarchy_plan; T=Float32)
+    hierarchy_position32 = Float32.(hierarchy_position)
+    hierarchy_density32, hierarchy_gradient32 = NP.logdensity_and_gradient!(
+        NP.workspace(hierarchy_prepared32, Float32, DI.AutoEnzyme()),
+        hierarchy_prepared32, hierarchy_position32)
+    @test hierarchy_density32 ≈ Float32(hierarchy_expected_density) rtol=1f-5
+    @test hierarchy_gradient32 ≈
+          Float32.(hierarchy_expected_gradient) rtol=1f-5
+    @test_throws ArgumentError NP.prepare(
+        hierarchy_plan; T=AbstractFloat)
     @test hierarchy_workspace.primal.pointwise_loglikelihood ≈
         logpdf.(Normal(
             hierarchy_individual, hierarchy_observation_scale), response)

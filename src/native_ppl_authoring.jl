@@ -675,6 +675,8 @@ function _factor_validate_condition_support(site::StochasticSite,
 end
 
 function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
+    isconcretetype(T) || throw(ArgumentError(
+        "native PPL factor prepared element type must be concrete; got $T"))
     names = Tuple(keys(plan.conditions))
     values = map(names) do name
         value = _factor_prepare_condition(
