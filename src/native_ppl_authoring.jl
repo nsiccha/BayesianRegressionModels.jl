@@ -5458,29 +5458,81 @@ function _lower_brmi_distributional_gaussian(
     (; declaration, bindings, conditions)
 end
 
+function _lower_brmi_observation_weight(response::Symbol, likelihood)
+    BRM.getf(likelihood) === BRM.weighted || return nothing, likelihood
+    isempty(BRM.getkwargs(likelihood)) || throw(CapabilityError(
+        :observation_weights,
+        "weighted likelihood for `$response` accepts no keywords"))
+    arguments = BRM.getargs(likelihood)
+    length(arguments) == 2 || throw(CapabilityError(
+        :observation_weights,
+        "weighted likelihood for `$response` needs a distribution and weights"))
+    distribution, weight = arguments
+    distribution isa BRM.ExprColumn || throw(CapabilityError(
+        :observation_weights,
+        "weighted likelihood for `$response` requires a distribution call"))
+    isempty(BRM.getkwargs(distribution)) || throw(CapabilityError(
+        :observation_weights,
+        "weighted distribution for `$response` accepts no keywords"))
+    weight isa BRM.ExprColumn || throw(CapabilityError(
+        :observation_weights,
+        "weighted likelihood for `$response` requires a typed StatsBase weight"))
+    isempty(BRM.getkwargs(weight)) || throw(CapabilityError(
+        :observation_weights,
+        "weight constructor for `$response` accepts no keywords"))
+    constructor = BRM.getf(weight)
+    kind = constructor === BRM.aweights || constructor === BRM.AnalyticWeights ?
+        :analytic :
+        constructor === BRM.fweights || constructor === BRM.FrequencyWeights ?
+        :frequency :
+        constructor === BRM.weights || constructor === BRM.Weights ?
+        :power :
+        constructor === BRM.uweights || constructor === BRM.UnitWeights ?
+        :unit : nothing
+    (constructor === BRM.pweights ||
+     constructor === BRM.ProbabilityWeights) && throw(CapabilityError(
+        :observation_weights,
+        "ProbabilityWeights semantics are not implemented for `$response`"))
+    kind === nothing && throw(CapabilityError(
+        :observation_weights,
+        "unsupported observation-weight constructor `$constructor` for `$response`"))
+    weight_arguments = BRM.getargs(weight)
+    length(weight_arguments) == 1 || throw(CapabilityError(
+        :observation_weights,
+        "weight constructor for `$response` requires one data column"))
+    column = only(weight_arguments)
+    column isa BRM.NamedColumn && parent(column) isa BRM.DataColumn || throw(
+        CapabilityError(
+            :observation_weights,
+            "weight constructor for `$response` requires one raw data column"))
+    source = BRM.name(column)
+    (; kind, source, column), distribution
+end
+
 function _lower_brmi(brmi::BRM.BRMI)
     observed = BRM.outcomes(brmi)
     length(observed) == 1 || throw(CapabilityError(
         :outcomes,
         "expected exactly one observed response, got $(length(observed))"))
     outcome = only(observed)
-    family = outcome.family
-    family === BRM.Normal || family === BRM.BernoulliLogit ||
-        family === BRM.Poisson || throw(CapabilityError(
-            :likelihood,
-            "expected `Normal(location, scale)`, `BernoulliLogit(logit)`, " *
-            "or `Poisson(exp(log_rate))`, got `$family`"))
-
     response = outcome.response
     response_lhs, likelihood = BRM._native_ppl_sampling_rhs(brmi, response)
     response_lhs isa BRM.NamedColumn &&
         parent(response_lhs) isa BRM.DataColumn || throw(CapabilityError(
             :response_decorator,
             "response `$response` must be a bare observed data column"))
-    likelihood isa BRM.ExprColumn && BRM.getf(likelihood) === family ||
+    likelihood isa BRM.ExprColumn ||
         throw(CapabilityError(
             :likelihood,
-            "response `$response` must use `$family` consistently"))
+            "response `$response` must use a distribution call"))
+    weight_spec, likelihood = _lower_brmi_observation_weight(
+        response, likelihood)
+    family = BRM.getf(likelihood)
+    family === BRM.Normal || family === BRM.BernoulliLogit ||
+        family === BRM.Poisson || throw(CapabilityError(
+            :likelihood,
+            "expected `Normal(location, scale)`, `BernoulliLogit(logit)`, " *
+            "or `Poisson(exp(log_rate))`, got `$family`"))
     isempty(BRM.getkwargs(likelihood)) || throw(CapabilityError(
         :likelihood_keywords,
         "$family likelihood for `$response` has keywords"))
@@ -5519,7 +5571,12 @@ function _lower_brmi(brmi::BRM.BRMI)
     if family === BRM.Normal
         distributional = _lower_brmi_distributional_gaussian(
             brmi, response, response_lhs, location, likelihood_args[2])
-        distributional === nothing || return distributional
+        if distributional !== nothing
+            weight_spec === nothing || throw(CapabilityError(
+                :observation_weights,
+                "weighted distributional Normal regression is not yet supported"))
+            return distributional
+        end
     end
     scale_name = family === BRM.Normal ?
         BRM._native_ppl_ref_name(likelihood_args[2]) : nothing
@@ -5528,7 +5585,7 @@ function _lower_brmi(brmi::BRM.BRMI)
             :likelihood_scale,
             "Normal scale must be one named scalar parameter"))
 
-    if family === BRM.Normal
+    if family === BRM.Normal && weight_spec === nothing
         factor_dag = _lower_brmi_scalar_factor_dag(
             brmi, response, response_lhs, location)
         factor_dag === nothing || return factor_dag
@@ -5587,6 +5644,11 @@ function _lower_brmi(brmi::BRM.BRMI)
     groups = map(varying_groups) do varying
         parent(parent(varying.group))
     end
+    weight_input_names = weight_spec !== nothing &&
+        weight_spec.source ∉ (input_predictor_names..., group_names...) ?
+        (weight_spec.source,) : ()
+    weight_inputs = isempty(weight_input_names) ? () :
+        (parent(parent(weight_spec.column)),)
     response_values = parent(parent(response_lhs))
 
     group_specs = map(varying_groups, group_names) do varying, group_name
@@ -5628,6 +5690,7 @@ function _lower_brmi(brmi::BRM.BRMI)
              sampled_offsets..., group_names...)) :
         Set((location, response, input_predictor_names..., sampled_offsets...,
              group_names...))
+    weight_spec === nothing || push!(expected_values, weight_spec.source)
     for spec in group_specs
         push!(expected_values, spec.prior.operation)
         spec.correlation_prior === nothing ||
@@ -5641,7 +5704,8 @@ function _lower_brmi(brmi::BRM.BRMI)
         "unsupported formula operations: " *
         join(sort!(collect(extras)), ", ")))
 
-    input_names = (input_predictor_names..., group_names...)
+    input_names = (
+        input_predictor_names..., group_names..., weight_input_names...)
     input_declarations = _declaration_namedtuple(
         input_names, map(_ -> input(), input_names))
     scalar_location && family !== BRM.Normal && throw(CapabilityError(
@@ -5789,6 +5853,11 @@ function _lower_brmi(brmi::BRM.BRMI)
             NamedTuple{(rate_name,)}((exp_link(location),)))
         poisson(response, rate_name)
     end
+    if weight_spec !== nothing
+        observation_declaration = weighted_observation(
+            observation_declaration,
+            observation_weight(weight_spec.kind, weight_spec.source))
+    end
     observation_declarations = NamedTuple{(response,)}(
         (broadcasted(observation_declaration),))
     declaration = if isempty(sampled_offsets) && isempty(group_specs)
@@ -5815,7 +5884,7 @@ function _lower_brmi(brmi::BRM.BRMI)
                         response))
     end
     bindings = _declaration_namedtuple(
-        input_names, (predictors..., groups...))
+        input_names, (predictors..., groups..., weight_inputs...))
     conditions = NamedTuple{(response,)}((response_values,))
     (; declaration, bindings, conditions)
 end
@@ -6519,10 +6588,36 @@ function _syntax_affine_assignment(statement,
        transform_values=Tuple(transform_values), affine_value)
 end
 
+function _syntax_observation_weight(rhs)
+    family, arguments = _syntax_distribution_call(
+        rhs, "observation family")
+    family === :weighted || return nothing
+    length(arguments) == 2 || throw(ArgumentError(
+        "native PPL @model weighted(distribution, weight) needs two arguments"))
+    distribution, weight = arguments
+    constructor, weight_arguments = _syntax_distribution_call(
+        weight, "observation-weight constructor")
+    kind = constructor === :aweights ? :analytic :
+        constructor === :fweights ? :frequency :
+        constructor === :weights ? :power :
+        constructor === :uweights ? :unit : nothing
+    constructor === :pweights && throw(ArgumentError(
+        "native PPL ProbabilityWeights semantics are not implemented"))
+    kind === nothing && throw(ArgumentError(
+        "native PPL @model unsupported observation-weight constructor " *
+        "`$constructor`; use aweights, fweights, weights, or uweights"))
+    length(weight_arguments) == 1 && only(weight_arguments) isa Symbol ||
+        throw(ArgumentError(
+            "native PPL @model observation weights require one named input"))
+    (; distribution, kind, source=only(weight_arguments))
+end
+
 function _syntax_observation(lhs, rhs; broadcasted::Bool)
     lhs isa Symbol || throw(ArgumentError(
         "native PPL @model stochastic-site left-hand side must be a bare " *
         "name; got `$lhs`"))
+    weight = _syntax_observation_weight(rhs)
+    weight === nothing || (rhs = weight.distribution)
     family, arguments = _syntax_distribution_call(rhs, "observation family")
     extra_node_name = nothing
     extra_node_value = nothing
@@ -6557,10 +6652,19 @@ function _syntax_observation(lhs, rhs; broadcasted::Bool)
         "native PPL @model $family observation needs $expected parameter(s)"))
     scalar_value = Expr(:call, _syntax_ref(builder), QuoteNode(lhs),
                         (QuoteNode(argument) for argument in arguments)...)
+    if weight !== nothing
+        weight_value = Expr(
+            :call, _syntax_ref(:observation_weight), QuoteNode(weight.kind),
+            QuoteNode(weight.source))
+        scalar_value = Expr(
+            :call, _syntax_ref(:weighted_observation), scalar_value,
+            weight_value)
+    end
     value = broadcasted ?
         Expr(:call, _syntax_ref(:broadcasted), scalar_value) : scalar_value
     (; name=lhs, value, extra_node_name, extra_node_value,
-       dependencies=Tuple(arguments))
+       dependencies=weight === nothing ? Tuple(arguments) :
+           (Tuple(arguments)..., weight.source))
 end
 
 function _syntax_outputs(statement)
@@ -6605,7 +6709,7 @@ end
 
 const _SYNTAX_DISTRIBUTION_NAMES =
     (:Normal, :StandardNormal, :Exponential, :LKJCholesky,
-     :MvNormalCholesky, :BernoulliLogit, :Poisson)
+     :MvNormalCholesky, :BernoulliLogit, :Poisson, :weighted)
 const _SYNTAX_DETERMINISTIC_NAMES =
     (:center, :zscale, :standardize, :affine, :exp, :exp_link, :dot)
 const _SYNTAX_OPERATOR_NAMES =

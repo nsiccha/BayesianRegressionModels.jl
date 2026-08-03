@@ -493,6 +493,16 @@ NP.@model function natural_varying_intercept(x, group)
     @. y ~ Normal(mu, sigma)
 end
 
+NP.@model function natural_weighted_varying_intercept(
+        x, group, replicates)
+    tau_g_group ~ Exponential(1)
+    b_g_group[group] ~ Normal(0.0, tau_g_group)
+    beta_mu[(:Intercept, :x)] ~ StandardNormal()
+    sigma ~ Exponential(2)
+    mu = dot(beta_mu, (1, x)) + b_g_group[group]
+    @. y ~ weighted(Normal(mu, sigma), aweights(replicates))
+end
+
 NP.@model function natural_varying_slope(x, group)
     tau_p_group ~ Exponential(1)
     b_p_group[group] ~ Normal(0.0, tau_p_group)
@@ -8384,6 +8394,41 @@ end
               location .+ scale .*
                 [randn(expected_rng) for _ in response]
     end
+
+    weighted_brm_data = (;
+        x=[-1.0, 0.5, 2.0],
+        group=[1, 1, 2],
+        replicates=[1, 4, 2],
+        y=response)
+    weighted_brmi = @brm weighted_brm_data begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x + (1 | g | group)
+        sd(:, g) ~ Exponential(1)
+        y ~ weighted(Normal(mu, sigma), aweights(replicates))
+    end
+    natural_weighted = NP.condition(
+        natural_weighted_varying_intercept(
+            weighted_brm_data.x, weighted_brm_data.group,
+            weighted_brm_data.replicates);
+        y=weighted_brm_data.y)
+    lowered_weighted = NP.lower(weighted_brmi)
+    @test typeof(lowered_weighted) ===
+          typeof(natural_weighted.declaration)
+    @test sprint(show, lowered_weighted) ==
+          sprint(show, natural_weighted.declaration)
+    @test keys(lowered_weighted.inputs) == (:x, :group, :replicates)
+    @test lowered_weighted.observations.y.scalar isa NP.WeightedObservation
+    @test NP.observation_weight_kind(
+        lowered_weighted.observations.y.scalar.weight) === :analytic
+    @test NP.observation_weight_source(
+        lowered_weighted.observations.y.scalar.weight) === :replicates
+    weighted_plan = NP.compile(weighted_brmi)
+    @test weighted_plan isa NP.FactorPlan
+    @test weighted_plan.graph.sites.y.factor isa NP.WeightedSiteFactor
+    @test weighted_plan.graph.schedule == (
+        :tau_g_group, :b_g_group, :beta_mu, :sigma,
+        :r_mu_g_group, :mu, :y)
+    @test SBBRMI(weighted_brmi; mod=@__MODULE__) isa SBBRMI
 end
 
 @testset "native PPL workflow queries and replay" begin
