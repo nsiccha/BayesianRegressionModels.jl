@@ -211,6 +211,180 @@ struct ModelInstance{M<:Model,B,C}
     conditions::C
 end
 
+"""
+A stable reference to one named value exported by a namespaced component.
+
+`Namespace`, `Name`, and `Kind` are part of the type so composition preserves
+identity without flattening unrelated component-local names. Kinds currently
+distinguish connected input values, parameter blocks, deterministic nodes, and
+stochastic sites; execution activity is deliberately derived later.
+"""
+struct GraphRef{Namespace,Name,Kind}
+    function GraphRef{Namespace,Name,Kind}() where {Namespace,Name,Kind}
+        Namespace isa Symbol || throw(ArgumentError(
+            "native PPL graph reference namespace must be a Symbol; got " *
+            "$(repr(Namespace))"))
+        Name isa Symbol || throw(ArgumentError(
+            "native PPL graph reference name must be a Symbol; got " *
+            "$(repr(Name))"))
+        Kind in (:binding, :parameter, :node, :site) || throw(ArgumentError(
+            "native PPL graph reference kind must be one of `:binding`, " *
+            "`:parameter`, `:node`, or `:site`; got $(repr(Kind))"))
+        new{Namespace,Name,Kind}()
+    end
+end
+
+graph_namespace(::GraphRef{Namespace}) where {Namespace} = Namespace
+graph_name(::GraphRef{Namespace,Name}) where {Namespace,Name} = Name
+graph_kind(::GraphRef{Namespace,Name,Kind}) where {Namespace,Name,Kind} = Kind
+
+"""One model instance under a collision-safe composition namespace."""
+struct Component{Namespace,I<:ModelInstance}
+    instance::I
+    function Component{Namespace,I}(instance::I) where {Namespace,I<:ModelInstance}
+        Namespace isa Symbol || throw(ArgumentError(
+            "native PPL component namespace must be a Symbol; got " *
+            "$(repr(Namespace))"))
+        isempty(string(Namespace)) && throw(ArgumentError(
+            "native PPL component namespace must not be empty"))
+        _validate_instance(instance)
+        new{Namespace,I}(instance)
+    end
+end
+
+component_namespace(::Component{Namespace}) where {Namespace} = Namespace
+
+function component(namespace::Symbol, instance::ModelInstance)
+    Component{namespace,typeof(instance)}(instance)
+end
+
+component(namespace::Symbol, declaration::Model) =
+    component(namespace, ModelInstance(declaration, (;)))
+
+function _component_output_kind(component::Component, name::Symbol)
+    instance = component.instance
+    declaration = instance.declaration
+    if hasproperty(declaration.inputs, name)
+        hasproperty(instance.bindings, name) || throw(ArgumentError(
+            "native PPL component `$(component_namespace(component))` cannot " *
+            "export open value port `$name`; connect it before exporting it"))
+        return :binding
+    elseif hasproperty(declaration.parameters, name)
+        return :parameter
+    elseif hasproperty(declaration.nodes, name)
+        return :node
+    elseif hasproperty(declaration.observations, name)
+        return :site
+    end
+    throw(ArgumentError(
+        "native PPL component `$(component_namespace(component))` has no " *
+        "exportable value `$name`"))
+end
+
+"""Reference a connected port, parameter, node, or stochastic site output."""
+function output(component::Component{Namespace}, name::Symbol) where {Namespace}
+    kind = _component_output_kind(component, name)
+    GraphRef{Namespace,name,kind}()
+end
+
+"""
+A topologically ordered collection of namespaced model components.
+
+Bindings may contain ordinary Julia values or `GraphRef`s. A reference may
+only point to an earlier component, making cycles and forward references fail
+at declaration time. Compilation of graph-valued connections is a separate
+stage from this collision-safe public composition boundary.
+"""
+struct Composition{C<:NamedTuple}
+    components::C
+    function Composition(components::C) where {C<:NamedTuple}
+        _validate_composition(components)
+        new{C}(components)
+    end
+end
+
+Composition(components) = throw(ArgumentError(
+    "native PPL composition components must be a NamedTuple; got " *
+    "$(typeof(components))"))
+
+function _validate_graph_reference(reference::GraphRef, available, components)
+    namespace = graph_namespace(reference)
+    namespace in available || throw(ArgumentError(
+        "native PPL graph reference `$(namespace).$(graph_name(reference))` " *
+        "must target an earlier component; available namespaces are " *
+        "$(Tuple(available))"))
+    source = getproperty(components, namespace)
+    expected_kind = _component_output_kind(source, graph_name(reference))
+    expected_kind === graph_kind(reference) || throw(ArgumentError(
+        "native PPL graph reference `$(namespace).$(graph_name(reference))` " *
+        "has kind `$(graph_kind(reference))`, expected `$expected_kind`"))
+    nothing
+end
+
+function _validate_composition(components::NamedTuple)
+    isempty(components) && throw(ArgumentError(
+        "native PPL composition requires at least one component"))
+    available = Symbol[]
+    for (namespace, component_value) in pairs(components)
+        component_value isa Component || throw(ArgumentError(
+            "native PPL composition `$namespace` must be a Component; got " *
+            "$(typeof(component_value))"))
+        component_namespace(component_value) === namespace || throw(ArgumentError(
+            "native PPL component namespace `$(component_namespace(component_value))` " *
+            "does not match composition key `$namespace`"))
+        _validate_instance(component_value.instance)
+        for value in values(component_value.instance.bindings)
+            value isa GraphRef &&
+                _validate_graph_reference(value, available, components)
+        end
+        for value in values(component_value.instance.conditions)
+            value isa GraphRef &&
+                _validate_graph_reference(value, available, components)
+        end
+        push!(available, namespace)
+    end
+    components
+end
+
+function compose(components::Component...)
+    isempty(components) && throw(ArgumentError(
+        "native PPL compose requires at least one component"))
+    namespaces = map(component_namespace, components)
+    length(unique(namespaces)) == length(namespaces) || throw(ArgumentError(
+        "native PPL component namespaces must be unique; got $namespaces"))
+    values = NamedTuple{namespaces}(components)
+    Composition(values)
+end
+
+function bind(composition::Composition)
+    _validate_composition(composition.components)
+    throw(CapabilityError(
+        :composition_compilation,
+        "graph-valued component connections are declared but not executable " *
+        "until the composition compiler derives activity and lowers the " *
+        "namespaced graph"))
+end
+
+compile(composition::Composition) = bind(composition)
+prepare(composition::Composition; kwargs...) =
+    prepare(compile(composition); kwargs...)
+
+function Base.show(io::IO, reference::GraphRef)
+    print(io, "NativePPL.GraphRef(", graph_namespace(reference), ".",
+          graph_name(reference), ", kind=", graph_kind(reference), ")")
+end
+
+function Base.show(io::IO, component::Component)
+    print(io, "NativePPL.Component(", component_namespace(component), ", ")
+    show(io, component.instance)
+    print(io, ")")
+end
+
+function Base.show(io::IO, composition::Composition)
+    print(io, "NativePPL.Composition(components=",
+          keys(composition.components), ")")
+end
+
 ModelInstance(declaration::Model, bindings) =
     ModelInstance(declaration, bindings, (;))
 
@@ -1370,7 +1544,7 @@ macro model(definition)
     esc(_model_function_syntax(definition))
 end
 
-export Model, ModelInstance, Input, Parameter
+export Model, ModelInstance, GraphRef, Component, Composition, Input, Parameter
 export RealSupport, PositiveSupport, IdentityTransform, ExpTransform
 export StandardNormal, ExponentialPrior
 export Center, ZScale, Affine, ExpLink
@@ -1379,5 +1553,6 @@ export BroadcastObservation
 export model, input, parameter, Identity, Exp, Exponential
 export center, zscale, standardize, affine, exp_link
 export normal, bernoulli_logit, poisson, broadcasted
-export instantiate, substitute, condition, bind, lower
+export instantiate, substitute, condition, component, output, compose, bind, lower
+export graph_namespace, graph_name, graph_kind, component_namespace
 export @model

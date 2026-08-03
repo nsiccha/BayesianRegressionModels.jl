@@ -253,6 +253,14 @@ NP.@model function macro_multi_gaussian_dotted(
     @. y ~ Normal(mu, sigma)
 end
 
+NP.@model function composable_gaussian(x)
+    intercept ~ Normal()
+    slope ~ Normal()
+    sigma ~ Exponential(2.0)
+    mu = intercept + slope * x
+    @. y ~ Normal(mu, sigma)
+end
+
 NP.@model function macro_bernoulli_center(
     x::AbstractVector{<:Real})
     intercept ~ Normal()
@@ -2226,6 +2234,88 @@ end
         @test_throws ArgumentError NP.rebind(
             prepared, (; x=new_x, w=Int.(new_w), y=new_y))
     end
+end
+
+
+@testset "public namespaced component composition" begin
+    raw_x = [-1.0, 0.0, 2.0, 4.0]
+    source = NP.component(:source, macro_gaussian_identity(raw_x))
+    @test NP.component_namespace(source) === :source
+
+    bound_input = NP.output(source, :x)
+    parameter = NP.output(source, :beta_mu)
+    deterministic = NP.output(source, :mu)
+    stochastic = NP.output(source, :y)
+    @test (NP.graph_namespace(bound_input), NP.graph_name(bound_input),
+           NP.graph_kind(bound_input)) == (:source, :x, :binding)
+    @test NP.graph_kind(parameter) === :parameter
+    @test NP.graph_kind(deterministic) === :node
+    @test NP.graph_kind(stochastic) === :site
+    @test_throws ArgumentError NP.GraphRef{1,:mu,:node}()
+    @test_throws ArgumentError NP.GraphRef{:source,1,:node}()
+    @test_throws ArgumentError NP.GraphRef{:source,:mu,:unknown}()
+    @test occursin(
+        "source.mu, kind=node", sprint(show, deterministic))
+
+    sink_instance = composable_gaussian(deterministic)
+    @test sink_instance.bindings.x === deterministic
+    sink = NP.component(:sink, sink_instance)
+    composition = NP.compose(source, sink)
+    @test keys(composition.components) == (:source, :sink)
+    @test composition.components.source === source
+    @test composition.components.sink === sink
+    @test NP.Composition((; source, sink)).components ==
+          composition.components
+    @test occursin(
+        "components=(:source, :sink)", sprint(show, composition))
+
+    # A constant and a graph reference use the same substitution map. The
+    # difference is the connected value, not a distinct data/pinning role.
+    @test source.instance.bindings.x === raw_x
+    @test sink.instance.bindings.x === deterministic
+
+    parameter_sink = NP.component(
+        :parameter_sink, composable_gaussian(parameter))
+    stochastic_sink = NP.component(
+        :stochastic_sink, composable_gaussian(stochastic))
+    parameter_composition = NP.compose(source, parameter_sink)
+    stochastic_composition = NP.compose(source, stochastic_sink)
+    @test parameter_composition.components.parameter_sink.instance.
+          bindings.x === parameter
+    @test stochastic_composition.components.stochastic_sink.instance.
+          bindings.x === stochastic
+
+    err = capability_error(() -> NP.compile(composition))
+    @test err.capability == :composition_compilation
+    @test occursin("derives activity", err.detail)
+
+    @test_throws ArgumentError NP.compose(sink, source)
+    @test_throws ArgumentError NP.compose()
+    @test_throws ArgumentError NP.compose(
+        source, NP.component(:source, composable_gaussian(raw_x)))
+    @test_throws ArgumentError NP.component(
+        Symbol(""), composable_gaussian(raw_x))
+    @test_throws ArgumentError NP.Component{1,typeof(source.instance)}(
+        source.instance)
+    @test_throws ArgumentError NP.Composition((source, sink))
+    @test_throws ArgumentError NP.Composition((;))
+    @test_throws ArgumentError NP.Composition((; sink, source))
+    @test_throws ArgumentError NP.Composition((; not_a_component=1))
+    @test_throws ArgumentError NP.output(source, :missing)
+    open_component = NP.component(:open, direct_native_model(
+        :gaussian, :identity))
+    @test_throws ArgumentError NP.output(open_component, :x)
+
+    bad_reference = NP.GraphRef{:source,:mu,:site}()
+    bad_sink = NP.component(:bad_sink, composable_gaussian(bad_reference))
+    @test_throws ArgumentError NP.compose(source, bad_sink)
+
+    site_conditioned = NP.component(
+        :site_conditioned,
+        NP.condition(composable_gaussian(raw_x); y=stochastic))
+    conditioned_composition = NP.compose(source, site_conditioned)
+    @test conditioned_composition.components.site_conditioned.instance.
+          conditions.y === stochastic
 end
 
 
