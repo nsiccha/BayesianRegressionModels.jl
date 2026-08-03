@@ -206,13 +206,14 @@ function instantiate(declaration::Model, bindings; conditions=(;))
 end
 
 """Connect a subset of a model's open value ports."""
-function substitute(declaration::Model, bindings::NamedTuple)
+function substitute(declaration::Model, bindings)
     _validate_model(declaration)
     _validate_substitution_names(declaration, bindings)
     ModelInstance(declaration, bindings, (;))
 end
 
-function substitute(instance::ModelInstance, bindings::NamedTuple)
+function substitute(instance::ModelInstance, bindings)
+    _validate_instance(instance)
     _validate_substitution_names(instance.declaration, bindings)
     ModelInstance(
         instance.declaration, merge(instance.bindings, bindings),
@@ -220,13 +221,14 @@ function substitute(instance::ModelInstance, bindings::NamedTuple)
 end
 
 """Condition stochastic sites while retaining and scoring their factors."""
-function condition(declaration::Model, conditions::NamedTuple)
+function condition(declaration::Model, conditions)
     _validate_model(declaration)
     _validate_condition_names(declaration, conditions)
     ModelInstance(declaration, (;), conditions)
 end
 
-function condition(instance::ModelInstance, conditions::NamedTuple)
+function condition(instance::ModelInstance, conditions)
+    _validate_instance(instance)
     _validate_condition_names(instance.declaration, conditions)
     ModelInstance(
         instance.declaration, instance.bindings,
@@ -362,6 +364,13 @@ function _validate_condition_names(declaration::Model, conditions)
         "native PPL conditions reference undeclared stochastic sites: " *
         join(sort!(collect(extra_conditions)), ", ")))
     conditions
+end
+
+function _validate_instance(instance::ModelInstance)
+    _validate_model(instance.declaration)
+    _validate_substitution_names(instance.declaration, instance.bindings)
+    _validate_condition_names(instance.declaration, instance.conditions)
+    instance
 end
 
 function _validated_plan(plan::Plan)

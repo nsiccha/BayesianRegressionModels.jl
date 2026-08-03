@@ -1669,12 +1669,17 @@ end
         @test sprint(show, direct_model) == sprint(show, lowered_model)
 
         direct_plan = NP.bind(conditioned(direct_model, data))
+        keyword_plan = NP.bind(
+            direct_model, (; x=data.x); conditions=(; y=data.y))
+        compiled_keyword_plan = NP.compile(
+            direct_model, (; x=data.x); conditions=(; y=data.y))
         compiled_direct_plan = NP.compile(conditioned(direct_model, data))
         lowered_plan = NP.bind(conditioned(lowered_model, data))
         brm_plan = NP.compile(brmi)
         compatibility_plan = BRM._native_ppl_plan(brmi)
         for candidate in (
-            compiled_direct_plan, lowered_plan, brm_plan, compatibility_plan)
+            keyword_plan, compiled_keyword_plan, compiled_direct_plan,
+            lowered_plan, brm_plan, compatibility_plan)
             check_plan_structure(direct_plan, candidate)
         end
         @test direct_plan.bindings.x === data.x
@@ -1683,9 +1688,18 @@ end
             direct_plan, brm_plan, position)
         @test NP.prepare(conditioned(direct_model, data)).predictor ==
               prepared.predictor
+        @test NP.prepare(
+            direct_model, (; x=data.x); conditions=(; y=data.y)).predictor ==
+              prepared.predictor
         @test steady_state_allocations(
             NP.workspace(prepared, Float64, DI.AutoEnzyme()),
             prepared, position) == (; primal=0, gradient=0)
+
+        unconditioned = NP.prepare(NP.bind(direct_model, (; x=data.x)))
+        @test !NP.has_response(unconditioned)
+        @test length(NP.simulate(
+            MersenneTwister(904), NP.workspace(unconditioned),
+            unconditioned, position)) == length(data.x)
 
         new_x = [10.0, 14.0, 20.0]
         new_y = family === :gaussian ? [0.4, 0.9, 1.3] :
@@ -1742,6 +1756,16 @@ end
           [3.0, 4.0]
     @test_throws ArgumentError NP.substitute(open_gaussian; unknown=[1.0])
     @test_throws ArgumentError NP.condition(open_gaussian; unknown=[1.0])
+    @test_throws ArgumentError NP.substitute(
+        open_gaussian, Dict(:x => gaussian_data.x))
+    @test_throws ArgumentError NP.condition(
+        open_gaussian, Dict(:y => gaussian_data.y))
+    malformed_instance = NP.ModelInstance(
+        open_gaussian, (; x=gaussian_data.x), Dict(:y => gaussian_data.y))
+    @test_throws ArgumentError NP.substitute(
+        malformed_instance; x=gaussian_data.x)
+    @test_throws ArgumentError NP.condition(
+        malformed_instance; y=gaussian_data.y)
     @test_throws ArgumentError NP.bind(gaussian_model, gaussian_data.x)
     @test !NP.has_response(NP.prepare(NP.bind(
         gaussian_model, (; x=gaussian_data.x))))
