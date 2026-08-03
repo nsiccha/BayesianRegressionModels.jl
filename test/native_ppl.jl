@@ -3502,6 +3502,22 @@ end
     @test factor_steady_state_allocations(
         sampled_offset_workspace, sampled_offset_prepared,
         sampled_offset_position) == (; primal=0, gradient=0)
+    sampled_offset_source_x = copy(sampled_offset_data.x)
+    sampled_offset_source_y = copy(sampled_offset_data.y)
+    sampled_offset_owned = NP.prepare(NP.bind(
+        sampled_offset_model, (; x=sampled_offset_source_x);
+        conditions=(; y=sampled_offset_source_y)))
+    sampled_offset_owned_workspace = NP.workspace(sampled_offset_owned)
+    sampled_offset_owned_density = NP.logdensity!(
+        sampled_offset_owned_workspace, sampled_offset_owned,
+        sampled_offset_position)
+    @test sampled_offset_owned.plan.bindings.x !== sampled_offset_source_x
+    @test sampled_offset_owned.conditions.y !== sampled_offset_source_y
+    sampled_offset_source_x[1] = 100.0
+    sampled_offset_source_y[1] = 100.0
+    @test NP.logdensity!(
+        sampled_offset_owned_workspace, sampled_offset_owned,
+        sampled_offset_position) == sampled_offset_owned_density
     sampled_offset_prediction_only = NP.rebind(
         sampled_offset_prepared, (;))
     @test !NP.has_response(sampled_offset_prediction_only)

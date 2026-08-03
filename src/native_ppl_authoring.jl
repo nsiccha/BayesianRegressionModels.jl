@@ -910,10 +910,14 @@ end
 function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
     isconcretetype(T) || throw(ArgumentError(
         "native PPL factor prepared element type must be concrete; got $T"))
-    for (name, value) in pairs(plan.bindings)
+    binding_names = Tuple(keys(plan.bindings))
+    binding_values = map(binding_names) do name
+        value = getproperty(plan.bindings, name)
         converted = _factor_prepare_condition(value, name, T)
         _factor_validate_binding_support(plan.graph, converted, name)
+        converted
     end
+    bindings = NamedTuple{binding_names}(binding_values)
     names = Tuple(keys(plan.conditions))
     values = map(names) do name
         value = _factor_prepare_condition(
@@ -932,8 +936,13 @@ function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
         _factor_validate_condition_support(site, value, name)
         value
     end
-    FactorPrepared{T,typeof(plan),NamedTuple{names,typeof(values)}}(
-        plan, NamedTuple{names}(values))
+    conditions = NamedTuple{names}(values)
+    owned_plan = FactorPlan(
+        plan.declaration, plan.graph, bindings, conditions,
+        plan.site_indices, plan.node_indices, plan.observation_axis,
+        plan.output_site)
+    FactorPrepared{T,typeof(owned_plan),typeof(conditions)}(
+        owned_plan, conditions)
 end
 
 workspace(prepared::FactorPrepared,
