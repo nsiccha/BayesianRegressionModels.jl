@@ -523,6 +523,18 @@ end
 _native_ppl_fit_center(values::AbstractVector, name::Symbol) =
     _native_ppl_fit_mean(values, name, :center)
 
+@inline function _native_ppl_scaled_sumsq(
+    magnitude_scale, scaled_squares, deviation)
+    magnitude = abs(deviation)
+    iszero(magnitude) && return magnitude_scale, scaled_squares
+    if magnitude_scale < magnitude
+        ratio = magnitude_scale / magnitude
+        return magnitude, one(magnitude) + scaled_squares * ratio * ratio
+    end
+    ratio = magnitude / magnitude_scale
+    magnitude_scale, scaled_squares + ratio * ratio
+end
+
 function _native_ppl_fit_zscale(values::AbstractVector, name::Symbol)
     length(values) >= 2 || throw(NativePPLCapabilityError(
         :predictor_transform,
@@ -534,32 +546,111 @@ function _native_ppl_fit_zscale(values::AbstractVector, name::Symbol)
     # sample-standard-deviation semantics.
     magnitude_scale = zero(fitted_mean)
     scaled_squares = zero(fitted_mean)
+    restore_scale = one(fitted_mean)
+    centered_overflow = false
     for value in values
         deviation = float(value) - fitted_mean
-        isfinite(deviation) || throw(NativePPLCapabilityError(
-            :predictor_transform,
-            "`zscale($name)` produced a non-finite centered training value"))
-        magnitude = abs(deviation)
-        iszero(magnitude) && continue
-        if magnitude_scale < magnitude
-            ratio = magnitude_scale / magnitude
-            scaled_squares = one(magnitude) + scaled_squares * ratio * ratio
-            magnitude_scale = magnitude
-        else
-            ratio = magnitude / magnitude_scale
-            scaled_squares += ratio * ratio
+        if !isfinite(deviation)
+            centered_overflow = true
+            break
+        end
+        magnitude_scale, scaled_squares = _native_ppl_scaled_sumsq(
+            magnitude_scale, scaled_squares, deviation)
+    end
+    if centered_overflow
+        # A finite sample can have an overflowing `value - mean` even when its
+        # corrected sample SD is representable. Accumulate centered values in
+        # a dimensionless domain and restore the common magnitude only once.
+        value_scale = maximum(value -> abs(float(value)), values)
+        isfinite(value_scale) && value_scale > zero(value_scale) ||
+            throw(NativePPLCapabilityError(
+                :predictor_transform,
+                "`zscale($name)` could not scale its finite training values"))
+        normalized_mean = fitted_mean / value_scale
+        restore_scale = value_scale
+        magnitude_scale = zero(normalized_mean)
+        scaled_squares = zero(normalized_mean)
+        for value in values
+            deviation = float(value) / value_scale - normalized_mean
+            magnitude_scale, scaled_squares = _native_ppl_scaled_sumsq(
+                magnitude_scale, scaled_squares, deviation)
         end
     end
     iszero(magnitude_scale) && throw(NativePPLCapabilityError(
         :predictor_transform,
         "`zscale($name)` requires nonzero sample variance"))
-    fitted_scale = magnitude_scale *
-        sqrt(scaled_squares / (length(values) - 1))
+    fitted_scale = (magnitude_scale *
+        sqrt(scaled_squares / (length(values) - 1))) * restore_scale
     isfinite(fitted_scale) && fitted_scale > zero(fitted_scale) ||
         throw(NativePPLCapabilityError(
             :predictor_transform,
             "`zscale($name)` produced a non-finite or zero sample SD"))
     (; mean=fitted_mean, scale=fitted_scale)
+end
+
+function _native_ppl_validate_predictor_graph(plan::NativePPLPlan)
+    observation_axis = plan.axes.observation
+    predictor = plan.inputs.predictor
+    response = plan.inputs.response
+    predictor.axis === observation_axis || throw(NativePPLCapabilityError(
+        :graph_identity,
+        "compiled predictor input must carry the plan observation axis"))
+    response.axis === observation_axis || throw(NativePPLCapabilityError(
+        :graph_identity,
+        "compiled response input must carry the plan observation axis"))
+
+    hasproperty(plan.nodes, :location) || throw(NativePPLCapabilityError(
+        :graph_identity, "compiled graph is missing its affine location node"))
+    location = plan.nodes.location
+    location isa NativePPLAffineNode || throw(NativePPLCapabilityError(
+        :graph_identity, "compiled location must be a typed affine node"))
+    location.axis === observation_axis || throw(NativePPLCapabilityError(
+        :graph_identity,
+        "compiled affine location must carry the plan observation axis"))
+
+    predictor_name = native_input_name(predictor)
+    expected_location_input = predictor_name
+    if hasproperty(plan.nodes, :transform)
+        transform = plan.nodes.transform
+        transform isa Union{NativePPLCenterNode,NativePPLZScaleNode} ||
+            throw(NativePPLCapabilityError(
+                :graph_identity,
+                "compiled predictor transform must be center or zscale"))
+        transform.axis === observation_axis || throw(NativePPLCapabilityError(
+            :graph_identity,
+            "compiled predictor transform must carry the plan observation axis"))
+        native_fitted_transform_input(transform) === predictor_name ||
+            throw(NativePPLCapabilityError(
+                :graph_identity,
+                "compiled predictor transform must consume the raw predictor"))
+        expected_location_input = native_node_name(transform)
+        expected_location_input !== native_node_name(location) ||
+            throw(NativePPLCapabilityError(
+                :graph_identity,
+                "compiled predictor transform and affine location must have distinct identities"))
+    end
+    native_affine_input(location) === expected_location_input ||
+        throw(NativePPLCapabilityError(
+            :graph_identity,
+            "compiled affine location must consume the compiled predictor path"))
+
+    if hasproperty(plan.nodes, :rate)
+        rate = plan.nodes.rate
+        rate isa NativePPLExpNode || throw(NativePPLCapabilityError(
+            :graph_identity, "compiled rate must be a typed exponential node"))
+        rate.axis === observation_axis || throw(NativePPLCapabilityError(
+            :graph_identity,
+            "compiled exponential rate must carry the plan observation axis"))
+        native_exp_input(rate) === native_node_name(location) ||
+            throw(NativePPLCapabilityError(
+                :graph_identity,
+                "compiled exponential rate must consume the affine location"))
+        native_node_name(rate) !== native_node_name(location) ||
+            throw(NativePPLCapabilityError(
+                :graph_identity,
+                "compiled exponential rate and affine location must have distinct identities"))
+    end
+    nothing
 end
 
 """
@@ -903,6 +994,7 @@ function _native_ppl_prepare_bindings(plan::NativePPLPlan, predictor,
                                       response, ::Type{T}) where {T<:AbstractFloat}
     isconcretetype(T) || throw(ArgumentError(
         "native PPL prepared element type must be concrete; got $T"))
+    _native_ppl_validate_predictor_graph(plan)
     predictor_name = native_input_name(plan.inputs.predictor)
     response_name = native_input_name(plan.inputs.response)
     prepared_predictor = _native_ppl_copy_input(
@@ -1534,6 +1626,7 @@ function _native_ppl_rebind(prepared::NativePPLPrepared, bindings;
                             T::Type{<:AbstractFloat}=eltype(prepared),
                             freeze_constants::Bool=true)
     plan = prepared.plan
+    _native_ppl_validate_predictor_graph(plan)
     predictor_name = native_input_name(plan.inputs.predictor)
     response_name = native_input_name(plan.inputs.response)
     predictor = _native_ppl_required_binding(bindings, predictor_name, :predictor)
