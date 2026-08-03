@@ -4214,6 +4214,11 @@ function _syntax_affine_assignment(statement,
     length(unique(sampled_offsets)) == length(sampled_offsets) || throw(
         ArgumentError(
             "native PPL @model affine offsets must be used once each"))
+    gathered_site_names = Tuple(
+        gather.site_name for gather in gathered_offsets)
+    length(unique(gathered_site_names)) == length(gathered_site_names) ||
+        throw(ArgumentError(
+            "native PPL @model grouped offsets must be used once each"))
     intercepts = [term for term in ordinary_terms
                   if term isa Symbol && term in scalar_priors]
     length(intercepts) <= 1 || return nothing

@@ -4780,6 +4780,46 @@ end
         end)))
     @test occursin("features must use distinct raw inputs", err.msg)
     err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function grouped_nonargument(x)
+            tau ~ Exponential(1)
+            b[group] ~ Normal(0, tau)
+            beta ~ Normal()
+            sigma ~ Exponential(2)
+            mu = beta * x + b[group]
+            @. y ~ Normal(mu, sigma)
+        end)))
+    @test occursin("must index one function argument", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function grouped_wrong_family(x, group)
+            tau ~ Exponential(1)
+            b[group] ~ Exponential(tau)
+            beta ~ Normal()
+            sigma ~ Exponential(2)
+            mu = beta * x + b[group]
+            @. y ~ Normal(mu, sigma)
+        end)))
+    @test occursin("requires Normal(location, scale)", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function grouped_wrong_gather(x, group, other)
+            tau ~ Exponential(1)
+            b[group] ~ Normal(0, tau)
+            beta ~ Normal()
+            sigma ~ Exponential(2)
+            mu = beta * x + b[other]
+            @. y ~ Normal(mu, sigma)
+        end)))
+    @test occursin("gathered with its declared group input", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function repeated_grouped_offset(x, group)
+            tau ~ Exponential(1)
+            b[group] ~ Normal(0, tau)
+            beta ~ Normal()
+            sigma ~ Exponential(2)
+            mu = beta * x + b[group] + b[group]
+            @. y ~ Normal(mu, sigma)
+        end)))
+    @test occursin("grouped offsets must be used once each", err.msg)
+    err = argument_error(() -> macroexpand(
         @__MODULE__, :(NP.@model function recursive_model(x)
             z ~ recursive_model(x)
             return z
