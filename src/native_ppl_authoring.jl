@@ -470,15 +470,60 @@ end
 BRM.LogDensityProblems.dimension(plan::FactorPlan) = plan.graph.dimension
 
 function _uses_factor_executor(declaration::Model, conditions)
+    isempty(declaration.inputs) && isempty(declaration.nodes) || return false
     graph = factor_graph(declaration; conditions)
     stochastic_names = Set(declaration.site_order)
     any(declaration.site_order) do name
         hasproperty(declaration.observations, name) || return false
         site = getproperty(graph.sites, name)
-        site.shape isa ScalarSiteShape && site.activity isa FreeSite &&
+        site.shape isa ScalarSiteShape &&
             any(dependency -> dependency in stochastic_names,
                 site_factor_dependencies(site.factor))
     end
+end
+
+function _validate_factor_plan_site(
+    name::Symbol, site::StochasticSite, graph::FactorGraph,
+    conditions::NamedTuple, broadcast_sites::Set{Symbol},
+)
+    site.shape isa BlockSiteShape && throw(CapabilityError(
+        :factor_shape,
+        "multi-latent factor site `$name` has an unsupported block shape"))
+    site.factor isa Union{
+        StandardNormalSiteFactor,NormalSiteFactor,ExponentialSiteFactor,
+    } || throw(CapabilityError(
+        :factor_family,
+        "multi-latent factor site `$name` has unsupported factor " *
+        "$(typeof(site.factor))"))
+    if site.activity isa ConditionedSite
+        value = getproperty(conditions, name)
+        if site.shape isa ScalarSiteShape
+            value isa Real || throw(ArgumentError(
+                "native PPL scalar condition `$name` must be a real value; " *
+                "got $(typeof(value))"))
+        elseif site.shape isa BroadcastSiteShape
+            value isa AbstractVector || throw(ArgumentError(
+                "native PPL broadcast condition `$name` must be a vector; " *
+                "got $(typeof(value))"))
+        end
+    end
+    for dependency in site_factor_dependencies(site.factor)
+        dependency in broadcast_sites && throw(CapabilityError(
+            :factor_dependencies,
+            "multi-latent factor site `$name` depends on broadcast site " *
+            "`$dependency`; broadcast outputs must remain terminal until " *
+            "their values can be materialized"))
+    end
+    if site.factor isa NormalSiteFactor &&
+       site.factor.scale isa SiteValue
+        scale_name = site_value_name(site.factor.scale)
+        scale_site = getproperty(graph.sites, scale_name)
+        scale_site.support isa PositiveSupport || throw(CapabilityError(
+            :factor_scale,
+            "Normal factor for site `$name` uses stochastic scale " *
+            "`$scale_name`, whose support must be PositiveSupport"))
+    end
+    nothing
 end
 
 function _bind_factor_plan(declaration::Model, bindings, conditions)
@@ -495,17 +540,6 @@ function _bind_factor_plan(declaration::Model, bindings, conditions)
     canonical_conditions = _canonical_factor_conditions(
         declaration, conditions)
     graph = factor_graph(declaration; conditions=canonical_conditions)
-    for (name, site) in pairs(graph.sites)
-        site.shape isa BlockSiteShape && throw(CapabilityError(
-            :factor_shape,
-            "multi-latent factor site `$name` has an unsupported block shape"))
-        site.factor isa Union{
-            StandardNormalSiteFactor,NormalSiteFactor,ExponentialSiteFactor,
-        } || throw(CapabilityError(
-            :factor_family,
-            "multi-latent factor site `$name` has unsupported factor " *
-            "$(typeof(site.factor))"))
-    end
     broadcast_sites = Tuple(
         name for (name, site) in pairs(graph.sites)
         if site.shape isa BroadcastSiteShape)
@@ -513,6 +547,11 @@ function _bind_factor_plan(declaration::Model, bindings, conditions)
         :factor_outputs,
         "the first multi-latent factor executor requires exactly one " *
         "broadcast stochastic output"))
+    broadcast_site_set = Set(broadcast_sites)
+    for (name, site) in pairs(graph.sites)
+        _validate_factor_plan_site(
+            name, site, graph, canonical_conditions, broadcast_site_set)
+    end
     output_site = only(broadcast_sites)
     hasproperty(canonical_conditions, output_site) || throw(CapabilityError(
         :factor_conditioning,

@@ -3233,6 +3233,52 @@ end
           (; primal=0, gradient=0)
     @test NP.LogDensityProblem(
         hierarchy_prepared, DI.AutoEnzyme()) isa NP.FactorLogDensityProblem
+    conditioned_individual_plan = NP.compile(NP.condition(
+        hierarchy; individual=0.1, y=response))
+    @test conditioned_individual_plan isa NP.FactorPlan
+    @test LogDensityProblems.dimension(conditioned_individual_plan) == 3
+    conditioned_individual_prepared = NP.prepare(conditioned_individual_plan)
+    @test isfinite(NP.logdensity!(
+        NP.workspace(conditioned_individual_prepared),
+        conditioned_individual_prepared,
+        [0.2, log(0.7), log(0.5)]))
+    @test_throws ArgumentError NP.compile(NP.condition(
+        hierarchy; individual=[0.1], y=response))
+
+    bad_scale_graph_model = NP.model(
+        inputs=(;),
+        parameters=(;
+            bad_scale=NP.parameter(
+                NP.RealSupport(), (:bad_scale,);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            likelihood_scale=NP.parameter(
+                NP.PositiveSupport(), (:likelihood_scale,);
+                transform=NP.Exp(), prior=NP.Exponential(1.0))),
+        observations=(;
+            child=NP.normal(:child, :bad_scale, :bad_scale),
+            observed=NP.broadcasted(
+                NP.normal(:observed, :child, :likelihood_scale))),
+        site_order=(:bad_scale, :child, :likelihood_scale, :observed))
+    @test capability_error(() -> NP.compile(NP.condition(
+        bad_scale_graph_model; observed=response))).capability == :factor_scale
+
+    broadcast_parent_graph_model = NP.model(
+        inputs=(;),
+        parameters=(;
+            root=NP.parameter(
+                NP.RealSupport(), (:root,);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            downstream_scale=NP.parameter(
+                NP.PositiveSupport(), (:downstream_scale,);
+                transform=NP.Exp(), prior=NP.Exponential(1.0))),
+        observations=(;
+            observed=NP.broadcasted(
+                NP.normal(:observed, :root, :downstream_scale)),
+            child=NP.normal(:child, :observed, :downstream_scale)),
+        site_order=(:root, :downstream_scale, :observed, :child))
+    @test capability_error(() -> NP.compile(NP.condition(
+        broadcast_parent_graph_model; observed=response))).capability ==
+          :factor_dependencies
     @test NP.factor_graph(hierarchy).sites.y.activity isa NP.GeneratedSite
     conditioned_population_graph = NP.factor_graph(
         hierarchy.declaration;
