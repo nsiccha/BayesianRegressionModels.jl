@@ -480,6 +480,20 @@ NP.@model function natural_correlated_varying_three(x, w, group)
     @. y ~ Normal(mu, sigma)
 end
 
+NP.@model function natural_crossed_group_regression(x, subject, item)
+    tau_p_subject[(:Intercept, :x)] ~ Exponential(1)
+    L_p_subject[(:Intercept, :x)] ~ LKJCholesky(2, 2)
+    b_p_subject[subject, (:Intercept, :x)] ~
+        MvNormalCholesky(tau_p_subject, L_p_subject)
+    tau_q_item ~ Exponential(1)
+    b_q_item[item] ~ Normal(0.0, tau_q_item)
+    beta_mu[(:x,)] ~ StandardNormal()
+    sigma ~ Exponential(2)
+    mu = dot(beta_mu, (x,)) +
+        dot(b_p_subject[subject], (1, x)) + b_q_item[item]
+    @. y ~ Normal(mu, sigma)
+end
+
 NP.@model function natural_correlated_bernoulli_logit(x, group)
     tau_p_group[(:Intercept, :x)] ~ Exponential(1)
     L_p_group[(:Intercept, :x)] ~ LKJCholesky(2, 2)
@@ -4894,6 +4908,27 @@ end
     @test factor_steady_state_allocations(
         crossed_group_workspace, crossed_group_prepared,
         crossed_group_position) == (; primal=0, gradient=0)
+    natural_crossed_group = NP.condition(
+        natural_crossed_group_regression(
+            crossed_group_data.x, crossed_group_data.subject,
+            crossed_group_data.item);
+        y=crossed_group_data.y)
+    @test natural_crossed_group.declaration == crossed_group_model
+    natural_crossed_prepared = NP.prepare(natural_crossed_group)
+    natural_crossed_workspace = NP.workspace(
+        natural_crossed_prepared, Float64, DI.AutoEnzyme())
+    natural_crossed_density, natural_crossed_gradient =
+        NP.logdensity_and_gradient!(
+            natural_crossed_workspace, natural_crossed_prepared,
+            crossed_group_position)
+    @test natural_crossed_density ≈ crossed_density
+    @test natural_crossed_gradient ≈ crossed_gradient
+    @test NP.evaluate(
+        natural_crossed_workspace, natural_crossed_prepared,
+        crossed_group_position, NP.LinearPredictor()) ≈ crossed_mu
+    @test factor_steady_state_allocations(
+        natural_crossed_workspace, natural_crossed_prepared,
+        crossed_group_position) == (; primal=0, gradient=0)
 
     varying_brm_data = (;
         x=sampled_offset_data.x,
@@ -5390,17 +5425,17 @@ end
     @test keys(natural_varying.declaration.parameters) ==
           keys(varying_model.parameters)
     @test keys(natural_varying.declaration.nodes) ==
-          (:b_p_group_by_group_for_mu, :mu)
+          (:r_mu_p_group, :mu)
     @test natural_varying.declaration.site_order == varying_model.site_order
     @test natural_varying.declaration.parameters.beta_mu.axis_keys == (:beta,)
     @test varying_model.parameters.beta_mu.axis_keys == (:x,)
     @test NP.group_input(
         natural_varying.declaration.parameters.b_p_group) === :group
     @test NP.group_values(
-        natural_varying.declaration.nodes.b_p_group_by_group_for_mu) ===
+        natural_varying.declaration.nodes.r_mu_p_group) ===
           :b_p_group
     @test NP.group_input(
-        natural_varying.declaration.nodes.b_p_group_by_group_for_mu) ===
+        natural_varying.declaration.nodes.r_mu_p_group) ===
           :group
     varying_plan = NP.compile(varying_brm)
     @test varying_plan isa NP.FactorPlan
@@ -5789,8 +5824,8 @@ end
     @test keys(natural_varying_slope_instance.declaration.parameters) ==
           keys(varying_slope_model.parameters)
     @test keys(natural_varying_slope_instance.declaration.nodes) == (
-        :b_p_group_by_group_for_mu,
-        :b_p_group_by_group_for_mu_times_x,
+        :r_mu_p_group,
+        :r_mu_p_group_times_x,
         :mu)
     @test natural_varying_slope_instance.declaration.site_order ==
           varying_slope_model.site_order
