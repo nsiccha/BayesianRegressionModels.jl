@@ -344,6 +344,12 @@ NP.@model function monolithic_scalar_normal()
     @. y ~ Normal(theta, sigma)
 end
 
+NP.@model function monolithic_latent_normal(prior_mu, prior_tau)
+    z ~ Normal(prior_mu, prior_tau)
+    sigma ~ Exponential(2.0)
+    @. y ~ Normal(z, sigma)
+end
+
 NP.@model function macro_bernoulli_center(
     x::AbstractVector{<:Real})
     intercept ~ Normal()
@@ -2912,8 +2918,25 @@ end
     latent_composition = NP.compose(latent_component, latent_sink)
     @test latent_composition.components.sink.instance.bindings.mu ===
           latent_output
-    @test capability_error(() -> NP.lower(latent_composition)).capability ==
-          :active_site_connection
+    latent_lowered = NP.lower(latent_composition)
+    latent_name = NP.qualified_name(:latent, :z)
+    latent_response_name = NP.qualified_name(:sink, :y)
+    latent_scale_name = NP.qualified_name(:sink, :sigma)
+    @test keys(latent_lowered.declaration.observations) ==
+          (latent_name, latent_response_name)
+    @test NP.observation_dependencies(getproperty(
+        latent_lowered.declaration.observations,
+        latent_response_name)) == (latent_name, latent_scale_name)
+    @test keys(latent_lowered.conditions) == (latent_response_name,)
+    latent_plan = NP.compile(latent_composition)
+    @test keys(latent_plan.parameters) == (latent_name, :scale)
+    @test keys(latent_plan.factors) ==
+          (:site_prior, :scale_prior, :likelihood)
+    @test latent_plan.factors.site_prior isa
+          BRM.NativePPLScalarNormalFactor
+    @test BRM.native_scalar_parameter(latent_plan.nodes.location) ===
+          latent_name
+    @test LogDensityProblems.dimension(latent_plan) == 2
 
     aliased_prior = aliased_scalar_normal_prior()
     @test keys(aliased_prior.declaration.parameters) == (:theta,)
@@ -3050,7 +3073,7 @@ end
         @__MODULE__, :(NP.@model function missing_observation(x)
             centered = center(x)
         end)))
-    @test occursin("exactly one observation", err.msg)
+    @test occursin("at least one stochastic site", err.msg)
     err = argument_error(() -> macroexpand(
         @__MODULE__, :(NP.@model function nonfinal_return(x)
             centered = center(x)
