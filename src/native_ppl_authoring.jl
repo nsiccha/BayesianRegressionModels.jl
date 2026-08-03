@@ -394,8 +394,17 @@ end
 struct ExponentialSiteFactor{S} <: AbstractSiteFactor
     scale::S
 end
-struct LKJCholeskySiteFactor{E} <: AbstractSiteFactor
+struct LKJCholeskySiteFactor{E,N} <: AbstractSiteFactor
     eta::E
+    log_normalizers::N
+end
+function LKJCholeskySiteFactor(eta, ::Val{K}) where {K}
+    log_normalizers = ntuple(K - 1) do column
+        alpha = eta + (K - column - 1) / 2
+        BRM.loggamma(alpha + 0.5) - BRM.loggamma(alpha) -
+            0.5 * log(BRM.pi)
+    end
+    LKJCholeskySiteFactor(eta, log_normalizers)
 end
 struct BernoulliLogitSiteFactor{L} <: AbstractSiteFactor
     logit::L
@@ -676,7 +685,8 @@ function _parameter_stochastic_site(
     StochasticSite(
         CholeskyCorrelationSupport{dimension}(),
         CholeskyCorrelationTransform{dimension}(),
-        LKJCholeskySiteFactor(declaration.eta), BlockSiteShape(), activity,
+        LKJCholeskySiteFactor(declaration.eta, Val(dimension)),
+        BlockSiteShape(), activity,
         coordinate_keys)
 end
 
@@ -1742,6 +1752,29 @@ end
     BRM._native_ppl_poisson_logdensity(value, log_rate)
 end
 
+@inline @generated function _factor_lkj_logdensity(
+        ::Val{K}, eta_value, log_normalizers, indices,
+        position::AbstractVector{T}) where {K,T}
+    terms = Any[]
+    coordinate_offset = 0
+    for column in 1:(K - 1)
+        alpha_offset = (K - column - 1) / 2
+        for row in (column + 1):K
+            push!(terms, quote
+                let alpha_value = eta_value + $alpha_offset,
+                    alpha = T(alpha_value),
+                    log_constant = T(getfield(log_normalizers, $column)),
+                    raw = position[first(indices) + $coordinate_offset]
+                    log_constant + alpha * _factor_logsech2(raw)
+                end
+            end)
+            coordinate_offset += 1
+        end
+    end
+    isempty(terms) && return :(zero(T))
+    foldl((left, right) -> :($left + $right), terms)
+end
+
 @inline function _factor_site_logdensity!(::Val{Name},
         site::StochasticSite{S,Tr,F,ScalarSiteShape,FreeSite},
         position::AbstractVector{T}, prepared::FactorPrepared,
@@ -1782,21 +1815,21 @@ end
 
 @inline function _factor_site_logdensity!(::Val{Name},
         site::StochasticSite{
-            CholeskyCorrelationSupport{2},
-            CholeskyCorrelationTransform{2},
+            CholeskyCorrelationSupport{K},
+            CholeskyCorrelationTransform{K},
             F,BlockSiteShape,FreeSite},
         position::AbstractVector{T}, prepared::FactorPrepared,
         buffers::FactorBuffers{T}) where {
-            Name,T,F<:LKJCholeskySiteFactor}
+            Name,K,T,F<:LKJCholeskySiteFactor}
     coordinates = getproperty(prepared.plan.graph.coordinates, Name)
-    length(coordinates.indices) == 1 || throw(CapabilityError(
+    expected_coordinates = K * (K - 1) ÷ 2
+    length(coordinates.indices) == expected_coordinates || throw(CapabilityError(
         :factor_coordinates,
-        "two-dimensional LKJ Cholesky site `$Name` must own one coordinate"))
-    raw = position[first(coordinates.indices)]
-    eta = T(site.factor.eta)
-    log_constant = T(BRM.loggamma(site.factor.eta + 0.5) -
-        BRM.loggamma(site.factor.eta) - 0.5 * log(BRM.pi))
-    log_constant + eta * _factor_logsech2(raw)
+        "$K-dimensional LKJ Cholesky site `$Name` must own " *
+        "$expected_coordinates coordinates"))
+    _factor_lkj_logdensity(
+        Val(K), site.factor.eta, site.factor.log_normalizers,
+        coordinates.indices, position)
 end
 
 @inline function _factor_site_logdensity!(::Val{Name},
@@ -1930,6 +1963,75 @@ end
     zero(T)
 end
 
+@inline function _factor_grouped_standardized(
+        node::GroupedAffineFactorNode, group_index::Int,
+        coefficient_index::Int, coefficient_count::Int,
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {T}
+    standardized_offset = (abs(group_index) - 1) * coefficient_count
+    standardized_name = site_value_name(node.standardized)
+    if group_index < 0
+        generated_indices = getproperty(
+            prepared.plan.generated_group_indices, standardized_name)
+        buffers.generated_group_values[
+            generated_indices[standardized_offset + coefficient_index]]
+    else
+        _factor_coefficient(
+            node.standardized, standardized_offset + coefficient_index,
+            position, prepared, buffers)
+    end
+end
+
+@inline function _factor_correlation_raw(
+        position::AbstractVector, correlation_coordinates,
+        coefficient_index::Int, source_index::Int,
+        coefficient_count::Int)
+    coordinate_offset =
+        (source_index - 1) * coefficient_count -
+        (source_index - 1) * source_index ÷ 2 +
+        coefficient_index - source_index
+    position[first(correlation_coordinates) + coordinate_offset - 1]
+end
+
+@inline @generated function _factor_grouped_affine_value(
+        node::GroupedAffineFactorNode{Z,S,C,G,P},
+        group_index::Int, row::Int, correlation_coordinates,
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Z,S,C,G,P,T}
+    coefficient_count = fieldcount(P)
+    contributions = Any[]
+    for coefficient_index in 1:coefficient_count
+        correlated_terms = Any[]
+        residual = :(one(T))
+        for source_index in 1:(coefficient_index - 1)
+            raw = :(_factor_correlation_raw(
+                position, correlation_coordinates,
+                $coefficient_index, $source_index, $coefficient_count))
+            standardized = :(_factor_grouped_standardized(
+                node, group_index, $source_index, $coefficient_count,
+                position, prepared, buffers))
+            push!(correlated_terms,
+                  :($residual * tanh($raw) * $standardized))
+            residual = :($residual * _factor_sech($raw))
+        end
+        diagonal = :(_factor_grouped_standardized(
+            node, group_index, $coefficient_index, $coefficient_count,
+            position, prepared, buffers))
+        push!(correlated_terms, :($residual * $diagonal))
+        correlated = foldl(
+            (left, right) -> :($left + $right), correlated_terms)
+        effect = :(_factor_coefficient(
+            node.scales, $coefficient_index,
+            position, prepared, buffers) * $correlated)
+        predictor = :(getfield(node.predictors, $coefficient_index))
+        push!(contributions, :(
+            $predictor === nothing ? $effect :
+                $effect * _factor_argument_at(
+                    $predictor, row, prepared.plan, buffers, T)))
+    end
+    isempty(contributions) && return :(zero(T))
+    foldl((left, right) -> :($left + $right), contributions)
+end
 
 @inline function _factor_node_logdensity!(::Val{Name},
         node::GroupedAffineFactorNode,
@@ -1937,45 +2039,14 @@ end
         buffers::FactorBuffers{T}) where {Name,T}
     node_index = getproperty(prepared.plan.node_indices, Name)
     group_indices = getproperty(prepared.plan.group_indices, Name)
-    standardized_name = site_value_name(node.standardized)
     correlation_name = site_value_name(node.correlation)
     correlation_coordinates = getproperty(
         prepared.plan.graph.coordinates, correlation_name).indices
-    raw_correlation = position[first(correlation_coordinates)]
-    correlation = tanh(raw_correlation)
-    residual_scale = _factor_sech(raw_correlation)
     for row in prepared.plan.observation_axis.keys
         group_index = group_indices[row]
-        z_intercept, z_slope = if group_index < 0
-            generated_indices = getproperty(
-                prepared.plan.generated_group_indices, standardized_name)
-            standardized_offset = (-group_index - 1) * 2
-            (buffers.generated_group_values[
-                 generated_indices[standardized_offset + 1]],
-             buffers.generated_group_values[
-                 generated_indices[standardized_offset + 2]])
-        else
-            standardized_offset = (group_index - 1) * 2
-            (_factor_coefficient(
-                 node.standardized, standardized_offset + 1,
-                 position, prepared, buffers),
-             _factor_coefficient(
-                 node.standardized, standardized_offset + 2,
-                 position, prepared, buffers))
-        end
-        intercept = _factor_coefficient(
-            node.scales, 1, position, prepared, buffers) * z_intercept
-        slope = _factor_coefficient(
-            node.scales, 2, position, prepared, buffers) *
-            (correlation * z_intercept + residual_scale * z_slope)
-        predictors = node.predictors
-        value = predictors[1] === nothing ? intercept :
-            intercept * _factor_argument_at(
-                predictors[1], row, prepared.plan, buffers, T)
-        value += predictors[2] === nothing ? slope :
-            slope * _factor_argument_at(
-                predictors[2], row, prepared.plan, buffers, T)
-        buffers.node_rows[node_index, row] = value
+        buffers.node_rows[node_index, row] = _factor_grouped_affine_value(
+            node, group_index, row, correlation_coordinates,
+            position, prepared, buffers)
     end
     zero(T)
 end

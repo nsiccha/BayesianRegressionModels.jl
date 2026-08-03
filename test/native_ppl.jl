@@ -4367,6 +4367,96 @@ end
             extreme_position, NP.LinearPredictor()))
     end
 
+    three_coefficient_group_prepared = NP.prepare(
+        three_coefficient_group_plan)
+    three_coefficient_group_workspace = NP.workspace(
+        three_coefficient_group_prepared, Float64, DI.AutoEnzyme())
+    three_coefficient_group_position = [
+        log(0.6), log(0.4), log(0.3),
+        0.2, -0.25, 0.35,
+        0.1, -0.3, 0.2,
+        -0.2, 0.4, -0.1,
+        0.5, -0.4, 0.3,
+        0.7, -0.4, log(0.5)]
+    three_tau = exp.(three_coefficient_group_position[1:3])
+    three_raw = three_coefficient_group_position[4:6]
+    three_z = reshape(three_coefficient_group_position[7:15], 3, 3)
+    three_L = [
+        1.0 0.0 0.0;
+        tanh(three_raw[1]) 1 / cosh(three_raw[1]) 0.0;
+        tanh(three_raw[2])
+            (1 / cosh(three_raw[2])) * tanh(three_raw[3])
+            (1 / cosh(three_raw[2])) * (1 / cosh(three_raw[3]));]
+    three_effects = [
+        three_tau .* (three_L * three_z[:, group])
+        for group in 1:3]
+    three_w = three_coefficient_group_plan.bindings.w
+    three_beta = three_coefficient_group_position[16:17]
+    three_sigma = exp(three_coefficient_group_position[18])
+    three_mu = [
+        three_beta[1] * sampled_offset_data.x[row] +
+        three_beta[2] * three_w[row] +
+        three_effects[[1, 2, 1, 3][row]][1] +
+        three_effects[[1, 2, 1, 3][row]][2] *
+            sampled_offset_data.x[row] +
+        three_effects[[1, 2, 1, 3][row]][3] * three_w[row]
+        for row in eachindex(sampled_offset_data.x)]
+    three_eta = 2.0
+    three_alpha1 = three_eta + 0.5
+    three_alpha2 = three_eta
+    three_log_normalizer(alpha) =
+        BRM.loggamma(alpha + 0.5) - BRM.loggamma(alpha) - 0.5 * log(pi)
+    three_lkj_density =
+        2 * three_log_normalizer(three_alpha1) +
+        three_log_normalizer(three_alpha2) +
+        three_alpha1 * (
+            NP._factor_logsech2(three_raw[1]) +
+            NP._factor_logsech2(three_raw[2])) +
+        three_alpha2 * NP._factor_logsech2(three_raw[3])
+    three_expected_density =
+        sum(logpdf.(Exponential(1), three_tau)) +
+        sum(three_coefficient_group_position[1:3]) +
+        three_lkj_density +
+        sum(logpdf.(Normal(), three_z)) +
+        sum(logpdf.(Normal(), three_beta)) +
+        logpdf(Exponential(2), three_sigma) +
+        three_coefficient_group_position[18] +
+        sum(logpdf.(Normal.(three_mu, three_sigma), sampled_offset_data.y))
+    three_density, three_gradient = NP.logdensity_and_gradient!(
+        three_coefficient_group_workspace,
+        three_coefficient_group_prepared,
+        three_coefficient_group_position)
+    @test three_density ≈ three_expected_density
+    @test NP.evaluate(
+        three_coefficient_group_workspace,
+        three_coefficient_group_prepared,
+        three_coefficient_group_position, NP.LinearPredictor()) ≈ three_mu
+    three_finite_difference = similar(three_gradient)
+    three_plus = copy(three_coefficient_group_position)
+    three_minus = copy(three_coefficient_group_position)
+    three_step = 1e-6
+    for coordinate in eachindex(three_finite_difference)
+        three_plus[coordinate] += three_step
+        three_minus[coordinate] -= three_step
+        three_finite_difference[coordinate] = (
+            NP.logdensity!(
+                three_coefficient_group_workspace,
+                three_coefficient_group_prepared, three_plus) -
+            NP.logdensity!(
+                three_coefficient_group_workspace,
+                three_coefficient_group_prepared, three_minus)) /
+            (2 * three_step)
+        three_plus[coordinate] =
+            three_coefficient_group_position[coordinate]
+        three_minus[coordinate] =
+            three_coefficient_group_position[coordinate]
+    end
+    @test three_gradient ≈ three_finite_difference rtol=2e-5 atol=2e-6
+    @test factor_steady_state_allocations(
+        three_coefficient_group_workspace,
+        three_coefficient_group_prepared,
+        three_coefficient_group_position) == (; primal=0, gradient=0)
+
     varying_brm_data = (;
         x=sampled_offset_data.x,
         group=grouped_bindings.group,
