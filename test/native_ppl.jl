@@ -7,6 +7,174 @@ using LogDensityProblems
 using Random: MersenneTwister, rand, randn
 
 const BRM = BayesianRegressionModels
+const NP = BRM.NativePPL
+
+function direct_native_model(family::Symbol, transform::Symbol;
+                             coefficient_keys=(:Intercept, :x))
+    location = family === :gaussian ? :mu :
+        family === :bernoulli ? :eta : :log_rate
+    coefficient_name = Symbol(:beta_, location)
+    coefficients = NP.parameter(
+        NP.RealSupport(), coefficient_keys;
+        transform=NP.Identity(), prior=NP.StandardNormal())
+    parameters = if family === :gaussian
+        scale = NP.parameter(
+            NP.PositiveSupport(), (:sigma,);
+            transform=NP.Exp(), prior=NP.Exponential(2.0))
+        NamedTuple{(coefficient_name, :sigma)}((coefficients, scale))
+    else
+        NamedTuple{(coefficient_name,)}((coefficients,))
+    end
+
+    transform_name = transform === :identity ? nothing :
+        Symbol("#native_ppl_", transform, "#", location, "#x")
+    transform_declaration = transform === :center ? NP.center(:x) :
+        transform === :zscale ? NP.zscale(:x) : nothing
+    affine_input = transform_name === nothing ? :x : transform_name
+    affine_declaration = NP.affine(affine_input, coefficient_name)
+    nodes = transform_name === nothing ?
+        NamedTuple{(location,)}((affine_declaration,)) :
+        NamedTuple{(transform_name, location)}(
+            (transform_declaration, affine_declaration))
+    observation = if family === :gaussian
+        NP.normal(:y, location, :sigma)
+    elseif family === :bernoulli
+        NP.bernoulli_logit(:y, location)
+    else
+        rate_name = Symbol(:exp_, location)
+        nodes = merge(nodes, NamedTuple{(rate_name,)}((NP.exp_link(location),)))
+        NP.poisson(:y, rate_name)
+    end
+    NP.model(
+        inputs=(; x=NP.input(:predictor), y=NP.input(:response)),
+        parameters=parameters,
+        nodes=nodes,
+        observations=(; y=observation))
+end
+
+function native_brmi(family::Symbol, transform::Symbol, data)
+    if family === :gaussian
+        transform === :identity && return @brm data begin
+            sigma ~ Exponential(2.0)
+            mu ~ 1 + x
+            y ~ Normal(mu, sigma)
+        end
+        transform === :center && return @brm data begin
+            sigma ~ Exponential(2.0)
+            mu ~ 1 + center(x)
+            y ~ Normal(mu, sigma)
+        end
+        return @brm data begin
+            sigma ~ Exponential(2.0)
+            mu ~ 1 + zscale(x)
+            y ~ Normal(mu, sigma)
+        end
+    elseif family === :bernoulli
+        transform === :identity && return @brm data begin
+            eta ~ 1 + x
+            y ~ BernoulliLogit(eta)
+        end
+        transform === :center && return @brm data begin
+            eta ~ 1 + center(x)
+            y ~ BernoulliLogit(eta)
+        end
+        return @brm data begin
+            eta ~ 1 + zscale(x)
+            y ~ BernoulliLogit(eta)
+        end
+    end
+    transform === :identity && return @brm data begin
+        log_rate ~ 1 + x
+        y ~ Poisson(exp(log_rate))
+    end
+    transform === :center && return @brm data begin
+        log_rate ~ 1 + center(x)
+        y ~ Poisson(exp(log_rate))
+    end
+    @brm data begin
+        log_rate ~ 1 + zscale(x)
+        y ~ Poisson(exp(log_rate))
+    end
+end
+
+function check_plan_structure(left, right)
+    @test typeof(left) === typeof(right)
+    @test keys(left.axes) == keys(right.axes)
+    @test keys(left.inputs) == keys(right.inputs)
+    @test keys(left.parameters) == keys(right.parameters)
+    @test keys(left.nodes) == keys(right.nodes)
+    @test keys(left.factors) == keys(right.factors)
+    @test keys(left.queries) == keys(right.queries)
+    @test left.axes.observation.keys == right.axes.observation.keys
+    @test left.axes.coefficient.keys == right.axes.coefficient.keys
+    @test map(typeof, values(left.nodes)) == map(typeof, values(right.nodes))
+    @test map(typeof, values(left.factors)) == map(typeof, values(right.factors))
+    @test map(typeof, values(left.queries)) == map(typeof, values(right.queries))
+    @test sprint(show, left) == sprint(show, right)
+    if hasproperty(left.nodes, :transform)
+        @test left.nodes.transform.mean == right.nodes.transform.mean
+        if left.nodes.transform isa BRM.NativePPLZScaleNode
+            @test left.nodes.transform.scale == right.nodes.transform.scale
+        end
+    end
+    if hasproperty(left.factors, :scale_prior)
+        @test left.factors.scale_prior.scale == right.factors.scale_prior.scale
+    end
+    nothing
+end
+
+NP.@model function macro_gaussian_identity(
+    x::AbstractVector{<:Real}, y::AbstractVector{<:Real})
+    intercept ~ Normal()
+    slope ~ Normal(0, 1)
+    sigma ~ Exponential(2.0)
+    mu = intercept + slope * x
+    y ~ Normal(mu, sigma)
+end
+
+NP.@model function macro_gaussian_zscale(
+    x::AbstractVector{<:Real}, y::AbstractVector{<:Real})
+    intercept ~ Normal()
+    slope ~ Normal(0, 1)
+    sigma ~ Exponential(2.0)
+    mu = intercept + slope * standardize(x)
+    y ~ Normal(mu, sigma)
+end
+
+NP.@model function macro_bernoulli_center(
+    x::AbstractVector{<:Real}, y::AbstractVector{<:Real})
+    intercept ~ Normal()
+    slope ~ Normal(0, 1)
+    eta = intercept .+ slope .* center(x)
+    y .~ BernoulliLogit.(eta)
+end
+
+NP.@model function macro_poisson_zscale(
+    x::AbstractVector{<:Real}, y::AbstractVector{<:Real})
+    intercept ~ Normal()
+    slope ~ Normal(0, 1)
+    log_rate = intercept .+ slope .* zscale(x)
+    y .~ Poisson.(exp(log_rate))
+end
+
+module NativePPLMacroHygiene
+import BayesianRegressionModels
+const NP = BayesianRegressionModels.NativePPL
+const model = :shadow
+const input = :shadow
+const parameter = :shadow
+const Normal = :shadow
+const Exponential = :shadow
+const zscale = :shadow
+
+NP.@model function hygienic(x::Vector{Float64}, y::Vector{Float64})
+    intercept ~ Normal()
+    slope ~ Normal(0, 1)
+    sigma ~ Exponential(2.0)
+    mu = intercept + slope * zscale(x)
+    y ~ Normal(mu, sigma)
+end
+end
 
 function capability_error(f)
     try
@@ -24,64 +192,74 @@ function bundle_execution_allocated(
         outputs, workspace, prepared, positions, queries)
 end
 
-function check_centered_execution(centered_plan, explicit_plan, position)
-    centered = BRM.NativePPL.prepare(centered_plan)
+function check_transformed_execution(transformed_plan, explicit_plan, position)
+    transformed = BRM.NativePPL.prepare(transformed_plan)
     explicit = BRM.NativePPL.prepare(explicit_plan)
-    centered_work = BRM.NativePPL.workspace(
-        centered, Float64, DI.AutoEnzyme())
+    transformed_work = BRM.NativePPL.workspace(
+        transformed, Float64, DI.AutoEnzyme())
     explicit_work = BRM.NativePPL.workspace(
         explicit, Float64, DI.AutoEnzyme())
     linear = BRM.NativePPL.LinearPredictor()
     pointwise = BRM.NativePPL.PointwiseLogLikelihood()
     predictive = BRM.NativePPL.PosteriorPredictive()
 
-    @test BRM.NativePPL.logdensity!(centered_work, centered, position) ≈
+    @test BRM.NativePPL.logdensity!(transformed_work, transformed, position) ≈
           BRM.NativePPL.logdensity!(explicit_work, explicit, position)
-    centered_density, centered_gradient =
+    transformed_density, transformed_gradient =
         BRM.NativePPL.logdensity_and_gradient!(
-            centered_work, centered, position)
+            transformed_work, transformed, position)
     explicit_density, explicit_gradient =
         BRM.NativePPL.logdensity_and_gradient!(
             explicit_work, explicit, position)
-    @test centered_density ≈ explicit_density
-    @test centered_gradient ≈ explicit_gradient
+    @test transformed_density ≈ explicit_density
+    @test transformed_gradient ≈ explicit_gradient
     @test BRM.NativePPL.evaluate(
-        centered_work, centered, position, linear) ≈
+        transformed_work, transformed, position, linear) ≈
           BRM.NativePPL.evaluate(explicit_work, explicit, position, linear)
     @test BRM.NativePPL.evaluate(
-        centered_work, centered, position, pointwise) ≈
+        transformed_work, transformed, position, pointwise) ≈
           BRM.NativePPL.evaluate(explicit_work, explicit, position, pointwise)
     @test BRM.NativePPL.simulate(
-        MersenneTwister(901), centered_work, centered, position, predictive) ==
+        MersenneTwister(901), transformed_work, transformed, position, predictive) ≈
           BRM.NativePPL.simulate(
               MersenneTwister(901), explicit_work, explicit, position, predictive)
 
     positions = permutedims(hcat(position, position ./ 2))
     queries = (; location=linear, pointwise, prediction=predictive)
-    centered_signatures = BRM.NativePPL.batch_output_signature(
-        centered, positions, queries)
+    transformed_signatures = BRM.NativePPL.batch_output_signature(
+        transformed, positions, queries)
     explicit_signatures = BRM.NativePPL.batch_output_signature(
         explicit, positions, queries)
-    @test map(BRM.NativePPL.output_axes, centered_signatures) ==
+    @test map(BRM.NativePPL.output_axes, transformed_signatures) ==
           map(BRM.NativePPL.output_axes, explicit_signatures)
-    centered_outputs = BRM.NativePPL.allocate_output(
-        centered_signatures, centered)
+    transformed_outputs = BRM.NativePPL.allocate_output(
+        transformed_signatures, transformed)
     explicit_outputs = BRM.NativePPL.allocate_output(
         explicit_signatures, explicit)
     BRM.NativePPL.execute_draws!(
-        MersenneTwister(902), centered_outputs, centered_work, centered,
+        MersenneTwister(902), transformed_outputs, transformed_work, transformed,
         positions, queries)
     BRM.NativePPL.execute_draws!(
         MersenneTwister(902), explicit_outputs, explicit_work, explicit,
         positions, queries)
-    @test centered_outputs.location ≈ explicit_outputs.location
-    @test centered_outputs.pointwise ≈ explicit_outputs.pointwise
-    @test centered_outputs.prediction == explicit_outputs.prediction
+    @test transformed_outputs.location ≈ explicit_outputs.location
+    @test transformed_outputs.pointwise ≈ explicit_outputs.pointwise
+    @test transformed_outputs.prediction ≈ explicit_outputs.prediction
     @test bundle_execution_allocated(
-        MersenneTwister(903), centered_outputs, centered_work, centered,
+        MersenneTwister(903), transformed_outputs, transformed_work, transformed,
         positions, queries) == 0
-    centered
+    transformed
 end
+
+replace_plan_nodes(plan, nodes) = BRM.NativePPLPlan(
+    plan.axes, plan.inputs, plan.parameters, nodes, plan.factors,
+    plan.queries, plan.bindings)
+replace_plan_factors(plan, factors) = BRM.NativePPLPlan(
+    plan.axes, plan.inputs, plan.parameters, plan.nodes, factors,
+    plan.queries, plan.bindings)
+replace_plan_queries(plan, queries) = BRM.NativePPLPlan(
+    plan.axes, plan.inputs, plan.parameters, plan.nodes, plan.factors,
+    queries, plan.bindings)
 
 function bundle_execution_allocated(
     rng, outputs, workspace, prepared, positions, queries)
@@ -1132,7 +1310,7 @@ end
         center_x ~ 1 + xc
         y ~ Normal(center_x, sigma)
     end)
-    gaussian = check_centered_execution(
+    gaussian = check_transformed_execution(
         gaussian_centered, gaussian_explicit, [0.2, -0.4, log(0.8)])
 
     @test hasproperty(gaussian_centered.nodes, :transform)
@@ -1161,7 +1339,7 @@ end
         eta ~ 1 + xc
         y ~ BernoulliLogit(eta)
     end)
-    bernoulli = check_centered_execution(
+    bernoulli = check_transformed_execution(
         bernoulli_centered, bernoulli_explicit, [-0.3, 0.6])
 
     poisson_data = (;
@@ -1176,7 +1354,7 @@ end
         log_rate ~ 1 + xc
         y ~ Poisson(exp(log_rate))
     end)
-    poisson = check_centered_execution(
+    poisson = check_transformed_execution(
         poisson_centered, poisson_explicit, [0.1, 0.2])
 
     new_x = [10.0, 14.0]
@@ -1235,6 +1413,487 @@ end
     @test_throws BRM.NativePPLCapabilityError BRM.NativePPL.rebind(
         gaussian, (; x=[1.0, NaN], y=[0.0, 1.0]);
         freeze_constants=false)
+end
+
+
+@testset "native PPL fitted sample-SD scaling and replay" begin
+    raw_x = [1.0, 2.0, 3.0, 4.0]
+    fitted_mean = 2.5
+    fitted_scale = sqrt(5 / 3)
+    standardized_x = (raw_x .- fitted_mean) ./ fitted_scale
+
+    gaussian_data = (; x=raw_x, y=[0.2, -0.1, 1.1, 0.7])
+    gaussian_scaled = BRM.NativePPL.compile(@brm gaussian_data begin
+        sigma ~ Exponential(2.0)
+        mu ~ 1 + zscale(x)
+        y ~ Normal(mu, sigma)
+    end)
+    gaussian_explicit_data = (; xz=standardized_x, y=gaussian_data.y)
+    gaussian_explicit = BRM.NativePPL.compile(@brm gaussian_explicit_data begin
+        sigma ~ Exponential(2.0)
+        mu ~ 1 + xz
+        y ~ Normal(mu, sigma)
+    end)
+    gaussian = check_transformed_execution(
+        gaussian_scaled, gaussian_explicit, [0.2, -0.4, log(0.8)])
+
+    gaussian_standardized = BRM.NativePPL.compile(@brm gaussian_data begin
+        sigma ~ Exponential(2.0)
+        mu ~ 1 + standardize(x)
+        y ~ Normal(mu, sigma)
+    end)
+    transform = gaussian_scaled.nodes.transform
+    alias_transform = gaussian_standardized.nodes.transform
+    @test transform isa BRM.NativePPLZScaleNode
+    @test typeof(alias_transform) === typeof(transform)
+    @test BRM.native_zscale_input(transform) === :x
+    @test transform.mean == fitted_mean
+    @test transform.scale ≈ fitted_scale
+    @test alias_transform.mean == transform.mean
+    @test alias_transform.scale == transform.scale
+    @test BRM.native_node_name(alias_transform) === BRM.native_node_name(transform)
+    @test transform.axis === gaussian_scaled.axes.observation
+    @test BRM.native_affine_input(gaussian_scaled.nodes.location) ===
+          BRM.native_node_name(transform)
+    @test gaussian.predictor ≈ standardized_x
+    @test gaussian.predictor !== gaussian_data.x
+
+    bernoulli_data = (; x=raw_x, y=Bool[false, false, true, true])
+    bernoulli_scaled = BRM.NativePPL.compile(@brm bernoulli_data begin
+        eta ~ 1 + zscale(x)
+        y ~ BernoulliLogit(eta)
+    end)
+    bernoulli_explicit_data = (; xz=standardized_x, y=bernoulli_data.y)
+    bernoulli_explicit = BRM.NativePPL.compile(@brm bernoulli_explicit_data begin
+        eta ~ 1 + xz
+        y ~ BernoulliLogit(eta)
+    end)
+    bernoulli = check_transformed_execution(
+        bernoulli_scaled, bernoulli_explicit, [-0.3, 0.6])
+
+    poisson_data = (; x=raw_x, y=[0, 1, 3, 6])
+    poisson_scaled = BRM.NativePPL.compile(@brm poisson_data begin
+        log_rate ~ 1 + standardize(x)
+        y ~ Poisson(exp(log_rate))
+    end)
+    poisson_explicit_data = (; xz=standardized_x, y=poisson_data.y)
+    poisson_explicit = BRM.NativePPL.compile(@brm poisson_explicit_data begin
+        log_rate ~ 1 + xz
+        y ~ Poisson(exp(log_rate))
+    end)
+    poisson = check_transformed_execution(
+        poisson_scaled, poisson_explicit, [0.1, 0.2])
+
+    new_x = [10.0, 14.0]
+    frozen_x = (new_x .- fitted_mean) ./ fitted_scale
+    refitted_x = [-inv(sqrt(2.0)), inv(sqrt(2.0))]
+    for (prepared, response, position) in
+        ((gaussian, [0.4, 0.9], [0.2, -0.4, log(0.8)]),
+         (bernoulli, Bool[false, true], [-0.3, 0.6]),
+         (poisson, [2, 4], [0.1, 0.2]))
+        frozen = BRM.NativePPL.rebind(prepared, (; x=new_x, y=response))
+        refitted = BRM.NativePPL.rebind(
+            prepared, (; x=new_x, y=response); freeze_constants=false)
+        @test frozen.predictor ≈ frozen_x
+        @test refitted.predictor ≈ refitted_x
+        @test frozen.plan.parameters === prepared.plan.parameters
+        @test frozen.plan.nodes.transform.mean == fitted_mean
+        @test frozen.plan.nodes.transform.scale ≈ fitted_scale
+        @test refitted.plan.nodes.transform.mean == 12.0
+        @test refitted.plan.nodes.transform.scale ≈ sqrt(8.0)
+        @test frozen.plan.nodes.transform.axis === frozen.plan.axes.observation
+        @test frozen.plan.nodes.location.axis === frozen.plan.axes.observation
+        @test frozen.plan.factors.likelihood.axis === frozen.plan.axes.observation
+
+        prediction_only = BRM.NativePPL.rebind(prepared, (; x=new_x))
+        refit_prediction_only = BRM.NativePPL.rebind(
+            prepared, (; x=new_x); freeze_constants=false)
+        @test !BRM.NativePPL.has_response(prediction_only)
+        @test prediction_only.predictor ≈ frozen_x
+        @test refit_prediction_only.predictor ≈ refitted_x
+        @test length(BRM.NativePPL.simulate(
+            MersenneTwister(905), BRM.NativePPL.workspace(prediction_only),
+            prediction_only, position)) == 2
+        @test_throws ArgumentError BRM.NativePPL.evaluate(
+            BRM.NativePPL.workspace(prediction_only), prediction_only,
+            position, BRM.NativePPL.PointwiseLogLikelihood())
+
+        single_prediction = BRM.NativePPL.rebind(prepared, (; x=[10.0]))
+        @test length(single_prediction.predictor) == 1
+        @test_throws BRM.NativePPLCapabilityError BRM.NativePPL.rebind(
+            prepared, (; x=[10.0]); freeze_constants=false)
+        constant_prediction = BRM.NativePPL.rebind(prepared, (; x=[10.0, 10.0]))
+        @test length(constant_prediction.predictor) == 2
+        @test_throws BRM.NativePPLCapabilityError BRM.NativePPL.rebind(
+            prepared, (; x=[10.0, 10.0]); freeze_constants=false)
+    end
+
+    gaussian_work = BRM.NativePPL.workspace(
+        gaussian, Float64, DI.AutoEnzyme())
+    @test steady_state_allocations(
+        gaussian_work, gaussian, [0.2, -0.4, log(0.8)]) ==
+          (; primal=0, gradient=0)
+
+    function scaled_gaussian(values)
+        data = (; x=values, y=zeros(length(values)))
+        BRM.NativePPL.compile(@brm data begin
+            sigma ~ Exponential(1.0)
+            mu ~ 1 + zscale(x)
+            y ~ Normal(mu, sigma)
+        end)
+    end
+    @test capability_error(() -> scaled_gaussian([1.0])).capability ==
+          :predictor_transform
+    @test capability_error(() -> scaled_gaussian([1.0, 1.0])).capability ==
+          :predictor_transform
+    @test capability_error(() -> scaled_gaussian([1.0, NaN])).capability ==
+          :predictor_transform
+    @test capability_error(() -> scaled_gaussian([1.0, Inf])).capability ==
+          :predictor_transform
+
+    extreme = floatmax(Float64)
+    extreme_plan = scaled_gaussian([-extreme, extreme, extreme, extreme])
+    @test extreme_plan.nodes.transform.mean ≈ extreme / 2
+    @test extreme_plan.nodes.transform.scale ≈ extreme
+    @test BRM.NativePPL.prepare(extreme_plan).predictor ≈ [-1.5, 0.5, 0.5, 0.5]
+    @test capability_error(() -> scaled_gaussian([-extreme, extreme])).capability ==
+          :predictor_transform
+    tiny_plan = scaled_gaussian([-1.0e-50, 1.0e-50])
+    @test_throws ArgumentError BRM.NativePPL.prepare(tiny_plan; T=Float32)
+    @test_throws ArgumentError BRM.NativePPL.rebind(
+        gaussian, (; x=[1.0, NaN]))
+    @test_throws BRM.NativePPLCapabilityError BRM.NativePPL.rebind(
+        gaussian, (; x=[1.0, NaN]); freeze_constants=false)
+
+    location = gaussian_scaled.nodes.location
+    wrong_location = BRM.NativePPLAffineNode(
+        BRM.native_node_name(location), :x, location.axis,
+        location.intercept_index, location.slope_index)
+    bad_plan = replace_plan_nodes(
+        gaussian_scaled, (; transform=gaussian_scaled.nodes.transform,
+                          location=wrong_location))
+    @test capability_error(() -> BRM.NativePPL.prepare(bad_plan)).capability ==
+          :graph_identity
+
+    wrong_transform = BRM.NativePPLZScaleNode(
+        BRM.native_node_name(transform), :wrong, transform.axis,
+        transform.mean, transform.scale)
+    bad_plan = replace_plan_nodes(
+        gaussian_scaled, (; transform=wrong_transform, location))
+    @test capability_error(() -> BRM.NativePPL.prepare(bad_plan)).capability ==
+          :graph_identity
+
+    equal_axis = BRM.NativePPLAxis(:observation, collect(eachindex(raw_x)))
+    wrong_axis_transform = BRM.NativePPLZScaleNode(
+        BRM.native_node_name(transform), :x, equal_axis,
+        transform.mean, transform.scale)
+    bad_plan = replace_plan_nodes(
+        gaussian_scaled, (; transform=wrong_axis_transform, location))
+    @test capability_error(() -> BRM.NativePPL.prepare(bad_plan)).capability ==
+          :graph_identity
+
+    rate = poisson_scaled.nodes.rate
+    wrong_rate = BRM.NativePPLExpNode(
+        BRM.native_node_name(rate), :wrong, rate.axis)
+    bad_plan = replace_plan_nodes(
+        poisson_scaled,
+        (; transform=poisson_scaled.nodes.transform,
+           location=poisson_scaled.nodes.location, rate=wrong_rate))
+    @test capability_error(() -> BRM.NativePPL.prepare(bad_plan)).capability ==
+          :graph_identity
+
+    wrong_likelihood = BRM.NativePPLNormalFactor(
+        :wrong_response, :mu, :sigma, gaussian_scaled.axes.observation)
+    bad_plan = replace_plan_factors(
+        gaussian_scaled,
+        merge(gaussian_scaled.factors, (; likelihood=wrong_likelihood)))
+    @test capability_error(() -> BRM.NativePPL.prepare(bad_plan)).capability ==
+          :graph_identity
+
+    wrong_prior = BRM.NativePPLStandardNormalFactor(:wrong_parameter, 1:2)
+    bad_plan = replace_plan_factors(
+        gaussian_scaled,
+        merge(gaussian_scaled.factors, (; coefficient_prior=wrong_prior)))
+    @test capability_error(() -> BRM.NativePPL.prepare(bad_plan)).capability ==
+          :graph_identity
+
+    bad_plan = replace_plan_queries(
+        gaussian_scaled,
+        merge(gaussian_scaled.queries, (; linear_predictor=1)))
+    @test capability_error(() -> BRM.NativePPL.prepare(bad_plan)).capability ==
+          :graph_identity
+
+    wrong_query_axis = BRM.NativePPLAxis(
+        :observation, collect(eachindex(raw_x)))
+    wrong_output = BRM.NativePPLOutputSignature(
+        wrong_query_axis, BRM.NativePPLPreparedElementType(),
+        BRM.NativePPLDenseVectorLayout())
+    wrong_query = BRM.NativePPLQuerySpec(
+        :linear_predictor, :per_draw, :workspace,
+        :until_next_evaluation, wrong_output)
+    bad_plan = replace_plan_queries(
+        gaussian_scaled,
+        merge(gaussian_scaled.queries, (; linear_predictor=wrong_query)))
+    @test capability_error(() -> BRM.NativePPL.prepare(bad_plan)).capability ==
+          :graph_identity
+end
+
+
+@testset "public native PPL Model lowering and binding" begin
+    raw_x = [-1.0, 0.0, 2.0, 4.0]
+    transforms = (:identity, :center, :zscale)
+    families = (:gaussian, :bernoulli, :poisson)
+    for family in families, transform in transforms
+        response = family === :gaussian ? [0.2, -0.1, 1.1, 0.7] :
+            family === :bernoulli ? Bool[false, false, true, true] :
+            [0, 1, 3, 6]
+        data = (; x=raw_x, y=response)
+        position = family === :gaussian ? [0.2, -0.4, log(0.8)] :
+            family === :bernoulli ? [-0.3, 0.6] : [0.1, 0.2]
+        brmi = native_brmi(family, transform, data)
+        direct_model = direct_native_model(family, transform)
+        lowered_model = NP.lower(brmi)
+        @test direct_model isa NP.Model
+        @test typeof(direct_model) === typeof(lowered_model)
+        @test sprint(show, direct_model) == sprint(show, lowered_model)
+
+        direct_plan = NP.bind(direct_model, data)
+        compiled_direct_plan = NP.compile(direct_model, data)
+        lowered_plan = NP.bind(lowered_model, data)
+        brm_plan = NP.compile(brmi)
+        compatibility_plan = BRM._native_ppl_plan(brmi)
+        for candidate in (
+            compiled_direct_plan, lowered_plan, brm_plan, compatibility_plan)
+            check_plan_structure(direct_plan, candidate)
+        end
+        @test direct_plan.bindings.x === data.x
+        @test direct_plan.bindings.y === data.y
+        prepared = check_transformed_execution(
+            direct_plan, brm_plan, position)
+        @test NP.prepare(direct_model, data).predictor == prepared.predictor
+        @test steady_state_allocations(
+            NP.workspace(prepared, Float64, DI.AutoEnzyme()),
+            prepared, position) == (; primal=0, gradient=0)
+
+        new_x = [10.0, 14.0, 20.0]
+        new_y = family === :gaussian ? [0.4, 0.9, 1.3] :
+            family === :bernoulli ? Bool[false, true, true] : [2, 4, 7]
+        direct_prepared = NP.prepare(direct_plan)
+        brm_prepared = NP.prepare(brm_plan)
+        for freeze_constants in (true, false)
+            direct_rebound = NP.rebind(
+                direct_prepared, (; x=new_x, y=new_y); freeze_constants)
+            brm_rebound = NP.rebind(
+                brm_prepared, (; x=new_x, y=new_y); freeze_constants)
+            check_plan_structure(direct_rebound.plan, brm_rebound.plan)
+            @test direct_rebound.predictor == brm_rebound.predictor
+            direct_work = NP.workspace(
+                direct_rebound, Float64, DI.AutoEnzyme())
+            brm_work = NP.workspace(
+                brm_rebound, Float64, DI.AutoEnzyme())
+            @test NP.logdensity!(direct_work, direct_rebound, position) ≈
+                  NP.logdensity!(brm_work, brm_rebound, position)
+            direct_density, direct_gradient = NP.logdensity_and_gradient!(
+                direct_work, direct_rebound, position)
+            brm_density, brm_gradient = NP.logdensity_and_gradient!(
+                brm_work, brm_rebound, position)
+            @test direct_density ≈ brm_density
+            @test direct_gradient ≈ brm_gradient
+
+            direct_prediction = NP.rebind(
+                direct_prepared, (; x=new_x); freeze_constants)
+            brm_prediction = NP.rebind(
+                brm_prepared, (; x=new_x); freeze_constants)
+            @test !NP.has_response(direct_prediction)
+            @test direct_prediction.predictor == brm_prediction.predictor
+            @test NP.simulate(
+                MersenneTwister(906), NP.workspace(direct_prediction),
+                direct_prediction, position) ==
+                  NP.simulate(
+                      MersenneTwister(906), NP.workspace(brm_prediction),
+                      brm_prediction, position)
+        end
+    end
+
+    gaussian_model = direct_native_model(:gaussian, :identity)
+    gaussian_data = (; x=[1.0, 2.0], y=[0.0, 1.0])
+    @test_throws ArgumentError NP.bind(gaussian_model, gaussian_data.x)
+    @test_throws ArgumentError NP.bind(gaussian_model, (; x=gaussian_data.x))
+    @test_throws ArgumentError NP.bind(
+        gaussian_model, merge(gaussian_data, (; extra=[1.0, 2.0])))
+    @test_throws ArgumentError NP.instantiate(
+        gaussian_model, (; x=gaussian_data.x))
+    bad_instance = NP.ModelInstance(
+        gaussian_model, (; x=gaussian_data.x))
+    @test_throws ArgumentError NP.bind(bad_instance)
+
+    malformed_model = NP.Model(
+        [NP.input(:predictor)], (;), (;), (;))
+    @test_throws ArgumentError NP.bind(malformed_model, (;))
+    @test_throws ArgumentError NP.input(:unknown)
+    @test_throws ArgumentError NP.Exponential(0.0)
+    @test_throws ArgumentError NP.parameter(
+        NP.RealSupport(), ();
+        transform=NP.Identity(), prior=NP.StandardNormal())
+    @test_throws ArgumentError NP.parameter(
+        NP.RealSupport(), (:x, :x);
+        transform=NP.Identity(), prior=NP.StandardNormal())
+
+    extra_nodes = merge(
+        gaussian_model.nodes, (; exp_mu=NP.exp_link(:mu)))
+    extra_model = NP.model(
+        inputs=gaussian_model.inputs,
+        parameters=gaussian_model.parameters,
+        nodes=extra_nodes,
+        observations=gaussian_model.observations)
+    @test capability_error(
+        () -> NP.bind(extra_model, gaussian_data)).capability ==
+          :additional_nodes
+
+    bad_coefficients = NP.parameter(
+        NP.RealSupport(), (:intercept,);
+        transform=NP.Identity(), prior=NP.StandardNormal())
+    bad_coefficient_model = NP.model(
+        inputs=gaussian_model.inputs,
+        parameters=(; beta_mu=bad_coefficients,
+                    sigma=gaussian_model.parameters.sigma),
+        nodes=gaussian_model.nodes,
+        observations=gaussian_model.observations)
+    @test capability_error(
+        () -> NP.bind(bad_coefficient_model, gaussian_data)).capability ==
+          :parameter_axis
+
+    bad_scale = NP.parameter(
+        NP.PositiveSupport(), (:residual,);
+        transform=NP.Exp(), prior=NP.Exponential(2.0))
+    bad_scale_model = NP.model(
+        inputs=gaussian_model.inputs,
+        parameters=(; beta_mu=gaussian_model.parameters.beta_mu,
+                    sigma=bad_scale),
+        nodes=gaussian_model.nodes,
+        observations=gaussian_model.observations)
+    @test capability_error(
+        () -> NP.bind(bad_scale_model, gaussian_data)).capability ==
+          :parameter_axis
+    @test capability_error(
+        () -> NP.bind(gaussian_model, (; x=[1, 2], y=[0.0, 1.0]))).capability ==
+          :predictor_type
+    @test capability_error(
+        () -> NP.bind(
+            direct_native_model(:bernoulli, :identity),
+            (; x=[1.0, 2.0], y=[0, 2]))).capability ==
+          :response_support
+    @test capability_error(
+        () -> NP.bind(
+            direct_native_model(:poisson, :identity),
+            (; x=[1.0, 2.0], y=[0, 1.5]))).capability ==
+          :response_support
+end
+
+
+@testset "public native PPL @model semantics" begin
+    raw_x = [-1.0, 0.0, 2.0, 4.0]
+    cases = (
+        (instance=macro_gaussian_identity(
+             raw_x, [0.2, -0.1, 1.1, 0.7]),
+         builder=direct_native_model(
+             :gaussian, :identity;
+             coefficient_keys=(:intercept, :slope)),
+         position=[0.2, -0.4, log(0.8)]),
+        (instance=macro_gaussian_zscale(
+             raw_x, [0.2, -0.1, 1.1, 0.7]),
+         builder=direct_native_model(
+             :gaussian, :zscale;
+             coefficient_keys=(:intercept, :slope)),
+         position=[0.2, -0.4, log(0.8)]),
+        (instance=macro_bernoulli_center(
+             raw_x, Bool[false, false, true, true]),
+         builder=direct_native_model(
+             :bernoulli, :center;
+             coefficient_keys=(:intercept, :slope)),
+         position=[-0.3, 0.6]),
+        (instance=macro_poisson_zscale(raw_x, [0, 1, 3, 6]),
+         builder=direct_native_model(
+             :poisson, :zscale;
+             coefficient_keys=(:intercept, :slope)),
+         position=[0.1, 0.2]),
+    )
+    for (; instance, builder, position) in cases
+        @test instance isa NP.ModelInstance
+        @test typeof(instance.declaration) === typeof(builder)
+        @test keys(instance.bindings) == keys(builder.inputs)
+        @test occursin("NativePPL.ModelInstance", sprint(show, instance))
+        macro_plan = NP.bind(instance)
+        @test typeof(NP.compile(instance)) === typeof(macro_plan)
+        builder_plan = NP.bind(builder, instance.bindings)
+        check_plan_structure(macro_plan, builder_plan)
+        prepared = check_transformed_execution(
+            macro_plan, builder_plan, position)
+        @test NP.prepare(instance).predictor == prepared.predictor
+        @test steady_state_allocations(
+            NP.workspace(prepared, Float64, DI.AutoEnzyme()),
+            prepared, position) == (; primal=0, gradient=0)
+
+        prediction = NP.rebind(prepared, (; x=[10.0, 14.0]))
+        builder_prediction = NP.rebind(
+            NP.prepare(builder_plan), (; x=[10.0, 14.0]))
+        @test !NP.has_response(prediction)
+        @test prediction.predictor == builder_prediction.predictor
+        @test NP.simulate(
+            MersenneTwister(907), NP.workspace(prediction),
+            prediction, position) ==
+              NP.simulate(
+                  MersenneTwister(907), NP.workspace(builder_prediction),
+                  builder_prediction, position)
+    end
+
+    hygienic = NativePPLMacroHygiene.hygienic(
+        raw_x, [0.2, -0.1, 1.1, 0.7])
+    @test hygienic isa NP.ModelInstance
+    @test NP.compile(hygienic) isa NP.Plan
+    @test NP.prepare(hygienic) isa NP.Prepared
+    @test_throws MethodError macro_gaussian_identity(1.0, [1.0])
+
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model bad_model = nothing)))
+    @test occursin("must wrap a function definition", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function bad_arity(x, y, z)
+            y ~ Normal(x, z)
+        end)))
+    @test occursin("exactly one predictor and one response", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function bad_keyword(x, y; scale=1)
+            y ~ Normal(x, scale)
+        end)))
+    @test occursin("plain or typed positional arguments", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function bad_statement(x, y)
+            println(x)
+            y ~ Normal(x, x)
+        end)))
+    @test occursin("unsupported statement", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function bad_prior(x, y)
+            intercept ~ Normal(1, 2)
+            slope ~ Normal()
+            mu = intercept + slope * x
+            y ~ BernoulliLogit(mu)
+        end)))
+    @test occursin("scalar `Normal()` or `Normal(0, 1)`", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function missing_observation(x, y)
+            centered = center(x)
+        end)))
+    @test occursin("exactly one observation", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function bad_link(x, y)
+            intercept ~ Normal()
+            slope ~ Normal()
+            log_rate = intercept + slope * x
+            y ~ Poisson(log_rate + x)
+        end)))
+    @test occursin("named rate or `exp(named_log_rate)`", err.msg)
 end
 
 

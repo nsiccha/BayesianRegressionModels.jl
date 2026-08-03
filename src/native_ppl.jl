@@ -115,6 +115,23 @@ NativePPLCenterNode(name::Symbol, input::Symbol, axis::A, mean::T) where {A,T} =
     NativePPLCenterNode{name,input,A,T}(axis, mean)
 native_node_name(::NativePPLCenterNode{Name}) where {Name} = Name
 native_center_input(::NativePPLCenterNode{Name,Input}) where {Name,Input} = Input
+native_fitted_transform_input(node::NativePPLCenterNode) =
+    native_center_input(node)
+
+"""A fitted corrected-sample-SD standardization over one raw input column."""
+struct NativePPLZScaleNode{Name,Input,A,T} <: NativePPLNode
+    axis::A
+    mean::T
+    scale::T
+end
+
+NativePPLZScaleNode(name::Symbol, input::Symbol, axis::A,
+                    mean::T, scale::T) where {A,T} =
+    NativePPLZScaleNode{name,input,A,T}(axis, mean, scale)
+native_node_name(::NativePPLZScaleNode{Name}) where {Name} = Name
+native_zscale_input(::NativePPLZScaleNode{Name,Input}) where {Name,Input} = Input
+native_fitted_transform_input(node::NativePPLZScaleNode) =
+    native_zscale_input(node)
 
 """Independent standard-normal prior over an unconstrained parameter range."""
 struct NativePPLStandardNormalFactor{Parameter,R} <: NativePPLFactor
@@ -413,24 +430,29 @@ function _native_ppl_predictor_term(term, key::Symbol)
     if term isa NamedColumn && parent(term) isa DataColumn
         return (; column=term, transform=:identity)
     end
-    if term isa ExprColumn && getf(term) === center
+    if term isa ExprColumn &&
+       (getf(term) === center || getf(term) === zscale ||
+        getf(term) === standardize)
+        transform = getf(term) === center ? :center : :zscale
+        spelling = getf(term) === standardize ? :standardize : transform
         isempty(getkwargs(term)) || throw(NativePPLCapabilityError(
             :predictor_transform,
-            "`center` in predictor `$key` cannot have keywords"))
+            "`$spelling` in predictor `$key` cannot have keywords"))
         args = getargs(term)
         length(args) == 1 || throw(NativePPLCapabilityError(
             :predictor_transform,
-            "`center` in predictor `$key` needs one raw data column"))
+            "`$spelling` in predictor `$key` needs one raw data column"))
         column = only(args)
         column isa NamedColumn && parent(column) isa DataColumn ||
             throw(NativePPLCapabilityError(
                 :predictor_transform,
-                "`center` in predictor `$key` must wrap one raw data column"))
-        return (; column, transform=:center)
+                "`$spelling` in predictor `$key` must wrap one raw data column"))
+        return (; column, transform)
     end
     throw(NativePPLCapabilityError(
         :predictor_terms,
-        "`$key` must be exactly `1 + x` or `1 + center(x)`; " *
+        "`$key` must be exactly `1 + x`, `1 + center(x)`, or " *
+        "`1 + zscale(x)` (`standardize(x)` is an alias); " *
         "offsets, interactions, groups, and other transforms are not lowered yet"))
 end
 
@@ -476,11 +498,15 @@ function _native_ppl_exponential_prior(brmi::BRMI, key::Symbol)
     scale
 end
 
-function _native_ppl_fit_center(values::AbstractVector, name::Symbol)
+function _native_ppl_fit_mean(values::AbstractVector, name::Symbol,
+                              transform::Symbol)
     all(value -> value isa Real && isfinite(value), values) ||
         throw(NativePPLCapabilityError(
             :predictor_transform,
-            "`center($name)` requires finite real training values"))
+            "`$transform($name)` requires finite real training values"))
+    isempty(values) && throw(NativePPLCapabilityError(
+        :predictor_transform,
+        "`$transform($name)` requires at least one training value"))
     fitted_mean = float(first(values))
     for (offset, value) in enumerate(Iterators.drop(values, 1))
         count = offset + 1
@@ -490,206 +516,322 @@ function _native_ppl_fit_center(values::AbstractVector, name::Symbol)
     end
     isfinite(fitted_mean) || throw(NativePPLCapabilityError(
         :predictor_transform,
-        "`center($name)` produced a non-finite fitted mean"))
+        "`$transform($name)` produced a non-finite fitted mean"))
     fitted_mean
 end
 
-"""
-    _native_ppl_plan(brmi::BRMI) -> NativePPLPlan
+_native_ppl_fit_center(values::AbstractVector, name::Symbol) =
+    _native_ppl_fit_mean(values, name, :center)
 
-Lower either initial workflow-complete model family:
-
-```julia
-y     ~ Normal(mu, sigma)
-mu    ~ 1 + x
-sigma ~ Exponential(scale)
-
-# or
-
-y     ~ BernoulliLogit(eta)
-eta   ~ 1 + x
-
-# or
-
-y     ~ Poisson(exp(eta))
-eta   ~ 1 + x
-```
-
-Names may vary, but the structure may not. Unsupported structure raises a
-`NativePPLCapabilityError` naming the missing capability.
-"""
-function _native_ppl_plan(brmi::BRMI)
-    observed = outcomes(brmi)
-    length(observed) == 1 || throw(NativePPLCapabilityError(
-        :outcomes, "expected exactly one observed response, got $(length(observed))"))
-    outcome = only(observed)
-    family = outcome.family
-    family === Normal || family === BernoulliLogit || family === Poisson ||
-        throw(NativePPLCapabilityError(
-            :likelihood,
-            "expected `Normal(location, scale)`, `BernoulliLogit(logit)`, " *
-            "or `Poisson(exp(log_rate))`, got `$family`"))
-
-    response = outcome.response
-    response_lhs, likelihood = _native_ppl_sampling_rhs(brmi, response)
-    response_lhs isa NamedColumn && parent(response_lhs) isa DataColumn ||
-        throw(NativePPLCapabilityError(:response_decorator,
-            "response `$response` must be a bare observed data column"))
-    likelihood isa ExprColumn && getf(likelihood) === family ||
-        throw(NativePPLCapabilityError(:likelihood,
-            "response `$response` must use `$family` consistently"))
-    isempty(getkwargs(likelihood)) || throw(NativePPLCapabilityError(
-        :likelihood_keywords, "$family likelihood for `$response` has keywords"))
-    likelihood_args = getargs(likelihood)
-    expected_arguments = family === Normal ? 2 : 1
-    length(likelihood_args) == expected_arguments ||
-        throw(NativePPLCapabilityError(
-            :likelihood,
-            "$family likelihood for `$response` needs $expected_arguments argument(s)"))
-    rate = nothing
-    location = if family === Poisson
-        rate_expression = only(likelihood_args)
-        rate_expression isa ExprColumn && getf(rate_expression) === exp ||
-            throw(NativePPLCapabilityError(
-                :likelihood_link,
-                "Poisson response `$response` must use `Poisson(exp(log_rate))`"))
-        isempty(getkwargs(rate_expression)) || throw(NativePPLCapabilityError(
-            :likelihood_link, "Poisson `exp` link cannot have keywords"))
-        rate_arguments = getargs(rate_expression)
-        length(rate_arguments) == 1 || throw(NativePPLCapabilityError(
-            :likelihood_link, "Poisson `exp` link needs one named predictor"))
-        log_rate = _native_ppl_ref_name(only(rate_arguments))
-        log_rate === nothing && throw(NativePPLCapabilityError(
-            :likelihood_location,
-            "Poisson `exp` link must consume one named linear predictor"))
-        rate = Symbol(:exp_, log_rate)
-        log_rate
-    else
-        _native_ppl_ref_name(likelihood_args[1])
+@inline function _native_ppl_scaled_sumsq(
+    magnitude_scale, scaled_squares, deviation)
+    magnitude = abs(deviation)
+    iszero(magnitude) && return magnitude_scale, scaled_squares
+    if magnitude_scale < magnitude
+        ratio = magnitude_scale / magnitude
+        return magnitude, one(magnitude) + scaled_squares * ratio * ratio
     end
-    location === nothing && throw(NativePPLCapabilityError(
-        :likelihood_location, "$family predictor must be one named linear predictor"))
-    scale_parameter = family === Normal ? _native_ppl_ref_name(likelihood_args[2]) : nothing
-    family === Normal && scale_parameter === nothing &&
-        throw(NativePPLCapabilityError(
-            :likelihood_scale, "Normal scale must be one named scalar parameter"))
-
-    predictor_term = _native_ppl_affine_predictor(brmi, location)
-    predictor = predictor_term.column
-    predictor_name = name(predictor)
-    predictor_name === response && throw(NativePPLCapabilityError(
-        :input_roles,
-        "predictor `$predictor_name` is also the observed response; the first native plan requires distinct input roles"))
-    x = parent(parent(predictor))
-    y = parent(parent(response_lhs))
-    x isa AbstractVector{<:Real} && !(eltype(x) <: Integer) ||
-        throw(NativePPLCapabilityError(:predictor_type,
-            "predictor `$predictor_name` must be a continuous real vector"))
-    y isa AbstractVector{<:Real} || throw(NativePPLCapabilityError(
-        :response_type, "response `$response` must be a real or Bool vector"))
-    if family === BernoulliLogit
-        all(value -> value == 0 || value == 1, y) ||
-            throw(NativePPLCapabilityError(
-                :response_support,
-                "BernoulliLogit response `$response` must contain only Bool/0/1 values"))
-    elseif family === Poisson
-        all(_native_ppl_is_count, y) ||
-            throw(NativePPLCapabilityError(
-                :response_support,
-                "Poisson response `$response` must contain nonnegative integer-valued counts representable as Int"))
-    end
-    length(x) == length(y) || throw(NativePPLCapabilityError(
-        :observation_axis,
-        "predictor `$predictor_name` has $(length(x)) rows but `$response` has $(length(y))"))
-    !isempty(y) || throw(NativePPLCapabilityError(
-        :observation_axis, "the observation axis cannot be empty"))
-    center_mean = predictor_term.transform === :center ?
-        _native_ppl_fit_center(x, predictor_name) : nothing
-
-    prior_scale = family === Normal ?
-        _native_ppl_exponential_prior(brmi, scale_parameter) : nothing
-    expected = family === Normal ?
-        Set((location, scale_parameter, response, predictor_name)) :
-        Set((location, response, predictor_name))
-    extras = setdiff(Set(keys(brmi.operations)), expected)
-    isempty(extras) || throw(NativePPLCapabilityError(
-        :additional_operations,
-        "unsupported formula operations: $(join(sort!(collect(extras)), ", "))"))
-
-    observation_axis = NativePPLAxis(:observation, Base.OneTo(length(y)))
-    coefficient_axis = NativePPLAxis(Symbol(location, :_coefficient),
-                                     (:Intercept, predictor_name))
-
-    predictor_input = NativePPLInput(predictor_name, :predictor,
-                                     observation_axis, eltype(x))
-    response_input = NativePPLInput(response, :response,
-                                    observation_axis, eltype(y))
-    coefficient_name = Symbol(:beta_, location)
-    coefficients = NativePPLParameter(
-        coefficient_name, NativePPLRealSupport(), NativePPLIdentityTransform(),
-        coefficient_axis, 1:2)
-    transform_node = predictor_term.transform === :center ?
-        NativePPLCenterNode(
-            Symbol("#native_ppl_center#", location, "#", predictor_name),
-            predictor_name,
-            observation_axis, center_mean) : nothing
-    location_input = transform_node === nothing ?
-        predictor_name : native_node_name(transform_node)
-    location_node = NativePPLAffineNode(location, location_input,
-                                        observation_axis, 1, 2)
-    nodes = transform_node === nothing ?
-        (; location=location_node) :
-        (; transform=transform_node, location=location_node)
-
-    coefficient_prior = NativePPLStandardNormalFactor(coefficient_name, 1:2)
-    bindings = NamedTuple{(predictor_name, response)}((x, y))
-
-    if family === Normal
-        scale_axis = NativePPLAxis(
-            Symbol(scale_parameter, :_scalar), (scale_parameter,))
-        scale = NativePPLParameter(
-            scale_parameter, NativePPLPositiveSupport(), NativePPLExpTransform(),
-            scale_axis, 3:3)
-        scale_prior = NativePPLExponentialFactor(scale_parameter, 3, prior_scale)
-        likelihood_factor = NativePPLNormalFactor(
-            response, location, scale_parameter, observation_axis)
-        NativePPLPlan(
-            (; observation=observation_axis, coefficient=coefficient_axis,
-               scale=scale_axis),
-            (; predictor=predictor_input, response=response_input),
-            (; coefficients, scale),
-            nodes,
-            (; coefficient_prior, scale_prior, likelihood=likelihood_factor),
-            _native_ppl_queries(observation_axis, likelihood_factor),
-            bindings,
-        )
-    elseif family === BernoulliLogit
-        likelihood_factor = NativePPLBernoulliLogitFactor(
-            response, location, observation_axis)
-        NativePPLPlan(
-            (; observation=observation_axis, coefficient=coefficient_axis),
-            (; predictor=predictor_input, response=response_input),
-            (; coefficients),
-            nodes,
-            (; coefficient_prior, likelihood=likelihood_factor),
-            _native_ppl_queries(observation_axis, likelihood_factor),
-            bindings,
-        )
-    else
-        rate_node = NativePPLExpNode(rate, location, observation_axis)
-        likelihood_factor = NativePPLPoissonFactor(
-            response, rate, observation_axis)
-        NativePPLPlan(
-            (; observation=observation_axis, coefficient=coefficient_axis),
-            (; predictor=predictor_input, response=response_input),
-            (; coefficients),
-            merge(nodes, (; rate=rate_node)),
-            (; coefficient_prior, likelihood=likelihood_factor),
-            _native_ppl_queries(observation_axis, likelihood_factor),
-            bindings,
-        )
-    end
+    ratio = magnitude / magnitude_scale
+    magnitude_scale, scaled_squares + ratio * ratio
 end
+
+function _native_ppl_fit_zscale(values::AbstractVector, name::Symbol)
+    length(values) >= 2 || throw(NativePPLCapabilityError(
+        :predictor_transform,
+        "`zscale($name)` requires at least two training values for sample SD"))
+    fitted_mean = _native_ppl_fit_mean(values, name, :zscale)
+
+    # Scaled sum-of-squares avoids the overflow and underflow of directly
+    # accumulating `(x - mean)^2`, while preserving corrected `n - 1`
+    # sample-standard-deviation semantics.
+    magnitude_scale = zero(fitted_mean)
+    scaled_squares = zero(fitted_mean)
+    restore_scale = one(fitted_mean)
+    centered_overflow = false
+    for value in values
+        deviation = float(value) - fitted_mean
+        if !isfinite(deviation)
+            centered_overflow = true
+            break
+        end
+        magnitude_scale, scaled_squares = _native_ppl_scaled_sumsq(
+            magnitude_scale, scaled_squares, deviation)
+    end
+    if centered_overflow
+        # A finite sample can have an overflowing `value - mean` even when its
+        # corrected sample SD is representable. Accumulate centered values in
+        # a dimensionless domain and restore the common magnitude only once.
+        value_scale = maximum(value -> abs(float(value)), values)
+        isfinite(value_scale) && value_scale > zero(value_scale) ||
+            throw(NativePPLCapabilityError(
+                :predictor_transform,
+                "`zscale($name)` could not scale its finite training values"))
+        normalized_mean = fitted_mean / value_scale
+        restore_scale = value_scale
+        magnitude_scale = zero(normalized_mean)
+        scaled_squares = zero(normalized_mean)
+        for value in values
+            deviation = float(value) / value_scale - normalized_mean
+            magnitude_scale, scaled_squares = _native_ppl_scaled_sumsq(
+                magnitude_scale, scaled_squares, deviation)
+        end
+    end
+    iszero(magnitude_scale) && throw(NativePPLCapabilityError(
+        :predictor_transform,
+        "`zscale($name)` requires nonzero sample variance"))
+    fitted_scale = (magnitude_scale *
+        sqrt(scaled_squares / (length(values) - 1))) * restore_scale
+    isfinite(fitted_scale) && fitted_scale > zero(fitted_scale) ||
+        throw(NativePPLCapabilityError(
+            :predictor_transform,
+            "`zscale($name)` produced a non-finite or zero sample SD"))
+    (; mean=fitted_mean, scale=fitted_scale)
+end
+
+function _native_ppl_validate_coefficient_prior(
+    factor::NativePPLStandardNormalFactor{Parameter},
+    parameter::NativePPLParameter{Parameter},
+) where {Parameter}
+    factor.unconstrained == parameter.unconstrained || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled coefficient prior and parameter coordinates must agree"))
+    nothing
+end
+_native_ppl_validate_coefficient_prior(::Any, ::Any) = throw(
+    NativePPLCapabilityError(
+        :graph_identity,
+        "compiled coefficient prior must target the coefficient parameter"))
+
+function _native_ppl_validate_scale_prior(
+    factor::NativePPLExponentialFactor{Parameter},
+    parameter::NativePPLParameter{Parameter},
+) where {Parameter}
+    factor.unconstrained_index in parameter.unconstrained || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled scale prior coordinate must belong to the scale parameter"))
+    nothing
+end
+_native_ppl_validate_scale_prior(::Any, ::Any) = throw(
+    NativePPLCapabilityError(
+        :graph_identity,
+        "compiled scale prior must target the scale parameter"))
+
+function _native_ppl_validate_likelihood_graph(
+    factor::NativePPLNormalFactor{Response,Location,Scale},
+    plan::NativePPLPlan, observation_axis,
+) where {Response,Location,Scale}
+    factor.axis === observation_axis || throw(NativePPLCapabilityError(
+        :graph_identity,
+        "compiled Normal factor must carry the plan observation axis"))
+    Response === native_input_name(plan.inputs.response) || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled Normal factor must observe the response input"))
+    Location === native_node_name(plan.nodes.location) || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled Normal factor must consume the affine location"))
+    hasproperty(plan.parameters, :scale) || throw(NativePPLCapabilityError(
+        :graph_identity, "compiled Normal graph is missing its scale parameter"))
+    scale = plan.parameters.scale
+    scale isa NativePPLParameter || throw(NativePPLCapabilityError(
+        :graph_identity,
+        "compiled Normal scale must be a typed parameter block"))
+    hasproperty(plan.axes, :scale) && scale.axis === plan.axes.scale || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled Normal scale parameter must carry the scale axis"))
+    Scale === native_parameter_name(scale) || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled Normal factor must consume the scale parameter"))
+    hasproperty(plan.factors, :scale_prior) || throw(NativePPLCapabilityError(
+        :graph_identity, "compiled Normal graph is missing its scale prior"))
+    _native_ppl_validate_scale_prior(
+        plan.factors.scale_prior, scale)
+    hasproperty(plan.nodes, :rate) && throw(NativePPLCapabilityError(
+        :graph_identity,
+        "compiled Normal graph cannot contain a Poisson rate node"))
+    nothing
+end
+
+function _native_ppl_validate_likelihood_graph(
+    factor::NativePPLBernoulliLogitFactor{Response,Location},
+    plan::NativePPLPlan, observation_axis,
+) where {Response,Location}
+    factor.axis === observation_axis || throw(NativePPLCapabilityError(
+        :graph_identity,
+        "compiled BernoulliLogit factor must carry the plan observation axis"))
+    Response === native_input_name(plan.inputs.response) || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled BernoulliLogit factor must observe the response input"))
+    Location === native_node_name(plan.nodes.location) || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled BernoulliLogit factor must consume the affine location"))
+    hasproperty(plan.nodes, :rate) && throw(NativePPLCapabilityError(
+        :graph_identity,
+        "compiled BernoulliLogit graph cannot contain a Poisson rate node"))
+    nothing
+end
+
+function _native_ppl_validate_likelihood_graph(
+    factor::NativePPLPoissonFactor{Response,Rate},
+    plan::NativePPLPlan, observation_axis,
+) where {Response,Rate}
+    factor.axis === observation_axis || throw(NativePPLCapabilityError(
+        :graph_identity,
+        "compiled Poisson factor must carry the plan observation axis"))
+    Response === native_input_name(plan.inputs.response) || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled Poisson factor must observe the response input"))
+    hasproperty(plan.nodes, :rate) || throw(NativePPLCapabilityError(
+        :graph_identity, "compiled Poisson graph is missing its rate node"))
+    Rate === native_node_name(plan.nodes.rate) || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled Poisson factor must consume the exponential rate"))
+    nothing
+end
+
+_native_ppl_validate_likelihood_graph(
+    ::Any, ::NativePPLPlan, ::Any,
+) = throw(NativePPLCapabilityError(
+    :graph_identity, "compiled graph has an unsupported likelihood factor"))
+
+function _native_ppl_validate_predictor_graph(plan::NativePPLPlan)
+    observation_axis = plan.axes.observation
+    predictor = plan.inputs.predictor
+    response = plan.inputs.response
+    native_input_role(predictor) === :predictor || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled predictor input must preserve its predictor role"))
+    native_input_role(response) === :response || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled response input must preserve its response role"))
+    native_input_name(predictor) !== native_input_name(response) || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled predictor and response must have distinct identities"))
+    predictor.axis === observation_axis || throw(NativePPLCapabilityError(
+        :graph_identity,
+        "compiled predictor input must carry the plan observation axis"))
+    response.axis === observation_axis || throw(NativePPLCapabilityError(
+        :graph_identity,
+        "compiled response input must carry the plan observation axis"))
+
+    hasproperty(plan.nodes, :location) || throw(NativePPLCapabilityError(
+        :graph_identity, "compiled graph is missing its affine location node"))
+    location = plan.nodes.location
+    location isa NativePPLAffineNode || throw(NativePPLCapabilityError(
+        :graph_identity, "compiled location must be a typed affine node"))
+    location.axis === observation_axis || throw(NativePPLCapabilityError(
+        :graph_identity,
+        "compiled affine location must carry the plan observation axis"))
+    hasproperty(plan.parameters, :coefficients) || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled graph is missing its coefficient parameter"))
+    hasproperty(plan.factors, :coefficient_prior) || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled graph is missing its coefficient prior"))
+    coefficients = plan.parameters.coefficients
+    coefficients isa NativePPLParameter || throw(NativePPLCapabilityError(
+        :graph_identity,
+        "compiled coefficients must be a typed parameter block"))
+    coefficients.axis === plan.axes.coefficient || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled coefficient parameter must carry the coefficient axis"))
+    location.intercept_index == first(coefficients.unconstrained) &&
+        location.slope_index == last(coefficients.unconstrained) || throw(
+            NativePPLCapabilityError(
+                :graph_identity,
+                "compiled affine coordinates must match the coefficient parameter"))
+    _native_ppl_validate_coefficient_prior(
+        plan.factors.coefficient_prior, coefficients)
+
+    predictor_name = native_input_name(predictor)
+    expected_location_input = predictor_name
+    if hasproperty(plan.nodes, :transform)
+        transform = plan.nodes.transform
+        transform isa Union{NativePPLCenterNode,NativePPLZScaleNode} ||
+            throw(NativePPLCapabilityError(
+                :graph_identity,
+                "compiled predictor transform must be center or zscale"))
+        transform.axis === observation_axis || throw(NativePPLCapabilityError(
+            :graph_identity,
+            "compiled predictor transform must carry the plan observation axis"))
+        native_fitted_transform_input(transform) === predictor_name ||
+            throw(NativePPLCapabilityError(
+                :graph_identity,
+                "compiled predictor transform must consume the raw predictor"))
+        expected_location_input = native_node_name(transform)
+        expected_location_input !== native_node_name(location) ||
+            throw(NativePPLCapabilityError(
+                :graph_identity,
+                "compiled predictor transform and affine location must have distinct identities"))
+    end
+    native_affine_input(location) === expected_location_input ||
+        throw(NativePPLCapabilityError(
+            :graph_identity,
+            "compiled affine location must consume the compiled predictor path"))
+
+    if hasproperty(plan.nodes, :rate)
+        rate = plan.nodes.rate
+        rate isa NativePPLExpNode || throw(NativePPLCapabilityError(
+            :graph_identity, "compiled rate must be a typed exponential node"))
+        rate.axis === observation_axis || throw(NativePPLCapabilityError(
+            :graph_identity,
+            "compiled exponential rate must carry the plan observation axis"))
+        native_exp_input(rate) === native_node_name(location) ||
+            throw(NativePPLCapabilityError(
+                :graph_identity,
+                "compiled exponential rate must consume the affine location"))
+        native_node_name(rate) !== native_node_name(location) ||
+            throw(NativePPLCapabilityError(
+                :graph_identity,
+                "compiled exponential rate and affine location must have distinct identities"))
+    end
+    hasproperty(plan.factors, :likelihood) || throw(NativePPLCapabilityError(
+        :graph_identity, "compiled graph is missing its likelihood factor"))
+    _native_ppl_validate_likelihood_graph(
+        plan.factors.likelihood, plan, observation_axis)
+
+    expected_queries = (
+        :linear_predictor, :pointwise_loglikelihood, :posterior_predictive)
+    keys(plan.queries) == expected_queries || throw(NativePPLCapabilityError(
+        :graph_identity,
+        "compiled graph must expose the canonical typed query set"))
+    for (name, query) in pairs(plan.queries)
+        query isa NativePPLQuerySpec || throw(NativePPLCapabilityError(
+            :graph_identity,
+            "compiled query `$name` must be a typed query specification"))
+        native_query_name(query) === name || throw(NativePPLCapabilityError(
+            :graph_identity,
+            "compiled query key `$name` must match its typed identity"))
+        output = native_query_output(query)
+        output isa NativePPLOutputSignature || throw(
+            NativePPLCapabilityError(
+                :graph_identity,
+                "compiled query `$name` must have a vector output signature"))
+        native_output_axis(output) === observation_axis ||
+            throw(NativePPLCapabilityError(
+                :graph_identity,
+                "compiled query outputs must carry the plan observation axis"))
+    end
+    nothing
+end
+
+"""Compatibility wrapper over the sole public BRM-to-Plan compiler path."""
+_native_ppl_plan(brmi::BRMI) = NativePPL.compile(brmi)
 
 function _native_ppl_copy_input(::Type{T}, input, role::Symbol, name::Symbol) where {T<:AbstractFloat}
     output = Vector{T}(undef, length(input))
@@ -767,6 +909,33 @@ function _native_ppl_apply_predictor!(
     predictor
 end
 
+function _native_ppl_apply_predictor!(
+    node::NativePPLZScaleNode{Name,Input},
+    ::NativePPLInput{Input},
+    predictor::Vector{T},
+) where {Name,Input,T}
+    mean = T(node.mean)
+    scale = T(node.scale)
+    isfinite(mean) || throw(ArgumentError(
+        "native PPL fitted zscale mean for `$Input` cannot be represented as $T"))
+    isfinite(scale) && scale > zero(T) || throw(ArgumentError(
+        "native PPL fitted zscale sample SD for `$Input` cannot be represented " *
+        "as a finite positive $T"))
+    for i in eachindex(predictor)
+        raw = predictor[i]
+        standardized = (raw - mean) / scale
+        if !isfinite(standardized)
+            # The separated form can represent a wide-span rebound value when
+            # `raw - mean` overflows even though the standardized result does not.
+            standardized = raw / scale - mean / scale
+        end
+        isfinite(standardized) || throw(ArgumentError(
+            "native PPL standardized predictor `$Input` is non-finite at row $i"))
+        predictor[i] = standardized
+    end
+    predictor
+end
+
 function _native_ppl_apply_predictor!(plan::NativePPLPlan,
                                       predictor::Vector)
     hasproperty(plan.nodes, :transform) || return predictor
@@ -795,6 +964,7 @@ function _native_ppl_prepare_bindings(plan::NativePPLPlan, predictor,
                                       response, ::Type{T}) where {T<:AbstractFloat}
     isconcretetype(T) || throw(ArgumentError(
         "native PPL prepared element type must be concrete; got $T"))
+    _native_ppl_validate_predictor_graph(plan)
     predictor_name = native_input_name(plan.inputs.predictor)
     response_name = native_input_name(plan.inputs.response)
     prepared_predictor = _native_ppl_copy_input(
@@ -1344,6 +1514,35 @@ _native_ppl_rebind_likelihood(
 ) where {Response,Rate} =
     NativePPLPoissonFactor(Response, Rate, axis)
 
+function _native_ppl_rebind_transform(
+    old_transform::NativePPLCenterNode,
+    observation_axis,
+    predictor_name::Symbol,
+    predictor,
+    freeze_constants::Bool,
+)
+    mean = freeze_constants ? old_transform.mean :
+        _native_ppl_fit_center(predictor, predictor_name)
+    NativePPLCenterNode(
+        native_node_name(old_transform), predictor_name,
+        observation_axis, mean)
+end
+
+function _native_ppl_rebind_transform(
+    old_transform::NativePPLZScaleNode,
+    observation_axis,
+    predictor_name::Symbol,
+    predictor,
+    freeze_constants::Bool,
+)
+    fit = freeze_constants ?
+        (; mean=old_transform.mean, scale=old_transform.scale) :
+        _native_ppl_fit_zscale(predictor, predictor_name)
+    NativePPLZScaleNode(
+        native_node_name(old_transform), predictor_name,
+        observation_axis, fit.mean, fit.scale)
+end
+
 function _native_ppl_rebind_nodes(plan::NativePPLPlan, observation_axis,
                                   predictor_name::Symbol, predictor,
                                   freeze_constants::Bool)
@@ -1351,15 +1550,13 @@ function _native_ppl_rebind_nodes(plan::NativePPLPlan, observation_axis,
     location_name = native_node_name(old_location)
     transform = if hasproperty(plan.nodes, :transform)
         old_transform = plan.nodes.transform
-        native_center_input(old_transform) === predictor_name ||
+        native_fitted_transform_input(old_transform) === predictor_name ||
             throw(NativePPLCapabilityError(
                 :graph_identity,
-                "rebound centering node must consume the compiled raw predictor"))
-        mean = freeze_constants ? old_transform.mean :
-            _native_ppl_fit_center(predictor, predictor_name)
-        NativePPLCenterNode(
-            native_node_name(old_transform), predictor_name,
-            observation_axis, mean)
+                "rebound fitted transform must consume the compiled raw predictor"))
+        _native_ppl_rebind_transform(
+            old_transform, observation_axis, predictor_name,
+            predictor, freeze_constants)
     else
         nothing
     end
@@ -1399,6 +1596,7 @@ function _native_ppl_rebind(prepared::NativePPLPrepared, bindings;
                             T::Type{<:AbstractFloat}=eltype(prepared),
                             freeze_constants::Bool=true)
     plan = prepared.plan
+    _native_ppl_validate_predictor_graph(plan)
     predictor_name = native_input_name(plan.inputs.predictor)
     response_name = native_input_name(plan.inputs.response)
     predictor = _native_ppl_required_binding(bindings, predictor_name, :predictor)
@@ -1958,7 +2156,6 @@ const LinearPredictor = BRM.NativePPLLinearPredictor
 const PointwiseLogLikelihood = BRM.NativePPLPointwiseLogLikelihood
 const PosteriorPredictive = BRM.NativePPLPosteriorPredictive
 
-compile(brmi::BRM.BRMI) = BRM._native_ppl_plan(brmi)
 prepare(plan::Plan; kwargs...) = BRM._native_ppl_prepare(plan; kwargs...)
 workspace(prepared::Prepared, ::Type{T}=eltype(prepared)) where {T<:AbstractFloat} =
     BRM._native_ppl_workspace(prepared, T)
@@ -2074,6 +2271,8 @@ function execute_draws(rng::BRM.AbstractRNG, work::Workspace,
     outputs = allocate_output(signatures, prepared)
     execute_draws!(rng, outputs, work, prepared, positions, queries)
 end
+
+include("native_ppl_authoring.jl")
 
 export Plan, Prepared, Workspace, CapabilityError
 export OutputSignature, BatchOutputSignature
