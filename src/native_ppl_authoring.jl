@@ -9,6 +9,7 @@ existing executable `Plan`.
 
 abstract type AbstractInputDeclaration end
 abstract type AbstractPriorDeclaration end
+abstract type AbstractParameterDeclaration end
 abstract type AbstractNodeDeclaration end
 abstract type AbstractObservationDeclaration end
 
@@ -78,12 +79,38 @@ An unbound logical parameter declaration.
 `axis_keys` name the constrained scalar coordinates. Compilation assigns their
 contiguous locations in the flat unconstrained vector.
 """
-struct Parameter{S,Tr,K,P<:AbstractPriorDeclaration}
+struct Parameter{S,Tr,K,P<:AbstractPriorDeclaration} <:
+       AbstractParameterDeclaration
     support::S
     transform::Tr
     axis_keys::K
     prior::P
 end
+
+"""A group-indexed Normal latent block whose axis is fitted from one input."""
+struct GroupedNormalParameter{Group,L,S} <: AbstractParameterDeclaration
+    location::L
+    scale::S
+end
+
+_factor_declaration_value(value::Symbol) = SiteValue{value}()
+_factor_declaration_value(value::Real) = LiteralValue(value)
+
+function grouped_normal(group::Symbol, location::Union{Symbol,Real},
+                        scale::Union{Symbol,Real})
+    location isa Real && !isfinite(location) && throw(ArgumentError(
+        "native PPL grouped-Normal location must be finite"))
+    scale isa Real && !(isfinite(scale) && scale > zero(scale)) && throw(
+        ArgumentError(
+            "native PPL grouped-Normal scale must be finite and positive"))
+    GroupedNormalParameter{group,
+        typeof(_factor_declaration_value(location)),
+        typeof(_factor_declaration_value(scale))}(
+            _factor_declaration_value(location),
+            _factor_declaration_value(scale))
+end
+
+group_input(::GroupedNormalParameter{Group}) where {Group} = Group
 
 function parameter(support::S, axis_keys::Tuple;
                    transform::Tr, prior::P) where {
@@ -151,6 +178,10 @@ affine(input::Symbol, coefficients::Symbol; offsets::Tuple=(),
 struct ExpLink{Input} <: AbstractNodeDeclaration end
 exp_link(input::Symbol) = ExpLink{input}()
 
+"""Gather a group-indexed latent block onto the observation-row axis."""
+struct GroupGather{Values,Group} <: AbstractNodeDeclaration end
+group_gather(values::Symbol, group::Symbol) = GroupGather{values,group}()
+
 node_input(::Center{Input}) where {Input} = Input
 node_input(::ZScale{Input}) where {Input} = Input
 node_inputs(::Affine{Inputs}) where {Inputs} = Inputs
@@ -166,6 +197,8 @@ function node_input(node::Affine)
     only(inputs)
 end
 node_input(::ExpLink{Input}) where {Input} = Input
+group_values(::GroupGather{Values}) where {Values} = Values
+group_input(::GroupGather{Values,Group}) where {Values,Group} = Group
 affine_parameter(::Affine{Inputs,Coefficients}) where {Inputs,Coefficients} =
     Coefficients
 
@@ -325,12 +358,19 @@ struct ExpFactorNode{I} <: AbstractFactorNode
     input::I
 end
 
+struct GroupGatherFactorNode{V,G} <: AbstractFactorNode
+    values::V
+    group::G
+end
+
 factor_node_dependencies(node::Union{
         CenterFactorNode,ZScaleFactorNode,ExpFactorNode}) =
     _factor_value_dependencies((node.input,))
 factor_node_dependencies(node::AffineFactorNode) =
     _factor_value_dependencies((
         node.inputs..., node.coefficients, node.offsets...))
+factor_node_dependencies(node::GroupGatherFactorNode) =
+    _factor_value_dependencies((node.values, node.group))
 
 abstract type AbstractSiteShape end
 struct ScalarSiteShape <: AbstractSiteShape end
@@ -364,6 +404,13 @@ end
 struct SiteCoordinates{K,R}
     keys::K
     indices::R
+end
+
+
+"""One semantic coordinate of a group-indexed latent site."""
+struct GroupCoordinateKey{L}
+    site::Symbol
+    level::L
 end
 
 """Typed, ordered stochastic-site graph and its free-coordinate allocation."""
@@ -408,6 +455,33 @@ function _parameter_stochastic_site(
         activity, coordinate_keys)
 end
 
+
+function _group_levels(values, name::Symbol)
+    values isa AbstractVector || throw(ArgumentError(
+        "native PPL group input `$name` must be a vector"))
+    isempty(values) && throw(ArgumentError(
+        "native PPL group input `$name` cannot be empty"))
+    any(ismissing, values) && throw(ArgumentError(
+        "native PPL group input `$name` cannot contain missing values"))
+    Tuple(unique(values))
+end
+
+function _parameter_stochastic_site(
+    name::Symbol, declaration::GroupedNormalParameter,
+    conditions::NamedTuple, bindings::NamedTuple)
+    group_name = group_input(declaration)
+    hasproperty(bindings, group_name) || throw(ArgumentError(
+        "native PPL grouped site `$name` requires binding `$group_name`"))
+    levels = _group_levels(getproperty(bindings, group_name), group_name)
+    activity = hasproperty(conditions, name) ? ConditionedSite() : FreeSite()
+    coordinate_keys = activity isa FreeSite ?
+        Tuple(GroupCoordinateKey(name, level) for level in levels) : ()
+    StochasticSite(
+        RealSupport(), Identity(),
+        NormalSiteFactor(declaration.location, declaration.scale),
+        BlockSiteShape(), activity, coordinate_keys)
+end
+
 function _factor_value(name::Symbol, inputs::NamedTuple, nodes::NamedTuple)
     hasproperty(inputs, name) && return InputValue{name}()
     hasproperty(nodes, name) && return NodeValue{name}()
@@ -427,8 +501,12 @@ function _factor_node(declaration::AbstractNodeDeclaration,
             SiteValue{affine_parameter(declaration)}(),
             map(reference, affine_offsets(declaration)),
             affine_has_intercept(declaration))
-    else
+    elseif declaration isa ExpLink
         ExpFactorNode(reference(node_input(declaration)))
+    else
+        GroupGatherFactorNode(
+            SiteValue{group_values(declaration)}(),
+            InputValue{group_input(declaration)}())
     end
 end
 
@@ -532,7 +610,7 @@ schedule, then allocate semantic unconstrained coordinates for free sites.
 `FactorPlan` executes the supported subset while preserving this graph as the
 public mid-level semantic representation.
 """
-function factor_graph(declaration::Model; conditions=(;))
+function factor_graph(declaration::Model; conditions=(;), bindings=(;))
     _validate_model(declaration)
     canonical_conditions = _canonical_factor_conditions(
         declaration, conditions)
@@ -542,9 +620,12 @@ function factor_graph(declaration::Model; conditions=(;))
     all_sites = Set(declaration.site_order)
     for name in declaration.site_order
         site = if hasproperty(declaration.parameters, name)
-            _parameter_stochastic_site(
-                name, getproperty(declaration.parameters, name),
-                canonical_conditions)
+            parameter = getproperty(declaration.parameters, name)
+            parameter isa GroupedNormalParameter ?
+                _parameter_stochastic_site(
+                    name, parameter, canonical_conditions, bindings) :
+                _parameter_stochastic_site(
+                    name, parameter, canonical_conditions)
         else
             _observation_stochastic_site(
                 name, getproperty(declaration.observations, name),
@@ -630,8 +711,8 @@ Base.propertynames(::FactorPlan, private::Bool=false) =
 
 BRM.LogDensityProblems.dimension(plan::FactorPlan) = plan.graph.dimension
 
-function _uses_factor_executor(declaration::Model, conditions)
-    graph = factor_graph(declaration; conditions)
+function _uses_factor_executor(declaration::Model, conditions, bindings=(;))
+    graph = factor_graph(declaration; conditions, bindings)
     count(site -> site.shape isa BroadcastSiteShape,
           Tuple(graph.sites)) == 1 || return false
     stochastic_names = Set(declaration.site_order)
@@ -668,9 +749,11 @@ function _validate_factor_plan_site(
     broadcast_sites::Set{Symbol},
 )
     site.shape isa BlockSiteShape &&
-        !(site.factor isa StandardNormalSiteFactor) && throw(CapabilityError(
+        !(site.factor isa Union{
+            StandardNormalSiteFactor,NormalSiteFactor}) && throw(CapabilityError(
             :factor_shape,
-            "multi-latent block site `$name` must currently be standard normal"))
+            "multi-latent block site `$name` must currently be standard or " *
+            "scalar-parameterized Normal"))
     site.factor isa Union{
         StandardNormalSiteFactor,NormalSiteFactor,ExponentialSiteFactor,
     } || throw(CapabilityError(
@@ -764,7 +847,8 @@ function _bind_factor_plan(declaration::Model, bindings, conditions)
     end
     canonical_conditions = _canonical_factor_conditions(
         declaration, conditions)
-    graph = factor_graph(declaration; conditions=canonical_conditions)
+    graph = factor_graph(
+        declaration; conditions=canonical_conditions, bindings)
     for (name, node) in pairs(graph.nodes)
         node isa Union{ExpFactorNode,AffineFactorNode} || throw(CapabilityError(
             :factor_nodes,
@@ -2077,6 +2161,17 @@ function _qualified_parameter(
         transform=declaration.transform, prior=declaration.prior)
 end
 
+function _qualified_parameter(
+    namespace::Symbol, name::Symbol,
+    declaration::GroupedNormalParameter)
+    qualify(value::LiteralValue) = value.value
+    qualify(value::SiteValue) = qualified_name(
+        namespace, site_value_name(value))
+    grouped_normal(
+        qualified_name(namespace, group_input(declaration)),
+        qualify(declaration.location), qualify(declaration.scale))
+end
+
 _mapped_name(mapping, name::Symbol, owner::Symbol, kind::AbstractString) =
     get(mapping, name) do
         throw(CapabilityError(
@@ -2113,6 +2208,14 @@ end
 function _qualified_node(namespace::Symbol, declaration::ExpLink, mapping)
     exp_link(_mapped_name(
         mapping, node_input(declaration), namespace, "exp node"))
+end
+
+function _qualified_node(namespace::Symbol, declaration::GroupGather, mapping)
+    group_gather(
+        _mapped_name(
+            mapping, group_values(declaration), namespace, "group gather"),
+        _mapped_name(
+            mapping, group_input(declaration), namespace, "group gather"))
 end
 
 
@@ -2507,7 +2610,7 @@ function _validate_model_components(
     _check_named_declarations(
         inputs, "input", AbstractInputDeclaration)
     _check_named_declarations(
-        parameters, "parameter", Parameter)
+        parameters, "parameter", AbstractParameterDeclaration)
     _check_named_declarations(
         nodes, "node", AbstractNodeDeclaration)
     _check_named_declarations(
@@ -2528,7 +2631,9 @@ function _validate_model_components(
     for (name, declaration) in pairs(nodes)
         dependencies = declaration isa Affine ?
             (node_inputs(declaration)..., affine_offsets(declaration)...) :
-            (node_input(declaration),)
+            declaration isa GroupGather ?
+                (group_values(declaration), group_input(declaration)) :
+                (node_input(declaration),)
         for dependency in dependencies
             dependency in available || throw(ArgumentError(
                 "native PPL node `$name` references unavailable value " *
@@ -2540,6 +2645,14 @@ function _validate_model_components(
             throw(ArgumentError(
                 "native PPL affine node `$name` references unknown parameter " *
                 "`$(affine_parameter(declaration))`"))
+        if declaration isa GroupGather
+            group_values(declaration) in parameter_names || throw(ArgumentError(
+                "native PPL group gather node `$name` references unknown " *
+                "latent site `$(group_values(declaration))`"))
+            group_input(declaration) in input_names || throw(ArgumentError(
+                "native PPL group gather node `$name` references unknown " *
+                "group input `$(group_input(declaration))`"))
+        end
         push!(available, name)
     end
 
@@ -3036,7 +3149,7 @@ function _bind(declaration::Model, bindings, conditions)
     _validate_model(declaration)
     _validate_binding_names(declaration, bindings)
     _validate_condition_names(declaration, conditions)
-    _uses_factor_executor(declaration, conditions) &&
+    _uses_factor_executor(declaration, conditions, bindings) &&
         return _bind_factor_plan(declaration, bindings, conditions)
     length(declaration.observations) > 1 && length(conditions) == 1 &&
         return _bind_scalar_site_schedule(declaration, bindings, conditions)
@@ -4358,10 +4471,12 @@ macro model(definition)
 end
 
 export Model, ModelInstance, GraphRef, Component, Composition, Input, Parameter
+export AbstractParameterDeclaration, GroupedNormalParameter
 export SiteValue, InputValue, NodeValue, LiteralValue, StochasticSite
-export SiteCoordinates
+export SiteCoordinates, GroupCoordinateKey
 export FactorGraph
 export CenterFactorNode, ZScaleFactorNode, AffineFactorNode, ExpFactorNode
+export GroupGatherFactorNode
 export FactorPlan, FactorPrepared, FactorWorkspace, FactorLogDensityProblem
 export StandardNormalSiteFactor, NormalSiteFactor, ExponentialSiteFactor
 export BernoulliLogitSiteFactor, PoissonSiteFactor
@@ -4369,11 +4484,12 @@ export ScalarSiteShape, BlockSiteShape, BroadcastSiteShape
 export FreeSite, ConditionedSite, GeneratedSite
 export RealSupport, PositiveSupport, IdentityTransform, ExpTransform
 export StandardNormal, NormalPrior, ExponentialPrior
-export Center, ZScale, Affine, ExpLink
+export Center, ZScale, Affine, ExpLink, GroupGather
 export NormalObservation, BernoulliLogitObservation, PoissonObservation
 export BroadcastObservation
 export model, input, parameter, Identity, Exp, normal_prior, Exponential
 export center, zscale, standardize, affine, exp_link
+export grouped_normal, group_gather, group_values, group_input
 export normal, bernoulli_logit, poisson, broadcasted
 export instantiate, substitute, condition, component, output, compose, bind, lower
 export factor_graph, site_factor_dependencies, factor_node_dependencies

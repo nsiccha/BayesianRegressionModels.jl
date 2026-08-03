@@ -3503,6 +3503,43 @@ end
         row_exp_model, (; x=sampled_offset_data.x);
         conditions=(; y=sampled_offset_data.y))).capability == :factor_nodes
 
+    grouped_declaration = NP.model(
+        inputs=(; group=NP.input()),
+        parameters=(;
+            tau=NP.parameter(
+                NP.PositiveSupport(), (:tau,); transform=NP.Exp(),
+                prior=NP.Exponential(1)),
+            varying=NP.grouped_normal(:group, 0.0, :tau),
+            sigma=NP.parameter(
+                NP.PositiveSupport(), (:sigma,); transform=NP.Exp(),
+                prior=NP.Exponential(2))),
+        nodes=(; varying_by_row=NP.group_gather(:varying, :group)),
+        observations=(; y=NP.broadcasted(
+            NP.normal(:y, :varying_by_row, :sigma))),
+        site_order=(:tau, :varying, :sigma, :y))
+    grouped_bindings = (; group=[:a, :b, :a, :c])
+    grouped_graph = NP.factor_graph(
+        grouped_declaration; bindings=grouped_bindings,
+        conditions=(; y=sampled_offset_data.y))
+    @test grouped_graph.schedule ==
+          (:tau, :varying, :sigma, :varying_by_row, :y)
+    @test grouped_graph.dimension == 5
+    @test keys(grouped_graph.coordinates) == (:tau, :varying, :sigma)
+    @test grouped_graph.coordinates.varying.keys == (
+        NP.GroupCoordinateKey(:varying, :a),
+        NP.GroupCoordinateKey(:varying, :b),
+        NP.GroupCoordinateKey(:varying, :c))
+    @test grouped_graph.coordinates.varying.indices == 2:4
+    @test grouped_graph.sites.varying.shape isa NP.BlockSiteShape
+    @test grouped_graph.sites.varying.factor isa NP.NormalSiteFactor
+    @test NP.site_factor_dependencies(
+        grouped_graph.sites.varying.factor) == (:tau,)
+    @test grouped_graph.nodes.varying_by_row isa NP.GroupGatherFactorNode
+    @test NP.factor_node_dependencies(
+        grouped_graph.nodes.varying_by_row) == (:varying,)
+    @test_throws ArgumentError NP.factor_graph(
+        grouped_declaration; conditions=(; y=sampled_offset_data.y))
+
     sampled_offset_plan = NP.compile(sampled_offset_brmi)
     @test sampled_offset_plan isa NP.FactorPlan
     @test sampled_offset_plan.bindings.x == sampled_offset_data.x
