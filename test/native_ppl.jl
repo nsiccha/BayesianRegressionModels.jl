@@ -4816,6 +4816,84 @@ end
         :tau_p_subject, :L_p_subject, :b_p_subject,
         :tau_q_item, :b_q_item, :beta_mu, :sigma,
         :b_p_subject_by_subject_for_mu, :r_mu_q_item, :mu, :y)
+    crossed_group_prepared = NP.prepare(crossed_group_plan)
+    crossed_group_workspace = NP.workspace(
+        crossed_group_prepared, Float64, DI.AutoEnzyme())
+    crossed_group_position = [
+        log(0.6), log(0.4), 0.25,
+        0.2, -0.3, -0.1, 0.5, 0.4, -0.2,
+        log(0.3), 0.1, -0.2, 0.25,
+        0.5, log(0.45)]
+    crossed_subject_tau = exp.(crossed_group_position[1:2])
+    crossed_subject_raw = crossed_group_position[3]
+    crossed_subject_rho = tanh(crossed_subject_raw)
+    crossed_subject_sech = 1 / cosh(crossed_subject_raw)
+    crossed_subject_z = reshape(crossed_group_position[4:9], 2, 3)
+    crossed_subject_effects = [
+        (crossed_subject_tau[1] * crossed_subject_z[1, group],
+         crossed_subject_tau[2] *
+            (crossed_subject_rho * crossed_subject_z[1, group] +
+             crossed_subject_sech * crossed_subject_z[2, group]))
+        for group in 1:3]
+    crossed_item_tau = exp(crossed_group_position[10])
+    crossed_item_effects = crossed_group_position[11:13]
+    crossed_beta = crossed_group_position[14]
+    crossed_sigma = exp(crossed_group_position[15])
+    crossed_mu = [
+        crossed_beta * crossed_group_data.x[row] +
+        crossed_subject_effects[[1, 2, 1, 3, 2, 3][row]][1] +
+        crossed_subject_effects[[1, 2, 1, 3, 2, 3][row]][2] *
+            crossed_group_data.x[row] +
+        crossed_item_effects[[1, 1, 2, 2, 3, 3][row]]
+        for row in eachindex(crossed_group_data.x)]
+    crossed_lkj_constant = BRM.loggamma(2.5) - BRM.loggamma(2.0) -
+        0.5 * log(pi)
+    crossed_expected_density =
+        sum(logpdf.(Exponential(1), crossed_subject_tau)) +
+        sum(crossed_group_position[1:2]) +
+        crossed_lkj_constant +
+        2 * NP._factor_logsech2(crossed_subject_raw) +
+        sum(logpdf.(Normal(), crossed_subject_z)) +
+        logpdf(Exponential(1), crossed_item_tau) +
+        crossed_group_position[10] +
+        sum(logpdf.(Normal(0, crossed_item_tau), crossed_item_effects)) +
+        logpdf(Normal(), crossed_beta) +
+        logpdf(Exponential(2), crossed_sigma) +
+        crossed_group_position[15] +
+        sum(logpdf.(Normal.(crossed_mu, crossed_sigma),
+                    crossed_group_data.y))
+    crossed_density, crossed_gradient = NP.logdensity_and_gradient!(
+        crossed_group_workspace, crossed_group_prepared,
+        crossed_group_position)
+    @test crossed_density ≈ crossed_expected_density
+    @test NP.evaluate(
+        crossed_group_workspace, crossed_group_prepared,
+        crossed_group_position, NP.LinearPredictor()) ≈ crossed_mu
+    @test NP.evaluate(
+        crossed_group_workspace, crossed_group_prepared,
+        crossed_group_position, NP.PointwiseLogLikelihood()) ≈
+          logpdf.(Normal.(crossed_mu, crossed_sigma), crossed_group_data.y)
+    crossed_finite_difference = similar(crossed_gradient)
+    crossed_plus = copy(crossed_group_position)
+    crossed_minus = copy(crossed_group_position)
+    crossed_step = 1e-6
+    for coordinate in eachindex(crossed_finite_difference)
+        crossed_plus[coordinate] += crossed_step
+        crossed_minus[coordinate] -= crossed_step
+        crossed_finite_difference[coordinate] = (
+            NP.logdensity!(
+                crossed_group_workspace, crossed_group_prepared,
+                crossed_plus) -
+            NP.logdensity!(
+                crossed_group_workspace, crossed_group_prepared,
+                crossed_minus)) / (2 * crossed_step)
+        crossed_plus[coordinate] = crossed_group_position[coordinate]
+        crossed_minus[coordinate] = crossed_group_position[coordinate]
+    end
+    @test crossed_gradient ≈ crossed_finite_difference rtol=2e-5 atol=2e-6
+    @test factor_steady_state_allocations(
+        crossed_group_workspace, crossed_group_prepared,
+        crossed_group_position) == (; primal=0, gradient=0)
 
     varying_brm_data = (;
         x=sampled_offset_data.x,
