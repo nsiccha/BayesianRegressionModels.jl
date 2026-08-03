@@ -856,7 +856,12 @@ function _bind_factor_plan(declaration::Model, bindings, conditions)
             "$(typeof(node)); the current executable slice accepts scalar " *
             "exp and row-valued affine nodes"))
         if node isa ExpFactorNode
-            _factor_value_is_row(node.input, graph, bindings) && throw(
+            broadcast_input = node.input isa SiteValue &&
+                getproperty(
+                    graph.sites, site_value_name(node.input)).shape isa
+                        BroadcastSiteShape
+            _factor_value_is_row(node.input, graph, bindings) &&
+                !broadcast_input && throw(
                 CapabilityError(
                     :factor_nodes,
                     "exp node `$name` cannot consume a row-valued argument " *
@@ -885,6 +890,7 @@ function _bind_factor_plan(declaration::Model, bindings, conditions)
                 argument isa SiteValue || continue
                 dependency = getproperty(
                     graph.sites, site_value_name(argument))
+                dependency.shape isa BroadcastSiteShape && continue
                 dependency.shape isa ScalarSiteShape || throw(CapabilityError(
                     :factor_shape,
                     "affine node `$name` cannot consume non-scalar site " *
