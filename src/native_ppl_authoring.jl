@@ -1535,6 +1535,15 @@ function _syntax_standard_normal(statement)
     valid ? lhs : nothing
 end
 
+function _syntax_scalar_standard_normal_parameter(name::Symbol)
+    Expr(
+        :call, _syntax_ref(:parameter),
+        Expr(:parameters,
+             Expr(:kw, :transform, Expr(:call, _syntax_ref(:Identity))),
+             Expr(:kw, :prior, Expr(:call, _syntax_ref(:StandardNormal)))),
+        Expr(:call, _syntax_ref(:RealSupport)), QuoteNode((name,)))
+end
+
 function _syntax_affine_terms(expression)
     expression isa Expr && expression.head === :call &&
         first(expression.args) in (:+, :.+) || return nothing
@@ -1826,6 +1835,23 @@ function _model_function_syntax(definition)
         else
             throw(ArgumentError(
                 "native PPL @model unsupported statement `$statement`"))
+        end
+    end
+    returned_names = explicit_outputs === nothing ? Set{Symbol}() :
+        Set(last(explicit_outputs))
+    standalone_scalar_priors = setdiff(
+        intersect(Set(scalar_prior_names), returned_names),
+        consumed_scalar_priors)
+    if !isempty(standalone_scalar_priors)
+        isempty(consumed_scalar_priors) || throw(ArgumentError(
+            "native PPL @model cannot yet mix explicitly returned scalar " *
+            "priors with packed affine coefficients in one component"))
+        for name in scalar_prior_names
+            name in standalone_scalar_priors || continue
+            push!(parameter_names, name)
+            push!(parameter_values,
+                  _syntax_scalar_standard_normal_parameter(name))
+            push!(consumed_scalar_priors, name)
         end
     end
     unused_scalar_priors = setdiff(

@@ -312,6 +312,17 @@ NP.@model function concise_aliased_zscale(raw)
     return (standardized=scaled,)
 end
 
+NP.@model function scalar_normal_prior()
+    theta ~ Normal()
+    return theta
+end
+
+NP.@model function named_scalar_normal_priors()
+    intercept ~ Normal()
+    slope ~ Normal(0, 1)
+    return (; intercept, slope)
+end
+
 NP.@model function macro_bernoulli_center(
     x::AbstractVector{<:Real})
     intercept ~ Normal()
@@ -2679,6 +2690,21 @@ end
     @test passthrough.declaration.outputs == (; raw=:raw)
     @test NP.graph_kind(NP.output(
         NP.component(:passthrough, passthrough), :raw)) === :binding
+
+    scalar_prior = scalar_normal_prior()
+    @test isempty(scalar_prior.declaration.inputs)
+    @test keys(scalar_prior.declaration.parameters) == (:theta,)
+    @test scalar_prior.declaration.parameters.theta.axis_keys == (:theta,)
+    @test scalar_prior.declaration.parameters.theta.prior isa NP.StandardNormal
+    @test scalar_prior.declaration.outputs == (; theta=:theta)
+    prior_component = NP.component(:prior, scalar_prior)
+    @test NP.graph_kind(NP.output(prior_component, :theta)) === :parameter
+    @test capability_error(() -> NP.bind(scalar_prior)).capability == :value_ports
+
+    named_priors = named_scalar_normal_priors()
+    @test keys(named_priors.declaration.parameters) == (:intercept, :slope)
+    @test named_priors.declaration.outputs ==
+          (; intercept=:intercept, slope=:slope)
     @test_throws ArgumentError NP.model(
         inputs=(; raw=NP.input()),
         nodes=(; scaled=NP.zscale(:raw)),
