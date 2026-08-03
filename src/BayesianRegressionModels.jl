@@ -123,7 +123,8 @@ export _sb_term_group_block, _sb_emit_group_block_term!
 # modules (bruno-ext via web-macro) that build their own SBBRMI-style
 # models with `StanBlocks.SlicModel(body, data, mod)` where `mod` is the
 # caller's namespace can still resolve the BRM built-in submodel names.
-export popefs, _popefs_normal, cdirichlet, c0dirichlet, c01dirichlet,
+export popefs, _popefs_normal, _popefs_coefs, _popefs_normal_coefs,
+       cdirichlet, c0dirichlet, c01dirichlet,
        ranef_intercept, ranef_intercept_draws, ranef_correlated, ranef_correlated_by,
        ranef_correlated_draws, ranef_correlated_by_draws,
        ranef_intercept_centered, ranef_correlated_centered,

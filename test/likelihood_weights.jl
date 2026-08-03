@@ -39,7 +39,15 @@ end
     code = BRM.stan_code(sb)
     @test sb.data[:brm_weight_y] == Float64.(analytic_df.replicate_k)
     @test occursin("sqrt(brm_weight_y)", code)
-    @test occursin("normal_lpdfs", code)
+    # What this pins is the SCALE: analytic weights rescale sigma and hand the
+    # result to the ordinary Gaussian, so no `weighted_*` HOF is involved (the
+    # frequency/power testset below is the contrast). WHICH Gaussian primitive
+    # carries that scale is not part of the contract -- this model is also pure
+    # population, so `_sb_fuse_normal_id_glm!` (sbimpl.jl) lowers it to Stan's
+    # fused `normal_id_glm`, and the pointwise-loglik twin follows the density.
+    @test occursin("(1.5 ./ sqrt(brm_weight_y))", code)
+    @test occursin(r"y ~ normal(_id_glm)?\(", code)
+    @test occursin(r"normal(_id_glm)?_lpdfs", code)
     @test occursin("normal_rng", code)
     @test !occursin("weighted_normal", code)
 
