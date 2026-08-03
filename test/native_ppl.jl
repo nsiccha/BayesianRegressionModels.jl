@@ -6836,8 +6836,27 @@ end
     @test ranefcoefnames(transformed_group_brm, :p) == [
         (; predictor=:mu, coefficient=:Intercept),
         (; predictor=:mu, coefficient=:zscale_x)]
-    @test SBBRMI(transformed_group_brm; mod=@__MODULE__) isa SBBRMI
+    transformed_group_sb = SBBRMI(
+        transformed_group_brm; mod=@__MODULE__)
+    @test transformed_group_sb isa SBBRMI
+    @test transformed_group_sb.data[:zscale_x] ≈
+          (varying_brm_data.x .- 0.5) ./ sqrt(5 / 3)
     transformed_group_model = NP.lower(transformed_group_brm)
+    direct_transformed_group_model = NP.model(
+        inputs=(; x=NP.input(), group=NP.input()),
+        parameters=transformed_group_model.parameters,
+        nodes=(;
+            zscale_x_for_mu=NP.zscale(:x),
+            b_p_group_by_group_for_mu=NP.grouped_affine(
+                :b_p_group, :tau_p_group, :L_p_group, :group,
+                (nothing, :zscale_x_for_mu)),
+            mu=NP.affine(
+                :zscale_x_for_mu, :beta_mu;
+                offsets=(:b_p_group_by_group_for_mu,), intercept=false)),
+        observations=(; y=NP.broadcasted(
+            NP.normal(:y, :mu, :sigma))),
+        site_order=transformed_group_model.site_order)
+    @test direct_transformed_group_model == transformed_group_model
     natural_transformed_group = NP.condition(
         natural_transformed_correlated_varying_slope(
             varying_brm_data.x, varying_brm_data.group);
@@ -6869,6 +6888,38 @@ end
     @test transformed_group_node.predictors ==
           (nothing, NP.NodeValue{:zscale_x_for_mu}())
     @test transformed_group_plan.graph.dimension == 11
+    invalid_transformed_scalar = NP.model(
+        inputs=direct_transformed_group_model.inputs,
+        parameters=direct_transformed_group_model.parameters,
+        nodes=direct_transformed_group_model.nodes,
+        observations=(;
+            scalar=NP.normal(:scalar, :zscale_x_for_mu, :sigma),
+            y=direct_transformed_group_model.observations.y),
+        site_order=(
+            transformed_group_model.site_order[1:(end - 1)]...,
+            :scalar, :y))
+    @test capability_error(() -> NP.compile(
+        invalid_transformed_scalar,
+        (; x=varying_brm_data.x, group=varying_brm_data.group);
+        conditions=(; y=varying_brm_data.y))).capability == :factor_shape
+    nested_fitted_transform = NP.model(
+        inputs=direct_transformed_group_model.inputs,
+        parameters=direct_transformed_group_model.parameters,
+        nodes=(;
+            zscale_x_for_mu=NP.zscale(:x),
+            nested_zscale=NP.zscale(:zscale_x_for_mu),
+            b_p_group_by_group_for_mu=NP.grouped_affine(
+                :b_p_group, :tau_p_group, :L_p_group, :group,
+                (nothing, :nested_zscale)),
+            mu=NP.affine(
+                :nested_zscale, :beta_mu;
+                offsets=(:b_p_group_by_group_for_mu,), intercept=false)),
+        observations=direct_transformed_group_model.observations,
+        site_order=direct_transformed_group_model.site_order)
+    @test capability_error(() -> NP.compile(
+        nested_fitted_transform,
+        (; x=varying_brm_data.x, group=varying_brm_data.group);
+        conditions=(; y=varying_brm_data.y))).capability == :factor_nodes
     transformed_group_prepared = NP.prepare(transformed_group_plan)
     transformed_group_workspace = NP.workspace(
         transformed_group_prepared, Float64, DI.AutoEnzyme())
@@ -7051,6 +7102,68 @@ end
     @test transformed_new_output ≈ transformed_new_mu
     @test transformed_new_workspace.primal.generated_group_values ≈
           transformed_new_z
+
+    transformed_input_scale_model = NP.model(
+        inputs=(; x=NP.input(), log_scale=NP.input(), group=NP.input()),
+        parameters=(;
+            tau_p_group=transformed_group_model.parameters.tau_p_group,
+            L_p_group=transformed_group_model.parameters.L_p_group,
+            b_p_group=transformed_group_model.parameters.b_p_group,
+            beta_mu=transformed_group_model.parameters.beta_mu),
+        nodes=(;
+            zscale_x_for_mu=NP.zscale(:x),
+            zscale_log_scale_for_y=NP.zscale(:log_scale),
+            b_p_group_by_group_for_mu=NP.grouped_affine(
+                :b_p_group, :tau_p_group, :L_p_group, :group,
+                (nothing, :zscale_x_for_mu)),
+            mu=NP.affine(
+                :zscale_x_for_mu, :beta_mu;
+                offsets=(:b_p_group_by_group_for_mu,), intercept=false),
+            scale=NP.exp_link(:zscale_log_scale_for_y)),
+        observations=(; y=NP.broadcasted(NP.normal(:y, :mu, :scale))),
+        site_order=(
+            :tau_p_group, :L_p_group, :b_p_group, :beta_mu, :y))
+    transformed_input_scale_plan = NP.compile(
+        transformed_input_scale_model,
+        (; x=varying_brm_data.x, log_scale=[-1.0, 0.0, 1.0, 2.0],
+           group=varying_brm_data.group);
+        conditions=(; y=varying_brm_data.y))
+    transformed_input_scale_prepared = NP.prepare(
+        transformed_input_scale_plan)
+    transformed_input_scale_new = NP.rebind(
+        transformed_input_scale_prepared, (;);
+        bindings=(;
+            x=transformed_new_bindings.x,
+            log_scale=[2.0, 3.0, 4.0, 5.0],
+            group=transformed_new_bindings.group),
+        new_groups=:resample)
+    transformed_input_scale_workspace = NP.workspace(
+        transformed_input_scale_new)
+    transformed_input_scale_position = correlated_group_position[1:10]
+    transformed_input_scale_output = zeros(4)
+    transformed_input_scale_query = NP.NodeOutput(:scale)
+    NP.evaluate!(
+        transformed_input_scale_output,
+        transformed_input_scale_workspace, transformed_input_scale_new,
+        transformed_input_scale_position, transformed_input_scale_query)
+    @test transformed_input_scale_output ≈
+          exp.(([2.0, 3.0, 4.0, 5.0] .- 0.5) ./ sqrt(5 / 3))
+    @test @allocated(NP.evaluate!(
+        transformed_input_scale_output,
+        transformed_input_scale_workspace, transformed_input_scale_new,
+        transformed_input_scale_position, transformed_input_scale_query)) == 0
+
+    transformed_large = @brm (
+            x=[-1e300, 0.0, 1e300, 5e299],
+            group=varying_brm_data.group, y=varying_brm_data.y) begin
+        sigma ~ Exponential(2)
+        mu ~ 0 + zscale(x) + (1 + zscale(x) | p | group)
+        sd(:, p) ~ Exponential(1)
+        cor(:, p) ~ LKJCholesky(2, 2)
+        y ~ Normal(mu, sigma)
+    end
+    @test_throws ArgumentError NP.prepare(
+        NP.compile(transformed_large); T=Float32)
 
     sampled_offset_plan = NP.compile(sampled_offset_brmi)
     @test sampled_offset_plan isa NP.FactorPlan
@@ -8058,6 +8171,31 @@ end
     @test occursin(
         "cannot mix a parameter dot with scalar population coefficients",
         err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function unsupported_grouped_transform(
+                x, group)
+            tau[(:Intercept, :x)] ~ Exponential(1)
+            L[(:Intercept, :x)] ~ LKJCholesky(2, 2)
+            b[group, (:Intercept, :x)] ~ MvNormalCholesky(tau, L)
+            beta[(:x,)] ~ StandardNormal()
+            sigma ~ Exponential(2)
+            mu = dot(beta, (log(x),)) + dot(b[group], (1, log(x)))
+            @. y ~ Normal(mu, sigma)
+        end)))
+    @test occursin("support only center(input) or zscale(input)", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function expression_grouped_transform(
+                x, group)
+            tau[(:Intercept, :x)] ~ Exponential(1)
+            L[(:Intercept, :x)] ~ LKJCholesky(2, 2)
+            b[group, (:Intercept, :x)] ~ MvNormalCholesky(tau, L)
+            beta[(:x,)] ~ StandardNormal()
+            sigma ~ Exponential(2)
+            mu = dot(beta, (zscale(x + 1),)) +
+                dot(b[group], (1, zscale(x + 1)))
+            @. y ~ Normal(mu, sigma)
+        end)))
+    @test occursin("requires one named input", err.msg)
     err = argument_error(() -> macroexpand(
         @__MODULE__, :(NP.@model function grouped_nonargument(x)
             tau ~ Exponential(1)

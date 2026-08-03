@@ -2372,6 +2372,54 @@ end
         position, prepared, buffers)
 end
 
+@inline _factor_input_only(::LiteralValue, ::FactorGraph) = true
+@inline _factor_input_only(::InputValue, ::FactorGraph) = true
+@inline _factor_input_only(::SiteValue, ::FactorGraph) = false
+@inline function _factor_input_only(::NodeValue{Name},
+                                    graph::FactorGraph) where {Name}
+    _factor_input_only(getproperty(graph.nodes, Name), graph)
+end
+
+@inline _factor_input_only(node::Union{
+        CenterFactorNode,ZScaleFactorNode,ExpFactorNode,LogFactorNode},
+        graph::FactorGraph) = _factor_input_only(node.input, graph)
+@inline _factor_input_only(node::RowProductFactorNode, graph::FactorGraph) =
+    _factor_input_only(node.left, graph) &&
+    _factor_input_only(node.right, graph)
+@inline _factor_input_only(::AbstractFactorNode, ::FactorGraph) = false
+
+@inline _factor_execute_input_only_dependency!(
+    ::Union{LiteralValue,InputValue}, position, prepared, buffers) = nothing
+@inline function _factor_execute_input_only_dependency!(
+        ::NodeValue{Name}, position::AbstractVector{T},
+        prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Name,T}
+    node = getproperty(prepared.plan.graph.nodes, Name)
+    _factor_execute_input_only_node!(
+        Val(Name), node, position, prepared, buffers)
+end
+
+@inline function _factor_execute_input_only_node!(
+        name::Val, node::Union{
+            CenterFactorNode,ZScaleFactorNode,ExpFactorNode,LogFactorNode},
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {T}
+    _factor_execute_input_only_dependency!(
+        node.input, position, prepared, buffers)
+    _factor_node_logdensity!(name, node, position, prepared, buffers)
+end
+
+@inline function _factor_execute_input_only_node!(
+        name::Val, node::RowProductFactorNode,
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {T}
+    _factor_execute_input_only_dependency!(
+        node.left, position, prepared, buffers)
+    _factor_execute_input_only_dependency!(
+        node.right, position, prepared, buffers)
+    _factor_node_logdensity!(name, node, position, prepared, buffers)
+end
+
 @inline function _factor_node_query_kernel(
         position::AbstractVector{T}, prepared::FactorPrepared,
         buffers::FactorBuffers{T},
@@ -2380,11 +2428,10 @@ end
         return _factor_logdensity_kernel(position, prepared, buffers)
     end
     node = getproperty(prepared.plan.graph.nodes, Name)
-    input_only = node isa Union{
-        CenterFactorNode,ZScaleFactorNode,LogFactorNode} &&
-        node.input isa InputValue
-    input_only || _factor_require_fixed_coordinates(prepared.plan)
-    _factor_node_logdensity!(Val(Name), node, position, prepared, buffers)
+    _factor_input_only(node, prepared.plan.graph) ||
+        _factor_require_fixed_coordinates(prepared.plan)
+    _factor_execute_input_only_node!(
+        Val(Name), node, position, prepared, buffers)
 end
 
 function _factor_check_workspace_layout(workspace::FactorWorkspace,

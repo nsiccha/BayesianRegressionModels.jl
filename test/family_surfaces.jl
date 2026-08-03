@@ -682,7 +682,8 @@ end
 
     sb = SBBRMI(family_builder(df); mod=@__MODULE__)
     math_mu = sum(df.math) / length(df.math)
-    math_sd = sqrt(sum((x - math_mu)^2 for x in df.math) / length(df.math))
+    math_sd = sqrt(sum((x - math_mu)^2 for x in df.math) /
+                   (length(df.math) - 1))
     expected_interaction = df.prog .* ((df.math .- math_mu) ./ math_sd)
     @test sb.data[:int_prog_x_zscale_math] ≈ expected_interaction
     @test sb.data[:y_cat] == [2, 1, 3, 2, 3, 1]

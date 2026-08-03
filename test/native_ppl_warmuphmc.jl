@@ -1,7 +1,7 @@
 using Test
 using BayesianRegressionModels
 import DifferentiationInterface as DI
-using Distributions: Exponential, Normal
+using Distributions: Exponential, LKJCholesky, Normal
 using Enzyme
 using LogDensityProblems
 using Random: Xoshiro
@@ -89,6 +89,60 @@ require_git_ancestor(
     draws = result.posterior_position
     @test size(draws, 1) == dimension
     @test size(draws, 2) >= 100 # n_draws is a floor for WarmupHMC.
+    @test all(isfinite, draws)
+    @test all(>(1e-6), vec(std(draws; dims=2)))
+    @test result.n_divergent_samples == 0
+end
+
+@testset "transformed grouped factor DAG samples end-to-end with WarmupHMC" begin
+    groups = 6
+    replicates = 4
+    group = repeat(collect(1:groups), outer=replicates)
+    x = collect(range(-1.8, 2.2; length=groups * replicates))
+    fitted = BRM._native_ppl_fit_zscale(x, :x)
+    scaled = (x .- fitted.mean) ./ fitted.scale
+    group_intercept = collect(range(-0.3, 0.3; length=groups))
+    group_slope = [0.12 * sin(0.7 * index) for index in 1:groups]
+    y = [
+        0.45 * scaled[row] + group_intercept[group[row]] +
+            group_slope[group[row]] * scaled[row] +
+            0.12 * sin(0.53 * row)
+        for row in eachindex(x)
+    ]
+    brmi = @brm (; x, group, y) begin
+        sigma ~ Exponential(2)
+        mu ~ 0 + zscale(x) + (1 + zscale(x) | p | group)
+        sd(:, p) ~ Exponential(1)
+        cor(:, p) ~ LKJCholesky(2, 2)
+        y ~ Normal(mu, sigma)
+    end
+    prepared = NP.prepare(NP.compile(brmi))
+    problem = NP.LogDensityProblem(prepared, DI.AutoEnzyme())
+
+    dimension = LogDensityProblems.dimension(problem)
+    @test dimension == 17
+    @test prepared.plan.fitted_nodes.zscale_x_for_mu.mean == fitted.mean
+    @test prepared.plan.fitted_nodes.zscale_x_for_mu.scale == fitted.scale
+    density, gradient = LogDensityProblems.logdensity_and_gradient(
+        problem, zeros(dimension))
+    @test isfinite(density)
+    @test all(isfinite, gradient)
+
+    result = WarmupHMC.adaptive_warmup_mcmc(
+        Xoshiro(0x20260805),
+        problem;
+        n_draws=50,
+        n_evaluations=220,
+        stepsize_adaptation_limit=25,
+        max_tree_depth=8,
+        progress=nothing,
+        monitor_ess=false,
+        nonlinear_adapt=false,
+    )
+
+    draws = result.posterior_position
+    @test size(draws, 1) == dimension
+    @test size(draws, 2) >= 50
     @test all(isfinite, draws)
     @test all(>(1e-6), vec(std(draws; dims=2)))
     @test result.n_divergent_samples == 0

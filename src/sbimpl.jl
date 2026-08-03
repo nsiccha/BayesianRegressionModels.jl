@@ -7262,10 +7262,13 @@ _sb_materialize_vec(x) = error("sbimpl: cannot materialize $(typeof(x)) inside w
 # a vector. The fused `_sb_zscale`/`_sb_center` keep construct-time behaviour
 # byte-identical (fit∘apply == the old one-pass), and `reprocess` reuses the
 # apply half with a frozen constant for prediction-replay (decision nr3v8n A).
-_sb_fit_zscale(v::AbstractVector{<:Real}) = let mu = sum(v) / length(v)
-    sd = sqrt(sum((x - mu)^2 for x in v) / length(v))
-    sd > 0 || error("sbimpl: zscale: zero variance")
-    (mu, sd)
+_sb_fit_zscale(v::AbstractVector{<:Real}) = let
+    # One fitted-preprocessing contract serves NativePPL, VBRMI, and SBBRMI:
+    # corrected sample SD, including the stable extreme-value path. Keeping
+    # a population-SD copy here made an unchanged BRMI a different statistical
+    # model in Stan whenever a transformed coefficient carried a prior.
+    fit = _native_ppl_fit_zscale(v, :predictor)
+    (fit.mean, fit.scale)
 end
 _sb_apply_zscale(c::Tuple, v::AbstractVector{<:Real}) = (v .- c[1]) ./ c[2]
 _sb_zscale(v::AbstractVector{<:Real}) = _sb_apply_zscale(_sb_fit_zscale(v), v)
