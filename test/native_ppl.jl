@@ -384,6 +384,15 @@ NP.@model function ambiguous_multioutput_submodel()
     return values
 end
 
+NP.@model function hierarchical_latent_graph()
+    population ~ Normal()
+    population_scale ~ Exponential(1.0)
+    individual ~ Normal(population, population_scale)
+    observation_scale ~ Exponential(2.0)
+    @. y ~ Normal(individual, observation_scale)
+    return y
+end
+
 NP.@model function monolithic_scalar_normal()
     theta ~ Normal()
     sigma ~ Exponential(2.0)
@@ -3136,6 +3145,59 @@ end
     @test_throws ArgumentError assigned_stochastic_submodel()
     @test_throws ArgumentError sampled_deterministic_submodel(raw_x)
     @test_throws ArgumentError ambiguous_multioutput_submodel()
+
+    hierarchy = hierarchical_latent_graph()
+    @test hierarchy.declaration.site_order ==
+          (:population, :population_scale, :individual,
+           :observation_scale, :y)
+    hierarchy_graph = NP.factor_graph(NP.condition(
+        hierarchy; y=response))
+    @test keys(hierarchy_graph.sites) == hierarchy.declaration.site_order
+    @test hierarchy_graph.dimension == 4
+    @test keys(hierarchy_graph.coordinates) ==
+          (:population, :population_scale, :individual, :observation_scale)
+    @test hierarchy_graph.coordinates.population.indices == 1:1
+    @test hierarchy_graph.coordinates.population_scale.indices == 2:2
+    @test hierarchy_graph.coordinates.individual.indices == 3:3
+    @test hierarchy_graph.coordinates.observation_scale.indices == 4:4
+    @test hierarchy_graph.sites.population.activity isa NP.FreeSite
+    @test hierarchy_graph.sites.population.factor isa
+          NP.StandardNormalSiteFactor
+    @test hierarchy_graph.sites.population_scale.factor isa
+          NP.ExponentialSiteFactor
+    @test hierarchy_graph.sites.individual.factor isa NP.NormalSiteFactor
+    @test NP.site_factor_dependencies(
+        hierarchy_graph.sites.individual.factor) ==
+          (:population, :population_scale)
+    @test hierarchy_graph.sites.y.activity isa NP.ConditionedSite
+    @test hierarchy_graph.sites.y.shape isa NP.BroadcastSiteShape
+    @test NP.site_factor_dependencies(hierarchy_graph.sites.y.factor) ==
+          (:individual, :observation_scale)
+    @test NP.factor_graph(hierarchy).sites.y.activity isa NP.GeneratedSite
+    conditioned_population_graph = NP.factor_graph(
+        hierarchy.declaration;
+        conditions=(; population=0.1, y=response))
+    @test conditioned_population_graph.sites.population.activity isa
+          NP.ConditionedSite
+    @test conditioned_population_graph.dimension == 3
+    @test keys(conditioned_population_graph.coordinates) ==
+          (:population_scale, :individual, :observation_scale)
+
+    natural_factor_graph = NP.factor_graph(conditioned_natural_latent)
+    @test keys(natural_factor_graph.sites) ==
+          (NP.qualified_name(:z, :z), NP.qualified_name(:y, :sigma), :y)
+    @test natural_factor_graph.dimension == 2
+    @test keys(natural_factor_graph.coordinates) ==
+          (NP.qualified_name(:z, :z), NP.qualified_name(:y, :sigma))
+
+    unordered_graph_model = NP.model(
+        inputs=(; literal_mu=NP.input(), literal_tau=NP.input()),
+        observations=(;
+            upstream=NP.normal(:upstream, :literal_mu, :literal_tau),
+            downstream=NP.normal(:downstream, :upstream, :literal_tau)),
+        site_order=(:downstream, :upstream))
+    @test capability_error(
+        () -> NP.factor_graph(unordered_graph_model)).capability == :site_order
 
     latent_brm_data = (; y=response)
     latent_brm = @brm latent_brm_data begin

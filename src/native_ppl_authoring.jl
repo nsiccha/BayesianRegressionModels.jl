@@ -215,16 +215,247 @@ output aliases to graph identities. The model owns logical graph semantics
 only; data binding, fitted transform state, axes, coordinates, output
 signatures, and workspace layout belong to compilation/preparation.
 """
-struct Model{I,P,N,O,R}
+struct Model{I,P,N,O,R,S}
     inputs::I
     parameters::P
     nodes::N
     observations::O
     outputs::R
+    site_order::S
 end
 
+_default_site_order(parameters, observations) =
+    (keys(parameters)..., keys(observations)...)
+
 Model(inputs, parameters, nodes, observations) =
-    Model(inputs, parameters, nodes, observations, nothing)
+    Model(inputs, parameters, nodes, observations, nothing,
+          _default_site_order(parameters, observations))
+
+Model(inputs, parameters, nodes, observations, outputs) =
+    Model(inputs, parameters, nodes, observations, outputs,
+          _default_site_order(parameters, observations))
+
+"""Reference one graph value as a stochastic-factor argument."""
+struct SiteValue{Name} end
+site_value_name(::SiteValue{Name}) where {Name} = Name
+
+"""Literal stochastic-factor argument retained in the typed graph."""
+struct LiteralValue{T}
+    value::T
+end
+
+abstract type AbstractSiteFactor end
+struct StandardNormalSiteFactor <: AbstractSiteFactor end
+struct NormalSiteFactor{L,S} <: AbstractSiteFactor
+    location::L
+    scale::S
+end
+struct ExponentialSiteFactor{S} <: AbstractSiteFactor
+    scale::S
+end
+struct BernoulliLogitSiteFactor{L} <: AbstractSiteFactor
+    logit::L
+end
+struct PoissonSiteFactor{R} <: AbstractSiteFactor
+    rate::R
+end
+
+site_factor_dependencies(::StandardNormalSiteFactor) = ()
+site_factor_dependencies(factor::NormalSiteFactor) =
+    _site_value_dependencies((factor.location, factor.scale))
+site_factor_dependencies(factor::ExponentialSiteFactor) =
+    _site_value_dependencies((factor.scale,))
+site_factor_dependencies(factor::BernoulliLogitSiteFactor) =
+    _site_value_dependencies((factor.logit,))
+site_factor_dependencies(factor::PoissonSiteFactor) =
+    _site_value_dependencies((factor.rate,))
+
+function _site_value_dependencies(values)
+    Tuple(site_value_name(value) for value in values if value isa SiteValue)
+end
+
+abstract type AbstractSiteShape end
+struct ScalarSiteShape <: AbstractSiteShape end
+struct BlockSiteShape <: AbstractSiteShape end
+struct BroadcastSiteShape <: AbstractSiteShape end
+
+abstract type AbstractSiteActivity end
+struct FreeSite <: AbstractSiteActivity end
+struct ConditionedSite <: AbstractSiteActivity end
+struct GeneratedSite <: AbstractSiteActivity end
+
+"""
+One canonical stochastic site after declaration normalization.
+
+The site owns its support/transform, typed factor arguments, scalar/block/
+broadcast shape, activity after conditioning, and semantic coordinate keys.
+This is the shared representation that replaces the transitional semantic
+split between `Model.parameters` and `Model.observations`.
+"""
+struct StochasticSite{S,T,F<:AbstractSiteFactor,H<:AbstractSiteShape,
+                      A<:AbstractSiteActivity,K}
+    support::S
+    transform::T
+    factor::F
+    shape::H
+    activity::A
+    coordinate_keys::K
+end
+
+"""Contiguous unconstrained coordinates assigned to one free site."""
+struct SiteCoordinates{K,R}
+    keys::K
+    indices::R
+end
+
+"""Typed, ordered stochastic-site graph and its free-coordinate allocation."""
+struct FactorGraph{S,C}
+    sites::S
+    coordinates::C
+    dimension::Int
+end
+
+function _parameter_stochastic_site(
+    name::Symbol, declaration::Parameter, conditions::NamedTuple)
+    prior = declaration.prior
+    factor = if prior isa StandardNormal
+        StandardNormalSiteFactor()
+    elseif prior isa NormalPrior
+        NormalSiteFactor(
+            LiteralValue(prior.location), LiteralValue(prior.scale))
+    else
+        ExponentialSiteFactor(LiteralValue(prior.scale))
+    end
+    shape = length(declaration.axis_keys) == 1 ?
+        ScalarSiteShape() : BlockSiteShape()
+    activity = hasproperty(conditions, name) ? ConditionedSite() : FreeSite()
+    coordinate_keys = activity isa FreeSite ? declaration.axis_keys : ()
+    StochasticSite(
+        declaration.support, declaration.transform, factor, shape,
+        activity, coordinate_keys)
+end
+
+function _observation_stochastic_site(
+    name::Symbol, declaration::AbstractObservationDeclaration,
+    conditions::NamedTuple)
+    scalar = scalar_observation(declaration)
+    dependencies = observation_dependencies(scalar)
+    factor = if scalar isa NormalObservation
+        NormalSiteFactor(
+            SiteValue{dependencies[1]}(), SiteValue{dependencies[2]}())
+    elseif scalar isa BernoulliLogitObservation
+        BernoulliLogitSiteFactor(SiteValue{only(dependencies)}())
+    else
+        PoissonSiteFactor(SiteValue{only(dependencies)}())
+    end
+    shape = is_broadcast_observation(declaration) ?
+        BroadcastSiteShape() : ScalarSiteShape()
+    activity = if hasproperty(conditions, name)
+        ConditionedSite()
+    elseif shape isa BroadcastSiteShape
+        GeneratedSite()
+    elseif factor isa NormalSiteFactor
+        FreeSite()
+    else
+        throw(CapabilityError(
+            :discrete_latent,
+            "unconditioned scalar site `$name` has unsupported discrete " *
+            "factor $(typeof(factor))"))
+    end
+    coordinate_keys = activity isa FreeSite ? (name,) : ()
+    support = factor isa NormalSiteFactor ? RealSupport() : nothing
+    transform = factor isa NormalSiteFactor ? Identity() : nothing
+    StochasticSite(
+        support, transform, factor, shape, activity, coordinate_keys)
+end
+
+function _site_coordinates(sites::NamedTuple)
+    names = Symbol[]
+    allocations = Any[]
+    next_index = 1
+    for (name, site) in pairs(sites)
+        site.activity isa FreeSite || continue
+        count = length(site.coordinate_keys)
+        indices = next_index:(next_index + count - 1)
+        push!(names, name)
+        push!(allocations, SiteCoordinates(site.coordinate_keys, indices))
+        next_index += count
+    end
+    NamedTuple{Tuple(names)}(Tuple(allocations)), next_index - 1
+end
+
+"""
+    factor_graph(model; conditions=(;)) -> FactorGraph
+
+Normalize parameters and stochastic observations into one ordered typed site
+graph, then allocate semantic unconstrained coordinates for free sites. This
+is declaration/activity semantics only; the existing walking-skeleton `Plan`
+remains the executor until the next capability slice consumes `FactorGraph`.
+"""
+function factor_graph(declaration::Model; conditions=(;))
+    _validate_model(declaration)
+    canonical_conditions = _canonical_factor_conditions(
+        declaration, conditions)
+    names = Symbol[]
+    sites = Any[]
+    available_sites = Set{Symbol}()
+    all_sites = Set(declaration.site_order)
+    for name in declaration.site_order
+        site = if hasproperty(declaration.parameters, name)
+            _parameter_stochastic_site(
+                name, getproperty(declaration.parameters, name),
+                canonical_conditions)
+        else
+            _observation_stochastic_site(
+                name, getproperty(declaration.observations, name),
+                canonical_conditions)
+        end
+        unavailable = setdiff(
+            Set(site_factor_dependencies(site.factor)), available_sites)
+        unresolved_sites = intersect(unavailable, all_sites)
+        isempty(unresolved_sites) || throw(CapabilityError(
+            :site_order,
+            "stochastic site `$name` depends on unscheduled sites " *
+            "$(sort!(collect(unresolved_sites)))"))
+        push!(names, name)
+        push!(sites, site)
+        push!(available_sites, name)
+    end
+    named_sites = NamedTuple{Tuple(names)}(Tuple(sites))
+    coordinates, dimension = _site_coordinates(named_sites)
+    FactorGraph(named_sites, coordinates, dimension)
+end
+
+function _canonical_factor_conditions(declaration::Model, conditions)
+    conditions isa NamedTuple || throw(ArgumentError(
+        "native PPL factor-graph conditions must be a NamedTuple; got " *
+        "$(typeof(conditions))"))
+    stochastic_names = Set((keys(declaration.parameters)...,
+                            keys(declaration.observations)...))
+    names = Symbol[]
+    values = Any[]
+    for (name, value) in pairs(conditions)
+        canonical = if name in stochastic_names
+            name
+        elseif declaration.outputs !== nothing &&
+               hasproperty(declaration.outputs, name)
+            getproperty(declaration.outputs, name)
+        else
+            throw(ArgumentError(
+                "native PPL factor-graph condition `$name` does not name a " *
+                "stochastic site"))
+        end
+        canonical in stochastic_names || throw(ArgumentError(
+            "native PPL factor-graph condition `$name` resolves to " *
+            "non-stochastic output `$canonical`"))
+        canonical in names && throw(ArgumentError(
+            "native PPL factor-graph conditions name site `$canonical` more " *
+            "than once"))
+        push!(names, canonical)
+        push!(values, value)
+    end
+    NamedTuple{Tuple(names)}(Tuple(values))
+end
 
 """
 A composed call of a staged `@model` function.
@@ -239,6 +470,9 @@ struct ModelInstance{M<:Model,B,C}
     bindings::B
     conditions::C
 end
+
+factor_graph(instance::ModelInstance) = factor_graph(
+    instance.declaration; conditions=instance.conditions)
 
 """
 A stable reference to one named value exported by a namespaced component.
@@ -558,6 +792,7 @@ function _lower_composition(composition::Composition, public_outputs=nothing)
     binding_values = Any[]
     condition_names = Symbol[]
     condition_values = Any[]
+    site_order_names = Symbol[]
     resolved = Dict{Tuple{Symbol,Symbol},Symbol}()
     activity = Dict{Tuple{Symbol,Symbol},Bool}()
 
@@ -643,6 +878,9 @@ function _lower_composition(composition::Composition, public_outputs=nothing)
             end
         end
 
+        append!(site_order_names, (mapping[name]
+                                   for name in declaration.site_order))
+
         if declaration.outputs !== nothing
             for (alias, local_name) in pairs(declaration.outputs)
                 resolved[(namespace, alias)] = resolved[(namespace, local_name)]
@@ -681,6 +919,10 @@ function _lower_composition(composition::Composition, public_outputs=nothing)
                 condition_names[condition_index] === resolved_name &&
                     (condition_names[condition_index] = alias)
             end
+            for site_index in eachindex(site_order_names)
+                site_order_names[site_index] === resolved_name &&
+                    (site_order_names[site_index] = alias)
+            end
             delete!(occupied, resolved_name)
             push!(occupied, alias)
             flattened_values[index] = alias
@@ -694,7 +936,8 @@ function _lower_composition(composition::Composition, public_outputs=nothing)
         nodes=NamedTuple{Tuple(node_names)}(Tuple(node_values)),
         observations=NamedTuple{Tuple(observation_names)}(
             Tuple(observation_values)),
-        outputs=flattened_outputs)
+        outputs=flattened_outputs,
+        site_order=Tuple(site_order_names))
     ModelInstance(
         declaration,
         NamedTuple{Tuple(binding_names)}(Tuple(binding_values)),
@@ -825,7 +1068,7 @@ function _check_named_declarations(values, kind::AbstractString, type)
 end
 
 function _validate_model_components(
-    inputs, parameters, nodes, observations, outputs)
+    inputs, parameters, nodes, observations, outputs, site_order)
     _check_named_declarations(
         inputs, "input", AbstractInputDeclaration)
     _check_named_declarations(
@@ -907,20 +1150,35 @@ function _validate_model_components(
         end
     end
 
+    site_order isa Tuple || throw(ArgumentError(
+        "native PPL stochastic-site order must be a Tuple; got " *
+        "$(typeof(site_order))"))
+    all(name -> name isa Symbol, site_order) || throw(ArgumentError(
+        "native PPL stochastic-site order must contain Symbols"))
+    length(unique(site_order)) == length(site_order) || throw(ArgumentError(
+        "native PPL stochastic-site order must contain unique identities"))
+    expected_sites = union(parameter_names, Set(keys(observations)))
+    Set(site_order) == expected_sites || throw(ArgumentError(
+        "native PPL stochastic-site order must name each parameter/site " *
+        "exactly once; expected $(sort!(collect(expected_sites))), got " *
+        "$(collect(site_order))"))
+
     nothing
 end
 
 function model(;
-    inputs, parameters=(;), nodes=(;), observations, outputs=nothing)
+    inputs, parameters=(;), nodes=(;), observations, outputs=nothing,
+    site_order=_default_site_order(parameters, observations))
     _validate_model_components(
-        inputs, parameters, nodes, observations, outputs)
-    Model(inputs, parameters, nodes, observations, outputs)
+        inputs, parameters, nodes, observations, outputs, site_order)
+    Model(inputs, parameters, nodes, observations, outputs, site_order)
 end
 
 function _validate_model(declaration::Model)
     _validate_model_components(
         declaration.inputs, declaration.parameters,
-        declaration.nodes, declaration.observations, declaration.outputs)
+        declaration.nodes, declaration.observations, declaration.outputs,
+        declaration.site_order)
     declaration
 end
 
@@ -1000,6 +1258,7 @@ function Base.show(io::IO, declaration::Model)
           ", observations=", keys(declaration.observations))
     declaration.outputs === nothing ||
         print(io, ", outputs=", keys(declaration.outputs))
+    print(io, ", site_order=", declaration.site_order)
     print(io, ")")
 end
 
@@ -2250,6 +2509,8 @@ function _model_function_syntax(definition)
     observation_names = Symbol[]
     observation_values = Any[]
     factor_dependency_names = Set{Symbol}()
+    source_site_names = Symbol[]
+    packed_site_names = Dict{Symbol,Symbol}()
     statements = body isa Expr && body.head === :block ? body.args : Any[body]
     statements = Any[statement for statement in statements
                      if !(statement isa LineNumberNode)]
@@ -2284,6 +2545,12 @@ function _model_function_syntax(definition)
                     "cannot also be a function argument; condition it after " *
                     "constructing the model"))
             normalized = Expr(:call, :~, sampling.lhs, sampling.rhs)
+            source_site_name = sampling.lhs isa Symbol ? sampling.lhs :
+                (sampling.lhs isa Expr && sampling.lhs.head === :ref &&
+                 first(sampling.lhs.args) isa Symbol ?
+                 first(sampling.lhs.args) : nothing)
+            source_site_name === nothing || push!(
+                source_site_names, source_site_name)
             scalar_prior = sampling.broadcasted ? nothing :
                 _syntax_standard_normal(normalized)
             prior_name = _syntax_name(
@@ -2336,6 +2603,12 @@ function _model_function_syntax(definition)
                 end
                 push!(node_names, affine_declaration.location)
                 push!(node_values, affine_declaration.affine_value)
+                packed_site_names[affine_declaration.intercept] =
+                    affine_declaration.coefficient_name
+                for slope in affine_declaration.slopes
+                    packed_site_names[slope] =
+                        affine_declaration.coefficient_name
+                end
                 push!(consumed_scalar_priors, affine_declaration.intercept)
                 union!(consumed_scalar_priors, affine_declaration.slopes)
             end
@@ -2373,6 +2646,17 @@ function _model_function_syntax(definition)
             "native PPL @model generated duplicate parameter identities"))
     length(unique(node_names)) == length(node_names) || throw(ArgumentError(
         "native PPL @model generated duplicate node identities"))
+    site_names = Set((parameter_names..., observation_names...))
+    source_site_order = Symbol[]
+    for source_name in source_site_names
+        canonical_name = get(packed_site_names, source_name, source_name)
+        canonical_name in site_names || continue
+        canonical_name in source_site_order || push!(
+            source_site_order, canonical_name)
+    end
+    for name in (parameter_names..., observation_names...)
+        name in source_site_order || push!(source_site_order, name)
+    end
     explicit_outputs === nothing && isempty(observation_names) &&
         throw(ArgumentError(
             "native PPL @model without an explicit return requires at least " *
@@ -2390,6 +2674,7 @@ function _model_function_syntax(definition)
              _syntax_namedtuple(node_names, node_values)),
         Expr(:kw, :observations,
              _syntax_namedtuple(observation_names, observation_values)),
+        Expr(:kw, :site_order, QuoteNode(Tuple(source_site_order))),
     ]
     if explicit_outputs !== nothing
         output_aliases, output_names = explicit_outputs
@@ -2431,6 +2716,11 @@ macro model(definition)
 end
 
 export Model, ModelInstance, GraphRef, Component, Composition, Input, Parameter
+export SiteValue, LiteralValue, StochasticSite, SiteCoordinates, FactorGraph
+export StandardNormalSiteFactor, NormalSiteFactor, ExponentialSiteFactor
+export BernoulliLogitSiteFactor, PoissonSiteFactor
+export ScalarSiteShape, BlockSiteShape, BroadcastSiteShape
+export FreeSite, ConditionedSite, GeneratedSite
 export RealSupport, PositiveSupport, IdentityTransform, ExpTransform
 export StandardNormal, NormalPrior, ExponentialPrior
 export Center, ZScale, Affine, ExpLink
@@ -2440,5 +2730,6 @@ export model, input, parameter, Identity, Exp, normal_prior, Exponential
 export center, zscale, standardize, affine, exp_link
 export normal, bernoulli_logit, poisson, broadcasted
 export instantiate, substitute, condition, component, output, compose, bind, lower
+export factor_graph, site_factor_dependencies, site_value_name
 export graph_namespace, graph_name, graph_kind, component_namespace, qualified_name
 export @model
