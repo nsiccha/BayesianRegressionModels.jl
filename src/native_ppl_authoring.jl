@@ -709,7 +709,7 @@ function _canonical_factor_conditions(declaration::Model, conditions)
 end
 
 """Executable plan for an ordered continuous stochastic-site DAG."""
-struct FactorPlan{Output,M,G,B,C,I,N,J,K,A}
+struct FactorPlan{Output,M,G,B,C,I,N,J,K,L,A}
     declaration::M
     graph::G
     bindings::B
@@ -718,18 +718,20 @@ struct FactorPlan{Output,M,G,B,C,I,N,J,K,A}
     node_indices::N
     group_indices::J
     generated_group_levels::K
+    generated_group_indices::L
     observation_axis::A
 end
 
 FactorPlan(declaration::M, graph::G, bindings::B, conditions::C,
            site_indices::I, node_indices::N, group_indices::J,
            generated_group_levels::K,
+           generated_group_indices::L,
            observation_axis::A,
-           output_site::Symbol) where {M,G,B,C,I,N,J,K,A} =
-    FactorPlan{output_site,M,G,B,C,I,N,J,K,A}(
+           output_site::Symbol) where {M,G,B,C,I,N,J,K,L,A} =
+    FactorPlan{output_site,M,G,B,C,I,N,J,K,L,A}(
         declaration, graph, bindings, conditions, site_indices,
         node_indices, group_indices, generated_group_levels,
-        observation_axis)
+        generated_group_indices, observation_axis)
 
 factor_output_site(::FactorPlan{Output}) where {Output} = Output
 
@@ -1022,6 +1024,14 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
     end
     generated_group_levels = NamedTuple{grouped_site_names}(
         generated_level_values)
+    next_generated_index = 1
+    generated_index_values = map(generated_level_values) do levels
+        indices = next_generated_index:(next_generated_index + length(levels) - 1)
+        next_generated_index += length(levels)
+        indices
+    end
+    generated_group_indices = NamedTuple{grouped_site_names}(
+        generated_index_values)
     gather_indices = map(gather_names) do name
         node = getproperty(graph.nodes, name)
         site_name = site_value_name(node.values)
@@ -1051,6 +1061,7 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
     FactorPlan(
         declaration, graph, bindings, canonical_conditions, site_indices,
         node_indices, group_indices, generated_group_levels,
+        generated_group_indices,
         BRM.NativePPLAxis(:observation, observation_keys), output_site)
 end
 
@@ -1076,6 +1087,7 @@ BRM.LogDensityProblems.dimension(prepared::FactorPrepared) =
 """Reusable primal storage for an ordered factor-graph evaluation."""
 mutable struct FactorBuffers{T,V<:Vector{T},M<:Matrix{T}}
     values::V
+    generated_group_values::V
     node_values::V
     node_rows::M
     pointwise_loglikelihood::V
@@ -1094,14 +1106,19 @@ function FactorWorkspace(prepared::FactorPrepared,
                          ::Type{T}=eltype(prepared)) where {T<:AbstractFloat}
     isconcretetype(T) || throw(ArgumentError(
         "native PPL factor workspace element type must be concrete; got $T"))
-    values = zeros(T, length(prepared.plan.graph.sites))
+    site_values = zeros(T, length(prepared.plan.graph.sites))
+    generated_group_values = zeros(
+        T, sum(length, values(prepared.plan.generated_group_levels); init=0))
     node_values = zeros(T, length(prepared.plan.graph.nodes))
     node_rows = zeros(T, length(prepared.plan.graph.nodes),
                       length(prepared.plan.observation_axis))
     pointwise = zeros(T, length(prepared.plan.observation_axis))
     FactorWorkspace{T,typeof(FactorBuffers(
-        values, node_values, node_rows, pointwise)),Vector{T},Nothing}(
-        FactorBuffers(values, node_values, node_rows, pointwise),
+        site_values, generated_group_values, node_values, node_rows, pointwise)),
+        Vector{T},Nothing}(
+        FactorBuffers(
+            site_values, generated_group_values, node_values, node_rows,
+            pointwise),
         zeros(T, BRM.LogDensityProblems.dimension(prepared)), nothing)
 end
 
@@ -1414,7 +1431,11 @@ end
     group_indices = getproperty(prepared.plan.group_indices, Name)
     for row in prepared.plan.observation_axis.keys
         group_index = group_indices[row]
-        value = if site.activity isa FreeSite
+        value = if group_index < 0
+            generated_indices = getproperty(
+                prepared.plan.generated_group_indices, site_name)
+            buffers.generated_group_values[generated_indices[-group_index]]
+        elseif site.activity isa FreeSite
             coordinates = getproperty(
                 prepared.plan.graph.coordinates, site_name).indices
             transformed, _ = _factor_transform(
@@ -1426,6 +1447,18 @@ end
         buffers.node_rows[node_index, row] = value
     end
     zero(T)
+end
+
+@inline _has_generated_groups(plan::FactorPlan) =
+    any(!isempty, values(plan.generated_group_levels))
+
+@inline function _factor_require_fixed_coordinates(plan::FactorPlan)
+    _has_generated_groups(plan) && throw(CapabilityError(
+        :new_group_activity,
+        "native PPL density and deterministic queries require fixed group " *
+        "coordinates; this replay contains generated groups and must use " *
+        "an RNG posterior-predictive query"))
+    nothing
 end
 
 @generated function _factor_execute_schedule!(::Val{Names},
@@ -1455,6 +1488,7 @@ end
 @inline function _factor_logdensity_kernel(position::AbstractVector{T},
                                            prepared::FactorPrepared,
                                            buffers::FactorBuffers{T}) where {T}
+    _factor_require_fixed_coordinates(prepared.plan)
     graph = prepared.plan.graph
     _factor_execute_schedule!(
         Val(graph.schedule), Val(Tuple(keys(graph.sites))),
@@ -1474,6 +1508,10 @@ function _factor_check_workspace_layout(workspace::FactorWorkspace,
     length(workspace.primal.values) == length(prepared.plan.graph.sites) ||
         throw(DimensionMismatch(
             "native PPL factor workspace has the wrong site-value layout"))
+    length(workspace.primal.generated_group_values) ==
+        sum(length, values(prepared.plan.generated_group_levels); init=0) ||
+        throw(DimensionMismatch(
+            "native PPL factor workspace has the wrong generated-group layout"))
     length(workspace.primal.node_values) ==
         length(prepared.plan.graph.nodes) || throw(DimensionMismatch(
             "native PPL factor workspace has the wrong node-value layout"))
@@ -1499,6 +1537,7 @@ function _factor_check_execution(workspace::FactorWorkspace,
         "match workspace eltype $(eltype(workspace))"))
     _factor_check_workspace_layout(workspace, prepared)
     for buffer in (workspace.gradient, workspace.primal.values,
+                   workspace.primal.generated_group_values,
                    workspace.primal.node_values, workspace.primal.node_rows,
                    workspace.primal.pointwise_loglikelihood)
         Base.mightalias(position, buffer) && throw(ArgumentError(
@@ -1565,6 +1604,7 @@ function rebind(prepared::FactorPrepared, conditions;
             rebound.conditions,
             rebound.site_indices, rebound.node_indices,
             rebound.group_indices, rebound.generated_group_levels,
+            rebound.generated_group_indices,
             prepared.plan.observation_axis,
             rebound.output_site)
     end
@@ -1614,6 +1654,7 @@ function _factor_check_query_output(output::AbstractVector,
             "native PPL factor output eltype $(eltype(output)) does not " *
             "match prepared eltype $(eltype(prepared))"))
     for buffer in (work.gradient, work.primal.values,
+                   work.primal.generated_group_values,
                    work.primal.node_values, work.primal.node_rows,
                    work.primal.pointwise_loglikelihood)
         Base.mightalias(output, buffer) && throw(ArgumentError(
@@ -1675,10 +1716,15 @@ end
 function simulate!(rng::BRM.AbstractRNG, output::AbstractVector,
                    work::FactorWorkspace, prepared::FactorPrepared,
                    position::AbstractVector,
-                   query::BRM.NativePPLPosteriorPredictive=
+    query::BRM.NativePPLPosteriorPredictive=
                        BRM.NativePPLPosteriorPredictive())
     _factor_check_query_output(output, work, prepared, position, query)
-    _factor_logdensity_kernel(position, prepared, work.primal)
+    if _has_generated_groups(prepared.plan)
+        _factor_predictive_kernel!(
+            rng, position, prepared, work.primal)
+    else
+        _factor_logdensity_kernel(position, prepared, work.primal)
+    end
     T = eltype(work)
     for index in eachindex(output)
         location, scale = _factor_terminal_arguments(
@@ -1714,6 +1760,64 @@ end
         factor::ExponentialSiteFactor, plan, buffers, ::Type{T}) where {T}
     scale = _factor_argument(factor.scale, plan, buffers, T)
     scale * BRM.randexp(rng, T)
+end
+
+@inline _factor_generated_group_sample!(rng::BRM.AbstractRNG, ::Val,
+        site::StochasticSite, position::AbstractVector,
+        prepared::FactorPrepared, buffers::FactorBuffers) = nothing
+
+@inline function _factor_generated_group_sample!(rng::BRM.AbstractRNG,
+        ::Val{Name},
+        site::StochasticSite{S,Tr,F,BlockSiteShape,FreeSite},
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
+    generated_indices = getproperty(
+        prepared.plan.generated_group_indices, Name)
+    for index in generated_indices
+        buffers.generated_group_values[index] = _factor_rand(
+            rng, site.factor, prepared.plan, buffers, T)
+    end
+    nothing
+end
+
+@generated function _factor_predictive_schedule!(rng::BRM.AbstractRNG,
+        ::Val{Names}, ::Val{SiteNames}, sites::Sites,
+        ::Val{NodeNames}, nodes::Nodes,
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {
+            Names,SiteNames,Sites<:Tuple,NodeNames,Nodes<:Tuple,T}
+    calls = Any[]
+    for name in Names
+        site_index = findfirst(==(name), SiteNames)
+        call = if site_index === nothing
+            node_index = findfirst(==(name), NodeNames)
+            node_index === nothing && error("unknown factor schedule entry $name")
+            :(_factor_node_logdensity!(
+                Val($(QuoteNode(name))), getfield(nodes, $node_index),
+                position, prepared, buffers))
+        else
+            quote
+                _factor_site_logdensity!(
+                    Val($(QuoteNode(name))), getfield(sites, $site_index),
+                    position, prepared, buffers)
+                _factor_generated_group_sample!(
+                    rng, Val($(QuoteNode(name))),
+                    getfield(sites, $site_index), position, prepared, buffers)
+            end
+        end
+        push!(calls, call)
+    end
+    Expr(:block, calls..., :(nothing))
+end
+
+@inline function _factor_predictive_kernel!(rng::BRM.AbstractRNG,
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {T}
+    graph = prepared.plan.graph
+    _factor_predictive_schedule!(
+        rng, Val(graph.schedule), Val(Tuple(keys(graph.sites))),
+        Tuple(graph.sites), Val(Tuple(keys(graph.nodes))), Tuple(graph.nodes),
+        position, prepared, buffers)
 end
 
 @inline function _factor_site_sample!(rng::BRM.AbstractRNG, ::Val{Name},
@@ -1805,6 +1909,7 @@ end
 function simulate_prior!(rng::BRM.AbstractRNG, position::AbstractVector,
                          output::AbstractVector, work::FactorWorkspace,
                          prepared::FactorPrepared)
+    _factor_require_fixed_coordinates(prepared.plan)
     _factor_check_query_output(
         output, work, prepared, position,
         BRM.NativePPLPosteriorPredictive())
@@ -1901,6 +2006,7 @@ function _factor_check_batch_output(output::AbstractMatrix,
     Base.mightalias(output, positions) && throw(ArgumentError(
         "native PPL factor batch output must not alias draw positions"))
     for buffer in (work.gradient, work.primal.values,
+                   work.primal.generated_group_values,
                    work.primal.node_values,
                    work.primal.pointwise_loglikelihood)
         Base.mightalias(output, buffer) && throw(ArgumentError(

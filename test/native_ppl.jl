@@ -650,6 +650,14 @@ function factor_query_allocations(workspace::NP.FactorWorkspace,
        predictive=predictive_bytes, prior=prior_bytes)
 end
 
+function factor_predictive_allocations(
+    rng, output, workspace::NP.FactorWorkspace,
+    prepared::NP.FactorPrepared, position)
+    NP.simulate!(rng, output, workspace, prepared, position)
+    @allocated NP.simulate!(
+        rng, output, workspace, prepared, position)
+end
+
 function factor_batch_allocations(workspace::NP.FactorWorkspace,
                                   prepared::NP.FactorPrepared,
                                   positions, linear, pointwise, predictive,
@@ -3831,6 +3839,53 @@ end
     @test_throws ArgumentError NP.rebind(
         varying_prepared, (;); bindings=varying_new_group_bindings,
         new_groups=:invent)
+    varying_new_group_workspace = NP.workspace(varying_new_group_replay)
+    varying_new_group_output = zeros(4)
+    varying_new_group_rng = MersenneTwister(936)
+    varying_new_group_expected_rng = MersenneTwister(936)
+    expected_new_group_effects = [
+        varying_tau * randn(varying_new_group_expected_rng),
+        varying_tau * randn(varying_new_group_expected_rng),
+    ]
+    varying_new_group_expected_mu = [
+        varying_beta * varying_new_group_bindings.x[1] + varying_effects[1],
+        varying_beta * varying_new_group_bindings.x[2] +
+            expected_new_group_effects[1],
+        varying_beta * varying_new_group_bindings.x[3] +
+            expected_new_group_effects[2],
+        varying_beta * varying_new_group_bindings.x[4] +
+            expected_new_group_effects[1],
+    ]
+    varying_new_group_expected_response = map(
+        varying_new_group_expected_mu) do location
+        location + varying_sigma * randn(varying_new_group_expected_rng)
+    end
+    NP.simulate!(
+        varying_new_group_rng, varying_new_group_output,
+        varying_new_group_workspace, varying_new_group_replay,
+        varying_position)
+    @test varying_new_group_output == varying_new_group_expected_response
+    @test varying_new_group_workspace.primal.generated_group_values ==
+          expected_new_group_effects
+    @test vec(varying_new_group_workspace.primal.node_rows[2, :]) ==
+          varying_new_group_expected_mu
+    @test factor_predictive_allocations(
+        varying_new_group_rng, varying_new_group_output,
+        varying_new_group_workspace, varying_new_group_replay,
+        varying_position) == 0
+    new_group_density_error = capability_error(() -> NP.logdensity!(
+        varying_new_group_workspace, varying_new_group_replay,
+        varying_position))
+    @test new_group_density_error.capability == :new_group_activity
+    new_group_linear_error = capability_error(() -> NP.evaluate!(
+        similar(varying_new_group_output), varying_new_group_workspace,
+        varying_new_group_replay, varying_position, NP.LinearPredictor()))
+    @test new_group_linear_error.capability == :new_group_activity
+    new_group_prior_error = capability_error(() -> NP.simulate_prior!(
+        MersenneTwister(937), similar(varying_position),
+        similar(varying_new_group_output), varying_new_group_workspace,
+        varying_new_group_replay))
+    @test new_group_prior_error.capability == :new_group_activity
 
     sampled_offset_plan = NP.compile(sampled_offset_brmi)
     @test sampled_offset_plan isa NP.FactorPlan
