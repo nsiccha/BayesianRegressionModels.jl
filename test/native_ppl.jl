@@ -8895,6 +8895,147 @@ end
                 poisson = Poisson(rate)
                 log(BRM.cdf(poisson, upper) - BRM.cdf(poisson, lower))
             end atol=2e-12
+
+    function check_evidence_gradient(prepared, values; rtol=3e-5)
+        work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
+        density, gradient = NP.logdensity_and_gradient!(
+            work, prepared, values)
+        finite_difference = similar(gradient)
+        step = 1e-6
+        plus = copy(values)
+        minus = copy(values)
+        for coordinate in eachindex(values)
+            plus[coordinate] += step
+            minus[coordinate] -= step
+            finite_difference[coordinate] = (
+                NP.logdensity!(work, prepared, plus) -
+                NP.logdensity!(work, prepared, minus)) / (2step)
+            plus[coordinate] = values[coordinate]
+            minus[coordinate] = values[coordinate]
+        end
+        @test isfinite(density)
+        @test gradient ≈ finite_difference rtol=rtol atol=3e-6
+        @test factor_steady_state_allocations(
+            work, prepared, values) == (; primal=0, gradient=0)
+        work
+    end
+    truncated_ad_work = check_evidence_gradient(
+        truncated_prepared, position)
+    censored_ad_work = check_evidence_gradient(
+        censored_prepared, position)
+    check_evidence_gradient(interval_prepared, position)
+    check_evidence_gradient(poisson_truncated, poisson_position; rtol=5e-5)
+    check_evidence_gradient(poisson_censored, poisson_position; rtol=5e-5)
+    check_evidence_gradient(poisson_interval, poisson_position; rtol=5e-5)
+
+    replay_x = [-0.5, 0.5]
+    replay_response = [-0.5, 0.7]
+    replay = NP.rebind(
+        censored_prepared, (; y=replay_response);
+        bindings=(; x=replay_x))
+    replay_work = NP.workspace(replay)
+    replay_location = position[1] .+ position[2] .* replay_x
+    @test NP.evaluate(
+        replay_work, replay, position,
+        NP.PointwiseLogLikelihood()) ≈ map(
+            replay_location, replay_response) do mu, value
+                logpdf(BRM.censored(
+                    Normal(mu, scale); lower=-0.5, upper=1.0), value)
+            end
+    prediction_only = NP.rebind(
+        interval_prepared, (;);
+        bindings=(; x=replay_x, interval_upper=[0.2, 1.0]))
+    prediction_work = NP.workspace(prediction_only)
+    @test length(NP.simulate(
+        MersenneTwister(715), prediction_work, prediction_only, position)) == 2
+
+    draw_positions = [position'; (position .+ [0.1, -0.05, 0.02])']
+    pointwise_draws = zeros(2, 3)
+    predictive_draws = zeros(2, 3)
+    bundle = (;
+        linear=zeros(2, 3),
+        pointwise=zeros(2, 3),
+        predictive=zeros(2, 3))
+    NP.evaluate_draws!(
+        pointwise_draws, censored_ad_work, censored_prepared,
+        draw_positions, NP.PointwiseLogLikelihood())
+    predictive_rng = MersenneTwister(716)
+    bundle_rng = MersenneTwister(716)
+    NP.simulate_draws!(
+        predictive_rng, predictive_draws, censored_ad_work,
+        censored_prepared, draw_positions)
+    NP.execute_draws!(
+        bundle_rng, bundle, censored_ad_work, censored_prepared,
+        draw_positions,
+        (; linear=NP.LinearPredictor(),
+           pointwise=NP.PointwiseLogLikelihood(),
+           predictive=NP.PosteriorPredictive()))
+    @test bundle.pointwise ≈ pointwise_draws
+    @test bundle.predictive == predictive_draws
+    @test factor_batch_allocations(
+        censored_ad_work, censored_prepared, draw_positions,
+        zeros(2, 3), zeros(2, 3), zeros(2, 3),
+        (; linear=zeros(2, 3), pointwise=zeros(2, 3),
+           predictive=zeros(2, 3))) ==
+          (; linear=0, pointwise=0, predictive=0, bundle=0)
+
+    @test_throws ArgumentError normal_evidence_prepared(
+        NP.truncated_evidence(lower=-0.75, upper=1.25),
+        [-0.8, 0.2, 1.1])
+    @test_throws ArgumentError normal_evidence_prepared(
+        NP.censored_evidence(lower=-0.5, upper=1.0),
+        [-0.5, 0.2, 1.1])
+    @test_throws ArgumentError normal_evidence_prepared(
+        NP.interval_evidence(:interval_upper),
+        [0.0, 0.5, 1.0]; extra=(; interval_upper=[0.2, 0.4, 1.1]))
+    @test_throws ArgumentError poisson_evidence_prepared(
+        NP.truncated_evidence(lower=0.5, upper=4), [1, 2, 4])
+
+    fractional_bound_model = poisson_interval.plan.declaration
+    @test_throws ArgumentError NP.prepare(NP.bind(
+        fractional_bound_model,
+        (; x, count_upper=[16_777_217, 3, 5]);
+        conditions=(; y=count_lower)); T=Float32)
+
+    bernoulli_evidence = NP.model(
+        inputs=(; eta=NP.input()), parameters=(;), nodes=(;),
+        observations=(; y=NP.broadcasted(NP.evidence_observation(
+            NP.bernoulli_logit(:y, :eta),
+            NP.censored_evidence(lower=0, upper=1)))))
+    @test capability_error(() -> NP.bind(
+        bernoulli_evidence, (; eta=[-1.0, 1.0]);
+        conditions=(; y=[0, 1]))).capability == :response_evidence
+
+    extreme_lower = normal_evidence_prepared(
+        NP.censored_evidence(lower=-1000.0), fill(-1000.0, 3))
+    extreme_work = NP.workspace(
+        extreme_lower, Float64, DI.AutoEnzyme())
+    extreme_density, extreme_gradient = NP.logdensity_and_gradient!(
+        extreme_work, extreme_lower, [0.0, 0.0, 0.0])
+    @test isfinite(extreme_density)
+    @test all(isfinite, extreme_gradient)
+    narrow_tail = normal_evidence_prepared(
+        NP.truncated_evidence(lower=-1001.0, upper=-1000.0),
+        fill(-1000.5, 3))
+    @test isfinite(NP.logdensity!(
+        NP.workspace(narrow_tail), narrow_tail, [0.0, 0.0, 0.0]))
+
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function bad_evidence_keyword(x)
+            beta[(:x,)] ~ StandardNormal()
+            sigma ~ Exponential(2)
+            mu = dot(beta, (x,))
+            @. y ~ censored(Normal(mu, sigma); side=0.0)
+        end)))
+    @test occursin("unsupported keywords", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function raw_evidence_bound(x)
+            beta[(:x,)] ~ StandardNormal()
+            sigma ~ Exponential(2)
+            mu = dot(beta, (x,))
+            @. y ~ truncated(Normal(mu, sigma); lower=[-1.0, 0.0])
+        end)))
+    @test occursin("finite literal, named value", err.msg)
 end
 
 @testset "native PPL workflow queries and replay" begin

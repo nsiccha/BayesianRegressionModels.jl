@@ -2106,6 +2106,34 @@ function _factor_validate_evidence_response(factor::EvidenceSiteFactor,
     nothing
 end
 
+
+function _factor_validate_evidence_representation(
+        factor::EvidenceSiteFactor, plan, name::Symbol,
+        ::Type{T}) where {T}
+    discrete = base_site_factor(factor) isa PoissonSiteFactor
+    for (label, bound) in (("lower", factor.lower), ("upper", factor.upper))
+        raw = if bound isa LiteralValue
+            bound.value
+        elseif bound isa InputValue
+            getproperty(plan.bindings, input_value_name(bound))
+        else
+            continue
+        end
+        raw === nothing && continue
+        values = raw isa AbstractVector ? raw : (raw,)
+        for value in values
+            converted = T(value)
+            isfinite(converted) || throw(ArgumentError(
+                "native PPL evidence $label bound for `$name` cannot be " *
+                "represented as finite $T"))
+            discrete && converted != value && throw(ArgumentError(
+                "native PPL discrete evidence $label bound $value for " *
+                "`$name` cannot be represented exactly as $T"))
+        end
+    end
+    nothing
+end
+
 function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
     isconcretetype(T) || throw(ArgumentError(
         "native PPL factor prepared element type must be concrete; got $T"))
@@ -2160,6 +2188,9 @@ function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
                     "underflow"))
         end
     end
+    evidence_factor = _evidence_site_factor(output_factor)
+    evidence_factor === nothing || _factor_validate_evidence_representation(
+        evidence_factor, plan, factor_output_site(plan), T)
     names = Tuple(keys(plan.conditions))
     values = map(names) do name
         original = getproperty(plan.conditions, name)
