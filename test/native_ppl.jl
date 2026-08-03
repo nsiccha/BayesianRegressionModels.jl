@@ -503,6 +503,12 @@ NP.@model function natural_weighted_varying_intercept(
     @. y ~ weighted(Normal(mu, sigma), aweights(replicates))
 end
 
+NP.@model function natural_power_weighted_poisson(x, importance)
+    beta_log_rate[(:Intercept, :x)] ~ StandardNormal()
+    log_rate = dot(beta_log_rate, (1, x))
+    @. y ~ weighted(Poisson(exp(log_rate)), weights(importance))
+end
+
 NP.@model function natural_varying_slope(x, group)
     tau_p_group ~ Exponential(1)
     b_p_group[group] ~ Normal(0.0, tau_p_group)
@@ -8324,7 +8330,7 @@ end
         observations=declaration.observations))
     @test occursin("replicates", err.msg)
 
-    function weighted_prepared(kind, values)
+    function weighted_prepared(kind, values; T=Float64)
         weight = NP.observation_weight(kind, :observation_weights)
         observation = NP.weighted_observation(
             NP.normal(:y, :mu, :sigma), weight)
@@ -8342,7 +8348,7 @@ end
         NP.prepare(NP.bind(
             declaration,
             (; x=[-1.0, 0.5, 2.0], observation_weights=values);
-            conditions=(; y=[-0.4, 0.3, 1.2])))
+            conditions=(; y=[-0.4, 0.3, 1.2])); T)
     end
 
     position = [0.2, 0.4, log(1.1)]
@@ -8522,6 +8528,12 @@ end
     @test_throws ArgumentError weighted_prepared(:power, [1.0, -0.1, 2.0])
     @test_throws ArgumentError weighted_prepared(:unit, [1.0, 0.0, 1.0])
     @test_throws DimensionMismatch weighted_prepared(:power, [1.0, 2.0])
+    @test_throws ArgumentError weighted_prepared(
+        :analytic, [1.0, 1e100, 2.0]; T=Float32)
+    @test_throws ArgumentError weighted_prepared(
+        :power, [1.0, 1e100, 2.0]; T=Float32)
+    @test_throws ArgumentError weighted_prepared(
+        :power, [1.0, floatmin(Float64), 2.0]; T=Float32)
     @test_throws ArgumentError NP.prepare(
         NP.bind(
             weighted_prepared(:frequency, [1, 2, 3]).plan.declaration,
@@ -8529,6 +8541,39 @@ end
                observation_weights=[16_777_217, 2, 3]);
             conditions=(; y=response));
         T=Float32)
+
+    weighted_scale_model = NP.model(
+        inputs=(; mu=NP.input(), sigma=NP.input(), precision=NP.input()),
+        parameters=(;), nodes=(;),
+        observations=(; y=NP.broadcasted(NP.weighted_observation(
+            NP.normal(:y, :mu, :sigma),
+            NP.observation_weight(:analytic, :precision)))))
+    @test_throws ArgumentError NP.prepare(NP.bind(
+        weighted_scale_model,
+        (; mu=[0.0, 0.5], sigma=[1.0, -0.1], precision=[1.0, 2.0]);
+        conditions=(; y=[0.2, 0.4])))
+
+    poisson_x = [-1.0, 0.5, 2.0]
+    poisson_importance = [0.5, 0.0, 2.0]
+    poisson_response = [0, 1, 3]
+    power_poisson = NP.prepare(NP.condition(
+        natural_power_weighted_poisson(poisson_x, poisson_importance);
+        y=poisson_response))
+    power_poisson_work = NP.workspace(power_poisson)
+    power_poisson_position = [0.1, -0.3]
+    power_poisson_log_rate =
+        power_poisson_position[1] .+ power_poisson_position[2] .* poisson_x
+    power_poisson_pointwise = poisson_importance .* logpdf.(
+        Poisson.(exp.(power_poisson_log_rate)), poisson_response)
+    @test NP.evaluate(
+        power_poisson_work, power_poisson, power_poisson_position,
+        NP.LinearPredictor()) ≈ power_poisson_log_rate
+    @test NP.evaluate(
+        power_poisson_work, power_poisson, power_poisson_position,
+        NP.PointwiseLogLikelihood()) ≈ power_poisson_pointwise
+    @test eltype(NP.simulate(
+        MersenneTwister(711), power_poisson_work, power_poisson,
+        power_poisson_position)) === Int
 
     analytic_poisson = NP.model(
         inputs=(; rate=NP.input(), precision=NP.input()),

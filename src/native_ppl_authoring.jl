@@ -1139,7 +1139,7 @@ _factor_value_is_row(::SiteValue{Name}, graph, bindings) where {Name} =
 
 function _factor_exp_is_poisson_rate(name::Symbol, graph::FactorGraph)
     any(values(graph.sites)) do site
-        factor = site.factor
+        factor = base_site_factor(site.factor)
         factor isa PoissonSiteFactor && factor.rate isa NodeValue &&
             node_value_name(factor.rate) === name
     end
@@ -1147,7 +1147,7 @@ end
 
 function _factor_exp_is_normal_scale(name::Symbol, graph::FactorGraph)
     any(values(graph.sites)) do site
-        factor = site.factor
+        factor = base_site_factor(site.factor)
         factor isa NormalSiteFactor && factor.scale isa NodeValue &&
             node_value_name(factor.scale) === name
     end
@@ -1791,7 +1791,7 @@ end
 function _factor_validate_binding_support(graph::FactorGraph,
                                           value, name::Symbol)
     for (site_name, site) in pairs(graph.sites)
-        factor = site.factor
+        factor = base_site_factor(site.factor)
         values = value isa AbstractVector ? value : (value,)
         if factor isa NormalSiteFactor && factor.scale isa InputValue &&
            input_value_name(factor.scale) === name
@@ -1901,9 +1901,20 @@ function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
                     "native PPL frequency weights from `$source` cannot be " *
                     "represented exactly as $T"))
         elseif kind === :analytic
-            all(>(zero(T)), converted) || throw(ArgumentError(
-                "native PPL analytic weights from `$source` cannot be " *
-                "represented as positive $T values"))
+            all(value -> isfinite(value) && value > zero(T), converted) ||
+                throw(ArgumentError(
+                    "native PPL analytic weights from `$source` cannot be " *
+                    "represented as finite positive $T values"))
+        elseif kind === :power
+            all(index ->
+                    isfinite(converted[index]) &&
+                    converted[index] >= zero(T) &&
+                    (iszero(original[index]) || converted[index] > zero(T)),
+                eachindex(original, converted)) ||
+                throw(ArgumentError(
+                    "native PPL power weights from `$source` cannot be " *
+                    "represented as finite nonnegative $T values without " *
+                    "underflow"))
         end
     end
     names = Tuple(keys(plan.conditions))
