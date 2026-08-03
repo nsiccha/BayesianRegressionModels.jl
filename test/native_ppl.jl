@@ -3797,6 +3797,18 @@ end
     @test_throws ArgumentError NP.cholesky_correlation((:x,), 2.0)
     @test_throws ArgumentError NP.cholesky_correlation(
         (:Intercept, :x), 0.0)
+    @test_throws ArgumentError NP.factor_graph(
+        structured_group_declaration;
+        bindings=(; x=row_product_bindings.x,
+                  group=row_product_bindings.group),
+        conditions=(; y=sampled_offset_data.y),
+        group_levels=(; z=()))
+    @test_throws ArgumentError NP.factor_graph(
+        structured_group_declaration;
+        bindings=(; x=row_product_bindings.x,
+                  group=row_product_bindings.group),
+        conditions=(; y=sampled_offset_data.y),
+        group_levels=(; z=(:a, :a)))
 
     correlated_group_declaration = NP.model(
         inputs=(; x=NP.input(), group=NP.input()),
@@ -3846,9 +3858,41 @@ end
     @test NP.factor_node_dependencies(
         correlated_group_plan.graph.nodes.correlated_by_row) ==
           (:z, :tau, :correlation)
+    correlated_scalar_consumer = NP.model(
+        inputs=correlated_group_declaration.inputs,
+        parameters=correlated_group_declaration.parameters,
+        nodes=correlated_group_declaration.nodes,
+        observations=(;
+            scalar=NP.normal(:scalar, :correlated_by_row, :sigma),
+            y=correlated_group_declaration.observations.y),
+        site_order=(
+            :tau, :correlation, :z, :beta, :sigma, :scalar, :y))
+    @test capability_error(() -> NP.compile(
+        correlated_scalar_consumer,
+        (; x=sampled_offset_data.x, group=grouped_bindings.group);
+        conditions=(; y=sampled_offset_data.y))).capability == :factor_shape
+    correlated_block_predictor = NP.model(
+        inputs=correlated_group_declaration.inputs,
+        parameters=correlated_group_declaration.parameters,
+        nodes=(;
+            invalid=NP.grouped_affine(
+                :z, :tau, :correlation, :group, (:tau, :x)),),
+        observations=(; y=NP.broadcasted(
+            NP.normal(:y, :invalid, :sigma))),
+        site_order=correlated_group_declaration.site_order)
+    @test capability_error(() -> NP.compile(
+        correlated_block_predictor,
+        (; x=sampled_offset_data.x, group=grouped_bindings.group);
+        conditions=(; y=sampled_offset_data.y))).capability == :factor_shape
     correlated_group_prepared = NP.prepare(correlated_group_plan)
     correlated_group_workspace = NP.workspace(
         correlated_group_prepared, Float64, DI.AutoEnzyme())
+    correlated_prior_rng = MersenneTwister(949)
+    correlated_prior_expected_rng = MersenneTwister(949)
+    @test capability_error(() -> NP.simulate_prior(
+        correlated_prior_rng, correlated_group_workspace,
+        correlated_group_prepared)).capability == :prior_simulation
+    @test randn(correlated_prior_rng) == randn(correlated_prior_expected_rng)
     correlated_group_position = [
         log(0.6), log(0.4), 0.25,
         0.2, -0.3, -0.1, 0.5, 0.4, -0.2,
@@ -3936,6 +3980,7 @@ end
     correlated_density, correlated_gradient = NP.logdensity_and_gradient!(
         correlated_group_workspace, correlated_group_prepared,
         correlated_group_position)
+    correlated_gradient = copy(correlated_gradient)
     @test correlated_density ≈ correlated_expected_density
     @test correlated_gradient ≈ correlated_expected_gradient
     @test NP.evaluate(
@@ -3944,6 +3989,18 @@ end
     @test factor_steady_state_allocations(
         correlated_group_workspace, correlated_group_prepared,
         correlated_group_position) == (; primal=0, gradient=0)
+    for raw_correlation in (-1_000.0, 1_000.0)
+        extreme_position = copy(correlated_group_position)
+        extreme_position[3] = raw_correlation
+        extreme_density, extreme_gradient = NP.logdensity_and_gradient!(
+            correlated_group_workspace, correlated_group_prepared,
+            extreme_position)
+        @test isfinite(extreme_density)
+        @test all(isfinite, extreme_gradient)
+        @test all(isfinite, NP.evaluate(
+            correlated_group_workspace, correlated_group_prepared,
+            extreme_position, NP.LinearPredictor()))
+    end
 
     varying_brm_data = (;
         x=sampled_offset_data.x,

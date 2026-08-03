@@ -635,8 +635,16 @@ function _parameter_stochastic_site(
         "native PPL grouped site `$name` requires binding `$group_name`"))
     observed_levels = _group_levels(
         getproperty(bindings, group_name), group_name)
-    levels = fitted_levels === nothing ? observed_levels : fitted_levels
-    unknown = Tuple(level for level in observed_levels if level ∉ levels)
+    levels = fitted_levels === nothing ? observed_levels : Tuple(fitted_levels)
+    isempty(levels) && throw(ArgumentError(
+        "native PPL fitted group levels for `$group_name` cannot be empty"))
+    any(ismissing, levels) && throw(ArgumentError(
+        "native PPL fitted group levels for `$group_name` cannot contain " *
+        "missing values"))
+    length(unique(levels)) == length(levels) || throw(ArgumentError(
+        "native PPL fitted group levels for `$group_name` must be unique"))
+    unknown = Tuple(level for level in observed_levels
+                    if findfirst(isequal(level), levels) === nothing)
     if !isempty(unknown) && new_groups === :error
         throw(CapabilityError(
             :new_group,
@@ -969,7 +977,9 @@ _factor_value_is_row(::InputValue{Name}, graph, bindings) where {Name} =
     getproperty(bindings, Name) isa AbstractVector
 _factor_value_is_row(::NodeValue{Name}, graph, bindings) where {Name} =
     getproperty(graph.nodes, Name) isa
-        Union{AffineFactorNode,GroupGatherFactorNode}
+        Union{
+            AffineFactorNode,GroupGatherFactorNode,RowProductFactorNode,
+            GroupedAffineFactorNode}
 _factor_value_is_row(::SiteValue{Name}, graph, bindings) where {Name} =
     getproperty(graph.sites, Name).shape isa
         Union{BlockSiteShape,BroadcastSiteShape}
@@ -1208,6 +1218,17 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
                     :factor_nodes,
                     "grouped affine node `$name` needs one predictor per " *
                     "group coefficient"))
+            for predictor in node.predictors
+                predictor isa SiteValue || continue
+                predictor_name = site_value_name(predictor)
+                predictor_site = getproperty(graph.sites, predictor_name)
+                predictor_site.shape isa BlockSiteShape || continue
+                throw(CapabilityError(
+                    :factor_shape,
+                    "grouped affine node `$name` cannot consume block site " *
+                    "`$predictor_name` as a row predictor; lower it through " *
+                    "a typed materializing node"))
+            end
             group_input(standardized_declaration) ==
                 input_value_name(node.group) || throw(CapabilityError(
                     :factor_nodes,
@@ -2306,14 +2327,33 @@ end
     Expr(:block, calls..., :(output))
 end
 
+@generated function _factor_check_prior_simulation(
+        ::Val{Names}, sites::Sites) where {Names,Sites<:Tuple}
+    checks = Any[]
+    for (index, name) in enumerate(Names)
+        message = "native PPL prior simulation for LKJ Cholesky site " *
+            "`$name` is not implemented; correlated grouped models " *
+            "support fixed-draw posterior prediction and conditional " *
+            "new-group simulation"
+        push!(checks, quote
+            getfield(sites, $index).factor isa LKJCholeskySiteFactor &&
+                throw(CapabilityError(
+                    :prior_simulation, $message))
+        end)
+    end
+    Expr(:block, checks..., :(nothing))
+end
+
 function simulate_prior!(rng::BRM.AbstractRNG, position::AbstractVector,
                          output::AbstractVector, work::FactorWorkspace,
                          prepared::FactorPrepared)
     _factor_require_fixed_coordinates(prepared.plan)
+    graph = prepared.plan.graph
+    _factor_check_prior_simulation(
+        Val(Tuple(keys(graph.sites))), Tuple(graph.sites))
     _factor_check_query_output(
         output, work, prepared, position,
         BRM.NativePPLPosteriorPredictive())
-    graph = prepared.plan.graph
     _factor_sample_schedule!(
         rng, Val(graph.schedule), Val(Tuple(keys(graph.sites))),
         Tuple(graph.sites), Val(Tuple(keys(graph.nodes))), Tuple(graph.nodes),
@@ -4964,6 +5004,9 @@ function _syntax_grouped_parameter(sampling,
             location, scale isa Symbol ? QuoteNode(scale) : scale)
         return (; name, group, value, correlated=nothing)
     end
+    length(lhs.args) == 2 && throw(ArgumentError(
+        "native PPL @model grouped site `$name` requires " *
+        "Normal(location, scale)"))
     family === :MvNormalCholesky && length(arguments) == 2 || throw(
         ArgumentError(
             "native PPL @model grouped vector site `$name` requires " *
