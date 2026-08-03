@@ -4118,6 +4118,17 @@ function _lower_brmi(brmi::BRM.BRMI)
         "sampled scalar offset or varying intercept"))
     predictor_columns = map(term -> term.column, predictor_terms)
     predictor_names = map(BRM.name, predictor_columns)
+    input_predictor_names = Symbol[predictor_names...]
+    input_predictor_columns = Any[predictor_columns...]
+    for varying in varying_groups
+        varying.predictor === nothing && continue
+        column = varying.predictor.column
+        name = BRM.name(column)
+        if name ∉ input_predictor_names
+            push!(input_predictor_names, name)
+            push!(input_predictor_columns, column)
+        end
+    end
     group_names = map(varying_groups) do varying
         BRM.name(varying.group)
     end
@@ -4133,7 +4144,8 @@ function _lower_brmi(brmi::BRM.BRMI)
     response in predictor_names && throw(CapabilityError(
         :input_roles,
         "predictor `$response` is also the observed response"))
-    predictors = map(column -> parent(parent(column)), predictor_columns)
+    predictors = map(
+        column -> parent(parent(column)), input_predictor_columns)
     groups = map(varying_groups) do varying
         parent(parent(varying.group))
     end
@@ -4141,10 +4153,16 @@ function _lower_brmi(brmi::BRM.BRMI)
 
     group_specs = map(varying_groups, group_names) do varying, group_name
         prior = _brmi_group_sd_prior(brmi, varying.id)
-        (; id=varying.id, group_name, prior,
+        predictor_name = varying.predictor === nothing ? nothing :
+            BRM.name(varying.predictor.column)
+        gather_name = Symbol(:r_, location, :_, varying.id, :_, group_name)
+        product_name = predictor_name === nothing ? nothing :
+            Symbol(gather_name, :_times_, predictor_name)
+        (; id=varying.id, group_name, prior, predictor_name,
            scale_name=Symbol(:tau_, varying.id, :_, group_name),
-           site_name=Symbol(:b_, varying.id, :_, group_name),
-           gather_name=Symbol(:r_, location, :_, varying.id, :_, group_name))
+           site_name=Symbol(:b_, varying.id, :_, group_name), gather_name,
+           product_name,
+           offset_name=product_name === nothing ? gather_name : product_name)
     end
 
     scalar_location = isempty(predictor_names)
@@ -4155,9 +4173,9 @@ function _lower_brmi(brmi::BRM.BRMI)
     prior_scale = family === BRM.Normal ?
         BRM._native_ppl_exponential_prior(brmi, scale_name) : nothing
     expected_values = family === BRM.Normal ?
-        Set((location, scale_name, response, predictor_names...,
+        Set((location, scale_name, response, input_predictor_names...,
              sampled_offsets..., group_names...)) :
-        Set((location, response, predictor_names..., sampled_offsets...,
+        Set((location, response, input_predictor_names..., sampled_offsets...,
              group_names...))
     for spec in group_specs
         push!(expected_values, spec.prior.operation)
@@ -4170,7 +4188,7 @@ function _lower_brmi(brmi::BRM.BRMI)
         "unsupported formula operations: " *
         join(sort!(collect(extras)), ", ")))
 
-    input_names = (predictor_names..., group_names...)
+    input_names = (input_predictor_names..., group_names...)
     input_declarations = _declaration_namedtuple(
         input_names, map(_ -> input(), input_names))
     scalar_location && family !== BRM.Normal && throw(CapabilityError(
@@ -4236,11 +4254,19 @@ function _lower_brmi(brmi::BRM.BRMI)
     gather_names = Tuple(spec.gather_name for spec in group_specs)
     gather_declarations = Tuple(
         group_gather(spec.site_name, spec.group_name) for spec in group_specs)
-    affine_offsets = (sampled_offsets..., gather_names...)
+    product_specs = Tuple(
+        spec for spec in group_specs if spec.product_name !== nothing)
+    product_names = Tuple(spec.product_name for spec in product_specs)
+    product_declarations = Tuple(
+        row_product(spec.gather_name, spec.predictor_name)
+        for spec in product_specs)
+    affine_offsets = (
+        sampled_offsets..., (spec.offset_name for spec in group_specs)...)
     node_names = scalar_location ? () : (
-        gather_names..., Tuple(transform_names)..., location)
+        gather_names..., product_names..., Tuple(transform_names)..., location)
     node_values = scalar_location ? () : (
-        gather_declarations..., Tuple(transform_declarations)...,
+        gather_declarations..., product_declarations...,
+        Tuple(transform_declarations)...,
         affine(Tuple(affine_inputs), coefficient_name;
                offsets=affine_offsets, intercept=has_intercept))
     node_declarations = _declaration_namedtuple(node_names, node_values)
@@ -4522,6 +4548,7 @@ function _syntax_affine_assignment(statement,
     length(terms) >= 2 || return nothing
     sampled_offsets = Symbol[]
     gathered_offsets = NamedTuple[]
+    grouped_products = NamedTuple[]
     ordinary_terms = Any[]
     for term in terms
         if term isa Expr && term.head === :call &&
@@ -4546,6 +4573,38 @@ function _syntax_affine_assignment(statement,
             gather_name = Symbol(
                 site_name, :_by_, group_name, :_for_, lhs)
             push!(gathered_offsets, (; site_name, group_name, gather_name))
+        elseif term isa Expr && term.head === :call &&
+               first(term.args) in (:*, :.*) && length(term.args) == 3
+            product_terms = term.args[2:end]
+            grouped_indices = findall(product_terms) do product_term
+                product_term isa Expr && product_term.head === :ref &&
+                    length(product_term.args) == 2 &&
+                    first(product_term.args) isa Symbol &&
+                    product_term.args[2] isa Symbol &&
+                    haskey(grouped_sites, first(product_term.args))
+            end
+            if isempty(grouped_indices)
+                push!(ordinary_terms, term)
+                continue
+            end
+            length(grouped_indices) == 1 || throw(ArgumentError(
+                "native PPL @model row product must contain one grouped site"))
+            grouped_index = only(grouped_indices)
+            grouped_ref = product_terms[grouped_index]
+            site_name, group_name = grouped_ref.args
+            grouped_sites[site_name] === group_name || throw(ArgumentError(
+                "native PPL @model grouped site `$site_name` must be " *
+                "gathered with its declared group input"))
+            predictor_name = product_terms[3 - grouped_index]
+            predictor_name isa Symbol || throw(ArgumentError(
+                "native PPL @model grouped slope must multiply its grouped " *
+                "site by one named predictor"))
+            gather_name = Symbol(
+                site_name, :_by_, group_name, :_for_, lhs)
+            product_name = Symbol(gather_name, :_times_, predictor_name)
+            push!(grouped_products, (;
+                site_name, group_name, predictor_name, gather_name,
+                product_name))
         else
             push!(ordinary_terms, term)
         end
@@ -4563,7 +4622,7 @@ function _syntax_affine_assignment(statement,
     length(intercepts) <= 1 || return nothing
     intercept = isempty(intercepts) ? nothing : only(intercepts)
     intercept === nothing && isempty(sampled_offsets) &&
-        isempty(gathered_offsets) && return nothing
+        isempty(gathered_offsets) && isempty(grouped_products) && return nothing
 
     slopes = Symbol[]
     predictor_names = Symbol[]
@@ -4636,17 +4695,26 @@ function _syntax_affine_assignment(statement,
         Expr(:parameters,
              Expr(:kw, :offsets, QuoteNode((
                  sampled_offsets...,
-                 (gather.gather_name for gather in gathered_offsets)...))),
+                 (gather.gather_name for gather in gathered_offsets)...,
+                 (product.product_name for product in grouped_products)...))),
              Expr(:kw, :intercept, intercept !== nothing)),
         QuoteNode(Tuple(predictor_names)),
         QuoteNode(coefficient_name))
-    gather_names = Tuple(gather.gather_name for gather in gathered_offsets)
+    grouped_nodes = (gathered_offsets..., grouped_products...)
+    gather_names = Tuple(grouped.gather_name for grouped in grouped_nodes)
+    length(unique(gather_names)) == length(gather_names) || throw(ArgumentError(
+        "native PPL @model grouped terms must use distinct latent sites"))
     gather_values = Tuple(Expr(
         :call, _syntax_ref(:group_gather),
         QuoteNode(gather.site_name), QuoteNode(gather.group_name))
-        for gather in gathered_offsets)
+        for gather in grouped_nodes)
+    product_names = Tuple(product.product_name for product in grouped_products)
+    product_values = Tuple(Expr(
+        :call, _syntax_ref(:row_product),
+        QuoteNode(product.gather_name), QuoteNode(product.predictor_name))
+        for product in grouped_products)
     (; location=lhs, intercept, offsets=Tuple(sampled_offsets),
-       gather_names, gather_values,
+       gather_names, gather_values, product_names, product_values,
        slopes=Tuple(slopes), coefficient_name,
        parameter_value, transform_names=Tuple(transform_names),
        transform_values=Tuple(transform_values), affine_value)
@@ -4971,6 +5039,12 @@ function _model_function_syntax(definition)
                     affine_declaration.gather_values)
                     push!(node_names, gather_name)
                     push!(node_values, gather_value)
+                end
+                for (product_name, product_value) in zip(
+                    affine_declaration.product_names,
+                    affine_declaration.product_values)
+                    push!(node_names, product_name)
+                    push!(node_values, product_value)
                 end
                 push!(node_names, affine_declaration.location)
                 push!(node_values, affine_declaration.affine_value)
