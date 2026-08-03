@@ -4930,6 +4930,222 @@ end
         natural_crossed_workspace, natural_crossed_prepared,
         crossed_group_position) == (; primal=0, gradient=0)
 
+    crossed_known_bindings = (;
+        x=[1.5, -0.5, 0.75, 2.0],
+        subject=[:s3, :s1, :s2, :s3],
+        item=[:i2, :i3, :i1, :i2])
+    crossed_known_replay = NP.rebind(
+        crossed_group_prepared, (;); bindings=crossed_known_bindings)
+    @test crossed_known_replay.plan.graph.dimension ==
+          crossed_group_plan.graph.dimension
+    @test crossed_known_replay.plan.group_indices == (
+        b_p_subject_by_subject_for_mu=(3, 1, 2, 3),
+        r_mu_q_item=(2, 3, 1, 2))
+    crossed_known_mu = [
+        crossed_beta * crossed_known_bindings.x[row] +
+        crossed_subject_effects[[3, 1, 2, 3][row]][1] +
+        crossed_subject_effects[[3, 1, 2, 3][row]][2] *
+            crossed_known_bindings.x[row] +
+        crossed_item_effects[[2, 3, 1, 2][row]]
+        for row in eachindex(crossed_known_bindings.x)]
+    @test NP.evaluate(
+        NP.workspace(crossed_known_replay), crossed_known_replay,
+        crossed_group_position, NP.LinearPredictor()) ≈ crossed_known_mu
+
+    crossed_subject_only_bindings = (;
+        x=[0.0, 1.0], subject=[:s4, :s1], item=[:i1, :i2])
+    crossed_subject_only = NP.rebind(
+        crossed_group_prepared, (;);
+        bindings=crossed_subject_only_bindings, new_groups=:resample)
+    @test crossed_subject_only.plan.generated_group_levels ==
+          (; b_p_subject=(:s4,), b_q_item=())
+    @test crossed_subject_only.plan.generated_group_indices.b_p_subject == 1:2
+    @test isempty(
+        crossed_subject_only.plan.generated_group_indices.b_q_item)
+    @test crossed_subject_only.plan.group_indices == (
+        b_p_subject_by_subject_for_mu=(-1, 1),
+        r_mu_q_item=(1, 2))
+
+    crossed_item_only_bindings = (;
+        x=[0.0, 1.0], subject=[:s1, :s2], item=[:i4, :i2])
+    crossed_item_only = NP.rebind(
+        crossed_group_prepared, (;);
+        bindings=crossed_item_only_bindings, new_groups=:resample)
+    @test crossed_item_only.plan.generated_group_levels ==
+          (; b_p_subject=(), b_q_item=(:i4,))
+    @test isempty(
+        crossed_item_only.plan.generated_group_indices.b_p_subject)
+    @test crossed_item_only.plan.generated_group_indices.b_q_item == 1:1
+    @test crossed_item_only.plan.group_indices == (
+        b_p_subject_by_subject_for_mu=(1, 2),
+        r_mu_q_item=(-1, 2))
+
+    crossed_new_bindings = (;
+        x=[-1.0, 0.5, 1.5, 2.0, -0.25],
+        subject=[:s1, :s4, :s4, :s3, :s2],
+        item=[:i4, :i2, :i4, :i3, :i2])
+    @test_throws NP.CapabilityError NP.rebind(
+        crossed_group_prepared, (;); bindings=crossed_new_bindings)
+    crossed_new_replay = NP.rebind(
+        crossed_group_prepared, (;); bindings=crossed_new_bindings,
+        new_groups=:resample)
+    @test crossed_new_replay.plan.graph.dimension ==
+          crossed_group_plan.graph.dimension
+    @test crossed_new_replay.plan.generated_group_levels ==
+          (; b_p_subject=(:s4,), b_q_item=(:i4,))
+    @test crossed_new_replay.plan.generated_group_indices ==
+          (; b_p_subject=1:2, b_q_item=3:3)
+    @test crossed_new_replay.plan.group_indices == (
+        b_p_subject_by_subject_for_mu=(1, -1, -1, 3, 2),
+        r_mu_q_item=(-1, 2, -1, 3, 2))
+    @test_throws NP.CapabilityError NP.rebind(
+        crossed_group_prepared, (; y=zeros(5));
+        bindings=crossed_new_bindings, new_groups=:resample)
+    crossed_new_workspace = NP.workspace(crossed_new_replay)
+    crossed_new_rng = MersenneTwister(980)
+    crossed_new_expected_rng = MersenneTwister(980)
+    crossed_new_subject_z = (
+        randn(crossed_new_expected_rng),
+        randn(crossed_new_expected_rng))
+    crossed_new_subject_effect = (
+        crossed_subject_tau[1] * crossed_new_subject_z[1],
+        crossed_subject_tau[2] *
+            (crossed_subject_rho * crossed_new_subject_z[1] +
+             crossed_subject_sech * crossed_new_subject_z[2]))
+    crossed_new_item_effect =
+        crossed_item_tau * randn(crossed_new_expected_rng)
+    crossed_new_subject_effects = [
+        crossed_subject_effects[1], crossed_new_subject_effect,
+        crossed_new_subject_effect, crossed_subject_effects[3],
+        crossed_subject_effects[2]]
+    crossed_new_item_effects = [
+        crossed_new_item_effect, crossed_item_effects[2],
+        crossed_new_item_effect, crossed_item_effects[3],
+        crossed_item_effects[2]]
+    crossed_new_mu = [
+        crossed_beta * crossed_new_bindings.x[row] +
+        crossed_new_subject_effects[row][1] +
+        crossed_new_subject_effects[row][2] *
+            crossed_new_bindings.x[row] +
+        crossed_new_item_effects[row]
+        for row in eachindex(crossed_new_bindings.x)]
+    crossed_new_expected = [
+        location + crossed_sigma * randn(crossed_new_expected_rng)
+        for location in crossed_new_mu]
+    crossed_new_output = zeros(5)
+    NP.simulate!(
+        crossed_new_rng, crossed_new_output,
+        crossed_new_workspace, crossed_new_replay,
+        crossed_group_position)
+    @test crossed_new_output ≈ crossed_new_expected
+    @test crossed_new_workspace.primal.generated_group_values ≈
+          [crossed_new_subject_z..., crossed_new_item_effect]
+    @test vec(crossed_new_workspace.primal.node_rows[3, :]) ≈
+          crossed_new_mu
+    @test factor_predictive_allocations(
+        MersenneTwister(981), crossed_new_output,
+        crossed_new_workspace, crossed_new_replay,
+        crossed_group_position) == 0
+    @test_throws NP.CapabilityError NP.logdensity!(
+        crossed_new_workspace, crossed_new_replay,
+        crossed_group_position)
+    @test_throws NP.CapabilityError NP.evaluate!(
+        similar(crossed_new_output), crossed_new_workspace,
+        crossed_new_replay, crossed_group_position,
+        NP.LinearPredictor())
+    crossed_new_linear = zeros(5)
+    NP.evaluate!(
+        MersenneTwister(982), crossed_new_linear,
+        crossed_new_workspace, crossed_new_replay,
+        crossed_group_position, NP.LinearPredictor())
+    crossed_new_linear_expected_rng = MersenneTwister(982)
+    crossed_linear_subject_z = (
+        randn(crossed_new_linear_expected_rng),
+        randn(crossed_new_linear_expected_rng))
+    crossed_linear_subject_effect = (
+        crossed_subject_tau[1] * crossed_linear_subject_z[1],
+        crossed_subject_tau[2] *
+            (crossed_subject_rho * crossed_linear_subject_z[1] +
+             crossed_subject_sech * crossed_linear_subject_z[2]))
+    crossed_linear_item_effect =
+        crossed_item_tau * randn(crossed_new_linear_expected_rng)
+    crossed_linear_subject_effects = [
+        crossed_subject_effects[1], crossed_linear_subject_effect,
+        crossed_linear_subject_effect, crossed_subject_effects[3],
+        crossed_subject_effects[2]]
+    crossed_linear_item_effects = [
+        crossed_linear_item_effect, crossed_item_effects[2],
+        crossed_linear_item_effect, crossed_item_effects[3],
+        crossed_item_effects[2]]
+    @test crossed_new_linear ≈ [
+        crossed_beta * crossed_new_bindings.x[row] +
+        crossed_linear_subject_effects[row][1] +
+        crossed_linear_subject_effects[row][2] *
+            crossed_new_bindings.x[row] +
+        crossed_linear_item_effects[row]
+        for row in eachindex(crossed_new_bindings.x)]
+
+    crossed_draw_positions = [
+        crossed_group_position';
+        (crossed_group_position .+
+         [0.02, -0.03, 0.01, 0.04, -0.02,
+          0.03, -0.01, 0.02, -0.04, 0.01,
+          0.03, -0.02, 0.01, 0.05, -0.03])']
+    crossed_draw_predictive = zeros(2, 5)
+    crossed_draw_linear = zeros(2, 5)
+    crossed_manual_predictive = zeros(2, 5)
+    crossed_manual_linear = zeros(2, 5)
+    crossed_manual_fused_linear = zeros(2, 5)
+    crossed_draw_rng = MersenneTwister(983)
+    crossed_manual_rng = MersenneTwister(983)
+    for draw in axes(crossed_draw_positions, 1)
+        NP.simulate!(
+            crossed_manual_rng,
+            @view(crossed_manual_predictive[draw, :]),
+            crossed_new_workspace, crossed_new_replay,
+            @view(crossed_draw_positions[draw, :]))
+        crossed_manual_fused_linear[draw, :] .=
+            @view crossed_new_workspace.primal.node_rows[3, :]
+    end
+    NP.simulate_draws!(
+        crossed_draw_rng, crossed_draw_predictive,
+        crossed_new_workspace, crossed_new_replay,
+        crossed_draw_positions)
+    @test crossed_draw_predictive == crossed_manual_predictive
+    NP.evaluate_draws!(
+        MersenneTwister(984), crossed_draw_linear,
+        crossed_new_workspace, crossed_new_replay,
+        crossed_draw_positions, NP.LinearPredictor())
+    crossed_linear_rng = MersenneTwister(984)
+    for draw in axes(crossed_draw_positions, 1)
+        NP.evaluate!(
+            crossed_linear_rng,
+            @view(crossed_manual_linear[draw, :]),
+            crossed_new_workspace, crossed_new_replay,
+            @view(crossed_draw_positions[draw, :]),
+            NP.LinearPredictor())
+    end
+    @test crossed_draw_linear == crossed_manual_linear
+    crossed_queries = (;
+        linear=NP.LinearPredictor(),
+        predictive=NP.PosteriorPredictive())
+    crossed_bundle = (;
+        linear=zeros(2, 5), predictive=zeros(2, 5))
+    NP.execute_draws!(
+        MersenneTwister(983), crossed_bundle,
+        crossed_new_workspace, crossed_new_replay,
+        crossed_draw_positions, crossed_queries)
+    @test crossed_bundle.linear == crossed_manual_fused_linear
+    @test crossed_bundle.predictive == crossed_manual_predictive
+    @test factor_generated_draw_allocations(
+        MersenneTwister(985), MersenneTwister(986),
+        MersenneTwister(987),
+        crossed_draw_predictive, crossed_draw_linear,
+        crossed_bundle, crossed_new_workspace,
+        crossed_new_replay, crossed_draw_positions,
+        crossed_queries) ==
+          (; predictive=0, linear=0, bundle=0)
+
     varying_brm_data = (;
         x=sampled_offset_data.x,
         group=grouped_bindings.group,
