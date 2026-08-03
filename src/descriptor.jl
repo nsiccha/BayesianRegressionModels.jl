@@ -315,7 +315,11 @@ _brm_declaration_role(d::GenerativeDeclaration) = begin
     isempty(d.context) || return :group_block
     f = d.family
     f isa Symbol || return :parameter
-    f in (:popefs, :_popefs_normal) && return :population_effect
+    # `_popefs_coefs` / `_popefs_normal_coefs` are the `normal_id_glm` fusion's
+    # coefficient-returning siblings (sbimpl.jl) — same block, same
+    # `beta_pop`, so the same role and the same `popcoefnames` labels.
+    f in (:popefs, :_popefs_normal, :_popefs_coefs, :_popefs_normal_coefs) &&
+        return :population_effect
     startswith(String(f), "ranef") && return :random_effect
     f === :plate && return :group_block
     :parameter

@@ -37,3 +37,25 @@ benchmark reports it as noise. The varying-slope gradient ratio moves 3.70x ->
 1.07x between those two sizes; the Gaussian GLM ratio moves the other way
 (2.69x -> 3.38x) because that cost is per-row. A single-N measurement cannot
 tell those two cases apart.
+
+## Acted on
+
+**Tier-1, landed** — pure-population Gaussian likelihoods now lower to Stan's
+fused `normal_id_glm_lpdf`, with the linear predictor re-emitted after the
+likelihood so it lands in `generated quantities` (`_sb_fuse_normal_id_glm!`,
+`src/sbimpl.jl`; pinned by `test/glm_fusion.jl`). Measured against the
+pre-change emission through BridgeStan, `propto=false, jacobian=true`:
+
+| N, K | density | gradient | max rel. gradient difference |
+|---|---|---|---|
+| 100, 4 | 2.10x | 2.18x | 7.5e-16 |
+| 2000, 4 | 3.15x | 3.81x | 2.9e-15 |
+
+That is within 7% of the hand-written `normal_id_glm` ceiling (4.08x gradient
+at N=2000). **Both halves of the change are load-bearing**: the fused `_lpdf`
+on its own is ~1.2x — the rest comes from taking the N-vector predictor off the
+gradient path. The vector-scale case (`log(sigma) ~ 1 + z`) fuses only the
+location predictor and measures 1.23x at N=2000.
+
+Of the 27 survey classes, exactly 6 change (`A1`, `A2`, `A3`, `C1`, `C2`,
+`F1`); the other 21 and all 27 data blocks are byte-identical.
