@@ -239,6 +239,10 @@ Model(inputs, parameters, nodes, observations, outputs) =
 struct SiteValue{Name} end
 site_value_name(::SiteValue{Name}) where {Name} = Name
 
+"""Reference one bound deterministic input as a stochastic-factor argument."""
+struct InputValue{Name} end
+input_value_name(::InputValue{Name}) where {Name} = Name
+
 """Literal stochastic-factor argument retained in the typed graph."""
 struct LiteralValue{T}
     value::T
@@ -335,18 +339,22 @@ function _parameter_stochastic_site(
         activity, coordinate_keys)
 end
 
+_factor_value(name::Symbol, inputs::NamedTuple) =
+    hasproperty(inputs, name) ? InputValue{name}() : SiteValue{name}()
+
 function _observation_stochastic_site(
     name::Symbol, declaration::AbstractObservationDeclaration,
-    conditions::NamedTuple)
+    inputs::NamedTuple, conditions::NamedTuple)
     scalar = scalar_observation(declaration)
     dependencies = observation_dependencies(scalar)
     factor = if scalar isa NormalObservation
         NormalSiteFactor(
-            SiteValue{dependencies[1]}(), SiteValue{dependencies[2]}())
+            _factor_value(dependencies[1], inputs),
+            _factor_value(dependencies[2], inputs))
     elseif scalar isa BernoulliLogitObservation
-        BernoulliLogitSiteFactor(SiteValue{only(dependencies)}())
+        BernoulliLogitSiteFactor(_factor_value(only(dependencies), inputs))
     else
-        PoissonSiteFactor(SiteValue{only(dependencies)}())
+        PoissonSiteFactor(_factor_value(only(dependencies), inputs))
     end
     shape = is_broadcast_observation(declaration) ?
         BroadcastSiteShape() : ScalarSiteShape()
@@ -408,6 +416,7 @@ function factor_graph(declaration::Model; conditions=(;))
         else
             _observation_stochastic_site(
                 name, getproperty(declaration.observations, name),
+                declaration.inputs,
                 canonical_conditions)
         end
         unavailable = setdiff(
@@ -458,18 +467,21 @@ function _canonical_factor_conditions(declaration::Model, conditions)
 end
 
 """Executable plan for an ordered continuous stochastic-site DAG."""
-struct FactorPlan{Output,M,G,C,I,A}
+struct FactorPlan{Output,M,G,B,C,I,A}
     declaration::M
     graph::G
+    bindings::B
     conditions::C
     site_indices::I
     observation_axis::A
 end
 
-FactorPlan(declaration::M, graph::G, conditions::C, site_indices::I,
-           observation_axis::A, output_site::Symbol) where {M,G,C,I,A} =
-    FactorPlan{output_site,M,G,C,I,A}(
-        declaration, graph, conditions, site_indices, observation_axis)
+FactorPlan(declaration::M, graph::G, bindings::B, conditions::C,
+           site_indices::I, observation_axis::A,
+           output_site::Symbol) where {M,G,B,C,I,A} =
+    FactorPlan{output_site,M,G,B,C,I,A}(
+        declaration, graph, bindings, conditions, site_indices,
+        observation_axis)
 
 factor_output_site(::FactorPlan{Output}) where {Output} = Output
 
@@ -484,7 +496,6 @@ Base.propertynames(::FactorPlan, private::Bool=false) =
 BRM.LogDensityProblems.dimension(plan::FactorPlan) = plan.graph.dimension
 
 function _uses_factor_executor(declaration::Model, conditions)
-    isempty(declaration.inputs) && isempty(declaration.nodes) || return false
     graph = factor_graph(declaration; conditions)
     stochastic_names = Set(declaration.site_order)
     any(declaration.site_order) do name
@@ -541,16 +552,20 @@ function _validate_factor_plan_site(
 end
 
 function _bind_factor_plan(declaration::Model, bindings, conditions)
-    isempty(declaration.inputs) || throw(CapabilityError(
-        :factor_inputs,
-        "the first multi-latent factor executor does not yet accept open " *
-        "deterministic inputs"))
     isempty(declaration.nodes) || throw(CapabilityError(
         :factor_nodes,
         "the first multi-latent factor executor does not yet accept " *
         "deterministic graph nodes"))
-    isempty(bindings) || throw(ArgumentError(
-        "the input-free multi-latent factor graph received unexpected bindings"))
+    for (name, declaration_input) in pairs(declaration.inputs)
+        input_role(declaration_input) === :value || throw(CapabilityError(
+            :factor_inputs,
+            "multi-latent factor input `$name` must be a generic scalar " *
+            "value port"))
+        value = getproperty(bindings, name)
+        value isa Real || throw(ArgumentError(
+            "multi-latent factor input `$name` must bind a real scalar; " *
+            "got $(typeof(value))"))
+    end
     canonical_conditions = _canonical_factor_conditions(
         declaration, conditions)
     graph = factor_graph(declaration; conditions=canonical_conditions)
@@ -581,7 +596,7 @@ function _bind_factor_plan(declaration::Model, bindings, conditions)
     site_indices = NamedTuple{site_names}(
         ntuple(identity, length(site_names)))
     FactorPlan(
-        declaration, graph, canonical_conditions, site_indices,
+        declaration, graph, bindings, canonical_conditions, site_indices,
         BRM.NativePPLAxis(:observation, observation_keys), output_site)
 end
 
@@ -677,6 +692,9 @@ end
 function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
     isconcretetype(T) || throw(ArgumentError(
         "native PPL factor prepared element type must be concrete; got $T"))
+    for (name, value) in pairs(plan.bindings)
+        _factor_prepare_condition(value, name, T)
+    end
     names = Tuple(keys(plan.conditions))
     values = map(names) do name
         value = _factor_prepare_condition(
@@ -697,6 +715,9 @@ workspace(prepared::FactorPrepared, ::Type{T}, backend) where {T<:AbstractFloat}
 
 @inline _factor_argument(value::LiteralValue, plan, buffers, ::Type{T}) where {T} =
     T(value.value)
+@inline _factor_argument(::InputValue{Name}, plan, buffers,
+                         ::Type{T}) where {Name,T} =
+    T(getproperty(plan.bindings, Name))
 @inline _factor_argument(::SiteValue{Name}, plan, buffers,
                          ::Type{T}) where {Name,T} =
     buffers.values[getproperty(plan.site_indices, Name)]
@@ -861,11 +882,12 @@ function rebind(prepared::FactorPrepared, conditions;
         "native PPL factor replay bindings must be a NamedTuple; got " *
         "$(typeof(conditions))"))
     rebound = _bind_factor_plan(
-        prepared.plan.declaration, (;), conditions)
+        prepared.plan.declaration, prepared.plan.bindings, conditions)
     if !hasproperty(rebound.conditions, rebound.output_site) &&
        isempty(rebound.observation_axis.keys)
         rebound = FactorPlan(
-            rebound.declaration, rebound.graph, rebound.conditions,
+            rebound.declaration, rebound.graph, rebound.bindings,
+            rebound.conditions,
             rebound.site_indices, prepared.plan.observation_axis,
             rebound.output_site)
     end
@@ -2790,6 +2812,104 @@ compile(instance::ModelInstance) = bind(instance)
 prepare(instance::ModelInstance; kwargs...) =
     prepare(bind(instance); kwargs...)
 
+function _lower_brmi_scalar_factor_dag(brmi::BRM.BRMI, response::Symbol,
+                                       response_lhs, location::Symbol)
+    haskey(brmi.operations, location) || return nothing
+    _, location_rhs = BRM._native_ppl_sampling_rhs(brmi, location)
+    location_rhs isa BRM.ExprColumn &&
+        BRM.getf(location_rhs) === BRM.Normal || return nothing
+
+    parameter_names = Symbol[]
+    parameter_values = Any[]
+    deferred_standard_names = Symbol[]
+    deferred_standard_values = Any[]
+    observation_names = Symbol[]
+    observation_values = Any[]
+    site_order = Symbol[]
+
+    for name in keys(brmi.operations)
+        name isa Symbol || continue
+        lhs, rhs = BRM._native_ppl_sampling_rhs(brmi, name)
+        rhs isa BRM.ExprColumn || throw(CapabilityError(
+            :factor_dag,
+            "scalar factor-DAG operation `$name` must have a distribution RHS"))
+        isempty(BRM.getkwargs(rhs)) || throw(CapabilityError(
+            :factor_dag,
+            "scalar factor-DAG operation `$name` cannot have distribution keywords"))
+        family = BRM.getf(rhs)
+        arguments = BRM.getargs(rhs)
+        push!(site_order, name)
+
+        if name === response
+            family === BRM.Normal && length(arguments) == 2 || throw(
+                CapabilityError(
+                    :factor_dag,
+                    "scalar factor-DAG response `$response` must use Normal(location, scale)"))
+            location_name = BRM._native_ppl_ref_name(arguments[1])
+            scale_name = BRM._native_ppl_ref_name(arguments[2])
+            (location_name === nothing || scale_name === nothing) && throw(
+                CapabilityError(
+                    :factor_dag,
+                    "scalar factor-DAG response arguments must be named sites"))
+            push!(observation_names, name)
+            push!(observation_values, broadcasted(
+                normal(name, location_name, scale_name)))
+            continue
+        end
+
+        if family === BRM.Exponential
+            length(arguments) == 1 && only(arguments) isa Real || throw(
+                CapabilityError(
+                    :factor_dag,
+                    "Exponential site `$name` requires one literal scale"))
+            push!(parameter_names, name)
+            push!(parameter_values, parameter(
+                PositiveSupport(), (name,); transform=Exp(),
+                prior=Exponential(only(arguments))))
+        elseif family === BRM.Normal && isempty(arguments)
+            push!(deferred_standard_names, name)
+            push!(deferred_standard_values, parameter(
+                RealSupport(), (name,); transform=Identity(),
+                prior=StandardNormal()))
+        elseif family === BRM.Normal && length(arguments) == 2 &&
+               all(argument -> argument isa Real, arguments)
+            push!(parameter_names, name)
+            push!(parameter_values, parameter(
+                RealSupport(), (name,); transform=Identity(),
+                prior=normal_prior(arguments...)))
+        elseif family === BRM.Normal && length(arguments) == 2
+            location_name = BRM._native_ppl_ref_name(arguments[1])
+            scale_name = BRM._native_ppl_ref_name(arguments[2])
+            (location_name === nothing || scale_name === nothing) && throw(
+                CapabilityError(
+                    :factor_dag,
+                    "Normal site `$name` arguments must be literals or named sites"))
+            push!(observation_names, name)
+            push!(observation_values,
+                  normal(name, location_name, scale_name))
+        else
+            throw(CapabilityError(
+                :factor_dag,
+                "unsupported scalar factor `$family` for site `$name`"))
+        end
+    end
+
+    append!(parameter_names, deferred_standard_names)
+    append!(parameter_values, deferred_standard_values)
+    declaration = model(
+        inputs=(;),
+        parameters=_declaration_namedtuple(
+            Tuple(parameter_names), Tuple(parameter_values)),
+        nodes=(;),
+        observations=_declaration_namedtuple(
+            Tuple(observation_names), Tuple(observation_values)),
+        outputs=NamedTuple{(response,)}((response,)),
+        site_order=Tuple(site_order))
+    response_values = parent(parent(response_lhs))
+    conditions = NamedTuple{(response,)}((response_values,))
+    (; declaration, bindings=(;), conditions)
+end
+
 function _lower_brmi(brmi::BRM.BRMI)
     observed = BRM.outcomes(brmi)
     length(observed) == 1 || throw(CapabilityError(
@@ -2854,6 +2974,12 @@ function _lower_brmi(brmi::BRM.BRMI)
         throw(CapabilityError(
             :likelihood_scale,
             "Normal scale must be one named scalar parameter"))
+
+    if family === BRM.Normal
+        factor_dag = _lower_brmi_scalar_factor_dag(
+            brmi, response, response_lhs, location)
+        factor_dag === nothing || return factor_dag
+    end
 
     predictor_terms = BRM._native_ppl_affine_predictors(brmi, location)
     predictor_columns = map(term -> term.column, predictor_terms)
@@ -2953,6 +3079,8 @@ function compile(brmi::BRM.BRMI)
     bind(lowered.declaration, lowered.bindings;
          conditions=lowered.conditions)
 end
+
+prepare(brmi::BRM.BRMI; kwargs...) = prepare(compile(brmi); kwargs...)
 
 _declaration_namedtuple(names::Tuple, values::Tuple) =
     NamedTuple{names}(values)
@@ -3648,7 +3776,8 @@ macro model(definition)
 end
 
 export Model, ModelInstance, GraphRef, Component, Composition, Input, Parameter
-export SiteValue, LiteralValue, StochasticSite, SiteCoordinates, FactorGraph
+export SiteValue, InputValue, LiteralValue, StochasticSite, SiteCoordinates
+export FactorGraph
 export FactorPlan, FactorPrepared, FactorWorkspace, FactorLogDensityProblem
 export StandardNormalSiteFactor, NormalSiteFactor, ExponentialSiteFactor
 export BernoulliLogitSiteFactor, PoissonSiteFactor
@@ -3663,6 +3792,6 @@ export model, input, parameter, Identity, Exp, normal_prior, Exponential
 export center, zscale, standardize, affine, exp_link
 export normal, bernoulli_logit, poisson, broadcasted
 export instantiate, substitute, condition, component, output, compose, bind, lower
-export factor_graph, site_factor_dependencies, site_value_name
+export factor_graph, site_factor_dependencies, site_value_name, input_value_name
 export graph_namespace, graph_name, graph_kind, component_namespace, qualified_name
 export @model

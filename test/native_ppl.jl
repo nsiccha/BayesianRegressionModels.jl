@@ -393,6 +393,36 @@ NP.@model function hierarchical_latent_graph()
     return y
 end
 
+NP.@model function hierarchy_population_source()
+    value ~ Normal()
+    return value
+end
+
+NP.@model function hierarchy_scale_source(scale)
+    value ~ Exponential(scale)
+    return value
+end
+
+NP.@model function hierarchy_individual_source(population, population_scale)
+    value ~ Normal(population, population_scale)
+    return value
+end
+
+NP.@model function hierarchy_observation_source(individual)
+    observation_scale ~ Exponential(2.0)
+    @. y ~ Normal(individual, observation_scale)
+    return y
+end
+
+NP.@model function naturally_composed_hierarchy()
+    population ~ hierarchy_population_source()
+    population_scale ~ hierarchy_scale_source(1.0)
+    individual ~ hierarchy_individual_source(
+        population, population_scale)
+    y ~ hierarchy_observation_source(individual)
+    return y
+end
+
 NP.@model function monolithic_scalar_normal()
     theta ~ Normal()
     sigma ~ Exponential(2.0)
@@ -3466,6 +3496,176 @@ end
         hierarchy_empty_output,
         NP.workspace(hierarchy_prepared, Float32), hierarchy_prepared,
         hierarchy_empty_positions, NP.LinearPredictor())
+
+    natural_hierarchy = NP.condition(
+        naturally_composed_hierarchy(); y=response)
+    natural_hierarchy_graph = NP.factor_graph(natural_hierarchy)
+    natural_population = NP.qualified_name(:population, :value)
+    natural_population_scale = NP.qualified_name(
+        :population_scale, :value)
+    natural_individual = NP.qualified_name(:individual, :value)
+    natural_observation_scale = NP.qualified_name(
+        :y, :observation_scale)
+    @test keys(natural_hierarchy_graph.sites) == (
+        natural_population, natural_population_scale, natural_individual,
+        natural_observation_scale, :y)
+    @test NP.site_factor_dependencies(
+        natural_hierarchy_graph.sites[natural_individual].factor) ==
+          (natural_population, natural_population_scale)
+    @test NP.site_factor_dependencies(
+        natural_hierarchy_graph.sites.y.factor) ==
+          (natural_individual, natural_observation_scale)
+
+    explicit_population_component = NP.component(
+        :population, hierarchy_population_source())
+    explicit_population = NP.output(
+        explicit_population_component, :value)
+    explicit_population_scale_component = NP.component(
+        :population_scale, hierarchy_scale_source(1.0))
+    explicit_population_scale = NP.output(
+        explicit_population_scale_component, :value)
+    explicit_individual_component = NP.component(
+        :individual,
+        hierarchy_individual_source(
+            explicit_population, explicit_population_scale))
+    explicit_individual = NP.output(
+        explicit_individual_component, :value)
+    explicit_response_component = NP.component(
+        :y,
+        NP.condition(
+            hierarchy_observation_source(explicit_individual);
+            y=response))
+    explicit_hierarchy = NP.compose(
+        explicit_population_component,
+        explicit_population_scale_component,
+        explicit_individual_component,
+        explicit_response_component)
+    explicit_hierarchy_graph = NP.factor_graph(
+        NP.lower(explicit_hierarchy))
+    explicit_response = NP.qualified_name(:y, :y)
+    @test keys(explicit_hierarchy_graph.sites) == (
+        natural_population, natural_population_scale, natural_individual,
+        natural_observation_scale, explicit_response)
+    @test NP.site_factor_dependencies(
+        explicit_hierarchy_graph.sites[natural_individual].factor) ==
+          (natural_population, natural_population_scale)
+    @test NP.site_factor_dependencies(
+        explicit_hierarchy_graph.sites[explicit_response].factor) ==
+          (natural_individual, natural_observation_scale)
+
+    hierarchy_brm_data = (; y=response)
+    hierarchy_brm = @brm hierarchy_brm_data begin
+        population ~ Normal()
+        population_scale ~ Exponential(1.0)
+        individual ~ Normal(population, population_scale)
+        observation_scale ~ Exponential(2.0)
+        y ~ Normal(individual, observation_scale)
+    end
+    hierarchy_brm_model = NP.lower(hierarchy_brm)
+    @test typeof(hierarchy_brm_model) === typeof(hierarchy.declaration)
+    @test sprint(show, hierarchy_brm_model) ==
+          sprint(show, hierarchy.declaration)
+    hierarchy_brm_plan = NP.compile(hierarchy_brm)
+    @test hierarchy_brm_plan isa NP.FactorPlan
+    @test hierarchy_brm_plan.declaration.site_order ==
+          hierarchy_plan.declaration.site_order
+
+    natural_hierarchy_prepared = NP.prepare(natural_hierarchy)
+    explicit_hierarchy_prepared = NP.prepare(NP.compile(explicit_hierarchy))
+    hierarchy_brm_prepared = NP.prepare(hierarchy_brm)
+    for candidate_prepared in (
+        natural_hierarchy_prepared,
+        explicit_hierarchy_prepared,
+        hierarchy_brm_prepared)
+        candidate_workspace = NP.workspace(
+            candidate_prepared, Float64, DI.AutoEnzyme())
+        candidate_density, candidate_gradient = NP.logdensity_and_gradient!(
+            candidate_workspace, candidate_prepared, hierarchy_position)
+        @test candidate_density ≈ hierarchy_density
+        @test candidate_gradient ≈ hierarchy_gradient
+        @test NP.evaluate(
+            candidate_workspace, candidate_prepared, hierarchy_position,
+            NP.LinearPredictor()) == hierarchy_linear
+        @test NP.evaluate(
+            candidate_workspace, candidate_prepared, hierarchy_position,
+            NP.PointwiseLogLikelihood()) ≈ hierarchy_pointwise
+        @test NP.simulate(
+            MersenneTwister(928), candidate_workspace,
+            candidate_prepared, hierarchy_position) == NP.simulate(
+                MersenneTwister(928), hierarchy_workspace,
+                hierarchy_prepared, hierarchy_position)
+        candidate_prior = NP.simulate_prior(
+            MersenneTwister(929), candidate_workspace, candidate_prepared)
+        reference_prior = NP.simulate_prior(
+            MersenneTwister(929), hierarchy_workspace, hierarchy_prepared)
+        @test candidate_prior.position == reference_prior.position
+        @test candidate_prior.response == reference_prior.response
+        @test NP.execute_draws(
+            MersenneTwister(930), candidate_workspace, candidate_prepared,
+            hierarchy_positions, hierarchy_bundle_queries) ==
+              NP.execute_draws(
+                  MersenneTwister(930), hierarchy_workspace,
+                  hierarchy_prepared, hierarchy_positions,
+                  hierarchy_bundle_queries)
+        @test factor_steady_state_allocations(
+            candidate_workspace, candidate_prepared, hierarchy_position) ==
+              (; primal=0, gradient=0)
+    end
+
+    bound_factor_declaration = NP.model(
+        inputs=(; latent_scale=NP.input(), observation_scale=NP.input()),
+        parameters=(;
+            population=NP.parameter(
+                NP.RealSupport(), (:population,);
+                transform=NP.Identity(), prior=NP.StandardNormal())),
+        observations=(;
+            individual=NP.normal(
+                :individual, :population, :latent_scale),
+            y=NP.broadcasted(NP.normal(
+                :y, :individual, :observation_scale))),
+        outputs=(; y=:y),
+        site_order=(:population, :individual, :y))
+    bound_factor_plan = NP.compile(
+        bound_factor_declaration,
+        (; latent_scale=0.7, observation_scale=0.5);
+        conditions=(; y=response))
+    @test bound_factor_plan isa NP.FactorPlan
+    @test bound_factor_plan.bindings ==
+          (; latent_scale=0.7, observation_scale=0.5)
+    @test bound_factor_plan.graph.sites.individual.factor.scale isa
+          NP.InputValue{:latent_scale}
+    @test bound_factor_plan.graph.sites.y.factor.scale isa
+          NP.InputValue{:observation_scale}
+    bound_factor_prepared = NP.prepare(bound_factor_plan)
+    bound_factor_workspace = NP.workspace(
+        bound_factor_prepared, Float64, DI.AutoEnzyme())
+    bound_factor_position = [0.2, -0.1]
+    bound_factor_density, bound_factor_gradient =
+        NP.logdensity_and_gradient!(
+            bound_factor_workspace, bound_factor_prepared,
+            bound_factor_position)
+    bound_latent_residual =
+        bound_factor_position[2] - bound_factor_position[1]
+    bound_observation_residuals = response .- bound_factor_position[2]
+    @test bound_factor_density ≈
+          logpdf(Normal(), bound_factor_position[1]) +
+          logpdf(Normal(
+              bound_factor_position[1], 0.7), bound_factor_position[2]) +
+          sum(logpdf.(Normal(bound_factor_position[2], 0.5), response))
+    @test bound_factor_gradient ≈ [
+        -bound_factor_position[1] + bound_latent_residual / 0.7^2,
+        -bound_latent_residual / 0.7^2 +
+            sum(bound_observation_residuals) / 0.5^2,
+    ]
+    @test factor_steady_state_allocations(
+        bound_factor_workspace, bound_factor_prepared,
+        bound_factor_position) == (; primal=0, gradient=0)
+    @test NP.rebind(bound_factor_prepared, (;)).plan.bindings ==
+          bound_factor_plan.bindings
+    @test_throws ArgumentError NP.prepare(NP.compile(
+        bound_factor_declaration,
+        (; latent_scale=Inf, observation_scale=0.5);
+        conditions=(; y=response)))
     @test NP.LogDensityProblem(
         hierarchy_prepared, DI.AutoEnzyme()) isa NP.FactorLogDensityProblem
     conditioned_individual_plan = NP.compile(NP.condition(
