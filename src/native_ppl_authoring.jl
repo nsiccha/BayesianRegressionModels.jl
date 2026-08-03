@@ -827,30 +827,31 @@ function _lower_brmi(brmi::BRM.BRMI)
             :likelihood_scale,
             "Normal scale must be one named scalar parameter"))
 
-    predictor_term = BRM._native_ppl_affine_predictor(brmi, location)
-    predictor_column = predictor_term.column
-    predictor_name = BRM.name(predictor_column)
-    predictor_name === response && throw(CapabilityError(
+    predictor_terms = BRM._native_ppl_affine_predictors(brmi, location)
+    predictor_columns = map(term -> term.column, predictor_terms)
+    predictor_names = map(BRM.name, predictor_columns)
+    response in predictor_names && throw(CapabilityError(
         :input_roles,
-        "predictor `$predictor_name` is also the observed response"))
-    predictor = parent(parent(predictor_column))
+        "predictor `$response` is also the observed response"))
+    predictors = map(column -> parent(parent(column)), predictor_columns)
     response_values = parent(parent(response_lhs))
 
     prior_scale = family === BRM.Normal ?
         BRM._native_ppl_exponential_prior(brmi, scale_name) : nothing
     expected = family === BRM.Normal ?
-        Set((location, scale_name, response, predictor_name)) :
-        Set((location, response, predictor_name))
+        Set((location, scale_name, response, predictor_names...)) :
+        Set((location, response, predictor_names...))
     extras = setdiff(Set(keys(brmi.operations)), expected)
     isempty(extras) || throw(CapabilityError(
         :additional_operations,
         "unsupported formula operations: " *
         join(sort!(collect(extras)), ", ")))
 
-    input_declarations = NamedTuple{(predictor_name,)}((input(),))
+    input_declarations = _declaration_namedtuple(
+        predictor_names, map(_ -> input(), predictor_names))
     coefficient_name = Symbol(:beta_, location)
     coefficient_declaration = parameter(
-        RealSupport(), (:Intercept, predictor_name);
+        RealSupport(), (:Intercept, predictor_names...);
         transform=Identity(), prior=StandardNormal())
     parameter_declarations = if family === BRM.Normal
         scale_declaration = parameter(
@@ -862,28 +863,23 @@ function _lower_brmi(brmi::BRM.BRMI)
         NamedTuple{(coefficient_name,)}((coefficient_declaration,))
     end
 
-    transform_name = if predictor_term.transform === :center
-        Symbol(:center_, predictor_name, :_for_, location)
-    elseif predictor_term.transform === :zscale
-        Symbol(:zscale_, predictor_name, :_for_, location)
-    else
-        nothing
+    transform_names = Symbol[]
+    transform_declarations = Any[]
+    affine_inputs = map(predictor_terms, predictor_names) do predictor_term,
+                                                          predictor_name
+        predictor_term.transform === :identity && return predictor_name
+        canonical = predictor_term.transform
+        transform_name = Symbol(canonical, :_, predictor_name, :_for_, location)
+        transform_declaration = canonical === :center ?
+            center(predictor_name) : zscale(predictor_name)
+        push!(transform_names, transform_name)
+        push!(transform_declarations, transform_declaration)
+        transform_name
     end
-    transform_declaration = if predictor_term.transform === :center
-        center(predictor_name)
-    elseif predictor_term.transform === :zscale
-        zscale(predictor_name)
-    else
-        nothing
-    end
-    affine_input = transform_name === nothing ? predictor_name : transform_name
-    affine_declaration = affine(affine_input, coefficient_name)
-    node_declarations = if transform_name === nothing
-        NamedTuple{(location,)}((affine_declaration,))
-    else
-        NamedTuple{(transform_name, location)}(
-            (transform_declaration, affine_declaration))
-    end
+    affine_declaration = affine(Tuple(affine_inputs), coefficient_name)
+    node_names = (Tuple(transform_names)..., location)
+    node_values = (Tuple(transform_declarations)..., affine_declaration)
+    node_declarations = _declaration_namedtuple(node_names, node_values)
 
     observation_declaration = if family === BRM.Normal
         normal(response, location, scale_name)
@@ -902,7 +898,7 @@ function _lower_brmi(brmi::BRM.BRMI)
         parameters=parameter_declarations,
         nodes=node_declarations,
         observations=observation_declarations)
-    bindings = NamedTuple{(predictor_name,)}((predictor,))
+    bindings = _declaration_namedtuple(predictor_names, predictors)
     conditions = NamedTuple{(response,)}((response_values,))
     (; declaration, bindings, conditions)
 end

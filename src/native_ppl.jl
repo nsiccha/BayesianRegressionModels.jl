@@ -489,18 +489,18 @@ function _native_ppl_predictor_term(term, key::Symbol)
         "offsets, interactions, groups, and other transforms are not lowered yet"))
 end
 
-function _native_ppl_affine_predictor(brmi::BRMI, key::Symbol)
+function _native_ppl_affine_predictors(brmi::BRMI, key::Symbol)
     lhs, predictor = _native_ppl_sampling_rhs(brmi, key)
     _native_ppl_ref_name(lhs) === key || throw(NativePPLCapabilityError(
         :linked_predictor, "`$key` must have a bare, unlinked left-hand side"))
     predictor isa ExprColumn && getf(predictor) === (+) ||
         throw(NativePPLCapabilityError(:predictor_terms,
-            "`$key` must be exactly `1 + x` for one continuous data column"))
+            "`$key` must be an additive affine formula such as `1 + x + z`"))
     isempty(getkwargs(predictor)) || throw(NativePPLCapabilityError(
         :predictor_keywords, "predictor `$key` has keywords"))
     terms = getargs(predictor)
-    length(terms) == 2 || throw(NativePPLCapabilityError(:predictor_terms,
-        "`$key` must have exactly an intercept and one continuous predictor"))
+    length(terms) >= 2 || throw(NativePPLCapabilityError(:predictor_terms,
+        "`$key` must have an intercept and at least one continuous predictor"))
 
     intercepts = filter(term -> term isa Number && term == 1, terms)
     length(intercepts) == 1 ||
@@ -508,9 +508,15 @@ function _native_ppl_affine_predictor(brmi::BRMI, key::Symbol)
             "`$key` must contain exactly one intercept"))
     predictor_terms = filter(
         term -> !(term isa Number && term == 1), terms)
-    length(predictor_terms) == 1 || throw(NativePPLCapabilityError(
-        :predictor_terms, "`$key` must contain exactly one predictor term"))
-    _native_ppl_predictor_term(only(predictor_terms), key)
+    parsed = Tuple(_native_ppl_predictor_term(term, key)
+                   for term in predictor_terms)
+    predictor_names = map(term -> name(term.column), parsed)
+    length(unique(predictor_names)) == length(predictor_names) || throw(
+        NativePPLCapabilityError(
+            :predictor_terms,
+            "`$key` must use each raw predictor at most once; got " *
+            "$(predictor_names)"))
+    parsed
 end
 
 function _native_ppl_exponential_prior(brmi::BRMI, key::Symbol)

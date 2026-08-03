@@ -1944,6 +1944,31 @@ end
     macro_work = NP.workspace(macro_prepared)
     @test NP.logdensity!(macro_work, macro_prepared, position) ≈
           expected_density
+
+    brmi = @brm data begin
+        sigma ~ Exponential(2.0)
+        mu ~ 1 + zscale(x) + center(w)
+        y ~ Normal(mu, sigma)
+    end
+    lowered = NP.lower(brmi)
+    @test keys(lowered.inputs) == (:x, :w)
+    @test keys(lowered.parameters) == (:beta_mu, :sigma)
+    @test lowered.parameters.beta_mu.axis_keys == (:Intercept, :x, :w)
+    @test keys(lowered.nodes) ==
+          (:zscale_x_for_mu, :center_w_for_mu, :mu)
+    @test lowered.nodes.mu ==
+          NP.affine((:zscale_x_for_mu, :center_w_for_mu), :beta_mu)
+    @test lowered.observations.y isa NP.BroadcastObservation
+
+    brm_plan = NP.compile(brmi)
+    @test keys(brm_plan.inputs.predictors) == (:x, :w)
+    @test brm_plan.axes.coefficient.keys == (:Intercept, :x, :w)
+    @test keys(brm_plan.nodes.transforms) ==
+          (:zscale_x_for_mu, :center_w_for_mu)
+    brm_prepared = NP.prepare(brm_plan)
+    @test brm_prepared.predictors == macro_prepared.predictors
+    @test NP.logdensity!(
+        NP.workspace(brm_prepared), brm_prepared, position) ≈ expected_density
 end
 
 
@@ -2406,12 +2431,12 @@ end
     @test capability_error(() -> BRM._native_ppl_plan(extra_operation)).capability ==
           :additional_operations
 
-    multiple_terms = @brm merge(data, (; z=[2.0, 1.0, 0.0])) begin
+    duplicate_term = @brm data begin
         sigma ~ Exponential(1)
-        mu ~ 1 + x + z
+        mu ~ 1 + x + x
         y ~ Normal(mu, sigma)
     end
-    @test capability_error(() -> BRM._native_ppl_plan(multiple_terms)).capability ==
+    @test capability_error(() -> BRM._native_ppl_plan(duplicate_term)).capability ==
           :predictor_terms
 
     response_as_predictor = @brm (y=data.y,) begin
