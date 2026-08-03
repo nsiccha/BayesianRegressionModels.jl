@@ -1,7 +1,7 @@
 using Test
 using BayesianRegressionModels
 import DifferentiationInterface as DI
-using Distributions: Exponential, Normal, Poisson, logpdf
+using Distributions: Exponential, LKJCholesky, Normal, Poisson, logpdf
 using Enzyme
 using LogDensityProblems
 using Random: MersenneTwister, rand, randexp, randn
@@ -454,6 +454,17 @@ NP.@model function natural_varying_slope(x, group)
     beta ~ Normal()
     sigma ~ Exponential(2)
     mu = beta * x + b_p_group[group] * x
+    @. y ~ Normal(mu, sigma)
+end
+
+NP.@model function natural_correlated_varying_intercept_slope(x, group)
+    tau_p_group[(:Intercept, :x)] ~ Exponential(1)
+    L_p_group[(:Intercept, :x)] ~ LKJCholesky(2, 2)
+    b_p_group[group, (:Intercept, :x)] ~
+        MvNormalCholesky(tau_p_group, L_p_group)
+    beta ~ Normal()
+    sigma ~ Exponential(2)
+    mu = beta * x + dot(b_p_group[group], (1, x))
     @. y ~ Normal(mu, sigma)
 end
 
@@ -3938,6 +3949,58 @@ end
         x=sampled_offset_data.x,
         group=grouped_bindings.group,
         y=sampled_offset_data.y)
+    correlated_varying_brm = @brm varying_brm_data begin
+        sigma ~ Exponential(2)
+        mu ~ 0 + x + (1 + x | p | group)
+        sd(:, p) ~ Exponential(1)
+        cor(:, p) ~ LKJCholesky(2, 2)
+        y ~ Normal(mu, sigma)
+    end
+    @test popcoefnames(correlated_varying_brm, :mu) == [:x]
+    @test ranefcoefnames(correlated_varying_brm, :p) == [
+        (; predictor=:mu, coefficient=:Intercept),
+        (; predictor=:mu, coefficient=:x)]
+    @test SBBRMI(correlated_varying_brm; mod=@__MODULE__) isa SBBRMI
+    correlated_varying_model = NP.lower(correlated_varying_brm)
+    natural_correlated_varying = NP.condition(
+        natural_correlated_varying_intercept_slope(
+            varying_brm_data.x, varying_brm_data.group);
+        y=varying_brm_data.y)
+    @test typeof(correlated_varying_model) ===
+          typeof(natural_correlated_varying.declaration)
+    @test sprint(show, correlated_varying_model) ==
+          sprint(show, natural_correlated_varying.declaration)
+    @test keys(correlated_varying_model.parameters) == (
+        :beta_mu, :tau_p_group, :L_p_group, :b_p_group, :sigma)
+    @test keys(correlated_varying_model.nodes) ==
+          (:b_p_group_by_group_for_mu, :mu)
+    correlated_varying_plan = NP.compile(correlated_varying_brm)
+    @test correlated_varying_plan.graph.schedule == (
+        :tau_p_group, :L_p_group, :b_p_group, :beta_mu, :sigma,
+        :b_p_group_by_group_for_mu, :mu, :y)
+    @test correlated_varying_plan.graph.dimension == 11
+    @test correlated_varying_plan.graph.coordinates.b_p_group.keys == (
+        NP.GroupCoefficientKey(:b_p_group, :a, :Intercept),
+        NP.GroupCoefficientKey(:b_p_group, :a, :x),
+        NP.GroupCoefficientKey(:b_p_group, :b, :Intercept),
+        NP.GroupCoefficientKey(:b_p_group, :b, :x),
+        NP.GroupCoefficientKey(:b_p_group, :c, :Intercept),
+        NP.GroupCoefficientKey(:b_p_group, :c, :x))
+    correlated_varying_prepared = NP.prepare(correlated_varying_plan)
+    correlated_varying_workspace = NP.workspace(
+        correlated_varying_prepared, Float64, DI.AutoEnzyme())
+    correlated_varying_density, correlated_varying_gradient =
+        NP.logdensity_and_gradient!(
+            correlated_varying_workspace, correlated_varying_prepared,
+            correlated_group_position)
+    @test correlated_varying_density ≈ correlated_density
+    @test correlated_varying_gradient ≈ correlated_gradient
+    @test NP.evaluate(
+        correlated_varying_workspace, correlated_varying_prepared,
+        correlated_group_position, NP.LinearPredictor()) ≈ correlated_mu
+    @test factor_steady_state_allocations(
+        correlated_varying_workspace, correlated_varying_prepared,
+        correlated_group_position) == (; primal=0, gradient=0)
     varying_brm = @brm varying_brm_data begin
         sigma ~ Exponential(2)
         mu ~ 0 + x + (1 | p | group)

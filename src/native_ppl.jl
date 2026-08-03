@@ -629,34 +629,37 @@ function _native_ppl_varying_intercept(term, key::Symbol)
         "grouped term in predictor `$key` must use `(1 | id | group)` " *
         "or `(0 + x | id | group)`"))
     coefficient, id, group = arguments
-    predictor = if coefficient == 1
-        nothing
+    predictors = if coefficient == 1
+        (nothing,)
     elseif coefficient isa ExprColumn && getf(coefficient) === (+)
         isempty(getkwargs(coefficient)) || throw(NativePPLCapabilityError(
             :group_term,
             "varying-slope expression in `$key` cannot have keywords"))
         coefficient_terms = getargs(coefficient)
-        count(==(0), coefficient_terms) == 1 || throw(
+        intercept_count = count(==(1), coefficient_terms)
+        suppression_count = count(==(0), coefficient_terms)
+        (intercept_count == 1 && suppression_count == 0) ||
+            (intercept_count == 0 && suppression_count == 1) || throw(
             NativePPLCapabilityError(
                 :group_term,
-                "varying slope in `$key` must suppress its intercept with " *
-                "exactly one `0`"))
-        slope_terms = filter(!=(0), coefficient_terms)
+                "grouped coefficients in `$key` must contain exactly one " *
+                "intercept `1` or suppression `0`"))
+        slope_terms = filter(term -> !(term isa Number && term in (0, 1)),
+                             coefficient_terms)
         length(slope_terms) == 1 || throw(NativePPLCapabilityError(
             :group_term,
-            "the current varying-slope slice requires exactly one raw " *
-            "predictor in `(0 + x | id | group)`"))
+            "the current correlated grouped slice requires exactly one raw " *
+            "slope predictor"))
         parsed = _native_ppl_predictor_term(only(slope_terms), key)
         parsed.transform === :identity || throw(NativePPLCapabilityError(
             :group_term,
             "the current varying-slope slice requires an untransformed raw " *
             "predictor"))
-        parsed
+        intercept_count == 1 ? (nothing, parsed) : (parsed,)
     else
         throw(NativePPLCapabilityError(
             :group_term,
-            "grouped term in `$key` must be a varying intercept `1` or one " *
-            "varying slope `0 + x`"))
+            "grouped term in `$key` must be `1`, `0 + x`, or `1 + x`"))
     end
     id isa Symbol || throw(NativePPLCapabilityError(
         :group_term, "grouped-term ID in `$key` must be a Symbol"))
@@ -664,7 +667,8 @@ function _native_ppl_varying_intercept(term, key::Symbol)
         NativePPLCapabilityError(
             :group_term,
             "grouped term in `$key` must use one raw data column"))
-    (; id, group, predictor)
+    predictor = length(predictors) == 1 ? only(predictors) : nothing
+    (; id, group, predictor, predictors)
 end
 
 function _native_ppl_affine_components(brmi::BRMI, key::Symbol)
