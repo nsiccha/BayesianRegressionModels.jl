@@ -595,6 +595,38 @@ function factor_query_allocations(workspace::NP.FactorWorkspace,
        predictive=predictive_bytes, prior=prior_bytes)
 end
 
+function factor_batch_allocations(workspace::NP.FactorWorkspace,
+                                  prepared::NP.FactorPrepared,
+                                  positions, linear, pointwise, predictive,
+                                  bundle)
+    linear_query = NP.LinearPredictor()
+    pointwise_query = NP.PointwiseLogLikelihood()
+    queries = (;
+        linear=linear_query,
+        pointwise=pointwise_query,
+        predictive=NP.PosteriorPredictive())
+    rng = MersenneTwister(924)
+    bundle_rng = MersenneTwister(925)
+    NP.evaluate_draws!(
+        linear, workspace, prepared, positions, linear_query)
+    NP.evaluate_draws!(
+        pointwise, workspace, prepared, positions, pointwise_query)
+    NP.simulate_draws!(
+        rng, predictive, workspace, prepared, positions)
+    NP.execute_draws!(
+        bundle_rng, bundle, workspace, prepared, positions, queries)
+    linear_bytes = @allocated NP.evaluate_draws!(
+        linear, workspace, prepared, positions, linear_query)
+    pointwise_bytes = @allocated NP.evaluate_draws!(
+        pointwise, workspace, prepared, positions, pointwise_query)
+    predictive_bytes = @allocated NP.simulate_draws!(
+        rng, predictive, workspace, prepared, positions)
+    bundle_bytes = @allocated NP.execute_draws!(
+        bundle_rng, bundle, workspace, prepared, positions, queries)
+    (; linear=linear_bytes, pointwise=pointwise_bytes,
+       predictive=predictive_bytes, bundle=bundle_bytes)
+end
+
 function allocating_query_bytes(workspace, prepared, position)
     linear = BRM.NativePPL.LinearPredictor()
     predictive = BRM.NativePPL.PosteriorPredictive()
@@ -3331,6 +3363,75 @@ end
         hierarchy_linear_buffer, hierarchy_pointwise_buffer,
         hierarchy_predictive_buffer, hierarchy_prior_position) ==
           (; linear=0, pointwise=0, predictive=0, prior=0)
+
+    hierarchy_positions = [
+        hierarchy_position';
+        0.1 log(0.9) 0.2 log(0.7);
+        -0.3 log(1.1) 0.4 log(0.6);
+    ]
+    hierarchy_linear_draws = NP.evaluate_draws(
+        hierarchy_workspace, hierarchy_prepared, hierarchy_positions,
+        NP.LinearPredictor())
+    hierarchy_pointwise_draws = NP.evaluate_draws(
+        hierarchy_workspace, hierarchy_prepared, hierarchy_positions,
+        NP.PointwiseLogLikelihood())
+    for draw in axes(hierarchy_positions, 1)
+        draw_position = collect(@view hierarchy_positions[draw, :])
+        @test hierarchy_linear_draws[draw, :] == NP.evaluate(
+            hierarchy_workspace, hierarchy_prepared, draw_position,
+            NP.LinearPredictor())
+        @test hierarchy_pointwise_draws[draw, :] == NP.evaluate(
+            hierarchy_workspace, hierarchy_prepared, draw_position,
+            NP.PointwiseLogLikelihood())
+    end
+    hierarchy_batch_signature = NP.batch_output_signature(
+        hierarchy_prepared, hierarchy_positions, NP.LinearPredictor())
+    @test NP.output_axes(hierarchy_batch_signature) == (
+        BRM.NativePPLAxis(:draw, Base.OneTo(3)),
+        hierarchy_prepared.plan.observation_axis)
+
+    hierarchy_predictive_draws_rng = MersenneTwister(926)
+    hierarchy_predictive_scalar_rng = MersenneTwister(926)
+    hierarchy_predictive_draws = NP.simulate_draws(
+        hierarchy_predictive_draws_rng, hierarchy_workspace,
+        hierarchy_prepared, hierarchy_positions)
+    hierarchy_predictive_scalar = similar(hierarchy_predictive_draws)
+    for draw in axes(hierarchy_positions, 1)
+        NP.simulate!(
+            hierarchy_predictive_scalar_rng,
+            @view(hierarchy_predictive_scalar[draw, :]),
+            hierarchy_workspace, hierarchy_prepared,
+            @view(hierarchy_positions[draw, :]))
+    end
+    @test hierarchy_predictive_draws == hierarchy_predictive_scalar
+
+    hierarchy_bundle_queries = (;
+        linear=NP.LinearPredictor(),
+        pointwise=NP.PointwiseLogLikelihood(),
+        predictive=NP.PosteriorPredictive())
+    hierarchy_bundle_rng = MersenneTwister(927)
+    hierarchy_bundle_predictive_rng = MersenneTwister(927)
+    hierarchy_bundle = NP.execute_draws(
+        hierarchy_bundle_rng, hierarchy_workspace, hierarchy_prepared,
+        hierarchy_positions, hierarchy_bundle_queries)
+    @test hierarchy_bundle.linear == hierarchy_linear_draws
+    @test hierarchy_bundle.pointwise == hierarchy_pointwise_draws
+    @test hierarchy_bundle.predictive == NP.simulate_draws(
+        hierarchy_bundle_predictive_rng, hierarchy_workspace,
+        hierarchy_prepared, hierarchy_positions)
+
+    hierarchy_batch_linear = similar(hierarchy_linear_draws)
+    hierarchy_batch_pointwise = similar(hierarchy_pointwise_draws)
+    hierarchy_batch_predictive = similar(hierarchy_predictive_draws)
+    hierarchy_batch_bundle = (;
+        linear=similar(hierarchy_linear_draws),
+        pointwise=similar(hierarchy_pointwise_draws),
+        predictive=similar(hierarchy_predictive_draws))
+    @test factor_batch_allocations(
+        hierarchy_workspace, hierarchy_prepared, hierarchy_positions,
+        hierarchy_batch_linear, hierarchy_batch_pointwise,
+        hierarchy_batch_predictive, hierarchy_batch_bundle) ==
+          (; linear=0, pointwise=0, predictive=0, bundle=0)
     @test NP.LogDensityProblem(
         hierarchy_prepared, DI.AutoEnzyme()) isa NP.FactorLogDensityProblem
     conditioned_individual_plan = NP.compile(NP.condition(
