@@ -179,7 +179,7 @@ function _check_named_declarations(values, kind::AbstractString, type)
     values
 end
 
-function model(; inputs, parameters=(;), nodes=(;), observations)
+function _validate_model_components(inputs, parameters, nodes, observations)
     _check_named_declarations(
         inputs, "input", AbstractInputDeclaration)
     _check_named_declarations(
@@ -230,7 +230,19 @@ function model(; inputs, parameters=(;), nodes=(;), observations)
         end
     end
 
+    nothing
+end
+
+function model(; inputs, parameters=(;), nodes=(;), observations)
+    _validate_model_components(inputs, parameters, nodes, observations)
     Model(inputs, parameters, nodes, observations)
+end
+
+function _validate_model(declaration::Model)
+    _validate_model_components(
+        declaration.inputs, declaration.parameters,
+        declaration.nodes, declaration.observations)
+    declaration
 end
 
 function Base.show(io::IO, declaration::Model)
@@ -280,7 +292,8 @@ function _compile_transform(declaration::ZScale, name::Symbol,
         name, predictor_name, axis, fit.mean, fit.scale)
 end
 
-function _validate_coefficient_parameter(name::Symbol, declaration::Parameter)
+function _validate_coefficient_parameter(
+    name::Symbol, declaration::Parameter, predictor_name::Symbol)
     declaration.support isa RealSupport || throw(CapabilityError(
         :parameter_support,
         "affine coefficient parameter `$name` must use RealSupport"))
@@ -293,6 +306,13 @@ function _validate_coefficient_parameter(name::Symbol, declaration::Parameter)
     length(declaration.axis_keys) == 2 || throw(CapabilityError(
         :parameter_axis,
         "affine coefficient parameter `$name` must have intercept and slope coordinates"))
+    first(declaration.axis_keys) === :Intercept || throw(CapabilityError(
+        :parameter_axis,
+        "affine coefficient parameter `$name` must name its first coordinate :Intercept"))
+    last(declaration.axis_keys) === predictor_name || throw(CapabilityError(
+        :parameter_axis,
+        "affine coefficient parameter `$name` must name its slope coordinate " *
+        "after predictor `$predictor_name`"))
     nothing
 end
 
@@ -309,6 +329,9 @@ function _validate_scale_parameter(name::Symbol, declaration::Parameter)
     length(declaration.axis_keys) == 1 || throw(CapabilityError(
         :parameter_axis,
         "Normal scale parameter `$name` must have one scalar coordinate"))
+    only(declaration.axis_keys) === name || throw(CapabilityError(
+        :parameter_axis,
+        "Normal scale parameter `$name` must use its parameter identity as its axis key"))
     nothing
 end
 
@@ -322,6 +345,17 @@ an optional exponential rate link, and one Normal/BernoulliLogit/Poisson
 observation. Unsupported graph shapes fail closed.
 """
 function bind(declaration::Model, bindings)
+    _validate_model(declaration)
+    bindings isa NamedTuple || throw(ArgumentError(
+        "native PPL bindings must be a NamedTuple; got $(typeof(bindings))"))
+    missing_bindings = setdiff(Set(keys(declaration.inputs)), Set(keys(bindings)))
+    isempty(missing_bindings) || throw(ArgumentError(
+        "native PPL bindings are missing declared inputs: " *
+        join(sort!(collect(missing_bindings)), ", ")))
+    extra_bindings = setdiff(Set(keys(bindings)), Set(keys(declaration.inputs)))
+    isempty(extra_bindings) || throw(ArgumentError(
+        "native PPL bindings contain undeclared inputs: " *
+        join(sort!(collect(extra_bindings)), ", ")))
     length(declaration.inputs) == 2 || throw(CapabilityError(
         :input_roles,
         "the current native compiler requires one predictor and one response input"))
@@ -363,7 +397,8 @@ function bind(declaration::Model, bindings)
             "`$coefficient_name`"))
     coefficient_declaration = getproperty(
         declaration.parameters, coefficient_name)
-    _validate_coefficient_parameter(coefficient_name, coefficient_declaration)
+    _validate_coefficient_parameter(
+        coefficient_name, coefficient_declaration, predictor_name)
 
     transform_pairs = [(name, value) for (name, value) in pairs(declaration.nodes)
                        if value isa Union{Center,ZScale}]
@@ -424,6 +459,10 @@ function bind(declaration::Model, bindings)
             "Normal declaration currently requires exactly coefficient and scale parameters"))
         scale_declaration = getproperty(declaration.parameters, scale_name)
         _validate_scale_parameter(scale_name, scale_declaration)
+        length(declaration.nodes) == (transform === nothing ? 1 : 2) ||
+            throw(CapabilityError(
+                :additional_nodes,
+                "Normal declaration contains unsupported extra nodes"))
         scale_axis = BRM.NativePPLAxis(
             Symbol(scale_name, :_scalar), scale_declaration.axis_keys)
         scale = BRM.NativePPLParameter(
