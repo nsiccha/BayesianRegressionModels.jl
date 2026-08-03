@@ -394,8 +394,17 @@ end
 struct ExponentialSiteFactor{S} <: AbstractSiteFactor
     scale::S
 end
-struct LKJCholeskySiteFactor{E} <: AbstractSiteFactor
+struct LKJCholeskySiteFactor{E,N} <: AbstractSiteFactor
     eta::E
+    log_normalizers::N
+end
+function LKJCholeskySiteFactor(eta, ::Val{K}) where {K}
+    log_normalizers = ntuple(K - 1) do column
+        alpha = eta + (K - column - 1) / 2
+        BRM.loggamma(alpha + 0.5) - BRM.loggamma(alpha) -
+            0.5 * log(BRM.pi)
+    end
+    LKJCholeskySiteFactor(eta, log_normalizers)
 end
 struct BernoulliLogitSiteFactor{L} <: AbstractSiteFactor
     logit::L
@@ -676,7 +685,8 @@ function _parameter_stochastic_site(
     StochasticSite(
         CholeskyCorrelationSupport{dimension}(),
         CholeskyCorrelationTransform{dimension}(),
-        LKJCholeskySiteFactor(declaration.eta), BlockSiteShape(), activity,
+        LKJCholeskySiteFactor(declaration.eta, Val(dimension)),
+        BlockSiteShape(), activity,
         coordinate_keys)
 end
 
@@ -1245,10 +1255,10 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
                     "grouped affine node `$name` requires a Cholesky " *
                     "correlation parameter"))
             coefficients = group_coefficients(standardized_declaration)
-            length(coefficients) == 2 || throw(CapabilityError(
+            length(coefficients) >= 2 || throw(CapabilityError(
                 :factor_nodes,
-                "the first executable grouped affine slice requires exactly " *
-                "two correlated coefficients"))
+                "grouped affine node `$name` requires at least two " *
+                "correlated coefficients"))
             scales_declaration.axis_keys == coefficients || throw(
                 CapabilityError(
                     :factor_nodes,
@@ -1289,13 +1299,15 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
                         "grouped affine node `$name` scales must be a positive " *
                         "Exponential-prior block"))
             correlation_site = getproperty(graph.sites, correlation_name)
-            correlation_site.support isa CholeskyCorrelationSupport{2} &&
+            dimension = length(coefficients)
+            correlation_site.support isa
+                CholeskyCorrelationSupport{dimension} &&
                 correlation_site.factor isa LKJCholeskySiteFactor &&
                 correlation_site.activity isa FreeSite || throw(
                     CapabilityError(
                         :factor_nodes,
-                        "grouped affine node `$name` currently requires one " *
-                        "free two-dimensional LKJ Cholesky factor"))
+                        "grouped affine node `$name` requires one free " *
+                        "$dimension-dimensional LKJ Cholesky factor"))
         end
     end
     broadcast_sites = Tuple(
@@ -1740,6 +1752,29 @@ end
     BRM._native_ppl_poisson_logdensity(value, log_rate)
 end
 
+@inline @generated function _factor_lkj_logdensity(
+        ::Val{K}, eta_value, log_normalizers, indices,
+        position::AbstractVector{T}) where {K,T}
+    terms = Any[]
+    coordinate_offset = 0
+    for column in 1:(K - 1)
+        alpha_offset = (K - column - 1) / 2
+        for row in (column + 1):K
+            push!(terms, quote
+                let alpha_value = eta_value + $alpha_offset,
+                    alpha = T(alpha_value),
+                    log_constant = T(getfield(log_normalizers, $column)),
+                    raw = position[first(indices) + $coordinate_offset]
+                    log_constant + alpha * _factor_logsech2(raw)
+                end
+            end)
+            coordinate_offset += 1
+        end
+    end
+    isempty(terms) && return :(zero(T))
+    foldl((left, right) -> :($left + $right), terms)
+end
+
 @inline function _factor_site_logdensity!(::Val{Name},
         site::StochasticSite{S,Tr,F,ScalarSiteShape,FreeSite},
         position::AbstractVector{T}, prepared::FactorPrepared,
@@ -1780,21 +1815,21 @@ end
 
 @inline function _factor_site_logdensity!(::Val{Name},
         site::StochasticSite{
-            CholeskyCorrelationSupport{2},
-            CholeskyCorrelationTransform{2},
+            CholeskyCorrelationSupport{K},
+            CholeskyCorrelationTransform{K},
             F,BlockSiteShape,FreeSite},
         position::AbstractVector{T}, prepared::FactorPrepared,
         buffers::FactorBuffers{T}) where {
-            Name,T,F<:LKJCholeskySiteFactor}
+            Name,K,T,F<:LKJCholeskySiteFactor}
     coordinates = getproperty(prepared.plan.graph.coordinates, Name)
-    length(coordinates.indices) == 1 || throw(CapabilityError(
+    expected_coordinates = K * (K - 1) ÷ 2
+    length(coordinates.indices) == expected_coordinates || throw(CapabilityError(
         :factor_coordinates,
-        "two-dimensional LKJ Cholesky site `$Name` must own one coordinate"))
-    raw = position[first(coordinates.indices)]
-    eta = T(site.factor.eta)
-    log_constant = T(BRM.loggamma(site.factor.eta + 0.5) -
-        BRM.loggamma(site.factor.eta) - 0.5 * log(BRM.pi))
-    log_constant + eta * _factor_logsech2(raw)
+        "$K-dimensional LKJ Cholesky site `$Name` must own " *
+        "$expected_coordinates coordinates"))
+    _factor_lkj_logdensity(
+        Val(K), site.factor.eta, site.factor.log_normalizers,
+        coordinates.indices, position)
 end
 
 @inline function _factor_site_logdensity!(::Val{Name},
@@ -1928,6 +1963,105 @@ end
     zero(T)
 end
 
+@inline function _factor_grouped_standardized(
+        node::GroupedAffineFactorNode, group_index::Int,
+        coefficient_index::Int, coefficient_count::Int,
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {T}
+    standardized_offset = (abs(group_index) - 1) * coefficient_count
+    standardized_name = site_value_name(node.standardized)
+    if group_index < 0
+        generated_indices = getproperty(
+            prepared.plan.generated_group_indices, standardized_name)
+        buffers.generated_group_values[
+            generated_indices[standardized_offset + coefficient_index]]
+    else
+        _factor_coefficient(
+            node.standardized, standardized_offset + coefficient_index,
+            position, prepared, buffers)
+    end
+end
+
+@inline function _factor_correlation_raw(
+        position::AbstractVector, correlation_coordinates,
+        coefficient_index::Int, source_index::Int,
+        coefficient_count::Int)
+    coordinate_offset =
+        (source_index - 1) * coefficient_count -
+        (source_index - 1) * source_index ÷ 2 +
+        coefficient_index - source_index
+    position[first(correlation_coordinates) + coordinate_offset - 1]
+end
+
+@inline @generated function _factor_grouped_scales(
+        node::GroupedAffineFactorNode{Z,S,C,G,P},
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Z,S,C,G,P,T}
+    Expr(:tuple, [:(
+        _factor_coefficient(
+            node.scales, $coefficient_index,
+            position, prepared, buffers))
+        for coefficient_index in 1:fieldcount(P)]...)
+end
+
+@inline @generated function _factor_grouped_partials(
+        node::GroupedAffineFactorNode{Z,S,C,G,P},
+        correlation_coordinates, position::AbstractVector{T}) where {
+            Z,S,C,G,P,T}
+    coefficient_count = fieldcount(P)
+    partials = Any[]
+    for source_index in 1:(coefficient_count - 1)
+        for coefficient_index in (source_index + 1):coefficient_count
+            raw = :(_factor_correlation_raw(
+                position, correlation_coordinates,
+                $coefficient_index, $source_index, $coefficient_count))
+            push!(partials, :(let value = $raw
+                (tanh(value), _factor_sech(value))
+            end))
+        end
+    end
+    Expr(:tuple, partials...)
+end
+
+@inline @generated function _factor_grouped_affine_value(
+        node::GroupedAffineFactorNode{Z,S,C,G,P},
+        group_index::Int, row::Int, scales, partials,
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Z,S,C,G,P,T}
+    coefficient_count = fieldcount(P)
+    contributions = Any[]
+    for coefficient_index in 1:coefficient_count
+        correlated_terms = Any[]
+        residual = :(one(T))
+        for source_index in 1:(coefficient_index - 1)
+            partial_index =
+                (source_index - 1) * coefficient_count -
+                (source_index - 1) * source_index ÷ 2 +
+                coefficient_index - source_index
+            partial = :(getfield(partials, $partial_index))
+            standardized = :(_factor_grouped_standardized(
+                node, group_index, $source_index, $coefficient_count,
+                position, prepared, buffers))
+            push!(correlated_terms,
+                  :($residual * getfield($partial, 1) * $standardized))
+            residual = :($residual * getfield($partial, 2))
+        end
+        diagonal = :(_factor_grouped_standardized(
+            node, group_index, $coefficient_index, $coefficient_count,
+            position, prepared, buffers))
+        push!(correlated_terms, :($residual * $diagonal))
+        correlated = foldl(
+            (left, right) -> :($left + $right), correlated_terms)
+        effect = :(getfield(scales, $coefficient_index) * $correlated)
+        predictor = :(getfield(node.predictors, $coefficient_index))
+        push!(contributions, :(
+            $predictor === nothing ? $effect :
+                $effect * _factor_argument_at(
+                    $predictor, row, prepared.plan, buffers, T)))
+    end
+    isempty(contributions) && return :(zero(T))
+    foldl((left, right) -> :($left + $right), contributions)
+end
 
 @inline function _factor_node_logdensity!(::Val{Name},
         node::GroupedAffineFactorNode,
@@ -1935,45 +2069,17 @@ end
         buffers::FactorBuffers{T}) where {Name,T}
     node_index = getproperty(prepared.plan.node_indices, Name)
     group_indices = getproperty(prepared.plan.group_indices, Name)
-    standardized_name = site_value_name(node.standardized)
     correlation_name = site_value_name(node.correlation)
     correlation_coordinates = getproperty(
         prepared.plan.graph.coordinates, correlation_name).indices
-    raw_correlation = position[first(correlation_coordinates)]
-    correlation = tanh(raw_correlation)
-    residual_scale = _factor_sech(raw_correlation)
+    scales = _factor_grouped_scales(node, position, prepared, buffers)
+    partials = _factor_grouped_partials(
+        node, correlation_coordinates, position)
     for row in prepared.plan.observation_axis.keys
         group_index = group_indices[row]
-        z_intercept, z_slope = if group_index < 0
-            generated_indices = getproperty(
-                prepared.plan.generated_group_indices, standardized_name)
-            standardized_offset = (-group_index - 1) * 2
-            (buffers.generated_group_values[
-                 generated_indices[standardized_offset + 1]],
-             buffers.generated_group_values[
-                 generated_indices[standardized_offset + 2]])
-        else
-            standardized_offset = (group_index - 1) * 2
-            (_factor_coefficient(
-                 node.standardized, standardized_offset + 1,
-                 position, prepared, buffers),
-             _factor_coefficient(
-                 node.standardized, standardized_offset + 2,
-                 position, prepared, buffers))
-        end
-        intercept = _factor_coefficient(
-            node.scales, 1, position, prepared, buffers) * z_intercept
-        slope = _factor_coefficient(
-            node.scales, 2, position, prepared, buffers) *
-            (correlation * z_intercept + residual_scale * z_slope)
-        predictors = node.predictors
-        value = predictors[1] === nothing ? intercept :
-            intercept * _factor_argument_at(
-                predictors[1], row, prepared.plan, buffers, T)
-        value += predictors[2] === nothing ? slope :
-            slope * _factor_argument_at(
-                predictors[2], row, prepared.plan, buffers, T)
-        buffers.node_rows[node_index, row] = value
+        buffers.node_rows[node_index, row] = _factor_grouped_affine_value(
+            node, group_index, row, scales, partials,
+            position, prepared, buffers)
     end
     zero(T)
 end
@@ -5263,6 +5369,7 @@ end
 
 function _syntax_affine_assignment(statement,
                                    scalar_priors::Set{Symbol},
+                                   block_priors::Dict{Symbol,Tuple},
                                    grouped_sites::Dict{Symbol,Symbol},
                                    correlated_grouped_sites::Dict{Symbol,NamedTuple})
     lhs, rhs = statement.args
@@ -5274,6 +5381,7 @@ function _syntax_affine_assignment(statement,
     gathered_offsets = NamedTuple[]
     grouped_products = NamedTuple[]
     correlated_groups = NamedTuple[]
+    population_blocks = NamedTuple[]
     ordinary_terms = Any[]
     for term in terms
         if term isa Expr && term.head === :call &&
@@ -5332,11 +5440,30 @@ function _syntax_affine_assignment(statement,
                 product_name))
         elseif term isa Expr && term.head === :call &&
                _syntax_name(first(term.args)) === :dot
-            _, arguments = _syntax_call(term, "correlated grouped dot product")
+            _, arguments = _syntax_call(term, "affine dot product")
             length(arguments) == 2 || throw(ArgumentError(
-                "native PPL @model grouped dot needs a grouped site and " *
-                "predictor tuple"))
+                "native PPL @model dot needs a parameter or grouped site " *
+                "and predictor tuple"))
             grouped_ref, predictor_tuple = arguments
+            if grouped_ref isa Symbol && haskey(block_priors, grouped_ref)
+                predictor_tuple isa Expr && predictor_tuple.head === :tuple ||
+                    throw(ArgumentError(
+                        "native PPL @model parameter dot predictors must " *
+                        "be a tuple"))
+                predictors = Tuple(map(predictor_tuple.args) do predictor
+                    predictor isa Symbol || throw(ArgumentError(
+                        "native PPL @model parameter dot predictors must " *
+                        "be named row values"))
+                    predictor
+                end)
+                predictors == block_priors[grouped_ref] || throw(
+                    ArgumentError(
+                        "native PPL @model parameter dot predictors must " *
+                        "match its declared coefficient keys"))
+                push!(population_blocks, (;
+                    name=grouped_ref, predictors))
+                continue
+            end
             grouped_ref isa Expr && grouped_ref.head === :ref &&
                 length(grouped_ref.args) == 2 &&
                 first(grouped_ref.args) isa Symbol &&
@@ -5387,19 +5514,31 @@ function _syntax_affine_assignment(statement,
     length(unique(gathered_site_names)) == length(gathered_site_names) ||
         throw(ArgumentError(
             "native PPL @model grouped offsets must be used once each"))
+    length(population_blocks) <= 1 || throw(ArgumentError(
+        "native PPL @model affine expression may use one parameter dot"))
     intercepts = [term for term in ordinary_terms
                   if term isa Symbol && term in scalar_priors]
     length(intercepts) <= 1 || return nothing
     intercept = isempty(intercepts) ? nothing : only(intercepts)
     intercept === nothing && isempty(sampled_offsets) &&
         isempty(gathered_offsets) && isempty(grouped_products) &&
-        isempty(correlated_groups) && return nothing
+        isempty(correlated_groups) && isempty(population_blocks) &&
+        return nothing
 
     slopes = Symbol[]
     predictor_names = Symbol[]
     raw_predictor_names = Symbol[]
     transform_names = Symbol[]
     transform_values = Any[]
+    population_block = isempty(population_blocks) ? nothing :
+        only(population_blocks)
+    if population_block !== nothing
+        isempty(ordinary_terms) || throw(ArgumentError(
+            "native PPL @model cannot mix a parameter dot with scalar " *
+            "population coefficients"))
+        append!(predictor_names, population_block.predictors)
+        append!(raw_predictor_names, population_block.predictors)
+    end
     for product in ordinary_terms
         product === intercept && continue
         product isa Expr && product.head === :call &&
@@ -5441,7 +5580,7 @@ function _syntax_affine_assignment(statement,
         push!(predictor_names, predictor_name)
         push!(raw_predictor_names, raw_predictor_name)
     end
-    isempty(slopes) && return nothing
+    isempty(slopes) && population_block === nothing && return nothing
     length(unique(slopes)) == length(slopes) || throw(ArgumentError(
         "native PPL @model affine coefficients must be used once each"))
     length(unique(predictor_names)) == length(predictor_names) ||
@@ -5451,16 +5590,21 @@ function _syntax_affine_assignment(statement,
         throw(ArgumentError(
             "native PPL @model affine features must use distinct raw inputs"))
 
-    coefficient_name = Symbol(:beta_, lhs)
-    coefficient_keys = intercept === nothing ?
-        Tuple(slopes) : (intercept, slopes...)
-    parameter_value = Expr(
-        :call, _syntax_ref(:parameter),
-        Expr(:parameters,
-             Expr(:kw, :transform, Expr(:call, _syntax_ref(:Identity))),
-             Expr(:kw, :prior, Expr(:call, _syntax_ref(:StandardNormal)))),
-        Expr(:call, _syntax_ref(:RealSupport)),
-        QuoteNode(coefficient_keys))
+    coefficient_name = population_block === nothing ?
+        Symbol(:beta_, lhs) : population_block.name
+    parameter_value = if population_block === nothing
+        coefficient_keys = intercept === nothing ?
+            Tuple(slopes) : (intercept, slopes...)
+        Expr(
+            :call, _syntax_ref(:parameter),
+            Expr(:parameters,
+                 Expr(:kw, :transform, Expr(:call, _syntax_ref(:Identity))),
+                 Expr(:kw, :prior, Expr(:call, _syntax_ref(:StandardNormal)))),
+            Expr(:call, _syntax_ref(:RealSupport)),
+            QuoteNode(coefficient_keys))
+    else
+        nothing
+    end
     affine_value = Expr(
         :call, _syntax_ref(:affine),
         Expr(:parameters,
@@ -5703,6 +5847,7 @@ function _model_function_syntax(definition)
     parameter_names = Symbol[]
     parameter_values = Any[]
     scalar_prior_names = Symbol[]
+    block_prior_axes = Dict{Symbol,Tuple}()
     grouped_sites = Dict{Symbol,Symbol}()
     correlated_grouped_sites = Dict{Symbol,NamedTuple}()
     consumed_scalar_priors = Set{Symbol}()
@@ -5793,6 +5938,11 @@ function _model_function_syntax(definition)
                         normalized, argument_name_set)
                     push!(parameter_names, name)
                     push!(parameter_values, value)
+                    if prior_name === :StandardNormal
+                        block_prior_axes[name] = _syntax_symbol_tuple(
+                            sampling.lhs.args[2],
+                            "StandardNormal parameter")
+                    end
                 else
                     scalar_prior in scalar_prior_names && throw(ArgumentError(
                         "native PPL @model parameter `$scalar_prior` is declared twice"))
@@ -5801,7 +5951,8 @@ function _model_function_syntax(definition)
             end
         elseif statement isa Expr && statement.head === :(=)
             affine_declaration = _syntax_affine_assignment(
-                statement, Set(scalar_prior_names), grouped_sites,
+                statement, Set(scalar_prior_names), block_prior_axes,
+                grouped_sites,
                 correlated_grouped_sites)
             if affine_declaration === nothing
                 name, value = _syntax_node(statement)
@@ -5811,10 +5962,25 @@ function _model_function_syntax(definition)
                 # Coefficient blocks precede support-transformed scalar
                 # parameters in the flat coordinate ABI, independent of where
                 # the deterministic affine assignment appears in source.
-                pushfirst!(
-                    parameter_names, affine_declaration.coefficient_name)
-                pushfirst!(
-                    parameter_values, affine_declaration.parameter_value)
+                if affine_declaration.parameter_value !== nothing
+                    pushfirst!(
+                        parameter_names, affine_declaration.coefficient_name)
+                    pushfirst!(
+                        parameter_values, affine_declaration.parameter_value)
+                else
+                    coefficient_index = findfirst(
+                        ==(affine_declaration.coefficient_name),
+                        parameter_names)
+                    coefficient_index === nothing && throw(ArgumentError(
+                        "native PPL @model affine dot references an " *
+                        "unavailable coefficient block"))
+                    coefficient_value = parameter_values[coefficient_index]
+                    deleteat!(parameter_names, coefficient_index)
+                    deleteat!(parameter_values, coefficient_index)
+                    pushfirst!(parameter_names,
+                               affine_declaration.coefficient_name)
+                    pushfirst!(parameter_values, coefficient_value)
+                end
                 for (transform_name, transform_value) in zip(
                     affine_declaration.transform_names,
                     affine_declaration.transform_values)

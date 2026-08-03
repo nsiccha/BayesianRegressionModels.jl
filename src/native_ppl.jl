@@ -646,20 +646,25 @@ function _native_ppl_varying_intercept(term, key::Symbol)
                 "intercept `1` or suppression `0`"))
         slope_terms = filter(term -> !(term isa Number && term in (0, 1)),
                              coefficient_terms)
-        length(slope_terms) == 1 || throw(NativePPLCapabilityError(
+        isempty(slope_terms) && throw(NativePPLCapabilityError(
             :group_term,
-            "the current correlated grouped slice requires exactly one raw " *
+            "grouped coefficients in `$key` require at least one raw " *
             "slope predictor"))
-        parsed = _native_ppl_predictor_term(only(slope_terms), key)
-        parsed.transform === :identity || throw(NativePPLCapabilityError(
-            :group_term,
-            "the current varying-slope slice requires an untransformed raw " *
-            "predictor"))
-        intercept_count == 1 ? (nothing, parsed) : (parsed,)
+        parsed = map(slope_terms) do slope
+            predictor = _native_ppl_predictor_term(slope, key)
+            predictor.transform === :identity || throw(
+                NativePPLCapabilityError(
+                    :group_term,
+                    "the current varying-slope slice requires " *
+                    "untransformed raw predictors"))
+            predictor
+        end
+        intercept_count == 1 ? (nothing, parsed...) : Tuple(parsed)
     else
         throw(NativePPLCapabilityError(
             :group_term,
-            "grouped term in `$key` must be `1`, `0 + x`, or `1 + x`"))
+            "grouped term in `$key` must be `1`, `0 + x + ...`, or " *
+            "`1 + x + ...`"))
     end
     id isa Symbol || throw(NativePPLCapabilityError(
         :group_term, "grouped-term ID in `$key` must be a Symbol"))

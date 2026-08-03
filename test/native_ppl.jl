@@ -468,6 +468,18 @@ NP.@model function natural_correlated_varying_intercept_slope(x, group)
     @. y ~ Normal(mu, sigma)
 end
 
+NP.@model function natural_correlated_varying_three(x, w, group)
+    tau_p_group[(:Intercept, :x, :w)] ~ Exponential(1)
+    L_p_group[(:Intercept, :x, :w)] ~ LKJCholesky(3, 2)
+    b_p_group[group, (:Intercept, :x, :w)] ~
+        MvNormalCholesky(tau_p_group, L_p_group)
+    beta_mu[(:x, :w)] ~ StandardNormal()
+    sigma ~ Exponential(2)
+    mu = dot(beta_mu, (x, w)) +
+        dot(b_p_group[group], (1, x, w))
+    @. y ~ Normal(mu, sigma)
+end
+
 NP.@model function natural_correlated_bernoulli_logit(x, group)
     tau_p_group[(:Intercept, :x)] ~ Exponential(1)
     L_p_group[(:Intercept, :x)] ~ LKJCholesky(2, 2)
@@ -4063,6 +4075,71 @@ end
         invalid_poisson_rate_input,
         (; group=grouped_bindings.group, rate=[1.0, -1.0, 2.0, 3.0]))
     @test_throws ArgumentError NP.prepare(invalid_poisson_rate_plan)
+    three_coefficient_group_declaration = NP.model(
+        inputs=(; x=NP.input(), w=NP.input(), group=NP.input()),
+        parameters=(;
+            tau=NP.parameter(
+                NP.PositiveSupport(), (:Intercept, :x, :w);
+                transform=NP.Exp(), prior=NP.Exponential(1)),
+            correlation=NP.cholesky_correlation(
+                (:Intercept, :x, :w), 2.0),
+            z=NP.grouped_standard_normal(
+                :group, (:Intercept, :x, :w)),
+            beta=NP.parameter(
+                NP.RealSupport(), (:x, :w); transform=NP.Identity(),
+                prior=NP.StandardNormal()),
+            sigma=NP.parameter(
+                NP.PositiveSupport(), (:sigma,); transform=NP.Exp(),
+                prior=NP.Exponential(2))),
+        nodes=(;
+            correlated_by_row=NP.grouped_affine(
+                :z, :tau, :correlation, :group,
+                (nothing, :x, :w)),
+            mu=NP.affine(
+                (:x, :w), :beta; offsets=(:correlated_by_row,),
+                intercept=false)),
+        observations=(; y=NP.broadcasted(NP.normal(:y, :mu, :sigma))),
+        site_order=(:tau, :correlation, :z, :beta, :sigma, :y))
+    three_coefficient_group_plan = NP.compile(
+        three_coefficient_group_declaration,
+        (; x=sampled_offset_data.x,
+           w=[0.5, -1.0, 1.5, 2.0],
+           group=grouped_bindings.group);
+        conditions=(; y=sampled_offset_data.y))
+    @test three_coefficient_group_plan isa NP.FactorPlan
+    @test three_coefficient_group_plan.graph.dimension == 18
+    @test three_coefficient_group_plan.graph.coordinates.correlation.keys == (
+        NP.CorrelationCoordinateKey(:correlation, 2, 1),
+        NP.CorrelationCoordinateKey(:correlation, 3, 1),
+        NP.CorrelationCoordinateKey(:correlation, 3, 2))
+    @test three_coefficient_group_plan.graph.coordinates.z.keys == (
+        NP.GroupCoefficientKey(:z, :a, :Intercept),
+        NP.GroupCoefficientKey(:z, :a, :x),
+        NP.GroupCoefficientKey(:z, :a, :w),
+        NP.GroupCoefficientKey(:z, :b, :Intercept),
+        NP.GroupCoefficientKey(:z, :b, :x),
+        NP.GroupCoefficientKey(:z, :b, :w),
+        NP.GroupCoefficientKey(:z, :c, :Intercept),
+        NP.GroupCoefficientKey(:z, :c, :x),
+        NP.GroupCoefficientKey(:z, :c, :w))
+    @test NP.factor_node_dependencies(
+        three_coefficient_group_plan.graph.nodes.correlated_by_row) ==
+          (:z, :tau, :correlation)
+    mismatched_three_correlation = NP.model(
+        inputs=three_coefficient_group_declaration.inputs,
+        parameters=merge(
+            three_coefficient_group_declaration.parameters,
+            (; correlation=NP.cholesky_correlation(
+                (:Intercept, :x), 2.0))),
+        nodes=three_coefficient_group_declaration.nodes,
+        observations=three_coefficient_group_declaration.observations,
+        site_order=three_coefficient_group_declaration.site_order)
+    @test capability_error(() -> NP.compile(
+        mismatched_three_correlation,
+        (; x=sampled_offset_data.x,
+           w=[0.5, -1.0, 1.5, 2.0],
+           group=grouped_bindings.group);
+        conditions=(; y=sampled_offset_data.y))).capability == :factor_nodes
 
     correlated_group_prepared = NP.prepare(correlated_group_plan)
     correlated_group_workspace = NP.workspace(
@@ -4316,6 +4393,395 @@ end
             correlated_group_workspace, correlated_group_prepared,
             extreme_position, NP.LinearPredictor()))
     end
+
+    three_coefficient_group_prepared = NP.prepare(
+        three_coefficient_group_plan)
+    three_coefficient_group_workspace = NP.workspace(
+        three_coefficient_group_prepared, Float64, DI.AutoEnzyme())
+    three_coefficient_group_position = [
+        log(0.6), log(0.4), log(0.3),
+        0.2, -0.25, 0.35,
+        0.1, -0.3, 0.2,
+        -0.2, 0.4, -0.1,
+        0.5, -0.4, 0.3,
+        0.7, -0.4, log(0.5)]
+    three_tau = exp.(three_coefficient_group_position[1:3])
+    three_raw = three_coefficient_group_position[4:6]
+    three_z = reshape(three_coefficient_group_position[7:15], 3, 3)
+    three_L31 = tanh(three_raw[2])
+    three_L32 = (1 / cosh(three_raw[2])) * tanh(three_raw[3])
+    three_L33 = (1 / cosh(three_raw[2])) * (1 / cosh(three_raw[3]))
+    three_L = [
+        1.0 0.0 0.0;
+        tanh(three_raw[1]) 1 / cosh(three_raw[1]) 0.0;
+        three_L31 three_L32 three_L33]
+    three_effects = [
+        three_tau .* (three_L * three_z[:, group])
+        for group in 1:3]
+    three_w = three_coefficient_group_plan.bindings.w
+    three_beta = three_coefficient_group_position[16:17]
+    three_sigma = exp(three_coefficient_group_position[18])
+    three_mu = [
+        three_beta[1] * sampled_offset_data.x[row] +
+        three_beta[2] * three_w[row] +
+        three_effects[[1, 2, 1, 3][row]][1] +
+        three_effects[[1, 2, 1, 3][row]][2] *
+            sampled_offset_data.x[row] +
+        three_effects[[1, 2, 1, 3][row]][3] * three_w[row]
+        for row in eachindex(sampled_offset_data.x)]
+    three_eta = 2.0
+    three_alpha1 = three_eta + 0.5
+    three_alpha2 = three_eta
+    three_log_normalizer(alpha) =
+        BRM.loggamma(alpha + 0.5) - BRM.loggamma(alpha) - 0.5 * log(pi)
+    three_lkj_density =
+        2 * three_log_normalizer(three_alpha1) +
+        three_log_normalizer(three_alpha2) +
+        three_alpha1 * (
+            NP._factor_logsech2(three_raw[1]) +
+            NP._factor_logsech2(three_raw[2])) +
+        three_alpha2 * NP._factor_logsech2(three_raw[3])
+    three_expected_density =
+        sum(logpdf.(Exponential(1), three_tau)) +
+        sum(three_coefficient_group_position[1:3]) +
+        three_lkj_density +
+        sum(logpdf.(Normal(), three_z)) +
+        sum(logpdf.(Normal(), three_beta)) +
+        logpdf(Exponential(2), three_sigma) +
+        three_coefficient_group_position[18] +
+        sum(logpdf.(Normal.(three_mu, three_sigma), sampled_offset_data.y))
+    three_density, three_gradient = NP.logdensity_and_gradient!(
+        three_coefficient_group_workspace,
+        three_coefficient_group_prepared,
+        three_coefficient_group_position)
+    @test three_density ≈ three_expected_density
+    @test NP.evaluate(
+        three_coefficient_group_workspace,
+        three_coefficient_group_prepared,
+        three_coefficient_group_position, NP.LinearPredictor()) ≈ three_mu
+    three_finite_difference = similar(three_gradient)
+    three_plus = copy(three_coefficient_group_position)
+    three_minus = copy(three_coefficient_group_position)
+    three_step = 1e-6
+    for coordinate in eachindex(three_finite_difference)
+        three_plus[coordinate] += three_step
+        three_minus[coordinate] -= three_step
+        three_finite_difference[coordinate] = (
+            NP.logdensity!(
+                three_coefficient_group_workspace,
+                three_coefficient_group_prepared, three_plus) -
+            NP.logdensity!(
+                three_coefficient_group_workspace,
+                three_coefficient_group_prepared, three_minus)) /
+            (2 * three_step)
+        three_plus[coordinate] =
+            three_coefficient_group_position[coordinate]
+        three_minus[coordinate] =
+            three_coefficient_group_position[coordinate]
+    end
+    @test three_gradient ≈ three_finite_difference rtol=2e-5 atol=2e-6
+    @test factor_steady_state_allocations(
+        three_coefficient_group_workspace,
+        three_coefficient_group_prepared,
+        three_coefficient_group_position) == (; primal=0, gradient=0)
+
+    # Exercise a dimension beyond the public K=3 example so the static-K
+    # executor cannot accidentally be a three-coefficient specialization.
+    four_declaration = NP.model(
+        inputs=(; x=NP.input(), w=NP.input(), v=NP.input(),
+                group=NP.input()),
+        parameters=(;
+            tau=NP.parameter(
+                NP.PositiveSupport(), (:Intercept, :x, :w, :v);
+                transform=NP.Exp(), prior=NP.Exponential(1)),
+            correlation=NP.cholesky_correlation(
+                (:Intercept, :x, :w, :v), 2.0),
+            z=NP.grouped_standard_normal(
+                :group, (:Intercept, :x, :w, :v)),
+            beta=NP.parameter(
+                NP.RealSupport(), (:x, :w, :v);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            sigma=NP.parameter(
+                NP.PositiveSupport(), (:sigma,);
+                transform=NP.Exp(), prior=NP.Exponential(2))),
+        nodes=(;
+            by_row=NP.grouped_affine(
+                :z, :tau, :correlation, :group,
+                (nothing, :x, :w, :v)),
+            mu=NP.affine(
+                (:x, :w, :v), :beta;
+                offsets=(:by_row,), intercept=false)),
+        observations=(; y=NP.broadcasted(NP.normal(:y, :mu, :sigma))),
+        site_order=(:tau, :correlation, :z, :beta, :sigma, :y))
+    four_bindings = (;
+        x=[0.2, -0.3], w=[0.5, 0.1], v=[-0.1, 0.4],
+        group=[:a, :a])
+    four_plan = NP.compile(
+        four_declaration, four_bindings; conditions=(; y=[0.1, -0.2]))
+    @test four_plan.graph.dimension == 18
+    @test length(four_plan.graph.coordinates.correlation.keys) == 6
+    four_prepared = NP.prepare(four_plan)
+    four_workspace = NP.workspace(
+        four_prepared, Float64, DI.AutoEnzyme())
+    four_position = [
+        log(0.5), log(0.6), log(0.7), log(0.8),
+        0.1, -0.2, 0.3, -0.15, 0.25, -0.35,
+        0.1, -0.2, 0.3, -0.4,
+        0.2, -0.1, 0.3, log(0.5)]
+    four_tau = exp.(four_position[1:4])
+    four_raw = four_position[5:10]
+    four_L = zeros(4, 4)
+    four_raw_index = 1
+    for column in 1:3
+        residuals = ones(4)
+        for previous in 1:(column - 1), row in (column + 1):4
+            previous_raw_index =
+                sum((4 - prior for prior in 1:(previous - 1)); init=0) +
+                row - previous
+            residuals[row] *= 1 / cosh(four_raw[previous_raw_index])
+        end
+        for row in (column + 1):4
+            four_L[row, column] =
+                residuals[row] * tanh(four_raw[four_raw_index])
+            four_raw_index += 1
+        end
+    end
+    for row in 1:4
+        four_L[row, row] = prod(
+            1 / cosh(four_raw[
+                sum((4 - prior for prior in 1:(column - 1)); init=0) +
+                row - column])
+            for column in 1:(row - 1);
+            init=1.0)
+    end
+    four_effect = four_tau .* (four_L * four_position[11:14])
+    four_beta = four_position[15:17]
+    four_mu = [
+        four_beta[1] * four_bindings.x[row] +
+        four_beta[2] * four_bindings.w[row] +
+        four_beta[3] * four_bindings.v[row] +
+        four_effect[1] +
+        four_effect[2] * four_bindings.x[row] +
+        four_effect[3] * four_bindings.w[row] +
+        four_effect[4] * four_bindings.v[row]
+        for row in eachindex(four_bindings.x)]
+    four_lkj_density = 0.0
+    four_raw_index = 1
+    for column in 1:3
+        alpha = 2.0 + (4 - column - 1) / 2
+        for _ in (column + 1):4
+            four_lkj_density += three_log_normalizer(alpha) +
+                alpha * NP._factor_logsech2(four_raw[four_raw_index])
+            four_raw_index += 1
+        end
+    end
+    four_expected_density =
+        sum(logpdf.(Exponential(1), four_tau)) +
+        sum(four_position[1:4]) + four_lkj_density +
+        sum(logpdf.(Normal(), four_position[11:14])) +
+        sum(logpdf.(Normal(), four_beta)) +
+        logpdf(Exponential(2), exp(four_position[18])) +
+        four_position[18] +
+        sum(logpdf.(Normal.(four_mu, exp(four_position[18])), [0.1, -0.2]))
+    four_density, four_gradient = NP.logdensity_and_gradient!(
+        four_workspace, four_prepared, four_position)
+    @test four_density ≈ four_expected_density
+    @test NP.evaluate(
+        four_workspace, four_prepared, four_position,
+        NP.LinearPredictor()) ≈ four_mu
+    four_finite_difference = similar(four_gradient)
+    four_plus = copy(four_position)
+    four_minus = copy(four_position)
+    for coordinate in eachindex(four_finite_difference)
+        four_plus[coordinate] += three_step
+        four_minus[coordinate] -= three_step
+        four_finite_difference[coordinate] = (
+            NP.logdensity!(
+                four_workspace, four_prepared, four_plus) -
+            NP.logdensity!(
+                four_workspace, four_prepared, four_minus)) /
+            (2 * three_step)
+        four_plus[coordinate] = four_position[coordinate]
+        four_minus[coordinate] = four_position[coordinate]
+    end
+    @test four_gradient ≈ four_finite_difference rtol=2e-5 atol=2e-6
+    @test factor_steady_state_allocations(
+        four_workspace, four_prepared, four_position) ==
+          (; primal=0, gradient=0)
+
+    three_group_data = (;
+        x=sampled_offset_data.x,
+        w=three_w,
+        group=grouped_bindings.group,
+        y=sampled_offset_data.y)
+    three_group_brm = @brm three_group_data begin
+        sigma ~ Exponential(2)
+        mu ~ 0 + x + w + (1 + x + w | p | group)
+        sd(:, p) ~ Exponential(1)
+        cor(:, p) ~ LKJCholesky(3, 2)
+        y ~ Normal(mu, sigma)
+    end
+    @test popcoefnames(three_group_brm, :mu) == [:x, :w]
+    @test ranefcoefnames(three_group_brm, :p) == [
+        (; predictor=:mu, coefficient=:Intercept),
+        (; predictor=:mu, coefficient=:x),
+        (; predictor=:mu, coefficient=:w)]
+    @test SBBRMI(three_group_brm; mod=@__MODULE__) isa SBBRMI
+    natural_three_group = NP.condition(
+        natural_correlated_varying_three(
+            three_group_data.x, three_group_data.w,
+            three_group_data.group);
+        y=three_group_data.y)
+    three_group_model = NP.lower(three_group_brm)
+    @test three_group_model == natural_three_group.declaration
+    @test three_group_model.parameters.beta_mu.axis_keys == (:x, :w)
+    @test three_group_model.parameters.tau_p_group.axis_keys ==
+          (:Intercept, :x, :w)
+    for candidate in (natural_three_group, three_group_brm)
+        candidate_prepared = NP.prepare(candidate)
+        candidate_workspace = NP.workspace(
+            candidate_prepared, Float64, DI.AutoEnzyme())
+        candidate_density, candidate_gradient =
+            NP.logdensity_and_gradient!(
+                candidate_workspace, candidate_prepared,
+                three_coefficient_group_position)
+        @test candidate_density ≈ three_density
+        @test candidate_gradient ≈ three_gradient
+        @test NP.evaluate(
+            candidate_workspace, candidate_prepared,
+            three_coefficient_group_position,
+            NP.LinearPredictor()) ≈ three_mu
+        @test factor_steady_state_allocations(
+            candidate_workspace, candidate_prepared,
+            three_coefficient_group_position) ==
+              (; primal=0, gradient=0)
+    end
+
+    three_group_prepared = NP.prepare(three_group_brm)
+    three_known_bindings = (;
+        x=[2.5, -0.5, 1.0],
+        w=[-0.25, 1.5, 0.75],
+        group=[:c, :a, :b])
+    three_known_replay = NP.rebind(
+        three_group_prepared, (;); bindings=three_known_bindings)
+    @test three_known_replay.plan.graph.dimension == 18
+    @test three_known_replay.plan.group_indices ==
+          (; b_p_group_by_group_for_mu=(3, 1, 2))
+    three_known_mu = [
+        three_beta[1] * three_known_bindings.x[row] +
+        three_beta[2] * three_known_bindings.w[row] +
+        three_effects[[3, 1, 2][row]][1] +
+        three_effects[[3, 1, 2][row]][2] *
+            three_known_bindings.x[row] +
+        three_effects[[3, 1, 2][row]][3] *
+            three_known_bindings.w[row]
+        for row in eachindex(three_known_bindings.x)]
+    @test NP.evaluate(
+        NP.workspace(three_known_replay), three_known_replay,
+        three_coefficient_group_position,
+        NP.LinearPredictor()) ≈ three_known_mu
+
+    three_new_bindings = (;
+        x=[-1.0, 0.5, 1.5, 2.0],
+        w=[0.25, -0.75, 1.25, 0.5],
+        group=[:a, :d, :d, :c])
+    three_new_replay = NP.rebind(
+        three_group_prepared, (;); bindings=three_new_bindings,
+        new_groups=:resample)
+    @test three_new_replay.plan.graph.dimension == 18
+    @test three_new_replay.plan.generated_group_levels ==
+          (; b_p_group=(:d,))
+    @test three_new_replay.plan.generated_group_indices ==
+          (; b_p_group=1:3)
+    @test three_new_replay.plan.group_indices ==
+          (; b_p_group_by_group_for_mu=(1, -1, -1, 3))
+    three_new_workspace = NP.workspace(three_new_replay)
+    three_new_rng = MersenneTwister(970)
+    three_new_expected_rng = MersenneTwister(970)
+    three_new_z = randn(three_new_expected_rng, 3)
+    three_new_effect = three_tau .* (three_L * three_new_z)
+    three_new_effects = [
+        three_effects[1], three_new_effect,
+        three_new_effect, three_effects[3]]
+    three_new_mu = [
+        three_beta[1] * three_new_bindings.x[row] +
+        three_beta[2] * three_new_bindings.w[row] +
+        three_new_effects[row][1] +
+        three_new_effects[row][2] * three_new_bindings.x[row] +
+        three_new_effects[row][3] * three_new_bindings.w[row]
+        for row in eachindex(three_new_bindings.x)]
+    three_new_linear = zeros(4)
+    NP.evaluate!(
+        three_new_rng, three_new_linear,
+        three_new_workspace, three_new_replay,
+        three_coefficient_group_position,
+        NP.LinearPredictor())
+    @test three_new_linear ≈ three_new_mu
+    @test three_new_workspace.primal.generated_group_values ≈ three_new_z
+    @test_throws NP.CapabilityError NP.logdensity!(
+        three_new_workspace, three_new_replay,
+        three_coefficient_group_position)
+
+    three_draw_positions = [
+        three_coefficient_group_position';
+        (three_coefficient_group_position .+
+         [0.02, -0.03, 0.01, 0.04, -0.02, 0.03,
+          0.01, -0.01, 0.02, -0.02, 0.01, -0.01,
+          0.03, -0.02, 0.01, 0.04, -0.03, 0.02])']
+    three_draw_predictive = zeros(2, 4)
+    three_draw_linear = zeros(2, 4)
+    three_manual_predictive = zeros(2, 4)
+    three_manual_linear = zeros(2, 4)
+    three_manual_fused_linear = zeros(2, 4)
+    three_draw_rng = MersenneTwister(971)
+    three_manual_rng = MersenneTwister(971)
+    for draw in axes(three_draw_positions, 1)
+        NP.simulate!(
+            three_manual_rng,
+            @view(three_manual_predictive[draw, :]),
+            three_new_workspace, three_new_replay,
+            @view(three_draw_positions[draw, :]))
+        three_manual_fused_linear[draw, :] .=
+            @view three_new_workspace.primal.node_rows[2, :]
+    end
+    NP.simulate_draws!(
+        three_draw_rng, three_draw_predictive,
+        three_new_workspace, three_new_replay,
+        three_draw_positions)
+    @test three_draw_predictive == three_manual_predictive
+    NP.evaluate_draws!(
+        MersenneTwister(972), three_draw_linear,
+        three_new_workspace, three_new_replay,
+        three_draw_positions, NP.LinearPredictor())
+    three_linear_rng = MersenneTwister(972)
+    for draw in axes(three_draw_positions, 1)
+        NP.evaluate!(
+            three_linear_rng,
+            @view(three_manual_linear[draw, :]),
+            three_new_workspace, three_new_replay,
+            @view(three_draw_positions[draw, :]),
+            NP.LinearPredictor())
+    end
+    @test three_draw_linear == three_manual_linear
+    three_queries = (;
+        linear=NP.LinearPredictor(),
+        predictive=NP.PosteriorPredictive())
+    three_bundle = (;
+        linear=zeros(2, 4), predictive=zeros(2, 4))
+    NP.execute_draws!(
+        MersenneTwister(971), three_bundle,
+        three_new_workspace, three_new_replay,
+        three_draw_positions, three_queries)
+    @test three_bundle.linear == three_manual_fused_linear
+    @test three_bundle.predictive == three_manual_predictive
+    @test factor_generated_draw_allocations(
+        MersenneTwister(973), MersenneTwister(974),
+        MersenneTwister(975),
+        three_draw_predictive, three_draw_linear,
+        three_bundle, three_new_workspace,
+        three_new_replay, three_draw_positions,
+        three_queries) ==
+          (; predictive=0, linear=0, bundle=0)
 
     varying_brm_data = (;
         x=sampled_offset_data.x,
@@ -6378,6 +6844,26 @@ end
             @. y ~ Normal(mu, sigma)
         end)))
     @test occursin("features must use distinct raw inputs", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function mismatched_parameter_dot(x, w)
+            beta[(:x, :w)] ~ StandardNormal()
+            extra ~ Normal()
+            sigma ~ Exponential(2)
+            mu = dot(beta, (w, x)) + extra * x
+            @. y ~ Normal(mu, sigma)
+        end)))
+    @test occursin("must match its declared coefficient keys", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function mixed_parameter_dot(x, w)
+            beta[(:x, :w)] ~ StandardNormal()
+            extra ~ Normal()
+            sigma ~ Exponential(2)
+            mu = dot(beta, (x, w)) + extra * x
+            @. y ~ Normal(mu, sigma)
+        end)))
+    @test occursin(
+        "cannot mix a parameter dot with scalar population coefficients",
+        err.msg)
     err = argument_error(() -> macroexpand(
         @__MODULE__, :(NP.@model function grouped_nonargument(x)
             tau ~ Exponential(1)
