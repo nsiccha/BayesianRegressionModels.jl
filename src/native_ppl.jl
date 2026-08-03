@@ -245,6 +245,9 @@ abstract type NativePPLQuery end
 struct NativePPLLinearPredictor <: NativePPLQuery end
 struct NativePPLPointwiseLogLikelihood <: NativePPLQuery end
 struct NativePPLPosteriorPredictive <: NativePPLQuery end
+struct NativePPLNodeOutput{Name} <: NativePPLQuery end
+NativePPLNodeOutput(name::Symbol) = NativePPLNodeOutput{name}()
+native_ppl_node_output_name(::NativePPLNodeOutput{Name}) where {Name} = Name
 
 """Rule selecting the prepared executor's numeric scalar as an output eltype."""
 struct NativePPLPreparedElementType end
@@ -2187,6 +2190,11 @@ _native_ppl_query_spec(plan::NativePPLPlan, ::NativePPLPointwiseLogLikelihood) =
     plan.queries.pointwise_loglikelihood
 _native_ppl_query_spec(plan::NativePPLPlan, ::NativePPLPosteriorPredictive) =
     plan.queries.posterior_predictive
+_native_ppl_query_spec(::NativePPLPlan,
+                       ::NativePPLNodeOutput{Name}) where {Name} =
+    throw(NativePPLCapabilityError(
+        :query,
+        "named node output `$Name` requires the typed factor-DAG executor"))
 _native_ppl_query_spec(prepared::NativePPLPrepared, query::NativePPLQuery) =
     _native_ppl_query_spec(prepared.plan, query)
 
@@ -2823,6 +2831,7 @@ const DenseMatrixLayout = BRM.NativePPLDenseMatrixLayout
 const LinearPredictor = BRM.NativePPLLinearPredictor
 const PointwiseLogLikelihood = BRM.NativePPLPointwiseLogLikelihood
 const PosteriorPredictive = BRM.NativePPLPosteriorPredictive
+const NodeOutput = BRM.NativePPLNodeOutput
 
 prepare(plan::Plan; kwargs...) = BRM._native_ppl_prepare(plan; kwargs...)
 workspace(prepared::Prepared, ::Type{T}=eltype(prepared)) where {T<:AbstractFloat} =
@@ -2958,7 +2967,7 @@ include("native_ppl_authoring.jl")
 export Plan, Prepared, Workspace, LogDensityProblem, CapabilityError
 export OutputSignature, BatchOutputSignature
 export DenseVectorLayout, DenseMatrixLayout
-export LinearPredictor, PointwiseLogLikelihood, PosteriorPredictive
+export LinearPredictor, PointwiseLogLikelihood, PosteriorPredictive, NodeOutput
 export compile, prepare, workspace, rebind, has_response
 export output_signature, batch_output_signature
 export output_axis, output_axes, output_draw_axis, output_eltype, output_layout
