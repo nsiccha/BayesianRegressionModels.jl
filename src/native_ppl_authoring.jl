@@ -43,16 +43,34 @@ Exp() = ExpTransform()
 """Independent standard-normal prior declaration."""
 struct StandardNormal <: AbstractPriorDeclaration end
 
+"""Scalar Normal prior declaration with literal location and scale."""
+struct NormalPrior{L<:Real,S<:Real} <: AbstractPriorDeclaration
+    location::L
+    scale::S
+
+    function NormalPrior(location::L, scale::S) where {L<:Real,S<:Real}
+        isfinite(location) || throw(ArgumentError(
+            "native PPL Normal prior location must be finite"))
+        isfinite(scale) && scale > zero(scale) || throw(ArgumentError(
+            "native PPL Normal prior scale must be finite and positive"))
+        new{L,S}(location, scale)
+    end
+end
+
+normal_prior(location::Real, scale::Real) = NormalPrior(location, scale)
+
 """Exponential prior declaration parameterized by its positive scale."""
 struct ExponentialPrior{T<:Real} <: AbstractPriorDeclaration
     scale::T
+
+    function ExponentialPrior(scale::T) where {T<:Real}
+        isfinite(scale) && scale > zero(scale) || throw(ArgumentError(
+            "native PPL Exponential prior scale must be finite and positive"))
+        new{T}(scale)
+    end
 end
 
-function Exponential(scale::Real)
-    isfinite(scale) && scale > zero(scale) || throw(ArgumentError(
-        "native PPL Exponential prior scale must be finite and positive"))
-    ExponentialPrior(scale)
-end
+Exponential(scale::Real) = ExponentialPrior(scale)
 
 """
 An unbound logical parameter declaration.
@@ -84,6 +102,11 @@ function parameter(support::S, axis_keys::Tuple;
     if prior isa StandardNormal
         support isa RealSupport || throw(ArgumentError(
             "native PPL StandardNormal prior requires RealSupport"))
+    elseif prior isa NormalPrior
+        support isa RealSupport || throw(ArgumentError(
+            "native PPL Normal prior requires RealSupport"))
+        length(axis_keys) == 1 || throw(ArgumentError(
+            "native PPL Normal prior currently requires one scalar coordinate"))
     elseif prior isa ExponentialPrior
         support isa PositiveSupport || throw(ArgumentError(
             "native PPL Exponential prior requires PositiveSupport"))
@@ -534,12 +557,23 @@ function _lower_composition(composition::Composition)
             if hasproperty(instance.bindings, name)
                 value = getproperty(instance.bindings, name)
                 if value isa GraphRef
-                    graph_kind(value) === :site && throw(CapabilityError(
-                        :active_site_connection,
-                        "component `$namespace` port `$name` consumes " *
-                        "stochastic-site output " *
-                        "`$(graph_namespace(value)).$(graph_name(value))`; " *
-                        "factor-to-value schedule ordering is not available yet"))
+                    if graph_kind(value) === :site
+                        source = getproperty(
+                            components, graph_namespace(value))
+                        local_site = _component_local_output_name(
+                            source, graph_name(value))
+                        site_declaration = getproperty(
+                            source.instance.declaration.observations,
+                            local_site)
+                        is_broadcast_observation(site_declaration) && throw(
+                            CapabilityError(
+                                :active_site_connection,
+                                "component `$namespace` port `$name` consumes " *
+                                "broadcast stochastic-site output " *
+                                "`$(graph_namespace(value)).$(graph_name(value))`; " *
+                                "the first factor-to-value schedule accepts a " *
+                                "scalar site"))
+                    end
                     _reference_active(value, components, activity)
                     mapping[name] = _resolved_reference(value, resolved)
                     resolved[(namespace, name)] = mapping[name]
@@ -764,6 +798,7 @@ function _validate_model_components(
                 "native PPL observation `$name` references unavailable dependency " *
                 "`$dependency`"))
         end
+        push!(available, response)
     end
 
     if outputs !== nothing
@@ -908,9 +943,12 @@ function _validate_coefficient_parameter(
     declaration.transform isa IdentityTransform || throw(CapabilityError(
         :parameter_transform,
         "affine coefficient parameter `$name` must use Identity()"))
-    declaration.prior isa StandardNormal || throw(CapabilityError(
+    valid_prior = declaration.prior isa StandardNormal ||
+        (predictor_count == 0 && declaration.prior isa NormalPrior)
+    valid_prior || throw(CapabilityError(
         :parameter_prior,
-        "affine coefficient parameter `$name` must use StandardNormal()"))
+        "affine coefficient parameter `$name` must use StandardNormal(); " *
+        "a scalar location may instead use NormalPrior"))
     expected = predictor_count + 1
     length(declaration.axis_keys) == expected || throw(CapabilityError(
         :parameter_axis,
@@ -1013,7 +1051,15 @@ function _bind_scalar_location(
         scale_axis, 2:2)
     location = BRM.NativePPLScalarBroadcastNode(
         location_name, location_name, observation_axis, 1)
-    coefficient_prior = BRM.NativePPLStandardNormalFactor(location_name, 1:1)
+    coefficient_prior = if location_declaration.prior isa StandardNormal
+        BRM.NativePPLStandardNormalFactor(location_name, 1:1)
+    else
+        prior = location_declaration.prior
+        BRM.NativePPLScalarNormalFactor(
+            location_name, Symbol(location_name, :_prior_location),
+            Symbol(location_name, :_prior_scale), 1,
+            prior.location, prior.scale)
+    end
     scale_prior = BRM.NativePPLExponentialFactor(
         scale_name, 2, scale_declaration.prior.scale)
     likelihood = BRM.NativePPLNormalFactor(
@@ -1026,6 +1072,141 @@ function _bind_scalar_location(
         (; transforms=(;), location),
         (; coefficient_prior, scale_prior, likelihood),
         BRM._native_ppl_queries(observation_axis, likelihood),
+        NamedTuple{(response_name,)}((response,))))
+end
+
+function _scalar_constant_binding(
+    bindings::NamedTuple, name::Symbol, role::AbstractString,
+)
+    hasproperty(bindings, name) || throw(ArgumentError(
+        "native PPL binding is missing $role `$name`"))
+    value = getproperty(bindings, name)
+    value isa Real && isfinite(value) || throw(ArgumentError(
+        "native PPL $role `$name` must be one finite real scalar; got $value"))
+    value
+end
+
+function _bind_scalar_site_schedule(
+    declaration::Model, bindings::NamedTuple, conditions::NamedTuple,
+)
+    isempty(declaration.nodes) || throw(CapabilityError(
+        :additional_nodes,
+        "the first scalar-site schedule accepts no deterministic nodes"))
+    length(declaration.observations) == 2 || throw(CapabilityError(
+        :factor_schedule,
+        "the first scalar-site schedule requires one generating factor and " *
+        "one conditioned likelihood"))
+    unconditioned = Tuple(name for name in keys(declaration.observations)
+                          if !hasproperty(conditions, name))
+    conditioned = Tuple(name for name in keys(declaration.observations)
+                        if hasproperty(conditions, name))
+    length(unconditioned) == 1 && length(conditioned) == 1 || throw(
+        CapabilityError(
+            :factor_schedule,
+            "the first scalar-site schedule requires exactly one unconditioned " *
+            "site followed by one conditioned site"))
+
+    site_name = only(unconditioned)
+    response_name = only(conditioned)
+    generating = getproperty(declaration.observations, site_name)
+    likelihood_declaration = getproperty(
+        declaration.observations, response_name)
+    is_broadcast_observation(generating) && throw(CapabilityError(
+        :factor_schedule,
+        "the first exported stochastic-site schedule requires a scalar site"))
+    is_broadcast_observation(likelihood_declaration) || throw(CapabilityError(
+        :broadcast_lifting,
+        "the downstream likelihood must use explicit dotted sampling"))
+    generating = scalar_observation(generating)
+    likelihood = scalar_observation(likelihood_declaration)
+    generating isa NormalObservation || throw(CapabilityError(
+        :likelihood,
+        "the first exported stochastic-site schedule supports a Normal " *
+        "generating factor"))
+    likelihood isa NormalObservation || throw(CapabilityError(
+        :likelihood,
+        "the first exported stochastic-site schedule supports a Normal " *
+        "downstream likelihood"))
+    observation_response(generating) === site_name || throw(CapabilityError(
+        :graph_identity,
+        "scalar generating-factor identity must match stochastic site `$site_name`"))
+    observation_response(likelihood) === response_name || throw(
+        CapabilityError(
+            :graph_identity,
+            "downstream likelihood identity must match response `$response_name`"))
+
+    prior_location_name, prior_scale_name = observation_dependencies(generating)
+    Set(keys(declaration.inputs)) == Set((prior_location_name, prior_scale_name)) ||
+        throw(CapabilityError(
+            :factor_schedule,
+            "the first scalar-site generating factor requires exactly two " *
+            "constant value ports"))
+    Set(keys(bindings)) == Set((prior_location_name, prior_scale_name)) || throw(
+        CapabilityError(
+            :factor_schedule,
+            "the scalar-site generating-factor ports must both be substituted"))
+    prior_location = _scalar_constant_binding(
+        bindings, prior_location_name, "Normal location")
+    prior_scale = _scalar_constant_binding(
+        bindings, prior_scale_name, "Normal scale")
+    prior_scale > zero(prior_scale) || throw(ArgumentError(
+        "native PPL Normal scale `$prior_scale_name` must be positive"))
+
+    downstream_location, downstream_scale = observation_dependencies(likelihood)
+    downstream_location === site_name || throw(CapabilityError(
+        :factor_schedule,
+        "downstream likelihood must consume exported scalar site `$site_name`"))
+    length(declaration.parameters) == 1 || throw(CapabilityError(
+        :additional_parameters,
+        "the first scalar-site schedule requires one downstream scale parameter"))
+    hasproperty(declaration.parameters, downstream_scale) || throw(
+        CapabilityError(
+            :parameter_binding,
+            "downstream Normal scale references missing parameter " *
+            "`$downstream_scale`"))
+    scale_declaration = getproperty(declaration.parameters, downstream_scale)
+    _validate_scale_parameter(downstream_scale, scale_declaration)
+
+    response = _binding(conditions, response_name, :conditioned_response)
+    eltype(response) <: Real || throw(CapabilityError(
+        :response_type,
+        "conditioned site `$response_name` must be a real vector"))
+    observation_count = length(response)
+    observation_count > 0 || throw(CapabilityError(
+        :observation_axis, "the observation axis cannot be empty"))
+
+    observation_axis = BRM.NativePPLAxis(
+        :observation, Base.OneTo(observation_count))
+    site_axis = BRM.NativePPLAxis(
+        Symbol(site_name, :_scalar), (site_name,))
+    scale_axis = BRM.NativePPLAxis(
+        Symbol(downstream_scale, :_scalar), scale_declaration.axis_keys)
+    response_input = BRM.NativePPLInput(
+        response_name, :response, observation_axis, eltype(response))
+    site_parameter = BRM.NativePPLParameter(
+        site_name, BRM.NativePPLRealSupport(),
+        BRM.NativePPLIdentityTransform(), site_axis, 1:1)
+    scale_parameter = BRM.NativePPLParameter(
+        downstream_scale, scale_declaration.support,
+        scale_declaration.transform, scale_axis, 2:2)
+    location = BRM.NativePPLScalarBroadcastNode(
+        site_name, site_name, observation_axis, 1)
+    site_prior = BRM.NativePPLScalarNormalFactor(
+        site_name, prior_location_name, prior_scale_name, 1,
+        prior_location, prior_scale)
+    scale_prior = BRM.NativePPLExponentialFactor(
+        downstream_scale, 2, scale_declaration.prior.scale)
+    likelihood_factor = BRM.NativePPLNormalFactor(
+        response_name, site_name, downstream_scale, observation_axis)
+    parameters = (; site=site_parameter, scale=scale_parameter)
+    _validated_plan(BRM.NativePPLPlan(
+        (; observation=observation_axis, coefficient=site_axis,
+           scale=scale_axis),
+        (; predictors=(;), response=response_input),
+        parameters,
+        (; transforms=(;), location),
+        (; site_prior, scale_prior, likelihood=likelihood_factor),
+        BRM._native_ppl_queries(observation_axis, likelihood_factor),
         NamedTuple{(response_name,)}((response,))))
 end
 
@@ -1045,6 +1226,8 @@ function _bind(declaration::Model, bindings, conditions)
     _validate_model(declaration)
     _validate_binding_names(declaration, bindings)
     _validate_condition_names(declaration, conditions)
+    length(declaration.observations) > 1 && length(conditions) == 1 &&
+        return _bind_scalar_site_schedule(declaration, bindings, conditions)
     isempty(declaration.inputs) &&
         return _bind_scalar_location(declaration, bindings, conditions)
     predictor_names = Tuple(keys(declaration.inputs))
@@ -1382,12 +1565,19 @@ function _lower_brmi(brmi::BRM.BRMI)
     predictors = map(column -> parent(parent(column)), predictor_columns)
     response_values = parent(parent(response_lhs))
 
+    scalar_location = isempty(predictor_names)
+    intercept_prior = scalar_location ?
+        BRM._native_ppl_intercept_normal_prior(brmi, location) :
+        (; location=0.0, scale=1.0, operation=nothing)
+
     prior_scale = family === BRM.Normal ?
         BRM._native_ppl_exponential_prior(brmi, scale_name) : nothing
-    expected = family === BRM.Normal ?
+    expected_values = family === BRM.Normal ?
         Set((location, scale_name, response, predictor_names...)) :
         Set((location, response, predictor_names...))
-    extras = setdiff(Set(keys(brmi.operations)), expected)
+    intercept_prior.operation === nothing ||
+        push!(expected_values, intercept_prior.operation)
+    extras = setdiff(Set(keys(brmi.operations)), expected_values)
     isempty(extras) || throw(CapabilityError(
         :additional_operations,
         "unsupported formula operations: " *
@@ -1395,7 +1585,6 @@ function _lower_brmi(brmi::BRM.BRMI)
 
     input_declarations = _declaration_namedtuple(
         predictor_names, map(_ -> input(), predictor_names))
-    scalar_location = isempty(predictor_names)
     scalar_location && family !== BRM.Normal && throw(CapabilityError(
         :likelihood,
         "the first intercept-only BRM native-PPL slice supports Normal"))
@@ -1403,7 +1592,9 @@ function _lower_brmi(brmi::BRM.BRMI)
     coefficient_declaration = parameter(
         RealSupport(),
         scalar_location ? (location,) : (:Intercept, predictor_names...);
-        transform=Identity(), prior=StandardNormal())
+        transform=Identity(),
+        prior=intercept_prior.operation === nothing ? StandardNormal() :
+            normal_prior(intercept_prior.location, intercept_prior.scale))
     parameter_declarations = if family === BRM.Normal
         scale_declaration = parameter(
             PositiveSupport(), (scale_name,);
@@ -1965,14 +2156,10 @@ function _model_function_syntax(definition)
             "native PPL @model generated duplicate parameter identities"))
     length(unique(node_names)) == length(node_names) || throw(ArgumentError(
         "native PPL @model generated duplicate node identities"))
-    if explicit_outputs === nothing
-        length(observation_names) == 1 || throw(ArgumentError(
-            "native PPL @model without an explicit return currently requires " *
-            "exactly one observation"))
-    else
-        length(observation_names) <= 1 || throw(ArgumentError(
-            "native PPL @model currently supports at most one observation"))
-    end
+    explicit_outputs === nothing && isempty(observation_names) &&
+        throw(ArgumentError(
+            "native PPL @model without an explicit return requires at least " *
+            "one stochastic site"))
     input_values = Any[
         Expr(:call, _syntax_ref(:input))
         for name in argument_names
@@ -2010,10 +2197,11 @@ end
 
 Define a staged probabilistic model function. Calling it returns a
 `ModelInstance`; it does not execute density or RNG work. The current language
-slice accepts generic composable positional value ports, standard-normal
+slice accepts generic composable positional value ports, scalar Normal and
+standard-normal
 coefficient sites, positive Exponential-prior scalar sites, fitted
-center/zscale nodes, affine and exp deterministic nodes, and one scalar or
-explicitly broadcast Normal/BernoulliLogit/Poisson stochastic site. A final
+center/zscale nodes, affine and exp deterministic nodes, and staged scalar or
+explicitly broadcast Normal/BernoulliLogit/Poisson stochastic sites. A final
 `return value` or named-tuple return declares component outputs and permits a
 deterministic zero-observation model. The current vector executor requires the
 explicit broadcast form (`@.` or dotted `~`).
@@ -2024,11 +2212,11 @@ end
 
 export Model, ModelInstance, GraphRef, Component, Composition, Input, Parameter
 export RealSupport, PositiveSupport, IdentityTransform, ExpTransform
-export StandardNormal, ExponentialPrior
+export StandardNormal, NormalPrior, ExponentialPrior
 export Center, ZScale, Affine, ExpLink
 export NormalObservation, BernoulliLogitObservation, PoissonObservation
 export BroadcastObservation
-export model, input, parameter, Identity, Exp, Exponential
+export model, input, parameter, Identity, Exp, normal_prior, Exponential
 export center, zscale, standardize, affine, exp_link
 export normal, bernoulli_logit, poisson, broadcasted
 export instantiate, substitute, condition, component, output, compose, bind, lower

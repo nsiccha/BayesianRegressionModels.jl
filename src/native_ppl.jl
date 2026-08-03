@@ -186,6 +186,25 @@ end
 NativePPLStandardNormalFactor(parameter::Symbol, unconstrained::R) where {R} =
     NativePPLStandardNormalFactor{parameter,R}(unconstrained)
 
+"""Generating Normal factor for one unconditioned scalar stochastic site."""
+struct NativePPLScalarNormalFactor{Site,Location,Scale,L,S} <:
+       NativePPLFactor
+    unconstrained_index::Int
+    location::L
+    scale::S
+end
+
+function NativePPLScalarNormalFactor(
+    site::Symbol, location_name::Symbol, scale_name::Symbol,
+    unconstrained_index::Int, location::L, scale::S,
+) where {L,S}
+    unconstrained_index > 0 || throw(ArgumentError(
+        "native PPL scalar Normal site coordinate must be positive"))
+    NativePPLScalarNormalFactor{
+        site,location_name,scale_name,L,S,
+    }(unconstrained_index, location, scale)
+end
+
 """Exponential prior on a constrained scalar; its parameter owns the transform."""
 struct NativePPLExponentialFactor{Parameter,T} <: NativePPLFactor
     unconstrained_index::Int
@@ -629,6 +648,49 @@ function _native_ppl_exponential_prior(brmi::BRMI, key::Symbol)
     scale
 end
 
+function _native_ppl_intercept_normal_prior(brmi::BRMI, key::Symbol)
+    matches = Tuple{Symbol,Any}[]
+    for (operation_key, named) in pairs(brmi.operations)
+        named isa NamedColumn || continue
+        operation = parent(named)
+        operation isa ExprColumn && getf(operation) === (~) || continue
+        isempty(getkwargs(operation)) || continue
+        lhs, prior = getargs(operation, 2)
+        lhs isa ExprColumn && getf(lhs) === effect || continue
+        isempty(getkwargs(lhs)) || continue
+        target = getargs(lhs)
+        target == (key, :Intercept) || continue
+        push!(matches, (operation_key, prior))
+    end
+    isempty(matches) && return (
+        location=0.0, scale=1.0, operation=nothing)
+    length(matches) == 1 || throw(NativePPLCapabilityError(
+        :coefficient_prior,
+        "linear predictor `$key` has multiple intercept prior declarations"))
+    operation_key, prior = only(matches)
+    prior isa ExprColumn && getf(prior) === Normal || throw(
+        NativePPLCapabilityError(
+            :coefficient_prior,
+            "`effect($key, Intercept)` must use `Normal(location, scale)`"))
+    isempty(getkwargs(prior)) || throw(NativePPLCapabilityError(
+        :coefficient_prior,
+        "Normal intercept prior for `$key` cannot have keywords"))
+    arguments = getargs(prior)
+    length(arguments) == 2 && all(argument -> argument isa Real, arguments) ||
+        throw(NativePPLCapabilityError(
+            :coefficient_prior,
+            "Normal intercept prior for `$key` needs numeric location and scale"))
+    location, scale = arguments
+    isfinite(location) || throw(NativePPLCapabilityError(
+        :coefficient_prior,
+        "Normal intercept prior location for `$key` must be finite"))
+    isfinite(scale) && scale > zero(scale) || throw(
+        NativePPLCapabilityError(
+            :coefficient_prior,
+            "Normal intercept prior scale for `$key` must be finite and positive"))
+    (; location, scale, operation=operation_key)
+end
+
 function _native_ppl_fit_mean(values::AbstractVector, name::Symbol,
                               transform::Symbol)
     all(value -> value isa Real && isfinite(value), values) ||
@@ -729,6 +791,24 @@ function _native_ppl_validate_coefficient_prior(
             "compiled coefficient prior and parameter coordinates must agree"))
     nothing
 end
+function _native_ppl_validate_coefficient_prior(
+    factor::NativePPLScalarNormalFactor{Parameter},
+    parameter::NativePPLParameter{Parameter},
+) where {Parameter}
+    factor.unconstrained_index == only(parameter.unconstrained) || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled scalar-site factor and parameter coordinate must agree"))
+    factor.location isa Real && isfinite(factor.location) || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled scalar-site Normal location must be finite"))
+    factor.scale isa Real && isfinite(factor.scale) && factor.scale > zero(factor.scale) ||
+        throw(NativePPLCapabilityError(
+            :graph_identity,
+            "compiled scalar-site Normal scale must be finite and positive"))
+    nothing
+end
 _native_ppl_validate_coefficient_prior(::Any, ::Any) = throw(
     NativePPLCapabilityError(
         :graph_identity,
@@ -748,6 +828,39 @@ _native_ppl_validate_scale_prior(::Any, ::Any) = throw(
     NativePPLCapabilityError(
         :graph_identity,
         "compiled scale prior must target the scale parameter"))
+
+@inline _native_ppl_location_parameter(
+    plan::NativePPLPlan,
+) = _native_ppl_location_parameter(plan.nodes.location, plan.parameters)
+@inline function _native_ppl_location_parameter(
+    ::NativePPLAffineNode, parameters,
+)
+    hasproperty(parameters, :coefficients) || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled affine graph is missing its coefficient parameter"))
+    parameters.coefficients
+end
+@inline function _native_ppl_location_parameter(
+    ::NativePPLScalarBroadcastNode{Location,Parameter}, parameters,
+) where {Location,Parameter}
+    hasproperty(parameters, :site) && return parameters.site
+    hasproperty(parameters, Parameter) && return getproperty(
+        parameters, Parameter)
+    hasproperty(parameters, :coefficients) && return parameters.coefficients
+    throw(NativePPLCapabilityError(
+        :graph_identity,
+        "compiled scalar graph is missing parameter `$Parameter`"))
+end
+
+@inline function _native_ppl_location_factor(plan::NativePPLPlan)
+    hasproperty(plan.factors, :site_prior) && return plan.factors.site_prior
+    hasproperty(plan.factors, :coefficient_prior) &&
+        return plan.factors.coefficient_prior
+    throw(NativePPLCapabilityError(
+        :graph_identity,
+        "compiled graph is missing its location-generating factor"))
+end
 
 function _native_ppl_validate_likelihood_graph(
     factor::NativePPLNormalFactor{Response,Location,Scale},
@@ -875,24 +988,16 @@ function _native_ppl_validate_predictor_graph(plan::NativePPLPlan)
     location.axis === observation_axis || throw(NativePPLCapabilityError(
         :graph_identity,
         "compiled location must carry the plan observation axis"))
-    hasproperty(plan.parameters, :coefficients) || throw(
-        NativePPLCapabilityError(
-            :graph_identity,
-            "compiled graph is missing its coefficient parameter"))
-    hasproperty(plan.factors, :coefficient_prior) || throw(
-        NativePPLCapabilityError(
-            :graph_identity,
-            "compiled graph is missing its coefficient prior"))
-    coefficients = plan.parameters.coefficients
+    coefficients = _native_ppl_location_parameter(plan)
     coefficients isa NativePPLParameter || throw(NativePPLCapabilityError(
         :graph_identity,
-        "compiled coefficients must be a typed parameter block"))
+        "compiled location source must be a typed parameter block"))
     coefficients.axis === plan.axes.coefficient || throw(
         NativePPLCapabilityError(
             :graph_identity,
-            "compiled coefficient parameter must carry the coefficient axis"))
+            "compiled location parameter must carry the coefficient axis"))
     _native_ppl_validate_coefficient_prior(
-        plan.factors.coefficient_prior, coefficients)
+        _native_ppl_location_factor(plan), coefficients)
 
     hasproperty(plan.nodes, :transforms) || throw(NativePPLCapabilityError(
         :graph_identity,
@@ -1290,6 +1395,21 @@ const _NATIVE_PPL_HALF_LOG2PI = _NATIVE_PPL_LOG2PI / 2
 end
 
 @inline function _native_ppl_factor_logdensity(
+    factor::NativePPLScalarNormalFactor{Parameter},
+    parameter::NativePPLParameter{Parameter},
+    position::AbstractVector{T},
+) where {Parameter,T}
+    coordinate = factor.unconstrained_index
+    value = native_parameter_value(parameter, position, coordinate)
+    logjac = native_parameter_logabsdetjac(parameter, position, coordinate)
+    location = T(factor.location)
+    scale = T(factor.scale)
+    standardized = (value - location) / scale
+    -T(0.5) * standardized * standardized - log(scale) -
+        T(_NATIVE_PPL_HALF_LOG2PI) + logjac
+end
+
+@inline function _native_ppl_factor_logdensity(
     factor::NativePPLExponentialFactor{Parameter},
     parameter::NativePPLParameter{Parameter},
     position::AbstractVector{T},
@@ -1591,7 +1711,7 @@ end
     prepared::NativePPLPrepared,
     buffers::NativePPLBuffers{T},
 ) where {T}
-    coefficient_parameter = prepared.plan.parameters.coefficients
+    coefficient_parameter = _native_ppl_location_parameter(prepared.plan)
     intercept = native_parameter_value(
         coefficient_parameter, position, node.intercept_index)
     predictors = values(prepared.predictors)
@@ -1614,7 +1734,7 @@ end
     prepared::NativePPLPrepared,
     buffers::NativePPLBuffers{T},
 ) where {Location,Parameter,T}
-    parameter = prepared.plan.parameters.coefficients
+    parameter = _native_ppl_location_parameter(prepared.plan)
     parameter isa NativePPLParameter{Parameter} || throw(
         NativePPLCapabilityError(
             :graph_identity,
@@ -1632,8 +1752,8 @@ end
     buffers::NativePPLBuffers{T},
 ) where {T}
     scale_factor = prepared.plan.factors.scale_prior
-    coefficient_factor = prepared.plan.factors.coefficient_prior
-    coefficient_parameter = prepared.plan.parameters.coefficients
+    coefficient_factor = _native_ppl_location_factor(prepared.plan)
+    coefficient_parameter = _native_ppl_location_parameter(prepared.plan)
     scale_parameter = prepared.plan.parameters.scale
     density = _native_ppl_factor_logdensity(
         coefficient_factor, coefficient_parameter, position)
@@ -1654,8 +1774,8 @@ end
     buffers::NativePPLBuffers{T},
 ) where {T}
     density = _native_ppl_factor_logdensity(
-        prepared.plan.factors.coefficient_prior,
-        prepared.plan.parameters.coefficients,
+        _native_ppl_location_factor(prepared.plan),
+        _native_ppl_location_parameter(prepared.plan),
         position)
     density += _native_ppl_factor_logdensity!(
         likelihood_factor, prepared.plan.inputs.response,
@@ -1670,8 +1790,8 @@ end
     buffers::NativePPLBuffers{T},
 ) where {T}
     density = _native_ppl_factor_logdensity(
-        prepared.plan.factors.coefficient_prior,
-        prepared.plan.parameters.coefficients,
+        _native_ppl_location_factor(prepared.plan),
+        _native_ppl_location_parameter(prepared.plan),
         position)
     density += _native_ppl_factor_logdensity!(
         likelihood_factor, prepared.plan.inputs.response,
@@ -2180,6 +2300,136 @@ function _native_ppl_simulate!(rng::AbstractRNG,
         prepared, position, workspace.primal)
 end
 
+@inline function _native_ppl_draw_parameter!(
+    rng::AbstractRNG,
+    position::AbstractVector{T},
+    factor::NativePPLStandardNormalFactor{Parameter},
+    parameter::NativePPLParameter{Parameter},
+) where {T,Parameter}
+    for coordinate in factor.unconstrained
+        position[coordinate] = randn(rng, T)
+    end
+    nothing
+end
+
+
+@inline function _native_ppl_draw_parameter!(
+    rng::AbstractRNG,
+    position::AbstractVector{T},
+    factor::NativePPLScalarNormalFactor{Parameter},
+    parameter::NativePPLParameter{Parameter},
+) where {T,Parameter}
+    position[factor.unconstrained_index] =
+        T(factor.location) + T(factor.scale) * randn(rng, T)
+    nothing
+end
+
+
+@inline function _native_ppl_draw_parameter!(
+    rng::AbstractRNG,
+    position::AbstractVector{T},
+    factor::NativePPLExponentialFactor{Parameter},
+    parameter::NativePPLParameter{Parameter},
+) where {T,Parameter}
+    constrained = T(factor.scale) * randexp(rng, T)
+    position[factor.unconstrained_index] = log(constrained)
+    nothing
+end
+
+
+function _native_ppl_check_prior_predictive(
+    output::AbstractVector,
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+    position::AbstractVector,
+)
+    _native_ppl_check_query_output(
+        output, prepared, NativePPLPosteriorPredictive())
+    _native_ppl_check_location_execution(workspace, prepared, position)
+    Base.mightalias(output, position) && throw(ArgumentError(
+        "native PPL prior-predictive output must not alias its position"))
+    Base.mightalias(output, workspace.primal.location) && throw(ArgumentError(
+        "native PPL prior-predictive output must not alias the workspace " *
+        "location buffer"))
+    Base.mightalias(output, workspace.primal.pointwise_loglikelihood) &&
+        throw(ArgumentError(
+            "native PPL prior-predictive output must not alias the workspace " *
+            "pointwise buffer"))
+    Base.mightalias(output, workspace.gradient) && throw(ArgumentError(
+        "native PPL prior-predictive output must not alias the workspace " *
+        "gradient buffer"))
+    Base.mightalias(position, workspace.primal.pointwise_loglikelihood) &&
+        throw(ArgumentError(
+            "native PPL prior-predictive position must not alias the " *
+            "workspace pointwise buffer"))
+    Base.mightalias(position, workspace.gradient) && throw(ArgumentError(
+        "native PPL prior-predictive position must not alias the workspace " *
+        "gradient buffer"))
+    for (name, predictor) in pairs(prepared.predictors)
+        Base.mightalias(output, predictor) && throw(ArgumentError(
+            "native PPL prior-predictive output must not alias prepared " *
+            "predictor `$name`"))
+        Base.mightalias(position, predictor) && throw(ArgumentError(
+            "native PPL prior-predictive position must not alias prepared " *
+            "predictor `$name`"))
+    end
+    if native_ppl_has_response(prepared)
+        Base.mightalias(output, prepared.response) && throw(ArgumentError(
+            "native PPL prior-predictive output must not alias the prepared " *
+            "response"))
+        Base.mightalias(position, prepared.response) && throw(ArgumentError(
+            "native PPL prior-predictive position must not alias the prepared " *
+            "response"))
+    end
+
+    location_parameter = _native_ppl_location_parameter(prepared.plan)
+    location_factor = _native_ppl_location_factor(prepared.plan)
+    _native_ppl_validate_coefficient_prior(
+        location_factor, location_parameter)
+    if hasproperty(prepared.plan.factors, :scale_prior)
+        hasproperty(prepared.plan.parameters, :scale) || throw(
+            NativePPLCapabilityError(
+                :graph_identity,
+                "compiled prior-predictive schedule is missing its scale " *
+                "parameter"))
+        _native_ppl_validate_scale_prior(
+            prepared.plan.factors.scale_prior,
+            prepared.plan.parameters.scale)
+    end
+    nothing
+end
+
+
+"""
+    NativePPL.simulate_prior!(rng, position, output, workspace, prepared)
+
+Draw every currently supported free parameter/site from its generating factor,
+then simulate the response in graph order. `position` receives unconstrained
+coordinates and `output` receives the prior-predictive response. Validation is
+completed before the RNG is advanced.
+"""
+function _native_ppl_simulate_prior!(
+    rng::AbstractRNG,
+    position::AbstractVector,
+    output::AbstractVector,
+    workspace::NativePPLWorkspace,
+    prepared::NativePPLPrepared,
+)
+    _native_ppl_check_prior_predictive(
+        output, workspace, prepared, position)
+    _native_ppl_draw_parameter!(
+        rng, position, _native_ppl_location_factor(prepared.plan),
+        _native_ppl_location_parameter(prepared.plan))
+    if hasproperty(prepared.plan.factors, :scale_prior)
+        _native_ppl_draw_parameter!(
+            rng, position, prepared.plan.factors.scale_prior,
+            prepared.plan.parameters.scale)
+    end
+    _native_ppl_simulate!(
+        rng, output, workspace, prepared, position,
+        NativePPLPosteriorPredictive())
+end
+
 function _native_ppl_evaluate_draws!(
     output::AbstractMatrix,
     workspace::NativePPLWorkspace,
@@ -2487,11 +2737,24 @@ simulate!(rng::BRM.AbstractRNG, output::AbstractVector, work::Workspace,
           prepared::Prepared, position::AbstractVector,
           query::BRM.NativePPLQuery=PosteriorPredictive()) =
     BRM._native_ppl_simulate!(rng, output, work, prepared, position, query)
+simulate_prior!(rng::BRM.AbstractRNG, position::AbstractVector,
+                output::AbstractVector, work::Workspace,
+                prepared::Prepared) =
+    BRM._native_ppl_simulate_prior!(
+        rng, position, output, work, prepared)
 function simulate(rng::BRM.AbstractRNG, work::Workspace, prepared::Prepared,
                   position::AbstractVector,
                   query::BRM.NativePPLQuery=PosteriorPredictive())
     output = allocate_output(prepared, query)
     simulate!(rng, output, work, prepared, position, query)
+end
+function simulate_prior(rng::BRM.AbstractRNG, work::Workspace,
+                        prepared::Prepared)
+    position = Vector{eltype(work)}(
+        undef, BRM.LogDensityProblems.dimension(prepared))
+    output = allocate_output(prepared, PosteriorPredictive())
+    simulate_prior!(rng, position, output, work, prepared)
+    (; position, response=output)
 end
 evaluate_draws!(output::AbstractMatrix, work::Workspace, prepared::Prepared,
                 positions::AbstractMatrix, query::BRM.NativePPLQuery) =
@@ -2553,9 +2816,10 @@ export LinearPredictor, PointwiseLogLikelihood, PosteriorPredictive
 export compile, prepare, workspace, rebind, has_response
 export output_signature, batch_output_signature
 export output_axis, output_axes, output_draw_axis, output_eltype, output_layout
-export allocate_output, evaluate, simulate
+export allocate_output, evaluate, simulate, simulate_prior
 export evaluate_draws, simulate_draws, execute_draws
 export logdensity!, logdensity_and_gradient!, evaluate!, simulate!
+export simulate_prior!
 export evaluate_draws!, simulate_draws!, execute_draws!
 
 end
