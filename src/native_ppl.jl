@@ -675,17 +675,10 @@ function _native_ppl_varying_intercept(term, key::Symbol)
                              coefficient_terms)
         isempty(slope_terms) && throw(NativePPLCapabilityError(
             :group_term,
-            "grouped coefficients in `$key` require at least one raw " *
+            "grouped coefficients in `$key` require at least one " *
             "slope predictor"))
-        parsed = map(slope_terms) do slope
-            predictor = _native_ppl_predictor_term(slope, key)
-            predictor.transform === :identity || throw(
-                NativePPLCapabilityError(
-                    :group_term,
-                    "the current varying-slope slice requires " *
-                    "untransformed raw predictors"))
-            predictor
-        end
+        parsed = map(
+            slope -> _native_ppl_predictor_term(slope, key), slope_terms)
         intercept_count == 1 ? (nothing, parsed...) : Tuple(parsed)
     else
         throw(NativePPLCapabilityError(
