@@ -394,6 +394,60 @@ _native_ppl_workspace(::NativePPLPrepared, ::Type{<:AbstractFloat}, backend) =
         "native PPL derivative workspaces require loading DifferentiationInterface; " *
         "only AutoEnzyme is tested, recommended, and guaranteed"))
 
+"""
+    NativePPL.LogDensityProblem(prepared, backend)
+
+An order-1 `LogDensityProblems` adapter over a conditioned native PPL value.
+The adapter owns the derivative workspace prepared by `backend`; construct one
+adapter per concurrent task or sampler chain. Gradient results are copied at
+the interface boundary because `LogDensityProblems` gives their ownership to
+the caller, while the lower-level `NativePPL.logdensity_and_gradient!` API
+deliberately returns a reusable workspace buffer.
+
+`DifferentiationInterface.AutoEnzyme()` is the supported backend. WarmupHMC is
+not required to construct or use this adapter.
+"""
+struct NativePPLLogDensityProblem{P,W}
+    prepared::P
+    workspace::W
+
+    function NativePPLLogDensityProblem(
+        prepared::P,
+        workspace::W,
+        ::Val{:workspace},
+    ) where {P<:NativePPLPrepared,W<:NativePPLWorkspace}
+        native_ppl_has_response(prepared) || throw(ArgumentError(
+            "native PPL log-density adapters require a conditioned response; " *
+            "the prepared value is prediction-only"))
+        workspace.derivative === nothing && throw(ArgumentError(
+            "native PPL log-density adapters require a derivative-prepared " *
+            "workspace; construct one with AutoEnzyme()"))
+        new{P,W}(prepared, workspace)
+    end
+end
+
+function NativePPLLogDensityProblem(prepared::NativePPLPrepared, backend)
+    workspace = _native_ppl_workspace(prepared, eltype(prepared), backend)
+    NativePPLLogDensityProblem(prepared, workspace, Val(:workspace))
+end
+
+Base.eltype(problem::NativePPLLogDensityProblem) = eltype(problem.prepared)
+LogDensityProblems.capabilities(::Type{<:NativePPLLogDensityProblem}) =
+    LogDensityProblems.LogDensityOrder{1}()
+LogDensityProblems.dimension(problem::NativePPLLogDensityProblem) =
+    LogDensityProblems.dimension(problem.prepared)
+LogDensityProblems.logdensity(problem::NativePPLLogDensityProblem,
+                              position::AbstractVector) =
+    _native_ppl_logdensity!(problem.workspace, problem.prepared, position)
+function LogDensityProblems.logdensity_and_gradient(
+    problem::NativePPLLogDensityProblem,
+    position::AbstractVector,
+)
+    density, gradient = _native_ppl_logdensity_and_gradient!(
+        problem.workspace, problem.prepared, position)
+    density, copy(gradient)
+end
+
 LogDensityProblems.dimension(plan::NativePPLPlan) =
     sum(length(parameter.unconstrained) for parameter in plan.parameters)
 
@@ -2274,6 +2328,7 @@ const BRM = parentmodule(@__MODULE__)
 const Plan = BRM.NativePPLPlan
 const Prepared = BRM.NativePPLPrepared
 const Workspace = BRM.NativePPLWorkspace
+const LogDensityProblem = BRM.NativePPLLogDensityProblem
 const CapabilityError = BRM.NativePPLCapabilityError
 const OutputSignature = BRM.NativePPLOutputSignature
 const BatchOutputSignature = BRM.NativePPLBatchOutputSignature
@@ -2401,7 +2456,7 @@ end
 
 include("native_ppl_authoring.jl")
 
-export Plan, Prepared, Workspace, CapabilityError
+export Plan, Prepared, Workspace, LogDensityProblem, CapabilityError
 export OutputSignature, BatchOutputSignature
 export DenseVectorLayout, DenseMatrixLayout
 export LinearPredictor, PointwiseLogLikelihood, PosteriorPredictive

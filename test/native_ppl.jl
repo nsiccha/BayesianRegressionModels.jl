@@ -156,14 +156,21 @@ function multi_native_brmi(family::Symbol, data)
     end
 end
 
-function deterministic_preprocessing_composition(family::Symbol, data)
-    preprocessing_model = NP.model(
-        inputs=(; raw=NP.input()),
-        nodes=(; scaled=NP.zscale(:raw)),
-        observations=(;))
+function deterministic_preprocessing_composition(
+    family::Symbol, data; concise::Bool=true)
+    preprocessing_instance = if concise
+        concise_zscale_component(data.x)
+    else
+        preprocessing_model = NP.model(
+            inputs=(; raw=NP.input()),
+            nodes=(; scaled=NP.zscale(:raw)),
+            observations=(;),
+            outputs=(; scaled=:scaled))
+        NP.substitute(preprocessing_model; raw=data.x)
+    end
     preprocessing = NP.component(
         :preprocessing,
-        NP.substitute(preprocessing_model; raw=data.x))
+        preprocessing_instance)
     regression_model = direct_native_model(family, :identity)
     regression = NP.component(
         :regression,
@@ -278,6 +285,31 @@ NP.@model function composable_gaussian(x)
     sigma ~ Exponential(2.0)
     mu = intercept + slope * x
     @. y ~ Normal(mu, sigma)
+end
+
+NP.@model function concise_zscale_component(raw)
+    scaled = zscale(raw)
+    return scaled
+end
+
+NP.@model function concise_named_preprocessing(raw)
+    centered = center(raw)
+    scaled = zscale(raw)
+    return (centered=centered, standardized=scaled)
+end
+
+NP.@model function unknown_output_component(raw)
+    scaled = zscale(raw)
+    return missing
+end
+
+NP.@model function concise_passthrough(raw)
+    return raw
+end
+
+NP.@model function concise_aliased_zscale(raw)
+    scaled = zscale(raw)
+    return (standardized=scaled,)
 end
 
 NP.@model function macro_bernoulli_center(
@@ -2342,12 +2374,10 @@ end
     @test conditioned_composition.components.site_conditioned.instance.
           conditions.y === stochastic
 
-    preprocessing_model = NP.model(
-        inputs=(; raw=NP.input()),
-        nodes=(; scaled=NP.zscale(:raw)),
-        observations=(;))
-    preprocessing = NP.component(
-        :preprocessing, NP.substitute(preprocessing_model; raw=raw_x))
+    preprocessing_instance = concise_zscale_component(raw_x)
+    @test isempty(preprocessing_instance.declaration.observations)
+    @test preprocessing_instance.declaration.outputs == (; scaled=:scaled)
+    preprocessing = NP.component(:preprocessing, preprocessing_instance)
     scaled = NP.output(preprocessing, :scaled)
     response = [0.2, -0.1, 1.1, 0.7]
     regression = NP.component(
@@ -2388,6 +2418,27 @@ end
     @test NP.simulate(
         MersenneTwister(909), composed_work, prepared, position) ==
           NP.simulate(MersenneTwister(909), direct_work, direct, position)
+
+    named_preprocessing = NP.component(
+        :named_preprocessing, concise_named_preprocessing(raw_x))
+    standardized = NP.output(named_preprocessing, :standardized)
+    @test NP.graph_kind(standardized) === :node
+    @test NP.graph_name(standardized) === :standardized
+    @test_throws ArgumentError NP.output(named_preprocessing, :scaled)
+
+    aliased_preprocessing = NP.component(
+        :aliased_preprocessing, concise_aliased_zscale(raw_x))
+    aliased_standardized = NP.output(
+        aliased_preprocessing, :standardized)
+    @test NP.graph_name(aliased_standardized) === :standardized
+    @test NP.graph_kind(aliased_standardized) === :node
+    @test_throws ArgumentError NP.output(aliased_preprocessing, :scaled)
+    aliased_regression = NP.component(
+        :aliased_regression,
+        NP.condition(composable_gaussian(aliased_standardized); y=response))
+    aliased_composed = NP.prepare(NP.compose(
+        aliased_preprocessing, aliased_regression))
+    @test only(values(aliased_composed.predictors)) == direct.predictor
 end
 
 
@@ -2409,8 +2460,11 @@ end
         data = (; x=raw_x, y=response)
         composition = deterministic_preprocessing_composition(family, data)
         composed_plan = NP.compile(composition)
+        builder_plan = NP.compile(deterministic_preprocessing_composition(
+            family, data; concise=false))
         direct_plan = NP.bind(conditioned(
             direct_native_model(family, :zscale), data))
+        check_plan_structure(composed_plan, builder_plan)
         composed = check_transformed_execution(
             composed_plan, direct_plan, position)
         direct = NP.prepare(direct_plan)
@@ -2483,10 +2537,8 @@ end
     raw_w = [4.0, 2.0, 3.0, 9.0]
     response = [0.2, -0.1, 1.1, 0.7]
 
-    identity_model = NP.model(
-        inputs=(; raw=NP.input()), observations=(;))
     constant_source = NP.component(
-        :constant_source, NP.substitute(identity_model; raw=raw_x))
+        :constant_source, concise_passthrough(raw_x))
     constant_regression = NP.component(
         :constant_regression,
         NP.condition(
@@ -2610,6 +2662,34 @@ end
 
 @testset "public native PPL @model semantics" begin
     raw_x = [-1.0, 0.0, 2.0, 4.0]
+    preprocessing = concise_zscale_component(raw_x)
+    @test keys(preprocessing.declaration.inputs) == (:raw,)
+    @test keys(preprocessing.declaration.nodes) == (:scaled,)
+    @test isempty(preprocessing.declaration.parameters)
+    @test isempty(preprocessing.declaration.observations)
+    @test preprocessing.declaration.outputs == (; scaled=:scaled)
+    @test occursin("outputs=(:scaled,)", sprint(show, preprocessing.declaration))
+
+    named_preprocessing = concise_named_preprocessing(raw_x)
+    @test named_preprocessing.declaration.outputs ==
+          (; centered=:centered, standardized=:scaled)
+    @test_throws ArgumentError unknown_output_component(raw_x)
+    @test capability_error(() -> NP.bind(preprocessing)).capability == :outcomes
+    passthrough = concise_passthrough(raw_x)
+    @test passthrough.declaration.outputs == (; raw=:raw)
+    @test NP.graph_kind(NP.output(
+        NP.component(:passthrough, passthrough), :raw)) === :binding
+    @test_throws ArgumentError NP.model(
+        inputs=(; raw=NP.input()),
+        nodes=(; scaled=NP.zscale(:raw)),
+        observations=(;), outputs=(; missing=:unknown))
+    @test_throws ArgumentError NP.model(
+        inputs=(; raw=NP.input()),
+        nodes=(; scaled=NP.zscale(:raw)),
+        observations=(;), outputs=(; first=:scaled, second=:scaled))
+    @test_throws ArgumentError NP.model(
+        inputs=(; raw=NP.input()), observations=(;), outputs=(;))
+
     unconditioned = macro_gaussian_identity(raw_x)
     @test keys(unconditioned.declaration.inputs) == (:x,)
     @test unconditioned.declaration.inputs.x isa NP.Input{:value}
@@ -2723,6 +2803,24 @@ end
             centered = center(x)
         end)))
     @test occursin("exactly one observation", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function nonfinal_return(x)
+            centered = center(x)
+            return centered
+            scaled = zscale(x)
+        end)))
+    @test occursin("return must be the final statement", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function duplicate_return(x)
+            centered = center(x)
+            return (first=centered, second=centered)
+        end)))
+    @test occursin("returned graph values must be distinct", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function empty_return(x)
+            return (;)
+        end)))
+    @test occursin("at least one named graph value", err.msg)
     err = argument_error(() -> macroexpand(
         @__MODULE__, :(NP.@model function bad_link(x)
             intercept ~ Normal()

@@ -79,13 +79,14 @@ and no `[extras]`/`[targets]` in the root `Project.toml`:
   every supported Julia version, so carrying both would be two declarations of
   one dependency list.
 
-Three files are the reason this environment exists — they fail at their own
+Four files are the reason this environment exists — they fail at their own
 `using` line under `julia --project=.`, before any BRM code runs:
 
 | file | needs beyond the root project |
 | --- | --- |
 | `test/adaptive_centering_bridgestan.jl` | `WarmupHMC`, `Enzyme` |
 | `test/adaptive_centering_warmuphmc.jl` | `WarmupHMC`, `Enzyme`, `DifferentiationInterface` |
+| `test/native_ppl_warmuphmc.jl` | `WarmupHMC`, `Enzyme`, `DifferentiationInterface` |
 | `test/plate_stress.jl` | `BridgeStan` |
 
 There is no CI workflow for these on purpose: they need `stanc` and a BridgeStan
