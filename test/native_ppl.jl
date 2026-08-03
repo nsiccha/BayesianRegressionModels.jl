@@ -2270,6 +2270,9 @@ end
     @test NP.graph_kind(parameter) === :parameter
     @test NP.graph_kind(deterministic) === :node
     @test NP.graph_kind(stochastic) === :site
+    @test_throws ArgumentError NP.GraphRef{1,:mu,:node}()
+    @test_throws ArgumentError NP.GraphRef{:source,1,:node}()
+    @test_throws ArgumentError NP.GraphRef{:source,:mu,:unknown}()
     @test occursin(
         "source.mu, kind=node", sprint(show, deterministic))
 
@@ -2280,6 +2283,8 @@ end
     @test keys(composition.components) == (:source, :sink)
     @test composition.components.source === source
     @test composition.components.sink === sink
+    @test NP.Composition((; source, sink)).components ==
+          composition.components
     @test occursin(
         "components=(:source, :sink)", sprint(show, composition))
 
@@ -2304,8 +2309,17 @@ end
     @test occursin("source.mu", err.detail)
 
     @test_throws ArgumentError NP.compose(sink, source)
+    @test_throws ArgumentError NP.compose()
     @test_throws ArgumentError NP.compose(
         source, NP.component(:source, composable_gaussian(raw_x)))
+    @test_throws ArgumentError NP.component(
+        Symbol(""), composable_gaussian(raw_x))
+    @test_throws ArgumentError NP.Component{1,typeof(source.instance)}(
+        source.instance)
+    @test_throws ArgumentError NP.Composition((source, sink))
+    @test_throws ArgumentError NP.Composition((;))
+    @test_throws ArgumentError NP.Composition((; sink, source))
+    @test_throws ArgumentError NP.Composition((; not_a_component=1))
     @test_throws ArgumentError NP.output(source, :missing)
     open_component = NP.component(:open, direct_native_model(
         :gaussian, :identity))
