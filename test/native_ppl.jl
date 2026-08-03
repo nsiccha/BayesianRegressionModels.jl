@@ -46,11 +46,14 @@ function direct_native_model(family::Symbol, transform::Symbol;
         NP.poisson(:y, rate_name)
     end
     NP.model(
-        inputs=(; x=NP.input(:predictor), y=NP.input(:response)),
+        inputs=(; x=NP.input()),
         parameters=parameters,
         nodes=nodes,
-        observations=(; y=observation))
+        observations=(; y=NP.broadcasted(observation)))
 end
+
+conditioned(model, data) =
+    NP.condition(NP.substitute(model; x=data.x); y=data.y)
 
 function native_brmi(family::Symbol, transform::Symbol, data)
     if family === :gaussian
@@ -124,7 +127,24 @@ function check_plan_structure(left, right)
 end
 
 NP.@model function macro_gaussian_identity(
-    x::AbstractVector{<:Real}, y::AbstractVector{<:Real})
+    x::AbstractVector{<:Real})
+    intercept ~ Normal()
+    slope ~ Normal(0, 1)
+    sigma ~ Exponential(2.0)
+    mu = intercept + slope * x
+    @. y ~ Normal(mu, sigma)
+end
+
+NP.@model function macro_gaussian_zscale(
+    x::AbstractVector{<:Real})
+    intercept ~ Normal()
+    slope ~ Normal(0, 1)
+    sigma ~ Exponential(2.0)
+    mu = intercept + slope * standardize(x)
+    @. y ~ Normal(mu, sigma)
+end
+
+NP.@model function macro_scalar_gaussian(x::AbstractVector{<:Real})
     intercept ~ Normal()
     slope ~ Normal(0, 1)
     sigma ~ Exponential(2.0)
@@ -132,17 +152,8 @@ NP.@model function macro_gaussian_identity(
     y ~ Normal(mu, sigma)
 end
 
-NP.@model function macro_gaussian_zscale(
-    x::AbstractVector{<:Real}, y::AbstractVector{<:Real})
-    intercept ~ Normal()
-    slope ~ Normal(0, 1)
-    sigma ~ Exponential(2.0)
-    mu = intercept + slope * standardize(x)
-    y ~ Normal(mu, sigma)
-end
-
 NP.@model function macro_bernoulli_center(
-    x::AbstractVector{<:Real}, y::AbstractVector{<:Real})
+    x::AbstractVector{<:Real})
     intercept ~ Normal()
     slope ~ Normal(0, 1)
     eta = intercept .+ slope .* center(x)
@@ -150,7 +161,7 @@ NP.@model function macro_bernoulli_center(
 end
 
 NP.@model function macro_poisson_zscale(
-    x::AbstractVector{<:Real}, y::AbstractVector{<:Real})
+    x::AbstractVector{<:Real})
     intercept ~ Normal()
     slope ~ Normal(0, 1)
     log_rate = intercept .+ slope .* zscale(x)
@@ -167,12 +178,12 @@ const Normal = :shadow
 const Exponential = :shadow
 const zscale = :shadow
 
-NP.@model function hygienic(x::Vector{Float64}, y::Vector{Float64})
+NP.@model function hygienic(x::Vector{Float64})
     intercept ~ Normal()
     slope ~ Normal(0, 1)
     sigma ~ Exponential(2.0)
     mu = intercept + slope * zscale(x)
-    y ~ Normal(mu, sigma)
+    @. y ~ Normal(mu, sigma)
 end
 end
 
@@ -1657,23 +1668,38 @@ end
         @test typeof(direct_model) === typeof(lowered_model)
         @test sprint(show, direct_model) == sprint(show, lowered_model)
 
-        direct_plan = NP.bind(direct_model, data)
-        compiled_direct_plan = NP.compile(direct_model, data)
-        lowered_plan = NP.bind(lowered_model, data)
+        direct_plan = NP.bind(conditioned(direct_model, data))
+        keyword_plan = NP.bind(
+            direct_model, (; x=data.x); conditions=(; y=data.y))
+        compiled_keyword_plan = NP.compile(
+            direct_model, (; x=data.x); conditions=(; y=data.y))
+        compiled_direct_plan = NP.compile(conditioned(direct_model, data))
+        lowered_plan = NP.bind(conditioned(lowered_model, data))
         brm_plan = NP.compile(brmi)
         compatibility_plan = BRM._native_ppl_plan(brmi)
         for candidate in (
-            compiled_direct_plan, lowered_plan, brm_plan, compatibility_plan)
+            keyword_plan, compiled_keyword_plan, compiled_direct_plan,
+            lowered_plan, brm_plan, compatibility_plan)
             check_plan_structure(direct_plan, candidate)
         end
         @test direct_plan.bindings.x === data.x
         @test direct_plan.bindings.y === data.y
         prepared = check_transformed_execution(
             direct_plan, brm_plan, position)
-        @test NP.prepare(direct_model, data).predictor == prepared.predictor
+        @test NP.prepare(conditioned(direct_model, data)).predictor ==
+              prepared.predictor
+        @test NP.prepare(
+            direct_model, (; x=data.x); conditions=(; y=data.y)).predictor ==
+              prepared.predictor
         @test steady_state_allocations(
             NP.workspace(prepared, Float64, DI.AutoEnzyme()),
             prepared, position) == (; primal=0, gradient=0)
+
+        unconditioned = NP.prepare(NP.bind(direct_model, (; x=data.x)))
+        @test !NP.has_response(unconditioned)
+        @test length(NP.simulate(
+            MersenneTwister(904), NP.workspace(unconditioned),
+            unconditioned, position)) == length(data.x)
 
         new_x = [10.0, 14.0, 20.0]
         new_y = family === :gaussian ? [0.4, 0.9, 1.3] :
@@ -1717,14 +1743,38 @@ end
 
     gaussian_model = direct_native_model(:gaussian, :identity)
     gaussian_data = (; x=[1.0, 2.0], y=[0.0, 1.0])
+    open_gaussian = gaussian_model
+    @test NP.input() isa NP.Input{:value}
+    open_instance = NP.substitute(open_gaussian; x=gaussian_data.x)
+    @test keys(open_instance.bindings) == (:x,)
+    @test isempty(open_instance.conditions)
+    conditioned_instance = NP.condition(open_instance; y=gaussian_data.y)
+    @test conditioned_instance.bindings.x === gaussian_data.x
+    @test conditioned_instance.conditions.y === gaussian_data.y
+    @test occursin("conditions=(:y,)", sprint(show, conditioned_instance))
+    @test NP.substitute(conditioned_instance; x=[3.0, 4.0]).bindings.x ==
+          [3.0, 4.0]
+    @test_throws ArgumentError NP.substitute(open_gaussian; unknown=[1.0])
+    @test_throws ArgumentError NP.condition(open_gaussian; unknown=[1.0])
+    @test_throws ArgumentError NP.substitute(
+        open_gaussian, Dict(:x => gaussian_data.x))
+    @test_throws ArgumentError NP.condition(
+        open_gaussian, Dict(:y => gaussian_data.y))
+    malformed_instance = NP.ModelInstance(
+        open_gaussian, (; x=gaussian_data.x), Dict(:y => gaussian_data.y))
+    @test_throws ArgumentError NP.substitute(
+        malformed_instance; x=gaussian_data.x)
+    @test_throws ArgumentError NP.condition(
+        malformed_instance; y=gaussian_data.y)
     @test_throws ArgumentError NP.bind(gaussian_model, gaussian_data.x)
-    @test_throws ArgumentError NP.bind(gaussian_model, (; x=gaussian_data.x))
+    @test !NP.has_response(NP.prepare(NP.bind(
+        gaussian_model, (; x=gaussian_data.x))))
     @test_throws ArgumentError NP.bind(
         gaussian_model, merge(gaussian_data, (; extra=[1.0, 2.0])))
-    @test_throws ArgumentError NP.instantiate(
-        gaussian_model, (; x=gaussian_data.x))
+    @test NP.instantiate(
+        gaussian_model, (; x=gaussian_data.x)) isa NP.ModelInstance
     bad_instance = NP.ModelInstance(
-        gaussian_model, (; x=gaussian_data.x))
+        gaussian_model, (;))
     @test_throws ArgumentError NP.bind(bad_instance)
 
     malformed_model = NP.Model(
@@ -1747,7 +1797,7 @@ end
         nodes=extra_nodes,
         observations=gaussian_model.observations)
     @test capability_error(
-        () -> NP.bind(extra_model, gaussian_data)).capability ==
+        () -> NP.bind(conditioned(extra_model, gaussian_data))).capability ==
           :additional_nodes
 
     bad_coefficients = NP.parameter(
@@ -1760,7 +1810,7 @@ end
         nodes=gaussian_model.nodes,
         observations=gaussian_model.observations)
     @test capability_error(
-        () -> NP.bind(bad_coefficient_model, gaussian_data)).capability ==
+        () -> NP.bind(conditioned(bad_coefficient_model, gaussian_data))).capability ==
           :parameter_axis
 
     bad_scale = NP.parameter(
@@ -1773,46 +1823,69 @@ end
         nodes=gaussian_model.nodes,
         observations=gaussian_model.observations)
     @test capability_error(
-        () -> NP.bind(bad_scale_model, gaussian_data)).capability ==
+        () -> NP.bind(conditioned(bad_scale_model, gaussian_data))).capability ==
           :parameter_axis
     @test capability_error(
-        () -> NP.bind(gaussian_model, (; x=[1, 2], y=[0.0, 1.0]))).capability ==
+        () -> NP.bind(NP.condition(
+            NP.substitute(gaussian_model; x=[1, 2]); y=[0.0, 1.0]))).capability ==
           :predictor_type
     @test capability_error(
         () -> NP.bind(
-            direct_native_model(:bernoulli, :identity),
-            (; x=[1.0, 2.0], y=[0, 2]))).capability ==
+            NP.condition(NP.substitute(
+                direct_native_model(:bernoulli, :identity);
+                x=[1.0, 2.0]); y=[0, 2]))).capability ==
           :response_support
     @test capability_error(
         () -> NP.bind(
-            direct_native_model(:poisson, :identity),
-            (; x=[1.0, 2.0], y=[0, 1.5]))).capability ==
+            NP.condition(NP.substitute(
+                direct_native_model(:poisson, :identity);
+                x=[1.0, 2.0]); y=[0, 1.5]))).capability ==
           :response_support
 end
 
 
 @testset "public native PPL @model semantics" begin
     raw_x = [-1.0, 0.0, 2.0, 4.0]
+    unconditioned = macro_gaussian_identity(raw_x)
+    @test keys(unconditioned.declaration.inputs) == (:x,)
+    @test unconditioned.declaration.inputs.x isa NP.Input{:value}
+    @test unconditioned.declaration.observations.y isa NP.BroadcastObservation
+    @test isempty(unconditioned.conditions)
+    unconditioned_prepared = NP.prepare(unconditioned)
+    @test !NP.has_response(unconditioned_prepared)
+    @test eltype(NP.simulate(
+        MersenneTwister(905), NP.workspace(unconditioned_prepared),
+        unconditioned_prepared, [0.2, -0.4, log(0.8)])) === Float64
+    scalar_instance = NP.condition(
+        macro_scalar_gaussian(raw_x); y=[0.2, -0.1, 1.1, 0.7])
+    @test !(
+        scalar_instance.declaration.observations.y isa NP.BroadcastObservation)
+    @test capability_error(() -> NP.bind(scalar_instance)).capability ==
+          :broadcast_lifting
     cases = (
-        (instance=macro_gaussian_identity(
-             raw_x, [0.2, -0.1, 1.1, 0.7]),
+        (instance=NP.condition(
+             macro_gaussian_identity(raw_x);
+             y=[0.2, -0.1, 1.1, 0.7]),
          builder=direct_native_model(
              :gaussian, :identity;
              coefficient_keys=(:intercept, :slope)),
          position=[0.2, -0.4, log(0.8)]),
-        (instance=macro_gaussian_zscale(
-             raw_x, [0.2, -0.1, 1.1, 0.7]),
+        (instance=NP.condition(
+             macro_gaussian_zscale(raw_x);
+             y=[0.2, -0.1, 1.1, 0.7]),
          builder=direct_native_model(
              :gaussian, :zscale;
              coefficient_keys=(:intercept, :slope)),
          position=[0.2, -0.4, log(0.8)]),
-        (instance=macro_bernoulli_center(
-             raw_x, Bool[false, false, true, true]),
+        (instance=NP.condition(
+             macro_bernoulli_center(raw_x);
+             y=Bool[false, false, true, true]),
          builder=direct_native_model(
              :bernoulli, :center;
              coefficient_keys=(:intercept, :slope)),
          position=[-0.3, 0.6]),
-        (instance=macro_poisson_zscale(raw_x, [0, 1, 3, 6]),
+        (instance=NP.condition(
+             macro_poisson_zscale(raw_x); y=[0, 1, 3, 6]),
          builder=direct_native_model(
              :poisson, :zscale;
              coefficient_keys=(:intercept, :slope)),
@@ -1825,7 +1898,8 @@ end
         @test occursin("NativePPL.ModelInstance", sprint(show, instance))
         macro_plan = NP.bind(instance)
         @test typeof(NP.compile(instance)) === typeof(macro_plan)
-        builder_plan = NP.bind(builder, instance.bindings)
+        builder_plan = NP.bind(NP.condition(
+            NP.substitute(builder, instance.bindings), instance.conditions))
         check_plan_structure(macro_plan, builder_plan)
         prepared = check_transformed_execution(
             macro_plan, builder_plan, position)
@@ -1847,8 +1921,9 @@ end
                   builder_prediction, position)
     end
 
-    hygienic = NativePPLMacroHygiene.hygienic(
-        raw_x, [0.2, -0.1, 1.1, 0.7])
+    hygienic = NP.condition(
+        NativePPLMacroHygiene.hygienic(raw_x);
+        y=[0.2, -0.1, 1.1, 0.7])
     @test hygienic isa NP.ModelInstance
     @test NP.compile(hygienic) isa NP.Plan
     @test NP.prepare(hygienic) isa NP.Prepared
@@ -1858,40 +1933,38 @@ end
         @__MODULE__, :(NP.@model bad_model = nothing)))
     @test occursin("must wrap a function definition", err.msg)
     err = argument_error(() -> macroexpand(
-        @__MODULE__, :(NP.@model function bad_arity(x, y, z)
-            y ~ Normal(x, z)
+        @__MODULE__, :(NP.@model function argument_observation(x, y)
+            @. y ~ Normal(x, 1)
         end)))
-    @test occursin("exactly one predictor and one response", err.msg)
+    @test occursin("cannot also be a function argument", err.msg)
     err = argument_error(() -> macroexpand(
         @__MODULE__, :(NP.@model function bad_keyword(x, y; scale=1)
             y ~ Normal(x, scale)
         end)))
     @test occursin("plain or typed positional arguments", err.msg)
     err = argument_error(() -> macroexpand(
-        @__MODULE__, :(NP.@model function bad_statement(x, y)
+        @__MODULE__, :(NP.@model function bad_statement(x)
             println(x)
-            y ~ Normal(x, x)
+            @. y ~ Normal(x, x)
         end)))
     @test occursin("unsupported statement", err.msg)
     err = argument_error(() -> macroexpand(
-        @__MODULE__, :(NP.@model function bad_prior(x, y)
-            intercept ~ Normal(1, 2)
-            slope ~ Normal()
-            mu = intercept + slope * x
-            y ~ BernoulliLogit(mu)
+        @__MODULE__, :(NP.@model function bad_prior(x)
+            sigma ~ StandardNormal(1)
+            @. y ~ Normal(x, sigma)
         end)))
-    @test occursin("scalar `Normal()` or `Normal(0, 1)`", err.msg)
+    @test occursin("StandardNormal() takes no arguments", err.msg)
     err = argument_error(() -> macroexpand(
-        @__MODULE__, :(NP.@model function missing_observation(x, y)
+        @__MODULE__, :(NP.@model function missing_observation(x)
             centered = center(x)
         end)))
     @test occursin("exactly one observation", err.msg)
     err = argument_error(() -> macroexpand(
-        @__MODULE__, :(NP.@model function bad_link(x, y)
+        @__MODULE__, :(NP.@model function bad_link(x)
             intercept ~ Normal()
             slope ~ Normal()
             log_rate = intercept + slope * x
-            y ~ Poisson(log_rate + x)
+            @. y ~ Poisson(log_rate + x)
         end)))
     @test occursin("named rate or `exp(named_log_rate)`", err.msg)
 end
