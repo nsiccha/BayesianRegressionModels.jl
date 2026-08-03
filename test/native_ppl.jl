@@ -346,6 +346,23 @@ NP.@model function natural_latent_normal(prior_mu, prior_tau)
     return y
 end
 
+module QualifiedStagedModels
+using BayesianRegressionModels
+using Distributions: Normal
+
+const NP = BayesianRegressionModels.NativePPL
+
+NP.@model function qualified_nested(prior_mu, prior_tau)
+    z ~ Normal(prior_mu, prior_tau)
+    return z
+end
+end
+
+NP.@model function qualified_nested(prior_mu, prior_tau)
+    z ~ QualifiedStagedModels.qualified_nested(prior_mu, prior_tau)
+    return z
+end
+
 NP.@model function natural_preprocessed_normal(raw)
     scaled = concise_zscale_component(raw)
     y ~ composable_gaussian(scaled)
@@ -3056,6 +3073,13 @@ end
         natural_latent_prepared, latent_position) == NP.simulate(
             MersenneTwister(913), latent_workspace,
             latent_prepared, latent_position)
+
+    qualified = qualified_nested(0.25, 0.8)
+    @test qualified isa NP.ModelInstance
+    @test qualified.declaration.outputs ==
+          (; z=NP.qualified_name(:z, :z))
+    @test keys(NP.condition(qualified; z=0.4).conditions) ==
+          (NP.qualified_name(:z, :z),)
 
     natural_preprocessed = NP.condition(
         natural_preprocessed_normal(raw_x); y=response)

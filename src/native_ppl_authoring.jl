@@ -2136,7 +2136,7 @@ function _syntax_composed_model(
     component_names = Symbol[]
     generated = Any[]
     for connection in connections
-        connection.callee === function_name && throw(ArgumentError(
+        first(connection.call.args) === function_name && throw(ArgumentError(
             "native PPL model `$function_name` cannot recursively stage itself"))
         connection.name in available && throw(ArgumentError(
             "native PPL staged result `$(connection.name)` is already defined"))
