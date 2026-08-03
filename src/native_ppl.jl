@@ -82,18 +82,40 @@ end
 abstract type NativePPLNode end
 abstract type NativePPLFactor end
 
-"""The first native deterministic node: an intercept plus one continuous slope."""
-struct NativePPLAffineNode{Name,Input,A} <: NativePPLNode
+"""An intercept plus one coefficient for each named continuous feature."""
+struct NativePPLAffineNode{Name,Inputs,A,R} <: NativePPLNode
     axis::A
     intercept_index::Int
-    slope_index::Int
+    slope_indices::R
 end
 
+function NativePPLAffineNode(name::Symbol, inputs::Tuple, axis::A,
+                             intercept_index::Int, slope_indices::R) where {A,R}
+    isempty(inputs) && throw(ArgumentError(
+        "native PPL affine node requires at least one input"))
+    all(input -> input isa Symbol, inputs) || throw(ArgumentError(
+        "native PPL affine inputs must be named Symbols; got $inputs"))
+    length(unique(inputs)) == length(inputs) || throw(ArgumentError(
+        "native PPL affine inputs must be unique; got $inputs"))
+    length(inputs) == length(slope_indices) || throw(ArgumentError(
+        "native PPL affine input and slope-coordinate counts must match"))
+    NativePPLAffineNode{name,inputs,A,R}(
+        axis, intercept_index, slope_indices)
+end
 NativePPLAffineNode(name::Symbol, input::Symbol, axis::A,
                     intercept_index::Int, slope_index::Int) where {A} =
-    NativePPLAffineNode{name,input,A}(axis, intercept_index, slope_index)
+    NativePPLAffineNode(
+        name, (input,), axis, intercept_index, (slope_index,))
 native_node_name(::NativePPLAffineNode{Name}) where {Name} = Name
-native_affine_input(::NativePPLAffineNode{Name,Input}) where {Name,Input} = Input
+native_affine_inputs(::NativePPLAffineNode{Name,Inputs}) where {Name,Inputs} =
+    Inputs
+function native_affine_input(node::NativePPLAffineNode)
+    inputs = native_affine_inputs(node)
+    length(inputs) == 1 || throw(ArgumentError(
+        "native PPL affine node has $(length(inputs)) inputs; use " *
+        "`native_affine_inputs`"))
+    only(inputs)
+end
 
 """A staged elementwise exponential link over one named deterministic node."""
 struct NativePPLExpNode{Name,Input,A} <: NativePPLNode
@@ -311,7 +333,7 @@ end
 """Validated, numeric input binding for a native PPL plan."""
 struct NativePPLPrepared{P,X,Y,S}
     plan::P
-    predictor::X
+    predictors::X
     response::Y
     workspace_spec::S
 end
@@ -319,7 +341,21 @@ end
 """Explicit absence of an observation binding in a prediction-only replay."""
 struct NativePPLNoResponse end
 
-Base.eltype(prepared::NativePPLPrepared) = eltype(prepared.predictor)
+Base.eltype(prepared::NativePPLPrepared) =
+    eltype(first(values(prepared.predictors)))
+function Base.getproperty(prepared::NativePPLPrepared, name::Symbol)
+    name === :predictor || return getfield(prepared, name)
+    predictors = getfield(prepared, :predictors)
+    length(predictors) == 1 || throw(ArgumentError(
+        "native PPL prepared model has $(length(predictors)) predictors; " *
+        "use `.predictors`"))
+    only(values(predictors))
+end
+function Base.propertynames(prepared::NativePPLPrepared, private::Bool=false)
+    names = fieldnames(typeof(prepared))
+    length(getfield(prepared, :predictors)) == 1 ?
+        (names..., :predictor) : names
+end
 native_ppl_has_response(prepared::NativePPLPrepared) =
     !(prepared.response isa NativePPLNoResponse)
 LogDensityProblems.dimension(prepared::NativePPLPrepared) =
@@ -366,12 +402,18 @@ function Base.show(io::IO, plan::NativePPLPlan)
           " unconstrained parameters, ", length(plan.axes.observation),
           " observations)\n")
     print(io, "  inputs: ",
-          join((string(native_input_name(input)) for input in plan.inputs), ", "), "\n")
+          join((string(name) for name in
+                (keys(plan.inputs.predictors)...,
+                 native_input_name(plan.inputs.response))), ", "), "\n")
     print(io, "  parameters: ",
           join((string(native_parameter_name(parameter)) for parameter in plan.parameters),
                ", "), "\n")
     print(io, "  nodes: ",
-          join((string(native_node_name(node)) for node in plan.nodes), ", "), "\n")
+          join((string(name) for name in
+                (keys(plan.nodes.transforms)...,
+                 native_node_name(plan.nodes.location),
+                 (hasproperty(plan.nodes, :rate) ?
+                  (native_node_name(plan.nodes.rate),) : ())...)), ", "), "\n")
     print(io, "  factors: ",
           join((string(nameof(typeof(factor))) for factor in plan.factors), ", "), "\n")
     print(io, "  queries: ",
@@ -451,23 +493,23 @@ function _native_ppl_predictor_term(term, key::Symbol)
     end
     throw(NativePPLCapabilityError(
         :predictor_terms,
-        "`$key` must be exactly `1 + x`, `1 + center(x)`, or " *
-        "`1 + zscale(x)` (`standardize(x)` is an alias); " *
+        "each non-intercept term in `$key` must be a raw data column, " *
+        "`center(x)`, or `zscale(x)` (`standardize(x)` is an alias); " *
         "offsets, interactions, groups, and other transforms are not lowered yet"))
 end
 
-function _native_ppl_affine_predictor(brmi::BRMI, key::Symbol)
+function _native_ppl_affine_predictors(brmi::BRMI, key::Symbol)
     lhs, predictor = _native_ppl_sampling_rhs(brmi, key)
     _native_ppl_ref_name(lhs) === key || throw(NativePPLCapabilityError(
         :linked_predictor, "`$key` must have a bare, unlinked left-hand side"))
     predictor isa ExprColumn && getf(predictor) === (+) ||
         throw(NativePPLCapabilityError(:predictor_terms,
-            "`$key` must be exactly `1 + x` for one continuous data column"))
+            "`$key` must be an additive affine formula such as `1 + x + z`"))
     isempty(getkwargs(predictor)) || throw(NativePPLCapabilityError(
         :predictor_keywords, "predictor `$key` has keywords"))
     terms = getargs(predictor)
-    length(terms) == 2 || throw(NativePPLCapabilityError(:predictor_terms,
-        "`$key` must have exactly an intercept and one continuous predictor"))
+    length(terms) >= 2 || throw(NativePPLCapabilityError(:predictor_terms,
+        "`$key` must have an intercept and at least one continuous predictor"))
 
     intercepts = filter(term -> term isa Number && term == 1, terms)
     length(intercepts) == 1 ||
@@ -475,9 +517,15 @@ function _native_ppl_affine_predictor(brmi::BRMI, key::Symbol)
             "`$key` must contain exactly one intercept"))
     predictor_terms = filter(
         term -> !(term isa Number && term == 1), terms)
-    length(predictor_terms) == 1 || throw(NativePPLCapabilityError(
-        :predictor_terms, "`$key` must contain exactly one predictor term"))
-    _native_ppl_predictor_term(only(predictor_terms), key)
+    parsed = Tuple(_native_ppl_predictor_term(term, key)
+                   for term in predictor_terms)
+    predictor_names = map(term -> name(term.column), parsed)
+    length(unique(predictor_names)) == length(predictor_names) || throw(
+        NativePPLCapabilityError(
+            :predictor_terms,
+            "`$key` must use each raw predictor at most once; got " *
+            "$(predictor_names)"))
+    parsed
 end
 
 function _native_ppl_exponential_prior(brmi::BRMI, key::Symbol)
@@ -705,23 +753,35 @@ _native_ppl_validate_likelihood_graph(
 
 function _native_ppl_validate_predictor_graph(plan::NativePPLPlan)
     observation_axis = plan.axes.observation
-    predictor = plan.inputs.predictor
+    predictors = plan.inputs.predictors
     response = plan.inputs.response
-    native_input_role(predictor) === :predictor || throw(
-        NativePPLCapabilityError(
-            :graph_identity,
-            "compiled predictor input must preserve its predictor role"))
     native_input_role(response) === :response || throw(
         NativePPLCapabilityError(
             :graph_identity,
             "compiled response input must preserve its response role"))
-    native_input_name(predictor) !== native_input_name(response) || throw(
+    isempty(predictors) && throw(NativePPLCapabilityError(
+        :graph_identity, "compiled graph must contain at least one predictor input"))
+    predictor_names = Tuple(keys(predictors))
+    length(unique(predictor_names)) == length(predictor_names) || throw(
         NativePPLCapabilityError(
+            :graph_identity, "compiled predictor identities must be unique"))
+    for (name, predictor) in pairs(predictors)
+        native_input_name(predictor) === name || throw(
+            NativePPLCapabilityError(
+                :graph_identity,
+                "compiled predictor key `$name` must match its semantic identity"))
+        native_input_role(predictor) === :predictor || throw(
+            NativePPLCapabilityError(
+                :graph_identity,
+                "compiled predictor `$name` must preserve its predictor role"))
+        native_input_name(predictor) !== native_input_name(response) || throw(
+            NativePPLCapabilityError(
+                :graph_identity,
+                "compiled predictor and response must have distinct identities"))
+        predictor.axis === observation_axis || throw(NativePPLCapabilityError(
             :graph_identity,
-            "compiled predictor and response must have distinct identities"))
-    predictor.axis === observation_axis || throw(NativePPLCapabilityError(
-        :graph_identity,
-        "compiled predictor input must carry the plan observation axis"))
+            "compiled predictor `$name` must carry the plan observation axis"))
+    end
     response.axis === observation_axis || throw(NativePPLCapabilityError(
         :graph_identity,
         "compiled response input must carry the plan observation axis"))
@@ -751,17 +811,21 @@ function _native_ppl_validate_predictor_graph(plan::NativePPLPlan)
             :graph_identity,
             "compiled coefficient parameter must carry the coefficient axis"))
     location.intercept_index == first(coefficients.unconstrained) &&
-        location.slope_index == last(coefficients.unconstrained) || throw(
+        location.slope_indices == Tuple(Iterators.drop(
+            coefficients.unconstrained, 1)) || throw(
             NativePPLCapabilityError(
                 :graph_identity,
                 "compiled affine coordinates must match the coefficient parameter"))
     _native_ppl_validate_coefficient_prior(
         plan.factors.coefficient_prior, coefficients)
 
-    predictor_name = native_input_name(predictor)
-    expected_location_input = predictor_name
-    if hasproperty(plan.nodes, :transform)
-        transform = plan.nodes.transform
+    hasproperty(plan.nodes, :transforms) || throw(NativePPLCapabilityError(
+        :graph_identity,
+        "compiled graph must carry its fitted transforms NamedTuple"))
+    transforms = plan.nodes.transforms
+    transformed_raw_inputs = Symbol[]
+    expected_location_inputs = Symbol[]
+    for (name, transform) in pairs(transforms)
         transform isa Union{NativePPLCenterNode,NativePPLZScaleNode} ||
             throw(NativePPLCapabilityError(
                 :graph_identity,
@@ -769,20 +833,38 @@ function _native_ppl_validate_predictor_graph(plan::NativePPLPlan)
         transform.axis === observation_axis || throw(NativePPLCapabilityError(
             :graph_identity,
             "compiled predictor transform must carry the plan observation axis"))
-        native_fitted_transform_input(transform) === predictor_name ||
+        raw_input = native_fitted_transform_input(transform)
+        hasproperty(predictors, raw_input) ||
             throw(NativePPLCapabilityError(
                 :graph_identity,
-                "compiled predictor transform must consume the raw predictor"))
-        expected_location_input = native_node_name(transform)
-        expected_location_input !== native_node_name(location) ||
+                "compiled predictor transform `$name` must consume a raw predictor"))
+        name === native_node_name(transform) || throw(NativePPLCapabilityError(
+            :graph_identity,
+            "compiled predictor transform key `$name` must match its identity"))
+        raw_input in transformed_raw_inputs && throw(NativePPLCapabilityError(
+            :graph_identity,
+            "compiled predictor `$raw_input` cannot feed multiple fitted transforms"))
+        push!(transformed_raw_inputs, raw_input)
+        name !== native_node_name(location) ||
             throw(NativePPLCapabilityError(
                 :graph_identity,
                 "compiled predictor transform and affine location must have distinct identities"))
     end
-    native_affine_input(location) === expected_location_input ||
+    for predictor_name in predictor_names
+        matching = [name for (name, transform) in pairs(transforms)
+                    if native_fitted_transform_input(transform) === predictor_name]
+        push!(expected_location_inputs,
+              isempty(matching) ? predictor_name : only(matching))
+    end
+    location_inputs = native_affine_inputs(location)
+    length(unique(location_inputs)) == length(location_inputs) || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled affine location inputs must be unique"))
+    Set(location_inputs) == Set(expected_location_inputs) ||
         throw(NativePPLCapabilityError(
             :graph_identity,
-            "compiled affine location must consume the compiled predictor path"))
+            "compiled affine location must consume every compiled predictor path"))
 
     if hasproperty(plan.nodes, :rate)
         rate = plan.nodes.rate
@@ -936,11 +1018,39 @@ function _native_ppl_apply_predictor!(
     predictor
 end
 
-function _native_ppl_apply_predictor!(plan::NativePPLPlan,
-                                      predictor::Vector)
-    hasproperty(plan.nodes, :transform) || return predictor
-    _native_ppl_apply_predictor!(
-        plan.nodes.transform, plan.inputs.predictor, predictor)
+function _native_ppl_feature_source(plan::NativePPLPlan, feature_name::Symbol)
+    if hasproperty(plan.inputs.predictors, feature_name)
+        return (; raw_name=feature_name, transform=nothing)
+    end
+    hasproperty(plan.nodes.transforms, feature_name) || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "affine feature `$feature_name` is neither a raw predictor nor a " *
+            "fitted transform"))
+    transform = getproperty(plan.nodes.transforms, feature_name)
+    (; raw_name=native_fitted_transform_input(transform), transform)
+end
+
+function _native_ppl_prepare_predictors(plan::NativePPLPlan, bindings,
+                                        ::Type{T}) where {T<:AbstractFloat}
+    feature_names = native_affine_inputs(plan.nodes.location)
+    prepared = map(feature_names) do feature_name
+        source = _native_ppl_feature_source(plan, feature_name)
+        raw_input = getproperty(plan.inputs.predictors, source.raw_name)
+        raw = getproperty(bindings, source.raw_name)
+        predictor = _native_ppl_copy_input(
+            T, raw, :predictor, source.raw_name)
+        length(predictor) == length(plan.axes.observation) ||
+            throw(DimensionMismatch(
+                "native PPL predictor `$(source.raw_name)` has " *
+                "$(length(predictor)) rows but the observation axis has " *
+                "$(length(plan.axes.observation))"))
+        source.transform === nothing ||
+            _native_ppl_apply_predictor!(
+                source.transform, raw_input, predictor)
+        predictor
+    end
+    NamedTuple{feature_names}(prepared)
 end
 
 _native_ppl_validate_response_conversion(
@@ -960,30 +1070,23 @@ function _native_ppl_validate_response_conversion(
     nothing
 end
 
-function _native_ppl_prepare_bindings(plan::NativePPLPlan, predictor,
+function _native_ppl_prepare_bindings(plan::NativePPLPlan, predictors,
                                       response, ::Type{T}) where {T<:AbstractFloat}
     isconcretetype(T) || throw(ArgumentError(
         "native PPL prepared element type must be concrete; got $T"))
     _native_ppl_validate_predictor_graph(plan)
-    predictor_name = native_input_name(plan.inputs.predictor)
     response_name = native_input_name(plan.inputs.response)
-    prepared_predictor = _native_ppl_copy_input(
-        T, predictor, :predictor, predictor_name)
-    length(prepared_predictor) == length(plan.axes.observation) ||
-        throw(DimensionMismatch(
-            "native PPL predictor `$predictor_name` has " *
-            "$(length(prepared_predictor)) rows but the observation axis has " *
-            "$(length(plan.axes.observation))"))
-    _native_ppl_apply_predictor!(plan, prepared_predictor)
+    prepared_predictors = _native_ppl_prepare_predictors(plan, predictors, T)
     _native_ppl_validate_response(
         plan.factors.likelihood, response, response_name)
     prepared_response = _native_ppl_prepare_response(
-        T, response, response_name, length(prepared_predictor))
+        T, response, response_name, length(plan.axes.observation))
     _native_ppl_validate_response_conversion(
         plan.factors.likelihood, response, prepared_response, response_name)
     workspace_spec = NativePPLWorkspaceSpec(
         plan.axes.observation, LogDensityProblems.dimension(plan))
-    NativePPLPrepared(plan, prepared_predictor, prepared_response, workspace_spec)
+    NativePPLPrepared(
+        plan, prepared_predictors, prepared_response, workspace_spec)
 end
 
 """
@@ -996,11 +1099,12 @@ separately by `NativePPLWorkspace`.
 function _native_ppl_prepare(plan::NativePPLPlan; T::Type{<:AbstractFloat}=Float64)
     isconcretetype(T) || throw(ArgumentError(
         "native PPL prepared element type must be concrete; got $T"))
-    predictor_name = native_input_name(plan.inputs.predictor)
     response_name = native_input_name(plan.inputs.response)
-    predictor = getproperty(plan.bindings, predictor_name)
+    predictor_names = Tuple(keys(plan.inputs.predictors))
+    predictors = NamedTuple{predictor_names}(map(
+        name -> getproperty(plan.bindings, name), predictor_names))
     response = _native_ppl_response_binding(plan.bindings, response_name)
-    _native_ppl_prepare_bindings(plan, predictor, response, T)
+    _native_ppl_prepare_bindings(plan, predictors, response, T)
 end
 
 
@@ -1020,8 +1124,11 @@ function _native_ppl_check_location_execution(workspace::NativePPLWorkspace,
     observations = length(prepared.plan.axes.observation)
     length(position) == dimension || throw(DimensionMismatch(
         "native PPL position has length $(length(position)); expected $dimension"))
-    length(prepared.predictor) == observations || throw(DimensionMismatch(
-        "native PPL prepared predictor has $(length(prepared.predictor)) rows; expected $observations"))
+    for (name, predictor) in pairs(prepared.predictors)
+        length(predictor) == observations || throw(DimensionMismatch(
+            "native PPL prepared predictor `$name` has $(length(predictor)) " *
+            "rows; expected $observations"))
+    end
     length(workspace.primal.location) == observations || throw(DimensionMismatch(
         "native PPL workspace location has $(length(workspace.primal.location)) rows; expected $observations"))
     eltype(position) === eltype(workspace) || throw(ArgumentError(
@@ -1376,10 +1483,15 @@ end
     coefficient_parameter = prepared.plan.parameters.coefficients
     intercept = native_parameter_value(
         coefficient_parameter, position, node.intercept_index)
-    slope = native_parameter_value(
-        coefficient_parameter, position, node.slope_index)
-    for i in eachindex(prepared.predictor)
-        buffers.location[i] = intercept + slope * prepared.predictor[i]
+    predictors = values(prepared.predictors)
+    for i in eachindex(first(predictors))
+        location = intercept
+        for j in eachindex(node.slope_indices)
+            slope = native_parameter_value(
+                coefficient_parameter, position, node.slope_indices[j])
+            location += slope * predictors[j][i]
+        end
+        buffers.location[i] = location
     end
     nothing
 end
@@ -1544,32 +1656,28 @@ function _native_ppl_rebind_transform(
 end
 
 function _native_ppl_rebind_nodes(plan::NativePPLPlan, observation_axis,
-                                  predictor_name::Symbol, predictor,
+                                  predictors::NamedTuple,
                                   freeze_constants::Bool)
     old_location = plan.nodes.location
     location_name = native_node_name(old_location)
-    transform = if hasproperty(plan.nodes, :transform)
-        old_transform = plan.nodes.transform
-        native_fitted_transform_input(old_transform) === predictor_name ||
-            throw(NativePPLCapabilityError(
+    transform_names = Tuple(keys(plan.nodes.transforms))
+    transform_values = map(transform_names) do transform_name
+        old_transform = getproperty(plan.nodes.transforms, transform_name)
+        predictor_name = native_fitted_transform_input(old_transform)
+        hasproperty(predictors, predictor_name) || throw(
+            NativePPLCapabilityError(
                 :graph_identity,
-                "rebound fitted transform must consume the compiled raw predictor"))
+                "rebound fitted transform `$transform_name` is missing raw " *
+                "predictor `$predictor_name`"))
         _native_ppl_rebind_transform(
             old_transform, observation_axis, predictor_name,
-            predictor, freeze_constants)
-    else
-        nothing
+            getproperty(predictors, predictor_name), freeze_constants)
     end
-    location_input = transform === nothing ?
-        predictor_name : native_node_name(transform)
-    native_affine_input(old_location) === location_input ||
-        throw(NativePPLCapabilityError(
-            :graph_identity,
-            "rebound affine node must consume the compiled predictor transform"))
+    transforms = NamedTuple{transform_names}(transform_values)
     location = NativePPLAffineNode(
-        location_name, location_input, observation_axis,
-        old_location.intercept_index, old_location.slope_index)
-    nodes = transform === nothing ? (; location) : (; transform, location)
+        location_name, native_affine_inputs(old_location), observation_axis,
+        old_location.intercept_index, old_location.slope_indices)
+    nodes = (; transforms, location)
     hasproperty(plan.nodes, :rate) || return nodes
 
     old_rate = plan.nodes.rate
@@ -1585,8 +1693,8 @@ end
     _native_ppl_rebind(prepared, bindings;
                        T=eltype(prepared), freeze_constants=true)
 
-Rebind the same graph semantics to compatible predictor and optional response
-vectors. Omitting the response creates an explicit prediction-only prepared
+Rebind the same graph semantics to compatible predictor vectors and an optional
+response vector. Omitting the response creates an explicit prediction-only prepared
 value. The observation axis and every node/factor/query carrying it are rebuilt
 from the new row count; parameter coordinates and semantic identities are reused.
 Fitted preprocessing constants are reused by default. Pass
@@ -1597,51 +1705,70 @@ function _native_ppl_rebind(prepared::NativePPLPrepared, bindings;
                             freeze_constants::Bool=true)
     plan = prepared.plan
     _native_ppl_validate_predictor_graph(plan)
-    predictor_name = native_input_name(plan.inputs.predictor)
+    predictor_names = Tuple(keys(plan.inputs.predictors))
     response_name = native_input_name(plan.inputs.response)
-    predictor = _native_ppl_required_binding(bindings, predictor_name, :predictor)
+    expected_names = Set((predictor_names..., response_name))
+    extra_names = setdiff(Set(keys(bindings)), expected_names)
+    isempty(extra_names) || throw(ArgumentError(
+        "native PPL rebind contains undeclared values: " *
+        join(sort!(collect(extra_names)), ", ")))
+    predictor_values = map(predictor_names) do predictor_name
+        predictor = _native_ppl_required_binding(
+            bindings, predictor_name, :predictor)
+        eltype(predictor) <: Real && !(eltype(predictor) <: Integer) ||
+            throw(ArgumentError(
+                "native PPL predictor `$predictor_name` must preserve the " *
+                "compiled continuous real input role; got eltype " *
+                "$(eltype(predictor))"))
+        predictor
+    end
+    predictors = NamedTuple{predictor_names}(predictor_values)
     response = _native_ppl_response_binding(bindings, response_name)
-    eltype(predictor) <: Real && !(eltype(predictor) <: Integer) ||
-        throw(ArgumentError(
-            "native PPL predictor `$predictor_name` must preserve the compiled " *
-            "continuous real input role; got eltype $(eltype(predictor))"))
+    observation_count = length(first(predictor_values))
+    for (predictor_name, predictor) in pairs(predictors)
+        length(predictor) == observation_count || throw(DimensionMismatch(
+            "native PPL predictor `$predictor_name` has $(length(predictor)) " *
+            "rows; expected $observation_count"))
+    end
     if response isa AbstractVector
         eltype(response) <: Real || throw(ArgumentError(
             "native PPL response `$response_name` must preserve its compiled real input role; " *
             "got eltype $(eltype(response))"))
-        length(predictor) == length(response) || throw(DimensionMismatch(
-            "native PPL predictor `$predictor_name` has $(length(predictor)) rows but " *
+        observation_count == length(response) || throw(DimensionMismatch(
+            "native PPL predictors have $observation_count rows but " *
             "response `$response_name` has $(length(response))"))
     end
-    !isempty(predictor) || throw(DimensionMismatch(
+    observation_count > 0 || throw(DimensionMismatch(
         "native PPL rebound observation axis cannot be empty"))
 
-    observation_axis = NativePPLAxis(:observation, Base.OneTo(length(predictor)))
-    predictor_input = NativePPLInput(
-        predictor_name, :predictor, observation_axis, eltype(predictor))
+    observation_axis = NativePPLAxis(
+        :observation, Base.OneTo(observation_count))
+    predictor_inputs = NamedTuple{predictor_names}(map(
+        (predictor_name, predictor) -> NativePPLInput(
+            predictor_name, :predictor, observation_axis, eltype(predictor)),
+        predictor_names, predictor_values))
     response_eltype = response isa AbstractVector ?
         eltype(response) : eltype(plan.inputs.response)
     response_input = NativePPLInput(
         response_name, :response, observation_axis, response_eltype)
 
     nodes = _native_ppl_rebind_nodes(
-        plan, observation_axis, predictor_name, predictor, freeze_constants)
+        plan, observation_axis, predictors, freeze_constants)
     likelihood = _native_ppl_rebind_likelihood(
         plan.factors.likelihood, observation_axis)
     new_bindings = response isa AbstractVector ?
-        NamedTuple{(predictor_name, response_name)}((predictor, response)) :
-        NamedTuple{(predictor_name,)}((predictor,))
+        merge(predictors, NamedTuple{(response_name,)}((response,))) : predictors
 
     rebound_plan = NativePPLPlan(
         merge(plan.axes, (; observation=observation_axis)),
-        (; predictor=predictor_input, response=response_input),
+        (; predictors=predictor_inputs, response=response_input),
         plan.parameters,
         nodes,
         merge(plan.factors, (; likelihood)),
         _native_ppl_queries(observation_axis, likelihood),
         new_bindings,
     )
-    _native_ppl_prepare_bindings(rebound_plan, predictor, response, T)
+    _native_ppl_prepare_bindings(rebound_plan, predictors, response, T)
 end
 
 _native_ppl_query_spec(plan::NativePPLPlan, ::NativePPLLinearPredictor) =
