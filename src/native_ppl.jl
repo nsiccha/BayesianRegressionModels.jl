@@ -115,6 +115,23 @@ NativePPLCenterNode(name::Symbol, input::Symbol, axis::A, mean::T) where {A,T} =
     NativePPLCenterNode{name,input,A,T}(axis, mean)
 native_node_name(::NativePPLCenterNode{Name}) where {Name} = Name
 native_center_input(::NativePPLCenterNode{Name,Input}) where {Name,Input} = Input
+native_fitted_transform_input(node::NativePPLCenterNode) =
+    native_center_input(node)
+
+"""A fitted corrected-sample-SD standardization over one raw input column."""
+struct NativePPLZScaleNode{Name,Input,A,T} <: NativePPLNode
+    axis::A
+    mean::T
+    scale::T
+end
+
+NativePPLZScaleNode(name::Symbol, input::Symbol, axis::A,
+                    mean::T, scale::T) where {A,T} =
+    NativePPLZScaleNode{name,input,A,T}(axis, mean, scale)
+native_node_name(::NativePPLZScaleNode{Name}) where {Name} = Name
+native_zscale_input(::NativePPLZScaleNode{Name,Input}) where {Name,Input} = Input
+native_fitted_transform_input(node::NativePPLZScaleNode) =
+    native_zscale_input(node)
 
 """Independent standard-normal prior over an unconstrained parameter range."""
 struct NativePPLStandardNormalFactor{Parameter,R} <: NativePPLFactor
@@ -413,24 +430,29 @@ function _native_ppl_predictor_term(term, key::Symbol)
     if term isa NamedColumn && parent(term) isa DataColumn
         return (; column=term, transform=:identity)
     end
-    if term isa ExprColumn && getf(term) === center
+    if term isa ExprColumn &&
+       (getf(term) === center || getf(term) === zscale ||
+        getf(term) === standardize)
+        transform = getf(term) === center ? :center : :zscale
+        spelling = getf(term) === standardize ? :standardize : transform
         isempty(getkwargs(term)) || throw(NativePPLCapabilityError(
             :predictor_transform,
-            "`center` in predictor `$key` cannot have keywords"))
+            "`$spelling` in predictor `$key` cannot have keywords"))
         args = getargs(term)
         length(args) == 1 || throw(NativePPLCapabilityError(
             :predictor_transform,
-            "`center` in predictor `$key` needs one raw data column"))
+            "`$spelling` in predictor `$key` needs one raw data column"))
         column = only(args)
         column isa NamedColumn && parent(column) isa DataColumn ||
             throw(NativePPLCapabilityError(
                 :predictor_transform,
-                "`center` in predictor `$key` must wrap one raw data column"))
-        return (; column, transform=:center)
+                "`$spelling` in predictor `$key` must wrap one raw data column"))
+        return (; column, transform)
     end
     throw(NativePPLCapabilityError(
         :predictor_terms,
-        "`$key` must be exactly `1 + x` or `1 + center(x)`; " *
+        "`$key` must be exactly `1 + x`, `1 + center(x)`, or " *
+        "`1 + zscale(x)` (`standardize(x)` is an alias); " *
         "offsets, interactions, groups, and other transforms are not lowered yet"))
 end
 
@@ -476,11 +498,15 @@ function _native_ppl_exponential_prior(brmi::BRMI, key::Symbol)
     scale
 end
 
-function _native_ppl_fit_center(values::AbstractVector, name::Symbol)
+function _native_ppl_fit_mean(values::AbstractVector, name::Symbol,
+                              transform::Symbol)
     all(value -> value isa Real && isfinite(value), values) ||
         throw(NativePPLCapabilityError(
             :predictor_transform,
-            "`center($name)` requires finite real training values"))
+            "`$transform($name)` requires finite real training values"))
+    isempty(values) && throw(NativePPLCapabilityError(
+        :predictor_transform,
+        "`$transform($name)` requires at least one training value"))
     fitted_mean = float(first(values))
     for (offset, value) in enumerate(Iterators.drop(values, 1))
         count = offset + 1
@@ -490,8 +516,50 @@ function _native_ppl_fit_center(values::AbstractVector, name::Symbol)
     end
     isfinite(fitted_mean) || throw(NativePPLCapabilityError(
         :predictor_transform,
-        "`center($name)` produced a non-finite fitted mean"))
+        "`$transform($name)` produced a non-finite fitted mean"))
     fitted_mean
+end
+
+_native_ppl_fit_center(values::AbstractVector, name::Symbol) =
+    _native_ppl_fit_mean(values, name, :center)
+
+function _native_ppl_fit_zscale(values::AbstractVector, name::Symbol)
+    length(values) >= 2 || throw(NativePPLCapabilityError(
+        :predictor_transform,
+        "`zscale($name)` requires at least two training values for sample SD"))
+    fitted_mean = _native_ppl_fit_mean(values, name, :zscale)
+
+    # Scaled sum-of-squares avoids the overflow and underflow of directly
+    # accumulating `(x - mean)^2`, while preserving corrected `n - 1`
+    # sample-standard-deviation semantics.
+    magnitude_scale = zero(fitted_mean)
+    scaled_squares = zero(fitted_mean)
+    for value in values
+        deviation = float(value) - fitted_mean
+        isfinite(deviation) || throw(NativePPLCapabilityError(
+            :predictor_transform,
+            "`zscale($name)` produced a non-finite centered training value"))
+        magnitude = abs(deviation)
+        iszero(magnitude) && continue
+        if magnitude_scale < magnitude
+            ratio = magnitude_scale / magnitude
+            scaled_squares = one(magnitude) + scaled_squares * ratio * ratio
+            magnitude_scale = magnitude
+        else
+            ratio = magnitude / magnitude_scale
+            scaled_squares += ratio * ratio
+        end
+    end
+    iszero(magnitude_scale) && throw(NativePPLCapabilityError(
+        :predictor_transform,
+        "`zscale($name)` requires nonzero sample variance"))
+    fitted_scale = magnitude_scale *
+        sqrt(scaled_squares / (length(values) - 1))
+    isfinite(fitted_scale) && fitted_scale > zero(fitted_scale) ||
+        throw(NativePPLCapabilityError(
+            :predictor_transform,
+            "`zscale($name)` produced a non-finite or zero sample SD"))
+    (; mean=fitted_mean, scale=fitted_scale)
 end
 
 """
@@ -603,8 +671,13 @@ function _native_ppl_plan(brmi::BRMI)
         "predictor `$predictor_name` has $(length(x)) rows but `$response` has $(length(y))"))
     !isempty(y) || throw(NativePPLCapabilityError(
         :observation_axis, "the observation axis cannot be empty"))
-    center_mean = predictor_term.transform === :center ?
-        _native_ppl_fit_center(x, predictor_name) : nothing
+    transform_fit = if predictor_term.transform === :center
+        _native_ppl_fit_center(x, predictor_name)
+    elseif predictor_term.transform === :zscale
+        _native_ppl_fit_zscale(x, predictor_name)
+    else
+        nothing
+    end
 
     prior_scale = family === Normal ?
         _native_ppl_exponential_prior(brmi, scale_parameter) : nothing
@@ -628,11 +701,19 @@ function _native_ppl_plan(brmi::BRMI)
     coefficients = NativePPLParameter(
         coefficient_name, NativePPLRealSupport(), NativePPLIdentityTransform(),
         coefficient_axis, 1:2)
-    transform_node = predictor_term.transform === :center ?
+    transform_node = if predictor_term.transform === :center
         NativePPLCenterNode(
             Symbol("#native_ppl_center#", location, "#", predictor_name),
             predictor_name,
-            observation_axis, center_mean) : nothing
+            observation_axis, transform_fit)
+    elseif predictor_term.transform === :zscale
+        NativePPLZScaleNode(
+            Symbol("#native_ppl_zscale#", location, "#", predictor_name),
+            predictor_name, observation_axis,
+            transform_fit.mean, transform_fit.scale)
+    else
+        nothing
+    end
     location_input = transform_node === nothing ?
         predictor_name : native_node_name(transform_node)
     location_node = NativePPLAffineNode(location, location_input,
@@ -763,6 +844,33 @@ function _native_ppl_apply_predictor!(
         predictor[i] -= mean
         isfinite(predictor[i]) || throw(ArgumentError(
             "native PPL centered predictor `$Input` is non-finite at row $i"))
+    end
+    predictor
+end
+
+function _native_ppl_apply_predictor!(
+    node::NativePPLZScaleNode{Name,Input},
+    ::NativePPLInput{Input},
+    predictor::Vector{T},
+) where {Name,Input,T}
+    mean = T(node.mean)
+    scale = T(node.scale)
+    isfinite(mean) || throw(ArgumentError(
+        "native PPL fitted zscale mean for `$Input` cannot be represented as $T"))
+    isfinite(scale) && scale > zero(T) || throw(ArgumentError(
+        "native PPL fitted zscale sample SD for `$Input` cannot be represented " *
+        "as a finite positive $T"))
+    for i in eachindex(predictor)
+        raw = predictor[i]
+        standardized = (raw - mean) / scale
+        if !isfinite(standardized)
+            # The separated form can represent a wide-span rebound value when
+            # `raw - mean` overflows even though the standardized result does not.
+            standardized = raw / scale - mean / scale
+        end
+        isfinite(standardized) || throw(ArgumentError(
+            "native PPL standardized predictor `$Input` is non-finite at row $i"))
+        predictor[i] = standardized
     end
     predictor
 end
@@ -1344,6 +1452,35 @@ _native_ppl_rebind_likelihood(
 ) where {Response,Rate} =
     NativePPLPoissonFactor(Response, Rate, axis)
 
+function _native_ppl_rebind_transform(
+    old_transform::NativePPLCenterNode,
+    observation_axis,
+    predictor_name::Symbol,
+    predictor,
+    freeze_constants::Bool,
+)
+    mean = freeze_constants ? old_transform.mean :
+        _native_ppl_fit_center(predictor, predictor_name)
+    NativePPLCenterNode(
+        native_node_name(old_transform), predictor_name,
+        observation_axis, mean)
+end
+
+function _native_ppl_rebind_transform(
+    old_transform::NativePPLZScaleNode,
+    observation_axis,
+    predictor_name::Symbol,
+    predictor,
+    freeze_constants::Bool,
+)
+    fit = freeze_constants ?
+        (; mean=old_transform.mean, scale=old_transform.scale) :
+        _native_ppl_fit_zscale(predictor, predictor_name)
+    NativePPLZScaleNode(
+        native_node_name(old_transform), predictor_name,
+        observation_axis, fit.mean, fit.scale)
+end
+
 function _native_ppl_rebind_nodes(plan::NativePPLPlan, observation_axis,
                                   predictor_name::Symbol, predictor,
                                   freeze_constants::Bool)
@@ -1351,15 +1488,13 @@ function _native_ppl_rebind_nodes(plan::NativePPLPlan, observation_axis,
     location_name = native_node_name(old_location)
     transform = if hasproperty(plan.nodes, :transform)
         old_transform = plan.nodes.transform
-        native_center_input(old_transform) === predictor_name ||
+        native_fitted_transform_input(old_transform) === predictor_name ||
             throw(NativePPLCapabilityError(
                 :graph_identity,
-                "rebound centering node must consume the compiled raw predictor"))
-        mean = freeze_constants ? old_transform.mean :
-            _native_ppl_fit_center(predictor, predictor_name)
-        NativePPLCenterNode(
-            native_node_name(old_transform), predictor_name,
-            observation_axis, mean)
+                "rebound fitted transform must consume the compiled raw predictor"))
+        _native_ppl_rebind_transform(
+            old_transform, observation_axis, predictor_name,
+            predictor, freeze_constants)
     else
         nothing
     end
