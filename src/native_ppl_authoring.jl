@@ -1245,10 +1245,10 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
                     "grouped affine node `$name` requires a Cholesky " *
                     "correlation parameter"))
             coefficients = group_coefficients(standardized_declaration)
-            length(coefficients) == 2 || throw(CapabilityError(
+            length(coefficients) >= 2 || throw(CapabilityError(
                 :factor_nodes,
-                "the first executable grouped affine slice requires exactly " *
-                "two correlated coefficients"))
+                "grouped affine node `$name` requires at least two " *
+                "correlated coefficients"))
             scales_declaration.axis_keys == coefficients || throw(
                 CapabilityError(
                     :factor_nodes,
@@ -1289,13 +1289,15 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
                         "grouped affine node `$name` scales must be a positive " *
                         "Exponential-prior block"))
             correlation_site = getproperty(graph.sites, correlation_name)
-            correlation_site.support isa CholeskyCorrelationSupport{2} &&
+            dimension = length(coefficients)
+            correlation_site.support isa
+                CholeskyCorrelationSupport{dimension} &&
                 correlation_site.factor isa LKJCholeskySiteFactor &&
                 correlation_site.activity isa FreeSite || throw(
                     CapabilityError(
                         :factor_nodes,
-                        "grouped affine node `$name` currently requires one " *
-                        "free two-dimensional LKJ Cholesky factor"))
+                        "grouped affine node `$name` requires one free " *
+                        "$dimension-dimensional LKJ Cholesky factor"))
         end
     end
     broadcast_sites = Tuple(

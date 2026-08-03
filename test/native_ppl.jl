@@ -4063,6 +4063,56 @@ end
         invalid_poisson_rate_input,
         (; group=grouped_bindings.group, rate=[1.0, -1.0, 2.0, 3.0]))
     @test_throws ArgumentError NP.prepare(invalid_poisson_rate_plan)
+    three_coefficient_group_declaration = NP.model(
+        inputs=(; x=NP.input(), w=NP.input(), group=NP.input()),
+        parameters=(;
+            tau=NP.parameter(
+                NP.PositiveSupport(), (:Intercept, :x, :w);
+                transform=NP.Exp(), prior=NP.Exponential(1)),
+            correlation=NP.cholesky_correlation(
+                (:Intercept, :x, :w), 2.0),
+            z=NP.grouped_standard_normal(
+                :group, (:Intercept, :x, :w)),
+            beta=NP.parameter(
+                NP.RealSupport(), (:x, :w); transform=NP.Identity(),
+                prior=NP.StandardNormal()),
+            sigma=NP.parameter(
+                NP.PositiveSupport(), (:sigma,); transform=NP.Exp(),
+                prior=NP.Exponential(2))),
+        nodes=(;
+            correlated_by_row=NP.grouped_affine(
+                :z, :tau, :correlation, :group,
+                (nothing, :x, :w)),
+            mu=NP.affine(
+                (:x, :w), :beta; offsets=(:correlated_by_row,),
+                intercept=false)),
+        observations=(; y=NP.broadcasted(NP.normal(:y, :mu, :sigma))),
+        site_order=(:tau, :correlation, :z, :beta, :sigma, :y))
+    three_coefficient_group_plan = NP.compile(
+        three_coefficient_group_declaration,
+        (; x=sampled_offset_data.x,
+           w=[0.5, -1.0, 1.5, 2.0],
+           group=grouped_bindings.group);
+        conditions=(; y=sampled_offset_data.y))
+    @test three_coefficient_group_plan isa NP.FactorPlan
+    @test three_coefficient_group_plan.graph.dimension == 18
+    @test three_coefficient_group_plan.graph.coordinates.correlation.keys == (
+        NP.CorrelationCoordinateKey(:correlation, 2, 1),
+        NP.CorrelationCoordinateKey(:correlation, 3, 1),
+        NP.CorrelationCoordinateKey(:correlation, 3, 2))
+    @test three_coefficient_group_plan.graph.coordinates.z.keys == (
+        NP.GroupCoefficientKey(:z, :a, :Intercept),
+        NP.GroupCoefficientKey(:z, :a, :x),
+        NP.GroupCoefficientKey(:z, :a, :w),
+        NP.GroupCoefficientKey(:z, :b, :Intercept),
+        NP.GroupCoefficientKey(:z, :b, :x),
+        NP.GroupCoefficientKey(:z, :b, :w),
+        NP.GroupCoefficientKey(:z, :c, :Intercept),
+        NP.GroupCoefficientKey(:z, :c, :x),
+        NP.GroupCoefficientKey(:z, :c, :w))
+    @test NP.factor_node_dependencies(
+        three_coefficient_group_plan.graph.nodes.correlated_by_row) ==
+          (:z, :tau, :correlation)
 
     correlated_group_prepared = NP.prepare(correlated_group_plan)
     correlated_group_workspace = NP.workspace(
