@@ -1219,6 +1219,7 @@ function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
         plan.declaration, plan.graph, bindings, conditions,
         plan.site_indices, plan.node_indices, plan.group_indices,
         plan.generated_group_levels,
+        plan.generated_group_indices,
         plan.observation_axis, plan.output_site)
     FactorPrepared{T,typeof(owned_plan),typeof(conditions)}(
         owned_plan, conditions)
