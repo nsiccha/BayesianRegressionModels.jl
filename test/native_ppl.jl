@@ -570,6 +570,31 @@ function factor_steady_state_allocations(workspace::NP.FactorWorkspace,
     (; primal, gradient)
 end
 
+function factor_query_allocations(workspace::NP.FactorWorkspace,
+                                  prepared::NP.FactorPrepared,
+                                  position, linear, pointwise, predictive,
+                                  prior_position)
+    query = NP.LinearPredictor()
+    likelihood = NP.PointwiseLogLikelihood()
+    rng = MersenneTwister(921)
+    prior_rng = MersenneTwister(922)
+    NP.evaluate!(linear, workspace, prepared, position, query)
+    NP.evaluate!(pointwise, workspace, prepared, position, likelihood)
+    NP.simulate!(rng, predictive, workspace, prepared, position)
+    NP.simulate_prior!(
+        prior_rng, prior_position, predictive, workspace, prepared)
+    linear_bytes = @allocated NP.evaluate!(
+        linear, workspace, prepared, position, query)
+    pointwise_bytes = @allocated NP.evaluate!(
+        pointwise, workspace, prepared, position, likelihood)
+    predictive_bytes = @allocated NP.simulate!(
+        rng, predictive, workspace, prepared, position)
+    prior_bytes = @allocated NP.simulate_prior!(
+        prior_rng, prior_position, predictive, workspace, prepared)
+    (; linear=linear_bytes, pointwise=pointwise_bytes,
+       predictive=predictive_bytes, prior=prior_bytes)
+end
+
 function allocating_query_bytes(workspace, prepared, position)
     linear = BRM.NativePPL.LinearPredictor()
     predictive = BRM.NativePPL.PosteriorPredictive()
@@ -3228,9 +3253,84 @@ end
     @test hierarchy_workspace.primal.pointwise_loglikelihood ≈
         logpdf.(Normal(
             hierarchy_individual, hierarchy_observation_scale), response)
+    hierarchy_linear = NP.evaluate(
+        hierarchy_workspace, hierarchy_prepared, hierarchy_position,
+        NP.LinearPredictor())
+    @test hierarchy_linear == fill(
+        hierarchy_individual, length(response))
+    hierarchy_pointwise = NP.evaluate(
+        hierarchy_workspace, hierarchy_prepared, hierarchy_position,
+        NP.PointwiseLogLikelihood())
+    @test hierarchy_pointwise ≈ logpdf.(Normal(
+        hierarchy_individual, hierarchy_observation_scale), response)
+    hierarchy_predictive_rng = MersenneTwister(919)
+    hierarchy_expected_predictive_rng = MersenneTwister(919)
+    hierarchy_expected_predictive = [
+        hierarchy_individual + hierarchy_observation_scale *
+            randn(hierarchy_expected_predictive_rng)
+        for _ in response
+    ]
+    hierarchy_predictive = NP.simulate(
+        hierarchy_predictive_rng, hierarchy_workspace,
+        hierarchy_prepared, hierarchy_position)
+    @test hierarchy_predictive == hierarchy_expected_predictive
+
+    hierarchy_prior_rng = MersenneTwister(920)
+    hierarchy_expected_prior_rng = MersenneTwister(920)
+    expected_population = randn(hierarchy_expected_prior_rng)
+    expected_population_scale = randexp(hierarchy_expected_prior_rng)
+    expected_individual = expected_population + expected_population_scale *
+        randn(hierarchy_expected_prior_rng)
+    expected_observation_scale = 2 * randexp(hierarchy_expected_prior_rng)
+    expected_prior_response = [
+        expected_individual + expected_observation_scale *
+            randn(hierarchy_expected_prior_rng)
+        for _ in response
+    ]
+    hierarchy_prior = NP.simulate_prior(
+        hierarchy_prior_rng, hierarchy_workspace, hierarchy_prepared)
+    @test hierarchy_prior.position ≈ [
+        expected_population,
+        log(expected_population_scale),
+        expected_individual,
+        log(expected_observation_scale),
+    ]
+    @test hierarchy_prior.response == expected_prior_response
+
+    hierarchy_signature = NP.output_signature(
+        hierarchy_prepared, NP.PosteriorPredictive())
+    @test NP.output_axis(hierarchy_signature).keys ==
+          Base.OneTo(length(response))
+    @test NP.output_eltype(hierarchy_signature, hierarchy_prepared) === Float64
+    hierarchy_rebound_response = [0.1, 0.4, 0.8]
+    hierarchy_rebound = NP.rebind(
+        hierarchy_prepared, (; y=hierarchy_rebound_response))
+    @test NP.has_response(hierarchy_rebound)
+    @test hierarchy_rebound.conditions.y == hierarchy_rebound_response
+    @test length(hierarchy_rebound.plan.observation_axis) == 3
+    hierarchy_prediction_only = NP.rebind(hierarchy_prepared, (;))
+    @test !NP.has_response(hierarchy_prediction_only)
+    @test length(hierarchy_prediction_only.plan.observation_axis) ==
+          length(response)
+    @test_throws ArgumentError NP.evaluate(
+        NP.workspace(hierarchy_prediction_only), hierarchy_prediction_only,
+        hierarchy_position, NP.PointwiseLogLikelihood())
+    @test length(NP.simulate(
+        MersenneTwister(923), NP.workspace(hierarchy_prediction_only),
+        hierarchy_prediction_only, hierarchy_position)) == length(response)
+
+    hierarchy_linear_buffer = similar(response)
+    hierarchy_pointwise_buffer = similar(response)
+    hierarchy_predictive_buffer = similar(response)
+    hierarchy_prior_position = similar(hierarchy_position)
     @test factor_steady_state_allocations(
         hierarchy_workspace, hierarchy_prepared, hierarchy_position) ==
           (; primal=0, gradient=0)
+    @test factor_query_allocations(
+        hierarchy_workspace, hierarchy_prepared, hierarchy_position,
+        hierarchy_linear_buffer, hierarchy_pointwise_buffer,
+        hierarchy_predictive_buffer, hierarchy_prior_position) ==
+          (; linear=0, pointwise=0, predictive=0, prior=0)
     @test NP.LogDensityProblem(
         hierarchy_prepared, DI.AutoEnzyme()) isa NP.FactorLogDensityProblem
     conditioned_individual_plan = NP.compile(NP.condition(

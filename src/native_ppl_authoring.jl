@@ -458,14 +458,28 @@ function _canonical_factor_conditions(declaration::Model, conditions)
 end
 
 """Executable plan for an ordered continuous stochastic-site DAG."""
-struct FactorPlan{M,G,C,I,A}
+struct FactorPlan{Output,M,G,C,I,A}
     declaration::M
     graph::G
     conditions::C
     site_indices::I
     observation_axis::A
-    output_site::Symbol
 end
+
+FactorPlan(declaration::M, graph::G, conditions::C, site_indices::I,
+           observation_axis::A, output_site::Symbol) where {M,G,C,I,A} =
+    FactorPlan{output_site,M,G,C,I,A}(
+        declaration, graph, conditions, site_indices, observation_axis)
+
+factor_output_site(::FactorPlan{Output}) where {Output} = Output
+
+function Base.getproperty(plan::FactorPlan, name::Symbol)
+    name === :output_site && return factor_output_site(plan)
+    getfield(plan, name)
+end
+
+Base.propertynames(::FactorPlan, private::Bool=false) =
+    (fieldnames(FactorPlan)..., :output_site)
 
 BRM.LogDensityProblems.dimension(plan::FactorPlan) = plan.graph.dimension
 
@@ -553,21 +567,22 @@ function _bind_factor_plan(declaration::Model, bindings, conditions)
             name, site, graph, canonical_conditions, broadcast_site_set)
     end
     output_site = only(broadcast_sites)
-    hasproperty(canonical_conditions, output_site) || throw(CapabilityError(
-        :factor_conditioning,
-        "multi-latent density execution currently requires conditioning " *
-        "broadcast site `$output_site`"))
-    response = getproperty(canonical_conditions, output_site)
-    response isa AbstractVector || throw(ArgumentError(
-        "native PPL broadcast condition `$output_site` must be a vector"))
-    isempty(response) && throw(ArgumentError(
-        "native PPL broadcast condition `$output_site` cannot be empty"))
+    observation_keys = if hasproperty(canonical_conditions, output_site)
+        response = getproperty(canonical_conditions, output_site)
+        response isa AbstractVector || throw(ArgumentError(
+            "native PPL broadcast condition `$output_site` must be a vector"))
+        isempty(response) && throw(ArgumentError(
+            "native PPL broadcast condition `$output_site` cannot be empty"))
+        Base.OneTo(length(response))
+    else
+        Base.OneTo(0)
+    end
     site_names = Tuple(keys(graph.sites))
     site_indices = NamedTuple{site_names}(
         ntuple(identity, length(site_names)))
     FactorPlan(
         declaration, graph, canonical_conditions, site_indices,
-        Base.OneTo(length(response)), output_site)
+        BRM.NativePPLAxis(:observation, observation_keys), output_site)
 end
 
 function Base.show(io::IO, plan::FactorPlan)
@@ -823,6 +838,238 @@ end
 logdensity_and_gradient!(work::FactorWorkspace, prepared::FactorPrepared,
                          position::AbstractVector) =
     _factor_logdensity_and_gradient!(work, prepared, position)
+
+has_response(prepared::FactorPrepared) =
+    hasproperty(prepared.conditions, factor_output_site(prepared.plan))
+
+function rebind(prepared::FactorPrepared, conditions;
+                T::Type{<:AbstractFloat}=eltype(prepared), kwargs...)
+    isempty(kwargs) || throw(ArgumentError(
+        "native PPL factor replay does not accept keyword options yet; got " *
+        "$(keys(kwargs))"))
+    conditions isa NamedTuple || throw(ArgumentError(
+        "native PPL factor replay bindings must be a NamedTuple; got " *
+        "$(typeof(conditions))"))
+    rebound = _bind_factor_plan(
+        prepared.plan.declaration, (;), conditions)
+    if !hasproperty(rebound.conditions, rebound.output_site) &&
+       isempty(rebound.observation_axis.keys)
+        rebound = FactorPlan(
+            rebound.declaration, rebound.graph, rebound.conditions,
+            rebound.site_indices, prepared.plan.observation_axis,
+            rebound.output_site)
+    end
+    prepare(rebound; T)
+end
+
+function _factor_output_signature(plan::FactorPlan)
+    BRM.NativePPLOutputSignature(
+        plan.observation_axis, BRM.NativePPLPreparedElementType(),
+        BRM.NativePPLDenseVectorLayout())
+end
+
+output_signature(plan::FactorPlan, ::BRM.NativePPLQuery) =
+    _factor_output_signature(plan)
+output_signature(prepared::FactorPrepared, query::BRM.NativePPLQuery) =
+    output_signature(prepared.plan, query)
+output_eltype(signature::BRM.NativePPLOutputSignature,
+              prepared::FactorPrepared) =
+    BRM.native_output_eltype(signature, prepared)
+
+function allocate_output(signature::BRM.NativePPLOutputSignature,
+                         prepared::FactorPrepared)
+    axis = BRM.native_output_axis(signature)
+    axis.keys == Base.OneTo(length(axis)) || throw(CapabilityError(
+        :output_layout,
+        "dense factor output requires a one-based semantic axis"))
+    Vector{BRM.native_output_eltype(signature, prepared)}(
+        undef, length(axis))
+end
+
+allocate_output(prepared::FactorPrepared, query::BRM.NativePPLQuery) =
+    allocate_output(output_signature(prepared, query), prepared)
+
+function _factor_check_query_output(output::AbstractVector,
+                                    work::FactorWorkspace,
+                                    prepared::FactorPrepared,
+                                    position::AbstractVector,
+                                    query::BRM.NativePPLQuery)
+    _factor_check_execution(work, prepared, position)
+    signature = output_signature(prepared, query)
+    expected_axis = BRM.native_output_axis(signature).keys
+    axes(output, 1) == expected_axis || throw(DimensionMismatch(
+        "native PPL factor output axis $(axes(output, 1)) does not match " *
+        "declared axis $expected_axis"))
+    eltype(output) === BRM.native_output_eltype(signature, prepared) ||
+        throw(ArgumentError(
+            "native PPL factor output eltype $(eltype(output)) does not " *
+            "match prepared eltype $(eltype(prepared))"))
+    for buffer in (work.gradient, work.primal.values,
+                   work.primal.pointwise_loglikelihood)
+        Base.mightalias(output, buffer) && throw(ArgumentError(
+            "native PPL factor output must not alias workspace storage"))
+    end
+    Base.mightalias(output, position) && throw(ArgumentError(
+        "native PPL factor output must not alias the position"))
+    output
+end
+
+@inline function _factor_terminal_arguments(prepared::FactorPrepared,
+                                            buffers::FactorBuffers)
+    site = getproperty(
+        prepared.plan.graph.sites, factor_output_site(prepared.plan))
+    factor = site.factor
+    factor isa NormalSiteFactor || throw(CapabilityError(
+        :factor_family,
+        "terminal factor queries currently require Normal, got " *
+        "$(typeof(factor))"))
+    T = eltype(buffers.values)
+    location = _factor_argument(
+        factor.location, prepared.plan, buffers, T)
+    scale = _factor_argument(factor.scale, prepared.plan, buffers, T)
+    location, scale
+end
+
+function evaluate!(output::AbstractVector, work::FactorWorkspace,
+                   prepared::FactorPrepared, position::AbstractVector,
+                   query::BRM.NativePPLLinearPredictor)
+    _factor_check_query_output(output, work, prepared, position, query)
+    _factor_logdensity_kernel(position, prepared, work.primal)
+    location, _ = _factor_terminal_arguments(prepared, work.primal)
+    fill!(output, location)
+end
+
+function evaluate!(output::AbstractVector, work::FactorWorkspace,
+                   prepared::FactorPrepared, position::AbstractVector,
+                   query::BRM.NativePPLPointwiseLogLikelihood)
+    _factor_check_query_output(output, work, prepared, position, query)
+    has_response(prepared) || throw(ArgumentError(
+        "native PPL pointwise log likelihood requires a conditioned " *
+        "broadcast response"))
+    _factor_logdensity_kernel(position, prepared, work.primal)
+    copyto!(output, work.primal.pointwise_loglikelihood)
+end
+
+function evaluate(work::FactorWorkspace, prepared::FactorPrepared,
+                  position::AbstractVector, query::BRM.NativePPLQuery)
+    output = allocate_output(prepared, query)
+    evaluate!(output, work, prepared, position, query)
+end
+
+function simulate!(rng::BRM.AbstractRNG, output::AbstractVector,
+                   work::FactorWorkspace, prepared::FactorPrepared,
+                   position::AbstractVector,
+                   query::BRM.NativePPLPosteriorPredictive=
+                       BRM.NativePPLPosteriorPredictive())
+    _factor_check_query_output(output, work, prepared, position, query)
+    _factor_logdensity_kernel(position, prepared, work.primal)
+    location, scale = _factor_terminal_arguments(prepared, work.primal)
+    T = eltype(work)
+    for index in eachindex(output)
+        output[index] = location + scale * BRM.randn(rng, T)
+    end
+    output
+end
+
+function simulate(rng::BRM.AbstractRNG, work::FactorWorkspace,
+                  prepared::FactorPrepared, position::AbstractVector,
+                  query::BRM.NativePPLPosteriorPredictive=
+                      BRM.NativePPLPosteriorPredictive())
+    output = allocate_output(prepared, query)
+    simulate!(rng, output, work, prepared, position, query)
+end
+
+@inline _factor_inverse(::IdentityTransform, value) = value
+@inline _factor_inverse(::ExpTransform, value) = log(value)
+
+@inline _factor_rand(rng::BRM.AbstractRNG, ::StandardNormalSiteFactor,
+                     plan, buffers, ::Type{T}) where {T} =
+    BRM.randn(rng, T)
+
+@inline function _factor_rand(rng::BRM.AbstractRNG,
+        factor::NormalSiteFactor, plan, buffers, ::Type{T}) where {T}
+    location = _factor_argument(factor.location, plan, buffers, T)
+    scale = _factor_argument(factor.scale, plan, buffers, T)
+    location + scale * BRM.randn(rng, T)
+end
+
+@inline function _factor_rand(rng::BRM.AbstractRNG,
+        factor::ExponentialSiteFactor, plan, buffers, ::Type{T}) where {T}
+    scale = _factor_argument(factor.scale, plan, buffers, T)
+    scale * BRM.randexp(rng, T)
+end
+
+@inline function _factor_site_sample!(rng::BRM.AbstractRNG, ::Val{Name},
+        site::StochasticSite{S,Tr,F,ScalarSiteShape,FreeSite},
+        position::AbstractVector{T}, output::AbstractVector{T},
+        prepared::FactorPrepared, buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
+    value = _factor_rand(rng, site.factor, prepared.plan, buffers, T)
+    coordinates = getproperty(prepared.plan.graph.coordinates, Name)
+    position[first(coordinates.indices)] = _factor_inverse(
+        site.transform, value)
+    buffers.values[getproperty(prepared.plan.site_indices, Name)] = value
+    nothing
+end
+
+@inline function _factor_site_sample!(rng::BRM.AbstractRNG, ::Val{Name},
+        site::StochasticSite{S,Tr,F,ScalarSiteShape,ConditionedSite},
+        position::AbstractVector{T}, output::AbstractVector{T},
+        prepared::FactorPrepared, buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
+    buffers.values[getproperty(prepared.plan.site_indices, Name)] =
+        getproperty(prepared.conditions, Name)
+    nothing
+end
+
+@inline function _factor_site_sample!(rng::BRM.AbstractRNG, ::Val{Name},
+        site::StochasticSite{S,Tr,F,BroadcastSiteShape,A},
+        position::AbstractVector{T}, output::AbstractVector{T},
+        prepared::FactorPrepared, buffers::FactorBuffers{T}) where {Name,S,Tr,F,A,T}
+    factor = site.factor
+    factor isa NormalSiteFactor || throw(CapabilityError(
+        :factor_family,
+        "prior predictive factor `$Name` must currently be Normal"))
+    location = _factor_argument(factor.location, prepared.plan, buffers, T)
+    scale = _factor_argument(factor.scale, prepared.plan, buffers, T)
+    for index in eachindex(output)
+        output[index] = location + scale * BRM.randn(rng, T)
+    end
+    nothing
+end
+
+@generated function _factor_sample_sites!(rng::BRM.AbstractRNG,
+        ::Val{Names}, sites::Sites, position::AbstractVector{T},
+        output::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Names,Sites<:Tuple,T}
+    calls = Any[
+        :(_factor_site_sample!(
+            rng, Val($(QuoteNode(name))), getfield(sites, $index),
+            position, output, prepared, buffers))
+        for (index, name) in enumerate(Names)
+    ]
+    Expr(:block, calls..., :(output))
+end
+
+function simulate_prior!(rng::BRM.AbstractRNG, position::AbstractVector,
+                         output::AbstractVector, work::FactorWorkspace,
+                         prepared::FactorPrepared)
+    _factor_check_query_output(
+        output, work, prepared, position,
+        BRM.NativePPLPosteriorPredictive())
+    names = Tuple(keys(prepared.plan.graph.sites))
+    _factor_sample_sites!(
+        rng, Val(names), Tuple(prepared.plan.graph.sites),
+        position, output, prepared, work.primal)
+end
+
+function simulate_prior(rng::BRM.AbstractRNG, work::FactorWorkspace,
+                        prepared::FactorPrepared)
+    position = Vector{eltype(work)}(
+        undef, BRM.LogDensityProblems.dimension(prepared))
+    output = allocate_output(
+        prepared, BRM.NativePPLPosteriorPredictive())
+    simulate_prior!(rng, position, output, work, prepared)
+    (; position, response=output)
+end
 
 """LogDensityProblems adapter for a prepared factor-graph executor."""
 struct FactorLogDensityProblem{P,W}
