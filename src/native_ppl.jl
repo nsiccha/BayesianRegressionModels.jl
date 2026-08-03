@@ -648,6 +648,49 @@ function _native_ppl_exponential_prior(brmi::BRMI, key::Symbol)
     scale
 end
 
+function _native_ppl_intercept_normal_prior(brmi::BRMI, key::Symbol)
+    matches = Tuple{Symbol,Any}[]
+    for (operation_key, named) in pairs(brmi.operations)
+        named isa NamedColumn || continue
+        operation = parent(named)
+        operation isa ExprColumn && getf(operation) === (~) || continue
+        isempty(getkwargs(operation)) || continue
+        lhs, prior = getargs(operation, 2)
+        lhs isa ExprColumn && getf(lhs) === effect || continue
+        isempty(getkwargs(lhs)) || continue
+        target = getargs(lhs)
+        target == (key, :Intercept) || continue
+        push!(matches, (operation_key, prior))
+    end
+    isempty(matches) && return (
+        location=0.0, scale=1.0, operation=nothing)
+    length(matches) == 1 || throw(NativePPLCapabilityError(
+        :coefficient_prior,
+        "linear predictor `$key` has multiple intercept prior declarations"))
+    operation_key, prior = only(matches)
+    prior isa ExprColumn && getf(prior) === Normal || throw(
+        NativePPLCapabilityError(
+            :coefficient_prior,
+            "`effect($key, Intercept)` must use `Normal(location, scale)`"))
+    isempty(getkwargs(prior)) || throw(NativePPLCapabilityError(
+        :coefficient_prior,
+        "Normal intercept prior for `$key` cannot have keywords"))
+    arguments = getargs(prior)
+    length(arguments) == 2 && all(argument -> argument isa Real, arguments) ||
+        throw(NativePPLCapabilityError(
+            :coefficient_prior,
+            "Normal intercept prior for `$key` needs numeric location and scale"))
+    location, scale = arguments
+    isfinite(location) || throw(NativePPLCapabilityError(
+        :coefficient_prior,
+        "Normal intercept prior location for `$key` must be finite"))
+    isfinite(scale) && scale > zero(scale) || throw(
+        NativePPLCapabilityError(
+            :coefficient_prior,
+            "Normal intercept prior scale for `$key` must be finite and positive"))
+    (; location, scale, operation=operation_key)
+end
+
 function _native_ppl_fit_mean(values::AbstractVector, name::Symbol,
                               transform::Symbol)
     all(value -> value isa Real && isfinite(value), values) ||

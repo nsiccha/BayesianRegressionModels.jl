@@ -43,6 +43,20 @@ Exp() = ExpTransform()
 """Independent standard-normal prior declaration."""
 struct StandardNormal <: AbstractPriorDeclaration end
 
+"""Scalar Normal prior declaration with literal location and scale."""
+struct NormalPrior{L<:Real,S<:Real} <: AbstractPriorDeclaration
+    location::L
+    scale::S
+end
+
+function normal_prior(location::Real, scale::Real)
+    isfinite(location) || throw(ArgumentError(
+        "native PPL Normal prior location must be finite"))
+    isfinite(scale) && scale > zero(scale) || throw(ArgumentError(
+        "native PPL Normal prior scale must be finite and positive"))
+    NormalPrior(location, scale)
+end
+
 """Exponential prior declaration parameterized by its positive scale."""
 struct ExponentialPrior{T<:Real} <: AbstractPriorDeclaration
     scale::T
@@ -84,6 +98,11 @@ function parameter(support::S, axis_keys::Tuple;
     if prior isa StandardNormal
         support isa RealSupport || throw(ArgumentError(
             "native PPL StandardNormal prior requires RealSupport"))
+    elseif prior isa NormalPrior
+        support isa RealSupport || throw(ArgumentError(
+            "native PPL Normal prior requires RealSupport"))
+        length(axis_keys) == 1 || throw(ArgumentError(
+            "native PPL Normal prior currently requires one scalar coordinate"))
     elseif prior isa ExponentialPrior
         support isa PositiveSupport || throw(ArgumentError(
             "native PPL Exponential prior requires PositiveSupport"))
@@ -920,9 +939,12 @@ function _validate_coefficient_parameter(
     declaration.transform isa IdentityTransform || throw(CapabilityError(
         :parameter_transform,
         "affine coefficient parameter `$name` must use Identity()"))
-    declaration.prior isa StandardNormal || throw(CapabilityError(
+    valid_prior = declaration.prior isa StandardNormal ||
+        (predictor_count == 0 && declaration.prior isa NormalPrior)
+    valid_prior || throw(CapabilityError(
         :parameter_prior,
-        "affine coefficient parameter `$name` must use StandardNormal()"))
+        "affine coefficient parameter `$name` must use StandardNormal(); " *
+        "a scalar location may instead use NormalPrior"))
     expected = predictor_count + 1
     length(declaration.axis_keys) == expected || throw(CapabilityError(
         :parameter_axis,
@@ -1025,7 +1047,15 @@ function _bind_scalar_location(
         scale_axis, 2:2)
     location = BRM.NativePPLScalarBroadcastNode(
         location_name, location_name, observation_axis, 1)
-    coefficient_prior = BRM.NativePPLStandardNormalFactor(location_name, 1:1)
+    coefficient_prior = if location_declaration.prior isa StandardNormal
+        BRM.NativePPLStandardNormalFactor(location_name, 1:1)
+    else
+        prior = location_declaration.prior
+        BRM.NativePPLScalarNormalFactor(
+            location_name, Symbol(location_name, :_prior_location),
+            Symbol(location_name, :_prior_scale), 1,
+            prior.location, prior.scale)
+    end
     scale_prior = BRM.NativePPLExponentialFactor(
         scale_name, 2, scale_declaration.prior.scale)
     likelihood = BRM.NativePPLNormalFactor(
@@ -1531,12 +1561,19 @@ function _lower_brmi(brmi::BRM.BRMI)
     predictors = map(column -> parent(parent(column)), predictor_columns)
     response_values = parent(parent(response_lhs))
 
+    scalar_location = isempty(predictor_names)
+    intercept_prior = scalar_location ?
+        BRM._native_ppl_intercept_normal_prior(brmi, location) :
+        (; location=0.0, scale=1.0, operation=nothing)
+
     prior_scale = family === BRM.Normal ?
         BRM._native_ppl_exponential_prior(brmi, scale_name) : nothing
-    expected = family === BRM.Normal ?
+    expected_values = family === BRM.Normal ?
         Set((location, scale_name, response, predictor_names...)) :
         Set((location, response, predictor_names...))
-    extras = setdiff(Set(keys(brmi.operations)), expected)
+    intercept_prior.operation === nothing ||
+        push!(expected_values, intercept_prior.operation)
+    extras = setdiff(Set(keys(brmi.operations)), expected_values)
     isempty(extras) || throw(CapabilityError(
         :additional_operations,
         "unsupported formula operations: " *
@@ -1544,7 +1581,6 @@ function _lower_brmi(brmi::BRM.BRMI)
 
     input_declarations = _declaration_namedtuple(
         predictor_names, map(_ -> input(), predictor_names))
-    scalar_location = isempty(predictor_names)
     scalar_location && family !== BRM.Normal && throw(CapabilityError(
         :likelihood,
         "the first intercept-only BRM native-PPL slice supports Normal"))
@@ -1552,7 +1588,9 @@ function _lower_brmi(brmi::BRM.BRMI)
     coefficient_declaration = parameter(
         RealSupport(),
         scalar_location ? (location,) : (:Intercept, predictor_names...);
-        transform=Identity(), prior=StandardNormal())
+        transform=Identity(),
+        prior=intercept_prior.operation === nothing ? StandardNormal() :
+            normal_prior(intercept_prior.location, intercept_prior.scale))
     parameter_declarations = if family === BRM.Normal
         scale_declaration = parameter(
             PositiveSupport(), (scale_name,);
@@ -2155,10 +2193,11 @@ end
 
 Define a staged probabilistic model function. Calling it returns a
 `ModelInstance`; it does not execute density or RNG work. The current language
-slice accepts generic composable positional value ports, standard-normal
+slice accepts generic composable positional value ports, scalar Normal and
+standard-normal
 coefficient sites, positive Exponential-prior scalar sites, fitted
-center/zscale nodes, affine and exp deterministic nodes, and one scalar or
-explicitly broadcast Normal/BernoulliLogit/Poisson stochastic site. A final
+center/zscale nodes, affine and exp deterministic nodes, and staged scalar or
+explicitly broadcast Normal/BernoulliLogit/Poisson stochastic sites. A final
 `return value` or named-tuple return declares component outputs and permits a
 deterministic zero-observation model. The current vector executor requires the
 explicit broadcast form (`@.` or dotted `~`).
@@ -2169,11 +2208,11 @@ end
 
 export Model, ModelInstance, GraphRef, Component, Composition, Input, Parameter
 export RealSupport, PositiveSupport, IdentityTransform, ExpTransform
-export StandardNormal, ExponentialPrior
+export StandardNormal, NormalPrior, ExponentialPrior
 export Center, ZScale, Affine, ExpLink
 export NormalObservation, BernoulliLogitObservation, PoissonObservation
 export BroadcastObservation
-export model, input, parameter, Identity, Exp, Exponential
+export model, input, parameter, Identity, Exp, normal_prior, Exponential
 export center, zscale, standardize, affine, exp_link
 export normal, bernoulli_logit, poisson, broadcasted
 export instantiate, substitute, condition, component, output, compose, bind, lower

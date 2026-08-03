@@ -3002,6 +3002,34 @@ end
             MersenneTwister(913), latent_workspace,
             latent_prepared, latent_position)
 
+    latent_brm_data = (; y=response)
+    latent_brm = @brm latent_brm_data begin
+        sigma ~ Exponential(2.0)
+        mu ~ 1
+        effect(mu, Intercept) ~ Normal(0.25, 0.8)
+        y ~ Normal(mu, sigma)
+    end
+    latent_brm_model = NP.lower(latent_brm)
+    @test isempty(latent_brm_model.inputs)
+    @test latent_brm_model.parameters.mu.prior isa NP.NormalPrior
+    @test latent_brm_model.parameters.mu.prior.location == 0.25
+    @test latent_brm_model.parameters.mu.prior.scale == 0.8
+    latent_brm_plan = NP.compile(latent_brm)
+    @test latent_brm_plan.factors.coefficient_prior isa
+          BRM.NativePPLScalarNormalFactor
+    latent_brm_prepared = NP.prepare(latent_brm_plan)
+    latent_brm_workspace = NP.workspace(
+        latent_brm_prepared, Float64, DI.AutoEnzyme())
+    latent_brm_density, latent_brm_gradient = NP.logdensity_and_gradient!(
+        latent_brm_workspace, latent_brm_prepared, latent_position)
+    @test latent_brm_density ≈ latent_density
+    @test latent_brm_gradient ≈ latent_gradient
+    @test NP.simulate(
+        MersenneTwister(913), latent_brm_workspace,
+        latent_brm_prepared, latent_position) == NP.simulate(
+            MersenneTwister(913), latent_workspace,
+            latent_prepared, latent_position)
+
     scale_named_plan = NP.compile(NP.condition(
         monolithic_scale_named_site(0.25, 0.8);
         y=response))
@@ -3053,6 +3081,9 @@ end
         MersenneTwister(915), monolithic_latent_workspace,
         monolithic_latent)
     @test monolithic_prior == allocated_prior
+    @test NP.simulate_prior(
+        MersenneTwister(915), latent_brm_workspace,
+        latent_brm_prepared) == allocated_prior
     prediction_prior = NP.simulate_prior(
         MersenneTwister(915), NP.workspace(latent_prediction),
         latent_prediction)
