@@ -1203,6 +1203,17 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
                     "unless it is the terminal Poisson log-rate link"))
         end
         if node isa AffineFactorNode
+            for offset in node.offsets
+                offset isa InputValue || continue
+                offset_name = input_value_name(offset)
+                offset_value = getproperty(bindings, offset_name)
+                all(value -> value isa Real && isfinite(value),
+                    offset_value isa AbstractVector ?
+                        offset_value : (offset_value,)) || throw(
+                    ArgumentError(
+                        "native PPL affine data offset `$offset_name` must " *
+                        "contain finite real values"))
+            end
             coefficient_name = site_value_name(node.coefficients)
             coefficient_site = getproperty(graph.sites, coefficient_name)
             coefficient_site.shape isa Union{ScalarSiteShape,BlockSiteShape} ||
@@ -5438,6 +5449,7 @@ function _syntax_group_gather_name(site::Symbol, group::Symbol,
 end
 
 function _syntax_affine_assignment(statement,
+                                   argument_names::Set{Symbol},
                                    scalar_priors::Set{Symbol},
                                    block_priors::Dict{Symbol,Tuple},
                                    grouped_sites::Dict{Symbol,Symbol},
@@ -5468,8 +5480,12 @@ function _syntax_affine_assignment(statement,
             if argument isa Symbol
                 if argument in scalar_priors
                     push!(sampled_offsets, argument)
-                else
+                elseif argument in argument_names
                     push!(data_offsets, argument)
+                else
+                    throw(ArgumentError(
+                        "native PPL @model offset `$argument` must name a " *
+                        "preceding scalar site or function argument"))
                 end
             elseif argument isa Expr && argument.head === :call
                 function_name, transform_arguments = _syntax_call(
@@ -5481,6 +5497,9 @@ function _syntax_affine_assignment(statement,
                     ArgumentError(
                         "native PPL @model log offset needs one named input"))
                 raw_input = only(transform_arguments)
+                raw_input in argument_names || throw(ArgumentError(
+                    "native PPL @model log offset `$raw_input` must name a " *
+                    "function argument"))
                 transform_name = Symbol(:log_, raw_input, :_for_, lhs)
                 push!(offset_transform_names, transform_name)
                 push!(offset_transform_values, Expr(
@@ -6101,7 +6120,8 @@ function _model_function_syntax(definition)
             end
         elseif statement isa Expr && statement.head === :(=)
             affine_declaration = _syntax_affine_assignment(
-                statement, Set(scalar_prior_names), block_prior_axes,
+                statement, argument_name_set, Set(scalar_prior_names),
+                block_prior_axes,
                 grouped_sites,
                 correlated_grouped_sites)
             if affine_declaration === nothing

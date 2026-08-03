@@ -451,6 +451,12 @@ NP.@model function natural_exposure_only_poisson(exposure)
     @. y ~ Poisson(exp(log_rate))
 end
 
+NP.@model function natural_raw_offset_poisson(x, exposure)
+    beta_log_rate[(:Intercept, :x)] ~ StandardNormal()
+    log_rate = dot(beta_log_rate, (1, x)) + offset(exposure)
+    @. y ~ Poisson(exp(log_rate))
+end
+
 NP.@model function natural_varying_intercept(x, group)
     tau_p_group ~ Exponential(1)
     b_p_group[group] ~ Normal(0.0, tau_p_group)
@@ -3717,6 +3723,20 @@ end
             [0.5, NaN, 2.0, 4.0, 1.5])
         @test_throws ArgumentError NP.prepare(NP.condition(
             natural_exposure_poisson(exposure_data.x, invalid_exposure);
+            y=exposure_data.y))
+    end
+    raw_offset_prepared = NP.prepare(NP.condition(
+        natural_raw_offset_poisson(
+            exposure_data.x, log.(exposure_data.exposure));
+        y=exposure_data.y))
+    @test NP.evaluate(
+        NP.workspace(raw_offset_prepared), raw_offset_prepared,
+        exposure_position, NP.LinearPredictor()) ≈ exposure_log_rate
+    for invalid_offset in (
+            [log(0.5), Inf, log(2.0), log(4.0), log(1.5)],
+            [log(0.5), NaN, log(2.0), log(4.0), log(1.5)])
+        @test_throws ArgumentError NP.prepare(NP.condition(
+            natural_raw_offset_poisson(exposure_data.x, invalid_offset);
             y=exposure_data.y))
     end
     exposure_predictive_rng = MersenneTwister(990)
@@ -7448,6 +7468,23 @@ end
             @. y ~ Normal(mu, sigma)
         end)))
     @test occursin("features must use distinct raw inputs", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function unknown_data_offset(x)
+            beta ~ Normal()
+            sigma ~ Exponential(1)
+            mu = beta * x + offset(expsoure)
+            @. y ~ Normal(mu, sigma)
+        end)))
+    @test occursin(
+        "must name a preceding scalar site or function argument", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function unknown_log_offset(x)
+            beta ~ Normal()
+            sigma ~ Exponential(1)
+            mu = beta * x + offset(log(expsoure))
+            @. y ~ Normal(mu, sigma)
+        end)))
+    @test occursin("must name a function argument", err.msg)
     err = argument_error(() -> macroexpand(
         @__MODULE__, :(NP.@model function mismatched_parameter_dot(x, w)
             beta[(:x, :w)] ~ StandardNormal()
