@@ -156,6 +156,25 @@ function multi_native_brmi(family::Symbol, data)
     end
 end
 
+function deterministic_preprocessing_composition(family::Symbol, data)
+    preprocessing_model = NP.model(
+        inputs=(; raw=NP.input()),
+        nodes=(; scaled=NP.zscale(:raw)),
+        observations=(;))
+    preprocessing = NP.component(
+        :preprocessing,
+        NP.substitute(preprocessing_model; raw=data.x))
+    regression_model = direct_native_model(family, :identity)
+    regression = NP.component(
+        :regression,
+        NP.condition(
+            NP.substitute(
+                regression_model;
+                x=NP.output(preprocessing, :scaled));
+            y=data.y))
+    NP.compose(preprocessing, regression)
+end
+
 function check_plan_structure(left, right)
     @test typeof(left) === typeof(right)
     @test keys(left.axes) == keys(right.axes)
@@ -2284,10 +2303,16 @@ end
           bindings.x === parameter
     @test stochastic_composition.components.stochastic_sink.instance.
           bindings.x === stochastic
+    @test capability_error(
+        () -> NP.compile(parameter_composition)).capability ==
+          :active_graph_connection
+    @test capability_error(
+        () -> NP.compile(stochastic_composition)).capability ==
+          :active_graph_connection
 
     err = capability_error(() -> NP.compile(composition))
-    @test err.capability == :composition_compilation
-    @test occursin("derives activity", err.detail)
+    @test err.capability == :active_graph_connection
+    @test occursin("source.mu", err.detail)
 
     @test_throws ArgumentError NP.compose(sink, source)
     @test_throws ArgumentError NP.compose()
@@ -2316,6 +2341,270 @@ end
     conditioned_composition = NP.compose(source, site_conditioned)
     @test conditioned_composition.components.site_conditioned.instance.
           conditions.y === stochastic
+
+    preprocessing_model = NP.model(
+        inputs=(; raw=NP.input()),
+        nodes=(; scaled=NP.zscale(:raw)),
+        observations=(;))
+    preprocessing = NP.component(
+        :preprocessing, NP.substitute(preprocessing_model; raw=raw_x))
+    scaled = NP.output(preprocessing, :scaled)
+    response = [0.2, -0.1, 1.1, 0.7]
+    regression = NP.component(
+        :regression,
+        NP.condition(composable_gaussian(scaled); y=response))
+    executable = NP.compose(preprocessing, regression)
+    lowered = NP.lower(executable)
+
+    raw_name = NP.qualified_name(:preprocessing, :raw)
+    scaled_name = NP.qualified_name(:preprocessing, :scaled)
+    coefficient_name = NP.qualified_name(:regression, :beta_mu)
+    location_name = NP.qualified_name(:regression, :mu)
+    response_name = NP.qualified_name(:regression, :y)
+    @test keys(lowered.declaration.inputs) == (raw_name,)
+    @test keys(lowered.declaration.parameters) ==
+          (coefficient_name, NP.qualified_name(:regression, :sigma))
+    @test keys(lowered.declaration.nodes) == (scaled_name, location_name)
+    @test keys(lowered.declaration.observations) == (response_name,)
+    @test keys(lowered.bindings) == (raw_name,)
+    @test keys(lowered.conditions) == (response_name,)
+
+    prepared = NP.prepare(executable)
+    direct = NP.prepare(NP.condition(
+        macro_gaussian_zscale(raw_x); y=response))
+    @test prepared.predictor == direct.predictor
+    position = [0.3, -0.4, log(0.8)]
+    composed_work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
+    direct_work = NP.workspace(direct, Float64, DI.AutoEnzyme())
+    composed_density, composed_gradient = NP.logdensity_and_gradient!(
+        composed_work, prepared, position)
+    direct_density, direct_gradient = NP.logdensity_and_gradient!(
+        direct_work, direct, position)
+    @test composed_density ≈ direct_density
+    @test composed_gradient ≈ direct_gradient
+    @test NP.evaluate(
+        composed_work, prepared, position, NP.LinearPredictor()) ≈
+          NP.evaluate(direct_work, direct, position, NP.LinearPredictor())
+    @test NP.simulate(
+        MersenneTwister(909), composed_work, prepared, position) ==
+          NP.simulate(MersenneTwister(909), direct_work, direct, position)
+end
+
+
+@testset "composed preprocessing family workflows" begin
+    raw_x = [-1.0, 0.0, 2.0, 4.0]
+    raw_name = NP.qualified_name(:preprocessing, :raw)
+    response_name = NP.qualified_name(:regression, :y)
+    @test NP.qualified_name(:a, :b_c) != NP.qualified_name(:a_b, :c)
+    @test NP.qualified_name(:a, Symbol("b#c")) !=
+          NP.qualified_name(Symbol("a#b"), :c)
+    @test_throws ArgumentError NP.qualified_name(Symbol(""), :raw)
+
+    for family in (:gaussian, :bernoulli, :poisson)
+        response = family === :gaussian ? [0.2, -0.1, 1.1, 0.7] :
+            family === :bernoulli ? Bool[false, false, true, true] :
+            [0, 1, 3, 6]
+        position = family === :gaussian ? [0.2, -0.4, log(0.8)] :
+            family === :bernoulli ? [-0.3, 0.6] : [0.1, 0.2]
+        data = (; x=raw_x, y=response)
+        composition = deterministic_preprocessing_composition(family, data)
+        composed_plan = NP.compile(composition)
+        direct_plan = NP.bind(conditioned(
+            direct_native_model(family, :zscale), data))
+        composed = check_transformed_execution(
+            composed_plan, direct_plan, position)
+        direct = NP.prepare(direct_plan)
+        @test composed.predictor == direct.predictor
+        @test steady_state_allocations(
+            NP.workspace(composed, Float64, DI.AutoEnzyme()),
+            composed, position) == (; primal=0, gradient=0)
+
+        new_x = [10.0, 14.0, 20.0]
+        new_y = family === :gaussian ? [0.4, 0.9, 1.3] :
+            family === :bernoulli ? Bool[false, true, true] : [2, 4, 7]
+        composed_bindings = NamedTuple{(raw_name, response_name)}(
+            (new_x, new_y))
+        for freeze_constants in (true, false)
+            composed_rebound = NP.rebind(
+                composed, composed_bindings; freeze_constants)
+            direct_rebound = NP.rebind(
+                direct, (; x=new_x, y=new_y); freeze_constants)
+            @test composed_rebound.predictor == direct_rebound.predictor
+            composed_work = NP.workspace(
+                composed_rebound, Float64, DI.AutoEnzyme())
+            direct_work = NP.workspace(
+                direct_rebound, Float64, DI.AutoEnzyme())
+            composed_density, composed_gradient =
+                NP.logdensity_and_gradient!(
+                    composed_work, composed_rebound, position)
+            direct_density, direct_gradient = NP.logdensity_and_gradient!(
+                direct_work, direct_rebound, position)
+            @test composed_density ≈ direct_density
+            @test composed_gradient ≈ direct_gradient
+
+            composed_prediction = NP.rebind(
+                composed,
+                NamedTuple{(raw_name,)}((new_x,)); freeze_constants)
+            direct_prediction = NP.rebind(
+                direct, (; x=new_x); freeze_constants)
+            @test !NP.has_response(composed_prediction)
+            @test composed_prediction.predictor == direct_prediction.predictor
+            @test NP.simulate(
+                MersenneTwister(910), NP.workspace(composed_prediction),
+                composed_prediction, position) == NP.simulate(
+                    MersenneTwister(910), NP.workspace(direct_prediction),
+                    direct_prediction, position)
+        end
+
+        @test_throws ArgumentError NP.rebind(
+            composed, NamedTuple{(response_name,)}((new_y,)))
+        @test_throws DimensionMismatch NP.rebind(
+            composed,
+            NamedTuple{(raw_name, response_name)}((new_x[1:2], new_y)))
+    end
+
+    source = NP.component(:source, macro_gaussian_identity(raw_x))
+    active_condition = NP.component(
+        :active_condition,
+        NP.condition(composable_gaussian(raw_x); y=NP.output(source, :y)))
+    @test capability_error(
+        () -> NP.lower(NP.compose(source, active_condition))).capability ==
+          :active_condition
+
+    empty_component = NP.model(
+        inputs=(; x=NP.input()), observations=(;))
+    @test capability_error(
+        () -> NP.bind(empty_component, (; x=raw_x))).capability == :outcomes
+end
+
+
+@testset "composed constant and multi-input preprocessing" begin
+    raw_x = [-1.0, 0.0, 2.0, 4.0]
+    raw_w = [4.0, 2.0, 3.0, 9.0]
+    response = [0.2, -0.1, 1.1, 0.7]
+
+    identity_model = NP.model(
+        inputs=(; raw=NP.input()), observations=(;))
+    constant_source = NP.component(
+        :constant_source, NP.substitute(identity_model; raw=raw_x))
+    constant_regression = NP.component(
+        :constant_regression,
+        NP.condition(
+            composable_gaussian(NP.output(constant_source, :raw));
+            y=response))
+    constant_composed = NP.prepare(NP.compose(
+        constant_source, constant_regression))
+    constant_direct = NP.prepare(NP.condition(
+        macro_gaussian_identity(raw_x); y=response))
+    @test only(values(constant_composed.predictors)) ==
+          constant_direct.predictor
+    constant_position = [0.3, -0.4, log(0.8)]
+    constant_work = NP.workspace(
+        constant_composed, Float64, DI.AutoEnzyme())
+    direct_work = NP.workspace(constant_direct, Float64, DI.AutoEnzyme())
+    constant_density, constant_gradient = NP.logdensity_and_gradient!(
+        constant_work, constant_composed, constant_position)
+    direct_density, direct_gradient = NP.logdensity_and_gradient!(
+        direct_work, constant_direct, constant_position)
+    @test constant_density ≈ direct_density
+    @test constant_gradient ≈ direct_gradient
+    @test steady_state_allocations(
+        constant_work, constant_composed, constant_position) ==
+          (; primal=0, gradient=0)
+
+    x_preprocessing_model = NP.model(
+        inputs=(; raw=NP.input()),
+        nodes=(; scaled=NP.zscale(:raw)), observations=(;))
+    w_preprocessing_model = NP.model(
+        inputs=(; raw=NP.input()),
+        nodes=(; centered=NP.center(:raw)), observations=(;))
+    x_preprocessing = NP.component(
+        :x_preprocessing,
+        NP.substitute(x_preprocessing_model; raw=raw_x))
+    w_preprocessing = NP.component(
+        :w_preprocessing,
+        NP.substitute(w_preprocessing_model; raw=raw_w))
+    stacked_regression = NP.component(
+        :stacked_regression,
+        NP.condition(
+            NP.substitute(
+                direct_multi_gaussian_model();
+                x=NP.output(x_preprocessing, :scaled),
+                w=NP.output(w_preprocessing, :centered));
+            y=response))
+    @test capability_error(
+        () -> NP.prepare(NP.compose(
+            x_preprocessing, w_preprocessing, stacked_regression))).capability ==
+          :graph_identity
+    coefficients = NP.parameter(
+        NP.RealSupport(), (:intercept, :beta_x, :beta_w);
+        transform=NP.Identity(), prior=NP.StandardNormal())
+    sigma = NP.parameter(
+        NP.PositiveSupport(), (:sigma,);
+        transform=NP.Exp(), prior=NP.Exponential(2.0))
+    regression_model = NP.model(
+        inputs=(; x=NP.input(), w=NP.input()),
+        parameters=(; beta_mu=coefficients, sigma),
+        nodes=(; mu=NP.affine((:x, :w), :beta_mu)),
+        observations=(; y=NP.broadcasted(
+            NP.normal(:y, :mu, :sigma))))
+    regression = NP.component(
+        :multi_regression,
+        NP.condition(
+            NP.substitute(
+                regression_model;
+                x=NP.output(x_preprocessing, :scaled),
+                w=NP.output(w_preprocessing, :centered));
+            y=response))
+    composed = NP.prepare(NP.compose(
+        x_preprocessing, w_preprocessing, regression))
+    direct = NP.prepare(NP.condition(
+        macro_multi_gaussian(raw_x, raw_w); y=response))
+    @test Tuple(values(composed.predictors)) ==
+          Tuple(values(direct.predictors))
+    @test composed.plan.axes.coefficient.keys == Tuple(
+        NP.qualified_name(:multi_regression, key)
+        for key in (:intercept, :beta_x, :beta_w))
+    position = [0.3, -0.4, 0.2, log(0.8)]
+    composed_work = NP.workspace(composed, Float64, DI.AutoEnzyme())
+    direct_work = NP.workspace(direct, Float64, DI.AutoEnzyme())
+    composed_density, composed_gradient = NP.logdensity_and_gradient!(
+        composed_work, composed, position)
+    direct_density, direct_gradient = NP.logdensity_and_gradient!(
+        direct_work, direct, position)
+    @test composed_density ≈ direct_density
+    @test composed_gradient ≈ direct_gradient
+    @test NP.simulate(
+        MersenneTwister(911), composed_work, composed, position) ==
+          NP.simulate(MersenneTwister(911), direct_work, direct, position)
+    @test steady_state_allocations(
+        composed_work, composed, position) == (; primal=0, gradient=0)
+
+    new_x = [10.0, 14.0, 20.0]
+    new_w = [3.0, 9.0, 15.0]
+    new_y = [0.4, 0.9, 1.3]
+    x_name = NP.qualified_name(:x_preprocessing, :raw)
+    w_name = NP.qualified_name(:w_preprocessing, :raw)
+    y_name = NP.qualified_name(:multi_regression, :y)
+    rebound = NP.rebind(
+        composed,
+        NamedTuple{(x_name, w_name, y_name)}((new_x, new_w, new_y));
+        freeze_constants=false)
+    direct_rebound = NP.rebind(
+        direct, (; x=new_x, w=new_w, y=new_y);
+        freeze_constants=false)
+    @test Tuple(values(rebound.predictors)) ==
+          Tuple(values(direct_rebound.predictors))
+    rebound_work = NP.workspace(rebound, Float64, DI.AutoEnzyme())
+    direct_rebound_work = NP.workspace(
+        direct_rebound, Float64, DI.AutoEnzyme())
+    rebound_density, rebound_gradient = NP.logdensity_and_gradient!(
+        rebound_work, rebound, position)
+    direct_rebound_density, direct_rebound_gradient =
+        NP.logdensity_and_gradient!(
+            direct_rebound_work, direct_rebound, position)
+    @test rebound_density ≈ direct_rebound_density
+    @test rebound_gradient ≈ direct_rebound_gradient
 end
 
 

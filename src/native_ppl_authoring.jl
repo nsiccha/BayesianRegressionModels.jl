@@ -356,13 +356,245 @@ function compose(components::Component...)
     Composition(values)
 end
 
+"""Collision-free flattened identity for a component-local graph name."""
+function qualified_name(namespace::Symbol, name::Symbol)
+    isempty(string(namespace)) && throw(ArgumentError(
+        "native PPL component namespace must not be empty"))
+    Symbol(
+        "#component#", ncodeunits(string(namespace)), ":", namespace, "#", name)
+end
+
+function _qualified_parameter(
+    namespace::Symbol, name::Symbol, declaration::Parameter)
+    axis_keys = Tuple(qualified_name(namespace, key)
+                      for key in declaration.axis_keys)
+    parameter(
+        declaration.support, axis_keys;
+        transform=declaration.transform, prior=declaration.prior)
+end
+
+_mapped_name(mapping, name::Symbol, owner::Symbol, kind::AbstractString) =
+    get(mapping, name) do
+        throw(CapabilityError(
+            :composition_identity,
+            "component `$owner` $kind references unavailable local value `$name`"))
+    end
+
+function _qualified_node(namespace::Symbol, declaration::Center, mapping)
+    center(_mapped_name(
+        mapping, node_input(declaration), namespace, "center node"))
+end
+
+function _qualified_node(namespace::Symbol, declaration::ZScale, mapping)
+    zscale(_mapped_name(
+        mapping, node_input(declaration), namespace, "zscale node"))
+end
+
+
+function _qualified_node(namespace::Symbol, declaration::Affine, mapping)
+    inputs = Tuple(_mapped_name(
+        mapping, name, namespace, "affine node")
+        for name in node_inputs(declaration))
+    coefficients = _mapped_name(
+        mapping, affine_parameter(declaration), namespace,
+        "affine coefficient")
+    affine(inputs, coefficients)
+end
+
+
+function _qualified_node(namespace::Symbol, declaration::ExpLink, mapping)
+    exp_link(_mapped_name(
+        mapping, node_input(declaration), namespace, "exp node"))
+end
+
+
+function _qualified_observation(namespace::Symbol, observation, mapping)
+    scalar = scalar_observation(observation)
+    response = qualified_name(namespace, observation_response(scalar))
+    declaration = if scalar isa NormalObservation
+        dependencies = observation_dependencies(scalar)
+        normal(
+            response,
+            _mapped_name(mapping, dependencies[1], namespace, "Normal factor"),
+            _mapped_name(mapping, dependencies[2], namespace, "Normal factor"))
+    elseif scalar isa BernoulliLogitObservation
+        bernoulli_logit(
+            response,
+            _mapped_name(
+                mapping, only(observation_dependencies(scalar)),
+                namespace, "Bernoulli-logit factor"))
+    else
+        poisson(
+            response,
+            _mapped_name(
+                mapping, only(observation_dependencies(scalar)),
+                namespace, "Poisson factor"))
+    end
+    is_broadcast_observation(observation) ? broadcasted(declaration) : declaration
+end
+
+function _resolved_reference(reference::GraphRef, resolved)
+    key = (graph_namespace(reference), graph_name(reference))
+    haskey(resolved, key) || throw(CapabilityError(
+        :composition_identity,
+        "component output `$(first(key)).$(last(key))` has no resolved identity"))
+    resolved[key]
+end
+
+function _push_declaration!(names, values, name::Symbol, value, kind)
+    name in names && throw(CapabilityError(
+        :composition_identity,
+        "composed $kind identity `$name` is not unique"))
+    push!(names, name)
+    push!(values, value)
+    nothing
+end
+
+function _component_value_active(
+    component_value::Component, name::Symbol, components, cache)
+    namespace = component_namespace(component_value)
+    key = (namespace, name)
+    haskey(cache, key) && return cache[key]
+    declaration = component_value.instance.declaration
+    active = if hasproperty(declaration.inputs, name)
+        if hasproperty(component_value.instance.bindings, name)
+            value = getproperty(component_value.instance.bindings, name)
+            value isa GraphRef ?
+                _component_value_active(
+                    getproperty(components, graph_namespace(value)),
+                    graph_name(value), components, cache) : false
+        else
+            false
+        end
+    elseif hasproperty(declaration.parameters, name)
+        true
+    elseif hasproperty(declaration.nodes, name)
+        node = getproperty(declaration.nodes, name)
+        node isa Affine || _component_value_active(
+            component_value, node_input(node), components, cache)
+    elseif hasproperty(declaration.observations, name)
+        true
+    else
+        throw(CapabilityError(
+            :composition_identity,
+            "component `$namespace` has no value `$name` for activity analysis"))
+    end
+    cache[key] = active
+    active
+end
+
+function _reference_active(reference::GraphRef, components, cache)
+    source = getproperty(components, graph_namespace(reference))
+    _component_value_active(source, graph_name(reference), components, cache)
+end
+
+function _lower_composition(composition::Composition)
+    components = _validate_composition(composition.components)
+    input_names = Symbol[]
+    input_values = Any[]
+    parameter_names = Symbol[]
+    parameter_values = Any[]
+    node_names = Symbol[]
+    node_values = Any[]
+    observation_names = Symbol[]
+    observation_values = Any[]
+    binding_names = Symbol[]
+    binding_values = Any[]
+    condition_names = Symbol[]
+    condition_values = Any[]
+    resolved = Dict{Tuple{Symbol,Symbol},Symbol}()
+    activity = Dict{Tuple{Symbol,Symbol},Bool}()
+
+    for (namespace, component_value) in pairs(components)
+        instance = component_value.instance
+        declaration = instance.declaration
+        mapping = Dict{Symbol,Symbol}()
+
+        for (name, input_declaration) in pairs(declaration.inputs)
+            if hasproperty(instance.bindings, name)
+                value = getproperty(instance.bindings, name)
+                if value isa GraphRef
+                    _reference_active(value, components, activity) && throw(
+                        CapabilityError(
+                            :active_graph_connection,
+                            "component `$namespace` port `$name` consumes active " *
+                            "`$(graph_kind(value))` output " *
+                            "`$(graph_namespace(value)).$(graph_name(value))`; " *
+                            "latent-coordinate activity lowering is not in the " *
+                            "current composition compiler"))
+                    mapping[name] = _resolved_reference(value, resolved)
+                    resolved[(namespace, name)] = mapping[name]
+                    continue
+                end
+            end
+            qualified = qualified_name(namespace, name)
+            mapping[name] = qualified
+            resolved[(namespace, name)] = qualified
+            _push_declaration!(
+                input_names, input_values, qualified, input_declaration, "input")
+            if hasproperty(instance.bindings, name)
+                push!(binding_names, qualified)
+                push!(binding_values, getproperty(instance.bindings, name))
+            end
+        end
+
+        for (name, parameter_declaration) in pairs(declaration.parameters)
+            qualified = qualified_name(namespace, name)
+            mapping[name] = qualified
+            resolved[(namespace, name)] = qualified
+            _push_declaration!(
+                parameter_names, parameter_values, qualified,
+                _qualified_parameter(namespace, name, parameter_declaration),
+                "parameter")
+        end
+
+        for (name, node_declaration) in pairs(declaration.nodes)
+            qualified = qualified_name(namespace, name)
+            mapping[name] = qualified
+            resolved[(namespace, name)] = qualified
+            _push_declaration!(
+                node_names, node_values, qualified,
+                _qualified_node(namespace, node_declaration, mapping), "node")
+        end
+
+        for (name, observation_declaration) in pairs(declaration.observations)
+            qualified = qualified_name(namespace, name)
+            mapping[name] = qualified
+            resolved[(namespace, name)] = qualified
+            _push_declaration!(
+                observation_names, observation_values, qualified,
+                _qualified_observation(namespace, observation_declaration, mapping),
+                "observation")
+            if hasproperty(instance.conditions, name)
+                value = getproperty(instance.conditions, name)
+                value isa GraphRef && throw(CapabilityError(
+                    :active_condition,
+                    "component `$namespace` conditions `$name` on active graph " *
+                    "output `$(graph_namespace(value)).$(graph_name(value))`; " *
+                    "active evidence lowering is not available yet"))
+                push!(condition_names, qualified)
+                push!(condition_values, value)
+            end
+        end
+    end
+
+    declaration = model(
+        inputs=NamedTuple{Tuple(input_names)}(Tuple(input_values)),
+        parameters=NamedTuple{Tuple(parameter_names)}(Tuple(parameter_values)),
+        nodes=NamedTuple{Tuple(node_names)}(Tuple(node_values)),
+        observations=NamedTuple{Tuple(observation_names)}(
+            Tuple(observation_values)))
+    ModelInstance(
+        declaration,
+        NamedTuple{Tuple(binding_names)}(Tuple(binding_values)),
+        NamedTuple{Tuple(condition_names)}(Tuple(condition_values)))
+end
+
+lower(composition::Composition) = _lower_composition(composition)
+
 function bind(composition::Composition)
-    _validate_composition(composition.components)
-    throw(CapabilityError(
-        :composition_compilation,
-        "graph-valued component connections are declared but not executable " *
-        "until the composition compiler derives activity and lowers the " *
-        "namespaced graph"))
+    lowered = lower(composition)
+    bind(lowered)
 end
 
 compile(composition::Composition) = bind(composition)
@@ -456,8 +688,6 @@ function _validate_model_components(inputs, parameters, nodes, observations)
         nodes, "node", AbstractNodeDeclaration)
     _check_named_declarations(
         observations, "observation", AbstractObservationDeclaration)
-    isempty(observations) && throw(ArgumentError(
-        "native PPL model requires at least one observation declaration"))
 
     input_names = Set(keys(inputs))
     parameter_names = Set(keys(parameters))
@@ -1554,5 +1784,5 @@ export model, input, parameter, Identity, Exp, Exponential
 export center, zscale, standardize, affine, exp_link
 export normal, bernoulli_logit, poisson, broadcasted
 export instantiate, substitute, condition, component, output, compose, bind, lower
-export graph_namespace, graph_name, graph_kind, component_namespace
+export graph_namespace, graph_name, graph_kind, component_namespace, qualified_name
 export @model
