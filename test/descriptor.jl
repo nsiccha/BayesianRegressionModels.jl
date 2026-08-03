@@ -425,9 +425,9 @@ kernel_schedule(n; subject=collect(1:n)) = (;
                    startswith(string(o.name), "kernel_z"), d.outputs)
     @test byname[:sigma_a].role === :parameter
 
-    # The plate's transformed-parameter carriers and cell locals resolve to the
-    # plate declaration, but the traced logical binding marks ONLY its collected
-    # return carrier. No compiler-owned suffix or descriptor order is parsed.
+    # The plate's transformed-parameter carriers and cell values all resolve to
+    # the plate DECLARATION, and each named value additionally carries its own
+    # logical identity. No compiler-owned suffix or descriptor order is parsed.
     plate_outputs = [o for o in d.outputs
                      if o.kind === :transformed_parameter && o.role === :group_block]
     @test !isempty(plate_outputs)
@@ -436,11 +436,17 @@ kernel_schedule(n; subject=collect(1:n)) = (;
     @test primary.logical === :loc
     @test primary.name in (o.name for o in plate_outputs)
     @test startswith(string(primary.name), "loc__pl_mem_")
-    @test all(o -> o.name === primary.name || o.logical === nothing, plate_outputs)
+
+    # Every value this cell names is addressable, including the scratch link
+    # inverses. That is the deliberate width of the rule (decision `1tpze5q`):
+    # `CL = exp(lCL)` is a value the author named, so it gets an address; the
+    # descriptor does not try to guess which names are "primary".
     @test byname[:loc_CL].role === :group_block
-    @test byname[:loc_CL].logical === nothing
+    @test byname[:loc_CL].logical === :CL
     @test byname[:loc_V].role === :group_block
-    @test byname[:loc_V].logical === nothing
+    @test byname[:loc_V].logical === :V
+    @test brm_output(d, :CL).name === :loc_CL
+    @test brm_output(d, :mu).logical === :mu       # the returned cell value
 
     @test :dv in d.columns && :subject in d.columns && :dose in d.columns
 
@@ -605,6 +611,203 @@ scalar_schedule(n) = (; dose=fill(100.0, n), dv=collect(1.0:n) ./ 10,
 
     @test :reprocess ∉ ops
     @test brm_execute(d, :replay, scalar_schedule(5)) isa BRMDescriptor
+end
+
+# A named deterministic value INSIDE the cell — the noise-free location an
+# in-cell observation is drawn around. It is owned by the plate declaration but
+# never occurs in its return binding, so the return-binding rule cannot reach
+# it. It has a binding of its own, and that is what makes it addressable — with
+# no annotation on the term (decision `1tpze5q`).
+qt_kernel_builder = @brm begin
+    sigma    ~ Exponential(1)
+    qt_sigma ~ Exponential(1)
+    log_CL   ~ 1 + (1 | p | subject)
+    qt_base  ~ 1 + (1 | p | subject)
+    pk_loc ~ kernel(t, dose, dv, qt_y, qt_idx, log_CL, qt_base) do ts, dd, yy, qy, qidx, lCL, qbase
+        conc = (dd / 10.0) .* exp(-exp(lCL) .* ts)
+        qt_loc = qbase .+ 2.0 .* conc[qidx]
+        qy ~ normal(qt_loc, qt_sigma)
+        yy ~ normal(conc, sigma)
+        conc
+    end
+end
+
+qt_schedule(n) = (;
+    t=[collect(1.0:3.0) for _ in 1:n],
+    dose=fill(100.0, n),
+    dv=[collect(1.0:3.0) ./ 10 for _ in 1:n],
+    qt_y=[collect(1.0:2.0) .+ 10.0 for _ in 1:n],
+    qt_idx=[[1, 3] for _ in 1:n],
+    subject=collect(1:n),
+)
+
+@testset "kernel(...) — named cell values are addressable, no annotation" begin
+    nsub = 3
+    d = brm_descriptor(qt_kernel_builder, qt_schedule(nsub);
+                       mod=@__MODULE__, name=:pk_qt)
+
+    # The reporter's target: address the fitted noise-free QT location by the
+    # name the cell author bound, with no emitted name parsed in the consumer
+    # and nothing added to the formula.
+    published = brm_output(d, :qt_loc)
+    @test published.logical === :qt_loc
+    @test published.role === :group_block
+    @test published.kind === :transformed_parameter
+    @test published.declaration.target === :pk_loc     # still the plate's
+    @test published.name !== :qt_loc                   # a compiler-owned carrier
+
+    # It is a PLATE member, resolved by the same rule as the collected return —
+    # not a name matched by prefix or picked by descriptor order.
+    plate_outputs = [o for o in d.outputs
+                     if o.kind === :transformed_parameter && o.role === :group_block]
+    @test published.name in (o.name for o in plate_outputs)
+
+    # EVERY named cell value, not just one: the other local and the return.
+    @test brm_output(d, :conc).logical === :conc
+    @test brm_output(d, :pk_loc).logical === :pk_loc
+    @test Set([:qt_loc, :conc, :pk_loc]) ⊆
+          Set(o.logical for o in d.outputs if !isnothing(o.logical))
+
+    # It compiles and the carrier is real. `:qt_loc` has one element per QT
+    # observation, `:pk_loc` one per PK time — different axes, both correct.
+    ops = Symbol[op.name for op in d.operations]
+    @test :fit in ops
+    prob = brm_execute(d, :fit)
+    n = StanBlocks.LogDensityProblems.dimension(prob)
+    @test isfinite(StanBlocks.LogDensityProblems.logdensity(prob, 0.1 .* randn(n)))
+
+    constrained_names = StanBlocks.BridgeStan.param_names(
+        prob.model; include_tp=true, include_gq=true)
+    qt_cols = brm_output_coordinates(d, :qt_loc, constrained_names)
+    @test length(qt_cols) == sum(length, qt_schedule(nsub).qt_idx)
+    @test all(startswith(string(published.name) * "."), constrained_names[qt_cols])
+
+    # The published value is the NOISE-FREE location, not the predictive twin
+    # drawn around it. They are different outputs at different Stan stages.
+    draw = brm_output(d, :qt_y; role=:posterior_predictive)
+    @test draw.name === :qt_y_gen
+    @test draw.generative === :draw
+    @test published.generative !== :draw
+    @test isdisjoint(Set(qt_cols),
+                     Set(brm_output_coordinates(d, :qt_y, constrained_names;
+                                                role=:posterior_predictive)))
+
+    # ...and it holds the value the author bound. The cell RETURNS `conc`, so
+    # one program carries the same quantity through two independent carriers:
+    # the collected return and the named cell value. Distinct names (asserted,
+    # so an aliasing emitter fails here rather than passing vacuously),
+    # identical numbers.
+    ret = brm_output(d, :pk_loc)
+    conc = brm_output(d, :conc)
+    @test ret.name !== conc.name
+    tp_names = StanBlocks.BridgeStan.param_names(
+        prob.model; include_tp=true, include_gq=false)
+    theta = 0.1 .* randn(n)
+    tp = StanBlocks.BridgeStan.param_constrain(
+        prob.model, theta; include_tp=true, include_gq=false)
+    @test tp[brm_output_coordinates(d, :pk_loc, tp_names)] ==
+          tp[brm_output_coordinates(d, :conc, tp_names)]
+    # The QT location is a real, distinct quantity in the same draw.
+    @test all(isfinite, tp[brm_output_coordinates(d, :qt_loc, tp_names)])
+
+    # Replay keeps every cell value addressable on new subjects.
+    replayed = brm_execute(d, :replay, qt_schedule(5))
+    @test brm_output(replayed, :qt_loc).logical === :qt_loc
+    @test brm_output(replayed, :conc).logical === :conc
+end
+
+@testset "two cells naming one value — ambiguity, not failure" begin
+    # `mu` in a PK cell and a PD cell is ordinary. Their emitted bindings differ
+    # (`pred_a_mu` / `pred_b_mu`), so both are claimed and the model BUILDS. The
+    # BRM address `:mu` then names two quantities, which resolves through the
+    # descriptor's existing one-logical-many-carriers contract — the same one an
+    # observation's predictive and pointwise twins already use.
+    collide = @brm begin
+        sigma ~ Exponential(1)
+        log_a ~ 1 + (1 | p | subject)
+        log_b ~ 1 + (1 | q | subject)
+        pred_a ~ kernel(dose, dv, log_a) do dd, yy, ls
+            mu = (dd / 10.0) * exp(ls)
+            yy ~ normal(mu, sigma)
+            mu
+        end
+        pred_b ~ kernel(dose, log_b) do dd, ls
+            mu = (dd / 20.0) * exp(ls)
+            mu
+        end
+    end
+    d = brm_descriptor(collide, scalar_schedule(4); mod=@__MODULE__, name=:collide)
+
+    # Ambiguous singular query refuses, and NAMES the owners — `role=` cannot
+    # separate these (both `:group_block`), so reporting only the role would
+    # name a discriminator that does not discriminate.
+    err = try; brm_output(d, :mu); catch e; e; end
+    @test err isa ErrorException
+    @test occursin("spans several emitted carriers", err.msg)
+    @test occursin("pred_a", err.msg) && occursin("pred_b", err.msg)
+    @test occursin("declaration.target", err.msg)
+    @test !occursin("pass `role=` to select one", err.msg)
+
+    # The plural discovery query returns both, selectable by owner.
+    both = brm_outputs(d; logical=:mu)
+    @test length(both) == 2
+    @test Set(o.declaration.target for o in both) == Set([:pred_a, :pred_b])
+
+    # Every unambiguous name around them still resolves directly.
+    @test brm_output(d, :pred_a).logical === :pred_a
+    @test brm_output(d, :pred_b).logical === :pred_b
+    @test brm_output(d, :sigma).logical === :sigma
+end
+
+@testset "kernel(...) accepts no keywords" begin
+    # A cell value shadowing an existing model binding never reaches BRM's own
+    # address space: StanBlocks' plate tracing refuses it first. Asserting it
+    # here keeps the descriptor's collision reasoning honest — if this ever
+    # starts building, BRM owes that collision an answer.
+    shadow = @brm begin
+        sigma ~ Exponential(1)
+        log_scale ~ 1 + (1 | p | subject)
+        pred ~ kernel(dose, dv, log_scale) do dd, yy, ls
+            sigma = (dd / 10.0) * exp(ls)
+            yy ~ normal(sigma, 1.0)
+            sigma
+        end
+    end
+    @test_throws Exception brm_descriptor(shadow, scalar_schedule(4); mod=@__MODULE__)
+
+    # `kernel(...)` takes NO keywords now that nothing needs annotating. An
+    # unknown one is a typo or retired syntax, and silently ignoring it is how
+    # retired v1 syntax passed a consumer's construction-time gate for eight
+    # days (snag `by-and-n-eta-are-3625f645`). Caught at BRMI construction, so
+    # no Stan toolchain is needed to gate on it.
+    stray = @brm begin
+        sigma ~ Exponential(1)
+        log_scale ~ 1 + (1 | p | subject)
+        pred ~ kernel(dose, dv, log_scale; outputs=(:mu,)) do dd, yy, ls
+            mu = (dd / 10.0) * exp(ls)
+            yy ~ normal(mu, sigma)
+            mu
+        end
+    end
+    err = try; stray(scalar_schedule(4)); catch e; e; end
+    @test err isa ErrorException
+    @test occursin("does not accept `outputs=`", err.msg)
+    @test occursin("accepts no keywords", err.msg)
+
+    # The retired keywords keep their own guidance rather than falling through
+    # to the generic message.
+    retired = @brm begin
+        sigma ~ Exponential(1)
+        log_scale ~ 1 + (1 | p | subject)
+        pred ~ kernel(dose, dv, log_scale; n_eta=2) do dd, yy, ls
+            mu = (dd / 10.0) * exp(ls)
+            yy ~ normal(mu, sigma)
+            mu
+        end
+    end
+    err = try; retired(scalar_schedule(4)); catch e; e; end
+    @test err isa ErrorException
+    @test occursin("no longer accepts `n_eta=`", err.msg)
 end
 
 @testset "fail closed" begin
