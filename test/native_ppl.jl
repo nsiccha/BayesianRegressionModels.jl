@@ -439,6 +439,15 @@ NP.@model function natural_sampled_offset_regression(x)
     @. y ~ Normal(mu, sigma)
 end
 
+NP.@model function natural_varying_intercept(x, group)
+    tau_p_group ~ Exponential(1)
+    b_p_group[group] ~ Normal(0.0, tau_p_group)
+    beta ~ Normal()
+    sigma ~ Exponential(2)
+    mu = beta * x + b_p_group[group]
+    @. y ~ Normal(mu, sigma)
+end
+
 NP.@model function monolithic_scalar_normal()
     theta ~ Normal()
     sigma ~ Exponential(2.0)
@@ -3623,14 +3632,14 @@ end
             beta_mu=NP.parameter(
                 NP.RealSupport(), (:x,); transform=NP.Identity(),
                 prior=NP.StandardNormal()),
-            sigma=NP.parameter(
-                NP.PositiveSupport(), (:sigma,); transform=NP.Exp(),
-                prior=NP.Exponential(2)),
             tau_p_group=NP.parameter(
                 NP.PositiveSupport(), (:tau_p_group,); transform=NP.Exp(),
                 prior=NP.Exponential(1)),
             b_p_group=NP.grouped_normal(
-                :group, 0.0, :tau_p_group)),
+                :group, 0.0, :tau_p_group),
+            sigma=NP.parameter(
+                NP.PositiveSupport(), (:sigma,); transform=NP.Exp(),
+                prior=NP.Exponential(2))),
         nodes=(;
             r_mu_p_group=NP.group_gather(:b_p_group, :group),
             mu=NP.affine(
@@ -3641,6 +3650,25 @@ end
         site_order=(:tau_p_group, :b_p_group, :beta_mu, :sigma, :y))
     @test typeof(varying_model) === typeof(direct_varying_model)
     @test sprint(show, varying_model) == sprint(show, direct_varying_model)
+    natural_varying = NP.condition(
+        natural_varying_intercept(
+            varying_brm_data.x, varying_brm_data.group);
+        y=varying_brm_data.y)
+    @test keys(natural_varying.declaration.parameters) ==
+          keys(varying_model.parameters)
+    @test keys(natural_varying.declaration.nodes) ==
+          (:b_p_group_by_group_for_mu, :mu)
+    @test natural_varying.declaration.site_order == varying_model.site_order
+    @test natural_varying.declaration.parameters.beta_mu.axis_keys == (:beta,)
+    @test varying_model.parameters.beta_mu.axis_keys == (:x,)
+    @test NP.group_input(
+        natural_varying.declaration.parameters.b_p_group) === :group
+    @test NP.group_values(
+        natural_varying.declaration.nodes.b_p_group_by_group_for_mu) ===
+          :b_p_group
+    @test NP.group_input(
+        natural_varying.declaration.nodes.b_p_group_by_group_for_mu) ===
+          :group
     varying_plan = NP.compile(varying_brm)
     @test varying_plan isa NP.FactorPlan
     @test varying_plan.graph.schedule == (
@@ -3715,6 +3743,33 @@ end
     @test capability_error(
         () -> NP.lower(varying_without_population)).capability ==
           :predictor_terms
+    natural_varying_plan = NP.compile(natural_varying)
+    direct_varying_plan = NP.compile(
+        direct_varying_model,
+        (; x=varying_brm_data.x, group=varying_brm_data.group);
+        conditions=(; y=varying_brm_data.y))
+    for candidate_plan in (natural_varying_plan, direct_varying_plan)
+        canonical_schedule = map(candidate_plan.graph.schedule) do name
+            name === :b_p_group_by_group_for_mu ? :r_mu_p_group : name
+        end
+        @test canonical_schedule == varying_plan.graph.schedule
+        @test only(values(candidate_plan.group_indices)) ==
+              only(values(varying_plan.group_indices))
+        @test candidate_plan.graph.dimension == varying_plan.graph.dimension
+        candidate_prepared = NP.prepare(candidate_plan)
+        candidate_workspace = NP.workspace(
+            candidate_prepared, Float64, DI.AutoEnzyme())
+        candidate_density, candidate_gradient = NP.logdensity_and_gradient!(
+            candidate_workspace, candidate_prepared, varying_position)
+        @test candidate_density ≈ varying_density
+        @test candidate_gradient ≈ varying_gradient
+        @test NP.evaluate(
+            candidate_workspace, candidate_prepared, varying_position,
+            NP.LinearPredictor()) ≈ varying_mu
+        @test factor_steady_state_allocations(
+            candidate_workspace, candidate_prepared, varying_position) ==
+              (; primal=0, gradient=0)
+    end
     varying_replay_bindings = (;
         x=[3.0, -2.0, 0.5], group=[:c, :a, :c])
     varying_replay_response = [0.2, -0.3, 0.7]
@@ -3739,6 +3794,16 @@ end
     @test length(NP.simulate(
         MersenneTwister(935), NP.workspace(varying_prediction_only),
         varying_prediction_only, varying_position)) == 3
+    natural_varying_replay = NP.rebind(
+        NP.prepare(natural_varying_plan), (;);
+        bindings=varying_replay_bindings)
+    @test only(values(natural_varying_replay.plan.group_indices)) ==
+          only(values(varying_replay.plan.group_indices))
+    @test NP.evaluate(
+        NP.workspace(natural_varying_replay), natural_varying_replay,
+        varying_position, NP.LinearPredictor()) ≈
+          varying_beta .* varying_replay_bindings.x .+
+          varying_effects[[3, 1, 3]]
     new_group_error = capability_error(() -> NP.rebind(
         varying_prepared, (;);
         bindings=(; x=[0.0, 1.0], group=[:a, :new_group])))

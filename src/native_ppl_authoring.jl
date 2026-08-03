@@ -3866,12 +3866,17 @@ function _lower_brmi(brmi::BRM.BRMI)
         end
         group_parameter_names = Tuple(spec.scale_name for spec in group_specs)
         group_site_names = Tuple(spec.site_name for spec in group_specs)
+        group_pair_names = foldl(
+            (names, pair) -> (names..., pair...),
+            zip(group_parameter_names, group_site_names); init=())
+        group_pair_declarations = foldl(
+            (declarations, pair) -> (declarations..., pair...),
+            zip(group_scale_declarations, group_site_declarations); init=())
         _declaration_namedtuple(
-            (coefficient_name, scale_name, sampled_offsets...,
-             group_parameter_names..., group_site_names...),
-            (coefficient_declaration, scale_declaration,
-             offset_declarations..., group_scale_declarations...,
-             group_site_declarations...))
+            (coefficient_name, group_pair_names..., scale_name,
+             sampled_offsets...),
+            (coefficient_declaration, group_pair_declarations...,
+             scale_declaration, offset_declarations...))
     else
         NamedTuple{(coefficient_name,)}((coefficient_declaration,))
     end
@@ -4071,6 +4076,31 @@ function _syntax_parameter(statement, argument_names::Set{Symbol})
         "native PPL @model unsupported parameter prior `$prior_name`"))
 end
 
+function _syntax_grouped_parameter(sampling,
+                                   argument_names::Set{Symbol})
+    sampling.broadcasted && return nothing
+    lhs = sampling.lhs
+    lhs isa Expr && lhs.head === :ref && length(lhs.args) == 2 &&
+        first(lhs.args) isa Symbol && lhs.args[2] isa Symbol || return nothing
+    name, group = lhs.args
+    group in argument_names || throw(ArgumentError(
+        "native PPL @model grouped site `$name` must index one function " *
+        "argument; got `$group`"))
+    family, arguments = _syntax_distribution_call(
+        sampling.rhs, "grouped parameter prior")
+    family === :Normal && length(arguments) == 2 || throw(ArgumentError(
+        "native PPL @model grouped site `$name` requires Normal(location, scale)"))
+    location, scale = arguments
+    location isa Real || throw(ArgumentError(
+        "native PPL @model grouped Normal location must be literal"))
+    scale isa Union{Real,Symbol} || throw(ArgumentError(
+        "native PPL @model grouped Normal scale must be literal or named"))
+    value = Expr(
+        :call, _syntax_ref(:grouped_normal), QuoteNode(group),
+        location, scale isa Symbol ? QuoteNode(scale) : scale)
+    (; name, group, value)
+end
+
 function _syntax_node(statement)
     lhs, rhs = statement.args
     lhs isa Symbol || throw(ArgumentError(
@@ -4144,13 +4174,15 @@ function _syntax_affine_terms(expression)
 end
 
 function _syntax_affine_assignment(statement,
-                                   scalar_priors::Set{Symbol})
+                                   scalar_priors::Set{Symbol},
+                                   grouped_sites::Dict{Symbol,Symbol})
     lhs, rhs = statement.args
     lhs isa Symbol || return nothing
     terms = _syntax_affine_terms(rhs)
     terms === nothing && return nothing
     length(terms) >= 2 || return nothing
     sampled_offsets = Symbol[]
+    gathered_offsets = NamedTuple[]
     ordinary_terms = Any[]
     for term in terms
         if term isa Expr && term.head === :call &&
@@ -4164,6 +4196,17 @@ function _syntax_affine_assignment(statement,
                 "native PPL @model affine offset `$offset_name` must name " *
                 "a preceding standard-normal scalar site"))
             push!(sampled_offsets, offset_name)
+        elseif term isa Expr && term.head === :ref &&
+               length(term.args) == 2 && first(term.args) isa Symbol &&
+               term.args[2] isa Symbol &&
+               haskey(grouped_sites, first(term.args))
+            site_name, group_name = term.args
+            grouped_sites[site_name] === group_name || throw(ArgumentError(
+                "native PPL @model grouped site `$site_name` must be " *
+                "gathered with its declared group input"))
+            gather_name = Symbol(
+                site_name, :_by_, group_name, :_for_, lhs)
+            push!(gathered_offsets, (; site_name, group_name, gather_name))
         else
             push!(ordinary_terms, term)
         end
@@ -4175,7 +4218,8 @@ function _syntax_affine_assignment(statement,
                   if term isa Symbol && term in scalar_priors]
     length(intercepts) <= 1 || return nothing
     intercept = isempty(intercepts) ? nothing : only(intercepts)
-    intercept === nothing && isempty(sampled_offsets) && return nothing
+    intercept === nothing && isempty(sampled_offsets) &&
+        isempty(gathered_offsets) && return nothing
 
     slopes = Symbol[]
     predictor_names = Symbol[]
@@ -4246,11 +4290,19 @@ function _syntax_affine_assignment(statement,
     affine_value = Expr(
         :call, _syntax_ref(:affine),
         Expr(:parameters,
-             Expr(:kw, :offsets, QuoteNode(Tuple(sampled_offsets))),
+             Expr(:kw, :offsets, QuoteNode((
+                 sampled_offsets...,
+                 (gather.gather_name for gather in gathered_offsets)...))),
              Expr(:kw, :intercept, intercept !== nothing)),
         QuoteNode(Tuple(predictor_names)),
         QuoteNode(coefficient_name))
+    gather_names = Tuple(gather.gather_name for gather in gathered_offsets)
+    gather_values = Tuple(Expr(
+        :call, _syntax_ref(:group_gather),
+        QuoteNode(gather.site_name), QuoteNode(gather.group_name))
+        for gather in gathered_offsets)
     (; location=lhs, intercept, offsets=Tuple(sampled_offsets),
+       gather_names, gather_values,
        slopes=Tuple(slopes), coefficient_name,
        parameter_value, transform_names=Tuple(transform_names),
        transform_values=Tuple(transform_values), affine_value)
@@ -4459,6 +4511,7 @@ function _model_function_syntax(definition)
     parameter_names = Symbol[]
     parameter_values = Any[]
     scalar_prior_names = Symbol[]
+    grouped_sites = Dict{Symbol,Symbol}()
     consumed_scalar_priors = Set{Symbol}()
     node_names = Symbol[]
     node_values = Any[]
@@ -4507,6 +4560,18 @@ function _model_function_syntax(definition)
                  first(sampling.lhs.args) : nothing)
             source_site_name === nothing || push!(
                 source_site_names, source_site_name)
+            grouped_parameter = _syntax_grouped_parameter(
+                sampling, argument_name_set)
+            if grouped_parameter !== nothing
+                haskey(grouped_sites, grouped_parameter.name) && throw(
+                    ArgumentError(
+                        "native PPL @model grouped site " *
+                        "`$(grouped_parameter.name)` is declared twice"))
+                push!(parameter_names, grouped_parameter.name)
+                push!(parameter_values, grouped_parameter.value)
+                grouped_sites[grouped_parameter.name] = grouped_parameter.group
+                continue
+            end
             scalar_prior = sampling.broadcasted ? nothing :
                 _syntax_standard_normal(normalized)
             prior_name = _syntax_name(
@@ -4538,7 +4603,7 @@ function _model_function_syntax(definition)
             end
         elseif statement isa Expr && statement.head === :(=)
             affine_declaration = _syntax_affine_assignment(
-                statement, Set(scalar_prior_names))
+                statement, Set(scalar_prior_names), grouped_sites)
             if affine_declaration === nothing
                 name, value = _syntax_node(statement)
                 push!(node_names, name)
@@ -4556,6 +4621,12 @@ function _model_function_syntax(definition)
                     affine_declaration.transform_values)
                     push!(node_names, transform_name)
                     push!(node_values, transform_value)
+                end
+                for (gather_name, gather_value) in zip(
+                    affine_declaration.gather_names,
+                    affine_declaration.gather_values)
+                    push!(node_names, gather_name)
+                    push!(node_values, gather_value)
                 end
                 push!(node_names, affine_declaration.location)
                 push!(node_values, affine_declaration.affine_value)
