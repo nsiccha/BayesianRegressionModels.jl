@@ -439,6 +439,18 @@ NP.@model function natural_sampled_offset_regression(x)
     @. y ~ Normal(mu, sigma)
 end
 
+NP.@model function natural_exposure_poisson(x, exposure)
+    beta_log_rate[(:Intercept, :x)] ~ StandardNormal()
+    log_rate = dot(beta_log_rate, (1, x)) + offset(log(exposure))
+    @. y ~ Poisson(exp(log_rate))
+end
+
+NP.@model function natural_exposure_only_poisson(exposure)
+    beta_log_rate[(:Intercept,)] ~ StandardNormal()
+    log_rate = dot(beta_log_rate, (1,)) + offset(log(exposure))
+    @. y ~ Poisson(exp(log_rate))
+end
+
 NP.@model function natural_varying_intercept(x, group)
     tau_p_group ~ Exponential(1)
     b_p_group[group] ~ Normal(0.0, tau_p_group)
@@ -3607,6 +3619,106 @@ end
     @test capability_error(() -> NP.compile(
         row_exp_model, (; x=sampled_offset_data.x);
         conditions=(; y=sampled_offset_data.y))).capability == :factor_nodes
+    exposure_data = (;
+        x=[-1.0, 0.0, 0.5, 1.0, 2.0],
+        exposure=[0.5, 1.0, 2.0, 4.0, 1.5],
+        y=[0, 1, 2, 3, 1])
+    exposure_brm = @brm exposure_data begin
+        log_rate ~ 1 + x + offset(log(exposure))
+        y ~ Poisson(exp(log_rate))
+    end
+    @test popcoefnames(exposure_brm, :log_rate) == [:Intercept, :x]
+    @test SBBRMI(exposure_brm; mod=@__MODULE__) isa SBBRMI
+    direct_exposure_model = NP.model(
+        inputs=(; x=NP.input(), exposure=NP.input()),
+        parameters=(;
+            beta_log_rate=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal())),
+        nodes=(;
+            log_exposure_for_log_rate=NP.log_link(:exposure),
+            log_rate=NP.affine(
+                :x, :beta_log_rate;
+                offsets=(:log_exposure_for_log_rate,), intercept=true),
+            exp_log_rate=NP.exp_link(:log_rate)),
+        observations=(;
+            y=NP.broadcasted(NP.poisson(:y, :exp_log_rate))))
+    exposure_model = NP.lower(exposure_brm)
+    @test exposure_model == direct_exposure_model
+    natural_exposure = NP.condition(
+        natural_exposure_poisson(
+            exposure_data.x, exposure_data.exposure);
+        y=exposure_data.y)
+    @test natural_exposure.declaration == exposure_model
+    exposure_only_brm = @brm exposure_data begin
+        log_rate ~ 1 + offset(log(exposure))
+        y ~ Poisson(exp(log_rate))
+    end
+    @test SBBRMI(exposure_only_brm; mod=@__MODULE__) isa SBBRMI
+    natural_exposure_only = NP.condition(
+        natural_exposure_only_poisson(exposure_data.exposure);
+        y=exposure_data.y)
+    @test natural_exposure_only.declaration == NP.lower(exposure_only_brm)
+    exposure_only_prepared = NP.prepare(exposure_only_brm)
+    @test exposure_only_prepared.plan.graph.dimension == 1
+    @test NP.evaluate(
+        NP.workspace(exposure_only_prepared), exposure_only_prepared,
+        [0.2], NP.LinearPredictor()) ≈
+          0.2 .+ log.(exposure_data.exposure)
+    exposure_plan = NP.compile(exposure_brm)
+    @test exposure_plan.graph.schedule == (
+        :beta_log_rate, :log_exposure_for_log_rate,
+        :log_rate, :exp_log_rate, :y)
+    @test exposure_plan.graph.dimension == 2
+    @test exposure_plan.graph.nodes.log_exposure_for_log_rate isa
+          NP.LogFactorNode
+    @test NP.factor_node_dependencies(
+        exposure_plan.graph.nodes.log_exposure_for_log_rate) == ()
+    @test exposure_plan.graph.nodes.log_rate.offsets ==
+          (NP.NodeValue{:log_exposure_for_log_rate}(),)
+    @test NP.factor_node_dependencies(exposure_plan.graph.nodes.log_rate) ==
+          (:beta_log_rate, :log_exposure_for_log_rate)
+    exposure_prepared = NP.prepare(exposure_plan)
+    exposure_workspace = NP.workspace(
+        exposure_prepared, Float64, DI.AutoEnzyme())
+    exposure_position = [0.2, -0.3]
+    exposure_log_rate = exposure_position[1] .+
+        exposure_position[2] .* exposure_data.x .+
+        log.(exposure_data.exposure)
+    exposure_rate = exp.(exposure_log_rate)
+    exposure_expected_density =
+        sum(logpdf.(Normal(), exposure_position)) +
+        sum(BRM._native_ppl_poisson_logdensity.(
+            Float64.(exposure_data.y), exposure_log_rate))
+    exposure_expected_gradient = [
+        -exposure_position[1] +
+            sum(exposure_data.y .- exposure_rate),
+        -exposure_position[2] +
+            sum(exposure_data.x .* (exposure_data.y .- exposure_rate))]
+    exposure_density, exposure_gradient = NP.logdensity_and_gradient!(
+        exposure_workspace, exposure_prepared, exposure_position)
+    @test exposure_density ≈ exposure_expected_density
+    @test exposure_gradient ≈ exposure_expected_gradient
+    @test NP.evaluate(
+        exposure_workspace, exposure_prepared, exposure_position,
+        NP.LinearPredictor()) ≈ exposure_log_rate
+    @test NP.evaluate(
+        exposure_workspace, exposure_prepared, exposure_position,
+        NP.PointwiseLogLikelihood()) ≈
+          BRM._native_ppl_poisson_logdensity.(
+              Float64.(exposure_data.y), exposure_log_rate)
+    @test factor_steady_state_allocations(
+        exposure_workspace, exposure_prepared,
+        exposure_position) == (; primal=0, gradient=0)
+    for invalid_exposure in (
+            [0.5, 0.0, 2.0, 4.0, 1.5],
+            [0.5, -1.0, 2.0, 4.0, 1.5],
+            [0.5, Inf, 2.0, 4.0, 1.5],
+            [0.5, NaN, 2.0, 4.0, 1.5])
+        @test_throws ArgumentError NP.prepare(NP.condition(
+            natural_exposure_poisson(exposure_data.x, invalid_exposure);
+            y=exposure_data.y))
+    end
 
     grouped_declaration = NP.model(
         inputs=(; group=NP.input()),
