@@ -3963,6 +3963,107 @@ end
         correlated_poisson_prepared,
         NP.LinearPredictor()) isa Vector{Float64}
 
+    grouped_discrete_parameters = (;
+        tau=grouped_declaration.parameters.tau,
+        varying=grouped_declaration.parameters.varying)
+    grouped_bernoulli_declaration = NP.model(
+        inputs=grouped_declaration.inputs,
+        parameters=grouped_discrete_parameters,
+        nodes=grouped_declaration.nodes,
+        observations=(; y=NP.broadcasted(
+            NP.bernoulli_logit(:y, :varying_by_row))),
+        site_order=(:tau, :varying, :y))
+    grouped_bernoulli_prediction = NP.prepare(NP.compile(
+        grouped_bernoulli_declaration, grouped_bindings))
+    grouped_bernoulli_prior_rng = MersenneTwister(947)
+    grouped_bernoulli_expected_rng = MersenneTwister(947)
+    grouped_bernoulli_tau = randexp(grouped_bernoulli_expected_rng)
+    grouped_bernoulli_effects = grouped_bernoulli_tau .* [
+        randn(grouped_bernoulli_expected_rng) for _ in 1:3]
+    grouped_bernoulli_expected = [
+        rand(grouped_bernoulli_expected_rng) <
+            BRM._native_ppl_logistic(value)
+        for value in grouped_bernoulli_effects[[1, 2, 1, 3]]]
+    grouped_bernoulli_prior = NP.simulate_prior(
+        grouped_bernoulli_prior_rng,
+        NP.workspace(grouped_bernoulli_prediction),
+        grouped_bernoulli_prediction)
+    @test grouped_bernoulli_prior.position ≈ [
+        log(grouped_bernoulli_tau), grouped_bernoulli_effects...]
+    @test grouped_bernoulli_prior.response == grouped_bernoulli_expected
+    @test grouped_bernoulli_prior.response isa Vector{Bool}
+    grouped_bernoulli_prior_position = zeros(4)
+    grouped_bernoulli_prior_response = falses(4)
+    grouped_bernoulli_prior_work = NP.workspace(
+        grouped_bernoulli_prediction)
+    NP.simulate_prior!(
+        MersenneTwister(948), grouped_bernoulli_prior_position,
+        grouped_bernoulli_prior_response, grouped_bernoulli_prior_work,
+        grouped_bernoulli_prediction)
+    grouped_bernoulli_allocation_rng = MersenneTwister(949)
+    @test @allocated(NP.simulate_prior!(
+        grouped_bernoulli_allocation_rng, grouped_bernoulli_prior_position,
+        grouped_bernoulli_prior_response, grouped_bernoulli_prior_work,
+        grouped_bernoulli_prediction)) == 0
+
+    grouped_poisson_declaration = NP.model(
+        inputs=grouped_declaration.inputs,
+        parameters=grouped_discrete_parameters,
+        nodes=merge(grouped_declaration.nodes,
+                    (; rate=NP.exp_link(:varying_by_row))),
+        observations=(; y=NP.broadcasted(NP.poisson(:y, :rate))),
+        site_order=(:tau, :varying, :y))
+    grouped_poisson_prediction = NP.prepare(NP.compile(
+        grouped_poisson_declaration, grouped_bindings))
+    grouped_poisson_prior_rng = MersenneTwister(950)
+    grouped_poisson_expected_rng = MersenneTwister(950)
+    grouped_poisson_tau = randexp(grouped_poisson_expected_rng)
+    grouped_poisson_effects = grouped_poisson_tau .* [
+        randn(grouped_poisson_expected_rng) for _ in 1:3]
+    grouped_poisson_expected = [
+        BRM._native_ppl_rand_poisson(
+            grouped_poisson_expected_rng, Float64, value)
+        for value in grouped_poisson_effects[[1, 2, 1, 3]]]
+    grouped_poisson_prior = NP.simulate_prior(
+        grouped_poisson_prior_rng, NP.workspace(grouped_poisson_prediction),
+        grouped_poisson_prediction)
+    @test grouped_poisson_prior.position ≈ [
+        log(grouped_poisson_tau), grouped_poisson_effects...]
+    @test grouped_poisson_prior.response == grouped_poisson_expected
+    @test grouped_poisson_prior.response isa Vector{Int}
+    grouped_poisson_prior_position = zeros(4)
+    grouped_poisson_prior_response = zeros(Int, 4)
+    grouped_poisson_prior_work = NP.workspace(grouped_poisson_prediction)
+    NP.simulate_prior!(
+        MersenneTwister(951), grouped_poisson_prior_position,
+        grouped_poisson_prior_response, grouped_poisson_prior_work,
+        grouped_poisson_prediction)
+    grouped_poisson_allocation_rng = MersenneTwister(952)
+    @test @allocated(NP.simulate_prior!(
+        grouped_poisson_allocation_rng, grouped_poisson_prior_position,
+        grouped_poisson_prior_response, grouped_poisson_prior_work,
+        grouped_poisson_prediction)) == 0
+
+    invalid_poisson_rate_node = NP.model(
+        inputs=grouped_declaration.inputs,
+        parameters=grouped_discrete_parameters,
+        nodes=grouped_declaration.nodes,
+        observations=(; y=NP.broadcasted(
+            NP.poisson(:y, :varying_by_row))),
+        site_order=(:tau, :varying, :y))
+    @test capability_error(() -> NP.compile(
+        invalid_poisson_rate_node, grouped_bindings)).capability == :factor_rate
+    invalid_poisson_rate_input = NP.model(
+        inputs=(; group=NP.input(), rate=NP.input()),
+        parameters=grouped_discrete_parameters,
+        nodes=grouped_declaration.nodes,
+        observations=(; y=NP.broadcasted(NP.poisson(:y, :rate))),
+        site_order=(:tau, :varying, :y))
+    invalid_poisson_rate_plan = NP.compile(
+        invalid_poisson_rate_input,
+        (; group=grouped_bindings.group, rate=[1.0, -1.0, 2.0, 3.0]))
+    @test_throws ArgumentError NP.prepare(invalid_poisson_rate_plan)
+
     correlated_group_prepared = NP.prepare(correlated_group_plan)
     correlated_group_workspace = NP.workspace(
         correlated_group_prepared, Float64, DI.AutoEnzyme())

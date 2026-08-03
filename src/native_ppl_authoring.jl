@@ -986,6 +986,42 @@ _factor_value_is_row(::SiteValue{Name}, graph, bindings) where {Name} =
     getproperty(graph.sites, Name).shape isa
         Union{BlockSiteShape,BroadcastSiteShape}
 
+function _factor_exp_is_poisson_rate(name::Symbol, graph::FactorGraph)
+    any(values(graph.sites)) do site
+        factor = site.factor
+        factor isa PoissonSiteFactor && factor.rate isa NodeValue &&
+            node_value_name(factor.rate) === name
+    end
+end
+
+function _validate_poisson_rate_source(name::Symbol,
+                                       factor::PoissonSiteFactor,
+                                       graph::FactorGraph)
+    rate = factor.rate
+    if rate isa LiteralValue
+        value = rate.value
+        value isa Real && isfinite(value) && value > zero(value) ||
+            throw(ArgumentError(
+                "native PPL Poisson factor for site `$name` requires a " *
+                "finite positive literal rate"))
+    elseif rate isa SiteValue
+        rate_name = site_value_name(rate)
+        getproperty(graph.sites, rate_name).support isa PositiveSupport ||
+            throw(CapabilityError(
+                :factor_rate,
+                "Poisson factor for site `$name` uses stochastic rate " *
+                "`$rate_name`, whose support must be PositiveSupport"))
+    elseif rate isa NodeValue
+        rate_name = node_value_name(rate)
+        getproperty(graph.nodes, rate_name) isa ExpFactorNode || throw(
+            CapabilityError(
+                :factor_rate,
+                "Poisson factor for site `$name` uses deterministic rate " *
+                "`$rate_name`, which must currently be an exp node"))
+    end
+    nothing
+end
+
 function _validate_factor_plan_site(
     name::Symbol, site::StochasticSite, graph::FactorGraph,
     bindings::NamedTuple, conditions::NamedTuple,
@@ -1067,6 +1103,8 @@ function _validate_factor_plan_site(
                 :factor_scale,
                 "Normal factor for site `$name` uses deterministic scale " *
                 "`$scale_name`, which must currently be an exp node"))
+    elseif site.factor isa PoissonSiteFactor
+        _validate_poisson_rate_source(name, site.factor, graph)
     end
     nothing
 end
@@ -1121,12 +1159,14 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
                 getproperty(
                     graph.sites, site_value_name(node.input)).shape isa
                         BroadcastSiteShape
+            terminal_poisson_rate =
+                _factor_exp_is_poisson_rate(name, graph)
             _factor_value_is_row(node.input, graph, bindings) &&
-                !broadcast_input && throw(
+                !broadcast_input && !terminal_poisson_rate && throw(
                 CapabilityError(
                     :factor_nodes,
                     "exp node `$name` cannot consume a row-valued argument " *
-                    "until row-node materialization is implemented"))
+                    "unless it is the terminal Poisson log-rate link"))
         elseif node isa AffineFactorNode
             coefficient_name = site_value_name(node.coefficients)
             coefficient_site = getproperty(graph.sites, coefficient_name)
@@ -1476,13 +1516,20 @@ function _factor_validate_binding_support(graph::FactorGraph,
                                           value, name::Symbol)
     for (site_name, site) in pairs(graph.sites)
         factor = site.factor
-        factor isa NormalSiteFactor || continue
-        factor.scale isa InputValue || continue
-        input_value_name(factor.scale) === name || continue
         values = value isa AbstractVector ? value : (value,)
-        all(element -> element > zero(element), values) || throw(ArgumentError(
-            "native PPL binding `$name` supplies the Normal scale for " *
-            "site `$site_name` and must be positive"))
+        if factor isa NormalSiteFactor && factor.scale isa InputValue &&
+           input_value_name(factor.scale) === name
+            all(element -> element > zero(element), values) ||
+                throw(ArgumentError(
+                    "native PPL binding `$name` supplies the Normal scale " *
+                    "for site `$site_name` and must be positive"))
+        elseif factor isa PoissonSiteFactor && factor.rate isa InputValue &&
+               input_value_name(factor.rate) === name
+            all(element -> isfinite(element) &&
+                    element > zero(element), values) || throw(ArgumentError(
+                "native PPL binding `$name` supplies the Poisson rate for " *
+                "site `$site_name` and must be finite and positive"))
+        end
     end
     nothing
 end
@@ -1805,6 +1852,8 @@ end
 @inline function _factor_node_logdensity!(::Val{Name}, node::ExpFactorNode,
         position::AbstractVector{T}, prepared::FactorPrepared,
         buffers::FactorBuffers{T}) where {Name,T}
+    _factor_exp_is_poisson_rate(Name, prepared.plan.graph) &&
+        return zero(T)
     input = _factor_argument(node.input, prepared.plan, buffers, T)
     buffers.node_values[getproperty(prepared.plan.node_indices, Name)] =
         exp(input)
@@ -2366,7 +2415,7 @@ end
 
 @inline function _factor_site_sample!(rng::BRM.AbstractRNG, ::Val{Name},
         site::StochasticSite{S,Tr,F,ScalarSiteShape,FreeSite},
-        position::AbstractVector{T}, output::AbstractVector{T},
+        position::AbstractVector{T}, output::AbstractVector,
         prepared::FactorPrepared, buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
     value = _factor_rand(rng, site.factor, prepared.plan, buffers, T)
     coordinates = getproperty(prepared.plan.graph.coordinates, Name)
@@ -2378,7 +2427,7 @@ end
 
 @inline function _factor_site_sample!(rng::BRM.AbstractRNG, ::Val{Name},
         site::StochasticSite{S,Tr,F,ScalarSiteShape,ConditionedSite},
-        position::AbstractVector{T}, output::AbstractVector{T},
+        position::AbstractVector{T}, output::AbstractVector,
         prepared::FactorPrepared, buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
     buffers.values[getproperty(prepared.plan.site_indices, Name)] =
         getproperty(prepared.conditions, Name)
@@ -2387,7 +2436,7 @@ end
 
 @inline function _factor_site_sample!(rng::BRM.AbstractRNG, ::Val{Name},
         site::StochasticSite{S,Tr,F,BlockSiteShape,FreeSite},
-        position::AbstractVector{T}, output::AbstractVector{T},
+        position::AbstractVector{T}, output::AbstractVector,
         prepared::FactorPrepared, buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
     coordinates = getproperty(prepared.plan.graph.coordinates, Name)
     for coordinate in coordinates.indices
@@ -2400,7 +2449,7 @@ end
 
 @inline function _factor_site_sample!(rng::BRM.AbstractRNG, ::Val{Name},
         site::StochasticSite{S,Tr,F,BlockSiteShape,ConditionedSite},
-        position::AbstractVector{T}, output::AbstractVector{T},
+        position::AbstractVector{T}, output::AbstractVector,
         prepared::FactorPrepared, buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
     nothing
 end
@@ -2420,7 +2469,7 @@ end
         ::Val{Names}, ::Val{SiteNames}, sites::Sites,
         ::Val{NodeNames}, nodes::Nodes,
         position::AbstractVector{T},
-        output::AbstractVector{T}, prepared::FactorPrepared,
+        output::AbstractVector, prepared::FactorPrepared,
         buffers::FactorBuffers{T}) where {
             Names,SiteNames,Sites<:Tuple,NodeNames,Nodes<:Tuple,T}
     calls = Any[]
