@@ -474,8 +474,8 @@ function _parameter_stochastic_site(
         "native PPL grouped site `$name` requires binding `$group_name`"))
     levels = _group_levels(getproperty(bindings, group_name), group_name)
     activity = hasproperty(conditions, name) ? ConditionedSite() : FreeSite()
-    coordinate_keys = activity isa FreeSite ?
-        Tuple(GroupCoordinateKey(name, level) for level in levels) : ()
+    coordinate_keys = Tuple(
+        GroupCoordinateKey(name, level) for level in levels)
     StochasticSite(
         RealSupport(), Identity(),
         NormalSiteFactor(declaration.location, declaration.scale),
@@ -682,22 +682,24 @@ function _canonical_factor_conditions(declaration::Model, conditions)
 end
 
 """Executable plan for an ordered continuous stochastic-site DAG."""
-struct FactorPlan{Output,M,G,B,C,I,N,A}
+struct FactorPlan{Output,M,G,B,C,I,N,J,A}
     declaration::M
     graph::G
     bindings::B
     conditions::C
     site_indices::I
     node_indices::N
+    group_indices::J
     observation_axis::A
 end
 
 FactorPlan(declaration::M, graph::G, bindings::B, conditions::C,
-           site_indices::I, node_indices::N, observation_axis::A,
-           output_site::Symbol) where {M,G,B,C,I,N,A} =
-    FactorPlan{output_site,M,G,B,C,I,N,A}(
+           site_indices::I, node_indices::N, group_indices::J,
+           observation_axis::A,
+           output_site::Symbol) where {M,G,B,C,I,N,J,A} =
+    FactorPlan{output_site,M,G,B,C,I,N,J,A}(
         declaration, graph, bindings, conditions, site_indices,
-        node_indices, observation_axis)
+        node_indices, group_indices, observation_axis)
 
 factor_output_site(::FactorPlan{Output}) where {Output} = Output
 
@@ -726,7 +728,15 @@ function _uses_factor_executor(declaration::Model, conditions, bindings=(;))
     sampled_offset_affine = any(values(graph.nodes)) do node
         node isa AffineFactorNode && !isempty(node.offsets)
     end
-    dependent_site || sampled_offset_affine
+    grouped_gather = any(node -> node isa GroupGatherFactorNode,
+                         values(graph.nodes))
+    dependent_site || sampled_offset_affine || grouped_gather
+end
+
+function _group_input_names(declaration::Model)
+    Tuple(unique(group_input(parameter)
+        for parameter in values(declaration.parameters)
+        if parameter isa GroupedNormalParameter))
 end
 
 _factor_arguments(::StandardNormalSiteFactor) = ()
@@ -738,7 +748,8 @@ _factor_value_is_row(::LiteralValue, graph, bindings) = false
 _factor_value_is_row(::InputValue{Name}, graph, bindings) where {Name} =
     getproperty(bindings, Name) isa AbstractVector
 _factor_value_is_row(::NodeValue{Name}, graph, bindings) where {Name} =
-    getproperty(graph.nodes, Name) isa AffineFactorNode
+    getproperty(graph.nodes, Name) isa
+        Union{AffineFactorNode,GroupGatherFactorNode}
 _factor_value_is_row(::SiteValue{Name}, graph, bindings) where {Name} =
     getproperty(graph.sites, Name).shape isa
         Union{BlockSiteShape,BroadcastSiteShape}
@@ -825,6 +836,7 @@ end
 
 function _bind_factor_plan(declaration::Model, bindings, conditions)
     input_axis_length = nothing
+    group_inputs = Set(_group_input_names(declaration))
     for (name, declaration_input) in pairs(declaration.inputs)
         input_role(declaration_input) in (:value, :predictor) || throw(CapabilityError(
             :factor_inputs,
@@ -834,8 +846,14 @@ function _bind_factor_plan(declaration::Model, bindings, conditions)
         if value isa AbstractVector
             isempty(value) && throw(ArgumentError(
                 "multi-latent factor input `$name` cannot be empty"))
-            all(element -> element isa Real, value) || throw(ArgumentError(
-                "multi-latent factor input `$name` must contain real values"))
+            if name in group_inputs
+                any(ismissing, value) && throw(ArgumentError(
+                    "multi-latent factor group input `$name` cannot contain " *
+                    "missing values"))
+            else
+                all(element -> element isa Real, value) || throw(ArgumentError(
+                    "multi-latent factor input `$name` must contain real values"))
+            end
             input_axis_length === nothing && (input_axis_length = length(value))
             length(value) == input_axis_length || throw(DimensionMismatch(
                 "multi-latent factor vector inputs must have equal lengths"))
@@ -850,11 +868,12 @@ function _bind_factor_plan(declaration::Model, bindings, conditions)
     graph = factor_graph(
         declaration; conditions=canonical_conditions, bindings)
     for (name, node) in pairs(graph.nodes)
-        node isa Union{ExpFactorNode,AffineFactorNode} || throw(CapabilityError(
+        node isa Union{ExpFactorNode,AffineFactorNode,GroupGatherFactorNode} ||
+            throw(CapabilityError(
             :factor_nodes,
             "multi-latent factor node `$name` has unsupported operation " *
             "$(typeof(node)); the current executable slice accepts scalar " *
-            "exp and row-valued affine nodes"))
+            "exp, row-valued affine, and group-gather nodes"))
         if node isa ExpFactorNode
             broadcast_input = node.input isa SiteValue &&
                 getproperty(
@@ -866,7 +885,7 @@ function _bind_factor_plan(declaration::Model, bindings, conditions)
                     :factor_nodes,
                     "exp node `$name` cannot consume a row-valued argument " *
                     "until row-node materialization is implemented"))
-        else
+        elseif node isa AffineFactorNode
             coefficient_name = site_value_name(node.coefficients)
             coefficient_site = getproperty(graph.sites, coefficient_name)
             coefficient_site.shape isa Union{ScalarSiteShape,BlockSiteShape} ||
@@ -896,6 +915,17 @@ function _bind_factor_plan(declaration::Model, bindings, conditions)
                     "affine node `$name` cannot consume non-scalar site " *
                     "`$(site_value_name(argument))` directly"))
             end
+        end
+        if node isa GroupGatherFactorNode
+            values_name = site_value_name(node.values)
+            values_site = getproperty(graph.sites, values_name)
+            values_site.shape isa BlockSiteShape || throw(CapabilityError(
+                :factor_nodes,
+                "group gather node `$name` requires a block latent site"))
+            group_name = input_value_name(node.group)
+            group_name in group_inputs || throw(CapabilityError(
+                :factor_nodes,
+                "group gather node `$name` requires a fitted group input"))
         end
     end
     broadcast_sites = Tuple(
@@ -943,9 +973,25 @@ function _bind_factor_plan(declaration::Model, bindings, conditions)
     node_names = Tuple(keys(graph.nodes))
     node_indices = NamedTuple{node_names}(
         ntuple(identity, length(node_names)))
+    gather_names = Tuple(name for (name, node) in pairs(graph.nodes)
+                         if node isa GroupGatherFactorNode)
+    gather_indices = map(gather_names) do name
+        node = getproperty(graph.nodes, name)
+        site_name = site_value_name(node.values)
+        site = getproperty(graph.sites, site_name)
+        levels = Tuple(key.level for key in site.coordinate_keys)
+        groups = getproperty(bindings, input_value_name(node.group))
+        Tuple(map(groups) do group
+            index = findfirst(isequal(group), levels)
+            index === nothing && throw(ArgumentError(
+                "native PPL group value `$group` is absent from fitted levels"))
+            index
+        end)
+    end
+    group_indices = NamedTuple{gather_names}(gather_indices)
     FactorPlan(
         declaration, graph, bindings, canonical_conditions, site_indices,
-        node_indices,
+        node_indices, group_indices,
         BRM.NativePPLAxis(:observation, observation_keys), output_site)
 end
 
@@ -1062,9 +1108,11 @@ end
 function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
     isconcretetype(T) || throw(ArgumentError(
         "native PPL factor prepared element type must be concrete; got $T"))
+    group_inputs = Set(_group_input_names(plan.declaration))
     binding_names = Tuple(keys(plan.bindings))
     binding_values = map(binding_names) do name
         value = getproperty(plan.bindings, name)
+        name in group_inputs && return copy(value)
         converted = _factor_prepare_condition(value, name, T)
         _factor_validate_binding_support(plan.graph, converted, name)
         converted
@@ -1091,8 +1139,8 @@ function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
     conditions = NamedTuple{names}(values)
     owned_plan = FactorPlan(
         plan.declaration, plan.graph, bindings, conditions,
-        plan.site_indices, plan.node_indices, plan.observation_axis,
-        plan.output_site)
+        plan.site_indices, plan.node_indices, plan.group_indices,
+        plan.observation_axis, plan.output_site)
     FactorPrepared{T,typeof(owned_plan),typeof(conditions)}(
         owned_plan, conditions)
 end
@@ -1126,7 +1174,8 @@ end
                                      ::Type{T}) where {Name,T}
     node_index = getproperty(plan.node_indices, Name)
     node = getproperty(plan.graph.nodes, Name)
-    node isa AffineFactorNode ? buffers.node_rows[node_index, index] :
+    node isa Union{AffineFactorNode,GroupGatherFactorNode} ?
+        buffers.node_rows[node_index, index] :
         buffers.node_values[node_index]
 end
 @inline _factor_argument_at(::SiteValue{Name}, index, plan, buffers,
@@ -1293,6 +1342,30 @@ end
     zero(T)
 end
 
+@inline function _factor_node_logdensity!(::Val{Name},
+        node::GroupGatherFactorNode,
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Name,T}
+    node_index = getproperty(prepared.plan.node_indices, Name)
+    site_name = site_value_name(node.values)
+    site = getproperty(prepared.plan.graph.sites, site_name)
+    group_indices = getproperty(prepared.plan.group_indices, Name)
+    for row in prepared.plan.observation_axis.keys
+        group_index = group_indices[row]
+        value = if site.activity isa FreeSite
+            coordinates = getproperty(
+                prepared.plan.graph.coordinates, site_name).indices
+            transformed, _ = _factor_transform(
+                site.transform, position[coordinates[group_index]])
+            transformed
+        else
+            getproperty(prepared.conditions, site_name)[group_index]
+        end
+        buffers.node_rows[node_index, row] = value
+    end
+    zero(T)
+end
+
 @generated function _factor_execute_schedule!(::Val{Names},
         ::Val{SiteNames}, sites::Sites,
         ::Val{NodeNames}, nodes::Nodes,
@@ -1411,6 +1484,7 @@ function rebind(prepared::FactorPrepared, conditions;
             rebound.declaration, rebound.graph, rebound.bindings,
             rebound.conditions,
             rebound.site_indices, rebound.node_indices,
+            rebound.group_indices,
             prepared.plan.observation_axis,
             rebound.output_site)
     end

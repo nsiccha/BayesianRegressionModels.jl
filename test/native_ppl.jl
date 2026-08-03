@@ -3539,6 +3539,60 @@ end
         grouped_graph.nodes.varying_by_row) == (:varying,)
     @test_throws ArgumentError NP.factor_graph(
         grouped_declaration; conditions=(; y=sampled_offset_data.y))
+    grouped_plan = NP.compile(
+        grouped_declaration, grouped_bindings;
+        conditions=(; y=sampled_offset_data.y))
+    @test grouped_plan isa NP.FactorPlan
+    @test grouped_plan.group_indices ==
+          (; varying_by_row=(1, 2, 1, 3))
+    grouped_prepared = NP.prepare(grouped_plan)
+    grouped_workspace = NP.workspace(
+        grouped_prepared, Float64, DI.AutoEnzyme())
+    grouped_position = [log(0.7), 0.2, -0.1, 0.4, log(0.5)]
+    grouped_tau = exp(grouped_position[1])
+    grouped_effects = grouped_position[2:4]
+    grouped_sigma = exp(grouped_position[5])
+    grouped_mu = grouped_effects[[1, 2, 1, 3]]
+    grouped_residuals = sampled_offset_data.y .- grouped_mu
+    grouped_expected_density =
+        logpdf(Exponential(1), grouped_tau) + grouped_position[1] +
+        sum(logpdf.(Normal(0, grouped_tau), grouped_effects)) +
+        logpdf(Exponential(2), grouped_sigma) + grouped_position[5] +
+        sum(logpdf.(Normal.(grouped_mu, grouped_sigma),
+                    sampled_offset_data.y))
+    grouped_expected_gradient = [
+        1 - grouped_tau - length(grouped_effects) +
+            sum(abs2, grouped_effects) / grouped_tau^2,
+        -grouped_effects[1] / grouped_tau^2 +
+            (grouped_residuals[1] + grouped_residuals[3]) /
+                grouped_sigma^2,
+        -grouped_effects[2] / grouped_tau^2 +
+            grouped_residuals[2] / grouped_sigma^2,
+        -grouped_effects[3] / grouped_tau^2 +
+            grouped_residuals[4] / grouped_sigma^2,
+        1 - grouped_sigma / 2 - length(sampled_offset_data.y) +
+            sum(abs2, grouped_residuals) / grouped_sigma^2,
+    ]
+    grouped_density, grouped_gradient = NP.logdensity_and_gradient!(
+        grouped_workspace, grouped_prepared, grouped_position)
+    @test grouped_density ≈ grouped_expected_density
+    @test grouped_gradient ≈ grouped_expected_gradient
+    @test NP.evaluate(
+        grouped_workspace, grouped_prepared, grouped_position,
+        NP.LinearPredictor()) == grouped_mu
+    @test NP.evaluate(
+        grouped_workspace, grouped_prepared, grouped_position,
+        NP.PointwiseLogLikelihood()) ≈
+          logpdf.(Normal.(grouped_mu, grouped_sigma), sampled_offset_data.y)
+    @test factor_steady_state_allocations(
+        grouped_workspace, grouped_prepared, grouped_position) ==
+          (; primal=0, gradient=0)
+    grouped_prediction_only = NP.rebind(grouped_prepared, (;))
+    @test !NP.has_response(grouped_prediction_only)
+    @test length(NP.simulate(
+        MersenneTwister(934), NP.workspace(grouped_prediction_only),
+        grouped_prediction_only, grouped_position)) ==
+          length(grouped_bindings.group)
 
     sampled_offset_plan = NP.compile(sampled_offset_brmi)
     @test sampled_offset_plan isa NP.FactorPlan
