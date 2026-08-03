@@ -457,6 +457,363 @@ function _canonical_factor_conditions(declaration::Model, conditions)
     NamedTuple{Tuple(names)}(Tuple(values))
 end
 
+"""Executable plan for an ordered continuous stochastic-site DAG."""
+struct FactorPlan{M,G,C,I,A}
+    declaration::M
+    graph::G
+    conditions::C
+    site_indices::I
+    observation_axis::A
+    output_site::Symbol
+end
+
+BRM.LogDensityProblems.dimension(plan::FactorPlan) = plan.graph.dimension
+
+function _uses_factor_executor(declaration::Model, conditions)
+    graph = factor_graph(declaration; conditions)
+    stochastic_names = Set(declaration.site_order)
+    any(declaration.site_order) do name
+        hasproperty(declaration.observations, name) || return false
+        site = getproperty(graph.sites, name)
+        site.shape isa ScalarSiteShape && site.activity isa FreeSite &&
+            any(dependency -> dependency in stochastic_names,
+                site_factor_dependencies(site.factor))
+    end
+end
+
+function _bind_factor_plan(declaration::Model, bindings, conditions)
+    isempty(declaration.inputs) || throw(CapabilityError(
+        :factor_inputs,
+        "the first multi-latent factor executor does not yet accept open " *
+        "deterministic inputs"))
+    isempty(declaration.nodes) || throw(CapabilityError(
+        :factor_nodes,
+        "the first multi-latent factor executor does not yet accept " *
+        "deterministic graph nodes"))
+    isempty(bindings) || throw(ArgumentError(
+        "the input-free multi-latent factor graph received unexpected bindings"))
+    canonical_conditions = _canonical_factor_conditions(
+        declaration, conditions)
+    graph = factor_graph(declaration; conditions=canonical_conditions)
+    for (name, site) in pairs(graph.sites)
+        site.shape isa BlockSiteShape && throw(CapabilityError(
+            :factor_shape,
+            "multi-latent factor site `$name` has an unsupported block shape"))
+        site.factor isa Union{
+            StandardNormalSiteFactor,NormalSiteFactor,ExponentialSiteFactor,
+        } || throw(CapabilityError(
+            :factor_family,
+            "multi-latent factor site `$name` has unsupported factor " *
+            "$(typeof(site.factor))"))
+    end
+    broadcast_sites = Tuple(
+        name for (name, site) in pairs(graph.sites)
+        if site.shape isa BroadcastSiteShape)
+    length(broadcast_sites) == 1 || throw(CapabilityError(
+        :factor_outputs,
+        "the first multi-latent factor executor requires exactly one " *
+        "broadcast stochastic output"))
+    output_site = only(broadcast_sites)
+    hasproperty(canonical_conditions, output_site) || throw(CapabilityError(
+        :factor_conditioning,
+        "multi-latent density execution currently requires conditioning " *
+        "broadcast site `$output_site`"))
+    response = getproperty(canonical_conditions, output_site)
+    response isa AbstractVector || throw(ArgumentError(
+        "native PPL broadcast condition `$output_site` must be a vector"))
+    isempty(response) && throw(ArgumentError(
+        "native PPL broadcast condition `$output_site` cannot be empty"))
+    site_names = Tuple(keys(graph.sites))
+    site_indices = NamedTuple{site_names}(
+        ntuple(identity, length(site_names)))
+    FactorPlan(
+        declaration, graph, canonical_conditions, site_indices,
+        Base.OneTo(length(response)), output_site)
+end
+
+function Base.show(io::IO, plan::FactorPlan)
+    print(io, "NativePPL.FactorPlan(", plan.graph.dimension,
+          " unconstrained parameters, ", length(plan.graph.sites),
+          " stochastic sites, ", length(plan.observation_axis),
+          " observations)")
+end
+
+"""Prepared, independently owned bindings for a `FactorPlan`."""
+struct FactorPrepared{T,P,C}
+    plan::P
+    conditions::C
+end
+
+Base.eltype(::FactorPrepared{T}) where {T} = T
+BRM.LogDensityProblems.dimension(prepared::FactorPrepared) =
+    BRM.LogDensityProblems.dimension(prepared.plan)
+
+"""Reusable primal storage for an ordered factor-graph evaluation."""
+mutable struct FactorBuffers{T,V<:Vector{T}}
+    values::V
+    pointwise_loglikelihood::V
+end
+
+"""Caller-owned workspace for factor-graph density and gradient execution."""
+struct FactorWorkspace{T,B,G,D}
+    primal::B
+    gradient::G
+    derivative::D
+end
+
+Base.eltype(::FactorWorkspace{T}) where {T} = T
+
+function FactorWorkspace(prepared::FactorPrepared,
+                         ::Type{T}=eltype(prepared)) where {T<:AbstractFloat}
+    isconcretetype(T) || throw(ArgumentError(
+        "native PPL factor workspace element type must be concrete; got $T"))
+    values = zeros(T, length(prepared.plan.graph.sites))
+    pointwise = zeros(T, length(prepared.plan.observation_axis))
+    FactorWorkspace{T,FactorBuffers{T,Vector{T}},Vector{T},Nothing}(
+        FactorBuffers(values, pointwise),
+        zeros(T, BRM.LogDensityProblems.dimension(prepared)), nothing)
+end
+
+function _factor_workspace end
+_factor_workspace(prepared::FactorPrepared,
+                  ::Type{T}) where {T<:AbstractFloat} =
+    FactorWorkspace(prepared, T)
+_factor_workspace(::FactorPrepared, ::Type{<:AbstractFloat}, backend) =
+    throw(ArgumentError(
+        "native PPL factor gradients require loading " *
+        "DifferentiationInterface; only AutoEnzyme is tested, recommended, " *
+        "and guaranteed"))
+
+function _factor_prepare_condition(value::Real, name::Symbol,
+                                   ::Type{T}) where {T<:AbstractFloat}
+    converted = T(value)
+    isfinite(converted) || throw(ArgumentError(
+        "native PPL condition `$name` must be finite in $T"))
+    converted
+end
+
+function _factor_prepare_condition(value::AbstractVector, name::Symbol,
+                                   ::Type{T}) where {T<:AbstractFloat}
+    isempty(value) && throw(ArgumentError(
+        "native PPL condition `$name` cannot be empty"))
+    all(element -> element isa Real, value) || throw(ArgumentError(
+        "native PPL condition `$name` must contain real values"))
+    converted = T.(value)
+    all(isfinite, converted) || throw(ArgumentError(
+        "native PPL condition `$name` must be finite in $T"))
+    converted
+end
+
+_factor_prepare_condition(value, name::Symbol, ::Type{T}) where {T} =
+    throw(ArgumentError(
+        "native PPL condition `$name` must be a real scalar or vector; got " *
+        "$(typeof(value))"))
+
+function _factor_validate_condition_support(site::StochasticSite,
+                                            value, name::Symbol)
+    scalar_values = value isa AbstractVector ? value : (value,)
+    if site.support isa PositiveSupport
+        all(element -> element > zero(element), scalar_values) ||
+            throw(ArgumentError(
+                "native PPL condition `$name` must lie in positive support"))
+    end
+    nothing
+end
+
+function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
+    names = Tuple(keys(plan.conditions))
+    values = map(names) do name
+        value = _factor_prepare_condition(
+            getproperty(plan.conditions, name), name, T)
+        _factor_validate_condition_support(
+            getproperty(plan.graph.sites, name), value, name)
+        value
+    end
+    FactorPrepared{T,typeof(plan),NamedTuple{names,typeof(values)}}(
+        plan, NamedTuple{names}(values))
+end
+
+workspace(prepared::FactorPrepared,
+          ::Type{T}=eltype(prepared)) where {T<:AbstractFloat} =
+    _factor_workspace(prepared, T)
+workspace(prepared::FactorPrepared, ::Type{T}, backend) where {T<:AbstractFloat} =
+    _factor_workspace(prepared, T, backend)
+
+@inline _factor_argument(value::LiteralValue, plan, buffers, ::Type{T}) where {T} =
+    T(value.value)
+@inline _factor_argument(::SiteValue{Name}, plan, buffers,
+                         ::Type{T}) where {Name,T} =
+    buffers.values[getproperty(plan.site_indices, Name)]
+
+@inline _factor_transform(::IdentityTransform, unconstrained) =
+    (unconstrained, zero(unconstrained))
+@inline _factor_transform(::ExpTransform, unconstrained) =
+    (exp(unconstrained), unconstrained)
+
+@inline function _factor_logdensity(::StandardNormalSiteFactor, value::T,
+                                    plan, buffers) where {T}
+    -T(0.5) * value * value - T(BRM._NATIVE_PPL_HALF_LOG2PI)
+end
+
+@inline function _factor_logdensity(factor::NormalSiteFactor, value::T,
+                                    plan, buffers) where {T}
+    location = _factor_argument(factor.location, plan, buffers, T)
+    scale = _factor_argument(factor.scale, plan, buffers, T)
+    residual = (value - location) / scale
+    -T(0.5) * residual * residual - log(scale) -
+        T(BRM._NATIVE_PPL_HALF_LOG2PI)
+end
+
+@inline function _factor_logdensity(factor::ExponentialSiteFactor, value::T,
+                                    plan, buffers) where {T}
+    scale = _factor_argument(factor.scale, plan, buffers, T)
+    -log(scale) - value / scale
+end
+
+@inline function _factor_site_logdensity!(::Val{Name},
+        site::StochasticSite{S,Tr,F,ScalarSiteShape,FreeSite},
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
+    coordinates = getproperty(prepared.plan.graph.coordinates, Name)
+    length(coordinates.indices) == 1 || throw(CapabilityError(
+        :factor_coordinates,
+        "free scalar site `$Name` must own exactly one coordinate"))
+    unconstrained = position[first(coordinates.indices)]
+    value, logjac = _factor_transform(site.transform, unconstrained)
+    buffers.values[getproperty(prepared.plan.site_indices, Name)] = value
+    _factor_logdensity(site.factor, value, prepared.plan, buffers) + logjac
+end
+
+@inline function _factor_site_logdensity!(::Val{Name},
+        site::StochasticSite{S,Tr,F,ScalarSiteShape,ConditionedSite},
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
+    value = getproperty(prepared.conditions, Name)
+    buffers.values[getproperty(prepared.plan.site_indices, Name)] = value
+    _factor_logdensity(site.factor, value, prepared.plan, buffers)
+end
+
+@inline function _factor_site_logdensity!(::Val{Name},
+        site::StochasticSite{S,Tr,F,BroadcastSiteShape,ConditionedSite},
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
+    response = getproperty(prepared.conditions, Name)
+    density = zero(T)
+    for index in eachindex(response)
+        pointwise = _factor_logdensity(
+            site.factor, response[index], prepared.plan, buffers)
+        buffers.pointwise_loglikelihood[index] = pointwise
+        density += pointwise
+    end
+    density
+end
+
+@inline _factor_site_logdensity!(::Val,
+        ::StochasticSite{S,Tr,F,BroadcastSiteShape,GeneratedSite},
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {S,Tr,F,T} = zero(T)
+
+@generated function _factor_execute_sites!(::Val{Names}, sites::Sites,
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Names,Sites<:Tuple,T}
+    calls = Any[
+        :(_factor_site_logdensity!(
+            Val($(QuoteNode(name))), getfield(sites, $index),
+            position, prepared, buffers))
+        for (index, name) in enumerate(Names)
+    ]
+    isempty(calls) && return :(zero(T))
+    foldl((left, right) -> :($left + $right), calls)
+end
+
+@inline function _factor_logdensity_kernel(position::AbstractVector{T},
+                                           prepared::FactorPrepared,
+                                           buffers::FactorBuffers{T}) where {T}
+    names = Tuple(keys(prepared.plan.graph.sites))
+    _factor_execute_sites!(
+        Val(names), Tuple(prepared.plan.graph.sites),
+        position, prepared, buffers)
+end
+
+function _factor_check_execution(workspace::FactorWorkspace,
+                                 prepared::FactorPrepared,
+                                 position::AbstractVector)
+    dimension = BRM.LogDensityProblems.dimension(prepared)
+    length(position) == dimension || throw(DimensionMismatch(
+        "native PPL factor position has length $(length(position)); " *
+        "expected $dimension"))
+    eltype(position) === eltype(workspace) || throw(ArgumentError(
+        "native PPL factor position eltype $(eltype(position)) does not " *
+        "match workspace eltype $(eltype(workspace))"))
+    eltype(prepared) === eltype(workspace) || throw(ArgumentError(
+        "native PPL factor prepared eltype $(eltype(prepared)) does not " *
+        "match workspace eltype $(eltype(workspace))"))
+    length(workspace.gradient) == dimension || throw(DimensionMismatch(
+        "native PPL factor gradient has length $(length(workspace.gradient)); " *
+        "expected $dimension"))
+    length(workspace.primal.values) == length(prepared.plan.graph.sites) ||
+        throw(DimensionMismatch(
+            "native PPL factor workspace has the wrong site-value layout"))
+    length(workspace.primal.pointwise_loglikelihood) ==
+        length(prepared.plan.observation_axis) || throw(DimensionMismatch(
+            "native PPL factor workspace has the wrong observation layout"))
+    for buffer in (workspace.gradient, workspace.primal.values,
+                   workspace.primal.pointwise_loglikelihood)
+        Base.mightalias(position, buffer) && throw(ArgumentError(
+            "native PPL factor position must not alias workspace storage"))
+    end
+    nothing
+end
+
+function logdensity!(work::FactorWorkspace, prepared::FactorPrepared,
+                     position::AbstractVector)
+    _factor_check_execution(work, prepared, position)
+    _factor_logdensity_kernel(position, prepared, work.primal)
+end
+
+function _factor_logdensity_and_gradient! end
+function _factor_logdensity_and_gradient!(work::FactorWorkspace,
+                                          prepared::FactorPrepared,
+                                          position::AbstractVector)
+    throw(ArgumentError(
+        "native PPL factor gradients require a " *
+        "DifferentiationInterface-prepared workspace; construct one with " *
+        "AutoEnzyme() for the supported path"))
+end
+
+logdensity_and_gradient!(work::FactorWorkspace, prepared::FactorPrepared,
+                         position::AbstractVector) =
+    _factor_logdensity_and_gradient!(work, prepared, position)
+
+"""LogDensityProblems adapter for a prepared factor-graph executor."""
+struct FactorLogDensityProblem{P,W}
+    prepared::P
+    workspace::W
+end
+
+function FactorLogDensityProblem(prepared::FactorPrepared, backend)
+    work = workspace(prepared, eltype(prepared), backend)
+    FactorLogDensityProblem{typeof(prepared),typeof(work)}(prepared, work)
+end
+
+Base.eltype(problem::FactorLogDensityProblem) = eltype(problem.prepared)
+BRM.LogDensityProblems.capabilities(::Type{<:FactorLogDensityProblem}) =
+    BRM.LogDensityProblems.LogDensityOrder{1}()
+BRM.LogDensityProblems.dimension(problem::FactorLogDensityProblem) =
+    BRM.LogDensityProblems.dimension(problem.prepared)
+BRM.LogDensityProblems.logdensity(problem::FactorLogDensityProblem,
+                                  position::AbstractVector) =
+    logdensity!(problem.workspace, problem.prepared, position)
+function BRM.LogDensityProblems.logdensity_and_gradient(
+        problem::FactorLogDensityProblem, position::AbstractVector)
+    density, gradient = logdensity_and_gradient!(
+        problem.workspace, problem.prepared, position)
+    density, copy(gradient)
+end
+
+BRM.NativePPLLogDensityProblem(prepared::FactorPrepared, backend) =
+    FactorLogDensityProblem(prepared, backend)
+
 """
 A composed call of a staged `@model` function.
 
@@ -1614,6 +1971,8 @@ function _bind(declaration::Model, bindings, conditions)
     _validate_model(declaration)
     _validate_binding_names(declaration, bindings)
     _validate_condition_names(declaration, conditions)
+    _uses_factor_executor(declaration, conditions) &&
+        return _bind_factor_plan(declaration, bindings, conditions)
     length(declaration.observations) > 1 && length(conditions) == 1 &&
         return _bind_scalar_site_schedule(declaration, bindings, conditions)
     isempty(declaration.inputs) &&
@@ -2738,6 +3097,7 @@ end
 
 export Model, ModelInstance, GraphRef, Component, Composition, Input, Parameter
 export SiteValue, LiteralValue, StochasticSite, SiteCoordinates, FactorGraph
+export FactorPlan, FactorPrepared, FactorWorkspace, FactorLogDensityProblem
 export StandardNormalSiteFactor, NormalSiteFactor, ExponentialSiteFactor
 export BernoulliLogitSiteFactor, PoissonSiteFactor
 export ScalarSiteShape, BlockSiteShape, BroadcastSiteShape

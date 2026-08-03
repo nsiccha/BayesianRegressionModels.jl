@@ -559,6 +559,17 @@ function steady_state_allocations(workspace, prepared, position)
     (; primal, gradient)
 end
 
+function factor_steady_state_allocations(workspace::NP.FactorWorkspace,
+                                         prepared::NP.FactorPrepared,
+                                         position)
+    NP.logdensity!(workspace, prepared, position)
+    NP.logdensity_and_gradient!(workspace, prepared, position)
+    primal = @allocated NP.logdensity!(workspace, prepared, position)
+    gradient = @allocated NP.logdensity_and_gradient!(
+        workspace, prepared, position)
+    (; primal, gradient)
+end
+
 function allocating_query_bytes(workspace, prepared, position)
     linear = BRM.NativePPL.LinearPredictor()
     predictive = BRM.NativePPL.PosteriorPredictive()
@@ -3173,6 +3184,55 @@ end
     @test hierarchy_graph.sites.y.shape isa NP.BroadcastSiteShape
     @test NP.site_factor_dependencies(hierarchy_graph.sites.y.factor) ==
           (:individual, :observation_scale)
+    hierarchy_plan = NP.compile(NP.condition(hierarchy; y=response))
+    @test hierarchy_plan isa NP.FactorPlan
+    @test LogDensityProblems.dimension(hierarchy_plan) == 4
+    @test hierarchy_plan.output_site === :y
+    hierarchy_prepared = NP.prepare(hierarchy_plan)
+    hierarchy_workspace = NP.workspace(
+        hierarchy_prepared, Float64, DI.AutoEnzyme())
+    hierarchy_position = [0.2, log(0.7), -0.1, log(0.5)]
+    hierarchy_population = hierarchy_position[1]
+    hierarchy_population_scale = exp(hierarchy_position[2])
+    hierarchy_individual = hierarchy_position[3]
+    hierarchy_observation_scale = exp(hierarchy_position[4])
+    hierarchy_residual = hierarchy_individual - hierarchy_population
+    hierarchy_observation_residuals = response .- hierarchy_individual
+    hierarchy_expected_density =
+        logpdf(Normal(), hierarchy_population) +
+        logpdf(Exponential(1.0), hierarchy_population_scale) +
+        hierarchy_position[2] +
+        logpdf(Normal(
+            hierarchy_population, hierarchy_population_scale),
+            hierarchy_individual) +
+        logpdf(Exponential(2.0), hierarchy_observation_scale) +
+        hierarchy_position[4] +
+        sum(logpdf.(Normal(
+            hierarchy_individual, hierarchy_observation_scale), response))
+    hierarchy_expected_gradient = [
+        -hierarchy_population +
+            hierarchy_residual / hierarchy_population_scale^2,
+        1 - hierarchy_population_scale - 1 +
+            hierarchy_residual^2 / hierarchy_population_scale^2,
+        -hierarchy_residual / hierarchy_population_scale^2 +
+            sum(hierarchy_observation_residuals) /
+                hierarchy_observation_scale^2,
+        1 - hierarchy_observation_scale / 2 - length(response) +
+            sum(abs2, hierarchy_observation_residuals) /
+                hierarchy_observation_scale^2,
+    ]
+    hierarchy_density, hierarchy_gradient = NP.logdensity_and_gradient!(
+        hierarchy_workspace, hierarchy_prepared, hierarchy_position)
+    @test hierarchy_density ≈ hierarchy_expected_density
+    @test hierarchy_gradient ≈ hierarchy_expected_gradient
+    @test hierarchy_workspace.primal.pointwise_loglikelihood ≈
+        logpdf.(Normal(
+            hierarchy_individual, hierarchy_observation_scale), response)
+    @test factor_steady_state_allocations(
+        hierarchy_workspace, hierarchy_prepared, hierarchy_position) ==
+          (; primal=0, gradient=0)
+    @test NP.LogDensityProblem(
+        hierarchy_prepared, DI.AutoEnzyme()) isa NP.FactorLogDensityProblem
     @test NP.factor_graph(hierarchy).sites.y.activity isa NP.GeneratedSite
     conditioned_population_graph = NP.factor_graph(
         hierarchy.declaration;
