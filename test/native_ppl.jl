@@ -3317,6 +3317,99 @@ end
     @test capability_error(
         () -> NP.factor_graph(cyclic_factor_declaration)).capability ==
           :factor_schedule
+
+    deterministic_scale_plan = NP.compile(deterministic_scale_instance)
+    @test deterministic_scale_plan isa NP.FactorPlan
+    @test deterministic_scale_plan.node_indices ==
+          (; observation_scale=1)
+    deterministic_scale_prepared = NP.prepare(deterministic_scale_plan)
+    deterministic_scale_workspace = NP.workspace(
+        deterministic_scale_prepared, Float64, DI.AutoEnzyme())
+    deterministic_scale_position = [0.2, log(0.5)]
+    deterministic_population = deterministic_scale_position[1]
+    deterministic_log_scale = deterministic_scale_position[2]
+    deterministic_observation_scale = exp(deterministic_log_scale)
+    deterministic_scale_latent_residual =
+        deterministic_log_scale - deterministic_population
+    deterministic_scale_observation_residuals =
+        response .- deterministic_population
+    deterministic_scale_expected_density =
+        logpdf(Normal(), deterministic_population) +
+        logpdf(Normal(deterministic_population, 1.0),
+               deterministic_log_scale) +
+        sum(logpdf.(Normal(
+            deterministic_population, deterministic_observation_scale),
+            response))
+    deterministic_scale_expected_gradient = [
+        -deterministic_population + deterministic_scale_latent_residual +
+            sum(deterministic_scale_observation_residuals) /
+                deterministic_observation_scale^2,
+        -deterministic_scale_latent_residual - length(response) +
+            sum(abs2, deterministic_scale_observation_residuals) /
+                deterministic_observation_scale^2,
+    ]
+    deterministic_scale_density, deterministic_scale_gradient =
+        NP.logdensity_and_gradient!(
+            deterministic_scale_workspace, deterministic_scale_prepared,
+            deterministic_scale_position)
+    @test deterministic_scale_density ≈
+          deterministic_scale_expected_density
+    @test deterministic_scale_gradient ≈
+          deterministic_scale_expected_gradient
+    @test deterministic_scale_workspace.primal.node_values ==
+          [deterministic_observation_scale]
+    deterministic_scale_linear = NP.evaluate(
+        deterministic_scale_workspace, deterministic_scale_prepared,
+        deterministic_scale_position, NP.LinearPredictor())
+    @test deterministic_scale_linear ==
+          fill(deterministic_population, length(response))
+    deterministic_scale_pointwise = NP.evaluate(
+        deterministic_scale_workspace, deterministic_scale_prepared,
+        deterministic_scale_position, NP.PointwiseLogLikelihood())
+    @test deterministic_scale_pointwise ≈ logpdf.(Normal(
+        deterministic_population, deterministic_observation_scale), response)
+    deterministic_scale_predictive_rng = MersenneTwister(931)
+    deterministic_scale_expected_predictive_rng = MersenneTwister(931)
+    @test NP.simulate(
+        deterministic_scale_predictive_rng,
+        deterministic_scale_workspace, deterministic_scale_prepared,
+        deterministic_scale_position) == [
+            deterministic_population + deterministic_observation_scale *
+                randn(deterministic_scale_expected_predictive_rng)
+            for _ in response
+        ]
+    deterministic_scale_prior_rng = MersenneTwister(932)
+    deterministic_scale_expected_prior_rng = MersenneTwister(932)
+    deterministic_prior_population = randn(
+        deterministic_scale_expected_prior_rng)
+    deterministic_prior_log_scale = deterministic_prior_population +
+        randn(deterministic_scale_expected_prior_rng)
+    deterministic_prior_scale = exp(deterministic_prior_log_scale)
+    deterministic_prior_response = [
+        deterministic_prior_population + deterministic_prior_scale *
+            randn(deterministic_scale_expected_prior_rng)
+        for _ in response
+    ]
+    deterministic_scale_prior = NP.simulate_prior(
+        deterministic_scale_prior_rng, deterministic_scale_workspace,
+        deterministic_scale_prepared)
+    @test deterministic_scale_prior.position ==
+          [deterministic_prior_population, deterministic_prior_log_scale]
+    @test deterministic_scale_prior.response == deterministic_prior_response
+    @test factor_steady_state_allocations(
+        deterministic_scale_workspace, deterministic_scale_prepared,
+        deterministic_scale_position) == (; primal=0, gradient=0)
+    @test factor_query_allocations(
+        deterministic_scale_workspace, deterministic_scale_prepared,
+        deterministic_scale_position, similar(response), similar(response),
+        similar(response), similar(deterministic_scale_position)) ==
+          (; linear=0, pointwise=0, predictive=0, prior=0)
+    deterministic_scale_rebound = NP.rebind(
+        deterministic_scale_prepared, (; y=[0.1, 0.4, 0.8]))
+    @test deterministic_scale_rebound.plan.graph.schedule ==
+          deterministic_scale_graph.schedule
+    @test deterministic_scale_rebound.plan.bindings ==
+          deterministic_scale_plan.bindings
     hierarchy_plan = NP.compile(NP.condition(hierarchy; y=response))
     @test hierarchy_plan isa NP.FactorPlan
     @test LogDensityProblems.dimension(hierarchy_plan) == 4

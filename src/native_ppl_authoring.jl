@@ -346,13 +346,26 @@ struct SiteCoordinates{K,R}
 end
 
 """Typed, ordered stochastic-site graph and its free-coordinate allocation."""
-struct FactorGraph{S,N,O,C}
+struct FactorGraph{Order,S,N,C}
     sites::S
     nodes::N
-    schedule::O
     coordinates::C
     dimension::Int
 end
+
+FactorGraph(sites::S, nodes::N, schedule::O, coordinates::C,
+            dimension::Int) where {S,N,O,C} =
+    FactorGraph{schedule,S,N,C}(sites, nodes, coordinates, dimension)
+
+factor_schedule(::FactorGraph{Order}) where {Order} = Order
+
+function Base.getproperty(graph::FactorGraph, name::Symbol)
+    name === :schedule && return factor_schedule(graph)
+    getfield(graph, name)
+end
+
+Base.propertynames(::FactorGraph, private::Bool=false) =
+    (fieldnames(FactorGraph)..., :schedule)
 
 function _parameter_stochastic_site(
     name::Symbol, declaration::Parameter, conditions::NamedTuple)
@@ -565,21 +578,22 @@ function _canonical_factor_conditions(declaration::Model, conditions)
 end
 
 """Executable plan for an ordered continuous stochastic-site DAG."""
-struct FactorPlan{Output,M,G,B,C,I,A}
+struct FactorPlan{Output,M,G,B,C,I,N,A}
     declaration::M
     graph::G
     bindings::B
     conditions::C
     site_indices::I
+    node_indices::N
     observation_axis::A
 end
 
 FactorPlan(declaration::M, graph::G, bindings::B, conditions::C,
-           site_indices::I, observation_axis::A,
-           output_site::Symbol) where {M,G,B,C,I,A} =
-    FactorPlan{output_site,M,G,B,C,I,A}(
+           site_indices::I, node_indices::N, observation_axis::A,
+           output_site::Symbol) where {M,G,B,C,I,N,A} =
+    FactorPlan{output_site,M,G,B,C,I,N,A}(
         declaration, graph, bindings, conditions, site_indices,
-        observation_axis)
+        node_indices, observation_axis)
 
 factor_output_site(::FactorPlan{Output}) where {Output} = Output
 
@@ -652,10 +666,6 @@ function _validate_factor_plan_site(
 end
 
 function _bind_factor_plan(declaration::Model, bindings, conditions)
-    isempty(declaration.nodes) || throw(CapabilityError(
-        :factor_nodes,
-        "the first multi-latent factor executor does not yet accept " *
-        "deterministic graph nodes"))
     for (name, declaration_input) in pairs(declaration.inputs)
         input_role(declaration_input) === :value || throw(CapabilityError(
             :factor_inputs,
@@ -669,6 +679,12 @@ function _bind_factor_plan(declaration::Model, bindings, conditions)
     canonical_conditions = _canonical_factor_conditions(
         declaration, conditions)
     graph = factor_graph(declaration; conditions=canonical_conditions)
+    for (name, node) in pairs(graph.nodes)
+        node isa ExpFactorNode || throw(CapabilityError(
+            :factor_nodes,
+            "multi-latent factor node `$name` has unsupported operation " *
+            "$(typeof(node)); the current executable slice accepts scalar exp"))
+    end
     broadcast_sites = Tuple(
         name for (name, site) in pairs(graph.sites)
         if site.shape isa BroadcastSiteShape)
@@ -695,8 +711,12 @@ function _bind_factor_plan(declaration::Model, bindings, conditions)
     site_names = Tuple(keys(graph.sites))
     site_indices = NamedTuple{site_names}(
         ntuple(identity, length(site_names)))
+    node_names = Tuple(keys(graph.nodes))
+    node_indices = NamedTuple{node_names}(
+        ntuple(identity, length(node_names)))
     FactorPlan(
         declaration, graph, bindings, canonical_conditions, site_indices,
+        node_indices,
         BRM.NativePPLAxis(:observation, observation_keys), output_site)
 end
 
@@ -720,6 +740,7 @@ BRM.LogDensityProblems.dimension(prepared::FactorPrepared) =
 """Reusable primal storage for an ordered factor-graph evaluation."""
 mutable struct FactorBuffers{T,V<:Vector{T}}
     values::V
+    node_values::V
     pointwise_loglikelihood::V
 end
 
@@ -737,9 +758,10 @@ function FactorWorkspace(prepared::FactorPrepared,
     isconcretetype(T) || throw(ArgumentError(
         "native PPL factor workspace element type must be concrete; got $T"))
     values = zeros(T, length(prepared.plan.graph.sites))
+    node_values = zeros(T, length(prepared.plan.graph.nodes))
     pointwise = zeros(T, length(prepared.plan.observation_axis))
     FactorWorkspace{T,FactorBuffers{T,Vector{T}},Vector{T},Nothing}(
-        FactorBuffers(values, pointwise),
+        FactorBuffers(values, node_values, pointwise),
         zeros(T, BRM.LogDensityProblems.dimension(prepared)), nothing)
 end
 
@@ -833,6 +855,9 @@ workspace(prepared::FactorPrepared, ::Type{T}, backend) where {T<:AbstractFloat}
 @inline _factor_argument(::InputValue{Name}, plan, buffers,
                          ::Type{T}) where {Name,T} =
     T(getproperty(plan.bindings, Name))
+@inline _factor_argument(::NodeValue{Name}, plan, buffers,
+                         ::Type{T}) where {Name,T} =
+    buffers.node_values[getproperty(plan.node_indices, Name)]
 @inline _factor_argument(::SiteValue{Name}, plan, buffers,
                          ::Type{T}) where {Name,T} =
     buffers.values[getproperty(plan.site_indices, Name)]
@@ -906,15 +931,35 @@ end
         position::AbstractVector{T}, prepared::FactorPrepared,
         buffers::FactorBuffers{T}) where {S,Tr,F,T} = zero(T)
 
-@generated function _factor_execute_sites!(::Val{Names}, sites::Sites,
+@inline function _factor_node_logdensity!(::Val{Name}, node::ExpFactorNode,
         position::AbstractVector{T}, prepared::FactorPrepared,
-        buffers::FactorBuffers{T}) where {Names,Sites<:Tuple,T}
-    calls = Any[
-        :(_factor_site_logdensity!(
-            Val($(QuoteNode(name))), getfield(sites, $index),
-            position, prepared, buffers))
-        for (index, name) in enumerate(Names)
-    ]
+        buffers::FactorBuffers{T}) where {Name,T}
+    input = _factor_argument(node.input, prepared.plan, buffers, T)
+    buffers.node_values[getproperty(prepared.plan.node_indices, Name)] =
+        exp(input)
+    zero(T)
+end
+
+@generated function _factor_execute_schedule!(::Val{Names},
+        ::Val{SiteNames}, sites::Sites,
+        ::Val{NodeNames}, nodes::Nodes,
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {
+            Names,SiteNames,Sites<:Tuple,NodeNames,Nodes<:Tuple,T}
+    calls = Any[]
+    for name in Names
+        site_index = findfirst(==(name), SiteNames)
+        entry, callee = if site_index === nothing
+            node_index = findfirst(==(name), NodeNames)
+            node_index === nothing && error("unknown factor schedule entry $name")
+            (:(getfield(nodes, $node_index)), :_factor_node_logdensity!)
+        else
+            (:(getfield(sites, $site_index)), :_factor_site_logdensity!)
+        end
+        push!(calls, :($callee(
+            Val($(QuoteNode(name))), $entry,
+            position, prepared, buffers)))
+    end
     isempty(calls) && return :(zero(T))
     foldl((left, right) -> :($left + $right), calls)
 end
@@ -922,9 +967,10 @@ end
 @inline function _factor_logdensity_kernel(position::AbstractVector{T},
                                            prepared::FactorPrepared,
                                            buffers::FactorBuffers{T}) where {T}
-    names = Tuple(keys(prepared.plan.graph.sites))
-    _factor_execute_sites!(
-        Val(names), Tuple(prepared.plan.graph.sites),
+    graph = prepared.plan.graph
+    _factor_execute_schedule!(
+        Val(graph.schedule), Val(Tuple(keys(graph.sites))),
+        Tuple(graph.sites), Val(Tuple(keys(graph.nodes))), Tuple(graph.nodes),
         position, prepared, buffers)
 end
 
@@ -940,6 +986,9 @@ function _factor_check_workspace_layout(workspace::FactorWorkspace,
     length(workspace.primal.values) == length(prepared.plan.graph.sites) ||
         throw(DimensionMismatch(
             "native PPL factor workspace has the wrong site-value layout"))
+    length(workspace.primal.node_values) ==
+        length(prepared.plan.graph.nodes) || throw(DimensionMismatch(
+            "native PPL factor workspace has the wrong node-value layout"))
     length(workspace.primal.pointwise_loglikelihood) ==
         length(prepared.plan.observation_axis) || throw(DimensionMismatch(
             "native PPL factor workspace has the wrong observation layout"))
@@ -958,6 +1007,7 @@ function _factor_check_execution(workspace::FactorWorkspace,
         "match workspace eltype $(eltype(workspace))"))
     _factor_check_workspace_layout(workspace, prepared)
     for buffer in (workspace.gradient, workspace.primal.values,
+                   workspace.primal.node_values,
                    workspace.primal.pointwise_loglikelihood)
         Base.mightalias(position, buffer) && throw(ArgumentError(
             "native PPL factor position must not alias workspace storage"))
@@ -1003,7 +1053,8 @@ function rebind(prepared::FactorPrepared, conditions;
         rebound = FactorPlan(
             rebound.declaration, rebound.graph, rebound.bindings,
             rebound.conditions,
-            rebound.site_indices, prepared.plan.observation_axis,
+            rebound.site_indices, rebound.node_indices,
+            prepared.plan.observation_axis,
             rebound.output_site)
     end
     prepare(rebound; T)
@@ -1052,6 +1103,7 @@ function _factor_check_query_output(output::AbstractVector,
             "native PPL factor output eltype $(eltype(output)) does not " *
             "match prepared eltype $(eltype(prepared))"))
     for buffer in (work.gradient, work.primal.values,
+                   work.primal.node_values,
                    work.primal.pointwise_loglikelihood)
         Base.mightalias(output, buffer) && throw(ArgumentError(
             "native PPL factor output must not alias workspace storage"))
@@ -1183,16 +1235,30 @@ end
     nothing
 end
 
-@generated function _factor_sample_sites!(rng::BRM.AbstractRNG,
-        ::Val{Names}, sites::Sites, position::AbstractVector{T},
+@generated function _factor_sample_schedule!(rng::BRM.AbstractRNG,
+        ::Val{Names}, ::Val{SiteNames}, sites::Sites,
+        ::Val{NodeNames}, nodes::Nodes,
+        position::AbstractVector{T},
         output::AbstractVector{T}, prepared::FactorPrepared,
-        buffers::FactorBuffers{T}) where {Names,Sites<:Tuple,T}
-    calls = Any[
-        :(_factor_site_sample!(
-            rng, Val($(QuoteNode(name))), getfield(sites, $index),
-            position, output, prepared, buffers))
-        for (index, name) in enumerate(Names)
-    ]
+        buffers::FactorBuffers{T}) where {
+            Names,SiteNames,Sites<:Tuple,NodeNames,Nodes<:Tuple,T}
+    calls = Any[]
+    for name in Names
+        site_index = findfirst(==(name), SiteNames)
+        call = if site_index === nothing
+            node_index = findfirst(==(name), NodeNames)
+            node_index === nothing && error("unknown factor schedule entry $name")
+            :(_factor_node_logdensity!(
+                Val($(QuoteNode(name))), getfield(nodes, $node_index),
+                position, prepared, buffers))
+        else
+            :(_factor_site_sample!(
+                rng, Val($(QuoteNode(name))),
+                getfield(sites, $site_index), position, output,
+                prepared, buffers))
+        end
+        push!(calls, call)
+    end
     Expr(:block, calls..., :(output))
 end
 
@@ -1202,9 +1268,10 @@ function simulate_prior!(rng::BRM.AbstractRNG, position::AbstractVector,
     _factor_check_query_output(
         output, work, prepared, position,
         BRM.NativePPLPosteriorPredictive())
-    names = Tuple(keys(prepared.plan.graph.sites))
-    _factor_sample_sites!(
-        rng, Val(names), Tuple(prepared.plan.graph.sites),
+    graph = prepared.plan.graph
+    _factor_sample_schedule!(
+        rng, Val(graph.schedule), Val(Tuple(keys(graph.sites))),
+        Tuple(graph.sites), Val(Tuple(keys(graph.nodes))), Tuple(graph.nodes),
         position, output, prepared, work.primal)
 end
 
@@ -1294,6 +1361,7 @@ function _factor_check_batch_output(output::AbstractMatrix,
     Base.mightalias(output, positions) && throw(ArgumentError(
         "native PPL factor batch output must not alias draw positions"))
     for buffer in (work.gradient, work.primal.values,
+                   work.primal.node_values,
                    work.primal.pointwise_loglikelihood)
         Base.mightalias(output, buffer) && throw(ArgumentError(
             "native PPL factor batch output must not alias workspace storage"))
