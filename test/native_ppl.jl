@@ -27,7 +27,7 @@ function direct_native_model(family::Symbol, transform::Symbol;
     end
 
     transform_name = transform === :identity ? nothing :
-        Symbol("#native_ppl_", transform, "#", location, "#x")
+        Symbol(transform, :_x_for_, location)
     transform_declaration = transform === :center ? NP.center(:x) :
         transform === :zscale ? NP.zscale(:x) : nothing
     affine_input = transform_name === nothing ? :x : transform_name
@@ -65,8 +65,10 @@ function direct_multi_gaussian_model()
     NP.model(
         inputs=(; x=NP.input(), w=NP.input()),
         parameters=(; beta_mu=coefficients, sigma),
-        nodes=(; x_scaled=NP.zscale(:x), w_centered=NP.center(:w),
-               mu=NP.affine((:x_scaled, :w_centered), :beta_mu)),
+        nodes=(; zscale_x_for_mu=NP.zscale(:x),
+               center_w_for_mu=NP.center(:w),
+               mu=NP.affine(
+                   (:zscale_x_for_mu, :center_w_for_mu), :beta_mu)),
         observations=(; y=NP.broadcasted(NP.normal(:y, :mu, :sigma))))
 end
 
@@ -130,11 +132,16 @@ function check_plan_structure(left, right)
     @test map(typeof, values(left.queries)) == map(typeof, values(right.queries))
     @test sprint(show, left) == sprint(show, right)
     if !isempty(left.nodes.transforms)
-        left_transform = only(values(left.nodes.transforms))
-        right_transform = only(values(right.nodes.transforms))
-        @test left_transform.mean == right_transform.mean
-        if left_transform isa BRM.NativePPLZScaleNode
-            @test left_transform.scale == right_transform.scale
+        left_transforms = values(left.nodes.transforms)
+        right_transforms = values(right.nodes.transforms)
+        @test length(left_transforms) == length(right_transforms)
+        for (left_transform, right_transform) in
+            zip(left_transforms, right_transforms)
+            @test typeof(left_transform) === typeof(right_transform)
+            @test left_transform.mean == right_transform.mean
+            if left_transform isa BRM.NativePPLZScaleNode
+                @test left_transform.scale == right_transform.scale
+            end
         end
     end
     if hasproperty(left.factors, :scale_prior)
@@ -167,6 +174,16 @@ NP.@model function macro_scalar_gaussian(x::AbstractVector{<:Real})
     sigma ~ Exponential(2.0)
     mu = intercept + slope * x
     y ~ Normal(mu, sigma)
+end
+
+NP.@model function macro_multi_gaussian(
+    x::AbstractVector{<:Real}, w::AbstractVector{<:Real})
+    intercept ~ Normal()
+    beta_x ~ Normal()
+    beta_w ~ Normal()
+    sigma ~ Exponential(2.0)
+    mu = intercept + beta_x * zscale(x) + beta_w * center(w)
+    @. y ~ Normal(mu, sigma)
 end
 
 NP.@model function macro_bernoulli_center(
@@ -1876,19 +1893,21 @@ end
         NP.substitute(declaration; x=data.x, w=data.w); y=data.y)
     plan = NP.compile(instance)
     @test keys(plan.inputs.predictors) == (:x, :w)
-    @test keys(plan.nodes.transforms) == (:x_scaled, :w_centered)
+    @test keys(plan.nodes.transforms) ==
+          (:zscale_x_for_mu, :center_w_for_mu)
     @test BRM.native_affine_inputs(plan.nodes.location) ==
-          (:x_scaled, :w_centered)
+          (:zscale_x_for_mu, :center_w_for_mu)
     @test plan.nodes.location.slope_indices == (2, 3)
     @test plan.parameters.coefficients.unconstrained == 1:3
     @test plan.parameters.scale.unconstrained == 4:4
 
     prepared = NP.prepare(plan)
-    @test keys(prepared.predictors) == (:x_scaled, :w_centered)
+    @test keys(prepared.predictors) ==
+          (:zscale_x_for_mu, :center_w_for_mu)
     expected_x = (data.x .- 1.0) ./ sqrt(26 / 3)
     expected_w = data.w .- sum(data.w) / length(data.w)
-    @test prepared.predictors.x_scaled ≈ expected_x
-    @test prepared.predictors.w_centered ≈ expected_w
+    @test prepared.predictors.zscale_x_for_mu ≈ expected_x
+    @test prepared.predictors.center_w_for_mu ≈ expected_w
     @test_throws ArgumentError prepared.predictor
 
     position = [0.3, -0.4, 0.2, log(0.8)]
@@ -1912,8 +1931,19 @@ end
     rebound = NP.rebind(
         prepared, (; x=[10.0, 14.0], w=[3.0, 9.0]);
         freeze_constants=false)
-    @test rebound.predictors.x_scaled ≈ [-1 / sqrt(2), 1 / sqrt(2)]
-    @test rebound.predictors.w_centered == [-3.0, 3.0]
+    @test rebound.predictors.zscale_x_for_mu ≈
+          [-1 / sqrt(2), 1 / sqrt(2)]
+    @test rebound.predictors.center_w_for_mu == [-3.0, 3.0]
+
+    macro_instance = NP.condition(
+        macro_multi_gaussian(data.x, data.w); y=data.y)
+    @test typeof(macro_instance.declaration) === typeof(declaration)
+    macro_plan = NP.compile(macro_instance)
+    check_plan_structure(plan, macro_plan)
+    macro_prepared = NP.prepare(macro_plan)
+    macro_work = NP.workspace(macro_prepared)
+    @test NP.logdensity!(macro_work, macro_prepared, position) ≈
+          expected_density
 end
 
 

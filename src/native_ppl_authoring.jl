@@ -863,9 +863,9 @@ function _lower_brmi(brmi::BRM.BRMI)
     end
 
     transform_name = if predictor_term.transform === :center
-        Symbol("#native_ppl_center#", location, "#", predictor_name)
+        Symbol(:center_, predictor_name, :_for_, location)
     elseif predictor_term.transform === :zscale
-        Symbol("#native_ppl_zscale#", location, "#", predictor_name)
+        Symbol(:zscale_, predictor_name, :_for_, location)
     else
         nothing
     end
@@ -1088,46 +1088,60 @@ function _syntax_affine_assignment(statement,
     lhs, rhs = statement.args
     lhs isa Symbol || return nothing
     rhs isa Expr && rhs.head === :call &&
-        first(rhs.args) in (:+, :.+) && length(rhs.args) == 3 || return nothing
+        first(rhs.args) in (:+, :.+) && length(rhs.args) >= 3 || return nothing
     terms = rhs.args[2:end]
-    intercept_index = findfirst(
-        term -> term isa Symbol && term in scalar_priors, terms)
-    intercept_index === nothing && return nothing
-    intercept = terms[intercept_index]
-    product = terms[3 - intercept_index]
-    product isa Expr && product.head === :call &&
-        first(product.args) in (:*, :.*) && length(product.args) == 3 ||
-        return nothing
-    product_terms = product.args[2:end]
-    slope_index = findfirst(
-        term -> term isa Symbol && term in scalar_priors && term !== intercept,
-        product_terms)
-    slope_index === nothing && return nothing
-    slope = product_terms[slope_index]
-    predictor_expression = product_terms[3 - slope_index]
+    intercepts = [term for term in terms
+                  if term isa Symbol && term in scalar_priors]
+    length(intercepts) == 1 || return nothing
+    intercept = only(intercepts)
 
-    transform_name = nothing
-    transform_value = nothing
-    predictor_name = if predictor_expression isa Symbol
-        predictor_expression
-    elseif predictor_expression isa Expr &&
-           predictor_expression.head === :call
-        function_name, arguments = _syntax_call(
-            predictor_expression, "affine predictor transform")
-        function_name in (:center, :zscale, :standardize) || return nothing
-        length(arguments) == 1 && only(arguments) isa Symbol ||
-            throw(ArgumentError(
-                "native PPL @model $function_name requires one named input"))
-        raw_input = only(arguments)
-        canonical = function_name === :center ? :center : :zscale
-        transform_name = Symbol(
-            "#native_ppl_", canonical, "#", lhs, "#", raw_input)
-        transform_value = Expr(
-            :call, _syntax_ref(canonical), QuoteNode(raw_input))
-        transform_name
-    else
-        return nothing
+    slopes = Symbol[]
+    predictor_names = Symbol[]
+    transform_names = Symbol[]
+    transform_values = Any[]
+    for product in terms
+        product === intercept && continue
+        product isa Expr && product.head === :call &&
+            first(product.args) in (:*, :.*) && length(product.args) == 3 ||
+            return nothing
+        product_terms = product.args[2:end]
+        coefficient_indices = findall(
+            term -> term isa Symbol && term in scalar_priors &&
+                    term !== intercept,
+            product_terms)
+        length(coefficient_indices) == 1 || return nothing
+        coefficient_index = only(coefficient_indices)
+        slope = product_terms[coefficient_index]
+        predictor_expression = product_terms[3 - coefficient_index]
+        predictor_name = if predictor_expression isa Symbol
+            predictor_expression
+        elseif predictor_expression isa Expr &&
+               predictor_expression.head === :call
+            function_name, arguments = _syntax_call(
+                predictor_expression, "affine predictor transform")
+            function_name in (:center, :zscale, :standardize) || return nothing
+            length(arguments) == 1 && only(arguments) isa Symbol ||
+                throw(ArgumentError(
+                    "native PPL @model $function_name requires one named input"))
+            raw_input = only(arguments)
+            canonical = function_name === :center ? :center : :zscale
+            transform_name = Symbol(canonical, :_, raw_input, :_for_, lhs)
+            push!(transform_names, transform_name)
+            push!(transform_values, Expr(
+                :call, _syntax_ref(canonical), QuoteNode(raw_input)))
+            transform_name
+        else
+            return nothing
+        end
+        push!(slopes, slope)
+        push!(predictor_names, predictor_name)
     end
+    isempty(slopes) && return nothing
+    length(unique(slopes)) == length(slopes) || throw(ArgumentError(
+        "native PPL @model affine coefficients must be used once each"))
+    length(unique(predictor_names)) == length(predictor_names) ||
+        throw(ArgumentError(
+            "native PPL @model affine predictor paths must be unique"))
 
     coefficient_name = Symbol(:beta_, lhs)
     parameter_value = Expr(
@@ -1136,12 +1150,13 @@ function _syntax_affine_assignment(statement,
              Expr(:kw, :transform, Expr(:call, _syntax_ref(:Identity))),
              Expr(:kw, :prior, Expr(:call, _syntax_ref(:StandardNormal)))),
         Expr(:call, _syntax_ref(:RealSupport)),
-        QuoteNode((intercept, slope)))
+        QuoteNode((intercept, slopes...)))
     affine_value = Expr(
-        :call, _syntax_ref(:affine), QuoteNode(predictor_name),
+        :call, _syntax_ref(:affine), QuoteNode(Tuple(predictor_names)),
         QuoteNode(coefficient_name))
-    (; location=lhs, intercept, slope, coefficient_name, parameter_value,
-       transform_name, transform_value, affine_value)
+    (; location=lhs, intercept, slopes=Tuple(slopes), coefficient_name,
+       parameter_value, transform_names=Tuple(transform_names),
+       transform_values=Tuple(transform_values), affine_value)
 end
 
 function _syntax_observation(lhs, rhs; broadcasted::Bool)
@@ -1267,14 +1282,16 @@ function _model_function_syntax(definition)
                     parameter_names, affine_declaration.coefficient_name)
                 pushfirst!(
                     parameter_values, affine_declaration.parameter_value)
-                if affine_declaration.transform_name !== nothing
-                    push!(node_names, affine_declaration.transform_name)
-                    push!(node_values, affine_declaration.transform_value)
+                for (transform_name, transform_value) in zip(
+                    affine_declaration.transform_names,
+                    affine_declaration.transform_values)
+                    push!(node_names, transform_name)
+                    push!(node_values, transform_value)
                 end
                 push!(node_names, affine_declaration.location)
                 push!(node_values, affine_declaration.affine_value)
                 push!(consumed_scalar_priors, affine_declaration.intercept)
-                push!(consumed_scalar_priors, affine_declaration.slope)
+                union!(consumed_scalar_priors, affine_declaration.slopes)
             end
         else
             throw(ArgumentError(
