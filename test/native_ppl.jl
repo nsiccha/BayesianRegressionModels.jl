@@ -156,6 +156,25 @@ function multi_native_brmi(family::Symbol, data)
     end
 end
 
+function deterministic_preprocessing_composition(family::Symbol, data)
+    preprocessing_model = NP.model(
+        inputs=(; raw=NP.input()),
+        nodes=(; scaled=NP.zscale(:raw)),
+        observations=(;))
+    preprocessing = NP.component(
+        :preprocessing,
+        NP.substitute(preprocessing_model; raw=data.x))
+    regression_model = direct_native_model(family, :identity)
+    regression = NP.component(
+        :regression,
+        NP.condition(
+            NP.substitute(
+                regression_model;
+                x=NP.output(preprocessing, :scaled));
+            y=data.y))
+    NP.compose(preprocessing, regression)
+end
+
 function check_plan_structure(left, right)
     @test typeof(left) === typeof(right)
     @test keys(left.axes) == keys(right.axes)
@@ -2349,6 +2368,90 @@ end
     @test NP.simulate(
         MersenneTwister(909), composed_work, prepared, position) ==
           NP.simulate(MersenneTwister(909), direct_work, direct, position)
+end
+
+
+@testset "composed preprocessing family workflows" begin
+    raw_x = [-1.0, 0.0, 2.0, 4.0]
+    raw_name = NP.qualified_name(:preprocessing, :raw)
+    response_name = NP.qualified_name(:regression, :y)
+    @test NP.qualified_name(:a, :b_c) != NP.qualified_name(:a_b, :c)
+
+    for family in (:gaussian, :bernoulli, :poisson)
+        response = family === :gaussian ? [0.2, -0.1, 1.1, 0.7] :
+            family === :bernoulli ? Bool[false, false, true, true] :
+            [0, 1, 3, 6]
+        position = family === :gaussian ? [0.2, -0.4, log(0.8)] :
+            family === :bernoulli ? [-0.3, 0.6] : [0.1, 0.2]
+        data = (; x=raw_x, y=response)
+        composition = deterministic_preprocessing_composition(family, data)
+        composed_plan = NP.compile(composition)
+        direct_plan = NP.bind(conditioned(
+            direct_native_model(family, :zscale), data))
+        composed = check_transformed_execution(
+            composed_plan, direct_plan, position)
+        direct = NP.prepare(direct_plan)
+        @test composed.predictor == direct.predictor
+        @test steady_state_allocations(
+            NP.workspace(composed, Float64, DI.AutoEnzyme()),
+            composed, position) == (; primal=0, gradient=0)
+
+        new_x = [10.0, 14.0, 20.0]
+        new_y = family === :gaussian ? [0.4, 0.9, 1.3] :
+            family === :bernoulli ? Bool[false, true, true] : [2, 4, 7]
+        composed_bindings = NamedTuple{(raw_name, response_name)}(
+            (new_x, new_y))
+        for freeze_constants in (true, false)
+            composed_rebound = NP.rebind(
+                composed, composed_bindings; freeze_constants)
+            direct_rebound = NP.rebind(
+                direct, (; x=new_x, y=new_y); freeze_constants)
+            @test composed_rebound.predictor == direct_rebound.predictor
+            composed_work = NP.workspace(
+                composed_rebound, Float64, DI.AutoEnzyme())
+            direct_work = NP.workspace(
+                direct_rebound, Float64, DI.AutoEnzyme())
+            composed_density, composed_gradient =
+                NP.logdensity_and_gradient!(
+                    composed_work, composed_rebound, position)
+            direct_density, direct_gradient = NP.logdensity_and_gradient!(
+                direct_work, direct_rebound, position)
+            @test composed_density ≈ direct_density
+            @test composed_gradient ≈ direct_gradient
+
+            composed_prediction = NP.rebind(
+                composed,
+                NamedTuple{(raw_name,)}((new_x,)); freeze_constants)
+            direct_prediction = NP.rebind(
+                direct, (; x=new_x); freeze_constants)
+            @test !NP.has_response(composed_prediction)
+            @test composed_prediction.predictor == direct_prediction.predictor
+            @test NP.simulate(
+                MersenneTwister(910), NP.workspace(composed_prediction),
+                composed_prediction, position) == NP.simulate(
+                    MersenneTwister(910), NP.workspace(direct_prediction),
+                    direct_prediction, position)
+        end
+
+        @test_throws ArgumentError NP.rebind(
+            composed, NamedTuple{(response_name,)}((new_y,)))
+        @test_throws DimensionMismatch NP.rebind(
+            composed,
+            NamedTuple{(raw_name, response_name)}((new_x[1:2], new_y)))
+    end
+
+    source = NP.component(:source, macro_gaussian_identity(raw_x))
+    active_condition = NP.component(
+        :active_condition,
+        NP.condition(composable_gaussian(raw_x); y=NP.output(source, :y)))
+    @test capability_error(
+        () -> NP.lower(NP.compose(source, active_condition))).capability ==
+          :active_condition
+
+    empty_component = NP.model(
+        inputs=(; x=NP.input()), observations=(;))
+    @test capability_error(
+        () -> NP.bind(empty_component, (; x=raw_x))).capability == :outcomes
 end
 
 
