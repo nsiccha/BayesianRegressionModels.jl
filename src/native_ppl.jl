@@ -2210,6 +2210,8 @@ function execute_draws(rng::BRM.AbstractRNG, work::Workspace,
     execute_draws!(rng, outputs, work, prepared, positions, queries)
 end
 
+include("native_ppl_authoring.jl")
+
 export Plan, Prepared, Workspace, CapabilityError
 export OutputSignature, BatchOutputSignature
 export DenseVectorLayout, DenseMatrixLayout
