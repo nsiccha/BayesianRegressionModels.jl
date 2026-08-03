@@ -2269,6 +2269,17 @@ end
     @test source.instance.bindings.x === raw_x
     @test sink.instance.bindings.x === deterministic
 
+    parameter_sink = NP.component(
+        :parameter_sink, composable_gaussian(parameter))
+    stochastic_sink = NP.component(
+        :stochastic_sink, composable_gaussian(stochastic))
+    parameter_composition = NP.compose(source, parameter_sink)
+    stochastic_composition = NP.compose(source, stochastic_sink)
+    @test parameter_composition.components.parameter_sink.instance.
+          bindings.x === parameter
+    @test stochastic_composition.components.stochastic_sink.instance.
+          bindings.x === stochastic
+
     err = capability_error(() -> NP.compile(composition))
     @test err.capability == :composition_compilation
     @test occursin("derives activity", err.detail)
