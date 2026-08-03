@@ -1890,15 +1890,21 @@ function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
     bindings = NamedTuple{binding_names}(binding_values)
     output_factor = getproperty(
         plan.graph.sites, factor_output_site(plan)).factor
-    if output_factor isa WeightedSiteFactor &&
-       observation_weight_kind(output_factor.weight) === :frequency
+    if output_factor isa WeightedSiteFactor
         source = input_value_name(output_factor.values)
         original = getproperty(plan.bindings, source)
         converted = getproperty(bindings, source)
-        all(index -> converted[index] == original[index], eachindex(original)) ||
-            throw(ArgumentError(
-                "native PPL frequency weights from `$source` cannot be " *
-                "represented exactly as $T"))
+        kind = observation_weight_kind(output_factor.weight)
+        if kind === :frequency
+            all(index -> converted[index] == original[index],
+                eachindex(original)) || throw(ArgumentError(
+                    "native PPL frequency weights from `$source` cannot be " *
+                    "represented exactly as $T"))
+        elseif kind === :analytic
+            all(>(zero(T)), converted) || throw(ArgumentError(
+                "native PPL analytic weights from `$source` cannot be " *
+                "represented as positive $T values"))
+        end
     end
     names = Tuple(keys(plan.conditions))
     values = map(names) do name

@@ -8293,7 +8293,7 @@ end
     @test NP.observation_weight_source(weight) === :replicates
     @test_throws ArgumentError NP.observation_weight(:probability, :weights)
 
-    weighted = NP.weighted_observation(
+    weighted_declaration = NP.weighted_observation(
         NP.normal(:y, :mu, :sigma), weight)
     declaration = NP.model(
         inputs=(; x=NP.input(), replicates=NP.input()),
@@ -8305,7 +8305,7 @@ end
                 NP.PositiveSupport(), (:sigma,);
                 transform=NP.Exp(), prior=NP.Exponential(2.0))),
         nodes=(; mu=NP.affine(:x, :beta_mu)),
-        observations=(; y=NP.broadcasted(weighted)))
+        observations=(; y=NP.broadcasted(weighted_declaration)))
     graph = NP.factor_graph(
         declaration;
         bindings=(; x=[-1.0, 0.5], replicates=[1, 4]),
@@ -8317,13 +8317,12 @@ end
     @test NP.observation_weight_kind(factor.weight) === :analytic
     @test NP.site_factor_dependencies(factor) == (:mu, :sigma)
 
-    err = capability_error(() -> NP.model(
+    err = argument_error(() -> NP.model(
         inputs=(; x=NP.input()),
         parameters=declaration.parameters,
         nodes=declaration.nodes,
         observations=declaration.observations))
-    @test err.capability == :graph_identity
-    @test occursin("replicates", err.detail)
+    @test occursin("replicates", err.msg)
 
     function weighted_prepared(kind, values)
         weight = NP.observation_weight(kind, :observation_weights)
@@ -8429,6 +8428,133 @@ end
         :tau_g_group, :b_g_group, :beta_mu, :sigma,
         :r_mu_g_group, :mu, :y)
     @test SBBRMI(weighted_brmi; mod=@__MODULE__) isa SBBRMI
+
+    for (kind, values) in (
+            (:analytic, [1.0, 4.0, 2.5]),
+            (:frequency, [1, 3, 0]),
+            (:power, [0.25, 1.0, 2.5]))
+        prepared = weighted_prepared(kind, values)
+        work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
+        density, gradient = NP.logdensity_and_gradient!(
+            work, prepared, position)
+        @test density == NP.logdensity!(work, prepared, position)
+        finite_difference = similar(gradient)
+        step = 1e-6
+        plus = copy(position)
+        minus = copy(position)
+        for coordinate in eachindex(position)
+            plus[coordinate] += step
+            minus[coordinate] -= step
+            finite_difference[coordinate] = (
+                NP.logdensity!(work, prepared, plus) -
+                NP.logdensity!(work, prepared, minus)) / (2step)
+            plus[coordinate] = position[coordinate]
+            minus[coordinate] = position[coordinate]
+        end
+        @test gradient ≈ finite_difference rtol=2e-5 atol=2e-6
+        @test factor_steady_state_allocations(
+            work, prepared, position) == (; primal=0, gradient=0)
+    end
+
+    replay_bindings = (;
+        x=[-0.5, 1.5], observation_weights=[9.0, 0.25])
+    replay_response = [0.1, 1.0]
+    replay = NP.rebind(
+        analytic_prepared, (; y=replay_response);
+        bindings=replay_bindings)
+    replay_work = NP.workspace(replay)
+    replay_location = 0.2 .+ 0.4 .* replay_bindings.x
+    replay_pointwise = logpdf.(Normal.(
+        replay_location, scale ./ sqrt.(replay_bindings.observation_weights)),
+        replay_response)
+    @test NP.evaluate(
+        replay_work, replay, position,
+        NP.PointwiseLogLikelihood()) ≈ replay_pointwise
+    prediction_only = NP.rebind(
+        analytic_prepared, (;); bindings=replay_bindings)
+    prediction_work = NP.workspace(prediction_only)
+    prediction_rng = MersenneTwister(709)
+    prediction_expected_rng = MersenneTwister(709)
+    @test NP.simulate(
+        prediction_rng, prediction_work, prediction_only, position) ==
+        replay_location .+ scale ./
+            sqrt.(replay_bindings.observation_weights) .*
+            [randn(prediction_expected_rng) for _ in replay_location]
+
+    positions = [position'; (position .+ [0.1, -0.05, 0.02])']
+    pointwise_draws = zeros(2, 3)
+    predictive_draws = zeros(2, 3)
+    bundle = (;
+        pointwise=zeros(2, 3),
+        predictive=zeros(2, 3))
+    queries = (;
+        pointwise=NP.PointwiseLogLikelihood(),
+        predictive=NP.PosteriorPredictive())
+    NP.evaluate_draws!(
+        pointwise_draws, analytic_work, analytic_prepared, positions,
+        NP.PointwiseLogLikelihood())
+    for draw in axes(positions, 1)
+        @test pointwise_draws[draw, :] ≈ NP.evaluate(
+            analytic_work, analytic_prepared, @view(positions[draw, :]),
+            NP.PointwiseLogLikelihood())
+    end
+    bundle_rng = MersenneTwister(710)
+    bundle_expected_rng = MersenneTwister(710)
+    NP.execute_draws!(
+        bundle_rng, bundle, analytic_work, analytic_prepared,
+        positions, queries)
+    NP.simulate_draws!(
+        bundle_expected_rng, predictive_draws, analytic_work,
+        analytic_prepared, positions)
+    @test bundle.pointwise ≈ pointwise_draws
+    @test bundle.predictive == predictive_draws
+    @test factor_batch_allocations(
+        analytic_work, analytic_prepared, positions,
+        zeros(2, 3), zeros(2, 3), zeros(2, 3),
+        (; linear=zeros(2, 3), pointwise=zeros(2, 3),
+           predictive=zeros(2, 3))) ==
+          (; linear=0, pointwise=0, predictive=0, bundle=0)
+
+    @test_throws ArgumentError weighted_prepared(:analytic, [1.0, 0.0, 2.0])
+    @test_throws ArgumentError weighted_prepared(:analytic, [1.0, Inf, 2.0])
+    @test_throws ArgumentError weighted_prepared(:frequency, [1.0, 1.5, 2.0])
+    @test_throws ArgumentError weighted_prepared(:frequency, [1, -1, 2])
+    @test_throws ArgumentError weighted_prepared(:power, [1.0, -0.1, 2.0])
+    @test_throws ArgumentError weighted_prepared(:unit, [1.0, 0.0, 1.0])
+    @test_throws DimensionMismatch weighted_prepared(:power, [1.0, 2.0])
+    @test_throws ArgumentError NP.prepare(
+        NP.bind(
+            weighted_prepared(:frequency, [1, 2, 3]).plan.declaration,
+            (; x=[-1.0, 0.5, 2.0],
+               observation_weights=[16_777_217, 2, 3]);
+            conditions=(; y=response));
+        T=Float32)
+
+    analytic_poisson = NP.model(
+        inputs=(; rate=NP.input(), precision=NP.input()),
+        parameters=(;), nodes=(;),
+        observations=(; y=NP.broadcasted(NP.weighted_observation(
+            NP.poisson(:y, :rate),
+            NP.observation_weight(:analytic, :precision)))))
+    @test capability_error(() -> NP.prepare(NP.bind(
+        analytic_poisson,
+        (; rate=[1.0, 2.0], precision=[1.0, 2.0]);
+        conditions=(; y=[0, 1])))).capability == :observation_weights
+
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function probability_weighted(x, p)
+            beta[(:x,)] ~ StandardNormal()
+            mu = dot(beta, (x,))
+            @. y ~ weighted(Normal(mu, mu), pweights(p))
+        end)))
+    @test occursin("ProbabilityWeights", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function raw_weighted(x)
+            beta[(:x,)] ~ StandardNormal()
+            mu = dot(beta, (x,))
+            @. y ~ weighted(Normal(mu, mu), [1.0, 2.0])
+        end)))
+    @test occursin("observation-weight constructor", err.msg)
 end
 
 @testset "native PPL workflow queries and replay" begin
