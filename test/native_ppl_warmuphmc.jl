@@ -132,3 +132,45 @@ end
     @test all(>(1e-6), vec(std(draws; dims=2)))
     @test result.n_divergent_samples == 0
 end
+
+@testset "distributional factor DAG samples end-to-end with WarmupHMC" begin
+    x = collect(range(-1.4, 1.4; length=20))
+    z = [sin(0.37 * row) for row in eachindex(x)]
+    residual = [0.18 * sin(0.71 * row) for row in eachindex(x)]
+    mu = @. 0.35 + 0.8 * x
+    sigma = @. exp(-0.25 + 0.3 * z)
+    data = (; x, z, y=mu .+ sigma .* residual)
+    brmi = @brm data begin
+        mu ~ 1 + x
+        log_sigma ~ 1 + z
+        y ~ Normal(mu, exp(log_sigma))
+    end
+    prepared = NP.prepare(NP.compile(brmi))
+    problem = NP.LogDensityProblem(prepared, DI.AutoEnzyme())
+
+    dimension = LogDensityProblems.dimension(problem)
+    @test dimension == 4
+    density, gradient = LogDensityProblems.logdensity_and_gradient(
+        problem, zeros(dimension))
+    @test isfinite(density)
+    @test all(isfinite, gradient)
+
+    result = WarmupHMC.adaptive_warmup_mcmc(
+        Xoshiro(0x20260804),
+        problem;
+        n_draws=50,
+        n_evaluations=180,
+        stepsize_adaptation_limit=20,
+        max_tree_depth=8,
+        progress=nothing,
+        monitor_ess=false,
+        nonlinear_adapt=false,
+    )
+
+    draws = result.posterior_position
+    @test size(draws, 1) == dimension
+    @test size(draws, 2) >= 50
+    @test all(isfinite, draws)
+    @test all(>(1e-6), vec(std(draws; dims=2)))
+    @test result.n_divergent_samples == 0
+end

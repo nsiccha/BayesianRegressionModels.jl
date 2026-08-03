@@ -21,11 +21,14 @@ Base.eltype(::NativePPLInput{Name,Role,A,T}) where {Name,Role,A,T} = T
 abstract type NativePPLSupport end
 struct NativePPLRealSupport <: NativePPLSupport end
 struct NativePPLPositiveSupport <: NativePPLSupport end
+struct NativePPLCholeskyCorrelationSupport{K} <: NativePPLSupport end
 
 """A typed map from an unconstrained coordinate to a parameter's support."""
 abstract type NativePPLTransform{S<:NativePPLSupport} end
 struct NativePPLIdentityTransform <: NativePPLTransform{NativePPLRealSupport} end
 struct NativePPLExpTransform <: NativePPLTransform{NativePPLPositiveSupport} end
+struct NativePPLCholeskyCorrelationTransform{K} <:
+       NativePPLTransform{NativePPLCholeskyCorrelationSupport{K}} end
 
 @inline native_transform_forward(::NativePPLIdentityTransform, value) = value
 @inline native_transform_forward(::NativePPLExpTransform, value) = exp(value)
@@ -242,6 +245,9 @@ abstract type NativePPLQuery end
 struct NativePPLLinearPredictor <: NativePPLQuery end
 struct NativePPLPointwiseLogLikelihood <: NativePPLQuery end
 struct NativePPLPosteriorPredictive <: NativePPLQuery end
+struct NativePPLNodeOutput{Name} <: NativePPLQuery end
+NativePPLNodeOutput(name::Symbol) = NativePPLNodeOutput{name}()
+native_ppl_node_output_name(::NativePPLNodeOutput{Name}) where {Name} = Name
 
 """Rule selecting the prepared executor's numeric scalar as an output eltype."""
 struct NativePPLPreparedElementType end
@@ -599,7 +605,7 @@ function _native_ppl_predictor_term(term, key::Symbol)
         "offsets, interactions, groups, and other transforms are not lowered yet"))
 end
 
-function _native_ppl_sampled_offset(term, key::Symbol)
+function _native_ppl_offset_term(term, key::Symbol)
     term isa ExprColumn && getf(term) === offset || return nothing
     isempty(getkwargs(term)) || throw(NativePPLCapabilityError(
         :predictor_offset,
@@ -607,12 +613,36 @@ function _native_ppl_sampled_offset(term, key::Symbol)
     arguments = getargs(term)
     length(arguments) == 1 || throw(NativePPLCapabilityError(
         :predictor_offset,
-        "`offset(...)` in predictor `$key` needs one sampled scalar"))
-    name = _native_ppl_ref_name(only(arguments))
-    name === nothing && throw(NativePPLCapabilityError(
+        "`offset(...)` in predictor `$key` needs one scalar site or " *
+        "row-valued data expression"))
+    argument = only(arguments)
+    if argument isa NamedColumn && parent(argument) isa DataColumn
+        return (; kind=:data, name=name(argument), column=argument,
+                transform=:identity)
+    end
+    if argument isa ExprColumn && getf(argument) === log
+        isempty(getkwargs(argument)) || throw(NativePPLCapabilityError(
+            :predictor_offset,
+            "`log` in offset for predictor `$key` cannot have keywords"))
+        log_arguments = getargs(argument)
+        length(log_arguments) == 1 || throw(NativePPLCapabilityError(
+            :predictor_offset,
+            "`log` in offset for predictor `$key` needs one data column"))
+        column = only(log_arguments)
+        column isa NamedColumn && parent(column) isa DataColumn || throw(
+            NativePPLCapabilityError(
+                :predictor_offset,
+                "`log` in offset for predictor `$key` must wrap one raw " *
+                "data column"))
+        return (; kind=:data, name=name(column), column, transform=:log)
+    end
+    sampled_name = _native_ppl_ref_name(argument)
+    sampled_name === nothing && throw(NativePPLCapabilityError(
         :predictor_offset,
-        "`offset(...)` in predictor `$key` must reference one named value"))
-    name
+        "`offset(...)` in predictor `$key` must reference one sampled site, " *
+        "raw data column, or `log(data_column)`"))
+    (; kind=:sampled, name=sampled_name, column=nothing,
+       transform=:identity)
 end
 
 function _native_ppl_varying_intercept(term, key::Symbol)
@@ -626,34 +656,42 @@ function _native_ppl_varying_intercept(term, key::Symbol)
         "grouped term in predictor `$key` must use `(1 | id | group)` " *
         "or `(0 + x | id | group)`"))
     coefficient, id, group = arguments
-    predictor = if coefficient == 1
-        nothing
+    predictors = if coefficient == 1
+        (nothing,)
     elseif coefficient isa ExprColumn && getf(coefficient) === (+)
         isempty(getkwargs(coefficient)) || throw(NativePPLCapabilityError(
             :group_term,
             "varying-slope expression in `$key` cannot have keywords"))
         coefficient_terms = getargs(coefficient)
-        count(==(0), coefficient_terms) == 1 || throw(
+        intercept_count = count(==(1), coefficient_terms)
+        suppression_count = count(==(0), coefficient_terms)
+        (intercept_count == 1 && suppression_count == 0) ||
+            (intercept_count == 0 && suppression_count == 1) || throw(
             NativePPLCapabilityError(
                 :group_term,
-                "varying slope in `$key` must suppress its intercept with " *
-                "exactly one `0`"))
-        slope_terms = filter(!=(0), coefficient_terms)
-        length(slope_terms) == 1 || throw(NativePPLCapabilityError(
+                "grouped coefficients in `$key` must contain exactly one " *
+                "intercept `1` or suppression `0`"))
+        slope_terms = filter(term -> !(term isa Number && term in (0, 1)),
+                             coefficient_terms)
+        isempty(slope_terms) && throw(NativePPLCapabilityError(
             :group_term,
-            "the current varying-slope slice requires exactly one raw " *
-            "predictor in `(0 + x | id | group)`"))
-        parsed = _native_ppl_predictor_term(only(slope_terms), key)
-        parsed.transform === :identity || throw(NativePPLCapabilityError(
-            :group_term,
-            "the current varying-slope slice requires an untransformed raw " *
-            "predictor"))
-        parsed
+            "grouped coefficients in `$key` require at least one raw " *
+            "slope predictor"))
+        parsed = map(slope_terms) do slope
+            predictor = _native_ppl_predictor_term(slope, key)
+            predictor.transform === :identity || throw(
+                NativePPLCapabilityError(
+                    :group_term,
+                    "the current varying-slope slice requires " *
+                    "untransformed raw predictors"))
+            predictor
+        end
+        intercept_count == 1 ? (nothing, parsed...) : Tuple(parsed)
     else
         throw(NativePPLCapabilityError(
             :group_term,
-            "grouped term in `$key` must be a varying intercept `1` or one " *
-            "varying slope `0 + x`"))
+            "grouped term in `$key` must be `1`, `0 + x + ...`, or " *
+            "`1 + x + ...`"))
     end
     id isa Symbol || throw(NativePPLCapabilityError(
         :group_term, "grouped-term ID in `$key` must be a Symbol"))
@@ -661,7 +699,8 @@ function _native_ppl_varying_intercept(term, key::Symbol)
         NativePPLCapabilityError(
             :group_term,
             "grouped term in `$key` must use one raw data column"))
-    (; id, group, predictor)
+    predictor = length(predictors) == 1 ? only(predictors) : nothing
+    (; id, group, predictor, predictors)
 end
 
 function _native_ppl_affine_components(brmi::BRMI, key::Symbol)
@@ -669,7 +708,8 @@ function _native_ppl_affine_components(brmi::BRMI, key::Symbol)
     _native_ppl_ref_name(lhs) === key || throw(NativePPLCapabilityError(
         :linked_predictor, "`$key` must have a bare, unlinked left-hand side"))
     predictor isa Number && predictor == 1 && return (
-        ; predictors=(), offsets=(), groups=(), intercept=true)
+        ; predictors=(), offsets=(), data_offsets=(), groups=(),
+        intercept=true)
     predictor isa ExprColumn && getf(predictor) === (+) ||
         throw(NativePPLCapabilityError(:predictor_terms,
             "`$key` must be an additive affine formula such as `1 + x + z`"))
@@ -692,16 +732,22 @@ function _native_ppl_affine_components(brmi::BRMI, key::Symbol)
     end
     nonintercept_terms = filter(
         term -> !(term isa Number && term in (0, 1)), terms)
-    sampled_offsets = Tuple(filter(!isnothing,
-        map(term -> _native_ppl_sampled_offset(term, key),
-            nonintercept_terms)))
+    parsed_offsets = map(
+        term -> _native_ppl_offset_term(term, key), nonintercept_terms)
+    sampled_offsets = Tuple(
+        parsed.name for parsed in parsed_offsets
+        if parsed !== nothing && parsed.kind === :sampled)
+    data_offsets = Tuple(
+        parsed for parsed in parsed_offsets
+        if parsed !== nothing && parsed.kind === :data)
     varying_groups = Tuple(filter(!isnothing,
         map(term -> _native_ppl_varying_intercept(term, key),
             nonintercept_terms)))
-    predictor_terms = filter(
-        term -> _native_ppl_sampled_offset(term, key) === nothing &&
-                _native_ppl_varying_intercept(term, key) === nothing,
-        nonintercept_terms)
+    predictor_terms = Tuple(
+        term for (term, parsed_offset) in
+            zip(nonintercept_terms, parsed_offsets)
+        if parsed_offset === nothing &&
+           _native_ppl_varying_intercept(term, key) === nothing)
     parsed = Tuple(_native_ppl_predictor_term(term, key)
                    for term in predictor_terms)
     predictor_names = map(term -> name(term.column), parsed)
@@ -715,11 +761,14 @@ function _native_ppl_affine_components(brmi::BRMI, key::Symbol)
             :predictor_offset,
             "`$key` must use each sampled offset at most once; got " *
             "$(sampled_offsets)"))
-    length(varying_groups) <= 1 || throw(NativePPLCapabilityError(
-        :group_term,
-        "the current grouped native-PPL slice accepts one grouped term"))
-    (; predictors=parsed, offsets=sampled_offsets, groups=varying_groups,
-       intercept=has_intercept)
+    data_offset_names = map(offset -> offset.name, data_offsets)
+    length(unique(data_offset_names)) == length(data_offset_names) || throw(
+        NativePPLCapabilityError(
+            :predictor_offset,
+            "`$key` must use each data offset at most once; got " *
+            "$(data_offset_names)"))
+    (; predictors=parsed, offsets=sampled_offsets,
+       data_offsets, groups=varying_groups, intercept=has_intercept)
 end
 
 function _native_ppl_affine_predictors(brmi::BRMI, key::Symbol)
@@ -2141,6 +2190,11 @@ _native_ppl_query_spec(plan::NativePPLPlan, ::NativePPLPointwiseLogLikelihood) =
     plan.queries.pointwise_loglikelihood
 _native_ppl_query_spec(plan::NativePPLPlan, ::NativePPLPosteriorPredictive) =
     plan.queries.posterior_predictive
+_native_ppl_query_spec(::NativePPLPlan,
+                       ::NativePPLNodeOutput{Name}) where {Name} =
+    throw(NativePPLCapabilityError(
+        :query,
+        "named node output `$Name` requires the typed factor-DAG executor"))
 _native_ppl_query_spec(prepared::NativePPLPrepared, query::NativePPLQuery) =
     _native_ppl_query_spec(prepared.plan, query)
 
@@ -2777,6 +2831,7 @@ const DenseMatrixLayout = BRM.NativePPLDenseMatrixLayout
 const LinearPredictor = BRM.NativePPLLinearPredictor
 const PointwiseLogLikelihood = BRM.NativePPLPointwiseLogLikelihood
 const PosteriorPredictive = BRM.NativePPLPosteriorPredictive
+const NodeOutput = BRM.NativePPLNodeOutput
 
 prepare(plan::Plan; kwargs...) = BRM._native_ppl_prepare(plan; kwargs...)
 workspace(prepared::Prepared, ::Type{T}=eltype(prepared)) where {T<:AbstractFloat} =
@@ -2912,7 +2967,7 @@ include("native_ppl_authoring.jl")
 export Plan, Prepared, Workspace, LogDensityProblem, CapabilityError
 export OutputSignature, BatchOutputSignature
 export DenseVectorLayout, DenseMatrixLayout
-export LinearPredictor, PointwiseLogLikelihood, PosteriorPredictive
+export LinearPredictor, PointwiseLogLikelihood, PosteriorPredictive, NodeOutput
 export compile, prepare, workspace, rebind, has_response
 export output_signature, batch_output_signature
 export output_axis, output_axes, output_draw_axis, output_eltype, output_layout
