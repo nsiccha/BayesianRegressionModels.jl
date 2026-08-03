@@ -336,6 +336,13 @@ end
 NP.@model function scalar_normal_likelihood(mu)
     sigma ~ Exponential(2.0)
     @. y ~ Normal(mu, sigma)
+    return y
+end
+
+NP.@model function natural_latent_normal(prior_mu, prior_tau)
+    z ~ scalar_normal_site(prior_mu, prior_tau)
+    y ~ scalar_normal_likelihood(z)
+    return y
 end
 
 NP.@model function monolithic_scalar_normal()
@@ -3005,6 +3012,29 @@ end
             MersenneTwister(913), latent_workspace,
             latent_prepared, latent_position)
 
+    natural_latent = natural_latent_normal(0.25, 0.8)
+    @test natural_latent isa NP.ModelInstance
+    @test natural_latent.declaration.outputs ==
+          (; y=NP.qualified_name(:y, :y))
+    @test keys(natural_latent.declaration.observations) ==
+          (NP.qualified_name(:z, :z), NP.qualified_name(:y, :y))
+    @test isempty(natural_latent.conditions)
+    conditioned_natural_latent = NP.condition(natural_latent; y=response)
+    @test keys(conditioned_natural_latent.conditions) ==
+          (NP.qualified_name(:y, :y),)
+    natural_latent_prepared = NP.prepare(conditioned_natural_latent)
+    natural_latent_workspace = NP.workspace(
+        natural_latent_prepared, Float64, DI.AutoEnzyme())
+    natural_density, natural_gradient = NP.logdensity_and_gradient!(
+        natural_latent_workspace, natural_latent_prepared, latent_position)
+    @test natural_density ≈ latent_density
+    @test natural_gradient ≈ latent_gradient
+    @test NP.simulate(
+        MersenneTwister(913), natural_latent_workspace,
+        natural_latent_prepared, latent_position) == NP.simulate(
+            MersenneTwister(913), latent_workspace,
+            latent_prepared, latent_position)
+
     latent_brm_data = (; y=response)
     latent_brm = @brm latent_brm_data begin
         sigma ~ Exponential(2.0)
@@ -3323,6 +3353,24 @@ end
             @. y ~ Normal(mu, sigma)
         end)))
     @test occursin("features must use distinct raw inputs", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function recursive_model(x)
+            z ~ recursive_model(x)
+            return z
+        end)))
+    @test occursin("cannot recursively stage itself", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function mixed_submodel(x)
+            z ~ scalar_normal_site(0.0, 1.0)
+            sigma ~ Exponential(1.0)
+            return z
+        end)))
+    @test occursin("cannot yet mix staged submodel connections", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function missing_submodel_return(x)
+            z ~ scalar_normal_site(0.0, 1.0)
+        end)))
+    @test occursin("requires an explicit returned graph value", err.msg)
 end
 
 
