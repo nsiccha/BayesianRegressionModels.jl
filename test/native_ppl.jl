@@ -3859,6 +3859,25 @@ end
     @test capability_error(() -> NP.compile(NP.condition(
         broadcast_parent_graph_model; observed=response))).capability ==
           :factor_dependencies
+
+    broadcast_node_graph_model = NP.model(
+        inputs=(;),
+        parameters=(;
+            root=NP.parameter(
+                NP.RealSupport(), (:root,);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            likelihood_scale=NP.parameter(
+                NP.PositiveSupport(), (:likelihood_scale,);
+                transform=NP.Exp(), prior=NP.Exponential(1.0))),
+        nodes=(; derived_scale=NP.exp_link(:observed)),
+        observations=(;
+            observed=NP.broadcasted(
+                NP.normal(:observed, :root, :likelihood_scale)),
+            child=NP.normal(:child, :root, :derived_scale)),
+        site_order=(:root, :likelihood_scale, :observed, :child))
+    @test capability_error(() -> NP.compile(NP.condition(
+        broadcast_node_graph_model; observed=response))).capability ==
+          :factor_dependencies
     @test NP.factor_graph(hierarchy).sites.y.activity isa NP.GeneratedSite
     conditioned_population_graph = NP.factor_graph(
         hierarchy.declaration;

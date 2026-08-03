@@ -693,6 +693,16 @@ function _bind_factor_plan(declaration::Model, bindings, conditions)
         "the first multi-latent factor executor requires exactly one " *
         "broadcast stochastic output"))
     broadcast_site_set = Set(broadcast_sites)
+    for (name, node) in pairs(graph.nodes)
+        for dependency in factor_node_dependencies(node)
+            dependency in broadcast_site_set || continue
+            throw(CapabilityError(
+                :factor_dependencies,
+                "multi-latent factor node `$name` depends on broadcast " *
+                "site `$dependency`; broadcast outputs must remain terminal " *
+                "until their values can be materialized"))
+        end
+    end
     for (name, site) in pairs(graph.sites)
         _validate_factor_plan_site(
             name, site, graph, canonical_conditions, broadcast_site_set)
