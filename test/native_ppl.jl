@@ -448,6 +448,15 @@ NP.@model function natural_varying_intercept(x, group)
     @. y ~ Normal(mu, sigma)
 end
 
+NP.@model function natural_varying_slope(x, group)
+    tau_p_group ~ Exponential(1)
+    b_p_group[group] ~ Normal(0.0, tau_p_group)
+    beta ~ Normal()
+    sigma ~ Exponential(2)
+    mu = beta * x + b_p_group[group] * x
+    @. y ~ Normal(mu, sigma)
+end
+
 NP.@model function monolithic_scalar_normal()
     theta ~ Normal()
     sigma ~ Exponential(2.0)
@@ -3641,6 +3650,91 @@ end
         grouped_prediction_only, grouped_position)) ==
           length(grouped_bindings.group)
 
+    row_product_declaration = NP.model(
+        inputs=(; x=NP.input(), group=NP.input()),
+        parameters=(;
+            tau=NP.parameter(
+                NP.PositiveSupport(), (:tau,); transform=NP.Exp(),
+                prior=NP.Exponential(1)),
+            varying=NP.grouped_normal(:group, 0.0, :tau),
+            sigma=NP.parameter(
+                NP.PositiveSupport(), (:sigma,); transform=NP.Exp(),
+                prior=NP.Exponential(2))),
+        nodes=(;
+            varying_by_row=NP.group_gather(:varying, :group),
+            varying_slope=NP.row_product(:varying_by_row, :x)),
+        observations=(; y=NP.broadcasted(
+            NP.normal(:y, :varying_slope, :sigma))),
+        site_order=(:tau, :varying, :sigma, :y))
+    @test NP.row_product_inputs(
+        row_product_declaration.nodes.varying_slope) ==
+          (:varying_by_row, :x)
+    row_product_bindings = (;
+        x=[0.5, -1.0, 1.5, 2.0], group=grouped_bindings.group)
+    row_product_graph = NP.factor_graph(
+        row_product_declaration; bindings=row_product_bindings,
+        conditions=(; y=sampled_offset_data.y))
+    @test row_product_graph.schedule == (
+        :tau, :varying, :sigma, :varying_by_row, :varying_slope, :y)
+    @test row_product_graph.nodes.varying_slope isa NP.RowProductFactorNode
+    @test NP.factor_node_dependencies(
+        row_product_graph.nodes.varying_slope) == (:varying_by_row,)
+    row_product_prepared = NP.prepare(NP.compile(
+        row_product_declaration, row_product_bindings;
+        conditions=(; y=sampled_offset_data.y)))
+    row_product_workspace = NP.workspace(
+        row_product_prepared, Float64, DI.AutoEnzyme())
+    row_product_mu = grouped_mu .* row_product_bindings.x
+    row_product_residuals = sampled_offset_data.y .- row_product_mu
+    row_product_expected_density =
+        logpdf(Exponential(1), grouped_tau) + grouped_position[1] +
+        sum(logpdf.(Normal(0, grouped_tau), grouped_effects)) +
+        logpdf(Exponential(2), grouped_sigma) + grouped_position[5] +
+        sum(logpdf.(Normal.(row_product_mu, grouped_sigma),
+                    sampled_offset_data.y))
+    row_product_expected_gradient = [
+        grouped_expected_gradient[1],
+        -grouped_effects[1] / grouped_tau^2 +
+            (row_product_residuals[1] * row_product_bindings.x[1] +
+             row_product_residuals[3] * row_product_bindings.x[3]) /
+                grouped_sigma^2,
+        -grouped_effects[2] / grouped_tau^2 +
+            row_product_residuals[2] * row_product_bindings.x[2] /
+                grouped_sigma^2,
+        -grouped_effects[3] / grouped_tau^2 +
+            row_product_residuals[4] * row_product_bindings.x[4] /
+                grouped_sigma^2,
+        1 - grouped_sigma / 2 - length(sampled_offset_data.y) +
+            sum(abs2, row_product_residuals) / grouped_sigma^2,
+    ]
+    row_product_density, row_product_gradient = NP.logdensity_and_gradient!(
+        row_product_workspace, row_product_prepared, grouped_position)
+    @test row_product_density ≈ row_product_expected_density
+    @test row_product_gradient ≈ row_product_expected_gradient
+    @test NP.evaluate(
+        row_product_workspace, row_product_prepared, grouped_position,
+        NP.LinearPredictor()) == row_product_mu
+    @test factor_steady_state_allocations(
+        row_product_workspace, row_product_prepared, grouped_position) ==
+          (; primal=0, gradient=0)
+
+    direct_block_product = NP.model(
+        inputs=(; x=NP.input(), group=NP.input()),
+        parameters=row_product_declaration.parameters,
+        nodes=(;
+            routed=NP.group_gather(:varying, :group),
+            invalid=NP.row_product(:varying, :x)),
+        observations=(; y=NP.broadcasted(
+            NP.normal(:y, :invalid, :sigma))),
+        site_order=row_product_declaration.site_order)
+    direct_block_product_error = capability_error(() -> NP.compile(
+        direct_block_product, row_product_bindings;
+        conditions=(; y=sampled_offset_data.y)))
+    @test direct_block_product_error.capability == :factor_shape
+    @test occursin(
+        "cannot consume block site `varying` directly",
+        sprint(showerror, direct_block_product_error))
+
     varying_brm_data = (;
         x=sampled_offset_data.x,
         group=grouped_bindings.group,
@@ -4036,6 +4130,251 @@ end
         varying_new_group_replay, varying_new_group_positions,
         NP.LinearPredictor())
     @test NP.output_axes(varying_new_group_signature) == (
+        BRM.NativePPLAxis(:draw, Base.OneTo(2)),
+        BRM.NativePPLAxis(:observation, Base.OneTo(4)))
+
+    varying_slope_brm = @brm varying_brm_data begin
+        sigma ~ Exponential(2)
+        mu ~ 0 + x + (0 + x | p | group)
+        sd(:, p) ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end
+    @test popcoefnames(varying_slope_brm, :mu) == [:x]
+    @test ranefcoefnames(varying_slope_brm, :p) == [
+        (; predictor=:mu, coefficient=:x)]
+    @test SBBRMI(varying_slope_brm; mod=@__MODULE__) isa SBBRMI
+    varying_slope_model = NP.lower(varying_slope_brm)
+    direct_varying_slope_model = NP.model(
+        inputs=(; x=NP.input(), group=NP.input()),
+        parameters=(;
+            beta_mu=NP.parameter(
+                NP.RealSupport(), (:x,); transform=NP.Identity(),
+                prior=NP.StandardNormal()),
+            tau_p_group=NP.parameter(
+                NP.PositiveSupport(), (:tau_p_group,); transform=NP.Exp(),
+                prior=NP.Exponential(1)),
+            b_p_group=NP.grouped_normal(:group, 0.0, :tau_p_group),
+            sigma=NP.parameter(
+                NP.PositiveSupport(), (:sigma,); transform=NP.Exp(),
+                prior=NP.Exponential(2))),
+        nodes=(;
+            r_mu_p_group=NP.group_gather(:b_p_group, :group),
+            r_mu_p_group_times_x=NP.row_product(:r_mu_p_group, :x),
+            mu=NP.affine(
+                :x, :beta_mu; offsets=(:r_mu_p_group_times_x,),
+                intercept=false)),
+        observations=(; y=NP.broadcasted(
+            NP.normal(:y, :mu, :sigma))),
+        site_order=(:tau_p_group, :b_p_group, :beta_mu, :sigma, :y))
+    @test typeof(varying_slope_model) ===
+          typeof(direct_varying_slope_model)
+    @test sprint(show, varying_slope_model) ==
+          sprint(show, direct_varying_slope_model)
+    @test keys(varying_slope_model.nodes) ==
+          (:r_mu_p_group, :r_mu_p_group_times_x, :mu)
+    @test varying_slope_model.nodes.r_mu_p_group_times_x isa NP.RowProduct
+    natural_varying_slope_instance = NP.condition(
+        natural_varying_slope(
+            varying_brm_data.x, varying_brm_data.group);
+        y=varying_brm_data.y)
+    @test keys(natural_varying_slope_instance.declaration.parameters) ==
+          keys(varying_slope_model.parameters)
+    @test keys(natural_varying_slope_instance.declaration.nodes) == (
+        :b_p_group_by_group_for_mu,
+        :b_p_group_by_group_for_mu_times_x,
+        :mu)
+    @test natural_varying_slope_instance.declaration.site_order ==
+          varying_slope_model.site_order
+    varying_slope_plan = NP.compile(varying_slope_brm)
+    @test varying_slope_plan.graph.schedule == (
+        :tau_p_group, :b_p_group, :beta_mu, :sigma,
+        :r_mu_p_group, :r_mu_p_group_times_x, :mu, :y)
+    @test varying_slope_plan.graph.dimension == varying_plan.graph.dimension
+    @test varying_slope_plan.group_indices == varying_plan.group_indices
+    @test varying_slope_plan.graph.nodes.r_mu_p_group_times_x isa
+          NP.RowProductFactorNode
+    @test NP.factor_node_dependencies(
+        varying_slope_plan.graph.nodes.r_mu_p_group_times_x) ==
+          (:r_mu_p_group,)
+    varying_slope_prepared = NP.prepare(varying_slope_plan)
+    varying_slope_workspace = NP.workspace(
+        varying_slope_prepared, Float64, DI.AutoEnzyme())
+    varying_slope_mu = (
+        varying_beta .+ varying_effects[[1, 2, 1, 3]]) .*
+        varying_brm_data.x
+    varying_slope_residuals = varying_brm_data.y .- varying_slope_mu
+    varying_slope_expected_density =
+        logpdf(Exponential(1), varying_tau) + varying_position[1] +
+        sum(logpdf.(Normal(0, varying_tau), varying_effects)) +
+        logpdf(Normal(), varying_beta) +
+        logpdf(Exponential(2), varying_sigma) + varying_position[6] +
+        sum(logpdf.(Normal.(varying_slope_mu, varying_sigma),
+                    varying_brm_data.y))
+    varying_slope_expected_gradient = [
+        varying_expected_gradient[1],
+        -varying_effects[1] / varying_tau^2 +
+            (varying_slope_residuals[1] * varying_brm_data.x[1] +
+             varying_slope_residuals[3] * varying_brm_data.x[3]) /
+                varying_sigma^2,
+        -varying_effects[2] / varying_tau^2 +
+            varying_slope_residuals[2] * varying_brm_data.x[2] /
+                varying_sigma^2,
+        -varying_effects[3] / varying_tau^2 +
+            varying_slope_residuals[4] * varying_brm_data.x[4] /
+                varying_sigma^2,
+        -varying_beta +
+            sum(varying_slope_residuals .* varying_brm_data.x) /
+                varying_sigma^2,
+        1 - varying_sigma / 2 - length(varying_brm_data.y) +
+            sum(abs2, varying_slope_residuals) / varying_sigma^2,
+    ]
+    varying_slope_density, varying_slope_gradient =
+        NP.logdensity_and_gradient!(
+            varying_slope_workspace, varying_slope_prepared,
+            varying_position)
+    @test varying_slope_density ≈ varying_slope_expected_density
+    @test varying_slope_gradient ≈ varying_slope_expected_gradient
+    @test NP.evaluate(
+        varying_slope_workspace, varying_slope_prepared,
+        varying_position, NP.LinearPredictor()) ≈ varying_slope_mu
+    @test factor_steady_state_allocations(
+        varying_slope_workspace, varying_slope_prepared,
+        varying_position) == (; primal=0, gradient=0)
+    for candidate_plan in (
+        NP.compile(natural_varying_slope_instance),
+        NP.compile(
+            direct_varying_slope_model,
+            (; x=varying_brm_data.x, group=varying_brm_data.group);
+            conditions=(; y=varying_brm_data.y)))
+        candidate_prepared = NP.prepare(candidate_plan)
+        candidate_workspace = NP.workspace(
+            candidate_prepared, Float64, DI.AutoEnzyme())
+        candidate_density, candidate_gradient = NP.logdensity_and_gradient!(
+            candidate_workspace, candidate_prepared, varying_position)
+        @test candidate_density ≈ varying_slope_density
+        @test candidate_gradient ≈ varying_slope_gradient
+        @test NP.evaluate(
+            candidate_workspace, candidate_prepared, varying_position,
+            NP.LinearPredictor()) ≈ varying_slope_mu
+        @test factor_steady_state_allocations(
+            candidate_workspace, candidate_prepared, varying_position) ==
+              (; primal=0, gradient=0)
+    end
+    varying_slope_known_bindings = (;
+        x=[2.0, -1.5, 0.25], group=[:c, :a, :c])
+    varying_slope_known_replay = NP.rebind(
+        varying_slope_prepared, (;);
+        bindings=varying_slope_known_bindings)
+    @test varying_slope_known_replay.plan.graph.dimension ==
+          varying_slope_plan.graph.dimension
+    @test varying_slope_known_replay.plan.group_indices ==
+          (; r_mu_p_group=(3, 1, 3))
+    @test NP.evaluate(
+        NP.workspace(varying_slope_known_replay),
+        varying_slope_known_replay, varying_position,
+        NP.LinearPredictor()) ≈
+          (varying_beta .+ varying_effects[[3, 1, 3]]) .*
+          varying_slope_known_bindings.x
+    varying_slope_new_bindings = (;
+        x=[0.5, -1.0, 2.0, 1.5],
+        group=[:a, :new_slope_group, :new_slope_group, :c])
+    varying_slope_new_replay = NP.rebind(
+        varying_slope_prepared, (;);
+        bindings=varying_slope_new_bindings, new_groups=:resample)
+    @test varying_slope_new_replay.plan.generated_group_levels ==
+          (; b_p_group=(:new_slope_group,))
+    @test varying_slope_new_replay.plan.group_indices ==
+          (; r_mu_p_group=(1, -1, -1, 3))
+    varying_slope_new_workspace = NP.workspace(varying_slope_new_replay)
+    varying_slope_new_output = zeros(4)
+    varying_slope_new_rng = MersenneTwister(945)
+    varying_slope_new_expected_rng = MersenneTwister(945)
+    varying_slope_generated_effect =
+        varying_tau * randn(varying_slope_new_expected_rng)
+    varying_slope_new_effects = [
+        varying_effects[1], varying_slope_generated_effect,
+        varying_slope_generated_effect, varying_effects[3]]
+    varying_slope_new_mu = (
+        varying_beta .+ varying_slope_new_effects) .*
+        varying_slope_new_bindings.x
+    varying_slope_new_expected = map(varying_slope_new_mu) do location
+        location + varying_sigma * randn(varying_slope_new_expected_rng)
+    end
+    NP.simulate!(
+        varying_slope_new_rng, varying_slope_new_output,
+        varying_slope_new_workspace, varying_slope_new_replay,
+        varying_position)
+    @test varying_slope_new_output ≈ varying_slope_new_expected
+    @test only(varying_slope_new_workspace.primal.generated_group_values) ==
+          varying_slope_generated_effect
+    @test vec(varying_slope_new_workspace.primal.node_rows[3, :]) ≈
+          varying_slope_new_mu
+    @test factor_predictive_allocations(
+        varying_slope_new_rng, varying_slope_new_output,
+        varying_slope_new_workspace, varying_slope_new_replay,
+        varying_position) == 0
+    varying_slope_draw_positions = [
+        varying_position';
+        log(0.9) -0.2 0.3 -0.4 0.15 log(0.6);
+    ]
+    varying_slope_draw_predictive = zeros(2, 4)
+    varying_slope_draw_linear = zeros(2, 4)
+    varying_slope_manual_predictive = zeros(2, 4)
+    varying_slope_manual_linear = zeros(2, 4)
+    varying_slope_manual_fused_linear = zeros(2, 4)
+    varying_slope_draw_rng = MersenneTwister(946)
+    varying_slope_manual_rng = MersenneTwister(946)
+    for draw in axes(varying_slope_draw_positions, 1)
+        NP.simulate!(
+            varying_slope_manual_rng,
+            @view(varying_slope_manual_predictive[draw, :]),
+            varying_slope_new_workspace, varying_slope_new_replay,
+            @view(varying_slope_draw_positions[draw, :]))
+        varying_slope_manual_fused_linear[draw, :] .=
+            @view varying_slope_new_workspace.primal.node_rows[3, :]
+    end
+    NP.simulate_draws!(
+        varying_slope_draw_rng, varying_slope_draw_predictive,
+        varying_slope_new_workspace, varying_slope_new_replay,
+        varying_slope_draw_positions)
+    @test varying_slope_draw_predictive == varying_slope_manual_predictive
+    varying_slope_linear_rng = MersenneTwister(947)
+    varying_slope_linear_manual_rng = MersenneTwister(947)
+    for draw in axes(varying_slope_draw_positions, 1)
+        NP.evaluate!(
+            varying_slope_linear_manual_rng,
+            @view(varying_slope_manual_linear[draw, :]),
+            varying_slope_new_workspace, varying_slope_new_replay,
+            @view(varying_slope_draw_positions[draw, :]),
+            NP.LinearPredictor())
+    end
+    NP.evaluate_draws!(
+        varying_slope_linear_rng, varying_slope_draw_linear,
+        varying_slope_new_workspace, varying_slope_new_replay,
+        varying_slope_draw_positions, NP.LinearPredictor())
+    @test varying_slope_draw_linear == varying_slope_manual_linear
+    varying_slope_queries = (;
+        linear=NP.LinearPredictor(),
+        predictive=NP.PosteriorPredictive())
+    varying_slope_bundle = (;
+        linear=zeros(2, 4), predictive=zeros(2, 4))
+    NP.execute_draws!(
+        MersenneTwister(946), varying_slope_bundle,
+        varying_slope_new_workspace, varying_slope_new_replay,
+        varying_slope_draw_positions, varying_slope_queries)
+    @test varying_slope_bundle.linear == varying_slope_manual_fused_linear
+    @test varying_slope_bundle.predictive == varying_slope_manual_predictive
+    @test factor_generated_draw_allocations(
+        MersenneTwister(948), MersenneTwister(949), MersenneTwister(950),
+        varying_slope_draw_predictive, varying_slope_draw_linear,
+        varying_slope_bundle, varying_slope_new_workspace,
+        varying_slope_new_replay, varying_slope_draw_positions,
+        varying_slope_queries) ==
+          (; predictive=0, linear=0, bundle=0)
+    varying_slope_signature = NP.batch_output_signature(
+        varying_slope_new_replay, varying_slope_draw_positions,
+        NP.LinearPredictor())
+    @test NP.output_axes(varying_slope_signature) == (
         BRM.NativePPLAxis(:draw, Base.OneTo(2)),
         BRM.NativePPLAxis(:observation, Base.OneTo(4)))
 
