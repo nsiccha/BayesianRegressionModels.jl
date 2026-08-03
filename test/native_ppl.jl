@@ -156,14 +156,21 @@ function multi_native_brmi(family::Symbol, data)
     end
 end
 
-function deterministic_preprocessing_composition(family::Symbol, data)
-    preprocessing_model = NP.model(
-        inputs=(; raw=NP.input()),
-        nodes=(; scaled=NP.zscale(:raw)),
-        observations=(;))
+function deterministic_preprocessing_composition(
+    family::Symbol, data; concise::Bool=true)
+    preprocessing_instance = if concise
+        concise_zscale_component(data.x)
+    else
+        preprocessing_model = NP.model(
+            inputs=(; raw=NP.input()),
+            nodes=(; scaled=NP.zscale(:raw)),
+            observations=(;),
+            outputs=(; scaled=:scaled))
+        NP.substitute(preprocessing_model; raw=data.x)
+    end
     preprocessing = NP.component(
         :preprocessing,
-        NP.substitute(preprocessing_model; raw=data.x))
+        preprocessing_instance)
     regression_model = direct_native_model(family, :identity)
     regression = NP.component(
         :regression,
@@ -278,6 +285,58 @@ NP.@model function composable_gaussian(x)
     sigma ~ Exponential(2.0)
     mu = intercept + slope * x
     @. y ~ Normal(mu, sigma)
+end
+
+NP.@model function concise_zscale_component(raw)
+    scaled = zscale(raw)
+    return scaled
+end
+
+NP.@model function concise_named_preprocessing(raw)
+    centered = center(raw)
+    scaled = zscale(raw)
+    return (centered=centered, standardized=scaled)
+end
+
+NP.@model function unknown_output_component(raw)
+    scaled = zscale(raw)
+    return missing
+end
+
+NP.@model function concise_passthrough(raw)
+    return raw
+end
+
+NP.@model function concise_aliased_zscale(raw)
+    scaled = zscale(raw)
+    return (standardized=scaled,)
+end
+
+NP.@model function scalar_normal_prior()
+    theta ~ Normal()
+    return theta
+end
+
+NP.@model function aliased_scalar_normal_prior()
+    theta ~ Normal(0, 1)
+    return (coefficient=theta,)
+end
+
+NP.@model function named_scalar_normal_priors()
+    intercept ~ Normal()
+    slope ~ Normal(0, 1)
+    return (; intercept, slope)
+end
+
+NP.@model function scalar_normal_likelihood(mu)
+    sigma ~ Exponential(2.0)
+    @. y ~ Normal(mu, sigma)
+end
+
+NP.@model function monolithic_scalar_normal()
+    theta ~ Normal()
+    sigma ~ Exponential(2.0)
+    @. y ~ Normal(theta, sigma)
 end
 
 NP.@model function macro_bernoulli_center(
@@ -2303,16 +2362,19 @@ end
           bindings.x === parameter
     @test stochastic_composition.components.stochastic_sink.instance.
           bindings.x === stochastic
-    @test capability_error(
-        () -> NP.compile(parameter_composition)).capability ==
-          :active_graph_connection
-    @test capability_error(
-        () -> NP.compile(stochastic_composition)).capability ==
-          :active_graph_connection
+    site_error = capability_error(() -> NP.lower(stochastic_composition))
+    @test site_error.capability == :active_site_connection
+    @test occursin("source.y", site_error.detail)
 
-    err = capability_error(() -> NP.compile(composition))
-    @test err.capability == :active_graph_connection
-    @test occursin("source.mu", err.detail)
+    active_lowered = NP.lower(composition)
+    sink_location_name = NP.qualified_name(:sink, :mu)
+    @test !hasproperty(
+        active_lowered.declaration.inputs,
+        NP.qualified_name(:sink, :x))
+    @test NP.node_inputs(
+        getproperty(active_lowered.declaration.nodes, sink_location_name)) ==
+          (NP.qualified_name(:source, :mu),)
+    @test capability_error(() -> NP.compile(composition)).capability == :outcomes
 
     @test_throws ArgumentError NP.compose(sink, source)
     @test_throws ArgumentError NP.compose()
@@ -2342,12 +2404,10 @@ end
     @test conditioned_composition.components.site_conditioned.instance.
           conditions.y === stochastic
 
-    preprocessing_model = NP.model(
-        inputs=(; raw=NP.input()),
-        nodes=(; scaled=NP.zscale(:raw)),
-        observations=(;))
-    preprocessing = NP.component(
-        :preprocessing, NP.substitute(preprocessing_model; raw=raw_x))
+    preprocessing_instance = concise_zscale_component(raw_x)
+    @test isempty(preprocessing_instance.declaration.observations)
+    @test preprocessing_instance.declaration.outputs == (; scaled=:scaled)
+    preprocessing = NP.component(:preprocessing, preprocessing_instance)
     scaled = NP.output(preprocessing, :scaled)
     response = [0.2, -0.1, 1.1, 0.7]
     regression = NP.component(
@@ -2388,6 +2448,188 @@ end
     @test NP.simulate(
         MersenneTwister(909), composed_work, prepared, position) ==
           NP.simulate(MersenneTwister(909), direct_work, direct, position)
+
+    named_preprocessing = NP.component(
+        :named_preprocessing, concise_named_preprocessing(raw_x))
+    standardized = NP.output(named_preprocessing, :standardized)
+    @test NP.graph_kind(standardized) === :node
+    @test NP.graph_name(standardized) === :standardized
+    @test_throws ArgumentError NP.output(named_preprocessing, :scaled)
+
+    aliased_preprocessing = NP.component(
+        :aliased_preprocessing, concise_aliased_zscale(raw_x))
+    aliased_standardized = NP.output(
+        aliased_preprocessing, :standardized)
+    @test NP.graph_name(aliased_standardized) === :standardized
+    @test NP.graph_kind(aliased_standardized) === :node
+    @test_throws ArgumentError NP.output(aliased_preprocessing, :scaled)
+    aliased_regression = NP.component(
+        :aliased_regression,
+        NP.condition(composable_gaussian(aliased_standardized); y=response))
+    aliased_composed = NP.prepare(NP.compose(
+        aliased_preprocessing, aliased_regression))
+    @test only(values(aliased_composed.predictors)) == direct.predictor
+
+    scalar_prior_component = NP.component(:prior, scalar_normal_prior())
+    theta = NP.output(scalar_prior_component, :theta)
+    scalar_likelihood_component = NP.component(
+        :likelihood,
+        NP.condition(scalar_normal_likelihood(theta); y=response))
+    active_scalar = NP.compose(
+        scalar_prior_component, scalar_likelihood_component)
+    active_scalar_lowered = NP.lower(active_scalar)
+    theta_name = NP.qualified_name(:prior, :theta)
+    sigma_name = NP.qualified_name(:likelihood, :sigma)
+    scalar_response_name = NP.qualified_name(:likelihood, :y)
+    @test isempty(active_scalar_lowered.declaration.inputs)
+    @test keys(active_scalar_lowered.declaration.parameters) ==
+          (theta_name, sigma_name)
+    @test NP.observation_dependencies(getproperty(
+        active_scalar_lowered.declaration.observations,
+        scalar_response_name)) == (theta_name, sigma_name)
+    @test isempty(active_scalar_lowered.bindings)
+    @test keys(active_scalar_lowered.conditions) == (scalar_response_name,)
+    scalar_plan = NP.compile(active_scalar)
+    @test isempty(scalar_plan.inputs.predictors)
+    @test scalar_plan.nodes.location isa BRM.NativePPLScalarBroadcastNode
+    @test BRM.native_node_name(scalar_plan.nodes.location) === theta_name
+    @test BRM.native_scalar_parameter(scalar_plan.nodes.location) === theta_name
+    @test LogDensityProblems.dimension(scalar_plan) == 2
+
+    aliased_active_prior = NP.component(
+        :aliased_active_prior, aliased_scalar_normal_prior())
+    aliased_theta = NP.output(aliased_active_prior, :coefficient)
+    aliased_active = NP.compose(
+        aliased_active_prior,
+        NP.component(
+            :aliased_active_likelihood,
+            NP.condition(scalar_normal_likelihood(aliased_theta); y=response)))
+    aliased_active_plan = NP.compile(aliased_active)
+    @test BRM.native_node_name(aliased_active_plan.nodes.location) ===
+          NP.qualified_name(:aliased_active_prior, :theta)
+    @test LogDensityProblems.dimension(aliased_active_plan) == 2
+
+    scalar_prepared = NP.prepare(scalar_plan)
+    scalar_position = [0.3, log(0.8)]
+    scalar_workspace = NP.workspace(
+        scalar_prepared, Float64, DI.AutoEnzyme())
+    expected_location = fill(scalar_position[1], length(response))
+    expected_density = logpdf(Normal(), scalar_position[1]) +
+        logpdf(Exponential(2.0), exp(scalar_position[2])) +
+        scalar_position[2] +
+        sum(logpdf.(Normal.(expected_location, exp(scalar_position[2])), response))
+    residuals = response .- scalar_position[1]
+    expected_gradient = [
+        -scalar_position[1] + sum(residuals) / exp(2 * scalar_position[2]),
+        1 - exp(scalar_position[2]) / 2 - length(response) +
+            sum(abs2, residuals) / exp(2 * scalar_position[2]),
+    ]
+    scalar_density, scalar_gradient = NP.logdensity_and_gradient!(
+        scalar_workspace, scalar_prepared, scalar_position)
+    @test scalar_density ≈ expected_density
+    @test scalar_gradient ≈ expected_gradient
+    @test NP.evaluate(
+        scalar_workspace, scalar_prepared, scalar_position,
+        NP.LinearPredictor()) == expected_location
+    @test length(NP.simulate(
+        MersenneTwister(911), scalar_workspace, scalar_prepared,
+        scalar_position)) == length(response)
+    @test steady_state_allocations(
+        scalar_workspace, scalar_prepared, scalar_position) ==
+          (; primal=0, gradient=0)
+
+    rebound_response = [0.1, 0.4, 0.8]
+    scalar_rebound = NP.rebind(
+        scalar_prepared,
+        NamedTuple{(scalar_response_name,)}((rebound_response,)))
+    @test isempty(scalar_rebound.predictors)
+    @test scalar_rebound.response == rebound_response
+    @test length(scalar_rebound.plan.axes.observation) == 3
+    scalar_prediction = NP.rebind(scalar_prepared, (;))
+    @test !NP.has_response(scalar_prediction)
+    @test eltype(scalar_prediction) === Float64
+    @test length(scalar_prediction.plan.axes.observation) == length(response)
+    scalar_prediction_workspace = NP.workspace(scalar_prediction)
+    @test length(NP.simulate(
+        MersenneTwister(912), scalar_prediction_workspace,
+        scalar_prediction, scalar_position)) == length(response)
+    @test_throws ArgumentError NP.evaluate(
+        scalar_prediction_workspace, scalar_prediction, scalar_position,
+        NP.PointwiseLogLikelihood())
+
+    scalar_prepared32 = NP.prepare(scalar_plan; T=Float32)
+    scalar_prediction32 = NP.rebind(scalar_prepared32, (;))
+    @test eltype(scalar_prediction32) === Float32
+    @test_throws DimensionMismatch NP.rebind(
+        scalar_prepared,
+        NamedTuple{(scalar_response_name,)}((Float64[],)))
+
+    integer_likelihood = NP.component(
+        :integer_likelihood,
+        NP.condition(scalar_normal_likelihood(theta); y=[0, 1, 2, 3]))
+    integer_prepared = NP.prepare(NP.compose(
+        scalar_prior_component, integer_likelihood))
+    @test eltype(integer_prepared.response) === Float64
+    @test eltype(integer_prepared) === Float64
+    @test NP.workspace(integer_prepared) isa NP.Workspace
+    @test NP.LogDensityProblem(
+        integer_prepared, DI.AutoEnzyme()) isa NP.LogDensityProblem
+
+    monolithic_plan = NP.compile(NP.condition(
+        monolithic_scalar_normal(); y=response))
+    scalar_data = (; y=response)
+    brm_scalar = @brm scalar_data begin
+        sigma ~ Exponential(2.0)
+        mu ~ 1
+        y ~ Normal(mu, sigma)
+    end
+    lowered_brm_scalar = NP.lower(brm_scalar)
+    @test isempty(lowered_brm_scalar.inputs)
+    @test keys(lowered_brm_scalar.parameters) == (:mu, :sigma)
+    @test isempty(lowered_brm_scalar.nodes)
+    brm_scalar_plan = NP.compile(brm_scalar)
+    for candidate_plan in (monolithic_plan, brm_scalar_plan)
+        candidate = NP.prepare(candidate_plan)
+        candidate_work = NP.workspace(
+            candidate, Float64, DI.AutoEnzyme())
+        candidate_density, candidate_gradient = NP.logdensity_and_gradient!(
+            candidate_work, candidate, scalar_position)
+        @test candidate_density ≈ scalar_density
+        @test candidate_gradient ≈ scalar_gradient
+        @test NP.evaluate(
+            candidate_work, candidate, scalar_position,
+            NP.LinearPredictor()) == expected_location
+        @test NP.simulate(
+            MersenneTwister(912), candidate_work, candidate,
+            scalar_position) == NP.simulate(
+                MersenneTwister(912), scalar_workspace, scalar_prepared,
+                scalar_position)
+    end
+
+    scalar_positions = [0.3 log(0.8); -0.2 log(1.1)]
+    scalar_queries = (;
+        location=NP.LinearPredictor(),
+        pointwise=NP.PointwiseLogLikelihood(),
+    )
+    scalar_signatures = NP.batch_output_signature(
+        scalar_prepared, scalar_positions, scalar_queries)
+    scalar_outputs = NP.allocate_output(
+        scalar_signatures, scalar_prepared)
+    NP.execute_draws!(
+        scalar_outputs, scalar_workspace, scalar_prepared,
+        scalar_positions, scalar_queries)
+    @test scalar_outputs.location[1, :] == expected_location
+    @test scalar_outputs.pointwise[1, :] ≈
+          logpdf.(Normal.(expected_location, 0.8), response)
+    @test bundle_execution_allocated(
+        scalar_outputs, scalar_workspace, scalar_prepared,
+        scalar_positions, scalar_queries) == 0
+
+    unconditioned_scalar = NP.compose(
+        scalar_prior_component,
+        NP.component(:unconditioned, scalar_normal_likelihood(theta)))
+    @test capability_error(
+        () -> NP.compile(unconditioned_scalar)).capability == :observation_axis
 end
 
 
@@ -2409,8 +2651,11 @@ end
         data = (; x=raw_x, y=response)
         composition = deterministic_preprocessing_composition(family, data)
         composed_plan = NP.compile(composition)
+        builder_plan = NP.compile(deterministic_preprocessing_composition(
+            family, data; concise=false))
         direct_plan = NP.bind(conditioned(
             direct_native_model(family, :zscale), data))
+        check_plan_structure(composed_plan, builder_plan)
         composed = check_transformed_execution(
             composed_plan, direct_plan, position)
         direct = NP.prepare(direct_plan)
@@ -2483,10 +2728,8 @@ end
     raw_w = [4.0, 2.0, 3.0, 9.0]
     response = [0.2, -0.1, 1.1, 0.7]
 
-    identity_model = NP.model(
-        inputs=(; raw=NP.input()), observations=(;))
     constant_source = NP.component(
-        :constant_source, NP.substitute(identity_model; raw=raw_x))
+        :constant_source, concise_passthrough(raw_x))
     constant_regression = NP.component(
         :constant_regression,
         NP.condition(
@@ -2610,6 +2853,57 @@ end
 
 @testset "public native PPL @model semantics" begin
     raw_x = [-1.0, 0.0, 2.0, 4.0]
+    preprocessing = concise_zscale_component(raw_x)
+    @test keys(preprocessing.declaration.inputs) == (:raw,)
+    @test keys(preprocessing.declaration.nodes) == (:scaled,)
+    @test isempty(preprocessing.declaration.parameters)
+    @test isempty(preprocessing.declaration.observations)
+    @test preprocessing.declaration.outputs == (; scaled=:scaled)
+    @test occursin("outputs=(:scaled,)", sprint(show, preprocessing.declaration))
+
+    named_preprocessing = concise_named_preprocessing(raw_x)
+    @test named_preprocessing.declaration.outputs ==
+          (; centered=:centered, standardized=:scaled)
+    @test_throws ArgumentError unknown_output_component(raw_x)
+    @test capability_error(() -> NP.bind(preprocessing)).capability == :outcomes
+    passthrough = concise_passthrough(raw_x)
+    @test passthrough.declaration.outputs == (; raw=:raw)
+    @test NP.graph_kind(NP.output(
+        NP.component(:passthrough, passthrough), :raw)) === :binding
+
+    scalar_prior = scalar_normal_prior()
+    @test isempty(scalar_prior.declaration.inputs)
+    @test keys(scalar_prior.declaration.parameters) == (:theta,)
+    @test scalar_prior.declaration.parameters.theta.axis_keys == (:theta,)
+    @test scalar_prior.declaration.parameters.theta.prior isa NP.StandardNormal
+    @test scalar_prior.declaration.outputs == (; theta=:theta)
+    prior_component = NP.component(:prior, scalar_prior)
+    @test NP.graph_kind(NP.output(prior_component, :theta)) === :parameter
+    @test capability_error(() -> NP.bind(scalar_prior)).capability == :outcomes
+
+    aliased_prior = aliased_scalar_normal_prior()
+    @test keys(aliased_prior.declaration.parameters) == (:theta,)
+    @test aliased_prior.declaration.outputs == (; coefficient=:theta)
+    aliased_prior_component = NP.component(:aliased_prior, aliased_prior)
+    @test NP.graph_kind(
+        NP.output(aliased_prior_component, :coefficient)) === :parameter
+    @test_throws ArgumentError NP.output(aliased_prior_component, :theta)
+
+    named_priors = named_scalar_normal_priors()
+    @test keys(named_priors.declaration.parameters) == (:intercept, :slope)
+    @test named_priors.declaration.outputs ==
+          (; intercept=:intercept, slope=:slope)
+    @test_throws ArgumentError NP.model(
+        inputs=(; raw=NP.input()),
+        nodes=(; scaled=NP.zscale(:raw)),
+        observations=(;), outputs=(; missing=:unknown))
+    @test_throws ArgumentError NP.model(
+        inputs=(; raw=NP.input()),
+        nodes=(; scaled=NP.zscale(:raw)),
+        observations=(;), outputs=(; first=:scaled, second=:scaled))
+    @test_throws ArgumentError NP.model(
+        inputs=(; raw=NP.input()), observations=(;), outputs=(;))
+
     unconditioned = macro_gaussian_identity(raw_x)
     @test keys(unconditioned.declaration.inputs) == (:x,)
     @test unconditioned.declaration.inputs.x isa NP.Input{:value}
@@ -2723,6 +3017,33 @@ end
             centered = center(x)
         end)))
     @test occursin("exactly one observation", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function nonfinal_return(x)
+            centered = center(x)
+            return centered
+            scaled = zscale(x)
+        end)))
+    @test occursin("return must be the final statement", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function duplicate_return(x)
+            centered = center(x)
+            return (first=centered, second=centered)
+        end)))
+    @test occursin("returned graph values must be distinct", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function empty_return(x)
+            return (;)
+        end)))
+    @test occursin("at least one named graph value", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function mixed_scalar_prior_component(x)
+            intercept ~ Normal()
+            slope ~ Normal()
+            theta ~ Normal()
+            mu = intercept + slope * x
+            return theta
+        end)))
+    @test occursin("cannot yet mix explicitly returned scalar priors", err.msg)
     err = argument_error(() -> macroexpand(
         @__MODULE__, :(NP.@model function bad_link(x)
             intercept ~ Normal()

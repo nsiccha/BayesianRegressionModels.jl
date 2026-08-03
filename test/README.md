@@ -33,7 +33,8 @@ BRM_TEST_TREEBARS=/path/to/Treebars.jl \
 
 That writes `test/Manifest.toml`, which is deliberately **not** committed (the
 root `.gitignore` covers `Manifest*.toml`). Re-run `bootstrap.jl` after moving
-a checkout, or on a new machine.
+a checkout, on a new machine, or when an existing ignored manifest still
+points at an older dependency checkout.
 
 `BridgeStan` needs the BridgeStan C++ sources in addition to the Julia package.
 `BridgeStan.jl` finds them via `$BRIDGESTAN`, falling back to
@@ -47,7 +48,12 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   registry only carries WarmupHMC 0.1.x, and the root `Project.toml` bounds it
   at `WarmupHMC = "0.2"` — so a registry resolve is unsatisfiable, not merely
   stale. `[sources]` cannot fix this either: it is a Julia 1.11+ feature and is
-  silently ignored on 1.10, which is this package's compat floor.
+  silently ignored on 1.10, which is this package's compat floor. Native PPL
+  sampling additionally requires WarmupHMC
+  `6e6be51a016ab1e3cae9c7478f5c885788c65155` or later, where Pathfinder uses
+  the target's own `logdensity_and_gradient`; `test/bootstrap.jl` and the
+  focused sampler test enforce this ancestry because both older and newer
+  checkouts report version 0.2.1.
 - **`StanBlocks` must be a checkout, not a release.** BRM does not precompile
   against registered StanBlocks; it fails inside a `@deffun` in `src/sbimpl.jl`.
   Configured `gp` / `hsgp` term priors additionally require StanBlocks
@@ -79,13 +85,14 @@ and no `[extras]`/`[targets]` in the root `Project.toml`:
   every supported Julia version, so carrying both would be two declarations of
   one dependency list.
 
-Three files are the reason this environment exists — they fail at their own
+Four files are the reason this environment exists — they fail at their own
 `using` line under `julia --project=.`, before any BRM code runs:
 
 | file | needs beyond the root project |
 | --- | --- |
 | `test/adaptive_centering_bridgestan.jl` | `WarmupHMC`, `Enzyme` |
 | `test/adaptive_centering_warmuphmc.jl` | `WarmupHMC`, `Enzyme`, `DifferentiationInterface` |
+| `test/native_ppl_warmuphmc.jl` | `WarmupHMC`, `Enzyme`, `DifferentiationInterface` |
 | `test/plate_stress.jl` | `BridgeStan` |
 
 There is no CI workflow for these on purpose: they need `stanc` and a BridgeStan

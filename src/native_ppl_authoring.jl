@@ -186,16 +186,22 @@ observation_dependencies(observation::BroadcastObservation) =
 """
 An unbound, typed native-PPL declaration shared by direct authors and BRM.
 
-Names are the keys of the four `NamedTuple`s. The model owns logical graph
-semantics only; data binding, fitted transform state, axes, coordinates, output
+Names are the keys of the declaration `NamedTuple`s. `outputs` is either
+`nothing` for the legacy implicit-export surface or a named map from public
+output aliases to graph identities. The model owns logical graph semantics
+only; data binding, fitted transform state, axes, coordinates, output
 signatures, and workspace layout belong to compilation/preparation.
 """
-struct Model{I,P,N,O}
+struct Model{I,P,N,O,R}
     inputs::I
     parameters::P
     nodes::N
     observations::O
+    outputs::R
 end
+
+Model(inputs, parameters, nodes, observations) =
+    Model(inputs, parameters, nodes, observations, nothing)
 
 """
 A composed call of a staged `@model` function.
@@ -261,19 +267,29 @@ end
 component(namespace::Symbol, declaration::Model) =
     component(namespace, ModelInstance(declaration, (;)))
 
+function _component_local_output_name(component::Component, name::Symbol)
+    outputs = component.instance.declaration.outputs
+    outputs === nothing && return name
+    hasproperty(outputs, name) || throw(ArgumentError(
+        "native PPL component `$(component_namespace(component))` does not " *
+        "export `$name`; declared outputs are $(keys(outputs))"))
+    getproperty(outputs, name)
+end
+
 function _component_output_kind(component::Component, name::Symbol)
     instance = component.instance
     declaration = instance.declaration
-    if hasproperty(declaration.inputs, name)
-        hasproperty(instance.bindings, name) || throw(ArgumentError(
+    local_name = _component_local_output_name(component, name)
+    if hasproperty(declaration.inputs, local_name)
+        hasproperty(instance.bindings, local_name) || throw(ArgumentError(
             "native PPL component `$(component_namespace(component))` cannot " *
-            "export open value port `$name`; connect it before exporting it"))
+            "export open value port `$local_name`; connect it before exporting it"))
         return :binding
-    elseif hasproperty(declaration.parameters, name)
+    elseif hasproperty(declaration.parameters, local_name)
         return :parameter
-    elseif hasproperty(declaration.nodes, name)
+    elseif hasproperty(declaration.nodes, local_name)
         return :node
-    elseif hasproperty(declaration.observations, name)
+    elseif hasproperty(declaration.observations, local_name)
         return :site
     end
     throw(ArgumentError(
@@ -450,7 +466,7 @@ function _push_declaration!(names, values, name::Symbol, value, kind)
     nothing
 end
 
-function _component_value_active(
+function _component_local_value_active(
     component_value::Component, name::Symbol, components, cache)
     namespace = component_namespace(component_value)
     key = (namespace, name)
@@ -460,9 +476,7 @@ function _component_value_active(
         if hasproperty(component_value.instance.bindings, name)
             value = getproperty(component_value.instance.bindings, name)
             value isa GraphRef ?
-                _component_value_active(
-                    getproperty(components, graph_namespace(value)),
-                    graph_name(value), components, cache) : false
+                _reference_active(value, components, cache) : false
         else
             false
         end
@@ -470,7 +484,7 @@ function _component_value_active(
         true
     elseif hasproperty(declaration.nodes, name)
         node = getproperty(declaration.nodes, name)
-        node isa Affine || _component_value_active(
+        node isa Affine || _component_local_value_active(
             component_value, node_input(node), components, cache)
     elseif hasproperty(declaration.observations, name)
         true
@@ -481,6 +495,12 @@ function _component_value_active(
     end
     cache[key] = active
     active
+end
+
+function _component_value_active(
+    component_value::Component, name::Symbol, components, cache)
+    local_name = _component_local_output_name(component_value, name)
+    _component_local_value_active(component_value, local_name, components, cache)
 end
 
 function _reference_active(reference::GraphRef, components, cache)
@@ -514,14 +534,13 @@ function _lower_composition(composition::Composition)
             if hasproperty(instance.bindings, name)
                 value = getproperty(instance.bindings, name)
                 if value isa GraphRef
-                    _reference_active(value, components, activity) && throw(
-                        CapabilityError(
-                            :active_graph_connection,
-                            "component `$namespace` port `$name` consumes active " *
-                            "`$(graph_kind(value))` output " *
-                            "`$(graph_namespace(value)).$(graph_name(value))`; " *
-                            "latent-coordinate activity lowering is not in the " *
-                            "current composition compiler"))
+                    graph_kind(value) === :site && throw(CapabilityError(
+                        :active_site_connection,
+                        "component `$namespace` port `$name` consumes " *
+                        "stochastic-site output " *
+                        "`$(graph_namespace(value)).$(graph_name(value))`; " *
+                        "factor-to-value schedule ordering is not available yet"))
+                    _reference_active(value, components, activity)
                     mapping[name] = _resolved_reference(value, resolved)
                     resolved[(namespace, name)] = mapping[name]
                     continue
@@ -574,6 +593,12 @@ function _lower_composition(composition::Composition)
                     "active evidence lowering is not available yet"))
                 push!(condition_names, qualified)
                 push!(condition_values, value)
+            end
+        end
+
+        if declaration.outputs !== nothing
+            for (alias, local_name) in pairs(declaration.outputs)
+                resolved[(namespace, alias)] = resolved[(namespace, local_name)]
             end
         end
     end
@@ -679,7 +704,8 @@ function _check_named_declarations(values, kind::AbstractString, type)
     values
 end
 
-function _validate_model_components(inputs, parameters, nodes, observations)
+function _validate_model_components(
+    inputs, parameters, nodes, observations, outputs)
     _check_named_declarations(
         inputs, "input", AbstractInputDeclaration)
     _check_named_declarations(
@@ -740,18 +766,40 @@ function _validate_model_components(inputs, parameters, nodes, observations)
         end
     end
 
+    if outputs !== nothing
+        outputs isa NamedTuple || throw(ArgumentError(
+            "native PPL model outputs must be a NamedTuple; got " *
+            "$(typeof(outputs))"))
+        isempty(outputs) && throw(ArgumentError(
+            "native PPL model outputs must declare at least one named graph value"))
+        all(name -> name isa Symbol, values(outputs)) || throw(ArgumentError(
+            "native PPL model outputs must reference named graph values"))
+        length(unique(values(outputs))) == length(outputs) || throw(
+            ArgumentError(
+                "native PPL model outputs must reference distinct graph values"))
+        exportable = union(
+            input_names, parameter_names, node_names, Set(keys(observations)))
+        for (alias, name) in pairs(outputs)
+            name in exportable || throw(ArgumentError(
+                "native PPL model output `$alias` references unavailable " *
+                "value `$name`"))
+        end
+    end
+
     nothing
 end
 
-function model(; inputs, parameters=(;), nodes=(;), observations)
-    _validate_model_components(inputs, parameters, nodes, observations)
-    Model(inputs, parameters, nodes, observations)
+function model(;
+    inputs, parameters=(;), nodes=(;), observations, outputs=nothing)
+    _validate_model_components(
+        inputs, parameters, nodes, observations, outputs)
+    Model(inputs, parameters, nodes, observations, outputs)
 end
 
 function _validate_model(declaration::Model)
     _validate_model_components(
         declaration.inputs, declaration.parameters,
-        declaration.nodes, declaration.observations)
+        declaration.nodes, declaration.observations, declaration.outputs)
     declaration
 end
 
@@ -806,7 +854,10 @@ function Base.show(io::IO, declaration::Model)
     print(io, "NativePPL.Model(inputs=", keys(declaration.inputs),
           ", parameters=", keys(declaration.parameters),
           ", nodes=", keys(declaration.nodes),
-          ", observations=", keys(declaration.observations), ")")
+          ", observations=", keys(declaration.observations))
+    declaration.outputs === nothing ||
+        print(io, ", outputs=", keys(declaration.outputs))
+    print(io, ")")
 end
 
 function _one_declaration(values::NamedTuple, type, kind::AbstractString)
@@ -887,24 +938,115 @@ function _validate_scale_parameter(name::Symbol, declaration::Parameter)
     nothing
 end
 
+function _bind_scalar_location(
+    declaration::Model, bindings::NamedTuple, conditions::NamedTuple)
+    isempty(bindings) || throw(CapabilityError(
+        :value_ports,
+        "scalar-only active composition cannot retain ordinary value bindings"))
+    isempty(declaration.nodes) || throw(CapabilityError(
+        :additional_nodes,
+        "the current scalar active compiler accepts no deterministic nodes"))
+    length(declaration.observations) == 1 || throw(CapabilityError(
+        :outcomes,
+        "the scalar active compiler requires exactly one observation declaration"))
+    response_name, lifted_observation =
+        only(collect(pairs(declaration.observations)))
+    is_broadcast_observation(lifted_observation) || throw(CapabilityError(
+        :broadcast_lifting,
+        "the scalar active compiler requires explicit dotted sampling"))
+    observation = scalar_observation(lifted_observation)
+    observation isa NormalObservation || throw(CapabilityError(
+        :likelihood,
+        "the first scalar active compiler slice supports Normal observations"))
+    observation_response(observation) === response_name || throw(
+        CapabilityError(
+            :graph_identity,
+            "scalar active stochastic-site identity must match its response"))
+    hasproperty(conditions, response_name) || throw(CapabilityError(
+        :observation_axis,
+        "a scalar-only unconditioned model has no observation-axis source; " *
+        "condition `$response_name` before compiling it"))
+    response = _binding(conditions, response_name, :conditioned_response)
+    eltype(response) <: Real || throw(CapabilityError(
+        :response_type,
+        "conditioned site `$response_name` must be a real vector"))
+    observation_count = length(response)
+    observation_count > 0 || throw(CapabilityError(
+        :observation_axis, "the observation axis cannot be empty"))
+
+    location_name, scale_name = observation_dependencies(observation)
+    location_name === scale_name && throw(CapabilityError(
+        :graph_identity,
+        "Normal location and scale must be distinct graph values"))
+    length(declaration.parameters) == 2 || throw(CapabilityError(
+        :additional_parameters,
+        "scalar Normal composition requires one location and one scale parameter"))
+    hasproperty(declaration.parameters, location_name) || throw(CapabilityError(
+        :parameter_binding,
+        "scalar Normal location references missing parameter `$location_name`"))
+    hasproperty(declaration.parameters, scale_name) || throw(CapabilityError(
+        :parameter_binding,
+        "scalar Normal scale references missing parameter `$scale_name`"))
+    location_declaration = getproperty(declaration.parameters, location_name)
+    scale_declaration = getproperty(declaration.parameters, scale_name)
+    _validate_coefficient_parameter(location_name, location_declaration, 0)
+    only(location_declaration.axis_keys) === location_name || throw(
+        CapabilityError(
+            :parameter_axis,
+            "scalar location parameter `$location_name` must use its graph " *
+            "identity as its axis key"))
+    _validate_scale_parameter(scale_name, scale_declaration)
+
+    observation_axis = BRM.NativePPLAxis(
+        :observation, Base.OneTo(observation_count))
+    coefficient_axis = BRM.NativePPLAxis(
+        Symbol(location_name, :_scalar), location_declaration.axis_keys)
+    scale_axis = BRM.NativePPLAxis(
+        Symbol(scale_name, :_scalar), scale_declaration.axis_keys)
+    response_input = BRM.NativePPLInput(
+        response_name, :response, observation_axis, eltype(response))
+    coefficients = BRM.NativePPLParameter(
+        location_name, location_declaration.support,
+        location_declaration.transform, coefficient_axis, 1:1)
+    scale = BRM.NativePPLParameter(
+        scale_name, scale_declaration.support, scale_declaration.transform,
+        scale_axis, 2:2)
+    location = BRM.NativePPLScalarBroadcastNode(
+        location_name, location_name, observation_axis, 1)
+    coefficient_prior = BRM.NativePPLStandardNormalFactor(location_name, 1:1)
+    scale_prior = BRM.NativePPLExponentialFactor(
+        scale_name, 2, scale_declaration.prior.scale)
+    likelihood = BRM.NativePPLNormalFactor(
+        response_name, location_name, scale_name, observation_axis)
+    _validated_plan(BRM.NativePPLPlan(
+        (; observation=observation_axis, coefficient=coefficient_axis,
+           scale=scale_axis),
+        (; predictors=(;), response=response_input),
+        (; coefficients, scale),
+        (; transforms=(;), location),
+        (; coefficient_prior, scale_prior, likelihood),
+        BRM._native_ppl_queries(observation_axis, likelihood),
+        NamedTuple{(response_name,)}((response,))))
+end
+
 """
     bind(model::Model, bindings; conditions=(;)) -> Plan
 
 Fit data-derived nodes and compile the current direct declaration subset into
-the same typed executable `Plan` used by BRM. This initial compiler accepts one
-or more continuous predictors, one affine node, an optional fitted
-center/zscale node per predictor, an optional exponential rate link, and one
-Normal/BernoulliLogit/Poisson stochastic site. The executor subset requires
-explicit broadcast lifting; conditions are optional so the same declaration
-can compile for generative prediction. Unsupported graph shapes fail closed.
+the same typed executable `Plan` used by BRM. The compiler accepts either one
+or more continuous predictors feeding an affine location, or an actively
+connected scalar parameter broadcast over a conditioned observation axis. The
+affine path supports optional fitted center/zscale nodes, an optional
+exponential rate link, and one Normal/BernoulliLogit/Poisson stochastic site;
+the first scalar-active path supports Normal. The executor requires explicit
+broadcast lifting. Unsupported graph shapes fail closed.
 """
 function _bind(declaration::Model, bindings, conditions)
     _validate_model(declaration)
     _validate_binding_names(declaration, bindings)
     _validate_condition_names(declaration, conditions)
-    isempty(declaration.inputs) && throw(CapabilityError(
-        :value_ports,
-        "the current affine compiler requires at least one connected value port"))
+    isempty(declaration.inputs) &&
+        return _bind_scalar_location(declaration, bindings, conditions)
     predictor_names = Tuple(keys(declaration.inputs))
     predictors = map(predictor_names) do predictor_name
         predictor_declaration = getproperty(declaration.inputs, predictor_name)
@@ -1253,9 +1395,14 @@ function _lower_brmi(brmi::BRM.BRMI)
 
     input_declarations = _declaration_namedtuple(
         predictor_names, map(_ -> input(), predictor_names))
-    coefficient_name = Symbol(:beta_, location)
+    scalar_location = isempty(predictor_names)
+    scalar_location && family !== BRM.Normal && throw(CapabilityError(
+        :likelihood,
+        "the first intercept-only BRM native-PPL slice supports Normal"))
+    coefficient_name = scalar_location ? location : Symbol(:beta_, location)
     coefficient_declaration = parameter(
-        RealSupport(), (:Intercept, predictor_names...);
+        RealSupport(),
+        scalar_location ? (location,) : (:Intercept, predictor_names...);
         transform=Identity(), prior=StandardNormal())
     parameter_declarations = if family === BRM.Normal
         scale_declaration = parameter(
@@ -1280,9 +1427,10 @@ function _lower_brmi(brmi::BRM.BRMI)
         push!(transform_declarations, transform_declaration)
         transform_name
     end
-    affine_declaration = affine(Tuple(affine_inputs), coefficient_name)
-    node_names = (Tuple(transform_names)..., location)
-    node_values = (Tuple(transform_declarations)..., affine_declaration)
+    node_names = scalar_location ? () : (Tuple(transform_names)..., location)
+    node_values = scalar_location ? () : (
+        Tuple(transform_declarations)...,
+        affine(Tuple(affine_inputs), coefficient_name))
     node_declarations = _declaration_namedtuple(node_names, node_values)
 
     observation_declaration = if family === BRM.Normal
@@ -1483,6 +1631,15 @@ function _syntax_standard_normal(statement)
     valid ? lhs : nothing
 end
 
+function _syntax_scalar_standard_normal_parameter(name::Symbol)
+    Expr(
+        :call, _syntax_ref(:parameter),
+        Expr(:parameters,
+             Expr(:kw, :transform, Expr(:call, _syntax_ref(:Identity))),
+             Expr(:kw, :prior, Expr(:call, _syntax_ref(:StandardNormal)))),
+        Expr(:call, _syntax_ref(:RealSupport)), QuoteNode((name,)))
+end
+
 function _syntax_affine_terms(expression)
     expression isa Expr && expression.head === :call &&
         first(expression.args) in (:+, :.+) || return nothing
@@ -1625,7 +1782,48 @@ function _syntax_observation(lhs, rhs; broadcasted::Bool)
                         (QuoteNode(argument) for argument in arguments)...)
     value = broadcasted ?
         Expr(:call, _syntax_ref(:broadcasted), scalar_value) : scalar_value
-    (; name=lhs, value, extra_node_name, extra_node_value)
+    (; name=lhs, value, extra_node_name, extra_node_value,
+       dependencies=Tuple(arguments))
+end
+
+function _syntax_outputs(statement)
+    statement isa Expr && statement.head === :return || return nothing
+    length(statement.args) == 1 || throw(ArgumentError(
+        "native PPL @model return requires one named value or named tuple"))
+    value = only(statement.args)
+    value isa Symbol && return ((value,), (value,))
+    value isa Expr && value.head === :tuple || throw(ArgumentError(
+        "native PPL @model return must be a named value or named tuple"))
+
+    entries = value.args
+    if length(entries) == 1 && entries[1] isa Expr &&
+       entries[1].head === :parameters
+        entries = entries[1].args
+        isempty(entries) && throw(ArgumentError(
+            "native PPL @model return requires at least one named graph value"))
+        all(entry -> entry isa Symbol, entries) || throw(ArgumentError(
+            "native PPL @model named return shorthand requires bare names"))
+        names = Tuple(entries)
+        return names, names
+    end
+
+    aliases = Symbol[]
+    names = Symbol[]
+    isempty(entries) && throw(ArgumentError(
+        "native PPL @model return requires at least one named graph value"))
+    for entry in entries
+        entry isa Expr && entry.head in (:(=), :kw) &&
+            length(entry.args) == 2 && entry.args[1] isa Symbol &&
+            entry.args[2] isa Symbol || throw(ArgumentError(
+                "native PPL @model tuple returns must use `alias=name` entries"))
+        push!(aliases, entry.args[1])
+        push!(names, entry.args[2])
+    end
+    length(unique(aliases)) == length(aliases) || throw(ArgumentError(
+        "native PPL @model return aliases must be unique"))
+    length(unique(names)) == length(names) || throw(ArgumentError(
+        "native PPL @model returned graph values must be distinct"))
+    Tuple(aliases), Tuple(names)
 end
 
 function _model_function_syntax(definition)
@@ -1654,9 +1852,22 @@ function _model_function_syntax(definition)
     node_values = Any[]
     observation_names = Symbol[]
     observation_values = Any[]
+    factor_dependency_names = Set{Symbol}()
     statements = body isa Expr && body.head === :block ? body.args : Any[body]
+    statements = Any[statement for statement in statements
+                     if !(statement isa LineNumberNode)]
+    return_indices = findall(
+        statement -> statement isa Expr && statement.head === :return,
+        statements)
+    length(return_indices) <= 1 || throw(ArgumentError(
+        "native PPL @model supports one explicit return statement"))
+    explicit_outputs = nothing
+    if !isempty(return_indices)
+        only(return_indices) == length(statements) || throw(ArgumentError(
+            "native PPL @model return must be the final statement"))
+        explicit_outputs = _syntax_outputs(pop!(statements))
+    end
     for statement in statements
-        statement isa LineNumberNode && continue
         sampling = _syntax_sampling_statement(statement)
         if sampling !== nothing
             sampling.lhs isa Symbol && sampling.lhs in argument_name_set &&
@@ -1681,6 +1892,7 @@ function _model_function_syntax(definition)
                 end
                 push!(observation_names, observation.name)
                 push!(observation_values, observation.value)
+                union!(factor_dependency_names, observation.dependencies)
             else
                 if is_explicit_parameter
                     name, value = _syntax_parameter(
@@ -1724,6 +1936,24 @@ function _model_function_syntax(definition)
                 "native PPL @model unsupported statement `$statement`"))
         end
     end
+    returned_names = explicit_outputs === nothing ? Set{Symbol}() :
+        Set(last(explicit_outputs))
+    union!(returned_names, factor_dependency_names)
+    standalone_scalar_priors = setdiff(
+        intersect(Set(scalar_prior_names), returned_names),
+        consumed_scalar_priors)
+    if !isempty(standalone_scalar_priors)
+        isempty(consumed_scalar_priors) || throw(ArgumentError(
+            "native PPL @model cannot yet mix explicitly returned scalar " *
+            "priors with packed affine coefficients in one component"))
+        for name in scalar_prior_names
+            name in standalone_scalar_priors || continue
+            push!(parameter_names, name)
+            push!(parameter_values,
+                  _syntax_scalar_standard_normal_parameter(name))
+            push!(consumed_scalar_priors, name)
+        end
+    end
     unused_scalar_priors = setdiff(
         Set(scalar_prior_names), consumed_scalar_priors)
     isempty(unused_scalar_priors) || throw(ArgumentError(
@@ -1735,23 +1965,39 @@ function _model_function_syntax(definition)
             "native PPL @model generated duplicate parameter identities"))
     length(unique(node_names)) == length(node_names) || throw(ArgumentError(
         "native PPL @model generated duplicate node identities"))
-    length(observation_names) == 1 || throw(ArgumentError(
-        "native PPL @model currently requires exactly one observation"))
+    if explicit_outputs === nothing
+        length(observation_names) == 1 || throw(ArgumentError(
+            "native PPL @model without an explicit return currently requires " *
+            "exactly one observation"))
+    else
+        length(observation_names) <= 1 || throw(ArgumentError(
+            "native PPL @model currently supports at most one observation"))
+    end
     input_values = Any[
         Expr(:call, _syntax_ref(:input))
         for name in argument_names
     ]
+    model_keywords = Any[
+        Expr(:kw, :inputs,
+             _syntax_namedtuple(argument_names, input_values)),
+        Expr(:kw, :parameters,
+             _syntax_namedtuple(parameter_names, parameter_values)),
+        Expr(:kw, :nodes,
+             _syntax_namedtuple(node_names, node_values)),
+        Expr(:kw, :observations,
+             _syntax_namedtuple(observation_names, observation_values)),
+    ]
+    if explicit_outputs !== nothing
+        output_aliases, output_names = explicit_outputs
+        push!(model_keywords, Expr(
+            :kw, :outputs,
+            _syntax_namedtuple(
+                collect(output_aliases),
+                Any[QuoteNode(name) for name in output_names])))
+    end
     declaration = Expr(
         :call, _syntax_ref(:model),
-        Expr(:parameters,
-             Expr(:kw, :inputs,
-                  _syntax_namedtuple(argument_names, input_values)),
-             Expr(:kw, :parameters,
-                  _syntax_namedtuple(parameter_names, parameter_values)),
-             Expr(:kw, :nodes,
-                  _syntax_namedtuple(node_names, node_values)),
-             Expr(:kw, :observations,
-                  _syntax_namedtuple(observation_names, observation_values))))
+        Expr(:parameters, model_keywords...))
     bindings = _syntax_namedtuple(argument_names, Any[argument_names...])
     instance = Expr(:call, _syntax_ref(:instantiate), declaration, bindings)
     Expr(:function, signature, Expr(:block, Expr(:return, instance)))
@@ -1767,8 +2013,10 @@ Define a staged probabilistic model function. Calling it returns a
 slice accepts generic composable positional value ports, standard-normal
 coefficient sites, positive Exponential-prior scalar sites, fitted
 center/zscale nodes, affine and exp deterministic nodes, and one scalar or
-explicitly broadcast Normal/BernoulliLogit/Poisson stochastic site. The current
-vector executor requires the explicit broadcast form (`@.` or dotted `~`).
+explicitly broadcast Normal/BernoulliLogit/Poisson stochastic site. A final
+`return value` or named-tuple return declares component outputs and permits a
+deterministic zero-observation model. The current vector executor requires the
+explicit broadcast form (`@.` or dotted `~`).
 """
 macro model(definition)
     esc(_model_function_syntax(definition))
