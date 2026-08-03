@@ -317,6 +317,11 @@ NP.@model function scalar_normal_prior()
     return theta
 end
 
+NP.@model function aliased_scalar_normal_prior()
+    theta ~ Normal(0, 1)
+    return (coefficient=theta,)
+end
+
 NP.@model function named_scalar_normal_priors()
     intercept ~ Normal()
     slope ~ Normal(0, 1)
@@ -2701,6 +2706,14 @@ end
     @test NP.graph_kind(NP.output(prior_component, :theta)) === :parameter
     @test capability_error(() -> NP.bind(scalar_prior)).capability == :value_ports
 
+    aliased_prior = aliased_scalar_normal_prior()
+    @test keys(aliased_prior.declaration.parameters) == (:theta,)
+    @test aliased_prior.declaration.outputs == (; coefficient=:theta)
+    aliased_prior_component = NP.component(:aliased_prior, aliased_prior)
+    @test NP.graph_kind(
+        NP.output(aliased_prior_component, :coefficient)) === :parameter
+    @test_throws ArgumentError NP.output(aliased_prior_component, :theta)
+
     named_priors = named_scalar_normal_priors()
     @test keys(named_priors.declaration.parameters) == (:intercept, :slope)
     @test named_priors.declaration.outputs ==
@@ -2847,6 +2860,15 @@ end
             return (;)
         end)))
     @test occursin("at least one named graph value", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function mixed_scalar_prior_component(x)
+            intercept ~ Normal()
+            slope ~ Normal()
+            theta ~ Normal()
+            mu = intercept + slope * x
+            return theta
+        end)))
+    @test occursin("cannot yet mix explicitly returned scalar priors", err.msg)
     err = argument_error(() -> macroexpand(
         @__MODULE__, :(NP.@model function bad_link(x)
             intercept ~ Normal()
