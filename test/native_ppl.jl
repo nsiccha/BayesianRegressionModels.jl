@@ -27,7 +27,7 @@ function direct_native_model(family::Symbol, transform::Symbol;
     end
 
     transform_name = transform === :identity ? nothing :
-        Symbol("#native_ppl_", transform, "#", location, "#x")
+        Symbol(transform, :_x_for_, location)
     transform_declaration = transform === :center ? NP.center(:x) :
         transform === :zscale ? NP.zscale(:x) : nothing
     affine_input = transform_name === nothing ? :x : transform_name
@@ -46,11 +46,54 @@ function direct_native_model(family::Symbol, transform::Symbol;
         NP.poisson(:y, rate_name)
     end
     NP.model(
-        inputs=(; x=NP.input(:predictor), y=NP.input(:response)),
+        inputs=(; x=NP.input()),
         parameters=parameters,
         nodes=nodes,
-        observations=(; y=observation))
+        observations=(; y=NP.broadcasted(observation)))
 end
+
+conditioned(model, data) =
+    NP.condition(NP.substitute(model; x=data.x); y=data.y)
+
+function direct_multi_model(family::Symbol;
+                            coefficient_keys=(:Intercept, :x, :w))
+    coefficients = NP.parameter(
+        NP.RealSupport(), coefficient_keys;
+        transform=NP.Identity(), prior=NP.StandardNormal())
+    location = family === :gaussian ? :mu :
+        family === :bernoulli ? :eta : :log_rate
+    parameters = NamedTuple{(Symbol(:beta_, location),)}((coefficients,))
+    if family === :gaussian
+        sigma = NP.parameter(
+            NP.PositiveSupport(), (:sigma,);
+            transform=NP.Exp(), prior=NP.Exponential(2.0))
+        parameters = merge(parameters, (; sigma))
+    end
+    transform_names = if location === :mu
+        (:zscale_x_for_mu, :center_w_for_mu)
+    else
+        (Symbol(:zscale_x_for_, location), Symbol(:center_w_for_, location))
+    end
+    nodes = NamedTuple{transform_names}((NP.zscale(:x), NP.center(:w)))
+    nodes = merge(nodes, NamedTuple{(location,)}((NP.affine(
+        transform_names, Symbol(:beta_, location)),)))
+    observation = if family === :gaussian
+        NP.normal(:y, location, :sigma)
+    elseif family === :bernoulli
+        NP.bernoulli_logit(:y, location)
+    else
+        rate = Symbol(:exp_, location)
+        nodes = merge(nodes, NamedTuple{(rate,)}((NP.exp_link(location),)))
+        NP.poisson(:y, rate)
+    end
+    NP.model(
+        inputs=(; x=NP.input(), w=NP.input()),
+        parameters=parameters, nodes=nodes,
+        observations=(; y=NP.broadcasted(observation)))
+end
+
+direct_multi_gaussian_model() = direct_multi_model(
+    :gaussian; coefficient_keys=(:intercept, :beta_x, :beta_w))
 
 function native_brmi(family::Symbol, transform::Symbol, data)
     if family === :gaussian
@@ -97,6 +140,41 @@ function native_brmi(family::Symbol, transform::Symbol, data)
     end
 end
 
+function multi_native_brmi(family::Symbol, data)
+    family === :gaussian && return @brm data begin
+        sigma ~ Exponential(2.0)
+        mu ~ 1 + zscale(x) + center(w)
+        y ~ Normal(mu, sigma)
+    end
+    family === :bernoulli && return @brm data begin
+        eta ~ 1 + zscale(x) + center(w)
+        y ~ BernoulliLogit(eta)
+    end
+    @brm data begin
+        log_rate ~ 1 + zscale(x) + center(w)
+        y ~ Poisson(exp(log_rate))
+    end
+end
+
+function deterministic_preprocessing_composition(family::Symbol, data)
+    preprocessing_model = NP.model(
+        inputs=(; raw=NP.input()),
+        nodes=(; scaled=NP.zscale(:raw)),
+        observations=(;))
+    preprocessing = NP.component(
+        :preprocessing,
+        NP.substitute(preprocessing_model; raw=data.x))
+    regression_model = direct_native_model(family, :identity)
+    regression = NP.component(
+        :regression,
+        NP.condition(
+            NP.substitute(
+                regression_model;
+                x=NP.output(preprocessing, :scaled));
+            y=data.y))
+    NP.compose(preprocessing, regression)
+end
+
 function check_plan_structure(left, right)
     @test typeof(left) === typeof(right)
     @test keys(left.axes) == keys(right.axes)
@@ -111,10 +189,17 @@ function check_plan_structure(left, right)
     @test map(typeof, values(left.factors)) == map(typeof, values(right.factors))
     @test map(typeof, values(left.queries)) == map(typeof, values(right.queries))
     @test sprint(show, left) == sprint(show, right)
-    if hasproperty(left.nodes, :transform)
-        @test left.nodes.transform.mean == right.nodes.transform.mean
-        if left.nodes.transform isa BRM.NativePPLZScaleNode
-            @test left.nodes.transform.scale == right.nodes.transform.scale
+    if !isempty(left.nodes.transforms)
+        left_transforms = values(left.nodes.transforms)
+        right_transforms = values(right.nodes.transforms)
+        @test length(left_transforms) == length(right_transforms)
+        for (left_transform, right_transform) in
+            zip(left_transforms, right_transforms)
+            @test typeof(left_transform) === typeof(right_transform)
+            @test left_transform.mean == right_transform.mean
+            if left_transform isa BRM.NativePPLZScaleNode
+                @test left_transform.scale == right_transform.scale
+            end
         end
     end
     if hasproperty(left.factors, :scale_prior)
@@ -124,7 +209,24 @@ function check_plan_structure(left, right)
 end
 
 NP.@model function macro_gaussian_identity(
-    x::AbstractVector{<:Real}, y::AbstractVector{<:Real})
+    x::AbstractVector{<:Real})
+    intercept ~ Normal()
+    slope ~ Normal(0, 1)
+    sigma ~ Exponential(2.0)
+    mu = intercept + slope * x
+    @. y ~ Normal(mu, sigma)
+end
+
+NP.@model function macro_gaussian_zscale(
+    x::AbstractVector{<:Real})
+    intercept ~ Normal()
+    slope ~ Normal(0, 1)
+    sigma ~ Exponential(2.0)
+    mu = intercept + slope * standardize(x)
+    @. y ~ Normal(mu, sigma)
+end
+
+NP.@model function macro_scalar_gaussian(x::AbstractVector{<:Real})
     intercept ~ Normal()
     slope ~ Normal(0, 1)
     sigma ~ Exponential(2.0)
@@ -132,17 +234,54 @@ NP.@model function macro_gaussian_identity(
     y ~ Normal(mu, sigma)
 end
 
-NP.@model function macro_gaussian_zscale(
-    x::AbstractVector{<:Real}, y::AbstractVector{<:Real})
+NP.@model function macro_multi_gaussian(
+    x::AbstractVector{<:Real}, w::AbstractVector{<:Real})
     intercept ~ Normal()
-    slope ~ Normal(0, 1)
+    beta_x ~ Normal()
+    beta_w ~ Normal()
     sigma ~ Exponential(2.0)
-    mu = intercept + slope * standardize(x)
-    y ~ Normal(mu, sigma)
+    mu = intercept + beta_x * zscale(x) + beta_w * center(w)
+    @. y ~ Normal(mu, sigma)
+end
+
+NP.@model function macro_multi_bernoulli(
+    x::AbstractVector{<:Real}, w::AbstractVector{<:Real})
+    intercept ~ Normal()
+    beta_x ~ Normal()
+    beta_w ~ Normal()
+    eta = intercept + beta_x * zscale(x) + beta_w * center(w)
+    @. y ~ BernoulliLogit(eta)
+end
+
+NP.@model function macro_multi_poisson(
+    x::AbstractVector{<:Real}, w::AbstractVector{<:Real})
+    intercept ~ Normal()
+    beta_x ~ Normal()
+    beta_w ~ Normal()
+    log_rate = intercept + beta_x * zscale(x) + beta_w * center(w)
+    @. y ~ Poisson(exp(log_rate))
+end
+
+NP.@model function macro_multi_gaussian_dotted(
+    x::AbstractVector{<:Real}, w::AbstractVector{<:Real})
+    intercept ~ Normal()
+    beta_x ~ Normal()
+    beta_w ~ Normal()
+    sigma ~ Exponential(2.0)
+    mu = intercept .+ zscale(x) .* beta_x .+ beta_w .* center(w)
+    @. y ~ Normal(mu, sigma)
+end
+
+NP.@model function composable_gaussian(x)
+    intercept ~ Normal()
+    slope ~ Normal()
+    sigma ~ Exponential(2.0)
+    mu = intercept + slope * x
+    @. y ~ Normal(mu, sigma)
 end
 
 NP.@model function macro_bernoulli_center(
-    x::AbstractVector{<:Real}, y::AbstractVector{<:Real})
+    x::AbstractVector{<:Real})
     intercept ~ Normal()
     slope ~ Normal(0, 1)
     eta = intercept .+ slope .* center(x)
@@ -150,7 +289,7 @@ NP.@model function macro_bernoulli_center(
 end
 
 NP.@model function macro_poisson_zscale(
-    x::AbstractVector{<:Real}, y::AbstractVector{<:Real})
+    x::AbstractVector{<:Real})
     intercept ~ Normal()
     slope ~ Normal(0, 1)
     log_rate = intercept .+ slope .* zscale(x)
@@ -167,12 +306,12 @@ const Normal = :shadow
 const Exponential = :shadow
 const zscale = :shadow
 
-NP.@model function hygienic(x::Vector{Float64}, y::Vector{Float64})
+NP.@model function hygienic(x::Vector{Float64})
     intercept ~ Normal()
     slope ~ Normal(0, 1)
     sigma ~ Exponential(2.0)
     mu = intercept + slope * zscale(x)
-    y ~ Normal(mu, sigma)
+    @. y ~ Normal(mu, sigma)
 end
 end
 
@@ -254,6 +393,9 @@ end
 replace_plan_nodes(plan, nodes) = BRM.NativePPLPlan(
     plan.axes, plan.inputs, plan.parameters, nodes, plan.factors,
     plan.queries, plan.bindings)
+replace_plan_transform(plan, transform) = replace_plan_nodes(
+    plan, merge(plan.nodes, (; transforms=NamedTuple{
+        keys(plan.nodes.transforms)}((transform,)))))
 replace_plan_factors(plan, factors) = BRM.NativePPLPlan(
     plan.axes, plan.inputs, plan.parameters, plan.nodes, factors,
     plan.queries, plan.bindings)
@@ -324,9 +466,9 @@ end
     @test BRM.native_axis_name(plan.axes.scale) == :residual_scalar
     @test plan.axes.scale.keys == (:residual,)
 
-    @test BRM.native_input_name(plan.inputs.predictor) == :dose
-    @test BRM.native_input_role(plan.inputs.predictor) == :predictor
-    @test eltype(plan.inputs.predictor) == Float64
+    @test BRM.native_input_name(plan.inputs.predictors.dose) == :dose
+    @test BRM.native_input_role(plan.inputs.predictors.dose) == :predictor
+    @test eltype(plan.inputs.predictors.dose) == Float64
     @test BRM.native_input_name(plan.inputs.response) == :response
     @test BRM.native_input_role(plan.inputs.response) == :response
     @test eltype(plan.inputs.response) == Float32
@@ -358,7 +500,11 @@ end
     @test BRM.native_affine_input(plan.nodes.location) == :dose
     @test plan.nodes.location.axis === plan.axes.observation
     @test plan.nodes.location.intercept_index == 1
-    @test plan.nodes.location.slope_index == 2
+    @test plan.nodes.location.slope_indices == (2,)
+    @test_throws ArgumentError BRM.NativePPLAffineNode(
+        :invalid, (), plan.axes.observation, 1, ())
+    @test_throws ArgumentError BRM.NativePPLAffineNode(
+        :invalid, (:dose, :dose), plan.axes.observation, 1, (2, 3))
 
     @test plan.factors.coefficient_prior isa BRM.NativePPLStandardNormalFactor
     @test plan.factors.coefficient_prior.unconstrained == 1:2
@@ -444,6 +590,7 @@ end
     @test prepared isa BRM.NativePPLPrepared
     @test eltype(prepared) == Float64
     @test LogDensityProblems.dimension(prepared) == 3
+    @test hasproperty(prepared, :predictor)
     @test prepared.predictor == data.dose
     @test prepared.predictor !== data.dose
     @test prepared.response == data.response
@@ -708,7 +855,8 @@ end
     @test LogDensityProblems.dimension(plan) == 2
     @test keys(plan.axes) == (:observation, :coefficient)
     @test keys(plan.parameters) == (:coefficients,)
-    @test keys(plan.nodes) == (:location, :rate)
+    @test keys(plan.nodes) == (:transforms, :location, :rate)
+    @test isempty(plan.nodes.transforms)
     @test keys(plan.factors) == (:coefficient_prior, :likelihood)
     @test plan.factors.likelihood isa BRM.NativePPLPoissonFactor
     @test plan.factors.likelihood.axis === plan.axes.observation
@@ -1313,8 +1461,8 @@ end
     gaussian = check_transformed_execution(
         gaussian_centered, gaussian_explicit, [0.2, -0.4, log(0.8)])
 
-    @test hasproperty(gaussian_centered.nodes, :transform)
-    transform = gaussian_centered.nodes.transform
+    @test length(gaussian_centered.nodes.transforms) == 1
+    transform = only(values(gaussian_centered.nodes.transforms))
     @test transform isa BRM.NativePPLCenterNode
     @test BRM.native_center_input(transform) === :x
     @test transform.mean == 2.5
@@ -1362,12 +1510,13 @@ end
         gaussian, (; x=new_x, y=[0.4, 0.9]))
     refitted = BRM.NativePPL.rebind(
         gaussian, (; x=new_x, y=[0.4, 0.9]); freeze_constants=false)
-    @test frozen.plan.nodes.transform.mean == 2.5
+    @test only(values(frozen.plan.nodes.transforms)).mean == 2.5
     @test frozen.predictor == [7.5, 11.5]
-    @test refitted.plan.nodes.transform.mean == 12.0
+    @test only(values(refitted.plan.nodes.transforms)).mean == 12.0
     @test refitted.predictor == [-2.0, 2.0]
     @test frozen.plan.bindings.x === new_x
-    @test frozen.plan.nodes.transform.axis === frozen.plan.axes.observation
+    @test only(values(frozen.plan.nodes.transforms)).axis ===
+          frozen.plan.axes.observation
     @test frozen.plan.nodes.location.axis === frozen.plan.axes.observation
     @test frozen.plan.factors.likelihood.axis === frozen.plan.axes.observation
 
@@ -1405,7 +1554,7 @@ end
         mu ~ 1 + center(x)
         y ~ Normal(mu, sigma)
     end)
-    @test extreme_plan.nodes.transform.mean == extreme
+    @test only(values(extreme_plan.nodes.transforms)).mean == extreme
     @test BRM.NativePPL.prepare(extreme_plan).predictor == [0.0, 0.0]
 
     @test_throws ArgumentError BRM.NativePPL.rebind(
@@ -1442,8 +1591,8 @@ end
         mu ~ 1 + standardize(x)
         y ~ Normal(mu, sigma)
     end)
-    transform = gaussian_scaled.nodes.transform
-    alias_transform = gaussian_standardized.nodes.transform
+    transform = only(values(gaussian_scaled.nodes.transforms))
+    alias_transform = only(values(gaussian_standardized.nodes.transforms))
     @test transform isa BRM.NativePPLZScaleNode
     @test typeof(alias_transform) === typeof(transform)
     @test BRM.native_zscale_input(transform) === :x
@@ -1497,11 +1646,13 @@ end
         @test frozen.predictor ≈ frozen_x
         @test refitted.predictor ≈ refitted_x
         @test frozen.plan.parameters === prepared.plan.parameters
-        @test frozen.plan.nodes.transform.mean == fitted_mean
-        @test frozen.plan.nodes.transform.scale ≈ fitted_scale
-        @test refitted.plan.nodes.transform.mean == 12.0
-        @test refitted.plan.nodes.transform.scale ≈ sqrt(8.0)
-        @test frozen.plan.nodes.transform.axis === frozen.plan.axes.observation
+        frozen_transform = only(values(frozen.plan.nodes.transforms))
+        refitted_transform = only(values(refitted.plan.nodes.transforms))
+        @test frozen_transform.mean == fitted_mean
+        @test frozen_transform.scale ≈ fitted_scale
+        @test refitted_transform.mean == 12.0
+        @test refitted_transform.scale ≈ sqrt(8.0)
+        @test frozen_transform.axis === frozen.plan.axes.observation
         @test frozen.plan.nodes.location.axis === frozen.plan.axes.observation
         @test frozen.plan.factors.likelihood.axis === frozen.plan.axes.observation
 
@@ -1553,8 +1704,8 @@ end
 
     extreme = floatmax(Float64)
     extreme_plan = scaled_gaussian([-extreme, extreme, extreme, extreme])
-    @test extreme_plan.nodes.transform.mean ≈ extreme / 2
-    @test extreme_plan.nodes.transform.scale ≈ extreme
+    @test only(values(extreme_plan.nodes.transforms)).mean ≈ extreme / 2
+    @test only(values(extreme_plan.nodes.transforms)).scale ≈ extreme
     @test BRM.NativePPL.prepare(extreme_plan).predictor ≈ [-1.5, 0.5, 0.5, 0.5]
     @test capability_error(() -> scaled_gaussian([-extreme, extreme])).capability ==
           :predictor_transform
@@ -1568,18 +1719,17 @@ end
     location = gaussian_scaled.nodes.location
     wrong_location = BRM.NativePPLAffineNode(
         BRM.native_node_name(location), :x, location.axis,
-        location.intercept_index, location.slope_index)
+        location.intercept_index, only(location.slope_indices))
     bad_plan = replace_plan_nodes(
-        gaussian_scaled, (; transform=gaussian_scaled.nodes.transform,
-                          location=wrong_location))
+        gaussian_scaled, merge(
+            gaussian_scaled.nodes, (; location=wrong_location)))
     @test capability_error(() -> BRM.NativePPL.prepare(bad_plan)).capability ==
           :graph_identity
 
     wrong_transform = BRM.NativePPLZScaleNode(
         BRM.native_node_name(transform), :wrong, transform.axis,
         transform.mean, transform.scale)
-    bad_plan = replace_plan_nodes(
-        gaussian_scaled, (; transform=wrong_transform, location))
+    bad_plan = replace_plan_transform(gaussian_scaled, wrong_transform)
     @test capability_error(() -> BRM.NativePPL.prepare(bad_plan)).capability ==
           :graph_identity
 
@@ -1587,8 +1737,7 @@ end
     wrong_axis_transform = BRM.NativePPLZScaleNode(
         BRM.native_node_name(transform), :x, equal_axis,
         transform.mean, transform.scale)
-    bad_plan = replace_plan_nodes(
-        gaussian_scaled, (; transform=wrong_axis_transform, location))
+    bad_plan = replace_plan_transform(gaussian_scaled, wrong_axis_transform)
     @test capability_error(() -> BRM.NativePPL.prepare(bad_plan)).capability ==
           :graph_identity
 
@@ -1597,8 +1746,7 @@ end
         BRM.native_node_name(rate), :wrong, rate.axis)
     bad_plan = replace_plan_nodes(
         poisson_scaled,
-        (; transform=poisson_scaled.nodes.transform,
-           location=poisson_scaled.nodes.location, rate=wrong_rate))
+        merge(poisson_scaled.nodes, (; rate=wrong_rate)))
     @test capability_error(() -> BRM.NativePPL.prepare(bad_plan)).capability ==
           :graph_identity
 
@@ -1657,23 +1805,38 @@ end
         @test typeof(direct_model) === typeof(lowered_model)
         @test sprint(show, direct_model) == sprint(show, lowered_model)
 
-        direct_plan = NP.bind(direct_model, data)
-        compiled_direct_plan = NP.compile(direct_model, data)
-        lowered_plan = NP.bind(lowered_model, data)
+        direct_plan = NP.bind(conditioned(direct_model, data))
+        keyword_plan = NP.bind(
+            direct_model, (; x=data.x); conditions=(; y=data.y))
+        compiled_keyword_plan = NP.compile(
+            direct_model, (; x=data.x); conditions=(; y=data.y))
+        compiled_direct_plan = NP.compile(conditioned(direct_model, data))
+        lowered_plan = NP.bind(conditioned(lowered_model, data))
         brm_plan = NP.compile(brmi)
         compatibility_plan = BRM._native_ppl_plan(brmi)
         for candidate in (
-            compiled_direct_plan, lowered_plan, brm_plan, compatibility_plan)
+            keyword_plan, compiled_keyword_plan, compiled_direct_plan,
+            lowered_plan, brm_plan, compatibility_plan)
             check_plan_structure(direct_plan, candidate)
         end
         @test direct_plan.bindings.x === data.x
         @test direct_plan.bindings.y === data.y
         prepared = check_transformed_execution(
             direct_plan, brm_plan, position)
-        @test NP.prepare(direct_model, data).predictor == prepared.predictor
+        @test NP.prepare(conditioned(direct_model, data)).predictor ==
+              prepared.predictor
+        @test NP.prepare(
+            direct_model, (; x=data.x); conditions=(; y=data.y)).predictor ==
+              prepared.predictor
         @test steady_state_allocations(
             NP.workspace(prepared, Float64, DI.AutoEnzyme()),
             prepared, position) == (; primal=0, gradient=0)
+
+        unconditioned = NP.prepare(NP.bind(direct_model, (; x=data.x)))
+        @test !NP.has_response(unconditioned)
+        @test length(NP.simulate(
+            MersenneTwister(904), NP.workspace(unconditioned),
+            unconditioned, position)) == length(data.x)
 
         new_x = [10.0, 14.0, 20.0]
         new_y = family === :gaussian ? [0.4, 0.9, 1.3] :
@@ -1717,14 +1880,38 @@ end
 
     gaussian_model = direct_native_model(:gaussian, :identity)
     gaussian_data = (; x=[1.0, 2.0], y=[0.0, 1.0])
+    open_gaussian = gaussian_model
+    @test NP.input() isa NP.Input{:value}
+    open_instance = NP.substitute(open_gaussian; x=gaussian_data.x)
+    @test keys(open_instance.bindings) == (:x,)
+    @test isempty(open_instance.conditions)
+    conditioned_instance = NP.condition(open_instance; y=gaussian_data.y)
+    @test conditioned_instance.bindings.x === gaussian_data.x
+    @test conditioned_instance.conditions.y === gaussian_data.y
+    @test occursin("conditions=(:y,)", sprint(show, conditioned_instance))
+    @test NP.substitute(conditioned_instance; x=[3.0, 4.0]).bindings.x ==
+          [3.0, 4.0]
+    @test_throws ArgumentError NP.substitute(open_gaussian; unknown=[1.0])
+    @test_throws ArgumentError NP.condition(open_gaussian; unknown=[1.0])
+    @test_throws ArgumentError NP.substitute(
+        open_gaussian, Dict(:x => gaussian_data.x))
+    @test_throws ArgumentError NP.condition(
+        open_gaussian, Dict(:y => gaussian_data.y))
+    malformed_instance = NP.ModelInstance(
+        open_gaussian, (; x=gaussian_data.x), Dict(:y => gaussian_data.y))
+    @test_throws ArgumentError NP.substitute(
+        malformed_instance; x=gaussian_data.x)
+    @test_throws ArgumentError NP.condition(
+        malformed_instance; y=gaussian_data.y)
     @test_throws ArgumentError NP.bind(gaussian_model, gaussian_data.x)
-    @test_throws ArgumentError NP.bind(gaussian_model, (; x=gaussian_data.x))
+    @test !NP.has_response(NP.prepare(NP.bind(
+        gaussian_model, (; x=gaussian_data.x))))
     @test_throws ArgumentError NP.bind(
         gaussian_model, merge(gaussian_data, (; extra=[1.0, 2.0])))
-    @test_throws ArgumentError NP.instantiate(
-        gaussian_model, (; x=gaussian_data.x))
+    @test NP.instantiate(
+        gaussian_model, (; x=gaussian_data.x)) isa NP.ModelInstance
     bad_instance = NP.ModelInstance(
-        gaussian_model, (; x=gaussian_data.x))
+        gaussian_model, (;))
     @test_throws ArgumentError NP.bind(bad_instance)
 
     malformed_model = NP.Model(
@@ -1747,7 +1934,7 @@ end
         nodes=extra_nodes,
         observations=gaussian_model.observations)
     @test capability_error(
-        () -> NP.bind(extra_model, gaussian_data)).capability ==
+        () -> NP.bind(conditioned(extra_model, gaussian_data))).capability ==
           :additional_nodes
 
     bad_coefficients = NP.parameter(
@@ -1760,7 +1947,7 @@ end
         nodes=gaussian_model.nodes,
         observations=gaussian_model.observations)
     @test capability_error(
-        () -> NP.bind(bad_coefficient_model, gaussian_data)).capability ==
+        () -> NP.bind(conditioned(bad_coefficient_model, gaussian_data))).capability ==
           :parameter_axis
 
     bad_scale = NP.parameter(
@@ -1773,46 +1960,696 @@ end
         nodes=gaussian_model.nodes,
         observations=gaussian_model.observations)
     @test capability_error(
-        () -> NP.bind(bad_scale_model, gaussian_data)).capability ==
+        () -> NP.bind(conditioned(bad_scale_model, gaussian_data))).capability ==
           :parameter_axis
     @test capability_error(
-        () -> NP.bind(gaussian_model, (; x=[1, 2], y=[0.0, 1.0]))).capability ==
+        () -> NP.bind(NP.condition(
+            NP.substitute(gaussian_model; x=[1, 2]); y=[0.0, 1.0]))).capability ==
           :predictor_type
     @test capability_error(
         () -> NP.bind(
-            direct_native_model(:bernoulli, :identity),
-            (; x=[1.0, 2.0], y=[0, 2]))).capability ==
+            NP.condition(NP.substitute(
+                direct_native_model(:bernoulli, :identity);
+                x=[1.0, 2.0]); y=[0, 2]))).capability ==
           :response_support
     @test capability_error(
         () -> NP.bind(
-            direct_native_model(:poisson, :identity),
-            (; x=[1.0, 2.0], y=[0, 1.5]))).capability ==
+            NP.condition(NP.substitute(
+                direct_native_model(:poisson, :identity);
+                x=[1.0, 2.0]); y=[0, 1.5]))).capability ==
           :response_support
+end
+
+
+@testset "public multi-predictor affine Model and executor" begin
+    data = (
+        x=[-2.0, 0.0, 1.0, 5.0],
+        w=[1.0, 2.0, 4.0, 8.0],
+        y=[0.2, -0.1, 1.1, 0.7],
+    )
+    declaration = direct_multi_gaussian_model()
+    instance = NP.condition(
+        NP.substitute(declaration; x=data.x, w=data.w); y=data.y)
+    plan = NP.compile(instance)
+    @test keys(plan.inputs.predictors) == (:x, :w)
+    @test keys(plan.nodes.transforms) ==
+          (:zscale_x_for_mu, :center_w_for_mu)
+    @test BRM.native_affine_inputs(plan.nodes.location) ==
+          (:zscale_x_for_mu, :center_w_for_mu)
+    @test plan.nodes.location.slope_indices == (2, 3)
+    @test plan.parameters.coefficients.unconstrained == 1:3
+    @test plan.parameters.scale.unconstrained == 4:4
+
+    prepared = NP.prepare(plan)
+    @test keys(prepared.predictors) ==
+          (:zscale_x_for_mu, :center_w_for_mu)
+    expected_x = (data.x .- 1.0) ./ sqrt(26 / 3)
+    expected_w = data.w .- sum(data.w) / length(data.w)
+    @test prepared.predictors.zscale_x_for_mu ≈ expected_x
+    @test prepared.predictors.center_w_for_mu ≈ expected_w
+    @test !hasproperty(prepared, :predictor)
+    @test_throws ArgumentError prepared.predictor
+
+    position = [0.3, -0.4, 0.2, log(0.8)]
+    expected_mu = position[1] .+ position[2] .* expected_x .+
+        position[3] .* expected_w
+    work = NP.workspace(prepared)
+    @test NP.evaluate(work, prepared, position, NP.LinearPredictor()) ≈
+          expected_mu
+    expected_density = sum(logpdf.(Normal(), position[1:3])) +
+        logpdf(Exponential(2.0), exp(position[4])) + position[4] +
+        sum(logpdf.(Normal.(expected_mu, exp(position[4])), data.y))
+    @test NP.logdensity!(work, prepared, position) ≈ expected_density
+
+    prediction = NP.prepare(NP.substitute(
+        declaration; x=data.x, w=data.w))
+    @test !NP.has_response(prediction)
+    @test length(NP.simulate(
+        MersenneTwister(904), NP.workspace(prediction), prediction,
+        position)) == length(data.x)
+
+    rebound = NP.rebind(
+        prepared, (; x=[10.0, 14.0], w=[3.0, 9.0]);
+        freeze_constants=false)
+    @test rebound.predictors.zscale_x_for_mu ≈
+          [-1 / sqrt(2), 1 / sqrt(2)]
+    @test rebound.predictors.center_w_for_mu == [-3.0, 3.0]
+
+    macro_instance = NP.condition(
+        macro_multi_gaussian(data.x, data.w); y=data.y)
+    @test typeof(macro_instance.declaration) === typeof(declaration)
+    macro_plan = NP.compile(macro_instance)
+    check_plan_structure(plan, macro_plan)
+    macro_prepared = NP.prepare(macro_plan)
+    macro_work = NP.workspace(macro_prepared)
+    @test NP.logdensity!(macro_work, macro_prepared, position) ≈
+          expected_density
+    brmi = @brm data begin
+        sigma ~ Exponential(2.0)
+        mu ~ 1 + zscale(x) + center(w)
+        y ~ Normal(mu, sigma)
+    end
+    lowered = NP.lower(brmi)
+    @test keys(lowered.inputs) == (:x, :w)
+    @test keys(lowered.parameters) == (:beta_mu, :sigma)
+    @test lowered.parameters.beta_mu.axis_keys == (:Intercept, :x, :w)
+    @test keys(lowered.nodes) ==
+          (:zscale_x_for_mu, :center_w_for_mu, :mu)
+    @test lowered.nodes.mu ==
+          NP.affine((:zscale_x_for_mu, :center_w_for_mu), :beta_mu)
+    @test lowered.observations.y isa NP.BroadcastObservation
+
+    brm_plan = NP.compile(brmi)
+    @test keys(brm_plan.inputs.predictors) == (:x, :w)
+    @test brm_plan.axes.coefficient.keys == (:Intercept, :x, :w)
+    @test keys(brm_plan.nodes.transforms) ==
+          (:zscale_x_for_mu, :center_w_for_mu)
+    brm_prepared = NP.prepare(brm_plan)
+    @test brm_prepared.predictors == macro_prepared.predictors
+    @test NP.logdensity!(
+        NP.workspace(brm_prepared), brm_prepared, position) ≈ expected_density
+
+    reordered_brmi = @brm data begin
+        sigma ~ Exponential(2.0)
+        mu ~ 1 + center(w) + x
+        y ~ Normal(mu, sigma)
+    end
+    reordered_lowered = NP.lower(reordered_brmi)
+    @test reordered_lowered.parameters.beta_mu.axis_keys ==
+          (:Intercept, :w, :x)
+    @test reordered_lowered.nodes.mu ==
+          NP.affine((:center_w_for_mu, :x), :beta_mu)
+    reordered_brmi_prediction = NP.prepare(NP.substitute(
+        reordered_lowered; x=data.x, w=data.w))
+    @test !NP.has_response(reordered_brmi_prediction)
+    @test keys(reordered_brmi_prediction.predictors) ==
+          (:center_w_for_mu, :x)
+    @test NP.evaluate(
+        NP.workspace(reordered_brmi_prediction),
+        reordered_brmi_prediction, [0.3, 0.2, -0.4, log(0.8)],
+        NP.LinearPredictor()) ≈
+          0.3 .+ 0.2 .* expected_w .- 0.4 .* data.x
+
+    dotted_instance = NP.condition(
+        macro_multi_gaussian_dotted(data.x, data.w); y=data.y)
+    dotted_plan = NP.compile(dotted_instance)
+    check_plan_structure(plan, dotted_plan)
+    dotted_prepared = NP.prepare(dotted_plan)
+    @test NP.evaluate(
+        NP.workspace(dotted_prepared), dotted_prepared, position,
+        NP.LinearPredictor()) ≈ expected_mu
+    @test_throws ArgumentError NP.rebind(prepared, (; x=data.x))
+    @test_throws ArgumentError NP.rebind(
+        prepared, (; x=data.x, w=data.w, extra=data.x))
+    @test_throws DimensionMismatch NP.rebind(
+        prepared, (; x=data.x, w=data.w[1:3]))
+
+    reordered_coefficients = NP.parameter(
+        NP.RealSupport(), (:intercept, :beta_w, :beta_x);
+        transform=NP.Identity(), prior=NP.StandardNormal())
+    reordered_declaration = NP.model(
+        inputs=declaration.inputs,
+        parameters=(; beta_mu=reordered_coefficients,
+                    sigma=declaration.parameters.sigma),
+        nodes=(; w_centered=NP.center(:w),
+               mu=NP.affine((:w_centered, :x), :beta_mu)),
+        observations=declaration.observations)
+    reordered = NP.prepare(NP.condition(
+        NP.substitute(reordered_declaration; x=data.x, w=data.w); y=data.y))
+    @test keys(reordered.predictors) == (:w_centered, :x)
+    reordered_position = [0.3, 0.2, -0.4, log(0.8)]
+    @test NP.evaluate(
+        NP.workspace(reordered), reordered, reordered_position,
+        NP.LinearPredictor()) ≈
+          0.3 .+ 0.2 .* expected_w .- 0.4 .* data.x
+
+    short_coefficients = NP.parameter(
+        NP.RealSupport(), (:intercept, :beta_x);
+        transform=NP.Identity(), prior=NP.StandardNormal())
+    short_declaration = NP.model(
+        inputs=declaration.inputs,
+        parameters=(; beta_mu=short_coefficients,
+                    sigma=declaration.parameters.sigma),
+        nodes=declaration.nodes,
+        observations=declaration.observations)
+    @test capability_error(() -> NP.compile(NP.condition(
+        NP.substitute(short_declaration; x=data.x, w=data.w); y=data.y))).capability ==
+          :parameter_axis
+    @test capability_error(() -> NP.compile(NP.condition(
+        NP.substitute(declaration; x=data.x, w=data.w[1:3]); y=data.y))).capability ==
+          :observation_axis
+
+    location = plan.nodes.location
+    coefficient_axis = BRM.NativePPLAxis(
+        BRM.native_axis_name(plan.axes.coefficient),
+        (:intercept, :beta_x, :beta_w, :duplicate))
+    coefficients = BRM.NativePPLParameter(
+        BRM.native_parameter_name(plan.parameters.coefficients),
+        plan.parameters.coefficients.support,
+        plan.parameters.coefficients.transform,
+        coefficient_axis, 1:4)
+    scale = BRM.NativePPLParameter(
+        BRM.native_parameter_name(plan.parameters.scale),
+        plan.parameters.scale.support,
+        plan.parameters.scale.transform,
+        plan.parameters.scale.axis, 5:5)
+    duplicated_inputs = (
+        :zscale_x_for_mu, :center_w_for_mu, :center_w_for_mu)
+    duplicated_location = BRM.NativePPLAffineNode{
+        BRM.native_node_name(location),duplicated_inputs,
+        typeof(location.axis),Tuple{Int,Int,Int}}(
+            location.axis, 1, (2, 3, 4))
+    malformed_plan = BRM.NativePPLPlan(
+        merge(plan.axes, (; coefficient=coefficient_axis)),
+        plan.inputs, (; coefficients, scale),
+        merge(plan.nodes, (; location=duplicated_location)),
+        merge(plan.factors, (;
+            coefficient_prior=BRM.NativePPLStandardNormalFactor(:beta_mu, 1:4),
+            scale_prior=BRM.NativePPLExponentialFactor(:sigma, 5, 2.0))),
+        plan.queries, plan.bindings)
+    @test capability_error(() -> NP.prepare(malformed_plan)).capability ==
+          :graph_identity
+end
+
+
+@testset "multi-predictor family workflows and replay" begin
+    raw_x = [-2.0, 0.0, 1.0, 5.0]
+    raw_w = [1.0, 2.0, 4.0, 8.0]
+    for family in (:gaussian, :bernoulli, :poisson)
+        response = family === :gaussian ? [0.2, -0.1, 1.1, 0.7] :
+            family === :bernoulli ? Bool[false, false, true, true] :
+            [0, 1, 3, 6]
+        position = family === :gaussian ?
+            [0.3, -0.4, 0.2, log(0.8)] : [0.3, -0.4, 0.2]
+        data = (; x=raw_x, w=raw_w, y=response)
+        direct_model = direct_multi_model(family)
+        brmi = multi_native_brmi(family, data)
+        lowered_model = NP.lower(brmi)
+        @test typeof(direct_model) === typeof(lowered_model)
+        @test sprint(show, direct_model) == sprint(show, lowered_model)
+
+        direct_plan = NP.bind(NP.condition(
+            NP.substitute(direct_model; x=data.x, w=data.w); y=data.y))
+        brm_plan = NP.compile(brmi)
+        check_plan_structure(direct_plan, brm_plan)
+        prepared = check_transformed_execution(
+            direct_plan, brm_plan, position)
+        @test steady_state_allocations(
+            NP.workspace(prepared, Float64, DI.AutoEnzyme()),
+            prepared, position) == (; primal=0, gradient=0)
+
+        macro_instance = family === :gaussian ?
+            NP.condition(macro_multi_gaussian(data.x, data.w); y=data.y) :
+            family === :bernoulli ?
+            NP.condition(macro_multi_bernoulli(data.x, data.w); y=data.y) :
+            NP.condition(macro_multi_poisson(data.x, data.w); y=data.y)
+        macro_plan = NP.compile(macro_instance)
+        macro_prepared = check_transformed_execution(
+            macro_plan, brm_plan, position)
+        @test steady_state_allocations(
+            NP.workspace(macro_prepared, Float64, DI.AutoEnzyme()),
+            macro_prepared, position) == (; primal=0, gradient=0)
+
+        new_x = [10.0, 14.0, 20.0]
+        new_w = [3.0, 9.0, 15.0]
+        new_y = family === :gaussian ? [0.4, 0.9, 1.3] :
+            family === :bernoulli ? Bool[false, true, true] : [2, 4, 7]
+        for freeze_constants in (true, false)
+            direct_rebound = NP.rebind(
+                prepared, (; x=new_x, w=new_w, y=new_y); freeze_constants)
+            macro_rebound = NP.rebind(
+                macro_prepared, (; x=new_x, w=new_w, y=new_y);
+                freeze_constants)
+            @test direct_rebound.predictors == macro_rebound.predictors
+            direct_work = NP.workspace(
+                direct_rebound, Float64, DI.AutoEnzyme())
+            macro_work = NP.workspace(
+                macro_rebound, Float64, DI.AutoEnzyme())
+            direct_density, direct_gradient = NP.logdensity_and_gradient!(
+                direct_work, direct_rebound, position)
+            macro_density, macro_gradient = NP.logdensity_and_gradient!(
+                macro_work, macro_rebound, position)
+            @test direct_density ≈ macro_density
+            @test direct_gradient ≈ macro_gradient
+
+            direct_prediction = NP.rebind(
+                prepared, (; x=new_x, w=new_w); freeze_constants)
+            macro_prediction = NP.rebind(
+                macro_prepared, (; x=new_x, w=new_w); freeze_constants)
+            @test !NP.has_response(direct_prediction)
+            @test direct_prediction.predictors == macro_prediction.predictors
+            @test NP.simulate(
+                MersenneTwister(908), NP.workspace(direct_prediction),
+                direct_prediction, position) == NP.simulate(
+                    MersenneTwister(908), NP.workspace(macro_prediction),
+                    macro_prediction, position)
+        end
+
+        @test_throws ArgumentError NP.rebind(prepared, (; x=new_x, y=new_y))
+        @test_throws ArgumentError NP.rebind(
+            prepared, (; x=new_x, w=new_w, y=new_y, extra=new_x))
+        @test_throws DimensionMismatch NP.rebind(
+            prepared, (; x=new_x, w=new_w[1:2], y=new_y))
+        @test_throws ArgumentError NP.rebind(
+            prepared, (; x=new_x, w=Int.(new_w), y=new_y))
+    end
+end
+
+
+@testset "public namespaced component composition" begin
+    raw_x = [-1.0, 0.0, 2.0, 4.0]
+    source = NP.component(:source, macro_gaussian_identity(raw_x))
+    @test NP.component_namespace(source) === :source
+
+    bound_input = NP.output(source, :x)
+    parameter = NP.output(source, :beta_mu)
+    deterministic = NP.output(source, :mu)
+    stochastic = NP.output(source, :y)
+    @test (NP.graph_namespace(bound_input), NP.graph_name(bound_input),
+           NP.graph_kind(bound_input)) == (:source, :x, :binding)
+    @test NP.graph_kind(parameter) === :parameter
+    @test NP.graph_kind(deterministic) === :node
+    @test NP.graph_kind(stochastic) === :site
+    @test_throws ArgumentError NP.GraphRef{1,:mu,:node}()
+    @test_throws ArgumentError NP.GraphRef{:source,1,:node}()
+    @test_throws ArgumentError NP.GraphRef{:source,:mu,:unknown}()
+    @test occursin(
+        "source.mu, kind=node", sprint(show, deterministic))
+
+    sink_instance = composable_gaussian(deterministic)
+    @test sink_instance.bindings.x === deterministic
+    sink = NP.component(:sink, sink_instance)
+    composition = NP.compose(source, sink)
+    @test keys(composition.components) == (:source, :sink)
+    @test composition.components.source === source
+    @test composition.components.sink === sink
+    @test NP.Composition((; source, sink)).components ==
+          composition.components
+    @test occursin(
+        "components=(:source, :sink)", sprint(show, composition))
+
+    # A constant and a graph reference use the same substitution map. The
+    # difference is the connected value, not a distinct data/pinning role.
+    @test source.instance.bindings.x === raw_x
+    @test sink.instance.bindings.x === deterministic
+
+    parameter_sink = NP.component(
+        :parameter_sink, composable_gaussian(parameter))
+    stochastic_sink = NP.component(
+        :stochastic_sink, composable_gaussian(stochastic))
+    parameter_composition = NP.compose(source, parameter_sink)
+    stochastic_composition = NP.compose(source, stochastic_sink)
+    @test parameter_composition.components.parameter_sink.instance.
+          bindings.x === parameter
+    @test stochastic_composition.components.stochastic_sink.instance.
+          bindings.x === stochastic
+    @test capability_error(
+        () -> NP.compile(parameter_composition)).capability ==
+          :active_graph_connection
+    @test capability_error(
+        () -> NP.compile(stochastic_composition)).capability ==
+          :active_graph_connection
+
+    err = capability_error(() -> NP.compile(composition))
+    @test err.capability == :active_graph_connection
+    @test occursin("source.mu", err.detail)
+
+    @test_throws ArgumentError NP.compose(sink, source)
+    @test_throws ArgumentError NP.compose()
+    @test_throws ArgumentError NP.compose(
+        source, NP.component(:source, composable_gaussian(raw_x)))
+    @test_throws ArgumentError NP.component(
+        Symbol(""), composable_gaussian(raw_x))
+    @test_throws ArgumentError NP.Component{1,typeof(source.instance)}(
+        source.instance)
+    @test_throws ArgumentError NP.Composition((source, sink))
+    @test_throws ArgumentError NP.Composition((;))
+    @test_throws ArgumentError NP.Composition((; sink, source))
+    @test_throws ArgumentError NP.Composition((; not_a_component=1))
+    @test_throws ArgumentError NP.output(source, :missing)
+    open_component = NP.component(:open, direct_native_model(
+        :gaussian, :identity))
+    @test_throws ArgumentError NP.output(open_component, :x)
+
+    bad_reference = NP.GraphRef{:source,:mu,:site}()
+    bad_sink = NP.component(:bad_sink, composable_gaussian(bad_reference))
+    @test_throws ArgumentError NP.compose(source, bad_sink)
+
+    site_conditioned = NP.component(
+        :site_conditioned,
+        NP.condition(composable_gaussian(raw_x); y=stochastic))
+    conditioned_composition = NP.compose(source, site_conditioned)
+    @test conditioned_composition.components.site_conditioned.instance.
+          conditions.y === stochastic
+
+    preprocessing_model = NP.model(
+        inputs=(; raw=NP.input()),
+        nodes=(; scaled=NP.zscale(:raw)),
+        observations=(;))
+    preprocessing = NP.component(
+        :preprocessing, NP.substitute(preprocessing_model; raw=raw_x))
+    scaled = NP.output(preprocessing, :scaled)
+    response = [0.2, -0.1, 1.1, 0.7]
+    regression = NP.component(
+        :regression,
+        NP.condition(composable_gaussian(scaled); y=response))
+    executable = NP.compose(preprocessing, regression)
+    lowered = NP.lower(executable)
+
+    raw_name = NP.qualified_name(:preprocessing, :raw)
+    scaled_name = NP.qualified_name(:preprocessing, :scaled)
+    coefficient_name = NP.qualified_name(:regression, :beta_mu)
+    location_name = NP.qualified_name(:regression, :mu)
+    response_name = NP.qualified_name(:regression, :y)
+    @test keys(lowered.declaration.inputs) == (raw_name,)
+    @test keys(lowered.declaration.parameters) ==
+          (coefficient_name, NP.qualified_name(:regression, :sigma))
+    @test keys(lowered.declaration.nodes) == (scaled_name, location_name)
+    @test keys(lowered.declaration.observations) == (response_name,)
+    @test keys(lowered.bindings) == (raw_name,)
+    @test keys(lowered.conditions) == (response_name,)
+
+    prepared = NP.prepare(executable)
+    direct = NP.prepare(NP.condition(
+        macro_gaussian_zscale(raw_x); y=response))
+    @test prepared.predictor == direct.predictor
+    position = [0.3, -0.4, log(0.8)]
+    composed_work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
+    direct_work = NP.workspace(direct, Float64, DI.AutoEnzyme())
+    composed_density, composed_gradient = NP.logdensity_and_gradient!(
+        composed_work, prepared, position)
+    direct_density, direct_gradient = NP.logdensity_and_gradient!(
+        direct_work, direct, position)
+    @test composed_density ≈ direct_density
+    @test composed_gradient ≈ direct_gradient
+    @test NP.evaluate(
+        composed_work, prepared, position, NP.LinearPredictor()) ≈
+          NP.evaluate(direct_work, direct, position, NP.LinearPredictor())
+    @test NP.simulate(
+        MersenneTwister(909), composed_work, prepared, position) ==
+          NP.simulate(MersenneTwister(909), direct_work, direct, position)
+end
+
+
+@testset "composed preprocessing family workflows" begin
+    raw_x = [-1.0, 0.0, 2.0, 4.0]
+    raw_name = NP.qualified_name(:preprocessing, :raw)
+    response_name = NP.qualified_name(:regression, :y)
+    @test NP.qualified_name(:a, :b_c) != NP.qualified_name(:a_b, :c)
+    @test NP.qualified_name(:a, Symbol("b#c")) !=
+          NP.qualified_name(Symbol("a#b"), :c)
+    @test_throws ArgumentError NP.qualified_name(Symbol(""), :raw)
+
+    for family in (:gaussian, :bernoulli, :poisson)
+        response = family === :gaussian ? [0.2, -0.1, 1.1, 0.7] :
+            family === :bernoulli ? Bool[false, false, true, true] :
+            [0, 1, 3, 6]
+        position = family === :gaussian ? [0.2, -0.4, log(0.8)] :
+            family === :bernoulli ? [-0.3, 0.6] : [0.1, 0.2]
+        data = (; x=raw_x, y=response)
+        composition = deterministic_preprocessing_composition(family, data)
+        composed_plan = NP.compile(composition)
+        direct_plan = NP.bind(conditioned(
+            direct_native_model(family, :zscale), data))
+        composed = check_transformed_execution(
+            composed_plan, direct_plan, position)
+        direct = NP.prepare(direct_plan)
+        @test composed.predictor == direct.predictor
+        @test steady_state_allocations(
+            NP.workspace(composed, Float64, DI.AutoEnzyme()),
+            composed, position) == (; primal=0, gradient=0)
+
+        new_x = [10.0, 14.0, 20.0]
+        new_y = family === :gaussian ? [0.4, 0.9, 1.3] :
+            family === :bernoulli ? Bool[false, true, true] : [2, 4, 7]
+        composed_bindings = NamedTuple{(raw_name, response_name)}(
+            (new_x, new_y))
+        for freeze_constants in (true, false)
+            composed_rebound = NP.rebind(
+                composed, composed_bindings; freeze_constants)
+            direct_rebound = NP.rebind(
+                direct, (; x=new_x, y=new_y); freeze_constants)
+            @test composed_rebound.predictor == direct_rebound.predictor
+            composed_work = NP.workspace(
+                composed_rebound, Float64, DI.AutoEnzyme())
+            direct_work = NP.workspace(
+                direct_rebound, Float64, DI.AutoEnzyme())
+            composed_density, composed_gradient =
+                NP.logdensity_and_gradient!(
+                    composed_work, composed_rebound, position)
+            direct_density, direct_gradient = NP.logdensity_and_gradient!(
+                direct_work, direct_rebound, position)
+            @test composed_density ≈ direct_density
+            @test composed_gradient ≈ direct_gradient
+
+            composed_prediction = NP.rebind(
+                composed,
+                NamedTuple{(raw_name,)}((new_x,)); freeze_constants)
+            direct_prediction = NP.rebind(
+                direct, (; x=new_x); freeze_constants)
+            @test !NP.has_response(composed_prediction)
+            @test composed_prediction.predictor == direct_prediction.predictor
+            @test NP.simulate(
+                MersenneTwister(910), NP.workspace(composed_prediction),
+                composed_prediction, position) == NP.simulate(
+                    MersenneTwister(910), NP.workspace(direct_prediction),
+                    direct_prediction, position)
+        end
+
+        @test_throws ArgumentError NP.rebind(
+            composed, NamedTuple{(response_name,)}((new_y,)))
+        @test_throws DimensionMismatch NP.rebind(
+            composed,
+            NamedTuple{(raw_name, response_name)}((new_x[1:2], new_y)))
+    end
+
+    source = NP.component(:source, macro_gaussian_identity(raw_x))
+    active_condition = NP.component(
+        :active_condition,
+        NP.condition(composable_gaussian(raw_x); y=NP.output(source, :y)))
+    @test capability_error(
+        () -> NP.lower(NP.compose(source, active_condition))).capability ==
+          :active_condition
+
+    empty_component = NP.model(
+        inputs=(; x=NP.input()), observations=(;))
+    @test capability_error(
+        () -> NP.bind(empty_component, (; x=raw_x))).capability == :outcomes
+end
+
+
+@testset "composed constant and multi-input preprocessing" begin
+    raw_x = [-1.0, 0.0, 2.0, 4.0]
+    raw_w = [4.0, 2.0, 3.0, 9.0]
+    response = [0.2, -0.1, 1.1, 0.7]
+
+    identity_model = NP.model(
+        inputs=(; raw=NP.input()), observations=(;))
+    constant_source = NP.component(
+        :constant_source, NP.substitute(identity_model; raw=raw_x))
+    constant_regression = NP.component(
+        :constant_regression,
+        NP.condition(
+            composable_gaussian(NP.output(constant_source, :raw));
+            y=response))
+    constant_composed = NP.prepare(NP.compose(
+        constant_source, constant_regression))
+    constant_direct = NP.prepare(NP.condition(
+        macro_gaussian_identity(raw_x); y=response))
+    @test only(values(constant_composed.predictors)) ==
+          constant_direct.predictor
+    constant_position = [0.3, -0.4, log(0.8)]
+    constant_work = NP.workspace(
+        constant_composed, Float64, DI.AutoEnzyme())
+    direct_work = NP.workspace(constant_direct, Float64, DI.AutoEnzyme())
+    constant_density, constant_gradient = NP.logdensity_and_gradient!(
+        constant_work, constant_composed, constant_position)
+    direct_density, direct_gradient = NP.logdensity_and_gradient!(
+        direct_work, constant_direct, constant_position)
+    @test constant_density ≈ direct_density
+    @test constant_gradient ≈ direct_gradient
+    @test steady_state_allocations(
+        constant_work, constant_composed, constant_position) ==
+          (; primal=0, gradient=0)
+
+    x_preprocessing_model = NP.model(
+        inputs=(; raw=NP.input()),
+        nodes=(; scaled=NP.zscale(:raw)), observations=(;))
+    w_preprocessing_model = NP.model(
+        inputs=(; raw=NP.input()),
+        nodes=(; centered=NP.center(:raw)), observations=(;))
+    x_preprocessing = NP.component(
+        :x_preprocessing,
+        NP.substitute(x_preprocessing_model; raw=raw_x))
+    w_preprocessing = NP.component(
+        :w_preprocessing,
+        NP.substitute(w_preprocessing_model; raw=raw_w))
+    stacked_regression = NP.component(
+        :stacked_regression,
+        NP.condition(
+            NP.substitute(
+                direct_multi_gaussian_model();
+                x=NP.output(x_preprocessing, :scaled),
+                w=NP.output(w_preprocessing, :centered));
+            y=response))
+    @test capability_error(
+        () -> NP.prepare(NP.compose(
+            x_preprocessing, w_preprocessing, stacked_regression))).capability ==
+          :graph_identity
+    coefficients = NP.parameter(
+        NP.RealSupport(), (:intercept, :beta_x, :beta_w);
+        transform=NP.Identity(), prior=NP.StandardNormal())
+    sigma = NP.parameter(
+        NP.PositiveSupport(), (:sigma,);
+        transform=NP.Exp(), prior=NP.Exponential(2.0))
+    regression_model = NP.model(
+        inputs=(; x=NP.input(), w=NP.input()),
+        parameters=(; beta_mu=coefficients, sigma),
+        nodes=(; mu=NP.affine((:x, :w), :beta_mu)),
+        observations=(; y=NP.broadcasted(
+            NP.normal(:y, :mu, :sigma))))
+    regression = NP.component(
+        :multi_regression,
+        NP.condition(
+            NP.substitute(
+                regression_model;
+                x=NP.output(x_preprocessing, :scaled),
+                w=NP.output(w_preprocessing, :centered));
+            y=response))
+    composed = NP.prepare(NP.compose(
+        x_preprocessing, w_preprocessing, regression))
+    direct = NP.prepare(NP.condition(
+        macro_multi_gaussian(raw_x, raw_w); y=response))
+    @test Tuple(values(composed.predictors)) ==
+          Tuple(values(direct.predictors))
+    @test composed.plan.axes.coefficient.keys == Tuple(
+        NP.qualified_name(:multi_regression, key)
+        for key in (:intercept, :beta_x, :beta_w))
+    position = [0.3, -0.4, 0.2, log(0.8)]
+    composed_work = NP.workspace(composed, Float64, DI.AutoEnzyme())
+    direct_work = NP.workspace(direct, Float64, DI.AutoEnzyme())
+    composed_density, composed_gradient = NP.logdensity_and_gradient!(
+        composed_work, composed, position)
+    direct_density, direct_gradient = NP.logdensity_and_gradient!(
+        direct_work, direct, position)
+    @test composed_density ≈ direct_density
+    @test composed_gradient ≈ direct_gradient
+    @test NP.simulate(
+        MersenneTwister(911), composed_work, composed, position) ==
+          NP.simulate(MersenneTwister(911), direct_work, direct, position)
+    @test steady_state_allocations(
+        composed_work, composed, position) == (; primal=0, gradient=0)
+
+    new_x = [10.0, 14.0, 20.0]
+    new_w = [3.0, 9.0, 15.0]
+    new_y = [0.4, 0.9, 1.3]
+    x_name = NP.qualified_name(:x_preprocessing, :raw)
+    w_name = NP.qualified_name(:w_preprocessing, :raw)
+    y_name = NP.qualified_name(:multi_regression, :y)
+    rebound = NP.rebind(
+        composed,
+        NamedTuple{(x_name, w_name, y_name)}((new_x, new_w, new_y));
+        freeze_constants=false)
+    direct_rebound = NP.rebind(
+        direct, (; x=new_x, w=new_w, y=new_y);
+        freeze_constants=false)
+    @test Tuple(values(rebound.predictors)) ==
+          Tuple(values(direct_rebound.predictors))
+    rebound_work = NP.workspace(rebound, Float64, DI.AutoEnzyme())
+    direct_rebound_work = NP.workspace(
+        direct_rebound, Float64, DI.AutoEnzyme())
+    rebound_density, rebound_gradient = NP.logdensity_and_gradient!(
+        rebound_work, rebound, position)
+    direct_rebound_density, direct_rebound_gradient =
+        NP.logdensity_and_gradient!(
+            direct_rebound_work, direct_rebound, position)
+    @test rebound_density ≈ direct_rebound_density
+    @test rebound_gradient ≈ direct_rebound_gradient
 end
 
 
 @testset "public native PPL @model semantics" begin
     raw_x = [-1.0, 0.0, 2.0, 4.0]
+    unconditioned = macro_gaussian_identity(raw_x)
+    @test keys(unconditioned.declaration.inputs) == (:x,)
+    @test unconditioned.declaration.inputs.x isa NP.Input{:value}
+    @test unconditioned.declaration.observations.y isa NP.BroadcastObservation
+    @test isempty(unconditioned.conditions)
+    unconditioned_prepared = NP.prepare(unconditioned)
+    @test !NP.has_response(unconditioned_prepared)
+    @test eltype(NP.simulate(
+        MersenneTwister(905), NP.workspace(unconditioned_prepared),
+        unconditioned_prepared, [0.2, -0.4, log(0.8)])) === Float64
+    scalar_instance = NP.condition(
+        macro_scalar_gaussian(raw_x); y=[0.2, -0.1, 1.1, 0.7])
+    @test !(
+        scalar_instance.declaration.observations.y isa NP.BroadcastObservation)
+    @test capability_error(() -> NP.bind(scalar_instance)).capability ==
+          :broadcast_lifting
     cases = (
-        (instance=macro_gaussian_identity(
-             raw_x, [0.2, -0.1, 1.1, 0.7]),
+        (instance=NP.condition(
+             macro_gaussian_identity(raw_x);
+             y=[0.2, -0.1, 1.1, 0.7]),
          builder=direct_native_model(
              :gaussian, :identity;
              coefficient_keys=(:intercept, :slope)),
          position=[0.2, -0.4, log(0.8)]),
-        (instance=macro_gaussian_zscale(
-             raw_x, [0.2, -0.1, 1.1, 0.7]),
+        (instance=NP.condition(
+             macro_gaussian_zscale(raw_x);
+             y=[0.2, -0.1, 1.1, 0.7]),
          builder=direct_native_model(
              :gaussian, :zscale;
              coefficient_keys=(:intercept, :slope)),
          position=[0.2, -0.4, log(0.8)]),
-        (instance=macro_bernoulli_center(
-             raw_x, Bool[false, false, true, true]),
+        (instance=NP.condition(
+             macro_bernoulli_center(raw_x);
+             y=Bool[false, false, true, true]),
          builder=direct_native_model(
              :bernoulli, :center;
              coefficient_keys=(:intercept, :slope)),
          position=[-0.3, 0.6]),
-        (instance=macro_poisson_zscale(raw_x, [0, 1, 3, 6]),
+        (instance=NP.condition(
+             macro_poisson_zscale(raw_x); y=[0, 1, 3, 6]),
          builder=direct_native_model(
              :poisson, :zscale;
              coefficient_keys=(:intercept, :slope)),
@@ -1825,7 +2662,8 @@ end
         @test occursin("NativePPL.ModelInstance", sprint(show, instance))
         macro_plan = NP.bind(instance)
         @test typeof(NP.compile(instance)) === typeof(macro_plan)
-        builder_plan = NP.bind(builder, instance.bindings)
+        builder_plan = NP.bind(NP.condition(
+            NP.substitute(builder, instance.bindings), instance.conditions))
         check_plan_structure(macro_plan, builder_plan)
         prepared = check_transformed_execution(
             macro_plan, builder_plan, position)
@@ -1847,8 +2685,9 @@ end
                   builder_prediction, position)
     end
 
-    hygienic = NativePPLMacroHygiene.hygienic(
-        raw_x, [0.2, -0.1, 1.1, 0.7])
+    hygienic = NP.condition(
+        NativePPLMacroHygiene.hygienic(raw_x);
+        y=[0.2, -0.1, 1.1, 0.7])
     @test hygienic isa NP.ModelInstance
     @test NP.compile(hygienic) isa NP.Plan
     @test NP.prepare(hygienic) isa NP.Prepared
@@ -1858,42 +2697,69 @@ end
         @__MODULE__, :(NP.@model bad_model = nothing)))
     @test occursin("must wrap a function definition", err.msg)
     err = argument_error(() -> macroexpand(
-        @__MODULE__, :(NP.@model function bad_arity(x, y, z)
-            y ~ Normal(x, z)
+        @__MODULE__, :(NP.@model function argument_observation(x, y)
+            @. y ~ Normal(x, 1)
         end)))
-    @test occursin("exactly one predictor and one response", err.msg)
+    @test occursin("cannot also be a function argument", err.msg)
     err = argument_error(() -> macroexpand(
         @__MODULE__, :(NP.@model function bad_keyword(x, y; scale=1)
             y ~ Normal(x, scale)
         end)))
     @test occursin("plain or typed positional arguments", err.msg)
     err = argument_error(() -> macroexpand(
-        @__MODULE__, :(NP.@model function bad_statement(x, y)
+        @__MODULE__, :(NP.@model function bad_statement(x)
             println(x)
-            y ~ Normal(x, x)
+            @. y ~ Normal(x, x)
         end)))
     @test occursin("unsupported statement", err.msg)
     err = argument_error(() -> macroexpand(
-        @__MODULE__, :(NP.@model function bad_prior(x, y)
-            intercept ~ Normal(1, 2)
-            slope ~ Normal()
-            mu = intercept + slope * x
-            y ~ BernoulliLogit(mu)
+        @__MODULE__, :(NP.@model function bad_prior(x)
+            sigma ~ StandardNormal(1)
+            @. y ~ Normal(x, sigma)
         end)))
-    @test occursin("scalar `Normal()` or `Normal(0, 1)`", err.msg)
+    @test occursin("StandardNormal() takes no arguments", err.msg)
     err = argument_error(() -> macroexpand(
-        @__MODULE__, :(NP.@model function missing_observation(x, y)
+        @__MODULE__, :(NP.@model function missing_observation(x)
             centered = center(x)
         end)))
     @test occursin("exactly one observation", err.msg)
     err = argument_error(() -> macroexpand(
-        @__MODULE__, :(NP.@model function bad_link(x, y)
+        @__MODULE__, :(NP.@model function bad_link(x)
             intercept ~ Normal()
             slope ~ Normal()
             log_rate = intercept + slope * x
-            y ~ Poisson(log_rate + x)
+            @. y ~ Poisson(log_rate + x)
         end)))
     @test occursin("named rate or `exp(named_log_rate)`", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function repeated_coefficient(x, w)
+            intercept ~ Normal()
+            beta ~ Normal()
+            sigma ~ Exponential(1.0)
+            mu = intercept + beta * x + beta * w
+            @. y ~ Normal(mu, sigma)
+        end)))
+    @test occursin("coefficients must be used once each", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function repeated_path(x, w)
+            intercept ~ Normal()
+            beta_x ~ Normal()
+            beta_w ~ Normal()
+            sigma ~ Exponential(1.0)
+            mu = intercept + beta_x * x + beta_w * x
+            @. y ~ Normal(mu, sigma)
+        end)))
+    @test occursin("predictor paths must be unique", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function repeated_raw_input(x, w)
+            intercept ~ Normal()
+            beta_x ~ Normal()
+            beta_centered_x ~ Normal()
+            sigma ~ Exponential(1.0)
+            mu = intercept + beta_x * x + beta_centered_x * center(x)
+            @. y ~ Normal(mu, sigma)
+        end)))
+    @test occursin("features must use distinct raw inputs", err.msg)
 end
 
 
@@ -2230,12 +3096,21 @@ end
     @test capability_error(() -> BRM._native_ppl_plan(extra_operation)).capability ==
           :additional_operations
 
-    multiple_terms = @brm merge(data, (; z=[2.0, 1.0, 0.0])) begin
+    duplicate_term = @brm data begin
         sigma ~ Exponential(1)
-        mu ~ 1 + x + z
+        mu ~ 1 + x + x
         y ~ Normal(mu, sigma)
     end
-    @test capability_error(() -> BRM._native_ppl_plan(multiple_terms)).capability ==
+    @test capability_error(() -> BRM._native_ppl_plan(duplicate_term)).capability ==
+          :predictor_terms
+
+    duplicate_raw_term = @brm data begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + center(x)
+        y ~ Normal(mu, sigma)
+    end
+    @test capability_error(
+        () -> BRM._native_ppl_plan(duplicate_raw_term)).capability ==
           :predictor_terms
 
     response_as_predictor = @brm (y=data.y,) begin
