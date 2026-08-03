@@ -6960,6 +6960,97 @@ end
             replay_workspace, replay, correlated_group_position,
             NP.NodeOutput(:zscale_x_for_mu)) ≈ transformed_values
     end
+    transformed_positions = [
+        correlated_group_position';
+        log(0.8) log(0.5) -0.15 -0.1 0.3 0.2 -0.4 0.1 0.35 -0.2 log(0.7);
+    ]
+    transformed_mu_draws = zeros(2, 4)
+    transformed_scaled_draws = zeros(2, 4)
+    NP.evaluate_draws!(
+        transformed_mu_draws, transformed_group_workspace,
+        transformed_group_prepared, transformed_positions,
+        NP.NodeOutput(:mu))
+    NP.evaluate_draws!(
+        transformed_scaled_draws, transformed_group_workspace,
+        transformed_group_prepared, transformed_positions,
+        transformed_node_query)
+    @test transformed_mu_draws[1, :] ≈ transformed_group_mu
+    @test all(row -> row ≈ transformed_x,
+              eachrow(transformed_scaled_draws))
+    transformed_bundle_queries = (;
+        mu=NP.NodeOutput(:mu),
+        scaled=transformed_node_query,
+        pointwise=NP.PointwiseLogLikelihood(),
+        predictive=NP.PosteriorPredictive())
+    transformed_bundle = (;
+        mu=zeros(2, 4), scaled=zeros(2, 4),
+        pointwise=zeros(2, 4), predictive=zeros(2, 4))
+    transformed_draw_predictive = zeros(2, 4)
+    transformed_bundle_rng = MersenneTwister(993)
+    transformed_predictive_rng = MersenneTwister(993)
+    NP.execute_draws!(
+        transformed_bundle_rng, transformed_bundle,
+        transformed_group_workspace, transformed_group_prepared,
+        transformed_positions, transformed_bundle_queries)
+    NP.simulate_draws!(
+        transformed_predictive_rng, transformed_draw_predictive,
+        transformed_group_workspace, transformed_group_prepared,
+        transformed_positions)
+    @test transformed_bundle.mu == transformed_mu_draws
+    @test transformed_bundle.scaled == transformed_scaled_draws
+    @test transformed_bundle.predictive == transformed_draw_predictive
+    @test factor_generated_draw_allocations(
+        MersenneTwister(994), MersenneTwister(995), MersenneTwister(996),
+        transformed_draw_predictive, similar(transformed_mu_draws),
+        transformed_bundle, transformed_group_workspace,
+        transformed_group_prepared, transformed_positions,
+        transformed_bundle_queries) ==
+          (; predictive=0, linear=0, bundle=0)
+
+    transformed_new_bindings = (;
+        x=[-2.0, 0.5, 1.5, 3.0],
+        group=[:a, :new_transformed_group, :new_transformed_group, :c])
+    transformed_new = NP.rebind(
+        transformed_group_prepared, (;);
+        bindings=transformed_new_bindings, new_groups=:resample)
+    @test transformed_new.plan.generated_group_levels ==
+          (; b_p_group=(:new_transformed_group,))
+    @test transformed_new.plan.group_indices ==
+          (; b_p_group_by_group_for_mu=(1, -1, -1, 3))
+    @test transformed_new.plan.fitted_nodes ==
+          transformed_group_plan.fitted_nodes
+    transformed_new_x = (transformed_new_bindings.x .- 0.5) ./ sqrt(5 / 3)
+    transformed_new_workspace = NP.workspace(transformed_new)
+    @test capability_error(() -> NP.evaluate(
+        transformed_new_workspace, transformed_new,
+        correlated_group_position,
+        NP.NodeOutput(:mu))).capability == :new_group_activity
+    @test NP.evaluate(
+        transformed_new_workspace, transformed_new,
+        correlated_group_position,
+        transformed_node_query) ≈ transformed_new_x
+    transformed_new_rng = MersenneTwister(997)
+    transformed_new_expected_rng = MersenneTwister(997)
+    transformed_new_z = randn(transformed_new_expected_rng, 2)
+    transformed_new_effect = (
+        correlated_tau[1] * transformed_new_z[1],
+        correlated_tau[2] * (
+            correlated_rho * transformed_new_z[1] +
+            correlated_sech * transformed_new_z[2]))
+    transformed_new_effects = (
+        correlated_effects[1], transformed_new_effect,
+        transformed_new_effect, correlated_effects[3])
+    transformed_new_mu = [
+        effect[1] + (correlated_beta + effect[2]) * transformed_new_x[row]
+        for (row, effect) in enumerate(transformed_new_effects)]
+    transformed_new_output = zeros(4)
+    NP.evaluate!(
+        transformed_new_rng, transformed_new_output,
+        transformed_new_workspace, transformed_new,
+        correlated_group_position, NP.LinearPredictor())
+    @test transformed_new_output ≈ transformed_new_mu
+    @test transformed_new_workspace.primal.generated_group_values ≈
+          transformed_new_z
 
     sampled_offset_plan = NP.compile(sampled_offset_brmi)
     @test sampled_offset_plan isa NP.FactorPlan

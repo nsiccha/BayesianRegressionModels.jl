@@ -2372,6 +2372,21 @@ end
         position, prepared, buffers)
 end
 
+@inline function _factor_node_query_kernel(
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T},
+        ::BRM.NativePPLNodeOutput{Name}) where {T,Name}
+    if !_has_generated_groups(prepared.plan)
+        return _factor_logdensity_kernel(position, prepared, buffers)
+    end
+    node = getproperty(prepared.plan.graph.nodes, Name)
+    input_only = node isa Union{
+        CenterFactorNode,ZScaleFactorNode,LogFactorNode} &&
+        node.input isa InputValue
+    input_only || _factor_require_fixed_coordinates(prepared.plan)
+    _factor_node_logdensity!(Val(Name), node, position, prepared, buffers)
+end
+
 function _factor_check_workspace_layout(workspace::FactorWorkspace,
                                         prepared::FactorPrepared)
     dimension = BRM.LogDensityProblems.dimension(prepared)
@@ -2659,7 +2674,7 @@ function evaluate!(output::AbstractVector, work::FactorWorkspace,
                    prepared::FactorPrepared, position::AbstractVector,
                    query::BRM.NativePPLNodeOutput)
     _factor_check_query_output(output, work, prepared, position, query)
-    _factor_logdensity_kernel(position, prepared, work.primal)
+    _factor_node_query_kernel(position, prepared, work.primal, query)
     for index in eachindex(output)
         output[index] = _factor_node_output_at(
             query, prepared, work.primal, index)
