@@ -201,8 +201,8 @@ standardize(input::Symbol) = zscale(input)
 struct Affine{Inputs,Coefficients,Offsets,Intercept} <: AbstractNodeDeclaration end
 function affine(inputs::Tuple, coefficients::Symbol; offsets::Tuple=(),
                 intercept::Bool=true)
-    isempty(inputs) && throw(ArgumentError(
-        "native PPL affine declaration requires at least one input"))
+    isempty(inputs) && !intercept && isempty(offsets) && throw(ArgumentError(
+        "native PPL affine declaration requires an input, intercept, or offset"))
     all(input -> input isa Symbol, inputs) || throw(ArgumentError(
         "native PPL affine inputs must be named Symbols; got $inputs"))
     length(unique(inputs)) == length(inputs) || throw(ArgumentError(
@@ -222,6 +222,10 @@ affine(input::Symbol, coefficients::Symbol; offsets::Tuple=(),
 """Elementwise exponential link over one named deterministic node."""
 struct ExpLink{Input} <: AbstractNodeDeclaration end
 exp_link(input::Symbol) = ExpLink{input}()
+
+"""Elementwise natural logarithm over one positive named row value."""
+struct LogLink{Input} <: AbstractNodeDeclaration end
+log_link(input::Symbol) = LogLink{input}()
 
 """Gather a group-indexed latent block onto the observation-row axis."""
 struct GroupGather{Values,Group} <: AbstractNodeDeclaration end
@@ -268,6 +272,7 @@ function node_input(node::Affine)
     only(inputs)
 end
 node_input(::ExpLink{Input}) where {Input} = Input
+node_input(::LogLink{Input}) where {Input} = Input
 group_values(::GroupGather{Values}) where {Values} = Values
 group_input(::GroupGather{Values,Group}) where {Values,Group} = Group
 row_product_inputs(::RowProduct{Left,Right}) where {Left,Right} = (Left, Right)
@@ -458,6 +463,10 @@ struct ExpFactorNode{I} <: AbstractFactorNode
     input::I
 end
 
+struct LogFactorNode{I} <: AbstractFactorNode
+    input::I
+end
+
 struct GroupGatherFactorNode{V,G} <: AbstractFactorNode
     values::V
     group::G
@@ -477,7 +486,7 @@ struct GroupedAffineFactorNode{Z,S,C,G,P} <: AbstractFactorNode
 end
 
 factor_node_dependencies(node::Union{
-        CenterFactorNode,ZScaleFactorNode,ExpFactorNode}) =
+        CenterFactorNode,ZScaleFactorNode,ExpFactorNode,LogFactorNode}) =
     _factor_value_dependencies((node.input,))
 factor_node_dependencies(node::AffineFactorNode) =
     _factor_value_dependencies((
@@ -711,6 +720,8 @@ function _factor_node(declaration::AbstractNodeDeclaration,
             affine_has_intercept(declaration))
     elseif declaration isa ExpLink
         ExpFactorNode(reference(node_input(declaration)))
+    elseif declaration isa LogLink
+        LogFactorNode(reference(node_input(declaration)))
     elseif declaration isa GroupGather
         GroupGatherFactorNode(
             SiteValue{group_values(declaration)}(),
@@ -1156,15 +1167,28 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
         group_levels, new_groups)
     for (name, node) in pairs(graph.nodes)
         node isa Union{
-            ExpFactorNode,AffineFactorNode,GroupGatherFactorNode,
+            ExpFactorNode,LogFactorNode,AffineFactorNode,GroupGatherFactorNode,
             RowProductFactorNode,GroupedAffineFactorNode,
         } ||
             throw(CapabilityError(
             :factor_nodes,
             "multi-latent factor node `$name` has unsupported operation " *
             "$(typeof(node)); the current executable slice accepts scalar " *
-            "exp plus row-valued affine, group-gather, and product nodes"))
-        if node isa ExpFactorNode
+            "exp and log plus row-valued affine, group-gather, and product " *
+            "nodes"))
+        if node isa LogFactorNode
+            node.input isa InputValue || throw(CapabilityError(
+                :factor_nodes,
+                "log node `$name` currently requires one bound input"))
+            input_name = input_value_name(node.input)
+            input = getproperty(bindings, input_name)
+            all(value -> value isa Real && isfinite(value) &&
+                         value > zero(value),
+                input isa AbstractVector ? input : (input,)) || throw(
+                ArgumentError(
+                    "native PPL log input `$input_name` must contain finite " *
+                    "positive values"))
+        elseif node isa ExpFactorNode
             broadcast_input = node.input isa SiteValue &&
                 getproperty(
                     graph.sites, site_value_name(node.input)).shape isa
@@ -1177,7 +1201,19 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
                     :factor_nodes,
                     "exp node `$name` cannot consume a row-valued argument " *
                     "unless it is the terminal Poisson log-rate link"))
-        elseif node isa AffineFactorNode
+        end
+        if node isa AffineFactorNode
+            for offset in node.offsets
+                offset isa InputValue || continue
+                offset_name = input_value_name(offset)
+                offset_value = getproperty(bindings, offset_name)
+                all(value -> value isa Real && isfinite(value),
+                    offset_value isa AbstractVector ?
+                        offset_value : (offset_value,)) || throw(
+                    ArgumentError(
+                        "native PPL affine data offset `$offset_name` must " *
+                        "contain finite real values"))
+            end
             coefficient_name = site_value_name(node.coefficients)
             coefficient_site = getproperty(graph.sites, coefficient_name)
             coefficient_site.shape isa Union{ScalarSiteShape,BlockSiteShape} ||
@@ -1668,7 +1704,7 @@ end
     node_index = getproperty(plan.node_indices, Name)
     node = getproperty(plan.graph.nodes, Name)
     node isa Union{
-        AffineFactorNode,GroupGatherFactorNode,RowProductFactorNode,
+        LogFactorNode,AffineFactorNode,GroupGatherFactorNode,RowProductFactorNode,
         GroupedAffineFactorNode,
     } ?
         buffers.node_rows[node_index, index] :
@@ -1892,6 +1928,17 @@ end
     input = _factor_argument(node.input, prepared.plan, buffers, T)
     buffers.node_values[getproperty(prepared.plan.node_indices, Name)] =
         exp(input)
+    zero(T)
+end
+
+@inline function _factor_node_logdensity!(::Val{Name}, node::LogFactorNode,
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Name,T}
+    node_index = getproperty(prepared.plan.node_indices, Name)
+    for row in prepared.plan.observation_axis.keys
+        buffers.node_rows[node_index, row] = log(_factor_argument_at(
+            node.input, row, prepared.plan, buffers, T))
+    end
     zero(T)
 end
 
@@ -4831,13 +4878,15 @@ function _lower_brmi(brmi::BRM.BRMI)
     affine_components = BRM._native_ppl_affine_components(brmi, location)
     predictor_terms = affine_components.predictors
     sampled_offsets = affine_components.offsets
+    data_offsets = affine_components.data_offsets
     varying_groups = affine_components.groups
     has_intercept = affine_components.intercept
-    isempty(sampled_offsets) && isempty(varying_groups) && !has_intercept &&
+    isempty(sampled_offsets) && isempty(data_offsets) &&
+        isempty(varying_groups) && !has_intercept &&
         throw(CapabilityError(
         :predictor_terms,
         "the current native-PPL no-intercept affine slice requires a " *
-        "sampled scalar offset or varying intercept"))
+        "sampled offset, data offset, or varying intercept"))
     predictor_columns = map(term -> term.column, predictor_terms)
     predictor_names = map(BRM.name, predictor_columns)
     input_predictor_names = Symbol[predictor_names...]
@@ -4851,6 +4900,12 @@ function _lower_brmi(brmi::BRM.BRMI)
                 push!(input_predictor_names, name)
                 push!(input_predictor_columns, column)
             end
+        end
+    end
+    for data_offset in data_offsets
+        if data_offset.name ∉ input_predictor_names
+            push!(input_predictor_names, data_offset.name)
+            push!(input_predictor_columns, data_offset.column)
         end
     end
     group_names = map(varying_groups) do varying
@@ -4904,7 +4959,9 @@ function _lower_brmi(brmi::BRM.BRMI)
            offset_name=product_name === nothing ? gather_name : product_name)
     end
 
-    scalar_location = isempty(predictor_names)
+    scalar_location = isempty(predictor_names) &&
+        isempty(sampled_offsets) && isempty(data_offsets) &&
+        isempty(group_specs)
     intercept_prior = scalar_location ?
         BRM._native_ppl_intercept_normal_prior(brmi, location) :
         (; location=0.0, scale=1.0, operation=nothing)
@@ -4998,6 +5055,14 @@ function _lower_brmi(brmi::BRM.BRMI)
 
     transform_names = Symbol[]
     transform_declarations = Any[]
+    data_offset_names = map(data_offsets) do data_offset
+        data_offset.transform === :identity && return data_offset.name
+        transform_name = Symbol(
+            :log_, data_offset.name, :_for_, location)
+        push!(transform_names, transform_name)
+        push!(transform_declarations, log_link(data_offset.name))
+        transform_name
+    end
     affine_inputs = map(predictor_terms, predictor_names) do predictor_term,
                                                           predictor_name
         predictor_term.transform === :identity && return predictor_name
@@ -5023,7 +5088,8 @@ function _lower_brmi(brmi::BRM.BRMI)
         row_product(spec.gather_name, spec.predictor_name)
         for spec in product_specs)
     affine_offsets = (
-        sampled_offsets..., (spec.offset_name for spec in group_specs)...)
+        sampled_offsets..., data_offset_names...,
+        (spec.offset_name for spec in group_specs)...)
     node_names = scalar_location ? () : (
         gather_names..., product_names..., Tuple(transform_names)..., location)
     node_values = scalar_location ? () : (
@@ -5319,6 +5385,10 @@ function _syntax_node(statement)
         length(arguments) == 1 || throw(ArgumentError(
             "native PPL @model exp needs one input"))
         :exp_link
+    elseif function_name === :log || function_name === :log_link
+        length(arguments) == 1 || throw(ArgumentError(
+            "native PPL @model log needs one input"))
+        :log_link
     else
         throw(ArgumentError(
             "native PPL @model unsupported deterministic function " *
@@ -5379,6 +5449,7 @@ function _syntax_group_gather_name(site::Symbol, group::Symbol,
 end
 
 function _syntax_affine_assignment(statement,
+                                   argument_names::Set{Symbol},
                                    scalar_priors::Set{Symbol},
                                    block_priors::Dict{Symbol,Tuple},
                                    grouped_sites::Dict{Symbol,Symbol},
@@ -5389,6 +5460,9 @@ function _syntax_affine_assignment(statement,
     terms === nothing && return nothing
     length(terms) >= 2 || return nothing
     sampled_offsets = Symbol[]
+    data_offsets = Symbol[]
+    offset_transform_names = Symbol[]
+    offset_transform_values = Any[]
     gathered_offsets = NamedTuple[]
     grouped_products = NamedTuple[]
     correlated_groups = NamedTuple[]
@@ -5398,15 +5472,44 @@ function _syntax_affine_assignment(statement,
     for term in terms
         if term isa Expr && term.head === :call &&
            _syntax_name(first(term.args)) === :offset
-            _, arguments = _syntax_call(term, "affine sampled offset")
-            length(arguments) == 1 && only(arguments) isa Symbol || throw(
-                ArgumentError(
-                    "native PPL @model offset needs one named scalar site"))
-            offset_name = only(arguments)
-            offset_name in scalar_priors || throw(ArgumentError(
-                "native PPL @model affine offset `$offset_name` must name " *
-                "a preceding standard-normal scalar site"))
-            push!(sampled_offsets, offset_name)
+            _, arguments = _syntax_call(term, "affine offset")
+            length(arguments) == 1 || throw(ArgumentError(
+                "native PPL @model offset needs one named scalar site or " *
+                "row-valued input"))
+            argument = only(arguments)
+            if argument isa Symbol
+                if argument in scalar_priors
+                    push!(sampled_offsets, argument)
+                elseif argument in argument_names
+                    push!(data_offsets, argument)
+                else
+                    throw(ArgumentError(
+                        "native PPL @model offset `$argument` must name a " *
+                        "preceding scalar site or function argument"))
+                end
+            elseif argument isa Expr && argument.head === :call
+                function_name, transform_arguments = _syntax_call(
+                    argument, "affine data-offset transform")
+                function_name in (:log, :log_link) || throw(ArgumentError(
+                    "native PPL @model data offset supports only `log(input)`"))
+                length(transform_arguments) == 1 &&
+                    only(transform_arguments) isa Symbol || throw(
+                    ArgumentError(
+                        "native PPL @model log offset needs one named input"))
+                raw_input = only(transform_arguments)
+                raw_input in argument_names || throw(ArgumentError(
+                    "native PPL @model log offset `$raw_input` must name a " *
+                    "function argument"))
+                transform_name = Symbol(:log_, raw_input, :_for_, lhs)
+                push!(offset_transform_names, transform_name)
+                push!(offset_transform_values, Expr(
+                    :call, _syntax_ref(:log_link), QuoteNode(raw_input)))
+                push!(data_offsets, transform_name)
+            else
+                throw(ArgumentError(
+                    "native PPL @model offset needs one named scalar site or " *
+                    "row-valued input"))
+            end
         elseif term isa Expr && term.head === :ref &&
                length(term.args) == 2 && first(term.args) isa Symbol &&
                term.args[2] isa Symbol &&
@@ -5467,12 +5570,21 @@ function _syntax_affine_assignment(statement,
                         "native PPL @model parameter dot predictors must " *
                         "be a tuple"))
                 predictors = Tuple(map(predictor_tuple.args) do predictor
+                    predictor == 1 && return nothing
                     predictor isa Symbol || throw(ArgumentError(
                         "native PPL @model parameter dot predictors must " *
-                        "be named row values"))
+                        "be `1` or named row values"))
                     predictor
                 end)
-                predictors == block_priors[grouped_ref] || throw(
+                count(isnothing, predictors) <= 1 || throw(ArgumentError(
+                    "native PPL @model parameter dot may contain one intercept"))
+                any(isnothing, predictors) && first(predictors) !== nothing &&
+                    throw(ArgumentError(
+                        "native PPL @model parameter-dot intercept must be first"))
+                coefficient_keys = Tuple(
+                    predictor === nothing ? :Intercept : predictor
+                    for predictor in predictors)
+                coefficient_keys == block_priors[grouped_ref] || throw(
                     ArgumentError(
                         "native PPL @model parameter dot predictors must " *
                         "match its declared coefficient keys"))
@@ -5532,6 +5644,12 @@ function _syntax_affine_assignment(statement,
     length(unique(gathered_site_names)) == length(gathered_site_names) ||
         throw(ArgumentError(
             "native PPL @model grouped offsets must be used once each"))
+    length(unique(data_offsets)) == length(data_offsets) || throw(
+        ArgumentError(
+            "native PPL @model data offsets must be used once each"))
+    isempty(intersect(Set(sampled_offsets), Set(data_offsets))) || throw(
+        ArgumentError(
+            "native PPL @model sampled and data offsets must be distinct"))
     length(population_blocks) <= 1 || throw(ArgumentError(
         "native PPL @model affine expression may use one parameter dot"))
     intercepts = [term for term in ordinary_terms
@@ -5539,6 +5657,7 @@ function _syntax_affine_assignment(statement,
     length(intercepts) <= 1 || return nothing
     intercept = isempty(intercepts) ? nothing : only(intercepts)
     intercept === nothing && isempty(sampled_offsets) &&
+        isempty(data_offsets) &&
         isempty(gathered_offsets) && isempty(grouped_products) &&
         isempty(correlated_groups) && isempty(population_blocks) &&
         return nothing
@@ -5546,16 +5665,19 @@ function _syntax_affine_assignment(statement,
     slopes = Symbol[]
     predictor_names = Symbol[]
     raw_predictor_names = Symbol[]
-    transform_names = Symbol[]
-    transform_values = Any[]
+    transform_names = copy(offset_transform_names)
+    transform_values = copy(offset_transform_values)
     population_block = isempty(population_blocks) ? nothing :
         only(population_blocks)
     if population_block !== nothing
         isempty(ordinary_terms) || throw(ArgumentError(
             "native PPL @model cannot mix a parameter dot with scalar " *
             "population coefficients"))
-        append!(predictor_names, population_block.predictors)
-        append!(raw_predictor_names, population_block.predictors)
+        for predictor in population_block.predictors
+            predictor === nothing && continue
+            push!(predictor_names, predictor)
+            push!(raw_predictor_names, predictor)
+        end
     end
     for product in ordinary_terms
         product === intercept && continue
@@ -5610,6 +5732,9 @@ function _syntax_affine_assignment(statement,
 
     coefficient_name = population_block === nothing ?
         Symbol(:beta_, lhs) : population_block.name
+    has_intercept = intercept !== nothing ||
+        (population_block !== nothing &&
+         any(isnothing, population_block.predictors))
     parameter_value = if population_block === nothing
         coefficient_keys = intercept === nothing ?
             Tuple(slopes) : (intercept, slopes...)
@@ -5628,13 +5753,14 @@ function _syntax_affine_assignment(statement,
         Expr(:parameters,
              Expr(:kw, :offsets, QuoteNode((
                  sampled_offsets...,
+                 data_offsets...,
                  (entry.kind === :gather ?
                     gathered_offsets[entry.index].gather_name :
                   entry.kind === :product ?
                     grouped_products[entry.index].product_name :
                     correlated_groups[entry.index].node_name
                   for entry in group_node_order)...))),
-             Expr(:kw, :intercept, intercept !== nothing)),
+             Expr(:kw, :intercept, has_intercept)),
         QuoteNode(Tuple(predictor_names)),
         QuoteNode(coefficient_name))
     grouped_nodes = (gathered_offsets..., grouped_products...)
@@ -5994,7 +6120,8 @@ function _model_function_syntax(definition)
             end
         elseif statement isa Expr && statement.head === :(=)
             affine_declaration = _syntax_affine_assignment(
-                statement, Set(scalar_prior_names), block_prior_axes,
+                statement, argument_name_set, Set(scalar_prior_names),
+                block_prior_axes,
                 grouped_sites,
                 correlated_grouped_sites)
             if affine_declaration === nothing
@@ -6167,6 +6294,7 @@ export SiteCoordinates, GroupCoordinateKey, GroupCoefficientKey
 export CorrelationCoordinateKey
 export FactorGraph
 export CenterFactorNode, ZScaleFactorNode, AffineFactorNode, ExpFactorNode
+export LogFactorNode
 export GroupGatherFactorNode, RowProductFactorNode, GroupedAffineFactorNode
 export FactorPlan, FactorPrepared, FactorWorkspace, FactorLogDensityProblem
 export StandardNormalSiteFactor, NormalSiteFactor, ExponentialSiteFactor
@@ -6177,11 +6305,12 @@ export FreeSite, ConditionedSite, GeneratedSite
 export RealSupport, PositiveSupport, CholeskyCorrelationSupport
 export IdentityTransform, ExpTransform, CholeskyCorrelationTransform
 export StandardNormal, NormalPrior, ExponentialPrior
-export Center, ZScale, Affine, ExpLink, GroupGather, RowProduct, GroupedAffine
+export Center, ZScale, Affine, ExpLink, LogLink
+export GroupGather, RowProduct, GroupedAffine
 export NormalObservation, BernoulliLogitObservation, PoissonObservation
 export BroadcastObservation
 export model, input, parameter, Identity, Exp, normal_prior, Exponential
-export center, zscale, standardize, affine, exp_link
+export center, zscale, standardize, affine, exp_link, log_link
 export grouped_normal, group_gather, group_values, group_input
 export grouped_standard_normal, group_coefficients
 export cholesky_correlation, correlation_coefficients

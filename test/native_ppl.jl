@@ -439,6 +439,24 @@ NP.@model function natural_sampled_offset_regression(x)
     @. y ~ Normal(mu, sigma)
 end
 
+NP.@model function natural_exposure_poisson(x, exposure)
+    beta_log_rate[(:Intercept, :x)] ~ StandardNormal()
+    log_rate = dot(beta_log_rate, (1, x)) + offset(log(exposure))
+    @. y ~ Poisson(exp(log_rate))
+end
+
+NP.@model function natural_exposure_only_poisson(exposure)
+    beta_log_rate[(:Intercept,)] ~ StandardNormal()
+    log_rate = dot(beta_log_rate, (1,)) + offset(log(exposure))
+    @. y ~ Poisson(exp(log_rate))
+end
+
+NP.@model function natural_raw_offset_poisson(x, exposure)
+    beta_log_rate[(:Intercept, :x)] ~ StandardNormal()
+    log_rate = dot(beta_log_rate, (1, x)) + offset(exposure)
+    @. y ~ Poisson(exp(log_rate))
+end
+
 NP.@model function natural_varying_intercept(x, group)
     tau_p_group ~ Exponential(1)
     b_p_group[group] ~ Normal(0.0, tau_p_group)
@@ -3607,6 +3625,249 @@ end
     @test capability_error(() -> NP.compile(
         row_exp_model, (; x=sampled_offset_data.x);
         conditions=(; y=sampled_offset_data.y))).capability == :factor_nodes
+    exposure_data = (;
+        x=[-1.0, 0.0, 0.5, 1.0, 2.0],
+        exposure=[0.5, 1.0, 2.0, 4.0, 1.5],
+        y=[0, 1, 2, 3, 1])
+    exposure_brm = @brm exposure_data begin
+        log_rate ~ 1 + x + offset(log(exposure))
+        y ~ Poisson(exp(log_rate))
+    end
+    @test popcoefnames(exposure_brm, :log_rate) == [:Intercept, :x]
+    @test SBBRMI(exposure_brm; mod=@__MODULE__) isa SBBRMI
+    direct_exposure_model = NP.model(
+        inputs=(; x=NP.input(), exposure=NP.input()),
+        parameters=(;
+            beta_log_rate=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal())),
+        nodes=(;
+            log_exposure_for_log_rate=NP.log_link(:exposure),
+            log_rate=NP.affine(
+                :x, :beta_log_rate;
+                offsets=(:log_exposure_for_log_rate,), intercept=true),
+            exp_log_rate=NP.exp_link(:log_rate)),
+        observations=(;
+            y=NP.broadcasted(NP.poisson(:y, :exp_log_rate))))
+    exposure_model = NP.lower(exposure_brm)
+    @test exposure_model == direct_exposure_model
+    natural_exposure = NP.condition(
+        natural_exposure_poisson(
+            exposure_data.x, exposure_data.exposure);
+        y=exposure_data.y)
+    @test natural_exposure.declaration == exposure_model
+    exposure_only_brm = @brm exposure_data begin
+        log_rate ~ 1 + offset(log(exposure))
+        y ~ Poisson(exp(log_rate))
+    end
+    @test SBBRMI(exposure_only_brm; mod=@__MODULE__) isa SBBRMI
+    natural_exposure_only = NP.condition(
+        natural_exposure_only_poisson(exposure_data.exposure);
+        y=exposure_data.y)
+    @test natural_exposure_only.declaration == NP.lower(exposure_only_brm)
+    exposure_only_prepared = NP.prepare(exposure_only_brm)
+    @test exposure_only_prepared.plan.graph.dimension == 1
+    @test NP.evaluate(
+        NP.workspace(exposure_only_prepared), exposure_only_prepared,
+        [0.2], NP.LinearPredictor()) ≈
+          0.2 .+ log.(exposure_data.exposure)
+    exposure_plan = NP.compile(exposure_brm)
+    @test exposure_plan.graph.schedule == (
+        :beta_log_rate, :log_exposure_for_log_rate,
+        :log_rate, :exp_log_rate, :y)
+    @test exposure_plan.graph.dimension == 2
+    @test exposure_plan.graph.nodes.log_exposure_for_log_rate isa
+          NP.LogFactorNode
+    @test NP.factor_node_dependencies(
+        exposure_plan.graph.nodes.log_exposure_for_log_rate) == ()
+    @test exposure_plan.graph.nodes.log_rate.offsets ==
+          (NP.NodeValue{:log_exposure_for_log_rate}(),)
+    @test NP.factor_node_dependencies(exposure_plan.graph.nodes.log_rate) ==
+          (:beta_log_rate, :log_exposure_for_log_rate)
+    exposure_prepared = NP.prepare(exposure_plan)
+    exposure_workspace = NP.workspace(
+        exposure_prepared, Float64, DI.AutoEnzyme())
+    exposure_position = [0.2, -0.3]
+    exposure_log_rate = exposure_position[1] .+
+        exposure_position[2] .* exposure_data.x .+
+        log.(exposure_data.exposure)
+    exposure_rate = exp.(exposure_log_rate)
+    exposure_expected_density =
+        sum(logpdf.(Normal(), exposure_position)) +
+        sum(BRM._native_ppl_poisson_logdensity.(
+            Float64.(exposure_data.y), exposure_log_rate))
+    exposure_expected_gradient = [
+        -exposure_position[1] +
+            sum(exposure_data.y .- exposure_rate),
+        -exposure_position[2] +
+            sum(exposure_data.x .* (exposure_data.y .- exposure_rate))]
+    exposure_density, exposure_gradient = NP.logdensity_and_gradient!(
+        exposure_workspace, exposure_prepared, exposure_position)
+    @test exposure_density ≈ exposure_expected_density
+    @test exposure_gradient ≈ exposure_expected_gradient
+    @test NP.evaluate(
+        exposure_workspace, exposure_prepared, exposure_position,
+        NP.LinearPredictor()) ≈ exposure_log_rate
+    @test NP.evaluate(
+        exposure_workspace, exposure_prepared, exposure_position,
+        NP.PointwiseLogLikelihood()) ≈
+          BRM._native_ppl_poisson_logdensity.(
+              Float64.(exposure_data.y), exposure_log_rate)
+    @test factor_steady_state_allocations(
+        exposure_workspace, exposure_prepared,
+        exposure_position) == (; primal=0, gradient=0)
+    for invalid_exposure in (
+            [0.5, 0.0, 2.0, 4.0, 1.5],
+            [0.5, -1.0, 2.0, 4.0, 1.5],
+            [0.5, Inf, 2.0, 4.0, 1.5],
+            [0.5, NaN, 2.0, 4.0, 1.5])
+        @test_throws ArgumentError NP.prepare(NP.condition(
+            natural_exposure_poisson(exposure_data.x, invalid_exposure);
+            y=exposure_data.y))
+    end
+    raw_offset_prepared = NP.prepare(NP.condition(
+        natural_raw_offset_poisson(
+            exposure_data.x, log.(exposure_data.exposure));
+        y=exposure_data.y))
+    @test NP.evaluate(
+        NP.workspace(raw_offset_prepared), raw_offset_prepared,
+        exposure_position, NP.LinearPredictor()) ≈ exposure_log_rate
+    for invalid_offset in (
+            [log(0.5), Inf, log(2.0), log(4.0), log(1.5)],
+            [log(0.5), NaN, log(2.0), log(4.0), log(1.5)])
+        @test_throws ArgumentError NP.prepare(NP.condition(
+            natural_raw_offset_poisson(exposure_data.x, invalid_offset);
+            y=exposure_data.y))
+    end
+    exposure_predictive_rng = MersenneTwister(990)
+    exposure_expected_rng = MersenneTwister(990)
+    exposure_predictive = NP.allocate_output(
+        exposure_prepared, NP.PosteriorPredictive())
+    NP.simulate!(
+        exposure_predictive_rng, exposure_predictive,
+        exposure_workspace, exposure_prepared, exposure_position)
+    @test exposure_predictive == [
+        BRM._native_ppl_rand_poisson(
+            exposure_expected_rng, Float64, log_rate)
+        for log_rate in exposure_log_rate]
+    @test factor_query_allocations(
+        exposure_workspace, exposure_prepared, exposure_position,
+        zeros(5), zeros(5), zeros(Int, 5), zeros(2)) ==
+          (; linear=0, pointwise=0, predictive=0, prior=0)
+
+    exposure_replay_bindings = (;
+        x=Float32[1.5, -0.5, 0.25],
+        exposure=Float32[2.0, 0.75, 3.0])
+    exposure_prediction_only = NP.rebind(
+        exposure_prepared, (;); bindings=exposure_replay_bindings)
+    @test !NP.has_response(exposure_prediction_only)
+    @test eltype(exposure_prediction_only) === Float64
+    exposure_replay_position = [0.1, 0.4]
+    exposure_replay_log_rate = exposure_replay_position[1] .+
+        exposure_replay_position[2] .*
+            Float64.(exposure_replay_bindings.x) .+
+        log.(Float64.(exposure_replay_bindings.exposure))
+    exposure_replay_workspace = NP.workspace(
+        exposure_prediction_only, Float64, DI.AutoEnzyme())
+    @test NP.evaluate(
+        exposure_replay_workspace, exposure_prediction_only,
+        exposure_replay_position, NP.LinearPredictor()) ≈
+          exposure_replay_log_rate
+    exposure_replay_rng = MersenneTwister(991)
+    exposure_replay_expected_rng = MersenneTwister(991)
+    @test NP.simulate(
+        exposure_replay_rng, exposure_replay_workspace,
+        exposure_prediction_only, exposure_replay_position) == [
+            BRM._native_ppl_rand_poisson(
+                exposure_replay_expected_rng, Float64, log_rate)
+            for log_rate in exposure_replay_log_rate]
+    @test_throws ArgumentError NP.rebind(
+        exposure_prepared, (;);
+        bindings=(; x=Float32[0, 1], exposure=Float32[1, 0]))
+    exposure_rebound_response = Int[2, 0, 1]
+    exposure_rebound = NP.rebind(
+        exposure_prepared, (; y=exposure_rebound_response);
+        bindings=exposure_replay_bindings)
+    exposure_rebound_workspace = NP.workspace(
+        exposure_rebound, Float64, DI.AutoEnzyme())
+    exposure_rebound_density, exposure_rebound_gradient =
+        NP.logdensity_and_gradient!(
+            exposure_rebound_workspace, exposure_rebound,
+            exposure_replay_position)
+    @test isfinite(exposure_rebound_density)
+    @test all(isfinite, exposure_rebound_gradient)
+    @test NP.evaluate(
+        exposure_rebound_workspace, exposure_rebound,
+        exposure_replay_position, NP.PointwiseLogLikelihood()) ≈
+          BRM._native_ppl_poisson_logdensity.(
+              Float64.(exposure_rebound_response),
+              exposure_replay_log_rate)
+
+    exposure_float32 = NP.condition(
+        natural_exposure_poisson(
+            Float32.(exposure_data.x), Float32.(exposure_data.exposure));
+        y=exposure_data.y)
+    exposure_float32_prepared = NP.prepare(exposure_float32; T=Float32)
+    @test eltype(exposure_float32_prepared) === Float32
+    exposure_float32_workspace = NP.workspace(
+        exposure_float32_prepared, Float32, DI.AutoEnzyme())
+    exposure_float32_position = Float32.(exposure_position)
+    exposure_float32_density, exposure_float32_gradient =
+        NP.logdensity_and_gradient!(
+            exposure_float32_workspace, exposure_float32_prepared,
+            exposure_float32_position)
+    @test exposure_float32_density ≈ Float32(exposure_density) rtol=1f-5
+    @test exposure_float32_gradient ≈
+          Float32.(exposure_gradient) rtol=1f-5
+
+    exposure_draw_positions = [
+        exposure_position';
+        0.1 0.25]
+    exposure_draw_linear = zeros(2, 5)
+    exposure_draw_pointwise = zeros(2, 5)
+    exposure_draw_predictive = zeros(Int, 2, 5)
+    NP.evaluate_draws!(
+        exposure_draw_linear, exposure_workspace, exposure_prepared,
+        exposure_draw_positions, NP.LinearPredictor())
+    NP.evaluate_draws!(
+        exposure_draw_pointwise, exposure_workspace, exposure_prepared,
+        exposure_draw_positions, NP.PointwiseLogLikelihood())
+    exposure_draw_rng = MersenneTwister(992)
+    exposure_manual_rng = MersenneTwister(992)
+    exposure_manual_predictive = similar(exposure_draw_predictive)
+    for draw in axes(exposure_draw_positions, 1)
+        NP.simulate!(
+            exposure_manual_rng,
+            @view(exposure_manual_predictive[draw, :]),
+            exposure_workspace, exposure_prepared,
+            @view(exposure_draw_positions[draw, :]))
+    end
+    NP.simulate_draws!(
+        exposure_draw_rng, exposure_draw_predictive,
+        exposure_workspace, exposure_prepared,
+        exposure_draw_positions)
+    @test exposure_draw_predictive == exposure_manual_predictive
+    exposure_queries = (;
+        linear=NP.LinearPredictor(),
+        pointwise=NP.PointwiseLogLikelihood(),
+        predictive=NP.PosteriorPredictive())
+    exposure_bundle = (;
+        linear=zeros(2, 5),
+        pointwise=zeros(2, 5),
+        predictive=zeros(Int, 2, 5))
+    NP.execute_draws!(
+        MersenneTwister(992), exposure_bundle,
+        exposure_workspace, exposure_prepared,
+        exposure_draw_positions, exposure_queries)
+    @test exposure_bundle.linear == exposure_draw_linear
+    @test exposure_bundle.pointwise == exposure_draw_pointwise
+    @test exposure_bundle.predictive == exposure_manual_predictive
+    @test factor_batch_allocations(
+        exposure_workspace, exposure_prepared,
+        exposure_draw_positions, exposure_draw_linear,
+        exposure_draw_pointwise, exposure_draw_predictive,
+        exposure_bundle) ==
+          (; linear=0, pointwise=0, predictive=0, bundle=0)
 
     grouped_declaration = NP.model(
         inputs=(; group=NP.input()),
@@ -7207,6 +7468,23 @@ end
             @. y ~ Normal(mu, sigma)
         end)))
     @test occursin("features must use distinct raw inputs", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function unknown_data_offset(x)
+            beta ~ Normal()
+            sigma ~ Exponential(1)
+            mu = beta * x + offset(expsoure)
+            @. y ~ Normal(mu, sigma)
+        end)))
+    @test occursin(
+        "must name a preceding scalar site or function argument", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function unknown_log_offset(x)
+            beta ~ Normal()
+            sigma ~ Exponential(1)
+            mu = beta * x + offset(log(expsoure))
+            @. y ~ Normal(mu, sigma)
+        end)))
+    @test occursin("must name a function argument", err.msg)
     err = argument_error(() -> macroexpand(
         @__MODULE__, :(NP.@model function mismatched_parameter_dot(x, w)
             beta[(:x, :w)] ~ StandardNormal()
