@@ -588,10 +588,137 @@ function _native_ppl_fit_zscale(values::AbstractVector, name::Symbol)
     (; mean=fitted_mean, scale=fitted_scale)
 end
 
+function _native_ppl_validate_coefficient_prior(
+    factor::NativePPLStandardNormalFactor{Parameter},
+    parameter::NativePPLParameter{Parameter},
+) where {Parameter}
+    factor.unconstrained == parameter.unconstrained || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled coefficient prior and parameter coordinates must agree"))
+    nothing
+end
+_native_ppl_validate_coefficient_prior(::Any, ::Any) = throw(
+    NativePPLCapabilityError(
+        :graph_identity,
+        "compiled coefficient prior must target the coefficient parameter"))
+
+function _native_ppl_validate_scale_prior(
+    factor::NativePPLExponentialFactor{Parameter},
+    parameter::NativePPLParameter{Parameter},
+) where {Parameter}
+    factor.unconstrained_index in parameter.unconstrained || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled scale prior coordinate must belong to the scale parameter"))
+    nothing
+end
+_native_ppl_validate_scale_prior(::Any, ::Any) = throw(
+    NativePPLCapabilityError(
+        :graph_identity,
+        "compiled scale prior must target the scale parameter"))
+
+function _native_ppl_validate_likelihood_graph(
+    factor::NativePPLNormalFactor{Response,Location,Scale},
+    plan::NativePPLPlan, observation_axis,
+) where {Response,Location,Scale}
+    factor.axis === observation_axis || throw(NativePPLCapabilityError(
+        :graph_identity,
+        "compiled Normal factor must carry the plan observation axis"))
+    Response === native_input_name(plan.inputs.response) || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled Normal factor must observe the response input"))
+    Location === native_node_name(plan.nodes.location) || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled Normal factor must consume the affine location"))
+    hasproperty(plan.parameters, :scale) || throw(NativePPLCapabilityError(
+        :graph_identity, "compiled Normal graph is missing its scale parameter"))
+    scale = plan.parameters.scale
+    scale isa NativePPLParameter || throw(NativePPLCapabilityError(
+        :graph_identity,
+        "compiled Normal scale must be a typed parameter block"))
+    hasproperty(plan.axes, :scale) && scale.axis === plan.axes.scale || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled Normal scale parameter must carry the scale axis"))
+    Scale === native_parameter_name(scale) || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled Normal factor must consume the scale parameter"))
+    hasproperty(plan.factors, :scale_prior) || throw(NativePPLCapabilityError(
+        :graph_identity, "compiled Normal graph is missing its scale prior"))
+    _native_ppl_validate_scale_prior(
+        plan.factors.scale_prior, scale)
+    hasproperty(plan.nodes, :rate) && throw(NativePPLCapabilityError(
+        :graph_identity,
+        "compiled Normal graph cannot contain a Poisson rate node"))
+    nothing
+end
+
+function _native_ppl_validate_likelihood_graph(
+    factor::NativePPLBernoulliLogitFactor{Response,Location},
+    plan::NativePPLPlan, observation_axis,
+) where {Response,Location}
+    factor.axis === observation_axis || throw(NativePPLCapabilityError(
+        :graph_identity,
+        "compiled BernoulliLogit factor must carry the plan observation axis"))
+    Response === native_input_name(plan.inputs.response) || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled BernoulliLogit factor must observe the response input"))
+    Location === native_node_name(plan.nodes.location) || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled BernoulliLogit factor must consume the affine location"))
+    hasproperty(plan.nodes, :rate) && throw(NativePPLCapabilityError(
+        :graph_identity,
+        "compiled BernoulliLogit graph cannot contain a Poisson rate node"))
+    nothing
+end
+
+function _native_ppl_validate_likelihood_graph(
+    factor::NativePPLPoissonFactor{Response,Rate},
+    plan::NativePPLPlan, observation_axis,
+) where {Response,Rate}
+    factor.axis === observation_axis || throw(NativePPLCapabilityError(
+        :graph_identity,
+        "compiled Poisson factor must carry the plan observation axis"))
+    Response === native_input_name(plan.inputs.response) || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled Poisson factor must observe the response input"))
+    hasproperty(plan.nodes, :rate) || throw(NativePPLCapabilityError(
+        :graph_identity, "compiled Poisson graph is missing its rate node"))
+    Rate === native_node_name(plan.nodes.rate) || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled Poisson factor must consume the exponential rate"))
+    nothing
+end
+
+_native_ppl_validate_likelihood_graph(
+    ::Any, ::NativePPLPlan, ::Any,
+) = throw(NativePPLCapabilityError(
+    :graph_identity, "compiled graph has an unsupported likelihood factor"))
+
 function _native_ppl_validate_predictor_graph(plan::NativePPLPlan)
     observation_axis = plan.axes.observation
     predictor = plan.inputs.predictor
     response = plan.inputs.response
+    native_input_role(predictor) === :predictor || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled predictor input must preserve its predictor role"))
+    native_input_role(response) === :response || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled response input must preserve its response role"))
+    native_input_name(predictor) !== native_input_name(response) || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled predictor and response must have distinct identities"))
     predictor.axis === observation_axis || throw(NativePPLCapabilityError(
         :graph_identity,
         "compiled predictor input must carry the plan observation axis"))
@@ -607,6 +734,29 @@ function _native_ppl_validate_predictor_graph(plan::NativePPLPlan)
     location.axis === observation_axis || throw(NativePPLCapabilityError(
         :graph_identity,
         "compiled affine location must carry the plan observation axis"))
+    hasproperty(plan.parameters, :coefficients) || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled graph is missing its coefficient parameter"))
+    hasproperty(plan.factors, :coefficient_prior) || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled graph is missing its coefficient prior"))
+    coefficients = plan.parameters.coefficients
+    coefficients isa NativePPLParameter || throw(NativePPLCapabilityError(
+        :graph_identity,
+        "compiled coefficients must be a typed parameter block"))
+    coefficients.axis === plan.axes.coefficient || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled coefficient parameter must carry the coefficient axis"))
+    location.intercept_index == first(coefficients.unconstrained) &&
+        location.slope_index == last(coefficients.unconstrained) || throw(
+            NativePPLCapabilityError(
+                :graph_identity,
+                "compiled affine coordinates must match the coefficient parameter"))
+    _native_ppl_validate_coefficient_prior(
+        plan.factors.coefficient_prior, coefficients)
 
     predictor_name = native_input_name(predictor)
     expected_location_input = predictor_name
@@ -649,6 +799,33 @@ function _native_ppl_validate_predictor_graph(plan::NativePPLPlan)
             throw(NativePPLCapabilityError(
                 :graph_identity,
                 "compiled exponential rate and affine location must have distinct identities"))
+    end
+    hasproperty(plan.factors, :likelihood) || throw(NativePPLCapabilityError(
+        :graph_identity, "compiled graph is missing its likelihood factor"))
+    _native_ppl_validate_likelihood_graph(
+        plan.factors.likelihood, plan, observation_axis)
+
+    expected_queries = (
+        :linear_predictor, :pointwise_loglikelihood, :posterior_predictive)
+    keys(plan.queries) == expected_queries || throw(NativePPLCapabilityError(
+        :graph_identity,
+        "compiled graph must expose the canonical typed query set"))
+    for (name, query) in pairs(plan.queries)
+        query isa NativePPLQuerySpec || throw(NativePPLCapabilityError(
+            :graph_identity,
+            "compiled query `$name` must be a typed query specification"))
+        native_query_name(query) === name || throw(NativePPLCapabilityError(
+            :graph_identity,
+            "compiled query key `$name` must match its typed identity"))
+        output = native_query_output(query)
+        output isa NativePPLOutputSignature || throw(
+            NativePPLCapabilityError(
+                :graph_identity,
+                "compiled query `$name` must have a vector output signature"))
+        native_output_axis(output) === observation_axis ||
+            throw(NativePPLCapabilityError(
+                :graph_identity,
+                "compiled query outputs must carry the plan observation axis"))
     end
     nothing
 end

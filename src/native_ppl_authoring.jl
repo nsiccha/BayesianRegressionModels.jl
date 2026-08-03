@@ -160,8 +160,11 @@ struct ModelInstance{M<:Model,B}
     bindings::B
 end
 
-instantiate(declaration::Model, bindings) =
+function instantiate(declaration::Model, bindings)
+    _validate_model(declaration)
+    _validate_binding_names(declaration, bindings)
     ModelInstance(declaration, bindings)
+end
 
 function Base.show(io::IO, instance::ModelInstance)
     print(io, "NativePPL.ModelInstance(")
@@ -245,6 +248,25 @@ function _validate_model(declaration::Model)
     declaration
 end
 
+function _validate_binding_names(declaration::Model, bindings)
+    bindings isa NamedTuple || throw(ArgumentError(
+        "native PPL bindings must be a NamedTuple; got $(typeof(bindings))"))
+    missing_bindings = setdiff(Set(keys(declaration.inputs)), Set(keys(bindings)))
+    isempty(missing_bindings) || throw(ArgumentError(
+        "native PPL bindings are missing declared inputs: " *
+        join(sort!(collect(missing_bindings)), ", ")))
+    extra_bindings = setdiff(Set(keys(bindings)), Set(keys(declaration.inputs)))
+    isempty(extra_bindings) || throw(ArgumentError(
+        "native PPL bindings contain undeclared inputs: " *
+        join(sort!(collect(extra_bindings)), ", ")))
+    bindings
+end
+
+function _validated_plan(plan::Plan)
+    BRM._native_ppl_validate_predictor_graph(plan)
+    plan
+end
+
 function Base.show(io::IO, declaration::Model)
     print(io, "NativePPL.Model(inputs=", keys(declaration.inputs),
           ", parameters=", keys(declaration.parameters),
@@ -293,7 +315,7 @@ function _compile_transform(declaration::ZScale, name::Symbol,
 end
 
 function _validate_coefficient_parameter(
-    name::Symbol, declaration::Parameter, predictor_name::Symbol)
+    name::Symbol, declaration::Parameter)
     declaration.support isa RealSupport || throw(CapabilityError(
         :parameter_support,
         "affine coefficient parameter `$name` must use RealSupport"))
@@ -346,16 +368,7 @@ observation. Unsupported graph shapes fail closed.
 """
 function bind(declaration::Model, bindings)
     _validate_model(declaration)
-    bindings isa NamedTuple || throw(ArgumentError(
-        "native PPL bindings must be a NamedTuple; got $(typeof(bindings))"))
-    missing_bindings = setdiff(Set(keys(declaration.inputs)), Set(keys(bindings)))
-    isempty(missing_bindings) || throw(ArgumentError(
-        "native PPL bindings are missing declared inputs: " *
-        join(sort!(collect(missing_bindings)), ", ")))
-    extra_bindings = setdiff(Set(keys(bindings)), Set(keys(declaration.inputs)))
-    isempty(extra_bindings) || throw(ArgumentError(
-        "native PPL bindings contain undeclared inputs: " *
-        join(sort!(collect(extra_bindings)), ", ")))
+    _validate_binding_names(declaration, bindings)
     length(declaration.inputs) == 2 || throw(CapabilityError(
         :input_roles,
         "the current native compiler requires one predictor and one response input"))
@@ -398,7 +411,7 @@ function bind(declaration::Model, bindings)
     coefficient_declaration = getproperty(
         declaration.parameters, coefficient_name)
     _validate_coefficient_parameter(
-        coefficient_name, coefficient_declaration, predictor_name)
+        coefficient_name, coefficient_declaration)
 
     transform_pairs = [(name, value) for (name, value) in pairs(declaration.nodes)
                        if value isa Union{Center,ZScale}]
@@ -472,7 +485,7 @@ function bind(declaration::Model, bindings)
             scale_name, 3, scale_declaration.prior.scale)
         likelihood = BRM.NativePPLNormalFactor(
             response_name, affine_name, scale_name, observation_axis)
-        return BRM.NativePPLPlan(
+        return _validated_plan(BRM.NativePPLPlan(
             (; observation=observation_axis, coefficient=coefficient_axis,
                scale=scale_axis),
             (; predictor=predictor_input, response=response_input),
@@ -480,7 +493,7 @@ function bind(declaration::Model, bindings)
             compiled_nodes,
             (; coefficient_prior, scale_prior, likelihood),
             BRM._native_ppl_queries(observation_axis, likelihood),
-            compiled_bindings)
+            compiled_bindings))
     end
 
     length(declaration.parameters) == 1 || throw(CapabilityError(
@@ -501,13 +514,13 @@ function bind(declaration::Model, bindings)
                 "BernoulliLogit declaration contains unsupported extra nodes"))
         likelihood = BRM.NativePPLBernoulliLogitFactor(
             response_name, affine_name, observation_axis)
-        return BRM.NativePPLPlan(
+        return _validated_plan(BRM.NativePPLPlan(
             (; observation=observation_axis, coefficient=coefficient_axis),
             (; predictor=predictor_input, response=response_input),
             (; coefficients), compiled_nodes,
             (; coefficient_prior, likelihood),
             BRM._native_ppl_queries(observation_axis, likelihood),
-            compiled_bindings)
+            compiled_bindings))
     end
 
     observation isa PoissonObservation || throw(CapabilityError(
@@ -536,13 +549,13 @@ function bind(declaration::Model, bindings)
     compiled_nodes = merge(compiled_nodes, (; rate))
     likelihood = BRM.NativePPLPoissonFactor(
         response_name, rate_name, observation_axis)
-    BRM.NativePPLPlan(
+    _validated_plan(BRM.NativePPLPlan(
         (; observation=observation_axis, coefficient=coefficient_axis),
         (; predictor=predictor_input, response=response_input),
         (; coefficients), compiled_nodes,
         (; coefficient_prior, likelihood),
         BRM._native_ppl_queries(observation_axis, likelihood),
-        compiled_bindings)
+        compiled_bindings))
 end
 
 compile(declaration::Model, bindings) = bind(declaration, bindings)
@@ -972,6 +985,9 @@ function _model_function_syntax(definition)
     length(unique(argument_names)) == length(argument_names) ||
         throw(ArgumentError(
             "NativePPL.@model function arguments must have unique names"))
+    length(argument_names) == 2 || throw(ArgumentError(
+        "NativePPL.@model currently requires exactly one predictor and one " *
+        "response argument"))
     argument_name_set = Set(argument_names)
 
     parameter_names = Symbol[]
