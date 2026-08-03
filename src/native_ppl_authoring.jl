@@ -3623,7 +3623,7 @@ function _brmi_group_sd_prior(brmi::BRM.BRMI, id::Symbol)
         lhs, prior = BRM.getargs(operation, 2)
         lhs isa BRM.ExprColumn && BRM.getf(lhs) === BRM.effect || continue
         address = BRM.getargs(lhs)
-        length(address) >= 2 && address[1] === :sd && address[2] === id ||
+        length(address) == 2 && address[1] === :sd && address[2] === id ||
             continue
         prior isa BRM.ExprColumn && BRM.getf(prior) === BRM.Exponential ||
             throw(CapabilityError(
@@ -3743,6 +3743,11 @@ function _lower_brmi(brmi::BRM.BRMI)
     group_names = map(varying_groups) do varying
         BRM.name(varying.group)
     end
+    !isempty(varying_groups) && isempty(predictor_names) && throw(
+        CapabilityError(
+            :predictor_terms,
+            "the first grouped native-PPL slice requires at least one " *
+            "ordinary population predictor"))
     length(unique(group_names)) == length(group_names) || throw(
         CapabilityError(
             :group_term,

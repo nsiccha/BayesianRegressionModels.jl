@@ -3546,6 +3546,14 @@ end
     @test grouped_plan.group_indices ==
           (; varying_by_row=(1, 2, 1, 3))
     grouped_prepared = NP.prepare(grouped_plan)
+    @test grouped_prepared.plan.bindings.group !== grouped_bindings.group
+    grouped_source = copy(grouped_bindings.group)
+    grouped_owned = NP.prepare(NP.compile(
+        grouped_declaration, (; group=grouped_source);
+        conditions=(; y=sampled_offset_data.y)))
+    grouped_source[1] = :changed_after_prepare
+    @test grouped_owned.plan.bindings.group == grouped_bindings.group
+    @test grouped_owned.plan.group_indices == grouped_plan.group_indices
     grouped_workspace = NP.workspace(
         grouped_prepared, Float64, DI.AutoEnzyme())
     grouped_position = [log(0.7), 0.2, -0.1, 0.4, log(0.5)]
@@ -3688,6 +3696,25 @@ end
     @test factor_steady_state_allocations(
         varying_workspace, varying_prepared, varying_position) ==
           (; primal=0, gradient=0)
+    varying_margin_prior = @brm varying_brm_data begin
+        sigma ~ Exponential(2)
+        mu ~ 0 + x + (1 | p | group)
+        sd(:, p, x) ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end
+    @test capability_error(
+        () -> NP.lower(varying_margin_prior)).capability == :group_prior
+    varying_no_population_data = (;
+        group=varying_brm_data.group, y=varying_brm_data.y)
+    varying_without_population = @brm varying_no_population_data begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + (1 | p | group)
+        sd(:, p) ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end
+    @test capability_error(
+        () -> NP.lower(varying_without_population)).capability ==
+          :predictor_terms
 
     sampled_offset_plan = NP.compile(sampled_offset_brmi)
     @test sampled_offset_plan isa NP.FactorPlan
