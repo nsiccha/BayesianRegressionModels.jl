@@ -365,9 +365,12 @@ end
 """Explicit absence of an observation binding in a prediction-only replay."""
 struct NativePPLNoResponse end
 
-Base.eltype(prepared::NativePPLPrepared) = isempty(prepared.predictors) ?
-    eltype(prepared.plan.inputs.response) :
-    eltype(first(values(prepared.predictors)))
+function Base.eltype(prepared::NativePPLPrepared)
+    isempty(prepared.predictors) ||
+        return eltype(first(values(prepared.predictors)))
+    native_ppl_has_response(prepared) && return eltype(prepared.response)
+    float(eltype(prepared.plan.inputs.response))
+end
 function Base.getproperty(prepared::NativePPLPrepared, name::Symbol)
     name === :predictor || return getfield(prepared, name)
     predictors = getfield(prepared, :predictors)
@@ -1863,9 +1866,8 @@ function _native_ppl_rebind(prepared::NativePPLPrepared, bindings;
     predictors = NamedTuple{predictor_names}(predictor_values)
     response = _native_ppl_response_binding(bindings, response_name)
     observation_count = isempty(predictor_values) ?
-        (response isa AbstractVector ? length(response) : throw(ArgumentError(
-            "native PPL scalar-only rebind requires a response binding to " *
-            "establish the observation axis"))) : length(first(predictor_values))
+        (response isa AbstractVector ? length(response) :
+         length(plan.axes.observation)) : length(first(predictor_values))
     for (predictor_name, predictor) in pairs(predictors)
         length(predictor) == observation_count || throw(DimensionMismatch(
             "native PPL predictor `$predictor_name` has $(length(predictor)) " *
@@ -1888,8 +1890,8 @@ function _native_ppl_rebind(prepared::NativePPLPrepared, bindings;
         (predictor_name, predictor) -> NativePPLInput(
             predictor_name, :predictor, observation_axis, eltype(predictor)),
         predictor_names, predictor_values))
-    response_eltype = response isa AbstractVector ?
-        eltype(response) : eltype(plan.inputs.response)
+    response_eltype = response isa AbstractVector ? eltype(response) :
+        (isempty(predictor_values) ? T : eltype(plan.inputs.response))
     response_input = NativePPLInput(
         response_name, :response, observation_axis, response_eltype)
 

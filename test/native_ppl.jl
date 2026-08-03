@@ -2356,9 +2356,9 @@ end
           bindings.x === parameter
     @test stochastic_composition.components.stochastic_sink.instance.
           bindings.x === stochastic
-    @test capability_error(
-        () -> NP.lower(stochastic_composition)).capability ==
-          :active_site_connection
+    site_error = capability_error(() -> NP.lower(stochastic_composition))
+    @test site_error.capability == :active_site_connection
+    @test occursin("source.y", site_error.detail)
 
     active_lowered = NP.lower(composition)
     sink_location_name = NP.qualified_name(:sink, :mu)
@@ -2490,6 +2490,19 @@ end
     @test BRM.native_scalar_parameter(scalar_plan.nodes.location) === theta_name
     @test LogDensityProblems.dimension(scalar_plan) == 2
 
+    aliased_active_prior = NP.component(
+        :aliased_active_prior, aliased_scalar_normal_prior())
+    aliased_theta = NP.output(aliased_active_prior, :coefficient)
+    aliased_active = NP.compose(
+        aliased_active_prior,
+        NP.component(
+            :aliased_active_likelihood,
+            NP.condition(scalar_normal_likelihood(aliased_theta); y=response)))
+    aliased_active_plan = NP.compile(aliased_active)
+    @test BRM.native_node_name(aliased_active_plan.nodes.location) ===
+          NP.qualified_name(:aliased_active_prior, :theta)
+    @test LogDensityProblems.dimension(aliased_active_plan) == 2
+
     scalar_prepared = NP.prepare(scalar_plan)
     scalar_position = [0.3, log(0.8)]
     scalar_workspace = NP.workspace(
@@ -2526,7 +2539,35 @@ end
     @test isempty(scalar_rebound.predictors)
     @test scalar_rebound.response == rebound_response
     @test length(scalar_rebound.plan.axes.observation) == 3
-    @test_throws ArgumentError NP.rebind(scalar_prepared, (;))
+    scalar_prediction = NP.rebind(scalar_prepared, (;))
+    @test !NP.has_response(scalar_prediction)
+    @test eltype(scalar_prediction) === Float64
+    @test length(scalar_prediction.plan.axes.observation) == length(response)
+    scalar_prediction_workspace = NP.workspace(scalar_prediction)
+    @test length(NP.simulate(
+        MersenneTwister(912), scalar_prediction_workspace,
+        scalar_prediction, scalar_position)) == length(response)
+    @test_throws ArgumentError NP.evaluate(
+        scalar_prediction_workspace, scalar_prediction, scalar_position,
+        NP.PointwiseLogLikelihood())
+
+    scalar_prepared32 = NP.prepare(scalar_plan; T=Float32)
+    scalar_prediction32 = NP.rebind(scalar_prepared32, (;))
+    @test eltype(scalar_prediction32) === Float32
+    @test_throws DimensionMismatch NP.rebind(
+        scalar_prepared,
+        NamedTuple{(scalar_response_name,)}((Float64[],)))
+
+    integer_likelihood = NP.component(
+        :integer_likelihood,
+        NP.condition(scalar_normal_likelihood(theta); y=[0, 1, 2, 3]))
+    integer_prepared = NP.prepare(NP.compose(
+        scalar_prior_component, integer_likelihood))
+    @test eltype(integer_prepared.response) === Float64
+    @test eltype(integer_prepared) === Float64
+    @test NP.workspace(integer_prepared) isa NP.Workspace
+    @test NP.LogDensityProblem(
+        integer_prepared, DI.AutoEnzyme()) isa NP.LogDensityProblem
 
     unconditioned_scalar = NP.compose(
         scalar_prior_component,
