@@ -5984,9 +5984,6 @@ function _lower_brmi_observation_weight(response::Symbol, likelihood)
     distribution isa BRM.ExprColumn || throw(CapabilityError(
         :observation_weights,
         "weighted likelihood for `$response` requires a distribution call"))
-    isempty(BRM.getkwargs(distribution)) || throw(CapabilityError(
-        :observation_weights,
-        "weighted distribution for `$response` accepts no keywords"))
     weight isa BRM.ExprColumn || throw(CapabilityError(
         :observation_weights,
         "weighted likelihood for `$response` requires a typed StatsBase weight"))
@@ -6022,6 +6019,91 @@ function _lower_brmi_observation_weight(response::Symbol, likelihood)
     (; kind, source, column), distribution
 end
 
+function _lower_brmi_evidence_bound(response::Symbol, value,
+                                    label::AbstractString)
+    value === nothing && return (; value=nothing, source=nothing, column=nothing)
+    if value isa Real
+        isfinite(value) || throw(CapabilityError(
+            :response_evidence,
+            "$label for `$response` must be finite"))
+        return (; value, source=nothing, column=nothing)
+    end
+    value isa BRM.NamedColumn && parent(value) isa BRM.DataColumn || throw(
+        CapabilityError(
+            :response_evidence,
+            "$label for `$response` must be a finite literal, raw data " *
+            "column, or `nothing`"))
+    source = BRM.name(value)
+    (; value=source, source, column=value)
+end
+
+function _lower_brmi_response_evidence(response::Symbol, likelihood)
+    family = BRM.getf(likelihood)
+    kind = family === BRM.truncated ? :truncated :
+        family === BRM.censored ? :censored :
+        family === BRM.interval_censored ? :interval_censored : nothing
+    kind === nothing && return nothing, likelihood
+    arguments = BRM.getargs(likelihood)
+    isempty(arguments) && throw(CapabilityError(
+        :response_evidence,
+        "$family wrapper for `$response` needs a base distribution"))
+    distribution = first(arguments)
+    distribution isa BRM.ExprColumn || throw(CapabilityError(
+        :response_evidence,
+        "$family wrapper for `$response` requires a distribution call"))
+    positional = arguments[2:end]
+    keywords = BRM.getkwargs(likelihood)
+    allowed = kind === :interval_censored ? (:upper,) : (:lower, :upper)
+    unknown = Tuple(key for key in keys(keywords) if key ∉ allowed)
+    isempty(unknown) || throw(CapabilityError(
+        :response_evidence,
+        "$family wrapper for `$response` has unsupported keywords $unknown"))
+
+    lower = nothing
+    upper = nothing
+    if kind === :interval_censored
+        isempty(positional) || throw(CapabilityError(
+            :response_evidence,
+            "interval_censored for `$response` accepts `upper` only as a keyword"))
+        haskey(keywords, :upper) || throw(CapabilityError(
+            :response_evidence,
+            "interval_censored for `$response` requires `upper=`"))
+        upper = keywords[:upper]
+    else
+        length(positional) <= 2 || throw(CapabilityError(
+            :response_evidence,
+            "$family for `$response` accepts at most lower and upper bounds"))
+        !isempty(positional) && (lower = positional[1])
+        length(positional) == 2 && (upper = positional[2])
+        haskey(keywords, :lower) && begin
+            isempty(positional) || throw(CapabilityError(
+                :response_evidence,
+                "$family for `$response` specifies `lower` twice"))
+            lower = keywords[:lower]
+        end
+        haskey(keywords, :upper) && begin
+            length(positional) < 2 || throw(CapabilityError(
+                :response_evidence,
+                "$family for `$response` specifies `upper` twice"))
+            upper = keywords[:upper]
+        end
+        lower === nothing && upper === nothing && throw(CapabilityError(
+            :response_evidence,
+            "$family for `$response` needs at least one bound"))
+    end
+    lower = _lower_brmi_evidence_bound(
+        response, lower, "$family lower bound")
+    upper = _lower_brmi_evidence_bound(
+        response, upper, "$family upper bound")
+    if lower.value isa Real && upper.value isa Real &&
+       lower.value >= upper.value
+        throw(CapabilityError(
+            :response_evidence,
+            "$family lower bound for `$response` must be below its upper bound"))
+    end
+    (; kind, lower, upper), distribution
+end
+
 function _lower_brmi(brmi::BRM.BRMI)
     observed = BRM.outcomes(brmi)
     length(observed) == 1 || throw(CapabilityError(
@@ -6039,6 +6121,8 @@ function _lower_brmi(brmi::BRM.BRMI)
             :likelihood,
             "response `$response` must use a distribution call"))
     weight_spec, likelihood = _lower_brmi_observation_weight(
+        response, likelihood)
+    evidence_spec, likelihood = _lower_brmi_response_evidence(
         response, likelihood)
     family = BRM.getf(likelihood)
     family === BRM.Normal || family === BRM.BernoulliLogit ||
@@ -6085,9 +6169,11 @@ function _lower_brmi(brmi::BRM.BRMI)
         distributional = _lower_brmi_distributional_gaussian(
             brmi, response, response_lhs, location, likelihood_args[2])
         if distributional !== nothing
-            weight_spec === nothing || throw(CapabilityError(
-                :observation_weights,
-                "weighted distributional Normal regression is not yet supported"))
+            weight_spec === nothing && evidence_spec === nothing || throw(
+                CapabilityError(
+                    :response_evidence,
+                    "weighted/evidence distributional Normal regression is " *
+                    "not yet supported"))
             return distributional
         end
     end
@@ -6098,7 +6184,8 @@ function _lower_brmi(brmi::BRM.BRMI)
             :likelihood_scale,
             "Normal scale must be one named scalar parameter"))
 
-    if family === BRM.Normal && weight_spec === nothing
+    if family === BRM.Normal && weight_spec === nothing &&
+       evidence_spec === nothing
         factor_dag = _lower_brmi_scalar_factor_dag(
             brmi, response, response_lhs, location)
         factor_dag === nothing || return factor_dag
@@ -6162,6 +6249,19 @@ function _lower_brmi(brmi::BRM.BRMI)
         (weight_spec.source,) : ()
     weight_inputs = isempty(weight_input_names) ? () :
         (parent(parent(weight_spec.column)),)
+    evidence_bounds = evidence_spec === nothing ? () :
+        (evidence_spec.lower, evidence_spec.upper)
+    evidence_input_specs = Tuple(bound for bound in evidence_bounds
+        if bound.source !== nothing &&
+           bound.source ∉ (input_predictor_names..., group_names...,
+                            weight_input_names...))
+    evidence_input_names = Tuple(unique(bound.source
+                                        for bound in evidence_input_specs))
+    evidence_inputs = map(evidence_input_names) do source
+        bound = first(entry for entry in evidence_input_specs
+                      if entry.source === source)
+        parent(parent(bound.column))
+    end
     response_values = parent(parent(response_lhs))
 
     group_specs = map(varying_groups, group_names) do varying, group_name
@@ -6204,6 +6304,12 @@ function _lower_brmi(brmi::BRM.BRMI)
         Set((location, response, input_predictor_names..., sampled_offsets...,
              group_names...))
     weight_spec === nothing || push!(expected_values, weight_spec.source)
+    if evidence_spec !== nothing
+        evidence_spec.lower.source === nothing ||
+            push!(expected_values, evidence_spec.lower.source)
+        evidence_spec.upper.source === nothing ||
+            push!(expected_values, evidence_spec.upper.source)
+    end
     for spec in group_specs
         push!(expected_values, spec.prior.operation)
         spec.correlation_prior === nothing ||
@@ -6218,7 +6324,8 @@ function _lower_brmi(brmi::BRM.BRMI)
         join(sort!(collect(extras)), ", ")))
 
     input_names = (
-        input_predictor_names..., group_names..., weight_input_names...)
+        input_predictor_names..., group_names..., weight_input_names...,
+        evidence_input_names...)
     input_declarations = _declaration_namedtuple(
         input_names, map(_ -> input(), input_names))
     scalar_location && family !== BRM.Normal && throw(CapabilityError(
@@ -6367,9 +6474,27 @@ function _lower_brmi(brmi::BRM.BRMI)
         poisson(response, rate_name)
     end
     if weight_spec !== nothing
+        evidence_spec === nothing || throw(CapabilityError(
+            :response_evidence,
+            "weighted response evidence is not yet lowered from BRM"))
         observation_declaration = weighted_observation(
             observation_declaration,
             observation_weight(weight_spec.kind, weight_spec.source))
+    end
+    if evidence_spec !== nothing
+        evidence = if evidence_spec.kind === :truncated
+            truncated_evidence(;
+                lower=evidence_spec.lower.value,
+                upper=evidence_spec.upper.value)
+        elseif evidence_spec.kind === :censored
+            censored_evidence(;
+                lower=evidence_spec.lower.value,
+                upper=evidence_spec.upper.value)
+        else
+            interval_evidence(evidence_spec.upper.value)
+        end
+        observation_declaration = evidence_observation(
+            observation_declaration, evidence)
     end
     observation_declarations = NamedTuple{(response,)}(
         (broadcasted(observation_declaration),))
@@ -6397,7 +6522,8 @@ function _lower_brmi(brmi::BRM.BRMI)
                         response))
     end
     bindings = _declaration_namedtuple(
-        input_names, (predictors..., groups..., weight_inputs...))
+        input_names,
+        (predictors..., groups..., weight_inputs..., evidence_inputs...))
     conditions = NamedTuple{(response,)}((response_values,))
     (; declaration, bindings, conditions)
 end
@@ -7125,12 +7251,114 @@ function _syntax_observation_weight(rhs)
     (; distribution, kind, source=only(weight_arguments))
 end
 
+function _syntax_call_parts(expression, context::AbstractString)
+    expression isa Expr || throw(ArgumentError(
+        "native PPL @model $context must be a call; got `$expression`"))
+    arguments = if expression.head === :call
+        expression.args[2:end]
+    elseif expression.head === :. && length(expression.args) == 2 &&
+           expression.args[2] isa Expr && expression.args[2].head === :tuple
+        expression.args[2].args
+    else
+        throw(ArgumentError(
+            "native PPL @model $context must be a call; got `$expression`"))
+    end
+    name = _syntax_name(first(expression.args))
+    name === nothing && throw(ArgumentError(
+        "native PPL @model cannot identify the function in `$expression`"))
+    positional = Any[]
+    keywords = Dict{Symbol,Any}()
+    for argument in arguments
+        if argument isa Expr && argument.head === :parameters
+            for keyword in argument.args
+                keyword isa Expr && keyword.head === :kw &&
+                    length(keyword.args) == 2 &&
+                    first(keyword.args) isa Symbol || throw(ArgumentError(
+                        "native PPL @model $context has malformed keywords"))
+                key, value = keyword.args
+                haskey(keywords, key) && throw(ArgumentError(
+                    "native PPL @model $context specifies `$key` twice"))
+                keywords[key] = value
+            end
+        else
+            push!(positional, argument)
+        end
+    end
+    (; name, positional, keywords)
+end
+
+function _syntax_evidence_bound(bound, context::AbstractString)
+    bound === :nothing && return (; value=nothing, dependency=nothing)
+    bound isa Real && isfinite(bound) || bound isa Symbol || throw(
+        ArgumentError(
+            "native PPL @model $context must be a finite literal, named " *
+            "value, or `nothing`"))
+    bound isa Real && !isfinite(bound) && throw(ArgumentError(
+        "native PPL @model $context must be finite"))
+    bound isa Symbol ? (; value=QuoteNode(bound), dependency=bound) :
+        (; value=bound, dependency=nothing)
+end
+
+function _syntax_observation_evidence(rhs)
+    parts = _syntax_call_parts(rhs, "observation family")
+    kind = parts.name === :truncated ? :truncated :
+        parts.name === :censored ? :censored :
+        parts.name === :interval_censored ? :interval_censored : nothing
+    kind === nothing && return nothing
+    isempty(parts.positional) && throw(ArgumentError(
+        "native PPL @model $(parts.name) needs a base distribution"))
+    distribution = first(parts.positional)
+    positional = parts.positional[2:end]
+    allowed = kind === :interval_censored ? (:upper,) : (:lower, :upper)
+    unknown = Tuple(key for key in keys(parts.keywords) if key ∉ allowed)
+    isempty(unknown) || throw(ArgumentError(
+        "native PPL @model $(parts.name) has unsupported keywords $unknown"))
+    lower = nothing
+    upper = nothing
+    if kind === :interval_censored
+        isempty(positional) || throw(ArgumentError(
+            "native PPL @model interval_censored accepts `upper` only as a keyword"))
+        haskey(parts.keywords, :upper) || throw(ArgumentError(
+            "native PPL @model interval_censored requires `upper=`"))
+        upper = parts.keywords[:upper]
+    else
+        length(positional) <= 2 || throw(ArgumentError(
+            "native PPL @model $(parts.name) accepts at most lower and upper bounds"))
+        !isempty(positional) && (lower = positional[1])
+        length(positional) == 2 && (upper = positional[2])
+        if haskey(parts.keywords, :lower)
+            isempty(positional) || throw(ArgumentError(
+                "native PPL @model $(parts.name) specifies `lower` twice"))
+            lower = parts.keywords[:lower]
+        end
+        if haskey(parts.keywords, :upper)
+            length(positional) < 2 || throw(ArgumentError(
+                "native PPL @model $(parts.name) specifies `upper` twice"))
+            upper = parts.keywords[:upper]
+        end
+        lower === nothing && upper === nothing && throw(ArgumentError(
+            "native PPL @model $(parts.name) needs at least one bound"))
+    end
+    lower = _syntax_evidence_bound(lower === nothing ? :nothing : lower,
+                                   "$(parts.name) lower bound")
+    upper = _syntax_evidence_bound(upper === nothing ? :nothing : upper,
+                                   "$(parts.name) upper bound")
+    if lower.value isa Real && upper.value isa Real &&
+       lower.value >= upper.value
+        throw(ArgumentError(
+            "native PPL @model $(parts.name) lower bound must be below its upper bound"))
+    end
+    (; kind, distribution, lower, upper)
+end
+
 function _syntax_observation(lhs, rhs; broadcasted::Bool)
     lhs isa Symbol || throw(ArgumentError(
         "native PPL @model stochastic-site left-hand side must be a bare " *
         "name; got `$lhs`"))
     weight = _syntax_observation_weight(rhs)
     weight === nothing || (rhs = weight.distribution)
+    evidence = _syntax_observation_evidence(rhs)
+    evidence === nothing || (rhs = evidence.distribution)
     family, arguments = _syntax_distribution_call(rhs, "observation family")
     extra_node_name = nothing
     extra_node_value = nothing
@@ -7165,6 +7393,26 @@ function _syntax_observation(lhs, rhs; broadcasted::Bool)
         "native PPL @model $family observation needs $expected parameter(s)"))
     scalar_value = Expr(:call, _syntax_ref(builder), QuoteNode(lhs),
                         (QuoteNode(argument) for argument in arguments)...)
+    if evidence !== nothing
+        evidence_value = if evidence.kind === :truncated
+            Expr(
+                :call, _syntax_ref(:truncated_evidence),
+                Expr(:parameters,
+                     Expr(:kw, :lower, evidence.lower.value),
+                     Expr(:kw, :upper, evidence.upper.value)))
+        elseif evidence.kind === :censored
+            Expr(
+                :call, _syntax_ref(:censored_evidence),
+                Expr(:parameters,
+                     Expr(:kw, :lower, evidence.lower.value),
+                     Expr(:kw, :upper, evidence.upper.value)))
+        else
+            Expr(:call, _syntax_ref(:interval_evidence), evidence.upper.value)
+        end
+        scalar_value = Expr(
+            :call, _syntax_ref(:evidence_observation), scalar_value,
+            evidence_value)
+    end
     if weight !== nothing
         weight_value = Expr(
             :call, _syntax_ref(:observation_weight), QuoteNode(weight.kind),
@@ -7175,9 +7423,13 @@ function _syntax_observation(lhs, rhs; broadcasted::Bool)
     end
     value = broadcasted ?
         Expr(:call, _syntax_ref(:broadcasted), scalar_value) : scalar_value
+    evidence_dependencies = evidence === nothing ? () : Tuple(
+        dependency for dependency in
+        (evidence.lower.dependency, evidence.upper.dependency)
+        if dependency !== nothing)
     (; name=lhs, value, extra_node_name, extra_node_value,
-       dependencies=weight === nothing ? Tuple(arguments) :
-           (Tuple(arguments)..., weight.source))
+       dependencies=(Tuple(arguments)..., evidence_dependencies...,
+                     (weight === nothing ? () : (weight.source,))...))
 end
 
 function _syntax_outputs(statement)
@@ -7222,7 +7474,8 @@ end
 
 const _SYNTAX_DISTRIBUTION_NAMES =
     (:Normal, :StandardNormal, :Exponential, :LKJCholesky,
-     :MvNormalCholesky, :BernoulliLogit, :Poisson, :weighted)
+     :MvNormalCholesky, :BernoulliLogit, :Poisson, :weighted,
+     :truncated, :censored, :interval_censored)
 const _SYNTAX_DETERMINISTIC_NAMES =
     (:center, :zscale, :standardize, :affine, :exp, :exp_link, :dot)
 const _SYNTAX_OPERATOR_NAMES =
@@ -7616,7 +7869,9 @@ deterministic zero-observation model. The current vector executor requires the
 explicit broadcast form (`@.` or dotted `~`). Composition-only outer models
 use `site ~ stochastic_child(...)` for stochastic child outputs and
 `value = deterministic_child(...)` for deterministic child outputs; the macro
-generates the explicit namespaced graph machinery.
+generates the explicit namespaced graph machinery. Broadcast observations may
+retain `truncated`, `censored`, or `interval_censored` evidence semantics;
+these are typed factor decorators rather than backend-specific syntax.
 """
 macro model(definition)
     esc(_model_function_syntax(definition))

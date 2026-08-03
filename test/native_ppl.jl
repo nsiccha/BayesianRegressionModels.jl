@@ -509,6 +509,28 @@ NP.@model function natural_power_weighted_poisson(x, importance)
     @. y ~ weighted(Poisson(exp(log_rate)), weights(importance))
 end
 
+NP.@model function natural_censored_varying_intercept(x, group)
+    tau_g_group ~ Exponential(1)
+    b_g_group[group] ~ Normal(0.0, tau_g_group)
+    beta_mu[(:Intercept, :x)] ~ StandardNormal()
+    sigma ~ Exponential(2)
+    mu = dot(beta_mu, (1, x)) + b_g_group[group]
+    @. y ~ censored(Normal(mu, sigma); lower=-0.5, upper=1.0)
+end
+
+NP.@model function natural_interval_gaussian(x, interval_upper)
+    beta_mu[(:Intercept, :x)] ~ StandardNormal()
+    sigma ~ Exponential(2)
+    mu = dot(beta_mu, (1, x))
+    @. y ~ interval_censored(Normal(mu, sigma); upper=interval_upper)
+end
+
+NP.@model function natural_truncated_poisson(x)
+    beta_log_rate[(:Intercept, :x)] ~ StandardNormal()
+    log_rate = dot(beta_log_rate, (1, x))
+    @. y ~ truncated(Poisson(exp(log_rate)), 1, 4)
+end
+
 NP.@model function natural_varying_slope(x, group)
     tau_p_group ~ Exponential(1)
     b_p_group[group] ~ Normal(0.0, tau_p_group)
@@ -8603,20 +8625,20 @@ end
 end
 
 @testset "typed native PPL response evidence" begin
-    truncated = NP.truncated_evidence(lower=-0.75, upper=1.25)
-    @test NP.evidence_kind(truncated) === :truncated
-    @test NP.evidence_lower(truncated) == -0.75
-    @test NP.evidence_upper(truncated) == 1.25
+    truncated_spec = NP.truncated_evidence(lower=-0.75, upper=1.25)
+    @test NP.evidence_kind(truncated_spec) === :truncated
+    @test NP.evidence_lower(truncated_spec) == -0.75
+    @test NP.evidence_upper(truncated_spec) == 1.25
 
-    censored = NP.censored_evidence(lower=:lower, upper=:upper)
-    @test NP.evidence_kind(censored) === :censored
-    @test NP.evidence_lower(censored) === :lower
-    @test NP.evidence_upper(censored) === :upper
+    censored_spec = NP.censored_evidence(lower=:lower, upper=:upper)
+    @test NP.evidence_kind(censored_spec) === :censored
+    @test NP.evidence_lower(censored_spec) === :lower
+    @test NP.evidence_upper(censored_spec) === :upper
 
-    interval = NP.interval_evidence(:interval_upper)
-    @test NP.evidence_kind(interval) === :interval_censored
-    @test NP.evidence_lower(interval) === nothing
-    @test NP.evidence_upper(interval) === :interval_upper
+    interval_spec = NP.interval_evidence(:interval_upper)
+    @test NP.evidence_kind(interval_spec) === :interval_censored
+    @test NP.evidence_lower(interval_spec) === nothing
+    @test NP.evidence_upper(interval_spec) === :interval_upper
 
     @test_throws ArgumentError NP.truncated_evidence()
     @test_throws ArgumentError NP.censored_evidence()
@@ -8626,7 +8648,7 @@ end
     @test_throws ArgumentError NP.interval_evidence([1.0, 2.0])
 
     base = NP.normal(:y, :mu, :sigma)
-    observation = NP.evidence_observation(base, censored)
+    observation = NP.evidence_observation(base, censored_spec)
     @test NP.observation_response(observation) === :y
     @test NP.observation_dependencies(observation) ==
           (:mu, :sigma, :lower, :upper)
@@ -8650,15 +8672,72 @@ end
     factor = graph.sites.y.factor
     @test factor isa NP.EvidenceSiteFactor
     @test factor.factor isa NP.NormalSiteFactor
-    @test factor.evidence === censored
+    @test factor.evidence === censored_spec
     @test factor.lower isa NP.InputValue{:lower}
     @test factor.upper isa NP.InputValue{:upper}
     @test NP.base_site_factor(factor) isa NP.NormalSiteFactor
     @test NP.site_factor_dependencies(factor) == (:mu, :sigma)
     @test graph.schedule == (:beta_mu, :sigma, :mu, :y)
 
+    evidence_data = (;
+        x=[-1.0, 0.0, 1.0],
+        group=[1, 1, 2],
+        y=[-0.5, 0.2, 1.0])
+    censored_brmi = @brm evidence_data begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x + (1 | g | group)
+        sd(:, g) ~ Exponential(1)
+        y ~ censored(Normal(mu, sigma); lower=-0.5, upper=1.0)
+    end
+    natural_censored = NP.condition(
+        natural_censored_varying_intercept(
+            evidence_data.x, evidence_data.group);
+        y=evidence_data.y)
+    lowered_censored = NP.lower(censored_brmi)
+    @test typeof(lowered_censored) ===
+          typeof(natural_censored.declaration)
+    @test sprint(show, lowered_censored) ==
+          sprint(show, natural_censored.declaration)
+    @test lowered_censored.observations.y.scalar isa NP.EvidenceObservation
+    @test NP.evidence_kind(
+        lowered_censored.observations.y.scalar.evidence) === :censored
+    @test NP.compile(censored_brmi) isa NP.FactorPlan
+    @test SBBRMI(censored_brmi; mod=@__MODULE__) isa SBBRMI
+
+    interval_data = (;
+        x=[-1.0, 0.0, 1.0],
+        interval_upper=[-0.1, 0.5, 1.3],
+        y=[-0.4, 0.0, 0.5])
+    interval_brmi = @brm interval_data begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x
+        y ~ interval_censored(Normal(mu, sigma); upper=interval_upper)
+    end
+    natural_interval = NP.condition(
+        natural_interval_gaussian(
+            interval_data.x, interval_data.interval_upper);
+        y=interval_data.y)
+    lowered_interval = NP.lower(interval_brmi)
+    @test typeof(lowered_interval) ===
+          typeof(natural_interval.declaration)
+    @test sprint(show, lowered_interval) ==
+          sprint(show, natural_interval.declaration)
+    @test keys(lowered_interval.inputs) == (:x, :interval_upper)
+
+    count_data = (; x=[-1.0, 0.0, 1.0], y=[1, 2, 4])
+    truncated_poisson_brmi = @brm count_data begin
+        log_rate ~ 1 + x
+        y ~ truncated(Poisson(exp(log_rate)), 1, 4)
+    end
+    natural_count = NP.condition(
+        natural_truncated_poisson(count_data.x); y=count_data.y)
+    lowered_count = NP.lower(truncated_poisson_brmi)
+    @test typeof(lowered_count) === typeof(natural_count.declaration)
+    @test sprint(show, lowered_count) ==
+          sprint(show, natural_count.declaration)
+
     nested = NP.weighted_observation(
-        NP.evidence_observation(base, truncated),
+        NP.evidence_observation(base, truncated_spec),
         NP.observation_weight(:frequency, :replicates))
     nested_model = NP.model(
         inputs=(; x=NP.input(), replicates=NP.input()),
