@@ -285,6 +285,7 @@ NP.@model function composable_gaussian(x)
     sigma ~ Exponential(2.0)
     mu = intercept + slope * x
     @. y ~ Normal(mu, sigma)
+    return y
 end
 
 NP.@model function concise_zscale_component(raw)
@@ -343,6 +344,27 @@ NP.@model function natural_latent_normal(prior_mu, prior_tau)
     z ~ scalar_normal_site(prior_mu, prior_tau)
     y ~ scalar_normal_likelihood(z)
     return y
+end
+
+NP.@model function natural_preprocessed_normal(raw)
+    scaled = concise_zscale_component(raw)
+    y ~ composable_gaussian(scaled)
+    return y
+end
+
+NP.@model function assigned_stochastic_submodel()
+    z = scalar_normal_site(0.0, 1.0)
+    return z
+end
+
+NP.@model function sampled_deterministic_submodel(raw)
+    scaled ~ concise_zscale_component(raw)
+    return scaled
+end
+
+NP.@model function ambiguous_multioutput_submodel()
+    values ~ named_scalar_normal_priors()
+    return values
 end
 
 NP.@model function monolithic_scalar_normal()
@@ -3034,6 +3056,50 @@ end
         natural_latent_prepared, latent_position) == NP.simulate(
             MersenneTwister(913), latent_workspace,
             latent_prepared, latent_position)
+
+    natural_preprocessed = NP.condition(
+        natural_preprocessed_normal(raw_x); y=response)
+    explicit_preprocessing_component = NP.component(
+        :scaled, concise_zscale_component(raw_x))
+    explicit_preprocessing_output = NP.output(
+        explicit_preprocessing_component, :scaled)
+    explicit_preprocessed = NP.compose(
+        explicit_preprocessing_component,
+        NP.component(
+            :y,
+            NP.condition(
+                composable_gaussian(explicit_preprocessing_output);
+                y=response)))
+    natural_preprocessed_plan = NP.compile(natural_preprocessed)
+    explicit_preprocessed_plan = NP.compile(explicit_preprocessed)
+    natural_preprocessed_prepared = NP.prepare(natural_preprocessed_plan)
+    explicit_preprocessed_prepared = NP.prepare(explicit_preprocessed_plan)
+    natural_preprocessed_workspace = NP.workspace(
+        natural_preprocessed_prepared, Float64, DI.AutoEnzyme())
+    explicit_preprocessed_workspace = NP.workspace(
+        explicit_preprocessed_prepared, Float64, DI.AutoEnzyme())
+    preprocessing_position = [0.3, -0.4, log(0.8)]
+    natural_preprocessed_density, natural_preprocessed_gradient =
+        NP.logdensity_and_gradient!(
+            natural_preprocessed_workspace, natural_preprocessed_prepared,
+            preprocessing_position)
+    explicit_preprocessed_density, explicit_preprocessed_gradient =
+        NP.logdensity_and_gradient!(
+            explicit_preprocessed_workspace, explicit_preprocessed_prepared,
+            preprocessing_position)
+    @test natural_preprocessed_density ≈ explicit_preprocessed_density
+    @test natural_preprocessed_gradient ≈ explicit_preprocessed_gradient
+    @test NP.evaluate(
+        natural_preprocessed_workspace, natural_preprocessed_prepared,
+        preprocessing_position, NP.LinearPredictor()) == NP.evaluate(
+            explicit_preprocessed_workspace, explicit_preprocessed_prepared,
+            preprocessing_position, NP.LinearPredictor())
+    @test steady_state_allocations(
+        natural_preprocessed_workspace, natural_preprocessed_prepared,
+        preprocessing_position) == (; primal=0, gradient=0)
+    @test_throws ArgumentError assigned_stochastic_submodel()
+    @test_throws ArgumentError sampled_deterministic_submodel(raw_x)
+    @test_throws ArgumentError ambiguous_multioutput_submodel()
 
     latent_brm_data = (; y=response)
     latent_brm = @brm latent_brm_data begin
