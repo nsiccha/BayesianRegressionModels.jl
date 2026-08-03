@@ -967,6 +967,18 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
                     "affine node `$name` cannot consume non-scalar site " *
                     "`$(site_value_name(argument))` directly"))
             end
+        elseif node isa RowProductFactorNode
+            for argument in (node.left, node.right)
+                argument isa SiteValue || continue
+                dependency_name = site_value_name(argument)
+                dependency = getproperty(graph.sites, dependency_name)
+                dependency.shape isa BlockSiteShape || continue
+                throw(CapabilityError(
+                    :factor_shape,
+                    "row-product node `$name` cannot consume block site " *
+                    "`$dependency_name` directly; lower it through a typed " *
+                    "materializing node such as group_gather"))
+            end
         end
         if node isa GroupGatherFactorNode
             values_name = site_value_name(node.values)

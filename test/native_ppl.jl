@@ -3718,6 +3718,23 @@ end
         row_product_workspace, row_product_prepared, grouped_position) ==
           (; primal=0, gradient=0)
 
+    direct_block_product = NP.model(
+        inputs=(; x=NP.input(), group=NP.input()),
+        parameters=row_product_declaration.parameters,
+        nodes=(;
+            routed=NP.group_gather(:varying, :group),
+            invalid=NP.row_product(:varying, :x)),
+        observations=(; y=NP.broadcasted(
+            NP.normal(:y, :invalid, :sigma))),
+        site_order=row_product_declaration.site_order)
+    direct_block_product_error = capability_error(() -> NP.compile(
+        direct_block_product, row_product_bindings;
+        conditions=(; y=sampled_offset_data.y)))
+    @test direct_block_product_error.capability == :factor_shape
+    @test occursin(
+        "cannot consume block site `varying` directly",
+        sprint(showerror, direct_block_product_error))
+
     varying_brm_data = (;
         x=sampled_offset_data.x,
         group=grouped_bindings.group,
