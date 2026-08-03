@@ -1181,11 +1181,25 @@ function _uses_factor_executor(declaration::Model, conditions, bindings=(;))
             base_site_factor(site.factor).scale isa NodeValue
     end
     weighted_observation = any(values(graph.sites)) do site
-        site.factor isa WeightedSiteFactor
+        _weighted_site_factor(site.factor) !== nothing
+    end
+    evidence_observation = any(values(graph.sites)) do site
+        _evidence_site_factor(site.factor) !== nothing
     end
     dependent_site || sampled_offset_affine || grouped_gather ||
-        grouped_affine_node || row_scale || weighted_observation
+        grouped_affine_node || row_scale || weighted_observation ||
+        evidence_observation
 end
+
+_weighted_site_factor(::AbstractSiteFactor) = nothing
+_weighted_site_factor(factor::WeightedSiteFactor) = factor
+_weighted_site_factor(factor::EvidenceSiteFactor) =
+    _weighted_site_factor(factor.factor)
+
+_evidence_site_factor(::AbstractSiteFactor) = nothing
+_evidence_site_factor(factor::EvidenceSiteFactor) = factor
+_evidence_site_factor(factor::WeightedSiteFactor) =
+    _evidence_site_factor(factor.factor)
 
 function _factor_validate_weight(factor::WeightedSiteFactor,
                                  bindings::NamedTuple,
@@ -1204,12 +1218,16 @@ function _factor_validate_weight(factor::WeightedSiteFactor,
     all(isfinite, raw) || throw(ArgumentError(
         "native PPL weight input `$source` for response `$response` must be finite"))
     kind = observation_weight_kind(factor.weight)
-    base = factor.factor
+    base = base_site_factor(factor)
     if kind === :analytic
         base isa NormalSiteFactor || throw(CapabilityError(
             :observation_weights,
             "analytic weights currently require a Normal response; got " *
             "$(typeof(base)) for `$response`"))
+        _evidence_site_factor(factor) === nothing || throw(CapabilityError(
+            :observation_weights,
+            "analytic weights combined with response evidence are not yet " *
+            "supported for `$response`"))
         all(>(0), raw) || throw(ArgumentError(
             "native PPL analytic weights for `$response` must be strictly positive"))
     elseif kind === :frequency
@@ -1227,6 +1245,51 @@ function _factor_validate_weight(factor::WeightedSiteFactor,
         all(isone, raw) || throw(ArgumentError(
             "native PPL unit weights for `$response` must all equal one"))
     end
+    nothing
+end
+
+function _factor_validate_evidence_bound(bound, bindings::NamedTuple,
+                                         response::Symbol,
+                                         label::AbstractString,
+                                         discrete::Bool)
+    raw = if bound isa LiteralValue
+        bound.value
+    elseif bound isa InputValue
+        getproperty(bindings, input_value_name(bound))
+    else
+        return nothing
+    end
+    raw === nothing && return nothing
+    values = raw isa AbstractVector ? raw : (raw,)
+    all(value -> value isa Real && isfinite(value), values) ||
+        throw(ArgumentError(
+            "native PPL $label for response `$response` must contain " *
+            "finite real values"))
+    discrete && all(value -> isinteger(value), values) || !discrete ||
+        throw(ArgumentError(
+            "native PPL $label for discrete response `$response` must be " *
+            "integer-valued"))
+    nothing
+end
+
+function _factor_validate_evidence(factor::EvidenceSiteFactor,
+                                   bindings::NamedTuple,
+                                   response::Symbol)
+    base = base_site_factor(factor)
+    base isa Union{NormalSiteFactor,PoissonSiteFactor} || throw(
+        CapabilityError(
+            :response_evidence,
+            "response evidence currently supports Normal and Poisson " *
+            "factors; got $(typeof(base)) for `$response`"))
+    _weighted_site_factor(factor) === nothing || throw(CapabilityError(
+        :response_evidence,
+        "response evidence cannot wrap a weighted factor for `$response`; " *
+        "apply weighting outside the evidence wrapper"))
+    discrete = base isa PoissonSiteFactor
+    _factor_validate_evidence_bound(
+        factor.lower, bindings, response, "evidence lower bound", discrete)
+    _factor_validate_evidence_bound(
+        factor.upper, bindings, response, "evidence upper bound", discrete)
     nothing
 end
 
@@ -1322,7 +1385,7 @@ function _validate_factor_plan_site(
     site.factor isa Union{
         StandardNormalSiteFactor,NormalSiteFactor,ExponentialSiteFactor,
         LKJCholeskySiteFactor,BernoulliLogitSiteFactor,PoissonSiteFactor,
-        WeightedSiteFactor,
+        WeightedSiteFactor,EvidenceSiteFactor,
     } || throw(CapabilityError(
         :factor_family,
         "multi-latent factor site `$name` has unsupported factor " *
@@ -1736,8 +1799,12 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
         Base.OneTo(0)
     end
     output_factor = getproperty(graph.sites, output_site).factor
-    output_factor isa WeightedSiteFactor && _factor_validate_weight(
-        output_factor, bindings, output_site, length(observation_keys))
+    weight_factor = _weighted_site_factor(output_factor)
+    weight_factor === nothing || _factor_validate_weight(
+        weight_factor, bindings, output_site, length(observation_keys))
+    evidence_factor = _evidence_site_factor(output_factor)
+    evidence_factor === nothing || _factor_validate_evidence(
+        evidence_factor, bindings, output_site)
     site_names = Tuple(keys(graph.sites))
     site_indices = NamedTuple{site_names}(
         ntuple(identity, length(site_names)))
@@ -1944,6 +2011,9 @@ end
 _factor_validate_observation(factor::WeightedSiteFactor, value,
                              name::Symbol) =
     _factor_validate_observation(factor.factor, value, name)
+_factor_validate_observation(factor::EvidenceSiteFactor, value,
+                             name::Symbol) =
+    _factor_validate_observation(factor.factor, value, name)
 
 function _factor_validate_observation(::BernoulliLogitSiteFactor, value,
                                       name::Symbol)
@@ -1977,6 +2047,11 @@ _factor_validate_observation_conversion(factor::WeightedSiteFactor,
                                         name::Symbol) =
     _factor_validate_observation_conversion(
         factor.factor, original, converted, name)
+_factor_validate_observation_conversion(factor::EvidenceSiteFactor,
+                                        original, converted,
+                                        name::Symbol) =
+    _factor_validate_observation_conversion(
+        factor.factor, original, converted, name)
 
 function _factor_validate_observation_conversion(::PoissonSiteFactor,
                                                  original, converted,
@@ -1986,6 +2061,47 @@ function _factor_validate_observation_conversion(::PoissonSiteFactor,
             "native PPL Poisson response `$name` count $(original[index]) " *
             "at row $index cannot be represented exactly as " *
             "$(eltype(converted))"))
+    end
+    nothing
+end
+
+_factor_prepared_bound_at(::LiteralValue{Nothing}, index, plan,
+                          ::Type{T}) where {T} = nothing
+_factor_prepared_bound_at(bound::LiteralValue, index, plan,
+                          ::Type{T}) where {T} = T(bound.value)
+function _factor_prepared_bound_at(::InputValue{Name}, index, plan,
+                                   ::Type{T}) where {Name,T}
+    raw = getproperty(plan.bindings, Name)
+    T(raw isa AbstractVector ? raw[index] : raw)
+end
+_factor_prepared_bound_at(::Union{NodeValue,SiteValue}, index, plan,
+                          ::Type{T}) where {T} = nothing
+
+function _factor_validate_evidence_response(factor::EvidenceSiteFactor,
+                                            response::AbstractVector,
+                                            plan, name::Symbol,
+                                            ::Type{T}) where {T}
+    kind = evidence_kind(factor.evidence)
+    for index in eachindex(response)
+        lower = _factor_prepared_bound_at(factor.lower, index, plan, T)
+        upper = _factor_prepared_bound_at(factor.upper, index, plan, T)
+        lower !== nothing && upper !== nothing && lower >= upper && throw(
+            ArgumentError(
+                "native PPL response evidence for `$name` has lower bound " *
+                "$lower not below upper bound $upper at row $index"))
+        value = response[index]
+        if kind === :interval_censored
+            upper === nothing || value < upper || throw(ArgumentError(
+                "native PPL interval evidence for `$name` requires an open " *
+                "lower endpoint below its upper endpoint at row $index"))
+        else
+            lower === nothing || value >= lower || throw(ArgumentError(
+                "native PPL $kind response `$name` lies below its lower " *
+                "bound at row $index"))
+            upper === nothing || value <= upper || throw(ArgumentError(
+                "native PPL $kind response `$name` lies above its upper " *
+                "bound at row $index"))
+        end
     end
     nothing
 end
@@ -2016,11 +2132,12 @@ function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
     bindings = NamedTuple{binding_names}(binding_values)
     output_factor = getproperty(
         plan.graph.sites, factor_output_site(plan)).factor
-    if output_factor isa WeightedSiteFactor
-        source = input_value_name(output_factor.values)
+    weight_factor = _weighted_site_factor(output_factor)
+    if weight_factor !== nothing
+        source = input_value_name(weight_factor.values)
         original = getproperty(plan.bindings, source)
         converted = getproperty(bindings, source)
-        kind = observation_weight_kind(output_factor.weight)
+        kind = observation_weight_kind(weight_factor.weight)
         if kind === :frequency
             all(index -> converted[index] == original[index],
                 eachindex(original)) || throw(ArgumentError(
@@ -2054,6 +2171,11 @@ function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
         site.shape isa BroadcastSiteShape &&
             _factor_validate_observation_conversion(
                 site.factor, original, value, name)
+        evidence_factor = _evidence_site_factor(site.factor)
+        site.shape isa BroadcastSiteShape &&
+            evidence_factor !== nothing &&
+            _factor_validate_evidence_response(
+                evidence_factor, value, plan, name, T)
         if site.shape isa BlockSiteShape
             value isa AbstractVector || throw(ArgumentError(
                 "native PPL block condition `$name` must be a vector"))
@@ -2193,6 +2315,175 @@ end
                                        index, plan, buffers) where {T}
     log_rate = _factor_poisson_log_rate(factor, index, plan, buffers, T)
     BRM._native_ppl_poisson_logdensity(value, log_rate)
+end
+
+@inline _factor_evidence_bound_at(::LiteralValue{Nothing}, index, plan,
+                                  buffers, ::Type{T}) where {T} = nothing
+@inline _factor_evidence_bound_at(value, index, plan, buffers,
+                                  ::Type{T}) where {T} =
+    _factor_argument_at(value, index, plan, buffers, T)
+
+@inline function _factor_logaddexp(left::T, right::T) where {T}
+    left == -T(Inf) && return right
+    right == -T(Inf) && return left
+    largest = max(left, right)
+    largest + log1p(exp(min(left, right) - largest))
+end
+
+@inline function _factor_logdiffexp(upper::T, lower::T) where {T}
+    lower < upper || return -T(Inf)
+    upper + BRM.log1mexp(lower - upper)
+end
+
+@inline function _factor_standard_normal_logcdf(value::T) where {T}
+    if value < -T(10)
+        inverse_square = inv(value * value)
+        series = one(T) - inverse_square + T(3) * inverse_square^2 -
+            T(15) * inverse_square^3 + T(105) * inverse_square^4
+        return -T(0.5) * value * value -
+            T(BRM._NATIVE_PPL_HALF_LOG2PI) - log(-value) + log(series)
+    end
+    log(BRM.erfc(-value / sqrt(T(2)))) - log(T(2))
+end
+
+@inline _factor_standard_normal_logccdf(value::T) where {T} =
+    _factor_standard_normal_logcdf(-value)
+
+@inline function _factor_logcdf_at(
+        factor::NormalSiteFactor, value::T, index, plan, buffers) where {T}
+    location = _factor_argument_at(
+        factor.location, index, plan, buffers, T)
+    scale = _factor_argument_at(factor.scale, index, plan, buffers, T)
+    scale > zero(T) || return -T(Inf)
+    _factor_standard_normal_logcdf((value - location) / scale)
+end
+
+@inline function _factor_logccdf_at(
+        factor::NormalSiteFactor, value::T, index, plan, buffers) where {T}
+    location = _factor_argument_at(
+        factor.location, index, plan, buffers, T)
+    scale = _factor_argument_at(factor.scale, index, plan, buffers, T)
+    scale > zero(T) || return -T(Inf)
+    _factor_standard_normal_logccdf((value - location) / scale)
+end
+
+@inline function _factor_poisson_logcdf(value::T, log_rate::T) where {T}
+    count = floor(Int, value)
+    count < 0 && return -T(Inf)
+    term = -exp(log_rate)
+    total = term
+    for outcome in 1:count
+        term += log_rate - log(T(outcome))
+        total = _factor_logaddexp(total, term)
+    end
+    min(total, zero(T))
+end
+
+@inline function _factor_poisson_logccdf_direct(
+        count::Int, log_rate::T) where {T}
+    outcome = count + 1
+    term = -exp(log_rate) + T(outcome) * log_rate -
+        T(BRM.loggamma(outcome + 1))
+    total = term
+    rate = exp(log_rate)
+    for _ in 1:100_000
+        outcome += 1
+        term += log_rate - log(T(outcome))
+        updated = _factor_logaddexp(total, term)
+        if outcome > rate && term - updated < log(eps(T)) - T(2)
+            return min(updated, zero(T))
+        end
+        total = updated
+    end
+    total
+end
+
+@inline function _factor_poisson_logccdf(value::T, log_rate::T) where {T}
+    count = floor(Int, value)
+    count < 0 && return zero(T)
+    lower = _factor_poisson_logcdf(T(count), log_rate)
+    lower < zero(T) && return BRM.log1mexp(lower)
+    _factor_poisson_logccdf_direct(count, log_rate)
+end
+
+@inline function _factor_logcdf_at(
+        factor::PoissonSiteFactor, value::T, index, plan, buffers) where {T}
+    _factor_poisson_logcdf(
+        value, _factor_poisson_log_rate(factor, index, plan, buffers, T))
+end
+
+@inline function _factor_logccdf_at(
+        factor::PoissonSiteFactor, value::T, index, plan, buffers) where {T}
+    _factor_poisson_logccdf(
+        value, _factor_poisson_log_rate(factor, index, plan, buffers, T))
+end
+
+@inline function _factor_truncation_logmass(
+        base::NormalSiteFactor, lower, upper, index, plan, buffers,
+        ::Type{T}) where {T}
+    lower === nothing && upper === nothing && return zero(T)
+    lower === nothing && return _factor_logcdf_at(
+        base, upper, index, plan, buffers)
+    upper === nothing && return _factor_logccdf_at(
+        base, lower, index, plan, buffers)
+    _factor_logdiffexp(
+        _factor_logcdf_at(base, upper, index, plan, buffers),
+        _factor_logcdf_at(base, lower, index, plan, buffers))
+end
+
+@inline function _factor_truncation_logmass(
+        base::PoissonSiteFactor, lower, upper, index, plan, buffers,
+        ::Type{T}) where {T}
+    lower === nothing && upper === nothing && return zero(T)
+    lower_cdf = lower === nothing ? -T(Inf) :
+        _factor_logcdf_at(base, lower - one(T), index, plan, buffers)
+    upper === nothing && return BRM.log1mexp(lower_cdf)
+    _factor_logdiffexp(
+        _factor_logcdf_at(base, upper, index, plan, buffers), lower_cdf)
+end
+
+@inline function _factor_interval_logmass(
+        base, lower::T, upper::T, index, plan, buffers) where {T}
+    _factor_logdiffexp(
+        _factor_logcdf_at(base, upper, index, plan, buffers),
+        _factor_logcdf_at(base, lower, index, plan, buffers))
+end
+
+@inline function _factor_logdensity_at(
+        factor::EvidenceSiteFactor, value::T,
+        index, plan, buffers) where {T}
+    base = base_site_factor(factor)
+    lower = _factor_evidence_bound_at(
+        factor.lower, index, plan, buffers, T)
+    upper = _factor_evidence_bound_at(
+        factor.upper, index, plan, buffers, T)
+    lower !== nothing && upper !== nothing && lower >= upper &&
+        return -T(Inf)
+    kind = evidence_kind(factor.evidence)
+    if kind === :interval_censored
+        upper === nothing && return -T(Inf)
+        value < upper || return -T(Inf)
+        return _factor_interval_logmass(
+            base, value, upper, index, plan, buffers)
+    elseif kind === :censored
+        lower !== nothing && value == lower && return _factor_logcdf_at(
+            base, lower, index, plan, buffers)
+        if upper !== nothing && value == upper
+            threshold = base isa PoissonSiteFactor ? upper - one(T) : upper
+            return _factor_logccdf_at(
+                base, threshold, index, plan, buffers)
+        end
+        lower !== nothing && value < lower && return -T(Inf)
+        upper !== nothing && value > upper && return -T(Inf)
+        return _factor_logdensity_at(
+            factor.factor, value, index, plan, buffers)
+    end
+    lower !== nothing && value < lower && return -T(Inf)
+    upper !== nothing && value > upper && return -T(Inf)
+    logmass = _factor_truncation_logmass(
+        base, lower, upper, index, plan, buffers, T)
+    isfinite(logmass) || return -T(Inf)
+    _factor_logdensity_at(factor.factor, value, index, plan, buffers) - logmass
 end
 
 @inline function _factor_logdensity_at(
@@ -2984,24 +3275,25 @@ end
         eltype(buffers.values))
 end
 
-@inline function _factor_terminal_sample(rng::BRM.AbstractRNG,
-                                         prepared::FactorPrepared,
-                                         buffers::FactorBuffers,
-                                         index::Int)
+@inline function _factor_terminal_base_sample(rng::BRM.AbstractRNG,
+                                              prepared::FactorPrepared,
+                                              buffers::FactorBuffers,
+                                              index::Int)
     site = getproperty(
         prepared.plan.graph.sites, factor_output_site(prepared.plan))
-    weighted_factor = site.factor
-    factor = base_site_factor(weighted_factor)
+    site_factor = site.factor
+    factor = base_site_factor(site_factor)
     T = eltype(buffers.values)
     if factor isa NormalSiteFactor
         location = _factor_argument_at(
             factor.location, index, prepared.plan, buffers, T)
         scale = _factor_argument_at(
             factor.scale, index, prepared.plan, buffers, T)
-        if weighted_factor isa WeightedSiteFactor &&
-           observation_weight_kind(weighted_factor.weight) === :analytic
+        weight_factor = _weighted_site_factor(site_factor)
+        if weight_factor !== nothing &&
+           observation_weight_kind(weight_factor.weight) === :analytic
             weight = _factor_argument_at(
-                weighted_factor.values, index, prepared.plan, buffers, T)
+                weight_factor.values, index, prepared.plan, buffers, T)
             scale /= sqrt(weight)
         end
         location + scale * BRM.randn(rng, T)
@@ -3014,6 +3306,43 @@ end
             factor, index, prepared.plan, buffers, T)
         BRM._native_ppl_rand_poisson(rng, T, log_rate)
     end
+end
+
+@inline function _factor_terminal_sample(rng::BRM.AbstractRNG,
+                                         prepared::FactorPrepared,
+                                         buffers::FactorBuffers,
+                                         index::Int)
+    site = getproperty(
+        prepared.plan.graph.sites, factor_output_site(prepared.plan))
+    evidence_factor = _evidence_site_factor(site.factor)
+    evidence_factor === nothing && return _factor_terminal_base_sample(
+        rng, prepared, buffers, index)
+    T = eltype(buffers.values)
+    lower = _factor_evidence_bound_at(
+        evidence_factor.lower, index, prepared.plan, buffers, T)
+    upper = _factor_evidence_bound_at(
+        evidence_factor.upper, index, prepared.plan, buffers, T)
+    kind = evidence_kind(evidence_factor.evidence)
+    sample = _factor_terminal_base_sample(rng, prepared, buffers, index)
+    kind === :interval_censored && return sample
+    if kind === :censored
+        lower !== nothing && sample < lower &&
+            (sample = convert(typeof(sample), lower))
+        upper !== nothing && sample > upper &&
+            (sample = convert(typeof(sample), upper))
+        return sample
+    end
+    attempts = 1
+    while (lower !== nothing && sample < lower) ||
+          (upper !== nothing && sample > upper)
+        attempts == 1_000_000 && throw(CapabilityError(
+            :predictive_support,
+            "native PPL truncated predictive sampler did not reach its " *
+            "support after $attempts proposals"))
+        sample = _factor_terminal_base_sample(rng, prepared, buffers, index)
+        attempts += 1
+    end
+    sample
 end
 
 function evaluate!(output::AbstractVector, work::FactorWorkspace,

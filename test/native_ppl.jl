@@ -8675,6 +8675,147 @@ end
     @test NP.base_site_factor(nested_factor) isa NP.NormalSiteFactor
     @test NP.observation_dependencies(nested) ==
           (:mu, :sigma, :replicates)
+
+    x = [-1.0, 0.0, 1.0]
+    position = [0.1, 0.4, log(0.8)]
+    location = position[1] .+ position[2] .* x
+    scale = exp(position[3])
+    function normal_evidence_prepared(evidence, response; extra=(;))
+        observation = NP.evidence_observation(
+            NP.normal(:y, :mu, :sigma), evidence)
+        model = NP.model(
+            inputs=merge((; x=NP.input()),
+                         map(_ -> NP.input(), extra)),
+            parameters=declaration.parameters,
+            nodes=declaration.nodes,
+            observations=(; y=NP.broadcasted(observation)))
+        NP.prepare(NP.bind(
+            model, merge((; x), extra); conditions=(; y=response)))
+    end
+
+    truncated_response = [-0.6, 0.2, 1.1]
+    truncated_prepared = normal_evidence_prepared(
+        NP.truncated_evidence(lower=-0.75, upper=1.25),
+        truncated_response)
+    truncated_work = NP.workspace(truncated_prepared)
+    truncated_expected = map(location, truncated_response) do mu, value
+        logpdf(BRM.truncated(
+            Normal(mu, scale); lower=-0.75, upper=1.25), value)
+    end
+    @test NP.evaluate(
+        truncated_work, truncated_prepared, position,
+        NP.PointwiseLogLikelihood()) ≈ truncated_expected atol=2e-12
+    truncated_draws = NP.simulate(
+        MersenneTwister(711), truncated_work, truncated_prepared, position)
+    @test all(-0.75 .<= truncated_draws .<= 1.25)
+    @test truncated_draws == NP.simulate(
+        MersenneTwister(711), truncated_work, truncated_prepared, position)
+
+    censored_response = [-0.5, 0.2, 1.0]
+    censored_prepared = normal_evidence_prepared(
+        NP.censored_evidence(lower=-0.5, upper=1.0), censored_response)
+    censored_work = NP.workspace(censored_prepared)
+    censored_expected = map(location, censored_response) do mu, value
+        logpdf(BRM.censored(
+            Normal(mu, scale); lower=-0.5, upper=1.0), value)
+    end
+    @test NP.evaluate(
+        censored_work, censored_prepared, position,
+        NP.PointwiseLogLikelihood()) ≈ censored_expected atol=2e-12
+    censored_draws = NP.simulate(
+        MersenneTwister(712), censored_work, censored_prepared, position)
+    @test all(-0.5 .<= censored_draws .<= 1.0)
+
+    interval_upper = [-0.1, 0.5, 1.3]
+    interval_response = [-0.4, 0.0, 0.5]
+    interval_prepared = normal_evidence_prepared(
+        NP.interval_evidence(:interval_upper), interval_response;
+        extra=(; interval_upper))
+    interval_work = NP.workspace(interval_prepared)
+    interval_expected = map(
+        location, interval_response, interval_upper) do mu, lower, upper
+        normal = Normal(mu, scale)
+        log(BRM.cdf(normal, upper) - BRM.cdf(normal, lower))
+    end
+    @test NP.evaluate(
+        interval_work, interval_prepared, position,
+        NP.PointwiseLogLikelihood()) ≈ interval_expected atol=2e-12
+    interval_rng = MersenneTwister(713)
+    interval_expected_rng = MersenneTwister(713)
+    @test NP.simulate(
+        interval_rng, interval_work, interval_prepared, position) ==
+        location .+ scale .* [randn(interval_expected_rng)
+                              for _ in location]
+
+    nested_prepared = NP.prepare(NP.bind(
+        nested_model, (; x=x[1:2], replicates=[2, 3]);
+        conditions=(; y=truncated_response[1:2])))
+    nested_work = NP.workspace(nested_prepared)
+    @test NP.evaluate(
+        nested_work, nested_prepared, position,
+        NP.PointwiseLogLikelihood()) ≈
+          [2, 3] .* truncated_expected[1:2]
+
+    function poisson_evidence_prepared(evidence, response; extra=(;))
+        observation = NP.evidence_observation(
+            NP.poisson(:y, :rate), evidence)
+        model = NP.model(
+            inputs=merge((; x=NP.input()),
+                         map(_ -> NP.input(), extra)),
+            parameters=(;
+                beta=NP.parameter(
+                    NP.RealSupport(), (:Intercept, :x);
+                    transform=NP.Identity(), prior=NP.StandardNormal())),
+            nodes=(;
+                log_rate=NP.affine(:x, :beta),
+                rate=NP.exp_link(:log_rate)),
+            observations=(; y=NP.broadcasted(observation)))
+        NP.prepare(NP.bind(
+            model, merge((; x), extra); conditions=(; y=response)))
+    end
+    poisson_position = [log(2.0), 0.2]
+    rates = exp.(poisson_position[1] .+ poisson_position[2] .* x)
+
+    count_truncated = [1, 2, 4]
+    poisson_truncated = poisson_evidence_prepared(
+        NP.truncated_evidence(lower=1, upper=4), count_truncated)
+    poisson_truncated_work = NP.workspace(poisson_truncated)
+    @test NP.evaluate(
+        poisson_truncated_work, poisson_truncated, poisson_position,
+        NP.PointwiseLogLikelihood()) ≈ map(
+            rates, count_truncated) do rate, value
+                logpdf(BRM.truncated(
+                    Poisson(rate); lower=1, upper=4), value)
+            end atol=2e-12
+    @test all(1 .<= NP.simulate(
+        MersenneTwister(714), poisson_truncated_work,
+        poisson_truncated, poisson_position) .<= 4)
+
+    count_censored = [0, 2, 4]
+    poisson_censored = poisson_evidence_prepared(
+        NP.censored_evidence(lower=0, upper=4), count_censored)
+    poisson_censored_work = NP.workspace(poisson_censored)
+    @test NP.evaluate(
+        poisson_censored_work, poisson_censored, poisson_position,
+        NP.PointwiseLogLikelihood()) ≈ map(
+            rates, count_censored) do rate, value
+                logpdf(BRM.censored(
+                    Poisson(rate); lower=0, upper=4), value)
+            end atol=2e-12
+
+    count_upper = [1, 3, 5]
+    count_lower = [0, 1, 3]
+    poisson_interval = poisson_evidence_prepared(
+        NP.interval_evidence(:count_upper), count_lower;
+        extra=(; count_upper))
+    poisson_interval_work = NP.workspace(poisson_interval)
+    @test NP.evaluate(
+        poisson_interval_work, poisson_interval, poisson_position,
+        NP.PointwiseLogLikelihood()) ≈ map(
+            rates, count_lower, count_upper) do rate, lower, upper
+                poisson = Poisson(rate)
+                log(BRM.cdf(poisson, upper) - BRM.cdf(poisson, lower))
+            end atol=2e-12
 end
 
 @testset "native PPL workflow queries and replay" begin
