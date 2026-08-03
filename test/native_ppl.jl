@@ -464,6 +464,10 @@ end
     @test plan.nodes.location.axis === plan.axes.observation
     @test plan.nodes.location.intercept_index == 1
     @test plan.nodes.location.slope_indices == (2,)
+    @test_throws ArgumentError BRM.NativePPLAffineNode(
+        :invalid, (), plan.axes.observation, 1, ())
+    @test_throws ArgumentError BRM.NativePPLAffineNode(
+        :invalid, (:dose, :dose), plan.axes.observation, 1, (2, 3))
 
     @test plan.factors.coefficient_prior isa BRM.NativePPLStandardNormalFactor
     @test plan.factors.coefficient_prior.unconstrained == 1:2
@@ -549,6 +553,7 @@ end
     @test prepared isa BRM.NativePPLPrepared
     @test eltype(prepared) == Float64
     @test LogDensityProblems.dimension(prepared) == 3
+    @test hasproperty(prepared, :predictor)
     @test prepared.predictor == data.dose
     @test prepared.predictor !== data.dose
     @test prepared.response == data.response
@@ -1965,6 +1970,7 @@ end
     expected_w = data.w .- sum(data.w) / length(data.w)
     @test prepared.predictors.zscale_x_for_mu ≈ expected_x
     @test prepared.predictors.center_w_for_mu ≈ expected_w
+    @test !hasproperty(prepared, :predictor)
     @test_throws ArgumentError prepared.predictor
 
     position = [0.3, -0.4, 0.2, log(0.8)]
@@ -2001,7 +2007,6 @@ end
     macro_work = NP.workspace(macro_prepared)
     @test NP.logdensity!(macro_work, macro_prepared, position) ≈
           expected_density
-
     brmi = @brm data begin
         sigma ~ Exponential(2.0)
         mu ~ 1 + zscale(x) + center(w)
@@ -2026,6 +2031,78 @@ end
     @test brm_prepared.predictors == macro_prepared.predictors
     @test NP.logdensity!(
         NP.workspace(brm_prepared), brm_prepared, position) ≈ expected_density
+
+    @test_throws ArgumentError NP.rebind(prepared, (; x=data.x))
+    @test_throws ArgumentError NP.rebind(
+        prepared, (; x=data.x, w=data.w, extra=data.x))
+    @test_throws DimensionMismatch NP.rebind(
+        prepared, (; x=data.x, w=data.w[1:3]))
+
+    reordered_coefficients = NP.parameter(
+        NP.RealSupport(), (:intercept, :beta_w, :beta_x);
+        transform=NP.Identity(), prior=NP.StandardNormal())
+    reordered_declaration = NP.model(
+        inputs=declaration.inputs,
+        parameters=(; beta_mu=reordered_coefficients,
+                    sigma=declaration.parameters.sigma),
+        nodes=(; w_centered=NP.center(:w),
+               mu=NP.affine((:w_centered, :x), :beta_mu)),
+        observations=declaration.observations)
+    reordered = NP.prepare(NP.condition(
+        NP.substitute(reordered_declaration; x=data.x, w=data.w); y=data.y))
+    @test keys(reordered.predictors) == (:w_centered, :x)
+    reordered_position = [0.3, 0.2, -0.4, log(0.8)]
+    @test NP.evaluate(
+        NP.workspace(reordered), reordered, reordered_position,
+        NP.LinearPredictor()) ≈
+          0.3 .+ 0.2 .* expected_w .- 0.4 .* data.x
+
+    short_coefficients = NP.parameter(
+        NP.RealSupport(), (:intercept, :beta_x);
+        transform=NP.Identity(), prior=NP.StandardNormal())
+    short_declaration = NP.model(
+        inputs=declaration.inputs,
+        parameters=(; beta_mu=short_coefficients,
+                    sigma=declaration.parameters.sigma),
+        nodes=declaration.nodes,
+        observations=declaration.observations)
+    @test capability_error(() -> NP.compile(NP.condition(
+        NP.substitute(short_declaration; x=data.x, w=data.w); y=data.y))).capability ==
+          :parameter_axis
+    @test capability_error(() -> NP.compile(NP.condition(
+        NP.substitute(declaration; x=data.x, w=data.w[1:3]); y=data.y))).capability ==
+          :observation_axis
+
+    location = plan.nodes.location
+    coefficient_axis = BRM.NativePPLAxis(
+        BRM.native_axis_name(plan.axes.coefficient),
+        (:intercept, :beta_x, :beta_w, :duplicate))
+    coefficients = BRM.NativePPLParameter(
+        BRM.native_parameter_name(plan.parameters.coefficients),
+        plan.parameters.coefficients.support,
+        plan.parameters.coefficients.transform,
+        coefficient_axis, 1:4)
+    scale = BRM.NativePPLParameter(
+        BRM.native_parameter_name(plan.parameters.scale),
+        plan.parameters.scale.support,
+        plan.parameters.scale.transform,
+        plan.parameters.scale.axis, 5:5)
+    duplicated_inputs = (
+        :zscale_x_for_mu, :center_w_for_mu, :center_w_for_mu)
+    duplicated_location = BRM.NativePPLAffineNode{
+        BRM.native_node_name(location),duplicated_inputs,
+        typeof(location.axis),Tuple{Int,Int,Int}}(
+            location.axis, 1, (2, 3, 4))
+    malformed_plan = BRM.NativePPLPlan(
+        merge(plan.axes, (; coefficient=coefficient_axis)),
+        plan.inputs, (; coefficients, scale),
+        merge(plan.nodes, (; location=duplicated_location)),
+        merge(plan.factors, (;
+            coefficient_prior=BRM.NativePPLStandardNormalFactor(:beta_mu, 1:4),
+            scale_prior=BRM.NativePPLExponentialFactor(:sigma, 5, 2.0))),
+        plan.queries, plan.bindings)
+    @test capability_error(() -> NP.prepare(malformed_plan)).capability ==
+          :graph_identity
 end
 
 

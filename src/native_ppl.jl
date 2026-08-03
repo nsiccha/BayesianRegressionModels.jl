@@ -91,8 +91,12 @@ end
 
 function NativePPLAffineNode(name::Symbol, inputs::Tuple, axis::A,
                              intercept_index::Int, slope_indices::R) where {A,R}
+    isempty(inputs) && throw(ArgumentError(
+        "native PPL affine node requires at least one input"))
     all(input -> input isa Symbol, inputs) || throw(ArgumentError(
         "native PPL affine inputs must be named Symbols; got $inputs"))
+    length(unique(inputs)) == length(inputs) || throw(ArgumentError(
+        "native PPL affine inputs must be unique; got $inputs"))
     length(inputs) == length(slope_indices) || throw(ArgumentError(
         "native PPL affine input and slope-coordinate counts must match"))
     NativePPLAffineNode{name,inputs,A,R}(
@@ -346,6 +350,11 @@ function Base.getproperty(prepared::NativePPLPrepared, name::Symbol)
         "native PPL prepared model has $(length(predictors)) predictors; " *
         "use `.predictors`"))
     only(values(predictors))
+end
+function Base.propertynames(prepared::NativePPLPrepared, private::Bool=false)
+    names = fieldnames(typeof(prepared))
+    length(getfield(prepared, :predictors)) == 1 ?
+        (names..., :predictor) : names
 end
 native_ppl_has_response(prepared::NativePPLPrepared) =
     !(prepared.response isa NativePPLNoResponse)
@@ -847,7 +856,12 @@ function _native_ppl_validate_predictor_graph(plan::NativePPLPlan)
         push!(expected_location_inputs,
               isempty(matching) ? predictor_name : only(matching))
     end
-    Set(native_affine_inputs(location)) == Set(expected_location_inputs) ||
+    location_inputs = native_affine_inputs(location)
+    length(unique(location_inputs)) == length(location_inputs) || throw(
+        NativePPLCapabilityError(
+            :graph_identity,
+            "compiled affine location inputs must be unique"))
+    Set(location_inputs) == Set(expected_location_inputs) ||
         throw(NativePPLCapabilityError(
             :graph_identity,
             "compiled affine location must consume every compiled predictor path"))

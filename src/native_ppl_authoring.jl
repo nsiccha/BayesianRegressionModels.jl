@@ -488,11 +488,11 @@ end
 
 Fit data-derived nodes and compile the current direct declaration subset into
 the same typed executable `Plan` used by BRM. This initial compiler accepts one
-continuous predictor, one affine node, an optional fitted center/zscale node,
-an optional exponential rate link, and one Normal/BernoulliLogit/Poisson
-stochastic site. The executor subset requires explicit broadcast lifting;
-conditions are optional so the same declaration can compile for generative
-prediction. Unsupported graph shapes fail closed.
+or more continuous predictors, one affine node, an optional fitted
+center/zscale node per predictor, an optional exponential rate link, and one
+Normal/BernoulliLogit/Poisson stochastic site. The executor subset requires
+explicit broadcast lifting; conditions are optional so the same declaration
+can compile for generative prediction. Unsupported graph shapes fail closed.
 """
 function _bind(declaration::Model, bindings, conditions)
     _validate_model(declaration)
