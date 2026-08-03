@@ -1993,9 +1993,39 @@ end
     position[first(correlation_coordinates) + coordinate_offset - 1]
 end
 
+@inline @generated function _factor_grouped_scales(
+        node::GroupedAffineFactorNode{Z,S,C,G,P},
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Z,S,C,G,P,T}
+    Expr(:tuple, [:(
+        _factor_coefficient(
+            node.scales, $coefficient_index,
+            position, prepared, buffers))
+        for coefficient_index in 1:fieldcount(P)]...)
+end
+
+@inline @generated function _factor_grouped_partials(
+        node::GroupedAffineFactorNode{Z,S,C,G,P},
+        correlation_coordinates, position::AbstractVector{T}) where {
+            Z,S,C,G,P,T}
+    coefficient_count = fieldcount(P)
+    partials = Any[]
+    for source_index in 1:(coefficient_count - 1)
+        for coefficient_index in (source_index + 1):coefficient_count
+            raw = :(_factor_correlation_raw(
+                position, correlation_coordinates,
+                $coefficient_index, $source_index, $coefficient_count))
+            push!(partials, :(let value = $raw
+                (tanh(value), _factor_sech(value))
+            end))
+        end
+    end
+    Expr(:tuple, partials...)
+end
+
 @inline @generated function _factor_grouped_affine_value(
         node::GroupedAffineFactorNode{Z,S,C,G,P},
-        group_index::Int, row::Int, correlation_coordinates,
+        group_index::Int, row::Int, scales, partials,
         position::AbstractVector{T}, prepared::FactorPrepared,
         buffers::FactorBuffers{T}) where {Z,S,C,G,P,T}
     coefficient_count = fieldcount(P)
@@ -2004,15 +2034,17 @@ end
         correlated_terms = Any[]
         residual = :(one(T))
         for source_index in 1:(coefficient_index - 1)
-            raw = :(_factor_correlation_raw(
-                position, correlation_coordinates,
-                $coefficient_index, $source_index, $coefficient_count))
+            partial_index =
+                (source_index - 1) * coefficient_count -
+                (source_index - 1) * source_index ÷ 2 +
+                coefficient_index - source_index
+            partial = :(getfield(partials, $partial_index))
             standardized = :(_factor_grouped_standardized(
                 node, group_index, $source_index, $coefficient_count,
                 position, prepared, buffers))
             push!(correlated_terms,
-                  :($residual * tanh($raw) * $standardized))
-            residual = :($residual * _factor_sech($raw))
+                  :($residual * getfield($partial, 1) * $standardized))
+            residual = :($residual * getfield($partial, 2))
         end
         diagonal = :(_factor_grouped_standardized(
             node, group_index, $coefficient_index, $coefficient_count,
@@ -2020,9 +2052,7 @@ end
         push!(correlated_terms, :($residual * $diagonal))
         correlated = foldl(
             (left, right) -> :($left + $right), correlated_terms)
-        effect = :(_factor_coefficient(
-            node.scales, $coefficient_index,
-            position, prepared, buffers) * $correlated)
+        effect = :(getfield(scales, $coefficient_index) * $correlated)
         predictor = :(getfield(node.predictors, $coefficient_index))
         push!(contributions, :(
             $predictor === nothing ? $effect :
@@ -2042,10 +2072,13 @@ end
     correlation_name = site_value_name(node.correlation)
     correlation_coordinates = getproperty(
         prepared.plan.graph.coordinates, correlation_name).indices
+    scales = _factor_grouped_scales(node, position, prepared, buffers)
+    partials = _factor_grouped_partials(
+        node, correlation_coordinates, position)
     for row in prepared.plan.observation_axis.keys
         group_index = group_indices[row]
         buffers.node_rows[node_index, row] = _factor_grouped_affine_value(
-            node, group_index, row, correlation_coordinates,
+            node, group_index, row, scales, partials,
             position, prepared, buffers)
     end
     zero(T)
