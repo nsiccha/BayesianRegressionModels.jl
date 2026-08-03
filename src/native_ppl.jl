@@ -2093,7 +2093,6 @@ const LinearPredictor = BRM.NativePPLLinearPredictor
 const PointwiseLogLikelihood = BRM.NativePPLPointwiseLogLikelihood
 const PosteriorPredictive = BRM.NativePPLPosteriorPredictive
 
-compile(brmi::BRM.BRMI) = BRM._native_ppl_plan(brmi)
 prepare(plan::Plan; kwargs...) = BRM._native_ppl_prepare(plan; kwargs...)
 workspace(prepared::Prepared, ::Type{T}=eltype(prepared)) where {T<:AbstractFloat} =
     BRM._native_ppl_workspace(prepared, T)

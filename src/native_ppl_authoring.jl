@@ -498,6 +498,160 @@ compile(declaration::Model, bindings) = bind(declaration, bindings)
 prepare(declaration::Model, bindings; kwargs...) =
     prepare(bind(declaration, bindings); kwargs...)
 
+function _lower_brmi(brmi::BRM.BRMI)
+    observed = BRM.outcomes(brmi)
+    length(observed) == 1 || throw(CapabilityError(
+        :outcomes,
+        "expected exactly one observed response, got $(length(observed))"))
+    outcome = only(observed)
+    family = outcome.family
+    family === BRM.Normal || family === BRM.BernoulliLogit ||
+        family === BRM.Poisson || throw(CapabilityError(
+            :likelihood,
+            "expected `Normal(location, scale)`, `BernoulliLogit(logit)`, " *
+            "or `Poisson(exp(log_rate))`, got `$family`"))
+
+    response = outcome.response
+    response_lhs, likelihood = BRM._native_ppl_sampling_rhs(brmi, response)
+    response_lhs isa BRM.NamedColumn &&
+        parent(response_lhs) isa BRM.DataColumn || throw(CapabilityError(
+            :response_decorator,
+            "response `$response` must be a bare observed data column"))
+    likelihood isa BRM.ExprColumn && BRM.getf(likelihood) === family ||
+        throw(CapabilityError(
+            :likelihood,
+            "response `$response` must use `$family` consistently"))
+    isempty(BRM.getkwargs(likelihood)) || throw(CapabilityError(
+        :likelihood_keywords,
+        "$family likelihood for `$response` has keywords"))
+    likelihood_args = BRM.getargs(likelihood)
+    expected_arguments = family === BRM.Normal ? 2 : 1
+    length(likelihood_args) == expected_arguments || throw(CapabilityError(
+        :likelihood,
+        "$family likelihood for `$response` needs $expected_arguments argument(s)"))
+
+    rate_name = nothing
+    location = if family === BRM.Poisson
+        rate_expression = only(likelihood_args)
+        rate_expression isa BRM.ExprColumn &&
+            BRM.getf(rate_expression) === exp || throw(CapabilityError(
+                :likelihood_link,
+                "Poisson response `$response` must use `Poisson(exp(log_rate))`"))
+        isempty(BRM.getkwargs(rate_expression)) || throw(CapabilityError(
+            :likelihood_link,
+            "Poisson `exp` link cannot have keywords"))
+        rate_arguments = BRM.getargs(rate_expression)
+        length(rate_arguments) == 1 || throw(CapabilityError(
+            :likelihood_link,
+            "Poisson `exp` link needs one named predictor"))
+        log_rate = BRM._native_ppl_ref_name(only(rate_arguments))
+        log_rate === nothing && throw(CapabilityError(
+            :likelihood_location,
+            "Poisson `exp` link must consume one named linear predictor"))
+        rate_name = Symbol(:exp_, log_rate)
+        log_rate
+    else
+        BRM._native_ppl_ref_name(likelihood_args[1])
+    end
+    location === nothing && throw(CapabilityError(
+        :likelihood_location,
+        "$family predictor must be one named linear predictor"))
+    scale_name = family === BRM.Normal ?
+        BRM._native_ppl_ref_name(likelihood_args[2]) : nothing
+    family === BRM.Normal && scale_name === nothing &&
+        throw(CapabilityError(
+            :likelihood_scale,
+            "Normal scale must be one named scalar parameter"))
+
+    predictor_term = BRM._native_ppl_affine_predictor(brmi, location)
+    predictor_column = predictor_term.column
+    predictor_name = BRM.name(predictor_column)
+    predictor_name === response && throw(CapabilityError(
+        :input_roles,
+        "predictor `$predictor_name` is also the observed response"))
+    predictor = parent(parent(predictor_column))
+    response_values = parent(parent(response_lhs))
+
+    prior_scale = family === BRM.Normal ?
+        BRM._native_ppl_exponential_prior(brmi, scale_name) : nothing
+    expected = family === BRM.Normal ?
+        Set((location, scale_name, response, predictor_name)) :
+        Set((location, response, predictor_name))
+    extras = setdiff(Set(keys(brmi.operations)), expected)
+    isempty(extras) || throw(CapabilityError(
+        :additional_operations,
+        "unsupported formula operations: " *
+        join(sort!(collect(extras)), ", ")))
+
+    input_declarations = NamedTuple{(predictor_name, response)}(
+        (input(:predictor), input(:response)))
+    coefficient_name = Symbol(:beta_, location)
+    coefficient_declaration = parameter(
+        RealSupport(), (:Intercept, predictor_name);
+        transform=Identity(), prior=StandardNormal())
+    parameter_declarations = if family === BRM.Normal
+        scale_declaration = parameter(
+            PositiveSupport(), (scale_name,);
+            transform=Exp(), prior=Exponential(prior_scale))
+        NamedTuple{(coefficient_name, scale_name)}(
+            (coefficient_declaration, scale_declaration))
+    else
+        NamedTuple{(coefficient_name,)}((coefficient_declaration,))
+    end
+
+    transform_name = if predictor_term.transform === :center
+        Symbol("#native_ppl_center#", location, "#", predictor_name)
+    elseif predictor_term.transform === :zscale
+        Symbol("#native_ppl_zscale#", location, "#", predictor_name)
+    else
+        nothing
+    end
+    transform_declaration = if predictor_term.transform === :center
+        center(predictor_name)
+    elseif predictor_term.transform === :zscale
+        zscale(predictor_name)
+    else
+        nothing
+    end
+    affine_input = transform_name === nothing ? predictor_name : transform_name
+    affine_declaration = affine(affine_input, coefficient_name)
+    node_declarations = if transform_name === nothing
+        NamedTuple{(location,)}((affine_declaration,))
+    else
+        NamedTuple{(transform_name, location)}(
+            (transform_declaration, affine_declaration))
+    end
+
+    observation_declaration = if family === BRM.Normal
+        normal(response, location, scale_name)
+    elseif family === BRM.BernoulliLogit
+        bernoulli_logit(response, location)
+    else
+        node_declarations = merge(
+            node_declarations,
+            NamedTuple{(rate_name,)}((exp_link(location),)))
+        poisson(response, rate_name)
+    end
+    observation_declarations = NamedTuple{(response,)}(
+        (observation_declaration,))
+    declaration = model(
+        inputs=input_declarations,
+        parameters=parameter_declarations,
+        nodes=node_declarations,
+        observations=observation_declarations)
+    bindings = NamedTuple{(predictor_name, response)}(
+        (predictor, response_values))
+    (; declaration, bindings)
+end
+
+"""Lower a supported BRM formula to the public unbound native-PPL declaration."""
+lower(brmi::BRM.BRMI) = _lower_brmi(brmi).declaration
+
+function compile(brmi::BRM.BRMI)
+    lowered = _lower_brmi(brmi)
+    bind(lowered.declaration, lowered.bindings)
+end
+
 export Model, Input, Parameter
 export RealSupport, PositiveSupport, IdentityTransform, ExpTransform
 export StandardNormal, ExponentialPrior
@@ -506,4 +660,4 @@ export NormalObservation, BernoulliLogitObservation, PoissonObservation
 export model, input, parameter, Identity, Exp, Exponential
 export center, zscale, standardize, affine, exp_link
 export normal, bernoulli_logit, poisson
-export bind
+export bind, lower
