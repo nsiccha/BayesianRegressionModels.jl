@@ -3199,6 +3199,40 @@ end
     @test capability_error(
         () -> NP.factor_graph(unordered_graph_model)).capability == :site_order
 
+    unordered_storage_graph_model = NP.model(
+        inputs=(; literal_mu=NP.input(), literal_tau=NP.input()),
+        observations=(;
+            downstream=NP.normal(:downstream, :upstream, :literal_tau),
+            upstream=NP.normal(:upstream, :literal_mu, :literal_tau)),
+        site_order=(:upstream, :downstream))
+    unordered_storage_graph = NP.factor_graph(unordered_storage_graph_model)
+    @test keys(unordered_storage_graph.sites) == (:upstream, :downstream)
+    @test NP.site_factor_dependencies(
+        unordered_storage_graph.sites.downstream.factor) ==
+          (:upstream, :literal_tau)
+
+    cyclic_graph_model = NP.model(
+        inputs=(; literal_tau=NP.input(),),
+        observations=(;
+            first_site=NP.normal(:first_site, :second_site, :literal_tau),
+            second_site=NP.normal(:second_site, :first_site, :literal_tau)),
+        site_order=(:first_site, :second_site))
+    @test capability_error(
+        () -> NP.factor_graph(cyclic_graph_model)).capability == :site_order
+
+    legacy_response_graph_model = NP.model(
+        inputs=(;
+            literal_mu=NP.input(), literal_tau=NP.input(),
+            legacy_y=NP.input(:response)),
+        observations=(;
+            legacy_y=NP.broadcasted(
+                NP.normal(:legacy_y, :literal_mu, :literal_tau))))
+    legacy_response_graph = NP.factor_graph(NP.instantiate(
+        legacy_response_graph_model,
+        (; literal_mu=0.0, literal_tau=1.0, legacy_y=response)))
+    @test legacy_response_graph.sites.legacy_y.activity isa NP.ConditionedSite
+    @test legacy_response_graph.dimension == 0
+
     latent_brm_data = (; y=response)
     latent_brm = @brm latent_brm_data begin
         sigma ~ Exponential(2.0)

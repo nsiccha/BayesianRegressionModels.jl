@@ -471,8 +471,24 @@ struct ModelInstance{M<:Model,B,C}
     conditions::C
 end
 
+function _factor_graph_instance_conditions(instance::ModelInstance)
+    _validate_instance(instance)
+    names = Symbol[keys(instance.conditions)...]
+    values = Any[getproperty(instance.conditions, name) for name in names]
+    for (name, input_declaration) in pairs(instance.declaration.inputs)
+        input_role(input_declaration) === :response || continue
+        hasproperty(instance.declaration.observations, name) || continue
+        hasproperty(instance.bindings, name) || continue
+        name in names && continue
+        push!(names, name)
+        push!(values, getproperty(instance.bindings, name))
+    end
+    NamedTuple{Tuple(names)}(Tuple(values))
+end
+
 factor_graph(instance::ModelInstance) = factor_graph(
-    instance.declaration; conditions=instance.conditions)
+    instance.declaration;
+    conditions=_factor_graph_instance_conditions(instance))
 
 """
 A stable reference to one named value exported by a namespaced component.
@@ -1105,6 +1121,7 @@ function _validate_model_components(
         push!(available, name)
     end
 
+    observation_names = Set(keys(observations))
     for (name, declaration) in pairs(observations)
         response = observation_response(declaration)
         name === response || throw(ArgumentError(
@@ -1123,9 +1140,10 @@ function _validate_model_components(
                 "native PPL stochastic site `$response` collides with a node identity"))
         end
         for dependency in observation_dependencies(declaration)
-            dependency in available || throw(ArgumentError(
-                "native PPL observation `$name` references unavailable dependency " *
-                "`$dependency`"))
+            dependency in available || dependency in observation_names ||
+                throw(ArgumentError(
+                    "native PPL observation `$name` references unavailable " *
+                    "dependency `$dependency`"))
         end
         push!(available, response)
     end
