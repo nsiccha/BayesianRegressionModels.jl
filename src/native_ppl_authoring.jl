@@ -125,18 +125,27 @@ struct ZScale{Input} <: AbstractNodeDeclaration end
 zscale(input::Symbol) = ZScale{input}()
 standardize(input::Symbol) = zscale(input)
 
-"""Intercept plus one slope per named input/node over one parameter block."""
-struct Affine{Inputs,Coefficients} <: AbstractNodeDeclaration end
-function affine(inputs::Tuple, coefficients::Symbol)
+"""Intercept plus one slope per named input/node and optional additive offsets."""
+struct Affine{Inputs,Coefficients,Offsets,Intercept} <: AbstractNodeDeclaration end
+function affine(inputs::Tuple, coefficients::Symbol; offsets::Tuple=(),
+                intercept::Bool=true)
     isempty(inputs) && throw(ArgumentError(
         "native PPL affine declaration requires at least one input"))
     all(input -> input isa Symbol, inputs) || throw(ArgumentError(
         "native PPL affine inputs must be named Symbols; got $inputs"))
     length(unique(inputs)) == length(inputs) || throw(ArgumentError(
         "native PPL affine inputs must be unique; got $inputs"))
-    Affine{inputs,coefficients}()
+    all(offset -> offset isa Symbol, offsets) || throw(ArgumentError(
+        "native PPL affine offsets must be named Symbols; got $offsets"))
+    length(unique(offsets)) == length(offsets) || throw(ArgumentError(
+        "native PPL affine offsets must be unique; got $offsets"))
+    isempty(intersect(Set(inputs), Set(offsets))) || throw(ArgumentError(
+        "native PPL affine inputs and offsets must have distinct names"))
+    Affine{inputs,coefficients,offsets,intercept}()
 end
-affine(input::Symbol, coefficients::Symbol) = affine((input,), coefficients)
+affine(input::Symbol, coefficients::Symbol; offsets::Tuple=(),
+       intercept::Bool=true) =
+    affine((input,), coefficients; offsets, intercept)
 
 """Elementwise exponential link over one named deterministic node."""
 struct ExpLink{Input} <: AbstractNodeDeclaration end
@@ -145,6 +154,10 @@ exp_link(input::Symbol) = ExpLink{input}()
 node_input(::Center{Input}) where {Input} = Input
 node_input(::ZScale{Input}) where {Input} = Input
 node_inputs(::Affine{Inputs}) where {Inputs} = Inputs
+affine_offsets(::Affine{Inputs,Coefficients,Offsets}) where {
+    Inputs,Coefficients,Offsets} = Offsets
+affine_has_intercept(::Affine{Inputs,Coefficients,Offsets,Intercept}) where {
+    Inputs,Coefficients,Offsets,Intercept} = Intercept
 function node_input(node::Affine)
     inputs = node_inputs(node)
     length(inputs) == 1 || throw(ArgumentError(
@@ -296,10 +309,17 @@ struct ZScaleFactorNode{I} <: AbstractFactorNode
     input::I
 end
 
-struct AffineFactorNode{I,C} <: AbstractFactorNode
+struct AffineFactorNode{I,C,O,H} <: AbstractFactorNode
     inputs::I
     coefficients::C
+    offsets::O
 end
+
+AffineFactorNode(inputs::I, coefficients::C, offsets::O,
+                 intercept::Bool) where {I,C,O} =
+    AffineFactorNode{I,C,O,intercept}(inputs, coefficients, offsets)
+
+affine_has_intercept(::AffineFactorNode{I,C,O,H}) where {I,C,O,H} = H
 
 struct ExpFactorNode{I} <: AbstractFactorNode
     input::I
@@ -309,7 +329,8 @@ factor_node_dependencies(node::Union{
         CenterFactorNode,ZScaleFactorNode,ExpFactorNode}) =
     _factor_value_dependencies((node.input,))
 factor_node_dependencies(node::AffineFactorNode) =
-    _factor_value_dependencies((node.inputs..., node.coefficients))
+    _factor_value_dependencies((
+        node.inputs..., node.coefficients, node.offsets...))
 
 abstract type AbstractSiteShape end
 struct ScalarSiteShape <: AbstractSiteShape end
@@ -403,7 +424,9 @@ function _factor_node(declaration::AbstractNodeDeclaration,
     elseif declaration isa Affine
         AffineFactorNode(
             map(reference, node_inputs(declaration)),
-            SiteValue{affine_parameter(declaration)}())
+            SiteValue{affine_parameter(declaration)}(),
+            map(reference, affine_offsets(declaration)),
+            affine_has_intercept(declaration))
     else
         ExpFactorNode(reference(node_input(declaration)))
     end
@@ -612,22 +635,27 @@ function _uses_factor_executor(declaration::Model, conditions)
     count(site -> site.shape isa BroadcastSiteShape,
           Tuple(graph.sites)) == 1 || return false
     stochastic_names = Set(declaration.site_order)
-    any(declaration.site_order) do name
+    dependent_site = any(declaration.site_order) do name
         hasproperty(declaration.observations, name) || return false
         site = getproperty(graph.sites, name)
         site.shape isa ScalarSiteShape &&
             any(dependency -> dependency in stochastic_names,
                 site_factor_dependencies(site.factor))
     end
+    sampled_offset_affine = any(values(graph.nodes)) do node
+        node isa AffineFactorNode && !isempty(node.offsets)
+    end
+    dependent_site || sampled_offset_affine
 end
 
 function _validate_factor_plan_site(
     name::Symbol, site::StochasticSite, graph::FactorGraph,
     conditions::NamedTuple, broadcast_sites::Set{Symbol},
 )
-    site.shape isa BlockSiteShape && throw(CapabilityError(
-        :factor_shape,
-        "multi-latent factor site `$name` has an unsupported block shape"))
+    site.shape isa BlockSiteShape &&
+        !(site.factor isa StandardNormalSiteFactor) && throw(CapabilityError(
+            :factor_shape,
+            "multi-latent block site `$name` must currently be standard normal"))
     site.factor isa Union{
         StandardNormalSiteFactor,NormalSiteFactor,ExponentialSiteFactor,
     } || throw(CapabilityError(
@@ -640,6 +668,10 @@ function _validate_factor_plan_site(
             value isa Real || throw(ArgumentError(
                 "native PPL scalar condition `$name` must be a real value; " *
                 "got $(typeof(value))"))
+        elseif site.shape isa BlockSiteShape
+            value isa AbstractVector || throw(ArgumentError(
+                "native PPL block condition `$name` must be a vector; got " *
+                "$(typeof(value))"))
         elseif site.shape isa BroadcastSiteShape
             value isa AbstractVector || throw(ArgumentError(
                 "native PPL broadcast condition `$name` must be a vector; " *
@@ -666,24 +698,55 @@ function _validate_factor_plan_site(
 end
 
 function _bind_factor_plan(declaration::Model, bindings, conditions)
+    input_axis_length = nothing
     for (name, declaration_input) in pairs(declaration.inputs)
-        input_role(declaration_input) === :value || throw(CapabilityError(
+        input_role(declaration_input) in (:value, :predictor) || throw(CapabilityError(
             :factor_inputs,
-            "multi-latent factor input `$name` must be a generic scalar " *
-            "value port"))
+            "multi-latent factor input `$name` must be a generic value " *
+            "port or predictor"))
         value = getproperty(bindings, name)
-        value isa Real || throw(ArgumentError(
-            "multi-latent factor input `$name` must bind a real scalar; " *
-            "got $(typeof(value))"))
+        if value isa AbstractVector
+            isempty(value) && throw(ArgumentError(
+                "multi-latent factor input `$name` cannot be empty"))
+            all(element -> element isa Real, value) || throw(ArgumentError(
+                "multi-latent factor input `$name` must contain real values"))
+            input_axis_length === nothing && (input_axis_length = length(value))
+            length(value) == input_axis_length || throw(DimensionMismatch(
+                "multi-latent factor vector inputs must have equal lengths"))
+        elseif !(value isa Real)
+            throw(ArgumentError(
+                "multi-latent factor input `$name` must bind a real scalar " *
+                "or vector; got $(typeof(value))"))
+        end
     end
     canonical_conditions = _canonical_factor_conditions(
         declaration, conditions)
     graph = factor_graph(declaration; conditions=canonical_conditions)
     for (name, node) in pairs(graph.nodes)
-        node isa ExpFactorNode || throw(CapabilityError(
+        node isa Union{ExpFactorNode,AffineFactorNode} || throw(CapabilityError(
             :factor_nodes,
             "multi-latent factor node `$name` has unsupported operation " *
-            "$(typeof(node)); the current executable slice accepts scalar exp"))
+            "$(typeof(node)); the current executable slice accepts scalar " *
+            "exp and row-valued affine nodes"))
+        if node isa AffineFactorNode
+            coefficient_name = site_value_name(node.coefficients)
+            coefficient_site = getproperty(graph.sites, coefficient_name)
+            coefficient_site.shape isa Union{ScalarSiteShape,BlockSiteShape} ||
+                throw(CapabilityError(
+                :factor_nodes,
+                "affine node `$name` requires a scalar or block coefficient site"))
+            coefficient_site.factor isa StandardNormalSiteFactor || throw(
+                CapabilityError(
+                    :factor_nodes,
+                    "affine node `$name` currently requires standard-normal " *
+                    "coefficients"))
+            coefficient_count = length(node.inputs) +
+                (affine_has_intercept(node) ? 1 : 0)
+            length(coefficient_site.coordinate_keys) == coefficient_count ||
+                throw(CapabilityError(
+                    :factor_nodes,
+                    "affine node `$name` has the wrong coefficient count"))
+        end
     end
     broadcast_sites = Tuple(
         name for (name, site) in pairs(graph.sites)
@@ -714,7 +777,12 @@ function _bind_factor_plan(declaration::Model, bindings, conditions)
             "native PPL broadcast condition `$output_site` must be a vector"))
         isempty(response) && throw(ArgumentError(
             "native PPL broadcast condition `$output_site` cannot be empty"))
+        input_axis_length === nothing || length(response) == input_axis_length ||
+            throw(DimensionMismatch(
+                "native PPL response and vector inputs must have equal lengths"))
         Base.OneTo(length(response))
+    elseif input_axis_length !== nothing
+        Base.OneTo(input_axis_length)
     else
         Base.OneTo(0)
     end
@@ -748,9 +816,10 @@ BRM.LogDensityProblems.dimension(prepared::FactorPrepared) =
     BRM.LogDensityProblems.dimension(prepared.plan)
 
 """Reusable primal storage for an ordered factor-graph evaluation."""
-mutable struct FactorBuffers{T,V<:Vector{T}}
+mutable struct FactorBuffers{T,V<:Vector{T},M<:Matrix{T}}
     values::V
     node_values::V
+    node_rows::M
     pointwise_loglikelihood::V
 end
 
@@ -769,9 +838,12 @@ function FactorWorkspace(prepared::FactorPrepared,
         "native PPL factor workspace element type must be concrete; got $T"))
     values = zeros(T, length(prepared.plan.graph.sites))
     node_values = zeros(T, length(prepared.plan.graph.nodes))
+    node_rows = zeros(T, length(prepared.plan.graph.nodes),
+                      length(prepared.plan.observation_axis))
     pointwise = zeros(T, length(prepared.plan.observation_axis))
-    FactorWorkspace{T,FactorBuffers{T,Vector{T}},Vector{T},Nothing}(
-        FactorBuffers(values, node_values, pointwise),
+    FactorWorkspace{T,typeof(FactorBuffers(
+        values, node_values, node_rows, pointwise)),Vector{T},Nothing}(
+        FactorBuffers(values, node_values, node_rows, pointwise),
         zeros(T, BRM.LogDensityProblems.dimension(prepared)), nothing)
 end
 
@@ -846,8 +918,18 @@ function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
     values = map(names) do name
         value = _factor_prepare_condition(
             getproperty(plan.conditions, name), name, T)
-        _factor_validate_condition_support(
-            getproperty(plan.graph.sites, name), value, name)
+        site = getproperty(plan.graph.sites, name)
+        if site.shape isa BlockSiteShape
+            value isa AbstractVector || throw(ArgumentError(
+                "native PPL block condition `$name` must be a vector"))
+            length(value) == length(site.coordinate_keys) || throw(
+                DimensionMismatch(
+                    "native PPL block condition `$name` has the wrong length"))
+        elseif site.shape isa ScalarSiteShape
+            value isa Real || throw(ArgumentError(
+                "native PPL scalar condition `$name` must be a scalar"))
+        end
+        _factor_validate_condition_support(site, value, name)
         value
     end
     FactorPrepared{T,typeof(plan),NamedTuple{names,typeof(values)}}(
@@ -870,6 +952,24 @@ workspace(prepared::FactorPrepared, ::Type{T}, backend) where {T<:AbstractFloat}
     buffers.node_values[getproperty(plan.node_indices, Name)]
 @inline _factor_argument(::SiteValue{Name}, plan, buffers,
                          ::Type{T}) where {Name,T} =
+    buffers.values[getproperty(plan.site_indices, Name)]
+
+@inline _factor_argument_at(value::LiteralValue, index, plan, buffers,
+                            ::Type{T}) where {T} = T(value.value)
+@inline function _factor_argument_at(::InputValue{Name}, index, plan, buffers,
+                                     ::Type{T}) where {Name,T}
+    value = getproperty(plan.bindings, Name)
+    T(value isa AbstractVector ? value[index] : value)
+end
+@inline function _factor_argument_at(::NodeValue{Name}, index, plan, buffers,
+                                     ::Type{T}) where {Name,T}
+    node_index = getproperty(plan.node_indices, Name)
+    node = getproperty(plan.graph.nodes, Name)
+    node isa AffineFactorNode ? buffers.node_rows[node_index, index] :
+        buffers.node_values[node_index]
+end
+@inline _factor_argument_at(::SiteValue{Name}, index, plan, buffers,
+                            ::Type{T}) where {Name,T} =
     buffers.values[getproperty(plan.site_indices, Name)]
 
 @inline _factor_transform(::IdentityTransform, unconstrained) =
@@ -898,6 +998,15 @@ end
     -log(scale) - value / scale
 end
 
+@inline function _factor_logdensity_at(factor::NormalSiteFactor, value::T,
+                                       index, plan, buffers) where {T}
+    location = _factor_argument_at(factor.location, index, plan, buffers, T)
+    scale = _factor_argument_at(factor.scale, index, plan, buffers, T)
+    residual = (value - location) / scale
+    -T(0.5) * residual * residual - log(scale) -
+        T(BRM._NATIVE_PPL_HALF_LOG2PI)
+end
+
 @inline function _factor_site_logdensity!(::Val{Name},
         site::StochasticSite{S,Tr,F,ScalarSiteShape,FreeSite},
         position::AbstractVector{T}, prepared::FactorPrepared,
@@ -922,18 +1031,65 @@ end
 end
 
 @inline function _factor_site_logdensity!(::Val{Name},
+        site::StochasticSite{S,Tr,F,BlockSiteShape,FreeSite},
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
+    coordinates = getproperty(prepared.plan.graph.coordinates, Name)
+    density = zero(T)
+    for coordinate in coordinates.indices
+        value, logjac = _factor_transform(
+            site.transform, position[coordinate])
+        density += _factor_logdensity(
+            site.factor, value, prepared.plan, buffers) + logjac
+    end
+    density
+end
+
+@inline function _factor_site_logdensity!(::Val{Name},
+        site::StochasticSite{S,Tr,F,BlockSiteShape,ConditionedSite},
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
+    values = getproperty(prepared.conditions, Name)
+    density = zero(T)
+    for value in values
+        density += _factor_logdensity(
+            site.factor, value, prepared.plan, buffers)
+    end
+    density
+end
+
+@inline function _factor_site_logdensity!(::Val{Name},
         site::StochasticSite{S,Tr,F,BroadcastSiteShape,ConditionedSite},
         position::AbstractVector{T}, prepared::FactorPrepared,
         buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
     response = getproperty(prepared.conditions, Name)
     density = zero(T)
     for index in eachindex(response)
-        pointwise = _factor_logdensity(
-            site.factor, response[index], prepared.plan, buffers)
+        pointwise = _factor_logdensity_at(
+            site.factor, response[index], index, prepared.plan, buffers)
         buffers.pointwise_loglikelihood[index] = pointwise
         density += pointwise
     end
     density
+end
+
+
+@inline function _factor_coefficient(::SiteValue{Name}, coefficient_index,
+                                     position::AbstractVector{T},
+                                     prepared::FactorPrepared,
+                                     buffers::FactorBuffers{T}) where {Name,T}
+    site = getproperty(prepared.plan.graph.sites, Name)
+    if site.activity isa FreeSite
+        coordinates = getproperty(
+            prepared.plan.graph.coordinates, Name).indices
+        value, _ = _factor_transform(
+            site.transform, position[coordinates[coefficient_index]])
+        value
+    else
+        conditioned = getproperty(prepared.conditions, Name)
+        T(conditioned isa AbstractVector ?
+            conditioned[coefficient_index] : conditioned)
+    end
 end
 
 @inline _factor_site_logdensity!(::Val,
@@ -947,6 +1103,31 @@ end
     input = _factor_argument(node.input, prepared.plan, buffers, T)
     buffers.node_values[getproperty(prepared.plan.node_indices, Name)] =
         exp(input)
+    zero(T)
+end
+
+@inline function _factor_node_logdensity!(::Val{Name}, node::AffineFactorNode,
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Name,T}
+    node_index = getproperty(prepared.plan.node_indices, Name)
+    for row in prepared.plan.observation_axis.keys
+        has_intercept = affine_has_intercept(node)
+        value = has_intercept ? _factor_coefficient(
+            node.coefficients, 1, position, prepared, buffers) : zero(T)
+        for input_index in eachindex(node.inputs)
+            value += _factor_coefficient(
+                node.coefficients, input_index + (has_intercept ? 1 : 0),
+                position, prepared, buffers) *
+                _factor_argument_at(
+                    node.inputs[input_index], row,
+                    prepared.plan, buffers, T)
+        end
+        for offset in node.offsets
+            value += _factor_argument_at(
+                offset, row, prepared.plan, buffers, T)
+        end
+        buffers.node_rows[node_index, row] = value
+    end
     zero(T)
 end
 
@@ -999,6 +1180,10 @@ function _factor_check_workspace_layout(workspace::FactorWorkspace,
     length(workspace.primal.node_values) ==
         length(prepared.plan.graph.nodes) || throw(DimensionMismatch(
             "native PPL factor workspace has the wrong node-value layout"))
+    axes(workspace.primal.node_rows) == (
+        Base.OneTo(length(prepared.plan.graph.nodes)),
+        prepared.plan.observation_axis.keys) || throw(DimensionMismatch(
+            "native PPL factor workspace has the wrong row-node layout"))
     length(workspace.primal.pointwise_loglikelihood) ==
         length(prepared.plan.observation_axis) || throw(DimensionMismatch(
             "native PPL factor workspace has the wrong observation layout"))
@@ -1017,7 +1202,7 @@ function _factor_check_execution(workspace::FactorWorkspace,
         "match workspace eltype $(eltype(workspace))"))
     _factor_check_workspace_layout(workspace, prepared)
     for buffer in (workspace.gradient, workspace.primal.values,
-                   workspace.primal.node_values,
+                   workspace.primal.node_values, workspace.primal.node_rows,
                    workspace.primal.pointwise_loglikelihood)
         Base.mightalias(position, buffer) && throw(ArgumentError(
             "native PPL factor position must not alias workspace storage"))
@@ -1113,7 +1298,7 @@ function _factor_check_query_output(output::AbstractVector,
             "native PPL factor output eltype $(eltype(output)) does not " *
             "match prepared eltype $(eltype(prepared))"))
     for buffer in (work.gradient, work.primal.values,
-                   work.primal.node_values,
+                   work.primal.node_values, work.primal.node_rows,
                    work.primal.pointwise_loglikelihood)
         Base.mightalias(output, buffer) && throw(ArgumentError(
             "native PPL factor output must not alias workspace storage"))
@@ -1124,7 +1309,8 @@ function _factor_check_query_output(output::AbstractVector,
 end
 
 @inline function _factor_terminal_arguments(prepared::FactorPrepared,
-                                            buffers::FactorBuffers)
+                                            buffers::FactorBuffers,
+                                            index::Int)
     site = getproperty(
         prepared.plan.graph.sites, factor_output_site(prepared.plan))
     factor = site.factor
@@ -1133,9 +1319,10 @@ end
         "terminal factor queries currently require Normal, got " *
         "$(typeof(factor))"))
     T = eltype(buffers.values)
-    location = _factor_argument(
-        factor.location, prepared.plan, buffers, T)
-    scale = _factor_argument(factor.scale, prepared.plan, buffers, T)
+    location = _factor_argument_at(
+        factor.location, index, prepared.plan, buffers, T)
+    scale = _factor_argument_at(
+        factor.scale, index, prepared.plan, buffers, T)
     location, scale
 end
 
@@ -1144,8 +1331,12 @@ function evaluate!(output::AbstractVector, work::FactorWorkspace,
                    query::BRM.NativePPLLinearPredictor)
     _factor_check_query_output(output, work, prepared, position, query)
     _factor_logdensity_kernel(position, prepared, work.primal)
-    location, _ = _factor_terminal_arguments(prepared, work.primal)
-    fill!(output, location)
+    for index in eachindex(output)
+        location, _ = _factor_terminal_arguments(
+            prepared, work.primal, index)
+        output[index] = location
+    end
+    output
 end
 
 function evaluate!(output::AbstractVector, work::FactorWorkspace,
@@ -1172,9 +1363,10 @@ function simulate!(rng::BRM.AbstractRNG, output::AbstractVector,
                        BRM.NativePPLPosteriorPredictive())
     _factor_check_query_output(output, work, prepared, position, query)
     _factor_logdensity_kernel(position, prepared, work.primal)
-    location, scale = _factor_terminal_arguments(prepared, work.primal)
     T = eltype(work)
     for index in eachindex(output)
+        location, scale = _factor_terminal_arguments(
+            prepared, work.primal, index)
         output[index] = location + scale * BRM.randn(rng, T)
     end
     output
@@ -1230,6 +1422,26 @@ end
 end
 
 @inline function _factor_site_sample!(rng::BRM.AbstractRNG, ::Val{Name},
+        site::StochasticSite{S,Tr,F,BlockSiteShape,FreeSite},
+        position::AbstractVector{T}, output::AbstractVector{T},
+        prepared::FactorPrepared, buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
+    coordinates = getproperty(prepared.plan.graph.coordinates, Name)
+    for coordinate in coordinates.indices
+        value = _factor_rand(
+            rng, site.factor, prepared.plan, buffers, T)
+        position[coordinate] = _factor_inverse(site.transform, value)
+    end
+    nothing
+end
+
+@inline function _factor_site_sample!(rng::BRM.AbstractRNG, ::Val{Name},
+        site::StochasticSite{S,Tr,F,BlockSiteShape,ConditionedSite},
+        position::AbstractVector{T}, output::AbstractVector{T},
+        prepared::FactorPrepared, buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
+    nothing
+end
+
+@inline function _factor_site_sample!(rng::BRM.AbstractRNG, ::Val{Name},
         site::StochasticSite{S,Tr,F,BroadcastSiteShape,A},
         position::AbstractVector{T}, output::AbstractVector{T},
         prepared::FactorPrepared, buffers::FactorBuffers{T}) where {Name,S,Tr,F,A,T}
@@ -1237,9 +1449,11 @@ end
     factor isa NormalSiteFactor || throw(CapabilityError(
         :factor_family,
         "prior predictive factor `$Name` must currently be Normal"))
-    location = _factor_argument(factor.location, prepared.plan, buffers, T)
-    scale = _factor_argument(factor.scale, prepared.plan, buffers, T)
     for index in eachindex(output)
+        location = _factor_argument_at(
+            factor.location, index, prepared.plan, buffers, T)
+        scale = _factor_argument_at(
+            factor.scale, index, prepared.plan, buffers, T)
         output[index] = location + scale * BRM.randn(rng, T)
     end
     nothing
@@ -1431,8 +1645,12 @@ end
 @inline function _factor_write_bundle_query!(rng, output::AbstractVector,
         ::BRM.NativePPLLinearPredictor, work::FactorWorkspace,
         prepared::FactorPrepared)
-    location, _ = _factor_terminal_arguments(prepared, work.primal)
-    fill!(output, location)
+    for index in eachindex(output)
+        location, _ = _factor_terminal_arguments(
+            prepared, work.primal, index)
+        output[index] = location
+    end
+    output
 end
 
 @inline function _factor_write_bundle_query!(rng, output::AbstractVector,
@@ -1444,9 +1662,10 @@ end
 @inline function _factor_write_bundle_query!(rng::BRM.AbstractRNG,
         output::AbstractVector, ::BRM.NativePPLPosteriorPredictive,
         work::FactorWorkspace, prepared::FactorPrepared)
-    location, scale = _factor_terminal_arguments(prepared, work.primal)
     T = eltype(work)
     for index in eachindex(output)
+        location, scale = _factor_terminal_arguments(
+            prepared, work.primal, index)
         output[index] = location + scale * BRM.randn(rng, T)
     end
     output
@@ -3105,6 +3324,26 @@ function _lower_brmi_scalar_factor_dag(brmi::BRM.BRMI, response::Symbol,
     (; declaration, bindings=(;), conditions)
 end
 
+function _brmi_literal_normal_prior(brmi::BRM.BRMI, name::Symbol)
+    lhs, prior = BRM._native_ppl_sampling_rhs(brmi, name)
+    BRM._native_ppl_ref_name(lhs) === name || throw(CapabilityError(
+        :parameter_prior,
+        "sampled offset `$name` must have a bare left-hand side"))
+    prior isa BRM.ExprColumn && BRM.getf(prior) === BRM.Normal || throw(
+        CapabilityError(
+            :parameter_prior,
+            "sampled offset `$name` must use Normal(location, scale)"))
+    isempty(BRM.getkwargs(prior)) || throw(CapabilityError(
+        :parameter_prior,
+        "Normal prior for sampled offset `$name` cannot have keywords"))
+    arguments = BRM.getargs(prior)
+    length(arguments) == 2 && all(argument -> argument isa Real, arguments) ||
+        throw(CapabilityError(
+            :parameter_prior,
+            "sampled offset `$name` requires literal Normal(location, scale)"))
+    normal_prior(arguments...)
+end
+
 function _lower_brmi(brmi::BRM.BRMI)
     observed = BRM.outcomes(brmi)
     length(observed) == 1 || throw(CapabilityError(
@@ -3176,7 +3415,14 @@ function _lower_brmi(brmi::BRM.BRMI)
         factor_dag === nothing || return factor_dag
     end
 
-    predictor_terms = BRM._native_ppl_affine_predictors(brmi, location)
+    affine_components = BRM._native_ppl_affine_components(brmi, location)
+    predictor_terms = affine_components.predictors
+    sampled_offsets = affine_components.offsets
+    has_intercept = affine_components.intercept
+    isempty(sampled_offsets) && !has_intercept && throw(CapabilityError(
+        :predictor_terms,
+        "the current native-PPL no-intercept affine slice requires a " *
+        "sampled scalar offset"))
     predictor_columns = map(term -> term.column, predictor_terms)
     predictor_names = map(BRM.name, predictor_columns)
     response in predictor_names && throw(CapabilityError(
@@ -3193,8 +3439,9 @@ function _lower_brmi(brmi::BRM.BRMI)
     prior_scale = family === BRM.Normal ?
         BRM._native_ppl_exponential_prior(brmi, scale_name) : nothing
     expected_values = family === BRM.Normal ?
-        Set((location, scale_name, response, predictor_names...)) :
-        Set((location, response, predictor_names...))
+        Set((location, scale_name, response, predictor_names...,
+             sampled_offsets...)) :
+        Set((location, response, predictor_names..., sampled_offsets...))
     intercept_prior.operation === nothing ||
         push!(expected_values, intercept_prior.operation)
     extras = setdiff(Set(keys(brmi.operations)), expected_values)
@@ -3209,9 +3456,11 @@ function _lower_brmi(brmi::BRM.BRMI)
         :likelihood,
         "the first intercept-only BRM native-PPL slice supports Normal"))
     coefficient_name = scalar_location ? location : Symbol(:beta_, location)
+    coefficient_keys = has_intercept ?
+        (:Intercept, predictor_names...) : Tuple(predictor_names)
     coefficient_declaration = parameter(
         RealSupport(),
-        scalar_location ? (location,) : (:Intercept, predictor_names...);
+        scalar_location ? (location,) : coefficient_keys;
         transform=Identity(),
         prior=intercept_prior.operation === nothing ? StandardNormal() :
             normal_prior(intercept_prior.location, intercept_prior.scale))
@@ -3219,8 +3468,15 @@ function _lower_brmi(brmi::BRM.BRMI)
         scale_declaration = parameter(
             PositiveSupport(), (scale_name,);
             transform=Exp(), prior=Exponential(prior_scale))
-        NamedTuple{(coefficient_name, scale_name)}(
-            (coefficient_declaration, scale_declaration))
+        offset_declarations = map(
+            name -> parameter(
+                RealSupport(), (name,); transform=Identity(),
+                prior=_brmi_literal_normal_prior(brmi, name)),
+            sampled_offsets)
+        _declaration_namedtuple(
+            (sampled_offsets..., coefficient_name, scale_name),
+            (offset_declarations..., coefficient_declaration,
+             scale_declaration))
     else
         NamedTuple{(coefficient_name,)}((coefficient_declaration,))
     end
@@ -3241,7 +3497,8 @@ function _lower_brmi(brmi::BRM.BRMI)
     node_names = scalar_location ? () : (Tuple(transform_names)..., location)
     node_values = scalar_location ? () : (
         Tuple(transform_declarations)...,
-        affine(Tuple(affine_inputs), coefficient_name))
+        affine(Tuple(affine_inputs), coefficient_name;
+               offsets=sampled_offsets, intercept=has_intercept))
     node_declarations = _declaration_namedtuple(node_names, node_values)
 
     observation_declaration = if family === BRM.Normal

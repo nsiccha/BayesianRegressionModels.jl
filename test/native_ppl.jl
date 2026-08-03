@@ -3410,6 +3410,106 @@ end
           deterministic_scale_graph.schedule
     @test deterministic_scale_rebound.plan.bindings ==
           deterministic_scale_plan.bindings
+
+    sampled_offset_data = (;
+        x=[-1.0, 0.0, 1.0, 2.0],
+        y=[0.1, 0.4, 0.8, 1.0])
+    sampled_offset_brmi = @brm sampled_offset_data begin
+        latent ~ Normal(0, 1)
+        sigma ~ Exponential(2)
+        mu ~ 0 + x + offset(latent)
+        y ~ Normal(mu, sigma)
+    end
+    @test popcoefnames(sampled_offset_brmi, :mu) == [:x]
+    @test dependencies(sampled_offset_brmi, :mu).intermediates == [:latent]
+    sampled_offset_model = NP.lower(sampled_offset_brmi)
+    direct_sampled_offset_model = NP.model(
+        inputs=(; x=NP.input()),
+        parameters=(;
+            latent=NP.parameter(
+                NP.RealSupport(), (:latent,); transform=NP.Identity(),
+                prior=NP.normal_prior(0, 1)),
+            beta_mu=NP.parameter(
+                NP.RealSupport(), (:x,); transform=NP.Identity(),
+                prior=NP.StandardNormal()),
+            sigma=NP.parameter(
+                NP.PositiveSupport(), (:sigma,); transform=NP.Exp(),
+                prior=NP.Exponential(2))),
+        nodes=(; mu=NP.affine(
+            :x, :beta_mu; offsets=(:latent,), intercept=false)),
+        observations=(; y=NP.broadcasted(NP.normal(:y, :mu, :sigma))))
+    @test typeof(sampled_offset_model) === typeof(direct_sampled_offset_model)
+    @test sprint(show, sampled_offset_model) ==
+          sprint(show, direct_sampled_offset_model)
+    @test SBBRMI(sampled_offset_brmi; mod=@__MODULE__) isa SBBRMI
+    sampled_offset_graph = NP.factor_graph(
+        sampled_offset_model; conditions=(; y=sampled_offset_data.y))
+    @test sampled_offset_graph.schedule ==
+          (:latent, :beta_mu, :sigma, :mu, :y)
+    @test sampled_offset_graph.dimension == 3
+    @test sampled_offset_graph.nodes.mu isa NP.AffineFactorNode
+    @test !NP.affine_has_intercept(sampled_offset_graph.nodes.mu)
+    @test sampled_offset_graph.nodes.mu.offsets ==
+          (NP.SiteValue{:latent}(),)
+    @test NP.factor_node_dependencies(sampled_offset_graph.nodes.mu) ==
+          (:beta_mu, :latent)
+
+    sampled_offset_plan = NP.compile(sampled_offset_brmi)
+    @test sampled_offset_plan isa NP.FactorPlan
+    @test sampled_offset_plan.bindings.x == sampled_offset_data.x
+    sampled_offset_prepared = NP.prepare(sampled_offset_plan)
+    sampled_offset_workspace = NP.workspace(
+        sampled_offset_prepared, Float64, DI.AutoEnzyme())
+    sampled_offset_position = [0.2, -0.3, log(0.7)]
+    sampled_offset_latent = sampled_offset_position[1]
+    sampled_offset_beta = sampled_offset_position[2]
+    sampled_offset_sigma = exp(sampled_offset_position[3])
+    sampled_offset_mu = sampled_offset_latent .+
+        sampled_offset_beta .* sampled_offset_data.x
+    sampled_offset_residuals = sampled_offset_data.y .- sampled_offset_mu
+    sampled_offset_expected_density =
+        logpdf(Normal(), sampled_offset_latent) +
+        logpdf(Normal(), sampled_offset_beta) +
+        logpdf(Exponential(2), sampled_offset_sigma) +
+        sampled_offset_position[3] +
+        sum(logpdf.(Normal.(sampled_offset_mu, sampled_offset_sigma),
+                    sampled_offset_data.y))
+    sampled_offset_expected_gradient = [
+        -sampled_offset_latent +
+            sum(sampled_offset_residuals) / sampled_offset_sigma^2,
+        -sampled_offset_beta +
+            sum(sampled_offset_residuals .* sampled_offset_data.x) /
+                sampled_offset_sigma^2,
+        1 - sampled_offset_sigma / 2 - length(sampled_offset_data.y) +
+            sum(abs2, sampled_offset_residuals) / sampled_offset_sigma^2,
+    ]
+    sampled_offset_density, sampled_offset_gradient =
+        NP.logdensity_and_gradient!(
+            sampled_offset_workspace, sampled_offset_prepared,
+            sampled_offset_position)
+    @test sampled_offset_density ≈ sampled_offset_expected_density
+    @test sampled_offset_gradient ≈ sampled_offset_expected_gradient
+    @test vec(sampled_offset_workspace.primal.node_rows[1, :]) ≈
+          sampled_offset_mu
+    @test NP.evaluate(
+        sampled_offset_workspace, sampled_offset_prepared,
+        sampled_offset_position, NP.LinearPredictor()) ≈ sampled_offset_mu
+    @test NP.evaluate(
+        sampled_offset_workspace, sampled_offset_prepared,
+        sampled_offset_position, NP.PointwiseLogLikelihood()) ≈
+          logpdf.(Normal.(sampled_offset_mu, sampled_offset_sigma),
+                  sampled_offset_data.y)
+    @test factor_steady_state_allocations(
+        sampled_offset_workspace, sampled_offset_prepared,
+        sampled_offset_position) == (; primal=0, gradient=0)
+    sampled_offset_prediction_only = NP.rebind(
+        sampled_offset_prepared, (;))
+    @test !NP.has_response(sampled_offset_prediction_only)
+    @test length(NP.simulate(
+        MersenneTwister(933), NP.workspace(sampled_offset_prediction_only),
+        sampled_offset_prediction_only, sampled_offset_position)) ==
+          length(sampled_offset_data.x)
+
     hierarchy_plan = NP.compile(NP.condition(hierarchy; y=response))
     @test hierarchy_plan isa NP.FactorPlan
     @test LogDensityProblems.dimension(hierarchy_plan) == 4
