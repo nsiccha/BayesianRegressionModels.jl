@@ -8602,6 +8602,81 @@ end
     @test occursin("observation-weight constructor", err.msg)
 end
 
+@testset "typed native PPL response evidence" begin
+    truncated = NP.truncated_evidence(lower=-0.75, upper=1.25)
+    @test NP.evidence_kind(truncated) === :truncated
+    @test NP.evidence_lower(truncated) == -0.75
+    @test NP.evidence_upper(truncated) == 1.25
+
+    censored = NP.censored_evidence(lower=:lower, upper=:upper)
+    @test NP.evidence_kind(censored) === :censored
+    @test NP.evidence_lower(censored) === :lower
+    @test NP.evidence_upper(censored) === :upper
+
+    interval = NP.interval_evidence(:interval_upper)
+    @test NP.evidence_kind(interval) === :interval_censored
+    @test NP.evidence_lower(interval) === nothing
+    @test NP.evidence_upper(interval) === :interval_upper
+
+    @test_throws ArgumentError NP.truncated_evidence()
+    @test_throws ArgumentError NP.censored_evidence()
+    @test_throws ArgumentError NP.interval_evidence(nothing)
+    @test_throws ArgumentError NP.truncated_evidence(lower=1.0, upper=1.0)
+    @test_throws ArgumentError NP.censored_evidence(lower=-Inf)
+    @test_throws ArgumentError NP.interval_evidence([1.0, 2.0])
+
+    base = NP.normal(:y, :mu, :sigma)
+    observation = NP.evidence_observation(base, censored)
+    @test NP.observation_response(observation) === :y
+    @test NP.observation_dependencies(observation) ==
+          (:mu, :sigma, :lower, :upper)
+
+    declaration = NP.model(
+        inputs=(; x=NP.input(), lower=NP.input(), upper=NP.input()),
+        parameters=(;
+            beta_mu=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            sigma=NP.parameter(
+                NP.PositiveSupport(), (:sigma,);
+                transform=NP.Exp(), prior=NP.Exponential(2.0))),
+        nodes=(; mu=NP.affine(:x, :beta_mu)),
+        observations=(; y=NP.broadcasted(observation)))
+    graph = NP.factor_graph(
+        declaration;
+        bindings=(;
+            x=[-1.0, 0.5], lower=[-0.5, -0.5], upper=[1.0, 1.0]),
+        conditions=(; y=[-0.5, 0.25]))
+    factor = graph.sites.y.factor
+    @test factor isa NP.EvidenceSiteFactor
+    @test factor.factor isa NP.NormalSiteFactor
+    @test factor.evidence === censored
+    @test factor.lower isa NP.InputValue{:lower}
+    @test factor.upper isa NP.InputValue{:upper}
+    @test NP.base_site_factor(factor) isa NP.NormalSiteFactor
+    @test NP.site_factor_dependencies(factor) == (:mu, :sigma)
+    @test graph.schedule == (:beta_mu, :sigma, :mu, :y)
+
+    nested = NP.weighted_observation(
+        NP.evidence_observation(base, truncated),
+        NP.observation_weight(:frequency, :replicates))
+    nested_model = NP.model(
+        inputs=(; x=NP.input(), replicates=NP.input()),
+        parameters=declaration.parameters,
+        nodes=declaration.nodes,
+        observations=(; y=NP.broadcasted(nested)))
+    nested_graph = NP.factor_graph(
+        nested_model;
+        bindings=(; x=[-1.0, 0.5], replicates=[1, 2]),
+        conditions=(; y=[-0.5, 0.25]))
+    nested_factor = nested_graph.sites.y.factor
+    @test nested_factor isa NP.WeightedSiteFactor
+    @test nested_factor.factor isa NP.EvidenceSiteFactor
+    @test NP.base_site_factor(nested_factor) isa NP.NormalSiteFactor
+    @test NP.observation_dependencies(nested) ==
+          (:mu, :sigma, :replicates)
+end
+
 @testset "native PPL workflow queries and replay" begin
     data = (; x=[-1.0, 0.0, 2.0], y=[0.5, 1.0, 2.5])
     brmi = @brm data begin

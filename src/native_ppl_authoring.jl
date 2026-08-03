@@ -341,6 +341,84 @@ weighted_observation(observation::AbstractObservationDeclaration,
                      weight::AbstractObservationWeight) =
     WeightedObservation(observation, weight)
 
+"""Typed evidence semantics retained around one observation declaration."""
+abstract type AbstractObservationEvidence end
+
+struct TruncatedEvidence{L,U} <: AbstractObservationEvidence
+    lower::L
+    upper::U
+end
+
+struct CensoredEvidence{L,U} <: AbstractObservationEvidence
+    lower::L
+    upper::U
+end
+
+struct IntervalEvidence{U} <: AbstractObservationEvidence
+    upper::U
+end
+
+function _observation_bound(bound, label::AbstractString)
+    bound === nothing && return nothing
+    bound isa Symbol && return bound
+    bound isa Real || throw(ArgumentError(
+        "native PPL $label must be a finite real literal, a bound input " *
+        "name, or `nothing`; got $(typeof(bound))"))
+    isfinite(bound) || throw(ArgumentError(
+        "native PPL $label literal must be finite; got $bound"))
+    bound
+end
+
+function _observation_interval(lower, upper, label::AbstractString)
+    lower = _observation_bound(lower, "$label lower bound")
+    upper = _observation_bound(upper, "$label upper bound")
+    lower === nothing && upper === nothing && throw(ArgumentError(
+        "native PPL $label needs at least one bound"))
+    lower isa Real && upper isa Real && lower >= upper &&
+        throw(ArgumentError(
+            "native PPL $label lower bound must be below its upper bound; " *
+            "got ($lower, $upper)"))
+    lower, upper
+end
+
+function truncated_evidence(; lower=nothing, upper=nothing)
+    lower, upper = _observation_interval(lower, upper, "truncation")
+    TruncatedEvidence(lower, upper)
+end
+
+function censored_evidence(; lower=nothing, upper=nothing)
+    lower, upper = _observation_interval(lower, upper, "censoring")
+    CensoredEvidence(lower, upper)
+end
+
+function interval_evidence(upper)
+    upper = _observation_bound(upper, "interval-evidence upper endpoint")
+    upper === nothing && throw(ArgumentError(
+        "native PPL interval evidence needs an upper endpoint"))
+    IntervalEvidence(upper)
+end
+
+evidence_kind(::TruncatedEvidence) = :truncated
+evidence_kind(::CensoredEvidence) = :censored
+evidence_kind(::IntervalEvidence) = :interval_censored
+evidence_lower(evidence::Union{TruncatedEvidence,CensoredEvidence}) =
+    evidence.lower
+evidence_lower(::IntervalEvidence) = nothing
+evidence_upper(evidence::AbstractObservationEvidence) = evidence.upper
+
+"""One base observation decorated with truncation/censoring evidence."""
+struct EvidenceObservation{
+        O<:AbstractObservationDeclaration,
+        E<:AbstractObservationEvidence,
+    } <: AbstractObservationDeclaration
+    observation::O
+    evidence::E
+end
+
+evidence_observation(observation::AbstractObservationDeclaration,
+                     evidence::AbstractObservationEvidence) =
+    EvidenceObservation(observation, evidence)
+
 """Explicit Julia-broadcast lifting of one scalar stochastic-site declaration."""
 struct BroadcastObservation{O<:AbstractObservationDeclaration} <:
        AbstractObservationDeclaration
@@ -361,6 +439,8 @@ observation_response(::BernoulliLogitObservation{Response}) where {Response} =
 observation_response(::PoissonObservation{Response}) where {Response} = Response
 observation_response(observation::WeightedObservation) =
     observation_response(observation.observation)
+observation_response(observation::EvidenceObservation) =
+    observation_response(observation.observation)
 observation_response(observation::BroadcastObservation) =
     observation_response(observation.scalar)
 observation_dependencies(
@@ -375,8 +455,19 @@ observation_dependencies(
 observation_dependencies(observation::WeightedObservation) =
     (observation_dependencies(observation.observation)...,
      observation_weight_source(observation.weight))
+_evidence_bound_dependencies(bound) = bound isa Symbol ? (bound,) : ()
+observation_dependencies(observation::EvidenceObservation) =
+    (observation_dependencies(observation.observation)...,
+     _evidence_bound_dependencies(evidence_lower(observation.evidence))...,
+     _evidence_bound_dependencies(evidence_upper(observation.evidence))...)
 observation_dependencies(observation::BroadcastObservation) =
     observation_dependencies(observation.scalar)
+
+base_observation(observation::AbstractObservationDeclaration) = observation
+base_observation(observation::WeightedObservation) =
+    base_observation(observation.observation)
+base_observation(observation::EvidenceObservation) =
+    base_observation(observation.observation)
 
 """
 An unbound, typed native-PPL declaration shared by direct authors and BRM.
@@ -461,8 +552,20 @@ struct WeightedSiteFactor{
     values::V
 end
 
+struct EvidenceSiteFactor{
+        F<:AbstractSiteFactor,
+        E<:AbstractObservationEvidence,
+        L,U,
+    } <: AbstractSiteFactor
+    factor::F
+    evidence::E
+    lower::L
+    upper::U
+end
+
 base_site_factor(factor::AbstractSiteFactor) = factor
-base_site_factor(factor::WeightedSiteFactor) = factor.factor
+base_site_factor(factor::Union{WeightedSiteFactor,EvidenceSiteFactor}) =
+    base_site_factor(factor.factor)
 
 site_factor_dependencies(::StandardNormalSiteFactor) = ()
 site_factor_dependencies(factor::NormalSiteFactor) =
@@ -476,6 +579,9 @@ site_factor_dependencies(factor::PoissonSiteFactor) =
     _factor_value_dependencies((factor.rate,))
 site_factor_dependencies(factor::WeightedSiteFactor) =
     site_factor_dependencies(factor.factor)
+site_factor_dependencies(factor::EvidenceSiteFactor) =
+    (site_factor_dependencies(factor.factor)...,
+     _factor_value_dependencies((factor.lower, factor.upper))...)
 
 _factor_value_name(value::SiteValue) = site_value_name(value)
 _factor_value_name(value::NodeValue) = node_value_name(value)
@@ -764,6 +870,35 @@ function _factor_value(name::Symbol, inputs::NamedTuple, nodes::NamedTuple)
     SiteValue{name}()
 end
 
+_factor_bound_value(bound::Symbol, inputs::NamedTuple, nodes::NamedTuple) =
+    _factor_value(bound, inputs, nodes)
+_factor_bound_value(bound, ::NamedTuple, ::NamedTuple) = LiteralValue(bound)
+
+function _decorate_site_factor(observation::AbstractObservationDeclaration,
+                               factor::AbstractSiteFactor,
+                               inputs::NamedTuple, nodes::NamedTuple,
+                               name::Symbol)
+    observation === base_observation(observation) && return factor
+    if observation isa WeightedObservation
+        factor = _decorate_site_factor(
+            observation.observation, factor, inputs, nodes, name)
+        source = observation_weight_source(observation.weight)
+        hasproperty(inputs, source) || throw(CapabilityError(
+            :graph_identity,
+            "weighted observation `$name` references unknown weight input " *
+            "`$source`"))
+        return WeightedSiteFactor(
+            factor, observation.weight, _factor_value(source, inputs, nodes))
+    end
+    factor = _decorate_site_factor(
+        observation.observation, factor, inputs, nodes, name)
+    evidence = observation.evidence
+    EvidenceSiteFactor(
+        factor, evidence,
+        _factor_bound_value(evidence_lower(evidence), inputs, nodes),
+        _factor_bound_value(evidence_upper(evidence), inputs, nodes))
+end
+
 function _factor_node(declaration::AbstractNodeDeclaration,
                       inputs::NamedTuple, nodes::NamedTuple)
     reference(name) = _factor_value(name, inputs, nodes)
@@ -813,29 +948,20 @@ function _observation_stochastic_site(
     name::Symbol, declaration::AbstractObservationDeclaration,
     inputs::NamedTuple, nodes::NamedTuple, conditions::NamedTuple)
     scalar = scalar_observation(declaration)
-    base_observation = scalar isa WeightedObservation ?
-        scalar.observation : scalar
-    dependencies = observation_dependencies(base_observation)
-    factor = if base_observation isa NormalObservation
+    base = base_observation(scalar)
+    dependencies = observation_dependencies(base)
+    factor = if base isa NormalObservation
         NormalSiteFactor(
             _factor_value(dependencies[1], inputs, nodes),
             _factor_value(dependencies[2], inputs, nodes))
-    elseif base_observation isa BernoulliLogitObservation
+    elseif base isa BernoulliLogitObservation
         BernoulliLogitSiteFactor(_factor_value(
             only(dependencies), inputs, nodes))
     else
         PoissonSiteFactor(_factor_value(
             only(dependencies), inputs, nodes))
     end
-    if scalar isa WeightedObservation
-        source = observation_weight_source(scalar.weight)
-        hasproperty(inputs, source) || throw(CapabilityError(
-            :graph_identity,
-            "weighted observation `$name` references unknown weight input " *
-            "`$source`"))
-        factor = WeightedSiteFactor(
-            factor, scalar.weight, _factor_value(source, inputs, nodes))
-    end
+    factor = _decorate_site_factor(scalar, factor, inputs, nodes, name)
     shape = is_broadcast_observation(declaration) ?
         BroadcastSiteShape() : ScalarSiteShape()
     base_factor = base_site_factor(factor)
@@ -3932,55 +4058,96 @@ end
 
 function _qualified_observation(namespace::Symbol, observation, mapping)
     scalar = scalar_observation(observation)
-    base_observation = scalar isa WeightedObservation ?
-        scalar.observation : scalar
-    response = qualified_name(namespace, observation_response(base_observation))
-    declaration = if base_observation isa NormalObservation
-        dependencies = observation_dependencies(base_observation)
+    base = base_observation(scalar)
+    response = qualified_name(namespace, observation_response(base))
+    declaration = if base isa NormalObservation
+        dependencies = observation_dependencies(base)
         normal(
             response,
             _mapped_name(mapping, dependencies[1], namespace, "Normal factor"),
             _mapped_name(mapping, dependencies[2], namespace, "Normal factor"))
-    elseif base_observation isa BernoulliLogitObservation
+    elseif base isa BernoulliLogitObservation
         bernoulli_logit(
             response,
             _mapped_name(
-                mapping, only(observation_dependencies(base_observation)),
+                mapping, only(observation_dependencies(base)),
                 namespace, "Bernoulli-logit factor"))
     else
         poisson(
             response,
             _mapped_name(
-                mapping, only(observation_dependencies(base_observation)),
+                mapping, only(observation_dependencies(base)),
                 namespace, "Poisson factor"))
     end
-    if scalar isa WeightedObservation
-        weight = scalar.weight
+    declaration = _qualified_observation_decorators(
+        namespace, scalar, declaration, mapping)
+    is_broadcast_observation(observation) ? broadcasted(declaration) : declaration
+end
+
+_qualified_evidence_bound(bound::Symbol, mapping, namespace) =
+    _mapped_name(mapping, bound, namespace, "observation-evidence bound")
+_qualified_evidence_bound(bound, mapping, namespace) = bound
+
+function _qualified_observation_decorators(
+    namespace::Symbol, observation::AbstractObservationDeclaration,
+    declaration::AbstractObservationDeclaration, mapping)
+    observation === base_observation(observation) && return declaration
+    if observation isa WeightedObservation
+        inner = _qualified_observation_decorators(
+            namespace, observation.observation, declaration, mapping)
+        weight = observation.weight
         source = _mapped_name(
             mapping, observation_weight_source(weight), namespace,
             "observation weight")
-        declaration = weighted_observation(
-            declaration,
-            observation_weight(observation_weight_kind(weight), source))
+        return weighted_observation(
+            inner, observation_weight(observation_weight_kind(weight), source))
     end
-    is_broadcast_observation(observation) ? broadcasted(declaration) : declaration
+    inner = _qualified_observation_decorators(
+        namespace, observation.observation, declaration, mapping)
+    evidence = observation.evidence
+    lower = _qualified_evidence_bound(
+        evidence_lower(evidence), mapping, namespace)
+    upper = _qualified_evidence_bound(
+        evidence_upper(evidence), mapping, namespace)
+    mapped = if evidence isa TruncatedEvidence
+        truncated_evidence(; lower, upper)
+    elseif evidence isa CensoredEvidence
+        censored_evidence(; lower, upper)
+    else
+        interval_evidence(upper)
+    end
+    evidence_observation(inner, mapped)
 end
 
 function _observation_with_response(observation, response::Symbol)
     scalar = scalar_observation(observation)
-    base_observation = scalar isa WeightedObservation ?
-        scalar.observation : scalar
-    dependencies = observation_dependencies(base_observation)
-    declaration = if base_observation isa NormalObservation
+    base = base_observation(scalar)
+    dependencies = observation_dependencies(base)
+    declaration = if base isa NormalObservation
         normal(response, dependencies...)
-    elseif base_observation isa BernoulliLogitObservation
+    elseif base isa BernoulliLogitObservation
         bernoulli_logit(response, only(dependencies))
     else
         poisson(response, only(dependencies))
     end
-    scalar isa WeightedObservation && (declaration = weighted_observation(
-        declaration, scalar.weight))
+    declaration = _observation_decorators_with_response(scalar, declaration)
     is_broadcast_observation(observation) ? broadcasted(declaration) : declaration
+end
+
+function _observation_decorators_with_response(
+    observation::AbstractObservationDeclaration,
+    declaration::AbstractObservationDeclaration)
+    observation === base_observation(observation) && return declaration
+    if observation isa WeightedObservation
+        return weighted_observation(
+            _observation_decorators_with_response(
+                observation.observation, declaration),
+            observation.weight)
+    end
+    evidence_observation(
+        _observation_decorators_with_response(
+            observation.observation, declaration),
+        observation.evidence)
 end
 
 function _resolved_reference(reference::GraphRef, resolved)
@@ -7141,6 +7308,7 @@ export FactorPlan, FactorPrepared, FactorWorkspace, FactorLogDensityProblem
 export StandardNormalSiteFactor, NormalSiteFactor, ExponentialSiteFactor
 export LKJCholeskySiteFactor
 export BernoulliLogitSiteFactor, PoissonSiteFactor, WeightedSiteFactor
+export EvidenceSiteFactor
 export ScalarSiteShape, BlockSiteShape, BroadcastSiteShape
 export FreeSite, ConditionedSite, GeneratedSite
 export RealSupport, PositiveSupport, CholeskyCorrelationSupport
@@ -7150,6 +7318,8 @@ export Center, ZScale, Affine, ExpLink, LogLink
 export GroupGather, RowProduct, GroupedAffine
 export NormalObservation, BernoulliLogitObservation, PoissonObservation
 export AbstractObservationWeight, ObservationWeight
+export AbstractObservationEvidence, TruncatedEvidence, CensoredEvidence
+export IntervalEvidence, EvidenceObservation
 export WeightedObservation, BroadcastObservation
 export model, input, parameter, Identity, Exp, normal_prior, Exponential
 export center, zscale, standardize, affine, exp_link, log_link
@@ -7161,7 +7331,9 @@ export grouped_affine, grouped_standardized, grouped_scales
 export grouped_correlation, grouped_predictors
 export normal, bernoulli_logit, poisson, observation_weight
 export observation_weight_kind, observation_weight_source
-export weighted_observation, broadcasted
+export weighted_observation, truncated_evidence, censored_evidence
+export interval_evidence, evidence_kind, evidence_lower, evidence_upper
+export evidence_observation, broadcasted
 export instantiate, substitute, condition, component, output, compose, bind, lower
 export factor_graph, site_factor_dependencies, factor_node_dependencies
 export site_value_name, input_value_name, node_value_name
