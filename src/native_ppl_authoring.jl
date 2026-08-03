@@ -12,12 +12,21 @@ abstract type AbstractPriorDeclaration end
 abstract type AbstractNodeDeclaration end
 abstract type AbstractObservationDeclaration end
 
-"""A named model input role. The surrounding `NamedTuple` key is its identity."""
+"""
+A named open value port. The surrounding `NamedTuple` key is its identity.
+
+`Role` remains as typed provenance for the transitional BRM compiler, but it
+does not determine whether a connected value is data, a parameter, or a
+deterministic graph value. New direct declarations use generic `:value` ports.
+"""
 struct Input{Role} <: AbstractInputDeclaration end
 
+input() = Input{:value}()
+
 function input(role::Symbol)
-    role in (:predictor, :response, :data) || throw(ArgumentError(
-        "native PPL input role must be :predictor, :response, or :data; got $role"))
+    role in (:value, :predictor, :response, :data) || throw(ArgumentError(
+        "native PPL input role must be :value, :predictor, :response, or " *
+        ":data; got $role"))
     Input{role}()
 end
 
@@ -154,22 +163,68 @@ struct Model{I,P,N,O}
     observations::O
 end
 
-"""A call of a staged `@model` function: one declaration plus its data bindings."""
-struct ModelInstance{M<:Model,B}
+"""
+A composed call of a staged `@model` function.
+
+`bindings` connect open value ports to arbitrary Julia or graph values.
+`conditions` attach realized values to stochastic sites while retaining their
+generating factors. They remain separate because substitution and conditioning
+have different probability semantics.
+"""
+struct ModelInstance{M<:Model,B,C}
     declaration::M
     bindings::B
+    conditions::C
 end
 
-function instantiate(declaration::Model, bindings)
+ModelInstance(declaration::Model, bindings) =
+    ModelInstance(declaration, bindings, (;))
+
+function instantiate(declaration::Model, bindings; conditions=(;))
     _validate_model(declaration)
     _validate_binding_names(declaration, bindings)
-    ModelInstance(declaration, bindings)
+    _validate_condition_names(declaration, conditions)
+    ModelInstance(declaration, bindings, conditions)
 end
+
+"""Connect a subset of a model's open value ports."""
+function substitute(declaration::Model, bindings::NamedTuple)
+    _validate_model(declaration)
+    _validate_substitution_names(declaration, bindings)
+    ModelInstance(declaration, bindings, (;))
+end
+
+function substitute(instance::ModelInstance, bindings::NamedTuple)
+    _validate_substitution_names(instance.declaration, bindings)
+    ModelInstance(
+        instance.declaration, merge(instance.bindings, bindings),
+        instance.conditions)
+end
+
+"""Condition stochastic sites while retaining and scoring their factors."""
+function condition(declaration::Model, conditions::NamedTuple)
+    _validate_model(declaration)
+    _validate_condition_names(declaration, conditions)
+    ModelInstance(declaration, (;), conditions)
+end
+
+function condition(instance::ModelInstance, conditions::NamedTuple)
+    _validate_condition_names(instance.declaration, conditions)
+    ModelInstance(
+        instance.declaration, instance.bindings,
+        merge(instance.conditions, conditions))
+end
+
+condition(declaration::Model; kwargs...) = condition(declaration, (; kwargs...))
+condition(instance::ModelInstance; kwargs...) = condition(instance, (; kwargs...))
+substitute(declaration::Model; kwargs...) = substitute(declaration, (; kwargs...))
+substitute(instance::ModelInstance; kwargs...) = substitute(instance, (; kwargs...))
 
 function Base.show(io::IO, instance::ModelInstance)
     print(io, "NativePPL.ModelInstance(")
     show(io, instance.declaration)
-    print(io, ", bindings=", keys(instance.bindings), ")")
+    print(io, ", bindings=", keys(instance.bindings),
+          ", conditions=", keys(instance.conditions), ")")
 end
 
 function _check_named_declarations(values, kind::AbstractString, type)
@@ -217,15 +272,23 @@ function _validate_model_components(inputs, parameters, nodes, observations)
         push!(available, name)
     end
 
-    response_names = Set(name for (name, declaration) in pairs(inputs)
-                         if input_role(declaration) === :response)
     for (name, declaration) in pairs(observations)
         response = observation_response(declaration)
-        response in response_names || throw(ArgumentError(
-            "native PPL observation `$name` references response input `$response`, " *
-            "which is not declared with role :response"))
         name === response || throw(ArgumentError(
             "native PPL observation key `$name` must match response identity `$response`"))
+        if response in input_names
+            input_role(getproperty(inputs, response)) === :response ||
+                throw(ArgumentError(
+                    "native PPL legacy observation input `$response` must use " *
+                    "role :response; direct stochastic sites must not also be " *
+                    "declared as value ports"))
+        else
+            response in parameter_names && throw(ArgumentError(
+                "native PPL stochastic site `$response` collides with a " *
+                "parameter identity"))
+            response in node_names && throw(ArgumentError(
+                "native PPL stochastic site `$response` collides with a node identity"))
+        end
         for dependency in observation_dependencies(declaration)
             dependency in available || throw(ArgumentError(
                 "native PPL observation `$name` references unavailable dependency " *
@@ -260,6 +323,27 @@ function _validate_binding_names(declaration::Model, bindings)
         "native PPL bindings contain undeclared inputs: " *
         join(sort!(collect(extra_bindings)), ", ")))
     bindings
+end
+
+function _validate_substitution_names(declaration::Model, bindings)
+    bindings isa NamedTuple || throw(ArgumentError(
+        "native PPL substitutions must be a NamedTuple; got $(typeof(bindings))"))
+    extra_bindings = setdiff(Set(keys(bindings)), Set(keys(declaration.inputs)))
+    isempty(extra_bindings) || throw(ArgumentError(
+        "native PPL substitutions reference undeclared value ports: " *
+        join(sort!(collect(extra_bindings)), ", ")))
+    bindings
+end
+
+function _validate_condition_names(declaration::Model, conditions)
+    conditions isa NamedTuple || throw(ArgumentError(
+        "native PPL conditions must be a NamedTuple; got $(typeof(conditions))"))
+    extra_conditions = setdiff(
+        Set(keys(conditions)), Set(keys(declaration.observations)))
+    isempty(extra_conditions) || throw(ArgumentError(
+        "native PPL conditions reference undeclared stochastic sites: " *
+        join(sort!(collect(extra_conditions)), ", ")))
+    conditions
 end
 
 function _validated_plan(plan::Plan)
@@ -1106,5 +1190,5 @@ export NormalObservation, BernoulliLogitObservation, PoissonObservation
 export model, input, parameter, Identity, Exp, Exponential
 export center, zscale, standardize, affine, exp_link
 export normal, bernoulli_logit, poisson
-export instantiate, bind, lower
+export instantiate, substitute, condition, bind, lower
 export @model

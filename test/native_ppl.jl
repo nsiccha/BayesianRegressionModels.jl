@@ -1717,6 +1717,23 @@ end
 
     gaussian_model = direct_native_model(:gaussian, :identity)
     gaussian_data = (; x=[1.0, 2.0], y=[0.0, 1.0])
+    open_gaussian = NP.model(
+        inputs=(; x=NP.input()),
+        parameters=gaussian_model.parameters,
+        nodes=gaussian_model.nodes,
+        observations=gaussian_model.observations)
+    @test NP.input() isa NP.Input{:value}
+    open_instance = NP.substitute(open_gaussian; x=gaussian_data.x)
+    @test keys(open_instance.bindings) == (:x,)
+    @test isempty(open_instance.conditions)
+    conditioned_instance = NP.condition(open_instance; y=gaussian_data.y)
+    @test conditioned_instance.bindings.x === gaussian_data.x
+    @test conditioned_instance.conditions.y === gaussian_data.y
+    @test occursin("conditions=(:y,)", sprint(show, conditioned_instance))
+    @test NP.substitute(conditioned_instance; x=[3.0, 4.0]).bindings.x ==
+          [3.0, 4.0]
+    @test_throws ArgumentError NP.substitute(open_gaussian; unknown=[1.0])
+    @test_throws ArgumentError NP.condition(open_gaussian; unknown=[1.0])
     @test_throws ArgumentError NP.bind(gaussian_model, gaussian_data.x)
     @test_throws ArgumentError NP.bind(gaussian_model, (; x=gaussian_data.x))
     @test_throws ArgumentError NP.bind(
