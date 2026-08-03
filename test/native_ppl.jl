@@ -7268,6 +7268,19 @@ end
         end)))
     @test occursin("grouped offsets must be used once each", err.msg)
     err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function repeated_correlated_group(
+                x, group)
+            tau[(:Intercept, :x)] ~ Exponential(1)
+            L[(:Intercept, :x)] ~ LKJCholesky(2, 2)
+            b[group, (:Intercept, :x)] ~ MvNormalCholesky(tau, L)
+            beta ~ Normal()
+            sigma ~ Exponential(2)
+            mu = beta * x + dot(b[group], (1, x)) +
+                dot(b[group], (1, x))
+            @. y ~ Normal(mu, sigma)
+        end)))
+    @test occursin("distinct public node identities", err.msg)
+    err = argument_error(() -> macroexpand(
         @__MODULE__, :(NP.@model function recursive_model(x)
             z ~ recursive_model(x)
             return z

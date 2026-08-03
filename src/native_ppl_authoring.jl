@@ -5674,6 +5674,9 @@ function _syntax_affine_assignment(statement,
             push!(group_values, correlated_values[entry.index])
         end
     end
+    length(unique(group_names)) == length(group_names) || throw(ArgumentError(
+        "native PPL @model grouped terms must produce distinct public " *
+        "node identities; use each grouped latent site once"))
     (; location=lhs, intercept, offsets=Tuple(sampled_offsets),
        gather_names, gather_values, product_names, product_values,
        correlated_names, correlated_values,
