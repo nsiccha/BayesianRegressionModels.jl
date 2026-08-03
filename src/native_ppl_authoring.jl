@@ -357,8 +357,12 @@ function compose(components::Component...)
 end
 
 """Collision-free flattened identity for a component-local graph name."""
-qualified_name(namespace::Symbol, name::Symbol) = Symbol(
-    "#component#", ncodeunits(string(namespace)), ":", namespace, "#", name)
+function qualified_name(namespace::Symbol, name::Symbol)
+    isempty(string(namespace)) && throw(ArgumentError(
+        "native PPL component namespace must not be empty"))
+    Symbol(
+        "#component#", ncodeunits(string(namespace)), ":", namespace, "#", name)
+end
 
 function _qualified_parameter(
     namespace::Symbol, name::Symbol, declaration::Parameter)
