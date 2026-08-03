@@ -8314,6 +8314,76 @@ end
         observations=declaration.observations))
     @test err.capability == :graph_identity
     @test occursin("replicates", err.detail)
+
+    function weighted_prepared(kind, values)
+        weight = NP.observation_weight(kind, :observation_weights)
+        observation = NP.weighted_observation(
+            NP.normal(:y, :mu, :sigma), weight)
+        declaration = NP.model(
+            inputs=(; x=NP.input(), observation_weights=NP.input()),
+            parameters=(;
+                beta_mu=NP.parameter(
+                    NP.RealSupport(), (:Intercept, :x);
+                    transform=NP.Identity(), prior=NP.StandardNormal()),
+                sigma=NP.parameter(
+                    NP.PositiveSupport(), (:sigma,);
+                    transform=NP.Exp(), prior=NP.Exponential(2.0))),
+            nodes=(; mu=NP.affine(:x, :beta_mu)),
+            observations=(; y=NP.broadcasted(observation)))
+        NP.prepare(NP.bind(
+            declaration,
+            (; x=[-1.0, 0.5, 2.0], observation_weights=values);
+            conditions=(; y=[-0.4, 0.3, 1.2])))
+    end
+
+    position = [0.2, 0.4, log(1.1)]
+    response = [-0.4, 0.3, 1.2]
+    location = 0.2 .+ 0.4 .* [-1.0, 0.5, 2.0]
+    scale = 1.1
+    unit_prepared = weighted_prepared(:unit, ones(3))
+    unit_work = NP.workspace(unit_prepared)
+    unit_density = NP.logdensity!(unit_work, unit_prepared, position)
+    base_pointwise = logpdf.(Normal.(location, scale), response)
+    prior_density = unit_density - sum(base_pointwise)
+    @test NP.evaluate(
+        unit_work, unit_prepared, position,
+        NP.PointwiseLogLikelihood()) ≈ base_pointwise
+
+    analytic_weights = [1.0, 4.0, 2.5]
+    analytic_prepared = weighted_prepared(:analytic, analytic_weights)
+    analytic_work = NP.workspace(analytic_prepared)
+    analytic_pointwise = logpdf.(
+        Normal.(location, scale ./ sqrt.(analytic_weights)), response)
+    @test NP.logdensity!(
+        analytic_work, analytic_prepared, position) ≈
+        prior_density + sum(analytic_pointwise)
+    @test NP.evaluate(
+        analytic_work, analytic_prepared, position,
+        NP.PointwiseLogLikelihood()) ≈ analytic_pointwise
+    analytic_rng = MersenneTwister(707)
+    analytic_expected_rng = MersenneTwister(707)
+    @test NP.simulate(
+        analytic_rng, analytic_work, analytic_prepared, position) ==
+        location .+ scale ./ sqrt.(analytic_weights) .*
+            [randn(analytic_expected_rng) for _ in response]
+
+    for (kind, values) in (
+            (:frequency, [1, 3, 0]),
+            (:power, [0.25, 1.0, 2.5]))
+        prepared = weighted_prepared(kind, values)
+        work = NP.workspace(prepared)
+        expected_pointwise = values .* base_pointwise
+        @test NP.logdensity!(work, prepared, position) ≈
+              prior_density + sum(expected_pointwise)
+        @test NP.evaluate(
+            work, prepared, position,
+            NP.PointwiseLogLikelihood()) ≈ expected_pointwise
+        rng = MersenneTwister(708)
+        expected_rng = MersenneTwister(708)
+        @test NP.simulate(rng, work, prepared, position) ==
+              location .+ scale .*
+                [randn(expected_rng) for _ in response]
+    end
 end
 
 @testset "native PPL workflow queries and replay" begin

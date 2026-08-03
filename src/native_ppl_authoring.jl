@@ -1051,11 +1051,57 @@ function _uses_factor_executor(declaration::Model, conditions, bindings=(;))
                               values(graph.nodes))
     row_scale = any(values(graph.sites)) do site
         site.shape isa BroadcastSiteShape &&
-            site.factor isa NormalSiteFactor &&
-            site.factor.scale isa NodeValue
+            base_site_factor(site.factor) isa NormalSiteFactor &&
+            base_site_factor(site.factor).scale isa NodeValue
+    end
+    weighted_observation = any(values(graph.sites)) do site
+        site.factor isa WeightedSiteFactor
     end
     dependent_site || sampled_offset_affine || grouped_gather ||
-        grouped_affine_node || row_scale
+        grouped_affine_node || row_scale || weighted_observation
+end
+
+function _factor_validate_weight(factor::WeightedSiteFactor,
+                                 bindings::NamedTuple,
+                                 response::Symbol, observation_count::Int)
+    factor.values isa InputValue || throw(CapabilityError(
+        :observation_weights,
+        "weighted response `$response` requires one bound weight input"))
+    source = input_value_name(factor.values)
+    raw = getproperty(bindings, source)
+    raw isa AbstractVector{<:Real} || throw(ArgumentError(
+        "native PPL weight input `$source` for response `$response` must be " *
+        "a real vector"))
+    length(raw) == observation_count || throw(DimensionMismatch(
+        "native PPL weight input `$source` has length $(length(raw)) but " *
+        "response `$response` has length $observation_count"))
+    all(isfinite, raw) || throw(ArgumentError(
+        "native PPL weight input `$source` for response `$response` must be finite"))
+    kind = observation_weight_kind(factor.weight)
+    base = factor.factor
+    if kind === :analytic
+        base isa NormalSiteFactor || throw(CapabilityError(
+            :observation_weights,
+            "analytic weights currently require a Normal response; got " *
+            "$(typeof(base)) for `$response`"))
+        all(>(0), raw) || throw(ArgumentError(
+            "native PPL analytic weights for `$response` must be strictly positive"))
+    elseif kind === :frequency
+        all(value -> value >= zero(value) && isinteger(value), raw) || throw(
+            ArgumentError(
+                "native PPL frequency weights for `$response` must be " *
+                "nonnegative integer-valued counts"))
+    elseif kind === :power
+        all(>=(0), raw) || throw(ArgumentError(
+            "native PPL power weights for `$response` must be nonnegative"))
+    else
+        kind === :unit || throw(CapabilityError(
+            :observation_weights,
+            "unsupported observation-weight kind `$kind`"))
+        all(isone, raw) || throw(ArgumentError(
+            "native PPL unit weights for `$response` must all equal one"))
+    end
+    nothing
 end
 
 function _group_input_names(declaration::Model)
@@ -1563,6 +1609,9 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
     else
         Base.OneTo(0)
     end
+    output_factor = getproperty(graph.sites, output_site).factor
+    output_factor isa WeightedSiteFactor && _factor_validate_weight(
+        output_factor, bindings, output_site, length(observation_keys))
     site_names = Tuple(keys(graph.sites))
     site_indices = NamedTuple{site_names}(
         ntuple(identity, length(site_names)))
@@ -1839,6 +1888,18 @@ function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
         converted
     end
     bindings = NamedTuple{binding_names}(binding_values)
+    output_factor = getproperty(
+        plan.graph.sites, factor_output_site(plan)).factor
+    if output_factor isa WeightedSiteFactor &&
+       observation_weight_kind(output_factor.weight) === :frequency
+        source = input_value_name(output_factor.values)
+        original = getproperty(plan.bindings, source)
+        converted = getproperty(bindings, source)
+        all(index -> converted[index] == original[index], eachindex(original)) ||
+            throw(ArgumentError(
+                "native PPL frequency weights from `$source` cannot be " *
+                "represented exactly as $T"))
+    end
     names = Tuple(keys(plan.conditions))
     values = map(names) do name
         original = getproperty(plan.conditions, name)
@@ -1989,6 +2050,31 @@ end
                                        index, plan, buffers) where {T}
     log_rate = _factor_poisson_log_rate(factor, index, plan, buffers, T)
     BRM._native_ppl_poisson_logdensity(value, log_rate)
+end
+
+@inline function _factor_logdensity_at(
+        factor::WeightedSiteFactor{F,ObservationWeight{:analytic,Source}},
+        value::T, index, plan, buffers) where {F,Source,T}
+    base = factor.factor
+    weight = _factor_argument_at(factor.values, index, plan, buffers, T)
+    location = _factor_argument_at(base.location, index, plan, buffers, T)
+    scale = _factor_argument_at(base.scale, index, plan, buffers, T)
+    adjusted_scale = scale / sqrt(weight)
+    residual = (value - location) / adjusted_scale
+    -T(0.5) * residual * residual - log(adjusted_scale) -
+        T(BRM._NATIVE_PPL_HALF_LOG2PI)
+end
+
+@inline function _factor_logdensity_at(
+        factor::WeightedSiteFactor{F,ObservationWeight{Kind,Source}},
+        value::T, index, plan, buffers) where {
+            F,Kind,Source,T}
+    Kind === :unit && return _factor_logdensity_at(
+        factor.factor, value, index, plan, buffers)
+    weight = _factor_argument_at(factor.values, index, plan, buffers, T)
+    iszero(weight) && return zero(T)
+    weight * _factor_logdensity_at(
+        factor.factor, value, index, plan, buffers)
 end
 
 @inline @generated function _factor_lkj_logdensity(
@@ -2727,7 +2813,7 @@ end
                                          index::Int)
     site = getproperty(
         prepared.plan.graph.sites, factor_output_site(prepared.plan))
-    factor = site.factor
+    factor = base_site_factor(site.factor)
     T = eltype(buffers.values)
     if factor isa NormalSiteFactor
         _factor_argument_at(
@@ -2761,13 +2847,20 @@ end
                                          index::Int)
     site = getproperty(
         prepared.plan.graph.sites, factor_output_site(prepared.plan))
-    factor = site.factor
+    weighted_factor = site.factor
+    factor = base_site_factor(weighted_factor)
     T = eltype(buffers.values)
     if factor isa NormalSiteFactor
         location = _factor_argument_at(
             factor.location, index, prepared.plan, buffers, T)
         scale = _factor_argument_at(
             factor.scale, index, prepared.plan, buffers, T)
+        if weighted_factor isa WeightedSiteFactor &&
+           observation_weight_kind(weighted_factor.weight) === :analytic
+            weight = _factor_argument_at(
+                weighted_factor.values, index, prepared.plan, buffers, T)
+            scale /= sqrt(weight)
+        end
         location + scale * BRM.randn(rng, T)
     elseif factor isa BernoulliLogitSiteFactor
         logit = _factor_argument_at(
