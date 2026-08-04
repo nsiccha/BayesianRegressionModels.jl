@@ -112,6 +112,98 @@ end
     return zeros(k)
 end
 
+# Multivariate POSITIVE-support latent: a `product_distribution` of `Exponential`
+# marginals — used for a vector of grouped scales `tau ~
+# product_distribution(fill(Exponential(1), K))`. Positive support → exp
+# transform per coordinate (constrain u -> exp(u), log-Jacobian u), so accumulate
+# per-marginal logpdf + sum(u). More specific than the real-support method above,
+# so it wins for the `Product{…,Exponential}` type (a product of Normals resolves
+# to `DiagNormal <: MvNormal`, which correctly stays on the identity path).
+@inline function _sample!(ctx::JulianicPrimal, ::Val,
+        dist::Distributions.Product{Distributions.Continuous,<:Distributions.Exponential})
+    k = length(dist)
+    lo = ctx.cursor + 1
+    ctx.cursor += k
+    u = ctx.theta[lo:ctx.cursor]
+    v = exp.(u)
+    ctx.acc += sum(Distributions.logpdf.(dist.v, v)) + sum(u)
+    return v
+end
+@inline function _sample!(ctx::JulianicTrace, ::Val,
+        dist::Distributions.Product{Distributions.Continuous,<:Distributions.Exponential})
+    k = length(dist)
+    ctx.dim += k
+    return ones(k)
+end
+
+# LKJ-Cholesky correlation latent: `L ~ LKJCholesky(K, eta)` returns the K×K
+# lower-triangular Cholesky factor of a correlation matrix, so the body can write
+# the non-centered effect `b = diag(tau) * (L * z)` in ordinary Julia. The `~`
+# magic reduces to prep + logpdf exactly as everywhere else — it just prepares a
+# constrained-manifold coordinate:
+#   * prep: consume K(K-1)/2 unconstrained coords, build L via the tanh/sech
+#     parametrization (row-normalized Cholesky-of-correlation).
+#   * logpdf (fused with the manifold log-Jacobian): the LKJ density in raw
+#     coords, `sum_j (log_normalizer_j + alpha_j * logsech2(raw))`.
+# This reuses the executor's exact leaf math (`_factor_logsech2` / `_factor_sech`
+# / the `LKJCholeskySiteFactor` normalizer formula), so it matches bit-for-bit —
+# but with RUNTIME K (no `Val{K}` / `@generated`) so the primal kernel stays
+# type-stable when K comes from the distribution object's `d` field.
+
+# LKJ log-density in raw coords (mirrors `_factor_lkj_logdensity`, runtime K).
+@inline function _julianic_lkj_logdensity(K::Int, eta, coords::AbstractVector{T}) where {T}
+    density = zero(T)
+    offset = 0
+    for column in 1:(K - 1)
+        alpha = eta + (K - column - 1) / 2
+        logc = BRM.loggamma(alpha + 0.5) - BRM.loggamma(alpha) - 0.5 * log(BRM.pi)
+        for _row in (column + 1):K
+            raw = coords[begin + offset]
+            density += logc + alpha * _factor_logsech2(raw)
+            offset += 1
+        end
+    end
+    return density
+end
+
+# Build the K×K lower-triangular correlation Cholesky factor from the raw coords
+# (mirrors the implicit construction in `_factor_grouped_affine_value`): column s
+# of row c is `(prod_{t<s} sech(raw_ct)) * tanh(raw_cs)`, diagonal is the residual
+# `prod_{t<c} sech(raw_ct)`. Coord addressing matches `_factor_correlation_raw`.
+@inline function _julianic_corr_cholesky(K::Int, coords::AbstractVector{T}) where {T}
+    L = zeros(T, K, K)
+    @inbounds L[1, 1] = one(T)
+    @inbounds for c in 2:K
+        residual = one(T)
+        for s in 1:(c - 1)
+            raw = coords[(s - 1) * K - (s - 1) * s ÷ 2 + c - s]
+            L[c, s] = residual * tanh(raw)
+            residual = residual * _factor_sech(raw)
+        end
+        L[c, c] = residual
+    end
+    return L
+end
+
+@inline function _sample!(ctx::JulianicPrimal, ::Val, dist::Distributions.LKJCholesky)
+    K = dist.d
+    m = K * (K - 1) ÷ 2
+    lo = ctx.cursor + 1
+    ctx.cursor += m
+    coords = ctx.theta[lo:lo + m - 1]
+    ctx.acc += _julianic_lkj_logdensity(K, dist.η, coords)
+    return _julianic_corr_cholesky(K, coords)
+end
+@inline function _sample!(ctx::JulianicTrace, ::Val, dist::Distributions.LKJCholesky)
+    K = dist.d
+    ctx.dim += K * (K - 1) ÷ 2
+    L = zeros(Float64, K, K)                # in-support placeholder (L = I)
+    for i in 1:K
+        L[i, i] = 1.0
+    end
+    return L
+end
+
 # Observation log density. The `~` magic (not the user) supplies `logpdf`, so we
 # route through this runtime helper — the model body needs no `logpdf` in scope,
 # only the distribution constructor the user actually wrote. Broadcast-safe.
