@@ -9,6 +9,19 @@ function _git_succeeds(arguments)
     end
 end
 
+function _git_output(arguments)
+    readchomp(Cmd(String.(arguments)))
+end
+
+function _git_checkout_contains(path, minimum)
+    path = abspath(path)
+    _git_succeeds(["git", "-C", path, "rev-parse", "--git-dir"]) &&
+        _git_succeeds(["git", "-C", path, "cat-file", "-e", "$minimum^{commit}"]) &&
+        _git_succeeds([
+            "git", "-C", path, "merge-base", "--is-ancestor", minimum, "HEAD",
+        ])
+end
+
 function require_git_ancestor(name, path, minimum; reason)
     path = abspath(path)
     _git_succeeds(["git", "-C", path, "rev-parse", "--git-dir"]) || error("""
@@ -27,4 +40,97 @@ function require_git_ancestor(name, path, minimum; reason)
         BRM_TEST_WARMUPHMC pointing at that commit or a descendant.
         """)
     head
+end
+
+function _require_julia_package_checkout(name, path)
+    isdir(path) || error("$name checkout does not exist: $path")
+    isfile(joinpath(path, "Project.toml")) ||
+        error("$name checkout at $path has no Project.toml")
+    path
+end
+
+function _mirror_contains(mirror, revision)
+    !isempty(mirror) && isdir(mirror) && _git_succeeds([
+        "git", "--git-dir=$mirror", "cat-file", "-e", "$revision^{commit}",
+    ])
+end
+
+function _clone_floor_checkout!(destination, minimum;
+        mirror, origin, branch)
+    branch_ref = "refs/heads/$branch"
+    if _mirror_contains(mirror, minimum)
+        if _mirror_contains(mirror, branch_ref) && _git_succeeds([
+                "git", "--git-dir=$mirror", "merge-base", "--is-ancestor",
+                minimum, branch_ref,
+            ])
+            run(Cmd([
+                "git", "clone", "--quiet", "--branch", branch,
+                "--single-branch", mirror, destination,
+            ]))
+            return "host mirror $branch_ref"
+        end
+        run(Cmd(["git", "clone", "--quiet", "--no-checkout", mirror, destination]))
+        run(Cmd(["git", "-C", destination, "checkout", "--quiet", "--detach", minimum]))
+        return "host mirror refs/kb-pins/$minimum"
+    end
+
+    run(Cmd([
+        "git", "clone", "--quiet", "--branch", branch,
+        "--single-branch", origin, destination,
+    ]))
+    "public $origin $branch"
+end
+
+"""
+    resolve_git_floor_checkout(name, configured_path, minimum; kwargs...)
+
+Return a Julia-package checkout whose `HEAD` contains `minimum`. A valid
+caller-provided checkout wins. Otherwise materialize one persistent,
+versioned checkout below `cache_root`, preferring the host mirror's immutable
+pin/`branch` and falling back to the public `origin` branch. The shared
+`~/github` checkout is deliberately never treated as evidence of what has
+landed or been published: it may be stale when its worktree is dirty.
+"""
+function resolve_git_floor_checkout(name, configured_path, minimum;
+        cache_root,
+        mirror="",
+        origin,
+        branch="dev",
+        reason)
+    if !isnothing(configured_path)
+        configured_path = abspath(configured_path)
+        _require_julia_package_checkout(name, configured_path)
+        if _git_checkout_contains(configured_path, minimum)
+            return configured_path
+        end
+        head = _git_succeeds(["git", "-C", configured_path, "rev-parse", "HEAD"]) ?
+            _git_output(["git", "-C", configured_path, "rev-parse", "HEAD"]) :
+            "not a Git checkout"
+        @warn "$name develop path is stale; materializing the required floor instead" path=configured_path head=head minimum=minimum
+    end
+
+    cache_root = abspath(cache_root)
+    cache = joinpath(cache_root, "$(lowercase(name))-$(minimum[1:12])")
+    if ispath(cache)
+        _require_julia_package_checkout(name, cache)
+        require_git_ancestor(name, cache, minimum; reason)
+        return cache
+    end
+
+    mkpath(cache_root)
+    source = mktempdir(cache_root; prefix=".$(lowercase(name))-bootstrap-") do scratch
+        source = _clone_floor_checkout!(
+            scratch, minimum; mirror=mirror, origin=origin, branch=branch)
+        _require_julia_package_checkout(name, scratch)
+        require_git_ancestor(name, scratch, minimum; reason)
+        if ispath(cache)
+            _require_julia_package_checkout(name, cache)
+            require_git_ancestor(name, cache, minimum; reason)
+        else
+            mv(scratch, cache)
+        end
+        source
+    end
+    @info "Materialized $name test dependency" path=cache source minimum
+    cache
 end

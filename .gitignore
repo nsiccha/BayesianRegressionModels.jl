@@ -27,6 +27,9 @@ docs/src/public/live-*/
 Manifest*.toml
 !scripts/render_env/Manifest.toml
 
+# Reproducible develop-path checkouts materialized by test/bootstrap.jl.
+test/.bootstrap/
+
 # Scratch dir for BridgeStan probe artifacts (.stan sources + compiled _model.so).
 # Regenerated on demand and host-specific; 22 of these were committed by mistake
 # in 2ffac3c and had to be untracked again in 9d55b60.
