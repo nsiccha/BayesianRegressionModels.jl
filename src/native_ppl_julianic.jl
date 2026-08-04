@@ -48,21 +48,25 @@ import Distributions
 # PRIMAL: walks θ with a cursor and accumulates the log density into `acc`.
 # `acc` is parameterized on θ's element type (concrete, type-stable) so Enzyme
 # differentiates through the accumulation cleanly.
-mutable struct JulianicPrimal{TH<:AbstractVector,D,A}
+#
+# The observation DATA is deliberately NOT a field here: it is a run-time
+# constant, and mixing a constant array with the active `theta`/`acc` inside one
+# mutable struct is exactly what forced Enzyme's `set_runtime_activity`. Instead
+# the body's `run` closure takes the data as a SEPARATE argument (passed through
+# DI as a `Constant`), so this struct holds only active/inactive-scalar state and
+# STATIC activity suffices — no runtime-activity workaround.
+mutable struct JulianicPrimal{TH<:AbstractVector,A}
     theta::TH
-    data::D
     cursor::Int
     acc::A
 end
-JulianicPrimal(theta::AbstractVector, data) =
-    JulianicPrimal(theta, data, 0, zero(eltype(theta)))
+JulianicPrimal(theta::AbstractVector) = JulianicPrimal(theta, 0, zero(eltype(theta)))
 
 # TRACE: runs the body once to size the unconstrained coordinate vector.
-mutable struct JulianicTrace{D}
-    data::D
+mutable struct JulianicTrace
     dim::Int
 end
-JulianicTrace(data) = JulianicTrace(data, 0)
+JulianicTrace() = JulianicTrace(0)
 
 # --- `~` runtime: prep + logpdf ------------------------------------------
 #
@@ -214,10 +218,10 @@ end
     (ctx.acc += contribution; nothing)
 @inline _accumulate!(::JulianicTrace, _contribution) = nothing
 
-# Fetch conditioned data for an observation site (available in both modes,
-# because tracing happens after conditioning).
-@inline _observation(ctx::Union{JulianicPrimal,JulianicTrace}, ::Val{name}) where {name} =
-    getproperty(ctx.data, name)
+# Fetch conditioned data for an observation site. The data is passed to the body
+# as a separate argument (not stored in the differentiated context — see
+# `JulianicPrimal`), so this reads straight from that constant `data` value.
+@inline _observation(data, ::Val{name}) where {name} = getproperty(data, name)
 
 # --- Model objects --------------------------------------------------------
 
@@ -255,8 +259,8 @@ jcondition(model::JulianicModel; observations...) =
 Run the body once in TRACE mode to discover the unconstrained dimension.
 """
 function jprepare(conditioned::JulianicConditioned)
-    trace = JulianicTrace(conditioned.data)
-    conditioned.run(trace)
+    trace = JulianicTrace()
+    conditioned.run(trace, conditioned.data)
     return JulianicPrepared(conditioned.run, conditioned.data, trace.dim)
 end
 
@@ -265,8 +269,8 @@ dimension(prepared::JulianicPrepared) = prepared.dimension
 # The primal kernel `θ -> Real`. Top-level (not a closure over θ) so the AD
 # backend sees `prepared` as a constant and `theta` as the sole active input.
 function _julianic_kernel(theta::AbstractVector, prepared::JulianicPrepared)
-    ctx = JulianicPrimal(theta, prepared.data)
-    prepared.run(ctx)
+    ctx = JulianicPrimal(theta)
+    prepared.run(ctx, prepared.data)
     return ctx.acc
 end
 
@@ -335,7 +339,9 @@ end
 
 # Lower one statement. Only `~` statements are rewritten; everything else is
 # returned verbatim (that is the whole point — the body is ordinary Julia).
-function _julianic_lower_statement(statement, ctx)
+# `ctx` names the (mutable) sampling context; `data` names the conditioned
+# observation data — both are parameters of the generated `run` closure.
+function _julianic_lower_statement(statement, ctx, data)
     broadcast_sample = _julianic_broadcast_sample(statement)
     if broadcast_sample !== nothing
         lhs, rhs = broadcast_sample.lhs, broadcast_sample.rhs
@@ -351,7 +357,7 @@ function _julianic_lower_statement(statement, ctx)
                       Expr(:call, logpdf_var, rhs, data_var))
         return quote
             $(logpdf_var) = $(_obs_logpdf)
-            $(data_var) = $(_observation)($ctx, $(Val(lhs)))
+            $(data_var) = $(_observation)($data, $(Val(lhs)))
             $(_accumulate!)($ctx, sum($(dotted)))
         end
     end
@@ -377,6 +383,7 @@ function _julianic_model_syntax(definition)
 
     statements = body isa Expr && body.head === :block ? body.args : Any[body]
     ctx = gensym(:ctx)
+    data = gensym(:data)
     lowered = Any[]
     for statement in statements
         statement isa LineNumberNode && (push!(lowered, statement); continue)
@@ -385,10 +392,10 @@ function _julianic_model_syntax(definition)
         if statement isa Expr && statement.head === :return
             continue
         end
-        push!(lowered, _julianic_lower_statement(statement, ctx))
+        push!(lowered, _julianic_lower_statement(statement, ctx, data))
     end
 
-    run_closure = Expr(:function, Expr(:call, gensym(:run), ctx),
+    run_closure = Expr(:function, Expr(:call, gensym(:run), ctx, data),
                        Expr(:block, lowered..., nothing))
     model_expr = :($(JulianicModel)($run_closure, $(input_names)))
     return Expr(:function, signature, Expr(:block, model_expr))
