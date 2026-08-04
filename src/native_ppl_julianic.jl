@@ -79,7 +79,7 @@ using MutatingFunctions: apply!!
 # Destination SHAPES for those in-place fills, declared rather than discovered by a
 # pilot run: `broadcast_size` for broadcast nodes (function-first, so it is its own
 # entry point) and `output_size(getindex, …)` for gathers.
-using OutputSignatures: broadcast_size, output_size
+using OutputSignatures: broadcast_eltype, broadcast_size, output_size
 
 # --- Buffer pool ----------------------------------------------------------
 #
@@ -577,22 +577,42 @@ end
 # that package is for: the destination shape from immediately-available information,
 # no pilot run (snag `broadcast-gather-3d8a0849`, landed `121de31`).
 #
+# ONLY floating-point intermediates may go through the pool. The pool is a flat
+# `Vector{T}` at the workspace/AD eltype, so anything else routed through it comes
+# back RETYPED: an index vector `[2, 4]` returns as `[2.0, 4.0]` and is no longer a
+# valid index, and a `Bool` mask returns as `[1.0, 0.0, …]` and silently stops being
+# a mask. Both are ordinary things to compute in a model body (`selector[group]`,
+# a mask sliced out of data), and the failure is invisible to `jprepare` — the TRACE
+# pass returns the real `getindex`/`broadcast` result, so only the PRIMAL breaks, at
+# the first density evaluation.
+#
+# The predicate must give the SAME answer in both passes or the trace's recorded
+# shapes and the primal's cursor walk desynchronise. It does: it reads only element
+# TYPES, and the two passes differ solely in float precision (`Float64` vs an Enzyme
+# dual) — both `<: AbstractFloat`, while an integer or boolean intermediate is
+# neither, in either pass.
+@inline _julianic_poolable(::Type{E}) where {E} = E <: AbstractFloat
+
 # `broadcast` a single operator/function `f` over already-materialized args:
 @inline function _cached_broadcast!(ctx::JulianicRun, f::F, args...) where {F}
+    _julianic_poolable(broadcast_eltype(f, args...)) || return broadcast(f, args...)
     buffer = _next_buffer!(ctx.buffers, broadcast_size(args...))
     apply!!(buffer, broadcast, f, args...)
 end
 @inline function _cached_broadcast!(ctx::JulianicTrace, f::F, args...) where {F}
+    _julianic_poolable(broadcast_eltype(f, args...)) || return broadcast(f, args...)
     push!(ctx.buffer_sizes, broadcast_size(args...))
     broadcast(f, args...)
 end
 
 # `getindex` gather `A[idx]` (a whole-vector index, e.g. `b[group]`):
 @inline function _cached_gather!(ctx::JulianicRun, A, idx)
+    _julianic_poolable(eltype(A)) || return getindex(A, idx)
     buffer = _next_buffer!(ctx.buffers, output_size(getindex, size(A), idx))
     apply!!(buffer, getindex, A, idx)
 end
 @inline function _cached_gather!(ctx::JulianicTrace, A, idx)
+    _julianic_poolable(eltype(A)) || return getindex(A, idx)
     push!(ctx.buffer_sizes, output_size(getindex, size(A), idx))
     getindex(A, idx)
 end
