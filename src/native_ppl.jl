@@ -696,10 +696,28 @@ function _native_ppl_varying_intercept(term, key::Symbol)
     (; id, group, predictor, predictors)
 end
 
-function _native_ppl_affine_components(brmi::BRMI, key::Symbol)
+function _native_ppl_affine_components(brmi::BRMI, key::Symbol;
+                                       link=nothing)
     lhs, predictor = _native_ppl_sampling_rhs(brmi, key)
-    _native_ppl_ref_name(lhs) === key || throw(NativePPLCapabilityError(
-        :linked_predictor, "`$key` must have a bare, unlinked left-hand side"))
+    if link === nothing
+        _native_ppl_ref_name(lhs) === key || throw(NativePPLCapabilityError(
+            :linked_predictor,
+            "`$key` must have a bare, unlinked left-hand side"))
+    else
+        lhs isa ExprColumn && getf(lhs) === link || throw(
+            NativePPLCapabilityError(
+                :linked_predictor,
+                "`$key` must use `$link($key)` on the left-hand side"))
+        isempty(getkwargs(lhs)) || throw(NativePPLCapabilityError(
+            :linked_predictor,
+            "linked predictor `$key` cannot use link keywords"))
+        arguments = getargs(lhs)
+        length(arguments) == 1 &&
+            _native_ppl_ref_name(only(arguments)) === key || throw(
+            NativePPLCapabilityError(
+                :linked_predictor,
+                "linked predictor must be exactly `$link($key)`"))
+    end
     predictor isa Number && predictor == 1 && return (
         ; predictors=(), offsets=(), data_offsets=(), groups=(),
         intercept=true)

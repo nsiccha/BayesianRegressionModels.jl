@@ -40,6 +40,21 @@ points at an older dependency checkout.
 `BridgeStan.jl` finds them via `$BRIDGESTAN`, falling back to
 `~/.bridgestan/bridgestan-<version>`, and downloads them if neither exists.
 
+The native-PPL milestone gates are separate on purpose:
+
+```sh
+julia --project=test test/native_ppl.jl
+julia --project=test test/native_ppl_warmuphmc.jl
+julia --project=test test/native_ppl_backend_parity.jl
+```
+
+The parity file compiles the unchanged substantive BRMI through `SBBRMI` and
+also compiles `test/native_ppl_shared_distributional_mixed.stan`, its
+hand-optimized minimal Stan analogue. It checks normalized density and mapped
+gradients before printing warmed density/gradient allocation and timing rows;
+those timings include the BridgeStan FFI crossing but exclude compilation and
+model/data construction.
+
 ## Why each constraint exists
 
 Every one of these was paid for by a failed resolve; none is stylistic.
@@ -85,13 +100,14 @@ and no `[extras]`/`[targets]` in the root `Project.toml`:
   every supported Julia version, so carrying both would be two declarations of
   one dependency list.
 
-Four files are the reason this environment exists — they fail at their own
+Five files are the reason this environment exists — they fail at their own
 `using` line under `julia --project=.`, before any BRM code runs:
 
 | file | needs beyond the root project |
 | --- | --- |
 | `test/adaptive_centering_bridgestan.jl` | `WarmupHMC`, `Enzyme` |
 | `test/adaptive_centering_warmuphmc.jl` | `WarmupHMC`, `Enzyme`, `DifferentiationInterface` |
+| `test/native_ppl_backend_parity.jl` | `BridgeStan`, `StanBlocks`, `Enzyme`, `DifferentiationInterface` |
 | `test/native_ppl_warmuphmc.jl` | `WarmupHMC`, `Enzyme`, `DifferentiationInterface` |
 | `test/plate_stress.jl` | `BridgeStan` |
 

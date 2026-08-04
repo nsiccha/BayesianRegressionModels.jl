@@ -1,7 +1,7 @@
 using Test
 using BayesianRegressionModels
 import DifferentiationInterface as DI
-using Distributions: Exponential, LKJCholesky, Normal
+using Distributions: BernoulliLogit, Exponential, LKJCholesky, Normal
 using Enzyme
 using LogDensityProblems
 using Random: Xoshiro
@@ -12,6 +12,13 @@ include("dependency_floors.jl")
 
 const BRM = BayesianRegressionModels
 const NP = BRM.NativePPL
+
+require_git_ancestor(
+    "WarmupHMC",
+    pkgdir(WarmupHMC),
+    WARMUPHMC_NATIVE_PPL_MINIMUM;
+    reason="Native PPL targets require WarmupHMC's own-gradient Pathfinder initialization.",
+)
 
 NP.@model function factor_hierarchy_for_warmup()
     population ~ Normal()
@@ -26,12 +33,70 @@ NP.@model function factor_hierarchy_for_warmup()
     return y
 end
 
-require_git_ancestor(
-    "WarmupHMC",
-    pkgdir(WarmupHMC),
-    WARMUPHMC_NATIVE_PPL_MINIMUM;
-    reason="Native PPL targets require WarmupHMC's own-gradient Pathfinder initialization.",
-)
+@testset "shared distributional mixed BRMI samples with WarmupHMC" begin
+    N = 48
+    G = 6
+    group = repeat(collect(1:G); inner=N ÷ G)
+    x = collect(range(-1.6, 1.6; length=N))
+    w = [cospi(2i / (N + 1)) for i in 1:N]
+    residual = repeat(
+        [-0.18, 0.07, -0.05, 0.12, -0.09, 0.03, 0.10, -0.02], G)
+    y = [
+        0.3 + 0.7x[i] + 0.12sinpi(2group[i] / G) +
+        exp(-0.5 + 0.1w[i]) * residual[i]
+        for i in 1:N
+    ]
+    eta = [
+        -0.2 + 0.6x[i] + 0.18sinpi(4group[i] / G)
+        for i in 1:N
+    ]
+    thresholds = repeat(
+        [-0.8, 0.5, -0.2, 0.9, -0.5, 0.2, -1.0, 0.7], G)
+    z = Int[eta[i] > thresholds[i] for i in 1:N]
+    data = (; x, w, group, y, z)
+
+    plan = NP.compile(@brm data begin
+        mu_y ~ 1 + x + (1 | p | group)
+        log_sigma_y ~ 1 + w + (1 | p | group)
+        eta_z ~ 1 + x + (1 | p | group)
+        sd(:, p) ~ Exponential(1)
+        cor(:, p) ~ LKJCholesky(3, 2)
+        y ~ Normal(mu_y, exp(log_sigma_y))
+        z ~ BernoulliLogit(eta_z)
+    end)
+    prepared = NP.prepare(plan)
+    problem = NP.LogDensityProblem(prepared, DI.AutoEnzyme())
+    dimension = LogDensityProblems.dimension(problem)
+
+    @test dimension == 30
+    @test LogDensityProblems.capabilities(problem) isa
+          LogDensityProblems.LogDensityOrder{1}
+    initial_density, initial_gradient =
+        LogDensityProblems.logdensity_and_gradient(problem, zeros(dimension))
+    @test isfinite(initial_density)
+    @test length(initial_gradient) == dimension
+    @test all(isfinite, initial_gradient)
+
+    result = WarmupHMC.adaptive_warmup_mcmc(
+        Xoshiro(0x20260804),
+        problem;
+        n_draws=50,
+        n_evaluations=400,
+        stepsize_adaptation_limit=75,
+        target_acceptance_rate=0.9,
+        max_tree_depth=8,
+        progress=nothing,
+        monitor_ess=false,
+        nonlinear_adapt=false,
+    )
+
+    draws = result.posterior_position
+    @test size(draws, 1) == dimension
+    @test size(draws, 2) >= 50
+    @test all(isfinite, draws)
+    @test all(>(1e-7), vec(std(draws; dims=2)))
+    @test result.n_divergent_samples == 0
+end
 
 @testset "native PPL samples end-to-end with WarmupHMC" begin
     x = collect(range(-1.5, 1.5; length=16))

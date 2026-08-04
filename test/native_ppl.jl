@@ -1,8 +1,10 @@
 using Test
 using BayesianRegressionModels
 import DifferentiationInterface as DI
-using Distributions: Exponential, LKJCholesky, Normal, Poisson, logpdf
+using Distributions: Exponential, LKJCholesky, LocationScale, Normal, Poisson,
+                     TDist, logpdf
 using Enzyme
+using LogExpFunctions: logistic, logit
 using LogDensityProblems
 using Random: MersenneTwister, rand, randexp, randn
 
@@ -304,28 +306,19 @@ NP.@model function unknown_output_component(raw)
     return missing
 end
 
-NP.@model function concise_passthrough(raw)
-    return raw
-end
-
-NP.@model function concise_aliased_zscale(raw)
-    scaled = zscale(raw)
-    return (standardized=scaled,)
-end
-
 NP.@model function scalar_normal_prior()
     theta ~ Normal()
     return theta
 end
 
-NP.@model function scalar_normal_site(mu, tau)
-    z ~ Normal(mu, tau)
-    return z
-end
-
 NP.@model function aliased_scalar_normal_prior()
     theta ~ Normal(0, 1)
     return (coefficient=theta,)
+end
+
+NP.@model function scalar_normal_site(mu, tau)
+    z ~ Normal(mu, tau)
+    return z
 end
 
 NP.@model function named_scalar_normal_priors()
@@ -458,6 +451,38 @@ NP.@model function natural_distributional_gaussian(x, z)
     @. y ~ Normal(mu, sigma)
 end
 
+NP.@model function natural_grouped_distributional_gaussian(x, z, group)
+    tau_p_group[(:mu, :log_sigma)] ~ Exponential(1)
+    L_p_group[(:mu, :log_sigma)] ~ LKJCholesky(2, 2)
+    b_p_group[group, (:mu, :log_sigma)] ~
+        MvNormalCholesky(tau_p_group, L_p_group)
+    beta_mu[(:Intercept, :x)] ~ StandardNormal()
+    beta_log_sigma[(:Intercept, :z)] ~ StandardNormal()
+    mu = dot(beta_mu, (1, x)) +
+        dot(b_p_group[group, (:mu,)], (1,))
+    log_sigma = dot(beta_log_sigma, (1, z)) +
+        dot(b_p_group[group, (:log_sigma,)], (1,))
+    sigma = exp(log_sigma)
+    @. y ~ Normal(mu, sigma)
+end
+
+NP.@model function natural_grouped_distributional_gaussian_slopes(
+        x, z, group)
+    tau_p_group[(:mu, :mu_x, :log_sigma, :log_sigma_z)] ~ Exponential(1)
+    L_p_group[(:mu, :mu_x, :log_sigma, :log_sigma_z)] ~
+        LKJCholesky(4, 2)
+    b_p_group[group, (:mu, :mu_x, :log_sigma, :log_sigma_z)] ~
+        MvNormalCholesky(tau_p_group, L_p_group)
+    beta_mu[(:Intercept, :x)] ~ StandardNormal()
+    beta_log_sigma[(:Intercept, :z)] ~ StandardNormal()
+    mu = dot(beta_mu, (1, x)) +
+        dot(b_p_group[group, (:mu, :mu_x)], (1, x))
+    log_sigma = dot(beta_log_sigma, (1, z)) +
+        dot(b_p_group[group, (:log_sigma, :log_sigma_z)], (1, z))
+    sigma = exp(log_sigma)
+    @. y ~ Normal(mu, sigma)
+end
+
 NP.@model function natural_sampled_offset_regression(x)
     latent ~ Normal()
     beta ~ Normal()
@@ -475,12 +500,6 @@ end
 NP.@model function natural_exposure_only_poisson(exposure)
     beta_log_rate[(:Intercept,)] ~ StandardNormal()
     log_rate = dot(beta_log_rate, (1,)) + offset(log(exposure))
-    @. y ~ Poisson(exp(log_rate))
-end
-
-NP.@model function natural_raw_offset_poisson(x, exposure)
-    beta_log_rate[(:Intercept, :x)] ~ StandardNormal()
-    log_rate = dot(beta_log_rate, (1, x)) + offset(exposure)
     @. y ~ Poisson(exp(log_rate))
 end
 
@@ -503,12 +522,6 @@ NP.@model function natural_weighted_varying_intercept(
     @. y ~ weighted(Normal(mu, sigma), aweights(replicates))
 end
 
-NP.@model function natural_power_weighted_poisson(x, importance)
-    beta_log_rate[(:Intercept, :x)] ~ StandardNormal()
-    log_rate = dot(beta_log_rate, (1, x))
-    @. y ~ weighted(Poisson(exp(log_rate)), weights(importance))
-end
-
 NP.@model function natural_censored_varying_intercept(x, group)
     tau_g_group ~ Exponential(1)
     b_g_group[group] ~ Normal(0.0, tau_g_group)
@@ -529,6 +542,205 @@ NP.@model function natural_truncated_poisson(x)
     beta_log_rate[(:Intercept, :x)] ~ StandardNormal()
     log_rate = dot(beta_log_rate, (1, x))
     @. y ~ truncated(Poisson(exp(log_rate)), 1, 4)
+end
+
+NP.@model function natural_zero_inflated_poisson(x, z)
+    beta_log_lambda[(:Intercept, :x)] ~ StandardNormal()
+    beta_logit_zi[(:Intercept, :z)] ~ StandardNormal()
+    log_lambda = dot(beta_log_lambda, (1, x))
+    logit_zi = dot(beta_logit_zi, (1, z))
+    @. y ~ ZeroInflatedPoisson(exp(log_lambda), logistic(logit_zi))
+end
+
+NP.@model function natural_negative_binomial2(x, z)
+    beta_log_mu[(:Intercept, :x)] ~ StandardNormal()
+    beta_log_phi[(:Intercept, :z)] ~ StandardNormal()
+    log_mu = dot(beta_log_mu, (1, x))
+    log_phi = dot(beta_log_phi, (1, z))
+    @. y ~ NegativeBinomial2(exp(log_mu), exp(log_phi))
+end
+
+NP.@model function natural_beta_binomial2(x, z, trials)
+    beta_logit_p[(:Intercept, :x)] ~ StandardNormal()
+    beta_log_phi[(:Intercept, :z)] ~ StandardNormal()
+    logit_p = dot(beta_logit_p, (1, x))
+    log_phi = dot(beta_log_phi, (1, z))
+    @. y ~ BetaBinomial2(
+        trials, logistic(logit_p), exp(log_phi))
+end
+
+NP.@model function natural_binomial_logit(x, trials)
+    beta_logit_p[(:Intercept, :x)] ~ StandardNormal()
+    logit_p = dot(beta_logit_p, (1, x))
+    @. y ~ BinomialLogit(trials, logit_p)
+end
+
+NP.@model function natural_categorical_logit(x, z)
+    beta_eta2[(:Intercept, :x)] ~ StandardNormal()
+    beta_eta3[(:Intercept, :z)] ~ StandardNormal()
+    eta2 = dot(beta_eta2, (1, x))
+    eta3 = dot(beta_eta3, (1, z))
+    @. y ~ CategoricalLogit(eta2, eta3)
+end
+
+NP.@model function natural_student_t(x, group)
+    tau_g_group ~ Exponential(1)
+    b_g_group[group] ~ Normal(0.0, tau_g_group)
+    beta_mu[(:Intercept, :x)] ~ StandardNormal()
+    nu ~ Exponential(10.0)
+    sigma ~ Exponential(2)
+    mu = dot(beta_mu, (1, x)) + b_g_group[group]
+    @. y ~ LocationScale(mu, sigma, TDist(nu))
+end
+
+NP.@model function natural_multioutcome_gaussian(x)
+    beta_mu_y[(:Intercept, :x)] ~ StandardNormal()
+    sigma_y ~ Exponential(2)
+    mu_y = dot(beta_mu_y, (1, x))
+    @. y ~ Normal(mu_y, sigma_y)
+    beta_mu_z[(:Intercept, :x)] ~ StandardNormal()
+    sigma_z ~ Exponential(2)
+    mu_z = dot(beta_mu_z, (1, x))
+    @. z ~ Normal(mu_z, sigma_z)
+end
+
+NP.@model function natural_shared_multioutcome_gaussian(x)
+    beta_mu[(:Intercept, :x)] ~ StandardNormal()
+    sigma ~ Exponential(2)
+    mu = dot(beta_mu, (1, x))
+    @. y ~ Normal(mu, sigma)
+    @. z ~ Normal(mu, sigma)
+end
+
+NP.@model function natural_mixed_outcome(x)
+    beta_mu_y[(:Intercept, :x)] ~ StandardNormal()
+    sigma_y ~ Exponential(2)
+    mu_y = dot(beta_mu_y, (1, x))
+    @. y ~ Normal(mu_y, sigma_y)
+    beta_eta_z[(:Intercept, :x)] ~ StandardNormal()
+    eta_z = dot(beta_eta_z, (1, x))
+    @. z ~ BernoulliLogit(eta_z)
+end
+
+NP.@model function natural_three_family_outcome(x)
+    beta_mu_y[(:Intercept, :x)] ~ StandardNormal()
+    sigma_y ~ Exponential(2)
+    mu_y = dot(beta_mu_y, (1, x))
+    @. y ~ Normal(mu_y, sigma_y)
+    beta_eta_z[(:Intercept, :x)] ~ StandardNormal()
+    eta_z = dot(beta_eta_z, (1, x))
+    @. z ~ BernoulliLogit(eta_z)
+    beta_log_rate_w[(:Intercept, :x)] ~ StandardNormal()
+    log_rate_w = dot(beta_log_rate_w, (1, x))
+    @. w ~ Poisson(exp(log_rate_w))
+end
+
+NP.@model function natural_mixed_censored_outcome(x, upper)
+    beta_mu_y[(:Intercept, :x)] ~ StandardNormal()
+    sigma_y ~ Exponential(2)
+    mu_y = dot(beta_mu_y, (1, x))
+    @. y ~ censored(Normal(mu_y, sigma_y); upper=upper)
+    beta_eta_z[(:Intercept, :x)] ~ StandardNormal()
+    eta_z = dot(beta_eta_z, (1, x))
+    @. z ~ BernoulliLogit(eta_z)
+end
+
+NP.@model function natural_mixed_weighted_outcome(x, replicates)
+    beta_mu_y[(:Intercept, :x)] ~ StandardNormal()
+    sigma_y ~ Exponential(2)
+    mu_y = dot(beta_mu_y, (1, x))
+    @. y ~ weighted(Normal(mu_y, sigma_y), fweights(replicates))
+    beta_eta_z[(:Intercept, :x)] ~ StandardNormal()
+    eta_z = dot(beta_eta_z, (1, x))
+    @. z ~ BernoulliLogit(eta_z)
+end
+
+NP.@model function natural_grouped_mixed_outcome(x, group)
+    tau_gy_group ~ Exponential(1)
+    b_gy_group[group] ~ Normal(0.0, tau_gy_group)
+    beta_mu_y[(:Intercept, :x)] ~ StandardNormal()
+    sigma_y ~ Exponential(2)
+    mu_y = dot(beta_mu_y, (1, x)) + b_gy_group[group]
+    @. y ~ Normal(mu_y, sigma_y)
+
+    tau_gz_group ~ Exponential(1)
+    b_gz_group[group] ~ Normal(0.0, tau_gz_group)
+    beta_eta_z[(:Intercept, :x)] ~ StandardNormal()
+    eta_z = dot(beta_eta_z, (1, x)) + b_gz_group[group]
+    @. z ~ BernoulliLogit(eta_z)
+end
+
+NP.@model function natural_correlated_grouped_mixed_outcome(x, group)
+    tau_gy_group[(:Intercept, :x)] ~ Exponential(1)
+    L_gy_group[(:Intercept, :x)] ~ LKJCholesky(2, 2)
+    b_gy_group[group, (:Intercept, :x)] ~
+        MvNormalCholesky(tau_gy_group, L_gy_group)
+    beta_mu_y[(:Intercept, :x)] ~ StandardNormal()
+    sigma_y ~ Exponential(2)
+    mu_y = dot(beta_mu_y, (1, x)) +
+        dot(b_gy_group[group], (1, x))
+    @. y ~ Normal(mu_y, sigma_y)
+
+    tau_gz_group ~ Exponential(1)
+    b_gz_group[group] ~ Normal(0.0, tau_gz_group)
+    beta_eta_z[(:Intercept, :x)] ~ StandardNormal()
+    eta_z = dot(beta_eta_z, (1, x)) + b_gz_group[group]
+    @. z ~ BernoulliLogit(eta_z)
+end
+
+NP.@model function natural_shared_grouped_mixed_outcome(x, group)
+    tau_p_group[(:mu_y, :eta_z)] ~ Exponential(1)
+    L_p_group[(:mu_y, :eta_z)] ~ LKJCholesky(2, 2)
+    b_p_group[group, (:mu_y, :eta_z)] ~
+        MvNormalCholesky(tau_p_group, L_p_group)
+    beta_mu_y[(:Intercept, :x)] ~ StandardNormal()
+    sigma_y ~ Exponential(2)
+    mu_y = dot(beta_mu_y, (1, x)) +
+        dot(b_p_group[group, (:mu_y,)], (1,))
+    @. y ~ Normal(mu_y, sigma_y)
+
+    beta_eta_z[(:Intercept, :x)] ~ StandardNormal()
+    eta_z = dot(beta_eta_z, (1, x)) +
+        dot(b_p_group[group, (:eta_z,)], (1,))
+    @. z ~ BernoulliLogit(eta_z)
+end
+
+NP.@model function natural_shared_grouped_slope_mixed_outcome(x, group)
+    tau_p_group[(:mu_y, :mu_y_x, :eta_z, :eta_z_x)] ~ Exponential(1)
+    L_p_group[(:mu_y, :mu_y_x, :eta_z, :eta_z_x)] ~ LKJCholesky(4, 2)
+    b_p_group[group, (:mu_y, :mu_y_x, :eta_z, :eta_z_x)] ~
+        MvNormalCholesky(tau_p_group, L_p_group)
+    beta_mu_y[(:Intercept, :x)] ~ StandardNormal()
+    sigma_y ~ Exponential(2)
+    mu_y = dot(beta_mu_y, (1, x)) +
+        dot(b_p_group[group, (:mu_y, :mu_y_x)], (1, x))
+    @. y ~ Normal(mu_y, sigma_y)
+
+    beta_eta_z[(:Intercept, :x)] ~ StandardNormal()
+    eta_z = dot(beta_eta_z, (1, x)) +
+        dot(b_p_group[group, (:eta_z, :eta_z_x)], (1, x))
+    @. z ~ BernoulliLogit(eta_z)
+end
+
+NP.@model function natural_shared_grouped_distributional_mixed_outcome(
+        x, w, group)
+    tau_p_group[(:mu_y, :log_sigma_y, :eta_z)] ~ Exponential(1)
+    L_p_group[(:mu_y, :log_sigma_y, :eta_z)] ~ LKJCholesky(3, 2)
+    b_p_group[group, (:mu_y, :log_sigma_y, :eta_z)] ~
+        MvNormalCholesky(tau_p_group, L_p_group)
+    beta_mu_y[(:Intercept, :x)] ~ StandardNormal()
+    beta_log_sigma_y[(:Intercept, :w)] ~ StandardNormal()
+    mu_y = dot(beta_mu_y, (1, x)) +
+        dot(b_p_group[group, (:mu_y,)], (1,))
+    log_sigma_y = dot(beta_log_sigma_y, (1, w)) +
+        dot(b_p_group[group, (:log_sigma_y,)], (1,))
+    sigma_y = exp(log_sigma_y)
+    @. y ~ Normal(mu_y, sigma_y)
+
+    beta_eta_z[(:Intercept, :x)] ~ StandardNormal()
+    eta_z = dot(beta_eta_z, (1, x)) +
+        dot(b_p_group[group, (:eta_z,)], (1,))
+    @. z ~ BernoulliLogit(eta_z)
 end
 
 NP.@model function natural_varying_slope(x, group)
@@ -621,7 +833,7 @@ NP.@model function monolithic_latent_normal(prior_mu, prior_tau)
     @. y ~ Normal(z, sigma)
 end
 
-NP.@model function monolithic_scale_named_site(prior_mu, prior_tau)
+NP.@model function monolithic_scale_named_latent(prior_mu, prior_tau)
     scale ~ Normal(prior_mu, prior_tau)
     sigma ~ Exponential(2.0)
     @. y ~ Normal(scale, sigma)
@@ -814,9 +1026,8 @@ end
 function factor_node_query_allocations(
     workspace::NP.FactorWorkspace, prepared::NP.FactorPrepared,
     position, mu, sigma, positions, mu_draws, sigma_draws,
-    bundle_outputs, bundle_queries)
-    mu_query = NP.NodeOutput(:mu)
-    sigma_query = NP.NodeOutput(:sigma)
+    bundle_outputs, bundle_queries,
+    mu_query=NP.NodeOutput(:mu), sigma_query=NP.NodeOutput(:sigma))
     NP.evaluate!(mu, workspace, prepared, position, mu_query)
     NP.evaluate!(sigma, workspace, prepared, position, sigma_query)
     NP.evaluate_draws!(
@@ -898,6 +1109,87 @@ function factor_batch_allocations(workspace::NP.FactorWorkspace,
         bundle_rng, bundle, workspace, prepared, positions, queries)
     (; linear=linear_bytes, pointwise=pointwise_bytes,
        predictive=predictive_bytes, bundle=bundle_bytes)
+end
+
+function factor_multioutcome_allocations(
+        pointwise, predictive, pointwise_draws, predictive_draws,
+        bundle, queries, prior_position,
+        workspace::NP.FactorWorkspace, prepared::NP.FactorPrepared,
+        position, positions)
+    predictive_rng = MersenneTwister(931)
+    draw_rng = MersenneTwister(932)
+    bundle_rng = MersenneTwister(933)
+    prior_rng = MersenneTwister(934)
+    NP.evaluate!(
+        pointwise, workspace, prepared, position,
+        NP.PointwiseLogLikelihood())
+    NP.simulate!(
+        predictive_rng, predictive, workspace, prepared, position)
+    NP.evaluate_draws!(
+        pointwise_draws, workspace, prepared, positions,
+        NP.PointwiseLogLikelihood())
+    NP.simulate_draws!(
+        draw_rng, predictive_draws, workspace, prepared, positions)
+    NP.execute_draws!(
+        bundle_rng, bundle, workspace, prepared, positions, queries)
+    NP.simulate_prior!(
+        prior_rng, prior_position, predictive, workspace, prepared)
+    pointwise_bytes = @allocated NP.evaluate!(
+        pointwise, workspace, prepared, position,
+        NP.PointwiseLogLikelihood())
+    predictive_bytes = @allocated NP.simulate!(
+        predictive_rng, predictive, workspace, prepared, position)
+    pointwise_draw_bytes = @allocated NP.evaluate_draws!(
+        pointwise_draws, workspace, prepared, positions,
+        NP.PointwiseLogLikelihood())
+    predictive_draw_bytes = @allocated NP.simulate_draws!(
+        draw_rng, predictive_draws, workspace, prepared, positions)
+    bundle_bytes = @allocated NP.execute_draws!(
+        bundle_rng, bundle, workspace, prepared, positions, queries)
+    prior_bytes = @allocated NP.simulate_prior!(
+        prior_rng, prior_position, predictive, workspace, prepared)
+    (; pointwise=pointwise_bytes, predictive=predictive_bytes,
+       pointwise_draws=pointwise_draw_bytes,
+       predictive_draws=predictive_draw_bytes,
+       bundle=bundle_bytes, prior=prior_bytes)
+end
+
+function factor_multioutcome_query_allocations(
+        pointwise, predictive, pointwise_draws, predictive_draws,
+        bundle, queries,
+        workspace::NP.FactorWorkspace, prepared::NP.FactorPrepared,
+        position, positions)
+    predictive_rng = MersenneTwister(936)
+    draw_rng = MersenneTwister(937)
+    bundle_rng = MersenneTwister(938)
+    NP.evaluate!(
+        pointwise, workspace, prepared, position,
+        NP.PointwiseLogLikelihood())
+    NP.simulate!(
+        predictive_rng, predictive, workspace, prepared, position)
+    NP.evaluate_draws!(
+        pointwise_draws, workspace, prepared, positions,
+        NP.PointwiseLogLikelihood())
+    NP.simulate_draws!(
+        draw_rng, predictive_draws, workspace, prepared, positions)
+    NP.execute_draws!(
+        bundle_rng, bundle, workspace, prepared, positions, queries)
+    pointwise_bytes = @allocated NP.evaluate!(
+        pointwise, workspace, prepared, position,
+        NP.PointwiseLogLikelihood())
+    predictive_bytes = @allocated NP.simulate!(
+        predictive_rng, predictive, workspace, prepared, position)
+    pointwise_draw_bytes = @allocated NP.evaluate_draws!(
+        pointwise_draws, workspace, prepared, positions,
+        NP.PointwiseLogLikelihood())
+    predictive_draw_bytes = @allocated NP.simulate_draws!(
+        draw_rng, predictive_draws, workspace, prepared, positions)
+    bundle_bytes = @allocated NP.execute_draws!(
+        bundle_rng, bundle, workspace, prepared, positions, queries)
+    (; pointwise=pointwise_bytes, predictive=predictive_bytes,
+       pointwise_draws=pointwise_draw_bytes,
+       predictive_draws=predictive_draw_bytes,
+       bundle=bundle_bytes)
 end
 
 function allocating_query_bytes(workspace, prepared, position)
@@ -2733,6 +3025,24 @@ end
     source = NP.component(:source, macro_gaussian_identity(raw_x))
     @test NP.component_namespace(source) === :source
 
+    @test_throws ArgumentError NP.NormalPrior(NaN, 1.0)
+    @test_throws ArgumentError NP.NormalPrior(0.0, 0.0)
+    @test_throws ArgumentError NP.ExponentialPrior(0.0)
+    @test_throws ArgumentError NP.GraphRef{1,:mu,:node}()
+    @test_throws ArgumentError NP.GraphRef{:source,1,:node}()
+    @test_throws ArgumentError NP.GraphRef{:source,:mu,:unknown}()
+    @test_throws ArgumentError NP.Component{1,typeof(source.instance)}(
+        source.instance)
+    @test_throws ArgumentError NP.Composition((source,))
+    @test_throws ArgumentError NP.Composition((;))
+    @test_throws ArgumentError NP.Composition((; not_a_component=1))
+    @test_throws ArgumentError NP.qualified_name(Symbol(""), :raw)
+
+    qualified = qualified_nested(0.25, 0.8)
+    @test qualified isa NP.ModelInstance
+    @test qualified.declaration.outputs == (; z=:z)
+    @test keys(NP.condition(qualified; z=0.4).conditions) == (:z,)
+
     bound_input = NP.output(source, :x)
     parameter = NP.output(source, :beta_mu)
     deterministic = NP.output(source, :mu)
@@ -2742,9 +3052,6 @@ end
     @test NP.graph_kind(parameter) === :parameter
     @test NP.graph_kind(deterministic) === :node
     @test NP.graph_kind(stochastic) === :site
-    @test_throws ArgumentError NP.GraphRef{1,:mu,:node}()
-    @test_throws ArgumentError NP.GraphRef{:source,1,:node}()
-    @test_throws ArgumentError NP.GraphRef{:source,:mu,:unknown}()
     @test occursin(
         "source.mu, kind=node", sprint(show, deterministic))
 
@@ -2755,8 +3062,6 @@ end
     @test keys(composition.components) == (:source, :sink)
     @test composition.components.source === source
     @test composition.components.sink === sink
-    @test NP.Composition((; source, sink)).components ==
-          composition.components
     @test occursin(
         "components=(:source, :sink)", sprint(show, composition))
 
@@ -2787,20 +3092,14 @@ end
     @test NP.node_inputs(
         getproperty(active_lowered.declaration.nodes, sink_location_name)) ==
           (NP.qualified_name(:source, :mu),)
-    @test capability_error(() -> NP.compile(composition)).capability == :outcomes
+    composed_plan = NP.compile(composition)
+    @test NP.factor_output_sites(composed_plan) == (
+        NP.qualified_name(:source, :y),
+        NP.qualified_name(:sink, :y))
 
     @test_throws ArgumentError NP.compose(sink, source)
-    @test_throws ArgumentError NP.compose()
     @test_throws ArgumentError NP.compose(
         source, NP.component(:source, composable_gaussian(raw_x)))
-    @test_throws ArgumentError NP.component(
-        Symbol(""), composable_gaussian(raw_x))
-    @test_throws ArgumentError NP.Component{1,typeof(source.instance)}(
-        source.instance)
-    @test_throws ArgumentError NP.Composition((source, sink))
-    @test_throws ArgumentError NP.Composition((;))
-    @test_throws ArgumentError NP.Composition((; sink, source))
-    @test_throws ArgumentError NP.Composition((; not_a_component=1))
     @test_throws ArgumentError NP.output(source, :missing)
     open_component = NP.component(:open, direct_native_model(
         :gaussian, :identity))
@@ -2868,20 +3167,6 @@ end
     @test NP.graph_kind(standardized) === :node
     @test NP.graph_name(standardized) === :standardized
     @test_throws ArgumentError NP.output(named_preprocessing, :scaled)
-
-    aliased_preprocessing = NP.component(
-        :aliased_preprocessing, concise_aliased_zscale(raw_x))
-    aliased_standardized = NP.output(
-        aliased_preprocessing, :standardized)
-    @test NP.graph_name(aliased_standardized) === :standardized
-    @test NP.graph_kind(aliased_standardized) === :node
-    @test_throws ArgumentError NP.output(aliased_preprocessing, :scaled)
-    aliased_regression = NP.component(
-        :aliased_regression,
-        NP.condition(composable_gaussian(aliased_standardized); y=response))
-    aliased_composed = NP.prepare(NP.compose(
-        aliased_preprocessing, aliased_regression))
-    @test only(values(aliased_composed.predictors)) == direct.predictor
 
     scalar_prior_component = NP.component(:prior, scalar_normal_prior())
     theta = NP.output(scalar_prior_component, :theta)
@@ -3051,9 +3336,6 @@ end
     raw_name = NP.qualified_name(:preprocessing, :raw)
     response_name = NP.qualified_name(:regression, :y)
     @test NP.qualified_name(:a, :b_c) != NP.qualified_name(:a_b, :c)
-    @test NP.qualified_name(:a, Symbol("b#c")) !=
-          NP.qualified_name(Symbol("a#b"), :c)
-    @test_throws ArgumentError NP.qualified_name(Symbol(""), :raw)
 
     for family in (:gaussian, :bernoulli, :poisson)
         response = family === :gaussian ? [0.2, -0.1, 1.1, 0.7] :
@@ -3136,134 +3418,6 @@ end
 end
 
 
-@testset "composed constant and multi-input preprocessing" begin
-    raw_x = [-1.0, 0.0, 2.0, 4.0]
-    raw_w = [4.0, 2.0, 3.0, 9.0]
-    response = [0.2, -0.1, 1.1, 0.7]
-
-    constant_source = NP.component(
-        :constant_source, concise_passthrough(raw_x))
-    constant_regression = NP.component(
-        :constant_regression,
-        NP.condition(
-            composable_gaussian(NP.output(constant_source, :raw));
-            y=response))
-    constant_composed = NP.prepare(NP.compose(
-        constant_source, constant_regression))
-    constant_direct = NP.prepare(NP.condition(
-        macro_gaussian_identity(raw_x); y=response))
-    @test only(values(constant_composed.predictors)) ==
-          constant_direct.predictor
-    constant_position = [0.3, -0.4, log(0.8)]
-    constant_work = NP.workspace(
-        constant_composed, Float64, DI.AutoEnzyme())
-    direct_work = NP.workspace(constant_direct, Float64, DI.AutoEnzyme())
-    constant_density, constant_gradient = NP.logdensity_and_gradient!(
-        constant_work, constant_composed, constant_position)
-    direct_density, direct_gradient = NP.logdensity_and_gradient!(
-        direct_work, constant_direct, constant_position)
-    @test constant_density ≈ direct_density
-    @test constant_gradient ≈ direct_gradient
-    @test steady_state_allocations(
-        constant_work, constant_composed, constant_position) ==
-          (; primal=0, gradient=0)
-
-    x_preprocessing_model = NP.model(
-        inputs=(; raw=NP.input()),
-        nodes=(; scaled=NP.zscale(:raw)), observations=(;))
-    w_preprocessing_model = NP.model(
-        inputs=(; raw=NP.input()),
-        nodes=(; centered=NP.center(:raw)), observations=(;))
-    x_preprocessing = NP.component(
-        :x_preprocessing,
-        NP.substitute(x_preprocessing_model; raw=raw_x))
-    w_preprocessing = NP.component(
-        :w_preprocessing,
-        NP.substitute(w_preprocessing_model; raw=raw_w))
-    stacked_regression = NP.component(
-        :stacked_regression,
-        NP.condition(
-            NP.substitute(
-                direct_multi_gaussian_model();
-                x=NP.output(x_preprocessing, :scaled),
-                w=NP.output(w_preprocessing, :centered));
-            y=response))
-    @test capability_error(
-        () -> NP.prepare(NP.compose(
-            x_preprocessing, w_preprocessing, stacked_regression))).capability ==
-          :graph_identity
-    coefficients = NP.parameter(
-        NP.RealSupport(), (:intercept, :beta_x, :beta_w);
-        transform=NP.Identity(), prior=NP.StandardNormal())
-    sigma = NP.parameter(
-        NP.PositiveSupport(), (:sigma,);
-        transform=NP.Exp(), prior=NP.Exponential(2.0))
-    regression_model = NP.model(
-        inputs=(; x=NP.input(), w=NP.input()),
-        parameters=(; beta_mu=coefficients, sigma),
-        nodes=(; mu=NP.affine((:x, :w), :beta_mu)),
-        observations=(; y=NP.broadcasted(
-            NP.normal(:y, :mu, :sigma))))
-    regression = NP.component(
-        :multi_regression,
-        NP.condition(
-            NP.substitute(
-                regression_model;
-                x=NP.output(x_preprocessing, :scaled),
-                w=NP.output(w_preprocessing, :centered));
-            y=response))
-    composed = NP.prepare(NP.compose(
-        x_preprocessing, w_preprocessing, regression))
-    direct = NP.prepare(NP.condition(
-        macro_multi_gaussian(raw_x, raw_w); y=response))
-    @test Tuple(values(composed.predictors)) ==
-          Tuple(values(direct.predictors))
-    @test composed.plan.axes.coefficient.keys == Tuple(
-        NP.qualified_name(:multi_regression, key)
-        for key in (:intercept, :beta_x, :beta_w))
-    position = [0.3, -0.4, 0.2, log(0.8)]
-    composed_work = NP.workspace(composed, Float64, DI.AutoEnzyme())
-    direct_work = NP.workspace(direct, Float64, DI.AutoEnzyme())
-    composed_density, composed_gradient = NP.logdensity_and_gradient!(
-        composed_work, composed, position)
-    direct_density, direct_gradient = NP.logdensity_and_gradient!(
-        direct_work, direct, position)
-    @test composed_density ≈ direct_density
-    @test composed_gradient ≈ direct_gradient
-    @test NP.simulate(
-        MersenneTwister(911), composed_work, composed, position) ==
-          NP.simulate(MersenneTwister(911), direct_work, direct, position)
-    @test steady_state_allocations(
-        composed_work, composed, position) == (; primal=0, gradient=0)
-
-    new_x = [10.0, 14.0, 20.0]
-    new_w = [3.0, 9.0, 15.0]
-    new_y = [0.4, 0.9, 1.3]
-    x_name = NP.qualified_name(:x_preprocessing, :raw)
-    w_name = NP.qualified_name(:w_preprocessing, :raw)
-    y_name = NP.qualified_name(:multi_regression, :y)
-    rebound = NP.rebind(
-        composed,
-        NamedTuple{(x_name, w_name, y_name)}((new_x, new_w, new_y));
-        freeze_constants=false)
-    direct_rebound = NP.rebind(
-        direct, (; x=new_x, w=new_w, y=new_y);
-        freeze_constants=false)
-    @test Tuple(values(rebound.predictors)) ==
-          Tuple(values(direct_rebound.predictors))
-    rebound_work = NP.workspace(rebound, Float64, DI.AutoEnzyme())
-    direct_rebound_work = NP.workspace(
-        direct_rebound, Float64, DI.AutoEnzyme())
-    rebound_density, rebound_gradient = NP.logdensity_and_gradient!(
-        rebound_work, rebound, position)
-    direct_rebound_density, direct_rebound_gradient =
-        NP.logdensity_and_gradient!(
-            direct_rebound_work, direct_rebound, position)
-    @test rebound_density ≈ direct_rebound_density
-    @test rebound_gradient ≈ direct_rebound_gradient
-end
-
-
 @testset "public native PPL @model semantics" begin
     raw_x = [-1.0, 0.0, 2.0, 4.0]
     response = [0.2, -0.1, 1.1, 0.7]
@@ -3280,10 +3434,6 @@ end
           (; centered=:centered, standardized=:scaled)
     @test_throws ArgumentError unknown_output_component(raw_x)
     @test capability_error(() -> NP.bind(preprocessing)).capability == :outcomes
-    passthrough = concise_passthrough(raw_x)
-    @test passthrough.declaration.outputs == (; raw=:raw)
-    @test NP.graph_kind(NP.output(
-        NP.component(:passthrough, passthrough), :raw)) === :binding
 
     scalar_prior = scalar_normal_prior()
     @test isempty(scalar_prior.declaration.inputs)
@@ -3294,9 +3444,14 @@ end
     prior_component = NP.component(:prior, scalar_prior)
     @test NP.graph_kind(NP.output(prior_component, :theta)) === :parameter
     @test capability_error(() -> NP.bind(scalar_prior)).capability == :outcomes
-    @test_throws ArgumentError NP.NormalPrior(NaN, 1.0)
-    @test_throws ArgumentError NP.NormalPrior(0.0, 0.0)
-    @test_throws ArgumentError NP.ExponentialPrior(0.0)
+
+    aliased_prior = aliased_scalar_normal_prior()
+    @test keys(aliased_prior.declaration.parameters) == (:theta,)
+    @test aliased_prior.declaration.outputs == (; coefficient=:theta)
+    aliased_prior_component = NP.component(:aliased_prior, aliased_prior)
+    @test NP.graph_kind(
+        NP.output(aliased_prior_component, :coefficient)) === :parameter
+    @test_throws ArgumentError NP.output(aliased_prior_component, :theta)
 
     latent_site = scalar_normal_site(0.25, 0.8)
     @test keys(latent_site.declaration.inputs) == (:mu, :tau)
@@ -3336,8 +3491,6 @@ end
     @test keys(latent_lowered.conditions) == (latent_response_name,)
     latent_plan = NP.compile(latent_composition)
     @test keys(latent_plan.parameters) == (:site, :scale)
-    @test BRM.native_parameter_name(latent_plan.parameters.site) ===
-          latent_name
     @test keys(latent_plan.factors) ==
           (:site_prior, :scale_prior, :likelihood)
     @test latent_plan.factors.site_prior isa
@@ -3437,11 +3590,6 @@ end
     @test length(NP.simulate(
         MersenneTwister(914), NP.workspace(natural_prediction),
         natural_prediction, latent_position)) == length(response)
-
-    qualified = qualified_nested(0.25, 0.8)
-    @test qualified isa NP.ModelInstance
-    @test qualified.declaration.outputs == (; z=:z)
-    @test keys(NP.condition(qualified; z=0.4).conditions) == (:z,)
 
     natural_preprocessed = NP.condition(
         natural_preprocessed_normal(raw_x); y=response)
@@ -3890,15 +4038,32 @@ end
 
     block_exp_scale_declaration = NP.model(
         inputs=(; location=NP.input()),
-        parameters=(;
-            beta=NP.parameter(
-                NP.RealSupport(), (:a, :b);
-                transform=NP.Identity(), prior=NP.StandardNormal())),
+        parameters=(; beta=NP.parameter(
+            NP.RealSupport(), (:a, :b);
+            transform=NP.Identity(), prior=NP.StandardNormal())),
         nodes=(; scale=NP.exp_link(:beta)),
-        observations=(;
-            y=NP.broadcasted(NP.normal(:y, :location, :scale))))
+        observations=(; y=NP.broadcasted(
+            NP.normal(:y, :location, :scale))))
     @test capability_error(() -> NP.compile(
         block_exp_scale_declaration, (; location=0.0);
+        conditions=(; y=response))).capability == :factor_shape
+
+    row_node_to_scalar_declaration = NP.model(
+        inputs=(; x=NP.input()),
+        parameters=(;
+            beta=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            sigma=NP.parameter(
+                NP.PositiveSupport(), (:sigma,);
+                transform=NP.Exp(), prior=NP.Exponential(2))),
+        nodes=(; mu=NP.affine(:x, :beta)),
+        observations=(;
+            z=NP.normal(:z, :mu, :sigma),
+            y=NP.broadcasted(NP.normal(:y, :mu, :sigma))),
+        site_order=(:beta, :sigma, :z, :y))
+    @test capability_error(() -> NP.compile(
+        row_node_to_scalar_declaration, (; x=raw_x);
         conditions=(; y=response))).capability == :factor_shape
 
     sampled_offset_data = (;
@@ -3952,40 +4117,6 @@ end
     @test NP.factor_node_dependencies(sampled_offset_graph.nodes.mu) ==
           (:beta_mu, :latent)
 
-    row_node_to_scalar_model = NP.model(
-        inputs=direct_sampled_offset_model.inputs,
-        parameters=direct_sampled_offset_model.parameters,
-        nodes=direct_sampled_offset_model.nodes,
-        observations=(;
-            z=NP.normal(:z, :mu, :sigma),
-            y=direct_sampled_offset_model.observations.y),
-        site_order=(:latent, :beta_mu, :sigma, :z, :y))
-    @test capability_error(() -> NP.compile(
-        row_node_to_scalar_model, (; x=sampled_offset_data.x);
-        conditions=(; y=sampled_offset_data.y))).capability == :factor_shape
-    affine_scale_model = NP.model(
-        inputs=direct_sampled_offset_model.inputs,
-        parameters=direct_sampled_offset_model.parameters,
-        nodes=direct_sampled_offset_model.nodes,
-        observations=(; y=NP.broadcasted(
-            NP.normal(:y, :latent, :mu))),
-        site_order=(:latent, :beta_mu, :sigma, :y))
-    @test capability_error(() -> NP.compile(
-        affine_scale_model, (; x=sampled_offset_data.x);
-        conditions=(; y=sampled_offset_data.y))).capability == :factor_scale
-    row_exp_model = NP.model(
-        inputs=direct_sampled_offset_model.inputs,
-        parameters=direct_sampled_offset_model.parameters,
-        nodes=(; mu=direct_sampled_offset_model.nodes.mu,
-                 row_scale=NP.exp_link(:mu)),
-        observations=(; y=NP.broadcasted(
-            NP.normal(:y, :latent, :row_scale))),
-        site_order=(:latent, :beta_mu, :sigma, :y))
-    row_exp_plan = NP.compile(
-        row_exp_model, (; x=sampled_offset_data.x);
-        conditions=(; y=sampled_offset_data.y))
-    @test row_exp_plan isa NP.FactorPlan
-    @test row_exp_plan.graph.nodes.row_scale isa NP.ExpFactorNode
     exposure_data = (;
         x=[-1.0, 0.0, 0.5, 1.0, 2.0],
         exposure=[0.5, 1.0, 2.0, 4.0, 1.5],
@@ -4071,9 +4202,6 @@ end
         NP.LinearPredictor()) ≈ exposure_log_rate
     @test NP.evaluate(
         exposure_workspace, exposure_prepared, exposure_position,
-        NP.NodeOutput(:exp_log_rate)) ≈ exposure_rate
-    @test NP.evaluate(
-        exposure_workspace, exposure_prepared, exposure_position,
         NP.PointwiseLogLikelihood()) ≈
           BRM._native_ppl_poisson_logdensity.(
               Float64.(exposure_data.y), exposure_log_rate)
@@ -4087,20 +4215,6 @@ end
             [0.5, NaN, 2.0, 4.0, 1.5])
         @test_throws ArgumentError NP.prepare(NP.condition(
             natural_exposure_poisson(exposure_data.x, invalid_exposure);
-            y=exposure_data.y))
-    end
-    raw_offset_prepared = NP.prepare(NP.condition(
-        natural_raw_offset_poisson(
-            exposure_data.x, log.(exposure_data.exposure));
-        y=exposure_data.y))
-    @test NP.evaluate(
-        NP.workspace(raw_offset_prepared), raw_offset_prepared,
-        exposure_position, NP.LinearPredictor()) ≈ exposure_log_rate
-    for invalid_offset in (
-            [log(0.5), Inf, log(2.0), log(4.0), log(1.5)],
-            [log(0.5), NaN, log(2.0), log(4.0), log(1.5)])
-        @test_throws ArgumentError NP.prepare(NP.condition(
-            natural_raw_offset_poisson(exposure_data.x, invalid_offset);
             y=exposure_data.y))
     end
     exposure_predictive_rng = MersenneTwister(990)
@@ -4364,6 +4478,17 @@ end
     row_product_prepared = NP.prepare(NP.compile(
         row_product_declaration, row_product_bindings;
         conditions=(; y=sampled_offset_data.y)))
+
+    direct_block_product = NP.model(
+        inputs=row_product_declaration.inputs,
+        parameters=row_product_declaration.parameters,
+        nodes=(; invalid=NP.row_product(:varying, :x)),
+        observations=(; y=NP.broadcasted(
+            NP.normal(:y, :invalid, :sigma))),
+        site_order=row_product_declaration.site_order)
+    @test capability_error(() -> NP.compile(
+        direct_block_product, row_product_bindings;
+        conditions=(; y=sampled_offset_data.y))).capability == :predictor_type
     row_product_workspace = NP.workspace(
         row_product_prepared, Float64, DI.AutoEnzyme())
     row_product_mu = grouped_mu .* row_product_bindings.x
@@ -4399,23 +4524,6 @@ end
     @test factor_steady_state_allocations(
         row_product_workspace, row_product_prepared, grouped_position) ==
           (; primal=0, gradient=0)
-
-    direct_block_product = NP.model(
-        inputs=(; x=NP.input(), group=NP.input()),
-        parameters=row_product_declaration.parameters,
-        nodes=(;
-            routed=NP.group_gather(:varying, :group),
-            invalid=NP.row_product(:varying, :x)),
-        observations=(; y=NP.broadcasted(
-            NP.normal(:y, :invalid, :sigma))),
-        site_order=row_product_declaration.site_order)
-    direct_block_product_error = capability_error(() -> NP.compile(
-        direct_block_product, row_product_bindings;
-        conditions=(; y=sampled_offset_data.y)))
-    @test direct_block_product_error.capability == :factor_shape
-    @test occursin(
-        "cannot consume block site `varying` directly",
-        sprint(showerror, direct_block_product_error))
 
     structured_group_declaration = NP.model(
         inputs=(; x=NP.input(), group=NP.input()),
@@ -4468,18 +4576,6 @@ end
     @test_throws ArgumentError NP.cholesky_correlation((:x,), 2.0)
     @test_throws ArgumentError NP.cholesky_correlation(
         (:Intercept, :x), 0.0)
-    @test_throws ArgumentError NP.factor_graph(
-        structured_group_declaration;
-        bindings=(; x=row_product_bindings.x,
-                  group=row_product_bindings.group),
-        conditions=(; y=sampled_offset_data.y),
-        group_levels=(; z=()))
-    @test_throws ArgumentError NP.factor_graph(
-        structured_group_declaration;
-        bindings=(; x=row_product_bindings.x,
-                  group=row_product_bindings.group),
-        conditions=(; y=sampled_offset_data.y),
-        group_levels=(; z=(:a, :a)))
 
     correlated_group_declaration = NP.model(
         inputs=(; x=NP.input(), group=NP.input()),
@@ -4529,32 +4625,6 @@ end
     @test NP.factor_node_dependencies(
         correlated_group_plan.graph.nodes.correlated_by_row) ==
           (:z, :tau, :correlation)
-    correlated_scalar_consumer = NP.model(
-        inputs=correlated_group_declaration.inputs,
-        parameters=correlated_group_declaration.parameters,
-        nodes=correlated_group_declaration.nodes,
-        observations=(;
-            scalar=NP.normal(:scalar, :correlated_by_row, :sigma),
-            y=correlated_group_declaration.observations.y),
-        site_order=(
-            :tau, :correlation, :z, :beta, :sigma, :scalar, :y))
-    @test capability_error(() -> NP.compile(
-        correlated_scalar_consumer,
-        (; x=sampled_offset_data.x, group=grouped_bindings.group);
-        conditions=(; y=sampled_offset_data.y))).capability == :factor_shape
-    correlated_block_predictor = NP.model(
-        inputs=correlated_group_declaration.inputs,
-        parameters=correlated_group_declaration.parameters,
-        nodes=(;
-            invalid=NP.grouped_affine(
-                :z, :tau, :correlation, :group, (:tau, :x)),),
-        observations=(; y=NP.broadcasted(
-            NP.normal(:y, :invalid, :sigma))),
-        site_order=correlated_group_declaration.site_order)
-    @test capability_error(() -> NP.compile(
-        correlated_block_predictor,
-        (; x=sampled_offset_data.x, group=grouped_bindings.group);
-        conditions=(; y=sampled_offset_data.y))).capability == :factor_shape
 
     correlated_glmm_parameters = (;
         tau=correlated_group_declaration.parameters.tau,
@@ -4614,106 +4684,6 @@ end
         correlated_poisson_prepared,
         NP.LinearPredictor()) isa Vector{Float64}
 
-    grouped_discrete_parameters = (;
-        tau=grouped_declaration.parameters.tau,
-        varying=grouped_declaration.parameters.varying)
-    grouped_bernoulli_declaration = NP.model(
-        inputs=grouped_declaration.inputs,
-        parameters=grouped_discrete_parameters,
-        nodes=grouped_declaration.nodes,
-        observations=(; y=NP.broadcasted(
-            NP.bernoulli_logit(:y, :varying_by_row))),
-        site_order=(:tau, :varying, :y))
-    grouped_bernoulli_prediction = NP.prepare(NP.compile(
-        grouped_bernoulli_declaration, grouped_bindings))
-    grouped_bernoulli_prior_rng = MersenneTwister(947)
-    grouped_bernoulli_expected_rng = MersenneTwister(947)
-    grouped_bernoulli_tau = randexp(grouped_bernoulli_expected_rng)
-    grouped_bernoulli_effects = grouped_bernoulli_tau .* [
-        randn(grouped_bernoulli_expected_rng) for _ in 1:3]
-    grouped_bernoulli_expected = [
-        rand(grouped_bernoulli_expected_rng) <
-            BRM._native_ppl_logistic(value)
-        for value in grouped_bernoulli_effects[[1, 2, 1, 3]]]
-    grouped_bernoulli_prior = NP.simulate_prior(
-        grouped_bernoulli_prior_rng,
-        NP.workspace(grouped_bernoulli_prediction),
-        grouped_bernoulli_prediction)
-    @test grouped_bernoulli_prior.position ≈ [
-        log(grouped_bernoulli_tau), grouped_bernoulli_effects...]
-    @test grouped_bernoulli_prior.response == grouped_bernoulli_expected
-    @test grouped_bernoulli_prior.response isa Vector{Bool}
-    grouped_bernoulli_prior_position = zeros(4)
-    grouped_bernoulli_prior_response = falses(4)
-    grouped_bernoulli_prior_work = NP.workspace(
-        grouped_bernoulli_prediction)
-    NP.simulate_prior!(
-        MersenneTwister(948), grouped_bernoulli_prior_position,
-        grouped_bernoulli_prior_response, grouped_bernoulli_prior_work,
-        grouped_bernoulli_prediction)
-    grouped_bernoulli_allocation_rng = MersenneTwister(949)
-    @test @allocated(NP.simulate_prior!(
-        grouped_bernoulli_allocation_rng, grouped_bernoulli_prior_position,
-        grouped_bernoulli_prior_response, grouped_bernoulli_prior_work,
-        grouped_bernoulli_prediction)) == 0
-
-    grouped_poisson_declaration = NP.model(
-        inputs=grouped_declaration.inputs,
-        parameters=grouped_discrete_parameters,
-        nodes=merge(grouped_declaration.nodes,
-                    (; rate=NP.exp_link(:varying_by_row))),
-        observations=(; y=NP.broadcasted(NP.poisson(:y, :rate))),
-        site_order=(:tau, :varying, :y))
-    grouped_poisson_prediction = NP.prepare(NP.compile(
-        grouped_poisson_declaration, grouped_bindings))
-    grouped_poisson_prior_rng = MersenneTwister(950)
-    grouped_poisson_expected_rng = MersenneTwister(950)
-    grouped_poisson_tau = randexp(grouped_poisson_expected_rng)
-    grouped_poisson_effects = grouped_poisson_tau .* [
-        randn(grouped_poisson_expected_rng) for _ in 1:3]
-    grouped_poisson_expected = [
-        BRM._native_ppl_rand_poisson(
-            grouped_poisson_expected_rng, Float64, value)
-        for value in grouped_poisson_effects[[1, 2, 1, 3]]]
-    grouped_poisson_prior = NP.simulate_prior(
-        grouped_poisson_prior_rng, NP.workspace(grouped_poisson_prediction),
-        grouped_poisson_prediction)
-    @test grouped_poisson_prior.position ≈ [
-        log(grouped_poisson_tau), grouped_poisson_effects...]
-    @test grouped_poisson_prior.response == grouped_poisson_expected
-    @test grouped_poisson_prior.response isa Vector{Int}
-    grouped_poisson_prior_position = zeros(4)
-    grouped_poisson_prior_response = zeros(Int, 4)
-    grouped_poisson_prior_work = NP.workspace(grouped_poisson_prediction)
-    NP.simulate_prior!(
-        MersenneTwister(951), grouped_poisson_prior_position,
-        grouped_poisson_prior_response, grouped_poisson_prior_work,
-        grouped_poisson_prediction)
-    grouped_poisson_allocation_rng = MersenneTwister(952)
-    @test @allocated(NP.simulate_prior!(
-        grouped_poisson_allocation_rng, grouped_poisson_prior_position,
-        grouped_poisson_prior_response, grouped_poisson_prior_work,
-        grouped_poisson_prediction)) == 0
-
-    invalid_poisson_rate_node = NP.model(
-        inputs=grouped_declaration.inputs,
-        parameters=grouped_discrete_parameters,
-        nodes=grouped_declaration.nodes,
-        observations=(; y=NP.broadcasted(
-            NP.poisson(:y, :varying_by_row))),
-        site_order=(:tau, :varying, :y))
-    @test capability_error(() -> NP.compile(
-        invalid_poisson_rate_node, grouped_bindings)).capability == :factor_rate
-    invalid_poisson_rate_input = NP.model(
-        inputs=(; group=NP.input(), rate=NP.input()),
-        parameters=grouped_discrete_parameters,
-        nodes=grouped_declaration.nodes,
-        observations=(; y=NP.broadcasted(NP.poisson(:y, :rate))),
-        site_order=(:tau, :varying, :y))
-    invalid_poisson_rate_plan = NP.compile(
-        invalid_poisson_rate_input,
-        (; group=grouped_bindings.group, rate=[1.0, -1.0, 2.0, 3.0]))
-    @test_throws ArgumentError NP.prepare(invalid_poisson_rate_plan)
     three_coefficient_group_declaration = NP.model(
         inputs=(; x=NP.input(), w=NP.input(), group=NP.input()),
         parameters=(;
@@ -4764,31 +4734,10 @@ end
     @test NP.factor_node_dependencies(
         three_coefficient_group_plan.graph.nodes.correlated_by_row) ==
           (:z, :tau, :correlation)
-    mismatched_three_correlation = NP.model(
-        inputs=three_coefficient_group_declaration.inputs,
-        parameters=merge(
-            three_coefficient_group_declaration.parameters,
-            (; correlation=NP.cholesky_correlation(
-                (:Intercept, :x), 2.0))),
-        nodes=three_coefficient_group_declaration.nodes,
-        observations=three_coefficient_group_declaration.observations,
-        site_order=three_coefficient_group_declaration.site_order)
-    @test capability_error(() -> NP.compile(
-        mismatched_three_correlation,
-        (; x=sampled_offset_data.x,
-           w=[0.5, -1.0, 1.5, 2.0],
-           group=grouped_bindings.group);
-        conditions=(; y=sampled_offset_data.y))).capability == :factor_nodes
 
     correlated_group_prepared = NP.prepare(correlated_group_plan)
     correlated_group_workspace = NP.workspace(
         correlated_group_prepared, Float64, DI.AutoEnzyme())
-    correlated_prior_rng = MersenneTwister(949)
-    correlated_prior_expected_rng = MersenneTwister(949)
-    @test capability_error(() -> NP.simulate_prior(
-        correlated_prior_rng, correlated_group_workspace,
-        correlated_group_prepared)).capability == :prior_simulation
-    @test randn(correlated_prior_rng) == randn(correlated_prior_expected_rng)
     correlated_group_position = [
         log(0.6), log(0.4), 0.25,
         0.2, -0.3, -0.1, 0.5, 0.4, -0.2,
@@ -5011,7 +4960,6 @@ end
     correlated_density, correlated_gradient = NP.logdensity_and_gradient!(
         correlated_group_workspace, correlated_group_prepared,
         correlated_group_position)
-    correlated_gradient = copy(correlated_gradient)
     @test correlated_density ≈ correlated_expected_density
     @test correlated_gradient ≈ correlated_expected_gradient
     @test NP.evaluate(
@@ -5020,18 +4968,6 @@ end
     @test factor_steady_state_allocations(
         correlated_group_workspace, correlated_group_prepared,
         correlated_group_position) == (; primal=0, gradient=0)
-    for raw_correlation in (-1_000.0, 1_000.0)
-        extreme_position = copy(correlated_group_position)
-        extreme_position[3] = raw_correlation
-        extreme_density, extreme_gradient = NP.logdensity_and_gradient!(
-            correlated_group_workspace, correlated_group_prepared,
-            extreme_position)
-        @test isfinite(extreme_density)
-        @test all(isfinite, extreme_gradient)
-        @test all(isfinite, NP.evaluate(
-            correlated_group_workspace, correlated_group_prepared,
-            extreme_position, NP.LinearPredictor()))
-    end
 
     three_coefficient_group_prepared = NP.prepare(
         three_coefficient_group_plan)
@@ -5123,130 +5059,6 @@ end
         three_coefficient_group_workspace,
         three_coefficient_group_prepared,
         three_coefficient_group_position) == (; primal=0, gradient=0)
-
-    # Exercise a dimension beyond the public K=3 example so the static-K
-    # executor cannot accidentally be a three-coefficient specialization.
-    four_declaration = NP.model(
-        inputs=(; x=NP.input(), w=NP.input(), v=NP.input(),
-                group=NP.input()),
-        parameters=(;
-            tau=NP.parameter(
-                NP.PositiveSupport(), (:Intercept, :x, :w, :v);
-                transform=NP.Exp(), prior=NP.Exponential(1)),
-            correlation=NP.cholesky_correlation(
-                (:Intercept, :x, :w, :v), 2.0),
-            z=NP.grouped_standard_normal(
-                :group, (:Intercept, :x, :w, :v)),
-            beta=NP.parameter(
-                NP.RealSupport(), (:x, :w, :v);
-                transform=NP.Identity(), prior=NP.StandardNormal()),
-            sigma=NP.parameter(
-                NP.PositiveSupport(), (:sigma,);
-                transform=NP.Exp(), prior=NP.Exponential(2))),
-        nodes=(;
-            by_row=NP.grouped_affine(
-                :z, :tau, :correlation, :group,
-                (nothing, :x, :w, :v)),
-            mu=NP.affine(
-                (:x, :w, :v), :beta;
-                offsets=(:by_row,), intercept=false)),
-        observations=(; y=NP.broadcasted(NP.normal(:y, :mu, :sigma))),
-        site_order=(:tau, :correlation, :z, :beta, :sigma, :y))
-    four_bindings = (;
-        x=[0.2, -0.3], w=[0.5, 0.1], v=[-0.1, 0.4],
-        group=[:a, :a])
-    four_plan = NP.compile(
-        four_declaration, four_bindings; conditions=(; y=[0.1, -0.2]))
-    @test four_plan.graph.dimension == 18
-    @test length(four_plan.graph.coordinates.correlation.keys) == 6
-    four_prepared = NP.prepare(four_plan)
-    four_workspace = NP.workspace(
-        four_prepared, Float64, DI.AutoEnzyme())
-    four_position = [
-        log(0.5), log(0.6), log(0.7), log(0.8),
-        0.1, -0.2, 0.3, -0.15, 0.25, -0.35,
-        0.1, -0.2, 0.3, -0.4,
-        0.2, -0.1, 0.3, log(0.5)]
-    four_tau = exp.(four_position[1:4])
-    four_raw = four_position[5:10]
-    four_L = zeros(4, 4)
-    four_raw_index = 1
-    for column in 1:3
-        residuals = ones(4)
-        for previous in 1:(column - 1), row in (column + 1):4
-            previous_raw_index =
-                sum((4 - prior for prior in 1:(previous - 1)); init=0) +
-                row - previous
-            residuals[row] *= 1 / cosh(four_raw[previous_raw_index])
-        end
-        for row in (column + 1):4
-            four_L[row, column] =
-                residuals[row] * tanh(four_raw[four_raw_index])
-            four_raw_index += 1
-        end
-    end
-    for row in 1:4
-        four_L[row, row] = prod(
-            1 / cosh(four_raw[
-                sum((4 - prior for prior in 1:(column - 1)); init=0) +
-                row - column])
-            for column in 1:(row - 1);
-            init=1.0)
-    end
-    four_effect = four_tau .* (four_L * four_position[11:14])
-    four_beta = four_position[15:17]
-    four_mu = [
-        four_beta[1] * four_bindings.x[row] +
-        four_beta[2] * four_bindings.w[row] +
-        four_beta[3] * four_bindings.v[row] +
-        four_effect[1] +
-        four_effect[2] * four_bindings.x[row] +
-        four_effect[3] * four_bindings.w[row] +
-        four_effect[4] * four_bindings.v[row]
-        for row in eachindex(four_bindings.x)]
-    four_lkj_density = 0.0
-    four_raw_index = 1
-    for column in 1:3
-        alpha = 2.0 + (4 - column - 1) / 2
-        for _ in (column + 1):4
-            four_lkj_density += three_log_normalizer(alpha) +
-                alpha * NP._factor_logsech2(four_raw[four_raw_index])
-            four_raw_index += 1
-        end
-    end
-    four_expected_density =
-        sum(logpdf.(Exponential(1), four_tau)) +
-        sum(four_position[1:4]) + four_lkj_density +
-        sum(logpdf.(Normal(), four_position[11:14])) +
-        sum(logpdf.(Normal(), four_beta)) +
-        logpdf(Exponential(2), exp(four_position[18])) +
-        four_position[18] +
-        sum(logpdf.(Normal.(four_mu, exp(four_position[18])), [0.1, -0.2]))
-    four_density, four_gradient = NP.logdensity_and_gradient!(
-        four_workspace, four_prepared, four_position)
-    @test four_density ≈ four_expected_density
-    @test NP.evaluate(
-        four_workspace, four_prepared, four_position,
-        NP.LinearPredictor()) ≈ four_mu
-    four_finite_difference = similar(four_gradient)
-    four_plus = copy(four_position)
-    four_minus = copy(four_position)
-    for coordinate in eachindex(four_finite_difference)
-        four_plus[coordinate] += three_step
-        four_minus[coordinate] -= three_step
-        four_finite_difference[coordinate] = (
-            NP.logdensity!(
-                four_workspace, four_prepared, four_plus) -
-            NP.logdensity!(
-                four_workspace, four_prepared, four_minus)) /
-            (2 * three_step)
-        four_plus[coordinate] = four_position[coordinate]
-        four_minus[coordinate] = four_position[coordinate]
-    end
-    @test four_gradient ≈ four_finite_difference rtol=2e-5 atol=2e-6
-    @test factor_steady_state_allocations(
-        four_workspace, four_prepared, four_position) ==
-          (; primal=0, gradient=0)
 
     three_group_data = (;
         x=sampled_offset_data.x,
@@ -6333,25 +6145,6 @@ end
     @test factor_steady_state_allocations(
         varying_workspace, varying_prepared, varying_position) ==
           (; primal=0, gradient=0)
-    varying_margin_prior = @brm varying_brm_data begin
-        sigma ~ Exponential(2)
-        mu ~ 0 + x + (1 | p | group)
-        sd(:, p, x) ~ Exponential(1)
-        y ~ Normal(mu, sigma)
-    end
-    @test capability_error(
-        () -> NP.lower(varying_margin_prior)).capability == :group_prior
-    varying_no_population_data = (;
-        group=varying_brm_data.group, y=varying_brm_data.y)
-    varying_without_population = @brm varying_no_population_data begin
-        sigma ~ Exponential(2)
-        mu ~ 1 + (1 | p | group)
-        sd(:, p) ~ Exponential(1)
-        y ~ Normal(mu, sigma)
-    end
-    @test capability_error(
-        () -> NP.lower(varying_without_population)).capability ==
-          :predictor_terms
     natural_varying_plan = NP.compile(natural_varying)
     direct_varying_plan = NP.compile(
         direct_varying_model,
@@ -6474,45 +6267,6 @@ end
         varying_new_group_rng, varying_new_group_output,
         varying_new_group_workspace, varying_new_group_replay,
         varying_position) == 0
-    multi_varying_model = NP.model(
-        inputs=(; x=NP.input(), w=NP.input(), group=NP.input()),
-        parameters=(;
-            beta_mu=NP.parameter(
-                NP.RealSupport(), (:x, :w); transform=NP.Identity(),
-                prior=NP.StandardNormal()),
-            tau_p_group=direct_varying_model.parameters.tau_p_group,
-            b_p_group=direct_varying_model.parameters.b_p_group,
-            sigma=direct_varying_model.parameters.sigma),
-        nodes=(;
-            r_mu_p_group=NP.group_gather(:b_p_group, :group),
-            mu=NP.affine(
-                (:x, :w), :beta_mu; offsets=(:r_mu_p_group,),
-                intercept=false)),
-        observations=direct_varying_model.observations,
-        site_order=direct_varying_model.site_order)
-    multi_varying_prepared = NP.prepare(NP.compile(
-        multi_varying_model,
-        (; x=varying_brm_data.x, w=reverse(varying_brm_data.x),
-           group=varying_brm_data.group);
-        conditions=(; y=varying_brm_data.y)))
-    multi_varying_replay = NP.rebind(
-        multi_varying_prepared, (;);
-        bindings=(; x=varying_new_group_bindings.x,
-                    w=reverse(varying_new_group_bindings.x),
-                    group=varying_new_group_bindings.group),
-        new_groups=:resample)
-    multi_varying_output = zeros(4)
-    multi_varying_workspace = NP.workspace(multi_varying_replay)
-    multi_varying_rng = MersenneTwister(938)
-    NP.simulate!(
-        multi_varying_rng, multi_varying_output,
-        multi_varying_workspace, multi_varying_replay,
-        [log(0.7), varying_effects..., -0.3, 0.1, log(0.5)])
-    @test all(isfinite, multi_varying_output)
-    @test factor_predictive_allocations(
-        multi_varying_rng, multi_varying_output,
-        multi_varying_workspace, multi_varying_replay,
-        [log(0.7), varying_effects..., -0.3, 0.1, log(0.5)]) == 0
     new_group_density_error = capability_error(() -> NP.logdensity!(
         varying_new_group_workspace, varying_new_group_replay,
         varying_position))
@@ -6874,27 +6628,8 @@ end
     @test ranefcoefnames(transformed_group_brm, :p) == [
         (; predictor=:mu, coefficient=:Intercept),
         (; predictor=:mu, coefficient=:zscale_x)]
-    transformed_group_sb = SBBRMI(
-        transformed_group_brm; mod=@__MODULE__)
-    @test transformed_group_sb isa SBBRMI
-    @test transformed_group_sb.data[:zscale_x] ≈
-          (varying_brm_data.x .- 0.5) ./ sqrt(5 / 3)
+    @test SBBRMI(transformed_group_brm; mod=@__MODULE__) isa SBBRMI
     transformed_group_model = NP.lower(transformed_group_brm)
-    direct_transformed_group_model = NP.model(
-        inputs=(; x=NP.input(), group=NP.input()),
-        parameters=transformed_group_model.parameters,
-        nodes=(;
-            zscale_x_for_mu=NP.zscale(:x),
-            b_p_group_by_group_for_mu=NP.grouped_affine(
-                :b_p_group, :tau_p_group, :L_p_group, :group,
-                (nothing, :zscale_x_for_mu)),
-            mu=NP.affine(
-                :zscale_x_for_mu, :beta_mu;
-                offsets=(:b_p_group_by_group_for_mu,), intercept=false)),
-        observations=(; y=NP.broadcasted(
-            NP.normal(:y, :mu, :sigma))),
-        site_order=transformed_group_model.site_order)
-    @test direct_transformed_group_model == transformed_group_model
     natural_transformed_group = NP.condition(
         natural_transformed_correlated_varying_slope(
             varying_brm_data.x, varying_brm_data.group);
@@ -6926,38 +6661,6 @@ end
     @test transformed_group_node.predictors ==
           (nothing, NP.NodeValue{:zscale_x_for_mu}())
     @test transformed_group_plan.graph.dimension == 11
-    invalid_transformed_scalar = NP.model(
-        inputs=direct_transformed_group_model.inputs,
-        parameters=direct_transformed_group_model.parameters,
-        nodes=direct_transformed_group_model.nodes,
-        observations=(;
-            scalar=NP.normal(:scalar, :zscale_x_for_mu, :sigma),
-            y=direct_transformed_group_model.observations.y),
-        site_order=(
-            transformed_group_model.site_order[1:(end - 1)]...,
-            :scalar, :y))
-    @test capability_error(() -> NP.compile(
-        invalid_transformed_scalar,
-        (; x=varying_brm_data.x, group=varying_brm_data.group);
-        conditions=(; y=varying_brm_data.y))).capability == :factor_shape
-    nested_fitted_transform = NP.model(
-        inputs=direct_transformed_group_model.inputs,
-        parameters=direct_transformed_group_model.parameters,
-        nodes=(;
-            zscale_x_for_mu=NP.zscale(:x),
-            nested_zscale=NP.zscale(:zscale_x_for_mu),
-            b_p_group_by_group_for_mu=NP.grouped_affine(
-                :b_p_group, :tau_p_group, :L_p_group, :group,
-                (nothing, :nested_zscale)),
-            mu=NP.affine(
-                :nested_zscale, :beta_mu;
-                offsets=(:b_p_group_by_group_for_mu,), intercept=false)),
-        observations=direct_transformed_group_model.observations,
-        site_order=direct_transformed_group_model.site_order)
-    @test capability_error(() -> NP.compile(
-        nested_fitted_transform,
-        (; x=varying_brm_data.x, group=varying_brm_data.group);
-        conditions=(; y=varying_brm_data.y))).capability == :factor_nodes
     transformed_group_prepared = NP.prepare(transformed_group_plan)
     transformed_group_workspace = NP.workspace(
         transformed_group_prepared, Float64, DI.AutoEnzyme())
@@ -7141,68 +6844,6 @@ end
     @test transformed_new_workspace.primal.generated_group_values ≈
           transformed_new_z
 
-    transformed_input_scale_model = NP.model(
-        inputs=(; x=NP.input(), log_scale=NP.input(), group=NP.input()),
-        parameters=(;
-            tau_p_group=transformed_group_model.parameters.tau_p_group,
-            L_p_group=transformed_group_model.parameters.L_p_group,
-            b_p_group=transformed_group_model.parameters.b_p_group,
-            beta_mu=transformed_group_model.parameters.beta_mu),
-        nodes=(;
-            zscale_x_for_mu=NP.zscale(:x),
-            zscale_log_scale_for_y=NP.zscale(:log_scale),
-            b_p_group_by_group_for_mu=NP.grouped_affine(
-                :b_p_group, :tau_p_group, :L_p_group, :group,
-                (nothing, :zscale_x_for_mu)),
-            mu=NP.affine(
-                :zscale_x_for_mu, :beta_mu;
-                offsets=(:b_p_group_by_group_for_mu,), intercept=false),
-            scale=NP.exp_link(:zscale_log_scale_for_y)),
-        observations=(; y=NP.broadcasted(NP.normal(:y, :mu, :scale))),
-        site_order=(
-            :tau_p_group, :L_p_group, :b_p_group, :beta_mu, :y))
-    transformed_input_scale_plan = NP.compile(
-        transformed_input_scale_model,
-        (; x=varying_brm_data.x, log_scale=[-1.0, 0.0, 1.0, 2.0],
-           group=varying_brm_data.group);
-        conditions=(; y=varying_brm_data.y))
-    transformed_input_scale_prepared = NP.prepare(
-        transformed_input_scale_plan)
-    transformed_input_scale_new = NP.rebind(
-        transformed_input_scale_prepared, (;);
-        bindings=(;
-            x=transformed_new_bindings.x,
-            log_scale=[2.0, 3.0, 4.0, 5.0],
-            group=transformed_new_bindings.group),
-        new_groups=:resample)
-    transformed_input_scale_workspace = NP.workspace(
-        transformed_input_scale_new)
-    transformed_input_scale_position = correlated_group_position[1:10]
-    transformed_input_scale_output = zeros(4)
-    transformed_input_scale_query = NP.NodeOutput(:scale)
-    NP.evaluate!(
-        transformed_input_scale_output,
-        transformed_input_scale_workspace, transformed_input_scale_new,
-        transformed_input_scale_position, transformed_input_scale_query)
-    @test transformed_input_scale_output ≈
-          exp.(([2.0, 3.0, 4.0, 5.0] .- 0.5) ./ sqrt(5 / 3))
-    @test @allocated(NP.evaluate!(
-        transformed_input_scale_output,
-        transformed_input_scale_workspace, transformed_input_scale_new,
-        transformed_input_scale_position, transformed_input_scale_query)) == 0
-
-    transformed_large = @brm (
-            x=[-1e300, 0.0, 1e300, 5e299],
-            group=varying_brm_data.group, y=varying_brm_data.y) begin
-        sigma ~ Exponential(2)
-        mu ~ 0 + zscale(x) + (1 + zscale(x) | p | group)
-        sd(:, p) ~ Exponential(1)
-        cor(:, p) ~ LKJCholesky(2, 2)
-        y ~ Normal(mu, sigma)
-    end
-    @test_throws ArgumentError NP.prepare(
-        NP.compile(transformed_large); T=Float32)
-
     sampled_offset_plan = NP.compile(sampled_offset_brmi)
     @test sampled_offset_plan isa NP.FactorPlan
     @test sampled_offset_plan.bindings.x == sampled_offset_data.x
@@ -7246,11 +6887,6 @@ end
             sampled_offset_position)
     @test sampled_offset_density ≈ sampled_offset_expected_density
     @test sampled_offset_gradient ≈ sampled_offset_expected_gradient
-    sampled_offset_underflow_position = copy(sampled_offset_position)
-    sampled_offset_underflow_position[3] = -1000.0
-    @test NP.logdensity!(
-        sampled_offset_workspace, sampled_offset_prepared,
-        sampled_offset_underflow_position) == -Inf
     @test vec(sampled_offset_workspace.primal.node_rows[1, :]) ≈
           sampled_offset_mu
     @test NP.evaluate(
@@ -7264,22 +6900,6 @@ end
     @test factor_steady_state_allocations(
         sampled_offset_workspace, sampled_offset_prepared,
         sampled_offset_position) == (; primal=0, gradient=0)
-    sampled_offset_source_x = copy(sampled_offset_data.x)
-    sampled_offset_source_y = copy(sampled_offset_data.y)
-    sampled_offset_owned = NP.prepare(NP.bind(
-        sampled_offset_model, (; x=sampled_offset_source_x);
-        conditions=(; y=sampled_offset_source_y)))
-    sampled_offset_owned_workspace = NP.workspace(sampled_offset_owned)
-    sampled_offset_owned_density = NP.logdensity!(
-        sampled_offset_owned_workspace, sampled_offset_owned,
-        sampled_offset_position)
-    @test sampled_offset_owned.plan.bindings.x !== sampled_offset_source_x
-    @test sampled_offset_owned.conditions.y !== sampled_offset_source_y
-    sampled_offset_source_x[1] = 100.0
-    sampled_offset_source_y[1] = 100.0
-    @test NP.logdensity!(
-        sampled_offset_owned_workspace, sampled_offset_owned,
-        sampled_offset_position) == sampled_offset_owned_density
     for candidate_plan in (
         natural_sampled_offset_plan, direct_sampled_offset_plan)
         candidate_prepared = NP.prepare(candidate_plan)
@@ -7347,21 +6967,6 @@ end
         hierarchy_workspace, hierarchy_prepared, hierarchy_position)
     @test hierarchy_density ≈ hierarchy_expected_density
     @test hierarchy_gradient ≈ hierarchy_expected_gradient
-    hierarchy_prepared32 = NP.prepare(hierarchy_plan; T=Float32)
-    hierarchy_position32 = Float32.(hierarchy_position)
-    hierarchy_density32, hierarchy_gradient32 = NP.logdensity_and_gradient!(
-        NP.workspace(hierarchy_prepared32, Float32, DI.AutoEnzyme()),
-        hierarchy_prepared32, hierarchy_position32)
-    @test hierarchy_density32 ≈ Float32(hierarchy_expected_density) rtol=1f-5
-    @test hierarchy_gradient32 ≈
-          Float32.(hierarchy_expected_gradient) rtol=1f-5
-    @test_throws ArgumentError NP.prepare(
-        hierarchy_plan; T=AbstractFloat)
-    hierarchy_underflow_position = copy(hierarchy_position)
-    hierarchy_underflow_position[2] = -1000.0
-    @test NP.logdensity!(
-        NP.workspace(hierarchy_prepared), hierarchy_prepared,
-        hierarchy_underflow_position) == -Inf
     @test hierarchy_workspace.primal.pointwise_loglikelihood ≈
         logpdf.(Normal(
             hierarchy_individual, hierarchy_observation_scale), response)
@@ -7512,25 +7117,6 @@ end
         hierarchy_batch_linear, hierarchy_batch_pointwise,
         hierarchy_batch_predictive, hierarchy_batch_bundle) ==
           (; linear=0, pointwise=0, predictive=0, bundle=0)
-    hierarchy_aliased_bundle = similar(hierarchy_linear_draws)
-    hierarchy_aliased_bundle_rng = MersenneTwister(928)
-    hierarchy_aliased_bundle_control_rng = MersenneTwister(928)
-    @test_throws ArgumentError NP.execute_draws!(
-        hierarchy_aliased_bundle_rng,
-        (; linear=hierarchy_aliased_bundle,
-           predictive=hierarchy_aliased_bundle),
-        hierarchy_workspace, hierarchy_prepared, hierarchy_positions,
-        (; linear=NP.LinearPredictor(),
-           predictive=NP.PosteriorPredictive()))
-    @test rand(hierarchy_aliased_bundle_rng) ==
-          rand(hierarchy_aliased_bundle_control_rng)
-
-    hierarchy_empty_positions = zeros(Float32, 0, 4)
-    hierarchy_empty_output = zeros(Float64, 0, length(response))
-    @test_throws ArgumentError NP.evaluate_draws!(
-        hierarchy_empty_output,
-        NP.workspace(hierarchy_prepared, Float32), hierarchy_prepared,
-        hierarchy_empty_positions, NP.LinearPredictor())
 
     natural_hierarchy = NP.condition(
         naturally_composed_hierarchy(); y=response)
@@ -7701,79 +7287,8 @@ end
         bound_factor_declaration,
         (; latent_scale=Inf, observation_scale=0.5);
         conditions=(; y=response)))
-    for (latent_scale, observation_scale) in ((0.0, 0.5), (0.7, -0.5))
-        @test_throws ArgumentError NP.prepare(NP.compile(
-            bound_factor_declaration,
-            (; latent_scale, observation_scale);
-            conditions=(; y=response)))
-    end
     @test NP.LogDensityProblem(
         hierarchy_prepared, DI.AutoEnzyme()) isa NP.FactorLogDensityProblem
-    conditioned_individual_plan = NP.compile(NP.condition(
-        hierarchy; individual=0.1, y=response))
-    @test conditioned_individual_plan isa NP.FactorPlan
-    @test LogDensityProblems.dimension(conditioned_individual_plan) == 3
-    conditioned_individual_prepared = NP.prepare(conditioned_individual_plan)
-    @test isfinite(NP.logdensity!(
-        NP.workspace(conditioned_individual_prepared),
-        conditioned_individual_prepared,
-        [0.2, log(0.7), log(0.5)]))
-    @test_throws ArgumentError NP.compile(NP.condition(
-        hierarchy; individual=[0.1], y=response))
-
-    bad_scale_graph_model = NP.model(
-        inputs=(;),
-        parameters=(;
-            bad_scale=NP.parameter(
-                NP.RealSupport(), (:bad_scale,);
-                transform=NP.Identity(), prior=NP.StandardNormal()),
-            likelihood_scale=NP.parameter(
-                NP.PositiveSupport(), (:likelihood_scale,);
-                transform=NP.Exp(), prior=NP.Exponential(1.0))),
-        observations=(;
-            child=NP.normal(:child, :bad_scale, :bad_scale),
-            observed=NP.broadcasted(
-                NP.normal(:observed, :child, :likelihood_scale))),
-        site_order=(:bad_scale, :child, :likelihood_scale, :observed))
-    @test capability_error(() -> NP.compile(NP.condition(
-        bad_scale_graph_model; observed=response))).capability == :factor_scale
-
-    broadcast_parent_graph_model = NP.model(
-        inputs=(;),
-        parameters=(;
-            root=NP.parameter(
-                NP.RealSupport(), (:root,);
-                transform=NP.Identity(), prior=NP.StandardNormal()),
-            downstream_scale=NP.parameter(
-                NP.PositiveSupport(), (:downstream_scale,);
-                transform=NP.Exp(), prior=NP.Exponential(1.0))),
-        observations=(;
-            observed=NP.broadcasted(
-                NP.normal(:observed, :root, :downstream_scale)),
-            child=NP.normal(:child, :observed, :downstream_scale)),
-        site_order=(:root, :downstream_scale, :observed, :child))
-    @test capability_error(() -> NP.compile(NP.condition(
-        broadcast_parent_graph_model; observed=response))).capability ==
-          :factor_dependencies
-
-    broadcast_node_graph_model = NP.model(
-        inputs=(;),
-        parameters=(;
-            root=NP.parameter(
-                NP.RealSupport(), (:root,);
-                transform=NP.Identity(), prior=NP.StandardNormal()),
-            likelihood_scale=NP.parameter(
-                NP.PositiveSupport(), (:likelihood_scale,);
-                transform=NP.Exp(), prior=NP.Exponential(1.0))),
-        nodes=(; derived_scale=NP.exp_link(:observed)),
-        observations=(;
-            observed=NP.broadcasted(
-                NP.normal(:observed, :root, :likelihood_scale)),
-            child=NP.normal(:child, :root, :derived_scale)),
-        site_order=(:root, :likelihood_scale, :observed, :child))
-    @test capability_error(() -> NP.compile(NP.condition(
-        broadcast_node_graph_model; observed=response))).capability ==
-          :factor_dependencies
     @test NP.factor_graph(hierarchy).sites.y.activity isa NP.GeneratedSite
     conditioned_population_graph = NP.factor_graph(
         hierarchy.declaration;
@@ -7799,50 +7314,6 @@ end
         site_order=(:downstream, :upstream))
     @test capability_error(
         () -> NP.factor_graph(unordered_graph_model)).capability == :site_order
-
-    unordered_storage_graph_model = NP.model(
-        inputs=(; literal_mu=NP.input(), literal_tau=NP.input()),
-        observations=(;
-            downstream=NP.normal(:downstream, :upstream, :literal_tau),
-            upstream=NP.normal(:upstream, :literal_mu, :literal_tau)),
-        outputs=(; public_downstream=:downstream),
-        site_order=(:upstream, :downstream))
-    unordered_storage_graph = NP.factor_graph(
-        unordered_storage_graph_model;
-        conditions=(; public_downstream=0.3))
-    @test keys(unordered_storage_graph.sites) == (:upstream, :downstream)
-    @test NP.site_factor_dependencies(
-        unordered_storage_graph.sites.downstream.factor) ==
-          (:upstream,)
-    @test unordered_storage_graph.sites.downstream.factor.scale isa
-          NP.InputValue{:literal_tau}
-    @test unordered_storage_graph.sites.downstream.activity isa
-          NP.ConditionedSite
-    @test_throws ArgumentError NP.factor_graph(
-        unordered_storage_graph_model;
-        conditions=(; downstream=0.3, public_downstream=0.3))
-
-    cyclic_graph_model = NP.model(
-        inputs=(; literal_tau=NP.input(),),
-        observations=(;
-            first_site=NP.normal(:first_site, :second_site, :literal_tau),
-            second_site=NP.normal(:second_site, :first_site, :literal_tau)),
-        site_order=(:first_site, :second_site))
-    @test capability_error(
-        () -> NP.factor_graph(cyclic_graph_model)).capability == :site_order
-
-    legacy_response_graph_model = NP.model(
-        inputs=(;
-            literal_mu=NP.input(), literal_tau=NP.input(),
-            legacy_y=NP.input(:response)),
-        observations=(;
-            legacy_y=NP.broadcasted(
-                NP.normal(:legacy_y, :literal_mu, :literal_tau))))
-    legacy_response_graph = NP.factor_graph(NP.instantiate(
-        legacy_response_graph_model,
-        (; literal_mu=0.0, literal_tau=1.0, legacy_y=response)))
-    @test legacy_response_graph.sites.legacy_y.activity isa NP.ConditionedSite
-    @test legacy_response_graph.dimension == 0
 
     latent_brm_data = (; y=response)
     latent_brm = @brm latent_brm_data begin
@@ -7873,11 +7344,9 @@ end
             latent_prepared, latent_position)
 
     scale_named_plan = NP.compile(NP.condition(
-        monolithic_scale_named_site(0.25, 0.8);
-        y=response))
+        monolithic_scale_named_latent(0.25, 0.8); y=response))
     @test keys(scale_named_plan.parameters) == (:site, :scale)
-    @test BRM.native_parameter_name(
-        scale_named_plan.parameters.site) === :scale
+    @test BRM.native_parameter_name(scale_named_plan.parameters.site) === :scale
     scale_named_prepared = NP.prepare(scale_named_plan)
     scale_named_density, scale_named_gradient = NP.logdensity_and_gradient!(
         NP.workspace(scale_named_prepared, Float64, DI.AutoEnzyme()),
@@ -7941,37 +7410,12 @@ end
         allocation_rng, prior_position, prior_response,
         latent_workspace, latent_prepared)) == 0
 
-    two_row_latent = NP.rebind(
-        latent_prepared,
-        NamedTuple{(latent_response_name,)}(([0.1, 0.4],)))
-    two_row_workspace = NP.workspace(two_row_latent)
-    for (position_buffer, output_buffer) in (
-        (two_row_workspace.gradient, zeros(2)),
-        (two_row_latent.response, zeros(2)),
-        (zeros(2), two_row_latent.response),
-    )
-        rejected_rng = MersenneTwister(917)
-        control_rng = MersenneTwister(917)
-        @test_throws ArgumentError NP.simulate_prior!(
-            rejected_rng, position_buffer, output_buffer,
-            two_row_workspace, two_row_latent)
-        @test rand(rejected_rng) == rand(control_rng)
-    end
-
     latent_prepared32 = NP.prepare(latent_plan; T=Float32)
     latent_density32, latent_gradient32 = NP.logdensity_and_gradient!(
         NP.workspace(latent_prepared32, Float32, DI.AutoEnzyme()),
         latent_prepared32, Float32.(latent_position))
     @test latent_density32 ≈ Float32(latent_expected_density) rtol=1f-5
     @test latent_gradient32 ≈ Float32.(latent_expected_gradient) rtol=1f-5
-
-    aliased_prior = aliased_scalar_normal_prior()
-    @test keys(aliased_prior.declaration.parameters) == (:theta,)
-    @test aliased_prior.declaration.outputs == (; coefficient=:theta)
-    aliased_prior_component = NP.component(:aliased_prior, aliased_prior)
-    @test NP.graph_kind(
-        NP.output(aliased_prior_component, :coefficient)) === :parameter
-    @test_throws ArgumentError NP.output(aliased_prior_component, :theta)
 
     named_priors = named_scalar_normal_priors()
     @test keys(named_priors.declaration.parameters) == (:intercept, :slope)
@@ -7985,15 +7429,6 @@ end
         inputs=(; raw=NP.input()),
         nodes=(; scaled=NP.zscale(:raw)),
         observations=(;), outputs=(; first=:scaled, second=:scaled))
-    @test_throws ArgumentError NP.model(
-        inputs=(; literal_mu=NP.input(), literal_tau=NP.input()),
-        observations=(;
-            first_site=NP.normal(:first_site, :literal_mu, :literal_tau),
-            second_site=NP.normal(
-                :second_site, :literal_mu, :literal_tau)),
-        outputs=(; first_site=:second_site))
-    @test_throws ArgumentError NP.model(
-        inputs=(; raw=NP.input()), observations=(;), outputs=(;))
 
     unconditioned = macro_gaussian_identity(raw_x)
     @test keys(unconditioned.declaration.inputs) == (:x,)
@@ -8122,11 +7557,6 @@ end
         end)))
     @test occursin("returned graph values must be distinct", err.msg)
     err = argument_error(() -> macroexpand(
-        @__MODULE__, :(NP.@model function empty_return(x)
-            return (;)
-        end)))
-    @test occursin("at least one named graph value", err.msg)
-    err = argument_error(() -> macroexpand(
         @__MODULE__, :(NP.@model function mixed_scalar_prior_component(x)
             intercept ~ Normal()
             slope ~ Normal()
@@ -8173,121 +7603,6 @@ end
         end)))
     @test occursin("features must use distinct raw inputs", err.msg)
     err = argument_error(() -> macroexpand(
-        @__MODULE__, :(NP.@model function unknown_data_offset(x)
-            beta ~ Normal()
-            sigma ~ Exponential(1)
-            mu = beta * x + offset(expsoure)
-            @. y ~ Normal(mu, sigma)
-        end)))
-    @test occursin(
-        "must name a preceding scalar site or function argument", err.msg)
-    err = argument_error(() -> macroexpand(
-        @__MODULE__, :(NP.@model function unknown_log_offset(x)
-            beta ~ Normal()
-            sigma ~ Exponential(1)
-            mu = beta * x + offset(log(expsoure))
-            @. y ~ Normal(mu, sigma)
-        end)))
-    @test occursin("must name a function argument", err.msg)
-    err = argument_error(() -> macroexpand(
-        @__MODULE__, :(NP.@model function mismatched_parameter_dot(x, w)
-            beta[(:x, :w)] ~ StandardNormal()
-            extra ~ Normal()
-            sigma ~ Exponential(2)
-            mu = dot(beta, (w, x)) + extra * x
-            @. y ~ Normal(mu, sigma)
-        end)))
-    @test occursin("must match its declared coefficient keys", err.msg)
-    err = argument_error(() -> macroexpand(
-        @__MODULE__, :(NP.@model function mixed_parameter_dot(x, w)
-            beta[(:x, :w)] ~ StandardNormal()
-            extra ~ Normal()
-            sigma ~ Exponential(2)
-            mu = dot(beta, (x, w)) + extra * x
-            @. y ~ Normal(mu, sigma)
-        end)))
-    @test occursin(
-        "cannot mix a parameter dot with scalar population coefficients",
-        err.msg)
-    err = argument_error(() -> macroexpand(
-        @__MODULE__, :(NP.@model function unsupported_grouped_transform(
-                x, group)
-            tau[(:Intercept, :x)] ~ Exponential(1)
-            L[(:Intercept, :x)] ~ LKJCholesky(2, 2)
-            b[group, (:Intercept, :x)] ~ MvNormalCholesky(tau, L)
-            beta[(:x,)] ~ StandardNormal()
-            sigma ~ Exponential(2)
-            mu = dot(beta, (log(x),)) + dot(b[group], (1, log(x)))
-            @. y ~ Normal(mu, sigma)
-        end)))
-    @test occursin("support only center(input) or zscale(input)", err.msg)
-    err = argument_error(() -> macroexpand(
-        @__MODULE__, :(NP.@model function expression_grouped_transform(
-                x, group)
-            tau[(:Intercept, :x)] ~ Exponential(1)
-            L[(:Intercept, :x)] ~ LKJCholesky(2, 2)
-            b[group, (:Intercept, :x)] ~ MvNormalCholesky(tau, L)
-            beta[(:x,)] ~ StandardNormal()
-            sigma ~ Exponential(2)
-            mu = dot(beta, (zscale(x + 1),)) +
-                dot(b[group], (1, zscale(x + 1)))
-            @. y ~ Normal(mu, sigma)
-        end)))
-    @test occursin("requires one named input", err.msg)
-    err = argument_error(() -> macroexpand(
-        @__MODULE__, :(NP.@model function grouped_nonargument(x)
-            tau ~ Exponential(1)
-            b[group] ~ Normal(0, tau)
-            beta ~ Normal()
-            sigma ~ Exponential(2)
-            mu = beta * x + b[group]
-            @. y ~ Normal(mu, sigma)
-        end)))
-    @test occursin("must index one function argument", err.msg)
-    err = argument_error(() -> macroexpand(
-        @__MODULE__, :(NP.@model function grouped_wrong_family(x, group)
-            tau ~ Exponential(1)
-            b[group] ~ Exponential(tau)
-            beta ~ Normal()
-            sigma ~ Exponential(2)
-            mu = beta * x + b[group]
-            @. y ~ Normal(mu, sigma)
-        end)))
-    @test occursin("requires Normal(location, scale)", err.msg)
-    err = argument_error(() -> macroexpand(
-        @__MODULE__, :(NP.@model function grouped_wrong_gather(x, group, other)
-            tau ~ Exponential(1)
-            b[group] ~ Normal(0, tau)
-            beta ~ Normal()
-            sigma ~ Exponential(2)
-            mu = beta * x + b[other]
-            @. y ~ Normal(mu, sigma)
-        end)))
-    @test occursin("gathered with its declared group input", err.msg)
-    err = argument_error(() -> macroexpand(
-        @__MODULE__, :(NP.@model function repeated_grouped_offset(x, group)
-            tau ~ Exponential(1)
-            b[group] ~ Normal(0, tau)
-            beta ~ Normal()
-            sigma ~ Exponential(2)
-            mu = beta * x + b[group] + b[group]
-            @. y ~ Normal(mu, sigma)
-        end)))
-    @test occursin("grouped offsets must be used once each", err.msg)
-    err = argument_error(() -> macroexpand(
-        @__MODULE__, :(NP.@model function repeated_correlated_group(
-                x, group)
-            tau[(:Intercept, :x)] ~ Exponential(1)
-            L[(:Intercept, :x)] ~ LKJCholesky(2, 2)
-            b[group, (:Intercept, :x)] ~ MvNormalCholesky(tau, L)
-            beta ~ Normal()
-            sigma ~ Exponential(2)
-            mu = beta * x + dot(b[group], (1, x)) +
-                dot(b[group], (1, x))
-            @. y ~ Normal(mu, sigma)
-        end)))
-    @test occursin("distinct public node identities", err.msg)
-    err = argument_error(() -> macroexpand(
         @__MODULE__, :(NP.@model function recursive_model(x)
             z ~ recursive_model(x)
             return z
@@ -8305,13 +7620,4879 @@ end
             z ~ scalar_normal_site(0.0, 1.0)
         end)))
     @test occursin("requires an explicit returned graph value", err.msg)
+end
+
+
+@testset "typed native PPL Student-t declarations" begin
+    observation = NP.student_t(:y, :nu, :mu, :sigma)
+    @test NP.observation_response(observation) === :y
+    @test NP.observation_dependencies(observation) == (:nu, :mu, :sigma)
+
+    declaration = NP.model(
+        inputs=(; x=NP.input()),
+        parameters=(;
+            nu=NP.parameter(
+                NP.PositiveSupport(), (:nu,);
+                transform=NP.Exp(), prior=NP.Exponential(10.0)),
+            beta_mu=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            sigma=NP.parameter(
+                NP.PositiveSupport(), (:sigma,);
+                transform=NP.Exp(), prior=NP.Exponential(2.0))),
+        nodes=(; mu=NP.affine(:x, :beta_mu)),
+        observations=(;
+            y=NP.broadcasted(NP.student_t(:y, :nu, :mu, :sigma))))
+    graph = NP.factor_graph(
+        declaration;
+        bindings=(; x=[-1.0, 0.0, 1.0]),
+        conditions=(; y=[-0.5, 0.25, 1.0]))
+    factor = graph.sites.y.factor
+    @test factor isa NP.StudentTSiteFactor
+    @test factor.degrees_freedom == NP.SiteValue{:nu}()
+    @test factor.location == NP.NodeValue{:mu}()
+    @test factor.scale == NP.SiteValue{:sigma}()
+    @test NP.site_factor_dependencies(factor) == (:nu, :mu, :sigma)
+    @test graph.schedule == (:nu, :beta_mu, :sigma, :mu, :y)
+
+    bindings = (; x=[-1.0, 0.0, 1.0])
+    response = [-0.5, 0.25, 1.0]
+    prepared = NP.prepare(NP.bind(
+        declaration, bindings; conditions=(; y=response)))
+    position = [log(7.0), 0.2, 0.4, log(1.25)]
+    work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
+    density, gradient = NP.logdensity_and_gradient!(
+        work, prepared, position)
+    mu = position[2] .+ position[3] .* bindings.x
+    reference_pointwise = logpdf.(
+        LocationScale.(mu, exp(position[4]), Ref(TDist(exp(position[1])))),
+        response)
+    reference_density =
+        logpdf(Exponential(10.0), exp(position[1])) + position[1] +
+        sum(logpdf.(Normal(), position[2:3])) +
+        logpdf(Exponential(2.0), exp(position[4])) + position[4] +
+        sum(reference_pointwise)
+    @test density ≈ reference_density atol=2e-11
+    @test NP.evaluate(
+        work, prepared, position, NP.PointwiseLogLikelihood()) ≈
+          reference_pointwise atol=2e-11
+
+    finite_difference = similar(gradient)
+    plus = copy(position)
+    minus = copy(position)
+    step = 1e-6
+    for coordinate in eachindex(position)
+        plus[coordinate] += step
+        minus[coordinate] -= step
+        finite_difference[coordinate] = (
+            NP.logdensity!(work, prepared, plus) -
+            NP.logdensity!(work, prepared, minus)) / (2step)
+        plus[coordinate] = position[coordinate]
+        minus[coordinate] = position[coordinate]
+    end
+    @test gradient ≈ finite_difference rtol=4e-5 atol=4e-6
+
+    predictive = NP.simulate(
+        MersenneTwister(831), work, prepared, position)
+    @test predictive == NP.simulate(
+        MersenneTwister(831), NP.workspace(prepared), prepared, position)
+    @test all(isfinite, predictive)
+    predictive_buffer = zeros(length(response))
+    @test factor_predictive_allocations(
+        MersenneTwister(832), predictive_buffer,
+        work, prepared, position) == 0
+    @test factor_steady_state_allocations(
+        work, prepared, position) == (; primal=0, gradient=0)
+
+    for extreme in (
+            [-1000.0, 0.2, 0.4, log(1.25)],
+            [1000.0, 0.2, 0.4, log(1.25)],
+            [log(7.0), 0.2, 0.4, -1000.0],
+            [log(7.0), 0.2, 0.4, 1000.0])
+        @test !isnan(NP.logdensity!(work, prepared, extreme))
+    end
+
+    brm_data = (;
+        x=[-1.0, 0.0, 1.0],
+        group=[:a, :a, :b],
+        y=response)
+    brmi = @brm brm_data begin
+        nu ~ Exponential(10.0)
+        sigma ~ Exponential(2)
+        mu ~ 1 + x + (1 | g | group)
+        sd(:, g) ~ Exponential(1)
+        y ~ LocationScale(mu, sigma, TDist(nu))
+    end
+    natural = NP.condition(
+        natural_student_t(brm_data.x, brm_data.group);
+        y=brm_data.y)
+    lowered = NP.lower(brmi)
+    @test SBBRMI(brmi; mod=@__MODULE__) isa SBBRMI
+    @test typeof(lowered) === typeof(natural.declaration)
+    @test lowered == natural.declaration
+    @test sprint(show, lowered) == sprint(show, natural.declaration)
+    @test keys(lowered.inputs) == (:x, :group)
+    @test keys(lowered.parameters) ==
+          (:beta_mu, :tau_g_group, :b_g_group, :nu, :sigma)
+    @test lowered.site_order ==
+          (:tau_g_group, :b_g_group, :beta_mu, :nu, :sigma, :y)
+
+    brm_prepared = NP.prepare(brmi)
+    natural_prepared = NP.prepare(natural)
+    @test brm_prepared.plan.graph.coordinates ==
+          natural_prepared.plan.graph.coordinates
+    grouped_position = [
+        log(0.7), -0.2, 0.3, 0.4, 0.15, log(6.0), log(1.1)]
+    brm_work = NP.workspace(
+        brm_prepared, Float64, DI.AutoEnzyme())
+    natural_work = NP.workspace(
+        natural_prepared, Float64, DI.AutoEnzyme())
+    @test NP.logdensity_and_gradient!(
+        brm_work, brm_prepared, grouped_position) ==
+          NP.logdensity_and_gradient!(
+            natural_work, natural_prepared, grouped_position)
+
+    grouped_mu = grouped_position[4] .+
+        grouped_position[5] .* brm_data.x .+
+        grouped_position[[2, 2, 3]]
+    @test NP.evaluate(
+        brm_work, brm_prepared, grouped_position,
+        NP.LinearPredictor()) ≈ grouped_mu
+    @test NP.evaluate(
+        brm_work, brm_prepared, grouped_position,
+        NP.NodeOutput(:mu)) ≈ grouped_mu
+    @test NP.output_eltype(
+        NP.output_signature(
+            brm_prepared, NP.PosteriorPredictive()), brm_prepared) ===
+          Float64
+    @test factor_steady_state_allocations(
+        brm_work, brm_prepared, grouped_position) ==
+          (; primal=0, gradient=0)
+
+    replay_bindings = (; x=[0.5, -0.5], group=[:b, :a])
+    replay_response = [0.1, -0.2]
+    rebound = NP.rebind(
+        brm_prepared, (; y=replay_response);
+        bindings=replay_bindings)
+    rebound_work = NP.workspace(
+        rebound, Float64, DI.AutoEnzyme())
+    rebound_density, rebound_gradient = NP.logdensity_and_gradient!(
+        rebound_work, rebound, grouped_position)
+    @test isfinite(rebound_density)
+    @test all(isfinite, rebound_gradient)
+    @test NP.evaluate(
+        rebound_work, rebound, grouped_position,
+        NP.LinearPredictor()) ≈
+          grouped_position[4] .+
+          grouped_position[5] .* replay_bindings.x .+
+          grouped_position[[3, 2]]
+
+    prediction_only = NP.rebind(
+        brm_prepared, (;); bindings=replay_bindings)
+    @test !NP.has_response(prediction_only)
+    @test length(NP.simulate(
+        MersenneTwister(833), NP.workspace(prediction_only),
+        prediction_only, grouped_position)) == 2
+    new_group_bindings = (; x=[0.0, 1.0], group=[:a, :new])
+    new_group = NP.rebind(
+        brm_prepared, (;); bindings=new_group_bindings,
+        new_groups=:resample)
+    @test new_group.plan.generated_group_levels ==
+          (; b_g_group=(:new,))
+    @test NP.simulate(
+        MersenneTwister(834), NP.workspace(new_group),
+        new_group, grouped_position) ==
+          NP.simulate(
+            MersenneTwister(834), NP.workspace(new_group),
+            new_group, grouped_position)
+
+    draw_positions = [
+        grouped_position';
+        (grouped_position .+
+         [0.02, 0.05, -0.03, 0.1, -0.02, 0.04, -0.01])';
+    ]
+    linear_draws = zeros(2, 3)
+    pointwise_draws = zeros(2, 3)
+    predictive_draws = zeros(2, 3)
+    bundle = (;
+        linear=zeros(2, 3), pointwise=zeros(2, 3),
+        predictive=zeros(2, 3))
+    @test factor_batch_allocations(
+        brm_work, brm_prepared, draw_positions,
+        linear_draws, pointwise_draws, predictive_draws, bundle) ==
+          (; linear=0, pointwise=0, predictive=0, bundle=0)
+
+    prepared32 = NP.prepare(NP.compile(brmi); T=Float32)
+    position32 = Float32.(grouped_position)
+    density32, gradient32 = NP.logdensity_and_gradient!(
+        NP.workspace(prepared32, Float32, DI.AutoEnzyme()),
+        prepared32, position32)
+    @test density32 ≈ Float32(NP.logdensity!(
+        brm_work, brm_prepared, grouped_position)) rtol=2f-5
+    @test all(isfinite, gradient32)
+
+    invalid_df = NP.model(
+        inputs=declaration.inputs,
+        parameters=merge(
+            declaration.parameters,
+            (; nu=NP.parameter(
+                NP.RealSupport(), (:nu,);
+                transform=NP.Identity(), prior=NP.StandardNormal()))),
+        nodes=declaration.nodes,
+        observations=declaration.observations)
+    @test capability_error(() -> NP.bind(
+        invalid_df, bindings; conditions=(; y=response))).capability ==
+          :factor_support
+
+    wrong_base_data = (;
+        x=brm_data.x, group=brm_data.group, y=brm_data.y)
+    wrong_base = @brm wrong_base_data begin
+        nu ~ Exponential(10.0)
+        sigma ~ Exponential(2)
+        mu ~ 1 + x + (1 | g | group)
+        sd(:, g) ~ Exponential(1)
+        y ~ LocationScale(mu, sigma, Normal())
+    end
+    @test capability_error(() -> NP.lower(wrong_base)).capability ==
+          :likelihood
+
     err = argument_error(() -> macroexpand(
-        @__MODULE__, :(NP.@model function returned_upstream_site(x)
-            z ~ scalar_normal_site(0.0, 1.0)
-            y ~ scalar_normal_likelihood(z)
-            return z
+        @__MODULE__, :(NP.@model function literal_student_df(x)
+            beta_mu[(:Intercept, :x)] ~ StandardNormal()
+            sigma ~ Exponential(2)
+            mu = dot(beta_mu, (1, x))
+            @. y ~ LocationScale(mu, sigma, TDist(4.0))
         end)))
-    @test occursin("public site aliases currently require a terminal", err.msg)
+    @test occursin("TDist(named_df)", err.msg)
+end
+
+
+@testset "typed native PPL multiple-outcome declarations" begin
+    data = (;
+        x=[-1.0, 0.0, 1.0],
+        y=[0.2, -0.1, 0.5],
+        z=[-0.4, 0.3, 0.8])
+    declaration = NP.model(
+        inputs=(; x=NP.input()),
+        parameters=(;
+            beta_mu_y=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            beta_mu_z=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            sigma_y=NP.parameter(
+                NP.PositiveSupport(), (:sigma_y,);
+                transform=NP.Exp(), prior=NP.Exponential(2)),
+            sigma_z=NP.parameter(
+                NP.PositiveSupport(), (:sigma_z,);
+                transform=NP.Exp(), prior=NP.Exponential(2))),
+        nodes=(;
+            mu_y=NP.affine(:x, :beta_mu_y),
+            mu_z=NP.affine(:x, :beta_mu_z)),
+        observations=(;
+            y=NP.broadcasted(NP.normal(:y, :mu_y, :sigma_y)),
+            z=NP.broadcasted(NP.normal(:z, :mu_z, :sigma_z))),
+        site_order=(
+            :beta_mu_y, :sigma_y, :y,
+            :beta_mu_z, :sigma_z, :z))
+    natural = natural_multioutcome_gaussian(data.x)
+    @test natural.declaration == declaration
+    brmi = @brm data begin
+        sigma_y ~ Exponential(2)
+        mu_y ~ 1 + x
+        y ~ Normal(mu_y, sigma_y)
+        sigma_z ~ Exponential(2)
+        mu_z ~ 1 + x
+        z ~ Normal(mu_z, sigma_z)
+    end
+    @test SBBRMI(brmi; mod=@__MODULE__) isa SBBRMI
+    @test NP.lower(brmi) == declaration
+    instance = NP.condition(natural; y=data.y, z=data.z)
+    graph = NP.factor_graph(
+        declaration; bindings=natural.bindings,
+        conditions=(; y=data.y, z=data.z))
+    @test graph.schedule == (
+        :beta_mu_y, :sigma_y, :beta_mu_z, :sigma_z,
+        :mu_y, :y, :mu_z, :z)
+    @test graph.sites.y.shape isa NP.BroadcastSiteShape
+    @test graph.sites.z.shape isa NP.BroadcastSiteShape
+    @test graph.sites.y.activity isa NP.ConditionedSite
+    @test graph.sites.z.activity isa NP.ConditionedSite
+
+    plan = NP.compile(instance)
+    @test NP.factor_output_sites(plan) == (:y, :z)
+    @test plan.output_sites == (:y, :z)
+    output_error = capability_error(() -> NP.factor_output_site(plan))
+    @test output_error.capability == :factor_outputs
+    @test occursin("select an outcome explicitly", output_error.detail)
+    @test occursin("2 terminal outcomes", sprint(show, plan))
+
+    pointwise_signatures = NP.output_signature(
+        plan, NP.PointwiseLogLikelihood())
+    predictive_signatures = NP.output_signature(
+        plan, NP.PosteriorPredictive())
+    @test keys(pointwise_signatures) == (:y, :z)
+    @test keys(predictive_signatures) == (:y, :z)
+    @test map(NP.output_axes, pointwise_signatures) ==
+          map(NP.output_axes, predictive_signatures)
+    @test all(
+        axes -> axes == (plan.observation_axis,),
+        values(map(NP.output_axes, pointwise_signatures)))
+    query_error = capability_error(() -> NP.output_signature(
+        plan, NP.LinearPredictor()))
+    @test query_error.capability == :query
+    @test occursin("no single linear predictor", query_error.detail)
+
+    prepared = NP.prepare(plan)
+    position = [0.1, 0.4, log(0.8), -0.2, 0.3, log(1.1)]
+    work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
+    density, gradient = NP.logdensity_and_gradient!(
+        work, prepared, position)
+    mu_y = position[1] .+ position[2] .* data.x
+    mu_z = position[4] .+ position[5] .* data.x
+    prior_density =
+        sum(logpdf.(Normal(), position[[1, 2, 4, 5]])) +
+        logpdf(Exponential(2), exp(position[3])) + position[3] +
+        logpdf(Exponential(2), exp(position[6])) + position[6]
+    y_density = sum(logpdf.(Normal.(mu_y, exp(position[3])), data.y))
+    z_density = sum(logpdf.(Normal.(mu_z, exp(position[6])), data.z))
+    @test density ≈ prior_density + y_density + z_density atol=2e-12
+    finite_difference = similar(gradient)
+    plus = copy(position)
+    minus = copy(position)
+    step = 1e-6
+    for coordinate in eachindex(position)
+        plus[coordinate] += step
+        minus[coordinate] -= step
+        finite_difference[coordinate] = (
+            NP.logdensity!(work, prepared, plus) -
+            NP.logdensity!(work, prepared, minus)) / (2step)
+        plus[coordinate] = position[coordinate]
+        minus[coordinate] = position[coordinate]
+    end
+    @test gradient ≈ finite_difference rtol=2e-5 atol=2e-6
+    @test factor_steady_state_allocations(
+        work, prepared, position) == (; primal=0, gradient=0)
+    brm_prepared = NP.prepare(brmi)
+    @test NP.factor_output_sites(brm_prepared.plan) == (:y, :z)
+    brm_work = NP.workspace(brm_prepared, Float64, DI.AutoEnzyme())
+    brm_density, brm_gradient = NP.logdensity_and_gradient!(
+        brm_work, brm_prepared, position)
+    @test brm_density == density
+    @test brm_gradient == gradient
+
+    pointwise_query = NP.PointwiseLogLikelihood()
+    predictive_query = NP.PosteriorPredictive()
+    pointwise = NP.evaluate(
+        work, prepared, position, pointwise_query)
+    @test keys(pointwise) == (:y, :z)
+    @test pointwise.y ≈ logpdf.(
+        Normal.(mu_y, exp(position[3])), data.y)
+    @test pointwise.z ≈ logpdf.(
+        Normal.(mu_z, exp(position[6])), data.z)
+    predictive = NP.simulate(
+        MersenneTwister(926), work, prepared, position, predictive_query)
+    @test keys(predictive) == (:y, :z)
+    @test predictive == NP.simulate(
+        MersenneTwister(926), work, prepared, position, predictive_query)
+
+    prior = NP.simulate_prior(
+        MersenneTwister(927), work, prepared)
+    @test keys(prior.response) == (:y, :z)
+    @test all(isfinite, prior.position)
+    @test prior == NP.simulate_prior(
+        MersenneTwister(927), work, prepared)
+
+    positions = permutedims(hcat(position, position .+ 0.05))
+    pointwise_draws = NP.evaluate_draws(
+        work, prepared, positions, pointwise_query)
+    predictive_draws = NP.simulate_draws(
+        MersenneTwister(928), work, prepared, positions,
+        predictive_query)
+    @test keys(pointwise_draws) == (:y, :z)
+    @test keys(predictive_draws) == (:y, :z)
+    @test pointwise_draws.y[1, :] == pointwise.y
+    @test pointwise_draws.z[1, :] == pointwise.z
+    @test predictive_draws == NP.simulate_draws(
+        MersenneTwister(928), work, prepared, positions,
+        predictive_query)
+
+    queries = (;
+        mu_y=NP.NodeOutput(:mu_y),
+        mu_z=NP.NodeOutput(:mu_z),
+        pointwise=pointwise_query,
+        predictive=predictive_query)
+    bundle = NP.execute_draws(
+        MersenneTwister(929), work, prepared, positions, queries)
+    @test keys(bundle) == keys(queries)
+    @test keys(bundle.pointwise) == (:y, :z)
+    @test keys(bundle.predictive) == (:y, :z)
+    @test bundle.mu_y[1, :] == mu_y
+    @test bundle.mu_z[1, :] == mu_z
+    @test bundle.pointwise == pointwise_draws
+    @test bundle == NP.execute_draws(
+        MersenneTwister(929), work, prepared, positions, queries)
+
+    pointwise_output = NP.allocate_output(prepared, pointwise_query)
+    predictive_output = NP.allocate_output(prepared, predictive_query)
+    pointwise_draw_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, pointwise_query),
+        prepared)
+    predictive_draw_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, predictive_query),
+        prepared)
+    bundle_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, queries), prepared)
+    prior_position = similar(position)
+    @test factor_multioutcome_allocations(
+        pointwise_output, predictive_output,
+        pointwise_draw_output, predictive_draw_output,
+        bundle_output, queries, prior_position,
+        work, prepared, position, positions) == (;
+            pointwise=0, predictive=0, pointwise_draws=0,
+            predictive_draws=0, bundle=0, prior=0)
+
+    aliased = fill(42.0, length(data.y))
+    alias_error = argument_error(() -> NP.evaluate!(
+        (; y=aliased, z=aliased), work, prepared, position,
+        pointwise_query))
+    @test occursin("must not alias", alias_error.msg)
+    @test aliased == fill(42.0, length(data.y))
+
+    float32_prepared = NP.prepare(plan; T=Float32)
+    float32_position = Float32.(position)
+    float32_work = NP.workspace(
+        float32_prepared, Float32, DI.AutoEnzyme())
+    float32_density, float32_gradient = NP.logdensity_and_gradient!(
+        float32_work, float32_prepared, float32_position)
+    @test float32_density ≈ density rtol=2f-5
+    @test float32_gradient ≈ gradient rtol=3f-5
+
+    partially_conditioned = NP.compile(NP.condition(natural; y=data.y))
+    @test NP.factor_output_sites(partially_conditioned) == (:y, :z)
+    @test partially_conditioned.graph.sites.y.activity isa NP.ConditionedSite
+    @test partially_conditioned.graph.sites.z.activity isa NP.GeneratedSite
+    partial_prepared = NP.prepare(partially_conditioned)
+    partial_density = NP.logdensity!(
+        NP.workspace(partial_prepared), partial_prepared, position)
+    @test partial_density ≈ prior_density + y_density atol=2e-12
+    untouched = (; y=fill(42.0, length(data.y)),
+                  z=fill(42.0, length(data.z)))
+    partial_error = argument_error(() -> NP.evaluate!(
+        untouched, NP.workspace(partial_prepared), partial_prepared,
+        position, pointwise_query))
+    @test occursin("for `z` requires", partial_error.msg)
+    @test all(==(42.0), untouched.y)
+    @test all(==(42.0), untouched.z)
+
+    replayed = NP.rebind(
+        prepared, (;); bindings=(; x=[-0.5, 0.5]))
+    @test NP.factor_output_sites(replayed.plan) == (:y, :z)
+    @test !NP.has_response(replayed)
+    @test length(replayed.plan.observation_axis) == 2
+    replay_work = NP.workspace(replayed, Float64, DI.AutoEnzyme())
+    replay_predictive = NP.simulate(
+        MersenneTwister(930), replay_work, replayed, position,
+        predictive_query)
+    @test size(replay_predictive.y) == (2,)
+    @test size(replay_predictive.z) == (2,)
+
+    shared_brmi = @brm data begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x
+        y ~ Normal(mu, sigma)
+        z ~ Normal(mu, sigma)
+    end
+    @test SBBRMI(shared_brmi; mod=@__MODULE__) isa SBBRMI
+    shared_natural = natural_shared_multioutcome_gaussian(data.x)
+    @test NP.lower(shared_brmi) == shared_natural.declaration
+    shared_prepared = NP.prepare(shared_brmi)
+    @test NP.factor_output_sites(shared_prepared.plan) == (:y, :z)
+    @test BRM.LogDensityProblems.dimension(shared_prepared) == 3
+    shared_position = [0.1, 0.4, log(0.8)]
+    shared_work = NP.workspace(
+        shared_prepared, Float64, DI.AutoEnzyme())
+    shared_density = NP.logdensity!(
+        shared_work, shared_prepared, shared_position)
+    shared_mu = shared_position[1] .+ shared_position[2] .* data.x
+    shared_reference =
+        sum(logpdf.(Normal(), shared_position[1:2])) +
+        logpdf(Exponential(2), exp(shared_position[3])) +
+        shared_position[3] +
+        sum(logpdf.(Normal.(shared_mu, exp(shared_position[3])), data.y)) +
+        sum(logpdf.(Normal.(shared_mu, exp(shared_position[3])), data.z))
+    @test shared_density ≈ shared_reference atol=2e-12
+    @test_throws DimensionMismatch NP.compile(NP.condition(
+        natural; y=data.y, z=data.z[1:2]))
+end
+
+
+@testset "typed native PPL mixed-family outcome declarations and signatures" begin
+    data = (;
+        x=[-1.0, 0.0, 1.0],
+        y=[0.2, -0.1, 0.5],
+        z=Bool[true, false, true])
+    declaration = NP.model(
+        inputs=(; x=NP.input()),
+        parameters=(;
+            beta_mu_y=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            beta_eta_z=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            sigma_y=NP.parameter(
+                NP.PositiveSupport(), (:sigma_y,);
+                transform=NP.Exp(), prior=NP.Exponential(2))),
+        nodes=(;
+            mu_y=NP.affine(:x, :beta_mu_y),
+            eta_z=NP.affine(:x, :beta_eta_z)),
+        observations=(;
+            y=NP.broadcasted(NP.normal(:y, :mu_y, :sigma_y)),
+            z=NP.broadcasted(NP.bernoulli_logit(:z, :eta_z))),
+        site_order=(
+            :beta_mu_y, :sigma_y, :y,
+            :beta_eta_z, :z))
+    natural = natural_mixed_outcome(data.x)
+    @test natural.declaration == declaration
+    brmi = @brm data begin
+        sigma_y ~ Exponential(2)
+        mu_y ~ 1 + x
+        y ~ Normal(mu_y, sigma_y)
+        eta_z ~ 1 + x
+        z ~ BernoulliLogit(eta_z)
+    end
+    @test SBBRMI(brmi; mod=@__MODULE__) isa SBBRMI
+    @test NP.lower(brmi) == declaration
+
+    plan = NP.compile(NP.condition(natural; y=data.y, z=data.z))
+    @test NP.factor_output_sites(plan) == (:y, :z)
+    @test plan.graph.schedule == (
+        :beta_mu_y, :sigma_y, :beta_eta_z,
+        :mu_y, :y, :eta_z, :z)
+    pointwise_signatures = NP.output_signature(
+        plan, NP.PointwiseLogLikelihood())
+    predictive_signatures = NP.output_signature(
+        plan, NP.PosteriorPredictive())
+    @test keys(pointwise_signatures) == (:y, :z)
+    @test keys(predictive_signatures) == (:y, :z)
+    @test all(
+        signature -> NP.output_axes(signature) == (plan.observation_axis,),
+        values(pointwise_signatures))
+
+    prepared = NP.prepare(plan)
+    @test NP.output_eltype(pointwise_signatures.y, prepared) === Float64
+    @test NP.output_eltype(pointwise_signatures.z, prepared) === Float64
+    @test NP.output_eltype(predictive_signatures.y, prepared) === Float64
+    @test NP.output_eltype(predictive_signatures.z, prepared) === Bool
+    predictive = NP.allocate_output(predictive_signatures, prepared)
+    @test predictive.y isa Vector{Float64}
+    @test predictive.z isa Vector{Bool}
+    @test axes(predictive.y) == axes(data.y)
+    @test axes(predictive.z) == axes(data.z)
+
+    position = [0.1, 0.4, log(0.8), -0.2, 0.3]
+    work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
+    density, gradient = NP.logdensity_and_gradient!(
+        work, prepared, position)
+    mu_y = position[1] .+ position[2] .* data.x
+    eta_z = position[4] .+ position[5] .* data.x
+    prior_density =
+        sum(logpdf.(Normal(), position[[1, 2, 4, 5]])) +
+        logpdf(Exponential(2), exp(position[3])) + position[3]
+    y_density = sum(logpdf.(Normal.(mu_y, exp(position[3])), data.y))
+    z_density = sum(logpdf.(BRM.BernoulliLogit.(eta_z), data.z))
+    @test density ≈ prior_density + y_density + z_density atol=2e-12
+
+    finite_difference = similar(gradient)
+    plus = copy(position)
+    minus = copy(position)
+    step = 1e-6
+    for coordinate in eachindex(position)
+        plus[coordinate] += step
+        minus[coordinate] -= step
+        finite_difference[coordinate] = (
+            NP.logdensity!(work, prepared, plus) -
+            NP.logdensity!(work, prepared, minus)) / (2step)
+        plus[coordinate] = position[coordinate]
+        minus[coordinate] = position[coordinate]
+    end
+    @test gradient ≈ finite_difference rtol=2e-5 atol=2e-6
+
+    brm_prepared = NP.prepare(brmi)
+    brm_work = NP.workspace(brm_prepared, Float64, DI.AutoEnzyme())
+    brm_density, brm_gradient = NP.logdensity_and_gradient!(
+        brm_work, brm_prepared, position)
+    @test brm_density == density
+    @test brm_gradient == gradient
+
+    @test factor_steady_state_allocations(
+        work, prepared, position) == (; primal=0, gradient=0)
+
+    pointwise_query = NP.PointwiseLogLikelihood()
+    predictive_query = NP.PosteriorPredictive()
+    pointwise = NP.evaluate(
+        work, prepared, position, pointwise_query)
+    @test keys(pointwise) == (:y, :z)
+    @test pointwise.y ≈ logpdf.(
+        Normal.(mu_y, exp(position[3])), data.y)
+    @test pointwise.z ≈ logpdf.(
+        BRM.BernoulliLogit.(eta_z), data.z)
+    predictive = NP.simulate(
+        MersenneTwister(935), work, prepared, position, predictive_query)
+    @test keys(predictive) == (:y, :z)
+    @test predictive.y isa Vector{Float64}
+    @test predictive.z isa Vector{Bool}
+    @test predictive == NP.simulate(
+        MersenneTwister(935), work, prepared, position, predictive_query)
+
+    prior = NP.simulate_prior(
+        MersenneTwister(936), work, prepared)
+    @test keys(prior.response) == (:y, :z)
+    @test prior.response.y isa Vector{Float64}
+    @test prior.response.z isa Vector{Bool}
+    @test all(isfinite, prior.position)
+    @test prior == NP.simulate_prior(
+        MersenneTwister(936), work, prepared)
+
+    positions = permutedims(hcat(position, position .+ 0.05))
+    pointwise_draws = NP.evaluate_draws(
+        work, prepared, positions, pointwise_query)
+    predictive_draws = NP.simulate_draws(
+        MersenneTwister(937), work, prepared, positions,
+        predictive_query)
+    @test keys(pointwise_draws) == (:y, :z)
+    @test keys(predictive_draws) == (:y, :z)
+    @test pointwise_draws.y[1, :] == pointwise.y
+    @test pointwise_draws.z[1, :] == pointwise.z
+    @test predictive_draws.y isa Matrix{Float64}
+    @test predictive_draws.z isa Matrix{Bool}
+    @test predictive_draws == NP.simulate_draws(
+        MersenneTwister(937), work, prepared, positions,
+        predictive_query)
+
+    queries = (;
+        mu_y=NP.NodeOutput(:mu_y),
+        eta_z=NP.NodeOutput(:eta_z),
+        pointwise=pointwise_query,
+        predictive=predictive_query)
+    bundle = NP.execute_draws(
+        MersenneTwister(938), work, prepared, positions, queries)
+    @test keys(bundle) == keys(queries)
+    @test bundle.mu_y[1, :] == mu_y
+    @test bundle.eta_z[1, :] == eta_z
+    @test bundle.pointwise == pointwise_draws
+    @test bundle.predictive.y isa Matrix{Float64}
+    @test bundle.predictive.z isa Matrix{Bool}
+    @test bundle == NP.execute_draws(
+        MersenneTwister(938), work, prepared, positions, queries)
+
+    pointwise_output = NP.allocate_output(prepared, pointwise_query)
+    predictive_output = NP.allocate_output(prepared, predictive_query)
+    pointwise_draw_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, pointwise_query),
+        prepared)
+    predictive_draw_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, predictive_query),
+        prepared)
+    bundle_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, queries), prepared)
+    prior_position = similar(position)
+    @test factor_multioutcome_allocations(
+        pointwise_output, predictive_output,
+        pointwise_draw_output, predictive_draw_output,
+        bundle_output, queries, prior_position,
+        work, prepared, position, positions) == (;
+            pointwise=0, predictive=0, pointwise_draws=0,
+            predictive_draws=0, bundle=0, prior=0)
+
+    float32_prepared = NP.prepare(plan; T=Float32)
+    float32_position = Float32.(position)
+    float32_work = NP.workspace(
+        float32_prepared, Float32, DI.AutoEnzyme())
+    float32_density, float32_gradient = NP.logdensity_and_gradient!(
+        float32_work, float32_prepared, float32_position)
+    @test float32_density ≈ density rtol=2f-5
+    @test float32_gradient ≈ gradient rtol=3f-5
+    float32_predictive = NP.simulate(
+        MersenneTwister(939), float32_work, float32_prepared,
+        float32_position, predictive_query)
+    @test float32_predictive.y isa Vector{Float32}
+    @test float32_predictive.z isa Vector{Bool}
+
+    partially_conditioned = NP.compile(NP.condition(natural; y=data.y))
+    @test NP.factor_output_sites(partially_conditioned) == (:y, :z)
+    @test partially_conditioned.graph.sites.y.activity isa NP.ConditionedSite
+    @test partially_conditioned.graph.sites.z.activity isa NP.GeneratedSite
+    partial_prepared = NP.prepare(partially_conditioned)
+    partial_work = NP.workspace(partial_prepared)
+    partial_density = NP.logdensity!(
+        partial_work, partial_prepared, position)
+    @test partial_density ≈ prior_density + y_density atol=2e-12
+    untouched = (;
+        y=fill(42.0, length(data.y)),
+        z=fill(42.0, length(data.z)))
+    partial_error = argument_error(() -> NP.evaluate!(
+        untouched, partial_work, partial_prepared,
+        position, pointwise_query))
+    @test occursin("for `z` requires", partial_error.msg)
+    @test all(==(42.0), untouched.y)
+    @test all(==(42.0), untouched.z)
+    partial_predictive = NP.simulate(
+        MersenneTwister(940), partial_work, partial_prepared,
+        position, predictive_query)
+    @test partial_predictive.y isa Vector{Float64}
+    @test partial_predictive.z isa Vector{Bool}
+
+    prediction_only = NP.rebind(
+        prepared, (;); bindings=(; x=[-0.5, 0.5]))
+    @test NP.factor_output_sites(prediction_only.plan) == (:y, :z)
+    @test !NP.has_response(prediction_only)
+    @test length(prediction_only.plan.observation_axis) == 2
+    prediction_work = NP.workspace(
+        prediction_only, Float64, DI.AutoEnzyme())
+    prediction = NP.simulate(
+        MersenneTwister(941), prediction_work, prediction_only,
+        position, predictive_query)
+    @test prediction.y isa Vector{Float64}
+    @test prediction.z isa Vector{Bool}
+    @test size(prediction.y) == (2,)
+    @test size(prediction.z) == (2,)
+    @test NP.evaluate(
+        prediction_work, prediction_only, position,
+        NP.NodeOutput(:mu_y)) ≈ position[1] .+
+          position[2] .* [-0.5, 0.5]
+    @test NP.logdensity!(prediction_work, prediction_only, position) ≈
+          prior_density atol=2e-12
+    prediction_pointwise = (;
+        y=fill(42.0, 2),
+        z=fill(42.0, 2))
+    prediction_pointwise_error = argument_error(() -> NP.evaluate!(
+        prediction_pointwise, prediction_work, prediction_only,
+        position, pointwise_query))
+    @test occursin("requires", prediction_pointwise_error.msg)
+    @test all(==(42.0), prediction_pointwise.y)
+    @test all(==(42.0), prediction_pointwise.z)
+
+    replayed = NP.rebind(
+        prepared,
+        (; y=[-0.2, 0.4], z=Bool[false, true]);
+        bindings=(; x=[-0.5, 0.5]))
+    @test NP.has_response(replayed)
+    @test length(replayed.plan.observation_axis) == 2
+    @test isfinite(NP.logdensity!(
+        NP.workspace(replayed), replayed, position))
+
+    @test_throws DimensionMismatch NP.compile(NP.condition(
+        natural; y=data.y, z=data.z[1:2]))
+    @test_throws ArgumentError NP.rebind(
+        prepared, (; y=data.y, z=[0, 2, 1]); bindings=(; x=data.x))
+
+    unsupported_data = (;
+        x=data.x,
+        y=data.y,
+        z=[0, 1, 2])
+    unsupported = @brm unsupported_data begin
+        sigma_y ~ Exponential(2)
+        mu_y ~ 1 + x
+        y ~ Normal(mu_y, sigma_y)
+        log_mu_z ~ 1 + x
+        log_phi_z ~ 1 + x
+        z ~ NegativeBinomial2(exp(log_mu_z), exp(log_phi_z))
+    end
+    unsupported_error = capability_error(() -> NP.lower(unsupported))
+    @test unsupported_error.capability == :likelihood
+    @test occursin("multiple-outcome", unsupported_error.detail)
+end
+
+
+@testset "typed native PPL three-family outcome declarations and signatures" begin
+    data = (;
+        x=[-1.0, 0.0, 1.0],
+        y=[0.2, -0.1, 0.5],
+        z=Bool[true, false, true],
+        w=[0, 2, 5])
+    declaration = NP.model(
+        inputs=(; x=NP.input()),
+        parameters=(;
+            beta_mu_y=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            beta_eta_z=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            beta_log_rate_w=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            sigma_y=NP.parameter(
+                NP.PositiveSupport(), (:sigma_y,);
+                transform=NP.Exp(), prior=NP.Exponential(2))),
+        nodes=(;
+            mu_y=NP.affine(:x, :beta_mu_y),
+            eta_z=NP.affine(:x, :beta_eta_z),
+            log_rate_w=NP.affine(:x, :beta_log_rate_w),
+            exp_log_rate_w=NP.exp_link(:log_rate_w)),
+        observations=(;
+            y=NP.broadcasted(NP.normal(:y, :mu_y, :sigma_y)),
+            z=NP.broadcasted(NP.bernoulli_logit(:z, :eta_z)),
+            w=NP.broadcasted(NP.poisson(:w, :exp_log_rate_w))),
+        site_order=(
+            :beta_mu_y, :sigma_y, :y,
+            :beta_eta_z, :z,
+            :beta_log_rate_w, :w))
+    natural = natural_three_family_outcome(data.x)
+    @test natural.declaration == declaration
+    brmi = @brm data begin
+        sigma_y ~ Exponential(2)
+        mu_y ~ 1 + x
+        y ~ Normal(mu_y, sigma_y)
+        eta_z ~ 1 + x
+        z ~ BernoulliLogit(eta_z)
+        log_rate_w ~ 1 + x
+        w ~ Poisson(exp(log_rate_w))
+    end
+    @test SBBRMI(brmi; mod=@__MODULE__) isa SBBRMI
+    @test NP.lower(brmi) == declaration
+
+    plan = NP.compile(NP.condition(
+        natural; y=data.y, z=data.z, w=data.w))
+    @test NP.factor_output_sites(plan) == (:y, :z, :w)
+    @test plan.graph.sites.y.activity isa NP.ConditionedSite
+    @test plan.graph.sites.z.activity isa NP.ConditionedSite
+    @test plan.graph.sites.w.activity isa NP.ConditionedSite
+    @test plan.graph.sites.y.shape isa NP.BroadcastSiteShape
+    @test plan.graph.sites.z.shape isa NP.BroadcastSiteShape
+    @test plan.graph.sites.w.shape isa NP.BroadcastSiteShape
+
+    pointwise_signatures = NP.output_signature(
+        plan, NP.PointwiseLogLikelihood())
+    predictive_signatures = NP.output_signature(
+        plan, NP.PosteriorPredictive())
+    @test keys(pointwise_signatures) == (:y, :z, :w)
+    @test keys(predictive_signatures) == (:y, :z, :w)
+    prepared = NP.prepare(plan)
+    @test map(signature -> NP.output_eltype(signature, prepared),
+              pointwise_signatures) == (y=Float64, z=Float64, w=Float64)
+    @test map(signature -> NP.output_eltype(signature, prepared),
+              predictive_signatures) == (y=Float64, z=Bool, w=Int)
+    predictive = NP.allocate_output(predictive_signatures, prepared)
+    @test predictive.y isa Vector{Float64}
+    @test predictive.z isa Vector{Bool}
+    @test predictive.w isa Vector{Int}
+    @test axes(predictive.y) == axes(data.y)
+    @test axes(predictive.z) == axes(data.z)
+    @test axes(predictive.w) == axes(data.w)
+
+    @test BRM.LogDensityProblems.dimension(prepared) == 7
+    position = [0.1, 0.4, log(0.8), -0.2, 0.3, 0.1, 0.5]
+    work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
+    density, gradient = NP.logdensity_and_gradient!(
+        work, prepared, position)
+    mu_y = position[1] .+ position[2] .* data.x
+    eta_z = position[4] .+ position[5] .* data.x
+    log_rate_w = position[6] .+ position[7] .* data.x
+    rate_w = exp.(log_rate_w)
+    prior_density =
+        sum(logpdf.(Normal(), position[[1, 2, 4, 5, 6, 7]])) +
+        logpdf(Exponential(2), exp(position[3])) + position[3]
+    y_density = sum(logpdf.(Normal.(mu_y, exp(position[3])), data.y))
+    z_density = sum(logpdf.(BRM.BernoulliLogit.(eta_z), data.z))
+    w_density = sum(logpdf.(Poisson.(rate_w), data.w))
+    @test density ≈
+          prior_density + y_density + z_density + w_density atol=2e-12
+
+    finite_difference = similar(gradient)
+    plus = copy(position)
+    minus = copy(position)
+    step = 1e-6
+    for coordinate in eachindex(position)
+        plus[coordinate] += step
+        minus[coordinate] -= step
+        finite_difference[coordinate] = (
+            NP.logdensity!(work, prepared, plus) -
+            NP.logdensity!(work, prepared, minus)) / (2step)
+        plus[coordinate] = position[coordinate]
+        minus[coordinate] = position[coordinate]
+    end
+    @test gradient ≈ finite_difference rtol=2e-5 atol=2e-6
+
+    brm_prepared = NP.prepare(brmi)
+    brm_work = NP.workspace(brm_prepared, Float64, DI.AutoEnzyme())
+    brm_density, brm_gradient = NP.logdensity_and_gradient!(
+        brm_work, brm_prepared, position)
+    @test brm_density == density
+    @test brm_gradient == gradient
+
+    @test factor_steady_state_allocations(
+        work, prepared, position) == (; primal=0, gradient=0)
+
+    pointwise_query = NP.PointwiseLogLikelihood()
+    predictive_query = NP.PosteriorPredictive()
+    pointwise = NP.evaluate(
+        work, prepared, position, pointwise_query)
+    @test keys(pointwise) == (:y, :z, :w)
+    @test pointwise.y ≈ logpdf.(
+        Normal.(mu_y, exp(position[3])), data.y)
+    @test pointwise.z ≈ logpdf.(
+        BRM.BernoulliLogit.(eta_z), data.z)
+    @test pointwise.w ≈ logpdf.(Poisson.(rate_w), data.w)
+    @test NP.evaluate(
+        work, prepared, position,
+        NP.NodeOutput(:exp_log_rate_w)) == rate_w
+    predictive_values = NP.simulate(
+        MersenneTwister(942), work, prepared, position, predictive_query)
+    @test keys(predictive_values) == (:y, :z, :w)
+    @test predictive_values.y isa Vector{Float64}
+    @test predictive_values.z isa Vector{Bool}
+    @test predictive_values.w isa Vector{Int}
+    @test predictive_values == NP.simulate(
+        MersenneTwister(942), work, prepared, position, predictive_query)
+
+    prior = NP.simulate_prior(
+        MersenneTwister(943), work, prepared)
+    @test keys(prior.response) == (:y, :z, :w)
+    @test prior.response.y isa Vector{Float64}
+    @test prior.response.z isa Vector{Bool}
+    @test prior.response.w isa Vector{Int}
+    @test all(isfinite, prior.position)
+    @test prior == NP.simulate_prior(
+        MersenneTwister(943), work, prepared)
+
+    positions = permutedims(hcat(position, position .+ 0.05))
+    pointwise_draws = NP.evaluate_draws(
+        work, prepared, positions, pointwise_query)
+    predictive_draws = NP.simulate_draws(
+        MersenneTwister(944), work, prepared, positions,
+        predictive_query)
+    @test keys(pointwise_draws) == (:y, :z, :w)
+    @test keys(predictive_draws) == (:y, :z, :w)
+    @test pointwise_draws.y[1, :] == pointwise.y
+    @test pointwise_draws.z[1, :] == pointwise.z
+    @test pointwise_draws.w[1, :] == pointwise.w
+    @test predictive_draws.y isa Matrix{Float64}
+    @test predictive_draws.z isa Matrix{Bool}
+    @test predictive_draws.w isa Matrix{Int}
+    @test predictive_draws == NP.simulate_draws(
+        MersenneTwister(944), work, prepared, positions,
+        predictive_query)
+
+    queries = (;
+        mu_y=NP.NodeOutput(:mu_y),
+        eta_z=NP.NodeOutput(:eta_z),
+        log_rate_w=NP.NodeOutput(:log_rate_w),
+        rate_w=NP.NodeOutput(:exp_log_rate_w),
+        pointwise=pointwise_query,
+        predictive=predictive_query)
+    bundle = NP.execute_draws(
+        MersenneTwister(945), work, prepared, positions, queries)
+    @test keys(bundle) == keys(queries)
+    @test bundle.mu_y[1, :] == mu_y
+    @test bundle.eta_z[1, :] == eta_z
+    @test bundle.log_rate_w[1, :] == log_rate_w
+    @test bundle.rate_w[1, :] == rate_w
+    @test bundle.pointwise == pointwise_draws
+    @test bundle.predictive.y isa Matrix{Float64}
+    @test bundle.predictive.z isa Matrix{Bool}
+    @test bundle.predictive.w isa Matrix{Int}
+    @test bundle == NP.execute_draws(
+        MersenneTwister(945), work, prepared, positions, queries)
+
+    pointwise_output = NP.allocate_output(prepared, pointwise_query)
+    predictive_output = NP.allocate_output(prepared, predictive_query)
+    pointwise_draw_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, pointwise_query),
+        prepared)
+    predictive_draw_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, predictive_query),
+        prepared)
+    bundle_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, queries), prepared)
+    prior_position = similar(position)
+    @test factor_multioutcome_allocations(
+        pointwise_output, predictive_output,
+        pointwise_draw_output, predictive_draw_output,
+        bundle_output, queries, prior_position,
+        work, prepared, position, positions) == (;
+            pointwise=0, predictive=0, pointwise_draws=0,
+            predictive_draws=0, bundle=0, prior=0)
+
+    float32_prepared = NP.prepare(plan; T=Float32)
+    float32_position = Float32.(position)
+    float32_work = NP.workspace(
+        float32_prepared, Float32, DI.AutoEnzyme())
+    float32_density, float32_gradient = NP.logdensity_and_gradient!(
+        float32_work, float32_prepared, float32_position)
+    @test float32_density ≈ density rtol=3f-5
+    @test float32_gradient ≈ gradient rtol=4f-5
+    float32_predictive = NP.simulate(
+        MersenneTwister(946), float32_work, float32_prepared,
+        float32_position, predictive_query)
+    @test float32_predictive.y isa Vector{Float32}
+    @test float32_predictive.z isa Vector{Bool}
+    @test float32_predictive.w isa Vector{Int}
+
+    partially_conditioned = NP.compile(NP.condition(
+        natural; y=data.y, z=data.z))
+    @test partially_conditioned.graph.sites.y.activity isa NP.ConditionedSite
+    @test partially_conditioned.graph.sites.z.activity isa NP.ConditionedSite
+    @test partially_conditioned.graph.sites.w.activity isa NP.GeneratedSite
+    partial_prepared = NP.prepare(partially_conditioned)
+    partial_work = NP.workspace(partial_prepared)
+    partial_density = NP.logdensity!(
+        partial_work, partial_prepared, position)
+    @test partial_density ≈
+          prior_density + y_density + z_density atol=2e-12
+    untouched = (;
+        y=fill(42.0, length(data.y)),
+        z=fill(42.0, length(data.z)),
+        w=fill(42.0, length(data.w)))
+    partial_error = argument_error(() -> NP.evaluate!(
+        untouched, partial_work, partial_prepared,
+        position, pointwise_query))
+    @test occursin("for `w` requires", partial_error.msg)
+    @test all(==(42.0), untouched.y)
+    @test all(==(42.0), untouched.z)
+    @test all(==(42.0), untouched.w)
+
+    prediction_only = NP.rebind(
+        prepared, (;); bindings=(; x=[-0.5, 0.5]))
+    @test !NP.has_response(prediction_only)
+    @test length(prediction_only.plan.observation_axis) == 2
+    prediction_work = NP.workspace(
+        prediction_only, Float64, DI.AutoEnzyme())
+    prediction = NP.simulate(
+        MersenneTwister(947), prediction_work, prediction_only,
+        position, predictive_query)
+    @test prediction.y isa Vector{Float64}
+    @test prediction.z isa Vector{Bool}
+    @test prediction.w isa Vector{Int}
+    @test size(prediction.y) == (2,)
+    @test size(prediction.z) == (2,)
+    @test size(prediction.w) == (2,)
+    @test NP.logdensity!(prediction_work, prediction_only, position) ≈
+          prior_density atol=2e-12
+    @test NP.evaluate(
+        prediction_work, prediction_only, position,
+        NP.NodeOutput(:log_rate_w)) ≈
+          position[6] .+ position[7] .* [-0.5, 0.5]
+
+    replayed = NP.rebind(
+        prepared,
+        (; y=[-0.2, 0.4], z=Bool[false, true], w=[1, 3]);
+        bindings=(; x=[-0.5, 0.5]))
+    @test NP.has_response(replayed)
+    @test length(replayed.plan.observation_axis) == 2
+    @test isfinite(NP.logdensity!(
+        NP.workspace(replayed), replayed, position))
+
+    @test_throws DimensionMismatch NP.compile(NP.condition(
+        natural; y=data.y, z=data.z, w=data.w[1:2]))
+    @test_throws ArgumentError NP.rebind(
+        prepared,
+        (; y=data.y, z=data.z, w=[0, -1, 5]);
+        bindings=(; x=data.x))
+    invalid_link = @brm data begin
+        sigma_y ~ Exponential(2)
+        mu_y ~ 1 + x
+        y ~ Normal(mu_y, sigma_y)
+        eta_z ~ 1 + x
+        z ~ BernoulliLogit(eta_z)
+        rate_w ~ 1 + x
+        w ~ Poisson(rate_w)
+    end
+    @test capability_error(() -> NP.lower(invalid_link)).capability ==
+          :likelihood_link
+
+    extreme_position = copy(position)
+    extreme_position[6] = -1000.0
+    extreme_position[7] = 0.0
+    @test isfinite(NP.logdensity!(work, prepared, extreme_position))
+end
+
+
+@testset "typed native PPL heterogeneous response evidence declarations" begin
+    data = (;
+        x=[-1.0, 0.0, 1.0],
+        upper=[0.4, 0.8, 0.6],
+        y=[0.2, 0.8, 0.5],
+        z=Bool[true, false, true])
+    declaration = NP.model(
+        inputs=(; x=NP.input(), upper=NP.input()),
+        parameters=(;
+            beta_mu_y=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            beta_eta_z=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            sigma_y=NP.parameter(
+                NP.PositiveSupport(), (:sigma_y,);
+                transform=NP.Exp(), prior=NP.Exponential(2))),
+        nodes=(;
+            mu_y=NP.affine(:x, :beta_mu_y),
+            eta_z=NP.affine(:x, :beta_eta_z)),
+        observations=(;
+            y=NP.broadcasted(NP.evidence_observation(
+                NP.normal(:y, :mu_y, :sigma_y),
+                NP.censored_evidence(upper=:upper))),
+            z=NP.broadcasted(NP.bernoulli_logit(:z, :eta_z))),
+        site_order=(
+            :beta_mu_y, :sigma_y, :y,
+            :beta_eta_z, :z))
+    natural = natural_mixed_censored_outcome(data.x, data.upper)
+    @test natural.declaration == declaration
+    brmi = @brm data begin
+        sigma_y ~ Exponential(2)
+        mu_y ~ 1 + x
+        y ~ censored(Normal(mu_y, sigma_y); upper=upper)
+        eta_z ~ 1 + x
+        z ~ BernoulliLogit(eta_z)
+    end
+    @test SBBRMI(brmi; mod=@__MODULE__) isa SBBRMI
+    @test NP.lower(brmi) == declaration
+    plan = NP.compile(NP.condition(natural; y=data.y, z=data.z))
+    @test NP.factor_output_sites(plan) == (:y, :z)
+    @test plan.graph.sites.y.factor isa NP.EvidenceSiteFactor
+    @test plan.graph.sites.y.factor.factor isa NP.NormalSiteFactor
+    @test plan.graph.sites.z.factor isa NP.BernoulliLogitSiteFactor
+    pointwise = NP.output_signature(plan, NP.PointwiseLogLikelihood())
+    predictive = NP.output_signature(plan, NP.PosteriorPredictive())
+    @test keys(pointwise) == (:y, :z)
+    @test keys(predictive) == (:y, :z)
+    prepared = NP.prepare(plan)
+    @test map(signature -> NP.output_eltype(signature, prepared),
+              pointwise) == (y=Float64, z=Float64)
+    @test map(signature -> NP.output_eltype(signature, prepared),
+              predictive) == (y=Float64, z=Bool)
+
+    position = [0.1, 0.4, log(0.8), -0.2, 0.3]
+    work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
+    density, gradient = NP.logdensity_and_gradient!(
+        work, prepared, position)
+    mu_y = position[1] .+ position[2] .* data.x
+    eta_z = position[4] .+ position[5] .* data.x
+    prior_density =
+        sum(logpdf.(Normal(), position[[1, 2, 4, 5]])) +
+        logpdf(Exponential(2), exp(position[3])) + position[3]
+    y_pointwise = map(mu_y, data.y, data.upper) do mu, value, upper
+        logpdf(BRM.censored(
+            Normal(mu, exp(position[3])); upper), value)
+    end
+    z_pointwise = logpdf.(BRM.BernoulliLogit.(eta_z), data.z)
+    @test density ≈
+          prior_density + sum(y_pointwise) + sum(z_pointwise) atol=2e-12
+
+    finite_difference = similar(gradient)
+    plus = copy(position)
+    minus = copy(position)
+    step = 1e-6
+    for coordinate in eachindex(position)
+        plus[coordinate] += step
+        minus[coordinate] -= step
+        finite_difference[coordinate] = (
+            NP.logdensity!(work, prepared, plus) -
+            NP.logdensity!(work, prepared, minus)) / (2step)
+        plus[coordinate] = position[coordinate]
+        minus[coordinate] = position[coordinate]
+    end
+    @test gradient ≈ finite_difference rtol=3e-5 atol=3e-6
+
+    brm_prepared = NP.prepare(brmi)
+    brm_work = NP.workspace(brm_prepared, Float64, DI.AutoEnzyme())
+    brm_density, brm_gradient = NP.logdensity_and_gradient!(
+        brm_work, brm_prepared, position)
+    @test brm_density == density
+    @test brm_gradient == gradient
+
+    @test factor_steady_state_allocations(
+        work, prepared, position) == (; primal=0, gradient=0)
+
+    pointwise_query = NP.PointwiseLogLikelihood()
+    predictive_query = NP.PosteriorPredictive()
+    pointwise_values = NP.evaluate(
+        work, prepared, position, pointwise_query)
+    @test keys(pointwise_values) == (:y, :z)
+    @test pointwise_values.y ≈ y_pointwise atol=2e-12
+    @test pointwise_values.z ≈ z_pointwise atol=2e-12
+    predictive_values = NP.simulate(
+        MersenneTwister(948), work, prepared, position, predictive_query)
+    @test predictive_values.y isa Vector{Float64}
+    @test predictive_values.z isa Vector{Bool}
+    @test all(predictive_values.y .<= data.upper)
+    @test predictive_values == NP.simulate(
+        MersenneTwister(948), work, prepared, position, predictive_query)
+
+    prior = NP.simulate_prior(
+        MersenneTwister(949), work, prepared)
+    @test prior.response.y isa Vector{Float64}
+    @test prior.response.z isa Vector{Bool}
+    @test all(prior.response.y .<= data.upper)
+    @test prior == NP.simulate_prior(
+        MersenneTwister(949), work, prepared)
+
+    positions = permutedims(hcat(position, position .+ 0.05))
+    pointwise_draws = NP.evaluate_draws(
+        work, prepared, positions, pointwise_query)
+    predictive_draws = NP.simulate_draws(
+        MersenneTwister(950), work, prepared, positions,
+        predictive_query)
+    @test keys(pointwise_draws) == (:y, :z)
+    @test keys(predictive_draws) == (:y, :z)
+    @test pointwise_draws.y[1, :] == pointwise_values.y
+    @test pointwise_draws.z[1, :] == pointwise_values.z
+    @test predictive_draws.y isa Matrix{Float64}
+    @test predictive_draws.z isa Matrix{Bool}
+    @test all(predictive_draws.y .<= permutedims(data.upper))
+    @test predictive_draws == NP.simulate_draws(
+        MersenneTwister(950), work, prepared, positions,
+        predictive_query)
+
+    queries = (;
+        mu_y=NP.NodeOutput(:mu_y),
+        eta_z=NP.NodeOutput(:eta_z),
+        pointwise=pointwise_query,
+        predictive=predictive_query)
+    bundle = NP.execute_draws(
+        MersenneTwister(951), work, prepared, positions, queries)
+    @test keys(bundle) == keys(queries)
+    @test bundle.mu_y[1, :] == mu_y
+    @test bundle.eta_z[1, :] == eta_z
+    @test bundle.pointwise == pointwise_draws
+    @test bundle.predictive.y isa Matrix{Float64}
+    @test bundle.predictive.z isa Matrix{Bool}
+    @test bundle == NP.execute_draws(
+        MersenneTwister(951), work, prepared, positions, queries)
+
+    pointwise_output = NP.allocate_output(prepared, pointwise_query)
+    predictive_output = NP.allocate_output(prepared, predictive_query)
+    pointwise_draw_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, pointwise_query),
+        prepared)
+    predictive_draw_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, predictive_query),
+        prepared)
+    bundle_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, queries), prepared)
+    prior_position = similar(position)
+    @test factor_multioutcome_allocations(
+        pointwise_output, predictive_output,
+        pointwise_draw_output, predictive_draw_output,
+        bundle_output, queries, prior_position,
+        work, prepared, position, positions) == (;
+            pointwise=0, predictive=0, pointwise_draws=0,
+            predictive_draws=0, bundle=0, prior=0)
+
+    float32_prepared = NP.prepare(plan; T=Float32)
+    float32_position = Float32.(position)
+    float32_work = NP.workspace(
+        float32_prepared, Float32, DI.AutoEnzyme())
+    float32_density, float32_gradient = NP.logdensity_and_gradient!(
+        float32_work, float32_prepared, float32_position)
+    @test float32_density ≈ density rtol=3f-5
+    @test float32_gradient ≈ gradient rtol=4f-5
+    float32_predictive = NP.simulate(
+        MersenneTwister(952), float32_work, float32_prepared,
+        float32_position, predictive_query)
+    @test float32_predictive.y isa Vector{Float32}
+    @test float32_predictive.z isa Vector{Bool}
+
+    partially_conditioned = NP.compile(NP.condition(natural; y=data.y))
+    @test partially_conditioned.graph.sites.y.activity isa NP.ConditionedSite
+    @test partially_conditioned.graph.sites.z.activity isa NP.GeneratedSite
+    partial_prepared = NP.prepare(partially_conditioned)
+    partial_work = NP.workspace(partial_prepared)
+    @test NP.logdensity!(partial_work, partial_prepared, position) ≈
+          prior_density + sum(y_pointwise) atol=2e-12
+    untouched = (;
+        y=fill(42.0, length(data.y)),
+        z=fill(42.0, length(data.z)))
+    partial_error = argument_error(() -> NP.evaluate!(
+        untouched, partial_work, partial_prepared,
+        position, pointwise_query))
+    @test occursin("for `z` requires", partial_error.msg)
+    @test all(==(42.0), untouched.y)
+    @test all(==(42.0), untouched.z)
+
+    new_x = [-0.5, 0.5]
+    new_upper = [0.3, 0.9]
+    prediction_only = NP.rebind(
+        prepared, (;); bindings=(; x=new_x, upper=new_upper))
+    @test !NP.has_response(prediction_only)
+    prediction_work = NP.workspace(
+        prediction_only, Float64, DI.AutoEnzyme())
+    prediction = NP.simulate(
+        MersenneTwister(953), prediction_work, prediction_only,
+        position, predictive_query)
+    @test prediction.y isa Vector{Float64}
+    @test prediction.z isa Vector{Bool}
+    @test all(prediction.y .<= new_upper)
+    @test NP.logdensity!(prediction_work, prediction_only, position) ≈
+          prior_density atol=2e-12
+
+    replayed = NP.rebind(
+        prepared,
+        (; y=[0.1, 0.9], z=Bool[false, true]);
+        bindings=(; x=new_x, upper=new_upper))
+    @test NP.has_response(replayed)
+    @test isfinite(NP.logdensity!(
+        NP.workspace(replayed), replayed, position))
+
+    @test_throws DimensionMismatch NP.compile(NP.condition(
+        natural; y=data.y, z=data.z[1:2]))
+    @test_throws DimensionMismatch NP.rebind(
+        prepared, (; y=data.y, z=data.z);
+        bindings=(; x=data.x, upper=data.upper[1:2]))
+    @test_throws ArgumentError NP.rebind(
+        prepared, (; y=data.y, z=data.z);
+        bindings=(; x=data.x, upper=[0.4, Inf, 0.6]))
+
+    invalid_evidence = @brm data begin
+        sigma_y ~ Exponential(2)
+        mu_y ~ 1 + x
+        y ~ Normal(mu_y, sigma_y)
+        eta_z ~ 1 + x
+        z ~ censored(BernoulliLogit(eta_z); upper=upper)
+    end
+    @test capability_error(() -> NP.compile(invalid_evidence)).capability ==
+          :response_evidence
+end
+
+
+@testset "typed native PPL heterogeneous observation-weight declarations" begin
+    data = (;
+        x=[-1.0, 0.0, 1.0],
+        replicates=[1, 2, 3],
+        y=[0.2, -0.1, 0.5],
+        z=Bool[true, false, true])
+    declaration = NP.model(
+        inputs=(; x=NP.input(), replicates=NP.input()),
+        parameters=(;
+            beta_mu_y=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            beta_eta_z=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            sigma_y=NP.parameter(
+                NP.PositiveSupport(), (:sigma_y,);
+                transform=NP.Exp(), prior=NP.Exponential(2))),
+        nodes=(;
+            mu_y=NP.affine(:x, :beta_mu_y),
+            eta_z=NP.affine(:x, :beta_eta_z)),
+        observations=(;
+            y=NP.broadcasted(NP.weighted_observation(
+                NP.normal(:y, :mu_y, :sigma_y),
+                NP.observation_weight(:frequency, :replicates))),
+            z=NP.broadcasted(NP.bernoulli_logit(:z, :eta_z))),
+        site_order=(
+            :beta_mu_y, :sigma_y, :y,
+            :beta_eta_z, :z))
+    natural = natural_mixed_weighted_outcome(
+        data.x, data.replicates)
+    @test natural.declaration == declaration
+    brmi = @brm data begin
+        sigma_y ~ Exponential(2)
+        mu_y ~ 1 + x
+        y ~ weighted(Normal(mu_y, sigma_y), fweights(replicates))
+        eta_z ~ 1 + x
+        z ~ BernoulliLogit(eta_z)
+    end
+    @test SBBRMI(brmi; mod=@__MODULE__) isa SBBRMI
+    @test NP.lower(brmi) == declaration
+    plan = NP.compile(NP.condition(natural; y=data.y, z=data.z))
+    @test NP.factor_output_sites(plan) == (:y, :z)
+    @test plan.graph.sites.y.factor isa NP.WeightedSiteFactor
+    @test plan.graph.sites.y.factor.factor isa NP.NormalSiteFactor
+    @test plan.graph.sites.z.factor isa NP.BernoulliLogitSiteFactor
+    pointwise = NP.output_signature(plan, NP.PointwiseLogLikelihood())
+    predictive = NP.output_signature(plan, NP.PosteriorPredictive())
+    prepared = NP.prepare(plan)
+    @test map(signature -> NP.output_eltype(signature, prepared),
+              pointwise) == (y=Float64, z=Float64)
+    @test map(signature -> NP.output_eltype(signature, prepared),
+              predictive) == (y=Float64, z=Bool)
+
+    position = [0.1, 0.4, log(0.8), -0.2, 0.3]
+    work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
+    density, gradient = NP.logdensity_and_gradient!(
+        work, prepared, position)
+    mu_y = position[1] .+ position[2] .* data.x
+    eta_z = position[4] .+ position[5] .* data.x
+    prior_density =
+        sum(logpdf.(Normal(), position[[1, 2, 4, 5]])) +
+        logpdf(Exponential(2), exp(position[3])) + position[3]
+    y_pointwise = data.replicates .* logpdf.(
+        Normal.(mu_y, exp(position[3])), data.y)
+    z_pointwise = logpdf.(BRM.BernoulliLogit.(eta_z), data.z)
+    @test density ≈
+          prior_density + sum(y_pointwise) + sum(z_pointwise) atol=2e-12
+
+    finite_difference = similar(gradient)
+    plus = copy(position)
+    minus = copy(position)
+    step = 1e-6
+    for coordinate in eachindex(position)
+        plus[coordinate] += step
+        minus[coordinate] -= step
+        finite_difference[coordinate] = (
+            NP.logdensity!(work, prepared, plus) -
+            NP.logdensity!(work, prepared, minus)) / (2step)
+        plus[coordinate] = position[coordinate]
+        minus[coordinate] = position[coordinate]
+    end
+    @test gradient ≈ finite_difference rtol=3e-5 atol=3e-6
+
+    brm_prepared = NP.prepare(brmi)
+    brm_work = NP.workspace(brm_prepared, Float64, DI.AutoEnzyme())
+    brm_density, brm_gradient = NP.logdensity_and_gradient!(
+        brm_work, brm_prepared, position)
+    @test brm_density == density
+    @test brm_gradient == gradient
+
+    @test factor_steady_state_allocations(
+        work, prepared, position) == (; primal=0, gradient=0)
+
+    pointwise_query = NP.PointwiseLogLikelihood()
+    predictive_query = NP.PosteriorPredictive()
+    pointwise_values = NP.evaluate(
+        work, prepared, position, pointwise_query)
+    @test keys(pointwise_values) == (:y, :z)
+    @test pointwise_values.y ≈ y_pointwise atol=2e-12
+    @test pointwise_values.z ≈ z_pointwise atol=2e-12
+    predictive_values = NP.simulate(
+        MersenneTwister(954), work, prepared, position, predictive_query)
+    @test predictive_values.y isa Vector{Float64}
+    @test predictive_values.z isa Vector{Bool}
+    @test predictive_values == NP.simulate(
+        MersenneTwister(954), work, prepared, position, predictive_query)
+
+    prior = NP.simulate_prior(MersenneTwister(955), work, prepared)
+    @test prior.response.y isa Vector{Float64}
+    @test prior.response.z isa Vector{Bool}
+    @test prior == NP.simulate_prior(MersenneTwister(955), work, prepared)
+
+    positions = permutedims(hcat(position, position .+ 0.05))
+    pointwise_draws = NP.evaluate_draws(
+        work, prepared, positions, pointwise_query)
+    predictive_draws = NP.simulate_draws(
+        MersenneTwister(956), work, prepared, positions,
+        predictive_query)
+    @test keys(pointwise_draws) == (:y, :z)
+    @test keys(predictive_draws) == (:y, :z)
+    @test pointwise_draws.y[1, :] == pointwise_values.y
+    @test pointwise_draws.z[1, :] == pointwise_values.z
+    @test predictive_draws.y isa Matrix{Float64}
+    @test predictive_draws.z isa Matrix{Bool}
+    @test predictive_draws == NP.simulate_draws(
+        MersenneTwister(956), work, prepared, positions,
+        predictive_query)
+
+    queries = (;
+        mu_y=NP.NodeOutput(:mu_y),
+        eta_z=NP.NodeOutput(:eta_z),
+        pointwise=pointwise_query,
+        predictive=predictive_query)
+    bundle = NP.execute_draws(
+        MersenneTwister(957), work, prepared, positions, queries)
+    @test keys(bundle) == keys(queries)
+    @test bundle.mu_y[1, :] == mu_y
+    @test bundle.eta_z[1, :] == eta_z
+    @test bundle.pointwise == pointwise_draws
+    @test bundle.predictive.y isa Matrix{Float64}
+    @test bundle.predictive.z isa Matrix{Bool}
+    @test bundle == NP.execute_draws(
+        MersenneTwister(957), work, prepared, positions, queries)
+
+    pointwise_output = NP.allocate_output(prepared, pointwise_query)
+    predictive_output = NP.allocate_output(prepared, predictive_query)
+    pointwise_draw_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, pointwise_query),
+        prepared)
+    predictive_draw_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, predictive_query),
+        prepared)
+    bundle_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, queries), prepared)
+    prior_position = similar(position)
+    @test factor_multioutcome_allocations(
+        pointwise_output, predictive_output,
+        pointwise_draw_output, predictive_draw_output,
+        bundle_output, queries, prior_position,
+        work, prepared, position, positions) == (;
+            pointwise=0, predictive=0, pointwise_draws=0,
+            predictive_draws=0, bundle=0, prior=0)
+
+    float32_prepared = NP.prepare(plan; T=Float32)
+    float32_position = Float32.(position)
+    float32_work = NP.workspace(
+        float32_prepared, Float32, DI.AutoEnzyme())
+    float32_density, float32_gradient = NP.logdensity_and_gradient!(
+        float32_work, float32_prepared, float32_position)
+    @test float32_density ≈ density rtol=3f-5
+    @test float32_gradient ≈ gradient rtol=4f-5
+    float32_predictive = NP.simulate(
+        MersenneTwister(958), float32_work, float32_prepared,
+        float32_position, predictive_query)
+    @test float32_predictive.y isa Vector{Float32}
+    @test float32_predictive.z isa Vector{Bool}
+
+    partially_conditioned = NP.compile(NP.condition(natural; y=data.y))
+    @test partially_conditioned.graph.sites.y.activity isa NP.ConditionedSite
+    @test partially_conditioned.graph.sites.z.activity isa NP.GeneratedSite
+    partial_prepared = NP.prepare(partially_conditioned)
+    partial_work = NP.workspace(partial_prepared)
+    @test NP.logdensity!(partial_work, partial_prepared, position) ≈
+          prior_density + sum(y_pointwise) atol=2e-12
+    untouched = (;
+        y=fill(42.0, length(data.y)),
+        z=fill(42.0, length(data.z)))
+    partial_error = argument_error(() -> NP.evaluate!(
+        untouched, partial_work, partial_prepared,
+        position, pointwise_query))
+    @test occursin("for `z` requires", partial_error.msg)
+    @test all(==(42.0), untouched.y)
+    @test all(==(42.0), untouched.z)
+
+    new_x = [-0.5, 0.5]
+    new_replicates = [2, 4]
+    prediction_only = NP.rebind(
+        prepared, (;);
+        bindings=(; x=new_x, replicates=new_replicates))
+    @test !NP.has_response(prediction_only)
+    prediction_work = NP.workspace(
+        prediction_only, Float64, DI.AutoEnzyme())
+    prediction = NP.simulate(
+        MersenneTwister(959), prediction_work, prediction_only,
+        position, predictive_query)
+    @test prediction.y isa Vector{Float64}
+    @test prediction.z isa Vector{Bool}
+    @test NP.logdensity!(prediction_work, prediction_only, position) ≈
+          prior_density atol=2e-12
+
+    replayed = NP.rebind(
+        prepared,
+        (; y=[0.1, 0.9], z=Bool[false, true]);
+        bindings=(; x=new_x, replicates=new_replicates))
+    @test NP.has_response(replayed)
+    @test isfinite(NP.logdensity!(NP.workspace(replayed), replayed, position))
+
+    @test_throws DimensionMismatch NP.compile(NP.condition(
+        natural_mixed_weighted_outcome(data.x, data.replicates[1:2]);
+        y=data.y, z=data.z))
+    @test_throws ArgumentError NP.rebind(
+        prepared, (; y=data.y, z=data.z);
+        bindings=(; x=data.x, replicates=[1, -1, 3]))
+    @test_throws ArgumentError NP.rebind(
+        prepared, (; y=data.y, z=data.z);
+        bindings=(; x=data.x, replicates=[1.0, 1.5, 3.0]))
+
+    invalid_data = merge(data, (; upper=[0.4, 0.8, 0.6]))
+    invalid_weighted_evidence = @brm invalid_data begin
+        sigma_y ~ Exponential(2)
+        mu_y ~ 1 + x
+        y ~ weighted(
+            censored(Normal(mu_y, sigma_y); upper=upper),
+            fweights(replicates))
+        eta_z ~ 1 + x
+        z ~ BernoulliLogit(eta_z)
+    end
+    @test capability_error(
+        () -> NP.lower(invalid_weighted_evidence)).capability ==
+          :response_evidence
+end
+
+
+@testset "typed native PPL grouped heterogeneous outcome declarations" begin
+    data = (;
+        x=[-1.0, 0.0, 1.0],
+        group=[:a, :b, :a],
+        y=[0.2, -0.1, 0.5],
+        z=Bool[true, false, true])
+    declaration = NP.model(
+        inputs=(; x=NP.input(), group=NP.input()),
+        parameters=(;
+            beta_mu_y=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            beta_eta_z=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            tau_gy_group=NP.parameter(
+                NP.PositiveSupport(), (:tau_gy_group,);
+                transform=NP.Exp(), prior=NP.Exponential(1)),
+            b_gy_group=NP.grouped_normal(
+                :group, 0.0, :tau_gy_group),
+            sigma_y=NP.parameter(
+                NP.PositiveSupport(), (:sigma_y,);
+                transform=NP.Exp(), prior=NP.Exponential(2)),
+            tau_gz_group=NP.parameter(
+                NP.PositiveSupport(), (:tau_gz_group,);
+                transform=NP.Exp(), prior=NP.Exponential(1)),
+            b_gz_group=NP.grouped_normal(
+                :group, 0.0, :tau_gz_group)),
+        nodes=(;
+            r_mu_y_gy_group=NP.group_gather(:b_gy_group, :group),
+            mu_y=NP.affine(
+                :x, :beta_mu_y; offsets=(:r_mu_y_gy_group,)),
+            r_eta_z_gz_group=NP.group_gather(:b_gz_group, :group),
+            eta_z=NP.affine(
+                :x, :beta_eta_z; offsets=(:r_eta_z_gz_group,))),
+        observations=(;
+            y=NP.broadcasted(NP.normal(:y, :mu_y, :sigma_y)),
+            z=NP.broadcasted(NP.bernoulli_logit(:z, :eta_z))),
+        site_order=(
+            :tau_gy_group, :b_gy_group, :beta_mu_y, :sigma_y, :y,
+            :tau_gz_group, :b_gz_group, :beta_eta_z, :z))
+    natural = natural_grouped_mixed_outcome(data.x, data.group)
+    @test natural.declaration == declaration
+    brmi = @brm data begin
+        sigma_y ~ Exponential(2)
+        mu_y ~ 1 + x + (1 | gy | group)
+        sd(:, gy) ~ Exponential(1)
+        y ~ Normal(mu_y, sigma_y)
+        eta_z ~ 1 + x + (1 | gz | group)
+        sd(:, gz) ~ Exponential(1)
+        z ~ BernoulliLogit(eta_z)
+    end
+    @test SBBRMI(brmi; mod=@__MODULE__) isa SBBRMI
+    @test NP.lower(brmi) == declaration
+    plan = NP.compile(NP.condition(natural; y=data.y, z=data.z))
+    @test plan isa NP.FactorPlan
+    @test NP.factor_output_sites(plan) == (:y, :z)
+    @test plan.graph.schedule == (
+        :tau_gy_group, :b_gy_group, :beta_mu_y, :sigma_y,
+        :tau_gz_group, :b_gz_group, :beta_eta_z,
+        :r_mu_y_gy_group, :mu_y, :y,
+        :r_eta_z_gz_group, :eta_z, :z)
+    @test plan.graph.dimension == 11
+    @test plan.group_indices == (;
+        r_mu_y_gy_group=(1, 2, 1),
+        r_eta_z_gz_group=(1, 2, 1))
+    @test plan.graph.coordinates.b_gy_group.keys == (
+        NP.GroupCoordinateKey(:b_gy_group, :a),
+        NP.GroupCoordinateKey(:b_gy_group, :b))
+    @test plan.graph.coordinates.b_gz_group.keys == (
+        NP.GroupCoordinateKey(:b_gz_group, :a),
+        NP.GroupCoordinateKey(:b_gz_group, :b))
+    prepared = NP.prepare(plan)
+    pointwise = NP.output_signature(plan, NP.PointwiseLogLikelihood())
+    predictive = NP.output_signature(plan, NP.PosteriorPredictive())
+    @test map(signature -> NP.output_eltype(signature, prepared),
+              pointwise) == (y=Float64, z=Float64)
+    @test map(signature -> NP.output_eltype(signature, prepared),
+              predictive) == (y=Float64, z=Bool)
+    brm_plan = NP.compile(brmi)
+    @test brm_plan.declaration == declaration
+    @test brm_plan.group_indices == plan.group_indices
+    @test brm_plan.graph.coordinates == plan.graph.coordinates
+
+    position = [
+        log(0.7), 0.2, -0.1, 0.1, 0.4, log(0.8),
+        log(0.6), -0.3, 0.25, -0.2, 0.3]
+    work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
+    density, gradient = NP.logdensity_and_gradient!(
+        work, prepared, position)
+    tau_y = exp(position[1])
+    effects_y = position[2:3]
+    sigma_y = exp(position[6])
+    tau_z = exp(position[7])
+    effects_z = position[8:9]
+    mu_y = position[4] .+ position[5] .* data.x .+
+        effects_y[[1, 2, 1]]
+    eta_z = position[10] .+ position[11] .* data.x .+
+        effects_z[[1, 2, 1]]
+    prior_density =
+        logpdf(Exponential(1), tau_y) + position[1] +
+        sum(logpdf.(Normal(0, tau_y), effects_y)) +
+        sum(logpdf.(Normal(), position[4:5])) +
+        logpdf(Exponential(2), sigma_y) + position[6] +
+        logpdf(Exponential(1), tau_z) + position[7] +
+        sum(logpdf.(Normal(0, tau_z), effects_z)) +
+        sum(logpdf.(Normal(), position[10:11]))
+    y_pointwise = logpdf.(Normal.(mu_y, sigma_y), data.y)
+    z_pointwise = logpdf.(BRM.BernoulliLogit.(eta_z), data.z)
+    @test density ≈
+          prior_density + sum(y_pointwise) + sum(z_pointwise) atol=2e-12
+
+    finite_difference = similar(gradient)
+    plus = copy(position)
+    minus = copy(position)
+    step = 1e-6
+    for coordinate in eachindex(position)
+        plus[coordinate] += step
+        minus[coordinate] -= step
+        finite_difference[coordinate] = (
+            NP.logdensity!(work, prepared, plus) -
+            NP.logdensity!(work, prepared, minus)) / (2step)
+        plus[coordinate] = position[coordinate]
+        minus[coordinate] = position[coordinate]
+    end
+    @test gradient ≈ finite_difference rtol=3e-5 atol=3e-6
+
+    brm_prepared = NP.prepare(brm_plan)
+    brm_work = NP.workspace(brm_prepared, Float64, DI.AutoEnzyme())
+    brm_density, brm_gradient = NP.logdensity_and_gradient!(
+        brm_work, brm_prepared, position)
+    @test brm_density == density
+    @test brm_gradient == gradient
+
+    @test factor_steady_state_allocations(
+        work, prepared, position) == (; primal=0, gradient=0)
+
+    pointwise_query = NP.PointwiseLogLikelihood()
+    predictive_query = NP.PosteriorPredictive()
+    pointwise_values = NP.evaluate(
+        work, prepared, position, pointwise_query)
+    @test pointwise_values.y ≈ y_pointwise atol=2e-12
+    @test pointwise_values.z ≈ z_pointwise atol=2e-12
+    predictive_values = NP.simulate(
+        MersenneTwister(960), work, prepared, position, predictive_query)
+    @test predictive_values.y isa Vector{Float64}
+    @test predictive_values.z isa Vector{Bool}
+    @test predictive_values == NP.simulate(
+        MersenneTwister(960), work, prepared, position, predictive_query)
+
+    prior = NP.simulate_prior(MersenneTwister(961), work, prepared)
+    @test prior.response.y isa Vector{Float64}
+    @test prior.response.z isa Vector{Bool}
+    @test prior == NP.simulate_prior(MersenneTwister(961), work, prepared)
+
+    positions = permutedims(hcat(position, position .+ 0.05))
+    pointwise_draws = NP.evaluate_draws(
+        work, prepared, positions, pointwise_query)
+    predictive_draws = NP.simulate_draws(
+        MersenneTwister(962), work, prepared, positions,
+        predictive_query)
+    @test pointwise_draws.y[1, :] == pointwise_values.y
+    @test pointwise_draws.z[1, :] == pointwise_values.z
+    @test predictive_draws.y isa Matrix{Float64}
+    @test predictive_draws.z isa Matrix{Bool}
+    @test predictive_draws == NP.simulate_draws(
+        MersenneTwister(962), work, prepared, positions,
+        predictive_query)
+
+    queries = (;
+        mu_y=NP.NodeOutput(:mu_y),
+        eta_z=NP.NodeOutput(:eta_z),
+        pointwise=pointwise_query,
+        predictive=predictive_query)
+    bundle = NP.execute_draws(
+        MersenneTwister(963), work, prepared, positions, queries)
+    @test bundle.mu_y[1, :] == mu_y
+    @test bundle.eta_z[1, :] == eta_z
+    @test bundle.pointwise == pointwise_draws
+    @test bundle.predictive.y isa Matrix{Float64}
+    @test bundle.predictive.z isa Matrix{Bool}
+    @test bundle == NP.execute_draws(
+        MersenneTwister(963), work, prepared, positions, queries)
+
+    pointwise_output = NP.allocate_output(prepared, pointwise_query)
+    predictive_output = NP.allocate_output(prepared, predictive_query)
+    pointwise_draw_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, pointwise_query),
+        prepared)
+    predictive_draw_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, predictive_query),
+        prepared)
+    bundle_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, queries), prepared)
+    prior_position = similar(position)
+    @test factor_multioutcome_allocations(
+        pointwise_output, predictive_output,
+        pointwise_draw_output, predictive_draw_output,
+        bundle_output, queries, prior_position,
+        work, prepared, position, positions) == (;
+            pointwise=0, predictive=0, pointwise_draws=0,
+            predictive_draws=0, bundle=0, prior=0)
+
+    float32_prepared = NP.prepare(plan; T=Float32)
+    float32_position = Float32.(position)
+    float32_work = NP.workspace(
+        float32_prepared, Float32, DI.AutoEnzyme())
+    float32_density, float32_gradient = NP.logdensity_and_gradient!(
+        float32_work, float32_prepared, float32_position)
+    @test float32_density ≈ density rtol=4f-5
+    @test float32_gradient ≈ gradient rtol=5f-5
+    float32_predictive = NP.simulate(
+        MersenneTwister(964), float32_work, float32_prepared,
+        float32_position, predictive_query)
+    @test float32_predictive.y isa Vector{Float32}
+    @test float32_predictive.z isa Vector{Bool}
+
+    partially_conditioned = NP.compile(NP.condition(natural; y=data.y))
+    @test partially_conditioned.graph.sites.y.activity isa NP.ConditionedSite
+    @test partially_conditioned.graph.sites.z.activity isa NP.GeneratedSite
+    partial_prepared = NP.prepare(partially_conditioned)
+    partial_work = NP.workspace(partial_prepared)
+    @test NP.logdensity!(partial_work, partial_prepared, position) ≈
+          prior_density + sum(y_pointwise) atol=2e-12
+
+    replay_bindings = (;
+        x=[0.5, -0.5, 1.5], group=[:b, :a, :b])
+    prediction_only = NP.rebind(
+        prepared, (;); bindings=replay_bindings)
+    @test !NP.has_response(prediction_only)
+    @test prediction_only.plan.group_indices == (;
+        r_mu_y_gy_group=(2, 1, 2),
+        r_eta_z_gz_group=(2, 1, 2))
+    @test prediction_only.plan.graph.coordinates == plan.graph.coordinates
+    prediction_work = NP.workspace(prediction_only)
+    prediction = NP.simulate(
+        MersenneTwister(965), prediction_work, prediction_only,
+        position, predictive_query)
+    @test prediction.y isa Vector{Float64}
+    @test prediction.z isa Vector{Bool}
+    @test NP.logdensity!(prediction_work, prediction_only, position) ≈
+          prior_density atol=2e-12
+
+    replayed = NP.rebind(
+        prepared,
+        (; y=[0.1, -0.2, 0.6], z=Bool[false, true, true]);
+        bindings=replay_bindings)
+    @test NP.has_response(replayed)
+    @test replayed.plan.graph.coordinates == plan.graph.coordinates
+    @test isfinite(NP.logdensity!(NP.workspace(replayed), replayed, position))
+
+    new_group_bindings = (;
+        x=[0.0, 1.0, 2.0], group=[:a, :new, :new])
+    new_group_error = capability_error(() -> NP.rebind(
+        prepared, (;); bindings=new_group_bindings))
+    @test new_group_error.capability == :new_group
+    generated = NP.rebind(
+        prepared, (;); bindings=new_group_bindings,
+        new_groups=:resample)
+    @test generated.plan.generated_group_levels == (;
+        b_gy_group=(:new,), b_gz_group=(:new,))
+    @test generated.plan.group_indices == (;
+        r_mu_y_gy_group=(1, -1, -1),
+        r_eta_z_gz_group=(1, -1, -1))
+    generated_work = NP.workspace(generated)
+    generated_predictive = NP.simulate(
+        MersenneTwister(966), generated_work, generated,
+        position, predictive_query)
+    @test generated_predictive.y isa Vector{Float64}
+    @test generated_predictive.z isa Vector{Bool}
+    @test generated_predictive == NP.simulate(
+        MersenneTwister(966), generated_work, generated,
+        position, predictive_query)
+    generated_density_error = capability_error(() -> NP.logdensity!(
+        generated_work, generated, position))
+    @test generated_density_error.capability == :new_group_activity
+    conditioned_new_group_error = capability_error(() -> NP.rebind(
+        prepared, (; y=zeros(3), z=Bool[false, true, false]);
+        bindings=new_group_bindings, new_groups=:resample))
+    @test conditioned_new_group_error.capability == :new_group_activity
+
+    @test_throws DimensionMismatch NP.rebind(
+        prepared, (; y=data.y, z=data.z);
+        bindings=(; x=data.x, group=data.group[1:2]))
+end
+
+
+@testset "typed native PPL correlated grouped heterogeneous declarations" begin
+    data = (;
+        x=[-1.0, 0.0, 1.0],
+        group=[:a, :b, :a],
+        y=[0.2, -0.1, 0.5],
+        z=Bool[true, false, true])
+    coefficient_keys = (:Intercept, :x)
+    declaration = NP.model(
+        inputs=(; x=NP.input(), group=NP.input()),
+        parameters=(;
+            beta_mu_y=NP.parameter(
+                NP.RealSupport(), coefficient_keys;
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            beta_eta_z=NP.parameter(
+                NP.RealSupport(), coefficient_keys;
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            tau_gy_group=NP.parameter(
+                NP.PositiveSupport(), coefficient_keys;
+                transform=NP.Exp(), prior=NP.Exponential(1)),
+            L_gy_group=NP.cholesky_correlation(coefficient_keys, 2),
+            b_gy_group=NP.grouped_standard_normal(
+                :group, coefficient_keys),
+            sigma_y=NP.parameter(
+                NP.PositiveSupport(), (:sigma_y,);
+                transform=NP.Exp(), prior=NP.Exponential(2)),
+            tau_gz_group=NP.parameter(
+                NP.PositiveSupport(), (:tau_gz_group,);
+                transform=NP.Exp(), prior=NP.Exponential(1)),
+            b_gz_group=NP.grouped_normal(
+                :group, 0.0, :tau_gz_group)),
+        nodes=(;
+            b_gy_group_by_group_for_mu_y=NP.grouped_affine(
+                :b_gy_group, :tau_gy_group, :L_gy_group,
+                :group, (nothing, :x)),
+            mu_y=NP.affine(
+                :x, :beta_mu_y;
+                offsets=(:b_gy_group_by_group_for_mu_y,)),
+            r_eta_z_gz_group=NP.group_gather(:b_gz_group, :group),
+            eta_z=NP.affine(
+                :x, :beta_eta_z; offsets=(:r_eta_z_gz_group,))),
+        observations=(;
+            y=NP.broadcasted(NP.normal(:y, :mu_y, :sigma_y)),
+            z=NP.broadcasted(NP.bernoulli_logit(:z, :eta_z))),
+        site_order=(
+            :tau_gy_group, :L_gy_group, :b_gy_group,
+            :beta_mu_y, :sigma_y, :y,
+            :tau_gz_group, :b_gz_group, :beta_eta_z, :z))
+    natural = natural_correlated_grouped_mixed_outcome(
+        data.x, data.group)
+    @test natural.declaration == declaration
+    brmi = @brm data begin
+        sigma_y ~ Exponential(2)
+        mu_y ~ 1 + x + (1 + x | gy | group)
+        sd(:, gy) ~ Exponential(1)
+        cor(:, gy) ~ LKJCholesky(2, 2)
+        y ~ Normal(mu_y, sigma_y)
+        eta_z ~ 1 + x + (1 | gz | group)
+        sd(:, gz) ~ Exponential(1)
+        z ~ BernoulliLogit(eta_z)
+    end
+    @test SBBRMI(brmi; mod=@__MODULE__) isa SBBRMI
+    @test NP.lower(brmi) == declaration
+    plan = NP.compile(NP.condition(natural; y=data.y, z=data.z))
+    @test plan.graph.schedule == (
+        :tau_gy_group, :L_gy_group, :b_gy_group,
+        :beta_mu_y, :sigma_y,
+        :tau_gz_group, :b_gz_group, :beta_eta_z,
+        :b_gy_group_by_group_for_mu_y, :mu_y, :y,
+        :r_eta_z_gz_group, :eta_z, :z)
+    @test plan.graph.dimension == 15
+    @test plan.group_indices == (;
+        b_gy_group_by_group_for_mu_y=(1, 2, 1),
+        r_eta_z_gz_group=(1, 2, 1))
+    @test plan.graph.coordinates.tau_gy_group.keys == coefficient_keys
+    @test length(plan.graph.coordinates.L_gy_group.keys) == 1
+    @test length(plan.graph.coordinates.b_gy_group.keys) == 4
+    prepared = NP.prepare(plan)
+    pointwise = NP.output_signature(plan, NP.PointwiseLogLikelihood())
+    predictive = NP.output_signature(plan, NP.PosteriorPredictive())
+    @test map(signature -> NP.output_eltype(signature, prepared),
+              pointwise) == (y=Float64, z=Float64)
+    @test map(signature -> NP.output_eltype(signature, prepared),
+              predictive) == (y=Float64, z=Bool)
+    brm_plan = NP.compile(brmi)
+    @test brm_plan.declaration == declaration
+    @test brm_plan.group_indices == plan.group_indices
+    @test brm_plan.graph.coordinates == plan.graph.coordinates
+
+    position = [
+        log(0.7), log(0.5), 0.2,
+        0.3, -0.4, -0.2, 0.25,
+        0.1, 0.4, log(0.8),
+        log(0.6), -0.3, 0.25,
+        -0.2, 0.3]
+    work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
+    density, gradient = NP.logdensity_and_gradient!(
+        work, prepared, position)
+    tau_y = exp.(position[1:2])
+    raw_correlation = position[3]
+    rho = tanh(raw_correlation)
+    sech = inv(cosh(raw_correlation))
+    standardized_y = reshape(position[4:7], 2, 2)
+    effects_y = [
+        (tau_y[1] * standardized_y[1, group],
+         tau_y[2] * (rho * standardized_y[1, group] +
+                     sech * standardized_y[2, group]))
+        for group in 1:2]
+    sigma_y = exp(position[10])
+    tau_z = exp(position[11])
+    effects_z = position[12:13]
+    group_indices = [1, 2, 1]
+    mu_y = [
+        position[8] + position[9] * data.x[row] +
+        effects_y[group_indices[row]][1] +
+        effects_y[group_indices[row]][2] * data.x[row]
+        for row in eachindex(data.x)]
+    eta_z = position[14] .+ position[15] .* data.x .+
+        effects_z[group_indices]
+    lkj_constant = BRM.loggamma(2.5) - BRM.loggamma(2.0) -
+        0.5 * log(pi)
+    prior_density =
+        sum(logpdf.(Exponential(1), tau_y)) + sum(position[1:2]) +
+        lkj_constant + 2 * NP._factor_logsech2(raw_correlation) +
+        sum(logpdf.(Normal(), standardized_y)) +
+        sum(logpdf.(Normal(), position[8:9])) +
+        logpdf(Exponential(2), sigma_y) + position[10] +
+        logpdf(Exponential(1), tau_z) + position[11] +
+        sum(logpdf.(Normal(0, tau_z), effects_z)) +
+        sum(logpdf.(Normal(), position[14:15]))
+    y_pointwise = logpdf.(Normal.(mu_y, sigma_y), data.y)
+    z_pointwise = logpdf.(BRM.BernoulliLogit.(eta_z), data.z)
+    @test density ≈
+          prior_density + sum(y_pointwise) + sum(z_pointwise) atol=2e-12
+
+    finite_difference = similar(gradient)
+    plus = copy(position)
+    minus = copy(position)
+    step = 1e-6
+    for coordinate in eachindex(position)
+        plus[coordinate] += step
+        minus[coordinate] -= step
+        finite_difference[coordinate] = (
+            NP.logdensity!(work, prepared, plus) -
+            NP.logdensity!(work, prepared, minus)) / (2step)
+        plus[coordinate] = position[coordinate]
+        minus[coordinate] = position[coordinate]
+    end
+    @test gradient ≈ finite_difference rtol=4e-5 atol=4e-6
+
+    brm_prepared = NP.prepare(brm_plan)
+    brm_work = NP.workspace(brm_prepared, Float64, DI.AutoEnzyme())
+    brm_density, brm_gradient = NP.logdensity_and_gradient!(
+        brm_work, brm_prepared, position)
+    @test brm_density == density
+    @test brm_gradient == gradient
+
+    @test factor_steady_state_allocations(
+        work, prepared, position) == (; primal=0, gradient=0)
+
+    pointwise_query = NP.PointwiseLogLikelihood()
+    predictive_query = NP.PosteriorPredictive()
+    pointwise_values = NP.evaluate(
+        work, prepared, position, pointwise_query)
+    @test pointwise_values.y ≈ y_pointwise atol=2e-12
+    @test pointwise_values.z ≈ z_pointwise atol=2e-12
+    predictive_values = NP.simulate(
+        MersenneTwister(967), work, prepared, position, predictive_query)
+    @test predictive_values.y isa Vector{Float64}
+    @test predictive_values.z isa Vector{Bool}
+    @test predictive_values == NP.simulate(
+        MersenneTwister(967), work, prepared, position, predictive_query)
+
+    prior_error = capability_error(() -> NP.simulate_prior(
+        MersenneTwister(968), work, prepared))
+    @test prior_error.capability == :prior_simulation
+
+    positions = permutedims(hcat(position, position .+ 0.05))
+    pointwise_draws = NP.evaluate_draws(
+        work, prepared, positions, pointwise_query)
+    predictive_draws = NP.simulate_draws(
+        MersenneTwister(969), work, prepared, positions,
+        predictive_query)
+    @test pointwise_draws.y[1, :] == pointwise_values.y
+    @test pointwise_draws.z[1, :] == pointwise_values.z
+    @test predictive_draws.y isa Matrix{Float64}
+    @test predictive_draws.z isa Matrix{Bool}
+    @test predictive_draws == NP.simulate_draws(
+        MersenneTwister(969), work, prepared, positions,
+        predictive_query)
+
+    queries = (;
+        mu_y=NP.NodeOutput(:mu_y),
+        eta_z=NP.NodeOutput(:eta_z),
+        pointwise=pointwise_query,
+        predictive=predictive_query)
+    bundle = NP.execute_draws(
+        MersenneTwister(971), work, prepared, positions, queries)
+    @test bundle.mu_y[1, :] ≈ mu_y atol=2e-12
+    @test bundle.eta_z[1, :] ≈ eta_z atol=2e-12
+    @test bundle.pointwise == pointwise_draws
+    @test bundle.predictive.y isa Matrix{Float64}
+    @test bundle.predictive.z isa Matrix{Bool}
+    @test bundle == NP.execute_draws(
+        MersenneTwister(971), work, prepared, positions, queries)
+
+    pointwise_output = NP.allocate_output(prepared, pointwise_query)
+    predictive_output = NP.allocate_output(prepared, predictive_query)
+    pointwise_draw_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, pointwise_query),
+        prepared)
+    predictive_draw_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, predictive_query),
+        prepared)
+    bundle_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, queries), prepared)
+    @test factor_multioutcome_query_allocations(
+        pointwise_output, predictive_output,
+        pointwise_draw_output, predictive_draw_output,
+        bundle_output, queries,
+        work, prepared, position, positions) == (;
+            pointwise=0, predictive=0, pointwise_draws=0,
+            predictive_draws=0, bundle=0)
+
+    float32_prepared = NP.prepare(plan; T=Float32)
+    float32_position = Float32.(position)
+    float32_work = NP.workspace(
+        float32_prepared, Float32, DI.AutoEnzyme())
+    float32_density, float32_gradient = NP.logdensity_and_gradient!(
+        float32_work, float32_prepared, float32_position)
+    @test float32_density ≈ density rtol=6f-5
+    @test float32_gradient ≈ gradient rtol=8f-5
+    float32_predictive = NP.simulate(
+        MersenneTwister(972), float32_work, float32_prepared,
+        float32_position, predictive_query)
+    @test float32_predictive.y isa Vector{Float32}
+    @test float32_predictive.z isa Vector{Bool}
+
+    partially_conditioned = NP.compile(NP.condition(natural; y=data.y))
+    @test partially_conditioned.graph.sites.y.activity isa NP.ConditionedSite
+    @test partially_conditioned.graph.sites.z.activity isa NP.GeneratedSite
+    partial_prepared = NP.prepare(partially_conditioned)
+    partial_work = NP.workspace(partial_prepared)
+    @test NP.logdensity!(partial_work, partial_prepared, position) ≈
+          prior_density + sum(y_pointwise) atol=2e-12
+
+    replay_bindings = (;
+        x=[0.5, -0.5, 1.5], group=[:b, :a, :b])
+    prediction_only = NP.rebind(
+        prepared, (;); bindings=replay_bindings)
+    @test !NP.has_response(prediction_only)
+    @test prediction_only.plan.group_indices == (;
+        b_gy_group_by_group_for_mu_y=(2, 1, 2),
+        r_eta_z_gz_group=(2, 1, 2))
+    @test prediction_only.plan.graph.coordinates == plan.graph.coordinates
+    prediction_work = NP.workspace(prediction_only)
+    prediction = NP.simulate(
+        MersenneTwister(973), prediction_work, prediction_only,
+        position, predictive_query)
+    @test prediction.y isa Vector{Float64}
+    @test prediction.z isa Vector{Bool}
+    @test NP.logdensity!(prediction_work, prediction_only, position) ≈
+          prior_density atol=2e-12
+
+    replayed = NP.rebind(
+        prepared,
+        (; y=[0.1, -0.2, 0.6], z=Bool[false, true, true]);
+        bindings=replay_bindings)
+    @test NP.has_response(replayed)
+    @test replayed.plan.graph.coordinates == plan.graph.coordinates
+    @test isfinite(NP.logdensity!(NP.workspace(replayed), replayed, position))
+
+    new_group_bindings = (;
+        x=[0.0, 1.0, 2.0], group=[:a, :new, :new])
+    new_group_error = capability_error(() -> NP.rebind(
+        prepared, (;); bindings=new_group_bindings))
+    @test new_group_error.capability == :new_group
+    generated = NP.rebind(
+        prepared, (;); bindings=new_group_bindings,
+        new_groups=:resample)
+    @test generated.plan.generated_group_levels == (;
+        b_gy_group=(:new,), b_gz_group=(:new,))
+    @test generated.plan.generated_group_indices == (;
+        b_gy_group=1:2, b_gz_group=3:3)
+    @test generated.plan.group_indices == (;
+        b_gy_group_by_group_for_mu_y=(1, -1, -1),
+        r_eta_z_gz_group=(1, -1, -1))
+    generated_work = NP.workspace(generated)
+    generated_predictive = NP.simulate(
+        MersenneTwister(974), generated_work, generated,
+        position, predictive_query)
+    @test generated_predictive.y isa Vector{Float64}
+    @test generated_predictive.z isa Vector{Bool}
+    @test generated_predictive == NP.simulate(
+        MersenneTwister(974), generated_work, generated,
+        position, predictive_query)
+    generated_density_error = capability_error(() -> NP.logdensity!(
+        generated_work, generated, position))
+    @test generated_density_error.capability == :new_group_activity
+    conditioned_new_group_error = capability_error(() -> NP.rebind(
+        prepared, (; y=zeros(3), z=Bool[false, true, false]);
+        bindings=new_group_bindings, new_groups=:resample))
+    @test conditioned_new_group_error.capability == :new_group_activity
+
+    @test_throws DimensionMismatch NP.rebind(
+        prepared, (; y=data.y, z=data.z);
+        bindings=(; x=data.x, group=data.group[1:2]))
+end
+
+
+@testset "typed native PPL grouped distributional Gaussian declarations" begin
+    data = (;
+        x=[-1.0, 0.0, 1.0, 0.5],
+        z=[0.25, -0.5, 0.75, 0.0],
+        group=[:a, :b, :a, :b],
+        y=[0.2, -0.1, 0.5, 0.1])
+    coefficient_keys = (:mu, :log_sigma)
+    mu_group = NP.grouped_affine(
+        :b_p_group, :tau_p_group, :L_p_group, :group, (nothing,);
+        coefficient_indices=(1,), coefficient_count=2)
+    log_sigma_group = NP.grouped_affine(
+        :b_p_group, :tau_p_group, :L_p_group, :group, (nothing,);
+        coefficient_indices=(2,), coefficient_count=2)
+    declaration = NP.model(
+        inputs=(; x=NP.input(), z=NP.input(), group=NP.input()),
+        parameters=(;
+            beta_mu=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            beta_log_sigma=NP.parameter(
+                NP.RealSupport(), (:Intercept, :z);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            tau_p_group=NP.parameter(
+                NP.PositiveSupport(), coefficient_keys;
+                transform=NP.Exp(), prior=NP.Exponential(1)),
+            L_p_group=NP.cholesky_correlation(coefficient_keys, 2),
+            b_p_group=NP.grouped_standard_normal(:group, coefficient_keys)),
+        nodes=(;
+            b_p_group_by_group_for_mu=mu_group,
+            mu=NP.affine(
+                :x, :beta_mu;
+                offsets=(:b_p_group_by_group_for_mu,)),
+            b_p_group_by_group_for_log_sigma=log_sigma_group,
+            log_sigma=NP.affine(
+                :z, :beta_log_sigma;
+                offsets=(:b_p_group_by_group_for_log_sigma,)),
+            sigma=NP.exp_link(:log_sigma)),
+        observations=(;
+            y=NP.broadcasted(NP.normal(:y, :mu, :sigma))),
+        site_order=(
+            :tau_p_group, :L_p_group, :b_p_group,
+            :beta_mu, :beta_log_sigma, :y))
+    natural = natural_grouped_distributional_gaussian(
+        data.x, data.z, data.group)
+    @test natural.declaration == declaration
+
+    brmi = @brm data begin
+        mu ~ 1 + x + (1 | p | group)
+        log_sigma ~ 1 + z + (1 | p | group)
+        sd(:, p) ~ Exponential(1)
+        cor(:, p) ~ LKJCholesky(2, 2)
+        y ~ Normal(mu, exp(log_sigma))
+    end
+    @test ranefcoefnames(brmi, :p) == [
+        (; predictor=:mu, coefficient=:Intercept),
+        (; predictor=:log_sigma, coefficient=:Intercept)]
+    @test SBBRMI(brmi; mod=@__MODULE__) isa SBBRMI
+    @test NP.lower(brmi) == declaration
+
+    plan = NP.compile(NP.condition(natural; y=data.y))
+    brm_plan = NP.compile(brmi)
+    @test brm_plan.declaration == declaration
+    @test brm_plan.graph.schedule == plan.graph.schedule
+    @test brm_plan.graph.coordinates == plan.graph.coordinates
+    @test brm_plan.group_indices == plan.group_indices
+    @test plan.graph.schedule == (
+        :tau_p_group, :L_p_group, :b_p_group,
+        :beta_mu, :beta_log_sigma,
+        :b_p_group_by_group_for_mu, :mu,
+        :b_p_group_by_group_for_log_sigma, :log_sigma, :sigma, :y)
+    @test plan.graph.dimension == 11
+    @test plan.group_indices == (;
+        b_p_group_by_group_for_mu=(1, 2, 1, 2),
+        b_p_group_by_group_for_log_sigma=(1, 2, 1, 2))
+    @test plan.graph.coordinates.tau_p_group.keys == coefficient_keys
+    @test length(plan.graph.coordinates.L_p_group.keys) == 1
+    @test length(plan.graph.coordinates.b_p_group.keys) == 4
+    @test NP.grouped_coefficient_indices(
+        plan.graph.nodes.b_p_group_by_group_for_mu) == (1,)
+    @test NP.grouped_coefficient_indices(
+        plan.graph.nodes.b_p_group_by_group_for_log_sigma) == (2,)
+    @test NP.output_signature(plan, NP.NodeOutput(:sigma)) isa
+          NP.OutputSignature
+
+    prepared = NP.prepare(plan)
+    position = [
+        log(0.7), log(0.5), 0.2,
+        0.3, -0.4, -0.2, 0.25,
+        0.1, 0.4, -0.3, 0.25]
+    work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
+    density, gradient = NP.logdensity_and_gradient!(
+        work, prepared, position)
+    tau = exp.(position[1:2])
+    raw_correlation = position[3]
+    rho = tanh(raw_correlation)
+    sech = inv(cosh(raw_correlation))
+    standardized = reshape(position[4:7], 2, 2)
+    effects = [
+        (tau[1] * standardized[1, group_index],
+         tau[2] * (rho * standardized[1, group_index] +
+                   sech * standardized[2, group_index]))
+        for group_index in 1:2]
+    group_indices = [1, 2, 1, 2]
+    mu = position[8] .+ position[9] .* data.x .+
+        first.(effects)[group_indices]
+    log_sigma = position[10] .+ position[11] .* data.z .+
+        last.(effects)[group_indices]
+    sigma = exp.(log_sigma)
+    @test all(>(0), sigma)
+    lkj_constant = BRM.loggamma(2.5) - BRM.loggamma(2.0) -
+        0.5 * log(pi)
+    prior_density =
+        sum(logpdf.(Exponential(1), tau)) + sum(position[1:2]) +
+        lkj_constant + 2 * NP._factor_logsech2(raw_correlation) +
+        sum(logpdf.(Normal(), standardized)) +
+        sum(logpdf.(Normal(), position[8:11]))
+    pointwise = logpdf.(Normal.(mu, sigma), data.y)
+    expected_density = prior_density + sum(pointwise)
+    @test density ≈ expected_density atol=2e-12
+
+    finite_difference = similar(gradient)
+    plus = copy(position)
+    minus = copy(position)
+    step = 1e-6
+    for coordinate in eachindex(position)
+        plus[coordinate] += step
+        minus[coordinate] -= step
+        finite_difference[coordinate] = (
+            NP.logdensity!(work, prepared, plus) -
+            NP.logdensity!(work, prepared, minus)) / (2step)
+        plus[coordinate] = position[coordinate]
+        minus[coordinate] = position[coordinate]
+    end
+    @test gradient ≈ finite_difference rtol=5e-5 atol=5e-6
+
+    sigma_query = NP.NodeOutput(:sigma)
+    sigma_signature = NP.output_signature(prepared, sigma_query)
+    @test NP.output_axis(sigma_signature).keys == eachindex(data.y)
+    @test NP.output_eltype(sigma_signature, prepared) === Float64
+    @test NP.evaluate(work, prepared, position, sigma_query) ≈ sigma
+    @test NP.evaluate(
+        work, prepared, position, NP.PointwiseLogLikelihood()) ≈ pointwise
+
+    brm_prepared = NP.prepare(brm_plan)
+    brm_work = NP.workspace(brm_prepared, Float64, DI.AutoEnzyme())
+    brm_density, brm_gradient = NP.logdensity_and_gradient!(
+        brm_work, brm_prepared, position)
+    @test brm_density == density
+    @test brm_gradient == gradient
+
+    predictive_query = NP.PosteriorPredictive()
+    predictive = NP.simulate(
+        MersenneTwister(1041), work, prepared, position, predictive_query)
+    @test predictive isa Vector{Float64}
+    @test predictive == NP.simulate(
+        MersenneTwister(1041), work, prepared, position, predictive_query)
+
+    positions = [position'; (position .+ 0.05)']
+    mu_query = NP.NodeOutput(:mu)
+    log_sigma_query = NP.NodeOutput(:log_sigma)
+    pointwise_query = NP.PointwiseLogLikelihood()
+    mu_draws = NP.evaluate_draws(
+        work, prepared, positions, mu_query)
+    sigma_draws = NP.evaluate_draws(
+        work, prepared, positions, sigma_query)
+    predictive_draws = NP.simulate_draws(
+        MersenneTwister(1042), work, prepared, positions,
+        predictive_query)
+    @test mu_draws[1, :] ≈ mu
+    @test sigma_draws[1, :] ≈ sigma
+    @test predictive_draws isa Matrix{Float64}
+    @test predictive_draws == NP.simulate_draws(
+        MersenneTwister(1042), work, prepared, positions,
+        predictive_query)
+    queries = (;
+        mu=mu_query,
+        log_sigma=log_sigma_query,
+        sigma=sigma_query,
+        pointwise=pointwise_query)
+    bundle = NP.execute_draws(
+        work, prepared, positions, queries)
+    @test bundle.mu == mu_draws
+    @test bundle.log_sigma[1, :] ≈ log_sigma
+    @test bundle.sigma == sigma_draws
+    @test bundle.pointwise[1, :] ≈ pointwise
+
+    @test factor_steady_state_allocations(
+        work, prepared, position) == (; primal=0, gradient=0)
+    bundle_output = map(similar, bundle)
+    @test factor_node_query_allocations(
+        work, prepared, position,
+        similar(data.y), similar(data.y),
+        positions, similar(mu_draws), similar(sigma_draws),
+        bundle_output, queries) == (;
+            scalar_mu=0, scalar_sigma=0,
+            batch_mu=0, batch_sigma=0, bundle=0)
+    batch_linear = NP.allocate_output(
+        NP.batch_output_signature(
+            prepared, positions, NP.LinearPredictor()), prepared)
+    batch_pointwise = NP.allocate_output(
+        NP.batch_output_signature(
+            prepared, positions, pointwise_query), prepared)
+    batch_predictive = NP.allocate_output(
+        NP.batch_output_signature(
+            prepared, positions, predictive_query), prepared)
+    batch_queries = (;
+        linear=NP.LinearPredictor(),
+        pointwise=pointwise_query,
+        predictive=predictive_query)
+    batch_bundle = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, batch_queries),
+        prepared)
+    @test factor_batch_allocations(
+        work, prepared, positions,
+        batch_linear, batch_pointwise, batch_predictive,
+        batch_bundle) == (;
+            linear=0, pointwise=0, predictive=0, bundle=0)
+
+    float32_prepared = NP.prepare(plan; T=Float32)
+    float32_position = Float32.(position)
+    float32_work = NP.workspace(
+        float32_prepared, Float32, DI.AutoEnzyme())
+    float32_density, float32_gradient = NP.logdensity_and_gradient!(
+        float32_work, float32_prepared, float32_position)
+    @test float32_density ≈ density rtol=8f-5
+    @test float32_gradient ≈ gradient rtol=1f-4
+    float32_sigma = NP.evaluate(
+        float32_work, float32_prepared, float32_position, sigma_query)
+    @test float32_sigma isa Vector{Float32}
+    @test all(>(0f0), float32_sigma)
+    @test NP.simulate(
+        MersenneTwister(1043), float32_work, float32_prepared,
+        float32_position, predictive_query) isa Vector{Float32}
+
+    replay_bindings = (;
+        x=[0.5, -0.5, 1.5],
+        z=[-0.25, 0.75, 0.5],
+        group=[:b, :a, :b])
+    prediction_only = NP.rebind(
+        prepared, (;); bindings=replay_bindings)
+    @test !NP.has_response(prediction_only)
+    @test prediction_only.plan.graph.coordinates == plan.graph.coordinates
+    @test prediction_only.plan.group_indices == (;
+        b_p_group_by_group_for_mu=(2, 1, 2),
+        b_p_group_by_group_for_log_sigma=(2, 1, 2))
+    prediction_work = NP.workspace(prediction_only)
+    prediction = NP.simulate(
+        MersenneTwister(1044), prediction_work, prediction_only,
+        position, predictive_query)
+    @test prediction isa Vector{Float64}
+    @test prediction == NP.simulate(
+        MersenneTwister(1044), prediction_work, prediction_only,
+        position, predictive_query)
+    @test NP.logdensity!(
+        prediction_work, prediction_only, position) ≈ prior_density
+
+    replayed = NP.rebind(
+        prepared, (; y=[0.1, -0.2, 0.6]); bindings=replay_bindings)
+    @test NP.has_response(replayed)
+    @test replayed.plan.graph.coordinates == plan.graph.coordinates
+    @test isfinite(NP.logdensity!(
+        NP.workspace(replayed), replayed, position))
+
+    new_group_bindings = (;
+        x=[0.0, 1.0, 2.0],
+        z=[0.5, -0.5, 1.0],
+        group=[:a, :new, :new])
+    new_group_error = capability_error(() -> NP.rebind(
+        prepared, (;); bindings=new_group_bindings))
+    @test new_group_error.capability == :new_group
+    generated = NP.rebind(
+        prepared, (;); bindings=new_group_bindings,
+        new_groups=:resample)
+    @test generated.plan.generated_group_levels == (;
+        b_p_group=(:new,))
+    @test generated.plan.generated_group_indices == (;
+        b_p_group=1:2)
+    @test generated.plan.group_indices == (;
+        b_p_group_by_group_for_mu=(1, -1, -1),
+        b_p_group_by_group_for_log_sigma=(1, -1, -1))
+    generated_work = NP.workspace(generated)
+    generated_prediction = NP.simulate(
+        MersenneTwister(1045), generated_work, generated,
+        position, predictive_query)
+    @test generated_prediction isa Vector{Float64}
+    @test generated_prediction == NP.simulate(
+        MersenneTwister(1045), generated_work, generated,
+        position, predictive_query)
+    @test capability_error(() -> NP.logdensity!(
+        generated_work, generated, position)).capability ==
+          :new_group_activity
+    @test capability_error(() -> NP.rebind(
+        prepared, (; y=zeros(3));
+        bindings=new_group_bindings,
+        new_groups=:resample)).capability == :new_group_activity
+
+    @test_throws DimensionMismatch NP.rebind(
+        prepared, (; y=data.y);
+        bindings=(; x=data.x, z=data.z, group=data.group[1:2]))
+end
+
+
+@testset "typed native PPL grouped distributional Gaussian slopes" begin
+    data = (;
+        x=[-1.0, 0.0, 1.0, 0.5],
+        z=[0.25, -0.5, 0.75, 0.0],
+        group=[:a, :b, :a, :b],
+        y=[0.2, -0.1, 0.5, 0.1])
+    coefficient_keys = (:mu, :mu_x, :log_sigma, :log_sigma_z)
+    mu_group = NP.grouped_affine(
+        :b_p_group, :tau_p_group, :L_p_group, :group,
+        (nothing, :x);
+        coefficient_indices=(1, 2), coefficient_count=4)
+    log_sigma_group = NP.grouped_affine(
+        :b_p_group, :tau_p_group, :L_p_group, :group,
+        (nothing, :z);
+        coefficient_indices=(3, 4), coefficient_count=4)
+    declaration = NP.model(
+        inputs=(; x=NP.input(), z=NP.input(), group=NP.input()),
+        parameters=(;
+            beta_mu=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            beta_log_sigma=NP.parameter(
+                NP.RealSupport(), (:Intercept, :z);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            tau_p_group=NP.parameter(
+                NP.PositiveSupport(), coefficient_keys;
+                transform=NP.Exp(), prior=NP.Exponential(1)),
+            L_p_group=NP.cholesky_correlation(coefficient_keys, 2),
+            b_p_group=NP.grouped_standard_normal(:group, coefficient_keys)),
+        nodes=(;
+            b_p_group_by_group_for_mu=mu_group,
+            mu=NP.affine(
+                :x, :beta_mu;
+                offsets=(:b_p_group_by_group_for_mu,)),
+            b_p_group_by_group_for_log_sigma=log_sigma_group,
+            log_sigma=NP.affine(
+                :z, :beta_log_sigma;
+                offsets=(:b_p_group_by_group_for_log_sigma,)),
+            sigma=NP.exp_link(:log_sigma)),
+        observations=(;
+            y=NP.broadcasted(NP.normal(:y, :mu, :sigma))),
+        site_order=(
+            :tau_p_group, :L_p_group, :b_p_group,
+            :beta_mu, :beta_log_sigma, :y))
+    natural = natural_grouped_distributional_gaussian_slopes(
+        data.x, data.z, data.group)
+    @test natural.declaration == declaration
+
+    brmi = @brm data begin
+        mu ~ 1 + x + (1 + x | p | group)
+        log_sigma ~ 1 + z + (1 + z | p | group)
+        sd(:, p) ~ Exponential(1)
+        cor(:, p) ~ LKJCholesky(4, 2)
+        y ~ Normal(mu, exp(log_sigma))
+    end
+    @test ranefcoefnames(brmi, :p) == [
+        (; predictor=:mu, coefficient=:Intercept),
+        (; predictor=:mu, coefficient=:x),
+        (; predictor=:log_sigma, coefficient=:Intercept),
+        (; predictor=:log_sigma, coefficient=:z)]
+    @test SBBRMI(brmi; mod=@__MODULE__) isa SBBRMI
+    @test NP.lower(brmi) == declaration
+
+    plan = NP.compile(NP.condition(natural; y=data.y))
+    brm_plan = NP.compile(brmi)
+    @test brm_plan.declaration == declaration
+    @test brm_plan.graph.schedule == plan.graph.schedule
+    @test brm_plan.graph.coordinates == plan.graph.coordinates
+    @test brm_plan.group_indices == plan.group_indices
+    @test plan.graph.schedule == (
+        :tau_p_group, :L_p_group, :b_p_group,
+        :beta_mu, :beta_log_sigma,
+        :b_p_group_by_group_for_mu, :mu,
+        :b_p_group_by_group_for_log_sigma, :log_sigma, :sigma, :y)
+    @test plan.graph.dimension == 22
+    @test plan.group_indices == (;
+        b_p_group_by_group_for_mu=(1, 2, 1, 2),
+        b_p_group_by_group_for_log_sigma=(1, 2, 1, 2))
+    @test plan.graph.coordinates.tau_p_group.keys == coefficient_keys
+    @test length(plan.graph.coordinates.L_p_group.keys) == 6
+    @test length(plan.graph.coordinates.b_p_group.keys) == 8
+    @test NP.grouped_coefficient_indices(
+        plan.graph.nodes.b_p_group_by_group_for_mu) == (1, 2)
+    @test NP.grouped_coefficient_indices(
+        plan.graph.nodes.b_p_group_by_group_for_log_sigma) == (3, 4)
+    @test NP.output_signature(plan, NP.NodeOutput(:sigma)) isa
+          NP.OutputSignature
+
+    prepared = NP.prepare(plan)
+    position = [
+        log(0.7), log(0.5), log(0.6), log(0.4),
+        0.2, -0.15, 0.1, 0.25, -0.2, 0.3,
+        0.3, -0.4, 0.2, -0.1,
+        -0.2, 0.25, -0.3, 0.15,
+        0.1, 0.4, -0.3, 0.25]
+    work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
+    density, gradient = NP.logdensity_and_gradient!(
+        work, prepared, position)
+    tau = exp.(position[1:4])
+    raw = position[5:10]
+    partial = tanh.(raw)
+    sech = inv.(cosh.(raw))
+    cholesky = [
+        1.0 0.0 0.0 0.0
+        partial[1] sech[1] 0.0 0.0
+        partial[2] partial[4]*sech[2] sech[4]*sech[2] 0.0
+        partial[3] partial[5]*sech[3] partial[6]*sech[5]*sech[3] sech[6]*sech[5]*sech[3]]
+    standardized = reshape(position[11:18], 4, 2)
+    effects = [tau .* (cholesky * standardized[:, group_index])
+               for group_index in 1:2]
+    group_indices = [1, 2, 1, 2]
+    mu = [
+        position[19] + position[20] * data.x[row] +
+        effects[group_indices[row]][1] +
+        effects[group_indices[row]][2] * data.x[row]
+        for row in eachindex(data.x)]
+    log_sigma = [
+        position[21] + position[22] * data.z[row] +
+        effects[group_indices[row]][3] +
+        effects[group_indices[row]][4] * data.z[row]
+        for row in eachindex(data.z)]
+    sigma = exp.(log_sigma)
+    @test all(>(0), sigma)
+    log_normalizer(alpha) =
+        BRM.loggamma(alpha + 0.5) - BRM.loggamma(alpha) - 0.5 * log(pi)
+    lkj_density =
+        3 * log_normalizer(3.0) +
+        2 * log_normalizer(2.5) +
+        log_normalizer(2.0) +
+        3.0 * sum(NP._factor_logsech2, raw[1:3]) +
+        2.5 * sum(NP._factor_logsech2, raw[4:5]) +
+        2.0 * NP._factor_logsech2(raw[6])
+    prior_density =
+        sum(logpdf.(Exponential(1), tau)) + sum(position[1:4]) +
+        lkj_density + sum(logpdf.(Normal(), standardized)) +
+        sum(logpdf.(Normal(), position[19:22]))
+    pointwise = logpdf.(Normal.(mu, sigma), data.y)
+    @test density ≈ prior_density + sum(pointwise) atol=3e-12
+
+    finite_difference = similar(gradient)
+    plus = copy(position)
+    minus = copy(position)
+    step = 1e-6
+    for coordinate in eachindex(position)
+        plus[coordinate] += step
+        minus[coordinate] -= step
+        finite_difference[coordinate] = (
+            NP.logdensity!(work, prepared, plus) -
+            NP.logdensity!(work, prepared, minus)) / (2step)
+        plus[coordinate] = position[coordinate]
+        minus[coordinate] = position[coordinate]
+    end
+    @test gradient ≈ finite_difference rtol=7e-5 atol=7e-6
+
+    sigma_query = NP.NodeOutput(:sigma)
+    @test NP.evaluate(work, prepared, position, sigma_query) ≈ sigma
+    @test NP.evaluate(
+        work, prepared, position, NP.PointwiseLogLikelihood()) ≈ pointwise
+
+    brm_prepared = NP.prepare(brm_plan)
+    brm_work = NP.workspace(brm_prepared, Float64, DI.AutoEnzyme())
+    brm_density, brm_gradient = NP.logdensity_and_gradient!(
+        brm_work, brm_prepared, position)
+    @test brm_density == density
+    @test brm_gradient == gradient
+
+    predictive_query = NP.PosteriorPredictive()
+    predictive = NP.simulate(
+        MersenneTwister(1051), work, prepared, position, predictive_query)
+    @test predictive isa Vector{Float64}
+    @test predictive == NP.simulate(
+        MersenneTwister(1051), work, prepared, position, predictive_query)
+
+    positions = [position'; (position .+ 0.025)']
+    mu_query = NP.NodeOutput(:mu)
+    log_sigma_query = NP.NodeOutput(:log_sigma)
+    pointwise_query = NP.PointwiseLogLikelihood()
+    mu_draws = NP.evaluate_draws(work, prepared, positions, mu_query)
+    sigma_draws = NP.evaluate_draws(
+        work, prepared, positions, sigma_query)
+    @test mu_draws[1, :] ≈ mu
+    @test sigma_draws[1, :] ≈ sigma
+    predictive_draws = NP.simulate_draws(
+        MersenneTwister(1052), work, prepared, positions,
+        predictive_query)
+    @test predictive_draws isa Matrix{Float64}
+    @test predictive_draws == NP.simulate_draws(
+        MersenneTwister(1052), work, prepared, positions,
+        predictive_query)
+    queries = (;
+        mu=mu_query,
+        log_sigma=log_sigma_query,
+        sigma=sigma_query,
+        pointwise=pointwise_query)
+    bundle = NP.execute_draws(work, prepared, positions, queries)
+    @test bundle.mu == mu_draws
+    @test bundle.log_sigma[1, :] ≈ log_sigma
+    @test bundle.sigma == sigma_draws
+    @test bundle.pointwise[1, :] ≈ pointwise
+
+    @test factor_steady_state_allocations(
+        work, prepared, position) == (; primal=0, gradient=0)
+    @test factor_node_query_allocations(
+        work, prepared, position,
+        similar(data.y), similar(data.y),
+        positions, similar(mu_draws), similar(sigma_draws),
+        map(similar, bundle), queries) == (;
+            scalar_mu=0, scalar_sigma=0,
+            batch_mu=0, batch_sigma=0, bundle=0)
+
+    float32_prepared = NP.prepare(plan; T=Float32)
+    float32_position = Float32.(position)
+    float32_work = NP.workspace(
+        float32_prepared, Float32, DI.AutoEnzyme())
+    float32_density, float32_gradient = NP.logdensity_and_gradient!(
+        float32_work, float32_prepared, float32_position)
+    @test float32_density ≈ density rtol=1f-4
+    @test float32_gradient ≈ gradient rtol=2f-4
+    float32_sigma = NP.evaluate(
+        float32_work, float32_prepared, float32_position, sigma_query)
+    @test float32_sigma isa Vector{Float32}
+    @test all(>(0f0), float32_sigma)
+    @test NP.simulate(
+        MersenneTwister(1053), float32_work, float32_prepared,
+        float32_position, predictive_query) isa Vector{Float32}
+
+    replay_bindings = (;
+        x=[0.5, -0.5, 1.5],
+        z=[-0.25, 0.75, 0.5],
+        group=[:b, :a, :b])
+    prediction_only = NP.rebind(
+        prepared, (;); bindings=replay_bindings)
+    @test !NP.has_response(prediction_only)
+    @test prediction_only.plan.graph.coordinates == plan.graph.coordinates
+    @test prediction_only.plan.group_indices == (;
+        b_p_group_by_group_for_mu=(2, 1, 2),
+        b_p_group_by_group_for_log_sigma=(2, 1, 2))
+    prediction_work = NP.workspace(prediction_only)
+    prediction = NP.simulate(
+        MersenneTwister(1054), prediction_work, prediction_only,
+        position, predictive_query)
+    @test prediction isa Vector{Float64}
+    @test prediction == NP.simulate(
+        MersenneTwister(1054), prediction_work, prediction_only,
+        position, predictive_query)
+    @test NP.logdensity!(
+        prediction_work, prediction_only, position) ≈ prior_density
+
+    replayed = NP.rebind(
+        prepared, (; y=[0.1, -0.2, 0.6]); bindings=replay_bindings)
+    @test NP.has_response(replayed)
+    @test replayed.plan.graph.coordinates == plan.graph.coordinates
+    @test isfinite(NP.logdensity!(
+        NP.workspace(replayed), replayed, position))
+
+    new_group_bindings = (;
+        x=[0.0, 1.0, 2.0],
+        z=[0.5, -0.5, 1.0],
+        group=[:a, :new, :new])
+    @test capability_error(() -> NP.rebind(
+        prepared, (;); bindings=new_group_bindings)).capability == :new_group
+    generated = NP.rebind(
+        prepared, (;); bindings=new_group_bindings,
+        new_groups=:resample)
+    @test generated.plan.generated_group_levels == (;
+        b_p_group=(:new,))
+    @test generated.plan.generated_group_indices == (;
+        b_p_group=1:4)
+    @test generated.plan.group_indices == (;
+        b_p_group_by_group_for_mu=(1, -1, -1),
+        b_p_group_by_group_for_log_sigma=(1, -1, -1))
+    generated_work = NP.workspace(generated)
+    generated_prediction = NP.simulate(
+        MersenneTwister(1055), generated_work, generated,
+        position, predictive_query)
+    @test generated_prediction isa Vector{Float64}
+    @test generated_prediction == NP.simulate(
+        MersenneTwister(1055), generated_work, generated,
+        position, predictive_query)
+    @test capability_error(() -> NP.logdensity!(
+        generated_work, generated, position)).capability ==
+          :new_group_activity
+    @test capability_error(() -> NP.rebind(
+        prepared, (; y=zeros(3)); bindings=new_group_bindings,
+        new_groups=:resample)).capability == :new_group_activity
+
+    @test_throws DimensionMismatch NP.rebind(
+        prepared, (; y=data.y);
+        bindings=(; x=data.x, z=data.z, group=data.group[1:2]))
+end
+
+
+@testset "typed native PPL shared grouped distributional mixed outcome" begin
+    data = (;
+        x=[-1.0, 0.0, 1.0, 0.5],
+        w=[0.25, -0.5, 0.75, 0.0],
+        group=[:a, :b, :a, :b],
+        y=[0.2, -0.1, 0.5, 0.1],
+        z=Bool[true, false, true, false])
+    coefficient_keys = (:mu_y, :log_sigma_y, :eta_z)
+    mu_group = NP.grouped_affine(
+        :b_p_group, :tau_p_group, :L_p_group, :group, (nothing,);
+        coefficient_indices=(1,), coefficient_count=3)
+    log_sigma_group = NP.grouped_affine(
+        :b_p_group, :tau_p_group, :L_p_group, :group, (nothing,);
+        coefficient_indices=(2,), coefficient_count=3)
+    eta_group = NP.grouped_affine(
+        :b_p_group, :tau_p_group, :L_p_group, :group, (nothing,);
+        coefficient_indices=(3,), coefficient_count=3)
+    declaration = NP.model(
+        inputs=(; x=NP.input(), w=NP.input(), group=NP.input()),
+        parameters=(;
+            beta_mu_y=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            beta_log_sigma_y=NP.parameter(
+                NP.RealSupport(), (:Intercept, :w);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            beta_eta_z=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            tau_p_group=NP.parameter(
+                NP.PositiveSupport(), coefficient_keys;
+                transform=NP.Exp(), prior=NP.Exponential(1)),
+            L_p_group=NP.cholesky_correlation(coefficient_keys, 2),
+            b_p_group=NP.grouped_standard_normal(:group, coefficient_keys)),
+        nodes=(;
+            b_p_group_by_group_for_mu_y=mu_group,
+            mu_y=NP.affine(
+                :x, :beta_mu_y;
+                offsets=(:b_p_group_by_group_for_mu_y,)),
+            b_p_group_by_group_for_log_sigma_y=log_sigma_group,
+            log_sigma_y=NP.affine(
+                :w, :beta_log_sigma_y;
+                offsets=(:b_p_group_by_group_for_log_sigma_y,)),
+            sigma_y=NP.exp_link(:log_sigma_y),
+            b_p_group_by_group_for_eta_z=eta_group,
+            eta_z=NP.affine(
+                :x, :beta_eta_z;
+                offsets=(:b_p_group_by_group_for_eta_z,))),
+        observations=(;
+            y=NP.broadcasted(NP.normal(:y, :mu_y, :sigma_y)),
+            z=NP.broadcasted(NP.bernoulli_logit(:z, :eta_z))),
+        site_order=(
+            :tau_p_group, :L_p_group, :b_p_group,
+            :beta_mu_y, :beta_log_sigma_y, :y, :beta_eta_z, :z))
+    natural = natural_shared_grouped_distributional_mixed_outcome(
+        data.x, data.w, data.group)
+    @test natural.declaration == declaration
+    brmi = @brm data begin
+        mu_y ~ 1 + x + (1 | p | group)
+        log_sigma_y ~ 1 + w + (1 | p | group)
+        eta_z ~ 1 + x + (1 | p | group)
+        sd(:, p) ~ Exponential(1)
+        cor(:, p) ~ LKJCholesky(3, 2)
+        y ~ Normal(mu_y, exp(log_sigma_y))
+        z ~ BernoulliLogit(eta_z)
+    end
+    @test SBBRMI(brmi; mod=@__MODULE__) isa SBBRMI
+    @test NP.lower(brmi) == declaration
+    brm_plan = NP.compile(brmi)
+    @test brm_plan.declaration == declaration
+    @test brm_plan.graph.schedule ==
+          NP.compile(NP.condition(natural; y=data.y, z=data.z)).graph.schedule
+
+    renamed_data = (;
+        x=data.x, w=data.w, cluster=data.group,
+        y_gauss=data.y, z_binary=data.z)
+    renamed_brmi = @brm renamed_data begin
+        mu ~ 1 + x + (1 | q | cluster)
+        log_sigma ~ 1 + w + (1 | q | cluster)
+        eta ~ 1 + x + (1 | q | cluster)
+        sd(:, q) ~ Exponential(1)
+        cor(:, q) ~ LKJCholesky(3, 2)
+        y_gauss ~ Normal(mu, exp(log_sigma))
+        z_binary ~ BernoulliLogit(eta)
+    end
+    renamed_plan = NP.compile(renamed_brmi)
+    @test keys(renamed_plan.declaration.observations) ==
+          (:y_gauss, :z_binary)
+    @test renamed_plan.graph.schedule == (
+        :tau_q_cluster, :L_q_cluster, :b_q_cluster,
+        :beta_mu, :beta_log_sigma, :beta_eta,
+        :b_q_cluster_by_cluster_for_mu, :mu,
+        :b_q_cluster_by_cluster_for_log_sigma,
+        :log_sigma, :sigma, :y_gauss,
+        :b_q_cluster_by_cluster_for_eta, :eta, :z_binary)
+
+    extra_effect_brmi = @brm data begin
+        mu_y ~ 1 + x + (1 | p | group)
+        log_sigma_y ~ 1 + w + (1 | p | group)
+        eta_z ~ 1 + x + (1 | p | group)
+        sd(:, p) ~ Exponential(1)
+        cor(:, p) ~ LKJCholesky(3, 2)
+        sd(:, q) ~ Exponential(7)
+        y ~ Normal(mu_y, exp(log_sigma_y))
+        z ~ BernoulliLogit(eta_z)
+    end
+    @test capability_error(
+        () -> NP.compile(extra_effect_brmi)).capability ==
+          :additional_operations
+
+    ungrouped_brmi = @brm data begin
+        mu_y ~ 1 + x
+        log_sigma_y ~ 1 + w
+        eta_z ~ 1 + x
+        y ~ Normal(mu_y, exp(log_sigma_y))
+        z ~ BernoulliLogit(eta_z)
+    end
+    @test capability_error(
+        () -> NP.compile(ungrouped_brmi)).capability == :group_term
+
+    shared_predictor_brmi = @brm data begin
+        mu_y ~ 1 + x + (1 | p | group)
+        log_sigma_y ~ 1 + w + (1 | p | group)
+        sd(:, p) ~ Exponential(1)
+        cor(:, p) ~ LKJCholesky(3, 2)
+        y ~ Normal(mu_y, exp(log_sigma_y))
+        z ~ BernoulliLogit(mu_y)
+    end
+    @test capability_error(
+        () -> NP.compile(shared_predictor_brmi)).capability == :group_term
+
+    collision_data = merge(data, (; sigma_y=copy(data.w)))
+    scale_collision_brmi = @brm collision_data begin
+        mu_y ~ 1 + sigma_y + (1 | p | group)
+        log_sigma_y ~ 1 + w + (1 | p | group)
+        eta_z ~ 1 + x + (1 | p | group)
+        sd(:, p) ~ Exponential(1)
+        cor(:, p) ~ LKJCholesky(3, 2)
+        y ~ Normal(mu_y, exp(log_sigma_y))
+        z ~ BernoulliLogit(eta_z)
+    end
+    @test capability_error(
+        () -> NP.compile(scale_collision_brmi)).capability == :graph_identity
+
+    empty_scale_brmi = @brm data begin
+        mu_y ~ 1 + x + (1 | p | group)
+        log_ ~ 1 + w + (1 | p | group)
+        eta_z ~ 1 + x + (1 | p | group)
+        sd(:, p) ~ Exponential(1)
+        cor(:, p) ~ LKJCholesky(3, 2)
+        y ~ Normal(mu_y, exp(log_))
+        z ~ BernoulliLogit(eta_z)
+    end
+    @test capability_error(
+        () -> NP.compile(empty_scale_brmi)).capability == :likelihood_scale
+
+    plan = NP.compile(NP.condition(natural; y=data.y, z=data.z))
+    @test brm_plan.graph.coordinates == plan.graph.coordinates
+    @test brm_plan.group_indices == plan.group_indices
+    @test plan.graph.schedule == (
+        :tau_p_group, :L_p_group, :b_p_group,
+        :beta_mu_y, :beta_log_sigma_y, :beta_eta_z,
+        :b_p_group_by_group_for_mu_y, :mu_y,
+        :b_p_group_by_group_for_log_sigma_y,
+        :log_sigma_y, :sigma_y, :y,
+        :b_p_group_by_group_for_eta_z, :eta_z, :z)
+    @test plan.graph.dimension == 18
+    @test plan.group_indices == (;
+        b_p_group_by_group_for_mu_y=(1, 2, 1, 2),
+        b_p_group_by_group_for_log_sigma_y=(1, 2, 1, 2),
+        b_p_group_by_group_for_eta_z=(1, 2, 1, 2))
+    @test plan.graph.coordinates.tau_p_group.keys == coefficient_keys
+    @test length(plan.graph.coordinates.L_p_group.keys) == 3
+    @test length(plan.graph.coordinates.b_p_group.keys) == 6
+    @test NP.grouped_coefficient_indices(
+        plan.graph.nodes.b_p_group_by_group_for_mu_y) == (1,)
+    @test NP.grouped_coefficient_indices(
+        plan.graph.nodes.b_p_group_by_group_for_log_sigma_y) == (2,)
+    @test NP.grouped_coefficient_indices(
+        plan.graph.nodes.b_p_group_by_group_for_eta_z) == (3,)
+    pointwise = NP.output_signature(plan, NP.PointwiseLogLikelihood())
+    predictive = NP.output_signature(plan, NP.PosteriorPredictive())
+    prepared = NP.prepare(plan)
+    @test map(signature -> NP.output_eltype(signature, prepared),
+              pointwise) == (y=Float64, z=Float64)
+    @test map(signature -> NP.output_eltype(signature, prepared),
+              predictive) == (y=Float64, z=Bool)
+
+    position = [
+        log(0.7), log(0.5), log(0.6),
+        0.2, -0.15, 0.1,
+        0.3, -0.4, 0.2, -0.1, 0.25, -0.2,
+        0.1, 0.4, -0.3, 0.25, -0.2, 0.35]
+    work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
+    density, gradient = NP.logdensity_and_gradient!(
+        work, prepared, position)
+    tau = exp.(position[1:3])
+    raw = position[4:6]
+    partial = tanh.(raw)
+    sech = inv.(cosh.(raw))
+    cholesky = [
+        1.0 0.0 0.0
+        partial[1] sech[1] 0.0
+        partial[2] partial[3] * sech[2] sech[3] * sech[2]]
+    standardized = reshape(position[7:12], 3, 2)
+    effects = [tau .* (cholesky * standardized[:, group_index])
+               for group_index in 1:2]
+    group_indices = [1, 2, 1, 2]
+    mu_y = position[13] .+ position[14] .* data.x .+
+        getindex.(effects[group_indices], 1)
+    log_sigma_y = position[15] .+ position[16] .* data.w .+
+        getindex.(effects[group_indices], 2)
+    sigma_y = exp.(log_sigma_y)
+    eta_z = position[17] .+ position[18] .* data.x .+
+        getindex.(effects[group_indices], 3)
+    log_normalizer(alpha) =
+        BRM.loggamma(alpha + 0.5) - BRM.loggamma(alpha) - 0.5 * log(pi)
+    lkj_density =
+        2 * log_normalizer(2.5) + log_normalizer(2.0) +
+        2.5 * sum(NP._factor_logsech2, raw[1:2]) +
+        2.0 * NP._factor_logsech2(raw[3])
+    prior_density =
+        sum(logpdf.(Exponential(1), tau)) + sum(position[1:3]) +
+        lkj_density + sum(logpdf.(Normal(), standardized)) +
+        sum(logpdf.(Normal(), position[13:18]))
+    y_pointwise = logpdf.(Normal.(mu_y, sigma_y), data.y)
+    z_pointwise = logpdf.(BRM.BernoulliLogit.(eta_z), data.z)
+    @test density ≈ prior_density + sum(y_pointwise) + sum(z_pointwise) atol=3e-12
+
+    finite_difference = similar(gradient)
+    plus = copy(position)
+    minus = copy(position)
+    step = 1e-6
+    for coordinate in eachindex(position)
+        plus[coordinate] += step
+        minus[coordinate] -= step
+        finite_difference[coordinate] = (
+            NP.logdensity!(work, prepared, plus) -
+            NP.logdensity!(work, prepared, minus)) / (2step)
+        plus[coordinate] = position[coordinate]
+        minus[coordinate] = position[coordinate]
+    end
+    @test gradient ≈ finite_difference rtol=8e-5 atol=8e-6
+
+    brm_prepared = NP.prepare(brm_plan)
+    brm_work = NP.workspace(brm_prepared, Float64, DI.AutoEnzyme())
+    brm_density, brm_gradient = NP.logdensity_and_gradient!(
+        brm_work, brm_prepared, position)
+    @test brm_density == density
+    @test brm_gradient == gradient
+
+    @test factor_steady_state_allocations(
+        work, prepared, position) == (; primal=0, gradient=0)
+    pointwise_query = NP.PointwiseLogLikelihood()
+    predictive_query = NP.PosteriorPredictive()
+    pointwise_values = NP.evaluate(
+        work, prepared, position, pointwise_query)
+    @test pointwise_values.y ≈ y_pointwise atol=3e-12
+    @test pointwise_values.z ≈ z_pointwise atol=3e-12
+    @test NP.evaluate(
+        work, prepared, position, NP.NodeOutput(:sigma_y)) ≈ sigma_y
+    predictive_values = NP.simulate(
+        MersenneTwister(1061), work, prepared, position, predictive_query)
+    @test predictive_values.y isa Vector{Float64}
+    @test predictive_values.z isa Vector{Bool}
+    @test predictive_values == NP.simulate(
+        MersenneTwister(1061), work, prepared, position, predictive_query)
+    @test capability_error(() -> NP.simulate_prior(
+        MersenneTwister(1062), work, prepared)).capability ==
+          :prior_simulation
+
+    positions = permutedims(hcat(position, position .+ 0.025))
+    pointwise_draws = NP.evaluate_draws(
+        work, prepared, positions, pointwise_query)
+    predictive_draws = NP.simulate_draws(
+        MersenneTwister(1063), work, prepared, positions,
+        predictive_query)
+    @test pointwise_draws.y[1, :] ≈ y_pointwise atol=3e-12
+    @test pointwise_draws.z[1, :] ≈ z_pointwise atol=3e-12
+    @test predictive_draws.y isa Matrix{Float64}
+    @test predictive_draws.z isa Matrix{Bool}
+    @test predictive_draws == NP.simulate_draws(
+        MersenneTwister(1063), work, prepared, positions,
+        predictive_query)
+    queries = (;
+        mu_y=NP.NodeOutput(:mu_y),
+        log_sigma_y=NP.NodeOutput(:log_sigma_y),
+        sigma_y=NP.NodeOutput(:sigma_y),
+        eta_z=NP.NodeOutput(:eta_z),
+        pointwise=pointwise_query,
+        predictive=predictive_query)
+    bundle = NP.execute_draws(
+        MersenneTwister(1064), work, prepared, positions, queries)
+    @test bundle.mu_y[1, :] ≈ mu_y atol=3e-12
+    @test bundle.log_sigma_y[1, :] ≈ log_sigma_y atol=3e-12
+    @test bundle.sigma_y[1, :] ≈ sigma_y atol=3e-12
+    @test bundle.eta_z[1, :] ≈ eta_z atol=3e-12
+    @test bundle.pointwise == pointwise_draws
+    @test bundle.predictive.y isa Matrix{Float64}
+    @test bundle.predictive.z isa Matrix{Bool}
+    @test bundle == NP.execute_draws(
+        MersenneTwister(1064), work, prepared, positions, queries)
+
+    pointwise_output = NP.allocate_output(prepared, pointwise_query)
+    predictive_output = NP.allocate_output(prepared, predictive_query)
+    pointwise_draw_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, pointwise_query),
+        prepared)
+    predictive_draw_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, predictive_query),
+        prepared)
+    bundle_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, queries), prepared)
+    @test factor_multioutcome_query_allocations(
+        pointwise_output, predictive_output,
+        pointwise_draw_output, predictive_draw_output,
+        bundle_output, queries,
+        work, prepared, position, positions) == (;
+            pointwise=0, predictive=0, pointwise_draws=0,
+            predictive_draws=0, bundle=0)
+
+    float32_prepared = NP.prepare(plan; T=Float32)
+    float32_position = Float32.(position)
+    float32_work = NP.workspace(
+        float32_prepared, Float32, DI.AutoEnzyme())
+    float32_density, float32_gradient = NP.logdensity_and_gradient!(
+        float32_work, float32_prepared, float32_position)
+    @test float32_density ≈ density rtol=1f-4
+    @test float32_gradient ≈ gradient rtol=2f-4
+    float32_predictive = NP.simulate(
+        MersenneTwister(1065), float32_work, float32_prepared,
+        float32_position, predictive_query)
+    @test float32_predictive.y isa Vector{Float32}
+    @test float32_predictive.z isa Vector{Bool}
+
+    partially_conditioned = NP.compile(NP.condition(natural; y=data.y))
+    @test partially_conditioned.graph.sites.y.activity isa NP.ConditionedSite
+    @test partially_conditioned.graph.sites.z.activity isa NP.GeneratedSite
+    partial_prepared = NP.prepare(partially_conditioned)
+    partial_work = NP.workspace(partial_prepared)
+    @test NP.logdensity!(
+        partial_work, partial_prepared, position) ≈
+          prior_density + sum(y_pointwise) atol=3e-12
+
+    replay_bindings = (;
+        x=[0.5, -0.5, 1.5],
+        w=[-0.25, 0.75, 0.5],
+        group=[:b, :a, :b])
+    prediction_only = NP.rebind(
+        prepared, (;); bindings=replay_bindings)
+    @test !NP.has_response(prediction_only)
+    @test prediction_only.plan.graph.coordinates == plan.graph.coordinates
+    @test prediction_only.plan.group_indices == (;
+        b_p_group_by_group_for_mu_y=(2, 1, 2),
+        b_p_group_by_group_for_log_sigma_y=(2, 1, 2),
+        b_p_group_by_group_for_eta_z=(2, 1, 2))
+    prediction_work = NP.workspace(prediction_only)
+    prediction = NP.simulate(
+        MersenneTwister(1066), prediction_work, prediction_only,
+        position, predictive_query)
+    @test prediction.y isa Vector{Float64}
+    @test prediction.z isa Vector{Bool}
+    @test NP.logdensity!(
+        prediction_work, prediction_only, position) ≈ prior_density atol=3e-12
+    prediction_gradient_work = NP.workspace(
+        prediction_only, Float64, DI.AutoEnzyme())
+    prediction_density, prediction_gradient = NP.logdensity_and_gradient!(
+        prediction_gradient_work, prediction_only, position)
+    @test prediction_density ≈ prior_density atol=3e-12
+    @test all(isfinite, prediction_gradient)
+    @test factor_steady_state_allocations(
+        prediction_gradient_work, prediction_only, position) ==
+          (; primal=0, gradient=0)
+    prediction_problem = NP.LogDensityProblem(
+        prediction_only, DI.AutoEnzyme())
+    @test LogDensityProblems.logdensity(prediction_problem, position) ≈
+          prior_density atol=3e-12
+    @test_throws ArgumentError NP.evaluate(
+        prediction_work, prediction_only, position, pointwise_query)
+
+    replayed = NP.rebind(
+        prepared,
+        (; y=[0.1, -0.2, 0.6], z=Bool[false, true, true]);
+        bindings=replay_bindings)
+    @test NP.has_response(replayed)
+    @test replayed.plan.graph.coordinates == plan.graph.coordinates
+    @test isfinite(NP.logdensity!(
+        NP.workspace(replayed), replayed, position))
+
+    new_group_bindings = (;
+        x=[0.0, 1.0, 2.0],
+        w=[0.5, -0.5, 1.0],
+        group=[:a, :new, :new])
+    @test capability_error(() -> NP.rebind(
+        prepared, (;); bindings=new_group_bindings)).capability == :new_group
+    generated = NP.rebind(
+        prepared, (;); bindings=new_group_bindings,
+        new_groups=:resample)
+    @test generated.plan.generated_group_levels == (;
+        b_p_group=(:new,))
+    @test generated.plan.generated_group_indices == (;
+        b_p_group=1:3)
+    @test generated.plan.group_indices == (;
+        b_p_group_by_group_for_mu_y=(1, -1, -1),
+        b_p_group_by_group_for_log_sigma_y=(1, -1, -1),
+        b_p_group_by_group_for_eta_z=(1, -1, -1))
+    generated_work = NP.workspace(generated)
+    generated_predictive = NP.simulate(
+        MersenneTwister(1067), generated_work, generated,
+        position, predictive_query)
+    @test generated_predictive.y isa Vector{Float64}
+    @test generated_predictive.z isa Vector{Bool}
+    @test generated_predictive == NP.simulate(
+        MersenneTwister(1067), generated_work, generated,
+        position, predictive_query)
+    @test capability_error(() -> NP.logdensity!(
+        generated_work, generated, position)).capability ==
+          :new_group_activity
+    @test capability_error(() -> NP.rebind(
+        prepared,
+        (; y=zeros(3), z=Bool[false, true, false]);
+        bindings=new_group_bindings,
+        new_groups=:resample)).capability == :new_group_activity
+
+    @test_throws DimensionMismatch NP.rebind(
+        prepared, (; y=data.y, z=data.z);
+        bindings=(; x=data.x, w=data.w, group=data.group[1:2]))
+end
+
+
+@testset "typed native PPL shared cross-outcome grouped declarations" begin
+    data = (;
+        x=[-1.0, 0.0, 1.0, 0.5],
+        group=[:a, :b, :a, :b],
+        y=[0.2, -0.1, 0.5, 0.1],
+        z=Bool[true, false, true, false])
+    coefficient_keys = (:mu_y, :eta_z)
+    mu_group = NP.grouped_affine(
+        :b_p_group, :tau_p_group, :L_p_group, :group, (nothing,);
+        coefficient_indices=(1,), coefficient_count=2)
+    eta_group = NP.grouped_affine(
+        :b_p_group, :tau_p_group, :L_p_group, :group, (nothing,);
+        coefficient_indices=(2,), coefficient_count=2)
+    @test NP.grouped_coefficient_indices(mu_group) == (1,)
+    @test NP.grouped_coefficient_indices(eta_group) == (2,)
+    @test NP.grouped_coefficient_count(mu_group) == 2
+    declaration = NP.model(
+        inputs=(; x=NP.input(), group=NP.input()),
+        parameters=(;
+            beta_mu_y=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            beta_eta_z=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            tau_p_group=NP.parameter(
+                NP.PositiveSupport(), coefficient_keys;
+                transform=NP.Exp(), prior=NP.Exponential(1)),
+            L_p_group=NP.cholesky_correlation(coefficient_keys, 2),
+            b_p_group=NP.grouped_standard_normal(
+                :group, coefficient_keys),
+            sigma_y=NP.parameter(
+                NP.PositiveSupport(), (:sigma_y,);
+                transform=NP.Exp(), prior=NP.Exponential(2))),
+        nodes=(;
+            b_p_group_by_group_for_mu_y=mu_group,
+            mu_y=NP.affine(
+                :x, :beta_mu_y;
+                offsets=(:b_p_group_by_group_for_mu_y,)),
+            b_p_group_by_group_for_eta_z=eta_group,
+            eta_z=NP.affine(
+                :x, :beta_eta_z;
+                offsets=(:b_p_group_by_group_for_eta_z,))),
+        observations=(;
+            y=NP.broadcasted(NP.normal(:y, :mu_y, :sigma_y)),
+            z=NP.broadcasted(NP.bernoulli_logit(:z, :eta_z))),
+        site_order=(
+            :tau_p_group, :L_p_group, :b_p_group,
+            :beta_mu_y, :sigma_y, :y, :beta_eta_z, :z))
+    natural = natural_shared_grouped_mixed_outcome(data.x, data.group)
+    @test natural.declaration == declaration
+    brmi = @brm data begin
+        sigma_y ~ Exponential(2)
+        mu_y ~ 1 + x + (1 | p | group)
+        eta_z ~ 1 + x + (1 | p | group)
+        sd(:, p) ~ Exponential(1)
+        cor(:, p) ~ LKJCholesky(2, 2)
+        y ~ Normal(mu_y, sigma_y)
+        z ~ BernoulliLogit(eta_z)
+    end
+    @test ranefcoefnames(brmi, :p) == [
+        (; predictor=:mu_y, coefficient=:Intercept),
+        (; predictor=:eta_z, coefficient=:Intercept)]
+    @test SBBRMI(brmi; mod=@__MODULE__) isa SBBRMI
+    @test NP.lower(brmi) == declaration
+    plan = NP.compile(NP.condition(natural; y=data.y, z=data.z))
+    brm_plan = NP.compile(brmi)
+    @test brm_plan.declaration == declaration
+    @test brm_plan.graph.schedule == plan.graph.schedule
+    @test brm_plan.graph.coordinates == plan.graph.coordinates
+    @test brm_plan.group_indices == plan.group_indices
+    @test plan.graph.schedule == (
+        :tau_p_group, :L_p_group, :b_p_group,
+        :beta_mu_y, :sigma_y, :beta_eta_z,
+        :b_p_group_by_group_for_mu_y, :mu_y, :y,
+        :b_p_group_by_group_for_eta_z, :eta_z, :z)
+    @test plan.graph.dimension == 12
+    @test plan.group_indices == (;
+        b_p_group_by_group_for_mu_y=(1, 2, 1, 2),
+        b_p_group_by_group_for_eta_z=(1, 2, 1, 2))
+    @test plan.graph.coordinates.tau_p_group.keys == coefficient_keys
+    @test length(plan.graph.coordinates.L_p_group.keys) == 1
+    @test length(plan.graph.coordinates.b_p_group.keys) == 4
+    @test NP.grouped_coefficient_indices(
+        plan.graph.nodes.b_p_group_by_group_for_mu_y) == (1,)
+    @test NP.grouped_coefficient_indices(
+        plan.graph.nodes.b_p_group_by_group_for_eta_z) == (2,)
+    prepared = NP.prepare(plan)
+    pointwise = NP.output_signature(plan, NP.PointwiseLogLikelihood())
+    predictive = NP.output_signature(plan, NP.PosteriorPredictive())
+    @test map(signature -> NP.output_eltype(signature, prepared),
+              pointwise) == (y=Float64, z=Float64)
+    @test map(signature -> NP.output_eltype(signature, prepared),
+              predictive) == (y=Float64, z=Bool)
+
+    position = [
+        log(0.7), log(0.5), 0.2,
+        0.3, -0.4, -0.2, 0.25,
+        0.1, 0.4, log(0.8),
+        -0.3, 0.25]
+    work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
+    density, gradient = NP.logdensity_and_gradient!(
+        work, prepared, position)
+    tau = exp.(position[1:2])
+    raw_correlation = position[3]
+    rho = tanh(raw_correlation)
+    sech = inv(cosh(raw_correlation))
+    standardized = reshape(position[4:7], 2, 2)
+    effects = [
+        (tau[1] * standardized[1, group],
+         tau[2] * (rho * standardized[1, group] +
+                   sech * standardized[2, group]))
+        for group in 1:2]
+    group_indices = [1, 2, 1, 2]
+    mu_y = position[8] .+ position[9] .* data.x .+
+        first.(effects)[group_indices]
+    sigma_y = exp(position[10])
+    eta_z = position[11] .+ position[12] .* data.x .+
+        last.(effects)[group_indices]
+    lkj_constant = BRM.loggamma(2.5) - BRM.loggamma(2.0) -
+        0.5 * log(pi)
+    prior_density =
+        sum(logpdf.(Exponential(1), tau)) + sum(position[1:2]) +
+        lkj_constant + 2 * NP._factor_logsech2(raw_correlation) +
+        sum(logpdf.(Normal(), standardized)) +
+        sum(logpdf.(Normal(), position[8:9])) +
+        logpdf(Exponential(2), sigma_y) + position[10] +
+        sum(logpdf.(Normal(), position[11:12]))
+    y_pointwise = logpdf.(Normal.(mu_y, sigma_y), data.y)
+    z_pointwise = logpdf.(BRM.BernoulliLogit.(eta_z), data.z)
+    @test density ≈
+          prior_density + sum(y_pointwise) + sum(z_pointwise) atol=2e-12
+
+    finite_difference = similar(gradient)
+    plus = copy(position)
+    minus = copy(position)
+    step = 1e-6
+    for coordinate in eachindex(position)
+        plus[coordinate] += step
+        minus[coordinate] -= step
+        finite_difference[coordinate] = (
+            NP.logdensity!(work, prepared, plus) -
+            NP.logdensity!(work, prepared, minus)) / (2step)
+        plus[coordinate] = position[coordinate]
+        minus[coordinate] = position[coordinate]
+    end
+    @test gradient ≈ finite_difference rtol=4e-5 atol=4e-6
+
+    brm_prepared = NP.prepare(brm_plan)
+    brm_work = NP.workspace(brm_prepared, Float64, DI.AutoEnzyme())
+    brm_density, brm_gradient = NP.logdensity_and_gradient!(
+        brm_work, brm_prepared, position)
+    @test brm_density == density
+    @test brm_gradient == gradient
+
+    @test factor_steady_state_allocations(
+        work, prepared, position) == (; primal=0, gradient=0)
+
+    pointwise_query = NP.PointwiseLogLikelihood()
+    predictive_query = NP.PosteriorPredictive()
+    pointwise_values = NP.evaluate(
+        work, prepared, position, pointwise_query)
+    @test pointwise_values.y ≈ y_pointwise atol=2e-12
+    @test pointwise_values.z ≈ z_pointwise atol=2e-12
+    predictive_values = NP.simulate(
+        MersenneTwister(975), work, prepared, position, predictive_query)
+    @test predictive_values.y isa Vector{Float64}
+    @test predictive_values.z isa Vector{Bool}
+    @test predictive_values == NP.simulate(
+        MersenneTwister(975), work, prepared, position, predictive_query)
+
+    prior_error = capability_error(() -> NP.simulate_prior(
+        MersenneTwister(976), work, prepared))
+    @test prior_error.capability == :prior_simulation
+
+    positions = permutedims(hcat(position, position .+ 0.05))
+    pointwise_draws = NP.evaluate_draws(
+        work, prepared, positions, pointwise_query)
+    predictive_draws = NP.simulate_draws(
+        MersenneTwister(977), work, prepared, positions,
+        predictive_query)
+    @test pointwise_draws.y[1, :] == pointwise_values.y
+    @test pointwise_draws.z[1, :] == pointwise_values.z
+    @test predictive_draws.y isa Matrix{Float64}
+    @test predictive_draws.z isa Matrix{Bool}
+    @test predictive_draws == NP.simulate_draws(
+        MersenneTwister(977), work, prepared, positions,
+        predictive_query)
+
+    queries = (;
+        mu_y=NP.NodeOutput(:mu_y),
+        eta_z=NP.NodeOutput(:eta_z),
+        pointwise=pointwise_query,
+        predictive=predictive_query)
+    bundle = NP.execute_draws(
+        MersenneTwister(978), work, prepared, positions, queries)
+    @test bundle.mu_y[1, :] ≈ mu_y atol=2e-12
+    @test bundle.eta_z[1, :] ≈ eta_z atol=2e-12
+    @test bundle.pointwise == pointwise_draws
+    @test bundle.predictive.y isa Matrix{Float64}
+    @test bundle.predictive.z isa Matrix{Bool}
+    @test bundle == NP.execute_draws(
+        MersenneTwister(978), work, prepared, positions, queries)
+
+    pointwise_output = NP.allocate_output(prepared, pointwise_query)
+    predictive_output = NP.allocate_output(prepared, predictive_query)
+    pointwise_draw_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, pointwise_query),
+        prepared)
+    predictive_draw_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, predictive_query),
+        prepared)
+    bundle_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, queries), prepared)
+    @test factor_multioutcome_query_allocations(
+        pointwise_output, predictive_output,
+        pointwise_draw_output, predictive_draw_output,
+        bundle_output, queries,
+        work, prepared, position, positions) == (;
+            pointwise=0, predictive=0, pointwise_draws=0,
+            predictive_draws=0, bundle=0)
+
+    float32_prepared = NP.prepare(plan; T=Float32)
+    float32_position = Float32.(position)
+    float32_work = NP.workspace(
+        float32_prepared, Float32, DI.AutoEnzyme())
+    float32_density, float32_gradient = NP.logdensity_and_gradient!(
+        float32_work, float32_prepared, float32_position)
+    @test float32_density ≈ density rtol=6f-5
+    @test float32_gradient ≈ gradient rtol=8f-5
+    float32_predictive = NP.simulate(
+        MersenneTwister(979), float32_work, float32_prepared,
+        float32_position, predictive_query)
+    @test float32_predictive.y isa Vector{Float32}
+    @test float32_predictive.z isa Vector{Bool}
+
+    partially_conditioned = NP.compile(NP.condition(natural; y=data.y))
+    @test partially_conditioned.graph.sites.y.activity isa NP.ConditionedSite
+    @test partially_conditioned.graph.sites.z.activity isa NP.GeneratedSite
+    partial_prepared = NP.prepare(partially_conditioned)
+    partial_work = NP.workspace(partial_prepared)
+    @test NP.logdensity!(partial_work, partial_prepared, position) ≈
+          prior_density + sum(y_pointwise) atol=2e-12
+
+    replay_bindings = (;
+        x=[0.5, -0.5, 1.5], group=[:b, :a, :b])
+    prediction_only = NP.rebind(
+        prepared, (;); bindings=replay_bindings)
+    @test !NP.has_response(prediction_only)
+    @test prediction_only.plan.group_indices == (;
+        b_p_group_by_group_for_mu_y=(2, 1, 2),
+        b_p_group_by_group_for_eta_z=(2, 1, 2))
+    @test prediction_only.plan.graph.coordinates == plan.graph.coordinates
+    prediction_work = NP.workspace(prediction_only)
+    prediction = NP.simulate(
+        MersenneTwister(980), prediction_work, prediction_only,
+        position, predictive_query)
+    @test prediction.y isa Vector{Float64}
+    @test prediction.z isa Vector{Bool}
+    @test NP.logdensity!(prediction_work, prediction_only, position) ≈
+          prior_density atol=2e-12
+
+    replayed = NP.rebind(
+        prepared,
+        (; y=[0.1, -0.2, 0.6], z=Bool[false, true, true]);
+        bindings=replay_bindings)
+    @test NP.has_response(replayed)
+    @test replayed.plan.graph.coordinates == plan.graph.coordinates
+    @test isfinite(NP.logdensity!(NP.workspace(replayed), replayed, position))
+
+    new_group_bindings = (;
+        x=[0.0, 1.0, 2.0], group=[:a, :new, :new])
+    new_group_error = capability_error(() -> NP.rebind(
+        prepared, (;); bindings=new_group_bindings))
+    @test new_group_error.capability == :new_group
+    generated = NP.rebind(
+        prepared, (;); bindings=new_group_bindings,
+        new_groups=:resample)
+    @test generated.plan.generated_group_levels == (;
+        b_p_group=(:new,))
+    @test generated.plan.generated_group_indices == (;
+        b_p_group=1:2)
+    @test generated.plan.group_indices == (;
+        b_p_group_by_group_for_mu_y=(1, -1, -1),
+        b_p_group_by_group_for_eta_z=(1, -1, -1))
+    generated_work = NP.workspace(generated)
+    generated_predictive = NP.simulate(
+        MersenneTwister(981), generated_work, generated,
+        position, predictive_query)
+    @test generated_predictive.y isa Vector{Float64}
+    @test generated_predictive.z isa Vector{Bool}
+    @test generated_predictive == NP.simulate(
+        MersenneTwister(981), generated_work, generated,
+        position, predictive_query)
+    generated_density_error = capability_error(() -> NP.logdensity!(
+        generated_work, generated, position))
+    @test generated_density_error.capability == :new_group_activity
+    conditioned_new_group_error = capability_error(() -> NP.rebind(
+        prepared, (; y=zeros(3), z=Bool[false, true, false]);
+        bindings=new_group_bindings, new_groups=:resample))
+    @test conditioned_new_group_error.capability == :new_group_activity
+
+    @test_throws DimensionMismatch NP.rebind(
+        prepared, (; y=data.y, z=data.z);
+        bindings=(; x=data.x, group=data.group[1:2]))
+
+    @test_throws ArgumentError NP.grouped_affine(
+        :b, :tau, :L, :group, (nothing,))
+    @test_throws ArgumentError NP.grouped_affine(
+        :b, :tau, :L, :group, (nothing, :x);
+        coefficient_indices=(1, 1), coefficient_count=2)
+    @test_throws ArgumentError NP.grouped_affine(
+        :b, :tau, :L, :group, (nothing,);
+        coefficient_indices=(3,), coefficient_count=2)
+end
+
+
+@testset "typed native PPL shared cross-outcome grouped slopes" begin
+    data = (;
+        x=[-1.0, 0.0, 1.0, 0.5],
+        group=[:a, :b, :a, :b],
+        y=[0.2, -0.1, 0.5, 0.1],
+        z=Bool[true, false, true, false])
+    coefficient_keys = (:mu_y, :mu_y_x, :eta_z, :eta_z_x)
+    mu_group = NP.grouped_affine(
+        :b_p_group, :tau_p_group, :L_p_group, :group,
+        (nothing, :x);
+        coefficient_indices=(1, 2), coefficient_count=4)
+    eta_group = NP.grouped_affine(
+        :b_p_group, :tau_p_group, :L_p_group, :group,
+        (nothing, :x);
+        coefficient_indices=(3, 4), coefficient_count=4)
+    @test NP.grouped_coefficient_indices(mu_group) == (1, 2)
+    @test NP.grouped_coefficient_indices(eta_group) == (3, 4)
+    @test NP.grouped_coefficient_count(mu_group) == 4
+    declaration = NP.model(
+        inputs=(; x=NP.input(), group=NP.input()),
+        parameters=(;
+            beta_mu_y=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            beta_eta_z=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            tau_p_group=NP.parameter(
+                NP.PositiveSupport(), coefficient_keys;
+                transform=NP.Exp(), prior=NP.Exponential(1)),
+            L_p_group=NP.cholesky_correlation(coefficient_keys, 2),
+            b_p_group=NP.grouped_standard_normal(
+                :group, coefficient_keys),
+            sigma_y=NP.parameter(
+                NP.PositiveSupport(), (:sigma_y,);
+                transform=NP.Exp(), prior=NP.Exponential(2))),
+        nodes=(;
+            b_p_group_by_group_for_mu_y=mu_group,
+            mu_y=NP.affine(
+                :x, :beta_mu_y;
+                offsets=(:b_p_group_by_group_for_mu_y,)),
+            b_p_group_by_group_for_eta_z=eta_group,
+            eta_z=NP.affine(
+                :x, :beta_eta_z;
+                offsets=(:b_p_group_by_group_for_eta_z,))),
+        observations=(;
+            y=NP.broadcasted(NP.normal(:y, :mu_y, :sigma_y)),
+            z=NP.broadcasted(NP.bernoulli_logit(:z, :eta_z))),
+        site_order=(
+            :tau_p_group, :L_p_group, :b_p_group,
+            :beta_mu_y, :sigma_y, :y, :beta_eta_z, :z))
+    natural = natural_shared_grouped_slope_mixed_outcome(
+        data.x, data.group)
+    @test natural.declaration == declaration
+    brmi = @brm data begin
+        sigma_y ~ Exponential(2)
+        mu_y ~ 1 + x + (1 + x | p | group)
+        eta_z ~ 1 + x + (1 + x | p | group)
+        sd(:, p) ~ Exponential(1)
+        cor(:, p) ~ LKJCholesky(4, 2)
+        y ~ Normal(mu_y, sigma_y)
+        z ~ BernoulliLogit(eta_z)
+    end
+    @test ranefcoefnames(brmi, :p) == [
+        (; predictor=:mu_y, coefficient=:Intercept),
+        (; predictor=:mu_y, coefficient=:x),
+        (; predictor=:eta_z, coefficient=:Intercept),
+        (; predictor=:eta_z, coefficient=:x)]
+    @test SBBRMI(brmi; mod=@__MODULE__) isa SBBRMI
+    @test NP.lower(brmi) == declaration
+    plan = NP.compile(NP.condition(natural; y=data.y, z=data.z))
+    brm_plan = NP.compile(brmi)
+    @test brm_plan.declaration == declaration
+    @test brm_plan.graph.schedule == plan.graph.schedule
+    @test brm_plan.graph.coordinates == plan.graph.coordinates
+    @test brm_plan.group_indices == plan.group_indices
+    @test plan.graph.schedule == (
+        :tau_p_group, :L_p_group, :b_p_group,
+        :beta_mu_y, :sigma_y, :beta_eta_z,
+        :b_p_group_by_group_for_mu_y, :mu_y, :y,
+        :b_p_group_by_group_for_eta_z, :eta_z, :z)
+    @test plan.graph.dimension == 23
+    @test plan.group_indices == (;
+        b_p_group_by_group_for_mu_y=(1, 2, 1, 2),
+        b_p_group_by_group_for_eta_z=(1, 2, 1, 2))
+    @test plan.graph.coordinates.tau_p_group.keys == coefficient_keys
+    @test plan.graph.coordinates.L_p_group.keys == (
+        NP.CorrelationCoordinateKey(:L_p_group, 2, 1),
+        NP.CorrelationCoordinateKey(:L_p_group, 3, 1),
+        NP.CorrelationCoordinateKey(:L_p_group, 4, 1),
+        NP.CorrelationCoordinateKey(:L_p_group, 3, 2),
+        NP.CorrelationCoordinateKey(:L_p_group, 4, 2),
+        NP.CorrelationCoordinateKey(:L_p_group, 4, 3))
+    @test length(plan.graph.coordinates.b_p_group.keys) == 8
+    @test NP.grouped_coefficient_indices(
+        plan.graph.nodes.b_p_group_by_group_for_mu_y) == (1, 2)
+    @test NP.grouped_coefficient_indices(
+        plan.graph.nodes.b_p_group_by_group_for_eta_z) == (3, 4)
+
+    prepared = NP.prepare(plan)
+    position = [
+        log(0.7), log(0.5), log(0.6), log(0.4),
+        0.2, -0.15, 0.1, 0.25, -0.2, 0.3,
+        0.3, -0.4, 0.2, -0.1,
+        -0.2, 0.25, -0.3, 0.15,
+        0.1, 0.4, log(0.8), -0.3, 0.25]
+    work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
+    density, gradient = NP.logdensity_and_gradient!(
+        work, prepared, position)
+    tau = exp.(position[1:4])
+    raw = position[5:10]
+    partial = tanh.(raw)
+    sech = inv.(cosh.(raw))
+    cholesky = [
+        1.0 0.0 0.0 0.0
+        partial[1] sech[1] 0.0 0.0
+        partial[2] partial[4]*sech[2] sech[4]*sech[2] 0.0
+        partial[3] partial[5]*sech[3] partial[6]*sech[5]*sech[3] sech[6]*sech[5]*sech[3]]
+    standardized = reshape(position[11:18], 4, 2)
+    effects = [tau .* (cholesky * standardized[:, group])
+               for group in 1:2]
+    group_indices = [1, 2, 1, 2]
+    mu_y = [
+        position[19] + position[20] * data.x[row] +
+        effects[group_indices[row]][1] +
+        effects[group_indices[row]][2] * data.x[row]
+        for row in eachindex(data.x)]
+    sigma_y = exp(position[21])
+    eta_z = [
+        position[22] + position[23] * data.x[row] +
+        effects[group_indices[row]][3] +
+        effects[group_indices[row]][4] * data.x[row]
+        for row in eachindex(data.x)]
+    log_normalizer(alpha) =
+        BRM.loggamma(alpha + 0.5) - BRM.loggamma(alpha) - 0.5 * log(pi)
+    lkj_density =
+        3 * log_normalizer(3.0) +
+        2 * log_normalizer(2.5) +
+        log_normalizer(2.0) +
+        3.0 * sum(NP._factor_logsech2, raw[1:3]) +
+        2.5 * sum(NP._factor_logsech2, raw[4:5]) +
+        2.0 * NP._factor_logsech2(raw[6])
+    prior_density =
+        sum(logpdf.(Exponential(1), tau)) + sum(position[1:4]) +
+        lkj_density + sum(logpdf.(Normal(), standardized)) +
+        sum(logpdf.(Normal(), position[19:20])) +
+        logpdf(Exponential(2), sigma_y) + position[21] +
+        sum(logpdf.(Normal(), position[22:23]))
+    y_pointwise = logpdf.(Normal.(mu_y, sigma_y), data.y)
+    z_pointwise = logpdf.(BRM.BernoulliLogit.(eta_z), data.z)
+    @test density ≈
+          prior_density + sum(y_pointwise) + sum(z_pointwise) atol=3e-12
+
+    finite_difference = similar(gradient)
+    plus = copy(position)
+    minus = copy(position)
+    step = 1e-6
+    for coordinate in eachindex(position)
+        plus[coordinate] += step
+        minus[coordinate] -= step
+        finite_difference[coordinate] = (
+            NP.logdensity!(work, prepared, plus) -
+            NP.logdensity!(work, prepared, minus)) / (2step)
+        plus[coordinate] = position[coordinate]
+        minus[coordinate] = position[coordinate]
+    end
+    @test gradient ≈ finite_difference rtol=6e-5 atol=6e-6
+
+    brm_prepared = NP.prepare(brm_plan)
+    brm_work = NP.workspace(brm_prepared, Float64, DI.AutoEnzyme())
+    brm_density, brm_gradient = NP.logdensity_and_gradient!(
+        brm_work, brm_prepared, position)
+    @test brm_density == density
+    @test brm_gradient == gradient
+
+    @test factor_steady_state_allocations(
+        work, prepared, position) == (; primal=0, gradient=0)
+
+    pointwise_query = NP.PointwiseLogLikelihood()
+    predictive_query = NP.PosteriorPredictive()
+    pointwise_values = NP.evaluate(
+        work, prepared, position, pointwise_query)
+    @test pointwise_values.y ≈ y_pointwise atol=3e-12
+    @test pointwise_values.z ≈ z_pointwise atol=3e-12
+    predictive_values = NP.simulate(
+        MersenneTwister(982), work, prepared, position, predictive_query)
+    @test predictive_values.y isa Vector{Float64}
+    @test predictive_values.z isa Vector{Bool}
+    @test predictive_values == NP.simulate(
+        MersenneTwister(982), work, prepared, position, predictive_query)
+
+    prior_error = capability_error(() -> NP.simulate_prior(
+        MersenneTwister(983), work, prepared))
+    @test prior_error.capability == :prior_simulation
+
+    positions = permutedims(hcat(position, position .+ 0.05))
+    pointwise_draws = NP.evaluate_draws(
+        work, prepared, positions, pointwise_query)
+    predictive_draws = NP.simulate_draws(
+        MersenneTwister(984), work, prepared, positions,
+        predictive_query)
+    @test pointwise_draws.y[1, :] == pointwise_values.y
+    @test pointwise_draws.z[1, :] == pointwise_values.z
+    @test predictive_draws.y isa Matrix{Float64}
+    @test predictive_draws.z isa Matrix{Bool}
+    @test predictive_draws == NP.simulate_draws(
+        MersenneTwister(984), work, prepared, positions,
+        predictive_query)
+
+    queries = (;
+        mu_y=NP.NodeOutput(:mu_y),
+        eta_z=NP.NodeOutput(:eta_z),
+        pointwise=pointwise_query,
+        predictive=predictive_query)
+    bundle = NP.execute_draws(
+        MersenneTwister(985), work, prepared, positions, queries)
+    @test bundle.mu_y[1, :] ≈ mu_y atol=3e-12
+    @test bundle.eta_z[1, :] ≈ eta_z atol=3e-12
+    @test bundle.pointwise == pointwise_draws
+    @test bundle.predictive.y isa Matrix{Float64}
+    @test bundle.predictive.z isa Matrix{Bool}
+    @test bundle == NP.execute_draws(
+        MersenneTwister(985), work, prepared, positions, queries)
+
+    pointwise_output = NP.allocate_output(prepared, pointwise_query)
+    predictive_output = NP.allocate_output(prepared, predictive_query)
+    pointwise_draw_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, pointwise_query),
+        prepared)
+    predictive_draw_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, predictive_query),
+        prepared)
+    bundle_output = NP.allocate_output(
+        NP.batch_output_signature(prepared, positions, queries), prepared)
+    @test factor_multioutcome_query_allocations(
+        pointwise_output, predictive_output,
+        pointwise_draw_output, predictive_draw_output,
+        bundle_output, queries,
+        work, prepared, position, positions) == (;
+            pointwise=0, predictive=0, pointwise_draws=0,
+            predictive_draws=0, bundle=0)
+
+    float32_prepared = NP.prepare(plan; T=Float32)
+    float32_position = Float32.(position)
+    float32_work = NP.workspace(
+        float32_prepared, Float32, DI.AutoEnzyme())
+    float32_density, float32_gradient = NP.logdensity_and_gradient!(
+        float32_work, float32_prepared, float32_position)
+    @test float32_density ≈ density rtol=1f-4
+    @test float32_gradient ≈ gradient rtol=2f-4 atol=2f-5
+    float32_predictive = NP.simulate(
+        MersenneTwister(986), float32_work, float32_prepared,
+        float32_position, predictive_query)
+    @test float32_predictive.y isa Vector{Float32}
+    @test float32_predictive.z isa Vector{Bool}
+
+    partially_conditioned = NP.compile(NP.condition(natural; y=data.y))
+    @test partially_conditioned.graph.sites.y.activity isa NP.ConditionedSite
+    @test partially_conditioned.graph.sites.z.activity isa NP.GeneratedSite
+    partial_prepared = NP.prepare(partially_conditioned)
+    partial_work = NP.workspace(partial_prepared)
+    @test NP.logdensity!(partial_work, partial_prepared, position) ≈
+          prior_density + sum(y_pointwise) atol=3e-12
+
+    replay_bindings = (;
+        x=[0.5, -0.5, 1.5], group=[:b, :a, :b])
+    prediction_only = NP.rebind(
+        prepared, (;); bindings=replay_bindings)
+    @test !NP.has_response(prediction_only)
+    @test prediction_only.plan.group_indices == (;
+        b_p_group_by_group_for_mu_y=(2, 1, 2),
+        b_p_group_by_group_for_eta_z=(2, 1, 2))
+    @test prediction_only.plan.graph.coordinates == plan.graph.coordinates
+    prediction_work = NP.workspace(prediction_only)
+    prediction = NP.simulate(
+        MersenneTwister(987), prediction_work, prediction_only,
+        position, predictive_query)
+    @test prediction.y isa Vector{Float64}
+    @test prediction.z isa Vector{Bool}
+    @test NP.logdensity!(prediction_work, prediction_only, position) ≈
+          prior_density atol=3e-12
+
+    replayed = NP.rebind(
+        prepared,
+        (; y=[0.1, -0.2, 0.6], z=Bool[false, true, true]);
+        bindings=replay_bindings)
+    @test NP.has_response(replayed)
+    @test replayed.plan.graph.coordinates == plan.graph.coordinates
+    @test isfinite(NP.logdensity!(NP.workspace(replayed), replayed, position))
+
+    new_group_bindings = (;
+        x=[0.0, 1.0, 2.0], group=[:a, :new, :new])
+    new_group_error = capability_error(() -> NP.rebind(
+        prepared, (;); bindings=new_group_bindings))
+    @test new_group_error.capability == :new_group
+    generated = NP.rebind(
+        prepared, (;); bindings=new_group_bindings,
+        new_groups=:resample)
+    @test generated.plan.generated_group_levels == (;
+        b_p_group=(:new,))
+    @test generated.plan.generated_group_indices == (;
+        b_p_group=1:4)
+    @test generated.plan.group_indices == (;
+        b_p_group_by_group_for_mu_y=(1, -1, -1),
+        b_p_group_by_group_for_eta_z=(1, -1, -1))
+    generated_work = NP.workspace(generated)
+    generated_predictive = NP.simulate(
+        MersenneTwister(988), generated_work, generated,
+        position, predictive_query)
+    @test generated_predictive.y isa Vector{Float64}
+    @test generated_predictive.z isa Vector{Bool}
+    @test generated_predictive == NP.simulate(
+        MersenneTwister(988), generated_work, generated,
+        position, predictive_query)
+    generated_density_error = capability_error(() -> NP.logdensity!(
+        generated_work, generated, position))
+    @test generated_density_error.capability == :new_group_activity
+    conditioned_new_group_error = capability_error(() -> NP.rebind(
+        prepared, (; y=zeros(3), z=Bool[false, true, false]);
+        bindings=new_group_bindings, new_groups=:resample))
+    @test conditioned_new_group_error.capability == :new_group_activity
+
+    @test_throws DimensionMismatch NP.rebind(
+        prepared, (; y=data.y, z=data.z);
+        bindings=(; x=data.x, group=data.group[1:2]))
+
+    wrong_correlation = @brm data begin
+        sigma_y ~ Exponential(2)
+        mu_y ~ 1 + x + (1 + x | p | group)
+        eta_z ~ 1 + x + (1 + x | p | group)
+        sd(:, p) ~ Exponential(1)
+        cor(:, p) ~ LKJCholesky(3, 2)
+        y ~ Normal(mu_y, sigma_y)
+        z ~ BernoulliLogit(eta_z)
+    end
+    correlation_error = capability_error(() -> NP.lower(wrong_correlation))
+    @test correlation_error.capability == :group_prior
+    @test occursin("dimension", correlation_error.detail)
+end
+
+
+@testset "typed native PPL categorical-logit declarations" begin
+    observation = NP.categorical_logit(:y, :eta2, :eta3)
+    @test NP.observation_response(observation) === :y
+    @test NP.observation_dependencies(observation) == (:eta2, :eta3)
+    @test_throws ArgumentError NP.categorical_logit(:y)
+
+    declaration = NP.model(
+        inputs=(; x=NP.input(), z=NP.input()),
+        parameters=(;
+            beta_eta2=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            beta_eta3=NP.parameter(
+                NP.RealSupport(), (:Intercept, :z);
+                transform=NP.Identity(), prior=NP.StandardNormal())),
+        nodes=(;
+            eta2=NP.affine(:x, :beta_eta2),
+            eta3=NP.affine(:z, :beta_eta3)),
+        observations=(;
+            y=NP.broadcasted(NP.categorical_logit(:y, :eta2, :eta3))))
+    graph = NP.factor_graph(
+        declaration;
+        bindings=(; x=[-1.0, 0.5], z=[0.25, -0.75]),
+        conditions=(; y=[1, 3]))
+    factor = graph.sites.y.factor
+    @test factor isa NP.CategoricalLogitSiteFactor
+    @test factor.logits ==
+          (NP.NodeValue{:eta2}(), NP.NodeValue{:eta3}())
+    @test NP.site_factor_dependencies(factor) == (:eta2, :eta3)
+    @test graph.schedule == (:beta_eta2, :beta_eta3, :eta2, :eta3, :y)
+
+    bindings = (; x=[-1.0, 0.5, 1.0], z=[0.25, -0.75, 0.5])
+    response = [1, 2, 3]
+    natural = natural_categorical_logit(bindings.x, bindings.z)
+    @test natural.declaration == declaration
+    brm_data = merge(bindings, (; y=response))
+    brmi = @brm brm_data begin
+        eta2 ~ 1 + x
+        eta3 ~ 1 + z
+        y ~ CategoricalLogit(eta2, eta3)
+    end
+    @test SBBRMI(brmi; mod=@__MODULE__) isa SBBRMI
+    @test NP.lower(brmi) == declaration
+    labeled_data = merge(bindings, (; y=["beta", "alpha", "gamma"]))
+    labeled_brmi = @brm labeled_data begin
+        eta2 ~ 1 + x
+        eta3 ~ 1 + z
+        y ~ CategoricalLogit(eta2, eta3)
+    end
+    @test SBBRMI(labeled_brmi; mod=@__MODULE__) isa SBBRMI
+    @test NP.lower(labeled_brmi) == declaration
+    prepared = NP.prepare(NP.bind(
+        declaration, bindings; conditions=(; y=response)))
+    natural_prepared = NP.prepare(NP.bind(
+        natural.declaration, natural.bindings; conditions=(; y=response)))
+    brm_prepared = NP.prepare(NP.compile(brmi))
+    labeled_prepared = NP.prepare(NP.compile(labeled_brmi))
+    @test labeled_prepared.plan.outcome_levels.y ==
+          ("alpha", "beta", "gamma")
+    @test labeled_prepared.conditions.y == [2.0, 1.0, 3.0]
+    @test NP.output_eltype(
+        NP.output_signature(prepared, NP.PosteriorPredictive()), prepared) ===
+          Int
+    position = [0.2, 0.3, -0.4, 0.1]
+    work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
+    density, gradient = NP.logdensity_and_gradient!(
+        work, prepared, position)
+    eta2 = position[1] .+ position[2] .* bindings.x
+    eta3 = position[3] .+ position[4] .* bindings.z
+    reference_pointwise = map(eta2, eta3, response) do class2, class3, value
+        logpdf(BRM.CategoricalLogit(class2, class3), value)
+    end
+    reference_density = sum(logpdf.(Normal(), position)) +
+        sum(reference_pointwise)
+    @test density ≈ reference_density atol=2e-12
+    @test NP.logdensity!(
+        NP.workspace(natural_prepared), natural_prepared, position) ≈
+          density atol=2e-12
+    @test NP.logdensity!(
+        NP.workspace(brm_prepared), brm_prepared, position) ≈
+          density atol=2e-12
+    @test NP.evaluate(
+        work, prepared, position, NP.PointwiseLogLikelihood()) ≈
+          reference_pointwise atol=2e-12
+
+    finite_difference = similar(gradient)
+    plus = copy(position)
+    minus = copy(position)
+    step = 1e-6
+    for coordinate in eachindex(position)
+        plus[coordinate] += step
+        minus[coordinate] -= step
+        finite_difference[coordinate] = (
+            NP.logdensity!(work, prepared, plus) -
+            NP.logdensity!(work, prepared, minus)) / (2step)
+        plus[coordinate] = position[coordinate]
+        minus[coordinate] = position[coordinate]
+    end
+    @test gradient ≈ finite_difference rtol=3e-5 atol=3e-6
+
+    predictive = NP.simulate(
+        MersenneTwister(817), work, prepared, position)
+    @test predictive == NP.simulate(
+        MersenneTwister(817), NP.workspace(prepared), prepared, position)
+    @test all(value -> 1 <= value <= 3, predictive)
+    predictive_buffer = zeros(Int, length(response))
+    @test factor_predictive_allocations(
+        MersenneTwister(819), predictive_buffer,
+        work, prepared, position) == 0
+
+    rebound_bindings = (; x=[-0.75, 0.75], z=[1.0, -1.0])
+    rebound = NP.rebind(
+        labeled_prepared, (; y=["gamma", "alpha"]);
+        bindings=rebound_bindings)
+    @test rebound.plan.outcome_levels == labeled_prepared.plan.outcome_levels
+    @test rebound.conditions.y == [3.0, 1.0]
+    rebound_density, rebound_gradient = NP.logdensity_and_gradient!(
+        NP.workspace(rebound, Float64, DI.AutoEnzyme()), rebound, position)
+    @test isfinite(rebound_density)
+    @test all(isfinite, rebound_gradient)
+    @test_throws ArgumentError NP.rebind(
+        labeled_prepared, (; y=["gamma", "delta"]);
+        bindings=rebound_bindings)
+    refitted = NP.rebind(
+        labeled_prepared, (; y=["upsilon", "phi", "chi"]);
+        bindings=bindings, freeze_constants=false)
+    @test refitted.plan.outcome_levels.y == ("chi", "phi", "upsilon")
+    prediction_only = NP.rebind(
+        labeled_prepared, (;); bindings=rebound_bindings)
+    @test prediction_only.plan.outcome_levels ==
+          labeled_prepared.plan.outcome_levels
+    @test length(NP.simulate(
+        MersenneTwister(818), NP.workspace(prediction_only),
+        prediction_only, position)) == 2
+
+    eta2_output = zeros(3)
+    eta3_output = zeros(3)
+    positions = [position'; (position .+ [0.1, -0.05, 0.02, 0.03])']
+    eta2_draws = zeros(2, 3)
+    eta3_draws = zeros(2, 3)
+    bundle_outputs = (; eta2=zeros(2, 3), eta3=zeros(2, 3))
+    bundle_queries = (;
+        eta2=NP.NodeOutput(:eta2), eta3=NP.NodeOutput(:eta3))
+    @test factor_steady_state_allocations(
+        work, prepared, position) == (; primal=0, gradient=0)
+    @test factor_node_query_allocations(
+        work, prepared, position,
+        eta2_output, eta3_output, positions,
+        eta2_draws, eta3_draws,
+        bundle_outputs, bundle_queries,
+        NP.NodeOutput(:eta2), NP.NodeOutput(:eta3)) ==
+          (; scalar_mu=0, scalar_sigma=0,
+           batch_mu=0, batch_sigma=0, bundle=0)
+    @test eta2_output ≈ eta2
+    @test eta3_output ≈ eta3
+    @test capability_error(() -> NP.output_signature(
+        prepared, NP.LinearPredictor())).capability == :query
+
+    extreme_positions = (
+        [1000.0, 0.0, -1000.0, 0.0],
+        [-1000.0, 0.0, 1000.0, 0.0],
+    )
+    extreme_response = (fill(2, 3), fill(3, 3))
+    for (extreme_position, values) in zip(
+            extreme_positions, extreme_response)
+        extreme = NP.prepare(NP.bind(
+            declaration, bindings; conditions=(; y=values)))
+        extreme_density, extreme_gradient = NP.logdensity_and_gradient!(
+            NP.workspace(extreme, Float64, DI.AutoEnzyme()),
+            extreme, extreme_position)
+        @test isfinite(extreme_density)
+        @test all(isfinite, extreme_gradient)
+    end
+
+    @test_throws ArgumentError NP.prepare(NP.bind(
+        declaration, bindings; conditions=(; y=[0, 2, 3])))
+    @test_throws ArgumentError NP.prepare(NP.bind(
+        declaration, bindings; conditions=(; y=[1, 2, 4])))
+    @test_throws ArgumentError NP.prepare(NP.bind(
+        declaration, bindings; conditions=(; y=[1, 2.5, 3])))
+    insufficient_levels = merge(bindings, (; y=["alpha", "beta", "alpha"]))
+    insufficient_brmi = @brm insufficient_levels begin
+        eta2 ~ 1 + x
+        eta3 ~ 1 + z
+        y ~ CategoricalLogit(eta2, eta3)
+    end
+    @test_throws ArgumentError NP.compile(insufficient_brmi)
+
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function duplicate_categorical_logits(x)
+            beta_eta2[(:Intercept, :x)] ~ StandardNormal()
+            eta2 = dot(beta_eta2, (1, x))
+            @. y ~ CategoricalLogit(eta2, eta2)
+        end)))
+    @test occursin("predictors must be distinct", err.msg)
+
+    lowered = NP.lower(NP.compose(NP.component(:classes, declaration))).
+        declaration
+    response_name = NP.qualified_name(:classes, :y)
+    observation = getproperty(lowered.observations, response_name)
+    @test NP.observation_response(observation) === response_name
+    @test NP.observation_dependencies(observation) ==
+          (NP.qualified_name(:classes, :eta2),
+           NP.qualified_name(:classes, :eta3))
+end
+
+
+@testset "typed native PPL binomial-logit declarations" begin
+    observation = NP.binomial_logit(:y, :trials, :logit_p)
+    @test NP.observation_response(observation) === :y
+    @test NP.observation_dependencies(observation) == (:trials, :logit_p)
+
+    declaration = NP.model(
+        inputs=(; x=NP.input(), trials=NP.input()),
+        parameters=(;
+            beta_logit_p=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal())),
+        nodes=(; logit_p=NP.affine(:x, :beta_logit_p)),
+        observations=(;
+            y=NP.broadcasted(NP.binomial_logit(
+                :y, :trials, :logit_p))))
+    graph = NP.factor_graph(
+        declaration;
+        bindings=(; x=[-1.0, 0.5], trials=[5, 10]),
+        conditions=(; y=[1, 7]))
+    factor = graph.sites.y.factor
+    @test factor isa NP.BinomialLogitSiteFactor
+    @test factor.trials isa NP.InputValue{:trials}
+    @test factor.logit isa NP.NodeValue{:logit_p}
+    @test NP.site_factor_dependencies(factor) == (:logit_p,)
+    @test graph.schedule == (:beta_logit_p, :logit_p, :y)
+
+    bindings = (; x=[-1.0, 0.5, 1.0], trials=[5, 10, 8])
+    response = [1, 7, 3]
+    natural = natural_binomial_logit(bindings.x, bindings.trials)
+    @test natural.declaration == declaration
+    brm_data = merge(bindings, (; y=response))
+    brmi = @brm brm_data begin
+        logit_p ~ 1 + x
+        y ~ BinomialLogit(trials, logit_p)
+    end
+    @test SBBRMI(brmi; mod=@__MODULE__) isa SBBRMI
+    @test NP.lower(brmi) == declaration
+    prepared = NP.prepare(NP.bind(
+        declaration, bindings; conditions=(; y=response)))
+    natural_prepared = NP.prepare(NP.bind(
+        natural.declaration, natural.bindings; conditions=(; y=response)))
+    brm_prepared = NP.prepare(NP.compile(brmi))
+    @test NP.output_eltype(
+        NP.output_signature(prepared, NP.PosteriorPredictive()), prepared) ===
+          Int
+    position = [0.2, 0.3]
+    work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
+    density, gradient = NP.logdensity_and_gradient!(
+        work, prepared, position)
+    logit_p = position[1] .+ position[2] .* bindings.x
+    reference_pointwise = map(
+        bindings.trials, logit_p, response
+    ) do trials, logit, count
+        logpdf(BRM.BinomialLogit(trials, logit), count)
+    end
+    reference_density = sum(logpdf.(Normal(), position)) +
+        sum(reference_pointwise)
+    @test density ≈ reference_density atol=2e-12
+    @test NP.logdensity!(
+        NP.workspace(natural_prepared), natural_prepared, position) ≈
+          density atol=2e-12
+    @test NP.logdensity!(
+        NP.workspace(brm_prepared), brm_prepared, position) ≈
+          density atol=2e-12
+    @test NP.evaluate(
+        work, prepared, position, NP.PointwiseLogLikelihood()) ≈
+          reference_pointwise atol=2e-12
+    @test NP.evaluate(
+        work, prepared, position, NP.LinearPredictor()) ≈ logit_p
+
+    finite_difference = similar(gradient)
+    plus = copy(position)
+    minus = copy(position)
+    step = 1e-6
+    for coordinate in eachindex(position)
+        plus[coordinate] += step
+        minus[coordinate] -= step
+        finite_difference[coordinate] = (
+            NP.logdensity!(work, prepared, plus) -
+            NP.logdensity!(work, prepared, minus)) / (2step)
+        plus[coordinate] = position[coordinate]
+        minus[coordinate] = position[coordinate]
+    end
+    @test gradient ≈ finite_difference rtol=3e-5 atol=3e-6
+
+    predictive = NP.simulate(
+        MersenneTwister(815), work, prepared, position)
+    @test predictive == NP.simulate(
+        MersenneTwister(815), NP.workspace(prepared), prepared, position)
+    @test all(
+        index -> 0 <= predictive[index] <= bindings.trials[index],
+        eachindex(predictive))
+
+    rebound_bindings = (; x=[-0.75, 0.75], trials=[4, 12])
+    rebound_response = [1, 9]
+    rebound = NP.rebind(
+        prepared, (; y=rebound_response); bindings=rebound_bindings)
+    rebound_work = NP.workspace(rebound, Float64, DI.AutoEnzyme())
+    rebound_density, rebound_gradient = NP.logdensity_and_gradient!(
+        rebound_work, rebound, position)
+    @test isfinite(rebound_density)
+    @test all(isfinite, rebound_gradient)
+    prediction_only = NP.rebind(
+        prepared, (;); bindings=rebound_bindings)
+    prediction = NP.simulate(
+        MersenneTwister(816), NP.workspace(prediction_only),
+        prediction_only, position)
+    @test length(prediction) == 2
+    @test all(
+        index -> 0 <= prediction[index] <= rebound_bindings.trials[index],
+        eachindex(prediction))
+
+    draw_positions = [position'; (position .+ [0.1, -0.05])']
+    linear = zeros(2, 3)
+    pointwise = zeros(2, 3)
+    predictive_draws = zeros(Int, 2, 3)
+    bundle = (;
+        linear=zeros(2, 3),
+        pointwise=zeros(2, 3),
+        predictive=zeros(Int, 2, 3))
+    @test factor_steady_state_allocations(
+        work, prepared, position) == (; primal=0, gradient=0)
+    @test factor_batch_allocations(
+        work, prepared, draw_positions,
+        linear, pointwise, predictive_draws, bundle) ==
+          (; linear=0, pointwise=0, predictive=0, bundle=0)
+
+    extreme_positions = ([1000.0, 0.0], [-1000.0, 0.0])
+    extreme_response = (bindings.trials, zeros(Int, length(response)))
+    for (extreme_position, values) in zip(
+            extreme_positions, extreme_response)
+        extreme = NP.prepare(NP.bind(
+            declaration, bindings; conditions=(; y=values)))
+        extreme_work = NP.workspace(extreme, Float64, DI.AutoEnzyme())
+        extreme_density, extreme_gradient = NP.logdensity_and_gradient!(
+            extreme_work, extreme, extreme_position)
+        @test isfinite(extreme_density)
+        @test all(isfinite, extreme_gradient)
+    end
+
+    @test_throws ArgumentError NP.prepare(NP.bind(
+        declaration, bindings; conditions=(; y=[0, -1, 2])))
+    @test_throws ArgumentError NP.prepare(NP.bind(
+        declaration, bindings; conditions=(; y=[0, 11, 2])))
+    @test_throws ArgumentError NP.prepare(NP.bind(
+        declaration, merge(bindings, (; trials=[5, -1, 8]));
+        conditions=(; y=response)))
+    @test_throws ArgumentError NP.prepare(NP.bind(
+        declaration, merge(bindings, (; trials=[5, 10.5, 8]));
+        conditions=(; y=response)))
+    lossy = NP.bind(
+        declaration,
+        merge(bindings, (; trials=[16_777_217, 10, 8]));
+        conditions=(; y=response))
+    @test_throws ArgumentError NP.prepare(lossy; T=Float32)
+
+    invalid_trials = NP.model(
+        inputs=(; x=NP.input()),
+        parameters=declaration.parameters,
+        nodes=(;
+            logit_p=declaration.nodes.logit_p,
+            trials=NP.affine(:x, :beta_logit_p)),
+        observations=declaration.observations)
+    @test capability_error(() -> NP.bind(
+        invalid_trials, (; x=bindings.x); conditions=(; y=response))).
+          capability == :factor_support
+
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function bad_binomial_logit_trials(x, trials)
+            beta_logit_p[(:Intercept, :x)] ~ StandardNormal()
+            logit_p = dot(beta_logit_p, (1, x))
+            @. y ~ BinomialLogit(trials + 1, logit_p)
+        end)))
+    @test occursin("accepts named distribution parameters", err.msg)
+
+    lowered = NP.lower(NP.compose(NP.component(:proportions, declaration))).
+        declaration
+    response_name = NP.qualified_name(:proportions, :y)
+    observation = getproperty(lowered.observations, response_name)
+    @test NP.observation_response(observation) === response_name
+    @test NP.observation_dependencies(observation) ==
+          (NP.qualified_name(:proportions, :trials),
+           NP.qualified_name(:proportions, :logit_p))
+end
+
+
+@testset "typed native PPL beta-binomial declarations" begin
+    observation = NP.beta_binomial2(
+        :y, :trials, :logistic_logit_p, :exp_log_phi)
+    @test NP.observation_response(observation) === :y
+    @test NP.observation_dependencies(observation) ==
+          (:trials, :logistic_logit_p, :exp_log_phi)
+
+    declaration = NP.model(
+        inputs=(; x=NP.input(), z=NP.input(), trials=NP.input()),
+        parameters=(;
+            beta_logit_p=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            beta_log_phi=NP.parameter(
+                NP.RealSupport(), (:Intercept, :z);
+                transform=NP.Identity(), prior=NP.StandardNormal())),
+        nodes=(;
+            logit_p=NP.affine(:x, :beta_logit_p),
+            log_phi=NP.affine(:z, :beta_log_phi),
+            logistic_logit_p=NP.logistic_link(:logit_p),
+            exp_log_phi=NP.exp_link(:log_phi)),
+        observations=(; y=NP.broadcasted(observation)))
+    graph = NP.factor_graph(
+        declaration;
+        bindings=(;
+            x=[-1.0, 0.5], z=[0.25, -0.75], trials=[5, 10]),
+        conditions=(; y=[1, 7]))
+    factor = graph.sites.y.factor
+    @test factor isa NP.BetaBinomial2SiteFactor
+    @test factor.trials isa NP.InputValue{:trials}
+    @test factor.mean isa NP.NodeValue{:logistic_logit_p}
+    @test factor.precision isa NP.NodeValue{:exp_log_phi}
+    @test NP.site_factor_dependencies(factor) ==
+          (:logistic_logit_p, :exp_log_phi)
+    @test graph.schedule == (
+        :beta_logit_p, :beta_log_phi, :logit_p, :log_phi,
+        :logistic_logit_p, :exp_log_phi, :y)
+
+    bindings = (;
+        x=[-1.0, 0.5, 1.0], z=[0.25, -0.75, 0.5],
+        trials=[5, 10, 8])
+    response = [1, 7, 3]
+    natural = natural_beta_binomial2(
+        bindings.x, bindings.z, bindings.trials)
+    @test natural.declaration == declaration
+    brm_data = merge(bindings, (; y=response))
+    brmi = @brm brm_data begin
+        logit(p) ~ 1 + x
+        log(phi) ~ 1 + z
+        y ~ BetaBinomial2(trials, p, phi)
+    end
+    @test SBBRMI(brmi; mod=@__MODULE__) isa SBBRMI
+    @test NP.lower(brmi) == declaration
+    prepared = NP.prepare(NP.bind(
+        declaration, bindings; conditions=(; y=response)))
+    natural_prepared = NP.prepare(NP.bind(
+        natural.declaration, natural.bindings; conditions=(; y=response)))
+    brm_prepared = NP.prepare(NP.compile(brmi))
+    @test NP.output_eltype(
+        NP.output_signature(prepared, NP.PosteriorPredictive()), prepared) ===
+          Int
+    position = [0.2, 0.3, -0.4, 0.1]
+    work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
+    density, gradient = NP.logdensity_and_gradient!(
+        work, prepared, position)
+    logit_p = position[1] .+ position[2] .* bindings.x
+    log_phi = position[3] .+ position[4] .* bindings.z
+    probability = BRM._native_ppl_logistic.(logit_p)
+    precision = exp.(log_phi)
+    reference_pointwise = map(
+        bindings.trials, probability, precision, response
+    ) do trials, mean, phi, count
+        logpdf(BRM.BetaBinomial2(trials, mean, phi), count)
+    end
+    reference_density = sum(logpdf.(Normal(), position)) +
+        sum(reference_pointwise)
+    @test density ≈ reference_density atol=2e-12
+    @test NP.logdensity!(
+        NP.workspace(natural_prepared), natural_prepared, position) ≈
+          density atol=2e-12
+    @test NP.logdensity!(
+        NP.workspace(brm_prepared), brm_prepared, position) ≈
+          density atol=2e-12
+    @test NP.evaluate(
+        work, prepared, position, NP.PointwiseLogLikelihood()) ≈
+          reference_pointwise atol=2e-12
+    @test NP.evaluate(
+        work, prepared, position, NP.LinearPredictor()) ≈ logit_p
+    @test NP.evaluate(
+        work, prepared, position,
+        NP.NodeOutput(:logistic_logit_p)) ≈ probability
+    @test NP.evaluate(
+        work, prepared, position, NP.NodeOutput(:exp_log_phi)) ≈ precision
+
+    finite_difference = similar(gradient)
+    plus = copy(position)
+    minus = copy(position)
+    step = 1e-6
+    for coordinate in eachindex(position)
+        plus[coordinate] += step
+        minus[coordinate] -= step
+        finite_difference[coordinate] = (
+            NP.logdensity!(work, prepared, plus) -
+            NP.logdensity!(work, prepared, minus)) / (2step)
+        plus[coordinate] = position[coordinate]
+        minus[coordinate] = position[coordinate]
+    end
+    @test gradient ≈ finite_difference rtol=3e-5 atol=3e-6
+    predictive = NP.simulate(
+        MersenneTwister(813), work, prepared, position)
+    @test predictive == NP.simulate(
+        MersenneTwister(813), NP.workspace(prepared), prepared, position)
+    @test all(
+        index -> 0 <= predictive[index] <= bindings.trials[index],
+        eachindex(predictive))
+
+    rebound_bindings = (;
+        x=[-0.75, 0.75], z=[1.0, -1.0], trials=[4, 12])
+    rebound_response = [1, 9]
+    rebound = NP.rebind(
+        prepared, (; y=rebound_response); bindings=rebound_bindings)
+    rebound_work = NP.workspace(rebound, Float64, DI.AutoEnzyme())
+    rebound_density, rebound_gradient = NP.logdensity_and_gradient!(
+        rebound_work, rebound, position)
+    @test isfinite(rebound_density)
+    @test all(isfinite, rebound_gradient)
+    prediction_only = NP.rebind(
+        prepared, (;); bindings=rebound_bindings)
+    prediction = NP.simulate(
+        MersenneTwister(814), NP.workspace(prediction_only),
+        prediction_only, position)
+    @test length(prediction) == 2
+    @test all(
+        index -> 0 <= prediction[index] <= rebound_bindings.trials[index],
+        eachindex(prediction))
+
+    draw_positions = [position'; (position .+ [0.1, -0.05, 0.02, 0.03])']
+    linear = zeros(2, 3)
+    pointwise = zeros(2, 3)
+    predictive_draws = zeros(Int, 2, 3)
+    bundle = (;
+        linear=zeros(2, 3),
+        pointwise=zeros(2, 3),
+        predictive=zeros(Int, 2, 3))
+    @test factor_steady_state_allocations(
+        work, prepared, position) == (; primal=0, gradient=0)
+    @test factor_batch_allocations(
+        work, prepared, draw_positions,
+        linear, pointwise, predictive_draws, bundle) ==
+          (; linear=0, pointwise=0, predictive=0, bundle=0)
+
+    extreme_positions = (
+        [1000.0, 0.0, -1000.0, 0.0],
+        [-1000.0, 0.0, 1000.0, 0.0],
+    )
+    extreme_response = (bindings.trials, zeros(Int, length(response)))
+    for (extreme_position, values) in zip(
+            extreme_positions, extreme_response)
+        extreme = NP.prepare(NP.bind(
+            declaration, bindings; conditions=(; y=values)))
+        extreme_work = NP.workspace(extreme, Float64, DI.AutoEnzyme())
+        extreme_density, extreme_gradient = NP.logdensity_and_gradient!(
+            extreme_work, extreme, extreme_position)
+        @test isfinite(extreme_density)
+        @test all(isfinite, extreme_gradient)
+    end
+
+    @test_throws ArgumentError NP.prepare(NP.bind(
+        declaration, bindings; conditions=(; y=[0, -1, 2])))
+    @test_throws ArgumentError NP.prepare(NP.bind(
+        declaration, bindings; conditions=(; y=[0, 11, 2])))
+    @test_throws ArgumentError NP.prepare(NP.bind(
+        declaration, merge(bindings, (; trials=[5, -1, 8]));
+        conditions=(; y=response)))
+    @test_throws ArgumentError NP.prepare(NP.bind(
+        declaration, merge(bindings, (; trials=[5, 10.5, 8]));
+        conditions=(; y=response)))
+    lossy = NP.bind(
+        declaration,
+        merge(bindings, (; trials=[16_777_217, 10, 8]));
+        conditions=(; y=response))
+    @test_throws ArgumentError NP.prepare(lossy; T=Float32)
+
+    bad_mean = NP.model(
+        inputs=declaration.inputs,
+        parameters=declaration.parameters,
+        nodes=merge(declaration.nodes, (;
+            logistic_logit_p=NP.exp_link(:logit_p))),
+        observations=declaration.observations)
+    @test capability_error(() -> NP.bind(
+        bad_mean, bindings; conditions=(; y=response))).capability ==
+          :factor_support
+    bad_precision = NP.model(
+        inputs=declaration.inputs,
+        parameters=declaration.parameters,
+        nodes=merge(declaration.nodes, (;
+            exp_log_phi=NP.logistic_link(:log_phi))),
+        observations=declaration.observations)
+    @test capability_error(() -> NP.bind(
+        bad_precision, bindings; conditions=(; y=response))).capability ==
+          :factor_support
+
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function bad_beta_binomial2_link(x, z, trials)
+            beta_logit_p[(:Intercept, :x)] ~ StandardNormal()
+            beta_log_phi[(:Intercept, :z)] ~ StandardNormal()
+            logit_p = dot(beta_logit_p, (1, x))
+            log_phi = dot(beta_log_phi, (1, z))
+            @. y ~ BetaBinomial2(
+                trials, exp(logit_p), exp(log_phi))
+        end)))
+    @test occursin(
+        "expects logistic(named_logit_mean) and exp(named_log_precision)",
+        err.msg)
+
+    lowered = NP.lower(NP.compose(NP.component(:proportions, declaration))).
+        declaration
+    response_name = NP.qualified_name(:proportions, :y)
+    observation = getproperty(lowered.observations, response_name)
+    @test NP.observation_response(observation) === response_name
+    @test NP.observation_dependencies(observation) ==
+          (NP.qualified_name(:proportions, :trials),
+           NP.qualified_name(:proportions, :logistic_logit_p),
+           NP.qualified_name(:proportions, :exp_log_phi))
+end
+
+
+@testset "typed native PPL overdispersed count declarations" begin
+    observation = NP.negative_binomial2(:y, :exp_log_mu, :exp_log_phi)
+    @test NP.observation_response(observation) === :y
+    @test NP.observation_dependencies(observation) ==
+          (:exp_log_mu, :exp_log_phi)
+
+    declaration = NP.model(
+        inputs=(; x=NP.input(), z=NP.input()),
+        parameters=(;
+            beta_log_mu=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            beta_log_phi=NP.parameter(
+                NP.RealSupport(), (:Intercept, :z);
+                transform=NP.Identity(), prior=NP.StandardNormal())),
+        nodes=(;
+            log_mu=NP.affine(:x, :beta_log_mu),
+            log_phi=NP.affine(:z, :beta_log_phi),
+            exp_log_mu=NP.exp_link(:log_mu),
+            exp_log_phi=NP.exp_link(:log_phi)),
+        observations=(; y=NP.broadcasted(observation)))
+    graph = NP.factor_graph(
+        declaration;
+        bindings=(; x=[-1.0, 0.5], z=[0.25, -0.75]),
+        conditions=(; y=[0, 3]))
+    factor = graph.sites.y.factor
+    @test factor isa NP.NegativeBinomial2SiteFactor
+    @test factor.mean isa NP.NodeValue{:exp_log_mu}
+    @test factor.precision isa NP.NodeValue{:exp_log_phi}
+    @test NP.site_factor_dependencies(factor) ==
+          (:exp_log_mu, :exp_log_phi)
+    @test graph.schedule == (
+        :beta_log_mu, :beta_log_phi, :log_mu, :log_phi,
+        :exp_log_mu, :exp_log_phi, :y)
+
+    bindings = (; x=[-1.0, 0.5, 1.0], z=[0.25, -0.75, 0.5])
+    response = [0, 3, 7]
+    natural = natural_negative_binomial2(bindings.x, bindings.z)
+    @test natural.declaration == declaration
+    brm_data = merge(bindings, (; y=response))
+    brmi = @brm brm_data begin
+        log(mu) ~ 1 + x
+        log(phi) ~ 1 + z
+        y ~ NegativeBinomial2(mu, phi)
+    end
+    @test SBBRMI(brmi; mod=@__MODULE__) isa SBBRMI
+    @test NP.lower(brmi) == declaration
+    prepared = NP.prepare(NP.bind(
+        declaration, bindings; conditions=(; y=response)))
+    natural_prepared = NP.prepare(NP.bind(
+        natural.declaration, natural.bindings; conditions=(; y=response)))
+    brm_prepared = NP.prepare(NP.compile(brmi))
+    @test NP.output_eltype(
+        NP.output_signature(prepared, NP.PosteriorPredictive()), prepared) ===
+          Int
+    position = [0.2, 0.3, -0.4, 0.1]
+    work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
+    density, gradient = NP.logdensity_and_gradient!(
+        work, prepared, position)
+    log_mu = position[1] .+ position[2] .* bindings.x
+    log_phi = position[3] .+ position[4] .* bindings.z
+    reference_pointwise = map(log_mu, log_phi, response) do lm, lp, count
+        logpdf(BRM.NegativeBinomial2(exp(lm), exp(lp)), count)
+    end
+    reference_density = sum(logpdf.(Normal(), position)) +
+        sum(reference_pointwise)
+    @test density ≈ reference_density atol=2e-12
+    @test NP.logdensity!(
+        NP.workspace(natural_prepared), natural_prepared, position) ≈
+          density atol=2e-12
+    @test NP.logdensity!(
+        NP.workspace(brm_prepared), brm_prepared, position) ≈
+          density atol=2e-12
+    @test NP.evaluate(
+        work, prepared, position, NP.PointwiseLogLikelihood()) ≈
+          reference_pointwise atol=2e-12
+    @test NP.evaluate(
+        work, prepared, position, NP.LinearPredictor()) ≈ log_mu
+    @test NP.evaluate(
+        work, prepared, position, NP.NodeOutput(:exp_log_mu)) ≈ exp.(log_mu)
+    @test NP.evaluate(
+        work, prepared, position, NP.NodeOutput(:exp_log_phi)) ≈ exp.(log_phi)
+
+    finite_difference = similar(gradient)
+    plus = copy(position)
+    minus = copy(position)
+    step = 1e-6
+    for coordinate in eachindex(position)
+        plus[coordinate] += step
+        minus[coordinate] -= step
+        finite_difference[coordinate] = (
+            NP.logdensity!(work, prepared, plus) -
+            NP.logdensity!(work, prepared, minus)) / (2step)
+        plus[coordinate] = position[coordinate]
+        minus[coordinate] = position[coordinate]
+    end
+    @test gradient ≈ finite_difference rtol=3e-5 atol=3e-6
+    @test NP.simulate(
+        MersenneTwister(811), work, prepared, position) ==
+          NP.simulate(
+              MersenneTwister(811), NP.workspace(prepared),
+              prepared, position)
+
+    rebound_bindings = (; x=[-0.75, 0.75], z=[1.0, -1.0])
+    rebound_response = [1, 4]
+    rebound = NP.rebind(
+        prepared, (; y=rebound_response); bindings=rebound_bindings)
+    rebound_work = NP.workspace(rebound, Float64, DI.AutoEnzyme())
+    rebound_density, rebound_gradient = NP.logdensity_and_gradient!(
+        rebound_work, rebound, position)
+    @test isfinite(rebound_density)
+    @test all(isfinite, rebound_gradient)
+    prediction_only = NP.rebind(
+        prepared, (;); bindings=rebound_bindings)
+    @test length(NP.simulate(
+        MersenneTwister(812), NP.workspace(prediction_only),
+        prediction_only, position)) == 2
+
+    draw_positions = [position'; (position .+ [0.1, -0.05, 0.02, 0.03])']
+    linear = zeros(2, 3)
+    pointwise = zeros(2, 3)
+    predictive_draws = zeros(Int, 2, 3)
+    bundle = (;
+        linear=zeros(2, 3),
+        pointwise=zeros(2, 3),
+        predictive=zeros(Int, 2, 3))
+    @test factor_steady_state_allocations(
+        work, prepared, position) == (; primal=0, gradient=0)
+    @test factor_batch_allocations(
+        work, prepared, draw_positions,
+        linear, pointwise, predictive_draws, bundle) ==
+          (; linear=0, pointwise=0, predictive=0, bundle=0)
+
+    extreme_positions = (
+        [1000.0, 0.0, -1000.0, 0.0],
+        [-1000.0, 0.0, 1000.0, 0.0],
+    )
+    extreme_response = ([0, 0, 0], [1, 1, 1])
+    for (extreme_position, values) in zip(
+            extreme_positions, extreme_response)
+        extreme = NP.prepare(NP.bind(
+            declaration, bindings; conditions=(; y=values)))
+        extreme_work = NP.workspace(extreme, Float64, DI.AutoEnzyme())
+        extreme_density, extreme_gradient = NP.logdensity_and_gradient!(
+            extreme_work, extreme, extreme_position)
+        @test isfinite(extreme_density)
+        @test all(isfinite, extreme_gradient)
+    end
+
+    @test_throws ArgumentError NP.prepare(NP.bind(
+        declaration, bindings; conditions=(; y=[0, -1, 2])))
+    lossy = NP.bind(
+        declaration, bindings; conditions=(; y=[16_777_217, 2, 0]))
+    @test_throws ArgumentError NP.prepare(lossy; T=Float32)
+
+    bad_mean = NP.model(
+        inputs=declaration.inputs,
+        parameters=declaration.parameters,
+        nodes=merge(declaration.nodes, (;
+            exp_log_mu=NP.logistic_link(:log_mu))),
+        observations=declaration.observations)
+    @test capability_error(() -> NP.bind(
+        bad_mean, bindings; conditions=(; y=response))).capability ==
+          :factor_support
+    bad_precision = NP.model(
+        inputs=declaration.inputs,
+        parameters=declaration.parameters,
+        nodes=merge(declaration.nodes, (;
+            exp_log_phi=NP.logistic_link(:log_phi))),
+        observations=declaration.observations)
+    @test capability_error(() -> NP.bind(
+        bad_precision, bindings; conditions=(; y=response))).capability ==
+          :factor_support
+
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function bad_nb2_link(x, z)
+            beta_log_mu[(:Intercept, :x)] ~ StandardNormal()
+            beta_log_phi[(:Intercept, :z)] ~ StandardNormal()
+            log_mu = dot(beta_log_mu, (1, x))
+            log_phi = dot(beta_log_phi, (1, z))
+            @. y ~ NegativeBinomial2(
+                exp(log_mu), logistic(log_phi))
+        end)))
+    @test occursin(
+        "expects exp(named_log_mean) and exp(named_log_precision)", err.msg)
+
+    renamed = NP.component(:counts, declaration)
+    lowered = NP.lower(NP.compose(renamed)).declaration
+    response_name = NP.qualified_name(:counts, :y)
+    observation = getproperty(lowered.observations, response_name)
+    @test NP.observation_response(observation) === response_name
+    @test NP.observation_dependencies(observation) ==
+          (NP.qualified_name(:counts, :exp_log_mu),
+           NP.qualified_name(:counts, :exp_log_phi))
+end
+
+
+@testset "typed native PPL zero-inflated count declarations" begin
+    observation = NP.zero_inflated_poisson(
+        :y, :exp_log_lambda, :logistic_logit_zi)
+    @test NP.observation_response(observation) === :y
+    @test NP.observation_dependencies(observation) ==
+          (:exp_log_lambda, :logistic_logit_zi)
+
+    declaration = NP.model(
+        inputs=(; x=NP.input(), z=NP.input()),
+        parameters=(;
+            beta_log_lambda=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            beta_logit_zi=NP.parameter(
+                NP.RealSupport(), (:Intercept, :z);
+                transform=NP.Identity(), prior=NP.StandardNormal())),
+        nodes=(;
+            log_lambda=NP.affine(:x, :beta_log_lambda),
+            logit_zi=NP.affine(:z, :beta_logit_zi),
+            exp_log_lambda=NP.exp_link(:log_lambda),
+            logistic_logit_zi=NP.logistic_link(:logit_zi)),
+        observations=(; y=NP.broadcasted(observation)))
+    graph = NP.factor_graph(
+        declaration;
+        bindings=(; x=[-1.0, 0.5], z=[0.25, -0.75]),
+        conditions=(; y=[0, 2]))
+    @test graph.nodes.exp_log_lambda isa NP.ExpFactorNode
+    @test graph.nodes.logistic_logit_zi isa NP.LogisticFactorNode
+    @test NP.factor_node_dependencies(graph.nodes.logistic_logit_zi) ==
+          (:logit_zi,)
+    factor = graph.sites.y.factor
+    @test factor isa NP.ZeroInflatedPoissonSiteFactor
+    @test factor.rate isa NP.NodeValue{:exp_log_lambda}
+    @test factor.zero_inflation isa NP.NodeValue{:logistic_logit_zi}
+    @test NP.site_factor_dependencies(factor) ==
+          (:exp_log_lambda, :logistic_logit_zi)
+    @test graph.schedule == (
+        :beta_log_lambda, :beta_logit_zi, :log_lambda, :logit_zi,
+        :exp_log_lambda, :logistic_logit_zi, :y)
+
+    bindings = (; x=[-1.0, 0.5, 1.0], z=[0.25, -0.75, 0.5])
+    response = [0, 2, 0]
+    natural = natural_zero_inflated_poisson(bindings.x, bindings.z)
+    @test natural.declaration == declaration
+    brm_data = merge(bindings, (; y=response))
+    brmi = @brm brm_data begin
+        log(lambda) ~ 1 + x
+        logit(zi) ~ 1 + z
+        y ~ ZeroInflatedPoisson(lambda, zi)
+    end
+    @test SBBRMI(brmi; mod=@__MODULE__) isa SBBRMI
+    @test NP.lower(brmi) == declaration
+    prepared = NP.prepare(NP.bind(
+        declaration, bindings; conditions=(; y=response)))
+    natural_prepared = NP.prepare(NP.bind(
+        natural.declaration, natural.bindings; conditions=(; y=response)))
+    brm_prepared = NP.prepare(NP.compile(brmi))
+    position = [0.2, 0.3, -0.4, 0.1]
+    work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
+    density, gradient = NP.logdensity_and_gradient!(
+        work, prepared, position)
+    log_rate = position[1] .+ position[2] .* bindings.x
+    zi_logit = position[3] .+ position[4] .* bindings.z
+    rate = exp.(log_rate)
+    zero_inflation = BRM._native_ppl_logistic.(zi_logit)
+    reference_pointwise = map(
+        rate, zero_inflation, response) do lambda, zi, count
+            logpdf(BRM.ZeroInflatedPoisson(lambda, zi), count)
+        end
+    reference_density = sum(logpdf.(Normal(), position)) +
+        sum(reference_pointwise)
+    @test density ≈ reference_density atol=2e-12
+    @test NP.logdensity!(
+        NP.workspace(natural_prepared), natural_prepared, position) ≈
+          density atol=2e-12
+    @test NP.logdensity!(
+        NP.workspace(brm_prepared), brm_prepared, position) ≈
+          density atol=2e-12
+    @test NP.evaluate(
+        work, prepared, position, NP.PointwiseLogLikelihood()) ≈
+          reference_pointwise atol=2e-12
+    @test NP.evaluate(
+        work, prepared, position, NP.NodeOutput(:logistic_logit_zi)) ≈
+          zero_inflation
+
+    finite_difference = similar(gradient)
+    plus = copy(position)
+    minus = copy(position)
+    step = 1e-6
+    for coordinate in eachindex(position)
+        plus[coordinate] += step
+        minus[coordinate] -= step
+        finite_difference[coordinate] = (
+            NP.logdensity!(work, prepared, plus) -
+            NP.logdensity!(work, prepared, minus)) / (2step)
+        plus[coordinate] = position[coordinate]
+        minus[coordinate] = position[coordinate]
+    end
+    @test gradient ≈ finite_difference rtol=3e-5 atol=3e-6
+
+    actual_rng = MersenneTwister(810)
+    expected_rng = MersenneTwister(810)
+    predictive = NP.simulate(
+        actual_rng, work, prepared, position)
+    expected = map(log_rate, zero_inflation) do row_log_rate, zi
+        rand(expected_rng) < zi ? 0 :
+            BRM._native_ppl_rand_poisson(
+                expected_rng, Float64, row_log_rate)
+    end
+    @test predictive == expected
+    @test eltype(predictive) === Int
+
+    rebound_bindings = (; x=[-0.75, 0.75], z=[1.0, -1.0])
+    rebound_response = [0, 3]
+    rebound = NP.rebind(
+        prepared, (; y=rebound_response); bindings=rebound_bindings)
+    rebound_work = NP.workspace(rebound, Float64, DI.AutoEnzyme())
+    rebound_density, rebound_gradient = NP.logdensity_and_gradient!(
+        rebound_work, rebound, position)
+    @test isfinite(rebound_density)
+    @test all(isfinite, rebound_gradient)
+    prediction_only = NP.rebind(
+        prepared, (;); bindings=rebound_bindings)
+    prediction_work = NP.workspace(prediction_only)
+    @test length(NP.simulate(
+        MersenneTwister(811), prediction_work, prediction_only,
+        position)) == 2
+
+    draw_positions = [position'; (position .+ [0.1, -0.05, 0.02, 0.03])']
+    linear = zeros(2, 3)
+    pointwise = zeros(2, 3)
+    predictive_draws = zeros(Int, 2, 3)
+    bundle = (;
+        linear=zeros(2, 3),
+        pointwise=zeros(2, 3),
+        predictive=zeros(Int, 2, 3))
+    @test factor_steady_state_allocations(
+        work, prepared, position) == (; primal=0, gradient=0)
+    @test factor_batch_allocations(
+        work, prepared, draw_positions,
+        linear, pointwise, predictive_draws, bundle) ==
+          (; linear=0, pointwise=0, predictive=0, bundle=0)
+
+    extreme_positions = (
+        [1000.0, 0.0, -1000.0, 0.0],
+        [-1000.0, 0.0, 1000.0, 0.0],
+    )
+    extreme_response = ([0, 0, 0], [1, 1, 1])
+    for (extreme_position, values) in zip(
+            extreme_positions, extreme_response)
+        extreme = NP.prepare(NP.bind(
+            declaration, bindings; conditions=(; y=values)))
+        extreme_work = NP.workspace(extreme, Float64, DI.AutoEnzyme())
+        extreme_density, extreme_gradient = NP.logdensity_and_gradient!(
+            extreme_work, extreme, extreme_position)
+        @test isfinite(extreme_density)
+        @test all(isfinite, extreme_gradient)
+    end
+
+    @test_throws ArgumentError NP.prepare(NP.bind(
+        declaration, bindings; conditions=(; y=[0, -1, 2])))
+    lossy = NP.bind(
+        declaration, bindings; conditions=(; y=[16_777_217, 2, 0]))
+    @test_throws ArgumentError NP.prepare(lossy; T=Float32)
+
+    bad_rate = NP.model(
+        inputs=declaration.inputs,
+        parameters=declaration.parameters,
+        nodes=merge(declaration.nodes, (;
+            exp_log_lambda=NP.logistic_link(:log_lambda))),
+        observations=declaration.observations)
+    @test capability_error(() -> NP.bind(
+        bad_rate, bindings; conditions=(; y=response))).capability ==
+          :factor_support
+    bad_probability = NP.model(
+        inputs=declaration.inputs,
+        parameters=declaration.parameters,
+        nodes=merge(declaration.nodes, (;
+            logistic_logit_zi=NP.exp_link(:logit_zi))),
+        observations=declaration.observations)
+    @test capability_error(() -> NP.bind(
+        bad_probability, bindings; conditions=(; y=response))).capability ==
+          :factor_support
+
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function bad_zip_link(x, z)
+            beta_log_lambda[(:Intercept, :x)] ~ StandardNormal()
+            beta_logit_zi[(:Intercept, :z)] ~ StandardNormal()
+            log_lambda = dot(beta_log_lambda, (1, x))
+            logit_zi = dot(beta_logit_zi, (1, z))
+            @. y ~ ZeroInflatedPoisson(
+                exp(log_lambda), exp(logit_zi))
+        end)))
+    @test occursin("expects exp(named_log_rate) and logistic(named_logit)",
+                   err.msg)
 end
 
 
@@ -8352,7 +12533,7 @@ end
         observations=declaration.observations))
     @test occursin("replicates", err.msg)
 
-    function weighted_prepared(kind, values; T=Float64)
+    function weighted_prepared(kind, values)
         weight = NP.observation_weight(kind, :observation_weights)
         observation = NP.weighted_observation(
             NP.normal(:y, :mu, :sigma), weight)
@@ -8370,7 +12551,7 @@ end
         NP.prepare(NP.bind(
             declaration,
             (; x=[-1.0, 0.5, 2.0], observation_weights=values);
-            conditions=(; y=[-0.4, 0.3, 1.2])); T)
+            conditions=(; y=[-0.4, 0.3, 1.2])))
     end
 
     position = [0.2, 0.4, log(1.1)]
@@ -8550,12 +12731,6 @@ end
     @test_throws ArgumentError weighted_prepared(:power, [1.0, -0.1, 2.0])
     @test_throws ArgumentError weighted_prepared(:unit, [1.0, 0.0, 1.0])
     @test_throws DimensionMismatch weighted_prepared(:power, [1.0, 2.0])
-    @test_throws ArgumentError weighted_prepared(
-        :analytic, [1.0, 1e100, 2.0]; T=Float32)
-    @test_throws ArgumentError weighted_prepared(
-        :power, [1.0, 1e100, 2.0]; T=Float32)
-    @test_throws ArgumentError weighted_prepared(
-        :power, [1.0, floatmin(Float64), 2.0]; T=Float32)
     @test_throws ArgumentError NP.prepare(
         NP.bind(
             weighted_prepared(:frequency, [1, 2, 3]).plan.declaration,
@@ -8563,39 +12738,6 @@ end
                observation_weights=[16_777_217, 2, 3]);
             conditions=(; y=response));
         T=Float32)
-
-    weighted_scale_model = NP.model(
-        inputs=(; mu=NP.input(), sigma=NP.input(), precision=NP.input()),
-        parameters=(;), nodes=(;),
-        observations=(; y=NP.broadcasted(NP.weighted_observation(
-            NP.normal(:y, :mu, :sigma),
-            NP.observation_weight(:analytic, :precision)))))
-    @test_throws ArgumentError NP.prepare(NP.bind(
-        weighted_scale_model,
-        (; mu=[0.0, 0.5], sigma=[1.0, -0.1], precision=[1.0, 2.0]);
-        conditions=(; y=[0.2, 0.4])))
-
-    poisson_x = [-1.0, 0.5, 2.0]
-    poisson_importance = [0.5, 0.0, 2.0]
-    poisson_response = [0, 1, 3]
-    power_poisson = NP.prepare(NP.condition(
-        natural_power_weighted_poisson(poisson_x, poisson_importance);
-        y=poisson_response))
-    power_poisson_work = NP.workspace(power_poisson)
-    power_poisson_position = [0.1, -0.3]
-    power_poisson_log_rate =
-        power_poisson_position[1] .+ power_poisson_position[2] .* poisson_x
-    power_poisson_pointwise = poisson_importance .* logpdf.(
-        Poisson.(exp.(power_poisson_log_rate)), poisson_response)
-    @test NP.evaluate(
-        power_poisson_work, power_poisson, power_poisson_position,
-        NP.LinearPredictor()) ≈ power_poisson_log_rate
-    @test NP.evaluate(
-        power_poisson_work, power_poisson, power_poisson_position,
-        NP.PointwiseLogLikelihood()) ≈ power_poisson_pointwise
-    @test eltype(NP.simulate(
-        MersenneTwister(711), power_poisson_work, power_poisson,
-        power_poisson_position)) === Int
 
     analytic_poisson = NP.model(
         inputs=(; rate=NP.input(), precision=NP.input()),
@@ -9019,33 +13161,6 @@ end
         fill(-1000.5, 3))
     @test isfinite(NP.logdensity!(
         NP.workspace(narrow_tail), narrow_tail, [0.0, 0.0, 0.0]))
-    narrow_upper_tail = normal_evidence_prepared(
-        NP.truncated_evidence(lower=10.0, upper=11.0),
-        fill(10.5, 3))
-    narrow_upper_work = NP.workspace(
-        narrow_upper_tail, Float64, DI.AutoEnzyme())
-    narrow_upper_density, narrow_upper_gradient =
-        NP.logdensity_and_gradient!(
-            narrow_upper_work, narrow_upper_tail, [0.0, 0.0, 0.0])
-    @test isfinite(narrow_upper_density)
-    @test all(isfinite, narrow_upper_gradient)
-    far_count_tail = poisson_evidence_prepared(
-        NP.truncated_evidence(lower=50, upper=51), fill(50, 3))
-    far_count_work = NP.workspace(
-        far_count_tail, Float64, DI.AutoEnzyme())
-    far_count_density, far_count_gradient = NP.logdensity_and_gradient!(
-        far_count_work, far_count_tail, [0.0, 0.0])
-    @test isfinite(far_count_density)
-    @test all(isfinite, far_count_gradient)
-    million_count_tail = poisson_evidence_prepared(
-        NP.truncated_evidence(lower=1_000_000, upper=1_000_001),
-        fill(1_000_000, 3))
-    @test isfinite(NP.logdensity!(
-        NP.workspace(million_count_tail), million_count_tail, [0.0, 0.0]))
-    @test_throws ArgumentError NP.prepare(NP.bind(
-        poisson_interval.plan.declaration,
-        (; x, count_upper=fill(1.0e100, length(x)));
-        conditions=(; y=count_lower)))
 
     err = argument_error(() -> macroexpand(
         @__MODULE__, :(NP.@model function bad_evidence_keyword(x)
@@ -9453,6 +13568,6 @@ end
         y ~ Normal(mu, sigma)
         z ~ Normal(mu, sigma)
     end
-    @test capability_error(() -> BRM._native_ppl_plan(multiple_outcomes)).capability ==
-          :outcomes
+    @test NP.factor_output_sites(
+        BRM._native_ppl_plan(multiple_outcomes)) == (:y, :z)
 end
