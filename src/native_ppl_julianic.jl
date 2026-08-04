@@ -28,7 +28,7 @@
 #       values so deterministic code and observations run without error.
 #     - PRIMAL (density): a cursor walks `θ`; each latent `~` consumes its slice,
 #       preps it (constrain + logjac), and accumulates prior logpdf; each
-#       observation accumulates its data logpdf. The scalar `ctx.acc` is the
+#       observation accumulates its data logpdf. The scalar `ctx.buffers.acc` is the
 #       primal `θ -> Real` that Enzyme differentiates (same AD path the
 #       declarative executor already uses — DifferentiationInterface + AutoEnzyme
 #       straight through the primal kernel).
@@ -96,13 +96,22 @@ using OutputSignatures: broadcast_size, output_size
 # preallocates the pool at the workspace eltype. `_next_buffer!` grows the pool on
 # demand for the unprepared path (`jlogdensity` without a workspace), so a
 # preallocated pool never grows inside a differentiated call.
+# It also carries the primal's own mutable state — the θ cursor and the density
+# accumulator. That state is preallocated with the pool rather than constructed per
+# call for the same reason the executor keeps everything in `FactorWorkspace`: a
+# per-call mutable context ESCAPES into the body closure, so Julia must heap-allocate
+# it, and one such box per gradient eval is exactly the allocation this whole piece
+# exists to remove. `JulianicPrimal` is therefore an immutable view over this struct.
 mutable struct JulianicBuffers{T}
     vectors::Vector{Vector{T}}
     vcursor::Int
+    cursor::Int         # position in θ
+    acc::T              # the accumulated log density
 end
-JulianicBuffers{T}() where {T} = JulianicBuffers{T}(Vector{Vector{T}}(), 0)
+JulianicBuffers{T}() where {T} =
+    JulianicBuffers{T}(Vector{Vector{T}}(), 0, 0, zero(T))
 function JulianicBuffers{T}(sizes::AbstractVector) where {T}
-    JulianicBuffers{T}([zeros(T, prod(s)) for s in sizes], 0)
+    JulianicBuffers{T}([zeros(T, prod(s)) for s in sizes], 0, 0, zero(T))
 end
 
 # The next flat buffer, grown to `n` elements if the pool was not presized.
@@ -125,24 +134,22 @@ end
 
 # --- Contexts -------------------------------------------------------------
 
-# PRIMAL: walks θ with a cursor and accumulates the log density into `acc`.
-# `acc` is parameterized on θ's element type (concrete, type-stable) so Enzyme
-# differentiates through the accumulation cleanly.
+# PRIMAL: walks θ with a cursor and accumulates the log density. Both the cursor
+# and the accumulator live on the preallocated `buffers` (see `JulianicBuffers`),
+# so this context is IMMUTABLE — two fields, both references — and costs nothing to
+# construct per call. A mutable context here would be heap-boxed on every gradient
+# eval, because it escapes into the body closure.
 #
 # The observation DATA is deliberately NOT a field here: it is a run-time
 # constant, and mixing a constant array with the active `theta`/`acc` inside one
-# mutable struct is exactly what forced Enzyme's `set_runtime_activity`. Instead
-# the body's `run` closure takes the data as a SEPARATE argument (passed through
-# DI as a `Constant`), so this struct holds only active/inactive-scalar state and
-# STATIC activity suffices — no runtime-activity workaround.
-mutable struct JulianicPrimal{TH<:AbstractVector,A,B}
+# struct is exactly what forced Enzyme's `set_runtime_activity`. Instead the body's
+# `run` closure takes the data as a SEPARATE argument (passed through DI as a
+# `Constant`), so this struct holds only active state and STATIC activity
+# suffices — no runtime-activity workaround.
+struct JulianicPrimal{TH<:AbstractVector,B}
     theta::TH
-    cursor::Int
-    acc::A
     buffers::B          # JulianicBuffers{eltype(theta)} — the preallocated pool
 end
-JulianicPrimal(theta::AbstractVector, buffers) =
-    JulianicPrimal(theta, 0, zero(eltype(theta)), buffers)
 
 # TRACE: runs the body once to size the unconstrained coordinate vector AND record
 # each array-valued intermediate's SHAPE (`buffer_sizes`), in body order, so the
@@ -193,9 +200,9 @@ end
 # bounds check turns that into an out-of-bounds READ (silent garbage under
 # Enzyme) instead of a `BoundsError`. The check is free next to a `logpdf`.
 @inline function _sample!(ctx::JulianicPrimal, ::Val, dist::Distributions.Normal)
-    ctx.cursor += 1
-    v = ctx.theta[ctx.cursor]
-    ctx.acc += Distributions.logpdf(dist, v)
+    ctx.buffers.cursor += 1
+    v = ctx.theta[ctx.buffers.cursor]
+    ctx.buffers.acc += Distributions.logpdf(dist, v)
     return v
 end
 @inline _sample!(ctx::JulianicTrace, ::Val, ::Distributions.Normal) = (ctx.dim += 1; 0.0)
@@ -203,10 +210,10 @@ end
 # Exponential: positive support, exp transform. constrain u -> exp(u); the
 # log-Jacobian of that transform is exactly u, so accumulate logpdf + u.
 @inline function _sample!(ctx::JulianicPrimal, ::Val, dist::Distributions.Exponential)
-    ctx.cursor += 1
-    u = ctx.theta[ctx.cursor]
+    ctx.buffers.cursor += 1
+    u = ctx.theta[ctx.buffers.cursor]
     v = exp(u)
-    ctx.acc += Distributions.logpdf(dist, v) + u
+    ctx.buffers.acc += Distributions.logpdf(dist, v) + u
     return v
 end
 @inline _sample!(ctx::JulianicTrace, ::Val, ::Distributions.Exponential) = (ctx.dim += 1; 1.0)
@@ -219,10 +226,10 @@ end
 # or `b ~ MvNormal(...)`, then referenced as `b[group]`.
 @inline function _sample!(ctx::JulianicPrimal, ::Val, dist::Distributions.MultivariateDistribution)
     k = length(dist)
-    lo = ctx.cursor + 1
-    ctx.cursor += k
-    v = @view ctx.theta[lo:ctx.cursor]   # view, not a copy — avoids an allocation
-    ctx.acc += Distributions.logpdf(dist, v)
+    lo = ctx.buffers.cursor + 1
+    ctx.buffers.cursor += k
+    v = @view ctx.theta[lo:ctx.buffers.cursor]   # view, not a copy — avoids an allocation
+    ctx.buffers.acc += Distributions.logpdf(dist, v)
     return v
 end
 @inline function _sample!(ctx::JulianicTrace, name::Val, dist::Distributions.MultivariateDistribution)
@@ -263,11 +270,11 @@ end
 @inline function _sample!(ctx::JulianicPrimal, ::Val,
         dist::Distributions.Product{Distributions.Continuous,<:Distributions.Exponential})
     k = length(dist)
-    lo = ctx.cursor + 1
-    ctx.cursor += k
-    u = @view ctx.theta[lo:ctx.cursor]   # view, not a copy
+    lo = ctx.buffers.cursor + 1
+    ctx.buffers.cursor += k
+    u = @view ctx.theta[lo:ctx.buffers.cursor]   # view, not a copy
     v = exp.(u)
-    ctx.acc += sum(Distributions.logpdf.(dist.v, v)) + sum(u)
+    ctx.buffers.acc += sum(Distributions.logpdf.(dist.v, v)) + sum(u)
     return v
 end
 @inline function _sample!(ctx::JulianicTrace, ::Val,
@@ -329,10 +336,10 @@ end
 @inline function _sample!(ctx::JulianicPrimal, ::Val, dist::Distributions.LKJCholesky)
     K = dist.d
     m = K * (K - 1) ÷ 2
-    lo = ctx.cursor + 1
-    ctx.cursor += m
+    lo = ctx.buffers.cursor + 1
+    ctx.buffers.cursor += m
     coords = @view ctx.theta[lo:lo + m - 1]   # view, not a copy
-    ctx.acc += _julianic_lkj_logdensity(K, dist.η, coords)
+    ctx.buffers.acc += _julianic_lkj_logdensity(K, dist.η, coords)
     return _julianic_corr_cholesky(K, coords)
 end
 @inline function _sample!(ctx::JulianicTrace, name::Val, dist::Distributions.LKJCholesky)
@@ -372,7 +379,7 @@ end
 
 # Accumulate an already-computed observation log-density contribution.
 @inline _accumulate!(ctx::JulianicPrimal, contribution) =
-    (ctx.acc += contribution; nothing)
+    (ctx.buffers.acc += contribution; nothing)
 @inline _accumulate!(::JulianicTrace, _contribution) = nothing
 
 # Fetch conditioned data for an observation site. The data is passed to the body
@@ -445,7 +452,7 @@ end
     push!(ctx.buffer_sizes, (n,))
     Vector{Float64}(undef, n)           # one-shot trace scratch for the .= fill
 end
-@inline _obs_end!(ctx::JulianicPrimal, buf) = (ctx.acc += sum(buf); nothing)
+@inline _obs_end!(ctx::JulianicPrimal, buf) = (ctx.buffers.acc += sum(buf); nothing)
 @inline _obs_end!(::JulianicTrace, _buf) = nothing
 
 # --- Model objects --------------------------------------------------------
@@ -499,11 +506,13 @@ dimension(prepared::JulianicPrepared) = prepared.dimension
 # backend sees `prepared` as a constant, `theta` as the sole active input, and the
 # preallocated `buffers` pool as scratch (a DI.Cache in the gradient path). The
 # body fills those buffers in place, so no per-eval allocation.
-function _julianic_kernel(theta::AbstractVector, prepared::JulianicPrepared, buffers)
-    buffers.vcursor = 0
-    ctx = JulianicPrimal(theta, buffers)
-    prepared.run(ctx, prepared.data)
-    return ctx.acc
+function _julianic_kernel(theta::AbstractVector{T}, prepared::JulianicPrepared,
+                          buffers::JulianicBuffers{T}) where {T}
+    buffers.vcursor = 0                 # rewind the pool + the primal's own state
+    buffers.cursor = 0
+    buffers.acc = zero(T)
+    prepared.run(JulianicPrimal(theta, buffers), prepared.data)
+    return buffers.acc
 end
 
 @noinline _julianic_dimension_error(prepared::JulianicPrepared, theta) =
