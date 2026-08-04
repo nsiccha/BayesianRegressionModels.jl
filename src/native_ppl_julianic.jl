@@ -683,6 +683,15 @@ end
 # `ctx` names the (mutable) sampling context; `data` names the conditioned
 # observation data — both are parameters of the generated `run` closure.
 function _julianic_lower_statement(statement, ctx, data)
+    # `end`/`begin` inside `A[...]` are POSITIONAL markers — they mean nothing
+    # outside the indexing expression that encloses them. The buffer rewrite
+    # hoists a gather into its own statement (`t = _cached_gather!(ctx, A, idx)`),
+    # which carries the index OUT of that context, so `z[1:2:end]` — ordinary
+    # Julia the surface promises to run — would lower to a bare undefined `end`.
+    # Resolve them to `lastindex`/`firstindex` calls FIRST, exactly as Base's own
+    # `@views`/`@view` do, so the index is a self-contained expression before
+    # anything moves it.
+    statement = Base.replace_ref_begin_end!(statement)
     broadcast_sample = _julianic_broadcast_sample(statement)
     if broadcast_sample !== nothing
         lhs, rhs = broadcast_sample.lhs, broadcast_sample.rhs
