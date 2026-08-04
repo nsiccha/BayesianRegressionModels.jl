@@ -106,7 +106,7 @@ end
     k = length(dist)
     lo = ctx.cursor + 1
     ctx.cursor += k
-    v = ctx.theta[lo:ctx.cursor]
+    v = @view ctx.theta[lo:ctx.cursor]   # view, not a copy — avoids an allocation
     ctx.acc += Distributions.logpdf(dist, v)
     return v
 end
@@ -128,7 +128,7 @@ end
     k = length(dist)
     lo = ctx.cursor + 1
     ctx.cursor += k
-    u = ctx.theta[lo:ctx.cursor]
+    u = @view ctx.theta[lo:ctx.cursor]   # view, not a copy
     v = exp.(u)
     ctx.acc += sum(Distributions.logpdf.(dist.v, v)) + sum(u)
     return v
@@ -194,7 +194,7 @@ end
     m = K * (K - 1) ÷ 2
     lo = ctx.cursor + 1
     ctx.cursor += m
-    coords = ctx.theta[lo:lo + m - 1]
+    coords = @view ctx.theta[lo:lo + m - 1]   # view, not a copy
     ctx.acc += _julianic_lkj_logdensity(K, dist.η, coords)
     return _julianic_corr_cholesky(K, coords)
 end
