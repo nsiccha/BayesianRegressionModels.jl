@@ -9019,6 +9019,33 @@ end
         fill(-1000.5, 3))
     @test isfinite(NP.logdensity!(
         NP.workspace(narrow_tail), narrow_tail, [0.0, 0.0, 0.0]))
+    narrow_upper_tail = normal_evidence_prepared(
+        NP.truncated_evidence(lower=10.0, upper=11.0),
+        fill(10.5, 3))
+    narrow_upper_work = NP.workspace(
+        narrow_upper_tail, Float64, DI.AutoEnzyme())
+    narrow_upper_density, narrow_upper_gradient =
+        NP.logdensity_and_gradient!(
+            narrow_upper_work, narrow_upper_tail, [0.0, 0.0, 0.0])
+    @test isfinite(narrow_upper_density)
+    @test all(isfinite, narrow_upper_gradient)
+    far_count_tail = poisson_evidence_prepared(
+        NP.truncated_evidence(lower=50, upper=51), fill(50, 3))
+    far_count_work = NP.workspace(
+        far_count_tail, Float64, DI.AutoEnzyme())
+    far_count_density, far_count_gradient = NP.logdensity_and_gradient!(
+        far_count_work, far_count_tail, [0.0, 0.0])
+    @test isfinite(far_count_density)
+    @test all(isfinite, far_count_gradient)
+    million_count_tail = poisson_evidence_prepared(
+        NP.truncated_evidence(lower=1_000_000, upper=1_000_001),
+        fill(1_000_000, 3))
+    @test isfinite(NP.logdensity!(
+        NP.workspace(million_count_tail), million_count_tail, [0.0, 0.0]))
+    @test_throws ArgumentError NP.prepare(NP.bind(
+        poisson_interval.plan.declaration,
+        (; x, count_upper=fill(1.0e100, length(x)));
+        conditions=(; y=count_lower)))
 
     err = argument_error(() -> macroexpand(
         @__MODULE__, :(NP.@model function bad_evidence_keyword(x)

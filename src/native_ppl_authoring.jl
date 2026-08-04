@@ -1309,6 +1309,8 @@ _factor_arguments(factor::BernoulliLogitSiteFactor) = (factor.logit,)
 _factor_arguments(factor::PoissonSiteFactor) = (factor.rate,)
 _factor_arguments(factor::WeightedSiteFactor) =
     (_factor_arguments(factor.factor)..., factor.values)
+_factor_arguments(factor::EvidenceSiteFactor) =
+    (_factor_arguments(factor.factor)..., factor.lower, factor.upper)
 
 _factor_value_is_row(::LiteralValue, graph, bindings) = false
 _factor_value_is_row(::InputValue{Name}, graph, bindings) where {Name} =
@@ -2129,6 +2131,10 @@ function _factor_validate_evidence_representation(
             discrete && converted != value && throw(ArgumentError(
                 "native PPL discrete evidence $label bound $value for " *
                 "`$name` cannot be represented exactly as $T"))
+            discrete && !(typemin(Int) <= converted < typemax(Int)) && throw(
+                ArgumentError(
+                    "native PPL discrete evidence $label bound $value for " *
+                    "`$name` lies outside the executable Int range"))
         end
     end
     nothing
@@ -2401,11 +2407,21 @@ end
 @inline function _factor_poisson_logcdf(value::T, log_rate::T) where {T}
     count = floor(Int, value)
     count < 0 && return -T(Inf)
-    term = -exp(log_rate)
+    rate = exp(log_rate)
+    isfinite(rate) || return -T(Inf)
+    if count >= rate
+        upper = _factor_poisson_logccdf_direct(count, log_rate)
+        return upper < zero(T) ? BRM.log1mexp(upper) : zero(T)
+    end
+    term = -rate + T(count) * log_rate -
+        T(BRM.loggamma(T(count) + one(T)))
     total = term
-    for outcome in 1:count
-        term += log_rate - log(T(outcome))
+    outcome = count
+    while outcome > 0
+        term += log(T(outcome)) - log_rate
+        outcome -= 1
         total = _factor_logaddexp(total, term)
+        term - total < log(eps(T)) - T(2) && break
     end
     min(total, zero(T))
 end
@@ -2414,10 +2430,11 @@ end
         count::Int, log_rate::T) where {T}
     outcome = count + 1
     term = -exp(log_rate) + T(outcome) * log_rate -
-        T(BRM.loggamma(outcome + 1))
+        T(BRM.loggamma(T(outcome) + one(T)))
     total = term
     rate = exp(log_rate)
     for _ in 1:100_000
+        outcome == typemax(Int) && return min(total, zero(T))
         outcome += 1
         term += log_rate - log(T(outcome))
         updated = _factor_logaddexp(total, term)
@@ -2432,9 +2449,11 @@ end
 @inline function _factor_poisson_logccdf(value::T, log_rate::T) where {T}
     count = floor(Int, value)
     count < 0 && return zero(T)
+    rate = exp(log_rate)
+    isfinite(rate) || return zero(T)
+    count >= rate && return _factor_poisson_logccdf_direct(count, log_rate)
     lower = _factor_poisson_logcdf(T(count), log_rate)
-    lower < zero(T) && return BRM.log1mexp(lower)
-    _factor_poisson_logccdf_direct(count, log_rate)
+    lower < zero(T) ? BRM.log1mexp(lower) : zero(T)
 end
 
 @inline function _factor_logcdf_at(
@@ -2449,6 +2468,20 @@ end
         value, _factor_poisson_log_rate(factor, index, plan, buffers, T))
 end
 
+@inline function _factor_loginterval_at(
+        base, lower::T, upper::T, index, plan, buffers) where {T}
+    upper_logcdf = _factor_logcdf_at(
+        base, upper, index, plan, buffers)
+    if upper_logcdf < -log(T(2))
+        return _factor_logdiffexp(
+            upper_logcdf,
+            _factor_logcdf_at(base, lower, index, plan, buffers))
+    end
+    _factor_logdiffexp(
+        _factor_logccdf_at(base, lower, index, plan, buffers),
+        _factor_logccdf_at(base, upper, index, plan, buffers))
+end
+
 @inline function _factor_truncation_logmass(
         base::NormalSiteFactor, lower, upper, index, plan, buffers,
         ::Type{T}) where {T}
@@ -2457,27 +2490,24 @@ end
         base, upper, index, plan, buffers)
     upper === nothing && return _factor_logccdf_at(
         base, lower, index, plan, buffers)
-    _factor_logdiffexp(
-        _factor_logcdf_at(base, upper, index, plan, buffers),
-        _factor_logcdf_at(base, lower, index, plan, buffers))
+    _factor_loginterval_at(base, lower, upper, index, plan, buffers)
 end
 
 @inline function _factor_truncation_logmass(
         base::PoissonSiteFactor, lower, upper, index, plan, buffers,
         ::Type{T}) where {T}
     lower === nothing && upper === nothing && return zero(T)
-    lower_cdf = lower === nothing ? -T(Inf) :
-        _factor_logcdf_at(base, lower - one(T), index, plan, buffers)
-    upper === nothing && return BRM.log1mexp(lower_cdf)
-    _factor_logdiffexp(
-        _factor_logcdf_at(base, upper, index, plan, buffers), lower_cdf)
+    lower === nothing && return _factor_logcdf_at(
+        base, upper, index, plan, buffers)
+    upper === nothing && return _factor_logccdf_at(
+        base, lower - one(T), index, plan, buffers)
+    _factor_loginterval_at(
+        base, lower - one(T), upper, index, plan, buffers)
 end
 
 @inline function _factor_interval_logmass(
         base, lower::T, upper::T, index, plan, buffers) where {T}
-    _factor_logdiffexp(
-        _factor_logcdf_at(base, upper, index, plan, buffers),
-        _factor_logcdf_at(base, lower, index, plan, buffers))
+    _factor_loginterval_at(base, lower, upper, index, plan, buffers)
 end
 
 @inline function _factor_logdensity_at(
