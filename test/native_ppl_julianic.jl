@@ -395,6 +395,14 @@ const CENSORED = (; y=[0.1, -0.5, 1.0, 1.0, 0.0, 0.8])
 const FREQUENCIES = [1, 3, 2, 1, 4, 2]
 const ANALYTIC = [0.5, 2.0, 1.0, 3.0, 0.25, 1.5]
 
+# Everything below is nested inside ONE outer set on purpose. A top-level
+# `@testset` throws as it finishes if anything inside it failed, which aborts the
+# rest of the FILE — so a single broken model class in the parity sweep takes every
+# later set down with it, unrun and unreported. Nested sets do not throw
+# individually: they report up, the outer set throws once at the very end, and a
+# failing run still tells you the state of the whole file.
+@testset "julianic run-the-body surface" begin
+
 @testset "julianic oracle parity" begin
     @testset "flat affine gaussian" begin
         oracle_parity(
@@ -636,6 +644,190 @@ NP.@jmodel function julianic_upper_lkj(x)
     @. y ~ Normal(corr[2, 1], 1.0)
 end
 
+# ---------------------------------------------------------------------------
+# `end` / `begin` in index position.
+#
+# The 0-alloc lowering hoists an index expression out of `A[...]` and into a
+# `_cached_gather!(ctx, A, idx)` argument. `end`/`begin` only mean anything
+# INSIDE the bracket, so the hoist has to resolve them against the array first.
+# When it did not, ordinary Julia like `z[1:2:end]` expanded cleanly and then
+# died at `jprepare` with `UndefVarError: end not defined` — no macro-time
+# complaint, and a whole model class (any non-centered reparameterization that
+# strides a latent block) unusable. The spelling must not change the answer, so
+# each model below is checked against its literal-index twin.
+# ---------------------------------------------------------------------------
+
+NP.@jmodel function julianic_index_end_range(x)
+    z ~ product_distribution(fill(Normal(0.0, 1.0), 4))
+    sigma ~ Exponential(1.0)
+    total = sum(z[1:2:end])
+    @. y ~ Normal(total, sigma)
+end
+
+NP.@jmodel function julianic_index_literal_range(x)
+    z ~ product_distribution(fill(Normal(0.0, 1.0), 4))
+    sigma ~ Exponential(1.0)
+    total = sum(z[1:2:3])
+    @. y ~ Normal(total, sigma)
+end
+
+NP.@jmodel function julianic_index_end_scalar(x)
+    z ~ product_distribution(fill(Normal(0.0, 1.0), 4))
+    sigma ~ Exponential(1.0)
+    total = sum(z[begin:end])
+    @. y ~ Normal(total, sigma)
+end
+
+NP.@jmodel function julianic_index_literal_scalar(x)
+    z ~ product_distribution(fill(Normal(0.0, 1.0), 4))
+    sigma ~ Exponential(1.0)
+    total = sum(z[1:4])
+    @. y ~ Normal(total, sigma)
+end
+
+# A nested `:ref` carries its OWN `end`: the inner one belongs to `selector`,
+# the outer to `z`. Resolving both against the outer array would silently gather
+# the wrong coordinates whenever the two lengths differ — as they do here (2 vs 4).
+NP.@jmodel function julianic_index_end_nested(x, selector)
+    z ~ product_distribution(fill(Normal(0.0, 1.0), 4))
+    sigma ~ Exponential(1.0)
+    total = sum(z[selector[begin:end]])
+    @. y ~ Normal(total, sigma)
+end
+
+NP.@jmodel function julianic_index_literal_nested(x, selector)
+    z ~ product_distribution(fill(Normal(0.0, 1.0), 4))
+    sigma ~ Exponential(1.0)
+    total = sum(z[selector[1:2]])
+    @. y ~ Normal(total, sigma)
+end
+
+@testset "julianic `end`/`begin` index resolution" begin
+    selector = [2, 4]
+    # `gradient` is false for the nested case ONLY because differentiating it is
+    # blocked upstream, not because `end` resolves differently there: gathering a
+    # `Vector{Int}` index out of a view into θ trips `EnzymeRuntimeActivityError`
+    # (snag `gather-subarray-11c41349`). Range indices — the other two cases —
+    # differentiate fine. Restore the gradient check when that snag lands.
+    cases = (
+        ("strided range `z[1:2:end]`", true,
+         julianic_index_end_range(PREDICTOR),
+         julianic_index_literal_range(PREDICTOR)),
+        ("whole span `z[begin:end]`", true,
+         julianic_index_end_scalar(PREDICTOR),
+         julianic_index_literal_scalar(PREDICTOR)),
+        ("nested `z[selector[begin:end]]`", false,
+         julianic_index_end_nested(PREDICTOR, selector),
+         julianic_index_literal_nested(PREDICTOR, selector)),
+    )
+    for (name, gradient, with_end, with_literal) in cases
+        @testset "$name" begin
+            # Regression: this `jprepare` is where `UndefVarError: end` struck.
+            bounded = NP.jprepare(NP.jcondition(with_end; CONTINUOUS...))
+            literal = NP.jprepare(NP.jcondition(with_literal; CONTINUOUS...))
+            @test NP.dimension(bounded) == NP.dimension(literal)
+
+            rng = MersenneTwister(20260805)
+            thetas = [randn(rng, NP.dimension(bounded)) for _ in 1:4]
+            for theta in thetas
+                # Same arithmetic in the same order — an exact match, not a
+                # tolerance.
+                @test NP.jlogdensity(bounded, theta) ==
+                      NP.jlogdensity(literal, theta)
+            end
+            gradient || continue
+
+            bounded_work = NP.jworkspace(bounded, Float64, JULIANIC_BACKEND)
+            literal_work = NP.jworkspace(literal, Float64, JULIANIC_BACKEND)
+            for theta in thetas
+                _, bounded_gradient =
+                    NP.jlogdensity_and_gradient!(bounded_work, bounded, theta)
+                _, literal_gradient =
+                    NP.jlogdensity_and_gradient!(literal_work, literal, theta)
+                @test bounded_gradient == literal_gradient
+            end
+        end
+    end
+end
+
+# ---------------------------------------------------------------------------
+# Non-float intermediates must not be routed through the buffer pool.
+#
+# The pool is a flat `Vector{T}` at the AD eltype. Sending an integer or boolean
+# intermediate through it retypes the values: an index vector `[2, 4]` comes back
+# `[2.0, 4.0]` and stops being an index, a `Bool` mask comes back `[1.0, 0.0, …]`
+# and stops being a mask. Both passed `jprepare` — the TRACE pass returns the real
+# `getindex`, so the model looked fine right up to the first density evaluation.
+# Each model is checked against a twin that receives the same intermediate
+# precomputed as data, so the in-body computation cannot change the answer.
+# ---------------------------------------------------------------------------
+
+NP.@jmodel function julianic_integer_intermediate(x, selector, group)
+    z ~ product_distribution(fill(Normal(0.0, 1.0), 4))
+    sigma ~ Exponential(1.0)
+    picked = selector[group]
+    effect = z[picked]
+    @. y ~ Normal(effect, sigma)
+end
+
+NP.@jmodel function julianic_integer_precomputed(x, picked)
+    z ~ product_distribution(fill(Normal(0.0, 1.0), 4))
+    sigma ~ Exponential(1.0)
+    effect = z[picked]
+    @. y ~ Normal(effect, sigma)
+end
+
+NP.@jmodel function julianic_boolean_mask(x, mask_source)
+    z ~ product_distribution(fill(Normal(0.0, 1.0), 4))
+    sigma ~ Exponential(1.0)
+    mask = mask_source[1:4]
+    total = sum(z[mask])
+    @. y ~ Normal(total, sigma)
+end
+
+NP.@jmodel function julianic_boolean_precomputed(x, mask)
+    z ~ product_distribution(fill(Normal(0.0, 1.0), 4))
+    sigma ~ Exponential(1.0)
+    total = sum(z[mask])
+    @. y ~ Normal(total, sigma)
+end
+
+@testset "julianic non-float intermediates keep their type" begin
+    selector = [2, 4]
+    group = [1, 2, 1, 2, 1, 2]
+    mask = [true, false, true, false]
+    pairs = (
+        ("integer gather `selector[group]` reused as an index",
+         julianic_integer_intermediate(PREDICTOR, selector, group),
+         julianic_integer_precomputed(PREDICTOR, selector[group])),
+        ("boolean gather `mask_source[1:4]` reused as a mask",
+         julianic_boolean_mask(PREDICTOR, mask),
+         julianic_boolean_precomputed(PREDICTOR, mask)),
+    )
+    # Density only. Both models index θ with a computed integer/boolean VECTOR,
+    # and gathering one of those out of a view into θ is blocked upstream by
+    # `EnzymeRuntimeActivityError` (snag `gather-subarray-11c41349`) — a separate
+    # defect from the retyping under test here, which is a primal-side bug and
+    # shows up in the density alone. Add the gradient leg when that snag lands.
+    for (name, in_body, precomputed) in pairs
+        @testset "$name" begin
+            computed = NP.jprepare(NP.jcondition(in_body; CONTINUOUS...))
+            given = NP.jprepare(NP.jcondition(precomputed; CONTINUOUS...))
+            @test NP.dimension(computed) == NP.dimension(given)
+
+            rng = MersenneTwister(20260805)
+            for _ in 1:4
+                theta = randn(rng, NP.dimension(computed))
+                # Regression: the primal used to throw `invalid index: 2.0 of
+                # type Float64` (integers) / `BoundsError … eltype Float64`
+                # (booleans) right here, while `jprepare` had reported success.
+                @test NP.jlogdensity(computed, theta) ==
+                      NP.jlogdensity(given, theta)
+            end
+        end
+    end
+end
+
 @testset "julianic fails closed" begin
     @testset "scalar site on conditioned data" begin
         # Without this check the site consumes a θ coordinate, scores the PRIOR
@@ -750,3 +942,5 @@ end
             :(function f(x); x[1] ~ Normal(); end))
     end
 end
+
+end # @testset "julianic run-the-body surface"
