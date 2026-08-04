@@ -92,6 +92,26 @@ end
 end
 @inline _sample!(ctx::JulianicTrace, ::Val, ::Distributions.Exponential) = (ctx.dim += 1; 1.0)
 
+# Multivariate real-support latent (e.g. MvNormal, `product_distribution` of
+# real-support univariates): identity transform on every coordinate (support is
+# all of R^k, so the log-Jacobian is 0). Consumes `length(dist)` contiguous
+# coordinates and returns the value vector for the body to index. This covers
+# grouped/blocked latents authored as `b ~ product_distribution(fill(D, k))`
+# or `b ~ MvNormal(...)`, then referenced as `b[group]`.
+@inline function _sample!(ctx::JulianicPrimal, ::Val, dist::Distributions.MultivariateDistribution)
+    k = length(dist)
+    lo = ctx.cursor + 1
+    ctx.cursor += k
+    v = ctx.theta[lo:ctx.cursor]
+    ctx.acc += Distributions.logpdf(dist, v)
+    return v
+end
+@inline function _sample!(ctx::JulianicTrace, ::Val, dist::Distributions.MultivariateDistribution)
+    k = length(dist)
+    ctx.dim += k
+    return zeros(k)
+end
+
 # Observation log density. The `~` magic (not the user) supplies `logpdf`, so we
 # route through this runtime helper — the model body needs no `logpdf` in scope,
 # only the distribution constructor the user actually wrote. Broadcast-safe.
