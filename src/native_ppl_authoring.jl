@@ -341,6 +341,84 @@ weighted_observation(observation::AbstractObservationDeclaration,
                      weight::AbstractObservationWeight) =
     WeightedObservation(observation, weight)
 
+"""Typed evidence semantics retained around one observation declaration."""
+abstract type AbstractObservationEvidence end
+
+struct TruncatedEvidence{L,U} <: AbstractObservationEvidence
+    lower::L
+    upper::U
+end
+
+struct CensoredEvidence{L,U} <: AbstractObservationEvidence
+    lower::L
+    upper::U
+end
+
+struct IntervalEvidence{U} <: AbstractObservationEvidence
+    upper::U
+end
+
+function _observation_bound(bound, label::AbstractString)
+    bound === nothing && return nothing
+    bound isa Symbol && return bound
+    bound isa Real || throw(ArgumentError(
+        "native PPL $label must be a finite real literal, a bound input " *
+        "name, or `nothing`; got $(typeof(bound))"))
+    isfinite(bound) || throw(ArgumentError(
+        "native PPL $label literal must be finite; got $bound"))
+    bound
+end
+
+function _observation_interval(lower, upper, label::AbstractString)
+    lower = _observation_bound(lower, "$label lower bound")
+    upper = _observation_bound(upper, "$label upper bound")
+    lower === nothing && upper === nothing && throw(ArgumentError(
+        "native PPL $label needs at least one bound"))
+    lower isa Real && upper isa Real && lower >= upper &&
+        throw(ArgumentError(
+            "native PPL $label lower bound must be below its upper bound; " *
+            "got ($lower, $upper)"))
+    lower, upper
+end
+
+function truncated_evidence(; lower=nothing, upper=nothing)
+    lower, upper = _observation_interval(lower, upper, "truncation")
+    TruncatedEvidence(lower, upper)
+end
+
+function censored_evidence(; lower=nothing, upper=nothing)
+    lower, upper = _observation_interval(lower, upper, "censoring")
+    CensoredEvidence(lower, upper)
+end
+
+function interval_evidence(upper)
+    upper = _observation_bound(upper, "interval-evidence upper endpoint")
+    upper === nothing && throw(ArgumentError(
+        "native PPL interval evidence needs an upper endpoint"))
+    IntervalEvidence(upper)
+end
+
+evidence_kind(::TruncatedEvidence) = :truncated
+evidence_kind(::CensoredEvidence) = :censored
+evidence_kind(::IntervalEvidence) = :interval_censored
+evidence_lower(evidence::Union{TruncatedEvidence,CensoredEvidence}) =
+    evidence.lower
+evidence_lower(::IntervalEvidence) = nothing
+evidence_upper(evidence::AbstractObservationEvidence) = evidence.upper
+
+"""One base observation decorated with truncation/censoring evidence."""
+struct EvidenceObservation{
+        O<:AbstractObservationDeclaration,
+        E<:AbstractObservationEvidence,
+    } <: AbstractObservationDeclaration
+    observation::O
+    evidence::E
+end
+
+evidence_observation(observation::AbstractObservationDeclaration,
+                     evidence::AbstractObservationEvidence) =
+    EvidenceObservation(observation, evidence)
+
 """Explicit Julia-broadcast lifting of one scalar stochastic-site declaration."""
 struct BroadcastObservation{O<:AbstractObservationDeclaration} <:
        AbstractObservationDeclaration
@@ -361,6 +439,8 @@ observation_response(::BernoulliLogitObservation{Response}) where {Response} =
 observation_response(::PoissonObservation{Response}) where {Response} = Response
 observation_response(observation::WeightedObservation) =
     observation_response(observation.observation)
+observation_response(observation::EvidenceObservation) =
+    observation_response(observation.observation)
 observation_response(observation::BroadcastObservation) =
     observation_response(observation.scalar)
 observation_dependencies(
@@ -375,8 +455,19 @@ observation_dependencies(
 observation_dependencies(observation::WeightedObservation) =
     (observation_dependencies(observation.observation)...,
      observation_weight_source(observation.weight))
+_evidence_bound_dependencies(bound) = bound isa Symbol ? (bound,) : ()
+observation_dependencies(observation::EvidenceObservation) =
+    (observation_dependencies(observation.observation)...,
+     _evidence_bound_dependencies(evidence_lower(observation.evidence))...,
+     _evidence_bound_dependencies(evidence_upper(observation.evidence))...)
 observation_dependencies(observation::BroadcastObservation) =
     observation_dependencies(observation.scalar)
+
+base_observation(observation::AbstractObservationDeclaration) = observation
+base_observation(observation::WeightedObservation) =
+    base_observation(observation.observation)
+base_observation(observation::EvidenceObservation) =
+    base_observation(observation.observation)
 
 """
 An unbound, typed native-PPL declaration shared by direct authors and BRM.
@@ -461,8 +552,20 @@ struct WeightedSiteFactor{
     values::V
 end
 
+struct EvidenceSiteFactor{
+        F<:AbstractSiteFactor,
+        E<:AbstractObservationEvidence,
+        L,U,
+    } <: AbstractSiteFactor
+    factor::F
+    evidence::E
+    lower::L
+    upper::U
+end
+
 base_site_factor(factor::AbstractSiteFactor) = factor
-base_site_factor(factor::WeightedSiteFactor) = factor.factor
+base_site_factor(factor::Union{WeightedSiteFactor,EvidenceSiteFactor}) =
+    base_site_factor(factor.factor)
 
 site_factor_dependencies(::StandardNormalSiteFactor) = ()
 site_factor_dependencies(factor::NormalSiteFactor) =
@@ -476,6 +579,9 @@ site_factor_dependencies(factor::PoissonSiteFactor) =
     _factor_value_dependencies((factor.rate,))
 site_factor_dependencies(factor::WeightedSiteFactor) =
     site_factor_dependencies(factor.factor)
+site_factor_dependencies(factor::EvidenceSiteFactor) =
+    (site_factor_dependencies(factor.factor)...,
+     _factor_value_dependencies((factor.lower, factor.upper))...)
 
 _factor_value_name(value::SiteValue) = site_value_name(value)
 _factor_value_name(value::NodeValue) = node_value_name(value)
@@ -764,6 +870,35 @@ function _factor_value(name::Symbol, inputs::NamedTuple, nodes::NamedTuple)
     SiteValue{name}()
 end
 
+_factor_bound_value(bound::Symbol, inputs::NamedTuple, nodes::NamedTuple) =
+    _factor_value(bound, inputs, nodes)
+_factor_bound_value(bound, ::NamedTuple, ::NamedTuple) = LiteralValue(bound)
+
+function _decorate_site_factor(observation::AbstractObservationDeclaration,
+                               factor::AbstractSiteFactor,
+                               inputs::NamedTuple, nodes::NamedTuple,
+                               name::Symbol)
+    observation === base_observation(observation) && return factor
+    if observation isa WeightedObservation
+        factor = _decorate_site_factor(
+            observation.observation, factor, inputs, nodes, name)
+        source = observation_weight_source(observation.weight)
+        hasproperty(inputs, source) || throw(CapabilityError(
+            :graph_identity,
+            "weighted observation `$name` references unknown weight input " *
+            "`$source`"))
+        return WeightedSiteFactor(
+            factor, observation.weight, _factor_value(source, inputs, nodes))
+    end
+    factor = _decorate_site_factor(
+        observation.observation, factor, inputs, nodes, name)
+    evidence = observation.evidence
+    EvidenceSiteFactor(
+        factor, evidence,
+        _factor_bound_value(evidence_lower(evidence), inputs, nodes),
+        _factor_bound_value(evidence_upper(evidence), inputs, nodes))
+end
+
 function _factor_node(declaration::AbstractNodeDeclaration,
                       inputs::NamedTuple, nodes::NamedTuple)
     reference(name) = _factor_value(name, inputs, nodes)
@@ -813,29 +948,20 @@ function _observation_stochastic_site(
     name::Symbol, declaration::AbstractObservationDeclaration,
     inputs::NamedTuple, nodes::NamedTuple, conditions::NamedTuple)
     scalar = scalar_observation(declaration)
-    base_observation = scalar isa WeightedObservation ?
-        scalar.observation : scalar
-    dependencies = observation_dependencies(base_observation)
-    factor = if base_observation isa NormalObservation
+    base = base_observation(scalar)
+    dependencies = observation_dependencies(base)
+    factor = if base isa NormalObservation
         NormalSiteFactor(
             _factor_value(dependencies[1], inputs, nodes),
             _factor_value(dependencies[2], inputs, nodes))
-    elseif base_observation isa BernoulliLogitObservation
+    elseif base isa BernoulliLogitObservation
         BernoulliLogitSiteFactor(_factor_value(
             only(dependencies), inputs, nodes))
     else
         PoissonSiteFactor(_factor_value(
             only(dependencies), inputs, nodes))
     end
-    if scalar isa WeightedObservation
-        source = observation_weight_source(scalar.weight)
-        hasproperty(inputs, source) || throw(CapabilityError(
-            :graph_identity,
-            "weighted observation `$name` references unknown weight input " *
-            "`$source`"))
-        factor = WeightedSiteFactor(
-            factor, scalar.weight, _factor_value(source, inputs, nodes))
-    end
+    factor = _decorate_site_factor(scalar, factor, inputs, nodes, name)
     shape = is_broadcast_observation(declaration) ?
         BroadcastSiteShape() : ScalarSiteShape()
     base_factor = base_site_factor(factor)
@@ -1055,11 +1181,25 @@ function _uses_factor_executor(declaration::Model, conditions, bindings=(;))
             base_site_factor(site.factor).scale isa NodeValue
     end
     weighted_observation = any(values(graph.sites)) do site
-        site.factor isa WeightedSiteFactor
+        _weighted_site_factor(site.factor) !== nothing
+    end
+    evidence_observation = any(values(graph.sites)) do site
+        _evidence_site_factor(site.factor) !== nothing
     end
     dependent_site || sampled_offset_affine || grouped_gather ||
-        grouped_affine_node || row_scale || weighted_observation
+        grouped_affine_node || row_scale || weighted_observation ||
+        evidence_observation
 end
+
+_weighted_site_factor(::AbstractSiteFactor) = nothing
+_weighted_site_factor(factor::WeightedSiteFactor) = factor
+_weighted_site_factor(factor::EvidenceSiteFactor) =
+    _weighted_site_factor(factor.factor)
+
+_evidence_site_factor(::AbstractSiteFactor) = nothing
+_evidence_site_factor(factor::EvidenceSiteFactor) = factor
+_evidence_site_factor(factor::WeightedSiteFactor) =
+    _evidence_site_factor(factor.factor)
 
 function _factor_validate_weight(factor::WeightedSiteFactor,
                                  bindings::NamedTuple,
@@ -1078,12 +1218,16 @@ function _factor_validate_weight(factor::WeightedSiteFactor,
     all(isfinite, raw) || throw(ArgumentError(
         "native PPL weight input `$source` for response `$response` must be finite"))
     kind = observation_weight_kind(factor.weight)
-    base = factor.factor
+    base = base_site_factor(factor)
     if kind === :analytic
         base isa NormalSiteFactor || throw(CapabilityError(
             :observation_weights,
             "analytic weights currently require a Normal response; got " *
             "$(typeof(base)) for `$response`"))
+        _evidence_site_factor(factor) === nothing || throw(CapabilityError(
+            :observation_weights,
+            "analytic weights combined with response evidence are not yet " *
+            "supported for `$response`"))
         all(>(0), raw) || throw(ArgumentError(
             "native PPL analytic weights for `$response` must be strictly positive"))
     elseif kind === :frequency
@@ -1104,6 +1248,51 @@ function _factor_validate_weight(factor::WeightedSiteFactor,
     nothing
 end
 
+function _factor_validate_evidence_bound(bound, bindings::NamedTuple,
+                                         response::Symbol,
+                                         label::AbstractString,
+                                         discrete::Bool)
+    raw = if bound isa LiteralValue
+        bound.value
+    elseif bound isa InputValue
+        getproperty(bindings, input_value_name(bound))
+    else
+        return nothing
+    end
+    raw === nothing && return nothing
+    values = raw isa AbstractVector ? raw : (raw,)
+    all(value -> value isa Real && isfinite(value), values) ||
+        throw(ArgumentError(
+            "native PPL $label for response `$response` must contain " *
+            "finite real values"))
+    discrete && all(value -> isinteger(value), values) || !discrete ||
+        throw(ArgumentError(
+            "native PPL $label for discrete response `$response` must be " *
+            "integer-valued"))
+    nothing
+end
+
+function _factor_validate_evidence(factor::EvidenceSiteFactor,
+                                   bindings::NamedTuple,
+                                   response::Symbol)
+    base = base_site_factor(factor)
+    base isa Union{NormalSiteFactor,PoissonSiteFactor} || throw(
+        CapabilityError(
+            :response_evidence,
+            "response evidence currently supports Normal and Poisson " *
+            "factors; got $(typeof(base)) for `$response`"))
+    _weighted_site_factor(factor) === nothing || throw(CapabilityError(
+        :response_evidence,
+        "response evidence cannot wrap a weighted factor for `$response`; " *
+        "apply weighting outside the evidence wrapper"))
+    discrete = base isa PoissonSiteFactor
+    _factor_validate_evidence_bound(
+        factor.lower, bindings, response, "evidence lower bound", discrete)
+    _factor_validate_evidence_bound(
+        factor.upper, bindings, response, "evidence upper bound", discrete)
+    nothing
+end
+
 function _group_input_names(declaration::Model)
     Tuple(unique(group_input(parameter)
         for parameter in values(declaration.parameters)
@@ -1120,6 +1309,8 @@ _factor_arguments(factor::BernoulliLogitSiteFactor) = (factor.logit,)
 _factor_arguments(factor::PoissonSiteFactor) = (factor.rate,)
 _factor_arguments(factor::WeightedSiteFactor) =
     (_factor_arguments(factor.factor)..., factor.values)
+_factor_arguments(factor::EvidenceSiteFactor) =
+    (_factor_arguments(factor.factor)..., factor.lower, factor.upper)
 
 _factor_value_is_row(::LiteralValue, graph, bindings) = false
 _factor_value_is_row(::InputValue{Name}, graph, bindings) where {Name} =
@@ -1196,7 +1387,7 @@ function _validate_factor_plan_site(
     site.factor isa Union{
         StandardNormalSiteFactor,NormalSiteFactor,ExponentialSiteFactor,
         LKJCholeskySiteFactor,BernoulliLogitSiteFactor,PoissonSiteFactor,
-        WeightedSiteFactor,
+        WeightedSiteFactor,EvidenceSiteFactor,
     } || throw(CapabilityError(
         :factor_family,
         "multi-latent factor site `$name` has unsupported factor " *
@@ -1610,8 +1801,12 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
         Base.OneTo(0)
     end
     output_factor = getproperty(graph.sites, output_site).factor
-    output_factor isa WeightedSiteFactor && _factor_validate_weight(
-        output_factor, bindings, output_site, length(observation_keys))
+    weight_factor = _weighted_site_factor(output_factor)
+    weight_factor === nothing || _factor_validate_weight(
+        weight_factor, bindings, output_site, length(observation_keys))
+    evidence_factor = _evidence_site_factor(output_factor)
+    evidence_factor === nothing || _factor_validate_evidence(
+        evidence_factor, bindings, output_site)
     site_names = Tuple(keys(graph.sites))
     site_indices = NamedTuple{site_names}(
         ntuple(identity, length(site_names)))
@@ -1818,6 +2013,9 @@ end
 _factor_validate_observation(factor::WeightedSiteFactor, value,
                              name::Symbol) =
     _factor_validate_observation(factor.factor, value, name)
+_factor_validate_observation(factor::EvidenceSiteFactor, value,
+                             name::Symbol) =
+    _factor_validate_observation(factor.factor, value, name)
 
 function _factor_validate_observation(::BernoulliLogitSiteFactor, value,
                                       name::Symbol)
@@ -1851,6 +2049,11 @@ _factor_validate_observation_conversion(factor::WeightedSiteFactor,
                                         name::Symbol) =
     _factor_validate_observation_conversion(
         factor.factor, original, converted, name)
+_factor_validate_observation_conversion(factor::EvidenceSiteFactor,
+                                        original, converted,
+                                        name::Symbol) =
+    _factor_validate_observation_conversion(
+        factor.factor, original, converted, name)
 
 function _factor_validate_observation_conversion(::PoissonSiteFactor,
                                                  original, converted,
@@ -1860,6 +2063,79 @@ function _factor_validate_observation_conversion(::PoissonSiteFactor,
             "native PPL Poisson response `$name` count $(original[index]) " *
             "at row $index cannot be represented exactly as " *
             "$(eltype(converted))"))
+    end
+    nothing
+end
+
+_factor_prepared_bound_at(::LiteralValue{Nothing}, index, plan,
+                          ::Type{T}) where {T} = nothing
+_factor_prepared_bound_at(bound::LiteralValue, index, plan,
+                          ::Type{T}) where {T} = T(bound.value)
+function _factor_prepared_bound_at(::InputValue{Name}, index, plan,
+                                   ::Type{T}) where {Name,T}
+    raw = getproperty(plan.bindings, Name)
+    T(raw isa AbstractVector ? raw[index] : raw)
+end
+_factor_prepared_bound_at(::Union{NodeValue,SiteValue}, index, plan,
+                          ::Type{T}) where {T} = nothing
+
+function _factor_validate_evidence_response(factor::EvidenceSiteFactor,
+                                            response::AbstractVector,
+                                            plan, name::Symbol,
+                                            ::Type{T}) where {T}
+    kind = evidence_kind(factor.evidence)
+    for index in eachindex(response)
+        lower = _factor_prepared_bound_at(factor.lower, index, plan, T)
+        upper = _factor_prepared_bound_at(factor.upper, index, plan, T)
+        lower !== nothing && upper !== nothing && lower >= upper && throw(
+            ArgumentError(
+                "native PPL response evidence for `$name` has lower bound " *
+                "$lower not below upper bound $upper at row $index"))
+        value = response[index]
+        if kind === :interval_censored
+            upper === nothing || value < upper || throw(ArgumentError(
+                "native PPL interval evidence for `$name` requires an open " *
+                "lower endpoint below its upper endpoint at row $index"))
+        else
+            lower === nothing || value >= lower || throw(ArgumentError(
+                "native PPL $kind response `$name` lies below its lower " *
+                "bound at row $index"))
+            upper === nothing || value <= upper || throw(ArgumentError(
+                "native PPL $kind response `$name` lies above its upper " *
+                "bound at row $index"))
+        end
+    end
+    nothing
+end
+
+
+function _factor_validate_evidence_representation(
+        factor::EvidenceSiteFactor, plan, name::Symbol,
+        ::Type{T}) where {T}
+    discrete = base_site_factor(factor) isa PoissonSiteFactor
+    for (label, bound) in (("lower", factor.lower), ("upper", factor.upper))
+        raw = if bound isa LiteralValue
+            bound.value
+        elseif bound isa InputValue
+            getproperty(plan.bindings, input_value_name(bound))
+        else
+            continue
+        end
+        raw === nothing && continue
+        values = raw isa AbstractVector ? raw : (raw,)
+        for value in values
+            converted = T(value)
+            isfinite(converted) || throw(ArgumentError(
+                "native PPL evidence $label bound for `$name` cannot be " *
+                "represented as finite $T"))
+            discrete && converted != value && throw(ArgumentError(
+                "native PPL discrete evidence $label bound $value for " *
+                "`$name` cannot be represented exactly as $T"))
+            discrete && !(typemin(Int) <= converted < typemax(Int)) && throw(
+                ArgumentError(
+                    "native PPL discrete evidence $label bound $value for " *
+                    "`$name` lies outside the executable Int range"))
+        end
     end
     nothing
 end
@@ -1890,11 +2166,12 @@ function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
     bindings = NamedTuple{binding_names}(binding_values)
     output_factor = getproperty(
         plan.graph.sites, factor_output_site(plan)).factor
-    if output_factor isa WeightedSiteFactor
-        source = input_value_name(output_factor.values)
+    weight_factor = _weighted_site_factor(output_factor)
+    if weight_factor !== nothing
+        source = input_value_name(weight_factor.values)
         original = getproperty(plan.bindings, source)
         converted = getproperty(bindings, source)
-        kind = observation_weight_kind(output_factor.weight)
+        kind = observation_weight_kind(weight_factor.weight)
         if kind === :frequency
             all(index -> converted[index] == original[index],
                 eachindex(original)) || throw(ArgumentError(
@@ -1917,6 +2194,9 @@ function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
                     "underflow"))
         end
     end
+    evidence_factor = _evidence_site_factor(output_factor)
+    evidence_factor === nothing || _factor_validate_evidence_representation(
+        evidence_factor, plan, factor_output_site(plan), T)
     names = Tuple(keys(plan.conditions))
     values = map(names) do name
         original = getproperty(plan.conditions, name)
@@ -1928,6 +2208,11 @@ function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
         site.shape isa BroadcastSiteShape &&
             _factor_validate_observation_conversion(
                 site.factor, original, value, name)
+        evidence_factor = _evidence_site_factor(site.factor)
+        site.shape isa BroadcastSiteShape &&
+            evidence_factor !== nothing &&
+            _factor_validate_evidence_response(
+                evidence_factor, value, plan, name, T)
         if site.shape isa BlockSiteShape
             value isa AbstractVector || throw(ArgumentError(
                 "native PPL block condition `$name` must be a vector"))
@@ -2067,6 +2352,199 @@ end
                                        index, plan, buffers) where {T}
     log_rate = _factor_poisson_log_rate(factor, index, plan, buffers, T)
     BRM._native_ppl_poisson_logdensity(value, log_rate)
+end
+
+@inline _factor_evidence_bound_at(::LiteralValue{Nothing}, index, plan,
+                                  buffers, ::Type{T}) where {T} = nothing
+@inline _factor_evidence_bound_at(value, index, plan, buffers,
+                                  ::Type{T}) where {T} =
+    _factor_argument_at(value, index, plan, buffers, T)
+
+@inline function _factor_logaddexp(left::T, right::T) where {T}
+    left == -T(Inf) && return right
+    right == -T(Inf) && return left
+    largest = max(left, right)
+    largest + log1p(exp(min(left, right) - largest))
+end
+
+@inline function _factor_logdiffexp(upper::T, lower::T) where {T}
+    lower < upper || return -T(Inf)
+    upper + BRM.log1mexp(lower - upper)
+end
+
+@inline function _factor_standard_normal_logcdf(value::T) where {T}
+    if value < -T(10)
+        inverse_square = inv(value * value)
+        series = one(T) - inverse_square + T(3) * inverse_square^2 -
+            T(15) * inverse_square^3 + T(105) * inverse_square^4
+        return -T(0.5) * value * value -
+            T(BRM._NATIVE_PPL_HALF_LOG2PI) - log(-value) + log(series)
+    end
+    log(BRM.erfc(-value / sqrt(T(2)))) - log(T(2))
+end
+
+@inline _factor_standard_normal_logccdf(value::T) where {T} =
+    _factor_standard_normal_logcdf(-value)
+
+@inline function _factor_logcdf_at(
+        factor::NormalSiteFactor, value::T, index, plan, buffers) where {T}
+    location = _factor_argument_at(
+        factor.location, index, plan, buffers, T)
+    scale = _factor_argument_at(factor.scale, index, plan, buffers, T)
+    scale > zero(T) || return -T(Inf)
+    _factor_standard_normal_logcdf((value - location) / scale)
+end
+
+@inline function _factor_logccdf_at(
+        factor::NormalSiteFactor, value::T, index, plan, buffers) where {T}
+    location = _factor_argument_at(
+        factor.location, index, plan, buffers, T)
+    scale = _factor_argument_at(factor.scale, index, plan, buffers, T)
+    scale > zero(T) || return -T(Inf)
+    _factor_standard_normal_logccdf((value - location) / scale)
+end
+
+@inline function _factor_poisson_logcdf(value::T, log_rate::T) where {T}
+    count = floor(Int, value)
+    count < 0 && return -T(Inf)
+    rate = exp(log_rate)
+    isfinite(rate) || return -T(Inf)
+    if count >= rate
+        upper = _factor_poisson_logccdf_direct(count, log_rate)
+        return upper < zero(T) ? BRM.log1mexp(upper) : zero(T)
+    end
+    term = -rate + T(count) * log_rate -
+        T(BRM.loggamma(T(count) + one(T)))
+    total = term
+    outcome = count
+    while outcome > 0
+        term += log(T(outcome)) - log_rate
+        outcome -= 1
+        total = _factor_logaddexp(total, term)
+        term - total < log(eps(T)) - T(2) && break
+    end
+    min(total, zero(T))
+end
+
+@inline function _factor_poisson_logccdf_direct(
+        count::Int, log_rate::T) where {T}
+    outcome = count + 1
+    term = -exp(log_rate) + T(outcome) * log_rate -
+        T(BRM.loggamma(T(outcome) + one(T)))
+    total = term
+    rate = exp(log_rate)
+    for _ in 1:100_000
+        outcome == typemax(Int) && return min(total, zero(T))
+        outcome += 1
+        term += log_rate - log(T(outcome))
+        updated = _factor_logaddexp(total, term)
+        if outcome > rate && term - updated < log(eps(T)) - T(2)
+            return min(updated, zero(T))
+        end
+        total = updated
+    end
+    total
+end
+
+@inline function _factor_poisson_logccdf(value::T, log_rate::T) where {T}
+    count = floor(Int, value)
+    count < 0 && return zero(T)
+    rate = exp(log_rate)
+    isfinite(rate) || return zero(T)
+    count >= rate && return _factor_poisson_logccdf_direct(count, log_rate)
+    lower = _factor_poisson_logcdf(T(count), log_rate)
+    lower < zero(T) ? BRM.log1mexp(lower) : zero(T)
+end
+
+@inline function _factor_logcdf_at(
+        factor::PoissonSiteFactor, value::T, index, plan, buffers) where {T}
+    _factor_poisson_logcdf(
+        value, _factor_poisson_log_rate(factor, index, plan, buffers, T))
+end
+
+@inline function _factor_logccdf_at(
+        factor::PoissonSiteFactor, value::T, index, plan, buffers) where {T}
+    _factor_poisson_logccdf(
+        value, _factor_poisson_log_rate(factor, index, plan, buffers, T))
+end
+
+@inline function _factor_loginterval_at(
+        base, lower::T, upper::T, index, plan, buffers) where {T}
+    upper_logcdf = _factor_logcdf_at(
+        base, upper, index, plan, buffers)
+    if upper_logcdf < -log(T(2))
+        return _factor_logdiffexp(
+            upper_logcdf,
+            _factor_logcdf_at(base, lower, index, plan, buffers))
+    end
+    _factor_logdiffexp(
+        _factor_logccdf_at(base, lower, index, plan, buffers),
+        _factor_logccdf_at(base, upper, index, plan, buffers))
+end
+
+@inline function _factor_truncation_logmass(
+        base::NormalSiteFactor, lower, upper, index, plan, buffers,
+        ::Type{T}) where {T}
+    lower === nothing && upper === nothing && return zero(T)
+    lower === nothing && return _factor_logcdf_at(
+        base, upper, index, plan, buffers)
+    upper === nothing && return _factor_logccdf_at(
+        base, lower, index, plan, buffers)
+    _factor_loginterval_at(base, lower, upper, index, plan, buffers)
+end
+
+@inline function _factor_truncation_logmass(
+        base::PoissonSiteFactor, lower, upper, index, plan, buffers,
+        ::Type{T}) where {T}
+    lower === nothing && upper === nothing && return zero(T)
+    lower === nothing && return _factor_logcdf_at(
+        base, upper, index, plan, buffers)
+    upper === nothing && return _factor_logccdf_at(
+        base, lower - one(T), index, plan, buffers)
+    _factor_loginterval_at(
+        base, lower - one(T), upper, index, plan, buffers)
+end
+
+@inline function _factor_interval_logmass(
+        base, lower::T, upper::T, index, plan, buffers) where {T}
+    _factor_loginterval_at(base, lower, upper, index, plan, buffers)
+end
+
+@inline function _factor_logdensity_at(
+        factor::EvidenceSiteFactor, value::T,
+        index, plan, buffers) where {T}
+    base = base_site_factor(factor)
+    lower = _factor_evidence_bound_at(
+        factor.lower, index, plan, buffers, T)
+    upper = _factor_evidence_bound_at(
+        factor.upper, index, plan, buffers, T)
+    lower !== nothing && upper !== nothing && lower >= upper &&
+        return -T(Inf)
+    kind = evidence_kind(factor.evidence)
+    if kind === :interval_censored
+        upper === nothing && return -T(Inf)
+        value < upper || return -T(Inf)
+        return _factor_interval_logmass(
+            base, value, upper, index, plan, buffers)
+    elseif kind === :censored
+        lower !== nothing && value == lower && return _factor_logcdf_at(
+            base, lower, index, plan, buffers)
+        if upper !== nothing && value == upper
+            threshold = base isa PoissonSiteFactor ? upper - one(T) : upper
+            return _factor_logccdf_at(
+                base, threshold, index, plan, buffers)
+        end
+        lower !== nothing && value < lower && return -T(Inf)
+        upper !== nothing && value > upper && return -T(Inf)
+        return _factor_logdensity_at(
+            factor.factor, value, index, plan, buffers)
+    end
+    lower !== nothing && value < lower && return -T(Inf)
+    upper !== nothing && value > upper && return -T(Inf)
+    logmass = _factor_truncation_logmass(
+        base, lower, upper, index, plan, buffers, T)
+    isfinite(logmass) || return -T(Inf)
+    _factor_logdensity_at(factor.factor, value, index, plan, buffers) - logmass
 end
 
 @inline function _factor_logdensity_at(
@@ -2858,24 +3336,25 @@ end
         eltype(buffers.values))
 end
 
-@inline function _factor_terminal_sample(rng::BRM.AbstractRNG,
-                                         prepared::FactorPrepared,
-                                         buffers::FactorBuffers,
-                                         index::Int)
+@inline function _factor_terminal_base_sample(rng::BRM.AbstractRNG,
+                                              prepared::FactorPrepared,
+                                              buffers::FactorBuffers,
+                                              index::Int)
     site = getproperty(
         prepared.plan.graph.sites, factor_output_site(prepared.plan))
-    weighted_factor = site.factor
-    factor = base_site_factor(weighted_factor)
+    site_factor = site.factor
+    factor = base_site_factor(site_factor)
     T = eltype(buffers.values)
     if factor isa NormalSiteFactor
         location = _factor_argument_at(
             factor.location, index, prepared.plan, buffers, T)
         scale = _factor_argument_at(
             factor.scale, index, prepared.plan, buffers, T)
-        if weighted_factor isa WeightedSiteFactor &&
-           observation_weight_kind(weighted_factor.weight) === :analytic
+        weight_factor = _weighted_site_factor(site_factor)
+        if weight_factor !== nothing &&
+           observation_weight_kind(weight_factor.weight) === :analytic
             weight = _factor_argument_at(
-                weighted_factor.values, index, prepared.plan, buffers, T)
+                weight_factor.values, index, prepared.plan, buffers, T)
             scale /= sqrt(weight)
         end
         location + scale * BRM.randn(rng, T)
@@ -2888,6 +3367,43 @@ end
             factor, index, prepared.plan, buffers, T)
         BRM._native_ppl_rand_poisson(rng, T, log_rate)
     end
+end
+
+@inline function _factor_terminal_sample(rng::BRM.AbstractRNG,
+                                         prepared::FactorPrepared,
+                                         buffers::FactorBuffers,
+                                         index::Int)
+    site = getproperty(
+        prepared.plan.graph.sites, factor_output_site(prepared.plan))
+    evidence_factor = _evidence_site_factor(site.factor)
+    evidence_factor === nothing && return _factor_terminal_base_sample(
+        rng, prepared, buffers, index)
+    T = eltype(buffers.values)
+    lower = _factor_evidence_bound_at(
+        evidence_factor.lower, index, prepared.plan, buffers, T)
+    upper = _factor_evidence_bound_at(
+        evidence_factor.upper, index, prepared.plan, buffers, T)
+    kind = evidence_kind(evidence_factor.evidence)
+    sample = _factor_terminal_base_sample(rng, prepared, buffers, index)
+    kind === :interval_censored && return sample
+    if kind === :censored
+        lower !== nothing && sample < lower &&
+            (sample = convert(typeof(sample), lower))
+        upper !== nothing && sample > upper &&
+            (sample = convert(typeof(sample), upper))
+        return sample
+    end
+    attempts = 1
+    while (lower !== nothing && sample < lower) ||
+          (upper !== nothing && sample > upper)
+        attempts == 1_000_000 && throw(CapabilityError(
+            :predictive_support,
+            "native PPL truncated predictive sampler did not reach its " *
+            "support after $attempts proposals"))
+        sample = _factor_terminal_base_sample(rng, prepared, buffers, index)
+        attempts += 1
+    end
+    sample
 end
 
 function evaluate!(output::AbstractVector, work::FactorWorkspace,
@@ -3932,55 +4448,96 @@ end
 
 function _qualified_observation(namespace::Symbol, observation, mapping)
     scalar = scalar_observation(observation)
-    base_observation = scalar isa WeightedObservation ?
-        scalar.observation : scalar
-    response = qualified_name(namespace, observation_response(base_observation))
-    declaration = if base_observation isa NormalObservation
-        dependencies = observation_dependencies(base_observation)
+    base = base_observation(scalar)
+    response = qualified_name(namespace, observation_response(base))
+    declaration = if base isa NormalObservation
+        dependencies = observation_dependencies(base)
         normal(
             response,
             _mapped_name(mapping, dependencies[1], namespace, "Normal factor"),
             _mapped_name(mapping, dependencies[2], namespace, "Normal factor"))
-    elseif base_observation isa BernoulliLogitObservation
+    elseif base isa BernoulliLogitObservation
         bernoulli_logit(
             response,
             _mapped_name(
-                mapping, only(observation_dependencies(base_observation)),
+                mapping, only(observation_dependencies(base)),
                 namespace, "Bernoulli-logit factor"))
     else
         poisson(
             response,
             _mapped_name(
-                mapping, only(observation_dependencies(base_observation)),
+                mapping, only(observation_dependencies(base)),
                 namespace, "Poisson factor"))
     end
-    if scalar isa WeightedObservation
-        weight = scalar.weight
+    declaration = _qualified_observation_decorators(
+        namespace, scalar, declaration, mapping)
+    is_broadcast_observation(observation) ? broadcasted(declaration) : declaration
+end
+
+_qualified_evidence_bound(bound::Symbol, mapping, namespace) =
+    _mapped_name(mapping, bound, namespace, "observation-evidence bound")
+_qualified_evidence_bound(bound, mapping, namespace) = bound
+
+function _qualified_observation_decorators(
+    namespace::Symbol, observation::AbstractObservationDeclaration,
+    declaration::AbstractObservationDeclaration, mapping)
+    observation === base_observation(observation) && return declaration
+    if observation isa WeightedObservation
+        inner = _qualified_observation_decorators(
+            namespace, observation.observation, declaration, mapping)
+        weight = observation.weight
         source = _mapped_name(
             mapping, observation_weight_source(weight), namespace,
             "observation weight")
-        declaration = weighted_observation(
-            declaration,
-            observation_weight(observation_weight_kind(weight), source))
+        return weighted_observation(
+            inner, observation_weight(observation_weight_kind(weight), source))
     end
-    is_broadcast_observation(observation) ? broadcasted(declaration) : declaration
+    inner = _qualified_observation_decorators(
+        namespace, observation.observation, declaration, mapping)
+    evidence = observation.evidence
+    lower = _qualified_evidence_bound(
+        evidence_lower(evidence), mapping, namespace)
+    upper = _qualified_evidence_bound(
+        evidence_upper(evidence), mapping, namespace)
+    mapped = if evidence isa TruncatedEvidence
+        truncated_evidence(; lower, upper)
+    elseif evidence isa CensoredEvidence
+        censored_evidence(; lower, upper)
+    else
+        interval_evidence(upper)
+    end
+    evidence_observation(inner, mapped)
 end
 
 function _observation_with_response(observation, response::Symbol)
     scalar = scalar_observation(observation)
-    base_observation = scalar isa WeightedObservation ?
-        scalar.observation : scalar
-    dependencies = observation_dependencies(base_observation)
-    declaration = if base_observation isa NormalObservation
+    base = base_observation(scalar)
+    dependencies = observation_dependencies(base)
+    declaration = if base isa NormalObservation
         normal(response, dependencies...)
-    elseif base_observation isa BernoulliLogitObservation
+    elseif base isa BernoulliLogitObservation
         bernoulli_logit(response, only(dependencies))
     else
         poisson(response, only(dependencies))
     end
-    scalar isa WeightedObservation && (declaration = weighted_observation(
-        declaration, scalar.weight))
+    declaration = _observation_decorators_with_response(scalar, declaration)
     is_broadcast_observation(observation) ? broadcasted(declaration) : declaration
+end
+
+function _observation_decorators_with_response(
+    observation::AbstractObservationDeclaration,
+    declaration::AbstractObservationDeclaration)
+    observation === base_observation(observation) && return declaration
+    if observation isa WeightedObservation
+        return weighted_observation(
+            _observation_decorators_with_response(
+                observation.observation, declaration),
+            observation.weight)
+    end
+    evidence_observation(
+        _observation_decorators_with_response(
+            observation.observation, declaration),
+        observation.evidence)
 end
 
 function _resolved_reference(reference::GraphRef, resolved)
@@ -5488,9 +6045,6 @@ function _lower_brmi_observation_weight(response::Symbol, likelihood)
     distribution isa BRM.ExprColumn || throw(CapabilityError(
         :observation_weights,
         "weighted likelihood for `$response` requires a distribution call"))
-    isempty(BRM.getkwargs(distribution)) || throw(CapabilityError(
-        :observation_weights,
-        "weighted distribution for `$response` accepts no keywords"))
     weight isa BRM.ExprColumn || throw(CapabilityError(
         :observation_weights,
         "weighted likelihood for `$response` requires a typed StatsBase weight"))
@@ -5526,6 +6080,91 @@ function _lower_brmi_observation_weight(response::Symbol, likelihood)
     (; kind, source, column), distribution
 end
 
+function _lower_brmi_evidence_bound(response::Symbol, value,
+                                    label::AbstractString)
+    value === nothing && return (; value=nothing, source=nothing, column=nothing)
+    if value isa Real
+        isfinite(value) || throw(CapabilityError(
+            :response_evidence,
+            "$label for `$response` must be finite"))
+        return (; value, source=nothing, column=nothing)
+    end
+    value isa BRM.NamedColumn && parent(value) isa BRM.DataColumn || throw(
+        CapabilityError(
+            :response_evidence,
+            "$label for `$response` must be a finite literal, raw data " *
+            "column, or `nothing`"))
+    source = BRM.name(value)
+    (; value=source, source, column=value)
+end
+
+function _lower_brmi_response_evidence(response::Symbol, likelihood)
+    family = BRM.getf(likelihood)
+    kind = family === BRM.truncated ? :truncated :
+        family === BRM.censored ? :censored :
+        family === BRM.interval_censored ? :interval_censored : nothing
+    kind === nothing && return nothing, likelihood
+    arguments = BRM.getargs(likelihood)
+    isempty(arguments) && throw(CapabilityError(
+        :response_evidence,
+        "$family wrapper for `$response` needs a base distribution"))
+    distribution = first(arguments)
+    distribution isa BRM.ExprColumn || throw(CapabilityError(
+        :response_evidence,
+        "$family wrapper for `$response` requires a distribution call"))
+    positional = arguments[2:end]
+    keywords = BRM.getkwargs(likelihood)
+    allowed = kind === :interval_censored ? (:upper,) : (:lower, :upper)
+    unknown = Tuple(key for key in keys(keywords) if key ∉ allowed)
+    isempty(unknown) || throw(CapabilityError(
+        :response_evidence,
+        "$family wrapper for `$response` has unsupported keywords $unknown"))
+
+    lower = nothing
+    upper = nothing
+    if kind === :interval_censored
+        isempty(positional) || throw(CapabilityError(
+            :response_evidence,
+            "interval_censored for `$response` accepts `upper` only as a keyword"))
+        haskey(keywords, :upper) || throw(CapabilityError(
+            :response_evidence,
+            "interval_censored for `$response` requires `upper=`"))
+        upper = keywords[:upper]
+    else
+        length(positional) <= 2 || throw(CapabilityError(
+            :response_evidence,
+            "$family for `$response` accepts at most lower and upper bounds"))
+        !isempty(positional) && (lower = positional[1])
+        length(positional) == 2 && (upper = positional[2])
+        haskey(keywords, :lower) && begin
+            isempty(positional) || throw(CapabilityError(
+                :response_evidence,
+                "$family for `$response` specifies `lower` twice"))
+            lower = keywords[:lower]
+        end
+        haskey(keywords, :upper) && begin
+            length(positional) < 2 || throw(CapabilityError(
+                :response_evidence,
+                "$family for `$response` specifies `upper` twice"))
+            upper = keywords[:upper]
+        end
+        lower === nothing && upper === nothing && throw(CapabilityError(
+            :response_evidence,
+            "$family for `$response` needs at least one bound"))
+    end
+    lower = _lower_brmi_evidence_bound(
+        response, lower, "$family lower bound")
+    upper = _lower_brmi_evidence_bound(
+        response, upper, "$family upper bound")
+    if lower.value isa Real && upper.value isa Real &&
+       lower.value >= upper.value
+        throw(CapabilityError(
+            :response_evidence,
+            "$family lower bound for `$response` must be below its upper bound"))
+    end
+    (; kind, lower, upper), distribution
+end
+
 function _lower_brmi(brmi::BRM.BRMI)
     observed = BRM.outcomes(brmi)
     length(observed) == 1 || throw(CapabilityError(
@@ -5543,6 +6182,8 @@ function _lower_brmi(brmi::BRM.BRMI)
             :likelihood,
             "response `$response` must use a distribution call"))
     weight_spec, likelihood = _lower_brmi_observation_weight(
+        response, likelihood)
+    evidence_spec, likelihood = _lower_brmi_response_evidence(
         response, likelihood)
     family = BRM.getf(likelihood)
     family === BRM.Normal || family === BRM.BernoulliLogit ||
@@ -5589,9 +6230,11 @@ function _lower_brmi(brmi::BRM.BRMI)
         distributional = _lower_brmi_distributional_gaussian(
             brmi, response, response_lhs, location, likelihood_args[2])
         if distributional !== nothing
-            weight_spec === nothing || throw(CapabilityError(
-                :observation_weights,
-                "weighted distributional Normal regression is not yet supported"))
+            weight_spec === nothing && evidence_spec === nothing || throw(
+                CapabilityError(
+                    :response_evidence,
+                    "weighted/evidence distributional Normal regression is " *
+                    "not yet supported"))
             return distributional
         end
     end
@@ -5602,7 +6245,8 @@ function _lower_brmi(brmi::BRM.BRMI)
             :likelihood_scale,
             "Normal scale must be one named scalar parameter"))
 
-    if family === BRM.Normal && weight_spec === nothing
+    if family === BRM.Normal && weight_spec === nothing &&
+       evidence_spec === nothing
         factor_dag = _lower_brmi_scalar_factor_dag(
             brmi, response, response_lhs, location)
         factor_dag === nothing || return factor_dag
@@ -5666,6 +6310,19 @@ function _lower_brmi(brmi::BRM.BRMI)
         (weight_spec.source,) : ()
     weight_inputs = isempty(weight_input_names) ? () :
         (parent(parent(weight_spec.column)),)
+    evidence_bounds = evidence_spec === nothing ? () :
+        (evidence_spec.lower, evidence_spec.upper)
+    evidence_input_specs = Tuple(bound for bound in evidence_bounds
+        if bound.source !== nothing &&
+           bound.source ∉ (input_predictor_names..., group_names...,
+                            weight_input_names...))
+    evidence_input_names = Tuple(unique(bound.source
+                                        for bound in evidence_input_specs))
+    evidence_inputs = map(evidence_input_names) do source
+        bound = first(entry for entry in evidence_input_specs
+                      if entry.source === source)
+        parent(parent(bound.column))
+    end
     response_values = parent(parent(response_lhs))
 
     group_specs = map(varying_groups, group_names) do varying, group_name
@@ -5708,6 +6365,12 @@ function _lower_brmi(brmi::BRM.BRMI)
         Set((location, response, input_predictor_names..., sampled_offsets...,
              group_names...))
     weight_spec === nothing || push!(expected_values, weight_spec.source)
+    if evidence_spec !== nothing
+        evidence_spec.lower.source === nothing ||
+            push!(expected_values, evidence_spec.lower.source)
+        evidence_spec.upper.source === nothing ||
+            push!(expected_values, evidence_spec.upper.source)
+    end
     for spec in group_specs
         push!(expected_values, spec.prior.operation)
         spec.correlation_prior === nothing ||
@@ -5722,7 +6385,8 @@ function _lower_brmi(brmi::BRM.BRMI)
         join(sort!(collect(extras)), ", ")))
 
     input_names = (
-        input_predictor_names..., group_names..., weight_input_names...)
+        input_predictor_names..., group_names..., weight_input_names...,
+        evidence_input_names...)
     input_declarations = _declaration_namedtuple(
         input_names, map(_ -> input(), input_names))
     scalar_location && family !== BRM.Normal && throw(CapabilityError(
@@ -5871,9 +6535,27 @@ function _lower_brmi(brmi::BRM.BRMI)
         poisson(response, rate_name)
     end
     if weight_spec !== nothing
+        evidence_spec === nothing || throw(CapabilityError(
+            :response_evidence,
+            "weighted response evidence is not yet lowered from BRM"))
         observation_declaration = weighted_observation(
             observation_declaration,
             observation_weight(weight_spec.kind, weight_spec.source))
+    end
+    if evidence_spec !== nothing
+        evidence = if evidence_spec.kind === :truncated
+            truncated_evidence(;
+                lower=evidence_spec.lower.value,
+                upper=evidence_spec.upper.value)
+        elseif evidence_spec.kind === :censored
+            censored_evidence(;
+                lower=evidence_spec.lower.value,
+                upper=evidence_spec.upper.value)
+        else
+            interval_evidence(evidence_spec.upper.value)
+        end
+        observation_declaration = evidence_observation(
+            observation_declaration, evidence)
     end
     observation_declarations = NamedTuple{(response,)}(
         (broadcasted(observation_declaration),))
@@ -5901,7 +6583,8 @@ function _lower_brmi(brmi::BRM.BRMI)
                         response))
     end
     bindings = _declaration_namedtuple(
-        input_names, (predictors..., groups..., weight_inputs...))
+        input_names,
+        (predictors..., groups..., weight_inputs..., evidence_inputs...))
     conditions = NamedTuple{(response,)}((response_values,))
     (; declaration, bindings, conditions)
 end
@@ -6629,12 +7312,114 @@ function _syntax_observation_weight(rhs)
     (; distribution, kind, source=only(weight_arguments))
 end
 
+function _syntax_call_parts(expression, context::AbstractString)
+    expression isa Expr || throw(ArgumentError(
+        "native PPL @model $context must be a call; got `$expression`"))
+    arguments = if expression.head === :call
+        expression.args[2:end]
+    elseif expression.head === :. && length(expression.args) == 2 &&
+           expression.args[2] isa Expr && expression.args[2].head === :tuple
+        expression.args[2].args
+    else
+        throw(ArgumentError(
+            "native PPL @model $context must be a call; got `$expression`"))
+    end
+    name = _syntax_name(first(expression.args))
+    name === nothing && throw(ArgumentError(
+        "native PPL @model cannot identify the function in `$expression`"))
+    positional = Any[]
+    keywords = Dict{Symbol,Any}()
+    for argument in arguments
+        if argument isa Expr && argument.head === :parameters
+            for keyword in argument.args
+                keyword isa Expr && keyword.head === :kw &&
+                    length(keyword.args) == 2 &&
+                    first(keyword.args) isa Symbol || throw(ArgumentError(
+                        "native PPL @model $context has malformed keywords"))
+                key, value = keyword.args
+                haskey(keywords, key) && throw(ArgumentError(
+                    "native PPL @model $context specifies `$key` twice"))
+                keywords[key] = value
+            end
+        else
+            push!(positional, argument)
+        end
+    end
+    (; name, positional, keywords)
+end
+
+function _syntax_evidence_bound(bound, context::AbstractString)
+    bound === :nothing && return (; value=nothing, dependency=nothing)
+    bound isa Real && isfinite(bound) || bound isa Symbol || throw(
+        ArgumentError(
+            "native PPL @model $context must be a finite literal, named " *
+            "value, or `nothing`"))
+    bound isa Real && !isfinite(bound) && throw(ArgumentError(
+        "native PPL @model $context must be finite"))
+    bound isa Symbol ? (; value=QuoteNode(bound), dependency=bound) :
+        (; value=bound, dependency=nothing)
+end
+
+function _syntax_observation_evidence(rhs)
+    parts = _syntax_call_parts(rhs, "observation family")
+    kind = parts.name === :truncated ? :truncated :
+        parts.name === :censored ? :censored :
+        parts.name === :interval_censored ? :interval_censored : nothing
+    kind === nothing && return nothing
+    isempty(parts.positional) && throw(ArgumentError(
+        "native PPL @model $(parts.name) needs a base distribution"))
+    distribution = first(parts.positional)
+    positional = parts.positional[2:end]
+    allowed = kind === :interval_censored ? (:upper,) : (:lower, :upper)
+    unknown = Tuple(key for key in keys(parts.keywords) if key ∉ allowed)
+    isempty(unknown) || throw(ArgumentError(
+        "native PPL @model $(parts.name) has unsupported keywords $unknown"))
+    lower = nothing
+    upper = nothing
+    if kind === :interval_censored
+        isempty(positional) || throw(ArgumentError(
+            "native PPL @model interval_censored accepts `upper` only as a keyword"))
+        haskey(parts.keywords, :upper) || throw(ArgumentError(
+            "native PPL @model interval_censored requires `upper=`"))
+        upper = parts.keywords[:upper]
+    else
+        length(positional) <= 2 || throw(ArgumentError(
+            "native PPL @model $(parts.name) accepts at most lower and upper bounds"))
+        !isempty(positional) && (lower = positional[1])
+        length(positional) == 2 && (upper = positional[2])
+        if haskey(parts.keywords, :lower)
+            isempty(positional) || throw(ArgumentError(
+                "native PPL @model $(parts.name) specifies `lower` twice"))
+            lower = parts.keywords[:lower]
+        end
+        if haskey(parts.keywords, :upper)
+            length(positional) < 2 || throw(ArgumentError(
+                "native PPL @model $(parts.name) specifies `upper` twice"))
+            upper = parts.keywords[:upper]
+        end
+        lower === nothing && upper === nothing && throw(ArgumentError(
+            "native PPL @model $(parts.name) needs at least one bound"))
+    end
+    lower = _syntax_evidence_bound(lower === nothing ? :nothing : lower,
+                                   "$(parts.name) lower bound")
+    upper = _syntax_evidence_bound(upper === nothing ? :nothing : upper,
+                                   "$(parts.name) upper bound")
+    if lower.value isa Real && upper.value isa Real &&
+       lower.value >= upper.value
+        throw(ArgumentError(
+            "native PPL @model $(parts.name) lower bound must be below its upper bound"))
+    end
+    (; kind, distribution, lower, upper)
+end
+
 function _syntax_observation(lhs, rhs; broadcasted::Bool)
     lhs isa Symbol || throw(ArgumentError(
         "native PPL @model stochastic-site left-hand side must be a bare " *
         "name; got `$lhs`"))
     weight = _syntax_observation_weight(rhs)
     weight === nothing || (rhs = weight.distribution)
+    evidence = _syntax_observation_evidence(rhs)
+    evidence === nothing || (rhs = evidence.distribution)
     family, arguments = _syntax_distribution_call(rhs, "observation family")
     extra_node_name = nothing
     extra_node_value = nothing
@@ -6669,6 +7454,26 @@ function _syntax_observation(lhs, rhs; broadcasted::Bool)
         "native PPL @model $family observation needs $expected parameter(s)"))
     scalar_value = Expr(:call, _syntax_ref(builder), QuoteNode(lhs),
                         (QuoteNode(argument) for argument in arguments)...)
+    if evidence !== nothing
+        evidence_value = if evidence.kind === :truncated
+            Expr(
+                :call, _syntax_ref(:truncated_evidence),
+                Expr(:parameters,
+                     Expr(:kw, :lower, evidence.lower.value),
+                     Expr(:kw, :upper, evidence.upper.value)))
+        elseif evidence.kind === :censored
+            Expr(
+                :call, _syntax_ref(:censored_evidence),
+                Expr(:parameters,
+                     Expr(:kw, :lower, evidence.lower.value),
+                     Expr(:kw, :upper, evidence.upper.value)))
+        else
+            Expr(:call, _syntax_ref(:interval_evidence), evidence.upper.value)
+        end
+        scalar_value = Expr(
+            :call, _syntax_ref(:evidence_observation), scalar_value,
+            evidence_value)
+    end
     if weight !== nothing
         weight_value = Expr(
             :call, _syntax_ref(:observation_weight), QuoteNode(weight.kind),
@@ -6679,9 +7484,13 @@ function _syntax_observation(lhs, rhs; broadcasted::Bool)
     end
     value = broadcasted ?
         Expr(:call, _syntax_ref(:broadcasted), scalar_value) : scalar_value
+    evidence_dependencies = evidence === nothing ? () : Tuple(
+        dependency for dependency in
+        (evidence.lower.dependency, evidence.upper.dependency)
+        if dependency !== nothing)
     (; name=lhs, value, extra_node_name, extra_node_value,
-       dependencies=weight === nothing ? Tuple(arguments) :
-           (Tuple(arguments)..., weight.source))
+       dependencies=(Tuple(arguments)..., evidence_dependencies...,
+                     (weight === nothing ? () : (weight.source,))...))
 end
 
 function _syntax_outputs(statement)
@@ -6726,7 +7535,8 @@ end
 
 const _SYNTAX_DISTRIBUTION_NAMES =
     (:Normal, :StandardNormal, :Exponential, :LKJCholesky,
-     :MvNormalCholesky, :BernoulliLogit, :Poisson, :weighted)
+     :MvNormalCholesky, :BernoulliLogit, :Poisson, :weighted,
+     :truncated, :censored, :interval_censored)
 const _SYNTAX_DETERMINISTIC_NAMES =
     (:center, :zscale, :standardize, :affine, :exp, :exp_link, :dot)
 const _SYNTAX_OPERATOR_NAMES =
@@ -7120,7 +7930,9 @@ deterministic zero-observation model. The current vector executor requires the
 explicit broadcast form (`@.` or dotted `~`). Composition-only outer models
 use `site ~ stochastic_child(...)` for stochastic child outputs and
 `value = deterministic_child(...)` for deterministic child outputs; the macro
-generates the explicit namespaced graph machinery.
+generates the explicit namespaced graph machinery. Broadcast observations may
+retain `truncated`, `censored`, or `interval_censored` evidence semantics;
+these are typed factor decorators rather than backend-specific syntax.
 """
 macro model(definition)
     esc(_model_function_syntax(definition))
@@ -7141,6 +7953,7 @@ export FactorPlan, FactorPrepared, FactorWorkspace, FactorLogDensityProblem
 export StandardNormalSiteFactor, NormalSiteFactor, ExponentialSiteFactor
 export LKJCholeskySiteFactor
 export BernoulliLogitSiteFactor, PoissonSiteFactor, WeightedSiteFactor
+export EvidenceSiteFactor
 export ScalarSiteShape, BlockSiteShape, BroadcastSiteShape
 export FreeSite, ConditionedSite, GeneratedSite
 export RealSupport, PositiveSupport, CholeskyCorrelationSupport
@@ -7150,6 +7963,8 @@ export Center, ZScale, Affine, ExpLink, LogLink
 export GroupGather, RowProduct, GroupedAffine
 export NormalObservation, BernoulliLogitObservation, PoissonObservation
 export AbstractObservationWeight, ObservationWeight
+export AbstractObservationEvidence, TruncatedEvidence, CensoredEvidence
+export IntervalEvidence, EvidenceObservation
 export WeightedObservation, BroadcastObservation
 export model, input, parameter, Identity, Exp, normal_prior, Exponential
 export center, zscale, standardize, affine, exp_link, log_link
@@ -7161,7 +7976,9 @@ export grouped_affine, grouped_standardized, grouped_scales
 export grouped_correlation, grouped_predictors
 export normal, bernoulli_logit, poisson, observation_weight
 export observation_weight_kind, observation_weight_source
-export weighted_observation, broadcasted
+export weighted_observation, truncated_evidence, censored_evidence
+export interval_evidence, evidence_kind, evidence_lower, evidence_upper
+export evidence_observation, broadcasted
 export instantiate, substitute, condition, component, output, compose, bind, lower
 export factor_graph, site_factor_dependencies, factor_node_dependencies
 export site_value_name, input_value_name, node_value_name

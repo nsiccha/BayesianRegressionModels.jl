@@ -201,6 +201,56 @@ end
     @test result.n_divergent_samples == 0
 end
 
+@testset "censored grouped factor DAG samples end-to-end with WarmupHMC" begin
+    groups = 6
+    replicates_per_group = 5
+    group = repeat(collect(1:groups), inner=replicates_per_group)
+    x = collect(range(-1.6, 1.8; length=groups * replicates_per_group))
+    group_intercept = collect(range(-0.28, 0.28; length=groups))
+    mu = [
+        0.22 - 0.48 * x[row] + group_intercept[group[row]]
+        for row in eachindex(x)
+    ]
+    latent_y = [mu[row] + 0.52 * sin(0.61 * row) for row in eachindex(x)]
+    y = clamp.(latent_y, -0.4, 0.7)
+    brmi = @brm (; x, group, y) begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x + (1 | g | group)
+        sd(:, g) ~ Exponential(1)
+        y ~ censored(Normal(mu, sigma); lower=-0.4, upper=0.7)
+    end
+    prepared = NP.prepare(NP.compile(brmi))
+    problem = NP.LogDensityProblem(prepared, DI.AutoEnzyme())
+
+    dimension = LogDensityProblems.dimension(problem)
+    @test dimension == groups + 4
+    @test NP.evidence_kind(
+        prepared.plan.graph.sites.y.factor.evidence) === :censored
+    density, gradient = LogDensityProblems.logdensity_and_gradient(
+        problem, zeros(dimension))
+    @test isfinite(density)
+    @test all(isfinite, gradient)
+
+    result = WarmupHMC.adaptive_warmup_mcmc(
+        Xoshiro(0x20260807),
+        problem;
+        n_draws=50,
+        n_evaluations=220,
+        stepsize_adaptation_limit=25,
+        max_tree_depth=8,
+        progress=nothing,
+        monitor_ess=false,
+        nonlinear_adapt=false,
+    )
+
+    draws = result.posterior_position
+    @test size(draws, 1) == dimension
+    @test size(draws, 2) >= 50
+    @test all(isfinite, draws)
+    @test all(>(1e-6), vec(std(draws; dims=2)))
+    @test result.n_divergent_samples == 0
+end
+
 @testset "factor DAG samples end-to-end with WarmupHMC" begin
     response = [0.28, 0.35, 0.31, 0.41, 0.26, 0.37]
     prepared = NP.prepare(NP.compile(NP.condition(

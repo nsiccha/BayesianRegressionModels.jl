@@ -509,6 +509,28 @@ NP.@model function natural_power_weighted_poisson(x, importance)
     @. y ~ weighted(Poisson(exp(log_rate)), weights(importance))
 end
 
+NP.@model function natural_censored_varying_intercept(x, group)
+    tau_g_group ~ Exponential(1)
+    b_g_group[group] ~ Normal(0.0, tau_g_group)
+    beta_mu[(:Intercept, :x)] ~ StandardNormal()
+    sigma ~ Exponential(2)
+    mu = dot(beta_mu, (1, x)) + b_g_group[group]
+    @. y ~ censored(Normal(mu, sigma); lower=-0.5, upper=1.0)
+end
+
+NP.@model function natural_interval_gaussian(x, interval_upper)
+    beta_mu[(:Intercept, :x)] ~ StandardNormal()
+    sigma ~ Exponential(2)
+    mu = dot(beta_mu, (1, x))
+    @. y ~ interval_censored(Normal(mu, sigma); upper=interval_upper)
+end
+
+NP.@model function natural_truncated_poisson(x)
+    beta_log_rate[(:Intercept, :x)] ~ StandardNormal()
+    log_rate = dot(beta_log_rate, (1, x))
+    @. y ~ truncated(Poisson(exp(log_rate)), 1, 4)
+end
+
 NP.@model function natural_varying_slope(x, group)
     tau_p_group ~ Exponential(1)
     b_p_group[group] ~ Normal(0.0, tau_p_group)
@@ -8600,6 +8622,447 @@ end
             @. y ~ weighted(Normal(mu, mu), [1.0, 2.0])
         end)))
     @test occursin("observation-weight constructor", err.msg)
+end
+
+@testset "typed native PPL response evidence" begin
+    truncated_spec = NP.truncated_evidence(lower=-0.75, upper=1.25)
+    @test NP.evidence_kind(truncated_spec) === :truncated
+    @test NP.evidence_lower(truncated_spec) == -0.75
+    @test NP.evidence_upper(truncated_spec) == 1.25
+
+    censored_spec = NP.censored_evidence(lower=:lower, upper=:upper)
+    @test NP.evidence_kind(censored_spec) === :censored
+    @test NP.evidence_lower(censored_spec) === :lower
+    @test NP.evidence_upper(censored_spec) === :upper
+
+    interval_spec = NP.interval_evidence(:interval_upper)
+    @test NP.evidence_kind(interval_spec) === :interval_censored
+    @test NP.evidence_lower(interval_spec) === nothing
+    @test NP.evidence_upper(interval_spec) === :interval_upper
+
+    @test_throws ArgumentError NP.truncated_evidence()
+    @test_throws ArgumentError NP.censored_evidence()
+    @test_throws ArgumentError NP.interval_evidence(nothing)
+    @test_throws ArgumentError NP.truncated_evidence(lower=1.0, upper=1.0)
+    @test_throws ArgumentError NP.censored_evidence(lower=-Inf)
+    @test_throws ArgumentError NP.interval_evidence([1.0, 2.0])
+
+    base = NP.normal(:y, :mu, :sigma)
+    observation = NP.evidence_observation(base, censored_spec)
+    @test NP.observation_response(observation) === :y
+    @test NP.observation_dependencies(observation) ==
+          (:mu, :sigma, :lower, :upper)
+
+    declaration = NP.model(
+        inputs=(; x=NP.input(), lower=NP.input(), upper=NP.input()),
+        parameters=(;
+            beta_mu=NP.parameter(
+                NP.RealSupport(), (:Intercept, :x);
+                transform=NP.Identity(), prior=NP.StandardNormal()),
+            sigma=NP.parameter(
+                NP.PositiveSupport(), (:sigma,);
+                transform=NP.Exp(), prior=NP.Exponential(2.0))),
+        nodes=(; mu=NP.affine(:x, :beta_mu)),
+        observations=(; y=NP.broadcasted(observation)))
+    graph = NP.factor_graph(
+        declaration;
+        bindings=(;
+            x=[-1.0, 0.5], lower=[-0.5, -0.5], upper=[1.0, 1.0]),
+        conditions=(; y=[-0.5, 0.25]))
+    factor = graph.sites.y.factor
+    @test factor isa NP.EvidenceSiteFactor
+    @test factor.factor isa NP.NormalSiteFactor
+    @test factor.evidence === censored_spec
+    @test factor.lower isa NP.InputValue{:lower}
+    @test factor.upper isa NP.InputValue{:upper}
+    @test NP.base_site_factor(factor) isa NP.NormalSiteFactor
+    @test NP.site_factor_dependencies(factor) == (:mu, :sigma)
+    @test graph.schedule == (:beta_mu, :sigma, :mu, :y)
+
+    evidence_data = (;
+        x=[-1.0, 0.0, 1.0],
+        group=[1, 1, 2],
+        y=[-0.5, 0.2, 1.0])
+    censored_brmi = @brm evidence_data begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x + (1 | g | group)
+        sd(:, g) ~ Exponential(1)
+        y ~ censored(Normal(mu, sigma); lower=-0.5, upper=1.0)
+    end
+    natural_censored = NP.condition(
+        natural_censored_varying_intercept(
+            evidence_data.x, evidence_data.group);
+        y=evidence_data.y)
+    lowered_censored = NP.lower(censored_brmi)
+    @test typeof(lowered_censored) ===
+          typeof(natural_censored.declaration)
+    @test sprint(show, lowered_censored) ==
+          sprint(show, natural_censored.declaration)
+    @test lowered_censored.observations.y.scalar isa NP.EvidenceObservation
+    @test NP.evidence_kind(
+        lowered_censored.observations.y.scalar.evidence) === :censored
+    @test NP.compile(censored_brmi) isa NP.FactorPlan
+    @test SBBRMI(censored_brmi; mod=@__MODULE__) isa SBBRMI
+
+    interval_data = (;
+        x=[-1.0, 0.0, 1.0],
+        interval_upper=[-0.1, 0.5, 1.3],
+        y=[-0.4, 0.0, 0.5])
+    interval_brmi = @brm interval_data begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x
+        y ~ interval_censored(Normal(mu, sigma); upper=interval_upper)
+    end
+    natural_interval = NP.condition(
+        natural_interval_gaussian(
+            interval_data.x, interval_data.interval_upper);
+        y=interval_data.y)
+    lowered_interval = NP.lower(interval_brmi)
+    @test typeof(lowered_interval) ===
+          typeof(natural_interval.declaration)
+    @test sprint(show, lowered_interval) ==
+          sprint(show, natural_interval.declaration)
+    @test keys(lowered_interval.inputs) == (:x, :interval_upper)
+
+    count_data = (; x=[-1.0, 0.0, 1.0], y=[1, 2, 4])
+    truncated_poisson_brmi = @brm count_data begin
+        log_rate ~ 1 + x
+        y ~ truncated(Poisson(exp(log_rate)), 1, 4)
+    end
+    natural_count = NP.condition(
+        natural_truncated_poisson(count_data.x); y=count_data.y)
+    lowered_count = NP.lower(truncated_poisson_brmi)
+    @test typeof(lowered_count) === typeof(natural_count.declaration)
+    @test sprint(show, lowered_count) ==
+          sprint(show, natural_count.declaration)
+
+    nested = NP.weighted_observation(
+        NP.evidence_observation(base, truncated_spec),
+        NP.observation_weight(:frequency, :replicates))
+    nested_model = NP.model(
+        inputs=(; x=NP.input(), replicates=NP.input()),
+        parameters=declaration.parameters,
+        nodes=declaration.nodes,
+        observations=(; y=NP.broadcasted(nested)))
+    nested_graph = NP.factor_graph(
+        nested_model;
+        bindings=(; x=[-1.0, 0.5], replicates=[1, 2]),
+        conditions=(; y=[-0.5, 0.25]))
+    nested_factor = nested_graph.sites.y.factor
+    @test nested_factor isa NP.WeightedSiteFactor
+    @test nested_factor.factor isa NP.EvidenceSiteFactor
+    @test NP.base_site_factor(nested_factor) isa NP.NormalSiteFactor
+    @test NP.observation_dependencies(nested) ==
+          (:mu, :sigma, :replicates)
+
+    x = [-1.0, 0.0, 1.0]
+    position = [0.1, 0.4, log(0.8)]
+    location = position[1] .+ position[2] .* x
+    scale = exp(position[3])
+    function normal_evidence_prepared(evidence, response; extra=(;))
+        observation = NP.evidence_observation(
+            NP.normal(:y, :mu, :sigma), evidence)
+        model = NP.model(
+            inputs=merge((; x=NP.input()),
+                         map(_ -> NP.input(), extra)),
+            parameters=declaration.parameters,
+            nodes=declaration.nodes,
+            observations=(; y=NP.broadcasted(observation)))
+        NP.prepare(NP.bind(
+            model, merge((; x), extra); conditions=(; y=response)))
+    end
+
+    truncated_response = [-0.6, 0.2, 1.1]
+    truncated_prepared = normal_evidence_prepared(
+        NP.truncated_evidence(lower=-0.75, upper=1.25),
+        truncated_response)
+    truncated_work = NP.workspace(truncated_prepared)
+    truncated_expected = map(location, truncated_response) do mu, value
+        logpdf(BRM.truncated(
+            Normal(mu, scale); lower=-0.75, upper=1.25), value)
+    end
+    @test NP.evaluate(
+        truncated_work, truncated_prepared, position,
+        NP.PointwiseLogLikelihood()) ≈ truncated_expected atol=2e-12
+    truncated_draws = NP.simulate(
+        MersenneTwister(711), truncated_work, truncated_prepared, position)
+    @test all(-0.75 .<= truncated_draws .<= 1.25)
+    @test truncated_draws == NP.simulate(
+        MersenneTwister(711), truncated_work, truncated_prepared, position)
+
+    censored_response = [-0.5, 0.2, 1.0]
+    censored_prepared = normal_evidence_prepared(
+        NP.censored_evidence(lower=-0.5, upper=1.0), censored_response)
+    censored_work = NP.workspace(censored_prepared)
+    censored_expected = map(location, censored_response) do mu, value
+        logpdf(BRM.censored(
+            Normal(mu, scale); lower=-0.5, upper=1.0), value)
+    end
+    @test NP.evaluate(
+        censored_work, censored_prepared, position,
+        NP.PointwiseLogLikelihood()) ≈ censored_expected atol=2e-12
+    censored_draws = NP.simulate(
+        MersenneTwister(712), censored_work, censored_prepared, position)
+    @test all(-0.5 .<= censored_draws .<= 1.0)
+
+    interval_upper = [-0.1, 0.5, 1.3]
+    interval_response = [-0.4, 0.0, 0.5]
+    interval_prepared = normal_evidence_prepared(
+        NP.interval_evidence(:interval_upper), interval_response;
+        extra=(; interval_upper))
+    interval_work = NP.workspace(interval_prepared)
+    interval_expected = map(
+        location, interval_response, interval_upper) do mu, lower, upper
+        normal = Normal(mu, scale)
+        log(BRM.cdf(normal, upper) - BRM.cdf(normal, lower))
+    end
+    @test NP.evaluate(
+        interval_work, interval_prepared, position,
+        NP.PointwiseLogLikelihood()) ≈ interval_expected atol=2e-12
+    interval_rng = MersenneTwister(713)
+    interval_expected_rng = MersenneTwister(713)
+    @test NP.simulate(
+        interval_rng, interval_work, interval_prepared, position) ==
+        location .+ scale .* [randn(interval_expected_rng)
+                              for _ in location]
+
+    nested_prepared = NP.prepare(NP.bind(
+        nested_model, (; x=x[1:2], replicates=[2, 3]);
+        conditions=(; y=truncated_response[1:2])))
+    nested_work = NP.workspace(nested_prepared)
+    @test NP.evaluate(
+        nested_work, nested_prepared, position,
+        NP.PointwiseLogLikelihood()) ≈
+          [2, 3] .* truncated_expected[1:2]
+
+    function poisson_evidence_prepared(evidence, response; extra=(;))
+        observation = NP.evidence_observation(
+            NP.poisson(:y, :rate), evidence)
+        model = NP.model(
+            inputs=merge((; x=NP.input()),
+                         map(_ -> NP.input(), extra)),
+            parameters=(;
+                beta=NP.parameter(
+                    NP.RealSupport(), (:Intercept, :x);
+                    transform=NP.Identity(), prior=NP.StandardNormal())),
+            nodes=(;
+                log_rate=NP.affine(:x, :beta),
+                rate=NP.exp_link(:log_rate)),
+            observations=(; y=NP.broadcasted(observation)))
+        NP.prepare(NP.bind(
+            model, merge((; x), extra); conditions=(; y=response)))
+    end
+    poisson_position = [log(2.0), 0.2]
+    rates = exp.(poisson_position[1] .+ poisson_position[2] .* x)
+
+    count_truncated = [1, 2, 4]
+    poisson_truncated = poisson_evidence_prepared(
+        NP.truncated_evidence(lower=1, upper=4), count_truncated)
+    poisson_truncated_work = NP.workspace(poisson_truncated)
+    @test NP.evaluate(
+        poisson_truncated_work, poisson_truncated, poisson_position,
+        NP.PointwiseLogLikelihood()) ≈ map(
+            rates, count_truncated) do rate, value
+                logpdf(BRM.truncated(
+                    Poisson(rate); lower=1, upper=4), value)
+            end atol=2e-12
+    @test all(1 .<= NP.simulate(
+        MersenneTwister(714), poisson_truncated_work,
+        poisson_truncated, poisson_position) .<= 4)
+
+    count_censored = [0, 2, 4]
+    poisson_censored = poisson_evidence_prepared(
+        NP.censored_evidence(lower=0, upper=4), count_censored)
+    poisson_censored_work = NP.workspace(poisson_censored)
+    @test NP.evaluate(
+        poisson_censored_work, poisson_censored, poisson_position,
+        NP.PointwiseLogLikelihood()) ≈ map(
+            rates, count_censored) do rate, value
+                logpdf(BRM.censored(
+                    Poisson(rate); lower=0, upper=4), value)
+            end atol=2e-12
+
+    count_upper = [1, 3, 5]
+    count_lower = [0, 1, 3]
+    poisson_interval = poisson_evidence_prepared(
+        NP.interval_evidence(:count_upper), count_lower;
+        extra=(; count_upper))
+    poisson_interval_work = NP.workspace(poisson_interval)
+    @test NP.evaluate(
+        poisson_interval_work, poisson_interval, poisson_position,
+        NP.PointwiseLogLikelihood()) ≈ map(
+            rates, count_lower, count_upper) do rate, lower, upper
+                poisson = Poisson(rate)
+                log(BRM.cdf(poisson, upper) - BRM.cdf(poisson, lower))
+            end atol=2e-12
+
+    function check_evidence_gradient(prepared, values; rtol=3e-5)
+        work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
+        density, gradient = NP.logdensity_and_gradient!(
+            work, prepared, values)
+        finite_difference = similar(gradient)
+        step = 1e-6
+        plus = copy(values)
+        minus = copy(values)
+        for coordinate in eachindex(values)
+            plus[coordinate] += step
+            minus[coordinate] -= step
+            finite_difference[coordinate] = (
+                NP.logdensity!(work, prepared, plus) -
+                NP.logdensity!(work, prepared, minus)) / (2step)
+            plus[coordinate] = values[coordinate]
+            minus[coordinate] = values[coordinate]
+        end
+        @test isfinite(density)
+        @test gradient ≈ finite_difference rtol=rtol atol=3e-6
+        @test factor_steady_state_allocations(
+            work, prepared, values) == (; primal=0, gradient=0)
+        work
+    end
+    truncated_ad_work = check_evidence_gradient(
+        truncated_prepared, position)
+    censored_ad_work = check_evidence_gradient(
+        censored_prepared, position)
+    check_evidence_gradient(interval_prepared, position)
+    check_evidence_gradient(poisson_truncated, poisson_position; rtol=5e-5)
+    check_evidence_gradient(poisson_censored, poisson_position; rtol=5e-5)
+    check_evidence_gradient(poisson_interval, poisson_position; rtol=5e-5)
+
+    replay_x = [-0.5, 0.5]
+    replay_response = [-0.5, 0.7]
+    replay = NP.rebind(
+        censored_prepared, (; y=replay_response);
+        bindings=(; x=replay_x))
+    replay_work = NP.workspace(replay)
+    replay_location = position[1] .+ position[2] .* replay_x
+    @test NP.evaluate(
+        replay_work, replay, position,
+        NP.PointwiseLogLikelihood()) ≈ map(
+            replay_location, replay_response) do mu, value
+                logpdf(BRM.censored(
+                    Normal(mu, scale); lower=-0.5, upper=1.0), value)
+            end
+    prediction_only = NP.rebind(
+        interval_prepared, (;);
+        bindings=(; x=replay_x, interval_upper=[0.2, 1.0]))
+    prediction_work = NP.workspace(prediction_only)
+    @test length(NP.simulate(
+        MersenneTwister(715), prediction_work, prediction_only, position)) == 2
+
+    draw_positions = [position'; (position .+ [0.1, -0.05, 0.02])']
+    pointwise_draws = zeros(2, 3)
+    predictive_draws = zeros(2, 3)
+    bundle = (;
+        linear=zeros(2, 3),
+        pointwise=zeros(2, 3),
+        predictive=zeros(2, 3))
+    NP.evaluate_draws!(
+        pointwise_draws, censored_ad_work, censored_prepared,
+        draw_positions, NP.PointwiseLogLikelihood())
+    predictive_rng = MersenneTwister(716)
+    bundle_rng = MersenneTwister(716)
+    NP.simulate_draws!(
+        predictive_rng, predictive_draws, censored_ad_work,
+        censored_prepared, draw_positions)
+    NP.execute_draws!(
+        bundle_rng, bundle, censored_ad_work, censored_prepared,
+        draw_positions,
+        (; linear=NP.LinearPredictor(),
+           pointwise=NP.PointwiseLogLikelihood(),
+           predictive=NP.PosteriorPredictive()))
+    @test bundle.pointwise ≈ pointwise_draws
+    @test bundle.predictive == predictive_draws
+    @test factor_batch_allocations(
+        censored_ad_work, censored_prepared, draw_positions,
+        zeros(2, 3), zeros(2, 3), zeros(2, 3),
+        (; linear=zeros(2, 3), pointwise=zeros(2, 3),
+           predictive=zeros(2, 3))) ==
+          (; linear=0, pointwise=0, predictive=0, bundle=0)
+
+    @test_throws ArgumentError normal_evidence_prepared(
+        NP.truncated_evidence(lower=-0.75, upper=1.25),
+        [-0.8, 0.2, 1.1])
+    @test_throws ArgumentError normal_evidence_prepared(
+        NP.censored_evidence(lower=-0.5, upper=1.0),
+        [-0.5, 0.2, 1.1])
+    @test_throws ArgumentError normal_evidence_prepared(
+        NP.interval_evidence(:interval_upper),
+        [0.0, 0.5, 1.0]; extra=(; interval_upper=[0.2, 0.4, 1.1]))
+    @test_throws ArgumentError poisson_evidence_prepared(
+        NP.truncated_evidence(lower=0.5, upper=4), [1, 2, 4])
+
+    fractional_bound_model = poisson_interval.plan.declaration
+    @test_throws ArgumentError NP.prepare(NP.bind(
+        fractional_bound_model,
+        (; x, count_upper=[16_777_217, 3, 5]);
+        conditions=(; y=count_lower)); T=Float32)
+
+    bernoulli_evidence = NP.model(
+        inputs=(; eta=NP.input()), parameters=(;), nodes=(;),
+        observations=(; y=NP.broadcasted(NP.evidence_observation(
+            NP.bernoulli_logit(:y, :eta),
+            NP.censored_evidence(lower=0, upper=1)))))
+    @test capability_error(() -> NP.bind(
+        bernoulli_evidence, (; eta=[-1.0, 1.0]);
+        conditions=(; y=[0, 1]))).capability == :response_evidence
+
+    extreme_lower = normal_evidence_prepared(
+        NP.censored_evidence(lower=-1000.0), fill(-1000.0, 3))
+    extreme_work = NP.workspace(
+        extreme_lower, Float64, DI.AutoEnzyme())
+    extreme_density, extreme_gradient = NP.logdensity_and_gradient!(
+        extreme_work, extreme_lower, [0.0, 0.0, 0.0])
+    @test isfinite(extreme_density)
+    @test all(isfinite, extreme_gradient)
+    narrow_tail = normal_evidence_prepared(
+        NP.truncated_evidence(lower=-1001.0, upper=-1000.0),
+        fill(-1000.5, 3))
+    @test isfinite(NP.logdensity!(
+        NP.workspace(narrow_tail), narrow_tail, [0.0, 0.0, 0.0]))
+    narrow_upper_tail = normal_evidence_prepared(
+        NP.truncated_evidence(lower=10.0, upper=11.0),
+        fill(10.5, 3))
+    narrow_upper_work = NP.workspace(
+        narrow_upper_tail, Float64, DI.AutoEnzyme())
+    narrow_upper_density, narrow_upper_gradient =
+        NP.logdensity_and_gradient!(
+            narrow_upper_work, narrow_upper_tail, [0.0, 0.0, 0.0])
+    @test isfinite(narrow_upper_density)
+    @test all(isfinite, narrow_upper_gradient)
+    far_count_tail = poisson_evidence_prepared(
+        NP.truncated_evidence(lower=50, upper=51), fill(50, 3))
+    far_count_work = NP.workspace(
+        far_count_tail, Float64, DI.AutoEnzyme())
+    far_count_density, far_count_gradient = NP.logdensity_and_gradient!(
+        far_count_work, far_count_tail, [0.0, 0.0])
+    @test isfinite(far_count_density)
+    @test all(isfinite, far_count_gradient)
+    million_count_tail = poisson_evidence_prepared(
+        NP.truncated_evidence(lower=1_000_000, upper=1_000_001),
+        fill(1_000_000, 3))
+    @test isfinite(NP.logdensity!(
+        NP.workspace(million_count_tail), million_count_tail, [0.0, 0.0]))
+    @test_throws ArgumentError NP.prepare(NP.bind(
+        poisson_interval.plan.declaration,
+        (; x, count_upper=fill(1.0e100, length(x)));
+        conditions=(; y=count_lower)))
+
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function bad_evidence_keyword(x)
+            beta[(:x,)] ~ StandardNormal()
+            sigma ~ Exponential(2)
+            mu = dot(beta, (x,))
+            @. y ~ censored(Normal(mu, sigma); side=0.0)
+        end)))
+    @test occursin("unsupported keywords", err.msg)
+    err = argument_error(() -> macroexpand(
+        @__MODULE__, :(NP.@model function raw_evidence_bound(x)
+            beta[(:x,)] ~ StandardNormal()
+            sigma ~ Exponential(2)
+            mu = dot(beta, (x,))
+            @. y ~ truncated(Normal(mu, sigma); lower=[-1.0, 0.0])
+        end)))
+    @test occursin("finite literal, named value", err.msg)
 end
 
 @testset "native PPL workflow queries and replay" begin
