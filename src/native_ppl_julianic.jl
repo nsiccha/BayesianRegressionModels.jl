@@ -66,6 +66,63 @@
 # CALLER's scope (the user's `using Distributions`), keeping the body real Julia.
 import Distributions
 
+# 0-alloc buffer-threading substrate (user directive 2026-08-04): every
+# array-valued intermediate in the run-the-body primal is filled IN PLACE into a
+# preallocated buffer via MutatingFunctions' `apply!!`, so the differentiated
+# kernel allocates nothing per gradient eval — the same discipline the declarative
+# FactorWorkspace uses (preallocated `FactorBuffers` threaded as a DI.Cache).
+using MutatingFunctions: apply!!
+# Destination SHAPES for those in-place fills, declared rather than discovered by a
+# pilot run: `broadcast_size` for broadcast nodes (function-first, so it is its own
+# entry point) and `output_size(getindex, …)` for gathers.
+using OutputSignatures: broadcast_size, output_size
+
+# --- Buffer pool ----------------------------------------------------------
+#
+# The pool holds one reusable flat `Vector{T}` per array-valued intermediate the
+# body produces, walked by a cursor in body-execution order. It is threaded through
+# the primal kernel as a `DI.Cache` (Enzyme shadows it; the in-place fills are
+# differentiated through), exactly mirroring the executor's `FactorBuffers`.
+#
+# Storage is deliberately FLAT and concretely typed (`Vector{Vector{T}}`): a pool of
+# heterogeneously-shaped arrays would be an abstract container and cost a dynamic
+# dispatch per access. An N-D intermediate (`tau .* (L*z)` is K×ngroups) is served by
+# `reshape`ing its flat buffer to the traced shape — a view, so still no allocation,
+# and MutatingFunctions' `apply!!(cache::AbstractArray, broadcast, …)` fills any-rank
+# destinations in place (snag `apply-0alloc-ppl-fb5b821f`, landed `0134a6c`).
+#
+# Sizing: a TRACE pass runs the body once with in-support placeholders and records
+# each intermediate's SHAPE (`buffer_sizes::Vector{Dims}`); `jworkspace` then
+# preallocates the pool at the workspace eltype. `_next_buffer!` grows the pool on
+# demand for the unprepared path (`jlogdensity` without a workspace), so a
+# preallocated pool never grows inside a differentiated call.
+mutable struct JulianicBuffers{T}
+    vectors::Vector{Vector{T}}
+    vcursor::Int
+end
+JulianicBuffers{T}() where {T} = JulianicBuffers{T}(Vector{Vector{T}}(), 0)
+function JulianicBuffers{T}(sizes::AbstractVector) where {T}
+    JulianicBuffers{T}([zeros(T, prod(s)) for s in sizes], 0)
+end
+
+# The next flat buffer, grown to `n` elements if the pool was not presized.
+@inline function _next_flat!(pool::JulianicBuffers{T}, n::Int) where {T}
+    pool.vcursor += 1
+    if pool.vcursor > length(pool.vectors)
+        push!(pool.vectors, zeros(T, n))    # grow lazily (unprepared eval only)
+    end
+    buffer = @inbounds pool.vectors[pool.vcursor]
+    length(buffer) == n || resize!(buffer, n)
+    return buffer
+end
+
+# The next buffer, shaped to `shape`. A 1-D shape returns the flat vector itself;
+# an N-D shape returns a `reshape` view of it (no allocation either way).
+@inline _next_buffer!(pool::JulianicBuffers, shape::Tuple{Int}) =
+    _next_flat!(pool, @inbounds shape[1])
+@inline _next_buffer!(pool::JulianicBuffers, shape::Dims) =
+    reshape(_next_flat!(pool, prod(shape)), shape)
+
 # --- Contexts -------------------------------------------------------------
 
 # PRIMAL: walks θ with a cursor and accumulates the log density into `acc`.
@@ -78,18 +135,23 @@ import Distributions
 # the body's `run` closure takes the data as a SEPARATE argument (passed through
 # DI as a `Constant`), so this struct holds only active/inactive-scalar state and
 # STATIC activity suffices — no runtime-activity workaround.
-mutable struct JulianicPrimal{TH<:AbstractVector,A}
+mutable struct JulianicPrimal{TH<:AbstractVector,A,B}
     theta::TH
     cursor::Int
     acc::A
+    buffers::B          # JulianicBuffers{eltype(theta)} — the preallocated pool
 end
-JulianicPrimal(theta::AbstractVector) = JulianicPrimal(theta, 0, zero(eltype(theta)))
+JulianicPrimal(theta::AbstractVector, buffers) =
+    JulianicPrimal(theta, 0, zero(eltype(theta)), buffers)
 
-# TRACE: runs the body once to size the unconstrained coordinate vector.
+# TRACE: runs the body once to size the unconstrained coordinate vector AND record
+# each array-valued intermediate's SHAPE (`buffer_sizes`), in body order, so the
+# primal pool can be preallocated to match.
 mutable struct JulianicTrace
     dim::Int
+    buffer_sizes::Vector{Dims}
 end
-JulianicTrace() = JulianicTrace(0)
+JulianicTrace() = JulianicTrace(0, Dims[])
 
 # --- `~` runtime: prep + logpdf ------------------------------------------
 #
@@ -338,6 +400,54 @@ end
     return getproperty(data, sitename)
 end
 
+# --- Cached array ops (the 0-alloc rewrite targets) -----------------------
+#
+# The macro rewrites each array-valued intermediate in the body into one of these,
+# decomposing a fused broadcast per operation node. PRIMAL fills a pooled buffer in
+# place via `apply!!`; TRACE runs the op allocating (once, at prepare) and records
+# the result SHAPE so the pool can be presized. Both passes execute the same lowered
+# body, so the push order (trace) and the walk order (primal) stay in lockstep.
+#
+# Shapes come from OutputSignatures — `broadcast_size` for a broadcast node (it is
+# function-first, so it has its own entry point rather than the `x`-first
+# `output_size`) and `output_size(getindex, …)` for a gather — which is exactly what
+# that package is for: the destination shape from immediately-available information,
+# no pilot run (snag `broadcast-gather-3d8a0849`, landed `121de31`).
+#
+# `broadcast` a single operator/function `f` over already-materialized args:
+@inline function _cached_broadcast!(ctx::JulianicPrimal, f::F, args...) where {F}
+    buffer = _next_buffer!(ctx.buffers, broadcast_size(args...))
+    apply!!(buffer, broadcast, f, args...)
+end
+@inline function _cached_broadcast!(ctx::JulianicTrace, f::F, args...) where {F}
+    push!(ctx.buffer_sizes, broadcast_size(args...))
+    broadcast(f, args...)
+end
+
+# `getindex` gather `A[idx]` (a whole-vector index, e.g. `b[group]`):
+@inline function _cached_gather!(ctx::JulianicPrimal, A, idx)
+    buffer = _next_buffer!(ctx.buffers, output_size(getindex, size(A), idx))
+    apply!!(buffer, getindex, A, idx)
+end
+@inline function _cached_gather!(ctx::JulianicTrace, A, idx)
+    push!(ctx.buffer_sizes, output_size(getindex, size(A), idx))
+    getindex(A, idx)
+end
+
+# Broadcast observation, accumulated 0-alloc. The macro brackets the obs with these
+# so the SAME generated `@. buf = logpdf(Dist(params), data)` runs in both passes
+# (no closure — the fused fill is inline generated code, keeping Enzyme's activity
+# analysis clean). PRIMAL fills a pooled, right-sized buffer (the distribution
+# vector stays lazy, never materialized) and sums it into `acc`; TRACE records the
+# obs length and hands back a throwaway scratch so the same `.=` fill is harmless.
+@inline _obs_begin!(ctx::JulianicPrimal, n::Int) = _next_buffer!(ctx.buffers, (n,))
+@inline function _obs_begin!(ctx::JulianicTrace, n::Int)
+    push!(ctx.buffer_sizes, (n,))
+    Vector{Float64}(undef, n)           # one-shot trace scratch for the .= fill
+end
+@inline _obs_end!(ctx::JulianicPrimal, buf) = (ctx.acc += sum(buf); nothing)
+@inline _obs_end!(::JulianicTrace, _buf) = nothing
+
 # --- Model objects --------------------------------------------------------
 
 # A julianic model: the lowered body (`run(ctx)`, closing over the model's
@@ -353,11 +463,14 @@ struct JulianicConditioned{R,D}
     data::D
 end
 
-# After the trace: adds the discovered unconstrained dimension.
+# After the trace: adds the discovered unconstrained dimension AND the ordered
+# lengths of the array-valued intermediate buffers (so a primal pool can be
+# preallocated to match — see `JulianicBuffers`).
 struct JulianicPrepared{R,D}
     run::R
     data::D
     dimension::Int
+    buffer_sizes::Vector{Dims}
 end
 
 """
@@ -376,15 +489,19 @@ Run the body once in TRACE mode to discover the unconstrained dimension.
 function jprepare(conditioned::JulianicConditioned)
     trace = JulianicTrace()
     conditioned.run(trace, conditioned.data)
-    return JulianicPrepared(conditioned.run, conditioned.data, trace.dim)
+    return JulianicPrepared(
+        conditioned.run, conditioned.data, trace.dim, trace.buffer_sizes)
 end
 
 dimension(prepared::JulianicPrepared) = prepared.dimension
 
 # The primal kernel `θ -> Real`. Top-level (not a closure over θ) so the AD
-# backend sees `prepared` as a constant and `theta` as the sole active input.
-function _julianic_kernel(theta::AbstractVector, prepared::JulianicPrepared)
-    ctx = JulianicPrimal(theta)
+# backend sees `prepared` as a constant, `theta` as the sole active input, and the
+# preallocated `buffers` pool as scratch (a DI.Cache in the gradient path). The
+# body fills those buffers in place, so no per-eval allocation.
+function _julianic_kernel(theta::AbstractVector, prepared::JulianicPrepared, buffers)
+    buffers.vcursor = 0
+    ctx = JulianicPrimal(theta, buffers)
     prepared.run(ctx, prepared.data)
     return ctx.acc
 end
@@ -405,7 +522,8 @@ Evaluate the log density by running the body as the primal.
 """
 function jlogdensity(prepared::JulianicPrepared, theta::AbstractVector)
     _julianic_check_dimension(prepared, theta)
-    return _julianic_kernel(theta, prepared)
+    buffers = JulianicBuffers{eltype(theta)}(prepared.buffer_sizes)
+    return _julianic_kernel(theta, prepared, buffers)
 end
 
 # Gradient plumbing. DifferentiationInterface lives in a weak-dep extension, so
@@ -414,16 +532,17 @@ end
 function _julianic_prepare_gradient end
 function _julianic_value_and_gradient! end
 
-struct JulianicWorkspace{P,G}
+struct JulianicWorkspace{P,G,B}
     di_preparation::P
     gradient::G
+    buffers::B          # the preallocated pool, threaded as a DI.Cache
 end
 
 """
     jworkspace(prepared, T, backend)
 
-Allocate a gradient workspace (AD preparation + gradient buffer) for a julianic
-prepared model at element type `T`.
+Allocate a gradient workspace (AD preparation + gradient buffer + the preallocated
+0-alloc buffer pool) for a julianic prepared model at element type `T`.
 
 `backend` is the plain `DI.AutoEnzyme()` the declarative executor uses — the
 conditioned data reaches the body as a separate `DI.Constant` argument instead
@@ -432,21 +551,23 @@ the primal and no `set_runtime_activity` mode is required.
 """
 function jworkspace(prepared::JulianicPrepared, ::Type{T}, backend) where {T<:AbstractFloat}
     position = zeros(T, prepared.dimension)
-    di_preparation = _julianic_prepare_gradient(prepared, backend, position)
-    JulianicWorkspace(di_preparation, zeros(T, prepared.dimension))
+    buffers = JulianicBuffers{T}(prepared.buffer_sizes)
+    di_preparation = _julianic_prepare_gradient(prepared, backend, position, buffers)
+    JulianicWorkspace(di_preparation, zeros(T, prepared.dimension), buffers)
 end
 
 """
     jlogdensity_and_gradient!(workspace, prepared, theta) -> (density, gradient)
 
 Value + gradient of the log density via Enzyme straight through the run-the-body
-primal.
+primal, with all array intermediates filled in place into the preallocated pool.
 """
 function jlogdensity_and_gradient!(
     workspace::JulianicWorkspace, prepared::JulianicPrepared, theta::AbstractVector)
     _julianic_check_dimension(prepared, theta)
     return _julianic_value_and_gradient!(
-        prepared, workspace.di_preparation, workspace.gradient, theta)
+        prepared, workspace.di_preparation, workspace.gradient, theta,
+        workspace.buffers)
 end
 
 # --- Macro ----------------------------------------------------------------
@@ -481,8 +602,75 @@ function _julianic_dotted_sample(statement)
     return (lhs=statement.args[2], rhs=statement.args[3])
 end
 
-# Lower one statement. Only `~` statements are rewritten; everything else is
-# returned verbatim (that is the whole point — the body is ordinary Julia).
+# --- 0-alloc rewrite of deterministic array expressions -------------------
+#
+# Every array-valued intermediate the body computes is routed through a pooled
+# buffer instead of a fresh allocation, so the differentiated kernel is literally
+# 0-alloc (user directive 2026-08-04; decision `08w0buk` option B). The rewrite is
+# per-NODE, bottom-up:
+#
+#   `beta[1] .+ beta[2] .* x .+ b[group]`
+#     ->  t1 = _cached_gather!(ctx, b, group)             # b[group]
+#         t2 = _cached_broadcast!(ctx, *, beta[2], x)     # beta[2] .* x
+#         t3 = _cached_broadcast!(ctx, +, beta[1], t2)    # ... .+ ...
+#         t4 = _cached_broadcast!(ctx, +, t3, t1)
+#
+# which is exactly `apply!!(buffer, broadcast|getindex, …)` — MutatingFunctions'
+# registered 0-alloc forms — with the buffers presized from the trace pass.
+# Scalar-only expressions are left VERBATIM (nothing to buffer), so the body stays
+# ordinary Julia wherever buffering buys nothing.
+
+# A dotted operator (`.+`) or dot-call (`exp.(v)`) is a broadcast node; `A[idx]`
+# with a non-literal index is a gather node. Anything else is left alone.
+_julianic_dotted_operator(f) =
+    f isa Symbol && length(string(f)) > 1 && startswith(string(f), ".") ?
+        Symbol(string(f)[2:end]) : nothing
+
+# Rewrite one expression bottom-up, emitting pooled-buffer ops into `prelude`.
+# Returns the expression to use in place of `ex`.
+function _julianic_buffer_expression!(prelude, ex, ctx)
+    ex isa Expr || return ex
+    # `exp.(v)` / `f.(a, b)` — an explicit dot-call.
+    if ex.head === :. && length(ex.args) == 2 && ex.args[2] isa Expr &&
+            ex.args[2].head === :tuple
+        f = ex.args[1]
+        args = [_julianic_buffer_expression!(prelude, a, ctx) for a in ex.args[2].args]
+        tmp = gensym(:bc)
+        push!(prelude, :($tmp = $(_cached_broadcast!)($ctx, $f, $(args...))))
+        return tmp
+    end
+    if ex.head === :call
+        operator = _julianic_dotted_operator(ex.args[1])
+        if operator !== nothing
+            args = [_julianic_buffer_expression!(prelude, a, ctx) for a in ex.args[2:end]]
+            tmp = gensym(:bc)
+            push!(prelude, :($tmp = $(_cached_broadcast!)($ctx, $operator, $(args...))))
+            return tmp
+        end
+        # Non-dotted call (`L * z`, `reshape(z, 2, n)`, `maximum(group)`, …) —
+        # recurse into the arguments but keep the call itself verbatim. `*` on
+        # arrays already has a registered mutating form, but it needs an
+        # output-shaped (possibly matrix) buffer, so it is handled by the
+        # matrix-aware path in a later milestone rather than forced through the
+        # vector pool here.
+        return Expr(:call, ex.args[1],
+                    (_julianic_buffer_expression!(prelude, a, ctx)
+                     for a in ex.args[2:end])...)
+    end
+    # `b[group]` — a gather when the index is not a literal scalar.
+    if ex.head === :ref && length(ex.args) == 2 && !(ex.args[2] isa Integer)
+        A = _julianic_buffer_expression!(prelude, ex.args[1], ctx)
+        idx = _julianic_buffer_expression!(prelude, ex.args[2], ctx)
+        tmp = gensym(:gather)
+        push!(prelude, :($tmp = $(_cached_gather!)($ctx, $A, $idx)))
+        return tmp
+    end
+    return ex
+end
+
+# Lower one statement. Only `~` statements change MEANING; deterministic
+# statements keep their semantics exactly and are only re-routed through pooled
+# buffers (still ordinary Julia, just allocation-free).
 # `ctx` names the (mutable) sampling context; `data` names the conditioned
 # observation data — both are parameters of the generated `run` closure.
 function _julianic_lower_statement(statement, ctx, data)
@@ -492,17 +680,21 @@ function _julianic_lower_statement(statement, ctx, data)
         lhs isa Symbol || throw(ArgumentError(
             "julianic @jmodel broadcast observation LHS must be a name; got `$lhs`"))
         data_var = gensym(lhs)
+        buffer_var = gensym(:obs)
         # `@__dot__` only dots calls whose head is a *symbol*, so bind the
-        # runtime logpdf to a local name before broadcasting. `@. lp(D(a,b), y)`
-        # then lowers to `lp.(D.(a,b), y)` — the constructor is dotted (so vector
-        # parameters broadcast row-wise) and each element's logpdf is scored.
+        # runtime logpdf to a local name before broadcasting. Writing the fused
+        # result INTO the pooled buffer (`@. buf = lp(D(a,b), y)`) keeps the
+        # vector of distributions lazy — it is never materialized — so the whole
+        # observation term costs no allocation.
         logpdf_var = gensym(:logpdf)
-        dotted = Expr(:macrocall, Symbol("@__dot__"), LineNumberNode(0),
-                      Expr(:call, logpdf_var, rhs, data_var))
+        fill = Expr(:macrocall, Symbol("@__dot__"), LineNumberNode(0),
+                    :($buffer_var = $(Expr(:call, logpdf_var, rhs, data_var))))
         return quote
             $(logpdf_var) = $(_obs_logpdf)
             $(data_var) = $(_observation)($data, $(Val(lhs)))
-            $(_accumulate!)($ctx, sum($(dotted)))
+            $(buffer_var) = $(_obs_begin!)($ctx, length($data_var))
+            $fill
+            $(_obs_end!)($ctx, $buffer_var)
         end
     end
     dotted_sample = _julianic_dotted_sample(statement)
@@ -512,13 +704,17 @@ function _julianic_lower_statement(statement, ctx, data)
             "julianic @jmodel broadcast observation LHS must be a name; got `$lhs`"))
         data_var = gensym(lhs)
         logpdf_var = gensym(:logpdf)
+        buffer_var = gensym(:obs)
         # The user already wrote the RHS dotted, so score elementwise WITHOUT
-        # re-dotting it: `y .~ Poisson.(exp(r))` is `sum(lp.(Poisson.(exp(r)), y))`.
-        dotted = Expr(:., logpdf_var, Expr(:tuple, rhs, data_var))
+        # re-dotting it: `y .~ Poisson.(exp(r))` fills the pooled buffer with
+        # `lp.(Poisson.(exp(r)), y)` and sums it — same 0-alloc path as `@.`.
+        fill = :($buffer_var .= $(Expr(:., logpdf_var, Expr(:tuple, rhs, data_var))))
         return quote
             $(logpdf_var) = $(_obs_logpdf)
             $(data_var) = $(_observation)($data, $(Val(lhs)))
-            $(_accumulate!)($ctx, sum($(dotted)))
+            $(buffer_var) = $(_obs_begin!)($ctx, length($data_var))
+            $fill
+            $(_obs_end!)($ctx, $buffer_var)
         end
     end
     scalar_sample = _julianic_scalar_sample(statement)
@@ -527,6 +723,13 @@ function _julianic_lower_statement(statement, ctx, data)
         lhs isa Symbol || throw(ArgumentError(
             "julianic @jmodel scalar site LHS must be a name (milestone 1); got `$lhs`"))
         return :($(lhs) = $(_sample_site!)($ctx, $data, $(Val(lhs)), $rhs))
+    end
+    # Deterministic assignment `lhs = rhs`: buffer every array-valued node in rhs.
+    if statement isa Expr && statement.head === :(=)
+        prelude = Any[]
+        rewritten = _julianic_buffer_expression!(prelude, statement.args[2], ctx)
+        isempty(prelude) && return statement
+        return Expr(:block, prelude..., Expr(:(=), statement.args[1], rewritten))
     end
     return statement
 end

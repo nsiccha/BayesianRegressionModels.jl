@@ -97,19 +97,22 @@ end
 # --- Julianic "run-the-body" stack ---------------------------------------
 # Enzyme straight through the run-the-body primal kernel `θ -> Real`. The
 # prepared model (its lowered body closure + conditioned data) is a Constant;
-# `theta` is the sole active input. No DI.Cache: the primal allocates its own
-# context per call.
+# `theta` is the sole active input; the preallocated buffer pool is a DI.Cache
+# that the body fills in place — the same 0-alloc discipline the declarative
+# factor stack uses above (`DI.Cache(workspace.primal)`).
 
 function BRM.NativePPL._julianic_prepare_gradient(
     prepared::BRM.NativePPL.JulianicPrepared,
     backend::DI.AbstractADType,
     position::AbstractVector,
+    buffers,
 )
     preparation = DI.prepare_gradient(
         BRM.NativePPL._julianic_kernel,
         backend,
         position,
         DI.Constant(prepared),
+        DI.Cache(buffers),
     )
     NativePPLDIState(backend, preparation)
 end
@@ -119,6 +122,7 @@ function BRM.NativePPL._julianic_value_and_gradient!(
     state::NativePPLDIState,
     gradient::AbstractVector,
     theta::AbstractVector,
+    buffers,
 )
     return DI.value_and_gradient!(
         BRM.NativePPL._julianic_kernel,
@@ -127,6 +131,7 @@ function BRM.NativePPL._julianic_value_and_gradient!(
         state.backend,
         theta,
         DI.Constant(prepared),
+        DI.Cache(buffers),
     )
 end
 
