@@ -21,6 +21,8 @@ import LinearAlgebra
 using LogExpFunctions: logistic
 using LogDensityProblems
 using Random: MersenneTwister, randn
+using Statistics: mean
+using TreeArrays
 
 const BRM = BayesianRegressionModels
 const NP = BRM.NativePPL
@@ -604,6 +606,41 @@ end
         @test all(in((0, 1, true, false)), flags.y)
     end
 
+    @testset "draws stack draw-major" begin
+        # ROWS = draws, the declarative `evaluate_draws!` convention, so a
+        # sampler's output feeds either surface unchanged.
+        positions = [0.4 -1.1 0.7; 0.0 0.0 0.0; -0.3 0.8 -0.2]
+        sites = NP.jconstrained_draws(prepared, positions)
+        @test size(sites.intercept) == (3,)
+        @test sites.intercept == positions[:, 1]
+        @test sites.sigma == exp.(positions[:, 3])
+
+        pointwise = NP.jpointwise_draws(prepared, positions)
+        @test size(pointwise.y) == (3, length(CONTINUOUS.y))
+        for draw in 1:3
+            @test pointwise.y[draw, :] ==
+                NP.jpointwise(prepared, positions[draw, :]).y
+        end
+
+        replicates = NP.jpredict_draws(MersenneTwister(3), prepared, positions)
+        @test size(replicates.y) == (3, length(CONTINUOUS.y))
+        # Each draw is its own replicate, not one broadcast across the rows.
+        @test replicates.y[1, :] != replicates.y[2, :]
+
+        # A site with its own axes stacks under the draw axis, not beside it.
+        correlated = NP.jprepare(NP.jcondition(
+            julianic_correlated_varying(PREDICTOR, GROUP); CONTINUOUS...))
+        block = randn(MersenneTwister(5), 4, NP.dimension(correlated))
+        blocked = NP.jconstrained_draws(correlated, block)
+        @test size(blocked.tau_p_group) == (4, 2)
+        @test size(blocked.L_p_group) == (4, 2, 2)
+        @test blocked.L_p_group[3, :, :] ==
+            NP.jconstrained(correlated, block[3, :]).L_p_group
+
+        @test_throws ArgumentError NP.jconstrained_draws(
+            prepared, zeros(0, NP.dimension(prepared)))
+    end
+
     @testset "grouped and constrained-manifold sites" begin
         # A multivariate site returns a `@view` into theta and the LKJ site
         # returns a pooled matrix — both would alias live state if recorded
@@ -620,6 +657,31 @@ end
         @test all(>(0), sites.tau_p_group)
         @test sites.L_p_group ≈ LinearAlgebra.LowerTriangular(sites.L_p_group)
         @test all(≈(1.0), sum(abs2, sites.L_p_group; dims=2))
+    end
+
+    # The labelled-container forms come from the TreeArrays weak-dep extension:
+    # the SAME arrays, with the axes named once as metadata instead of smeared
+    # across rows. Loading TreeArrays must be all it takes.
+    @testset "TreeArrays draw containers" begin
+        positions = [0.4 -1.1 0.7; 0.0 0.0 0.0; -0.3 0.8 -0.2]
+        fields = parent(NP.jconstrained_tree(prepared, positions))
+        @test propertynames(fields) == (:intercept, :slope, :sigma)
+        # No restructuring and no copy — the tree wraps the very array the plain
+        # form returns.
+        @test parent(fields.sigma) == exp.(positions[:, 3])
+
+        # Reducing BY NAME is the axis-naming contract: TreeArrays refuses a
+        # `dims=` name that resolves nowhere, so a successful reduce over `:draw`
+        # is proof the axis carries that name, and the refusal proves the check
+        # is live rather than the name being ignored.
+        @test mean(fields.sigma; dims=:draw) isa Any
+        @test_throws Exception mean(fields.sigma; dims=:not_an_axis)
+
+        pointwise = parent(NP.jpointwise_tree(prepared, positions))
+        @test size(parent(pointwise.y)) == (3, length(CONTINUOUS.y))
+        # Per-observation means over the draw axis — the shape PSIS-LOO reduces.
+        @test parent(mean(pointwise.y; dims=:draw)) ≈
+            vec(sum(NP.jpointwise_draws(prepared, positions).y; dims=1) ./ 3)
     end
 end
 

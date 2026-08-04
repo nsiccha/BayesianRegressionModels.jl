@@ -22,10 +22,12 @@ StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
 [weakdeps]
 DifferentiationInterface = "a0c0ee7d-e4b9-4e03-894e-1c5f64a51d63"
 Enzyme = "7da242da-08ed-463a-9acd-ee780be4f1d9"
+TreeArrays = "5daaa025-ac78-4e9a-8805-78946e672e43"
 WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 
 [extensions]
 BayesianRegressionModelsDifferentiationInterfaceExt = "DifferentiationInterface"
+BayesianRegressionModelsTreeArraysExt = "TreeArrays"
 BayesianRegressionModelsWarmupHMCEnzymeExt = ["WarmupHMC", "Enzyme"]
 BayesianRegressionModelsWarmupHMCExt = "WarmupHMC"
 
@@ -34,6 +36,7 @@ DifferentiationInterface = "0.7"
 Enzyme = "0.13"
 MutatingFunctions = "0.1"
 OutputSignatures = "0.1"
+TreeArrays = "0.1"
 WarmupHMC = "0.2"
 julia = "1.10"
 
@@ -45,3 +48,6 @@ julia = "1.10"
 [sources]
 MutatingFunctions = {url = "https://github.com/nsiccha/MutatingFunctions.jl"}
 OutputSignatures = {url = "https://github.com/nsiccha/OutputSignatures.jl"}
+# TreeArrays.jl labels the postprocessing draw axes (weak dep — the density
+# path never loads it).
+TreeArrays = {url = "https://github.com/nsiccha/TreeArrays.jl"}

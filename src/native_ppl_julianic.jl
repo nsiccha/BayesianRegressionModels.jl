@@ -829,6 +829,103 @@ jpredict(rng::Random.AbstractRNG, prepared::JulianicPrepared, theta::AbstractVec
 jpredict(prepared::JulianicPrepared, theta::AbstractVector) =
     jpredict(Random.default_rng(), prepared, theta)
 
+# --- Draws ------------------------------------------------------------------
+#
+# The batch forms. `positions` is a matrix of unconstrained draws with ROWS =
+# draws, matching the declarative `evaluate_draws!` convention so a sampler's
+# output feeds either surface unchanged.
+#
+# Each site's draws are stacked into one dense array whose FIRST axis is the
+# draw, so a scalar site becomes an `ndraws` vector, a length-k site an
+# `ndraws × k` matrix, and the LKJ factor an `ndraws × K × K` array. That layout
+# is what a labelled container wants (`TreeData(store, :draw, …)` — see the
+# TreeArrays extension) and what a plain reduction over draws wants.
+@inline _julianic_draw_store(value::Number, ndraws::Int) =
+    Vector{typeof(value)}(undef, ndraws)
+@inline _julianic_draw_store(value::AbstractArray, ndraws::Int) =
+    Array{eltype(value)}(undef, ndraws, size(value)...)
+
+@inline _julianic_store_draw!(store, draw::Int, value::Number) =
+    (store[draw] = value; nothing)
+@inline _julianic_store_draw!(store, draw::Int, value::AbstractArray) =
+    (selectdim(store, 1, draw) .= value; nothing)
+
+@noinline _julianic_draw_shape_error(draw::Int, expected, got) =
+    throw(ArgumentError(
+        "julianic draws: draw " * string(draw) * " recorded sites " *
+        string(got) * " but draw 1 recorded " * string(expected) * ". The body " *
+        "takes a different path per position, so the draws cannot be stacked."))
+
+function _julianic_draws(prepared::JulianicPrepared, positions::AbstractMatrix,
+                         kernel, selector::F) where {F}
+    ndraws = size(positions, 1)
+    ndraws >= 1 || throw(ArgumentError(
+        "julianic draws: `positions` needs at least one row (rows are draws)"))
+    recorded = selector(
+        _julianic_record(prepared, view(positions, 1, :), kernel))
+    names = Tuple(pair.first for pair in recorded)
+    stores = Tuple(_julianic_draw_store(pair.second, ndraws) for pair in recorded)
+    for (store, pair) in zip(stores, recorded)
+        _julianic_store_draw!(store, 1, pair.second)
+    end
+    for draw in 2:ndraws
+        recorded = selector(
+            _julianic_record(prepared, view(positions, draw, :), kernel))
+        # A body whose site set depends on the position would stack garbage under
+        # the first draw's names, so check rather than trust the shape.
+        Tuple(pair.first for pair in recorded) == names ||
+            _julianic_draw_shape_error(
+                draw, names, Tuple(pair.first for pair in recorded))
+        for (store, pair) in zip(stores, recorded)
+            _julianic_store_draw!(store, draw, pair.second)
+        end
+    end
+    return NamedTuple{names}(stores)
+end
+
+_julianic_sites(context::JulianicRecord) = context.sites
+_julianic_observations(context::JulianicRecord) = context.observations
+
+"""
+    jconstrained_draws(prepared, positions) -> NamedTuple
+
+`jconstrained` over a matrix of unconstrained draws (ROWS = draws). Each site's
+draws are stacked with the draw as the FIRST axis.
+"""
+jconstrained_draws(prepared::JulianicPrepared, positions::AbstractMatrix) =
+    _julianic_draws(prepared, positions, _obs_logpdf, _julianic_sites)
+
+"""
+    jpointwise_draws(prepared, positions) -> NamedTuple
+
+`jpointwise` over a matrix of unconstrained draws (ROWS = draws), stacked as
+`ndraws × nobservations` per observation site — the layout PSIS-LOO expects.
+"""
+jpointwise_draws(prepared::JulianicPrepared, positions::AbstractMatrix) =
+    _julianic_draws(prepared, positions, _obs_logpdf, _julianic_observations)
+
+"""
+    jpredict_draws([rng], prepared, positions) -> NamedTuple
+
+`jpredict` over a matrix of unconstrained draws (ROWS = draws): the posterior
+predictive, one redrawn replicate per draw per observation.
+"""
+jpredict_draws(rng::Random.AbstractRNG, prepared::JulianicPrepared,
+               positions::AbstractMatrix) =
+    _julianic_draws(prepared, positions, JulianicPredictKernel(rng),
+                    _julianic_observations)
+jpredict_draws(prepared::JulianicPrepared, positions::AbstractMatrix) =
+    jpredict_draws(Random.default_rng(), prepared, positions)
+
+# Labelled-container forms, given methods in
+# ext/BayesianRegressionModelsTreeArraysExt.jl. They are a weak-dep extension
+# rather than core because a labelled container is a POSTPROCESSING convenience:
+# what the axes mean, attached to the very arrays the functions above already
+# return. A consumer who only wants the density never loads TreeArrays.
+function jconstrained_tree end
+function jpointwise_tree end
+function jpredict_tree end
+
 # --- LogDensityProblems -----------------------------------------------------
 #
 # The interface every downstream consumer actually reaches for (WarmupHMC and
