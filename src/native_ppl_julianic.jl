@@ -150,7 +150,15 @@ end
 # `run` closure takes the data as a SEPARATE argument (passed through DI as a
 # `Constant`), so this struct holds only active state and STATIC activity
 # suffices — no runtime-activity workaround.
-struct JulianicPrimal{TH<:AbstractVector,B}
+# A context that WALKS θ: it constrains each site's coordinates and returns the
+# natural-space value, so every deterministic in the body computes for real.
+# `JulianicPrimal` accumulates the log density while doing it; the postprocessing
+# contexts (below) do the identical walk and record instead. Sharing the abstract
+# type is what makes postprocessing structurally unable to disagree with the
+# density — there is one walk, not a walk and a reimplementation of it.
+abstract type JulianicRun end
+
+struct JulianicPrimal{TH<:AbstractVector,B} <: JulianicRun
     theta::TH
     buffers::B          # JulianicBuffers{eltype(theta)} — the preallocated pool
 end
@@ -163,6 +171,41 @@ mutable struct JulianicTrace
     buffer_sizes::Vector{Dims}
 end
 JulianicTrace() = JulianicTrace(0, Dims[])
+
+# POSTPROCESSING: the same θ walk as the primal, recording instead of scoring.
+# It reuses `JulianicBuffers` verbatim — including the cursor and the (unread)
+# accumulator — so every `_sample!` method above works here with no second
+# implementation. That is the whole point: a postprocessing pass that re-derived
+# what a site means could disagree with the density, and this one cannot.
+#
+# `sites` collects `name => constrained value` in body order, and `observations`
+# collects whatever the observation hook produced per observed site. No pooled
+# buffer discipline: postprocessing is not on the gradient hot path, and the
+# 0-alloc constraint is deliberately scoped to logdensity + gradient (user,
+# 2026-08-04). Values are COPIED out, because a `_sample!` returning a `@view`
+# into θ (the multivariate path) would otherwise alias a caller's position — and
+# a pooled observation buffer is overwritten by the next site.
+struct JulianicRecord{TH<:AbstractVector,B,K} <: JulianicRun
+    theta::TH
+    buffers::B
+    kernel::K           # what an observation site computes (logpdf / rand / …)
+    sites::Vector{Pair{Symbol,Any}}
+    observations::Vector{Pair{Symbol,Any}}
+end
+JulianicRecord(theta::AbstractVector, buffers, kernel) =
+    JulianicRecord(theta, buffers, kernel,
+                   Pair{Symbol,Any}[], Pair{Symbol,Any}[])
+
+# The recording hook on the latent path. Inlined to the identity for every
+# context that is not recording, so the primal keeps its 0-alloc property.
+@inline _record_site!(_ctx, ::Val, value) = value
+@inline function _record_site!(ctx::JulianicRecord, ::Val{name}, value) where {name}
+    push!(ctx.sites, name => _julianic_recorded(value))
+    return value
+end
+# `copy` on anything that is a view of, or a pooled buffer over, live state.
+@inline _julianic_recorded(value) = value
+@inline _julianic_recorded(value::AbstractArray) = copy(value)
 
 # --- `~` runtime: prep + logpdf ------------------------------------------
 #
@@ -194,7 +237,7 @@ JulianicTrace() = JulianicTrace(0, Dims[])
 @inline function _sample_site!(ctx, data, name::Val, dist)
     _julianic_is_conditioned(data, name) &&
         _julianic_conditioned_latent_error(name)
-    return _sample!(ctx, name, dist)
+    return _record_site!(ctx, name, _sample!(ctx, name, dist))
 end
 
 # Normal: real support, identity transform (log-Jacobian 0). Covers `Normal()`
@@ -203,7 +246,7 @@ end
 # on how many coordinates each site consumes; if they ever drift, an elided
 # bounds check turns that into an out-of-bounds READ (silent garbage under
 # Enzyme) instead of a `BoundsError`. The check is free next to a `logpdf`.
-@inline function _sample!(ctx::JulianicPrimal, ::Val, dist::Distributions.Normal)
+@inline function _sample!(ctx::JulianicRun, ::Val, dist::Distributions.Normal)
     ctx.buffers.cursor += 1
     v = ctx.theta[ctx.buffers.cursor]
     ctx.buffers.acc += Distributions.logpdf(dist, v)
@@ -213,7 +256,7 @@ end
 
 # Exponential: positive support, exp transform. constrain u -> exp(u); the
 # log-Jacobian of that transform is exactly u, so accumulate logpdf + u.
-@inline function _sample!(ctx::JulianicPrimal, ::Val, dist::Distributions.Exponential)
+@inline function _sample!(ctx::JulianicRun, ::Val, dist::Distributions.Exponential)
     ctx.buffers.cursor += 1
     u = ctx.theta[ctx.buffers.cursor]
     v = exp(u)
@@ -228,7 +271,7 @@ end
 # coordinates and returns the value vector for the body to index. This covers
 # grouped/blocked latents authored as `b ~ product_distribution(fill(D, k))`
 # or `b ~ MvNormal(...)`, then referenced as `b[group]`.
-@inline function _sample!(ctx::JulianicPrimal, ::Val, dist::Distributions.MultivariateDistribution)
+@inline function _sample!(ctx::JulianicRun, ::Val, dist::Distributions.MultivariateDistribution)
     k = length(dist)
     lo = ctx.buffers.cursor + 1
     ctx.buffers.cursor += k
@@ -271,7 +314,7 @@ end
 # per-marginal logpdf + sum(u). More specific than the real-support method above,
 # so it wins for the `Product{…,Exponential}` type (a product of Normals resolves
 # to `DiagNormal <: MvNormal`, which correctly stays on the identity path).
-@inline function _sample!(ctx::JulianicPrimal, ::Val,
+@inline function _sample!(ctx::JulianicRun, ::Val,
         dist::Distributions.Product{Distributions.Continuous,<:Distributions.Exponential})
     k = length(dist)
     lo = ctx.buffers.cursor + 1
@@ -337,7 +380,7 @@ end
     return L
 end
 
-@inline function _sample!(ctx::JulianicPrimal, ::Val, dist::Distributions.LKJCholesky)
+@inline function _sample!(ctx::JulianicRun, ::Val, dist::Distributions.LKJCholesky)
     K = dist.d
     m = K * (K - 1) ÷ 2
     lo = ctx.buffers.cursor + 1
@@ -491,7 +534,7 @@ end
 end
 
 # Accumulate an already-computed observation log-density contribution.
-@inline _accumulate!(ctx::JulianicPrimal, contribution) =
+@inline _accumulate!(ctx::JulianicRun, contribution) =
     (ctx.buffers.acc += contribution; nothing)
 @inline _accumulate!(::JulianicTrace, _contribution) = nothing
 
@@ -535,7 +578,7 @@ end
 # no pilot run (snag `broadcast-gather-3d8a0849`, landed `121de31`).
 #
 # `broadcast` a single operator/function `f` over already-materialized args:
-@inline function _cached_broadcast!(ctx::JulianicPrimal, f::F, args...) where {F}
+@inline function _cached_broadcast!(ctx::JulianicRun, f::F, args...) where {F}
     buffer = _next_buffer!(ctx.buffers, broadcast_size(args...))
     apply!!(buffer, broadcast, f, args...)
 end
@@ -545,7 +588,7 @@ end
 end
 
 # `getindex` gather `A[idx]` (a whole-vector index, e.g. `b[group]`):
-@inline function _cached_gather!(ctx::JulianicPrimal, A, idx)
+@inline function _cached_gather!(ctx::JulianicRun, A, idx)
     buffer = _next_buffer!(ctx.buffers, output_size(getindex, size(A), idx))
     apply!!(buffer, getindex, A, idx)
 end
@@ -560,13 +603,40 @@ end
 # analysis clean). PRIMAL fills a pooled, right-sized buffer (the distribution
 # vector stays lazy, never materialized) and sums it into `acc`; TRACE records the
 # obs length and hands back a throwaway scratch so the same `.=` fill is harmless.
-@inline _obs_begin!(ctx::JulianicPrimal, n::Int) = _next_buffer!(ctx.buffers, (n,))
+@inline _obs_begin!(ctx::JulianicRun, n::Int) = _next_buffer!(ctx.buffers, (n,))
 @inline function _obs_begin!(ctx::JulianicTrace, n::Int)
     push!(ctx.buffer_sizes, (n,))
     Vector{Float64}(undef, n)           # one-shot trace scratch for the .= fill
 end
-@inline _obs_end!(ctx::JulianicPrimal, buf) = (ctx.buffers.acc += sum(buf); nothing)
-@inline _obs_end!(::JulianicTrace, _buf) = nothing
+@inline _obs_end!(ctx::JulianicPrimal, ::Val, buf) = (ctx.buffers.acc += sum(buf); nothing)
+@inline _obs_end!(::JulianicTrace, ::Val, _buf) = nothing
+@inline function _obs_end!(ctx::JulianicRecord, ::Val{name}, buf) where {name}
+    push!(ctx.observations, name => identity.(buf))   # narrows `Any` to the real eltype
+    return nothing
+end
+
+# WHAT an observation site computes, chosen by the context rather than baked into
+# the lowered body. The body's fused fill calls this function elementwise over
+# `(distribution, datum)`, so one body serves the density, the pointwise
+# log-likelihood and the posterior predictive with no second lowering — the
+# observation distribution is built by the author's own code either way.
+@inline _obs_kernel(_ctx) = _obs_logpdf
+@inline _obs_kernel(ctx::JulianicRecord) = ctx.kernel
+
+# Posterior-predictive kernel: ignores the observed datum — redrawing it is the
+# point — and carries its own RNG so a predictive pass is reproducible.
+struct JulianicPredictKernel{R<:Random.AbstractRNG}
+    rng::R
+end
+@inline (kernel::JulianicPredictKernel)(dist, _x) = rand(kernel.rng, dist)
+
+# Postprocessing collects into a FRESH `Any` buffer rather than the pooled one:
+# the pool is typed at θ's eltype, which would silently coerce a discrete
+# predictive draw (a `Poisson` count, a `Bernoulli` outcome) to `Float64`.
+# `_obs_end!` narrows it back to the concrete eltype the kernel actually
+# produced. Nothing here is on the gradient path, so the allocation is free of
+# consequence — the 0-alloc constraint is scoped to logdensity + gradient.
+@inline _obs_begin!(::JulianicRecord, n::Int) = Vector{Any}(undef, n)
 
 # --- Model objects --------------------------------------------------------
 
@@ -706,6 +776,58 @@ function jlogdensity_and_gradient!(
         prepared, workspace.di_preparation, workspace.gradient, theta,
         workspace.buffers)
 end
+
+# --- Postprocessing ---------------------------------------------------------
+#
+# The same body, the same θ walk, a different sink. Everything a consumer asks of
+# a fitted model — what are the parameters in natural space, how well is each
+# observation predicted, what would new data look like — is answered by RUNNING
+# the model rather than by a parallel description of it. The declarative surface
+# needs `output`/`outputs`/`simulate` machinery precisely because its executor
+# discarded the body; julianic still has the body.
+function _julianic_record(prepared::JulianicPrepared, theta::AbstractVector, kernel)
+    _julianic_check_dimension(prepared, theta)
+    buffers = JulianicBuffers{eltype(theta)}(prepared.buffer_sizes)
+    context = JulianicRecord(theta, buffers, kernel)
+    prepared.run(context, prepared.data)
+    return context
+end
+
+"""
+    jconstrained(prepared, theta) -> NamedTuple
+
+Every latent site's value in NATURAL (constrained) space, at the unconstrained
+position `theta`, keyed by site name in body order.
+
+This is the same constraining transform the density applies — one walk, not a
+reimplementation — so a value here can never disagree with the log density that
+scored it.
+"""
+jconstrained(prepared::JulianicPrepared, theta::AbstractVector) =
+    NamedTuple(_julianic_record(prepared, theta, _obs_logpdf).sites)
+
+"""
+    jpointwise(prepared, theta) -> NamedTuple
+
+Per-observation log-likelihood at `theta`, keyed by observation site — the
+elementwise terms whose sum the density accumulates, which is what PSIS-LOO and
+WAIC consume.
+"""
+jpointwise(prepared::JulianicPrepared, theta::AbstractVector) =
+    NamedTuple(_julianic_record(prepared, theta, _obs_logpdf).observations)
+
+"""
+    jpredict([rng], prepared, theta) -> NamedTuple
+
+One posterior-predictive draw per observation site at `theta`: the body's own
+observation distributions, resampled instead of scored. Discrete families keep
+their natural element type.
+"""
+jpredict(rng::Random.AbstractRNG, prepared::JulianicPrepared, theta::AbstractVector) =
+    NamedTuple(_julianic_record(
+        prepared, theta, JulianicPredictKernel(rng)).observations)
+jpredict(prepared::JulianicPrepared, theta::AbstractVector) =
+    jpredict(Random.default_rng(), prepared, theta)
 
 # --- LogDensityProblems -----------------------------------------------------
 #
@@ -878,11 +1000,11 @@ function _julianic_lower_statement(statement, ctx, data)
         fill = Expr(:macrocall, Symbol("@__dot__"), LineNumberNode(0),
                     :($buffer_var = $(Expr(:call, logpdf_var, rhs, data_var))))
         return quote
-            $(logpdf_var) = $(_obs_logpdf)
+            $(logpdf_var) = $(_obs_kernel)($ctx)
             $(data_var) = $(_observation)($data, $(Val(lhs)))
             $(buffer_var) = $(_obs_begin!)($ctx, length($data_var))
             $fill
-            $(_obs_end!)($ctx, $buffer_var)
+            $(_obs_end!)($ctx, $(Val(lhs)), $buffer_var)
         end
     end
     dotted_sample = _julianic_dotted_sample(statement)
@@ -898,11 +1020,11 @@ function _julianic_lower_statement(statement, ctx, data)
         # `lp.(Poisson.(exp(r)), y)` and sums it — same 0-alloc path as `@.`.
         fill = :($buffer_var .= $(Expr(:., logpdf_var, Expr(:tuple, rhs, data_var))))
         return quote
-            $(logpdf_var) = $(_obs_logpdf)
+            $(logpdf_var) = $(_obs_kernel)($ctx)
             $(data_var) = $(_observation)($data, $(Val(lhs)))
             $(buffer_var) = $(_obs_begin!)($ctx, length($data_var))
             $fill
-            $(_obs_end!)($ctx, $buffer_var)
+            $(_obs_end!)($ctx, $(Val(lhs)), $buffer_var)
         end
     end
     scalar_sample = _julianic_scalar_sample(statement)

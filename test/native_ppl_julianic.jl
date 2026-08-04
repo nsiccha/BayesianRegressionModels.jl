@@ -17,6 +17,7 @@ import DifferentiationInterface as DI
 using Distributions: Bernoulli, Dirichlet, Exponential, LKJCholesky, Normal,
                      Poisson, censored, logpdf, product_distribution
 using Enzyme
+import LinearAlgebra
 using LogExpFunctions: logistic
 using LogDensityProblems
 using Random: MersenneTwister, randn
@@ -546,6 +547,79 @@ end
         @test allocations.gradient == 0
         allocations == (primal=0, gradient=0) ||
             @info "julianic allocations" model=name allocations
+    end
+end
+
+# Postprocessing runs the SAME body with a different sink, so the numbers cannot
+# drift from the density that scored them. Pinned against the model recomputed by
+# hand — the test is the independent implementation, which is the only kind of
+# oracle that catches a shared-walk bug.
+@testset "julianic postprocessing" begin
+    prepared = NP.jprepare(NP.jcondition(
+        julianic_affine_gaussian(PREDICTOR); CONTINUOUS...))
+    theta = [0.4, -1.1, 0.7]
+    intercept, slope, sigma = theta[1], theta[2], exp(theta[3])
+
+    @testset "constrained site values" begin
+        sites = NP.jconstrained(prepared, theta)
+        @test keys(sites) == (:intercept, :slope, :sigma)
+        @test sites.intercept == intercept
+        @test sites.slope == slope
+        # The positive-support site is the one that MUST be constrained: the raw
+        # coordinate 0.7 and the natural value exp(0.7) are both plausible-looking
+        # numbers, so returning the wrong one would not look wrong.
+        @test sites.sigma == sigma
+    end
+
+    @testset "pointwise log-likelihood" begin
+        pointwise = NP.jpointwise(prepared, theta)
+        expected = logpdf.(Normal.(intercept .+ slope .* PREDICTOR, sigma),
+                           CONTINUOUS.y)
+        @test pointwise.y ≈ expected
+        # The elementwise terms must be exactly the ones the density summed, so
+        # the density is recoverable from them plus the priors.
+        priors = logpdf(Normal(), intercept) + logpdf(Normal(), slope) +
+            logpdf(Exponential(2.0), sigma) + theta[3]   # + the exp log-Jacobian
+        @test sum(pointwise.y) + priors ≈ NP.jlogdensity(prepared, theta)
+    end
+
+    @testset "posterior predictive" begin
+        draws = NP.jpredict(MersenneTwister(7), prepared, theta)
+        @test length(draws.y) == length(CONTINUOUS.y)
+        # Redrawn, not echoed back — the whole point of a predictive.
+        @test draws.y != CONTINUOUS.y
+        # Reproducible from the seed, and NOT a fluke of a fixed value.
+        @test NP.jpredict(MersenneTwister(7), prepared, theta).y == draws.y
+        @test NP.jpredict(MersenneTwister(8), prepared, theta).y != draws.y
+    end
+
+    @testset "discrete families keep their element type" begin
+        counts = NP.jprepare(NP.jcondition(julianic_poisson(PREDICTOR); COUNTS...))
+        drawn = NP.jpredict(MersenneTwister(7), counts, [0.3, -0.2])
+        @test eltype(drawn.y) <: Integer
+        @test all(>=(0), drawn.y)
+
+        binary = NP.jprepare(NP.jcondition(julianic_bernoulli(PREDICTOR); BINARY...))
+        flags = NP.jpredict(MersenneTwister(7), binary, [0.3, -0.2])
+        @test all(in((0, 1, true, false)), flags.y)
+    end
+
+    @testset "grouped and constrained-manifold sites" begin
+        # A multivariate site returns a `@view` into theta and the LKJ site
+        # returns a pooled matrix — both would alias live state if recorded
+        # as-is, so the recorded values must survive a later run untouched.
+        model = NP.jprepare(NP.jcondition(
+            julianic_correlated_varying(PREDICTOR, GROUP); CONTINUOUS...))
+        position = randn(MersenneTwister(11), NP.dimension(model))
+        sites = NP.jconstrained(model, position)
+        saved = deepcopy(sites)
+        NP.jconstrained(model, position .+ 1.0)
+        @test sites == saved
+        # `tau` is positive-support, `L` is the correlation factor: both are the
+        # constrained values, not raw coordinates.
+        @test all(>(0), sites.tau_p_group)
+        @test sites.L_p_group ≈ LinearAlgebra.LowerTriangular(sites.L_p_group)
+        @test all(≈(1.0), sum(abs2, sites.L_p_group; dims=2))
     end
 end
 
