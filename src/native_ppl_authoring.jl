@@ -1370,6 +1370,8 @@ BRM.LogDensityProblems.dimension(plan::FactorPlan) = plan.graph.dimension
 
 function _uses_factor_executor(declaration::Model, conditions, bindings=(;))
     graph = factor_graph(declaration; conditions, bindings)
+    any(site -> site.shape isa BroadcastSiteShape, values(graph.sites)) ||
+        return false
     stochastic_names = Set(declaration.site_order)
     dependent_site = any(declaration.site_order) do name
         hasproperty(declaration.observations, name) || return false
