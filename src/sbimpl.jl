@@ -3399,6 +3399,21 @@ fall through to the default linear-predictor path. The default method
 **Use `import BayesianRegressionModels: _sb_submodel_rhs!`** (not
 `using`) when adding methods from a downstream module so the binding is
 extended rather than shadowed.
+
+**Reserved data keys — BRM owns raw grouping-column names.** Any raw
+column used as a ranef grouping factor (the `g` in `(… | g)`,
+`(… | ID | g)`, or `gr(g, by=…)`) is reclaimed by BRM's ranef pre-pass:
+the raw labels are DELETED from `data` and replaced by a dense integer
+index (`g_idx`) and level count (`n_g`), because Stan cannot consume raw
+(possibly string) labels. So a hook must NOT stash its own vector under a
+raw column name that the same model also uses as a grouping factor, nor
+emit a reference to it — the reclaim will delete it out from under the
+emitted statement, and the failure surfaces only much later, in
+StanBlocks tracing, as an unresolvable-symbol error. Key consumer-owned
+`data` PER TARGET instead, e.g. `Symbol(col_key, :_, target)`, which is
+self-owned and order-independent. (`_sb_reclaim_group_col!` now turns a
+collision into an immediate, correctly-attributed error at the delete
+site rather than a late one in a third package.)
 """
 _sb_submodel_rhs!(stmts, data, target, f, rhs) = nothing
 
@@ -6798,6 +6813,41 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name,
     info.idx_name
 end
 
+# Reclaim a raw grouping-column name for BRM's dense integer index. The generic
+# data prepass sees grouping columns too, but Stan consumes only their dense
+# integer code, never the raw labels (which may be strings and therefore are not
+# valid Stan data at all) — so the raw column is deleted from `data` here. BRM
+# OWNS the raw name of any column used as a ranef grouping factor and reclaims it
+# in this pre-pass; see the `_sb_submodel_rhs!` docstring for the reserved-name
+# contract this enforces.
+#
+# Guard against a silent clobber: a `_sb_submodel_rhs!` hook (or any other data-
+# writing extension) that stashes its OWN vector under a raw column name the same
+# model also uses as a grouping factor — and emits a reference to it — would have
+# that vector deleted out from under the emitted statement, surfacing only much
+# later as an unresolvable-symbol error deep in StanBlocks tracing that names
+# neither the delete nor BRM. When the key no longer holds the raw column the
+# data prepass wrote (i.e. something replaced it), fail loudly and attributed
+# HERE, pointing at the per-target keying that fixes it.
+function _sb_reclaim_group_col!(data, colname::Symbol, backing::DataColumn)
+    if haskey(data, colname) && !isequal(data[colname], parent(backing))
+        error(
+            "sbimpl: `$colname` is used as a ranef grouping factor, so BRM ",
+            "reclaims its raw column for a dense integer index (`$(colname)_idx` ",
+            "/ `n_$colname`) and deletes the raw labels here — but `data[:$colname]` ",
+            "currently holds a value the generic data prepass did NOT write. A ",
+            "`_sb_submodel_rhs!` hook (or other extension) stashed its own vector ",
+            "under this reserved name; it would be deleted out from under any ",
+            "statement referencing it and fail later in StanBlocks tracing with an ",
+            "unresolvable-symbol error naming a third package. BRM owns raw column ",
+            "names used as grouping factors — key consumer-written data PER TARGET ",
+            "instead, e.g. `_sb_kernel_key(col, target) = Symbol(col, :_, target)`, ",
+            "which is self-owned and order-independent.")
+    end
+    delete!(data, colname)
+    nothing
+end
+
 # Ensure `group_idx` / `n_groups` for a plain-group ranef descriptor are stashed
 # in `data`. Idempotent — safe to call from both the ID pre-pass and the per-
 # target plain-block emitter. Returns the (idx_name, n_name) pair used in stmts.
@@ -6808,10 +6858,7 @@ function _sb_ensure_group_data!(data, g::NamedColumn)
     idx_name = Symbol(gname, :_idx)
     n_name   = Symbol(:n_, gname)
     n_levels, g_idx = _sb_level_index(parent(g_backing))
-    # The generic data prepass sees grouping columns too. Stan consumes only
-    # their dense integer code, never the raw labels (which may be strings and
-    # therefore are not valid Stan data at all).
-    delete!(data, gname)
+    _sb_reclaim_group_col!(data, gname, g_backing)
     data[idx_name] = g_idx
     data[n_name]   = n_levels
     idx_name, n_name
@@ -6829,8 +6876,8 @@ function _sb_ensure_group_data!(data, g::Tuple{NamedColumn,NamedColumn})
     gname, bname = name(gcol), name(bcol)
     n_groups, g_idx = _sb_level_index(parent(g_backing))
     n_strata, b_idx = _sb_level_index(parent(b_backing))
-    delete!(data, gname)
-    delete!(data, bname)
+    _sb_reclaim_group_col!(data, gname, g_backing)
+    _sb_reclaim_group_col!(data, bname, b_backing)
     stratum_idx = _sb_stratum_idx(g_idx, b_idx, gname, bname)
     suffix = Symbol(gname, :__by__, bname)
     idx_name       = Symbol(suffix, :_idx)
