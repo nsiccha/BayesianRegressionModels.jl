@@ -65,6 +65,10 @@
 # macro-generated model body, `Normal`/`logpdf` deliberately resolve in the
 # CALLER's scope (the user's `using Distributions`), keeping the body real Julia.
 import Distributions
+# `weighted`'s typed weight-vector methods dispatch on the StatsBase weight
+# kinds, and `rand` on a wrapper distribution needs the RNG abstract type.
+import StatsBase
+import Random
 
 # 0-alloc buffer-threading substrate (user directive 2026-08-04): every
 # array-valued intermediate in the run-the-body primal is filled IN PLACE into a
@@ -376,6 +380,115 @@ end
 # route through this runtime helper — the model body needs no `logpdf` in scope,
 # only the distribution constructor the user actually wrote. Broadcast-safe.
 @inline _obs_logpdf(dist, x) = Distributions.logpdf(dist, x)
+
+# --- Observation weights --------------------------------------------------
+#
+# The declarative surface spells a weighted observation
+# `y ~ weighted(Normal(mu, sigma), fweights(n))`, and the weight KIND — carried
+# by the StatsBase constructor's NAME — selects the semantics at lowering time:
+# `:analytic` scales precision (`Normal(mu, sigma/sqrt(w))`), `:frequency` and
+# `:power` MULTIPLY the log density by `w`, `:unit` is a no-op. That taxonomy is
+# a FORMULA-surface device: a declaration cannot say `sigma/sqrt(w)`, so the
+# weight type has to say it for the author.
+#
+# A julianic body is ordinary Julia, so it says it directly:
+#
+#   analytic:  `@. y ~ Normal(mu, sigma / sqrt(w))`     — already expressible
+#   unit:      `@. y ~ Normal(mu, sigma)`               — just omit the weight
+#
+# What plain Julia has no spelling for is the MULTIPLY: `logpdf` returns a
+# number, and there is no distribution whose density is another's raised to a
+# power. That is the one real gap, and this closes it — as a runtime wrapper
+# distribution, per decision `06le2au`. `weighted` is BRM's existing formula
+# marker (`src/macro.jl`, declared with no methods); this gives it an executable
+# method, so ONE name means the same thing on both surfaces.
+#
+# The result is a genuine `Distributions.Distribution` — the point of julianic
+# is that the body is real Julia, so `logpdf(weighted(d, 2.0), y)` must work
+# outside the macro too. It is deliberately NOT normalized: `w * logpdf` is a
+# pseudo-likelihood for any `w != 1`, exactly as the declarative `:frequency` /
+# `:power` kinds are.
+struct WeightedDistribution{VF<:Distributions.VariateForm,
+                            VS<:Distributions.ValueSupport,
+                            D<:Distributions.Distribution{VF,VS},
+                            W<:Real} <: Distributions.Distribution{VF,VS}
+    distribution::D
+    weight::W
+end
+
+Distributions.params(d::WeightedDistribution) =
+    (Distributions.params(d.distribution)..., d.weight)
+
+# The whole contract, both variate forms. `logpdf` on the base distribution is
+# whatever the author's distribution defines, so this composes with every family
+# — including the `truncated`/`censored` response evidence.
+@inline Distributions.logpdf(d::WeightedDistribution{Distributions.Univariate},
+                             x::Real) =
+    d.weight * Distributions.logpdf(d.distribution, x)
+@inline Distributions.logpdf(d::WeightedDistribution{<:Union{Distributions.Multivariate,
+                                                             Distributions.Matrixvariate}},
+                             x::AbstractArray) =
+    d.weight * Distributions.logpdf(d.distribution, x)
+
+# Sampling is UNWEIGHTED on purpose, matching the declarative backend: a
+# frequency/power weight scales the log-density contribution but leaves the base
+# distribution's predictive RNG intact (`src/macro.jl`'s `weighted` docstring).
+Base.rand(rng::Random.AbstractRNG, d::WeightedDistribution) =
+    rand(rng, d.distribution)
+Base.length(d::WeightedDistribution) = length(d.distribution)
+Distributions.insupport(d::WeightedDistribution, x) =
+    Distributions.insupport(d.distribution, x)
+
+"""
+    weighted(distribution, weight::Real)
+
+A distribution whose log density is `weight * logpdf(distribution, x)` — the
+executable form of BRM's observation-weight marker, for a julianic `@jmodel`
+body:
+
+    @. y ~ weighted(Poisson(exp(eta)), n)
+
+This is the `:frequency` / `:power` semantics (the weight MULTIPLIES the log
+density). The other two kinds need no wrapper, because a julianic body writes
+them directly: `:analytic` weights scale precision — `@. y ~ Normal(mu, sigma /
+sqrt(w))` — and `:unit` weights are the unweighted model.
+
+`weight * logpdf` is a pseudo-likelihood, not a normalized density, for any
+`weight != 1`. `rand` is deliberately UNWEIGHTED, so the predictive RNG stays
+the base distribution's.
+
+!!! note
+    Passing a `StatsBase` weight VECTOR (`weighted(d, fweights(n))`) applies
+    elementwise and is checked: `aweights` is rejected with the precision
+    spelling above, because broadcasting it here would silently multiply. Under
+    `@.` the vector is broadcast to plain numbers BEFORE this function sees it,
+    so that check cannot fire — write the weight kind you mean.
+"""
+BRM.weighted(distribution::Distributions.Distribution, weight::Real) =
+    WeightedDistribution(distribution, weight)
+
+# The un-dotted vector spellings, kept identical to the declarative surface so a
+# model ports across unchanged. Each maps to the kind's real semantics, and the
+# two that this wrapper CANNOT express fail closed rather than silently
+# multiplying.
+BRM.weighted(distribution::Distributions.Distribution,
+             weight::StatsBase.AbstractWeights) =
+    WeightedDistribution.(distribution, weight)
+@noinline function BRM.weighted(::Distributions.Distribution,
+                                ::StatsBase.AnalyticWeights)
+    throw(ArgumentError(
+        "julianic `weighted`: analytic weights scale PRECISION, not the log " *
+        "density, so they are not a `weighted(...)` wrapper here — write them " *
+        "directly, e.g. `@. y ~ Normal(mu, sigma / sqrt(w))`. Use " *
+        "`weighted(dist, w)` only for frequency/power weights, which multiply " *
+        "the log density."))
+end
+@noinline function BRM.weighted(::Distributions.Distribution,
+                                ::StatsBase.ProbabilityWeights)
+    throw(ArgumentError(
+        "julianic `weighted`: ProbabilityWeights semantics are not implemented " *
+        "(the declarative surface rejects them too)."))
+end
 
 # Accumulate an already-computed observation log-density contribution.
 @inline _accumulate!(ctx::JulianicPrimal, contribution) =

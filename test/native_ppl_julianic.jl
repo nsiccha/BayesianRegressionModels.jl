@@ -324,6 +324,51 @@ NP.@jmodel function julianic_censored(x, group)
     @. y ~ censored(Normal(mu, sigma); lower=-0.5, upper=1.0)
 end
 
+# Observation weights. The declarative surface carries the weight KIND in the
+# StatsBase constructor's NAME, because a declaration cannot say `sigma/sqrt(w)`
+# — the weight type has to say it for the author. A julianic body is Julia, so it
+# says it directly, and the two kinds land in different places:
+#
+#   :frequency / :power  MULTIPLY the log density   -> `weighted(dist, w)`, the
+#                                                      one thing plain Julia has
+#                                                      no spelling for
+#   :analytic            scale PRECISION            -> written out, no wrapper
+#
+# Both are pinned against the declarative oracle here, since the second is a
+# claim about arithmetic identity (`Normal(mu, sigma/sqrt(w))` IS the analytic
+# weighting) rather than about the `~` runtime. Decision `06le2au`.
+NP.@model function declarative_frequency_weighted(x, replicates)
+    intercept ~ Normal()
+    slope ~ Normal()
+    sigma ~ Exponential(2.0)
+    mu = intercept .+ slope .* x
+    @. y ~ weighted(Normal(mu, sigma), fweights(replicates))
+end
+
+NP.@jmodel function julianic_frequency_weighted(x, replicates)
+    intercept ~ Normal()
+    slope ~ Normal()
+    sigma ~ Exponential(2.0)
+    mu = intercept .+ slope .* x
+    @. y ~ weighted(Normal(mu, sigma), replicates)
+end
+
+NP.@model function declarative_analytic_weighted(x, replicates)
+    intercept ~ Normal()
+    slope ~ Normal()
+    sigma ~ Exponential(2.0)
+    mu = intercept .+ slope .* x
+    @. y ~ weighted(Normal(mu, sigma), aweights(replicates))
+end
+
+NP.@jmodel function julianic_analytic_weighted(x, replicates)
+    intercept ~ Normal()
+    slope ~ Normal()
+    sigma ~ Exponential(2.0)
+    mu = intercept .+ slope .* x
+    @. y ~ Normal(mu, sigma / sqrt(replicates))
+end
+
 # `y .~ D.(...)` — the spelling the declarative surface uses, where the author
 # has already dotted the RHS. Must be the same model as the `@.` form.
 NP.@jmodel function julianic_affine_gaussian_dotted(x)
@@ -344,6 +389,11 @@ const BINARY = (; y=[0.0, 1.0, 1.0, 0.0, 1.0, 0.0])
 # `[lower, upper]` — an out-of-range value scores `-Inf` on both surfaces and
 # would make the comparison vacuous rather than wrong.
 const CENSORED = (; y=[0.1, -0.5, 1.0, 1.0, 0.0, 0.8])
+# Frequency weights are counts; analytic weights are arbitrary positive reals.
+# Neither is all-ones — an all-ones weight makes every kind agree and would pass
+# whatever the wrapper did.
+const FREQUENCIES = [1, 3, 2, 1, 4, 2]
+const ANALYTIC = [0.5, 2.0, 1.0, 3.0, 0.25, 1.5]
 
 @testset "julianic oracle parity" begin
     @testset "flat affine gaussian" begin
@@ -410,6 +460,92 @@ const CENSORED = (; y=[0.1, -0.5, 1.0, 1.0, 0.0, 0.8])
             declarative_censored(PREDICTOR, GROUP),
             julianic_censored(PREDICTOR, GROUP),
             CENSORED)
+    end
+
+    @testset "frequency-weighted observation" begin
+        oracle_parity(
+            declarative_frequency_weighted(PREDICTOR, FREQUENCIES),
+            julianic_frequency_weighted(PREDICTOR, FREQUENCIES),
+            CONTINUOUS)
+    end
+
+    @testset "analytic-weighted observation (precision scaling)" begin
+        oracle_parity(
+            declarative_analytic_weighted(PREDICTOR, ANALYTIC),
+            julianic_analytic_weighted(PREDICTOR, ANALYTIC),
+            CONTINUOUS)
+    end
+end
+
+# The `weighted` wrapper is a real `Distributions.Distribution`, not a macro
+# device — that is the whole point of the julianic surface, so it has to hold
+# OUTSIDE a model body too.
+@testset "weighted is an ordinary distribution" begin
+    base = Normal(0.5, 2.0)
+    @test logpdf(weighted(base, 3.0), 0.3) ≈ 3.0 * logpdf(base, 0.3)
+    @test logpdf(weighted(base, 1.0), 0.3) == logpdf(base, 0.3)
+    # Elementwise under broadcast — the form a model body actually produces.
+    @test logpdf.(weighted.(Normal.([0.1, 0.2], 1.0), [2.0, 5.0]), [0.0, 1.0]) ≈
+        [2.0, 5.0] .* logpdf.(Normal.([0.1, 0.2], 1.0), [0.0, 1.0])
+    # The un-dotted StatsBase spellings, kept identical to the declarative
+    # surface. Frequency/power apply; the two kinds this wrapper cannot express
+    # fail closed instead of silently multiplying.
+    @test logpdf.(weighted(base, fweights([1, 2])), [0.0, 1.0]) ≈
+        [1, 2] .* logpdf.(base, [0.0, 1.0])
+    @test occursin("analytic weights scale PRECISION",
+                   argument_error(() -> weighted(base, aweights([1.0, 2.0]))).msg)
+    @test occursin("ProbabilityWeights semantics are not implemented",
+                   argument_error(() -> weighted(base, pweights([1.0, 2.0]))).msg)
+end
+
+# Steady-state allocations. The declarative executor pins
+# `(primal=0, gradient=0)` and the julianic kernel is held to the SAME bar
+# (decision `08w0buk`): every array-valued intermediate is filled in place into a
+# preallocated pool threaded as a `DI.Cache`, so a gradient eval allocates
+# nothing no matter how many data rows there are — the 32-bytes-per-row cost this
+# surface used to carry is gone, not merely reduced.
+#
+# The measurement MUST happen inside a function with typed locals: at global
+# scope `@allocated` boxes the untyped globals and reports a meaningless nonzero
+# number, which is exactly how a false "DI has an allocation floor" conclusion
+# gets reached.
+# Both entry points take the WORKSPACE — `jlogdensity(prepared, theta)` without
+# one allocates its pool per call by construction, so it is the convenience form,
+# not the one this bar is about.
+function steady_state_allocations(prepared, workspace, theta)
+    NP.jlogdensity!(workspace, prepared, theta)
+    NP.jlogdensity_and_gradient!(workspace, prepared, theta)
+    primal = @allocated NP.jlogdensity!(workspace, prepared, theta)
+    gradient = @allocated NP.jlogdensity_and_gradient!(workspace, prepared, theta)
+    return (; primal, gradient)
+end
+
+@testset "julianic steady-state allocations" begin
+    # Scaled 10x past the pinned gallery size, because a per-row leak is what
+    # this is guarding against — it would be invisible at n=6.
+    rng = MersenneTwister(20260804)
+    x = randn(rng, 60)
+    weights = rand(rng, 60) .+ 0.5
+    counts = rand(rng, 1:4, 60)
+    observations = (; y=randn(rng, 60))
+
+    for (name, model) in (
+            "affine gaussian" => julianic_affine_gaussian(x),
+            "frequency-weighted" => julianic_frequency_weighted(x, counts),
+            "analytic-weighted" => julianic_analytic_weighted(x, weights))
+        prepared = NP.jprepare(NP.jcondition(model; observations...))
+        workspace = NP.jworkspace(prepared, Float64, JULIANIC_BACKEND)
+        theta = randn(rng, NP.dimension(prepared))
+        # The pooled primal must be the SAME number as the allocating one — a
+        # buffer reused across evals without a proper rewind would show up here
+        # and nowhere else.
+        @test NP.jlogdensity!(workspace, prepared, theta) ==
+            NP.jlogdensity(prepared, theta)
+        allocations = steady_state_allocations(prepared, workspace, theta)
+        @test allocations.primal == 0
+        @test allocations.gradient == 0
+        allocations == (primal=0, gradient=0) ||
+            @info "julianic allocations" model=name allocations
     end
 end
 
