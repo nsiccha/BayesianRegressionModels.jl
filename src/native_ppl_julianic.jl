@@ -707,6 +707,48 @@ function jlogdensity_and_gradient!(
         workspace.buffers)
 end
 
+# --- LogDensityProblems -----------------------------------------------------
+#
+# The interface every downstream consumer actually reaches for (WarmupHMC and
+# the samplers take a `LogDensityProblem`, not a `Prepared`), so julianic cannot
+# stand in for the declarative surface without it. Deliberately the same shape as
+# `FactorLogDensityProblem`: the problem OWNS its workspace, so `logdensity` and
+# `logdensity_and_gradient` hit the 0-alloc pooled paths rather than allocating
+# per call.
+struct JulianicLogDensityProblem{P,W}
+    prepared::P
+    workspace::W
+end
+
+"""
+    JulianicLogDensityProblem(prepared, backend; eltype=Float64)
+
+Wrap a prepared julianic model as a `LogDensityProblems` problem of order 1,
+allocating the gradient workspace (and the 0-alloc buffer pool) once.
+"""
+function JulianicLogDensityProblem(prepared::JulianicPrepared, backend;
+                                   eltype::Type{T}=Float64) where {T<:AbstractFloat}
+    work = jworkspace(prepared, T, backend)
+    JulianicLogDensityProblem{typeof(prepared),typeof(work)}(prepared, work)
+end
+
+Base.eltype(problem::JulianicLogDensityProblem) = eltype(problem.workspace.gradient)
+BRM.LogDensityProblems.capabilities(::Type{<:JulianicLogDensityProblem}) =
+    BRM.LogDensityProblems.LogDensityOrder{1}()
+BRM.LogDensityProblems.dimension(problem::JulianicLogDensityProblem) =
+    problem.prepared.dimension
+BRM.LogDensityProblems.logdensity(problem::JulianicLogDensityProblem,
+                                  position::AbstractVector) =
+    jlogdensity!(problem.workspace, problem.prepared, position)
+# `copy` because the workspace's gradient buffer is reused on the next call —
+# the same contract the declarative problem keeps.
+function BRM.LogDensityProblems.logdensity_and_gradient(
+        problem::JulianicLogDensityProblem, position::AbstractVector)
+    density, gradient = jlogdensity_and_gradient!(
+        problem.workspace, problem.prepared, position)
+    density, copy(gradient)
+end
+
 # --- Macro ----------------------------------------------------------------
 
 # Detect a broadcast sampling statement: `@. lhs ~ rhs` or `@__dot__ lhs ~ rhs`.

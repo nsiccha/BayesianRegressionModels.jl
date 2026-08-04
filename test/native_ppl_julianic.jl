@@ -549,6 +549,45 @@ end
     end
 end
 
+# Downstream consumers (WarmupHMC, the samplers) take a `LogDensityProblem`, not
+# a `Prepared` — so julianic cannot stand in for the declarative surface without
+# this, and it has to be the SAME problem, not merely a similar one.
+@testset "julianic LogDensityProblems interface" begin
+    prepared = NP.jprepare(NP.jcondition(
+        julianic_affine_gaussian(PREDICTOR); CONTINUOUS...))
+    problem = NP.JulianicLogDensityProblem(prepared, JULIANIC_BACKEND)
+    oracle = NP.LogDensityProblem(
+        NP.prepare(NP.compile(NP.condition(
+            NP.substitute(declarative_affine_gaussian(PREDICTOR)); CONTINUOUS...))),
+        DI.AutoEnzyme())
+
+    @test LogDensityProblems.capabilities(typeof(problem)) ==
+        LogDensityProblems.LogDensityOrder{1}()
+    @test LogDensityProblems.dimension(problem) ==
+        LogDensityProblems.dimension(oracle)
+    @test eltype(problem) == Float64
+
+    rng = MersenneTwister(20260805)
+    for _ in 1:4
+        theta = randn(rng, LogDensityProblems.dimension(problem))
+        @test LogDensityProblems.logdensity(problem, theta) ≈
+            LogDensityProblems.logdensity(oracle, theta) atol=ORACLE_TOLERANCE
+        density, gradient = LogDensityProblems.logdensity_and_gradient(problem, theta)
+        oracle_density, oracle_gradient =
+            LogDensityProblems.logdensity_and_gradient(oracle, theta)
+        @test density ≈ oracle_density atol=ORACLE_TOLERANCE
+        @test maximum(abs, gradient .- oracle_gradient) <= ORACLE_TOLERANCE
+    end
+
+    # The gradient must be a COPY — the workspace buffer is reused, so handing
+    # out an alias would let the next call silently rewrite a caller's result.
+    theta = zeros(LogDensityProblems.dimension(problem))
+    _, first_gradient = LogDensityProblems.logdensity_and_gradient(problem, theta)
+    saved = copy(first_gradient)
+    LogDensityProblems.logdensity_and_gradient(problem, theta .+ 1.0)
+    @test first_gradient == saved
+end
+
 @testset "julianic observation spellings agree" begin
     dotted = NP.jprepare(NP.jcondition(
         julianic_affine_gaussian_dotted(PREDICTOR); CONTINUOUS...))
