@@ -1,7 +1,6 @@
 # Stand up the test environment described by `test/Project.toml`.
 #
 #     BRM_TEST_STANBLOCKS=/path/to/StanBlocks.jl \
-#     BRM_TEST_WARMUPHMC=/path/to/WarmupHMC.jl \
 #     BRM_TEST_TREEBARS=/path/to/Treebars.jl \
 #     julia --project=test test/bootstrap.jl
 #
@@ -15,16 +14,20 @@ include("dependency_floors.jl")
 const REPO = dirname(@__DIR__)
 const TESTENV = @__DIR__
 
-# Four packages must be develop paths rather than registry resolves, so the
-# caller supplies the three that live outside this repo. Absolute paths are
-# machine-specific and deliberately never committed; `test/Manifest.toml` (where
-# `Pkg.develop` records them) is covered by the root `.gitignore`.
-function dev_path(name, var)
+# Four packages must be develop paths rather than registry resolves. The caller
+# supplies StanBlocks and Treebars; WarmupHMC may be supplied or reproducibly
+# materialized at its enforced floor. Absolute paths are machine-specific and
+# deliberately never committed; `test/Manifest.toml` (where `Pkg.develop`
+# records them) is covered by the root `.gitignore`.
+function dev_path(name, var; required=true)
     raw = get(ENV, var, "")
-    isempty(raw) && error("""
-        $var is unset — $name has to be an explicit develop path.
-        Point it at a local checkout: $var=/path/to/$name.jl
-        """)
+    if isempty(raw)
+        required && error("""
+            $var is unset — $name has to be an explicit develop path.
+            Point it at a local checkout: $var=/path/to/$name.jl
+            """)
+        return nothing
+    end
     path = abspath(expanduser(raw))
     isdir(path) || error("$var=$raw does not name a directory ($path)")
     isfile(joinpath(path, "Project.toml")) ||
@@ -33,11 +36,19 @@ function dev_path(name, var)
 end
 
 stanblocks = dev_path("StanBlocks", "BRM_TEST_STANBLOCKS")
-warmuphmc = dev_path("WarmupHMC", "BRM_TEST_WARMUPHMC")
-require_git_ancestor(
+configured_warmuphmc = dev_path(
+    "WarmupHMC", "BRM_TEST_WARMUPHMC"; required=false)
+warmuphmc = resolve_git_floor_checkout(
     "WarmupHMC",
-    warmuphmc,
+    configured_warmuphmc,
     WARMUPHMC_NATIVE_PPL_MINIMUM;
+    cache_root=joinpath(TESTENV, ".bootstrap"),
+    mirror=get(ENV, "BRM_TEST_WARMUPHMC_MIRROR", joinpath(
+        homedir(), ".local", "state", "kb-agents", "git-mirrors",
+        "WarmupHMC.jl.git")),
+    origin=get(ENV, "BRM_TEST_WARMUPHMC_ORIGIN",
+        "https://github.com/nsiccha/WarmupHMC.jl.git"),
+    branch="dev",
     reason="Native PPL targets require WarmupHMC's own-gradient Pathfinder initialization.",
 )
 # Transitive: WarmupHMC depends on the unregistered Treebars and pins it with a

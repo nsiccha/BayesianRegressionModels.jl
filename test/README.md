@@ -20,16 +20,25 @@ gradient site easier.
 
 ## One-time bootstrap
 
-Four of the packages have to be **develop paths**, and absolute paths are
-machine-specific, so they are not committed. Supply the three outside this repo
+Four packages have to be **develop paths**, and absolute paths are
+machine-specific, so they are not committed. Supply StanBlocks and Treebars
 once:
 
 ```sh
 BRM_TEST_STANBLOCKS=/path/to/StanBlocks.jl \
-BRM_TEST_WARMUPHMC=/path/to/WarmupHMC.jl \
 BRM_TEST_TREEBARS=/path/to/Treebars.jl \
   julia --project=test test/bootstrap.jl
 ```
+
+`BRM_TEST_WARMUPHMC=/path/to/WarmupHMC.jl` is an optional override. A supplied
+checkout is used only when its `HEAD` contains the enforced NativePPL floor. If
+it is unset or stale, `bootstrap.jl` materializes an ignored, versioned checkout
+under `test/.bootstrap/`, preferring the host mirror's `dev`/immutable
+`refs/kb-pins/<sha>` and otherwise cloning public `origin/dev`. This is
+deliberate: a dirty shared `~/github/nsiccha/WarmupHMC.jl` checkout may be
+hundreds of commits behind even though the floor is landed and published.
+`BRM_TEST_WARMUPHMC_MIRROR` and `BRM_TEST_WARMUPHMC_ORIGIN` override those two
+sources for an offline or nonstandard host.
 
 That writes `test/Manifest.toml`, which is deliberately **not** committed (the
 root `.gitignore` covers `Manifest*.toml`). Re-run `bootstrap.jl` after moving
@@ -39,6 +48,21 @@ points at an older dependency checkout.
 `BridgeStan` needs the BridgeStan C++ sources in addition to the Julia package.
 `BridgeStan.jl` finds them via `$BRIDGESTAN`, falling back to
 `~/.bridgestan/bridgestan-<version>`, and downloads them if neither exists.
+
+The native-PPL milestone gates are separate on purpose:
+
+```sh
+julia --project=test test/native_ppl.jl
+julia --project=test test/native_ppl_warmuphmc.jl
+julia --project=test test/native_ppl_backend_parity.jl
+```
+
+The parity file compiles the unchanged substantive BRMI through `SBBRMI` and
+also compiles `test/native_ppl_shared_distributional_mixed.stan`, its
+hand-optimized minimal Stan analogue. It checks normalized density and mapped
+gradients before printing warmed density/gradient allocation and timing rows;
+those timings include the BridgeStan FFI crossing but exclude compilation and
+model/data construction.
 
 ## Why each constraint exists
 
@@ -53,7 +77,9 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   `6e6be51a016ab1e3cae9c7478f5c885788c65155` or later, where Pathfinder uses
   the target's own `logdensity_and_gradient`; `test/bootstrap.jl` and the
   focused sampler test enforce this ancestry because both older and newer
-  checkouts report version 0.2.1.
+  checkouts report version 0.2.1. Bootstrap resolves the floor from public
+  `origin/dev` or the host mirror's immutable pin, not from a shared checkout's
+  possibly stale local branch.
 - **`StanBlocks` must be a checkout, not a release.** BRM does not precompile
   against registered StanBlocks; it fails inside a `@deffun` in `src/sbimpl.jl`.
   Configured `gp` / `hsgp` term priors additionally require StanBlocks
@@ -85,13 +111,14 @@ and no `[extras]`/`[targets]` in the root `Project.toml`:
   every supported Julia version, so carrying both would be two declarations of
   one dependency list.
 
-Four files are the reason this environment exists — they fail at their own
+Five files are the reason this environment exists — they fail at their own
 `using` line under `julia --project=.`, before any BRM code runs:
 
 | file | needs beyond the root project |
 | --- | --- |
 | `test/adaptive_centering_bridgestan.jl` | `WarmupHMC`, `Enzyme` |
 | `test/adaptive_centering_warmuphmc.jl` | `WarmupHMC`, `Enzyme`, `DifferentiationInterface` |
+| `test/native_ppl_backend_parity.jl` | `BridgeStan`, `StanBlocks`, `Enzyme`, `DifferentiationInterface` |
 | `test/native_ppl_warmuphmc.jl` | `WarmupHMC`, `Enzyme`, `DifferentiationInterface` |
 | `test/plate_stress.jl` | `BridgeStan` |
 

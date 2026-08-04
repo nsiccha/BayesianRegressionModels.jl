@@ -62,7 +62,13 @@ struct NormalPrior{L<:Real,S<:Real} <: AbstractPriorDeclaration
     end
 end
 
-normal_prior(location::Real, scale::Real) = NormalPrior(location, scale)
+function normal_prior(location::Real, scale::Real)
+    isfinite(location) || throw(ArgumentError(
+        "native PPL Normal prior location must be finite"))
+    isfinite(scale) && scale > zero(scale) || throw(ArgumentError(
+        "native PPL Normal prior scale must be finite and positive"))
+    NormalPrior(location, scale)
+end
 
 """Exponential prior declaration parameterized by its positive scale."""
 struct ExponentialPrior{T<:Real} <: AbstractPriorDeclaration
@@ -75,7 +81,11 @@ struct ExponentialPrior{T<:Real} <: AbstractPriorDeclaration
     end
 end
 
-Exponential(scale::Real) = ExponentialPrior(scale)
+function Exponential(scale::Real)
+    isfinite(scale) && scale > zero(scale) || throw(ArgumentError(
+        "native PPL Exponential prior scale must be finite and positive"))
+    ExponentialPrior(scale)
+end
 
 """
 An unbound logical parameter declaration.
@@ -227,6 +237,10 @@ exp_link(input::Symbol) = ExpLink{input}()
 struct LogLink{Input} <: AbstractNodeDeclaration end
 log_link(input::Symbol) = LogLink{input}()
 
+"""Elementwise logistic link over one named deterministic node."""
+struct LogisticLink{Input} <: AbstractNodeDeclaration end
+logistic_link(input::Symbol) = LogisticLink{input}()
+
 """Gather a group-indexed latent block onto the observation-row axis."""
 struct GroupGather{Values,Group} <: AbstractNodeDeclaration end
 group_gather(values::Symbol, group::Symbol) = GroupGather{values,group}()
@@ -235,13 +249,17 @@ group_gather(values::Symbol, group::Symbol) = GroupGather{values,group}()
 struct RowProduct{Left,Right} <: AbstractNodeDeclaration end
 row_product(left::Symbol, right::Symbol) = RowProduct{left,right}()
 
-"""Apply one correlated, scaled group-coefficient block on each row."""
-struct GroupedAffine{Standardized,Scales,Correlation,Group,Predictors} <:
+"""Apply selected columns of one correlated group-coefficient block on each row."""
+struct GroupedAffine{
+        Standardized,Scales,Correlation,Group,Predictors,
+        CoefficientIndices,CoefficientCount} <:
        AbstractNodeDeclaration end
 
 function grouped_affine(standardized::Symbol, scales::Symbol,
                         correlation::Symbol, group::Symbol,
-                        predictors::Tuple)
+                        predictors::Tuple;
+                        coefficient_indices::Union{Nothing,Tuple}=nothing,
+                        coefficient_count::Union{Nothing,Integer}=nothing)
     isempty(predictors) && throw(ArgumentError(
         "native PPL grouped affine predictors cannot be empty"))
     all(predictor -> predictor === nothing || predictor isa Symbol,
@@ -254,7 +272,26 @@ function grouped_affine(standardized::Symbol, scales::Symbol,
                   if predictor !== nothing)
     length(unique(named)) == length(named) || throw(ArgumentError(
         "native PPL grouped affine predictors must be unique"))
-    GroupedAffine{standardized,scales,correlation,group,predictors}()
+    indices = coefficient_indices === nothing ?
+        ntuple(identity, length(predictors)) : coefficient_indices
+    length(indices) == length(predictors) || throw(ArgumentError(
+        "native PPL grouped affine coefficient selection must have one " *
+        "index per predictor"))
+    all(index -> index isa Integer && index > 0, indices) || throw(
+        ArgumentError(
+            "native PPL grouped affine coefficient indices must be positive " *
+            "integers"))
+    length(unique(indices)) == length(indices) || throw(ArgumentError(
+        "native PPL grouped affine coefficient indices must be unique"))
+    total = coefficient_count === nothing ? length(predictors) :
+        Int(coefficient_count)
+    total >= 2 || throw(ArgumentError(
+        "native PPL grouped affine coefficient count must be at least two"))
+    maximum(indices) <= total || throw(ArgumentError(
+        "native PPL grouped affine coefficient selection exceeds the full " *
+        "coefficient count"))
+    GroupedAffine{
+        standardized,scales,correlation,group,predictors,indices,total}()
 end
 
 node_input(::Center{Input}) where {Input} = Input
@@ -273,6 +310,7 @@ function node_input(node::Affine)
 end
 node_input(::ExpLink{Input}) where {Input} = Input
 node_input(::LogLink{Input}) where {Input} = Input
+node_input(::LogisticLink{Input}) where {Input} = Input
 group_values(::GroupGather{Values}) where {Values} = Values
 group_input(::GroupGather{Values,Group}) where {Values,Group} = Group
 row_product_inputs(::RowProduct{Left,Right}) where {Left,Right} = (Left, Right)
@@ -291,6 +329,13 @@ group_input(
 grouped_predictors(
     ::GroupedAffine{Standardized,Scales,Correlation,Group,Predictors},
 ) where {Standardized,Scales,Correlation,Group,Predictors} = Predictors
+grouped_coefficient_indices(
+    ::GroupedAffine{Standardized,Scales,Correlation,Group,Predictors,Indices},
+) where {Standardized,Scales,Correlation,Group,Predictors,Indices} = Indices
+grouped_coefficient_count(
+    ::GroupedAffine{
+        Standardized,Scales,Correlation,Group,Predictors,Indices,Count},
+) where {Standardized,Scales,Correlation,Group,Predictors,Indices,Count} = Count
 affine_parameter(::Affine{Inputs,Coefficients}) where {Inputs,Coefficients} =
     Coefficients
 
@@ -299,6 +344,13 @@ struct NormalObservation{Response,Location,Scale} <:
        AbstractObservationDeclaration end
 normal(response::Symbol, location::Symbol, scale::Symbol) =
     NormalObservation{response,location,scale}()
+
+"""One location-scale Student-t site with positive degrees of freedom."""
+struct StudentTObservation{Response,Df,Location,Scale} <:
+       AbstractObservationDeclaration end
+student_t(response::Symbol, degrees_freedom::Symbol,
+          location::Symbol, scale::Symbol) =
+    StudentTObservation{response,degrees_freedom,location,scale}()
 
 """One scalar Bernoulli stochastic-site declaration parameterized by logits."""
 struct BernoulliLogitObservation{Response,Logit} <:
@@ -311,6 +363,41 @@ struct PoissonObservation{Response,Rate} <:
        AbstractObservationDeclaration end
 poisson(response::Symbol, rate::Symbol) =
     PoissonObservation{response,rate}()
+
+"""One zero-inflated Poisson site with positive rate and inflation probability."""
+struct ZeroInflatedPoissonObservation{Response,Rate,ZeroInflation} <:
+       AbstractObservationDeclaration end
+zero_inflated_poisson(response::Symbol, rate::Symbol,
+                      zero_inflation::Symbol) =
+    ZeroInflatedPoissonObservation{response,rate,zero_inflation}()
+
+"""One NegativeBinomial2 site parameterized by positive mean and precision."""
+struct NegativeBinomial2Observation{Response,Mean,Precision} <:
+       AbstractObservationDeclaration end
+negative_binomial2(response::Symbol, mean::Symbol, precision::Symbol) =
+    NegativeBinomial2Observation{response,mean,precision}()
+
+"""One BetaBinomial2 site with trials, mean probability, and precision."""
+struct BetaBinomial2Observation{Response,Trials,Mean,Precision} <:
+       AbstractObservationDeclaration end
+beta_binomial2(response::Symbol, trials::Symbol, mean::Symbol,
+               precision::Symbol) =
+    BetaBinomial2Observation{response,trials,mean,precision}()
+
+"""One BinomialLogit site with row-varying trials and success logit."""
+struct BinomialLogitObservation{Response,Trials,Logit} <:
+       AbstractObservationDeclaration end
+binomial_logit(response::Symbol, trials::Symbol, logit::Symbol) =
+    BinomialLogitObservation{response,trials,logit}()
+
+"""One categorical-logit site with class 1 fixed at zero."""
+struct CategoricalLogitObservation{Response,Logits} <:
+       AbstractObservationDeclaration end
+function categorical_logit(response::Symbol, logits::Vararg{Symbol})
+    isempty(logits) && throw(ArgumentError(
+        "native PPL CategoricalLogit needs at least one non-reference logit"))
+    CategoricalLogitObservation{response,logits}()
+end
 
 """Typed observation-weight semantics retained in the public PPL graph."""
 abstract type AbstractObservationWeight end
@@ -434,9 +521,25 @@ is_broadcast_observation(::AbstractObservationDeclaration) = false
 is_broadcast_observation(::BroadcastObservation) = true
 
 observation_response(::NormalObservation{Response}) where {Response} = Response
+observation_response(::StudentTObservation{Response}) where {Response} = Response
 observation_response(::BernoulliLogitObservation{Response}) where {Response} =
     Response
 observation_response(::PoissonObservation{Response}) where {Response} = Response
+observation_response(
+    ::ZeroInflatedPoissonObservation{Response},
+) where {Response} = Response
+observation_response(
+    ::NegativeBinomial2Observation{Response},
+) where {Response} = Response
+observation_response(
+    ::BetaBinomial2Observation{Response},
+) where {Response} = Response
+observation_response(
+    ::BinomialLogitObservation{Response},
+) where {Response} = Response
+observation_response(
+    ::CategoricalLogitObservation{Response},
+) where {Response} = Response
 observation_response(observation::WeightedObservation) =
     observation_response(observation.observation)
 observation_response(observation::EvidenceObservation) =
@@ -447,11 +550,29 @@ observation_dependencies(
     ::NormalObservation{Response,Location,Scale},
 ) where {Response,Location,Scale} = (Location, Scale)
 observation_dependencies(
+    ::StudentTObservation{Response,Df,Location,Scale},
+) where {Response,Df,Location,Scale} = (Df, Location, Scale)
+observation_dependencies(
     ::BernoulliLogitObservation{Response,Logit},
 ) where {Response,Logit} = (Logit,)
 observation_dependencies(
     ::PoissonObservation{Response,Rate},
 ) where {Response,Rate} = (Rate,)
+observation_dependencies(
+    ::ZeroInflatedPoissonObservation{Response,Rate,ZeroInflation},
+) where {Response,Rate,ZeroInflation} = (Rate, ZeroInflation)
+observation_dependencies(
+    ::NegativeBinomial2Observation{Response,Mean,Precision},
+) where {Response,Mean,Precision} = (Mean, Precision)
+observation_dependencies(
+    ::BetaBinomial2Observation{Response,Trials,Mean,Precision},
+) where {Response,Trials,Mean,Precision} = (Trials, Mean, Precision)
+observation_dependencies(
+    ::BinomialLogitObservation{Response,Trials,Logit},
+) where {Response,Trials,Logit} = (Trials, Logit)
+observation_dependencies(
+    ::CategoricalLogitObservation{Response,Logits},
+) where {Response,Logits} = Logits
 observation_dependencies(observation::WeightedObservation) =
     (observation_dependencies(observation.observation)...,
      observation_weight_source(observation.weight))
@@ -521,6 +642,11 @@ struct NormalSiteFactor{L,S} <: AbstractSiteFactor
     location::L
     scale::S
 end
+struct StudentTSiteFactor{D,L,S} <: AbstractSiteFactor
+    degrees_freedom::D
+    location::L
+    scale::S
+end
 struct ExponentialSiteFactor{S} <: AbstractSiteFactor
     scale::S
 end
@@ -541,6 +667,26 @@ struct BernoulliLogitSiteFactor{L} <: AbstractSiteFactor
 end
 struct PoissonSiteFactor{R} <: AbstractSiteFactor
     rate::R
+end
+struct ZeroInflatedPoissonSiteFactor{R,Z} <: AbstractSiteFactor
+    rate::R
+    zero_inflation::Z
+end
+struct NegativeBinomial2SiteFactor{M,P} <: AbstractSiteFactor
+    mean::M
+    precision::P
+end
+struct BetaBinomial2SiteFactor{N,M,P} <: AbstractSiteFactor
+    trials::N
+    mean::M
+    precision::P
+end
+struct BinomialLogitSiteFactor{N,L} <: AbstractSiteFactor
+    trials::N
+    logit::L
+end
+struct CategoricalLogitSiteFactor{L} <: AbstractSiteFactor
+    logits::L
 end
 struct WeightedSiteFactor{
         F<:AbstractSiteFactor,
@@ -570,6 +716,9 @@ base_site_factor(factor::Union{WeightedSiteFactor,EvidenceSiteFactor}) =
 site_factor_dependencies(::StandardNormalSiteFactor) = ()
 site_factor_dependencies(factor::NormalSiteFactor) =
     _factor_value_dependencies((factor.location, factor.scale))
+site_factor_dependencies(factor::StudentTSiteFactor) =
+    _factor_value_dependencies((
+        factor.degrees_freedom, factor.location, factor.scale))
 site_factor_dependencies(factor::ExponentialSiteFactor) =
     _factor_value_dependencies((factor.scale,))
 site_factor_dependencies(::LKJCholeskySiteFactor) = ()
@@ -577,6 +726,16 @@ site_factor_dependencies(factor::BernoulliLogitSiteFactor) =
     _factor_value_dependencies((factor.logit,))
 site_factor_dependencies(factor::PoissonSiteFactor) =
     _factor_value_dependencies((factor.rate,))
+site_factor_dependencies(factor::ZeroInflatedPoissonSiteFactor) =
+    _factor_value_dependencies((factor.rate, factor.zero_inflation))
+site_factor_dependencies(factor::NegativeBinomial2SiteFactor) =
+    _factor_value_dependencies((factor.mean, factor.precision))
+site_factor_dependencies(factor::BetaBinomial2SiteFactor) =
+    _factor_value_dependencies((factor.trials, factor.mean, factor.precision))
+site_factor_dependencies(factor::BinomialLogitSiteFactor) =
+    _factor_value_dependencies((factor.trials, factor.logit))
+site_factor_dependencies(factor::CategoricalLogitSiteFactor) =
+    _factor_value_dependencies(factor.logits)
 site_factor_dependencies(factor::WeightedSiteFactor) =
     site_factor_dependencies(factor.factor)
 site_factor_dependencies(factor::EvidenceSiteFactor) =
@@ -632,6 +791,10 @@ struct LogFactorNode{I} <: AbstractFactorNode
     input::I
 end
 
+struct LogisticFactorNode{I} <: AbstractFactorNode
+    input::I
+end
+
 struct GroupGatherFactorNode{V,G} <: AbstractFactorNode
     values::V
     group::G
@@ -642,7 +805,7 @@ struct RowProductFactorNode{L,R} <: AbstractFactorNode
     right::R
 end
 
-struct GroupedAffineFactorNode{Z,S,C,G,P} <: AbstractFactorNode
+struct GroupedAffineFactorNode{Z,S,C,G,P,I,K} <: AbstractFactorNode
     standardized::Z
     scales::S
     correlation::C
@@ -650,8 +813,16 @@ struct GroupedAffineFactorNode{Z,S,C,G,P} <: AbstractFactorNode
     predictors::P
 end
 
+grouped_coefficient_indices(
+    ::GroupedAffineFactorNode{Z,S,C,G,P,I},
+) where {Z,S,C,G,P,I} = I
+grouped_coefficient_count(
+    ::GroupedAffineFactorNode{Z,S,C,G,P,I,K},
+) where {Z,S,C,G,P,I,K} = K
+
 factor_node_dependencies(node::Union{
-        CenterFactorNode,ZScaleFactorNode,ExpFactorNode,LogFactorNode}) =
+        CenterFactorNode,ZScaleFactorNode,ExpFactorNode,LogFactorNode,
+        LogisticFactorNode}) =
     _factor_value_dependencies((node.input,))
 factor_node_dependencies(node::AffineFactorNode) =
     _factor_value_dependencies((
@@ -782,16 +953,8 @@ function _parameter_stochastic_site(
         "native PPL grouped site `$name` requires binding `$group_name`"))
     observed_levels = _group_levels(
         getproperty(bindings, group_name), group_name)
-    levels = fitted_levels === nothing ? observed_levels : Tuple(fitted_levels)
-    isempty(levels) && throw(ArgumentError(
-        "native PPL fitted group levels for `$group_name` cannot be empty"))
-    any(ismissing, levels) && throw(ArgumentError(
-        "native PPL fitted group levels for `$group_name` cannot contain " *
-        "missing values"))
-    length(unique(levels)) == length(levels) || throw(ArgumentError(
-        "native PPL fitted group levels for `$group_name` must be unique"))
-    unknown = Tuple(level for level in observed_levels
-                    if findfirst(isequal(level), levels) === nothing)
+    levels = fitted_levels === nothing ? observed_levels : fitted_levels
+    unknown = Tuple(level for level in observed_levels if level ∉ levels)
     if !isempty(unknown) && new_groups === :error
         throw(CapabilityError(
             :new_group,
@@ -818,16 +981,8 @@ function _parameter_stochastic_site(
         "native PPL grouped site `$name` requires binding `$group_name`"))
     observed_levels = _group_levels(
         getproperty(bindings, group_name), group_name)
-    levels = fitted_levels === nothing ? observed_levels : Tuple(fitted_levels)
-    isempty(levels) && throw(ArgumentError(
-        "native PPL fitted group levels for `$group_name` cannot be empty"))
-    any(ismissing, levels) && throw(ArgumentError(
-        "native PPL fitted group levels for `$group_name` cannot contain " *
-        "missing values"))
-    length(unique(levels)) == length(levels) || throw(ArgumentError(
-        "native PPL fitted group levels for `$group_name` must be unique"))
-    unknown = Tuple(level for level in observed_levels
-                    if findfirst(isequal(level), levels) === nothing)
+    levels = fitted_levels === nothing ? observed_levels : fitted_levels
+    unknown = Tuple(level for level in observed_levels if level ∉ levels)
     if !isempty(unknown) && new_groups === :error
         throw(CapabilityError(
             :new_group,
@@ -916,6 +1071,8 @@ function _factor_node(declaration::AbstractNodeDeclaration,
         ExpFactorNode(reference(node_input(declaration)))
     elseif declaration isa LogLink
         LogFactorNode(reference(node_input(declaration)))
+    elseif declaration isa LogisticLink
+        LogisticFactorNode(reference(node_input(declaration)))
     elseif declaration isa GroupGather
         GroupGatherFactorNode(
             SiteValue{group_values(declaration)}(),
@@ -924,7 +1081,15 @@ function _factor_node(declaration::AbstractNodeDeclaration,
         left, right = row_product_inputs(declaration)
         RowProductFactorNode(reference(left), reference(right))
     else
-        GroupedAffineFactorNode(
+        GroupedAffineFactorNode{
+            typeof(SiteValue{grouped_standardized(declaration)}()),
+            typeof(SiteValue{grouped_scales(declaration)}()),
+            typeof(SiteValue{grouped_correlation(declaration)}()),
+            typeof(InputValue{group_input(declaration)}()),
+            typeof(map(predictor -> predictor === nothing ? nothing :
+                reference(predictor), grouped_predictors(declaration))),
+            grouped_coefficient_indices(declaration),
+            grouped_coefficient_count(declaration)}(
             SiteValue{grouped_standardized(declaration)}(),
             SiteValue{grouped_scales(declaration)}(),
             SiteValue{grouped_correlation(declaration)}(),
@@ -954,9 +1119,35 @@ function _observation_stochastic_site(
         NormalSiteFactor(
             _factor_value(dependencies[1], inputs, nodes),
             _factor_value(dependencies[2], inputs, nodes))
+    elseif base isa StudentTObservation
+        StudentTSiteFactor(
+            _factor_value(dependencies[1], inputs, nodes),
+            _factor_value(dependencies[2], inputs, nodes),
+            _factor_value(dependencies[3], inputs, nodes))
     elseif base isa BernoulliLogitObservation
         BernoulliLogitSiteFactor(_factor_value(
             only(dependencies), inputs, nodes))
+    elseif base isa ZeroInflatedPoissonObservation
+        ZeroInflatedPoissonSiteFactor(
+            _factor_value(dependencies[1], inputs, nodes),
+            _factor_value(dependencies[2], inputs, nodes))
+    elseif base isa NegativeBinomial2Observation
+        NegativeBinomial2SiteFactor(
+            _factor_value(dependencies[1], inputs, nodes),
+            _factor_value(dependencies[2], inputs, nodes))
+    elseif base isa BetaBinomial2Observation
+        BetaBinomial2SiteFactor(
+            _factor_value(dependencies[1], inputs, nodes),
+            _factor_value(dependencies[2], inputs, nodes),
+            _factor_value(dependencies[3], inputs, nodes))
+    elseif base isa BinomialLogitObservation
+        BinomialLogitSiteFactor(
+            _factor_value(dependencies[1], inputs, nodes),
+            _factor_value(dependencies[2], inputs, nodes))
+    elseif base isa CategoricalLogitObservation
+        CategoricalLogitSiteFactor(Tuple(
+            _factor_value(dependency, inputs, nodes)
+            for dependency in dependencies))
     else
         PoissonSiteFactor(_factor_value(
             only(dependencies), inputs, nodes))
@@ -1118,12 +1309,13 @@ function _canonical_factor_conditions(declaration::Model, conditions)
 end
 
 """Executable plan for an ordered continuous stochastic-site DAG."""
-struct FactorPlan{Output,M,G,F,B,C,I,N,J,K,L,A}
+struct FactorPlan{Output,M,G,F,B,C,O,I,N,J,K,L,A}
     declaration::M
     graph::G
     fitted_nodes::F
     bindings::B
     conditions::C
+    outcome_levels::O
     site_indices::I
     node_indices::N
     group_indices::J
@@ -1133,33 +1325,53 @@ struct FactorPlan{Output,M,G,F,B,C,I,N,J,K,L,A}
 end
 
 FactorPlan(declaration::M, graph::G, fitted_nodes::F,
-           bindings::B, conditions::C,
+           bindings::B, conditions::C, outcome_levels::O,
            site_indices::I, node_indices::N, group_indices::J,
            generated_group_levels::K,
            generated_group_indices::L,
            observation_axis::A,
-           output_site::Symbol) where {M,G,F,B,C,I,N,J,K,L,A} =
-    FactorPlan{output_site,M,G,F,B,C,I,N,J,K,L,A}(
-        declaration, graph, fitted_nodes, bindings, conditions, site_indices,
+           output_sites::Tuple) where {M,G,F,B,C,O,I,N,J,K,L,A} =
+    FactorPlan{output_sites,M,G,F,B,C,O,I,N,J,K,L,A}(
+        declaration, graph, fitted_nodes, bindings, conditions,
+        outcome_levels, site_indices,
         node_indices, group_indices, generated_group_levels,
         generated_group_indices, observation_axis)
 
-factor_output_site(::FactorPlan{Output}) where {Output} = Output
+FactorPlan(declaration, graph, fitted_nodes, bindings, conditions,
+           outcome_levels, site_indices, node_indices, group_indices,
+           generated_group_levels, generated_group_indices,
+           observation_axis, output_site::Symbol) =
+    FactorPlan(
+        declaration, graph, fitted_nodes, bindings, conditions,
+        outcome_levels, site_indices, node_indices, group_indices,
+        generated_group_levels, generated_group_indices,
+        observation_axis, (output_site,))
+
+factor_output_sites(::FactorPlan{Outputs}) where {Outputs} = Outputs
+function factor_output_site(plan::FactorPlan)
+    outputs = factor_output_sites(plan)
+    length(outputs) == 1 || throw(CapabilityError(
+        :factor_outputs,
+        "factor plan has multiple terminal stochastic outputs " *
+        "$(collect(outputs)); select an outcome explicitly"))
+    only(outputs)
+end
 
 function Base.getproperty(plan::FactorPlan, name::Symbol)
     name === :output_site && return factor_output_site(plan)
+    name === :output_sites && return factor_output_sites(plan)
     getfield(plan, name)
 end
 
 Base.propertynames(::FactorPlan, private::Bool=false) =
-    (fieldnames(FactorPlan)..., :output_site)
+    (fieldnames(FactorPlan)..., :output_site, :output_sites)
 
 BRM.LogDensityProblems.dimension(plan::FactorPlan) = plan.graph.dimension
 
 function _uses_factor_executor(declaration::Model, conditions, bindings=(;))
     graph = factor_graph(declaration; conditions, bindings)
-    count(site -> site.shape isa BroadcastSiteShape,
-          Tuple(graph.sites)) == 1 || return false
+    any(site -> site.shape isa BroadcastSiteShape, values(graph.sites)) ||
+        return false
     stochastic_names = Set(declaration.site_order)
     dependent_site = any(declaration.site_order) do name
         hasproperty(declaration.observations, name) || return false
@@ -1186,9 +1398,31 @@ function _uses_factor_executor(declaration::Model, conditions, bindings=(;))
     evidence_observation = any(values(graph.sites)) do site
         _evidence_site_factor(site.factor) !== nothing
     end
+    zero_inflated_observation = any(values(graph.sites)) do site
+        base_site_factor(site.factor) isa ZeroInflatedPoissonSiteFactor
+    end
+    overdispersed_count_observation = any(values(graph.sites)) do site
+        base_site_factor(site.factor) isa NegativeBinomial2SiteFactor
+    end
+    bounded_count_observation = any(values(graph.sites)) do site
+        base_site_factor(site.factor) isa
+            Union{BetaBinomial2SiteFactor,BinomialLogitSiteFactor}
+    end
+    categorical_observation = any(values(graph.sites)) do site
+        base_site_factor(site.factor) isa CategoricalLogitSiteFactor
+    end
+    student_t_observation = any(values(graph.sites)) do site
+        base_site_factor(site.factor) isa StudentTSiteFactor
+    end
+    broadcast_output_count = count(values(graph.sites)) do site
+        site.shape isa BroadcastSiteShape
+    end
     dependent_site || sampled_offset_affine || grouped_gather ||
         grouped_affine_node || row_scale || weighted_observation ||
-        evidence_observation
+        evidence_observation || zero_inflated_observation ||
+        overdispersed_count_observation || bounded_count_observation ||
+        categorical_observation || student_t_observation ||
+        broadcast_output_count > 1
 end
 
 _weighted_site_factor(::AbstractSiteFactor) = nothing
@@ -1304,9 +1538,20 @@ _factor_arguments(::StandardNormalSiteFactor) = ()
 _factor_arguments(::LKJCholeskySiteFactor) = ()
 _factor_arguments(factor::NormalSiteFactor) =
     (factor.location, factor.scale)
+_factor_arguments(factor::StudentTSiteFactor) =
+    (factor.degrees_freedom, factor.location, factor.scale)
 _factor_arguments(factor::ExponentialSiteFactor) = (factor.scale,)
 _factor_arguments(factor::BernoulliLogitSiteFactor) = (factor.logit,)
 _factor_arguments(factor::PoissonSiteFactor) = (factor.rate,)
+_factor_arguments(factor::ZeroInflatedPoissonSiteFactor) =
+    (factor.rate, factor.zero_inflation)
+_factor_arguments(factor::NegativeBinomial2SiteFactor) =
+    (factor.mean, factor.precision)
+_factor_arguments(factor::BetaBinomial2SiteFactor) =
+    (factor.trials, factor.mean, factor.precision)
+_factor_arguments(factor::BinomialLogitSiteFactor) =
+    (factor.trials, factor.logit)
+_factor_arguments(factor::CategoricalLogitSiteFactor) = factor.logits
 _factor_arguments(factor::WeightedSiteFactor) =
     (_factor_arguments(factor.factor)..., factor.values)
 _factor_arguments(factor::EvidenceSiteFactor) =
@@ -1317,7 +1562,7 @@ _factor_value_is_row(::InputValue{Name}, graph, bindings) where {Name} =
     getproperty(bindings, Name) isa AbstractVector
 function _factor_value_is_row(::NodeValue{Name}, graph, bindings) where {Name}
     node = getproperty(graph.nodes, Name)
-    node isa Union{ExpFactorNode,LogFactorNode} &&
+    node isa Union{ExpFactorNode,LogFactorNode,LogisticFactorNode} &&
         return _factor_value_is_row(node.input, graph, bindings)
     node isa Union{
         CenterFactorNode,ZScaleFactorNode,AffineFactorNode,
@@ -1327,156 +1572,6 @@ end
 _factor_value_is_row(::SiteValue{Name}, graph, bindings) where {Name} =
     getproperty(graph.sites, Name).shape isa
         Union{BlockSiteShape,BroadcastSiteShape}
-
-function _factor_exp_is_poisson_rate(name::Symbol, graph::FactorGraph)
-    any(values(graph.sites)) do site
-        factor = base_site_factor(site.factor)
-        factor isa PoissonSiteFactor && factor.rate isa NodeValue &&
-            node_value_name(factor.rate) === name
-    end
-end
-
-function _factor_exp_is_normal_scale(name::Symbol, graph::FactorGraph)
-    any(values(graph.sites)) do site
-        factor = base_site_factor(site.factor)
-        factor isa NormalSiteFactor && factor.scale isa NodeValue &&
-            node_value_name(factor.scale) === name
-    end
-end
-
-function _validate_poisson_rate_source(name::Symbol,
-                                       factor::PoissonSiteFactor,
-                                       graph::FactorGraph)
-    rate = factor.rate
-    if rate isa LiteralValue
-        value = rate.value
-        value isa Real && isfinite(value) && value > zero(value) ||
-            throw(ArgumentError(
-                "native PPL Poisson factor for site `$name` requires a " *
-                "finite positive literal rate"))
-    elseif rate isa SiteValue
-        rate_name = site_value_name(rate)
-        getproperty(graph.sites, rate_name).support isa PositiveSupport ||
-            throw(CapabilityError(
-                :factor_rate,
-                "Poisson factor for site `$name` uses stochastic rate " *
-                "`$rate_name`, whose support must be PositiveSupport"))
-    elseif rate isa NodeValue
-        rate_name = node_value_name(rate)
-        getproperty(graph.nodes, rate_name) isa ExpFactorNode || throw(
-            CapabilityError(
-                :factor_rate,
-                "Poisson factor for site `$name` uses deterministic rate " *
-                "`$rate_name`, which must currently be an exp node"))
-    end
-    nothing
-end
-
-function _validate_factor_plan_site(
-    name::Symbol, site::StochasticSite, graph::FactorGraph,
-    bindings::NamedTuple, conditions::NamedTuple,
-    broadcast_sites::Set{Symbol},
-)
-    base_factor = base_site_factor(site.factor)
-    site.shape isa BlockSiteShape &&
-        !(base_factor isa Union{
-            StandardNormalSiteFactor,NormalSiteFactor,
-            ExponentialSiteFactor,LKJCholeskySiteFactor}) && throw(CapabilityError(
-            :factor_shape,
-            "multi-latent block site `$name` has an unsupported factor"))
-    site.factor isa Union{
-        StandardNormalSiteFactor,NormalSiteFactor,ExponentialSiteFactor,
-        LKJCholeskySiteFactor,BernoulliLogitSiteFactor,PoissonSiteFactor,
-        WeightedSiteFactor,EvidenceSiteFactor,
-    } || throw(CapabilityError(
-        :factor_family,
-        "multi-latent factor site `$name` has unsupported factor " *
-        "$(typeof(site.factor))"))
-    base_factor isa Union{BernoulliLogitSiteFactor,PoissonSiteFactor} &&
-        !(site.shape isa BroadcastSiteShape) && throw(CapabilityError(
-            :factor_shape,
-            "discrete factor site `$name` must be a broadcast output"))
-    if site.activity isa ConditionedSite
-        value = getproperty(conditions, name)
-        if site.shape isa ScalarSiteShape
-            value isa Real || throw(ArgumentError(
-                "native PPL scalar condition `$name` must be a real value; " *
-                "got $(typeof(value))"))
-        elseif site.shape isa BlockSiteShape
-            value isa AbstractVector || throw(ArgumentError(
-                "native PPL block condition `$name` must be a vector; got " *
-                "$(typeof(value))"))
-        elseif site.shape isa BroadcastSiteShape
-            value isa AbstractVector || throw(ArgumentError(
-                "native PPL broadcast condition `$name` must be a vector; " *
-                "got $(typeof(value))"))
-        end
-    end
-    for dependency in site_factor_dependencies(site.factor)
-        dependency in broadcast_sites && throw(CapabilityError(
-            :factor_dependencies,
-            "multi-latent factor site `$name` depends on broadcast site " *
-            "`$dependency`; broadcast outputs must remain terminal until " *
-            "their values can be materialized"))
-    end
-    if site.shape isa ScalarSiteShape
-        for argument in _factor_arguments(site.factor)
-            _factor_value_is_row(argument, graph, bindings) || continue
-            throw(CapabilityError(
-                :factor_shape,
-                "scalar factor site `$name` cannot consume a row-valued " *
-                "argument"))
-        end
-    end
-    for argument in _factor_arguments(site.factor)
-        argument isa SiteValue || continue
-        dependency = getproperty(
-            graph.sites, site_value_name(argument))
-        dependency.shape isa BlockSiteShape || continue
-        throw(CapabilityError(
-            :factor_shape,
-            "factor site `$name` cannot consume block site " *
-            "`$(site_value_name(argument))` directly; lower it through a " *
-            "typed materializing node"))
-    end
-    if base_factor isa NormalSiteFactor &&
-       base_factor.scale isa SiteValue
-        scale_name = site_value_name(base_factor.scale)
-        scale_site = getproperty(graph.sites, scale_name)
-        scale_site.support isa PositiveSupport || throw(CapabilityError(
-            :factor_scale,
-            "Normal factor for site `$name` uses stochastic scale " *
-            "`$scale_name`, whose support must be PositiveSupport"))
-    elseif base_factor isa NormalSiteFactor &&
-           base_factor.scale isa NodeValue
-        scale_name = node_value_name(base_factor.scale)
-        getproperty(graph.nodes, scale_name) isa ExpFactorNode || throw(
-            CapabilityError(
-                :factor_scale,
-                "Normal factor for site `$name` uses deterministic scale " *
-                "`$scale_name`, which must currently be an exp node"))
-    elseif base_factor isa NormalSiteFactor &&
-           base_factor.scale isa InputValue
-        scale_name = input_value_name(base_factor.scale)
-        values = getproperty(bindings, scale_name)
-        all(value -> value isa Real && isfinite(value) &&
-                     value > zero(value),
-            values isa AbstractVector ? values : (values,)) || throw(
-            ArgumentError(
-                "Normal factor for site `$name` input scale `$scale_name` " *
-                "must contain finite positive values"))
-    elseif base_factor isa NormalSiteFactor &&
-           base_factor.scale isa LiteralValue
-        scale = base_factor.scale.value
-        scale isa Real && isfinite(scale) && scale > zero(scale) || throw(
-            ArgumentError(
-                "Normal factor for site `$name` literal scale must be " *
-                "finite and positive"))
-    elseif base_factor isa PoissonSiteFactor
-        _validate_poisson_rate_source(name, base_factor, graph)
-    end
-    nothing
-end
 
 function _fit_factor_nodes(graph::FactorGraph, bindings::NamedTuple)
     names = Tuple(name for (name, node) in pairs(graph.nodes)
@@ -1523,9 +1618,76 @@ function _factor_fitted_nodes(graph::FactorGraph, bindings::NamedTuple,
     fitted_nodes
 end
 
+_factor_raw_category_values(raw) = raw
+_factor_raw_category_values(raw::BRM.CA.CategoricalVector) =
+    BRM.CA.unwrap.(raw)
+
+function _factor_fit_category_levels(raw)
+    raw isa BRM.CA.CategoricalVector && return Tuple(BRM.CA.levels(raw))
+    Tuple(sort(unique(raw)))
+end
+
+function _factor_initial_category_levels(raw, class_count::Int)
+    values = _factor_raw_category_values(raw)
+    if any(value -> value isa Real, values)
+        all(value -> value isa Real && BRM._native_ppl_is_count(value) &&
+                     1 <= value <= class_count, values) ||
+            throw(ArgumentError(
+                "native PPL CategoricalLogit numeric responses must be " *
+                "integer class codes in 1:$class_count"))
+        return Tuple(1:class_count)
+    end
+    _factor_fit_category_levels(raw)
+end
+
+function _factor_apply_category_levels(levels, raw, response::Symbol)
+    mapping = Dict(level => index for (index, level) in enumerate(levels))
+    values = _factor_raw_category_values(raw)
+    map(values) do value
+        haskey(mapping, value) || throw(ArgumentError(
+            "native PPL CategoricalLogit response `$response` contains " *
+            "unseen level `$value`; fitted levels are $(collect(levels))"))
+        mapping[value]
+    end
+end
+
+function _factor_categorical_conditions(
+        declaration::Model, conditions::NamedTuple, fitted_levels)
+    categorical_names = Tuple(
+        name for (name, observation) in pairs(declaration.observations)
+        if base_observation(scalar_observation(observation)) isa
+            CategoricalLogitObservation)
+    isempty(categorical_names) && return conditions, (;)
+    length(categorical_names) == 1 || throw(CapabilityError(
+        :categorical_outputs,
+        "native PPL currently supports one CategoricalLogit response"))
+    response = only(categorical_names)
+    observation = base_observation(scalar_observation(
+        getproperty(declaration.observations, response)))
+    class_count = length(observation_dependencies(observation)) + 1
+    levels = if fitted_levels !== nothing &&
+                hasproperty(fitted_levels, response)
+        getproperty(fitted_levels, response)
+    elseif hasproperty(conditions, response)
+        _factor_initial_category_levels(
+            getproperty(conditions, response), class_count)
+    else
+        Tuple(1:class_count)
+    end
+    length(levels) == class_count || throw(ArgumentError(
+        "native PPL CategoricalLogit response `$response` needs " *
+        "$class_count fitted levels for $(class_count - 1) non-reference " *
+        "predictors; got $(collect(levels))"))
+    outcome_levels = NamedTuple{(response,)}((Tuple(levels),))
+    hasproperty(conditions, response) || return conditions, outcome_levels
+    encoded = _factor_apply_category_levels(
+        levels, getproperty(conditions, response), response)
+    merge(conditions, NamedTuple{(response,)}((encoded,))), outcome_levels
+end
+
 function _bind_factor_plan(declaration::Model, bindings, conditions;
                            group_levels=(;), new_groups::Symbol=:error,
-                           fitted_nodes=nothing)
+                           fitted_nodes=nothing, outcome_levels=nothing)
     input_axis_length = nothing
     group_inputs = Set(_group_input_names(declaration))
     for (name, declaration_input) in pairs(declaration.inputs)
@@ -1556,6 +1718,8 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
     end
     canonical_conditions = _canonical_factor_conditions(
         declaration, conditions)
+    canonical_conditions, outcome_levels = _factor_categorical_conditions(
+        declaration, canonical_conditions, outcome_levels)
     graph = factor_graph(
         declaration; conditions=canonical_conditions, bindings,
         group_levels, new_groups)
@@ -1563,14 +1727,15 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
     for (name, node) in pairs(graph.nodes)
         node isa Union{
             CenterFactorNode,ZScaleFactorNode,
-            ExpFactorNode,LogFactorNode,AffineFactorNode,GroupGatherFactorNode,
+            ExpFactorNode,LogFactorNode,LogisticFactorNode,
+            AffineFactorNode,GroupGatherFactorNode,
             RowProductFactorNode,GroupedAffineFactorNode,
         } ||
             throw(CapabilityError(
             :factor_nodes,
             "multi-latent factor node `$name` has unsupported operation " *
             "$(typeof(node)); the current executable slice accepts scalar " *
-            "fitted transforms and row-valued exp, log, affine, " *
+            "fitted transforms and row-valued exp, log, logistic, affine, " *
             "group-gather, product, and grouped-affine nodes"))
         if node isa Union{CenterFactorNode,ZScaleFactorNode}
             node.input isa InputValue || throw(CapabilityError(
@@ -1589,46 +1754,16 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
                 ArgumentError(
                     "native PPL log input `$input_name` must contain finite " *
                     "positive values"))
-        elseif node isa ExpFactorNode
-            if node.input isa SiteValue
-                source_name = site_value_name(node.input)
-                source_site = getproperty(graph.sites, source_name)
-                source_site.shape isa BlockSiteShape && throw(
-                    CapabilityError(
-                        :factor_shape,
-                        "exp node `$name` cannot consume block site " *
-                        "`$source_name` directly; lower it through a typed " *
-                        "materializing node"))
-            end
-            broadcast_input = node.input isa SiteValue &&
-                getproperty(
-                    graph.sites, site_value_name(node.input)).shape isa
-                        BroadcastSiteShape
-            terminal_poisson_rate =
-                _factor_exp_is_poisson_rate(name, graph)
-            terminal_normal_scale =
-                _factor_exp_is_normal_scale(name, graph)
-            _factor_value_is_row(node.input, graph, bindings) &&
-                !broadcast_input && !terminal_poisson_rate &&
-                !terminal_normal_scale && throw(
-                CapabilityError(
-                    :factor_nodes,
-                    "exp node `$name` cannot consume a row-valued argument " *
-                    "unless it is a terminal Poisson log-rate link or " *
-                    "Normal scale"))
+        end
+        if node isa ExpFactorNode && node.input isa SiteValue
+            source_name = site_value_name(node.input)
+            source_site = getproperty(graph.sites, source_name)
+            source_site.shape isa BlockSiteShape && throw(CapabilityError(
+                :factor_shape,
+                "exp node `$name` cannot consume block site `$source_name` " *
+                "directly; lower it through a typed materializing node"))
         end
         if node isa AffineFactorNode
-            for offset in node.offsets
-                offset isa InputValue || continue
-                offset_name = input_value_name(offset)
-                offset_value = getproperty(bindings, offset_name)
-                all(value -> value isa Real && isfinite(value),
-                    offset_value isa AbstractVector ?
-                        offset_value : (offset_value,)) || throw(
-                    ArgumentError(
-                        "native PPL affine data offset `$offset_name` must " *
-                        "contain finite real values"))
-            end
             coefficient_name = site_value_name(node.coefficients)
             coefficient_site = getproperty(graph.sites, coefficient_name)
             coefficient_site.shape isa Union{ScalarSiteShape,BlockSiteShape} ||
@@ -1642,9 +1777,7 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
                     "coefficients"))
             coefficient_count = length(node.inputs) +
                 (affine_has_intercept(node) ? 1 : 0)
-            coefficient_declaration = getproperty(
-                declaration.parameters, coefficient_name)
-            length(coefficient_declaration.axis_keys) == coefficient_count ||
+            length(coefficient_site.coordinate_keys) == coefficient_count ||
                 throw(CapabilityError(
                     :factor_nodes,
                     "affine node `$name` has the wrong coefficient count"))
@@ -1720,11 +1853,22 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
                     :factor_nodes,
                     "grouped affine node `$name` correlation keys must match " *
                     "its group coefficient keys"))
-            length(node.predictors) == length(coefficients) || throw(
+            grouped_coefficient_count(node) == length(coefficients) || throw(
+                CapabilityError(
+                    :factor_nodes,
+                    "grouped affine node `$name` full coefficient count must " *
+                    "match its group coefficient axis"))
+            indices = grouped_coefficient_indices(node)
+            length(node.predictors) == length(indices) || throw(
                 CapabilityError(
                     :factor_nodes,
                     "grouped affine node `$name` needs one predictor per " *
-                    "group coefficient"))
+                    "selected group coefficient"))
+            all(index -> index in eachindex(coefficients), indices) || throw(
+                CapabilityError(
+                    :factor_nodes,
+                    "grouped affine node `$name` selects a coefficient " *
+                    "outside its group coefficient axis"))
             for predictor in node.predictors
                 predictor isa SiteValue || continue
                 predictor_name = site_value_name(predictor)
@@ -1761,52 +1905,349 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
                         "$dimension-dimensional LKJ Cholesky factor"))
         end
     end
+    for (name, site) in pairs(graph.sites)
+        base_factor = base_site_factor(site.factor)
+        if site.shape isa ScalarSiteShape
+            for argument in _factor_arguments(site.factor)
+                _factor_value_is_row(argument, graph, bindings) || continue
+                throw(CapabilityError(
+                    :factor_shape,
+                    "scalar factor site `$name` cannot consume a row-valued " *
+                    "argument"))
+            end
+        end
+        for argument in _factor_arguments(site.factor)
+            argument isa SiteValue || continue
+            dependency_name = site_value_name(argument)
+            dependency = getproperty(graph.sites, dependency_name)
+            dependency.shape isa BlockSiteShape || continue
+            throw(CapabilityError(
+                :factor_shape,
+                "factor site `$name` cannot consume block site " *
+                "`$dependency_name` directly; lower it through a typed " *
+                "materializing node"))
+        end
+        if base_factor isa NormalSiteFactor
+            scale = base_factor.scale
+            if scale isa NodeValue
+                scale_name = node_value_name(scale)
+                getproperty(graph.nodes, scale_name) isa ExpFactorNode ||
+                    throw(CapabilityError(
+                        :factor_scale,
+                        "Normal site `$name` node scale `$scale_name` must " *
+                        "be produced by `exp`"))
+            elseif scale isa SiteValue
+                scale_name = site_value_name(scale)
+                getproperty(graph.sites, scale_name).support isa
+                    PositiveSupport || throw(CapabilityError(
+                        :factor_scale,
+                        "Normal site `$name` scale site `$scale_name` must " *
+                        "have positive support"))
+            elseif scale isa InputValue
+                scale_name = input_value_name(scale)
+                values = getproperty(bindings, scale_name)
+                all(value -> value isa Real && isfinite(value) &&
+                             value > zero(value),
+                    values isa AbstractVector ? values : (values,)) || throw(
+                    ArgumentError(
+                        "Normal site `$name` input scale `$scale_name` must " *
+                        "contain finite positive values"))
+            elseif scale isa LiteralValue
+                isfinite(scale.value) && scale.value > zero(scale.value) ||
+                    throw(ArgumentError(
+                        "Normal site `$name` literal scale must be finite " *
+                        "and positive"))
+            end
+        elseif base_factor isa StudentTSiteFactor
+            for (label, argument) in
+                    (("degrees of freedom", base_factor.degrees_freedom),
+                     ("scale", base_factor.scale))
+                if argument isa NodeValue
+                    argument_name = node_value_name(argument)
+                    getproperty(graph.nodes, argument_name) isa
+                        ExpFactorNode || throw(CapabilityError(
+                            :factor_support,
+                            "Student-t site `$name` $label node " *
+                            "`$argument_name` must be produced by `exp`"))
+                elseif argument isa SiteValue
+                    argument_name = site_value_name(argument)
+                    getproperty(graph.sites, argument_name).support isa
+                        PositiveSupport || throw(CapabilityError(
+                            :factor_support,
+                            "Student-t site `$name` $label site " *
+                            "`$argument_name` must have positive support"))
+                elseif argument isa InputValue
+                    argument_name = input_value_name(argument)
+                    values = getproperty(bindings, argument_name)
+                    all(value -> value isa Real && isfinite(value) &&
+                                 value > zero(value),
+                        values isa AbstractVector ? values : (values,)) ||
+                        throw(ArgumentError(
+                            "Student-t $label input `$argument_name` must " *
+                            "contain finite positive values"))
+                elseif argument isa LiteralValue
+                    value = argument.value
+                    isfinite(value) && value > zero(value) || throw(
+                        ArgumentError(
+                            "Student-t literal $label must be finite and " *
+                            "positive"))
+                else
+                    throw(CapabilityError(
+                        :factor_support,
+                        "Student-t site `$name` has unsupported $label " *
+                        "source $(typeof(argument))"))
+                end
+            end
+        elseif base_factor isa ZeroInflatedPoissonSiteFactor
+            rate = base_factor.rate
+            zero_inflation = base_factor.zero_inflation
+            if rate isa NodeValue
+                rate_name = node_value_name(rate)
+                getproperty(graph.nodes, rate_name) isa ExpFactorNode || throw(
+                    CapabilityError(
+                        :factor_support,
+                        "zero-inflated Poisson site `$name` rate node " *
+                        "`$rate_name` must be produced by `exp`"))
+            elseif rate isa InputValue
+                rate_name = input_value_name(rate)
+                values = getproperty(bindings, rate_name)
+                all(value -> value isa Real && isfinite(value) &&
+                             value >= zero(value),
+                    values isa AbstractVector ? values : (values,)) || throw(
+                    ArgumentError(
+                        "zero-inflated Poisson rate input `$rate_name` must " *
+                        "contain finite nonnegative values"))
+            elseif rate isa LiteralValue
+                isfinite(rate.value) && rate.value >= zero(rate.value) ||
+                    throw(ArgumentError(
+                        "zero-inflated Poisson literal rate must be finite " *
+                        "and nonnegative"))
+            else
+                throw(CapabilityError(
+                    :factor_support,
+                    "zero-inflated Poisson site `$name` has unsupported " *
+                    "rate source $(typeof(rate))"))
+            end
+            if zero_inflation isa NodeValue
+                probability_name = node_value_name(zero_inflation)
+                getproperty(graph.nodes, probability_name) isa
+                    LogisticFactorNode || throw(CapabilityError(
+                        :factor_support,
+                        "zero-inflated Poisson site `$name` probability node " *
+                        "`$probability_name` must be produced by `logistic`"))
+            elseif zero_inflation isa InputValue
+                probability_name = input_value_name(zero_inflation)
+                values = getproperty(bindings, probability_name)
+                all(value -> value isa Real && isfinite(value) &&
+                             zero(value) <= value <= one(value),
+                    values isa AbstractVector ? values : (values,)) || throw(
+                    ArgumentError(
+                        "zero-inflated Poisson probability input " *
+                        "`$probability_name` must lie in [0, 1]"))
+            elseif zero_inflation isa LiteralValue
+                value = zero_inflation.value
+                isfinite(value) && zero(value) <= value <= one(value) ||
+                    throw(ArgumentError(
+                        "zero-inflated Poisson literal probability must lie " *
+                        "in [0, 1]"))
+            else
+                throw(CapabilityError(
+                    :factor_support,
+                    "zero-inflated Poisson site `$name` has unsupported " *
+                    "probability source $(typeof(zero_inflation))"))
+            end
+        elseif base_factor isa NegativeBinomial2SiteFactor
+            for (label, argument) in
+                    (("mean", base_factor.mean),
+                     ("precision", base_factor.precision))
+                if argument isa NodeValue
+                    argument_name = node_value_name(argument)
+                    getproperty(graph.nodes, argument_name) isa
+                        ExpFactorNode || throw(CapabilityError(
+                            :factor_support,
+                            "NegativeBinomial2 site `$name` $label node " *
+                            "`$argument_name` must be produced by `exp`"))
+                elseif argument isa InputValue
+                    argument_name = input_value_name(argument)
+                    values = getproperty(bindings, argument_name)
+                    all(value -> value isa Real && isfinite(value) &&
+                                 value > zero(value),
+                        values isa AbstractVector ? values : (values,)) ||
+                        throw(ArgumentError(
+                            "NegativeBinomial2 $label input `$argument_name` " *
+                            "must contain finite positive values"))
+                elseif argument isa LiteralValue
+                    value = argument.value
+                    isfinite(value) && value > zero(value) || throw(
+                        ArgumentError(
+                            "NegativeBinomial2 literal $label must be " *
+                            "finite and positive"))
+                else
+                    throw(CapabilityError(
+                        :factor_support,
+                        "NegativeBinomial2 site `$name` has unsupported " *
+                        "$label source $(typeof(argument))"))
+                end
+            end
+        elseif base_factor isa BetaBinomial2SiteFactor
+            trials = base_factor.trials
+            if trials isa InputValue
+                trials_name = input_value_name(trials)
+                values = getproperty(bindings, trials_name)
+                all(BRM._native_ppl_is_count,
+                    values isa AbstractVector ? values : (values,)) || throw(
+                    ArgumentError(
+                        "BetaBinomial2 trials input `$trials_name` must " *
+                        "contain nonnegative integer-valued counts"))
+            elseif trials isa LiteralValue
+                BRM._native_ppl_is_count(trials.value) || throw(ArgumentError(
+                    "BetaBinomial2 literal trials must be a nonnegative " *
+                    "integer-valued count"))
+            else
+                throw(CapabilityError(
+                    :factor_support,
+                    "BetaBinomial2 site `$name` has unsupported trials " *
+                    "source $(typeof(trials))"))
+            end
+            mean = base_factor.mean
+            if mean isa NodeValue
+                mean_name = node_value_name(mean)
+                getproperty(graph.nodes, mean_name) isa LogisticFactorNode ||
+                    throw(CapabilityError(
+                        :factor_support,
+                        "BetaBinomial2 site `$name` mean node `$mean_name` " *
+                        "must be produced by `logistic`"))
+            elseif mean isa InputValue
+                mean_name = input_value_name(mean)
+                values = getproperty(bindings, mean_name)
+                all(value -> value isa Real && isfinite(value) &&
+                             zero(value) < value < one(value),
+                    values isa AbstractVector ? values : (values,)) || throw(
+                    ArgumentError(
+                        "BetaBinomial2 mean input `$mean_name` must lie " *
+                        "strictly in (0, 1)"))
+            elseif mean isa LiteralValue
+                value = mean.value
+                isfinite(value) && zero(value) < value < one(value) || throw(
+                    ArgumentError(
+                        "BetaBinomial2 literal mean must lie strictly in " *
+                        "(0, 1)"))
+            else
+                throw(CapabilityError(
+                    :factor_support,
+                    "BetaBinomial2 site `$name` has unsupported mean " *
+                    "source $(typeof(mean))"))
+            end
+            precision = base_factor.precision
+            if precision isa NodeValue
+                precision_name = node_value_name(precision)
+                getproperty(graph.nodes, precision_name) isa ExpFactorNode ||
+                    throw(CapabilityError(
+                        :factor_support,
+                        "BetaBinomial2 site `$name` precision node " *
+                        "`$precision_name` must be produced by `exp`"))
+            elseif precision isa InputValue
+                precision_name = input_value_name(precision)
+                values = getproperty(bindings, precision_name)
+                all(value -> value isa Real && isfinite(value) &&
+                             value > zero(value),
+                    values isa AbstractVector ? values : (values,)) || throw(
+                    ArgumentError(
+                        "BetaBinomial2 precision input `$precision_name` " *
+                        "must contain finite positive values"))
+            elseif precision isa LiteralValue
+                value = precision.value
+                isfinite(value) && value > zero(value) || throw(ArgumentError(
+                    "BetaBinomial2 literal precision must be finite and " *
+                    "positive"))
+            else
+                throw(CapabilityError(
+                    :factor_support,
+                    "BetaBinomial2 site `$name` has unsupported precision " *
+                    "source $(typeof(precision))"))
+            end
+        elseif base_factor isa BinomialLogitSiteFactor
+            trials = base_factor.trials
+            if trials isa InputValue
+                trials_name = input_value_name(trials)
+                values = getproperty(bindings, trials_name)
+                all(BRM._native_ppl_is_count,
+                    values isa AbstractVector ? values : (values,)) || throw(
+                    ArgumentError(
+                        "BinomialLogit trials input `$trials_name` must " *
+                        "contain nonnegative integer-valued counts"))
+            elseif trials isa LiteralValue
+                BRM._native_ppl_is_count(trials.value) || throw(ArgumentError(
+                    "BinomialLogit literal trials must be a nonnegative " *
+                    "integer-valued count"))
+            else
+                throw(CapabilityError(
+                    :factor_support,
+                    "BinomialLogit site `$name` has unsupported trials " *
+                    "source $(typeof(trials))"))
+            end
+        end
+        site.shape isa BlockSiteShape &&
+            !(base_factor isa Union{
+                StandardNormalSiteFactor,NormalSiteFactor,
+                ExponentialSiteFactor,LKJCholeskySiteFactor}) &&
+            throw(CapabilityError(
+                :factor_shape,
+                "multi-latent block site `$name` has an unsupported factor"))
+        site.factor isa Union{
+            StandardNormalSiteFactor,NormalSiteFactor,ExponentialSiteFactor,
+            LKJCholeskySiteFactor,StudentTSiteFactor,BernoulliLogitSiteFactor,
+            PoissonSiteFactor,ZeroInflatedPoissonSiteFactor,
+            NegativeBinomial2SiteFactor,BetaBinomial2SiteFactor,
+            BinomialLogitSiteFactor,CategoricalLogitSiteFactor,
+            WeightedSiteFactor,EvidenceSiteFactor,
+        } || throw(CapabilityError(
+            :factor_family,
+            "multi-latent factor site `$name` has unsupported factor " *
+            "$(typeof(site.factor))"))
+        base_factor isa Union{
+            BernoulliLogitSiteFactor,PoissonSiteFactor,
+            ZeroInflatedPoissonSiteFactor,NegativeBinomial2SiteFactor,
+            BetaBinomial2SiteFactor,BinomialLogitSiteFactor,
+            CategoricalLogitSiteFactor,
+        } &&
+            !(site.shape isa BroadcastSiteShape) && throw(CapabilityError(
+                :factor_shape,
+                "discrete factor site `$name` must be a broadcast output"))
+    end
     broadcast_sites = Tuple(
         name for (name, site) in pairs(graph.sites)
         if site.shape isa BroadcastSiteShape)
-    length(broadcast_sites) == 1 || throw(CapabilityError(
+    isempty(broadcast_sites) && throw(CapabilityError(
         :factor_outputs,
-        "the first multi-latent factor executor requires exactly one " *
-        "broadcast stochastic output"))
-    broadcast_site_set = Set(broadcast_sites)
-    for (name, node) in pairs(graph.nodes)
-        for dependency in factor_node_dependencies(node)
-            dependency in broadcast_site_set || continue
-            throw(CapabilityError(
-                :factor_dependencies,
-                "multi-latent factor node `$name` depends on broadcast " *
-                "site `$dependency`; broadcast outputs must remain terminal " *
-                "until their values can be materialized"))
-        end
-    end
-    for (name, site) in pairs(graph.sites)
-        _validate_factor_plan_site(
-            name, site, graph, bindings, canonical_conditions,
-            broadcast_site_set)
-    end
-    output_site = only(broadcast_sites)
-    observation_keys = if hasproperty(canonical_conditions, output_site)
+        "multi-latent factor executor requires at least one broadcast " *
+        "stochastic output"))
+    observation_count = input_axis_length
+    for output_site in broadcast_sites
+        hasproperty(canonical_conditions, output_site) || continue
         response = getproperty(canonical_conditions, output_site)
         response isa AbstractVector || throw(ArgumentError(
             "native PPL broadcast condition `$output_site` must be a vector"))
         isempty(response) && throw(ArgumentError(
             "native PPL broadcast condition `$output_site` cannot be empty"))
-        input_axis_length === nothing || length(response) == input_axis_length ||
-            throw(DimensionMismatch(
-                "native PPL response and vector inputs must have equal lengths"))
-        Base.OneTo(length(response))
-    elseif input_axis_length !== nothing
-        Base.OneTo(input_axis_length)
-    else
-        Base.OneTo(0)
+        observation_count === nothing &&
+            (observation_count = length(response))
+        length(response) == observation_count || throw(DimensionMismatch(
+            "native PPL broadcast outputs and vector inputs must share the " *
+            "same observation axis; `$output_site` has $(length(response)) " *
+            "rows, expected $observation_count"))
     end
-    output_factor = getproperty(graph.sites, output_site).factor
-    weight_factor = _weighted_site_factor(output_factor)
-    weight_factor === nothing || _factor_validate_weight(
-        weight_factor, bindings, output_site, length(observation_keys))
-    evidence_factor = _evidence_site_factor(output_factor)
-    evidence_factor === nothing || _factor_validate_evidence(
-        evidence_factor, bindings, output_site)
+    observation_keys = observation_count === nothing ?
+        Base.OneTo(0) : Base.OneTo(observation_count)
+    for output_site in broadcast_sites
+        output_factor = getproperty(graph.sites, output_site).factor
+        weight_factor = _weighted_site_factor(output_factor)
+        weight_factor === nothing || _factor_validate_weight(
+            weight_factor, bindings, output_site, length(observation_keys))
+        evidence_factor = _evidence_site_factor(output_factor)
+        evidence_factor === nothing || _factor_validate_evidence(
+            evidence_factor, bindings, output_site)
+    end
     site_names = Tuple(keys(graph.sites))
     site_indices = NamedTuple{site_names}(
         ntuple(identity, length(site_names)))
@@ -1826,8 +2267,7 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
         fitted_site = getproperty(graph.sites, site_name)
         fitted_levels = Tuple(unique(
             key.level for key in fitted_site.coordinate_keys))
-        Tuple(level for level in observed_levels
-              if findfirst(isequal(level), fitted_levels) === nothing)
+        Tuple(level for level in observed_levels if level ∉ fitted_levels)
     end
     generated_group_levels = NamedTuple{grouped_site_names}(
         generated_level_values)
@@ -1866,7 +2306,8 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
     group_indices = NamedTuple{grouped_node_names}(grouped_indices)
     has_generated_groups = any(!isempty, values(generated_group_levels))
     has_generated_groups &&
-        hasproperty(canonical_conditions, output_site) && throw(
+        any(output_site -> hasproperty(canonical_conditions, output_site),
+            broadcast_sites) && throw(
             CapabilityError(
                 :new_group_activity,
                 "native PPL new-group resampling is prediction-only; " *
@@ -1874,10 +2315,11 @@ function _bind_factor_plan(declaration::Model, bindings, conditions;
                 "group-effect coordinates"))
     FactorPlan(
         declaration, graph, fitted_nodes, bindings, canonical_conditions,
+        outcome_levels,
         site_indices,
         node_indices, group_indices, generated_group_levels,
         generated_group_indices,
-        BRM.NativePPLAxis(:observation, observation_keys), output_site)
+        BRM.NativePPLAxis(:observation, observation_keys), broadcast_sites)
 end
 
 function Base.show(io::IO, plan::FactorPlan)
@@ -1885,8 +2327,10 @@ function Base.show(io::IO, plan::FactorPlan)
     print(io, "NativePPL.FactorPlan(", plan.graph.dimension,
           " unconstrained parameters, ", length(plan.graph.sites),
           " stochastic sites, ", generated, " generated groups, ",
-          length(plan.observation_axis),
-          " observations)")
+          length(plan.observation_axis), " observations")
+    length(factor_output_sites(plan)) > 1 && print(
+        io, ", ", length(factor_output_sites(plan)), " terminal outcomes")
+    print(io, ")")
 end
 
 """Prepared, independently owned bindings for a `FactorPlan`."""
@@ -1983,28 +2427,6 @@ function _factor_validate_condition_support(site::StochasticSite,
     nothing
 end
 
-function _factor_validate_binding_support(graph::FactorGraph,
-                                          value, name::Symbol)
-    for (site_name, site) in pairs(graph.sites)
-        factor = base_site_factor(site.factor)
-        values = value isa AbstractVector ? value : (value,)
-        if factor isa NormalSiteFactor && factor.scale isa InputValue &&
-           input_value_name(factor.scale) === name
-            all(element -> element > zero(element), values) ||
-                throw(ArgumentError(
-                    "native PPL binding `$name` supplies the Normal scale " *
-                    "for site `$site_name` and must be positive"))
-        elseif factor isa PoissonSiteFactor && factor.rate isa InputValue &&
-               input_value_name(factor.rate) === name
-            all(element -> isfinite(element) &&
-                    element > zero(element), values) || throw(ArgumentError(
-                "native PPL binding `$name` supplies the Poisson rate for " *
-                "site `$site_name` and must be finite and positive"))
-        end
-    end
-    nothing
-end
-
 function _factor_validate_observation(::AbstractSiteFactor, value,
                                       name::Symbol)
     nothing
@@ -2027,8 +2449,23 @@ function _factor_validate_observation(::BernoulliLogitSiteFactor, value,
     nothing
 end
 
-function _factor_validate_observation(::PoissonSiteFactor, value,
-                                      name::Symbol)
+function _factor_validate_observation(
+        factor::CategoricalLogitSiteFactor, value, name::Symbol)
+    classes = length(factor.logits) + 1
+    for (index, element) in enumerate(value)
+        BRM._native_ppl_is_count(element) && one(element) <= element <= classes ||
+            throw(ArgumentError(
+                "native PPL CategoricalLogit response `$name` must be an " *
+                "integer class in 1:$classes; got $element at row $index"))
+    end
+    nothing
+end
+
+function _factor_validate_observation(
+        ::Union{PoissonSiteFactor,ZeroInflatedPoissonSiteFactor,
+                NegativeBinomial2SiteFactor,BetaBinomial2SiteFactor,
+                BinomialLogitSiteFactor}, value,
+        name::Symbol)
     for (index, element) in enumerate(value)
         BRM._native_ppl_is_count(element) || throw(ArgumentError(
             "native PPL Poisson response `$name` must be a nonnegative " *
@@ -2055,14 +2492,67 @@ _factor_validate_observation_conversion(factor::EvidenceSiteFactor,
     _factor_validate_observation_conversion(
         factor.factor, original, converted, name)
 
-function _factor_validate_observation_conversion(::PoissonSiteFactor,
-                                                 original, converted,
-                                                 name::Symbol)
+function _factor_validate_observation_conversion(
+        ::Union{PoissonSiteFactor,ZeroInflatedPoissonSiteFactor,
+                NegativeBinomial2SiteFactor,BetaBinomial2SiteFactor,
+                BinomialLogitSiteFactor},
+        original, converted, name::Symbol)
     for index in eachindex(original, converted)
         converted[index] == original[index] || throw(ArgumentError(
             "native PPL Poisson response `$name` count $(original[index]) " *
             "at row $index cannot be represented exactly as " *
             "$(eltype(converted))"))
+    end
+    nothing
+end
+
+function _factor_validate_observation_conversion(
+        ::CategoricalLogitSiteFactor, original, converted, name::Symbol)
+    for index in eachindex(original, converted)
+        converted[index] == original[index] || throw(ArgumentError(
+            "native PPL CategoricalLogit response `$name` class " *
+            "$(original[index]) at row $index cannot be represented exactly " *
+            "as $(eltype(converted))"))
+    end
+    nothing
+end
+
+function _factor_validate_beta_binomial_response(
+        factor::BetaBinomial2SiteFactor, response, plan,
+        name::Symbol, ::Type{T}) where {T}
+    raw_trials = factor.trials isa InputValue ?
+        getproperty(plan.bindings, input_value_name(factor.trials)) :
+        factor.trials.value
+    for index in eachindex(response)
+        raw = raw_trials isa AbstractVector ? raw_trials[index] : raw_trials
+        converted = T(raw)
+        converted == raw || throw(ArgumentError(
+            "native PPL BetaBinomial2 trials $raw at row $index cannot be " *
+            "represented exactly as $T"))
+        trials = Int(converted)
+        response[index] <= trials || throw(ArgumentError(
+            "native PPL BetaBinomial2 response `$name` at row $index " *
+            "exceeds its trial count $trials"))
+    end
+    nothing
+end
+
+function _factor_validate_binomial_logit_response(
+        factor::BinomialLogitSiteFactor, response, plan,
+        name::Symbol, ::Type{T}) where {T}
+    raw_trials = factor.trials isa InputValue ?
+        getproperty(plan.bindings, input_value_name(factor.trials)) :
+        factor.trials.value
+    for index in eachindex(response)
+        raw = raw_trials isa AbstractVector ? raw_trials[index] : raw_trials
+        converted = T(raw)
+        converted == raw || throw(ArgumentError(
+            "native PPL BinomialLogit trials $raw at row $index cannot be " *
+            "represented exactly as $T"))
+        trials = Int(converted)
+        response[index] <= trials || throw(ArgumentError(
+            "native PPL BinomialLogit response `$name` at row $index " *
+            "exceeds its $trials trials"))
     end
     nothing
 end
@@ -2131,10 +2621,6 @@ function _factor_validate_evidence_representation(
             discrete && converted != value && throw(ArgumentError(
                 "native PPL discrete evidence $label bound $value for " *
                 "`$name` cannot be represented exactly as $T"))
-            discrete && !(typemin(Int) <= converted < typemax(Int)) && throw(
-                ArgumentError(
-                    "native PPL discrete evidence $label bound $value for " *
-                    "`$name` lies outside the executable Int range"))
         end
     end
     nothing
@@ -2151,7 +2637,7 @@ function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
             scale = T(fitted.scale)
             isfinite(scale) && scale > zero(T) || throw(ArgumentError(
                 "native PPL fitted sample SD for `$name` cannot be " *
-            "represented as a finite positive $T"))
+                "represented as a finite positive $T"))
         end
     end
     group_inputs = Set(_group_input_names(plan.declaration))
@@ -2159,44 +2645,33 @@ function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
     binding_values = map(binding_names) do name
         value = getproperty(plan.bindings, name)
         name in group_inputs && return copy(value)
-        converted = _factor_prepare_condition(value, name, T)
-        _factor_validate_binding_support(plan.graph, converted, name)
-        converted
+        _factor_prepare_condition(value, name, T)
     end
     bindings = NamedTuple{binding_names}(binding_values)
-    output_factor = getproperty(
-        plan.graph.sites, factor_output_site(plan)).factor
-    weight_factor = _weighted_site_factor(output_factor)
-    if weight_factor !== nothing
-        source = input_value_name(weight_factor.values)
-        original = getproperty(plan.bindings, source)
-        converted = getproperty(bindings, source)
-        kind = observation_weight_kind(weight_factor.weight)
-        if kind === :frequency
-            all(index -> converted[index] == original[index],
-                eachindex(original)) || throw(ArgumentError(
-                    "native PPL frequency weights from `$source` cannot be " *
-                    "represented exactly as $T"))
-        elseif kind === :analytic
-            all(value -> isfinite(value) && value > zero(T), converted) ||
-                throw(ArgumentError(
+    for output_site in factor_output_sites(plan)
+        output_factor = getproperty(plan.graph.sites, output_site).factor
+        weight_factor = _weighted_site_factor(output_factor)
+        if weight_factor !== nothing
+            source = input_value_name(weight_factor.values)
+            original = getproperty(plan.bindings, source)
+            converted = getproperty(bindings, source)
+            kind = observation_weight_kind(weight_factor.weight)
+            if kind === :frequency
+                all(index -> converted[index] == original[index],
+                    eachindex(original)) || throw(ArgumentError(
+                        "native PPL frequency weights from `$source` cannot " *
+                        "be represented exactly as $T"))
+            elseif kind === :analytic
+                all(>(zero(T)), converted) || throw(ArgumentError(
                     "native PPL analytic weights from `$source` cannot be " *
-                    "represented as finite positive $T values"))
-        elseif kind === :power
-            all(index ->
-                    isfinite(converted[index]) &&
-                    converted[index] >= zero(T) &&
-                    (iszero(original[index]) || converted[index] > zero(T)),
-                eachindex(original, converted)) ||
-                throw(ArgumentError(
-                    "native PPL power weights from `$source` cannot be " *
-                    "represented as finite nonnegative $T values without " *
-                    "underflow"))
+                    "represented as positive $T values"))
+            end
         end
+        evidence_factor = _evidence_site_factor(output_factor)
+        evidence_factor === nothing ||
+            _factor_validate_evidence_representation(
+                evidence_factor, plan, output_site, T)
     end
-    evidence_factor = _evidence_site_factor(output_factor)
-    evidence_factor === nothing || _factor_validate_evidence_representation(
-        evidence_factor, plan, factor_output_site(plan), T)
     names = Tuple(keys(plan.conditions))
     values = map(names) do name
         original = getproperty(plan.conditions, name)
@@ -2208,6 +2683,15 @@ function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
         site.shape isa BroadcastSiteShape &&
             _factor_validate_observation_conversion(
                 site.factor, original, value, name)
+        base_factor = base_site_factor(site.factor)
+        site.shape isa BroadcastSiteShape &&
+            base_factor isa BetaBinomial2SiteFactor &&
+            _factor_validate_beta_binomial_response(
+                base_factor, value, plan, name, T)
+        site.shape isa BroadcastSiteShape &&
+            base_factor isa BinomialLogitSiteFactor &&
+            _factor_validate_binomial_logit_response(
+                base_factor, value, plan, name, T)
         evidence_factor = _evidence_site_factor(site.factor)
         site.shape isa BroadcastSiteShape &&
             evidence_factor !== nothing &&
@@ -2229,11 +2713,10 @@ function prepare(plan::FactorPlan; T::Type{<:AbstractFloat}=Float64)
     conditions = NamedTuple{names}(values)
     owned_plan = FactorPlan(
         plan.declaration, plan.graph, plan.fitted_nodes,
-        bindings, conditions,
+        bindings, conditions, plan.outcome_levels,
         plan.site_indices, plan.node_indices, plan.group_indices,
-        plan.generated_group_levels,
-        plan.generated_group_indices,
-        plan.observation_axis, plan.output_site)
+        plan.generated_group_levels, plan.generated_group_indices,
+        plan.observation_axis, factor_output_sites(plan))
     FactorPrepared{T,typeof(owned_plan),typeof(conditions)}(
         owned_plan, conditions)
 end
@@ -2269,7 +2752,7 @@ end
     node = getproperty(plan.graph.nodes, Name)
     node isa Union{
         CenterFactorNode,ZScaleFactorNode,
-        ExpFactorNode,LogFactorNode,AffineFactorNode,
+        ExpFactorNode,LogFactorNode,LogisticFactorNode,AffineFactorNode,
         GroupGatherFactorNode,RowProductFactorNode,
         GroupedAffineFactorNode,
     } ?
@@ -2305,7 +2788,6 @@ end
                                     plan, buffers) where {T}
     location = _factor_argument(factor.location, plan, buffers, T)
     scale = _factor_argument(factor.scale, plan, buffers, T)
-    scale > zero(T) || return -T(Inf)
     residual = (value - location) / scale
     -T(0.5) * residual * residual - log(scale) -
         T(BRM._NATIVE_PPL_HALF_LOG2PI)
@@ -2325,6 +2807,38 @@ end
     residual = (value - location) / scale
     -T(0.5) * residual * residual - log(scale) -
         T(BRM._NATIVE_PPL_HALF_LOG2PI)
+end
+
+@inline function _factor_student_t_log_normalizer(degrees_freedom::T) where {T}
+    !isfinite(degrees_freedom) && return -T(BRM._NATIVE_PPL_HALF_LOG2PI)
+    if degrees_freedom > T(1_000_000)
+        inverse_df = inv(degrees_freedom)
+        return -T(BRM._NATIVE_PPL_HALF_LOG2PI) -
+            T(0.25) * inverse_df +
+            T(1 / 24) * inverse_df * inverse_df * inverse_df
+    end
+    half_df = degrees_freedom / T(2)
+    BRM.loggamma(half_df + T(0.5)) - BRM.loggamma(half_df) -
+        T(0.5) * (log(degrees_freedom) + log(T(BRM.pi)))
+end
+
+@inline function _factor_logdensity_at(factor::StudentTSiteFactor, value::T,
+                                       index, plan, buffers) where {T}
+    degrees_freedom = _factor_argument_at(
+        factor.degrees_freedom, index, plan, buffers, T)
+    location = _factor_argument_at(
+        factor.location, index, plan, buffers, T)
+    scale = _factor_argument_at(
+        factor.scale, index, plan, buffers, T)
+    degrees_freedom > zero(T) && scale > zero(T) || return -T(Inf)
+    residual = (value - location) / scale
+    if !isfinite(degrees_freedom)
+        return -T(0.5) * residual * residual - log(scale) -
+            T(BRM._NATIVE_PPL_HALF_LOG2PI)
+    end
+    _factor_student_t_log_normalizer(degrees_freedom) - log(scale) -
+        (degrees_freedom + one(T)) / T(2) *
+        log1p(residual * residual / degrees_freedom)
 end
 
 @inline function _factor_logdensity_at(
@@ -2352,6 +2866,250 @@ end
                                        index, plan, buffers) where {T}
     log_rate = _factor_poisson_log_rate(factor, index, plan, buffers, T)
     BRM._native_ppl_poisson_logdensity(value, log_rate)
+end
+
+@inline function _factor_zip_log_rate(
+        factor::ZeroInflatedPoissonSiteFactor,
+        index, plan, buffers, ::Type{T}) where {T}
+    rate = factor.rate
+    if rate isa NodeValue
+        name = node_value_name(rate)
+        node = getproperty(plan.graph.nodes, name)
+        node isa ExpFactorNode && return _factor_argument_at(
+            node.input, index, plan, buffers, T)
+    end
+    log(_factor_argument_at(rate, index, plan, buffers, T))
+end
+
+@inline function _factor_zip_log_probabilities(
+        factor::ZeroInflatedPoissonSiteFactor,
+        index, plan, buffers, ::Type{T}) where {T}
+    probability = factor.zero_inflation
+    if probability isa NodeValue
+        name = node_value_name(probability)
+        node = getproperty(plan.graph.nodes, name)
+        if node isa LogisticFactorNode
+            logit = _factor_argument_at(node.input, index, plan, buffers, T)
+            return (-BRM._native_ppl_softplus(-logit),
+                    -BRM._native_ppl_softplus(logit))
+        end
+    end
+    value = _factor_argument_at(probability, index, plan, buffers, T)
+    (log(value), log1p(-value))
+end
+
+@inline function _factor_logdensity_at(
+        factor::ZeroInflatedPoissonSiteFactor, value::T,
+        index, plan, buffers) where {T}
+    log_rate = _factor_zip_log_rate(factor, index, plan, buffers, T)
+    log_zero, log_count = _factor_zip_log_probabilities(
+        factor, index, plan, buffers, T)
+    iszero(value) && log_rate > log(floatmax(T)) && return log_zero
+    poisson = BRM._native_ppl_poisson_logdensity(value, log_rate)
+    iszero(value) ? _factor_logaddexp(log_zero, log_count + poisson) :
+        log_count + poisson
+end
+
+@inline function _factor_nb2_log_parameter(
+        argument, index, plan, buffers, ::Type{T}) where {T}
+    if argument isa NodeValue
+        name = node_value_name(argument)
+        node = getproperty(plan.graph.nodes, name)
+        node isa ExpFactorNode && return _factor_argument_at(
+            node.input, index, plan, buffers, T)
+    end
+    log(_factor_argument_at(argument, index, plan, buffers, T))
+end
+
+@inline function _factor_nb2_logdensity(
+        count::T, log_mean::T, log_precision::T) where {T}
+    log_precision > log(floatmax(T)) &&
+        return BRM._native_ppl_poisson_logdensity(count, log_mean)
+    count_int = Int(count)
+    precision = exp(log_precision)
+
+    log_total = _factor_logaddexp(log_mean, log_precision)
+    log_rising = if iszero(count)
+        zero(T)
+    elseif count_int < 32
+        total = log_precision
+        for outcome in 1:(count_int - 1)
+            total += log(precision + T(outcome))
+        end
+        total
+    else
+        T(BRM.loggamma(precision + count)) - T(BRM.loggamma(precision))
+    end
+    log_rising - BRM._native_ppl_logfactorial(T, count_int) +
+        precision * (log_precision - log_total) +
+        count * (log_mean - log_total)
+end
+
+@inline function _factor_logdensity_at(
+        factor::NegativeBinomial2SiteFactor, value::T,
+        index, plan, buffers) where {T}
+    log_mean = _factor_nb2_log_parameter(
+        factor.mean, index, plan, buffers, T)
+    log_precision = _factor_nb2_log_parameter(
+        factor.precision, index, plan, buffers, T)
+    _factor_nb2_logdensity(value, log_mean, log_precision)
+end
+
+@inline function _factor_bb2_log_probabilities(
+        factor::BetaBinomial2SiteFactor,
+        index, plan, buffers, ::Type{T}) where {T}
+    mean = factor.mean
+    if mean isa NodeValue
+        name = node_value_name(mean)
+        node = getproperty(plan.graph.nodes, name)
+        if node isa LogisticFactorNode
+            logit = _factor_argument_at(node.input, index, plan, buffers, T)
+            return (-BRM._native_ppl_softplus(-logit),
+                    -BRM._native_ppl_softplus(logit))
+        end
+    end
+    value = _factor_argument_at(mean, index, plan, buffers, T)
+    (log(value), log1p(-value))
+end
+
+@inline function _factor_bb2_log_precision(
+        factor::BetaBinomial2SiteFactor,
+        index, plan, buffers, ::Type{T}) where {T}
+    _factor_nb2_log_parameter(
+        factor.precision, index, plan, buffers, T)
+end
+
+@inline function _factor_log_rising(
+        log_base::T, base::T, count::Int) where {T}
+    count == 0 && return zero(T)
+    total = log_base
+    for index in 1:(count - 1)
+        total += log(base + T(index))
+    end
+    total
+end
+
+@inline function _factor_bb2_logdensity(
+        outcome::T, trials::Int, log_mean::T, log_complement::T,
+        log_precision::T) where {T}
+    successes = Int(outcome)
+    failures = trials - successes
+    log_choose = BRM._native_ppl_logfactorial(T, trials) -
+        BRM._native_ppl_logfactorial(T, successes) -
+        BRM._native_ppl_logfactorial(T, failures)
+    log_precision > log(floatmax(T)) && return log_choose +
+        outcome * log_mean + T(failures) * log_complement
+
+    precision = exp(log_precision)
+    log_alpha = log_precision + log_mean
+    log_beta = log_precision + log_complement
+    alpha = exp(log_alpha)
+    beta = exp(log_beta)
+    log_choose +
+        _factor_log_rising(log_alpha, alpha, successes) +
+        _factor_log_rising(log_beta, beta, failures) -
+        _factor_log_rising(log_precision, precision, trials)
+end
+
+@inline function _factor_logdensity_at(
+        factor::BetaBinomial2SiteFactor, value::T,
+        index, plan, buffers) where {T}
+    trials = Int(_factor_argument_at(
+        factor.trials, index, plan, buffers, T))
+    log_mean, log_complement = _factor_bb2_log_probabilities(
+        factor, index, plan, buffers, T)
+    log_precision = _factor_bb2_log_precision(
+        factor, index, plan, buffers, T)
+    _factor_bb2_logdensity(
+        value, trials, log_mean, log_complement, log_precision)
+end
+
+@inline function _factor_logdensity_at(
+        factor::BinomialLogitSiteFactor, value::T,
+        index, plan, buffers) where {T}
+    trials = Int(_factor_argument_at(
+        factor.trials, index, plan, buffers, T))
+    successes = Int(value)
+    failures = trials - successes
+    logit = _factor_argument_at(
+        factor.logit, index, plan, buffers, T)
+    BRM._native_ppl_logfactorial(T, trials) -
+        BRM._native_ppl_logfactorial(T, successes) -
+        BRM._native_ppl_logfactorial(T, failures) -
+        value * BRM._native_ppl_softplus(-logit) -
+        T(failures) * BRM._native_ppl_softplus(logit)
+end
+
+@inline function _factor_logdensity_at(
+        factor::CategoricalLogitSiteFactor, value::T,
+        index, plan, buffers) where {T}
+    largest = _factor_categorical_largest(
+        factor.logits, index, plan, buffers, T, zero(T))
+    total = _factor_categorical_total(
+        factor.logits, index, plan, buffers, T,
+        largest, exp(-largest))
+    selected = _factor_categorical_selected(
+        factor.logits, Int(value) - 1, index, plan, buffers, T,
+        zero(T), 1)
+    selected - largest - log(total)
+end
+
+@inline _factor_categorical_largest(
+    ::Tuple{}, index, plan, buffers, ::Type{T}, largest::T) where {T} = largest
+
+@inline function _factor_categorical_largest(
+        arguments::Tuple, index, plan, buffers, ::Type{T},
+        largest::T) where {T}
+    logit = _factor_argument_at(
+        first(arguments), index, plan, buffers, T)
+    _factor_categorical_largest(
+        Base.tail(arguments), index, plan, buffers, T,
+        max(largest, logit))
+end
+
+@inline _factor_categorical_total(
+    ::Tuple{}, index, plan, buffers, ::Type{T}, largest::T,
+    total::T) where {T} = total
+
+@inline function _factor_categorical_total(
+        arguments::Tuple, index, plan, buffers, ::Type{T},
+        largest::T, total::T) where {T}
+    logit = _factor_argument_at(
+        first(arguments), index, plan, buffers, T)
+    _factor_categorical_total(
+        Base.tail(arguments), index, plan, buffers, T, largest,
+        total + exp(logit - largest))
+end
+
+
+@inline _factor_categorical_selected(
+    ::Tuple{}, target, index, plan, buffers, ::Type{T},
+    selected::T, offset::Int) where {T} = selected
+
+@inline function _factor_categorical_selected(
+        arguments::Tuple, target, index, plan, buffers, ::Type{T},
+        selected::T, offset::Int) where {T}
+    logit = _factor_argument_at(
+        first(arguments), index, plan, buffers, T)
+    _factor_categorical_selected(
+        Base.tail(arguments), target, index, plan, buffers, T,
+        offset == target ? logit : selected, offset + 1)
+end
+
+@inline _factor_categorical_draw(
+    ::Tuple{}, threshold, index, plan, buffers, ::Type{T}, largest::T,
+    cumulative::T, offset::Int) where {T} = offset
+
+@inline function _factor_categorical_draw(
+        arguments::Tuple, threshold, index, plan, buffers, ::Type{T},
+        largest::T, cumulative::T, offset::Int) where {T}
+    logit = _factor_argument_at(
+        first(arguments), index, plan, buffers, T)
+    next_cumulative = cumulative + exp(logit - largest)
+    threshold < next_cumulative && return offset + 1
+    _factor_categorical_draw(
+        Base.tail(arguments), threshold, index, plan, buffers, T,
+        largest, next_cumulative, offset + 1)
 end
 
 @inline _factor_evidence_bound_at(::LiteralValue{Nothing}, index, plan,
@@ -2407,21 +3165,11 @@ end
 @inline function _factor_poisson_logcdf(value::T, log_rate::T) where {T}
     count = floor(Int, value)
     count < 0 && return -T(Inf)
-    rate = exp(log_rate)
-    isfinite(rate) || return -T(Inf)
-    if count >= rate
-        upper = _factor_poisson_logccdf_direct(count, log_rate)
-        return upper < zero(T) ? BRM.log1mexp(upper) : zero(T)
-    end
-    term = -rate + T(count) * log_rate -
-        T(BRM.loggamma(T(count) + one(T)))
+    term = -exp(log_rate)
     total = term
-    outcome = count
-    while outcome > 0
-        term += log(T(outcome)) - log_rate
-        outcome -= 1
+    for outcome in 1:count
+        term += log_rate - log(T(outcome))
         total = _factor_logaddexp(total, term)
-        term - total < log(eps(T)) - T(2) && break
     end
     min(total, zero(T))
 end
@@ -2430,11 +3178,10 @@ end
         count::Int, log_rate::T) where {T}
     outcome = count + 1
     term = -exp(log_rate) + T(outcome) * log_rate -
-        T(BRM.loggamma(T(outcome) + one(T)))
+        T(BRM.loggamma(outcome + 1))
     total = term
     rate = exp(log_rate)
     for _ in 1:100_000
-        outcome == typemax(Int) && return min(total, zero(T))
         outcome += 1
         term += log_rate - log(T(outcome))
         updated = _factor_logaddexp(total, term)
@@ -2449,11 +3196,9 @@ end
 @inline function _factor_poisson_logccdf(value::T, log_rate::T) where {T}
     count = floor(Int, value)
     count < 0 && return zero(T)
-    rate = exp(log_rate)
-    isfinite(rate) || return zero(T)
-    count >= rate && return _factor_poisson_logccdf_direct(count, log_rate)
     lower = _factor_poisson_logcdf(T(count), log_rate)
-    lower < zero(T) ? BRM.log1mexp(lower) : zero(T)
+    lower < zero(T) && return BRM.log1mexp(lower)
+    _factor_poisson_logccdf_direct(count, log_rate)
 end
 
 @inline function _factor_logcdf_at(
@@ -2468,20 +3213,6 @@ end
         value, _factor_poisson_log_rate(factor, index, plan, buffers, T))
 end
 
-@inline function _factor_loginterval_at(
-        base, lower::T, upper::T, index, plan, buffers) where {T}
-    upper_logcdf = _factor_logcdf_at(
-        base, upper, index, plan, buffers)
-    if upper_logcdf < -log(T(2))
-        return _factor_logdiffexp(
-            upper_logcdf,
-            _factor_logcdf_at(base, lower, index, plan, buffers))
-    end
-    _factor_logdiffexp(
-        _factor_logccdf_at(base, lower, index, plan, buffers),
-        _factor_logccdf_at(base, upper, index, plan, buffers))
-end
-
 @inline function _factor_truncation_logmass(
         base::NormalSiteFactor, lower, upper, index, plan, buffers,
         ::Type{T}) where {T}
@@ -2490,24 +3221,27 @@ end
         base, upper, index, plan, buffers)
     upper === nothing && return _factor_logccdf_at(
         base, lower, index, plan, buffers)
-    _factor_loginterval_at(base, lower, upper, index, plan, buffers)
+    _factor_logdiffexp(
+        _factor_logcdf_at(base, upper, index, plan, buffers),
+        _factor_logcdf_at(base, lower, index, plan, buffers))
 end
 
 @inline function _factor_truncation_logmass(
         base::PoissonSiteFactor, lower, upper, index, plan, buffers,
         ::Type{T}) where {T}
     lower === nothing && upper === nothing && return zero(T)
-    lower === nothing && return _factor_logcdf_at(
-        base, upper, index, plan, buffers)
-    upper === nothing && return _factor_logccdf_at(
-        base, lower - one(T), index, plan, buffers)
-    _factor_loginterval_at(
-        base, lower - one(T), upper, index, plan, buffers)
+    lower_cdf = lower === nothing ? -T(Inf) :
+        _factor_logcdf_at(base, lower - one(T), index, plan, buffers)
+    upper === nothing && return BRM.log1mexp(lower_cdf)
+    _factor_logdiffexp(
+        _factor_logcdf_at(base, upper, index, plan, buffers), lower_cdf)
 end
 
 @inline function _factor_interval_logmass(
         base, lower::T, upper::T, index, plan, buffers) where {T}
-    _factor_loginterval_at(base, lower, upper, index, plan, buffers)
+    _factor_logdiffexp(
+        _factor_logcdf_at(base, upper, index, plan, buffers),
+        _factor_logcdf_at(base, lower, index, plan, buffers))
 end
 
 @inline function _factor_logdensity_at(
@@ -2754,20 +3488,7 @@ end
 @inline function _factor_node_logdensity!(::Val{Name}, node::ExpFactorNode,
         position::AbstractVector{T}, prepared::FactorPrepared,
         buffers::FactorBuffers{T}) where {Name,T}
-    normal_scale = _factor_exp_is_normal_scale(Name, prepared.plan.graph)
-    _factor_exp_is_poisson_rate(Name, prepared.plan.graph) &&
-        !normal_scale && return zero(T)
     node_index = getproperty(prepared.plan.node_indices, Name)
-    if !_factor_value_is_row(
-            node.input, prepared.plan.graph, prepared.plan.bindings)
-        value = exp(_factor_argument(
-            node.input, prepared.plan, buffers, T))
-        buffers.node_values[node_index] = value
-        for row in prepared.plan.observation_axis.keys
-            buffers.node_rows[node_index, row] = value
-        end
-        return zero(T)
-    end
     first_value = zero(T)
     for row in prepared.plan.observation_axis.keys
         value = exp(_factor_argument_at(
@@ -2780,6 +3501,46 @@ end
     zero(T)
 end
 
+@inline _factor_schedule_node_logdensity!(name, node,
+        position, prepared, buffers) =
+    _factor_node_logdensity!(name, node, position, prepared, buffers)
+
+@inline function _factor_site_has_log_rate_node(
+        ::Val{Name}, site::StochasticSite) where {Name}
+    factor = base_site_factor(site.factor)
+    rate = if factor isa PoissonSiteFactor
+        factor.rate
+    elseif factor isa ZeroInflatedPoissonSiteFactor
+        factor.rate
+    elseif factor isa NegativeBinomial2SiteFactor
+        return (factor.mean isa NodeValue{Name}) ||
+               (factor.precision isa NodeValue{Name})
+    elseif factor isa BetaBinomial2SiteFactor
+        return factor.precision isa NodeValue{Name}
+    else
+        return false
+    end
+    rate isa NodeValue{Name}
+end
+
+@inline @generated function _factor_terminal_log_rate_node(
+        name::Val{Name}, plan::FactorPlan{Outputs}) where {Name,Outputs}
+    checks = map(Outputs) do output
+        :(_factor_site_has_log_rate_node(
+            name, getproperty(plan.graph.sites, $(QuoteNode(output)))))
+    end
+    isempty(checks) && return :(false)
+    foldl((left, right) -> :($left || $right), checks)
+end
+
+@inline function _factor_schedule_node_logdensity!(
+        name::Val, node::ExpFactorNode,
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {T}
+    _factor_terminal_log_rate_node(name, prepared.plan) && return zero(T)
+    _factor_node_logdensity!(name, node, position, prepared, buffers)
+end
+
 @inline function _factor_node_logdensity!(::Val{Name}, node::LogFactorNode,
         position::AbstractVector{T}, prepared::FactorPrepared,
         buffers::FactorBuffers{T}) where {Name,T}
@@ -2788,6 +3549,23 @@ end
         buffers.node_rows[node_index, row] = log(_factor_argument_at(
             node.input, row, prepared.plan, buffers, T))
     end
+    zero(T)
+end
+
+@inline function _factor_node_logdensity!(
+        ::Val{Name}, node::LogisticFactorNode,
+        position::AbstractVector{T}, prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Name,T}
+    node_index = getproperty(prepared.plan.node_indices, Name)
+    first_value = zero(T)
+    for row in prepared.plan.observation_axis.keys
+        value = BRM._native_ppl_logistic(_factor_argument_at(
+            node.input, row, prepared.plan, buffers, T))
+        buffers.node_rows[node_index, row] = value
+        row == first(prepared.plan.observation_axis.keys) &&
+            (first_value = value)
+    end
+    buffers.node_values[node_index] = first_value
     zero(T)
 end
 
@@ -2889,58 +3667,26 @@ end
     position[first(correlation_coordinates) + coordinate_offset - 1]
 end
 
-@inline @generated function _factor_grouped_scales(
-        node::GroupedAffineFactorNode{Z,S,C,G,P},
-        position::AbstractVector{T}, prepared::FactorPrepared,
-        buffers::FactorBuffers{T}) where {Z,S,C,G,P,T}
-    Expr(:tuple, [:(
-        _factor_coefficient(
-            node.scales, $coefficient_index,
-            position, prepared, buffers))
-        for coefficient_index in 1:fieldcount(P)]...)
-end
-
-@inline @generated function _factor_grouped_partials(
-        node::GroupedAffineFactorNode{Z,S,C,G,P},
-        correlation_coordinates, position::AbstractVector{T}) where {
-            Z,S,C,G,P,T}
-    coefficient_count = fieldcount(P)
-    partials = Any[]
-    for source_index in 1:(coefficient_count - 1)
-        for coefficient_index in (source_index + 1):coefficient_count
-            raw = :(_factor_correlation_raw(
-                position, correlation_coordinates,
-                $coefficient_index, $source_index, $coefficient_count))
-            push!(partials, :(let value = $raw
-                (tanh(value), _factor_sech(value))
-            end))
-        end
-    end
-    Expr(:tuple, partials...)
-end
-
 @inline @generated function _factor_grouped_affine_value(
-        node::GroupedAffineFactorNode{Z,S,C,G,P},
-        group_index::Int, row::Int, scales, partials,
+        node::GroupedAffineFactorNode{Z,S,C,G,P,I,K},
+        group_index::Int, row::Int, correlation_coordinates,
         position::AbstractVector{T}, prepared::FactorPrepared,
-        buffers::FactorBuffers{T}) where {Z,S,C,G,P,T}
-    coefficient_count = fieldcount(P)
+        buffers::FactorBuffers{T}) where {Z,S,C,G,P,I,K,T}
+    coefficient_count = K
     contributions = Any[]
-    for coefficient_index in 1:coefficient_count
+    for (predictor_index, coefficient_index) in enumerate(I)
         correlated_terms = Any[]
         residual = :(one(T))
         for source_index in 1:(coefficient_index - 1)
-            partial_index =
-                (source_index - 1) * coefficient_count -
-                (source_index - 1) * source_index ÷ 2 +
-                coefficient_index - source_index
-            partial = :(getfield(partials, $partial_index))
+            raw = :(_factor_correlation_raw(
+                position, correlation_coordinates,
+                $coefficient_index, $source_index, $coefficient_count))
             standardized = :(_factor_grouped_standardized(
                 node, group_index, $source_index, $coefficient_count,
                 position, prepared, buffers))
             push!(correlated_terms,
-                  :($residual * getfield($partial, 1) * $standardized))
-            residual = :($residual * getfield($partial, 2))
+                  :($residual * tanh($raw) * $standardized))
+            residual = :($residual * _factor_sech($raw))
         end
         diagonal = :(_factor_grouped_standardized(
             node, group_index, $coefficient_index, $coefficient_count,
@@ -2948,8 +3694,10 @@ end
         push!(correlated_terms, :($residual * $diagonal))
         correlated = foldl(
             (left, right) -> :($left + $right), correlated_terms)
-        effect = :(getfield(scales, $coefficient_index) * $correlated)
-        predictor = :(getfield(node.predictors, $coefficient_index))
+        effect = :(_factor_coefficient(
+            node.scales, $coefficient_index,
+            position, prepared, buffers) * $correlated)
+        predictor = :(getfield(node.predictors, $predictor_index))
         push!(contributions, :(
             $predictor === nothing ? $effect :
                 $effect * _factor_argument_at(
@@ -2968,13 +3716,10 @@ end
     correlation_name = site_value_name(node.correlation)
     correlation_coordinates = getproperty(
         prepared.plan.graph.coordinates, correlation_name).indices
-    scales = _factor_grouped_scales(node, position, prepared, buffers)
-    partials = _factor_grouped_partials(
-        node, correlation_coordinates, position)
     for row in prepared.plan.observation_axis.keys
         group_index = group_indices[row]
         buffers.node_rows[node_index, row] = _factor_grouped_affine_value(
-            node, group_index, row, scales, partials,
+            node, group_index, row, correlation_coordinates,
             position, prepared, buffers)
     end
     zero(T)
@@ -3004,7 +3749,8 @@ end
         entry, callee = if site_index === nothing
             node_index = findfirst(==(name), NodeNames)
             node_index === nothing && error("unknown factor schedule entry $name")
-            (:(getfield(nodes, $node_index)), :_factor_node_logdensity!)
+            (:(getfield(nodes, $node_index)),
+             :_factor_schedule_node_logdensity!)
         else
             (:(getfield(sites, $site_index)), :_factor_site_logdensity!)
         end
@@ -3027,71 +3773,38 @@ end
         position, prepared, buffers)
 end
 
-@inline _factor_input_only(::LiteralValue, ::FactorGraph) = true
-@inline _factor_input_only(::InputValue, ::FactorGraph) = true
-@inline _factor_input_only(::SiteValue, ::FactorGraph) = false
-@inline function _factor_input_only(::NodeValue{Name},
-                                    graph::FactorGraph) where {Name}
-    _factor_input_only(getproperty(graph.nodes, Name), graph)
-end
-
-@inline _factor_input_only(node::Union{
-        CenterFactorNode,ZScaleFactorNode,ExpFactorNode,LogFactorNode},
-        graph::FactorGraph) = _factor_input_only(node.input, graph)
-@inline _factor_input_only(node::RowProductFactorNode, graph::FactorGraph) =
-    _factor_input_only(node.left, graph) &&
-    _factor_input_only(node.right, graph)
-@inline _factor_input_only(::AbstractFactorNode, ::FactorGraph) = false
-
-@inline _factor_execute_input_only_dependency!(
-    ::Union{LiteralValue,InputValue}, position, prepared, buffers) = nothing
-@inline function _factor_execute_input_only_dependency!(
-        ::NodeValue{Name}, position::AbstractVector{T},
-        prepared::FactorPrepared,
-        buffers::FactorBuffers{T}) where {Name,T}
-    node = getproperty(prepared.plan.graph.nodes, Name)
-    _factor_execute_input_only_node!(
-        Val(Name), node, position, prepared, buffers)
-end
-
-@inline function _factor_execute_input_only_node!(
-        name::Val, node::Union{
-            CenterFactorNode,ZScaleFactorNode,ExpFactorNode,LogFactorNode},
-        position::AbstractVector{T}, prepared::FactorPrepared,
-        buffers::FactorBuffers{T}) where {T}
-    _factor_execute_input_only_dependency!(
-        node.input, position, prepared, buffers)
-    _factor_node_logdensity!(name, node, position, prepared, buffers)
-end
-
-@inline function _factor_execute_input_only_node!(
-        name::Val, node::RowProductFactorNode,
-        position::AbstractVector{T}, prepared::FactorPrepared,
-        buffers::FactorBuffers{T}) where {T}
-    _factor_execute_input_only_dependency!(
-        node.left, position, prepared, buffers)
-    _factor_execute_input_only_dependency!(
-        node.right, position, prepared, buffers)
-    _factor_node_logdensity!(name, node, position, prepared, buffers)
-end
-
 @inline function _factor_node_query_kernel(
         position::AbstractVector{T}, prepared::FactorPrepared,
         buffers::FactorBuffers{T},
         ::BRM.NativePPLNodeOutput{Name}) where {T,Name}
     if !_has_generated_groups(prepared.plan)
-        return _factor_logdensity_kernel(position, prepared, buffers)
+        density = _factor_logdensity_kernel(position, prepared, buffers)
+        node = getproperty(prepared.plan.graph.nodes, Name)
+        node isa ExpFactorNode &&
+            _factor_terminal_log_rate_node(Val(Name), prepared.plan) &&
+            _factor_node_logdensity!(
+                Val(Name), node, position, prepared, buffers)
+        return density
     end
     node = getproperty(prepared.plan.graph.nodes, Name)
-    _factor_input_only(node, prepared.plan.graph) ||
-        _factor_require_fixed_coordinates(prepared.plan)
-    _factor_execute_input_only_node!(
-        Val(Name), node, position, prepared, buffers)
+    input_only = node isa Union{
+        CenterFactorNode,ZScaleFactorNode,LogFactorNode,
+        LogisticFactorNode} &&
+        node.input isa InputValue
+    input_only || _factor_require_fixed_coordinates(prepared.plan)
+    _factor_node_logdensity!(Val(Name), node, position, prepared, buffers)
 end
 
-function _factor_check_workspace_layout(workspace::FactorWorkspace,
-                                        prepared::FactorPrepared)
+function _factor_check_execution(workspace::FactorWorkspace,
+                                 prepared::FactorPrepared,
+                                 position::AbstractVector)
     dimension = BRM.LogDensityProblems.dimension(prepared)
+    length(position) == dimension || throw(DimensionMismatch(
+        "native PPL factor position has length $(length(position)); " *
+        "expected $dimension"))
+    eltype(position) === eltype(workspace) || throw(ArgumentError(
+        "native PPL factor position eltype $(eltype(position)) does not " *
+        "match workspace eltype $(eltype(workspace))"))
     eltype(prepared) === eltype(workspace) || throw(ArgumentError(
         "native PPL factor prepared eltype $(eltype(prepared)) does not " *
         "match workspace eltype $(eltype(workspace))"))
@@ -3115,20 +3828,6 @@ function _factor_check_workspace_layout(workspace::FactorWorkspace,
     length(workspace.primal.pointwise_loglikelihood) ==
         length(prepared.plan.observation_axis) || throw(DimensionMismatch(
             "native PPL factor workspace has the wrong observation layout"))
-    nothing
-end
-
-function _factor_check_execution(workspace::FactorWorkspace,
-                                 prepared::FactorPrepared,
-                                 position::AbstractVector)
-    dimension = BRM.LogDensityProblems.dimension(prepared)
-    length(position) == dimension || throw(DimensionMismatch(
-        "native PPL factor position has length $(length(position)); " *
-        "expected $dimension"))
-    eltype(position) === eltype(workspace) || throw(ArgumentError(
-        "native PPL factor position eltype $(eltype(position)) does not " *
-        "match workspace eltype $(eltype(workspace))"))
-    _factor_check_workspace_layout(workspace, prepared)
     for buffer in (workspace.gradient, workspace.primal.values,
                    workspace.primal.generated_group_values,
                    workspace.primal.node_values, workspace.primal.node_rows,
@@ -3159,8 +3858,9 @@ logdensity_and_gradient!(work::FactorWorkspace, prepared::FactorPrepared,
                          position::AbstractVector) =
     _factor_logdensity_and_gradient!(work, prepared, position)
 
-has_response(prepared::FactorPrepared) =
-    hasproperty(prepared.conditions, factor_output_site(prepared.plan))
+has_response(prepared::FactorPrepared) = any(
+    output -> hasproperty(prepared.conditions, output),
+    factor_output_sites(prepared.plan))
 
 function _factor_group_levels(plan::FactorPlan)
     names = Tuple(name for (name, parameter) in pairs(
@@ -3192,18 +3892,22 @@ function rebind(prepared::FactorPrepared, conditions;
     rebound = _bind_factor_plan(
         prepared.plan.declaration, bindings, conditions;
         group_levels=_factor_group_levels(prepared.plan), new_groups,
-        fitted_nodes=freeze_constants ? prepared.plan.fitted_nodes : nothing)
-    if !hasproperty(rebound.conditions, rebound.output_site) &&
+        fitted_nodes=freeze_constants ? prepared.plan.fitted_nodes : nothing,
+        outcome_levels=(freeze_constants || isempty(conditions)) ?
+            prepared.plan.outcome_levels : nothing)
+    if !any(output -> hasproperty(rebound.conditions, output),
+            factor_output_sites(rebound)) &&
        isempty(rebound.observation_axis.keys)
         rebound = FactorPlan(
             rebound.declaration, rebound.graph, rebound.fitted_nodes,
             rebound.bindings,
             rebound.conditions,
+            rebound.outcome_levels,
             rebound.site_indices, rebound.node_indices,
             rebound.group_indices, rebound.generated_group_levels,
             rebound.generated_group_indices,
             prepared.plan.observation_axis,
-            rebound.output_site)
+            factor_output_sites(rebound))
     end
     prepare(rebound; T)
 end
@@ -3214,12 +3918,24 @@ function _factor_output_signature(plan::FactorPlan)
         BRM.NativePPLDenseVectorLayout())
 end
 
-function _factor_predictive_output_signature(plan::FactorPlan)
-    site = getproperty(plan.graph.sites, factor_output_site(plan))
+function _factor_predictive_output_signature(
+        plan::FactorPlan, output_site::Symbol)
+    output_site in factor_output_sites(plan) || throw(CapabilityError(
+        :query,
+        "`$output_site` is not a terminal stochastic output"))
+    _factor_predictive_output_signature(plan, Val(output_site))
+end
+
+function _factor_predictive_output_signature(
+        plan::FactorPlan, ::Val{Output}) where {Output}
+    site = getproperty(plan.graph.sites, Output)
     factor = base_site_factor(site.factor)
     element_type = if factor isa BernoulliLogitSiteFactor
         BRM.NativePPLFixedElementType{Bool}()
-    elseif factor isa PoissonSiteFactor
+    elseif factor isa Union{
+            PoissonSiteFactor,ZeroInflatedPoissonSiteFactor,
+            NegativeBinomial2SiteFactor,BetaBinomial2SiteFactor,
+            BinomialLogitSiteFactor,CategoricalLogitSiteFactor}
         BRM.NativePPLFixedElementType{Int}()
     else
         BRM.NativePPLPreparedElementType()
@@ -3229,8 +3945,23 @@ function _factor_predictive_output_signature(plan::FactorPlan)
         BRM.NativePPLDenseVectorLayout())
 end
 
+@generated function _factor_predictive_output_signature(
+        plan::FactorPlan{Outputs}) where {Outputs}
+    length(Outputs) == 1 || return :(throw(CapabilityError(
+        :factor_outputs,
+        "predictive signature requires one selected terminal outcome")))
+    :(_factor_predictive_output_signature(
+        plan, Val($(QuoteNode(only(Outputs))))))
+end
+
+function _factor_outcome_signatures(plan::FactorPlan, signature)
+    outputs = factor_output_sites(plan)
+    NamedTuple{outputs}(map(signature, outputs))
+end
+
 const _FactorRowNode = Union{
     CenterFactorNode,ZScaleFactorNode,ExpFactorNode,LogFactorNode,
+    LogisticFactorNode,
     AffineFactorNode,GroupGatherFactorNode,
     RowProductFactorNode,GroupedAffineFactorNode,
 }
@@ -3246,12 +3977,33 @@ function _factor_node_output(plan::FactorPlan,
     node
 end
 
-output_signature(plan::FactorPlan,
-                 ::Union{BRM.NativePPLLinearPredictor,
-                         BRM.NativePPLPointwiseLogLikelihood}) =
+function output_signature(plan::FactorPlan,
+                          ::BRM.NativePPLLinearPredictor)
+    length(factor_output_sites(plan)) == 1 || throw(CapabilityError(
+        :query,
+        "multiple-outcome factor plans have no single linear predictor; " *
+        "query each named predictor with NodeOutput or use a fused bundle"))
+    factor = base_site_factor(getproperty(
+        plan.graph.sites, factor_output_site(plan)).factor)
+    factor isa CategoricalLogitSiteFactor && throw(CapabilityError(
+        :query,
+        "CategoricalLogit has multiple non-reference predictors; query " *
+        "their named NodeOutput values individually or in one fused bundle"))
     _factor_output_signature(plan)
-output_signature(plan::FactorPlan, ::BRM.NativePPLPosteriorPredictive) =
-    _factor_predictive_output_signature(plan)
+end
+function output_signature(plan::FactorPlan,
+                          ::BRM.NativePPLPointwiseLogLikelihood)
+    length(factor_output_sites(plan)) == 1 &&
+        return _factor_output_signature(plan)
+    _factor_outcome_signatures(plan, _ -> _factor_output_signature(plan))
+end
+function output_signature(plan::FactorPlan,
+                          ::BRM.NativePPLPosteriorPredictive)
+    length(factor_output_sites(plan)) == 1 &&
+        return _factor_predictive_output_signature(plan)
+    _factor_outcome_signatures(
+        plan, output -> _factor_predictive_output_signature(plan, output))
+end
 function output_signature(plan::FactorPlan,
                           query::BRM.NativePPLNodeOutput)
     _factor_node_output(plan, query)
@@ -3262,6 +4014,8 @@ output_signature(prepared::FactorPrepared, query::BRM.NativePPLQuery) =
 output_eltype(signature::BRM.NativePPLOutputSignature,
               prepared::FactorPrepared) =
     BRM.native_output_eltype(signature, prepared)
+output_eltype(signatures::NamedTuple, prepared::FactorPrepared) =
+    map(signature -> output_eltype(signature, prepared), signatures)
 
 function allocate_output(signature::BRM.NativePPLOutputSignature,
                          prepared::FactorPrepared)
@@ -3280,9 +4034,8 @@ function _factor_check_query_output(output::AbstractVector,
                                     work::FactorWorkspace,
                                     prepared::FactorPrepared,
                                     position::AbstractVector,
-                                    query::BRM.NativePPLQuery)
+                                    signature::BRM.NativePPLOutputSignature)
     _factor_check_execution(work, prepared, position)
-    signature = output_signature(prepared, query)
     expected_axis = BRM.native_output_axis(signature).keys
     axes(output, 1) == expected_axis || throw(DimensionMismatch(
         "native PPL factor output axis $(axes(output, 1)) does not match " *
@@ -3303,17 +4056,134 @@ function _factor_check_query_output(output::AbstractVector,
     output
 end
 
-@inline function _factor_terminal_linear(prepared::FactorPrepared,
+function _factor_check_query_output(output::AbstractVector,
+                                    work::FactorWorkspace,
+                                    prepared::FactorPrepared,
+                                    position::AbstractVector,
+                                    query::BRM.NativePPLQuery)
+    signature = output_signature(prepared, query)
+    signature isa BRM.NativePPLOutputSignature || throw(CapabilityError(
+        :query,
+        "multiple-outcome query output must be a NamedTuple keyed by " *
+        "$(collect(factor_output_sites(prepared.plan)))"))
+    _factor_check_query_output(
+        output, work, prepared, position, signature)
+end
+
+@inline @generated function _factor_check_outcome_query_outputs(
+        outputs::NamedTuple{Names}, work::FactorWorkspace,
+        prepared::FactorPrepared, position::AbstractVector,
+        query::Q) where {Names,Q<:Union{
+            BRM.NativePPLPointwiseLogLikelihood,
+            BRM.NativePPLPosteriorPredictive}}
+    checks = Any[]
+    for index in eachindex(Names)
+        name = Names[index]
+        signature = Q <: BRM.NativePPLPointwiseLogLikelihood ?
+            :(_factor_output_signature(prepared.plan)) :
+            :(_factor_predictive_output_signature(
+                prepared.plan, Val($(QuoteNode(name)))))
+        push!(checks, :(_factor_check_query_output(
+            getfield(outputs, $index), work, prepared, position,
+            $signature)))
+    end
+    for left in eachindex(Names), right in (left + 1):length(Names)
+        push!(checks, quote
+            Base.mightalias(getfield(outputs, $left),
+                            getfield(outputs, $right)) && throw(
+                ArgumentError(
+                    "native PPL outcome query outputs must not alias " *
+                    "each other"))
+        end)
+    end
+    quote
+        expected = factor_output_sites(prepared.plan)
+        Names == expected || throw(ArgumentError(
+            "native PPL outcome query fields $Names do not match " *
+            "terminal outcomes $expected"))
+        $(checks...)
+        outputs
+    end
+end
+
+@inline function _factor_pointwise_at(
+        ::Val{Name}, prepared::FactorPrepared,
+        buffers::FactorBuffers, index::Int) where {Name}
+    hasproperty(prepared.conditions, Name) || throw(ArgumentError(
+        "native PPL pointwise log likelihood for `$Name` requires that " *
+        "outcome to be conditioned"))
+    site = getproperty(prepared.plan.graph.sites, Name)
+    response = getproperty(prepared.conditions, Name)
+    _factor_logdensity_at(
+        site.factor, response[index], index, prepared.plan, buffers)
+end
+
+@inline @generated function _factor_write_pointwise_outputs!(
+        outputs::NamedTuple{Names}, prepared::FactorPrepared,
+        buffers::FactorBuffers) where {Names}
+    calls = map(eachindex(Names)) do output_index
+        name = Names[output_index]
+        quote
+            output = getfield(outputs, $output_index)
+            for row in eachindex(output)
+                output[row] = _factor_pointwise_at(
+                    Val($(QuoteNode(name))), prepared, buffers, row)
+            end
+        end
+    end
+    Expr(:block, calls..., :(outputs))
+end
+
+@inline @generated function _factor_write_predictive_outputs!(
+        rng::BRM.AbstractRNG, outputs::NamedTuple{Names},
+        prepared::FactorPrepared, buffers::FactorBuffers) where {Names}
+    calls = map(eachindex(Names)) do output_index
+        name = Names[output_index]
+        quote
+            output = getfield(outputs, $output_index)
+            for row in eachindex(output)
+                output[row] = _factor_terminal_sample(
+                    rng, Val($(QuoteNode(name))), prepared, buffers, row)
+            end
+        end
+    end
+    Expr(:block, calls..., :(outputs))
+end
+
+@inline function _factor_terminal_linear(::Val{Name},
+                                         prepared::FactorPrepared,
                                          buffers::FactorBuffers,
-                                         index::Int)
-    site = getproperty(
-        prepared.plan.graph.sites, factor_output_site(prepared.plan))
+                                         index::Int) where {Name}
+    site = getproperty(prepared.plan.graph.sites, Name)
     factor = base_site_factor(site.factor)
     T = eltype(buffers.values)
     if factor isa NormalSiteFactor
         _factor_argument_at(
             factor.location, index, prepared.plan, buffers, T)
+    elseif factor isa StudentTSiteFactor
+        _factor_argument_at(
+            factor.location, index, prepared.plan, buffers, T)
     elseif factor isa BernoulliLogitSiteFactor
+        _factor_argument_at(
+            factor.logit, index, prepared.plan, buffers, T)
+    elseif factor isa ZeroInflatedPoissonSiteFactor
+        _factor_zip_log_rate(
+            factor, index, prepared.plan, buffers, T)
+    elseif factor isa NegativeBinomial2SiteFactor
+        _factor_nb2_log_parameter(
+            factor.mean, index, prepared.plan, buffers, T)
+    elseif factor isa BetaBinomial2SiteFactor
+        mean = factor.mean
+        if mean isa NodeValue
+            node = getproperty(
+                prepared.plan.graph.nodes, node_value_name(mean))
+            node isa LogisticFactorNode && return _factor_argument_at(
+                node.input, index, prepared.plan, buffers, T)
+        end
+        probability = _factor_argument_at(
+            mean, index, prepared.plan, buffers, T)
+        log(probability) - log1p(-probability)
+    elseif factor isa BinomialLogitSiteFactor
         _factor_argument_at(
             factor.logit, index, prepared.plan, buffers, T)
     else
@@ -3322,26 +4192,116 @@ end
     end
 end
 
+@inline _factor_terminal_linear(prepared::FactorPrepared,
+                                buffers::FactorBuffers, index::Int) =
+    _factor_terminal_linear(
+        Val(factor_output_site(prepared.plan)), prepared, buffers, index)
+
 @inline function _factor_node_output_at(
     ::BRM.NativePPLNodeOutput{Name}, prepared::FactorPrepared,
     buffers::FactorBuffers, index::Int) where {Name}
     node = getproperty(prepared.plan.graph.nodes, Name)
-    if node isa ExpFactorNode
+    if node isa ExpFactorNode &&
+       _factor_terminal_log_rate_node(Val(Name), prepared.plan)
+        T = eltype(buffers.values)
         return exp(_factor_argument_at(
-            node.input, index, prepared.plan, buffers,
-            eltype(buffers.values)))
+            node.input, index, prepared.plan, buffers, T))
     end
     _factor_argument_at(
         NodeValue{Name}(), index, prepared.plan, buffers,
         eltype(buffers.values))
 end
 
+@inline function _factor_rand_unit_gamma(
+        rng::BRM.AbstractRNG, ::Type{T}, shape::T) where {T}
+    isfinite(shape) && shape > zero(T) || throw(DomainError(
+        shape, "native PPL Gamma shape must be finite and positive"))
+    if shape < one(T)
+        draw = _factor_rand_unit_gamma(rng, T, shape + one(T))
+        uniform = BRM.rand(rng, T)
+        iszero(uniform) && return zero(T)
+        return draw * exp(log(uniform) / shape)
+    end
+
+    shifted = shape - T(1 / 3)
+    inverse_scale = inv(sqrt(T(9) * shifted))
+    while true
+        normal = BRM.randn(rng, T)
+        root = one(T) + inverse_scale * normal
+        root > zero(T) || continue
+        candidate = root * root * root
+        uniform = BRM.rand(rng, T)
+        normal2 = normal * normal
+        uniform < one(T) - T(0.0331) * normal2 * normal2 &&
+            return shifted * candidate
+        log(uniform) < T(0.5) * normal2 +
+            shifted * (one(T) - candidate + log(candidate)) &&
+            return shifted * candidate
+    end
+end
+
+@inline function _factor_rand_negative_binomial2(
+        rng::BRM.AbstractRNG, factor::NegativeBinomial2SiteFactor,
+        index, plan, buffers, ::Type{T}) where {T}
+    log_mean = _factor_nb2_log_parameter(
+        factor.mean, index, plan, buffers, T)
+    log_precision = _factor_nb2_log_parameter(
+        factor.precision, index, plan, buffers, T)
+    precision = exp(log_precision)
+    isfinite(precision) || return BRM._native_ppl_rand_poisson(
+        rng, T, log_mean)
+    gamma = _factor_rand_unit_gamma(rng, T, precision)
+    iszero(gamma) && return 0
+    BRM._native_ppl_rand_poisson(
+        rng, T, log_mean + log(gamma) - log_precision)
+end
+
+@inline function _factor_rand_binomial(
+        rng::BRM.AbstractRNG, ::Type{T}, trials::Int,
+        probability::T) where {T}
+    successes = 0
+    for _ in 1:trials
+        successes += BRM.rand(rng, T) < probability
+    end
+    successes
+end
+
+@inline function _factor_rand_beta_binomial2(
+        rng::BRM.AbstractRNG, factor::BetaBinomial2SiteFactor,
+        index, plan, buffers, ::Type{T}) where {T}
+    trials = Int(_factor_argument_at(
+        factor.trials, index, plan, buffers, T))
+    log_mean, log_complement = _factor_bb2_log_probabilities(
+        factor, index, plan, buffers, T)
+    mean = exp(log_mean)
+    log_precision = _factor_bb2_log_precision(
+        factor, index, plan, buffers, T)
+    log_precision > log(floatmax(T)) && return _factor_rand_binomial(
+        rng, T, trials, mean)
+    alpha = exp(log_precision + log_mean)
+    beta = exp(log_precision + log_complement)
+    probability = if iszero(alpha) && iszero(beta)
+        BRM.rand(rng, T) < mean ? one(T) : zero(T)
+    elseif iszero(alpha)
+        zero(T)
+    elseif iszero(beta)
+        one(T)
+    else
+        left = _factor_rand_unit_gamma(rng, T, alpha)
+        right = _factor_rand_unit_gamma(rng, T, beta)
+        total = left + right
+        iszero(total) ?
+            (BRM.rand(rng, T) < mean ? one(T) : zero(T)) : left / total
+    end
+    _factor_rand_binomial(rng, T, trials, probability)
+end
+
 @inline function _factor_terminal_base_sample(rng::BRM.AbstractRNG,
+                                              ::Val{Name},
                                               prepared::FactorPrepared,
                                               buffers::FactorBuffers,
-                                              index::Int)
-    site = getproperty(
-        prepared.plan.graph.sites, factor_output_site(prepared.plan))
+                                              index::Int) where {Name}
+    site = getproperty(prepared.plan.graph.sites, Name)
     site_factor = site.factor
     factor = base_site_factor(site_factor)
     T = eltype(buffers.values)
@@ -3358,10 +4318,60 @@ end
             scale /= sqrt(weight)
         end
         location + scale * BRM.randn(rng, T)
+    elseif factor isa StudentTSiteFactor
+        degrees_freedom = _factor_argument_at(
+            factor.degrees_freedom, index, prepared.plan, buffers, T)
+        location = _factor_argument_at(
+            factor.location, index, prepared.plan, buffers, T)
+        scale = _factor_argument_at(
+            factor.scale, index, prepared.plan, buffers, T)
+        degrees_freedom > zero(T) && scale > zero(T) || throw(DomainError(
+            (degrees_freedom, scale),
+            "native PPL Student-t degrees of freedom and scale must be " *
+            "positive"))
+        if !isfinite(degrees_freedom)
+            return location + scale * BRM.randn(rng, T)
+        end
+        chi_square = T(2) * _factor_rand_unit_gamma(
+            rng, T, degrees_freedom / T(2))
+        location + scale * BRM.randn(rng, T) /
+            sqrt(chi_square / degrees_freedom)
     elseif factor isa BernoulliLogitSiteFactor
         logit = _factor_argument_at(
             factor.logit, index, prepared.plan, buffers, T)
         BRM.rand(rng, T) < BRM._native_ppl_logistic(logit)
+    elseif factor isa ZeroInflatedPoissonSiteFactor
+        log_zero, _ = _factor_zip_log_probabilities(
+            factor, index, prepared.plan, buffers, T)
+        BRM.rand(rng, T) < exp(log_zero) ? 0 :
+            BRM._native_ppl_rand_poisson(
+                rng, T, _factor_zip_log_rate(
+                    factor, index, prepared.plan, buffers, T))
+    elseif factor isa NegativeBinomial2SiteFactor
+        _factor_rand_negative_binomial2(
+            rng, factor, index, prepared.plan, buffers, T)
+    elseif factor isa BetaBinomial2SiteFactor
+        _factor_rand_beta_binomial2(
+            rng, factor, index, prepared.plan, buffers, T)
+    elseif factor isa BinomialLogitSiteFactor
+        trials = Int(_factor_argument_at(
+            factor.trials, index, prepared.plan, buffers, T))
+        logit = _factor_argument_at(
+            factor.logit, index, prepared.plan, buffers, T)
+        _factor_rand_binomial(
+            rng, T, trials, BRM._native_ppl_logistic(logit))
+    elseif factor isa CategoricalLogitSiteFactor
+        largest = _factor_categorical_largest(
+            factor.logits, index, prepared.plan, buffers, T, zero(T))
+        reference_mass = exp(-largest)
+        total = _factor_categorical_total(
+            factor.logits, index, prepared.plan, buffers, T,
+            largest, reference_mass)
+        threshold = BRM.rand(rng, T) * total
+        threshold < reference_mass && return 1
+        _factor_categorical_draw(
+            factor.logits, threshold, index, prepared.plan, buffers, T,
+            largest, reference_mass, 1)
     else
         log_rate = _factor_poisson_log_rate(
             factor, index, prepared.plan, buffers, T)
@@ -3369,22 +4379,31 @@ end
     end
 end
 
+
+@inline _factor_terminal_base_sample(
+        rng::BRM.AbstractRNG, prepared::FactorPrepared,
+        buffers::FactorBuffers, index::Int) =
+    _factor_terminal_base_sample(
+        rng, Val(factor_output_site(prepared.plan)),
+        prepared, buffers, index)
+
 @inline function _factor_terminal_sample(rng::BRM.AbstractRNG,
+                                         ::Val{Name},
                                          prepared::FactorPrepared,
                                          buffers::FactorBuffers,
-                                         index::Int)
-    site = getproperty(
-        prepared.plan.graph.sites, factor_output_site(prepared.plan))
+                                         index::Int) where {Name}
+    site = getproperty(prepared.plan.graph.sites, Name)
     evidence_factor = _evidence_site_factor(site.factor)
     evidence_factor === nothing && return _factor_terminal_base_sample(
-        rng, prepared, buffers, index)
+        rng, Val(Name), prepared, buffers, index)
     T = eltype(buffers.values)
     lower = _factor_evidence_bound_at(
         evidence_factor.lower, index, prepared.plan, buffers, T)
     upper = _factor_evidence_bound_at(
         evidence_factor.upper, index, prepared.plan, buffers, T)
     kind = evidence_kind(evidence_factor.evidence)
-    sample = _factor_terminal_base_sample(rng, prepared, buffers, index)
+    sample = _factor_terminal_base_sample(
+        rng, Val(Name), prepared, buffers, index)
     kind === :interval_censored && return sample
     if kind === :censored
         lower !== nothing && sample < lower &&
@@ -3400,11 +4419,19 @@ end
             :predictive_support,
             "native PPL truncated predictive sampler did not reach its " *
             "support after $attempts proposals"))
-        sample = _factor_terminal_base_sample(rng, prepared, buffers, index)
+        sample = _factor_terminal_base_sample(
+            rng, Val(Name), prepared, buffers, index)
         attempts += 1
     end
     sample
 end
+
+@inline _factor_terminal_sample(
+        rng::BRM.AbstractRNG, prepared::FactorPrepared,
+        buffers::FactorBuffers, index::Int) =
+    _factor_terminal_sample(
+        rng, Val(factor_output_site(prepared.plan)),
+        prepared, buffers, index)
 
 function evaluate!(output::AbstractVector, work::FactorWorkspace,
                    prepared::FactorPrepared, position::AbstractVector,
@@ -3439,6 +4466,20 @@ function evaluate!(output::AbstractVector, work::FactorWorkspace,
         "broadcast response"))
     _factor_logdensity_kernel(position, prepared, work.primal)
     copyto!(output, work.primal.pointwise_loglikelihood)
+end
+
+function evaluate!(outputs::NamedTuple, work::FactorWorkspace,
+                   prepared::FactorPrepared, position::AbstractVector,
+                   query::BRM.NativePPLPointwiseLogLikelihood)
+    _factor_check_outcome_query_outputs(
+        outputs, work, prepared, position, query)
+    for output in factor_output_sites(prepared.plan)
+        hasproperty(prepared.conditions, output) || throw(ArgumentError(
+            "native PPL pointwise log likelihood for `$output` requires " *
+            "that outcome to be conditioned"))
+    end
+    _factor_logdensity_kernel(position, prepared, work.primal)
+    _factor_write_pointwise_outputs!(outputs, prepared, work.primal)
 end
 
 function evaluate(work::FactorWorkspace, prepared::FactorPrepared,
@@ -3516,6 +4557,23 @@ function simulate!(rng::BRM.AbstractRNG, output::AbstractVector,
     output
 end
 
+function simulate!(rng::BRM.AbstractRNG, outputs::NamedTuple,
+                   work::FactorWorkspace, prepared::FactorPrepared,
+                   position::AbstractVector,
+                   query::BRM.NativePPLPosteriorPredictive=
+                       BRM.NativePPLPosteriorPredictive())
+    _factor_check_outcome_query_outputs(
+        outputs, work, prepared, position, query)
+    if _has_generated_groups(prepared.plan)
+        _factor_predictive_kernel!(
+            rng, position, prepared, work.primal)
+    else
+        _factor_logdensity_kernel(position, prepared, work.primal)
+    end
+    _factor_write_predictive_outputs!(
+        rng, outputs, prepared, work.primal)
+end
+
 function simulate(rng::BRM.AbstractRNG, work::FactorWorkspace,
                   prepared::FactorPrepared, position::AbstractVector,
                   query::BRM.NativePPLPosteriorPredictive=
@@ -3542,6 +4600,44 @@ end
         factor::ExponentialSiteFactor, plan, buffers, ::Type{T}) where {T}
     scale = _factor_argument(factor.scale, plan, buffers, T)
     scale * BRM.randexp(rng, T)
+end
+
+@inline _factor_require_prior_simulation(
+    name::Symbol,
+    factor::Union{StandardNormalSiteFactor,NormalSiteFactor,
+                  ExponentialSiteFactor}) = nothing
+
+@noinline function _factor_require_prior_simulation(name::Symbol, factor)
+    throw(CapabilityError(
+        :prior_simulation,
+        "native PPL prior simulation has no sampler for free site `$name` " *
+        "with factor `$(typeof(factor))`"))
+end
+
+@inline _factor_require_prior_simulation(
+    name::Symbol,
+    site::StochasticSite{S,Tr,F,Sh,A,K}) where {S,Tr,F,Sh,A,K} = nothing
+
+@inline function _factor_require_prior_simulation(
+        name::Symbol,
+        site::StochasticSite{S,Tr,F,Sh,FreeSite,K}) where {S,Tr,F,Sh,K}
+    _factor_require_prior_simulation(name, site.factor)
+end
+
+@generated function _factor_require_prior_simulation(
+        ::Val{Names}, sites::Sites) where {Names,Sites<:Tuple}
+    calls = Any[]
+    for (index, name) in enumerate(Names)
+        push!(calls, :(_factor_require_prior_simulation(
+            $(QuoteNode(name)), getfield(sites, $index))))
+    end
+    Expr(:block, calls..., :(nothing))
+end
+
+@inline function _factor_require_prior_simulation(plan::FactorPlan)
+    sites = plan.graph.sites
+    _factor_require_prior_simulation(
+        Val(Tuple(keys(sites))), Tuple(sites))
 end
 
 @inline function _factor_generated_group_sample!(rng::BRM.AbstractRNG,
@@ -3601,7 +4697,7 @@ end
 
 @inline function _factor_site_sample!(rng::BRM.AbstractRNG, ::Val{Name},
         site::StochasticSite{S,Tr,F,ScalarSiteShape,FreeSite},
-        position::AbstractVector{T}, output::AbstractVector,
+        position::AbstractVector{T}, output,
         prepared::FactorPrepared, buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
     value = _factor_rand(rng, site.factor, prepared.plan, buffers, T)
     coordinates = getproperty(prepared.plan.graph.coordinates, Name)
@@ -3613,7 +4709,7 @@ end
 
 @inline function _factor_site_sample!(rng::BRM.AbstractRNG, ::Val{Name},
         site::StochasticSite{S,Tr,F,ScalarSiteShape,ConditionedSite},
-        position::AbstractVector{T}, output::AbstractVector,
+        position::AbstractVector{T}, output,
         prepared::FactorPrepared, buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
     buffers.values[getproperty(prepared.plan.site_indices, Name)] =
         getproperty(prepared.conditions, Name)
@@ -3622,7 +4718,7 @@ end
 
 @inline function _factor_site_sample!(rng::BRM.AbstractRNG, ::Val{Name},
         site::StochasticSite{S,Tr,F,BlockSiteShape,FreeSite},
-        position::AbstractVector{T}, output::AbstractVector,
+        position::AbstractVector{T}, output,
         prepared::FactorPrepared, buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
     coordinates = getproperty(prepared.plan.graph.coordinates, Name)
     for coordinate in coordinates.indices
@@ -3635,7 +4731,7 @@ end
 
 @inline function _factor_site_sample!(rng::BRM.AbstractRNG, ::Val{Name},
         site::StochasticSite{S,Tr,F,BlockSiteShape,ConditionedSite},
-        position::AbstractVector{T}, output::AbstractVector,
+        position::AbstractVector{T}, output,
         prepared::FactorPrepared, buffers::FactorBuffers{T}) where {Name,S,Tr,F,T}
     nothing
 end
@@ -3646,7 +4742,20 @@ end
         prepared::FactorPrepared, buffers::FactorBuffers{T}) where {Name,S,Tr,F,A,T}
     for index in eachindex(output)
         output[index] = _factor_terminal_sample(
-            rng, prepared, buffers, index)
+            rng, Val(Name), prepared, buffers, index)
+    end
+    nothing
+end
+
+@inline function _factor_site_sample!(rng::BRM.AbstractRNG, ::Val{Name},
+        site::StochasticSite{S,Tr,F,BroadcastSiteShape,A},
+        position::AbstractVector{T}, outputs::NamedTuple,
+        prepared::FactorPrepared,
+        buffers::FactorBuffers{T}) where {Name,S,Tr,F,A,T}
+    output = getproperty(outputs, Name)
+    for index in eachindex(output)
+        output[index] = _factor_terminal_sample(
+            rng, Val(Name), prepared, buffers, index)
     end
     nothing
 end
@@ -3655,7 +4764,7 @@ end
         ::Val{Names}, ::Val{SiteNames}, sites::Sites,
         ::Val{NodeNames}, nodes::Nodes,
         position::AbstractVector{T},
-        output::AbstractVector, prepared::FactorPrepared,
+        output, prepared::FactorPrepared,
         buffers::FactorBuffers{T}) where {
             Names,SiteNames,Sites<:Tuple,NodeNames,Nodes<:Tuple,T}
     calls = Any[]
@@ -3678,37 +4787,34 @@ end
     Expr(:block, calls..., :(output))
 end
 
-@generated function _factor_check_prior_simulation(
-        ::Val{Names}, sites::Sites) where {Names,Sites<:Tuple}
-    checks = Any[]
-    for (index, name) in enumerate(Names)
-        message = "native PPL prior simulation for LKJ Cholesky site " *
-            "`$name` is not implemented; correlated grouped models " *
-            "support fixed-draw posterior prediction and conditional " *
-            "new-group simulation"
-        push!(checks, quote
-            getfield(sites, $index).factor isa LKJCholeskySiteFactor &&
-                throw(CapabilityError(
-                    :prior_simulation, $message))
-        end)
-    end
-    Expr(:block, checks..., :(nothing))
-end
-
 function simulate_prior!(rng::BRM.AbstractRNG, position::AbstractVector,
                          output::AbstractVector, work::FactorWorkspace,
                          prepared::FactorPrepared)
     _factor_require_fixed_coordinates(prepared.plan)
-    graph = prepared.plan.graph
-    _factor_check_prior_simulation(
-        Val(Tuple(keys(graph.sites))), Tuple(graph.sites))
+    _factor_require_prior_simulation(prepared.plan)
     _factor_check_query_output(
         output, work, prepared, position,
         BRM.NativePPLPosteriorPredictive())
+    graph = prepared.plan.graph
     _factor_sample_schedule!(
         rng, Val(graph.schedule), Val(Tuple(keys(graph.sites))),
         Tuple(graph.sites), Val(Tuple(keys(graph.nodes))), Tuple(graph.nodes),
         position, output, prepared, work.primal)
+end
+
+function simulate_prior!(rng::BRM.AbstractRNG, position::AbstractVector,
+                         outputs::NamedTuple, work::FactorWorkspace,
+                         prepared::FactorPrepared)
+    _factor_require_fixed_coordinates(prepared.plan)
+    _factor_require_prior_simulation(prepared.plan)
+    _factor_check_outcome_query_outputs(
+        outputs, work, prepared, position,
+        BRM.NativePPLPosteriorPredictive())
+    graph = prepared.plan.graph
+    _factor_sample_schedule!(
+        rng, Val(graph.schedule), Val(Tuple(keys(graph.sites))),
+        Tuple(graph.sites), Val(Tuple(keys(graph.nodes))), Tuple(graph.nodes),
+        position, outputs, prepared, work.primal)
 end
 
 function simulate_prior(rng::BRM.AbstractRNG, work::FactorWorkspace,
@@ -3738,10 +4844,24 @@ function batch_output_signature(prepared::FactorPrepared,
                                 query::BRM.NativePPLQuery)
     _factor_check_positions(prepared, positions)
     element = output_signature(prepared, query)
+    _factor_batch_output_signature(prepared, positions, element)
+end
+
+function _factor_batch_output_signature(
+        prepared::FactorPrepared, positions::AbstractMatrix,
+        element::BRM.NativePPLOutputSignature)
     BRM.NativePPLBatchOutputSignature(
         BRM.NativePPLAxis(:draw, Base.OneTo(size(positions, 1))),
         BRM.native_output_axis(element), element.element_type,
         BRM.NativePPLDenseMatrixLayout())
+end
+
+
+function _factor_batch_output_signature(
+        prepared::FactorPrepared, positions::AbstractMatrix,
+        elements::NamedTuple)
+    map(element -> _factor_batch_output_signature(
+            prepared, positions, element), elements)
 end
 
 function batch_output_signature(prepared::FactorPrepared,
@@ -3780,9 +4900,7 @@ function _factor_check_batch_output(output::AbstractMatrix,
                                     work::FactorWorkspace,
                                     prepared::FactorPrepared,
                                     positions::AbstractMatrix,
-                                    query::BRM.NativePPLQuery)
-    _factor_check_workspace_layout(work, prepared)
-    signature = batch_output_signature(prepared, positions, query)
+                                    signature::BRM.NativePPLBatchOutputSignature)
     draw_axis, observation_axis = BRM.native_output_axes(signature)
     axes(output) == (draw_axis.keys, observation_axis.keys) ||
         throw(DimensionMismatch(
@@ -3809,6 +4927,91 @@ function _factor_check_batch_output(output::AbstractMatrix,
     nothing
 end
 
+
+function _factor_check_batch_output(output::AbstractMatrix,
+                                    work::FactorWorkspace,
+                                    prepared::FactorPrepared,
+                                    positions::AbstractMatrix,
+                                    query::BRM.NativePPLQuery)
+    signature = batch_output_signature(prepared, positions, query)
+    signature isa BRM.NativePPLBatchOutputSignature || throw(
+        CapabilityError(
+            :query,
+            "multiple-outcome batch output must be a NamedTuple keyed by " *
+            "$(collect(factor_output_sites(prepared.plan)))"))
+    _factor_check_batch_output(
+        output, work, prepared, positions, signature)
+end
+
+@inline @generated function _factor_check_outcome_batch_outputs(
+        outputs::NamedTuple{Names}, work::FactorWorkspace,
+        prepared::FactorPrepared, positions::AbstractMatrix,
+        query::Q) where {Names,Q<:Union{
+            BRM.NativePPLPointwiseLogLikelihood,
+            BRM.NativePPLPosteriorPredictive}}
+    checks = Any[]
+    for index in eachindex(Names)
+        name = Names[index]
+        element = Q <: BRM.NativePPLPointwiseLogLikelihood ?
+            :(_factor_output_signature(prepared.plan)) :
+            :(_factor_predictive_output_signature(
+                prepared.plan, Val($(QuoteNode(name)))))
+        push!(checks, :(_factor_check_batch_output(
+            getfield(outputs, $index), work, prepared, positions,
+            _factor_batch_output_signature(
+                prepared, positions, $element))))
+    end
+    for left in eachindex(Names), right in (left + 1):length(Names)
+        push!(checks, quote
+            Base.mightalias(getfield(outputs, $left),
+                            getfield(outputs, $right)) && throw(
+                ArgumentError(
+                    "native PPL outcome batch outputs must not alias " *
+                    "each other"))
+        end)
+    end
+    quote
+        expected = factor_output_sites(prepared.plan)
+        Names == expected || throw(ArgumentError(
+            "native PPL outcome batch fields $Names do not match terminal " *
+            "outcomes $expected"))
+        $(checks...)
+        outputs
+    end
+end
+
+@inline @generated function _factor_write_pointwise_output_matrices!(
+        outputs::NamedTuple{Names}, draw,
+        prepared::FactorPrepared, buffers::FactorBuffers) where {Names}
+    calls = map(eachindex(Names)) do output_index
+        name = Names[output_index]
+        quote
+            output = getfield(outputs, $output_index)
+            for row in axes(output, 2)
+                output[draw, row] = _factor_pointwise_at(
+                    Val($(QuoteNode(name))), prepared, buffers, row)
+            end
+        end
+    end
+    Expr(:block, calls..., :(outputs))
+end
+
+@inline @generated function _factor_write_predictive_output_matrices!(
+        rng::BRM.AbstractRNG, outputs::NamedTuple{Names}, draw,
+        prepared::FactorPrepared, buffers::FactorBuffers) where {Names}
+    calls = map(eachindex(Names)) do output_index
+        name = Names[output_index]
+        quote
+            output = getfield(outputs, $output_index)
+            for row in axes(output, 2)
+                output[draw, row] = _factor_terminal_sample(
+                    rng, Val($(QuoteNode(name))), prepared, buffers, row)
+            end
+        end
+    end
+    Expr(:block, calls..., :(outputs))
+end
+
 function evaluate_draws!(output::AbstractMatrix, work::FactorWorkspace,
                          prepared::FactorPrepared,
                          positions::AbstractMatrix,
@@ -3821,6 +5024,27 @@ function evaluate_draws!(output::AbstractMatrix, work::FactorWorkspace,
             @view(positions[draw, :]), query)
     end
     output
+end
+
+function evaluate_draws!(outputs::NamedTuple, work::FactorWorkspace,
+                         prepared::FactorPrepared,
+                         positions::AbstractMatrix,
+                         query::BRM.NativePPLPointwiseLogLikelihood)
+    _factor_check_outcome_batch_outputs(
+        outputs, work, prepared, positions, query)
+    for output in factor_output_sites(prepared.plan)
+        hasproperty(prepared.conditions, output) || throw(ArgumentError(
+            "native PPL pointwise log likelihood for `$output` requires " *
+            "that outcome to be conditioned"))
+    end
+    for draw in axes(positions, 1)
+        position = @view positions[draw, :]
+        _factor_check_execution(work, prepared, position)
+        _factor_logdensity_kernel(position, prepared, work.primal)
+        _factor_write_pointwise_output_matrices!(
+            outputs, draw, prepared, work.primal)
+    end
+    outputs
 end
 
 function evaluate_draws(work::FactorWorkspace, prepared::FactorPrepared,
@@ -3870,6 +5094,29 @@ function simulate_draws!(rng::BRM.AbstractRNG, output::AbstractMatrix,
             @view(positions[draw, :]), query)
     end
     output
+end
+
+function simulate_draws!(rng::BRM.AbstractRNG, outputs::NamedTuple,
+                         work::FactorWorkspace,
+                         prepared::FactorPrepared,
+                         positions::AbstractMatrix,
+                         query::BRM.NativePPLPosteriorPredictive=
+                             BRM.NativePPLPosteriorPredictive())
+    _factor_check_outcome_batch_outputs(
+        outputs, work, prepared, positions, query)
+    for draw in axes(positions, 1)
+        position = @view positions[draw, :]
+        _factor_check_execution(work, prepared, position)
+        if _has_generated_groups(prepared.plan)
+            _factor_predictive_kernel!(
+                rng, position, prepared, work.primal)
+        else
+            _factor_logdensity_kernel(position, prepared, work.primal)
+        end
+        _factor_write_predictive_output_matrices!(
+            rng, outputs, draw, prepared, work.primal)
+    end
+    outputs
 end
 
 function simulate_draws(rng::BRM.AbstractRNG, work::FactorWorkspace,
@@ -3958,6 +5205,20 @@ end
     output
 end
 
+@inline _factor_write_bundle_matrix_query!(rng,
+        outputs::NamedTuple, draw,
+        ::BRM.NativePPLPointwiseLogLikelihood,
+        work::FactorWorkspace, prepared::FactorPrepared) =
+    _factor_write_pointwise_output_matrices!(
+        outputs, draw, prepared, work.primal)
+
+@inline _factor_write_bundle_matrix_query!(rng::BRM.AbstractRNG,
+        outputs::NamedTuple, draw,
+        ::BRM.NativePPLPosteriorPredictive,
+        work::FactorWorkspace, prepared::FactorPrepared) =
+    _factor_write_predictive_output_matrices!(
+        rng, outputs, draw, prepared, work.primal)
+
 @inline _factor_bundle_requires_rng(::Tuple{}) = false
 @inline _factor_bundle_requires_rng(queries::Tuple) =
     first(queries) isa BRM.NativePPLPosteriorPredictive ||
@@ -4024,6 +5285,36 @@ end
     nothing
 end
 
+@inline function _factor_check_bundle_value(
+        output::AbstractMatrix, work::FactorWorkspace,
+        prepared::FactorPrepared, positions::AbstractMatrix,
+        query::BRM.NativePPLQuery)
+    _factor_check_bundle_matrix(
+        output, work, prepared, positions, query)
+end
+
+@inline function _factor_check_bundle_value(
+        outputs::NamedTuple, work::FactorWorkspace,
+        prepared::FactorPrepared, positions::AbstractMatrix,
+        query::BRM.NativePPLPointwiseLogLikelihood)
+    _factor_check_outcome_batch_outputs(
+        outputs, work, prepared, positions, query)
+    for output in factor_output_sites(prepared.plan)
+        hasproperty(prepared.conditions, output) || throw(ArgumentError(
+            "native PPL pointwise log likelihood for `$output` requires " *
+            "that outcome to be conditioned"))
+    end
+    outputs
+end
+
+@inline function _factor_check_bundle_value(
+        outputs::NamedTuple, work::FactorWorkspace,
+        prepared::FactorPrepared, positions::AbstractMatrix,
+        query::BRM.NativePPLPosteriorPredictive)
+    _factor_check_outcome_batch_outputs(
+        outputs, work, prepared, positions, query)
+end
+
 @inline function _factor_check_bundle_fields(outputs, queries,
         work::FactorWorkspace, prepared::FactorPrepared,
         positions::AbstractMatrix, ::Val{0})
@@ -4037,21 +5328,37 @@ end
     query isa BRM.NativePPLQuery || throw(ArgumentError(
         "native PPL factor query bundles require typed graph queries"))
     output = getfield(outputs, Index)
-    output isa AbstractMatrix || throw(ArgumentError(
-        "native PPL factor bundle outputs must be matrices"))
-    _factor_check_bundle_matrix(
+    output isa Union{AbstractMatrix,NamedTuple} || throw(ArgumentError(
+        "native PPL factor bundle outputs must be matrices or named " *
+        "outcome matrices"))
+    _factor_check_bundle_value(
         output, work, prepared, positions, query)
     _factor_check_bundle_fields(
         outputs, queries, work, prepared, positions, Val(Index - 1))
 end
 
+function _factor_output_leaf_expressions(type, expression)
+    type <: NamedTuple || return type <: AbstractArray ? [expression] : Any[]
+    leaves = Any[]
+    for (index, field_type) in enumerate(fieldtypes(type))
+        append!(leaves, _factor_output_leaf_expressions(
+            field_type, :(getfield($expression, $index))))
+    end
+    leaves
+end
+
 @inline @generated function _factor_check_bundle_output_aliases(
-        outputs::NamedTuple{Names}) where {Names}
+        outputs::NamedTuple{Names,Types}) where {Names,Types}
+    leaves = Any[]
+    for (index, field_type) in enumerate(fieldtypes(Types))
+        append!(leaves, _factor_output_leaf_expressions(
+            field_type, :(getfield(outputs, $index))))
+    end
     calls = Any[]
-    for left in eachindex(Names), right in (left + 1):length(Names)
+    for left in eachindex(leaves), right in (left + 1):length(leaves)
         push!(calls, quote
             Base.mightalias(
-                getfield(outputs, $left), getfield(outputs, $right)) &&
+                $(leaves[left]), $(leaves[right])) &&
                 throw(ArgumentError(
                     "native PPL factor bundle outputs must not alias each other"))
         end)
@@ -4172,24 +5479,8 @@ struct ModelInstance{M<:Model,B,C}
     conditions::C
 end
 
-function _factor_graph_instance_conditions(instance::ModelInstance)
-    _validate_instance(instance)
-    names = Symbol[keys(instance.conditions)...]
-    values = Any[getproperty(instance.conditions, name) for name in names]
-    for (name, input_declaration) in pairs(instance.declaration.inputs)
-        input_role(input_declaration) === :response || continue
-        hasproperty(instance.declaration.observations, name) || continue
-        hasproperty(instance.bindings, name) || continue
-        name in names && continue
-        push!(names, name)
-        push!(values, getproperty(instance.bindings, name))
-    end
-    NamedTuple{Tuple(names)}(Tuple(values))
-end
-
 factor_graph(instance::ModelInstance) = factor_graph(
-    instance.declaration;
-    conditions=_factor_graph_instance_conditions(instance))
+    instance.declaration; conditions=instance.conditions)
 
 """
 A stable reference to one named value exported by a namespaced component.
@@ -4412,6 +5703,16 @@ function _qualified_node(namespace::Symbol, declaration::ExpLink, mapping)
         mapping, node_input(declaration), namespace, "exp node"))
 end
 
+function _qualified_node(namespace::Symbol, declaration::LogLink, mapping)
+    log_link(_mapped_name(
+        mapping, node_input(declaration), namespace, "log node"))
+end
+
+function _qualified_node(namespace::Symbol, declaration::LogisticLink, mapping)
+    logistic_link(_mapped_name(
+        mapping, node_input(declaration), namespace, "logistic node"))
+end
+
 function _qualified_node(namespace::Symbol, declaration::GroupGather, mapping)
     group_gather(
         _mapped_name(
@@ -4442,7 +5743,9 @@ function _qualified_node(namespace::Symbol, declaration::GroupedAffine, mapping)
         map(predictor -> predictor === nothing ? nothing :
             _mapped_name(mapping, predictor, namespace,
                          "grouped affine predictor"),
-            grouped_predictors(declaration)))
+            grouped_predictors(declaration));
+        coefficient_indices=grouped_coefficient_indices(declaration),
+        coefficient_count=grouped_coefficient_count(declaration))
 end
 
 
@@ -4462,6 +5765,47 @@ function _qualified_observation(namespace::Symbol, observation, mapping)
             _mapped_name(
                 mapping, only(observation_dependencies(base)),
                 namespace, "Bernoulli-logit factor"))
+    elseif base isa ZeroInflatedPoissonObservation
+        dependencies = observation_dependencies(base)
+        zero_inflated_poisson(
+            response,
+            _mapped_name(mapping, dependencies[1], namespace,
+                         "zero-inflated Poisson factor"),
+            _mapped_name(mapping, dependencies[2], namespace,
+                         "zero-inflated Poisson factor"))
+    elseif base isa NegativeBinomial2Observation
+        dependencies = observation_dependencies(base)
+        negative_binomial2(
+            response,
+            _mapped_name(mapping, dependencies[1], namespace,
+                         "NegativeBinomial2 factor"),
+            _mapped_name(mapping, dependencies[2], namespace,
+                         "NegativeBinomial2 factor"))
+    elseif base isa BetaBinomial2Observation
+        dependencies = observation_dependencies(base)
+        beta_binomial2(
+            response,
+            _mapped_name(mapping, dependencies[1], namespace,
+                         "BetaBinomial2 factor"),
+            _mapped_name(mapping, dependencies[2], namespace,
+                         "BetaBinomial2 factor"),
+            _mapped_name(mapping, dependencies[3], namespace,
+                         "BetaBinomial2 factor"))
+    elseif base isa BinomialLogitObservation
+        dependencies = observation_dependencies(base)
+        binomial_logit(
+            response,
+            _mapped_name(mapping, dependencies[1], namespace,
+                         "BinomialLogit factor"),
+            _mapped_name(mapping, dependencies[2], namespace,
+                         "BinomialLogit factor"))
+    elseif base isa CategoricalLogitObservation
+        dependencies = observation_dependencies(base)
+        categorical_logit(
+            response,
+            (_mapped_name(mapping, dependency, namespace,
+                          "CategoricalLogit factor")
+             for dependency in dependencies)...)
     else
         poisson(
             response,
@@ -4517,6 +5861,16 @@ function _observation_with_response(observation, response::Symbol)
         normal(response, dependencies...)
     elseif base isa BernoulliLogitObservation
         bernoulli_logit(response, only(dependencies))
+    elseif base isa ZeroInflatedPoissonObservation
+        zero_inflated_poisson(response, dependencies...)
+    elseif base isa NegativeBinomial2Observation
+        negative_binomial2(response, dependencies...)
+    elseif base isa BetaBinomial2Observation
+        beta_binomial2(response, dependencies...)
+    elseif base isa BinomialLogitObservation
+        binomial_logit(response, dependencies...)
+    elseif base isa CategoricalLogitObservation
+        categorical_logit(response, dependencies...)
     else
         poisson(response, only(dependencies))
     end
@@ -4980,10 +6334,9 @@ function _validate_model_components(
                 "native PPL stochastic site `$response` collides with a node identity"))
         end
         for dependency in observation_dependencies(declaration)
-            dependency in available || dependency in observation_names ||
-                throw(ArgumentError(
-                    "native PPL observation `$name` references unavailable " *
-                    "dependency `$dependency`"))
+            dependency in available || throw(ArgumentError(
+                "native PPL observation `$name` references unavailable dependency " *
+                "`$dependency`"))
         end
     end
 
@@ -4991,8 +6344,6 @@ function _validate_model_components(
         outputs isa NamedTuple || throw(ArgumentError(
             "native PPL model outputs must be a NamedTuple; got " *
             "$(typeof(outputs))"))
-        isempty(outputs) && throw(ArgumentError(
-            "native PPL model outputs must declare at least one named graph value"))
         all(name -> name isa Symbol, values(outputs)) || throw(ArgumentError(
             "native PPL model outputs must reference named graph values"))
         length(unique(values(outputs))) == length(outputs) || throw(
@@ -5004,9 +6355,6 @@ function _validate_model_components(
             name in exportable || throw(ArgumentError(
                 "native PPL model output `$alias` references unavailable " *
                 "value `$name`"))
-            alias === name || alias ∉ exportable || throw(ArgumentError(
-                "native PPL model output alias `$alias` collides with " *
-                "existing graph identity `$alias`"))
         end
     end
 
@@ -5847,7 +7195,7 @@ function _brmi_group_sd_prior(brmi::BRM.BRMI, id::Symbol)
         lhs, prior = BRM.getargs(operation, 2)
         lhs isa BRM.ExprColumn && BRM.getf(lhs) === BRM.effect || continue
         address = BRM.getargs(lhs)
-        length(address) == 2 && address[1] === :sd && address[2] === id ||
+        length(address) >= 2 && address[1] === :sd && address[2] === id ||
             continue
         prior isa BRM.ExprColumn && BRM.getf(prior) === BRM.Exponential ||
             throw(CapabilityError(
@@ -5935,15 +7283,7 @@ function _lower_brmi_distributional_gaussian(
         :graph_identity,
         "Normal location and log-scale predictors must be distinct"))
 
-    predictor_names = Symbol[]
-    predictor_columns = Any[]
-    parameter_names = Symbol[]
-    parameter_declarations = Any[]
-    node_names = Symbol[]
-    node_declarations = Any[]
-    expected_values = Set((location, log_scale, response))
-
-    for predictor in (location, log_scale)
+    specs = map((location, log_scale)) do predictor
         components = BRM._native_ppl_affine_components(brmi, predictor)
         isempty(components.offsets) || throw(CapabilityError(
             :distributional_predictor,
@@ -5953,31 +7293,21 @@ function _lower_brmi_distributional_gaussian(
             :distributional_predictor,
             "distributional predictor `$predictor` does not yet support " *
             "data offsets"))
-        isempty(components.groups) || throw(CapabilityError(
-            :distributional_predictor,
-            "distributional predictor `$predictor` does not yet support " *
-            "grouped terms"))
         terms = components.predictors
         isempty(terms) && !components.intercept && throw(CapabilityError(
             :distributional_predictor,
             "distributional predictor `$predictor` needs an intercept or " *
             "population predictor"))
         raw_names = Tuple(BRM.name(term.column) for term in terms)
-        for (name, term) in zip(raw_names, terms)
-            if name ∉ predictor_names
-                push!(predictor_names, name)
-                push!(predictor_columns, term.column)
-            end
-            push!(expected_values, name)
-        end
+        length(unique(raw_names)) == length(raw_names) || throw(
+            CapabilityError(
+                :distributional_predictor,
+                "distributional predictor `$predictor` repeats a raw input"))
         coefficient_name = Symbol(:beta_, predictor)
         coefficient_keys = components.intercept ?
             (:Intercept, raw_names...) : raw_names
-        push!(parameter_names, coefficient_name)
-        push!(parameter_declarations, parameter(
-            RealSupport(), coefficient_keys;
-            transform=Identity(), prior=StandardNormal()))
-
+        transform_node_names = Symbol[]
+        transform_node_declarations = Any[]
         affine_inputs = Symbol[]
         for (name, term) in zip(raw_names, terms)
             if term.transform === :identity
@@ -5987,22 +7317,235 @@ function _lower_brmi_distributional_gaussian(
                     term.transform, :_, name, :_for_, predictor)
                 transform_declaration = term.transform === :center ?
                     center(name) : zscale(name)
-                push!(node_names, transform_name)
-                push!(node_declarations, transform_declaration)
+                push!(transform_node_names, transform_name)
+                push!(transform_node_declarations, transform_declaration)
                 push!(affine_inputs, transform_name)
             end
         end
-        push!(node_names, predictor)
-        push!(node_declarations, affine(
-            Tuple(affine_inputs), coefficient_name;
-            intercept=components.intercept))
+        group_specs = map(components.groups) do varying
+            group_name = BRM.name(varying.group)
+            group_predictor_names = Tuple(
+                term === nothing ? nothing : begin
+                    term.transform === :identity || throw(CapabilityError(
+                        :group_term,
+                        "distributional grouped predictors currently " *
+                        "require raw, untransformed inputs"))
+                    BRM.name(term.column)
+                end
+                for term in varying.predictors)
+            local_keys = Tuple(name === nothing ? :Intercept : name
+                               for name in group_predictor_names)
+            correlated = length(local_keys) > 1
+            prior = _brmi_group_sd_prior(brmi, varying.id)
+            scale_name = Symbol(:tau_, varying.id, :_, group_name)
+            correlation_name = Symbol(:L_, varying.id, :_, group_name)
+            site_name = Symbol(:b_, varying.id, :_, group_name)
+            gather_name = correlated ? Symbol(
+                site_name, :_by_, group_name, :_for_, predictor) :
+                Symbol(:r_, predictor, :_, varying.id, :_, group_name)
+            predictor_value = length(group_predictor_names) == 1 ?
+                only(group_predictor_names) : nothing
+            product_name = !correlated && predictor_value !== nothing ?
+                Symbol(gather_name, :_times_, predictor_value) : nothing
+            (; id=varying.id, group_name, column=varying.group, prior,
+               predictor_terms=varying.predictors,
+               predictor_names=group_predictor_names,
+               coefficient_keys=local_keys,
+               coefficient_indices=ntuple(identity, length(local_keys)),
+               coefficient_count=length(local_keys), correlated,
+               correlation_prior=nothing, scale_name, correlation_name,
+               site_name, gather_name, predictor_value, product_name,
+               offset_name=product_name === nothing ?
+                   gather_name : product_name)
+        end
+        group_names = Tuple(spec.group_name for spec in group_specs)
+        length(unique(group_names)) == length(group_names) || throw(
+            CapabilityError(
+                :group_term,
+                "distributional predictor `$predictor` repeats a grouping " *
+                "input"))
+        (; predictor, components, raw_names,
+           raw_columns=Tuple(term.column for term in terms),
+           coefficient_name, coefficient_keys,
+           affine_inputs=Tuple(affine_inputs),
+           transform_node_names=Tuple(transform_node_names),
+           transform_node_declarations=Tuple(transform_node_declarations),
+           group_specs=Tuple(group_specs))
     end
 
-    extras = setdiff(Set(keys(brmi.operations)), expected_values)
-    isempty(extras) || throw(CapabilityError(
-        :additional_operations,
-        "unsupported distributional formula operations: " *
-        join(sort!(collect(extras)), ", ")))
+    group_buckets = Dict{Tuple{Symbol,Symbol},Vector{Tuple{Int,Int}}}()
+    for (spec_index, spec) in pairs(specs)
+        for (group_index, group_spec) in pairs(spec.group_specs)
+            push!(get!(group_buckets,
+                       (group_spec.id, group_spec.group_name),
+                       Tuple{Int,Int}[]),
+                  (spec_index, group_index))
+        end
+    end
+    group_overrides = Dict{Tuple{Int,Int},Any}()
+    for entries in values(group_buckets)
+        first_entry = first(entries)
+        first_spec_index, first_group_index = first_entry
+        first_group = specs[first_spec_index].group_specs[first_group_index]
+        if length(entries) == 1
+            first_group.correlated || continue
+            group_overrides[first_entry] = (;
+                correlation_prior=_brmi_group_correlation_prior(
+                    brmi, first_group.id,
+                    length(first_group.coefficient_keys)))
+            continue
+        end
+        coefficient_keys_buffer = Symbol[]
+        entry_indices = Dict{Tuple{Int,Int},Tuple}()
+        for entry in entries
+            spec_index, group_index = entry
+            spec = specs[spec_index]
+            group_spec = spec.group_specs[group_index]
+            group_spec.column == first_group.column || throw(CapabilityError(
+                :group_term,
+                "shared grouped id `$(group_spec.id)` must use one grouping " *
+                "column across distributional predictors"))
+            first_index = length(coefficient_keys_buffer) + 1
+            append!(coefficient_keys_buffer, map(
+                group_spec.coefficient_keys) do key
+                    key === :Intercept ? spec.predictor :
+                        Symbol(spec.predictor, :_, key)
+                end)
+            entry_indices[entry] = Tuple(
+                first_index:length(coefficient_keys_buffer))
+        end
+        coefficient_keys = Tuple(coefficient_keys_buffer)
+        length(unique(coefficient_keys)) == length(coefficient_keys) || throw(
+            CapabilityError(
+                :group_term,
+                "shared grouped id `$(first_group.id)` produces duplicate " *
+                "distributional coefficient identities"))
+        coefficient_count = length(coefficient_keys)
+        correlation_prior = _brmi_group_correlation_prior(
+            brmi, first_group.id, coefficient_count)
+        for entry in entries
+            spec_index, group_index = entry
+            spec = specs[spec_index]
+            group_spec = spec.group_specs[group_index]
+            gather_name = Symbol(
+                group_spec.site_name, :_by_, group_spec.group_name,
+                :_for_, spec.predictor)
+            group_overrides[entry] = (;
+                coefficient_keys,
+                coefficient_indices=entry_indices[entry],
+                coefficient_count, correlated=true, correlation_prior,
+                gather_name, predictor_value=nothing, product_name=nothing,
+                offset_name=gather_name)
+        end
+    end
+    specs = ntuple(length(specs)) do spec_index
+        spec = specs[spec_index]
+        group_specs = ntuple(length(spec.group_specs)) do group_index
+            group_spec = spec.group_specs[group_index]
+            override = get(group_overrides, (spec_index, group_index), nothing)
+            override === nothing ? group_spec : merge(group_spec, override)
+        end
+        merge(spec, (; group_specs))
+    end
+
+    predictor_names = Symbol[]
+    predictor_columns = Any[]
+    function add_input!(name, column)
+        index = findfirst(==(name), predictor_names)
+        if index === nothing
+            push!(predictor_names, name)
+            push!(predictor_columns, column)
+        elseif predictor_columns[index] != column
+            throw(CapabilityError(
+                :graph_identity,
+                "distributional input `$name` has conflicting sources"))
+        end
+        nothing
+    end
+    for spec in specs
+        for (name, column) in zip(spec.raw_names, spec.raw_columns)
+            add_input!(name, column)
+        end
+    end
+    for spec in specs
+        for group_spec in spec.group_specs
+            for (name, term) in zip(
+                    group_spec.predictor_names,
+                    group_spec.predictor_terms)
+                name === nothing || add_input!(name, term.column)
+            end
+            add_input!(group_spec.group_name, group_spec.column)
+        end
+    end
+
+    parameter_names = Symbol[spec.coefficient_name for spec in specs]
+    parameter_declarations = Any[parameter(
+        RealSupport(), spec.coefficient_keys;
+        transform=Identity(), prior=StandardNormal()) for spec in specs]
+    other_parameter_names = Symbol[]
+    other_parameter_declarations = Any[]
+    function add_other_parameter!(name, declaration)
+        index = findfirst(==(name), other_parameter_names)
+        if index === nothing
+            push!(other_parameter_names, name)
+            push!(other_parameter_declarations, declaration)
+        elseif other_parameter_declarations[index] != declaration
+            throw(CapabilityError(
+                :graph_identity,
+                "distributional parameter `$name` has conflicting " *
+                "declarations"))
+        end
+        nothing
+    end
+
+    node_names = Symbol[]
+    node_declarations = Any[]
+    for spec in specs
+        append!(node_names, spec.transform_node_names)
+        append!(node_declarations, spec.transform_node_declarations)
+        for group_spec in spec.group_specs
+            add_other_parameter!(group_spec.scale_name, parameter(
+                PositiveSupport(), group_spec.correlated ?
+                    group_spec.coefficient_keys : (group_spec.scale_name,);
+                transform=Exp(), prior=Exponential(group_spec.prior.scale)))
+            if group_spec.correlated
+                add_other_parameter!(
+                    group_spec.correlation_name,
+                    cholesky_correlation(
+                        group_spec.coefficient_keys,
+                        group_spec.correlation_prior.eta))
+            end
+            add_other_parameter!(
+                group_spec.site_name,
+                group_spec.correlated ? grouped_standard_normal(
+                    group_spec.group_name, group_spec.coefficient_keys) :
+                    grouped_normal(
+                        group_spec.group_name, 0.0, group_spec.scale_name))
+            push!(node_names, group_spec.gather_name)
+            push!(node_declarations,
+                  group_spec.correlated ? grouped_affine(
+                      group_spec.site_name, group_spec.scale_name,
+                      group_spec.correlation_name, group_spec.group_name,
+                      group_spec.predictor_names;
+                      coefficient_indices=group_spec.coefficient_indices,
+                      coefficient_count=group_spec.coefficient_count) :
+                  group_gather(group_spec.site_name, group_spec.group_name))
+            if group_spec.product_name !== nothing
+                push!(node_names, group_spec.product_name)
+                push!(node_declarations, row_product(
+                    group_spec.gather_name, group_spec.predictor_value))
+            end
+        end
+        push!(node_names, spec.predictor)
+        push!(node_declarations, affine(
+            spec.affine_inputs, spec.coefficient_name;
+            offsets=Tuple(group_spec.offset_name
+                          for group_spec in spec.group_specs),
+            intercept=spec.components.intercept))
+    end
+    append!(parameter_names, other_parameter_names)
+    append!(parameter_declarations, other_parameter_declarations)
+
     log_scale_spelling = String(log_scale)
     scale_name = startswith(log_scale_spelling, "log_") ?
         Symbol(log_scale_spelling[5:end]) : Symbol(:exp_, log_scale)
@@ -6013,20 +7556,460 @@ function _lower_brmi_distributional_gaussian(
     push!(node_names, scale_name)
     push!(node_declarations, exp_link(log_scale))
 
+    expected_values = Set((location, log_scale, response))
+    union!(expected_values, predictor_names)
+    for spec in specs
+        for group_spec in spec.group_specs
+            push!(expected_values, group_spec.prior.operation)
+            group_spec.correlation_prior === nothing ||
+                push!(expected_values,
+                      group_spec.correlation_prior.operation)
+        end
+    end
+    extras = setdiff(Set(keys(brmi.operations)), expected_values)
+    isempty(extras) || throw(CapabilityError(
+        :additional_operations,
+        "unsupported distributional formula operations: " *
+        join(sort!(collect(extras)), ", ")))
+
     input_declarations = _declaration_namedtuple(
         Tuple(predictor_names), Tuple(input() for _ in predictor_names))
     parameters = _declaration_namedtuple(
         Tuple(parameter_names), Tuple(parameter_declarations))
     nodes = _declaration_namedtuple(
         Tuple(node_names), Tuple(node_declarations))
+    site_order_buffer = Symbol[]
+    for spec in specs
+        for group_spec in spec.group_specs
+            group_spec.scale_name in site_order_buffer ||
+                push!(site_order_buffer, group_spec.scale_name)
+            if group_spec.correlated
+                group_spec.correlation_name in site_order_buffer ||
+                    push!(site_order_buffer, group_spec.correlation_name)
+            end
+            group_spec.site_name in site_order_buffer ||
+                push!(site_order_buffer, group_spec.site_name)
+        end
+    end
+    append!(site_order_buffer,
+            Tuple(spec.coefficient_name for spec in specs))
+    push!(site_order_buffer, response)
     declaration = model(
         inputs=input_declarations,
         parameters=parameters,
         nodes=nodes,
         observations=NamedTuple{(response,)}((broadcasted(
-            normal(response, location, scale_name)),)))
+            normal(response, location, scale_name)),)),
+        site_order=Tuple(site_order_buffer))
     bindings = _declaration_namedtuple(
         Tuple(predictor_names),
+        Tuple(parent(parent(column)) for column in predictor_columns))
+    conditions = NamedTuple{(response,)}((parent(parent(response_lhs)),))
+    (; declaration, bindings, conditions)
+end
+
+function _lower_brmi_linked_affine(
+        brmi::BRM.BRMI, key::Symbol, link, graph_name::Symbol)
+    components = BRM._native_ppl_affine_components(brmi, key; link)
+    isempty(components.offsets) || throw(CapabilityError(
+        :linked_predictor,
+        "linked distributional predictor `$key` does not yet support " *
+        "sampled offsets"))
+    isempty(components.data_offsets) || throw(CapabilityError(
+        :linked_predictor,
+        "linked distributional predictor `$key` does not yet support data offsets"))
+    isempty(components.groups) || throw(CapabilityError(
+        :linked_predictor,
+        "linked distributional predictor `$key` does not yet support grouped terms"))
+    terms = components.predictors
+    isempty(terms) && !components.intercept && throw(CapabilityError(
+        :linked_predictor,
+        "linked distributional predictor `$key` needs an intercept or predictor"))
+    raw_names = Tuple(BRM.name(term.column) for term in terms)
+    coefficient_name = Symbol(:beta_, graph_name)
+    coefficient_keys = components.intercept ?
+        (:Intercept, raw_names...) : raw_names
+    parameter_declaration = parameter(
+        RealSupport(), coefficient_keys;
+        transform=Identity(), prior=StandardNormal())
+    node_names = Symbol[]
+    node_declarations = Any[]
+    affine_inputs = Symbol[]
+    for (name, term) in zip(raw_names, terms)
+        if term.transform === :identity
+            push!(affine_inputs, name)
+        else
+            transform_name = Symbol(
+                term.transform, :_, name, :_for_, graph_name)
+            push!(node_names, transform_name)
+            push!(node_declarations,
+                  term.transform === :center ? center(name) : zscale(name))
+            push!(affine_inputs, transform_name)
+        end
+    end
+    push!(node_names, graph_name)
+    push!(node_declarations, affine(
+        Tuple(affine_inputs), coefficient_name;
+        intercept=components.intercept))
+    (; key, graph_name, coefficient_name, parameter_declaration,
+       raw_names, raw_columns=Tuple(term.column for term in terms),
+       node_names=Tuple(node_names),
+       node_declarations=Tuple(node_declarations))
+end
+
+function _lower_brmi_negative_binomial2(
+        brmi::BRM.BRMI, response::Symbol, response_lhs, likelihood)
+    isempty(BRM.getkwargs(likelihood)) || throw(CapabilityError(
+        :likelihood_keywords,
+        "NegativeBinomial2 likelihood for `$response` has keywords"))
+    arguments = BRM.getargs(likelihood)
+    length(arguments) == 2 || throw(CapabilityError(
+        :likelihood,
+        "NegativeBinomial2 likelihood for `$response` needs mean and " *
+        "precision arguments"))
+    mean_key = BRM._native_ppl_ref_name(arguments[1])
+    precision_key = BRM._native_ppl_ref_name(arguments[2])
+    mean_key === nothing && throw(CapabilityError(
+        :likelihood_mean,
+        "NegativeBinomial2 mean must name one `log(mean) ~ ...` predictor"))
+    precision_key === nothing && throw(CapabilityError(
+        :likelihood_precision,
+        "NegativeBinomial2 precision must name one `log(phi) ~ ...` predictor"))
+    mean_key == precision_key && throw(CapabilityError(
+        :graph_identity,
+        "NegativeBinomial2 mean and precision predictors must be distinct"))
+
+    log_mean = Symbol(:log_, mean_key)
+    log_precision = Symbol(:log_, precision_key)
+    mean_spec = _lower_brmi_linked_affine(brmi, mean_key, log, log_mean)
+    precision_spec = _lower_brmi_linked_affine(
+        brmi, precision_key, log, log_precision)
+    predictor_names = Symbol[]
+    predictor_columns = Any[]
+    for spec in (mean_spec, precision_spec)
+        for (name, column) in zip(spec.raw_names, spec.raw_columns)
+            if name ∉ predictor_names
+                push!(predictor_names, name)
+                push!(predictor_columns, column)
+            end
+        end
+    end
+    expected_values = Set((
+        response, mean_key, precision_key, predictor_names...))
+    extras = setdiff(Set(keys(brmi.operations)), expected_values)
+    isempty(extras) || throw(CapabilityError(
+        :additional_operations,
+        "unsupported NegativeBinomial2 formula operations: " *
+        join(sort!(collect(extras)), ", ")))
+
+    mean_name = Symbol(:exp_, log_mean)
+    precision_name = Symbol(:exp_, log_precision)
+    node_names = (
+        mean_spec.node_names..., precision_spec.node_names...,
+        mean_name, precision_name)
+    length(unique(node_names)) == length(node_names) || throw(CapabilityError(
+        :graph_identity,
+        "NegativeBinomial2 predictor nodes have colliding identities"))
+    node_declarations = (
+        mean_spec.node_declarations..., precision_spec.node_declarations...,
+        exp_link(log_mean), exp_link(log_precision))
+    input_names = Tuple(predictor_names)
+    declaration = model(
+        inputs=_declaration_namedtuple(
+            input_names, Tuple(input() for _ in input_names)),
+        parameters=_declaration_namedtuple(
+            (mean_spec.coefficient_name, precision_spec.coefficient_name),
+            (mean_spec.parameter_declaration,
+             precision_spec.parameter_declaration)),
+        nodes=_declaration_namedtuple(node_names, node_declarations),
+        observations=NamedTuple{(response,)}((broadcasted(
+            negative_binomial2(
+                response, mean_name, precision_name)),)))
+    bindings = _declaration_namedtuple(
+        input_names,
+        Tuple(parent(parent(column)) for column in predictor_columns))
+    conditions = NamedTuple{(response,)}((parent(parent(response_lhs)),))
+    (; declaration, bindings, conditions)
+end
+
+function _lower_brmi_beta_binomial2(
+        brmi::BRM.BRMI, response::Symbol, response_lhs, likelihood)
+    isempty(BRM.getkwargs(likelihood)) || throw(CapabilityError(
+        :likelihood_keywords,
+        "BetaBinomial2 likelihood for `$response` has keywords"))
+    arguments = BRM.getargs(likelihood)
+    length(arguments) == 3 || throw(CapabilityError(
+        :likelihood,
+        "BetaBinomial2 likelihood for `$response` needs trials, mean, and " *
+        "precision arguments"))
+    trials_argument = arguments[1]
+    trials_key = trials_argument isa BRM.NamedColumn &&
+                 parent(trials_argument) isa BRM.DataColumn ?
+        BRM.name(trials_argument) : BRM._native_ppl_ref_name(trials_argument)
+    mean_key = BRM._native_ppl_ref_name(arguments[2])
+    precision_key = BRM._native_ppl_ref_name(arguments[3])
+    trials_key === nothing && throw(CapabilityError(
+        :likelihood_trials,
+        "BetaBinomial2 trials must name one data input"))
+    mean_key === nothing && throw(CapabilityError(
+        :likelihood_mean,
+        "BetaBinomial2 mean must name one `logit(mean) ~ ...` predictor"))
+    precision_key === nothing && throw(CapabilityError(
+        :likelihood_precision,
+        "BetaBinomial2 precision must name one `log(phi) ~ ...` predictor"))
+    length(unique((trials_key, mean_key, precision_key))) == 3 || throw(
+        CapabilityError(
+            :graph_identity,
+            "BetaBinomial2 trials, mean, and precision must be distinct"))
+
+    logit_mean = Symbol(:logit_, mean_key)
+    log_precision = Symbol(:log_, precision_key)
+    mean_spec = _lower_brmi_linked_affine(
+        brmi, mean_key, BRM.logit, logit_mean)
+    precision_spec = _lower_brmi_linked_affine(
+        brmi, precision_key, log, log_precision)
+    predictor_names = Symbol[]
+    predictor_columns = Any[]
+    for spec in (mean_spec, precision_spec)
+        for (name, column) in zip(spec.raw_names, spec.raw_columns)
+            if name ∉ predictor_names
+                push!(predictor_names, name)
+                push!(predictor_columns, column)
+            end
+        end
+    end
+    trials_key in predictor_names && throw(CapabilityError(
+        :graph_identity,
+        "BetaBinomial2 trials input `$trials_key` also appears as a predictor"))
+    expected_values = Set((
+        response, trials_key, mean_key, precision_key, predictor_names...))
+    extras = setdiff(Set(keys(brmi.operations)), expected_values)
+    isempty(extras) || throw(CapabilityError(
+        :additional_operations,
+        "unsupported BetaBinomial2 formula operations: " *
+        join(sort!(collect(extras)), ", ")))
+
+    probability_name = Symbol(:logistic_, logit_mean)
+    precision_name = Symbol(:exp_, log_precision)
+    node_names = (
+        mean_spec.node_names..., precision_spec.node_names...,
+        probability_name, precision_name)
+    length(unique(node_names)) == length(node_names) || throw(CapabilityError(
+        :graph_identity,
+        "BetaBinomial2 predictor nodes have colliding identities"))
+    node_declarations = (
+        mean_spec.node_declarations..., precision_spec.node_declarations...,
+        logistic_link(logit_mean), exp_link(log_precision))
+    input_names = (predictor_names..., trials_key)
+    trials_column = getproperty(brmi.operations, trials_key)
+    declaration = model(
+        inputs=_declaration_namedtuple(
+            input_names, Tuple(input() for _ in input_names)),
+        parameters=_declaration_namedtuple(
+            (mean_spec.coefficient_name, precision_spec.coefficient_name),
+            (mean_spec.parameter_declaration,
+             precision_spec.parameter_declaration)),
+        nodes=_declaration_namedtuple(node_names, node_declarations),
+        observations=NamedTuple{(response,)}((broadcasted(
+            beta_binomial2(
+                response, trials_key, probability_name, precision_name)),)))
+    bindings = _declaration_namedtuple(
+        input_names,
+        (Tuple(parent(parent(column)) for column in predictor_columns)...,
+         parent(parent(trials_column))))
+    conditions = NamedTuple{(response,)}((parent(parent(response_lhs)),))
+    (; declaration, bindings, conditions)
+end
+
+function _lower_brmi_binomial_logit(
+        brmi::BRM.BRMI, response::Symbol, response_lhs, likelihood)
+    isempty(BRM.getkwargs(likelihood)) || throw(CapabilityError(
+        :likelihood_keywords,
+        "BinomialLogit likelihood for `$response` has keywords"))
+    arguments = BRM.getargs(likelihood)
+    length(arguments) == 2 || throw(CapabilityError(
+        :likelihood,
+        "BinomialLogit likelihood for `$response` needs trials and logit " *
+        "arguments"))
+    trials_argument = arguments[1]
+    trials_key = trials_argument isa BRM.NamedColumn &&
+                 parent(trials_argument) isa BRM.DataColumn ?
+        BRM.name(trials_argument) : BRM._native_ppl_ref_name(trials_argument)
+    logit_key = BRM._native_ppl_ref_name(arguments[2])
+    trials_key === nothing && throw(CapabilityError(
+        :likelihood_trials,
+        "BinomialLogit trials must name one data input"))
+    logit_key === nothing && throw(CapabilityError(
+        :likelihood_logit,
+        "BinomialLogit logit must name one affine predictor"))
+    trials_key == logit_key && throw(CapabilityError(
+        :graph_identity,
+        "BinomialLogit trials and logit predictor must be distinct"))
+
+    logit_spec = _lower_brmi_linked_affine(
+        brmi, logit_key, nothing, logit_key)
+    predictor_names = collect(logit_spec.raw_names)
+    trials_key in predictor_names && throw(CapabilityError(
+        :graph_identity,
+        "BinomialLogit trials input `$trials_key` also appears as a predictor"))
+    expected_values = Set((
+        response, trials_key, logit_key, predictor_names...))
+    extras = setdiff(Set(keys(brmi.operations)), expected_values)
+    isempty(extras) || throw(CapabilityError(
+        :additional_operations,
+        "unsupported BinomialLogit formula operations: " *
+        join(sort!(collect(extras)), ", ")))
+
+    input_names = (Tuple(predictor_names)..., trials_key)
+    trials_column = getproperty(brmi.operations, trials_key)
+    declaration = model(
+        inputs=_declaration_namedtuple(
+            input_names, Tuple(input() for _ in input_names)),
+        parameters=NamedTuple{(logit_spec.coefficient_name,)}(
+            (logit_spec.parameter_declaration,)),
+        nodes=_declaration_namedtuple(
+            logit_spec.node_names, logit_spec.node_declarations),
+        observations=NamedTuple{(response,)}((broadcasted(
+            binomial_logit(response, trials_key, logit_key)),)))
+    bindings = _declaration_namedtuple(
+        input_names,
+        (Tuple(parent(parent(column)) for column in logit_spec.raw_columns)...,
+         parent(parent(trials_column))))
+    conditions = NamedTuple{(response,)}((parent(parent(response_lhs)),))
+    (; declaration, bindings, conditions)
+end
+
+function _lower_brmi_categorical_logit(
+        brmi::BRM.BRMI, response::Symbol, response_lhs, likelihood)
+    isempty(BRM.getkwargs(likelihood)) || throw(CapabilityError(
+        :likelihood_keywords,
+        "CategoricalLogit likelihood for `$response` has keywords"))
+    arguments = BRM.getargs(likelihood)
+    isempty(arguments) && throw(CapabilityError(
+        :likelihood,
+        "CategoricalLogit likelihood for `$response` needs at least one " *
+        "non-reference predictor"))
+    logit_keys = Tuple(BRM._native_ppl_ref_name(argument)
+                       for argument in arguments)
+    any(isnothing, logit_keys) && throw(CapabilityError(
+        :likelihood_logits,
+        "CategoricalLogit arguments must name affine predictors"))
+    length(unique(logit_keys)) == length(logit_keys) || throw(CapabilityError(
+        :graph_identity,
+        "CategoricalLogit predictors must be distinct"))
+
+    specs = Tuple(_lower_brmi_linked_affine(
+        brmi, key, nothing, key) for key in logit_keys)
+    predictor_names = Symbol[]
+    predictor_columns = Any[]
+    for spec in specs
+        for (name, column) in zip(spec.raw_names, spec.raw_columns)
+            if name ∉ predictor_names
+                push!(predictor_names, name)
+                push!(predictor_columns, column)
+            end
+        end
+    end
+    expected_values = Set((response, logit_keys..., predictor_names...))
+    extras = setdiff(Set(keys(brmi.operations)), expected_values)
+    isempty(extras) || throw(CapabilityError(
+        :additional_operations,
+        "unsupported CategoricalLogit formula operations: " *
+        join(sort!(collect(extras)), ", ")))
+
+    node_names = Tuple(name for spec in specs for name in spec.node_names)
+    length(unique(node_names)) == length(node_names) || throw(CapabilityError(
+        :graph_identity,
+        "CategoricalLogit predictor nodes have colliding identities"))
+    node_declarations = Tuple(
+        node for spec in specs for node in spec.node_declarations)
+    parameter_names = Tuple(spec.coefficient_name for spec in specs)
+    parameter_declarations = Tuple(spec.parameter_declaration for spec in specs)
+    input_names = Tuple(predictor_names)
+    declaration = model(
+        inputs=_declaration_namedtuple(
+            input_names, Tuple(input() for _ in input_names)),
+        parameters=_declaration_namedtuple(
+            parameter_names, parameter_declarations),
+        nodes=_declaration_namedtuple(node_names, node_declarations),
+        observations=NamedTuple{(response,)}((broadcasted(
+            categorical_logit(response, logit_keys...)),)))
+    bindings = _declaration_namedtuple(
+        input_names,
+        Tuple(parent(parent(column)) for column in predictor_columns))
+    conditions = NamedTuple{(response,)}((parent(parent(response_lhs)),))
+    (; declaration, bindings, conditions)
+end
+
+function _lower_brmi_zero_inflated_poisson(
+        brmi::BRM.BRMI, response::Symbol, response_lhs, likelihood)
+    isempty(BRM.getkwargs(likelihood)) || throw(CapabilityError(
+        :likelihood_keywords,
+        "ZeroInflatedPoisson likelihood for `$response` has keywords"))
+    arguments = BRM.getargs(likelihood)
+    length(arguments) == 2 || throw(CapabilityError(
+        :likelihood,
+        "ZeroInflatedPoisson likelihood for `$response` needs rate and " *
+        "zero-inflation arguments"))
+    rate_key = BRM._native_ppl_ref_name(arguments[1])
+    probability_key = BRM._native_ppl_ref_name(arguments[2])
+    rate_key === nothing && throw(CapabilityError(
+        :likelihood_rate,
+        "ZeroInflatedPoisson rate must name one `log(rate) ~ ...` predictor"))
+    probability_key === nothing && throw(CapabilityError(
+        :likelihood_probability,
+        "ZeroInflatedPoisson probability must name one `logit(p) ~ ...` predictor"))
+    rate_key == probability_key && throw(CapabilityError(
+        :graph_identity,
+        "zero-inflated rate and probability predictors must be distinct"))
+
+    log_rate = Symbol(:log_, rate_key)
+    probability_logit = Symbol(:logit_, probability_key)
+    rate = _lower_brmi_linked_affine(brmi, rate_key, log, log_rate)
+    probability = _lower_brmi_linked_affine(
+        brmi, probability_key, BRM.logit, probability_logit)
+    predictor_names = Symbol[]
+    predictor_columns = Any[]
+    for spec in (rate, probability)
+        for (name, column) in zip(spec.raw_names, spec.raw_columns)
+            if name ∉ predictor_names
+                push!(predictor_names, name)
+                push!(predictor_columns, column)
+            end
+        end
+    end
+    expected_values = Set((
+        response, rate_key, probability_key, predictor_names...))
+    extras = setdiff(Set(keys(brmi.operations)), expected_values)
+    isempty(extras) || throw(CapabilityError(
+        :additional_operations,
+        "unsupported zero-inflated formula operations: " *
+        join(sort!(collect(extras)), ", ")))
+
+    rate_name = Symbol(:exp_, log_rate)
+    probability_name = Symbol(:logistic_, probability_logit)
+    node_names = (
+        rate.node_names..., probability.node_names...,
+        rate_name, probability_name)
+    length(unique(node_names)) == length(node_names) || throw(CapabilityError(
+        :graph_identity,
+        "zero-inflated predictor nodes have colliding identities"))
+    node_declarations = (
+        rate.node_declarations..., probability.node_declarations...,
+        exp_link(log_rate), logistic_link(probability_logit))
+    input_names = Tuple(predictor_names)
+    declaration = model(
+        inputs=_declaration_namedtuple(
+            input_names, Tuple(input() for _ in input_names)),
+        parameters=_declaration_namedtuple(
+            (rate.coefficient_name, probability.coefficient_name),
+            (rate.parameter_declaration, probability.parameter_declaration)),
+        nodes=_declaration_namedtuple(node_names, node_declarations),
+        observations=NamedTuple{(response,)}((broadcasted(
+            zero_inflated_poisson(
+                response, rate_name, probability_name)),)))
+    bindings = _declaration_namedtuple(
+        input_names,
         Tuple(parent(parent(column)) for column in predictor_columns))
     conditions = NamedTuple{(response,)}((parent(parent(response_lhs)),))
     (; declaration, bindings, conditions)
@@ -6165,11 +8148,773 @@ function _lower_brmi_response_evidence(response::Symbol, likelihood)
     (; kind, lower, upper), distribution
 end
 
+function _lower_brmi_multiple_outcomes(brmi::BRM.BRMI, outcomes)
+    response_names = Tuple(outcome.response for outcome in outcomes)
+    length(unique(response_names)) == length(response_names) || throw(
+        CapabilityError(
+            :outcomes,
+            "multiple-outcome BRM responses must have distinct identities"))
+    specs = map(outcomes) do outcome
+        response = outcome.response
+        response_lhs, likelihood = BRM._native_ppl_sampling_rhs(
+            brmi, response)
+        response_lhs isa BRM.NamedColumn &&
+            parent(response_lhs) isa BRM.DataColumn || throw(
+                CapabilityError(
+                    :response_decorator,
+                    "multiple-outcome response `$response` must be a bare " *
+                    "observed data column"))
+        likelihood isa BRM.ExprColumn || throw(CapabilityError(
+            :likelihood,
+            "multiple-outcome response `$response` must use a distribution call"))
+        weight_spec, likelihood = _lower_brmi_observation_weight(
+            response, likelihood)
+        evidence_spec, likelihood = _lower_brmi_response_evidence(
+            response, likelihood)
+        weight_spec === nothing || evidence_spec === nothing || throw(
+            CapabilityError(
+                :response_evidence,
+                "weighted response evidence for `$response` is not yet " *
+                "lowered by the native PPL"))
+        family = BRM.getf(likelihood)
+        family === BRM.Normal || family === BRM.BernoulliLogit ||
+            family === BRM.Poisson || throw(
+            CapabilityError(
+                :likelihood,
+                "the mixed multiple-outcome native-PPL slice requires " *
+                "Normal(location, scale), BernoulliLogit(logit), or " *
+                "Poisson(exp(log_rate)) responses; " *
+                "`$response` uses `$family`"))
+        isempty(BRM.getkwargs(likelihood)) || throw(CapabilityError(
+            :likelihood_keywords,
+            "$family likelihood for `$response` cannot have keywords"))
+        arguments = BRM.getargs(likelihood)
+        expected_arguments = family === BRM.Normal ? 2 : 1
+        length(arguments) == expected_arguments || throw(CapabilityError(
+            :likelihood,
+            "$family response `$response` needs $expected_arguments argument(s)"))
+        rate = nothing
+        location = if family === BRM.Poisson
+            rate_expression = only(arguments)
+            rate_expression isa BRM.ExprColumn &&
+                BRM.getf(rate_expression) === exp || throw(CapabilityError(
+                    :likelihood_link,
+                    "Poisson response `$response` must use " *
+                    "`Poisson(exp(log_rate))`"))
+            isempty(BRM.getkwargs(rate_expression)) || throw(CapabilityError(
+                :likelihood_link,
+                "Poisson `exp` link for `$response` cannot have keywords"))
+            rate_arguments = BRM.getargs(rate_expression)
+            length(rate_arguments) == 1 || throw(CapabilityError(
+                :likelihood_link,
+                "Poisson `exp` link for `$response` needs one named predictor"))
+            log_rate = BRM._native_ppl_ref_name(only(rate_arguments))
+            log_rate === nothing && throw(CapabilityError(
+                :likelihood_location,
+                "Poisson `exp` link for `$response` must consume one " *
+                "named linear predictor"))
+            rate = Symbol(:exp_, log_rate)
+            log_rate
+        else
+            BRM._native_ppl_ref_name(arguments[1])
+        end
+        location === nothing && throw(CapabilityError(
+            :likelihood_location,
+            "$family response `$response` predictor must be one named " *
+            "linear predictor"))
+        scale = family === BRM.Normal ?
+            BRM._native_ppl_ref_name(arguments[2]) : nothing
+        family === BRM.Normal && scale === nothing && throw(CapabilityError(
+            :likelihood_scale,
+            "Normal response `$response` scale must be one named scalar " *
+            "parameter"))
+        identities = family === BRM.Normal ?
+            (response, location, scale) :
+            family === BRM.Poisson ? (response, location, rate) :
+            (response, location)
+        length(unique(identities)) == length(identities) ||
+            throw(CapabilityError(
+                :likelihood_parameters,
+                "$family response and parameter identities for `$response` " *
+                "must be distinct"))
+        affine = BRM._native_ppl_affine_components(brmi, location)
+        affine.intercept || throw(CapabilityError(
+            :predictor_terms,
+            "multiple-outcome predictor `$location` must include an intercept"))
+        isempty(affine.offsets) && isempty(affine.data_offsets) || throw(
+            CapabilityError(
+                :predictor_terms,
+                "multiple-outcome predictor `$location` currently accepts " *
+                "population terms and grouped intercepts, but not offsets"))
+        all(term -> term.transform === :identity, affine.predictors) || throw(
+            CapabilityError(
+                :predictor_terms,
+                "multiple-outcome predictor `$location` currently accepts " *
+                "only raw, untransformed predictors"))
+        predictor_columns = Tuple(term.column for term in affine.predictors)
+        predictor_names = Tuple(BRM.name(column)
+                                for column in predictor_columns)
+        length(unique(predictor_names)) == length(predictor_names) || throw(
+            CapabilityError(
+                :predictor_terms,
+                "multiple-outcome predictor `$location` repeats a raw input"))
+        group_specs = map(affine.groups) do varying
+            group_name = BRM.name(varying.group)
+            group_predictor_names = Tuple(
+                predictor === nothing ? nothing : begin
+                    predictor.transform === :identity || throw(
+                        CapabilityError(
+                            :group_term,
+                            "multiple-outcome grouped predictors currently " *
+                            "require raw, untransformed inputs"))
+                    BRM.name(predictor.column)
+                end
+                for predictor in varying.predictors)
+            coefficient_keys = Tuple(
+                name === nothing ? :Intercept : name
+                for name in group_predictor_names)
+            correlated = length(coefficient_keys) > 1
+            prior = _brmi_group_sd_prior(brmi, varying.id)
+            # Validate the correlation prior only after cross-outcome `|ID|`
+            # buckets have been assembled: a formula-local K can be a typed
+            # projection of a larger shared block.
+            correlation_prior = nothing
+            scale_name = Symbol(:tau_, varying.id, :_, group_name)
+            correlation_name = Symbol(:L_, varying.id, :_, group_name)
+            site_name = Symbol(:b_, varying.id, :_, group_name)
+            gather_name = correlated ? Symbol(
+                site_name, :_by_, group_name, :_for_, location) :
+                Symbol(:r_, location, :_, varying.id, :_, group_name)
+            predictor_value = length(group_predictor_names) == 1 ?
+                only(group_predictor_names) : nothing
+            product_name = !correlated && predictor_value !== nothing ?
+                Symbol(gather_name, :_times_, predictor_value) : nothing
+            (; id=varying.id, group_name, column=varying.group, prior,
+               predictor_terms=varying.predictors,
+               predictor_names=group_predictor_names, coefficient_keys,
+               coefficient_indices=ntuple(identity, length(coefficient_keys)),
+               coefficient_count=length(coefficient_keys),
+               correlated, correlation_prior,
+               scale_name, correlation_name, site_name, gather_name,
+               predictor_value, product_name,
+               offset_name=product_name === nothing ?
+                   gather_name : product_name)
+        end
+        group_names = Tuple(spec.group_name for spec in group_specs)
+        length(unique(group_names)) == length(group_names) || throw(
+            CapabilityError(
+                :group_term,
+                "multiple-outcome predictor `$location` repeats a grouping " *
+                "input"))
+        prior_scale = family === BRM.Normal ?
+            BRM._native_ppl_exponential_prior(brmi, scale) : nothing
+        coefficient = Symbol(:beta_, location)
+        (; family, response, location, rate, scale, coefficient,
+           predictor_columns, predictor_names, prior_scale,
+           group_specs, weight_spec, evidence_spec,
+           response_values=parent(parent(response_lhs)))
+    end
+
+    # A shared `(terms | id | group)` identifier denotes one latent block even
+    # when its coefficients feed different outcome predictors.  Keep the
+    # formula-local predictor tuples on each consumer node, but give every
+    # consumer an explicit projection into one common coefficient axis.  This
+    # is a typed graph connection; neither lowering nor execution relies on
+    # predictor/site names happening to match.
+    group_buckets = Dict{Tuple{Symbol,Symbol},Vector{Tuple{Int,Int}}}()
+    for (spec_index, spec) in pairs(specs)
+        for (group_index, group_spec) in pairs(spec.group_specs)
+            key = (group_spec.id, group_spec.group_name)
+            push!(get!(group_buckets, key, Tuple{Int,Int}[]),
+                  (spec_index, group_index))
+        end
+    end
+    shared_group_overrides = Dict{Tuple{Int,Int},Any}()
+    for entries in values(group_buckets)
+        first_spec_index, first_group_index = first(entries)
+        first_group = specs[first_spec_index].group_specs[first_group_index]
+        if length(entries) == 1
+            first_group.correlated || continue
+            shared_group_overrides[first(entries)] = (;
+                correlation_prior=_brmi_group_correlation_prior(
+                    brmi, first_group.id,
+                    length(first_group.coefficient_keys)))
+            continue
+        end
+        coefficient_keys_buffer = Symbol[]
+        entry_indices = Dict{Tuple{Int,Int},Tuple}()
+        for entry in entries
+            spec_index, group_index = entry
+            spec = specs[spec_index]
+            group_spec = spec.group_specs[group_index]
+            group_spec.column == first_group.column || throw(CapabilityError(
+                :group_term,
+                "shared grouped id `$(group_spec.id)` must use one grouping " *
+                "column across outcome predictors"))
+            first_index = length(coefficient_keys_buffer) + 1
+            append!(coefficient_keys_buffer, map(
+                group_spec.coefficient_keys) do key
+                    key === :Intercept ? spec.location :
+                        Symbol(spec.location, :_, key)
+                end)
+            last_index = length(coefficient_keys_buffer)
+            entry_indices[entry] = Tuple(first_index:last_index)
+        end
+        coefficient_keys = Tuple(coefficient_keys_buffer)
+        length(unique(coefficient_keys)) == length(coefficient_keys) || throw(
+            CapabilityError(
+                :group_term,
+                "shared grouped id `$(first_group.id)` produces duplicate " *
+                "cross-outcome coefficient identities"))
+        coefficient_count = length(coefficient_keys)
+        correlation_prior = _brmi_group_correlation_prior(
+            brmi, first_group.id, coefficient_count)
+        for entry in entries
+            spec_index, group_index = entry
+            spec = specs[spec_index]
+            group_spec = spec.group_specs[group_index]
+            gather_name = Symbol(
+                group_spec.site_name, :_by_, group_spec.group_name,
+                :_for_, spec.location)
+            shared_group_overrides[entry] = (;
+                coefficient_keys,
+                coefficient_indices=entry_indices[entry],
+                coefficient_count,
+                correlated=true,
+                correlation_prior,
+                gather_name,
+                predictor_value=nothing,
+                product_name=nothing,
+                offset_name=gather_name)
+        end
+    end
+    specs = ntuple(length(specs)) do spec_index
+        spec = specs[spec_index]
+        group_specs = ntuple(length(spec.group_specs)) do group_index
+            group_spec = spec.group_specs[group_index]
+            override = get(shared_group_overrides,
+                           (spec_index, group_index), nothing)
+            override === nothing ? group_spec : merge(group_spec, override)
+        end
+        merge(spec, (; group_specs))
+    end
+
+    coefficient_names_buffer = Symbol[]
+    coefficient_specs_buffer = Any[]
+    other_parameter_names_buffer = Symbol[]
+    other_parameter_declarations_buffer = Any[]
+    node_names_buffer = Symbol[]
+    node_declarations_buffer = Any[]
+    function add_other_parameter!(name, declaration)
+        index = findfirst(==(name), other_parameter_names_buffer)
+        if index === nothing
+            push!(other_parameter_names_buffer, name)
+            push!(other_parameter_declarations_buffer, declaration)
+        elseif other_parameter_declarations_buffer[index] != declaration
+            throw(CapabilityError(
+                :graph_identity,
+                "multiple-outcome parameter `$name` has conflicting " *
+                "declarations"))
+        end
+        nothing
+    end
+    for spec in specs
+        if spec.coefficient ∉ coefficient_names_buffer
+            push!(coefficient_names_buffer, spec.coefficient)
+            push!(coefficient_specs_buffer, spec)
+        end
+        for group_spec in spec.group_specs
+            add_other_parameter!(group_spec.scale_name, parameter(
+                PositiveSupport(), group_spec.correlated ?
+                    group_spec.coefficient_keys : (group_spec.scale_name,);
+                transform=Exp(), prior=Exponential(group_spec.prior.scale)))
+            if group_spec.correlated
+                add_other_parameter!(
+                    group_spec.correlation_name,
+                    cholesky_correlation(
+                        group_spec.coefficient_keys,
+                        group_spec.correlation_prior.eta))
+            end
+            add_other_parameter!(group_spec.site_name,
+                group_spec.correlated ? grouped_standard_normal(
+                    group_spec.group_name, group_spec.coefficient_keys) :
+                    grouped_normal(
+                        group_spec.group_name, 0.0, group_spec.scale_name))
+            push!(node_names_buffer, group_spec.gather_name)
+            push!(node_declarations_buffer,
+                group_spec.correlated ? grouped_affine(
+                    group_spec.site_name, group_spec.scale_name,
+                    group_spec.correlation_name, group_spec.group_name,
+                    group_spec.predictor_names;
+                    coefficient_indices=group_spec.coefficient_indices,
+                    coefficient_count=group_spec.coefficient_count) : group_gather(
+                    group_spec.site_name, group_spec.group_name))
+            if group_spec.product_name !== nothing
+                push!(node_names_buffer, group_spec.product_name)
+                push!(node_declarations_buffer, row_product(
+                    group_spec.gather_name, group_spec.predictor_value))
+            end
+        end
+        if spec.scale !== nothing
+            add_other_parameter!(spec.scale, parameter(
+                PositiveSupport(), (spec.scale,);
+                transform=Exp(), prior=Exponential(spec.prior_scale)))
+        end
+        if spec.location ∉ node_names_buffer
+            push!(node_names_buffer, spec.location)
+            push!(node_declarations_buffer, affine(
+                spec.predictor_names, spec.coefficient;
+                offsets=Tuple(group_spec.offset_name
+                              for group_spec in spec.group_specs),
+                intercept=true))
+        end
+        if spec.rate !== nothing && spec.rate ∉ node_names_buffer
+            push!(node_names_buffer, spec.rate)
+            push!(node_declarations_buffer, exp_link(spec.location))
+        end
+    end
+    coefficient_names = Tuple(coefficient_names_buffer)
+    coefficient_specs = Tuple(coefficient_specs_buffer)
+    other_parameter_names = Tuple(other_parameter_names_buffer)
+    other_parameter_declarations =
+        Tuple(other_parameter_declarations_buffer)
+    node_names = Tuple(node_names_buffer)
+    all_graph_names = (response_names..., coefficient_names...,
+                       other_parameter_names..., node_names...)
+    length(unique(all_graph_names)) == length(all_graph_names) || throw(
+        CapabilityError(
+            :graph_identity,
+            "multiple-outcome responses, predictors, coefficients, and " *
+            "scales must have distinct graph identities"))
+
+    input_names_buffer = Symbol[]
+    input_columns_buffer = Any[]
+    for spec in specs
+        for (name, column) in zip(
+                spec.predictor_names, spec.predictor_columns)
+            name in input_names_buffer && continue
+            push!(input_names_buffer, name)
+            push!(input_columns_buffer, column)
+        end
+        for group_spec in spec.group_specs
+            for (name, predictor) in zip(
+                    group_spec.predictor_names,
+                    group_spec.predictor_terms)
+                name === nothing && continue
+                name in input_names_buffer && continue
+                push!(input_names_buffer, name)
+                push!(input_columns_buffer, predictor.column)
+            end
+            group_spec.group_name in input_names_buffer && continue
+            push!(input_names_buffer, group_spec.group_name)
+            push!(input_columns_buffer, group_spec.column)
+        end
+        if spec.weight_spec !== nothing &&
+           spec.weight_spec.source ∉ input_names_buffer
+            push!(input_names_buffer, spec.weight_spec.source)
+            push!(input_columns_buffer, spec.weight_spec.column)
+        end
+        if spec.evidence_spec !== nothing
+            for bound in (spec.evidence_spec.lower, spec.evidence_spec.upper)
+                bound.source === nothing && continue
+                bound.source in input_names_buffer && continue
+                push!(input_names_buffer, bound.source)
+                push!(input_columns_buffer, bound.column)
+            end
+        end
+    end
+    input_names = Tuple(input_names_buffer)
+    input_declarations = _declaration_namedtuple(
+        input_names, map(_ -> input(), input_names))
+    coefficient_declarations = Tuple(map(coefficient_specs) do spec
+        parameter(
+            RealSupport(), (:Intercept, spec.predictor_names...);
+            transform=Identity(), prior=StandardNormal())
+    end)
+    parameter_declarations = _declaration_namedtuple(
+        (coefficient_names..., other_parameter_names...),
+        (coefficient_declarations..., other_parameter_declarations...))
+    node_declarations = _declaration_namedtuple(
+        node_names, Tuple(node_declarations_buffer))
+    observation_values = map(specs) do spec
+        observation = spec.family === BRM.Normal ? normal(
+            spec.response, spec.location, spec.scale) :
+            spec.family === BRM.BernoulliLogit ? bernoulli_logit(
+                spec.response, spec.location) : poisson(
+                spec.response, spec.rate)
+        if spec.weight_spec !== nothing
+            observation = weighted_observation(
+                observation,
+                observation_weight(
+                    spec.weight_spec.kind, spec.weight_spec.source))
+        end
+        if spec.evidence_spec !== nothing
+            evidence = if spec.evidence_spec.kind === :truncated
+                truncated_evidence(;
+                    lower=spec.evidence_spec.lower.value,
+                    upper=spec.evidence_spec.upper.value)
+            elseif spec.evidence_spec.kind === :censored
+                censored_evidence(;
+                    lower=spec.evidence_spec.lower.value,
+                    upper=spec.evidence_spec.upper.value)
+            else
+                interval_evidence(spec.evidence_spec.upper.value)
+            end
+            observation = evidence_observation(observation, evidence)
+        end
+        broadcasted(observation)
+    end
+    observation_declarations = _declaration_namedtuple(
+        response_names, Tuple(observation_values))
+    site_order_buffer = Symbol[]
+    for spec in specs
+        for group_spec in spec.group_specs
+            group_spec.scale_name in site_order_buffer ||
+                push!(site_order_buffer, group_spec.scale_name)
+            if group_spec.correlated
+                group_spec.correlation_name in site_order_buffer ||
+                    push!(site_order_buffer, group_spec.correlation_name)
+            end
+            group_spec.site_name in site_order_buffer ||
+                push!(site_order_buffer, group_spec.site_name)
+        end
+        spec.coefficient in site_order_buffer ||
+            push!(site_order_buffer, spec.coefficient)
+        spec.scale === nothing || spec.scale in site_order_buffer ||
+            push!(site_order_buffer, spec.scale)
+        push!(site_order_buffer, spec.response)
+    end
+    site_order = Tuple(site_order_buffer)
+    declaration = model(
+        inputs=input_declarations,
+        parameters=parameter_declarations,
+        nodes=node_declarations,
+        observations=observation_declarations,
+        site_order=site_order)
+
+    expected_operations = Set(input_names)
+    for spec in specs
+        union!(expected_operations, (spec.location, spec.response))
+        spec.scale === nothing || push!(expected_operations, spec.scale)
+        for group_spec in spec.group_specs
+            push!(expected_operations, group_spec.prior.operation)
+            group_spec.correlation_prior === nothing ||
+                push!(expected_operations,
+                      group_spec.correlation_prior.operation)
+        end
+    end
+    extras = setdiff(Set(keys(brmi.operations)), expected_operations)
+    isempty(extras) || throw(CapabilityError(
+        :additional_operations,
+        "unsupported multiple-outcome formula operations: " *
+        join(sort!(collect(extras)), ", ")))
+    bindings = _declaration_namedtuple(
+        input_names,
+        Tuple(parent(parent(column)) for column in input_columns_buffer))
+    conditions = _declaration_namedtuple(
+        response_names, Tuple(spec.response_values for spec in specs))
+    (; declaration, bindings, conditions)
+end
+
+function _lower_brmi_mixed_distributional_outcomes(
+        brmi::BRM.BRMI, outcomes)
+    length(outcomes) == 2 || throw(CapabilityError(
+        :outcomes, "mixed distributional native-PPL slice expects two responses"))
+    response_names = Tuple(outcome.response for outcome in outcomes)
+    length(unique(response_names)) == 2 || throw(CapabilityError(
+        :outcomes, "mixed distributional responses must be distinct"))
+    specs = NamedTuple[]
+    for outcome in outcomes
+        response = outcome.response
+        response_lhs, likelihood = BRM._native_ppl_sampling_rhs(brmi, response)
+        response_lhs isa BRM.NamedColumn && parent(response_lhs) isa BRM.DataColumn ||
+            throw(CapabilityError(:response_decorator,
+                "mixed distributional response `$response` must be a bare data column"))
+        likelihood isa BRM.ExprColumn || throw(CapabilityError(
+            :likelihood, "mixed distributional response `$response` needs a distribution"))
+        BRM.getf(likelihood) in (BRM.Normal, BRM.BernoulliLogit) ||
+            throw(CapabilityError(:likelihood,
+                "mixed distributional slice supports Normal and BernoulliLogit"))
+        isempty(BRM.getkwargs(likelihood)) || throw(CapabilityError(
+            :likelihood_keywords, "mixed distributional likelihoods cannot have keywords"))
+        args = BRM.getargs(likelihood)
+        family = BRM.getf(likelihood)
+        expected_arguments = family === BRM.Normal ? 2 : 1
+        length(args) == expected_arguments || throw(CapabilityError(
+            :likelihood,
+            "mixed distributional $family response `$response` needs " *
+            "$expected_arguments argument(s)"))
+        location_expression = first(args)
+        scale_expression = family === BRM.Normal ? last(args) : nothing
+        log_scale = nothing
+        if family === BRM.Normal
+            scale_expression isa BRM.ExprColumn && BRM.getf(scale_expression) === exp ||
+                throw(CapabilityError(:likelihood_link,
+                    "mixed distributional Normal scale must be exp(log_scale)"))
+            scale_args = BRM.getargs(scale_expression)
+            length(scale_args) == 1 || throw(CapabilityError(
+                :likelihood_link, "mixed distributional exp scale needs one predictor"))
+            log_scale = BRM._native_ppl_ref_name(only(scale_args))
+            log_scale === nothing && throw(CapabilityError(
+                :likelihood_scale, "mixed distributional exp scale needs a named predictor"))
+        end
+        location = BRM._native_ppl_ref_name(location_expression)
+        location === nothing && throw(CapabilityError(
+            :likelihood_location, "mixed distributional predictors must be named"))
+        push!(specs, (; response, response_lhs, family, location, log_scale,
+                      response_value=parent(parent(response_lhs))))
+    end
+    normal_specs = filter(spec -> spec.family === BRM.Normal, specs)
+    bernoulli_specs = filter(
+        spec -> spec.family === BRM.BernoulliLogit, specs)
+    length(normal_specs) == 1 && length(bernoulli_specs) == 1 || throw(
+        CapabilityError(
+            :likelihood,
+            "mixed distributional slice requires exactly one Normal and " *
+            "one BernoulliLogit response"))
+    normal_spec = only(normal_specs)
+    bernoulli_spec = only(bernoulli_specs)
+    predictor_specs = NamedTuple[]
+    for (predictor, consumer) in (
+            (normal_spec.location, normal_spec.response),
+            (normal_spec.log_scale, normal_spec.response),
+            (bernoulli_spec.location, bernoulli_spec.response))
+        components = BRM._native_ppl_affine_components(brmi, predictor)
+        components.intercept || throw(CapabilityError(
+            :predictor_terms, "mixed distributional predictor `$predictor` needs an intercept"))
+        isempty(components.offsets) && isempty(components.data_offsets) ||
+            throw(CapabilityError(:predictor_terms,
+                "mixed distributional predictors do not yet accept offsets"))
+        all(term -> term.transform === :identity, components.predictors) ||
+            throw(CapabilityError(:predictor_terms,
+                "mixed distributional predictors require raw predictors"))
+        raw_names = Tuple(BRM.name(term.column) for term in components.predictors)
+        length(unique(raw_names)) == length(raw_names) || throw(
+            CapabilityError(
+                :predictor_terms,
+                "mixed distributional predictor `$predictor` repeats a " *
+                "raw input"))
+        coefficient_name = Symbol(:beta_, predictor)
+        group_specs = map(components.groups) do varying
+            group_name = BRM.name(varying.group)
+            predictor_names = Tuple(term === nothing ? nothing :
+                BRM.name(term.column) for term in varying.predictors)
+            coefficient_keys = Tuple(name === nothing ? :Intercept : name
+                                     for name in predictor_names)
+            prior = _brmi_group_sd_prior(brmi, varying.id)
+            correlated = length(coefficient_keys) > 1
+            scale_name = Symbol(:tau_, varying.id, :_, group_name)
+            correlation_name = Symbol(:L_, varying.id, :_, group_name)
+            site_name = Symbol(:b_, varying.id, :_, group_name)
+            gather_name = Symbol(site_name, :_by_, group_name, :_for_, predictor)
+            (; id=varying.id, group_name, column=varying.group, prior,
+               predictor_terms=varying.predictors, predictor_names,
+               coefficient_keys, correlated, scale_name, correlation_name,
+               site_name, gather_name, predictor, consumer)
+        end
+        push!(predictor_specs, (; predictor, consumer, components,
+            raw_names, raw_columns=Tuple(term.column for term in components.predictors),
+            coefficient_name, coefficient_keys=(:Intercept, raw_names...),
+            group_specs))
+    end
+    predictor_identities = Tuple(spec.predictor for spec in predictor_specs)
+    length(unique(predictor_identities)) == length(predictor_identities) ||
+        throw(CapabilityError(
+            :group_term,
+            "mixed distributional responses require distinct location and " *
+            "log-scale predictors so each shared group coefficient has one " *
+            "typed consumer"))
+    all(length(spec.group_specs) == 1 for spec in predictor_specs) || throw(
+        CapabilityError(
+            :group_term,
+            "mixed distributional slice requires exactly one shared " *
+            "grouped intercept on each predictor"))
+    shared_group = only(first(predictor_specs).group_specs)
+    for spec in predictor_specs
+        group = only(spec.group_specs)
+        group.id == shared_group.id &&
+            group.group_name == shared_group.group_name &&
+            group.column == shared_group.column || throw(CapabilityError(
+                :group_term,
+                "mixed distributional predictors must share one `|ID|` " *
+                "and grouping column"))
+        group.coefficient_keys == (:Intercept,) || throw(CapabilityError(
+            :group_term,
+            "mixed distributional K=3 slice currently supports grouped " *
+            "intercepts; grouped slopes use the arbitrary-K path"))
+    end
+    group_buckets = Dict{Tuple{Symbol,Symbol},Vector{Int}}()
+    for (index, spec) in pairs(predictor_specs)
+        for group in spec.group_specs
+            push!(get!(group_buckets, (group.id, group.group_name), Int[]), index)
+        end
+    end
+    group_axis = Dict{Tuple{Int,Int},Any}()
+    for indices in values(group_buckets)
+        first_index = first(indices)
+        first_group = first(predictor_specs[first_index].group_specs)
+        keys_buffer = Symbol[]
+        ranges = Dict{Int,Tuple}()
+        for index in indices
+            spec = predictor_specs[index]
+            group = only(filter(g -> g.id == first_group.id &&
+                g.group_name == first_group.group_name, spec.group_specs))
+            start = length(keys_buffer) + 1
+            append!(keys_buffer, map(group.coefficient_keys) do key
+                key === :Intercept ? spec.predictor : Symbol(spec.predictor, :_, key)
+            end)
+            ranges[index] = Tuple(start:length(keys_buffer))
+            group.column == first_group.column || throw(CapabilityError(
+                :group_term, "shared mixed distributional groups need one column"))
+        end
+        axis = Tuple(keys_buffer)
+        corr = _brmi_group_correlation_prior(brmi, first_group.id, length(axis))
+        for index in indices
+            group_axis[(index, 1)] = (; coefficient_keys=axis,
+                coefficient_indices=ranges[index], coefficient_count=length(axis),
+                correlation_prior=corr, correlated=true)
+        end
+    end
+    input_names = Symbol[]
+    input_columns = Any[]
+    for spec in predictor_specs
+        for (name, column) in zip(spec.raw_names, spec.raw_columns)
+            name in input_names || (push!(input_names, name); push!(input_columns, column))
+        end
+    end
+    for spec in predictor_specs, group in spec.group_specs
+        group.group_name in input_names ||
+            (push!(input_names, group.group_name); push!(input_columns, group.column))
+    end
+    coefficient_names = Symbol[spec.coefficient_name for spec in predictor_specs]
+    coefficient_declarations = Any[parameter(
+        RealSupport(), spec.coefficient_keys;
+        transform=Identity(), prior=StandardNormal()) for spec in predictor_specs]
+    other_names = Symbol[]
+    other_declarations = Any[]
+    add_other!(name, declaration) = begin
+        index = findfirst(==(name), other_names)
+        index === nothing ? (push!(other_names, name), push!(other_declarations, declaration)) :
+            other_declarations[index] == declaration || throw(CapabilityError(
+                :graph_identity, "mixed distributional parameter `$name` conflicts"))
+    end
+    node_names = Symbol[]
+    node_declarations = Any[]
+    log_scale_spelling = String(normal_spec.log_scale)
+    scale_name = if startswith(log_scale_spelling, "log_")
+        suffix = log_scale_spelling[5:end]
+        isempty(suffix) && throw(CapabilityError(
+            :likelihood_scale,
+            "mixed distributional log-scale predictor `$(normal_spec.log_scale)` " *
+            "does not leave a valid derived scale identity after `log_`"))
+        Symbol(suffix)
+    else
+        Symbol(:exp_, normal_spec.log_scale)
+    end
+    for (index, spec) in pairs(predictor_specs)
+        if index == 3
+            push!(node_names, scale_name)
+            push!(node_declarations, exp_link(normal_spec.log_scale))
+        end
+        for group in spec.group_specs
+            override = get(group_axis, (index, 1), nothing)
+            keys = override === nothing ? group.coefficient_keys : override.coefficient_keys
+            indices = override === nothing ? ntuple(identity, length(keys)) : override.coefficient_indices
+            add_other!(group.scale_name, parameter(
+                PositiveSupport(), keys; transform=Exp(), prior=Exponential(group.prior.scale)))
+            add_other!(group.correlation_name, cholesky_correlation(
+                keys, (override === nothing ? _brmi_group_correlation_prior(
+                    brmi, group.id, length(keys)) : override.correlation_prior).eta))
+            add_other!(group.site_name, grouped_standard_normal(group.group_name, keys))
+            push!(node_names, group.gather_name)
+            push!(node_declarations, grouped_affine(
+                group.site_name, group.scale_name, group.correlation_name,
+                group.group_name, group.predictor_names;
+                coefficient_indices=indices, coefficient_count=length(keys)))
+        end
+        push!(node_names, spec.predictor)
+        push!(node_declarations, affine(
+            spec.raw_names, spec.coefficient_name;
+            offsets=Tuple(group.gather_name for group in spec.group_specs), intercept=true))
+    end
+    (scale_name in input_names ||
+     scale_name in coefficient_names ||
+     scale_name in other_names ||
+     scale_name in response_names ||
+     count(==(scale_name), node_names) != 1) && throw(CapabilityError(
+        :graph_identity,
+        "derived mixed distributional Normal scale node `$scale_name` " *
+        "collides with another input, parameter, node, or observation identity"))
+    params = _declaration_namedtuple(
+        (coefficient_names..., other_names...),
+        (coefficient_declarations..., other_declarations...))
+    nodes = _declaration_namedtuple(Tuple(node_names), Tuple(node_declarations))
+    observation_values = map(specs) do spec
+        spec.family === BRM.Normal ? broadcasted(normal(
+            spec.response, spec.location, scale_name)) :
+            broadcasted(bernoulli_logit(spec.response, spec.location))
+    end
+    observations = _declaration_namedtuple(
+        response_names, Tuple(observation_values))
+    group_scale = shared_group.scale_name
+    group_correlation = shared_group.correlation_name
+    group_site = shared_group.site_name
+    declaration = model(
+        inputs=_declaration_namedtuple(Tuple(input_names), Tuple(input() for _ in input_names)),
+        parameters=params, nodes=nodes, observations=observations,
+        site_order=(group_scale, group_correlation, group_site,
+                    Symbol(:beta_, normal_spec.location),
+                    Symbol(:beta_, normal_spec.log_scale),
+                    normal_spec.response,
+                    Symbol(:beta_, bernoulli_spec.location),
+                    bernoulli_spec.response))
+    expected = Set(response_names)
+    union!(expected, (normal_spec.location, normal_spec.log_scale,
+                      bernoulli_spec.location))
+    for spec in predictor_specs, group in spec.group_specs
+        push!(expected, group.prior.operation)
+    end
+    push!(expected, _brmi_group_correlation_prior(
+        brmi, shared_group.id, length(predictor_specs)).operation)
+    union!(expected, input_names)
+    extras = setdiff(Set(keys(brmi.operations)), expected)
+    isempty(extras) || throw(CapabilityError(
+        :additional_operations, "unsupported mixed distributional operations: " *
+        join(sort!(collect(extras)), ", ")))
+    bindings = _declaration_namedtuple(
+        Tuple(input_names), Tuple(parent(parent(column)) for column in input_columns))
+    conditions = _declaration_namedtuple(
+        response_names, Tuple(spec.response_value for spec in specs))
+    (; declaration, bindings, conditions)
+end
+
 function _lower_brmi(brmi::BRM.BRMI)
     observed = BRM.outcomes(brmi)
-    length(observed) == 1 || throw(CapabilityError(
-        :outcomes,
-        "expected exactly one observed response, got $(length(observed))"))
+    isempty(observed) && throw(CapabilityError(
+        :outcomes, "expected at least one observed response"))
+    if length(observed) > 1
+        normal_exp = 0
+        bernoulli_outcomes = 0
+        for outcome in observed
+            _, likelihood = BRM._native_ppl_sampling_rhs(
+                brmi, outcome.response)
+            likelihood isa BRM.ExprColumn || continue
+            family = BRM.getf(likelihood)
+            arguments = BRM.getargs(likelihood)
+            if family === BRM.Normal && length(arguments) == 2
+                scale = arguments[2]
+                normal_exp += scale isa BRM.ExprColumn &&
+                    BRM.getf(scale) === exp
+            elseif family === BRM.BernoulliLogit
+                bernoulli_outcomes += 1
+            end
+        end
+        mixed_distributional = length(observed) == 2 &&
+            normal_exp == 1 && bernoulli_outcomes == 1
+        return mixed_distributional ?
+            _lower_brmi_mixed_distributional_outcomes(brmi, observed) :
+            _lower_brmi_multiple_outcomes(brmi, observed)
+    end
     outcome = only(observed)
     response = outcome.response
     response_lhs, likelihood = BRM._native_ppl_sampling_rhs(brmi, response)
@@ -6186,16 +8931,96 @@ function _lower_brmi(brmi::BRM.BRMI)
     evidence_spec, likelihood = _lower_brmi_response_evidence(
         response, likelihood)
     family = BRM.getf(likelihood)
+    if family === BRM.ZeroInflatedPoisson
+        weight_spec === nothing && evidence_spec === nothing || throw(
+            CapabilityError(
+                :mixture_decorator,
+                "weighted or censored/truncated ZeroInflatedPoisson is not " *
+                "yet supported"))
+        return _lower_brmi_zero_inflated_poisson(
+            brmi, response, response_lhs, likelihood)
+    end
+    if family === BRM.NegativeBinomial2
+        weight_spec === nothing && evidence_spec === nothing || throw(
+            CapabilityError(
+                :count_decorator,
+                "weighted or censored/truncated NegativeBinomial2 is not " *
+                "yet supported"))
+        return _lower_brmi_negative_binomial2(
+            brmi, response, response_lhs, likelihood)
+    end
+    if family === BRM.BetaBinomial2
+        weight_spec === nothing && evidence_spec === nothing || throw(
+            CapabilityError(
+                :count_decorator,
+                "weighted or censored/truncated BetaBinomial2 is not yet " *
+                "supported"))
+        return _lower_brmi_beta_binomial2(
+            brmi, response, response_lhs, likelihood)
+    end
+    if family === BRM.BinomialLogit
+        weight_spec === nothing && evidence_spec === nothing || throw(
+            CapabilityError(
+                :count_decorator,
+                "weighted or censored/truncated BinomialLogit is not yet " *
+                "supported"))
+        return _lower_brmi_binomial_logit(
+            brmi, response, response_lhs, likelihood)
+    end
+    if family === BRM.CategoricalLogit
+        weight_spec === nothing && evidence_spec === nothing || throw(
+            CapabilityError(
+                :categorical_decorator,
+                "weighted or censored/truncated CategoricalLogit is not yet " *
+                "supported"))
+        return _lower_brmi_categorical_logit(
+            brmi, response, response_lhs, likelihood)
+    end
+    is_student_t = family === BRM.LocationScale
     family === BRM.Normal || family === BRM.BernoulliLogit ||
-        family === BRM.Poisson || throw(CapabilityError(
+        family === BRM.Poisson || is_student_t || throw(CapabilityError(
             :likelihood,
             "expected `Normal(location, scale)`, `BernoulliLogit(logit)`, " *
-            "or `Poisson(exp(log_rate))`, got `$family`"))
+            "`Poisson(exp(log_rate))`, or " *
+            "`LocationScale(location, scale, TDist(df))`, got `$family`"))
     isempty(BRM.getkwargs(likelihood)) || throw(CapabilityError(
         :likelihood_keywords,
         "$family likelihood for `$response` has keywords"))
     likelihood_args = BRM.getargs(likelihood)
-    expected_arguments = family === BRM.Normal ? 2 : 1
+    degrees_freedom_name = nothing
+    if is_student_t
+        weight_spec === nothing && evidence_spec === nothing || throw(
+            CapabilityError(
+                :response_evidence,
+                "weighted/evidence Student-t regression is not yet supported"))
+        length(likelihood_args) == 3 || throw(CapabilityError(
+            :likelihood,
+            "LocationScale Student-t response `$response` needs location, " *
+            "scale, and TDist(degrees_freedom)"))
+        base = likelihood_args[3]
+        base isa BRM.ExprColumn && BRM.getf(base) === BRM.TDist || throw(
+            CapabilityError(
+                :likelihood,
+                "LocationScale response `$response` currently requires " *
+                "TDist(degrees_freedom) as its base distribution"))
+        isempty(BRM.getkwargs(base)) || throw(CapabilityError(
+            :likelihood_keywords,
+            "TDist base distribution for `$response` cannot have keywords"))
+        base_arguments = BRM.getargs(base)
+        length(base_arguments) == 1 || throw(CapabilityError(
+            :likelihood,
+            "TDist base distribution for `$response` needs one named " *
+            "degrees-of-freedom parameter"))
+        degrees_freedom_name =
+            BRM._native_ppl_ref_name(only(base_arguments))
+        degrees_freedom_name === nothing && throw(CapabilityError(
+            :likelihood,
+            "TDist degrees of freedom for `$response` must be one named " *
+            "scalar parameter"))
+        likelihood_args = (likelihood_args[1], likelihood_args[2])
+    end
+    expected_arguments =
+        (family === BRM.Normal || is_student_t) ? 2 : 1
     length(likelihood_args) == expected_arguments || throw(CapabilityError(
         :likelihood,
         "$family likelihood for `$response` needs $expected_arguments argument(s)"))
@@ -6238,12 +9063,19 @@ function _lower_brmi(brmi::BRM.BRMI)
             return distributional
         end
     end
-    scale_name = family === BRM.Normal ?
+    has_scale = family === BRM.Normal || is_student_t
+    scale_name = has_scale ?
         BRM._native_ppl_ref_name(likelihood_args[2]) : nothing
-    family === BRM.Normal && scale_name === nothing &&
+    has_scale && scale_name === nothing &&
         throw(CapabilityError(
             :likelihood_scale,
-            "Normal scale must be one named scalar parameter"))
+            "$family scale must be one named scalar parameter"))
+    is_student_t &&
+        length(unique((degrees_freedom_name, location, scale_name))) != 3 &&
+        throw(CapabilityError(
+            :likelihood_parameters,
+            "Student-t degrees of freedom, location, and scale must have " *
+            "distinct graph identities"))
 
     if family === BRM.Normal && weight_spec === nothing &&
        evidence_spec === nothing
@@ -6288,11 +9120,6 @@ function _lower_brmi(brmi::BRM.BRMI)
     group_names = map(varying_groups) do varying
         BRM.name(varying.group)
     end
-    !isempty(varying_groups) && isempty(predictor_names) && throw(
-        CapabilityError(
-            :predictor_terms,
-            "the first grouped native-PPL slice requires at least one " *
-            "ordinary population predictor"))
     length(unique(group_names)) == length(group_names) || throw(
         CapabilityError(
             :group_term,
@@ -6357,9 +9184,14 @@ function _lower_brmi(brmi::BRM.BRMI)
         BRM._native_ppl_intercept_normal_prior(brmi, location) :
         (; location=0.0, scale=1.0, operation=nothing)
 
-    prior_scale = family === BRM.Normal ?
+    prior_scale = has_scale ?
         BRM._native_ppl_exponential_prior(brmi, scale_name) : nothing
-    expected_values = family === BRM.Normal ?
+    prior_degrees_freedom = is_student_t ?
+        BRM._native_ppl_exponential_prior(brmi, degrees_freedom_name) : nothing
+    expected_values = is_student_t ?
+        Set((location, degrees_freedom_name, scale_name, response,
+             input_predictor_names..., sampled_offsets..., group_names...)) :
+        family === BRM.Normal ?
         Set((location, scale_name, response, input_predictor_names...,
              sampled_offsets..., group_names...)) :
         Set((location, response, input_predictor_names..., sampled_offsets...,
@@ -6389,9 +9221,11 @@ function _lower_brmi(brmi::BRM.BRMI)
         evidence_input_names...)
     input_declarations = _declaration_namedtuple(
         input_names, map(_ -> input(), input_names))
-    scalar_location && family !== BRM.Normal && throw(CapabilityError(
-        :likelihood,
-        "the first intercept-only BRM native-PPL slice supports Normal"))
+    scalar_location && family !== BRM.Normal && !is_student_t && throw(
+        CapabilityError(
+            :likelihood,
+            "the intercept-only BRM native-PPL slice supports Normal and " *
+            "Student-t"))
     coefficient_name = scalar_location ? location : Symbol(:beta_, location)
     coefficient_keys = has_intercept ?
         (:Intercept, predictor_names...) : Tuple(predictor_names)
@@ -6437,7 +9271,20 @@ function _lower_brmi(brmi::BRM.BRMI)
         zip(group_specs, group_scale_declarations,
             group_correlation_declarations, group_site_declarations);
         init=())
-    parameter_declarations = if family === BRM.Normal
+    parameter_declarations = if is_student_t
+        degrees_freedom_declaration = parameter(
+            PositiveSupport(), (degrees_freedom_name,);
+            transform=Exp(), prior=Exponential(prior_degrees_freedom))
+        scale_declaration = parameter(
+            PositiveSupport(), (scale_name,);
+            transform=Exp(), prior=Exponential(prior_scale))
+        _declaration_namedtuple(
+            (coefficient_name, group_parameter_names...,
+             degrees_freedom_name, scale_name, sampled_offsets...),
+            (coefficient_declaration, group_parameter_declarations...,
+             degrees_freedom_declaration, scale_declaration,
+             offset_declarations...))
+    elseif family === BRM.Normal
         scale_declaration = parameter(
             PositiveSupport(), (scale_name,);
             transform=Exp(), prior=Exponential(prior_scale))
@@ -6524,7 +9371,9 @@ function _lower_brmi(brmi::BRM.BRMI)
                offsets=affine_offsets, intercept=has_intercept))
     node_declarations = _declaration_namedtuple(node_names, node_values)
 
-    observation_declaration = if family === BRM.Normal
+    observation_declaration = if is_student_t
+        student_t(response, degrees_freedom_name, location, scale_name)
+    elseif family === BRM.Normal
         normal(response, location, scale_name)
     elseif family === BRM.BernoulliLogit
         bernoulli_logit(response, location)
@@ -6579,7 +9428,9 @@ function _lower_brmi(brmi::BRM.BRMI)
             observations=observation_declarations,
             site_order=(sampled_offsets..., group_site_order...,
                         coefficient_name,
-                        (family === BRM.Normal ? (scale_name,) : ())...,
+                        (is_student_t ?
+                            (degrees_freedom_name, scale_name) :
+                         family === BRM.Normal ? (scale_name,) : ())...,
                         response))
     end
     bindings = _declaration_namedtuple(
@@ -6787,9 +9638,6 @@ function _syntax_grouped_parameter(sampling,
             location, scale isa Symbol ? QuoteNode(scale) : scale)
         return (; name, group, value, correlated=nothing)
     end
-    length(lhs.args) == 2 && throw(ArgumentError(
-        "native PPL @model grouped site `$name` requires " *
-        "Normal(location, scale)"))
     family === :MvNormalCholesky && length(arguments) == 2 || throw(
         ArgumentError(
             "native PPL @model grouped vector site `$name` requires " *
@@ -6838,6 +9686,10 @@ function _syntax_node(statement)
         length(arguments) == 1 || throw(ArgumentError(
             "native PPL @model log needs one input"))
         :log_link
+    elseif function_name === :logistic || function_name === :logistic_link
+        length(arguments) == 1 || throw(ArgumentError(
+            "native PPL @model logistic needs one input"))
+        :logistic_link
     else
         throw(ArgumentError(
             "native PPL @model unsupported deterministic function " *
@@ -6898,7 +9750,6 @@ function _syntax_group_gather_name(site::Symbol, group::Symbol,
 end
 
 function _syntax_affine_assignment(statement,
-                                   argument_names::Set{Symbol},
                                    scalar_priors::Set{Symbol},
                                    block_priors::Dict{Symbol,Tuple},
                                    grouped_sites::Dict{Symbol,Symbol},
@@ -6959,12 +9810,8 @@ function _syntax_affine_assignment(statement,
             if argument isa Symbol
                 if argument in scalar_priors
                     push!(sampled_offsets, argument)
-                elseif argument in argument_names
-                    push!(data_offsets, argument)
                 else
-                    throw(ArgumentError(
-                        "native PPL @model offset `$argument` must name a " *
-                        "preceding scalar site or function argument"))
+                    push!(data_offsets, argument)
                 end
             elseif argument isa Expr && argument.head === :call
                 function_name, transform_arguments = _syntax_call(
@@ -6976,9 +9823,6 @@ function _syntax_affine_assignment(statement,
                     ArgumentError(
                         "native PPL @model log offset needs one named input"))
                 raw_input = only(transform_arguments)
-                raw_input in argument_names || throw(ArgumentError(
-                    "native PPL @model log offset `$raw_input` must name a " *
-                    "function argument"))
                 transform_name = Symbol(:log_, raw_input, :_for_, lhs)
                 push!(offset_transform_names, transform_name)
                 push!(offset_transform_values, Expr(
@@ -7069,12 +9913,12 @@ function _syntax_affine_assignment(statement,
                 continue
             end
             grouped_ref isa Expr && grouped_ref.head === :ref &&
-                length(grouped_ref.args) == 2 &&
+                length(grouped_ref.args) in (2, 3) &&
                 first(grouped_ref.args) isa Symbol &&
                 grouped_ref.args[2] isa Symbol || throw(ArgumentError(
                     "native PPL @model grouped dot must start with " *
-                    "`site[group]`"))
-            site_name, group_name = grouped_ref.args
+                    "`site[group]` or `site[group, coefficient_keys]`"))
+            site_name, group_name = grouped_ref.args[1:2]
             haskey(correlated_grouped_sites, site_name) || throw(
                 ArgumentError(
                     "native PPL @model grouped dot site `$site_name` must " *
@@ -7090,18 +9934,38 @@ function _syntax_affine_assignment(statement,
                 predictor -> dot_predictor(predictor, "grouped dot"),
                 predictor_tuple.args))
             predictors = Tuple(parsed.value for parsed in parsed_predictors)
-            length(predictors) == length(metadata.coefficients) || throw(
+            selected_coefficients = length(grouped_ref.args) == 2 ?
+                metadata.coefficients : _syntax_symbol_tuple(
+                    grouped_ref.args[3], "grouped dot coefficient selection")
+            isempty(selected_coefficients) && throw(ArgumentError(
+                "native PPL @model grouped dot coefficient selection cannot " *
+                "be empty"))
+            length(unique(selected_coefficients)) ==
+                length(selected_coefficients) || throw(ArgumentError(
+                    "native PPL @model grouped dot coefficient selection " *
+                    "must be unique"))
+            all(coefficient -> coefficient in metadata.coefficients,
+                selected_coefficients) || throw(ArgumentError(
+                    "native PPL @model grouped dot selects an unknown group " *
+                    "coefficient"))
+            coefficient_indices = Tuple(
+                something(findfirst(==(coefficient), metadata.coefficients))
+                for coefficient in selected_coefficients)
+            length(predictors) == length(selected_coefficients) || throw(
                 ArgumentError(
                     "native PPL @model grouped dot predictor count must " *
-                    "match its coefficient axis"))
+                    "match its selected coefficient axis"))
             coefficient_keys = Tuple(parsed.key for parsed in parsed_predictors)
-            coefficient_keys == metadata.coefficients || throw(ArgumentError(
+            length(grouped_ref.args) == 2 &&
+                coefficient_keys != metadata.coefficients && throw(ArgumentError(
                 "native PPL @model grouped dot predictors must match its " *
                 "declared coefficient keys"))
             node_name = Symbol(site_name, :_by_, group_name, :_for_, lhs)
             push!(correlated_groups, (;
                 site_name, group_name, predictors, node_name,
-                scales=metadata.scales, correlation=metadata.correlation))
+                scales=metadata.scales, correlation=metadata.correlation,
+                coefficient_indices,
+                coefficient_count=length(metadata.coefficients)))
             push!(group_node_order, (;
                 kind=:correlated, index=length(correlated_groups)))
         else
@@ -7111,11 +9975,6 @@ function _syntax_affine_assignment(statement,
     length(unique(sampled_offsets)) == length(sampled_offsets) || throw(
         ArgumentError(
             "native PPL @model affine offsets must be used once each"))
-    gathered_site_names = Tuple(
-        gather.site_name for gather in gathered_offsets)
-    length(unique(gathered_site_names)) == length(gathered_site_names) ||
-        throw(ArgumentError(
-            "native PPL @model grouped offsets must be used once each"))
     length(unique(data_offsets)) == length(data_offsets) || throw(
         ArgumentError(
             "native PPL @model data offsets must be used once each"))
@@ -7255,6 +10114,10 @@ function _syntax_affine_assignment(statement,
     correlated_names = Tuple(group.node_name for group in correlated_groups)
     correlated_values = Tuple(Expr(
         :call, _syntax_ref(:grouped_affine),
+        Expr(:parameters,
+             Expr(:kw, :coefficient_indices,
+                  QuoteNode(group.coefficient_indices)),
+             Expr(:kw, :coefficient_count, group.coefficient_count)),
         QuoteNode(group.site_name), QuoteNode(group.scales),
         QuoteNode(group.correlation), QuoteNode(group.group_name),
         QuoteNode(group.predictors)) for group in correlated_groups)
@@ -7276,9 +10139,6 @@ function _syntax_affine_assignment(statement,
             push!(group_values, correlated_values[entry.index])
         end
     end
-    length(unique(group_names)) == length(group_names) || throw(ArgumentError(
-        "native PPL @model grouped terms must produce distinct public " *
-        "node identities; use each grouped latent site once"))
     (; location=lhs, intercept, offsets=Tuple(sampled_offsets),
        gather_names, gather_values, product_names, product_values,
        correlated_names, correlated_values,
@@ -7421,8 +10281,8 @@ function _syntax_observation(lhs, rhs; broadcasted::Bool)
     evidence = _syntax_observation_evidence(rhs)
     evidence === nothing || (rhs = evidence.distribution)
     family, arguments = _syntax_distribution_call(rhs, "observation family")
-    extra_node_name = nothing
-    extra_node_value = nothing
+    extra_node_names = Symbol[]
+    extra_node_values = Any[]
     if family === :Poisson && length(arguments) == 1 &&
        only(arguments) isa Expr && only(arguments).head in (:call, :.)
         link_name, link_arguments = _syntax_distribution_call(
@@ -7433,9 +10293,121 @@ function _syntax_observation(lhs, rhs; broadcasted::Bool)
                 "`exp(named_log_rate)`"))
         log_rate = only(link_arguments)
         extra_node_name = Symbol(:exp_, log_rate)
-        extra_node_value = Expr(
+        push!(extra_node_names, extra_node_name)
+        push!(extra_node_values, Expr(
             :call, _syntax_ref(:exp_link), QuoteNode(log_rate))
+        )
         arguments = Any[extra_node_name]
+    elseif family === :ZeroInflatedPoisson && length(arguments) == 2
+        linked = Any[]
+        for (argument, expected_link, prefix, builder) in zip(
+                arguments, (:exp, :logistic), (:exp_, :logistic_),
+                (:exp_link, :logistic_link))
+            if argument isa Symbol
+                push!(linked, argument)
+                continue
+            end
+            argument isa Expr && argument.head in (:call, :.) || throw(
+                ArgumentError(
+                    "native PPL @model ZeroInflatedPoisson accepts named " *
+                    "parameters or exp(named_log_rate), " *
+                    "logistic(named_logit)"))
+            link_name, link_arguments = _syntax_distribution_call(
+                argument, "ZeroInflatedPoisson parameter link")
+            link_name === expected_link && length(link_arguments) == 1 &&
+                only(link_arguments) isa Symbol || throw(ArgumentError(
+                    "native PPL @model ZeroInflatedPoisson expects " *
+                    "exp(named_log_rate) and logistic(named_logit)"))
+            input = only(link_arguments)
+            name = Symbol(prefix, input)
+            push!(extra_node_names, name)
+            push!(extra_node_values, Expr(
+                :call, _syntax_ref(builder), QuoteNode(input)))
+            push!(linked, name)
+        end
+        arguments = linked
+    elseif family === :NegativeBinomial2 && length(arguments) == 2
+        linked = Any[]
+        for argument in arguments
+            if argument isa Symbol
+                push!(linked, argument)
+                continue
+            end
+            argument isa Expr && argument.head in (:call, :.) || throw(
+                ArgumentError(
+                    "native PPL @model NegativeBinomial2 accepts named " *
+                    "parameters or exp(named_log_parameter)"))
+            link_name, link_arguments = _syntax_distribution_call(
+                argument, "NegativeBinomial2 parameter link")
+            link_name === :exp && length(link_arguments) == 1 &&
+                only(link_arguments) isa Symbol || throw(ArgumentError(
+                    "native PPL @model NegativeBinomial2 expects " *
+                    "exp(named_log_mean) and exp(named_log_precision)"))
+            input = only(link_arguments)
+            name = Symbol(:exp_, input)
+            push!(extra_node_names, name)
+            push!(extra_node_values, Expr(
+                :call, _syntax_ref(:exp_link), QuoteNode(input)))
+            push!(linked, name)
+        end
+        arguments = linked
+    elseif family === :BetaBinomial2 && length(arguments) == 3
+        trials = first(arguments)
+        trials isa Symbol || throw(ArgumentError(
+            "native PPL @model BetaBinomial2 trials must be a named input"))
+        linked = Any[trials]
+        for (argument, expected_link, prefix, builder) in zip(
+                arguments[2:3], (:logistic, :exp),
+                (:logistic_, :exp_), (:logistic_link, :exp_link))
+            if argument isa Symbol
+                push!(linked, argument)
+                continue
+            end
+            argument isa Expr && argument.head in (:call, :.) || throw(
+                ArgumentError(
+                    "native PPL @model BetaBinomial2 accepts named " *
+                    "parameters or linked mean/precision parameters"))
+            link_name, link_arguments = _syntax_distribution_call(
+                argument, "BetaBinomial2 parameter link")
+            link_name === expected_link && length(link_arguments) == 1 &&
+                only(link_arguments) isa Symbol || throw(ArgumentError(
+                    "native PPL @model BetaBinomial2 expects " *
+                    "logistic(named_logit_mean) and " *
+                    "exp(named_log_precision)"))
+            input = only(link_arguments)
+            name = Symbol(prefix, input)
+            push!(extra_node_names, name)
+            push!(extra_node_values, Expr(
+                :call, _syntax_ref(builder), QuoteNode(input)))
+            push!(linked, name)
+        end
+        arguments = linked
+    elseif family === :CategoricalLogit
+        isempty(arguments) && throw(ArgumentError(
+            "native PPL @model CategoricalLogit needs at least one " *
+            "non-reference predictor"))
+        all(argument -> argument isa Symbol, arguments) || throw(
+            ArgumentError(
+                "native PPL @model CategoricalLogit arguments must name " *
+                "scalar predictors"))
+        length(unique(arguments)) == length(arguments) || throw(ArgumentError(
+            "native PPL @model CategoricalLogit predictors must be distinct"))
+    elseif family === :LocationScale
+        length(arguments) == 3 || throw(ArgumentError(
+            "native PPL @model LocationScale Student-t needs location, " *
+            "scale, and TDist(degrees_freedom)"))
+        location, scale, base = arguments
+        location isa Symbol && scale isa Symbol || throw(ArgumentError(
+            "native PPL @model LocationScale location and scale must be " *
+            "named graph values"))
+        base_family, base_arguments = _syntax_distribution_call(
+            base, "LocationScale base distribution")
+        base_family === :TDist && length(base_arguments) == 1 &&
+            only(base_arguments) isa Symbol || throw(ArgumentError(
+                "native PPL @model currently supports " *
+                "LocationScale(location, scale, TDist(named_df))"))
+        arguments = Any[only(base_arguments), location, scale]
+        family = :StudentT
     end
     all(argument -> argument isa Symbol, arguments) || throw(ArgumentError(
         "native PPL @model observation `$lhs` currently accepts named " *
@@ -7446,6 +10418,18 @@ function _syntax_observation(lhs, rhs; broadcasted::Bool)
         (:bernoulli_logit, 1)
     elseif family === :Poisson
         (:poisson, 1)
+    elseif family === :ZeroInflatedPoisson
+        (:zero_inflated_poisson, 2)
+    elseif family === :NegativeBinomial2
+        (:negative_binomial2, 2)
+    elseif family === :BetaBinomial2
+        (:beta_binomial2, 3)
+    elseif family === :BinomialLogit
+        (:binomial_logit, 2)
+    elseif family === :CategoricalLogit
+        (:categorical_logit, length(arguments))
+    elseif family === :StudentT
+        (:student_t, 3)
     else
         throw(ArgumentError(
             "native PPL @model unsupported observation family `$family`"))
@@ -7488,7 +10472,9 @@ function _syntax_observation(lhs, rhs; broadcasted::Bool)
         dependency for dependency in
         (evidence.lower.dependency, evidence.upper.dependency)
         if dependency !== nothing)
-    (; name=lhs, value, extra_node_name, extra_node_value,
+    (; name=lhs, value,
+       extra_node_names=Tuple(extra_node_names),
+       extra_node_values=Tuple(extra_node_values),
        dependencies=(Tuple(arguments)..., evidence_dependencies...,
                      (weight === nothing ? () : (weight.source,))...))
 end
@@ -7506,8 +10492,6 @@ function _syntax_outputs(statement)
     if length(entries) == 1 && entries[1] isa Expr &&
        entries[1].head === :parameters
         entries = entries[1].args
-        isempty(entries) && throw(ArgumentError(
-            "native PPL @model return requires at least one named graph value"))
         all(entry -> entry isa Symbol, entries) || throw(ArgumentError(
             "native PPL @model named return shorthand requires bare names"))
         names = Tuple(entries)
@@ -7516,8 +10500,6 @@ function _syntax_outputs(statement)
 
     aliases = Symbol[]
     names = Symbol[]
-    isempty(entries) && throw(ArgumentError(
-        "native PPL @model return requires at least one named graph value"))
     for entry in entries
         entry isa Expr && entry.head in (:(=), :kw) &&
             length(entry.args) == 2 && entry.args[1] isa Symbol &&
@@ -7535,10 +10517,13 @@ end
 
 const _SYNTAX_DISTRIBUTION_NAMES =
     (:Normal, :StandardNormal, :Exponential, :LKJCholesky,
-     :MvNormalCholesky, :BernoulliLogit, :Poisson, :weighted,
+     :MvNormalCholesky, :BernoulliLogit, :Poisson, :LocationScale,
+     :ZeroInflatedPoisson, :NegativeBinomial2, :BetaBinomial2,
+     :BinomialLogit, :CategoricalLogit, :weighted,
      :truncated, :censored, :interval_censored)
 const _SYNTAX_DETERMINISTIC_NAMES =
-    (:center, :zscale, :standardize, :affine, :exp, :exp_link, :dot)
+    (:center, :zscale, :standardize, :affine,
+     :exp, :exp_link, :logistic, :logistic_link, :dot)
 const _SYNTAX_OPERATOR_NAMES =
     (:+, :.+, :-, :.-, :*, :.*, :/, :./, :^, :.^)
 
@@ -7609,21 +10594,6 @@ function _syntax_composed_model(
     all(name -> name in result_name_set, output_names) || throw(ArgumentError(
         "native PPL composed model may return only staged child outputs; got " *
         "$(output_names)"))
-    for output_name in output_names
-        output_index = findfirst(
-            connection -> connection.name === output_name, connections)
-        connection = connections[output_index]
-        connection.connection === :stochastic || continue
-        consumer_index = findfirst(
-            index -> index > output_index &&
-                     any(==(output_name), connections[index].arguments),
-            eachindex(connections))
-        consumer_index === nothing || throw(ArgumentError(
-            "native PPL cannot yet return stochastic staged output " *
-            "`$output_name` after it feeds downstream child " *
-            "`$(connections[consumer_index].name)`; public site aliases " *
-            "currently require a terminal child output"))
-    end
     public_outputs = _syntax_namedtuple(
         collect(output_aliases), Any[output_names...])
     push!(generated, Expr(
@@ -7733,9 +10703,11 @@ function _model_function_syntax(definition)
                 observation = _syntax_observation(
                     sampling.lhs, sampling.rhs;
                     broadcasted=sampling.broadcasted)
-                if observation.extra_node_name !== nothing
-                    push!(node_names, observation.extra_node_name)
-                    push!(node_values, observation.extra_node_value)
+                for index in eachindex(
+                        observation.extra_node_names,
+                        observation.extra_node_values)
+                    push!(node_names, observation.extra_node_names[index])
+                    push!(node_values, observation.extra_node_values[index])
                 end
                 push!(observation_names, observation.name)
                 push!(observation_values, observation.value)
@@ -7759,8 +10731,7 @@ function _model_function_syntax(definition)
             end
         elseif statement isa Expr && statement.head === :(=)
             affine_declaration = _syntax_affine_assignment(
-                statement, argument_name_set, Set(scalar_prior_names),
-                block_prior_axes,
+                statement, Set(scalar_prior_names), block_prior_axes,
                 grouped_sites,
                 correlated_grouped_sites)
             if affine_declaration === nothing
@@ -7947,40 +10918,58 @@ export CorrelationCoordinateKey
 export FactorGraph
 export CenterFactorNode, ZScaleFactorNode, AffineFactorNode, ExpFactorNode
 export FittedCenter, FittedZScale
-export LogFactorNode
+export LogFactorNode, LogisticFactorNode
 export GroupGatherFactorNode, RowProductFactorNode, GroupedAffineFactorNode
 export FactorPlan, FactorPrepared, FactorWorkspace, FactorLogDensityProblem
-export StandardNormalSiteFactor, NormalSiteFactor, ExponentialSiteFactor
+export StandardNormalSiteFactor, NormalSiteFactor, StudentTSiteFactor,
+       ExponentialSiteFactor
 export LKJCholeskySiteFactor
-export BernoulliLogitSiteFactor, PoissonSiteFactor, WeightedSiteFactor
+export BernoulliLogitSiteFactor, PoissonSiteFactor
+export ZeroInflatedPoissonSiteFactor, NegativeBinomial2SiteFactor
+export BetaBinomial2SiteFactor
+export BinomialLogitSiteFactor
+export CategoricalLogitSiteFactor
+export WeightedSiteFactor
 export EvidenceSiteFactor
 export ScalarSiteShape, BlockSiteShape, BroadcastSiteShape
 export FreeSite, ConditionedSite, GeneratedSite
 export RealSupport, PositiveSupport, CholeskyCorrelationSupport
 export IdentityTransform, ExpTransform, CholeskyCorrelationTransform
 export StandardNormal, NormalPrior, ExponentialPrior
-export Center, ZScale, Affine, ExpLink, LogLink
+export Center, ZScale, Affine, ExpLink, LogLink, LogisticLink
 export GroupGather, RowProduct, GroupedAffine
-export NormalObservation, BernoulliLogitObservation, PoissonObservation
+export NormalObservation, StudentTObservation, BernoulliLogitObservation,
+       PoissonObservation
+export ZeroInflatedPoissonObservation, NegativeBinomial2Observation
+export BetaBinomial2Observation
+export BinomialLogitObservation
+export CategoricalLogitObservation
 export AbstractObservationWeight, ObservationWeight
 export AbstractObservationEvidence, TruncatedEvidence, CensoredEvidence
 export IntervalEvidence, EvidenceObservation
 export WeightedObservation, BroadcastObservation
 export model, input, parameter, Identity, Exp, normal_prior, Exponential
-export center, zscale, standardize, affine, exp_link, log_link
+export center, zscale, standardize, affine, exp_link, log_link, logistic_link
 export grouped_normal, group_gather, group_values, group_input
 export grouped_standard_normal, group_coefficients
 export cholesky_correlation, correlation_coefficients
 export row_product, row_product_inputs
 export grouped_affine, grouped_standardized, grouped_scales
 export grouped_correlation, grouped_predictors
-export normal, bernoulli_logit, poisson, observation_weight
+export grouped_coefficient_indices, grouped_coefficient_count
+export normal, student_t, bernoulli_logit, poisson, zero_inflated_poisson
+export negative_binomial2
+export beta_binomial2
+export binomial_logit
+export categorical_logit
+export observation_weight
 export observation_weight_kind, observation_weight_source
 export weighted_observation, truncated_evidence, censored_evidence
 export interval_evidence, evidence_kind, evidence_lower, evidence_upper
 export evidence_observation, broadcasted
 export instantiate, substitute, condition, component, output, compose, bind, lower
-export factor_graph, site_factor_dependencies, factor_node_dependencies
+export factor_graph, factor_output_site, factor_output_sites
+export site_factor_dependencies, factor_node_dependencies
 export site_value_name, input_value_name, node_value_name
 export graph_namespace, graph_name, graph_kind, component_namespace, qualified_name
 export @model
