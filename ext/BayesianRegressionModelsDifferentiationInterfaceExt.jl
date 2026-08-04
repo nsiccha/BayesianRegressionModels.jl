@@ -94,4 +94,40 @@ function BRM.NativePPL._factor_logdensity_and_gradient!(
     )
 end
 
+# --- Julianic "run-the-body" stack ---------------------------------------
+# Enzyme straight through the run-the-body primal kernel `θ -> Real`. The
+# prepared model (its lowered body closure + conditioned data) is a Constant;
+# `theta` is the sole active input. No DI.Cache: the primal allocates its own
+# context per call.
+
+function BRM.NativePPL._julianic_prepare_gradient(
+    prepared::BRM.NativePPL.JulianicPrepared,
+    backend::DI.AbstractADType,
+    position::AbstractVector,
+)
+    preparation = DI.prepare_gradient(
+        BRM.NativePPL._julianic_kernel,
+        backend,
+        position,
+        DI.Constant(prepared),
+    )
+    NativePPLDIState(backend, preparation)
+end
+
+function BRM.NativePPL._julianic_value_and_gradient!(
+    prepared::BRM.NativePPL.JulianicPrepared,
+    state::NativePPLDIState,
+    gradient::AbstractVector,
+    theta::AbstractVector,
+)
+    return DI.value_and_gradient!(
+        BRM.NativePPL._julianic_kernel,
+        gradient,
+        state.preparation,
+        state.backend,
+        theta,
+        DI.Constant(prepared),
+    )
+end
+
 end

@@ -2974,6 +2974,7 @@ function execute_draws(rng::BRM.AbstractRNG, work::Workspace,
 end
 
 include("native_ppl_authoring.jl")
+include("native_ppl_julianic.jl")
 
 export Plan, Prepared, Workspace, LogDensityProblem, CapabilityError
 export OutputSignature, BatchOutputSignature
