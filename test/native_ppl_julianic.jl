@@ -696,6 +696,91 @@ end
 # Downstream consumers (WarmupHMC, the samplers) take a `LogDensityProblem`, not
 # a `Prepared` — so julianic cannot stand in for the declarative surface without
 # this, and it has to be the SAME problem, not merely a similar one.
+# ---------------------------------------------------------------------------
+# Postprocessing against the DECLARATIVE oracle.
+#
+# `julianic postprocessing` above pins the layer against ITSELF — batch against
+# single, RNG determinism, shapes, element types. None of that can catch a value
+# the whole layer computes consistently and wrongly, which is exactly what the
+# charter's oracle discipline exists for. It applies here as it does to the
+# density: the declarative executor already answers `PointwiseLogLikelihood`, so
+# the two surfaces' per-observation log-likelihoods have to agree.
+#
+# This also reaches the two classes whose GRADIENT parity is currently blocked by
+# `gather-subarray-11c41349`. The recording pass is primal-only — no Enzyme — so
+# `grouped varying intercept` and `censored observation` do get oracle coverage
+# here even while `oracle parity` cannot differentiate them.
+# ---------------------------------------------------------------------------
+
+"""
+Compare julianic `jpointwise_draws` against the declarative executor's
+`PointwiseLogLikelihood` over random unconstrained draws. Returns the worst gap.
+"""
+function pointwise_oracle(declarative, julianic, observations;
+                          ndraws=5, seed=20260805)
+    oracle = NP.prepare(NP.compile(
+        NP.condition(NP.substitute(declarative); observations...)))
+    prepared = NP.jprepare(NP.jcondition(julianic; observations...))
+    work = NP.workspace(oracle, Float64, DI.AutoEnzyme())
+
+    rng = MersenneTwister(seed)
+    dimension = NP.dimension(prepared)
+    positions = Matrix{Float64}(undef, ndraws, dimension)
+    for draw in 1:ndraws
+        positions[draw, :] = randn(rng, dimension)
+    end
+
+    expected = NP.evaluate_draws(work, oracle, positions,
+                                 NP.PointwiseLogLikelihood())
+    got = NP.jpointwise_draws(prepared, positions).y
+    # Shape first: a transposed result would still compare elementwise on a
+    # square fixture, so this is the assertion that pins ROWS = draws.
+    @test size(got) == size(expected)
+    gap = maximum(abs, got .- expected)
+    @test gap <= ORACLE_TOLERANCE
+    return gap
+end
+
+@testset "julianic postprocessing matches the declarative oracle" begin
+    @testset "flat affine gaussian" begin
+        pointwise_oracle(declarative_affine_gaussian(PREDICTOR),
+                         julianic_affine_gaussian(PREDICTOR), CONTINUOUS)
+    end
+    @testset "distributional gaussian" begin
+        pointwise_oracle(declarative_distributional(PREDICTOR, SECONDARY),
+                         julianic_distributional(PREDICTOR, SECONDARY),
+                         CONTINUOUS)
+    end
+    @testset "poisson log link" begin
+        pointwise_oracle(declarative_poisson(PREDICTOR),
+                         julianic_poisson(PREDICTOR), COUNTS)
+    end
+    @testset "bernoulli logit link" begin
+        pointwise_oracle(declarative_bernoulli(PREDICTOR),
+                         julianic_bernoulli(PREDICTOR), BINARY)
+    end
+    # Gradient-blocked upstream; the primal recording pass reaches them anyway.
+    @testset "grouped varying intercept" begin
+        pointwise_oracle(declarative_varying_intercept(PREDICTOR, GROUP),
+                         julianic_varying_intercept(PREDICTOR, GROUP),
+                         CONTINUOUS)
+    end
+    @testset "censored observation" begin
+        pointwise_oracle(declarative_censored(PREDICTOR, GROUP),
+                         julianic_censored(PREDICTOR, GROUP), CENSORED)
+    end
+    @testset "correlated varying intercept and slope (LKJ)" begin
+        pointwise_oracle(declarative_correlated_varying(PREDICTOR, GROUP),
+                         julianic_correlated_varying(PREDICTOR, GROUP),
+                         CONTINUOUS)
+    end
+    @testset "frequency-weighted observation" begin
+        pointwise_oracle(declarative_frequency_weighted(PREDICTOR, FREQUENCIES),
+                         julianic_frequency_weighted(PREDICTOR, FREQUENCIES),
+                         CONTINUOUS)
+    end
+end
+
 @testset "julianic LogDensityProblems interface" begin
     prepared = NP.jprepare(NP.jcondition(
         julianic_affine_gaussian(PREDICTOR); CONTINUOUS...))
