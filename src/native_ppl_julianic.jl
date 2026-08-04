@@ -566,6 +566,21 @@ function jworkspace(prepared::JulianicPrepared, ::Type{T}, backend) where {T<:Ab
 end
 
 """
+    jlogdensity!(workspace, prepared, theta)
+
+Log density evaluated against the workspace's preallocated pool — the 0-alloc
+primal, and the exact counterpart of the declarative executor's
+`logdensity!(workspace, …)`. `jlogdensity(prepared, theta)` computes the same
+number but allocates a pool per call, so it is the convenience entry point, not
+the one to put in a sampler's inner loop.
+"""
+function jlogdensity!(
+    workspace::JulianicWorkspace, prepared::JulianicPrepared, theta::AbstractVector)
+    _julianic_check_dimension(prepared, theta)
+    return _julianic_kernel(theta, prepared, workspace.buffers)
+end
+
+"""
     jlogdensity_and_gradient!(workspace, prepared, theta) -> (density, gradient)
 
 Value + gradient of the log density via Enzyme straight through the run-the-body
