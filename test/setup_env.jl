@@ -2,56 +2,46 @@
 #
 #     julia --project=test test/setup_env.jl
 #
-# Five of the test env's dependencies are UNREGISTERED — MutatingFunctions and
-# OutputSignatures (the julianic 0-alloc substrate), TreeArrays (the
-# postprocessing containers), plus StanBlocks / Treebars / WarmupHMC. On Julia
-# 1.11+ the `[sources]` blocks in `test/Project.toml` resolve them from GitHub;
-# on **1.10, which is what this suite runs on, `[sources]` is IGNORED**, so a
-# bare `Pkg.resolve()` fails with
+# The test env has six UNREGISTERED dependencies. Each is pinned to a specific
+# GitHub COMMIT and `Pkg.add`ed straight from GitHub by `rev` — there is NO
+# dependence on any local/shared `~/github/nsiccha/<pkg>` checkout. A full-SHA
+# `rev` is branch-independent, so it does not matter that several of these live
+# on a `dev`/`devibe` branch rather than `main`; the commit only has to be
+# pushed to GitHub, which every pin below is.
+#
+# `Pkg.add(...; rev)` is the mechanism on EVERY Julia version we run. On 1.11+
+# the `[sources]` blocks in `test/Project.toml` (which mirror these revs) would
+# also resolve them; on **1.10, which is what this suite runs on, `[sources]` is
+# IGNORED**, so a bare `Pkg.resolve()` fails with
 #
 #     ERROR: expected package `TreeArrays [5daaa025]` to be registered
 #
-# and the run is lost to an error that looks like a missing registry rather than
-# a version-gated feature. This script is the 1.10 answer: it `develop`s each one
-# from its local checkout, which is also what pins the julianic substrate to the
-# two upstream fixes the surface depends on (`0134a6c` / `121de31`).
+# an error that looks like a missing registry rather than a version-gated
+# feature. This script is the version-independent answer.
+#
+# Bumping a pin is a deliberate one-line edit here (+ the matching `[sources]`
+# rev in test/Project.toml), reviewed like any other change — not a silent
+# consequence of whatever a shared checkout drifted to.
 #
 # It is idempotent — re-running it on an already-correct env is a no-op — so it
 # is safe to run before any suite when unsure of the env's state.
 using Pkg
 
-const CHECKOUTS = joinpath(homedir(), "github", "nsiccha")
-
-# Ordered by how load-bearing they are, so a missing one is reported before the
-# rest of the work happens.
-const UNREGISTERED = [
-    "MutatingFunctions",    # apply!! — the in-place 0-alloc fills
-    "OutputSignatures",     # broadcast_size / output_size — their destination shapes
-    "TreeArrays",           # labelled postprocessing draw containers (weak dep)
-    "StanBlocks",
-    "Treebars",
-    "WarmupHMC",
+# name => (github url, pinned commit)   — comment records the branch the commit
+# is on, for humans; the pin itself is the full SHA and needs no branch.
+const PINS = [
+    # MutatingFunctions carries the SubArray-gather activity fix the julianic
+    # 0-alloc surface depends on (main).
+    ("MutatingFunctions", "https://github.com/nsiccha/MutatingFunctions.jl.git", "92687c809f60493422b11158ac8abba32b21cdf9"),
+    ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "121de3194f02044e00bac0d11019a93458ddb63a"),  # main
+    ("TreeArrays",        "https://github.com/nsiccha/TreeArrays.jl.git",        "c317cc003fc41c2d933c27dc80799141eebd434e"),  # main
+    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "e6f607da17f04f06e7e65d867137940a82ba1392"),  # devibe
+    ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
+    ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "676e43fb2510adcd6ef930faabe8ddf7f89ebec2"),  # dev
 ]
 
 function main()
-    missing_checkouts = String[]
-    specs = PackageSpec[]
-    for name in UNREGISTERED
-        path = joinpath(CHECKOUTS, name * ".jl")
-        if isdir(path)
-            push!(specs, PackageSpec(; path))
-        else
-            push!(missing_checkouts, path)
-        end
-    end
-    if !isempty(missing_checkouts)
-        # Fail loudly and completely rather than developing a partial env: a
-        # half-built environment fails later, somewhere less obvious.
-        error("test/setup_env.jl: missing local checkout(s):\n  " *
-              join(missing_checkouts, "\n  ") *
-              "\nClone them from https://github.com/nsiccha/<name>.jl and re-run.")
-    end
-    Pkg.develop(specs)
+    Pkg.add([PackageSpec(; url, rev) for (_name, url, rev) in PINS])
     Pkg.instantiate()
     return nothing
 end

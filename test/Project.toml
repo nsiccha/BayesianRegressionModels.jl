@@ -27,9 +27,24 @@ julia = "1.10"
 
 [sources.MutatingFunctions]
 url = "https://github.com/nsiccha/MutatingFunctions.jl"
+rev = "92687c809f60493422b11158ac8abba32b21cdf9"
 
 [sources.OutputSignatures]
 url = "https://github.com/nsiccha/OutputSignatures.jl"
+rev = "121de3194f02044e00bac0d11019a93458ddb63a"
 
 [sources.TreeArrays]
 url = "https://github.com/nsiccha/TreeArrays.jl"
+rev = "c317cc003fc41c2d933c27dc80799141eebd434e"
+
+[sources.StanBlocks]
+url = "https://github.com/nsiccha/StanBlocks.jl"
+rev = "e6f607da17f04f06e7e65d867137940a82ba1392"
+
+[sources.Treebars]
+url = "https://github.com/nsiccha/Treebars.jl"
+rev = "c02aa16ab1b08e4f5283597fe678a88e69555cd1"
+
+[sources.WarmupHMC]
+url = "https://github.com/nsiccha/WarmupHMC.jl"
+rev = "676e43fb2510adcd6ef930faabe8ddf7f89ebec2"
