@@ -1237,10 +1237,12 @@ end
             workspace, prepared, [0.1, 0.2])
     end
 
-    @testset "sampling nested in control flow" begin
-        # Milestone 1 lowers TOP-LEVEL statements only. A nested `~` used to
-        # survive verbatim and fail at run time with an `UndefVarError` naming
-        # the site — a message that points nowhere near the cause.
+    @testset "control flow and nested `~` are rejected" begin
+        # Control flow is barred outright: it would make "which statements run"
+        # position-dependent and break the static activity analysis, which reads
+        # the body as one static statement list. A `~` nested in a loop or branch
+        # is therefore rejected as control flow — a stronger, earlier error than
+        # the old post-lowering "top level only" one.
         nested_loop = :(function nested(x)
             s ~ Exponential(1.0)
             for i in 1:2
@@ -1248,8 +1250,8 @@ end
             end
             @. y ~ Normal(0.0, s)
         end)
-        err = argument_error(() -> NP._julianic_model_syntax(nested_loop))
-        @test occursin("TOP LEVEL", err.msg)
+        @test occursin("control flow",
+            argument_error(() -> NP._julianic_model_syntax(nested_loop)).msg)
 
         nested_branch = :(function nested(x)
             s ~ Exponential(1.0)
@@ -1257,9 +1259,19 @@ end
                 @. y ~ Normal(0.0, s)
             end
         end)
-        @test occursin(
-            "TOP LEVEL",
+        @test occursin("control flow",
             argument_error(() -> NP._julianic_model_syntax(nested_branch)).msg)
+
+        # A `~` nested in an EXPRESSION (not control flow) still trips the
+        # top-level-only guard: lowering treats `mu = (z ~ Normal())` as a
+        # deterministic assignment, leaving the inner `~` un-rewritten.
+        nested_expr = :(function nested(x)
+            s ~ Exponential(1.0)
+            mu = (z ~ Normal())
+            @. y ~ Normal(mu, s)
+        end)
+        @test occursin("TOP LEVEL",
+            argument_error(() -> NP._julianic_model_syntax(nested_expr)).msg)
 
         # Unary `~` is ordinary Julia (bitwise not) and must be left alone.
         bitwise = :(function fine(x)

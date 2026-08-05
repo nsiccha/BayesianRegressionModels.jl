@@ -85,6 +85,54 @@ using MutatingFunctions: apply!!
 # entry point) and `output_size(getindex, …)` for gathers.
 using OutputSignatures: broadcast_eltype, broadcast_size, output_size
 
+# --- Activity-analysis types ----------------------------------------------
+#
+# The macro records a static per-statement SKELETON (pure syntax: what each
+# statement reads and writes, and whether it is a `~`). At `jprepare` — after
+# conditioning is known — `_julianic_activity` runs ONE forward + ONE backward
+# sweep over that skeleton to partition every statement into data /
+# needed-for-sampling / generated-quantity, with NO values (the SSA statement
+# order IS a topological sort, so no graph need be built). The partition is a
+# function of (skeleton, conditioning), so it can move a site between `:sampled`
+# and `:gq` when the same model is conditioned differently.
+
+# One statement's syntactic facts, built at macro time. `write` is the name it
+# binds — a `~` binds its site name; `Symbol("")` marks a bare expression that
+# binds nothing. `reads` are the free names of its right-hand side, OVER-collected:
+# a name with no model binding (`exp`, `Normal`) simply resolves to no dependency
+# edge, so precision is unnecessary and only false-negatives (a missed read) would
+# be unsound.
+struct JulianicStmt
+    write::Symbol
+    reads::Vector{Symbol}
+    is_sample::Bool
+    broadcast::Bool
+end
+
+# One statement's assigned role, for `jactivity` introspection:
+#   :observation — a conditioned `~` (a likelihood term; always in the density)
+#   :sampled     — an unconditioned `~` reaching the likelihood (consumes a
+#                  coordinate, prior scored in the density)
+#   :gq          — an unconditioned `~`, or a parameter-dependent deterministic,
+#                  that does NOT reach the likelihood (drawn / computed only in
+#                  postprocessing; consumes NO coordinate)
+#   :density     — a parameter-dependent deterministic on the likelihood path
+#   :data        — depends on no parameter (constant across θ; computable once)
+struct JulianicActivity
+    write::Symbol
+    role::Symbol
+    is_sample::Bool
+end
+
+# The generated-quantity LATENT site names as a TYPE PARAMETER, so
+# `_julianic_is_gq(roles, Val(name))` folds to a literal at each `~` call site —
+# exactly the trick `_julianic_is_conditioned` plays on the data type. An EMPTY
+# tuple (no gq latent — the entire current gallery) makes every gq branch dead
+# code, so those models lower identically to the pre-AA surface, and both the
+# 0-alloc primal and the oracle parity are preserved by construction.
+struct JulianicRoles{G} end
+@inline _julianic_is_gq(::JulianicRoles{G}, ::Val{name}) where {G,name} = name in G
+
 # --- Buffer pool ----------------------------------------------------------
 #
 # The pool holds one reusable flat `Vector{T}` per array-valued intermediate the
@@ -195,15 +243,16 @@ JulianicTrace() = JulianicTrace(0, Dims[])
 # 2026-08-04). Values are COPIED out, because a `_sample!` returning a `@view`
 # into θ (the multivariate path) would otherwise alias a caller's position — and
 # a pooled observation buffer is overwritten by the next site.
-struct JulianicRecord{TH<:AbstractVector,B,K} <: JulianicWalk
+struct JulianicRecord{TH<:AbstractVector,B,K,R<:Random.AbstractRNG} <: JulianicWalk
     theta::TH
     buffers::B
     kernel::K           # what an observation site computes (logpdf / rand / …)
+    rng::R              # for GQ latents: they have no coordinate, so they are DRAWN
     sites::Vector{Pair{Symbol,Any}}
     observations::Vector{Pair{Symbol,Any}}
 end
-JulianicRecord(theta::AbstractVector, buffers, kernel) =
-    JulianicRecord(theta, buffers, kernel,
+JulianicRecord(theta::AbstractVector, buffers, kernel, rng::Random.AbstractRNG) =
+    JulianicRecord(theta, buffers, kernel, rng,
                    Pair{Symbol,Any}[], Pair{Symbol,Any}[])
 
 # SIMULATE (the prior / prior-predictive pass): the same body again, but with no
@@ -340,6 +389,69 @@ end
 # SIMULATE: draw each marginal from its prior (no position to walk). Not on the
 # gradient path, so the plain loop is fine.
 @inline function _sample_broadcast!(ctx::JulianicSimulate, name::Val, dists)
+    lazy = _julianic_instantiate(dists)
+    n = length(lazy)
+    b = _site_buffer!(ctx, n)
+    for i in 1:n
+        b[i] = rand(ctx.rng, lazy[i])
+    end
+    return _record_site!(ctx, name, b)
+end
+
+# --- Generated-quantity latents (a `~` that reaches no likelihood term) ----
+#
+# The activity analysis routes an unconstrained-latent `~` here when its site
+# does NOT reach the likelihood (a new-group random effect with no data, say).
+# It consumes NO unconstrained coordinate and contributes nothing to the density;
+# it exists only to be DRAWN in postprocessing (the julianic counterpart of a
+# Stan `generated quantities` draw). The branch is compile-time-dead for every
+# model with no gq latent, which is the entire current gallery.
+
+# DENSITY / TRACE: return a cheap in-support placeholder, consume no θ, score
+# nothing. Nothing on the likelihood path reads a gq value — by construction of
+# the partition — so the placeholder is never scored, and for a scalar site it is
+# a literal the primal's dead-code elimination removes. (`0.0`/`1.0` are the same
+# in-support values the TRACE `_sample!` methods hand back.)
+@inline _julianic_gq_placeholder(::Distributions.Normal) = 0.0
+@inline _julianic_gq_placeholder(::Distributions.Exponential) = 1.0
+@inline _julianic_gq_placeholder(dist::Distributions.MultivariateDistribution) =
+    zeros(length(dist))
+@inline _julianic_gq_placeholder(
+        dist::Distributions.Product{Distributions.Continuous,<:Distributions.Exponential}) =
+    ones(length(dist))
+@inline function _julianic_gq_placeholder(dist::Distributions.LKJCholesky)
+    K = dist.d
+    L = zeros(K, K)
+    for i in 1:K
+        L[i, i] = 1.0
+    end
+    return L
+end
+
+# POSTPROCESSING: a gq latent has no posterior coordinate, so it is drawn from its
+# prior (conditioned on the other latents' current values — which the record walk
+# has already read from θ) and recorded, using the recording context's RNG.
+@inline _julianic_gq_draw(ctx, dist) = rand(ctx.rng, dist)
+@inline _julianic_gq_draw(ctx, dist::Distributions.LKJCholesky) =
+    Matrix(rand(ctx.rng, dist).L)
+
+@inline _sample_gq!(::JulianicPrimal, ::Val, dist) = _julianic_gq_placeholder(dist)
+@inline _sample_gq!(::JulianicTrace, ::Val, dist) = _julianic_gq_placeholder(dist)
+@inline _sample_gq!(ctx::JulianicRecording, name::Val, dist) =
+    _record_site!(ctx, name, _julianic_gq_draw(ctx, dist))
+
+# Elementwise gq latent (`b .~ Normal.(0, tau)` with `b` a gq site): the same, per
+# marginal. DENSITY/TRACE hand back an in-support placeholder vector (allocating,
+# but dead in the primal — a gq broadcast site is unread on the likelihood path);
+# POSTPROCESSING draws each marginal. Consumes no θ and pushes no pooled buffer.
+@inline function _sample_broadcast_gq!(ctx::Union{JulianicPrimal,JulianicTrace},
+                                       name::Val, dists)
+    lazy = _julianic_instantiate(dists)
+    return _julianic_gq_placeholder(lazy[1]) isa Number ?
+        fill(_julianic_gq_placeholder(lazy[1]), length(lazy)) :
+        _julianic_gq_placeholder(lazy[1])
+end
+@inline function _sample_broadcast_gq!(ctx::JulianicRecording, name::Val, dists)
     lazy = _julianic_instantiate(dists)
     n = length(lazy)
     b = _site_buffer!(ctx, n)
@@ -757,27 +869,34 @@ end
 
 # --- Model objects --------------------------------------------------------
 
-# A julianic model: the lowered body (`run(ctx)`, closing over the model's
-# input arguments) plus the input argument names (for introspection/error text).
+# A julianic model: the lowered body (`run(ctx, data, roles)`, closing over the
+# model's input arguments), the input argument names (introspection/error text),
+# and the static AA skeleton (one `JulianicStmt` per body statement).
 struct JulianicModel{R}
     run::R
     input_names::Tuple{Vararg{Symbol}}
+    statements::Vector{JulianicStmt}
 end
 
-# After conditioning: the run closure + the conditioned observation data.
+# After conditioning: the run closure + the conditioned observation data + the
+# skeleton (carried through so `jprepare` can run the analysis on it).
 struct JulianicConditioned{R,D}
     run::R
     data::D
+    statements::Vector{JulianicStmt}
 end
 
-# After the trace: adds the discovered unconstrained dimension AND the ordered
-# lengths of the array-valued intermediate buffers (so a primal pool can be
-# preallocated to match — see `JulianicBuffers`).
-struct JulianicPrepared{R,D}
+# After the trace: adds the discovered unconstrained dimension, the ordered
+# array-valued intermediate buffer lengths (so a primal pool can be preallocated
+# — see `JulianicBuffers`), the compile-time-constant `roles` carrier threaded
+# into `run`, and the per-statement `activity` partition (for `jactivity`).
+struct JulianicPrepared{R,D,RL}
     run::R
     data::D
     dimension::Int
     buffer_sizes::Vector{Dims}
+    roles::RL
+    activity::Vector{JulianicActivity}
 end
 
 """
@@ -786,19 +905,121 @@ end
 Bind observed data to a julianic model, yielding a `JulianicConditioned`.
 """
 jcondition(model::JulianicModel; observations...) =
-    JulianicConditioned(model.run, NamedTuple(observations))
+    JulianicConditioned(model.run, NamedTuple(observations), model.statements)
+
+# The two-pass activity analysis (§ Activity-analysis types). Runs over the static
+# skeleton with the conditioned names — no values — so it can run at `jprepare`,
+# after conditioning, before any position exists.
+#
+#   * FORWARD (parameter taint): a statement produces a parameter-dependent value
+#     if it is an unconditioned `~` (introduces a latent) or reads a name whose
+#     defining statement is parameter-tainted. A conditioned `~` produces the
+#     observed DATA value (not parameter-tainted).
+#   * BACKWARD (affects-likelihood): seed every conditioned `~` (a likelihood
+#     term); a statement affects the likelihood if a downstream affecting
+#     statement reads what it writes. SSA + top-to-bottom means a write is only
+#     read later, so a single reverse sweep is exact.
+#   * DISTRIBUTE: unconditioned `~` → :sampled if it affects the likelihood else
+#     :gq; deterministic → :density if parameter ∧ affecting, :gq if parameter ∧
+#     not, :data otherwise; conditioned `~` → :observation.
+#
+# Returns the per-statement activity (introspection) and the gq LATENT site names
+# (threaded as `JulianicRoles`). O(V·E) in the reverse sweep, which is nothing for
+# the handful of statements a model body has.
+function _julianic_activity(statements::Vector{JulianicStmt}, condnames)
+    n = length(statements)
+    defindex = Dict{Symbol,Int}()
+    for i in 1:n
+        w = statements[i].write
+        w === Symbol("") || (defindex[w] = i)
+    end
+    is_cond(name) = name in condnames
+    is_obs = Bool[s.is_sample && is_cond(s.write) for s in statements]
+    is_latent = Bool[s.is_sample && !is_cond(s.write) for s in statements]
+
+    is_param = falses(n)
+    for i in 1:n
+        if is_latent[i]
+            is_param[i] = true
+        elseif is_obs[i]
+            is_param[i] = false
+        else
+            is_param[i] = any(statements[i].reads) do r
+                j = get(defindex, r, 0)
+                j != 0 && is_param[j]
+            end
+        end
+    end
+
+    affects = Bool[is_obs[i] for i in 1:n]
+    # With no likelihood term at all (a prior-only model), the sampling target IS
+    # the joint prior, so every latent is part of it. Seed the backward sweep from
+    # the latent sites instead of the (empty) observation set — otherwise no latent
+    # would "affect the likelihood", every one would collapse to a generated
+    # quantity, and the model would prepare with dimension 0 (unsamplable). A
+    # generated quantity is meaningful only relative to a likelihood; with none,
+    # there is nothing to generate a quantity against.
+    any(is_obs) || (affects .= is_latent)
+    for i in n:-1:1
+        (affects[i] || statements[i].write === Symbol("")) && continue
+        w = statements[i].write
+        for j in (i + 1):n
+            if affects[j] && (w in statements[j].reads)
+                affects[i] = true
+                break
+            end
+        end
+    end
+
+    activity = Vector{JulianicActivity}(undef, n)
+    gq = Symbol[]
+    for i in 1:n
+        s = statements[i]
+        role = if is_obs[i]
+            :observation
+        elseif is_latent[i]
+            affects[i] ? :sampled : (push!(gq, s.write); :gq)
+        elseif !is_param[i]
+            :data
+        elseif affects[i]
+            :density
+        else
+            :gq
+        end
+        activity[i] = JulianicActivity(s.write, role, s.is_sample)
+    end
+    return activity, Tuple(gq)
+end
 
 """
     jprepare(conditioned::JulianicConditioned)
 
-Run the body once in TRACE mode to discover the unconstrained dimension.
+Run the activity analysis (partition the body into data / needed-for-sampling /
+generated-quantity), then run the body once in TRACE mode to discover the
+unconstrained dimension — which now counts ONLY the sampled latents, so a
+generated-quantity latent consumes no coordinate.
 """
 function jprepare(conditioned::JulianicConditioned)
+    activity, gq_sites = _julianic_activity(
+        conditioned.statements, propertynames(conditioned.data))
+    roles = JulianicRoles{gq_sites}()
     trace = JulianicTrace()
-    conditioned.run(trace, conditioned.data)
+    conditioned.run(trace, conditioned.data, roles)
     return JulianicPrepared(
-        conditioned.run, conditioned.data, trace.dim, trace.buffer_sizes)
+        conditioned.run, conditioned.data, trace.dim, trace.buffer_sizes,
+        roles, activity)
 end
+
+"""
+    jactivity(prepared) -> Vector{JulianicActivity}
+
+The activity partition assigned to each body statement at `jprepare`: per
+statement, the name it binds and its role (`:observation`, `:sampled`, `:gq`,
+`:density`, `:data`). The partition is a function of the model AND the
+conditioning, so re-conditioning the same model can move a site between
+`:sampled` and `:gq`.
+"""
+jactivity(prepared::JulianicPrepared) = prepared.activity
 
 dimension(prepared::JulianicPrepared) = prepared.dimension
 
@@ -811,7 +1032,7 @@ function _julianic_kernel(theta::AbstractVector{T}, prepared::JulianicPrepared,
     buffers.vcursor = 0                 # rewind the pool + the primal's own state
     buffers.cursor = 0
     buffers.acc = zero(T)
-    prepared.run(JulianicPrimal(theta, buffers), prepared.data)
+    prepared.run(JulianicPrimal(theta, buffers), prepared.data, prepared.roles)
     return buffers.acc
 end
 
@@ -902,11 +1123,14 @@ end
 # the model rather than by a parallel description of it. The declarative surface
 # needs `output`/`outputs`/`simulate` machinery precisely because its executor
 # discarded the body; julianic still has the body.
-function _julianic_record(prepared::JulianicPrepared, theta::AbstractVector, kernel)
+# `rng` is used only to DRAW gq latents (sites the analysis found unreachable from
+# the likelihood); a model with none never touches it, so it defaults.
+function _julianic_record(prepared::JulianicPrepared, theta::AbstractVector, kernel,
+                          rng::Random.AbstractRNG=Random.default_rng())
     _julianic_check_dimension(prepared, theta)
     buffers = JulianicBuffers{eltype(theta)}(prepared.buffer_sizes)
-    context = JulianicRecord(theta, buffers, kernel)
-    prepared.run(context, prepared.data)
+    context = JulianicRecord(theta, buffers, kernel, rng)
+    prepared.run(context, prepared.data, prepared.roles)
     return context
 end
 
@@ -918,10 +1142,13 @@ position `theta`, keyed by site name in body order.
 
 This is the same constraining transform the density applies — one walk, not a
 reimplementation — so a value here can never disagree with the log density that
-scored it.
+scored it. A generated-quantity latent (one the analysis found unreachable from
+the likelihood) has no coordinate to constrain, so it is DRAWN from its prior
+using `rng`, conditioned on this position's other latents.
 """
-jconstrained(prepared::JulianicPrepared, theta::AbstractVector) =
-    NamedTuple(_julianic_record(prepared, theta, _obs_logpdf).sites)
+jconstrained(prepared::JulianicPrepared, theta::AbstractVector;
+             rng::Random.AbstractRNG=Random.default_rng()) =
+    NamedTuple(_julianic_record(prepared, theta, _obs_logpdf, rng).sites)
 
 """
     jpointwise(prepared, theta) -> NamedTuple
@@ -930,8 +1157,9 @@ Per-observation log-likelihood at `theta`, keyed by observation site — the
 elementwise terms whose sum the density accumulates, which is what PSIS-LOO and
 WAIC consume.
 """
-jpointwise(prepared::JulianicPrepared, theta::AbstractVector) =
-    NamedTuple(_julianic_record(prepared, theta, _obs_logpdf).observations)
+jpointwise(prepared::JulianicPrepared, theta::AbstractVector;
+           rng::Random.AbstractRNG=Random.default_rng()) =
+    NamedTuple(_julianic_record(prepared, theta, _obs_logpdf, rng).observations)
 
 """
     jpredict([rng], prepared, theta) -> NamedTuple
@@ -942,7 +1170,7 @@ their natural element type.
 """
 jpredict(rng::Random.AbstractRNG, prepared::JulianicPrepared, theta::AbstractVector) =
     NamedTuple(_julianic_record(
-        prepared, theta, JulianicPredictKernel(rng)).observations)
+        prepared, theta, JulianicPredictKernel(rng), rng).observations)
 jpredict(prepared::JulianicPrepared, theta::AbstractVector) =
     jpredict(Random.default_rng(), prepared, theta)
 
@@ -967,7 +1195,7 @@ parametrization that the family methods exist to handle.
 function jsimulate(rng::Random.AbstractRNG, prepared::JulianicPrepared)
     buffers = JulianicBuffers{Float64}(prepared.buffer_sizes)
     context = JulianicSimulate(rng, buffers, JulianicPredictKernel(rng))
-    prepared.run(context, prepared.data)
+    prepared.run(context, prepared.data, prepared.roles)
     return (; latents=NamedTuple(context.sites),
               observations=NamedTuple(context.observations))
 end
@@ -1001,12 +1229,13 @@ jsimulate(prepared::JulianicPrepared) = jsimulate(Random.default_rng(), prepared
         "takes a different path per position, so the draws cannot be stacked."))
 
 function _julianic_draws(prepared::JulianicPrepared, positions::AbstractMatrix,
-                         kernel, selector::F) where {F}
+                         kernel, selector::F,
+                         rng::Random.AbstractRNG=Random.default_rng()) where {F}
     ndraws = size(positions, 1)
     ndraws >= 1 || throw(ArgumentError(
         "julianic draws: `positions` needs at least one row (rows are draws)"))
     recorded = selector(
-        _julianic_record(prepared, view(positions, 1, :), kernel))
+        _julianic_record(prepared, view(positions, 1, :), kernel, rng))
     names = Tuple(pair.first for pair in recorded)
     stores = Tuple(_julianic_draw_store(pair.second, ndraws) for pair in recorded)
     for (store, pair) in zip(stores, recorded)
@@ -1014,7 +1243,7 @@ function _julianic_draws(prepared::JulianicPrepared, positions::AbstractMatrix,
     end
     for draw in 2:ndraws
         recorded = selector(
-            _julianic_record(prepared, view(positions, draw, :), kernel))
+            _julianic_record(prepared, view(positions, draw, :), kernel, rng))
         # A body whose site set depends on the position would stack garbage under
         # the first draw's names, so check rather than trust the shape.
         Tuple(pair.first for pair in recorded) == names ||
@@ -1183,7 +1412,7 @@ end
 # its type), so the branch folds to a literal and the dead half is eliminated —
 # no runtime test, and both halves stay inline generated code rather than
 # closures, which is what keeps Enzyme's activity analysis clean.
-function _julianic_lower_sample(lhs, rhs, broadcast::Bool, ctx, data)
+function _julianic_lower_sample(lhs, rhs, broadcast::Bool, ctx, data, roles)
     lhs isa Symbol || throw(ArgumentError(
         "julianic @jmodel: `~` left-hand side must be a name; got `$lhs`"))
     name = Val(lhs)
@@ -1206,13 +1435,25 @@ function _julianic_lower_sample(lhs, rhs, broadcast::Bool, ctx, data)
         $(_obs_end!)($ctx, $name, $buffer_var)
         $data_var
     end
-    latent = broadcast ?
+    # A latent `~` splits three ways, each guard a compile-time constant:
+    #   conditioned → observation (above);
+    #   generated-quantity (unconditioned, unreachable from the likelihood) →
+    #     no coordinate, drawn only in postprocessing;
+    #   sampled (the default) → consume a coordinate, score the prior.
+    # `_julianic_is_gq` is `false` for every model with no gq latent, so the
+    # `elseif` folds away and the lowering is identical to the pre-AA surface.
+    sampled = broadcast ?
         :($(_sample_broadcast!)($ctx, $name, $(_julianic_lazy(rhs)))) :
         :($(_sample_site!)($ctx, $data, $name, $rhs))
+    gq = broadcast ?
+        :($(_sample_broadcast_gq!)($ctx, $name, $(_julianic_lazy(rhs)))) :
+        :($(_sample_gq!)($ctx, $name, $rhs))
     return :($lhs = if $(_julianic_is_conditioned)($data, $name)
                  $observed
+             elseif $(_julianic_is_gq)($roles, $name)
+                 $gq
              else
-                 $latent
+                 $sampled
              end)
 end
 
@@ -1287,7 +1528,7 @@ end
 # buffers (still ordinary Julia, just allocation-free).
 # `ctx` names the (mutable) sampling context; `data` names the conditioned
 # observation data — both are parameters of the generated `run` closure.
-function _julianic_lower_statement(statement, ctx, data)
+function _julianic_lower_statement(statement, ctx, data, roles)
     # `end`/`begin` inside `A[...]` are POSITIONAL markers — they mean nothing
     # outside the indexing expression that encloses them. The buffer rewrite
     # hoists a gather into its own statement (`t = _cached_gather!(ctx, A, idx)`),
@@ -1299,7 +1540,8 @@ function _julianic_lower_statement(statement, ctx, data)
     statement = Base.replace_ref_begin_end!(statement)
     sample = _julianic_sample_statement(statement)
     if sample !== nothing
-        return _julianic_lower_sample(sample.lhs, sample.rhs, sample.broadcast, ctx, data)
+        return _julianic_lower_sample(
+            sample.lhs, sample.rhs, sample.broadcast, ctx, data, roles)
     end
     # Deterministic assignment `lhs = rhs`: buffer every array-valued node in rhs.
     if statement isa Expr && statement.head === :(=)
@@ -1398,7 +1640,11 @@ _julianic_is_mutation_head(h) = h isa Symbol && h !== :(=) && endswith(string(h)
 # destructuring), which the SSA restriction forbids. `sample` is the precomputed
 # `_julianic_sample_statement` result (a `~` writes its site name).
 function _julianic_statement_write(statement, sample)
-    sample === nothing || return sample.lhs
+    # A `~` writes its site name — but only a Symbol lhs is a valid write. A
+    # non-Symbol lhs (`x[1] ~ …`) is left for `_julianic_lower_sample` to reject
+    # with its precise "lhs must be a name" error, so return `nothing` here rather
+    # than track a non-Symbol in the (Symbol-typed) written set.
+    sample === nothing || return sample.lhs isa Symbol ? sample.lhs : nothing
     statement isa Expr || return nothing
     _julianic_is_mutation_head(statement.head) &&
         _julianic_ssa_error(statement, "mutates in place (`x .= v` / `x += v`)")
@@ -1415,6 +1661,65 @@ end
     string(statement) * "`). The body must be single-assignment so the activity " *
     "analysis follows each name to one defining statement; use a new name."))
 
+# The free NAMES an expression reads, for the static skeleton. Over-collected on
+# purpose: a symbol with no model binding (`exp`, `Normal`, a range `end`) simply
+# gets no `defindex` entry in the analysis, so it contributes no dependency edge.
+# A MISSED read would be unsound (a hidden edge), so the walk errs toward
+# collecting: the only things skipped are things that are provably NOT variable
+# reads — a `.field` name, a keyword-argument key, a macro name.
+_julianic_collect_symbols!(_acc, _x) = nothing
+_julianic_collect_symbols!(acc, s::Symbol) = (push!(acc, s); nothing)
+function _julianic_collect_symbols!(acc, ex::Expr)
+    if ex.head === :.                               # `a.field` vs broadcast `f.(x)`
+        _julianic_collect_symbols!(acc, ex.args[1])
+        if length(ex.args) >= 2 && ex.args[2] isa Expr && ex.args[2].head === :tuple
+            for a in ex.args[2].args                # broadcast args ARE reads
+                _julianic_collect_symbols!(acc, a)
+            end
+        end                                         # a QuoteNode field name is not
+        return nothing
+    elseif ex.head === :kw                          # `key = val` — only val is read
+        _julianic_collect_symbols!(acc, ex.args[2])
+        return nothing
+    elseif ex.head === :macrocall                   # skip the macro name (args[1])
+        for a in ex.args[2:end]
+            _julianic_collect_symbols!(acc, a)
+        end
+        return nothing
+    end
+    for a in ex.args
+        _julianic_collect_symbols!(acc, a)
+    end
+    return nothing
+end
+function _julianic_free_symbols(ex)
+    collected = Symbol[]
+    _julianic_collect_symbols!(collected, ex)
+    seen = Set{Symbol}()
+    reads = Symbol[]
+    for s in collected
+        s in seen || (push!(seen, s); push!(reads, s))
+    end
+    return reads
+end
+
+# The skeleton statement for one lowered body statement — the syntactic facts the
+# analysis runs on. Built from the RAW statement (a `~` reads its distribution's
+# free names; a `lhs = rhs` reads rhs's; a bare expression writes nothing).
+function _julianic_skeleton_statement(statement, sample, write)
+    # `write` is `nothing` for a bare expression, and also for a `~` with a
+    # non-Symbol lhs that lowering is about to reject — coerce both to `Symbol("")`
+    # so the skeleton is well-formed even for the statement whose lowering throws.
+    w = write isa Symbol ? write : Symbol("")
+    if sample !== nothing
+        return JulianicStmt(w, _julianic_free_symbols(sample.rhs), true,
+                            sample.broadcast)
+    end
+    reads = statement isa Expr && statement.head === :(=) ?
+        _julianic_free_symbols(statement.args[2]) : Symbol[]
+    return JulianicStmt(w, reads, false, false)
+end
+
 function _julianic_model_syntax(definition)
     definition isa Expr && definition.head === :function ||
         throw(ArgumentError("julianic @jmodel must wrap a function definition"))
@@ -1428,7 +1733,9 @@ function _julianic_model_syntax(definition)
     statements = body isa Expr && body.head === :block ? body.args : Any[body]
     ctx = gensym(:ctx)
     data = gensym(:data)
+    roles = gensym(:roles)
     lowered = Any[]
+    skeleton = JulianicStmt[]
     # Function-argument names are pre-bound; a statement re-writing one is a
     # single-assignment violation, so they seed the written-name set.
     written = Set{Symbol}(input_names)
@@ -1448,14 +1755,19 @@ function _julianic_model_syntax(definition)
             write in written && _julianic_reassignment_error(write, statement)
             push!(written, write)
         end
-        lowered_statement = _julianic_lower_statement(statement, ctx, data)
+        # Record the static skeleton BEFORE lowering mutates the statement
+        # (`replace_ref_begin_end!`) — the analysis wants the author's own reads.
+        push!(skeleton, _julianic_skeleton_statement(statement, sample, write))
+        lowered_statement = _julianic_lower_statement(statement, ctx, data, roles)
         _julianic_assert_lowered(lowered_statement)
         push!(lowered, lowered_statement)
     end
 
-    run_closure = Expr(:function, Expr(:call, gensym(:run), ctx, data),
+    run_closure = Expr(:function, Expr(:call, gensym(:run), ctx, data, roles),
                        Expr(:block, lowered..., nothing))
-    model_expr = :($(JulianicModel)($run_closure, $(input_names)))
+    # The skeleton is real data built here; splice it in as a literal object so
+    # `jprepare` can run the analysis over it at runtime.
+    model_expr = :($(JulianicModel)($run_closure, $(input_names), $(skeleton)))
     return Expr(:function, signature, Expr(:block, model_expr))
 end
 
