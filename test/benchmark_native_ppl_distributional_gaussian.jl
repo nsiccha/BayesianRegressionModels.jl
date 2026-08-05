@@ -254,5 +254,35 @@ println("mu_head=", NP.evaluate(
     work, prepared, position, NP.NodeOutput(:mu))[1:8])
 println("sigma_head=", NP.evaluate(
     work, prepared, position, NP.NodeOutput(:sigma))[1:8])
+# Four-way wall-clock, hand-optimized Stan (`pure`) as the CEILING to beat:
+# julianic_over_hand_stan < 1.0 ⇒ julianic is FASTER than hand-optimized Stan,
+# > 1.0 ⇒ that many times slower. nppl(declarative) = in-house speed reference,
+# sbbrmi = backend reference. Primal (density) and gradient (HMC path) both.
+# CAVEAT: julianic ALLOCATES (workspace-free primal ~10 KB; grouped gradient
+# 5-14 KB) where nppl/Stan are 0-alloc, and `timing_receipt` disables GC, so
+# julianic's high-iteration wall-clock is inflated by accumulated garbage and
+# is protocol-sensitive. `allocations=` is the DETERMINISTIC companion metric
+# (isolation-confirmed intrinsic); read the ratios as directional, alloc as exact.
+function speed_comparison(timing)
+    over(arm) = (
+        primal=timing.jl.density.median / arm.density.median,
+        gradient=timing.jl.gradient.median / arm.gradient.median)
+    (;
+        wall_clock_median_ns=(
+            hand_stan=(primal=timing.pure.density.median,
+                       gradient=timing.pure.gradient.median),
+            nppl_declarative=(primal=timing.native.density.median,
+                              gradient=timing.native.gradient.median),
+            sbbrmi=(primal=timing.sb.density.median,
+                    gradient=timing.sb.gradient.median),
+            julianic=(primal=timing.jl.density.median,
+                      gradient=timing.jl.gradient.median)),
+        julianic_over_hand_stan=over(timing.pure),
+        julianic_over_nppl_declarative=over(timing.native),
+        julianic_over_sbbrmi=over(timing.sb))
+end
+
 println("allocations=", allocation_receipt())
-println("nanoseconds=", timing_receipt())
+const timing_result = timing_receipt()
+println("nanoseconds=", timing_result)
+println("speed_comparison=", speed_comparison(timing_result))

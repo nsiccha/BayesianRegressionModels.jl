@@ -398,4 +398,22 @@ end
     show_benchmark("optimized Stan/BridgeStan", "normalized gradient FFI", optimized_gradient_bench; N, G, dimension)
     show_benchmark("julianic NativePPL @jmodel", "jlogdensity", julianic_density_bench; N, G, dimension)
     show_benchmark("julianic NativePPL @jmodel", "jlogdensity_and_gradient!", julianic_gradient_bench; N, G, dimension)
+    # hand-optimized Stan is the CEILING to beat: julianic_over_hand_stan < 1.0
+    # ⇒ julianic is FASTER than hand-optimized Stan. nppl = in-house speed ref,
+    # sbbrmi = backend ref. Here the hand-optimized `.stan` is the "optimized"
+    # arm. Primal (density) and gradient (HMC path) reported for each.
+    println(
+        "BRM_MIXED_SPEED",
+        " julianic_over_hand_stan_primal=",
+        julianic_density_bench.median_ns / optimized_density_bench.median_ns,
+        " julianic_over_hand_stan_gradient=",
+        julianic_gradient_bench.median_ns / optimized_gradient_bench.median_ns,
+        " julianic_over_nppl_primal=",
+        julianic_density_bench.median_ns / native_density_bench.median_ns,
+        " julianic_over_nppl_gradient=",
+        julianic_gradient_bench.median_ns / native_gradient_bench.median_ns,
+        " julianic_over_sbbrmi_primal=",
+        julianic_density_bench.median_ns / sbb_density_bench.median_ns,
+        " julianic_over_sbbrmi_gradient=",
+        julianic_gradient_bench.median_ns / sbb_gradient_bench.median_ns)
 end
