@@ -1331,6 +1331,90 @@ function _julianic_assert_lowered(expr)
     return nothing
 end
 
+# --- Body restrictions (what makes the activity analysis sound) -----------
+#
+# The activity analysis (below, at `jprepare`) reads the body as a STATIC
+# single-assignment statement list: the statement ORDER is a topological sort of
+# the dependency graph, so one forward + one backward sweep over the names each
+# statement reads and writes computes the data / needed-for-sampling /
+# generated-quantity partition with NO values. Two properties make that sound, and
+# each is enforced here with a loud macro-expansion error rather than left as a
+# silent assumption:
+#
+#   * NO value-dependent control flow. A branch or loop makes "which statements
+#     run" depend on the position, so one static statement list could no longer
+#     stand for the graph. Same constraint StanBlocks imposes.
+#   * SINGLE ASSIGNMENT. Each name is written once, so "the statement that defines
+#     `n`" is unambiguous — that is exactly the edge the analysis follows. In-place
+#     mutation (`x[i] = v`, `x .= v`, `x += v`) and reassignment both break it.
+#
+# Both NARROW the surface the walking skeleton accepted; the gallery uses neither
+# (verified: no body has control flow, in-place mutation, or a repeated
+# left-hand side), so nothing regresses.
+
+const _JULIANIC_CONTROL_FLOW_HEADS = Dict{Symbol,String}(
+    :for => "a `for` loop", :while => "a `while` loop",
+    :if => "an `if` / `?:` branch", :elseif => "an `elseif` branch",
+    :(&&) => "an `&&` short-circuit", :(||) => "an `||` short-circuit",
+    :comprehension => "a comprehension", :generator => "a generator",
+    :flatten => "a nested generator", :do => "a `do` block",
+    :try => "a `try` block", :break => "a `break`", :continue => "a `continue`",
+    :let => "a `let` block",
+)
+
+@noinline _julianic_control_flow_error(kind, statement) = throw(ArgumentError(
+    "julianic @jmodel: the model body must be single-assignment Julia with no " *
+    "value-dependent control flow — the activity analysis reads it as a static " *
+    "statement list — but found " * kind * " in `" * string(statement) * "`. " *
+    "Rewrite without control flow: a vector of independent sites is " *
+    "`b .~ Normal.(0, tau)`, a conditional mean is arithmetic or indexing."))
+
+# Reject any control-flow / scope-introducing construct anywhere in a RAW
+# statement (before lowering, so the `if` the lowering itself emits is never seen).
+function _julianic_assert_no_control_flow(root)
+    root isa Expr || return nothing
+    kind = get(_JULIANIC_CONTROL_FLOW_HEADS, root.head, nothing)
+    kind === nothing || _julianic_control_flow_error(kind, root)
+    for argument in root.args
+        _julianic_assert_no_control_flow(argument)
+    end
+    return nothing
+end
+
+# The Expr heads ending in `=` are exactly `:(=)` (plain assignment) and the
+# augmented / broadcast assignments (`:+=`, `:.+=`, `:.=`, …); the comparison
+# operators (`<=`, `==`) are `:call` heads, never Expr heads. So "ends in `=`,
+# is not plain `=`" cleanly identifies an in-place update.
+_julianic_is_mutation_head(h) = h isa Symbol && h !== :(=) && endswith(string(h), "=")
+
+@noinline _julianic_ssa_error(statement, reason) = throw(ArgumentError(
+    "julianic @jmodel: the model body must be single-assignment, but `" *
+    string(statement) * "` " * reason * ". Bind a NEW name instead — the activity " *
+    "analysis follows each name to ONE defining statement, which in-place " *
+    "mutation and destructuring make ambiguous."))
+
+# The name a raw statement writes, or `nothing` for a bare expression. Throws on
+# any non-single-assignment form (compound / broadcast assign, setindex,
+# destructuring), which the SSA restriction forbids. `sample` is the precomputed
+# `_julianic_sample_statement` result (a `~` writes its site name).
+function _julianic_statement_write(statement, sample)
+    sample === nothing || return sample.lhs
+    statement isa Expr || return nothing
+    _julianic_is_mutation_head(statement.head) &&
+        _julianic_ssa_error(statement, "mutates in place (`x .= v` / `x += v`)")
+    statement.head === :(=) || return nothing          # bare expression: no write
+    target = statement.args[1]
+    target isa Symbol && return target
+    target isa Expr && target.head === :ref &&
+        _julianic_ssa_error(statement, "assigns into an index (`x[i] = v`)")
+    _julianic_ssa_error(statement, "is not a plain `name = value` assignment")
+end
+
+@noinline _julianic_reassignment_error(name, statement) = throw(ArgumentError(
+    "julianic @jmodel: `" * string(name) * "` is assigned more than once (at `" *
+    string(statement) * "`). The body must be single-assignment so the activity " *
+    "analysis follows each name to one defining statement; use a new name."))
+
 function _julianic_model_syntax(definition)
     definition isa Expr && definition.head === :function ||
         throw(ArgumentError("julianic @jmodel must wrap a function definition"))
@@ -1345,12 +1429,24 @@ function _julianic_model_syntax(definition)
     ctx = gensym(:ctx)
     data = gensym(:data)
     lowered = Any[]
+    # Function-argument names are pre-bound; a statement re-writing one is a
+    # single-assignment violation, so they seed the written-name set.
+    written = Set{Symbol}(input_names)
     for statement in statements
         statement isa LineNumberNode && (push!(lowered, statement); continue)
         # Drop an explicit `return` — the density is the accumulator, not the
         # body's return value (the return only named outputs in `@model`).
         if statement isa Expr && statement.head === :return
             continue
+        end
+        # Enforce the body restrictions BEFORE lowering, so the checks see the
+        # author's syntax rather than the `if`/`.=` the lowering introduces.
+        _julianic_assert_no_control_flow(statement)
+        sample = _julianic_sample_statement(statement)
+        write = _julianic_statement_write(statement, sample)
+        if write !== nothing
+            write in written && _julianic_reassignment_error(write, statement)
+            push!(written, write)
         end
         lowered_statement = _julianic_lower_statement(statement, ctx, data)
         _julianic_assert_lowered(lowered_statement)
