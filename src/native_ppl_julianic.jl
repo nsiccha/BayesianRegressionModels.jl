@@ -16,12 +16,12 @@
 # ------
 # * Only `~` / `.~` statements are rewritten; every other statement is kept
 #   VERBATIM — that is exactly "valid Julia except ~".
-# * A latent `sym ~ dist` lowers to `sym = _sample_site!(ctx, Val(:sym), dist)`.
-# * A broadcast observation `@. lhs ~ dist` lowers to accumulating
-#   `sum(@. logpdf(dist, <conditioned data for lhs>))`. `lhs .~ dist` is the
-#   same site in the spelling the declarative `@model` uses, where the RHS is
-#   already written in broadcast form (`y .~ Poisson.(exp(r))`) and so is NOT
-#   re-dotted.
+# * `sym ~ dist` lowers to ONE operation — prep the value, accumulate its
+#   log-density contribution — with the value coming from the conditioned data
+#   when `sym` was passed to `jcondition` and from a fresh slice of theta when it
+#   was not. The dot lifts that operation elementwise and nothing more, so
+#   `@. y ~ D(a, b)` and `y .~ D.(a, b)` are the same statement (Julia's own
+#   `Base.Broadcast.__dot__` performs the normalization).
 # * The body runs twice against a context `ctx`:
 #     - TRACE (compile): discover the total unconstrained dimension by counting
 #       the coordinates each latent `~` consumes. Returns in-support placeholder
@@ -33,13 +33,17 @@
 #       declarative executor already uses — DifferentiationInterface + AutoEnzyme
 #       straight through the primal kernel).
 #
-# Latent-vs-observation is decided SYNTACTICALLY (broadcast = observation,
-# scalar = latent), so BOTH directions are checked against the conditioned data
-# and fail closed. Without that check a scalar `~` on a conditioned name would
-# silently score a fresh latent and never look at the observation — and the
-# declarative `@model` accepts exactly that spelling (`macro_scalar_gaussian`,
-# test/native_ppl.jl:238), so the same source text would mean two different
-# models depending on which macro read it.
+# Latent-vs-observation is decided by CONDITIONING, never by spelling. That is
+# what data-vs-parameter means, it is what the architecture contract specifies
+# ("free-coordinate allocation after composition and conditioning"), and it is
+# what the declarative graph layer already does (`AbstractSiteActivity` in
+# `native_ppl_authoring.jl`, assigned `hasproperty(conditions, name)`).
+#
+# An earlier version of this file decided it syntactically — broadcast meant
+# observation, scalar meant latent — and needed two fail-closed errors to police
+# the disagreement with the conditioned data. Both are gone: the check that used
+# to throw now selects a branch instead, and it still folds to a compile-time
+# constant, so the primal pays nothing for it either way.
 #
 # Supported latent site families, each one `_sample!` method pair (trace +
 # primal) — the surface grows by ADDING methods, never by touching the lowering:
@@ -258,22 +262,36 @@ end
     name in names
 @inline _julianic_is_conditioned(_data, ::Val) = false
 
-@noinline _julianic_conditioned_latent_error(::Val{name}) where {name} =
-    throw(ArgumentError(
-        "julianic @jmodel: `" * String(name) * "` is conditioned data, so " *
-        "`" * String(name) * " ~ dist` would silently score a fresh LATENT " *
-        "and never look at the observation. Write the observation in " *
-        "broadcast form — `@. " * String(name) * " ~ dist` or `" *
-        String(name) * " .~ dist` — or drop it from `jcondition`."))
+# A latent `~`: prep the site's coordinate(s), accumulate its density, return the
+# natural-space value. `data` is NOT consulted for a kind check — conditioning
+# selects between this and the observation path at the call site
+# (`_julianic_lower_sample`), as a compile-time constant, so a conditioned name
+# never reaches here. It stays in the signature because the scalar and broadcast
+# forms share one call shape.
+@inline _sample_site!(ctx, _data, name::Val, dist) =
+    _record_site!(ctx, name, _sample!(ctx, name, dist))
 
-# Every lowered scalar `~` routes through here, so the fail-closed check covers
-# present AND future `_sample!` methods. `data` is the same constant value the
-# observation sites read; it is threaded in rather than stored on `ctx` so the
-# differentiated context keeps holding only active state (see `JulianicPrimal`).
-@inline function _sample_site!(ctx, data, name::Val, dist)
-    _julianic_is_conditioned(data, name) &&
-        _julianic_conditioned_latent_error(name)
-    return _record_site!(ctx, name, _sample!(ctx, name, dist))
+# Elementwise latent: `b .~ Normal.(0, tau)` is k INDEPENDENT scalar sites by
+# ordinary broadcasting — no `product_distribution`, no special multivariate
+# form. `dists` arrives LAZY (a `Broadcasted`, never materialized), so the k
+# distributions cost no allocation; the cursor advances one site at a time in
+# index order, which the trace pass walks identically because it runs this same
+# code. An explicit loop rather than a fused `.=` because broadcast does not
+# promise an evaluation ORDER, and order is what decides which theta coordinate
+# each element gets — with non-identical marginals (`Normal.(0, tau)`) a
+# different order is a different model, silently.
+@inline _julianic_instantiate(dists) = dists
+@inline _julianic_instantiate(dists::Base.Broadcast.Broadcasted) =
+    Base.Broadcast.instantiate(dists)
+
+@inline function _sample_broadcast!(ctx, name::Val, dists)
+    lazy = _julianic_instantiate(dists)
+    n = length(lazy)
+    buffer = _site_buffer!(ctx, n)
+    for i in 1:n
+        buffer[i] = _sample!(ctx, name, lazy[i])
+    end
+    return _record_site!(ctx, name, buffer)
 end
 
 # Normal: real support, identity transform (log-Jacobian 0). Covers `Normal()`
@@ -579,25 +597,12 @@ end
 # `JulianicPrimal`), so this reads straight from that constant `data` value.
 # Available in both modes, because tracing happens after conditioning.
 #
-# Fails closed on a site that was never conditioned — the mirror of
-# `_sample_site!`'s check, and it surfaces at `jprepare` because the trace runs
-# the same body. The check folds away exactly like that one: `name` rides a
-# `Val` and `data`'s field names are in its type.
-@noinline function _julianic_unconditioned_observation_error(data, ::Val{name}) where {name}
-    conditioned = isempty(propertynames(data)) ? "none" :
-        join(propertynames(data), ", ")
-    throw(ArgumentError(
-        "julianic @jmodel: observation site `" * String(name) * "` has no " *
-        "conditioned data (conditioned sites: " * conditioned * "). Pass it " *
-        "to `jcondition`, or write a latent as `" * String(name) * " ~ dist` " *
-        "without the broadcast."))
-end
-
-@inline function _observation(data, name::Val{sitename}) where {sitename}
-    _julianic_is_conditioned(data, name) ||
-        _julianic_unconditioned_observation_error(data, name)
-    return getproperty(data, sitename)
-end
+# No fail-closed check here any more: this is only reached from the branch that
+# `_julianic_is_conditioned` already selected, so the name is conditioned by
+# construction. The two errors that used to police the latent/observation split
+# are gone with the split itself.
+@inline _observation(data, ::Val{sitename}) where {sitename} =
+    getproperty(data, sitename)
 
 # --- Cached array ops (the 0-alloc rewrite targets) -----------------------
 #
@@ -653,16 +658,17 @@ end
     getindex(A, idx)
 end
 
-# Broadcast observation, accumulated 0-alloc. The macro brackets the obs with these
-# so the SAME generated `@. buf = logpdf(Dist(params), data)` runs in both passes
-# (no closure — the fused fill is inline generated code, keeping Enzyme's activity
-# analysis clean). PRIMAL fills a pooled, right-sized buffer (the distribution
-# vector stays lazy, never materialized) and sums it into `acc`; TRACE records the
-# obs length and hands back a throwaway scratch so the same `.=` fill is harmless.
-@inline _obs_begin!(ctx::JulianicRun, n::Int) = _next_buffer!(ctx.buffers, (n,))
-@inline function _obs_begin!(ctx::JulianicTrace, n::Int)
+# A length-n destination buffer for a whole-vector site — serves BOTH a broadcast
+# observation (the `@. buf = logpdf(...)` fill) and an elementwise latent (the
+# `b .~ Normal.(0, tau)` per-coordinate walk), because both want the same thing: a
+# right-sized destination presized from the trace. PRIMAL hands back a pooled
+# buffer (so the term is 0-alloc — the distribution vector stays lazy, never
+# materialized); TRACE records the length and hands back a throwaway scratch so the
+# same fill/walk is harmless.
+@inline _site_buffer!(ctx::JulianicRun, n::Int) = _next_buffer!(ctx.buffers, (n,))
+@inline function _site_buffer!(ctx::JulianicTrace, n::Int)
     push!(ctx.buffer_sizes, (n,))
-    Vector{Float64}(undef, n)           # one-shot trace scratch for the .= fill
+    Vector{Float64}(undef, n)           # one-shot trace scratch
 end
 @inline _obs_end!(ctx::JulianicPrimal, ::Val, buf) = (ctx.buffers.acc += sum(buf); nothing)
 @inline _obs_end!(::JulianicTrace, ::Val, _buf) = nothing
@@ -692,7 +698,7 @@ end
 # `_obs_end!` narrows it back to the concrete eltype the kernel actually
 # produced. Nothing here is on the gradient path, so the allocation is free of
 # consequence — the 0-alloc constraint is scoped to logdensity + gradient.
-@inline _obs_begin!(::JulianicRecording, n::Int) = Vector{Any}(undef, n)
+@inline _site_buffer!(::JulianicRecording, n::Int) = Vector{Any}(undef, n)
 
 # --- Model objects --------------------------------------------------------
 
@@ -1053,34 +1059,106 @@ end
 
 # --- Macro ----------------------------------------------------------------
 
-# Detect a broadcast sampling statement: `@. lhs ~ rhs` or `@__dot__ lhs ~ rhs`.
-function _julianic_broadcast_sample(statement)
-    statement isa Expr && statement.head === :macrocall || return nothing
-    macro_name = statement.args[1]
-    (macro_name === Symbol("@__dot__") || macro_name === Symbol("@.")) || return nothing
-    inner = statement.args[end]
-    inner isa Expr && inner.head === :call && length(inner.args) == 3 &&
-        inner.args[1] === :~ || return nothing
-    return (lhs=inner.args[2], rhs=inner.args[3])
+# Detect a sampling statement in ANY spelling, and normalize it.
+#
+# There is ONE rule for `~`; the dot carries only its ordinary Julia meaning
+# (lift elementwise) and never decides what the statement MEANS. So `@. y ~ D(l, s)`
+# and `y .~ D.(l, s)` are the same statement, which is exactly the identity Julia
+# itself gives them — and the normalization is done BY Julia: `Base.Broadcast.__dot__`
+# is the function behind `@.`, so the `@.` spelling is dotted by the same code that
+# dots every other `@.` in the language rather than by a rewriter of mine.
+#
+# Binary `.~` has no meaning in Base, so matching it cannot shadow ordinary Julia
+# (unary `~x` has `length(args) == 2` and is left alone).
+function _julianic_sample_statement(statement)
+    statement isa Expr || return nothing
+    if statement.head === :macrocall
+        macro_name = statement.args[1]
+        (macro_name === Symbol("@__dot__") || macro_name === Symbol("@.")) ||
+            return nothing
+        inner = statement.args[end]
+        inner isa Expr && inner.head === :call && length(inner.args) == 3 &&
+            inner.args[1] === :~ || return nothing
+        return (lhs=inner.args[2], rhs=Base.Broadcast.__dot__(inner.args[3]),
+                broadcast=true)
+    end
+    statement.head === :call && length(statement.args) == 3 || return nothing
+    statement.args[1] === :~ &&
+        return (lhs=statement.args[2], rhs=statement.args[3], broadcast=false)
+    statement.args[1] === :.~ &&
+        return (lhs=statement.args[2], rhs=statement.args[3], broadcast=true)
+    return nothing
 end
 
-# Detect a scalar sampling statement: `lhs ~ rhs`.
-function _julianic_scalar_sample(statement)
-    statement isa Expr && statement.head === :call && length(statement.args) == 3 &&
-        statement.args[1] === :~ || return nothing
-    return (lhs=statement.args[2], rhs=statement.args[3])
+# Rewrite dotted syntax into its LAZY form: `f.(a, b)` -> `broadcasted(f, a, b)`,
+# `a .+ b` -> `broadcasted(+, a, b)`, recursively. `broadcasted` is what `f.(x)`
+# builds before `materialize` runs, so this is Julia's own fusion machinery with
+# the final materialize withheld — which is the whole point: a lazy vector of
+# distributions is never built, so an elementwise latent costs no allocation.
+#
+# One exception, stated rather than hidden: `broadcasted` accepts no KEYWORD
+# arguments, so a dotted call carrying them (`censored.(D.(mu, s); lower, upper)`)
+# cannot be made lazy and is left materializing. That costs an allocation per
+# evaluation — but only for an UNCONDITIONED kwarg site, because for a conditioned
+# one this branch is eliminated before it runs.
+_julianic_lazy(ex) = ex
+function _julianic_lazy(ex::Expr)
+    if ex.head === :. && length(ex.args) == 2 && ex.args[2] isa Expr &&
+            ex.args[2].head === :tuple
+        any(a -> a isa Expr && a.head === :parameters, ex.args[2].args) && return ex
+        return Expr(:call, Base.Broadcast.broadcasted, ex.args[1],
+                    (_julianic_lazy(a) for a in ex.args[2].args)...)
+    end
+    if ex.head === :call
+        operator = _julianic_dotted_operator(ex.args[1])
+        operator === nothing || return Expr(:call, Base.Broadcast.broadcasted, operator,
+                                            (_julianic_lazy(a) for a in ex.args[2:end])...)
+    end
+    return ex
 end
 
-# Detect a dotted sampling statement: `lhs .~ rhs`. This is the spelling the
-# declarative `@model` uses for observations (`y .~ Poisson.(exp(r))`), where
-# the RHS is ALREADY written in broadcast form — so unlike `@. lhs ~ rhs` the
-# RHS must NOT be re-dotted. Binary `.~` has no meaning in Base, so matching it
-# here cannot shadow ordinary Julia (unary `~x` is `length(args) == 2` and is
-# left alone).
-function _julianic_dotted_sample(statement)
-    statement isa Expr && statement.head === :call && length(statement.args) == 3 &&
-        statement.args[1] === :.~ || return nothing
-    return (lhs=statement.args[2], rhs=statement.args[3])
+# Lower one `~`, whatever dots surround it. The statement is prep + accumulate:
+#
+#   * the value comes from the CONDITIONED DATA if the name was passed to
+#     `jcondition`, and from a fresh slice of theta otherwise;
+#   * the log-density contribution is accumulated either way.
+#
+# Which one is decided by `_julianic_is_conditioned`, whose arguments are both
+# compile-time constants (the name rides a `Val`, the data's field names are in
+# its type), so the branch folds to a literal and the dead half is eliminated —
+# no runtime test, and both halves stay inline generated code rather than
+# closures, which is what keeps Enzyme's activity analysis clean.
+function _julianic_lower_sample(lhs, rhs, broadcast::Bool, ctx, data)
+    lhs isa Symbol || throw(ArgumentError(
+        "julianic @jmodel: `~` left-hand side must be a name; got `$lhs`"))
+    name = Val(lhs)
+    data_var = gensym(lhs)
+    buffer_var = gensym(:obs)
+    kernel_var = gensym(:kernel)
+    # The observation half. `_obs_kernel` picks WHAT each site computes from the
+    # context (logpdf for the density, a redraw for the posterior predictive), so
+    # one lowered body serves every query. A scalar observation is just the n=1
+    # case — same buffer, same accumulate — rather than its own code path.
+    fill = broadcast ?
+        :($buffer_var .= $kernel_var.($rhs, $data_var)) :
+        :($buffer_var[1] = $kernel_var($rhs, $data_var))
+    size = broadcast ? :(length($data_var)) : 1
+    observed = quote
+        $kernel_var = $(_obs_kernel)($ctx)
+        $data_var = $(_observation)($data, $name)
+        $buffer_var = $(_site_buffer!)($ctx, $size)
+        $fill
+        $(_obs_end!)($ctx, $name, $buffer_var)
+        $data_var
+    end
+    latent = broadcast ?
+        :($(_sample_broadcast!)($ctx, $name, $(_julianic_lazy(rhs)))) :
+        :($(_sample_site!)($ctx, $data, $name, $rhs))
+    return :($lhs = if $(_julianic_is_conditioned)($data, $name)
+                 $observed
+             else
+                 $latent
+             end)
 end
 
 # --- 0-alloc rewrite of deterministic array expressions -------------------
@@ -1164,55 +1242,9 @@ function _julianic_lower_statement(statement, ctx, data)
     # `@views`/`@view` do, so the index is a self-contained expression before
     # anything moves it.
     statement = Base.replace_ref_begin_end!(statement)
-    broadcast_sample = _julianic_broadcast_sample(statement)
-    if broadcast_sample !== nothing
-        lhs, rhs = broadcast_sample.lhs, broadcast_sample.rhs
-        lhs isa Symbol || throw(ArgumentError(
-            "julianic @jmodel broadcast observation LHS must be a name; got `$lhs`"))
-        data_var = gensym(lhs)
-        buffer_var = gensym(:obs)
-        # `@__dot__` only dots calls whose head is a *symbol*, so bind the
-        # runtime logpdf to a local name before broadcasting. Writing the fused
-        # result INTO the pooled buffer (`@. buf = lp(D(a,b), y)`) keeps the
-        # vector of distributions lazy — it is never materialized — so the whole
-        # observation term costs no allocation.
-        logpdf_var = gensym(:logpdf)
-        fill = Expr(:macrocall, Symbol("@__dot__"), LineNumberNode(0),
-                    :($buffer_var = $(Expr(:call, logpdf_var, rhs, data_var))))
-        return quote
-            $(logpdf_var) = $(_obs_kernel)($ctx)
-            $(data_var) = $(_observation)($data, $(Val(lhs)))
-            $(buffer_var) = $(_obs_begin!)($ctx, length($data_var))
-            $fill
-            $(_obs_end!)($ctx, $(Val(lhs)), $buffer_var)
-        end
-    end
-    dotted_sample = _julianic_dotted_sample(statement)
-    if dotted_sample !== nothing
-        lhs, rhs = dotted_sample.lhs, dotted_sample.rhs
-        lhs isa Symbol || throw(ArgumentError(
-            "julianic @jmodel broadcast observation LHS must be a name; got `$lhs`"))
-        data_var = gensym(lhs)
-        logpdf_var = gensym(:logpdf)
-        buffer_var = gensym(:obs)
-        # The user already wrote the RHS dotted, so score elementwise WITHOUT
-        # re-dotting it: `y .~ Poisson.(exp(r))` fills the pooled buffer with
-        # `lp.(Poisson.(exp(r)), y)` and sums it — same 0-alloc path as `@.`.
-        fill = :($buffer_var .= $(Expr(:., logpdf_var, Expr(:tuple, rhs, data_var))))
-        return quote
-            $(logpdf_var) = $(_obs_kernel)($ctx)
-            $(data_var) = $(_observation)($data, $(Val(lhs)))
-            $(buffer_var) = $(_obs_begin!)($ctx, length($data_var))
-            $fill
-            $(_obs_end!)($ctx, $(Val(lhs)), $buffer_var)
-        end
-    end
-    scalar_sample = _julianic_scalar_sample(statement)
-    if scalar_sample !== nothing
-        lhs, rhs = scalar_sample.lhs, scalar_sample.rhs
-        lhs isa Symbol || throw(ArgumentError(
-            "julianic @jmodel scalar site LHS must be a name (milestone 1); got `$lhs`"))
-        return :($(lhs) = $(_sample_site!)($ctx, $data, $(Val(lhs)), $rhs))
+    sample = _julianic_sample_statement(statement)
+    if sample !== nothing
+        return _julianic_lower_sample(sample.lhs, sample.rhs, sample.broadcast, ctx, data)
     end
     # Deterministic assignment `lhs = rhs`: buffer every array-valued node in rhs.
     if statement isa Expr && statement.head === :(=)
@@ -1230,14 +1262,12 @@ end
 # site, far from its cause. Reject it at macro-expansion time instead.
 function _julianic_assert_lowered(expr)
     expr isa Expr || return nothing
-    if _julianic_scalar_sample(expr) !== nothing ||
-       _julianic_dotted_sample(expr) !== nothing ||
-       _julianic_broadcast_sample(expr) !== nothing
+    if _julianic_sample_statement(expr) !== nothing
         throw(ArgumentError(
             "julianic @jmodel: `~` is only lowered at the TOP LEVEL of the " *
             "model body, but found a nested sampling statement `" *
-            string(expr) * "`. Hoist it to the top level; a looped/vector site " *
-            "is written as one multivariate `~` (`b ~ product_distribution(...)`) " *
+            string(expr) * "`. Hoist it to the top level; a vector of " *
+            "independent sites is written elementwise (`b .~ Normal.(0, tau)`) " *
             "and indexed afterwards in ordinary Julia."))
     end
     for argument in expr.args
@@ -1287,24 +1317,32 @@ end
 
 """
     @jmodel function name(inputs...)
-        latent ~ Dist(...)          # prep + logpdf, consumes an unconstrained slice
-        block  ~ product_distribution(...)   # k contiguous coordinates
-        deterministic = f(latent)   # ordinary Julia, kept verbatim
-        @. observed ~ Dist(...)     # accumulate data logpdf (RHS gets dotted)
-        other .~ Dist.(...)         # same, RHS already dotted by the author
+        sigma ~ Exponential(2.0)    # prep + accumulate
+        b .~ Normal.(0, tau)        # k independent sites, by ordinary broadcasting
+        mu = f(b)                   # ordinary Julia, kept verbatim
+        @. y ~ Normal(mu, sigma)    # identical to `y .~ Normal.(mu, sigma)`
     end
 
 Julianic NativePPL model: the body is valid SSA Julia except `~`, which reduces
-to prep + logpdf. Calling `name(inputs...)` returns a `JulianicModel`; condition
-it with `jcondition`, `jprepare` it, then evaluate with `jlogdensity` /
+to prep + accumulate. Calling `name(inputs...)` returns a `JulianicModel`;
+condition it with `jcondition`, `jprepare` it, then evaluate with `jlogdensity` /
 `jlogdensity_and_gradient!` (see `jworkspace` for the required AD backend).
 
-A site is a LATENT when written scalar (`s ~ D`) and an OBSERVATION when written
-broadcast (`@. y ~ D` or `y .~ D.(...)`). Both spellings are checked against the
-names passed to `jcondition` and fail closed on a mismatch, so a conditioned
-name can never be silently resampled as a latent. `~` is lowered at the TOP
-LEVEL of the body only; a nested one is a macro-expansion error rather than an
-opaque runtime failure.
+Every `~` is ONE operation, whatever dots surround it:
+
+  * **prep** — if the name was passed to `jcondition` the value is that data; if
+    not, it is a fresh slice of the unconstrained position, constrained with its
+    log-Jacobian.
+  * **accumulate** — the log-density contribution, either way.
+
+So **conditioning decides what is data**, not spelling: `y ~ Normal(mu, sigma)`
+scores an observation when `y` is conditioned and declares a latent when it is
+not. The dot carries only its ordinary Julia meaning — lift elementwise — which
+is why `@. y ~ D(a, b)` and `y .~ D.(a, b)` are the same statement, and why
+`b .~ Normal.(0, tau)` is simply k independent sites.
+
+`~` is lowered at the TOP LEVEL of the body only; a nested one is a
+macro-expansion error rather than an opaque runtime failure.
 """
 macro jmodel(definition)
     esc(_julianic_model_syntax(definition))

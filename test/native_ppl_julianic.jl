@@ -382,6 +382,17 @@ NP.@jmodel function julianic_affine_gaussian_dotted(x)
     y .~ Normal.(mu, sigma)
 end
 
+# An elementwise latent with NON-identical marginals: `b .~ Normal.(0, tau)` is k
+# independent sites, one per `tau[i]`, by ordinary broadcasting — no
+# `product_distribution`. Non-identical scales make it a coordinate-ORDER probe:
+# if the cursor walked `b` in any order but 1..k, a `tau[i]` would pair with the
+# wrong slice and the density would change. Defined here (rather than beside the
+# other conditioning fixtures) because the allocation testset below uses it too.
+NP.@jmodel function julianic_elementwise_latent(tau)
+    b .~ Normal.(0.0, tau)
+    @. y ~ Normal(b, 1.0)
+end
+
 const PREDICTOR = [-1.2, 0.3, 0.9, 2.1, -0.4, 1.5]
 const SECONDARY = [0.4, -0.8, 1.7, 0.2, -1.1, 0.6]
 const GROUP = [1, 2, 1, 3, 2, 3]
@@ -538,8 +549,10 @@ end
     x = randn(rng, 60)
     weights = rand(rng, 60) .+ 0.5
     counts = rand(rng, 1:4, 60)
+    scales = rand(rng, 60) .+ 0.5
     observations = (; y=randn(rng, 60))
 
+    # Flat / scalar-latent models: 0-alloc holds for BOTH primal and gradient.
     for (name, model) in (
             "affine gaussian" => julianic_affine_gaussian(x),
             "frequency-weighted" => julianic_frequency_weighted(x, counts),
@@ -557,6 +570,30 @@ end
         @test allocations.gradient == 0
         allocations == (primal=0, gradient=0) ||
             @info "julianic allocations" model=name allocations
+    end
+
+    # A VECTOR latent (`b .~ Normal.(0, tau)` feeding an observation) is 0-alloc
+    # in the PRIMAL, but the GRADIENT still allocates — a pre-existing cost of a
+    # pooled buffer that is both written by the latent and read by the likelihood,
+    # in the DI+Enzyme+Cache interaction (all the isolated pieces measure 0). This
+    # spelling is nonetheless a strict IMPROVEMENT over the `product_distribution`
+    # form it replaces, measured on this same model at n=60:
+    #   `product_distribution`  → (primal = 2720, gradient = 6640)
+    #   `b .~ Normal.(0, tau)`  → (primal =    0, gradient = 2176)
+    # so the 0-alloc guarantee (decision `08w0buk`) has NEVER held for
+    # hierarchical models in either spelling; this narrows the gap, it does not
+    # open it. Tracked as a follow-up; the primal win is asserted hard, the
+    # gradient is `@test_broken` so a future fix trips it loudly.
+    @testset "vector latent — primal 0-alloc, gradient tracked" begin
+        prepared = NP.jprepare(NP.jcondition(
+            julianic_elementwise_latent(scales); observations...))
+        workspace = NP.jworkspace(prepared, Float64, JULIANIC_BACKEND)
+        theta = randn(rng, NP.dimension(prepared))
+        @test NP.jlogdensity!(workspace, prepared, theta) ==
+            NP.jlogdensity(prepared, theta)
+        allocations = steady_state_allocations(prepared, workspace, theta)
+        @test allocations.primal == 0
+        @test_broken allocations.gradient == 0
     end
 end
 
@@ -885,18 +922,19 @@ end
 end
 
 # ---------------------------------------------------------------------------
-# Fail-closed boundaries.
+# Conditioning — not spelling — decides latent vs observation.
 # ---------------------------------------------------------------------------
 
+# The SAME body is a latent when `y` is free and an observation when `y` is
+# conditioned. A scalar `~` carries no built-in "this is data" marker; that is
+# what conditioning is for.
 NP.@jmodel function julianic_scalar_site_on_data(x)
     mu ~ Normal()
     y ~ Normal(mu, 1.0)
 end
 
-NP.@jmodel function julianic_unconditioned_observation(x)
-    mu ~ Normal()
-    @. absent ~ Normal(mu, 1.0)
-end
+# (`julianic_elementwise_latent` is defined earlier, before the allocation
+# testset that also uses it.)
 
 # A positive-support vector IS supported (its own `_sample!`, exp transform per
 # coordinate) — this is the model the guard below must NOT catch.
@@ -1105,18 +1143,19 @@ end
     end
 end
 
-@testset "julianic fails closed" begin
-    @testset "scalar site on conditioned data" begin
-        # Without this check the site consumes a θ coordinate, scores the PRIOR
-        # at θ, rebinds `y`, and never reads the observation — a well-formed
-        # program computing the wrong density. The declarative `@model` accepts
-        # this exact spelling as an observation, so silence is not an option.
-        err = argument_error(() -> NP.jprepare(NP.jcondition(
-            julianic_scalar_site_on_data(PREDICTOR); y=3.0)))
-        @test occursin("conditioned data", err.msg)
-        @test occursin("y", err.msg)
+@testset "conditioning, not spelling, decides latent vs observation" begin
+    @testset "scalar `~` scores when conditioned, samples when not" begin
+        # `y ~ Normal(mu, 1.0)` with `y` CONDITIONED is an observation: `mu` is
+        # the only latent (dimension 1), and the density is prior(mu) + the datum
+        # logpdf. This is the spelling the previous syntactic rule REFUSED; under
+        # conditioning-decides it is exactly an observation, as it should be.
+        observed = NP.jprepare(NP.jcondition(
+            julianic_scalar_site_on_data(PREDICTOR); y=3.0))
+        @test NP.dimension(observed) == 1
+        @test NP.jlogdensity(observed, [0.5]) ≈
+              logpdf(Normal(), 0.5) + logpdf(Normal(0.5, 1.0), 3.0)
 
-        # …and the same body IS a valid latent when `y` is not conditioned.
+        # …and the same body IS two latents when `y` is not conditioned.
         latent_only = NP.jprepare(NP.jcondition(
             julianic_scalar_site_on_data(PREDICTOR)))
         @test NP.dimension(latent_only) == 2
@@ -1124,13 +1163,27 @@ end
               logpdf(Normal(), 0.5) + logpdf(Normal(0.5, 1.0), 0.7)
     end
 
-    @testset "observation with no conditioned data" begin
-        err = argument_error(() -> NP.jprepare(NP.jcondition(
-            julianic_unconditioned_observation(PREDICTOR); CONTINUOUS...)))
-        @test occursin("absent", err.msg)
-        @test occursin("conditioned sites: y", err.msg)
-    end
+    @testset "broadcast `~` on a free name is an elementwise latent" begin
+        # A broadcast `~` whose LHS is NOT conditioned samples k independent
+        # sites — the previous rule made this an error. Non-identical `tau`
+        # pins the coordinate order: b[i] must pair with tau[i].
+        tau = [0.5, 1.0, 2.0]
+        y = [0.2, -0.3, 1.1]
+        prepared = NP.jprepare(NP.jcondition(julianic_elementwise_latent(tau); y=y))
+        @test NP.dimension(prepared) == 3        # b consumes 3 coords; y is data
 
+        # The equality below IS the order probe: `Normal.(0.0, tau)[i]` and
+        # `position[i]` are walked under the same `i`, so if the cursor paired
+        # them any other way this `≈` would fail — the non-identical `tau` is
+        # what makes a mispairing observable.
+        b = [0.4, -0.7, 1.3]
+        expected = sum(logpdf.(Normal.(0.0, tau), b)) +
+                   sum(logpdf.(Normal.(b, 1.0), y))
+        @test NP.jlogdensity(prepared, b) ≈ expected
+    end
+end
+
+@testset "julianic fails closed" begin
     @testset "constrained multivariate block" begin
         # The multivariate `_sample!` dispatches on the whole
         # `MultivariateDistribution` type but implements only the real-support
