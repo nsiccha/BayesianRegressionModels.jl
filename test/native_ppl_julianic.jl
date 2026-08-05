@@ -21,7 +21,7 @@ import LinearAlgebra
 using LogExpFunctions: logistic
 using LogDensityProblems
 using Random: MersenneTwister, randn
-using Statistics: mean
+using Statistics: mean, std
 using TreeArrays
 
 const BRM = BayesianRegressionModels
@@ -690,6 +690,62 @@ end
         # Per-observation means over the draw axis — the shape PSIS-LOO reduces.
         @test parent(mean(pointwise.y; dims=:draw)) ≈
             vec(sum(NP.jpointwise_draws(prepared, positions).y; dims=1) ./ 3)
+    end
+
+    # Forward simulation is the ONE pass that does not go through the `_sample!`
+    # family table — a prior draw is `rand(dist)` for every family at once,
+    # because it never touches the unconstrained parametrization the families
+    # exist to handle. So the thing to pin is that it really is drawing from the
+    # PRIORS the body declares, which only a distributional check can show.
+    @testset "prior simulation" begin
+        drawn = NP.jsimulate(MersenneTwister(4), prepared)
+        @test keys(drawn.latents) == (:intercept, :slope, :sigma)
+        @test keys(drawn.observations) == (:y,)
+        @test length(drawn.observations.y) == length(CONTINUOUS.y)
+        @test drawn.latents.sigma > 0                      # support respected
+        @test NP.jsimulate(MersenneTwister(4), prepared) == drawn
+        @test NP.jsimulate(MersenneTwister(5), prepared).latents != drawn.latents
+
+        # The marginals must BE the declared priors. `sigma ~ Exponential(2.0)`
+        # has mean 2 and `intercept ~ Normal()` mean 0 / sd 1; a pass that
+        # sampled the wrong distribution (or the unconstrained coordinate rather
+        # than the constrained value) would land somewhere else entirely, which
+        # a single draw cannot distinguish.
+        rng = MersenneTwister(20260805)
+        simulations = [NP.jsimulate(rng, prepared) for _ in 1:4000]
+        intercepts = [s.latents.intercept for s in simulations]
+        sigmas = [s.latents.sigma for s in simulations]
+        @test abs(mean(intercepts)) < 0.06
+        @test abs(std(intercepts) - 1.0) < 0.06
+        @test abs(mean(sigmas) - 2.0) < 0.15
+        @test all(>(0), sigmas)
+
+        # And the prior predictive must be generated from THOSE latents, not from
+        # some other draw: standardising each observation by the parameters
+        # returned beside it has to give standard normals. Getting this wrong —
+        # resampling the parameters for the observation pass — would still
+        # produce plausible-looking `y`.
+        residuals = Float64[]
+        for s in simulations
+            mu = s.latents.intercept .+ s.latents.slope .* PREDICTOR
+            append!(residuals, (s.observations.y .- mu) ./ s.latents.sigma)
+        end
+        @test abs(mean(residuals)) < 0.05
+        @test abs(std(residuals) - 1.0) < 0.05
+
+        # Constrained-manifold and discrete families come along for free, since
+        # `rand` is the family's own. LKJ needs the one adapter (its `rand` gives
+        # a `Cholesky` where the body wants the factor matrix).
+        correlated = NP.jprepare(NP.jcondition(
+            julianic_correlated_varying(PREDICTOR, GROUP); CONTINUOUS...))
+        block = NP.jsimulate(MersenneTwister(9), correlated).latents
+        @test size(block.L_p_group) == (2, 2)
+        @test block.L_p_group ≈ LinearAlgebra.LowerTriangular(block.L_p_group)
+        @test all(≈(1.0), sum(abs2, block.L_p_group; dims=2))
+        @test all(>(0), block.tau_p_group)
+
+        counts = NP.jprepare(NP.jcondition(julianic_poisson(PREDICTOR); COUNTS...))
+        @test eltype(NP.jsimulate(MersenneTwister(9), counts).observations.y) <: Integer
     end
 end
 

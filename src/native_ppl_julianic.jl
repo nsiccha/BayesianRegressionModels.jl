@@ -158,7 +158,13 @@ end
 # density — there is one walk, not a walk and a reimplementation of it.
 abstract type JulianicRun end
 
-struct JulianicPrimal{TH<:AbstractVector,B} <: JulianicRun
+# The contexts that WALK θ. The per-family `_sample!` table is keyed on this, not
+# on `JulianicRun`, because reading a coordinate and applying its constraining
+# transform is exactly what the families are FOR — and `JulianicSimulate` (below)
+# runs the same body with no position at all, so it must not inherit them.
+abstract type JulianicWalk <: JulianicRun end
+
+struct JulianicPrimal{TH<:AbstractVector,B} <: JulianicWalk
     theta::TH
     buffers::B          # JulianicBuffers{eltype(theta)} — the preallocated pool
 end
@@ -185,7 +191,7 @@ JulianicTrace() = JulianicTrace(0, Dims[])
 # 2026-08-04). Values are COPIED out, because a `_sample!` returning a `@view`
 # into θ (the multivariate path) would otherwise alias a caller's position — and
 # a pooled observation buffer is overwritten by the next site.
-struct JulianicRecord{TH<:AbstractVector,B,K} <: JulianicRun
+struct JulianicRecord{TH<:AbstractVector,B,K} <: JulianicWalk
     theta::TH
     buffers::B
     kernel::K           # what an observation site computes (logpdf / rand / …)
@@ -196,10 +202,40 @@ JulianicRecord(theta::AbstractVector, buffers, kernel) =
     JulianicRecord(theta, buffers, kernel,
                    Pair{Symbol,Any}[], Pair{Symbol,Any}[])
 
+# SIMULATE (the prior / prior-predictive pass): the same body again, but with no
+# position to walk — each latent `~` DRAWS from its own prior instead of reading
+# θ, and each observation resamples. It is the one pass that does not share the
+# `_sample!` family table, and it needs almost none of it: a prior draw is
+# `rand(dist)` for every family at once, precisely BECAUSE it never touches the
+# unconstrained parametrization. Only `LKJCholesky` needs an adapter, since its
+# `rand` yields a `Cholesky` where the body wants the plain factor matrix.
+struct JulianicSimulate{R<:Random.AbstractRNG,B,K} <: JulianicRun
+    rng::R
+    buffers::B
+    kernel::K
+    sites::Vector{Pair{Symbol,Any}}
+    observations::Vector{Pair{Symbol,Any}}
+end
+JulianicSimulate(rng::Random.AbstractRNG, buffers, kernel) =
+    JulianicSimulate(rng, buffers, kernel,
+                     Pair{Symbol,Any}[], Pair{Symbol,Any}[])
+
+@inline _sample!(ctx::JulianicSimulate, ::Val, dist) = rand(ctx.rng, dist)
+@inline _sample!(ctx::JulianicSimulate, ::Val, dist::Distributions.LKJCholesky) =
+    Matrix(rand(ctx.rng, dist).L)
+
+# "Records what each site produced" is a SECOND axis, crossing the walk/simulate
+# split: `JulianicRecord` walks θ and records, `JulianicSimulate` draws and
+# records. Single inheritance cannot express both, so this axis is a Union — it
+# dispatches exactly like an abstract type and stays more specific than
+# `JulianicRun`, which is what lets the recording `_obs_*` hooks override the
+# pooled ones.
+const JulianicRecording = Union{JulianicRecord,JulianicSimulate}
+
 # The recording hook on the latent path. Inlined to the identity for every
 # context that is not recording, so the primal keeps its 0-alloc property.
 @inline _record_site!(_ctx, ::Val, value) = value
-@inline function _record_site!(ctx::JulianicRecord, ::Val{name}, value) where {name}
+@inline function _record_site!(ctx::JulianicRecording, ::Val{name}, value) where {name}
     push!(ctx.sites, name => _julianic_recorded(value))
     return value
 end
@@ -246,7 +282,7 @@ end
 # on how many coordinates each site consumes; if they ever drift, an elided
 # bounds check turns that into an out-of-bounds READ (silent garbage under
 # Enzyme) instead of a `BoundsError`. The check is free next to a `logpdf`.
-@inline function _sample!(ctx::JulianicRun, ::Val, dist::Distributions.Normal)
+@inline function _sample!(ctx::JulianicWalk, ::Val, dist::Distributions.Normal)
     ctx.buffers.cursor += 1
     v = ctx.theta[ctx.buffers.cursor]
     ctx.buffers.acc += Distributions.logpdf(dist, v)
@@ -256,7 +292,7 @@ end
 
 # Exponential: positive support, exp transform. constrain u -> exp(u); the
 # log-Jacobian of that transform is exactly u, so accumulate logpdf + u.
-@inline function _sample!(ctx::JulianicRun, ::Val, dist::Distributions.Exponential)
+@inline function _sample!(ctx::JulianicWalk, ::Val, dist::Distributions.Exponential)
     ctx.buffers.cursor += 1
     u = ctx.theta[ctx.buffers.cursor]
     v = exp(u)
@@ -271,7 +307,7 @@ end
 # coordinates and returns the value vector for the body to index. This covers
 # grouped/blocked latents authored as `b ~ product_distribution(fill(D, k))`
 # or `b ~ MvNormal(...)`, then referenced as `b[group]`.
-@inline function _sample!(ctx::JulianicRun, ::Val, dist::Distributions.MultivariateDistribution)
+@inline function _sample!(ctx::JulianicWalk, ::Val, dist::Distributions.MultivariateDistribution)
     k = length(dist)
     lo = ctx.buffers.cursor + 1
     ctx.buffers.cursor += k
@@ -314,7 +350,7 @@ end
 # per-marginal logpdf + sum(u). More specific than the real-support method above,
 # so it wins for the `Product{…,Exponential}` type (a product of Normals resolves
 # to `DiagNormal <: MvNormal`, which correctly stays on the identity path).
-@inline function _sample!(ctx::JulianicRun, ::Val,
+@inline function _sample!(ctx::JulianicWalk, ::Val,
         dist::Distributions.Product{Distributions.Continuous,<:Distributions.Exponential})
     k = length(dist)
     lo = ctx.buffers.cursor + 1
@@ -380,7 +416,7 @@ end
     return L
 end
 
-@inline function _sample!(ctx::JulianicRun, ::Val, dist::Distributions.LKJCholesky)
+@inline function _sample!(ctx::JulianicWalk, ::Val, dist::Distributions.LKJCholesky)
     K = dist.d
     m = K * (K - 1) ÷ 2
     lo = ctx.buffers.cursor + 1
@@ -630,7 +666,7 @@ end
 end
 @inline _obs_end!(ctx::JulianicPrimal, ::Val, buf) = (ctx.buffers.acc += sum(buf); nothing)
 @inline _obs_end!(::JulianicTrace, ::Val, _buf) = nothing
-@inline function _obs_end!(ctx::JulianicRecord, ::Val{name}, buf) where {name}
+@inline function _obs_end!(ctx::JulianicRecording, ::Val{name}, buf) where {name}
     push!(ctx.observations, name => identity.(buf))   # narrows `Any` to the real eltype
     return nothing
 end
@@ -641,7 +677,7 @@ end
 # log-likelihood and the posterior predictive with no second lowering — the
 # observation distribution is built by the author's own code either way.
 @inline _obs_kernel(_ctx) = _obs_logpdf
-@inline _obs_kernel(ctx::JulianicRecord) = ctx.kernel
+@inline _obs_kernel(ctx::JulianicRecording) = ctx.kernel
 
 # Posterior-predictive kernel: ignores the observed datum — redrawing it is the
 # point — and carries its own RNG so a predictive pass is reproducible.
@@ -656,7 +692,7 @@ end
 # `_obs_end!` narrows it back to the concrete eltype the kernel actually
 # produced. Nothing here is on the gradient path, so the allocation is free of
 # consequence — the 0-alloc constraint is scoped to logdensity + gradient.
-@inline _obs_begin!(::JulianicRecord, n::Int) = Vector{Any}(undef, n)
+@inline _obs_begin!(::JulianicRecording, n::Int) = Vector{Any}(undef, n)
 
 # --- Model objects --------------------------------------------------------
 
@@ -849,6 +885,33 @@ jpredict(rng::Random.AbstractRNG, prepared::JulianicPrepared, theta::AbstractVec
 jpredict(prepared::JulianicPrepared, theta::AbstractVector) =
     jpredict(Random.default_rng(), prepared, theta)
 
+"""
+    jsimulate([rng], prepared) -> (; latents, observations)
+
+Draw the whole model FORWARD from its priors, with no position: every latent is
+sampled from its own prior and every observation is generated from the resulting
+distribution. `latents` are natural-space site values, `observations` the prior
+predictive — the julianic counterpart of the declarative `simulate_prior`.
+
+Both halves come back because a prior predictive check needs them together: the
+generated data is only interpretable against the parameters that generated it,
+and returning them separately would mean running the model twice and getting two
+different draws.
+
+Note this is the ONE pass that does not go through the `_sample!` family table.
+It does not need to: a prior draw is `rand(dist)` for every family at once,
+precisely because forward simulation never touches the unconstrained
+parametrization that the family methods exist to handle.
+"""
+function jsimulate(rng::Random.AbstractRNG, prepared::JulianicPrepared)
+    buffers = JulianicBuffers{Float64}(prepared.buffer_sizes)
+    context = JulianicSimulate(rng, buffers, JulianicPredictKernel(rng))
+    prepared.run(context, prepared.data)
+    return (; latents=NamedTuple(context.sites),
+              observations=NamedTuple(context.observations))
+end
+jsimulate(prepared::JulianicPrepared) = jsimulate(Random.default_rng(), prepared)
+
 # --- Draws ------------------------------------------------------------------
 #
 # The batch forms. `positions` is a matrix of unconstrained draws with ROWS =
@@ -903,8 +966,8 @@ function _julianic_draws(prepared::JulianicPrepared, positions::AbstractMatrix,
     return NamedTuple{names}(stores)
 end
 
-_julianic_sites(context::JulianicRecord) = context.sites
-_julianic_observations(context::JulianicRecord) = context.observations
+_julianic_sites(context::JulianicRecording) = context.sites
+_julianic_observations(context::JulianicRecording) = context.observations
 
 """
     jconstrained_draws(prepared, positions) -> NamedTuple
