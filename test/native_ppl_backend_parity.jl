@@ -2,9 +2,11 @@ using Test
 using BayesianRegressionModels
 using BridgeStan
 import DifferentiationInterface as DI
-using Distributions: BernoulliLogit, Exponential, LKJCholesky, Normal
+using Distributions: Bernoulli, BernoulliLogit, Exponential, LKJCholesky,
+                     Normal, product_distribution
 using Enzyme
 using LogDensityProblems
+using LogExpFunctions: logistic
 using Statistics: median
 using StanBlocks
 
@@ -30,6 +32,35 @@ NP.@model function direct_shared_distributional_mixed(x, w, group)
     eta_z = dot(beta_eta_z, (1, x)) +
         dot(b_p_group[group, (:eta_z,)], (1,))
     @. z ~ BernoulliLogit(eta_z)
+end
+
+# The SAME mixed model authored on the julianic run-the-body surface — the
+# "fourth arm". The declarative executor stores `b_p_group ~ MvNormalCholesky`
+# NON-CENTERED (standard-normal coordinates `z`, effect `diag(tau)·L·z`) and has
+# a bespoke `BernoulliLogit` factor; run-the-body has neither, so the body writes
+# the reparameterization out by hand and uses ordinary `Bernoulli(logistic(·))`
+# for the Bernoulli outcome (which reproduces `BernoulliLogit` to roundoff —
+# measured ~3e-14 at the base point). LATENT declaration order is
+# tau, L, z, beta_mu_y, beta_log_sigma_y, beta_eta_z — identical to the
+# declarative coordinate order — so the julianic θ IS `native_position`, unmapped;
+# the Stan arms keep the `stan_from_native` permutation. Depends on
+# MutatingFunctions 92687c8 (the SubArray-gather activity fix) for the `b[k,group]`
+# gather.
+NP.@jmodel function julianic_shared_distributional_mixed(x, w, group)
+    groups = maximum(group)
+    tau_p_group ~ product_distribution(fill(Exponential(1.0), 3))
+    L_p_group ~ LKJCholesky(3, 2)
+    z_p_group ~ product_distribution(fill(Normal(0.0, 1.0), 3 * groups))
+    b = tau_p_group .* (L_p_group * reshape(z_p_group, 3, groups))
+    beta_mu_y ~ product_distribution(fill(Normal(0.0, 1.0), 2))
+    beta_log_sigma_y ~ product_distribution(fill(Normal(0.0, 1.0), 2))
+    mu_y = beta_mu_y[1] .+ beta_mu_y[2] .* x .+ b[1, group]
+    log_sigma_y = beta_log_sigma_y[1] .+ beta_log_sigma_y[2] .* w .+ b[2, group]
+    sigma_y = exp.(log_sigma_y)
+    @. y ~ Normal(mu_y, sigma_y)
+    beta_eta_z ~ product_distribution(fill(Normal(0.0, 1.0), 2))
+    eta_z = beta_eta_z[1] .+ beta_eta_z[2] .* x .+ b[3, group]
+    @. z ~ Bernoulli(logistic(eta_z))
 end
 
 function realistic_mixed_data(; N=96, G=12)
@@ -176,6 +207,22 @@ end
     @test direct_lp == native_lp
     @test direct_gradient == native_gradient
 
+    # Julianic run-the-body FOURTH ARM. θ == native θ (identity), so it evaluates
+    # at `native_q` and its gradient is already in native order.
+    jprepared = NP.jprepare(NP.jcondition(
+        julianic_shared_distributional_mixed(data.x, data.w, data.group);
+        y=data.y, z=data.z))
+    @test NP.dimension(jprepared) == dimension
+    jwork = NP.jworkspace(jprepared, Float64, DI.AutoEnzyme())
+    julianic_lp, julianic_gradient_view =
+        NP.jlogdensity_and_gradient!(jwork, jprepared, native_q)
+    julianic_gradient = copy(julianic_gradient_view)
+    # `Bernoulli(logistic)` reproduces the declarative `BernoulliLogit` factor to
+    # roundoff, so the julianic arm reproduces the declarative density/gradient at
+    # the same tight tolerance the other arms hold.
+    @test julianic_lp ≈ native_lp rtol=1e-11 atol=1e-11
+    @test julianic_gradient ≈ native_gradient rtol=1e-11 atol=1e-11
+
     sb = SBBRMI(brmi; mod=@__MODULE__)
     sbb_code = BRM.stan_code(sb)
     @test occursin("cholesky_factor_corr[n_terms_p_group] b_p_group_L", sbb_code)
@@ -225,16 +272,31 @@ end
     @test native_gradient ≈ native_from_stan_gradient(sbb_gradient, G) rtol=3e-11 atol=3e-10
     @test native_gradient ≈ native_from_stan_gradient(optimized_gradient, G) rtol=3e-11 atol=3e-10
     @test sbb_gradient ≈ optimized_gradient rtol=3e-11 atol=3e-10
+    # Julianic fourth arm directly against both Stan surfaces (slightly relaxed to
+    # absorb the ~3e-14 `Bernoulli(logistic)`↔`BernoulliLogit` reparameterization).
+    @test julianic_lp ≈ sbb_lp rtol=5e-12 atol=2e-10
+    @test julianic_lp ≈ optimized_lp rtol=5e-12 atol=2e-10
+    @test julianic_gradient ≈ native_from_stan_gradient(sbb_gradient, G) rtol=5e-11 atol=3e-10
+    @test julianic_gradient ≈ native_from_stan_gradient(optimized_gradient, G) rtol=5e-11 atol=3e-10
     println(
         "BRM_MIXED_PARITY point=base",
         " native_lp=", native_lp,
+        " julianic_lp=", julianic_lp,
         " sbb_lp=", sbb_lp,
         " optimized_lp=", optimized_lp,
+        " max_julianic_native_gradient_diff=",
+        maximum(abs, julianic_gradient .- native_gradient),
         " max_native_sbb_gradient_diff=",
         maximum(abs, native_gradient .-
             native_from_stan_gradient(sbb_gradient, G)),
+        " max_julianic_sbb_gradient_diff=",
+        maximum(abs, julianic_gradient .-
+            native_from_stan_gradient(sbb_gradient, G)),
         " max_native_optimized_gradient_diff=",
         maximum(abs, native_gradient .-
+            native_from_stan_gradient(optimized_gradient, G)),
+        " max_julianic_optimized_gradient_diff=",
+        maximum(abs, julianic_gradient .-
             native_from_stan_gradient(optimized_gradient, G)),
     )
 
@@ -242,6 +304,9 @@ end
     shifted_stan_q = stan_from_native(shifted_native_q, G)
     shifted_native_lp, shifted_native_gradient = NP.logdensity_and_gradient!(
         native_work, prepared, shifted_native_q)
+    shifted_julianic_lp, shifted_julianic_gradient_view =
+        NP.jlogdensity_and_gradient!(jwork, jprepared, shifted_native_q)
+    shifted_julianic_gradient = copy(shifted_julianic_gradient_view)
     shifted_sbb_lp, _ = BS.log_density_gradient!(
         sbb_problem.model, shifted_stan_q, sbb_gradient;
         propto=false, jacobian=true)
@@ -254,13 +319,28 @@ end
           native_from_stan_gradient(sbb_gradient, G) rtol=3e-11 atol=3e-10
     @test shifted_native_gradient ≈
           native_from_stan_gradient(optimized_gradient, G) rtol=3e-11 atol=3e-10
+    # Julianic fourth arm at the shifted point — vs declarative and both Stans.
+    @test shifted_julianic_lp ≈ shifted_native_lp rtol=1e-11 atol=1e-11
+    @test shifted_julianic_lp ≈ shifted_sbb_lp rtol=5e-12 atol=2e-10
+    @test shifted_julianic_lp ≈ shifted_optimized_lp rtol=5e-12 atol=2e-10
+    @test shifted_julianic_gradient ≈ shifted_native_gradient rtol=1e-11 atol=1e-11
+    @test shifted_julianic_gradient ≈
+          native_from_stan_gradient(sbb_gradient, G) rtol=5e-11 atol=3e-10
+    @test shifted_julianic_gradient ≈
+          native_from_stan_gradient(optimized_gradient, G) rtol=5e-11 atol=3e-10
     println(
         "BRM_MIXED_PARITY point=shifted",
         " native_lp=", shifted_native_lp,
+        " julianic_lp=", shifted_julianic_lp,
         " sbb_lp=", shifted_sbb_lp,
         " optimized_lp=", shifted_optimized_lp,
+        " max_julianic_native_gradient_diff=",
+        maximum(abs, shifted_julianic_gradient .- shifted_native_gradient),
         " max_native_sbb_gradient_diff=",
         maximum(abs, shifted_native_gradient .-
+            native_from_stan_gradient(sbb_gradient, G)),
+        " max_julianic_sbb_gradient_diff=",
+        maximum(abs, shifted_julianic_gradient .-
             native_from_stan_gradient(sbb_gradient, G)),
         " max_native_optimized_gradient_diff=",
         maximum(abs, shifted_native_gradient .-
@@ -292,13 +372,23 @@ end
         () -> BS.log_density_gradient!(
             optimized_problem.model, stan_q, optimized_gradient;
             propto=false, jacobian=true))
+    NP.jlogdensity(jprepared, native_q)
+    NP.jlogdensity_and_gradient!(jwork, jprepared, native_q)
+    julianic_density_bench = benchmark_call(
+        () -> NP.jlogdensity(jprepared, native_q))
+    julianic_gradient_bench = benchmark_call(
+        () -> NP.jlogdensity_and_gradient!(jwork, jprepared, native_q))
 
     @test native_density_bench.bytes_per_call == 0
     @test native_gradient_bench.bytes_per_call == 0
+    # The julianic run-the-body surface is NOT 0-alloc on this grouped model: the
+    # LKJ manifold, the non-centered reshape/matmul and the `b[k,group]` gather all
+    # allocate. That allocation cost is the receipt itself — reported, not asserted.
     @test all(isfinite, (
         native_density_bench.median_ns, native_gradient_bench.median_ns,
         sbb_density_bench.median_ns, sbb_gradient_bench.median_ns,
         optimized_density_bench.median_ns, optimized_gradient_bench.median_ns,
+        julianic_density_bench.median_ns, julianic_gradient_bench.median_ns,
     ))
     show_benchmark("NativePPL", "density!", native_density_bench; N, G, dimension)
     show_benchmark("NativePPL", "DI.AutoEnzyme density+gradient!", native_gradient_bench; N, G, dimension)
@@ -306,4 +396,6 @@ end
     show_benchmark("SBBRMI/BridgeStan", "normalized gradient FFI", sbb_gradient_bench; N, G, dimension)
     show_benchmark("optimized Stan/BridgeStan", "normalized density FFI", optimized_density_bench; N, G, dimension)
     show_benchmark("optimized Stan/BridgeStan", "normalized gradient FFI", optimized_gradient_bench; N, G, dimension)
+    show_benchmark("julianic NativePPL @jmodel", "jlogdensity", julianic_density_bench; N, G, dimension)
+    show_benchmark("julianic NativePPL @jmodel", "jlogdensity_and_gradient!", julianic_gradient_bench; N, G, dimension)
 end

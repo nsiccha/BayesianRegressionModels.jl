@@ -63,6 +63,18 @@ export TruncatedNormal, bordet_hierarchical_parametric, kernel, ragged
 # exact Distributions.jl functions; `interval_censored` is BRM's narrow formula
 # shim for evidence that a latent response lies between two row-wise bounds.
 export truncated, censored, interval_censored
+# A julianic `@jmodel` body is ordinary Julia, so the distributions it names must
+# be real `Distributions` objects resolved in the AUTHOR's scope. Re-export the
+# ones a model body actually writes so `using BayesianRegressionModels` is the
+# only import a model file needs — no `using Distributions` on top (todo
+# `0n9bz7p`, decision `0w84aut`). These are `Distributions.*` verbatim, not
+# wrappers. Note `NativePPL` exports its OWN `Exponential`/`StandardNormal` —
+# the DECLARATIVE prior *declarations*, a different thing — so a caller who
+# `using`s both modules must qualify that one name; `Normal` does not clash at
+# all, because the declarative macro matches the bare symbol at expansion time
+# rather than resolving a binding.
+export Normal, Exponential, Poisson, Bernoulli, LKJCholesky
+export product_distribution, logpdf
 # Logit-form Bernoulli/Binomial -- prefer these over `Bernoulli(logistic(eta))`
 # / `Binomial(N, logistic(eta))`. Both backends lower to a logit-native log-pmf
 # (Stan's `bernoulli_logit_lpmf` / `binomial_logit_lpmf`; LogExpFunctions'

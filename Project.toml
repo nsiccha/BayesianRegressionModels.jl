@@ -11,7 +11,9 @@ InverseFunctions = "3587e190-3f89-42d0-90ee-14403ec27112"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 LogDensityProblems = "6fdf6af0-433a-55f7-b3ed-c6c6e0b8df7c"
 LogExpFunctions = "2ab3a3ac-af41-5b50-aa03-7779005ae688"
+MutatingFunctions = "8a4c2d94-4b3b-4f9e-be63-a3c0cd816e3a"
 OrderedCollections = "bac558e1-5e72-5ebc-8fee-abe8a469f55d"
+OutputSignatures = "86cfaae4-1704-4c69-ba62-d919d81ae5f8"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
 StanBlocks = "2e771a56-c23a-4e0b-9282-20c2e37157e9"
@@ -20,15 +22,32 @@ StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
 [weakdeps]
 DifferentiationInterface = "a0c0ee7d-e4b9-4e03-894e-1c5f64a51d63"
 Enzyme = "7da242da-08ed-463a-9acd-ee780be4f1d9"
+TreeArrays = "5daaa025-ac78-4e9a-8805-78946e672e43"
 WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 
 [extensions]
 BayesianRegressionModelsDifferentiationInterfaceExt = "DifferentiationInterface"
+BayesianRegressionModelsTreeArraysExt = "TreeArrays"
 BayesianRegressionModelsWarmupHMCEnzymeExt = ["WarmupHMC", "Enzyme"]
 BayesianRegressionModelsWarmupHMCExt = "WarmupHMC"
 
 [compat]
 DifferentiationInterface = "0.7"
 Enzyme = "0.13"
+MutatingFunctions = "0.1"
+OutputSignatures = "0.1"
+TreeArrays = "0.1"
 WarmupHMC = "0.2"
 julia = "1.10"
+
+# MutatingFunctions.jl + OutputSignatures.jl are the 0-alloc buffer-threading
+# substrate for the julianic run-the-body executor (user directive 2026-08-04:
+# "use ... the MutatingFunctions.jl and OutputSignatures.jl packages"). Not yet
+# in a registry — sourced from their canonical GitHub repos; the Manifest pins
+# the resolved commit.
+[sources]
+MutatingFunctions = {url = "https://github.com/nsiccha/MutatingFunctions.jl"}
+OutputSignatures = {url = "https://github.com/nsiccha/OutputSignatures.jl"}
+# TreeArrays.jl labels the postprocessing draw axes (weak dep — the density
+# path never loads it).
+TreeArrays = {url = "https://github.com/nsiccha/TreeArrays.jl"}

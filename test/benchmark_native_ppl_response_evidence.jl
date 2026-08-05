@@ -1,7 +1,7 @@
 using BayesianRegressionModels
 using StanBlocks
 using BridgeStan
-using Distributions: Exponential, Normal
+using Distributions: Exponential, Normal, censored, product_distribution
 import DifferentiationInterface as DI
 using Enzyme
 using LinearAlgebra: dot
@@ -59,6 +59,31 @@ const model = NP.lower(brmi)
 const plan = NP.compile(brmi)
 const prepared = NP.prepare(plan)
 const work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
+
+# Julianic run-the-body surface — the SAME censored grouped-varying-intercept model
+# authored as `@jmodel`, pinned DIRECTLY against Stan here. `censored(...)` needs
+# nothing from the `~` runtime — it is an ordinary `Distributions` object with a
+# `logpdf`, so the julianic body writes the same call. This transcribes the
+# gallery's proven `julianic_censored` (test/native_ppl_julianic.jl) with this
+# benchmark's bounds. The group effect is sampled CENTERED (`b_g_group ~ Normal(0,
+# tau)`), exactly like the declarative `native` surface — so the julianic θ IS
+# `native_position` (centered), UNMAPPED, and its gradient is in native order.
+# The Stan arms stay NON-CENTERED (`z = b/tau`) and keep `normalized_stan_density`
+# (density) + `stan_gradient_to_native` (gradient). The `b_g_group[group]` gather
+# differentiates under MutatingFunctions 92687c8.
+NP.@jmodel function julianic_censored_varying_intercept_benchmark(x, group)
+    tau_g_group ~ Exponential(1.0)
+    b_g_group ~ product_distribution(
+        fill(Normal(0.0, tau_g_group), maximum(group)))
+    beta_mu ~ product_distribution(fill(Normal(0.0, 1.0), 2))
+    sigma ~ Exponential(2.0)
+    mu = beta_mu[1] .+ beta_mu[2] .* x .+ b_g_group[group]
+    @. y ~ censored(Normal(mu, sigma); lower=LOWER, upper=UPPER)
+end
+
+const jprepared = NP.jprepare(NP.jcondition(
+    julianic_censored_varying_intercept_benchmark(x, group); y))
+const jwork = NP.jworkspace(jprepared, Float64, DI.AutoEnzyme())
 
 const sb = SBBRMI(brmi; mod=@__MODULE__)
 const sb_path = "/tmp/native_ppl_response_evidence_sb.stan"
@@ -149,6 +174,8 @@ function warmup!()
         BridgeStan.log_density_gradient!(
             pure_model, stan_position, pure_gradient;
             propto=false, jacobian=true)
+        NP.jlogdensity(jprepared, native_position)
+        NP.jlogdensity_and_gradient!(jwork, jprepared, native_position)
     end
 end
 
@@ -171,7 +198,11 @@ function allocation_receipt()
                 pure_model, stan_position; propto=false, jacobian=true)),
             gradient=@allocated(BridgeStan.log_density_gradient!(
                 pure_model, stan_position, pure_gradient;
-                propto=false, jacobian=true))))
+                propto=false, jacobian=true))),
+        jl=(
+            density=@allocated(NP.jlogdensity(jprepared, native_position)),
+            gradient=@allocated(NP.jlogdensity_and_gradient!(
+                jwork, jprepared, native_position))))
 end
 
 function measure!(f)
@@ -209,7 +240,12 @@ function timing_receipt()
                     propto=false, jacobian=true)),
                 gradient=measure!(() -> BridgeStan.log_density_gradient!(
                     pure_model, stan_position, pure_gradient;
-                    propto=false, jacobian=true))))
+                    propto=false, jacobian=true))),
+            jl=(
+                density=measure!(() -> NP.jlogdensity(
+                    jprepared, native_position)),
+                gradient=measure!(() -> NP.jlogdensity_and_gradient!(
+                    jwork, jprepared, native_position))))
     finally
         GC.enable(gc_was_enabled)
     end
@@ -219,6 +255,12 @@ function equivalence_receipt()
     native_density, native_gradient_view =
         NP.logdensity_and_gradient!(work, prepared, native_position)
     native_gradient = copy(native_gradient_view)
+    # Julianic shares the CENTERED native_position, so its density/gradient are
+    # compared to native directly and to the Stan arms after the same
+    # normalize/map the native arm uses.
+    jl_density, jl_gradient_view =
+        NP.jlogdensity_and_gradient!(jwork, jprepared, native_position)
+    jl_gradient = copy(jl_gradient_view)
     sb_density_raw, _ = BridgeStan.log_density_gradient!(
         sb_model, stan_position, sb_gradient;
         propto=false, jacobian=true)
@@ -238,15 +280,25 @@ function equivalence_receipt()
     native_pure_index = argmax(abs.(native_pure_delta))
     sb_pure_index = argmax(abs.(sb_pure_delta))
     (;
-        density=(native=native_density, sb=sb_density, pure=pure_density,
+        density=(native=native_density, julianic=jl_density,
+                 sb=sb_density, pure=pure_density,
                  native_minus_sb=native_density - sb_density,
                  native_minus_pure=native_density - pure_density,
+                 julianic_minus_native=jl_density - native_density,
+                 julianic_minus_sb=jl_density - sb_density,
+                 julianic_minus_pure=jl_density - pure_density,
                  sb_minus_pure=sb_density - pure_density),
         gradient_max_abs_difference=(
             native_sb=maximum(abs.(
                 native_gradient .- sb_gradient_native)),
             native_pure=maximum(abs.(
                 native_gradient .- pure_gradient_native)),
+            julianic_native=maximum(abs.(
+                jl_gradient .- native_gradient)),
+            julianic_sb=maximum(abs.(
+                jl_gradient .- sb_gradient_native)),
+            julianic_pure=maximum(abs.(
+                jl_gradient .- pure_gradient_native)),
             sb_pure=maximum(abs.(
                 sb_gradient_native .- pure_gradient_native))),
         mapped_finite_difference_max_abs_difference=(
@@ -292,6 +344,17 @@ const equivalence = equivalence_receipt()
     1e-7
 @assert equivalence.mapped_finite_difference_max_abs_difference.native_pure <
     1e-7
+# Julianic fourth arm: reproduces the declarative (centered) surface to roundoff,
+# and matches the pure hand-Stan to the same <1e-10; vs SBBRMI it inherits the
+# same ~1e-5 censored-reverse-rule caveat native does (its Stan normal_lcdf rule
+# is the outlier — see gradient_caveat below).
+@assert abs(equivalence.density.julianic_minus_native) < 1e-10
+@assert maximum(abs, (
+    equivalence.density.julianic_minus_sb,
+    equivalence.density.julianic_minus_pure)) < 1e-10
+@assert equivalence.gradient_max_abs_difference.julianic_native < 1e-10
+@assert equivalence.gradient_max_abs_difference.julianic_pure < 1e-10
+@assert equivalence.gradient_max_abs_difference.julianic_sb < 1e-5
 
 println("context=", (;
     julia_version=VERSION, cpu=Sys.CPU_NAME, threads=Threads.nthreads(),
@@ -331,6 +394,10 @@ println("generated_surfaces=", (;
           lines=count(==(UInt8('\n')), codeunits(read(
               pure_stan_path, String))) + 1,
           sha256=file_sha(pure_stan_path))))
+println("julianic=", (;
+    dimension=NP.dimension(jprepared),
+    matches_native_dimension=NP.dimension(jprepared) == plan.graph.dimension,
+    coordinate_order=:declaration_order_identity_to_native_centered))
 println("equivalence=", equivalence)
 println("gradient_caveat=", (;
     mapped_finite_difference_step=1e-5,

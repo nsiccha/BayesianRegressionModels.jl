@@ -17,9 +17,12 @@ import DifferentiationInterface as DI
 using Distributions: Bernoulli, Dirichlet, Exponential, LKJCholesky, Normal,
                      Poisson, censored, logpdf, product_distribution
 using Enzyme
+import LinearAlgebra
 using LogExpFunctions: logistic
 using LogDensityProblems
 using Random: MersenneTwister, randn
+using Statistics: mean, std
+using TreeArrays
 
 const BRM = BayesianRegressionModels
 const NP = BRM.NativePPL
@@ -324,6 +327,51 @@ NP.@jmodel function julianic_censored(x, group)
     @. y ~ censored(Normal(mu, sigma); lower=-0.5, upper=1.0)
 end
 
+# Observation weights. The declarative surface carries the weight KIND in the
+# StatsBase constructor's NAME, because a declaration cannot say `sigma/sqrt(w)`
+# — the weight type has to say it for the author. A julianic body is Julia, so it
+# says it directly, and the two kinds land in different places:
+#
+#   :frequency / :power  MULTIPLY the log density   -> `weighted(dist, w)`, the
+#                                                      one thing plain Julia has
+#                                                      no spelling for
+#   :analytic            scale PRECISION            -> written out, no wrapper
+#
+# Both are pinned against the declarative oracle here, since the second is a
+# claim about arithmetic identity (`Normal(mu, sigma/sqrt(w))` IS the analytic
+# weighting) rather than about the `~` runtime. Decision `06le2au`.
+NP.@model function declarative_frequency_weighted(x, replicates)
+    intercept ~ Normal()
+    slope ~ Normal()
+    sigma ~ Exponential(2.0)
+    mu = intercept .+ slope .* x
+    @. y ~ weighted(Normal(mu, sigma), fweights(replicates))
+end
+
+NP.@jmodel function julianic_frequency_weighted(x, replicates)
+    intercept ~ Normal()
+    slope ~ Normal()
+    sigma ~ Exponential(2.0)
+    mu = intercept .+ slope .* x
+    @. y ~ weighted(Normal(mu, sigma), replicates)
+end
+
+NP.@model function declarative_analytic_weighted(x, replicates)
+    intercept ~ Normal()
+    slope ~ Normal()
+    sigma ~ Exponential(2.0)
+    mu = intercept .+ slope .* x
+    @. y ~ weighted(Normal(mu, sigma), aweights(replicates))
+end
+
+NP.@jmodel function julianic_analytic_weighted(x, replicates)
+    intercept ~ Normal()
+    slope ~ Normal()
+    sigma ~ Exponential(2.0)
+    mu = intercept .+ slope .* x
+    @. y ~ Normal(mu, sigma / sqrt(replicates))
+end
+
 # `y .~ D.(...)` — the spelling the declarative surface uses, where the author
 # has already dotted the RHS. Must be the same model as the `@.` form.
 NP.@jmodel function julianic_affine_gaussian_dotted(x)
@@ -332,6 +380,17 @@ NP.@jmodel function julianic_affine_gaussian_dotted(x)
     sigma ~ Exponential(2.0)
     mu = intercept .+ slope .* x
     y .~ Normal.(mu, sigma)
+end
+
+# An elementwise latent with NON-identical marginals: `b .~ Normal.(0, tau)` is k
+# independent sites, one per `tau[i]`, by ordinary broadcasting — no
+# `product_distribution`. Non-identical scales make it a coordinate-ORDER probe:
+# if the cursor walked `b` in any order but 1..k, a `tau[i]` would pair with the
+# wrong slice and the density would change. Defined here (rather than beside the
+# other conditioning fixtures) because the allocation testset below uses it too.
+NP.@jmodel function julianic_elementwise_latent(tau)
+    b .~ Normal.(0.0, tau)
+    @. y ~ Normal(b, 1.0)
 end
 
 const PREDICTOR = [-1.2, 0.3, 0.9, 2.1, -0.4, 1.5]
@@ -344,6 +403,19 @@ const BINARY = (; y=[0.0, 1.0, 1.0, 0.0, 1.0, 0.0])
 # `[lower, upper]` — an out-of-range value scores `-Inf` on both surfaces and
 # would make the comparison vacuous rather than wrong.
 const CENSORED = (; y=[0.1, -0.5, 1.0, 1.0, 0.0, 0.8])
+# Frequency weights are counts; analytic weights are arbitrary positive reals.
+# Neither is all-ones — an all-ones weight makes every kind agree and would pass
+# whatever the wrapper did.
+const FREQUENCIES = [1, 3, 2, 1, 4, 2]
+const ANALYTIC = [0.5, 2.0, 1.0, 3.0, 0.25, 1.5]
+
+# Everything below is nested inside ONE outer set on purpose. A top-level
+# `@testset` throws as it finishes if anything inside it failed, which aborts the
+# rest of the FILE — so a single broken model class in the parity sweep takes every
+# later set down with it, unrun and unreported. Nested sets do not throw
+# individually: they report up, the outer set throws once at the very end, and a
+# failing run still tells you the state of the whole file.
+@testset "julianic run-the-body surface" begin
 
 @testset "julianic oracle parity" begin
     @testset "flat affine gaussian" begin
@@ -411,6 +483,435 @@ const CENSORED = (; y=[0.1, -0.5, 1.0, 1.0, 0.0, 0.8])
             julianic_censored(PREDICTOR, GROUP),
             CENSORED)
     end
+
+    @testset "frequency-weighted observation" begin
+        oracle_parity(
+            declarative_frequency_weighted(PREDICTOR, FREQUENCIES),
+            julianic_frequency_weighted(PREDICTOR, FREQUENCIES),
+            CONTINUOUS)
+    end
+
+    @testset "analytic-weighted observation (precision scaling)" begin
+        oracle_parity(
+            declarative_analytic_weighted(PREDICTOR, ANALYTIC),
+            julianic_analytic_weighted(PREDICTOR, ANALYTIC),
+            CONTINUOUS)
+    end
+end
+
+# The `weighted` wrapper is a real `Distributions.Distribution`, not a macro
+# device — that is the whole point of the julianic surface, so it has to hold
+# OUTSIDE a model body too.
+@testset "weighted is an ordinary distribution" begin
+    base = Normal(0.5, 2.0)
+    @test logpdf(weighted(base, 3.0), 0.3) ≈ 3.0 * logpdf(base, 0.3)
+    @test logpdf(weighted(base, 1.0), 0.3) == logpdf(base, 0.3)
+    # Elementwise under broadcast — the form a model body actually produces.
+    @test logpdf.(weighted.(Normal.([0.1, 0.2], 1.0), [2.0, 5.0]), [0.0, 1.0]) ≈
+        [2.0, 5.0] .* logpdf.(Normal.([0.1, 0.2], 1.0), [0.0, 1.0])
+    # The un-dotted StatsBase spellings, kept identical to the declarative
+    # surface. Frequency/power apply; the two kinds this wrapper cannot express
+    # fail closed instead of silently multiplying.
+    @test logpdf.(weighted(base, fweights([1, 2])), [0.0, 1.0]) ≈
+        [1, 2] .* logpdf.(base, [0.0, 1.0])
+    @test occursin("analytic weights scale PRECISION",
+                   argument_error(() -> weighted(base, aweights([1.0, 2.0]))).msg)
+    @test occursin("ProbabilityWeights semantics are not implemented",
+                   argument_error(() -> weighted(base, pweights([1.0, 2.0]))).msg)
+end
+
+# Steady-state allocations. The declarative executor pins
+# `(primal=0, gradient=0)` and the julianic kernel is held to the SAME bar
+# (decision `08w0buk`): every array-valued intermediate is filled in place into a
+# preallocated pool threaded as a `DI.Cache`, so a gradient eval allocates
+# nothing no matter how many data rows there are — the 32-bytes-per-row cost this
+# surface used to carry is gone, not merely reduced.
+#
+# The measurement MUST happen inside a function with typed locals: at global
+# scope `@allocated` boxes the untyped globals and reports a meaningless nonzero
+# number, which is exactly how a false "DI has an allocation floor" conclusion
+# gets reached.
+# Both entry points take the WORKSPACE — `jlogdensity(prepared, theta)` without
+# one allocates its pool per call by construction, so it is the convenience form,
+# not the one this bar is about.
+function steady_state_allocations(prepared, workspace, theta)
+    # Measure the REALISTIC hot loop: primal then gradient, interleaved, the way
+    # HMC calls them (primal for the accept step, gradient for the leapfrog). The
+    # gradient measure is deliberately taken right after a primal call — NOT after
+    # warming the gradient in isolation — because a gradient-after-primal is what
+    # HMC actually does, and papering that over with an extra same-kind warmup
+    # would hide a cost the sampler really pays.
+    NP.jlogdensity!(workspace, prepared, theta)
+    NP.jlogdensity_and_gradient!(workspace, prepared, theta)
+    primal = @allocated NP.jlogdensity!(workspace, prepared, theta)
+    gradient = @allocated NP.jlogdensity_and_gradient!(workspace, prepared, theta)
+    return (; primal, gradient)
+end
+
+@testset "julianic steady-state allocations" begin
+    # Scaled 10x past the pinned gallery size, because a per-row leak is what
+    # this is guarding against — it would be invisible at n=6.
+    rng = MersenneTwister(20260804)
+    x = randn(rng, 60)
+    weights = rand(rng, 60) .+ 0.5
+    counts = rand(rng, 1:4, 60)
+    scales = rand(rng, 60) .+ 0.5
+    observations = (; y=randn(rng, 60))
+
+    # Flat / scalar-latent models: 0-alloc holds for BOTH primal and gradient.
+    for (name, model) in (
+            "affine gaussian" => julianic_affine_gaussian(x),
+            "frequency-weighted" => julianic_frequency_weighted(x, counts),
+            "analytic-weighted" => julianic_analytic_weighted(x, weights))
+        prepared = NP.jprepare(NP.jcondition(model; observations...))
+        workspace = NP.jworkspace(prepared, Float64, JULIANIC_BACKEND)
+        theta = randn(rng, NP.dimension(prepared))
+        # The pooled primal must be the SAME number as the allocating one — a
+        # buffer reused across evals without a proper rewind would show up here
+        # and nowhere else.
+        @test NP.jlogdensity!(workspace, prepared, theta) ==
+            NP.jlogdensity(prepared, theta)
+        allocations = steady_state_allocations(prepared, workspace, theta)
+        @test allocations.primal == 0
+        @test allocations.gradient == 0
+        allocations == (primal=0, gradient=0) ||
+            @info "julianic allocations" model=name allocations
+    end
+
+    # A VECTOR latent (`b .~ Normal.(0, tau)` feeding an observation). The fused
+    # `_broadcast_constrain!` rewrite (replacing the per-element walk that BOXED
+    # ~34 B/coordinate under Enzyme reverse when writing a Cache-nested pool
+    # buffer) got the PRIMAL to 0 and the gradient-ONLY hot loop to 0 (verified 0
+    # over 10^4 successive gradient calls). What remains is a ~150 B/pair residual
+    # in the INTERLEAVED primal+gradient pattern this measurement uses — the real
+    # HMC loop — which `steady_state_allocations` deliberately does not hide. That
+    # residual is hardener-owned (todo `0wo5x9r`). Still a strict improvement over
+    # the `product_distribution` form it replaces (primal 2720, gradient 6640 at
+    # n=60): primal is now 0 outright, the gradient residual an order smaller.
+    @testset "vector latent — primal 0-alloc, interleaved gradient tracked" begin
+        prepared = NP.jprepare(NP.jcondition(
+            julianic_elementwise_latent(scales); observations...))
+        workspace = NP.jworkspace(prepared, Float64, JULIANIC_BACKEND)
+        theta = randn(rng, NP.dimension(prepared))
+        @test NP.jlogdensity!(workspace, prepared, theta) ==
+            NP.jlogdensity(prepared, theta)
+        allocations = steady_state_allocations(prepared, workspace, theta)
+        @test allocations.primal == 0
+        @test_broken allocations.gradient == 0
+    end
+end
+
+# Postprocessing runs the SAME body with a different sink, so the numbers cannot
+# drift from the density that scored them. Pinned against the model recomputed by
+# hand — the test is the independent implementation, which is the only kind of
+# oracle that catches a shared-walk bug.
+@testset "julianic postprocessing" begin
+    prepared = NP.jprepare(NP.jcondition(
+        julianic_affine_gaussian(PREDICTOR); CONTINUOUS...))
+    theta = [0.4, -1.1, 0.7]
+    intercept, slope, sigma = theta[1], theta[2], exp(theta[3])
+
+    @testset "constrained site values" begin
+        sites = NP.jconstrained(prepared, theta)
+        @test keys(sites) == (:intercept, :slope, :sigma)
+        @test sites.intercept == intercept
+        @test sites.slope == slope
+        # The positive-support site is the one that MUST be constrained: the raw
+        # coordinate 0.7 and the natural value exp(0.7) are both plausible-looking
+        # numbers, so returning the wrong one would not look wrong.
+        @test sites.sigma == sigma
+    end
+
+    @testset "pointwise log-likelihood" begin
+        pointwise = NP.jpointwise(prepared, theta)
+        expected = logpdf.(Normal.(intercept .+ slope .* PREDICTOR, sigma),
+                           CONTINUOUS.y)
+        @test pointwise.y ≈ expected
+        # The elementwise terms must be exactly the ones the density summed, so
+        # the density is recoverable from them plus the priors.
+        priors = logpdf(Normal(), intercept) + logpdf(Normal(), slope) +
+            logpdf(Exponential(2.0), sigma) + theta[3]   # + the exp log-Jacobian
+        @test sum(pointwise.y) + priors ≈ NP.jlogdensity(prepared, theta)
+    end
+
+    @testset "posterior predictive" begin
+        draws = NP.jpredict(MersenneTwister(7), prepared, theta)
+        @test length(draws.y) == length(CONTINUOUS.y)
+        # Redrawn, not echoed back — the whole point of a predictive.
+        @test draws.y != CONTINUOUS.y
+        # Reproducible from the seed, and NOT a fluke of a fixed value.
+        @test NP.jpredict(MersenneTwister(7), prepared, theta).y == draws.y
+        @test NP.jpredict(MersenneTwister(8), prepared, theta).y != draws.y
+    end
+
+    @testset "discrete families keep their element type" begin
+        counts = NP.jprepare(NP.jcondition(julianic_poisson(PREDICTOR); COUNTS...))
+        drawn = NP.jpredict(MersenneTwister(7), counts, [0.3, -0.2])
+        @test eltype(drawn.y) <: Integer
+        @test all(>=(0), drawn.y)
+
+        binary = NP.jprepare(NP.jcondition(julianic_bernoulli(PREDICTOR); BINARY...))
+        flags = NP.jpredict(MersenneTwister(7), binary, [0.3, -0.2])
+        @test all(in((0, 1, true, false)), flags.y)
+    end
+
+    @testset "draws stack draw-major" begin
+        # ROWS = draws, the declarative `evaluate_draws!` convention, so a
+        # sampler's output feeds either surface unchanged.
+        positions = [0.4 -1.1 0.7; 0.0 0.0 0.0; -0.3 0.8 -0.2]
+        sites = NP.jconstrained_draws(prepared, positions)
+        @test size(sites.intercept) == (3,)
+        @test sites.intercept == positions[:, 1]
+        @test sites.sigma == exp.(positions[:, 3])
+
+        pointwise = NP.jpointwise_draws(prepared, positions)
+        @test size(pointwise.y) == (3, length(CONTINUOUS.y))
+        for draw in 1:3
+            @test pointwise.y[draw, :] ==
+                NP.jpointwise(prepared, positions[draw, :]).y
+        end
+
+        replicates = NP.jpredict_draws(MersenneTwister(3), prepared, positions)
+        @test size(replicates.y) == (3, length(CONTINUOUS.y))
+        # Each draw is its own replicate, not one broadcast across the rows.
+        @test replicates.y[1, :] != replicates.y[2, :]
+
+        # A site with its own axes stacks under the draw axis, not beside it.
+        correlated = NP.jprepare(NP.jcondition(
+            julianic_correlated_varying(PREDICTOR, GROUP); CONTINUOUS...))
+        block = randn(MersenneTwister(5), 4, NP.dimension(correlated))
+        blocked = NP.jconstrained_draws(correlated, block)
+        @test size(blocked.tau_p_group) == (4, 2)
+        @test size(blocked.L_p_group) == (4, 2, 2)
+        @test blocked.L_p_group[3, :, :] ==
+            NP.jconstrained(correlated, block[3, :]).L_p_group
+
+        @test_throws ArgumentError NP.jconstrained_draws(
+            prepared, zeros(0, NP.dimension(prepared)))
+    end
+
+    @testset "grouped and constrained-manifold sites" begin
+        # A multivariate site returns a `@view` into theta and the LKJ site
+        # returns a pooled matrix — both would alias live state if recorded
+        # as-is, so the recorded values must survive a later run untouched.
+        model = NP.jprepare(NP.jcondition(
+            julianic_correlated_varying(PREDICTOR, GROUP); CONTINUOUS...))
+        position = randn(MersenneTwister(11), NP.dimension(model))
+        sites = NP.jconstrained(model, position)
+        saved = deepcopy(sites)
+        NP.jconstrained(model, position .+ 1.0)
+        @test sites == saved
+        # `tau` is positive-support, `L` is the correlation factor: both are the
+        # constrained values, not raw coordinates.
+        @test all(>(0), sites.tau_p_group)
+        @test sites.L_p_group ≈ LinearAlgebra.LowerTriangular(sites.L_p_group)
+        @test all(≈(1.0), sum(abs2, sites.L_p_group; dims=2))
+    end
+
+    # The labelled-container forms come from the TreeArrays weak-dep extension:
+    # the SAME arrays, with the axes named once as metadata instead of smeared
+    # across rows. Loading TreeArrays must be all it takes.
+    @testset "TreeArrays draw containers" begin
+        positions = [0.4 -1.1 0.7; 0.0 0.0 0.0; -0.3 0.8 -0.2]
+        fields = parent(NP.jconstrained_tree(prepared, positions))
+        @test propertynames(fields) == (:intercept, :slope, :sigma)
+        # No restructuring and no copy — the tree wraps the very array the plain
+        # form returns.
+        @test parent(fields.sigma) == exp.(positions[:, 3])
+
+        # Reducing BY NAME is the axis-naming contract: TreeArrays refuses a
+        # `dims=` name that resolves nowhere, so a successful reduce over `:draw`
+        # is proof the axis carries that name, and the refusal proves the check
+        # is live rather than the name being ignored.
+        @test mean(fields.sigma; dims=:draw) isa Any
+        @test_throws Exception mean(fields.sigma; dims=:not_an_axis)
+
+        pointwise = parent(NP.jpointwise_tree(prepared, positions))
+        @test size(parent(pointwise.y)) == (3, length(CONTINUOUS.y))
+        # Per-observation means over the draw axis — the shape PSIS-LOO reduces.
+        @test parent(mean(pointwise.y; dims=:draw)) ≈
+            vec(sum(NP.jpointwise_draws(prepared, positions).y; dims=1) ./ 3)
+    end
+
+    # Forward simulation is the ONE pass that does not go through the `_sample!`
+    # family table — a prior draw is `rand(dist)` for every family at once,
+    # because it never touches the unconstrained parametrization the families
+    # exist to handle. So the thing to pin is that it really is drawing from the
+    # PRIORS the body declares, which only a distributional check can show.
+    @testset "prior simulation" begin
+        drawn = NP.jsimulate(MersenneTwister(4), prepared)
+        @test keys(drawn.latents) == (:intercept, :slope, :sigma)
+        @test keys(drawn.observations) == (:y,)
+        @test length(drawn.observations.y) == length(CONTINUOUS.y)
+        @test drawn.latents.sigma > 0                      # support respected
+        @test NP.jsimulate(MersenneTwister(4), prepared) == drawn
+        @test NP.jsimulate(MersenneTwister(5), prepared).latents != drawn.latents
+
+        # The marginals must BE the declared priors. `sigma ~ Exponential(2.0)`
+        # has mean 2 and `intercept ~ Normal()` mean 0 / sd 1; a pass that
+        # sampled the wrong distribution (or the unconstrained coordinate rather
+        # than the constrained value) would land somewhere else entirely, which
+        # a single draw cannot distinguish.
+        rng = MersenneTwister(20260805)
+        simulations = [NP.jsimulate(rng, prepared) for _ in 1:4000]
+        intercepts = [s.latents.intercept for s in simulations]
+        sigmas = [s.latents.sigma for s in simulations]
+        @test abs(mean(intercepts)) < 0.06
+        @test abs(std(intercepts) - 1.0) < 0.06
+        @test abs(mean(sigmas) - 2.0) < 0.15
+        @test all(>(0), sigmas)
+
+        # And the prior predictive must be generated from THOSE latents, not from
+        # some other draw: standardising each observation by the parameters
+        # returned beside it has to give standard normals. Getting this wrong —
+        # resampling the parameters for the observation pass — would still
+        # produce plausible-looking `y`.
+        residuals = Float64[]
+        for s in simulations
+            mu = s.latents.intercept .+ s.latents.slope .* PREDICTOR
+            append!(residuals, (s.observations.y .- mu) ./ s.latents.sigma)
+        end
+        @test abs(mean(residuals)) < 0.05
+        @test abs(std(residuals) - 1.0) < 0.05
+
+        # Constrained-manifold and discrete families come along for free, since
+        # `rand` is the family's own. LKJ needs the one adapter (its `rand` gives
+        # a `Cholesky` where the body wants the factor matrix).
+        correlated = NP.jprepare(NP.jcondition(
+            julianic_correlated_varying(PREDICTOR, GROUP); CONTINUOUS...))
+        block = NP.jsimulate(MersenneTwister(9), correlated).latents
+        @test size(block.L_p_group) == (2, 2)
+        @test block.L_p_group ≈ LinearAlgebra.LowerTriangular(block.L_p_group)
+        @test all(≈(1.0), sum(abs2, block.L_p_group; dims=2))
+        @test all(>(0), block.tau_p_group)
+
+        counts = NP.jprepare(NP.jcondition(julianic_poisson(PREDICTOR); COUNTS...))
+        @test eltype(NP.jsimulate(MersenneTwister(9), counts).observations.y) <: Integer
+    end
+end
+
+# Downstream consumers (WarmupHMC, the samplers) take a `LogDensityProblem`, not
+# a `Prepared` — so julianic cannot stand in for the declarative surface without
+# this, and it has to be the SAME problem, not merely a similar one.
+# ---------------------------------------------------------------------------
+# Postprocessing against the DECLARATIVE oracle.
+#
+# `julianic postprocessing` above pins the layer against ITSELF — batch against
+# single, RNG determinism, shapes, element types. None of that can catch a value
+# the whole layer computes consistently and wrongly, which is exactly what the
+# charter's oracle discipline exists for. It applies here as it does to the
+# density: the declarative executor already answers `PointwiseLogLikelihood`, so
+# the two surfaces' per-observation log-likelihoods have to agree.
+#
+# This also reaches the two classes whose GRADIENT parity is currently blocked by
+# `gather-subarray-11c41349`. The recording pass is primal-only — no Enzyme — so
+# `grouped varying intercept` and `censored observation` do get oracle coverage
+# here even while `oracle parity` cannot differentiate them.
+# ---------------------------------------------------------------------------
+
+"""
+Compare julianic `jpointwise_draws` against the declarative executor's
+`PointwiseLogLikelihood` over random unconstrained draws. Returns the worst gap.
+"""
+function pointwise_oracle(declarative, julianic, observations;
+                          ndraws=5, seed=20260805)
+    oracle = NP.prepare(NP.compile(
+        NP.condition(NP.substitute(declarative); observations...)))
+    prepared = NP.jprepare(NP.jcondition(julianic; observations...))
+    work = NP.workspace(oracle, Float64, DI.AutoEnzyme())
+
+    rng = MersenneTwister(seed)
+    dimension = NP.dimension(prepared)
+    positions = Matrix{Float64}(undef, ndraws, dimension)
+    for draw in 1:ndraws
+        positions[draw, :] = randn(rng, dimension)
+    end
+
+    expected = NP.evaluate_draws(work, oracle, positions,
+                                 NP.PointwiseLogLikelihood())
+    got = NP.jpointwise_draws(prepared, positions).y
+    # Shape first: a transposed result would still compare elementwise on a
+    # square fixture, so this is the assertion that pins ROWS = draws.
+    @test size(got) == size(expected)
+    gap = maximum(abs, got .- expected)
+    @test gap <= ORACLE_TOLERANCE
+    return gap
+end
+
+@testset "julianic postprocessing matches the declarative oracle" begin
+    @testset "flat affine gaussian" begin
+        pointwise_oracle(declarative_affine_gaussian(PREDICTOR),
+                         julianic_affine_gaussian(PREDICTOR), CONTINUOUS)
+    end
+    @testset "distributional gaussian" begin
+        pointwise_oracle(declarative_distributional(PREDICTOR, SECONDARY),
+                         julianic_distributional(PREDICTOR, SECONDARY),
+                         CONTINUOUS)
+    end
+    @testset "poisson log link" begin
+        pointwise_oracle(declarative_poisson(PREDICTOR),
+                         julianic_poisson(PREDICTOR), COUNTS)
+    end
+    @testset "bernoulli logit link" begin
+        pointwise_oracle(declarative_bernoulli(PREDICTOR),
+                         julianic_bernoulli(PREDICTOR), BINARY)
+    end
+    # Gradient-blocked upstream; the primal recording pass reaches them anyway.
+    @testset "grouped varying intercept" begin
+        pointwise_oracle(declarative_varying_intercept(PREDICTOR, GROUP),
+                         julianic_varying_intercept(PREDICTOR, GROUP),
+                         CONTINUOUS)
+    end
+    @testset "censored observation" begin
+        pointwise_oracle(declarative_censored(PREDICTOR, GROUP),
+                         julianic_censored(PREDICTOR, GROUP), CENSORED)
+    end
+    @testset "correlated varying intercept and slope (LKJ)" begin
+        pointwise_oracle(declarative_correlated_varying(PREDICTOR, GROUP),
+                         julianic_correlated_varying(PREDICTOR, GROUP),
+                         CONTINUOUS)
+    end
+    @testset "frequency-weighted observation" begin
+        pointwise_oracle(declarative_frequency_weighted(PREDICTOR, FREQUENCIES),
+                         julianic_frequency_weighted(PREDICTOR, FREQUENCIES),
+                         CONTINUOUS)
+    end
+end
+
+@testset "julianic LogDensityProblems interface" begin
+    prepared = NP.jprepare(NP.jcondition(
+        julianic_affine_gaussian(PREDICTOR); CONTINUOUS...))
+    problem = NP.JulianicLogDensityProblem(prepared, JULIANIC_BACKEND)
+    oracle = NP.LogDensityProblem(
+        NP.prepare(NP.compile(NP.condition(
+            NP.substitute(declarative_affine_gaussian(PREDICTOR)); CONTINUOUS...))),
+        DI.AutoEnzyme())
+
+    @test LogDensityProblems.capabilities(typeof(problem)) ==
+        LogDensityProblems.LogDensityOrder{1}()
+    @test LogDensityProblems.dimension(problem) ==
+        LogDensityProblems.dimension(oracle)
+    @test eltype(problem) == Float64
+
+    rng = MersenneTwister(20260805)
+    for _ in 1:4
+        theta = randn(rng, LogDensityProblems.dimension(problem))
+        @test LogDensityProblems.logdensity(problem, theta) ≈
+            LogDensityProblems.logdensity(oracle, theta) atol=ORACLE_TOLERANCE
+        density, gradient = LogDensityProblems.logdensity_and_gradient(problem, theta)
+        oracle_density, oracle_gradient =
+            LogDensityProblems.logdensity_and_gradient(oracle, theta)
+        @test density ≈ oracle_density atol=ORACLE_TOLERANCE
+        @test maximum(abs, gradient .- oracle_gradient) <= ORACLE_TOLERANCE
+    end
+
+    # The gradient must be a COPY — the workspace buffer is reused, so handing
+    # out an alias would let the next call silently rewrite a caller's result.
+    theta = zeros(LogDensityProblems.dimension(problem))
+    _, first_gradient = LogDensityProblems.logdensity_and_gradient(problem, theta)
+    saved = copy(first_gradient)
+    LogDensityProblems.logdensity_and_gradient(problem, theta .+ 1.0)
+    @test first_gradient == saved
 end
 
 @testset "julianic observation spellings agree" begin
@@ -425,18 +926,19 @@ end
 end
 
 # ---------------------------------------------------------------------------
-# Fail-closed boundaries.
+# Conditioning — not spelling — decides latent vs observation.
 # ---------------------------------------------------------------------------
 
+# The SAME body is a latent when `y` is free and an observation when `y` is
+# conditioned. A scalar `~` carries no built-in "this is data" marker; that is
+# what conditioning is for.
 NP.@jmodel function julianic_scalar_site_on_data(x)
     mu ~ Normal()
     y ~ Normal(mu, 1.0)
 end
 
-NP.@jmodel function julianic_unconditioned_observation(x)
-    mu ~ Normal()
-    @. absent ~ Normal(mu, 1.0)
-end
+# (`julianic_elementwise_latent` is defined earlier, before the allocation
+# testset that also uses it.)
 
 # A positive-support vector IS supported (its own `_sample!`, exp transform per
 # coordinate) — this is the model the guard below must NOT catch.
@@ -461,18 +963,276 @@ NP.@jmodel function julianic_upper_lkj(x)
     @. y ~ Normal(corr[2, 1], 1.0)
 end
 
-@testset "julianic fails closed" begin
-    @testset "scalar site on conditioned data" begin
-        # Without this check the site consumes a θ coordinate, scores the PRIOR
-        # at θ, rebinds `y`, and never reads the observation — a well-formed
-        # program computing the wrong density. The declarative `@model` accepts
-        # this exact spelling as an observation, so silence is not an option.
-        err = argument_error(() -> NP.jprepare(NP.jcondition(
-            julianic_scalar_site_on_data(PREDICTOR); y=3.0)))
-        @test occursin("conditioned data", err.msg)
-        @test occursin("y", err.msg)
+# Activity analysis: a generated-quantity latent. `b_new` is a random effect for
+# a group with NO observed data, so it reaches no likelihood term — the analysis
+# must classify it :gq (no coordinate, drawn from its prior in postprocessing).
+# Its twin (same body WITHOUT `b_new`) pins that the gq latent changes neither the
+# dimension nor the density. No gather here, so the pre-existing MutatingFunctions
+# gather gap does not mask the gradient check.
+NP.@jmodel function julianic_gq_latent(x)
+    a ~ Normal()
+    b_new ~ Normal(0.0, 1.0)
+    sigma ~ Exponential(2.0)
+    mu = a .* x
+    @. y ~ Normal(mu, sigma)
+end
+NP.@jmodel function julianic_gq_latent_twin(x)
+    a ~ Normal()
+    sigma ~ Exponential(2.0)
+    mu = a .* x
+    @. y ~ Normal(mu, sigma)
+end
 
-        # …and the same body IS a valid latent when `y` is not conditioned.
+# Activity analysis: a generated-quantity DETERMINISTIC. `z` is an array-valued
+# deterministic that reads a gq latent (`b_new`) and reaches no likelihood term, so
+# it is classified :gq — it must be skipped in the density (no pooled buffer slot,
+# no computation). Its twin (same body WITHOUT `z`) pins that the gq deterministic
+# changes neither the pool size nor the density.
+NP.@jmodel function julianic_gq_deterministic(x)
+    a ~ Normal()
+    sigma ~ Exponential(2.0)
+    b_new ~ Normal(0.0, 1.0)
+    z = b_new .* x
+    mu = a .* x
+    @. y ~ Normal(mu, sigma)
+end
+NP.@jmodel function julianic_gq_deterministic_twin(x)
+    a ~ Normal()
+    sigma ~ Exponential(2.0)
+    b_new ~ Normal(0.0, 1.0)
+    mu = a .* x
+    @. y ~ Normal(mu, sigma)
+end
+
+# Activity analysis: a data-only statement. `logx` is a transform of the predictor
+# `x` with NO parameter ancestor, so it is :data — it must be computed ONCE at
+# prepare and fetched in the density, not recomputed per call. Its twin INLINES the
+# same transform onto `mu` (putting it on the density path), which pins that the
+# precompute removes the transform's array intermediates from the density pool.
+NP.@jmodel function julianic_data_precompute(x)
+    logx = log.(abs.(x) .+ 1.0)
+    a ~ Normal()
+    sigma ~ Exponential(2.0)
+    mu = a .* logx
+    @. y ~ Normal(mu, sigma)
+end
+NP.@jmodel function julianic_data_precompute_twin(x)
+    a ~ Normal()
+    sigma ~ Exponential(2.0)
+    mu = a .* log.(abs.(x) .+ 1.0)
+    @. y ~ Normal(mu, sigma)
+end
+
+# Activity analysis: conditioning — NOT spelling — moves a site across the
+# partition. `pred ~ Normal(b, 1.0)` is an OBSERVATION when `pred` is conditioned
+# (its parent `b` is then needed for sampling) and a gq LATENT when it is not (so
+# neither `pred` nor the `b` it reads reaches the likelihood). One body, both
+# roles — the source text never changes.
+NP.@jmodel function julianic_optional_outcome(x)
+    a ~ Normal()
+    b ~ Normal()
+    mu = a .* x
+    @. y ~ Normal(mu, 1.0)
+    pred ~ Normal(b, 1.0)
+end
+
+# ---------------------------------------------------------------------------
+# `end` / `begin` in index position.
+#
+# The 0-alloc lowering hoists an index expression out of `A[...]` and into a
+# `_cached_gather!(ctx, A, idx)` argument. `end`/`begin` only mean anything
+# INSIDE the bracket, so the hoist has to resolve them against the array first.
+# When it did not, ordinary Julia like `z[1:2:end]` expanded cleanly and then
+# died at `jprepare` with `UndefVarError: end not defined` — no macro-time
+# complaint, and a whole model class (any non-centered reparameterization that
+# strides a latent block) unusable. The spelling must not change the answer, so
+# each model below is checked against its literal-index twin.
+# ---------------------------------------------------------------------------
+
+NP.@jmodel function julianic_index_end_range(x)
+    z ~ product_distribution(fill(Normal(0.0, 1.0), 4))
+    sigma ~ Exponential(1.0)
+    total = sum(z[1:2:end])
+    @. y ~ Normal(total, sigma)
+end
+
+NP.@jmodel function julianic_index_literal_range(x)
+    z ~ product_distribution(fill(Normal(0.0, 1.0), 4))
+    sigma ~ Exponential(1.0)
+    total = sum(z[1:2:3])
+    @. y ~ Normal(total, sigma)
+end
+
+NP.@jmodel function julianic_index_end_scalar(x)
+    z ~ product_distribution(fill(Normal(0.0, 1.0), 4))
+    sigma ~ Exponential(1.0)
+    total = sum(z[begin:end])
+    @. y ~ Normal(total, sigma)
+end
+
+NP.@jmodel function julianic_index_literal_scalar(x)
+    z ~ product_distribution(fill(Normal(0.0, 1.0), 4))
+    sigma ~ Exponential(1.0)
+    total = sum(z[1:4])
+    @. y ~ Normal(total, sigma)
+end
+
+# A nested `:ref` carries its OWN `end`: the inner one belongs to `selector`,
+# the outer to `z`. Resolving both against the outer array would silently gather
+# the wrong coordinates whenever the two lengths differ — as they do here (2 vs 4).
+NP.@jmodel function julianic_index_end_nested(x, selector)
+    z ~ product_distribution(fill(Normal(0.0, 1.0), 4))
+    sigma ~ Exponential(1.0)
+    total = sum(z[selector[begin:end]])
+    @. y ~ Normal(total, sigma)
+end
+
+NP.@jmodel function julianic_index_literal_nested(x, selector)
+    z ~ product_distribution(fill(Normal(0.0, 1.0), 4))
+    sigma ~ Exponential(1.0)
+    total = sum(z[selector[1:2]])
+    @. y ~ Normal(total, sigma)
+end
+
+@testset "julianic `end`/`begin` index resolution" begin
+    selector = [2, 4]
+    # `gradient` is false for the nested case ONLY because differentiating it is
+    # blocked upstream, not because `end` resolves differently there: gathering a
+    # `Vector{Int}` index out of a view into θ trips `EnzymeRuntimeActivityError`
+    # (snag `gather-subarray-11c41349`). Range indices — the other two cases —
+    # differentiate fine. Restore the gradient check when that snag lands.
+    cases = (
+        ("strided range `z[1:2:end]`", true,
+         julianic_index_end_range(PREDICTOR),
+         julianic_index_literal_range(PREDICTOR)),
+        ("whole span `z[begin:end]`", true,
+         julianic_index_end_scalar(PREDICTOR),
+         julianic_index_literal_scalar(PREDICTOR)),
+        ("nested `z[selector[begin:end]]`", false,
+         julianic_index_end_nested(PREDICTOR, selector),
+         julianic_index_literal_nested(PREDICTOR, selector)),
+    )
+    for (name, gradient, with_end, with_literal) in cases
+        @testset "$name" begin
+            # Regression: this `jprepare` is where `UndefVarError: end` struck.
+            bounded = NP.jprepare(NP.jcondition(with_end; CONTINUOUS...))
+            literal = NP.jprepare(NP.jcondition(with_literal; CONTINUOUS...))
+            @test NP.dimension(bounded) == NP.dimension(literal)
+
+            rng = MersenneTwister(20260805)
+            thetas = [randn(rng, NP.dimension(bounded)) for _ in 1:4]
+            for theta in thetas
+                # Same arithmetic in the same order — an exact match, not a
+                # tolerance.
+                @test NP.jlogdensity(bounded, theta) ==
+                      NP.jlogdensity(literal, theta)
+            end
+            gradient || continue
+
+            bounded_work = NP.jworkspace(bounded, Float64, JULIANIC_BACKEND)
+            literal_work = NP.jworkspace(literal, Float64, JULIANIC_BACKEND)
+            for theta in thetas
+                _, bounded_gradient =
+                    NP.jlogdensity_and_gradient!(bounded_work, bounded, theta)
+                _, literal_gradient =
+                    NP.jlogdensity_and_gradient!(literal_work, literal, theta)
+                @test bounded_gradient == literal_gradient
+            end
+        end
+    end
+end
+
+# ---------------------------------------------------------------------------
+# Non-float intermediates must not be routed through the buffer pool.
+#
+# The pool is a flat `Vector{T}` at the AD eltype. Sending an integer or boolean
+# intermediate through it retypes the values: an index vector `[2, 4]` comes back
+# `[2.0, 4.0]` and stops being an index, a `Bool` mask comes back `[1.0, 0.0, …]`
+# and stops being a mask. Both passed `jprepare` — the TRACE pass returns the real
+# `getindex`, so the model looked fine right up to the first density evaluation.
+# Each model is checked against a twin that receives the same intermediate
+# precomputed as data, so the in-body computation cannot change the answer.
+# ---------------------------------------------------------------------------
+
+NP.@jmodel function julianic_integer_intermediate(x, selector, group)
+    z ~ product_distribution(fill(Normal(0.0, 1.0), 4))
+    sigma ~ Exponential(1.0)
+    picked = selector[group]
+    effect = z[picked]
+    @. y ~ Normal(effect, sigma)
+end
+
+NP.@jmodel function julianic_integer_precomputed(x, picked)
+    z ~ product_distribution(fill(Normal(0.0, 1.0), 4))
+    sigma ~ Exponential(1.0)
+    effect = z[picked]
+    @. y ~ Normal(effect, sigma)
+end
+
+NP.@jmodel function julianic_boolean_mask(x, mask_source)
+    z ~ product_distribution(fill(Normal(0.0, 1.0), 4))
+    sigma ~ Exponential(1.0)
+    mask = mask_source[1:4]
+    total = sum(z[mask])
+    @. y ~ Normal(total, sigma)
+end
+
+NP.@jmodel function julianic_boolean_precomputed(x, mask)
+    z ~ product_distribution(fill(Normal(0.0, 1.0), 4))
+    sigma ~ Exponential(1.0)
+    total = sum(z[mask])
+    @. y ~ Normal(total, sigma)
+end
+
+@testset "julianic non-float intermediates keep their type" begin
+    selector = [2, 4]
+    group = [1, 2, 1, 2, 1, 2]
+    mask = [true, false, true, false]
+    pairs = (
+        ("integer gather `selector[group]` reused as an index",
+         julianic_integer_intermediate(PREDICTOR, selector, group),
+         julianic_integer_precomputed(PREDICTOR, selector[group])),
+        ("boolean gather `mask_source[1:4]` reused as a mask",
+         julianic_boolean_mask(PREDICTOR, mask),
+         julianic_boolean_precomputed(PREDICTOR, mask)),
+    )
+    # Density only. Both models index θ with a computed integer/boolean VECTOR,
+    # and gathering one of those out of a view into θ is blocked upstream by
+    # `EnzymeRuntimeActivityError` (snag `gather-subarray-11c41349`) — a separate
+    # defect from the retyping under test here, which is a primal-side bug and
+    # shows up in the density alone. Add the gradient leg when that snag lands.
+    for (name, in_body, precomputed) in pairs
+        @testset "$name" begin
+            computed = NP.jprepare(NP.jcondition(in_body; CONTINUOUS...))
+            given = NP.jprepare(NP.jcondition(precomputed; CONTINUOUS...))
+            @test NP.dimension(computed) == NP.dimension(given)
+
+            rng = MersenneTwister(20260805)
+            for _ in 1:4
+                theta = randn(rng, NP.dimension(computed))
+                # Regression: the primal used to throw `invalid index: 2.0 of
+                # type Float64` (integers) / `BoundsError … eltype Float64`
+                # (booleans) right here, while `jprepare` had reported success.
+                @test NP.jlogdensity(computed, theta) ==
+                      NP.jlogdensity(given, theta)
+            end
+        end
+    end
+end
+
+@testset "conditioning, not spelling, decides latent vs observation" begin
+    @testset "scalar `~` scores when conditioned, samples when not" begin
+        # `y ~ Normal(mu, 1.0)` with `y` CONDITIONED is an observation: `mu` is
+        # the only latent (dimension 1), and the density is prior(mu) + the datum
+        # logpdf. This is the spelling the previous syntactic rule REFUSED; under
+        # conditioning-decides it is exactly an observation, as it should be.
+        observed = NP.jprepare(NP.jcondition(
+            julianic_scalar_site_on_data(PREDICTOR); y=3.0))
+        @test NP.dimension(observed) == 1
+        @test NP.jlogdensity(observed, [0.5]) ≈
+              logpdf(Normal(), 0.5) + logpdf(Normal(0.5, 1.0), 3.0)
+
+        # …and the same body IS two latents when `y` is not conditioned.
         latent_only = NP.jprepare(NP.jcondition(
             julianic_scalar_site_on_data(PREDICTOR)))
         @test NP.dimension(latent_only) == 2
@@ -480,13 +1240,218 @@ end
               logpdf(Normal(), 0.5) + logpdf(Normal(0.5, 1.0), 0.7)
     end
 
-    @testset "observation with no conditioned data" begin
-        err = argument_error(() -> NP.jprepare(NP.jcondition(
-            julianic_unconditioned_observation(PREDICTOR); CONTINUOUS...)))
-        @test occursin("absent", err.msg)
-        @test occursin("conditioned sites: y", err.msg)
-    end
+    @testset "broadcast `~` on a free name is an elementwise latent" begin
+        # A broadcast `~` whose LHS is NOT conditioned samples k independent
+        # sites — the previous rule made this an error. Non-identical `tau`
+        # pins the coordinate order: b[i] must pair with tau[i].
+        tau = [0.5, 1.0, 2.0]
+        y = [0.2, -0.3, 1.1]
+        prepared = NP.jprepare(NP.jcondition(julianic_elementwise_latent(tau); y=y))
+        @test NP.dimension(prepared) == 3        # b consumes 3 coords; y is data
 
+        # The equality below IS the order probe: `Normal.(0.0, tau)[i]` and
+        # `position[i]` are walked under the same `i`, so if the cursor paired
+        # them any other way this `≈` would fail — the non-identical `tau` is
+        # what makes a mispairing observable.
+        b = [0.4, -0.7, 1.3]
+        expected = sum(logpdf.(Normal.(0.0, tau), b)) +
+                   sum(logpdf.(Normal.(b, 1.0), y))
+        @test NP.jlogdensity(prepared, b) ≈ expected
+    end
+end
+
+@testset "activity analysis: a latent unreachable from the likelihood is a generated quantity" begin
+    prepared = NP.jprepare(NP.jcondition(julianic_gq_latent(PREDICTOR); CONTINUOUS...))
+    twin = NP.jprepare(NP.jcondition(julianic_gq_latent_twin(PREDICTOR); CONTINUOUS...))
+
+    # the partition itself: b_new reaches no likelihood term, so it is :gq; the
+    # likelihood-reaching latents are :sampled, the affine mean :density, `y` the
+    # observation.
+    roles = Dict(a.write => a.role for a in NP.jactivity(prepared))
+    @test roles[:b_new] == :gq
+    @test roles[:a] == :sampled
+    @test roles[:sigma] == :sampled
+    @test roles[:mu] == :density
+    @test roles[:y] == :observation
+
+    # a gq latent consumes NO unconstrained coordinate: same dimension as the twin
+    # without it (this is the behaviour that proves the partition is real).
+    @test NP.dimension(prepared) == NP.dimension(twin) == 2
+
+    # and contributes NOTHING to the density: identical to the twin at any position.
+    theta = [0.4, -0.3]
+    @test NP.jlogdensity(prepared, theta) == NP.jlogdensity(twin, theta)
+
+    # in postprocessing it IS drawn from its prior — stochastic across rng, while
+    # the sampled latents stay deterministic in theta.
+    c1 = NP.jconstrained(prepared, theta; rng=MersenneTwister(1))
+    c2 = NP.jconstrained(prepared, theta; rng=MersenneTwister(2))
+    @test haskey(c1, :b_new)
+    @test c1.b_new != c2.b_new
+    @test c1.a == c2.a && c1.sigma == c2.sigma
+
+    # the gradient runs and has the reduced dimension (no gather, so the
+    # pre-existing MutatingFunctions gather gap does not apply here).
+    workspace = NP.jworkspace(prepared, Float64, JULIANIC_BACKEND)
+    _, gradient = NP.jlogdensity_and_gradient!(workspace, prepared, theta)
+    @test length(gradient) == 2
+    @test all(isfinite, gradient)
+
+    # a prior-only conditioning (no `y`) has no likelihood term, so every latent is
+    # sampled — the joint prior stays samplable rather than collapsing to dim 0.
+    # Even `y` is now a length-6 broadcast latent, so dim = a + b_new + sigma + y =
+    # 1 + 1 + 1 + 6 = 9 (and every `~` site is :sampled, none :gq).
+    prior_only = NP.jprepare(NP.jcondition(julianic_gq_latent(PREDICTOR)))
+    @test NP.dimension(prior_only) == 1 + 1 + 1 + length(PREDICTOR)
+    @test all(a.role == :sampled for a in NP.jactivity(prior_only) if a.is_sample)
+end
+
+@testset "activity analysis: a generated-quantity deterministic is skipped in the density" begin
+    prepared = NP.jprepare(NP.jcondition(julianic_gq_deterministic(PREDICTOR); CONTINUOUS...))
+    twin = NP.jprepare(NP.jcondition(julianic_gq_deterministic_twin(PREDICTOR); CONTINUOUS...))
+
+    # `z` reads the gq latent `b_new` and reaches no likelihood term, so it is a gq
+    # DETERMINISTIC; `mu` is on the likelihood path so it stays :density.
+    roles = Dict(a.write => a.role for a in NP.jactivity(prepared))
+    @test roles[:z] == :gq
+    @test roles[:mu] == :density
+    @test roles[:b_new] == :gq
+
+    # THE PROOF that the density does as little work as possible: `z` is an array gq
+    # deterministic, so were it computed in the density it would need a pooled buffer
+    # slot. It is skipped, so the trace sizes NO slot for it — the pool is the same
+    # size as the twin without `z`. This is measured on the trace, not inferred from
+    # DCE: the buffer op is never emitted, so there is nothing for the compiler to
+    # eliminate.
+    @test length(prepared.buffer_sizes) == length(twin.buffer_sizes)
+
+    # a gq latent still consumes no coordinate, so both are dimension 2 (a + sigma);
+    # `b_new` is drawn, not walked.
+    @test NP.dimension(prepared) == NP.dimension(twin) == 2
+
+    # and `z` contributes nothing to the density — identical to the twin at any θ.
+    theta = [0.4, -0.3]
+    @test NP.jlogdensity(prepared, theta) == NP.jlogdensity(twin, theta)
+
+    # still 0-alloc primal + working gradient with a skipped array gq deterministic.
+    workspace = NP.jworkspace(prepared, Float64, JULIANIC_BACKEND)
+    _, gradient = NP.jlogdensity_and_gradient!(workspace, prepared, theta)
+    @test length(gradient) == 2
+    @test all(isfinite, gradient)
+    allocations = steady_state_allocations(prepared, workspace, theta)
+    @test allocations.primal == 0
+
+    # postprocessing DOES compute the gq deterministic (a downstream gq draw could
+    # read it) — on a growable pool, so the density's skip does not desync it. The
+    # sites still come back with `b_new` DRAWN (varies with rng) and the sampled
+    # latents deterministic in θ, and the skipped-in-density array det does not error.
+    c1 = NP.jconstrained(prepared, theta; rng=MersenneTwister(1))
+    c2 = NP.jconstrained(prepared, theta; rng=MersenneTwister(2))
+    @test haskey(c1, :b_new) && c1.b_new != c2.b_new
+    @test c1.a == c2.a && c1.sigma == c2.sigma
+end
+
+@testset "activity analysis: a data-only statement is precomputed once, fetched in the density" begin
+    prepared = NP.jprepare(NP.jcondition(julianic_data_precompute(PREDICTOR); CONTINUOUS...))
+    twin = NP.jprepare(NP.jcondition(julianic_data_precompute_twin(PREDICTOR); CONTINUOUS...))
+
+    # `logx` reads only the predictor `x` — no parameter ancestor — so it is :data;
+    # `mu` reads the latent `a` so it stays :density.
+    roles = Dict(a.write => a.role for a in NP.jactivity(prepared))
+    @test roles[:logx] == :data
+    @test roles[:mu] == :density
+
+    # it is PRECOMPUTED into the store at prepare — once — with the right value.
+    @test haskey(prepared.store, :logx)
+    @test prepared.store.logx ≈ log.(abs.(PREDICTOR) .+ 1.0)
+
+    # and FETCHED, not recomputed, in the density: the transform's array intermediates
+    # (abs, +1, log) are absent from the density's buffer pool, so the pool is SMALLER
+    # than the twin that inlines the same transform onto mu's path. Measured on the
+    # trace — the buffer ops are never emitted, nothing for the compiler to eliminate.
+    @test length(prepared.buffer_sizes) < length(twin.buffer_sizes)
+
+    # same dimension, same density as the twin (logx is the same values either way).
+    @test NP.dimension(prepared) == NP.dimension(twin) == 2
+    theta = [0.4, -0.3]
+    @test NP.jlogdensity(prepared, theta) ≈ NP.jlogdensity(twin, theta)
+
+    # the precomputed data is a Constant, so the gradient does no work on it — and the
+    # primal stays 0-alloc even with an array :data fetched every call (which only
+    # holds if the fetched value is type-stable, i.e. the store is concretely typed).
+    workspace = NP.jworkspace(prepared, Float64, JULIANIC_BACKEND)
+    _, gradient = NP.jlogdensity_and_gradient!(workspace, prepared, theta)
+    @test length(gradient) == 2
+    @test all(isfinite, gradient)
+    allocations = steady_state_allocations(prepared, workspace, theta)
+    @test allocations.primal == 0
+
+    # postprocessing fetches the same precomputed data and agrees with the twin.
+    c = NP.jconstrained(prepared, theta)
+    ct = NP.jconstrained(twin, theta)
+    @test c.a ≈ ct.a && c.sigma ≈ ct.sigma
+end
+
+@testset "activity analysis: conditioning re-partitions a site sampled ↔ gq" begin
+    # The SAME body under two conditionings. This is the re-conditioning axis the
+    # other AA testsets don't cover: they each pin ONE partition; this pins that a
+    # site MOVES between :sampled/:observation and :gq purely by what is
+    # conditioned, with no change to the source.
+
+    # (1) `pred` observed: `pred ~ Normal(b, 1.0)` scores the datum, so `b` is
+    # needed-for-sampling and both consume coordinates.
+    obs = NP.jprepare(NP.jcondition(
+        julianic_optional_outcome(PREDICTOR); y=CONTINUOUS.y, pred=0.7))
+    obs_roles = Dict(a.write => a.role for a in NP.jactivity(obs))
+    @test obs_roles[:pred] == :observation
+    @test obs_roles[:b] == :sampled
+    @test obs_roles[:a] == :sampled
+    @test obs_roles[:mu] == :density
+    @test obs_roles[:y] == :observation
+    @test NP.dimension(obs) == 2                 # a + b
+
+    # (2) only `y` observed: `pred` is now a free latent reaching no likelihood, so
+    # it is :gq and earns no coordinate — and `b`, read ONLY by the gq `pred`, is
+    # dragged into :gq with it. Only `a` is still sampled.
+    gq = NP.jprepare(NP.jcondition(
+        julianic_optional_outcome(PREDICTOR); y=CONTINUOUS.y))
+    gq_roles = Dict(a.write => a.role for a in NP.jactivity(gq))
+    @test gq_roles[:pred] == :gq
+    @test gq_roles[:b] == :gq
+    @test gq_roles[:a] == :sampled
+    @test gq_roles[:y] == :observation
+    @test NP.dimension(gq) == 1                  # a only; b, pred earn no coordinate
+
+    # the gq density is just a's prior + the y-likelihood: b and pred contribute
+    # nothing, at any position.
+    theta = [0.4]
+    @test NP.jlogdensity(gq, theta) ≈
+          logpdf(Normal(), theta[1]) +
+          sum(logpdf.(Normal.(theta[1] .* PREDICTOR, 1.0), CONTINUOUS.y))
+
+    # with pred observed the density picks up BOTH b's prior AND the pred datum.
+    theta2 = [0.4, -0.3]
+    @test NP.jlogdensity(obs, theta2) ≈
+          logpdf(Normal(), theta2[1]) + logpdf(Normal(), theta2[2]) +
+          sum(logpdf.(Normal.(theta2[1] .* PREDICTOR, 1.0), CONTINUOUS.y)) +
+          logpdf(Normal(theta2[2], 1.0), 0.7)
+
+    # under the gq conditioning, postprocessing DRAWS b and pred (stochastic across
+    # rng) while `a` stays deterministic in θ.
+    c1 = NP.jconstrained(gq, theta; rng=MersenneTwister(1))
+    c2 = NP.jconstrained(gq, theta; rng=MersenneTwister(2))
+    @test c1.a == c2.a
+    @test c1.b != c2.b && c1.pred != c2.pred
+
+    # the gradient runs at the reduced dimension (no gather here, so this is a
+    # clean gradient check independent of the MutatingFunctions gather path).
+    workspace = NP.jworkspace(gq, Float64, JULIANIC_BACKEND)
+    _, gradient = NP.jlogdensity_and_gradient!(workspace, gq, theta)
+    @test length(gradient) == 1
+    @test all(isfinite, gradient)
+end
+
+@testset "julianic fails closed" begin
     @testset "constrained multivariate block" begin
         # The multivariate `_sample!` dispatches on the whole
         # `MultivariateDistribution` type but implements only the real-support
@@ -536,10 +1501,12 @@ end
             workspace, prepared, [0.1, 0.2])
     end
 
-    @testset "sampling nested in control flow" begin
-        # Milestone 1 lowers TOP-LEVEL statements only. A nested `~` used to
-        # survive verbatim and fail at run time with an `UndefVarError` naming
-        # the site — a message that points nowhere near the cause.
+    @testset "control flow and nested `~` are rejected" begin
+        # Control flow is barred outright: it would make "which statements run"
+        # position-dependent and break the static activity analysis, which reads
+        # the body as one static statement list. A `~` nested in a loop or branch
+        # is therefore rejected as control flow — a stronger, earlier error than
+        # the old post-lowering "top level only" one.
         nested_loop = :(function nested(x)
             s ~ Exponential(1.0)
             for i in 1:2
@@ -547,8 +1514,8 @@ end
             end
             @. y ~ Normal(0.0, s)
         end)
-        err = argument_error(() -> NP._julianic_model_syntax(nested_loop))
-        @test occursin("TOP LEVEL", err.msg)
+        @test occursin("control flow",
+            argument_error(() -> NP._julianic_model_syntax(nested_loop)).msg)
 
         nested_branch = :(function nested(x)
             s ~ Exponential(1.0)
@@ -556,9 +1523,19 @@ end
                 @. y ~ Normal(0.0, s)
             end
         end)
-        @test occursin(
-            "TOP LEVEL",
+        @test occursin("control flow",
             argument_error(() -> NP._julianic_model_syntax(nested_branch)).msg)
+
+        # A `~` nested in an EXPRESSION (not control flow) still trips the
+        # top-level-only guard: lowering treats `mu = (z ~ Normal())` as a
+        # deterministic assignment, leaving the inner `~` un-rewritten.
+        nested_expr = :(function nested(x)
+            s ~ Exponential(1.0)
+            mu = (z ~ Normal())
+            @. y ~ Normal(mu, s)
+        end)
+        @test occursin("TOP LEVEL",
+            argument_error(() -> NP._julianic_model_syntax(nested_expr)).msg)
 
         # Unary `~` is ordinary Julia (bitwise not) and must be left alone.
         bitwise = :(function fine(x)
@@ -575,3 +1552,5 @@ end
             :(function f(x); x[1] ~ Normal(); end))
     end
 end
+
+end # @testset "julianic run-the-body surface"
