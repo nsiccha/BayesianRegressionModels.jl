@@ -1,7 +1,7 @@
 using BayesianRegressionModels
 using StanBlocks
 using BridgeStan
-using Distributions: Poisson
+using Distributions: Normal, Poisson
 import DifferentiationInterface as DI
 using Enzyme
 using Statistics: median
@@ -40,6 +40,24 @@ const plan = NP.compile(brmi)
 const prepared = NP.prepare(plan)
 const work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
 
+# Julianic run-the-body surface — the SAME exposure-offset Poisson model authored
+# as `@jmodel`, pinned DIRECTLY against Stan here. The declarative `offset(...)`
+# helper has no run-the-body counterpart because a Julia body just ADDS the term:
+# `log_rate = … .+ log.(exposure)`. θ layout is declaration order = the declarative
+# `native` order = `position` (identity map, like the other flat scenarios), so it
+# is shared unmapped. Flat/elementwise — no group gather, differentiates under
+# plain AutoEnzyme.
+NP.@jmodel function julianic_exposure_poisson_benchmark(x, exposure)
+    beta_log_rate_intercept ~ Normal()
+    beta_log_rate_x ~ Normal()
+    log_rate = beta_log_rate_intercept .+ beta_log_rate_x .* x .+ log.(exposure)
+    @. y ~ Poisson(exp(log_rate))
+end
+
+const jprepared = NP.jprepare(
+    NP.jcondition(julianic_exposure_poisson_benchmark(x, exposure); y))
+const jwork = NP.jworkspace(jprepared, Float64, DI.AutoEnzyme())
+
 const sb = SBBRMI(brmi; mod=@__MODULE__)
 const sb_path = "/tmp/native_ppl_data_offset_sb.stan"
 const sb_problem = StanBlocks.stan_instantiate(sb.model; path=sb_path)
@@ -75,6 +93,8 @@ function warmup!()
         BridgeStan.log_density_gradient!(
             pure_model, position, pure_gradient;
             propto=false, jacobian=true)
+        NP.jlogdensity(jprepared, position)
+        NP.jlogdensity_and_gradient!(jwork, jprepared, position)
     end
 end
 
@@ -96,7 +116,11 @@ function allocation_receipt()
                 pure_model, position; propto=false, jacobian=true)),
             gradient=@allocated(BridgeStan.log_density_gradient!(
                 pure_model, position, pure_gradient;
-                propto=false, jacobian=true))))
+                propto=false, jacobian=true))),
+        jl=(
+            density=@allocated(NP.jlogdensity(jprepared, position)),
+            gradient=@allocated(NP.jlogdensity_and_gradient!(
+                jwork, jprepared, position))))
 end
 
 function measure!(f)
@@ -142,6 +166,9 @@ function equivalence_receipt()
     native_density, native_gradient_view =
         NP.logdensity_and_gradient!(work, prepared, position)
     native_gradient = copy(native_gradient_view)
+    jl_density, jl_gradient_view =
+        NP.jlogdensity_and_gradient!(jwork, jprepared, position)
+    jl_gradient = copy(jl_gradient_view)
     sb_density, _ = BridgeStan.log_density_gradient!(
         sb_model, position, sb_gradient;
         propto=false, jacobian=true)
@@ -149,13 +176,20 @@ function equivalence_receipt()
         pure_model, position, pure_gradient;
         propto=false, jacobian=true)
     (;
-        density=(native=native_density, sb=sb_density, pure=pure_density,
+        density=(native=native_density, julianic=jl_density,
+                 sb=sb_density, pure=pure_density,
                  native_minus_sb=native_density - sb_density,
                  native_minus_pure=native_density - pure_density,
+                 julianic_minus_sb=jl_density - sb_density,
+                 julianic_minus_pure=jl_density - pure_density,
+                 julianic_minus_native=jl_density - native_density,
                  sb_minus_pure=sb_density - pure_density),
         gradient_max_abs_difference=(
             native_sb=maximum(abs.(native_gradient .- sb_gradient)),
             native_pure=maximum(abs.(native_gradient .- pure_gradient)),
+            julianic_sb=maximum(abs.(jl_gradient .- sb_gradient)),
+            julianic_pure=maximum(abs.(jl_gradient .- pure_gradient)),
+            julianic_native=maximum(abs.(jl_gradient .- native_gradient)),
             sb_pure=maximum(abs.(sb_gradient .- pure_gradient))))
 end
 
@@ -195,6 +229,10 @@ println("generated_surfaces=", (;
           lines=count(==(UInt8('\n')), codeunits(read(
               pure_stan_path, String))) + 1,
           sha256=file_sha(pure_stan_path))))
+println("julianic=", (;
+    dimension=NP.dimension(jprepared),
+    matches_native_dimension=NP.dimension(jprepared) == plan.graph.dimension,
+    coordinate_order=:declaration_order_identity_to_native))
 println("equivalence=", equivalence_receipt())
 println("linear_head=", NP.evaluate(
     work, prepared, position, NP.LinearPredictor())[1:8])
