@@ -272,26 +272,81 @@ end
     _record_site!(ctx, name, _sample!(ctx, name, dist))
 
 # Elementwise latent: `b .~ Normal.(0, tau)` is k INDEPENDENT scalar sites by
-# ordinary broadcasting — no `product_distribution`, no special multivariate
-# form. `dists` arrives LAZY (a `Broadcasted`, never materialized), so the k
-# distributions cost no allocation; the cursor advances one site at a time in
-# index order, which the trace pass walks identically because it runs this same
-# code. An explicit loop rather than a fused `.=` because broadcast does not
-# promise an evaluation ORDER, and order is what decides which theta coordinate
-# each element gets — with non-identical marginals (`Normal.(0, tau)`) a
-# different order is a different model, silently.
+# ordinary broadcasting — no `product_distribution`, no special multivariate form.
+# `dists` arrives LAZY (a `Broadcasted`, never materialized), so the k
+# distributions cost no allocation.
+#
+# The k sites consume k CONTIGUOUS coordinates, so the walk takes the whole slice
+# ONCE and constrains + scores it with FUSED broadcasts into pooled buffers —
+# never a per-element loop. That is not a micro-optimization: a scalar loop that
+# writes a Cache-nested pool buffer element-by-element BOXES under Enzyme reverse
+# (~34 B / coordinate, measured), while the identical fused `.=` the observation
+# path uses is 0-alloc. Taking the slice up front also makes evaluation ORDER
+# irrelevant — coordinate `i` pairs with marginal `i` by index, not by iteration
+# order — which is what the per-element cursor walk needed the loop to guarantee.
 @inline _julianic_instantiate(dists) = dists
 @inline _julianic_instantiate(dists::Base.Broadcast.Broadcasted) =
     Base.Broadcast.instantiate(dists)
 
-@inline function _sample_broadcast!(ctx, name::Val, dists)
+# Constrain a whole coordinate slice `u` into `dest` for one marginal FAMILY,
+# returning the TOTAL log-Jacobian. Fused counterparts of the scalar `_sample!`
+# transforms; the family is read off a representative element so the two passes
+# agree. Real support → identity (0 Jacobian); positive support → exp (Jacobian
+# `u`). A family without a method here is refused at TRACE time (prepare), the
+# mirror of the multivariate `_julianic_require_real_support` guard.
+@inline function _broadcast_constrain!(::Distributions.Normal, dest, u)
+    dest .= u
+    return zero(eltype(dest))
+end
+@inline function _broadcast_constrain!(::Distributions.Exponential, dest, u)
+    dest .= exp.(u)
+    return sum(u)
+end
+@noinline _broadcast_constrain!(dist, _dest, _u) = throw(ArgumentError(
+    "julianic @jmodel: an elementwise latent `b .~ D.(...)` supports `Normal` " *
+    "and `Exponential` marginals (real and positive support); got `" *
+    string(nameof(typeof(dist))) * "`. A constrained-manifold marginal needs " *
+    "its own `_broadcast_constrain!` method, as the scalar/LKJ sites do."))
+
+# WALK (primal + record): slice, constrain (fused), score (fused, pooled), one
+# accumulate. Both pooled buffers are presized by the matching TRACE method below,
+# in the same push order.
+@inline function _sample_broadcast!(ctx::JulianicWalk, name::Val, dists)
     lazy = _julianic_instantiate(dists)
     n = length(lazy)
-    buffer = _site_buffer!(ctx, n)
+    lo = ctx.buffers.cursor + 1
+    ctx.buffers.cursor += n
+    u = @view ctx.theta[lo:ctx.buffers.cursor]
+    b = _site_buffer!(ctx, n)
+    logjac = _broadcast_constrain!(lazy[1], b, u)
+    lp = _site_buffer!(ctx, n)
+    lp .= Distributions.logpdf.(lazy, b)
+    ctx.buffers.acc += sum(lp) + logjac
+    return _record_site!(ctx, name, b)
+end
+# TRACE: count k coordinates, record the two buffer sizes in the SAME order the
+# walk pushes them, and hand back an in-support placeholder so downstream body
+# code runs. The placeholder slice is zeros, constrained the same way (`0` for
+# real support, `exp(0)=1` for positive) so it is always in the marginal's domain.
+@inline function _sample_broadcast!(ctx::JulianicTrace, name::Val, dists)
+    lazy = _julianic_instantiate(dists)
+    n = length(lazy)
+    ctx.dim += n
+    b = _site_buffer!(ctx, n)
+    _broadcast_constrain!(lazy[1], b, zeros(eltype(b), n))
+    _site_buffer!(ctx, n)                       # the logpdf scratch's size
+    return b
+end
+# SIMULATE: draw each marginal from its prior (no position to walk). Not on the
+# gradient path, so the plain loop is fine.
+@inline function _sample_broadcast!(ctx::JulianicSimulate, name::Val, dists)
+    lazy = _julianic_instantiate(dists)
+    n = length(lazy)
+    b = _site_buffer!(ctx, n)
     for i in 1:n
-        buffer[i] = _sample!(ctx, name, lazy[i])
+        b[i] = rand(ctx.rng, lazy[i])
     end
-    return _record_site!(ctx, name, buffer)
+    return _record_site!(ctx, name, b)
 end
 
 # Normal: real support, identity transform (log-Jacobian 0). Covers `Normal()`

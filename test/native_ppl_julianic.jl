@@ -535,6 +535,12 @@ end
 # one allocates its pool per call by construction, so it is the convenience form,
 # not the one this bar is about.
 function steady_state_allocations(prepared, workspace, theta)
+    # Measure the REALISTIC hot loop: primal then gradient, interleaved, the way
+    # HMC calls them (primal for the accept step, gradient for the leapfrog). The
+    # gradient measure is deliberately taken right after a primal call — NOT after
+    # warming the gradient in isolation — because a gradient-after-primal is what
+    # HMC actually does, and papering that over with an extra same-kind warmup
+    # would hide a cost the sampler really pays.
     NP.jlogdensity!(workspace, prepared, theta)
     NP.jlogdensity_and_gradient!(workspace, prepared, theta)
     primal = @allocated NP.jlogdensity!(workspace, prepared, theta)
@@ -572,19 +578,17 @@ end
             @info "julianic allocations" model=name allocations
     end
 
-    # A VECTOR latent (`b .~ Normal.(0, tau)` feeding an observation) is 0-alloc
-    # in the PRIMAL, but the GRADIENT still allocates — a pre-existing cost of a
-    # pooled buffer that is both written by the latent and read by the likelihood,
-    # in the DI+Enzyme+Cache interaction (all the isolated pieces measure 0). This
-    # spelling is nonetheless a strict IMPROVEMENT over the `product_distribution`
-    # form it replaces, measured on this same model at n=60:
-    #   `product_distribution`  → (primal = 2720, gradient = 6640)
-    #   `b .~ Normal.(0, tau)`  → (primal =    0, gradient = 2176)
-    # so the 0-alloc guarantee (decision `08w0buk`) has NEVER held for
-    # hierarchical models in either spelling; this narrows the gap, it does not
-    # open it. Tracked as a follow-up; the primal win is asserted hard, the
-    # gradient is `@test_broken` so a future fix trips it loudly.
-    @testset "vector latent — primal 0-alloc, gradient tracked" begin
+    # A VECTOR latent (`b .~ Normal.(0, tau)` feeding an observation). The fused
+    # `_broadcast_constrain!` rewrite (replacing the per-element walk that BOXED
+    # ~34 B/coordinate under Enzyme reverse when writing a Cache-nested pool
+    # buffer) got the PRIMAL to 0 and the gradient-ONLY hot loop to 0 (verified 0
+    # over 10^4 successive gradient calls). What remains is a ~150 B/pair residual
+    # in the INTERLEAVED primal+gradient pattern this measurement uses — the real
+    # HMC loop — which `steady_state_allocations` deliberately does not hide. That
+    # residual is hardener-owned (todo `0wo5x9r`). Still a strict improvement over
+    # the `product_distribution` form it replaces (primal 2720, gradient 6640 at
+    # n=60): primal is now 0 outright, the gradient residual an order smaller.
+    @testset "vector latent — primal 0-alloc, interleaved gradient tracked" begin
         prepared = NP.jprepare(NP.jcondition(
             julianic_elementwise_latent(scales); observations...))
         workspace = NP.jworkspace(prepared, Float64, JULIANIC_BACKEND)
