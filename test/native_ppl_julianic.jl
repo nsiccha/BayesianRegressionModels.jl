@@ -1004,6 +1004,25 @@ NP.@jmodel function julianic_gq_deterministic_twin(x)
     @. y ~ Normal(mu, sigma)
 end
 
+# Activity analysis: a data-only statement. `logx` is a transform of the predictor
+# `x` with NO parameter ancestor, so it is :data — it must be computed ONCE at
+# prepare and fetched in the density, not recomputed per call. Its twin INLINES the
+# same transform onto `mu` (putting it on the density path), which pins that the
+# precompute removes the transform's array intermediates from the density pool.
+NP.@jmodel function julianic_data_precompute(x)
+    logx = log.(abs.(x) .+ 1.0)
+    a ~ Normal()
+    sigma ~ Exponential(2.0)
+    mu = a .* logx
+    @. y ~ Normal(mu, sigma)
+end
+NP.@jmodel function julianic_data_precompute_twin(x)
+    a ~ Normal()
+    sigma ~ Exponential(2.0)
+    mu = a .* log.(abs.(x) .+ 1.0)
+    @. y ~ Normal(mu, sigma)
+end
+
 # ---------------------------------------------------------------------------
 # `end` / `begin` in index position.
 #
@@ -1317,6 +1336,47 @@ end
     c2 = NP.jconstrained(prepared, theta; rng=MersenneTwister(2))
     @test haskey(c1, :b_new) && c1.b_new != c2.b_new
     @test c1.a == c2.a && c1.sigma == c2.sigma
+end
+
+@testset "activity analysis: a data-only statement is precomputed once, fetched in the density" begin
+    prepared = NP.jprepare(NP.jcondition(julianic_data_precompute(PREDICTOR); CONTINUOUS...))
+    twin = NP.jprepare(NP.jcondition(julianic_data_precompute_twin(PREDICTOR); CONTINUOUS...))
+
+    # `logx` reads only the predictor `x` — no parameter ancestor — so it is :data;
+    # `mu` reads the latent `a` so it stays :density.
+    roles = Dict(a.write => a.role for a in NP.jactivity(prepared))
+    @test roles[:logx] == :data
+    @test roles[:mu] == :density
+
+    # it is PRECOMPUTED into the store at prepare — once — with the right value.
+    @test haskey(prepared.store, :logx)
+    @test prepared.store.logx ≈ log.(abs.(PREDICTOR) .+ 1.0)
+
+    # and FETCHED, not recomputed, in the density: the transform's array intermediates
+    # (abs, +1, log) are absent from the density's buffer pool, so the pool is SMALLER
+    # than the twin that inlines the same transform onto mu's path. Measured on the
+    # trace — the buffer ops are never emitted, nothing for the compiler to eliminate.
+    @test length(prepared.buffer_sizes) < length(twin.buffer_sizes)
+
+    # same dimension, same density as the twin (logx is the same values either way).
+    @test NP.dimension(prepared) == NP.dimension(twin) == 2
+    theta = [0.4, -0.3]
+    @test NP.jlogdensity(prepared, theta) ≈ NP.jlogdensity(twin, theta)
+
+    # the precomputed data is a Constant, so the gradient does no work on it — and the
+    # primal stays 0-alloc even with an array :data fetched every call (which only
+    # holds if the fetched value is type-stable, i.e. the store is concretely typed).
+    workspace = NP.jworkspace(prepared, Float64, JULIANIC_BACKEND)
+    _, gradient = NP.jlogdensity_and_gradient!(workspace, prepared, theta)
+    @test length(gradient) == 2
+    @test all(isfinite, gradient)
+    allocations = steady_state_allocations(prepared, workspace, theta)
+    @test allocations.primal == 0
+
+    # postprocessing fetches the same precomputed data and agrees with the twin.
+    c = NP.jconstrained(prepared, theta)
+    ct = NP.jconstrained(twin, theta)
+    @test c.a ≈ ct.a && c.sigma ≈ ct.sigma
 end
 
 @testset "julianic fails closed" begin

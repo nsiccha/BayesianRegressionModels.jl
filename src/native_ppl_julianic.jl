@@ -239,8 +239,9 @@ end
 mutable struct JulianicTrace
     dim::Int
     buffer_sizes::Vector{Dims}
+    captured::Vector{Pair{Symbol,Any}}   # data-only writes, computed once here
 end
-JulianicTrace() = JulianicTrace(0, Dims[])
+JulianicTrace() = JulianicTrace(0, Dims[], Pair{Symbol,Any}[])
 
 # POSTPROCESSING: the same θ walk as the primal, recording instead of scoring.
 # It reuses `JulianicBuffers` verbatim — including the cursor and the (unread)
@@ -318,6 +319,23 @@ end
 # is never emitted, not emitted-then-eliminated.
 @inline _julianic_computes_det(_ctx) = false
 @inline _julianic_computes_det(::JulianicRecording) = true
+
+# Data-only precompute. A `:data` write is constant across θ, so it is computed
+# EXACTLY ONCE — during the trace pass, which already runs the body once at
+# `jprepare` — and every later pass FETCHES it from a `store` NamedTuple threaded
+# as `run`'s 4th argument (a Constant on `prepared`, exactly like the observation
+# data). Only the trace "captures"; the density, gradient and postprocessing fetch.
+# Because a `:data` write is fetched (never `_cached_broadcast!`-ed) in the density
+# AND computed by a plain broadcast (never pooled) in the trace, NEITHER pass gives
+# it a pooled buffer slot — so the trace's slot list and the primal's cursor stay
+# in lockstep with the `:data` array simply absent from both. The fetched array is
+# part of the `prepared` Constant, so the gradient never shadows or differentiates
+# it: the density does no work on it at all.
+@inline _julianic_captures_data(_ctx) = false
+@inline _julianic_captures_data(::JulianicTrace) = true
+@inline _julianic_record_data!(ctx::JulianicTrace, ::Val{name}, value) where {name} =
+    (push!(ctx.captured, name => value); value)
+@inline _julianic_fetch_data(store, ::Val{name}) where {name} = getfield(store, name)
 
 # --- `~` runtime: prep + logpdf ------------------------------------------
 #
@@ -913,13 +931,14 @@ end
 # array-valued intermediate buffer lengths (so a primal pool can be preallocated
 # — see `JulianicBuffers`), the compile-time-constant `roles` carrier threaded
 # into `run`, and the per-statement `activity` partition (for `jactivity`).
-struct JulianicPrepared{R,D,RL}
+struct JulianicPrepared{R,D,RL,S}
     run::R
     data::D
     dimension::Int
     buffer_sizes::Vector{Dims}
     roles::RL
     activity::Vector{JulianicActivity}
+    store::S            # data-only writes, precomputed once by the trace pass
 end
 
 """
@@ -1031,11 +1050,15 @@ function jprepare(conditioned::JulianicConditioned)
     activity, gq_sites, gq_det, data_names = _julianic_activity(
         conditioned.statements, propertynames(conditioned.data))
     roles = JulianicRoles{gq_sites,gq_det,data_names}()
+    # The trace pass DOUBLES as the capture pass: it runs the body once here, sizing
+    # the buffer pool AND computing every `:data` write into `trace.captured`. No
+    # store exists yet, so pass an empty one — the trace captures, it never fetches.
     trace = JulianicTrace()
-    conditioned.run(trace, conditioned.data, roles)
+    conditioned.run(trace, conditioned.data, roles, NamedTuple())
+    store = NamedTuple(trace.captured)
     return JulianicPrepared(
         conditioned.run, conditioned.data, trace.dim, trace.buffer_sizes,
-        roles, activity)
+        roles, activity, store)
 end
 
 """
@@ -1060,7 +1083,7 @@ function _julianic_kernel(theta::AbstractVector{T}, prepared::JulianicPrepared,
     buffers.vcursor = 0                 # rewind the pool + the primal's own state
     buffers.cursor = 0
     buffers.acc = zero(T)
-    prepared.run(JulianicPrimal(theta, buffers), prepared.data, prepared.roles)
+    prepared.run(JulianicPrimal(theta, buffers), prepared.data, prepared.roles, prepared.store)
     return buffers.acc
 end
 
@@ -1165,7 +1188,7 @@ function _julianic_record(prepared::JulianicPrepared, theta::AbstractVector, ker
     # off the 0-alloc hot path (that is scoped to logdensity + gradient).
     buffers = JulianicBuffers{eltype(theta)}()
     context = JulianicRecord(theta, buffers, kernel, rng)
-    prepared.run(context, prepared.data, prepared.roles)
+    prepared.run(context, prepared.data, prepared.roles, prepared.store)
     return context
 end
 
@@ -1233,7 +1256,7 @@ function jsimulate(rng::Random.AbstractRNG, prepared::JulianicPrepared)
     # `buffer_sizes` (see `_julianic_record`). Off the 0-alloc hot path.
     buffers = JulianicBuffers{Float64}()
     context = JulianicSimulate(rng, buffers, JulianicPredictKernel(rng))
-    prepared.run(context, prepared.data, prepared.roles)
+    prepared.run(context, prepared.data, prepared.roles, prepared.store)
     return (; latents=NamedTuple(context.sites),
               observations=NamedTuple(context.observations))
 end
@@ -1566,7 +1589,7 @@ end
 # buffers (still ordinary Julia, just allocation-free).
 # `ctx` names the (mutable) sampling context; `data` names the conditioned
 # observation data — both are parameters of the generated `run` closure.
-function _julianic_lower_statement(statement, ctx, data, roles)
+function _julianic_lower_statement(statement, ctx, data, roles, store)
     # `end`/`begin` inside `A[...]` are POSITIONAL markers — they mean nothing
     # outside the indexing expression that encloses them. The buffer rewrite
     # hoists a gather into its own statement (`t = _cached_gather!(ctx, A, idx)`),
@@ -1582,15 +1605,20 @@ function _julianic_lower_statement(statement, ctx, data, roles)
             sample.lhs, sample.rhs, sample.broadcast, ctx, data, roles)
     end
     # Deterministic assignment `lhs = rhs`: buffer every array-valued node in rhs,
-    # then GATE the whole computation on `lhs`'s role. A generated-quantity
-    # deterministic (parameter-dependent, reaches no likelihood) is computed only in
-    # the recording passes; the density and trace get `nothing` instead. Both guards
-    # fold to compile-time constants at `run`'s specialization — a `:density`/`:data`
-    # write folds straight to the else branch (identical to the pre-AA lowering,
-    # buffer ops and all), and a gq deterministic on the density/trace path folds to
-    # the placeholder, so its buffer ops are never emitted and consume no pool slot.
+    # then GATE the whole computation on `lhs`'s role. Every guard folds to a
+    # compile-time constant at `run`'s specialization, so a `:density` write folds
+    # straight to the final else branch — identical to the pre-AA lowering, buffer
+    # ops and all — while the other roles prune the density's work away entirely:
+    #   * data-only — computed ONCE in the trace by a PLAIN (un-pooled) broadcast, so
+    #     it takes no buffer slot there; the density and every other pass FETCH it
+    #     from `store`, so it takes no slot there either. The cursors stay aligned
+    #     with the `:data` array simply absent from both slot lists.
+    #   * gq deterministic — computed only in the recording passes (a gq draw may
+    #     read it); the density and trace get `nothing`, so its buffer ops are never
+    #     emitted and it consumes no pool slot.
     if statement isa Expr && statement.head === :(=)
         target = statement.args[1]
+        plain = statement.args[2]           # the raw rhs — plain Julia, no pooled ops
         prelude = Any[]
         rewritten = _julianic_buffer_expression!(prelude, statement.args[2], ctx)
         compute = isempty(prelude) ? rewritten : Expr(:block, prelude..., rewritten)
@@ -1600,7 +1628,13 @@ function _julianic_lower_statement(statement, ctx, data, roles)
         target isa Symbol || return isempty(prelude) ? statement :
             Expr(:block, prelude..., Expr(:(=), target, rewritten))
         name = Val(target)
-        gated = :(if $(_julianic_is_gq_det)($roles, $name)
+        gated = :(if $(_julianic_is_data)($roles, $name)
+                      if $(_julianic_captures_data)($ctx)
+                          $(_julianic_record_data!)($ctx, $name, $plain)
+                      else
+                          $(_julianic_fetch_data)($store, $name)
+                      end
+                  elseif $(_julianic_is_gq_det)($roles, $name)
                       $(_julianic_computes_det)($ctx) ? $compute : nothing
                   else
                       $compute
@@ -1791,6 +1825,7 @@ function _julianic_model_syntax(definition)
     ctx = gensym(:ctx)
     data = gensym(:data)
     roles = gensym(:roles)
+    store = gensym(:store)
     lowered = Any[]
     skeleton = JulianicStmt[]
     # Function-argument names are pre-bound; a statement re-writing one is a
@@ -1815,12 +1850,12 @@ function _julianic_model_syntax(definition)
         # Record the static skeleton BEFORE lowering mutates the statement
         # (`replace_ref_begin_end!`) — the analysis wants the author's own reads.
         push!(skeleton, _julianic_skeleton_statement(statement, sample, write))
-        lowered_statement = _julianic_lower_statement(statement, ctx, data, roles)
+        lowered_statement = _julianic_lower_statement(statement, ctx, data, roles, store)
         _julianic_assert_lowered(lowered_statement)
         push!(lowered, lowered_statement)
     end
 
-    run_closure = Expr(:function, Expr(:call, gensym(:run), ctx, data, roles),
+    run_closure = Expr(:function, Expr(:call, gensym(:run), ctx, data, roles, store),
                        Expr(:block, lowered..., nothing))
     # The skeleton is real data built here; splice it in as a literal object so
     # `jprepare` can run the analysis over it at runtime.
