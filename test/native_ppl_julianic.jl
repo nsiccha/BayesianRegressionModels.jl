@@ -963,6 +963,26 @@ NP.@jmodel function julianic_upper_lkj(x)
     @. y ~ Normal(corr[2, 1], 1.0)
 end
 
+# Activity analysis: a generated-quantity latent. `b_new` is a random effect for
+# a group with NO observed data, so it reaches no likelihood term — the analysis
+# must classify it :gq (no coordinate, drawn from its prior in postprocessing).
+# Its twin (same body WITHOUT `b_new`) pins that the gq latent changes neither the
+# dimension nor the density. No gather here, so the pre-existing MutatingFunctions
+# gather gap does not mask the gradient check.
+NP.@jmodel function julianic_gq_latent(x)
+    a ~ Normal()
+    b_new ~ Normal(0.0, 1.0)
+    sigma ~ Exponential(2.0)
+    mu = a .* x
+    @. y ~ Normal(mu, sigma)
+end
+NP.@jmodel function julianic_gq_latent_twin(x)
+    a ~ Normal()
+    sigma ~ Exponential(2.0)
+    mu = a .* x
+    @. y ~ Normal(mu, sigma)
+end
+
 # ---------------------------------------------------------------------------
 # `end` / `begin` in index position.
 #
@@ -1185,6 +1205,52 @@ end
                    sum(logpdf.(Normal.(b, 1.0), y))
         @test NP.jlogdensity(prepared, b) ≈ expected
     end
+end
+
+@testset "activity analysis: a latent unreachable from the likelihood is a generated quantity" begin
+    prepared = NP.jprepare(NP.jcondition(julianic_gq_latent(PREDICTOR); CONTINUOUS...))
+    twin = NP.jprepare(NP.jcondition(julianic_gq_latent_twin(PREDICTOR); CONTINUOUS...))
+
+    # the partition itself: b_new reaches no likelihood term, so it is :gq; the
+    # likelihood-reaching latents are :sampled, the affine mean :density, `y` the
+    # observation.
+    roles = Dict(a.write => a.role for a in NP.jactivity(prepared))
+    @test roles[:b_new] == :gq
+    @test roles[:a] == :sampled
+    @test roles[:sigma] == :sampled
+    @test roles[:mu] == :density
+    @test roles[:y] == :observation
+
+    # a gq latent consumes NO unconstrained coordinate: same dimension as the twin
+    # without it (this is the behaviour that proves the partition is real).
+    @test NP.dimension(prepared) == NP.dimension(twin) == 2
+
+    # and contributes NOTHING to the density: identical to the twin at any position.
+    theta = [0.4, -0.3]
+    @test NP.jlogdensity(prepared, theta) == NP.jlogdensity(twin, theta)
+
+    # in postprocessing it IS drawn from its prior — stochastic across rng, while
+    # the sampled latents stay deterministic in theta.
+    c1 = NP.jconstrained(prepared, theta; rng=MersenneTwister(1))
+    c2 = NP.jconstrained(prepared, theta; rng=MersenneTwister(2))
+    @test haskey(c1, :b_new)
+    @test c1.b_new != c2.b_new
+    @test c1.a == c2.a && c1.sigma == c2.sigma
+
+    # the gradient runs and has the reduced dimension (no gather, so the
+    # pre-existing MutatingFunctions gather gap does not apply here).
+    workspace = NP.jworkspace(prepared, Float64, JULIANIC_BACKEND)
+    _, gradient = NP.jlogdensity_and_gradient!(workspace, prepared, theta)
+    @test length(gradient) == 2
+    @test all(isfinite, gradient)
+
+    # a prior-only conditioning (no `y`) has no likelihood term, so every latent is
+    # sampled — the joint prior stays samplable rather than collapsing to dim 0.
+    # Even `y` is now a length-6 broadcast latent, so dim = a + b_new + sigma + y =
+    # 1 + 1 + 1 + 6 = 9 (and every `~` site is :sampled, none :gq).
+    prior_only = NP.jprepare(NP.jcondition(julianic_gq_latent(PREDICTOR)))
+    @test NP.dimension(prior_only) == 1 + 1 + 1 + length(PREDICTOR)
+    @test all(a.role == :sampled for a in NP.jactivity(prior_only) if a.is_sample)
 end
 
 @testset "julianic fails closed" begin
