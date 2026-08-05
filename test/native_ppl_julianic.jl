@@ -1023,6 +1023,19 @@ NP.@jmodel function julianic_data_precompute_twin(x)
     @. y ~ Normal(mu, sigma)
 end
 
+# Activity analysis: conditioning — NOT spelling — moves a site across the
+# partition. `pred ~ Normal(b, 1.0)` is an OBSERVATION when `pred` is conditioned
+# (its parent `b` is then needed for sampling) and a gq LATENT when it is not (so
+# neither `pred` nor the `b` it reads reaches the likelihood). One body, both
+# roles — the source text never changes.
+NP.@jmodel function julianic_optional_outcome(x)
+    a ~ Normal()
+    b ~ Normal()
+    mu = a .* x
+    @. y ~ Normal(mu, 1.0)
+    pred ~ Normal(b, 1.0)
+end
+
 # ---------------------------------------------------------------------------
 # `end` / `begin` in index position.
 #
@@ -1377,6 +1390,65 @@ end
     c = NP.jconstrained(prepared, theta)
     ct = NP.jconstrained(twin, theta)
     @test c.a ≈ ct.a && c.sigma ≈ ct.sigma
+end
+
+@testset "activity analysis: conditioning re-partitions a site sampled ↔ gq" begin
+    # The SAME body under two conditionings. This is the re-conditioning axis the
+    # other AA testsets don't cover: they each pin ONE partition; this pins that a
+    # site MOVES between :sampled/:observation and :gq purely by what is
+    # conditioned, with no change to the source.
+
+    # (1) `pred` observed: `pred ~ Normal(b, 1.0)` scores the datum, so `b` is
+    # needed-for-sampling and both consume coordinates.
+    obs = NP.jprepare(NP.jcondition(
+        julianic_optional_outcome(PREDICTOR); y=CONTINUOUS.y, pred=0.7))
+    obs_roles = Dict(a.write => a.role for a in NP.jactivity(obs))
+    @test obs_roles[:pred] == :observation
+    @test obs_roles[:b] == :sampled
+    @test obs_roles[:a] == :sampled
+    @test obs_roles[:mu] == :density
+    @test obs_roles[:y] == :observation
+    @test NP.dimension(obs) == 2                 # a + b
+
+    # (2) only `y` observed: `pred` is now a free latent reaching no likelihood, so
+    # it is :gq and earns no coordinate — and `b`, read ONLY by the gq `pred`, is
+    # dragged into :gq with it. Only `a` is still sampled.
+    gq = NP.jprepare(NP.jcondition(
+        julianic_optional_outcome(PREDICTOR); y=CONTINUOUS.y))
+    gq_roles = Dict(a.write => a.role for a in NP.jactivity(gq))
+    @test gq_roles[:pred] == :gq
+    @test gq_roles[:b] == :gq
+    @test gq_roles[:a] == :sampled
+    @test gq_roles[:y] == :observation
+    @test NP.dimension(gq) == 1                  # a only; b, pred earn no coordinate
+
+    # the gq density is just a's prior + the y-likelihood: b and pred contribute
+    # nothing, at any position.
+    theta = [0.4]
+    @test NP.jlogdensity(gq, theta) ≈
+          logpdf(Normal(), theta[1]) +
+          sum(logpdf.(Normal.(theta[1] .* PREDICTOR, 1.0), CONTINUOUS.y))
+
+    # with pred observed the density picks up BOTH b's prior AND the pred datum.
+    theta2 = [0.4, -0.3]
+    @test NP.jlogdensity(obs, theta2) ≈
+          logpdf(Normal(), theta2[1]) + logpdf(Normal(), theta2[2]) +
+          sum(logpdf.(Normal.(theta2[1] .* PREDICTOR, 1.0), CONTINUOUS.y)) +
+          logpdf(Normal(theta2[2], 1.0), 0.7)
+
+    # under the gq conditioning, postprocessing DRAWS b and pred (stochastic across
+    # rng) while `a` stays deterministic in θ.
+    c1 = NP.jconstrained(gq, theta; rng=MersenneTwister(1))
+    c2 = NP.jconstrained(gq, theta; rng=MersenneTwister(2))
+    @test c1.a == c2.a
+    @test c1.b != c2.b && c1.pred != c2.pred
+
+    # the gradient runs at the reduced dimension (no gather here, so this is a
+    # clean gradient check independent of the MutatingFunctions gather path).
+    workspace = NP.jworkspace(gq, Float64, JULIANIC_BACKEND)
+    _, gradient = NP.jlogdensity_and_gradient!(workspace, gq, theta)
+    @test length(gradient) == 1
+    @test all(isfinite, gradient)
 end
 
 @testset "julianic fails closed" begin
