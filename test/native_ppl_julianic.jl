@@ -983,6 +983,27 @@ NP.@jmodel function julianic_gq_latent_twin(x)
     @. y ~ Normal(mu, sigma)
 end
 
+# Activity analysis: a generated-quantity DETERMINISTIC. `z` is an array-valued
+# deterministic that reads a gq latent (`b_new`) and reaches no likelihood term, so
+# it is classified :gq — it must be skipped in the density (no pooled buffer slot,
+# no computation). Its twin (same body WITHOUT `z`) pins that the gq deterministic
+# changes neither the pool size nor the density.
+NP.@jmodel function julianic_gq_deterministic(x)
+    a ~ Normal()
+    sigma ~ Exponential(2.0)
+    b_new ~ Normal(0.0, 1.0)
+    z = b_new .* x
+    mu = a .* x
+    @. y ~ Normal(mu, sigma)
+end
+NP.@jmodel function julianic_gq_deterministic_twin(x)
+    a ~ Normal()
+    sigma ~ Exponential(2.0)
+    b_new ~ Normal(0.0, 1.0)
+    mu = a .* x
+    @. y ~ Normal(mu, sigma)
+end
+
 # ---------------------------------------------------------------------------
 # `end` / `begin` in index position.
 #
@@ -1251,6 +1272,51 @@ end
     prior_only = NP.jprepare(NP.jcondition(julianic_gq_latent(PREDICTOR)))
     @test NP.dimension(prior_only) == 1 + 1 + 1 + length(PREDICTOR)
     @test all(a.role == :sampled for a in NP.jactivity(prior_only) if a.is_sample)
+end
+
+@testset "activity analysis: a generated-quantity deterministic is skipped in the density" begin
+    prepared = NP.jprepare(NP.jcondition(julianic_gq_deterministic(PREDICTOR); CONTINUOUS...))
+    twin = NP.jprepare(NP.jcondition(julianic_gq_deterministic_twin(PREDICTOR); CONTINUOUS...))
+
+    # `z` reads the gq latent `b_new` and reaches no likelihood term, so it is a gq
+    # DETERMINISTIC; `mu` is on the likelihood path so it stays :density.
+    roles = Dict(a.write => a.role for a in NP.jactivity(prepared))
+    @test roles[:z] == :gq
+    @test roles[:mu] == :density
+    @test roles[:b_new] == :gq
+
+    # THE PROOF that the density does as little work as possible: `z` is an array gq
+    # deterministic, so were it computed in the density it would need a pooled buffer
+    # slot. It is skipped, so the trace sizes NO slot for it — the pool is the same
+    # size as the twin without `z`. This is measured on the trace, not inferred from
+    # DCE: the buffer op is never emitted, so there is nothing for the compiler to
+    # eliminate.
+    @test length(prepared.buffer_sizes) == length(twin.buffer_sizes)
+
+    # a gq latent still consumes no coordinate, so both are dimension 2 (a + sigma);
+    # `b_new` is drawn, not walked.
+    @test NP.dimension(prepared) == NP.dimension(twin) == 2
+
+    # and `z` contributes nothing to the density — identical to the twin at any θ.
+    theta = [0.4, -0.3]
+    @test NP.jlogdensity(prepared, theta) == NP.jlogdensity(twin, theta)
+
+    # still 0-alloc primal + working gradient with a skipped array gq deterministic.
+    workspace = NP.jworkspace(prepared, Float64, JULIANIC_BACKEND)
+    _, gradient = NP.jlogdensity_and_gradient!(workspace, prepared, theta)
+    @test length(gradient) == 2
+    @test all(isfinite, gradient)
+    allocations = steady_state_allocations(prepared, workspace, theta)
+    @test allocations.primal == 0
+
+    # postprocessing DOES compute the gq deterministic (a downstream gq draw could
+    # read it) — on a growable pool, so the density's skip does not desync it. The
+    # sites still come back with `b_new` DRAWN (varies with rng) and the sampled
+    # latents deterministic in θ, and the skipped-in-density array det does not error.
+    c1 = NP.jconstrained(prepared, theta; rng=MersenneTwister(1))
+    c2 = NP.jconstrained(prepared, theta; rng=MersenneTwister(2))
+    @test haskey(c1, :b_new) && c1.b_new != c2.b_new
+    @test c1.a == c2.a && c1.sigma == c2.sigma
 end
 
 @testset "julianic fails closed" begin

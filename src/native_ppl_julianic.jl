@@ -124,14 +124,26 @@ struct JulianicActivity
     is_sample::Bool
 end
 
-# The generated-quantity LATENT site names as a TYPE PARAMETER, so
-# `_julianic_is_gq(roles, Val(name))` folds to a literal at each `~` call site —
-# exactly the trick `_julianic_is_conditioned` plays on the data type. An EMPTY
-# tuple (no gq latent — the entire current gallery) makes every gq branch dead
-# code, so those models lower identically to the pre-AA surface, and both the
-# 0-alloc primal and the oracle parity are preserved by construction.
-struct JulianicRoles{G} end
-@inline _julianic_is_gq(::JulianicRoles{G}, ::Val{name}) where {G,name} = name in G
+# The role sets a body's names fall into, each carried as a TYPE PARAMETER so its
+# per-name predicate folds to a literal at the statement's call site — exactly the
+# trick `_julianic_is_conditioned` plays on the data type. Three sets drive the
+# lowering:
+#   G  — generated-quantity LATENT sites (drawn only in postprocessing; no coordinate)
+#   GD — generated-quantity DETERMINISTIC writes (a parameter-dependent deterministic
+#        that reaches no likelihood term — skipped in the density, computed only where
+#        a downstream gq draw needs it, i.e. postprocessing)
+#   D  — data-only writes (constant across θ — precomputed once at `jprepare`, fetched
+#        in the density rather than recomputed)
+# An EMPTY set makes its branch dead code: a model with no gq latent, no gq
+# deterministic and no precomputed data (the entire pre-AA gallery) lowers
+# IDENTICALLY to the pre-AA surface — so both the 0-alloc primal and the oracle
+# parity are preserved by construction. The pruning is Julia's own constant-branch
+# folding at `run`'s specialization on this type, NOT LLVM dead-code elimination of
+# an emitted-but-unused store: the losing branch is gone before LLVM sees the body.
+struct JulianicRoles{G,GD,D} end
+@inline _julianic_is_gq(::JulianicRoles{G,GD,D}, ::Val{name}) where {G,GD,D,name} = name in G
+@inline _julianic_is_gq_det(::JulianicRoles{G,GD,D}, ::Val{name}) where {G,GD,D,name} = name in GD
+@inline _julianic_is_data(::JulianicRoles{G,GD,D}, ::Val{name}) where {G,GD,D,name} = name in D
 
 # --- Buffer pool ----------------------------------------------------------
 #
@@ -295,6 +307,17 @@ end
 # `copy` on anything that is a view of, or a pooled buffer over, live state.
 @inline _julianic_recorded(value) = value
 @inline _julianic_recorded(value::AbstractArray) = copy(value)
+
+# Does THIS context need a generated-quantity DETERMINISTIC evaluated? Only the
+# recording passes do — a gq deterministic reaches no likelihood term, so nothing
+# on the density path (primal, trace) ever reads it; but a gq LATENT drawn in
+# postprocessing may, so `JulianicRecord`/`JulianicSimulate` compute it. The
+# density and trace get a `nothing` placeholder for it instead, and because this
+# predicate folds to a compile-time constant, that placeholder branch is the ONLY
+# code generated there — the deterministic's work (and its pooled buffer slot)
+# is never emitted, not emitted-then-eliminated.
+@inline _julianic_computes_det(_ctx) = false
+@inline _julianic_computes_det(::JulianicRecording) = true
 
 # --- `~` runtime: prep + logpdf ------------------------------------------
 #
@@ -972,7 +995,10 @@ function _julianic_activity(statements::Vector{JulianicStmt}, condnames)
     end
 
     activity = Vector{JulianicActivity}(undef, n)
-    gq = Symbol[]
+    gq = Symbol[]        # gq LATENT sites (drawn in postprocessing; consume no coordinate)
+    gq_det = Symbol[]    # gq DETERMINISTIC writes (skipped in the density)
+    data = Symbol[]      # data-only writes (precomputed once at prepare)
+    named(w) = w !== Symbol("")   # a bare expression writes nothing to gate on
     for i in 1:n
         s = statements[i]
         role = if is_obs[i]
@@ -980,15 +1006,17 @@ function _julianic_activity(statements::Vector{JulianicStmt}, condnames)
         elseif is_latent[i]
             affects[i] ? :sampled : (push!(gq, s.write); :gq)
         elseif !is_param[i]
+            named(s.write) && push!(data, s.write)
             :data
         elseif affects[i]
             :density
         else
+            named(s.write) && push!(gq_det, s.write)
             :gq
         end
         activity[i] = JulianicActivity(s.write, role, s.is_sample)
     end
-    return activity, Tuple(gq)
+    return activity, Tuple(gq), Tuple(gq_det), Tuple(data)
 end
 
 """
@@ -1000,9 +1028,9 @@ unconstrained dimension — which now counts ONLY the sampled latents, so a
 generated-quantity latent consumes no coordinate.
 """
 function jprepare(conditioned::JulianicConditioned)
-    activity, gq_sites = _julianic_activity(
+    activity, gq_sites, gq_det, data_names = _julianic_activity(
         conditioned.statements, propertynames(conditioned.data))
-    roles = JulianicRoles{gq_sites}()
+    roles = JulianicRoles{gq_sites,gq_det,data_names}()
     trace = JulianicTrace()
     conditioned.run(trace, conditioned.data, roles)
     return JulianicPrepared(
@@ -1128,7 +1156,14 @@ end
 function _julianic_record(prepared::JulianicPrepared, theta::AbstractVector, kernel,
                           rng::Random.AbstractRNG=Random.default_rng())
     _julianic_check_dimension(prepared, theta)
-    buffers = JulianicBuffers{eltype(theta)}(prepared.buffer_sizes)
+    # A GROWABLE pool, not one presized to `prepared.buffer_sizes` — the density's
+    # pool. Postprocessing's set of pooled intermediates genuinely DIFFERS from the
+    # density's: it COMPUTES the generated-quantity deterministics the density skips
+    # (a downstream gq draw may read them), so a presized pool would be sized for the
+    # density's slots and the gq-det broadcast would land on the wrong one. Sizing on
+    # demand is exactly right here and costs nothing that matters — postprocessing is
+    # off the 0-alloc hot path (that is scoped to logdensity + gradient).
+    buffers = JulianicBuffers{eltype(theta)}()
     context = JulianicRecord(theta, buffers, kernel, rng)
     prepared.run(context, prepared.data, prepared.roles)
     return context
@@ -1193,7 +1228,10 @@ precisely because forward simulation never touches the unconstrained
 parametrization that the family methods exist to handle.
 """
 function jsimulate(rng::Random.AbstractRNG, prepared::JulianicPrepared)
-    buffers = JulianicBuffers{Float64}(prepared.buffer_sizes)
+    # Growable, not presized — the forward pass computes generated-quantity
+    # deterministics the density skips, so its pooled set differs from the density's
+    # `buffer_sizes` (see `_julianic_record`). Off the 0-alloc hot path.
+    buffers = JulianicBuffers{Float64}()
     context = JulianicSimulate(rng, buffers, JulianicPredictKernel(rng))
     prepared.run(context, prepared.data, prepared.roles)
     return (; latents=NamedTuple(context.sites),
@@ -1543,12 +1581,31 @@ function _julianic_lower_statement(statement, ctx, data, roles)
         return _julianic_lower_sample(
             sample.lhs, sample.rhs, sample.broadcast, ctx, data, roles)
     end
-    # Deterministic assignment `lhs = rhs`: buffer every array-valued node in rhs.
+    # Deterministic assignment `lhs = rhs`: buffer every array-valued node in rhs,
+    # then GATE the whole computation on `lhs`'s role. A generated-quantity
+    # deterministic (parameter-dependent, reaches no likelihood) is computed only in
+    # the recording passes; the density and trace get `nothing` instead. Both guards
+    # fold to compile-time constants at `run`'s specialization — a `:density`/`:data`
+    # write folds straight to the else branch (identical to the pre-AA lowering,
+    # buffer ops and all), and a gq deterministic on the density/trace path folds to
+    # the placeholder, so its buffer ops are never emitted and consume no pool slot.
     if statement isa Expr && statement.head === :(=)
+        target = statement.args[1]
         prelude = Any[]
         rewritten = _julianic_buffer_expression!(prelude, statement.args[2], ctx)
-        isempty(prelude) && return statement
-        return Expr(:block, prelude..., Expr(:(=), statement.args[1], rewritten))
+        compute = isempty(prelude) ? rewritten : Expr(:block, prelude..., rewritten)
+        # Only a plain `name = …` write carries a role. The SSA check has already
+        # rejected index/destructuring/mutation targets, so a non-Symbol target here
+        # is unreachable; keep the un-gated form for it defensively.
+        target isa Symbol || return isempty(prelude) ? statement :
+            Expr(:block, prelude..., Expr(:(=), target, rewritten))
+        name = Val(target)
+        gated = :(if $(_julianic_is_gq_det)($roles, $name)
+                      $(_julianic_computes_det)($ctx) ? $compute : nothing
+                  else
+                      $compute
+                  end)
+        return Expr(:(=), target, gated)
     end
     return statement
 end
