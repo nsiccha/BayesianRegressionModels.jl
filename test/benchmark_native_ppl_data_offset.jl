@@ -156,7 +156,12 @@ function timing_receipt()
                     pure_model, position; propto=false, jacobian=true)),
                 gradient=measure!(() -> BridgeStan.log_density_gradient!(
                     pure_model, position, pure_gradient;
-                    propto=false, jacobian=true))))
+                    propto=false, jacobian=true))),
+            jl=(
+                density=measure!(() -> NP.jlogdensity(
+                    jprepared, position)),
+                gradient=measure!(() -> NP.jlogdensity_and_gradient!(
+                    jwork, jprepared, position))))
     finally
         GC.enable(gc_was_enabled)
     end

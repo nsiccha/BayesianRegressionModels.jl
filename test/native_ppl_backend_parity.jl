@@ -289,6 +289,9 @@ end
         " max_native_sbb_gradient_diff=",
         maximum(abs, native_gradient .-
             native_from_stan_gradient(sbb_gradient, G)),
+        " max_julianic_sbb_gradient_diff=",
+        maximum(abs, julianic_gradient .-
+            native_from_stan_gradient(sbb_gradient, G)),
         " max_native_optimized_gradient_diff=",
         maximum(abs, native_gradient .-
             native_from_stan_gradient(optimized_gradient, G)),
@@ -335,6 +338,9 @@ end
         maximum(abs, shifted_julianic_gradient .- shifted_native_gradient),
         " max_native_sbb_gradient_diff=",
         maximum(abs, shifted_native_gradient .-
+            native_from_stan_gradient(sbb_gradient, G)),
+        " max_julianic_sbb_gradient_diff=",
+        maximum(abs, shifted_julianic_gradient .-
             native_from_stan_gradient(sbb_gradient, G)),
         " max_native_optimized_gradient_diff=",
         maximum(abs, shifted_native_gradient .-
