@@ -1,7 +1,7 @@
 using BayesianRegressionModels
 using StanBlocks
 using BridgeStan
-using Distributions: Exponential, LKJCholesky, Normal
+using Distributions: Exponential, LKJCholesky, Normal, product_distribution
 import DifferentiationInterface as DI
 using Enzyme
 using Statistics: median
@@ -58,6 +58,39 @@ const plan = NP.compile(brmi)
 const prepared = NP.prepare(plan)
 const work = NP.workspace(prepared, Float64, DI.AutoEnzyme())
 
+# Julianic run-the-body surface — the SAME correlated-varying-K3 model authored
+# as `@jmodel`, pinned DIRECTLY against Stan here (density + mapped gradient +
+# allocations + timing), closing the transitivity gap. The declarative executor
+# stores `b_p_group ~ MvNormalCholesky(tau, L)` NON-CENTERED (coordinates are
+# standard-normal `z`, effect is `diag(tau)·L·z`); run-the-body has no such
+# storage rule, so the julianic body writes that reparameterization out by hand.
+# This transcribes the gallery's proven `julianic_correlated_varying_three`
+# (test/native_ppl_julianic.jl) verbatim. Its θ layout is declaration order =
+# the declarative `native` order (`oracle_parity` evaluates both surfaces at the
+# SAME θ), so it shares `native_position` UNMAPPED; the Stan arms keep their own
+# `stan_position` + `stan_gradient_to_native` permutation. The `b[k, group]`
+# gather differentiates only under MutatingFunctions 92687c8 (the SubArray-gather
+# activity fix) — the arm this file's env pins.
+NP.@jmodel function julianic_correlated_varying_three(x, w, group)
+    groups = maximum(group)
+    tau_p_group ~ product_distribution(fill(Exponential(1.0), 3))
+    L_p_group ~ LKJCholesky(3, 2)
+    z_p_group ~ product_distribution(fill(Normal(0.0, 1.0), 3 * groups))
+    beta_mu ~ product_distribution(fill(Normal(0.0, 1.0), 2))
+    sigma ~ Exponential(2.0)
+    # Column g of `z` is group g's (Intercept, x, w) block — the group-major
+    # layout the executor uses. `b = diag(tau)·L·z`, one column per group.
+    z = reshape(z_p_group, 3, groups)
+    b = tau_p_group .* (L_p_group * z)
+    mu = beta_mu[1] .* x .+ beta_mu[2] .* w .+
+        b[1, group] .+ b[2, group] .* x .+ b[3, group] .* w
+    @. y ~ Normal(mu, sigma)
+end
+
+const jprepared = NP.jprepare(
+    NP.jcondition(julianic_correlated_varying_three(x, w, group); y))
+const jwork = NP.jworkspace(jprepared, Float64, DI.AutoEnzyme())
+
 const sb = SBBRMI(brmi; mod=@__MODULE__)
 const sb_problem = StanBlocks.stan_instantiate(
     sb.model; path="/tmp/native_ppl_arbitrary_k3_sb.stan")
@@ -113,6 +146,8 @@ function warmup!()
         BridgeStan.log_density_gradient!(
             pure_model, stan_position, pure_gradient;
             propto=false, jacobian=true)
+        NP.jlogdensity(jprepared, native_position)
+        NP.jlogdensity_and_gradient!(jwork, jprepared, native_position)
     end
 end
 
@@ -135,7 +170,11 @@ function allocation_receipt()
                 pure_model, stan_position; propto=false, jacobian=true)),
             gradient=@allocated(BridgeStan.log_density_gradient!(
                 pure_model, stan_position, pure_gradient;
-                propto=false, jacobian=true))))
+                propto=false, jacobian=true))),
+        jl=(
+            density=@allocated(NP.jlogdensity(jprepared, native_position)),
+            gradient=@allocated(NP.jlogdensity_and_gradient!(
+                jwork, jprepared, native_position))))
 end
 
 function measure!(f)
@@ -173,7 +212,12 @@ function timing_receipt()
                     propto=false, jacobian=true)),
                 gradient=measure!(() -> BridgeStan.log_density_gradient!(
                     pure_model, stan_position, pure_gradient;
-                    propto=false, jacobian=true))))
+                    propto=false, jacobian=true))),
+            jl=(
+                density=measure!(() -> NP.jlogdensity(
+                    jprepared, native_position)),
+                gradient=measure!(() -> NP.jlogdensity_and_gradient!(
+                    jwork, jprepared, native_position))))
     finally
         GC.enable(gc_was_enabled)
     end
@@ -183,6 +227,12 @@ function equivalence_receipt()
     native_density, native_gradient_view =
         NP.logdensity_and_gradient!(work, prepared, native_position)
     native_gradient = copy(native_gradient_view)
+    # Julianic θ == native θ (identity), so its gradient is ALREADY in native
+    # order — compared directly, and against the Stan gradients only after the
+    # `stan_gradient_to_native` permutation.
+    jl_density, jl_gradient_view =
+        NP.jlogdensity_and_gradient!(jwork, jprepared, native_position)
+    jl_gradient = copy(jl_gradient_view)
     sb_density, _ = BridgeStan.log_density_gradient!(
         sb_model, stan_position, sb_gradient;
         propto=false, jacobian=true)
@@ -190,15 +240,24 @@ function equivalence_receipt()
         pure_model, stan_position, pure_gradient;
         propto=false, jacobian=true)
     (;
-        density=(native=native_density, sb=sb_density, pure=pure_density,
+        density=(native=native_density, julianic=jl_density,
+                 sb=sb_density, pure=pure_density,
                  native_minus_sb=native_density - sb_density,
                  native_minus_pure=native_density - pure_density,
+                 julianic_minus_sb=jl_density - sb_density,
+                 julianic_minus_pure=jl_density - pure_density,
+                 julianic_minus_native=jl_density - native_density,
                  sb_minus_pure=sb_density - pure_density),
         gradient_max_abs_difference=(
             native_sb=maximum(abs.(native_gradient .-
                 stan_gradient_to_native(sb_gradient))),
             native_pure=maximum(abs.(native_gradient .-
                 stan_gradient_to_native(pure_gradient))),
+            julianic_sb=maximum(abs.(jl_gradient .-
+                stan_gradient_to_native(sb_gradient))),
+            julianic_pure=maximum(abs.(jl_gradient .-
+                stan_gradient_to_native(pure_gradient))),
+            julianic_native=maximum(abs.(jl_gradient .- native_gradient)),
             sb_pure=maximum(abs.(sb_gradient .- pure_gradient))))
 end
 
@@ -236,6 +295,10 @@ println("generated_surfaces=", (;
     pure=(path=pure_stan_path,
           lines=count(==(UInt8('\n')), codeunits(read(pure_stan_path, String))) + 1,
           sha256=file_sha(pure_stan_path))))
+println("julianic=", (;
+    dimension=NP.dimension(jprepared),
+    matches_native_dimension=NP.dimension(jprepared) == plan.graph.dimension,
+    coordinate_order=:declaration_order_identity_to_native))
 println("equivalence=", equivalence_receipt())
 println("linear_head=", NP.evaluate(
     work, prepared, native_position, NP.LinearPredictor())[1:8])
