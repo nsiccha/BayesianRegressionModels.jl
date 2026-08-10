@@ -233,6 +233,51 @@ end
         @test StanBlocks.stanc_check(code; warn_pedantic = false).ok
     end
 
+    @testset "frozen same-group replay regenerates the joint event design" begin
+        # Same fitted subjects, reordered; nine future dose events on a changed
+        # dose axis.  The kernel partition, event-level factors, and HSGP basis
+        # all have to move while the trained group and basis coordinates stay
+        # fixed.
+        replay_df = ev_df(; sub_order = [3, 1, 2])
+        replay_df = merge(replay_df, (;
+            dose_amount = [[210.0, 190.0, 180.0, 170.0],
+                           [110.0, 100.0, 90.0],
+                           [60.0, 55.0]],
+            dose_subject = ["s1", "s3", "s2", "s1", "s3", "s3", "s2", "s1", "s3"],
+            vessel = [1, 2, 1, 2, 1, 2, 2, 1, 1],
+            diet = [1, 3, 2, 2, 1, 3, 3, 1, 2],
+            log_dose = log.([110.0, 210.0, 60.0, 100.0, 190.0,
+                             180.0, 55.0, 90.0, 170.0]),
+            dose_amount_flat = [110.0, 210.0, 60.0, 100.0, 190.0,
+                                180.0, 55.0, 90.0, 170.0],
+        ))
+
+        replayed = reprocess(sb, replay_df)
+        fresh = reprocess(sb, replay_df; freeze_constants = false)
+        @test replayed.data[:subject_idx] == [3, 1, 2]
+        @test replayed.data[:n_subject] == 3
+        @test replayed.data[:kernel_nsub_pred] == 3
+        @test replayed.data[:kernel_pred_log_F_ragged] ==
+              [[2, 5, 6, 9], [1, 4, 8], [3, 7]]
+        @test size(replayed.data[:PHI_hsgp_log_dose]) == (9, 5)
+        @test replayed.preproc[:PHI_hsgp_log_dose].const_.fits ==
+              sb.preproc[:PHI_hsgp_log_dose].const_.fits
+        @test fresh.preproc[:PHI_hsgp_log_dose].const_.fits !=
+              sb.preproc[:PHI_hsgp_log_dose].const_.fits
+        @test replayed.data[:omega2_hsgp_log_dose] ==
+              sb.data[:omega2_hsgp_log_dose]
+        @test StanBlocks.stan_code(replayed.model) == StanBlocks.stan_code(sb.model)
+        @test reprocess(sb, df).data == sb.data
+
+        unseen = merge(replay_df, (; subject = ["s3", "s1", "s9"]))
+        @test_throws "unseen level" reprocess(sb, unseen)
+
+        stray = merge(replay_df, (;
+            dose_subject = ["s1", "s3", "s2", "s1", "s9", "s3", "s2", "s1", "s3"],
+        ))
+        @test_throws "name no subject" reprocess(sb, stray)
+    end
+
     @testset "BridgeStan runtime — the event-axis LP is a live parameter" begin
         if EV_RUN_BRIDGESTAN
             using LogDensityProblems
@@ -347,6 +392,18 @@ end
         # column must describe the same per-subject split.
         @test length.(flat.data[:kernel_pred_dose_amount_flat_ragged]) ==
               length.(flat.data[:kernel_pred_log_F_ragged])
+
+        # Replay rebuilds the Julia-gathered half too.  Both axes are
+        # independently reordered here: the subject frame selects the outer
+        # ragged order, while the event frame selects each inner row sequence.
+        flat_replay_df = ev_df(
+            sub_order = [3, 1, 2], ev_order = [6, 1, 3, 2, 4, 7, 5])
+        flat_replayed = reprocess(flat, flat_replay_df)
+        @test flat_replayed.data[:kernel_pred_dose_amount_flat_ragged] ==
+              flat_replay_df.dose_amount
+        @test flat_replayed.data[:kernel_pred_log_F_ragged] ==
+              [[1, 6], [2, 4], [3, 5, 7]]
+        @test StanBlocks.stan_code(flat_replayed.model) == code
 
         if EV_RUN_BRIDGESTAN
             # The flat-column spelling is the SAME MODEL as the hand-grouped one:

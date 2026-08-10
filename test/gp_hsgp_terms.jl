@@ -84,10 +84,22 @@ end
         replay_df = gp_term_df(; shift_x=0.25, shift_x2=0.4)
         replay_exact = reprocess(sb_exact, replay_df)
         replay_hsgp = reprocess(sb_hsgp, replay_df)
+        replay_grouped = reprocess(sb_grouped, replay_df)
         @test replay_exact.data[:X_gp_x_x2] != sb_exact.data[:X_gp_x_x2]
         @test replay_hsgp.data[:PHI_hsgp_x_x2] != sb_hsgp.data[:PHI_hsgp_x_x2]
+        @test replay_grouped.data[:g_idx] == sb_grouped.data[:g_idx]
+        @test replay_grouped.data[:PHI_hsgp_x_by_g] !=
+              sb_grouped.data[:PHI_hsgp_x_by_g]
+        @test replay_grouped.preproc[:PHI_hsgp_x_by_g].const_.fits ==
+              sb_grouped.preproc[:PHI_hsgp_x_by_g].const_.fits
         @test StanBlocks.stan_code(replay_exact.model) == StanBlocks.stan_code(sb_exact.model)
         @test StanBlocks.stan_code(replay_hsgp.model) == StanBlocks.stan_code(sb_hsgp.model)
+        @test StanBlocks.stan_code(replay_grouped.model) ==
+              StanBlocks.stan_code(sb_grouped.model)
+        @test :reprocess in Symbol[
+            op.name for op in brm_descriptor(sb_grouped).operations]
+        @test_throws "unseen level" reprocess(
+            sb_grouped, merge(replay_df, (; g=vcat(fill("a", 4), fill("c", 4)))))
 
         # The hsgp validity floor (decision 13keyez) is a function of the
         # fitted `L = c*max|x - mean(x)|`, so it tracks the BASIS, not the
