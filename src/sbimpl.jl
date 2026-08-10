@@ -3291,6 +3291,32 @@ account for (ordinary `(1|g)` indices remain outside this replay path) rather
 than silently copying a stale vector — rebuild from `new_df` for those models.
 """
 function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true)
+    # kernel(...) `ragged(x, group)` inputs are gathered per-group into derived
+    # `kernel_<target>_<arg>_ragged` columns at SBBRMI-construction time (the
+    # ragged-emission site above) with NO Julia-side preprocessing record, so
+    # reprocess cannot regenerate them on `new_df`. And a kernel(...) linear
+    # predictor is random-effects-bearing BY CONSTRUCTION (build errors without a
+    # grouping ranef term), so reprocess — which does not yet re-code random-effects
+    # group indices (tracked: BRM todo `11r1d3j`) — cannot replay a kernel model
+    # regardless of the ragged columns. Diagnose this UP FRONT with one
+    # authoritative, deterministic message rather than failing incidentally on
+    # whichever derived key `Dict` iteration reaches first (which reads like a
+    # narrowly-fixable "missing preproc record" gap and misdirects the fix).
+    kernel_ragged = sort!(Symbol[k for k in keys(sb.data)
+        if k !== _SB_PREPROC_KEY && !haskey(sb.preproc, k) &&
+           startswith(String(k), "kernel_") && endswith(String(k), "_ragged")])
+    isempty(kernel_ragged) || error(
+        "sbimpl: reprocess: this model has kernel(...) `ragged(x, group)` inputs ",
+        "$(kernel_ragged) gathered per-group at build time with no preprocessing ",
+        "record, so reprocess cannot regenerate them on a new DataFrame. A ",
+        "kernel(...) linear predictor is also random-effects-bearing by ",
+        "construction, and reprocess does not yet re-code random-effects group ",
+        "indices (tracked: BayesianRegressionModels todo `11r1d3j`) — so frozen ",
+        "replay of a kernel model is not available yet. To carry a fitted kernel ",
+        "model to a new design, use `generative_plan(plan, new_schedule)` or ",
+        "`brm_descriptor(...)` `:replay`; note these REBUILD from the formula and ",
+        "therefore REFIT frozen constants (HSGP basis, factor levels, …) — a ",
+        "frozen-constant kernel replay is not yet supported.")
     new_data = Dict{Symbol,Any}()
     new_preproc = Dict{Symbol,PreprocEntry}()
     handled = Set{Symbol}()
