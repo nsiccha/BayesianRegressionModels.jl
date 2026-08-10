@@ -678,7 +678,9 @@ hand, so an operation that appears can be executed.
 
 `:replay` / `:reprocess` take the new dataframe positionally and return a NEW
 `BRMDescriptor`; their `inputs` are the dataframe columns in `d.columns`, not
-Stan data keys.
+Stan data keys. `:reprocess` forwards both `freeze_constants=` and the checked
+new-population `resample_groups=` CV/GQ re-emission described by
+[`reprocess`](@ref).
 
 # Extension points
 
@@ -917,8 +919,9 @@ function _brm_derive_operations(plan, stan, outputs, columns)
         push!(ops, BRMOperation(
             :reprocess, "Re-run preprocessing on a new dataframe", columns, (), :brm,
             (d, new_df; freeze_constants::Bool=true, highlights=d.highlights,
-             kwargs...) -> brm_descriptor(
-                reprocess(d.plan, new_df; freeze_constants); highlights, kwargs...)))
+             resample_groups=(), kwargs...) -> brm_descriptor(
+                reprocess(d.plan, new_df; freeze_constants, resample_groups);
+                highlights, kwargs...)))
     end
     ops
 end

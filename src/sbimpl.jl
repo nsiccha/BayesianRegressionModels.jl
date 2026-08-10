@@ -3136,6 +3136,178 @@ end
 
 _sb_df_has_column(df, k::Symbol) = hasproperty(df, k)
 
+# Rebind the typed BRMI tree to a new dataframe without re-parsing source code.
+# This is the construction half `resample_groups` needs: cv-contagious sizing is
+# selected while emitting Stan, so swapping the old model's data cannot create
+# a new-population artifact.  Named data leaves are the only values replaced;
+# formula-local structure, functions, and literal hyperparameters stay exact.
+_sb_rebind_value(x, _df) = x
+_sb_rebind_value(x::Tuple, df) = map(v -> _sb_rebind_value(v, df), x)
+_sb_rebind_value(x::NamedTuple, df) =
+    NamedTuple{keys(x)}(map(v -> _sb_rebind_value(v, df), values(x)))
+_sb_rebind_value(x::NestedPredictorFormula, df) =
+    NestedPredictorFormula(_sb_rebind_value(parent(x), df))
+_sb_rebind_value(x::LikelihoodColumn, df) =
+    LikelihoodColumn(_sb_rebind_value(parent(x), df),
+                     _sb_rebind_value(rhs(x), df))
+function _sb_rebind_value(x::NamedColumn, df)
+    n = name(x)
+    p = parent(x)
+    if p isa DataColumn || p isa MissingColumn
+        if _sb_df_has_column(df, n)
+            return NamedColumn(n, DataColumn(_sb_df_column(df, n)))
+        end
+        p isa DataColumn && error(
+            "sbimpl: resample replay: new DataFrame has no column `$n`, which " *
+            "was data-backed in the fitted BRMI")
+        return NamedColumn(n, MissingColumn())
+    end
+    NamedColumn(n, _sb_rebind_value(p, df))
+end
+function _sb_rebind_value(x::ExprColumn, df)
+    args = map(v -> _sb_rebind_value(v, df), getargs(x))
+    kw = getkwargs(x)
+    rebound_kw = NamedTuple{keys(kw)}(
+        map(v -> _sb_rebind_value(v, df), values(kw)))
+    ExprColumn(getf(x), args...; rebound_kw...)
+end
+function _sb_rebind_value(x::MultiMembershipTerm, df)
+    groups = map(v -> _sb_rebind_value(v, df), getfield(x, :groups))
+    old_weights = getfield(x, :weights)
+    weights = isnothing(old_weights) ? nothing :
+              map(v -> _sb_rebind_value(v, df), old_weights)
+    MultiMembershipTerm(groups...; weights, normalize=getfield(x, :normalize))
+end
+function _sb_rebind_brmi(brmi::BRMI, df)
+    ops = brmi.operations
+    BRMI(NamedTuple{keys(ops)}(
+        map(v -> _sb_rebind_value(v, df), values(ops))))
+end
+
+function _sb_resample_group_set(groups)
+    groups === nothing && return Set{Symbol}()
+    values = groups isa Symbol ? (groups,) : groups
+    values isa AbstractString && error(
+        "sbimpl: `resample_groups` expects a Symbol or collection of Symbols, " *
+        "got $(repr(values))")
+    collected = try
+        collect(values)
+    catch
+        error("sbimpl: `resample_groups` expects a Symbol or collection of " *
+              "Symbols, got $(repr(values))")
+    end
+    all(v -> v isa Symbol, collected) || error(
+        "sbimpl: `resample_groups` expects only Symbols, got $(repr(collected))")
+    Set{Symbol}(collected)
+end
+
+_sb_same_raw_ref(a, b) = isequal(a, b)
+_sb_same_raw_ref(::DataColumn, ::DataColumn) = true
+_sb_same_raw_ref(a::NamedColumn, b::NamedColumn) =
+    name(a) === name(b) && _sb_same_raw_ref(parent(a), parent(b))
+_sb_same_raw_ref(a::ExprColumn, b::ExprColumn) =
+    getf(a) === getf(b) && _sb_same_raw_ref(getargs(a), getargs(b)) &&
+    _sb_same_raw_ref(getkwargs(a), getkwargs(b))
+_sb_same_raw_ref(a::Tuple, b::Tuple) =
+    length(a) == length(b) && all(ab -> _sb_same_raw_ref(ab...), zip(a, b))
+_sb_same_raw_ref(a::NamedTuple, b::NamedTuple) =
+    keys(a) == keys(b) && all(
+        ab -> _sb_same_raw_ref(ab...), zip(values(a), values(b)))
+
+function _sb_resample_preproc(training, fresh, groups)
+    training_keys = Set(keys(training))
+    fresh_keys = Set(keys(fresh))
+    training_keys == fresh_keys || error(
+        "sbimpl: resample replay: rebuilding on the new DataFrame changed the " *
+        "preprocessed model shape (training-only keys: " *
+        "$(sort!(collect(setdiff(training_keys, fresh_keys)))); new-only keys: " *
+        "$(sort!(collect(setdiff(fresh_keys, training_keys))))). Preserve fitted " *
+        "factor/design dimensions or build and fit a genuinely new model.")
+    out = Dict{Symbol,PreprocEntry}()
+    for key in training_keys
+        old = training[key]
+        new = fresh[key]
+        (old.kind === new.kind && _sb_same_raw_ref(old.raw_ref, new.raw_ref)) || error(
+            "sbimpl: resample replay: preprocessing record `$key` changed from " *
+            "$(old.kind)/$(repr(old.raw_ref)) to " *
+            "$(new.kind)/$(repr(new.raw_ref)); the rebuilt formula is not the " *
+            "fitted model.")
+        out[key] = old.kind === :group_index && old.raw_ref in groups ? new : old
+    end
+    out
+end
+
+function _sb_assert_cv_reemission(sb::SBBRMI, groups)
+    plan = generative_plan(sb)
+    for group in groups
+        hits = GenerativeDeclaration[]
+        for d in plan.declarations
+            d.role === :prior || continue
+            haskey(d.keywords, :group_idx) || continue
+            idx = d.keywords.group_idx
+            idx isa Symbol || continue
+            entry = get(plan.preproc, idx, nothing)
+            entry isa PreprocEntry || continue
+            entry.kind === :group_index || continue
+            entry.raw_ref === group || continue
+            push!(hits, d)
+        end
+        isempty(hits) && error(
+            "sbimpl: `resample_groups` names `$group`, but the model has no " *
+            "ordinary random-effect block with a tracked group index on that " *
+            "column.")
+        for d in hits
+            expected = Symbol(d.target, :_n_g)
+            get(d.keywords, :n_groups, nothing) === expected || error(
+                "sbimpl: `resample_groups=[:$group]` reaches random-effect " *
+                "block `$(d.target)`, but that block has no cv-contagious size " *
+                "local `$expected`. Stratified, multi-membership, grouped-HSGP, " *
+                "and derived-scale R2D2 blocks are not supported by this " *
+                "new-population emission.")
+        end
+    end
+    nothing
+end
+
+function _sb_mark_resample_groups(sb::SBBRMI, groups)
+    marked = Dict{Symbol,Any}(sb.data)
+    seen = Set{Symbol}()
+    for (key, entry) in sb.preproc
+        entry.kind === :group_index || continue
+        entry.raw_ref in groups || continue
+        marked[key] = StanBlocks.stan.maybecv(key, marked[key])
+        push!(seen, entry.raw_ref)
+    end
+    seen == groups || error(
+        "sbimpl: resample replay: failed to mark group index provenance for " *
+        "$(sort!(collect(setdiff(groups, seen))))")
+    model = StanBlocks.SlicModel(sb.model.model, marked, sb.model.mod)
+    SBBRMI(sb.parent, model, marked, sb.preproc)
+end
+
+function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool)
+    # Re-emission cannot safely guess constructor-only geometry that SBBRMI did
+    # not historically retain.  The public ergonomic path starts from the
+    # ordinary non-centred fit; fail if the supplied artifact used a different
+    # emission rather than silently changing it while adding CV sizing.
+    baseline = SBBRMI(sb.parent; mod=sb.model.mod)
+    stan_code(baseline) == stan_code(sb) || error(
+        "sbimpl: `resample_groups` requires an SBBRMI emitted with the default " *
+        "non-centered, non-CV constructor. The supplied model used additional " *
+        "constructor-time geometry (for example `centered_groups` or existing " *
+        "`cv_groups`) that cannot be inferred from SBBRMI. Rebuild the ordinary " *
+        "fit artifact, then request `resample_groups` from it.")
+
+    rebound = _sb_rebind_brmi(sb.parent, new_df)
+    cv_template = SBBRMI(rebound; mod=sb.model.mod, cv_groups=groups)
+    _sb_assert_cv_reemission(cv_template, groups)
+    preproc = _sb_resample_preproc(sb.preproc, cv_template.preproc, groups)
+    hybrid = SBBRMI(cv_template.parent, cv_template.model,
+                    cv_template.data, preproc)
+    prepared = reprocess(hybrid, new_df; freeze_constants=freeze)
+    _sb_mark_resample_groups(prepared, groups)
+end
+
 # Recompute one transform-output data key against `df`. `freeze=true` applies
 # the stored training constant (prediction-replay); `freeze=false` re-derives
 # the constant from `df`, then applies (fresh-fit semantics). Writes the
@@ -3364,7 +3536,8 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
 end
 
 """
-    reprocess(sb::SBBRMI, new_df; freeze_constants=true) -> SBBRMI
+    reprocess(sb::SBBRMI, new_df; freeze_constants=true,
+              resample_groups=()) -> SBBRMI
 
 Re-materialise the SBBRMI's Stan data dict against `new_df`, **re-running** the
 Julia-side preprocessing (decision nr3v8n A) — so the silent-stale-constant bug
@@ -3378,6 +3551,14 @@ of a naive per-column `sb.model(; col=…)` rebind is avoided. Returns a NEW
   eigenbasis/(mean, L)). This is the operation Bruno hand-rolls outside BRM.
 - `freeze_constants=false` (fresh-fit semantics): re-derive each constant from
   `new_df`, then apply.
+- `resample_groups=()` (default): retain the fitted random-effect coordinates.
+  Naming one or more ordinary grouping factors (for example `[:subject]`)
+  re-emits the BRMI with cv-contagious sizing, derives those groups' levels
+  from `new_df`, and marks their indices so their standardized effects are
+  re-drawn in generated quantities from the fitted covariance. Predictor
+  constants remain frozen unless `freeze_constants=false` is also requested.
+  This changes Stan source by construction; it is the new-population/CV twin
+  of the default same-group replay.
 
 Covered: the Julia-side transforms (`zscale`/`standardize`/`center`/`factor`/
 `mo`/`s`/`t2`/`gp`/`hsgp`), `protect`/implicit-fn columns (re-materialised on
@@ -3389,7 +3570,11 @@ time). Frozen replay errors loudly on an unseen fitted level. Stratified
 `gr(g, by=b)` group-index replay remains correct-or-loud unsupported rather
 than silently copying stale structure.
 """
-function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true)
+function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
+                   resample_groups=())
+    groups = _sb_resample_group_set(resample_groups)
+    isempty(groups) || return _sb_reprocess_resample(
+        sb, new_df, groups, freeze_constants)
     # Current kernel(...) emitters record each gathered/index ragged input, but
     # an SBBRMI serialized by the short-lived fail-closed implementation may
     # still lack that provenance. Diagnose such a legacy artifact up front;
@@ -3451,23 +3636,34 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true)
     SBBRMI(sb.parent, new_model, new_data, new_preproc)
 end
 
-function reprocess(plan::GenerativePlan, new_df; freeze_constants::Bool=true)
+function reprocess(plan::GenerativePlan, new_df; freeze_constants::Bool=true,
+                   resample_groups=())
     sb = SBBRMI(plan.parent, plan.model, plan.data, plan.preproc)
-    _generative_plan(reprocess(sb, new_df; freeze_constants), plan.builder,
-                     plan.cv_groups)
+    groups = _sb_resample_group_set(resample_groups)
+    replayed = reprocess(sb, new_df; freeze_constants,
+                         resample_groups=groups)
+    _generative_plan(replayed, plan.builder,
+                     isempty(groups) ? plan.cv_groups : groups)
 end
 
 """
-    restan_data(sb::SBBRMI, new_df; freeze_constants=true) -> Dict
+    restan_data(sb::SBBRMI, new_df; freeze_constants=true,
+                resample_groups=()) -> Dict
 
 Thin convenience over [`reprocess`](@ref): the prepared Stan **data dict** for
 `new_df`, ready for a `param_constrain!` replay. Equivalent to
-`StanBlocks.stan_data(reprocess(sb, new_df; freeze_constants).model)`. Same
+`StanBlocks.stan_data(reprocess(sb, new_df; freeze_constants,
+resample_groups).model)`. Same
 `freeze_constants` semantics (default `true` = training constants applied to new
-data). See [`reprocess`](@ref) for the covered-terms list and error cases.
+data), and accepts the same `resample_groups` keyword. A non-empty
+`resample_groups` also changes the Stan program; call `reprocess` when you need
+the corresponding `SBBRMI`/source as well as this data-only convenience result.
+See [`reprocess`](@ref) for the covered-terms list and error cases.
 """
-restan_data(sb::SBBRMI, new_df; freeze_constants::Bool=true) =
-    StanBlocks.stan_data(reprocess(sb, new_df; freeze_constants).model)
+restan_data(sb::SBBRMI, new_df; freeze_constants::Bool=true,
+            resample_groups=()) =
+    StanBlocks.stan_data(reprocess(
+        sb, new_df; freeze_constants, resample_groups).model)
 
 # ---- top-level op dispatch ---------------------------------------------------
 

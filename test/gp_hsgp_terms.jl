@@ -100,6 +100,8 @@ end
             op.name for op in brm_descriptor(sb_grouped).operations]
         @test_throws "unseen level" reprocess(
             sb_grouped, merge(replay_df, (; g=vcat(fill("a", 4), fill("c", 4)))))
+        @test_throws "no cv-contagious size" reprocess(
+            sb_grouped, replay_df; resample_groups=:g)
 
         # The hsgp validity floor (decision 13keyez) is a function of the
         # fitted `L = c*max|x - mean(x)|`, so it tracks the BASIS, not the

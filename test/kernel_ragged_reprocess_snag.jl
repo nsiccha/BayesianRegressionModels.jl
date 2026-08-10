@@ -101,6 +101,26 @@ end
     @test_throws "unseen level" reprocess(
         sb, subj_df(; subs=["s1", "s2", "new-subject"]))
 
+    # The RESAMPLE twin deliberately admits a wholly new subject population,
+    # but freezes the trained event-axis HSGP fit while rebuilding both ragged
+    # partitions and moving the subject draw to generated quantities.
+    new_population = subj_df(; subs=["n1", "n2", "n3", "n4"])
+    resampled = reprocess(
+        sb, new_population; resample_groups=[:subject])
+    @test resampled.preproc[:subject_idx].const_.levels ==
+          ["n1", "n2", "n3", "n4"]
+    @test resampled.data[:kernel_nsub_pred] == 4
+    @test resampled.preproc[:PHI_hsgp_log_dose].const_.fits ==
+          sb.preproc[:PHI_hsgp_log_dose].const_.fits
+    resampled_code = StanBlocks.stan_code(resampled.model)
+    resampled_params = resampled_code[
+        first(findfirst("parameters {", resampled_code)):first(findfirst(
+            "model {", resampled_code))]
+    resampled_gq = resampled_code[
+        first(findfirst("generated quantities {", resampled_code)):end]
+    @test !occursin("b_p_subject_z_flat", resampled_params)
+    @test occursin("b_p_subject_z_flat = std_normal_vector_rng", resampled_gq)
+
     # A short-lived older artifact can still have the same derived data without
     # the provenance. Preserve one deterministic upgrade diagnosis for it.
     foreach(k -> delete!(sb.preproc, k), ragged_keys)
