@@ -56,6 +56,46 @@ const BRM = BayesianRegressionModels
     @test Turing.logjoint(renamed.model, params) ≈ expected atol=1e-12 rtol=1e-12
 end
 
+
+@testset "Turing extension — Gaussian plain random intercept" begin
+    df = (;
+        x=[-1.0, 0.5, 2.0, 0.25],
+        subject=["b", "a", "b", "c"],
+        y=[0.2, 1.1, -0.4, 0.7],
+    )
+    brmi = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x + (1 | subject)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    backend = TuringBRMI(brmi)
+    block = only(backend.plan.random_intercepts)
+    params = (;
+        beta_pop=[0.25, -0.5], sigma=0.8,
+        log_group_scale=log(0.6), z_group=[-0.2, 0.4, 1.1])
+    group_effect = exp(params.log_group_scale) .* params.z_group
+    mu = backend.plan.design.matrix * params.beta_pop +
+         group_effect[block.indices]
+    prior = sum(logpdf.(Normal(), params.beta_pop)) +
+            logpdf(Exponential(2), params.sigma) +
+            logpdf(Normal(), params.log_group_scale) +
+            sum(logpdf.(Normal(), params.z_group))
+    likelihood = sum(logpdf.(Normal.(mu, params.sigma), df.y))
+    returned = Turing.DynamicPPL.returned(backend.model, params)
+
+    @test block.levels == ["a", "b", "c"]
+    @test block.indices == [2, 1, 2, 3]
+    @test Turing.logjoint(backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+    @test Turing.logprior(backend.model, params) ≈ prior atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(backend.model, params) ≈
+          likelihood atol=1e-12 rtol=1e-12
+    @test returned.mu == mu
+    @test returned.group_scale == 0.6
+    @test returned.group_effect == group_effect
+end
+
+
 @testset "Turing extension — fitted numeric population transforms" begin
     df = (;
         x=[1.0, 2.0, 4.0],
@@ -586,5 +626,15 @@ end
     end)((; x=[0.0, 1.0], y=[0, 1]))
     @test_throws "requires predictor `mu` to use `log(...)`" begin
         TuringBRMI(poisson_identity)
+    end
+
+    random_slope = (@brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 + x | subject)
+        y ~ Normal(mu, sigma)
+    end)((;
+        x=[0.0, 1.0, 2.0], subject=["a", "a", "b"], y=zeros(3)))
+    @test_throws "supports plain `(1 | group)` random intercepts" begin
+        TuringBRMI(random_slope)
     end
 end

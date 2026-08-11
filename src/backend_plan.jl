@@ -197,6 +197,13 @@ struct _BRMPopulationDesign{C<:Tuple,M<:AbstractMatrix,T<:Tuple,V<:AbstractVecto
     fixed::V
 end
 
+struct _BRMRandomInterceptPlan{L<:AbstractVector,I<:AbstractVector{Int}}
+    predictor::Symbol
+    group::Symbol
+    levels::L
+    indices::I
+end
+
 _brm_additive_terms(rhs) = begin
     terms = Any[]
     _brm_collect_additive_terms!(terms, rhs)
@@ -209,6 +216,58 @@ function _brm_collect_additive_terms!(terms, x::Integer)
     nothing
 end
 _brm_collect_additive_terms!(terms, x) = push!(terms, x)
+
+_brm_is_grouped_term(term::ExprColumn) =
+    getf(term) === (|) || getf(term) === doublepipe
+_brm_is_grouped_term(_term) = false
+
+function _brm_simple_random_intercept_plans(
+        brmi::BRMI, target::Symbol, context::_BRMBackendContext;
+        required::Bool=false)
+    op = linear_predictor_op(brmi, target)
+    isnothing(op) && return ()
+    _, rhs = getargs(op, 2)
+    grouped = filter(_brm_is_grouped_term, _brm_additive_terms(rhs))
+    plans = _BRMRandomInterceptPlan[]
+    seen = Set{Symbol}()
+    for term in grouped
+        args = getargs(term)
+        if length(args) != 2
+            required && error(
+                "BRM backend lowering: grouped term `$(repr(term))` does not " *
+                "have the expected `(effects | group)` shape")
+            return nothing
+        end
+        inner, group_raw = args
+        if !(inner isa Integer && inner == 1)
+            required && error(
+                "BRM backend lowering: the shared initial group plan supports " *
+                "plain `(1 | group)` random intercepts; got `$(repr(term))`")
+            return nothing
+        end
+        if !(group_raw isa NamedColumn && parent(group_raw) isa DataColumn)
+            required && error(
+                "BRM backend lowering: random-intercept grouping factor must " *
+                "be one raw data column; got `$(repr(group_raw))`")
+            return nothing
+        end
+        group = name(group_raw)
+        group in seen && error(
+            "BRM backend lowering: predictor `$target` repeats random-intercept " *
+            "group `$group`")
+        push!(seen, group)
+        raw = context.data[group]
+        raw isa AbstractVector || error(
+            "BRM backend lowering: grouping column `$group` must be a vector")
+        levels = collect(_brm_fit_levels(raw))
+        n_levels, indices = _brm_level_index(raw)
+        length(levels) == n_levels || error(
+            "BRM backend lowering: inconsistent fitted levels for group `$group`")
+        push!(plans, _BRMRandomInterceptPlan(
+            target, group, levels, indices))
+    end
+    Tuple(plans)
+end
 
 function _brm_population_column(term::Integer)
     term == 1 || return nothing
@@ -470,6 +529,8 @@ an additive intercept, continuous raw-data columns, pure numeric data
 expressions, fitted `zscale`/`standardize`/`center` columns, pairwise
 continuous/categorical interactions, treatment contrasts for integer or
 `CategoricalVector` columns, and pure data-derived fixed `offset(...)` terms.
+Plain grouped terms are separated into `_BRMRandomInterceptPlan` values rather
+than being mistaken for population columns.
 Returns `nothing` for a term requiring richer lowering unless `required=true`,
 in which case it fails loudly. SBBRMI and Turing consume the shared
 coefficient-bearing representation; Turing also consumes the materialized
@@ -483,6 +544,9 @@ function _brm_simple_population_design(target::Symbol, rhs,
     raw_columns = Any[]
     fixed_terms = _BRMPopulationFixedTerm[]
     for term in _brm_additive_terms(rhs)
+        # Grouped terms have their own backend-neutral geometry. They are not
+        # coefficient-bearing population columns and are planned separately.
+        _brm_is_grouped_term(term) && continue
         fixed = _brm_population_fixed_term(term)
         if !isnothing(fixed)
             push!(fixed_terms, fixed)

@@ -18,6 +18,22 @@ Turing.@model function _brm_population_gaussian(
     (; mu)
 end
 
+Turing.@model function _brm_population_gaussian_random_intercept(
+    X, fixed, group_idx, n_groups, y,
+    beta_location, beta_scale, sigma_scale)
+    beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
+    sigma ~ Exponential(sigma_scale)
+    log_group_scale ~ Normal()
+    z_group ~ product_distribution(fill(Normal(), n_groups))
+    group_scale = exp(log_group_scale)
+    group_effect = group_scale .* z_group
+    mu = X * beta_pop + fixed + group_effect[group_idx]
+    for i in eachindex(y)
+        y[i] ~ Normal(mu[i], sigma)
+    end
+    (; mu, group_scale, group_effect)
+end
+
 Turing.@model function _brm_population_bernoulli_logit(
     X, fixed, y, beta_location, beta_scale)
     beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
@@ -87,6 +103,19 @@ end
 
 function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:normal_identity}})
+    if !isempty(plan.random_intercepts)
+        block = only(plan.random_intercepts)
+        return _brm_population_gaussian_random_intercept(
+            plan.design.matrix,
+            plan.design.fixed,
+            block.indices,
+            length(block.levels),
+            plan.response,
+            plan.beta_location,
+            plan.beta_scale,
+            plan.scale_prior,
+        )
+    end
     _brm_population_gaussian(
         plan.design.matrix,
         plan.design.fixed,

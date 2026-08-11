@@ -84,6 +84,33 @@ end
 end
 
 
+@testset "backend-neutral plain random-intercept geometry" begin
+    df = (;
+        x=[-1.0, 0.5, 2.0, 0.25],
+        subject=["b", "a", "b", "c"],
+        y=[0.2, 1.1, -0.4, 0.7],
+    )
+    brmi = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x + (1 | subject)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    context = BRM._brm_backend_context(brmi)
+    block = only(BRM._brm_simple_random_intercept_plans(
+        brmi, :mu, context; required=true))
+    sb = SBBRMI(brmi)
+    plan = BRM._brm_turing_plan(brmi)
+
+    @test block.group === :subject
+    @test block.levels == ["a", "b", "c"]
+    @test block.indices == [2, 1, 2, 3]
+    @test block.indices == sb.data[:subject_idx]
+    @test length(block.levels) == sb.data[:n_subject]
+    @test plan.design.matrix == hcat(ones(4), df.x)
+    @test only(plan.random_intercepts).indices == block.indices
+end
+
+
 @testset "backend-neutral fitted population transforms" begin
     df = (;
         x=[1.0, 2.0, 4.0],
