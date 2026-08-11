@@ -261,7 +261,8 @@ function _turing_mean_precision_components(brmi::BRMI, observation,
 end
 
 function _turing_negative_binomial2_plan(brmi::BRMI, observation,
-                                         rhs::ExprColumn)
+                                         rhs::ExprColumn;
+                                         observation_weight=nothing)
     isempty(getkwargs(rhs)) || error(
         "Turing backend: `NegativeBinomial2(mu, phi)` accepts no formula keywords")
     args = getargs(rhs)
@@ -275,11 +276,12 @@ function _turing_negative_binomial2_plan(brmi::BRMI, observation,
         "contain nonnegative integer counts")
     _TuringMeanPrecisionPlan(
         Val(:negative_binomial2), parts.context, parts.mean, parts.precision,
-        NamedTuple(), Int.(response), nothing, nothing)
+        NamedTuple(), Int.(response), nothing, observation_weight)
 end
 
 function _turing_beta_binomial2_plan(brmi::BRMI, observation,
-                                    rhs::ExprColumn)
+                                    rhs::ExprColumn;
+                                    observation_weight=nothing)
     isempty(getkwargs(rhs)) || error(
         "Turing backend: `BetaBinomial2(trials, mean, precision)` accepts no formula keywords")
     args = getargs(rhs)
@@ -295,7 +297,7 @@ function _turing_beta_binomial2_plan(brmi::BRMI, observation,
         parts.response, trials, observation.key; prefix="Turing backend")
     _TuringMeanPrecisionPlan(
         Val(:beta_binomial2), parts.context, parts.mean, parts.precision,
-        (; trials), response, nothing, nothing)
+        (; trials), response, nothing, observation_weight)
 end
 
 function _turing_normal_plan(brmi::BRMI, observation, rhs::ExprColumn;
@@ -334,7 +336,8 @@ end
 
 function _turing_bernoulli_population_plan(brmi::BRMI, observation,
                                            predictor::Symbol, expected_link,
-                                           role::AbstractString)
+                                           role::AbstractString;
+                                           observation_weight=nothing)
     parts = _turing_population_components(
         brmi, observation, predictor; allow_random_effects=true,
         allow_random_slopes=true, allow_zero_correlation=true)
@@ -345,10 +348,11 @@ function _turing_bernoulli_population_plan(brmi::BRMI, observation,
                           parts.design,
                           Int.(parts.response), parts.beta_location,
                           parts.beta_scale, NamedTuple(), nothing,
-                          parts.random_effects, nothing, nothing)
+                          parts.random_effects, nothing, observation_weight)
 end
 
-function _turing_bernoulli_logit_plan(brmi::BRMI, observation, rhs::ExprColumn)
+function _turing_bernoulli_logit_plan(brmi::BRMI, observation, rhs::ExprColumn;
+                                      observation_weight=nothing)
     isempty(getkwargs(rhs)) || error(
         "Turing backend: `BernoulliLogit(eta)` accepts no formula keywords")
     args = getargs(rhs)
@@ -356,10 +360,12 @@ function _turing_bernoulli_logit_plan(brmi::BRMI, observation, rhs::ExprColumn)
         "Turing backend: `BernoulliLogit(eta)` requires exactly one argument")
     predictor = _turing_named_reference(only(args), "logit")
     _turing_bernoulli_population_plan(
-        brmi, observation, predictor, identity, "BernoulliLogit")
+        brmi, observation, predictor, identity, "BernoulliLogit";
+        observation_weight)
 end
 
-function _turing_bernoulli_plan(brmi::BRMI, observation, rhs::ExprColumn)
+function _turing_bernoulli_plan(brmi::BRMI, observation, rhs::ExprColumn;
+                                observation_weight=nothing)
     isempty(getkwargs(rhs)) || error(
         "Turing backend: `Bernoulli(p)` accepts no formula keywords")
     args = getargs(rhs)
@@ -367,12 +373,14 @@ function _turing_bernoulli_plan(brmi::BRMI, observation, rhs::ExprColumn)
         "Turing backend: `Bernoulli(p)` requires exactly one argument")
     predictor = _turing_named_reference(only(args), "probability")
     _turing_bernoulli_population_plan(
-        brmi, observation, predictor, logit, "Bernoulli logit link")
+        brmi, observation, predictor, logit, "Bernoulli logit link";
+        observation_weight)
 end
 
 function _turing_binomial_population_plan(brmi::BRMI, observation, trials_raw,
                                           predictor::Symbol, expected_link,
-                                          role::AbstractString)
+                                          role::AbstractString;
+                                          observation_weight=nothing)
     parts = _turing_population_components(
         brmi, observation, predictor; allow_random_effects=true,
         allow_random_slopes=true, allow_zero_correlation=true)
@@ -386,10 +394,11 @@ function _turing_binomial_population_plan(brmi::BRMI, observation, trials_raw,
                           parts.design,
                           response, parts.beta_location,
                           parts.beta_scale, (; trials), nothing,
-                          parts.random_effects, nothing, nothing)
+                          parts.random_effects, nothing, observation_weight)
 end
 
-function _turing_binomial_logit_plan(brmi::BRMI, observation, rhs::ExprColumn)
+function _turing_binomial_logit_plan(brmi::BRMI, observation, rhs::ExprColumn;
+                                     observation_weight=nothing)
     isempty(getkwargs(rhs)) || error(
         "Turing backend: `BinomialLogit(trials, eta)` accepts no formula keywords")
     args = getargs(rhs)
@@ -398,10 +407,12 @@ function _turing_binomial_logit_plan(brmi::BRMI, observation, rhs::ExprColumn)
     trials_raw, eta_raw = args
     predictor = _turing_named_reference(eta_raw, "logit")
     _turing_binomial_population_plan(
-        brmi, observation, trials_raw, predictor, identity, "BinomialLogit")
+        brmi, observation, trials_raw, predictor, identity, "BinomialLogit";
+        observation_weight)
 end
 
-function _turing_binomial_plan(brmi::BRMI, observation, rhs::ExprColumn)
+function _turing_binomial_plan(brmi::BRMI, observation, rhs::ExprColumn;
+                               observation_weight=nothing)
     isempty(getkwargs(rhs)) || error(
         "Turing backend: `Binomial(trials, p)` accepts no formula keywords")
     args = getargs(rhs)
@@ -410,11 +421,13 @@ function _turing_binomial_plan(brmi::BRMI, observation, rhs::ExprColumn)
     trials_raw, probability_raw = args
     predictor = _turing_named_reference(probability_raw, "probability")
     _turing_binomial_population_plan(
-        brmi, observation, trials_raw, predictor, logit, "Binomial logit link")
+        brmi, observation, trials_raw, predictor, logit, "Binomial logit link";
+        observation_weight)
 end
 
 function _turing_poisson_log_plan(brmi::BRMI, observation, rhs::ExprColumn;
-                                  response_modifier=nothing)
+                                  response_modifier=nothing,
+                                  observation_weight=nothing)
     isempty(getkwargs(rhs)) || error(
         "Turing backend: `Poisson(exp(log_rate))` accepts no formula keywords")
     args = getargs(rhs)
@@ -448,7 +461,8 @@ function _turing_poisson_log_plan(brmi::BRMI, observation, rhs::ExprColumn;
                           parts.design,
                           Int.(parts.response), parts.beta_location,
                           parts.beta_scale, NamedTuple(), nothing,
-                          parts.random_effects, materialized_modifier, nothing)
+                          parts.random_effects, materialized_modifier,
+                          observation_weight)
 end
 
 function _brm_turing_plan(brmi::BRMI)
@@ -463,14 +477,14 @@ function _brm_turing_plan(brmi::BRMI)
     observation_weight = _brm_observation_weight_plan(
         rhs, observation.key, raw_response; prefix="Turing backend")
     if !isnothing(observation_weight)
-        observation_weight.kind === :analytic || error(
-            "Turing backend: the current weight slice supports only " *
-            "`aweights` / `AnalyticWeights`; frequency and power weights are pending")
         rhs = observation_weight.distribution
     end
     response_modifier = _brm_response_modifier_plan(rhs; prefix="Turing backend")
-    isnothing(observation_weight) || isnothing(response_modifier) || error(
-        "Turing backend: weighted response modifiers are not yet supported")
+    (isnothing(observation_weight) || isnothing(response_modifier) ||
+     observation_weight.kind !== :analytic) || error(
+        "Turing backend: analytic/precision weights cannot yet be composed " *
+        "with response modifiers; use frequency/power objective weights or " *
+        "an unmodified Normal observation")
     if !isnothing(response_modifier)
         response_modifier.kind in (:truncated, :censored, :interval_censored) || error(
             "Turing backend: response modifier `$(response_modifier.kind)` is " *
@@ -483,24 +497,31 @@ function _brm_turing_plan(brmi::BRMI)
     family = getf(rhs)
     family === Normal && return _turing_normal_plan(
         brmi, observation, rhs; response_modifier, observation_weight)
-    isnothing(observation_weight) || error(
+    (isnothing(observation_weight) ||
+     observation_weight.kind !== :analytic) || error(
         "Turing backend: `AnalyticWeights` currently support only " *
         "`Normal(mu, sigma)` observations; got `$family`")
     family === Poisson && return _turing_poisson_log_plan(
-        brmi, observation, rhs; response_modifier)
+        brmi, observation, rhs; response_modifier, observation_weight)
     isnothing(response_modifier) || error(
         "Turing backend: `$(response_modifier.kind)` currently supports only " *
         "`Normal(mu, sigma)` and `Poisson(rate)` observations; got `$family`")
-    family === Bernoulli && return _turing_bernoulli_plan(brmi, observation, rhs)
+    family === Bernoulli && return _turing_bernoulli_plan(
+        brmi, observation, rhs; observation_weight)
     family === BernoulliLogit &&
-        return _turing_bernoulli_logit_plan(brmi, observation, rhs)
-    family === Binomial && return _turing_binomial_plan(brmi, observation, rhs)
+        return _turing_bernoulli_logit_plan(
+            brmi, observation, rhs; observation_weight)
+    family === Binomial && return _turing_binomial_plan(
+        brmi, observation, rhs; observation_weight)
     family === BinomialLogit &&
-        return _turing_binomial_logit_plan(brmi, observation, rhs)
+        return _turing_binomial_logit_plan(
+            brmi, observation, rhs; observation_weight)
     family === NegativeBinomial2 &&
-        return _turing_negative_binomial2_plan(brmi, observation, rhs)
+        return _turing_negative_binomial2_plan(
+            brmi, observation, rhs; observation_weight)
     family === BetaBinomial2 &&
-        return _turing_beta_binomial2_plan(brmi, observation, rhs)
+        return _turing_beta_binomial2_plan(
+            brmi, observation, rhs; observation_weight)
     error("Turing backend: executable families are `Normal(mu, sigma)`, " *
           "`Bernoulli(p)` / `BernoulliLogit(eta)`, `Binomial(trials, p)` / " *
           "`BinomialLogit(trials, eta)`, " *

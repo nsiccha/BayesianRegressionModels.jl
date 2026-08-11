@@ -182,6 +182,84 @@ end
 end
 
 
+@testset "Turing extension — frequency/power objective weights" begin
+    normal_data = (;
+        x=[-1.0, 0.5, 2.0],
+        repeats=[1, 3, 2],
+        y=[-0.4, 0.6, 0.9],
+    )
+    normal_backend = TuringBRMI((@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x
+        y ~ weighted(Normal(mu, sigma), fweights(repeats))
+    end)(normal_data))
+    normal_weight = normal_backend.plan.observation_weight
+    normal_params = (; beta_pop=[0.25, -0.5], sigma=0.8)
+    mu = normal_backend.plan.design.matrix * normal_params.beta_pop
+    normal_likelihood = sum(eachindex(normal_data.y)) do i
+        normal_data.repeats[i] *
+        logpdf(Normal(mu[i], normal_params.sigma), normal_data.y[i])
+    end
+    normal_prior = sum(logpdf.(Normal(), normal_params.beta_pop)) +
+                   logpdf(Exponential(2), normal_params.sigma)
+    @test normal_weight.kind === :frequency
+    @test Turing.logjoint(normal_backend.model, normal_params) ≈
+          normal_prior + normal_likelihood atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(normal_backend.model, normal_params) ≈
+          normal_likelihood atol=1e-12 rtol=1e-12
+
+    ext = Base.get_extension(BRM, :BayesianRegressionModelsTuringExt)
+    objective_normal = ext._brm_normal_observation(
+        nothing, normal_weight, mu[2], normal_params.sigma, 2)
+    @test rand(Xoshiro(41), objective_normal) ==
+          rand(Xoshiro(41), Normal(mu[2], normal_params.sigma))
+
+    poisson_data = (;
+        x=[-1.0, 0.5, 2.0],
+        power=[0.5, 2.0, 1.25],
+        count=[0, 2, 4],
+    )
+    poisson_backend = TuringBRMI((@brm begin
+        log_rate ~ 1 + x
+        count ~ weighted(
+            censored(Poisson(exp(log_rate)); lower=0, upper=4),
+            weights(power))
+    end)(poisson_data))
+    poisson_weight = poisson_backend.plan.observation_weight
+    poisson_modifier = poisson_backend.plan.response_modifier
+    poisson_params = (; beta_pop=[0.3, 0.4])
+    rate = exp.(poisson_backend.plan.design.matrix * poisson_params.beta_pop)
+    poisson_likelihood = sum(eachindex(poisson_data.count)) do i
+        poisson_data.power[i] * logpdf(
+            censored(Poisson(rate[i]); lower=0, upper=4),
+            poisson_data.count[i])
+    end
+    poisson_prior = sum(logpdf.(Normal(), poisson_params.beta_pop))
+    @test poisson_weight.kind === :power
+    @test poisson_modifier.kind === :censored
+    @test Turing.logjoint(poisson_backend.model, poisson_params) ≈
+          poisson_prior + poisson_likelihood atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(poisson_backend.model, poisson_params) ≈
+          poisson_likelihood atol=1e-12 rtol=1e-12
+
+    objective_poisson = ext._brm_poisson_observation(
+        poisson_modifier, poisson_weight, rate[2], 2)
+    base_poisson = censored(Poisson(rate[2]); lower=0, upper=4)
+    @test rand(Xoshiro(52), objective_poisson) ==
+          rand(Xoshiro(52), base_poisson)
+
+    @test_throws "analytic/precision weights cannot yet be composed" begin
+        TuringBRMI((@brm begin
+            sigma ~ Exponential(2)
+            mu ~ 1 + x
+            y ~ weighted(
+                censored(Normal(mu, sigma); upper=1.0),
+                aweights(repeats))
+        end)(normal_data))
+    end
+end
+
+
 @testset "Turing extension — Gaussian plain random intercept" begin
     df = (;
         x=[-1.0, 0.5, 2.0, 0.25],

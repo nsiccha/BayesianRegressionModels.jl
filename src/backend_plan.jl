@@ -211,9 +211,11 @@ function _brm_observation_weight_plan(rhs, target::Symbol,
     distribution isa ExprColumn || error(
         "$prefix: first argument of `weighted` for response `$target` must be a " *
         "distribution call, got $(typeof(distribution))")
-    isempty(getkwargs(distribution)) || error(
-        "$prefix: weighted distribution `$target` does not currently support " *
-        "distribution constructor keywords")
+    if !isempty(getkwargs(distribution))
+        getf(distribution) in (truncated, censored, interval_censored) || error(
+            "$prefix: weighted distribution `$target` does not currently support " *
+            "distribution constructor keywords")
+    end
     weight isa ExprColumn || error(
         "$prefix: second argument of `weighted` must be a StatsBase weight " *
         "constructor, got $(typeof(weight))")

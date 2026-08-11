@@ -25,6 +25,18 @@ struct _BRMDiscreteIntervalEvidence{D,U} <:
     upper::U
 end
 
+struct _BRMContinuousObjectiveWeight{D,W} <:
+       ContinuousUnivariateDistribution
+    base::D
+    weight::W
+end
+
+struct _BRMDiscreteObjectiveWeight{D,W} <:
+       DiscreteUnivariateDistribution
+    base::D
+    weight::W
+end
+
 
 function _brm_interval_logmass(base, lower, upper)
     upper_logcdf = logcdf(base, upper)
@@ -40,17 +52,39 @@ logpdf(d::_BRMDiscreteIntervalEvidence, lower::Real) =
 rand(rng::AbstractRNG, d::_BRMContinuousIntervalEvidence) = rand(rng, d.base)
 rand(rng::AbstractRNG, d::_BRMDiscreteIntervalEvidence) = rand(rng, d.base)
 
+logpdf(d::_BRMContinuousObjectiveWeight, x::Real) =
+    d.weight * logpdf(d.base, x)
+logpdf(d::_BRMDiscreteObjectiveWeight, x::Real) =
+    d.weight * logpdf(d.base, x)
+rand(rng::AbstractRNG, d::_BRMContinuousObjectiveWeight) = rand(rng, d.base)
+rand(rng::AbstractRNG, d::_BRMDiscreteObjectiveWeight) = rand(rng, d.base)
+
 _brm_interval_evidence(base::ContinuousUnivariateDistribution, upper) =
     _BRMContinuousIntervalEvidence(base, upper)
 _brm_interval_evidence(base::DiscreteUnivariateDistribution, upper) =
     _BRMDiscreteIntervalEvidence(base, upper)
 
+_brm_objective_observation(base, ::Nothing, _i) = base
+function _brm_objective_observation(
+        base::ContinuousUnivariateDistribution,
+        weight::BRM._BRMObservationWeightPlan, i)
+    weight.kind === :analytic && return base
+    _BRMContinuousObjectiveWeight(base, weight.values[i])
+end
+function _brm_objective_observation(
+        base::DiscreteUnivariateDistribution,
+        weight::BRM._BRMObservationWeightPlan, i)
+    weight.kind === :analytic && return base
+    _BRMDiscreteObjectiveWeight(base, weight.values[i])
+end
+
 _brm_analytic_scale(::Nothing, sigma, _i) = sigma
 _brm_analytic_scale(weight::BRM._BRMObservationWeightPlan, sigma, i) =
-    sigma / sqrt(weight.values[i])
+    weight.kind === :analytic ? sigma / sqrt(weight.values[i]) : sigma
 
 _brm_normal_observation(::Nothing, weight, mu, sigma, i) =
-    Normal(mu, _brm_analytic_scale(weight, sigma, i))
+    _brm_objective_observation(
+        Normal(mu, _brm_analytic_scale(weight, sigma, i)), weight, i)
 function _brm_normal_observation(
         modifier::BRM._BRMResponseModifierPlan, weight, mu, sigma, i)
     lower = isnothing(modifier.lower) ? nothing :
@@ -58,28 +92,31 @@ function _brm_normal_observation(
     upper = isnothing(modifier.upper) ? nothing :
         BRM._brm_response_bound_at(modifier.upper, i)
     base = Normal(mu, _brm_analytic_scale(weight, sigma, i))
-    modifier.kind === :truncated && return truncated(base; lower, upper)
-    modifier.kind === :censored && return censored(base; lower, upper)
-    modifier.kind === :interval_censored &&
-        return _brm_interval_evidence(base, upper)
-    error("Turing backend: internal unsupported Normal response modifier " *
-          "`$(modifier.kind)`")
+    observation = modifier.kind === :truncated ? truncated(base; lower, upper) :
+                  modifier.kind === :censored ? censored(base; lower, upper) :
+                  modifier.kind === :interval_censored ?
+                      _brm_interval_evidence(base, upper) :
+                  error("Turing backend: internal unsupported Normal response " *
+                        "modifier `$(modifier.kind)`")
+    _brm_objective_observation(observation, weight, i)
 end
 
-_brm_poisson_observation(::Nothing, rate, _i) = Poisson(rate)
+_brm_poisson_observation(::Nothing, weight, rate, i) =
+    _brm_objective_observation(Poisson(rate), weight, i)
 function _brm_poisson_observation(
-        modifier::BRM._BRMResponseModifierPlan, rate, i)
+        modifier::BRM._BRMResponseModifierPlan, weight, rate, i)
     lower = isnothing(modifier.lower) ? nothing :
         BRM._brm_response_bound_at(modifier.lower, i)
     upper = isnothing(modifier.upper) ? nothing :
         BRM._brm_response_bound_at(modifier.upper, i)
     base = Poisson(rate)
-    modifier.kind === :truncated && return truncated(base; lower, upper)
-    modifier.kind === :censored && return censored(base; lower, upper)
-    modifier.kind === :interval_censored &&
-        return _brm_interval_evidence(base, upper)
-    error("Turing backend: internal unsupported Poisson response modifier " *
-          "`$(modifier.kind)`")
+    observation = modifier.kind === :truncated ? truncated(base; lower, upper) :
+                  modifier.kind === :censored ? censored(base; lower, upper) :
+                  modifier.kind === :interval_censored ?
+                      _brm_interval_evidence(base, upper) :
+                  error("Turing backend: internal unsupported Poisson response " *
+                        "modifier `$(modifier.kind)`")
+    _brm_objective_observation(observation, weight, i)
 end
 
 _random_effect_args(component) = isempty(component.random_effects) ?
@@ -178,7 +215,7 @@ end
 
 Turing.@model function _brm_population_glm_correlated_group(
     family, X, fixed, Z, group_idx, n_groups, trials, y,
-    beta_location, beta_scale, response_modifier)
+    beta_location, beta_scale, response_modifier, observation_weight)
     beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
     n_terms = size(Z, 2)
     L_group ~ LKJCholesky(n_terms, 1.0)
@@ -193,16 +230,19 @@ Turing.@model function _brm_population_glm_correlated_group(
     rate = nothing
     if family isa Val{:bernoulli_logit}
         for i in eachindex(y)
-            y[i] ~ BRM.BernoulliLogit(eta[i])
+            y[i] ~ _brm_objective_observation(
+                BRM.BernoulliLogit(eta[i]), observation_weight, i)
         end
     elseif family isa Val{:binomial_logit}
         for i in eachindex(y)
-            y[i] ~ BRM.BinomialLogit(trials[i], eta[i])
+            y[i] ~ _brm_objective_observation(
+                BRM.BinomialLogit(trials[i], eta[i]), observation_weight, i)
         end
     elseif family isa Val{:poisson_log}
         rate = exp.(eta)
         for i in eachindex(y)
-            y[i] ~ _brm_poisson_observation(response_modifier, rate[i], i)
+            y[i] ~ _brm_poisson_observation(
+                response_modifier, observation_weight, rate[i], i)
         end
     else
         error("Turing backend: internal unsupported grouped GLM family $family")
@@ -212,7 +252,7 @@ end
 
 Turing.@model function _brm_population_glm_zero_correlation_group(
     family, X, fixed, Z, group_idx, n_groups, intercept_index, trials, y,
-    beta_location, beta_scale, response_modifier)
+    beta_location, beta_scale, response_modifier, observation_weight)
     beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
     n_terms = size(Z, 2)
     n_slopes = n_terms - (intercept_index > 0)
@@ -237,16 +277,19 @@ Turing.@model function _brm_population_glm_zero_correlation_group(
     rate = nothing
     if family isa Val{:bernoulli_logit}
         for i in eachindex(y)
-            y[i] ~ BRM.BernoulliLogit(eta[i])
+            y[i] ~ _brm_objective_observation(
+                BRM.BernoulliLogit(eta[i]), observation_weight, i)
         end
     elseif family isa Val{:binomial_logit}
         for i in eachindex(y)
-            y[i] ~ BRM.BinomialLogit(trials[i], eta[i])
+            y[i] ~ _brm_objective_observation(
+                BRM.BinomialLogit(trials[i], eta[i]), observation_weight, i)
         end
     elseif family isa Val{:poisson_log}
         rate = exp.(eta)
         for i in eachindex(y)
-            y[i] ~ _brm_poisson_observation(response_modifier, rate[i], i)
+            y[i] ~ _brm_poisson_observation(
+                response_modifier, observation_weight, rate[i], i)
         end
     else
         error("Turing backend: internal unsupported zero-correlation GLM family $family")
@@ -256,17 +299,19 @@ Turing.@model function _brm_population_glm_zero_correlation_group(
 end
 
 Turing.@model function _brm_population_bernoulli_logit(
-    X, fixed, y, beta_location, beta_scale)
+    X, fixed, y, beta_location, beta_scale, observation_weight)
     beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
     eta = X * beta_pop + fixed
     for i in eachindex(y)
-        y[i] ~ BRM.BernoulliLogit(eta[i])
+        y[i] ~ _brm_objective_observation(
+            BRM.BernoulliLogit(eta[i]), observation_weight, i)
     end
     (; eta)
 end
 
 Turing.@model function _brm_population_bernoulli_logit_random_intercept(
-    X, fixed, group_idx, n_groups, y, beta_location, beta_scale)
+    X, fixed, group_idx, n_groups, y, beta_location, beta_scale,
+    observation_weight)
     beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
     log_group_scale ~ Normal()
     z_group ~ product_distribution(fill(Normal(), n_groups))
@@ -274,23 +319,26 @@ Turing.@model function _brm_population_bernoulli_logit_random_intercept(
     group_effect = group_scale .* z_group
     eta = X * beta_pop + fixed + group_effect[group_idx]
     for i in eachindex(y)
-        y[i] ~ BRM.BernoulliLogit(eta[i])
+        y[i] ~ _brm_objective_observation(
+            BRM.BernoulliLogit(eta[i]), observation_weight, i)
     end
     (; eta, group_scale, group_effect)
 end
 
 Turing.@model function _brm_population_binomial_logit(
-    X, fixed, trials, y, beta_location, beta_scale)
+    X, fixed, trials, y, beta_location, beta_scale, observation_weight)
     beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
     eta = X * beta_pop + fixed
     for i in eachindex(y)
-        y[i] ~ BRM.BinomialLogit(trials[i], eta[i])
+        y[i] ~ _brm_objective_observation(
+            BRM.BinomialLogit(trials[i], eta[i]), observation_weight, i)
     end
     (; eta, trials)
 end
 
 Turing.@model function _brm_population_binomial_logit_random_intercept(
-    X, fixed, group_idx, n_groups, trials, y, beta_location, beta_scale)
+    X, fixed, group_idx, n_groups, trials, y, beta_location, beta_scale,
+    observation_weight)
     beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
     log_group_scale ~ Normal()
     z_group ~ product_distribution(fill(Normal(), n_groups))
@@ -298,25 +346,28 @@ Turing.@model function _brm_population_binomial_logit_random_intercept(
     group_effect = group_scale .* z_group
     eta = X * beta_pop + fixed + group_effect[group_idx]
     for i in eachindex(y)
-        y[i] ~ BRM.BinomialLogit(trials[i], eta[i])
+        y[i] ~ _brm_objective_observation(
+            BRM.BinomialLogit(trials[i], eta[i]), observation_weight, i)
     end
     (; eta, trials, group_scale, group_effect)
 end
 
 Turing.@model function _brm_population_poisson_log(
-    X, fixed, y, beta_location, beta_scale, response_modifier)
+    X, fixed, y, beta_location, beta_scale, response_modifier,
+    observation_weight)
     beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
     log_rate = X * beta_pop + fixed
     rate = exp.(log_rate)
     for i in eachindex(y)
-        y[i] ~ _brm_poisson_observation(response_modifier, rate[i], i)
+        y[i] ~ _brm_poisson_observation(
+            response_modifier, observation_weight, rate[i], i)
     end
     (; log_rate, rate)
 end
 
 Turing.@model function _brm_population_poisson_log_random_intercept(
     X, fixed, group_idx, n_groups, y, beta_location, beta_scale,
-    response_modifier)
+    response_modifier, observation_weight)
     beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
     log_group_scale ~ Normal()
     z_group ~ product_distribution(fill(Normal(), n_groups))
@@ -325,7 +376,8 @@ Turing.@model function _brm_population_poisson_log_random_intercept(
     log_rate = X * beta_pop + fixed + group_effect[group_idx]
     rate = exp.(log_rate)
     for i in eachindex(y)
-        y[i] ~ _brm_poisson_observation(response_modifier, rate[i], i)
+        y[i] ~ _brm_poisson_observation(
+            response_modifier, observation_weight, rate[i], i)
     end
     (; log_rate, rate, group_scale, group_effect)
 end
@@ -337,7 +389,8 @@ Turing.@model function _brm_population_negative_binomial2(
     mean_group_kind, mean_Z,
     mean_group_idx, n_mean_groups,
     precision_group_kind, precision_Z,
-    precision_group_idx, n_precision_groups)
+    precision_group_idx, n_precision_groups,
+    observation_weight)
     beta_mean ~ product_distribution(
         Normal.(mean_beta_location, mean_beta_scale))
     beta_precision ~ product_distribution(
@@ -400,7 +453,8 @@ Turing.@model function _brm_population_negative_binomial2(
     mu = exp.(log_mu)
     phi = exp.(log_phi)
     for i in eachindex(y)
-        y[i] ~ BRM.NegativeBinomial2(mu[i], phi[i])
+        y[i] ~ _brm_objective_observation(
+            BRM.NegativeBinomial2(mu[i], phi[i]), observation_weight, i)
     end
     (; log_mu, log_phi, mu, phi,
        mean_group_scale, mean_group_effect,
@@ -416,7 +470,8 @@ Turing.@model function _brm_population_beta_binomial2(
     mean_group_kind, mean_Z,
     mean_group_idx, n_mean_groups,
     precision_group_kind, precision_Z,
-    precision_group_idx, n_precision_groups)
+    precision_group_idx, n_precision_groups,
+    observation_weight)
     beta_mean ~ product_distribution(
         Normal.(mean_beta_location, mean_beta_scale))
     beta_precision ~ product_distribution(
@@ -479,7 +534,9 @@ Turing.@model function _brm_population_beta_binomial2(
     mean = logistic.(logit_mean)
     precision = exp.(log_precision)
     for i in eachindex(y)
-        y[i] ~ BRM.BetaBinomial2(trials[i], mean[i], precision[i])
+        y[i] ~ _brm_objective_observation(
+            BRM.BetaBinomial2(trials[i], mean[i], precision[i]),
+            observation_weight, i)
     end
     (; logit_mean, log_precision, mean, precision, trials,
        mean_group_scale, mean_group_effect,
@@ -561,7 +618,8 @@ function BRM._brm_turing_model(
                 Val(:bernoulli_logit), plan.design.matrix, plan.design.fixed,
                 block.matrix, block.indices, length(block.levels),
                 intercept_index, Int[], plan.response,
-                plan.beta_location, plan.beta_scale, nothing)
+                plan.beta_location, plan.beta_scale, nothing,
+                plan.observation_weight)
         end
         if !block.intercept_only
             return _brm_population_glm_correlated_group(
@@ -576,6 +634,7 @@ function BRM._brm_turing_model(
                 plan.beta_location,
                 plan.beta_scale,
                 nothing,
+                plan.observation_weight,
             )
         end
         return _brm_population_bernoulli_logit_random_intercept(
@@ -586,6 +645,7 @@ function BRM._brm_turing_model(
             plan.response,
             plan.beta_location,
             plan.beta_scale,
+            plan.observation_weight,
         )
     end
     _brm_population_bernoulli_logit(
@@ -594,6 +654,7 @@ function BRM._brm_turing_model(
         plan.response,
         plan.beta_location,
         plan.beta_scale,
+        plan.observation_weight,
     )
 end
 
@@ -608,7 +669,8 @@ function BRM._brm_turing_model(
                 Val(:binomial_logit), plan.design.matrix, plan.design.fixed,
                 block.matrix, block.indices, length(block.levels),
                 intercept_index, plan.family_args.trials, plan.response,
-                plan.beta_location, plan.beta_scale, nothing)
+                plan.beta_location, plan.beta_scale, nothing,
+                plan.observation_weight)
         end
         if !block.intercept_only
             return _brm_population_glm_correlated_group(
@@ -623,6 +685,7 @@ function BRM._brm_turing_model(
                 plan.beta_location,
                 plan.beta_scale,
                 nothing,
+                plan.observation_weight,
             )
         end
         return _brm_population_binomial_logit_random_intercept(
@@ -634,6 +697,7 @@ function BRM._brm_turing_model(
             plan.response,
             plan.beta_location,
             plan.beta_scale,
+            plan.observation_weight,
         )
     end
     _brm_population_binomial_logit(
@@ -643,6 +707,7 @@ function BRM._brm_turing_model(
         plan.response,
         plan.beta_location,
         plan.beta_scale,
+        plan.observation_weight,
     )
 end
 
@@ -657,7 +722,8 @@ function BRM._brm_turing_model(
                 Val(:poisson_log), plan.design.matrix, plan.design.fixed,
                 block.matrix, block.indices, length(block.levels),
                 intercept_index, Int[], plan.response,
-                plan.beta_location, plan.beta_scale, plan.response_modifier)
+                plan.beta_location, plan.beta_scale, plan.response_modifier,
+                plan.observation_weight)
         end
         if !block.intercept_only
             return _brm_population_glm_correlated_group(
@@ -672,6 +738,7 @@ function BRM._brm_turing_model(
                 plan.beta_location,
                 plan.beta_scale,
                 plan.response_modifier,
+                plan.observation_weight,
             )
         end
         return _brm_population_poisson_log_random_intercept(
@@ -683,6 +750,7 @@ function BRM._brm_turing_model(
             plan.beta_location,
             plan.beta_scale,
             plan.response_modifier,
+            plan.observation_weight,
         )
     end
     _brm_population_poisson_log(
@@ -692,6 +760,7 @@ function BRM._brm_turing_model(
         plan.beta_location,
         plan.beta_scale,
         plan.response_modifier,
+        plan.observation_weight,
     )
 end
 
@@ -720,6 +789,7 @@ function BRM._brm_turing_model(
         precision_Z,
         precision_group_idx,
         n_precision_groups,
+        plan.observation_weight,
     )
 end
 
@@ -748,6 +818,7 @@ function BRM._brm_turing_model(
         precision_Z,
         precision_group_idx,
         n_precision_groups,
+        plan.observation_weight,
     )
 end
 
