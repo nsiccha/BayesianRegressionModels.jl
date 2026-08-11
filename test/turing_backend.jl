@@ -739,6 +739,76 @@ end
 end
 
 
+@testset "Turing extension — categorical and transformed random slopes" begin
+    df = (;
+        x=[-1.0, 0.5, 2.0, 0.25],
+        w=[1.0, 2.0, 4.0, 8.0],
+        category=[1, 2, 3, 2],
+        subject=["b", "a", "b", "c"],
+        y=[0.2, 1.1, -0.4, 0.7],
+    )
+    backend = TuringBRMI((@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x +
+             (1 + zscale(x) + factor(category) + log(w) | subject)
+        y ~ Normal(mu, sigma)
+    end)(df))
+    block = only(backend.plan.random_effects)
+    labels = Tuple(column.label for column in block.columns)
+    @test labels[1:4] ==
+          (:Intercept, :zscale_x, :category_lvl_2, :category_lvl_3)
+    @test startswith(String(labels[5]), "log_expr_")
+    @test block.columns[5].preprocess.kind === :protect
+    @test size(block.matrix) == (4, 5)
+    @test block.matrix[:, 3] == Float64.(df.category .== 2)
+    @test block.matrix[:, 4] == Float64.(df.category .== 3)
+    @test block.matrix[:, 5] == log.(df.w)
+
+    L_group = cholesky(Symmetric(Matrix{Float64}(I, 5, 5)))
+    params = (;
+        beta_pop=[0.25, -0.5], sigma=0.8, L_group,
+        tau_group=[0.4, 0.7, 0.3, 0.5, 0.6],
+        z_group_flat=collect(range(-0.7, 0.7; length=15)),
+    )
+    coefficients = transpose(Diagonal(params.tau_group) *
+        Matrix(L_group.L) * reshape(params.z_group_flat, 5, 3))
+    group_effect = vec(sum(
+        block.matrix .* coefficients[block.indices, :]; dims=2))
+    mu = backend.plan.design.matrix * params.beta_pop + group_effect
+    half_normal = truncated(Normal(), 0.0, Inf)
+    prior = sum(logpdf.(Normal(), params.beta_pop)) +
+            logpdf(Exponential(2), params.sigma) +
+            logpdf(LKJCholesky(5, 1.0), params.L_group) +
+            sum(logpdf.(half_normal, params.tau_group)) +
+            sum(logpdf.(Normal(), params.z_group_flat))
+    likelihood = sum(logpdf.(Normal.(mu, params.sigma), df.y))
+    returned = Turing.DynamicPPL.returned(backend.model, params)
+    @test Turing.logjoint(backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+    @test Turing.logprior(backend.model, params) ≈ prior atol=1e-12 rtol=1e-12
+    @test returned.b_group == coefficients
+    @test returned.group_effect == group_effect
+
+    new_df = (;
+        x=[2.5, -0.5, 1.0, 0.0],
+        w=[3.0, 6.0, 12.0, 24.0],
+        category=[3, 1, 2, 1],
+        subject=["c", "a", "b", "a"],
+        y=zeros(4),
+    )
+    replayed = reprocess(backend, new_df)
+    replay_block = only(replayed.plan.random_effects)
+    transform = block.columns[2].preprocess.const_
+    @test replay_block.matrix[:, 2] ≈
+          (new_df.x .- transform[1]) ./ transform[2]
+    @test replay_block.matrix[:, 3] == Float64.(new_df.category .== 2)
+    @test replay_block.matrix[:, 4] == Float64.(new_df.category .== 3)
+    @test replay_block.matrix[:, 5] == log.(new_df.w)
+    @test_throws "unseen level" reprocess(
+        backend, (; new_df..., category=[1, 2, 4, 1]))
+end
+
+
 @testset "Turing extension — GLM plain random intercepts" begin
     base = (;
         x=[-1.0, 0.5, 2.0, 0.25],

@@ -689,9 +689,10 @@ function _brm_replay_random_effect_plan(
         "$(collect(training.levels))")
     indices = Int[lookup[level] for level in raw_groups]
     n = length(indices)
+    cache = Dict{Symbol,Vector{Float64}}()
     columns = map(training.columns) do column
-        values = isnothing(column.source) ? ones(Float64, n) :
-                 collect(Float64, context.data[column.source])
+        values = _brm_replay_population_column(column, context.data, cache)
+        isnothing(values) && (values = ones(Float64, n))
         length(values) == n || error(
             "BRM replay: random-effect column `$(column.label)` and grouping " *
             "factor `$(training.group)` have different row counts")
@@ -783,12 +784,12 @@ function _brm_simple_random_effect_plans(
         for inner_term in _brm_additive_terms(inner)
             columns = _brm_population_columns(inner_term)
             if isnothing(columns) || any(column ->
-                    !isnothing(column.preprocess) ||
-                    (!isnothing(column.source) &&
-                     !(column.values isa AbstractVector{<:Real})), columns)
+                    !isnothing(column.source) &&
+                    !(column.values isa AbstractVector{<:Real}), columns)
                 required && error(
-                    "BRM backend lowering: the shared initial random-slope " *
-                    "design supports an intercept and raw continuous columns; " *
+                    "BRM backend lowering: random-slope designs support the " *
+                    "backend-neutral population column surface (continuous, " *
+                    "categorical, transformed, and interaction columns); " *
                     "got `$(repr(inner_term))` in `$(repr(term))`")
                 return nothing
             end
