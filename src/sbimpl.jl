@@ -3426,6 +3426,33 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             new_data[n_name] = length(levels)
             push!(handled, n_name)
         end
+    elseif e.kind === :ragged_gather
+        # A gathered ragged response or its data-backed censoring/truncation
+        # bound. Re-gather the flat source column into the kernel's per-subject
+        # row order — the same operation `_sb_ragged_lhs_layout` performed at fit
+        # time. No fitted constant, so `freeze` is irrelevant; the subject axis
+        # comes from the new DataFrame's own kernel frame (which is how a
+        # resample re-emission and a same-subject replay stay consistent).
+        source = e.raw_ref
+        group_col = e.const_.group_col
+        subject_col = e.const_.subject_col
+        raw = _sb_df_column(df, source)
+        if raw isa AbstractVector{<:AbstractVector}
+            new_data[key] = raw   # already per-subject ragged: pass through
+        else
+            subject_values = _sb_kernel_subject_values(
+                _sb_df_column(df, subject_col), subject_col)
+            group_values = collect(_sb_group_values(_sb_df_column(df, group_col)))
+            length(group_values) == length(raw) || error(
+                "sbimpl: reprocess: ragged source `$source` has $(length(raw)) " *
+                "rows but grouping column `$group_col` has " *
+                "$(length(group_values)); they must describe the same " *
+                "observation axis.")
+            rows = _sb_ragged_group_rows(key, group_col, group_values,
+                                         subject_values)
+            new_data[key] = [raw[r] for r in rows]
+        end
+        new_preproc[key] = e
     else
         error("sbimpl: reprocess: unknown preproc kind `$(e.kind)` for key `$key`")
     end
@@ -3461,7 +3488,10 @@ of a naive per-column `sb.model(; col=…)` rebind is avoided. Returns a NEW
 Covered: the Julia-side transforms (`zscale`/`standardize`/`center`/`factor`/
 `mo`/`s`/`t2`/`gp`/`hsgp`), `protect`/implicit-fn columns (re-materialised on
 `new_df`), typed `mm(...)` and ordinary plain/`|ID|` random-effect group
-indices, `kernel(...)` subject counts and `ragged(x, group)` columns, continuous
+indices, `kernel(...)` subject counts and `ragged(x, group)` columns,
+formula-boundary `ragged(response, group)` observations and their data-backed
+`censored`/`truncated`/`interval_censored` bounds (both re-gathered from the
+flat source column into the kernel's per-subject row order), continuous
 × continuous interaction columns, typed observation weights, categorical
 outcomes, and pass-through raw columns (plain data, `me` obs values, `ar`
 time). Frozen replay errors loudly on an unseen fitted level. Stratified
@@ -4572,6 +4602,26 @@ function _sb_ragged_rhs_kernel_groups!(acc, x::ExprColumn)
     nothing
 end
 
+# Partition flat observation rows into per-subject groups using the kernel's
+# ROW-ordered subject axis. Shared by `_sb_ragged_lhs_layout` (emission) and the
+# `:ragged_gather` reprocess handler so a replayed frame is aligned to the
+# kernel exactly as it was at fit time.
+function _sb_ragged_group_rows(key::Symbol, group::Symbol,
+                               group_values::AbstractVector,
+                               subject_values::AbstractVector)
+    positions = Dict{Any,Int}(v => i for (i, v) in enumerate(subject_values))
+    rows = [Int[] for _ in subject_values]
+    unknown = Any[]
+    for (row, label) in enumerate(group_values)
+        i = get(positions, label, 0)
+        i == 0 ? push!(unknown, label) : push!(rows[i], row)
+    end
+    isempty(unknown) || error(
+        "sbimpl: `ragged($key, $group)` contains label(s) " *
+        "$(unique(unknown)) that name no subject in the referenced kernel.")
+    rows
+end
+
 function _sb_ragged_lhs_layout(key::Symbol, lhs::ExprColumn, rhs)
     args = getargs(lhs)
     length(args) == 2 || error(
@@ -4621,17 +4671,9 @@ function _sb_ragged_lhs_layout(key::Symbol, lhs::ExprColumn, rhs)
         "subject column to contain one non-missing unique label per row; got " *
         "$(subject_values).")
 
-    positions = Dict{Any,Int}(v => i for (i, v) in enumerate(subject_values))
-    rows = [Int[] for _ in subject_values]
-    unknown = Any[]
-    for (row, label) in enumerate(group_values)
-        i = get(positions, label, 0)
-        i == 0 ? push!(unknown, label) : push!(rows[i], row)
-    end
-    isempty(unknown) || error(
-        "sbimpl: `ragged($key, $(name(group)))` contains label(s) " *
-        "$(unique(unknown)) that name no subject in the referenced kernel.")
-    (; values=[raw[r] for r in rows], rows, nrows=length(raw))
+    rows = _sb_ragged_group_rows(key, name(group), group_values, subject_values)
+    (; values=[raw[r] for r in rows], rows, nrows=length(raw),
+       group_col=name(group), subject_col=name(first(producers)[2]))
 end
 
 # A data-backed bound on a ragged formula-LHS lives on the same flat observed
@@ -4656,6 +4698,13 @@ function _sb_ragged_bound(data, key::Symbol, label::Symbol, bound, layout)
             "different observed data")
     else
         data[derived] = grouped
+        # Same provenance the gathered response carries (`_sb_sampling!`): a
+        # data-backed censoring/truncation bound is re-gathered from its flat
+        # column + the shared grouping on `reprocess`.
+        _sb_record_preproc!(data, derived, PreprocEntry(
+            :ragged_gather,
+            (; group_col=layout.group_col, subject_col=layout.subject_col),
+            name(bound), true))
     end
     NamedColumn(derived, DataColumn(grouped))
 end
@@ -4686,6 +4735,14 @@ function _sb_sampling!(stmts, data, key,
                        id_lookup=_sb_empty_id_lookup(), kwargs...)
     layout = _sb_ragged_lhs_layout(key, lhs, rhs)
     data[key] = layout.values
+    # The gathered ragged response has no raw column of its own on a new
+    # DataFrame — record how to re-gather it from the flat response + grouping
+    # so `reprocess` regenerates it rather than erroring on it or silently
+    # keeping the stale/flat column.
+    _sb_record_preproc!(data, key, PreprocEntry(
+        :ragged_gather,
+        (; group_col=layout.group_col, subject_col=layout.subject_col),
+        key, true))
     grouped_rhs = _sb_ragged_likelihood_rhs(data, key, rhs, layout)
     _sb_likelihood!(stmts, key, grouped_rhs, data)
 end
