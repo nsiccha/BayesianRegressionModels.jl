@@ -4,7 +4,7 @@
 
 struct _TuringPopulationPlan{F,C<:_BRMBackendContext,P<:_BRMPopulationPredictor,
                              D<:_BRMPopulationDesign,Y<:AbstractVector,
-                             B<:AbstractVector,A,S,R<:Tuple,RM,OW}
+                             B<:AbstractVector,A,S,R<:Tuple,MR,RM,OW}
     family::F
     context::C
     predictor::P
@@ -15,6 +15,7 @@ struct _TuringPopulationPlan{F,C<:_BRMBackendContext,P<:_BRMPopulationPredictor,
     family_args::A
     scale_prior::S
     random_effects::R
+    missing_response::MR
     response_modifier::RM
     observation_weight::OW
 end
@@ -191,9 +192,13 @@ function _turing_population_components(brmi::BRMI, observation, predictor::Symbo
                                        extra_operations=(),
                                        allow_random_effects::Bool=false,
                                        allow_random_slopes::Bool=false,
-                                       allow_zero_correlation::Bool=false)
+                                       allow_zero_correlation::Bool=false,
+                                       response_override=nothing)
     context = _turing_model_context(
         brmi, observation, (predictor, extra_operations...))
+    if !isnothing(response_override)
+        context.data[observation.key] = response_override
+    end
     component = _turing_predictor_component(
         brmi, context, predictor; allow_group_terms=allow_random_effects,
         allow_random_slopes, allow_zero_correlation)
@@ -301,6 +306,7 @@ function _turing_beta_binomial2_plan(brmi::BRMI, observation,
 end
 
 function _turing_normal_plan(brmi::BRMI, observation, rhs::ExprColumn;
+                             missing_response=nothing,
                              response_modifier=nothing,
                              observation_weight=nothing)
     isempty(getkwargs(rhs)) || error(
@@ -319,18 +325,26 @@ function _turing_normal_plan(brmi::BRMI, observation, rhs::ExprColumn;
     parts = _turing_population_components(
         brmi, observation, predictor; extra_operations=(scale,),
         allow_random_effects=true, allow_random_slopes=true,
-        allow_zero_correlation=true)
+        allow_zero_correlation=true,
+        response_override=isnothing(missing_response) ? nothing :
+            missing_response.values)
     _turing_require_predictor_link(parts, identity, "Gaussian identity location")
-    parts.response isa AbstractVector{<:Real} || error(
-        "Turing backend: Gaussian response `$(observation.key)` must be real-valued")
+    all(x -> ismissing(x) || x isa Real, parts.response) || error(
+        "Turing backend: Gaussian response `$(observation.key)` must contain " *
+        "only real values and explicitly modelled missings")
     scale_prior = _turing_scalar_exponential_prior(brmi, scale)
     materialized_modifier = _turing_materialize_response_modifier(
         response_modifier, observation, parts.response, parts.context)
+    response = isnothing(missing_response) ?
+        collect(Float64, parts.response) :
+        Union{Missing,Float64}[
+            ismissing(x) ? missing : Float64(x) for x in parts.response]
     _TuringPopulationPlan(Val(:normal_identity), parts.context, parts.predictor,
                           parts.design,
-                          collect(Float64, parts.response), parts.beta_location,
+                          response, parts.beta_location,
                           parts.beta_scale, NamedTuple(), scale_prior,
-                          parts.random_effects, materialized_modifier,
+                          parts.random_effects, missing_response,
+                          materialized_modifier,
                           observation_weight)
 end
 
@@ -348,7 +362,8 @@ function _turing_bernoulli_population_plan(brmi::BRMI, observation,
                           parts.design,
                           Int.(parts.response), parts.beta_location,
                           parts.beta_scale, NamedTuple(), nothing,
-                          parts.random_effects, nothing, observation_weight)
+                          parts.random_effects, nothing, nothing,
+                          observation_weight)
 end
 
 function _turing_bernoulli_logit_plan(brmi::BRMI, observation, rhs::ExprColumn;
@@ -394,7 +409,8 @@ function _turing_binomial_population_plan(brmi::BRMI, observation, trials_raw,
                           parts.design,
                           response, parts.beta_location,
                           parts.beta_scale, (; trials), nothing,
-                          parts.random_effects, nothing, observation_weight)
+                          parts.random_effects, nothing, nothing,
+                          observation_weight)
 end
 
 function _turing_binomial_logit_plan(brmi::BRMI, observation, rhs::ExprColumn;
@@ -461,25 +477,35 @@ function _turing_poisson_log_plan(brmi::BRMI, observation, rhs::ExprColumn;
                           parts.design,
                           Int.(parts.response), parts.beta_location,
                           parts.beta_scale, NamedTuple(), nothing,
-                          parts.random_effects, materialized_modifier,
+                          parts.random_effects, nothing, materialized_modifier,
                           observation_weight)
 end
 
 function _brm_turing_plan(brmi::BRMI)
     observation = _turing_direct_observation(brmi)
-    observation.lhs isa NamedColumn || error(
-        "Turing backend: response decorators and response links are not yet supported")
+    missing_response = _brm_missing_response_plan(
+        observation.lhs; prefix="Turing backend")
+    (observation.lhs isa NamedColumn || !isnothing(missing_response)) || error(
+        "Turing backend: response decorators other than `mi(response)` and " *
+        "response links are not yet supported")
     rhs = observation.rhs
     rhs isa ExprColumn || error(
         "Turing backend: observed likelihood must be a distribution call")
-    raw_response = _brm_data_vec(
-        observation.key, parent(parent(observation.lhs)))
+    raw_response = isnothing(missing_response) ? _brm_data_vec(
+        observation.key, parent(parent(observation.lhs))) :
+        missing_response.values
     observation_weight = _brm_observation_weight_plan(
         rhs, observation.key, raw_response; prefix="Turing backend")
     if !isnothing(observation_weight)
         rhs = observation_weight.distribution
     end
     response_modifier = _brm_response_modifier_plan(rhs; prefix="Turing backend")
+    (isnothing(missing_response) || isnothing(observation_weight)) || error(
+        "Turing backend: `mi(response)` cannot yet be composed with " *
+        "observation weights")
+    (isnothing(missing_response) || isnothing(response_modifier)) || error(
+        "Turing backend: `mi(response)` cannot yet be composed with response " *
+        "modifiers")
     (isnothing(observation_weight) || isnothing(response_modifier) ||
      observation_weight.kind !== :analytic) || error(
         "Turing backend: analytic/precision weights cannot yet be composed " *
@@ -496,7 +522,11 @@ function _brm_turing_plan(brmi::BRMI)
     end
     family = getf(rhs)
     family === Normal && return _turing_normal_plan(
-        brmi, observation, rhs; response_modifier, observation_weight)
+        brmi, observation, rhs; missing_response, response_modifier,
+        observation_weight)
+    isnothing(missing_response) || error(
+        "Turing backend: `mi(response)` currently supports only " *
+        "`Normal(mu, sigma)` observations; got `$family`")
     (isnothing(observation_weight) ||
      observation_weight.kind !== :analytic) || error(
         "Turing backend: `AnalyticWeights` currently support only " *

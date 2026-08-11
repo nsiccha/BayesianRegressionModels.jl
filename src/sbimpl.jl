@@ -4776,28 +4776,12 @@ _SB_MI_FAMILIES = Dict{Any,Symbol}(
     Normal => :_sb_mi_normal,
 )
 function _sb_emit_mi!(stmts, data, key, lhs::ExprColumn, rhs)
-    inner_raw = only(getargs(lhs))
-    inner = _as_named_column(inner_raw)
-    isnothing(inner) && error("sbimpl: `mi(...)` expects a NamedColumn inside, got $(typeof(inner_raw))")
-    inner_name = name(inner)
-    backing_raw = parent(inner)
-    backing = _as_data_column(backing_raw)
-    isnothing(backing) && error(
-        "sbimpl: `mi($inner_name)` requires a real data column with missings; ",
-        "got backing $(typeof(backing_raw)).")
-    raw = parent(backing)
-    eltype(raw) >: Missing || error(
-        "sbimpl: `mi($inner_name)` requires a column whose eltype admits ",
-        "`missing` (got $(eltype(raw))). If `$inner_name` has no NAs, drop ",
-        "the `mi(...)` wrapper.")
-    obs_mask = .!ismissing.(raw)
-    Jobs = findall(obs_mask)
-    Jmis = findall(.!obs_mask)
-    isempty(Jmis) && error(
-        "sbimpl: `mi($inner_name)` invoked on a column with NO missing values. ",
-        "Drop the `mi(...)` wrapper, or check your data.")
-    elT = nonmissingtype(eltype(raw))
-    y_obs = collect(elT, raw[obs_mask])
+    plan = _brm_missing_response_plan(lhs; prefix="sbimpl")
+    isnothing(plan) && error("sbimpl: internal `mi(...)` response was not planned")
+    inner_name = plan.source
+    Jobs = plan.observed_indices
+    Jmis = plan.missing_indices
+    y_obs = plan.observed_values
 
     rhs_e = _as_expr_column(rhs)
     isnothing(rhs_e) && error("sbimpl: `mi($inner_name) ~ <family>(args)` requires the RHS to be a family call, got $(typeof(rhs))")

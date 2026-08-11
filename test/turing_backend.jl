@@ -59,6 +59,68 @@ const BRM = BayesianRegressionModels
 end
 
 
+@testset "Turing extension — partially missing Gaussian response" begin
+    df = (;
+        x=[-1.0, 0.5, 2.0, 0.25],
+        y=Union{Missing,Float64}[0.2, missing, -0.4, missing],
+    )
+    backend = TuringBRMI((@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x
+        mi(y) ~ Normal(mu, sigma)
+    end)(df))
+    missing_plan = backend.plan.missing_response
+
+    @test missing_plan.source === :y
+    @test missing_plan.observed_indices == [1, 3]
+    @test missing_plan.missing_indices == [2, 4]
+    @test missing_plan.observed_values == [0.2, -0.4]
+    @test isequal(backend.plan.response, df.y)
+
+    draw = rand(Xoshiro(73), backend.model)
+    returned = Turing.DynamicPPL.returned(backend.model, draw.data)
+    params = draw.data
+    mu = backend.plan.design.matrix * params.beta_pop
+    complete_y = returned.response
+    coefficient_prior = sum(logpdf.(Normal(), params.beta_pop))
+    scale_prior = logpdf(Exponential(2), params.sigma)
+    observed_likelihood = sum(missing_plan.observed_indices) do i
+        logpdf(Normal(mu[i], params.sigma), complete_y[i])
+    end
+    imputation_prior = sum(missing_plan.missing_indices) do i
+        logpdf(Normal(mu[i], params.sigma), complete_y[i])
+    end
+
+    @test !any(ismissing, complete_y)
+    @test complete_y[missing_plan.observed_indices] ==
+          missing_plan.observed_values
+    @test Turing.logjoint(backend.model, params) ≈
+          coefficient_prior + scale_prior + observed_likelihood +
+          imputation_prior atol=1e-12 rtol=1e-12
+    @test Turing.logprior(backend.model, params) ≈
+          coefficient_prior + scale_prior + imputation_prior atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(backend.model, params) ≈
+          observed_likelihood atol=1e-12 rtol=1e-12
+
+    complete = merge(df, (; y=Union{Missing,Float64}[0.2, 0.1, -0.4, 0.3]))
+    @test_throws "found no missing values" begin
+        TuringBRMI((@brm begin
+            sigma ~ Exponential(2)
+            mu ~ 1 + x
+            mi(y) ~ Normal(mu, sigma)
+        end)(complete))
+    end
+
+    binary = (; x=df.x, y=Union{Missing,Int}[1, missing, 0, 1])
+    @test_throws "currently supports only `Normal" begin
+        TuringBRMI((@brm begin
+            eta ~ 1 + x
+            mi(y) ~ BernoulliLogit(eta)
+        end)(binary))
+    end
+end
+
+
 @testset "Turing extension — truncated Gaussian response" begin
     df = (;
         x=[-1.0, 0.5, 2.0],

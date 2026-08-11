@@ -160,6 +160,58 @@ struct _BRMObservationWeightPlan{D,V<:AbstractVector}
     values::V
 end
 
+"""
+    _BRMMissingResponsePlan
+
+Backend-neutral materialization of `mi(y)`: the original partly-missing row
+axis, the observed and missing row indices, and the concrete observed values.
+Concrete backends decide how missing rows become latent variables and how the
+merged response is exposed.
+"""
+struct _BRMMissingResponsePlan{Y<:AbstractVector,O<:AbstractVector{Int},
+                               M<:AbstractVector{Int},V<:AbstractVector}
+    source::Symbol
+    values::Y
+    observed_indices::O
+    missing_indices::M
+    observed_values::V
+end
+
+function _brm_missing_response_plan(lhs; prefix="BRM backend lowering")
+    lhs isa ExprColumn && getf(lhs) === mi || return nothing
+    isempty(getkwargs(lhs)) || error(
+        "$prefix: `mi(response)` accepts no keywords")
+    args = getargs(lhs)
+    length(args) == 1 || error(
+        "$prefix: `mi(response)` expects exactly one argument")
+    inner = only(args)
+    inner isa NamedColumn || error(
+        "$prefix: `mi(...)` expects one named response column, got " *
+        "$(typeof(inner))")
+    backing = parent(inner)
+    backing isa DataColumn || error(
+        "$prefix: `mi($(name(inner)))` requires a raw data column with " *
+        "missing values, got backing $(typeof(backing))")
+    raw = parent(backing)
+    raw isa AbstractVector || error(
+        "$prefix: `mi($(name(inner)))` requires a vector response")
+    Missing <: eltype(raw) || error(
+        "$prefix: `mi($(name(inner)))` requires a column whose element type " *
+        "admits `missing` (got $(eltype(raw))); drop `mi(...)` when there are no NAs")
+    value_type = nonmissingtype(eltype(raw))
+    value_type <: Real || error(
+        "$prefix: `mi($(name(inner)))` currently requires a real-valued response; " *
+        "got non-missing element type $value_type")
+    observed_indices = findall(!ismissing, raw)
+    missing_indices = findall(ismissing, raw)
+    isempty(missing_indices) && error(
+        "$prefix: `mi($(name(inner)))` found no missing values; drop the wrapper")
+    observed_values = collect(value_type, raw[observed_indices])
+    _BRMMissingResponsePlan(
+        name(inner), collect(raw), observed_indices, missing_indices,
+        observed_values)
+end
+
 _brm_observation_weight_kind(f) =
     f === aweights || f === AnalyticWeights ? :analytic :
     f === fweights || f === FrequencyWeights ? :frequency :

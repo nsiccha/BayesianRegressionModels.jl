@@ -135,7 +135,7 @@ Turing.@model function _brm_population_gaussian(
         y[i] ~ _brm_normal_observation(
             response_modifier, observation_weight, mu[i], sigma, i)
     end
-    (; mu)
+    (; mu, response=y)
 end
 
 Turing.@model function _brm_population_gaussian_random_intercept(
@@ -153,7 +153,7 @@ Turing.@model function _brm_population_gaussian_random_intercept(
         y[i] ~ _brm_normal_observation(
             response_modifier, observation_weight, mu[i], sigma, i)
     end
-    (; mu, group_scale, group_effect)
+    (; mu, response=y, group_scale, group_effect)
 end
 
 Turing.@model function _brm_population_gaussian_correlated_group(
@@ -176,7 +176,7 @@ Turing.@model function _brm_population_gaussian_correlated_group(
         y[i] ~ _brm_normal_observation(
             response_modifier, observation_weight, mu[i], sigma, i)
     end
-    (; mu, L_group, tau_group, b_group, group_effect)
+    (; mu, response=y, L_group, tau_group, b_group, group_effect)
 end
 
 Turing.@model function _brm_population_gaussian_zero_correlation_group(
@@ -209,7 +209,7 @@ Turing.@model function _brm_population_gaussian_zero_correlation_group(
         y[i] ~ _brm_normal_observation(
             response_modifier, observation_weight, mu[i], sigma, i)
     end
-    (; mu, group_intercept_scale, tau_group_slopes, scales,
+    (; mu, response=y, group_intercept_scale, tau_group_slopes, scales,
        b_group, group_effect)
 end
 
