@@ -88,74 +88,23 @@ end)((;
 transformed.plan.design.matrix
 ```
 
-Integer-coded and `CategoricalVector` population predictors use ordered
-treatment contrasts with the first level as reference. A single
-`effect(mu, group)` prior applies to every non-reference contrast, matching the
-StanBlocks categorical block:
+Random slopes reuse those same fitted columns. In particular, transforms keep
+their training-time constants during replay, and categorical slopes expand to
+the fitted treatment-contrast columns:
 
 ```julia
-categorical = TuringBRMI((@brm begin
+random_slopes = TuringBRMI((@brm begin
     sigma ~ Exponential(2)
-    mu ~ 1 + group + x + x & group
-    effect(mu, group) ~ Normal(0, 0.5)
-    effect(mu, int_x_x_group_lvl_2) ~ Normal(0, 0.25)
+    mu ~ 1 + x + (1 + zscale(x) + factor(category) | subject)
     y ~ Normal(mu, sigma)
 end)((;
-    group=[1, 2, 3, 1, 2, 3],
-    x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
-    y=[-2.4, -2.2, -2.0, -1.8, -1.7, -1.5],
-)))
-```
-
-`factor(group; ref=k)` uses the same reference-level swap and address aliases
-as StanBlocks. The user-facing column name still addresses the whole contrast
-block:
-
-```julia
-reference_level = TuringBRMI((@brm begin
-    sigma ~ Exponential(2)
-    mu ~ 1 + factor(group; ref=3)
-    effect(mu, group) ~ Normal(0, 0.5)
-    y ~ Normal(mu, sigma)
-end)((;
-    group=[1, 2, 3, 1, 2, 3],
-    y=[-2.4, -2.2, -2.0, -1.8, -1.7, -1.5],
-)))
-```
-
-Pure numeric expressions remain coefficient-bearing population terms, while
-`offset(...)` contributes with coefficient one. This makes the usual
-exposure-offset count model direct:
-
-```julia
-exposure_model = TuringBRMI((@brm begin
-    log_rate ~ 1 + log(x) + offset(log(exposure))
-    y ~ Poisson(exp(log_rate))
-end)((;
-    x=[1.0, 2.0, 4.0],
-    exposure=[2.0, 4.0, 8.0],
-    y=[0, 2, 5],
-)))
-```
-
-Fitted numeric transforms use the same design and coefficient labels as the
-StanBlocks backend. The fitted mean and sample standard deviation belong to the
-model plan rather than to Turing:
-
-```julia
-transformed = TuringBRMI((@brm begin
-    sigma ~ Exponential(2)
-    mu ~ 1 + zscale(x) + center(w) + zscale(x) & w
-    effect(mu, zscale_x) ~ Normal(0, 0.25)
-    effect(mu, int_zscale_x_x_w) ~ Normal(0, 0.5)
-    y ~ Normal(mu, sigma)
-end)((;
-    x=[1.0, 2.0, 4.0],
-    w=[-2.0, 1.0, 5.0],
-    y=[0.2, 1.1, -0.4],
+    x=[1.0, 2.0, 4.0, 2.5, 3.5, 5.0],
+    category=[1, 2, 3, 2, 1, 3],
+    subject=[1, 1, 2, 2, 3, 3],
+    y=[0.2, 1.1, -0.4, 0.7, 0.3, 1.2],
 )))
 
-transformed.plan.design.matrix
+only(random_slopes.plan.random_effects).matrix
 ```
 
 Integer-coded and `CategoricalVector` population predictors use ordered
@@ -290,14 +239,14 @@ the Turing backend refuses the surface rather than approximating it.
 | Poisson log | **Supported** | Canonical linked declarations, data offsets, and admitted grouped predictors |
 | NegativeBinomial2 | **Supported subset** | Shared mean/precision population plans and one admitted group block per predictor |
 | BetaBinomial2 | **Supported subset** | Shared mean/precision population plans and one admitted group block per predictor |
-| Group effects | **Partial** | Plain intercepts, one correlated raw-continuous slope block, and admitted exact-zero-correlation blocks |
+| Group effects | **Partial** | Correlated blocks admit continuous, transformed/expression, interaction, and categorical slopes; zero-correlation blocks admit non-categorical slopes; crossed groups, shared-ID blocks, explicit centering, stratified `gr(by=)`, and SD/correlation prior overrides are supported |
 | Response evidence | **Partial** | Truncated, censored, and interval-censored Normal/Poisson observations; wider modifiers remain pending |
 | Missing responses | **Supported subset** | `mi(y) ~ Normal(mu, sigma)` imputes missing rows from the same conditional family and keeps observed rows in the likelihood |
 | Multiple responses | **Supported subset** | Independent blocks are namespaced; exactly compatible shared predictors/group blocks are sampled once and reused, while partial or incompatible overlaps fail closed |
 | Observation weights | **Supported subset** | Analytic Normal weights rescale sigma; frequency and power weights scale density while predictive draws retain the base distribution |
-| Advanced terms | **Pending** | Splines, `t2`, `mo`, `me`, GP/HSGP, shared-ID covariance, multiple/crossed blocks, and kernel/ragged models fail loudly |
+| Advanced terms | **Pending** | Adaptive group geometry, multi-membership, splines, `t2`, `mo`, `me`, GP/HSGP, and kernel/ragged models fail loudly |
 | Outputs | **Supported subset** | Row-aligned pointwise likelihoods, deterministic returned quantities, one-draw posterior prediction, and chain-level Turing prediction; fitted response latents are excluded before regeneration |
-| Replay | **Supported subset** | Frozen preprocessing and existing-group coordinates replay on new rows; refitting constants is explicit; `resample_groups` rebuilds selected level axes and redraws their standardized effects while retaining fitted covariance parameters |
+| Replay | **Supported subset** | Frozen population and random-slope preprocessing plus existing-group coordinates replay on new rows; refitting constants is explicit; `resample_groups` rebuilds selected level axes and redraws their standardized effects while retaining fitted covariance parameters |
 
 The executable checks live in `test/backend_plan.jl` and
 `test/turing_backend.jl`. Each expansion should first add or extend a shared
@@ -309,10 +258,11 @@ postprocessing oracle.
 Within the current slice, all of the following are rejected explicitly:
 
 - string/object population columns that are not explicit `CategoricalVector`s;
-- multiple/crossed group blocks, shared `|ID|` covariance, transformed or
-  categorical random slopes, and advanced group structures;
-- non-Normal or nonconstant population priors, random-effect prior overrides,
-  R2D2, and term-prior overrides;
+- categorical random slopes inside a zero-correlation `||` block, adaptive
+  centering, multi-membership, and random-effect prior overrides on stratified
+  blocks;
+- non-Normal or nonconstant population priors, R2D2, and unsupported
+  term-prior overrides;
 - advanced terms such as splines, `t2`, `mo`, `me`, GP/HSGP, and kernel/ragged
   models; and
 - unsupported links, likelihood families, evidence/weight compositions, or

@@ -186,3 +186,19 @@ extension when `WarmupHMC` is loaded; calling it without that optional package
 raises a normal `MethodError`.
 """
 function adaptive_centering_problem end
+
+function adaptive_centering_blocks(::TuringBRMI, _unc_names)
+    error(
+        "Turing backend: `adaptive_centering_blocks` describes compiled Stan " *
+        "unconstrained coordinates and does not apply to DynamicPPL models. " *
+        "Choose the executable endpoint with " *
+        "`TuringBRMI(brmi; centered_groups=...)`.")
+end
+
+function adaptive_centering_problem(::TuringBRMI, _problem, _ad_backend;
+                                    _kwargs...)
+    error(
+        "Turing backend: WarmupHMC's compiled-Stan adaptive-centering " *
+        "reparametrizer does not apply to DynamicPPL models. Choose centered " *
+        "or non-centered group geometry when constructing `TuringBRMI`.")
+end

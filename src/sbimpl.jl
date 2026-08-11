@@ -5920,18 +5920,9 @@ end
 
 # Per-group level of `g` -> stratum level of `by`. Errors if any group level
 # straddles multiple strata. Ported from vimpl's `_stratum_idx`.
-_sb_stratum_idx(g_idx::AbstractVector{Int}, b_idx::AbstractVector{Int}, gname, bname) = begin
-    m_groups = maximum(g_idx)
-    mapping = zeros(Int, m_groups)
-    for (gi, bi) in zip(g_idx, b_idx)
-        if mapping[gi] == 0
-            mapping[gi] = bi
-        elseif mapping[gi] != bi
-            error("sbimpl: gr($gname, by=$bname): group level $gi straddles multiple strata ($(mapping[gi]) vs $bi)")
-        end
-    end
-    mapping
-end
+_sb_stratum_idx(g_idx::AbstractVector{Int}, b_idx::AbstractVector{Int},
+                 gname, bname) =
+    _brm_group_strata(g_idx, b_idx, maximum(g_idx), Symbol(gname), Symbol(bname))
 
 function _sb_emit_ranefs!(stmts, data, target::Symbol, ran_terms, summands;
                            id_lookup=_sb_empty_id_lookup(),
