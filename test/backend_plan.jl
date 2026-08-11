@@ -294,6 +294,47 @@ end
 end
 
 
+@testset "backend-neutral pure expressions and fixed offsets" begin
+    df = (;
+        x=[1.0, 2.0, 4.0],
+        exposure=[2.0, 4.0, 8.0],
+        y=[0, 2, 5],
+    )
+    brmi = (@brm begin
+        log_rate ~ 1 + log(x) + offset(log(exposure))
+        y ~ Poisson(exp(log_rate))
+    end)(df)
+    context = BRM._brm_backend_context(brmi)
+    _, rhs = getargs(linear_predictor_op(brmi, :log_rate), 2)
+    design = BRM._brm_simple_population_design(
+        :log_rate, rhs, context.data, context.target_obs[:log_rate];
+        required=true)
+
+    expression_label = design.columns[2].label
+    @test startswith(String(expression_label), "log_expr_")
+    @test Tuple(c.label for c in design.columns) ==
+          (:Intercept, expression_label)
+    @test design.matrix == hcat(ones(3), log.(df.x))
+    @test length(design.fixed_terms) == 1
+    @test only(design.fixed_terms).source === :exposure
+    @test design.fixed == log.(df.exposure)
+
+    # Pure coefficient-bearing data expressions use the exact same key and
+    # replay record in StanBlocks. Offsets retain StanBlocks' direct
+    # coefficient-one expression while Turing consumes the shared fixed vector.
+    sb = SBBRMI(brmi)
+    @test expression_label in keys(sb.data)
+    @test sb.data[expression_label] == log.(df.x)
+    @test sb.preproc[expression_label].kind === :protect
+    @test popcoefnames(brmi, :log_rate) == [:Intercept, expression_label]
+
+    future = (; x=[8.0, 16.0], exposure=[3.0, 9.0], y=zeros(Int, 2))
+    replay = reprocess(sb, future)
+    @test replay.data[expression_label] == log.(future.x)
+    @test replay.data[:exposure] == future.exposure
+end
+
+
 @testset "backend-neutral population effect-prior plan" begin
     df = (; x=[-1.0, 0.0, 1.0], y=[0.1, 0.2, 0.3])
     brmi = (@brm begin
@@ -391,7 +432,7 @@ end
     _, cat_rhs = getargs(linear_predictor_op(unsupported, :mu), 2)
     @test isnothing(BRM._brm_simple_population_design(
         :mu, cat_rhs, cat_context.data, cat_context.target_obs[:mu]))
-    @test_throws "supports only `1` and continuous raw-data columns" begin
+    @test_throws "supports `1`, continuous raw-data columns" begin
         BRM._brm_simple_population_design(
             :mu, cat_rhs, cat_context.data, cat_context.target_obs[:mu];
             required=true)

@@ -7772,10 +7772,8 @@ _sb_center(v::AbstractVector{<:Real}) = _sb_apply_center(_sb_fit_center(v), v)
 # Stable, human-readable column name for a wrapped predictor. When the
 # inner is a single NamedColumn we tag with its name; otherwise we hash
 # the expr structure so multiple `protect(...)` summands don't collide.
-_sb_wrapper_col_name(prefix::Symbol, inner::NamedColumn) =
-    Symbol(prefix, :_, name(inner))
 _sb_wrapper_col_name(prefix::Symbol, inner) =
-    Symbol(prefix, :_expr_, string(hash(inner); base=16)[1:8])
+    _brm_wrapper_col_name(prefix, inner)
 
 _n_obs_name(t::NamedColumn) = _n_obs_named_data(t, parent(t))
 _n_obs_name(_) = nothing
