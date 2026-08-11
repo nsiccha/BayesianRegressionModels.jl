@@ -2162,6 +2162,19 @@ struct PreprocEntry
     dim_coupled::Bool
 end
 
+# During resample-group re-emission, the new-data BRMI still has to be lowered
+# once to obtain the CV-contagious Stan body.  Frozen replay must make fitted
+# transform constants available to that lowering pass: otherwise an eager
+# constructor-time fit can reject perfectly valid prediction data before
+# `reprocess` gets a chance to apply the training constants (notably an HSGP
+# axis that is constant only on the future schedule).  Keep the frozen inputs
+# separate from the entries recorded by this pass so the shape comparison in
+# `_sb_resample_preproc` remains meaningful.
+struct _SBPreprocContext
+    recorded::Dict{Symbol,PreprocEntry}
+    frozen::Any
+end
+
 # Reserved side-channel key: during construction the emitters record into
 # `data[_SB_PREPROC_KEY]`; the constructor pops it BEFORE building the SlicModel
 # so it never reaches Stan's data dict. Filtered in `_sb_any_data_symbol`'s
@@ -2172,8 +2185,20 @@ const _SB_PREPROC_KEY = :__preproc__
 _sb_record_preproc!(data, key::Symbol, entry::PreprocEntry) = begin
     pp = get(data, _SB_PREPROC_KEY, nothing)
     pp === nothing && return nothing   # recording disabled (defensive)
+    pp isa _SBPreprocContext && (pp = pp.recorded)
     pp[key] = entry
     nothing
+end
+
+function _sb_frozen_preproc_entry(data, key::Symbol, kind::Symbol, raw_ref)
+    ctx = get(data, _SB_PREPROC_KEY, nothing)
+    ctx isa _SBPreprocContext || return nothing
+    entry = get(ctx.frozen, key, nothing)
+    isnothing(entry) && return nothing
+    (entry.kind === kind && isequal(entry.raw_ref, raw_ref)) || error(
+        "sbimpl: resample replay: fitted preprocessing record `$key` no longer " *
+        "matches the re-emitted `$kind` term")
+    entry
 end
 
 function _sb_record_group_index!(data, idx_key::Symbol, n_groups_key::Symbol,
@@ -2603,7 +2628,7 @@ function _sb_effect_prior_arg(x::ExprColumn)
 end
 
 SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
-       centered_groups=Set{Symbol}()) = begin
+       centered_groups=Set{Symbol}(), _frozen_preproc=nothing) = begin
     cv_groups = cv_groups isa Set ? cv_groups : Set{Symbol}(cv_groups)
     centered_groups = centered_groups isa Set ? centered_groups : Set{Symbol}(centered_groups)
     both = intersect(cv_groups, centered_groups)
@@ -2620,7 +2645,9 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     # Side-channel: transform emitters record their fit-time constant + raw
     # reference here (via `_sb_record_preproc!`); popped before `SlicModel` below
     # so it never reaches Stan's data dict. See `PreprocEntry` / `reprocess`.
-    data[_SB_PREPROC_KEY] = Dict{Symbol,PreprocEntry}()
+    data[_SB_PREPROC_KEY] = isnothing(_frozen_preproc) ?
+        Dict{Symbol,PreprocEntry}() :
+        _SBPreprocContext(Dict{Symbol,PreprocEntry}(), _frozen_preproc)
     # Prepass 0: collect every column wrapped in `mi(...)` somewhere in the
     # model. Those columns are NOT materialised as plain data -- the
     # `_sb_emit_mi!` handler later splits them into observed values + missing
@@ -2692,7 +2719,8 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     _sb_fuse_normal_id_glm!(stmts, data)
     # Pop the preproc side-channel BEFORE building the SlicModel so it never
     # pollutes Stan's data dict.
-    preproc = pop!(data, _SB_PREPROC_KEY, Dict{Symbol,PreprocEntry}())
+    preproc_ctx = pop!(data, _SB_PREPROC_KEY, Dict{Symbol,PreprocEntry}())
+    preproc = preproc_ctx isa _SBPreprocContext ? preproc_ctx.recorded : preproc_ctx
     body = Expr(:block, stmts...)
     model = StanBlocks.SlicModel(body, data, mod)
     SBBRMI(brmi, model, data, preproc)
@@ -3299,7 +3327,9 @@ function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool)
         "fit artifact, then request `resample_groups` from it.")
 
     rebound = _sb_rebind_brmi(sb.parent, new_df)
-    cv_template = SBBRMI(rebound; mod=sb.model.mod, cv_groups=groups)
+    cv_template = SBBRMI(
+        rebound; mod=sb.model.mod, cv_groups=groups,
+        _frozen_preproc=freeze ? sb.preproc : nothing)
     _sb_assert_cv_reemission(cv_template, groups)
     preproc = _sb_resample_preproc(sb.preproc, cv_template.preproc, groups)
     hybrid = SBBRMI(cv_template.parent, cv_template.model,
@@ -7667,14 +7697,22 @@ end
 # and `c` broadcast across axes; tuples/vectors specify one value per axis.
 # The tensor basis has `prod(k)` columns. With `by=`, only those basis weights
 # vary per group; length-scale and marginal-SD hyperparameters stay shared.
+function _sb_hsgp_fit_for_emission(data, key, names, axes, K, c, iso)
+    frozen = _sb_frozen_preproc_entry(data, key, :hsgp, names)
+    isnothing(frozen) && return _sb_fit_hsgp(axes, K, c)
+    const_ = frozen.const_
+    (const_.K == K && const_.c == c && const_.iso == iso) || error(
+        "sbimpl: resample replay: fitted HSGP configuration for `$key` no " *
+        "longer matches the re-emitted formula")
+    const_.fits
+end
+
 _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
                     term_overrides=Dict{Symbol,Any}(), kwargs...) = begin
     args = getargs(t); kw = getkwargs(t)
     _check_term_kwargs(hsgp, kw)
     names, axes = _sb_gp_axes(:hsgp, args)
     K, c = _sb_hsgp_options(kw, length(axes))
-    fits = _sb_fit_hsgp(axes, K, c)
-    PHI, omega2 = _sb_apply_hsgp(fits, axes, K)
     suffix = join(string.(names), "_")
     iso = _sb_gp_iso(kw, :hsgp)
 
@@ -7688,6 +7726,9 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         PHI_name = Symbol(:PHI_hsgp_, suffix, :_by_, gname)
         omega2_name = Symbol(:omega2_hsgp_, suffix, :_by_, gname)
         rho_lower_name = Symbol(:rho_lower_hsgp_, suffix, :_by_, gname)
+        fits = _sb_hsgp_fit_for_emission(
+            data, PHI_name, names, axes, K, c, iso)
+        PHI, omega2 = _sb_apply_hsgp(fits, axes, K)
         data[PHI_name] = PHI
         data[omega2_name] = omega2
         data[rho_lower_name] = _sb_hsgp_rho_lower_data(fits, K, iso)
@@ -7706,6 +7747,9 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     PHI_name = Symbol(:PHI_hsgp_, suffix)
     omega2_name = Symbol(:omega2_hsgp_, suffix)
     rho_lower_name = Symbol(:rho_lower_hsgp_, suffix)
+    fits = _sb_hsgp_fit_for_emission(
+        data, PHI_name, names, axes, K, c, iso)
+    PHI, omega2 = _sb_apply_hsgp(fits, axes, K)
     data[PHI_name] = PHI
     data[omega2_name] = omega2
     data[rho_lower_name] = _sb_hsgp_rho_lower_data(fits, K, iso)
