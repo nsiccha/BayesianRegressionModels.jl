@@ -298,6 +298,85 @@ end
     @test identity_link.inverse_link === identity
 end
 
+@testset "term coordinates — monotonic simplex and HSGP internals" begin
+    n = 12
+    term_df = (;
+        y=zeros(n),
+        vessel_bottle=repeat([0.0, 1.0, 0.0], 4),
+        vessel_bottle_20=repeat([0.0, 0.0, 1.0], 4),
+        vessel_tablet=repeat([1.0, 0.0, 0.0], 4),
+        vessel_tablet_20=repeat([0.0, 1.0, 0.0], 4),
+        op_diet=repeat(1:4, 3),
+        op_log_dose=collect(range(-1.0, 1.0; length=n)),
+    )
+    term_builder = @brm begin
+        y ~ Normal(log_F, 1.0)
+        log_F ~ 0 + vessel_bottle + vessel_bottle_20 + vessel_tablet +
+                    vessel_tablet_20 + mo(op_diet) + op_log_dose +
+                    hsgp(op_log_dose; k=5)
+        effect(log_F, :) ~ Normal(0.0, 0.5)
+        effect(log_F, op_log_dose) ~ Normal(0.0, 0.6676)
+        length_scale(:, hsgp(op_log_dose)) ~ LogNormal(0.0, 1.0)
+        sd(:, hsgp(op_log_dose)) ~ LogNormal(0.0, 1.0)
+    end
+    d = brm_descriptor(term_builder, term_df;
+                       mod=@__MODULE__, name=:joint_log_F, highlights=())
+    @test popcoefnames(d.plan.parent, :log_F) == [
+        :vessel_bottle, :vessel_bottle_20, :vessel_tablet,
+        :vessel_tablet_20, :mo_op_diet, :op_log_dose,
+    ]
+
+    prob = brm_execute(d, :fit)
+    names = StanBlocks.BridgeStan.param_names(
+        prob.model; include_tp=false, include_gq=false)
+    simplex = brm_term_coordinates(
+        d, :log_F, names; term=:mo_op_diet, parameter=:simplex)
+    rho = brm_term_coordinates(
+        d, :log_F, names;
+        term=:hsgp_op_log_dose, parameter=:length_scale)
+    amplitude = brm_term_coordinates(
+        d, :log_F, names; term=:hsgp_op_log_dose, parameter=:sd)
+    weights = brm_term_coordinates(
+        d, :log_F, names;
+        term=:hsgp_op_log_dose, parameter=:basis_weights)
+
+    @test length(simplex.coordinates) == 3
+    @test length(rho.coordinates) == 1
+    @test length(amplitude.coordinates) == 1
+    @test length(weights.coordinates) == 5
+    @test simplex.output.declaration.target === :mo_op_diet
+    @test weights.output.declaration.target === :hsgp_op_log_dose
+    @test all(x -> x.link === identity && x.inverse_link === identity,
+              (simplex, rho, amplitude, weights))
+
+    # The numerical workaround and the public selector address the SAME draws.
+    # What the selector removes is the consumer's dependency on these private
+    # compiler spellings, not a mathematical difference in the posterior.
+    workaround_simplex = findall(
+        name -> startswith(name, "mo_op_diet_simplex_incr."), names)
+    workaround_rho = findall(==("hsgp_op_log_dose_rho_iso"), names)
+    workaround_amplitude = findall(==("hsgp_op_log_dose_sigma"), names)
+    workaround_weights = findall(
+        name -> startswith(name, "hsgp_op_log_dose_beta_raw."), names)
+    @test simplex.coordinates == workaround_simplex
+    @test rho.coordinates == workaround_rho
+    @test amplitude.coordinates == workaround_amplitude
+    @test weights.coordinates == workaround_weights
+
+    @test_throws "available term labels" brm_term_coordinates(
+        d, :log_F, names; term=:mo_missing, parameter=:simplex)
+    @test_throws "available roles are (:simplex,)" brm_term_coordinates(
+        d, :log_F, names; term=:mo_op_diet, parameter=:sd)
+    @test_throws "owns 5 constrained coordinates but resolves to 2" begin
+        partial_names = names[setdiff(eachindex(names), weights.coordinates[3:end])]
+        brm_term_coordinates(
+            d, :log_F, partial_names;
+            term=:hsgp_op_log_dose, parameter=:basis_weights)
+    end
+    @test_throws "0 formula declarations" brm_term_coordinates(
+        d, :missing, names; term=:mo_op_diet, parameter=:simplex)
+end
+
 @testset "semantic output query — role, not emitted name" begin
     d = brm_descriptor(hier_builder, df; mod=@__MODULE__)
     byname = Dict(o.name => o for o in d.outputs)
