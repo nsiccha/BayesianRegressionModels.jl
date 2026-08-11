@@ -46,6 +46,242 @@ const BRM = BayesianRegressionModels
     @test prior_draw.data.sigma isa Float64
 end
 
+@testset "Turing extension — fitted numeric population transforms" begin
+    df = (;
+        x=[1.0, 2.0, 4.0],
+        w=[-2.0, 1.0, 5.0],
+        y=[0.2, 1.1, -0.4],
+    )
+    brmi = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + zscale(x) + center(w)
+        effect(mu, zscale_x) ~ Normal(0.5, 0.25)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    backend = TuringBRMI(brmi)
+
+    x_mean = sum(df.x) / length(df.x)
+    x_scale = sqrt(sum((df.x .- x_mean) .^ 2) / (length(df.x) - 1))
+    w_mean = sum(df.w) / length(df.w)
+    expected_X = hcat(
+        ones(length(df.y)),
+        (df.x .- x_mean) ./ x_scale,
+        df.w .- w_mean,
+    )
+    @test backend.plan.design.matrix ≈ expected_X
+    @test Tuple(c.label for c in backend.plan.design.columns) ==
+          (:Intercept, :zscale_x, :center_w)
+    @test backend.plan.beta_location == [0.0, 0.5, 0.0]
+    @test backend.plan.beta_scale == [1.0, 0.25, 1.0]
+
+    params = (; beta_pop=[0.25, -0.5, 0.4], sigma=0.8)
+    mu = expected_X * params.beta_pop
+    prior = sum(logpdf.(Normal.(backend.plan.beta_location,
+                               backend.plan.beta_scale), params.beta_pop)) +
+            logpdf(Exponential(2), params.sigma)
+    likelihood = sum(logpdf.(Normal.(mu, params.sigma), df.y))
+    @test Turing.logjoint(backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+    @test Turing.DynamicPPL.returned(backend.model, params).mu ≈ mu
+end
+
+@testset "Turing extension — continuous transformed interaction" begin
+    df = (;
+        x=[1.0, 2.0, 4.0],
+        w=[-2.0, 1.0, 5.0],
+        y=[0.2, 1.1, -0.4],
+    )
+    brmi = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + zscale(x) & w
+        effect(mu, int_zscale_x_x_w) ~ Normal(0.5, 0.25)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    backend = TuringBRMI(brmi)
+
+    fitted = BRM._brm_fit_zscale(df.x)
+    interaction = BRM._brm_apply_zscale(fitted, df.x) .* df.w
+    expected_X = hcat(ones(length(df.y)), interaction)
+    @test backend.plan.design.matrix ≈ expected_X
+    @test Tuple(c.label for c in backend.plan.design.columns) ==
+          (:Intercept, :int_zscale_x_x_w)
+    @test backend.plan.beta_location == [0.0, 0.5]
+    @test backend.plan.beta_scale == [1.0, 0.25]
+
+    params = (; beta_pop=[0.25, -0.5], sigma=0.8)
+    mu = expected_X * params.beta_pop
+    prior = sum(logpdf.(Normal.(backend.plan.beta_location,
+                               backend.plan.beta_scale), params.beta_pop)) +
+            logpdf(Exponential(2), params.sigma)
+    likelihood = sum(logpdf.(Normal.(mu, params.sigma), df.y))
+    @test Turing.logjoint(backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+    @test Turing.DynamicPPL.returned(backend.model, params).mu ≈ mu
+end
+
+@testset "Turing extension — categorical treatment contrasts" begin
+    df = (;
+        g=[1, 2, 3, 1, 2, 3],
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        y=[-2.4, -2.2, -2.0, -1.8, -1.7, -1.5],
+    )
+    brmi = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + g + x
+        effect(mu, g) ~ Normal(0.5, 0.25)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    backend = TuringBRMI(brmi)
+
+    expected_X = hcat(
+        ones(6),
+        Float64.(df.g .== 2),
+        Float64.(df.g .== 3),
+        df.x,
+    )
+    @test backend.plan.design.matrix == expected_X
+    @test Tuple(c.label for c in backend.plan.design.columns) ==
+          (:Intercept, :g_lvl_2, :g_lvl_3, :x)
+    @test backend.plan.beta_location == [0.0, 0.5, 0.5, 0.0]
+    @test backend.plan.beta_scale == [1.0, 0.25, 0.25, 1.0]
+
+    params = (; beta_pop=[0.25, -0.5, 0.4, 0.2], sigma=0.8)
+    mu = expected_X * params.beta_pop
+    prior = sum(logpdf.(Normal.(backend.plan.beta_location,
+                               backend.plan.beta_scale), params.beta_pop)) +
+            logpdf(Exponential(2), params.sigma)
+    likelihood = sum(logpdf.(Normal.(mu, params.sigma), df.y))
+    @test Turing.logjoint(backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+    @test Turing.DynamicPPL.returned(backend.model, params).mu ≈ mu
+
+    declared = BRM.CA.categorical(
+        [1, 2, 3, 1, 2, 3]; levels=[3, 1, 2])
+    declared_brmi = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + g
+        effect(mu, g) ~ Normal(0.5, 0.25)
+        y ~ Normal(mu, sigma)
+    end)((; g=declared, y=df.y))
+    declared_backend = TuringBRMI(declared_brmi)
+    @test declared_backend.plan.design.matrix == hcat(
+        ones(6), Float64.(declared .== 1), Float64.(declared .== 2))
+    @test declared_backend.plan.design.columns[2].preprocess.const_.levels ==
+          [3, 1, 2]
+    @test declared_backend.plan.beta_location == [0.0, 0.5, 0.5]
+    @test declared_backend.plan.beta_scale == [1.0, 0.25, 0.25]
+end
+
+@testset "Turing extension — categorical reference level" begin
+    df = (;
+        g=[1, 2, 3, 1, 2, 3],
+        y=[-2.4, -2.2, -2.0, -1.8, -1.7, -1.5],
+    )
+    brmi = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + factor(g; ref=3)
+        effect(mu, g) ~ Normal(-0.5, 0.2)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    backend = TuringBRMI(brmi)
+    expected_X = hcat(
+        ones(6), Float64.(df.g .== 2), Float64.(df.g .== 1))
+    @test backend.plan.design.matrix == expected_X
+    @test Tuple(c.label for c in backend.plan.design.columns) ==
+          (:Intercept, :g__ref_3_lvl_2, :g__ref_3_lvl_3)
+    @test backend.plan.beta_location == [0.0, -0.5, -0.5]
+    @test backend.plan.beta_scale == [1.0, 0.2, 0.2]
+
+    params = (; beta_pop=[0.25, -0.5, 0.4], sigma=0.8)
+    mu = expected_X * params.beta_pop
+    prior = sum(logpdf.(Normal.(backend.plan.beta_location,
+                               backend.plan.beta_scale), params.beta_pop)) +
+            logpdf(Exponential(2), params.sigma)
+    likelihood = sum(logpdf.(Normal.(mu, params.sigma), df.y))
+    @test Turing.logjoint(backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+
+    ambiguous = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + factor(g; ref=2) + factor(g; ref=3)
+        effect(mu, g) ~ Normal(0, 0.5)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    @test_throws "ambiguously names categorical contrast blocks" begin
+        TuringBRMI(ambiguous)
+    end
+end
+
+@testset "Turing extension — categorical interactions" begin
+    df = (;
+        x=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        g=[1, 2, 3, 1, 2, 3],
+        h=[1, 1, 2, 2, 1, 2],
+        y=[0.2, 1.1, -0.4, 0.7, 1.4, -0.8],
+    )
+    brmi = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x & g + g & h
+        effect(mu, int_x_x_g_lvl_2) ~ Normal(0.5, 0.25)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    backend = TuringBRMI(brmi)
+    expected_X = hcat(
+        ones(6),
+        df.x .* (df.g .== 2),
+        df.x .* (df.g .== 3),
+        (df.g .== 2) .* (df.h .== 2),
+        (df.g .== 3) .* (df.h .== 2),
+    )
+    @test backend.plan.design.matrix == expected_X
+    @test Tuple(c.label for c in backend.plan.design.columns) == (
+        :Intercept,
+        :int_x_x_g_lvl_2,
+        :int_x_x_g_lvl_3,
+        :int_g_lvl_2_x_h_lvl_2,
+        :int_g_lvl_3_x_h_lvl_2,
+    )
+    @test backend.plan.beta_location == [0.0, 0.5, 0.0, 0.0, 0.0]
+    @test backend.plan.beta_scale == [1.0, 0.25, 1.0, 1.0, 1.0]
+
+    params = (; beta_pop=[0.25, -0.5, 0.4, 0.2, -0.1], sigma=0.8)
+    mu = expected_X * params.beta_pop
+    prior = sum(logpdf.(Normal.(backend.plan.beta_location,
+                               backend.plan.beta_scale), params.beta_pop)) +
+            logpdf(Exponential(2), params.sigma)
+    likelihood = sum(logpdf.(Normal.(mu, params.sigma), df.y))
+    @test Turing.logjoint(backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+end
+
+@testset "Turing extension — pure expression and exposure offset" begin
+    df = (;
+        x=[1.0, 2.0, 4.0],
+        exposure=[2.0, 4.0, 8.0],
+        y=[0, 2, 5],
+    )
+    brmi = (@brm begin
+        log_rate ~ 1 + log(x) + offset(log(exposure))
+        y ~ Poisson(exp(log_rate))
+    end)(df)
+    backend = TuringBRMI(brmi)
+    expected_X = hcat(ones(3), log.(df.x))
+    @test backend.plan.design.matrix == expected_X
+    @test backend.plan.design.fixed == log.(df.exposure)
+    @test only(backend.plan.design.fixed_terms).source === :exposure
+
+    params = (; beta_pop=[0.25, -0.5])
+    log_rate = expected_X * params.beta_pop + log.(df.exposure)
+    rate = exp.(log_rate)
+    prior = sum(logpdf.(Normal(), params.beta_pop))
+    likelihood = sum(logpdf.(Poisson.(rate), df.y))
+    returned = Turing.DynamicPPL.returned(backend.model, params)
+    @test Turing.logjoint(backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+    @test returned.log_rate ≈ log_rate
+    @test returned.rate ≈ rate
+end
+
 @testset "Turing extension — population effect-prior overrides" begin
     df = (; x=[-1.0, 0.5, 2.0], y=[0.2, 1.1, -0.4])
     brmi = (@brm begin
@@ -133,13 +369,13 @@ end
 end
 
 @testset "Turing extension — unsupported shapes fail loudly" begin
-    categorical = (@brm begin
+    unsupported_string_column = (@brm begin
         sigma ~ Exponential(1)
         mu ~ 1 + group
         y ~ Normal(mu, sigma)
-    end)((; group=[1, 2, 1], y=zeros(3)))
-    @test_throws "supports only `1` and continuous raw-data columns" begin
-        TuringBRMI(categorical)
+    end)((; group=["a", "b", "a"], y=zeros(3)))
+    @test_throws "supports `1`, continuous raw-data columns" begin
+        TuringBRMI(unsupported_string_column)
     end
 
     poisson_identity = (@brm begin

@@ -1785,12 +1785,7 @@ end
 # Categorical -> (n_levels::Int, per-row level index::Vector{Int}). Mirrors
 # vimpl._level_index so the integer indices the walker stashes in `data`
 # agree with what the cimpl-side uses.
-_sb_level_index(raw::CA.CategoricalVector) = length(CA.levels(raw)), Int.(CA.levelcode.(raw))
-_sb_level_index(raw::AbstractVector) = begin
-    lvls = sort(unique(raw))
-    lm = Dict(l => i for (i, l) in enumerate(lvls))
-    length(lvls), [lm[l] for l in raw]
-end
+_sb_level_index(raw::AbstractVector) = _brm_level_index(raw)
 
 # Fit/apply split for categorical level coding (factor / mo). `_sb_fit_levels`
 # returns the ordered level set (the frozen constant); `_sb_apply_levels` maps a
@@ -1800,7 +1795,6 @@ end
 # for a CategoricalVector the level position == `CA.levelcode`; for a plain
 # vector `sort(unique)` gives the same ordering. `_sb_level_index` (the
 # construct-time entry) is unchanged.
-_brm_fit_levels(raw::CA.CategoricalVector) = CA.levels(raw)
 _sb_fit_levels(raw::AbstractVector) = _brm_fit_levels(raw)
 _sb_apply_levels(levels, raw::CA.CategoricalVector) = _sb_apply_levels(levels, CA.unwrap.(raw))
 _sb_apply_levels(levels, raw::AbstractVector) = begin
@@ -3222,6 +3216,32 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             "($(length(left)) vs $(length(right)))")
         new_data[key] = collect(Float64, left .* right)
         new_preproc[key] = e
+    elseif e.kind === :population_factor_dummy
+        raw = _sb_df_column(df, e.raw_ref)
+        raw isa AbstractVector || error(
+            "sbimpl: reprocess: categorical population predictor " *
+            "`$(e.raw_ref)` must be a vector, got $(typeof(raw))")
+        ref = e.const_.ref
+        recoded = if ref == 1
+            raw
+        else
+            raw isa AbstractVector{<:Integer} || error(
+                "sbimpl: reprocess: `factor($(e.raw_ref); ref=$ref)` requires " *
+                "integer-coded categorical data")
+            Int[value == ref ? 1 : value == 1 ? ref : value for value in raw]
+        end
+        levels = freeze ? e.const_.levels : _sb_fit_levels(recoded)
+        length(levels) == e.const_.n_levels || error(
+            "sbimpl: reprocess: categorical population predictor " *
+            "`$(e.raw_ref)` has $(length(levels)) levels, but the fitted " *
+            "interaction design has $(e.const_.n_levels). Preserve the fitted " *
+            "level count or rebuild the model.")
+        idx = _sb_apply_levels(levels, recoded)
+        new_data[key] = Float64[i == e.const_.level ? 1.0 : 0.0 for i in idx]
+        new_preproc[key] = PreprocEntry(
+            :population_factor_dummy,
+            (; levels, level=e.const_.level, n_levels=e.const_.n_levels, ref),
+            e.raw_ref, true)
     elseif e.kind === :group_index
         raw = _sb_df_column(df, e.raw_ref)
         raw isa AbstractVector || error(
@@ -4910,14 +4930,27 @@ end
 _sb_classify_term!(t, pop_terms, ran_terms, direct_terms) =
     isnothing(_sb_cat_levels(t)) ? push!(pop_terms, t) : push!(direct_terms, t)
 
+function _sb_shared_population_column!(data, column)
+    isnothing(column.source) && return nothing
+    p = column.preprocess
+    if !isnothing(p)
+        for dependency in p.dependencies
+            _sb_shared_population_column!(data, dependency)
+        end
+        _sb_record_preproc!(data, column.label,
+            PreprocEntry(p.kind, p.const_, p.raw_ref, false))
+    end
+    data[column.label] = column.values
+    column.label
+end
+
 function _sb_shared_population_cols!(cols, data,
                                      design::_BRMPopulationDesign)
     for column in design.columns
         if isnothing(column.source)
             push!(cols, :(rep_vector(1.0, num_elements($(design.row_source)))))
         else
-            data[column.source] = column.values
-            push!(cols, column.source)
+            push!(cols, _sb_shared_population_column!(data, column))
         end
     end
     cols
@@ -7726,28 +7759,21 @@ _sb_materialize_vec(x) = error("sbimpl: cannot materialize $(typeof(x)) inside w
 # a vector. The fused `_sb_zscale`/`_sb_center` keep construct-time behaviour
 # byte-identical (fit∘apply == the old one-pass), and `reprocess` reuses the
 # apply half with a frozen constant for prediction-replay (decision nr3v8n A).
-_sb_fit_zscale(v::AbstractVector{<:Real}) = let
-    # One fitted-preprocessing contract serves NativePPL, VBRMI, and SBBRMI:
-    # corrected sample SD, including the stable extreme-value path. Keeping
-    # a population-SD copy here made an unchanged BRMI a different statistical
-    # model in Stan whenever a transformed coefficient carried a prior.
-    fit = _native_ppl_fit_zscale(v, :predictor)
-    (fit.mean, fit.scale)
-end
-_sb_apply_zscale(c::Tuple, v::AbstractVector{<:Real}) = (v .- c[1]) ./ c[2]
+_sb_fit_zscale(v::AbstractVector{<:Real}) = _brm_fit_zscale(v)
+_sb_apply_zscale(c::Tuple, v::AbstractVector{<:Real}) =
+    _brm_apply_zscale(c, v)
 _sb_zscale(v::AbstractVector{<:Real}) = _sb_apply_zscale(_sb_fit_zscale(v), v)
 
-_sb_fit_center(v::AbstractVector{<:Real}) = sum(v) / length(v)
-_sb_apply_center(mu::Real, v::AbstractVector{<:Real}) = v .- mu
+_sb_fit_center(v::AbstractVector{<:Real}) = _brm_fit_center(v)
+_sb_apply_center(mu::Real, v::AbstractVector{<:Real}) =
+    _brm_apply_center(mu, v)
 _sb_center(v::AbstractVector{<:Real}) = _sb_apply_center(_sb_fit_center(v), v)
 
 # Stable, human-readable column name for a wrapped predictor. When the
 # inner is a single NamedColumn we tag with its name; otherwise we hash
 # the expr structure so multiple `protect(...)` summands don't collide.
-_sb_wrapper_col_name(prefix::Symbol, inner::NamedColumn) =
-    Symbol(prefix, :_, name(inner))
 _sb_wrapper_col_name(prefix::Symbol, inner) =
-    Symbol(prefix, :_expr_, string(hash(inner); base=16)[1:8])
+    _brm_wrapper_col_name(prefix, inner)
 
 _n_obs_name(t::NamedColumn) = _n_obs_named_data(t, parent(t))
 _n_obs_name(_) = nothing
