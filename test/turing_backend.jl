@@ -171,6 +171,75 @@ end
 end
 
 
+@testset "Turing extension — replay composes responses and evidence" begin
+    training = (;
+        x=[-2.0, -0.5, 1.0, 3.0],
+        upper=[0.5, 0.8, 1.1, 1.4],
+        repeats=[1, 2, 3, 4],
+        outcome=[0.2, 0.8, -0.1, 1.4],
+    )
+    evidence = TuringBRMI((@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + center(x)
+        outcome ~ weighted(
+            censored(Normal(mu, sigma); upper=upper),
+            fweights(repeats))
+    end)(training))
+    future = (;
+        x=[10.0, 12.0, 14.0],
+        upper=[0.4, 0.9, 1.3],
+        repeats=[0, 5, 2],
+        outcome=[0.1, 0.9, 0.7],
+    )
+    replayed = reprocess(evidence, future)
+    params = (; beta_pop=[0.3, -0.2], sigma=0.7)
+    fitted_center = BRM._brm_fit_center(training.x)
+    centered_x = BRM._brm_apply_center(fitted_center, future.x)
+    mu = params.beta_pop[1] .+ params.beta_pop[2] .* centered_x
+    expected = sum(eachindex(future.outcome)) do i
+        future.repeats[i] * logpdf(censored(
+            Normal(mu[i], params.sigma); upper=future.upper[i]),
+            future.outcome[i])
+    end
+
+    @test replayed.plan.design.matrix[:, 2] ≈ centered_x
+    @test replayed.plan.response_modifier.upper == future.upper
+    @test replayed.plan.observation_weight.values == future.repeats
+    @test Turing.loglikelihood(replayed.model, params) ≈
+          expected atol=1e-12 rtol=1e-12
+    @test turing_pointwise_loglikelihoods(replayed, params).outcome ≈ [
+        future.repeats[i] * logpdf(censored(
+            Normal(mu[i], params.sigma); upper=future.upper[i]),
+            future.outcome[i]) for i in eachindex(future.outcome)
+    ]
+
+    shared_training = (;
+        x=training.x,
+        y=training.outcome,
+        y2=reverse(training.outcome),
+    )
+    shared = TuringBRMI((@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + zscale(x)
+        y ~ Normal(mu, sigma)
+        y2 ~ Normal(mu, sigma)
+    end)(shared_training))
+    shared_future = (;
+        x=[4.0, 7.0], y=[0.3, -0.2], y2=[-0.1, 0.6])
+    shared_replay = reprocess(shared, shared_future)
+    shared_draw = rand(Xoshiro(64), shared.model)
+    shared_predictive = turing_posterior_predictive(
+        Xoshiro(65), shared_replay, shared_draw.data)
+
+    @test shared_replay.plan.owners == (1, 1)
+    @test shared_replay.plan.responses == (:y, :y2)
+    @test isfinite(Turing.logjoint(shared_replay.model, shared_draw.data))
+    @test propertynames(shared_predictive) == (:y, :y2)
+    @test length(shared_predictive.y) == length(shared_future.y)
+    @test length(shared_predictive.y2) == length(shared_future.y2)
+end
+
+
 @testset "Turing extension — partially missing Gaussian response" begin
     df = (;
         x=[-1.0, 0.5, 2.0, 0.25],

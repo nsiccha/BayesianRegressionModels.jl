@@ -213,6 +213,28 @@ context and population-design plan; the extension turns that plan into a
 `DynamicPPL.Model`. It does not construct or inspect `SBBRMI`,
 `GenerativePlan`, `StanBlocks.SlicModel`, emitted SLIC, or Stan code.
 
+## Outputs and replay
+
+`turing_pointwise_loglikelihoods` returns response-named, row-aligned
+log-likelihood vectors; latent rows of a partly missing response remain
+`missing`. `turing_generated_quantities` evaluates the model's deterministic
+return value at one constrained draw. `turing_posterior_predictive` regenerates
+every response row at one constrained draw, including rows that were latent in
+the fitted model. For a fitted chain, `Turing.predict(backend, chain)` performs
+the same response-latent exclusion before running DynamicPPL's chain-level
+prediction.
+
+`reprocess(backend, new_data)` rebuilds the direct BRMI plan on new rows while
+reusing fitted centers, scales, categorical coordinates, interactions, offsets,
+and existing group coordinates. `freeze_constants=false` explicitly refits
+those preprocessing constants. Reusing existing groups is supported; unseen
+categorical levels fail closed. For a new population,
+`resample_groups=:subject` takes the selected group's levels from `new_data` and
+posterior prediction redraws only its standardized effects while retaining the
+fitted scales and correlation factors. The same exclusion applies to
+`Turing.predict(backend, chain)`, so fitted group latents are not silently
+reused for a resampled block.
+
 ## Parity contract
 
 “Parity” means the same admitted BRMI has the same constrained prior and
@@ -228,23 +250,21 @@ the Turing backend refuses the surface rather than approximating it.
 | BRMI surface | Turing status | Current contract / next shared seam |
 | --- | --- | --- |
 | Backend boundary | **Supported** | Direct `BRMI` → backend-neutral plan → Turing extension; core loads without Turing |
-| Observation topology | **Partial** | Exactly one direct response named `y`; arbitrary names, multiple responses, distributional predictors, and hierarchical/ragged axes are pending |
-| Population design | **Partial** | Additive intercept and continuous raw/fitted-transform columns share `_BRMPopulationDesign` with SBBRMI; ordered treatment contrasts reuse SBBRMI's level-coding primitive and effect-address semantics |
-| Population transforms and terms | **Partial** | Numeric data expressions, fixed data-derived `offset`, fitted transforms, continuous/categorical interactions, treatment contrasts, and integer `factor(...; ref=k)` are supported; sampled-parameter offsets, `mo`/`mo1`, `me`, `s`, `t2`, `gp`, and `hsgp` are pending |
-| Population coefficient priors | **Partial** | Independent `Normal(0, 1)` defaults plus `effect(lp, coef)`, `effect(:, coef)`, and `:` coefficient defaults with the same specificity/tie rules as SBBRMI; current Turing hyperparameters must be finite numeric constants |
-| Scalar and structured priors | **Partial** | Gaussian scale accepts explicit `Exponential(scale)`; general scalar, horseshoe, simplex, R2D2, term, and latent priors are pending |
-| Gaussian identity likelihood | **Supported** | `sigma ~ Exponential(scale)`, `mu ~ 1 + continuous...`, `y ~ Normal(mu, sigma)` |
-| Bernoulli-logit likelihood | **Supported** | Canonical `logit(p) ~ formula; y ~ Bernoulli(p)` and explicit linked-scale `eta ~ formula; y ~ BernoulliLogit(eta)` share one stable logit executor |
-| Binomial-logit likelihood | **Supported** | Canonical `logit(p) ~ formula; y ~ Binomial(trials, p)` and explicit `BinomialLogit(trials, eta)` share count validation and one stable logit executor; trials may be constant or row-wise integers |
-| Poisson-log likelihood | **Supported** | Canonical `log(lambda) ~ formula; y ~ Poisson(lambda)` and explicit linked-scale `log_rate ~ formula; y ~ Poisson(exp(log_rate))` share one predictor/link plan |
-| Negative-binomial-2 likelihood | **Supported** | `log(mu) ~ formula; log(phi) ~ formula; y ~ NegativeBinomial2(mu, phi)` uses two shared predictor/link/effect-prior plans and distinct Turing coefficient vectors |
-| Other scalar likelihoods | **Pending** | The built-in catalogue in [Likelihoods](likelihoods.md), including Distributions.jl `NegativeBinomial`, beta-binomial, hurdle/mixture, circular, quantile, and ordinal families |
-| Group/random effects | **Pending** | Plain and correlated groups, `|ID|` blocks, centering/CV, stratification, multi-membership, and their SD/correlation/effect priors |
-| Response compositions | **Pending** | Truncation, censoring, interval evidence, observation weights, missing-response inference, measurement error, and concise categorical formulas |
-| Density decomposition | **Partial** | Turing `logjoint`, `logprior`, and `loglikelihood` are exact for the five supported likelihood shapes; pointwise named log-likelihood outputs are pending |
-| Generated quantities | **Partial** | Returns `mu`, `eta`, or `log_rate`/`rate`; BRM-standard predictive draws and output naming are pending |
-| Replay and prediction | **Pending** | Frozen preprocessing, new-data replay, population-only prediction, transported group effects, and new-level policy |
-| Descriptor/introspection parity | **Pending** | `brm_descriptor`, output coordinates, highlights, and backend capability reporting |
+| Population design | **Partial** | Intercepts, raw and fitted numeric transforms, pure data expressions, offsets, treatment contrasts, and continuous/categorical interactions |
+| Population priors | **Partial** | Independent Normal defaults plus shared `effect(...)` specificity and addressing semantics |
+| Gaussian identity | **Supported** | Population and admitted grouped predictors with explicit Exponential scale prior |
+| Bernoulli/Binomial logit | **Supported** | Canonical linked declarations and explicit stable-logit families |
+| Poisson log | **Supported** | Canonical linked declarations, data offsets, and admitted grouped predictors |
+| NegativeBinomial2 | **Supported subset** | Shared mean/precision population plans and one admitted group block per predictor |
+| BetaBinomial2 | **Supported subset** | Shared mean/precision population plans and one admitted group block per predictor |
+| Group effects | **Partial** | Plain intercepts, one correlated raw-continuous slope block, and admitted exact-zero-correlation blocks |
+| Response evidence | **Partial** | Truncated, censored, and interval-censored Normal/Poisson observations; wider modifiers remain pending |
+| Missing responses | **Supported subset** | `mi(y) ~ Normal(mu, sigma)` imputes missing rows from the same conditional family and keeps observed rows in the likelihood |
+| Multiple responses | **Supported subset** | Independent blocks are namespaced; exactly compatible shared predictors/group blocks are sampled once and reused, while partial or incompatible overlaps fail closed |
+| Observation weights | **Supported subset** | Analytic Normal weights rescale sigma; frequency and power weights scale density while predictive draws retain the base distribution |
+| Advanced terms | **Pending** | Splines, `t2`, `mo`, `me`, GP/HSGP, shared-ID covariance, multiple/crossed blocks, and kernel/ragged models fail loudly |
+| Outputs | **Supported subset** | Row-aligned pointwise likelihoods, deterministic returned quantities, one-draw posterior prediction, and chain-level Turing prediction; fitted response latents are excluded before regeneration |
+| Replay | **Supported subset** | Frozen preprocessing and existing-group coordinates replay on new rows; refitting constants is explicit; `resample_groups` rebuilds selected level axes and redraws their standardized effects while retaining fitted covariance parameters |
 
 The executable checks live in `test/backend_plan.jl` and
 `test/turing_backend.jl`. Each expansion should first add or extend a shared
@@ -256,11 +276,14 @@ postprocessing oracle.
 Within the current slice, all of the following are rejected explicitly:
 
 - string/object population columns that are not explicit `CategoricalVector`s;
-- random effects and group blocks;
-- non-Normal or nonconstant population priors, random-effect priors, R2D2, or term-prior overrides;
-- response decorators, multiple likelihoods, or extra model statements;
-- unsupported links or likelihood families beyond Normal-identity, Bernoulli-logit, Binomial-logit, and Poisson-log; and
-- missing values or mismatched row axes.
+- multiple/crossed group blocks, shared `|ID|` covariance, transformed or
+  categorical random slopes, and advanced group structures;
+- non-Normal or nonconstant population priors, random-effect prior overrides,
+  R2D2, and term-prior overrides;
+- advanced terms such as splines, `t2`, `mo`, `me`, GP/HSGP, and kernel/ragged
+  models; and
+- unsupported links, likelihood families, evidence/weight compositions, or
+  mismatched row axes outside the subsets listed above.
 
 This boundary is intentional and temporary: it prevents the Turing backend
 from silently looking compatible while assigning a different model.
