@@ -1514,6 +1514,40 @@ _brm_predictive_response_varnames(plan::BRM._TuringMultiResponsePlan) =
         length(plan.plans),
     )
 
+_brm_initialized_chain_skeleton(value) = value
+# DynamicPPL 0.41 can leave `#undef` entries in the skeleton of a
+# heterogeneous array of prefixed submodels.  Prediction normally avoids the
+# broken template through exact chain-key matches, but new-group replay removes
+# one such key and therefore needs every remaining skeleton slot initialized.
+function _brm_initialized_chain_skeleton(value::AbstractArray)
+    initialized = Array{Any}(undef, size(value))
+    for i in eachindex(value)
+        initialized[i] = isassigned(value, i) ?
+                         _brm_initialized_chain_skeleton(value[i]) : nothing
+    end
+    initialized
+end
+function _brm_initialized_chain_skeleton(
+        value::Turing.DynamicPPL.VarNamedTuple)
+    Turing.DynamicPPL.VarNamedTuple(
+        map(_brm_initialized_chain_skeleton, value.data))
+end
+
+function _brm_initialized_predictive_chain(chain)
+    flexi = Turing.FlexiChains
+    flexi.FlexiChain{Turing.DynamicPPL.VarName}(
+        flexi.niters(chain),
+        flexi.nchains(chain),
+        chain._data;
+        structures=map(
+            _brm_initialized_chain_skeleton, chain._structures),
+        iter_indices=flexi.iter_indices(chain),
+        chain_indices=flexi.chain_indices(chain),
+        sampling_time=flexi.sampling_time(chain),
+        last_sampler_state=flexi.last_sampler_state(chain),
+    )
+end
+
 function _brm_predictive_chain(backend, chain)
     response_varnames = _brm_predictive_response_varnames(backend.plan)
     resampled_parameters = _brm_resampled_parameter_names(backend)
@@ -1526,7 +1560,9 @@ function _brm_predictive_chain(backend, chain)
         end
         !is_response && string(name) ∉ resampled_parameters
     end
-    chain[retained]
+    predictive_chain = chain[retained]
+    isempty(resampled_parameters) && return predictive_chain
+    _brm_initialized_predictive_chain(predictive_chain)
 end
 
 function Turing.predict(
@@ -1682,13 +1718,14 @@ function _brm_resampled_parameter_names(backend::BRM.TuringBRMI)
         removed = Set{String}()
         for i in eachindex(backend.plan.plans)
             backend.plan.owners[i] == i || continue
-            for name in _brm_resampled_latents(backend.plan.plans[i], groups)
+            for name in _brm_resampled_latent_paths(
+                    backend.plan.plans[i], groups)
                 push!(removed, "responses[$i].$name")
             end
         end
         return removed
     end
-    Set(string(name) for name in _brm_resampled_latents(backend.plan, groups))
+    _brm_resampled_latent_paths(backend.plan, groups)
 end
 
 function BRM.turing_posterior_predictive(

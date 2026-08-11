@@ -1235,6 +1235,26 @@ end
     @test "groups[2].log_scale" in replay_names
     predictive = turing_posterior_predictive(Xoshiro(113), replayed, params)
     @test length(predictive.y) == length(df.y)
+
+    fitted_chain = sample(
+        Xoshiro(114), backend.model, Prior(), 2; progress=false)
+    chain_predictive = Turing.predict(
+        Xoshiro(115), replayed, fitted_chain; include_all=false)
+    fitted_by_name = Dict(
+        string(getfield(key, :name)) => key for key in keys(fitted_chain)
+        if hasfield(typeof(key), :name))
+    predictive_by_name = Dict(
+        string(getfield(key, :name)) => key for key in keys(chain_predictive)
+        if hasfield(typeof(key), :name))
+    @test haskey(fitted_by_name, "groups[1].z_flat")
+    @test haskey(fitted_by_name, "groups[2].z")
+    @test !haskey(predictive_by_name, "groups[1].z_flat")
+    @test haskey(predictive_by_name, "groups[2].z")
+    old_item_latents = fitted_chain[fitted_by_name["groups[2].z"]]
+    new_item_latents = chain_predictive[predictive_by_name["groups[2].z"]]
+    @test all(
+        new_item_latents[i, j] != old_item_latents[i, j]
+        for i in axes(new_item_latents, 1), j in axes(new_item_latents, 2))
 end
 
 
