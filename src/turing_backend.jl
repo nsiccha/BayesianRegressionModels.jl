@@ -49,11 +49,17 @@ struct _TuringMultiResponsePlan{N<:Tuple,P<:Tuple,O<:Tuple}
 end
 
 """
-    TuringBRMI
+    TuringBRMI(brmi; centered_groups=(), cv_groups=())
 
 A [`BRMI`](@ref) lowered to the Turing backend. `plan` is the strict,
 Stan-independent semantic plan; `model` is the concrete DynamicPPL model
 provided by `BayesianRegressionModelsTuringExt` when Turing is loaded.
+
+Groups named in `centered_groups` sample their model-scale effects directly;
+all others use the default non-centered geometry. `cv_groups` is accepted only
+to give a loud boundary: it controls emitted Stan artifact sizing and therefore
+does not apply to the dynamic Turing model. Use
+`reprocess(backend, new_data; resample_groups=...)` for new group populations.
 """
 struct _TuringReplayState{G<:Tuple}
     resample_groups::G
@@ -189,11 +195,21 @@ function _turing_replay_random_effects(
         "Turing backend: replay changed the random-effect block count")
     Tuple(map(zip(training, fresh)) do (old, new)
         old.predictor === new.predictor && old.id === new.id &&
-        old.group === new.group || error(
+        old.group === new.group && old.by === new.by || error(
             "Turing backend: replay changed random-effect block identity")
-        old.group in resample_groups ? new :
+        old.group in resample_groups ?
+            _turing_resampled_random_effect_plan(old, new) :
             _brm_replay_random_effect_plan(old, context)
     end)
+end
+
+function _turing_resampled_random_effect_plan(old::_BRMRandomEffectPlan,
+                                              new::_BRMRandomEffectPlan)
+    _BRMRandomEffectPlan(
+        new.predictor, new.id, new.group, new.by, new.levels, new.strata,
+        new.indices, new.stratum_indices, new.group_strata, new.columns,
+        new.matrix, new.intercept_only, new.zero_correlation, old.centered,
+        old.sd_family, old.sd_rate, old.lkj_eta)
 end
 
 function _turing_replay_plan(
@@ -239,13 +255,24 @@ end
 
 
 _turing_group_names(plan::_TuringPopulationPlan) =
-    Set(block.group for block in plan.random_effects)
+    Set{Symbol}(block.group for block in plan.random_effects)
 _turing_group_names(plan::_TuringMeanPrecisionPlan) = union(
-    Set(block.group for block in plan.mean.random_effects),
-    Set(block.group for block in plan.precision.random_effects))
+    Set{Symbol}(block.group for block in plan.mean.random_effects),
+    Set{Symbol}(block.group for block in plan.precision.random_effects))
 function _turing_group_names(plan::_TuringMultiResponsePlan)
     groups = Set{Symbol}()
     foreach(child -> union!(groups, _turing_group_names(child)), plan.plans)
+    groups
+end
+
+_turing_centered_group_names(plan::_TuringPopulationPlan) =
+    Set{Symbol}(block.group for block in plan.random_effects if block.centered)
+_turing_centered_group_names(plan::_TuringMeanPrecisionPlan) = union(
+    Set{Symbol}(block.group for block in plan.mean.random_effects if block.centered),
+    Set{Symbol}(block.group for block in plan.precision.random_effects if block.centered))
+function _turing_centered_group_names(plan::_TuringMultiResponsePlan)
+    groups = Set{Symbol}()
+    foreach(child -> union!(groups, _turing_centered_group_names(child)), plan.plans)
     groups
 end
 
@@ -403,15 +430,65 @@ end
 function _turing_with_ranef_prior(block::_BRMRandomEffectPlan,
                                   sd_family, sd_rate, lkj_eta)
     _BRMRandomEffectPlan(
-        block.predictor, block.id, block.group, block.levels, block.indices,
+        block.predictor, block.id, block.group, block.by, block.levels,
+        block.strata, block.indices, block.stratum_indices, block.group_strata,
         block.columns, block.matrix, block.intercept_only,
-        block.zero_correlation, collect(Int, sd_family),
+        block.zero_correlation, block.centered, collect(Int, sd_family),
         collect(Float64, sd_rate), Float64(lkj_eta))
 end
+
+function _turing_with_centering(block::_BRMRandomEffectPlan, centered::Bool)
+    _BRMRandomEffectPlan(
+        block.predictor, block.id, block.group, block.by, block.levels,
+        block.strata, block.indices, block.stratum_indices, block.group_strata,
+        block.columns, block.matrix, block.intercept_only,
+        block.zero_correlation, centered, block.sd_family, block.sd_rate,
+        block.lkj_eta)
+end
+
+function _turing_center_component(component::_TuringPopulationComponent,
+                                  groups::Set{Symbol})
+    random_effects = Tuple(
+        _turing_with_centering(block, block.group in groups)
+        for block in component.random_effects)
+    _TuringPopulationComponent(
+        component.predictor, component.design, component.beta_location,
+        component.beta_scale, random_effects)
+end
+
+function _turing_center_groups(plan::_TuringPopulationPlan,
+                               groups::Set{Symbol})
+    random_effects = Tuple(
+        _turing_with_centering(block, block.group in groups)
+        for block in plan.random_effects)
+    _TuringPopulationPlan(
+        plan.family, plan.context, plan.predictor, plan.design, plan.response,
+        plan.beta_location, plan.beta_scale, plan.family_args, plan.scale_prior,
+        random_effects, plan.missing_response, plan.response_modifier,
+        plan.observation_weight)
+end
+
+function _turing_center_groups(plan::_TuringMeanPrecisionPlan,
+                               groups::Set{Symbol})
+    _TuringMeanPrecisionPlan(
+        plan.family, plan.context, _turing_center_component(plan.mean, groups),
+        _turing_center_component(plan.precision, groups), plan.family_args,
+        plan.response, plan.response_modifier, plan.observation_weight)
+end
+
+_turing_center_groups(plan::_TuringMultiResponsePlan, groups::Set{Symbol}) =
+    _TuringMultiResponsePlan(
+        plan.responses,
+        Tuple(_turing_center_groups(child, groups) for child in plan.plans),
+        plan.owners)
 
 function _turing_apply_ranef_effect_priors(brmi::BRMI, components::Tuple)
     specs = ranef_effect_priors(brmi)
     isempty(specs) && return components
+    any(component -> any(block -> !isnothing(block.by),
+                         component.random_effects), components) && error(
+        "Turing backend: random-effect `sd`/`cor` overrides for stratified " *
+        "`gr(group; by=...)` blocks are not yet supported")
     margins = Dict{Tuple{Symbol,Symbol},Vector{NamedTuple}}()
     locations = Dict{Tuple{Int,Int},Tuple{Tuple{Symbol,Symbol},UnitRange{Int}}}()
     for (component_index, component) in enumerate(components)
@@ -459,6 +536,14 @@ function _turing_materialize_response_modifier(
             support_kind, prefix="Turing backend")
 end
 
+function _turing_has_categorical_basis(column)
+    preprocess = column.preprocess
+    isnothing(preprocess) && return false
+    preprocess.kind === :population_factor_dummy && return true
+    preprocess.kind === :interaction || return false
+    any(_turing_has_categorical_basis, preprocess.dependencies)
+end
+
 function _turing_predictor_component(brmi::BRMI, context::_BRMBackendContext,
                                      predictor::Symbol;
                                      available_predictors=(predictor,),
@@ -479,6 +564,13 @@ function _turing_predictor_component(brmi::BRMI, context::_BRMBackendContext,
                                       for block in random_effects)
         error("Turing backend: zero-correlation `||` random effects for " *
               "predictor `$predictor` are not yet supported by this likelihood plan")
+    end
+    if any(block.zero_correlation &&
+           any(_turing_has_categorical_basis, block.columns)
+           for block in random_effects)
+        error("Turing backend: categorical random slopes inside a " *
+              "zero-correlation `||` block are not yet parity-safe; " *
+              "use correlated `|` random effects")
     end
     predictor_plan = _brm_simple_population_predictor(
         brmi, predictor, context; required=true)
@@ -917,9 +1009,14 @@ function _turing_same_random_effects(left, right)
     length(left) == length(right) || return false
     all(zip(left, right)) do (a, b)
         a.predictor === b.predictor && a.id === b.id && a.group === b.group &&
+        a.by === b.by &&
         a.levels == b.levels && a.indices == b.indices &&
+        a.strata == b.strata && a.stratum_indices == b.stratum_indices &&
+        a.group_strata == b.group_strata &&
         a.matrix == b.matrix && a.intercept_only == b.intercept_only &&
-        a.zero_correlation == b.zero_correlation
+        a.zero_correlation == b.zero_correlation && a.centered == b.centered &&
+        a.sd_family == b.sd_family && a.sd_rate == b.sd_rate &&
+        a.lkj_eta == b.lkj_eta
     end
 end
 

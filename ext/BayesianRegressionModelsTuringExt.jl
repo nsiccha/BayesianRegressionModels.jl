@@ -1,17 +1,66 @@
 module BayesianRegressionModelsTuringExt
 
 using BayesianRegressionModels
-using Distributions: ContinuousUnivariateDistribution,
+using Distributions: ContinuousMultivariateDistribution,
+                     ContinuousUnivariateDistribution,
                      DiscreteUnivariateDistribution, Exponential, LKJCholesky,
-                     Normal, Poisson, censored, logcdf,
+                     MvNormal, Normal, Poisson, censored, logcdf,
                      product_distribution, truncated
-using LinearAlgebra: Diagonal
+using LinearAlgebra: Diagonal, Symmetric
 using LogExpFunctions: logistic, log1mexp
 import Distributions: logpdf
 import Random: AbstractRNG, default_rng, rand
 using Turing
 
 const BRM = BayesianRegressionModels
+
+struct _BRMGroupedMvNormal{D<:ContinuousMultivariateDistribution} <:
+       ContinuousMultivariateDistribution
+    base::D
+    n_groups::Int
+end
+
+Base.length(distribution::_BRMGroupedMvNormal) =
+    length(distribution.base) * distribution.n_groups
+
+function logpdf(distribution::_BRMGroupedMvNormal, values::AbstractVector)
+    length(values) == length(distribution) || return oftype(sum(values), -Inf)
+    n_terms = length(distribution.base)
+    sum(1:distribution.n_groups) do group
+        first_index = (group - 1) * n_terms + 1
+        logpdf(distribution.base,
+               @view values[first_index:(first_index + n_terms - 1)])
+    end
+end
+
+rand(rng::AbstractRNG, distribution::_BRMGroupedMvNormal) =
+    vcat((rand(rng, distribution.base)
+          for _ in 1:distribution.n_groups)...)
+
+struct _BRMStratifiedMvNormal{B,G<:AbstractVector{Int}} <:
+       ContinuousMultivariateDistribution
+    bases::B
+    group_strata::G
+end
+
+
+Base.length(distribution::_BRMStratifiedMvNormal) =
+    length(first(distribution.bases)) * length(distribution.group_strata)
+
+function logpdf(distribution::_BRMStratifiedMvNormal,
+                values::AbstractVector)
+    length(values) == length(distribution) || return oftype(sum(values), -Inf)
+    n_terms = length(first(distribution.bases))
+    sum(eachindex(distribution.group_strata)) do group
+        first_index = (group - 1) * n_terms + 1
+        logpdf(distribution.bases[distribution.group_strata[group]],
+               @view values[first_index:(first_index + n_terms - 1)])
+    end
+end
+
+rand(rng::AbstractRNG, distribution::_BRMStratifiedMvNormal) =
+    vcat((rand(rng, distribution.bases[stratum])
+          for stratum in distribution.group_strata)...)
 
 struct _BRMContinuousIntervalEvidence{D,U} <:
        ContinuousUnivariateDistribution
@@ -151,6 +200,55 @@ _brm_has_group_prior_override(block) =
     any(!iszero, block.sd_family) || block.lkj_eta != 1.0
 _brm_has_group_prior_override(blocks::Tuple) =
     any(_brm_has_group_prior_override, blocks)
+_brm_has_group_geometry_override(block) =
+    !isnothing(block.by) || block.centered || _brm_has_group_prior_override(block)
+_brm_has_group_geometry_override(blocks::Tuple) =
+    any(_brm_has_group_geometry_override, blocks)
+
+function _brm_centered_coefficients_distribution(scales, L, n_groups)
+    factor = Diagonal(scales) * Matrix(L.L)
+    covariance = factor * transpose(factor)
+    _BRMGroupedMvNormal(
+        MvNormal(zeros(length(scales)), Symmetric(covariance)), n_groups)
+end
+
+function _brm_centered_diagonal_distribution(scales, n_groups)
+    _BRMGroupedMvNormal(
+        MvNormal(zeros(length(scales)), Diagonal(scales .^ 2)), n_groups)
+end
+
+_brm_centered_intercept_distribution(scale, n_groups) =
+    MvNormal(zeros(n_groups), Diagonal(fill(scale^2, n_groups)))
+
+function _brm_stratified_centered_distribution(frames, group_strata)
+    n_terms = size(first(frames).factor, 1)
+    bases = [MvNormal(
+        zeros(n_terms),
+        Symmetric(frame.factor * transpose(frame.factor))) for frame in frames]
+    _BRMStratifiedMvNormal(bases, group_strata)
+end
+
+function _brm_stratified_noncentered_coefficients(
+        frames, group_strata, z_flat, n_groups)
+    n_terms = size(first(frames).factor, 1)
+    z = reshape(z_flat, n_terms, n_groups)
+    transpose(hcat((
+        frames[group_strata[group]].factor * @view(z[:, group])
+        for group in 1:n_groups)...))
+end
+
+_brm_stratified_centered_coefficients(values, n_terms, n_groups) =
+    transpose(reshape(values, n_terms, n_groups))
+
+
+Turing.@model function _brm_stratified_group_frame(
+        n_terms, sd_family, sd_rate, lkj_eta)
+    L ~ LKJCholesky(n_terms, lkj_eta)
+    tau ~ product_distribution(
+        _brm_group_scale_distributions(sd_family, sd_rate))
+    factor = Diagonal(tau) * Matrix(L.L)
+    (; L, tau, factor)
+end
 
 Turing.@model function _brm_random_intercept_effect(group_idx, n_groups)
     log_scale ~ Normal()
@@ -172,6 +270,25 @@ Turing.@model function _brm_random_intercept_effect_prior(
 end
 
 
+Turing.@model function _brm_centered_random_intercept_effect(
+        group_idx, n_groups)
+    log_scale ~ Normal()
+    scale = exp(log_scale)
+    values ~ _brm_centered_intercept_distribution(scale, n_groups)
+    effect = values[group_idx]
+    (; effect, scale, values)
+end
+
+
+Turing.@model function _brm_centered_random_intercept_effect_prior(
+        group_idx, n_groups, family, rate)
+    scale ~ _brm_group_scale_distribution(family, rate)
+    values ~ _brm_centered_intercept_distribution(scale, n_groups)
+    effect = values[group_idx]
+    (; effect, scale, values)
+end
+
+
 Turing.@model function _brm_correlated_group_effect(
         Z, group_idx, n_groups, sd_family, sd_rate, lkj_eta)
     n_terms = size(Z, 2)
@@ -181,6 +298,20 @@ Turing.@model function _brm_correlated_group_effect(
     z_flat ~ product_distribution(fill(Normal(), n_terms * n_groups))
     z = reshape(z_flat, n_terms, n_groups)
     coefficients = transpose(Diagonal(tau) * Matrix(L.L) * z)
+    effect = vec(sum(Z .* coefficients[group_idx, :]; dims=2))
+    (; effect, L, tau, coefficients)
+end
+
+
+Turing.@model function _brm_centered_correlated_group_effect(
+        Z, group_idx, n_groups, sd_family, sd_rate, lkj_eta)
+    n_terms = size(Z, 2)
+    L ~ LKJCholesky(n_terms, lkj_eta)
+    tau ~ product_distribution(
+        _brm_group_scale_distributions(sd_family, sd_rate))
+    coefficients_flat ~ _brm_centered_coefficients_distribution(
+        tau, L, n_groups)
+    coefficients = transpose(reshape(coefficients_flat, n_terms, n_groups))
     effect = vec(sum(Z .* coefficients[group_idx, :]; dims=2))
     (; effect, L, tau, coefficients)
 end
@@ -207,8 +338,69 @@ Turing.@model function _brm_zero_correlation_group_effect(
 end
 
 
+Turing.@model function _brm_centered_zero_correlation_group_effect(
+        Z, group_idx, n_groups, intercept_index)
+    n_terms = size(Z, 2)
+    n_slopes = n_terms - (intercept_index > 0)
+    intercept_scale = nothing
+    if intercept_index > 0
+        log_intercept_scale ~ Normal()
+        intercept_scale = exp(log_intercept_scale)
+    end
+    tau_slopes ~ product_distribution(
+        fill(truncated(Normal(), 0.0, Inf), n_slopes))
+    scales = _zero_correlation_scales(
+        intercept_index, intercept_scale, tau_slopes)
+    coefficients_flat ~ _brm_centered_diagonal_distribution(scales, n_groups)
+    coefficients = transpose(reshape(coefficients_flat, n_terms, n_groups))
+    effect = vec(sum(Z .* coefficients[group_idx, :]; dims=2))
+    (; effect, intercept_scale, tau_slopes, scales, coefficients)
+end
+
+
+Turing.@model function _brm_stratified_group_effect(
+        Z, group_idx, n_groups, group_strata, n_strata, sd_family, sd_rate,
+        lkj_eta, centered)
+    n_terms = size(Z, 2)
+    frame_model = _brm_stratified_group_frame(
+        n_terms, sd_family, sd_rate, lkj_eta)
+    strata = Vector{Any}(undef, n_strata)
+    for stratum in 1:n_strata
+        strata[stratum] ~ to_submodel(frame_model)
+    end
+    coefficients = nothing
+    if centered
+        coefficients_flat ~ _brm_stratified_centered_distribution(
+            strata, group_strata)
+        coefficients = _brm_stratified_centered_coefficients(
+            coefficients_flat, n_terms, n_groups)
+    else
+        z_flat ~ product_distribution(fill(Normal(), n_terms * n_groups))
+        coefficients = _brm_stratified_noncentered_coefficients(
+            strata, group_strata, z_flat, n_groups)
+    end
+    effect = vec(sum(Z .* coefficients[group_idx, :]; dims=2))
+    (; effect, strata, coefficients)
+end
+
+
 function _brm_group_effect_model(block)
+    if !isnothing(block.by)
+        return _brm_stratified_group_effect(
+            block.matrix, block.indices, length(block.levels),
+            block.group_strata, length(block.strata), block.sd_family,
+            block.sd_rate, block.lkj_eta, block.centered)
+    end
     if block.intercept_only
+        if block.centered
+            if _brm_has_group_prior_override(block)
+                return _brm_centered_random_intercept_effect_prior(
+                    block.indices, length(block.levels), only(block.sd_family),
+                    only(block.sd_rate))
+            end
+            return _brm_centered_random_intercept_effect(
+                block.indices, length(block.levels))
+        end
         if _brm_has_group_prior_override(block)
             return _brm_random_intercept_effect_prior(
                 block.indices, length(block.levels), only(block.sd_family),
@@ -220,10 +412,13 @@ function _brm_group_effect_model(block)
     if block.zero_correlation
         intercept_index = something(
             findfirst(column -> column.label === :Intercept, block.columns), 0)
-        return _brm_zero_correlation_group_effect(
+        return (block.centered ?
+            _brm_centered_zero_correlation_group_effect :
+            _brm_zero_correlation_group_effect)(
             block.matrix, block.indices, length(block.levels), intercept_index)
     end
-    _brm_correlated_group_effect(
+    (block.centered ? _brm_centered_correlated_group_effect :
+                      _brm_correlated_group_effect)(
         block.matrix, block.indices, length(block.levels), block.sd_family,
         block.sd_rate, block.lkj_eta)
 end
@@ -257,9 +452,67 @@ Turing.@model function _brm_shared_correlated_group_effect(
 end
 
 
+Turing.@model function _brm_centered_shared_correlated_group_effect(
+        matrices, group_idx, n_groups, sd_family, sd_rate, lkj_eta)
+    term_counts = Tuple(size(matrix, 2) for matrix in matrices)
+    n_terms = sum(term_counts)
+    L ~ LKJCholesky(n_terms, lkj_eta)
+    tau ~ product_distribution(
+        _brm_group_scale_distributions(sd_family, sd_rate))
+    coefficients_flat ~ _brm_centered_coefficients_distribution(
+        tau, L, n_groups)
+    coefficients = transpose(reshape(coefficients_flat, n_terms, n_groups))
+    effects = Vector{Any}(undef, length(matrices))
+    first_column = 1
+    for i in eachindex(matrices)
+        last_column = first_column + term_counts[i] - 1
+        block_coefficients = @view coefficients[:, first_column:last_column]
+        effects[i] = vec(sum(
+            matrices[i] .* block_coefficients[group_idx, :]; dims=2))
+        first_column = last_column + 1
+    end
+    (; effects, L, tau, coefficients)
+end
+
+
+Turing.@model function _brm_stratified_shared_group_effect(
+        matrices, group_idx, n_groups, group_strata, n_strata, sd_family,
+        sd_rate, lkj_eta, centered)
+    term_counts = Tuple(size(matrix, 2) for matrix in matrices)
+    n_terms = sum(term_counts)
+    frame_model = _brm_stratified_group_frame(
+        n_terms, sd_family, sd_rate, lkj_eta)
+    strata = Vector{Any}(undef, n_strata)
+    for stratum in 1:n_strata
+        strata[stratum] ~ to_submodel(frame_model)
+    end
+    coefficients = nothing
+    if centered
+        coefficients_flat ~ _brm_stratified_centered_distribution(
+            strata, group_strata)
+        coefficients = _brm_stratified_centered_coefficients(
+            coefficients_flat, n_terms, n_groups)
+    else
+        z_flat ~ product_distribution(fill(Normal(), n_terms * n_groups))
+        coefficients = _brm_stratified_noncentered_coefficients(
+            strata, group_strata, z_flat, n_groups)
+    end
+    effects = Vector{Any}(undef, length(matrices))
+    first_column = 1
+    for i in eachindex(matrices)
+        last_column = first_column + term_counts[i] - 1
+        block_coefficients = @view coefficients[:, first_column:last_column]
+        effects[i] = vec(sum(
+            matrices[i] .* block_coefficients[group_idx, :]; dims=2))
+        first_column = last_column + 1
+    end
+    (; effects, strata, coefficients)
+end
+
+
 function _brm_distributional_group_parts(plan)
     precision_keys = Dict(
-        (block.id, block.group) => index
+        (block.id, block.group, block.by) => index
         for (index, block) in enumerate(plan.precision.random_effects)
         if !isnothing(block.id))
     mean_shared = Set{Int}()
@@ -267,7 +520,7 @@ function _brm_distributional_group_parts(plan)
     shared = Any[]
     for (mean_index, mean_block) in enumerate(plan.mean.random_effects)
         isnothing(mean_block.id) && continue
-        key = (mean_block.id, mean_block.group)
+        key = (mean_block.id, mean_block.group, mean_block.by)
         haskey(precision_keys, key) || continue
         precision_index = precision_keys[key]
         precision_block = plan.precision.random_effects[precision_index]
@@ -277,17 +530,36 @@ function _brm_distributional_group_parts(plan)
         mean_block.indices == precision_block.indices || error(
             "Turing backend: shared random-effect ID `$(mean_block.id)` has " *
             "incompatible group coordinates across distributional predictors")
+        mean_block.strata == precision_block.strata &&
+            mean_block.group_strata == precision_block.group_strata || error(
+            "Turing backend: shared random-effect ID `$(mean_block.id)` has " *
+            "incompatible stratified coordinates across distributional " *
+            "predictors")
         mean_block.lkj_eta == precision_block.lkj_eta || error(
             "Turing backend: shared random-effect ID `$(mean_block.id)` has " *
             "incompatible correlation priors across distributional predictors")
+        mean_block.centered == precision_block.centered || error(
+            "Turing backend: shared random-effect ID `$(mean_block.id)` has " *
+            "incompatible centered parameterizations across distributional " *
+            "predictors")
         push!(mean_shared, mean_index)
         push!(precision_shared, precision_index)
-        model = _brm_shared_correlated_group_effect(
-            (mean_block.matrix, precision_block.matrix), mean_block.indices,
-            length(mean_block.levels),
-            vcat(mean_block.sd_family, precision_block.sd_family),
-            vcat(mean_block.sd_rate, precision_block.sd_rate),
-            mean_block.lkj_eta)
+        sd_family = vcat(mean_block.sd_family, precision_block.sd_family)
+        sd_rate = vcat(mean_block.sd_rate, precision_block.sd_rate)
+        model = if !isnothing(mean_block.by)
+            _brm_stratified_shared_group_effect(
+                (mean_block.matrix, precision_block.matrix), mean_block.indices,
+                length(mean_block.levels), mean_block.group_strata,
+                length(mean_block.strata), sd_family, sd_rate,
+                mean_block.lkj_eta, mean_block.centered)
+        else
+            (mean_block.centered ?
+                _brm_centered_shared_correlated_group_effect :
+                _brm_shared_correlated_group_effect)(
+                (mean_block.matrix, precision_block.matrix), mean_block.indices,
+                length(mean_block.levels), sd_family, sd_rate,
+                mean_block.lkj_eta)
+        end
         push!(shared, (; key, mean_block, precision_block, model))
     end
     mean_independent = Tuple(
@@ -1039,7 +1311,7 @@ end
 function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:normal_identity}})
     if length(plan.random_effects) > 1 ||
-       _brm_has_group_prior_override(plan.random_effects)
+       _brm_has_group_geometry_override(plan.random_effects)
         return _brm_population_gaussian_multiple_groups(
             plan.design.matrix,
             plan.design.fixed,
@@ -1115,7 +1387,7 @@ end
 function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:bernoulli_logit}})
     if length(plan.random_effects) > 1 ||
-       _brm_has_group_prior_override(plan.random_effects)
+       _brm_has_group_geometry_override(plan.random_effects)
         return _brm_population_glm_multiple_groups(
             Val(:bernoulli_logit), plan.design.matrix, plan.design.fixed,
             _brm_group_effect_models(plan), Int[], plan.response,
@@ -1174,7 +1446,7 @@ end
 function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:binomial_logit}})
     if length(plan.random_effects) > 1 ||
-       _brm_has_group_prior_override(plan.random_effects)
+       _brm_has_group_geometry_override(plan.random_effects)
         return _brm_population_glm_multiple_groups(
             Val(:binomial_logit), plan.design.matrix, plan.design.fixed,
             _brm_group_effect_models(plan), plan.family_args.trials,
@@ -1235,7 +1507,7 @@ end
 function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:poisson_log}})
     if length(plan.random_effects) > 1 ||
-       _brm_has_group_prior_override(plan.random_effects)
+       _brm_has_group_geometry_override(plan.random_effects)
         return _brm_population_glm_multiple_groups(
             Val(:poisson_log), plan.design.matrix, plan.design.fixed,
             _brm_group_effect_models(plan), Int[], plan.response,
@@ -1300,8 +1572,8 @@ function BRM._brm_turing_model(
     if length(plan.mean.random_effects) > 1 ||
        length(plan.precision.random_effects) > 1 ||
        !isempty(group_parts.shared) ||
-       _brm_has_group_prior_override(plan.mean.random_effects) ||
-       _brm_has_group_prior_override(plan.precision.random_effects)
+       _brm_has_group_geometry_override(plan.mean.random_effects) ||
+       _brm_has_group_geometry_override(plan.precision.random_effects)
         return _brm_population_mean_precision_multiple_groups(
             Val(:negative_binomial2),
             plan.mean.design.matrix, plan.mean.design.fixed,
@@ -1350,8 +1622,8 @@ function BRM._brm_turing_model(
     if length(plan.mean.random_effects) > 1 ||
        length(plan.precision.random_effects) > 1 ||
        !isempty(group_parts.shared) ||
-       _brm_has_group_prior_override(plan.mean.random_effects) ||
-       _brm_has_group_prior_override(plan.precision.random_effects)
+       _brm_has_group_geometry_override(plan.mean.random_effects) ||
+       _brm_has_group_geometry_override(plan.precision.random_effects)
         return _brm_population_mean_precision_multiple_groups(
             Val(:beta_binomial2),
             plan.mean.design.matrix, plan.mean.design.fixed,
@@ -1395,8 +1667,27 @@ function BRM._brm_turing_model(
     )
 end
 
-function BRM.TuringBRMI(brmi::BRM.BRMI)
+function _brm_group_keyword_set(value, keyword::Symbol)
+    value === nothing && return Set{Symbol}()
+    values = value isa Symbol ? (value,) : Tuple(value)
+    all(item -> item isa Symbol, values) || error(
+        "Turing backend: `$keyword` expects a Symbol or collection of Symbols")
+    Set{Symbol}(values)
+end
+
+function BRM.TuringBRMI(brmi::BRM.BRMI; centered_groups=(), cv_groups=())
+    centered = _brm_group_keyword_set(centered_groups, :centered_groups)
+    cv = _brm_group_keyword_set(cv_groups, :cv_groups)
+    isempty(cv) || error(
+        "Turing backend: `cv_groups` is a Stan artifact-sizing control and " *
+        "does not apply to DynamicPPL execution. Use `reprocess(backend, " *
+        "new_data; resample_groups=...)` to draw new group populations.")
     plan = BRM._brm_turing_plan(brmi)
+    unknown = setdiff(centered, BRM._turing_group_names(plan))
+    isempty(unknown) || error(
+        "Turing backend: `centered_groups` names no random-effect block for " *
+        "$(sort!(collect(unknown)))")
+    plan = BRM._turing_center_groups(plan, centered)
     model = BRM._brm_turing_model(plan)
     BRM.TuringBRMI(brmi, plan, model)
 end
@@ -1435,6 +1726,8 @@ function BRM.reprocess(
                     BRM._turing_replay_input(backend.plan, new_data) : new_data
     rebound = BRM._brm_rebind_brmi(backend.parent, prepared_data)
     fresh = BRM._brm_turing_plan(rebound)
+    fresh = BRM._turing_center_groups(
+        fresh, BRM._turing_centered_group_names(backend.plan))
     plan = freeze_constants ? BRM._turing_replay_plan(
         backend.plan, fresh, Set{Symbol}(groups)) : fresh
     model = BRM._brm_turing_model(plan)
@@ -1602,16 +1895,18 @@ function _brm_named_predictive(
     NamedTuple{plan.responses}(responses)
 end
 
-_brm_group_latent_name(block) = block.intercept_only ? "z" : "z_flat"
+_brm_group_latent_name(block) = block.centered ?
+    (block.intercept_only ? "values" : "coefficients_flat") :
+    (block.intercept_only ? "z" : "z_flat")
 _brm_multiple_group_model(plan::BRM._TuringPopulationPlan) =
     length(plan.random_effects) > 1 ||
-    _brm_has_group_prior_override(plan.random_effects)
+    _brm_has_group_geometry_override(plan.random_effects)
 function _brm_multiple_group_model(plan::BRM._TuringMeanPrecisionPlan)
     parts = _brm_distributional_group_parts(plan)
     length(plan.mean.random_effects) > 1 ||
     length(plan.precision.random_effects) > 1 || !isempty(parts.shared) ||
-    _brm_has_group_prior_override(plan.mean.random_effects) ||
-    _brm_has_group_prior_override(plan.precision.random_effects)
+    _brm_has_group_geometry_override(plan.mean.random_effects) ||
+    _brm_has_group_geometry_override(plan.precision.random_effects)
 end
 
 function _brm_resampled_latent_paths(
@@ -1653,7 +1948,8 @@ function _brm_resampled_latent_paths(
             "precision_groups")
         for (i, shared) in enumerate(parts.shared)
             shared.mean_block.group in groups || continue
-            push!(paths, "shared_groups[$i].z_flat")
+            latent = shared.mean_block.centered ? "coefficients_flat" : "z_flat"
+            push!(paths, "shared_groups[$i].$latent")
         end
         return paths
     end

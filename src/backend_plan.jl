@@ -665,17 +665,23 @@ function _brm_replay_population_design(
 end
 
 struct _BRMRandomEffectPlan{L<:AbstractVector,I<:AbstractVector{Int},
+                            S<:AbstractVector,
                             C<:Tuple,M<:AbstractMatrix,
                             SF<:AbstractVector{Int},SR<:AbstractVector{Float64}}
     predictor::Symbol
     id::Union{Nothing,Symbol}
     group::Symbol
+    by::Union{Nothing,Symbol}
     levels::L
+    strata::S
     indices::I
+    stratum_indices::Vector{Int}
+    group_strata::Vector{Int}
     columns::C
     matrix::M
     intercept_only::Bool
     zero_correlation::Bool
+    centered::Bool
     sd_family::SF
     sd_rate::SR
     lkj_eta::Float64
@@ -692,6 +698,34 @@ function _brm_replay_random_effect_plan(
         "level(s) $(collect(unknown)); fitted levels are " *
         "$(collect(training.levels))")
     indices = Int[lookup[level] for level in raw_groups]
+    stratum_indices = Int[]
+    group_strata = Int[]
+    if !isnothing(training.by)
+        raw_strata = context.data[training.by]
+        length(raw_strata) == length(raw_groups) || error(
+            "BRM replay: grouping factor `$(training.group)` and stratum " *
+            "column `$(training.by)` have different row counts")
+        stratum_lookup = Dict(
+            level => index for (index, level) in pairs(training.strata))
+        unknown_strata = unique(
+            [level for level in raw_strata if !haskey(stratum_lookup, level)])
+        isempty(unknown_strata) || error(
+            "BRM replay: stratum `$(training.by)` contains unseen level(s) " *
+            "$(collect(unknown_strata)); fitted strata are " *
+            "$(collect(training.strata))")
+        stratum_indices = Int[stratum_lookup[level] for level in raw_strata]
+        observed_mapping = _brm_group_strata(
+            indices, stratum_indices, length(training.levels),
+            training.group, training.by)
+        for group_index in eachindex(observed_mapping)
+            observed_mapping[group_index] == 0 && continue
+            observed_mapping[group_index] == training.group_strata[group_index] ||
+                error("BRM replay: group `$(training.group)` level " *
+                      "$(training.levels[group_index]) changed stratum in " *
+                      "`$(training.by)`")
+        end
+        group_strata = training.group_strata
+    end
     n = length(indices)
     cache = Dict{Symbol,Vector{Float64}}()
     columns = map(training.columns) do column
@@ -706,10 +740,11 @@ function _brm_replay_random_effect_plan(
     end
     matrix = hcat((column.values for column in columns)...)
     _BRMRandomEffectPlan(
-        training.predictor, training.id, training.group, training.levels, indices,
-        Tuple(columns), matrix, training.intercept_only,
-        training.zero_correlation, training.sd_family, training.sd_rate,
-        training.lkj_eta)
+        training.predictor, training.id, training.group, training.by,
+        training.levels, training.strata, indices, stratum_indices,
+        group_strata, Tuple(columns), matrix, training.intercept_only,
+        training.zero_correlation, training.centered, training.sd_family,
+        training.sd_rate, training.lkj_eta)
 end
 
 _brm_replay_random_effect_plans(training::Tuple, context::_BRMBackendContext) =
@@ -732,6 +767,60 @@ _brm_is_grouped_term(term::ExprColumn) =
     getf(term) === (|) || getf(term) === doublepipe
 _brm_is_grouped_term(_term) = false
 
+_brm_group_id(::Nothing) = nothing
+_brm_group_id(value::Symbol) = value
+_brm_group_id(value::AbstractString) = Symbol(value)
+_brm_group_id(value) = error(
+    "BRM backend lowering: `gr(...; id=...)` expects a Symbol or String; " *
+    "got $(typeof(value))")
+
+function _brm_random_effect_group(raw)
+    if raw isa NamedColumn && parent(raw) isa DataColumn
+        return (; group=raw, by=nothing, id=nothing)
+    end
+    raw isa ExprColumn && getf(raw) === gr || error(
+        "BRM backend lowering: random-effect group must be one raw data " *
+        "column or `gr(group; by=..., id=...)`; got `$(repr(raw))`")
+    args = getargs(raw)
+    length(args) == 1 || error(
+        "BRM backend lowering: `gr(...)` expects exactly one positional " *
+        "group; got $(length(args))")
+    group = only(args)
+    group isa NamedColumn && parent(group) isa DataColumn || error(
+        "BRM backend lowering: `gr(...)` group must be one raw data column; " *
+        "got `$(repr(group))`")
+    kwargs = getkwargs(raw)
+    unknown = setdiff(Set(keys(kwargs)), Set((:by, :id)))
+    isempty(unknown) || error(
+        "BRM backend lowering: `gr(...)` has unsupported keyword(s) " *
+        "$(sort!(collect(unknown)))")
+    by = get(kwargs, :by, nothing)
+    if !isnothing(by)
+        by isa NamedColumn && parent(by) isa DataColumn || error(
+            "BRM backend lowering: `gr(...; by=...)` must name one raw data " *
+            "column; got `$(repr(by))`")
+    end
+    (; group, by, id=_brm_group_id(get(kwargs, :id, nothing)))
+end
+
+function _brm_group_strata(group_indices, stratum_indices, n_groups,
+                           group::Symbol, by::Symbol)
+    length(group_indices) == length(stratum_indices) || error(
+        "BRM backend lowering: group `$group` and stratum `$by` have " *
+        "different row counts")
+    mapping = zeros(Int, n_groups)
+    for (group_index, stratum_index) in zip(group_indices, stratum_indices)
+        if mapping[group_index] == 0
+            mapping[group_index] = stratum_index
+        elseif mapping[group_index] != stratum_index
+            error("BRM backend lowering: gr($group, by=$by): group level " *
+                  "$group_index straddles multiple strata " *
+                  "($(mapping[group_index]) vs $stratum_index)")
+        end
+    end
+    mapping
+end
+
 function _brm_simple_random_effect_plans(
         brmi::BRMI, target::Symbol, context::_BRMBackendContext;
         required::Bool=false)
@@ -740,7 +829,7 @@ function _brm_simple_random_effect_plans(
     _, rhs = getargs(op, 2)
     grouped = filter(_brm_is_grouped_term, _brm_additive_terms(rhs))
     plans = _BRMRandomEffectPlan[]
-    seen = Set{Tuple{Union{Nothing,Symbol},Symbol}}()
+    seen = Set{Tuple{Union{Nothing,Symbol},Symbol,Union{Nothing,Symbol}}}()
     for term in grouped
         args = getargs(term)
         if length(args) ∉ (2, 3)
@@ -752,28 +841,39 @@ function _brm_simple_random_effect_plans(
         end
         zero_correlation = getf(term) === doublepipe
         inner = first(args)
-        id = length(args) == 3 ? args[2] : nothing
+        explicit_id = length(args) == 3 ? args[2] : nothing
         group_raw = last(args)
-        if !isnothing(id) && !(id isa Symbol)
+        if !isnothing(explicit_id) && !(explicit_id isa Symbol)
             required && error(
                 "BRM backend lowering: shared random-effect ID must be a " *
-                "symbol; got `$(repr(id))`")
+                "symbol; got `$(repr(explicit_id))`")
             return nothing
         end
+        descriptor = try
+            _brm_random_effect_group(group_raw)
+        catch exception
+            required && rethrow(exception)
+            return nothing
+        end
+        if !isnothing(explicit_id) && !isnothing(descriptor.id)
+            required && error(
+                "BRM backend lowering: `(effects | ID | group)` cannot also " *
+                "carry `gr(...; id=...)`")
+            return nothing
+        end
+        id = isnothing(explicit_id) ? descriptor.id : explicit_id
         if zero_correlation && !isnothing(id)
             required && error(
                 "BRM backend lowering: shared `(effects | ID | group)` " *
                 "blocks are correlated; `||` cannot carry an ID")
             return nothing
         end
-        if !(group_raw isa NamedColumn && parent(group_raw) isa DataColumn)
-            required && error(
-                "BRM backend lowering: random-intercept grouping factor must " *
-                "be one raw data column; got `$(repr(group_raw))`")
-            return nothing
-        end
-        group = name(group_raw)
-        key = (id, group)
+        group = name(descriptor.group)
+        by = isnothing(descriptor.by) ? nothing : name(descriptor.by)
+        zero_correlation && !isnothing(by) && error(
+            "BRM backend lowering: zero-correlation `||` is not supported " *
+            "for stratified `gr($group, by=$by)` blocks")
+        key = (id, group, by)
         key in seen && error(
             "BRM backend lowering: predictor `$target` repeats random-effect " *
             "block $(isnothing(id) ? "" : "ID `$id`, ")group `$group`")
@@ -785,6 +885,25 @@ function _brm_simple_random_effect_plans(
         n_levels, indices = _brm_level_index(raw)
         length(levels) == n_levels || error(
             "BRM backend lowering: inconsistent fitted levels for group `$group`")
+        strata = Any[]
+        stratum_indices = Int[]
+        group_strata = Int[]
+        if !isnothing(by)
+            raw_strata = context.data[by]
+            raw_strata isa AbstractVector || error(
+                "BRM backend lowering: stratum column `$by` must be a vector")
+            length(raw_strata) == length(raw) || error(
+                "BRM backend lowering: group `$group` and stratum `$by` have " *
+                "different row counts")
+            strata = collect(_brm_fit_levels(raw_strata))
+            n_strata, raw_stratum_indices = _brm_level_index(raw_strata)
+            length(strata) == n_strata || error(
+                "BRM backend lowering: inconsistent fitted levels for " *
+                "stratum `$by`")
+            stratum_indices = collect(Int, raw_stratum_indices)
+            group_strata = _brm_group_strata(
+                indices, stratum_indices, n_levels, group, by)
+        end
         raw_columns = Any[]
         for inner_term in _brm_additive_terms(inner)
             columns = _brm_random_effect_columns(inner_term)
@@ -817,8 +936,9 @@ function _brm_simple_random_effect_plans(
                          only(columns).label === :Intercept
         n_terms = length(columns)
         push!(plans, _BRMRandomEffectPlan(
-            target, id, group, levels, indices, Tuple(columns), matrix,
-            intercept_only, zero_correlation, zeros(Int, n_terms),
+            target, id, group, by, levels, strata, indices,
+            stratum_indices, group_strata, Tuple(columns), matrix,
+            intercept_only, zero_correlation, false, zeros(Int, n_terms),
             ones(Float64, n_terms), 1.0))
     end
     Tuple(plans)
