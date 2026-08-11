@@ -18,7 +18,9 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
+  # A replacement docs publish must be able to cancel a wedged run for the
+  # same branch instead of waiting behind GitHub's default six-hour timeout.
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -42,6 +44,11 @@ jobs:
         # installed via npm before the Julia build runs (see /ci §6g).
         run: cd docs && npm install
       - name: Install dependencies
+        env:
+          # Pkg's automatic whole-environment precompile can retain a Julia
+          # worker indefinitely on this closure. The docs build below loads
+          # and precompiles the packages it actually consumes.
+          JULIA_PKG_PRECOMPILE_AUTO: "0"
         # BRM's nsiccha-org runtime dependencies must be developed explicitly:
         # Julia 1.10 ignores Project.toml's `[sources]`, and MutatingFunctions
         # plus OutputSignatures are not registered. Clone the public sources
