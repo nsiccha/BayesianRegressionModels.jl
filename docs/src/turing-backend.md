@@ -73,8 +73,9 @@ StanBlocks categorical block:
 ```julia
 categorical = TuringBRMI((@brm begin
     sigma ~ Exponential(2)
-    mu ~ 1 + group + x
+    mu ~ 1 + group + x + x & group
     effect(mu, group) ~ Normal(0, 0.5)
+    effect(mu, int_x_x_group_lvl_2) ~ Normal(0, 0.25)
     y ~ Normal(mu, sigma)
 end)((;
     group=[1, 2, 3, 1, 2, 3],
@@ -121,7 +122,7 @@ the Turing backend refuses the surface rather than approximating it.
 | Backend boundary | **Supported** | Direct `BRMI` → backend-neutral plan → Turing extension; core loads without Turing |
 | Observation topology | **Partial** | Exactly one direct response named `y`; arbitrary names, multiple responses, distributional predictors, and hierarchical/ragged axes are pending |
 | Population design | **Partial** | Additive intercept and continuous raw/fitted-transform columns share `_BRMPopulationDesign` with SBBRMI; ordered treatment contrasts reuse SBBRMI's level-coding primitive and effect-address semantics |
-| Population transforms and terms | **Partial** | `zscale`, `standardize`, and `center`, pairwise continuous interactions, bare integer/`CategoricalVector` treatment contrasts, and integer `factor(...; ref=k)` are supported; categorical interactions, `offset`, `mo`/`mo1`, `me`, `s`, `t2`, `gp`, and `hsgp` are pending |
+| Population transforms and terms | **Partial** | `zscale`, `standardize`, and `center`, continuous/categorical pairwise interactions, bare integer/`CategoricalVector` treatment contrasts, and integer `factor(...; ref=k)` are supported; `offset`, `mo`/`mo1`, `me`, `s`, `t2`, `gp`, and `hsgp` are pending |
 | Population coefficient priors | **Partial** | Independent `Normal(0, 1)` defaults plus `effect(lp, coef)`, `effect(:, coef)`, and `:` coefficient defaults with the same specificity/tie rules as SBBRMI; current Turing hyperparameters must be finite numeric constants |
 | Scalar and structured priors | **Partial** | Gaussian scale accepts explicit `Exponential(scale)`; general scalar, horseshoe, simplex, R2D2, term, and latent priors are pending |
 | Gaussian identity likelihood | **Supported** | `sigma ~ Exponential(scale)`, `mu ~ 1 + continuous...`, `y ~ Normal(mu, sigma)` |
