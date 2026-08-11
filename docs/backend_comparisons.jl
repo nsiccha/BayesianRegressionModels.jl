@@ -137,13 +137,20 @@ function validate_generated_templates(paths)
 end
 
 function validate_no_bypasses(paths)
+    executable_fences = Set((
+        "julia", "jldoctest", "@eval", "@example", "@repl", "@setup"))
     for path in paths
         source = read(path, String)
-        for block in eachmatch(r"(?ms)^```julia\s*\n(.*?)^```\s*$", source)
-            code = only(block.captures)
+        for block in eachmatch(r"(?ms)^```([^\n]*)\n(.*?)^```\s*$", source)
+            info, code = block.captures
+            fence_parts = split(strip(info))
+            language = isempty(fence_parts) ? "" : first(fence_parts)
+            language in executable_fences || continue
             occursin("@brm", code) || continue
-            error("$(basename(path)) contains a standalone executable `@brm` " *
-                  "example; use the generated four-pane comparison")
+            occursin("Main.BRMDocsComparisons.comparison(", code) && continue
+            error("$path contains a standalone executable `@brm` example " *
+                  "in a `$language` fence; use the generated four-pane " *
+                  "comparison")
         end
         if endswith(path, "turing-backend.md")
             occursin("Main.BRMDocsComparisons.comparison", source) && error(

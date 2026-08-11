@@ -8,10 +8,12 @@ const GENERATED_EXAMPLE_PAGES = [
     joinpath(@__DIR__, "src", "likelihoods.md"),
     joinpath(@__DIR__, "src", "feature-atlas.md"),
 ]
-const DOCS_MARKDOWN_PAGES = filter(
-    path -> endswith(path, ".md"),
-    readdir(joinpath(@__DIR__, "src"); join=true),
-)
+const DOCS_MARKDOWN_PAGES = sort!(String[
+    joinpath(root, file)
+    for (root, _, files) in walkdir(joinpath(@__DIR__, "src"))
+    for file in files
+    if endswith(file, ".md")
+])
 BRMDocsComparisons.validate_generated_templates(GENERATED_EXAMPLE_PAGES)
 BRMDocsComparisons.validate_no_bypasses(DOCS_MARKDOWN_PAGES)
 
