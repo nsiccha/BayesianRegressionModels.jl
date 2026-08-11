@@ -2,8 +2,8 @@ using BayesianRegressionModels
 using BridgeStan
 import DifferentiationInterface as DI
 import Enzyme
+using Logging: NullLogger, with_logger
 using LogDensityProblems
-using LogDensityProblemsAD
 using Sockets: gethostname
 using StanBlocks
 using Statistics: median
@@ -59,9 +59,18 @@ function turing_density(backend, params)
     density = DP.LogDensityFunction(
         backend.model, DP.getlogjoint_internal, vi)
     position = collect(DP.get_sample_input_vector(density))
-    gradient = LogDensityProblemsAD.ADgradient(ENZYME_BACKEND, density)
-    (; density, gradient, position)
+    preparation = DI.prepare_gradient(
+        turing_logdensity_kernel, ENZYME_BACKEND, position,
+        DI.Constant(density))
+    gradient = similar(position)
+    (; density, preparation, gradient, position)
 end
+
+turing_logdensity_kernel(position, density) =
+    LogDensityProblems.logdensity(density, position)
+turing_logdensity_and_gradient(turing) = DI.value_and_gradient!(
+    turing_logdensity_kernel, turing.gradient, turing.preparation,
+    ENZYME_BACKEND, turing.position, DI.Constant(turing.density))
 
 const N = 128
 const SUBJECTS = 8
@@ -105,9 +114,11 @@ function stan_value(name)
     end
 end
 
-const turing_construction = benchmark_call(
-    () -> DP.LogDensityFunction(TuringBRMI(brmi).model);
-    warmup=10, samples=15, batch=5)
+const turing_construction = with_logger(NullLogger()) do
+    benchmark_call(
+        () -> DP.LogDensityFunction(TuringBRMI(brmi).model);
+        warmup=10, samples=15, batch=5)
+end
 const stan_lowering = benchmark_call(
     () -> SBBRMI(brmi); warmup=10, samples=15, batch=5)
 
@@ -127,8 +138,7 @@ const stan_gradient = zeros(length(stan_position))
 const turing_lp = LogDensityProblems.logdensity(
     turing.density, turing.position)
 const turing_lp_gradient, turing_gradient =
-    LogDensityProblems.logdensity_and_gradient(
-        turing.gradient, turing.position)
+    turing_logdensity_and_gradient(turing)
 const stan_lp = BS.log_density(
     stan_problem.model, stan_position; propto=false, jacobian=false)
 const stan_lp_gradient, _ = BS.log_density_gradient!(
@@ -144,8 +154,7 @@ const turing_density_bench = benchmark_call(
     () -> LogDensityProblems.logdensity(turing.density, turing.position);
     warmup=30, samples=21, batch=50)
 const turing_gradient_bench = benchmark_call(
-    () -> LogDensityProblems.logdensity_and_gradient(
-        turing.gradient, turing.position);
+    () -> turing_logdensity_and_gradient(turing);
     warmup=20, samples=21, batch=20)
 const stan_density_bench = benchmark_call(
     () -> BS.log_density(
@@ -191,6 +200,7 @@ println(
     " turing=", Base.pkgversion(Turing),
     " enzyme=", Base.pkgversion(Enzyme),
     " bridgestan=", Base.pkgversion(BS),
-    " setup=warmed allocation-aware medians; sampling omitted because this ",
+    " setup=gradient prepared once; caller-owned gradient reused; warmed ",
+    "allocation-aware hot-call medians; sampling omitted because this ",
     "benchmark targets crossed-group construction and density kernels",
 )
