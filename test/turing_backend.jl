@@ -121,6 +121,59 @@ end
 end
 
 
+@testset "Turing extension — independent mixed-family responses" begin
+    df = (;
+        x=[-1.0, 0.5, 2.0],
+        y=[0.2, 1.1, -0.4],
+        count=[0, 2, 4],
+    )
+    backend = TuringBRMI((@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x
+        y ~ Normal(mu, sigma)
+        log_rate ~ 1 + x
+        count ~ Poisson(exp(log_rate))
+    end)(df))
+
+    @test backend.plan.responses == (:y, :count)
+    @test length(backend.plan.plans) == 2
+    @test sprint(show, backend) ==
+          "TuringBRMI with 4 population coefficients across 2 responses and 6 observations"
+
+    draw = rand(Xoshiro(91), backend.model)
+    returned = Turing.DynamicPPL.returned(backend.model, draw.data)
+    normal_params = draw.data.responses[1].data
+    poisson_params = draw.data.responses[2].data
+    normal_plan, poisson_plan = backend.plan.plans
+    mu = normal_plan.design.matrix * normal_params.beta_pop
+    rate = exp.(poisson_plan.design.matrix * poisson_params.beta_pop)
+    prior = sum(logpdf.(Normal(), normal_params.beta_pop)) +
+            logpdf(Exponential(2), normal_params.sigma) +
+            sum(logpdf.(Normal(), poisson_params.beta_pop))
+    likelihood = sum(logpdf.(Normal.(mu, normal_params.sigma), df.y)) +
+                 sum(logpdf.(Poisson.(rate), df.count))
+
+    @test returned.responses[1].mu == mu
+    @test returned.responses[2].rate == rate
+    @test Turing.logjoint(backend.model, draw.data) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+    @test Turing.logprior(backend.model, draw.data) ≈
+          prior atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(backend.model, draw.data) ≈
+          likelihood atol=1e-12 rtol=1e-12
+
+    shared = merge(df, (; y2=[-0.1, 0.3, 0.7]))
+    @test_throws "share parameter source `mu`" begin
+        TuringBRMI((@brm begin
+            sigma ~ Exponential(2)
+            mu ~ 1 + x
+            y ~ Normal(mu, sigma)
+            y2 ~ Normal(mu, sigma)
+        end)(shared))
+    end
+end
+
+
 @testset "Turing extension — truncated Gaussian response" begin
     df = (;
         x=[-1.0, 0.5, 2.0],

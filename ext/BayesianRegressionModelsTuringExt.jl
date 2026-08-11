@@ -545,6 +545,19 @@ Turing.@model function _brm_population_beta_binomial2(
        L_precision_group, tau_precision_group, b_precision_group)
 end
 
+Turing.@model function _brm_multi_response(models)
+    responses = Vector{Any}(undef, length(models))
+    for i in eachindex(models)
+        responses[i] ~ to_submodel(models[i])
+    end
+    (; responses)
+end
+
+function BRM._brm_turing_model(plan::BRM._TuringMultiResponsePlan)
+    models = Tuple(BRM._brm_turing_model(child) for child in plan.plans)
+    _brm_multi_response(models)
+end
+
 function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:normal_identity}})
     if !isempty(plan.random_effects)
