@@ -328,6 +328,60 @@ end
     @test length(rand(Xoshiro(43), backend.model).data.beta_pop) == 2
 end
 
+@testset "Turing extension — Binomial-logit population GLM" begin
+    df = (;
+        x=[-1.0, 0.5, 2.0, 0.25],
+        trials=[2, 4, 6, 3],
+        y=[0, 2, 5, 1],
+    )
+    brmi = (@brm begin
+        eta ~ 1 + x
+        y ~ BRM.BinomialLogit(trials, eta)
+    end)(df)
+    sb = SBBRMI(brmi)
+    backend = TuringBRMI(brmi)
+    params = (; beta_pop=[-0.2, 0.7])
+    eta = backend.plan.design.matrix * params.beta_pop
+    prior = sum(logpdf.(Normal(), params.beta_pop))
+    likelihood = sum(logpdf.(BRM.BinomialLogit.(df.trials, eta), df.y))
+    returned = Turing.DynamicPPL.returned(backend.model, params)
+
+    @test backend.plan.family isa Val{:binomial_logit}
+    @test backend.plan.family_args.trials == df.trials
+    @test sb.data[:trials] == df.trials
+    @test Turing.logjoint(backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+    @test Turing.logprior(backend.model, params) ≈ prior atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(backend.model, params) ≈
+          likelihood atol=1e-12 rtol=1e-12
+    @test returned.eta == eta
+    @test returned.trials == df.trials
+
+    constant_trials = (@brm begin
+        eta ~ 1 + x
+        y ~ BRM.BinomialLogit(6, eta)
+    end)(df)
+    @test TuringBRMI(constant_trials).plan.family_args.trials == fill(6, 4)
+
+    invalid_trials = (@brm begin
+        eta ~ 1 + x
+        y ~ BRM.BinomialLogit(trials, eta)
+    end)((; x=df.x, trials=[2, 4.5, 6, 3], y=df.y))
+    @test_throws "must contain only nonnegative integers" SBBRMI(invalid_trials)
+    @test_throws "must contain only nonnegative integers" TuringBRMI(invalid_trials)
+
+    invalid_response = (@brm begin
+        eta ~ 1 + x
+        y ~ BRM.BinomialLogit(trials, eta)
+    end)((; x=df.x, trials=df.trials, y=[0, 5, 5, 1]))
+    @test_throws "between zero and its row's trial count" begin
+        SBBRMI(invalid_response)
+    end
+    @test_throws "between zero and its row's trial count" begin
+        TuringBRMI(invalid_response)
+    end
+end
+
 @testset "Turing extension — Poisson-log population GLM" begin
     df = (; x=[-1.0, 0.5, 2.0], y=[0, 2, 5])
     brmi = (@brm begin

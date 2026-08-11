@@ -261,6 +261,35 @@ function _brm_materialize_data_expression(x::ExprColumn)
 end
 _brm_materialize_data_expression(_x) = nothing
 
+function _brm_materialize_count_argument(argument, n::Integer, role::AbstractString;
+                                         prefix="BRM backend lowering")
+    raw = _brm_materialize_data_expression(argument)
+    isnothing(raw) && error(
+        "$prefix: $role must be a nonnegative integer constant or a pure " *
+        "expression over raw numeric data columns")
+    values = raw isa AbstractVector ? raw : fill(raw, n)
+    length(values) == n || error(
+        "$prefix: $role has $(length(values)) rows; expected $n")
+    all(x -> x isa Integer && !(x isa Bool) && x >= 0, values) || error(
+        "$prefix: $role must contain only nonnegative integers")
+    Int.(values)
+end
+
+function _brm_validate_binomial_response(response::AbstractVector, trials,
+                                         target::Symbol;
+                                         prefix="BRM backend lowering")
+    length(response) == length(trials) || error(
+        "$prefix: Binomial response `$target` has $(length(response)) rows; " *
+        "expected $(length(trials))")
+    all(eachindex(response)) do i
+        y = response[i]
+        y isa Integer && !(y isa Bool) && 0 <= y <= trials[i]
+    end || error(
+        "$prefix: Binomial response `$target` must contain integer counts " *
+        "between zero and its row's trial count")
+    Int.(response)
+end
+
 _brm_wrapper_col_name(prefix::Symbol, inner::NamedColumn) =
     Symbol(prefix, :_, name(inner))
 _brm_wrapper_col_name(prefix::Symbol, inner) =

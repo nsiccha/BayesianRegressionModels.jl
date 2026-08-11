@@ -8273,6 +8273,18 @@ _sb_lik_family!(stmts, target, ::Type{<:NegativeBinomial2},
                 args::Tuple{Any,Any}, data) =
     _sb_lik_stan!(stmts, target, :neg_binomial_2, args, data)
 
+function _sb_lik_family!(stmts, target, ::Type{<:BinomialLogit},
+                         args::Tuple{Any,Any}, data)
+    response = get(data, target, nothing)
+    response isa AbstractVector || error(
+        "sbimpl: `BinomialLogit` expects an observed vector for `$target`")
+    trials = _brm_materialize_count_argument(
+        first(args), length(response), "BinomialLogit trial count";
+        prefix="sbimpl")
+    _brm_validate_binomial_response(response, trials, target; prefix="sbimpl")
+    _sb_lik_stan!(stmts, target, :binomial_logit, args, data)
+end
+
 _sb_von_mises_observations(data, target) = begin
     raw = get(data, target, nothing)
     raw isa AbstractVector || error(

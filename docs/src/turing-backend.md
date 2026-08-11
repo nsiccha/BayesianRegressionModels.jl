@@ -37,12 +37,23 @@ binary = TuringBRMI((@brm begin
     y ~ BernoulliLogit(eta)
 end)((; x=[-1.0, 0.5, 2.0, 0.25], y=[0, 1, 1, 0])))
 
+grouped_binary = TuringBRMI((@brm begin
+    eta ~ 1 + x
+    y ~ BayesianRegressionModels.BinomialLogit(trials, eta)
+end)((;
+    x=[-1.0, 0.5, 2.0, 0.25],
+    trials=[2, 4, 6, 3],
+    y=[0, 2, 5, 1],
+)))
+
 count = TuringBRMI((@brm begin
     log_rate ~ 1 + x
     y ~ Poisson(exp(log_rate))
 end)((; x=[-1.0, 0.5, 2.0], y=[0, 2, 5])))
 
-(binary=summary(binary.model), count=summary(count.model))
+(binary=summary(binary.model),
+ grouped_binary=summary(grouped_binary.model),
+ count=summary(count.model))
 ```
 
 Fitted numeric transforms use the same design and coefficient labels as the
@@ -142,11 +153,12 @@ the Turing backend refuses the surface rather than approximating it.
 | Scalar and structured priors | **Partial** | Gaussian scale accepts explicit `Exponential(scale)`; general scalar, horseshoe, simplex, R2D2, term, and latent priors are pending |
 | Gaussian identity likelihood | **Supported** | `sigma ~ Exponential(scale)`, `mu ~ 1 + continuous...`, `y ~ Normal(mu, sigma)` |
 | Bernoulli-logit likelihood | **Supported** | `eta ~ 1 + continuous...`, `y ~ BernoulliLogit(eta)` |
+| Binomial-logit likelihood | **Supported** | `eta ~ 1 + continuous...`, `y ~ BinomialLogit(trials, eta)` with constant or row-wise nonnegative integer trials |
 | Poisson-log likelihood | **Supported** | `log_rate ~ 1 + continuous...`, `y ~ Poisson(exp(log_rate))` |
-| Other scalar likelihoods | **Pending** | The built-in catalogue in [Likelihoods](likelihoods.md), including Binomial-logit, negative-binomial, beta-binomial, hurdle/mixture, circular, quantile, and ordinal families |
+| Other scalar likelihoods | **Pending** | The built-in catalogue in [Likelihoods](likelihoods.md), including negative-binomial, beta-binomial, hurdle/mixture, circular, quantile, and ordinal families |
 | Group/random effects | **Pending** | Plain and correlated groups, `|ID|` blocks, centering/CV, stratification, multi-membership, and their SD/correlation/effect priors |
 | Response compositions | **Pending** | Truncation, censoring, interval evidence, observation weights, missing-response inference, measurement error, and concise categorical formulas |
-| Density decomposition | **Partial** | Turing `logjoint`, `logprior`, and `loglikelihood` are exact for the three supported GLMs; pointwise named log-likelihood outputs are pending |
+| Density decomposition | **Partial** | Turing `logjoint`, `logprior`, and `loglikelihood` are exact for the four supported GLMs; pointwise named log-likelihood outputs are pending |
 | Generated quantities | **Partial** | Returns `mu`, `eta`, or `log_rate`/`rate`; BRM-standard predictive draws and output naming are pending |
 | Replay and prediction | **Pending** | Frozen preprocessing, new-data replay, population-only prediction, transported group effects, and new-level policy |
 | Descriptor/introspection parity | **Pending** | `brm_descriptor`, output coordinates, highlights, and backend capability reporting |
@@ -164,7 +176,7 @@ Within the current slice, all of the following are rejected explicitly:
 - random effects and group blocks;
 - non-Normal or nonconstant population priors, random-effect priors, R2D2, or term-prior overrides;
 - response decorators, multiple likelihoods, or extra model statements;
-- unsupported links or likelihood families; and
+- unsupported links or likelihood families beyond Normal-identity, Bernoulli-logit, Binomial-logit, and Poisson-log; and
 - missing values or mismatched row axes.
 
 This boundary is intentional and temporary: it prevents the Turing backend

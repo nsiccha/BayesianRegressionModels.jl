@@ -27,6 +27,16 @@ Turing.@model function _brm_population_bernoulli_logit(
     (; eta)
 end
 
+Turing.@model function _brm_population_binomial_logit(
+    X, fixed, trials, y, beta_location, beta_scale)
+    beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
+    eta = X * beta_pop + fixed
+    for i in eachindex(y)
+        y[i] ~ BRM.BinomialLogit(trials[i], eta[i])
+    end
+    (; eta, trials)
+end
+
 Turing.@model function _brm_population_poisson_log(
     X, fixed, y, beta_location, beta_scale)
     beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
@@ -55,6 +65,18 @@ function BRM._brm_turing_model(
     _brm_population_bernoulli_logit(
         plan.design.matrix,
         plan.design.fixed,
+        plan.response,
+        plan.beta_location,
+        plan.beta_scale,
+    )
+end
+
+function BRM._brm_turing_model(
+    plan::BRM._TuringPopulationPlan{Val{:binomial_logit}})
+    _brm_population_binomial_logit(
+        plan.design.matrix,
+        plan.design.fixed,
+        plan.family_args.trials,
         plan.response,
         plan.beta_location,
         plan.beta_scale,

@@ -3,13 +3,14 @@
 # package extension supplies the executable model after Turing is loaded.
 
 struct _TuringPopulationPlan{F,C<:_BRMBackendContext,D<:_BRMPopulationDesign,
-                             Y<:AbstractVector,B<:AbstractVector,S}
+                             Y<:AbstractVector,B<:AbstractVector,A,S}
     family::F
     context::C
     design::D
     response::Y
     beta_location::B
     beta_scale::B
+    family_args::A
     scale_prior::S
 end
 
@@ -146,7 +147,7 @@ function _turing_normal_plan(brmi::BRMI, observation, rhs::ExprColumn)
     scale_prior = _turing_scalar_exponential_prior(brmi, scale)
     _TuringPopulationPlan(Val(:normal_identity), parts.context, parts.design,
                           collect(Float64, parts.response), parts.beta_location,
-                          parts.beta_scale, scale_prior)
+                          parts.beta_scale, NamedTuple(), scale_prior)
 end
 
 function _turing_bernoulli_logit_plan(brmi::BRMI, observation, rhs::ExprColumn)
@@ -161,7 +162,26 @@ function _turing_bernoulli_logit_plan(brmi::BRMI, observation, rhs::ExprColumn)
         "Turing backend: Bernoulli response `$(observation.key)` must contain only 0/1")
     _TuringPopulationPlan(Val(:bernoulli_logit), parts.context, parts.design,
                           Int.(parts.response), parts.beta_location,
-                          parts.beta_scale, nothing)
+                          parts.beta_scale, NamedTuple(), nothing)
+end
+
+function _turing_binomial_logit_plan(brmi::BRMI, observation, rhs::ExprColumn)
+    isempty(getkwargs(rhs)) || error(
+        "Turing backend: `BinomialLogit(trials, eta)` accepts no formula keywords")
+    args = getargs(rhs)
+    length(args) == 2 || error(
+        "Turing backend: `BinomialLogit(trials, eta)` requires exactly two arguments")
+    trials_raw, eta_raw = args
+    predictor = _turing_named_reference(eta_raw, "logit")
+    parts = _turing_population_components(brmi, observation, predictor)
+    trials = _brm_materialize_count_argument(
+        trials_raw, length(parts.response), "BinomialLogit trial count";
+        prefix="Turing backend")
+    response = _brm_validate_binomial_response(
+        parts.response, trials, observation.key; prefix="Turing backend")
+    _TuringPopulationPlan(Val(:binomial_logit), parts.context, parts.design,
+                          response, parts.beta_location,
+                          parts.beta_scale, (; trials), nothing)
 end
 
 function _turing_poisson_log_plan(brmi::BRMI, observation, rhs::ExprColumn)
@@ -183,7 +203,7 @@ function _turing_poisson_log_plan(brmi::BRMI, observation, rhs::ExprColumn)
         "Turing backend: Poisson response `$(observation.key)` must be nonnegative integers")
     _TuringPopulationPlan(Val(:poisson_log), parts.context, parts.design,
                           Int.(parts.response), parts.beta_location,
-                          parts.beta_scale, nothing)
+                          parts.beta_scale, NamedTuple(), nothing)
 end
 
 function _brm_turing_plan(brmi::BRMI)
@@ -200,9 +220,12 @@ function _brm_turing_plan(brmi::BRMI)
     family === Normal && return _turing_normal_plan(brmi, observation, rhs)
     family === BernoulliLogit &&
         return _turing_bernoulli_logit_plan(brmi, observation, rhs)
+    family === BinomialLogit &&
+        return _turing_binomial_logit_plan(brmi, observation, rhs)
     family === Poisson && return _turing_poisson_log_plan(brmi, observation, rhs)
     error("Turing backend: executable families are `Normal(mu, sigma)`, " *
-          "`BernoulliLogit(eta)`, and `Poisson(exp(log_rate))`; got `$family`")
+          "`BernoulliLogit(eta)`, `BinomialLogit(trials, eta)`, and " *
+          "`Poisson(exp(log_rate))`; got `$family`")
 end
 
 _brm_turing_gaussian_plan(brmi::BRMI) = begin
