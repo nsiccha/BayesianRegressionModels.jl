@@ -7271,20 +7271,34 @@ _predictor_col_for(t, d, _) = error("sbimpl: expected data-backed NamedColumn fo
 _sb_predictor_col(t::ExprColumn, data, stmts, _pop_terms=(); kwargs...) = _sb_predictor_term!(stmts, data, getf(t), t; kwargs...)
 _sb_predictor_col(t, _data, _stmts, _pop_terms=(); kwargs...) = error("sbimpl: unsupported predictor term $(typeof(t)): $t")
 
+# Monotonic-effect increment-simplex level set for emission. During a frozen
+# resample re-emission the FITTED level set — recorded in `PreprocEntry(:mo)` —
+# sizes the simplex, exactly as it freezes the `<c>_idx` codes in
+# `_sb_reprocess_entry!`; a fresh fit or a `freeze_constants=false` re-emission
+# derives it from `raw`. Mirrors `_sb_hsgp_fit_for_emission`.
+function _sb_mo_levels_for_emission(data, idx_name::Symbol, inner_name, raw)
+    frozen = _sb_frozen_preproc_entry(data, idx_name, :mo, inner_name)
+    isnothing(frozen) ? _sb_fit_levels(raw) : frozen.const_
+end
+
 # Monotonic-effect predictor: emit `mo_<c> ~ _sb_mo(; x=<c>_idx)` and return
 # `mo_<c>` as the column. Scope: single NamedColumn inner arg backed by raw
 # data. Other wrapped terms dispatch to their own methods below.
 _sb_predictor_term!(stmts, data, ::typeof(mo), t;
                     term_overrides=Dict{Symbol,Any}(), kwargs...) = begin
     inner_name, raw = _sb_inner_data(:mo, only(getargs(t)))
-    n_levels, idx = _sb_level_index(raw)
-    n_levels >= 2 || error("sbimpl: `mo($inner_name)` needs >= 2 levels (got $n_levels)")
     idx_name = Symbol(inner_name, :_idx)
+    # The FITTED level set drives the increment-simplex dimension. On a frozen
+    # resample re-emission it comes from the recorded `PreprocEntry(:mo)`, so a
+    # prediction frame carrying only a SUBSET of the training levels keeps the
+    # fitted `simplex[n_levels-1]` rather than shrinking it and indexing a frozen
+    # `<c>_idx` code past the simplex (snag reprocess-freeze-80ddd7e4).
+    levels = _sb_mo_levels_for_emission(data, idx_name, inner_name, raw)
+    n_levels = length(levels)
+    n_levels >= 2 || error("sbimpl: `mo($inner_name)` needs >= 2 levels (got $n_levels)")
     col_name = Symbol(:mo_, inner_name)
-    data[idx_name] = idx
-    # Frozen level set drives the monotonic-effect simplex dimension; re-coding
-    # a new df against it is dimension-coupled (unseen level / changed count).
-    _sb_record_preproc!(data, idx_name, PreprocEntry(:mo, _sb_fit_levels(raw), inner_name, true))
+    data[idx_name] = _sb_apply_levels(levels, raw)
+    _sb_record_preproc!(data, idx_name, PreprocEntry(:mo, levels, inner_name, true))
     alpha = _sb_mo_alpha_expr(term_overrides, t, n_levels)
     push!(stmts, :($col_name ~ _sb_mo(; x=$idx_name, alpha=$alpha)))
     col_name
