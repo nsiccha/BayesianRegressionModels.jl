@@ -2,7 +2,7 @@ using BayesianRegressionModels
 using BridgeStan
 import DifferentiationInterface as DI
 import Enzyme
-using LinearAlgebra: Cholesky, Symmetric, cholesky
+using LinearAlgebra: Cholesky, Diagonal, Symmetric, cholesky
 using LogDensityProblems
 using Sockets: gethostname
 using StanBlocks
@@ -81,16 +81,19 @@ function instantiate_stan(sb, label)
        names=BS.param_unc_names(problem.model))
 end
 
-function run_case(case, brmi, params, stan_position, project_gradients; N)
+function run_case(case, brmi, params, stan_position, project_gradients; N,
+                  centered_groups=())
     turing_construction = benchmark_call(
-        () -> DP.LogDensityFunction(TuringBRMI(brmi).model);
+        () -> DP.LogDensityFunction(TuringBRMI(
+            brmi; centered_groups).model);
         warmup=10, samples=15, batch=5)
     stan_lowering = benchmark_call(
-        () -> SBBRMI(brmi); warmup=10, samples=15, batch=5)
+        () -> SBBRMI(brmi; centered_groups);
+        warmup=10, samples=15, batch=5)
 
-    backend = TuringBRMI(brmi)
+    backend = TuringBRMI(brmi; centered_groups)
     td = turing_density(backend, params)
-    sb = SBBRMI(brmi)
+    sb = SBBRMI(brmi; centered_groups)
     stan = instantiate_stan(sb, case)
     stan_q = stan_position(stan.problem.model, stan.names)
     stan_gradient = zeros(length(stan_q))
@@ -225,6 +228,58 @@ if "correlated_poisson" in ARGS
              correlated_project; N)
 end
 
+const centered_coefficients = transpose(
+    Diagonal(correlated_tau) * correlated_L_matrix * reshape(z, 2, G))
+const centered_flat = vec(transpose(centered_coefficients))
+const centered_params = Dict(
+    Turing.@varname(beta_pop) => beta,
+    Turing.@varname(groups[1].L) =>
+        Cholesky(copy(correlated_L_matrix), 'L', 0),
+    Turing.@varname(groups[1].tau) => correlated_tau,
+    Turing.@varname(groups[1].coefficients_flat) => centered_flat,
+)
+
+json_array(values) = "[" * join(string.(values), ",") * "]"
+json_matrix(matrix) = "[" * join(
+    (json_array(@view matrix[i, :]) for i in axes(matrix, 1)), ",") * "]"
+
+function centered_stan_position(model, _names)
+    json = "{" * join([
+        "\"pop_log_lambda_beta_pop\":" * json_array(beta),
+        "\"r_log_lambda_subject_L\":" * json_matrix(correlated_L_matrix),
+        "\"r_log_lambda_subject_tau\":" * json_array(correlated_tau),
+        "\"r_log_lambda_subject_b\":" * json_matrix(centered_coefficients),
+    ], ",") * "}"
+    BS.param_unconstrain_json(model, json)
+end
+
+function centered_project(turing_gradient, stan_gradient, stan_names)
+    stan_by_name = Dict(stan_names .=> stan_gradient)
+    turing_rho_gradient = turing_gradient[4] -
+        rho / sqrt(1 - rho^2) * turing_gradient[5]
+    turing = vcat(
+        turing_gradient[1:2], turing_rho_gradient,
+        turing_gradient[6:7], turing_gradient[8:end])
+    stan = vcat(
+        [stan_by_name["pop_log_lambda_beta_pop.$i"] for i in 1:2],
+        stan_by_name["r_log_lambda_subject_L.1"] / (1 - rho^2),
+        [stan_by_name["r_log_lambda_subject_tau.$i"] /
+         correlated_tau[i] for i in 1:2],
+        # BridgeStan's names enumerate this array-of-vectors term-major, while
+        # its unconstrained position and gradient are group-major. The JSON
+        # position above establishes the semantic order; retain that order.
+        stan_gradient[6:end],
+    )
+    turing, stan
+end
+
+if "centered_correlated_poisson" in ARGS
+    run_case(
+        "centered_correlated_poisson", correlated_brmi, centered_params,
+        centered_stan_position, centered_project;
+        N, centered_groups=(:subject,))
+end
+
 const zero_brmi = (@brm begin
     log(lambda) ~ 1 + x + (1 + x || subject)
     y ~ Poisson(lambda)
@@ -300,10 +355,6 @@ const shared_params = Dict(
     Turing.@varname(shared_groups[1].tau) => shared_tau,
     Turing.@varname(shared_groups[1].z_flat) => shared_latent,
 )
-
-json_array(values) = "[" * join(string.(values), ",") * "]"
-json_matrix(matrix) = "[" * join(
-    (json_array(@view matrix[i, :]) for i in axes(matrix, 1)), ",") * "]"
 
 function shared_stan_position(model, _names)
     json = "{" * join([

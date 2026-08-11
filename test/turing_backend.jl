@@ -2511,7 +2511,7 @@ end
     prior = sum(logpdf.(Normal(), params[Turing.@varname(beta_pop)])) +
             logpdf(Exponential(2), params[Turing.@varname(sigma)]) +
             logpdf(LKJCholesky(2, 1.0), L) +
-            sum(logpdf.(half_normal, tau)) +
+            sum(logpdf.(half_normal, tau)) - length(tau) * log(2.0) +
             logpdf(coefficient_prior, coefficients_flat)
     likelihood = sum(logpdf.(Normal.(mu, params[Turing.@varname(sigma)]),
                                 data.y))
@@ -2649,8 +2649,12 @@ end
 
     @test_throws "names no random-effect block" TuringBRMI(
         parent(backend); centered_groups=:unknown)
+    @test_throws "expects a Symbol or collection of Symbols" TuringBRMI(
+        parent(backend); centered_groups=1)
     @test_throws "Stan artifact-sizing control" TuringBRMI(
         parent(backend); cv_groups=:subject)
+    @test_throws "expects a Symbol or collection of Symbols" TuringBRMI(
+        parent(backend); cv_groups=1)
     @test_throws "compiled Stan unconstrained coordinates" begin
         adaptive_centering_blocks(backend, String[])
     end
