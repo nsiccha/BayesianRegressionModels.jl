@@ -80,8 +80,11 @@ julia --project=test test/benchmark_turing_backend_groups.jl \
 ```
 
 It checks constrained density and mapped gradients before reporting warmed,
-allocation-aware construction, density, and gradient timings. Sampling is
-omitted because this gate targets the lowering and density kernels.
+allocation-aware construction, density, and gradient timings. Gradient setup
+is outside the hot loop: the harness prepares Enzyme once with
+`DifferentiationInterface.prepare_gradient`, reuses a caller-owned gradient
+buffer, and times only repeated `value_and_gradient!` calls. Sampling is omitted
+because this gate targets the lowering and density kernels.
 
 The multi-membership Turing parity benchmark exercises one weighted correlated
 `mm(...)` block through the direct Turing plan and StanBlocks emission:
@@ -92,8 +95,10 @@ julia --project=test test/benchmark_turing_multi_membership.jl
 
 It checks constrained density and mapped Enzyme/BridgeStan gradients before
 reporting warmed, allocation-aware construction, density, and gradient timings.
-Sampling is omitted because this focused gate targets lowering and density
-kernels rather than sampler behavior.
+Like the grouped and crossed-group harnesses, it prepares Enzyme once, reuses a
+caller-owned gradient buffer, and measures the repeated hot call separately
+from construction. Sampling is omitted because this focused gate targets
+lowering and density kernels rather than sampler behavior.
 
 ## Why each constraint exists
 
@@ -148,12 +153,12 @@ and no `[extras]`/`[targets]` in the root `Project.toml`:
   every supported Julia version, so carrying both would be two declarations of
   one dependency list.
 
-Five files are the reason this environment exists — they fail at their own
+Six files are the reason this environment exists — they fail at their own
 `using` line under `julia --project=.`, before any BRM code runs:
 
 | file | needs beyond the root project |
 | --- | --- |
-| `test/benchmark_turing_multi_membership.jl` | `BridgeStan`, `StanBlocks`, `Enzyme`, `DifferentiationInterface`, `LogDensityProblemsAD` |
+| `test/benchmark_turing_multi_membership.jl` | `BridgeStan`, `StanBlocks`, `Enzyme`, `DifferentiationInterface` |
 | `test/adaptive_centering_bridgestan.jl` | `WarmupHMC`, `Enzyme` |
 | `test/adaptive_centering_warmuphmc.jl` | `WarmupHMC`, `Enzyme`, `DifferentiationInterface` |
 | `test/native_ppl_backend_parity.jl` | `BridgeStan`, `StanBlocks`, `Enzyme`, `DifferentiationInterface` |

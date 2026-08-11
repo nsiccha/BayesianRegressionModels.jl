@@ -7,7 +7,6 @@ Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
 Enzyme = "7da242da-08ed-463a-9acd-ee780be4f1d9"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 LogDensityProblems = "6fdf6af0-433a-55f7-b3ed-c6c6e0b8df7c"
-LogDensityProblemsAD = "996a588d-648d-4e1f-a8f0-a84b347e47b1"
 LogExpFunctions = "2ab3a3ac-af41-5b50-aa03-7779005ae688"
 MutatingFunctions = "8a4c2d94-4b3b-4f9e-be63-a3c0cd816e3a"
 OutputSignatures = "86cfaae4-1704-4c69-ba62-d919d81ae5f8"
@@ -23,7 +22,6 @@ WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 [compat]
 BridgeStan = "2.9"
 Enzyme = "0.13"
-LogDensityProblemsAD = "1.13"
 Treebars = "0.1"
 Turing = "0.46"
 WarmupHMC = "0.2"
@@ -31,11 +29,11 @@ julia = "1.10"
 
 [sources.MutatingFunctions]
 url = "https://github.com/nsiccha/MutatingFunctions.jl"
-rev = "92687c809f60493422b11158ac8abba32b21cdf9"
+rev = "b4948cca48e7e60701b013385d958045ce9e936f"
 
 [sources.OutputSignatures]
 url = "https://github.com/nsiccha/OutputSignatures.jl"
-rev = "121de3194f02044e00bac0d11019a93458ddb63a"
+rev = "4f9c5a711859918e0d0eab37745dcd47f51b9e40"
 
 [sources.TreeArrays]
 url = "https://github.com/nsiccha/TreeArrays.jl"
@@ -43,7 +41,7 @@ rev = "c317cc003fc41c2d933c27dc80799141eebd434e"
 
 [sources.StanBlocks]
 url = "https://github.com/nsiccha/StanBlocks.jl"
-rev = "e6f607da17f04f06e7e65d867137940a82ba1392"
+rev = "b1d4df5b35f52c19dfcbe7221d8c9e0dce33742a"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
