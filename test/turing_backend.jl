@@ -45,6 +45,15 @@ const BRM = BayesianRegressionModels
     prior_draw = rand(Xoshiro(42), backend.model)
     @test prior_draw.data.beta_pop isa Vector{Float64}
     @test prior_draw.data.sigma isa Float64
+
+    renamed_df = (; x=df.x, outcome=df.y)
+    renamed = TuringBRMI((@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x
+        outcome ~ Normal(mu, sigma)
+    end)(renamed_df))
+    @test renamed.plan.response == renamed_df.outcome
+    @test Turing.logjoint(renamed.model, params) ≈ expected atol=1e-12 rtol=1e-12
 end
 
 @testset "Turing extension — fitted numeric population transforms" begin

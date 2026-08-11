@@ -73,7 +73,7 @@ function _turing_direct_observation(brmi::BRMI)
         push!(found, (; key, lhs, rhs))
     end
     length(found) == 1 || error(
-        "Turing backend: the initial executable slice requires exactly one " *
+        "Turing backend: direct execution requires exactly one " *
         "observed likelihood; found $(length(found))")
     only(found)
 end
@@ -373,9 +373,6 @@ end
 
 function _brm_turing_plan(brmi::BRMI)
     observation = _turing_direct_observation(brmi)
-    observation.key === :y || error(
-        "Turing backend: the initial executable slice requires response name `y`; " *
-        "got `$(observation.key)`")
     observation.lhs isa NamedColumn || error(
         "Turing backend: response decorators and response links are not yet supported")
     rhs = observation.rhs
