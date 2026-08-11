@@ -9,6 +9,16 @@ using Turing
 
 const BRM = BayesianRegressionModels
 
+_brm_normal_observation(::Nothing, mu, sigma, _i) = Normal(mu, sigma)
+function _brm_normal_observation(
+        modifier::BRM._BRMResponseModifierPlan, mu, sigma, i)
+    lower = isnothing(modifier.lower) ? nothing :
+        BRM._brm_response_bound_at(modifier.lower, i)
+    upper = isnothing(modifier.upper) ? nothing :
+        BRM._brm_response_bound_at(modifier.upper, i)
+    truncated(Normal(mu, sigma); lower, upper)
+end
+
 _random_effect_args(component) = isempty(component.random_effects) ?
     (0, zeros(0, 0), Int[], 0) : let block = only(component.random_effects)
         (block.intercept_only ? 1 : 2, block.matrix, block.indices,
@@ -16,19 +26,19 @@ _random_effect_args(component) = isempty(component.random_effects) ?
     end
 
 Turing.@model function _brm_population_gaussian(
-    X, fixed, y, beta_location, beta_scale, sigma_scale)
+    X, fixed, y, beta_location, beta_scale, sigma_scale, response_modifier)
     beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
     sigma ~ Exponential(sigma_scale)
     mu = X * beta_pop + fixed
     for i in eachindex(y)
-        y[i] ~ Normal(mu[i], sigma)
+        y[i] ~ _brm_normal_observation(response_modifier, mu[i], sigma, i)
     end
     (; mu)
 end
 
 Turing.@model function _brm_population_gaussian_random_intercept(
     X, fixed, group_idx, n_groups, y,
-    beta_location, beta_scale, sigma_scale)
+    beta_location, beta_scale, sigma_scale, response_modifier)
     beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
     sigma ~ Exponential(sigma_scale)
     log_group_scale ~ Normal()
@@ -37,14 +47,14 @@ Turing.@model function _brm_population_gaussian_random_intercept(
     group_effect = group_scale .* z_group
     mu = X * beta_pop + fixed + group_effect[group_idx]
     for i in eachindex(y)
-        y[i] ~ Normal(mu[i], sigma)
+        y[i] ~ _brm_normal_observation(response_modifier, mu[i], sigma, i)
     end
     (; mu, group_scale, group_effect)
 end
 
 Turing.@model function _brm_population_gaussian_correlated_group(
     X, fixed, Z, group_idx, n_groups, y,
-    beta_location, beta_scale, sigma_scale)
+    beta_location, beta_scale, sigma_scale, response_modifier)
     beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
     sigma ~ Exponential(sigma_scale)
     n_terms = size(Z, 2)
@@ -58,14 +68,14 @@ Turing.@model function _brm_population_gaussian_correlated_group(
     group_effect = vec(sum(Z .* b_group[group_idx, :]; dims=2))
     mu = X * beta_pop + fixed + group_effect
     for i in eachindex(y)
-        y[i] ~ Normal(mu[i], sigma)
+        y[i] ~ _brm_normal_observation(response_modifier, mu[i], sigma, i)
     end
     (; mu, L_group, tau_group, b_group, group_effect)
 end
 
 Turing.@model function _brm_population_gaussian_zero_correlation_group(
     X, fixed, Z, group_idx, n_groups, intercept_index, y,
-    beta_location, beta_scale, sigma_scale)
+    beta_location, beta_scale, sigma_scale, response_modifier)
     beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
     sigma ~ Exponential(sigma_scale)
     n_terms = size(Z, 2)
@@ -89,7 +99,7 @@ Turing.@model function _brm_population_gaussian_zero_correlation_group(
     group_effect = vec(sum(Z .* b_group[group_idx, :]; dims=2))
     mu = X * beta_pop + fixed + group_effect
     for i in eachindex(y)
-        y[i] ~ Normal(mu[i], sigma)
+        y[i] ~ _brm_normal_observation(response_modifier, mu[i], sigma, i)
     end
     (; mu, group_intercept_scale, tau_group_slopes, scales,
        b_group, group_effect)
@@ -424,6 +434,7 @@ function BRM._brm_turing_model(
                 plan.beta_location,
                 plan.beta_scale,
                 plan.scale_prior,
+                plan.response_modifier,
             )
         end
         if !block.intercept_only
@@ -437,6 +448,7 @@ function BRM._brm_turing_model(
                 plan.beta_location,
                 plan.beta_scale,
                 plan.scale_prior,
+                plan.response_modifier,
             )
         end
         return _brm_population_gaussian_random_intercept(
@@ -448,6 +460,7 @@ function BRM._brm_turing_model(
             plan.beta_location,
             plan.beta_scale,
             plan.scale_prior,
+            plan.response_modifier,
         )
     end
     _brm_population_gaussian(
@@ -457,6 +470,7 @@ function BRM._brm_turing_model(
         plan.beta_location,
         plan.beta_scale,
         plan.scale_prior,
+        plan.response_modifier,
     )
 end
 

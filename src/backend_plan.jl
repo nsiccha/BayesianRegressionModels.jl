@@ -136,6 +136,119 @@ function _brm_collect_target_obs(brmi::BRMI)
     target_obs
 end
 
+# ---- shared response composition -----------------------------------------
+
+"""
+    _BRMResponseModifierPlan
+
+Backend-neutral syntax and materialized bounds for one response wrapper. The
+`base` remains a formula distribution expression; concrete backends decide how
+to represent its density. Bounds are raw formula values in the syntax plan and
+scalars/vectors after materialization.
+"""
+struct _BRMResponseModifierPlan{B,L,U}
+    kind::Symbol
+    base::B
+    lower::L
+    upper::U
+end
+
+_brm_normalize_response_bound(::Nothing) = nothing
+_brm_normalize_response_bound(x::NamedColumn) =
+    _brm_is_nothing_column(x) ? nothing : x
+_brm_normalize_response_bound(x) = x
+
+function _brm_response_modifier_plan(wrapper, args, kwargs::NamedTuple;
+                                     prefix="BRM backend lowering")
+    kind = wrapper === truncated || wrapper === :truncated ? :truncated :
+           wrapper === censored || wrapper === :censored ? :censored :
+           wrapper === interval_censored || wrapper === :interval_censored ?
+               :interval_censored : nothing
+    isnothing(kind) && return nothing
+
+    if kind === :interval_censored
+        length(args) == 1 || error(
+            "$prefix: `interval_censored` expects one base distribution argument")
+        keys(kwargs) == (:upper,) || error(
+            "$prefix: `interval_censored` requires exactly the `upper` keyword; " *
+            "the response column is the interval lower endpoint")
+        base = only(args)
+        return _BRMResponseModifierPlan(
+            kind, base, nothing,
+            _brm_normalize_response_bound(kwargs.upper))
+    end
+
+    length(args) in (1, 3) || error(
+        "$prefix: `$kind` expects a base distribution and either keyword " *
+        "bounds or positional `(lower, upper)` bounds, got $(length(args)) arguments")
+    lower, upper = if length(args) == 3
+        isempty(kwargs) || error(
+            "$prefix: `$kind` cannot mix positional bounds with keyword bounds")
+        (_brm_normalize_response_bound(args[2]),
+         _brm_normalize_response_bound(args[3]))
+    else
+        unknown = setdiff(collect(keys(kwargs)), [:lower, :upper])
+        isempty(unknown) || error(
+            "$prefix: `$kind` accepts only `lower` and `upper` keywords, got $unknown")
+        (_brm_normalize_response_bound(get(kwargs, :lower, nothing)),
+         _brm_normalize_response_bound(get(kwargs, :upper, nothing)))
+    end
+    isnothing(lower) && isnothing(upper) && error(
+        "$prefix: `$kind` needs at least one non-`nothing` bound")
+    _BRMResponseModifierPlan(kind, first(args), lower, upper)
+end
+
+function _brm_response_modifier_plan(rhs;
+                                     prefix="BRM backend lowering")
+    rhs isa ExprColumn || return nothing
+    _brm_response_modifier_plan(
+        getf(rhs), getargs(rhs), getkwargs(rhs); prefix)
+end
+
+function _brm_materialize_response_bound(bound, data::AbstractDict, n::Integer,
+                                         label::Symbol;
+                                         prefix="BRM backend lowering")
+    isnothing(bound) && return nothing
+    raw = if bound isa NamedColumn && parent(bound) isa DataColumn
+        get(data, name(bound), parent(parent(bound)))
+    else
+        _brm_materialize_data_expression(bound)
+    end
+    raw isa Real || raw isa AbstractVector{<:Real} || error(
+        "$prefix: response $label bound must be a numeric scalar or a pure " *
+        "expression over raw numeric data columns")
+    raw isa Real && return raw
+    length(raw) == n || error(
+        "$prefix: response $label bound has $(length(raw)) rows; expected $n")
+    collect(raw)
+end
+
+_brm_response_bound_at(bound::Real, _i) = bound
+_brm_response_bound_at(bound::AbstractVector, i) = bound[i]
+
+function _brm_materialize_truncated_response(
+        spec::_BRMResponseModifierPlan, target::Symbol,
+        response::AbstractVector, data::AbstractDict;
+        prefix="BRM backend lowering")
+    spec.kind === :truncated || error(
+        "$prefix: internal response modifier `$(spec.kind)` is not truncation")
+    n = length(response)
+    lower = _brm_materialize_response_bound(
+        spec.lower, data, n, :lower; prefix)
+    upper = _brm_materialize_response_bound(
+        spec.upper, data, n, :upper; prefix)
+    for i in eachindex(response)
+        lo = isnothing(lower) ? nothing : _brm_response_bound_at(lower, i)
+        hi = isnothing(upper) ? nothing : _brm_response_bound_at(upper, i)
+        (isnothing(lo) || isnothing(hi) || lo <= hi) || error(
+            "$prefix: `truncated` lower bounds must not exceed upper bounds")
+        (isnothing(lo) || lo <= response[i]) &&
+        (isnothing(hi) || response[i] <= hi) || error(
+            "$prefix: `truncated` response `$target` contains values outside its bounds")
+    end
+    _BRMResponseModifierPlan(:truncated, spec.base, lower, upper)
+end
+
 function _brm_backend_context(brmi::BRMI;
                               data::AbstractDict=Dict{Symbol,Any}())
     prepass = Dict{Symbol,Any}()

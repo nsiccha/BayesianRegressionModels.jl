@@ -4,7 +4,7 @@
 
 struct _TuringPopulationPlan{F,C<:_BRMBackendContext,P<:_BRMPopulationPredictor,
                              D<:_BRMPopulationDesign,Y<:AbstractVector,
-                             B<:AbstractVector,A,S,R<:Tuple}
+                             B<:AbstractVector,A,S,R<:Tuple,RM}
     family::F
     context::C
     predictor::P
@@ -15,6 +15,7 @@ struct _TuringPopulationPlan{F,C<:_BRMBackendContext,P<:_BRMPopulationPredictor,
     family_args::A
     scale_prior::S
     random_effects::R
+    response_modifier::RM
 end
 
 struct _TuringPopulationComponent{P<:_BRMPopulationPredictor,
@@ -28,13 +29,14 @@ struct _TuringPopulationComponent{P<:_BRMPopulationPredictor,
 end
 
 struct _TuringMeanPrecisionPlan{F,C<:_BRMBackendContext,M,Q,A,
-                                Y<:AbstractVector}
+                                Y<:AbstractVector,RM}
     family::F
     context::C
     mean::M
     precision::Q
     family_args::A
     response::Y
+    response_modifier::RM
 end
 
 """
@@ -258,7 +260,7 @@ function _turing_negative_binomial2_plan(brmi::BRMI, observation,
         "contain nonnegative integer counts")
     _TuringMeanPrecisionPlan(
         Val(:negative_binomial2), parts.context, parts.mean, parts.precision,
-        NamedTuple(), Int.(response))
+        NamedTuple(), Int.(response), nothing)
 end
 
 function _turing_beta_binomial2_plan(brmi::BRMI, observation,
@@ -278,10 +280,11 @@ function _turing_beta_binomial2_plan(brmi::BRMI, observation,
         parts.response, trials, observation.key; prefix="Turing backend")
     _TuringMeanPrecisionPlan(
         Val(:beta_binomial2), parts.context, parts.mean, parts.precision,
-        (; trials), response)
+        (; trials), response, nothing)
 end
 
-function _turing_normal_plan(brmi::BRMI, observation, rhs::ExprColumn)
+function _turing_normal_plan(brmi::BRMI, observation, rhs::ExprColumn;
+                             response_modifier=nothing)
     isempty(getkwargs(rhs)) || error(
         "Turing backend: `Normal(mu, sigma)` accepts no formula keywords")
     args = getargs(rhs)
@@ -303,11 +306,15 @@ function _turing_normal_plan(brmi::BRMI, observation, rhs::ExprColumn)
     parts.response isa AbstractVector{<:Real} || error(
         "Turing backend: Gaussian response `$(observation.key)` must be real-valued")
     scale_prior = _turing_scalar_exponential_prior(brmi, scale)
+    materialized_modifier = isnothing(response_modifier) ? nothing :
+        _brm_materialize_truncated_response(
+            response_modifier, observation.key, parts.response,
+            parts.context.data; prefix="Turing backend")
     _TuringPopulationPlan(Val(:normal_identity), parts.context, parts.predictor,
                           parts.design,
                           collect(Float64, parts.response), parts.beta_location,
                           parts.beta_scale, NamedTuple(), scale_prior,
-                          parts.random_effects)
+                          parts.random_effects, materialized_modifier)
 end
 
 function _turing_bernoulli_population_plan(brmi::BRMI, observation,
@@ -323,7 +330,7 @@ function _turing_bernoulli_population_plan(brmi::BRMI, observation,
                           parts.design,
                           Int.(parts.response), parts.beta_location,
                           parts.beta_scale, NamedTuple(), nothing,
-                          parts.random_effects)
+                          parts.random_effects, nothing)
 end
 
 function _turing_bernoulli_logit_plan(brmi::BRMI, observation, rhs::ExprColumn)
@@ -364,7 +371,7 @@ function _turing_binomial_population_plan(brmi::BRMI, observation, trials_raw,
                           parts.design,
                           response, parts.beta_location,
                           parts.beta_scale, (; trials), nothing,
-                          parts.random_effects)
+                          parts.random_effects, nothing)
 end
 
 function _turing_binomial_logit_plan(brmi::BRMI, observation, rhs::ExprColumn)
@@ -422,7 +429,7 @@ function _turing_poisson_log_plan(brmi::BRMI, observation, rhs::ExprColumn)
                           parts.design,
                           Int.(parts.response), parts.beta_location,
                           parts.beta_scale, NamedTuple(), nothing,
-                          parts.random_effects)
+                          parts.random_effects, nothing)
 end
 
 function _brm_turing_plan(brmi::BRMI)
@@ -432,8 +439,22 @@ function _brm_turing_plan(brmi::BRMI)
     rhs = observation.rhs
     rhs isa ExprColumn || error(
         "Turing backend: observed likelihood must be a distribution call")
+    response_modifier = _brm_response_modifier_plan(rhs; prefix="Turing backend")
+    if !isnothing(response_modifier)
+        response_modifier.kind === :truncated || error(
+            "Turing backend: response modifier `$(response_modifier.kind)` is " *
+            "not yet executable; the current response-composition slice supports " *
+            "`truncated(Normal(mu, sigma); lower=..., upper=...)`")
+        rhs = response_modifier.base
+        rhs isa ExprColumn || error(
+            "Turing backend: `truncated` base must be a distribution call")
+    end
     family = getf(rhs)
-    family === Normal && return _turing_normal_plan(brmi, observation, rhs)
+    family === Normal && return _turing_normal_plan(
+        brmi, observation, rhs; response_modifier)
+    isnothing(response_modifier) || error(
+        "Turing backend: `truncated` currently supports only " *
+        "`Normal(mu, sigma)` observations; got `$family`")
     family === Bernoulli && return _turing_bernoulli_plan(brmi, observation, rhs)
     family === BernoulliLogit &&
         return _turing_bernoulli_logit_plan(brmi, observation, rhs)
@@ -449,7 +470,8 @@ function _brm_turing_plan(brmi::BRMI)
           "`Bernoulli(p)` / `BernoulliLogit(eta)`, `Binomial(trials, p)` / " *
           "`BinomialLogit(trials, eta)`, " *
           "`Poisson(exp(log_rate))`, `NegativeBinomial2(mu, phi)`, and " *
-          "`BetaBinomial2(trials, mean, precision)`; got `$family`")
+          "`BetaBinomial2(trials, mean, precision)`, and truncated " *
+          "`Normal(mu, sigma)`; got `$family`")
 end
 
 _brm_turing_gaussian_plan(brmi::BRMI) = begin

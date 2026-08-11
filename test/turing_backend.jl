@@ -59,6 +59,53 @@ const BRM = BayesianRegressionModels
 end
 
 
+@testset "Turing extension — truncated Gaussian response" begin
+    df = (;
+        x=[-1.0, 0.5, 2.0],
+        lower=[-0.7, -0.2, -0.5],
+        outcome=[-0.4, 0.6, 0.9],
+    )
+    brmi = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x
+        outcome ~ truncated(
+            Normal(mu, sigma); lower=lower, upper=1.25)
+    end)(df)
+    backend = TuringBRMI(brmi)
+    modifier = backend.plan.response_modifier
+
+    @test modifier.kind === :truncated
+    @test modifier.lower == df.lower
+    @test modifier.upper == 1.25
+
+    params = (; beta_pop=[0.25, -0.5], sigma=0.8)
+    mu = backend.plan.design.matrix * params.beta_pop
+    likelihood = sum(eachindex(df.outcome)) do i
+        logpdf(truncated(
+            Normal(mu[i], params.sigma);
+            lower=df.lower[i], upper=1.25), df.outcome[i])
+    end
+    prior = sum(logpdf.(Normal(), params.beta_pop)) +
+            logpdf(Exponential(2), params.sigma)
+    @test Turing.logjoint(backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+    @test Turing.logprior(backend.model, params) ≈
+          prior atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(backend.model, params) ≈
+          likelihood atol=1e-12 rtol=1e-12
+
+    outside = merge(df, (; outcome=[-0.8, 0.6, 0.9]))
+    @test_throws "contains values outside its bounds" begin
+        TuringBRMI((@brm begin
+            sigma ~ Exponential(2)
+            mu ~ 1 + x
+            outcome ~ truncated(
+                Normal(mu, sigma); lower=lower, upper=1.25)
+        end)(outside))
+    end
+end
+
+
 @testset "Turing extension — Gaussian plain random intercept" begin
     df = (;
         x=[-1.0, 0.5, 2.0, 0.25],

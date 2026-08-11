@@ -134,30 +134,6 @@ function _check_term_kwargs(::Type{<:Ordinal}, kwargs)
     nothing
 end
 
-"""
-    interval_censored(base; upper)
-
-Formula-only RHS wrapper for genuine interval evidence. The observed response
-column supplies each interval's lower endpoint and `upper` supplies its upper
-endpoint:
-
-```julia
-y_lower ~ interval_censored(Normal(mu, sigma); upper=y_upper)
-```
-
-Each row contributes the base family's probability over `(y_lower, y_upper]`,
-exactly `CDF(y_upper) - CDF(y_lower)`. The lower endpoint is open for discrete
-families too; unlike inclusive truncation it receives no predecessor shift.
-Posterior prediction remains on the uncoarsened base-response scale. This is
-separate from Distributions.jl's `censored`, which is the distribution
-of `clamp(X, lower, upper)` and therefore has atoms at its thresholds.
-
-The marker is intentionally formula-local: unlike `truncated` and `censored`,
-there is no existing Distributions.jl value with these per-row evidence
-semantics for BRM to construct outside `@brm`.
-"""
-function interval_censored end
-
 popefs = StanBlocks.@slic begin
     n_covariates = dims(X)[2]
     beta_pop ~ std_normal(; n=n_covariates)
@@ -8522,21 +8498,16 @@ function _sb_composed_family(wrapper, args)
 end
 
 function _sb_wrapper_bounds(wrapper, args, kwargs::NamedTuple)
-    if length(args) == 3
-        isempty(kwargs) || error(
-            "sbimpl: `$wrapper` cannot mix positional bounds with keyword bounds")
-        return _sb_normalize_bound(args[2]), _sb_normalize_bound(args[3])
-    end
-    unknown = setdiff(collect(keys(kwargs)), [:lower, :upper])
-    isempty(unknown) || error(
-        "sbimpl: `$wrapper` accepts only `lower` and `upper` keywords, got $unknown")
-    _sb_normalize_bound(get(kwargs, :lower, nothing)),
-        _sb_normalize_bound(get(kwargs, :upper, nothing))
+    plan = _brm_response_modifier_plan(
+        wrapper, args, kwargs; prefix="sbimpl")
+    isnothing(plan) && error(
+        "sbimpl: internal unsupported response modifier `$wrapper`")
+    plan.lower, plan.upper
 end
 
-_sb_normalize_bound(::Nothing) = nothing
-_sb_normalize_bound(x::NamedColumn) = _brm_is_nothing_column(x) ? nothing : x
-_sb_normalize_bound(x) = x
+# Compatibility name for downstream/tests that inspect the established
+# StanBlocks lowering helper; semantics now live in the shared core.
+_sb_normalize_bound(x) = _brm_normalize_response_bound(x)
 
 _sb_bound_data(x::Real, _data) = x
 _sb_bound_data(x::AbstractVector{<:Real}, _data) = x
