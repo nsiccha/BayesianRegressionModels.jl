@@ -172,9 +172,10 @@ end
 _BRMPopulationPreprocess(kind::Symbol, const_, raw_ref) =
     _BRMPopulationPreprocess(kind, const_, raw_ref, ())
 
-struct _BRMPopulationColumn{V<:AbstractVector,P}
+struct _BRMPopulationColumn{A<:Tuple,V<:AbstractVector,P}
     label::Symbol
-    effect_address::Symbol
+    effect_addresses::A
+    effect_block::Symbol
     source::Union{Nothing,Symbol}
     values::V
     preprocess::P
@@ -202,7 +203,8 @@ _brm_collect_additive_terms!(terms, x) = push!(terms, x)
 
 function _brm_population_column(term::Integer)
     term == 1 || return nothing
-    (; label=:Intercept, effect_address=:Intercept, source=nothing,
+    (; label=:Intercept, effect_addresses=(:Intercept,),
+       effect_block=:Intercept, source=nothing,
        values=nothing, preprocess=nothing)
 end
 function _brm_population_column(term::NamedColumn)
@@ -211,7 +213,8 @@ function _brm_population_column(term::NamedColumn)
     raw = parent(backing)
     raw isa AbstractVector{<:Real} || return nothing
     eltype(raw) <: Integer && return nothing
-    (; label=name(term), effect_address=name(term), source=name(term),
+    (; label=name(term), effect_addresses=(name(term),),
+       effect_block=name(term), source=name(term),
        values=collect(Float64, raw), preprocess=nothing)
 end
 
@@ -246,8 +249,8 @@ function _brm_population_column(term::ExprColumn)
                                      _brm_apply_zscale(const_, values)
     label = Symbol(kind, :_, name(inner))
     preprocess = _BRMPopulationPreprocess(kind, const_, inner)
-    (; label, effect_address=label, source=name(inner), values=transformed,
-       preprocess)
+    (; label, effect_addresses=(label,), effect_block=label,
+       source=name(inner), values=transformed, preprocess)
 end
 _brm_population_column(_term) = nothing
 
@@ -260,32 +263,60 @@ _brm_level_index(raw::AbstractVector) = begin
     length(levels), Int[lookup[level] for level in raw]
 end
 
-function _brm_categorical_population_columns(term::NamedColumn)
-    backing = parent(term)
-    backing isa DataColumn || return nothing
-    raw = parent(backing)
+function _brm_categorical_population_columns(
+        raw, source::Symbol, block::Symbol,
+        effect_addresses::Tuple=(block,); ref::Integer=1)
     is_categorical = raw isa CA.CategoricalVector ||
                      (raw isa AbstractVector && eltype(raw) <: Integer)
     is_categorical || return nothing
     n_levels, indices = _brm_level_index(raw)
     n_levels >= 2 || return nothing
     levels = _brm_fit_levels(raw)
-    source = name(term)
     Tuple(begin
-        label = Symbol(source, :_lvl_, level)
+        label = Symbol(block, :_lvl_, level)
         values = Float64[index == level ? 1.0 : 0.0 for index in indices]
         preprocess = _BRMPopulationPreprocess(
             :population_factor_dummy,
-            (; levels, level, n_levels), source)
-        (; label, effect_address=source, source, values, preprocess)
+            (; levels, level, n_levels, ref), source)
+        (; label, effect_addresses, effect_block=block, source, values,
+           preprocess)
     end for level in 2:n_levels)
 end
 
 function _brm_population_columns(term::NamedColumn)
-    categorical = _brm_categorical_population_columns(term)
+    backing = parent(term)
+    categorical = backing isa DataColumn ?
+        _brm_categorical_population_columns(
+            parent(backing), name(term), name(term)) : nothing
     !isnothing(categorical) && return categorical
     column = _brm_population_column(term)
     isnothing(column) ? nothing : (column,)
+end
+
+function _brm_population_columns(term::ExprColumn{typeof(factor)})
+    args = getargs(term)
+    length(args) == 1 || return nothing
+    inner = only(args)
+    inner isa NamedColumn || return nothing
+    backing = parent(inner)
+    backing isa DataColumn || return nothing
+    raw = parent(backing)
+    raw isa AbstractVector && eltype(raw) <: Integer || return nothing
+    kwargs = getkwargs(term)
+    all(k -> k === :ref, keys(kwargs)) || return nothing
+    ref_raw = get(kwargs, :ref, 1)
+    ref_raw isa Integer || return nothing
+    1 <= ref_raw <= maximum(raw) || error(
+        "BRM backend lowering: `factor($(name(inner)); ref=$ref_raw)` ref " *
+        "out of range (max level $(maximum(raw)))")
+
+    source = name(inner)
+    block = ref_raw == 1 ? source : Symbol(source, :__ref_, ref_raw)
+    recoded = ref_raw == 1 ? raw :
+        Int[value == ref_raw ? 1 : value == 1 ? ref_raw : value for value in raw]
+    addresses = ref_raw == 1 ? (source,) : (block, source)
+    _brm_categorical_population_columns(
+        recoded, source, block, addresses; ref=ref_raw)
 end
 _brm_population_columns(term) = let column = _brm_population_column(term)
     isnothing(column) ? nothing : (column,)
@@ -309,7 +340,8 @@ function _brm_population_columns(term::ExprColumn{typeof(&)})
                          if !isnothing(c.preprocess))
     preprocess = _BRMPopulationPreprocess(
         :interaction, nothing, (left.label, right.label), dependencies)
-    ((; label, effect_address=label, source=left.source, values, preprocess),)
+    ((; label, effect_addresses=(label,), effect_block=label,
+       source=left.source, values, preprocess),)
 end
 
 """
@@ -374,8 +406,8 @@ function _brm_simple_population_design(target::Symbol, rhs,
             "BRM backend lowering: predictor `$target` mixes row axes of lengths " *
             "$n and $(length(values))")
         _BRMPopulationColumn(
-            column.label, column.effect_address, column.source, values,
-            column.preprocess)
+            column.label, column.effect_addresses, column.effect_block,
+            column.source, values, column.preprocess)
     end
     matrix = hcat((c.values for c in columns)...)
     _BRMPopulationDesign(target, Tuple(columns), matrix, row_source)
@@ -469,7 +501,14 @@ function _brm_simple_population_effect_overrides(brmi::BRMI,
     isempty(specs) && return nothing
 
     labels = Symbol[c.label for c in design.columns]
-    addresses = Symbol[c.effect_address for c in design.columns]
+    address_blocks = Dict{Symbol,Set{Symbol}}()
+    for column in design.columns, address in column.effect_addresses
+        push!(get!(address_blocks, address, Set{Symbol}()), column.effect_block)
+    end
+    ambiguous = Dict(address => blocks for (address, blocks) in address_blocks
+                     if length(blocks) > 1)
+    available = Symbol[address for (address, blocks) in address_blocks
+                       if length(blocks) == 1]
     cells = Any[nothing for _ in labels]
     for spec in specs
         _brm_validate_population_effect_spec(spec; prefix)
@@ -481,11 +520,18 @@ function _brm_simple_population_effect_overrides(brmi::BRMI,
         indices = if spec.coefficient === _EFFECT_COLON
             eachindex(labels)
         else
-            idxs = findall(==(spec.coefficient), addresses)
+            if haskey(ambiguous, spec.coefficient)
+                blocks = sort!(collect(ambiguous[spec.coefficient]))
+                error("$prefix: `$(spec.coefficient)` ambiguously names " *
+                      "categorical contrast blocks $(join(blocks, ", ")). " *
+                      "Address an emitted block name explicitly.")
+            end
+            idxs = findall(c -> spec.coefficient in c.effect_addresses,
+                           design.columns)
             isempty(idxs) && error(
                 "$prefix: `$(spec.coefficient)` is not a population coefficient " *
                 "of `$(design.target)`. Available labels: " *
-                "$(join(unique(addresses), ", ")).")
+                "$(join(sort!(available), ", ")).")
             idxs
         end
         for idx in indices
