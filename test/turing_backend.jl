@@ -1223,6 +1223,7 @@ end
             logpdf(LKJCholesky(2, 1.0), L_subject) +
             sum(logpdf.(half_normal,
                 params[Turing.@varname(groups[1].tau)])) +
+            (-2 * log(2.0)) +
             sum(logpdf.(Normal(),
                 params[Turing.@varname(groups[1].z_flat)])) +
             logpdf(Normal(), params[Turing.@varname(groups[2].log_scale)]) +
@@ -1269,6 +1270,34 @@ end
     @test all(
         new_item_latents[i, j] != old_item_latents[i, j]
         for i in axes(new_item_latents, 1), j in axes(new_item_latents, 2))
+
+    zero_backend = TuringBRMI((@brm begin
+        log(lambda) ~ 1 + x + (1 + x || subject) + (0 + x || item)
+        y ~ Poisson(lambda)
+    end)((; df..., y=[0, 2, 5, 1])))
+    zero_params = Dict(
+        Turing.@varname(beta_pop) => [0.1, -0.2],
+        Turing.@varname(groups[1].log_intercept_scale) => log(0.6),
+        Turing.@varname(groups[1].tau_slopes) => [0.7],
+        Turing.@varname(groups[1].z_flat) =>
+            [-0.2, 0.4, 1.1, 0.3, -0.5, 0.8],
+        Turing.@varname(groups[2].tau_slopes) => [0.5],
+        Turing.@varname(groups[2].z_flat) => [0.25, -0.35],
+    )
+    zero_prior =
+        sum(logpdf.(Normal(), zero_params[Turing.@varname(beta_pop)])) +
+        logpdf(Normal(), zero_params[
+            Turing.@varname(groups[1].log_intercept_scale)]) +
+        sum(logpdf.(half_normal, zero_params[
+            Turing.@varname(groups[1].tau_slopes)])) - log(2.0) +
+        sum(logpdf.(Normal(), zero_params[
+            Turing.@varname(groups[1].z_flat)])) +
+        sum(logpdf.(half_normal, zero_params[
+            Turing.@varname(groups[2].tau_slopes)])) - log(2.0) +
+        sum(logpdf.(Normal(), zero_params[
+            Turing.@varname(groups[2].z_flat)]))
+    @test Turing.logprior(zero_backend.model, zero_params) ≈
+          zero_prior atol=1e-12 rtol=1e-12
 end
 
 
@@ -2310,6 +2339,7 @@ end
             logpdf(LKJCholesky(4, 1.0), L_shared) +
             sum(logpdf.(half_normal,
                 params[Turing.@varname(shared_groups[1].tau)])) +
+            (-4 * log(2.0)) +
             sum(logpdf.(Normal(),
                 params[Turing.@varname(shared_groups[1].z_flat)]))
 

@@ -196,6 +196,10 @@ _brm_group_scale_distribution(family, rate) = family == 0 ?
 _brm_group_scale_distributions(families, rates) =
     [_brm_group_scale_distribution(families[i], rates[i])
      for i in eachindex(families)]
+# Stan's positive-constrained Normal sampling statements omit the truncation
+# normalization that `truncated(Normal(), 0, Inf)` includes in Turing.
+_brm_group_scale_log_normalization(families) =
+    -count(iszero, families) * log(2.0)
 _brm_has_group_prior_override(block) =
     any(!iszero, block.sd_family) || block.lkj_eta != 1.0
 _brm_has_group_prior_override(blocks::Tuple) =
@@ -295,6 +299,8 @@ Turing.@model function _brm_correlated_group_effect(
     L ~ LKJCholesky(n_terms, lkj_eta)
     tau ~ product_distribution(
         _brm_group_scale_distributions(sd_family, sd_rate))
+    Turing.@addlogprob! (; logprior=
+        _brm_group_scale_log_normalization(sd_family))
     z_flat ~ product_distribution(fill(Normal(), n_terms * n_groups))
     z = reshape(z_flat, n_terms, n_groups)
     coefficients = transpose(Diagonal(tau) * Matrix(L.L) * z)
@@ -328,6 +334,7 @@ Turing.@model function _brm_zero_correlation_group_effect(
     end
     tau_slopes ~ product_distribution(
         fill(truncated(Normal(), 0.0, Inf), n_slopes))
+    Turing.@addlogprob! (; logprior=-n_slopes * log(2.0))
     scales = _zero_correlation_scales(
         intercept_index, intercept_scale, tau_slopes)
     z_flat ~ product_distribution(fill(Normal(), n_terms * n_groups))
@@ -436,6 +443,8 @@ Turing.@model function _brm_shared_correlated_group_effect(
     L ~ LKJCholesky(n_terms, lkj_eta)
     tau ~ product_distribution(
         _brm_group_scale_distributions(sd_family, sd_rate))
+    Turing.@addlogprob! (; logprior=
+        _brm_group_scale_log_normalization(sd_family))
     z_flat ~ product_distribution(fill(Normal(), n_terms * n_groups))
     z = reshape(z_flat, n_terms, n_groups)
     coefficients = transpose(Diagonal(tau) * Matrix(L.L) * z)

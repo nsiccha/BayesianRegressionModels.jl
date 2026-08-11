@@ -162,6 +162,25 @@ context and population-design plan; the extension turns that plan into a
 `DynamicPPL.Model`. It does not construct or inspect `SBBRMI`,
 `GenerativePlan`, `StanBlocks.SlicModel`, emitted SLIC, or Stan code.
 
+Multiple and crossed group blocks compose as independent nested Turing
+submodels. Each block retains its own scale/correlation prior and standardized
+latent coordinates:
+
+```julia
+crossed_groups = TuringBRMI((@brm begin
+    sigma ~ Exponential(2)
+    mu ~ 1 + x + (1 + x | subject) + (1 | item)
+    y ~ Normal(mu, sigma)
+end)((;
+    x=[-1.0, 0.5, 2.0, 0.25],
+    subject=["b", "a", "b", "c"],
+    item=[2, 1, 1, 2],
+    y=[0.2, 1.1, -0.4, 0.7],
+)))
+
+summary(crossed_groups.model)
+```
+
 ## Outputs and replay
 
 `turing_pointwise_loglikelihoods` returns response-named, row-aligned
@@ -180,9 +199,10 @@ those preprocessing constants. Reusing existing groups is supported; unseen
 categorical levels fail closed. For a new population,
 `resample_groups=:subject` takes the selected group's levels from `new_data` and
 posterior prediction redraws only its standardized effects while retaining the
-fitted scales and correlation factors. The same exclusion applies to
-`Turing.predict(backend, chain)`, so fitted group latents are not silently
-reused for a resampled block.
+fitted scales and correlation factors. Across multiple or crossed blocks, every
+unselected block keeps its fitted latent coordinates. The same exclusion
+applies to `Turing.predict(backend, chain)`, so fitted group latents are not
+silently reused for a resampled block.
 
 ```julia
 using Random: Xoshiro
@@ -237,16 +257,16 @@ the Turing backend refuses the surface rather than approximating it.
 | Gaussian identity | **Supported** | Population and admitted grouped predictors with explicit Exponential scale prior |
 | Bernoulli/Binomial logit | **Supported** | Canonical linked declarations and explicit stable-logit families |
 | Poisson log | **Supported** | Canonical linked declarations, data offsets, and admitted grouped predictors |
-| NegativeBinomial2 | **Supported subset** | Shared mean/precision population plans and one admitted group block per predictor |
-| BetaBinomial2 | **Supported subset** | Shared mean/precision population plans and one admitted group block per predictor |
-| Group effects | **Partial** | Correlated blocks admit continuous, transformed/expression, interaction, and categorical slopes; zero-correlation blocks admit non-categorical slopes; crossed groups, shared-ID blocks, explicit centering, stratified `gr(by=)`, and SD/correlation prior overrides are supported |
+| NegativeBinomial2 | **Supported subset** | Shared mean/precision population plans and multiple admitted group blocks per predictor |
+| BetaBinomial2 | **Supported subset** | Shared mean/precision population plans and multiple admitted group blocks per predictor |
+| Group effects | **Partial** | Correlated blocks admit continuous, transformed/expression, interaction, and categorical slopes; zero-correlation blocks admit non-categorical slopes; crossed groups, shared-ID blocks, explicit centering, stratified `gr(by=)`, and SD/correlation prior overrides are supported with independent block geometry |
 | Response evidence | **Partial** | Truncated, censored, and interval-censored Normal/Poisson observations; wider modifiers remain pending |
 | Missing responses | **Supported subset** | `mi(y) ~ Normal(mu, sigma)` imputes missing rows from the same conditional family and keeps observed rows in the likelihood |
 | Multiple responses | **Supported subset** | Independent blocks are namespaced; exactly compatible shared predictors/group blocks are sampled once and reused, while partial or incompatible overlaps fail closed |
 | Observation weights | **Supported subset** | Analytic Normal weights rescale sigma; frequency and power weights scale density while predictive draws retain the base distribution |
 | Advanced terms | **Pending** | Adaptive group geometry, multi-membership, splines, `t2`, `mo`, `me`, GP/HSGP, and kernel/ragged models fail loudly |
 | Outputs | **Supported subset** | Row-aligned pointwise likelihoods, deterministic returned quantities, one-draw posterior prediction, and chain-level Turing prediction; fitted response latents are excluded before regeneration |
-| Replay | **Supported subset** | Frozen population and random-slope preprocessing plus existing-group coordinates replay on new rows; refitting constants is explicit; `resample_groups` rebuilds selected level axes and redraws their standardized effects while retaining fitted covariance parameters |
+| Replay | **Supported subset** | Frozen population/random-slope preprocessing and existing-group coordinates replay on new rows; refitting constants is explicit; `resample_groups` selectively redraws named latent coordinates across multiple/crossed blocks while retaining fitted covariance parameters |
 
 The executable checks live in `test/backend_plan.jl` and
 `test/turing_backend.jl`. Each expansion should first add or extend a shared
