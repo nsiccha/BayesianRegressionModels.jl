@@ -552,6 +552,29 @@ end
     @test length(grouped_predictive.binary) == length(grouped_data.binary)
     @test length(grouped_predictive.successes) ==
           length(grouped_data.successes)
+
+    fitted_chain = sample(
+        Xoshiro(104), grouped.model, Prior(), 2; progress=false)
+    chain_predictive = Turing.predict(
+        Xoshiro(105), grouped_replay, fitted_chain; include_all=false)
+    old_latent_key = only(filter(collect(keys(fitted_chain))) do key
+        hasfield(typeof(key), :name) &&
+            string(getfield(key, :name)) == "responses[1].z_group"
+    end)
+    new_latent_key = only(filter(collect(keys(chain_predictive))) do key
+        hasfield(typeof(key), :name) &&
+            string(getfield(key, :name)) == "responses[1].z_group"
+    end)
+    old_latents = fitted_chain[old_latent_key]
+    new_latents = chain_predictive[new_latent_key]
+    @test all(CartesianIndices(new_latents)) do sample
+        new_latents[sample] != old_latents[sample]
+    end
+
+    @test_throws "duplicate group names" reprocess(
+        grouped, new_grouped_data; resample_groups=(:group, :group))
+    @test_throws "names no fitted random-effect block" reprocess(
+        grouped, new_grouped_data; resample_groups=:unknown)
 end
 
 

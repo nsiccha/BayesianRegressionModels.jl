@@ -1514,15 +1514,17 @@ _brm_predictive_response_varnames(plan::BRM._TuringMultiResponsePlan) =
         length(plan.plans),
     )
 
-function _brm_without_response_parameters(plan, chain)
-    response_varnames = _brm_predictive_response_varnames(plan)
+function _brm_predictive_chain(backend, chain)
+    response_varnames = _brm_predictive_response_varnames(backend.plan)
+    resampled_parameters = _brm_resampled_parameter_names(backend)
     retained = filter(collect(keys(chain))) do key
         hasfield(typeof(key), :name) || return true
         name = getfield(key, :name)
         name isa Turing.DynamicPPL.VarName || return true
-        !any(response_varnames) do response_varname
+        is_response = any(response_varnames) do response_varname
             Turing.DynamicPPL.subsumes(response_varname, name)
         end
+        !is_response && string(name) ∉ resampled_parameters
     end
     chain[retained]
 end
@@ -1530,7 +1532,7 @@ end
 function Turing.predict(
         rng::AbstractRNG, backend::BRM.TuringBRMI, chain;
         include_all::Bool=true)
-    parameters = _brm_without_response_parameters(backend.plan, chain)
+    parameters = _brm_predictive_chain(backend, chain)
     Turing.predict(
         rng, BRM.turing_predictive_model(backend), parameters;
         include_all,
@@ -1671,6 +1673,22 @@ function _brm_resampled_parameters(backend::BRM.TuringBRMI, parameters)
     removed = Set(Symbol(path) for path in
                   _brm_resampled_latent_paths(backend.plan, groups))
     _brm_without_fields(parameters, removed)
+end
+
+function _brm_resampled_parameter_names(backend::BRM.TuringBRMI)
+    groups = Set{Symbol}(backend.replay.resample_groups)
+    isempty(groups) && return Set{String}()
+    if backend.plan isa BRM._TuringMultiResponsePlan
+        removed = Set{String}()
+        for i in eachindex(backend.plan.plans)
+            backend.plan.owners[i] == i || continue
+            for name in _brm_resampled_latents(backend.plan.plans[i], groups)
+                push!(removed, "responses[$i].$name")
+            end
+        end
+        return removed
+    end
+    Set(string(name) for name in _brm_resampled_latents(backend.plan, groups))
 end
 
 function BRM.turing_posterior_predictive(
