@@ -3,6 +3,7 @@ using BridgeStan
 import DifferentiationInterface as DI
 import Enzyme
 using LinearAlgebra: Cholesky, Diagonal, Symmetric, cholesky
+using Logging: NullLogger, with_logger
 using LogDensityProblems
 using Sockets: gethostname
 using StanBlocks
@@ -83,10 +84,12 @@ end
 
 function run_case(case, brmi, params, stan_position, project_gradients; N,
                   centered_groups=())
-    turing_construction = benchmark_call(
-        () -> DP.LogDensityFunction(TuringBRMI(
-            brmi; centered_groups).model);
-        warmup=10, samples=15, batch=5)
+    turing_construction = with_logger(NullLogger()) do
+        benchmark_call(
+            () -> DP.LogDensityFunction(TuringBRMI(
+                brmi; centered_groups).model);
+            warmup=10, samples=15, batch=5)
+    end
     stan_lowering = benchmark_call(
         () -> SBBRMI(brmi; centered_groups);
         warmup=10, samples=15, batch=5)
