@@ -46,6 +46,51 @@ const BRM = BayesianRegressionModels
     @test prior_draw.data.sigma isa Float64
 end
 
+@testset "Turing extension — Bernoulli-logit population GLM" begin
+    df = (; x=[-1.0, 0.5, 2.0, 0.25], y=[0, 1, 1, 0])
+    brmi = (@brm begin
+        eta ~ 1 + x
+        y ~ BernoulliLogit(eta)
+    end)(df)
+    backend = TuringBRMI(brmi)
+    params = (; beta_pop=[-0.2, 0.7])
+    eta = backend.plan.design.matrix * params.beta_pop
+    prior = sum(logpdf.(Normal(), params.beta_pop))
+    likelihood = sum(logpdf.(BRM.BernoulliLogit.(eta), df.y))
+
+    @test backend.plan.family isa Val{:bernoulli_logit}
+    @test backend.plan.response == df.y
+    @test Turing.logjoint(backend.model, params) ≈ prior + likelihood atol=1e-12 rtol=1e-12
+    @test Turing.logprior(backend.model, params) ≈ prior atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(backend.model, params) ≈ likelihood atol=1e-12 rtol=1e-12
+    @test Turing.DynamicPPL.returned(backend.model, params).eta == eta
+    @test length(rand(Xoshiro(43), backend.model).data.beta_pop) == 2
+end
+
+@testset "Turing extension — Poisson-log population GLM" begin
+    df = (; x=[-1.0, 0.5, 2.0], y=[0, 2, 5])
+    brmi = (@brm begin
+        log_rate ~ 1 + x
+        y ~ Poisson(exp(log_rate))
+    end)(df)
+    backend = TuringBRMI(brmi)
+    params = (; beta_pop=[0.3, 0.4])
+    log_rate = backend.plan.design.matrix * params.beta_pop
+    rate = exp.(log_rate)
+    prior = sum(logpdf.(Normal(), params.beta_pop))
+    likelihood = sum(logpdf.(Poisson.(rate), df.y))
+    returned = Turing.DynamicPPL.returned(backend.model, params)
+
+    @test backend.plan.family isa Val{:poisson_log}
+    @test backend.plan.response == df.y
+    @test Turing.logjoint(backend.model, params) ≈ prior + likelihood atol=1e-12 rtol=1e-12
+    @test Turing.logprior(backend.model, params) ≈ prior atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(backend.model, params) ≈ likelihood atol=1e-12 rtol=1e-12
+    @test returned.log_rate == log_rate
+    @test returned.rate == rate
+    @test length(rand(Xoshiro(44), backend.model).data.beta_pop) == 2
+end
+
 @testset "Turing extension — unsupported shapes fail loudly" begin
     categorical = (@brm begin
         sigma ~ Exponential(1)
@@ -56,11 +101,11 @@ end
         TuringBRMI(categorical)
     end
 
-    poisson = (@brm begin
+    poisson_identity = (@brm begin
         mu ~ 1 + x
-        y ~ Poisson(exp(mu))
+        y ~ Poisson(mu)
     end)((; x=[0.0, 1.0], y=[0, 1]))
-    @test_throws "initial executable family is `Normal(mu, sigma)`" begin
-        TuringBRMI(poisson)
+    @test_throws "require the log link" begin
+        TuringBRMI(poisson_identity)
     end
 end

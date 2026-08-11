@@ -2,14 +2,15 @@
 # no dependency on Turing, DynamicPPL, StanBlocks, SBBRMI, or emitted SLIC. The
 # package extension supplies the executable model after Turing is loaded.
 
-struct _TuringGaussianPlan{C<:_BRMBackendContext,D<:_BRMPopulationDesign,
-                           Y<:AbstractVector,B<:AbstractVector}
+struct _TuringPopulationPlan{F,C<:_BRMBackendContext,D<:_BRMPopulationDesign,
+                             Y<:AbstractVector,B<:AbstractVector,S}
+    family::F
     context::C
     design::D
     response::Y
     beta_location::B
     beta_scale::B
-    sigma_scale::Float64
+    scale_prior::S
 end
 
 """
@@ -45,6 +46,10 @@ function _brm_numeric_constant(x::ExprColumn)
     value isa Real ? Float64(value) : nothing
 end
 _brm_numeric_constant(_x) = nothing
+
+# Implemented only by the Turing package extension. Keeping the generic here
+# lets the core validate and materialise plans without loading Turing.
+function _brm_turing_model end
 
 function _turing_direct_observation(brmi::BRMI)
     found = Any[]
@@ -93,33 +98,11 @@ function _turing_scalar_exponential_prior(brmi::BRMI, target::Symbol)
     scale
 end
 
-function _brm_turing_gaussian_plan(brmi::BRMI)
-    observation = _turing_direct_observation(brmi)
-    observation.key === :y || error(
-        "Turing backend: the initial Gaussian slice requires response name `y`; " *
-        "got `$(observation.key)`")
-    observation.lhs isa NamedColumn || error(
-        "Turing backend: response decorators and response links are not yet supported")
-    rhs = observation.rhs
-    rhs isa ExprColumn && getf(rhs) === Normal || error(
-        "Turing backend: the initial executable family is `Normal(mu, sigma)`")
-    isempty(getkwargs(rhs)) || error(
-        "Turing backend: `Normal(mu, sigma)` accepts no formula keywords")
-    args = getargs(rhs)
-    length(args) == 2 || error(
-        "Turing backend: `Normal(mu, sigma)` requires exactly two arguments")
-    predictor = _turing_named_reference(args[1], "location")
-    scale = _turing_named_reference(args[2], "scale")
-    predictor === :mu || error(
-        "Turing backend: the initial Gaussian slice requires location predictor " *
-        "name `mu`; got `$predictor`")
-    scale === :sigma || error(
-        "Turing backend: the initial Gaussian slice requires scale name `sigma`; " *
-        "got `$scale`")
-
+function _turing_population_components(brmi::BRMI, observation, predictor::Symbol;
+                                       extra_operations=())
     lp = linear_predictor_op(brmi, predictor)
     isnothing(lp) && error(
-        "Turing backend: location `$predictor` has no population formula")
+        "Turing backend: predictor `$predictor` has no population formula")
     lp_lhs, lp_rhs = getargs(lp, 2)
     lp_lhs isa NamedColumn && name(lp_lhs) === predictor || error(
         "Turing backend: linked/distributional predictor LHSs are not yet supported")
@@ -136,7 +119,8 @@ function _brm_turing_gaussian_plan(brmi::BRMI)
     context = _brm_backend_context(brmi)
     # Raw data columns are represented in `brmi.operations` too. They are
     # inputs to the backend plan, not additional model operations.
-    allowed = union(Set((:y, :mu, :sigma)), Set(keys(context.data)))
+    allowed = union(Set((observation.key, predictor, extra_operations...)),
+                    Set(keys(context.data)))
     extras = setdiff(Set(keys(brmi.operations)), allowed)
     isempty(extras) || error(
         "Turing backend: unsupported top-level operation(s): " *
@@ -145,15 +129,99 @@ function _brm_turing_gaussian_plan(brmi::BRMI)
     design = _brm_simple_population_design(
         predictor, lp_rhs, context.data, get(context.target_obs, predictor, nothing);
         required=true)
-    response = context.data[:y]
-    response isa AbstractVector{<:Real} || error(
-        "Turing backend: response `y` must be a real vector")
+    response = context.data[observation.key]
+    response isa AbstractVector || error(
+        "Turing backend: response `$(observation.key)` must be a vector")
     length(response) == size(design.matrix, 1) || error(
         "Turing backend: response and population design have different row counts")
-    sigma_scale = _turing_scalar_exponential_prior(brmi, scale)
     k = size(design.matrix, 2)
-    beta_location = zeros(Float64, k)
-    beta_scale = ones(Float64, k)
-    _TuringGaussianPlan(context, design, collect(Float64, response),
-                        beta_location, beta_scale, sigma_scale)
+    (; context, design, response,
+       beta_location=zeros(Float64, k), beta_scale=ones(Float64, k))
+end
+
+function _turing_normal_plan(brmi::BRMI, observation, rhs::ExprColumn)
+    isempty(getkwargs(rhs)) || error(
+        "Turing backend: `Normal(mu, sigma)` accepts no formula keywords")
+    args = getargs(rhs)
+    length(args) == 2 || error(
+        "Turing backend: `Normal(mu, sigma)` requires exactly two arguments")
+    predictor = _turing_named_reference(args[1], "location")
+    scale = _turing_named_reference(args[2], "scale")
+    predictor === :mu || error(
+        "Turing backend: the initial Gaussian slice requires location predictor " *
+        "name `mu`; got `$predictor`")
+    scale === :sigma || error(
+        "Turing backend: the initial Gaussian slice requires scale name `sigma`; " *
+        "got `$scale`")
+    parts = _turing_population_components(
+        brmi, observation, predictor; extra_operations=(scale,))
+    parts.response isa AbstractVector{<:Real} || error(
+        "Turing backend: Gaussian response `$(observation.key)` must be real-valued")
+    scale_prior = _turing_scalar_exponential_prior(brmi, scale)
+    _TuringPopulationPlan(Val(:normal_identity), parts.context, parts.design,
+                          collect(Float64, parts.response), parts.beta_location,
+                          parts.beta_scale, scale_prior)
+end
+
+function _turing_bernoulli_logit_plan(brmi::BRMI, observation, rhs::ExprColumn)
+    isempty(getkwargs(rhs)) || error(
+        "Turing backend: `BernoulliLogit(eta)` accepts no formula keywords")
+    args = getargs(rhs)
+    length(args) == 1 || error(
+        "Turing backend: `BernoulliLogit(eta)` requires exactly one argument")
+    predictor = _turing_named_reference(only(args), "logit")
+    parts = _turing_population_components(brmi, observation, predictor)
+    all(x -> x isa Bool || (x isa Integer && x in (0, 1)), parts.response) || error(
+        "Turing backend: Bernoulli response `$(observation.key)` must contain only 0/1")
+    _TuringPopulationPlan(Val(:bernoulli_logit), parts.context, parts.design,
+                          Int.(parts.response), parts.beta_location,
+                          parts.beta_scale, nothing)
+end
+
+function _turing_poisson_log_plan(brmi::BRMI, observation, rhs::ExprColumn)
+    isempty(getkwargs(rhs)) || error(
+        "Turing backend: `Poisson(exp(log_rate))` accepts no formula keywords")
+    args = getargs(rhs)
+    length(args) == 1 || error(
+        "Turing backend: `Poisson(exp(log_rate))` requires exactly one argument")
+    link = only(args)
+    link isa ExprColumn && getf(link) === exp && isempty(getkwargs(link)) || error(
+        "Turing backend: Poisson population models require the log link " *
+        "`Poisson(exp(log_rate))`")
+    link_args = getargs(link)
+    length(link_args) == 1 || error(
+        "Turing backend: Poisson log link `exp(log_rate)` requires one argument")
+    predictor = _turing_named_reference(only(link_args), "log-rate")
+    parts = _turing_population_components(brmi, observation, predictor)
+    all(x -> x isa Integer && x >= 0, parts.response) || error(
+        "Turing backend: Poisson response `$(observation.key)` must be nonnegative integers")
+    _TuringPopulationPlan(Val(:poisson_log), parts.context, parts.design,
+                          Int.(parts.response), parts.beta_location,
+                          parts.beta_scale, nothing)
+end
+
+function _brm_turing_plan(brmi::BRMI)
+    observation = _turing_direct_observation(brmi)
+    observation.key === :y || error(
+        "Turing backend: the initial executable slice requires response name `y`; " *
+        "got `$(observation.key)`")
+    observation.lhs isa NamedColumn || error(
+        "Turing backend: response decorators and response links are not yet supported")
+    rhs = observation.rhs
+    rhs isa ExprColumn || error(
+        "Turing backend: observed likelihood must be a distribution call")
+    family = getf(rhs)
+    family === Normal && return _turing_normal_plan(brmi, observation, rhs)
+    family === BernoulliLogit &&
+        return _turing_bernoulli_logit_plan(brmi, observation, rhs)
+    family === Poisson && return _turing_poisson_log_plan(brmi, observation, rhs)
+    error("Turing backend: executable families are `Normal(mu, sigma)`, " *
+          "`BernoulliLogit(eta)`, and `Poisson(exp(log_rate))`; got `$family`")
+end
+
+_brm_turing_gaussian_plan(brmi::BRMI) = begin
+    plan = _brm_turing_plan(brmi)
+    plan.family isa Val{:normal_identity} || error(
+        "Turing backend: requested Gaussian plan for non-Gaussian likelihood")
+    plan
 end
