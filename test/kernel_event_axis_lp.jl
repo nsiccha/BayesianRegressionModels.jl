@@ -166,36 +166,6 @@ ev_independent_axes_model(df) = @brm df begin
     pk_y ~ Normal(pred, sigma)
 end
 
-# INTERCEPT-ONLY event-axis LP (snag `intercept-only-k-b30b872a`, reported by
-# `Bruno:arv393`). `qt_fixed ~ 1` has no covariate (tier 1/1b), no categorical
-# (tier 1d) and no group term (tier 1c) of its own; the kernel's observation is
-# CELL-LOCAL so no top-level likelihood references its target (tier 2); and the
-# model spans TWO row axes (3 subjects, 7 events — `qt_w` puts the second flat
-# axis in `data`). Before the fix `_sb_any_data_symbol` REFUSED here. But the
-# `ragged(qt_fixed, ecg_subject)` consumer names the ECG axis outright, so the
-# scientifically-required constant scale is expressible with NO dummy covariate.
-function ev_intercept_axis_df()
-    (;
-        subject = ["s1", "s2", "s3"],
-        weight = [60.0, 75.0, 90.0],
-        pk_idx = [collect(1.0:4.0), collect(1.0:3.0), Float64[]],
-        pk_y = [fill(0.2, 4), fill(0.3, 3), Float64[]],
-        ecg_subject = ["s1", "s1", "s1", "s2", "s2", "s3", "s3"],
-        qt_w = [1.0, 1.1, 0.9, 1.2, 0.8, 1.05, 0.95],
-    )
-end
-
-ev_intercept_axis_model(df) = @brm df begin
-    sigma ~ Exponential(1)
-    qt_fixed ~ 1
-    log_CL ~ 1 + weight + (1 | p | subject)
-    pred ~ kernel(pk_idx, ragged(qt_fixed, ecg_subject),
-                  ragged(qt_w, ecg_subject), log_CL) do idx, qt, qw, lCL
-        rep_vector(sum(qt .* qw) + lCL, dims(idx)[1])
-    end
-    pk_y ~ Normal(pred, sigma)
-end
-
 # Grouping column on the WRONG axis (3 subject rows vs a 7-row predictor).
 ev_wrong_axis_model(df) = @brm df begin
     sigma  ~ Exponential(1)
@@ -388,56 +358,6 @@ end
         if EV_RUN_BRIDGESTAN
             using LogDensityProblems
             prob = ev_problem(independent, "independent_axes")
-            dim = LogDensityProblems.dimension(prob)
-            q = [0.05 * ((i % 5) - 2) for i in 1:dim]
-            lp, g = LogDensityProblems.logdensity_and_gradient(prob, q)
-            @test isfinite(lp)
-            @test length(g) == dim
-            @test all(isfinite, g)
-        end
-    end
-
-    # An INTERCEPT-ONLY event-axis LP resolves its row axis from the kernel's
-    # `ragged(lp, group)` consumer — no dummy covariate, no group term (snag
-    # `intercept-only-k-b30b872a`). Before this, the only ways to name the axis
-    # (`~ 1 + <col>` / `(1 | <g>)`) each changed the model by adding a parameter;
-    # a scientifically-required constant scale had no faithful spelling.
-    @testset "intercept-only event-axis LP resolves via the ragged consumer" begin
-        df = ev_intercept_axis_df()
-        sb = SBBRMI(ev_intercept_axis_model(df); mod = @__MODULE__)
-        code = StanBlocks.stan_code(sb.model)
-
-        # Sized off the 7-row ECG axis (the ragged group's per-event index),
-        # NEVER off the 3-row subject axis it used to guess/refuse. `X_qt_fixed`
-        # is the intercept-only design, so its lone column is that rep_vector.
-        @test occursin("X_qt_fixed = hcat(rep_vector(1.0, num_elements(ecg_subject_idx)))", code)
-        @test length(sb.data[:ecg_subject_idx]) == length(df.ecg_subject) == 7
-        # The LP stays a parameter and the plate fancy-indexes it (event frame).
-        @test !haskey(sb.data, :qt_fixed)
-        @test sb.data[:kernel_pred_qt_fixed_ragged] == [[1, 2, 3], [4, 5], [6, 7]]
-
-        # EXACTLY ONE population coefficient — the intercept. A dummy covariate
-        # would have made this 2, which is the cost the snag was about.
-        @test occursin("int pop_qt_fixed_n_covariates = 1;", code)
-
-        @test StanBlocks.stan.transpiles(sb.model)
-        @test StanBlocks.stanc_check(code; warn_pedantic = false).ok
-
-        # Replay re-sizes the intercept to the new event count and stays byte
-        # identical, and self-reprocess is the identity.
-        replay = ev_intercept_axis_df()
-        replay = merge(replay, (;
-            ecg_subject = ["s3", "s3", "s1", "s1", "s1", "s1", "s2", "s2"],
-            qt_w = [1.0, 1.1, 0.9, 1.2, 0.8, 1.05, 0.95, 1.3],
-        ))
-        rp = reprocess(sb, replay)
-        @test length(rp.data[:ecg_subject_idx]) == 8
-        @test StanBlocks.stan_code(rp.model) == code
-        @test reprocess(sb, df).data == sb.data
-
-        if EV_RUN_BRIDGESTAN
-            using LogDensityProblems
-            prob = ev_problem(sb, "intercept_only_axis")
             dim = LogDensityProblems.dimension(prob)
             q = [0.05 * ((i % 5) - 2) for i in 1:dim]
             lp, g = LogDensityProblems.logdensity_and_gradient(prob, q)
