@@ -102,6 +102,7 @@ there; `BetaBinomial2` above is BRM's own mean/precision parameterization.
 ```@docs
 BayesianRegressionModels.VBRMI
 BayesianRegressionModels.SBBRMI
+BayesianRegressionModels.TuringBRMI
 BayesianRegressionModels.stan_code
 BayesianRegressionModels.GenerativeDeclaration
 BayesianRegressionModels.GenerativePlan
