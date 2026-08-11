@@ -46,6 +46,45 @@ const BRM = BayesianRegressionModels
     @test prior_draw.data.sigma isa Float64
 end
 
+@testset "Turing extension — fitted numeric population transforms" begin
+    df = (;
+        x=[1.0, 2.0, 4.0],
+        w=[-2.0, 1.0, 5.0],
+        y=[0.2, 1.1, -0.4],
+    )
+    brmi = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + zscale(x) + center(w)
+        effect(mu, zscale_x) ~ Normal(0.5, 0.25)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    backend = TuringBRMI(brmi)
+
+    x_mean = sum(df.x) / length(df.x)
+    x_scale = sqrt(sum((df.x .- x_mean) .^ 2) / (length(df.x) - 1))
+    w_mean = sum(df.w) / length(df.w)
+    expected_X = hcat(
+        ones(length(df.y)),
+        (df.x .- x_mean) ./ x_scale,
+        df.w .- w_mean,
+    )
+    @test backend.plan.design.matrix ≈ expected_X
+    @test Tuple(c.label for c in backend.plan.design.columns) ==
+          (:Intercept, :zscale_x, :center_w)
+    @test backend.plan.beta_location == [0.0, 0.5, 0.0]
+    @test backend.plan.beta_scale == [1.0, 0.25, 1.0]
+
+    params = (; beta_pop=[0.25, -0.5, 0.4], sigma=0.8)
+    mu = expected_X * params.beta_pop
+    prior = sum(logpdf.(Normal.(backend.plan.beta_location,
+                               backend.plan.beta_scale), params.beta_pop)) +
+            logpdf(Exponential(2), params.sigma)
+    likelihood = sum(logpdf.(Normal.(mu, params.sigma), df.y))
+    @test Turing.logjoint(backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+    @test Turing.DynamicPPL.returned(backend.model, params).mu ≈ mu
+end
+
 @testset "Turing extension — population effect-prior overrides" begin
     df = (; x=[-1.0, 0.5, 2.0], y=[0.2, 1.1, -0.4])
     brmi = (@brm begin

@@ -40,6 +40,65 @@ const BRM = BayesianRegressionModels
 end
 
 
+@testset "backend-neutral fitted population transforms" begin
+    df = (;
+        x=[1.0, 2.0, 4.0],
+        w=[-2.0, 1.0, 5.0],
+        q=[10.0, 14.0, 16.0],
+        y=[0.2, 1.1, -0.4],
+    )
+    brmi = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + zscale(x) + center(w) + standardize(q)
+        effect(mu, zscale_x) ~ Normal(0, 0.25)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    context = BRM._brm_backend_context(brmi)
+    _, rhs = getargs(linear_predictor_op(brmi, :mu), 2)
+    design = BRM._brm_simple_population_design(
+        :mu, rhs, context.data, context.target_obs[:mu]; required=true)
+
+    x_mean = sum(df.x) / length(df.x)
+    x_scale = sqrt(sum((df.x .- x_mean) .^ 2) / (length(df.x) - 1))
+    w_mean = sum(df.w) / length(df.w)
+    q_mean = sum(df.q) / length(df.q)
+    q_scale = sqrt(sum((df.q .- q_mean) .^ 2) / (length(df.q) - 1))
+    expected = hcat(
+        ones(length(df.y)),
+        (df.x .- x_mean) ./ x_scale,
+        df.w .- w_mean,
+        (df.q .- q_mean) ./ q_scale,
+    )
+
+    @test Tuple(c.label for c in design.columns) ==
+          (:Intercept, :zscale_x, :center_w, :standardize_q)
+    @test Tuple(c.source for c in design.columns) ==
+          (nothing, :x, :w, :q)
+    @test Tuple(isnothing(c.preprocess) ? nothing : c.preprocess.kind
+                for c in design.columns) ==
+          (nothing, :zscale, :center, :standardize)
+    @test design.matrix ≈ expected
+
+    sb = SBBRMI(brmi)
+    @test sb.data[:zscale_x] ≈ expected[:, 2]
+    @test sb.data[:center_w] ≈ expected[:, 3]
+    @test sb.data[:standardize_q] ≈ expected[:, 4]
+    @test all(isapprox.(sb.preproc[:zscale_x].const_, (x_mean, x_scale)))
+    @test sb.preproc[:center_w].const_ == w_mean
+    @test all(isapprox.(
+        sb.preproc[:standardize_q].const_, (q_mean, q_scale)))
+
+    future = (;
+        x=[5.0, 7.0], w=[10.0, 12.0], q=[20.0, 24.0], y=zeros(2))
+    replay = reprocess(sb, future)
+    @test replay.preproc[:zscale_x].const_ == sb.preproc[:zscale_x].const_
+    @test replay.preproc[:center_w].const_ == sb.preproc[:center_w].const_
+    @test replay.data[:zscale_x] ≈ (future.x .- x_mean) ./ x_scale
+    @test replay.data[:center_w] ≈ future.w .- w_mean
+    @test replay.data[:standardize_q] ≈ (future.q .- q_mean) ./ q_scale
+end
+
+
 @testset "backend-neutral population effect-prior plan" begin
     df = (; x=[-1.0, 0.0, 1.0], y=[0.1, 0.2, 0.3])
     brmi = (@brm begin
