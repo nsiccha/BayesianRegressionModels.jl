@@ -135,7 +135,7 @@ Turing.@model function _brm_population_gaussian(
         y[i] ~ _brm_normal_observation(
             response_modifier, observation_weight, mu[i], sigma, i)
     end
-    (; mu, response=y)
+    (; mu, sigma, response=y)
 end
 
 Turing.@model function _brm_population_gaussian_random_intercept(
@@ -153,7 +153,7 @@ Turing.@model function _brm_population_gaussian_random_intercept(
         y[i] ~ _brm_normal_observation(
             response_modifier, observation_weight, mu[i], sigma, i)
     end
-    (; mu, response=y, group_scale, group_effect)
+    (; mu, sigma, response=y, group_scale, group_effect)
 end
 
 Turing.@model function _brm_population_gaussian_correlated_group(
@@ -176,7 +176,7 @@ Turing.@model function _brm_population_gaussian_correlated_group(
         y[i] ~ _brm_normal_observation(
             response_modifier, observation_weight, mu[i], sigma, i)
     end
-    (; mu, response=y, L_group, tau_group, b_group, group_effect)
+    (; mu, sigma, response=y, L_group, tau_group, b_group, group_effect)
 end
 
 Turing.@model function _brm_population_gaussian_zero_correlation_group(
@@ -209,7 +209,7 @@ Turing.@model function _brm_population_gaussian_zero_correlation_group(
         y[i] ~ _brm_normal_observation(
             response_modifier, observation_weight, mu[i], sigma, i)
     end
-    (; mu, response=y, group_intercept_scale, tau_group_slopes, scales,
+    (; mu, sigma, response=y, group_intercept_scale, tau_group_slopes, scales,
        b_group, group_effect)
 end
 
@@ -545,17 +545,108 @@ Turing.@model function _brm_population_beta_binomial2(
        L_precision_group, tau_precision_group, b_precision_group)
 end
 
-Turing.@model function _brm_multi_response(models)
+Turing.@model function _brm_shared_normal_response(
+    mu, sigma, y, response_modifier, observation_weight)
+    for i in eachindex(y)
+        y[i] ~ _brm_normal_observation(
+            response_modifier, observation_weight, mu[i], sigma, i)
+    end
+    (; mu, sigma, response=y)
+end
+
+Turing.@model function _brm_shared_bernoulli_response(
+    eta, y, observation_weight)
+    for i in eachindex(y)
+        y[i] ~ _brm_objective_observation(
+            BRM.BernoulliLogit(eta[i]), observation_weight, i)
+    end
+    (; eta)
+end
+
+Turing.@model function _brm_shared_binomial_response(
+    eta, trials, y, observation_weight)
+    for i in eachindex(y)
+        y[i] ~ _brm_objective_observation(
+            BRM.BinomialLogit(trials[i], eta[i]), observation_weight, i)
+    end
+    (; eta, trials)
+end
+
+Turing.@model function _brm_shared_poisson_response(
+    rate, y, response_modifier, observation_weight)
+    for i in eachindex(y)
+        y[i] ~ _brm_poisson_observation(
+            response_modifier, observation_weight, rate[i], i)
+    end
+    (; log_rate=log.(rate), rate)
+end
+
+Turing.@model function _brm_shared_negative_binomial2_response(
+    mu, phi, y, observation_weight)
+    for i in eachindex(y)
+        y[i] ~ _brm_objective_observation(
+            BRM.NegativeBinomial2(mu[i], phi[i]), observation_weight, i)
+    end
+    (; mu, phi)
+end
+
+Turing.@model function _brm_shared_beta_binomial2_response(
+    mean, precision, trials, y, observation_weight)
+    for i in eachindex(y)
+        y[i] ~ _brm_objective_observation(
+            BRM.BetaBinomial2(trials[i], mean[i], precision[i]),
+            observation_weight, i)
+    end
+    (; mean, precision, trials)
+end
+
+
+_brm_shared_response_model(
+    plan::BRM._TuringPopulationPlan{Val{:normal_identity}}, owner) =
+    _brm_shared_normal_response(
+        owner.mu, owner.sigma, plan.response, plan.response_modifier,
+        plan.observation_weight)
+_brm_shared_response_model(
+    plan::BRM._TuringPopulationPlan{Val{:bernoulli_logit}}, owner) =
+    _brm_shared_bernoulli_response(
+        owner.eta, plan.response, plan.observation_weight)
+_brm_shared_response_model(
+    plan::BRM._TuringPopulationPlan{Val{:binomial_logit}}, owner) =
+    _brm_shared_binomial_response(
+        owner.eta, plan.family_args.trials, plan.response,
+        plan.observation_weight)
+_brm_shared_response_model(
+    plan::BRM._TuringPopulationPlan{Val{:poisson_log}}, owner) =
+    _brm_shared_poisson_response(
+        owner.rate, plan.response, plan.response_modifier,
+        plan.observation_weight)
+_brm_shared_response_model(
+    plan::BRM._TuringMeanPrecisionPlan{Val{:negative_binomial2}}, owner) =
+    _brm_shared_negative_binomial2_response(
+        owner.mu, owner.phi, plan.response, plan.observation_weight)
+_brm_shared_response_model(
+    plan::BRM._TuringMeanPrecisionPlan{Val{:beta_binomial2}}, owner) =
+    _brm_shared_beta_binomial2_response(
+        owner.mean, owner.precision, plan.family_args.trials, plan.response,
+        plan.observation_weight)
+
+
+Turing.@model function _brm_multi_response(models, plans, owners)
     responses = Vector{Any}(undef, length(models))
     for i in eachindex(models)
-        responses[i] ~ to_submodel(models[i])
+        if owners[i] == i
+            responses[i] ~ to_submodel(models[i])
+        else
+            responses[i] ~ to_submodel(
+                _brm_shared_response_model(plans[i], responses[owners[i]]))
+        end
     end
     (; responses)
 end
 
 function BRM._brm_turing_model(plan::BRM._TuringMultiResponsePlan)
     models = Tuple(BRM._brm_turing_model(child) for child in plan.plans)
-    _brm_multi_response(models)
+    _brm_multi_response(models, plan.plans, plan.owners)
 end
 
 function BRM._brm_turing_model(

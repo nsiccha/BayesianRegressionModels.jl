@@ -42,9 +42,10 @@ struct _TuringMeanPrecisionPlan{F,C<:_BRMBackendContext,M,Q,A,
     observation_weight::OW
 end
 
-struct _TuringMultiResponsePlan{N<:Tuple,P<:Tuple}
+struct _TuringMultiResponsePlan{N<:Tuple,P<:Tuple,O<:Tuple}
     responses::N
     plans::P
+    owners::O
 end
 
 """
@@ -640,20 +641,86 @@ _turing_parameter_sources(plan::_TuringPopulationPlan) =
 _turing_parameter_sources(plan::_TuringMeanPrecisionPlan) =
     (plan.mean.predictor.name, plan.precision.predictor.name)
 
-function _turing_require_independent_responses(responses, plans)
-    claimed = Dict{Symbol,Symbol}()
-    for (response, plan) in zip(responses, plans)
-        for source in _turing_parameter_sources(plan)
-            if haskey(claimed, source)
-                error("Turing backend: responses `$(claimed[source])` and " *
-                      "`$response` share parameter source `$source`; shared " *
-                      "multi-response parameter blocks are the next parity " *
-                      "slice and are not duplicated silently")
-            end
-            claimed[source] = response
-        end
+_turing_share_class(plan::_TuringPopulationPlan{Val{:normal_identity}}) = :normal
+_turing_share_class(plan::_TuringPopulationPlan{Val{:bernoulli_logit}}) = :logit
+_turing_share_class(plan::_TuringPopulationPlan{Val{:binomial_logit}}) = :logit
+_turing_share_class(plan::_TuringPopulationPlan{Val{:poisson_log}}) = :poisson
+_turing_share_class(plan::_TuringMeanPrecisionPlan{Val{:negative_binomial2}}) =
+    :negative_binomial2
+_turing_share_class(plan::_TuringMeanPrecisionPlan{Val{:beta_binomial2}}) =
+    :beta_binomial2
+
+function _turing_same_random_effects(left, right)
+    length(left) == length(right) || return false
+    all(zip(left, right)) do (a, b)
+        a.predictor === b.predictor && a.group === b.group &&
+        a.levels == b.levels && a.indices == b.indices &&
+        a.matrix == b.matrix && a.intercept_only == b.intercept_only &&
+        a.zero_correlation == b.zero_correlation
     end
-    nothing
+end
+
+function _turing_same_component(left::_TuringPopulationComponent,
+                                right::_TuringPopulationComponent)
+    left.predictor.name === right.predictor.name &&
+    left.predictor.link_lhs_fn === right.predictor.link_lhs_fn &&
+    left.design.matrix == right.design.matrix &&
+    left.design.fixed == right.design.fixed &&
+    left.beta_location == right.beta_location &&
+    left.beta_scale == right.beta_scale &&
+    _turing_same_random_effects(left.random_effects, right.random_effects)
+end
+
+function _turing_same_component(left::_TuringPopulationPlan,
+                                right::_TuringPopulationPlan)
+    left.predictor.name === right.predictor.name &&
+    left.predictor.link_lhs_fn === right.predictor.link_lhs_fn &&
+    left.design.matrix == right.design.matrix &&
+    left.design.fixed == right.design.fixed &&
+    left.beta_location == right.beta_location &&
+    left.beta_scale == right.beta_scale &&
+    _turing_same_random_effects(left.random_effects, right.random_effects)
+end
+
+function _turing_shared_plans_compatible(left::_TuringPopulationPlan,
+                                         right::_TuringPopulationPlan)
+    _turing_share_class(left) === _turing_share_class(right) || return false
+    _turing_same_component(left, right) || return false
+    _turing_share_class(left) === :normal ?
+        left.scale_prior == right.scale_prior : true
+end
+function _turing_shared_plans_compatible(left::_TuringMeanPrecisionPlan,
+                                         right::_TuringMeanPrecisionPlan)
+    _turing_share_class(left) === _turing_share_class(right) &&
+    _turing_same_component(left.mean, right.mean) &&
+    _turing_same_component(left.precision, right.precision)
+end
+_turing_shared_plans_compatible(_left, _right) = false
+
+function _turing_response_owners(responses, plans)
+    owners = Int[]
+    source_sets = [Set(_turing_parameter_sources(plan)) for plan in plans]
+    for i in eachindex(plans)
+        owner = i
+        for j in 1:(i - 1)
+            overlap = intersect(source_sets[i], source_sets[j])
+            isempty(overlap) && continue
+            if source_sets[i] != source_sets[j]
+                error("Turing backend: responses `$(responses[j])` and " *
+                      "`$(responses[i])` partially overlap parameter sources " *
+                      "$(join(sort!(collect(overlap)), ", ")); shared response " *
+                      "blocks must currently match exactly")
+            end
+            _turing_shared_plans_compatible(plans[j], plans[i]) || error(
+                "Turing backend: responses `$(responses[j])` and " *
+                "`$(responses[i])` share parameter sources but require " *
+                "incompatible predictor geometry, priors, or likelihood links")
+            owner = owners[j]
+            break
+        end
+        push!(owners, owner)
+    end
+    Tuple(owners)
 end
 
 function _brm_turing_plan(brmi::BRMI)
@@ -668,8 +735,8 @@ function _brm_turing_plan(brmi::BRMI)
     plans = Tuple(_brm_turing_single_plan(
         brmi, observation; additional_model_operations=model_operations)
         for observation in observations)
-    _turing_require_independent_responses(response_names, plans)
-    _TuringMultiResponsePlan(response_names, plans)
+    owners = _turing_response_owners(response_names, plans)
+    _TuringMultiResponsePlan(response_names, plans, owners)
 end
 
 _brm_turing_gaussian_plan(brmi::BRMI) = begin

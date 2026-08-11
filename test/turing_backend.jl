@@ -162,15 +162,78 @@ end
     @test Turing.loglikelihood(backend.model, draw.data) ≈
           likelihood atol=1e-12 rtol=1e-12
 
-    shared = merge(df, (; y2=[-0.1, 0.3, 0.7]))
-    @test_throws "share parameter source `mu`" begin
-        TuringBRMI((@brm begin
-            sigma ~ Exponential(2)
-            mu ~ 1 + x
-            y ~ Normal(mu, sigma)
-            y2 ~ Normal(mu, sigma)
-        end)(shared))
-    end
+end
+
+
+@testset "Turing extension — shared multi-response parameter blocks" begin
+    gaussian_data = (;
+        x=[-1.0, 0.5, 2.0],
+        y=[0.2, 1.1, -0.4],
+        y2=[-0.1, 0.3, 0.7],
+    )
+    gaussian = TuringBRMI((@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x
+        y ~ Normal(mu, sigma)
+        y2 ~ Normal(mu, sigma)
+    end)(gaussian_data))
+    @test gaussian.plan.owners == (1, 1)
+
+    gaussian_draw = rand(Xoshiro(101), gaussian.model)
+    gaussian_returned = Turing.DynamicPPL.returned(
+        gaussian.model, gaussian_draw.data)
+    gaussian_params = gaussian_draw.data.responses[1].data
+    mu = gaussian.plan.plans[1].design.matrix * gaussian_params.beta_pop
+    gaussian_prior = sum(logpdf.(Normal(), gaussian_params.beta_pop)) +
+                     logpdf(Exponential(2), gaussian_params.sigma)
+    gaussian_likelihood =
+        sum(logpdf.(Normal.(mu, gaussian_params.sigma), gaussian_data.y)) +
+        sum(logpdf.(Normal.(mu, gaussian_params.sigma), gaussian_data.y2))
+    @test gaussian_returned.responses[1].mu == mu
+    @test gaussian_returned.responses[2].mu == mu
+    @test Turing.logjoint(gaussian.model, gaussian_draw.data) ≈
+          gaussian_prior + gaussian_likelihood atol=1e-12 rtol=1e-12
+    @test Turing.logprior(gaussian.model, gaussian_draw.data) ≈
+          gaussian_prior atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(gaussian.model, gaussian_draw.data) ≈
+          gaussian_likelihood atol=1e-12 rtol=1e-12
+
+    grouped_data = (;
+        x=[-1.0, 0.5, 2.0, 0.25],
+        group=["b", "a", "b", "c"],
+        binary=[1, 0, 1, 1],
+        successes=[1, 2, 4, 1],
+        trials=[3, 4, 5, 2],
+    )
+    grouped = TuringBRMI((@brm begin
+        eta ~ 1 + x + (1 | group)
+        binary ~ BernoulliLogit(eta)
+        successes ~ BRM.BinomialLogit(trials, eta)
+    end)(grouped_data))
+    @test grouped.plan.owners == (1, 1)
+
+    grouped_draw = rand(Xoshiro(102), grouped.model)
+    grouped_returned = Turing.DynamicPPL.returned(grouped.model, grouped_draw.data)
+    grouped_params = grouped_draw.data.responses[1].data
+    block = only(grouped.plan.plans[1].random_effects)
+    group_effect = exp(grouped_params.log_group_scale) .* grouped_params.z_group
+    eta = grouped.plan.plans[1].design.matrix * grouped_params.beta_pop +
+          group_effect[block.indices]
+    grouped_prior = sum(logpdf.(Normal(), grouped_params.beta_pop)) +
+                    logpdf(Normal(), grouped_params.log_group_scale) +
+                    sum(logpdf.(Normal(), grouped_params.z_group))
+    grouped_likelihood =
+        sum(logpdf.(BRM.BernoulliLogit.(eta), grouped_data.binary)) +
+        sum(logpdf.(BRM.BinomialLogit.(grouped_data.trials, eta),
+                    grouped_data.successes))
+    @test grouped_returned.responses[1].eta == eta
+    @test grouped_returned.responses[2].eta == eta
+    @test Turing.logjoint(grouped.model, grouped_draw.data) ≈
+          grouped_prior + grouped_likelihood atol=1e-12 rtol=1e-12
+    @test Turing.logprior(grouped.model, grouped_draw.data) ≈
+          grouped_prior atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(grouped.model, grouped_draw.data) ≈
+          grouped_likelihood atol=1e-12 rtol=1e-12
 end
 
 
