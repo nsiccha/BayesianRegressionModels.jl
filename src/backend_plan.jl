@@ -665,7 +665,8 @@ function _brm_replay_population_design(
 end
 
 struct _BRMRandomEffectPlan{L<:AbstractVector,I<:AbstractVector{Int},
-                            C<:Tuple,M<:AbstractMatrix}
+                            C<:Tuple,M<:AbstractMatrix,
+                            SF<:AbstractVector{Int},SR<:AbstractVector{Float64}}
     predictor::Symbol
     id::Union{Nothing,Symbol}
     group::Symbol
@@ -675,6 +676,9 @@ struct _BRMRandomEffectPlan{L<:AbstractVector,I<:AbstractVector{Int},
     matrix::M
     intercept_only::Bool
     zero_correlation::Bool
+    sd_family::SF
+    sd_rate::SR
+    lkj_eta::Float64
 end
 
 function _brm_replay_random_effect_plan(
@@ -704,7 +708,8 @@ function _brm_replay_random_effect_plan(
     _BRMRandomEffectPlan(
         training.predictor, training.id, training.group, training.levels, indices,
         Tuple(columns), matrix, training.intercept_only,
-        training.zero_correlation)
+        training.zero_correlation, training.sd_family, training.sd_rate,
+        training.lkj_eta)
 end
 
 _brm_replay_random_effect_plans(training::Tuple, context::_BRMBackendContext) =
@@ -782,7 +787,7 @@ function _brm_simple_random_effect_plans(
             "BRM backend lowering: inconsistent fitted levels for group `$group`")
         raw_columns = Any[]
         for inner_term in _brm_additive_terms(inner)
-            columns = _brm_population_columns(inner_term)
+            columns = _brm_random_effect_columns(inner_term)
             if isnothing(columns) || any(column ->
                     !isnothing(column.source) &&
                     !(column.values isa AbstractVector{<:Real}), columns)
@@ -810,9 +815,11 @@ function _brm_simple_random_effect_plans(
         matrix = hcat((column.values for column in columns)...)
         intercept_only = length(columns) == 1 &&
                          only(columns).label === :Intercept
+        n_terms = length(columns)
         push!(plans, _BRMRandomEffectPlan(
             target, id, group, levels, indices, Tuple(columns), matrix,
-            intercept_only, zero_correlation))
+            intercept_only, zero_correlation, zeros(Int, n_terms),
+            ones(Float64, n_terms), 1.0))
     end
     Tuple(plans)
 end
@@ -1037,6 +1044,32 @@ function _brm_population_columns(term::ExprColumn{typeof(factor)})
 end
 _brm_population_columns(term) = let column = _brm_population_column(term)
     isnothing(column) ? nothing : (column,)
+end
+
+function _brm_random_categorical_column(column)
+    _brm_population_column_is_categorical(column) || return column
+    level = column.preprocess.const_.level
+    label = Symbol(column.source, :_dummy_, level)
+    _BRMPopulationColumn(
+        label, (label,), column.effect_block, column.source, column.values,
+        column.preprocess)
+end
+
+function _brm_random_effect_columns(term::ExprColumn{typeof(&)})
+    args = getargs(term)
+    length(args) == 2 || return nothing
+    left = _brm_random_effect_columns(args[1])
+    right = _brm_random_effect_columns(args[2])
+    (isnothing(left) || isnothing(right) ||
+     any(c -> isnothing(c.source), left) ||
+     any(c -> isnothing(c.source), right)) && return nothing
+    Tuple(_brm_interaction_population_column(l, r)
+          for l in left for r in right)
+end
+function _brm_random_effect_columns(term)
+    columns = _brm_population_columns(term)
+    isnothing(columns) && return nothing
+    Tuple(_brm_random_categorical_column(column) for column in columns)
 end
 
 _brm_population_column_is_categorical(column) =
@@ -1287,6 +1320,156 @@ function _brm_numeric_constant(x::ExprColumn)
 end
 _brm_numeric_constant(_x) = nothing
 
+# ---- shared random-effect prior resolution ---------------------------------
+
+function _brm_ranef_sd_rate(spec, spelling::AbstractString;
+                            prefix="BRM backend lowering")
+    T = _as_distribution_type(spec.family)
+    (!isnothing(T) && T <: Exponential) || error(
+        "$prefix: `$spelling` currently supports `Exponential(scale)`; got " *
+        "`$(spec.family)`. An unmentioned scale keeps the backend default prior.")
+    isempty(spec.keywords) || error(
+        "$prefix: `$spelling ~ Exponential(...)` does not accept keywords")
+    length(spec.arguments) in (0, 1) || error(
+        "$prefix: `$spelling ~ Exponential` expects zero or one Julia scale argument")
+    scale = isempty(spec.arguments) ? 1.0 :
+            _brm_numeric_constant(only(spec.arguments))
+    isnothing(scale) && error(
+        "$prefix: `$spelling` scale must be a numeric formula constant")
+    isfinite(scale) && scale > 0 || error(
+        "$prefix: `$spelling` scale must be finite and strictly positive, got $scale")
+    1.0 / scale
+end
+
+function _brm_ranef_lkj_eta(spec, n_terms::Int;
+                            prefix="BRM backend lowering")
+    T = _as_distribution_type(spec.family)
+    (!isnothing(T) && T <: LKJCholesky) || error(
+        "$prefix: `cor(:, ID)` expects `LKJCholesky(K, eta)`; got `$(spec.family)`")
+    isempty(spec.keywords) || error(
+        "$prefix: `cor(:, ID) ~ LKJCholesky(...)` does not accept keywords")
+    length(spec.arguments) == 2 || error(
+        "$prefix: `LKJCholesky` correlation priors require dimension K and eta")
+    k = _brm_numeric_constant(spec.arguments[1])
+    eta = _brm_numeric_constant(spec.arguments[2])
+    isnothing(k) && error(
+        "$prefix: `LKJCholesky(K, eta)` dimension K must be an integer formula constant")
+    isinteger(k) || error(
+        "$prefix: `LKJCholesky(K, eta)` dimension K must be an integer formula constant")
+    Int(k) == n_terms || error(
+        "$prefix: `LKJCholesky($(Int(k)), ...)` does not match the addressed " *
+        "random-effect block width $n_terms")
+    isnothing(eta) && error(
+        "$prefix: LKJ eta must be a numeric formula constant")
+    isfinite(eta) && eta > 0 || error(
+        "$prefix: LKJ eta must be finite and strictly positive, got $eta")
+    eta
+end
+
+function _brm_ranef_margin_claim(spec, margins;
+                                 prefix="BRM backend lowering")
+    spelling = "sd($(isnothing(spec.predictor) ? ":" : spec.predictor), " *
+               "$(spec.id)" *
+               (isnothing(spec.coefficient) ? "" : ", $(spec.coefficient)") * ")"
+    if isnothing(spec.predictor) && isnothing(spec.coefficient)
+        return nothing
+    elseif isnothing(spec.predictor)
+        hits = findall(m -> m.coefficient === spec.coefficient, margins)
+        isempty(hits) && error(
+            "$prefix: `$spelling` matches no random-effect margin")
+        return (hits, 1)
+    elseif isnothing(spec.coefficient)
+        hits = findall(m -> m.predictor === spec.predictor, margins)
+        isempty(hits) && error(
+            "$prefix: `$spelling` matches no random-effect margin")
+        length(hits) == 1 || error(
+            "$prefix: `$spelling` is ambiguous because that predictor " *
+            "contributes $(length(hits)) margins; name a coefficient")
+        return (hits, 1)
+    end
+    hits = findall(m -> m.predictor === spec.predictor &&
+                        m.coefficient === spec.coefficient, margins)
+    isempty(hits) && error(
+        "$prefix: `$spelling` matches no random-effect margin")
+    length(hits) == 1 || error(
+        "$prefix: `$spelling` matches $(length(hits)) margins and is ambiguous")
+    (hits, 2)
+end
+
+"""
+    _brm_resolve_ranef_effect_overrides(specs, bucket_margins)
+
+Resolve public `sd(...)` and `cor(...)` statements against backend-supplied
+ordered `(predictor, coefficient)` margin axes. Both SBBRMI and direct Turing
+use this precedence and validation engine; only their executable distributions
+differ.
+"""
+function _brm_resolve_ranef_effect_overrides(
+        specs, bucket_margins; prefix="BRM backend lowering")
+    isempty(specs) && return Dict{Any,NamedTuple}()
+    states = Dict{Any,Dict{Symbol,Any}}()
+    for spec in specs
+        matches = Any[key for key in keys(bucket_margins)
+                      if first(key) === spec.id]
+        isempty(matches) && error(
+            "$prefix: `$(spec.class)(:, $(spec.id))` matches no shared " *
+            "`|$(spec.id)|` random-effect block")
+        length(matches) == 1 || error(
+            "$prefix: public `|$(spec.id)|` addresses $(length(matches)) blocks " *
+            "with different grouping factors; use a unique ID")
+        key = only(matches)
+        margins = bucket_margins[key]
+        state = get!(states, key) do
+            Dict{Symbol,Any}(
+                :margins => margins,
+                :sd_default => nothing,
+                :sd_overrides => Dict{Int,Tuple{Float64,Int}}(),
+                :lkj_eta => nothing)
+        end
+        if spec.class === :cor
+            state[:lkj_eta] === nothing || error(
+                "$prefix: duplicate correlation prior for `cor(:, $(spec.id))`")
+            state[:lkj_eta] = _brm_ranef_lkj_eta(
+                spec, length(margins); prefix)
+            continue
+        end
+        rate = _brm_ranef_sd_rate(spec, "sd(:, $(spec.id))"; prefix)
+        claim = _brm_ranef_margin_claim(spec, margins; prefix)
+        if isnothing(claim)
+            state[:sd_default] === nothing || error(
+                "$prefix: duplicate block SD prior for `sd(:, $(spec.id))`")
+            state[:sd_default] = rate
+            continue
+        end
+        indices, rank = claim
+        for index in indices
+            held = get(state[:sd_overrides], index, nothing)
+            if isnothing(held) || rank > held[2]
+                state[:sd_overrides][index] = (rate, rank)
+            elseif rank == held[2]
+                error("$prefix: two SD prior statements are equally specific " *
+                      "and both set margin $(margins[index]) of `|$(spec.id)|`")
+            end
+        end
+    end
+    out = Dict{Any,NamedTuple}()
+    for (key, state) in states
+        margins = state[:margins]
+        default_rate = state[:sd_default]
+        sd_family = fill(isnothing(default_rate) ? 0 : 1, length(margins))
+        sd_rate = fill(isnothing(default_rate) ? 1.0 : default_rate,
+                       length(margins))
+        for (index, (rate, _)) in state[:sd_overrides]
+            sd_family[index] = 1
+            sd_rate[index] = rate
+        end
+        out[key] = (; sd_family, sd_rate,
+                    lkj_eta=isnothing(state[:lkj_eta]) ? 1.0 : state[:lkj_eta],
+                    margins)
+    end
+    out
+end
+
 """
     _brm_simple_population_effect_overrides(
         brmi, design; available_predictors=(design.target,))
@@ -1400,6 +1583,24 @@ function _brm_population_effect_operation_keys(brmi::BRMI)
         first(address) in _NON_EFFECT_CLASSES && continue
         getf(rhs_e) === r2d2 && continue
         push!(out, key)
+    end
+    out
+end
+
+function _brm_ranef_effect_operation_keys(brmi::BRMI)
+    out = Set{Symbol}()
+    for (key, op_nc) in pairs(brmi.operations)
+        op = _named_op(op_nc)
+        isnothing(op) && continue
+        getf(op) === (~) || continue
+        lhs, rhs = getargs(op, 2)
+        lhs_e = _as_expr_column(lhs)
+        rhs_e = _as_expr_column(rhs)
+        (isnothing(lhs_e) || isnothing(rhs_e) || getf(lhs_e) !== effect) &&
+            continue
+        address = getargs(lhs_e)
+        isempty(address) && continue
+        first(address) in (:sd, :cor) && push!(out, key)
     end
     out
 end

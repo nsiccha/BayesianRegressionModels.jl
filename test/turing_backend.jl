@@ -756,7 +756,7 @@ end
     block = only(backend.plan.random_effects)
     labels = Tuple(column.label for column in block.columns)
     @test labels[1:4] ==
-          (:Intercept, :zscale_x, :category_lvl_2, :category_lvl_3)
+          (:Intercept, :zscale_x, :category_dummy_2, :category_dummy_3)
     @test startswith(String(labels[5]), "log_expr_")
     @test block.columns[5].preprocess.kind === :protect
     @test size(block.matrix) == (4, 5)
@@ -2135,6 +2135,88 @@ end
     @test "shared_groups[1].tau" in replay_names
     predictive = turing_posterior_predictive(Xoshiro(114), replayed, params)
     @test length(predictive.y) == length(dist_data.x)
+end
+
+
+@testset "Turing extension — random-effect sd/cor prior overrides" begin
+    dist_data = (;
+        x=[-1.0, 0.5, 2.0, 0.25],
+        z=[0.0, 1.0, -0.5, 0.75],
+        subject=["b", "a", "b", "c"],
+    )
+    backend = TuringBRMI((@brm begin
+        log(mu) ~ 1 + x + (1 + x | joint | subject)
+        log(phi) ~ 1 + z + (1 + z | joint | subject)
+        sd(:, joint) ~ Exponential(2)
+        sd(mu, joint, x) ~ Exponential(0.25)
+        sd(phi, joint, z) ~ Exponential(0.5)
+        cor(:, joint) ~ LKJCholesky(4, 2.5)
+        y ~ BRM.NegativeBinomial2(mu, phi)
+    end)((; dist_data..., y=[0, 2, 5, 1])))
+    mean_block = only(backend.plan.mean.random_effects)
+    precision_block = only(backend.plan.precision.random_effects)
+    @test mean_block.sd_family == [1, 1]
+    @test mean_block.sd_rate == [0.5, 4.0]
+    @test precision_block.sd_family == [1, 1]
+    @test precision_block.sd_rate == [0.5, 2.0]
+    @test mean_block.lkj_eta == precision_block.lkj_eta == 2.5
+
+    L_shared = cholesky(Symmetric(Matrix{Float64}(I, 4, 4)))
+    params = Dict(
+        Turing.@varname(beta_mean) => [0.1, 0.2],
+        Turing.@varname(beta_precision) => [-0.4, 0.15],
+        Turing.@varname(shared_groups[1].L) => L_shared,
+        Turing.@varname(shared_groups[1].tau) => [0.4, 0.7, 0.25, 0.45],
+        Turing.@varname(shared_groups[1].z_flat) =>
+            [-0.2, 0.4, 0.5, -0.7,
+             1.1, 0.3, 0.2, 0.6,
+             -0.5, 0.8, 0.4, -0.1],
+    )
+    shared_coefficients = transpose(Diagonal(params[
+        Turing.@varname(shared_groups[1].tau)]) * Matrix(L_shared.L) *
+        reshape(params[Turing.@varname(shared_groups[1].z_flat)], 4, 3))
+    mean_group_effect = vec(sum(mean_block.matrix .*
+        shared_coefficients[mean_block.indices, 1:2]; dims=2))
+    precision_group_effect = vec(sum(precision_block.matrix .*
+        shared_coefficients[precision_block.indices, 3:4]; dims=2))
+    linear_mean = backend.plan.mean.design.matrix *
+                  params[Turing.@varname(beta_mean)] + mean_group_effect
+    linear_precision = backend.plan.precision.design.matrix *
+                       params[Turing.@varname(beta_precision)] +
+                       precision_group_effect
+    mu = exp.(linear_mean)
+    phi = exp.(linear_precision)
+    prior = sum(logpdf.(Normal(), params[Turing.@varname(beta_mean)])) +
+            sum(logpdf.(Normal(), params[Turing.@varname(beta_precision)])) +
+            logpdf(LKJCholesky(4, 2.5), L_shared) +
+            sum(logpdf.([Exponential(2.0), Exponential(0.25),
+                         Exponential(2.0), Exponential(0.5)],
+                        params[Turing.@varname(shared_groups[1].tau)])) +
+            sum(logpdf.(Normal(),
+                params[Turing.@varname(shared_groups[1].z_flat)]))
+    likelihood = sum(logpdf.(BRM.NegativeBinomial2.(
+        mu, phi), backend.plan.response))
+    returned = Turing.DynamicPPL.returned(backend.model, params)
+    @test Turing.logjoint(backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+    @test Turing.logprior(backend.model, params) ≈ prior atol=1e-12 rtol=1e-12
+    @test returned.shared_groups[1].coefficients == shared_coefficients
+
+    wrong_dimension = (@brm begin
+        log(mu) ~ 1 + x + (1 + x | joint | subject)
+        log(phi) ~ 1 + z + (1 + z | joint | subject)
+        cor(:, joint) ~ LKJCholesky(3, 2)
+        y ~ BRM.NegativeBinomial2(mu, phi)
+    end)((; dist_data..., y=[0, 2, 5, 1]))
+    @test_throws "does not match" TuringBRMI(wrong_dimension)
+
+    unknown_margin = (@brm begin
+        log(mu) ~ 1 + x + (1 + x | joint | subject)
+        log(phi) ~ 1 + z + (1 + z | joint | subject)
+        sd(mu, joint, nope) ~ Exponential(1)
+        y ~ BRM.NegativeBinomial2(mu, phi)
+    end)((; dist_data..., y=[0, 2, 5, 1]))
+    @test_throws "matches no random-effect margin" TuringBRMI(unknown_margin)
 end
 
 @testset "Turing extension — unsupported shapes fail loudly" begin

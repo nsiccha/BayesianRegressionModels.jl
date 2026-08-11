@@ -141,6 +141,17 @@ function _noncentered_group_coefficients(scales, z_flat, n_groups)
               reshape(z_flat, n_terms, n_groups))
 end
 
+_brm_group_scale_distribution(family, rate) = family == 0 ?
+    truncated(Normal(), 0.0, Inf) : family == 1 ? Exponential(inv(rate)) :
+    error("Turing backend: internal unsupported random-effect SD prior family $family")
+_brm_group_scale_distributions(families, rates) =
+    [_brm_group_scale_distribution(families[i], rates[i])
+     for i in eachindex(families)]
+_brm_has_group_prior_override(block) =
+    any(!iszero, block.sd_family) || block.lkj_eta != 1.0
+_brm_has_group_prior_override(blocks::Tuple) =
+    any(_brm_has_group_prior_override, blocks)
+
 Turing.@model function _brm_random_intercept_effect(group_idx, n_groups)
     log_scale ~ Normal()
     z ~ product_distribution(fill(Normal(), n_groups))
@@ -151,12 +162,22 @@ Turing.@model function _brm_random_intercept_effect(group_idx, n_groups)
 end
 
 
+Turing.@model function _brm_random_intercept_effect_prior(
+        group_idx, n_groups, family, rate)
+    scale ~ _brm_group_scale_distribution(family, rate)
+    z ~ product_distribution(fill(Normal(), n_groups))
+    values = scale .* z
+    effect = values[group_idx]
+    (; effect, scale, values)
+end
+
+
 Turing.@model function _brm_correlated_group_effect(
-        Z, group_idx, n_groups)
+        Z, group_idx, n_groups, sd_family, sd_rate, lkj_eta)
     n_terms = size(Z, 2)
-    L ~ LKJCholesky(n_terms, 1.0)
+    L ~ LKJCholesky(n_terms, lkj_eta)
     tau ~ product_distribution(
-        fill(truncated(Normal(), 0.0, Inf), n_terms))
+        _brm_group_scale_distributions(sd_family, sd_rate))
     z_flat ~ product_distribution(fill(Normal(), n_terms * n_groups))
     z = reshape(z_flat, n_terms, n_groups)
     coefficients = transpose(Diagonal(tau) * Matrix(L.L) * z)
@@ -188,6 +209,11 @@ end
 
 function _brm_group_effect_model(block)
     if block.intercept_only
+        if _brm_has_group_prior_override(block)
+            return _brm_random_intercept_effect_prior(
+                block.indices, length(block.levels), only(block.sd_family),
+                only(block.sd_rate))
+        end
         return _brm_random_intercept_effect(
             block.indices, length(block.levels))
     end
@@ -198,7 +224,8 @@ function _brm_group_effect_model(block)
             block.matrix, block.indices, length(block.levels), intercept_index)
     end
     _brm_correlated_group_effect(
-        block.matrix, block.indices, length(block.levels))
+        block.matrix, block.indices, length(block.levels), block.sd_family,
+        block.sd_rate, block.lkj_eta)
 end
 
 _brm_group_effect_models(component) =
@@ -208,12 +235,12 @@ _brm_group_effect_models(blocks::Tuple) =
 
 
 Turing.@model function _brm_shared_correlated_group_effect(
-        matrices, group_idx, n_groups)
+        matrices, group_idx, n_groups, sd_family, sd_rate, lkj_eta)
     term_counts = Tuple(size(matrix, 2) for matrix in matrices)
     n_terms = sum(term_counts)
-    L ~ LKJCholesky(n_terms, 1.0)
+    L ~ LKJCholesky(n_terms, lkj_eta)
     tau ~ product_distribution(
-        fill(truncated(Normal(), 0.0, Inf), n_terms))
+        _brm_group_scale_distributions(sd_family, sd_rate))
     z_flat ~ product_distribution(fill(Normal(), n_terms * n_groups))
     z = reshape(z_flat, n_terms, n_groups)
     coefficients = transpose(Diagonal(tau) * Matrix(L.L) * z)
@@ -250,11 +277,17 @@ function _brm_distributional_group_parts(plan)
         mean_block.indices == precision_block.indices || error(
             "Turing backend: shared random-effect ID `$(mean_block.id)` has " *
             "incompatible group coordinates across distributional predictors")
+        mean_block.lkj_eta == precision_block.lkj_eta || error(
+            "Turing backend: shared random-effect ID `$(mean_block.id)` has " *
+            "incompatible correlation priors across distributional predictors")
         push!(mean_shared, mean_index)
         push!(precision_shared, precision_index)
         model = _brm_shared_correlated_group_effect(
             (mean_block.matrix, precision_block.matrix), mean_block.indices,
-            length(mean_block.levels))
+            length(mean_block.levels),
+            vcat(mean_block.sd_family, precision_block.sd_family),
+            vcat(mean_block.sd_rate, precision_block.sd_rate),
+            mean_block.lkj_eta)
         push!(shared, (; key, mean_block, precision_block, model))
     end
     mean_independent = Tuple(
@@ -1005,7 +1038,8 @@ end
 
 function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:normal_identity}})
-    if length(plan.random_effects) > 1
+    if length(plan.random_effects) > 1 ||
+       _brm_has_group_prior_override(plan.random_effects)
         return _brm_population_gaussian_multiple_groups(
             plan.design.matrix,
             plan.design.fixed,
@@ -1080,7 +1114,8 @@ end
 
 function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:bernoulli_logit}})
-    if length(plan.random_effects) > 1
+    if length(plan.random_effects) > 1 ||
+       _brm_has_group_prior_override(plan.random_effects)
         return _brm_population_glm_multiple_groups(
             Val(:bernoulli_logit), plan.design.matrix, plan.design.fixed,
             _brm_group_effect_models(plan), Int[], plan.response,
@@ -1138,7 +1173,8 @@ end
 
 function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:binomial_logit}})
-    if length(plan.random_effects) > 1
+    if length(plan.random_effects) > 1 ||
+       _brm_has_group_prior_override(plan.random_effects)
         return _brm_population_glm_multiple_groups(
             Val(:binomial_logit), plan.design.matrix, plan.design.fixed,
             _brm_group_effect_models(plan), plan.family_args.trials,
@@ -1198,7 +1234,8 @@ end
 
 function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:poisson_log}})
-    if length(plan.random_effects) > 1
+    if length(plan.random_effects) > 1 ||
+       _brm_has_group_prior_override(plan.random_effects)
         return _brm_population_glm_multiple_groups(
             Val(:poisson_log), plan.design.matrix, plan.design.fixed,
             _brm_group_effect_models(plan), Int[], plan.response,
@@ -1262,7 +1299,9 @@ function BRM._brm_turing_model(
     group_parts = _brm_distributional_group_parts(plan)
     if length(plan.mean.random_effects) > 1 ||
        length(plan.precision.random_effects) > 1 ||
-       !isempty(group_parts.shared)
+       !isempty(group_parts.shared) ||
+       _brm_has_group_prior_override(plan.mean.random_effects) ||
+       _brm_has_group_prior_override(plan.precision.random_effects)
         return _brm_population_mean_precision_multiple_groups(
             Val(:negative_binomial2),
             plan.mean.design.matrix, plan.mean.design.fixed,
@@ -1310,7 +1349,9 @@ function BRM._brm_turing_model(
     group_parts = _brm_distributional_group_parts(plan)
     if length(plan.mean.random_effects) > 1 ||
        length(plan.precision.random_effects) > 1 ||
-       !isempty(group_parts.shared)
+       !isempty(group_parts.shared) ||
+       _brm_has_group_prior_override(plan.mean.random_effects) ||
+       _brm_has_group_prior_override(plan.precision.random_effects)
         return _brm_population_mean_precision_multiple_groups(
             Val(:beta_binomial2),
             plan.mean.design.matrix, plan.mean.design.fixed,
@@ -1491,11 +1532,14 @@ end
 
 _brm_group_latent_name(block) = block.intercept_only ? "z" : "z_flat"
 _brm_multiple_group_model(plan::BRM._TuringPopulationPlan) =
-    length(plan.random_effects) > 1
+    length(plan.random_effects) > 1 ||
+    _brm_has_group_prior_override(plan.random_effects)
 function _brm_multiple_group_model(plan::BRM._TuringMeanPrecisionPlan)
     parts = _brm_distributional_group_parts(plan)
     length(plan.mean.random_effects) > 1 ||
-    length(plan.precision.random_effects) > 1 || !isempty(parts.shared)
+    length(plan.precision.random_effects) > 1 || !isempty(parts.shared) ||
+    _brm_has_group_prior_override(plan.mean.random_effects) ||
+    _brm_has_group_prior_override(plan.precision.random_effects)
 end
 
 function _brm_resampled_latent_paths(

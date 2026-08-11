@@ -376,8 +376,6 @@ function _turing_scalar_exponential_prior(brmi::BRMI, target::Symbol)
 end
 
 function _turing_model_context(brmi::BRMI, observation, model_operations)
-    isempty(ranef_effect_priors(brmi)) || error(
-        "Turing backend: random-effect prior overrides are not yet supported")
     isempty(r2d2_priors(brmi)) || error(
         "Turing backend: R2D2 priors are not yet supported")
     isempty(term_priors(brmi)) || error(
@@ -388,12 +386,59 @@ function _turing_model_context(brmi::BRMI, observation, model_operations)
     # inputs to the backend plan, not additional model operations.
     allowed = union(Set((observation.key, model_operations...)),
                     Set(keys(context.data)),
-                    _brm_population_effect_operation_keys(brmi))
+                    _brm_population_effect_operation_keys(brmi),
+                    _brm_ranef_effect_operation_keys(brmi))
     extras = setdiff(Set(keys(brmi.operations)), allowed)
     isempty(extras) || error(
         "Turing backend: unsupported top-level operation(s): " *
         join(sort!(collect(extras)), ", "))
     context
+end
+
+function _turing_with_ranef_prior(block::_BRMRandomEffectPlan,
+                                  sd_family, sd_rate, lkj_eta)
+    _BRMRandomEffectPlan(
+        block.predictor, block.id, block.group, block.levels, block.indices,
+        block.columns, block.matrix, block.intercept_only,
+        block.zero_correlation, collect(Int, sd_family),
+        collect(Float64, sd_rate), Float64(lkj_eta))
+end
+
+function _turing_apply_ranef_effect_priors(brmi::BRMI, components::Tuple)
+    specs = ranef_effect_priors(brmi)
+    isempty(specs) && return components
+    margins = Dict{Tuple{Symbol,Symbol},Vector{NamedTuple}}()
+    locations = Dict{Tuple{Int,Int},Tuple{Tuple{Symbol,Symbol},UnitRange{Int}}}()
+    for (component_index, component) in enumerate(components)
+        for (block_index, block) in enumerate(component.random_effects)
+            isnothing(block.id) && continue
+            key = (block.id, block.group)
+            axis = get!(margins, key, NamedTuple[])
+            first_index = length(axis) + 1
+            append!(axis, ((; predictor=block.predictor,
+                             coefficient=column.label)
+                           for column in block.columns))
+            locations[(component_index, block_index)] =
+                (key, first_index:length(axis))
+        end
+    end
+    resolved = _brm_resolve_ranef_effect_overrides(
+        specs, margins; prefix="Turing backend")
+    Tuple(map(enumerate(components)) do (component_index, component)
+        blocks = Tuple(map(enumerate(component.random_effects)) do (block_index, block)
+            location = get(locations, (component_index, block_index), nothing)
+            isnothing(location) && return block
+            key, range = location
+            override = get(resolved, key, nothing)
+            isnothing(override) && return block
+            _turing_with_ranef_prior(
+                block, override.sd_family[range], override.sd_rate[range],
+                override.lkj_eta)
+        end)
+        _TuringPopulationComponent(
+            component.predictor, component.design, component.beta_location,
+            component.beta_scale, blocks)
+    end)
 end
 
 function _turing_materialize_response_modifier(
@@ -456,6 +501,7 @@ function _turing_population_components(brmi::BRMI, observation, predictor::Symbo
     component = _turing_predictor_component(
         brmi, context, predictor; allow_group_terms=allow_random_effects,
         allow_random_slopes, allow_zero_correlation)
+    component = only(_turing_apply_ranef_effect_priors(brmi, (component,)))
     random_effects = component.random_effects
     response = context.data[observation.key]
     response isa AbstractVector || error(
@@ -503,6 +549,8 @@ function _turing_mean_precision_components(brmi::BRMI, observation,
         brmi, context, precision_name; available_predictors=predictor_names,
         allow_group_terms=true, allow_random_slopes=true,
         allow_zero_correlation=true)
+    mean, precision = _turing_apply_ranef_effect_priors(
+        brmi, (mean, precision))
     _turing_require_predictor_link((; predictor=mean.predictor), mean_link,
                                    "$family_name mean link")
     _turing_require_predictor_link((; predictor=precision.predictor),

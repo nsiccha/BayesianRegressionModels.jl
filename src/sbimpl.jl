@@ -6336,75 +6336,17 @@ end
 function _sb_ranef_effect_overrides(brmi::BRMI, id_buckets)
     specs = ranef_effect_priors(brmi)
     isempty(specs) && return Dict{Tuple{Symbol,Any},NamedTuple}()
-
-    states = Dict{Tuple{Symbol,Any},Dict{Symbol,Any}}()
-    for spec in specs
-        matches = Any[k for k in keys(id_buckets) if first(k) === spec.id]
-        isempty(matches) && error(
-            "sbimpl: `$(spec.class)(:, $(spec.id))` matches no shared " *
-            "`|$(spec.id)|` random-effect block")
-        length(matches) == 1 || error(
-            "sbimpl: public `|$(spec.id)|` addresses $(length(matches)) blocks " *
-            "with different grouping factors; use a unique ID")
-        key = only(matches)
-        bucket = id_buckets[key]
-        bucket.group_desc isa Tuple && error(
-            "sbimpl: covariance-prior effects for stratified " *
-            "`|$(spec.id)| gr(..., by=...)` buckets are not yet supported")
-        margins = _sb_id_bucket_margins(bucket)
-        state = get!(states, key) do
-            Dict{Symbol,Any}(
-                :margins => margins,
-                :sd_default => nothing,
-                :sd_overrides => Dict{Int,Tuple{Float64,Int}}(),
-                :lkj_eta => nothing,
-            )
-        end
-
-        if spec.class === :cor
-            state[:lkj_eta] === nothing || error(
-                "sbimpl: duplicate correlation prior for `cor(:, $(spec.id))`")
-            state[:lkj_eta] = _sb_ranef_lkj(spec, length(margins))
-            continue
-        end
-
-        rate = _sb_ranef_sd_rate(spec, "sd(:, $(spec.id))")
-        claim = _sb_ranef_margin_index(spec, margins)
-        if isnothing(claim)
-            state[:sd_default] === nothing || error(
-                "sbimpl: duplicate block SD prior for `sd(:, $(spec.id))`")
-            state[:sd_default] = rate
-        else
-            idxs, rank = claim
-            for idx in idxs
-                held = get(state[:sd_overrides], idx, nothing)
-                if isnothing(held) || rank > held[2]
-                    state[:sd_overrides][idx] = (rate, rank)
-                elseif rank == held[2]
-                    error("sbimpl: two SD prior statements are equally " *
-                          "specific and both set the prior for margin " *
-                          "$(margins[idx]) of `|$(spec.id)|`. Neither wins — " *
-                          "make one of them more specific, or drop it.")
-                end
-            end
-        end
+    margins = Dict{Tuple{Symbol,Any},Any}()
+    for (key, bucket) in id_buckets
+        bucket.group_desc isa Tuple && any(spec -> spec.id === first(key), specs) &&
+            error("sbimpl: covariance-prior effects for stratified " *
+                  "`|$(first(key))| gr(..., by=...)` buckets are not yet supported")
+        margins[key] = _sb_id_bucket_margins(bucket)
     end
-
-    out = Dict{Tuple{Symbol,Any},NamedTuple}()
-    for (key, state) in states
-        margins = state[:margins]
-        default_rate = state[:sd_default]
-        sd_family = fill(isnothing(default_rate) ? 0 : 1, length(margins))
-        sd_rate = fill(isnothing(default_rate) ? 1.0 : default_rate, length(margins))
-        for (idx, (rate, _)) in state[:sd_overrides]
-            sd_family[idx] = 1
-            sd_rate[idx] = rate
-        end
-        out[key] = (; sd_family, sd_rate,
-                    lkj_eta=isnothing(state[:lkj_eta]) ? 1.0 : state[:lkj_eta],
-                    margins)
-    end
-    out
+    resolved = _brm_resolve_ranef_effect_overrides(
+        specs, margins; prefix="sbimpl")
+    Dict{Tuple{Symbol,Any},NamedTuple}(key => value
+        for (key, value) in resolved)
 end
 
 # ---- R2D2 whole-predictor variance decomposition ----------------------------
