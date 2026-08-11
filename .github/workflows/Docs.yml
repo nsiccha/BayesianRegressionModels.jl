@@ -22,6 +22,7 @@ concurrency:
 
 jobs:
   build:
+    if: github.repository == 'nsiccha/BayesianRegressionModels.jl'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
