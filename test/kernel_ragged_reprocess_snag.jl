@@ -104,7 +104,13 @@ end
     # The RESAMPLE twin deliberately admits a wholly new subject population,
     # but freezes the trained event-axis HSGP fit while rebuilding both ragged
     # partitions and moving the subject draw to generated quantities.
-    new_population = subj_df(; subs=["n1", "n2", "n3", "n4"])
+    # A fixed future regimen legitimately makes the event-axis HSGP covariate
+    # constant even though its TRAINING domain was non-degenerate. Frozen
+    # replay must evaluate that constant against the training basis; it must
+    # not try to fit a new basis while constructing the CV template.
+    new_population = merge(
+        subj_df(; subs=["n1", "n2", "n3", "n4"]),
+        (; dose_amount_flat=fill(120.0, 8), log_dose=fill(log(120.0), 8)))
     resampled = reprocess(
         sb, new_population; resample_groups=[:subject])
     @test resampled.preproc[:subject_idx].const_.levels ==
@@ -112,6 +118,26 @@ end
     @test resampled.data[:kernel_nsub_pred] == 4
     @test resampled.preproc[:PHI_hsgp_log_dose].const_.fits ==
           sb.preproc[:PHI_hsgp_log_dose].const_.fits
+    @test size(resampled.data[:PHI_hsgp_log_dose]) == (8, 5)
+    @test all(isfinite, resampled.data[:PHI_hsgp_log_dose])
+    @test all(r -> r == resampled.data[:PHI_hsgp_log_dose][1, :],
+              eachrow(resampled.data[:PHI_hsgp_log_dose]))
+    @test resampled.data[:omega2_hsgp_log_dose] ==
+          sb.data[:omega2_hsgp_log_dose]
+
+    # Same-subject frozen replay was the pre-existing reference path. Its
+    # evaluation of 120 mg must agree with the new-population path above.
+    fitted_population = merge(
+        subj_df(),
+        (; dose_amount_flat=fill(120.0, 6), log_dose=fill(log(120.0), 6)))
+    fitted_replay = reprocess(sb, fitted_population)
+    @test resampled.data[:PHI_hsgp_log_dose][1, :] ==
+          fitted_replay.data[:PHI_hsgp_log_dose][1, :]
+
+    # Fresh-fit semantics still have no domain on which to fit this HSGP.
+    @test_throws "hsgp: degenerate input" reprocess(
+        sb, new_population; freeze_constants=false,
+        resample_groups=[:subject])
     resampled_code = StanBlocks.stan_code(resampled.model)
     resampled_params = resampled_code[
         first(findfirst("parameters {", resampled_code)):first(findfirst(
