@@ -1,10 +1,9 @@
 using Documenter, DocumenterVitepress, BayesianRegressionModels
 
-# The docs have one publication home. Hard-coding it is deliberate:
-# Documenter's GitHub Actions deploy criterion will refuse to publish a build
-# running in a different fork, so an accidental JuliaBayes workflow run cannot
-# create a second, drifting docs site.
-const DOCS_REPO = "nsiccha/BayesianRegressionModels.jl"
+# The docs have one publication home. Keep the target literal: Documenter's
+# GitHub Actions deploy criterion requires the workflow repository to match
+# `repo`, and the CI-equivalent docs wrapper validates the same static target.
+# A legacy JuliaBayes workflow therefore cannot create a drifting second site.
 const DOCS_DEVBRANCH = "ns/devibe"
 
 # Note: BRM's docs must build without the private HTMXObjects.jl repo — the
@@ -22,7 +21,7 @@ makedocs(
     sitename = "BayesianRegressionModels.jl",
     modules  = [BayesianRegressionModels],
     format   = DocumenterVitepress.MarkdownVitepress(
-        repo = "github.com/$DOCS_REPO",
+        repo = "github.com/nsiccha/BayesianRegressionModels.jl",
         devurl = "dev",
         devbranch = DOCS_DEVBRANCH,
         build_vitepress = false,
@@ -31,6 +30,7 @@ makedocs(
         "Home" => "index.md",
         "Formula terms" => "formula-terms.md",
         "Likelihoods" => "likelihoods.md",
+        "Backend lowering" => "backend-lowering.md",
         "Turing backend" => "turing-backend.md",
         "Gallery" => "gallery.md",
         "Complete-PLATE blueprint" => "plate-building-blocks.md",
@@ -63,7 +63,7 @@ let redirect = joinpath(@__DIR__, "build", "index.html")
 end
 
 DocumenterVitepress.deploydocs(
-    repo = "github.com/$DOCS_REPO",
+    repo = "github.com/nsiccha/BayesianRegressionModels.jl",
     devbranch = DOCS_DEVBRANCH,
     push_preview = true,
 )

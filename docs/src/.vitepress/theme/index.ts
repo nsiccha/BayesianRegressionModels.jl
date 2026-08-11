@@ -8,6 +8,7 @@ import { enhanceAppWithTabs } from 'vitepress-plugin-tabs/client'
 // `HTMXObjects.vitepress_theme_install` in make.jl. Don't edit in place
 // — edit the upstream and re-run make.jl.
 import { setupHtmxoEmbed } from './htmxo-embed'
+import { setupBackendComparisons } from './backend-comparison'
 
 import './style.css'
 
@@ -15,6 +16,7 @@ export const Theme: ThemeConfig = {
   extends: DefaultTheme,
   enhanceApp({ app, router }) {
     enhanceAppWithTabs(app);
+    setupBackendComparisons();
     // HTMXObjects embed wiring: data-hx-base resolution + SPA route
     // re-process + .htmxo-embed link rewriting. BRM defaults the proxy
     // prefix to `/live-brm` (matches the Vite proxy in config.mts and

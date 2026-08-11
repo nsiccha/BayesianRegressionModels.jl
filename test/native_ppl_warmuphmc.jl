@@ -16,8 +16,9 @@ const NP = BRM.NativePPL
 require_git_ancestor(
     "WarmupHMC",
     pkgdir(WarmupHMC),
-    WARMUPHMC_NATIVE_PPL_MINIMUM;
-    reason="Native PPL targets require WarmupHMC's own-gradient Pathfinder initialization.",
+    WARMUPHMC_TEST_MINIMUM;
+    reason="The test environment requires WarmupHMC's own-gradient " *
+        "initialization and Pathfinder 0.10.7 compatibility with Turing 0.46.",
 )
 
 NP.@model function factor_hierarchy_for_warmup()

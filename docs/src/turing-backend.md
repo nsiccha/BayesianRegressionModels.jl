@@ -3,6 +3,9 @@
 `TuringBRMI` is the direct-BRMI Turing backend. Loading Turing activates the
 package extension:
 
+For a visual three-way comparison of the direct Turing route and the
+StanBlocks/Stan route, open the [backend lowering explorer](backend-lowering.md).
+
 ```julia
 using BayesianRegressionModels, Turing
 using Distributions: Binomial
@@ -63,6 +66,76 @@ end)((; x=[-1.0, 0.5, 2.0], y=[0, 2, 5])))
  grouped_binary=summary(grouped_binary.model),
  count=summary(count.model),
  overdispersed_count=summary(overdispersed_count.model))
+```
+
+Fitted numeric transforms use the same design and coefficient labels as the
+StanBlocks backend. The fitted mean and sample standard deviation belong to the
+model plan rather than to Turing:
+
+```julia
+transformed = TuringBRMI((@brm begin
+    sigma ~ Exponential(2)
+    mu ~ 1 + zscale(x) + center(w) + zscale(x) & w
+    effect(mu, zscale_x) ~ Normal(0, 0.25)
+    effect(mu, int_zscale_x_x_w) ~ Normal(0, 0.5)
+    y ~ Normal(mu, sigma)
+end)((;
+    x=[1.0, 2.0, 4.0],
+    w=[-2.0, 1.0, 5.0],
+    y=[0.2, 1.1, -0.4],
+)))
+
+transformed.plan.design.matrix
+```
+
+Integer-coded and `CategoricalVector` population predictors use ordered
+treatment contrasts with the first level as reference. A single
+`effect(mu, group)` prior applies to every non-reference contrast, matching the
+StanBlocks categorical block:
+
+```julia
+categorical = TuringBRMI((@brm begin
+    sigma ~ Exponential(2)
+    mu ~ 1 + group + x + x & group
+    effect(mu, group) ~ Normal(0, 0.5)
+    effect(mu, int_x_x_group_lvl_2) ~ Normal(0, 0.25)
+    y ~ Normal(mu, sigma)
+end)((;
+    group=[1, 2, 3, 1, 2, 3],
+    x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+    y=[-2.4, -2.2, -2.0, -1.8, -1.7, -1.5],
+)))
+```
+
+`factor(group; ref=k)` uses the same reference-level swap and address aliases
+as StanBlocks. The user-facing column name still addresses the whole contrast
+block:
+
+```julia
+reference_level = TuringBRMI((@brm begin
+    sigma ~ Exponential(2)
+    mu ~ 1 + factor(group; ref=3)
+    effect(mu, group) ~ Normal(0, 0.5)
+    y ~ Normal(mu, sigma)
+end)((;
+    group=[1, 2, 3, 1, 2, 3],
+    y=[-2.4, -2.2, -2.0, -1.8, -1.7, -1.5],
+)))
+```
+
+Pure numeric expressions remain coefficient-bearing population terms, while
+`offset(...)` contributes with coefficient one. This makes the usual
+exposure-offset count model direct:
+
+```julia
+exposure_model = TuringBRMI((@brm begin
+    log_rate ~ 1 + log(x) + offset(log(exposure))
+    y ~ Poisson(exp(log_rate))
+end)((;
+    x=[1.0, 2.0, 4.0],
+    exposure=[2.0, 4.0, 8.0],
+    y=[0, 2, 5],
+)))
 ```
 
 Fitted numeric transforms use the same design and coefficient labels as the

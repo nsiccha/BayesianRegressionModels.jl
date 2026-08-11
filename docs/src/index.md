@@ -5,7 +5,7 @@ layout: home
 hero:
   name: BayesianRegressionModels.jl
   text: A brms-shaped formula DSL for Julia
-  tagline: Same formula grammar, but your columns do not all have to come from one equal-length data frame. Transpiles to Stan via StanBlocks; fits via Pathfinder / NUTS.
+  tagline: Same formula grammar, but your columns do not all have to come from one equal-length data frame. Runs directly in Turing or transpiles to Stan through StanBlocks.
   actions:
     - theme: brand
       text: Gallery
@@ -24,11 +24,15 @@ hero:
 A formula DSL for Bayesian regression. The macro [`@brm`](@ref) parses
 brms-style syntax (`y ~ 1 + a + (1 | g)`, `log(err) ~ 1 + b`,
 `y ~ Normal(loc, err)`) into a [`BRMI`](@ref) intermediate
-representation, then forks into one of two backends:
+representation, then lowers into a backend-specific executor:
 
-- [`VBRMI`](@ref) — pure-Julia, vectorised, `LogDensityProblems`-compatible.
-- [`SBBRMI`](@ref) — StanBlocks → Stan source, fit via Pathfinder or
-  full warmup HMC (`WarmupHMC.adaptive_warmup_mcmc`).
+- [`TuringBRMI`](@ref) — direct Turing / `DynamicPPL.Model` execution for the
+  [currently supported population GLMs](turing-backend.md).
+- [`SBBRMI`](@ref) — StanBlocks → Stan source, fit via Pathfinder or full
+  warmup HMC (`WarmupHMC.adaptive_warmup_mcmc`).
+
+The [backend lowering explorer](backend-lowering.md) puts the BRM declaration,
+intermediate representation, and executable backend views next to each other.
 
 ```julia
 using BayesianRegressionModels, DataFrames
