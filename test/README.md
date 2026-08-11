@@ -80,12 +80,14 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   stale. `[sources]` cannot fix this either: it is a Julia 1.11+ feature and is
   silently ignored on 1.10, which is this package's compat floor. Native PPL
   sampling additionally requires WarmupHMC
-  `6e6be51a016ab1e3cae9c7478f5c885788c65155` or later, where Pathfinder uses
-  the target's own `logdensity_and_gradient`; `test/bootstrap.jl` and the
-  focused sampler test enforce this ancestry because both older and newer
-  checkouts report version 0.2.1. Bootstrap resolves the floor from public
-  `origin/dev` or the host mirror's immutable pin, not from a shared checkout's
-  possibly stale local branch.
+  `9c642178720d5c294b9cead86fc8c82da5a5db09` or later. That floor retains
+  Pathfinder's use of the target's own `logdensity_and_gradient` and admits
+  Pathfinder 0.10.7, the first registered release compatible with the test
+  environment's Turing 0.46. `test/bootstrap.jl` and the focused sampler test
+  enforce this ancestry because older and newer checkouts all report version
+  0.2.1. Bootstrap resolves the floor from public `origin/dev` or the host
+  mirror's immutable pin, not from a shared checkout's possibly stale local
+  branch.
 - **`StanBlocks` must be a checkout, not a release.** BRM does not precompile
   against registered StanBlocks; it fails inside a `@deffun` in `src/sbimpl.jl`.
   Configured `gp` / `hsgp` term priors additionally require StanBlocks

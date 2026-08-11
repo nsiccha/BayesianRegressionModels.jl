@@ -49,4 +49,4 @@ rev = "c02aa16ab1b08e4f5283597fe678a88e69555cd1"
 
 [sources.WarmupHMC]
 url = "https://github.com/nsiccha/WarmupHMC.jl"
-rev = "676e43fb2510adcd6ef930faabe8ddf7f89ebec2"
+rev = "8fa829b39d6f519deaf13cd03ee17e8df6b7b9c2"
