@@ -1,14 +1,18 @@
 using Documenter, DocumenterVitepress, BayesianRegressionModels
 
-# BRM documentation is published only from the current nsiccha home. Keep the
-# target literal: Documenter's GitHub Actions deploy config requires the
-# workflow repository to match `repo`, so a legacy JuliaBayes mirror cannot
-# accidentally update a second `gh-pages` site.
+# The docs have one publication home. Hard-coding it is deliberate:
+# Documenter's GitHub Actions deploy criterion will refuse to publish a build
+# running in a different fork, so an accidental JuliaBayes workflow run cannot
+# create a second, drifting docs site.
+const DOCS_REPO = "nsiccha/BayesianRegressionModels.jl"
 const DOCS_DEVBRANCH = "ns/devibe"
 
-# Keep the docs build independent of the private HTMXObjects.jl repository:
-# `htmxo-embed.ts` is committed in-tree rather than fetched in CI. Local edits
-# to the canonical upstream file should be hand-copied; see /docs-vitepress §8.
+# Note: BRM's docs must build without the private HTMXObjects.jl repo — the
+# CI cannot clone it without repository-specific credentials. So `htmxo-embed.ts`
+# is committed in-tree (see docs/src/.vitepress/theme/) rather than synced from
+# HTMXObjects via `HTMXObjects.vitepress_theme_install` at build time. Local
+# edits to the canonical upstream file should be hand-copied; see
+# /docs-vitepress §8.
 @static if Base.find_package("HTMXObjects") !== nothing
     @eval import HTMXObjects
     @eval HTMXObjects.vitepress_theme_install(joinpath(@__DIR__, "src", ".vitepress", "theme"))
@@ -18,7 +22,7 @@ makedocs(
     sitename = "BayesianRegressionModels.jl",
     modules  = [BayesianRegressionModels],
     format   = DocumenterVitepress.MarkdownVitepress(
-        repo = "github.com/nsiccha/BayesianRegressionModels.jl",
+        repo = "github.com/$DOCS_REPO",
         devurl = "dev",
         devbranch = DOCS_DEVBRANCH,
         build_vitepress = false,
@@ -59,7 +63,7 @@ let redirect = joinpath(@__DIR__, "build", "index.html")
 end
 
 DocumenterVitepress.deploydocs(
-    repo = "github.com/nsiccha/BayesianRegressionModels.jl",
+    repo = "github.com/$DOCS_REPO",
     devbranch = DOCS_DEVBRANCH,
     push_preview = true,
 )
