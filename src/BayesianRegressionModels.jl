@@ -20,6 +20,7 @@ using StatsBase: AbstractWeights, AnalyticWeights, FrequencyWeights,
                  aweights, fweights, pweights, uweights, weights
 import CategoricalArrays as CA
 include("likelihood_distributions.jl")
+include("backend_plan.jl")
 include("native_ppl.jl")
 include("vimpl.jl")
 

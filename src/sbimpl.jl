@@ -2250,33 +2250,6 @@ function _sb_gp_axes_from_df(df, raw_ref, label::Symbol)
     axes
 end
 
-# `mm`-only source columns are consumed entirely by Julia preprocessing. Find
-# them before the generic data collector so raw labels (including strings) do
-# not become unused Stan data. A source ALSO referenced outside `mm` is retained
-# normally (e.g. `w1 + (1 | mm(...; weights=(w1,w2)))`).
-_sb_collect_mm_sources!(_, _) = nothing
-_sb_collect_mm_sources!(out, x::NamedColumn) = _sb_collect_mm_sources!(out, parent(x))
-_sb_collect_mm_sources!(out, x::ExprColumn) = begin
-    foreach(a -> _sb_collect_mm_sources!(out, a), getargs(x))
-    foreach(v -> _sb_collect_mm_sources!(out, v), values(getkwargs(x)))
-end
-_sb_collect_mm_sources!(out, x::MultiMembershipTerm) = begin
-    foreach(g -> push!(out, name(g)), getargs(x))
-    weights = getfield(x, :weights)
-    isnothing(weights) || foreach(w -> push!(out, name(w)), weights)
-end
-
-_sb_collect_non_mm_sources!(_, _) = nothing
-_sb_collect_non_mm_sources!(out, x::NamedColumn) = begin
-    parent(x) isa DataColumn && push!(out, name(x))
-    nothing
-end
-_sb_collect_non_mm_sources!(out, x::ExprColumn) = begin
-    foreach(a -> _sb_collect_non_mm_sources!(out, a), getargs(x))
-    foreach(v -> _sb_collect_non_mm_sources!(out, v), values(getkwargs(x)))
-end
-_sb_collect_non_mm_sources!(_, ::MultiMembershipTerm) = nothing
-
 """
     SBBRMI(brmi::BRMI; mod=@__MODULE__, cv_groups=Set{Symbol}(),
            centered_groups=Set{Symbol}()) -> SBBRMI
@@ -2648,36 +2621,13 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     data[_SB_PREPROC_KEY] = isnothing(_frozen_preproc) ?
         Dict{Symbol,PreprocEntry}() :
         _SBPreprocContext(Dict{Symbol,PreprocEntry}(), _frozen_preproc)
-    # Prepass 0: collect every column wrapped in `mi(...)` somewhere in the
-    # model. Those columns are NOT materialised as plain data -- the
-    # `_sb_emit_mi!` handler later splits them into observed values + missing
-    # parameters. Any other formula that references the same name (e.g.
-    # `loc2 = a + b * y`) will see the merged response, not the raw column.
-    # Generic prepass: each registered LHS-decorator method writes into its
-    # own subkey of `prepass`. The constructor only knows the subkey at the
-    # consumer site below.
-    prepass = Dict{Symbol, Any}()
-    for (_, op) in pairs(brmi.operations)
-        _sb_visit_op!(prepass, op)
-    end
+    # The shared, backend-neutral pass owns raw-data materialisation,
+    # likelihood-decorator claims, and target -> observation row axes. Its
+    # input `data` already carries the Stan preprocessing side-channel, which
+    # the generic collector leaves untouched.
+    context = _brm_backend_context(brmi; data)
+    prepass = context.prepass
     effect_overrides = _sb_prior_overrides(brmi)
-    # Prepass 1: stash every data-backed NamedColumn so later intercept-only
-    # predictors have a length probe to hang `rep_vector(1., num_elements(...))`
-    # off, regardless of iteration order. Decorators that materialise their
-    # own columns (e.g. `mi`'s `_sb_emit_mi!`) claim them via the prepass'
-    # `:skip_data` bucket; the data-collection pass honours that.
-    skip_data = get(prepass, :skip_data, Set{Symbol}())
-    mm_sources = Set{Symbol}()
-    non_mm_sources = Set{Symbol}()
-    for (_, op) in pairs(brmi.operations)
-        p = op isa NamedColumn ? parent(op) : op
-        _sb_collect_mm_sources!(mm_sources, p)
-        _sb_collect_non_mm_sources!(non_mm_sources, p)
-    end
-    union!(skip_data, setdiff(mm_sources, non_mm_sources))
-    for (_, op) in pairs(brmi.operations)
-        _sb_collect_data!(data, op; skip=skip_data)
-    end
     # Prepass 2: collect brms-style `|ID|` ranef buckets across all sub-formulas,
     # emit one shared ranef_correlated_draws per bucket, and build a lookup
     # `(brmi_key, (id_sym, group_key)) => (bucket_name, col_range, idx_name, suffix)`
@@ -2702,8 +2652,9 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     # Prepass 3: target -> observation-source map. Lets purely-intercept
     # linear predictors (`loc ~ 1`, `log(y_scale) ~ 1`) borrow N from the
     # observed `~` target that consumes them, instead of the hash-order
-    # `_sb_any_data_symbol(data)` fallback. See `_sb_collect_target_obs`.
-    target_obs = _sb_collect_target_obs(brmi)
+    # `_sb_any_data_symbol(data)` fallback. The shared context discovers this
+    # map before either backend emits or executes anything.
+    target_obs = context.target_obs
     for (key, op) in pairs(brmi.operations)
         nc = _as_named_column(op)
         isnothing(nc) && error("sbimpl: top-level op `$key` is not a NamedColumn")
@@ -2725,60 +2676,6 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     model = StanBlocks.SlicModel(body, data, mod)
     SBBRMI(brmi, model, data, preproc)
 end
-
-# Materialise a user data vector into Stan's `data` dict. Refuses
-# vectors containing `missing` -- BRM does not silently drop NA rows.
-# To model NAs as parameters wrap the response in `mi(...)`; for NAs
-# in predictors, drop or impute upstream before passing the dataframe.
-_sb_data_vec(col_name::Symbol, raw) = begin
-    if eltype(raw) >: Missing
-        any(ismissing, raw) && error(
-            "sbimpl: data column `$col_name` contains `missing` values. ",
-            "BRM never silently drops rows. Either (a) drop / impute the ",
-            "missing values in your dataframe before passing it, or ",
-            "(b) for the response, wrap the LHS in `mi(...)` to model ",
-            "the missing values as parameters (see TODO for support).")
-        # Statically known to have no missings -- coerce the eltype so the
-        # downstream Stan typer doesn't see a `Union{Missing,Float64}` it
-        # can't translate.
-        return collect(nonmissingtype(eltype(raw)), raw)
-    end
-    raw
-end
-
-# Generic prepass walker. Visits every operation; per-`typeof(f)` overrides
-# of `_sb_register_sampling_lhs!` write into `ctx` under their own subkey.
-# `ctx` is a plain Dict — each decorator's extension method picks its own
-# key (e.g. `:skip_data`) and lazily creates the bucket via `get!`. The
-# walker has no knowledge of `mi` or any specific decorator. Adding one is
-# a new method on `_sb_register_sampling_lhs!`, no walker edit.
-_sb_visit_op!(_, _) = nothing
-_sb_visit_op!(ctx, op::NamedColumn) = _sb_visit_op!(ctx, parent(op))
-_sb_visit_op!(ctx, p::ExprColumn{typeof(~)}) =
-    _sb_register_sampling_lhs!(ctx, getargs(p, 2)[1])
-
-# Default: no LHS shape claims anything.
-_sb_register_sampling_lhs!(_, _) = nothing
-
-# `mi(NamedColumn) ~ rhs` — claim the inner column under `:skip_data`,
-# which the data-collection pass honours by not materialising the column
-# (the merged response is emitted later by `_sb_emit_mi!`).
-_sb_register_sampling_lhs!(ctx::AbstractDict, lhs::ExprColumn{typeof(mi)}) =
-    _sb_register_mi_inner!(ctx, only(getargs(lhs)))
-_sb_register_mi_inner!(_, _) = nothing
-_sb_register_mi_inner!(ctx::AbstractDict, inner::NamedColumn) =
-    (push!(get!(ctx, :skip_data, Set{Symbol}()), name(inner)); nothing)
-
-# `ragged(y, group) ~ rhs` materialises `y` itself as grouped data in the
-# sampling handler below. Do not let the generic data prepass first register
-# the flat backing under the same logical response name.
-_sb_register_sampling_lhs!(ctx::AbstractDict,
-                           lhs::ExprColumn{typeof(ragged)}) =
-    _sb_register_ragged_lhs_inner!(ctx, first(getargs(lhs)))
-_sb_register_ragged_lhs_inner!(_, _) = nothing
-_sb_register_ragged_lhs_inner!(ctx::AbstractDict, inner::NamedColumn) =
-    (push!(get!(ctx, :skip_data, Set{Symbol}()), name(inner)); nothing)
-
 
 _as_data_column(x::DataColumn) = x
 _as_data_column(_) = nothing
@@ -2809,28 +2706,6 @@ _as_error_exception(_) = nothing
 
 _scalar_or_lift(::Real, scalar_v, other_v) = :(rep_vector($scalar_v, num_elements($other_v)))
 _scalar_or_lift(_, scalar_v, _other_v) = scalar_v
-
-_sb_collect_data!(data, x; skip=Set{Symbol}()) = nothing
-function _sb_record_data!(data, x::NamedColumn, d::DataColumn, skip)
-    !(name(x) in skip) && (data[name(x)] = _sb_data_vec(name(x), parent(d)))
-    nothing
-end
-_sb_record_data!(args...) = nothing
-
-_sb_collect_data!(data, x::NamedColumn; skip=Set{Symbol}()) = begin
-    d = parent(x)
-    _sb_record_data!(data, x, d, skip)
-    _sb_collect_data!(data, d; skip)
-end
-_sb_collect_data!(data, x::ExprColumn; skip=Set{Symbol}()) = begin
-    foreach(a -> _sb_collect_data!(data, a; skip), getargs(x))
-    foreach(v -> _sb_collect_data!(data, v; skip), values(getkwargs(x)))
-end
-_sb_collect_data!(data, x::MultiMembershipTerm; skip=Set{Symbol}()) = begin
-    foreach(a -> _sb_collect_data!(data, a; skip), getargs(x))
-    weights = getfield(x, :weights)
-    isnothing(weights) || foreach(a -> _sb_collect_data!(data, a; skip), weights)
-end
 
 """
     stan_code(sb::SBBRMI) -> String
@@ -4667,7 +4542,7 @@ _sb_sampling!(_stmts, _data, _key, _lhs::ExprColumn{typeof(effect)}, _rhs;
               kwargs...) = nothing
 
 _sb_sampling_backed!(stmts, data, key, backing::DataColumn, rhs; id_lookup, kwargs...) = begin
-    data[key] = _sb_data_vec(key, parent(backing))
+    data[key] = _brm_data_vec(key, parent(backing))
     _sb_likelihood!(stmts, key, rhs, data)
 end
 
@@ -4720,7 +4595,7 @@ function _sb_ragged_lhs_layout(key::Symbol, lhs::ExprColumn, rhs)
         "sbimpl: `ragged($key, ...)` observation LHS needs a raw data grouping " *
         "column as its second argument; got $(typeof(group)).")
 
-    raw = _sb_data_vec(key, parent(parent(response)))
+    raw = _brm_data_vec(key, parent(parent(response)))
     raw isa AbstractVector{<:AbstractVector} && error(
         "sbimpl: `ragged($key, $(name(group)))` observation LHS received an " *
         "ALREADY-ragged response; write `$key ~ <family>(...)` directly.")
@@ -4772,7 +4647,7 @@ end
 # still be used by another formula term on its native axis.
 function _sb_ragged_bound(data, key::Symbol, label::Symbol, bound, layout)
     bound isa NamedColumn && parent(bound) isa DataColumn || return bound
-    raw = _sb_data_vec(name(bound), parent(parent(bound)))
+    raw = _brm_data_vec(name(bound), parent(parent(bound)))
     grouped = if raw isa AbstractVector{<:AbstractVector}
         raw
     else
@@ -5018,7 +4893,8 @@ _sb_mi_kwarg_value(x::NamedColumn, data) = begin
     name(x)
 end
 
-_maybe_record_data!(data, x, d::DataColumn) = (data[name(x)] = _sb_data_vec(name(x), parent(d)); nothing)
+_maybe_record_data!(data, x, d::DataColumn) =
+    (data[name(x)] = _brm_data_vec(name(x), parent(d)); nothing)
 _maybe_record_data!(args...) = nothing
 _sb_mi_kwarg_value(x, _) = error("sbimpl: unsupported `mi(...)` family arg shape $(typeof(x))")
 
@@ -5061,6 +4937,19 @@ end
 _sb_classify_term!(t, pop_terms, ran_terms, direct_terms) =
     isnothing(_sb_cat_levels(t)) ? push!(pop_terms, t) : push!(direct_terms, t)
 
+function _sb_shared_population_cols!(cols, data,
+                                     design::_BRMPopulationDesign)
+    for column in design.columns
+        if isnothing(column.source)
+            push!(cols, :(rep_vector(1.0, num_elements($(design.row_source)))))
+        else
+            data[column.source] = column.values
+            push!(cols, column.source)
+        end
+    end
+    cols
+end
+
 function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
                                 id_lookup=_sb_empty_id_lookup(),
                                 brmi_key::Symbol=target,
@@ -5091,14 +4980,20 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
 
     if !isempty(pop_terms)
         col_exprs = Any[]
-        for t in pop_terms
-            # `direct_terms` / `ran_terms` ride along for the intercept's
-            # tier-1d / tier-1c length probes: a categorical peer or a group
-            # term names this formula's row axis, and one of them is the only
-            # signal available when the intercept is the sole population term.
-            _sb_pop_cols!(col_exprs, t, data, stmts, pop_terms;
-                          obs_n, ran_terms, direct_terms, target,
-                          group_block_lookup, term_overrides)
+        shared_design = isempty(ran_terms) && isempty(direct_terms) ?
+            _brm_simple_population_design(target, rhs, data, obs_n) : nothing
+        if isnothing(shared_design)
+            for t in pop_terms
+                # `direct_terms` / `ran_terms` ride along for the intercept's
+                # tier-1d / tier-1c length probes: a categorical peer or a group
+                # term names this formula's row axis, and one of them is the only
+                # signal available when the intercept is the sole population term.
+                _sb_pop_cols!(col_exprs, t, data, stmts, pop_terms;
+                              obs_n, ran_terms, direct_terms, target,
+                              group_block_lookup, term_overrides)
+            end
+        else
+            _sb_shared_population_cols!(col_exprs, data, shared_design)
         end
         X_name = Symbol(:X_, target)
         pop_name = Symbol(:pop_, target)
@@ -7959,57 +7854,6 @@ _sb_group_row_idx(data, g::NamedColumn) = first(_sb_ensure_group_data!(data, g))
 _sb_group_row_idx(data, g::Tuple{NamedColumn,NamedColumn}) = _sb_ensure_group_data!(data, g).idx_name
 _sb_group_row_idx(_data, _g) = nothing
 
-# Prepass: build a `target -> observation` map. For each `~` op whose LHS is
-# observed (a data-backed NamedColumn directly, or wrapped in a link like
-# `log(y)` over a data-backed NamedColumn), walk the RHS recursively and
-# record `target_obs[ref_name] = obs_name` for every NamedColumn reference.
-# The observation column itself maps to itself. First write wins -- if a
-# target is referenced by multiple likelihoods, the first encountered op
-# (BRMI iteration order) supplies the source N. The intercept emitter
-# consults this map for purely-intercept formulas (`y ~ 1`, `loc ~ 1`) where
-# no in-formula data-backed peer exists; the threaded `obs_n` becomes the
-# length probe before falling through to `_sb_any_data_symbol`.
-function _sb_collect_target_obs(brmi::BRMI)
-    target_obs = Dict{Symbol,Symbol}()
-    for (_, op_nc) in pairs(brmi.operations)
-        op = _as_expr_column(parent(op_nc))
-        isnothing(op) && continue
-        getf(op) === (~) || continue
-        lhs, rhs = getargs(op, 2)
-        obs_name = _sb_observation_name(lhs)
-        isnothing(obs_name) && continue
-        get!(target_obs, obs_name, obs_name)
-        _sb_collect_rhs_refs!(target_obs, rhs, obs_name)
-    end
-    target_obs
-end
-
-# Resolve a `~` op's LHS to the observed data-column name (the source of N),
-# or `nothing` if the LHS isn't an observation. Handles direct
-# data-backed NamedColumn and one-arg link wrappers (`log(y)`, `mi(y)`, etc.).
-_sb_observation_name(_) = nothing
-_sb_observation_name(lhs::NamedColumn) = _n_obs_named_data(lhs, parent(lhs))
-_sb_observation_name(lhs::ExprColumn{typeof(ragged)}) =
-    _sb_observation_name(first(getargs(lhs)))
-_sb_observation_name(lhs::ExprColumn) = begin
-    args = getargs(lhs)
-    length(args) == 1 ? _sb_observation_name(args[1]) : nothing
-end
-
-# Walk a RHS expression tree, recording every NamedColumn reference's name
-# into `target_obs` keyed back to `obs_name`. `get!` ensures first-write
-# wins so the BRMI's natural iteration order picks the source.
-_sb_collect_rhs_refs!(_target_obs, _x, _obs_name) = nothing
-_sb_is_nothing_column(x::NamedColumn) =
-    name(x) === :nothing && parent(x) isa MissingColumn
-_sb_collect_rhs_refs!(target_obs, x::NamedColumn, obs_name) = begin
-    !_sb_is_nothing_column(x) && get!(target_obs, name(x), obs_name)
-    nothing
-end
-_sb_collect_rhs_refs!(target_obs, x::ExprColumn, obs_name) = begin
-    foreach(a -> _sb_collect_rhs_refs!(target_obs, a, obs_name), getargs(x))
-    foreach(v -> _sb_collect_rhs_refs!(target_obs, v, obs_name), values(getkwargs(x)))
-end
 _sb_any_data_symbol(data, target=nothing) = begin
     isempty(data) && error("sbimpl: can't emit `rep_vector(1., n)` — no data column seen yet. Make sure an observed `~` comes before the intercept-only predictor, or add a concrete covariate.")
     # Prefer a flat length-N vector (numeric / integer) so `num_elements(...)` in
@@ -8680,7 +8524,7 @@ function _sb_wrapper_bounds(wrapper, args, kwargs::NamedTuple)
 end
 
 _sb_normalize_bound(::Nothing) = nothing
-_sb_normalize_bound(x::NamedColumn) = _sb_is_nothing_column(x) ? nothing : x
+_sb_normalize_bound(x::NamedColumn) = _brm_is_nothing_column(x) ? nothing : x
 _sb_normalize_bound(x) = x
 
 _sb_bound_data(x::Real, _data) = x
