@@ -119,6 +119,43 @@ end
     @test Turing.DynamicPPL.returned(backend.model, params).mu ≈ mu
 end
 
+@testset "Turing extension — categorical treatment contrasts" begin
+    df = (;
+        g=[1, 2, 3, 1, 2, 3],
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        y=[-2.4, -2.2, -2.0, -1.8, -1.7, -1.5],
+    )
+    brmi = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + g + x
+        effect(mu, g) ~ Normal(0.5, 0.25)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    backend = TuringBRMI(brmi)
+
+    expected_X = hcat(
+        ones(6),
+        Float64.(df.g .== 2),
+        Float64.(df.g .== 3),
+        df.x,
+    )
+    @test backend.plan.design.matrix == expected_X
+    @test Tuple(c.label for c in backend.plan.design.columns) ==
+          (:Intercept, :g_lvl_2, :g_lvl_3, :x)
+    @test backend.plan.beta_location == [0.0, 0.5, 0.5, 0.0]
+    @test backend.plan.beta_scale == [1.0, 0.25, 0.25, 1.0]
+
+    params = (; beta_pop=[0.25, -0.5, 0.4, 0.2], sigma=0.8)
+    mu = expected_X * params.beta_pop
+    prior = sum(logpdf.(Normal.(backend.plan.beta_location,
+                               backend.plan.beta_scale), params.beta_pop)) +
+            logpdf(Exponential(2), params.sigma)
+    likelihood = sum(logpdf.(Normal.(mu, params.sigma), df.y))
+    @test Turing.logjoint(backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+    @test Turing.DynamicPPL.returned(backend.model, params).mu ≈ mu
+end
+
 @testset "Turing extension — population effect-prior overrides" begin
     df = (; x=[-1.0, 0.5, 2.0], y=[0.2, 1.1, -0.4])
     brmi = (@brm begin
@@ -206,13 +243,13 @@ end
 end
 
 @testset "Turing extension — unsupported shapes fail loudly" begin
-    categorical = (@brm begin
+    unsupported_string_column = (@brm begin
         sigma ~ Exponential(1)
         mu ~ 1 + group
         y ~ Normal(mu, sigma)
-    end)((; group=[1, 2, 1], y=zeros(3)))
+    end)((; group=["a", "b", "a"], y=zeros(3)))
     @test_throws "supports only `1` and continuous raw-data columns" begin
-        TuringBRMI(categorical)
+        TuringBRMI(unsupported_string_column)
     end
 
     poisson_identity = (@brm begin
