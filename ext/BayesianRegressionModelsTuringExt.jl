@@ -2,6 +2,7 @@ module BayesianRegressionModelsTuringExt
 
 using BayesianRegressionModels
 using Distributions: Exponential, Normal, Poisson, product_distribution
+using LogExpFunctions: logistic
 using Turing
 
 const BRM = BayesianRegressionModels
@@ -66,6 +67,24 @@ Turing.@model function _brm_population_negative_binomial2(
     (; log_mu, log_phi, mu, phi)
 end
 
+Turing.@model function _brm_population_beta_binomial2(
+    X_mean, fixed_mean, X_precision, fixed_precision, trials, y,
+    mean_beta_location, mean_beta_scale,
+    precision_beta_location, precision_beta_scale)
+    beta_mean ~ product_distribution(
+        Normal.(mean_beta_location, mean_beta_scale))
+    beta_precision ~ product_distribution(
+        Normal.(precision_beta_location, precision_beta_scale))
+    logit_mean = X_mean * beta_mean + fixed_mean
+    log_precision = X_precision * beta_precision + fixed_precision
+    mean = logistic.(logit_mean)
+    precision = exp.(log_precision)
+    for i in eachindex(y)
+        y[i] ~ BRM.BetaBinomial2(trials[i], mean[i], precision[i])
+    end
+    (; logit_mean, log_precision, mean, precision, trials)
+end
+
 function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:normal_identity}})
     _brm_population_gaussian(
@@ -113,12 +132,29 @@ function BRM._brm_turing_model(
 end
 
 
-function BRM._brm_turing_model(plan::BRM._TuringNegativeBinomial2Plan)
+function BRM._brm_turing_model(
+    plan::BRM._TuringMeanPrecisionPlan{Val{:negative_binomial2}})
     _brm_population_negative_binomial2(
         plan.mean.design.matrix,
         plan.mean.design.fixed,
         plan.precision.design.matrix,
         plan.precision.design.fixed,
+        plan.response,
+        plan.mean.beta_location,
+        plan.mean.beta_scale,
+        plan.precision.beta_location,
+        plan.precision.beta_scale,
+    )
+end
+
+function BRM._brm_turing_model(
+    plan::BRM._TuringMeanPrecisionPlan{Val{:beta_binomial2}})
+    _brm_population_beta_binomial2(
+        plan.mean.design.matrix,
+        plan.mean.design.fixed,
+        plan.precision.design.matrix,
+        plan.precision.design.fixed,
+        plan.family_args.trials,
         plan.response,
         plan.mean.beta_location,
         plan.mean.beta_scale,

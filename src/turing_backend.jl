@@ -25,12 +25,13 @@ struct _TuringPopulationComponent{P<:_BRMPopulationPredictor,
     beta_scale::B
 end
 
-struct _TuringNegativeBinomial2Plan{F,C<:_BRMBackendContext,M,Q,
-                                    Y<:AbstractVector}
+struct _TuringMeanPrecisionPlan{F,C<:_BRMBackendContext,M,Q,A,
+                                Y<:AbstractVector}
     family::F
     context::C
     mean::M
     precision::Q
+    family_args::A
     response::Y
 end
 
@@ -50,7 +51,7 @@ end
 Base.parent(x::TuringBRMI) = x.parent
 _turing_num_population_coefficients(plan::_TuringPopulationPlan) =
     size(plan.design.matrix, 2)
-_turing_num_population_coefficients(plan::_TuringNegativeBinomial2Plan) =
+_turing_num_population_coefficients(plan::_TuringMeanPrecisionPlan) =
     size(plan.mean.design.matrix, 2) + size(plan.precision.design.matrix, 2)
 
 Base.show(io::IO, x::TuringBRMI) = print(
@@ -168,17 +169,15 @@ function _turing_require_predictor_link(parts, expected, role::AbstractString)
     nothing
 end
 
-function _turing_negative_binomial2_plan(brmi::BRMI, observation,
-                                         rhs::ExprColumn)
-    isempty(getkwargs(rhs)) || error(
-        "Turing backend: `NegativeBinomial2(mu, phi)` accepts no formula keywords")
-    args = getargs(rhs)
-    length(args) == 2 || error(
-        "Turing backend: `NegativeBinomial2(mu, phi)` requires exactly two arguments")
-    mean_name = _turing_named_reference(args[1], "mean")
-    precision_name = _turing_named_reference(args[2], "precision")
+function _turing_mean_precision_components(brmi::BRMI, observation,
+                                           mean_raw, precision_raw,
+                                           family_name::AbstractString,
+                                           mean_link, precision_link)
+    mean_name = _turing_named_reference(mean_raw, "$family_name mean")
+    precision_name = _turing_named_reference(
+        precision_raw, "$family_name precision")
     mean_name === precision_name && error(
-        "Turing backend: NegativeBinomial2 mean and precision need distinct predictors")
+        "Turing backend: $family_name mean and precision need distinct predictors")
 
     predictor_names = (mean_name, precision_name)
     context = _turing_model_context(brmi, observation, predictor_names)
@@ -186,24 +185,58 @@ function _turing_negative_binomial2_plan(brmi::BRMI, observation,
         brmi, context, mean_name; available_predictors=predictor_names)
     precision = _turing_predictor_component(
         brmi, context, precision_name; available_predictors=predictor_names)
-    _turing_require_predictor_link((; predictor=mean.predictor), log,
-                                   "NegativeBinomial2 mean log link")
-    _turing_require_predictor_link((; predictor=precision.predictor), log,
-                                   "NegativeBinomial2 precision log link")
+    _turing_require_predictor_link((; predictor=mean.predictor), mean_link,
+                                   "$family_name mean link")
+    _turing_require_predictor_link((; predictor=precision.predictor),
+                                   precision_link, "$family_name precision link")
 
     response = context.data[observation.key]
     response isa AbstractVector || error(
         "Turing backend: response `$(observation.key)` must be a vector")
     n = length(response)
     size(mean.design.matrix, 1) == n || error(
-        "Turing backend: NegativeBinomial2 mean design has a different row count")
+        "Turing backend: $family_name mean design has a different row count")
     size(precision.design.matrix, 1) == n || error(
-        "Turing backend: NegativeBinomial2 precision design has a different row count")
+        "Turing backend: $family_name precision design has a different row count")
+    (; context, mean, precision, response)
+end
+
+function _turing_negative_binomial2_plan(brmi::BRMI, observation,
+                                         rhs::ExprColumn)
+    isempty(getkwargs(rhs)) || error(
+        "Turing backend: `NegativeBinomial2(mu, phi)` accepts no formula keywords")
+    args = getargs(rhs)
+    length(args) == 2 || error(
+        "Turing backend: `NegativeBinomial2(mu, phi)` requires exactly two arguments")
+    parts = _turing_mean_precision_components(
+        brmi, observation, args[1], args[2], "NegativeBinomial2", log, log)
+    response = parts.response
     all(x -> x isa Integer && !(x isa Bool) && x >= 0, response) || error(
         "Turing backend: NegativeBinomial2 response `$(observation.key)` must " *
         "contain nonnegative integer counts")
-    _TuringNegativeBinomial2Plan(
-        Val(:negative_binomial2), context, mean, precision, Int.(response))
+    _TuringMeanPrecisionPlan(
+        Val(:negative_binomial2), parts.context, parts.mean, parts.precision,
+        NamedTuple(), Int.(response))
+end
+
+function _turing_beta_binomial2_plan(brmi::BRMI, observation,
+                                    rhs::ExprColumn)
+    isempty(getkwargs(rhs)) || error(
+        "Turing backend: `BetaBinomial2(trials, mean, precision)` accepts no formula keywords")
+    args = getargs(rhs)
+    length(args) == 3 || error(
+        "Turing backend: `BetaBinomial2(trials, mean, precision)` requires exactly three arguments")
+    trials_raw, mean_raw, precision_raw = args
+    parts = _turing_mean_precision_components(
+        brmi, observation, mean_raw, precision_raw, "BetaBinomial2", logit, log)
+    trials = _brm_materialize_count_argument(
+        trials_raw, length(parts.response), "BetaBinomial2 trial count";
+        prefix="Turing backend")
+    response = _brm_validate_binomial_response(
+        parts.response, trials, observation.key; prefix="Turing backend")
+    _TuringMeanPrecisionPlan(
+        Val(:beta_binomial2), parts.context, parts.mean, parts.precision,
+        (; trials), response)
 end
 
 function _turing_normal_plan(brmi::BRMI, observation, rhs::ExprColumn)
@@ -358,11 +391,14 @@ function _brm_turing_plan(brmi::BRMI)
         return _turing_binomial_logit_plan(brmi, observation, rhs)
     family === NegativeBinomial2 &&
         return _turing_negative_binomial2_plan(brmi, observation, rhs)
+    family === BetaBinomial2 &&
+        return _turing_beta_binomial2_plan(brmi, observation, rhs)
     family === Poisson && return _turing_poisson_log_plan(brmi, observation, rhs)
     error("Turing backend: executable families are `Normal(mu, sigma)`, " *
           "`Bernoulli(p)` / `BernoulliLogit(eta)`, `Binomial(trials, p)` / " *
           "`BinomialLogit(trials, eta)`, " *
-          "`Poisson(exp(log_rate))`, and `NegativeBinomial2(mu, phi)`; got `$family`")
+          "`Poisson(exp(log_rate))`, `NegativeBinomial2(mu, phi)`, and " *
+          "`BetaBinomial2(trials, mean, precision)`; got `$family`")
 end
 
 _brm_turing_gaussian_plan(brmi::BRMI) = begin

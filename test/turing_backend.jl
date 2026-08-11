@@ -2,7 +2,7 @@ using Test
 using Random: Xoshiro
 using BayesianRegressionModels
 using Distributions: Binomial, Cauchy, Exponential, Normal, Poisson, logpdf
-using LogExpFunctions: logit
+using LogExpFunctions: logistic, logit
 using Turing
 
 const BRM = BayesianRegressionModels
@@ -513,6 +513,52 @@ end
     @test returned.mu == mu
     @test returned.phi == phi
     @test haskey(sb.data, :x) && haskey(sb.data, :z)
+end
+
+
+@testset "Turing extension — distributional BetaBinomial2" begin
+    df = (;
+        x=[-1.0, 0.5, 2.0, 0.25],
+        z=[0.0, 1.0, -0.5, 0.75],
+        trials=[4, 6, 8, 5],
+        y=[1, 4, 5, 0],
+    )
+    brmi = (@brm begin
+        logit(mean) ~ 1 + x
+        log(precision) ~ 1 + z
+        effect(mean, x) ~ Normal(0.25, 0.5)
+        effect(precision, Intercept) ~ Normal(-0.2, 0.3)
+        y ~ BRM.BetaBinomial2(trials, mean, precision)
+    end)(df)
+    backend = TuringBRMI(brmi)
+    params = (; beta_mean=[0.1, 0.2], beta_precision=[-0.4, 0.15])
+    logit_mean = backend.plan.mean.design.matrix * params.beta_mean
+    log_precision = backend.plan.precision.design.matrix * params.beta_precision
+    mean = logistic.(logit_mean)
+    precision = exp.(log_precision)
+    prior = sum(logpdf.(
+        Normal.(backend.plan.mean.beta_location, backend.plan.mean.beta_scale),
+        params.beta_mean)) + sum(logpdf.(
+        Normal.(backend.plan.precision.beta_location,
+                backend.plan.precision.beta_scale), params.beta_precision))
+    likelihood = sum(logpdf.(
+        BRM.BetaBinomial2.(df.trials, mean, precision), df.y))
+    returned = Turing.DynamicPPL.returned(backend.model, params)
+
+    @test backend.plan.family isa Val{:beta_binomial2}
+    @test backend.plan.family_args.trials == df.trials
+    @test backend.plan.mean.beta_location == [0.0, 0.25]
+    @test backend.plan.precision.beta_location == [-0.2, 0.0]
+    @test Turing.logjoint(backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+    @test Turing.logprior(backend.model, params) ≈ prior atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(backend.model, params) ≈
+          likelihood atol=1e-12 rtol=1e-12
+    @test returned.logit_mean == logit_mean
+    @test returned.log_precision == log_precision
+    @test returned.mean == mean
+    @test returned.precision == precision
+    @test returned.trials == df.trials
 end
 
 @testset "Turing extension — unsupported shapes fail loudly" begin

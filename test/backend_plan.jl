@@ -1,6 +1,7 @@
 using Test
 using BayesianRegressionModels
 using Distributions: Cauchy, Exponential, Normal
+using LogExpFunctions: logit
 
 const BRM = BayesianRegressionModels
 
@@ -59,6 +60,27 @@ end
     emitted = sprint(show, SBBRMI(brmi).model.model)
     @test occursin("X_log_lambda", emitted)
     @test occursin("lambda = exp(log_lambda)", emitted)
+end
+
+
+@testset "Turing mean/precision plan reuses backend-neutral predictors" begin
+    df = (;
+        x=[-1.0, 0.5, 2.0], z=[0.0, 1.0, -0.5],
+        trials=[4, 6, 5], y=[1, 4, 2])
+    brmi = (@brm begin
+        logit(mean) ~ 1 + x
+        log(precision) ~ 1 + z
+        y ~ BRM.BetaBinomial2(trials, mean, precision)
+    end)(df)
+    plan = BRM._brm_turing_plan(brmi)
+
+    @test plan.family isa Val{:beta_binomial2}
+    @test plan.mean.predictor.link_lhs_fn === logit
+    @test plan.precision.predictor.link_lhs_fn === log
+    @test plan.mean.design.matrix == hcat(ones(3), df.x)
+    @test plan.precision.design.matrix == hcat(ones(3), df.z)
+    @test plan.family_args.trials == df.trials
+    @test plan.response == df.y
 end
 
 
