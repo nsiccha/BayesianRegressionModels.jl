@@ -42,6 +42,11 @@ jobs:
         # installed via npm before the Julia build runs (see /ci §6g).
         run: cd docs && npm install
       - name: Install dependencies
+        env:
+          # Pkg's automatic whole-environment precompile can retain a Julia
+          # worker indefinitely on this closure. The docs build below loads
+          # and precompiles the packages it actually consumes.
+          JULIA_PKG_PRECOMPILE_AUTO: "0"
         # BRM's nsiccha-org runtime dependencies must be developed explicitly:
         # Julia 1.10 ignores Project.toml's `[sources]`, and MutatingFunctions
         # plus OutputSignatures are not registered. Clone the public sources
