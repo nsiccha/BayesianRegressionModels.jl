@@ -53,7 +53,8 @@ The last two are BRM's addition — the **schema link** back to the dataframe:
   when it has no single raw column (a design matrix, a level count, a size).
 - `transform` — the BRM preprocessing kind applied on the way (`:zscale`,
   `:center`, `:standardize`, `:factor`, `:mo`, `:spline`, `:gp`, `:hsgp`,
-  `:multi_membership`, `:protect`),
+  `:static`, `:group_index`, `:ranef_factor_dummy`, `:multi_membership`, `:kernel_subject_count`,
+  `:kernel_ragged`, `:protect`),
   or `nothing` when the column is passed through untransformed.
 
 `column`/`transform` are read from the plan's `preproc` record and the BRMI's
@@ -673,11 +674,13 @@ hand, so an operation that appears can be executed.
 | `:predict` | `:stan` | the Stan program emits ≥1 posterior-predictive draw **and** ≥1 BRM observation resolves to it |
 | `:pointwise_loglik` | `:stan` | the Stan program emits ≥1 pointwise log-likelihood |
 | `:replay` | `:brm` | the descriptor was built from a `@brm` builder (rebuild on a new dataframe, e.g. new subjects) |
-| `:reprocess` | `:brm` | the declaration has no random-effect block, or every random-effect block uses typed `mm(...)` preprocessing |
+| `:reprocess` | `:brm` | the declaration has no random-effect block, or every random-effect block has frozen same-group preprocessing (plain/`|ID|`/grouped-HSGP group indices or typed `mm(...)`; stratified `gr(g, by=b)` remains unsupported) |
 
 `:replay` / `:reprocess` take the new dataframe positionally and return a NEW
 `BRMDescriptor`; their `inputs` are the dataframe columns in `d.columns`, not
-Stan data keys.
+Stan data keys. `:reprocess` forwards both `freeze_constants=` and the checked
+new-population `resample_groups=` CV/GQ re-emission described by
+[`reprocess`](@ref).
 
 # Extension points
 
@@ -887,7 +890,8 @@ function _brm_reprocess_supported(plan, outputs)
         idx_key = d.keywords.group_idx
         idx_key isa Symbol || return false
         entry = get(plan.preproc, idx_key, nothing)
-        entry isa PreprocEntry && entry.kind === :multi_membership
+        entry isa PreprocEntry &&
+            entry.kind in (:group_index, :multi_membership)
     end
 end
 
@@ -915,8 +919,9 @@ function _brm_derive_operations(plan, stan, outputs, columns)
         push!(ops, BRMOperation(
             :reprocess, "Re-run preprocessing on a new dataframe", columns, (), :brm,
             (d, new_df; freeze_constants::Bool=true, highlights=d.highlights,
-             kwargs...) -> brm_descriptor(
-                reprocess(d.plan, new_df; freeze_constants); highlights, kwargs...)))
+             resample_groups=(), kwargs...) -> brm_descriptor(
+                reprocess(d.plan, new_df; freeze_constants, resample_groups);
+                highlights, kwargs...)))
     end
     ops
 end

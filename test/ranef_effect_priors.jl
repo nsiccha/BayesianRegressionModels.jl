@@ -195,10 +195,13 @@ end
     @test occursin("b_p_subject_tau ~ std_normal();", default_code)
 
     new_df = merge(df, (; x=reverse(df.x), y=reverse(df.y)))
-    # Ordinary ranef indices are an existing loud `reprocess` edge; replay must
-    # rebuild from the retained builder instead of pretending those indices are
-    # portable.
-    @test_throws "ordinary random-effects group indices" reprocess(partial, new_df)
+    replayed = reprocess(partial, new_df)
+    @test replayed.data[:subject_idx] == partial.data[:subject_idx]
+    @test replayed.data[:n_subject] == partial.data[:n_subject]
+    @test BayesianRegressionModels.stan_code(replayed) ==
+          BayesianRegressionModels.stan_code(partial)
+    @test_throws "unseen level" reprocess(
+        partial, merge(new_df, (; subject=[1, 1, 2, 2, 3, 9])))
 
     reusable = generative_plan(partial_builder, df; mod=@__MODULE__)
     rebuilt = generative_plan(reusable, new_df)

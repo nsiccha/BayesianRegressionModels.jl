@@ -1817,6 +1817,28 @@ _sb_apply_levels(levels, raw::AbstractVector) = begin
     idx
 end
 
+# Random-effect group coding has the same frozen-level geometry as `factor`,
+# but deserves its own diagnostic: the missing coordinate is a fitted group
+# effect, not a treatment contrast.  Keep this separate from `_sb_apply_levels`
+# so an unseen group cannot be misreported as a factor-level problem.
+_sb_group_values(raw::CA.CategoricalVector) = CA.unwrap.(raw)
+_sb_group_values(raw::AbstractVector) = raw
+function _sb_apply_group_levels(levels, raw::AbstractVector, group::Symbol)
+    values = _sb_group_values(raw)
+    lm = Dict(l => i for (i, l) in enumerate(levels))
+    idx = Vector{Int}(undef, length(values))
+    for (row, level) in enumerate(values)
+        haskey(lm, level) || error(
+            "sbimpl: reprocess: random-effects grouping column `$group` has " *
+            "unseen level `$(level)` at row $row (training levels: " *
+            "$(collect(levels))). The fitted model has no random-effect " *
+            "coordinate for that level. Rebuild for a new population, or use " *
+            "only fitted groups for frozen replay.")
+        idx[row] = lm[level]
+    end
+    idx
+end
+
 # GP input helpers. Both public terms accept one-or-more raw real-valued axes
 # and lower them to an N x d matrix. Keeping the raw column names in the
 # preprocessing record lets `reprocess` rebuild that matrix on new data.
@@ -2153,6 +2175,20 @@ _sb_record_preproc!(data, key::Symbol, entry::PreprocEntry) = begin
     pp[key] = entry
     nothing
 end
+
+function _sb_record_group_index!(data, idx_key::Symbol, n_groups_key::Symbol,
+                                 group::Symbol, raw::AbstractVector)
+    levels = _sb_fit_levels(raw)
+    _sb_record_preproc!(data, idx_key, PreprocEntry(
+        :group_index, (; levels, n_groups_key), group, true))
+end
+
+# Model-shape data that do not depend on dataframe rows (for example the
+# number of columns in a shared `|ID|` bucket and its per-formula column
+# selectors) must survive replay verbatim.  Recording them explicitly keeps
+# `reprocess` fail-closed for every other unexplained derived datum.
+_sb_record_static!(data, key::Symbol) =
+    _sb_record_preproc!(data, key, PreprocEntry(:static, deepcopy(data[key]), nothing, true))
 
 # Re-materialise a column-node tree (NamedColumn / ExprColumn) against a fresh
 # DataFrame `df`, mirroring `_sb_materialize_vec` but resolving raw-data leaves
@@ -3100,13 +3136,188 @@ end
 
 _sb_df_has_column(df, k::Symbol) = hasproperty(df, k)
 
+# Rebind the typed BRMI tree to a new dataframe without re-parsing source code.
+# This is the construction half `resample_groups` needs: cv-contagious sizing is
+# selected while emitting Stan, so swapping the old model's data cannot create
+# a new-population artifact.  Named data leaves are the only values replaced;
+# formula-local structure, functions, and literal hyperparameters stay exact.
+_sb_rebind_value(x, _df) = x
+_sb_rebind_value(x::Tuple, df) = map(v -> _sb_rebind_value(v, df), x)
+_sb_rebind_value(x::NamedTuple, df) =
+    NamedTuple{keys(x)}(map(v -> _sb_rebind_value(v, df), values(x)))
+_sb_rebind_value(x::NestedPredictorFormula, df) =
+    NestedPredictorFormula(_sb_rebind_value(parent(x), df))
+_sb_rebind_value(x::LikelihoodColumn, df) =
+    LikelihoodColumn(_sb_rebind_value(parent(x), df),
+                     _sb_rebind_value(rhs(x), df))
+function _sb_rebind_value(x::NamedColumn, df)
+    n = name(x)
+    p = parent(x)
+    if p isa DataColumn || p isa MissingColumn
+        if _sb_df_has_column(df, n)
+            return NamedColumn(n, DataColumn(_sb_df_column(df, n)))
+        end
+        p isa DataColumn && error(
+            "sbimpl: resample replay: new DataFrame has no column `$n`, which " *
+            "was data-backed in the fitted BRMI")
+        return NamedColumn(n, MissingColumn())
+    end
+    NamedColumn(n, _sb_rebind_value(p, df))
+end
+function _sb_rebind_value(x::ExprColumn, df)
+    args = map(v -> _sb_rebind_value(v, df), getargs(x))
+    kw = getkwargs(x)
+    rebound_kw = NamedTuple{keys(kw)}(
+        map(v -> _sb_rebind_value(v, df), values(kw)))
+    ExprColumn(getf(x), args...; rebound_kw...)
+end
+function _sb_rebind_value(x::MultiMembershipTerm, df)
+    groups = map(v -> _sb_rebind_value(v, df), getfield(x, :groups))
+    old_weights = getfield(x, :weights)
+    weights = isnothing(old_weights) ? nothing :
+              map(v -> _sb_rebind_value(v, df), old_weights)
+    MultiMembershipTerm(groups...; weights, normalize=getfield(x, :normalize))
+end
+function _sb_rebind_brmi(brmi::BRMI, df)
+    ops = brmi.operations
+    BRMI(NamedTuple{keys(ops)}(
+        map(v -> _sb_rebind_value(v, df), values(ops))))
+end
+
+function _sb_resample_group_set(groups)
+    groups === nothing && return Set{Symbol}()
+    values = groups isa Symbol ? (groups,) : groups
+    values isa AbstractString && error(
+        "sbimpl: `resample_groups` expects a Symbol or collection of Symbols, " *
+        "got $(repr(values))")
+    collected = try
+        collect(values)
+    catch
+        error("sbimpl: `resample_groups` expects a Symbol or collection of " *
+              "Symbols, got $(repr(values))")
+    end
+    all(v -> v isa Symbol, collected) || error(
+        "sbimpl: `resample_groups` expects only Symbols, got $(repr(collected))")
+    Set{Symbol}(collected)
+end
+
+_sb_same_raw_ref(a, b) = isequal(a, b)
+_sb_same_raw_ref(::DataColumn, ::DataColumn) = true
+_sb_same_raw_ref(a::NamedColumn, b::NamedColumn) =
+    name(a) === name(b) && _sb_same_raw_ref(parent(a), parent(b))
+_sb_same_raw_ref(a::ExprColumn, b::ExprColumn) =
+    getf(a) === getf(b) && _sb_same_raw_ref(getargs(a), getargs(b)) &&
+    _sb_same_raw_ref(getkwargs(a), getkwargs(b))
+_sb_same_raw_ref(a::Tuple, b::Tuple) =
+    length(a) == length(b) && all(ab -> _sb_same_raw_ref(ab...), zip(a, b))
+_sb_same_raw_ref(a::NamedTuple, b::NamedTuple) =
+    keys(a) == keys(b) && all(
+        ab -> _sb_same_raw_ref(ab...), zip(values(a), values(b)))
+
+function _sb_resample_preproc(training, fresh, groups)
+    training_keys = Set(keys(training))
+    fresh_keys = Set(keys(fresh))
+    training_keys == fresh_keys || error(
+        "sbimpl: resample replay: rebuilding on the new DataFrame changed the " *
+        "preprocessed model shape (training-only keys: " *
+        "$(sort!(collect(setdiff(training_keys, fresh_keys)))); new-only keys: " *
+        "$(sort!(collect(setdiff(fresh_keys, training_keys))))). Preserve fitted " *
+        "factor/design dimensions or build and fit a genuinely new model.")
+    out = Dict{Symbol,PreprocEntry}()
+    for key in training_keys
+        old = training[key]
+        new = fresh[key]
+        (old.kind === new.kind && _sb_same_raw_ref(old.raw_ref, new.raw_ref)) || error(
+            "sbimpl: resample replay: preprocessing record `$key` changed from " *
+            "$(old.kind)/$(repr(old.raw_ref)) to " *
+            "$(new.kind)/$(repr(new.raw_ref)); the rebuilt formula is not the " *
+            "fitted model.")
+        out[key] = old.kind === :group_index && old.raw_ref in groups ? new : old
+    end
+    out
+end
+
+function _sb_assert_cv_reemission(sb::SBBRMI, groups)
+    plan = generative_plan(sb)
+    for group in groups
+        hits = GenerativeDeclaration[]
+        for d in plan.declarations
+            d.role === :prior || continue
+            haskey(d.keywords, :group_idx) || continue
+            idx = d.keywords.group_idx
+            idx isa Symbol || continue
+            entry = get(plan.preproc, idx, nothing)
+            entry isa PreprocEntry || continue
+            entry.kind === :group_index || continue
+            entry.raw_ref === group || continue
+            push!(hits, d)
+        end
+        isempty(hits) && error(
+            "sbimpl: `resample_groups` names `$group`, but the model has no " *
+            "ordinary random-effect block with a tracked group index on that " *
+            "column.")
+        for d in hits
+            expected = Symbol(d.target, :_n_g)
+            get(d.keywords, :n_groups, nothing) === expected || error(
+                "sbimpl: `resample_groups=[:$group]` reaches random-effect " *
+                "block `$(d.target)`, but that block has no cv-contagious size " *
+                "local `$expected`. Stratified, multi-membership, grouped-HSGP, " *
+                "and derived-scale R2D2 blocks are not supported by this " *
+                "new-population emission.")
+        end
+    end
+    nothing
+end
+
+function _sb_mark_resample_groups(sb::SBBRMI, groups)
+    marked = Dict{Symbol,Any}(sb.data)
+    seen = Set{Symbol}()
+    for (key, entry) in sb.preproc
+        entry.kind === :group_index || continue
+        entry.raw_ref in groups || continue
+        marked[key] = StanBlocks.stan.maybecv(key, marked[key])
+        push!(seen, entry.raw_ref)
+    end
+    seen == groups || error(
+        "sbimpl: resample replay: failed to mark group index provenance for " *
+        "$(sort!(collect(setdiff(groups, seen))))")
+    model = StanBlocks.SlicModel(sb.model.model, marked, sb.model.mod)
+    SBBRMI(sb.parent, model, marked, sb.preproc)
+end
+
+function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool)
+    # Re-emission cannot safely guess constructor-only geometry that SBBRMI did
+    # not historically retain.  The public ergonomic path starts from the
+    # ordinary non-centred fit; fail if the supplied artifact used a different
+    # emission rather than silently changing it while adding CV sizing.
+    baseline = SBBRMI(sb.parent; mod=sb.model.mod)
+    stan_code(baseline) == stan_code(sb) || error(
+        "sbimpl: `resample_groups` requires an SBBRMI emitted with the default " *
+        "non-centered, non-CV constructor. The supplied model used additional " *
+        "constructor-time geometry (for example `centered_groups` or existing " *
+        "`cv_groups`) that cannot be inferred from SBBRMI. Rebuild the ordinary " *
+        "fit artifact, then request `resample_groups` from it.")
+
+    rebound = _sb_rebind_brmi(sb.parent, new_df)
+    cv_template = SBBRMI(rebound; mod=sb.model.mod, cv_groups=groups)
+    _sb_assert_cv_reemission(cv_template, groups)
+    preproc = _sb_resample_preproc(sb.preproc, cv_template.preproc, groups)
+    hybrid = SBBRMI(cv_template.parent, cv_template.model,
+                    cv_template.data, preproc)
+    prepared = reprocess(hybrid, new_df; freeze_constants=freeze)
+    _sb_mark_resample_groups(prepared, groups)
+end
+
 # Recompute one transform-output data key against `df`. `freeze=true` applies
 # the stored training constant (prediction-replay); `freeze=false` re-derives
 # the constant from `df`, then applies (fresh-fit semantics). Writes the
 # regenerated key(s) into `new_data`, the (possibly re-derived) record into
 # `new_preproc`, and marks every key it owns in `handled`.
 function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::PreprocEntry, df, freeze::Bool)
-    if e.kind === :zscale || e.kind === :standardize
+    if e.kind === :static
+        new_data[key] = deepcopy(e.const_)
+        new_preproc[key] = e
+    elseif e.kind === :zscale || e.kind === :standardize
         v = collect(Float64, _sb_rematerialize_vec(e.raw_ref, df))
         c = freeze ? e.const_ : _sb_fit_zscale(v)
         new_data[key] = _sb_apply_zscale(c, v)
@@ -3132,6 +3343,65 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             "sbimpl: reprocess: interaction `$key` operand lengths mismatch ",
             "($(length(left)) vs $(length(right)))")
         new_data[key] = collect(Float64, left .* right)
+        new_preproc[key] = e
+    elseif e.kind === :group_index
+        raw = _sb_df_column(df, e.raw_ref)
+        raw isa AbstractVector || error(
+            "sbimpl: reprocess: random-effects grouping column `$(e.raw_ref)` " *
+            "must be a vector, got $(typeof(raw))")
+        levels = freeze ? e.const_.levels : _sb_fit_levels(raw)
+        new_data[key] = _sb_apply_group_levels(levels, raw, e.raw_ref)
+        new_data[e.const_.n_groups_key] = length(levels)
+        push!(handled, e.const_.n_groups_key)
+        new_preproc[key] = PreprocEntry(
+            :group_index, (; levels, n_groups_key=e.const_.n_groups_key),
+            e.raw_ref, true)
+    elseif e.kind === :ranef_factor_dummy
+        raw = _sb_df_column(df, e.raw_ref)
+        raw isa AbstractVector || error(
+            "sbimpl: reprocess: categorical random-effect predictor `$(e.raw_ref)` " *
+            "must be a vector, got $(typeof(raw))")
+        levels = freeze ? e.const_.levels : _sb_fit_levels(raw)
+        length(levels) == e.const_.n_levels || error(
+            "sbimpl: reprocess: categorical random-effect predictor `$(e.raw_ref)` " *
+            "has $(length(levels)) levels, but the fitted design has " *
+            "$(e.const_.n_levels). Preserve the fitted level count or rebuild " *
+            "the model.")
+        idx = _sb_apply_levels(levels, raw)
+        new_data[key] = Float64[i == e.const_.level ? 1.0 : 0.0 for i in idx]
+        new_preproc[key] = PreprocEntry(
+            :ranef_factor_dummy,
+            (; levels, level=e.const_.level, n_levels=e.const_.n_levels),
+            e.raw_ref, true)
+    elseif e.kind === :kernel_subject_count
+        subjects = _sb_kernel_subject_values(
+            _sb_df_column(df, e.raw_ref), e.raw_ref)
+        new_data[key] = length(subjects)
+        new_preproc[key] = e
+    elseif e.kind === :kernel_ragged
+        arg_name, event_group, subject_group = e.raw_ref
+        subjects = _sb_kernel_subject_values(
+            _sb_df_column(df, subject_group), subject_group)
+        event_groups = _sb_df_column(df, event_group)
+        event_groups isa AbstractVector || error(
+            "sbimpl: reprocess: kernel event grouping column `$event_group` " *
+            "must be a vector, got $(typeof(event_groups))")
+        rows = _sb_kernel_ragged_partition(
+            arg_name, event_group,
+            collect(_sb_group_values(event_groups)), subjects)
+        if e.const_.is_lp
+            new_data[key] = rows
+        else
+            flat = _sb_df_column(df, arg_name)
+            flat isa AbstractVector || error(
+                "sbimpl: reprocess: kernel ragged source `$arg_name` must be a " *
+                "vector, got $(typeof(flat))")
+            length(flat) == length(event_groups) || error(
+                "sbimpl: reprocess: kernel ragged source `$arg_name` has " *
+                "$(length(flat)) rows but grouping column `$event_group` has " *
+                "$(length(event_groups)); they must describe the same event axis.")
+            new_data[key] = [flat[r] for r in rows]
+        end
         new_preproc[key] = e
     elseif e.kind === :multi_membership
         group_names = e.raw_ref.groups
@@ -3266,7 +3536,8 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
 end
 
 """
-    reprocess(sb::SBBRMI, new_df; freeze_constants=true) -> SBBRMI
+    reprocess(sb::SBBRMI, new_df; freeze_constants=true,
+              resample_groups=()) -> SBBRMI
 
 Re-materialise the SBBRMI's Stan data dict against `new_df`, **re-running** the
 Julia-side preprocessing (decision nr3v8n A) — so the silent-stale-constant bug
@@ -3280,43 +3551,44 @@ of a naive per-column `sb.model(; col=…)` rebind is avoided. Returns a NEW
   eigenbasis/(mean, L)). This is the operation Bruno hand-rolls outside BRM.
 - `freeze_constants=false` (fresh-fit semantics): re-derive each constant from
   `new_df`, then apply.
+- `resample_groups=()` (default): retain the fitted random-effect coordinates.
+  Naming one or more ordinary grouping factors (for example `[:subject]`)
+  re-emits the BRMI with cv-contagious sizing, derives those groups' levels
+  from `new_df`, and marks their indices so their standardized effects are
+  re-drawn in generated quantities from the fitted covariance. Predictor
+  constants remain frozen unless `freeze_constants=false` is also requested.
+  This changes Stan source by construction; it is the new-population/CV twin
+  of the default same-group replay.
 
 Covered: the Julia-side transforms (`zscale`/`standardize`/`center`/`factor`/
 `mo`/`s`/`t2`/`gp`/`hsgp`), `protect`/implicit-fn columns (re-materialised on
-`new_df`), typed `mm(...)` group indices and weights, continuous × continuous
-interaction columns, typed observation weights, categorical outcomes, and
-pass-through raw columns (plain data, `me` obs values, `ar` time). Errors loudly
-on a `factor`/`mo`/`mm` **unseen level** and on any derived data key it cannot
-account for (ordinary `(1|g)` indices remain outside this replay path) rather
-than silently copying a stale vector — rebuild from `new_df` for those models.
+`new_df`), typed `mm(...)` and ordinary plain/`|ID|` random-effect group
+indices, `kernel(...)` subject counts and `ragged(x, group)` columns, continuous
+× continuous interaction columns, typed observation weights, categorical
+outcomes, and pass-through raw columns (plain data, `me` obs values, `ar`
+time). Frozen replay errors loudly on an unseen fitted level. Stratified
+`gr(g, by=b)` group-index replay remains correct-or-loud unsupported rather
+than silently copying stale structure.
 """
-function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true)
-    # kernel(...) `ragged(x, group)` inputs are gathered per-group into derived
-    # `kernel_<target>_<arg>_ragged` columns at SBBRMI-construction time (the
-    # ragged-emission site above) with NO Julia-side preprocessing record, so
-    # reprocess cannot regenerate them on `new_df`. And a kernel(...) linear
-    # predictor is random-effects-bearing BY CONSTRUCTION (build errors without a
-    # grouping ranef term), so reprocess — which does not yet re-code random-effects
-    # group indices (tracked: BRM todo `11r1d3j`) — cannot replay a kernel model
-    # regardless of the ragged columns. Diagnose this UP FRONT with one
-    # authoritative, deterministic message rather than failing incidentally on
-    # whichever derived key `Dict` iteration reaches first (which reads like a
-    # narrowly-fixable "missing preproc record" gap and misdirects the fix).
+function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
+                   resample_groups=())
+    groups = _sb_resample_group_set(resample_groups)
+    isempty(groups) || return _sb_reprocess_resample(
+        sb, new_df, groups, freeze_constants)
+    # Current kernel(...) emitters record each gathered/index ragged input, but
+    # an SBBRMI serialized by the short-lived fail-closed implementation may
+    # still lack that provenance. Diagnose such a legacy artifact up front;
+    # current models continue into the normal regeneration path below.
     kernel_ragged = sort!(Symbol[k for k in keys(sb.data)
         if k !== _SB_PREPROC_KEY && !haskey(sb.preproc, k) &&
            startswith(String(k), "kernel_") && endswith(String(k), "_ragged")])
     isempty(kernel_ragged) || error(
         "sbimpl: reprocess: this model has kernel(...) `ragged(x, group)` inputs ",
         "$(kernel_ragged) gathered per-group at build time with no preprocessing ",
-        "record, so reprocess cannot regenerate them on a new DataFrame. A ",
-        "kernel(...) linear predictor is also random-effects-bearing by ",
-        "construction, and reprocess does not yet re-code random-effects group ",
-        "indices (tracked: BayesianRegressionModels todo `11r1d3j`) — so frozen ",
-        "replay of a kernel model is not available yet. To carry a fitted kernel ",
-        "model to a new design, use `generative_plan(plan, new_schedule)` or ",
-        "`brm_descriptor(...)` `:replay`; note these REBUILD from the formula and ",
-        "therefore REFIT frozen constants (HSGP basis, factor levels, …) — a ",
-        "frozen-constant kernel replay is not yet supported.")
+        "record, so this artifact cannot regenerate them on a new DataFrame. ",
+        "Rebuild the SBBRMI once with the current BayesianRegressionModels ",
+        "version to enable frozen same-group replay. For genuinely new groups, ",
+        "use `generative_plan(plan, new_schedule)` to rebuild from the formula.")
     new_data = Dict{Symbol,Any}()
     new_preproc = Dict{Symbol,PreprocEntry}()
     handled = Set{Symbol}()
@@ -3341,8 +3613,9 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true)
                     "preprocessing record and is not a column of the new DataFrame. ",
                     "reprocess covers the Julia-side predictor transforms ",
                     "(zscale/standardize/center/factor/mo/s/t2/gp/hsgp), protect/implicit-fn ",
-                    "columns, typed `mm(...)`, and pass-through raw columns; ordinary ",
-                    "random-effects group indices (e.g. `(1|g)`) are not yet supported — ",
+                    "columns, typed `mm(...)`, plain random-effects group indices, ",
+                    "kernel ragged inputs, and pass-through raw columns; this derived ",
+                    "structure is outside that replay surface — ",
                     "rebuild the SBBRMI from the new DataFrame instead.")
             end
         elseif v isa Number || v isa AbstractString || v isa Bool
@@ -3363,23 +3636,34 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true)
     SBBRMI(sb.parent, new_model, new_data, new_preproc)
 end
 
-function reprocess(plan::GenerativePlan, new_df; freeze_constants::Bool=true)
+function reprocess(plan::GenerativePlan, new_df; freeze_constants::Bool=true,
+                   resample_groups=())
     sb = SBBRMI(plan.parent, plan.model, plan.data, plan.preproc)
-    _generative_plan(reprocess(sb, new_df; freeze_constants), plan.builder,
-                     plan.cv_groups)
+    groups = _sb_resample_group_set(resample_groups)
+    replayed = reprocess(sb, new_df; freeze_constants,
+                         resample_groups=groups)
+    _generative_plan(replayed, plan.builder,
+                     isempty(groups) ? plan.cv_groups : groups)
 end
 
 """
-    restan_data(sb::SBBRMI, new_df; freeze_constants=true) -> Dict
+    restan_data(sb::SBBRMI, new_df; freeze_constants=true,
+                resample_groups=()) -> Dict
 
 Thin convenience over [`reprocess`](@ref): the prepared Stan **data dict** for
 `new_df`, ready for a `param_constrain!` replay. Equivalent to
-`StanBlocks.stan_data(reprocess(sb, new_df; freeze_constants).model)`. Same
+`StanBlocks.stan_data(reprocess(sb, new_df; freeze_constants,
+resample_groups).model)`. Same
 `freeze_constants` semantics (default `true` = training constants applied to new
-data). See [`reprocess`](@ref) for the covered-terms list and error cases.
+data), and accepts the same `resample_groups` keyword. A non-empty
+`resample_groups` also changes the Stan program; call `reprocess` when you need
+the corresponding `SBBRMI`/source as well as this data-only convenience result.
+See [`reprocess`](@ref) for the covered-terms list and error cases.
 """
-restan_data(sb::SBBRMI, new_df; freeze_constants::Bool=true) =
-    StanBlocks.stan_data(reprocess(sb, new_df; freeze_constants).model)
+restan_data(sb::SBBRMI, new_df; freeze_constants::Bool=true,
+            resample_groups=()) =
+    StanBlocks.stan_data(reprocess(
+        sb, new_df; freeze_constants, resample_groups).model)
 
 # ---- top-level op dispatch ---------------------------------------------------
 
@@ -3754,6 +4038,41 @@ _sb_subst_sym(x::Expr, from::Symbol, to) =
 # `g_vals[i]` — a LABEL join, not a level-index join, so it cannot silently
 # disagree with the row-ordered linear predictors sharing the same plate.
 # Nothing requires a subject's rows to be CONTIGUOUS, and nothing is reordered.
+function _sb_kernel_subject_values(raw, group::Symbol)
+    raw isa AbstractVector || error(
+        "sbimpl: kernel(...) subject grouping column `$group` must be a vector, " *
+        "got $(typeof(raw)).")
+    values = collect(_sb_group_values(raw))
+    (!isempty(values) && !any(ismissing, values) &&
+     length(unique(values)) == length(values)) || error(
+        "sbimpl: kernel(...) needs pre-grouped per-subject data — `$group` must " *
+        "list one non-missing unique subject per row. Repeated levels indicate " *
+        "long-format data. Got $(values).")
+    values
+end
+
+function _sb_kernel_ragged_partition(a_name::Symbol, grp_name::Symbol,
+                                     ev_vals::AbstractVector,
+                                     subject_vals::AbstractVector)
+    (!isempty(ev_vals) && !any(ismissing, ev_vals)) || error(
+        "sbimpl: kernel(...) `ragged($a_name, $grp_name)`: `$grp_name` must be a " *
+        "non-empty column with no missing labels.")
+    pos = Dict{Any,Int}()
+    for (i, v) in enumerate(subject_vals); pos[v] = i; end
+    rows = [Int[] for _ in eachindex(subject_vals)]
+    unknown = Any[]
+    for (r, v) in enumerate(ev_vals)
+        i = get(pos, v, 0)
+        i == 0 ? push!(unknown, v) : push!(rows[i], r)
+    end
+    isempty(unknown) || error(
+        "sbimpl: kernel(...) `ragged($a_name, $grp_name)`: label(s) " *
+        "$(unique(unknown)) in `$grp_name` name no subject in the kernel's " *
+        "per-subject frame. Every event row must belong to a subject this " *
+        "kernel walks.")
+    rows
+end
+
 function _sb_kernel_ragged_rows(data, arg_col, grp_arg, g_vals)
     a_name = name(arg_col)
     decl = parent(arg_col)
@@ -3766,10 +4085,7 @@ function _sb_kernel_ragged_rows(data, arg_col, grp_arg, g_vals)
         "sbimpl: kernel(...) `ragged($a_name, …)` needs a raw data column naming the ",
         "subject of every row of `$a_name`'s row axis; got $(typeof(grp_arg)).")
     grp_name = name(grp_arg)
-    ev_vals = collect(parent(parent(grp_arg)))
-    (!isempty(ev_vals) && !any(ismissing, ev_vals)) || error(
-        "sbimpl: kernel(...) `ragged($a_name, $grp_name)`: `$grp_name` must be a ",
-        "non-empty column with no missing labels.")
+    ev_vals = collect(_sb_group_values(parent(parent(grp_arg))))
     n_ev = length(ev_vals)
 
     # The frame `$a_name` lives on must be the one `$grp_name` describes. For an
@@ -3793,18 +4109,7 @@ function _sb_kernel_ragged_rows(data, arg_col, grp_arg, g_vals)
             "`$a_name`'s own frame.")
     end
 
-    pos = Dict{Any,Int}()
-    for (i, v) in enumerate(g_vals); pos[v] = i; end
-    rows = [Int[] for _ in eachindex(g_vals)]
-    unknown = Any[]
-    for (r, v) in enumerate(ev_vals)
-        i = get(pos, v, 0)
-        i == 0 ? push!(unknown, v) : push!(rows[i], r)
-    end
-    isempty(unknown) || error(
-        "sbimpl: kernel(...) `ragged($a_name, $grp_name)`: label(s) $(unique(unknown)) ",
-        "in `$grp_name` name no subject in the kernel's per-subject frame. Every row ",
-        "of `$a_name`'s frame must belong to a subject this kernel walks.")
+    rows = _sb_kernel_ragged_partition(a_name, grp_name, ev_vals, g_vals)
 
     # Same treatment the per-subject group column gets: the labels join rows on
     # the Julia side and never enter the emitted Stan program, so drop the raw
@@ -3928,12 +4233,9 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     # Stan program: only their count and row order do. Accept arbitrary unique
     # labels so a reusable generative-plan builder can rebuild on genuinely new
     # subject ids without app-local recoding to 1:n.
-    g_vals = collect(parent(parent(group_col)))
-    nsub, g_idx = _sb_level_index(g_vals)
-    (!isempty(g_vals) && !any(ismissing, g_vals) && nsub == length(g_idx)) || error(
-        "sbimpl: kernel(...) needs pre-grouped per-subject data — `$(name(group_col))` ",
-        "must list one non-missing unique subject per row; repeated levels indicate ",
-        "long-format data. Got $(g_vals).")
+    g_vals = _sb_kernel_subject_values(
+        parent(parent(group_col)), name(group_col))
+    nsub = length(g_vals)
     # Arbitrary labels identify rows on the Julia side; the emitted Stan program
     # consumes only their integer index/count. The generic data prepass has
     # already materialised the raw column, so discard it when Stan cannot type it
@@ -3941,6 +4243,8 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     # consumer also passed that column to the cell as ordinary numeric data.
     all(v -> v isa Real, g_vals) || pop!(data, name(group_col), nothing)
     nsub_sym = Symbol("kernel_nsub_", target); data[nsub_sym] = nsub
+    _sb_record_preproc!(data, nsub_sym,
+        PreprocEntry(:kernel_subject_count, nothing, name(group_col), false))
 
     # `ragged(x, group)` positionals, now that the subject row order is known.
     #
@@ -3967,6 +4271,9 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
             gathered = [flat[r] for r in rows]
             data[gath_sym] = gathered
         end
+        _sb_record_preproc!(data, gath_sym, PreprocEntry(
+            :kernel_ragged, (; is_lp),
+            (name(arg_col), name(grp_arg), name(group_col)), false))
     end
 
     # Per-subject plate: slice params bind the data columns and already-emitted LPs;
@@ -5613,9 +5920,14 @@ _sb_ranef_cols_dispatch!(cols, data, stmts, t, ::Nothing, gterms=(); group_idx=n
 function _sb_ranef_cols_dispatch!(cols, data, _stmts, t, levels, _gterms=(); group_idx=nothing)
     n_levels, idx = _sb_level_index(levels)
     n_levels >= 2 || error("sbimpl: categorical ranef term `$(name(t))` needs >= 2 levels (got $n_levels)")
+    fitted_levels = _sb_fit_levels(levels)
     for lvl in 2:n_levels
         col_name = Symbol(name(t), :_dummy_, lvl)
         data[col_name] = Float64[l == lvl ? 1.0 : 0.0 for l in idx]
+        _sb_record_preproc!(data, col_name, PreprocEntry(
+            :ranef_factor_dummy,
+            (; levels=fitted_levels, level=lvl, n_levels),
+            name(t), true))
         push!(cols, col_name)
     end
 end
@@ -5791,6 +6103,7 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, 
     n_name   = Symbol(:n_, g)
     data[idx_name] = g_idx
     data[n_name]   = n_levels
+    _sb_record_group_index!(data, idx_name, n_name, g, parent(g_backing))
     r_name = Symbol(:r_, target, :_, g)
     # The size expression the non-centered submodels are given. Bound to a named
     # local in the cv case so it appears once as `int <r>_n_g = max(<g>_idx);`
@@ -6610,6 +6923,7 @@ function _sb_emit_group_blocks!(stmts, data, gb_terms)
             haskey(lookup, block_name) && continue   # identical instance already allocated
             n_terms_name = Symbol(:n_terms_, suffix)
             data[n_terms_name] = fld.n_per_group
+            _sb_record_static!(data, n_terms_name)
             idx_name, n_name = _sb_ensure_group_data!(data, group_col)
             _sb_emit_block_draw!(stmts, fld.prior, block_name, idx_name, n_name, n_terms_name, suffix)
             lookup[block_name] = (; block_name, idx_name, n_per_group=fld.n_per_group)
@@ -6685,6 +6999,7 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
         n_terms_total = cursor
         n_terms_total >= 1 || error("sbimpl: `|$id_sym|` bucket has zero terms")
         data[n_terms_name] = n_terms_total
+        _sb_record_static!(data, n_terms_name)
         ranef_effect = get(ranef_effect_overrides, k, nothing)
         # Derived-`tau` vector for an R2D2-scoped bucket. `_sb_r2d2_check_buckets`
         # has already guaranteed all-or-nothing, so either every margin resolves
@@ -6887,6 +7202,7 @@ function _sb_ensure_group_data!(data, g::NamedColumn)
     _sb_reclaim_group_col!(data, gname, g_backing)
     data[idx_name] = g_idx
     data[n_name]   = n_levels
+    _sb_record_group_index!(data, idx_name, n_name, gname, parent(g_backing))
     idx_name, n_name
 end
 
@@ -6941,6 +7257,7 @@ function _sb_emit_id_ranef_block!(stmts, data, target::Symbol, info, gterms, sum
         Z_name       = Symbol(:Z_, target, :_, suffix)
         col_idx_name = Symbol(:col_idx_, target, :_, suffix)
         data[col_idx_name] = collect(Int, cols)
+        _sb_record_static!(data, col_idx_name)
         push!(stmts, :($Z_name = $(Expr(:call, :hcat, col_exprs...))))
         push!(stmts, :($r_name = rows_dot_product($Z_name, $bucket_name[$idx_name, $col_idx_name])))
     end

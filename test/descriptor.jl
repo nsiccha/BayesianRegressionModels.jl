@@ -55,7 +55,7 @@ end
 
     # Operations are DERIVED, not listed. This model has parameters, a
     # likelihood, predictive draws and pointwise log-liks, and was built from a
-    # reusable builder -> everything but :reprocess (it has a random effect).
+    # reusable builder -> replay plus frozen same-group reprocess.
     ops = Symbol[op.name for op in d.operations]
     @test :transpile in ops
     @test :instantiate in ops
@@ -63,7 +63,7 @@ end
     @test :predict in ops
     @test :pointwise_loglik in ops
     @test :replay in ops
-    @test :reprocess ∉ ops          # ranef-bearing: reprocess is not supported
+    @test :reprocess in ops
     @test isempty(d.unpredictable)  # both observations get a real *_gen
 
     # An operation's origin says which namespace its `inputs` live in.
@@ -375,8 +375,7 @@ end
     @test changed_d.plan.data[entry.const_.weight_key] ≈
           [0.9, 0.1, 0.25, 0.75, 0.5, 0.5]
 
-    # One ordinary grouping block keeps a mixed model outside the safe replay
-    # subset even when its other random-effect block is typed multi-membership.
+    # Ordinary and multi-membership groups both carry frozen replay provenance.
     mixed_builder = @brm begin
         sigma ~ Exponential(1)
         mu ~ 1 + (1 | mm(g1, g2; weights=(w1, w2))) + (1 | g)
@@ -384,7 +383,7 @@ end
     end
     mixed_df = merge(mm_df, (; g=[1, 1, 2]))
     mixed_d = brm_descriptor(mixed_builder, mixed_df; mod=@__MODULE__)
-    @test :reprocess ∉ Symbol[op.name for op in mixed_d.operations]
+    @test :reprocess in Symbol[op.name for op in mixed_d.operations]
 end
 
 kernel_builder = @brm begin
@@ -504,11 +503,10 @@ kernel_schedule(n; subject=collect(1:n)) = (;
     # inventing boundaries.
     @test primary.segments === nothing
 
-    # A builder-backed kernel can rebuild for genuinely new groups. It cannot
-    # reprocess in place because its formula-declared BSV is a random-effect
-    # block, exactly the documented reprocess boundary.
+    # A builder-backed kernel can rebuild for genuinely new groups and can
+    # reprocess the same fitted groups without changing parameter coordinates.
     @test :replay in ops
-    @test :reprocess ∉ ops
+    @test :reprocess in ops
     @test brm_execute(d, :replay, kernel_schedule(5)) isa BRMDescriptor
 
     @test :predict in ops
@@ -609,7 +607,7 @@ scalar_schedule(n) = (; dose=fill(100.0, n), dv=collect(1.0:n) ./ 10,
     out = brm_execute(d, :predict; problem=prob, draws=0.1 .* randn(n), seed=7)
     @test haskey(out, :dv_gen)
 
-    @test :reprocess ∉ ops
+    @test :reprocess in ops
     @test brm_execute(d, :replay, scalar_schedule(5)) isa BRMDescriptor
 end
 

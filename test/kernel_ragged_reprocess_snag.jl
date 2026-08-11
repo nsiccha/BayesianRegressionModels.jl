@@ -9,13 +9,12 @@
 #      fixed by landed top-level-ragged work; this pins it so it can't regress.)
 #
 #   2. `reprocess(sb, new_df; freeze_constants=true)` of a kernel(...) model with
-#      `ragged(...)` inputs raises a DETERMINISTIC, actionable error (not the old
-#      incidental "derived vector with no preprocessing record" that misdirected
-#      the fix), AND the documented carry-to-new-design routes
-#      (`generative_plan(plan, new_schedule)`, `brm_descriptor :replay`) succeed.
-#      Frozen-constant kernel replay itself remains unsupported — a kernel LP is
-#      ranef-bearing by construction and reprocess does not yet re-code ranef
-#      group indices (tracked: BRM todo `11r1d3j`).
+#      `ragged(...)` inputs regenerates the derived design for fitted groups.
+#      The gathered/index columns carry provenance, unseen groups fail loudly,
+#      and genuinely new groups retain the explicit formula-rebuild routes
+#      (`generative_plan(plan, new_schedule)`, `brm_descriptor :replay`). A
+#      legacy SBBRMI missing the new provenance gets one deterministic upgrade
+#      error rather than an incidental Dict-order-dependent failure.
 #
 # Run: julia --project=test test/kernel_ragged_reprocess_snag.jl
 
@@ -65,7 +64,7 @@ using Distributions: Exponential, Normal
     @test "qt_y_likelihood" in names
 end
 
-@testset "kernel ragged reprocess: deterministic error + working alternatives (snag Failure 2)" begin
+@testset "kernel ragged reprocess: frozen replay + legacy guard (snag Failure 2)" begin
     subj_df(; subs = ["s1", "s2", "s3"]) = (;
         subject = subs,
         t_obs   = [abs.(sin.(1:4)) .+ 0.5 for _ in eachindex(subs)],
@@ -89,15 +88,42 @@ end
     end
     sb = SBBRMI(builder(subj_df()); mod=@__MODULE__)
 
-    # The gathered kernel ragged columns are present in the data with NO preproc
-    # record — the root cause of the historical incidental error.
+    # The gathered kernel ragged columns now carry explicit regeneration
+    # provenance, superseding the historical incidental error.
     ragged_keys = Symbol[k for k in keys(sb.data)
         if startswith(String(k), "kernel_") && endswith(String(k), "_ragged")]
     @test !isempty(ragged_keys)
-    @test all(!haskey(sb.preproc, k) for k in ragged_keys)
+    @test all(haskey(sb.preproc, k) for k in ragged_keys)
 
-    # reprocess must now fail with the deterministic kernel-ragged diagnosis that
-    # names the tracked gap and the working routes — regardless of Dict order.
+    replayed = reprocess(sb, subj_df(); freeze_constants=true)
+    @test replayed.data == sb.data
+    @test StanBlocks.stan_code(replayed.model) == StanBlocks.stan_code(sb.model)
+    @test_throws "unseen level" reprocess(
+        sb, subj_df(; subs=["s1", "s2", "new-subject"]))
+
+    # The RESAMPLE twin deliberately admits a wholly new subject population,
+    # but freezes the trained event-axis HSGP fit while rebuilding both ragged
+    # partitions and moving the subject draw to generated quantities.
+    new_population = subj_df(; subs=["n1", "n2", "n3", "n4"])
+    resampled = reprocess(
+        sb, new_population; resample_groups=[:subject])
+    @test resampled.preproc[:subject_idx].const_.levels ==
+          ["n1", "n2", "n3", "n4"]
+    @test resampled.data[:kernel_nsub_pred] == 4
+    @test resampled.preproc[:PHI_hsgp_log_dose].const_.fits ==
+          sb.preproc[:PHI_hsgp_log_dose].const_.fits
+    resampled_code = StanBlocks.stan_code(resampled.model)
+    resampled_params = resampled_code[
+        first(findfirst("parameters {", resampled_code)):first(findfirst(
+            "model {", resampled_code))]
+    resampled_gq = resampled_code[
+        first(findfirst("generated quantities {", resampled_code)):end]
+    @test !occursin("b_p_subject_z_flat", resampled_params)
+    @test occursin("b_p_subject_z_flat = std_normal_vector_rng", resampled_gq)
+
+    # A short-lived older artifact can still have the same derived data without
+    # the provenance. Preserve one deterministic upgrade diagnosis for it.
+    foreach(k -> delete!(sb.preproc, k), ragged_keys)
     err = try
         reprocess(sb, subj_df(); freeze_constants=true)
         nothing
@@ -107,8 +133,8 @@ end
     @test err isa ErrorException
     msg = sprint(showerror, err)
     @test occursin("ragged", msg)
-    @test occursin("11r1d3j", msg)          # points at the tracked ranef-index gap
-    @test occursin("generative_plan", msg)  # points at the working alternative
+    @test occursin("Rebuild the SBBRMI", msg)
+    @test occursin("generative_plan", msg)
 
     # The documented carry-to-new-design routes DO work (they rebuild + refit).
     plan = generative_plan(builder, subj_df(); mod=@__MODULE__)
@@ -117,5 +143,6 @@ end
 
     d = brm_descriptor(builder, subj_df(); mod=@__MODULE__, name=:pk)
     @test :replay in Set(op.name for op in d.operations)
+    @test :reprocess in Set(op.name for op in d.operations)
     @test brm_execute(d, :replay, subj_df(; subs = ["n1", "n2", "n3"])) !== nothing
 end
