@@ -3,6 +3,9 @@
 `TuringBRMI` is the direct-BRMI Turing backend. Loading Turing activates the
 package extension:
 
+For a visual three-way comparison of the direct Turing route and the
+StanBlocks/Stan route, open the [backend lowering explorer](backend-lowering.md).
+
 ```julia
 using BayesianRegressionModels, Turing
 
