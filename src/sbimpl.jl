@@ -2403,37 +2403,16 @@ function _sb_effect_prior_overrides(brmi::BRMI)
     # specific and collide on `mu`'s `weight` column, which is the tie error.
     pop_overrides = Dict{Symbol,Vector{Any}}()
     cat_overrides = Dict{Symbol,Dict{Symbol,Any}}()
-    _rank(spec) = (spec.predictor === _EFFECT_COLON ? 0 : 1) +
-                  (spec.coefficient === _EFFECT_COLON ? 0 : 1)
-    _spelling(spec) = "effect($(spec.predictor), $(spec.coefficient))"
+    _spelling(spec) = _brm_effect_spelling(spec)
     # `slot` is a 0-argument getter / 1-argument setter pair over whichever
     # container owns the cell, so pop columns and categorical blocks share one
     # precedence rule instead of two drifting copies.
-    function _claim!(get_cell, set_cell!, spec, rank, what)
-        held = get_cell()
-        if isnothing(held)
-            set_cell!((; expression=spec.expression, rank, spelling=_spelling(spec)))
-        elseif rank > held.rank
-            set_cell!((; expression=spec.expression, rank, spelling=_spelling(spec)))
-        elseif rank == held.rank
-            error("sbimpl: `$(_spelling(spec))` and `$(held.spelling)` are equally " *
-                  "specific and both set the prior for $what. Neither wins — make " *
-                  "one of them more specific, or drop it.")
-        end
-        nothing
-    end
+    _claim!(get_cell, set_cell!, spec, what) =
+        _brm_claim_effect_prior!(get_cell, set_cell!, spec, what; prefix="sbimpl")
 
     for spec in specs
-        T = _as_distribution_type(spec.family)
-        (!isnothing(T) && T <: Normal) || error(
-            "sbimpl: population `effect(...)` overrides currently support only " *
-            "`Normal(location, scale)`; got `$(spec.family)`. Ordinary scalar " *
-            "parameter priors remain available for other supported families.")
-        isempty(spec.keywords) || error(
-            "sbimpl: `effect(...) ~ Normal(...)` does not accept distribution " *
-            "keywords; put bounds on an explicitly declared scalar parameter instead")
+        _brm_validate_population_effect_spec(spec; prefix="sbimpl")
 
-        rank = _rank(spec)
         all_predictors = spec.predictor === _EFFECT_COLON
         all_coefficients = spec.coefficient === _EFFECT_COLON
 
@@ -2468,7 +2447,7 @@ function _sb_effect_prior_overrides(brmi::BRMI)
                         Any[nothing for _ in labels]
                     end
                     for idx in eachindex(labels)
-                        _claim!(() -> cells[idx], v -> (cells[idx] = v), spec, rank,
+                        _claim!(() -> cells[idx], v -> (cells[idx] = v), spec,
                                 "`$target`'s `$(labels[idx])` column")
                     end
                 end
@@ -2477,7 +2456,7 @@ function _sb_effect_prior_overrides(brmi::BRMI)
                         Dict{Symbol,Any}()
                     end
                     _claim!(() -> get(target_cat, emitted, nothing),
-                            v -> (target_cat[emitted] = v), spec, rank,
+                            v -> (target_cat[emitted] = v), spec,
                             "`$target`'s `$emitted` contrast block")
                 end
                 continue
@@ -2496,7 +2475,7 @@ function _sb_effect_prior_overrides(brmi::BRMI)
                     Dict{Symbol,Any}()
                 end
                 _claim!(() -> get(target_cat, emitted, nothing),
-                        v -> (target_cat[emitted] = v), spec, rank,
+                        v -> (target_cat[emitted] = v), spec,
                         "`$target`'s `$emitted` contrast block")
                 continue
             end
@@ -2521,7 +2500,7 @@ function _sb_effect_prior_overrides(brmi::BRMI)
             cells = get!(pop_overrides, target) do
                 Any[nothing for _ in labels]
             end
-            _claim!(() -> cells[idx], v -> (cells[idx] = v), spec, rank,
+            _claim!(() -> cells[idx], v -> (cells[idx] = v), spec,
                     "`$target`'s `$(spec.coefficient)` column")
         end
     end
@@ -2575,11 +2554,8 @@ function _sb_term_effect_overrides(effect_overrides, lp::Symbol)
 end
 
 function _sb_effect_normal_args(rhs::ExprColumn)
-    args = _sb_stan_dist_args(getf(rhs), map(_sb_effect_prior_arg, getargs(rhs)))
-    length(args) == 2 || error(
-        "sbimpl: `effect(...) ~ Normal(...)` must lower to exactly location and " *
-        "scale arguments, got $(length(args))")
-    args
+    map(_sb_effect_prior_arg,
+        _brm_normal_effect_args(rhs; prefix="sbimpl"))
 end
 
 _sb_effect_prior_arg(x) = _sb_prior_arg(x)
@@ -2682,9 +2658,6 @@ _as_data_column(_) = nothing
 
 _as_missing_column(x::MissingColumn) = x
 _as_missing_column(_) = nothing
-
-_as_distribution_type(::Type{T}) where {T<:Distribution} = T
-_as_distribution_type(_) = nothing
 
 _as_symbol(s::Symbol) = s
 _as_symbol(_) = nothing

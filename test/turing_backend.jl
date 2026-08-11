@@ -1,7 +1,7 @@
 using Test
 using Random: Xoshiro
 using BayesianRegressionModels
-using Distributions: Exponential, Normal, Poisson, logpdf
+using Distributions: Cauchy, Exponential, Normal, Poisson, logpdf
 using Turing
 
 const BRM = BayesianRegressionModels
@@ -44,6 +44,47 @@ const BRM = BayesianRegressionModels
     prior_draw = rand(Xoshiro(42), backend.model)
     @test prior_draw.data.beta_pop isa Vector{Float64}
     @test prior_draw.data.sigma isa Float64
+end
+
+@testset "Turing extension — population effect-prior overrides" begin
+    df = (; x=[-1.0, 0.5, 2.0], y=[0.2, 1.1, -0.4])
+    brmi = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x
+        effect(:, :) ~ Normal(-1, 3)
+        effect(mu, Intercept) ~ Normal(log(2), 0.5)
+        effect(mu, x) ~ Normal(0, 0.25)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    backend = TuringBRMI(brmi)
+
+    @test backend.plan.beta_location == [log(2), 0.0]
+    @test backend.plan.beta_scale == [0.5, 0.25]
+    params = (; beta_pop=[0.25, -0.5], sigma=0.8)
+    mu = backend.plan.design.matrix * params.beta_pop
+    prior = sum(logpdf.(Normal.(backend.plan.beta_location,
+                               backend.plan.beta_scale), params.beta_pop)) +
+            logpdf(Exponential(2), params.sigma)
+    likelihood = sum(logpdf.(Normal.(mu, params.sigma), df.y))
+    @test Turing.logjoint(backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+    @test Turing.logprior(backend.model, params) ≈ prior atol=1e-12 rtol=1e-12
+
+    wrong_family = (@brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x
+        effect(mu, x) ~ Cauchy(0, 1)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    @test_throws "support only `Normal" TuringBRMI(wrong_family)
+
+    unknown = (@brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x
+        effect(mu, nope) ~ Normal(0, 1)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    @test_throws "not a population coefficient" TuringBRMI(unknown)
 end
 
 @testset "Turing extension — Bernoulli-logit population GLM" begin
