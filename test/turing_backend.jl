@@ -1712,6 +1712,107 @@ end
     @test bb_returned.precision_group_effect == precision_group_effect
 end
 
+@testset "Turing extension — mean/precision zero-correlation random slopes" begin
+    dist_data = (;
+        x=[-1.0, 0.5, 2.0, 0.25],
+        z=[0.0, 1.0, -0.5, 0.75],
+        subject=["b", "a", "b", "c"],
+        batch=[2, 1, 1, 2],
+        trials=[4, 6, 8, 5],
+    )
+    negative_binomial = TuringBRMI((@brm begin
+        log(mu) ~ 1 + x + (1 + x || subject)
+        log(phi) ~ 1 + z + (0 + z || batch)
+        y ~ BRM.NegativeBinomial2(mu, phi)
+    end)((; dist_data..., y=[0, 2, 5, 1])))
+    beta_binomial = TuringBRMI((@brm begin
+        logit(mean) ~ 1 + x + (1 + x || subject)
+        log(precision) ~ 1 + z + (0 + z || batch)
+        y ~ BRM.BetaBinomial2(trials, mean, precision)
+    end)((; dist_data..., y=[1, 4, 5, 0])))
+
+    params = (;
+        beta_mean=[0.1, 0.2], beta_precision=[-0.4, 0.15],
+        log_mean_group_intercept_scale=log(0.4),
+        tau_mean_group_slopes=[0.7],
+        z_mean_group_flat=[-0.2, 0.4, 1.1, 0.3, -0.5, 0.8],
+        tau_precision_group_slopes=[0.45],
+        z_precision_group_flat=[0.5, -0.7],
+    )
+    mean_block = only(negative_binomial.plan.mean.random_effects)
+    precision_block = only(negative_binomial.plan.precision.random_effects)
+    mean_scales = [0.4, 0.7]
+    precision_scales = [0.45]
+    mean_b = transpose(reshape(mean_scales, :, 1) .*
+        reshape(params.z_mean_group_flat, 2, 3))
+    precision_b = transpose(reshape(precision_scales, :, 1) .*
+        reshape(params.z_precision_group_flat, 1, 2))
+    mean_group_effect = vec(sum(
+        mean_block.matrix .* mean_b[mean_block.indices, :]; dims=2))
+    precision_group_effect = vec(sum(
+        precision_block.matrix .* precision_b[precision_block.indices, :];
+        dims=2))
+    linear_mean = negative_binomial.plan.mean.design.matrix * params.beta_mean +
+                  mean_group_effect
+    linear_precision = negative_binomial.plan.precision.design.matrix *
+                       params.beta_precision + precision_group_effect
+    half_normal = truncated(Normal(), 0.0, Inf)
+    prior = sum(logpdf.(Normal(), params.beta_mean)) +
+            sum(logpdf.(Normal(), params.beta_precision)) +
+            logpdf(Normal(), params.log_mean_group_intercept_scale) +
+            sum(logpdf.(half_normal, params.tau_mean_group_slopes)) +
+            sum(logpdf.(Normal(), params.z_mean_group_flat)) +
+            sum(logpdf.(half_normal, params.tau_precision_group_slopes)) +
+            sum(logpdf.(Normal(), params.z_precision_group_flat))
+
+    mu = exp.(linear_mean)
+    phi = exp.(linear_precision)
+    nb_lik = sum(logpdf.(BRM.NegativeBinomial2.(
+        mu, phi), negative_binomial.plan.response))
+    nb_returned = Turing.DynamicPPL.returned(negative_binomial.model, params)
+    @test mean_block.zero_correlation
+    @test precision_block.zero_correlation
+    @test Turing.logjoint(negative_binomial.model, params) ≈
+          prior + nb_lik atol=1e-12 rtol=1e-12
+    @test Turing.logprior(negative_binomial.model, params) ≈
+          prior atol=1e-12 rtol=1e-12
+    @test nb_returned.mean_group_scales == mean_scales
+    @test nb_returned.precision_group_scales == precision_scales
+    @test nb_returned.b_mean_group == mean_b
+    @test nb_returned.b_precision_group == precision_b
+
+    mean_prob = logistic.(linear_mean)
+    precision = exp.(linear_precision)
+    bb_lik = sum(logpdf.(BRM.BetaBinomial2.(
+        dist_data.trials, mean_prob, precision), beta_binomial.plan.response))
+    bb_returned = Turing.DynamicPPL.returned(beta_binomial.model, params)
+    @test Turing.logjoint(beta_binomial.model, params) ≈
+          prior + bb_lik atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(beta_binomial.model, params) ≈
+          bb_lik atol=1e-12 rtol=1e-12
+    @test bb_returned.mean_group_effect == mean_group_effect
+    @test bb_returned.precision_group_effect == precision_group_effect
+
+    replayed = reprocess(
+        beta_binomial,
+        (; dist_data...,
+         subject=["new_b", "new_a", "new_b", "new_c"],
+         batch=[20, 10, 10, 20], y=[1, 4, 5, 0]);
+        resample_groups=[:subject, :batch])
+    ext = Base.get_extension(BRM, :BayesianRegressionModelsTuringExt)
+    replay_parameters = ext._brm_resampled_parameters(replayed, params)
+    @test !hasproperty(replay_parameters, :z_mean_group_flat)
+    @test !hasproperty(replay_parameters, :z_precision_group_flat)
+    @test replay_parameters.log_mean_group_intercept_scale ==
+          params.log_mean_group_intercept_scale
+    @test replay_parameters.tau_mean_group_slopes ==
+          params.tau_mean_group_slopes
+    @test replay_parameters.tau_precision_group_slopes ==
+          params.tau_precision_group_slopes
+    predictive = turing_posterior_predictive(Xoshiro(112), replayed, params)
+    @test length(predictive.y) == length(dist_data.x)
+end
+
 @testset "Turing extension — unsupported shapes fail loudly" begin
     unsupported_string_column = (@brm begin
         sigma ~ Exponential(1)
@@ -1730,13 +1831,4 @@ end
         TuringBRMI(poisson_identity)
     end
 
-    random_slope = (@brm begin
-        log(mu) ~ 1 + x + (1 + x || subject)
-        log(phi) ~ 1
-        y ~ BRM.NegativeBinomial2(mu, phi)
-    end)((;
-        x=[0.0, 1.0, 2.0], subject=["a", "a", "b"], y=[0, 1, 2]))
-    @test_throws "zero-correlation `||` random effects for predictor `mu`" begin
-        TuringBRMI(random_slope)
-    end
 end

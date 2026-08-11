@@ -501,10 +501,12 @@ function _turing_mean_precision_components(brmi::BRMI, observation,
         (predictor_names..., additional_model_operations...))
     mean = _turing_predictor_component(
         brmi, context, mean_name; available_predictors=predictor_names,
-        allow_group_terms=true, allow_random_slopes=true)
+        allow_group_terms=true, allow_random_slopes=true,
+        allow_zero_correlation=true)
     precision = _turing_predictor_component(
         brmi, context, precision_name; available_predictors=predictor_names,
-        allow_group_terms=true, allow_random_slopes=true)
+        allow_group_terms=true, allow_random_slopes=true,
+        allow_zero_correlation=true)
     _turing_require_predictor_link((; predictor=mean.predictor), mean_link,
                                    "$family_name mean link")
     _turing_require_predictor_link((; predictor=precision.predictor),

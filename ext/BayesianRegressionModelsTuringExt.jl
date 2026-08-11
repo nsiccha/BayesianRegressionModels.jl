@@ -120,10 +120,26 @@ function _brm_poisson_observation(
 end
 
 _random_effect_args(component) = isempty(component.random_effects) ?
-    (0, zeros(0, 0), Int[], 0) : let block = only(component.random_effects)
-        (block.intercept_only ? 1 : 2, block.matrix, block.indices,
-         length(block.levels))
+    (0, zeros(0, 0), Int[], 0, 0) : let block = only(component.random_effects)
+        intercept_index = something(
+            findfirst(column -> column.label === :Intercept, block.columns), 0)
+        kind = block.intercept_only ? 1 : block.zero_correlation ? 3 : 2
+        (kind, block.matrix, block.indices, length(block.levels),
+         intercept_index)
     end
+
+function _zero_correlation_scales(intercept_index, intercept_scale,
+                                  slope_scales)
+    intercept_index == 0 && return slope_scales
+    vcat(slope_scales[1:(intercept_index - 1)], [intercept_scale],
+         slope_scales[intercept_index:end])
+end
+
+function _noncentered_group_coefficients(scales, z_flat, n_groups)
+    n_terms = length(scales)
+    transpose(reshape(scales, n_terms, 1) .*
+              reshape(z_flat, n_terms, n_groups))
+end
 
 Turing.@model function _brm_population_gaussian(
     X, fixed, y, beta_location, beta_scale, sigma_scale, response_modifier,
@@ -387,9 +403,9 @@ Turing.@model function _brm_population_negative_binomial2(
     mean_beta_location, mean_beta_scale,
     precision_beta_location, precision_beta_scale,
     mean_group_kind, mean_Z,
-    mean_group_idx, n_mean_groups,
+    mean_group_idx, n_mean_groups, mean_intercept_index,
     precision_group_kind, precision_Z,
-    precision_group_idx, n_precision_groups,
+    precision_group_idx, n_precision_groups, precision_intercept_index,
     observation_weight)
     beta_mean ~ product_distribution(
         Normal.(mean_beta_location, mean_beta_scale))
@@ -398,6 +414,9 @@ Turing.@model function _brm_population_negative_binomial2(
     mean_group_scale = nothing
     L_mean_group = nothing
     tau_mean_group = nothing
+    mean_group_intercept_scale = nothing
+    tau_mean_group_slopes = nothing
+    mean_group_scales = nothing
     b_mean_group = nothing
     mean_group_effect = zeros(length(y))
     if mean_group_kind == 1
@@ -419,10 +438,31 @@ Turing.@model function _brm_population_negative_binomial2(
             Diagonal(tau_mean_group) * Matrix(L_mean_group.L) * z_mean_group)
         mean_group_effect = vec(sum(
             mean_Z .* b_mean_group[mean_group_idx, :]; dims=2))
+    elseif mean_group_kind == 3
+        n_mean_terms = size(mean_Z, 2)
+        n_mean_slopes = n_mean_terms - (mean_intercept_index > 0)
+        if mean_intercept_index > 0
+            log_mean_group_intercept_scale ~ Normal()
+            mean_group_intercept_scale = exp(log_mean_group_intercept_scale)
+        end
+        tau_mean_group_slopes ~ product_distribution(
+            fill(truncated(Normal(), 0.0, Inf), n_mean_slopes))
+        mean_group_scales = _zero_correlation_scales(
+            mean_intercept_index, mean_group_intercept_scale,
+            tau_mean_group_slopes)
+        z_mean_group_flat ~ product_distribution(
+            fill(Normal(), n_mean_terms * n_mean_groups))
+        b_mean_group = _noncentered_group_coefficients(
+            mean_group_scales, z_mean_group_flat, n_mean_groups)
+        mean_group_effect = vec(sum(
+            mean_Z .* b_mean_group[mean_group_idx, :]; dims=2))
     end
     precision_group_scale = nothing
     L_precision_group = nothing
     tau_precision_group = nothing
+    precision_group_intercept_scale = nothing
+    tau_precision_group_slopes = nothing
+    precision_group_scales = nothing
     b_precision_group = nothing
     precision_group_effect = zeros(length(y))
     if precision_group_kind == 1
@@ -446,6 +486,26 @@ Turing.@model function _brm_population_negative_binomial2(
             z_precision_group)
         precision_group_effect = vec(sum(
             precision_Z .* b_precision_group[precision_group_idx, :]; dims=2))
+    elseif precision_group_kind == 3
+        n_precision_terms = size(precision_Z, 2)
+        n_precision_slopes = n_precision_terms - (precision_intercept_index > 0)
+        if precision_intercept_index > 0
+            log_precision_group_intercept_scale ~ Normal()
+            precision_group_intercept_scale = exp(
+                log_precision_group_intercept_scale)
+        end
+        tau_precision_group_slopes ~ product_distribution(
+            fill(truncated(Normal(), 0.0, Inf), n_precision_slopes))
+        precision_group_scales = _zero_correlation_scales(
+            precision_intercept_index, precision_group_intercept_scale,
+            tau_precision_group_slopes)
+        z_precision_group_flat ~ product_distribution(
+            fill(Normal(), n_precision_terms * n_precision_groups))
+        b_precision_group = _noncentered_group_coefficients(
+            precision_group_scales, z_precision_group_flat,
+            n_precision_groups)
+        precision_group_effect = vec(sum(
+            precision_Z .* b_precision_group[precision_group_idx, :]; dims=2))
     end
     log_mu = X_mean * beta_mean + fixed_mean + mean_group_effect
     log_phi = X_precision * beta_precision + fixed_precision +
@@ -458,9 +518,12 @@ Turing.@model function _brm_population_negative_binomial2(
     end
     (; log_mu, log_phi, mu, phi, response=y,
        mean_group_scale, mean_group_effect,
-       L_mean_group, tau_mean_group, b_mean_group,
+       L_mean_group, tau_mean_group, mean_group_intercept_scale,
+       tau_mean_group_slopes, mean_group_scales, b_mean_group,
        precision_group_scale, precision_group_effect,
-       L_precision_group, tau_precision_group, b_precision_group)
+       L_precision_group, tau_precision_group,
+       precision_group_intercept_scale, tau_precision_group_slopes,
+       precision_group_scales, b_precision_group)
 end
 
 Turing.@model function _brm_population_beta_binomial2(
@@ -468,9 +531,9 @@ Turing.@model function _brm_population_beta_binomial2(
     mean_beta_location, mean_beta_scale,
     precision_beta_location, precision_beta_scale,
     mean_group_kind, mean_Z,
-    mean_group_idx, n_mean_groups,
+    mean_group_idx, n_mean_groups, mean_intercept_index,
     precision_group_kind, precision_Z,
-    precision_group_idx, n_precision_groups,
+    precision_group_idx, n_precision_groups, precision_intercept_index,
     observation_weight)
     beta_mean ~ product_distribution(
         Normal.(mean_beta_location, mean_beta_scale))
@@ -479,6 +542,9 @@ Turing.@model function _brm_population_beta_binomial2(
     mean_group_scale = nothing
     L_mean_group = nothing
     tau_mean_group = nothing
+    mean_group_intercept_scale = nothing
+    tau_mean_group_slopes = nothing
+    mean_group_scales = nothing
     b_mean_group = nothing
     mean_group_effect = zeros(length(y))
     if mean_group_kind == 1
@@ -500,10 +566,31 @@ Turing.@model function _brm_population_beta_binomial2(
             Diagonal(tau_mean_group) * Matrix(L_mean_group.L) * z_mean_group)
         mean_group_effect = vec(sum(
             mean_Z .* b_mean_group[mean_group_idx, :]; dims=2))
+    elseif mean_group_kind == 3
+        n_mean_terms = size(mean_Z, 2)
+        n_mean_slopes = n_mean_terms - (mean_intercept_index > 0)
+        if mean_intercept_index > 0
+            log_mean_group_intercept_scale ~ Normal()
+            mean_group_intercept_scale = exp(log_mean_group_intercept_scale)
+        end
+        tau_mean_group_slopes ~ product_distribution(
+            fill(truncated(Normal(), 0.0, Inf), n_mean_slopes))
+        mean_group_scales = _zero_correlation_scales(
+            mean_intercept_index, mean_group_intercept_scale,
+            tau_mean_group_slopes)
+        z_mean_group_flat ~ product_distribution(
+            fill(Normal(), n_mean_terms * n_mean_groups))
+        b_mean_group = _noncentered_group_coefficients(
+            mean_group_scales, z_mean_group_flat, n_mean_groups)
+        mean_group_effect = vec(sum(
+            mean_Z .* b_mean_group[mean_group_idx, :]; dims=2))
     end
     precision_group_scale = nothing
     L_precision_group = nothing
     tau_precision_group = nothing
+    precision_group_intercept_scale = nothing
+    tau_precision_group_slopes = nothing
+    precision_group_scales = nothing
     b_precision_group = nothing
     precision_group_effect = zeros(length(y))
     if precision_group_kind == 1
@@ -525,6 +612,26 @@ Turing.@model function _brm_population_beta_binomial2(
         b_precision_group = transpose(
             Diagonal(tau_precision_group) * Matrix(L_precision_group.L) *
             z_precision_group)
+        precision_group_effect = vec(sum(
+            precision_Z .* b_precision_group[precision_group_idx, :]; dims=2))
+    elseif precision_group_kind == 3
+        n_precision_terms = size(precision_Z, 2)
+        n_precision_slopes = n_precision_terms - (precision_intercept_index > 0)
+        if precision_intercept_index > 0
+            log_precision_group_intercept_scale ~ Normal()
+            precision_group_intercept_scale = exp(
+                log_precision_group_intercept_scale)
+        end
+        tau_precision_group_slopes ~ product_distribution(
+            fill(truncated(Normal(), 0.0, Inf), n_precision_slopes))
+        precision_group_scales = _zero_correlation_scales(
+            precision_intercept_index, precision_group_intercept_scale,
+            tau_precision_group_slopes)
+        z_precision_group_flat ~ product_distribution(
+            fill(Normal(), n_precision_terms * n_precision_groups))
+        b_precision_group = _noncentered_group_coefficients(
+            precision_group_scales, z_precision_group_flat,
+            n_precision_groups)
         precision_group_effect = vec(sum(
             precision_Z .* b_precision_group[precision_group_idx, :]; dims=2))
     end
@@ -540,9 +647,12 @@ Turing.@model function _brm_population_beta_binomial2(
     end
     (; logit_mean, log_precision, mean, precision, trials, response=y,
        mean_group_scale, mean_group_effect,
-       L_mean_group, tau_mean_group, b_mean_group,
+       L_mean_group, tau_mean_group, mean_group_intercept_scale,
+       tau_mean_group_slopes, mean_group_scales, b_mean_group,
        precision_group_scale, precision_group_effect,
-       L_precision_group, tau_precision_group, b_precision_group)
+       L_precision_group, tau_precision_group,
+       precision_group_intercept_scale, tau_precision_group_slopes,
+       precision_group_scales, b_precision_group)
 end
 
 Turing.@model function _brm_shared_normal_response(
@@ -871,10 +981,12 @@ end
 
 function BRM._brm_turing_model(
     plan::BRM._TuringMeanPrecisionPlan{Val{:negative_binomial2}})
-    mean_group_kind, mean_Z, mean_group_idx, n_mean_groups =
+    mean_group_kind, mean_Z, mean_group_idx, n_mean_groups,
+        mean_intercept_index =
         _random_effect_args(plan.mean)
     precision_group_kind, precision_Z, precision_group_idx,
-        n_precision_groups = _random_effect_args(plan.precision)
+        n_precision_groups, precision_intercept_index =
+        _random_effect_args(plan.precision)
     _brm_population_negative_binomial2(
         plan.mean.design.matrix,
         plan.mean.design.fixed,
@@ -889,20 +1001,24 @@ function BRM._brm_turing_model(
         mean_Z,
         mean_group_idx,
         n_mean_groups,
+        mean_intercept_index,
         precision_group_kind,
         precision_Z,
         precision_group_idx,
         n_precision_groups,
+        precision_intercept_index,
         plan.observation_weight,
     )
 end
 
 function BRM._brm_turing_model(
     plan::BRM._TuringMeanPrecisionPlan{Val{:beta_binomial2}})
-    mean_group_kind, mean_Z, mean_group_idx, n_mean_groups =
+    mean_group_kind, mean_Z, mean_group_idx, n_mean_groups,
+        mean_intercept_index =
         _random_effect_args(plan.mean)
     precision_group_kind, precision_Z, precision_group_idx,
-        n_precision_groups = _random_effect_args(plan.precision)
+        n_precision_groups, precision_intercept_index =
+        _random_effect_args(plan.precision)
     _brm_population_beta_binomial2(
         plan.mean.design.matrix,
         plan.mean.design.fixed,
@@ -918,10 +1034,12 @@ function BRM._brm_turing_model(
         mean_Z,
         mean_group_idx,
         n_mean_groups,
+        mean_intercept_index,
         precision_group_kind,
         precision_Z,
         precision_group_idx,
         n_precision_groups,
+        precision_intercept_index,
         plan.observation_weight,
     )
 end
