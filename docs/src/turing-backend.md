@@ -35,13 +35,13 @@ coefficient geometry for supported blocks; Stan-only adaptive/CV sizing controls
 remain loud construction errors.
 
 Multiple and crossed grouping factors remain separate blocks. `gr(..., by=)`
-uses a separate scale/correlation frame per stratum, while `mm(...)` pools a
-strict shared level coordinate with normalized or explicitly raw row weights.
-Matching `|ID|` terms in a distributional mean and precision predictor instead
-share one joint scale vector, LKJ factor, and group draw; each predictor consumes
-its own coefficient slice from that covariance block. Addressed `sd(...)` and
-`cor(...)` declarations reuse the same backend-neutral prior resolver as
-StanBlocks.
+uses a separate scale/correlation frame per stratum. Matching `|ID|` terms in a
+distributional mean and precision predictor instead share one joint scale
+vector, LKJ factor, and group draw; each predictor consumes its own coefficient
+slice from that covariance block. Addressed `sd(...)` and `cor(...)`
+declarations reuse the same backend-neutral prior resolver as StanBlocks.
+Multi-membership remains fail-closed in Turing; the feature atlas keeps its real
+construction error beside the successful StanBlocks/Stan emission.
 
 Canonical link declarations are lowered once in BRM and reused by the Turing
 executor. Response modifiers likewise carry materialized bounds, interval
@@ -86,14 +86,14 @@ not sufficient.
 | Poisson log | **Supported** | Canonical linked declarations, data offsets, and admitted grouped predictors |
 | NegativeBinomial2 | **Supported subset** | Shared mean/precision population plans, independent multiple grouping blocks, and a joint cross-predictor `|ID|` covariance block |
 | BetaBinomial2 | **Supported subset** | Shared mean/precision population plans, independent multiple grouping blocks, and a joint cross-predictor `|ID|` covariance block |
-| Group effects | **Partial** | Plain intercepts, correlated and exact-zero-correlation slopes, multiple/crossed factors, distributional cross-predictor `|ID|` covariance, fitted transformed/categorical slopes, stratified `gr(by=)`, weighted multi-membership, explicit centering, and `sd`/`cor` prior overrides; adaptive geometry remains pending |
+| Group effects | **Partial** | Plain intercepts, correlated and exact-zero-correlation slopes, multiple/crossed factors, distributional cross-predictor `|ID|` covariance, fitted transformed/categorical slopes, stratified `gr(by=)`, explicit centering, and `sd`/`cor` prior overrides; multi-membership and adaptive geometry remain pending |
 | Response evidence | **Partial** | Truncated, censored, and interval-censored Normal/Poisson observations; wider modifiers remain pending |
 | Missing responses | **Supported subset** | `mi(y) ~ Normal(mu, sigma)` imputes missing rows from the same conditional family and keeps observed rows in the likelihood |
 | Multiple responses | **Supported subset** | Independent blocks are namespaced; exactly compatible shared predictors/group blocks are sampled once and reused, while partial or incompatible overlaps fail closed |
 | Observation weights | **Supported subset** | Analytic Normal weights rescale sigma; frequency and power weights scale density while predictive draws retain the base distribution |
 | Advanced terms | **Pending** | Splines, `t2`, `mo`, `me`, GP/HSGP, and kernel/ragged models fail loudly |
 | Outputs | **Supported subset** | Row-aligned pointwise likelihoods, deterministic returned quantities, one-draw posterior prediction, and chain-level Turing prediction; fitted response latents are excluded before regeneration |
-| Replay | **Supported subset** | Frozen preprocessing and existing-group coordinates replay on new rows; refitting constants and selective new-group resampling—including joint `|ID|`, stratified, and all-membership redraws—are explicit |
+| Replay | **Supported subset** | Frozen preprocessing and existing-group coordinates replay on new rows; refitting constants and selective new-group resampling—including joint `|ID|` and stratified redraws—are explicit |
 
 The matrix is intentionally an overview. The build-generated examples and
 their current unsupported reasons are the executable source of truth.
