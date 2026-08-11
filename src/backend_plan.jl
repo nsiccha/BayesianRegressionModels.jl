@@ -226,12 +226,13 @@ end
 _brm_response_bound_at(bound::Real, _i) = bound
 _brm_response_bound_at(bound::AbstractVector, i) = bound[i]
 
-function _brm_materialize_truncated_response(
+function _brm_materialize_bounded_response(
         spec::_BRMResponseModifierPlan, target::Symbol,
         response::AbstractVector, data::AbstractDict;
         prefix="BRM backend lowering")
-    spec.kind === :truncated || error(
-        "$prefix: internal response modifier `$(spec.kind)` is not truncation")
+    spec.kind in (:truncated, :censored) || error(
+        "$prefix: internal response modifier `$(spec.kind)` is not a bounded " *
+        "response distribution")
     n = length(response)
     lower = _brm_materialize_response_bound(
         spec.lower, data, n, :lower; prefix)
@@ -241,12 +242,12 @@ function _brm_materialize_truncated_response(
         lo = isnothing(lower) ? nothing : _brm_response_bound_at(lower, i)
         hi = isnothing(upper) ? nothing : _brm_response_bound_at(upper, i)
         (isnothing(lo) || isnothing(hi) || lo <= hi) || error(
-            "$prefix: `truncated` lower bounds must not exceed upper bounds")
+            "$prefix: `$(spec.kind)` lower bounds must not exceed upper bounds")
         (isnothing(lo) || lo <= response[i]) &&
         (isnothing(hi) || response[i] <= hi) || error(
-            "$prefix: `truncated` response `$target` contains values outside its bounds")
+            "$prefix: `$(spec.kind)` response `$target` contains values outside its bounds")
     end
-    _BRMResponseModifierPlan(:truncated, spec.base, lower, upper)
+    _BRMResponseModifierPlan(spec.kind, spec.base, lower, upper)
 end
 
 function _brm_backend_context(brmi::BRMI;

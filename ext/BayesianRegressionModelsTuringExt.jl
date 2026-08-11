@@ -2,7 +2,7 @@ module BayesianRegressionModelsTuringExt
 
 using BayesianRegressionModels
 using Distributions: Exponential, LKJCholesky, Normal, Poisson,
-                     product_distribution, truncated
+                     censored, product_distribution, truncated
 using LinearAlgebra: Diagonal
 using LogExpFunctions: logistic
 using Turing
@@ -16,7 +16,11 @@ function _brm_normal_observation(
         BRM._brm_response_bound_at(modifier.lower, i)
     upper = isnothing(modifier.upper) ? nothing :
         BRM._brm_response_bound_at(modifier.upper, i)
-    truncated(Normal(mu, sigma); lower, upper)
+    base = Normal(mu, sigma)
+    modifier.kind === :truncated && return truncated(base; lower, upper)
+    modifier.kind === :censored && return censored(base; lower, upper)
+    error("Turing backend: internal unsupported Normal response modifier " *
+          "`$(modifier.kind)`")
 end
 
 _random_effect_args(component) = isempty(component.random_effects) ?

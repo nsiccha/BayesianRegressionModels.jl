@@ -2,7 +2,7 @@ using Test
 using Random: Xoshiro
 using BayesianRegressionModels
 using Distributions: Binomial, Cauchy, Exponential, LKJCholesky, Normal,
-                     Poisson, logpdf, truncated
+                     Poisson, censored, logpdf, truncated
 using LinearAlgebra: Diagonal, Symmetric, cholesky
 using LogExpFunctions: logistic, logit
 using Turing
@@ -103,6 +103,42 @@ end
                 Normal(mu, sigma); lower=lower, upper=1.25)
         end)(outside))
     end
+end
+
+
+@testset "Turing extension — censored Gaussian response" begin
+    df = (;
+        x=[-1.0, 0.5, 2.0],
+        lower=[-0.5, -0.2, -0.5],
+        outcome=[-0.5, 0.6, 1.0],
+    )
+    backend = TuringBRMI((@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x
+        outcome ~ censored(
+            Normal(mu, sigma); lower=lower, upper=1.0)
+    end)(df))
+    modifier = backend.plan.response_modifier
+
+    @test modifier.kind === :censored
+    @test modifier.lower == df.lower
+    @test modifier.upper == 1.0
+
+    params = (; beta_pop=[0.25, -0.5], sigma=0.8)
+    mu = backend.plan.design.matrix * params.beta_pop
+    likelihood = sum(eachindex(df.outcome)) do i
+        logpdf(censored(
+            Normal(mu[i], params.sigma);
+            lower=df.lower[i], upper=1.0), df.outcome[i])
+    end
+    prior = sum(logpdf.(Normal(), params.beta_pop)) +
+            logpdf(Exponential(2), params.sigma)
+    @test Turing.logjoint(backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+    @test Turing.logprior(backend.model, params) ≈
+          prior atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(backend.model, params) ≈
+          likelihood atol=1e-12 rtol=1e-12
 end
 
 

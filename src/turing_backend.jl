@@ -307,7 +307,7 @@ function _turing_normal_plan(brmi::BRMI, observation, rhs::ExprColumn;
         "Turing backend: Gaussian response `$(observation.key)` must be real-valued")
     scale_prior = _turing_scalar_exponential_prior(brmi, scale)
     materialized_modifier = isnothing(response_modifier) ? nothing :
-        _brm_materialize_truncated_response(
+        _brm_materialize_bounded_response(
             response_modifier, observation.key, parts.response,
             parts.context.data; prefix="Turing backend")
     _TuringPopulationPlan(Val(:normal_identity), parts.context, parts.predictor,
@@ -441,19 +441,19 @@ function _brm_turing_plan(brmi::BRMI)
         "Turing backend: observed likelihood must be a distribution call")
     response_modifier = _brm_response_modifier_plan(rhs; prefix="Turing backend")
     if !isnothing(response_modifier)
-        response_modifier.kind === :truncated || error(
+        response_modifier.kind in (:truncated, :censored) || error(
             "Turing backend: response modifier `$(response_modifier.kind)` is " *
             "not yet executable; the current response-composition slice supports " *
-            "`truncated(Normal(mu, sigma); lower=..., upper=...)`")
+            "bounded Normal observations")
         rhs = response_modifier.base
         rhs isa ExprColumn || error(
-            "Turing backend: `truncated` base must be a distribution call")
+            "Turing backend: bounded response base must be a distribution call")
     end
     family = getf(rhs)
     family === Normal && return _turing_normal_plan(
         brmi, observation, rhs; response_modifier)
     isnothing(response_modifier) || error(
-        "Turing backend: `truncated` currently supports only " *
+        "Turing backend: `$(response_modifier.kind)` currently supports only " *
         "`Normal(mu, sigma)` observations; got `$family`")
     family === Bernoulli && return _turing_bernoulli_plan(brmi, observation, rhs)
     family === BernoulliLogit &&
@@ -470,7 +470,7 @@ function _brm_turing_plan(brmi::BRMI)
           "`Bernoulli(p)` / `BernoulliLogit(eta)`, `Binomial(trials, p)` / " *
           "`BinomialLogit(trials, eta)`, " *
           "`Poisson(exp(log_rate))`, `NegativeBinomial2(mu, phi)`, and " *
-          "`BetaBinomial2(trials, mean, precision)`, and truncated " *
+          "`BetaBinomial2(trials, mean, precision)`, and bounded " *
           "`Normal(mu, sigma)`; got `$family`")
 end
 
