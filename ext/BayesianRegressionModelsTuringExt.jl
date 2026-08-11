@@ -1506,6 +1506,40 @@ function BRM.turing_predictive_model(backend::BRM.TuringBRMI)
     BRM._brm_turing_model(BRM._turing_predictive_plan(backend.plan))
 end
 
+_brm_predictive_response_varnames(plan) =
+    (Turing.DynamicPPL.@varname(y),)
+_brm_predictive_response_varnames(plan::BRM._TuringMultiResponsePlan) =
+    ntuple(
+        i -> Turing.DynamicPPL.@varname(responses[i].y),
+        length(plan.plans),
+    )
+
+function _brm_without_response_parameters(plan, chain)
+    response_varnames = _brm_predictive_response_varnames(plan)
+    retained = filter(collect(keys(chain))) do key
+        hasfield(typeof(key), :name) || return true
+        name = getfield(key, :name)
+        name isa Turing.DynamicPPL.VarName || return true
+        !any(response_varnames) do response_varname
+            Turing.DynamicPPL.subsumes(response_varname, name)
+        end
+    end
+    chain[retained]
+end
+
+function Turing.predict(
+        rng::AbstractRNG, backend::BRM.TuringBRMI, chain;
+        include_all::Bool=true)
+    parameters = _brm_without_response_parameters(backend.plan, chain)
+    Turing.predict(
+        rng, BRM.turing_predictive_model(backend), parameters;
+        include_all,
+    )
+end
+
+Turing.predict(backend::BRM.TuringBRMI, chain; include_all::Bool=true) =
+    Turing.predict(default_rng(), backend, chain; include_all)
+
 BRM.turing_generated_quantities(backend::BRM.TuringBRMI, parameters) =
     Turing.DynamicPPL.returned(backend.model, parameters)
 
@@ -1644,8 +1678,10 @@ function BRM.turing_posterior_predictive(
     predictive = BRM.turing_predictive_model(backend)
     fixed_parameters = _brm_resampled_parameters(backend, parameters)
     fixed = Turing.fix(predictive, fixed_parameters)
-    draw = rand(rng, fixed)
-    returned = Turing.DynamicPPL.returned(fixed, draw.data)
+    generative = Turing.unfix(
+        fixed, _brm_predictive_response_varnames(backend.plan)...)
+    draw = rand(rng, generative)
+    returned = Turing.DynamicPPL.returned(generative, draw.data)
     _brm_named_predictive(backend.plan, returned)
 end
 

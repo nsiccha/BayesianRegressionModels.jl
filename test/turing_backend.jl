@@ -226,6 +226,36 @@ end
     @test propertynames(predictive) == (:y,)
     @test !any(ismissing, predictive.y)
     @test length(predictive.y) == length(df.y)
+    @test predictive.y[missing_plan.missing_indices] !=
+          complete_y[missing_plan.missing_indices]
+
+    # A fitted chain contains latent `y[i]` parameters for the missing rows.
+    # BRM's chain-level predict entry point must remove those before delegating
+    # to DynamicPPL, otherwise the old imputed values are silently reused.
+    fitted = sample(Xoshiro(75), backend.model, Prior(), 2; progress=false)
+    response_root = Turing.DynamicPPL.@varname(y)
+    response_keys = filter(collect(keys(fitted))) do key
+        hasfield(typeof(key), :name) || return false
+        name = getfield(key, :name)
+        name isa Turing.DynamicPPL.VarName &&
+            Turing.DynamicPPL.subsumes(response_root, name)
+    end
+    @test length(response_keys) == length(missing_plan.missing_indices)
+    fitted_latents = Dict(
+        string(getfield(key, :name)) => fitted[key] for key in response_keys)
+    chain_predictive = Turing.predict(
+        Xoshiro(76), backend, fitted; include_all=false)
+    predicted_key = only(filter(collect(keys(chain_predictive))) do key
+        hasfield(typeof(key), :name) || return false
+        getfield(key, :name) == response_root
+    end)
+    predicted_rows = chain_predictive[predicted_key]
+    for missing_index in missing_plan.missing_indices
+        latent = fitted_latents["y[$missing_index]"]
+        @test all(CartesianIndices(predicted_rows)) do sample
+            predicted_rows[sample][missing_index] != latent[sample]
+        end
+    end
 
     complete = merge(df, (; y=Union{Missing,Float64}[0.2, 0.1, -0.4, 0.3]))
     @test_throws "found no missing values" begin
@@ -301,6 +331,65 @@ end
     @test length(predictive.count) == length(df.count)
     @test eltype(predictive.count) <: Integer
 
+    composed = TuringBRMI((@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x
+        mi(y_missing) ~ Normal(mu, sigma)
+        log(rate_weighted) ~ 1 + x
+        count_weighted ~ weighted(
+            Poisson(rate_weighted), fweights(repeats))
+    end)((;
+        x=df.x,
+        y_missing=Union{Missing,Float64}[0.2, missing, -0.4],
+        count_weighted=df.count,
+        repeats=[0, 3, 2],
+    )))
+    composed_draw = rand(Xoshiro(93), composed.model)
+    composed_returned = Turing.DynamicPPL.returned(
+        composed.model, composed_draw.data)
+    gaussian_params = composed_draw.data.responses[1].data
+    poisson_params = composed_draw.data.responses[2].data
+    gaussian_plan, weighted_plan = composed.plan.plans
+    completed_y = composed_returned.responses[1].response
+    mu_missing = gaussian_plan.design.matrix * gaussian_params.beta_pop
+    rate_weighted = exp.(
+        weighted_plan.design.matrix * poisson_params.beta_pop)
+    gaussian_observed = sum(gaussian_plan.missing_response.observed_indices) do i
+        logpdf(Normal(mu_missing[i], gaussian_params.sigma), completed_y[i])
+    end
+    gaussian_imputed = sum(gaussian_plan.missing_response.missing_indices) do i
+        logpdf(Normal(mu_missing[i], gaussian_params.sigma), completed_y[i])
+    end
+    weighted_poisson = sum(eachindex(df.count)) do i
+        [0, 3, 2][i] * logpdf(Poisson(rate_weighted[i]), df.count[i])
+    end
+    composed_prior = sum(logpdf.(Normal(), gaussian_params.beta_pop)) +
+                     logpdf(Exponential(2), gaussian_params.sigma) +
+                     gaussian_imputed +
+                     sum(logpdf.(Normal(), poisson_params.beta_pop))
+
+    @test completed_y[gaussian_plan.missing_response.observed_indices] ==
+          gaussian_plan.missing_response.observed_values
+    @test Turing.logprior(composed.model, composed_draw.data) ≈
+          composed_prior atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(composed.model, composed_draw.data) ≈
+          gaussian_observed + weighted_poisson atol=1e-12 rtol=1e-12
+    composed_pointwise = turing_pointwise_loglikelihoods(
+        composed, composed_draw.data)
+    @test propertynames(composed_pointwise) == (:y_missing, :count_weighted)
+    @test ismissing(composed_pointwise.y_missing[2])
+    @test composed_pointwise.y_missing[[1, 3]] ≈ [
+        logpdf(Normal(mu_missing[i], gaussian_params.sigma), completed_y[i])
+        for i in (1, 3)
+    ]
+    @test composed_pointwise.count_weighted ≈ [
+        [0, 3, 2][i] * logpdf(Poisson(rate_weighted[i]), df.count[i])
+        for i in eachindex(df.count)
+    ]
+    @test composed_pointwise.count_weighted[1] == 0.0
+    composed_predictive = turing_posterior_predictive(
+        Xoshiro(94), composed, composed_draw.data)
+    @test composed_predictive.y_missing[2] != completed_y[2]
 end
 
 

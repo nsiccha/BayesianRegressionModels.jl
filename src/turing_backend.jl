@@ -113,8 +113,11 @@ function turing_pointwise_loglikelihoods end
     turing_predictive_model(backend::TuringBRMI)
 
 Return the direct-BRMI DynamicPPL model with every response site unobserved.
-Use this with Turing's standard chain-level `predict` interface, or call
-[`turing_posterior_predictive`](@ref) for one constrained parameter draw.
+For chain-level prediction, call `Turing.predict([rng], backend, chain)` so
+latent response values from partially missing fitted responses are removed
+before DynamicPPL conditions the predictive model. Use this model directly
+with `Turing.predict` only when the chain contains no response parameters, or
+call [`turing_posterior_predictive`](@ref) for one constrained parameter draw.
 """
 function turing_predictive_model end
 
@@ -132,7 +135,9 @@ function turing_generated_quantities end
 
 Draw every modeled response at one constrained parameter draw. The result is a
 response-named `NamedTuple`, including one entry per response in a
-multi-response model.
+multi-response model. Response parameters in `parameters` (for example latent
+values fitted through `mi(y)`) are deliberately not conditioned, so every row
+is regenerated.
 """
 function turing_posterior_predictive end
 
