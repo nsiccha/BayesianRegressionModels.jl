@@ -219,6 +219,29 @@ end)((;
 """, :stratified_groups; title="Group covariance stratified by arm")
 ```
 
+## Multi-membership group effects
+
+Each row belongs to two groups. The row weights are normalized before the two
+group contributions are pooled; `normalize=false` is the explicit raw-weight
+variant.
+
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+multi_membership = (@brm begin
+    sigma ~ Exponential(2)
+    mu ~ 1 + x + (1 + x | mm(g1, g2; weights=(w1, w2)))
+    outcome ~ Normal(mu, sigma)
+end)((;
+    x=[-1.0, 0.5, 2.0, 0.25],
+    g1=[1, 1, 2, 3],
+    g2=[2, 3, 3, 1],
+    w1=[2.0, 1.0, 0.5, 3.0],
+    w2=[1.0, 1.0, 1.5, 1.0],
+    outcome=[0.2, 1.1, -0.4, 0.7],
+))
+""", :multi_membership; title="Weighted multi-membership random slopes")
+```
+
 ## Multiple crossed group effects
 
 ```@eval
