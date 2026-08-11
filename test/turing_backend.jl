@@ -662,6 +662,81 @@ end
     @test returned.trials == df.trials
 end
 
+
+@testset "Turing extension — grouped mean/precision families" begin
+    dist_data = (;
+        x=[-1.0, 0.5, 2.0, 0.25],
+        z=[0.0, 1.0, -0.5, 0.75],
+        subject=["b", "a", "b", "c"],
+        batch=[2, 1, 1, 2],
+        trials=[4, 6, 8, 5],
+    )
+    negative_binomial = TuringBRMI((@brm begin
+        log(mu) ~ 1 + x + (1 | subject)
+        log(phi) ~ 1 + z + (1 | batch)
+        y ~ BRM.NegativeBinomial2(mu, phi)
+    end)((; dist_data..., y=[0, 2, 5, 1])))
+    beta_binomial = TuringBRMI((@brm begin
+        logit(mean) ~ 1 + x + (1 | subject)
+        log(precision) ~ 1 + z + (1 | batch)
+        y ~ BRM.BetaBinomial2(trials, mean, precision)
+    end)((; dist_data..., y=[1, 4, 5, 0])))
+
+    params = (;
+        beta_mean=[0.1, 0.2], beta_precision=[-0.4, 0.15],
+        log_mean_group_scale=log(0.6),
+        z_mean_group=[-0.2, 0.4, 1.1],
+        log_precision_group_scale=log(0.3),
+        z_precision_group=[0.5, -0.7],
+    )
+    mean_block = only(negative_binomial.plan.mean.random_intercepts)
+    precision_block = only(
+        negative_binomial.plan.precision.random_intercepts)
+    mean_group_values = exp(params.log_mean_group_scale) .* params.z_mean_group
+    precision_group_values = exp(params.log_precision_group_scale) .*
+                             params.z_precision_group
+    linear_mean = negative_binomial.plan.mean.design.matrix * params.beta_mean +
+                  mean_group_values[mean_block.indices]
+    linear_precision = negative_binomial.plan.precision.design.matrix *
+                       params.beta_precision +
+                       precision_group_values[precision_block.indices]
+    prior = sum(logpdf.(Normal(), params.beta_mean)) +
+            sum(logpdf.(Normal(), params.beta_precision)) +
+            logpdf(Normal(), params.log_mean_group_scale) +
+            sum(logpdf.(Normal(), params.z_mean_group)) +
+            logpdf(Normal(), params.log_precision_group_scale) +
+            sum(logpdf.(Normal(), params.z_precision_group))
+
+    mu = exp.(linear_mean)
+    phi = exp.(linear_precision)
+    nb_lik = sum(logpdf.(
+        BRM.NegativeBinomial2.(mu, phi), negative_binomial.plan.response))
+    nb_returned = Turing.DynamicPPL.returned(
+        negative_binomial.model, params)
+    @test Turing.logjoint(negative_binomial.model, params) ≈
+          prior + nb_lik atol=1e-12 rtol=1e-12
+    @test Turing.logprior(negative_binomial.model, params) ≈
+          prior atol=1e-12 rtol=1e-12
+    @test nb_returned.mu == mu
+    @test nb_returned.phi == phi
+
+    mean_prob = logistic.(linear_mean)
+    precision = exp.(linear_precision)
+    bb_lik = sum(logpdf.(BRM.BetaBinomial2.(
+        dist_data.trials, mean_prob, precision), beta_binomial.plan.response))
+    bb_returned = Turing.DynamicPPL.returned(beta_binomial.model, params)
+    @test Turing.logjoint(beta_binomial.model, params) ≈
+          prior + bb_lik atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(beta_binomial.model, params) ≈
+          bb_lik atol=1e-12 rtol=1e-12
+    @test bb_returned.mean == mean_prob
+    @test bb_returned.precision == precision
+    @test bb_returned.mean_group_effect ==
+          mean_group_values[mean_block.indices]
+    @test bb_returned.precision_group_effect ==
+          precision_group_values[precision_block.indices]
+end
+
 @testset "Turing extension — unsupported shapes fail loudly" begin
     unsupported_string_column = (@brm begin
         sigma ~ Exponential(1)

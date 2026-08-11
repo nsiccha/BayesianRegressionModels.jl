@@ -19,11 +19,12 @@ end
 
 struct _TuringPopulationComponent{P<:_BRMPopulationPredictor,
                                   D<:_BRMPopulationDesign,
-                                  B<:AbstractVector}
+                                  B<:AbstractVector,R<:Tuple}
     predictor::P
     design::D
     beta_location::B
     beta_scale::B
+    random_intercepts::R
 end
 
 struct _TuringMeanPrecisionPlan{F,C<:_BRMBackendContext,M,Q,A,
@@ -141,6 +142,11 @@ function _turing_predictor_component(brmi::BRMI, context::_BRMBackendContext,
         error("Turing backend: random effects for predictor `$predictor` are " *
               "not yet supported by this likelihood plan")
     end
+    if allow_group_terms && length(random_intercepts) > 1
+        error("Turing backend: the initial grouped slice supports one plain " *
+              "random-intercept block per predictor; found " *
+              "$(length(random_intercepts)) for `$predictor`")
+    end
     predictor_plan = _brm_simple_population_predictor(
         brmi, predictor, context; required=true)
     design = predictor_plan.design
@@ -150,7 +156,7 @@ function _turing_predictor_component(brmi::BRMI, context::_BRMBackendContext,
     beta_location, beta_scale = _brm_materialize_normal_effect_priors(
         overrides, k; prefix="Turing backend")
     _TuringPopulationComponent(
-        predictor_plan, design, beta_location, beta_scale)
+        predictor_plan, design, beta_location, beta_scale, random_intercepts)
 end
 
 function _turing_population_components(brmi::BRMI, observation, predictor::Symbol;
@@ -160,13 +166,7 @@ function _turing_population_components(brmi::BRMI, observation, predictor::Symbo
         brmi, observation, (predictor, extra_operations...))
     component = _turing_predictor_component(
         brmi, context, predictor; allow_group_terms=allow_random_intercepts)
-    random_intercepts = _brm_simple_random_intercept_plans(
-        brmi, predictor, context; required=true)
-    if allow_random_intercepts && length(random_intercepts) > 1
-        error("Turing backend: the initial grouped slice supports one plain " *
-              "random-intercept block per predictor; found " *
-              "$(length(random_intercepts)) for `$predictor`")
-    end
+    random_intercepts = component.random_intercepts
     response = context.data[observation.key]
     response isa AbstractVector || error(
         "Turing backend: response `$(observation.key)` must be a vector")
@@ -203,9 +203,11 @@ function _turing_mean_precision_components(brmi::BRMI, observation,
     predictor_names = (mean_name, precision_name)
     context = _turing_model_context(brmi, observation, predictor_names)
     mean = _turing_predictor_component(
-        brmi, context, mean_name; available_predictors=predictor_names)
+        brmi, context, mean_name; available_predictors=predictor_names,
+        allow_group_terms=true)
     precision = _turing_predictor_component(
-        brmi, context, precision_name; available_predictors=predictor_names)
+        brmi, context, precision_name; available_predictors=predictor_names,
+        allow_group_terms=true)
     _turing_require_predictor_link((; predictor=mean.predictor), mean_link,
                                    "$family_name mean link")
     _turing_require_predictor_link((; predictor=precision.predictor),
@@ -219,6 +221,11 @@ function _turing_mean_precision_components(brmi::BRMI, observation,
         "Turing backend: $family_name mean design has a different row count")
     size(precision.design.matrix, 1) == n || error(
         "Turing backend: $family_name precision design has a different row count")
+    all(length(block.indices) == n
+        for component in (mean, precision)
+        for block in component.random_intercepts) || error(
+            "Turing backend: $family_name response and random-intercept index " *
+            "have different row counts")
     (; context, mean, precision, response)
 end
 
