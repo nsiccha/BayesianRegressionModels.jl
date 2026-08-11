@@ -141,6 +141,124 @@ function _noncentered_group_coefficients(scales, z_flat, n_groups)
               reshape(z_flat, n_terms, n_groups))
 end
 
+Turing.@model function _brm_random_intercept_effect(group_idx, n_groups)
+    log_scale ~ Normal()
+    z ~ product_distribution(fill(Normal(), n_groups))
+    scale = exp(log_scale)
+    values = scale .* z
+    effect = values[group_idx]
+    (; effect, scale, values)
+end
+
+
+Turing.@model function _brm_correlated_group_effect(
+        Z, group_idx, n_groups)
+    n_terms = size(Z, 2)
+    L ~ LKJCholesky(n_terms, 1.0)
+    tau ~ product_distribution(
+        fill(truncated(Normal(), 0.0, Inf), n_terms))
+    z_flat ~ product_distribution(fill(Normal(), n_terms * n_groups))
+    z = reshape(z_flat, n_terms, n_groups)
+    coefficients = transpose(Diagonal(tau) * Matrix(L.L) * z)
+    effect = vec(sum(Z .* coefficients[group_idx, :]; dims=2))
+    (; effect, L, tau, coefficients)
+end
+
+
+Turing.@model function _brm_zero_correlation_group_effect(
+        Z, group_idx, n_groups, intercept_index)
+    n_terms = size(Z, 2)
+    n_slopes = n_terms - (intercept_index > 0)
+    intercept_scale = nothing
+    if intercept_index > 0
+        log_intercept_scale ~ Normal()
+        intercept_scale = exp(log_intercept_scale)
+    end
+    tau_slopes ~ product_distribution(
+        fill(truncated(Normal(), 0.0, Inf), n_slopes))
+    scales = _zero_correlation_scales(
+        intercept_index, intercept_scale, tau_slopes)
+    z_flat ~ product_distribution(fill(Normal(), n_terms * n_groups))
+    coefficients = _noncentered_group_coefficients(
+        scales, z_flat, n_groups)
+    effect = vec(sum(Z .* coefficients[group_idx, :]; dims=2))
+    (; effect, intercept_scale, tau_slopes, scales, coefficients)
+end
+
+
+function _brm_group_effect_model(block)
+    if block.intercept_only
+        return _brm_random_intercept_effect(
+            block.indices, length(block.levels))
+    end
+    if block.zero_correlation
+        intercept_index = something(
+            findfirst(column -> column.label === :Intercept, block.columns), 0)
+        return _brm_zero_correlation_group_effect(
+            block.matrix, block.indices, length(block.levels), intercept_index)
+    end
+    _brm_correlated_group_effect(
+        block.matrix, block.indices, length(block.levels))
+end
+
+_brm_group_effect_models(component) =
+    Tuple(_brm_group_effect_model(block) for block in component.random_effects)
+
+
+Turing.@model function _brm_population_gaussian_multiple_groups(
+        X, fixed, group_models, y, beta_location, beta_scale, sigma_scale,
+        response_modifier, observation_weight)
+    beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
+    sigma ~ Exponential(sigma_scale)
+    groups = Vector{Any}(undef, length(group_models))
+    group_effect = zeros(length(y))
+    for i in eachindex(group_models)
+        groups[i] ~ to_submodel(group_models[i])
+        group_effect = group_effect + groups[i].effect
+    end
+    mu = X * beta_pop + fixed + group_effect
+    for i in eachindex(y)
+        y[i] ~ _brm_normal_observation(
+            response_modifier, observation_weight, mu[i], sigma, i)
+    end
+    (; mu, sigma, response=y, groups, group_effect)
+end
+
+
+Turing.@model function _brm_population_glm_multiple_groups(
+        family, X, fixed, group_models, trials, y, beta_location, beta_scale,
+        response_modifier, observation_weight)
+    beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
+    groups = Vector{Any}(undef, length(group_models))
+    group_effect = zeros(length(y))
+    for i in eachindex(group_models)
+        groups[i] ~ to_submodel(group_models[i])
+        group_effect = group_effect + groups[i].effect
+    end
+    eta = X * beta_pop + fixed + group_effect
+    rate = nothing
+    if family isa Val{:bernoulli_logit}
+        for i in eachindex(y)
+            y[i] ~ _brm_objective_observation(
+                BRM.BernoulliLogit(eta[i]), observation_weight, i)
+        end
+    elseif family isa Val{:binomial_logit}
+        for i in eachindex(y)
+            y[i] ~ _brm_objective_observation(
+                BRM.BinomialLogit(trials[i], eta[i]), observation_weight, i)
+        end
+    elseif family isa Val{:poisson_log}
+        rate = exp.(eta)
+        for i in eachindex(y)
+            y[i] ~ _brm_poisson_observation(
+                response_modifier, observation_weight, rate[i], i)
+        end
+    else
+        error("Turing backend: internal unsupported multiple-group family $family")
+    end
+    (; eta, rate, response=y, groups, group_effect)
+end
+
 Turing.@model function _brm_population_gaussian(
     X, fixed, y, beta_location, beta_scale, sigma_scale, response_modifier,
     observation_weight)
@@ -655,6 +773,61 @@ Turing.@model function _brm_population_beta_binomial2(
        precision_group_scales, b_precision_group)
 end
 
+
+Turing.@model function _brm_population_mean_precision_multiple_groups(
+        family, X_mean, fixed_mean, X_precision, fixed_precision,
+        mean_group_models, precision_group_models, trials, y,
+        mean_beta_location, mean_beta_scale,
+        precision_beta_location, precision_beta_scale, observation_weight)
+    beta_mean ~ product_distribution(
+        Normal.(mean_beta_location, mean_beta_scale))
+    beta_precision ~ product_distribution(
+        Normal.(precision_beta_location, precision_beta_scale))
+    mean_groups = Vector{Any}(undef, length(mean_group_models))
+    mean_group_effect = zeros(length(y))
+    for i in eachindex(mean_group_models)
+        mean_groups[i] ~ to_submodel(mean_group_models[i])
+        mean_group_effect = mean_group_effect + mean_groups[i].effect
+    end
+    precision_groups = Vector{Any}(undef, length(precision_group_models))
+    precision_group_effect = zeros(length(y))
+    for i in eachindex(precision_group_models)
+        precision_groups[i] ~ to_submodel(precision_group_models[i])
+        precision_group_effect =
+            precision_group_effect + precision_groups[i].effect
+    end
+
+    mean_link = X_mean * beta_mean + fixed_mean + mean_group_effect
+    precision_link = X_precision * beta_precision + fixed_precision +
+                     precision_group_effect
+    mu = nothing
+    phi = nothing
+    mean = nothing
+    precision = nothing
+    if family isa Val{:negative_binomial2}
+        mu = exp.(mean_link)
+        phi = exp.(precision_link)
+        for i in eachindex(y)
+            y[i] ~ _brm_objective_observation(
+                BRM.NegativeBinomial2(mu[i], phi[i]), observation_weight, i)
+        end
+    elseif family isa Val{:beta_binomial2}
+        mean = logistic.(mean_link)
+        precision = exp.(precision_link)
+        for i in eachindex(y)
+            y[i] ~ _brm_objective_observation(
+                BRM.BetaBinomial2(trials[i], mean[i], precision[i]),
+                observation_weight, i)
+        end
+    else
+        error("Turing backend: internal unsupported multiple-group " *
+              "mean/precision family $family")
+    end
+    (; mean_link, precision_link, mu, phi, mean, precision, trials,
+       response=y, mean_groups, precision_groups,
+       mean_group_effect, precision_group_effect)
+end
+
 Turing.@model function _brm_shared_normal_response(
     mu, sigma, y, response_modifier, observation_weight)
     for i in eachindex(y)
@@ -761,6 +934,19 @@ end
 
 function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:normal_identity}})
+    if length(plan.random_effects) > 1
+        return _brm_population_gaussian_multiple_groups(
+            plan.design.matrix,
+            plan.design.fixed,
+            _brm_group_effect_models(plan),
+            plan.response,
+            plan.beta_location,
+            plan.beta_scale,
+            plan.scale_prior,
+            plan.response_modifier,
+            plan.observation_weight,
+        )
+    end
     if !isempty(plan.random_effects)
         block = only(plan.random_effects)
         if block.zero_correlation && !block.intercept_only
@@ -823,6 +1009,13 @@ end
 
 function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:bernoulli_logit}})
+    if length(plan.random_effects) > 1
+        return _brm_population_glm_multiple_groups(
+            Val(:bernoulli_logit), plan.design.matrix, plan.design.fixed,
+            _brm_group_effect_models(plan), Int[], plan.response,
+            plan.beta_location, plan.beta_scale, nothing,
+            plan.observation_weight)
+    end
     if !isempty(plan.random_effects)
         block = only(plan.random_effects)
         if block.zero_correlation && !block.intercept_only
@@ -874,6 +1067,13 @@ end
 
 function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:binomial_logit}})
+    if length(plan.random_effects) > 1
+        return _brm_population_glm_multiple_groups(
+            Val(:binomial_logit), plan.design.matrix, plan.design.fixed,
+            _brm_group_effect_models(plan), plan.family_args.trials,
+            plan.response, plan.beta_location, plan.beta_scale, nothing,
+            plan.observation_weight)
+    end
     if !isempty(plan.random_effects)
         block = only(plan.random_effects)
         if block.zero_correlation && !block.intercept_only
@@ -927,6 +1127,13 @@ end
 
 function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:poisson_log}})
+    if length(plan.random_effects) > 1
+        return _brm_population_glm_multiple_groups(
+            Val(:poisson_log), plan.design.matrix, plan.design.fixed,
+            _brm_group_effect_models(plan), Int[], plan.response,
+            plan.beta_location, plan.beta_scale, plan.response_modifier,
+            plan.observation_weight)
+    end
     if !isempty(plan.random_effects)
         block = only(plan.random_effects)
         if block.zero_correlation && !block.intercept_only
@@ -981,6 +1188,18 @@ end
 
 function BRM._brm_turing_model(
     plan::BRM._TuringMeanPrecisionPlan{Val{:negative_binomial2}})
+    if length(plan.mean.random_effects) > 1 ||
+       length(plan.precision.random_effects) > 1
+        return _brm_population_mean_precision_multiple_groups(
+            Val(:negative_binomial2),
+            plan.mean.design.matrix, plan.mean.design.fixed,
+            plan.precision.design.matrix, plan.precision.design.fixed,
+            _brm_group_effect_models(plan.mean),
+            _brm_group_effect_models(plan.precision), Int[], plan.response,
+            plan.mean.beta_location, plan.mean.beta_scale,
+            plan.precision.beta_location, plan.precision.beta_scale,
+            plan.observation_weight)
+    end
     mean_group_kind, mean_Z, mean_group_idx, n_mean_groups,
         mean_intercept_index =
         _random_effect_args(plan.mean)
@@ -1013,6 +1232,18 @@ end
 
 function BRM._brm_turing_model(
     plan::BRM._TuringMeanPrecisionPlan{Val{:beta_binomial2}})
+    if length(plan.mean.random_effects) > 1 ||
+       length(plan.precision.random_effects) > 1
+        return _brm_population_mean_precision_multiple_groups(
+            Val(:beta_binomial2),
+            plan.mean.design.matrix, plan.mean.design.fixed,
+            plan.precision.design.matrix, plan.precision.design.fixed,
+            _brm_group_effect_models(plan.mean),
+            _brm_group_effect_models(plan.precision), plan.family_args.trials,
+            plan.response, plan.mean.beta_location, plan.mean.beta_scale,
+            plan.precision.beta_location, plan.precision.beta_scale,
+            plan.observation_weight)
+    end
     mean_group_kind, mean_Z, mean_group_idx, n_mean_groups,
         mean_intercept_index =
         _random_effect_args(plan.mean)
@@ -1179,32 +1410,59 @@ function _brm_named_predictive(
     NamedTuple{plan.responses}(responses)
 end
 
-function _brm_resampled_latents(
+_brm_group_latent_name(block) = block.intercept_only ? "z" : "z_flat"
+_brm_multiple_group_model(plan::BRM._TuringPopulationPlan) =
+    length(plan.random_effects) > 1
+_brm_multiple_group_model(plan::BRM._TuringMeanPrecisionPlan) =
+    length(plan.mean.random_effects) > 1 ||
+    length(plan.precision.random_effects) > 1
+
+function _brm_resampled_latent_paths(
         plan::BRM._TuringPopulationPlan, groups)
-    names = Symbol[]
+    paths = String[]
+    if _brm_multiple_group_model(plan)
+        for (i, block) in enumerate(plan.random_effects)
+            block.group in groups || continue
+            push!(paths, "groups[$i].$(_brm_group_latent_name(block))")
+        end
+        return Set(paths)
+    end
     for block in plan.random_effects
         block.group in groups || continue
-        push!(names, block.intercept_only ? :z_group : :z_group_flat)
+        push!(paths, block.intercept_only ? "z_group" : "z_group_flat")
     end
-    Set(names)
+    Set(paths)
 end
 
-function _brm_component_resampled_latents!(
-        names, component, groups, prefix::Symbol)
-    for block in component.random_effects
+function _brm_component_resampled_latent_paths!(
+        paths, component, groups, prefix::AbstractString)
+    for (i, block) in enumerate(component.random_effects)
         block.group in groups || continue
-        suffix = block.intercept_only ? :group : :group_flat
-        push!(names, Symbol(:z_, prefix, :_, suffix))
+        push!(paths, "$prefix[$i].$(_brm_group_latent_name(block))")
     end
-    names
+    paths
 end
 
-function _brm_resampled_latents(
+function _brm_resampled_latent_paths(
         plan::BRM._TuringMeanPrecisionPlan, groups)
-    names = Set{Symbol}()
-    _brm_component_resampled_latents!(names, plan.mean, groups, :mean)
-    _brm_component_resampled_latents!(
-        names, plan.precision, groups, :precision)
+    paths = Set{String}()
+    if _brm_multiple_group_model(plan)
+        _brm_component_resampled_latent_paths!(
+            paths, plan.mean, groups, "mean_groups")
+        return _brm_component_resampled_latent_paths!(
+            paths, plan.precision, groups, "precision_groups")
+    end
+    for block in plan.mean.random_effects
+        block.group in groups || continue
+        push!(paths, block.intercept_only ?
+              "z_mean_group" : "z_mean_group_flat")
+    end
+    for block in plan.precision.random_effects
+        block.group in groups || continue
+        push!(paths, block.intercept_only ?
+              "z_precision_group" : "z_precision_group_flat")
+    end
+    paths
 end
 
 function _brm_without_fields(parameters::NamedTuple, removed)
@@ -1212,29 +1470,39 @@ function _brm_without_fields(parameters::NamedTuple, removed)
     NamedTuple{kept}(Tuple(getproperty(parameters, name) for name in kept))
 end
 
+function _brm_without_parameter_paths(parameters, removed)
+    point_parameters = Turing.DynamicPPL.VarNamedTuple(parameters)
+    kept = Dict{Turing.DynamicPPL.VarName,Any}()
+    for variable in keys(point_parameters)
+        string(variable) in removed && continue
+        kept[variable] = point_parameters[variable]
+    end
+    kept
+end
+
 function _brm_resampled_parameters(backend::BRM.TuringBRMI, parameters)
     groups = Set{Symbol}(backend.replay.resample_groups)
     isempty(groups) && return parameters
     if backend.plan isa BRM._TuringMultiResponsePlan
-        point_parameters = Turing.DynamicPPL.VarNamedTuple(parameters)
         removed = Set{String}()
         for i in eachindex(backend.plan.plans)
             backend.plan.owners[i] == i || continue
-            for name in _brm_resampled_latents(backend.plan.plans[i], groups)
-                push!(removed, "responses[$i].$name")
+            for path in _brm_resampled_latent_paths(
+                    backend.plan.plans[i], groups)
+                push!(removed, "responses[$i].$path")
             end
         end
-        kept = Dict{Turing.DynamicPPL.VarName,Any}()
-        for variable in keys(point_parameters)
-            string(variable) in removed && continue
-            kept[variable] = point_parameters[variable]
-        end
-        return kept
+        return _brm_without_parameter_paths(parameters, removed)
+    end
+    if _brm_multiple_group_model(backend.plan)
+        removed = _brm_resampled_latent_paths(backend.plan, groups)
+        return _brm_without_parameter_paths(parameters, removed)
     end
     parameters isa NamedTuple || error(
         "Turing backend: `resample_groups` posterior prediction currently " *
         "requires one constrained parameter draw as a NamedTuple")
-    removed = _brm_resampled_latents(backend.plan, groups)
+    removed = Set(Symbol(path) for path in
+                  _brm_resampled_latent_paths(backend.plan, groups))
     _brm_without_fields(parameters, removed)
 end
 

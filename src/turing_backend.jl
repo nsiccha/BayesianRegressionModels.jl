@@ -420,11 +420,6 @@ function _turing_predictor_component(brmi::BRMI, context::_BRMBackendContext,
         error("Turing backend: random effects for predictor `$predictor` are " *
               "not yet supported by this likelihood plan")
     end
-    if allow_group_terms && length(random_effects) > 1
-        error("Turing backend: the initial grouped slice supports one plain " *
-              "random-effect block per predictor; found " *
-              "$(length(random_effects)) for `$predictor`")
-    end
     if !allow_random_slopes && any(!block.intercept_only for block in random_effects)
         error("Turing backend: random slopes for predictor `$predictor` are " *
               "not yet supported by this likelihood plan")

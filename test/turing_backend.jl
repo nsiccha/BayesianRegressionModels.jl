@@ -913,6 +913,80 @@ end
 end
 
 
+@testset "Turing extension — multiple crossed random-effect blocks" begin
+    df = (;
+        x=[-1.0, 0.5, 2.0, 0.25],
+        subject=["b", "a", "b", "c"],
+        item=[2, 1, 1, 2],
+        y=[0.2, 1.1, -0.4, 0.7],
+    )
+    backend = TuringBRMI((@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x + (1 + x | subject) + (1 | item)
+        y ~ Normal(mu, sigma)
+    end)(df))
+    @test Tuple(block.group for block in backend.plan.random_effects) ==
+          (:subject, :item)
+
+    L_matrix = [1.0 0.0; 0.25 sqrt(1 - 0.25^2)]
+    L_subject = cholesky(Symmetric(L_matrix * transpose(L_matrix)))
+    params = Dict(
+        Turing.@varname(beta_pop) => [0.25, -0.5],
+        Turing.@varname(sigma) => 0.8,
+        Turing.@varname(groups[1].L) => L_subject,
+        Turing.@varname(groups[1].tau) => [0.4, 0.7],
+        Turing.@varname(groups[1].z_flat) =>
+            [-0.2, 0.4, 1.1, 0.3, -0.5, 0.8],
+        Turing.@varname(groups[2].log_scale) => log(0.6),
+        Turing.@varname(groups[2].z) => [0.2, -0.4],
+    )
+    subject_block, item_block = backend.plan.random_effects
+    subject_coefficients = transpose(Diagonal(params[
+        Turing.@varname(groups[1].tau)]) *
+        Matrix(L_subject.L) * reshape(params[
+            Turing.@varname(groups[1].z_flat)], 2, 3))
+    subject_effect = vec(sum(subject_block.matrix .*
+        subject_coefficients[subject_block.indices, :]; dims=2))
+    item_values = 0.6 .* params[Turing.@varname(groups[2].z)]
+    item_effect = item_values[item_block.indices]
+    group_effect = subject_effect + item_effect
+    mu = backend.plan.design.matrix * params[Turing.@varname(beta_pop)] +
+         group_effect
+    half_normal = truncated(Normal(), 0.0, Inf)
+    prior = sum(logpdf.(Normal(), params[Turing.@varname(beta_pop)])) +
+            logpdf(Exponential(2), params[Turing.@varname(sigma)]) +
+            logpdf(LKJCholesky(2, 1.0), L_subject) +
+            sum(logpdf.(half_normal,
+                params[Turing.@varname(groups[1].tau)])) +
+            sum(logpdf.(Normal(),
+                params[Turing.@varname(groups[1].z_flat)])) +
+            logpdf(Normal(), params[Turing.@varname(groups[2].log_scale)]) +
+            sum(logpdf.(Normal(), params[Turing.@varname(groups[2].z)]))
+    likelihood = sum(logpdf.(Normal.(mu, params[Turing.@varname(sigma)]), df.y))
+    returned = Turing.DynamicPPL.returned(backend.model, params)
+    @test Turing.logjoint(backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+    @test Turing.logprior(backend.model, params) ≈ prior atol=1e-12 rtol=1e-12
+    @test returned.groups[1].coefficients == subject_coefficients
+    @test returned.groups[2].values == item_values
+    @test returned.group_effect == group_effect
+    @test returned.mu == mu
+
+    replayed = reprocess(
+        backend,
+        (; df..., item=[20, 10, 10, 20], y=zeros(length(df.y)));
+        resample_groups=:item)
+    ext = Base.get_extension(BRM, :BayesianRegressionModelsTuringExt)
+    replay_parameters = ext._brm_resampled_parameters(replayed, params)
+    replay_names = Set(string(variable) for variable in keys(replay_parameters))
+    @test "groups[1].z_flat" in replay_names
+    @test "groups[2].z" ∉ replay_names
+    @test "groups[2].log_scale" in replay_names
+    predictive = turing_posterior_predictive(Xoshiro(113), replayed, params)
+    @test length(predictive.y) == length(df.y)
+end
+
+
 @testset "Turing extension — fitted numeric population transforms" begin
     df = (;
         x=[1.0, 2.0, 4.0],
@@ -1811,6 +1885,90 @@ end
           params.tau_precision_group_slopes
     predictive = turing_posterior_predictive(Xoshiro(112), replayed, params)
     @test length(predictive.y) == length(dist_data.x)
+end
+
+
+@testset "Turing extension — distributional multiple group blocks" begin
+    dist_data = (;
+        x=[-1.0, 0.5, 2.0, 0.25],
+        z=[0.0, 1.0, -0.5, 0.75],
+        subject=["b", "a", "b", "c"],
+        item=[2, 1, 1, 2],
+        batch=[20, 10, 10, 20],
+        trials=[4, 6, 8, 5],
+    )
+    negative_binomial = TuringBRMI((@brm begin
+        log(mu) ~ 1 + x + (1 | subject) + (1 | item)
+        log(phi) ~ 1 + z + (1 | batch)
+        y ~ BRM.NegativeBinomial2(mu, phi)
+    end)((; dist_data..., y=[0, 2, 5, 1])))
+    beta_binomial = TuringBRMI((@brm begin
+        logit(mean) ~ 1 + x + (1 | subject) + (1 | item)
+        log(precision) ~ 1 + z + (1 | batch)
+        y ~ BRM.BetaBinomial2(trials, mean, precision)
+    end)((; dist_data..., y=[1, 4, 5, 0])))
+
+    params = Dict(
+        Turing.@varname(beta_mean) => [0.1, 0.2],
+        Turing.@varname(beta_precision) => [-0.4, 0.15],
+        Turing.@varname(mean_groups[1].log_scale) => log(0.4),
+        Turing.@varname(mean_groups[1].z) => [-0.2, 0.4, 1.1],
+        Turing.@varname(mean_groups[2].log_scale) => log(0.7),
+        Turing.@varname(mean_groups[2].z) => [0.3, -0.5],
+        Turing.@varname(precision_groups[1].log_scale) => log(0.45),
+        Turing.@varname(precision_groups[1].z) => [0.5, -0.7],
+    )
+    mean_subject, mean_item = negative_binomial.plan.mean.random_effects
+    precision_batch = only(negative_binomial.plan.precision.random_effects)
+    subject_values = 0.4 .* params[Turing.@varname(mean_groups[1].z)]
+    item_values = 0.7 .* params[Turing.@varname(mean_groups[2].z)]
+    batch_values = 0.45 .* params[Turing.@varname(precision_groups[1].z)]
+    mean_group_effect = subject_values[mean_subject.indices] +
+                        item_values[mean_item.indices]
+    precision_group_effect = batch_values[precision_batch.indices]
+    linear_mean = negative_binomial.plan.mean.design.matrix *
+                  params[Turing.@varname(beta_mean)] + mean_group_effect
+    linear_precision = negative_binomial.plan.precision.design.matrix *
+                       params[Turing.@varname(beta_precision)] +
+                       precision_group_effect
+    prior = sum(logpdf.(Normal(), params[Turing.@varname(beta_mean)])) +
+            sum(logpdf.(Normal(), params[Turing.@varname(beta_precision)])) +
+            logpdf(Normal(),
+                params[Turing.@varname(mean_groups[1].log_scale)]) +
+            sum(logpdf.(Normal(),
+                params[Turing.@varname(mean_groups[1].z)])) +
+            logpdf(Normal(),
+                params[Turing.@varname(mean_groups[2].log_scale)]) +
+            sum(logpdf.(Normal(),
+                params[Turing.@varname(mean_groups[2].z)])) +
+            logpdf(Normal(),
+                params[Turing.@varname(precision_groups[1].log_scale)]) +
+            sum(logpdf.(Normal(),
+                params[Turing.@varname(precision_groups[1].z)]))
+
+    mu = exp.(linear_mean)
+    phi = exp.(linear_precision)
+    nb_lik = sum(logpdf.(BRM.NegativeBinomial2.(
+        mu, phi), negative_binomial.plan.response))
+    nb_returned = Turing.DynamicPPL.returned(negative_binomial.model, params)
+    @test Turing.logjoint(negative_binomial.model, params) ≈
+          prior + nb_lik atol=1e-12 rtol=1e-12
+    @test Turing.logprior(negative_binomial.model, params) ≈
+          prior atol=1e-12 rtol=1e-12
+    @test nb_returned.mean_group_effect == mean_group_effect
+    @test nb_returned.precision_group_effect == precision_group_effect
+
+    mean_prob = logistic.(linear_mean)
+    precision = exp.(linear_precision)
+    bb_lik = sum(logpdf.(BRM.BetaBinomial2.(
+        dist_data.trials, mean_prob, precision), beta_binomial.plan.response))
+    bb_returned = Turing.DynamicPPL.returned(beta_binomial.model, params)
+    @test Turing.logjoint(beta_binomial.model, params) ≈
+          prior + bb_lik atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(beta_binomial.model, params) ≈
+          bb_lik atol=1e-12 rtol=1e-12
+    @test bb_returned.mean == mean_prob
+    @test bb_returned.precision == precision
 end
 
 @testset "Turing extension — unsupported shapes fail loudly" begin
