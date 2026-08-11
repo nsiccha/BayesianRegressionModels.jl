@@ -2,6 +2,7 @@ import { defineConfig } from 'vitepress'
 import { tabsMarkdownPlugin } from 'vitepress-plugin-tabs'
 import footnote from "markdown-it-footnote";
 import path from 'path'
+import { stanLanguage } from './stan-language'
 
 function getBaseRepository(base: string): string {
   if (!base || base === '/') return '/';
@@ -79,6 +80,7 @@ export default defineConfig({
       light: "github-light",
       dark: "github-dark"
     },
+    languages: [stanLanguage],
   },
   vite: {
     define: {

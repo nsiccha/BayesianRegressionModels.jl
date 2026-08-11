@@ -40,8 +40,8 @@ distributional mean and precision predictor instead share one joint scale
 vector, LKJ factor, and group draw; each predictor consumes its own coefficient
 slice from that covariance block. Addressed `sd(...)` and `cor(...)`
 declarations reuse the same backend-neutral prior resolver as StanBlocks.
-Multi-membership remains fail-closed in Turing; the feature atlas keeps its real
-construction error beside the successful StanBlocks/Stan emission.
+Weighted multi-membership intercepts and correlated slopes are supported with
+strict all-source replay and resampling. Adaptive geometry remains fail-closed.
 
 Canonical link declarations are lowered once in BRM and reused by the Turing
 executor. Response modifiers likewise carry materialized bounds, interval
@@ -86,7 +86,7 @@ not sufficient.
 | Poisson log | **Supported** | Canonical linked declarations, data offsets, and admitted grouped predictors |
 | NegativeBinomial2 | **Supported subset** | Shared mean/precision population plans, independent multiple grouping blocks, and a joint cross-predictor `|ID|` covariance block |
 | BetaBinomial2 | **Supported subset** | Shared mean/precision population plans, independent multiple grouping blocks, and a joint cross-predictor `|ID|` covariance block |
-| Group effects | **Partial** | Plain intercepts, correlated and exact-zero-correlation slopes, multiple/crossed factors, distributional cross-predictor `|ID|` covariance, fitted transformed/categorical slopes, stratified `gr(by=)`, explicit centering, and `sd`/`cor` prior overrides; multi-membership and adaptive geometry remain pending |
+| Group effects | **Partial** | Plain intercepts, correlated and exact-zero-correlation slopes, multiple/crossed factors, distributional cross-predictor `|ID|` covariance, fitted transformed/categorical slopes, stratified `gr(by=)`, explicit centering, `sd`/`cor` prior overrides, and weighted multi-membership intercepts/correlated slopes with replay/resampling; adaptive geometry remains pending |
 | Response evidence | **Partial** | Truncated, censored, and interval-censored Normal/Poisson observations; wider modifiers remain pending |
 | Missing responses | **Supported subset** | `mi(y) ~ Normal(mu, sigma)` imputes missing rows from the same conditional family and keeps observed rows in the likelihood |
 | Multiple responses | **Supported subset** | Independent blocks are namespaced; exactly compatible shared predictors/group blocks are sampled once and reused, while partial or incompatible overlaps fail closed |
