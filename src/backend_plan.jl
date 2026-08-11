@@ -17,6 +17,65 @@ struct _BRMBackendContext{P<:BRMI,D<:AbstractDict,PP<:AbstractDict,TO<:AbstractD
     target_obs::TO
 end
 
+# Backend-neutral construction replay. Concrete backends consume the same
+# rebound BRMI rather than each maintaining a tree walker over formula values.
+function reprocess end
+
+_brm_df_has_column(df, key::Symbol) = hasproperty(df, key)
+function _brm_df_column(df, key::Symbol)
+    column = getproperty(Data(df), key)
+    data = parent(column)
+    data isa DataColumn || error(
+        "BRM replay: new data has no column `$key`")
+    parent(data)
+end
+
+_brm_rebind_value(x, _df) = x
+_brm_rebind_value(x::Tuple, df) =
+    map(value -> _brm_rebind_value(value, df), x)
+_brm_rebind_value(x::NamedTuple, df) = NamedTuple{keys(x)}(
+    map(value -> _brm_rebind_value(value, df), values(x)))
+_brm_rebind_value(x::NestedPredictorFormula, df) =
+    NestedPredictorFormula(_brm_rebind_value(parent(x), df))
+_brm_rebind_value(x::LikelihoodColumn, df) = LikelihoodColumn(
+    _brm_rebind_value(parent(x), df), _brm_rebind_value(rhs(x), df))
+function _brm_rebind_value(x::NamedColumn, df)
+    column_name = name(x)
+    payload = parent(x)
+    if payload isa DataColumn || payload isa MissingColumn
+        if _brm_df_has_column(df, column_name)
+            return NamedColumn(
+                column_name, DataColumn(_brm_df_column(df, column_name)))
+        end
+        payload isa DataColumn && error(
+            "BRM replay: new data has no column `$column_name`, which was " *
+            "data-backed in the fitted BRMI")
+        return NamedColumn(column_name, MissingColumn())
+    end
+    NamedColumn(column_name, _brm_rebind_value(payload, df))
+end
+function _brm_rebind_value(x::ExprColumn, df)
+    args = map(value -> _brm_rebind_value(value, df), getargs(x))
+    kwargs = getkwargs(x)
+    rebound_kwargs = NamedTuple{keys(kwargs)}(
+        map(value -> _brm_rebind_value(value, df), values(kwargs)))
+    ExprColumn(getf(x), args...; rebound_kwargs...)
+end
+function _brm_rebind_value(x::MultiMembershipTerm, df)
+    groups = map(
+        value -> _brm_rebind_value(value, df), getfield(x, :groups))
+    old_weights = getfield(x, :weights)
+    weights = isnothing(old_weights) ? nothing : map(
+        value -> _brm_rebind_value(value, df), old_weights)
+    MultiMembershipTerm(
+        groups...; weights, normalize=getfield(x, :normalize))
+end
+function _brm_rebind_brmi(brmi::BRMI, df)
+    operations = brmi.operations
+    BRMI(NamedTuple{keys(operations)}(
+        map(value -> _brm_rebind_value(value, df), values(operations))))
+end
+
 # Materialise a user data vector without silently deleting missing rows. A
 # likelihood decorator may deliberately keep its response out of this generic
 # data dict and model the missing values itself; that decision is made by the
@@ -136,6 +195,310 @@ function _brm_collect_target_obs(brmi::BRMI)
     target_obs
 end
 
+# ---- shared response composition -----------------------------------------
+
+"""
+    _BRMResponseModifierPlan
+
+Backend-neutral syntax and materialized bounds for one response wrapper. The
+`base` remains a formula distribution expression; concrete backends decide how
+to represent its density. Bounds are raw formula values in the syntax plan and
+scalars/vectors after materialization.
+"""
+struct _BRMResponseModifierPlan{B,L,U}
+    kind::Symbol
+    base::B
+    lower::L
+    upper::U
+end
+
+struct _BRMObservationWeightPlan{D,V<:AbstractVector}
+    kind::Symbol
+    distribution::D
+    source::Symbol
+    values::V
+end
+
+"""
+    _BRMMissingResponsePlan
+
+Backend-neutral materialization of `mi(y)`: the original partly-missing row
+axis, the observed and missing row indices, and the concrete observed values.
+Concrete backends decide how missing rows become latent variables and how the
+merged response is exposed.
+"""
+struct _BRMMissingResponsePlan{Y<:AbstractVector,O<:AbstractVector{Int},
+                               M<:AbstractVector{Int},V<:AbstractVector}
+    source::Symbol
+    values::Y
+    observed_indices::O
+    missing_indices::M
+    observed_values::V
+end
+
+function _brm_missing_response_plan(lhs; prefix="BRM backend lowering")
+    lhs isa ExprColumn && getf(lhs) === mi || return nothing
+    isempty(getkwargs(lhs)) || error(
+        "$prefix: `mi(response)` accepts no keywords")
+    args = getargs(lhs)
+    length(args) == 1 || error(
+        "$prefix: `mi(response)` expects exactly one argument")
+    inner = only(args)
+    inner isa NamedColumn || error(
+        "$prefix: `mi(...)` expects one named response column, got " *
+        "$(typeof(inner))")
+    backing = parent(inner)
+    backing isa DataColumn || error(
+        "$prefix: `mi($(name(inner)))` requires a raw data column with " *
+        "missing values, got backing $(typeof(backing))")
+    raw = parent(backing)
+    raw isa AbstractVector || error(
+        "$prefix: `mi($(name(inner)))` requires a vector response")
+    Missing <: eltype(raw) || error(
+        "$prefix: `mi($(name(inner)))` requires a column whose element type " *
+        "admits `missing` (got $(eltype(raw))); drop `mi(...)` when there are no NAs")
+    value_type = nonmissingtype(eltype(raw))
+    value_type <: Real || error(
+        "$prefix: `mi($(name(inner)))` currently requires a real-valued response; " *
+        "got non-missing element type $value_type")
+    observed_indices = findall(!ismissing, raw)
+    missing_indices = findall(ismissing, raw)
+    isempty(missing_indices) && error(
+        "$prefix: `mi($(name(inner)))` found no missing values; drop the wrapper")
+    observed_values = collect(value_type, raw[observed_indices])
+    _BRMMissingResponsePlan(
+        name(inner), collect(raw), observed_indices, missing_indices,
+        observed_values)
+end
+
+_brm_observation_weight_kind(f) =
+    f === aweights || f === AnalyticWeights ? :analytic :
+    f === fweights || f === FrequencyWeights ? :frequency :
+    f === weights || f === Weights ? :power :
+    f === pweights || f === ProbabilityWeights ? :probability :
+    f === uweights || f === UnitWeights ? :unit : nothing
+
+function _brm_prepare_observation_weight_values(
+        kind::Symbol, raw, nobs::Integer, target::Symbol, source::Symbol;
+        prefix="BRM backend lowering")
+    raw isa AbstractVector{<:Real} || error(
+        "$prefix: weight column `$source` for response `$target` must be a real " *
+        "vector, got $(typeof(raw))")
+    length(raw) == nobs || error(
+        "$prefix: weight column `$source` has length $(length(raw)) but response " *
+        "`$target` has length $nobs")
+    values = collect(Float64, raw)
+    all(isfinite, values) || error(
+        "$prefix: weight column `$source` for response `$target` contains " *
+        "non-finite values")
+    if kind === :analytic
+        all(>(0), values) || error(
+            "$prefix: analytic/precision weights for response `$target` must be " *
+            "strictly positive")
+    elseif kind === :frequency
+        all(x -> x >= 0 && isinteger(x), values) || error(
+            "$prefix: frequency weights for response `$target` must be " *
+            "nonnegative integer-valued counts")
+    elseif kind === :power
+        all(>=(0), values) || error(
+            "$prefix: power-likelihood weights for response `$target` must be " *
+            "nonnegative")
+    else
+        error("$prefix: internal unsupported observation-weight kind `$kind`")
+    end
+    values
+end
+
+function _brm_observation_weight_plan(rhs, target::Symbol,
+                                      response::AbstractVector;
+                                      prefix="BRM backend lowering")
+    rhs isa ExprColumn && getf(rhs) === weighted || return nothing
+    isempty(getkwargs(rhs)) || error(
+        "$prefix: `weighted(distribution, weights)` accepts no keywords")
+    args = getargs(rhs)
+    length(args) == 2 || error(
+        "$prefix: `weighted(distribution, weights)` expects exactly two arguments")
+    distribution, weight = args
+    distribution isa ExprColumn || error(
+        "$prefix: first argument of `weighted` for response `$target` must be a " *
+        "distribution call, got $(typeof(distribution))")
+    if !isempty(getkwargs(distribution))
+        getf(distribution) in (truncated, censored, interval_censored) || error(
+            "$prefix: weighted distribution `$target` does not currently support " *
+            "distribution constructor keywords")
+    end
+    weight isa ExprColumn || error(
+        "$prefix: second argument of `weighted` must be a StatsBase weight " *
+        "constructor, got $(typeof(weight))")
+    isempty(getkwargs(weight)) || error(
+        "$prefix: `weighted(..., $(getf(weight))(...))` does not accept weight " *
+        "constructor keywords")
+    kind = _brm_observation_weight_kind(getf(weight))
+    isnothing(kind) && error(
+        "$prefix: unsupported weight constructor `$(getf(weight))`; use " *
+        "`aweights`, `fweights`, or `weights`")
+    kind === :probability && error(
+        "$prefix: `ProbabilityWeights` sampling-weight semantics are not " *
+        "implemented; they are not interchangeable with likelihood weights")
+    kind === :unit && error(
+        "$prefix: omit `weighted(...)` for unit weights; write the base " *
+        "distribution directly")
+    weight_args = getargs(weight)
+    length(weight_args) == 1 || error(
+        "$prefix: `weighted` expects a one-column StatsBase weight constructor " *
+        "such as `aweights(k)`, `fweights(n)`, or `weights(w)`; got " *
+        "$(length(weight_args)) arguments for response `$target`")
+    source_column = only(weight_args)
+    source_column isa NamedColumn && parent(source_column) isa DataColumn || error(
+        "$prefix: weights for response `$target` must be built from one raw " *
+        "dataframe column, got $(typeof(source_column))")
+    source = name(source_column)
+    raw = parent(parent(source_column))
+    values = _brm_prepare_observation_weight_values(
+        kind, raw, length(response), target, source; prefix)
+    _BRMObservationWeightPlan(kind, distribution, source, values)
+end
+
+_brm_normalize_response_bound(::Nothing) = nothing
+_brm_normalize_response_bound(x::NamedColumn) =
+    _brm_is_nothing_column(x) ? nothing : x
+_brm_normalize_response_bound(x) = x
+
+function _brm_response_modifier_plan(wrapper, args, kwargs::NamedTuple;
+                                     prefix="BRM backend lowering")
+    kind = wrapper === truncated || wrapper === :truncated ? :truncated :
+           wrapper === censored || wrapper === :censored ? :censored :
+           wrapper === interval_censored || wrapper === :interval_censored ?
+               :interval_censored : nothing
+    isnothing(kind) && return nothing
+
+    if kind === :interval_censored
+        length(args) == 1 || error(
+            "$prefix: `interval_censored` expects one base distribution argument")
+        keys(kwargs) == (:upper,) || error(
+            "$prefix: `interval_censored` requires exactly the `upper` keyword; " *
+            "the response column is the interval lower endpoint")
+        base = only(args)
+        return _BRMResponseModifierPlan(
+            kind, base, nothing,
+            _brm_normalize_response_bound(kwargs.upper))
+    end
+
+    length(args) in (1, 3) || error(
+        "$prefix: `$kind` expects a base distribution and either keyword " *
+        "bounds or positional `(lower, upper)` bounds, got $(length(args)) arguments")
+    lower, upper = if length(args) == 3
+        isempty(kwargs) || error(
+            "$prefix: `$kind` cannot mix positional bounds with keyword bounds")
+        (_brm_normalize_response_bound(args[2]),
+         _brm_normalize_response_bound(args[3]))
+    else
+        unknown = setdiff(collect(keys(kwargs)), [:lower, :upper])
+        isempty(unknown) || error(
+            "$prefix: `$kind` accepts only `lower` and `upper` keywords, got $unknown")
+        (_brm_normalize_response_bound(get(kwargs, :lower, nothing)),
+         _brm_normalize_response_bound(get(kwargs, :upper, nothing)))
+    end
+    isnothing(lower) && isnothing(upper) && error(
+        "$prefix: `$kind` needs at least one non-`nothing` bound")
+    _BRMResponseModifierPlan(kind, first(args), lower, upper)
+end
+
+function _brm_response_modifier_plan(rhs;
+                                     prefix="BRM backend lowering")
+    rhs isa ExprColumn || return nothing
+    _brm_response_modifier_plan(
+        getf(rhs), getargs(rhs), getkwargs(rhs); prefix)
+end
+
+function _brm_materialize_response_bound(bound, data::AbstractDict, n::Integer,
+                                         label::Symbol;
+                                         prefix="BRM backend lowering")
+    isnothing(bound) && return nothing
+    raw = if bound isa NamedColumn && parent(bound) isa DataColumn
+        get(data, name(bound), parent(parent(bound)))
+    else
+        _brm_materialize_data_expression(bound)
+    end
+    raw isa Real || raw isa AbstractVector{<:Real} || error(
+        "$prefix: response $label bound must be a numeric scalar or a pure " *
+        "expression over raw numeric data columns")
+    raw isa Real && return raw
+    length(raw) == n || error(
+        "$prefix: response $label bound has $(length(raw)) rows; expected $n")
+    collect(raw)
+end
+
+_brm_response_bound_at(bound::Real, _i) = bound
+_brm_response_bound_at(bound::AbstractVector, i) = bound[i]
+
+function _brm_materialize_bounded_response(
+        spec::_BRMResponseModifierPlan, target::Symbol,
+        response::AbstractVector, data::AbstractDict;
+        support_kind::Symbol=:continuous,
+        prefix="BRM backend lowering")
+    spec.kind in (:truncated, :censored) || error(
+        "$prefix: internal response modifier `$(spec.kind)` is not a bounded " *
+        "response distribution")
+    n = length(response)
+    lower = _brm_materialize_response_bound(
+        spec.lower, data, n, :lower; prefix)
+    upper = _brm_materialize_response_bound(
+        spec.upper, data, n, :upper; prefix)
+    support_kind in (:continuous, :discrete) || error(
+        "$prefix: internal unsupported bounded-response support `$support_kind`")
+    if support_kind === :discrete
+        all(x -> x isa Integer && !(x isa Bool), response) || error(
+            "$prefix: `$(spec.kind)` discrete base family requires an integer response")
+        for (label, bound) in ((:lower, lower), (:upper, upper))
+            isnothing(bound) && continue
+            values = bound isa AbstractVector ? bound : (bound,)
+            all(x -> x isa Integer && !(x isa Bool), values) || error(
+                "$prefix: `$(spec.kind)` discrete $label bounds must be integers")
+        end
+    end
+    for i in eachindex(response)
+        lo = isnothing(lower) ? nothing : _brm_response_bound_at(lower, i)
+        hi = isnothing(upper) ? nothing : _brm_response_bound_at(upper, i)
+        (isnothing(lo) || isnothing(hi) || lo <= hi) || error(
+            "$prefix: `$(spec.kind)` lower bounds must not exceed upper bounds")
+        (isnothing(lo) || lo <= response[i]) &&
+        (isnothing(hi) || response[i] <= hi) || error(
+            "$prefix: `$(spec.kind)` response `$target` contains values outside its bounds")
+    end
+    _BRMResponseModifierPlan(spec.kind, spec.base, lower, upper)
+end
+
+function _brm_materialize_interval_response(
+        spec::_BRMResponseModifierPlan, target::Symbol,
+        response::AbstractVector, data::AbstractDict;
+        support_kind::Symbol=:continuous,
+        prefix="BRM backend lowering")
+    spec.kind === :interval_censored || error(
+        "$prefix: internal response modifier `$(spec.kind)` is not interval evidence")
+    n = length(response)
+    upper = _brm_materialize_response_bound(
+        spec.upper, data, n, :upper; prefix)
+    isnothing(upper) && error(
+        "$prefix: `interval_censored` requires an upper bound")
+    support_kind in (:continuous, :discrete) || error(
+        "$prefix: internal unsupported interval-response support `$support_kind`")
+    if support_kind === :discrete
+        all(x -> x isa Integer && !(x isa Bool), response) || error(
+            "$prefix: `interval_censored` discrete base family requires integer " *
+            "lower endpoints")
+        values = upper isa AbstractVector ? upper : (upper,)
+        all(x -> x isa Integer && !(x isa Bool), values) || error(
+            "$prefix: `interval_censored` discrete upper bounds must be integers")
+    end
+    all(eachindex(response)) do i
+        response[i] < _brm_response_bound_at(upper, i)
+    end || error(
+        "$prefix: `interval_censored` lower endpoints must be strictly below " *
+        "upper endpoints for response `$target`")
+    _BRMResponseModifierPlan(:interval_censored, spec.base, nothing, upper)
+end
+
 function _brm_backend_context(brmi::BRMI;
                               data::AbstractDict=Dict{Symbol,Any}())
     prepass = Dict{Symbol,Any}()
@@ -197,6 +560,196 @@ struct _BRMPopulationDesign{C<:Tuple,M<:AbstractMatrix,T<:Tuple,V<:AbstractVecto
     fixed::V
 end
 
+_brm_replay_expression(value::Number, _data) = value
+_brm_replay_expression(value::NamedColumn, data) = data[name(value)]
+function _brm_replay_expression(value::ExprColumn, data)
+    isempty(getkwargs(value)) || error(
+        "BRM replay: pure data expressions with keywords are unsupported")
+    broadcast(
+        getf(value),
+        map(argument -> _brm_replay_expression(argument, data),
+            getargs(value))...)
+end
+
+function _brm_replay_factor_column(column, data)
+    preprocess = column.preprocess
+    raw = data[column.source]
+    fitted_levels = collect(preprocess.const_.levels)
+    raw_values = raw isa CA.CategoricalVector ? let levels = CA.levels(raw)
+        [levels[code] for code in Int.(CA.levelcode.(raw))]
+    end : raw
+    lookup = Dict(level => index for (index, level) in pairs(fitted_levels))
+    unknown = unique([value for value in raw_values if !haskey(lookup, value)])
+    isempty(unknown) || error(
+        "BRM replay: categorical predictor `$(column.source)` contains unseen " *
+        "level(s) $(collect(unknown)); fitted levels are $fitted_levels")
+    indices = Int[lookup[value] for value in raw_values]
+    ref = preprocess.const_.ref
+    if ref != 1
+        indices = Int[index == ref ? 1 : index == 1 ? ref : index
+                      for index in indices]
+    end
+    Float64[index == preprocess.const_.level ? 1.0 : 0.0
+            for index in indices]
+end
+
+function _brm_replay_population_column(column, data, cache)
+    haskey(cache, column.label) && return cache[column.label]
+    preprocess = column.preprocess
+    values = if isnothing(column.source)
+        nothing
+    elseif isnothing(preprocess)
+        collect(Float64, data[column.source])
+    elseif preprocess.kind === :zscale || preprocess.kind === :standardize
+        collect(Float64, _brm_apply_zscale(
+            preprocess.const_, data[column.source]))
+    elseif preprocess.kind === :center
+        collect(Float64, _brm_apply_center(
+            preprocess.const_, data[column.source]))
+    elseif preprocess.kind === :protect
+        collect(Float64, _brm_replay_expression(preprocess.raw_ref, data))
+    elseif preprocess.kind === :population_factor_dummy
+        _brm_replay_factor_column(column, data)
+    elseif preprocess.kind === :interaction
+        for dependency in preprocess.dependencies
+            _brm_replay_population_column(dependency, data, cache)
+        end
+        left, right = preprocess.raw_ref
+        left_values = get(cache, left, get(data, left, nothing))
+        right_values = get(cache, right, get(data, right, nothing))
+        isnothing(left_values) && error(
+            "BRM replay: interaction input `$left` is unavailable")
+        isnothing(right_values) && error(
+            "BRM replay: interaction input `$right` is unavailable")
+        collect(Float64, left_values .* right_values)
+    else
+        error("BRM replay: unsupported population preprocessing kind " *
+              "`$(preprocess.kind)`")
+    end
+    isnothing(values) || (cache[column.label] = values)
+    values
+end
+
+function _brm_replay_population_design(
+        training::_BRMPopulationDesign, context::_BRMBackendContext)
+    data = context.data
+    haskey(data, training.row_source) || error(
+        "BRM replay: row-axis source `$(training.row_source)` is absent")
+    n = length(data[training.row_source])
+    cache = Dict{Symbol,Vector{Float64}}()
+    columns = map(training.columns) do column
+        values = _brm_replay_population_column(column, data, cache)
+        isnothing(values) && (values = ones(Float64, n))
+        length(values) == n || error(
+            "BRM replay: population column `$(column.label)` has " *
+            "$(length(values)) rows; expected $n")
+        _BRMPopulationColumn(
+            column.label, column.effect_addresses, column.effect_block,
+            column.source, values, column.preprocess)
+    end
+    fixed_terms = map(training.fixed_terms) do term
+        values = collect(
+            Float64, _brm_replay_expression(term.preprocess.raw_ref, data))
+        length(values) == n || error(
+            "BRM replay: fixed term `$(term.label)` has $(length(values)) " *
+            "rows; expected $n")
+        _BRMPopulationFixedTerm(
+            term.label, term.source, values, term.preprocess)
+    end
+    fixed = zeros(Float64, n)
+    foreach(term -> fixed .+= term.values, fixed_terms)
+    matrix = hcat((column.values for column in columns)...)
+    _BRMPopulationDesign(
+        training.target, Tuple(columns), matrix, training.row_source,
+        Tuple(fixed_terms), fixed)
+end
+
+struct _BRMRandomEffectPlan{L<:AbstractVector,I<:AbstractVector{Int},
+                            S<:AbstractVector,
+                            C<:Tuple,M<:AbstractMatrix,
+                            SF<:AbstractVector{Int},SR<:AbstractVector{Float64}}
+    predictor::Symbol
+    id::Union{Nothing,Symbol}
+    group::Symbol
+    by::Union{Nothing,Symbol}
+    levels::L
+    strata::S
+    indices::I
+    stratum_indices::Vector{Int}
+    group_strata::Vector{Int}
+    columns::C
+    matrix::M
+    intercept_only::Bool
+    zero_correlation::Bool
+    centered::Bool
+    sd_family::SF
+    sd_rate::SR
+    lkj_eta::Float64
+end
+
+function _brm_replay_random_effect_plan(
+        training::_BRMRandomEffectPlan, context::_BRMBackendContext)
+    raw_groups = context.data[training.group]
+    lookup = Dict(level => index for (index, level) in pairs(training.levels))
+    unknown = unique(
+        [level for level in raw_groups if !haskey(lookup, level)])
+    isempty(unknown) || error(
+        "BRM replay: grouping factor `$(training.group)` contains unseen " *
+        "level(s) $(collect(unknown)); fitted levels are " *
+        "$(collect(training.levels))")
+    indices = Int[lookup[level] for level in raw_groups]
+    stratum_indices = Int[]
+    group_strata = Int[]
+    if !isnothing(training.by)
+        raw_strata = context.data[training.by]
+        length(raw_strata) == length(raw_groups) || error(
+            "BRM replay: grouping factor `$(training.group)` and stratum " *
+            "column `$(training.by)` have different row counts")
+        stratum_lookup = Dict(
+            level => index for (index, level) in pairs(training.strata))
+        unknown_strata = unique(
+            [level for level in raw_strata if !haskey(stratum_lookup, level)])
+        isempty(unknown_strata) || error(
+            "BRM replay: stratum `$(training.by)` contains unseen level(s) " *
+            "$(collect(unknown_strata)); fitted strata are " *
+            "$(collect(training.strata))")
+        stratum_indices = Int[stratum_lookup[level] for level in raw_strata]
+        observed_mapping = _brm_group_strata(
+            indices, stratum_indices, length(training.levels),
+            training.group, training.by)
+        for group_index in eachindex(observed_mapping)
+            observed_mapping[group_index] == 0 && continue
+            observed_mapping[group_index] == training.group_strata[group_index] ||
+                error("BRM replay: group `$(training.group)` level " *
+                      "$(training.levels[group_index]) changed stratum in " *
+                      "`$(training.by)`")
+        end
+        group_strata = training.group_strata
+    end
+    n = length(indices)
+    cache = Dict{Symbol,Vector{Float64}}()
+    columns = map(training.columns) do column
+        values = _brm_replay_population_column(column, context.data, cache)
+        isnothing(values) && (values = ones(Float64, n))
+        length(values) == n || error(
+            "BRM replay: random-effect column `$(column.label)` and grouping " *
+            "factor `$(training.group)` have different row counts")
+        _BRMPopulationColumn(
+            column.label, column.effect_addresses, column.effect_block,
+            column.source, values, column.preprocess)
+    end
+    matrix = hcat((column.values for column in columns)...)
+    _BRMRandomEffectPlan(
+        training.predictor, training.id, training.group, training.by,
+        training.levels, training.strata, indices, stratum_indices,
+        group_strata, Tuple(columns), matrix, training.intercept_only,
+        training.zero_correlation, training.centered, training.sd_family,
+        training.sd_rate, training.lkj_eta)
+end
+
+_brm_replay_random_effect_plans(training::Tuple, context::_BRMBackendContext) =
+    Tuple(_brm_replay_random_effect_plan(block, context) for block in training)
+
 _brm_additive_terms(rhs) = begin
     terms = Any[]
     _brm_collect_additive_terms!(terms, rhs)
@@ -209,6 +762,187 @@ function _brm_collect_additive_terms!(terms, x::Integer)
     nothing
 end
 _brm_collect_additive_terms!(terms, x) = push!(terms, x)
+
+_brm_is_grouped_term(term::ExprColumn) =
+    getf(term) === (|) || getf(term) === doublepipe
+_brm_is_grouped_term(_term) = false
+
+_brm_group_id(::Nothing) = nothing
+_brm_group_id(value::Symbol) = value
+_brm_group_id(value::AbstractString) = Symbol(value)
+_brm_group_id(value) = error(
+    "BRM backend lowering: `gr(...; id=...)` expects a Symbol or String; " *
+    "got $(typeof(value))")
+
+function _brm_random_effect_group(raw)
+    if raw isa NamedColumn && parent(raw) isa DataColumn
+        return (; group=raw, by=nothing, id=nothing)
+    end
+    raw isa ExprColumn && getf(raw) === gr || error(
+        "BRM backend lowering: random-effect group must be one raw data " *
+        "column or `gr(group; by=..., id=...)`; got `$(repr(raw))`")
+    args = getargs(raw)
+    length(args) == 1 || error(
+        "BRM backend lowering: `gr(...)` expects exactly one positional " *
+        "group; got $(length(args))")
+    group = only(args)
+    group isa NamedColumn && parent(group) isa DataColumn || error(
+        "BRM backend lowering: `gr(...)` group must be one raw data column; " *
+        "got `$(repr(group))`")
+    kwargs = getkwargs(raw)
+    unknown = setdiff(Set(keys(kwargs)), Set((:by, :id)))
+    isempty(unknown) || error(
+        "BRM backend lowering: `gr(...)` has unsupported keyword(s) " *
+        "$(sort!(collect(unknown)))")
+    by = get(kwargs, :by, nothing)
+    if !isnothing(by)
+        by isa NamedColumn && parent(by) isa DataColumn || error(
+            "BRM backend lowering: `gr(...; by=...)` must name one raw data " *
+            "column; got `$(repr(by))`")
+    end
+    (; group, by, id=_brm_group_id(get(kwargs, :id, nothing)))
+end
+
+function _brm_group_strata(group_indices, stratum_indices, n_groups,
+                           group::Symbol, by::Symbol)
+    length(group_indices) == length(stratum_indices) || error(
+        "BRM backend lowering: group `$group` and stratum `$by` have " *
+        "different row counts")
+    mapping = zeros(Int, n_groups)
+    for (group_index, stratum_index) in zip(group_indices, stratum_indices)
+        if mapping[group_index] == 0
+            mapping[group_index] = stratum_index
+        elseif mapping[group_index] != stratum_index
+            error("BRM backend lowering: gr($group, by=$by): group level " *
+                  "$group_index straddles multiple strata " *
+                  "($(mapping[group_index]) vs $stratum_index)")
+        end
+    end
+    mapping
+end
+
+function _brm_simple_random_effect_plans(
+        brmi::BRMI, target::Symbol, context::_BRMBackendContext;
+        required::Bool=false)
+    op = linear_predictor_op(brmi, target)
+    isnothing(op) && return ()
+    _, rhs = getargs(op, 2)
+    grouped = filter(_brm_is_grouped_term, _brm_additive_terms(rhs))
+    plans = _BRMRandomEffectPlan[]
+    seen = Set{Tuple{Union{Nothing,Symbol},Symbol,Union{Nothing,Symbol}}}()
+    for term in grouped
+        args = getargs(term)
+        if length(args) ∉ (2, 3)
+            required && error(
+                "BRM backend lowering: grouped term `$(repr(term))` does not " *
+                "have the expected `(effects | group)` or " *
+                "`(effects | ID | group)` shape")
+            return nothing
+        end
+        zero_correlation = getf(term) === doublepipe
+        inner = first(args)
+        explicit_id = length(args) == 3 ? args[2] : nothing
+        group_raw = last(args)
+        if !isnothing(explicit_id) && !(explicit_id isa Symbol)
+            required && error(
+                "BRM backend lowering: shared random-effect ID must be a " *
+                "symbol; got `$(repr(explicit_id))`")
+            return nothing
+        end
+        descriptor = try
+            _brm_random_effect_group(group_raw)
+        catch exception
+            required && rethrow(exception)
+            return nothing
+        end
+        if !isnothing(explicit_id) && !isnothing(descriptor.id)
+            required && error(
+                "BRM backend lowering: `(effects | ID | group)` cannot also " *
+                "carry `gr(...; id=...)`")
+            return nothing
+        end
+        id = isnothing(explicit_id) ? descriptor.id : explicit_id
+        if zero_correlation && !isnothing(id)
+            required && error(
+                "BRM backend lowering: shared `(effects | ID | group)` " *
+                "blocks are correlated; `||` cannot carry an ID")
+            return nothing
+        end
+        group = name(descriptor.group)
+        by = isnothing(descriptor.by) ? nothing : name(descriptor.by)
+        zero_correlation && !isnothing(by) && error(
+            "BRM backend lowering: zero-correlation `||` is not supported " *
+            "for stratified `gr($group, by=$by)` blocks")
+        key = (id, group, by)
+        key in seen && error(
+            "BRM backend lowering: predictor `$target` repeats random-effect " *
+            "block $(isnothing(id) ? "" : "ID `$id`, ")group `$group`")
+        push!(seen, key)
+        raw = context.data[group]
+        raw isa AbstractVector || error(
+            "BRM backend lowering: grouping column `$group` must be a vector")
+        levels = collect(_brm_fit_levels(raw))
+        n_levels, indices = _brm_level_index(raw)
+        length(levels) == n_levels || error(
+            "BRM backend lowering: inconsistent fitted levels for group `$group`")
+        strata = Any[]
+        stratum_indices = Int[]
+        group_strata = Int[]
+        if !isnothing(by)
+            raw_strata = context.data[by]
+            raw_strata isa AbstractVector || error(
+                "BRM backend lowering: stratum column `$by` must be a vector")
+            length(raw_strata) == length(raw) || error(
+                "BRM backend lowering: group `$group` and stratum `$by` have " *
+                "different row counts")
+            strata = collect(_brm_fit_levels(raw_strata))
+            n_strata, raw_stratum_indices = _brm_level_index(raw_strata)
+            length(strata) == n_strata || error(
+                "BRM backend lowering: inconsistent fitted levels for " *
+                "stratum `$by`")
+            stratum_indices = collect(Int, raw_stratum_indices)
+            group_strata = _brm_group_strata(
+                indices, stratum_indices, n_levels, group, by)
+        end
+        raw_columns = Any[]
+        for inner_term in _brm_additive_terms(inner)
+            columns = _brm_random_effect_columns(inner_term)
+            if isnothing(columns) || any(column ->
+                    !isnothing(column.source) &&
+                    !(column.values isa AbstractVector{<:Real}), columns)
+                required && error(
+                    "BRM backend lowering: random-slope designs support the " *
+                    "backend-neutral population column surface (continuous, " *
+                    "categorical, transformed, and interaction columns); " *
+                    "got `$(repr(inner_term))` in `$(repr(term))`")
+                return nothing
+            end
+            append!(raw_columns, columns)
+        end
+        isempty(raw_columns) && error(
+            "BRM backend lowering: random-effect term `$(repr(term))` has no columns")
+        n = length(indices)
+        columns = map(raw_columns) do column
+            values = isnothing(column.source) ? ones(Float64, n) : column.values
+            length(values) == n || error(
+                "BRM backend lowering: random-effect predictor `$target` and " *
+                "group `$group` have different row counts")
+            _BRMPopulationColumn(
+                column.label, column.effect_addresses, column.effect_block,
+                column.source, values, column.preprocess)
+        end
+        matrix = hcat((column.values for column in columns)...)
+        intercept_only = length(columns) == 1 &&
+                         only(columns).label === :Intercept
+        n_terms = length(columns)
+        push!(plans, _BRMRandomEffectPlan(
+            target, id, group, by, levels, strata, indices,
+            stratum_indices, group_strata, Tuple(columns), matrix,
+            intercept_only, zero_correlation, false, zeros(Int, n_terms),
+            ones(Float64, n_terms), 1.0))
+    end
+    Tuple(plans)
+end
 
 function _brm_population_column(term::Integer)
     term == 1 || return nothing
@@ -269,6 +1003,35 @@ function _brm_materialize_data_expression(x::ExprColumn)
     broadcast(getf(x), args...)
 end
 _brm_materialize_data_expression(_x) = nothing
+
+function _brm_materialize_count_argument(argument, n::Integer, role::AbstractString;
+                                         prefix="BRM backend lowering")
+    raw = _brm_materialize_data_expression(argument)
+    isnothing(raw) && error(
+        "$prefix: $role must be a nonnegative integer constant or a pure " *
+        "expression over raw numeric data columns")
+    values = raw isa AbstractVector ? raw : fill(raw, n)
+    length(values) == n || error(
+        "$prefix: $role has $(length(values)) rows; expected $n")
+    all(x -> x isa Integer && !(x isa Bool) && x >= 0, values) || error(
+        "$prefix: $role must contain only nonnegative integers")
+    Int.(values)
+end
+
+function _brm_validate_binomial_response(response::AbstractVector, trials,
+                                         target::Symbol;
+                                         prefix="BRM backend lowering")
+    length(response) == length(trials) || error(
+        "$prefix: Binomial response `$target` has $(length(response)) rows; " *
+        "expected $(length(trials))")
+    all(eachindex(response)) do i
+        y = response[i]
+        y isa Integer && !(y isa Bool) && 0 <= y <= trials[i]
+    end || error(
+        "$prefix: Binomial response `$target` must contain integer counts " *
+        "between zero and its row's trial count")
+    Int.(response)
+end
 
 _brm_wrapper_col_name(prefix::Symbol, inner::NamedColumn) =
     Symbol(prefix, :_, name(inner))
@@ -382,25 +1145,60 @@ function _brm_population_columns(term::ExprColumn{typeof(factor)})
     backing = parent(inner)
     backing isa DataColumn || return nothing
     raw = parent(backing)
-    raw isa AbstractVector && eltype(raw) <: Integer || return nothing
+    raw isa AbstractVector || return nothing
+    raw_values = if raw isa CA.CategoricalVector
+        levels = CA.levels(raw)
+        eltype(levels) <: Integer || return nothing
+        [levels[code] for code in Int.(CA.levelcode.(raw))]
+    else
+        eltype(raw) <: Integer || return nothing
+        raw
+    end
     kwargs = getkwargs(term)
     all(k -> k === :ref, keys(kwargs)) || return nothing
     ref_raw = get(kwargs, :ref, 1)
     ref_raw isa Integer || return nothing
-    1 <= ref_raw <= maximum(raw) || error(
+    1 <= ref_raw <= maximum(raw_values) || error(
         "BRM backend lowering: `factor($(name(inner)); ref=$ref_raw)` ref " *
-        "out of range (max level $(maximum(raw)))")
+        "out of range (max level $(maximum(raw_values)))")
 
     source = name(inner)
     block = ref_raw == 1 ? source : Symbol(source, :__ref_, ref_raw)
-    recoded = ref_raw == 1 ? raw :
-        Int[value == ref_raw ? 1 : value == 1 ? ref_raw : value for value in raw]
+    recoded = ref_raw == 1 ? raw_values :
+        Int[value == ref_raw ? 1 : value == 1 ? ref_raw : value
+            for value in raw_values]
     addresses = ref_raw == 1 ? (source,) : (block, source)
     _brm_categorical_population_columns(
         recoded, source, block, addresses; ref=ref_raw)
 end
 _brm_population_columns(term) = let column = _brm_population_column(term)
     isnothing(column) ? nothing : (column,)
+end
+
+function _brm_random_categorical_column(column)
+    _brm_population_column_is_categorical(column) || return column
+    level = column.preprocess.const_.level
+    label = Symbol(column.source, :_dummy_, level)
+    _BRMPopulationColumn(
+        label, (label,), column.effect_block, column.source, column.values,
+        column.preprocess)
+end
+
+function _brm_random_effect_columns(term::ExprColumn{typeof(&)})
+    args = getargs(term)
+    length(args) == 2 || return nothing
+    left = _brm_random_effect_columns(args[1])
+    right = _brm_random_effect_columns(args[2])
+    (isnothing(left) || isnothing(right) ||
+     any(c -> isnothing(c.source), left) ||
+     any(c -> isnothing(c.source), right)) && return nothing
+    Tuple(_brm_interaction_population_column(l, r)
+          for l in left for r in right)
+end
+function _brm_random_effect_columns(term)
+    columns = _brm_population_columns(term)
+    isnothing(columns) && return nothing
+    Tuple(_brm_random_categorical_column(column) for column in columns)
 end
 
 _brm_population_column_is_categorical(column) =
@@ -450,6 +1248,8 @@ an additive intercept, continuous raw-data columns, pure numeric data
 expressions, fitted `zscale`/`standardize`/`center` columns, pairwise
 continuous/categorical interactions, treatment contrasts for integer or
 `CategoricalVector` columns, and pure data-derived fixed `offset(...)` terms.
+Plain grouped terms are separated into `_BRMRandomEffectPlan` values rather
+than being mistaken for population columns.
 Returns `nothing` for a term requiring richer lowering unless `required=true`,
 in which case it fails loudly. SBBRMI and Turing consume the shared
 coefficient-bearing representation; Turing also consumes the materialized
@@ -463,6 +1263,9 @@ function _brm_simple_population_design(target::Symbol, rhs,
     raw_columns = Any[]
     fixed_terms = _BRMPopulationFixedTerm[]
     for term in _brm_additive_terms(rhs)
+        # Grouped terms have their own backend-neutral geometry. They are not
+        # coefficient-bearing population columns and are planned separately.
+        _brm_is_grouped_term(term) && continue
         fixed = _brm_population_fixed_term(term)
         if !isnothing(fixed)
             push!(fixed_terms, fixed)
@@ -531,6 +1334,48 @@ function _brm_simple_population_design(target::Symbol, rhs,
     end
     _BRMPopulationDesign(
         target, Tuple(columns), matrix, row_source, Tuple(fixed_terms), fixed)
+end
+
+struct _BRMPopulationPredictor{F,D<:_BRMPopulationDesign}
+    name::Symbol
+    link_lhs_fn::F
+    emitted_name::Symbol
+    design::D
+end
+
+function _brm_replay_population_predictor(
+        training::_BRMPopulationPredictor, context::_BRMBackendContext)
+    design = _brm_replay_population_design(training.design, context)
+    _BRMPopulationPredictor(
+        training.name, training.link_lhs_fn, training.emitted_name, design)
+end
+
+_brm_lp_emitted_name(name::Symbol, link_lhs_fn) =
+    link_lhs_fn === identity ? name : Symbol(nameof(link_lhs_fn), :_, name)
+
+function _brm_simple_population_predictor(brmi::BRMI, target::Symbol,
+                                          context::_BRMBackendContext;
+                                          required::Bool=false)
+    op = linear_predictor_op(brmi, target)
+    if isnothing(op) || getf(op) !== (~)
+        required && error(
+            "BRM backend lowering: predictor `$target` has no population formula")
+        return nothing
+    end
+    lhs, rhs = getargs(op, 2)
+    peeled = _peel_lp_lhs(lhs)
+    if isnothing(peeled) || last(peeled) !== target
+        required && error(
+            "BRM backend lowering: predictor `$target` has an unsupported LHS")
+        return nothing
+    end
+    link_lhs_fn, name = peeled
+    design = _brm_simple_population_design(
+        name, rhs, context.data, get(context.target_obs, name, nothing);
+        required)
+    isnothing(design) && return nothing
+    _BRMPopulationPredictor(
+        name, link_lhs_fn, _brm_lp_emitted_name(name, link_lhs_fn), design)
 end
 
 # ---- shared population-effect prior semantics -----------------------------
@@ -604,19 +1449,173 @@ function _brm_numeric_constant(x::ExprColumn)
 end
 _brm_numeric_constant(_x) = nothing
 
+# ---- shared random-effect prior resolution ---------------------------------
+
+function _brm_ranef_sd_rate(spec, spelling::AbstractString;
+                            prefix="BRM backend lowering")
+    T = _as_distribution_type(spec.family)
+    (!isnothing(T) && T <: Exponential) || error(
+        "$prefix: `$spelling` currently supports `Exponential(scale)`; got " *
+        "`$(spec.family)`. An unmentioned scale keeps the backend default prior.")
+    isempty(spec.keywords) || error(
+        "$prefix: `$spelling ~ Exponential(...)` does not accept keywords")
+    length(spec.arguments) in (0, 1) || error(
+        "$prefix: `$spelling ~ Exponential` expects zero or one Julia scale argument")
+    scale = isempty(spec.arguments) ? 1.0 :
+            _brm_numeric_constant(only(spec.arguments))
+    isnothing(scale) && error(
+        "$prefix: `$spelling` scale must be a numeric formula constant")
+    isfinite(scale) && scale > 0 || error(
+        "$prefix: `$spelling` scale must be finite and strictly positive, got $scale")
+    1.0 / scale
+end
+
+function _brm_ranef_lkj_eta(spec, n_terms::Int;
+                            prefix="BRM backend lowering")
+    T = _as_distribution_type(spec.family)
+    (!isnothing(T) && T <: LKJCholesky) || error(
+        "$prefix: `cor(:, ID)` expects `LKJCholesky(K, eta)`; got `$(spec.family)`")
+    isempty(spec.keywords) || error(
+        "$prefix: `cor(:, ID) ~ LKJCholesky(...)` does not accept keywords")
+    length(spec.arguments) == 2 || error(
+        "$prefix: `LKJCholesky` correlation priors require dimension K and eta")
+    k = _brm_numeric_constant(spec.arguments[1])
+    eta = _brm_numeric_constant(spec.arguments[2])
+    isnothing(k) && error(
+        "$prefix: `LKJCholesky(K, eta)` dimension K must be an integer formula constant")
+    isinteger(k) || error(
+        "$prefix: `LKJCholesky(K, eta)` dimension K must be an integer formula constant")
+    Int(k) == n_terms || error(
+        "$prefix: `LKJCholesky($(Int(k)), ...)` does not match the addressed " *
+        "random-effect block width $n_terms")
+    isnothing(eta) && error(
+        "$prefix: LKJ eta must be a numeric formula constant")
+    isfinite(eta) && eta > 0 || error(
+        "$prefix: LKJ eta must be finite and strictly positive, got $eta")
+    eta
+end
+
+function _brm_ranef_margin_claim(spec, margins;
+                                 prefix="BRM backend lowering")
+    spelling = "sd($(isnothing(spec.predictor) ? ":" : spec.predictor), " *
+               "$(spec.id)" *
+               (isnothing(spec.coefficient) ? "" : ", $(spec.coefficient)") * ")"
+    if isnothing(spec.predictor) && isnothing(spec.coefficient)
+        return nothing
+    elseif isnothing(spec.predictor)
+        hits = findall(m -> m.coefficient === spec.coefficient, margins)
+        isempty(hits) && error(
+            "$prefix: `$spelling` matches no random-effect margin")
+        return (hits, 1)
+    elseif isnothing(spec.coefficient)
+        hits = findall(m -> m.predictor === spec.predictor, margins)
+        isempty(hits) && error(
+            "$prefix: `$spelling` matches no random-effect margin")
+        length(hits) == 1 || error(
+            "$prefix: `$spelling` is ambiguous because that predictor " *
+            "contributes $(length(hits)) margins; name a coefficient")
+        return (hits, 1)
+    end
+    hits = findall(m -> m.predictor === spec.predictor &&
+                        m.coefficient === spec.coefficient, margins)
+    isempty(hits) && error(
+        "$prefix: `$spelling` matches no random-effect margin")
+    length(hits) == 1 || error(
+        "$prefix: `$spelling` matches $(length(hits)) margins and is ambiguous")
+    (hits, 2)
+end
+
 """
-    _brm_simple_population_effect_overrides(brmi, design)
+    _brm_resolve_ranef_effect_overrides(specs, bucket_margins)
+
+Resolve public `sd(...)` and `cor(...)` statements against backend-supplied
+ordered `(predictor, coefficient)` margin axes. Both SBBRMI and direct Turing
+use this precedence and validation engine; only their executable distributions
+differ.
+"""
+function _brm_resolve_ranef_effect_overrides(
+        specs, bucket_margins; prefix="BRM backend lowering")
+    isempty(specs) && return Dict{Any,NamedTuple}()
+    states = Dict{Any,Dict{Symbol,Any}}()
+    for spec in specs
+        matches = Any[key for key in keys(bucket_margins)
+                      if first(key) === spec.id]
+        isempty(matches) && error(
+            "$prefix: `$(spec.class)(:, $(spec.id))` matches no shared " *
+            "`|$(spec.id)|` random-effect block")
+        length(matches) == 1 || error(
+            "$prefix: public `|$(spec.id)|` addresses $(length(matches)) blocks " *
+            "with different grouping factors; use a unique ID")
+        key = only(matches)
+        margins = bucket_margins[key]
+        state = get!(states, key) do
+            Dict{Symbol,Any}(
+                :margins => margins,
+                :sd_default => nothing,
+                :sd_overrides => Dict{Int,Tuple{Float64,Int}}(),
+                :lkj_eta => nothing)
+        end
+        if spec.class === :cor
+            state[:lkj_eta] === nothing || error(
+                "$prefix: duplicate correlation prior for `cor(:, $(spec.id))`")
+            state[:lkj_eta] = _brm_ranef_lkj_eta(
+                spec, length(margins); prefix)
+            continue
+        end
+        rate = _brm_ranef_sd_rate(spec, "sd(:, $(spec.id))"; prefix)
+        claim = _brm_ranef_margin_claim(spec, margins; prefix)
+        if isnothing(claim)
+            state[:sd_default] === nothing || error(
+                "$prefix: duplicate block SD prior for `sd(:, $(spec.id))`")
+            state[:sd_default] = rate
+            continue
+        end
+        indices, rank = claim
+        for index in indices
+            held = get(state[:sd_overrides], index, nothing)
+            if isnothing(held) || rank > held[2]
+                state[:sd_overrides][index] = (rate, rank)
+            elseif rank == held[2]
+                error("$prefix: two SD prior statements are equally specific " *
+                      "and both set margin $(margins[index]) of `|$(spec.id)|`")
+            end
+        end
+    end
+    out = Dict{Any,NamedTuple}()
+    for (key, state) in states
+        margins = state[:margins]
+        default_rate = state[:sd_default]
+        sd_family = fill(isnothing(default_rate) ? 0 : 1, length(margins))
+        sd_rate = fill(isnothing(default_rate) ? 1.0 : default_rate,
+                       length(margins))
+        for (index, (rate, _)) in state[:sd_overrides]
+            sd_family[index] = 1
+            sd_rate[index] = rate
+        end
+        out[key] = (; sd_family, sd_rate,
+                    lkj_eta=isnothing(state[:lkj_eta]) ? 1.0 : state[:lkj_eta],
+                    margins)
+    end
+    out
+end
+
+"""
+    _brm_simple_population_effect_overrides(
+        brmi, design; available_predictors=(design.target,))
 
 Resolve formula-level `effect(...) ~ Normal(...)` statements against a narrow
 shared population design. The output is aligned 1:1 with `design.columns` and
 contains the winning parsed RHS (or `nothing` for the default Normal(0, 1)).
 An `effect(lp, categorical_column)` address fans out over that column's K-1
 treatment contrasts, matching SBBRMI's one-prior-per-contrast-block contract.
-Richer multi-predictor resolution remains additive.
+For a distributional likelihood, `available_predictors` names its complete
+predictor set: a prior targeting a peer is ignored by this component, while a
+prior targeting no member still fails loudly.
 """
 function _brm_simple_population_effect_overrides(brmi::BRMI,
                                                  design::_BRMPopulationDesign;
-                                                 prefix="BRM backend lowering")
+                                                 prefix="BRM backend lowering",
+                                                 available_predictors=(design.target,))
     specs = effect_priors(brmi)
     isempty(specs) && return nothing
 
@@ -633,9 +1632,12 @@ function _brm_simple_population_effect_overrides(brmi::BRMI,
     for spec in specs
         _brm_validate_population_effect_spec(spec; prefix)
         all_predictors = spec.predictor === _EFFECT_COLON
-        (all_predictors || spec.predictor === design.target) || error(
-            "$prefix: `$(_brm_effect_spelling(spec))` names no linear " *
-            "predictor in this backend plan. Available predictor: $(design.target).")
+        if !all_predictors && spec.predictor !== design.target
+            spec.predictor in available_predictors && continue
+            error("$prefix: `$(_brm_effect_spelling(spec))` names no linear " *
+                  "predictor in this backend plan. Available predictors: " *
+                  "$(join(available_predictors, ", ")).")
+        end
 
         indices = if spec.coefficient === _EFFECT_COLON
             eachindex(labels)
@@ -710,6 +1712,24 @@ function _brm_population_effect_operation_keys(brmi::BRMI)
         first(address) in _NON_EFFECT_CLASSES && continue
         getf(rhs_e) === r2d2 && continue
         push!(out, key)
+    end
+    out
+end
+
+function _brm_ranef_effect_operation_keys(brmi::BRMI)
+    out = Set{Symbol}()
+    for (key, op_nc) in pairs(brmi.operations)
+        op = _named_op(op_nc)
+        isnothing(op) && continue
+        getf(op) === (~) || continue
+        lhs, rhs = getargs(op, 2)
+        lhs_e = _as_expr_column(lhs)
+        rhs_e = _as_expr_column(rhs)
+        (isnothing(lhs_e) || isnothing(rhs_e) || getf(lhs_e) !== effect) &&
+            continue
+        address = getargs(lhs_e)
+        isempty(address) && continue
+        first(address) in (:sd, :cor) && push!(out, key)
     end
     out
 end

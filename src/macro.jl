@@ -218,6 +218,32 @@ backend; this marker is never called directly.
 function weighted end
 
 """
+    interval_censored(base; upper)
+
+Formula-only RHS wrapper for genuine interval evidence. The observed response
+column supplies each interval's lower endpoint and `upper` supplies its upper
+endpoint:
+
+```julia
+y_lower ~ interval_censored(Normal(mu, sigma); upper=y_upper)
+```
+
+Each row contributes the base family's probability over `(y_lower, y_upper]`,
+exactly `CDF(y_upper) - CDF(y_lower)`. The lower endpoint is open for discrete
+families too; unlike inclusive truncation it receives no predecessor shift.
+Posterior prediction remains on the uncoarsened base-response scale. This is
+separate from Distributions.jl's `censored`, which is the distribution of
+`clamp(X, lower, upper)` and therefore has atoms at its thresholds.
+
+The marker is intentionally formula-local: unlike `truncated` and `censored`,
+there is no existing Distributions.jl value with these per-row evidence
+semantics for BRM to construct outside `@brm`. It lives in the backend-neutral
+formula layer so weak-dependency backends can inspect it without loading
+StanBlocks.
+"""
+function interval_censored end
+
+"""
     gr(group; by=strata)
 
 brms-style stratified grouping marker. `(1 | gr(subj, by=diagnosis))`
