@@ -31,20 +31,23 @@ representation, then lowers into a backend-specific executor:
 - [`SBBRMI`](@ref) — StanBlocks → Stan source, fit via Pathfinder or full
   warmup HMC (`WarmupHMC.adaptive_warmup_mcmc`).
 
-The [backend lowering explorer](backend-lowering.md) puts the BRM declaration,
-intermediate representation, and executable backend views next to each other.
+The [BRM feature atlas](feature-atlas.md) gives every executable example the
+same build-generated four-way view: BRM authoring, the emitted StanBlocks model,
+generated Stan, and the selected Turing model.
 
-```julia
-using BayesianRegressionModels, DataFrames
-
-brmi = @brm df begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+intro_model = (@brm begin
     y ~ Normal(loc, err)
     loc ~ 1 + age + sex + (1 + age | subj)
     err ~ Exponential(1)
-end
-
-sbbrmi = SBBRMI(brmi)
-src    = stan_code(sbbrmi)
+end)((;
+    age=[21.0, 38.0, 55.0, 29.0, 47.0, 61.0],
+    sex=[1, 2, 1, 2, 1, 2],
+    subj=[1, 1, 2, 2, 3, 3],
+    y=[0.2, 1.1, -0.4, 0.7, 1.4, 1.0],
+))
+""", :intro_model; title="BRM regression model")
 ```
 
 ## Coming from brms
@@ -71,25 +74,32 @@ reach brms for:
 Distributional regression needs no special form: give the parameter its own
 formula, and apply the link yourself where you want one.
 
-```julia
-@brm df begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+distributional = (@brm begin
     y        ~ Normal(mu, sigma)
     mu       ~ 1 + age
     log(sigma) ~ 1 + age          # explicit link, addressed as `sigma`
-end
+end)((; age=[21.0, 38.0, 55.0, 29.0], y=[0.2, 1.1, -0.4, 0.7]))
+""", :distributional; title="Distributional Gaussian regression")
 ```
 
 Nonlinear models need no `nl = TRUE` and no `nlf()`. A declaration is a named
 value, so composing declarations into an arbitrary Julia expression is the
 whole feature:
 
-```julia
-@brm df begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+nonlinear = (@brm begin
     a     ~ 1 + (1 | g)           # ordinary linear predictors …
     b     ~ 1
     y     ~ Normal(a * exp(-b * x), sigma)   # … composed nonlinearly
     sigma ~ Exponential(1)
-end
+end)((;
+    g=[1, 1, 2, 2], x=[0.0, 0.5, 1.0, 1.5],
+    y=[1.0, 0.8, 0.5, 0.3],
+))
+""", :nonlinear; title="Nonlinear predictor composition")
 ```
 
 That lowers to `y ~ normal(a .* exp(-b .* x), sigma)` in the generated Stan,
@@ -104,23 +114,10 @@ every column shares one row axis. `@brm` takes any column collection — a
 `NamedTuple` is fine — whose columns may live on *different* row axes, and
 different linear predictors in one model may be defined on different axes:
 
-```julia
-@brm schedule begin
-    sigma  ~ Exponential(1)
-    log_F  ~ 1 + factor(vessel) + mo(diet)   # one row per dose EVENT
-    log_CL ~ 1 + weight + (1 | pk | subject) # one row per SUBJECT
-
-    pred ~ kernel(t_obs, y,
-                  ragged(dose_amount, dose_subject),
-                  ragged(log_F,       dose_subject),
-                  log_CL) do ts, yy, doses, lF, lCL
-        effective_dose = sum(doses .* exp(lF))
-        mu = effective_dose .* exp(-exp(lCL) .* ts)
-        yy ~ normal(mu, sigma)
-        mu
-    end
-end
-```
+The [complete PLATE blueprint](plate-building-blocks.md) explains the
+multi-axis kernel design. It is an architecture proposal rather than a
+runnable model example, so it is kept separate from the build-generated model
+atlas.
 
 [`ragged`](@ref)`(x, group)` attaches a flat secondary frame to the grouping
 axis, and [`kernel`](@ref) broadcasts a do-block *cell* — arbitrary Julia,
@@ -155,12 +152,18 @@ Population coefficients use independent standard-normal priors by default.
 Override selected coefficients with separate `effect(...)` statements; the
 coefficient names are exactly those returned by `popcoefnames`:
 
-```julia
-pk = @brm df begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+pk = (@brm begin
     log_ka ~ 1 + weight + (1 | pk | subject)
     effect(log_ka, Intercept) ~ Normal(log(1 / 8), 0.8)
     effect(log_ka, weight) ~ Normal(0, 0.1)
-end
+    y ~ Normal(log_ka, 1.0)
+end)((;
+    weight=[55.0, 65.0, 75.0, 85.0],
+    subject=[1, 1, 2, 2], y=[-2.1, -1.9, -1.8, -1.7],
+))
+""", :pk; title="Population effect priors")
 ```
 
 Both slots are mandatory, and `:` is the wildcard for either.
@@ -184,12 +187,18 @@ Those contrasts also default to `std_normal()`, and the same `effect(...)`
 address changes them — keyed by the **column** name, not the emitted
 `cat_<column>` parameter name:
 
-```julia
-m = @brm df begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+categorical_prior = (@brm begin
+    sigma ~ Exponential(1)
     mu ~ 1 + factor(g) + x
     effect(mu, g) ~ Normal(0.0, 0.5)   # ⇒ cat_g_beta ~ normal(0.0, 0.5);
     y ~ Normal(mu, sigma)
-end
+end)((;
+    g=[1, 2, 3, 1, 2, 3], x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+    y=[-2.4, -2.2, -2.0, -1.8, -1.7, -1.5],
+))
+""", :categorical_prior; title="Categorical effect prior")
 ```
 
 One shared `(location, scale)` covers every contrast in the block; per-level
@@ -209,8 +218,9 @@ scale, `mo(c)`'s Dirichlet increments, `me(x, sd)`'s latent true covariate, a
 Gaussian process's length scale and amplitude. They are addressed by naming the
 term itself in the target slot, under the same head-position grammar:
 
-```julia
-m = @brm df begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+term_priors_example = (@brm begin
     y ~ Normal(mu, 1.)
     mu ~ 1 + s(age) + mo(dose) + me(w_obs, 0.3) + hsgp(conc; k=5)
 
@@ -219,7 +229,12 @@ m = @brm df begin
     latent(:, me(w_obs))        ~ Normal(0, 5)       # latent true covariate
     length_scale(:, hsgp(conc)) ~ Uniform(0.84, 2)   # GP length scale
     sd(:, hsgp(conc))           ~ Normal(0, 0.5)     # GP marginal amplitude
-end
+end)((;
+    age=collect(20.0:29.0), dose=repeat(1:5; inner=2),
+    w_obs=collect(1.0:10.0), conc=collect(range(-2, 2; length=10)),
+    y=collect(range(-1, 1; length=10)),
+))
+""", :term_priors_example; title="Term-internal priors")
 ```
 
 The term is spelled the way the formula spells it, minus numeric and keyword

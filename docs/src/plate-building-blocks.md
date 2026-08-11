@@ -223,18 +223,11 @@ Most of these do **not** require new user-facing formula syntax. Existing BRM
 terms can emit the generic cells. The important genuinely new extension is a
 user-supplied group-local kernel:
 
-```julia
-@brm df begin
-    sigma  ~ Exponential(1)
-    log_CL ~ 1 + weight + (1 | p | subject)
-    log_V  ~ 1 +          (1 | p | subject)
-    pred ~ kernel(time, dose, dv, log_CL, log_V) do ts, d, yy, lCL, lV
-        mu = <prediction from exp(lCL), exp(lV) over ts, d>
-        yy ~ normal(mu, sigma)
-        mu
-    end
-end
-```
+The public form is an ordinary BRM declaration containing subject-level
+predictors and a group-local kernel. The pseudo-code that originally occupied
+this spot was removed because it contained a non-executable prediction
+placeholder; executable BRM examples belong in the build-generated
+[feature atlas](feature-atlas.md), not in this architecture blueprint.
 
 **Current syntax:** the public spelling has been decided and shipped:
 per-subject quantities
@@ -265,24 +258,11 @@ to, and the cell receives `x` as the ragged per-subject vector that grouping
 implies. It is a general operation on axes; nothing about it is specific to what
 `x` is:
 
-```julia
-@brm df begin
-    sigma  ~ Exponential(1)
-    log_F  ~ 1 + vessel + mo(diet) + hsgp(log_dose)   # rows = dose events
-    log_CL ~ 1 + weight + (1 | p | subject)           # rows = subjects
-
-    pred ~ kernel(t_obs, dv,
-                  ragged(dose_time, dose_subject),    # flat column
-                  ragged(dose_amount, dose_subject),  # flat column
-                  ragged(log_F, dose_subject),        # linear predictor
-                  log_CL) do ts, yy, dts, doses, lF, lCL
-        effective_dose = doses .* exp(lF)
-        mu = <prediction from effective_dose over dts, ts, exp(lCL)>
-        yy ~ normal(mu, sigma)
-        mu
-    end
-end
-```
+The event-axis form adds `ragged(dose_time, dose_subject)`,
+`ragged(dose_amount, dose_subject)`, and `ragged(log_F, dose_subject)` arguments
+to that kernel. It remains a design blueprint until the placeholder prediction
+is replaced by an executable scientific function; it is therefore not rendered
+as a misleading backend comparison.
 
 `x` may therefore be either a linear predictor declared in the same `@brm` block
 or a raw flat data column. Only the REALIZATION differs, and the difference is

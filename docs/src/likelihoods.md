@@ -81,8 +81,9 @@ diagnostics silently mean something else.
 BRM preserves the standard Distributions.jl RHS composition for mathematical
 truncation and threshold censoring:
 
-```julia
-model = @brm begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+bounded_evidence = (@brm begin
     mu ~ 1 + x
     log(sigma) ~ 1
 
@@ -92,7 +93,14 @@ model = @brm begin
     # Genuine interval evidence: y_lower stores the open lower endpoint and
     # y_upper stores the closed upper endpoint.
     y_lower ~ interval_censored(Normal(mu, sigma); upper=y_upper)
-end
+end)((;
+    x=[-1.0, 0.0, 1.0],
+    y_truncated=[0.2, 0.8, 1.4],
+    y_clamped=[0.25, 0.9, 1.8],
+    y_lower=[-0.4, 0.1, 0.8],
+    y_upper=[-0.1, 0.4, 1.2],
+))
+""", :bounded_evidence; title="Truncated, censored, and interval evidence")
 ```
 
 These are three different likelihood contracts:
@@ -132,15 +140,17 @@ token spellings and is intentionally incompatible.
 
 `CategoricalLogit` accepts an explicit nested `@brm(...)` predictor formula:
 
-```julia
-data = (;
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+categorical_data = (;
     x = [-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
     y = ["b", "a", "c", "b", "c", "a"],
 )
 
-categorical_model = @brm data begin
+categorical_model = @brm categorical_data begin
     y ~ CategoricalLogit(@brm(1 + x))
 end
+""", :categorical_model; title="Nested categorical-logit formula")
 ```
 
 For an outcome with ``K`` levels, BRM expands the marked formula to ``K-1``
@@ -152,12 +162,18 @@ the way to select a reference level deliberately.
 
 For example, a three-level outcome above is equivalent in model structure to:
 
-```julia
-explicit_model = @brm data begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+explicit_data = (;
+    x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+    y=["b", "a", "c", "b", "c", "a"],
+)
+explicit_model = @brm explicit_data begin
     y_nested_arg1_class2 ~ 1 + x
     y_nested_arg1_class3 ~ 1 + x
     y ~ CategoricalLogit(y_nested_arg1_class2, y_nested_arg1_class3)
 end
+""", :explicit_model; title="Explicit categorical-logit predictors")
 ```
 
 The generated names are deterministic implementation names; use the explicit
@@ -171,10 +187,13 @@ one family-argument position while surrounding expressions retain their usual
 meaning. For example, a distributional Normal model can make both predictors
 concise while keeping the positive scale link explicit:
 
-```julia
-distributional_model = @brm data begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+distributional_data = (; x=[-1.0, 0.0, 1.0], y=[-0.2, 0.3, 1.1])
+distributional_model = @brm distributional_data begin
     y ~ Normal(@brm(1 + x), exp(@brm(1)))
 end
+""", :distributional_model; title="Nested distributional predictors")
 ```
 
 This introduces distinct scalar predictors for location and log-scale, then
@@ -193,11 +212,14 @@ defaults implicitly.
 BRM treats the ordinal probability construction and inverse link as separate
 typed choices. A cumulative probit model is:
 
-```julia
-ordinal_model = @brm data begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+ordinal_data = (; x=[-1.0, -0.5, 0.0, 0.5, 1.0], y=[1, 1, 2, 3, 3])
+ordinal_model = @brm ordinal_data begin
     eta ~ 0 + x
     y ~ Ordinal(Cumulative(), ProbitLink(), eta)
 end
+""", :ordinal_model; title="Ordinal cumulative-probit model")
 ```
 
 The accepted structures are `Cumulative()` and `StoppingRatio()`. Each composes
@@ -229,13 +251,19 @@ The thresholds already supply the model location, so the composed surface
 requires an intercept-free common predictor (`eta ~ 0 + ...`). A positive
 discrimination parameter is explicit:
 
-```julia
-ordinal_disc = @brm data begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+ordinal_disc_data = (;
+    x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+    group=[1, 2, 1, 2, 1, 2], y=[1, 1, 2, 2, 3, 3],
+)
+ordinal_disc = @brm ordinal_disc_data begin
     eta ~ 0 + x
     log(disc) ~ 0 + group
     y ~ Ordinal(Cumulative(), ProbitLink(), eta;
                 discrimination=disc)
 end
+""", :ordinal_disc; title="Ordinal discrimination model")
 ```
 
 `discrimination` defaults to one. Literal or data-supplied values are checked
@@ -245,12 +273,18 @@ positive-support prior or a link such as `log(disc) ~ ...`.
 Stopping-ratio models may add non-proportional effects with a tuple of raw
 numeric predictors:
 
-```julia
-sequential = @brm data begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+sequential_data = (;
+    period=[1, 2, 3, 1, 2, 3], carry=[0, 0, 1, 0, 1, 1],
+    treat=[1, 2, 1, 2, 1, 2], y=[1, 1, 2, 2, 3, 3],
+)
+sequential = @brm sequential_data begin
     eta ~ 0 + period + carry
     y ~ Ordinal(StoppingRatio(), CloglogLink(), eta;
                 per_threshold=(treat,))
 end
+""", :sequential; title="Sequential ordinal model")
 ```
 
 BRM estimates one coefficient per predictor and non-terminal stage, so here
@@ -286,22 +320,19 @@ The StanBlocks backend accepts `Distributions.Laplace` as an ordinary
 likelihood. For example, a robust regression for the conditional median can be
 written as:
 
-```julia
-using BayesianRegressionModels
-using Distributions: Laplace
-
-data = (;
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+laplace_data = (;
     x = [-1.0, -0.5, 0.0, 0.5, 1.0],
     y = [-1.1, -0.2, 0.1, 0.6, 1.4],
 )
 
-median_model = @brm data begin
+median_model = @brm laplace_data begin
     median_y ~ 1 + x
     log(laplace_scale) ~ 1
     y ~ Laplace(median_y, laplace_scale)
 end
-
-stan = stan_code(SBBRMI(median_model))
+""", :median_model; title="Median regression with Laplace")
 ```
 
 This lowers to Stan's native
@@ -351,12 +382,18 @@ Thus `cdf(SkewDoubleExponential(mu, sigma, tau), mu) == tau`, and
 `SkewDoubleExponential(mu, sigma, 0.5)` is exactly `Laplace(mu, sigma)`.
 There is no hidden brms-scale conversion on this primary Julia surface.
 
-```julia
-quantile_model = @brm data begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+quantile_data = (;
+    x=[-1.0, -0.5, 0.0, 0.5, 1.0],
+    y=[-1.1, -0.2, 0.1, 0.6, 1.4],
+)
+quantile_model = @brm quantile_data begin
     q25_y ~ 1 + x
     log(native_scale) ~ 1
     y ~ SkewDoubleExponential(q25_y, native_scale, 0.25)
 end
+""", :quantile_model; title="Non-median quantile regression")
 ```
 
 The brms/check-loss scale ``s`` translates explicitly as
@@ -381,15 +418,18 @@ use the same translation.
 BRM exposes two deliberately different von-Mises likelihoods. Use
 Distributions.jl's `VonMises` when its exact Julia contract is intended:
 
-```julia
-using BayesianRegressionModels
-using Distributions: VonMises
-
-exact_model = @brm data begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+von_mises_data = (;
+    x=[-1.0, -0.5, 0.0, 0.5, 1.0],
+    direction=[-0.8, -0.2, 0.1, 0.5, 0.9],
+)
+exact_model = @brm von_mises_data begin
     mu ~ 1 + x
     log(kappa) ~ 1
     direction ~ VonMises(mu, kappa)
 end
+""", :exact_model; title="Moving-support von Mises")
 ```
 
 This preserves the constructor order `(mu, kappa)`, the shorthand
@@ -403,12 +443,18 @@ fixed principal interval.
 For conventional circular regression on a fixed interval, use the distinct
 BRM distribution `CircularVonMises`:
 
-```julia
-circular_model = @brm data begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+circular_data = (;
+    x=[-1.0, -0.5, 0.0, 0.5, 1.0],
+    direction=[-0.8, -0.2, 0.1, 0.5, 0.9],
+)
+circular_model = @brm circular_data begin
     mu ~ 1 + x
     log(kappa) ~ 1
     direction ~ CircularVonMises(mu, kappa; interval=(-pi, pi))
 end
+""", :circular_model; title="Fixed-interval circular regression")
 ```
 
 `interval` is a compile-time pair of finite numbers with length `2pi`; it
@@ -432,12 +478,17 @@ syntax takes a **rate**: the brms prior `gamma(2, 0.01)` is spelled
 Observation weights live in the `@brm` model beside the observation
 distribution:
 
-```julia
-model = @brm begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+weighted_model = (@brm begin
     y ~ weighted(Normal(mu, sigma), aweights(replicate_k))
     mu ~ 1 + x
     log(sigma) ~ 1
-end
+end)((;
+    x=[-1.0, 0.0, 1.0], y=[-0.2, 0.3, 1.1],
+    replicate_k=[1.0, 2.0, 4.0],
+))
+""", :weighted_model; title="Analytic observation weights")
 ```
 
 The StatsBase constructor determines the statistical meaning:

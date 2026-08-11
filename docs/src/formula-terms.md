@@ -85,13 +85,18 @@ coefficient one. It never allocates a `beta_pop` column. The argument may be a
 raw-data expression, as in an exposure offset, or an already-declared sampled
 scalar:
 
-```julia
-brmi = @brm df begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+offset_model = (@brm begin
     log_ka_pop ~ Normal(-2.08, 1.0)
     sigma ~ Exponential(1.0)
     eta_ka ~ offset(log_ka_pop) + (1 | p | subject)
     concentration ~ Normal(exp(eta_ka), sigma)
-end
+end)((;
+    subject=[1, 1, 2, 2],
+    concentration=[0.2, 0.4, 0.7, 0.5],
+))
+""", :offset_model; title="Sampled-value offset")
 ```
 
 Use [`protect`](@ref) for literal data transformations whose resulting column
@@ -106,19 +111,15 @@ coefficient to one. Offsets are population-level terms and are rejected inside
 [`s`](@ref) adds a penalized one-dimensional thin-plate regression spline to a
 linear predictor. It is available only in the `SBBRMI` StanBlocks backend.
 
-```julia
-using BayesianRegressionModels, Distributions
-
-x = collect(range(-2, 2; length=50))
-df = (; x, y=sin.(x))
-
-brmi = @brm df begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+x_smooth = collect(range(-2, 2; length=50))
+smooth_model = (@brm begin
     y ~ Normal(mu, sigma)
     mu ~ s(x)
     sigma ~ Exponential(1)
-end
-
-sb = SBBRMI(brmi)
+end)((; x=x_smooth, y=sin.(x_smooth)))
+""", :smooth_model; title="Penalized smooth")
 ```
 
 The supported public call has exactly one numeric predictor and no keyword
@@ -152,13 +153,19 @@ one-for-one syntax translation: `s(x; k=...)`, `s(x; knots=...)`, `bs(...)`, and
 predictor. Its public defaults follow the brms/mgcv `t2` catalogue surface,
 with Julia tuples for per-margin options:
 
-```julia
-brmi = @brm df begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+t2_model = (@brm begin
     loc ~ 1 + t2(area, yearc;
                  k=(5, 5), basis=(:cr, :cr), full=false)
     rent ~ Normal(loc, sigma)
     sigma ~ Exponential(1)
-end
+end)((;
+    area=repeat(collect(1.0:5.0); inner=5),
+    yearc=repeat(collect(-2.0:2.0); outer=5),
+    rent=collect(range(0.1, 2.5; length=25)),
+))
+""", :t2_model; title="Tensor-product smooth")
 ```
 
 Both predictors must be finite numeric columns with at least the corresponding
@@ -197,8 +204,9 @@ uses:
 <quantity>(<linear predictor | :>, <term>[, <component>]) ~ <distribution>
 ```
 
-```julia
-@brm df begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+term_prior_model = (@brm begin
     y ~ Normal(mu, sigma)
     mu ~ 1 + s(age) + t2(x, z) + mo(dose) + me(w_obs, 0.3) + hsgp(conc; k=5)
     sigma ~ Exponential(1)
@@ -209,7 +217,16 @@ uses:
     latent(mu, me(w_obs))       ~ Normal(0, 5)       # latent true covariate
     length_scale(:, hsgp(conc)) ~ Uniform(0.84, 2)   # GP length scale
     sd(:, hsgp(conc))           ~ Normal(0, 0.5)     # GP marginal amplitude
-end
+end)((;
+    age=collect(20.0:44.0),
+    x=repeat(collect(1.0:5.0); inner=5),
+    z=repeat(collect(-2.0:2.0); outer=5),
+    dose=repeat(1:5; inner=5),
+    w_obs=collect(range(1, 4; length=25)),
+    conc=collect(range(-2, 2; length=25)),
+    y=collect(range(-1, 1; length=25)),
+))
+""", :term_prior_model; title="Term-internal priors")
 ```
 
 | head | term | parameter | default |
@@ -342,10 +359,9 @@ formula block — addressed with [`effect`](@ref), never with a per-column
 `effect(lp, coef) ~ Normal(...)` — and is implemented only by the `SBBRMI`
 StanBlocks backend.
 
-```julia
-using BayesianRegressionModels, Distributions
-
-brmi = @brm df begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+r2d2_model = (@brm begin
     log_CL ~ 1 + wt + age + (1 | p | subject)
     log_V  ~ 1 + wt + (1 | p | subject)
 
@@ -353,7 +369,12 @@ brmi = @brm df begin
     effect(log_V, :)  ~ r2d2(R2=Beta(2, 3), tau_bsv=0.25)
 
     conc ~ Normal(exp(log_CL - log_V) * time, 1)
-end
+end)((;
+    wt=[55.0, 65.0, 75.0, 85.0], age=[21.0, 38.0, 55.0, 29.0],
+    subject=[1, 1, 2, 2], time=[0.5, 1.0, 1.5, 2.0],
+    conc=[0.2, 0.4, 0.3, 0.1],
+))
+""", :r2d2_model; title="R2D2 population and group decomposition")
 ```
 
 `effect(lp, :)` addresses every population coefficient of `lp` at once, and
@@ -430,13 +451,15 @@ All of these fail loudly rather than silently sampling something else:
 [`Horseshoe`](@ref) attaches a scalar Carvalho–Polson–Scott shrinkage
 hierarchy to an explicitly named coefficient:
 
-```julia
-brmi = @brm df begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+horseshoe_model = (@brm begin
     beta_sparse ~ Horseshoe(local_scale=0.5, global_scale=0.1)
     sigma ~ Exponential(1)
     mu ~ 0 + beta_sparse * x
     y ~ Normal(mu, sigma)
-end
+end)((; x=[-1.0, 0.5, 2.0], y=[0.2, 1.1, -0.4]))
+""", :horseshoe_model; title="Scalar horseshoe prior")
 ```
 
 The emitted non-centered hierarchy is
@@ -473,21 +496,10 @@ predictor. Like every other scalar-parameter prior declaration it is addressable
 by name anywhere later in the formula block, `kernel(...)` cells included. It is
 implemented only by the `SBBRMI` StanBlocks backend.
 
-```julia
-using BayesianRegressionModels, Distributions
-
-brmi = @brm df begin
-    sigma ~ Exponential(1)
-    diet_share ~ Dirichlet(3, 1.0)
-    log_CL ~ 1 + (1 | p | subject)
-
-    pred ~ kernel(t, dose, diet, dv, log_CL) do ts, d, di, yy, lCL
-        mu = d * diet_share[di] * exp(-exp(lCL) * ts)
-        yy ~ normal(mu, sigma)
-        mu
-    end
-end
-```
+The complete kernel form belongs to the
+[PLATE architecture blueprint](plate-building-blocks.md). That page is explicit
+about which snippets are proposals; it does not present them as executable
+backend examples.
 
 The inciting shape is a per-**event** multiplier: `diet` scales dose
 bioavailability inside the cell, so what the model needs is a `K`-simplex
@@ -495,14 +507,10 @@ parameter indexed by an ordinal level — not a per-observation design column.
 
 ### What it emits
 
-For `diet_share ~ Dirichlet(3, 1.0)`:
-
-```stan
-data        { int diet_share_alpha_n;
-              vector[diet_share_alpha_n] diet_share_alpha; }   // [1.0, 1.0, 1.0]
-parameters  { simplex[diet_share_alpha_n] diet_share; }
-model       { diet_share ~ dirichlet(diet_share_alpha); }
-```
+For `diet_share ~ Dirichlet(3, 1.0)`, the generated Stan declares the
+concentration vector as data, the parameter as `simplex[3]`, and the model
+statement as `diet_share ~ dirichlet(diet_share_alpha)`. Complete emissions are
+shown only through build-generated comparisons rather than copied Stan fences.
 
 The concentration is registered as **data** under `<name>_alpha`, which is what
 sizes the simplex; the name is reserved, so a collision is rejected rather than

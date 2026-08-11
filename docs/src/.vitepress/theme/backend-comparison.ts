@@ -46,6 +46,23 @@ function labelsFor(root: HTMLElement, panes: HTMLElement[]) {
   )
 }
 
+function semanticIdsFor(root: HTMLElement, panes: HTMLElement[]) {
+  const declared = (root.dataset.paneIds || '')
+    .split('|')
+    .map((id) => id.trim())
+  const used = new Set<string>()
+
+  return panes.map((pane, index) => {
+    const requested = pane.dataset.backendPane || declared[index] || `view-${index + 1}`
+    let id = requested.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-')
+    if (!id) id = `view-${index + 1}`
+    if (used.has(id)) id = `${id}-${index + 1}`
+    used.add(id)
+    pane.dataset.backendPane = id
+    return id
+  })
+}
+
 function enhanceComparison(root: HTMLElement) {
   if (root.dataset.backendComparisonReady === '1') return
 
@@ -54,6 +71,7 @@ function enhanceComparison(root: HTMLElement) {
 
   root.dataset.backendComparisonReady = '1'
   const labels = labelsFor(root, panes)
+  const semanticIds = semanticIdsFor(root, panes)
   const title = root.dataset.comparisonTitle || labels.join(' · ')
   const id = `backend-comparison-${++comparisonCounter}`
   let active = 0
@@ -108,7 +126,7 @@ function enhanceComparison(root: HTMLElement) {
     selectPane(next, true)
   })
 
-  const expand = makeButton('Compare all', 'backend-comparison__expand')
+  const expand = makeButton('Compare…', 'backend-comparison__expand')
   expand.setAttribute('aria-haspopup', 'dialog')
   toolbar.append(tablist, expand)
   root.prepend(toolbar)
@@ -123,17 +141,24 @@ function enhanceComparison(root: HTMLElement) {
   header.className = 'backend-comparison__dialog-header'
   const heading = document.createElement('strong')
   heading.textContent = title
+  const selector = document.createElement('fieldset')
+  selector.className = 'backend-comparison__selector'
+  const selectorLegend = document.createElement('legend')
+  selectorLegend.textContent = 'Visible levels'
+  selector.appendChild(selectorLegend)
   const close = makeButton('Close', 'backend-comparison__close')
   close.setAttribute('aria-label', 'Close side-by-side comparison')
   close.addEventListener('click', () => dialog.close())
-  header.append(heading, close)
+  header.append(heading, selector, close)
 
   const columns = document.createElement('div')
   columns.className = 'backend-comparison__columns'
-  columns.style.setProperty('--backend-pane-count', String(panes.length))
+  const modalColumns: HTMLElement[] = []
+  const selectors: HTMLInputElement[] = []
   panes.forEach((pane, index) => {
     const column = document.createElement('section')
     column.className = 'backend-comparison__column'
+    column.dataset.backendPane = semanticIds[index]
     const columnHeading = document.createElement('h3')
     columnHeading.textContent = labels[index]
     const content = pane.cloneNode(true) as HTMLElement
@@ -146,7 +171,45 @@ function enhanceComparison(root: HTMLElement) {
     content.querySelectorAll('.copy').forEach((button) => button.remove())
     column.append(columnHeading, content)
     columns.appendChild(column)
+    modalColumns.push(column)
+
+    const option = document.createElement('label')
+    option.className = 'backend-comparison__selector-option'
+    const checkbox = document.createElement('input')
+    checkbox.type = 'checkbox'
+    checkbox.checked = true
+    checkbox.value = semanticIds[index]
+    checkbox.setAttribute('aria-controls', `${id}-${semanticIds[index]}-column`)
+    column.id = `${id}-${semanticIds[index]}-column`
+    const optionLabel = document.createElement('span')
+    optionLabel.textContent = labels[index]
+    option.append(checkbox, optionLabel)
+    selector.appendChild(option)
+    selectors.push(checkbox)
   })
+
+  const updateVisibleLevels = () => {
+    const selected = new Set(
+      selectors.filter((checkbox) => checkbox.checked).map((checkbox) => checkbox.value),
+    )
+    columns.style.setProperty('--backend-pane-count', String(selected.size))
+    let firstVisible = true
+    modalColumns.forEach((column) => {
+      const visible = selected.has(column.dataset.backendPane || '')
+      column.hidden = !visible
+      column.classList.toggle('is-first-visible', visible && firstVisible)
+      if (visible) firstVisible = false
+    })
+    selectors.forEach((checkbox) => {
+      checkbox.disabled = checkbox.checked && selected.size <= 2
+      checkbox.closest('label')?.classList.toggle('is-selected', checkbox.checked)
+    })
+    expand.textContent = `Compare ${selected.size} levels`
+  }
+  selectors.forEach((checkbox) => {
+    checkbox.addEventListener('change', updateVisibleLevels)
+  })
+  updateVisibleLevels()
 
   frame.append(header, columns)
   dialog.appendChild(frame)
@@ -154,7 +217,7 @@ function enhanceComparison(root: HTMLElement) {
 
   expand.addEventListener('click', () => {
     dialog.showModal()
-    close.focus()
+    selectors[0].focus()
   })
   dialog.addEventListener('click', (event) => {
     if (event.target === dialog) dialog.close()
@@ -164,7 +227,41 @@ function enhanceComparison(root: HTMLElement) {
   selectPane(0)
 }
 
+function materializeGeneratedComparisons(root: ParentNode) {
+  const sentinels = Array.from(
+    root.querySelectorAll<HTMLElement>('div.language-brm-comparison'),
+  )
+  if (root instanceof HTMLElement && root.matches('div.language-brm-comparison')) {
+    sentinels.unshift(root)
+  }
+
+  sentinels.forEach((sentinel) => {
+    const panes: HTMLElement[] = []
+    let cursor = sentinel.nextElementSibling
+    while (cursor && panes.length < 4) {
+      if (!(cursor instanceof HTMLElement) || !cursor.matches('div[class*="language-"]')) {
+        break
+      }
+      panes.push(cursor)
+      cursor = cursor.nextElementSibling
+    }
+    if (panes.length !== 4) return
+
+    const title = sentinel.textContent?.trim() || 'BRM model comparison'
+    const comparison = document.createElement('div')
+    comparison.className = 'backend-comparison'
+    comparison.dataset.backendComparison = ''
+    comparison.dataset.comparisonTitle = title
+    comparison.dataset.paneIds = 'brm|stanblocks|stan|turing'
+    comparison.dataset.paneLabels =
+      'BRM authoring|StanBlocks model|Stan source|Turing model'
+    sentinel.replaceWith(comparison)
+    panes.forEach((pane) => comparison.appendChild(pane))
+  })
+}
+
 function processComparisons(root: ParentNode) {
+  materializeGeneratedComparisons(root)
   const candidates = Array.from(
     root.querySelectorAll<HTMLElement>('[data-backend-comparison]'),
   )
