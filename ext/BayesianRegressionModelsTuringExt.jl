@@ -45,14 +45,19 @@ _brm_interval_evidence(base::ContinuousUnivariateDistribution, upper) =
 _brm_interval_evidence(base::DiscreteUnivariateDistribution, upper) =
     _BRMDiscreteIntervalEvidence(base, upper)
 
-_brm_normal_observation(::Nothing, mu, sigma, _i) = Normal(mu, sigma)
+_brm_analytic_scale(::Nothing, sigma, _i) = sigma
+_brm_analytic_scale(weight::BRM._BRMObservationWeightPlan, sigma, i) =
+    sigma / sqrt(weight.values[i])
+
+_brm_normal_observation(::Nothing, weight, mu, sigma, i) =
+    Normal(mu, _brm_analytic_scale(weight, sigma, i))
 function _brm_normal_observation(
-        modifier::BRM._BRMResponseModifierPlan, mu, sigma, i)
+        modifier::BRM._BRMResponseModifierPlan, weight, mu, sigma, i)
     lower = isnothing(modifier.lower) ? nothing :
         BRM._brm_response_bound_at(modifier.lower, i)
     upper = isnothing(modifier.upper) ? nothing :
         BRM._brm_response_bound_at(modifier.upper, i)
-    base = Normal(mu, sigma)
+    base = Normal(mu, _brm_analytic_scale(weight, sigma, i))
     modifier.kind === :truncated && return truncated(base; lower, upper)
     modifier.kind === :censored && return censored(base; lower, upper)
     modifier.kind === :interval_censored &&
@@ -84,19 +89,22 @@ _random_effect_args(component) = isempty(component.random_effects) ?
     end
 
 Turing.@model function _brm_population_gaussian(
-    X, fixed, y, beta_location, beta_scale, sigma_scale, response_modifier)
+    X, fixed, y, beta_location, beta_scale, sigma_scale, response_modifier,
+    observation_weight)
     beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
     sigma ~ Exponential(sigma_scale)
     mu = X * beta_pop + fixed
     for i in eachindex(y)
-        y[i] ~ _brm_normal_observation(response_modifier, mu[i], sigma, i)
+        y[i] ~ _brm_normal_observation(
+            response_modifier, observation_weight, mu[i], sigma, i)
     end
     (; mu)
 end
 
 Turing.@model function _brm_population_gaussian_random_intercept(
     X, fixed, group_idx, n_groups, y,
-    beta_location, beta_scale, sigma_scale, response_modifier)
+    beta_location, beta_scale, sigma_scale, response_modifier,
+    observation_weight)
     beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
     sigma ~ Exponential(sigma_scale)
     log_group_scale ~ Normal()
@@ -105,14 +113,16 @@ Turing.@model function _brm_population_gaussian_random_intercept(
     group_effect = group_scale .* z_group
     mu = X * beta_pop + fixed + group_effect[group_idx]
     for i in eachindex(y)
-        y[i] ~ _brm_normal_observation(response_modifier, mu[i], sigma, i)
+        y[i] ~ _brm_normal_observation(
+            response_modifier, observation_weight, mu[i], sigma, i)
     end
     (; mu, group_scale, group_effect)
 end
 
 Turing.@model function _brm_population_gaussian_correlated_group(
     X, fixed, Z, group_idx, n_groups, y,
-    beta_location, beta_scale, sigma_scale, response_modifier)
+    beta_location, beta_scale, sigma_scale, response_modifier,
+    observation_weight)
     beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
     sigma ~ Exponential(sigma_scale)
     n_terms = size(Z, 2)
@@ -126,14 +136,16 @@ Turing.@model function _brm_population_gaussian_correlated_group(
     group_effect = vec(sum(Z .* b_group[group_idx, :]; dims=2))
     mu = X * beta_pop + fixed + group_effect
     for i in eachindex(y)
-        y[i] ~ _brm_normal_observation(response_modifier, mu[i], sigma, i)
+        y[i] ~ _brm_normal_observation(
+            response_modifier, observation_weight, mu[i], sigma, i)
     end
     (; mu, L_group, tau_group, b_group, group_effect)
 end
 
 Turing.@model function _brm_population_gaussian_zero_correlation_group(
     X, fixed, Z, group_idx, n_groups, intercept_index, y,
-    beta_location, beta_scale, sigma_scale, response_modifier)
+    beta_location, beta_scale, sigma_scale, response_modifier,
+    observation_weight)
     beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
     sigma ~ Exponential(sigma_scale)
     n_terms = size(Z, 2)
@@ -157,7 +169,8 @@ Turing.@model function _brm_population_gaussian_zero_correlation_group(
     group_effect = vec(sum(Z .* b_group[group_idx, :]; dims=2))
     mu = X * beta_pop + fixed + group_effect
     for i in eachindex(y)
-        y[i] ~ _brm_normal_observation(response_modifier, mu[i], sigma, i)
+        y[i] ~ _brm_normal_observation(
+            response_modifier, observation_weight, mu[i], sigma, i)
     end
     (; mu, group_intercept_scale, tau_group_slopes, scales,
        b_group, group_effect)
@@ -494,6 +507,7 @@ function BRM._brm_turing_model(
                 plan.beta_scale,
                 plan.scale_prior,
                 plan.response_modifier,
+                plan.observation_weight,
             )
         end
         if !block.intercept_only
@@ -508,6 +522,7 @@ function BRM._brm_turing_model(
                 plan.beta_scale,
                 plan.scale_prior,
                 plan.response_modifier,
+                plan.observation_weight,
             )
         end
         return _brm_population_gaussian_random_intercept(
@@ -520,6 +535,7 @@ function BRM._brm_turing_model(
             plan.beta_scale,
             plan.scale_prior,
             plan.response_modifier,
+            plan.observation_weight,
         )
     end
     _brm_population_gaussian(
@@ -530,6 +546,7 @@ function BRM._brm_turing_model(
         plan.beta_scale,
         plan.scale_prior,
         plan.response_modifier,
+        plan.observation_weight,
     )
 end
 

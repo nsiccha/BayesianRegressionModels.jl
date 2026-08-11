@@ -4,7 +4,7 @@
 
 struct _TuringPopulationPlan{F,C<:_BRMBackendContext,P<:_BRMPopulationPredictor,
                              D<:_BRMPopulationDesign,Y<:AbstractVector,
-                             B<:AbstractVector,A,S,R<:Tuple,RM}
+                             B<:AbstractVector,A,S,R<:Tuple,RM,OW}
     family::F
     context::C
     predictor::P
@@ -16,6 +16,7 @@ struct _TuringPopulationPlan{F,C<:_BRMBackendContext,P<:_BRMPopulationPredictor,
     scale_prior::S
     random_effects::R
     response_modifier::RM
+    observation_weight::OW
 end
 
 struct _TuringPopulationComponent{P<:_BRMPopulationPredictor,
@@ -29,7 +30,7 @@ struct _TuringPopulationComponent{P<:_BRMPopulationPredictor,
 end
 
 struct _TuringMeanPrecisionPlan{F,C<:_BRMBackendContext,M,Q,A,
-                                Y<:AbstractVector,RM}
+                                Y<:AbstractVector,RM,OW}
     family::F
     context::C
     mean::M
@@ -37,6 +38,7 @@ struct _TuringMeanPrecisionPlan{F,C<:_BRMBackendContext,M,Q,A,
     family_args::A
     response::Y
     response_modifier::RM
+    observation_weight::OW
 end
 
 """
@@ -273,7 +275,7 @@ function _turing_negative_binomial2_plan(brmi::BRMI, observation,
         "contain nonnegative integer counts")
     _TuringMeanPrecisionPlan(
         Val(:negative_binomial2), parts.context, parts.mean, parts.precision,
-        NamedTuple(), Int.(response), nothing)
+        NamedTuple(), Int.(response), nothing, nothing)
 end
 
 function _turing_beta_binomial2_plan(brmi::BRMI, observation,
@@ -293,11 +295,12 @@ function _turing_beta_binomial2_plan(brmi::BRMI, observation,
         parts.response, trials, observation.key; prefix="Turing backend")
     _TuringMeanPrecisionPlan(
         Val(:beta_binomial2), parts.context, parts.mean, parts.precision,
-        (; trials), response, nothing)
+        (; trials), response, nothing, nothing)
 end
 
 function _turing_normal_plan(brmi::BRMI, observation, rhs::ExprColumn;
-                             response_modifier=nothing)
+                             response_modifier=nothing,
+                             observation_weight=nothing)
     isempty(getkwargs(rhs)) || error(
         "Turing backend: `Normal(mu, sigma)` accepts no formula keywords")
     args = getargs(rhs)
@@ -325,7 +328,8 @@ function _turing_normal_plan(brmi::BRMI, observation, rhs::ExprColumn;
                           parts.design,
                           collect(Float64, parts.response), parts.beta_location,
                           parts.beta_scale, NamedTuple(), scale_prior,
-                          parts.random_effects, materialized_modifier)
+                          parts.random_effects, materialized_modifier,
+                          observation_weight)
 end
 
 function _turing_bernoulli_population_plan(brmi::BRMI, observation,
@@ -341,7 +345,7 @@ function _turing_bernoulli_population_plan(brmi::BRMI, observation,
                           parts.design,
                           Int.(parts.response), parts.beta_location,
                           parts.beta_scale, NamedTuple(), nothing,
-                          parts.random_effects, nothing)
+                          parts.random_effects, nothing, nothing)
 end
 
 function _turing_bernoulli_logit_plan(brmi::BRMI, observation, rhs::ExprColumn)
@@ -382,7 +386,7 @@ function _turing_binomial_population_plan(brmi::BRMI, observation, trials_raw,
                           parts.design,
                           response, parts.beta_location,
                           parts.beta_scale, (; trials), nothing,
-                          parts.random_effects, nothing)
+                          parts.random_effects, nothing, nothing)
 end
 
 function _turing_binomial_logit_plan(brmi::BRMI, observation, rhs::ExprColumn)
@@ -444,7 +448,7 @@ function _turing_poisson_log_plan(brmi::BRMI, observation, rhs::ExprColumn;
                           parts.design,
                           Int.(parts.response), parts.beta_location,
                           parts.beta_scale, NamedTuple(), nothing,
-                          parts.random_effects, materialized_modifier)
+                          parts.random_effects, materialized_modifier, nothing)
 end
 
 function _brm_turing_plan(brmi::BRMI)
@@ -454,7 +458,19 @@ function _brm_turing_plan(brmi::BRMI)
     rhs = observation.rhs
     rhs isa ExprColumn || error(
         "Turing backend: observed likelihood must be a distribution call")
+    raw_response = _brm_data_vec(
+        observation.key, parent(parent(observation.lhs)))
+    observation_weight = _brm_observation_weight_plan(
+        rhs, observation.key, raw_response; prefix="Turing backend")
+    if !isnothing(observation_weight)
+        observation_weight.kind === :analytic || error(
+            "Turing backend: the current weight slice supports only " *
+            "`aweights` / `AnalyticWeights`; frequency and power weights are pending")
+        rhs = observation_weight.distribution
+    end
     response_modifier = _brm_response_modifier_plan(rhs; prefix="Turing backend")
+    isnothing(observation_weight) || isnothing(response_modifier) || error(
+        "Turing backend: weighted response modifiers are not yet supported")
     if !isnothing(response_modifier)
         response_modifier.kind in (:truncated, :censored, :interval_censored) || error(
             "Turing backend: response modifier `$(response_modifier.kind)` is " *
@@ -466,7 +482,10 @@ function _brm_turing_plan(brmi::BRMI)
     end
     family = getf(rhs)
     family === Normal && return _turing_normal_plan(
-        brmi, observation, rhs; response_modifier)
+        brmi, observation, rhs; response_modifier, observation_weight)
+    isnothing(observation_weight) || error(
+        "Turing backend: `AnalyticWeights` currently support only " *
+        "`Normal(mu, sigma)` observations; got `$family`")
     family === Poisson && return _turing_poisson_log_plan(
         brmi, observation, rhs; response_modifier)
     isnothing(response_modifier) || error(

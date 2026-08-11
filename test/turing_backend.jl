@@ -142,6 +142,46 @@ end
 end
 
 
+@testset "Turing extension — analytic Normal weights" begin
+    df = (;
+        x=[-1.0, 0.5, 2.0],
+        precision=[1.0, 4.0, 2.25],
+        y=[-0.4, 0.6, 0.9],
+    )
+    backend = TuringBRMI((@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x
+        y ~ weighted(Normal(mu, sigma), aweights(precision))
+    end)(df))
+    weight = backend.plan.observation_weight
+    @test weight.kind === :analytic
+    @test weight.source === :precision
+    @test weight.values == df.precision
+
+    params = (; beta_pop=[0.25, -0.5], sigma=0.8)
+    mu = backend.plan.design.matrix * params.beta_pop
+    likelihood = sum(logpdf.(
+        Normal.(mu, params.sigma ./ sqrt.(df.precision)), df.y))
+    prior = sum(logpdf.(Normal(), params.beta_pop)) +
+            logpdf(Exponential(2), params.sigma)
+    @test Turing.logjoint(backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+    @test Turing.logprior(backend.model, params) ≈
+          prior atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(backend.model, params) ≈
+          likelihood atol=1e-12 rtol=1e-12
+
+    invalid = merge(df, (; precision=[1.0, 0.0, 2.25]))
+    @test_throws "must be strictly positive" begin
+        TuringBRMI((@brm begin
+            sigma ~ Exponential(2)
+            mu ~ 1 + x
+            y ~ weighted(Normal(mu, sigma), aweights(precision))
+        end)(invalid))
+    end
+end
+
+
 @testset "Turing extension — Gaussian plain random intercept" begin
     df = (;
         x=[-1.0, 0.5, 2.0, 0.25],

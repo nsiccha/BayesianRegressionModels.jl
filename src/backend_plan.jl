@@ -153,6 +153,99 @@ struct _BRMResponseModifierPlan{B,L,U}
     upper::U
 end
 
+struct _BRMObservationWeightPlan{D,V<:AbstractVector}
+    kind::Symbol
+    distribution::D
+    source::Symbol
+    values::V
+end
+
+_brm_observation_weight_kind(f) =
+    f === aweights || f === AnalyticWeights ? :analytic :
+    f === fweights || f === FrequencyWeights ? :frequency :
+    f === weights || f === Weights ? :power :
+    f === pweights || f === ProbabilityWeights ? :probability :
+    f === uweights || f === UnitWeights ? :unit : nothing
+
+function _brm_prepare_observation_weight_values(
+        kind::Symbol, raw, nobs::Integer, target::Symbol, source::Symbol;
+        prefix="BRM backend lowering")
+    raw isa AbstractVector{<:Real} || error(
+        "$prefix: weight column `$source` for response `$target` must be a real " *
+        "vector, got $(typeof(raw))")
+    length(raw) == nobs || error(
+        "$prefix: weight column `$source` has length $(length(raw)) but response " *
+        "`$target` has length $nobs")
+    values = collect(Float64, raw)
+    all(isfinite, values) || error(
+        "$prefix: weight column `$source` for response `$target` contains " *
+        "non-finite values")
+    if kind === :analytic
+        all(>(0), values) || error(
+            "$prefix: analytic/precision weights for response `$target` must be " *
+            "strictly positive")
+    elseif kind === :frequency
+        all(x -> x >= 0 && isinteger(x), values) || error(
+            "$prefix: frequency weights for response `$target` must be " *
+            "nonnegative integer-valued counts")
+    elseif kind === :power
+        all(>=(0), values) || error(
+            "$prefix: power-likelihood weights for response `$target` must be " *
+            "nonnegative")
+    else
+        error("$prefix: internal unsupported observation-weight kind `$kind`")
+    end
+    values
+end
+
+function _brm_observation_weight_plan(rhs, target::Symbol,
+                                      response::AbstractVector;
+                                      prefix="BRM backend lowering")
+    rhs isa ExprColumn && getf(rhs) === weighted || return nothing
+    isempty(getkwargs(rhs)) || error(
+        "$prefix: `weighted(distribution, weights)` accepts no keywords")
+    args = getargs(rhs)
+    length(args) == 2 || error(
+        "$prefix: `weighted(distribution, weights)` expects exactly two arguments")
+    distribution, weight = args
+    distribution isa ExprColumn || error(
+        "$prefix: first argument of `weighted` for response `$target` must be a " *
+        "distribution call, got $(typeof(distribution))")
+    isempty(getkwargs(distribution)) || error(
+        "$prefix: weighted distribution `$target` does not currently support " *
+        "distribution constructor keywords")
+    weight isa ExprColumn || error(
+        "$prefix: second argument of `weighted` must be a StatsBase weight " *
+        "constructor, got $(typeof(weight))")
+    isempty(getkwargs(weight)) || error(
+        "$prefix: `weighted(..., $(getf(weight))(...))` does not accept weight " *
+        "constructor keywords")
+    kind = _brm_observation_weight_kind(getf(weight))
+    isnothing(kind) && error(
+        "$prefix: unsupported weight constructor `$(getf(weight))`; use " *
+        "`aweights`, `fweights`, or `weights`")
+    kind === :probability && error(
+        "$prefix: `ProbabilityWeights` sampling-weight semantics are not " *
+        "implemented; they are not interchangeable with likelihood weights")
+    kind === :unit && error(
+        "$prefix: omit `weighted(...)` for unit weights; write the base " *
+        "distribution directly")
+    weight_args = getargs(weight)
+    length(weight_args) == 1 || error(
+        "$prefix: `weighted` expects a one-column StatsBase weight constructor " *
+        "such as `aweights(k)`, `fweights(n)`, or `weights(w)`; got " *
+        "$(length(weight_args)) arguments for response `$target`")
+    source_column = only(weight_args)
+    source_column isa NamedColumn && parent(source_column) isa DataColumn || error(
+        "$prefix: weights for response `$target` must be built from one raw " *
+        "dataframe column, got $(typeof(source_column))")
+    source = name(source_column)
+    raw = parent(parent(source_column))
+    values = _brm_prepare_observation_weight_values(
+        kind, raw, length(response), target, source; prefix)
+    _BRMObservationWeightPlan(kind, distribution, source, values)
+end
+
 _brm_normalize_response_bound(::Nothing) = nothing
 _brm_normalize_response_bound(x::NamedColumn) =
     _brm_is_nothing_column(x) ? nothing : x

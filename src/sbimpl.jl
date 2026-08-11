@@ -3387,8 +3387,9 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         response isa AbstractVector || error(
             "sbimpl: reprocess: weighted response `$(e.const_.response)` must " *
             "be a vector, got $(typeof(response))")
-        new_data[key] = _sb_prepare_weight_values(
-            e.const_.kind, raw, length(response), e.const_.response, e.raw_ref)
+        new_data[key] = _brm_prepare_observation_weight_values(
+            e.const_.kind, raw, length(response), e.const_.response, e.raw_ref;
+            prefix="sbimpl: reprocess")
         new_preproc[key] = e
     elseif e.kind === :factor || e.kind === :mo
         v = _sb_df_column(df, e.raw_ref)
@@ -7894,86 +7895,19 @@ function _sb_likelihood!(stmts, target::Symbol, rhs::ExprColumn, data)
     _sb_lik_family!(stmts, target, f, getargs(rhs), getkwargs(rhs), data)
 end
 
-_sb_weight_kind(f) =
-    f === aweights || f === AnalyticWeights ? :analytic :
-    f === fweights || f === FrequencyWeights ? :frequency :
-    f === weights || f === Weights ? :power :
-    f === pweights || f === ProbabilityWeights ? :probability :
-    f === uweights || f === UnitWeights ? :unit : nothing
-
-function _sb_weight_source(target::Symbol, weight::ExprColumn)
-    isempty(getkwargs(weight)) || error(
-        "sbimpl: `weighted(..., $(getf(weight))(...))` does not accept weight " *
-        "constructor keywords")
-    args = getargs(weight)
-    length(args) == 1 || error(
-        "sbimpl: `weighted` expects a one-column StatsBase weight constructor " *
-        "such as `aweights(k)`, `fweights(n)`, or `weights(w)`; got " *
-        "$(length(args)) arguments for response `$target`")
-    source = only(args)
-    source isa NamedColumn && parent(source) isa DataColumn || error(
-        "sbimpl: weights for response `$target` must be built from one raw " *
-        "dataframe column, got $(typeof(source))")
-    name(source), parent(parent(source))
-end
-
-function _sb_prepare_weight_values(kind::Symbol, raw, nobs::Int, target::Symbol,
-                                   source::Symbol)
-    raw isa AbstractVector{<:Real} || error(
-        "sbimpl: weight column `$source` for response `$target` must be a real " *
-        "vector, got $(typeof(raw))")
-    length(raw) == nobs || error(
-        "sbimpl: weight column `$source` has length $(length(raw)) but response " *
-        "`$target` has length $nobs")
-    values = collect(Float64, raw)
-    all(isfinite, values) || error(
-        "sbimpl: weight column `$source` for response `$target` contains " *
-        "non-finite values")
-    if kind === :analytic
-        all(>(0), values) || error(
-            "sbimpl: analytic/precision weights for response `$target` must be " *
-            "strictly positive")
-    elseif kind === :frequency
-        all(x -> x >= 0 && isinteger(x), values) || error(
-            "sbimpl: frequency weights for response `$target` must be " *
-            "nonnegative integer-valued counts")
-    elseif kind === :power
-        all(>=(0), values) || error(
-            "sbimpl: power-likelihood weights for response `$target` must be " *
-            "nonnegative")
-    else
-        error("sbimpl: internal unsupported observation-weight kind `$kind`")
-    end
-    values
-end
-
 _sb_weight_data_key(target::Symbol) = Symbol(:brm_weight_, target)
 
-function _sb_weight_data!(data, target::Symbol, kind::Symbol,
-                          weight::ExprColumn)
-    source, raw = _sb_weight_source(target, weight)
-    response = get(data, target, nothing)
-    response isa AbstractVector || error(
-        "sbimpl: weighted response `$target` must be an observed vector, got " *
-        "$(typeof(response))")
+function _sb_weight_data!(data, target::Symbol,
+                          plan::_BRMObservationWeightPlan)
     key = _sb_weight_data_key(target)
     haskey(data, key) && error(
         "sbimpl: reserved derived weight key `$key` collides with a model/data " *
         "column; rename that column")
-    data[key] = _sb_prepare_weight_values(kind, raw, length(response), target, source)
+    data[key] = plan.values
     _sb_record_preproc!(data, key, PreprocEntry(
-        :observation_weight, (; kind, response=target), source, false))
+        :observation_weight, (; kind=plan.kind, response=target),
+        plan.source, false))
     key
-end
-
-function _sb_weighted_distribution(rhs, target::Symbol)
-    rhs isa ExprColumn || error(
-        "sbimpl: first argument of `weighted` for response `$target` must be a " *
-        "distribution call, got $(typeof(rhs))")
-    isempty(getkwargs(rhs)) || error(
-        "sbimpl: weighted distribution `$target` does not currently support " *
-        "distribution constructor keywords")
-    rhs
 end
 
 function _sb_analytic_weighted_likelihood!(stmts, target::Symbol,
@@ -8012,30 +7946,20 @@ end
 
 function _sb_likelihood!(stmts, target::Symbol,
                          rhs::ExprColumn{typeof(weighted)}, data)
-    isempty(getkwargs(rhs)) || error(
-        "sbimpl: `weighted(distribution, weights)` accepts no keywords")
-    distribution_raw, weight_raw = getargs(rhs, 2)
-    distribution = _sb_weighted_distribution(distribution_raw, target)
-    weight_raw isa ExprColumn || error(
-        "sbimpl: second argument of `weighted` must be a StatsBase weight " *
-        "constructor, got $(typeof(weight_raw))")
-    kind = _sb_weight_kind(getf(weight_raw))
-    isnothing(kind) && error(
-        "sbimpl: unsupported weight constructor `$(getf(weight_raw))`; use " *
-        "`aweights`, `fweights`, or `weights`")
-    kind === :probability && error(
-        "sbimpl: `ProbabilityWeights` sampling-weight semantics are not " *
-        "implemented; they are not interchangeable with likelihood weights")
-    kind === :unit && error(
-        "sbimpl: omit `weighted(...)` for unit weights; write the base " *
-        "distribution directly")
-    weight_key = _sb_weight_data!(data, target, kind, weight_raw)
-    if kind === :analytic
+    response = get(data, target, nothing)
+    response isa AbstractVector || error(
+        "sbimpl: weighted response `$target` must be an observed vector, got " *
+        "$(typeof(response))")
+    plan = _brm_observation_weight_plan(
+        rhs, target, response; prefix="sbimpl")
+    isnothing(plan) && error("sbimpl: internal weighted response was not planned")
+    weight_key = _sb_weight_data!(data, target, plan)
+    if plan.kind === :analytic
         _sb_analytic_weighted_likelihood!(
-            stmts, target, distribution, weight_key, data)
+            stmts, target, plan.distribution, weight_key, data)
     else
         _sb_objective_weighted_likelihood!(
-            stmts, target, distribution, weight_key, data)
+            stmts, target, plan.distribution, weight_key, data)
     end
 end
 _sb_likelihood!(stmts, target, rhs, _) =
