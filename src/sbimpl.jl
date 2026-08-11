@@ -2198,12 +2198,7 @@ _sb_rematerialize_vec(x, _df) = error(
 
 # Fetch a raw column from a new df via the BRM `Data` wrapper (the same accessor
 # the `@brm` builder uses), unwrapped to a plain vector. Errors if absent.
-_sb_df_column(df, col::Symbol) = begin
-    nc = getproperty(Data(df), col)
-    d = _as_data_column(parent(nc))
-    isnothing(d) && error("sbimpl: reprocess: new DataFrame has no column `$col`")
-    parent(d)
-end
+const _sb_df_column = _brm_df_column
 
 function _sb_gp_axes_from_df(df, raw_ref, label::Symbol)
     names = raw_ref isa Symbol ? (raw_ref,) : Tuple(raw_ref)
@@ -2980,55 +2975,8 @@ end
 
 # ---- reprocess / restan_data (decision nr3v8n A) ----------------------------
 
-_sb_df_has_column(df, k::Symbol) = hasproperty(df, k)
-
-# Rebind the typed BRMI tree to a new dataframe without re-parsing source code.
-# This is the construction half `resample_groups` needs: cv-contagious sizing is
-# selected while emitting Stan, so swapping the old model's data cannot create
-# a new-population artifact.  Named data leaves are the only values replaced;
-# formula-local structure, functions, and literal hyperparameters stay exact.
-_sb_rebind_value(x, _df) = x
-_sb_rebind_value(x::Tuple, df) = map(v -> _sb_rebind_value(v, df), x)
-_sb_rebind_value(x::NamedTuple, df) =
-    NamedTuple{keys(x)}(map(v -> _sb_rebind_value(v, df), values(x)))
-_sb_rebind_value(x::NestedPredictorFormula, df) =
-    NestedPredictorFormula(_sb_rebind_value(parent(x), df))
-_sb_rebind_value(x::LikelihoodColumn, df) =
-    LikelihoodColumn(_sb_rebind_value(parent(x), df),
-                     _sb_rebind_value(rhs(x), df))
-function _sb_rebind_value(x::NamedColumn, df)
-    n = name(x)
-    p = parent(x)
-    if p isa DataColumn || p isa MissingColumn
-        if _sb_df_has_column(df, n)
-            return NamedColumn(n, DataColumn(_sb_df_column(df, n)))
-        end
-        p isa DataColumn && error(
-            "sbimpl: resample replay: new DataFrame has no column `$n`, which " *
-            "was data-backed in the fitted BRMI")
-        return NamedColumn(n, MissingColumn())
-    end
-    NamedColumn(n, _sb_rebind_value(p, df))
-end
-function _sb_rebind_value(x::ExprColumn, df)
-    args = map(v -> _sb_rebind_value(v, df), getargs(x))
-    kw = getkwargs(x)
-    rebound_kw = NamedTuple{keys(kw)}(
-        map(v -> _sb_rebind_value(v, df), values(kw)))
-    ExprColumn(getf(x), args...; rebound_kw...)
-end
-function _sb_rebind_value(x::MultiMembershipTerm, df)
-    groups = map(v -> _sb_rebind_value(v, df), getfield(x, :groups))
-    old_weights = getfield(x, :weights)
-    weights = isnothing(old_weights) ? nothing :
-              map(v -> _sb_rebind_value(v, df), old_weights)
-    MultiMembershipTerm(groups...; weights, normalize=getfield(x, :normalize))
-end
-function _sb_rebind_brmi(brmi::BRMI, df)
-    ops = brmi.operations
-    BRMI(NamedTuple{keys(ops)}(
-        map(v -> _sb_rebind_value(v, df), values(ops))))
-end
+const _sb_df_has_column = _brm_df_has_column
+const _sb_rebind_brmi = _brm_rebind_brmi
 
 function _sb_resample_group_set(groups)
     groups === nothing && return Set{Symbol}()

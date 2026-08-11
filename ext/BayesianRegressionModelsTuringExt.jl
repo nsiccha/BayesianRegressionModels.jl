@@ -932,6 +932,25 @@ function BRM.TuringBRMI(brmi::BRM.BRMI)
     BRM.TuringBRMI(brmi, plan, model)
 end
 
+function BRM.reprocess(
+        backend::BRM.TuringBRMI, new_data;
+        freeze_constants::Bool=true, resample_groups=())
+    groups = resample_groups === nothing ? () :
+             resample_groups isa Symbol ? (resample_groups,) :
+             Tuple(resample_groups)
+    isempty(groups) || error(
+        "Turing backend: `resample_groups` replay is not yet supported; " *
+        "same-group replay rejects unseen levels by default")
+    prepared_data = freeze_constants ?
+                    BRM._turing_replay_input(backend.plan, new_data) : new_data
+    rebound = BRM._brm_rebind_brmi(backend.parent, prepared_data)
+    fresh = BRM._brm_turing_plan(rebound)
+    plan = freeze_constants ?
+           BRM._turing_replay_plan(backend.plan, fresh) : fresh
+    model = BRM._brm_turing_model(plan)
+    BRM.TuringBRMI(rebound, plan, model)
+end
+
 _brm_pointwise_indices(plan::BRM._TuringPopulationPlan) =
     isnothing(plan.missing_response) ? eachindex(plan.response) :
     plan.missing_response.observed_indices

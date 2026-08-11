@@ -17,6 +17,65 @@ struct _BRMBackendContext{P<:BRMI,D<:AbstractDict,PP<:AbstractDict,TO<:AbstractD
     target_obs::TO
 end
 
+# Backend-neutral construction replay. Concrete backends consume the same
+# rebound BRMI rather than each maintaining a tree walker over formula values.
+function reprocess end
+
+_brm_df_has_column(df, key::Symbol) = hasproperty(df, key)
+function _brm_df_column(df, key::Symbol)
+    column = getproperty(Data(df), key)
+    data = parent(column)
+    data isa DataColumn || error(
+        "BRM replay: new data has no column `$key`")
+    parent(data)
+end
+
+_brm_rebind_value(x, _df) = x
+_brm_rebind_value(x::Tuple, df) =
+    map(value -> _brm_rebind_value(value, df), x)
+_brm_rebind_value(x::NamedTuple, df) = NamedTuple{keys(x)}(
+    map(value -> _brm_rebind_value(value, df), values(x)))
+_brm_rebind_value(x::NestedPredictorFormula, df) =
+    NestedPredictorFormula(_brm_rebind_value(parent(x), df))
+_brm_rebind_value(x::LikelihoodColumn, df) = LikelihoodColumn(
+    _brm_rebind_value(parent(x), df), _brm_rebind_value(rhs(x), df))
+function _brm_rebind_value(x::NamedColumn, df)
+    column_name = name(x)
+    payload = parent(x)
+    if payload isa DataColumn || payload isa MissingColumn
+        if _brm_df_has_column(df, column_name)
+            return NamedColumn(
+                column_name, DataColumn(_brm_df_column(df, column_name)))
+        end
+        payload isa DataColumn && error(
+            "BRM replay: new data has no column `$column_name`, which was " *
+            "data-backed in the fitted BRMI")
+        return NamedColumn(column_name, MissingColumn())
+    end
+    NamedColumn(column_name, _brm_rebind_value(payload, df))
+end
+function _brm_rebind_value(x::ExprColumn, df)
+    args = map(value -> _brm_rebind_value(value, df), getargs(x))
+    kwargs = getkwargs(x)
+    rebound_kwargs = NamedTuple{keys(kwargs)}(
+        map(value -> _brm_rebind_value(value, df), values(kwargs)))
+    ExprColumn(getf(x), args...; rebound_kwargs...)
+end
+function _brm_rebind_value(x::MultiMembershipTerm, df)
+    groups = map(
+        value -> _brm_rebind_value(value, df), getfield(x, :groups))
+    old_weights = getfield(x, :weights)
+    weights = isnothing(old_weights) ? nothing : map(
+        value -> _brm_rebind_value(value, df), old_weights)
+    MultiMembershipTerm(
+        groups...; weights, normalize=getfield(x, :normalize))
+end
+function _brm_rebind_brmi(brmi::BRMI, df)
+    operations = brmi.operations
+    BRMI(NamedTuple{keys(operations)}(
+        map(value -> _brm_rebind_value(value, df), values(operations))))
+end
+
 # Materialise a user data vector without silently deleting missing rows. A
 # likelihood decorator may deliberately keep its response out of this generic
 # data dict and model the missing values itself; that decision is made by the
@@ -501,6 +560,110 @@ struct _BRMPopulationDesign{C<:Tuple,M<:AbstractMatrix,T<:Tuple,V<:AbstractVecto
     fixed::V
 end
 
+_brm_replay_expression(value::Number, _data) = value
+_brm_replay_expression(value::NamedColumn, data) = data[name(value)]
+function _brm_replay_expression(value::ExprColumn, data)
+    isempty(getkwargs(value)) || error(
+        "BRM replay: pure data expressions with keywords are unsupported")
+    broadcast(
+        getf(value),
+        map(argument -> _brm_replay_expression(argument, data),
+            getargs(value))...)
+end
+
+function _brm_replay_factor_column(column, data)
+    preprocess = column.preprocess
+    raw = data[column.source]
+    fitted_levels = collect(preprocess.const_.levels)
+    raw_values = raw isa CA.CategoricalVector ? let levels = CA.levels(raw)
+        [levels[code] for code in Int.(CA.levelcode.(raw))]
+    end : raw
+    lookup = Dict(level => index for (index, level) in pairs(fitted_levels))
+    unknown = unique([value for value in raw_values if !haskey(lookup, value)])
+    isempty(unknown) || error(
+        "BRM replay: categorical predictor `$(column.source)` contains unseen " *
+        "level(s) $(collect(unknown)); fitted levels are $fitted_levels")
+    indices = Int[lookup[value] for value in raw_values]
+    ref = preprocess.const_.ref
+    if ref != 1
+        indices = Int[index == ref ? 1 : index == 1 ? ref : index
+                      for index in indices]
+    end
+    Float64[index == preprocess.const_.level ? 1.0 : 0.0
+            for index in indices]
+end
+
+function _brm_replay_population_column(column, data, cache)
+    haskey(cache, column.label) && return cache[column.label]
+    preprocess = column.preprocess
+    values = if isnothing(column.source)
+        nothing
+    elseif isnothing(preprocess)
+        collect(Float64, data[column.source])
+    elseif preprocess.kind === :zscale || preprocess.kind === :standardize
+        collect(Float64, _brm_apply_zscale(
+            preprocess.const_, data[column.source]))
+    elseif preprocess.kind === :center
+        collect(Float64, _brm_apply_center(
+            preprocess.const_, data[column.source]))
+    elseif preprocess.kind === :protect
+        collect(Float64, _brm_replay_expression(preprocess.raw_ref, data))
+    elseif preprocess.kind === :population_factor_dummy
+        _brm_replay_factor_column(column, data)
+    elseif preprocess.kind === :interaction
+        for dependency in preprocess.dependencies
+            _brm_replay_population_column(dependency, data, cache)
+        end
+        left, right = preprocess.raw_ref
+        left_values = get(cache, left, get(data, left, nothing))
+        right_values = get(cache, right, get(data, right, nothing))
+        isnothing(left_values) && error(
+            "BRM replay: interaction input `$left` is unavailable")
+        isnothing(right_values) && error(
+            "BRM replay: interaction input `$right` is unavailable")
+        collect(Float64, left_values .* right_values)
+    else
+        error("BRM replay: unsupported population preprocessing kind " *
+              "`$(preprocess.kind)`")
+    end
+    isnothing(values) || (cache[column.label] = values)
+    values
+end
+
+function _brm_replay_population_design(
+        training::_BRMPopulationDesign, context::_BRMBackendContext)
+    data = context.data
+    haskey(data, training.row_source) || error(
+        "BRM replay: row-axis source `$(training.row_source)` is absent")
+    n = length(data[training.row_source])
+    cache = Dict{Symbol,Vector{Float64}}()
+    columns = map(training.columns) do column
+        values = _brm_replay_population_column(column, data, cache)
+        isnothing(values) && (values = ones(Float64, n))
+        length(values) == n || error(
+            "BRM replay: population column `$(column.label)` has " *
+            "$(length(values)) rows; expected $n")
+        _BRMPopulationColumn(
+            column.label, column.effect_addresses, column.effect_block,
+            column.source, values, column.preprocess)
+    end
+    fixed_terms = map(training.fixed_terms) do term
+        values = collect(
+            Float64, _brm_replay_expression(term.preprocess.raw_ref, data))
+        length(values) == n || error(
+            "BRM replay: fixed term `$(term.label)` has $(length(values)) " *
+            "rows; expected $n")
+        _BRMPopulationFixedTerm(
+            term.label, term.source, values, term.preprocess)
+    end
+    fixed = zeros(Float64, n)
+    foreach(term -> fixed .+= term.values, fixed_terms)
+    matrix = hcat((column.values for column in columns)...)
+    _BRMPopulationDesign(
+        training.target, Tuple(columns), matrix, training.row_source,
+        Tuple(fixed_terms), fixed)
+end
+
 struct _BRMRandomEffectPlan{L<:AbstractVector,I<:AbstractVector{Int},
                             C<:Tuple,M<:AbstractMatrix}
     predictor::Symbol
@@ -512,6 +675,38 @@ struct _BRMRandomEffectPlan{L<:AbstractVector,I<:AbstractVector{Int},
     intercept_only::Bool
     zero_correlation::Bool
 end
+
+function _brm_replay_random_effect_plan(
+        training::_BRMRandomEffectPlan, context::_BRMBackendContext)
+    raw_groups = context.data[training.group]
+    lookup = Dict(level => index for (index, level) in pairs(training.levels))
+    unknown = unique(
+        [level for level in raw_groups if !haskey(lookup, level)])
+    isempty(unknown) || error(
+        "BRM replay: grouping factor `$(training.group)` contains unseen " *
+        "level(s) $(collect(unknown)); fitted levels are " *
+        "$(collect(training.levels))")
+    indices = Int[lookup[level] for level in raw_groups]
+    n = length(indices)
+    columns = map(training.columns) do column
+        values = isnothing(column.source) ? ones(Float64, n) :
+                 collect(Float64, context.data[column.source])
+        length(values) == n || error(
+            "BRM replay: random-effect column `$(column.label)` and grouping " *
+            "factor `$(training.group)` have different row counts")
+        _BRMPopulationColumn(
+            column.label, column.effect_addresses, column.effect_block,
+            column.source, values, column.preprocess)
+    end
+    matrix = hcat((column.values for column in columns)...)
+    _BRMRandomEffectPlan(
+        training.predictor, training.group, training.levels, indices,
+        Tuple(columns), matrix, training.intercept_only,
+        training.zero_correlation)
+end
+
+_brm_replay_random_effect_plans(training::Tuple, context::_BRMBackendContext) =
+    Tuple(_brm_replay_random_effect_plan(block, context) for block in training)
 
 _brm_additive_terms(rhs) = begin
     terms = Any[]
@@ -796,19 +991,28 @@ function _brm_population_columns(term::ExprColumn{typeof(factor)})
     backing = parent(inner)
     backing isa DataColumn || return nothing
     raw = parent(backing)
-    raw isa AbstractVector && eltype(raw) <: Integer || return nothing
+    raw isa AbstractVector || return nothing
+    raw_values = if raw isa CA.CategoricalVector
+        levels = CA.levels(raw)
+        eltype(levels) <: Integer || return nothing
+        [levels[code] for code in Int.(CA.levelcode.(raw))]
+    else
+        eltype(raw) <: Integer || return nothing
+        raw
+    end
     kwargs = getkwargs(term)
     all(k -> k === :ref, keys(kwargs)) || return nothing
     ref_raw = get(kwargs, :ref, 1)
     ref_raw isa Integer || return nothing
-    1 <= ref_raw <= maximum(raw) || error(
+    1 <= ref_raw <= maximum(raw_values) || error(
         "BRM backend lowering: `factor($(name(inner)); ref=$ref_raw)` ref " *
-        "out of range (max level $(maximum(raw)))")
+        "out of range (max level $(maximum(raw_values)))")
 
     source = name(inner)
     block = ref_raw == 1 ? source : Symbol(source, :__ref_, ref_raw)
-    recoded = ref_raw == 1 ? raw :
-        Int[value == ref_raw ? 1 : value == 1 ? ref_raw : value for value in raw]
+    recoded = ref_raw == 1 ? raw_values :
+        Int[value == ref_raw ? 1 : value == 1 ? ref_raw : value
+            for value in raw_values]
     addresses = ref_raw == 1 ? (source,) : (block, source)
     _brm_categorical_population_columns(
         recoded, source, block, addresses; ref=ref_raw)
@@ -957,6 +1161,13 @@ struct _BRMPopulationPredictor{F,D<:_BRMPopulationDesign}
     link_lhs_fn::F
     emitted_name::Symbol
     design::D
+end
+
+function _brm_replay_population_predictor(
+        training::_BRMPopulationPredictor, context::_BRMBackendContext)
+    design = _brm_replay_population_design(training.design, context)
+    _BRMPopulationPredictor(
+        training.name, training.link_lhs_fn, training.emitted_name, design)
 end
 
 _brm_lp_emitted_name(name::Symbol, link_lhs_fn) =

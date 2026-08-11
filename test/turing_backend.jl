@@ -76,6 +76,80 @@ const BRM = BayesianRegressionModels
 end
 
 
+@testset "Turing extension — frozen same-group replay" begin
+    training = (;
+        x=[1.0, 2.0, 4.0, 5.0, 7.0, 8.0],
+        w=[-2.0, 1.0, 5.0, 0.0, 3.0, 6.0],
+        g=[1, 2, 3, 1, 2, 3],
+        subject=["b", "a", "b", "c", "a", "c"],
+        exposure=[2.0, 4.0, 8.0, 3.0, 6.0, 9.0],
+        y=[0.2, 1.1, -0.4, 0.7, -0.2, 0.5],
+    )
+    backend = TuringBRMI((@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + zscale(x) + center(w) + g +
+             zscale(x) & w + offset(log(exposure)) +
+             (1 + x | subject)
+        y ~ Normal(mu, sigma)
+    end)(training))
+    future = (;
+        x=[10.0, 12.0, 14.0, 16.0, 18.0, 20.0],
+        w=[4.0, 2.0, 8.0, 6.0, 10.0, 12.0],
+        g=[3, 2, 1, 3, 1, 2],
+        subject=["c", "a", "b", "c", "b", "a"],
+        exposure=[5.0, 7.0, 11.0, 13.0, 17.0, 19.0],
+        y=[-0.1, 0.3, 0.9, -0.4, 0.6, 0.2],
+    )
+    replayed = reprocess(backend, future)
+    fresh = reprocess(backend, future; freeze_constants=false)
+    fitted_x = BRM._brm_fit_zscale(training.x)
+    fitted_w = BRM._brm_fit_center(training.w)
+    scaled_x = BRM._brm_apply_zscale(fitted_x, future.x)
+    centered_w = BRM._brm_apply_center(fitted_w, future.w)
+    labels = Tuple(column.label for column in replayed.plan.design.columns)
+
+    @test labels == Tuple(column.label for column in backend.plan.design.columns)
+    @test replayed.plan.design.matrix[:, 2] ≈ scaled_x
+    @test replayed.plan.design.matrix[:, 3] ≈ centered_w
+    @test replayed.plan.design.matrix[:, 4] == Float64.(future.g .== 2)
+    @test replayed.plan.design.matrix[:, 5] == Float64.(future.g .== 3)
+    interaction_index = findfirst(==(Symbol(:int_zscale_x_x_w)), labels)
+    @test replayed.plan.design.matrix[:, interaction_index] ≈
+          scaled_x .* future.w
+    @test replayed.plan.design.fixed ≈ log.(future.exposure)
+    @test replayed.plan.response == future.y
+    @test fresh.plan.design.matrix[:, 2] != replayed.plan.design.matrix[:, 2]
+
+    block = only(replayed.plan.random_effects)
+    @test block.levels == only(backend.plan.random_effects).levels
+    @test block.indices == [3, 1, 2, 3, 2, 1]
+    @test block.matrix == hcat(ones(6), future.x)
+
+    draw = rand(Xoshiro(62), backend.model)
+    @test isfinite(Turing.logjoint(replayed.model, draw.data))
+    predictive = turing_posterior_predictive(
+        Xoshiro(63), replayed, draw.data)
+    @test length(predictive.y) == length(future.y)
+
+    subset = (;
+        x=future.x[1:3], w=future.w[1:3], g=fill(2, 3),
+        subject=fill("a", 3), exposure=future.exposure[1:3],
+        y=future.y[1:3])
+    subset_replay = reprocess(backend, subset)
+    @test Tuple(column.label for column in subset_replay.plan.design.columns) ==
+          labels
+    @test subset_replay.plan.design.matrix[:, 4] == ones(3)
+    @test subset_replay.plan.design.matrix[:, 5] == zeros(3)
+    @test only(subset_replay.plan.random_effects).levels == block.levels
+    @test only(subset_replay.plan.random_effects).indices == ones(Int, 3)
+
+    unseen_group = merge(future, (; subject=["new", future.subject[2:end]...]))
+    @test_throws "contains unseen level" reprocess(backend, unseen_group)
+    unseen_category = merge(future, (; g=[4, future.g[2:end]...]))
+    @test_throws "contains unseen level" reprocess(backend, unseen_category)
+end
+
+
 @testset "Turing extension — partially missing Gaussian response" begin
     df = (;
         x=[-1.0, 0.5, 2.0, 0.25],

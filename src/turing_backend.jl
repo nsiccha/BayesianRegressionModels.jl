@@ -156,6 +156,111 @@ _turing_predictive_plan(plan::_TuringMultiResponsePlan) =
         Tuple(_turing_predictive_plan(child) for child in plan.plans),
         plan.owners)
 
+function _turing_replay_component(
+        training::_TuringPopulationComponent,
+        context::_BRMBackendContext)
+    predictor = _brm_replay_population_predictor(training.predictor, context)
+    random_effects = _brm_replay_random_effect_plans(
+        training.random_effects, context)
+    _TuringPopulationComponent(
+        predictor, predictor.design, training.beta_location,
+        training.beta_scale, random_effects)
+end
+
+function _turing_replay_plan(
+        training::_TuringPopulationPlan,
+        fresh::_TuringPopulationPlan)
+    predictor = _brm_replay_population_predictor(
+        training.predictor, fresh.context)
+    random_effects = _brm_replay_random_effect_plans(
+        training.random_effects, fresh.context)
+    _TuringPopulationPlan(
+        fresh.family, fresh.context, predictor, predictor.design,
+        fresh.response, training.beta_location, training.beta_scale,
+        fresh.family_args, fresh.scale_prior, random_effects,
+        fresh.missing_response, fresh.response_modifier,
+        fresh.observation_weight)
+end
+
+
+function _turing_replay_plan(
+        training::_TuringMeanPrecisionPlan,
+        fresh::_TuringMeanPrecisionPlan)
+    mean = _turing_replay_component(training.mean, fresh.context)
+    precision = _turing_replay_component(training.precision, fresh.context)
+    _TuringMeanPrecisionPlan(
+        fresh.family, fresh.context, mean, precision, fresh.family_args,
+        fresh.response, fresh.response_modifier, fresh.observation_weight)
+end
+
+function _turing_replay_plan(
+        training::_TuringMultiResponsePlan,
+        fresh::_TuringMultiResponsePlan)
+    training.responses == fresh.responses || error(
+        "Turing backend: replay changed the response-name set")
+    length(training.plans) == length(fresh.plans) || error(
+        "Turing backend: replay changed the response-plan count")
+    plans = Tuple(_turing_replay_plan(old, new)
+                  for (old, new) in zip(training.plans, fresh.plans))
+    _TuringMultiResponsePlan(training.responses, plans, training.owners)
+end
+
+function _turing_collect_factor_schemas!(schemas, column)
+    preprocess = column.preprocess
+    isnothing(preprocess) && return schemas
+    if preprocess.kind === :population_factor_dummy
+        levels = collect(preprocess.const_.levels)
+        existing = get(schemas, column.source, levels)
+        existing == levels || error(
+            "Turing backend: fitted categorical source `$(column.source)` " *
+            "has inconsistent level schemas across predictors")
+        schemas[column.source] = levels
+    end
+    foreach(dependency -> _turing_collect_factor_schemas!(schemas, dependency),
+            preprocess.dependencies)
+    schemas
+end
+
+function _turing_collect_factor_schemas!(schemas, design::_BRMPopulationDesign)
+    foreach(column -> _turing_collect_factor_schemas!(schemas, column),
+            design.columns)
+    schemas
+end
+function _turing_collect_factor_schemas!(schemas, plan::_TuringPopulationPlan)
+    _turing_collect_factor_schemas!(schemas, plan.design)
+end
+function _turing_collect_factor_schemas!(schemas, plan::_TuringMeanPrecisionPlan)
+    _turing_collect_factor_schemas!(schemas, plan.mean.design)
+    _turing_collect_factor_schemas!(schemas, plan.precision.design)
+end
+function _turing_collect_factor_schemas!(schemas, plan::_TuringMultiResponsePlan)
+    foreach(child -> _turing_collect_factor_schemas!(schemas, child), plan.plans)
+    schemas
+end
+
+function _turing_replay_input(plan, new_data)
+    schemas = _turing_collect_factor_schemas!(Dict{Symbol,Any}(), plan)
+    isempty(schemas) && return new_data
+    names = Tuple(propertynames(new_data))
+    values = Tuple(getproperty(new_data, key) for key in names)
+    prepared = NamedTuple{names}(values)
+    for (source, levels) in schemas
+        raw = _brm_df_column(new_data, source)
+        raw_values = raw isa CA.CategoricalVector ? let raw_levels = CA.levels(raw)
+            [raw_levels[code] for code in Int.(CA.levelcode.(raw))]
+        end : collect(raw)
+        unknown = unique(
+            [value for value in raw_values if value ∉ levels])
+        isempty(unknown) || error(
+            "BRM replay: categorical predictor `$source` contains unseen " *
+            "level(s) $(collect(unknown)); fitted levels are $levels")
+        categorical = CA.categorical(raw_values; levels)
+        prepared = merge(
+            prepared, NamedTuple{(source,)}((categorical,)))
+    end
+    prepared
+end
+
 function _turing_direct_observations(brmi::BRMI)
     found = Any[]
     for (key, op_nc) in pairs(brmi.operations)
