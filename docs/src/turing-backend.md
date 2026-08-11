@@ -39,7 +39,7 @@ the Turing backend refuses the surface rather than approximating it.
 | Observation topology | **Partial** | Exactly one direct response named `y`; arbitrary names, multiple responses, distributional predictors, and hierarchical/ragged axes are pending |
 | Population design | **Partial** | Additive intercept plus continuous, non-integer raw columns share `_BRMPopulationDesign` with SBBRMI |
 | Population transforms and terms | **Pending** | Categorical contrasts, interactions, `standardize`, `offset`, `mo`/`mo1`, `me`, `s`, `t2`, `gp`, and `hsgp` |
-| Population coefficient priors | **Partial** | Independent `Normal(0, 1)` defaults; formula-level `effect(...) ~ Normal(...)` overrides are the next shared semantic layer |
+| Population coefficient priors | **Partial** | Independent `Normal(0, 1)` defaults plus `effect(lp, coef)`, `effect(:, coef)`, and `:` coefficient defaults with the same specificity/tie rules as SBBRMI; current Turing hyperparameters must be finite numeric constants |
 | Scalar and structured priors | **Partial** | Gaussian scale accepts explicit `Exponential(scale)`; general scalar, horseshoe, simplex, R2D2, term, and latent priors are pending |
 | Gaussian identity likelihood | **Supported** | `sigma ~ Exponential(scale)`, `mu ~ 1 + continuous...`, `y ~ Normal(mu, sigma)` |
 | Bernoulli-logit likelihood | **Supported** | `eta ~ 1 + continuous...`, `y ~ BernoulliLogit(eta)` |
@@ -63,11 +63,10 @@ Within the current slice, all of the following are rejected explicitly:
 
 - categorical or integer-coded population columns;
 - random effects and group blocks;
-- population, random-effect, R2D2, or term-prior overrides;
+- non-Normal or nonconstant population priors, random-effect priors, R2D2, or term-prior overrides;
 - response decorators, multiple likelihoods, or extra model statements;
 - unsupported links or likelihood families; and
 - missing values or mismatched row axes.
 
 This boundary is intentional and temporary: it prevents the Turing backend
 from silently looking compatible while assigning a different model.
-

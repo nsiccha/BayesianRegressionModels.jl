@@ -262,3 +262,167 @@ function _brm_simple_population_design(target::Symbol, rhs,
     matrix = hcat((c.values for c in columns)...)
     _BRMPopulationDesign(target, Tuple(columns), matrix, row_source)
 end
+
+# ---- shared population-effect prior semantics -----------------------------
+
+# This is a representation test, not a Stan lowering decision. Keep it in the
+# backend-neutral layer so a weak-dependency backend can validate distribution
+# declarations without loading SBBRMI.
+_as_distribution_type(::Type{T}) where {T<:Distribution} = T
+_as_distribution_type(_) = nothing
+
+_brm_effect_specificity(spec) =
+    (spec.predictor === _EFFECT_COLON ? 0 : 1) +
+    (spec.coefficient === _EFFECT_COLON ? 0 : 1)
+_brm_effect_spelling(spec) =
+    "effect($(spec.predictor), $(spec.coefficient))"
+
+function _brm_validate_population_effect_spec(spec;
+                                               prefix="BRM backend lowering")
+    T = _as_distribution_type(spec.family)
+    (!isnothing(T) && T <: Normal) || error(
+        "$prefix: population `effect(...)` overrides currently support only " *
+        "`Normal(location, scale)`; got `$(spec.family)`. Ordinary scalar " *
+        "parameter priors remain available for other supported families.")
+    isempty(spec.keywords) || error(
+        "$prefix: `effect(...) ~ Normal(...)` does not accept distribution " *
+        "keywords; put bounds on an explicitly declared scalar parameter instead")
+    _brm_normal_effect_args(spec.expression; prefix)
+    nothing
+end
+
+# One precedence engine is shared by the simple direct-BRMI plan and SBBRMI's
+# richer population/categorical resolver. A cell stores both the exact parsed
+# RHS and the specificity that won it; formula order never decides a tie.
+function _brm_claim_effect_prior!(get_cell, set_cell!, spec, what;
+                                  prefix="BRM backend lowering")
+    rank = _brm_effect_specificity(spec)
+    spelling = _brm_effect_spelling(spec)
+    held = get_cell()
+    if isnothing(held) || rank > held.rank
+        set_cell!((; expression=spec.expression, rank, spelling))
+    elseif rank == held.rank
+        error("$prefix: `$spelling` and `$(held.spelling)` are equally specific " *
+              "and both set the prior for $what. Neither wins — make one of " *
+              "them more specific, or drop it.")
+    end
+    nothing
+end
+
+function _brm_normal_effect_args(rhs::ExprColumn;
+                                 prefix="BRM backend lowering")
+    args = getargs(rhs)
+    length(args) <= 2 || error(
+        "$prefix: `effect(...) ~ Normal(...)` must lower to exactly location " *
+        "and scale arguments, got $(length(args))")
+    isempty(args) && return (0.0, 1.0)
+    length(args) == 1 && return (only(args), 1.0)
+    args
+end
+
+_brm_numeric_constant(x::Real) = Float64(x)
+function _brm_numeric_constant(x::ExprColumn)
+    isempty(getkwargs(x)) || return nothing
+    values = map(_brm_numeric_constant, getargs(x))
+    any(isnothing, values) && return nothing
+    value = try
+        getf(x)(values...)
+    catch
+        return nothing
+    end
+    value isa Real ? Float64(value) : nothing
+end
+_brm_numeric_constant(_x) = nothing
+
+"""
+    _brm_simple_population_effect_overrides(brmi, design)
+
+Resolve formula-level `effect(...) ~ Normal(...)` statements against a narrow
+shared population design. The output is aligned 1:1 with `design.columns` and
+contains the winning parsed RHS (or `nothing` for the default Normal(0, 1)).
+This is the backend-neutral subset currently shared by SBBRMI and direct-BRMI
+backends; richer categorical and multi-predictor resolution remains additive.
+"""
+function _brm_simple_population_effect_overrides(brmi::BRMI,
+                                                 design::_BRMPopulationDesign;
+                                                 prefix="BRM backend lowering")
+    specs = effect_priors(brmi)
+    isempty(specs) && return nothing
+
+    labels = Symbol[c.label for c in design.columns]
+    cells = Any[nothing for _ in labels]
+    for spec in specs
+        _brm_validate_population_effect_spec(spec; prefix)
+        all_predictors = spec.predictor === _EFFECT_COLON
+        (all_predictors || spec.predictor === design.target) || error(
+            "$prefix: `$(_brm_effect_spelling(spec))` names no linear " *
+            "predictor in this backend plan. Available predictor: $(design.target).")
+
+        indices = if spec.coefficient === _EFFECT_COLON
+            eachindex(labels)
+        else
+            idx = findfirst(==(spec.coefficient), labels)
+            isnothing(idx) && error(
+                "$prefix: `$(spec.coefficient)` is not a population coefficient " *
+                "of `$(design.target)`. Available labels: $(join(labels, ", ")).")
+            (idx,)
+        end
+        for idx in indices
+            _brm_claim_effect_prior!(
+                () -> cells[idx], v -> (cells[idx] = v), spec,
+                "`$(design.target)`'s `$(labels[idx])` column"; prefix)
+        end
+    end
+    Any[isnothing(cell) ? nothing : cell.expression for cell in cells]
+end
+
+function _brm_materialize_normal_effect_priors(overrides, n::Integer;
+                                               prefix="BRM backend lowering")
+    isnothing(overrides) && return (zeros(Float64, n), ones(Float64, n))
+    length(overrides) == n || error(
+        "$prefix: internal effect-prior alignment error: $(length(overrides)) " *
+        "priors for $n population columns")
+    location = zeros(Float64, n)
+    scale = ones(Float64, n)
+    for i in eachindex(overrides)
+        isnothing(overrides[i]) && continue
+        raw_location, raw_scale = _brm_normal_effect_args(overrides[i]; prefix)
+        loc = _brm_numeric_constant(raw_location)
+        sd = _brm_numeric_constant(raw_scale)
+        isnothing(loc) && error(
+            "$prefix: population-effect Normal location must be a numeric constant")
+        isnothing(sd) && error(
+            "$prefix: population-effect Normal scale must be a numeric constant")
+        isfinite(loc) || error(
+            "$prefix: population-effect Normal location must be finite")
+        isfinite(sd) && sd > 0 || error(
+            "$prefix: population-effect Normal scale must be finite and positive")
+        location[i] = loc
+        scale[i] = sd
+    end
+    location, scale
+end
+
+# Operation keys for the declarations consumed by the resolver above. These
+# keys are model statements, not stray operations, and must be admitted by a
+# strict direct-BRMI backend after their semantics have been validated.
+function _brm_population_effect_operation_keys(brmi::BRMI)
+    out = Set{Symbol}()
+    for (key, op_nc) in pairs(brmi.operations)
+        op = _named_op(op_nc)
+        isnothing(op) && continue
+        getf(op) === (~) || continue
+        lhs, rhs = getargs(op, 2)
+        lhs_e = _as_expr_column(lhs)
+        rhs_e = _as_expr_column(rhs)
+        isnothing(lhs_e) && continue
+        isnothing(rhs_e) && continue
+        getf(lhs_e) === effect || continue
+        address = getargs(lhs_e)
+        length(address) == 2 || continue
+        first(address) in _NON_EFFECT_CLASSES && continue
+        getf(rhs_e) === r2d2 && continue
+        push!(out, key)
+    end
+    out
+end

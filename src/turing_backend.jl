@@ -31,22 +31,6 @@ Base.show(io::IO, x::TuringBRMI) = print(
     io, "TuringBRMI with ", size(x.plan.design.matrix, 2),
     " population coefficients and ", length(x.plan.response), " observations")
 
-_brm_numeric_constant(x::Real) = Float64(x)
-function _brm_numeric_constant(x::ExprColumn)
-    isempty(getkwargs(x)) || return nothing
-    values = map(_brm_numeric_constant, getargs(x))
-    any(isnothing, values) && return nothing
-    f = getf(x)
-    f in (+, -, *, /, ^) || return nothing
-    value = try
-        f(values...)
-    catch
-        return nothing
-    end
-    value isa Real ? Float64(value) : nothing
-end
-_brm_numeric_constant(_x) = nothing
-
 # Implemented only by the Turing package extension. Keeping the generic here
 # lets the core validate and materialise plans without loading Turing.
 function _brm_turing_model end
@@ -107,8 +91,6 @@ function _turing_population_components(brmi::BRMI, observation, predictor::Symbo
     lp_lhs isa NamedColumn && name(lp_lhs) === predictor || error(
         "Turing backend: linked/distributional predictor LHSs are not yet supported")
 
-    isempty(effect_priors(brmi)) || error(
-        "Turing backend: population `effect(...)` prior overrides are not yet supported")
     isempty(ranef_effect_priors(brmi)) || error(
         "Turing backend: random-effect prior overrides are not yet supported")
     isempty(r2d2_priors(brmi)) || error(
@@ -120,7 +102,8 @@ function _turing_population_components(brmi::BRMI, observation, predictor::Symbo
     # Raw data columns are represented in `brmi.operations` too. They are
     # inputs to the backend plan, not additional model operations.
     allowed = union(Set((observation.key, predictor, extra_operations...)),
-                    Set(keys(context.data)))
+                    Set(keys(context.data)),
+                    _brm_population_effect_operation_keys(brmi))
     extras = setdiff(Set(keys(brmi.operations)), allowed)
     isempty(extras) || error(
         "Turing backend: unsupported top-level operation(s): " *
@@ -135,8 +118,11 @@ function _turing_population_components(brmi::BRMI, observation, predictor::Symbo
     length(response) == size(design.matrix, 1) || error(
         "Turing backend: response and population design have different row counts")
     k = size(design.matrix, 2)
-    (; context, design, response,
-       beta_location=zeros(Float64, k), beta_scale=ones(Float64, k))
+    overrides = _brm_simple_population_effect_overrides(
+        brmi, design; prefix="Turing backend")
+    beta_location, beta_scale = _brm_materialize_normal_effect_priors(
+        overrides, k; prefix="Turing backend")
+    (; context, design, response, beta_location, beta_scale)
 end
 
 function _turing_normal_plan(brmi::BRMI, observation, rhs::ExprColumn)

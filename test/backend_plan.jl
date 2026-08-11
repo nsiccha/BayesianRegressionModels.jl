@@ -1,6 +1,6 @@
 using Test
 using BayesianRegressionModels
-using Distributions: Exponential, Normal
+using Distributions: Cauchy, Exponential, Normal
 
 const BRM = BayesianRegressionModels
 
@@ -37,6 +37,82 @@ const BRM = BayesianRegressionModels
         mu = X_mu * pop_mu
     end
     @test Base.remove_linenums!(emitted) == Base.remove_linenums!(expected)
+end
+
+
+@testset "backend-neutral population effect-prior plan" begin
+    df = (; x=[-1.0, 0.0, 1.0], y=[0.1, 0.2, 0.3])
+    brmi = (@brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x
+        effect(:, :) ~ Normal(-1, 3)
+        effect(mu, Intercept) ~ Normal(log(2), 0.5)
+        effect(mu, x) ~ Normal(0, 0.25)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    context = BRM._brm_backend_context(brmi)
+    _, rhs = getargs(linear_predictor_op(brmi, :mu), 2)
+    design = BRM._brm_simple_population_design(
+        :mu, rhs, context.data, context.target_obs[:mu]; required=true)
+
+    overrides = BRM._brm_simple_population_effect_overrides(brmi, design)
+    location, scale = BRM._brm_materialize_normal_effect_priors(
+        overrides, length(design.columns))
+    @test location == [log(2), 0.0]
+    @test scale == [0.5, 0.25]
+    @test BRM._brm_population_effect_operation_keys(brmi) == Set((
+        Symbol("__effect__:__:"),
+        Symbol("__effect__mu__Intercept"),
+        Symbol("__effect__mu__x"),
+    ))
+
+    layered = (@brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x
+        effect(:, x) ~ Normal(0, 0.4)
+        effect(mu, x) ~ Normal(1, 0.2)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    layered_context = BRM._brm_backend_context(layered)
+    _, layered_rhs = getargs(linear_predictor_op(layered, :mu), 2)
+    layered_design = BRM._brm_simple_population_design(
+        :mu, layered_rhs, layered_context.data,
+        layered_context.target_obs[:mu]; required=true)
+    layered_overrides = BRM._brm_simple_population_effect_overrides(
+        layered, layered_design)
+    @test BRM._brm_materialize_normal_effect_priors(
+        layered_overrides, 2) == ([0.0, 1.0], [1.0, 0.2])
+
+    tied = (@brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x
+        effect(:, x) ~ Normal(0, 0.4)
+        effect(mu, :) ~ Normal(0, 0.2)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    tied_context = BRM._brm_backend_context(tied)
+    _, tied_rhs = getargs(linear_predictor_op(tied, :mu), 2)
+    tied_design = BRM._brm_simple_population_design(
+        :mu, tied_rhs, tied_context.data, tied_context.target_obs[:mu];
+        required=true)
+    @test_throws "equally specific" begin
+        BRM._brm_simple_population_effect_overrides(tied, tied_design)
+    end
+
+    wrong_family = (@brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x
+        effect(mu, x) ~ Cauchy(0, 1)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    wrong_context = BRM._brm_backend_context(wrong_family)
+    _, wrong_rhs = getargs(linear_predictor_op(wrong_family, :mu), 2)
+    wrong_design = BRM._brm_simple_population_design(
+        :mu, wrong_rhs, wrong_context.data, wrong_context.target_obs[:mu];
+        required=true)
+    @test_throws "support only `Normal" begin
+        BRM._brm_simple_population_effect_overrides(wrong_family, wrong_design)
+    end
 end
 
 @testset "shared population design is narrow and loud" begin
