@@ -44,7 +44,7 @@ configured_warmuphmc = dev_path(
 warmuphmc = resolve_git_floor_checkout(
     "WarmupHMC",
     configured_warmuphmc,
-    WARMUPHMC_NATIVE_PPL_MINIMUM;
+    WARMUPHMC_TEST_MINIMUM;
     cache_root=joinpath(TESTENV, ".bootstrap"),
     mirror=get(ENV, "BRM_TEST_WARMUPHMC_MIRROR", joinpath(
         homedir(), ".local", "state", "kb-agents", "git-mirrors",
@@ -52,7 +52,8 @@ warmuphmc = resolve_git_floor_checkout(
     origin=get(ENV, "BRM_TEST_WARMUPHMC_ORIGIN",
         "https://github.com/nsiccha/WarmupHMC.jl.git"),
     branch="dev",
-    reason="Native PPL targets require WarmupHMC's own-gradient Pathfinder initialization.",
+    reason="The test environment requires WarmupHMC's own-gradient " *
+        "initialization and Pathfinder 0.10.7 compatibility with Turing 0.46.",
 )
 # Transitive: WarmupHMC depends on the unregistered Treebars and pins it with a
 # `[sources]` entry, which Julia 1.10 ignores. `Pkg.develop` can only fix a path

@@ -1,5 +1,5 @@
-const WARMUPHMC_NATIVE_PPL_MINIMUM =
-    "6e6be51a016ab1e3cae9c7478f5c885788c65155"
+const WARMUPHMC_TEST_MINIMUM =
+    "9c642178720d5c294b9cead86fc8c82da5a5db09"
 
 function _git_succeeds(arguments)
     try
