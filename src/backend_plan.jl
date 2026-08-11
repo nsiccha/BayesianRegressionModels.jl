@@ -163,11 +163,14 @@ end
 
 # ---- narrow shared population design --------------------------------------
 
-struct _BRMPopulationPreprocess{C,R}
+struct _BRMPopulationPreprocess{C,R,D<:Tuple}
     kind::Symbol
     const_::C
     raw_ref::R
+    dependencies::D
 end
+_BRMPopulationPreprocess(kind::Symbol, const_, raw_ref) =
+    _BRMPopulationPreprocess(kind, const_, raw_ref, ())
 
 struct _BRMPopulationColumn{V<:AbstractVector,P}
     label::Symbol
@@ -245,6 +248,31 @@ function _brm_population_column(term::ExprColumn)
 end
 _brm_population_column(_term) = nothing
 
+_brm_population_columns(term) = let column = _brm_population_column(term)
+    isnothing(column) ? nothing : (column,)
+end
+
+function _brm_population_columns(term::ExprColumn{typeof(&)})
+    args = getargs(term)
+    length(args) == 2 || return nothing
+    left = _brm_population_column(args[1])
+    right = _brm_population_column(args[2])
+    (isnothing(left) || isnothing(right) ||
+     isnothing(left.source) || isnothing(right.source)) && return nothing
+    length(left.values) == length(right.values) || error(
+        "BRM backend lowering: interaction `$(left.label) & $(right.label)` " *
+        "mixes row axes of lengths $(length(left.values)) and " *
+        "$(length(right.values))")
+
+    label = Symbol(:int_, left.label, :_x_, right.label)
+    values = left.values .* right.values
+    dependencies = Tuple(c for c in (left, right)
+                         if !isnothing(c.preprocess))
+    preprocess = _BRMPopulationPreprocess(
+        :interaction, nothing, (left.label, right.label), dependencies)
+    ((; label, source=left.source, values, preprocess),)
+end
+
 """
     _brm_simple_population_design(target, rhs, data, obs_name; required=false)
 
@@ -261,16 +289,17 @@ function _brm_simple_population_design(target::Symbol, rhs,
                                        required::Bool=false)
     raw_columns = Any[]
     for term in _brm_additive_terms(rhs)
-        column = _brm_population_column(term)
-        if isnothing(column)
+        columns = _brm_population_columns(term)
+        if isnothing(columns)
             required && error(
                 "BRM backend lowering: predictor `$target` contains unsupported " *
                 "population term `$(repr(term))`; the shared initial surface " *
                 "supports only `1` and continuous raw-data columns, plus " *
-                "`zscale`, `standardize`, and `center` of one numeric column")
+                "`zscale`, `standardize`, and `center` of one numeric column, " *
+                "and pairwise interactions among those numeric terms")
             return nothing
         end
-        push!(raw_columns, column)
+        append!(raw_columns, columns)
     end
     isempty(raw_columns) && begin
         required && error("BRM backend lowering: predictor `$target` has no terms")

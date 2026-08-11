@@ -4910,19 +4910,27 @@ end
 _sb_classify_term!(t, pop_terms, ran_terms, direct_terms) =
     isnothing(_sb_cat_levels(t)) ? push!(pop_terms, t) : push!(direct_terms, t)
 
+function _sb_shared_population_column!(data, column)
+    isnothing(column.source) && return nothing
+    p = column.preprocess
+    if !isnothing(p)
+        for dependency in p.dependencies
+            _sb_shared_population_column!(data, dependency)
+        end
+        _sb_record_preproc!(data, column.label,
+            PreprocEntry(p.kind, p.const_, p.raw_ref, false))
+    end
+    data[column.label] = column.values
+    column.label
+end
+
 function _sb_shared_population_cols!(cols, data,
                                      design::_BRMPopulationDesign)
     for column in design.columns
         if isnothing(column.source)
             push!(cols, :(rep_vector(1.0, num_elements($(design.row_source)))))
         else
-            data[column.label] = column.values
-            push!(cols, column.label)
-            if !isnothing(column.preprocess)
-                p = column.preprocess
-                _sb_record_preproc!(data, column.label,
-                    PreprocEntry(p.kind, p.const_, p.raw_ref, false))
-            end
+            push!(cols, _sb_shared_population_column!(data, column))
         end
     end
     cols

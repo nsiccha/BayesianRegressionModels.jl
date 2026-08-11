@@ -99,6 +99,49 @@ end
 end
 
 
+@testset "backend-neutral continuous interactions" begin
+    df = (;
+        x=[1.0, 2.0, 4.0],
+        w=[-2.0, 1.0, 5.0],
+        y=[0.2, 1.1, -0.4],
+    )
+    brmi = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + zscale(x) & w
+        effect(mu, int_zscale_x_x_w) ~ Normal(0.5, 0.25)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    context = BRM._brm_backend_context(brmi)
+    _, rhs = getargs(linear_predictor_op(brmi, :mu), 2)
+    design = BRM._brm_simple_population_design(
+        :mu, rhs, context.data, context.target_obs[:mu]; required=true)
+
+    fitted = BRM._brm_fit_zscale(df.x)
+    scaled_x = BRM._brm_apply_zscale(fitted, df.x)
+    expected_interaction = scaled_x .* df.w
+    @test Tuple(c.label for c in design.columns) ==
+          (:Intercept, :int_zscale_x_x_w)
+    @test design.matrix ≈ hcat(ones(3), expected_interaction)
+    interaction = design.columns[2].preprocess
+    @test interaction.kind === :interaction
+    @test interaction.raw_ref == (:zscale_x, :w)
+    @test length(interaction.dependencies) == 1
+    @test only(interaction.dependencies).label === :zscale_x
+
+    sb = SBBRMI(brmi)
+    @test sb.data[:zscale_x] ≈ scaled_x
+    @test sb.data[:int_zscale_x_x_w] ≈ expected_interaction
+    @test sb.preproc[:zscale_x].kind === :zscale
+    @test sb.preproc[:int_zscale_x_x_w].kind === :interaction
+
+    future = (; x=[5.0, 7.0], w=[10.0, 12.0], y=zeros(2))
+    replay = reprocess(sb, future)
+    future_scaled = BRM._brm_apply_zscale(fitted, future.x)
+    @test replay.data[:zscale_x] ≈ future_scaled
+    @test replay.data[:int_zscale_x_x_w] ≈ future_scaled .* future.w
+end
+
+
 @testset "backend-neutral population effect-prior plan" begin
     df = (; x=[-1.0, 0.0, 1.0], y=[0.1, 0.2, 0.3])
     brmi = (@brm begin

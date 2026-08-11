@@ -85,6 +85,40 @@ end
     @test Turing.DynamicPPL.returned(backend.model, params).mu ≈ mu
 end
 
+@testset "Turing extension — continuous transformed interaction" begin
+    df = (;
+        x=[1.0, 2.0, 4.0],
+        w=[-2.0, 1.0, 5.0],
+        y=[0.2, 1.1, -0.4],
+    )
+    brmi = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + zscale(x) & w
+        effect(mu, int_zscale_x_x_w) ~ Normal(0.5, 0.25)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    backend = TuringBRMI(brmi)
+
+    fitted = BRM._brm_fit_zscale(df.x)
+    interaction = BRM._brm_apply_zscale(fitted, df.x) .* df.w
+    expected_X = hcat(ones(length(df.y)), interaction)
+    @test backend.plan.design.matrix ≈ expected_X
+    @test Tuple(c.label for c in backend.plan.design.columns) ==
+          (:Intercept, :int_zscale_x_x_w)
+    @test backend.plan.beta_location == [0.0, 0.5]
+    @test backend.plan.beta_scale == [1.0, 0.25]
+
+    params = (; beta_pop=[0.25, -0.5], sigma=0.8)
+    mu = expected_X * params.beta_pop
+    prior = sum(logpdf.(Normal.(backend.plan.beta_location,
+                               backend.plan.beta_scale), params.beta_pop)) +
+            logpdf(Exponential(2), params.sigma)
+    likelihood = sum(logpdf.(Normal.(mu, params.sigma), df.y))
+    @test Turing.logjoint(backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+    @test Turing.DynamicPPL.returned(backend.model, params).mu ≈ mu
+end
+
 @testset "Turing extension — population effect-prior overrides" begin
     df = (; x=[-1.0, 0.5, 2.0], y=[0.2, 1.1, -0.4])
     brmi = (@brm begin
