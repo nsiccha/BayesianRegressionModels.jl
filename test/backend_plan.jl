@@ -184,6 +184,27 @@ end
     @test sb.data[:g_idx] == df.g
     @test sb.preproc[:g_idx].const_ == [1, 2, 3]
 
+    declared = BRM.CA.categorical(
+        [10, 20, 30, 10, 20, 30]; levels=[30, 20, 10])
+    declared_brmi = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + g
+        y ~ Normal(mu, sigma)
+    end)((; g=declared, y=zeros(6)))
+    declared_context = BRM._brm_backend_context(declared_brmi)
+    _, declared_rhs = getargs(
+        linear_predictor_op(declared_brmi, :mu), 2)
+    declared_design = BRM._brm_simple_population_design(
+        :mu, declared_rhs, declared_context.data,
+        declared_context.target_obs[:mu]; required=true)
+    @test declared_design.matrix == hcat(
+        ones(6), Float64.(declared .== 20), Float64.(declared .== 10))
+    @test declared_design.columns[2].preprocess.const_.levels == [30, 20, 10]
+
+    declared_sb = SBBRMI(declared_brmi)
+    @test declared_sb.data[:g_idx] == [3, 2, 1, 3, 2, 1]
+    @test declared_sb.preproc[:g_idx].const_ == [30, 20, 10]
+
     reffed = (@brm begin
         sigma ~ Exponential(2)
         mu ~ 1 + factor(g; ref=3)

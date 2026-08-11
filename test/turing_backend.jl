@@ -154,6 +154,22 @@ end
     @test Turing.logjoint(backend.model, params) ≈
           prior + likelihood atol=1e-12 rtol=1e-12
     @test Turing.DynamicPPL.returned(backend.model, params).mu ≈ mu
+
+    declared = BRM.CA.categorical(
+        [1, 2, 3, 1, 2, 3]; levels=[3, 1, 2])
+    declared_brmi = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + g
+        effect(mu, g) ~ Normal(0.5, 0.25)
+        y ~ Normal(mu, sigma)
+    end)((; g=declared, y=df.y))
+    declared_backend = TuringBRMI(declared_brmi)
+    @test declared_backend.plan.design.matrix == hcat(
+        ones(6), Float64.(declared .== 1), Float64.(declared .== 2))
+    @test declared_backend.plan.design.columns[2].preprocess.const_.levels ==
+          [3, 1, 2]
+    @test declared_backend.plan.beta_location == [0.0, 0.5, 0.5]
+    @test declared_backend.plan.beta_scale == [1.0, 0.25, 0.25]
 end
 
 @testset "Turing extension — categorical reference level" begin
