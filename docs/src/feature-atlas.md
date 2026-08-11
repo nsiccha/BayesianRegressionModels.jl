@@ -178,6 +178,47 @@ end)((;
 """, :grouped; title="Correlated random slopes")
 ```
 
+## Random-effect scale and correlation priors
+
+The `p` identifier gives the group block a stable prior address. The scale
+override applies only to the `x` margin; the intercept keeps the shared default.
+
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+grouped_priors = (@brm begin
+    sigma ~ Exponential(2)
+    mu ~ 1 + x + (1 + x | p | subject)
+    sd(mu, p, x) ~ Exponential(0.25)
+    cor(:, p) ~ LKJCholesky(2, 2.5)
+    outcome ~ Normal(mu, sigma)
+end)((;
+    x=[-1.0, 0.5, 2.0, 0.25],
+    subject=[2, 1, 2, 3],
+    outcome=[0.2, 1.1, -0.4, 0.7],
+))
+""", :grouped_priors; title="Addressed group scale and correlation priors")
+```
+
+## Stratified group covariance
+
+`gr(subject, by=arm)` fits a separate scale/correlation frame in each arm while
+retaining one pooled subject coordinate.
+
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+stratified_groups = (@brm begin
+    sigma ~ Exponential(2)
+    mu ~ 1 + x + (1 + x | gr(subject, by=arm))
+    outcome ~ Normal(mu, sigma)
+end)((;
+    x=[-1.0, 0.5, 2.0, 0.25, -0.5, 1.25],
+    subject=[1, 1, 2, 3, 3, 4],
+    arm=[1, 1, 1, 2, 2, 2],
+    outcome=[0.2, 1.1, -0.4, 0.7, -0.2, 0.5],
+))
+""", :stratified_groups; title="Group covariance stratified by arm")
+```
+
 ## Multiple crossed group effects
 
 ```@eval
