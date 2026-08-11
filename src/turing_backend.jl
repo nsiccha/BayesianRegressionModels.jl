@@ -101,6 +101,61 @@ same executable distributions as `backend.model`.
 """
 function turing_pointwise_loglikelihoods end
 
+"""
+    turing_predictive_model(backend::TuringBRMI)
+
+Return the direct-BRMI DynamicPPL model with every response site unobserved.
+Use this with Turing's standard chain-level `predict` interface, or call
+[`turing_posterior_predictive`](@ref) for one constrained parameter draw.
+"""
+function turing_predictive_model end
+
+"""
+    turing_generated_quantities(backend::TuringBRMI, parameters)
+
+Return the deterministic quantities produced by the fitted Turing model at one
+constrained parameter draw. This is the response-aware BRM entry point to
+DynamicPPL's `returned` evaluation.
+"""
+function turing_generated_quantities end
+
+"""
+    turing_posterior_predictive([rng], backend::TuringBRMI, parameters)
+
+Draw every modeled response at one constrained parameter draw. The result is a
+response-named `NamedTuple`, including one entry per response in a
+multi-response model.
+"""
+function turing_posterior_predictive end
+
+function _turing_unobserved_response(response)
+    T = nonmissingtype(eltype(response))
+    unobserved = Vector{Union{Missing,T}}(undef, length(response))
+    fill!(unobserved, missing)
+end
+
+function _turing_predictive_plan(plan::_TuringPopulationPlan)
+    _TuringPopulationPlan(
+        plan.family, plan.context, plan.predictor, plan.design,
+        _turing_unobserved_response(plan.response), plan.beta_location,
+        plan.beta_scale, plan.family_args, plan.scale_prior,
+        plan.random_effects, plan.missing_response, plan.response_modifier,
+        plan.observation_weight)
+end
+
+function _turing_predictive_plan(plan::_TuringMeanPrecisionPlan)
+    _TuringMeanPrecisionPlan(
+        plan.family, plan.context, plan.mean, plan.precision, plan.family_args,
+        _turing_unobserved_response(plan.response), plan.response_modifier,
+        plan.observation_weight)
+end
+
+_turing_predictive_plan(plan::_TuringMultiResponsePlan) =
+    _TuringMultiResponsePlan(
+        plan.responses,
+        Tuple(_turing_predictive_plan(child) for child in plan.plans),
+        plan.owners)
+
 function _turing_direct_observations(brmi::BRMI)
     found = Any[]
     for (key, op_nc) in pairs(brmi.operations)

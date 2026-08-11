@@ -8,7 +8,7 @@ using Distributions: ContinuousUnivariateDistribution,
 using LinearAlgebra: Diagonal
 using LogExpFunctions: logistic, log1mexp
 import Distributions: logpdf
-import Random: AbstractRNG, rand
+import Random: AbstractRNG, default_rng, rand
 using Turing
 
 const BRM = BayesianRegressionModels
@@ -247,7 +247,7 @@ Turing.@model function _brm_population_glm_correlated_group(
     else
         error("Turing backend: internal unsupported grouped GLM family $family")
     end
-    (; eta, rate, L_group, tau_group, b_group, group_effect)
+    (; eta, rate, response=y, L_group, tau_group, b_group, group_effect)
 end
 
 Turing.@model function _brm_population_glm_zero_correlation_group(
@@ -294,7 +294,7 @@ Turing.@model function _brm_population_glm_zero_correlation_group(
     else
         error("Turing backend: internal unsupported zero-correlation GLM family $family")
     end
-    (; eta, rate, group_intercept_scale, tau_group_slopes, scales,
+    (; eta, rate, response=y, group_intercept_scale, tau_group_slopes, scales,
        b_group, group_effect)
 end
 
@@ -306,7 +306,7 @@ Turing.@model function _brm_population_bernoulli_logit(
         y[i] ~ _brm_objective_observation(
             BRM.BernoulliLogit(eta[i]), observation_weight, i)
     end
-    (; eta)
+    (; eta, response=y)
 end
 
 Turing.@model function _brm_population_bernoulli_logit_random_intercept(
@@ -322,7 +322,7 @@ Turing.@model function _brm_population_bernoulli_logit_random_intercept(
         y[i] ~ _brm_objective_observation(
             BRM.BernoulliLogit(eta[i]), observation_weight, i)
     end
-    (; eta, group_scale, group_effect)
+    (; eta, response=y, group_scale, group_effect)
 end
 
 Turing.@model function _brm_population_binomial_logit(
@@ -333,7 +333,7 @@ Turing.@model function _brm_population_binomial_logit(
         y[i] ~ _brm_objective_observation(
             BRM.BinomialLogit(trials[i], eta[i]), observation_weight, i)
     end
-    (; eta, trials)
+    (; eta, trials, response=y)
 end
 
 Turing.@model function _brm_population_binomial_logit_random_intercept(
@@ -349,7 +349,7 @@ Turing.@model function _brm_population_binomial_logit_random_intercept(
         y[i] ~ _brm_objective_observation(
             BRM.BinomialLogit(trials[i], eta[i]), observation_weight, i)
     end
-    (; eta, trials, group_scale, group_effect)
+    (; eta, trials, response=y, group_scale, group_effect)
 end
 
 Turing.@model function _brm_population_poisson_log(
@@ -362,7 +362,7 @@ Turing.@model function _brm_population_poisson_log(
         y[i] ~ _brm_poisson_observation(
             response_modifier, observation_weight, rate[i], i)
     end
-    (; log_rate, rate)
+    (; log_rate, rate, response=y)
 end
 
 Turing.@model function _brm_population_poisson_log_random_intercept(
@@ -379,7 +379,7 @@ Turing.@model function _brm_population_poisson_log_random_intercept(
         y[i] ~ _brm_poisson_observation(
             response_modifier, observation_weight, rate[i], i)
     end
-    (; log_rate, rate, group_scale, group_effect)
+    (; log_rate, rate, response=y, group_scale, group_effect)
 end
 
 Turing.@model function _brm_population_negative_binomial2(
@@ -456,7 +456,7 @@ Turing.@model function _brm_population_negative_binomial2(
         y[i] ~ _brm_objective_observation(
             BRM.NegativeBinomial2(mu[i], phi[i]), observation_weight, i)
     end
-    (; log_mu, log_phi, mu, phi,
+    (; log_mu, log_phi, mu, phi, response=y,
        mean_group_scale, mean_group_effect,
        L_mean_group, tau_mean_group, b_mean_group,
        precision_group_scale, precision_group_effect,
@@ -538,7 +538,7 @@ Turing.@model function _brm_population_beta_binomial2(
             BRM.BetaBinomial2(trials[i], mean[i], precision[i]),
             observation_weight, i)
     end
-    (; logit_mean, log_precision, mean, precision, trials,
+    (; logit_mean, log_precision, mean, precision, trials, response=y,
        mean_group_scale, mean_group_effect,
        L_mean_group, tau_mean_group, b_mean_group,
        precision_group_scale, precision_group_effect,
@@ -560,7 +560,7 @@ Turing.@model function _brm_shared_bernoulli_response(
         y[i] ~ _brm_objective_observation(
             BRM.BernoulliLogit(eta[i]), observation_weight, i)
     end
-    (; eta)
+    (; eta, response=y)
 end
 
 Turing.@model function _brm_shared_binomial_response(
@@ -569,7 +569,7 @@ Turing.@model function _brm_shared_binomial_response(
         y[i] ~ _brm_objective_observation(
             BRM.BinomialLogit(trials[i], eta[i]), observation_weight, i)
     end
-    (; eta, trials)
+    (; eta, trials, response=y)
 end
 
 Turing.@model function _brm_shared_poisson_response(
@@ -578,7 +578,7 @@ Turing.@model function _brm_shared_poisson_response(
         y[i] ~ _brm_poisson_observation(
             response_modifier, observation_weight, rate[i], i)
     end
-    (; log_rate=log.(rate), rate)
+    (; log_rate=log.(rate), rate, response=y)
 end
 
 Turing.@model function _brm_shared_negative_binomial2_response(
@@ -587,7 +587,7 @@ Turing.@model function _brm_shared_negative_binomial2_response(
         y[i] ~ _brm_objective_observation(
             BRM.NegativeBinomial2(mu[i], phi[i]), observation_weight, i)
     end
-    (; mu, phi)
+    (; mu, phi, response=y)
 end
 
 Turing.@model function _brm_shared_beta_binomial2_response(
@@ -597,7 +597,7 @@ Turing.@model function _brm_shared_beta_binomial2_response(
             BRM.BetaBinomial2(trials[i], mean[i], precision[i]),
             observation_weight, i)
     end
-    (; mean, precision, trials)
+    (; mean, precision, trials, response=y)
 end
 
 
@@ -991,5 +991,46 @@ function BRM.turing_pointwise_loglikelihoods(
         "likelihood term for a rowwise BRM observation")
     _brm_named_pointwise(backend.plan, raw_values)
 end
+
+function BRM.turing_predictive_model(backend::BRM.TuringBRMI)
+    BRM._brm_turing_model(BRM._turing_predictive_plan(backend.plan))
+end
+
+BRM.turing_generated_quantities(backend::BRM.TuringBRMI, parameters) =
+    Turing.DynamicPPL.returned(backend.model, parameters)
+
+function _brm_complete_predictive_response(response)
+    any(ismissing, response) && error(
+        "Turing backend: posterior-predictive execution left an ungenerated " *
+        "response value")
+    collect(nonmissingtype(eltype(response)), response)
+end
+
+function _brm_named_predictive(plan, returned)
+    response_name = BRM._turing_direct_observation(plan.context.parent).key
+    response = _brm_complete_predictive_response(returned.response)
+    NamedTuple{(response_name,)}((response,))
+end
+
+function _brm_named_predictive(
+        plan::BRM._TuringMultiResponsePlan, returned)
+    responses = Tuple(
+        _brm_complete_predictive_response(child.response)
+        for child in returned.responses)
+    NamedTuple{plan.responses}(responses)
+end
+
+function BRM.turing_posterior_predictive(
+        rng::AbstractRNG, backend::BRM.TuringBRMI, parameters)
+    predictive = BRM.turing_predictive_model(backend)
+    fixed = Turing.fix(predictive, parameters)
+    draw = rand(rng, fixed)
+    returned = Turing.DynamicPPL.returned(fixed, draw.data)
+    _brm_named_predictive(backend.plan, returned)
+end
+
+BRM.turing_posterior_predictive(
+    backend::BRM.TuringBRMI, parameters; rng=default_rng()) =
+    BRM.turing_posterior_predictive(rng, backend, parameters)
 
 end # module

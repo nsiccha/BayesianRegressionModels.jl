@@ -96,7 +96,8 @@ export Data, MaybeData, maybedata
 export AbstractColumn, MissingColumn, DataColumn, NamedColumn,
        ExprColumn, LikelihoodColumn, MaterializedColumn
 export BRMI, VBRMI, SBBRMI, TuringBRMI, GenerativeDeclaration, GenerativePlan,
-       turing_pointwise_loglikelihoods
+       turing_pointwise_loglikelihoods, turing_predictive_model,
+       turing_generated_quantities, turing_posterior_predictive
 export NativePPL
 export BRMDescriptor, BRMInput, BRMOutput, BRMOperation, BRMHighlight
 export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,

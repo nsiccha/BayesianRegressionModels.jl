@@ -43,10 +43,23 @@ const BRM = BayesianRegressionModels
     @test Turing.loglikelihood(backend.model, params) ≈
           sum(logpdf.(Normal.(mu, params.sigma), df.y)) atol=1e-12 rtol=1e-12
     @test Turing.DynamicPPL.returned(backend.model, params).mu == mu
+    generated = turing_generated_quantities(backend, params)
+    @test generated.mu == mu
+    @test generated.response == df.y
     pointwise = turing_pointwise_loglikelihoods(backend, params)
     @test propertynames(pointwise) == (:y,)
     @test pointwise.y ≈ logpdf.(Normal.(mu, params.sigma), df.y)
     @test sum(pointwise.y) ≈ Turing.loglikelihood(backend.model, params)
+
+    predictive_model = turing_predictive_model(backend)
+    @test predictive_model isa Turing.DynamicPPL.Model
+    predictive = turing_posterior_predictive(
+        Xoshiro(61), backend, params)
+    @test propertynames(predictive) == (:y,)
+    @test predictive == turing_posterior_predictive(
+        Xoshiro(61), backend, params)
+    @test length(predictive.y) == length(df.y)
+    @test all(isfinite, predictive.y)
 
     prior_draw = rand(Xoshiro(42), backend.model)
     @test prior_draw.data.beta_pop isa Vector{Float64}
@@ -114,6 +127,10 @@ end
         for i in missing_plan.observed_indices
     ]
     @test sum(skipmissing(pointwise.y)) ≈ observed_likelihood
+    predictive = turing_posterior_predictive(Xoshiro(74), backend, params)
+    @test propertynames(predictive) == (:y,)
+    @test !any(ismissing, predictive.y)
+    @test length(predictive.y) == length(df.y)
 
     complete = merge(df, (; y=Union{Missing,Float64}[0.2, 0.1, -0.4, 0.3]))
     @test_throws "found no missing values" begin
@@ -179,6 +196,15 @@ end
     @test pointwise.y ≈ logpdf.(Normal.(mu, normal_params.sigma), df.y)
     @test pointwise.count ≈ logpdf.(Poisson.(rate), df.count)
     @test sum(pointwise.y) + sum(pointwise.count) ≈ likelihood
+    generated = turing_generated_quantities(backend, draw.data)
+    @test generated.responses[1].response == df.y
+    @test generated.responses[2].response == df.count
+    predictive = turing_posterior_predictive(
+        Xoshiro(92), backend, draw.data)
+    @test propertynames(predictive) == (:y, :count)
+    @test length(predictive.y) == length(df.y)
+    @test length(predictive.count) == length(df.count)
+    @test eltype(predictive.count) <: Integer
 
 end
 
