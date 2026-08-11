@@ -197,11 +197,15 @@ struct _BRMPopulationDesign{C<:Tuple,M<:AbstractMatrix,T<:Tuple,V<:AbstractVecto
     fixed::V
 end
 
-struct _BRMRandomInterceptPlan{L<:AbstractVector,I<:AbstractVector{Int}}
+struct _BRMRandomEffectPlan{L<:AbstractVector,I<:AbstractVector{Int},
+                            C<:Tuple,M<:AbstractMatrix}
     predictor::Symbol
     group::Symbol
     levels::L
     indices::I
+    columns::C
+    matrix::M
+    intercept_only::Bool
 end
 
 _brm_additive_terms(rhs) = begin
@@ -221,14 +225,14 @@ _brm_is_grouped_term(term::ExprColumn) =
     getf(term) === (|) || getf(term) === doublepipe
 _brm_is_grouped_term(_term) = false
 
-function _brm_simple_random_intercept_plans(
+function _brm_simple_random_effect_plans(
         brmi::BRMI, target::Symbol, context::_BRMBackendContext;
         required::Bool=false)
     op = linear_predictor_op(brmi, target)
     isnothing(op) && return ()
     _, rhs = getargs(op, 2)
     grouped = filter(_brm_is_grouped_term, _brm_additive_terms(rhs))
-    plans = _BRMRandomInterceptPlan[]
+    plans = _BRMRandomEffectPlan[]
     seen = Set{Symbol}()
     for term in grouped
         args = getargs(term)
@@ -238,13 +242,13 @@ function _brm_simple_random_intercept_plans(
                 "have the expected `(effects | group)` shape")
             return nothing
         end
-        inner, group_raw = args
-        if !(inner isa Integer && inner == 1)
+        getf(term) === (|) || begin
             required && error(
-                "BRM backend lowering: the shared initial group plan supports " *
-                "plain `(1 | group)` random intercepts; got `$(repr(term))`")
+                "BRM backend lowering: zero-correlation `||` random slopes " *
+                "need a separate independent-block plan; got `$(repr(term))`")
             return nothing
         end
+        inner, group_raw = args
         if !(group_raw isa NamedColumn && parent(group_raw) isa DataColumn)
             required && error(
                 "BRM backend lowering: random-intercept grouping factor must " *
@@ -263,8 +267,39 @@ function _brm_simple_random_intercept_plans(
         n_levels, indices = _brm_level_index(raw)
         length(levels) == n_levels || error(
             "BRM backend lowering: inconsistent fitted levels for group `$group`")
-        push!(plans, _BRMRandomInterceptPlan(
-            target, group, levels, indices))
+        raw_columns = Any[]
+        for inner_term in _brm_additive_terms(inner)
+            columns = _brm_population_columns(inner_term)
+            if isnothing(columns) || any(column ->
+                    !isnothing(column.preprocess) ||
+                    (!isnothing(column.source) &&
+                     !(column.values isa AbstractVector{<:Real})), columns)
+                required && error(
+                    "BRM backend lowering: the shared initial random-slope " *
+                    "design supports an intercept and raw continuous columns; " *
+                    "got `$(repr(inner_term))` in `$(repr(term))`")
+                return nothing
+            end
+            append!(raw_columns, columns)
+        end
+        isempty(raw_columns) && error(
+            "BRM backend lowering: random-effect term `$(repr(term))` has no columns")
+        n = length(indices)
+        columns = map(raw_columns) do column
+            values = isnothing(column.source) ? ones(Float64, n) : column.values
+            length(values) == n || error(
+                "BRM backend lowering: random-effect predictor `$target` and " *
+                "group `$group` have different row counts")
+            _BRMPopulationColumn(
+                column.label, column.effect_addresses, column.effect_block,
+                column.source, values, column.preprocess)
+        end
+        matrix = hcat((column.values for column in columns)...)
+        intercept_only = length(columns) == 1 &&
+                         only(columns).label === :Intercept
+        push!(plans, _BRMRandomEffectPlan(
+            target, group, levels, indices, Tuple(columns), matrix,
+            intercept_only))
     end
     Tuple(plans)
 end
@@ -529,7 +564,7 @@ an additive intercept, continuous raw-data columns, pure numeric data
 expressions, fitted `zscale`/`standardize`/`center` columns, pairwise
 continuous/categorical interactions, treatment contrasts for integer or
 `CategoricalVector` columns, and pure data-derived fixed `offset(...)` terms.
-Plain grouped terms are separated into `_BRMRandomInterceptPlan` values rather
+Plain grouped terms are separated into `_BRMRandomEffectPlan` values rather
 than being mistaken for population columns.
 Returns `nothing` for a term requiring richer lowering unless `required=true`,
 in which case it fails loudly. SBBRMI and Turing consume the shared

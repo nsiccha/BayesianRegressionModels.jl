@@ -1,14 +1,18 @@
 module BayesianRegressionModelsTuringExt
 
 using BayesianRegressionModels
-using Distributions: Exponential, Normal, Poisson, product_distribution
+using Distributions: Exponential, LKJCholesky, Normal, Poisson,
+                     product_distribution, truncated
+using LinearAlgebra: Diagonal
 using LogExpFunctions: logistic
 using Turing
 
 const BRM = BayesianRegressionModels
 
-_random_intercept_args(component) = isempty(component.random_intercepts) ?
-    (Int[], 0) : let block = only(component.random_intercepts)
+_random_intercept_args(component) = isempty(component.random_effects) ?
+    (Int[], 0) : let block = only(component.random_effects)
+        block.intercept_only || error(
+            "Turing backend: internal random-intercept dispatch received a slope block")
         (block.indices, length(block.levels))
     end
 
@@ -37,6 +41,27 @@ Turing.@model function _brm_population_gaussian_random_intercept(
         y[i] ~ Normal(mu[i], sigma)
     end
     (; mu, group_scale, group_effect)
+end
+
+Turing.@model function _brm_population_gaussian_correlated_group(
+    X, fixed, Z, group_idx, n_groups, y,
+    beta_location, beta_scale, sigma_scale)
+    beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
+    sigma ~ Exponential(sigma_scale)
+    n_terms = size(Z, 2)
+    L_group ~ LKJCholesky(n_terms, 1.0)
+    tau_group ~ product_distribution(
+        fill(truncated(Normal(), 0.0, Inf), n_terms))
+    z_group_flat ~ product_distribution(
+        fill(Normal(), n_terms * n_groups))
+    z_group = reshape(z_group_flat, n_terms, n_groups)
+    b_group = transpose(Diagonal(tau_group) * Matrix(L_group.L) * z_group)
+    group_effect = vec(sum(Z .* b_group[group_idx, :]; dims=2))
+    mu = X * beta_pop + fixed + group_effect
+    for i in eachindex(y)
+        y[i] ~ Normal(mu[i], sigma)
+    end
+    (; mu, L_group, tau_group, b_group, group_effect)
 end
 
 Turing.@model function _brm_population_bernoulli_logit(
@@ -199,8 +224,21 @@ end
 
 function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:normal_identity}})
-    if !isempty(plan.random_intercepts)
-        block = only(plan.random_intercepts)
+    if !isempty(plan.random_effects)
+        block = only(plan.random_effects)
+        if !block.intercept_only
+            return _brm_population_gaussian_correlated_group(
+                plan.design.matrix,
+                plan.design.fixed,
+                block.matrix,
+                block.indices,
+                length(block.levels),
+                plan.response,
+                plan.beta_location,
+                plan.beta_scale,
+                plan.scale_prior,
+            )
+        end
         return _brm_population_gaussian_random_intercept(
             plan.design.matrix,
             plan.design.fixed,
@@ -224,8 +262,8 @@ end
 
 function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:bernoulli_logit}})
-    if !isempty(plan.random_intercepts)
-        block = only(plan.random_intercepts)
+    if !isempty(plan.random_effects)
+        block = only(plan.random_effects)
         return _brm_population_bernoulli_logit_random_intercept(
             plan.design.matrix,
             plan.design.fixed,
@@ -247,8 +285,8 @@ end
 
 function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:binomial_logit}})
-    if !isempty(plan.random_intercepts)
-        block = only(plan.random_intercepts)
+    if !isempty(plan.random_effects)
+        block = only(plan.random_effects)
         return _brm_population_binomial_logit_random_intercept(
             plan.design.matrix,
             plan.design.fixed,
@@ -272,8 +310,8 @@ end
 
 function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:poisson_log}})
-    if !isempty(plan.random_intercepts)
-        block = only(plan.random_intercepts)
+    if !isempty(plan.random_effects)
+        block = only(plan.random_effects)
         return _brm_population_poisson_log_random_intercept(
             plan.design.matrix,
             plan.design.fixed,

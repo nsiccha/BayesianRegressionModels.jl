@@ -1,7 +1,9 @@
 using Test
 using Random: Xoshiro
 using BayesianRegressionModels
-using Distributions: Binomial, Cauchy, Exponential, Normal, Poisson, logpdf
+using Distributions: Binomial, Cauchy, Exponential, LKJCholesky, Normal,
+                     Poisson, logpdf, truncated
+using LinearAlgebra: Diagonal, Symmetric, cholesky
 using LogExpFunctions: logistic, logit
 using Turing
 
@@ -69,7 +71,7 @@ end
         y ~ Normal(mu, sigma)
     end)(df)
     backend = TuringBRMI(brmi)
-    block = only(backend.plan.random_intercepts)
+    block = only(backend.plan.random_effects)
     params = (;
         beta_pop=[0.25, -0.5], sigma=0.8,
         log_group_scale=log(0.6), z_group=[-0.2, 0.4, 1.1])
@@ -96,6 +98,54 @@ end
 end
 
 
+@testset "Turing extension — Gaussian correlated random slope" begin
+    df = (;
+        x=[-1.0, 0.5, 2.0, 0.25],
+        subject=["b", "a", "b", "c"],
+        y=[0.2, 1.1, -0.4, 0.7],
+    )
+    backend = TuringBRMI((@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x + (1 + x | subject)
+        y ~ Normal(mu, sigma)
+    end)(df))
+    block = only(backend.plan.random_effects)
+    L_matrix = [1.0 0.0; 0.3 sqrt(1 - 0.3^2)]
+    L_group = cholesky(Symmetric(L_matrix * transpose(L_matrix)))
+    params = (;
+        beta_pop=[0.25, -0.5], sigma=0.8,
+        L_group,
+        tau_group=[0.4, 0.7],
+        z_group_flat=[-0.2, 0.4, 1.1, 0.3, -0.5, 0.8],
+    )
+    z_group = reshape(params.z_group_flat, 2, 3)
+    b_group = transpose(
+        Diagonal(params.tau_group) * Matrix(params.L_group.L) * z_group)
+    group_effect = vec(sum(
+        block.matrix .* b_group[block.indices, :]; dims=2))
+    mu = backend.plan.design.matrix * params.beta_pop + group_effect
+    half_normal = truncated(Normal(), 0.0, Inf)
+    prior = sum(logpdf.(Normal(), params.beta_pop)) +
+            logpdf(Exponential(2), params.sigma) +
+            logpdf(LKJCholesky(2, 1.0), params.L_group) +
+            sum(logpdf.(half_normal, params.tau_group)) +
+            sum(logpdf.(Normal(), params.z_group_flat))
+    likelihood = sum(logpdf.(Normal.(mu, params.sigma), df.y))
+    returned = Turing.DynamicPPL.returned(backend.model, params)
+
+    @test block.matrix == hcat(ones(4), df.x)
+    @test Turing.logjoint(backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+    @test Turing.logprior(backend.model, params) ≈ prior atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(backend.model, params) ≈
+          likelihood atol=1e-12 rtol=1e-12
+    @test returned.mu == mu
+    @test returned.tau_group == params.tau_group
+    @test returned.b_group == b_group
+    @test returned.group_effect == group_effect
+end
+
+
 @testset "Turing extension — GLM plain random intercepts" begin
     base = (;
         x=[-1.0, 0.5, 2.0, 0.25],
@@ -118,7 +168,7 @@ end
         beta_pop=[0.25, -0.5],
         log_group_scale=log(0.6), z_group=[-0.2, 0.4, 1.1])
     group_effect = exp(params.log_group_scale) .* params.z_group
-    indices = only(bernoulli.plan.random_intercepts).indices
+    indices = only(bernoulli.plan.random_effects).indices
     eta = bernoulli.plan.design.matrix * params.beta_pop + group_effect[indices]
     prior = sum(logpdf.(Normal(), params.beta_pop)) +
             logpdf(Normal(), params.log_group_scale) +
@@ -689,9 +739,9 @@ end
         log_precision_group_scale=log(0.3),
         z_precision_group=[0.5, -0.7],
     )
-    mean_block = only(negative_binomial.plan.mean.random_intercepts)
+    mean_block = only(negative_binomial.plan.mean.random_effects)
     precision_block = only(
-        negative_binomial.plan.precision.random_intercepts)
+        negative_binomial.plan.precision.random_effects)
     mean_group_values = exp(params.log_mean_group_scale) .* params.z_mean_group
     precision_group_values = exp(params.log_precision_group_scale) .*
                              params.z_precision_group
@@ -756,12 +806,11 @@ end
     end
 
     random_slope = (@brm begin
-        sigma ~ Exponential(1)
-        mu ~ 1 + x + (1 + x | subject)
-        y ~ Normal(mu, sigma)
+        log(lambda) ~ 1 + x + (1 + x | subject)
+        y ~ Poisson(lambda)
     end)((;
-        x=[0.0, 1.0, 2.0], subject=["a", "a", "b"], y=zeros(3)))
-    @test_throws "supports plain `(1 | group)` random intercepts" begin
+        x=[0.0, 1.0, 2.0], subject=["a", "a", "b"], y=[0, 1, 2]))
+    @test_throws "random slopes for predictor `lambda`" begin
         TuringBRMI(random_slope)
     end
 end

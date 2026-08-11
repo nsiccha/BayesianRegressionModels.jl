@@ -14,7 +14,7 @@ struct _TuringPopulationPlan{F,C<:_BRMBackendContext,P<:_BRMPopulationPredictor,
     beta_scale::B
     family_args::A
     scale_prior::S
-    random_intercepts::R
+    random_effects::R
 end
 
 struct _TuringPopulationComponent{P<:_BRMPopulationPredictor,
@@ -24,7 +24,7 @@ struct _TuringPopulationComponent{P<:_BRMPopulationPredictor,
     design::D
     beta_location::B
     beta_scale::B
-    random_intercepts::R
+    random_effects::R
 end
 
 struct _TuringMeanPrecisionPlan{F,C<:_BRMBackendContext,M,Q,A,
@@ -135,17 +135,22 @@ end
 function _turing_predictor_component(brmi::BRMI, context::_BRMBackendContext,
                                      predictor::Symbol;
                                      available_predictors=(predictor,),
-                                     allow_group_terms::Bool=false)
-    random_intercepts = _brm_simple_random_intercept_plans(
+                                     allow_group_terms::Bool=false,
+                                     allow_random_slopes::Bool=false)
+    random_effects = _brm_simple_random_effect_plans(
         brmi, predictor, context; required=true)
-    if !allow_group_terms && !isempty(random_intercepts)
+    if !allow_group_terms && !isempty(random_effects)
         error("Turing backend: random effects for predictor `$predictor` are " *
               "not yet supported by this likelihood plan")
     end
-    if allow_group_terms && length(random_intercepts) > 1
+    if allow_group_terms && length(random_effects) > 1
         error("Turing backend: the initial grouped slice supports one plain " *
-              "random-intercept block per predictor; found " *
-              "$(length(random_intercepts)) for `$predictor`")
+              "random-effect block per predictor; found " *
+              "$(length(random_effects)) for `$predictor`")
+    end
+    if !allow_random_slopes && any(!block.intercept_only for block in random_effects)
+        error("Turing backend: random slopes for predictor `$predictor` are " *
+              "not yet supported by this likelihood plan")
     end
     predictor_plan = _brm_simple_population_predictor(
         brmi, predictor, context; required=true)
@@ -156,28 +161,30 @@ function _turing_predictor_component(brmi::BRMI, context::_BRMBackendContext,
     beta_location, beta_scale = _brm_materialize_normal_effect_priors(
         overrides, k; prefix="Turing backend")
     _TuringPopulationComponent(
-        predictor_plan, design, beta_location, beta_scale, random_intercepts)
+        predictor_plan, design, beta_location, beta_scale, random_effects)
 end
 
 function _turing_population_components(brmi::BRMI, observation, predictor::Symbol;
                                        extra_operations=(),
-                                       allow_random_intercepts::Bool=false)
+                                       allow_random_effects::Bool=false,
+                                       allow_random_slopes::Bool=false)
     context = _turing_model_context(
         brmi, observation, (predictor, extra_operations...))
     component = _turing_predictor_component(
-        brmi, context, predictor; allow_group_terms=allow_random_intercepts)
-    random_intercepts = component.random_intercepts
+        brmi, context, predictor; allow_group_terms=allow_random_effects,
+        allow_random_slopes)
+    random_effects = component.random_effects
     response = context.data[observation.key]
     response isa AbstractVector || error(
         "Turing backend: response `$(observation.key)` must be a vector")
     length(response) == size(component.design.matrix, 1) || error(
         "Turing backend: response and population design have different row counts")
     all(length(block.indices) == length(response)
-        for block in random_intercepts) || error(
-            "Turing backend: response and random-intercept index have different row counts")
+        for block in random_effects) || error(
+            "Turing backend: response and random-effect index have different row counts")
     (; context, predictor=component.predictor, design=component.design, response,
        beta_location=component.beta_location, beta_scale=component.beta_scale,
-       random_intercepts)
+       random_effects)
 end
 
 
@@ -223,8 +230,8 @@ function _turing_mean_precision_components(brmi::BRMI, observation,
         "Turing backend: $family_name precision design has a different row count")
     all(length(block.indices) == n
         for component in (mean, precision)
-        for block in component.random_intercepts) || error(
-            "Turing backend: $family_name response and random-intercept index " *
+        for block in component.random_effects) || error(
+            "Turing backend: $family_name response and random-effect index " *
             "have different row counts")
     (; context, mean, precision, response)
 end
@@ -283,7 +290,7 @@ function _turing_normal_plan(brmi::BRMI, observation, rhs::ExprColumn)
         "got `$scale`")
     parts = _turing_population_components(
         brmi, observation, predictor; extra_operations=(scale,),
-        allow_random_intercepts=true)
+        allow_random_effects=true, allow_random_slopes=true)
     _turing_require_predictor_link(parts, identity, "Gaussian identity location")
     parts.response isa AbstractVector{<:Real} || error(
         "Turing backend: Gaussian response `$(observation.key)` must be real-valued")
@@ -292,14 +299,14 @@ function _turing_normal_plan(brmi::BRMI, observation, rhs::ExprColumn)
                           parts.design,
                           collect(Float64, parts.response), parts.beta_location,
                           parts.beta_scale, NamedTuple(), scale_prior,
-                          parts.random_intercepts)
+                          parts.random_effects)
 end
 
 function _turing_bernoulli_population_plan(brmi::BRMI, observation,
                                            predictor::Symbol, expected_link,
                                            role::AbstractString)
     parts = _turing_population_components(
-        brmi, observation, predictor; allow_random_intercepts=true)
+        brmi, observation, predictor; allow_random_effects=true)
     _turing_require_predictor_link(parts, expected_link, role)
     all(x -> x isa Bool || (x isa Integer && x in (0, 1)), parts.response) || error(
         "Turing backend: Bernoulli response `$(observation.key)` must contain only 0/1")
@@ -307,7 +314,7 @@ function _turing_bernoulli_population_plan(brmi::BRMI, observation,
                           parts.design,
                           Int.(parts.response), parts.beta_location,
                           parts.beta_scale, NamedTuple(), nothing,
-                          parts.random_intercepts)
+                          parts.random_effects)
 end
 
 function _turing_bernoulli_logit_plan(brmi::BRMI, observation, rhs::ExprColumn)
@@ -336,7 +343,7 @@ function _turing_binomial_population_plan(brmi::BRMI, observation, trials_raw,
                                           predictor::Symbol, expected_link,
                                           role::AbstractString)
     parts = _turing_population_components(
-        brmi, observation, predictor; allow_random_intercepts=true)
+        brmi, observation, predictor; allow_random_effects=true)
     _turing_require_predictor_link(parts, expected_link, role)
     trials = _brm_materialize_count_argument(
         trials_raw, length(parts.response), "Binomial trial count";
@@ -347,7 +354,7 @@ function _turing_binomial_population_plan(brmi::BRMI, observation, trials_raw,
                           parts.design,
                           response, parts.beta_location,
                           parts.beta_scale, (; trials), nothing,
-                          parts.random_intercepts)
+                          parts.random_effects)
 end
 
 function _turing_binomial_logit_plan(brmi::BRMI, observation, rhs::ExprColumn)
@@ -396,7 +403,7 @@ function _turing_poisson_log_plan(brmi::BRMI, observation, rhs::ExprColumn)
               "`log_rate ~ formula; y ~ Poisson(exp(log_rate))`")
     end
     parts = _turing_population_components(
-        brmi, observation, predictor; allow_random_intercepts=true)
+        brmi, observation, predictor; allow_random_effects=true)
     _turing_require_predictor_link(parts, expected_link, "Poisson log link")
     all(x -> x isa Integer && x >= 0, parts.response) || error(
         "Turing backend: Poisson response `$(observation.key)` must be nonnegative integers")
@@ -404,7 +411,7 @@ function _turing_poisson_log_plan(brmi::BRMI, observation, rhs::ExprColumn)
                           parts.design,
                           Int.(parts.response), parts.beta_location,
                           parts.beta_scale, NamedTuple(), nothing,
-                          parts.random_intercepts)
+                          parts.random_effects)
 end
 
 function _brm_turing_plan(brmi::BRMI)

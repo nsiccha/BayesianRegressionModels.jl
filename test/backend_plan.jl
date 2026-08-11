@@ -96,7 +96,7 @@ end
         y ~ Normal(mu, sigma)
     end)(df)
     context = BRM._brm_backend_context(brmi)
-    block = only(BRM._brm_simple_random_intercept_plans(
+    block = only(BRM._brm_simple_random_effect_plans(
         brmi, :mu, context; required=true))
     sb = SBBRMI(brmi)
     plan = BRM._brm_turing_plan(brmi)
@@ -107,7 +107,21 @@ end
     @test block.indices == sb.data[:subject_idx]
     @test length(block.levels) == sb.data[:n_subject]
     @test plan.design.matrix == hcat(ones(4), df.x)
-    @test only(plan.random_intercepts).indices == block.indices
+    @test only(plan.random_effects).indices == block.indices
+
+    sloped = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x + (1 + x | subject)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    sloped_context = BRM._brm_backend_context(sloped)
+    sloped_block = only(BRM._brm_simple_random_effect_plans(
+        sloped, :mu, sloped_context; required=true))
+    @test !sloped_block.intercept_only
+    @test Tuple(column.label for column in sloped_block.columns) ==
+          (:Intercept, :x)
+    @test sloped_block.matrix == hcat(ones(4), df.x)
+    @test sloped_block.indices == block.indices
 end
 
 
