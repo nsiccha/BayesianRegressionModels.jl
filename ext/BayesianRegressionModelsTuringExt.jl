@@ -63,6 +63,38 @@ Turing.@model function _brm_population_gaussian_correlated_group(
     (; mu, L_group, tau_group, b_group, group_effect)
 end
 
+Turing.@model function _brm_population_gaussian_zero_correlation_group(
+    X, fixed, Z, group_idx, n_groups, intercept_index, y,
+    beta_location, beta_scale, sigma_scale)
+    beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
+    sigma ~ Exponential(sigma_scale)
+    n_terms = size(Z, 2)
+    n_slopes = n_terms - (intercept_index > 0)
+    group_intercept_scale = nothing
+    if intercept_index > 0
+        log_group_intercept_scale ~ Normal()
+        group_intercept_scale = exp(log_group_intercept_scale)
+    end
+    tau_group_slopes ~ product_distribution(
+        fill(truncated(Normal(), 0.0, Inf), n_slopes))
+    scales = if intercept_index == 0
+        tau_group_slopes
+    else
+        vcat(tau_group_slopes[1:(intercept_index - 1)],
+             [group_intercept_scale], tau_group_slopes[intercept_index:end])
+    end
+    z_group_flat ~ product_distribution(fill(Normal(), n_terms * n_groups))
+    z_group = reshape(z_group_flat, n_terms, n_groups)
+    b_group = transpose(reshape(scales, :, 1) .* z_group)
+    group_effect = vec(sum(Z .* b_group[group_idx, :]; dims=2))
+    mu = X * beta_pop + fixed + group_effect
+    for i in eachindex(y)
+        y[i] ~ Normal(mu[i], sigma)
+    end
+    (; mu, group_intercept_scale, tau_group_slopes, scales,
+       b_group, group_effect)
+end
+
 Turing.@model function _brm_population_glm_correlated_group(
     family, X, fixed, Z, group_idx, n_groups, trials, y,
     beta_location, beta_scale)
@@ -95,6 +127,51 @@ Turing.@model function _brm_population_glm_correlated_group(
         error("Turing backend: internal unsupported grouped GLM family $family")
     end
     (; eta, rate, L_group, tau_group, b_group, group_effect)
+end
+
+Turing.@model function _brm_population_glm_zero_correlation_group(
+    family, X, fixed, Z, group_idx, n_groups, intercept_index, trials, y,
+    beta_location, beta_scale)
+    beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
+    n_terms = size(Z, 2)
+    n_slopes = n_terms - (intercept_index > 0)
+    group_intercept_scale = nothing
+    if intercept_index > 0
+        log_group_intercept_scale ~ Normal()
+        group_intercept_scale = exp(log_group_intercept_scale)
+    end
+    tau_group_slopes ~ product_distribution(
+        fill(truncated(Normal(), 0.0, Inf), n_slopes))
+    scales = if intercept_index == 0
+        tau_group_slopes
+    else
+        vcat(tau_group_slopes[1:(intercept_index - 1)],
+             [group_intercept_scale], tau_group_slopes[intercept_index:end])
+    end
+    z_group_flat ~ product_distribution(fill(Normal(), n_terms * n_groups))
+    z_group = reshape(z_group_flat, n_terms, n_groups)
+    b_group = transpose(reshape(scales, :, 1) .* z_group)
+    group_effect = vec(sum(Z .* b_group[group_idx, :]; dims=2))
+    eta = X * beta_pop + fixed + group_effect
+    rate = nothing
+    if family isa Val{:bernoulli_logit}
+        for i in eachindex(y)
+            y[i] ~ BRM.BernoulliLogit(eta[i])
+        end
+    elseif family isa Val{:binomial_logit}
+        for i in eachindex(y)
+            y[i] ~ BRM.BinomialLogit(trials[i], eta[i])
+        end
+    elseif family isa Val{:poisson_log}
+        rate = exp.(eta)
+        for i in eachindex(y)
+            y[i] ~ Poisson(rate[i])
+        end
+    else
+        error("Turing backend: internal unsupported zero-correlation GLM family $family")
+    end
+    (; eta, rate, group_intercept_scale, tau_group_slopes, scales,
+       b_group, group_effect)
 end
 
 Turing.@model function _brm_population_bernoulli_logit(
@@ -333,6 +410,22 @@ function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:normal_identity}})
     if !isempty(plan.random_effects)
         block = only(plan.random_effects)
+        if block.zero_correlation && !block.intercept_only
+            intercept_index = something(
+                findfirst(column -> column.label === :Intercept, block.columns), 0)
+            return _brm_population_gaussian_zero_correlation_group(
+                plan.design.matrix,
+                plan.design.fixed,
+                block.matrix,
+                block.indices,
+                length(block.levels),
+                intercept_index,
+                plan.response,
+                plan.beta_location,
+                plan.beta_scale,
+                plan.scale_prior,
+            )
+        end
         if !block.intercept_only
             return _brm_population_gaussian_correlated_group(
                 plan.design.matrix,
@@ -371,6 +464,15 @@ function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:bernoulli_logit}})
     if !isempty(plan.random_effects)
         block = only(plan.random_effects)
+        if block.zero_correlation && !block.intercept_only
+            intercept_index = something(
+                findfirst(column -> column.label === :Intercept, block.columns), 0)
+            return _brm_population_glm_zero_correlation_group(
+                Val(:bernoulli_logit), plan.design.matrix, plan.design.fixed,
+                block.matrix, block.indices, length(block.levels),
+                intercept_index, Int[], plan.response,
+                plan.beta_location, plan.beta_scale)
+        end
         if !block.intercept_only
             return _brm_population_glm_correlated_group(
                 Val(:bernoulli_logit),
@@ -408,6 +510,15 @@ function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:binomial_logit}})
     if !isempty(plan.random_effects)
         block = only(plan.random_effects)
+        if block.zero_correlation && !block.intercept_only
+            intercept_index = something(
+                findfirst(column -> column.label === :Intercept, block.columns), 0)
+            return _brm_population_glm_zero_correlation_group(
+                Val(:binomial_logit), plan.design.matrix, plan.design.fixed,
+                block.matrix, block.indices, length(block.levels),
+                intercept_index, plan.family_args.trials, plan.response,
+                plan.beta_location, plan.beta_scale)
+        end
         if !block.intercept_only
             return _brm_population_glm_correlated_group(
                 Val(:binomial_logit),
@@ -447,6 +558,15 @@ function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:poisson_log}})
     if !isempty(plan.random_effects)
         block = only(plan.random_effects)
+        if block.zero_correlation && !block.intercept_only
+            intercept_index = something(
+                findfirst(column -> column.label === :Intercept, block.columns), 0)
+            return _brm_population_glm_zero_correlation_group(
+                Val(:poisson_log), plan.design.matrix, plan.design.fixed,
+                block.matrix, block.indices, length(block.levels),
+                intercept_index, Int[], plan.response,
+                plan.beta_location, plan.beta_scale)
+        end
         if !block.intercept_only
             return _brm_population_glm_correlated_group(
                 Val(:poisson_log),

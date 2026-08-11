@@ -122,6 +122,18 @@ end
           (:Intercept, :x)
     @test sloped_block.matrix == hcat(ones(4), df.x)
     @test sloped_block.indices == block.indices
+
+    zero_corr = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x + (1 + x || subject)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    zero_context = BRM._brm_backend_context(zero_corr)
+    zero_block = only(BRM._brm_simple_random_effect_plans(
+        zero_corr, :mu, zero_context; required=true))
+    @test zero_block.zero_correlation
+    @test zero_block.matrix == sloped_block.matrix
+    @test zero_block.indices == block.indices
 end
 
 

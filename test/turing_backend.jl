@@ -146,6 +146,51 @@ end
 end
 
 
+@testset "Turing extension — Gaussian zero-correlation random slope" begin
+    df = (;
+        x=[-1.0, 0.5, 2.0, 0.25],
+        subject=["b", "a", "b", "c"],
+        y=[0.2, 1.1, -0.4, 0.7],
+    )
+    backend = TuringBRMI((@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x + (1 + x || subject)
+        y ~ Normal(mu, sigma)
+    end)(df))
+    block = only(backend.plan.random_effects)
+    params = (;
+        beta_pop=[0.25, -0.5], sigma=0.8,
+        log_group_intercept_scale=log(0.6),
+        tau_group_slopes=[0.7],
+        z_group_flat=[-0.2, 0.4, 1.1, 0.3, -0.5, 0.8],
+    )
+    scales = [0.6, 0.7]
+    b_group = transpose(reshape(scales, :, 1) .*
+        reshape(params.z_group_flat, 2, 3))
+    group_effect = vec(sum(
+        block.matrix .* b_group[block.indices, :]; dims=2))
+    mu = backend.plan.design.matrix * params.beta_pop + group_effect
+    half_normal = truncated(Normal(), 0.0, Inf)
+    prior = sum(logpdf.(Normal(), params.beta_pop)) +
+            logpdf(Exponential(2), params.sigma) +
+            logpdf(Normal(), params.log_group_intercept_scale) +
+            sum(logpdf.(half_normal, params.tau_group_slopes)) +
+            sum(logpdf.(Normal(), params.z_group_flat))
+    likelihood = sum(logpdf.(Normal.(mu, params.sigma), df.y))
+    returned = Turing.DynamicPPL.returned(backend.model, params)
+
+    @test block.zero_correlation
+    @test Turing.logjoint(backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+    @test Turing.logprior(backend.model, params) ≈ prior atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(backend.model, params) ≈
+          likelihood atol=1e-12 rtol=1e-12
+    @test returned.scales == scales
+    @test returned.b_group == b_group
+    @test returned.group_effect == group_effect
+end
+
+
 @testset "Turing extension — GLM plain random intercepts" begin
     base = (;
         x=[-1.0, 0.5, 2.0, 0.25],
@@ -249,6 +294,66 @@ end
           bin_lik atol=1e-12 rtol=1e-12
     @test Turing.DynamicPPL.returned(binomial.model, params).group_effect ==
           group_effect
+
+    rate = exp.(eta)
+    poisson_lik = sum(logpdf.(Poisson.(rate), poisson.plan.response))
+    @test Turing.logjoint(poisson.model, params) ≈
+          prior + poisson_lik atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(poisson.model, params) ≈
+          poisson_lik atol=1e-12 rtol=1e-12
+    @test Turing.DynamicPPL.returned(poisson.model, params).rate == rate
+end
+
+
+@testset "Turing extension — GLM zero-correlation random slopes" begin
+    base = (;
+        x=[-1.0, 0.5, 2.0, 0.25],
+        subject=["b", "a", "b", "c"],
+        trials=[2, 4, 6, 3])
+    bernoulli = TuringBRMI((@brm begin
+        logit(p) ~ 1 + x + (1 + x || subject)
+        y ~ Bernoulli(p)
+    end)((; base..., y=[0, 1, 1, 0])))
+    binomial = TuringBRMI((@brm begin
+        logit(p) ~ 1 + x + (1 + x || subject)
+        y ~ Binomial(trials, p)
+    end)((; base..., y=[0, 2, 5, 1])))
+    poisson = TuringBRMI((@brm begin
+        log(lambda) ~ 1 + x + (1 + x || subject)
+        y ~ Poisson(lambda)
+    end)((; base..., y=[0, 2, 5, 1])))
+
+    params = (;
+        beta_pop=[0.25, -0.5],
+        log_group_intercept_scale=log(0.6),
+        tau_group_slopes=[0.7],
+        z_group_flat=[-0.2, 0.4, 1.1, 0.3, -0.5, 0.8])
+    block = only(bernoulli.plan.random_effects)
+    scales = [0.6, 0.7]
+    b_group = transpose(reshape(scales, :, 1) .*
+        reshape(params.z_group_flat, 2, 3))
+    group_effect = vec(sum(
+        block.matrix .* b_group[block.indices, :]; dims=2))
+    eta = bernoulli.plan.design.matrix * params.beta_pop + group_effect
+    half_normal = truncated(Normal(), 0.0, Inf)
+    prior = sum(logpdf.(Normal(), params.beta_pop)) +
+            logpdf(Normal(), params.log_group_intercept_scale) +
+            sum(logpdf.(half_normal, params.tau_group_slopes)) +
+            sum(logpdf.(Normal(), params.z_group_flat))
+
+    bern_lik = sum(logpdf.(BRM.BernoulliLogit.(eta), bernoulli.plan.response))
+    @test Turing.logjoint(bernoulli.model, params) ≈
+          prior + bern_lik atol=1e-12 rtol=1e-12
+    @test Turing.logprior(bernoulli.model, params) ≈ prior atol=1e-12 rtol=1e-12
+    @test Turing.DynamicPPL.returned(bernoulli.model, params).scales == scales
+
+    bin_lik = sum(logpdf.(BRM.BinomialLogit.(
+        base.trials, eta), binomial.plan.response))
+    @test Turing.logjoint(binomial.model, params) ≈
+          prior + bin_lik atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(binomial.model, params) ≈
+          bin_lik atol=1e-12 rtol=1e-12
+    @test Turing.DynamicPPL.returned(binomial.model, params).b_group == b_group
 
     rate = exp.(eta)
     poisson_lik = sum(logpdf.(Poisson.(rate), poisson.plan.response))
@@ -952,11 +1057,12 @@ end
     end
 
     random_slope = (@brm begin
-        log(lambda) ~ 1 + x + (1 + x || subject)
-        y ~ Poisson(lambda)
+        log(mu) ~ 1 + x + (1 + x || subject)
+        log(phi) ~ 1
+        y ~ BRM.NegativeBinomial2(mu, phi)
     end)((;
         x=[0.0, 1.0, 2.0], subject=["a", "a", "b"], y=[0, 1, 2]))
-    @test_throws "zero-correlation `||` random slopes" begin
+    @test_throws "zero-correlation `||` random effects for predictor `mu`" begin
         TuringBRMI(random_slope)
     end
 end

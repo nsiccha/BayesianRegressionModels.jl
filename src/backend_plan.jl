@@ -206,6 +206,7 @@ struct _BRMRandomEffectPlan{L<:AbstractVector,I<:AbstractVector{Int},
     columns::C
     matrix::M
     intercept_only::Bool
+    zero_correlation::Bool
 end
 
 _brm_additive_terms(rhs) = begin
@@ -242,12 +243,7 @@ function _brm_simple_random_effect_plans(
                 "have the expected `(effects | group)` shape")
             return nothing
         end
-        getf(term) === (|) || begin
-            required && error(
-                "BRM backend lowering: zero-correlation `||` random slopes " *
-                "need a separate independent-block plan; got `$(repr(term))`")
-            return nothing
-        end
+        zero_correlation = getf(term) === doublepipe
         inner, group_raw = args
         if !(group_raw isa NamedColumn && parent(group_raw) isa DataColumn)
             required && error(
@@ -299,7 +295,7 @@ function _brm_simple_random_effect_plans(
                          only(columns).label === :Intercept
         push!(plans, _BRMRandomEffectPlan(
             target, group, levels, indices, Tuple(columns), matrix,
-            intercept_only))
+            intercept_only, zero_correlation))
     end
     Tuple(plans)
 end

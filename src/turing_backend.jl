@@ -136,7 +136,8 @@ function _turing_predictor_component(brmi::BRMI, context::_BRMBackendContext,
                                      predictor::Symbol;
                                      available_predictors=(predictor,),
                                      allow_group_terms::Bool=false,
-                                     allow_random_slopes::Bool=false)
+                                     allow_random_slopes::Bool=false,
+                                     allow_zero_correlation::Bool=false)
     random_effects = _brm_simple_random_effect_plans(
         brmi, predictor, context; required=true)
     if !allow_group_terms && !isempty(random_effects)
@@ -151,6 +152,11 @@ function _turing_predictor_component(brmi::BRMI, context::_BRMBackendContext,
     if !allow_random_slopes && any(!block.intercept_only for block in random_effects)
         error("Turing backend: random slopes for predictor `$predictor` are " *
               "not yet supported by this likelihood plan")
+    end
+    if !allow_zero_correlation && any(block.zero_correlation
+                                      for block in random_effects)
+        error("Turing backend: zero-correlation `||` random effects for " *
+              "predictor `$predictor` are not yet supported by this likelihood plan")
     end
     predictor_plan = _brm_simple_population_predictor(
         brmi, predictor, context; required=true)
@@ -167,12 +173,13 @@ end
 function _turing_population_components(brmi::BRMI, observation, predictor::Symbol;
                                        extra_operations=(),
                                        allow_random_effects::Bool=false,
-                                       allow_random_slopes::Bool=false)
+                                       allow_random_slopes::Bool=false,
+                                       allow_zero_correlation::Bool=false)
     context = _turing_model_context(
         brmi, observation, (predictor, extra_operations...))
     component = _turing_predictor_component(
         brmi, context, predictor; allow_group_terms=allow_random_effects,
-        allow_random_slopes)
+        allow_random_slopes, allow_zero_correlation)
     random_effects = component.random_effects
     response = context.data[observation.key]
     response isa AbstractVector || error(
@@ -290,7 +297,8 @@ function _turing_normal_plan(brmi::BRMI, observation, rhs::ExprColumn)
         "got `$scale`")
     parts = _turing_population_components(
         brmi, observation, predictor; extra_operations=(scale,),
-        allow_random_effects=true, allow_random_slopes=true)
+        allow_random_effects=true, allow_random_slopes=true,
+        allow_zero_correlation=true)
     _turing_require_predictor_link(parts, identity, "Gaussian identity location")
     parts.response isa AbstractVector{<:Real} || error(
         "Turing backend: Gaussian response `$(observation.key)` must be real-valued")
@@ -307,7 +315,7 @@ function _turing_bernoulli_population_plan(brmi::BRMI, observation,
                                            role::AbstractString)
     parts = _turing_population_components(
         brmi, observation, predictor; allow_random_effects=true,
-        allow_random_slopes=true)
+        allow_random_slopes=true, allow_zero_correlation=true)
     _turing_require_predictor_link(parts, expected_link, role)
     all(x -> x isa Bool || (x isa Integer && x in (0, 1)), parts.response) || error(
         "Turing backend: Bernoulli response `$(observation.key)` must contain only 0/1")
@@ -345,7 +353,7 @@ function _turing_binomial_population_plan(brmi::BRMI, observation, trials_raw,
                                           role::AbstractString)
     parts = _turing_population_components(
         brmi, observation, predictor; allow_random_effects=true,
-        allow_random_slopes=true)
+        allow_random_slopes=true, allow_zero_correlation=true)
     _turing_require_predictor_link(parts, expected_link, role)
     trials = _brm_materialize_count_argument(
         trials_raw, length(parts.response), "Binomial trial count";
@@ -406,7 +414,7 @@ function _turing_poisson_log_plan(brmi::BRMI, observation, rhs::ExprColumn)
     end
     parts = _turing_population_components(
         brmi, observation, predictor; allow_random_effects=true,
-        allow_random_slopes=true)
+        allow_random_slopes=true, allow_zero_correlation=true)
     _turing_require_predictor_link(parts, expected_link, "Poisson log link")
     all(x -> x isa Integer && x >= 0, parts.response) || error(
         "Turing backend: Poisson response `$(observation.key)` must be nonnegative integers")
