@@ -23,6 +23,20 @@ function _brm_normal_observation(
           "`$(modifier.kind)`")
 end
 
+_brm_poisson_observation(::Nothing, rate, _i) = Poisson(rate)
+function _brm_poisson_observation(
+        modifier::BRM._BRMResponseModifierPlan, rate, i)
+    lower = isnothing(modifier.lower) ? nothing :
+        BRM._brm_response_bound_at(modifier.lower, i)
+    upper = isnothing(modifier.upper) ? nothing :
+        BRM._brm_response_bound_at(modifier.upper, i)
+    base = Poisson(rate)
+    modifier.kind === :truncated && return truncated(base; lower, upper)
+    modifier.kind === :censored && return censored(base; lower, upper)
+    error("Turing backend: internal unsupported Poisson response modifier " *
+          "`$(modifier.kind)`")
+end
+
 _random_effect_args(component) = isempty(component.random_effects) ?
     (0, zeros(0, 0), Int[], 0) : let block = only(component.random_effects)
         (block.intercept_only ? 1 : 2, block.matrix, block.indices,
@@ -111,7 +125,7 @@ end
 
 Turing.@model function _brm_population_glm_correlated_group(
     family, X, fixed, Z, group_idx, n_groups, trials, y,
-    beta_location, beta_scale)
+    beta_location, beta_scale, response_modifier)
     beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
     n_terms = size(Z, 2)
     L_group ~ LKJCholesky(n_terms, 1.0)
@@ -135,7 +149,7 @@ Turing.@model function _brm_population_glm_correlated_group(
     elseif family isa Val{:poisson_log}
         rate = exp.(eta)
         for i in eachindex(y)
-            y[i] ~ Poisson(rate[i])
+            y[i] ~ _brm_poisson_observation(response_modifier, rate[i], i)
         end
     else
         error("Turing backend: internal unsupported grouped GLM family $family")
@@ -145,7 +159,7 @@ end
 
 Turing.@model function _brm_population_glm_zero_correlation_group(
     family, X, fixed, Z, group_idx, n_groups, intercept_index, trials, y,
-    beta_location, beta_scale)
+    beta_location, beta_scale, response_modifier)
     beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
     n_terms = size(Z, 2)
     n_slopes = n_terms - (intercept_index > 0)
@@ -179,7 +193,7 @@ Turing.@model function _brm_population_glm_zero_correlation_group(
     elseif family isa Val{:poisson_log}
         rate = exp.(eta)
         for i in eachindex(y)
-            y[i] ~ Poisson(rate[i])
+            y[i] ~ _brm_poisson_observation(response_modifier, rate[i], i)
         end
     else
         error("Turing backend: internal unsupported zero-correlation GLM family $family")
@@ -237,18 +251,19 @@ Turing.@model function _brm_population_binomial_logit_random_intercept(
 end
 
 Turing.@model function _brm_population_poisson_log(
-    X, fixed, y, beta_location, beta_scale)
+    X, fixed, y, beta_location, beta_scale, response_modifier)
     beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
     log_rate = X * beta_pop + fixed
     rate = exp.(log_rate)
     for i in eachindex(y)
-        y[i] ~ Poisson(rate[i])
+        y[i] ~ _brm_poisson_observation(response_modifier, rate[i], i)
     end
     (; log_rate, rate)
 end
 
 Turing.@model function _brm_population_poisson_log_random_intercept(
-    X, fixed, group_idx, n_groups, y, beta_location, beta_scale)
+    X, fixed, group_idx, n_groups, y, beta_location, beta_scale,
+    response_modifier)
     beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
     log_group_scale ~ Normal()
     z_group ~ product_distribution(fill(Normal(), n_groups))
@@ -257,7 +272,7 @@ Turing.@model function _brm_population_poisson_log_random_intercept(
     log_rate = X * beta_pop + fixed + group_effect[group_idx]
     rate = exp.(log_rate)
     for i in eachindex(y)
-        y[i] ~ Poisson(rate[i])
+        y[i] ~ _brm_poisson_observation(response_modifier, rate[i], i)
     end
     (; log_rate, rate, group_scale, group_effect)
 end
@@ -489,7 +504,7 @@ function BRM._brm_turing_model(
                 Val(:bernoulli_logit), plan.design.matrix, plan.design.fixed,
                 block.matrix, block.indices, length(block.levels),
                 intercept_index, Int[], plan.response,
-                plan.beta_location, plan.beta_scale)
+                plan.beta_location, plan.beta_scale, nothing)
         end
         if !block.intercept_only
             return _brm_population_glm_correlated_group(
@@ -503,6 +518,7 @@ function BRM._brm_turing_model(
                 plan.response,
                 plan.beta_location,
                 plan.beta_scale,
+                nothing,
             )
         end
         return _brm_population_bernoulli_logit_random_intercept(
@@ -535,7 +551,7 @@ function BRM._brm_turing_model(
                 Val(:binomial_logit), plan.design.matrix, plan.design.fixed,
                 block.matrix, block.indices, length(block.levels),
                 intercept_index, plan.family_args.trials, plan.response,
-                plan.beta_location, plan.beta_scale)
+                plan.beta_location, plan.beta_scale, nothing)
         end
         if !block.intercept_only
             return _brm_population_glm_correlated_group(
@@ -549,6 +565,7 @@ function BRM._brm_turing_model(
                 plan.response,
                 plan.beta_location,
                 plan.beta_scale,
+                nothing,
             )
         end
         return _brm_population_binomial_logit_random_intercept(
@@ -583,7 +600,7 @@ function BRM._brm_turing_model(
                 Val(:poisson_log), plan.design.matrix, plan.design.fixed,
                 block.matrix, block.indices, length(block.levels),
                 intercept_index, Int[], plan.response,
-                plan.beta_location, plan.beta_scale)
+                plan.beta_location, plan.beta_scale, plan.response_modifier)
         end
         if !block.intercept_only
             return _brm_population_glm_correlated_group(
@@ -597,6 +614,7 @@ function BRM._brm_turing_model(
                 plan.response,
                 plan.beta_location,
                 plan.beta_scale,
+                plan.response_modifier,
             )
         end
         return _brm_population_poisson_log_random_intercept(
@@ -607,6 +625,7 @@ function BRM._brm_turing_model(
             plan.response,
             plan.beta_location,
             plan.beta_scale,
+            plan.response_modifier,
         )
     end
     _brm_population_poisson_log(
@@ -615,6 +634,7 @@ function BRM._brm_turing_model(
         plan.response,
         plan.beta_location,
         plan.beta_scale,
+        plan.response_modifier,
     )
 end
 

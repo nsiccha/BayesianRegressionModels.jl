@@ -229,6 +229,7 @@ _brm_response_bound_at(bound::AbstractVector, i) = bound[i]
 function _brm_materialize_bounded_response(
         spec::_BRMResponseModifierPlan, target::Symbol,
         response::AbstractVector, data::AbstractDict;
+        support_kind::Symbol=:continuous,
         prefix="BRM backend lowering")
     spec.kind in (:truncated, :censored) || error(
         "$prefix: internal response modifier `$(spec.kind)` is not a bounded " *
@@ -238,6 +239,18 @@ function _brm_materialize_bounded_response(
         spec.lower, data, n, :lower; prefix)
     upper = _brm_materialize_response_bound(
         spec.upper, data, n, :upper; prefix)
+    support_kind in (:continuous, :discrete) || error(
+        "$prefix: internal unsupported bounded-response support `$support_kind`")
+    if support_kind === :discrete
+        all(x -> x isa Integer && !(x isa Bool), response) || error(
+            "$prefix: `$(spec.kind)` discrete base family requires an integer response")
+        for (label, bound) in ((:lower, lower), (:upper, upper))
+            isnothing(bound) && continue
+            values = bound isa AbstractVector ? bound : (bound,)
+            all(x -> x isa Integer && !(x isa Bool), values) || error(
+                "$prefix: `$(spec.kind)` discrete $label bounds must be integers")
+        end
+    end
     for i in eachindex(response)
         lo = isnothing(lower) ? nothing : _brm_response_bound_at(lower, i)
         hi = isnothing(upper) ? nothing : _brm_response_bound_at(upper, i)

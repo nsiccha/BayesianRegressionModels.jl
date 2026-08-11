@@ -869,6 +869,56 @@ end
     end
 end
 
+@testset "Turing extension — bounded Poisson responses" begin
+    base = (;
+        x=[-1.0, 0.5, 2.0],
+        lower=[1, 1, 2],
+        upper=[3, 4, 5],
+    )
+    truncated_backend = TuringBRMI((@brm begin
+        log_rate ~ 1 + x
+        count ~ truncated(
+            Poisson(exp(log_rate)); lower=lower, upper=upper)
+    end)((; base..., count=[1, 2, 4])))
+    censored_data = (;
+        x=base.x, lower=[0, 1, 2], upper=[3, 4, 4], count=[0, 2, 4])
+    censored_backend = TuringBRMI((@brm begin
+        log_rate ~ 1 + x
+        count ~ censored(
+            Poisson(exp(log_rate)); lower=lower, upper=upper)
+    end)(censored_data))
+
+    params = (; beta_pop=[0.3, 0.4])
+    prior = sum(logpdf.(Normal(), params.beta_pop))
+    for (backend, data, wrapper) in (
+            (truncated_backend, merge(base, (; count=[1, 2, 4])), truncated),
+            (censored_backend, censored_data, censored))
+        rate = exp.(backend.plan.design.matrix * params.beta_pop)
+        likelihood = sum(eachindex(data.count)) do i
+            logpdf(wrapper(
+                Poisson(rate[i]); lower=data.lower[i], upper=data.upper[i]),
+                data.count[i])
+        end
+        @test backend.plan.response_modifier.lower == data.lower
+        @test backend.plan.response_modifier.upper == data.upper
+        @test Turing.logjoint(backend.model, params) ≈
+              prior + likelihood atol=1e-12 rtol=1e-12
+        @test Turing.logprior(backend.model, params) ≈
+              prior atol=1e-12 rtol=1e-12
+        @test Turing.loglikelihood(backend.model, params) ≈
+              likelihood atol=1e-12 rtol=1e-12
+    end
+
+    fractional_bound = (;
+        x=base.x, lower=[0.5, 1.0, 2.0], count=[1, 2, 4])
+    @test_throws "discrete lower bounds must be integers" begin
+        TuringBRMI((@brm begin
+            log_rate ~ 1 + x
+            count ~ truncated(Poisson(exp(log_rate)); lower=lower)
+        end)(fractional_bound))
+    end
+end
+
 @testset "Turing extension — distributional NegativeBinomial2" begin
     df = (;
         x=[-1.0, 0.5, 2.0, 0.25],

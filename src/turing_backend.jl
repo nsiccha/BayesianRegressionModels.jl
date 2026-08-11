@@ -398,7 +398,8 @@ function _turing_binomial_plan(brmi::BRMI, observation, rhs::ExprColumn)
         brmi, observation, trials_raw, predictor, logit, "Binomial logit link")
 end
 
-function _turing_poisson_log_plan(brmi::BRMI, observation, rhs::ExprColumn)
+function _turing_poisson_log_plan(brmi::BRMI, observation, rhs::ExprColumn;
+                                  response_modifier=nothing)
     isempty(getkwargs(rhs)) || error(
         "Turing backend: `Poisson(exp(log_rate))` accepts no formula keywords")
     args = getargs(rhs)
@@ -425,11 +426,16 @@ function _turing_poisson_log_plan(brmi::BRMI, observation, rhs::ExprColumn)
     _turing_require_predictor_link(parts, expected_link, "Poisson log link")
     all(x -> x isa Integer && x >= 0, parts.response) || error(
         "Turing backend: Poisson response `$(observation.key)` must be nonnegative integers")
+    materialized_modifier = isnothing(response_modifier) ? nothing :
+        _brm_materialize_bounded_response(
+            response_modifier, observation.key, parts.response,
+            parts.context.data; support_kind=:discrete,
+            prefix="Turing backend")
     _TuringPopulationPlan(Val(:poisson_log), parts.context, parts.predictor,
                           parts.design,
                           Int.(parts.response), parts.beta_location,
                           parts.beta_scale, NamedTuple(), nothing,
-                          parts.random_effects, nothing)
+                          parts.random_effects, materialized_modifier)
 end
 
 function _brm_turing_plan(brmi::BRMI)
@@ -452,9 +458,11 @@ function _brm_turing_plan(brmi::BRMI)
     family = getf(rhs)
     family === Normal && return _turing_normal_plan(
         brmi, observation, rhs; response_modifier)
+    family === Poisson && return _turing_poisson_log_plan(
+        brmi, observation, rhs; response_modifier)
     isnothing(response_modifier) || error(
         "Turing backend: `$(response_modifier.kind)` currently supports only " *
-        "`Normal(mu, sigma)` observations; got `$family`")
+        "`Normal(mu, sigma)` and `Poisson(rate)` observations; got `$family`")
     family === Bernoulli && return _turing_bernoulli_plan(brmi, observation, rhs)
     family === BernoulliLogit &&
         return _turing_bernoulli_logit_plan(brmi, observation, rhs)
@@ -465,7 +473,6 @@ function _brm_turing_plan(brmi::BRMI)
         return _turing_negative_binomial2_plan(brmi, observation, rhs)
     family === BetaBinomial2 &&
         return _turing_beta_binomial2_plan(brmi, observation, rhs)
-    family === Poisson && return _turing_poisson_log_plan(brmi, observation, rhs)
     error("Turing backend: executable families are `Normal(mu, sigma)`, " *
           "`Bernoulli(p)` / `BernoulliLogit(eta)`, `Binomial(trials, p)` / " *
           "`BinomialLogit(trials, eta)`, " *
