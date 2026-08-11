@@ -1916,95 +1916,13 @@ function _check_term_kwargs(::typeof(t2), kw)
     nothing
 end
 
-_sb_mm_values(raw::CA.CategoricalVector) = CA.unwrap.(raw)
-_sb_mm_values(raw::AbstractVector) = raw
-_sb_mm_level_pool(raw::CA.CategoricalVector) = collect(CA.levels(raw))
-_sb_mm_level_pool(raw::AbstractVector) = collect(unique(raw))
-
-function _sb_mm_fit_levels(raw_groups)
-    pooled = Any[]
-    for raw in raw_groups
-        append!(pooled, _sb_mm_level_pool(raw))
-    end
-    unique!(pooled)
-    try
-        sort!(pooled)
-    catch
-        error("sbimpl: `mm(...)` grouping levels must be mutually orderable so ",
-              "one shared level index can be fitted (got $(repr(pooled)))")
-    end
-    pooled
-end
-
 function _sb_prepare_mm(raw_groups::Tuple, raw_weights, normalize::Bool;
                         levels=nothing,
                         group_names=ntuple(i -> Symbol(:group_, i), length(raw_groups)),
                         weight_names=nothing)
-    M = length(raw_groups)
-    M >= 2 || error("sbimpl: internal — multi-membership preprocessing received $M groups")
-    all(v -> v isa AbstractVector, raw_groups) || error(
-        "sbimpl: every `mm(...)` group must resolve to a vector column")
-    N = length(first(raw_groups))
-    group_values = map(_sb_mm_values, raw_groups)
-    for m in 1:M
-        v = group_values[m]
-        length(v) == N || error(
-            "sbimpl: `mm(...)` group column `$(group_names[m])` has $(length(v)) rows; ",
-            "expected $N to match `$(group_names[1])`")
-        bad = findfirst(ismissing, v)
-        isnothing(bad) || error(
-            "sbimpl: `mm(...)` group column `$(group_names[m])` is missing at row $bad")
-    end
-
-    fitted_levels = isnothing(levels) ? _sb_mm_fit_levels(raw_groups) : collect(levels)
-    isempty(fitted_levels) && error("sbimpl: `mm(...)` grouping columns contain no levels")
-    level_map = Dict(l => i for (i, l) in enumerate(fitted_levels))
-    group_idx = Vector{Int}(undef, N * M)
-    for i in 1:N, m in 1:M
-        l = group_values[m][i]
-        haskey(level_map, l) || error(
-            "sbimpl: reprocess: `mm(...)` group column `$(group_names[m])` has ",
-            "unseen level `$(l)` at row $i (training levels: $(fitted_levels)). ",
-            "Re-fit with `freeze_constants=false` to derive a new shared level set.")
-        group_idx[(i - 1) * M + m] = level_map[l]
-    end
-
-    weights = Vector{Float64}(undef, N * M)
-    if isnothing(raw_weights)
-        fill!(weights, inv(Float64(M)))
-    else
-        length(raw_weights) == M || error(
-            "sbimpl: internal — `mm(...)` has $M groups but $(length(raw_weights)) weights")
-        names = isnothing(weight_names) ? ntuple(i -> Symbol(:weight_, i), M) : weight_names
-        for m in 1:M
-            v = raw_weights[m]
-            v isa AbstractVector || error(
-                "sbimpl: `mm(...)` weight `$(names[m])` must resolve to a vector column")
-            length(v) == N || error(
-                "sbimpl: `mm(...)` weight column `$(names[m])` has $(length(v)) rows; expected $N")
-            for i in 1:N
-                x = v[i]
-                x isa Real || error(
-                    "sbimpl: `mm(...)` weight `$(names[m])` at row $i must be real; got $(repr(x))")
-                isfinite(x) || error(
-                    "sbimpl: `mm(...)` weight `$(names[m])` at row $i must be finite; got $(repr(x))")
-                x >= 0 || error(
-                    "sbimpl: `mm(...)` weight `$(names[m])` at row $i must be nonnegative; got $(repr(x))")
-                xf = Float64(x)
-                isfinite(xf) || error(
-                    "sbimpl: `mm(...)` weight `$(names[m])` at row $i cannot be represented as finite Float64")
-                weights[(i - 1) * M + m] = xf
-            end
-        end
-        for i in 1:N
-            row = ((i - 1) * M + 1):(i * M)
-            total = sum(@view weights[row])
-            isfinite(total) || error("sbimpl: `mm(...)` weights have a non-finite total at row $i")
-            total > 0 || error("sbimpl: `mm(...)` weights must have a positive total at row $i")
-            normalize && (@views weights[row] ./= total)
-        end
-    end
-    (; levels=fitted_levels, group_idx, weights, n_obs=N, n_memberships=M)
+    _brm_prepare_mm(
+        raw_groups, raw_weights, normalize;
+        levels, group_names, weight_names, prefix="sbimpl")
 end
 
 # HSGP fit/apply split. The scalar methods reproduce the historical 1D basis;
@@ -5875,18 +5793,9 @@ _sb_group_key(g::MultiMembershipTerm) =
      isnothing(getfield(g, :weights)) ? nothing : Tuple(name(x) for x in getfield(g, :weights)),
      getfield(g, :normalize))
 
-_sb_mm_group_names(g::MultiMembershipTerm) = Tuple(name(x) for x in getargs(g))
-_sb_mm_weight_names(g::MultiMembershipTerm) = begin
-    weights = getfield(g, :weights)
-    isnothing(weights) ? nothing : Tuple(name(x) for x in weights)
-end
-function _sb_mm_suffix(g::MultiMembershipTerm)
-    groups = join(String.(_sb_mm_group_names(g)), "__")
-    weights = _sb_mm_weight_names(g)
-    weighted = isnothing(weights) ? "" : "__w__$(join(String.(weights), "__"))"
-    raw = getfield(g, :normalize) ? "" : "__raw"
-    Symbol("mm__", groups, weighted, raw)
-end
+_sb_mm_group_names(g::MultiMembershipTerm) = _brm_mm_group_names(g)
+_sb_mm_weight_names(g::MultiMembershipTerm) = _brm_mm_weight_names(g)
+_sb_mm_suffix(g::MultiMembershipTerm) = _brm_mm_suffix(g)
 
 # Normalize `(expr | group)` vs `(expr | id | group)` into (id_sym, lhs, descriptor)
 # where id_sym === nothing signals the plain (non-ID'd) case. Surface-level
