@@ -142,6 +142,50 @@ end
 end
 
 
+@testset "backend-neutral categorical treatment contrasts" begin
+    df = (;
+        g=[1, 2, 3, 1, 2, 3],
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        y=[-2.4, -2.2, -2.0, -1.8, -1.7, -1.5],
+    )
+    brmi = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + g + x
+        effect(mu, g) ~ Normal(0.5, 0.25)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    context = BRM._brm_backend_context(brmi)
+    _, rhs = getargs(linear_predictor_op(brmi, :mu), 2)
+    design = BRM._brm_simple_population_design(
+        :mu, rhs, context.data, context.target_obs[:mu]; required=true)
+
+    @test Tuple(c.label for c in design.columns) ==
+          (:Intercept, :g_lvl_2, :g_lvl_3, :x)
+    @test Tuple(c.effect_address for c in design.columns) ==
+          (:Intercept, :g, :g, :x)
+    @test design.matrix == hcat(
+        ones(6),
+        Float64.(df.g .== 2),
+        Float64.(df.g .== 3),
+        df.x,
+    )
+    @test design.columns[2].preprocess.kind === :population_factor_dummy
+    @test design.columns[2].preprocess.const_.levels == [1, 2, 3]
+
+    overrides = BRM._brm_simple_population_effect_overrides(brmi, design)
+    location, scale = BRM._brm_materialize_normal_effect_priors(
+        overrides, length(design.columns))
+    @test location == [0.0, 0.5, 0.5, 0.0]
+    @test scale == [1.0, 0.25, 0.25, 1.0]
+
+    # The StanBlocks backend retains its established `cat_g_beta` parameter
+    # block, but shares the same ordered level-coding primitive.
+    sb = SBBRMI(brmi)
+    @test sb.data[:g_idx] == df.g
+    @test sb.preproc[:g_idx].const_ == [1, 2, 3]
+end
+
+
 @testset "backend-neutral population effect-prior plan" begin
     df = (; x=[-1.0, 0.0, 1.0], y=[0.1, 0.2, 0.3])
     brmi = (@brm begin
@@ -230,13 +274,13 @@ end
     @test design.row_source === :y
     @test design.matrix == ones(3, 1)
 
-    categorical = (@brm begin
+    unsupported = (@brm begin
         sigma ~ Exponential(1)
         mu ~ 1 + g
         y ~ Normal(mu, sigma)
-    end)((; g=[1, 2, 1], y=zeros(3)))
-    cat_context = BRM._brm_backend_context(categorical)
-    _, cat_rhs = getargs(linear_predictor_op(categorical, :mu), 2)
+    end)((; g=["a", "b", "a"], y=zeros(3)))
+    cat_context = BRM._brm_backend_context(unsupported)
+    _, cat_rhs = getargs(linear_predictor_op(unsupported, :mu), 2)
     @test isnothing(BRM._brm_simple_population_design(
         :mu, cat_rhs, cat_context.data, cat_context.target_obs[:mu]))
     @test_throws "supports only `1` and continuous raw-data columns" begin

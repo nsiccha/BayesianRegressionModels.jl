@@ -174,6 +174,7 @@ _BRMPopulationPreprocess(kind::Symbol, const_, raw_ref) =
 
 struct _BRMPopulationColumn{V<:AbstractVector,P}
     label::Symbol
+    effect_address::Symbol
     source::Union{Nothing,Symbol}
     values::V
     preprocess::P
@@ -201,7 +202,8 @@ _brm_collect_additive_terms!(terms, x) = push!(terms, x)
 
 function _brm_population_column(term::Integer)
     term == 1 || return nothing
-    (; label=:Intercept, source=nothing, values=nothing, preprocess=nothing)
+    (; label=:Intercept, effect_address=:Intercept, source=nothing,
+       values=nothing, preprocess=nothing)
 end
 function _brm_population_column(term::NamedColumn)
     backing = parent(term)
@@ -209,8 +211,8 @@ function _brm_population_column(term::NamedColumn)
     raw = parent(backing)
     raw isa AbstractVector{<:Real} || return nothing
     eltype(raw) <: Integer && return nothing
-    (; label=name(term), source=name(term), values=collect(Float64, raw),
-       preprocess=nothing)
+    (; label=name(term), effect_address=name(term), source=name(term),
+       values=collect(Float64, raw), preprocess=nothing)
 end
 
 _brm_fit_zscale(v::AbstractVector{<:Real}) = let
@@ -244,10 +246,47 @@ function _brm_population_column(term::ExprColumn)
                                      _brm_apply_zscale(const_, values)
     label = Symbol(kind, :_, name(inner))
     preprocess = _BRMPopulationPreprocess(kind, const_, inner)
-    (; label, source=name(inner), values=transformed, preprocess)
+    (; label, effect_address=label, source=name(inner), values=transformed,
+       preprocess)
 end
 _brm_population_column(_term) = nothing
 
+_brm_fit_levels(raw::CA.CategoricalVector) = CA.levels(raw)
+_brm_level_index(raw::CA.CategoricalVector) =
+    length(CA.levels(raw)), Int.(CA.levelcode.(raw))
+_brm_level_index(raw::AbstractVector) = begin
+    levels = _brm_fit_levels(raw)
+    lookup = Dict(level => i for (i, level) in enumerate(levels))
+    length(levels), Int[lookup[level] for level in raw]
+end
+
+function _brm_categorical_population_columns(term::NamedColumn)
+    backing = parent(term)
+    backing isa DataColumn || return nothing
+    raw = parent(backing)
+    is_categorical = raw isa CA.CategoricalVector ||
+                     (raw isa AbstractVector && eltype(raw) <: Integer)
+    is_categorical || return nothing
+    n_levels, indices = _brm_level_index(raw)
+    n_levels >= 2 || return nothing
+    levels = _brm_fit_levels(raw)
+    source = name(term)
+    Tuple(begin
+        label = Symbol(source, :_lvl_, level)
+        values = Float64[index == level ? 1.0 : 0.0 for index in indices]
+        preprocess = _BRMPopulationPreprocess(
+            :population_factor_dummy,
+            (; levels, level, n_levels), source)
+        (; label, effect_address=source, source, values, preprocess)
+    end for level in 2:n_levels)
+end
+
+function _brm_population_columns(term::NamedColumn)
+    categorical = _brm_categorical_population_columns(term)
+    !isnothing(categorical) && return categorical
+    column = _brm_population_column(term)
+    isnothing(column) ? nothing : (column,)
+end
 _brm_population_columns(term) = let column = _brm_population_column(term)
     isnothing(column) ? nothing : (column,)
 end
@@ -270,7 +309,7 @@ function _brm_population_columns(term::ExprColumn{typeof(&)})
                          if !isnothing(c.preprocess))
     preprocess = _BRMPopulationPreprocess(
         :interaction, nothing, (left.label, right.label), dependencies)
-    ((; label, source=left.source, values, preprocess),)
+    ((; label, effect_address=label, source=left.source, values, preprocess),)
 end
 
 """
@@ -278,10 +317,12 @@ end
 
 Materialise the backend-neutral population design for the first common surface:
 an additive intercept, continuous raw-data columns, and fitted
-`zscale`/`standardize`/`center` columns. Returns `nothing` for a term requiring
-richer lowering unless `required=true`, in which case it fails loudly. Both
-SBBRMI and Turing consume this exact representation, including coefficient
-labels and preprocessing constants.
+`zscale`/`standardize`/`center` columns, their pairwise continuous
+interactions, and treatment contrasts for integer or `CategoricalVector`
+columns. Returns `nothing` for a term requiring richer lowering unless
+`required=true`, in which case it fails loudly. SBBRMI and Turing consume the
+shared continuous representation; categorical columns additionally reuse the
+same ordered level-coding primitive as SBBRMI's established contrast block.
 """
 function _brm_simple_population_design(target::Symbol, rhs,
                                        data::AbstractDict,
@@ -296,7 +337,8 @@ function _brm_simple_population_design(target::Symbol, rhs,
                 "population term `$(repr(term))`; the shared initial surface " *
                 "supports only `1` and continuous raw-data columns, plus " *
                 "`zscale`, `standardize`, and `center` of one numeric column, " *
-                "and pairwise interactions among those numeric terms")
+                "pairwise interactions among those numeric terms, and ordered " *
+                "treatment contrasts for integer or `CategoricalVector` columns")
             return nothing
         end
         append!(raw_columns, columns)
@@ -332,7 +374,8 @@ function _brm_simple_population_design(target::Symbol, rhs,
             "BRM backend lowering: predictor `$target` mixes row axes of lengths " *
             "$n and $(length(values))")
         _BRMPopulationColumn(
-            column.label, column.source, values, column.preprocess)
+            column.label, column.effect_address, column.source, values,
+            column.preprocess)
     end
     matrix = hcat((c.values for c in columns)...)
     _BRMPopulationDesign(target, Tuple(columns), matrix, row_source)
@@ -415,8 +458,9 @@ _brm_numeric_constant(_x) = nothing
 Resolve formula-level `effect(...) ~ Normal(...)` statements against a narrow
 shared population design. The output is aligned 1:1 with `design.columns` and
 contains the winning parsed RHS (or `nothing` for the default Normal(0, 1)).
-This is the backend-neutral subset currently shared by SBBRMI and direct-BRMI
-backends; richer categorical and multi-predictor resolution remains additive.
+An `effect(lp, categorical_column)` address fans out over that column's K-1
+treatment contrasts, matching SBBRMI's one-prior-per-contrast-block contract.
+Richer multi-predictor resolution remains additive.
 """
 function _brm_simple_population_effect_overrides(brmi::BRMI,
                                                  design::_BRMPopulationDesign;
@@ -425,6 +469,7 @@ function _brm_simple_population_effect_overrides(brmi::BRMI,
     isempty(specs) && return nothing
 
     labels = Symbol[c.label for c in design.columns]
+    addresses = Symbol[c.effect_address for c in design.columns]
     cells = Any[nothing for _ in labels]
     for spec in specs
         _brm_validate_population_effect_spec(spec; prefix)
@@ -436,11 +481,12 @@ function _brm_simple_population_effect_overrides(brmi::BRMI,
         indices = if spec.coefficient === _EFFECT_COLON
             eachindex(labels)
         else
-            idx = findfirst(==(spec.coefficient), labels)
-            isnothing(idx) && error(
+            idxs = findall(==(spec.coefficient), addresses)
+            isempty(idxs) && error(
                 "$prefix: `$(spec.coefficient)` is not a population coefficient " *
-                "of `$(design.target)`. Available labels: $(join(labels, ", ")).")
-            (idx,)
+                "of `$(design.target)`. Available labels: " *
+                "$(join(unique(addresses), ", ")).")
+            idxs
         end
         for idx in indices
             _brm_claim_effect_prior!(

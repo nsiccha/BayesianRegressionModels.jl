@@ -1785,12 +1785,7 @@ end
 # Categorical -> (n_levels::Int, per-row level index::Vector{Int}). Mirrors
 # vimpl._level_index so the integer indices the walker stashes in `data`
 # agree with what the cimpl-side uses.
-_sb_level_index(raw::CA.CategoricalVector) = length(CA.levels(raw)), Int.(CA.levelcode.(raw))
-_sb_level_index(raw::AbstractVector) = begin
-    lvls = sort(unique(raw))
-    lm = Dict(l => i for (i, l) in enumerate(lvls))
-    length(lvls), [lm[l] for l in raw]
-end
+_sb_level_index(raw::AbstractVector) = _brm_level_index(raw)
 
 # Fit/apply split for categorical level coding (factor / mo). `_sb_fit_levels`
 # returns the ordered level set (the frozen constant); `_sb_apply_levels` maps a
@@ -1800,7 +1795,6 @@ end
 # for a CategoricalVector the level position == `CA.levelcode`; for a plain
 # vector `sort(unique)` gives the same ordering. `_sb_level_index` (the
 # construct-time entry) is unchanged.
-_brm_fit_levels(raw::CA.CategoricalVector) = CA.levels(raw)
 _sb_fit_levels(raw::AbstractVector) = _brm_fit_levels(raw)
 _sb_apply_levels(levels, raw::CA.CategoricalVector) = _sb_apply_levels(levels, CA.unwrap.(raw))
 _sb_apply_levels(levels, raw::AbstractVector) = begin
