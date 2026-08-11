@@ -2,10 +2,12 @@
 # no dependency on Turing, DynamicPPL, StanBlocks, SBBRMI, or emitted SLIC. The
 # package extension supplies the executable model after Turing is loaded.
 
-struct _TuringPopulationPlan{F,C<:_BRMBackendContext,D<:_BRMPopulationDesign,
-                             Y<:AbstractVector,B<:AbstractVector,A,S}
+struct _TuringPopulationPlan{F,C<:_BRMBackendContext,P<:_BRMPopulationPredictor,
+                             D<:_BRMPopulationDesign,Y<:AbstractVector,
+                             B<:AbstractVector,A,S}
     family::F
     context::C
+    predictor::P
     design::D
     response::Y
     beta_location::B
@@ -54,7 +56,7 @@ end
 
 function _turing_named_reference(x, role::AbstractString)
     x isa NamedColumn || error(
-        "Turing backend: Gaussian $role must be a direct named predictor; " *
+        "Turing backend: $role must be a direct named predictor; " *
         "got $(typeof(x))")
     name(x)
 end
@@ -85,13 +87,6 @@ end
 
 function _turing_population_components(brmi::BRMI, observation, predictor::Symbol;
                                        extra_operations=())
-    lp = linear_predictor_op(brmi, predictor)
-    isnothing(lp) && error(
-        "Turing backend: predictor `$predictor` has no population formula")
-    lp_lhs, lp_rhs = getargs(lp, 2)
-    lp_lhs isa NamedColumn && name(lp_lhs) === predictor || error(
-        "Turing backend: linked/distributional predictor LHSs are not yet supported")
-
     isempty(ranef_effect_priors(brmi)) || error(
         "Turing backend: random-effect prior overrides are not yet supported")
     isempty(r2d2_priors(brmi)) || error(
@@ -110,9 +105,9 @@ function _turing_population_components(brmi::BRMI, observation, predictor::Symbo
         "Turing backend: unsupported top-level operation(s): " *
         join(sort!(collect(extras)), ", "))
 
-    design = _brm_simple_population_design(
-        predictor, lp_rhs, context.data, get(context.target_obs, predictor, nothing);
-        required=true)
+    predictor_plan = _brm_simple_population_predictor(
+        brmi, predictor, context; required=true)
+    design = predictor_plan.design
     response = context.data[observation.key]
     response isa AbstractVector || error(
         "Turing backend: response `$(observation.key)` must be a vector")
@@ -123,7 +118,18 @@ function _turing_population_components(brmi::BRMI, observation, predictor::Symbo
         brmi, design; prefix="Turing backend")
     beta_location, beta_scale = _brm_materialize_normal_effect_priors(
         overrides, k; prefix="Turing backend")
-    (; context, design, response, beta_location, beta_scale)
+    (; context, predictor=predictor_plan, design, response,
+       beta_location, beta_scale)
+end
+
+
+function _turing_require_predictor_link(parts, expected, role::AbstractString)
+    found = parts.predictor.link_lhs_fn
+    found === expected || error(
+        "Turing backend: $role requires predictor `$(parts.predictor.name)` " *
+        "to use `$(nameof(expected))(...)` on the formula LHS; got " *
+        "`$(nameof(found))(...)`")
+    nothing
 end
 
 function _turing_normal_plan(brmi::BRMI, observation, rhs::ExprColumn)
@@ -142,10 +148,12 @@ function _turing_normal_plan(brmi::BRMI, observation, rhs::ExprColumn)
         "got `$scale`")
     parts = _turing_population_components(
         brmi, observation, predictor; extra_operations=(scale,))
+    _turing_require_predictor_link(parts, identity, "Gaussian identity location")
     parts.response isa AbstractVector{<:Real} || error(
         "Turing backend: Gaussian response `$(observation.key)` must be real-valued")
     scale_prior = _turing_scalar_exponential_prior(brmi, scale)
-    _TuringPopulationPlan(Val(:normal_identity), parts.context, parts.design,
+    _TuringPopulationPlan(Val(:normal_identity), parts.context, parts.predictor,
+                          parts.design,
                           collect(Float64, parts.response), parts.beta_location,
                           parts.beta_scale, NamedTuple(), scale_prior)
 end
@@ -158,9 +166,11 @@ function _turing_bernoulli_logit_plan(brmi::BRMI, observation, rhs::ExprColumn)
         "Turing backend: `BernoulliLogit(eta)` requires exactly one argument")
     predictor = _turing_named_reference(only(args), "logit")
     parts = _turing_population_components(brmi, observation, predictor)
+    _turing_require_predictor_link(parts, identity, "BernoulliLogit")
     all(x -> x isa Bool || (x isa Integer && x in (0, 1)), parts.response) || error(
         "Turing backend: Bernoulli response `$(observation.key)` must contain only 0/1")
-    _TuringPopulationPlan(Val(:bernoulli_logit), parts.context, parts.design,
+    _TuringPopulationPlan(Val(:bernoulli_logit), parts.context, parts.predictor,
+                          parts.design,
                           Int.(parts.response), parts.beta_location,
                           parts.beta_scale, NamedTuple(), nothing)
 end
@@ -174,12 +184,14 @@ function _turing_binomial_logit_plan(brmi::BRMI, observation, rhs::ExprColumn)
     trials_raw, eta_raw = args
     predictor = _turing_named_reference(eta_raw, "logit")
     parts = _turing_population_components(brmi, observation, predictor)
+    _turing_require_predictor_link(parts, identity, "BinomialLogit")
     trials = _brm_materialize_count_argument(
         trials_raw, length(parts.response), "BinomialLogit trial count";
         prefix="Turing backend")
     response = _brm_validate_binomial_response(
         parts.response, trials, observation.key; prefix="Turing backend")
-    _TuringPopulationPlan(Val(:binomial_logit), parts.context, parts.design,
+    _TuringPopulationPlan(Val(:binomial_logit), parts.context, parts.predictor,
+                          parts.design,
                           response, parts.beta_location,
                           parts.beta_scale, (; trials), nothing)
 end
@@ -190,18 +202,27 @@ function _turing_poisson_log_plan(brmi::BRMI, observation, rhs::ExprColumn)
     args = getargs(rhs)
     length(args) == 1 || error(
         "Turing backend: `Poisson(exp(log_rate))` requires exactly one argument")
-    link = only(args)
-    link isa ExprColumn && getf(link) === exp && isempty(getkwargs(link)) || error(
-        "Turing backend: Poisson population models require the log link " *
-        "`Poisson(exp(log_rate))`")
-    link_args = getargs(link)
-    length(link_args) == 1 || error(
-        "Turing backend: Poisson log link `exp(log_rate)` requires one argument")
-    predictor = _turing_named_reference(only(link_args), "log-rate")
+    rate = only(args)
+    predictor, expected_link = if rate isa ExprColumn &&
+                                  getf(rate) === exp &&
+                                  isempty(getkwargs(rate))
+        link_args = getargs(rate)
+        length(link_args) == 1 || error(
+            "Turing backend: Poisson log link `exp(log_rate)` requires one argument")
+        (_turing_named_reference(only(link_args), "log-rate"), identity)
+    elseif rate isa NamedColumn
+        (_turing_named_reference(rate, "rate"), log)
+    else
+        error("Turing backend: Poisson population models require either " *
+              "`log(lambda) ~ formula; y ~ Poisson(lambda)` or " *
+              "`log_rate ~ formula; y ~ Poisson(exp(log_rate))`")
+    end
     parts = _turing_population_components(brmi, observation, predictor)
+    _turing_require_predictor_link(parts, expected_link, "Poisson log link")
     all(x -> x isa Integer && x >= 0, parts.response) || error(
         "Turing backend: Poisson response `$(observation.key)` must be nonnegative integers")
-    _TuringPopulationPlan(Val(:poisson_log), parts.context, parts.design,
+    _TuringPopulationPlan(Val(:poisson_log), parts.context, parts.predictor,
+                          parts.design,
                           Int.(parts.response), parts.beta_location,
                           parts.beta_scale, NamedTuple(), nothing)
 end

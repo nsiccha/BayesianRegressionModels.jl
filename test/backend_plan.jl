@@ -40,6 +40,28 @@ const BRM = BayesianRegressionModels
 end
 
 
+@testset "backend-neutral linked population predictor" begin
+    df = (; x=[-1.0, 0.5, 2.0], y=[0, 2, 5])
+    brmi = (@brm begin
+        log(lambda) ~ 1 + x
+        y ~ Poisson(lambda)
+    end)(df)
+    context = BRM._brm_backend_context(brmi)
+    predictor = BRM._brm_simple_population_predictor(
+        brmi, :lambda, context; required=true)
+
+    @test predictor.name === :lambda
+    @test predictor.link_lhs_fn === log
+    @test predictor.emitted_name === :log_lambda
+    @test predictor.design.target === :lambda
+    @test predictor.design.matrix == hcat(ones(3), df.x)
+
+    emitted = sprint(show, SBBRMI(brmi).model.model)
+    @test occursin("X_log_lambda", emitted)
+    @test occursin("lambda = exp(log_lambda)", emitted)
+end
+
+
 @testset "backend-neutral fitted population transforms" begin
     df = (;
         x=[1.0, 2.0, 4.0],

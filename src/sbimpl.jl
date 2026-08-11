@@ -4760,7 +4760,7 @@ _sb_sampling_through_link!(stmts, data, key, f, inner, rhs; kwargs...) =
 # link path instead and takes the same branch — harmless, because Stan has no
 # `identity` function, so that spelling has never transpiled either way.
 _sb_lp_emitted_name(lp_name::Symbol, link_lhs_fn) =
-    link_lhs_fn === identity ? lp_name : Symbol(nameof(link_lhs_fn), :_, lp_name)
+    _brm_lp_emitted_name(lp_name, link_lhs_fn)
 
 function _sb_sampling_through_link!(stmts, data, key, f, inner::NamedColumn, rhs; id_lookup, obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2())
     inv_f = InverseFunctions.inverse(f)

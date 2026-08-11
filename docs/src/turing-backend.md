@@ -47,8 +47,8 @@ end)((;
 )))
 
 count = TuringBRMI((@brm begin
-    log_rate ~ 1 + x
-    y ~ Poisson(exp(log_rate))
+    log(lambda) ~ 1 + x
+    y ~ Poisson(lambda)
 end)((; x=[-1.0, 0.5, 2.0], y=[0, 2, 5])))
 
 (binary=summary(binary.model),
@@ -154,7 +154,7 @@ the Turing backend refuses the surface rather than approximating it.
 | Gaussian identity likelihood | **Supported** | `sigma ~ Exponential(scale)`, `mu ~ 1 + continuous...`, `y ~ Normal(mu, sigma)` |
 | Bernoulli-logit likelihood | **Supported** | `eta ~ 1 + continuous...`, `y ~ BernoulliLogit(eta)` |
 | Binomial-logit likelihood | **Supported** | `eta ~ 1 + continuous...`, `y ~ BinomialLogit(trials, eta)` with constant or row-wise nonnegative integer trials |
-| Poisson-log likelihood | **Supported** | `log_rate ~ 1 + continuous...`, `y ~ Poisson(exp(log_rate))` |
+| Poisson-log likelihood | **Supported** | Canonical `log(lambda) ~ formula; y ~ Poisson(lambda)` and explicit linked-scale `log_rate ~ formula; y ~ Poisson(exp(log_rate))` share one predictor/link plan |
 | Other scalar likelihoods | **Pending** | The built-in catalogue in [Likelihoods](likelihoods.md), including negative-binomial, beta-binomial, hurdle/mixture, circular, quantile, and ordinal families |
 | Group/random effects | **Pending** | Plain and correlated groups, `|ID|` blocks, centering/CV, stratification, multi-membership, and their SD/correlation/effect priors |
 | Response compositions | **Pending** | Truncation, censoring, interval evidence, observation weights, missing-response inference, measurement error, and concise categorical formulas |

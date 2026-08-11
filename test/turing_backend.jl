@@ -397,6 +397,7 @@ end
     returned = Turing.DynamicPPL.returned(backend.model, params)
 
     @test backend.plan.family isa Val{:poisson_log}
+    @test backend.plan.predictor.link_lhs_fn === identity
     @test backend.plan.response == df.y
     @test Turing.logjoint(backend.model, params) ≈ prior + likelihood atol=1e-12 rtol=1e-12
     @test Turing.logprior(backend.model, params) ≈ prior atol=1e-12 rtol=1e-12
@@ -404,6 +405,31 @@ end
     @test returned.log_rate == log_rate
     @test returned.rate == rate
     @test length(rand(Xoshiro(44), backend.model).data.beta_pop) == 2
+
+    canonical = (@brm begin
+        log(lambda) ~ 1 + x
+        y ~ Poisson(lambda)
+    end)(df)
+    canonical_sb = SBBRMI(canonical)
+    canonical_backend = TuringBRMI(canonical)
+    canonical_returned = Turing.DynamicPPL.returned(
+        canonical_backend.model, params)
+    @test canonical_backend.plan.predictor.link_lhs_fn === log
+    @test canonical_backend.plan.predictor.emitted_name === :log_lambda
+    @test canonical_backend.plan.design.matrix == backend.plan.design.matrix
+    @test Turing.logjoint(canonical_backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+    @test canonical_returned.log_rate == log_rate
+    @test canonical_returned.rate == rate
+    @test haskey(canonical_sb.data, :x)
+
+    incompatible = (@brm begin
+        lambda ~ 1 + x
+        y ~ Poisson(lambda)
+    end)(df)
+    @test_throws "requires predictor `lambda` to use `log(...)`" begin
+        TuringBRMI(incompatible)
+    end
 end
 
 @testset "Turing extension — unsupported shapes fail loudly" begin
@@ -420,7 +446,7 @@ end
         mu ~ 1 + x
         y ~ Poisson(mu)
     end)((; x=[0.0, 1.0], y=[0, 1]))
-    @test_throws "require the log link" begin
+    @test_throws "requires predictor `mu` to use `log(...)`" begin
         TuringBRMI(poisson_identity)
     end
 end

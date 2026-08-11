@@ -553,6 +553,41 @@ function _brm_simple_population_design(target::Symbol, rhs,
         target, Tuple(columns), matrix, row_source, Tuple(fixed_terms), fixed)
 end
 
+struct _BRMPopulationPredictor{F,D<:_BRMPopulationDesign}
+    name::Symbol
+    link_lhs_fn::F
+    emitted_name::Symbol
+    design::D
+end
+
+_brm_lp_emitted_name(name::Symbol, link_lhs_fn) =
+    link_lhs_fn === identity ? name : Symbol(nameof(link_lhs_fn), :_, name)
+
+function _brm_simple_population_predictor(brmi::BRMI, target::Symbol,
+                                          context::_BRMBackendContext;
+                                          required::Bool=false)
+    op = linear_predictor_op(brmi, target)
+    if isnothing(op) || getf(op) !== (~)
+        required && error(
+            "BRM backend lowering: predictor `$target` has no population formula")
+        return nothing
+    end
+    lhs, rhs = getargs(op, 2)
+    peeled = _peel_lp_lhs(lhs)
+    if isnothing(peeled) || last(peeled) !== target
+        required && error(
+            "BRM backend lowering: predictor `$target` has an unsupported LHS")
+        return nothing
+    end
+    link_lhs_fn, name = peeled
+    design = _brm_simple_population_design(
+        name, rhs, context.data, get(context.target_obs, name, nothing);
+        required)
+    isnothing(design) && return nothing
+    _BRMPopulationPredictor(
+        name, link_lhs_fn, _brm_lp_emitted_name(name, link_lhs_fn), design)
+end
+
 # ---- shared population-effect prior semantics -----------------------------
 
 # This is a representation test, not a Stan lowering decision. Keep it in the
