@@ -181,11 +181,20 @@ struct _BRMPopulationColumn{A<:Tuple,V<:AbstractVector,P}
     preprocess::P
 end
 
-struct _BRMPopulationDesign{C<:Tuple,M<:AbstractMatrix}
+struct _BRMPopulationFixedTerm{V<:AbstractVector,P}
+    label::Symbol
+    source::Symbol
+    values::V
+    preprocess::P
+end
+
+struct _BRMPopulationDesign{C<:Tuple,M<:AbstractMatrix,T<:Tuple,V<:AbstractVector}
     target::Symbol
     columns::C
     matrix::M
     row_source::Symbol
+    fixed_terms::T
+    fixed::V
 end
 
 _brm_additive_terms(rhs) = begin
@@ -227,12 +236,53 @@ _brm_apply_zscale(c::Tuple, v::AbstractVector{<:Real}) =
 _brm_fit_center(v::AbstractVector{<:Real}) = sum(v) / length(v)
 _brm_apply_center(mu::Real, v::AbstractVector{<:Real}) = v .- mu
 
+_brm_data_expression_sources!(sources, term::NamedColumn) = begin
+    parent(term) isa DataColumn && push!(sources, name(term))
+    sources
+end
+_brm_data_expression_sources!(sources, term::ExprColumn) = begin
+    foreach(arg -> _brm_data_expression_sources!(sources, arg), getargs(term))
+    sources
+end
+_brm_data_expression_sources!(sources, _term) = sources
+_brm_data_expression_sources(term) =
+    _brm_data_expression_sources!(Symbol[], term)
+
+_brm_materialize_data_expression(x::Number) = x
+_brm_materialize_data_expression(x::NamedColumn) = begin
+    backing = parent(x)
+    backing isa DataColumn ? parent(backing) : nothing
+end
+function _brm_materialize_data_expression(x::ExprColumn)
+    isempty(getkwargs(x)) || return nothing
+    args = map(_brm_materialize_data_expression, getargs(x))
+    any(isnothing, args) && return nothing
+    broadcast(getf(x), args...)
+end
+_brm_materialize_data_expression(_x) = nothing
+
+_brm_wrapper_col_name(prefix::Symbol, inner::NamedColumn) =
+    Symbol(prefix, :_, name(inner))
+_brm_wrapper_col_name(prefix::Symbol, inner) =
+    Symbol(prefix, :_expr_, string(hash(inner); base=16)[1:8])
+
 function _brm_population_column(term::ExprColumn)
     f = getf(term)
     kind = f === zscale ? :zscale :
            f === standardize ? :standardize :
            f === center ? :center : nothing
-    isnothing(kind) && return nothing
+    if isnothing(kind)
+        values = _brm_materialize_data_expression(term)
+        values isa AbstractVector{<:Real} || return nothing
+        sources = _brm_data_expression_sources(term)
+        isempty(sources) && return nothing
+        label = _brm_wrapper_col_name(Symbol(getf(term)), term)
+        preprocess = _BRMPopulationPreprocess(
+            :protect, nothing, term)
+        return (; label, effect_addresses=(label,), effect_block=label,
+                source=first(sources), values=collect(Float64, values),
+                preprocess)
+    end
     args = getargs(term)
     length(args) == 1 || return nothing
     inner = only(args)
@@ -253,6 +303,28 @@ function _brm_population_column(term::ExprColumn)
        source=name(inner), values=transformed, preprocess)
 end
 _brm_population_column(_term) = nothing
+
+function _brm_population_fixed_term(term)
+    term isa ExprColumn && getf(term) === offset || return nothing
+    args = getargs(term)
+    length(args) == 1 || error(
+        "BRM backend lowering: `offset(x)` expects exactly one positional " *
+        "argument, got $(length(args))")
+    isempty(getkwargs(term)) || error(
+        "BRM backend lowering: `offset(x)` does not accept keyword arguments")
+    inner = only(args)
+    values = _brm_materialize_data_expression(inner)
+    values isa AbstractVector{<:Real} || error(
+        "BRM backend lowering: direct-BRMI `offset(...)` currently requires a " *
+        "pure expression over raw numeric data columns")
+    sources = _brm_data_expression_sources(inner)
+    isempty(sources) && error(
+        "BRM backend lowering: `offset(...)` has no raw data row axis")
+    label = _brm_wrapper_col_name(:offset, inner)
+    preprocess = _BRMPopulationPreprocess(:protect, nothing, inner)
+    _BRMPopulationFixedTerm(
+        label, first(sources), collect(Float64, values), preprocess)
+end
 
 _brm_fit_levels(raw::CA.CategoricalVector) = CA.levels(raw)
 _brm_level_index(raw::CA.CategoricalVector) =
@@ -365,28 +437,37 @@ end
     _brm_simple_population_design(target, rhs, data, obs_name; required=false)
 
 Materialise the backend-neutral population design for the first common surface:
-an additive intercept, continuous raw-data columns, and fitted
-`zscale`/`standardize`/`center` columns, their pairwise continuous
-interactions, and treatment contrasts for integer or `CategoricalVector`
-columns. Returns `nothing` for a term requiring richer lowering unless
-`required=true`, in which case it fails loudly. SBBRMI and Turing consume the
-shared continuous representation; categorical columns additionally reuse the
-same ordered level-coding primitive as SBBRMI's established contrast block.
+an additive intercept, continuous raw-data columns, pure numeric data
+expressions, fitted `zscale`/`standardize`/`center` columns, pairwise
+continuous/categorical interactions, treatment contrasts for integer or
+`CategoricalVector` columns, and pure data-derived fixed `offset(...)` terms.
+Returns `nothing` for a term requiring richer lowering unless `required=true`,
+in which case it fails loudly. SBBRMI and Turing consume the shared
+coefficient-bearing representation; Turing also consumes the materialized
+fixed-offset vector. Categorical columns reuse SBBRMI's established ordered
+level-coding primitive.
 """
 function _brm_simple_population_design(target::Symbol, rhs,
                                        data::AbstractDict,
                                        obs_name::Union{Nothing,Symbol};
                                        required::Bool=false)
     raw_columns = Any[]
+    fixed_terms = _BRMPopulationFixedTerm[]
     for term in _brm_additive_terms(rhs)
+        fixed = _brm_population_fixed_term(term)
+        if !isnothing(fixed)
+            push!(fixed_terms, fixed)
+            continue
+        end
         columns = _brm_population_columns(term)
         if isnothing(columns)
             required && error(
                 "BRM backend lowering: predictor `$target` contains unsupported " *
                 "population term `$(repr(term))`; the shared initial surface " *
-                "supports only `1` and continuous raw-data columns, plus " *
+                "supports `1`, continuous raw-data columns, pure numeric data " *
+                "expressions and fixed data-derived `offset(...)` terms, plus " *
                 "`zscale`, `standardize`, and `center` of one numeric column, " *
-                "pairwise interactions among those numeric terms, and ordered " *
+                "pairwise continuous/categorical interactions, and ordered " *
                 "treatment contrasts for integer or `CategoricalVector` columns")
             return nothing
         end
@@ -398,14 +479,19 @@ function _brm_simple_population_design(target::Symbol, rhs,
     end
 
     concrete = filter(c -> !isnothing(c.source), raw_columns)
+    row_sources = Symbol[c.source for c in concrete]
+    append!(row_sources, (term.source for term in fixed_terms))
     row_source = if isempty(concrete)
-        isnothing(obs_name) && begin
+        if !isempty(row_sources)
+            first(row_sources)
+        elseif isnothing(obs_name)
             required && error(
                 "BRM backend lowering: intercept-only predictor `$target` has no " *
                 "observed response from which to determine its row axis")
             return nothing
+        else
+            obs_name
         end
-        obs_name
     else
         first(concrete).source
     end
@@ -427,7 +513,15 @@ function _brm_simple_population_design(target::Symbol, rhs,
             column.source, values, column.preprocess)
     end
     matrix = hcat((c.values for c in columns)...)
-    _BRMPopulationDesign(target, Tuple(columns), matrix, row_source)
+    fixed = zeros(Float64, n)
+    for term in fixed_terms
+        length(term.values) == n || error(
+            "BRM backend lowering: predictor `$target` mixes row axes of " *
+            "lengths $n and $(length(term.values)) in fixed offset `$(term.label)`")
+        fixed .+= term.values
+    end
+    _BRMPopulationDesign(
+        target, Tuple(columns), matrix, row_source, Tuple(fixed_terms), fixed)
 end
 
 # ---- shared population-effect prior semantics -----------------------------

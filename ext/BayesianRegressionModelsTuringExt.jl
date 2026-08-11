@@ -7,10 +7,10 @@ using Turing
 const BRM = BayesianRegressionModels
 
 Turing.@model function _brm_population_gaussian(
-    X, y, beta_location, beta_scale, sigma_scale)
+    X, fixed, y, beta_location, beta_scale, sigma_scale)
     beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
     sigma ~ Exponential(sigma_scale)
-    mu = X * beta_pop
+    mu = X * beta_pop + fixed
     for i in eachindex(y)
         y[i] ~ Normal(mu[i], sigma)
     end
@@ -18,9 +18,9 @@ Turing.@model function _brm_population_gaussian(
 end
 
 Turing.@model function _brm_population_bernoulli_logit(
-    X, y, beta_location, beta_scale)
+    X, fixed, y, beta_location, beta_scale)
     beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
-    eta = X * beta_pop
+    eta = X * beta_pop + fixed
     for i in eachindex(y)
         y[i] ~ BRM.BernoulliLogit(eta[i])
     end
@@ -28,9 +28,9 @@ Turing.@model function _brm_population_bernoulli_logit(
 end
 
 Turing.@model function _brm_population_poisson_log(
-    X, y, beta_location, beta_scale)
+    X, fixed, y, beta_location, beta_scale)
     beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
-    log_rate = X * beta_pop
+    log_rate = X * beta_pop + fixed
     rate = exp.(log_rate)
     for i in eachindex(y)
         y[i] ~ Poisson(rate[i])
@@ -42,6 +42,7 @@ function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:normal_identity}})
     _brm_population_gaussian(
         plan.design.matrix,
+        plan.design.fixed,
         plan.response,
         plan.beta_location,
         plan.beta_scale,
@@ -53,6 +54,7 @@ function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:bernoulli_logit}})
     _brm_population_bernoulli_logit(
         plan.design.matrix,
+        plan.design.fixed,
         plan.response,
         plan.beta_location,
         plan.beta_scale,
@@ -63,6 +65,7 @@ function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:poisson_log}})
     _brm_population_poisson_log(
         plan.design.matrix,
+        plan.design.fixed,
         plan.response,
         plan.beta_location,
         plan.beta_scale,

@@ -238,6 +238,34 @@ end
           prior + likelihood atol=1e-12 rtol=1e-12
 end
 
+@testset "Turing extension — pure expression and exposure offset" begin
+    df = (;
+        x=[1.0, 2.0, 4.0],
+        exposure=[2.0, 4.0, 8.0],
+        y=[0, 2, 5],
+    )
+    brmi = (@brm begin
+        log_rate ~ 1 + log(x) + offset(log(exposure))
+        y ~ Poisson(exp(log_rate))
+    end)(df)
+    backend = TuringBRMI(brmi)
+    expected_X = hcat(ones(3), log.(df.x))
+    @test backend.plan.design.matrix == expected_X
+    @test backend.plan.design.fixed == log.(df.exposure)
+    @test only(backend.plan.design.fixed_terms).source === :exposure
+
+    params = (; beta_pop=[0.25, -0.5])
+    log_rate = expected_X * params.beta_pop + log.(df.exposure)
+    rate = exp.(log_rate)
+    prior = sum(logpdf.(Normal(), params.beta_pop))
+    likelihood = sum(logpdf.(Poisson.(rate), df.y))
+    returned = Turing.DynamicPPL.returned(backend.model, params)
+    @test Turing.logjoint(backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+    @test returned.log_rate ≈ log_rate
+    @test returned.rate ≈ rate
+end
+
 @testset "Turing extension — population effect-prior overrides" begin
     df = (; x=[-1.0, 0.5, 2.0], y=[0.2, 1.1, -0.4])
     brmi = (@brm begin
