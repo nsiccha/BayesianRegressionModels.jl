@@ -5,6 +5,8 @@ package extension:
 
 ```julia
 using BayesianRegressionModels, Turing
+using Distributions: Binomial
+using LogExpFunctions: logit
 
 gaussian_brmi = (@brm begin
     sigma ~ Exponential(2)
@@ -33,13 +35,13 @@ GLMs—there is no intermediate Stan or SLIC model:
 
 ```julia
 binary = TuringBRMI((@brm begin
-    eta ~ 1 + x
-    y ~ BernoulliLogit(eta)
+    logit(p) ~ 1 + x
+    y ~ Bernoulli(p)
 end)((; x=[-1.0, 0.5, 2.0, 0.25], y=[0, 1, 1, 0])))
 
 grouped_binary = TuringBRMI((@brm begin
-    eta ~ 1 + x
-    y ~ BayesianRegressionModels.BinomialLogit(trials, eta)
+    logit(p) ~ 1 + x
+    y ~ Binomial(trials, p)
 end)((;
     x=[-1.0, 0.5, 2.0, 0.25],
     trials=[2, 4, 6, 3],
@@ -152,8 +154,8 @@ the Turing backend refuses the surface rather than approximating it.
 | Population coefficient priors | **Partial** | Independent `Normal(0, 1)` defaults plus `effect(lp, coef)`, `effect(:, coef)`, and `:` coefficient defaults with the same specificity/tie rules as SBBRMI; current Turing hyperparameters must be finite numeric constants |
 | Scalar and structured priors | **Partial** | Gaussian scale accepts explicit `Exponential(scale)`; general scalar, horseshoe, simplex, R2D2, term, and latent priors are pending |
 | Gaussian identity likelihood | **Supported** | `sigma ~ Exponential(scale)`, `mu ~ 1 + continuous...`, `y ~ Normal(mu, sigma)` |
-| Bernoulli-logit likelihood | **Supported** | `eta ~ 1 + continuous...`, `y ~ BernoulliLogit(eta)` |
-| Binomial-logit likelihood | **Supported** | `eta ~ 1 + continuous...`, `y ~ BinomialLogit(trials, eta)` with constant or row-wise nonnegative integer trials |
+| Bernoulli-logit likelihood | **Supported** | Canonical `logit(p) ~ formula; y ~ Bernoulli(p)` and explicit linked-scale `eta ~ formula; y ~ BernoulliLogit(eta)` share one stable logit executor |
+| Binomial-logit likelihood | **Supported** | Canonical `logit(p) ~ formula; y ~ Binomial(trials, p)` and explicit `BinomialLogit(trials, eta)` share count validation and one stable logit executor; trials may be constant or row-wise integers |
 | Poisson-log likelihood | **Supported** | Canonical `log(lambda) ~ formula; y ~ Poisson(lambda)` and explicit linked-scale `log_rate ~ formula; y ~ Poisson(exp(log_rate))` share one predictor/link plan |
 | Other scalar likelihoods | **Pending** | The built-in catalogue in [Likelihoods](likelihoods.md), including negative-binomial, beta-binomial, hurdle/mixture, circular, quantile, and ordinal families |
 | Group/random effects | **Pending** | Plain and correlated groups, `|ID|` blocks, centering/CV, stratification, multi-membership, and their SD/correlation/effect priors |

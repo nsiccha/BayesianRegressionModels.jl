@@ -158,6 +158,19 @@ function _turing_normal_plan(brmi::BRMI, observation, rhs::ExprColumn)
                           parts.beta_scale, NamedTuple(), scale_prior)
 end
 
+function _turing_bernoulli_population_plan(brmi::BRMI, observation,
+                                           predictor::Symbol, expected_link,
+                                           role::AbstractString)
+    parts = _turing_population_components(brmi, observation, predictor)
+    _turing_require_predictor_link(parts, expected_link, role)
+    all(x -> x isa Bool || (x isa Integer && x in (0, 1)), parts.response) || error(
+        "Turing backend: Bernoulli response `$(observation.key)` must contain only 0/1")
+    _TuringPopulationPlan(Val(:bernoulli_logit), parts.context, parts.predictor,
+                          parts.design,
+                          Int.(parts.response), parts.beta_location,
+                          parts.beta_scale, NamedTuple(), nothing)
+end
+
 function _turing_bernoulli_logit_plan(brmi::BRMI, observation, rhs::ExprColumn)
     isempty(getkwargs(rhs)) || error(
         "Turing backend: `BernoulliLogit(eta)` accepts no formula keywords")
@@ -165,14 +178,35 @@ function _turing_bernoulli_logit_plan(brmi::BRMI, observation, rhs::ExprColumn)
     length(args) == 1 || error(
         "Turing backend: `BernoulliLogit(eta)` requires exactly one argument")
     predictor = _turing_named_reference(only(args), "logit")
+    _turing_bernoulli_population_plan(
+        brmi, observation, predictor, identity, "BernoulliLogit")
+end
+
+function _turing_bernoulli_plan(brmi::BRMI, observation, rhs::ExprColumn)
+    isempty(getkwargs(rhs)) || error(
+        "Turing backend: `Bernoulli(p)` accepts no formula keywords")
+    args = getargs(rhs)
+    length(args) == 1 || error(
+        "Turing backend: `Bernoulli(p)` requires exactly one argument")
+    predictor = _turing_named_reference(only(args), "probability")
+    _turing_bernoulli_population_plan(
+        brmi, observation, predictor, logit, "Bernoulli logit link")
+end
+
+function _turing_binomial_population_plan(brmi::BRMI, observation, trials_raw,
+                                          predictor::Symbol, expected_link,
+                                          role::AbstractString)
     parts = _turing_population_components(brmi, observation, predictor)
-    _turing_require_predictor_link(parts, identity, "BernoulliLogit")
-    all(x -> x isa Bool || (x isa Integer && x in (0, 1)), parts.response) || error(
-        "Turing backend: Bernoulli response `$(observation.key)` must contain only 0/1")
-    _TuringPopulationPlan(Val(:bernoulli_logit), parts.context, parts.predictor,
+    _turing_require_predictor_link(parts, expected_link, role)
+    trials = _brm_materialize_count_argument(
+        trials_raw, length(parts.response), "Binomial trial count";
+        prefix="Turing backend")
+    response = _brm_validate_binomial_response(
+        parts.response, trials, observation.key; prefix="Turing backend")
+    _TuringPopulationPlan(Val(:binomial_logit), parts.context, parts.predictor,
                           parts.design,
-                          Int.(parts.response), parts.beta_location,
-                          parts.beta_scale, NamedTuple(), nothing)
+                          response, parts.beta_location,
+                          parts.beta_scale, (; trials), nothing)
 end
 
 function _turing_binomial_logit_plan(brmi::BRMI, observation, rhs::ExprColumn)
@@ -183,17 +217,20 @@ function _turing_binomial_logit_plan(brmi::BRMI, observation, rhs::ExprColumn)
         "Turing backend: `BinomialLogit(trials, eta)` requires exactly two arguments")
     trials_raw, eta_raw = args
     predictor = _turing_named_reference(eta_raw, "logit")
-    parts = _turing_population_components(brmi, observation, predictor)
-    _turing_require_predictor_link(parts, identity, "BinomialLogit")
-    trials = _brm_materialize_count_argument(
-        trials_raw, length(parts.response), "BinomialLogit trial count";
-        prefix="Turing backend")
-    response = _brm_validate_binomial_response(
-        parts.response, trials, observation.key; prefix="Turing backend")
-    _TuringPopulationPlan(Val(:binomial_logit), parts.context, parts.predictor,
-                          parts.design,
-                          response, parts.beta_location,
-                          parts.beta_scale, (; trials), nothing)
+    _turing_binomial_population_plan(
+        brmi, observation, trials_raw, predictor, identity, "BinomialLogit")
+end
+
+function _turing_binomial_plan(brmi::BRMI, observation, rhs::ExprColumn)
+    isempty(getkwargs(rhs)) || error(
+        "Turing backend: `Binomial(trials, p)` accepts no formula keywords")
+    args = getargs(rhs)
+    length(args) == 2 || error(
+        "Turing backend: `Binomial(trials, p)` requires exactly two arguments")
+    trials_raw, probability_raw = args
+    predictor = _turing_named_reference(probability_raw, "probability")
+    _turing_binomial_population_plan(
+        brmi, observation, trials_raw, predictor, logit, "Binomial logit link")
 end
 
 function _turing_poisson_log_plan(brmi::BRMI, observation, rhs::ExprColumn)
@@ -239,13 +276,16 @@ function _brm_turing_plan(brmi::BRMI)
         "Turing backend: observed likelihood must be a distribution call")
     family = getf(rhs)
     family === Normal && return _turing_normal_plan(brmi, observation, rhs)
+    family === Bernoulli && return _turing_bernoulli_plan(brmi, observation, rhs)
     family === BernoulliLogit &&
         return _turing_bernoulli_logit_plan(brmi, observation, rhs)
+    family === Binomial && return _turing_binomial_plan(brmi, observation, rhs)
     family === BinomialLogit &&
         return _turing_binomial_logit_plan(brmi, observation, rhs)
     family === Poisson && return _turing_poisson_log_plan(brmi, observation, rhs)
     error("Turing backend: executable families are `Normal(mu, sigma)`, " *
-          "`BernoulliLogit(eta)`, `BinomialLogit(trials, eta)`, and " *
+          "`Bernoulli(p)` / `BernoulliLogit(eta)`, `Binomial(trials, p)` / " *
+          "`BinomialLogit(trials, eta)`, and " *
           "`Poisson(exp(log_rate))`; got `$family`")
 end
 

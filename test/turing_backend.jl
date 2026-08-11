@@ -1,7 +1,8 @@
 using Test
 using Random: Xoshiro
 using BayesianRegressionModels
-using Distributions: Cauchy, Exponential, Normal, Poisson, logpdf
+using Distributions: Binomial, Cauchy, Exponential, Normal, Poisson, logpdf
+using LogExpFunctions: logit
 using Turing
 
 const BRM = BayesianRegressionModels
@@ -326,6 +327,15 @@ end
     @test Turing.loglikelihood(backend.model, params) ≈ likelihood atol=1e-12 rtol=1e-12
     @test Turing.DynamicPPL.returned(backend.model, params).eta == eta
     @test length(rand(Xoshiro(43), backend.model).data.beta_pop) == 2
+
+    canonical = (@brm begin
+        logit(p) ~ 1 + x
+        y ~ Bernoulli(p)
+    end)(df)
+    canonical_backend = TuringBRMI(canonical)
+    @test canonical_backend.plan.predictor.link_lhs_fn === logit
+    @test Turing.logjoint(canonical_backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
 end
 
 @testset "Turing extension — Binomial-logit population GLM" begin
@@ -356,6 +366,16 @@ end
           likelihood atol=1e-12 rtol=1e-12
     @test returned.eta == eta
     @test returned.trials == df.trials
+
+    canonical = (@brm begin
+        logit(p) ~ 1 + x
+        y ~ Binomial(trials, p)
+    end)(df)
+    canonical_backend = TuringBRMI(canonical)
+    @test canonical_backend.plan.predictor.link_lhs_fn === logit
+    @test canonical_backend.plan.family_args.trials == df.trials
+    @test Turing.logjoint(canonical_backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
 
     constant_trials = (@brm begin
         eta ~ 1 + x
