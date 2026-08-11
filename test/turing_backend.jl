@@ -358,7 +358,7 @@ end
         mu ~ 1 + group
         y ~ Normal(mu, sigma)
     end)((; group=["a", "b", "a"], y=zeros(3)))
-    @test_throws "supports only `1` and continuous raw-data columns" begin
+    @test_throws "supports `1`, continuous raw-data columns" begin
         TuringBRMI(unsupported_string_column)
     end
 
