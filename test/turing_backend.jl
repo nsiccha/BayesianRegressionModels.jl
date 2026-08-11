@@ -2308,7 +2308,13 @@ end
     @test mean_block.id === :joint
     @test precision_block.id === :joint
 
-    L_shared = cholesky(Symmetric(Matrix{Float64}(I, 4, 4)))
+    correlation = [
+        1.0 0.20 -0.10 0.15
+        0.20 1.0 0.25 -0.20
+        -0.10 0.25 1.0 0.30
+        0.15 -0.20 0.30 1.0
+    ]
+    L_shared = cholesky(Symmetric(correlation))
     params = Dict(
         Turing.@varname(beta_mean) => [0.1, 0.2],
         Turing.@varname(beta_precision) => [-0.4, 0.15],
@@ -2321,6 +2327,9 @@ end
     )
     shared_coefficients = transpose(Diagonal(params[
         Turing.@varname(shared_groups[1].tau)]) * Matrix(L_shared.L) *
+        reshape(params[Turing.@varname(shared_groups[1].z_flat)], 4, 3))
+    diagonal_coefficients = transpose(reshape(params[
+        Turing.@varname(shared_groups[1].tau)], 4, 1) .*
         reshape(params[Turing.@varname(shared_groups[1].z_flat)], 4, 3))
     mean_coefficients = @view shared_coefficients[:, 1:2]
     precision_coefficients = @view shared_coefficients[:, 3:4]
@@ -2353,6 +2362,7 @@ end
     @test Turing.logprior(negative_binomial.model, params) ≈
           prior atol=1e-12 rtol=1e-12
     @test nb_returned.shared_groups[1].coefficients == shared_coefficients
+    @test shared_coefficients != diagonal_coefficients
     @test nb_returned.mean_group_effect == mean_group_effect
     @test nb_returned.precision_group_effect == precision_group_effect
 
