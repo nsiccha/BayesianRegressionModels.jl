@@ -161,8 +161,8 @@ end
 
     @test Tuple(c.label for c in design.columns) ==
           (:Intercept, :g_lvl_2, :g_lvl_3, :x)
-    @test Tuple(c.effect_address for c in design.columns) ==
-          (:Intercept, :g, :g, :x)
+    @test Tuple(c.effect_addresses for c in design.columns) ==
+          ((:Intercept,), (:g,), (:g,), (:x,))
     @test design.matrix == hcat(
         ones(6),
         Float64.(df.g .== 2),
@@ -183,6 +183,43 @@ end
     sb = SBBRMI(brmi)
     @test sb.data[:g_idx] == df.g
     @test sb.preproc[:g_idx].const_ == [1, 2, 3]
+
+    reffed = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + factor(g; ref=3)
+        effect(mu, g) ~ Normal(-0.5, 0.2)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    reffed_context = BRM._brm_backend_context(reffed)
+    _, reffed_rhs = getargs(linear_predictor_op(reffed, :mu), 2)
+    reffed_design = BRM._brm_simple_population_design(
+        :mu, reffed_rhs, reffed_context.data,
+        reffed_context.target_obs[:mu]; required=true)
+    @test Tuple(c.label for c in reffed_design.columns) ==
+          (:Intercept, :g__ref_3_lvl_2, :g__ref_3_lvl_3)
+    @test reffed_design.matrix == hcat(
+        ones(6), Float64.(df.g .== 2), Float64.(df.g .== 1))
+    @test reffed_design.columns[2].effect_addresses == (:g__ref_3, :g)
+    reffed_overrides = BRM._brm_simple_population_effect_overrides(
+        reffed, reffed_design)
+    @test BRM._brm_materialize_normal_effect_priors(
+        reffed_overrides, 3) == ([0.0, -0.5, -0.5], [1.0, 0.2, 0.2])
+
+    ambiguous = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + factor(g; ref=2) + factor(g; ref=3)
+        effect(mu, g) ~ Normal(0, 0.5)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    ambiguous_context = BRM._brm_backend_context(ambiguous)
+    _, ambiguous_rhs = getargs(linear_predictor_op(ambiguous, :mu), 2)
+    ambiguous_design = BRM._brm_simple_population_design(
+        :mu, ambiguous_rhs, ambiguous_context.data,
+        ambiguous_context.target_obs[:mu]; required=true)
+    @test_throws "ambiguously names categorical contrast blocks" begin
+        BRM._brm_simple_population_effect_overrides(
+            ambiguous, ambiguous_design)
+    end
 end
 
 

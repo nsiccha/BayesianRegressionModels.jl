@@ -83,6 +83,22 @@ end)((;
 )))
 ```
 
+`factor(group; ref=k)` uses the same reference-level swap and address aliases
+as StanBlocks. The user-facing column name still addresses the whole contrast
+block:
+
+```julia
+reference_level = TuringBRMI((@brm begin
+    sigma ~ Exponential(2)
+    mu ~ 1 + factor(group; ref=3)
+    effect(mu, group) ~ Normal(0, 0.5)
+    y ~ Normal(mu, sigma)
+end)((;
+    group=[1, 2, 3, 1, 2, 3],
+    y=[-2.4, -2.2, -2.0, -1.8, -1.7, -1.5],
+)))
+```
+
 Turing is a weak dependency. The core package owns a backend-neutral BRMI
 context and population-design plan; the extension turns that plan into a
 `DynamicPPL.Model`. It does not construct or inspect `SBBRMI`,
@@ -105,7 +121,7 @@ the Turing backend refuses the surface rather than approximating it.
 | Backend boundary | **Supported** | Direct `BRMI` → backend-neutral plan → Turing extension; core loads without Turing |
 | Observation topology | **Partial** | Exactly one direct response named `y`; arbitrary names, multiple responses, distributional predictors, and hierarchical/ragged axes are pending |
 | Population design | **Partial** | Additive intercept and continuous raw/fitted-transform columns share `_BRMPopulationDesign` with SBBRMI; ordered treatment contrasts reuse SBBRMI's level-coding primitive and effect-address semantics |
-| Population transforms and terms | **Partial** | `zscale`, `standardize`, and `center`, pairwise continuous interactions, and bare integer/`CategoricalVector` treatment contrasts are supported; categorical interactions, `factor(...; ref=...)`, `offset`, `mo`/`mo1`, `me`, `s`, `t2`, `gp`, and `hsgp` are pending |
+| Population transforms and terms | **Partial** | `zscale`, `standardize`, and `center`, pairwise continuous interactions, bare integer/`CategoricalVector` treatment contrasts, and integer `factor(...; ref=k)` are supported; categorical interactions, `offset`, `mo`/`mo1`, `me`, `s`, `t2`, `gp`, and `hsgp` are pending |
 | Population coefficient priors | **Partial** | Independent `Normal(0, 1)` defaults plus `effect(lp, coef)`, `effect(:, coef)`, and `:` coefficient defaults with the same specificity/tie rules as SBBRMI; current Turing hyperparameters must be finite numeric constants |
 | Scalar and structured priors | **Partial** | Gaussian scale accepts explicit `Exponential(scale)`; general scalar, horseshoe, simplex, R2D2, term, and latent priors are pending |
 | Gaussian identity likelihood | **Supported** | `sigma ~ Exponential(scale)`, `mu ~ 1 + continuous...`, `y ~ Normal(mu, sigma)` |
@@ -128,7 +144,7 @@ postprocessing oracle.
 
 Within the current slice, all of the following are rejected explicitly:
 
-- string/object population columns that are not explicit `CategoricalVector`s, and custom-reference `factor(...)` terms;
+- string/object population columns that are not explicit `CategoricalVector`s;
 - random effects and group blocks;
 - non-Normal or nonconstant population priors, random-effect priors, R2D2, or term-prior overrides;
 - response decorators, multiple likelihoods, or extra model statements;
