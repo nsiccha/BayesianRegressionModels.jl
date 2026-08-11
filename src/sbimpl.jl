@@ -134,30 +134,6 @@ function _check_term_kwargs(::Type{<:Ordinal}, kwargs)
     nothing
 end
 
-"""
-    interval_censored(base; upper)
-
-Formula-only RHS wrapper for genuine interval evidence. The observed response
-column supplies each interval's lower endpoint and `upper` supplies its upper
-endpoint:
-
-```julia
-y_lower ~ interval_censored(Normal(mu, sigma); upper=y_upper)
-```
-
-Each row contributes the base family's probability over `(y_lower, y_upper]`,
-exactly `CDF(y_upper) - CDF(y_lower)`. The lower endpoint is open for discrete
-families too; unlike inclusive truncation it receives no predecessor shift.
-Posterior prediction remains on the uncoarsened base-response scale. This is
-separate from Distributions.jl's `censored`, which is the distribution
-of `clamp(X, lower, upper)` and therefore has atoms at its thresholds.
-
-The marker is intentionally formula-local: unlike `truncated` and `censored`,
-there is no existing Distributions.jl value with these per-row evidence
-semantics for BRM to construct outside `@brm`.
-"""
-function interval_censored end
-
 popefs = StanBlocks.@slic begin
     n_covariates = dims(X)[2]
     beta_pop ~ std_normal(; n=n_covariates)
@@ -2222,12 +2198,7 @@ _sb_rematerialize_vec(x, _df) = error(
 
 # Fetch a raw column from a new df via the BRM `Data` wrapper (the same accessor
 # the `@brm` builder uses), unwrapped to a plain vector. Errors if absent.
-_sb_df_column(df, col::Symbol) = begin
-    nc = getproperty(Data(df), col)
-    d = _as_data_column(parent(nc))
-    isnothing(d) && error("sbimpl: reprocess: new DataFrame has no column `$col`")
-    parent(d)
-end
+const _sb_df_column = _brm_df_column
 
 function _sb_gp_axes_from_df(df, raw_ref, label::Symbol)
     names = raw_ref isa Symbol ? (raw_ref,) : Tuple(raw_ref)
@@ -3004,55 +2975,8 @@ end
 
 # ---- reprocess / restan_data (decision nr3v8n A) ----------------------------
 
-_sb_df_has_column(df, k::Symbol) = hasproperty(df, k)
-
-# Rebind the typed BRMI tree to a new dataframe without re-parsing source code.
-# This is the construction half `resample_groups` needs: cv-contagious sizing is
-# selected while emitting Stan, so swapping the old model's data cannot create
-# a new-population artifact.  Named data leaves are the only values replaced;
-# formula-local structure, functions, and literal hyperparameters stay exact.
-_sb_rebind_value(x, _df) = x
-_sb_rebind_value(x::Tuple, df) = map(v -> _sb_rebind_value(v, df), x)
-_sb_rebind_value(x::NamedTuple, df) =
-    NamedTuple{keys(x)}(map(v -> _sb_rebind_value(v, df), values(x)))
-_sb_rebind_value(x::NestedPredictorFormula, df) =
-    NestedPredictorFormula(_sb_rebind_value(parent(x), df))
-_sb_rebind_value(x::LikelihoodColumn, df) =
-    LikelihoodColumn(_sb_rebind_value(parent(x), df),
-                     _sb_rebind_value(rhs(x), df))
-function _sb_rebind_value(x::NamedColumn, df)
-    n = name(x)
-    p = parent(x)
-    if p isa DataColumn || p isa MissingColumn
-        if _sb_df_has_column(df, n)
-            return NamedColumn(n, DataColumn(_sb_df_column(df, n)))
-        end
-        p isa DataColumn && error(
-            "sbimpl: resample replay: new DataFrame has no column `$n`, which " *
-            "was data-backed in the fitted BRMI")
-        return NamedColumn(n, MissingColumn())
-    end
-    NamedColumn(n, _sb_rebind_value(p, df))
-end
-function _sb_rebind_value(x::ExprColumn, df)
-    args = map(v -> _sb_rebind_value(v, df), getargs(x))
-    kw = getkwargs(x)
-    rebound_kw = NamedTuple{keys(kw)}(
-        map(v -> _sb_rebind_value(v, df), values(kw)))
-    ExprColumn(getf(x), args...; rebound_kw...)
-end
-function _sb_rebind_value(x::MultiMembershipTerm, df)
-    groups = map(v -> _sb_rebind_value(v, df), getfield(x, :groups))
-    old_weights = getfield(x, :weights)
-    weights = isnothing(old_weights) ? nothing :
-              map(v -> _sb_rebind_value(v, df), old_weights)
-    MultiMembershipTerm(groups...; weights, normalize=getfield(x, :normalize))
-end
-function _sb_rebind_brmi(brmi::BRMI, df)
-    ops = brmi.operations
-    BRMI(NamedTuple{keys(ops)}(
-        map(v -> _sb_rebind_value(v, df), values(ops))))
-end
+const _sb_df_has_column = _brm_df_has_column
+const _sb_rebind_brmi = _brm_rebind_brmi
 
 function _sb_resample_group_set(groups)
     groups === nothing && return Set{Symbol}()
@@ -3411,8 +3335,9 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         response isa AbstractVector || error(
             "sbimpl: reprocess: weighted response `$(e.const_.response)` must " *
             "be a vector, got $(typeof(response))")
-        new_data[key] = _sb_prepare_weight_values(
-            e.const_.kind, raw, length(response), e.const_.response, e.raw_ref)
+        new_data[key] = _brm_prepare_observation_weight_values(
+            e.const_.kind, raw, length(response), e.const_.response, e.raw_ref;
+            prefix="sbimpl: reprocess")
         new_preproc[key] = e
     elseif e.kind === :factor || e.kind === :mo
         v = _sb_df_column(df, e.raw_ref)
@@ -4817,7 +4742,7 @@ _sb_sampling_through_link!(stmts, data, key, f, inner, rhs; kwargs...) =
 # link path instead and takes the same branch — harmless, because Stan has no
 # `identity` function, so that spelling has never transpiled either way.
 _sb_lp_emitted_name(lp_name::Symbol, link_lhs_fn) =
-    link_lhs_fn === identity ? lp_name : Symbol(nameof(link_lhs_fn), :_, lp_name)
+    _brm_lp_emitted_name(lp_name, link_lhs_fn)
 
 function _sb_sampling_through_link!(stmts, data, key, f, inner::NamedColumn, rhs; id_lookup, obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2())
     inv_f = InverseFunctions.inverse(f)
@@ -4856,28 +4781,12 @@ _SB_MI_FAMILIES = Dict{Any,Symbol}(
     Normal => :_sb_mi_normal,
 )
 function _sb_emit_mi!(stmts, data, key, lhs::ExprColumn, rhs)
-    inner_raw = only(getargs(lhs))
-    inner = _as_named_column(inner_raw)
-    isnothing(inner) && error("sbimpl: `mi(...)` expects a NamedColumn inside, got $(typeof(inner_raw))")
-    inner_name = name(inner)
-    backing_raw = parent(inner)
-    backing = _as_data_column(backing_raw)
-    isnothing(backing) && error(
-        "sbimpl: `mi($inner_name)` requires a real data column with missings; ",
-        "got backing $(typeof(backing_raw)).")
-    raw = parent(backing)
-    eltype(raw) >: Missing || error(
-        "sbimpl: `mi($inner_name)` requires a column whose eltype admits ",
-        "`missing` (got $(eltype(raw))). If `$inner_name` has no NAs, drop ",
-        "the `mi(...)` wrapper.")
-    obs_mask = .!ismissing.(raw)
-    Jobs = findall(obs_mask)
-    Jmis = findall(.!obs_mask)
-    isempty(Jmis) && error(
-        "sbimpl: `mi($inner_name)` invoked on a column with NO missing values. ",
-        "Drop the `mi(...)` wrapper, or check your data.")
-    elT = nonmissingtype(eltype(raw))
-    y_obs = collect(elT, raw[obs_mask])
+    plan = _brm_missing_response_plan(lhs; prefix="sbimpl")
+    isnothing(plan) && error("sbimpl: internal `mi(...)` response was not planned")
+    inner_name = plan.source
+    Jobs = plan.observed_indices
+    Jmis = plan.missing_indices
+    y_obs = plan.observed_values
 
     rhs_e = _as_expr_column(rhs)
     isnothing(rhs_e) && error("sbimpl: `mi($inner_name) ~ <family>(args)` requires the RHS to be a family call, got $(typeof(rhs))")
@@ -6484,75 +6393,17 @@ end
 function _sb_ranef_effect_overrides(brmi::BRMI, id_buckets)
     specs = ranef_effect_priors(brmi)
     isempty(specs) && return Dict{Tuple{Symbol,Any},NamedTuple}()
-
-    states = Dict{Tuple{Symbol,Any},Dict{Symbol,Any}}()
-    for spec in specs
-        matches = Any[k for k in keys(id_buckets) if first(k) === spec.id]
-        isempty(matches) && error(
-            "sbimpl: `$(spec.class)(:, $(spec.id))` matches no shared " *
-            "`|$(spec.id)|` random-effect block")
-        length(matches) == 1 || error(
-            "sbimpl: public `|$(spec.id)|` addresses $(length(matches)) blocks " *
-            "with different grouping factors; use a unique ID")
-        key = only(matches)
-        bucket = id_buckets[key]
-        bucket.group_desc isa Tuple && error(
-            "sbimpl: covariance-prior effects for stratified " *
-            "`|$(spec.id)| gr(..., by=...)` buckets are not yet supported")
-        margins = _sb_id_bucket_margins(bucket)
-        state = get!(states, key) do
-            Dict{Symbol,Any}(
-                :margins => margins,
-                :sd_default => nothing,
-                :sd_overrides => Dict{Int,Tuple{Float64,Int}}(),
-                :lkj_eta => nothing,
-            )
-        end
-
-        if spec.class === :cor
-            state[:lkj_eta] === nothing || error(
-                "sbimpl: duplicate correlation prior for `cor(:, $(spec.id))`")
-            state[:lkj_eta] = _sb_ranef_lkj(spec, length(margins))
-            continue
-        end
-
-        rate = _sb_ranef_sd_rate(spec, "sd(:, $(spec.id))")
-        claim = _sb_ranef_margin_index(spec, margins)
-        if isnothing(claim)
-            state[:sd_default] === nothing || error(
-                "sbimpl: duplicate block SD prior for `sd(:, $(spec.id))`")
-            state[:sd_default] = rate
-        else
-            idxs, rank = claim
-            for idx in idxs
-                held = get(state[:sd_overrides], idx, nothing)
-                if isnothing(held) || rank > held[2]
-                    state[:sd_overrides][idx] = (rate, rank)
-                elseif rank == held[2]
-                    error("sbimpl: two SD prior statements are equally " *
-                          "specific and both set the prior for margin " *
-                          "$(margins[idx]) of `|$(spec.id)|`. Neither wins — " *
-                          "make one of them more specific, or drop it.")
-                end
-            end
-        end
+    margins = Dict{Tuple{Symbol,Any},Any}()
+    for (key, bucket) in id_buckets
+        bucket.group_desc isa Tuple && any(spec -> spec.id === first(key), specs) &&
+            error("sbimpl: covariance-prior effects for stratified " *
+                  "`|$(first(key))| gr(..., by=...)` buckets are not yet supported")
+        margins[key] = _sb_id_bucket_margins(bucket)
     end
-
-    out = Dict{Tuple{Symbol,Any},NamedTuple}()
-    for (key, state) in states
-        margins = state[:margins]
-        default_rate = state[:sd_default]
-        sd_family = fill(isnothing(default_rate) ? 0 : 1, length(margins))
-        sd_rate = fill(isnothing(default_rate) ? 1.0 : default_rate, length(margins))
-        for (idx, (rate, _)) in state[:sd_overrides]
-            sd_family[idx] = 1
-            sd_rate[idx] = rate
-        end
-        out[key] = (; sd_family, sd_rate,
-                    lkj_eta=isnothing(state[:lkj_eta]) ? 1.0 : state[:lkj_eta],
-                    margins)
-    end
-    out
+    resolved = _brm_resolve_ranef_effect_overrides(
+        specs, margins; prefix="sbimpl")
+    Dict{Tuple{Symbol,Any},NamedTuple}(key => value
+        for (key, value) in resolved)
 end
 
 # ---- R2D2 whole-predictor variance decomposition ----------------------------
@@ -7976,86 +7827,19 @@ function _sb_likelihood!(stmts, target::Symbol, rhs::ExprColumn, data)
     _sb_lik_family!(stmts, target, f, getargs(rhs), getkwargs(rhs), data)
 end
 
-_sb_weight_kind(f) =
-    f === aweights || f === AnalyticWeights ? :analytic :
-    f === fweights || f === FrequencyWeights ? :frequency :
-    f === weights || f === Weights ? :power :
-    f === pweights || f === ProbabilityWeights ? :probability :
-    f === uweights || f === UnitWeights ? :unit : nothing
-
-function _sb_weight_source(target::Symbol, weight::ExprColumn)
-    isempty(getkwargs(weight)) || error(
-        "sbimpl: `weighted(..., $(getf(weight))(...))` does not accept weight " *
-        "constructor keywords")
-    args = getargs(weight)
-    length(args) == 1 || error(
-        "sbimpl: `weighted` expects a one-column StatsBase weight constructor " *
-        "such as `aweights(k)`, `fweights(n)`, or `weights(w)`; got " *
-        "$(length(args)) arguments for response `$target`")
-    source = only(args)
-    source isa NamedColumn && parent(source) isa DataColumn || error(
-        "sbimpl: weights for response `$target` must be built from one raw " *
-        "dataframe column, got $(typeof(source))")
-    name(source), parent(parent(source))
-end
-
-function _sb_prepare_weight_values(kind::Symbol, raw, nobs::Int, target::Symbol,
-                                   source::Symbol)
-    raw isa AbstractVector{<:Real} || error(
-        "sbimpl: weight column `$source` for response `$target` must be a real " *
-        "vector, got $(typeof(raw))")
-    length(raw) == nobs || error(
-        "sbimpl: weight column `$source` has length $(length(raw)) but response " *
-        "`$target` has length $nobs")
-    values = collect(Float64, raw)
-    all(isfinite, values) || error(
-        "sbimpl: weight column `$source` for response `$target` contains " *
-        "non-finite values")
-    if kind === :analytic
-        all(>(0), values) || error(
-            "sbimpl: analytic/precision weights for response `$target` must be " *
-            "strictly positive")
-    elseif kind === :frequency
-        all(x -> x >= 0 && isinteger(x), values) || error(
-            "sbimpl: frequency weights for response `$target` must be " *
-            "nonnegative integer-valued counts")
-    elseif kind === :power
-        all(>=(0), values) || error(
-            "sbimpl: power-likelihood weights for response `$target` must be " *
-            "nonnegative")
-    else
-        error("sbimpl: internal unsupported observation-weight kind `$kind`")
-    end
-    values
-end
-
 _sb_weight_data_key(target::Symbol) = Symbol(:brm_weight_, target)
 
-function _sb_weight_data!(data, target::Symbol, kind::Symbol,
-                          weight::ExprColumn)
-    source, raw = _sb_weight_source(target, weight)
-    response = get(data, target, nothing)
-    response isa AbstractVector || error(
-        "sbimpl: weighted response `$target` must be an observed vector, got " *
-        "$(typeof(response))")
+function _sb_weight_data!(data, target::Symbol,
+                          plan::_BRMObservationWeightPlan)
     key = _sb_weight_data_key(target)
     haskey(data, key) && error(
         "sbimpl: reserved derived weight key `$key` collides with a model/data " *
         "column; rename that column")
-    data[key] = _sb_prepare_weight_values(kind, raw, length(response), target, source)
+    data[key] = plan.values
     _sb_record_preproc!(data, key, PreprocEntry(
-        :observation_weight, (; kind, response=target), source, false))
+        :observation_weight, (; kind=plan.kind, response=target),
+        plan.source, false))
     key
-end
-
-function _sb_weighted_distribution(rhs, target::Symbol)
-    rhs isa ExprColumn || error(
-        "sbimpl: first argument of `weighted` for response `$target` must be a " *
-        "distribution call, got $(typeof(rhs))")
-    isempty(getkwargs(rhs)) || error(
-        "sbimpl: weighted distribution `$target` does not currently support " *
-        "distribution constructor keywords")
-    rhs
 end
 
 function _sb_analytic_weighted_likelihood!(stmts, target::Symbol,
@@ -8094,30 +7878,20 @@ end
 
 function _sb_likelihood!(stmts, target::Symbol,
                          rhs::ExprColumn{typeof(weighted)}, data)
-    isempty(getkwargs(rhs)) || error(
-        "sbimpl: `weighted(distribution, weights)` accepts no keywords")
-    distribution_raw, weight_raw = getargs(rhs, 2)
-    distribution = _sb_weighted_distribution(distribution_raw, target)
-    weight_raw isa ExprColumn || error(
-        "sbimpl: second argument of `weighted` must be a StatsBase weight " *
-        "constructor, got $(typeof(weight_raw))")
-    kind = _sb_weight_kind(getf(weight_raw))
-    isnothing(kind) && error(
-        "sbimpl: unsupported weight constructor `$(getf(weight_raw))`; use " *
-        "`aweights`, `fweights`, or `weights`")
-    kind === :probability && error(
-        "sbimpl: `ProbabilityWeights` sampling-weight semantics are not " *
-        "implemented; they are not interchangeable with likelihood weights")
-    kind === :unit && error(
-        "sbimpl: omit `weighted(...)` for unit weights; write the base " *
-        "distribution directly")
-    weight_key = _sb_weight_data!(data, target, kind, weight_raw)
-    if kind === :analytic
+    response = get(data, target, nothing)
+    response isa AbstractVector || error(
+        "sbimpl: weighted response `$target` must be an observed vector, got " *
+        "$(typeof(response))")
+    plan = _brm_observation_weight_plan(
+        rhs, target, response; prefix="sbimpl")
+    isnothing(plan) && error("sbimpl: internal weighted response was not planned")
+    weight_key = _sb_weight_data!(data, target, plan)
+    if plan.kind === :analytic
         _sb_analytic_weighted_likelihood!(
-            stmts, target, distribution, weight_key, data)
+            stmts, target, plan.distribution, weight_key, data)
     else
         _sb_objective_weighted_likelihood!(
-            stmts, target, distribution, weight_key, data)
+            stmts, target, plan.distribution, weight_key, data)
     end
 end
 _sb_likelihood!(stmts, target, rhs, _) =
@@ -8330,6 +8104,18 @@ _sb_lik_family!(stmts, target, ::Type{<:ZeroInflatedPoisson},
 _sb_lik_family!(stmts, target, ::Type{<:NegativeBinomial2},
                 args::Tuple{Any,Any}, data) =
     _sb_lik_stan!(stmts, target, :neg_binomial_2, args, data)
+
+function _sb_lik_family!(stmts, target, ::Type{<:BinomialLogit},
+                         args::Tuple{Any,Any}, data)
+    response = get(data, target, nothing)
+    response isa AbstractVector || error(
+        "sbimpl: `BinomialLogit` expects an observed vector for `$target`")
+    trials = _brm_materialize_count_argument(
+        first(args), length(response), "BinomialLogit trial count";
+        prefix="sbimpl")
+    _brm_validate_binomial_response(response, trials, target; prefix="sbimpl")
+    _sb_lik_stan!(stmts, target, :binomial_logit, args, data)
+end
 
 _sb_von_mises_observations(data, target) = begin
     raw = get(data, target, nothing)
@@ -8568,21 +8354,16 @@ function _sb_composed_family(wrapper, args)
 end
 
 function _sb_wrapper_bounds(wrapper, args, kwargs::NamedTuple)
-    if length(args) == 3
-        isempty(kwargs) || error(
-            "sbimpl: `$wrapper` cannot mix positional bounds with keyword bounds")
-        return _sb_normalize_bound(args[2]), _sb_normalize_bound(args[3])
-    end
-    unknown = setdiff(collect(keys(kwargs)), [:lower, :upper])
-    isempty(unknown) || error(
-        "sbimpl: `$wrapper` accepts only `lower` and `upper` keywords, got $unknown")
-    _sb_normalize_bound(get(kwargs, :lower, nothing)),
-        _sb_normalize_bound(get(kwargs, :upper, nothing))
+    plan = _brm_response_modifier_plan(
+        wrapper, args, kwargs; prefix="sbimpl")
+    isnothing(plan) && error(
+        "sbimpl: internal unsupported response modifier `$wrapper`")
+    plan.lower, plan.upper
 end
 
-_sb_normalize_bound(::Nothing) = nothing
-_sb_normalize_bound(x::NamedColumn) = _brm_is_nothing_column(x) ? nothing : x
-_sb_normalize_bound(x) = x
+# Compatibility name for downstream/tests that inspect the established
+# StanBlocks lowering helper; semantics now live in the shared core.
+_sb_normalize_bound(x) = _brm_normalize_response_bound(x)
 
 _sb_bound_data(x::Real, _data) = x
 _sb_bound_data(x::AbstractVector{<:Real}, _data) = x

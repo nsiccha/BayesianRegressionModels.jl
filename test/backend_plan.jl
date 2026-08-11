@@ -1,6 +1,7 @@
 using Test
 using BayesianRegressionModels
 using Distributions: Cauchy, Exponential, Normal
+using LogExpFunctions: logit
 
 const BRM = BayesianRegressionModels
 
@@ -37,6 +38,102 @@ const BRM = BayesianRegressionModels
         mu = X_mu * pop_mu
     end
     @test Base.remove_linenums!(emitted) == Base.remove_linenums!(expected)
+end
+
+
+@testset "backend-neutral linked population predictor" begin
+    df = (; x=[-1.0, 0.5, 2.0], y=[0, 2, 5])
+    brmi = (@brm begin
+        log(lambda) ~ 1 + x
+        y ~ Poisson(lambda)
+    end)(df)
+    context = BRM._brm_backend_context(brmi)
+    predictor = BRM._brm_simple_population_predictor(
+        brmi, :lambda, context; required=true)
+
+    @test predictor.name === :lambda
+    @test predictor.link_lhs_fn === log
+    @test predictor.emitted_name === :log_lambda
+    @test predictor.design.target === :lambda
+    @test predictor.design.matrix == hcat(ones(3), df.x)
+
+    emitted = sprint(show, SBBRMI(brmi).model.model)
+    @test occursin("X_log_lambda", emitted)
+    @test occursin("lambda = exp(log_lambda)", emitted)
+end
+
+
+@testset "Turing mean/precision plan reuses backend-neutral predictors" begin
+    df = (;
+        x=[-1.0, 0.5, 2.0], z=[0.0, 1.0, -0.5],
+        trials=[4, 6, 5], y=[1, 4, 2])
+    brmi = (@brm begin
+        logit(mean) ~ 1 + x
+        log(precision) ~ 1 + z
+        y ~ BRM.BetaBinomial2(trials, mean, precision)
+    end)(df)
+    plan = BRM._brm_turing_plan(brmi)
+
+    @test plan.family isa Val{:beta_binomial2}
+    @test plan.mean.predictor.link_lhs_fn === logit
+    @test plan.precision.predictor.link_lhs_fn === log
+    @test plan.mean.design.matrix == hcat(ones(3), df.x)
+    @test plan.precision.design.matrix == hcat(ones(3), df.z)
+    @test plan.family_args.trials == df.trials
+    @test plan.response == df.y
+end
+
+
+@testset "backend-neutral plain random-intercept geometry" begin
+    df = (;
+        x=[-1.0, 0.5, 2.0, 0.25],
+        subject=["b", "a", "b", "c"],
+        y=[0.2, 1.1, -0.4, 0.7],
+    )
+    brmi = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x + (1 | subject)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    context = BRM._brm_backend_context(brmi)
+    block = only(BRM._brm_simple_random_effect_plans(
+        brmi, :mu, context; required=true))
+    sb = SBBRMI(brmi)
+    plan = BRM._brm_turing_plan(brmi)
+
+    @test block.group === :subject
+    @test block.levels == ["a", "b", "c"]
+    @test block.indices == [2, 1, 2, 3]
+    @test block.indices == sb.data[:subject_idx]
+    @test length(block.levels) == sb.data[:n_subject]
+    @test plan.design.matrix == hcat(ones(4), df.x)
+    @test only(plan.random_effects).indices == block.indices
+
+    sloped = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x + (1 + x | subject)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    sloped_context = BRM._brm_backend_context(sloped)
+    sloped_block = only(BRM._brm_simple_random_effect_plans(
+        sloped, :mu, sloped_context; required=true))
+    @test !sloped_block.intercept_only
+    @test Tuple(column.label for column in sloped_block.columns) ==
+          (:Intercept, :x)
+    @test sloped_block.matrix == hcat(ones(4), df.x)
+    @test sloped_block.indices == block.indices
+
+    zero_corr = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x + (1 + x || subject)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    zero_context = BRM._brm_backend_context(zero_corr)
+    zero_block = only(BRM._brm_simple_random_effect_plans(
+        zero_corr, :mu, zero_context; required=true))
+    @test zero_block.zero_correlation
+    @test zero_block.matrix == sloped_block.matrix
+    @test zero_block.indices == block.indices
 end
 
 
