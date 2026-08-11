@@ -250,6 +250,54 @@ end
     @test byname[:mu].labels === nothing
 end
 
+@testset "population coordinates — public logical address and LHS link" begin
+    linked_df = (; weight=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+                   y=[-2.4, -2.2, -2.0, -1.8, -1.7, -1.5])
+    linked_builder = @brm begin
+        log(Vc) ~ 1 + weight
+        y ~ Normal(log(Vc), 0.2)
+    end
+    d = brm_descriptor(linked_builder, linked_df; mod=@__MODULE__, name=:linked)
+    names = ["y_gen.1", "pop_log_Vc_beta_pop.1",
+             "pop_log_Vc_beta_pop.2", "y_likelihood.1"]
+
+    intercept = brm_population_effect_coordinates(
+        d, :Vc, names; coefficient=:Intercept)
+    slope = brm_population_effect_coordinates(
+        d, :Vc, names; coefficient=:weight)
+
+    @test intercept.logical === :Vc
+    @test intercept.coefficient === :Intercept
+    @test intercept.output.role === :population_effect
+    @test intercept.output.name === :pop_log_Vc_beta_pop
+    @test intercept.coordinates == [2]
+    @test slope.coordinates == [3]
+    @test intercept.link === log
+    @test intercept.inverse_link === exp
+
+    # Same answer as the former consumer workaround, but without constructing
+    # the compiler-owned carrier/coordinate spellings or guessing output order.
+    workaround = findall(==("pop_log_Vc_beta_pop.1"), names)
+    @test intercept.coordinates == workaround
+
+    @test_throws "available labels are (:Intercept, :weight)" begin
+        brm_population_effect_coordinates(d, :Vc, names; coefficient=:missing)
+    end
+    @test_throws "0 formula declarations" begin
+        brm_population_effect_coordinates(d, :log_Vc, names)
+    end
+    @test_throws "2 coefficient labels but resolves to 1 constrained coordinates" begin
+        brm_population_effect_coordinates(
+            d, :Vc, ["pop_log_Vc_beta_pop.1"])
+    end
+
+    identity_link = brm_population_effect_coordinates(
+        brm_descriptor(hier_builder, df; mod=@__MODULE__), :mu,
+        ["pop_mu_beta_pop.1", "pop_mu_beta_pop.2"])
+    @test identity_link.link === identity
+    @test identity_link.inverse_link === identity
+end
+
 @testset "semantic output query — role, not emitted name" begin
     d = brm_descriptor(hier_builder, df; mod=@__MODULE__)
     byname = Dict(o.name => o for o in d.outputs)

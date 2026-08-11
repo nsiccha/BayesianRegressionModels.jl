@@ -365,6 +365,19 @@ end
 _brm_plan_of(plan::GenerativePlan) = plan
 _brm_plan_of(sb::SBBRMI) = generative_plan(sb)
 
+# The formula-owned population address space. `block` is derived FORWARDS with
+# the same helper sbimpl uses to emit the design, so an inert `log_Vc` predictor
+# and a linked `log(Vc)` predictor never become indistinguishable through name
+# parsing. Keep this as a vector: duplicate public logical predictors must stay
+# observable to the fail-closed query below rather than being overwritten by a
+# Dict constructor.
+_brm_population_effect_entries(brmi) = [
+    (; logical=l.name,
+       block=Symbol(:pop_, _sb_lp_emitted_name(l.name, l.link_lhs_fn)),
+       link=l.link_lhs_fn)
+    for l in linear_predictors(brmi)
+]
+
 _brm_highlight_spec(x::Union{Symbol,AbstractString}) =
     (Symbol(x), nothing, nothing)
 _brm_highlight_spec(x::Pair{<:Union{Symbol,AbstractString}}) =
@@ -832,11 +845,9 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
     # matched no emitted block for a linked LHS, so the coefficient vector
     # silently lost its `labels` — the one thing a consumer mounts a descriptor
     # for — while the same model written with an inert `log_Vc` name kept them.
-    lp_list = linear_predictors(brmi)
-    lps = Set{Symbol}(l.name for l in lp_list)
-    pop_lp = Dict{Symbol,Symbol}(
-        Symbol(:pop_, _sb_lp_emitted_name(l.name, l.link_lhs_fn)) => l.name
-        for l in lp_list)
+    population_effects = _brm_population_effect_entries(brmi)
+    lps = Set{Symbol}(e.logical for e in population_effects)
+    pop_lp = Dict{Symbol,Symbol}(e.block => e.logical for e in population_effects)
 
     # --- outputs ------------------------------------------------------------
     outputs = BRMOutput[]
@@ -1064,6 +1075,84 @@ function brm_output(d::BRMDescriptor, logical::Symbol; role=nothing)
           " `brm_outputs` to take them all and select on `declaration.target`.")
 end
 
+_brm_emitted_coordinates(output::BRMOutput, constrained_names) = begin
+    stem = String(output.name)
+    prefix = stem * "."
+    Int[i for (i, name) in enumerate(constrained_names)
+        if string(name) == stem || startswith(string(name), prefix)]
+end
+
+"""
+    brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
+                                      constrained_names;
+                                      coefficient=:Intercept)
+
+Resolve one formula-level population coefficient to its exact constrained
+posterior coordinate without constructing or parsing an emitted `pop_*` name.
+Returns a named tuple with:
+
+- `logical` / `coefficient` — the public formula address;
+- `output` — the owning population-effect [`BRMOutput`](@ref);
+- `coordinates` — the matching indices in `constrained_names`;
+- `link` — the function applied on the formula LHS (`identity`, `log`, …);
+- `inverse_link` — the transform from the fitted linear-predictor scale back to
+  the declared quantity (`identity`, `exp`, …).
+
+For `log(Vc) ~ 1 + weight`, ask for `logical=:Vc`. The returned intercept is on
+the log scale, `link === log`, and `inverse_link === exp`; the emitted
+`pop_log_Vc_beta_pop` spelling remains private.
+
+Resolution is fail-closed. Missing or duplicate logical predictors, missing or
+duplicate population carriers, unavailable/duplicate coefficient labels, and
+descriptor/artifact coordinate drift all error rather than selecting by
+descriptor order.
+"""
+function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
+                                           constrained_names;
+                                           coefficient::Symbol=:Intercept)
+    entries = [e for e in _brm_population_effect_entries(d.plan.parent)
+               if e.logical === logical]
+    length(entries) == 1 || error(
+        "brm_descriptor: logical predictor `$logical` resolves to " *
+        "$(length(entries)) formula declarations; expected exactly one public " *
+        "population-effect address.")
+    entry = only(entries)
+
+    outputs = BRMOutput[
+        o for o in d.outputs
+        if o.role === :population_effect && o.kind === :parameter &&
+           !isnothing(o.declaration) && o.declaration.target === entry.block
+    ]
+    length(outputs) == 1 || error(
+        "brm_descriptor: logical predictor `$logical` resolves to population " *
+        "block `$(entry.block)`, which owns $(length(outputs)) parameter " *
+        "carriers; expected exactly one.")
+    output = only(outputs)
+
+    labels = output.labels
+    isnothing(labels) && error(
+        "brm_descriptor: population carrier `$(output.name)` for logical " *
+        "predictor `$logical` has no coefficient labels; this formula shape " *
+        "does not expose a stable population-coordinate address.")
+    label_indices = findall(==(coefficient), labels)
+    length(label_indices) == 1 || error(
+        "brm_descriptor: coefficient `$coefficient` occurs $(length(label_indices)) " *
+        "times on logical predictor `$logical`; available labels are " *
+        "$(Tuple(labels)).")
+
+    all_coordinates = _brm_emitted_coordinates(output, constrained_names)
+    length(all_coordinates) == length(labels) || error(
+        "brm_descriptor: population carrier `$(output.name)` has " *
+        "$(length(labels)) coefficient labels but resolves to " *
+        "$(length(all_coordinates)) constrained coordinates. Re-reflect the " *
+        "model that produced the posterior draws.")
+
+    (; logical, coefficient, output,
+       coordinates=all_coordinates[label_indices],
+       link=entry.link,
+       inverse_link=InverseFunctions.inverse(entry.link))
+end
+
 """
     brm_output_coordinates(d::BRMDescriptor, logical::Symbol, constrained_names;
                            role=nothing) -> Vector{Int}
@@ -1091,13 +1180,7 @@ of returning an empty posterior slice.
 function brm_output_coordinates(d::BRMDescriptor, logical::Symbol,
                                 constrained_names; role=nothing)
     output = brm_output(d, logical; role)
-    stem = String(output.name)
-    prefix = stem * "."
-    coordinates = Int[]
-    for (i, name) in enumerate(constrained_names)
-        rendered = string(name)
-        (rendered == stem || startswith(rendered, prefix)) && push!(coordinates, i)
-    end
+    coordinates = _brm_emitted_coordinates(output, constrained_names)
     isempty(coordinates) && error(
         "brm_descriptor: logical output `$logical` resolves to emitted " *
         "`$(output.name)`, but that carrier is absent from the supplied constrained " *
