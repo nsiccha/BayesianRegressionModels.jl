@@ -660,18 +660,22 @@ end
 _brm_numeric_constant(_x) = nothing
 
 """
-    _brm_simple_population_effect_overrides(brmi, design)
+    _brm_simple_population_effect_overrides(
+        brmi, design; available_predictors=(design.target,))
 
 Resolve formula-level `effect(...) ~ Normal(...)` statements against a narrow
 shared population design. The output is aligned 1:1 with `design.columns` and
 contains the winning parsed RHS (or `nothing` for the default Normal(0, 1)).
 An `effect(lp, categorical_column)` address fans out over that column's K-1
 treatment contrasts, matching SBBRMI's one-prior-per-contrast-block contract.
-Richer multi-predictor resolution remains additive.
+For a distributional likelihood, `available_predictors` names its complete
+predictor set: a prior targeting a peer is ignored by this component, while a
+prior targeting no member still fails loudly.
 """
 function _brm_simple_population_effect_overrides(brmi::BRMI,
                                                  design::_BRMPopulationDesign;
-                                                 prefix="BRM backend lowering")
+                                                 prefix="BRM backend lowering",
+                                                 available_predictors=(design.target,))
     specs = effect_priors(brmi)
     isempty(specs) && return nothing
 
@@ -688,9 +692,12 @@ function _brm_simple_population_effect_overrides(brmi::BRMI,
     for spec in specs
         _brm_validate_population_effect_spec(spec; prefix)
         all_predictors = spec.predictor === _EFFECT_COLON
-        (all_predictors || spec.predictor === design.target) || error(
-            "$prefix: `$(_brm_effect_spelling(spec))` names no linear " *
-            "predictor in this backend plan. Available predictor: $(design.target).")
+        if !all_predictors && spec.predictor !== design.target
+            spec.predictor in available_predictors && continue
+            error("$prefix: `$(_brm_effect_spelling(spec))` names no linear " *
+                  "predictor in this backend plan. Available predictors: " *
+                  "$(join(available_predictors, ", ")).")
+        end
 
         indices = if spec.coefficient === _EFFECT_COLON
             eachindex(labels)

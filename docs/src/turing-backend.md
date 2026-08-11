@@ -53,9 +53,16 @@ count = TuringBRMI((@brm begin
     y ~ Poisson(lambda)
 end)((; x=[-1.0, 0.5, 2.0], y=[0, 2, 5])))
 
+overdispersed_count = TuringBRMI((@brm begin
+    log(mu) ~ 1 + x
+    log(phi) ~ 1
+    y ~ BayesianRegressionModels.NegativeBinomial2(mu, phi)
+end)((; x=[-1.0, 0.5, 2.0], y=[0, 2, 5])))
+
 (binary=summary(binary.model),
  grouped_binary=summary(grouped_binary.model),
- count=summary(count.model))
+ count=summary(count.model),
+ overdispersed_count=summary(overdispersed_count.model))
 ```
 
 Fitted numeric transforms use the same design and coefficient labels as the
@@ -157,10 +164,11 @@ the Turing backend refuses the surface rather than approximating it.
 | Bernoulli-logit likelihood | **Supported** | Canonical `logit(p) ~ formula; y ~ Bernoulli(p)` and explicit linked-scale `eta ~ formula; y ~ BernoulliLogit(eta)` share one stable logit executor |
 | Binomial-logit likelihood | **Supported** | Canonical `logit(p) ~ formula; y ~ Binomial(trials, p)` and explicit `BinomialLogit(trials, eta)` share count validation and one stable logit executor; trials may be constant or row-wise integers |
 | Poisson-log likelihood | **Supported** | Canonical `log(lambda) ~ formula; y ~ Poisson(lambda)` and explicit linked-scale `log_rate ~ formula; y ~ Poisson(exp(log_rate))` share one predictor/link plan |
-| Other scalar likelihoods | **Pending** | The built-in catalogue in [Likelihoods](likelihoods.md), including negative-binomial, beta-binomial, hurdle/mixture, circular, quantile, and ordinal families |
+| Negative-binomial-2 likelihood | **Supported** | `log(mu) ~ formula; log(phi) ~ formula; y ~ NegativeBinomial2(mu, phi)` uses two shared predictor/link/effect-prior plans and distinct Turing coefficient vectors |
+| Other scalar likelihoods | **Pending** | The built-in catalogue in [Likelihoods](likelihoods.md), including Distributions.jl `NegativeBinomial`, beta-binomial, hurdle/mixture, circular, quantile, and ordinal families |
 | Group/random effects | **Pending** | Plain and correlated groups, `|ID|` blocks, centering/CV, stratification, multi-membership, and their SD/correlation/effect priors |
 | Response compositions | **Pending** | Truncation, censoring, interval evidence, observation weights, missing-response inference, measurement error, and concise categorical formulas |
-| Density decomposition | **Partial** | Turing `logjoint`, `logprior`, and `loglikelihood` are exact for the four supported GLMs; pointwise named log-likelihood outputs are pending |
+| Density decomposition | **Partial** | Turing `logjoint`, `logprior`, and `loglikelihood` are exact for the five supported likelihood shapes; pointwise named log-likelihood outputs are pending |
 | Generated quantities | **Partial** | Returns `mu`, `eta`, or `log_rate`/`rate`; BRM-standard predictive draws and output naming are pending |
 | Replay and prediction | **Pending** | Frozen preprocessing, new-data replay, population-only prediction, transported group effects, and new-level policy |
 | Descriptor/introspection parity | **Pending** | `brm_descriptor`, output coordinates, highlights, and backend capability reporting |

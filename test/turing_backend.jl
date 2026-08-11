@@ -452,6 +452,53 @@ end
     end
 end
 
+@testset "Turing extension — distributional NegativeBinomial2" begin
+    df = (;
+        x=[-1.0, 0.5, 2.0, 0.25],
+        z=[0.0, 1.0, -0.5, 0.75],
+        y=[0, 2, 5, 1],
+    )
+    brmi = (@brm begin
+        log(mu) ~ 1 + x
+        log(phi) ~ 1 + z
+        effect(mu, x) ~ Normal(0.25, 0.5)
+        effect(phi, Intercept) ~ Normal(-0.2, 0.3)
+        y ~ BRM.NegativeBinomial2(mu, phi)
+    end)(df)
+    sb = SBBRMI(brmi)
+    backend = TuringBRMI(brmi)
+    params = (; beta_mean=[0.1, 0.2], beta_precision=[-0.4, 0.15])
+    log_mu = backend.plan.mean.design.matrix * params.beta_mean
+    log_phi = backend.plan.precision.design.matrix * params.beta_precision
+    mu = exp.(log_mu)
+    phi = exp.(log_phi)
+    prior = sum(logpdf.(
+        Normal.(backend.plan.mean.beta_location, backend.plan.mean.beta_scale),
+        params.beta_mean)) + sum(logpdf.(
+        Normal.(backend.plan.precision.beta_location,
+                backend.plan.precision.beta_scale), params.beta_precision))
+    likelihood = sum(logpdf.(BRM.NegativeBinomial2.(mu, phi), df.y))
+    returned = Turing.DynamicPPL.returned(backend.model, params)
+
+    @test backend.plan.family isa Val{:negative_binomial2}
+    @test backend.plan.mean.predictor.link_lhs_fn === log
+    @test backend.plan.precision.predictor.link_lhs_fn === log
+    @test backend.plan.mean.beta_location == [0.0, 0.25]
+    @test backend.plan.precision.beta_location == [-0.2, 0.0]
+    @test sprint(show, backend) ==
+          "TuringBRMI with 4 population coefficients and 4 observations"
+    @test Turing.logjoint(backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+    @test Turing.logprior(backend.model, params) ≈ prior atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(backend.model, params) ≈
+          likelihood atol=1e-12 rtol=1e-12
+    @test returned.log_mu == log_mu
+    @test returned.log_phi == log_phi
+    @test returned.mu == mu
+    @test returned.phi == phi
+    @test haskey(sb.data, :x) && haskey(sb.data, :z)
+end
+
 @testset "Turing extension — unsupported shapes fail loudly" begin
     unsupported_string_column = (@brm begin
         sigma ~ Exponential(1)

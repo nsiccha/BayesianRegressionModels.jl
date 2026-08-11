@@ -48,6 +48,24 @@ Turing.@model function _brm_population_poisson_log(
     (; log_rate, rate)
 end
 
+Turing.@model function _brm_population_negative_binomial2(
+    X_mean, fixed_mean, X_precision, fixed_precision, y,
+    mean_beta_location, mean_beta_scale,
+    precision_beta_location, precision_beta_scale)
+    beta_mean ~ product_distribution(
+        Normal.(mean_beta_location, mean_beta_scale))
+    beta_precision ~ product_distribution(
+        Normal.(precision_beta_location, precision_beta_scale))
+    log_mu = X_mean * beta_mean + fixed_mean
+    log_phi = X_precision * beta_precision + fixed_precision
+    mu = exp.(log_mu)
+    phi = exp.(log_phi)
+    for i in eachindex(y)
+        y[i] ~ BRM.NegativeBinomial2(mu[i], phi[i])
+    end
+    (; log_mu, log_phi, mu, phi)
+end
+
 function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:normal_identity}})
     _brm_population_gaussian(
@@ -91,6 +109,21 @@ function BRM._brm_turing_model(
         plan.response,
         plan.beta_location,
         plan.beta_scale,
+    )
+end
+
+
+function BRM._brm_turing_model(plan::BRM._TuringNegativeBinomial2Plan)
+    _brm_population_negative_binomial2(
+        plan.mean.design.matrix,
+        plan.mean.design.fixed,
+        plan.precision.design.matrix,
+        plan.precision.design.fixed,
+        plan.response,
+        plan.mean.beta_location,
+        plan.mean.beta_scale,
+        plan.precision.beta_location,
+        plan.precision.beta_scale,
     )
 end
 
