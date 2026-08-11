@@ -134,6 +134,19 @@ function _turing_model_context(brmi::BRMI, observation, model_operations)
     context
 end
 
+function _turing_materialize_response_modifier(
+        response_modifier, observation, response, context;
+        support_kind::Symbol=:continuous)
+    isnothing(response_modifier) && return nothing
+    response_modifier.kind === :interval_censored ?
+        _brm_materialize_interval_response(
+            response_modifier, observation.key, response, context.data;
+            support_kind, prefix="Turing backend") :
+        _brm_materialize_bounded_response(
+            response_modifier, observation.key, response, context.data;
+            support_kind, prefix="Turing backend")
+end
+
 function _turing_predictor_component(brmi::BRMI, context::_BRMBackendContext,
                                      predictor::Symbol;
                                      available_predictors=(predictor,),
@@ -306,10 +319,8 @@ function _turing_normal_plan(brmi::BRMI, observation, rhs::ExprColumn;
     parts.response isa AbstractVector{<:Real} || error(
         "Turing backend: Gaussian response `$(observation.key)` must be real-valued")
     scale_prior = _turing_scalar_exponential_prior(brmi, scale)
-    materialized_modifier = isnothing(response_modifier) ? nothing :
-        _brm_materialize_bounded_response(
-            response_modifier, observation.key, parts.response,
-            parts.context.data; prefix="Turing backend")
+    materialized_modifier = _turing_materialize_response_modifier(
+        response_modifier, observation, parts.response, parts.context)
     _TuringPopulationPlan(Val(:normal_identity), parts.context, parts.predictor,
                           parts.design,
                           collect(Float64, parts.response), parts.beta_location,
@@ -426,11 +437,9 @@ function _turing_poisson_log_plan(brmi::BRMI, observation, rhs::ExprColumn;
     _turing_require_predictor_link(parts, expected_link, "Poisson log link")
     all(x -> x isa Integer && x >= 0, parts.response) || error(
         "Turing backend: Poisson response `$(observation.key)` must be nonnegative integers")
-    materialized_modifier = isnothing(response_modifier) ? nothing :
-        _brm_materialize_bounded_response(
-            response_modifier, observation.key, parts.response,
-            parts.context.data; support_kind=:discrete,
-            prefix="Turing backend")
+    materialized_modifier = _turing_materialize_response_modifier(
+        response_modifier, observation, parts.response, parts.context;
+        support_kind=:discrete)
     _TuringPopulationPlan(Val(:poisson_log), parts.context, parts.predictor,
                           parts.design,
                           Int.(parts.response), parts.beta_location,
@@ -447,7 +456,7 @@ function _brm_turing_plan(brmi::BRMI)
         "Turing backend: observed likelihood must be a distribution call")
     response_modifier = _brm_response_modifier_plan(rhs; prefix="Turing backend")
     if !isnothing(response_modifier)
-        response_modifier.kind in (:truncated, :censored) || error(
+        response_modifier.kind in (:truncated, :censored, :interval_censored) || error(
             "Turing backend: response modifier `$(response_modifier.kind)` is " *
             "not yet executable; the current response-composition slice supports " *
             "bounded Normal observations")

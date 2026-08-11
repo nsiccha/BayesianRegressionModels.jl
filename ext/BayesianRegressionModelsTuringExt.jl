@@ -1,13 +1,49 @@
 module BayesianRegressionModelsTuringExt
 
 using BayesianRegressionModels
-using Distributions: Exponential, LKJCholesky, Normal, Poisson,
-                     censored, product_distribution, truncated
+using Distributions: ContinuousUnivariateDistribution,
+                     DiscreteUnivariateDistribution, Exponential, LKJCholesky,
+                     Normal, Poisson, censored, logcdf,
+                     product_distribution, truncated
 using LinearAlgebra: Diagonal
-using LogExpFunctions: logistic
+using LogExpFunctions: logistic, log1mexp
+import Distributions: logpdf
+import Random: AbstractRNG, rand
 using Turing
 
 const BRM = BayesianRegressionModels
+
+struct _BRMContinuousIntervalEvidence{D,U} <:
+       ContinuousUnivariateDistribution
+    base::D
+    upper::U
+end
+
+struct _BRMDiscreteIntervalEvidence{D,U} <:
+       DiscreteUnivariateDistribution
+    base::D
+    upper::U
+end
+
+
+function _brm_interval_logmass(base, lower, upper)
+    upper_logcdf = logcdf(base, upper)
+    lower_logcdf = logcdf(base, lower)
+    lower_logcdf < upper_logcdf || return oftype(upper_logcdf, -Inf)
+    upper_logcdf + log1mexp(lower_logcdf - upper_logcdf)
+end
+
+logpdf(d::_BRMContinuousIntervalEvidence, lower::Real) =
+    _brm_interval_logmass(d.base, lower, d.upper)
+logpdf(d::_BRMDiscreteIntervalEvidence, lower::Real) =
+    _brm_interval_logmass(d.base, lower, d.upper)
+rand(rng::AbstractRNG, d::_BRMContinuousIntervalEvidence) = rand(rng, d.base)
+rand(rng::AbstractRNG, d::_BRMDiscreteIntervalEvidence) = rand(rng, d.base)
+
+_brm_interval_evidence(base::ContinuousUnivariateDistribution, upper) =
+    _BRMContinuousIntervalEvidence(base, upper)
+_brm_interval_evidence(base::DiscreteUnivariateDistribution, upper) =
+    _BRMDiscreteIntervalEvidence(base, upper)
 
 _brm_normal_observation(::Nothing, mu, sigma, _i) = Normal(mu, sigma)
 function _brm_normal_observation(
@@ -19,6 +55,8 @@ function _brm_normal_observation(
     base = Normal(mu, sigma)
     modifier.kind === :truncated && return truncated(base; lower, upper)
     modifier.kind === :censored && return censored(base; lower, upper)
+    modifier.kind === :interval_censored &&
+        return _brm_interval_evidence(base, upper)
     error("Turing backend: internal unsupported Normal response modifier " *
           "`$(modifier.kind)`")
 end
@@ -33,6 +71,8 @@ function _brm_poisson_observation(
     base = Poisson(rate)
     modifier.kind === :truncated && return truncated(base; lower, upper)
     modifier.kind === :censored && return censored(base; lower, upper)
+    modifier.kind === :interval_censored &&
+        return _brm_interval_evidence(base, upper)
     error("Turing backend: internal unsupported Poisson response modifier " *
           "`$(modifier.kind)`")
 end

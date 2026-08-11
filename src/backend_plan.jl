@@ -263,6 +263,36 @@ function _brm_materialize_bounded_response(
     _BRMResponseModifierPlan(spec.kind, spec.base, lower, upper)
 end
 
+function _brm_materialize_interval_response(
+        spec::_BRMResponseModifierPlan, target::Symbol,
+        response::AbstractVector, data::AbstractDict;
+        support_kind::Symbol=:continuous,
+        prefix="BRM backend lowering")
+    spec.kind === :interval_censored || error(
+        "$prefix: internal response modifier `$(spec.kind)` is not interval evidence")
+    n = length(response)
+    upper = _brm_materialize_response_bound(
+        spec.upper, data, n, :upper; prefix)
+    isnothing(upper) && error(
+        "$prefix: `interval_censored` requires an upper bound")
+    support_kind in (:continuous, :discrete) || error(
+        "$prefix: internal unsupported interval-response support `$support_kind`")
+    if support_kind === :discrete
+        all(x -> x isa Integer && !(x isa Bool), response) || error(
+            "$prefix: `interval_censored` discrete base family requires integer " *
+            "lower endpoints")
+        values = upper isa AbstractVector ? upper : (upper,)
+        all(x -> x isa Integer && !(x isa Bool), values) || error(
+            "$prefix: `interval_censored` discrete upper bounds must be integers")
+    end
+    all(eachindex(response)) do i
+        response[i] < _brm_response_bound_at(upper, i)
+    end || error(
+        "$prefix: `interval_censored` lower endpoints must be strictly below " *
+        "upper endpoints for response `$target`")
+    _BRMResponseModifierPlan(:interval_censored, spec.base, nothing, upper)
+end
+
 function _brm_backend_context(brmi::BRMI;
                               data::AbstractDict=Dict{Symbol,Any}())
     prepass = Dict{Symbol,Any}()

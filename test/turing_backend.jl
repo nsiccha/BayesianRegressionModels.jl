@@ -2,7 +2,7 @@ using Test
 using Random: Xoshiro
 using BayesianRegressionModels
 using Distributions: Binomial, Cauchy, Exponential, LKJCholesky, Normal,
-                     Poisson, censored, logpdf, truncated
+                     Poisson, censored, cdf, logpdf, truncated
 using LinearAlgebra: Diagonal, Symmetric, cholesky
 using LogExpFunctions: logistic, logit
 using Turing
@@ -916,6 +916,64 @@ end
             log_rate ~ 1 + x
             count ~ truncated(Poisson(exp(log_rate)); lower=lower)
         end)(fractional_bound))
+    end
+end
+
+@testset "Turing extension — interval-censored Normal and Poisson" begin
+    normal_data = (;
+        x=[-1.0, 0.5, 2.0],
+        outcome=[-0.5, 0.2, 0.8],
+        upper=[0.0, 0.7, 1.2],
+    )
+    normal_backend = TuringBRMI((@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x
+        outcome ~ interval_censored(Normal(mu, sigma); upper=upper)
+    end)(normal_data))
+    normal_params = (; beta_pop=[0.25, -0.5], sigma=0.8)
+    mu = normal_backend.plan.design.matrix * normal_params.beta_pop
+    normal_likelihood = sum(eachindex(normal_data.outcome)) do i
+        log(cdf(Normal(mu[i], normal_params.sigma), normal_data.upper[i]) -
+            cdf(Normal(mu[i], normal_params.sigma), normal_data.outcome[i]))
+    end
+    normal_prior = sum(logpdf.(Normal(), normal_params.beta_pop)) +
+                   logpdf(Exponential(2), normal_params.sigma)
+
+    @test normal_backend.plan.response_modifier.kind === :interval_censored
+    @test normal_backend.plan.response_modifier.upper == normal_data.upper
+    @test Turing.logjoint(normal_backend.model, normal_params) ≈
+          normal_prior + normal_likelihood atol=1e-12 rtol=1e-12
+    @test Turing.logprior(normal_backend.model, normal_params) ≈
+          normal_prior atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(normal_backend.model, normal_params) ≈
+          normal_likelihood atol=1e-12 rtol=1e-12
+
+    poisson_data = (;
+        x=[-1.0, 0.5, 2.0], count=[0, 1, 2], upper=[1, 3, 5])
+    poisson_backend = TuringBRMI((@brm begin
+        log_rate ~ 1 + x
+        count ~ interval_censored(Poisson(exp(log_rate)); upper=upper)
+    end)(poisson_data))
+    poisson_params = (; beta_pop=[0.3, 0.4])
+    rate = exp.(poisson_backend.plan.design.matrix * poisson_params.beta_pop)
+    poisson_likelihood = sum(eachindex(poisson_data.count)) do i
+        log(cdf(Poisson(rate[i]), poisson_data.upper[i]) -
+            cdf(Poisson(rate[i]), poisson_data.count[i]))
+    end
+    poisson_prior = sum(logpdf.(Normal(), poisson_params.beta_pop))
+    @test poisson_backend.plan.response_modifier.kind === :interval_censored
+    @test Turing.logjoint(poisson_backend.model, poisson_params) ≈
+          poisson_prior + poisson_likelihood atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(poisson_backend.model, poisson_params) ≈
+          poisson_likelihood atol=1e-12 rtol=1e-12
+
+    invalid = merge(normal_data, (; upper=[0.0, 0.2, 1.2]))
+    @test_throws "strictly below upper endpoints" begin
+        TuringBRMI((@brm begin
+            sigma ~ Exponential(2)
+            mu ~ 1 + x
+            outcome ~ interval_censored(Normal(mu, sigma); upper=upper)
+        end)(invalid))
     end
 end
 
