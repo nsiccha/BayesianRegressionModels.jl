@@ -30,6 +30,7 @@ makedocs(
         "Home" => "index.md",
         "Formula terms" => "formula-terms.md",
         "Likelihoods" => "likelihoods.md",
+        "Backend lowering" => "backend-lowering.md",
         "Turing backend" => "turing-backend.md",
         "Gallery" => "gallery.md",
         "Complete-PLATE blueprint" => "plate-building-blocks.md",
