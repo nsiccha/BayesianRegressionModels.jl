@@ -70,6 +70,19 @@ gradients before printing warmed density/gradient allocation and timing rows;
 those timings include the BridgeStan FFI crossing but exclude compilation and
 model/data construction.
 
+The grouped Turing parity benchmark compares the same BRMI and constrained
+parameter point through StanBlocks/BridgeStan and Turing/Enzyme. Pass a case
+name to keep a hardening run focused; the centered-geometry gate is:
+
+```sh
+julia --project=test test/benchmark_turing_backend_groups.jl \
+  centered_correlated_poisson
+```
+
+It checks constrained density and mapped gradients before reporting warmed,
+allocation-aware construction, density, and gradient timings. Sampling is
+omitted because this gate targets the lowering and density kernels.
+
 ## Why each constraint exists
 
 Every one of these was paid for by a failed resolve; none is stylistic.

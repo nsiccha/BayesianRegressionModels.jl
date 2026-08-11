@@ -336,7 +336,12 @@ Turing.@model function _brm_centered_correlated_group_effect(
     n_terms = size(Z, 2)
     L ~ LKJCholesky(n_terms, lkj_eta)
     tau ~ product_distribution(
-        _brm_group_scale_distributions(sd_family, sd_rate))
+        fill(truncated(Normal(), 0.0, Inf), n_terms))
+    # A concrete sampling site keeps Enzyme's type analysis valid. Adjust its
+    # half-Normal density to the backend-neutral Normal/Exponential semantics.
+    Turing.@addlogprob! (;
+        logprior=_brm_group_scale_site_adjustment(
+            tau, sd_family, sd_rate))
     coefficients_flat ~ _brm_centered_coefficients_distribution(
         tau, L, n_groups)
     coefficients = transpose(reshape(coefficients_flat, n_terms, n_groups))
@@ -1702,9 +1707,17 @@ end
 
 function _brm_group_keyword_set(value, keyword::Symbol)
     value === nothing && return Set{Symbol}()
-    values = value isa Symbol ? (value,) : Tuple(value)
-    all(item -> item isa Symbol, values) || error(
-        "Turing backend: `$keyword` expects a Symbol or collection of Symbols")
+    message = "Turing backend: `$keyword` expects a Symbol or collection of Symbols"
+    values = if value isa Symbol
+        (value,)
+    else
+        try
+            Tuple(value)
+        catch
+            error(message)
+        end
+    end
+    all(item -> item isa Symbol, values) || error(message)
     Set{Symbol}(values)
 end
 
