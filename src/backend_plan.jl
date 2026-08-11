@@ -163,10 +163,17 @@ end
 
 # ---- narrow shared population design --------------------------------------
 
-struct _BRMPopulationColumn{V<:AbstractVector}
+struct _BRMPopulationPreprocess{C,R}
+    kind::Symbol
+    const_::C
+    raw_ref::R
+end
+
+struct _BRMPopulationColumn{V<:AbstractVector,P}
     label::Symbol
     source::Union{Nothing,Symbol}
     values::V
+    preprocess::P
 end
 
 struct _BRMPopulationDesign{C<:Tuple,M<:AbstractMatrix}
@@ -191,7 +198,7 @@ _brm_collect_additive_terms!(terms, x) = push!(terms, x)
 
 function _brm_population_column(term::Integer)
     term == 1 || return nothing
-    (; label=:Intercept, source=nothing, values=nothing)
+    (; label=:Intercept, source=nothing, values=nothing, preprocess=nothing)
 end
 function _brm_population_column(term::NamedColumn)
     backing = parent(term)
@@ -199,7 +206,42 @@ function _brm_population_column(term::NamedColumn)
     raw = parent(backing)
     raw isa AbstractVector{<:Real} || return nothing
     eltype(raw) <: Integer && return nothing
-    (; label=name(term), source=name(term), values=collect(Float64, raw))
+    (; label=name(term), source=name(term), values=collect(Float64, raw),
+       preprocess=nothing)
+end
+
+_brm_fit_zscale(v::AbstractVector{<:Real}) = let
+    fit = _native_ppl_fit_zscale(v, :predictor)
+    (fit.mean, fit.scale)
+end
+_brm_apply_zscale(c::Tuple, v::AbstractVector{<:Real}) =
+    (v .- c[1]) ./ c[2]
+_brm_fit_center(v::AbstractVector{<:Real}) = sum(v) / length(v)
+_brm_apply_center(mu::Real, v::AbstractVector{<:Real}) = v .- mu
+
+function _brm_population_column(term::ExprColumn)
+    f = getf(term)
+    kind = f === zscale ? :zscale :
+           f === standardize ? :standardize :
+           f === center ? :center : nothing
+    isnothing(kind) && return nothing
+    args = getargs(term)
+    length(args) == 1 || return nothing
+    inner = only(args)
+    inner isa NamedColumn || return nothing
+    backing = parent(inner)
+    backing isa DataColumn || return nothing
+    raw = parent(backing)
+    raw isa AbstractVector{<:Real} || return nothing
+
+    values = collect(Float64, raw)
+    const_ = kind === :center ? _brm_fit_center(values) :
+                               _brm_fit_zscale(values)
+    transformed = kind === :center ? _brm_apply_center(const_, values) :
+                                     _brm_apply_zscale(const_, values)
+    label = Symbol(kind, :_, name(inner))
+    preprocess = _BRMPopulationPreprocess(kind, const_, inner)
+    (; label, source=name(inner), values=transformed, preprocess)
 end
 _brm_population_column(_term) = nothing
 
@@ -207,9 +249,11 @@ _brm_population_column(_term) = nothing
     _brm_simple_population_design(target, rhs, data, obs_name; required=false)
 
 Materialise the backend-neutral population design for the first common surface:
-an additive intercept and continuous raw-data columns. Returns `nothing` for a
-term requiring richer lowering unless `required=true`, in which case it fails
-loudly. Both SBBRMI and Turing consume this exact representation.
+an additive intercept, continuous raw-data columns, and fitted
+`zscale`/`standardize`/`center` columns. Returns `nothing` for a term requiring
+richer lowering unless `required=true`, in which case it fails loudly. Both
+SBBRMI and Turing consume this exact representation, including coefficient
+labels and preprocessing constants.
 """
 function _brm_simple_population_design(target::Symbol, rhs,
                                        data::AbstractDict,
@@ -222,7 +266,8 @@ function _brm_simple_population_design(target::Symbol, rhs,
             required && error(
                 "BRM backend lowering: predictor `$target` contains unsupported " *
                 "population term `$(repr(term))`; the shared initial surface " *
-                "supports only `1` and continuous raw-data columns")
+                "supports only `1` and continuous raw-data columns, plus " *
+                "`zscale`, `standardize`, and `center` of one numeric column")
             return nothing
         end
         push!(raw_columns, column)
@@ -257,7 +302,8 @@ function _brm_simple_population_design(target::Symbol, rhs,
         length(values) == n || error(
             "BRM backend lowering: predictor `$target` mixes row axes of lengths " *
             "$n and $(length(values))")
-        _BRMPopulationColumn(column.label, column.source, values)
+        _BRMPopulationColumn(
+            column.label, column.source, values, column.preprocess)
     end
     matrix = hcat((c.values for c in columns)...)
     _BRMPopulationDesign(target, Tuple(columns), matrix, row_source)

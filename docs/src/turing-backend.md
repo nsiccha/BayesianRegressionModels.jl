@@ -45,6 +45,25 @@ end)((; x=[-1.0, 0.5, 2.0], y=[0, 2, 5])))
 (binary=summary(binary.model), count=summary(count.model))
 ```
 
+Fitted numeric transforms use the same design and coefficient labels as the
+StanBlocks backend. The fitted mean and sample standard deviation belong to the
+model plan rather than to Turing:
+
+```julia
+transformed = TuringBRMI((@brm begin
+    sigma ~ Exponential(2)
+    mu ~ 1 + zscale(x) + center(w)
+    effect(mu, zscale_x) ~ Normal(0, 0.25)
+    y ~ Normal(mu, sigma)
+end)((;
+    x=[1.0, 2.0, 4.0],
+    w=[-2.0, 1.0, 5.0],
+    y=[0.2, 1.1, -0.4],
+)))
+
+transformed.plan.design.matrix
+```
+
 Turing is a weak dependency. The core package owns a backend-neutral BRMI
 context and population-design plan; the extension turns that plan into a
 `DynamicPPL.Model`. It does not construct or inspect `SBBRMI`,
@@ -66,8 +85,8 @@ the Turing backend refuses the surface rather than approximating it.
 | --- | --- | --- |
 | Backend boundary | **Supported** | Direct `BRMI` → backend-neutral plan → Turing extension; core loads without Turing |
 | Observation topology | **Partial** | Exactly one direct response named `y`; arbitrary names, multiple responses, distributional predictors, and hierarchical/ragged axes are pending |
-| Population design | **Partial** | Additive intercept plus continuous, non-integer raw columns share `_BRMPopulationDesign` with SBBRMI |
-| Population transforms and terms | **Pending** | Categorical contrasts, interactions, `standardize`, `offset`, `mo`/`mo1`, `me`, `s`, `t2`, `gp`, and `hsgp` |
+| Population design | **Partial** | Additive intercept, continuous non-integer raw columns, and fitted numeric transform columns share `_BRMPopulationDesign` with SBBRMI |
+| Population transforms and terms | **Partial** | `zscale`, `standardize`, and `center` share fitted constants, labels, matrices, and SBBRMI replay records; categorical contrasts, interactions, `offset`, `mo`/`mo1`, `me`, `s`, `t2`, `gp`, and `hsgp` are pending |
 | Population coefficient priors | **Partial** | Independent `Normal(0, 1)` defaults plus `effect(lp, coef)`, `effect(:, coef)`, and `:` coefficient defaults with the same specificity/tie rules as SBBRMI; current Turing hyperparameters must be finite numeric constants |
 | Scalar and structured priors | **Partial** | Gaussian scale accepts explicit `Exponential(scale)`; general scalar, horseshoe, simplex, R2D2, term, and latent priors are pending |
 | Gaussian identity likelihood | **Supported** | `sigma ~ Exponential(scale)`, `mu ~ 1 + continuous...`, `y ~ Normal(mu, sigma)` |

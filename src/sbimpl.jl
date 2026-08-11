@@ -4916,8 +4916,13 @@ function _sb_shared_population_cols!(cols, data,
         if isnothing(column.source)
             push!(cols, :(rep_vector(1.0, num_elements($(design.row_source)))))
         else
-            data[column.source] = column.values
-            push!(cols, column.source)
+            data[column.label] = column.values
+            push!(cols, column.label)
+            if !isnothing(column.preprocess)
+                p = column.preprocess
+                _sb_record_preproc!(data, column.label,
+                    PreprocEntry(p.kind, p.const_, p.raw_ref, false))
+            end
         end
     end
     cols
@@ -7726,19 +7731,14 @@ _sb_materialize_vec(x) = error("sbimpl: cannot materialize $(typeof(x)) inside w
 # a vector. The fused `_sb_zscale`/`_sb_center` keep construct-time behaviour
 # byte-identical (fit∘apply == the old one-pass), and `reprocess` reuses the
 # apply half with a frozen constant for prediction-replay (decision nr3v8n A).
-_sb_fit_zscale(v::AbstractVector{<:Real}) = let
-    # One fitted-preprocessing contract serves NativePPL, VBRMI, and SBBRMI:
-    # corrected sample SD, including the stable extreme-value path. Keeping
-    # a population-SD copy here made an unchanged BRMI a different statistical
-    # model in Stan whenever a transformed coefficient carried a prior.
-    fit = _native_ppl_fit_zscale(v, :predictor)
-    (fit.mean, fit.scale)
-end
-_sb_apply_zscale(c::Tuple, v::AbstractVector{<:Real}) = (v .- c[1]) ./ c[2]
+_sb_fit_zscale(v::AbstractVector{<:Real}) = _brm_fit_zscale(v)
+_sb_apply_zscale(c::Tuple, v::AbstractVector{<:Real}) =
+    _brm_apply_zscale(c, v)
 _sb_zscale(v::AbstractVector{<:Real}) = _sb_apply_zscale(_sb_fit_zscale(v), v)
 
-_sb_fit_center(v::AbstractVector{<:Real}) = sum(v) / length(v)
-_sb_apply_center(mu::Real, v::AbstractVector{<:Real}) = v .- mu
+_sb_fit_center(v::AbstractVector{<:Real}) = _brm_fit_center(v)
+_sb_apply_center(mu::Real, v::AbstractVector{<:Real}) =
+    _brm_apply_center(mu, v)
 _sb_center(v::AbstractVector{<:Real}) = _sb_apply_center(_sb_fit_center(v), v)
 
 # Stable, human-readable column name for a wrapped predictor. When the
