@@ -932,4 +932,64 @@ function BRM.TuringBRMI(brmi::BRM.BRMI)
     BRM.TuringBRMI(brmi, plan, model)
 end
 
+_brm_pointwise_indices(plan::BRM._TuringPopulationPlan) =
+    isnothing(plan.missing_response) ? eachindex(plan.response) :
+    plan.missing_response.observed_indices
+_brm_pointwise_indices(plan::BRM._TuringMeanPrecisionPlan) =
+    eachindex(plan.response)
+
+function _brm_typed_loglikelihoods(values)
+    isempty(values) && return Float64[]
+    T = promote_type(map(typeof, values)...)
+    T[values...]
+end
+
+function _brm_pointwise_response(plan, raw_values, first_index)
+    indices = _brm_pointwise_indices(plan)
+    last_index = first_index + length(indices) - 1
+    segment = _brm_typed_loglikelihoods(raw_values[first_index:last_index])
+    isnothing(plan.missing_response) && return segment, last_index + 1
+
+    T = eltype(segment)
+    aligned = Vector{Union{Missing,T}}(undef, length(plan.response))
+    fill!(aligned, missing)
+    aligned[indices] = segment
+    aligned, last_index + 1
+end
+
+function _brm_named_pointwise(plan, raw_values)
+    result, next_index = _brm_pointwise_response(plan, raw_values, 1)
+    next_index == length(raw_values) + 1 || error(
+        "Turing backend: DynamicPPL returned an unexpected number of " *
+        "pointwise likelihood terms")
+    response_name = BRM._turing_direct_observation(plan.context.parent).key
+    NamedTuple{(response_name,)}((result,))
+end
+
+function _brm_named_pointwise(
+        plan::BRM._TuringMultiResponsePlan, raw_values)
+    results = Any[]
+    next_index = 1
+    for child in plan.plans
+        result, next_index = _brm_pointwise_response(
+            child, raw_values, next_index)
+        push!(results, result)
+    end
+    next_index == length(raw_values) + 1 || error(
+        "Turing backend: DynamicPPL returned an unexpected number of " *
+        "pointwise likelihood terms")
+    NamedTuple{plan.responses}(Tuple(results))
+end
+
+function BRM.turing_pointwise_loglikelihoods(
+        backend::BRM.TuringBRMI, parameters)
+    pointwise = Turing.DynamicPPL.pointwise_loglikelihoods(
+        backend.model, Turing.DynamicPPL.InitFromParams(parameters))
+    raw_values = values(pointwise)
+    all(value -> value isa Number, raw_values) || error(
+        "Turing backend: DynamicPPL returned a non-scalar pointwise " *
+        "likelihood term for a rowwise BRM observation")
+    _brm_named_pointwise(backend.plan, raw_values)
+end
+
 end # module

@@ -87,6 +87,20 @@ Base.show(io::IO, x::TuringBRMI) = print(
 # lets the core validate and materialise plans without loading Turing.
 function _brm_turing_model end
 
+"""
+    turing_pointwise_loglikelihoods(backend::TuringBRMI, parameters)
+
+Evaluate the direct-BRMI Turing model's observation sites at one constrained
+parameter draw and return a response-named `NamedTuple` of rowwise log
+likelihoods. Responses with modelled missing values retain their original row
+axis, with `missing` at latent (non-observed) rows.
+
+The Turing extension implements this by re-running DynamicPPL's pointwise
+likelihood accumulator, so response modifiers and observation weights use the
+same executable distributions as `backend.model`.
+"""
+function turing_pointwise_loglikelihoods end
+
 function _turing_direct_observations(brmi::BRMI)
     found = Any[]
     for (key, op_nc) in pairs(brmi.operations)

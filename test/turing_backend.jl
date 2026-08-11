@@ -43,6 +43,10 @@ const BRM = BayesianRegressionModels
     @test Turing.loglikelihood(backend.model, params) ≈
           sum(logpdf.(Normal.(mu, params.sigma), df.y)) atol=1e-12 rtol=1e-12
     @test Turing.DynamicPPL.returned(backend.model, params).mu == mu
+    pointwise = turing_pointwise_loglikelihoods(backend, params)
+    @test propertynames(pointwise) == (:y,)
+    @test pointwise.y ≈ logpdf.(Normal.(mu, params.sigma), df.y)
+    @test sum(pointwise.y) ≈ Turing.loglikelihood(backend.model, params)
 
     prior_draw = rand(Xoshiro(42), backend.model)
     @test prior_draw.data.beta_pop isa Vector{Float64}
@@ -101,6 +105,15 @@ end
           coefficient_prior + scale_prior + imputation_prior atol=1e-12 rtol=1e-12
     @test Turing.loglikelihood(backend.model, params) ≈
           observed_likelihood atol=1e-12 rtol=1e-12
+    pointwise = turing_pointwise_loglikelihoods(backend, params)
+    @test propertynames(pointwise) == (:y,)
+    @test ismissing(pointwise.y[2])
+    @test ismissing(pointwise.y[4])
+    @test pointwise.y[missing_plan.observed_indices] ≈ [
+        logpdf(Normal(mu[i], params.sigma), complete_y[i])
+        for i in missing_plan.observed_indices
+    ]
+    @test sum(skipmissing(pointwise.y)) ≈ observed_likelihood
 
     complete = merge(df, (; y=Union{Missing,Float64}[0.2, 0.1, -0.4, 0.3]))
     @test_throws "found no missing values" begin
@@ -161,6 +174,11 @@ end
           prior atol=1e-12 rtol=1e-12
     @test Turing.loglikelihood(backend.model, draw.data) ≈
           likelihood atol=1e-12 rtol=1e-12
+    pointwise = turing_pointwise_loglikelihoods(backend, draw.data)
+    @test propertynames(pointwise) == (:y, :count)
+    @test pointwise.y ≈ logpdf.(Normal.(mu, normal_params.sigma), df.y)
+    @test pointwise.count ≈ logpdf.(Poisson.(rate), df.count)
+    @test sum(pointwise.y) + sum(pointwise.count) ≈ likelihood
 
 end
 
@@ -271,7 +289,6 @@ end
           prior atol=1e-12 rtol=1e-12
     @test Turing.loglikelihood(backend.model, params) ≈
           likelihood atol=1e-12 rtol=1e-12
-
     outside = merge(df, (; outcome=[-0.8, 0.6, 0.9]))
     @test_throws "contains values outside its bounds" begin
         TuringBRMI((@brm begin
@@ -348,6 +365,8 @@ end
           prior atol=1e-12 rtol=1e-12
     @test Turing.loglikelihood(backend.model, params) ≈
           likelihood atol=1e-12 rtol=1e-12
+    @test turing_pointwise_loglikelihoods(backend, params).y ≈
+          logpdf.(Normal.(mu, params.sigma ./ sqrt.(df.precision)), df.y)
 
     invalid = merge(df, (; precision=[1.0, 0.0, 2.25]))
     @test_throws "must be strictly positive" begin
@@ -419,6 +438,14 @@ end
           poisson_prior + poisson_likelihood atol=1e-12 rtol=1e-12
     @test Turing.loglikelihood(poisson_backend.model, poisson_params) ≈
           poisson_likelihood atol=1e-12 rtol=1e-12
+    pointwise_poisson = turing_pointwise_loglikelihoods(
+        poisson_backend, poisson_params)
+    @test pointwise_poisson.count ≈ [
+        poisson_data.power[i] * logpdf(
+            censored(Poisson(rate[i]); lower=0, upper=4),
+            poisson_data.count[i])
+        for i in eachindex(poisson_data.count)
+    ]
 
     objective_poisson = ext._brm_poisson_observation(
         poisson_modifier, poisson_weight, rate[2], 2)
