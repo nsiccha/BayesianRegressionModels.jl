@@ -321,22 +321,20 @@ hsgp_censored_df(; subs, dose_amt) = (;
     @test occursin("b_p_subject_z_flat = std_normal_vector_rng", gq)
 
     # (2b) snag reprocess-resamp-14c5ef20 (reported by Bruno:arv393:memo against
-    #      joint_brm2). The resampled program above is emitted correctly by BRM
-    #      but is NOT stanc-valid: under resample the kernel result `pred` moves
-    #      to generated quantities, yet StanBlocks leaves the held-out top-level
-    #      ragged density loop `ragged(pk_conc,…) ~ …(pred,…)` in the MODEL
-    #      block, so it references `pred__pl_mem_1` (GQ-scoped) out of scope
-    #      ("Identifier pred__pl_mem_1 not in scope"). Root cause is a missing
-    #      cv-taint propagation in StanBlocks' top-level ragged-obs forward path
-    #      (`_forward_ragged_obs_broadcast!`, slic_stan/forward.jl:1128); the
-    #      scalar (forward.jl:1168) and indexed (forward.jl:1445) obs paths
-    #      already propagate it. Snagged as
-    #      StanBlocks:snag.ragged-obs-not-c-5b1180c7. This cannot be fixed from
-    #      the BRM side (marking the response `stan.maybecv` does not move the
-    #      loop). PROMOTE this @test_broken to @test once that StanBlocks fix
-    #      lands — a StanBlocks pin bump past the fix surfaces it here as an
-    #      unexpected pass.
-    @test_broken StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    #      joint_brm2): the resampled program above must be stanc-valid. It was
+    #      not — under resample the kernel result `pred` moves to generated
+    #      quantities, but StanBlocks left the held-out top-level ragged density
+    #      loop `ragged(pk_conc,…) ~ …(pred,…)` in the MODEL block, referencing
+    #      `pred__pl_mem_1` (GQ-scoped) out of scope ("Identifier pred__pl_mem_1
+    #      not in scope"). Root cause was a missing cv-taint propagation in
+    #      StanBlocks' top-level ragged-obs forward path
+    #      (`_forward_ragged_obs_broadcast!`), fixed in StanBlocks (snag
+    #      ragged-obs-not-c-5b1180c7, StanBlocks devibe 9ec5e97): the ragged
+    #      response is now marked cv when its density arg is cv (mirroring the
+    #      scalar/indexed obs paths), so `distribution_blocks` routes the
+    #      per-group density loop to generated quantities. This locks that
+    #      resample of a top-level ragged-response kernel model stays stanc-valid.
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
 
     # (3) COST: the fixed future axis is degenerate, so REBUILDING fails at
     #     construction — the frozen-basis reprocess above is genuinely required.
