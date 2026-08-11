@@ -52,8 +52,9 @@ model plan rather than to Turing:
 ```julia
 transformed = TuringBRMI((@brm begin
     sigma ~ Exponential(2)
-    mu ~ 1 + zscale(x) + center(w)
+    mu ~ 1 + zscale(x) + center(w) + zscale(x) & w
     effect(mu, zscale_x) ~ Normal(0, 0.25)
+    effect(mu, int_zscale_x_x_w) ~ Normal(0, 0.5)
     y ~ Normal(mu, sigma)
 end)((;
     x=[1.0, 2.0, 4.0],
@@ -86,7 +87,7 @@ the Turing backend refuses the surface rather than approximating it.
 | Backend boundary | **Supported** | Direct `BRMI` → backend-neutral plan → Turing extension; core loads without Turing |
 | Observation topology | **Partial** | Exactly one direct response named `y`; arbitrary names, multiple responses, distributional predictors, and hierarchical/ragged axes are pending |
 | Population design | **Partial** | Additive intercept, continuous non-integer raw columns, and fitted numeric transform columns share `_BRMPopulationDesign` with SBBRMI |
-| Population transforms and terms | **Partial** | `zscale`, `standardize`, and `center` share fitted constants, labels, matrices, and SBBRMI replay records; categorical contrasts, interactions, `offset`, `mo`/`mo1`, `me`, `s`, `t2`, `gp`, and `hsgp` are pending |
+| Population transforms and terms | **Partial** | `zscale`, `standardize`, and `center`, plus pairwise interactions among continuous raw/transformed terms, share fitted constants, labels, matrices, and SBBRMI replay records; categorical contrasts, categorical interactions, `offset`, `mo`/`mo1`, `me`, `s`, `t2`, `gp`, and `hsgp` are pending |
 | Population coefficient priors | **Partial** | Independent `Normal(0, 1)` defaults plus `effect(lp, coef)`, `effect(:, coef)`, and `:` coefficient defaults with the same specificity/tie rules as SBBRMI; current Turing hyperparameters must be finite numeric constants |
 | Scalar and structured priors | **Partial** | Gaussian scale accepts explicit `Exponential(scale)`; general scalar, horseshoe, simplex, R2D2, term, and latent priors are pending |
 | Gaussian identity likelihood | **Supported** | `sigma ~ Exponential(scale)`, `mu ~ 1 + continuous...`, `y ~ Normal(mu, sigma)` |
