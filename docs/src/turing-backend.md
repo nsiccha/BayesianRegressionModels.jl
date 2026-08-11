@@ -235,6 +235,39 @@ fitted scales and correlation factors. The same exclusion applies to
 `Turing.predict(backend, chain)`, so fitted group latents are not silently
 reused for a resampled block.
 
+```julia
+using Random: Xoshiro
+
+training_grouped = TuringBRMI((@brm begin
+    log(lambda) ~ 1 + x + (1 | subject)
+    y ~ Poisson(lambda)
+end)((;
+    x=[-1.0, 0.5, 2.0, 0.25],
+    subject=["a", "b", "a", "c"],
+    y=[0, 2, 5, 1],
+)))
+
+new_population = (;
+    x=[-0.75, 0.25, 1.25, 2.25],
+    subject=["new_b", "new_a", "new_b", "new_c"],
+    y=zeros(Int, 4),
+)
+replayed = reprocess(
+    training_grouped, new_population; resample_groups=:subject)
+
+# A constrained draw from the fitted model. Its old `z_group` values are
+# ignored for the named resampled block; beta and the fitted scale are retained.
+posterior_draw = (;
+    beta_pop=[0.1, -0.2],
+    log_group_scale=log(0.6),
+    z_group=[-0.2, 0.4, 1.1],
+)
+predicted = turing_posterior_predictive(
+    Xoshiro(42), replayed, posterior_draw)
+
+(levels=only(replayed.plan.random_effects).levels, y=predicted.y)
+```
+
 ## Parity contract
 
 “Parity” means the same admitted BRMI has the same constrained prior and
