@@ -291,7 +291,8 @@ end
 function _turing_bernoulli_population_plan(brmi::BRMI, observation,
                                            predictor::Symbol, expected_link,
                                            role::AbstractString)
-    parts = _turing_population_components(brmi, observation, predictor)
+    parts = _turing_population_components(
+        brmi, observation, predictor; allow_random_intercepts=true)
     _turing_require_predictor_link(parts, expected_link, role)
     all(x -> x isa Bool || (x isa Integer && x in (0, 1)), parts.response) || error(
         "Turing backend: Bernoulli response `$(observation.key)` must contain only 0/1")
@@ -327,7 +328,8 @@ end
 function _turing_binomial_population_plan(brmi::BRMI, observation, trials_raw,
                                           predictor::Symbol, expected_link,
                                           role::AbstractString)
-    parts = _turing_population_components(brmi, observation, predictor)
+    parts = _turing_population_components(
+        brmi, observation, predictor; allow_random_intercepts=true)
     _turing_require_predictor_link(parts, expected_link, role)
     trials = _brm_materialize_count_argument(
         trials_raw, length(parts.response), "Binomial trial count";
@@ -386,7 +388,8 @@ function _turing_poisson_log_plan(brmi::BRMI, observation, rhs::ExprColumn)
               "`log(lambda) ~ formula; y ~ Poisson(lambda)` or " *
               "`log_rate ~ formula; y ~ Poisson(exp(log_rate))`")
     end
-    parts = _turing_population_components(brmi, observation, predictor)
+    parts = _turing_population_components(
+        brmi, observation, predictor; allow_random_intercepts=true)
     _turing_require_predictor_link(parts, expected_link, "Poisson log link")
     all(x -> x isa Integer && x >= 0, parts.response) || error(
         "Turing backend: Poisson response `$(observation.key)` must be nonnegative integers")

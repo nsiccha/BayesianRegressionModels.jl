@@ -96,6 +96,58 @@ end
 end
 
 
+@testset "Turing extension — GLM plain random intercepts" begin
+    base = (;
+        x=[-1.0, 0.5, 2.0, 0.25],
+        subject=["b", "a", "b", "c"],
+        trials=[2, 4, 6, 3])
+    bernoulli = TuringBRMI((@brm begin
+        logit(p) ~ 1 + x + (1 | subject)
+        y ~ Bernoulli(p)
+    end)((; base..., y=[0, 1, 1, 0])))
+    binomial = TuringBRMI((@brm begin
+        logit(p) ~ 1 + x + (1 | subject)
+        y ~ Binomial(trials, p)
+    end)((; base..., y=[0, 2, 5, 1])))
+    poisson = TuringBRMI((@brm begin
+        log(lambda) ~ 1 + x + (1 | subject)
+        y ~ Poisson(lambda)
+    end)((; base..., y=[0, 2, 5, 1])))
+
+    params = (;
+        beta_pop=[0.25, -0.5],
+        log_group_scale=log(0.6), z_group=[-0.2, 0.4, 1.1])
+    group_effect = exp(params.log_group_scale) .* params.z_group
+    indices = only(bernoulli.plan.random_intercepts).indices
+    eta = bernoulli.plan.design.matrix * params.beta_pop + group_effect[indices]
+    prior = sum(logpdf.(Normal(), params.beta_pop)) +
+            logpdf(Normal(), params.log_group_scale) +
+            sum(logpdf.(Normal(), params.z_group))
+
+    bern_lik = sum(logpdf.(BRM.BernoulliLogit.(eta), bernoulli.plan.response))
+    @test Turing.logjoint(bernoulli.model, params) ≈
+          prior + bern_lik atol=1e-12 rtol=1e-12
+    @test Turing.logprior(bernoulli.model, params) ≈ prior atol=1e-12 rtol=1e-12
+    @test Turing.DynamicPPL.returned(bernoulli.model, params).eta == eta
+
+    bin_lik = sum(logpdf.(
+        BRM.BinomialLogit.(base.trials, eta), binomial.plan.response))
+    @test Turing.logjoint(binomial.model, params) ≈
+          prior + bin_lik atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(binomial.model, params) ≈
+          bin_lik atol=1e-12 rtol=1e-12
+    @test Turing.DynamicPPL.returned(binomial.model, params).eta == eta
+
+    rate = exp.(eta)
+    poisson_lik = sum(logpdf.(Poisson.(rate), poisson.plan.response))
+    @test Turing.logjoint(poisson.model, params) ≈
+          prior + poisson_lik atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(poisson.model, params) ≈
+          poisson_lik atol=1e-12 rtol=1e-12
+    @test Turing.DynamicPPL.returned(poisson.model, params).rate == rate
+end
+
+
 @testset "Turing extension — fitted numeric population transforms" begin
     df = (;
         x=[1.0, 2.0, 4.0],

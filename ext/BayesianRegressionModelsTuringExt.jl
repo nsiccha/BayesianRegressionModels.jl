@@ -44,6 +44,20 @@ Turing.@model function _brm_population_bernoulli_logit(
     (; eta)
 end
 
+Turing.@model function _brm_population_bernoulli_logit_random_intercept(
+    X, fixed, group_idx, n_groups, y, beta_location, beta_scale)
+    beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
+    log_group_scale ~ Normal()
+    z_group ~ product_distribution(fill(Normal(), n_groups))
+    group_scale = exp(log_group_scale)
+    group_effect = group_scale .* z_group
+    eta = X * beta_pop + fixed + group_effect[group_idx]
+    for i in eachindex(y)
+        y[i] ~ BRM.BernoulliLogit(eta[i])
+    end
+    (; eta, group_scale, group_effect)
+end
+
 Turing.@model function _brm_population_binomial_logit(
     X, fixed, trials, y, beta_location, beta_scale)
     beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
@@ -52,6 +66,20 @@ Turing.@model function _brm_population_binomial_logit(
         y[i] ~ BRM.BinomialLogit(trials[i], eta[i])
     end
     (; eta, trials)
+end
+
+Turing.@model function _brm_population_binomial_logit_random_intercept(
+    X, fixed, group_idx, n_groups, trials, y, beta_location, beta_scale)
+    beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
+    log_group_scale ~ Normal()
+    z_group ~ product_distribution(fill(Normal(), n_groups))
+    group_scale = exp(log_group_scale)
+    group_effect = group_scale .* z_group
+    eta = X * beta_pop + fixed + group_effect[group_idx]
+    for i in eachindex(y)
+        y[i] ~ BRM.BinomialLogit(trials[i], eta[i])
+    end
+    (; eta, trials, group_scale, group_effect)
 end
 
 Turing.@model function _brm_population_poisson_log(
@@ -63,6 +91,21 @@ Turing.@model function _brm_population_poisson_log(
         y[i] ~ Poisson(rate[i])
     end
     (; log_rate, rate)
+end
+
+Turing.@model function _brm_population_poisson_log_random_intercept(
+    X, fixed, group_idx, n_groups, y, beta_location, beta_scale)
+    beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
+    log_group_scale ~ Normal()
+    z_group ~ product_distribution(fill(Normal(), n_groups))
+    group_scale = exp(log_group_scale)
+    group_effect = group_scale .* z_group
+    log_rate = X * beta_pop + fixed + group_effect[group_idx]
+    rate = exp.(log_rate)
+    for i in eachindex(y)
+        y[i] ~ Poisson(rate[i])
+    end
+    (; log_rate, rate, group_scale, group_effect)
 end
 
 Turing.@model function _brm_population_negative_binomial2(
@@ -128,6 +171,18 @@ end
 
 function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:bernoulli_logit}})
+    if !isempty(plan.random_intercepts)
+        block = only(plan.random_intercepts)
+        return _brm_population_bernoulli_logit_random_intercept(
+            plan.design.matrix,
+            plan.design.fixed,
+            block.indices,
+            length(block.levels),
+            plan.response,
+            plan.beta_location,
+            plan.beta_scale,
+        )
+    end
     _brm_population_bernoulli_logit(
         plan.design.matrix,
         plan.design.fixed,
@@ -139,6 +194,19 @@ end
 
 function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:binomial_logit}})
+    if !isempty(plan.random_intercepts)
+        block = only(plan.random_intercepts)
+        return _brm_population_binomial_logit_random_intercept(
+            plan.design.matrix,
+            plan.design.fixed,
+            block.indices,
+            length(block.levels),
+            plan.family_args.trials,
+            plan.response,
+            plan.beta_location,
+            plan.beta_scale,
+        )
+    end
     _brm_population_binomial_logit(
         plan.design.matrix,
         plan.design.fixed,
@@ -151,6 +219,18 @@ end
 
 function BRM._brm_turing_model(
     plan::BRM._TuringPopulationPlan{Val{:poisson_log}})
+    if !isempty(plan.random_intercepts)
+        block = only(plan.random_intercepts)
+        return _brm_population_poisson_log_random_intercept(
+            plan.design.matrix,
+            plan.design.fixed,
+            block.indices,
+            length(block.levels),
+            plan.response,
+            plan.beta_location,
+            plan.beta_scale,
+        )
+    end
     _brm_population_poisson_log(
         plan.design.matrix,
         plan.design.fixed,
