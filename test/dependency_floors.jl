@@ -81,6 +81,68 @@ function _clone_floor_checkout!(destination, minimum;
     "public $origin $branch"
 end
 
+function _clone_revision_checkout!(destination, revision; mirror, origin)
+    source = if _mirror_contains(mirror, revision)
+        run(Cmd(["git", "clone", "--quiet", "--no-checkout", mirror, destination]))
+        "host mirror revision $revision"
+    else
+        run(Cmd(["git", "clone", "--quiet", "--no-checkout", origin, destination]))
+        "public $origin revision $revision"
+    end
+    run(Cmd([
+        "git", "-C", destination, "checkout", "--quiet", "--detach", revision,
+    ]))
+    source
+end
+
+function require_git_revision(name, path, revision)
+    path = abspath(path)
+    _require_julia_package_checkout(name, path)
+    _git_succeeds(["git", "-C", path, "rev-parse", "--git-dir"]) ||
+        error("$name at $path is not a readable Git checkout")
+    head = _git_output(["git", "-C", path, "rev-parse", "HEAD"])
+    head == revision || error("""
+        $name checkout $path is at $head, not the pinned revision $revision.
+        Remove the stale test bootstrap checkout and run test/bootstrap.jl again.
+        """)
+    head
+end
+
+"""
+    resolve_git_revision_checkout(name, revision; kwargs...)
+
+Materialize and return an exact, persistent Git checkout below `cache_root`.
+Prefer a host mirror containing `revision`, otherwise clone the public `origin`.
+Unlike [`resolve_git_floor_checkout`](@ref), descendants do not satisfy an
+exact source pin.
+"""
+function resolve_git_revision_checkout(name, revision;
+        cache_root,
+        mirror="",
+        origin)
+    cache_root = abspath(cache_root)
+    cache = joinpath(cache_root, "$(lowercase(name))-$(revision[1:12])")
+    if ispath(cache)
+        require_git_revision(name, cache, revision)
+        return cache
+    end
+
+    mkpath(cache_root)
+    source = mktempdir(cache_root; prefix=".$(lowercase(name))-bootstrap-") do scratch
+        source = _clone_revision_checkout!(
+            scratch, revision; mirror=mirror, origin=origin)
+        require_git_revision(name, scratch, revision)
+        if ispath(cache)
+            require_git_revision(name, cache, revision)
+        else
+            mv(scratch, cache)
+        end
+        source
+    end
+    @info "Materialized $name test dependency" path=cache source revision
+    cache
+end
+
 """
     resolve_git_floor_checkout(name, configured_path, minimum; kwargs...)
 

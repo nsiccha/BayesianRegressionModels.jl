@@ -20,9 +20,9 @@ gradient site easier.
 
 ## One-time bootstrap
 
-Four packages have to be **develop paths**, and absolute paths are
-machine-specific, so they are not committed. Supply StanBlocks and Treebars
-once:
+Seven packages have to enter resolution as **develop paths**, and absolute
+paths are machine-specific, so they are not committed. Supply StanBlocks and
+Treebars once:
 
 ```sh
 BRM_TEST_STANBLOCKS=/path/to/StanBlocks.jl \
@@ -39,6 +39,12 @@ deliberate: a dirty shared `~/github/nsiccha/WarmupHMC.jl` checkout may be
 hundreds of commits behind even though the floor is landed and published.
 `BRM_TEST_WARMUPHMC_MIRROR` and `BRM_TEST_WARMUPHMC_ORIGIN` override those two
 sources for an offline or nonstandard host.
+
+The other three source-only direct dependencies — `MutatingFunctions`,
+`OutputSignatures`, and `TreeArrays` — are materialized under the same ignored
+directory at the exact full-SHA revisions in `test/Project.toml`. Julia 1.10
+ignores those `[sources]` entries, so `bootstrap.jl` reads the committed table
+itself and includes their paths in the single resolve.
 
 That writes `test/Manifest.toml`, which is deliberately **not** committed (the
 root `.gitignore` covers `Manifest*.toml`). Re-run `bootstrap.jl` after moving
@@ -93,10 +99,14 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   `Treebars [e1e568c4] has no known versions!`. `Pkg.develop` can only fix a path
   for a *direct* dependency, so Treebars has to be listed in `test/Project.toml`
   as well; that entry is transitive plumbing, not a test dependency.
-- **All four `develop` paths go in ONE `Pkg.develop` call.** Resolution has to
+- **The other three `[sources]` packages must be develop paths too.**
+  `MutatingFunctions`, `OutputSignatures`, and `TreeArrays` are unregistered
+  direct dependencies. On Julia 1.10 their committed source pins are inert, so
+  omitting their paths fails with `expected package ... to be registered`.
+- **All seven `develop` paths go in ONE `Pkg.develop` call.** Resolution has to
   satisfy them together. Developing StanBlocks by itself fails with `expected
-  package BayesianRegressionModels to be registered`, because BRM is
-  unregistered and is not yet in the manifest when StanBlocks' resolve runs.
+  package BayesianRegressionModels to be registered`, while omitting a
+  source-only direct dependency produces the same error for that dependency.
 
 ## Why not `Pkg.test`
 
