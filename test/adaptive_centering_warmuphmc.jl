@@ -278,7 +278,7 @@ end
         n_cholesky = K * (K - 1) ÷ 2
         ranef = BayesianRegressionModels.RanefBlock(
             :r_mu_subject, :ranef_correlated, :subject, nothing, nothing,
-            string.(1:G), K, G, :r_mu_subject_z_flat, true,
+            string.(1:G), K, G, :r_mu_subject_z_flat, true, false,
         )
         block = AdaptiveCenteringBlock(
             ranef,
@@ -329,7 +329,7 @@ end
         n_cholesky = K * (K - 1) ÷ 2
         ranef = BayesianRegressionModels.RanefBlock(
             :r_mu_subject, :ranef_correlated, :subject, nothing, nothing,
-            ["a", "b"], K, G, :r_mu_subject_z_flat, true,
+            ["a", "b"], K, G, :r_mu_subject_z_flat, true, false,
         )
         block = AdaptiveCenteringBlock(
             ranef,

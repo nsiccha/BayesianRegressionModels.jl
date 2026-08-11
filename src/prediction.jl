@@ -131,6 +131,15 @@ address its draws without reading the generated Stan.
   reading `levels`, resolving coordinates all work — and it is
   `population_draws` / `transport_draws` that refuse them. So a successful
   `ranef_blocks` is NOT clearance to zero or transport; branch on this flag.
+- `generated` — true iff `resample_groups` moved this block's standardised draws
+  to GENERATED QUANTITIES (a `reprocess(model, new_df; resample_groups = [g])`
+  re-draw target; [`transport_draws`](@ref)). Such a block is re-drawn Stan-side
+  per draw, so it has NO coordinate in `param_unc_names`: it is DESCRIBED (shape,
+  `levels`, group count all read off the preprocessing record) but
+  [`ranef_coordinates`](@ref) refuses it and `transport_draws` skips it — its
+  `L` / `tau` hyperparameters are the transportable state, and they are copied by
+  name. `false` for an ordinary fit (including a plain `cv_groups` build, whose
+  block is still a sampled parameter).
 
 Obtain with [`ranef_blocks`](@ref); resolve to unconstrained coordinates with
 [`ranef_coordinates`](@ref).
@@ -146,13 +155,15 @@ struct RanefBlock
     n_groups::Int
     z::Symbol
     noncentered::Bool
+    generated::Bool
 end
 
 Base.show(io::IO, b::RanefBlock) = print(io,
     "RanefBlock(", b.binding, " :: ", b.family, ", group=", b.group,
     isnothing(b.id) ? "" : ", id=$(b.id)",
     isnothing(b.by) ? "" : ", by=$(b.by)",
-    ", ", b.n_terms, "×", b.n_groups, ", z=", b.z, ")")
+    ", ", b.n_terms, "×", b.n_groups, ", z=", b.z,
+    b.generated ? ", generated" : "", ")")
 
 # `<gname>_idx` / `<gname>__by__<bname>_idx` — the emitter's own group-index
 # naming (`_sb_ensure_group_data!`, `_sb_emit_ranef_block!`), read backwards.
@@ -254,6 +265,7 @@ function ranef_blocks(model)
         if mm_entry isa PreprocEntry && mm_entry.kind === :multi_membership
             group = Tuple(mm_entry.raw_ref.groups)
             by = nothing
+            generated = false
             levels = collect(mm_entry.const_.levels)
             n_groups = _ranef_data_int(data, mm_entry.const_.n_groups_key,
                                        d.target, fam)
@@ -268,20 +280,44 @@ function ranef_blocks(model)
                 "BRM prediction: grouping factor `$group` (from `$(idx_key)`) is not ",
                 "a raw data column of this model.")
             levels = collect(_sb_fit_levels(raw))
-            # CONTROL. `levels` is reconstructed from the training column with the
-            # same fit/apply split the emitter used; the emitted `n_groups` is the
-            # count the Stan program was built with. If those disagree, the group
-            # name derived from `idx_key` is wrong (or the level coding drifted).
-            n_groups = if haskey(d.keywords, :n_groups) && d.keywords.n_groups isa Symbol
-                ng_key = d.keywords.n_groups
-                if ng_key === Symbol(d.target, :_n_g)
-                    # cv-contagious sizing uses a Stan-side local, not a data key.
-                    maximum(_ranef_data_vec(data, idx_key, d.target, fam))
-                else
-                    _ranef_data_int(data, ng_key, d.target, fam)
-                end
+            idx_val = _ranef_data_vec(data, idx_key, d.target, fam)
+            if idx_val isa StanBlocks.StanExpr
+                # RESAMPLE target: `resample_groups` marked this factor's index
+                # with `maybecv(...)`, so it is a Stan-side expression (not a data
+                # vector) and the block's standardised draws were flipped to
+                # generated quantities. Its group count is NOT recoverable by
+                # iterating the expression — read it off the `:group_index`
+                # preprocessing record, and flag the block `generated` so
+                # `ranef_coordinates` / `transport_draws` treat it as a re-drawn
+                # non-parameter rather than looking for coordinates that no longer
+                # exist in `param_unc_names`.
+                gi_entry = get(plan.preproc, idx_key, nothing)
+                (gi_entry isa PreprocEntry && gi_entry.kind === :group_index) || error(
+                    "BRM prediction: `$(d.target) ~ $(fam)(…)` has a resample-marked ",
+                    "group index `$(idx_key)` (moved to generated quantities) with no ",
+                    "`:group_index` preprocessing record; its group count cannot be ",
+                    "recovered.")
+                generated = true
+                n_groups = _ranef_data_int(data, gi_entry.const_.n_groups_key,
+                                           d.target, fam)
             else
-                maximum(_ranef_data_vec(data, idx_key, d.target, fam))
+                generated = false
+                # CONTROL. `levels` is reconstructed from the training column with
+                # the same fit/apply split the emitter used; the emitted `n_groups`
+                # is the count the Stan program was built with. If those disagree,
+                # the group name derived from `idx_key` is wrong (or the level
+                # coding drifted).
+                n_groups = if haskey(d.keywords, :n_groups) && d.keywords.n_groups isa Symbol
+                    ng_key = d.keywords.n_groups
+                    if ng_key === Symbol(d.target, :_n_g)
+                        # cv-contagious sizing uses a Stan-side local, not a data key.
+                        maximum(idx_val)
+                    else
+                        _ranef_data_int(data, ng_key, d.target, fam)
+                    end
+                else
+                    maximum(idx_val)
+                end
             end
         end
         length(levels) == n_groups || error(
@@ -297,7 +333,8 @@ function ranef_blocks(model)
         push!(out, RanefBlock(d.target, fam, group,
                               _ranef_id_of_binding(d.target, group, by), by,
                               levels, n_terms, n_groups,
-                              Symbol(d.target, :_, spec.z), spec.noncentered))
+                              Symbol(d.target, :_, spec.z), spec.noncentered,
+                              generated))
     end
     out
 end
@@ -349,6 +386,13 @@ covariate level, or a model rebuilt with a different parameterization).
 maps over several blocks.
 """
 function ranef_coordinates(block::RanefBlock, unc_names)
+    block.generated && error(
+        "BRM prediction: block `$(block.binding)` (group `$(block.group)`) was ",
+        "moved to generated quantities by `resample_groups`; its draws are ",
+        "re-generated Stan-side, so it has no unconstrained coordinates to ",
+        "resolve against `param_unc_names`. Transport copies its `L` / `tau` ",
+        "hyperparameters by name and lets the target re-draw the effects; ",
+        "`transport_draws` skips such a block rather than calling this.")
     layout = _RANEF_FAMILIES[block.family].layout
     pos = _ranef_name_positions(unc_names)
     out = Matrix{Int}(undef, block.n_terms, block.n_groups)
@@ -472,8 +516,9 @@ fit can be evaluated on new data without refitting.
 
 - `from` / `to` — `SBBRMI` / `GenerativePlan` values. `to` is typically
   `generative_plan(plan, new_df)` (the builder form, which rebuilds the same
-  declarations for genuinely new groups) or `reprocess(sb, new_df)` when the
-  groups are unchanged.
+  declarations for genuinely new groups), `reprocess(sb, new_df)` when the
+  groups are unchanged, or `reprocess(sb, new_df; resample_groups = [g])` — see
+  the resample-target paragraph below.
 - `draws` — draws × coordinates in `unc_from` order; `unc_from` / `unc_to` are
   the two models' `param_unc_names`.
 - `resample` — grouping factors whose EXISTING levels should also be re-drawn
@@ -505,6 +550,22 @@ plausible, wrong numbers.
 
 Coordinates that exist in `from` but not in `to` (a dropped group level) are
 simply not carried over.
+
+# Resample targets (`reprocess(sb, new_df; resample_groups = [g])`)
+
+`resample_groups` moves factor `g`'s standardised draws to the target's
+GENERATED QUANTITIES, so they are re-drawn Stan-side per draw and are NOT in
+`to`'s `param_unc_names`. `ranef_blocks(to)` reports such a block with
+`generated = true`; `transport_draws` SKIPS it — there is no coordinate to
+transport. What IS transported is everything that remains a parameter: the
+population coefficients and, critically, the resampled factor's own `L` / `tau`
+covariance hyperparameters, all copied by NAME (rule 3). The net effect is exact
+out-of-sample semantics — the target re-draws `g`'s per-level effects from the
+FITTED covariance, because that covariance is transported. `from`'s per-level
+draws for `g` are dropped (they are `from`-only coordinates), which is correct:
+the new levels are not the fitted ones. This is the intended consumption path
+for a resample target; a positional splice of the fitted levels' draws would be
+the exact wrong answer.
 
 # Example
 
@@ -544,6 +605,12 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
     claimed = falses(length(unc_to))
 
     for bt in blocks_to
+        # A resample target's block is re-drawn in the target's generated
+        # quantities (see the resample-target paragraph above): it has no
+        # coordinate in `unc_to`, so there is nothing to align. Its `L` / `tau`
+        # hyperparameters and every population coordinate remain parameters and
+        # are copied by name in the fall-through below.
+        bt.generated && continue
         key = (bt.id, bt.group, bt.by)
         bf = get(by_key, key, nothing)
         isnothing(bf) && error(

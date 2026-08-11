@@ -34,7 +34,7 @@ function synthetic_adaptive_block(K, G)
     n_cholesky = K * (K - 1) ÷ 2
     ranef = BayesianRegressionModels.RanefBlock(
         :r_mu_subject, :ranef_correlated, :subject, nothing, nothing,
-        string.(1:G), K, G, :r_mu_subject_z_flat, true,
+        string.(1:G), K, G, :r_mu_subject_z_flat, true, false,
     )
     AdaptiveCenteringBlock(
         ranef,
