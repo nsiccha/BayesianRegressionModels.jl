@@ -253,3 +253,105 @@ end
     @test_throws "group lengths [3, 4]; expected [4, 3]" SBBRMI(
         censored_flat_builder(wrong_segments); mod=@__MODULE__)
 end
+
+# snag reprocess-ragged-ea8c7e42 (reported by Bruno:arv393:memo against
+# joint_brm2). The gathered ragged RESPONSE and its data-backed censoring BOUND
+# had no preprocessing record, so `reprocess`/`resample_groups` errored on the
+# derived bound (`pk_conc_lower_pk_lloq_ragged`) and would have silently kept the
+# stale/flat response. Both now carry `:ragged_gather` provenance and are
+# re-gathered from their flat columns into the kernel's per-subject row order. A
+# fixed future regimen makes the event-axis HSGP covariate constant, so
+# rebuilding the model refits a degenerate basis — the frozen reprocess is the
+# only correct route, exactly as the reporter needed.
+hsgp_censored_builder = @brm begin
+    sigma  ~ Exponential(1)
+    log_F  ~ 1 + hsgp(log_dose; k = 5)
+    log_CL ~ 1 + weight + (1 | p | subject)
+    pred   ~ kernel(ragged(obs_time, obs_subject),
+                    ragged(dose_amount_flat, dose_subject),
+                    ragged(log_F, dose_subject), log_CL) do ts, doses, lF, lCL
+        sum(doses .* exp(lF)) .* exp(-exp(lCL) .* ts)
+    end
+    ragged(pk_conc, obs_subject) ~ censored(Normal(pred, sigma); lower = pk_lloq)
+end
+
+hsgp_censored_df(; subs, dose_amt) = (;
+    subject          = subs,
+    weight           = collect(range(60.0, 90.0; length = length(subs))),
+    obs_subject      = vcat([fill(s, 4) for s in subs]...),
+    obs_time         = repeat([0.5, 1.0, 1.5, 2.0], length(subs)),
+    pk_conc          = repeat([1.2, 0.8, 0.5, 0.3], length(subs)),
+    pk_lloq          = fill(0.1, 4 * length(subs)),
+    dose_subject     = vcat([fill(s, 2) for s in subs]...),
+    dose_amount_flat = repeat(dose_amt, length(subs)),
+    log_dose         = log.(repeat(dose_amt, length(subs))),
+)
+
+@testset "ragged observation LHS — reprocess/resample regenerates response + bound" begin
+    train = hsgp_censored_df(; subs = ["s1", "s2", "s3"], dose_amt = [100.0, 50.0])
+    sb = SBBRMI(hsgp_censored_builder(train); mod = @__MODULE__)
+
+    # (0) The gathered response and its data-backed bound now carry provenance.
+    @test sb.preproc[:pk_conc].kind === :ragged_gather
+    @test sb.preproc[:pk_conc_lower_pk_lloq_ragged].kind === :ragged_gather
+    @test sb.preproc[:pk_conc_lower_pk_lloq_ragged].raw_ref === :pk_lloq
+
+    # (1) Same-subject frozen replay: byte-identical Stan, correctly re-gathered.
+    same = hsgp_censored_df(; subs = ["s1", "s2", "s3"], dose_amt = [120.0, 120.0])
+    replayed = reprocess(sb, same; freeze_constants = true)
+    @test StanBlocks.stan_code(replayed.model) == StanBlocks.stan_code(sb.model)
+    @test replayed.data[:pk_conc] == [[1.2, 0.8, 0.5, 0.3] for _ in 1:3]
+    @test replayed.data[:pk_conc_lower_pk_lloq_ragged] == [[0.1, 0.1, 0.1, 0.1] for _ in 1:3]
+
+    # (2) New-population resample onto a fixed 120 mg future: succeeds, freezes
+    #     the trained HSGP basis, and re-gathers response + bound for the new
+    #     subjects (the reporter's exact call).
+    future = hsgp_censored_df(; subs = ["n1", "n2", "n3", "n4"], dose_amt = [120.0, 120.0])
+    resampled = reprocess(sb, future; resample_groups = [:subject])
+    @test resampled.preproc[:subject_idx].const_.levels == ["n1", "n2", "n3", "n4"]
+    @test resampled.data[:kernel_nsub_pred] == 4
+    @test resampled.preproc[:PHI_hsgp_log_dose].const_.fits ==
+          sb.preproc[:PHI_hsgp_log_dose].const_.fits            # HSGP basis frozen
+    @test resampled.data[:pk_conc] == [[1.2, 0.8, 0.5, 0.3] for _ in 1:4]
+    @test resampled.data[:pk_conc_lower_pk_lloq_ragged] == [[0.1, 0.1, 0.1, 0.1] for _ in 1:4]
+    code = StanBlocks.stan_code(resampled.model)
+    params = code[first(findfirst("parameters {", code)):first(findfirst("model {", code))]
+    gq = code[first(findfirst("generated quantities {", code)):end]
+    @test !occursin("b_p_subject_z_flat", params)
+    @test occursin("b_p_subject_z_flat = std_normal_vector_rng", gq)
+
+    # (2b) snag reprocess-resamp-14c5ef20 (reported by Bruno:arv393:memo against
+    #      joint_brm2): the resampled program above must be stanc-valid. It was
+    #      not — under resample the kernel result `pred` moves to generated
+    #      quantities, but StanBlocks left the held-out top-level ragged density
+    #      loop `ragged(pk_conc,…) ~ …(pred,…)` in the MODEL block, referencing
+    #      `pred__pl_mem_1` (GQ-scoped) out of scope ("Identifier pred__pl_mem_1
+    #      not in scope"). Root cause was a missing cv-taint propagation in
+    #      StanBlocks' top-level ragged-obs forward path
+    #      (`_forward_ragged_obs_broadcast!`), fixed in StanBlocks (snag
+    #      ragged-obs-not-c-5b1180c7, StanBlocks devibe 9ec5e97): the ragged
+    #      response is now marked cv when its density arg is cv (mirroring the
+    #      scalar/indexed obs paths), so `distribution_blocks` routes the
+    #      per-group density loop to generated quantities. This locks that
+    #      resample of a top-level ragged-response kernel model stays stanc-valid.
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+
+    # (3) COST: the fixed future axis is degenerate, so REBUILDING fails at
+    #     construction — the frozen-basis reprocess above is genuinely required.
+    @test_throws "hsgp: degenerate input" SBBRMI(
+        hsgp_censored_builder(future); mod = @__MODULE__)
+    @test_throws "hsgp: degenerate input" reprocess(
+        sb, future; freeze_constants = false, resample_groups = [:subject])
+
+    # (4) Unseen fitted subject still fails loudly on the frozen same-group path.
+    @test_throws "unseen level" reprocess(
+        sb, hsgp_censored_df(; subs = ["s1", "s2", "zzz"], dose_amt = [100.0, 50.0]))
+
+    # (5) A bound-free top-level ragged response is also re-gathered now (the
+    #     response gather was un-provenanced before, independent of any bound).
+    plain = SBBRMI(flat_builder(flat_data); mod = @__MODULE__)
+    @test plain.preproc[:obs_y].kind === :ragged_gather
+    reprocessed = reprocess(plain, flat_data; freeze_constants = true)
+    @test reprocessed.data[:obs_y] == plain.data[:obs_y]
+    @test StanBlocks.stan_code(reprocessed.model) == StanBlocks.stan_code(plain.model)
+end

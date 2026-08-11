@@ -535,6 +535,25 @@ end
             required=true)
     end
 
+    # A parameter-owning term head (`mo`, `me`, `s`, ...) is NOT a materialisable
+    # data expression — the simple design must DECLINE it so the richer emitter
+    # lowers it as a parameter, never `broadcast(mo, diet)` into a bare
+    # `MethodError: no method matching mo(::Int64)` (snag `kernel-mo-term-i`).
+    monotonic = (@brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + mo(diet)
+        y ~ Normal(mu, sigma)
+    end)((; diet=[1, 2, 1, 3], y=zeros(4)))
+    mo_context = BRM._brm_backend_context(monotonic)
+    _, mo_rhs = getargs(linear_predictor_op(monotonic, :mu), 2)
+    @test isnothing(BRM._brm_simple_population_design(
+        :mu, mo_rhs, mo_context.data, mo_context.target_obs[:mu]))
+    @test_throws "supports `1`, continuous raw-data columns" begin
+        BRM._brm_simple_population_design(
+            :mu, mo_rhs, mo_context.data, mo_context.target_obs[:mu];
+            required=true)
+    end
+
     missing_x = Union{Missing,Float64}[1.0, missing]
     @test_throws "never silently drops rows" begin
         broken = (@brm begin

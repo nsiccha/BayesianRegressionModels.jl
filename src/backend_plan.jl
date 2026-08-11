@@ -862,12 +862,21 @@ _brm_data_expression_sources!(sources, _term) = sources
 _brm_data_expression_sources(term) =
     _brm_data_expression_sources!(Symbol[], term)
 
+# A BRM DSL term head (`mo`, `me`, `s`, `t2`, `gp`, `hsgp`, `ar`, `mo1`) is a
+# parameter-owning special term, NOT a pure data function: it carries no method
+# that accepts a materialized data value, so broadcasting it as if it were
+# `log`/`*` throws a bare `MethodError` (`mo(::Int64)`). Such a term is never
+# materialisable as a population data column — reuse the canonical `_TERM_HEADS`
+# set so a new special term is covered without editing here too.
+_brm_is_term_head(f) = f isa Function && nameof(f) in _TERM_HEADS
+
 _brm_materialize_data_expression(x::Number) = x
 _brm_materialize_data_expression(x::NamedColumn) = begin
     backing = parent(x)
     backing isa DataColumn ? parent(backing) : nothing
 end
 function _brm_materialize_data_expression(x::ExprColumn)
+    _brm_is_term_head(getf(x)) && return nothing
     isempty(getkwargs(x)) || return nothing
     args = map(_brm_materialize_data_expression, getargs(x))
     any(isnothing, args) && return nothing
