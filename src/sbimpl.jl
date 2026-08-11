@@ -7854,7 +7854,7 @@ _sb_group_row_idx(data, g::Tuple{NamedColumn,NamedColumn}) = _sb_ensure_group_da
 _sb_group_row_idx(_data, _g) = nothing
 
 _sb_any_data_symbol(data, target=nothing) = begin
-    isempty(data) && error("sbimpl: can't emit `rep_vector(1., n)` — no data column seen yet. Make sure an observed `~` comes before the intercept-only predictor, or add a concrete covariate.")
+    isempty(data) && error("sbimpl: can't emit `rep_vector(1., n)` — no data column seen yet. Make sure an observed `~` comes before the intercept-only predictor, or, if it is a single constant, declare it directly as a scalar parameter with its own prior (`x ~ <distribution>`).")
     # Prefer a flat length-N vector (numeric / integer) so `num_elements(...)` in
     # Stan resolves to an int. Skip ragged `Vector{<:AbstractVector}` layouts
     # (bruno-ext's `dose_times`) which StanBlocks serializes as a
@@ -7894,10 +7894,11 @@ _sb_any_data_symbol(data, target=nothing) = begin
             "size the intercept from, and this model spans SEVERAL row axes, with ",
             "candidate lengths $frames. Picking one would be a guess that stanc accepts ",
             "and that then fails as a dimension error on every log-density evaluation. ",
-            "Say which frame the predictor lives on by naming any column from it: a ",
-            "covariate (continuous or categorical) is enough — ",
-            "`$(isnothing(target) ? "loc" : target) ~ 1 + <column>` — or a group term ",
-            "`(1 | <group>)` if the frame has no natural covariate.")
+            "An intercept-only predictor is a single constant, so the clearest fix is to ",
+            "declare it directly as a scalar parameter with its own prior — ",
+            "`$(isnothing(target) ? "loc" : target) ~ <distribution>` (e.g. `Normal(0, 1)`) — ",
+            "which broadcasts wherever it is used and needs no row axis. If it is instead ",
+            "meant to vary across a frame, name a column from that frame so its length is known.")
     end
     isnothing(first_hit) || return first_hit
     first(k for k in keys(data) if k !== _SB_PREPROC_KEY)
