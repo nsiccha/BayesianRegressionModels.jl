@@ -1,5 +1,20 @@
 using Documenter, DocumenterVitepress, BayesianRegressionModels
 
+include("backend_comparisons.jl")
+
+const GENERATED_EXAMPLE_PAGES = [
+    joinpath(@__DIR__, "src", "index.md"),
+    joinpath(@__DIR__, "src", "formula-terms.md"),
+    joinpath(@__DIR__, "src", "likelihoods.md"),
+    joinpath(@__DIR__, "src", "feature-atlas.md"),
+]
+const DOCS_MARKDOWN_PAGES = filter(
+    path -> endswith(path, ".md"),
+    readdir(joinpath(@__DIR__, "src"); join=true),
+)
+BRMDocsComparisons.validate_generated_templates(GENERATED_EXAMPLE_PAGES)
+BRMDocsComparisons.validate_no_bypasses(DOCS_MARKDOWN_PAGES)
+
 # The docs have one publication home. Keep the target literal: Documenter's
 # GitHub Actions deploy criterion requires the workflow repository to match
 # `repo`, and the CI-equivalent docs wrapper validates the same static target.
@@ -30,7 +45,7 @@ makedocs(
         "Home" => "index.md",
         "Formula terms" => "formula-terms.md",
         "Likelihoods" => "likelihoods.md",
-        "Backend lowering" => "backend-lowering.md",
+        "Feature atlas" => "feature-atlas.md",
         "Turing backend" => "turing-backend.md",
         "Gallery" => "gallery.md",
         "Complete-PLATE blueprint" => "plate-building-blocks.md",
