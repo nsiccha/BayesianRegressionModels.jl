@@ -3,7 +3,7 @@
 `TuringBRMI` is the direct-BRMI Turing backend. Loading Turing activates the
 package extension:
 
-```@example turing-backend
+```julia
 using BayesianRegressionModels, Turing
 
 gaussian_brmi = (@brm begin
@@ -31,7 +31,7 @@ chain = sample(gaussian.model, NUTS(), 1_000)
 The same direct-BRMI path covers the currently supported binary and count
 GLMs—there is no intermediate Stan or SLIC model:
 
-```@example turing-backend
+```julia
 binary = TuringBRMI((@brm begin
     eta ~ 1 + x
     y ~ BernoulliLogit(eta)
