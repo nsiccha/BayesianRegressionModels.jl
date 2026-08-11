@@ -1082,6 +1082,171 @@ _brm_emitted_coordinates(output::BRMOutput, constrained_names) = begin
         if string(name) == stem || startswith(string(name), prefix)]
 end
 
+# Public term labels are derived forwards from the formula term with the same
+# rules as `_sb_predictor_term!` (`sbimpl.jl`), while their configurable
+# parameter vocabulary is the same closed set the term-prior emitter owns. The
+# binding names below are used only to validate the declaration-owned output,
+# never exposed as a consumer address.
+_brm_term_label(::typeof(mo), t) =
+    Symbol(:mo_, name(_sb_named_inner(:mo, only(getargs(t)))))
+_brm_term_label(::typeof(mo1), t) =
+    Symbol(:mo1_, name(_sb_named_inner(:mo1, only(getargs(t)))))
+function _brm_term_label(::typeof(hsgp), t)
+    axes = Tuple(name(_sb_named_inner(:hsgp, a)) for a in getargs(t))
+    suffix = join(string.(axes), "_")
+    kw = getkwargs(t)
+    haskey(kw, :by) || return Symbol(:hsgp_, suffix)
+    group = _as_named_column(kw.by)
+    isnothing(group) && error(
+        "brm_descriptor: `hsgp(...; by=...)` group is not a named column.")
+    Symbol(:hsgp_, suffix, :_by_, name(group))
+end
+_brm_term_label(f, t) = _sb_term_key(t)
+
+_brm_term_parameter_bindings(::typeof(mo), _t) =
+    (; simplex=:simplex_incr)
+_brm_term_parameter_bindings(::typeof(mo1), _t) =
+    (; simplex=:simplex_incr)
+function _brm_term_parameter_bindings(::typeof(hsgp), t)
+    rho = _sb_gp_iso(getkwargs(t), :hsgp) ? :rho_iso : :rho
+    haskey(getkwargs(t), :by) && return (; length_scale=rho, sd=:sigma)
+    (; length_scale=rho, sd=:sigma, basis_weights=:beta_raw)
+end
+_brm_term_parameter_bindings(_f, _t) = NamedTuple()
+
+function _brm_term_coordinate_entries(brmi, logical::Symbol)
+    predictors = [lp for lp in linear_predictors(brmi) if lp.name === logical]
+    length(predictors) == 1 || return NamedTuple[]
+    link = only(predictors).link_lhs_fn
+    entries = NamedTuple[]
+    for terms in values(_sb_term_address_map(brmi, logical)), t in terms
+        push!(entries, (; term=_brm_term_label(getf(t), t), value=t, link))
+    end
+    entries
+end
+
+_brm_resolved_dimension(plan, x::Integer) = Int(x)
+_brm_resolved_dimension(plan, x::Symbol) = begin
+    value = get(plan.data, x, nothing)
+    value isa Integer ? Int(value) : nothing
+end
+_brm_resolved_dimension(_plan, _x) = nothing
+
+function _brm_output_coordinate_count(plan, output::BRMOutput)
+    isempty(output.size) && return 1
+    dims = [_brm_resolved_dimension(plan, x) for x in output.size]
+    any(isnothing, dims) && return nothing
+    prod(dims)
+end
+
+_brm_term_coordinate_count(_f, _t, _parameter, plan, output) =
+    _brm_output_coordinate_count(plan, output)
+_brm_term_coordinate_count(::typeof(hsgp), t, ::Val{:length_scale}, _plan, _output) =
+    _sb_gp_iso(getkwargs(t), :hsgp) ? 1 : length(getargs(t))
+_brm_term_coordinate_count(::typeof(hsgp), _t, ::Val{:sd}, _plan, _output) = 1
+function _brm_term_coordinate_count(::typeof(hsgp), t,
+                                    ::Val{:basis_weights}, _plan, _output)
+    K, _ = _sb_hsgp_options(getkwargs(t), length(getargs(t)))
+    prod(K)
+end
+
+"""
+    brm_term_coordinates(d::BRMDescriptor, logical::Symbol, constrained_names;
+                         term::Symbol, parameter::Symbol)
+
+Resolve one formula term's internal sampled parameter to its exact constrained
+posterior coordinates. `logical` names the linear predictor and `term` is the
+public term-output label BRM derives from the formula (for example
+`:mo_op_diet` or `:hsgp_op_log_dose`). Supported parameter roles are:
+
+| term | `parameter` |
+| --- | --- |
+| `mo(...)` / `mo1(...)` | `:simplex` |
+| ungrouped `hsgp(...)` | `:length_scale`, `:sd`, `:basis_weights` |
+| grouped `hsgp(...; by=...)` | `:length_scale`, `:sd` |
+
+The returned named tuple contains `logical`, `term`, `parameter`, the owning
+[`BRMOutput`](@ref), `coordinates`, and the formula LHS `link` / `inverse_link`.
+For example:
+
+```julia
+brm_term_coordinates(d, :log_F, constrained_names;
+                     term=:mo_op_diet, parameter=:simplex)
+brm_term_coordinates(d, :log_F, constrained_names;
+                     term=:hsgp_op_log_dose, parameter=:basis_weights)
+```
+
+Resolution follows the formula term to its logical term output, then selects a
+parameter owned by that declaration. Consumers never construct or parse the
+compiler-owned carrier name. Missing or duplicate predictors/terms/owners,
+unsupported parameter roles, and descriptor/artifact coordinate drift all
+error rather than selecting by descriptor order.
+"""
+function brm_term_coordinates(d::BRMDescriptor, logical::Symbol,
+                              constrained_names;
+                              term::Symbol, parameter::Symbol)
+    predictors = [lp for lp in linear_predictors(d.plan.parent)
+                  if lp.name === logical]
+    length(predictors) == 1 || error(
+        "brm_descriptor: logical predictor `$logical` resolves to " *
+        "$(length(predictors)) formula declarations; expected exactly one " *
+        "public term-parameter address.")
+
+    all_entries = _brm_term_coordinate_entries(d.plan.parent, logical)
+    entries = [e for e in all_entries if e.term === term]
+    length(entries) == 1 || error(
+        "brm_descriptor: term `$term` occurs $(length(entries)) times on logical " *
+        "predictor `$logical`; available term labels are " *
+        "$(Tuple(sort!(unique(e.term for e in all_entries), by=string))).")
+    entry = only(entries)
+
+    owners = BRMOutput[
+        o for o in d.outputs
+        if o.logical === term && !isnothing(o.declaration)
+    ]
+    length(owners) == 1 || error(
+        "brm_descriptor: term `$term` on logical predictor `$logical` has " *
+        "$(length(owners)) logical output owners; expected exactly one.")
+    owner = only(owners).declaration
+
+    bindings = _brm_term_parameter_bindings(getf(entry.value), entry.value)
+    haskey(bindings, parameter) || error(
+        "brm_descriptor: term `$term` on logical predictor `$logical` exposes " *
+        "no parameter role `$parameter`; available roles are $(keys(bindings)).")
+    binding = getproperty(bindings, parameter)
+    expected = Symbol(_brm_stan_name(owner), :_, binding)
+    outputs = BRMOutput[
+        o for o in d.outputs
+        if o.kind === :parameter && !isnothing(o.declaration) &&
+           o.declaration.target === owner.target && o.name === expected
+    ]
+    length(outputs) == 1 || error(
+        "brm_descriptor: term `$term` on logical predictor `$logical` resolves " *
+        "parameter role `$parameter` to $(length(outputs)) declaration-owned " *
+        "posterior carriers; expected exactly one. Re-reflect the model that " *
+        "produced the posterior draws.")
+    output = only(outputs)
+
+    coordinates = _brm_emitted_coordinates(output, constrained_names)
+    expected_count = _brm_term_coordinate_count(
+        getf(entry.value), entry.value, Val(parameter), d.plan, output)
+    if isnothing(expected_count)
+        isempty(coordinates) && error(
+            "brm_descriptor: term `$term` parameter role `$parameter` resolves " *
+            "to emitted `$(output.name)`, but that carrier is absent from the " *
+            "supplied constrained names. Re-reflect the model that produced " *
+            "the posterior draws.")
+    elseif length(coordinates) != expected_count
+        error("brm_descriptor: term `$term` parameter role `$parameter` owns " *
+              "$expected_count constrained coordinates but resolves to " *
+              "$(length(coordinates)). Re-reflect the model that produced the " *
+              "posterior draws.")
+    end
+
+    (; logical, term, parameter, output, coordinates,
+       link=entry.link, inverse_link=InverseFunctions.inverse(entry.link))
+end
+
 """
     brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
                                       constrained_names;
