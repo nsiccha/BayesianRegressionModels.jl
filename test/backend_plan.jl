@@ -223,6 +223,56 @@ end
 end
 
 
+@testset "backend-neutral categorical interactions" begin
+    df = (;
+        x=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        g=[1, 2, 3, 1, 2, 3],
+        h=[1, 1, 2, 2, 1, 2],
+        y=zeros(6),
+    )
+    brmi = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x & g + g & h
+        effect(mu, int_x_x_g_lvl_2) ~ Normal(0.5, 0.25)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    context = BRM._brm_backend_context(brmi)
+    _, rhs = getargs(linear_predictor_op(brmi, :mu), 2)
+    design = BRM._brm_simple_population_design(
+        :mu, rhs, context.data, context.target_obs[:mu]; required=true)
+    expected_labels = (
+        :Intercept,
+        :int_x_x_g_lvl_2,
+        :int_x_x_g_lvl_3,
+        :int_g_lvl_2_x_h_lvl_2,
+        :int_g_lvl_3_x_h_lvl_2,
+    )
+    expected = hcat(
+        ones(6),
+        df.x .* (df.g .== 2),
+        df.x .* (df.g .== 3),
+        (df.g .== 2) .* (df.h .== 2),
+        (df.g .== 3) .* (df.h .== 2),
+    )
+    @test Tuple(c.label for c in design.columns) == expected_labels
+    @test design.matrix == expected
+
+    sb = SBBRMI(brmi)
+    @test sb.data[:int_x_x_g_lvl_2] == expected[:, 2]
+    @test sb.data[:int_g_lvl_3_x_h_lvl_2] == expected[:, 5]
+    @test sb.preproc[:g_lvl_2].kind === :population_factor_dummy
+    @test sb.preproc[:int_x_x_g_lvl_2].kind === :interaction
+
+    future = (;
+        x=[10.0, 20.0, 30.0], g=[3, 2, 1], h=[2, 1, 2], y=zeros(3))
+    replay = reprocess(sb, future)
+    @test replay.data[:int_x_x_g_lvl_2] ==
+          future.x .* (future.g .== 2)
+    @test replay.data[:int_g_lvl_3_x_h_lvl_2] ==
+          (future.g .== 3) .* (future.h .== 2)
+end
+
+
 @testset "backend-neutral population effect-prior plan" begin
     df = (; x=[-1.0, 0.0, 1.0], y=[0.1, 0.2, 0.3])
     brmi = (@brm begin

@@ -322,13 +322,18 @@ _brm_population_columns(term) = let column = _brm_population_column(term)
     isnothing(column) ? nothing : (column,)
 end
 
-function _brm_population_columns(term::ExprColumn{typeof(&)})
-    args = getargs(term)
-    length(args) == 2 || return nothing
-    left = _brm_population_column(args[1])
-    right = _brm_population_column(args[2])
-    (isnothing(left) || isnothing(right) ||
-     isnothing(left.source) || isnothing(right.source)) && return nothing
+_brm_population_column_is_categorical(column) =
+    !isnothing(column.preprocess) &&
+    column.preprocess.kind === :population_factor_dummy
+
+function _brm_interaction_population_column(left, right)
+    left_cat = _brm_population_column_is_categorical(left)
+    right_cat = _brm_population_column_is_categorical(right)
+    # StanBlocks names mixed interactions with the continuous operand first,
+    # independent of surface order. Preserve that exact public effect address.
+    if left_cat && !right_cat
+        return _brm_interaction_population_column(right, left)
+    end
     length(left.values) == length(right.values) || error(
         "BRM backend lowering: interaction `$(left.label) & $(right.label)` " *
         "mixes row axes of lengths $(length(left.values)) and " *
@@ -340,8 +345,20 @@ function _brm_population_columns(term::ExprColumn{typeof(&)})
                          if !isnothing(c.preprocess))
     preprocess = _BRMPopulationPreprocess(
         :interaction, nothing, (left.label, right.label), dependencies)
-    ((; label, effect_addresses=(label,), effect_block=label,
-       source=left.source, values, preprocess),)
+    (; label, effect_addresses=(label,), effect_block=label,
+       source=left.source, values, preprocess)
+end
+
+function _brm_population_columns(term::ExprColumn{typeof(&)})
+    args = getargs(term)
+    length(args) == 2 || return nothing
+    left = _brm_population_columns(args[1])
+    right = _brm_population_columns(args[2])
+    (isnothing(left) || isnothing(right) ||
+     any(c -> isnothing(c.source), left) ||
+     any(c -> isnothing(c.source), right)) && return nothing
+    Tuple(_brm_interaction_population_column(l, r)
+          for l in left for r in right)
 end
 
 """

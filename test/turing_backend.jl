@@ -196,6 +196,48 @@ end
     end
 end
 
+@testset "Turing extension — categorical interactions" begin
+    df = (;
+        x=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        g=[1, 2, 3, 1, 2, 3],
+        h=[1, 1, 2, 2, 1, 2],
+        y=[0.2, 1.1, -0.4, 0.7, 1.4, -0.8],
+    )
+    brmi = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x & g + g & h
+        effect(mu, int_x_x_g_lvl_2) ~ Normal(0.5, 0.25)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    backend = TuringBRMI(brmi)
+    expected_X = hcat(
+        ones(6),
+        df.x .* (df.g .== 2),
+        df.x .* (df.g .== 3),
+        (df.g .== 2) .* (df.h .== 2),
+        (df.g .== 3) .* (df.h .== 2),
+    )
+    @test backend.plan.design.matrix == expected_X
+    @test Tuple(c.label for c in backend.plan.design.columns) == (
+        :Intercept,
+        :int_x_x_g_lvl_2,
+        :int_x_x_g_lvl_3,
+        :int_g_lvl_2_x_h_lvl_2,
+        :int_g_lvl_3_x_h_lvl_2,
+    )
+    @test backend.plan.beta_location == [0.0, 0.5, 0.0, 0.0, 0.0]
+    @test backend.plan.beta_scale == [1.0, 0.25, 1.0, 1.0, 1.0]
+
+    params = (; beta_pop=[0.25, -0.5, 0.4, 0.2, -0.1], sigma=0.8)
+    mu = expected_X * params.beta_pop
+    prior = sum(logpdf.(Normal.(backend.plan.beta_location,
+                               backend.plan.beta_scale), params.beta_pop)) +
+            logpdf(Exponential(2), params.sigma)
+    likelihood = sum(logpdf.(Normal.(mu, params.sigma), df.y))
+    @test Turing.logjoint(backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+end
+
 @testset "Turing extension — population effect-prior overrides" begin
     df = (; x=[-1.0, 0.5, 2.0], y=[0.2, 1.1, -0.4])
     brmi = (@brm begin

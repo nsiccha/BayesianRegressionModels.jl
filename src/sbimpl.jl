@@ -3216,6 +3216,32 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             "($(length(left)) vs $(length(right)))")
         new_data[key] = collect(Float64, left .* right)
         new_preproc[key] = e
+    elseif e.kind === :population_factor_dummy
+        raw = _sb_df_column(df, e.raw_ref)
+        raw isa AbstractVector || error(
+            "sbimpl: reprocess: categorical population predictor " *
+            "`$(e.raw_ref)` must be a vector, got $(typeof(raw))")
+        ref = e.const_.ref
+        recoded = if ref == 1
+            raw
+        else
+            raw isa AbstractVector{<:Integer} || error(
+                "sbimpl: reprocess: `factor($(e.raw_ref); ref=$ref)` requires " *
+                "integer-coded categorical data")
+            Int[value == ref ? 1 : value == 1 ? ref : value for value in raw]
+        end
+        levels = freeze ? e.const_.levels : _sb_fit_levels(recoded)
+        length(levels) == e.const_.n_levels || error(
+            "sbimpl: reprocess: categorical population predictor " *
+            "`$(e.raw_ref)` has $(length(levels)) levels, but the fitted " *
+            "interaction design has $(e.const_.n_levels). Preserve the fitted " *
+            "level count or rebuild the model.")
+        idx = _sb_apply_levels(levels, recoded)
+        new_data[key] = Float64[i == e.const_.level ? 1.0 : 0.0 for i in idx]
+        new_preproc[key] = PreprocEntry(
+            :population_factor_dummy,
+            (; levels, level=e.const_.level, n_levels=e.const_.n_levels, ref),
+            e.raw_ref, true)
     elseif e.kind === :group_index
         raw = _sb_df_column(df, e.raw_ref)
         raw isa AbstractVector || error(
