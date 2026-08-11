@@ -500,7 +500,8 @@ function _brm_materialize_interval_response(
 end
 
 function _brm_backend_context(brmi::BRMI;
-                              data::AbstractDict=Dict{Symbol,Any}())
+                              data::AbstractDict=Dict{Symbol,Any}(),
+                              retain_mm_sources::Bool=false)
     prepass = Dict{Symbol,Any}()
     for op in values(brmi.operations)
         _brm_visit_op!(prepass, op)
@@ -514,7 +515,7 @@ function _brm_backend_context(brmi::BRMI;
         _brm_collect_mm_sources!(mm_sources, payload)
         _brm_collect_non_mm_sources!(non_mm_sources, payload)
     end
-    union!(skip_data, setdiff(mm_sources, non_mm_sources))
+    retain_mm_sources || union!(skip_data, setdiff(mm_sources, non_mm_sources))
     prepass[:skip_data] = skip_data
 
     for op in values(brmi.operations)
@@ -664,6 +665,136 @@ function _brm_replay_population_design(
         Tuple(fixed_terms), fixed)
 end
 
+_brm_mm_group_names(term::MultiMembershipTerm) =
+    Tuple(name(group) for group in getargs(term))
+_brm_mm_weight_names(term::MultiMembershipTerm) = begin
+    weights = getfield(term, :weights)
+    isnothing(weights) ? nothing : Tuple(name(weight) for weight in weights)
+end
+function _brm_mm_suffix(term::MultiMembershipTerm)
+    groups = join(String.(_brm_mm_group_names(term)), "__")
+    weights = _brm_mm_weight_names(term)
+    weighted = isnothing(weights) ? "" : "__w__$(join(String.(weights), "__"))"
+    raw = getfield(term, :normalize) ? "" : "__raw"
+    Symbol("mm__", groups, weighted, raw)
+end
+
+_brm_mm_values(raw::CA.CategoricalVector) = CA.unwrap.(raw)
+_brm_mm_values(raw::AbstractVector) = raw
+_brm_mm_level_pool(raw::CA.CategoricalVector) = collect(CA.levels(raw))
+_brm_mm_level_pool(raw::AbstractVector) = collect(unique(raw))
+
+function _brm_mm_fit_levels(raw_groups; prefix="BRM backend lowering")
+    pooled = Any[]
+    for raw in raw_groups
+        append!(pooled, _brm_mm_level_pool(raw))
+    end
+    unique!(pooled)
+    try
+        sort!(pooled)
+    catch
+        error("$prefix: `mm(...)` grouping levels must be mutually orderable " *
+              "so one shared level index can be fitted (got $(repr(pooled)))")
+    end
+    pooled
+end
+
+function _brm_prepare_mm(raw_groups::Tuple, raw_weights, normalize::Bool;
+                         levels=nothing,
+                         group_names=ntuple(i -> Symbol(:group_, i),
+                                            length(raw_groups)),
+                         weight_names=nothing,
+                         prefix="BRM backend lowering")
+    n_memberships = length(raw_groups)
+    n_memberships >= 2 || error(
+        "$prefix: internal — multi-membership preprocessing received " *
+        "$n_memberships groups")
+    all(group -> group isa AbstractVector, raw_groups) || error(
+        "$prefix: every `mm(...)` group must resolve to a vector column")
+    n_obs = length(first(raw_groups))
+    group_values = map(_brm_mm_values, raw_groups)
+    for membership in 1:n_memberships
+        values = group_values[membership]
+        length(values) == n_obs || error(
+            "$prefix: `mm(...)` group column `$(group_names[membership])` " *
+            "has $(length(values)) rows; expected $n_obs to match " *
+            "`$(group_names[1])`")
+        missing_row = findfirst(ismissing, values)
+        isnothing(missing_row) || error(
+            "$prefix: `mm(...)` group column `$(group_names[membership])` " *
+            "is missing at row $missing_row")
+    end
+
+    fitted_levels = isnothing(levels) ?
+        _brm_mm_fit_levels(raw_groups; prefix) : collect(levels)
+    isempty(fitted_levels) && error(
+        "$prefix: `mm(...)` grouping columns contain no levels")
+    level_map = Dict(level => index
+                     for (index, level) in enumerate(fitted_levels))
+    group_idx = Vector{Int}(undef, n_obs * n_memberships)
+    for observation in 1:n_obs, membership in 1:n_memberships
+        level = group_values[membership][observation]
+        haskey(level_map, level) || error(
+            "$prefix: replay: `mm(...)` group column " *
+            "`$(group_names[membership])` has unseen level `$(level)` at row " *
+            "$observation (training levels: $(fitted_levels)). Re-fit with " *
+            "`freeze_constants=false` or resample every membership column " *
+            "to derive a new shared level set.")
+        group_idx[(observation - 1) * n_memberships + membership] =
+            level_map[level]
+    end
+
+    weights = Vector{Float64}(undef, n_obs * n_memberships)
+    if isnothing(raw_weights)
+        fill!(weights, inv(Float64(n_memberships)))
+    else
+        length(raw_weights) == n_memberships || error(
+            "$prefix: internal — `mm(...)` has $n_memberships groups but " *
+            "$(length(raw_weights)) weights")
+        names = isnothing(weight_names) ?
+            ntuple(i -> Symbol(:weight_, i), n_memberships) : weight_names
+        for membership in 1:n_memberships
+            values = raw_weights[membership]
+            values isa AbstractVector || error(
+                "$prefix: `mm(...)` weight `$(names[membership])` must " *
+                "resolve to a vector column")
+            length(values) == n_obs || error(
+                "$prefix: `mm(...)` weight column `$(names[membership])` " *
+                "has $(length(values)) rows; expected $n_obs")
+            for observation in 1:n_obs
+                value = values[observation]
+                value isa Real || error(
+                    "$prefix: `mm(...)` weight `$(names[membership])` at row " *
+                    "$observation must be real; got $(repr(value))")
+                isfinite(value) || error(
+                    "$prefix: `mm(...)` weight `$(names[membership])` at row " *
+                    "$observation must be finite; got $(repr(value))")
+                value >= 0 || error(
+                    "$prefix: `mm(...)` weight `$(names[membership])` at row " *
+                    "$observation must be nonnegative; got $(repr(value))")
+                converted = Float64(value)
+                isfinite(converted) || error(
+                    "$prefix: `mm(...)` weight `$(names[membership])` at row " *
+                    "$observation cannot be represented as finite Float64")
+                weights[(observation - 1) * n_memberships + membership] =
+                    converted
+            end
+        end
+        for observation in 1:n_obs
+            row = ((observation - 1) * n_memberships + 1):(observation * n_memberships)
+            total = sum(@view weights[row])
+            isfinite(total) || error(
+                "$prefix: `mm(...)` weights have a non-finite total at row " *
+                "$observation")
+            total > 0 || error(
+                "$prefix: `mm(...)` weights must have a positive total at " *
+                "row $observation")
+            normalize && (@views weights[row] ./= total)
+        end
+    end
+    (; levels=fitted_levels, group_idx, weights, n_obs, n_memberships)
+end
+
 struct _BRMRandomEffectPlan{L<:AbstractVector,I<:AbstractVector{Int},
                             S<:AbstractVector,
                             C<:Tuple,M<:AbstractMatrix,
@@ -685,6 +816,34 @@ struct _BRMRandomEffectPlan{L<:AbstractVector,I<:AbstractVector{Int},
     sd_family::SF
     sd_rate::SR
     lkj_eta::Float64
+end
+
+struct _BRMMultiMembershipPlan{L<:AbstractVector,I<:AbstractVector{Int},
+                               C<:Tuple,M<:AbstractMatrix,
+                               W<:AbstractVector{Float64}}
+    predictor::Symbol
+    id::Nothing
+    group::Symbol
+    by::Nothing
+    levels::L
+    strata::Vector{Any}
+    indices::I
+    stratum_indices::Vector{Int}
+    group_strata::Vector{Int}
+    columns::C
+    matrix::M
+    intercept_only::Bool
+    zero_correlation::Bool
+    centered::Bool
+    sd_family::Vector{Int}
+    sd_rate::Vector{Float64}
+    lkj_eta::Float64
+    groups::Tuple
+    weight_sources::Union{Nothing,Tuple}
+    weights::W
+    n_obs::Int
+    n_memberships::Int
+    normalize::Bool
 end
 
 function _brm_replay_random_effect_plan(
@@ -745,6 +904,36 @@ function _brm_replay_random_effect_plan(
         group_strata, Tuple(columns), matrix, training.intercept_only,
         training.zero_correlation, training.centered, training.sd_family,
         training.sd_rate, training.lkj_eta)
+end
+
+function _brm_replay_random_effect_plan(
+        training::_BRMMultiMembershipPlan, context::_BRMBackendContext)
+    raw_groups = Tuple(context.data[group] for group in training.groups)
+    raw_weights = isnothing(training.weight_sources) ? nothing :
+        Tuple(context.data[weight] for weight in training.weight_sources)
+    prepared = _brm_prepare_mm(
+        raw_groups, raw_weights, training.normalize;
+        levels=training.levels, group_names=training.groups,
+        weight_names=training.weight_sources, prefix="BRM replay")
+    cache = Dict{Symbol,Vector{Float64}}()
+    columns = map(training.columns) do column
+        values = _brm_replay_population_column(column, context.data, cache)
+        isnothing(values) && (values = ones(Float64, prepared.n_obs))
+        length(values) == prepared.n_obs || error(
+            "BRM replay: random-effect column `$(column.label)` and " *
+            "multi-membership rows have different row counts")
+        _BRMPopulationColumn(
+            column.label, column.effect_addresses, column.effect_block,
+            column.source, values, column.preprocess)
+    end
+    matrix = hcat((column.values for column in columns)...)
+    _BRMMultiMembershipPlan(
+        training.predictor, nothing, training.group, nothing,
+        training.levels, Any[], prepared.group_idx, Int[], Int[],
+        Tuple(columns), matrix, training.intercept_only, false, false,
+        training.sd_family, training.sd_rate, training.lkj_eta,
+        training.groups, training.weight_sources, prepared.weights,
+        prepared.n_obs, prepared.n_memberships, training.normalize)
 end
 
 _brm_replay_random_effect_plans(training::Tuple, context::_BRMBackendContext) =
@@ -828,8 +1017,8 @@ function _brm_simple_random_effect_plans(
     isnothing(op) && return ()
     _, rhs = getargs(op, 2)
     grouped = filter(_brm_is_grouped_term, _brm_additive_terms(rhs))
-    plans = _BRMRandomEffectPlan[]
-    seen = Set{Tuple{Union{Nothing,Symbol},Symbol,Union{Nothing,Symbol}}}()
+    plans = ()
+    seen = Set{Any}()
     for term in grouped
         args = getargs(term)
         if length(args) ∉ (2, 3)
@@ -849,60 +1038,101 @@ function _brm_simple_random_effect_plans(
                 "symbol; got `$(repr(explicit_id))`")
             return nothing
         end
-        descriptor = try
-            _brm_random_effect_group(group_raw)
-        catch exception
-            required && rethrow(exception)
-            return nothing
-        end
-        if !isnothing(explicit_id) && !isnothing(descriptor.id)
-            required && error(
-                "BRM backend lowering: `(effects | ID | group)` cannot also " *
-                "carry `gr(...; id=...)`")
-            return nothing
-        end
-        id = isnothing(explicit_id) ? descriptor.id : explicit_id
-        if zero_correlation && !isnothing(id)
-            required && error(
-                "BRM backend lowering: shared `(effects | ID | group)` " *
-                "blocks are correlated; `||` cannot carry an ID")
-            return nothing
-        end
-        group = name(descriptor.group)
-        by = isnothing(descriptor.by) ? nothing : name(descriptor.by)
-        zero_correlation && !isnothing(by) && error(
-            "BRM backend lowering: zero-correlation `||` is not supported " *
-            "for stratified `gr($group, by=$by)` blocks")
-        key = (id, group, by)
-        key in seen && error(
-            "BRM backend lowering: predictor `$target` repeats random-effect " *
-            "block $(isnothing(id) ? "" : "ID `$id`, ")group `$group`")
-        push!(seen, key)
-        raw = context.data[group]
-        raw isa AbstractVector || error(
-            "BRM backend lowering: grouping column `$group` must be a vector")
-        levels = collect(_brm_fit_levels(raw))
-        n_levels, indices = _brm_level_index(raw)
-        length(levels) == n_levels || error(
-            "BRM backend lowering: inconsistent fitted levels for group `$group`")
-        strata = Any[]
-        stratum_indices = Int[]
-        group_strata = Int[]
-        if !isnothing(by)
-            raw_strata = context.data[by]
-            raw_strata isa AbstractVector || error(
-                "BRM backend lowering: stratum column `$by` must be a vector")
-            length(raw_strata) == length(raw) || error(
-                "BRM backend lowering: group `$group` and stratum `$by` have " *
-                "different row counts")
-            strata = collect(_brm_fit_levels(raw_strata))
-            n_strata, raw_stratum_indices = _brm_level_index(raw_strata)
-            length(strata) == n_strata || error(
+        multi_membership = group_raw isa MultiMembershipTerm
+        prepared_mm = nothing
+        groups = ()
+        weight_sources = nothing
+        normalize = true
+        if multi_membership
+            isnothing(explicit_id) || error(
+                "BRM backend lowering: `mm(...)` cannot carry a shared " *
+                "random-effect ID")
+            zero_correlation && error(
+                "BRM backend lowering: `mm(...)` is one shared correlated " *
+                "membership block and does not support `||`")
+            groups = _brm_mm_group_names(group_raw)
+            weight_sources = _brm_mm_weight_names(group_raw)
+            normalize = getfield(group_raw, :normalize)
+            key = (:mm, groups, weight_sources, normalize)
+            key in seen && error(
+                "BRM backend lowering: predictor `$target` repeats " *
+                "multi-membership block `mm($(join(groups, ", ")))`")
+            push!(seen, key)
+            raw_groups = Tuple(context.data[group_name]
+                               for group_name in groups)
+            raw_weights = isnothing(weight_sources) ? nothing :
+                Tuple(context.data[weight] for weight in weight_sources)
+            prepared_mm = _brm_prepare_mm(
+                raw_groups, raw_weights, normalize;
+                group_names=groups, weight_names=weight_sources)
+            id = nothing
+            group = _brm_mm_suffix(group_raw)
+            by = nothing
+            levels = prepared_mm.levels
+            indices = prepared_mm.group_idx
+            strata = Any[]
+            stratum_indices = Int[]
+            group_strata = Int[]
+        else
+            descriptor = try
+                _brm_random_effect_group(group_raw)
+            catch exception
+                required && rethrow(exception)
+                return nothing
+            end
+            if !isnothing(explicit_id) && !isnothing(descriptor.id)
+                required && error(
+                    "BRM backend lowering: `(effects | ID | group)` cannot " *
+                    "also carry `gr(...; id=...)`")
+                return nothing
+            end
+            id = isnothing(explicit_id) ? descriptor.id : explicit_id
+            if zero_correlation && !isnothing(id)
+                required && error(
+                    "BRM backend lowering: shared `(effects | ID | group)` " *
+                    "blocks are correlated; `||` cannot carry an ID")
+                return nothing
+            end
+            group = name(descriptor.group)
+            by = isnothing(descriptor.by) ? nothing : name(descriptor.by)
+            zero_correlation && !isnothing(by) && error(
+                "BRM backend lowering: zero-correlation `||` is not " *
+                "supported for stratified `gr($group, by=$by)` blocks")
+            key = (id, group, by)
+            key in seen && error(
+                "BRM backend lowering: predictor `$target` repeats " *
+                "random-effect block " *
+                "$(isnothing(id) ? "" : "ID `$id`, ")group `$group`")
+            push!(seen, key)
+            raw = context.data[group]
+            raw isa AbstractVector || error(
+                "BRM backend lowering: grouping column `$group` must be a " *
+                "vector")
+            levels = collect(_brm_fit_levels(raw))
+            n_levels, indices = _brm_level_index(raw)
+            length(levels) == n_levels || error(
                 "BRM backend lowering: inconsistent fitted levels for " *
-                "stratum `$by`")
-            stratum_indices = collect(Int, raw_stratum_indices)
-            group_strata = _brm_group_strata(
-                indices, stratum_indices, n_levels, group, by)
+                "group `$group`")
+            strata = Any[]
+            stratum_indices = Int[]
+            group_strata = Int[]
+            if !isnothing(by)
+                raw_strata = context.data[by]
+                raw_strata isa AbstractVector || error(
+                    "BRM backend lowering: stratum column `$by` must be a " *
+                    "vector")
+                length(raw_strata) == length(raw) || error(
+                    "BRM backend lowering: group `$group` and stratum `$by` " *
+                    "have different row counts")
+                strata = collect(_brm_fit_levels(raw_strata))
+                n_strata, raw_stratum_indices = _brm_level_index(raw_strata)
+                length(strata) == n_strata || error(
+                    "BRM backend lowering: inconsistent fitted levels for " *
+                    "stratum `$by`")
+                stratum_indices = collect(Int, raw_stratum_indices)
+                group_strata = _brm_group_strata(
+                    indices, stratum_indices, n_levels, group, by)
+            end
         end
         raw_columns = Any[]
         for inner_term in _brm_additive_terms(inner)
@@ -921,7 +1151,7 @@ function _brm_simple_random_effect_plans(
         end
         isempty(raw_columns) && error(
             "BRM backend lowering: random-effect term `$(repr(term))` has no columns")
-        n = length(indices)
+        n = multi_membership ? prepared_mm.n_obs : length(indices)
         columns = map(raw_columns) do column
             values = isnothing(column.source) ? ones(Float64, n) : column.values
             length(values) == n || error(
@@ -935,13 +1165,22 @@ function _brm_simple_random_effect_plans(
         intercept_only = length(columns) == 1 &&
                          only(columns).label === :Intercept
         n_terms = length(columns)
-        push!(plans, _BRMRandomEffectPlan(
-            target, id, group, by, levels, strata, indices,
-            stratum_indices, group_strata, Tuple(columns), matrix,
-            intercept_only, zero_correlation, false, zeros(Int, n_terms),
-            ones(Float64, n_terms), 1.0))
+        if multi_membership
+            plans = (plans..., _BRMMultiMembershipPlan(
+                target, nothing, group, nothing, levels, Any[], indices,
+                Int[], Int[], Tuple(columns), matrix, intercept_only, false,
+                false, zeros(Int, n_terms), ones(Float64, n_terms), 1.0,
+                groups, weight_sources, prepared_mm.weights,
+                prepared_mm.n_obs, prepared_mm.n_memberships, normalize))
+        else
+            plans = (plans..., _BRMRandomEffectPlan(
+                target, id, group, by, levels, strata, indices,
+                stratum_indices, group_strata, Tuple(columns), matrix,
+                intercept_only, zero_correlation, false,
+                zeros(Int, n_terms), ones(Float64, n_terms), 1.0))
+        end
     end
-    Tuple(plans)
+    plans
 end
 
 function _brm_population_column(term::Integer)

@@ -156,7 +156,7 @@ end
     ext = Base.get_extension(BRM, :BayesianRegressionModelsTuringExt)
     fixed_parameters = ext._brm_resampled_parameters(resampled, draw.data)
     @test !hasproperty(fixed_parameters, :z_group_flat)
-    @test fixed_parameters.L_group == draw.data.L_group
+    @test Matrix(fixed_parameters.L_group.L) == Matrix(draw.data.L_group.L)
     @test fixed_parameters.tau_group == draw.data.tau_group
     resampled_predictive = turing_posterior_predictive(
         Xoshiro(64), resampled, draw.data)
@@ -2511,7 +2511,7 @@ end
     prior = sum(logpdf.(Normal(), params[Turing.@varname(beta_pop)])) +
             logpdf(Exponential(2), params[Turing.@varname(sigma)]) +
             logpdf(LKJCholesky(2, 1.0), L) +
-            sum(logpdf.(half_normal, tau)) +
+            sum(logpdf.(half_normal, tau)) - length(tau) * log(2.0) +
             logpdf(coefficient_prior, coefficients_flat)
     likelihood = sum(logpdf.(Normal.(mu, params[Turing.@varname(sigma)]),
                                 data.y))
@@ -2649,8 +2649,12 @@ end
 
     @test_throws "names no random-effect block" TuringBRMI(
         parent(backend); centered_groups=:unknown)
+    @test_throws "expects a Symbol or collection of Symbols" TuringBRMI(
+        parent(backend); centered_groups=1)
     @test_throws "Stan artifact-sizing control" TuringBRMI(
         parent(backend); cv_groups=:subject)
+    @test_throws "expects a Symbol or collection of Symbols" TuringBRMI(
+        parent(backend); cv_groups=1)
     @test_throws "compiled Stan unconstrained coordinates" begin
         adaptive_centering_blocks(backend, String[])
     end
@@ -2769,6 +2773,146 @@ end
     shared_draw = rand(Xoshiro(119), shared.model)
     @test shared_draw.data.shared_groups[1].data.strata[1].data.tau isa
           Vector{Float64}
+end
+
+@testset "Turing extension — multi-membership group geometry" begin
+    data = (;
+        g1=["a", "a", "b"],
+        g2=["b", "c", "c"],
+        w1=[2.0, 1.0, 0.0],
+        w2=[1.0, 1.0, 3.0],
+        x=[0.2, -0.1, 0.4],
+        y=[0.1, 0.2, 0.3],
+    )
+    builder = @brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + (1 | mm(g1, g2; weights=(w1, w2)))
+        y ~ Normal(mu, sigma)
+    end
+    backend = TuringBRMI(builder(data))
+    block = only(backend.plan.random_effects)
+    @test block isa BRM._BRMMultiMembershipPlan
+    @test block.groups == (:g1, :g2)
+    @test block.weight_sources == (:w1, :w2)
+    @test block.levels == ["a", "b", "c"]
+    @test block.indices == [1, 2, 1, 3, 2, 3]
+    @test block.weights ≈ [2 / 3, 1 / 3, 1 / 2, 1 / 2, 0, 1]
+    @test (block.n_obs, block.n_memberships) == (3, 2)
+
+    z = [-0.5, 0.75, 1.25]
+    params = Dict(
+        Turing.@varname(beta_pop) => [0.1],
+        Turing.@varname(sigma) => 0.8,
+        Turing.@varname(groups[1].log_scale) => log(0.4),
+        Turing.@varname(groups[1].z) => z,
+    )
+    values = 0.4 .* z
+    group_effect = [
+        2 / 3 * values[1] + 1 / 3 * values[2],
+        1 / 2 * values[1] + 1 / 2 * values[3],
+        values[3],
+    ]
+    mu = fill(0.1, 3) + group_effect
+    prior = logpdf(Normal(), 0.1) + logpdf(Exponential(1), 0.8) +
+            logpdf(Normal(), log(0.4)) + sum(logpdf.(Normal(), z))
+    likelihood = sum(logpdf.(Normal.(mu, 0.8), data.y))
+    returned = Turing.DynamicPPL.returned(backend.model, params)
+    @test Turing.logjoint(backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+    @test Turing.logprior(backend.model, params) ≈ prior atol=1e-12 rtol=1e-12
+    @test returned.groups[1].values ≈ values
+    @test returned.groups[1].effect ≈ group_effect
+    @test returned.group_effect ≈ group_effect
+
+    raw_backend = TuringBRMI((@brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + (1 | mm(g1, g2; weights=(w1, w2), normalize=false))
+        y ~ Normal(mu, sigma)
+    end)(data))
+    @test only(raw_backend.plan.random_effects).weights ==
+          [2, 1, 1, 1, 0, 3]
+    equal_backend = TuringBRMI((@brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + (1 | mm(g1, g2))
+        y ~ Normal(mu, sigma)
+    end)(data))
+    @test only(equal_backend.plan.random_effects).weights == fill(0.5, 6)
+
+    slope_backend = TuringBRMI((@brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 + x | mm(g1, g2; weights=(w1, w2)))
+        y ~ Normal(mu, sigma)
+    end)(data))
+    slope_block = only(slope_backend.plan.random_effects)
+    L = cholesky(Symmetric(Matrix{Float64}(I, 2, 2)))
+    tau = [0.4, 0.7]
+    z_flat = [-0.5, 0.2, 0.75, -0.3, 1.25, 0.4]
+    slope_params = Dict(
+        Turing.@varname(beta_pop) => [0.1, 0.25],
+        Turing.@varname(sigma) => 0.8,
+        Turing.@varname(groups[1].L) => L,
+        Turing.@varname(groups[1].tau) => tau,
+        Turing.@varname(groups[1].z_flat) => z_flat,
+    )
+    coefficients = transpose(Diagonal(tau) * Matrix(L.L) *
+                             reshape(z_flat, 2, 3))
+    slope_effect = [sum(1:2) do membership
+        flat = (observation - 1) * 2 + membership
+        slope_block.weights[flat] * sum(
+            slope_block.matrix[observation, :] .*
+            coefficients[slope_block.indices[flat], :])
+    end for observation in 1:3]
+    slope_mu = slope_backend.plan.design.matrix *
+               slope_params[Turing.@varname(beta_pop)] + slope_effect
+    half_normal = truncated(Normal(), 0.0, Inf)
+    slope_prior = sum(logpdf.(Normal(),
+                      slope_params[Turing.@varname(beta_pop)])) +
+                  logpdf(Exponential(1), 0.8) +
+                  logpdf(LKJCholesky(2, 1.0), L) +
+                  sum(logpdf.(half_normal, tau)) - length(tau) * log(2.0) +
+                  sum(logpdf.(Normal(), z_flat))
+    slope_likelihood = sum(logpdf.(Normal.(slope_mu, 0.8), data.y))
+    slope_returned = Turing.DynamicPPL.returned(
+        slope_backend.model, slope_params)
+    @test Turing.logjoint(slope_backend.model, slope_params) ≈
+          slope_prior + slope_likelihood atol=1e-12 rtol=1e-12
+    @test slope_returned.groups[1].coefficients ≈ coefficients
+    @test slope_returned.groups[1].effect ≈ slope_effect
+
+    changed = merge(data, (; w1=[9.0, 1.0, 1.0],
+                            w2=[1.0, 3.0, 1.0]))
+    replayed = reprocess(backend, changed)
+    @test only(replayed.plan.random_effects).levels == block.levels
+    @test only(replayed.plan.random_effects).weights ≈
+          [0.9, 0.1, 0.25, 0.75, 0.5, 0.5]
+    @test_throws "unseen level" reprocess(
+        backend, merge(data, (; g2=["b", "c", "new"])))
+
+    future = merge(data, (;
+        g1=["na", "na", "nb"], g2=["nb", "nc", "nc"]))
+    resampled = reprocess(
+        backend, future; resample_groups=(:g1, :g2))
+    @test only(resampled.plan.random_effects).levels == ["na", "nb", "nc"]
+    ext = Base.get_extension(BRM, :BayesianRegressionModelsTuringExt)
+    replay_parameters = ext._brm_resampled_parameters(resampled, params)
+    replay_names = Set(string(variable) for variable in keys(replay_parameters))
+    @test "groups[1].z" ∉ replay_names
+    @test "groups[1].log_scale" in replay_names
+    @test_throws "must be resampled as one shared population" reprocess(
+        backend, future; resample_groups=:g1)
+
+    repeated_source = TuringBRMI((@brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + (1 | mm(g1, g1; weights=(w1, w2)))
+        y ~ Normal(mu, sigma)
+    end)(data))
+    repeated_future = merge(data, (; g1=["na", "na", "nb"]))
+    repeated_resampled = reprocess(
+        repeated_source, repeated_future; resample_groups=:g1)
+    @test only(repeated_resampled.plan.random_effects).levels == ["na", "nb"]
+
+    @test_throws "centered parameterization for `mm(...)`" TuringBRMI(
+        builder(data); centered_groups=:g1)
 end
 
 @testset "Turing extension — unsupported shapes fail loudly" begin

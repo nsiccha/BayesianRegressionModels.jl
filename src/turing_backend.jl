@@ -194,13 +194,36 @@ function _turing_replay_random_effects(
     length(training) == length(fresh) || error(
         "Turing backend: replay changed the random-effect block count")
     Tuple(map(zip(training, fresh)) do (old, new)
-        old.predictor === new.predictor && old.id === new.id &&
-        old.group === new.group && old.by === new.by || error(
+        _turing_same_random_effect_identity(old, new) || error(
             "Turing backend: replay changed random-effect block identity")
-        old.group in resample_groups ?
+        _turing_block_is_resampled(old, resample_groups) ?
             _turing_resampled_random_effect_plan(old, new) :
             _brm_replay_random_effect_plan(old, context)
     end)
+end
+
+_turing_same_random_effect_identity(old, new) =
+    old.predictor === new.predictor && old.id === new.id &&
+    old.group === new.group && old.by === new.by
+function _turing_same_random_effect_identity(
+        old::_BRMMultiMembershipPlan, new::_BRMMultiMembershipPlan)
+    old.predictor === new.predictor && old.groups == new.groups &&
+    old.weight_sources == new.weight_sources && old.normalize == new.normalize
+end
+
+_turing_block_group_names(block::_BRMRandomEffectPlan) = Set((block.group,))
+_turing_block_group_names(block::_BRMMultiMembershipPlan) = Set(block.groups)
+_turing_block_is_resampled(block::_BRMRandomEffectPlan, groups) =
+    block.group in groups
+function _turing_block_is_resampled(block::_BRMMultiMembershipPlan, groups)
+    required = Set(block.groups)
+    selected = intersect(required, groups)
+    isempty(selected) && return false
+    selected == required || error(
+        "Turing backend: multi-membership block `mm($(join(block.groups, ", ")))` " *
+        "must be resampled as one shared population; select every membership " *
+        "column $(collect(block.groups)), not $(sort!(collect(selected)))")
+    true
 end
 
 function _turing_resampled_random_effect_plan(old::_BRMRandomEffectPlan,
@@ -210,6 +233,16 @@ function _turing_resampled_random_effect_plan(old::_BRMRandomEffectPlan,
         new.indices, new.stratum_indices, new.group_strata, new.columns,
         new.matrix, new.intercept_only, new.zero_correlation, old.centered,
         old.sd_family, old.sd_rate, old.lkj_eta)
+end
+
+function _turing_resampled_random_effect_plan(
+        old::_BRMMultiMembershipPlan, new::_BRMMultiMembershipPlan)
+    _BRMMultiMembershipPlan(
+        new.predictor, nothing, new.group, nothing, new.levels, Any[],
+        new.indices, Int[], Int[], new.columns, new.matrix,
+        new.intercept_only, false, false, old.sd_family, old.sd_rate,
+        old.lkj_eta, new.groups, new.weight_sources, new.weights, new.n_obs,
+        new.n_memberships, new.normalize)
 end
 
 function _turing_replay_plan(
@@ -254,22 +287,36 @@ function _turing_replay_plan(
 end
 
 
+function _turing_random_effect_group_names(blocks)
+    groups = Set{Symbol}()
+    foreach(block -> union!(groups, _turing_block_group_names(block)), blocks)
+    groups
+end
 _turing_group_names(plan::_TuringPopulationPlan) =
-    Set{Symbol}(block.group for block in plan.random_effects)
+    _turing_random_effect_group_names(plan.random_effects)
 _turing_group_names(plan::_TuringMeanPrecisionPlan) = union(
-    Set{Symbol}(block.group for block in plan.mean.random_effects),
-    Set{Symbol}(block.group for block in plan.precision.random_effects))
+    _turing_random_effect_group_names(plan.mean.random_effects),
+    _turing_random_effect_group_names(plan.precision.random_effects))
 function _turing_group_names(plan::_TuringMultiResponsePlan)
     groups = Set{Symbol}()
     foreach(child -> union!(groups, _turing_group_names(child)), plan.plans)
     groups
 end
 
+_turing_centered_block_group_names(block::_BRMRandomEffectPlan) =
+    block.centered ? Set((block.group,)) : Set{Symbol}()
+_turing_centered_block_group_names(::_BRMMultiMembershipPlan) = Set{Symbol}()
+function _turing_centered_random_effect_group_names(blocks)
+    groups = Set{Symbol}()
+    foreach(block -> union!(groups, _turing_centered_block_group_names(block)),
+            blocks)
+    groups
+end
 _turing_centered_group_names(plan::_TuringPopulationPlan) =
-    Set{Symbol}(block.group for block in plan.random_effects if block.centered)
+    _turing_centered_random_effect_group_names(plan.random_effects)
 _turing_centered_group_names(plan::_TuringMeanPrecisionPlan) = union(
-    Set{Symbol}(block.group for block in plan.mean.random_effects if block.centered),
-    Set{Symbol}(block.group for block in plan.precision.random_effects if block.centered))
+    _turing_centered_random_effect_group_names(plan.mean.random_effects),
+    _turing_centered_random_effect_group_names(plan.precision.random_effects))
 function _turing_centered_group_names(plan::_TuringMultiResponsePlan)
     groups = Set{Symbol}()
     foreach(child -> union!(groups, _turing_centered_group_names(child)), plan.plans)
@@ -413,7 +460,7 @@ function _turing_model_context(brmi::BRMI, observation, model_operations)
     isempty(term_priors(brmi)) || error(
         "Turing backend: term-parameter priors are not yet supported")
 
-    context = _brm_backend_context(brmi)
+    context = _brm_backend_context(brmi; retain_mm_sources=true)
     # Raw data columns are represented in `brmi.operations` too. They are
     # inputs to the backend plan, not additional model operations.
     allowed = union(Set((observation.key, model_operations...)),
@@ -446,10 +493,25 @@ function _turing_with_centering(block::_BRMRandomEffectPlan, centered::Bool)
         block.lkj_eta)
 end
 
+function _turing_with_centering(block::_BRMMultiMembershipPlan,
+                                centered::Bool)
+    centered && error(
+        "Turing backend: centered parameterization for `mm(...)` is not " *
+        "supported; leave the shared multi-membership block non-centered")
+    block
+end
+
+_turing_center_block(block::_BRMRandomEffectPlan, groups) =
+    _turing_with_centering(block, block.group in groups)
+function _turing_center_block(block::_BRMMultiMembershipPlan, groups)
+    selected = intersect(Set(block.groups), groups)
+    _turing_with_centering(block, !isempty(selected))
+end
+
 function _turing_center_component(component::_TuringPopulationComponent,
                                   groups::Set{Symbol})
     random_effects = Tuple(
-        _turing_with_centering(block, block.group in groups)
+        _turing_center_block(block, groups)
         for block in component.random_effects)
     _TuringPopulationComponent(
         component.predictor, component.design, component.beta_location,
@@ -459,7 +521,7 @@ end
 function _turing_center_groups(plan::_TuringPopulationPlan,
                                groups::Set{Symbol})
     random_effects = Tuple(
-        _turing_with_centering(block, block.group in groups)
+        _turing_center_block(block, groups)
         for block in plan.random_effects)
     _TuringPopulationPlan(
         plan.family, plan.context, plan.predictor, plan.design, plan.response,
@@ -605,13 +667,18 @@ function _turing_population_components(brmi::BRMI, observation, predictor::Symbo
         "Turing backend: response `$(observation.key)` must be a vector")
     length(response) == size(component.design.matrix, 1) || error(
         "Turing backend: response and population design have different row counts")
-    all(length(block.indices) == length(response)
+    all(_turing_random_effect_observation_count(block) == length(response)
         for block in random_effects) || error(
             "Turing backend: response and random-effect index have different row counts")
     (; context, predictor=component.predictor, design=component.design, response,
        beta_location=component.beta_location, beta_scale=component.beta_scale,
        random_effects)
 end
+
+_turing_random_effect_observation_count(block::_BRMRandomEffectPlan) =
+    length(block.indices)
+_turing_random_effect_observation_count(block::_BRMMultiMembershipPlan) =
+    block.n_obs
 
 
 function _turing_require_predictor_link(parts, expected, role::AbstractString)
@@ -661,7 +728,7 @@ function _turing_mean_precision_components(brmi::BRMI, observation,
         "Turing backend: $family_name mean design has a different row count")
     size(precision.design.matrix, 1) == n || error(
         "Turing backend: $family_name precision design has a different row count")
-    all(length(block.indices) == n
+    all(_turing_random_effect_observation_count(block) == n
         for component in (mean, precision)
         for block in component.random_effects) || error(
             "Turing backend: $family_name response and random-effect index " *
@@ -1005,19 +1072,37 @@ _turing_share_class(plan::_TuringMeanPrecisionPlan{Val{:negative_binomial2}}) =
 _turing_share_class(plan::_TuringMeanPrecisionPlan{Val{:beta_binomial2}}) =
     :beta_binomial2
 
+function _turing_same_random_effect(left::_BRMRandomEffectPlan,
+                                    right::_BRMRandomEffectPlan)
+    left.predictor === right.predictor && left.id === right.id &&
+    left.group === right.group && left.by === right.by &&
+    left.levels == right.levels && left.indices == right.indices &&
+    left.strata == right.strata &&
+    left.stratum_indices == right.stratum_indices &&
+    left.group_strata == right.group_strata && left.matrix == right.matrix &&
+    left.intercept_only == right.intercept_only &&
+    left.zero_correlation == right.zero_correlation &&
+    left.centered == right.centered && left.sd_family == right.sd_family &&
+    left.sd_rate == right.sd_rate && left.lkj_eta == right.lkj_eta
+end
+
+function _turing_same_random_effect(left::_BRMMultiMembershipPlan,
+                                    right::_BRMMultiMembershipPlan)
+    _turing_same_random_effect_identity(left, right) &&
+    left.levels == right.levels && left.indices == right.indices &&
+    left.weights == right.weights && left.n_obs == right.n_obs &&
+    left.n_memberships == right.n_memberships &&
+    left.matrix == right.matrix &&
+    left.intercept_only == right.intercept_only &&
+    left.sd_family == right.sd_family && left.sd_rate == right.sd_rate &&
+    left.lkj_eta == right.lkj_eta
+end
+
+_turing_same_random_effect(_left, _right) = false
+
 function _turing_same_random_effects(left, right)
     length(left) == length(right) || return false
-    all(zip(left, right)) do (a, b)
-        a.predictor === b.predictor && a.id === b.id && a.group === b.group &&
-        a.by === b.by &&
-        a.levels == b.levels && a.indices == b.indices &&
-        a.strata == b.strata && a.stratum_indices == b.stratum_indices &&
-        a.group_strata == b.group_strata &&
-        a.matrix == b.matrix && a.intercept_only == b.intercept_only &&
-        a.zero_correlation == b.zero_correlation && a.centered == b.centered &&
-        a.sd_family == b.sd_family && a.sd_rate == b.sd_rate &&
-        a.lkj_eta == b.lkj_eta
-    end
+    all(pair -> _turing_same_random_effect(pair...), zip(left, right))
 end
 
 function _turing_same_component(left::_TuringPopulationComponent,

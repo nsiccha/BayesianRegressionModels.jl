@@ -228,6 +228,7 @@ _brm_has_group_prior_override(blocks::Tuple) =
     any(_brm_has_group_prior_override, blocks)
 _brm_has_group_geometry_override(block) =
     !isnothing(block.by) || block.centered || _brm_has_group_prior_override(block)
+_brm_has_group_geometry_override(::BRM._BRMMultiMembershipPlan) = true
 _brm_has_group_geometry_override(blocks::Tuple) =
     any(_brm_has_group_geometry_override, blocks)
 
@@ -331,12 +332,83 @@ Turing.@model function _brm_correlated_group_effect(
 end
 
 
+function _brm_multi_membership_intercept(values, group_idx, weights,
+                                          n_obs, n_memberships)
+    effect = similar(values, n_obs)
+    for observation in 1:n_obs
+        first_index = (observation - 1) * n_memberships
+        value = zero(eltype(effect))
+        for membership in 1:n_memberships
+            index = first_index + membership
+            value += weights[index] * values[group_idx[index]]
+        end
+        effect[observation] = value
+    end
+    effect
+end
+
+function _brm_multi_membership_correlated(
+        Z, coefficients, group_idx, weights, n_obs, n_memberships)
+    effect = Vector{eltype(coefficients)}(undef, n_obs)
+    for observation in 1:n_obs
+        first_index = (observation - 1) * n_memberships
+        value = zero(eltype(effect))
+        for membership in 1:n_memberships
+            index = first_index + membership
+            member_value = zero(eltype(effect))
+            for term in axes(Z, 2)
+                member_value += Z[observation, term] *
+                                coefficients[group_idx[index], term]
+            end
+            value += weights[index] * member_value
+        end
+        effect[observation] = value
+    end
+    effect
+end
+
+Turing.@model function _brm_multi_membership_intercept_effect(
+        group_idx, weights, n_obs, n_memberships, n_groups)
+    log_scale ~ Normal()
+    z ~ product_distribution(fill(Normal(), n_groups))
+    scale = exp(log_scale)
+    values = scale .* z
+    effect = _brm_multi_membership_intercept(
+        values, group_idx, weights, n_obs, n_memberships)
+    (; effect, scale, values)
+end
+
+Turing.@model function _brm_multi_membership_correlated_effect(
+        Z, group_idx, weights, n_obs, n_memberships, n_groups,
+        sd_family, sd_rate, lkj_eta)
+    n_terms = size(Z, 2)
+    L ~ LKJCholesky(n_terms, lkj_eta)
+    tau ~ product_distribution(
+        fill(truncated(Normal(), 0.0, Inf), n_terms))
+    # Keep the sampling site concretely typed for Enzyme, then recover the
+    # backend-neutral marginal-SD prior semantics.
+    Turing.@addlogprob! (;
+        logprior=_brm_group_scale_site_adjustment(tau, sd_family, sd_rate))
+    z_flat ~ product_distribution(fill(Normal(), n_terms * n_groups))
+    z = reshape(z_flat, n_terms, n_groups)
+    coefficients = transpose(Diagonal(tau) * Matrix(L.L) * z)
+    effect = _brm_multi_membership_correlated(
+        Z, coefficients, group_idx, weights, n_obs, n_memberships)
+    (; effect, L, tau, coefficients)
+end
+
+
 Turing.@model function _brm_centered_correlated_group_effect(
         Z, group_idx, n_groups, sd_family, sd_rate, lkj_eta)
     n_terms = size(Z, 2)
     L ~ LKJCholesky(n_terms, lkj_eta)
     tau ~ product_distribution(
-        _brm_group_scale_distributions(sd_family, sd_rate))
+        fill(truncated(Normal(), 0.0, Inf), n_terms))
+    # A concrete sampling site keeps Enzyme's type analysis valid. Adjust its
+    # half-Normal density to the backend-neutral Normal/Exponential semantics.
+    Turing.@addlogprob! (;
+        logprior=_brm_group_scale_site_adjustment(
+            tau, sd_family, sd_rate))
     coefficients_flat ~ _brm_centered_coefficients_distribution(
         tau, L, n_groups)
     coefficients = transpose(reshape(coefficients_flat, n_terms, n_groups))
@@ -412,6 +484,16 @@ Turing.@model function _brm_stratified_group_effect(
     (; effect, strata, coefficients)
 end
 
+
+function _brm_group_effect_model(block::BRM._BRMMultiMembershipPlan)
+    block.intercept_only && return _brm_multi_membership_intercept_effect(
+        block.indices, block.weights, block.n_obs, block.n_memberships,
+        length(block.levels))
+    _brm_multi_membership_correlated_effect(
+        block.matrix, block.indices, block.weights, block.n_obs,
+        block.n_memberships, length(block.levels), block.sd_family,
+        block.sd_rate, block.lkj_eta)
+end
 
 function _brm_group_effect_model(block)
     if !isnothing(block.by)
@@ -1702,9 +1784,17 @@ end
 
 function _brm_group_keyword_set(value, keyword::Symbol)
     value === nothing && return Set{Symbol}()
-    values = value isa Symbol ? (value,) : Tuple(value)
-    all(item -> item isa Symbol, values) || error(
-        "Turing backend: `$keyword` expects a Symbol or collection of Symbols")
+    message = "Turing backend: `$keyword` expects a Symbol or collection of Symbols"
+    values = if value isa Symbol
+        (value,)
+    else
+        try
+            Tuple(value)
+        catch
+            error(message)
+        end
+    end
+    all(item -> item isa Symbol, values) || error(message)
     Set{Symbol}(values)
 end
 
@@ -1947,13 +2037,13 @@ function _brm_resampled_latent_paths(
     paths = String[]
     if _brm_multiple_group_model(plan)
         for (i, block) in enumerate(plan.random_effects)
-            block.group in groups || continue
+            BRM._turing_block_is_resampled(block, groups) || continue
             push!(paths, "groups[$i].$(_brm_group_latent_name(block))")
         end
         return Set(paths)
     end
     for block in plan.random_effects
-        block.group in groups || continue
+        BRM._turing_block_is_resampled(block, groups) || continue
         push!(paths, block.intercept_only ? "z_group" : "z_group_flat")
     end
     Set(paths)
@@ -1962,7 +2052,7 @@ end
 function _brm_component_resampled_latent_paths!(
         paths, component, groups, prefix::AbstractString)
     for (i, block) in enumerate(component.random_effects)
-        block.group in groups || continue
+        BRM._turing_block_is_resampled(block, groups) || continue
         push!(paths, "$prefix[$i].$(_brm_group_latent_name(block))")
     end
     paths
@@ -1980,19 +2070,19 @@ function _brm_resampled_latent_paths(
             paths, (; random_effects=parts.precision_independent), groups,
             "precision_groups")
         for (i, shared) in enumerate(parts.shared)
-            shared.mean_block.group in groups || continue
+            BRM._turing_block_is_resampled(shared.mean_block, groups) || continue
             latent = shared.mean_block.centered ? "coefficients_flat" : "z_flat"
             push!(paths, "shared_groups[$i].$latent")
         end
         return paths
     end
     for block in plan.mean.random_effects
-        block.group in groups || continue
+        BRM._turing_block_is_resampled(block, groups) || continue
         push!(paths, block.intercept_only ?
               "z_mean_group" : "z_mean_group_flat")
     end
     for block in plan.precision.random_effects
-        block.group in groups || continue
+        BRM._turing_block_is_resampled(block, groups) || continue
         push!(paths, block.intercept_only ?
               "z_precision_group" : "z_precision_group_flat")
     end
