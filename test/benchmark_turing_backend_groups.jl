@@ -400,6 +400,7 @@ println(
     " turing=", Base.pkgversion(Turing),
     " enzyme=", Base.pkgversion(Enzyme),
     " bridgestan=", Base.pkgversion(BS),
-    " setup=warmed allocation-aware medians; density batch 50; gradient batch 20; ",
+    " setup=gradient prepared once; caller-owned gradient reused; warmed ",
+    "allocation-aware hot-call medians; density batch 50; gradient batch 20; ",
     "sampling omitted because this benchmark targets shared group lowering and density kernels",
 )
