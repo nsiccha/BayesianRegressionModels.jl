@@ -200,6 +200,28 @@ _brm_group_scale_distributions(families, rates) =
 # normalization that `truncated(Normal(), 0, Inf)` includes in Turing.
 _brm_group_scale_log_normalization(families) =
     -count(iszero, families) * log(2.0)
+function _brm_group_scale_site_adjustment(scales, families, rates)
+    adjustment = zero(eltype(scales))
+    log_two = log(2.0)
+    log_sqrt_two_pi = 0.5 * log(2π)
+    for i in eachindex(scales)
+        if families[i] == 0
+            # The concrete sampling site below is half-Normal, while Stan's
+            # positive constraint evaluates the ordinary Normal kernel.
+            adjustment -= log_two
+        elseif families[i] == 1
+            # Replace that half-Normal density with Exponential(rate).
+            value = scales[i]
+            rate = rates[i]
+            adjustment += log(rate) - rate * value + 0.5 * value^2 +
+                          log_sqrt_two_pi - log_two
+        else
+            error("Turing backend: internal unsupported random-effect SD " *
+                  "prior family $(families[i])")
+        end
+    end
+    adjustment
+end
 _brm_has_group_prior_override(block) =
     any(!iszero, block.sd_family) || block.lkj_eta != 1.0
 _brm_has_group_prior_override(blocks::Tuple) =
@@ -438,25 +460,27 @@ _brm_group_effect_models(blocks::Tuple) =
 
 Turing.@model function _brm_shared_correlated_group_effect(
         matrices, group_idx, n_groups, sd_family, sd_rate, lkj_eta)
-    term_counts = Tuple(size(matrix, 2) for matrix in matrices)
-    n_terms = sum(term_counts)
+    length(matrices) == 2 || error(
+        "Turing backend: internal shared distributional group block must " *
+        "contain mean and precision matrices")
+    n_mean_terms = size(matrices[1], 2)
+    n_terms = n_mean_terms + size(matrices[2], 2)
     L ~ LKJCholesky(n_terms, lkj_eta)
     tau ~ product_distribution(
-        _brm_group_scale_distributions(sd_family, sd_rate))
-    Turing.@addlogprob! (; logprior=
-        _brm_group_scale_log_normalization(sd_family))
+        fill(truncated(Normal(), 0.0, Inf), n_terms))
+    # A concrete site keeps Enzyme type analysis valid even when the semantic
+    # priors mix defaults and Exponential overrides.
+    Turing.@addlogprob! (;
+        logprior=_brm_group_scale_site_adjustment(tau, sd_family, sd_rate))
     z_flat ~ product_distribution(fill(Normal(), n_terms * n_groups))
     z = reshape(z_flat, n_terms, n_groups)
     coefficients = transpose(Diagonal(tau) * Matrix(L.L) * z)
-    effects = Vector{Any}(undef, length(matrices))
-    first_column = 1
-    for i in eachindex(matrices)
-        last_column = first_column + term_counts[i] - 1
-        block_coefficients = @view coefficients[:, first_column:last_column]
-        effects[i] = vec(sum(
-            matrices[i] .* block_coefficients[group_idx, :]; dims=2))
-        first_column = last_column + 1
-    end
+    mean_coefficients = @view coefficients[:, 1:n_mean_terms]
+    precision_coefficients = @view coefficients[:, (n_mean_terms + 1):end]
+    effects = (
+        vec(sum(matrices[1] .* mean_coefficients[group_idx, :]; dims=2)),
+        vec(sum(matrices[2] .* precision_coefficients[group_idx, :]; dims=2)),
+    )
     (; effects, L, tau, coefficients)
 end
 
