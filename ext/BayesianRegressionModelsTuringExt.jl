@@ -203,6 +203,68 @@ end
 
 _brm_group_effect_models(component) =
     Tuple(_brm_group_effect_model(block) for block in component.random_effects)
+_brm_group_effect_models(blocks::Tuple) =
+    Tuple(_brm_group_effect_model(block) for block in blocks)
+
+
+Turing.@model function _brm_shared_correlated_group_effect(
+        matrices, group_idx, n_groups)
+    term_counts = Tuple(size(matrix, 2) for matrix in matrices)
+    n_terms = sum(term_counts)
+    L ~ LKJCholesky(n_terms, 1.0)
+    tau ~ product_distribution(
+        fill(truncated(Normal(), 0.0, Inf), n_terms))
+    z_flat ~ product_distribution(fill(Normal(), n_terms * n_groups))
+    z = reshape(z_flat, n_terms, n_groups)
+    coefficients = transpose(Diagonal(tau) * Matrix(L.L) * z)
+    effects = Vector{Any}(undef, length(matrices))
+    first_column = 1
+    for i in eachindex(matrices)
+        last_column = first_column + term_counts[i] - 1
+        block_coefficients = @view coefficients[:, first_column:last_column]
+        effects[i] = vec(sum(
+            matrices[i] .* block_coefficients[group_idx, :]; dims=2))
+        first_column = last_column + 1
+    end
+    (; effects, L, tau, coefficients)
+end
+
+
+function _brm_distributional_group_parts(plan)
+    precision_keys = Dict(
+        (block.id, block.group) => index
+        for (index, block) in enumerate(plan.precision.random_effects)
+        if !isnothing(block.id))
+    mean_shared = Set{Int}()
+    precision_shared = Set{Int}()
+    shared = Any[]
+    for (mean_index, mean_block) in enumerate(plan.mean.random_effects)
+        isnothing(mean_block.id) && continue
+        key = (mean_block.id, mean_block.group)
+        haskey(precision_keys, key) || continue
+        precision_index = precision_keys[key]
+        precision_block = plan.precision.random_effects[precision_index]
+        mean_block.levels == precision_block.levels || error(
+            "Turing backend: shared random-effect ID `$(mean_block.id)` has " *
+            "incompatible fitted levels across distributional predictors")
+        mean_block.indices == precision_block.indices || error(
+            "Turing backend: shared random-effect ID `$(mean_block.id)` has " *
+            "incompatible group coordinates across distributional predictors")
+        push!(mean_shared, mean_index)
+        push!(precision_shared, precision_index)
+        model = _brm_shared_correlated_group_effect(
+            (mean_block.matrix, precision_block.matrix), mean_block.indices,
+            length(mean_block.levels))
+        push!(shared, (; key, mean_block, precision_block, model))
+    end
+    mean_independent = Tuple(
+        block for (index, block) in enumerate(plan.mean.random_effects)
+        if index ∉ mean_shared)
+    precision_independent = Tuple(
+        block for (index, block) in enumerate(plan.precision.random_effects)
+        if index ∉ precision_shared)
+    (; mean_independent, precision_independent, shared=Tuple(shared))
+end
 
 
 Turing.@model function _brm_population_gaussian_multiple_groups(
@@ -776,7 +838,8 @@ end
 
 Turing.@model function _brm_population_mean_precision_multiple_groups(
         family, X_mean, fixed_mean, X_precision, fixed_precision,
-        mean_group_models, precision_group_models, trials, y,
+        mean_group_models, precision_group_models, shared_group_models,
+        trials, y,
         mean_beta_location, mean_beta_scale,
         precision_beta_location, precision_beta_scale, observation_weight)
     beta_mean ~ product_distribution(
@@ -795,6 +858,13 @@ Turing.@model function _brm_population_mean_precision_multiple_groups(
         precision_groups[i] ~ to_submodel(precision_group_models[i])
         precision_group_effect =
             precision_group_effect + precision_groups[i].effect
+    end
+    shared_groups = Vector{Any}(undef, length(shared_group_models))
+    for i in eachindex(shared_group_models)
+        shared_groups[i] ~ to_submodel(shared_group_models[i])
+        mean_group_effect = mean_group_effect + shared_groups[i].effects[1]
+        precision_group_effect =
+            precision_group_effect + shared_groups[i].effects[2]
     end
 
     mean_link = X_mean * beta_mean + fixed_mean + mean_group_effect
@@ -825,6 +895,7 @@ Turing.@model function _brm_population_mean_precision_multiple_groups(
     end
     (; mean_link, precision_link, mu, phi, mean, precision, trials,
        response=y, mean_groups, precision_groups,
+       shared_groups,
        mean_group_effect, precision_group_effect)
 end
 
@@ -1188,14 +1259,18 @@ end
 
 function BRM._brm_turing_model(
     plan::BRM._TuringMeanPrecisionPlan{Val{:negative_binomial2}})
+    group_parts = _brm_distributional_group_parts(plan)
     if length(plan.mean.random_effects) > 1 ||
-       length(plan.precision.random_effects) > 1
+       length(plan.precision.random_effects) > 1 ||
+       !isempty(group_parts.shared)
         return _brm_population_mean_precision_multiple_groups(
             Val(:negative_binomial2),
             plan.mean.design.matrix, plan.mean.design.fixed,
             plan.precision.design.matrix, plan.precision.design.fixed,
-            _brm_group_effect_models(plan.mean),
-            _brm_group_effect_models(plan.precision), Int[], plan.response,
+            _brm_group_effect_models(group_parts.mean_independent),
+            _brm_group_effect_models(group_parts.precision_independent),
+            Tuple(group.model for group in group_parts.shared),
+            Int[], plan.response,
             plan.mean.beta_location, plan.mean.beta_scale,
             plan.precision.beta_location, plan.precision.beta_scale,
             plan.observation_weight)
@@ -1232,14 +1307,18 @@ end
 
 function BRM._brm_turing_model(
     plan::BRM._TuringMeanPrecisionPlan{Val{:beta_binomial2}})
+    group_parts = _brm_distributional_group_parts(plan)
     if length(plan.mean.random_effects) > 1 ||
-       length(plan.precision.random_effects) > 1
+       length(plan.precision.random_effects) > 1 ||
+       !isempty(group_parts.shared)
         return _brm_population_mean_precision_multiple_groups(
             Val(:beta_binomial2),
             plan.mean.design.matrix, plan.mean.design.fixed,
             plan.precision.design.matrix, plan.precision.design.fixed,
-            _brm_group_effect_models(plan.mean),
-            _brm_group_effect_models(plan.precision), plan.family_args.trials,
+            _brm_group_effect_models(group_parts.mean_independent),
+            _brm_group_effect_models(group_parts.precision_independent),
+            Tuple(group.model for group in group_parts.shared),
+            plan.family_args.trials,
             plan.response, plan.mean.beta_location, plan.mean.beta_scale,
             plan.precision.beta_location, plan.precision.beta_scale,
             plan.observation_weight)
@@ -1413,9 +1492,11 @@ end
 _brm_group_latent_name(block) = block.intercept_only ? "z" : "z_flat"
 _brm_multiple_group_model(plan::BRM._TuringPopulationPlan) =
     length(plan.random_effects) > 1
-_brm_multiple_group_model(plan::BRM._TuringMeanPrecisionPlan) =
+function _brm_multiple_group_model(plan::BRM._TuringMeanPrecisionPlan)
+    parts = _brm_distributional_group_parts(plan)
     length(plan.mean.random_effects) > 1 ||
-    length(plan.precision.random_effects) > 1
+    length(plan.precision.random_effects) > 1 || !isempty(parts.shared)
+end
 
 function _brm_resampled_latent_paths(
         plan::BRM._TuringPopulationPlan, groups)
@@ -1447,10 +1528,18 @@ function _brm_resampled_latent_paths(
         plan::BRM._TuringMeanPrecisionPlan, groups)
     paths = Set{String}()
     if _brm_multiple_group_model(plan)
+        parts = _brm_distributional_group_parts(plan)
         _brm_component_resampled_latent_paths!(
-            paths, plan.mean, groups, "mean_groups")
-        return _brm_component_resampled_latent_paths!(
-            paths, plan.precision, groups, "precision_groups")
+            paths, (; random_effects=parts.mean_independent), groups,
+            "mean_groups")
+        _brm_component_resampled_latent_paths!(
+            paths, (; random_effects=parts.precision_independent), groups,
+            "precision_groups")
+        for (i, shared) in enumerate(parts.shared)
+            shared.mean_block.group in groups || continue
+            push!(paths, "shared_groups[$i].z_flat")
+        end
+        return paths
     end
     for block in plan.mean.random_effects
         block.group in groups || continue

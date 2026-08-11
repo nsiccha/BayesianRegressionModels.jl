@@ -183,7 +183,8 @@ function _turing_replay_random_effects(
     length(training) == length(fresh) || error(
         "Turing backend: replay changed the random-effect block count")
     Tuple(map(zip(training, fresh)) do (old, new)
-        old.predictor === new.predictor && old.group === new.group || error(
+        old.predictor === new.predictor && old.id === new.id &&
+        old.group === new.group || error(
             "Turing backend: replay changed random-effect block identity")
         old.group in resample_groups ? new :
             _brm_replay_random_effect_plan(old, context)
@@ -862,7 +863,7 @@ _turing_share_class(plan::_TuringMeanPrecisionPlan{Val{:beta_binomial2}}) =
 function _turing_same_random_effects(left, right)
     length(left) == length(right) || return false
     all(zip(left, right)) do (a, b)
-        a.predictor === b.predictor && a.group === b.group &&
+        a.predictor === b.predictor && a.id === b.id && a.group === b.group &&
         a.levels == b.levels && a.indices == b.indices &&
         a.matrix == b.matrix && a.intercept_only == b.intercept_only &&
         a.zero_correlation == b.zero_correlation

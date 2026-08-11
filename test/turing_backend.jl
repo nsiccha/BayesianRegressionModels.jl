@@ -1971,6 +1971,102 @@ end
     @test bb_returned.precision == precision
 end
 
+
+@testset "Turing extension — shared distributional |ID| group block" begin
+    dist_data = (;
+        x=[-1.0, 0.5, 2.0, 0.25],
+        z=[0.0, 1.0, -0.5, 0.75],
+        subject=["b", "a", "b", "c"],
+        trials=[4, 6, 8, 5],
+    )
+    negative_binomial = TuringBRMI((@brm begin
+        log(mu) ~ 1 + x + (1 + x | joint | subject)
+        log(phi) ~ 1 + z + (1 + z | joint | subject)
+        y ~ BRM.NegativeBinomial2(mu, phi)
+    end)((; dist_data..., y=[0, 2, 5, 1])))
+    beta_binomial = TuringBRMI((@brm begin
+        logit(mean) ~ 1 + x + (1 + x | joint | subject)
+        log(precision) ~ 1 + z + (1 + z | joint | subject)
+        y ~ BRM.BetaBinomial2(trials, mean, precision)
+    end)((; dist_data..., y=[1, 4, 5, 0])))
+    mean_block = only(negative_binomial.plan.mean.random_effects)
+    precision_block = only(negative_binomial.plan.precision.random_effects)
+    @test mean_block.id === :joint
+    @test precision_block.id === :joint
+
+    L_shared = cholesky(Symmetric(Matrix{Float64}(I, 4, 4)))
+    params = Dict(
+        Turing.@varname(beta_mean) => [0.1, 0.2],
+        Turing.@varname(beta_precision) => [-0.4, 0.15],
+        Turing.@varname(shared_groups[1].L) => L_shared,
+        Turing.@varname(shared_groups[1].tau) => [0.4, 0.7, 0.25, 0.45],
+        Turing.@varname(shared_groups[1].z_flat) =>
+            [-0.2, 0.4, 0.5, -0.7,
+             1.1, 0.3, 0.2, 0.6,
+             -0.5, 0.8, 0.4, -0.1],
+    )
+    shared_coefficients = transpose(Diagonal(params[
+        Turing.@varname(shared_groups[1].tau)]) * Matrix(L_shared.L) *
+        reshape(params[Turing.@varname(shared_groups[1].z_flat)], 4, 3))
+    mean_coefficients = @view shared_coefficients[:, 1:2]
+    precision_coefficients = @view shared_coefficients[:, 3:4]
+    mean_group_effect = vec(sum(mean_block.matrix .*
+        mean_coefficients[mean_block.indices, :]; dims=2))
+    precision_group_effect = vec(sum(precision_block.matrix .*
+        precision_coefficients[precision_block.indices, :]; dims=2))
+    linear_mean = negative_binomial.plan.mean.design.matrix *
+                  params[Turing.@varname(beta_mean)] + mean_group_effect
+    linear_precision = negative_binomial.plan.precision.design.matrix *
+                       params[Turing.@varname(beta_precision)] +
+                       precision_group_effect
+    half_normal = truncated(Normal(), 0.0, Inf)
+    prior = sum(logpdf.(Normal(), params[Turing.@varname(beta_mean)])) +
+            sum(logpdf.(Normal(), params[Turing.@varname(beta_precision)])) +
+            logpdf(LKJCholesky(4, 1.0), L_shared) +
+            sum(logpdf.(half_normal,
+                params[Turing.@varname(shared_groups[1].tau)])) +
+            sum(logpdf.(Normal(),
+                params[Turing.@varname(shared_groups[1].z_flat)]))
+
+    mu = exp.(linear_mean)
+    phi = exp.(linear_precision)
+    nb_lik = sum(logpdf.(BRM.NegativeBinomial2.(
+        mu, phi), negative_binomial.plan.response))
+    nb_returned = Turing.DynamicPPL.returned(negative_binomial.model, params)
+    @test Turing.logjoint(negative_binomial.model, params) ≈
+          prior + nb_lik atol=1e-12 rtol=1e-12
+    @test Turing.logprior(negative_binomial.model, params) ≈
+          prior atol=1e-12 rtol=1e-12
+    @test nb_returned.shared_groups[1].coefficients == shared_coefficients
+    @test nb_returned.mean_group_effect == mean_group_effect
+    @test nb_returned.precision_group_effect == precision_group_effect
+
+    mean_prob = logistic.(linear_mean)
+    precision = exp.(linear_precision)
+    bb_lik = sum(logpdf.(BRM.BetaBinomial2.(
+        dist_data.trials, mean_prob, precision), beta_binomial.plan.response))
+    bb_returned = Turing.DynamicPPL.returned(beta_binomial.model, params)
+    @test Turing.logjoint(beta_binomial.model, params) ≈
+          prior + bb_lik atol=1e-12 rtol=1e-12
+    @test Turing.loglikelihood(beta_binomial.model, params) ≈
+          bb_lik atol=1e-12 rtol=1e-12
+    @test bb_returned.mean == mean_prob
+    @test bb_returned.precision == precision
+
+    replayed = reprocess(
+        beta_binomial,
+        (; dist_data..., subject=["new_b", "new_a", "new_b", "new_c"],
+         y=[1, 4, 5, 0]); resample_groups=:subject)
+    ext = Base.get_extension(BRM, :BayesianRegressionModelsTuringExt)
+    replay_parameters = ext._brm_resampled_parameters(replayed, params)
+    replay_names = Set(string(variable) for variable in keys(replay_parameters))
+    @test "shared_groups[1].z_flat" ∉ replay_names
+    @test "shared_groups[1].L" in replay_names
+    @test "shared_groups[1].tau" in replay_names
+    predictive = turing_posterior_predictive(Xoshiro(114), replayed, params)
+    @test length(predictive.y) == length(dist_data.x)
+end
+
 @testset "Turing extension — unsupported shapes fail loudly" begin
     unsupported_string_column = (@brm begin
         sigma ~ Exponential(1)

@@ -667,6 +667,7 @@ end
 struct _BRMRandomEffectPlan{L<:AbstractVector,I<:AbstractVector{Int},
                             C<:Tuple,M<:AbstractMatrix}
     predictor::Symbol
+    id::Union{Nothing,Symbol}
     group::Symbol
     levels::L
     indices::I
@@ -700,7 +701,7 @@ function _brm_replay_random_effect_plan(
     end
     matrix = hcat((column.values for column in columns)...)
     _BRMRandomEffectPlan(
-        training.predictor, training.group, training.levels, indices,
+        training.predictor, training.id, training.group, training.levels, indices,
         Tuple(columns), matrix, training.intercept_only,
         training.zero_correlation)
 end
@@ -733,17 +734,32 @@ function _brm_simple_random_effect_plans(
     _, rhs = getargs(op, 2)
     grouped = filter(_brm_is_grouped_term, _brm_additive_terms(rhs))
     plans = _BRMRandomEffectPlan[]
-    seen = Set{Symbol}()
+    seen = Set{Tuple{Union{Nothing,Symbol},Symbol}}()
     for term in grouped
         args = getargs(term)
-        if length(args) != 2
+        if length(args) ∉ (2, 3)
             required && error(
                 "BRM backend lowering: grouped term `$(repr(term))` does not " *
-                "have the expected `(effects | group)` shape")
+                "have the expected `(effects | group)` or " *
+                "`(effects | ID | group)` shape")
             return nothing
         end
         zero_correlation = getf(term) === doublepipe
-        inner, group_raw = args
+        inner = first(args)
+        id = length(args) == 3 ? args[2] : nothing
+        group_raw = last(args)
+        if !isnothing(id) && !(id isa Symbol)
+            required && error(
+                "BRM backend lowering: shared random-effect ID must be a " *
+                "symbol; got `$(repr(id))`")
+            return nothing
+        end
+        if zero_correlation && !isnothing(id)
+            required && error(
+                "BRM backend lowering: shared `(effects | ID | group)` " *
+                "blocks are correlated; `||` cannot carry an ID")
+            return nothing
+        end
         if !(group_raw isa NamedColumn && parent(group_raw) isa DataColumn)
             required && error(
                 "BRM backend lowering: random-intercept grouping factor must " *
@@ -751,10 +767,11 @@ function _brm_simple_random_effect_plans(
             return nothing
         end
         group = name(group_raw)
-        group in seen && error(
-            "BRM backend lowering: predictor `$target` repeats random-intercept " *
-            "group `$group`")
-        push!(seen, group)
+        key = (id, group)
+        key in seen && error(
+            "BRM backend lowering: predictor `$target` repeats random-effect " *
+            "block $(isnothing(id) ? "" : "ID `$id`, ")group `$group`")
+        push!(seen, key)
         raw = context.data[group]
         raw isa AbstractVector || error(
             "BRM backend lowering: grouping column `$group` must be a vector")
@@ -793,7 +810,7 @@ function _brm_simple_random_effect_plans(
         intercept_only = length(columns) == 1 &&
                          only(columns).label === :Intercept
         push!(plans, _BRMRandomEffectPlan(
-            target, group, levels, indices, Tuple(columns), matrix,
+            target, id, group, levels, indices, Tuple(columns), matrix,
             intercept_only, zero_correlation))
     end
     Tuple(plans)
