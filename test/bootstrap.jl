@@ -8,17 +8,20 @@
 # See `test/README.md` for why each of the constraints below exists.
 
 using Pkg
+using TOML
 
 include("dependency_floors.jl")
 
 const REPO = dirname(@__DIR__)
 const TESTENV = @__DIR__
 
-# Four packages must be develop paths rather than registry resolves. The caller
-# supplies StanBlocks and Treebars; WarmupHMC may be supplied or reproducibly
-# materialized at its enforced floor. Absolute paths are machine-specific and
-# deliberately never committed; `test/Manifest.toml` (where `Pkg.develop`
-# records them) is covered by the root `.gitignore`.
+# Seven packages must enter resolution as develop paths. The caller supplies
+# StanBlocks and Treebars; WarmupHMC may be supplied or reproducibly materialized
+# at its enforced floor. The three remaining source-only direct dependencies are
+# materialized at the exact revisions committed in `test/Project.toml`.
+# Absolute paths are machine-specific and deliberately never committed;
+# `test/Manifest.toml` (where `Pkg.develop` records them) is covered by the root
+# `.gitignore`.
 function dev_path(name, var; required=true)
     raw = get(ENV, var, "")
     if isempty(raw)
@@ -56,24 +59,40 @@ warmuphmc = resolve_git_floor_checkout(
 # for a DIRECT dependency, so Treebars is also listed in `test/Project.toml`.
 treebars = dev_path("Treebars", "BRM_TEST_TREEBARS")
 
-@info "Developing into $TESTENV" BayesianRegressionModels = REPO StanBlocks = stanblocks WarmupHMC = warmuphmc Treebars = treebars
+project = TOML.parsefile(joinpath(TESTENV, "Project.toml"))
+sources = project["sources"]
+explicit_paths = Dict(
+    "BayesianRegressionModels" => REPO,
+    "StanBlocks" => stanblocks,
+    "WarmupHMC" => warmuphmc,
+    "Treebars" => treebars,
+)
+source_only = Dict(name => resolve_git_revision_checkout(
+        name,
+        source["rev"];
+        cache_root=joinpath(TESTENV, ".bootstrap"),
+        mirror=joinpath(
+            homedir(), ".local", "state", "kb-agents", "git-mirrors",
+            "$name.jl.git"),
+        origin=source["url"],
+    ) for (name, source) in sources if !haskey(explicit_paths, name))
+merge!(explicit_paths, source_only)
+
+@info "Developing into $TESTENV" paths = explicit_paths
 
 Pkg.activate(TESTENV)
 
-# ONE `develop` call for all four. Resolution has to satisfy them together:
-# developing StanBlocks on its own fails with "expected package
-# BayesianRegressionModels to be registered", because BRM is unregistered and
-# is not yet in the manifest when StanBlocks' own resolve runs.
-Pkg.develop([
-    PackageSpec(path=REPO),
-    PackageSpec(path=stanblocks),
-    PackageSpec(path=warmuphmc),
-    PackageSpec(path=treebars),
+# ONE `develop` call for all seven. Resolution has to satisfy them together:
+# omitting any unregistered direct dependency fails before the manifest can be
+# written, while developing StanBlocks on its own also fails because BRM is
+# unregistered and is not yet present in the manifest.
+Pkg.develop(PackageSpec[
+    PackageSpec(path=path) for (_name, path) in sort!(collect(explicit_paths))
 ])
 
-# Everything else comes from the registry, per the committed `test/Project.toml`
-# — which is the single source of truth for the dependency list. This script
-# only supplies the paths that cannot be committed.
+# Every remaining dependency comes from the registry, per the committed
+# `test/Project.toml` — the single source of truth for the dependency list and
+# source revisions. This script only materializes paths that cannot be committed.
 Pkg.instantiate()
 Pkg.precompile()
 
