@@ -1,24 +1,14 @@
 using Documenter, DocumenterVitepress, BayesianRegressionModels
 
-# Which GitHub repository these docs are built FOR. Documenter's
-# `GitHubActions` deploy config requires `ENV["GITHUB_REPOSITORY"]` to occur in
-# `deploydocs(repo=…)` — it is a hard deployment criterion, not a hint — so a
-# workflow can only ever publish to its OWN repository's `gh-pages`. Reading
-# the environment therefore lets one `make.jl` serve both homes:
-#
-#   * `nsiccha/BayesianRegressionModels.jl`  -> nsiccha.github.io/…   (current)
-#   * `JuliaBayes/BayesianRegressionModels.jl` -> juliabayes.github.io/… (legacy)
-#
-# whichever runs it, with no per-fork edit and no cross-repo token. Locally the
-# fallback picks the current home, which is what edit links should point at.
-const DOCS_REPO = get(ENV, "GITHUB_REPOSITORY", "nsiccha/BayesianRegressionModels.jl")
-
-# The branch whose build lands under `dev/`. `ns/devibe` is the active line
-# (dev §11.5); the legacy JuliaBayes home only ever published from `main`.
-const DOCS_DEVBRANCH = startswith(DOCS_REPO, "JuliaBayes/") ? "main" : "ns/devibe"
+# The docs have one publication home. Hard-coding it is deliberate:
+# Documenter's GitHub Actions deploy criterion will refuse to publish a build
+# running in a different fork, so an accidental JuliaBayes workflow run cannot
+# create a second, drifting docs site.
+const DOCS_REPO = "nsiccha/BayesianRegressionModels.jl"
+const DOCS_DEVBRANCH = "ns/devibe"
 
 # Note: BRM's docs must build without the private HTMXObjects.jl repo — the
-# legacy JuliaBayes home could not clone it from CI at all. So `htmxo-embed.ts`
+# CI cannot clone it without repository-specific credentials. So `htmxo-embed.ts`
 # is committed in-tree (see docs/src/.vitepress/theme/) rather than synced from
 # HTMXObjects via `HTMXObjects.vitepress_theme_install` at build time. Local
 # edits to the canonical upstream file should be hand-copied; see

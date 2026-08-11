@@ -15,7 +15,7 @@ hero:
       link: /api
     - theme: alt
       text: GitHub
-      link: https://github.com/JuliaBayes/BayesianRegressionModels.jl
+      link: https://github.com/nsiccha/BayesianRegressionModels.jl
 ---
 ````
 
