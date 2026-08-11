@@ -23,11 +23,13 @@ StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
 DifferentiationInterface = "a0c0ee7d-e4b9-4e03-894e-1c5f64a51d63"
 Enzyme = "7da242da-08ed-463a-9acd-ee780be4f1d9"
 TreeArrays = "5daaa025-ac78-4e9a-8805-78946e672e43"
+Turing = "fce5fe82-541a-59a6-adf8-730c64b5f9a0"
 WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 
 [extensions]
 BayesianRegressionModelsDifferentiationInterfaceExt = "DifferentiationInterface"
 BayesianRegressionModelsTreeArraysExt = "TreeArrays"
+BayesianRegressionModelsTuringExt = "Turing"
 BayesianRegressionModelsWarmupHMCEnzymeExt = ["WarmupHMC", "Enzyme"]
 BayesianRegressionModelsWarmupHMCExt = "WarmupHMC"
 
@@ -37,6 +39,7 @@ Enzyme = "0.13"
 MutatingFunctions = "0.1"
 OutputSignatures = "0.1"
 TreeArrays = "0.1"
+Turing = "0.46"
 WarmupHMC = "0.2"
 julia = "1.10"
 

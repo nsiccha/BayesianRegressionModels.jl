@@ -21,6 +21,7 @@ using StatsBase: AbstractWeights, AnalyticWeights, FrequencyWeights,
 import CategoricalArrays as CA
 include("likelihood_distributions.jl")
 include("backend_plan.jl")
+include("turing_backend.jl")
 include("native_ppl.jl")
 include("vimpl.jl")
 
@@ -94,7 +95,7 @@ export brm_ordinal, brm_ordinal_lpmf, brm_ordinal_lpmfs, brm_ordinal_rng,
 export Data, MaybeData, maybedata
 export AbstractColumn, MissingColumn, DataColumn, NamedColumn,
        ExprColumn, LikelihoodColumn, MaterializedColumn
-export BRMI, VBRMI, SBBRMI, GenerativeDeclaration, GenerativePlan
+export BRMI, VBRMI, SBBRMI, TuringBRMI, GenerativeDeclaration, GenerativePlan
 export NativePPL
 export BRMDescriptor, BRMInput, BRMOutput, BRMOperation, BRMHighlight
 export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
