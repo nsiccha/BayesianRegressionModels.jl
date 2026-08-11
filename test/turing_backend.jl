@@ -145,6 +145,27 @@ end
 
     unseen_group = merge(future, (; subject=["new", future.subject[2:end]...]))
     @test_throws "contains unseen level" reprocess(backend, unseen_group)
+    new_population = merge(future, (;
+        subject=["new_b", "new_a", "new_b", "new_c", "new_a", "new_c"]))
+    resampled = reprocess(
+        backend, new_population; resample_groups=:subject)
+    resampled_block = only(resampled.plan.random_effects)
+    @test resampled.replay.resample_groups == (:subject,)
+    @test resampled_block.levels == ["new_a", "new_b", "new_c"]
+    @test resampled_block.indices == [2, 1, 2, 3, 1, 3]
+    ext = Base.get_extension(BRM, :BayesianRegressionModelsTuringExt)
+    fixed_parameters = ext._brm_resampled_parameters(resampled, draw.data)
+    @test !hasproperty(fixed_parameters, :z_group_flat)
+    @test fixed_parameters.L_group == draw.data.L_group
+    @test fixed_parameters.tau_group == draw.data.tau_group
+    resampled_predictive = turing_posterior_predictive(
+        Xoshiro(64), resampled, draw.data)
+    @test resampled_predictive == turing_posterior_predictive(
+        Xoshiro(64), resampled, draw.data)
+    @test length(resampled_predictive.y) == length(new_population.y)
+    @test_throws "names no fitted random-effect block" reprocess(
+        backend, new_population; resample_groups=:unknown)
+
     unseen_category = merge(future, (; g=[4, future.g[2:end]...]))
     @test_throws "contains unseen level" reprocess(backend, unseen_category)
 end
@@ -352,6 +373,27 @@ end
           grouped_prior atol=1e-12 rtol=1e-12
     @test Turing.loglikelihood(grouped.model, grouped_draw.data) ≈
           grouped_likelihood atol=1e-12 rtol=1e-12
+
+    new_grouped_data = merge(grouped_data, (;
+        group=["new_b", "new_a", "new_b", "new_c"]))
+    grouped_replay = reprocess(
+        grouped, new_grouped_data; resample_groups=:group)
+    @test grouped_replay.plan.owners == (1, 1)
+    @test only(grouped_replay.plan.plans[1].random_effects).levels ==
+          ["new_a", "new_b", "new_c"]
+    ext = Base.get_extension(BRM, :BayesianRegressionModelsTuringExt)
+    grouped_fixed = ext._brm_resampled_parameters(
+        grouped_replay, grouped_draw.data)
+    @test all(!endswith(string(variable), ".z_group")
+              for variable in keys(grouped_fixed))
+    @test any(endswith(string(variable), ".log_group_scale")
+              for variable in keys(grouped_fixed))
+    grouped_predictive = turing_posterior_predictive(
+        Xoshiro(103), grouped_replay, grouped_draw.data)
+    @test propertynames(grouped_predictive) == (:binary, :successes)
+    @test length(grouped_predictive.binary) == length(grouped_data.binary)
+    @test length(grouped_predictive.successes) ==
+          length(grouped_data.successes)
 end
 
 
@@ -1566,6 +1608,24 @@ end
           mean_group_values[mean_block.indices]
     @test bb_returned.precision_group_effect ==
           precision_group_values[precision_block.indices]
+
+    new_dist_data = merge(dist_data, (;
+        subject=["new_b", "new_a", "new_b", "new_c"],
+        batch=[20, 10, 10, 20]))
+    replayed = reprocess(
+        beta_binomial, (; new_dist_data..., y=[1, 4, 5, 0]);
+        resample_groups=[:subject, :batch])
+    @test replayed.replay.resample_groups == (:subject, :batch)
+    ext = Base.get_extension(BRM, :BayesianRegressionModelsTuringExt)
+    replay_parameters = ext._brm_resampled_parameters(replayed, params)
+    @test !hasproperty(replay_parameters, :z_mean_group)
+    @test !hasproperty(replay_parameters, :z_precision_group)
+    @test replay_parameters.log_mean_group_scale == params.log_mean_group_scale
+    @test replay_parameters.log_precision_group_scale ==
+          params.log_precision_group_scale
+    predictive = turing_posterior_predictive(
+        Xoshiro(111), replayed, params)
+    @test length(predictive.y) == length(dist_data.x)
 end
 
 

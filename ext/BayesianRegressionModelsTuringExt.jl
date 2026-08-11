@@ -932,23 +932,45 @@ function BRM.TuringBRMI(brmi::BRM.BRMI)
     BRM.TuringBRMI(brmi, plan, model)
 end
 
+"""
+    reprocess(backend::TuringBRMI, new_data;
+              freeze_constants=true, resample_groups=())
+
+Rebuild a direct-BRMI Turing backend on `new_data`. Frozen replay retains the
+training transform constants, categorical coordinates, effect priors, and
+ordinary group coordinates; unseen levels fail loudly. Groups named in
+`resample_groups` instead take their levels from `new_data`. At posterior
+prediction time [`turing_posterior_predictive`](@ref) retains fitted group
+scales/correlation factors and redraws only those groups' standardized effects.
+
+`freeze_constants=false` has fresh-fit semantics and should be refitted rather
+than evaluated with the old posterior draw.
+"""
 function BRM.reprocess(
         backend::BRM.TuringBRMI, new_data;
         freeze_constants::Bool=true, resample_groups=())
     groups = resample_groups === nothing ? () :
              resample_groups isa Symbol ? (resample_groups,) :
              Tuple(resample_groups)
-    isempty(groups) || error(
-        "Turing backend: `resample_groups` replay is not yet supported; " *
-        "same-group replay rejects unseen levels by default")
+    all(group -> group isa Symbol, groups) || error(
+        "Turing backend: `resample_groups` expects a Symbol or collection of " *
+        "Symbols")
+    length(unique(groups)) == length(groups) || error(
+        "Turing backend: `resample_groups` contains duplicate group names")
+    available_groups = BRM._turing_group_names(backend.plan)
+    unknown_groups = setdiff(Set(groups), available_groups)
+    isempty(unknown_groups) || error(
+        "Turing backend: `resample_groups` names no fitted random-effect " *
+        "block for $(sort!(collect(unknown_groups)))")
     prepared_data = freeze_constants ?
                     BRM._turing_replay_input(backend.plan, new_data) : new_data
     rebound = BRM._brm_rebind_brmi(backend.parent, prepared_data)
     fresh = BRM._brm_turing_plan(rebound)
-    plan = freeze_constants ?
-           BRM._turing_replay_plan(backend.plan, fresh) : fresh
+    plan = freeze_constants ? BRM._turing_replay_plan(
+        backend.plan, fresh, Set{Symbol}(groups)) : fresh
     model = BRM._brm_turing_model(plan)
-    BRM.TuringBRMI(rebound, plan, model)
+    replay = BRM._TuringReplayState(Tuple(groups))
+    BRM.TuringBRMI(rebound, plan, model, replay)
 end
 
 _brm_pointwise_indices(plan::BRM._TuringPopulationPlan) =
@@ -1039,10 +1061,70 @@ function _brm_named_predictive(
     NamedTuple{plan.responses}(responses)
 end
 
+function _brm_resampled_latents(
+        plan::BRM._TuringPopulationPlan, groups)
+    names = Symbol[]
+    for block in plan.random_effects
+        block.group in groups || continue
+        push!(names, block.intercept_only ? :z_group : :z_group_flat)
+    end
+    Set(names)
+end
+
+function _brm_component_resampled_latents!(
+        names, component, groups, prefix::Symbol)
+    for block in component.random_effects
+        block.group in groups || continue
+        suffix = block.intercept_only ? :group : :group_flat
+        push!(names, Symbol(:z_, prefix, :_, suffix))
+    end
+    names
+end
+
+function _brm_resampled_latents(
+        plan::BRM._TuringMeanPrecisionPlan, groups)
+    names = Set{Symbol}()
+    _brm_component_resampled_latents!(names, plan.mean, groups, :mean)
+    _brm_component_resampled_latents!(
+        names, plan.precision, groups, :precision)
+end
+
+function _brm_without_fields(parameters::NamedTuple, removed)
+    kept = Tuple(name for name in keys(parameters) if name ∉ removed)
+    NamedTuple{kept}(Tuple(getproperty(parameters, name) for name in kept))
+end
+
+function _brm_resampled_parameters(backend::BRM.TuringBRMI, parameters)
+    groups = Set{Symbol}(backend.replay.resample_groups)
+    isempty(groups) && return parameters
+    if backend.plan isa BRM._TuringMultiResponsePlan
+        point_parameters = Turing.DynamicPPL.VarNamedTuple(parameters)
+        removed = Set{String}()
+        for i in eachindex(backend.plan.plans)
+            backend.plan.owners[i] == i || continue
+            for name in _brm_resampled_latents(backend.plan.plans[i], groups)
+                push!(removed, "responses[$i].$name")
+            end
+        end
+        kept = Dict{Turing.DynamicPPL.VarName,Any}()
+        for variable in keys(point_parameters)
+            string(variable) in removed && continue
+            kept[variable] = point_parameters[variable]
+        end
+        return kept
+    end
+    parameters isa NamedTuple || error(
+        "Turing backend: `resample_groups` posterior prediction currently " *
+        "requires one constrained parameter draw as a NamedTuple")
+    removed = _brm_resampled_latents(backend.plan, groups)
+    _brm_without_fields(parameters, removed)
+end
+
 function BRM.turing_posterior_predictive(
         rng::AbstractRNG, backend::BRM.TuringBRMI, parameters)
     predictive = BRM.turing_predictive_model(backend)
-    fixed = Turing.fix(predictive, parameters)
+    fixed_parameters = _brm_resampled_parameters(backend, parameters)
+    fixed = Turing.fix(predictive, fixed_parameters)
     draw = rand(rng, fixed)
     returned = Turing.DynamicPPL.returned(fixed, draw.data)
     _brm_named_predictive(backend.plan, returned)

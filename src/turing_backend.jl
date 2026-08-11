@@ -55,11 +55,19 @@ A [`BRMI`](@ref) lowered to the Turing backend. `plan` is the strict,
 Stan-independent semantic plan; `model` is the concrete DynamicPPL model
 provided by `BayesianRegressionModelsTuringExt` when Turing is loaded.
 """
-struct TuringBRMI{P<:BRMI,PL,M}
+struct _TuringReplayState{G<:Tuple}
+    resample_groups::G
+end
+_TuringReplayState() = _TuringReplayState(())
+
+struct TuringBRMI{P<:BRMI,PL,M,R<:_TuringReplayState}
     parent::P
     plan::PL
     model::M
+    replay::R
 end
+TuringBRMI(parent::BRMI, plan, model) =
+    TuringBRMI(parent, plan, model, _TuringReplayState())
 
 Base.parent(x::TuringBRMI) = x.parent
 _turing_num_population_coefficients(plan::_TuringPopulationPlan) =
@@ -158,22 +166,38 @@ _turing_predictive_plan(plan::_TuringMultiResponsePlan) =
 
 function _turing_replay_component(
         training::_TuringPopulationComponent,
-        context::_BRMBackendContext)
+        fresh::_TuringPopulationComponent,
+        context::_BRMBackendContext, resample_groups)
     predictor = _brm_replay_population_predictor(training.predictor, context)
-    random_effects = _brm_replay_random_effect_plans(
-        training.random_effects, context)
+    random_effects = _turing_replay_random_effects(
+        training.random_effects, fresh.random_effects, context,
+        resample_groups)
     _TuringPopulationComponent(
         predictor, predictor.design, training.beta_location,
         training.beta_scale, random_effects)
 end
 
+function _turing_replay_random_effects(
+        training::Tuple, fresh::Tuple, context::_BRMBackendContext,
+        resample_groups)
+    length(training) == length(fresh) || error(
+        "Turing backend: replay changed the random-effect block count")
+    Tuple(map(zip(training, fresh)) do (old, new)
+        old.predictor === new.predictor && old.group === new.group || error(
+            "Turing backend: replay changed random-effect block identity")
+        old.group in resample_groups ? new :
+            _brm_replay_random_effect_plan(old, context)
+    end)
+end
+
 function _turing_replay_plan(
         training::_TuringPopulationPlan,
-        fresh::_TuringPopulationPlan)
+        fresh::_TuringPopulationPlan, resample_groups=Set{Symbol}())
     predictor = _brm_replay_population_predictor(
         training.predictor, fresh.context)
-    random_effects = _brm_replay_random_effect_plans(
-        training.random_effects, fresh.context)
+    random_effects = _turing_replay_random_effects(
+        training.random_effects, fresh.random_effects, fresh.context,
+        resample_groups)
     _TuringPopulationPlan(
         fresh.family, fresh.context, predictor, predictor.design,
         fresh.response, training.beta_location, training.beta_scale,
@@ -185,9 +209,11 @@ end
 
 function _turing_replay_plan(
         training::_TuringMeanPrecisionPlan,
-        fresh::_TuringMeanPrecisionPlan)
-    mean = _turing_replay_component(training.mean, fresh.context)
-    precision = _turing_replay_component(training.precision, fresh.context)
+        fresh::_TuringMeanPrecisionPlan, resample_groups=Set{Symbol}())
+    mean = _turing_replay_component(
+        training.mean, fresh.mean, fresh.context, resample_groups)
+    precision = _turing_replay_component(
+        training.precision, fresh.precision, fresh.context, resample_groups)
     _TuringMeanPrecisionPlan(
         fresh.family, fresh.context, mean, precision, fresh.family_args,
         fresh.response, fresh.response_modifier, fresh.observation_weight)
@@ -195,14 +221,26 @@ end
 
 function _turing_replay_plan(
         training::_TuringMultiResponsePlan,
-        fresh::_TuringMultiResponsePlan)
+        fresh::_TuringMultiResponsePlan, resample_groups=Set{Symbol}())
     training.responses == fresh.responses || error(
         "Turing backend: replay changed the response-name set")
     length(training.plans) == length(fresh.plans) || error(
         "Turing backend: replay changed the response-plan count")
-    plans = Tuple(_turing_replay_plan(old, new)
+    plans = Tuple(_turing_replay_plan(old, new, resample_groups)
                   for (old, new) in zip(training.plans, fresh.plans))
     _TuringMultiResponsePlan(training.responses, plans, training.owners)
+end
+
+
+_turing_group_names(plan::_TuringPopulationPlan) =
+    Set(block.group for block in plan.random_effects)
+_turing_group_names(plan::_TuringMeanPrecisionPlan) = union(
+    Set(block.group for block in plan.mean.random_effects),
+    Set(block.group for block in plan.precision.random_effects))
+function _turing_group_names(plan::_TuringMultiResponsePlan)
+    groups = Set{Symbol}()
+    foreach(child -> union!(groups, _turing_group_names(child)), plan.plans)
+    groups
 end
 
 function _turing_collect_factor_schemas!(schemas, column)
