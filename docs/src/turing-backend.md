@@ -3,17 +3,46 @@
 `TuringBRMI` is the direct-BRMI Turing backend. Loading Turing activates the
 package extension:
 
-```julia
+```@example turing-backend
 using BayesianRegressionModels, Turing
 
-brmi = (@brm begin
+gaussian_brmi = (@brm begin
     sigma ~ Exponential(2)
     mu ~ 1 + x
+    effect(:, :) ~ Normal(0, 2)
+    effect(mu, x) ~ Normal(0, 0.25)
     y ~ Normal(mu, sigma)
-end)((; x, y))
+end)((;
+    x = [-1.0, 0.5, 2.0],
+    y = [0.2, 1.1, -0.4],
+))
 
-backend = TuringBRMI(brmi)
-chain = sample(backend.model, NUTS(), 1_000)
+gaussian = TuringBRMI(gaussian_brmi)
+gaussian.plan.beta_location, gaussian.plan.beta_scale
+```
+
+The backend owns an ordinary `DynamicPPL.Model`, so standard Turing workflows
+apply directly:
+
+```julia
+chain = sample(gaussian.model, NUTS(), 1_000)
+```
+
+The same direct-BRMI path covers the currently supported binary and count
+GLMs—there is no intermediate Stan or SLIC model:
+
+```@example turing-backend
+binary = TuringBRMI((@brm begin
+    eta ~ 1 + x
+    y ~ BernoulliLogit(eta)
+end)((; x=[-1.0, 0.5, 2.0, 0.25], y=[0, 1, 1, 0])))
+
+count = TuringBRMI((@brm begin
+    log_rate ~ 1 + x
+    y ~ Poisson(exp(log_rate))
+end)((; x=[-1.0, 0.5, 2.0], y=[0, 2, 5])))
+
+(binary=summary(binary.model), count=summary(count.model))
 ```
 
 Turing is a weak dependency. The core package owns a backend-neutral BRMI
