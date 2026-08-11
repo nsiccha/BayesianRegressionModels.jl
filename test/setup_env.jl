@@ -37,7 +37,7 @@ const PINS = [
     ("TreeArrays",        "https://github.com/nsiccha/TreeArrays.jl.git",        "c317cc003fc41c2d933c27dc80799141eebd434e"),  # main
     ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "e6f607da17f04f06e7e65d867137940a82ba1392"),  # devibe
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
-    ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "676e43fb2510adcd6ef930faabe8ddf7f89ebec2"),  # dev
+    ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "8fa829b39d6f519deaf13cd03ee17e8df6b7b9c2"),  # dev
 ]
 
 function main()
