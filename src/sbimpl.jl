@@ -2570,6 +2570,50 @@ function _sb_effect_prior_arg(x::ExprColumn)
     Expr(:call, getf(x), args...)
 end
 
+# Prepass: a BARE-INTERCEPT linear predictor (`log_qt_scale ~ 1`) whose ONLY
+# consumer is a kernel `ragged(lp, group)` positional has no row axis any of the
+# ordinary length tiers can see. It names no covariate (tier 1/1b), no
+# categorical (tier 1d) and no group term (tier 1c) of its own, and because a
+# kernel's observation is written CELL-LOCAL inside the do-block, no top-level
+# observed likelihood references its target either (tier 2, `obs_n`). So every
+# tier comes up empty and `_sb_any_data_symbol` REFUSES on a multi-axis model
+# (snag `intercept-only-k...`, reported by `Bruno:arv393`).
+#
+# The ragged consumer, though, names that axis outright: `ragged(x, group)`
+# requires one `group` key per row of `x`'s own frame, so `length(group) ==
+# length(x)` by the same contract `_sb_kernel_ragged_rows` enforces. Collect
+# `lp_target => group_column_node` for each such bare-intercept LP; the
+# constructor materialises the group's durable per-event index and feeds it
+# through the SAME intercept-only row-axis channel (`obs_n`) a real observed
+# target uses. Only this exact shape is collected — an LP with any other term
+# resolves through a normal tier and is never touched here, so every other model
+# keeps byte-identical emission.
+function _sb_kernel_intercept_axis_groups(brmi)
+    out = Dict{Symbol,NamedColumn}()
+    for op_nc in values(brmi.operations)
+        op_nc isa NamedColumn || continue
+        op = parent(op_nc)
+        (op isa ExprColumn && getf(op) === (~)) || continue
+        rhs = getargs(op, 2)[2]
+        (rhs isa ExprColumn && getf(rhs) === kernel) || continue
+        for c in getargs(rhs)
+            (c isa ExprColumn && getf(c) === ragged) || continue
+            length(getargs(c)) == 2 || continue
+            arg_col, grp_arg = getargs(c)
+            arg_col isa NamedColumn || continue
+            (grp_arg isa NamedColumn && parent(grp_arg) isa DataColumn) || continue
+            decl = parent(arg_col)
+            # Only a linear predictor declared in this block (`x ~ <terms>`); a
+            # raw-data ragged arg carries its own axis and never needs this.
+            (decl isa ExprColumn && getf(decl) === (~)) || continue
+            terms = _sb_terms(getargs(decl, 2)[2])
+            (!isempty(terms) && all(t -> t === 1, terms)) || continue
+            get!(out, name(arg_col), grp_arg)
+        end
+    end
+    out
+end
+
 SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
        centered_groups=Set{Symbol}(), _frozen_preproc=nothing) = begin
     cv_groups = cv_groups isa Set ? cv_groups : Set{Symbol}(cv_groups)
@@ -2625,10 +2669,22 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     # `_sb_any_data_symbol(data)` fallback. The shared context discovers this
     # map before either backend emits or executes anything.
     target_obs = context.target_obs
+    # Prepass 3.5: a bare-intercept LP consumed only by a kernel `ragged(lp,
+    # group)` (snag `intercept-only-k...`). Materialise the group's durable
+    # per-event row-index column and feed its length through the intercept-only
+    # row-axis channel below. A real observed axis (`target_obs`) still wins, and
+    # only this exact shape is touched, so every other model is unchanged.
+    kernel_intercept_axes = Dict{Symbol,Symbol}()
+    for (tgt, grp) in _sb_kernel_intercept_axis_groups(brmi)
+        haskey(target_obs, tgt) && continue
+        idx_name, _ = _sb_ensure_group_data!(data, grp)
+        kernel_intercept_axes[tgt] = idx_name
+    end
     for (key, op) in pairs(brmi.operations)
         nc = _as_named_column(op)
         isnothing(nc) && error("sbimpl: top-level op `$key` is not a NamedColumn")
         obs_n = get(target_obs, key, nothing)
+        isnothing(obs_n) && (obs_n = get(kernel_intercept_axes, key, nothing))
         _sb_emit!(stmts, data, key, parent(nc); id_lookup, obs_n, cv_groups,
                   centered_groups, group_block_lookup, effect_overrides,
                   r2d2=(; overrides=r2d2_overrides, names=r2d2_names))
