@@ -115,7 +115,7 @@ grouped_negative_binomial = (@brm begin
 end)((;
     x=[-1.0, 0.5, 2.0, 0.25],
     z=[0.0, 1.0, -0.5, 0.75],
-    subject=["b", "a", "b", "c"],
+    subject=[2, 1, 2, 3],
     batch=[2, 1, 1, 2],
     y=[0, 2, 5, 1],
 ))
@@ -138,7 +138,7 @@ shared_group_negative_binomial = (@brm begin
 end)((;
     x=[-1.0, 0.5, 2.0, 0.25, -0.75, 1.25],
     z=[0.0, 1.0, -0.5, 0.75, 0.25, -1.0],
-    subject=["b", "a", "b", "c", "a", "c"],
+    subject=[2, 1, 2, 3, 1, 3],
     y=[0, 2, 5, 1, 3, 4],
 ))
 """, :shared_group_negative_binomial;
@@ -252,7 +252,7 @@ crossed_groups = (@brm begin
     outcome ~ Normal(mu, sigma)
 end)((;
     x=[-1.0, 0.5, 2.0, 0.25],
-    subject=["b", "a", "b", "c"],
+    subject=[2, 1, 2, 3],
     item=[2, 1, 1, 2],
     site=[10, 10, 20, 20],
     outcome=[0.2, 1.1, -0.4, 0.7],
