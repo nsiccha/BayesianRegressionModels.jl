@@ -1231,10 +1231,10 @@ end
 
 # Treatment-coded categorical predictor with a caller-supplied Normal prior on
 # the K-1 contrasts. Kept as a SIBLING of `_sb_cat` (exactly as `_popefs_normal`
-# is of `popefs`) so an unconfigured model's emission stays byte-for-byte
-# unchanged. One shared `(location, scale)` covers every contrast; the reference
-# level still contributes 0. The sampled parameter keeps the same `beta` name,
-# so the Stan parameter remains `cat_<c>_beta` either way.
+# is of `popefs`) so configured and unconfigured blocks share one output shape.
+# One shared `(location, scale)` covers every contrast; the reference level
+# still contributes 0. The sampled parameter keeps the same `beta` name, so the
+# Stan parameter is `cat_<lp>_<c>_beta` for both sibling submodels.
 _sb_cat_normal = StanBlocks.@slic begin
     beta ~ normal(beta_loc, beta_scale; n=n_levels - 1)
     return append_row(0., beta)[x]
@@ -2264,7 +2264,7 @@ function _sb_effect_prior_overrides(brmi::BRMI)
     end
 
     # Categorical addresses are resolved from the SAME lazy/memoised discipline:
-    # a predictor is asked for its `cat_<c>` blocks only when an `effect(...)`
+    # a predictor is asked for its `cat_<lp>_<c>` blocks only when an `effect(...)`
     # statement could reach it, and a shape that cannot be walked is skipped
     # rather than made fatal for the whole model.
     resolved_cat = Dict{Symbol,Dict{Symbol,Symbol}}()
@@ -2346,7 +2346,7 @@ function _sb_effect_prior_overrides(brmi::BRMI)
             end
 
             # A categorical / integer-coded predictor owns its own K-1 contrast
-            # block (`cat_<c>_beta`) instead of `beta_pop` columns, so it is
+            # block (`cat_<lp>_<c>_beta`) instead of `beta_pop` columns, so it is
             # structurally absent from `popcoefnames`. Resolve it FIRST: nothing
             # in `popcoefnames` can ever collide with a name only
             # `_sb_cat_address_map` knows, and this keeps the block reachable
@@ -2405,14 +2405,15 @@ function _sb_effect_prior_overrides(brmi::BRMI)
 end
 
 # Trailing hint for a coefficient that IS in this predictor, just not as a
-# `beta_pop` column. `cat_g` (the emitted Stan parameter prefix) is the natural
-# wrong guess once a user has read the transpiled code, so name the address that
-# does work rather than leaving "Available labels" looking exhaustive.
+# `beta_pop` column. `cat_mu_g` (the emitted Stan parameter prefix) is the
+# natural wrong guess once a user has read the transpiled code, so name the
+# address that does work rather than leaving "Available labels" looking
+# exhaustive.
 function _sb_effect_cat_note(cat_map)
     isempty(cat_map) && return ""
     " Categorical contrast block(s) " *
     join(("`$a`" for a in sort!(collect(keys(cat_map)))), ", ") *
-    " own their own `cat_<c>_beta` parameters rather than `beta_pop` columns; " *
+    " own their own `cat_<lp>_<c>_beta` parameters rather than `beta_pop` columns; " *
     "address one by that name to set its contrast prior."
 end
 
@@ -5141,7 +5142,7 @@ formula (left-to-right) order:
 EXCLUDED — emitted as their OWN parameters, NOT `beta_pop`, so they never
 appear in `pop_<lhs>_beta_pop`:
 
-- integer- or `CategoricalVector`-typed bare predictors → `cat_<name>`
+- integer- or `CategoricalVector`-typed bare predictors → `cat_<lhs>_<name>`
   (K−1 treatment contrasts);
 - `offset(x)` → `x` itself, with fixed coefficient one;
 - `mo1(c)` → `mo1_<c>`; `s(x)` and `t2(x,z)` → their own fixed/range
@@ -5159,7 +5160,7 @@ resolves against — with ONE addition that is deliberately not listed here,
 because it is not a `beta_pop` column: a categorical / integer-coded
 predictor (bare, or wrapped in `factor(...)`) is addressable by its COLUMN
 name, which sets one shared Normal prior over its K-1 treatment contrasts
-(`cat_<c>_beta`). Everything else in the EXCLUDED list above still owns
+(`cat_<lhs>_<c>_beta`). Everything else in the EXCLUDED list above still owns
 parameters no `effect(...)` address reaches.
 """
 function popcoefnames(brmi::BRMI, lhs::Symbol)
@@ -5200,11 +5201,11 @@ function popcoefnames(brmi::BRMI, lhs::Symbol)
     labels
 end
 
-# ---- consumer helper: name the `cat_<c>_beta` contrast blocks ---------------
+# ---- consumer helper: name the `cat_<lp>_<c>_beta` contrast blocks ----------
 #
 # The categorical counterpart of `popcoefnames`. A categorical / integer-coded
 # predictor (bare, or wrapped in `factor(...)`) is EXCLUDED from `beta_pop` and
-# owns its own K-1 treatment-contrast block `cat_<c>_beta`, so it can never
+# owns its own K-1 treatment-contrast block `cat_<lp>_<c>_beta`, so it can never
 # appear in `popcoefnames`. This walker drives the SAME `_sb_terms` +
 # `_sb_classify_term!` the emitter does, so the returned names can never drift
 # from what `_sb_emit_cat!` actually emits.
@@ -5213,21 +5214,33 @@ end
 # predictor). `factor(c; ref=k)` recodes into a synthetic `c__ref_k` column, so
 # the emitted name and the name the user wrote differ there; see
 # `_sb_cat_addresses` for the address spellings that resolve onto it.
-function _sb_cat_coefnames(brmi::BRMI, lhs::Symbol)
+_sb_cat_block_name(lp::Symbol, term::Symbol) = Symbol(:cat_, lp, :_, term)
+
+function _sb_cat_entries(brmi::BRMI, lhs::Symbol)
     op = linear_predictor_op(brmi, lhs)
     isnothing(op) && return nothing
+    predictors = [lp for lp in linear_predictors(brmi) if lp.name === lhs]
+    length(predictors) == 1 || error(
+        "sbimpl: expected one linear predictor named `$lhs`, found $(length(predictors))")
+    emitted_lp = _sb_lp_emitted_name(lhs, only(predictors).link_lhs_fn)
     _, rhs = getargs(op, 2)
     pop_terms = Any[]; ran_terms = Any[]; direct_terms = Any[]
     for t in _sb_terms(rhs)
         _sb_classify_term!(t, pop_terms, ran_terms, direct_terms)
     end
-    Symbol[name(t) for t in direct_terms
-           if t isa NamedColumn && !isnothing(_sb_cat_levels(t))]
+    [(; address=name(t), emitted=_sb_cat_block_name(emitted_lp, name(t)))
+     for t in direct_terms
+     if t isa NamedColumn && !isnothing(_sb_cat_levels(t))]
+end
+
+function _sb_cat_coefnames(brmi::BRMI, lhs::Symbol)
+    entries = _sb_cat_entries(brmi, lhs)
+    isnothing(entries) ? nothing : Symbol[e.emitted for e in entries]
 end
 
 # `factor(c; ref=k)` is re-encoded at term-collection time into a synthetic
 # `c__ref_k` NamedColumn (see `_sb_collect_terms_expr!(::typeof(factor), ...)`),
-# and that synthetic name is what reaches the emitted `cat_c__ref_k_beta`.
+# and that synthetic name is what reaches the emitted `cat_<lp>_c__ref_k_beta`.
 # Requiring the user to spell the internal suffix would leak an implementation
 # detail into a public prior address, so BOTH the emitted name and the column
 # the formula names resolve onto the same block.
@@ -5239,7 +5252,7 @@ function _sb_cat_addresses(emitted::Symbol)
     (emitted, Symbol(s[1:prevind(s, m.offset)]))
 end
 
-# address Symbol -> emitted `cat_<name>` term name, for one linear predictor.
+# address Symbol -> emitted `cat_<lp>_<name>` term name, for one linear predictor.
 # An address that would name two different blocks (only reachable by writing
 # both `factor(c)` and `factor(c; ref=k)` in one predictor) is dropped rather
 # than silently resolving to the first, so `effect(...)` fails loudly instead.
@@ -5604,23 +5617,23 @@ function _sb_prior_overrides(brmi::BRMI)
 end
 
 function _sb_cat_address_map(brmi::BRMI, lhs::Symbol)
-    emitted = _sb_cat_coefnames(brmi, lhs)
+    entries = _sb_cat_entries(brmi, lhs)
     out = Dict{Symbol,Symbol}()
-    isnothing(emitted) && return out
+    isnothing(entries) && return out
     # Exact emitted names bind first and are never displaced: a `mu ~ factor(g) +
     # factor(g; ref=3)` emits `g` AND `g__ref_3`, and the latter's stripped alias
     # `g` must not steal the former's own name. Aliases then fill in only where
     # they are unambiguous -- an alias wanted by two blocks binds to neither, so
     # such a model refuses the address instead of silently priming one block.
-    exact = Set{Symbol}(emitted)
-    for nm in emitted
-        out[nm] = nm
+    exact = Set{Symbol}(e.address for e in entries)
+    for e in entries
+        out[e.address] = e.emitted
     end
     clashes = Set{Symbol}()
-    for nm in emitted, a in _sb_cat_addresses(nm)
+    for e in entries, a in _sb_cat_addresses(e.address)
         a in exact && continue
-        haskey(out, a) && out[a] !== nm && (push!(clashes, a); continue)
-        out[a] = nm
+        haskey(out, a) && out[a] !== e.emitted && (push!(clashes, a); continue)
+        out[a] = e.emitted
     end
     foreach(a -> delete!(out, a), clashes)
     out
@@ -5649,12 +5662,15 @@ _sb_cat_levels_vec(v::CA.CategoricalVector) = v
 _sb_cat_levels_vec(_v) = nothing
 
 # Free-summand terms (no popefs beta): `mo1(c)`, `s(x)`, `t2(x,z)`, categoricals.
-# Categoricals emit `cat_<c> ~ _sb_cat(; x=<c>_idx, n_levels=<c>_n_levels)`.
+# Categoricals emit
+# `cat_<lp>_<c> ~ _sb_cat(; x=<c>_idx, n_levels=<c>_n_levels)`.
 # `mo1(c)` reuses `_sb_mo`; smooths own their complete fixed + penalized bases.
 _sb_emit_direct!(stmts, data, target::Symbol, t::NamedColumn, summands;
-                 cat_overrides=Dict{Symbol,Any}(), kwargs...) =
-    _sb_emit_cat!(stmts, data, t, summands;
-                  prior=get(cat_overrides, name(t), nothing))
+                 cat_overrides=Dict{Symbol,Any}(), kwargs...) = begin
+    block = _sb_cat_block_name(target, name(t))
+    _sb_emit_cat!(stmts, data, target, t, summands;
+                  prior=get(cat_overrides, block, nothing))
+end
 function _sb_emit_direct!(stmts, data, target::Symbol, t::ExprColumn, summands;
                           group_block_lookup=Dict(), cat_overrides=Dict{Symbol,Any}(),
                           term_overrides=Dict{Symbol,Any}())
@@ -5721,10 +5737,11 @@ _sb_emit_direct_expr!(_stmts, _data, _target::Symbol, f, _t, _summands; kwargs..
 # predictor). The `PreprocEntry(:factor)` provenance is recorded for every K, so
 # frozen reprocess / unseen-level fail-closed behaves identically at K == 1; and
 # an `effect(...)` prior on a K == 1 block simply has zero contrasts to apply to.
-function _sb_emit_cat!(stmts, data, t::NamedColumn, summands; prior=nothing)
+function _sb_emit_cat!(stmts, data, target::Symbol, t::NamedColumn, summands;
+                       prior=nothing)
     backing = parent(t)
     n_levels, idx = _sb_level_index(parent(backing))
-    col_name = Symbol(:cat_, name(t))
+    col_name = _sb_cat_block_name(target, name(t))
     idx_name = Symbol(name(t), :_idx)
     n_name   = Symbol(name(t), :_n_levels)
     data[idx_name] = idx

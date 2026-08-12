@@ -54,7 +54,7 @@ function _sb_submodel_rhs!(stmts, data, target::Symbol,
 end
 
 # ── Mock data (same as #6) ────────────────────────────────────────────────────
-# Binary covariates as Float64 (decision 1x6dtzq: avoids _sb_emit_cat! collision).
+# Binary covariates remain Float64 to match the deployed numeric-contrast model.
 # 4 observations, 2 subjects; all 13 predictors share these columns.
 df = (;
     subject  = [1, 1, 2, 2],
