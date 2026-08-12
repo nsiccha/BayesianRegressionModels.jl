@@ -2459,6 +2459,20 @@ function _sb_effect_prior_arg(x::ExprColumn)
     Expr(:call, getf(x), args...)
 end
 
+# StanBlocks' data phase (`forward!(::SlicModel)`) types EVERY key in the data
+# dict via `stan_type`, so every value handed to the `SlicModel` must be Stan
+# data. The shared `_brm_collect_data!` (backend_plan.jl) records the raw of
+# every formula-referenced column as reprocess provenance — including raw
+# `CategoricalVector`/string predictor columns whose Stan representation is a
+# derived integer-code column (`<col>_idx`), NOT the raw column itself. The raw
+# is never referenced by the emitted model, so it must be dropped before the
+# SlicModel; otherwise `stan_type` errors on it at ALL K (not just K=1). Numeric
+# arrays (including ragged vectors-of-vectors), scalars, functions, and tuples
+# are all valid data and kept.
+_sb_is_stan_data_value(::Any) = true
+_sb_is_stan_data_value(v::AbstractArray) =
+    eltype(v) <: Real || eltype(v) <: AbstractArray
+
 SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
        centered_groups=Set{Symbol}(), _frozen_preproc=nothing) = begin
     cv_groups = cv_groups isa Set ? cv_groups : Set{Symbol}(cv_groups)
@@ -2531,6 +2545,13 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     # pollutes Stan's data dict.
     preproc_ctx = pop!(data, _SB_PREPROC_KEY, Dict{Symbol,PreprocEntry}())
     preproc = preproc_ctx isa _SBPreprocContext ? preproc_ctx.recorded : preproc_ctx
+    # Drop leaked non-Stan data (raw `CategoricalVector`/string predictor columns
+    # collected as reprocess provenance). See `_sb_is_stan_data_value`. This also
+    # keeps `reprocess`'s pass-through (step 2) from re-leaking the raw column
+    # into `new_data`, since it only passes through keys present in `sb.data`.
+    for k in collect(keys(data))
+        _sb_is_stan_data_value(data[k]) || delete!(data, k)
+    end
     body = Expr(:block, stmts...)
     model = StanBlocks.SlicModel(body, data, mod)
     SBBRMI(brmi, model, data, preproc)
@@ -4315,10 +4336,13 @@ function _sb_dirichlet_alpha(target, args, kwargs)
               "vector `Dirichlet(alpha)` or a symmetric `Dirichlet(K, a)`; got ",
               "$(length(args)) positional arguments.")
     end
-    length(alpha) >= 2 || error(
-        "sbimpl: `$target ~ Dirichlet(...)` needs dimension >= 2, got ",
-        "$(length(alpha)). A one-element simplex is deterministically `[1.0]` — ",
-        "there is no parameter to sample; use the constant directly.")
+    length(alpha) >= 1 || error(
+        "sbimpl: `$target ~ Dirichlet(...)` needs dimension >= 1, got ",
+        "$(length(alpha)). A zero-element Dirichlet is undefined (no simplex).")
+    # A one-element simplex (`Dirichlet([a])` / `Dirichlet(1, a)`) is allowed and
+    # emits `simplex[1] $target; $target ~ dirichlet(...)` — deterministically
+    # `[1.0]` with zero sampler dimensions, so it costs nothing and keeps ONE
+    # uniform emission (no `dimension == 1 ? constant : simplex` branch).
     all(x -> isfinite(x) && x > 0, alpha) || error(
         "sbimpl: `$target ~ Dirichlet(...)` concentrations must be finite and ",
         "strictly positive, got $alpha.")
@@ -4885,35 +4909,45 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
         else
             _sb_shared_population_cols!(col_exprs, data, shared_design)
         end
-        X_name = Symbol(:X_, target)
-        pop_name = Symbol(:pop_, target)
-        # StanBlocks `hcat` promotes a lone vector to matrix[n,1] and folds to
-        # append_col for two-or-more columns, so we can always just emit hcat.
-        push!(stmts, :($X_name = $(Expr(:call, :hcat, col_exprs...))))
-        overrides = _sb_pop_effect_overrides(effect_overrides, brmi_key)
-        r2d2_spec = get(r2d2.overrides, brmi_key, nothing)
-        if !isnothing(r2d2_spec) && r2d2_spec.n_shares > 0
-            _sb_emit_r2d2_popefs!(stmts, data, brmi_key, X_name, pop_name,
-                                  length(col_exprs), r2d2_spec,
-                                  r2d2.names[brmi_key], overrides)
-        elseif isnothing(overrides)
-            push!(stmts, :($pop_name ~ popefs(; X=$X_name)))
+        if isempty(col_exprs)
+            # Every population term degenerated to zero columns (e.g.
+            # `0 + mo(c)` with single-level `c`): the design spans no
+            # coefficients, so `X * beta` is identically 0. Contribute a scalar
+            # 0.0 (mirrors mo1 K=1) rather than an empty `hcat()` — which
+            # StanBlocks cannot type — and skip the popefs entirely. Keeps the
+            # summand list non-empty so the assembler never emits `+()`.
+            push!(summands, 0.0)
         else
-            length(overrides) == length(col_exprs) || error(
-                "sbimpl: internal effect-prior alignment error for `$brmi_key`: " *
-                "$(length(overrides)) priors for $(length(col_exprs)) columns")
-            beta_loc = Any[0.0 for _ in overrides]
-            beta_scale = Any[1.0 for _ in overrides]
-            for i in eachindex(overrides)
-                isnothing(overrides[i]) && continue
-                beta_loc[i], beta_scale[i] = _sb_effect_normal_args(overrides[i])
+            X_name = Symbol(:X_, target)
+            pop_name = Symbol(:pop_, target)
+            # StanBlocks `hcat` promotes a lone vector to matrix[n,1] and folds to
+            # append_col for two-or-more columns, so we can always just emit hcat.
+            push!(stmts, :($X_name = $(Expr(:call, :hcat, col_exprs...))))
+            overrides = _sb_pop_effect_overrides(effect_overrides, brmi_key)
+            r2d2_spec = get(r2d2.overrides, brmi_key, nothing)
+            if !isnothing(r2d2_spec) && r2d2_spec.n_shares > 0
+                _sb_emit_r2d2_popefs!(stmts, data, brmi_key, X_name, pop_name,
+                                      length(col_exprs), r2d2_spec,
+                                      r2d2.names[brmi_key], overrides)
+            elseif isnothing(overrides)
+                push!(stmts, :($pop_name ~ popefs(; X=$X_name)))
+            else
+                length(overrides) == length(col_exprs) || error(
+                    "sbimpl: internal effect-prior alignment error for `$brmi_key`: " *
+                    "$(length(overrides)) priors for $(length(col_exprs)) columns")
+                beta_loc = Any[0.0 for _ in overrides]
+                beta_scale = Any[1.0 for _ in overrides]
+                for i in eachindex(overrides)
+                    isnothing(overrides[i]) && continue
+                    beta_loc[i], beta_scale[i] = _sb_effect_normal_args(overrides[i])
+                end
+                loc_expr = Expr(:vect, beta_loc...)
+                scale_expr = Expr(:vect, beta_scale...)
+                push!(stmts, :($pop_name ~ _popefs_normal(;
+                    X=$X_name, beta_loc=$loc_expr, beta_scale=$scale_expr)))
             end
-            loc_expr = Expr(:vect, beta_loc...)
-            scale_expr = Expr(:vect, beta_scale...)
-            push!(stmts, :($pop_name ~ _popefs_normal(;
-                X=$X_name, beta_loc=$loc_expr, beta_scale=$scale_expr)))
+            push!(summands, pop_name)
         end
-        push!(summands, pop_name)
     end
 
     cat_overrides = _sb_cat_effect_overrides(effect_overrides, brmi_key)
@@ -5648,9 +5682,21 @@ function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(mo1), t, su
                                term_overrides=Dict{Symbol,Any}())
     inner_name, raw = _sb_inner_data(:mo1, only(getargs(t)))
     n_levels, idx = _sb_level_index(raw)
-    n_levels >= 2 || error("sbimpl: `mo1($inner_name)` needs >= 2 levels (got $n_levels)")
-    idx_name = Symbol(inner_name, :_idx)
     col_name = Symbol(:mo1_, inner_name)
+    if n_levels < 2
+        # Single-level factor: 0 increments -> the monotonic effect is
+        # identically 0. Contribute a scalar `0.0` summand and NEVER ask Sb for
+        # the `simplex[0]` that `_sb_mo`'s dirichlet would declare -- Stan rejects
+        # a zero-dim SUM-constrained type (simplex / sum_to_zero_vector /
+        # unit_vector). A scalar keeps the summand list non-empty (so the
+        # assembler never emits `+()`) and broadcasts away against the other
+        # vector summands, WITHOUT leaking a derived `mo1_<c>` data column that
+        # `reprocess` could not regenerate. `mu ~ 1 + mo1(c)` stays a vector via
+        # the intercept; a bare `mu ~ 0 + mo1(c)` degenerates to the scalar 0.
+        push!(summands, 0.0)
+        return
+    end
+    idx_name = Symbol(inner_name, :_idx)
     data[idx_name] = idx
     alpha = _sb_mo_alpha_expr(term_overrides, t, n_levels)
     push!(stmts, :($col_name ~ _sb_mo(; x=$idx_name, alpha=$alpha)))
@@ -5668,30 +5714,17 @@ _sb_emit_direct_expr!(_stmts, _data, _target::Symbol, f, _t, _summands; kwargs..
     error("sbimpl: unsupported direct-summand term `$f`")
 
 # Categorical population-level predictor. Allocates K-1 betas via `_sb_cat`
-# and pushes the per-row contribution column into `summands`. K == 1 (single
-# level) degenerates to a zero column instead of erroring — see the in-body note.
+# and pushes the per-row contribution column into `summands`. No data-shape
+# branch: at K == 1 the usual `_sb_cat` path degenerates uniformly — `std_normal(;
+# n=0)` -> `vector[0]`, `append_row(0., beta)[x]` -> an all-zero column (the lone
+# level is absorbed by the intercept, or vanishes for an intercept-less
+# predictor). The `PreprocEntry(:factor)` provenance is recorded for every K, so
+# frozen reprocess / unseen-level fail-closed behaves identically at K == 1; and
+# an `effect(...)` prior on a K == 1 block simply has zero contrasts to apply to.
 function _sb_emit_cat!(stmts, data, t::NamedColumn, summands; prior=nothing)
     backing = parent(t)
     n_levels, idx = _sb_level_index(parent(backing))
     col_name = Symbol(:cat_, name(t))
-    if n_levels < 2
-        # Single-level categorical: K-1 = 0 treatment contrasts, so the term
-        # degenerates to a zero contribution — the lone level is absorbed by the
-        # intercept (or, for an intercept-less predictor, vanishes). Emit a literal
-        # zero column instead of erroring, so callers never need an
-        # `n_levels > 1 ? " + c" : ""` conditional: `y ~ 1 + c` ≡ `y ~ 1`, and a
-        # no-intercept `b ~ c` ≡ 0, at K == 1. (`_sb_cat` already degenerates via
-        # `std_normal(; n=0)`, but the assembler has no zero-summand branch —
-        # `length(summands)==0` would emit `+()` — so we contribute a column, not skip.)
-        #
-        # A K == 1 block has NO free contrast, so an `effect(...)` prior on it
-        # has nothing to apply to. It stays inert rather than raising, for the
-        # same reason the term itself degenerates instead of erroring: a caller
-        # must not need an `n_levels > 1 ?` conditional around its prior either.
-        data[col_name] = zeros(Float64, length(idx))
-        push!(summands, col_name)
-        return
-    end
     idx_name = Symbol(name(t), :_idx)
     n_name   = Symbol(name(t), :_n_levels)
     data[idx_name] = idx
@@ -5731,10 +5764,12 @@ end
 _sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(offset)}, gterms=(); kwargs...) =
     error("sbimpl: `offset(...)` is a population-level fixed contribution and cannot appear inside a random-effects term")
 _sb_ranef_cols_dispatch!(cols, data, stmts, t, ::Nothing, gterms=(); group_idx=nothing) =
-    push!(cols, _sb_predictor_col(t, data, stmts, gterms; group_idx))
+    _sb_maybe_push_col!(cols, _sb_predictor_col(t, data, stmts, gterms; group_idx))
 function _sb_ranef_cols_dispatch!(cols, data, _stmts, t, levels, _gterms=(); group_idx=nothing)
     n_levels, idx = _sb_level_index(levels)
-    n_levels >= 2 || error("sbimpl: categorical ranef term `$(name(t))` needs >= 2 levels (got $n_levels)")
+    # Single-level factor: `2:n_levels` is empty, so this contributes 0 dummy
+    # columns uniformly (no shape special-case) — a `(1 + c | g)` degenerates to
+    # intercept-only, matching how the population path drops a K=1 factor.
     fitted_levels = _sb_fit_levels(levels)
     for lvl in 2:n_levels
         col_name = Symbol(name(t), :_dummy_, lvl)
@@ -5950,6 +5985,15 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, 
         col_exprs = Any[]
         for t in gterms
             _sb_ranef_cols!(col_exprs, data, stmts, t, gterms; group_idx=idx_name)
+        end
+        if isempty(col_exprs)
+            # Every slope term degenerated to zero columns (e.g. `(0 + c | g)`
+            # with `c` single-level): the block spans no coefficients and is a
+            # no-op. Emit no Z / correlated draw and add no summand — an empty
+            # `hcat()` has no traceable shape (StanBlocks cannot type it), and a
+            # zero-column random effect contributes nothing. One uniform
+            # emission: the block degenerates rather than erroring.
+            return
         end
         Z_name = Symbol(:Z_, target, :_, g)
         k_name = Symbol(:n_terms_, target, :_, g)
@@ -6481,15 +6525,15 @@ function _sb_emit_r2d2_params!(stmts, data, r2d2_overrides)
             continue
         end
         push!(stmts, :($r2_name ~ beta($(spec.r2_a), $(spec.r2_b))))
-        if spec.n_shares == 1
-            # A one-element simplex is deterministically [1]; emitting a
-            # Dirichlet over it would add a degenerate constrained parameter.
-            data[phi_name] = [1.0]
-        else
-            alpha_name = Symbol(:r2d2_, target, :_alpha)
-            data[alpha_name] = fill(spec.alpha, spec.n_shares)
-            push!(stmts, :($phi_name ~ dirichlet($alpha_name)))
-        end
+        # No `n_shares == 1` special-case: a one-element simplex emits
+        # `simplex[1] $phi_name; $phi_name ~ dirichlet($alpha_name)` uniformly.
+        # It is deterministically [1.0] with zero sampler dimensions, so it costs
+        # nothing and keeps ONE Sb emission (no count-conditional branch). The
+        # `n_shares == 0` case above is a genuine no-op — zero non-intercept
+        # columns means no variance to decompose — not a degenerate-shape branch.
+        alpha_name = Symbol(:r2d2_, target, :_alpha)
+        data[alpha_name] = fill(spec.alpha, spec.n_shares)
+        push!(stmts, :($phi_name ~ dirichlet($alpha_name)))
         names[target] = (; r2_name, phi_name, tau_name)
     end
     names
@@ -7075,12 +7119,18 @@ _sb_collect_terms_expr!(acc, _, x) = push!(acc, x)
 # `pop_terms` is threaded so the intercept emitter can borrow N from a
 # data-backed peer in the same formula (deterministic) rather than
 # probing the shared `data` dict in hash order.
+# A predictor term may legitimately contribute NO column: a `mo(c)` over a
+# single-level factor has 0 increments, so its free-beta effect is identically 0
+# and it vanishes rather than emitting a `simplex[0]` (which Stan rejects). Such
+# terms return `nothing`; drop them instead of pushing a `nothing` into `cols`.
+_sb_maybe_push_col!(cols, ::Nothing) = cols
+_sb_maybe_push_col!(cols, c) = push!(cols, c)
 _sb_pop_cols!(cols, t, data, stmts, pop_terms=(); obs_n=nothing, ran_terms=(), direct_terms=(), target=nothing, group_block_lookup=Dict(), term_overrides=Dict{Symbol,Any}()) =
-    push!(cols, _sb_predictor_col(t, data, stmts, pop_terms; obs_n, ran_terms, direct_terms, target, group_block_lookup, term_overrides))
+    _sb_maybe_push_col!(cols, _sb_predictor_col(t, data, stmts, pop_terms; obs_n, ran_terms, direct_terms, target, group_block_lookup, term_overrides))
 _sb_pop_cols!(cols, t::ExprColumn, data, stmts, pop_terms=(); obs_n=nothing, ran_terms=(), direct_terms=(), target=nothing, group_block_lookup=Dict(), term_overrides=Dict{Symbol,Any}()) =
     _sb_pop_cols_expr!(cols, getf(t), t, data, stmts, pop_terms; obs_n, ran_terms, direct_terms, target, group_block_lookup, term_overrides)
 _sb_pop_cols_expr!(cols, ::Any, t, data, stmts, pop_terms=(); obs_n=nothing, ran_terms=(), direct_terms=(), target=nothing, group_block_lookup=Dict(), term_overrides=Dict{Symbol,Any}()) =
-    push!(cols, _sb_predictor_col(t, data, stmts, pop_terms; obs_n, ran_terms, direct_terms, target, group_block_lookup, term_overrides))
+    _sb_maybe_push_col!(cols, _sb_predictor_col(t, data, stmts, pop_terms; obs_n, ran_terms, direct_terms, target, group_block_lookup, term_overrides))
 _sb_pop_cols_expr!(cols, ::typeof(&), t, data, stmts, _pop_terms=(); kwargs...) =
     _sb_interaction_cols!(cols, t, data, stmts)
 
@@ -7132,9 +7182,8 @@ _sb_interaction_operand(t::ExprColumn, data, stmts) = begin
 end
 _sb_interaction_operand_kind(t, v, levels) = begin
     n_levels, idx = _sb_level_index(levels)
-    n_levels >= 2 || error(
-        "sbimpl: categorical interaction operand `$(name(t))` needs >= 2 levels (got $n_levels)"
-    )
+    # Single-level factor: the expander's `2:n_levels` loops are empty, so this
+    # contributes 0 interaction columns uniformly (no shape special-case).
     (; kind=:cat, name=name(t), n_levels, idx)
 end
 _sb_interaction_operand_kind(t, v, ::Nothing) = begin
@@ -7245,6 +7294,10 @@ _sb_predictor_col(t::Int, data, _stmts, pop_terms=(); obs_n::Union{Symbol,Nothin
     #      no group term) and whose target no observed likelihood references.
     #      A formula naming any live numeric data column resolves above.
     probe = _sb_n_obs_probe(pop_terms)
+    # Tier 1a is unguarded: keep it only when it named a live numeric datum,
+    # else fall through to the numeric-guarded tiers (a raw categorical/string
+    # peer must not become `num_elements(<non-numeric>)`).
+    isnothing(probe) || _sb_probe_is_live_numeric(data, probe) || (probe = nothing)
     isnothing(probe) && (probe = _sb_n_obs_probe_deep(pop_terms, data))
     isnothing(probe) && (probe = _sb_n_obs_probe_deep(direct_terms, data))
     isnothing(probe) && (probe = group_idx)
@@ -7295,8 +7348,16 @@ _sb_predictor_term!(stmts, data, ::typeof(mo), t;
     # `<c>_idx` code past the simplex (snag reprocess-freeze-80ddd7e4).
     levels = _sb_mo_levels_for_emission(data, idx_name, inner_name, raw)
     n_levels = length(levels)
-    n_levels >= 2 || error("sbimpl: `mo($inner_name)` needs >= 2 levels (got $n_levels)")
     col_name = Symbol(:mo_, inner_name)
+    if n_levels < 2
+        # Single-level factor: 0 increments -> the free-beta monotonic effect is
+        # identically 0. Contribute NO column (returning `nothing`, which
+        # `_sb_pop_cols!` / the ranef collector drop), so there is no free `beta`
+        # and no `simplex[0]` (which Stan rejects). A K=1 `mo(c)` therefore
+        # vanishes like a K=1 nominal factor: `mu ~ 1 + mo(c)` degenerates to
+        # `mu ~ 1`. Sb is never asked to be clever about the degenerate simplex.
+        return nothing
+    end
     data[idx_name] = _sb_apply_levels(levels, raw)
     _sb_record_preproc!(data, idx_name, PreprocEntry(:mo, levels, inner_name, true))
     alpha = _sb_mo_alpha_expr(term_overrides, t, n_levels)
@@ -7610,6 +7671,15 @@ _sb_n_obs_probe(terms) = begin
     nothing
 end
 
+# A probe name is usable in `num_elements(<name>)` only if it is a live numeric
+# Stan datum. Tier 1a (`_sb_n_obs_probe`) is unguarded and can name a raw
+# categorical/string column whose emitted Stan form is a derived label — the raw
+# column is non-numeric and is dropped before the SlicModel — so the caller
+# validates tier 1a's answer with this before using it, falling through to the
+# numeric-guarded tiers otherwise.
+_sb_probe_is_live_numeric(data, k::Symbol) =
+    haskey(data, k) && data[k] isa AbstractVector{<:Real}
+
 # Tier 1b of the intercept length probe (see `_sb_predictor_col(::Int, …)`):
 # descend into WRAPPED population terms for a data-backed column of this
 # formula's own row axis. Only consulted when the narrow probe above found
@@ -7840,7 +7910,12 @@ function _sb_lik_family!(stmts, target, ::Type{<:OrderedLogistic}, args::Tuple{A
         "sbimpl: `OrderedLogistic` expects integer outcome data for `$target`, got $(typeof(y_raw))"
     )
     n_levels = maximum(y)
-    n_levels >= 2 || error("sbimpl: `OrderedLogistic($target)` needs >= 2 levels (got $n_levels)")
+    # No `n_levels >= 2` guard: one uniform emission. At a single observed level
+    # `n_cut == 0`, so this emits `ordered[0]` cutpoints and
+    # `ordered_logistic(eta, cutpoints)` — both Stan-valid (`ordered[0]`
+    # constructs; `ordered_logistic_lpmf(1 | eta, empty)` contributes 0). A
+    # single-level outcome degenerates to a zero-information likelihood rather
+    # than a shape-conditional error.
     n_cut = n_levels - 1
     cut_name = Symbol(target, :_cutpoints)
     push!(stmts, :($cut_name::ordered[$n_cut] ~ std_normal()))
@@ -7959,9 +8034,10 @@ function _sb_lik_family!(stmts, target, ::Type{<:Ordinal},
         "got $(typeof(raw))")
     levels = _sb_fit_levels(raw)
     n_levels = length(levels)
-    n_levels >= 2 || error(
-        "sbimpl: `Ordinal($target)` needs at least two observed levels " *
-        "(got $n_levels)")
+    # No `n_levels >= 2` guard: one uniform emission. At a single observed level
+    # `n_cut == 0` — `ordered[0]`/`vector[0]` thresholds and an empty
+    # `rep_matrix(0., N, 0)` threshold effect, all Stan-valid, degenerating to a
+    # zero-information likelihood rather than a shape-conditional error.
     n_cut = n_levels - 1
     data[target] = _sb_apply_levels(levels, raw)
     _sb_record_preproc!(data, target, PreprocEntry(
@@ -8102,9 +8178,11 @@ _sb_lik_family!(_, target, ::Type{<:CircularVonMises}, args, ::NamedTuple, _) = 
 # observation's K logits per column, so transpose the row-wise hcat carrier.
 function _sb_lik_family!(stmts, target, ::Type{<:CategoricalLogit},
                          args::Tuple, data)
-    isempty(args) && error(
-        "sbimpl: `CategoricalLogit($target)` needs at least one non-reference " *
-        "linear predictor")
+    # No `isempty(args)` guard: one uniform emission. A single-level outcome has
+    # zero non-reference classes, so 0 predictors is the correct arity for it —
+    # `hcat(zero_reference)` is a `matrix[1, N]` and `categorical_logit` over one
+    # category is Stan-valid (contributes 0). The `expected_n_levels` check below
+    # still rejects a genuine predictor/level mismatch at K >= 2.
     all(a -> a isa NamedColumn && !(parent(a) isa DataColumn), args) || error(
         "sbimpl: `CategoricalLogit($target)` expects one existing scalar linear " *
         "predictor per non-reference class, got $(args)")
@@ -8115,9 +8193,7 @@ function _sb_lik_family!(stmts, target, ::Type{<:CategoricalLogit},
         "`$target`, got $(typeof(raw))")
     levels = _sb_fit_levels(raw)
     n_levels = length(levels)
-    n_levels >= 2 || error(
-        "sbimpl: `CategoricalLogit($target)` needs >= 2 outcome levels " *
-        "(got $n_levels)")
+    # No `n_levels >= 2` guard: one uniform emission (see the arity note above).
     expected_n_levels = length(args) + 1
     n_levels == expected_n_levels || error(
         "sbimpl: `CategoricalLogit($target)` observed $n_levels outcome levels " *
