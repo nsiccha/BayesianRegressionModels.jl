@@ -4315,10 +4315,13 @@ function _sb_dirichlet_alpha(target, args, kwargs)
               "vector `Dirichlet(alpha)` or a symmetric `Dirichlet(K, a)`; got ",
               "$(length(args)) positional arguments.")
     end
-    length(alpha) >= 2 || error(
-        "sbimpl: `$target ~ Dirichlet(...)` needs dimension >= 2, got ",
-        "$(length(alpha)). A one-element simplex is deterministically `[1.0]` — ",
-        "there is no parameter to sample; use the constant directly.")
+    length(alpha) >= 1 || error(
+        "sbimpl: `$target ~ Dirichlet(...)` needs dimension >= 1, got ",
+        "$(length(alpha)). A zero-element Dirichlet is undefined (no simplex).")
+    # A one-element simplex (`Dirichlet([a])` / `Dirichlet(1, a)`) is allowed and
+    # emits `simplex[1] $target; $target ~ dirichlet(...)` — deterministically
+    # `[1.0]` with zero sampler dimensions, so it costs nothing and keeps ONE
+    # uniform emission (no `dimension == 1 ? constant : simplex` branch).
     all(x -> isfinite(x) && x > 0, alpha) || error(
         "sbimpl: `$target ~ Dirichlet(...)` concentrations must be finite and ",
         "strictly positive, got $alpha.")
@@ -6469,15 +6472,15 @@ function _sb_emit_r2d2_params!(stmts, data, r2d2_overrides)
             continue
         end
         push!(stmts, :($r2_name ~ beta($(spec.r2_a), $(spec.r2_b))))
-        if spec.n_shares == 1
-            # A one-element simplex is deterministically [1]; emitting a
-            # Dirichlet over it would add a degenerate constrained parameter.
-            data[phi_name] = [1.0]
-        else
-            alpha_name = Symbol(:r2d2_, target, :_alpha)
-            data[alpha_name] = fill(spec.alpha, spec.n_shares)
-            push!(stmts, :($phi_name ~ dirichlet($alpha_name)))
-        end
+        # No `n_shares == 1` special-case: a one-element simplex emits
+        # `simplex[1] $phi_name; $phi_name ~ dirichlet($alpha_name)` uniformly.
+        # It is deterministically [1.0] with zero sampler dimensions, so it costs
+        # nothing and keeps ONE Sb emission (no count-conditional branch). The
+        # `n_shares == 0` case above is a genuine no-op — zero non-intercept
+        # columns means no variance to decompose — not a degenerate-shape branch.
+        alpha_name = Symbol(:r2d2_, target, :_alpha)
+        data[alpha_name] = fill(spec.alpha, spec.n_shares)
+        push!(stmts, :($phi_name ~ dirichlet($alpha_name)))
         names[target] = (; r2_name, phi_name, tau_name)
     end
     names

@@ -75,11 +75,14 @@ end
     @test sb.data[:r2d2_log_CL_share_idx] == [0, 1, 2]
     @test sb.data[:r2d2_log_CL_tau_bsv] == 0.5
 
-    # A single share needs no simplex parameter at all -- `phi == [1]` is a
-    # data constant, and `log_V` has exactly one non-intercept column.
-    @test sb.data[:r2d2_log_V_phi] == [1.0]
-    @test !occursin("simplex[r2d2_log_V_alpha_n]", code)
-    @test !haskey(sb.data, :r2d2_log_V_alpha)
+    # A single share (`log_V` has exactly one non-intercept column) now emits a
+    # `simplex[1]` uniformly -- no `n_shares == 1` special-case. simplex[1] is
+    # deterministically [1.0] with zero sampler dimensions, so it costs nothing
+    # and keeps ONE Sb emission. `phi` is a parameter now, not a data constant.
+    @test occursin("simplex[r2d2_log_V_alpha_n] r2d2_log_V_phi;", code)
+    @test occursin("r2d2_log_V_phi ~ dirichlet(r2d2_log_V_alpha);", code)
+    @test sb.data[:r2d2_log_V_alpha] == [0.5]
+    @test !haskey(sb.data, :r2d2_log_V_phi)
 
     # Column variances are data-only, so they hoist to transformed data.
     @test occursin("vector[(2 + 1)] r2d2_log_CL_varx = brm_col_variances(", code)
