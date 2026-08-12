@@ -533,9 +533,9 @@ kernel_builder = @brm begin
 end
 
 kernel_schedule(n; subject=collect(1:n)) = (;
-    t=[collect(1.0:3.0) for _ in 1:n],
+    t=[collect(1.0:(i + 2)) for i in 1:n],
     dose=fill(100.0, n),
-    dv=[collect(1.0:3.0) ./ 10 for _ in 1:n],
+    dv=[collect(1.0:(i + 2)) ./ 10 for i in 1:n],
     subject,
 )
 
@@ -629,11 +629,12 @@ kernel_schedule(n; subject=collect(1:n)) = (;
     @test length(draw_coordinates) == last(ends)
     @test length(loglik_coordinates) == length(ends)
 
-    # `segments` is plumbed from StanBlocks either way. The plate's collected
-    # return carrier is a plate member, not an observation twin, so it carries
-    # none — this asserts the field exists and stays honest rather than
-    # inventing boundaries.
-    @test primary.segments === nothing
+    # A varying-length plate member carries its OWN inclusive group ends, just
+    # like the observation twins. These compose with the primary carrier's
+    # coordinates without parsing the compiler-owned backing name.
+    @test primary.segments == ends
+    @test brm_output(d, :mu).segments == ends
+    @test brm_output(d, :CL).segments === nothing
 
     # A builder-backed kernel can rebuild for genuinely new groups and can
     # reprocess the same fitted groups without changing parameter coordinates.
@@ -763,11 +764,11 @@ qt_kernel_builder = @brm begin
 end
 
 qt_schedule(n) = (;
-    t=[collect(1.0:3.0) for _ in 1:n],
+    t=[collect(1.0:(i + 2)) for i in 1:n],
     dose=fill(100.0, n),
-    dv=[collect(1.0:3.0) ./ 10 for _ in 1:n],
-    qt_y=[collect(1.0:2.0) .+ 10.0 for _ in 1:n],
-    qt_idx=[[1, 3] for _ in 1:n],
+    dv=[collect(1.0:(i + 2)) ./ 10 for i in 1:n],
+    qt_y=[collect(1.0:i) .+ 10.0 for i in 1:n],
+    qt_idx=[collect(1:i) for i in 1:n],
     subject=collect(1:n),
 )
 
@@ -786,6 +787,11 @@ qt_schedule(n) = (;
     @test published.declaration.target === :pk_loc     # still the plate's
     @test published.name !== :qt_loc                   # a compiler-owned carrier
 
+    sched = qt_schedule(nsub)
+    pk_ends = cumsum(length.(sched.t))
+    qt_ends = cumsum(length.(sched.qt_idx))
+    @test published.segments == qt_ends
+
     # It is a PLATE member, resolved by the same rule as the collected return —
     # not a name matched by prefix or picked by descriptor order.
     plate_outputs = [o for o in d.outputs
@@ -793,8 +799,12 @@ qt_schedule(n) = (;
     @test published.name in (o.name for o in plate_outputs)
 
     # EVERY named cell value, not just one: the other local and the return.
-    @test brm_output(d, :conc).logical === :conc
-    @test brm_output(d, :pk_loc).logical === :pk_loc
+    conc = brm_output(d, :conc)
+    ret = brm_output(d, :pk_loc)
+    @test conc.logical === :conc
+    @test ret.logical === :pk_loc
+    @test conc.segments == pk_ends
+    @test ret.segments == pk_ends
     @test Set([:qt_loc, :conc, :pk_loc]) ⊆
           Set(o.logical for o in d.outputs if !isnothing(o.logical))
 
@@ -809,8 +819,12 @@ qt_schedule(n) = (;
     constrained_names = StanBlocks.BridgeStan.param_names(
         prob.model; include_tp=true, include_gq=true)
     qt_cols = brm_output_coordinates(d, :qt_loc, constrained_names)
-    @test length(qt_cols) == sum(length, qt_schedule(nsub).qt_idx)
+    @test length(qt_cols) == last(qt_ends)
     @test all(startswith(string(published.name) * "."), constrained_names[qt_cols])
+    qt_starts = [1; qt_ends[1:end-1] .+ 1]
+    qt_groups = [qt_cols[s:e] for (s, e) in zip(qt_starts, qt_ends)]
+    @test length.(qt_groups) == length.(sched.qt_idx)
+    @test reduce(vcat, qt_groups) == qt_cols
 
     # The published value is the NOISE-FREE location, not the predictive twin
     # drawn around it. They are different outputs at different Stan stages.
@@ -827,8 +841,6 @@ qt_schedule(n) = (;
     # the collected return and the named cell value. Distinct names (asserted,
     # so an aliasing emitter fails here rather than passing vacuously),
     # identical numbers.
-    ret = brm_output(d, :pk_loc)
-    conc = brm_output(d, :conc)
     @test ret.name !== conc.name
     tp_names = StanBlocks.BridgeStan.param_names(
         prob.model; include_tp=true, include_gq=false)
@@ -841,9 +853,17 @@ qt_schedule(n) = (;
     @test all(isfinite, tp[brm_output_coordinates(d, :qt_loc, tp_names)])
 
     # Replay keeps every cell value addressable on new subjects.
-    replayed = brm_execute(d, :replay, qt_schedule(5))
+    replay_sched = qt_schedule(5)
+    replayed = brm_execute(d, :replay, replay_sched)
     @test brm_output(replayed, :qt_loc).logical === :qt_loc
     @test brm_output(replayed, :conc).logical === :conc
+    @test brm_output(replayed, :pk_loc).logical === :pk_loc
+    @test brm_output(replayed, :qt_loc).segments ==
+          cumsum(length.(replay_sched.qt_idx))
+    @test brm_output(replayed, :conc).segments ==
+          cumsum(length.(replay_sched.t))
+    @test brm_output(replayed, :pk_loc).segments ==
+          cumsum(length.(replay_sched.t))
 end
 
 @testset "two cells naming one value — ambiguity, not failure" begin
