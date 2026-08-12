@@ -115,7 +115,7 @@ export parse!, _brm, stan_code, reprocess, restan_data, generative_plan
 # Post-fit prediction — the population-level ("nore") and transported
 # ("recov") modes, plus the random-effect block description both stand on.
 export RanefBlock, ranef_blocks, ranef_coordinates,
-       population_draws, transport_draws
+       population_draws, transport_draws, term_draws
 export AdaptiveCenteringBlock, adaptive_centering_blocks,
        adaptive_centering_problem
 

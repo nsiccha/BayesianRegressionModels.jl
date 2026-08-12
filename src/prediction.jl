@@ -667,3 +667,82 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
     end
     out
 end
+
+"""
+    term_draws(d::BRMDescriptor, draws, unc_names;
+               predictor::Symbol, term::Symbol, to::Symbol = :zero) -> Matrix{Float64}
+
+Ablate ONE named linear-predictor term in fitted UNCONSTRAINED draws: a copy of
+`draws` with that term's basis-weight coordinates set to zero, so a subsequent
+`brm_execute(d, :predict; draws = …)` regenerates every descriptor output with
+the term's contribution removed and all other structure — every other term, the
+population coefficients, the residual scales, the term's own length-scale and
+marginal sd — held at its fitted value.
+
+This is the structural counterpart to [`population_draws`](@ref): that zeroes a
+grouping factor's random effects (a *level* intervention); this zeroes one
+formula *term*. Both are draw-matrix operations on the unconstrained parameter
+vector, resolved BY NAME, and neither reaches into the constrained space or the
+compiler-owned coordinate order.
+
+- `d` — the [`BRMDescriptor`](@ref) the draws were fitted under (the same object
+  passed to `brm_execute(d, :predict; …)`).
+- `draws` — draws × coordinates, in `unc_names` order: the unconstrained
+  posterior draw matrix `:predict` consumes.
+- `unc_names` — that model's `param_unc_names` (BridgeStan), in its order. The
+  carrier is looked up by Stan name, so nothing here depends on that order.
+- `predictor` — the linear-predictor name (`:log_F`).
+- `term` — the public term label BRM derives from the formula
+  (`:hsgp_op_log_dose`), the same labels [`brm_term_coordinates`](@ref) uses.
+- `to` — the target value for the term's carrier. Only `:zero` is supported.
+
+Returns a fresh draws × `length(unc_names)` matrix; `draws` is left untouched.
+
+# Why zeroing removes exactly the term, and only for `hsgp`
+
+An ungrouped `hsgp(x; …)` emits `beta_raw ~ std_normal()` and contributes the
+summand `PHI * (sqrt_spd .* beta_raw)` to its linear predictor (`_sb_hsgp` /
+`_sb_hsgp_aniso`, sbimpl.jl). `beta_raw` is a raw standard normal — an
+unconstrained-domain parameter whose unconstrained coordinate IS the value
+multiplied into the predictor — so setting it to zero removes that summand
+exactly, whatever the fitted length-scale (`rho`) and marginal sd (`sigma`).
+
+No other emitted term shares this "zero the raw carrier ⇒ remove the
+contribution" invariant, so `term_draws` admits ONLY the ungrouped-`hsgp`
+basis-weight carrier and fails closed on everything else. It resolves the
+carrier through [`brm_term_coordinates`](@ref)'s `parameter = :basis_weights`
+role, which exists only for an ungrouped `hsgp`; a grouped `hsgp(…; by = …)`
+(whose weights are a correlated random-effect block — zero its levels with
+[`population_draws`](@ref) instead), an `mo(…)` simplex, or a population term
+exposes no such role and errors rather than zeroing a coordinate whose removal
+would mean something else. `to = :zero` is likewise the only value with an
+established meaning; any other target errors.
+
+# Example
+
+```julia
+unc     = BridgeStan.param_unc_names(stan_model)          # unconstrained names
+full    = brm_execute(d, :predict; problem, draws, seed)  # every term present
+linear  = term_draws(d, draws, unc;
+                     predictor = :log_F, term = :hsgp_op_log_dose)
+no_hsgp = brm_execute(d, :predict; problem, draws = linear, seed)  # term removed
+```
+"""
+function term_draws(d::BRMDescriptor, draws::AbstractMatrix, unc_names;
+                    predictor::Symbol, term::Symbol, to::Symbol = :zero)
+    to === :zero || error(
+        "BRM prediction: `term_draws` supports only `to = :zero` (got `$to`). ",
+        "Zeroing an ungrouped `hsgp` term's basis weights removes exactly its ",
+        "predictor contribution; no other target value has an established ",
+        "meaning, so it is refused rather than guessed.")
+    _ranef_check_draws(draws, unc_names)
+    # Resolve the term's basis-weight carrier BY NAME against the UNCONSTRAINED
+    # names. `brm_term_coordinates` matches emitted names and validates the
+    # count, and `:basis_weights` resolves only for an ungrouped `hsgp` — so a
+    # non-hsgp / grouped-hsgp term fails closed here rather than in `:predict`.
+    resolved = brm_term_coordinates(d, predictor, unc_names;
+                                    term, parameter = :basis_weights)
+    out = Matrix{Float64}(draws)
+    out[:, resolved.coordinates] .= 0.0
+    out
+end
