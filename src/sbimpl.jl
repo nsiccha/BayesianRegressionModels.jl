@@ -5648,7 +5648,6 @@ function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(mo1), t, su
                                term_overrides=Dict{Symbol,Any}())
     inner_name, raw = _sb_inner_data(:mo1, only(getargs(t)))
     n_levels, idx = _sb_level_index(raw)
-    n_levels >= 2 || error("sbimpl: `mo1($inner_name)` needs >= 2 levels (got $n_levels)")
     idx_name = Symbol(inner_name, :_idx)
     col_name = Symbol(:mo1_, inner_name)
     data[idx_name] = idx
@@ -5668,30 +5667,17 @@ _sb_emit_direct_expr!(_stmts, _data, _target::Symbol, f, _t, _summands; kwargs..
     error("sbimpl: unsupported direct-summand term `$f`")
 
 # Categorical population-level predictor. Allocates K-1 betas via `_sb_cat`
-# and pushes the per-row contribution column into `summands`. K == 1 (single
-# level) degenerates to a zero column instead of erroring — see the in-body note.
+# and pushes the per-row contribution column into `summands`. No data-shape
+# branch: at K == 1 the usual `_sb_cat` path degenerates uniformly — `std_normal(;
+# n=0)` -> `vector[0]`, `append_row(0., beta)[x]` -> an all-zero column (the lone
+# level is absorbed by the intercept, or vanishes for an intercept-less
+# predictor). The `PreprocEntry(:factor)` provenance is recorded for every K, so
+# frozen reprocess / unseen-level fail-closed behaves identically at K == 1; and
+# an `effect(...)` prior on a K == 1 block simply has zero contrasts to apply to.
 function _sb_emit_cat!(stmts, data, t::NamedColumn, summands; prior=nothing)
     backing = parent(t)
     n_levels, idx = _sb_level_index(parent(backing))
     col_name = Symbol(:cat_, name(t))
-    if n_levels < 2
-        # Single-level categorical: K-1 = 0 treatment contrasts, so the term
-        # degenerates to a zero contribution — the lone level is absorbed by the
-        # intercept (or, for an intercept-less predictor, vanishes). Emit a literal
-        # zero column instead of erroring, so callers never need an
-        # `n_levels > 1 ? " + c" : ""` conditional: `y ~ 1 + c` ≡ `y ~ 1`, and a
-        # no-intercept `b ~ c` ≡ 0, at K == 1. (`_sb_cat` already degenerates via
-        # `std_normal(; n=0)`, but the assembler has no zero-summand branch —
-        # `length(summands)==0` would emit `+()` — so we contribute a column, not skip.)
-        #
-        # A K == 1 block has NO free contrast, so an `effect(...)` prior on it
-        # has nothing to apply to. It stays inert rather than raising, for the
-        # same reason the term itself degenerates instead of erroring: a caller
-        # must not need an `n_levels > 1 ?` conditional around its prior either.
-        data[col_name] = zeros(Float64, length(idx))
-        push!(summands, col_name)
-        return
-    end
     idx_name = Symbol(name(t), :_idx)
     n_name   = Symbol(name(t), :_n_levels)
     data[idx_name] = idx
@@ -5734,7 +5720,9 @@ _sb_ranef_cols_dispatch!(cols, data, stmts, t, ::Nothing, gterms=(); group_idx=n
     push!(cols, _sb_predictor_col(t, data, stmts, gterms; group_idx))
 function _sb_ranef_cols_dispatch!(cols, data, _stmts, t, levels, _gterms=(); group_idx=nothing)
     n_levels, idx = _sb_level_index(levels)
-    n_levels >= 2 || error("sbimpl: categorical ranef term `$(name(t))` needs >= 2 levels (got $n_levels)")
+    # Single-level factor: `2:n_levels` is empty, so this contributes 0 dummy
+    # columns uniformly (no shape special-case) — a `(1 + c | g)` degenerates to
+    # intercept-only, matching how the population path drops a K=1 factor.
     fitted_levels = _sb_fit_levels(levels)
     for lvl in 2:n_levels
         col_name = Symbol(name(t), :_dummy_, lvl)
@@ -7132,9 +7120,8 @@ _sb_interaction_operand(t::ExprColumn, data, stmts) = begin
 end
 _sb_interaction_operand_kind(t, v, levels) = begin
     n_levels, idx = _sb_level_index(levels)
-    n_levels >= 2 || error(
-        "sbimpl: categorical interaction operand `$(name(t))` needs >= 2 levels (got $n_levels)"
-    )
+    # Single-level factor: the expander's `2:n_levels` loops are empty, so this
+    # contributes 0 interaction columns uniformly (no shape special-case).
     (; kind=:cat, name=name(t), n_levels, idx)
 end
 _sb_interaction_operand_kind(t, v, ::Nothing) = begin
@@ -7295,7 +7282,6 @@ _sb_predictor_term!(stmts, data, ::typeof(mo), t;
     # `<c>_idx` code past the simplex (snag reprocess-freeze-80ddd7e4).
     levels = _sb_mo_levels_for_emission(data, idx_name, inner_name, raw)
     n_levels = length(levels)
-    n_levels >= 2 || error("sbimpl: `mo($inner_name)` needs >= 2 levels (got $n_levels)")
     col_name = Symbol(:mo_, inner_name)
     data[idx_name] = _sb_apply_levels(levels, raw)
     _sb_record_preproc!(data, idx_name, PreprocEntry(:mo, levels, inner_name, true))
