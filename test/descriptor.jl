@@ -234,7 +234,12 @@ end
     @test byname[:pop_mu_beta_pop].declaration.target === :pop_mu
     @test byname[:pop_mu_beta_pop].logical === nothing
     @test byname[:mu].role === :linear_predictor
+    @test byname[:mu].logical === :mu
     @test byname[:mu].declaration === nothing
+    @test brm_output(d, :mu; role=:linear_predictor).name === :mu
+    @test brm_output_coordinates(
+        d, :mu, ["mu.1", "mu.2", "y_gen.1"];
+        role=:linear_predictor) == [1, 2]
 
     @test byname[:r_mu_g].role === :random_effect
     @test byname[:r_mu_g_xi].role === :random_effect

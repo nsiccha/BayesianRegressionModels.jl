@@ -511,7 +511,8 @@ function _brm_kernel_cell_values(brmi)
     cells
 end
 
-function _brm_logical_outputs(stan, by_name, targets, cell_values)
+function _brm_logical_outputs(stan, by_name, targets, cell_values,
+                              formula_predictors)
     logical = Dict{Symbol,Symbol}()
     output_names = Set{Symbol}(o.name for o in stan.outputs)
     model_names = Set{Symbol}(keys(stan.model))
@@ -553,6 +554,16 @@ function _brm_logical_outputs(stan, by_name, targets, cell_values)
     # query takes `role` to disambiguate.
     for o in stan.outputs
         isnothing(o.source) || claim!(o.name, o.source)
+    end
+
+    # A formula-level linear predictor is not a declaration: sbimpl emits it
+    # from an `=` assignment after combining the population and group blocks.
+    # Its public formula name is nevertheless stable and is already the exact
+    # rule used below to assign `role = :linear_predictor`. Claim that same
+    # output here so role-qualified posterior lookup does not require a
+    # consumer to fall back to the emitter-owned Stan name.
+    for logical in formula_predictors
+        logical in output_names && claim!(logical, logical)
     end
 
     # The outputs one declaration owns, and the emitted carriers a BRM-side name
@@ -829,8 +840,10 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
         by_name[sname] = d
     end
     targets = collect(keys(by_name))
-    logical_outputs = _brm_logical_outputs(stan, by_name, targets,
-                                           _brm_kernel_cell_values(brmi))
+    population_effects = _brm_population_effect_entries(brmi)
+    logical_outputs = _brm_logical_outputs(
+        stan, by_name, targets, _brm_kernel_cell_values(brmi),
+        (e.logical for e in population_effects))
 
     # Linear-predictor names come from the FORMULA, not from the emitted body:
     # `mu = pop_mu + r_mu_g` is an `=`, so no declaration binds it, yet it is
@@ -845,7 +858,6 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
     # matched no emitted block for a linked LHS, so the coefficient vector
     # silently lost its `labels` — the one thing a consumer mounts a descriptor
     # for — while the same model written with an inert `log_Vc` name kept them.
-    population_effects = _brm_population_effect_entries(brmi)
     lps = Set{Symbol}(e.logical for e in population_effects)
     pop_lp = Dict{Symbol,Symbol}(e.block => e.logical for e in population_effects)
 
