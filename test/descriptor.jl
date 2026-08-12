@@ -756,7 +756,12 @@ qt_kernel_builder = @brm begin
     qt_base  ~ 1 + (1 | p | subject)
     pk_loc ~ kernel(t, dose, dv, qt_y, qt_idx, log_CL, qt_base) do ts, dd, yy, qy, qidx, lCL, qbase
         conc = (dd / 10.0) .* exp(-exp(lCL) .* ts)
-        qt_loc = qbase .+ 2.0 .* conc[qidx]
+        # Reporter shape: a dense concentration workspace sized from the
+        # largest read index, then projected onto a ragged observation axis.
+        # Descriptor reflection must evaluate Stan's collection `max` with
+        # Julia `maximum`; Base.max(::Vector) is not a valid call.
+        dense_conc = rep_vector(qbase, max(qidx))
+        qt_loc = dense_conc[qidx] .+ 2.0 .* conc[qidx]
         qy ~ normal(qt_loc, qt_sigma)
         yy ~ normal(conc, sigma)
         conc
@@ -768,7 +773,10 @@ qt_schedule(n) = (;
     dose=fill(100.0, n),
     dv=[collect(1.0:(i + 2)) ./ 10 for i in 1:n],
     qt_y=[collect(1.0:i) .+ 10.0 for i in 1:n],
-    qt_idx=[collect(1:i) for i in 1:n],
+    # Read indices deliberately skip the first two dense locations: the
+    # observation-axis length (`length`) and dense workspace extent (`max`)
+    # are different contracts, as in the reported joint PK/QT model.
+    qt_idx=[collect(3:(i + 2)) for i in 1:n],
     subject=collect(1:n),
 )
 
@@ -790,6 +798,7 @@ qt_schedule(n) = (;
     sched = qt_schedule(nsub)
     pk_ends = cumsum(length.(sched.t))
     qt_ends = cumsum(length.(sched.qt_idx))
+    dense_ends = cumsum(maximum.(sched.qt_idx))
     @test published.segments == qt_ends
 
     # It is a PLATE member, resolved by the same rule as the collected return —
@@ -800,12 +809,15 @@ qt_schedule(n) = (;
 
     # EVERY named cell value, not just one: the other local and the return.
     conc = brm_output(d, :conc)
+    dense_conc = brm_output(d, :dense_conc)
     ret = brm_output(d, :pk_loc)
     @test conc.logical === :conc
+    @test dense_conc.logical === :dense_conc
     @test ret.logical === :pk_loc
     @test conc.segments == pk_ends
+    @test dense_conc.segments == dense_ends
     @test ret.segments == pk_ends
-    @test Set([:qt_loc, :conc, :pk_loc]) ⊆
+    @test Set([:qt_loc, :conc, :dense_conc, :pk_loc]) ⊆
           Set(o.logical for o in d.outputs if !isnothing(o.logical))
 
     # It compiles and the carrier is real. `:qt_loc` has one element per QT
@@ -857,11 +869,14 @@ qt_schedule(n) = (;
     replayed = brm_execute(d, :replay, replay_sched)
     @test brm_output(replayed, :qt_loc).logical === :qt_loc
     @test brm_output(replayed, :conc).logical === :conc
+    @test brm_output(replayed, :dense_conc).logical === :dense_conc
     @test brm_output(replayed, :pk_loc).logical === :pk_loc
     @test brm_output(replayed, :qt_loc).segments ==
           cumsum(length.(replay_sched.qt_idx))
     @test brm_output(replayed, :conc).segments ==
           cumsum(length.(replay_sched.t))
+    @test brm_output(replayed, :dense_conc).segments ==
+          cumsum(maximum.(replay_sched.qt_idx))
     @test brm_output(replayed, :pk_loc).segments ==
           cumsum(length.(replay_sched.t))
 end
