@@ -209,6 +209,8 @@ end
 @testset "kernel(...) — secondary row axis via ragged(x, group)" begin
     df = ev_df()
     sb = SBBRMI(ev_model(df); mod = @__MODULE__)
+    descriptor = brm_descriptor(
+        sb; name = :joint_pk_qt_brm2_direct_linear, highlights = ())
 
     @testset "the LP stays a parameter; the plate gets an index column" begin
         @test !haskey(sb.data, :log_F)
@@ -217,6 +219,14 @@ end
         # String labels join rows on the Julia side only; Stan cannot type them.
         @test !haskey(sb.data, :dose_subject)
         @test !haskey(sb.data, :subject)
+
+        # The fitted event-axis predictor is a public posterior quantity. Its
+        # formula name, role, categorical design and HSGP basis survive as one
+        # semantic address; consumers do not select its emitted Stan spelling.
+        log_F = brm_output(descriptor, :log_F; role = :linear_predictor)
+        @test log_F.name === :log_F
+        @test log_F.logical === :log_F
+        @test log_F.declaration === nothing
     end
 
     @testset "transpile + stanc" begin
@@ -268,6 +278,9 @@ end
               sb.data[:omega2_hsgp_log_dose]
         @test StanBlocks.stan_code(replayed.model) == StanBlocks.stan_code(sb.model)
         @test reprocess(sb, df).data == sb.data
+        @test brm_output(
+            brm_descriptor(replayed; name = :joint_pk_qt_replay, highlights = ()),
+            :log_F; role = :linear_predictor).logical === :log_F
 
         unseen = merge(replay_df, (; subject = ["s3", "s1", "s9"]))
         @test_throws "unseen level" reprocess(sb, unseen)
@@ -288,6 +301,24 @@ end
             @test isfinite(lp)
             @test length(g) == dim
             @test all(isfinite, g)
+
+            # The semantic selector and the former consumer workaround select
+            # the exact same constrained posterior values. The workaround is
+            # retained only as the independent acceptance oracle here.
+            constrained_names = StanBlocks.BridgeStan.param_names(
+                prob.model; include_tp = true, include_gq = false)
+            semantic_coordinates = brm_output_coordinates(
+                descriptor, :log_F, constrained_names;
+                role = :linear_predictor)
+            workaround_coordinates = findall(
+                n -> n == "log_F" || startswith(n, "log_F."),
+                constrained_names)
+            @test semantic_coordinates == workaround_coordinates
+            @test length(semantic_coordinates) == length(df.log_dose)
+            constrained = StanBlocks.BridgeStan.param_constrain(
+                prob.model, q; include_tp = true, include_gq = false)
+            @test constrained[semantic_coordinates] ==
+                  constrained[workaround_coordinates]
 
             # The event-axis blocks are REAL parameters, not data folded into a
             # constant: widening the event-axis `hsgp` basis by 3 must widen the
