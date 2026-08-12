@@ -437,7 +437,7 @@ end
 end
 
 # A categorical / `factor(...)` predictor does NOT live in `beta_pop`: it owns a
-# `cat_<c>_beta` contrast vector emitted by its own submodel, which is exactly
+# `cat_<lp>_<c>_beta` contrast vector emitted by its own submodel, which is exactly
 # why `popcoefnames` excludes it. Before this, that vector's `std_normal()` was
 # hardcoded with no seam at all — the only way to change it was to hand-build
 # K-1 dummy columns, which loses `factor()`'s frozen training levels (and so its
@@ -455,7 +455,7 @@ end
         mu ~ 1 + factor(g) + x
         y ~ Normal(mu, 1)
     end
-    @test occursin("cat_g_beta ~ std_normal();", code_of(plain))
+    @test occursin("cat_mu_g_beta ~ std_normal();", code_of(plain))
     # The categorical is still deliberately absent from `beta_pop`'s labels.
     @test popcoefnames(plain, :mu) == [:Intercept, :x]
 
@@ -468,7 +468,7 @@ end
     code = BayesianRegressionModels.stan_code(sb)
     @test StanBlocks.stan.transpiles(sb.model)
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
-    @test occursin("cat_g_beta ~ normal(0.0, 0.5);", code)
+    @test occursin("cat_mu_g_beta ~ normal(0.0, 0.5);", code)
     # One shared `(location, scale)` over the K-1 contrasts; `beta_pop` untouched.
     @test occursin("pop_mu_beta_pop ~ std_normal();", code)
     @test popcoefnames(configured, :mu) == [:Intercept, :x]
@@ -495,7 +495,7 @@ end
         effect(mu, g) ~ Normal(0.0, 0.5)
         y ~ Normal(mu, 1)
     end
-    @test occursin("cat_g__ref_3_beta ~ normal(0.0, 0.5);", code_of(reffed))
+    @test occursin("cat_mu_g__ref_3_beta ~ normal(0.0, 0.5);", code_of(reffed))
 
     # An intercept-less formula has no `beta_pop` labels at all; the contrast
     # block must stay reachable anyway.
@@ -505,7 +505,7 @@ end
         y ~ Normal(mu, 1)
     end
     @test popcoefnames(no_intercept, :mu) == Symbol[]
-    @test occursin("cat_g_beta ~ normal(0.0, 0.5);", code_of(no_intercept))
+    @test occursin("cat_mu_g_beta ~ normal(0.0, 0.5);", code_of(no_intercept))
 
     # Same column at two reference levels: each EXACT emitted name binds to its
     # own block, so the plain block never loses its name to the other's alias.
@@ -516,8 +516,8 @@ end
         y ~ Normal(mu, 1)
     end
     both_code = code_of(both)
-    @test occursin("cat_g_beta ~ normal(0.0, 0.5);", both_code)
-    @test occursin("cat_g__ref_3_beta ~ normal(0.0, 0.25);", both_code)
+    @test occursin("cat_mu_g_beta ~ normal(0.0, 0.5);", both_code)
+    @test occursin("cat_mu_g__ref_3_beta ~ normal(0.0, 0.25);", both_code)
 
     # But an alias wanted by two blocks binds to neither — refuse, never guess.
     ambiguous_ref = @brm cat_df begin
@@ -544,8 +544,8 @@ end
         y ~ Normal(mu, 1)
     end
     layered_code = BayesianRegressionModels.stan_code(SBBRMI(layered; mod=@__MODULE__))
-    @test occursin("cat_g_beta ~ normal(0.0, 0.25);", layered_code)
-    @test !occursin("cat_g_beta ~ normal(0.0, 0.5);", layered_code)
+    @test occursin("cat_mu_g_beta ~ normal(0.0, 0.25);", layered_code)
+    @test !occursin("cat_mu_g_beta ~ normal(0.0, 0.5);", layered_code)
 
     # Two addresses of EQUAL specificity reaching one block have no winner, and
     # that is an error rather than a silent last-writer-wins.
@@ -573,8 +573,53 @@ end
         y ~ Normal(mu, 1)
     end
     mixed_code = code_of(mixed)
-    @test occursin("cat_g_beta ~ normal(0.0, 0.5);", mixed_code)
+    @test occursin("cat_mu_g_beta ~ normal(0.0, 0.5);", mixed_code)
     @test occursin("[1.0, 0.25]'", mixed_code)
+
+    # One categorical source may be reused across any number of response
+    # formulas. Every formula owns a separate contrast parameter and its own
+    # `effect(response, source)` prior, including linked LHS predictors whose
+    # emitted namespace carries the link spelling.
+    repeated_df = (;
+        indication=[1, 2, 1, 2],
+        y=zeros(4),
+    )
+    repeated = @brm repeated_df begin
+        log(Vc) ~ 1 + indication
+        log(k10) ~ 1 + indication
+        log(k12) ~ 1 + indication
+        log(k21) ~ 1 + indication
+        log(ka) ~ 1 + indication
+        qt_base ~ 1 + indication
+        qt_slope ~ 1 + indication
+
+        effect(Vc, indication) ~ Normal(0.0, 0.11)
+        effect(k10, indication) ~ Normal(0.0, 0.12)
+        effect(k12, indication) ~ Normal(0.0, 0.13)
+        effect(k21, indication) ~ Normal(0.0, 0.14)
+        effect(ka, indication) ~ Normal(0.0, 0.15)
+        effect(qt_base, indication) ~ Normal(0.0, 0.16)
+        effect(qt_slope, indication) ~ Normal(0.0, 0.17)
+
+        y ~ Normal(Vc + k10 + k12 + k21 + ka + qt_base + qt_slope, 1.0)
+    end
+    repeated_sb = SBBRMI(repeated; mod=@__MODULE__)
+    repeated_code = BayesianRegressionModels.stan_code(repeated_sb)
+    @test StanBlocks.stan.transpiles(repeated_sb.model)
+    @test StanBlocks.stanc_check(repeated_code; warn_pedantic=false).ok
+    EFFECT_PRIOR_RUNTIME && @test StanBlocks.stan.compiles(repeated_sb.model)
+    @test !isempty(brm_descriptor(repeated_sb).outputs)
+    for (block, scale) in (
+        (:cat_log_Vc_indication_beta, 0.11),
+        (:cat_log_k10_indication_beta, 0.12),
+        (:cat_log_k12_indication_beta, 0.13),
+        (:cat_log_k21_indication_beta, 0.14),
+        (:cat_log_ka_indication_beta, 0.15),
+        (:cat_qt_base_indication_beta, 0.16),
+        (:cat_qt_slope_indication_beta, 0.17),
+    )
+        @test occursin("$block ~ normal(0.0, $scale);", repeated_code)
+    end
 
     # `factor()`'s frozen training levels — the guard the hand-built-dummy
     # workaround silently gives up — still fire on the configured model.

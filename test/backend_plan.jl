@@ -275,8 +275,8 @@ end
     @test location == [0.0, 0.5, 0.5, 0.0]
     @test scale == [1.0, 0.25, 0.25, 1.0]
 
-    # The StanBlocks backend retains its established `cat_g_beta` parameter
-    # block, but shares the same ordered level-coding primitive.
+    # The StanBlocks backend owns a predictor-qualified `cat_mu_g_beta`
+    # parameter block, but shares the same ordered level-coding primitive.
     sb = SBBRMI(brmi)
     @test sb.data[:g_idx] == df.g
     @test sb.preproc[:g_idx].const_ == [1, 2, 3]

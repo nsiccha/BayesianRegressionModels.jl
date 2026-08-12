@@ -53,11 +53,9 @@ end
 # ── Mock data ─────────────────────────────────────────────────────────────────
 # Ragged dose/dtimes match real term shapes (zero edits at swap-in).
 # 4 observations, 2 subjects; subject-level covariates repeated per obs.
-# male/diseased are Float64 (not Int): BRM's _sb_cat_levels_vec only triggers on
-# AbstractVector{<:Integer}, so Int would be emitted as `cat_male ~ _sb_cat()`
-# which is a shared name across predictors -- second emission collides in SLIC
-# info. Float64 → treated as continuous (one coef per predictor, no collision),
-# matching the deployed model's matrix-multiply treatment of these binary cols.
+# male/diseased are Float64 (not Int) to match the deployed model's numeric
+# matrix-multiply treatment of these binary columns. Integer input would instead
+# select BRM's predictor-scoped categorical treatment-contrast path.
 df = (;
     subject  = [1, 1, 2, 2],
     male     = [1.0, 1.0, 0.0, 0.0],
