@@ -1259,21 +1259,154 @@ function brm_term_coordinates(d::BRMDescriptor, logical::Symbol,
        link=entry.link, inverse_link=InverseFunctions.inverse(entry.link))
 end
 
+# Categorical population terms own separate `_sb_cat` parameter blocks rather
+# than elements of `beta_pop`. Recover their public level semantics from the
+# formula term plus the fitted preprocessing record: the former owns the
+# predictor/ref address, while the latter is the frozen level order that drove
+# the sampled K-1 vector. The emitted block name is used only to join two
+# producer-owned descriptor records; it is never exposed as a consumer address.
+function _brm_categorical_effect_entry(plan, emitted_lp::Symbol,
+                                       term::NamedColumn)
+    isnothing(_sb_cat_levels(term)) && return nothing
+    address = name(term)
+    _brm_categorical_effect_entry(
+        plan, emitted_lp, address, address, identity)
+end
+
+function _brm_categorical_effect_entry(plan, emitted_lp::Symbol,
+                                       term::ExprColumn)
+    getf(term) === factor || return nothing
+    lowered = only(_sb_terms(term))
+    lowered isa NamedColumn && !isnothing(_sb_cat_levels(lowered)) || return nothing
+
+    args = getargs(term)
+    length(args) == 1 || return nothing
+    predictor = _as_named_column(only(args))
+    isnothing(predictor) && return nothing
+    ref = _as_integer(get(getkwargs(term), :ref, 1))
+    isnothing(ref) && return nothing
+    decode = ref == 1 ? identity :
+        level -> level == 1 ? ref : level == ref ? 1 : level
+    _brm_categorical_effect_entry(
+        plan, emitted_lp, name(lowered), name(predictor), decode)
+end
+
+_brm_categorical_effect_entry(_plan, _emitted_lp::Symbol, _term) = nothing
+
+function _brm_categorical_effect_entry(plan, emitted_lp::Symbol,
+                                       address::Symbol, predictor::Symbol,
+                                       decode)
+    key = Symbol(address, :_idx)
+    preproc = get(plan.preproc, key, nothing)
+    (!isnothing(preproc) && preproc.kind === :factor) || error(
+        "brm_descriptor: categorical predictor `$predictor` resolves to no " *
+        "fitted factor preprocessing record at `$key`. Re-reflect the model " *
+        "that produced the posterior draws.")
+    levels = collect(preproc.const_)
+    isempty(levels) && error(
+        "brm_descriptor: categorical predictor `$predictor` has an empty " *
+        "fitted level set.")
+
+    n_levels_key = Symbol(address, :_n_levels)
+    n_levels = get(plan.data, n_levels_key, nothing)
+    n_levels isa Integer && n_levels == length(levels) || error(
+        "brm_descriptor: categorical predictor `$predictor` has " *
+        "$(length(levels)) frozen levels but emitted level count " *
+        "$(repr(n_levels)) at `$n_levels_key`. Re-reflect the model that " *
+        "produced the posterior draws.")
+
+    decoded = map(decode, levels)
+    (; predictor, address,
+       emitted=_sb_cat_block_name(emitted_lp, address),
+       reference_level=first(decoded),
+       nonreference_levels=decoded[2:end])
+end
+
+function _brm_categorical_effect_entries(d::BRMDescriptor, logical::Symbol,
+                                         link)
+    op = linear_predictor_op(d.plan.parent, logical)
+    isnothing(op) && return NamedTuple[]
+    _, rhs = getargs(op, 2)
+    emitted_lp = _sb_lp_emitted_name(logical, link)
+    entries = NamedTuple[]
+    for term in _brm_additive_terms(rhs)
+        entry = _brm_categorical_effect_entry(d.plan, emitted_lp, term)
+        isnothing(entry) || push!(entries, entry)
+    end
+    entries
+end
+
+function _brm_categorical_effect_coordinates(d::BRMDescriptor,
+                                             logical::Symbol,
+                                             coefficient::Symbol,
+                                             constrained_names,
+                                             entry, block::Symbol)
+    entries = [e for e in _brm_categorical_effect_entries(d, logical, entry.link)
+               if e.emitted === block]
+    length(entries) == 1 || error(
+        "brm_descriptor: categorical address `$coefficient` on logical " *
+        "predictor `$logical` resolves to $(length(entries)) fitted formula " *
+        "terms; expected exactly one.")
+    categorical = only(entries)
+
+    outputs = BRMOutput[
+        o for o in d.outputs
+        if o.kind === :parameter && !isnothing(o.declaration) &&
+           o.declaration.target === block
+    ]
+    length(outputs) == 1 || error(
+        "brm_descriptor: categorical address `$coefficient` on logical " *
+        "predictor `$logical` resolves to block `$block`, which owns " *
+        "$(length(outputs)) parameter carriers; expected exactly one.")
+    output = only(outputs)
+
+    coordinates = _brm_emitted_coordinates(output, constrained_names)
+    expected_count = length(categorical.nonreference_levels)
+    length(coordinates) == expected_count || error(
+        "brm_descriptor: categorical address `$coefficient` on logical " *
+        "predictor `$logical` owns $expected_count treatment contrasts but " *
+        "resolves to $(length(coordinates)) constrained coordinates. " *
+        "Re-reflect the model that produced the posterior draws.")
+    contrasts = [
+        (; nonreference_level=level,
+           reference_level=categorical.reference_level,
+           coordinate)
+        for (level, coordinate) in
+            zip(categorical.nonreference_levels, coordinates)
+    ]
+
+    (; logical, coefficient, predictor=categorical.predictor, output,
+       coordinates, contrasts,
+       reference_level=categorical.reference_level,
+       nonreference_levels=categorical.nonreference_levels,
+       link=entry.link,
+       inverse_link=InverseFunctions.inverse(entry.link))
+end
+
 """
     brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
                                       constrained_names;
                                       coefficient=:Intercept)
 
-Resolve one formula-level population coefficient to its exact constrained
-posterior coordinate without constructing or parsing an emitted `pop_*` name.
-Returns a named tuple with:
+Resolve one formula-level population coefficient or categorical contrast block
+to its exact constrained posterior coordinates without constructing or parsing
+an emitted `pop_*` / `cat_*` name. Returns a named tuple with:
 
 - `logical` / `coefficient` — the public formula address;
-- `output` — the owning population-effect [`BRMOutput`](@ref);
+- `output` — the owning coefficient or contrast [`BRMOutput`](@ref);
 - `coordinates` — the matching indices in `constrained_names`;
 - `link` — the function applied on the formula LHS (`identity`, `log`, …);
 - `inverse_link` — the transform from the fitted linear-predictor scale back to
   the declared quantity (`identity`, `exp`, …).
+
+A categorical predictor is addressed by the formula column, just like its
+`effect(logical, column)` prior. Its result additionally contains `predictor`,
+the frozen `reference_level` and ordered `nonreference_levels`, plus
+`contrasts`, which pairs every non-reference level with its reference level and
+exact constrained coordinate. For example, `coefficient=:indication` resolves
+the K-1 block in `log(Vc) ~ 1 + indication`; the block's emitted spelling stays
+private. A `factor(g; ref=3)` term remains addressable as `coefficient=:g` and
+reports the fitted reference and contrast order after recoding.
 
 For `log(Vc) ~ 1 + weight`, ask for `logical=:Vc`. The returned intercept is on
 the log scale, `link === log`, and `inverse_link === exp`; the emitted
@@ -1295,6 +1428,21 @@ function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
         "population-effect address.")
     entry = only(entries)
 
+    categorical = _sb_cat_address_map(d.plan.parent, logical)
+    categorical_block = get(categorical, coefficient, nothing)
+    numeric_labels = _brm_labels(d.plan.parent, logical)
+    numeric_matches = isnothing(numeric_labels) ? Int[] :
+                      findall(==(coefficient), numeric_labels)
+    if !isnothing(categorical_block)
+        isempty(numeric_matches) || error(
+            "brm_descriptor: coefficient `$coefficient` on logical predictor " *
+            "`$logical` names both a beta_pop coefficient and a categorical " *
+            "contrast block; use an unambiguous formula address.")
+        return _brm_categorical_effect_coordinates(
+            d, logical, coefficient, constrained_names, entry,
+            categorical_block)
+    end
+
     outputs = BRMOutput[
         o for o in d.outputs
         if o.role === :population_effect && o.kind === :parameter &&
@@ -1312,10 +1460,11 @@ function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
         "predictor `$logical` has no coefficient labels; this formula shape " *
         "does not expose a stable population-coordinate address.")
     label_indices = findall(==(coefficient), labels)
+    available = unique!(vcat(copy(labels), sort!(collect(keys(categorical)))))
     length(label_indices) == 1 || error(
         "brm_descriptor: coefficient `$coefficient` occurs $(length(label_indices)) " *
         "times on logical predictor `$logical`; available labels are " *
-        "$(Tuple(labels)).")
+        "$(Tuple(available)).")
 
     all_coordinates = _brm_emitted_coordinates(output, constrained_names)
     length(all_coordinates) == length(labels) || error(

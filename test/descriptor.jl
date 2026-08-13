@@ -303,6 +303,97 @@ end
     @test identity_link.inverse_link === identity
 end
 
+@testset "categorical population coordinates — response-qualified contrasts" begin
+    categorical_df = (;
+        indication=[1, 2, 3, 1, 2, 3],
+        y=zeros(6),
+    )
+    categorical_builder = @brm begin
+        log(Vc) ~ 1 + indication
+        log(k10) ~ 1 + indication
+        y ~ Normal(log(Vc) + log(k10), 1.0)
+    end
+    d = brm_descriptor(
+        categorical_builder, categorical_df;
+        mod=@__MODULE__, name=:categorical_coordinates)
+    names = [
+        "cat_log_k10_indication_beta.1",
+        "cat_log_Vc_indication_beta.1",
+        "cat_log_Vc_indication_beta.2",
+        "cat_log_k10_indication_beta.2",
+    ]
+
+    vc = brm_population_effect_coordinates(
+        d, :Vc, names; coefficient=:indication)
+    k10 = brm_population_effect_coordinates(
+        d, :k10, names; coefficient=:indication)
+
+    @test vc.logical === :Vc
+    @test vc.coefficient === :indication
+    @test vc.predictor === :indication
+    @test vc.output.name === :cat_log_Vc_indication_beta
+    @test vc.coordinates == [2, 3]
+    @test vc.reference_level == 1
+    @test vc.nonreference_levels == [2, 3]
+    @test vc.contrasts == [
+        (; nonreference_level=2, reference_level=1, coordinate=2),
+        (; nonreference_level=3, reference_level=1, coordinate=3),
+    ]
+    @test vc.link === log
+    @test vc.inverse_link === exp
+    @test k10.output.name === :cat_log_k10_indication_beta
+    @test k10.coordinates == [1, 4]
+
+    # The private-name workaround finds the same posterior columns, but only
+    # the descriptor result identifies their predictor, fitted reference, and
+    # ordered non-reference levels.
+    workaround = findall(
+        name -> startswith(name, "cat_log_Vc_indication_beta."), names)
+    @test vc.coordinates == workaround
+
+    @test_throws "available labels are (:Intercept, :indication)" begin
+        brm_population_effect_coordinates(
+            d, :Vc, names; coefficient=:missing)
+    end
+    @test_throws "owns 2 treatment contrasts but resolves to 1" begin
+        brm_population_effect_coordinates(
+            d, :Vc, ["cat_log_Vc_indication_beta.1"];
+            coefficient=:indication)
+    end
+
+    reffed_builder = @brm begin
+        mu ~ 0 + factor(indication; ref=3)
+        y ~ Normal(mu, 1.0)
+    end
+    reffed = brm_descriptor(
+        reffed_builder, categorical_df;
+        mod=@__MODULE__, name=:categorical_reference)
+    reffed_result = brm_population_effect_coordinates(
+        reffed, :mu,
+        ["cat_mu_indication__ref_3_beta.1",
+         "cat_mu_indication__ref_3_beta.2"];
+        coefficient=:indication)
+    @test reffed_result.predictor === :indication
+    @test reffed_result.reference_level == 3
+    @test reffed_result.nonreference_levels == [2, 1]
+    @test reffed_result.coordinates == [1, 2]
+
+    one_level_df = (; indication=fill(1, 4), y=zeros(4))
+    one_level_builder = @brm begin
+        mu ~ 0 + indication
+        y ~ Normal(mu, 1.0)
+    end
+    one_level = brm_descriptor(
+        one_level_builder, one_level_df;
+        mod=@__MODULE__, name=:categorical_one_level)
+    one_level_result = brm_population_effect_coordinates(
+        one_level, :mu, String[]; coefficient=:indication)
+    @test one_level_result.reference_level == 1
+    @test isempty(one_level_result.nonreference_levels)
+    @test isempty(one_level_result.coordinates)
+    @test isempty(one_level_result.contrasts)
+end
+
 @testset "term coordinates — monotonic simplex and HSGP internals" begin
     n = 12
     term_df = (;
