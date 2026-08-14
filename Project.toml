@@ -43,6 +43,17 @@ Turing = "0.46"
 WarmupHMC = "0.2"
 julia = "1.10"
 
+# TreeArrays is a weakdep (extension trigger for BayesianRegressionModelsTreeArraysExt)
+# sourced from an unregistered git repo below. Pkg >=1.12 validates that every
+# [sources] key appears in [deps] or [extras]; a weakdep can't be in [deps], so it
+# is declared here in [extras]. Without this, reading this Project.toml on Julia
+# >=1.12 fails with "Sources for `TreeArrays` not listed in `deps` or `extras`",
+# breaking every downstream consumer (MutatingFunctions/OutputSignatures are exempt
+# because they're already in [deps]). No [targets] references it, so this entry is
+# inert for resolution — TreeArrays stays a weakdep and never enters the manifest.
+[extras]
+TreeArrays = "5daaa025-ac78-4e9a-8805-78946e672e43"
+
 # MutatingFunctions.jl + OutputSignatures.jl are the 0-alloc buffer-threading
 # substrate for the julianic run-the-body executor (user directive 2026-08-04:
 # "use ... the MutatingFunctions.jl and OutputSignatures.jl packages"). Not yet
