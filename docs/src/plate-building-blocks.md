@@ -585,10 +585,10 @@ end
 # Existing vectorized Bordet response and likelihood remain unchanged.
 ```
 
-The deployed `bd06936` line infers this vector result from the trailing
-expression, so the untyped spelling above is now valid on `devibe`. Older
-deployments required
-`theta::vector[6] ~ plate(; outer=(n_series,)) do series`.
+The vector result is inferred from the trailing expression. Keep the plate LHS
+bare as above: a typed plate LHS names the collected result, not one cell (for
+this one-axis example that collected type is `matrix[6, n_series]`), and a
+multi-axis `outer` has no collected type spelling.
 
 This is the first real migration unlocked by fixed-vector cell results; it does
 not require ragged inputs.

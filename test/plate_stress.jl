@@ -46,7 +46,7 @@ const fixed_correlated = StanBlocks.@slic (;
 ) begin
     L::cholesky_factor_corr[k] ~ lkj_corr_cholesky(2.0)
     tau::vector[k] ~ normal(0.0, 1.0; lower=0.0)
-    b::vector[k] ~ plate(y; outer=(n_groups,)) do yi
+    b ~ plate(y; outer=(n_groups,)) do yi
         cell ~ brm_fixed_correlated_cell(k, L, tau)
         yi ~ normal(cell[1], 0.5)
         cell
@@ -90,7 +90,7 @@ end
 
 # Dense N-D vector cells exercise logical-cell axes plus multiple PLATE axes.
 const nd_vector = StanBlocks.@slic (;y=[0.2 -0.1 0.3; 0.0 0.4 -0.2], k=2) begin
-    theta::vector[k] ~ plate(y; outer=(2, 3)) do yi
+    theta ~ plate(y; outer=(2, 3)) do yi
         z::vector[k] ~ std_normal()
         yi ~ normal(z[1], 1.0)
         z
@@ -119,7 +119,7 @@ end
 # Known gaps. `@test_broken` makes the suite green today, but turns a newly
 # supported capability into an unexpected pass that must be promoted above.
 const matrix_cell_gap = StanBlocks.@slic (;n=3, k=2) begin
-    theta::matrix[k, k] ~ plate(; outer=(n,)) do g
+    theta ~ plate(; outer=(n,)) do g
         z::vector[k * k] ~ std_normal()
         to_matrix(z, k, k)
     end
