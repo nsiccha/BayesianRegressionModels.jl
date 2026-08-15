@@ -218,7 +218,7 @@ const plate_model = StanBlocks.@slic (;
 ) begin
     L::cholesky_factor_corr[k] ~ lkj_corr_cholesky(2.0)
     tau::vector[k] ~ normal(0.0, 1.0; lower=0.0)
-    b::vector[k] ~ plate(y; outer=(n_groups,)) do yi
+    b ~ plate(y; outer=(n_groups,)) do yi
         cell ~ historical_plate_cell(k, L, tau)
         yi ~ normal(cell[1], 0.5)
         cell
