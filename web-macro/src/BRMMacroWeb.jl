@@ -31,7 +31,7 @@ import AlgebraOfGraphics as AoG
 
 # The @brm macro and VBRMI / SBBRMI implementations now live in the main
 # `BayesianRegressionModels` package (moved out of web-macro in `ns/devibe`
-# so bruno can consume them as a submodule without the web app deps).
+# so a downstream package can consume them as a submodule without the web app deps).
 using BayesianRegressionModels
 # Pull in the types / functions the web app touches by unqualified name.
 using BayesianRegressionModels: AbstractColumn, MissingColumn, DataColumn,

@@ -72,7 +72,7 @@ y1 ~ Normal(loc, err)
     # Utility route: clears all in-memory caches on AppData (compute_steps
     # results, nested IP dicts, etc.). Useful after code changes when you
     # want to re-run a stage that's currently returning a stale cached
-    # value. Mirrors bruno's OpsRoutes.reset.
+    # value. Mirrors the downstream app's ops-reset route.
     @get reset() = begin
         clear_mem_caches!(__appdata__)
         h.p("In-memory caches cleared.")
@@ -336,7 +336,7 @@ y1 ~ Normal(loc, err)
                 h.input(;
                     id="brm-examples-search",
                     type="search",
-                    placeholder="Search (case-insensitive regex; e.g. interact|bruno)...",
+                    placeholder="Search (case-insensitive regex; e.g. interact|poisson)...",
                     autocomplete="off"),
             ),
             h.div(; class="brm-global-bar")(

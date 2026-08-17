@@ -1,5 +1,5 @@
 # test/kernel_ragged_reprocess_snag.jl — snag `joint-ragged-ref-40368a11`
-# (reported by Bruno:arv393:memo against a joint PK/QT kernel model).
+# (reported by a downstream PKPD consumer against a joint PK/QT kernel model).
 #
 # Locks two facts established while handling the snag:
 #

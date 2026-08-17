@@ -20,7 +20,7 @@ using Distributions: Exponential, Normal
 import BayesianRegressionModels: _sb_submodel_rhs!, getkwargs, name
 
 # ── Stub term ─────────────────────────────────────────────────────────────────
-# Same function name as the real term -> clean swap when Bruno:qt lands.
+# Same function name as the real term -> clean swap when the downstream PKPD term lands.
 
 function twocmt_superposition end
 

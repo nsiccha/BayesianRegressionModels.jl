@@ -29,7 +29,7 @@ function bridgestan_accepts(model; expected_dimension=nothing)
 end
 
 # Fixed-width correlated group effect: the first BRM migration target for
-# `(1 + x | ID | group)` buckets and fixed-width Bordet parameter vectors.
+# `(1 + x | ID | group)` buckets and fixed-width biomarker parameter vectors.
 StanBlocks.@slic brm_fixed_correlated_cell(
     k::int,
     L::matrix[k, k],

@@ -290,7 +290,7 @@ end
 # them — so the coefficient label for a linked declaration was undocumented and
 # a consumer moving off the inert-name spelling had to guess between
 # `effect(Vc, …)`, `effect(log(Vc), …)` and `effect(log_Vc, …)`
-# (snag `how-do-you-attac-a30ba40b`, `Bruno:arv393`). Two names are in play and
+# (snag `how-do-you-attac-a30ba40b`, a downstream PKPD consumer). Two names are in play and
 # they are NOT interchangeable:
 #
 #   PUBLIC  address  = the bare inner name `Vc` — what `linear_predictors`
@@ -382,7 +382,7 @@ end
     end
 end
 
-# The consumer shape the snag was reported for (`bruno` `web-pkpd`,
+# The consumer shape the snag was reported for (a downstream PKPD web app,
 # `linear_pk_brm5`): the PK model declares its per-subject quantities with LHS
 # links so the cell no longer spells `exp(...)` itself, and `kernel(...)` is fed
 # the NATURAL-scale bindings. The population priors stay on the log scale and

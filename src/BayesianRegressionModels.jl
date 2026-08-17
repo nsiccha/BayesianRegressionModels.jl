@@ -47,7 +47,7 @@ include("prediction.jl")
 include("adaptive_centering.jl")
 
 # Public surface. The macros and value types everything downstream
-# (web-macro, bruno, tests) reaches for.
+# (web-macro, downstream extensions, tests) reaches for.
 export @brm, @n, @x, @getproperty
 export assign, effect, r2d2, doublepipe, gr, mm, gp, offset, zscale, center, standardize, protect, factor
 export weighted, AbstractWeights, AnalyticWeights, FrequencyWeights,
@@ -59,8 +59,8 @@ export me, mi, s, t2, ar, mo, mo1, hsgp, OrderedLogistic, Ordinal,
        CategoricalLogit, ZeroInflatedPoisson, NegativeBinomial2,
        BetaBinomial, BetaBinomial2, CircularVonMises, SkewDoubleExponential,
        sb_group_demo, addprop
-# Bordet model family — formula-surface markers for custom likelihood + submodel
-export TruncatedNormal, bordet_hierarchical_parametric, kernel, ragged
+# Hierarchical biomarker family — formula-surface markers for custom likelihood + submodel
+export TruncatedNormal, biomarker_hierarchical_parametric, kernel, ragged
 # Julia-native response-family composition. `truncated` and `censored` are the
 # exact Distributions.jl functions; `interval_censored` is BRM's narrow formula
 # shim for evidence that a latent response lies between two row-wise bounds.
@@ -105,11 +105,11 @@ export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
        brm_operation, brm_execute, brm_columns, required_brm_inputs
 
 # Accessor helpers for column types — used unqualified by html renderers,
-# sbimpl dispatch logic, and downstream extension hooks like bruno-ext.
+# sbimpl dispatch logic, and downstream extension hooks.
 export name, getf, getargs, getkwargs, getbroadcast, getop
 
 # Macro plumbing + compiled-output accessors used by downstream code
-# (web-macro's Formula struct, bruno's direct pipeline calls).
+# (web-macro's Formula struct, downstream direct pipeline calls).
 export parse!, _brm, stan_code, reprocess, restan_data, generative_plan
 
 # Post-fit prediction — the population-level ("nore") and transported
@@ -127,7 +127,7 @@ export outcomes, linear_predictor_op, linear_predictors, predictors,
        linear_predictor_args, data_args, primary_lp, popcoefnames, effect_priors,
        ranef_effect_priors, r2d2_priors, term_priors, ranefcoefnames
 
-# Extension API. Downstream packages (bruno) add their own formula terms
+# Extension API. Downstream packages add their own formula terms
 # by defining methods on `vmeta_sampling_rhs` + `_sb_submodel_rhs!` and
 # pushing `Part`s via `push_parts!!`; `nparams` + `lprior!` complete the
 # vimpl side. `vbroadcasted` is the materializer they call to resolve
@@ -137,7 +137,7 @@ export vbroadcasted, vmeta_sampling_rhs, _sb_submodel_rhs!
 export _sb_term_group_block, _sb_emit_group_block_term!
 
 # Internal @slic submodels from sbimpl.jl — exported so downstream
-# modules (bruno-ext via web-macro) that build their own SBBRMI-style
+# modules (downstream extensions via web-macro) that build their own SBBRMI-style
 # models with `StanBlocks.SlicModel(body, data, mod)` where `mod` is the
 # caller's namespace can still resolve the BRM built-in submodel names.
 export popefs, _popefs_normal, _popefs_coefs, _popefs_normal_coefs,
