@@ -1055,6 +1055,42 @@ struct BRMI{O<:NamedTuple}
 end
 BRMI(;kwargs...) = BRMI((;kwargs...))
 
+"""
+    Base.merge(a::BRMI, b::BRMI, rest::BRMI...) -> BRMI
+
+Compose two or more parsed models into one, later models overriding earlier
+ones where they name the same operation. A `BRMI` is a formula-ordered
+`NamedTuple` of operations keyed by LHS name — a linear predictor / parameter
+name (`mu`, `sigma`), or a prior address such as `effect(...)` / `sd(...)` /
+`cor(...)` (see [`@brm`](@ref)) — so merging is the corresponding `NamedTuple`
+merge: `a`'s operations keep their order, `b`'s new operations are appended,
+and any operation `b` shares with `a` (same key) takes `b`'s value.
+
+This makes priors a first-class, separable fragment. Build the structural
+model with one `@brm` block and its priors with another, then compose:
+
+```julia
+model  = @brm df begin
+    log_ka ~ 1 + x + (1 | pk | subject)
+    y ~ Normal(log_ka, 0.2)
+end
+priors = @brm df begin
+    effect(log_ka, Intercept) ~ Normal(log(1 / 8), 0.8)
+    sd(:, pk) ~ Exponential(1)
+end
+fitted = Base.merge(model, priors)
+```
+
+Because a prior address IS its operation key, a post-hoc prior overrides an
+inline one at the same address (last-wins) rather than colliding the way two
+same-address statements in ONE block do. `merge` is a pure structural
+combine: an address is validated against the model it configures at backend
+lowering (`SBBRMI(...)`), exactly as for an inline prior — never here.
+"""
+Base.merge(a::BRMI, b::BRMI) = BRMI(Base.merge(a.operations, b.operations))
+Base.merge(a::BRMI, b::BRMI, rest::BRMI...) =
+    foldl(Base.merge, rest; init=Base.merge(a, b))
+
 # Nested predictor formulas are normalised at builder execution time, after
 # data columns have values (categorical K is therefore known) but before a BRMI
 # becomes public. Downstream introspection, replay, descriptors, and both
