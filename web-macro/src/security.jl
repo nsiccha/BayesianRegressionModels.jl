@@ -36,8 +36,15 @@ _ALLOWED_CALLS = Set{Symbol}([
     :length, :unique, :sort, :size, :eltype, :nrow, :ncol,
 ])
 
+# NOTE: `:.` is deliberately NOT a safe head. A `:.` head admits a qualified
+# reference like `Base.exit` / `Core.eval`; combined with the `:call` branch
+# only allowlist-checking `fname` when `fname isa Symbol`, that let ANY
+# `Module.func(args…)` slip through the screen (`Base.exit()`,
+# `Base.open("/etc/passwd")`, `Core.eval(1)`, …). No legitimate formula uses a
+# dotted head, so excluding it costs nothing and closes the bypass. See the
+# explicit dotted-call rejection in the `:call` branch below.
 _SAFE_HEADS = Set{Symbol}([
-    :block, :call, :., :(=), :(||), :tuple, :vect, :ref,
+    :block, :call, :(=), :(||), :tuple, :vect, :ref,
     :kw, :parameters, :(...),
     :comparison, :&&,
 ])
@@ -77,6 +84,15 @@ _walk(x, inside_nested_brm::Bool) = begin
             return FormulaSecurityError(
                 "function `$fname` is not in the formula allowlist. " *
                 "Allowed: arithmetic, math, distributions, DSL operators.")
+        end
+        # Qualified/dotted calls (`Module.func(args…)`) are never allowlisted:
+        # `fname` is an `Expr(:., …)`, not a Symbol, so the check above cannot
+        # see it. Reject it explicitly (belt-and-suspenders alongside `:.`
+        # being absent from `_SAFE_HEADS`) with a clear message.
+        if fname isa Expr && fname.head === :.
+            return FormulaSecurityError(
+                "qualified/dotted calls are not allowed in formulas (got `$fname`). " *
+                "Use a bare allowlisted function name.")
         end
         if fname isa Expr && fname.head == :curly
             tname = fname.args[1]
