@@ -8678,10 +8678,10 @@ _sb_scalar_expr(x, _) = error("sbimpl: cannot lift to Stan expression: $(typeof(
 #       log_obs ~ TruncatedNormal(log_y, sigma, lloq, uloq)
 #   end
 #
-# Cross-tree contract (StanBlocks:bordet, decision 1lmystf):
+# Cross-tree contract (StanBlocks biomarker kernel builtins, decision 1lmystf):
 #   - `truncated_normal` lpxf triad: censored normal (LLOQ→lcdf, ULOQ→lccdf)
-#   - `bordet_time_response(log_time, loc, log_slope, mag)::vector` bell kernel
-#   - `bordet_dose_response(log_dose, loc, log_slope)::vector` — returns LOG
+#   - `biomarker_time_response(log_time, loc, log_slope, mag)::vector` bell kernel
+#   - `biomarker_dose_response(log_dose, loc, log_slope)::vector` — returns LOG
 #   - Transdata builtins: `linear_idxs`, `broadcasted_max`, `broadcasted_gt`
 #   All registered in StanBlocks' builtin module; reachable with no import.
 # ==============================================================================
@@ -8693,8 +8693,8 @@ BRM formula marker for the hierarchical biomarker parametric mean submodel.
 All data columns and hyperparameters are passed as keyword arguments.
 Emits (in order): sizes (n_biomarkers, n_persons, n_series), sigma prior
 (biomarker-level exponential), transdata (series_idxs, log_time, log_dose,
-affectable), 6 per-series parameter priors, and log_y via StanBlocks:bordet
-kernel builtins (bordet_time_response + bordet_dose_response).
+affectable), 6 per-series parameter priors, and log_y via StanBlocks
+biomarker kernel builtins (biomarker_time_response + biomarker_dose_response).
 """
 function biomarker_hierarchical_parametric end
 
@@ -8761,8 +8761,8 @@ function _sb_emit_group_block_term!(stmts, data, target,
     push!(stmts, :(time_mag       = $(block_name)[$(idx_name), 4]))
     push!(stmts, :(dose_loc       = $(block_name)[$(idx_name), 5]))
     push!(stmts, :(dose_log_slope = $(block_name)[$(idx_name), 6]))
-    # log_y via StanBlocks:bordet kernel builtins
-    push!(stmts, :(time_response = bordet_time_response(log_time, time_loc, time_log_slope, time_mag)))
-    push!(stmts, :(dose_response = exp(bordet_dose_response(log_dose, dose_loc, dose_log_slope))))
+    # log_y via StanBlocks biomarker kernel builtins
+    push!(stmts, :(time_response = biomarker_time_response(log_time, time_loc, time_log_slope, time_mag)))
+    push!(stmts, :(dose_response = exp(biomarker_dose_response(log_dose, dose_loc, dose_log_slope))))
     push!(stmts, :($target = baseline + affectable .* time_response .* dose_response))
 end
