@@ -254,7 +254,7 @@ end
         censored_flat_builder(wrong_segments); mod=@__MODULE__)
 end
 
-# snag reprocess-ragged-ea8c7e42 (reported by Bruno:arv393:memo against
+# snag reprocess-ragged-ea8c7e42 (reported by a downstream PKPD consumer against
 # joint_brm2). The gathered ragged RESPONSE and its data-backed censoring BOUND
 # had no preprocessing record, so `reprocess`/`resample_groups` errored on the
 # derived bound (`pk_conc_lower_pk_lloq_ragged`) and would have silently kept the
@@ -320,7 +320,7 @@ hsgp_censored_df(; subs, dose_amt) = (;
     @test !occursin("b_p_subject_z_flat", params)
     @test occursin("b_p_subject_z_flat = std_normal_vector_rng", gq)
 
-    # (2b) snag reprocess-resamp-14c5ef20 (reported by Bruno:arv393:memo against
+    # (2b) snag reprocess-resamp-14c5ef20 (reported by a downstream PKPD consumer against
     #      joint_brm2): the resampled program above must be stanc-valid. It was
     #      not — under resample the kernel result `pred` moves to generated
     #      quantities, but StanBlocks left the held-out top-level ragged density

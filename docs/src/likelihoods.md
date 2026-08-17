@@ -41,7 +41,7 @@ are rejected rather than silently treated as a standard beta likelihood.
 | `OrderedLogistic(eta)` | legacy cumulative-logit ordinal model |
 | `Ordinal(structure, link, eta; ...)` | `Cumulative()` or `StoppingRatio()` crossed with `LogitLink()`, `ProbitLink()`, or `CloglogLink()` |
 | `CircularVonMises(mu, kappa; interval=(-pi, pi))` | von Mises on a fixed principal interval |
-| `TruncatedNormal(mu, sigma, lower, upper)` | legacy Bordet-only censored-Normal marker; new models should use `censored` below |
+| `TruncatedNormal(mu, sigma, lower, upper)` | legacy censored-Normal marker; new models should use `censored` below |
 
 ### Response compositions and modifiers
 
@@ -126,7 +126,7 @@ use `VBRMI` for these formulas:** it currently does not reject `truncated` or
 `censored` at construction and can return log densities for a misinterpreted
 model; `interval_censored` may fail only when the density is evaluated. A
 `VBRMI` result is therefore not a valid cross-check of an `SBBRMI` fit. The
-legacy `TruncatedNormal` Bordet marker remains a separate censored-Normal
+legacy `TruncatedNormal` marker remains a separate censored-Normal
 compatibility surface.
 
 The backend compatibility floor for this surface is StanBlocks

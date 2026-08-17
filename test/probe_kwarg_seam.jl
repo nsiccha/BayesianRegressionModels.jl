@@ -2,7 +2,7 @@
 # test/probe_kwarg_seam.jl — seam-regression probe for option-(ii) param-feed seam
 #
 # Verifies that existing BRM + StanBlocks machinery already supports the
-# per-obs LP kwargs end-to-end (option ii), so Bruno:qt can implement the
+# per-obs LP kwargs end-to-end (option ii), so a downstream PKPD lane can implement the
 # `twocmt_superposition` term without requiring BRM-core additions.
 #
 # Three checks:
@@ -14,7 +14,7 @@
 #       threads them as @slic kwargs pointing at the correct Stan variable.
 #
 # SCOPE: BRM-side seam only. Cross-module @slic mod-reachability of the
-# real co-located `_sb_twocmt_superposition` is Bruno's kernel-wiring check.
+# real co-located `_sb_twocmt_superposition` is the downstream package's kernel-wiring check.
 
 using BayesianRegressionModels, StanBlocks
 using Distributions: Normal
@@ -24,7 +24,7 @@ import BayesianRegressionModels: _sb_submodel_rhs!
 
 # ── Probe term (in-script; NOT added to BRM core) ──────────────────────────
 
-# Marker function — zero body, mirrors Bruno:qt triad pattern.
+# Marker function — zero body, mirrors the downstream PKPD triad pattern.
 function probe_kwarg_consumer end
 
 # Trivial @slic: sums two per-obs LP kwargs. Zero internal ~ statements.
@@ -35,7 +35,7 @@ probe_slic = StanBlocks.@slic begin
 end
 
 # Emitter: reads LP column names via getkwargs(rhs), threads as @slic kwargs.
-# Mirrors the _sb_logistic_dr emitter pattern in Bruno:qt brm_integration.jl.
+# Mirrors the _sb_logistic_dr emitter pattern in the downstream PKPD integration.
 function _sb_submodel_rhs!(stmts, data, target::Symbol,
                             ::typeof(probe_kwarg_consumer), rhs)
     kw = getkwargs(rhs)

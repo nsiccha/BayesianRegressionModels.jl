@@ -3,10 +3,10 @@ import StanBlocks: RaggedVector
 
 
 # ==============================================================================
-# SlicModel helpers (ported verbatim from /home/niko/github/nsiccha/bruno/src/qt.jl,
+# SlicModel helpers (ported verbatim from an external PKPD codebase's qt.jl,
 # `popefs`/`ranefs`/`popranefs`/`cdirichlet` family, lines 303-344). Kept here
 # as module-local bindings so the walker can emit calls to them by name without
-# depending on bruno. Duplication is intentional for now.
+# depending on that package. Duplication is intentional for now.
 # ==============================================================================
 
 # Formula-term stubs needed so the @brm macro can parse example formulas
@@ -3338,7 +3338,7 @@ of a naive per-column `sb.model(; col=…)` rebind is avoided. Returns a NEW
 - `freeze_constants=true` (default — prediction / replay): apply the **training**
   constant to `new_df` (z-score with training mean/sd, map factor codes via the
   training level set, rebuild the spline/HSGP basis on the training
-  eigenbasis/(mean, L)). This is the operation Bruno hand-rolls outside BRM.
+  eigenbasis/(mean, L)). This is the operation the downstream PKPD app hand-rolls outside BRM.
 - `freeze_constants=false` (fresh-fit semantics): re-derive each constant from
   `new_df`, then apply.
 - `resample_groups=()` (default): retain the fitted random-effect coordinates.
@@ -3489,7 +3489,7 @@ _sb_empty_id_lookup() = Dict{Tuple{Symbol,Tuple{Symbol,Any}}, Any}()
 """
     _sb_submodel_rhs!(stmts, data, target, f, rhs)
 
-sbimpl extension hook. Override (e.g. in `bruno-ext.jl`) to route
+sbimpl extension hook. Override (e.g. in a downstream `-ext.jl`) to route
 `target ~ f(...)` where `f` is a known SLIC submodel family
 (`logistic_dr`, `gamma_time`, …) straight to `target ~ <slic>(; kwargs)`,
 bypassing the population-linear-predictor wrap (which would otherwise
@@ -6616,9 +6616,9 @@ end
 #
 # Scan brmi.operations for declaring terms anywhere in the model: a term `f`
 # with a `_sb_term_group_block` declaration, appearing EITHER as a whole-RHS
-# parameter submodel (`mu ~ f(...)`, like bordet) OR as a predictor summand
+# parameter submodel (`mu ~ f(...)`, like the biomarker family) OR as a predictor summand
 # (`y ~ 1 + hsgp(t, by=g)`). We walk every `~` op's RHS summands (`_sb_terms`),
-# which covers both: bordet is a single summand of its RHS, hsgp is one of several.
+# which covers both: the biomarker family is a single summand of its RHS, hsgp is one of several.
 # Every declaring summand is its own term INSTANCE — there is no `(key, f)`
 # dedup, so N instances of the same term (e.g. `hsgp(t, by=g) + hsgp(s, by=g)`)
 # each get collected and allocated their own block. Identical instances (same
@@ -7273,7 +7273,7 @@ _sb_predictor_col(t::Int, data, _stmts, pop_terms=(); obs_n::Union{Symbol,Nothin
     #      deterministic probe came up empty even though the formula names its
     #      row axis in plain sight. On a multi-axis model that then hit tier 3
     #      and refused, telling the user to add a group term when `source` was
-    #      already right there (reported against `Bruno:qt`).
+    #      already right there (reported against a downstream PKPD consumer).
     #      Uses the tier-1b probe rather than tier 1a's: a direct term may be
     #      backed by STRINGS, and `_sb_n_obs_probe` would hand back that raw
     #      name unguarded, emitting `num_elements(<string column>)` — which
@@ -7290,7 +7290,7 @@ _sb_predictor_col(t::Int, data, _stmts, pop_terms=(); obs_n::Union{Symbol,Nothin
     #      sized off an EVENT-axis column found in hash order, so
     #      `pop_log_ka + r_log_ka_p_subject` added an 11-vector to a 2-vector
     #      and every log-density evaluation threw (snag
-    #      `two-axis-brm-an-9881c01b`, reported by `Bruno:arv393`).
+    #      `two-axis-brm-an-9881c01b`, reported by a downstream PKPD consumer).
     #      Deliberately ranked BELOW tiers 1/1b rather than ahead of them: a
     #      population peer in the same formula is on that same row axis by
     #      construction, so promoting the group probe would rewrite the emitted
@@ -7766,7 +7766,7 @@ _sb_any_data_symbol(data, target=nothing) = begin
     isempty(data) && error("sbimpl: can't emit `rep_vector(1., n)` — no data column seen yet. Make sure an observed `~` comes before the intercept-only predictor, or, if it is a single constant, declare it directly as a scalar parameter with its own prior (`x ~ <distribution>`).")
     # Prefer a flat length-N vector (numeric / integer) so `num_elements(...)` in
     # Stan resolves to an int. Skip ragged `Vector{<:AbstractVector}` layouts
-    # (bruno-ext's `dose_times`) which StanBlocks serializes as a
+    # (a downstream `-ext`'s `dose_times`) which StanBlocks serializes as a
     # `tuple(vector, array[] int)` that Stan's `num_elements` rejects.
     #
     # The pick is `Dict` HASH ORDER, so it is only meaningful when every
@@ -8666,12 +8666,12 @@ end
 _sb_scalar_expr(x, _) = error("sbimpl: cannot lift to Stan expression: $(typeof(x)): $x")
 
 # ==============================================================================
-# Bordet model family — BRM-side composition surface.
+# Hierarchical biomarker family — BRM-side composition surface.
 #
 # Representative model formula (log_y MUST precede log_obs so sigma is in scope):
 #
 #   brmi = @brm df begin
-#       log_y ~ bordet_hierarchical_parametric(;
+#       log_y ~ biomarker_hierarchical_parametric(;
 #           time, dose, person_idxs, biomarker_idxs,
 #           sigma_rate, scale_rate, hierarchical_centeredness
 #       )
@@ -8687,20 +8687,20 @@ _sb_scalar_expr(x, _) = error("sbimpl: cannot lift to Stan expression: $(typeof(
 # ==============================================================================
 
 """
-    bordet_hierarchical_parametric
+    biomarker_hierarchical_parametric
 
-BRM formula marker for the bordet hierarchical parametric mean submodel.
+BRM formula marker for the hierarchical biomarker parametric mean submodel.
 All data columns and hyperparameters are passed as keyword arguments.
 Emits (in order): sizes (n_biomarkers, n_persons, n_series), sigma prior
 (biomarker-level exponential), transdata (series_idxs, log_time, log_dose,
 affectable), 6 per-series parameter priors, and log_y via StanBlocks:bordet
 kernel builtins (bordet_time_response + bordet_dose_response).
 """
-function bordet_hierarchical_parametric end
+function biomarker_hierarchical_parametric end
 
 # TruncatedNormal custom likelihood.
 # Emits: target ~ truncated_normal(mean, sigma[biomarker_idxs], lloq[biomarker_idxs], uloq[biomarker_idxs])
-# biomarker_idxs is in scope because bordet_hierarchical_parametric emits it as data.
+# biomarker_idxs is in scope because biomarker_hierarchical_parametric emits it as data.
 function _sb_lik_family!(stmts, target, ::typeof(TruncatedNormal), args, data)
     length(args) == 4 || error(
         "sbimpl: TruncatedNormal likelihood expects 4 positional args ",
@@ -8717,12 +8717,12 @@ function _sb_lik_family!(stmts, target, ::typeof(TruncatedNormal), args, data)
         $(uloq_sym)[biomarker_idxs])))
 end
 
-# Group-block declaration for bordet_hierarchical_parametric.
+# Group-block declaration for biomarker_hierarchical_parametric.
 # The 6 per-(biomarker×person) params (baseline, time_loc, time_log_slope,
 # time_mag, dose_loc, dose_log_slope) are correlated normals via BRM's
 # ranef_correlated_draws floor. The group is series_idxs = linear_idxs(bm, pn)
 # — a computed column, so group_fn synthesises it from the kwargs in data.
-_sb_term_group_block(::typeof(bordet_hierarchical_parametric)) = (;
+_sb_term_group_block(::typeof(biomarker_hierarchical_parametric)) = (;
     n_per_group  = 6,
     group_fn     = (rhs_e, data) -> begin
         bm   = data[:biomarker_idxs]
@@ -8740,7 +8740,7 @@ _sb_term_group_block(::typeof(bordet_hierarchical_parametric)) = (;
 #                 matches the param order below)
 #   idx_name    — per-obs integer index into block rows (= series_idxs_idx)
 function _sb_emit_group_block_term!(stmts, data, target,
-                                     ::typeof(bordet_hierarchical_parametric),
+                                     ::typeof(biomarker_hierarchical_parametric),
                                      rhs_e, block_info)
     (; block_name, idx_name) = block_info
     # Sizes: deterministic transdata from int[] index arrays

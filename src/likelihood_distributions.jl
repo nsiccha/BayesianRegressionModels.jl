@@ -589,7 +589,7 @@ Random.rand(rng::Random.AbstractRNG, d::BinomialLogit) =
 """
     TruncatedNormal(mu, sigma, lloq, uloq)
 
-Historical BRM spelling for the bordet **censored** normal observation model.
+Historical BRM spelling for the **censored** normal observation model.
 Numeric arguments construct Distributions.jl's exact
 `Censored(Normal(mu, sigma), lloq, uloq)` distribution, including its boundary
 atoms.  The name is retained for formula compatibility.

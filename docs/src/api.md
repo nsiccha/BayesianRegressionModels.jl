@@ -159,8 +159,8 @@ BayesianRegressionModels.ranefcoefnames
 
 ## Extension API
 
-For downstream packages adding their own formula terms (e.g.
-`bruno-ext`):
+For downstream packages adding their own formula terms (e.g. via a gitignored
+`-ext.jl` extension):
 
 ```@docs
 BayesianRegressionModels.Part

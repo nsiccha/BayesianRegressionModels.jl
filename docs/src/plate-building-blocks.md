@@ -51,7 +51,7 @@ The merge retains the public, called-submodel, N-dimensional, ragged, and
 block-routing hardening coverage, and the combined tree loads cleanly. Thus
 scalar-only, typed-result-only, called-submodel-unsupported, and
 one-dimensional-only are no longer deployment limitations. The six-vector
-Bordet hierarchy is BRM's first vector-cell migration target. General ragged
+hierarchical biomarker family is BRM's first vector-cell migration target. General ragged
 iteration/results, arbitrary shape-polymorphic collection, CV/replay taint,
 and parallel likelihood lowering remain part of the complete target below.
 
@@ -166,7 +166,7 @@ end
 ```
 
 One vector-valued result replaces the special structured-latent path built for
-Bruno's `obs_scale` matrix.
+a per-assay `obs_scale` matrix.
 
 ### Per-stratum constrained cells
 
@@ -209,11 +209,11 @@ The PLATE boundary is ragged, while the event recurrence or ODE remains inside
 | Scalar varying parameter | `(1 | g)`, group-specific `sigma`, `phi`, `nu`, `zi` | Bespoke gather vectors and distribution-specific group code |
 | Correlated vector by group | `(1 + x + z | g)` and `(e | ID | g)` | `ranef_correlated*`, flat draw/reshape code, cross-formula draw variants |
 | Stratified covariance | `(1 + x | gr(g, by=s))` | `multi_lkj_corr_cholesky_lpdf`, `multi_std_normal_lpdf`, `stratified_correlated_b` |
-| Independent structured fields | Bruno `obs_scale`, per-assay add/prop noise | The general `ez6anl` structured-latent allocation floor for fixed fields |
+| Independent structured fields | `obs_scale`, per-assay add/prop noise | The general `ez6anl` structured-latent allocation floor for fixed fields |
 | Grouped constrained parameter | `mo(x; by=g)`, group-specific thresholds and mixture weights | Manual flat unconstrained storage, offset tables, and constrain loops in BRM |
 | Grouped basis model | `hsgp(x; by=g)`, grouped splines | `_sb_hsgp_by` and term-specific basis-weight floors |
 | Inferred-observation cell | `me`, missing values, calibration and censoring cells | One SLIC model per observation family merely to vectorize scalar latent draws |
-| Ragged longitudinal kernel | Bruno PK/PKPD and Bordet biomarker series | Prefix/gather scaffolding and one custom vector wrapper for every kernel |
+| Ragged longitudinal kernel | PK/PKPD and biomarker series | Prefix/gather scaffolding and one custom vector wrapper for every kernel |
 | Secondary row axis (events, doses) | `kernel(..., ragged(x, group), ...)` | Hand-built per-subject views of every flat column, plus one hand-written scalar prior + basis per event-level covariate |
 | Per-cell likelihood | mixture, hurdle, zero-inflated, censored, custom user likelihoods | PLATE owns the per-cell density (`lpdf`/`lpmf`) loop and predictive draw; a ragged observation also gets one aggregate log likelihood per cell, while dense per-cell pointwise synthesis remains target work |
 | Parallel subject/series likelihood | expensive PK/PD, ODE, GP, and longitudinal models | Separate threaded model variants; the compiler may choose `reduce_sum` |
@@ -374,7 +374,7 @@ end
 ```
 
 One collected `matrix[n_terms,n_groups]` now serves ordinary random slopes,
-`|ID|` cross-formula buckets, Bordet parameter blocks, and any future custom
+`|ID|` cross-formula buckets, hierarchical parameter blocks, and any future custom
 group kernel. The CV form again changes only the cell count and relies on taint
 propagation — which is exactly what the flat spelling gets for free by taking
 `n_groups` as a caller-supplied kwarg, and why there are no `_cv` submodels any
@@ -566,7 +566,7 @@ Complete PLATE is not a reason to de-vectorize concise global models.
 | `addprop` | Pure elementwise deterministic vector algebra is already concise |
 | `mi_merge` | Scatter/gather mutation belongs in an opaque function, not the model loop |
 
-## Bordet family
+## Hierarchical biomarker family
 
 The shipped hierarchical-parametric representative currently obtains one
 correlated six-vector for every `(biomarker, person)` series from the structured
@@ -582,7 +582,7 @@ theta ~ plate(; outer=(n_series,)) do series
     diag_pre_multiply(tau, L) * z
 end
 
-# Existing vectorized Bordet response and likelihood remain unchanged.
+# Existing vectorized biomarker response and likelihood remain unchanged.
 ```
 
 The vector result is inferred from the trailing expression. Keep the plate LHS
@@ -601,7 +601,7 @@ log_y_by_series ~ plate(
     outer=(n_series,),
 ) do ys, ts, ds, biomarker
     theta_s ~ brm_correlated_cell(L, tau, 6)
-    mu_s = bordet_response(ts, ds, theta_s)
+    mu_s = biomarker_response(ts, ds, theta_s)
     ys ~ normal(mu_s, sigma[biomarker])
     mu_s
 end
@@ -613,9 +613,9 @@ vector-valued basis cell. Student-t and CV variants change the likelihood or
 outer taint, not the plate structure. Full correlation *between* series remains
 outside the independent-cell abstraction.
 
-## Bruno PK/PD family
+## PK/PD family
 
-Bruno's near-replicates expose three increasingly useful plate levels.
+The PK/PD near-replicates expose three increasingly useful plate levels.
 
 ### Scalar observation maps
 
@@ -683,7 +683,7 @@ mu2 = X2 * beta2 + rows_dot_product(Z2, b_shared[cols2, g2]')
 
 This removes the need for a separate matrix-returning `*_draws` submodel. The
 same collected value serves any number of linked regressions, including
-Bruno's multi-assay outcomes.
+multi-assay PK/PD outcomes.
 
 ## What PLATE still should not model
 
@@ -707,22 +707,22 @@ Even a complete implementation has a useful boundary.
    BRM-shaped models. `test/plate_stress.jl` now gates SLIC, `stanc`, and
    BridgeStan log-density/gradient behavior and retains unsupported forms as
    expected failures.
-2. **Fixed vector BRM migration:** rewrite the six-vector Bordet floor and
+2. **Fixed vector BRM migration:** rewrite the six-vector biomarker floor and
    generic `ranef_correlated_draws`; compare emitted parameter shapes and log
    density on the deployed implementation.
 3. **Hygienic submodel acceptance:** express the same cell as a named `@slic`
    building block and verify per-call names, captures, and return substitution.
 4. **Constrained cell values:** replace `ranef_correlated_by*` and the `multi_*`
    helpers with per-stratum Cholesky/scale plates.
-5. **Ragged cells:** migrate grouped HSGP, Bordet series likelihoods, and Bruno
+5. **Ragged cells:** migrate grouped HSGP, biomarker series likelihoods, and PK/PD
    subject kernels; verify offset/gather order under `reprocess`.
 6. **Scalar likelihood families:** remove vector wrapper UDFs for
    zero-inflated, hurdle, censored, and missing-data models.
 7. **Parallel lowering:** compare serial and `reduce_sum` log density for
-   likelihood-carrying Bruno/Bordet plates.
+   likelihood-carrying PK/PD and biomarker plates.
 8. **CV and replay:** prove that outer-size taint, generated-quantity redraws,
    new groups, and ragged offsets survive `reprocess`/`restan_data`.
 
-The first acceptance model should be Bordet's shipped
-`bordet_hierarchical_parametric`: it exercises a real correlated vector cell
+The first acceptance model should be the shipped hierarchical-parametric
+biomarker model: it exercises a real correlated vector cell
 without depending on the later ragged or parallel layers.
