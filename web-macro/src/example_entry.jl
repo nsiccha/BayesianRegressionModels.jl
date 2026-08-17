@@ -137,14 +137,18 @@
     # notes (no formula body) are skipped. Confidential client-project examples
     # (`<prefix>-*`) depend on their gitignored `<prefix>-ext.jl` registering the
     # dataset + allowlist; without that file on disk they'd error at compile, so
-    # they're hidden too. Add a new confidential prefix to `_CONFIDENTIAL_EXT` —
-    # the gate generalizes over the tuple rather than special-casing each one.
-    _CONFIDENTIAL_EXT = ("bruno", "bordet")
+    # they're hidden too. A slug is confidential exactly when a matching
+    # `<prefix>-ext.jl` was discovered at load (`CONFIDENTIAL_EXT_PREFIXES`), so
+    # tracked source names no specific project. A confidential example whose ext
+    # is absent would error at compile, but its example file is gitignored
+    # alongside the ext (same `.gitignore` unit) — both are present or absent
+    # together, so that pair never occurs.
+    _confidential = CONFIDENTIAL_EXT_PREFIXES
     shown = begin
-        gated = findfirst(p -> startswith(slug, "$p-"), _CONFIDENTIAL_EXT)
+        gated = findfirst(p -> startswith(slug, "$p-"), _confidential)
         !isnothing(formula) &&
             (isnothing(gated) ||
-             isfile(joinpath(@__DIR__, "$(_CONFIDENTIAL_EXT[gated])-ext.jl")))
+             isfile(joinpath(@__DIR__, "$(_confidential[gated])-ext.jl")))
     end
 
     # Placeholder card emitted by the gallery shell: auto-fetches its body

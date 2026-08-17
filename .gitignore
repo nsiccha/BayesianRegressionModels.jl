@@ -39,8 +39,10 @@ tmp/
 LocalPreferences.toml
 JuliaLocalPreferences.toml
 
-# Confidential client-project examples (local-only, never commit)
+# Confidential client-project extensions (local-only, never commit): each
+# `<prefix>-ext.jl` registers a dataset + allowlist for its `<prefix>-*` examples.
+web-macro/src/*-ext.jl
+# Confidential client-project example data (local-only, never commit). These
+# match the local example filenames directly; see the pending naming decision.
 web-macro/examples/bruno-*.jl
-web-macro/src/bruno-*.jl
 web-macro/examples/bordet-*.jl
-web-macro/src/bordet-*.jl
