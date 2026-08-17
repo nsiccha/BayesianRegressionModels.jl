@@ -449,6 +449,80 @@ function r2d2_priors(brmi::BRMI)
     out
 end
 
+# ---- split a parsed model into prior vs structural fragments --------------
+
+# One operation is a PRIOR-address statement iff its `~`-LHS is an `effect(...)`
+# carrier. Every prior head (`effect`/`sd`/`cor`/`simplex`/`latent`/
+# `length_scale`, and the `r2d2` decomposition) normalises onto that carrier in
+# `_parse_effect!`, so this single shape test partitions the operations exactly
+# and stays consistent with `effect_priors` (which classifies on the same LHS).
+# A scalar declaration like `sigma ~ Exponential(1)` has a bare-name LHS, so it
+# is NOT a prior op -- it declares a parameter and counts as model, matching
+# brms.
+function _is_effect_prior_op(op_nc)
+    op = _named_op(op_nc)
+    isnothing(op) && return false
+    getf(op) === (~) || return false
+    lhs, _ = getargs(op, 2)
+    lhs_e = _as_expr_column(lhs)
+    isnothing(lhs_e) && return false
+    getf(lhs_e) === effect
+end
+
+# Rebuild a BRMI from the operations that satisfy `keep`, preserving formula
+# order. The `(; pairs...)` splat keeps the NamedTuple key order, so each
+# fragment prints in the same order the statements were written.
+_select_ops(brmi::BRMI, keep) =
+    BRMI((; (k => v for (k, v) in pairs(brmi.operations) if keep(v))...))
+
+"""
+    priors_of(brmi::BRMI) -> BRMI
+
+Return the PRIOR fragment of a parsed model: a `BRMI` holding only its
+prior-address statements — the `effect(...)` / `sd(...)` / `cor(...)` /
+`simplex(...)` / `latent(...)` / `length_scale(...)` / `r2d2(...)` block — in
+formula order. This is the "set the priors to the only thing" view: printing
+the result shows just the prior specification, which is often longer than the
+structural model and distracting inside the full listing.
+
+It is the inverse partition to [`structure_of`](@ref); together they split a
+`BRMI` so that `Base.merge(structure_of(brmi), priors_of(brmi))` recomposes an
+equivalent model. Scalar parameter declarations such as `sigma ~ Exponential(1)`
+are NOT priors here — they declare a parameter and stay in
+[`structure_of`](@ref) (brms prints them with the model too).
+
+The default `show(::BRMI)` is unchanged; this is an explicit, opt-in view.
+
+```jldoctest
+julia> brmi = @brm (; x=[1.0, 2.0], y=[0.1, 0.2]) begin
+           mu ~ 1 + x
+           y ~ Normal(mu, 0.5)
+           effect(mu, Intercept) ~ Normal(0, 1)
+       end;
+
+julia> priors_of(brmi)
+BRMI:
+  effect(mu, Intercept) ~ Normal(0, 1)
+```
+"""
+priors_of(brmi::BRMI) = _select_ops(brmi, _is_effect_prior_op)
+
+"""
+    structure_of(brmi::BRMI) -> BRMI
+
+Return the STRUCTURAL fragment of a parsed model: a `BRMI` holding everything
+that is NOT a prior-address statement — linear predictors, likelihoods, and
+scalar parameter declarations (`sigma ~ Exponential(1)`) — in formula order.
+This is the "suppress the priors when printing" view: printing the result shows
+the model without the prior block that swamps it.
+
+Inverse partition to [`priors_of`](@ref):
+`Base.merge(structure_of(brmi), priors_of(brmi))` recomposes an equivalent
+model. The default `show(::BRMI)` is unchanged; this is an explicit, opt-in
+view.
+"""
+structure_of(brmi::BRMI) = _select_ops(brmi, op_nc -> !_is_effect_prior_op(op_nc))
+
 # ---- predictors of a single LP --------------------------------------------
 
 """
