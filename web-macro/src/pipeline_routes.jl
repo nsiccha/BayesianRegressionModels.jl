@@ -604,7 +604,7 @@
     # URL through `compute_steps` and dumps the static HTML for deploy.
     @include gallery = begin
         # Showable subset of `examples.entries()` (drops markdown-only
-        # notes and bruno-* entries when bruno-ext.jl isn't on disk).
+        # notes and confidential <prefix>-* entries when their <prefix>-ext.jl isn't on disk).
         items() = [e for e in __parent__.__parent__.examples.entries() if e.shown]
 
         # Card grid: one placeholder article per item, lazy-loading its
@@ -627,7 +627,7 @@
         # Path-based so static-deploy recording works -- query-string
         # URLs lose their differentiator when GitHub Pages strips the
         # query before file lookup. Formula is set up under the example's
-        # namespace (so `bruno-*` items get `dataset_extras(::Val{:bruno},
+        # namespace (so a `<prefix>-*` item gets `dataset_extras(::Val{:<prefix>},
         # df)` extras) and run through `compute_steps` to terminal state
         # via `polling_fetchindex` -- same machinery the stage buttons
         # use, so the user sees the progress treebar during compile + fit.

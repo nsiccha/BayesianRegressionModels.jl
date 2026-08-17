@@ -57,10 +57,10 @@ using BayesianRegressionModels: AbstractColumn, MissingColumn, DataColumn,
     name, getargs, getf, getkwargs, getbroadcast, getop,
     # Macro / pipeline entry points called by Formula + stan_code.
     parse!, _brm, stan_code, maybedata,
-    # Part machinery and push_parts!! (called by bruno-ext unqualified).
+    # Part machinery and push_parts!! (called by a confidential -ext.jl unqualified).
     Part, push_parts!!, vbroadcasted, llikelihood!
-# Extension hooks — use `import` (not `using`) so bruno-ext can ADD
-# methods to the same function binding rather than creating a shadowing
+# Extension hooks — use `import` (not `using`) so a confidential -ext.jl can
+# ADD methods to the same function binding rather than creating a shadowing
 # local function.
 import BayesianRegressionModels: _sb_submodel_rhs!, vmeta_sampling_rhs,
     nparams, lprior!
@@ -69,13 +69,13 @@ import BayesianRegressionModels: _sb_submodel_rhs!, vmeta_sampling_rhs,
 # HTMX builders).
 include("html_expr.jl")
 
-# Extension hook: extensions (e.g. the gitignored `bruno-ext.jl`) that need
+# Extension hook: extensions (e.g. a gitignored `<prefix>-ext.jl`) that need
 # to contribute auxiliary data which doesn't fit as per-row DataFrame
 # columns -- for example `dose_times::Vector{<:AbstractVector}` indexed by
 # subject id -- add a method `dataset_extras(::Val{:ns}, df)` returning a
 # NamedTuple of extras. The namespace is derived from the example
-# label/slug (first dash/space-separated segment), so `bruno-qt-*` examples
-# dispatch to `::Val{:bruno}`. Default is no extras.
+# label/slug (first dash/space-separated segment), so a `<prefix>-*` example
+# dispatches to `::Val{:<prefix>}`. Default is no extras.
 dataset_extras(::Val, df) = (;)
 
 # DOs in dependency order. Every feature is a focused @dynamicstruct:
@@ -100,14 +100,23 @@ function __init__()
     route!(AppContext())
 end
 
-# Confidential client-project extensions (gitignored); load each if present.
-# Each `<prefix>-ext.jl` adds a `dataset_extras(::Val{:<prefix>}, df)` method and
-# pushes its formula calls into `_ALLOWED_CALLS`. Keep this list in sync with
-# `_CONFIDENTIAL_EXT` in example_entry.jl (which hides examples whose ext is absent).
-for _ext in ("bruno-ext.jl", "bordet-ext.jl")
-    let path = joinpath(@__DIR__, _ext)
-        isfile(path) && include(path)
+# Confidential client-project extensions (gitignored `<prefix>-ext.jl`); discover
+# and load each present one. Each adds a `dataset_extras(::Val{:<prefix>}, df)`
+# method and pushes its formula calls into `_ALLOWED_CALLS`. The discovered
+# prefixes are recorded in `CONFIDENTIAL_EXT_PREFIXES`, which drives the
+# example-visibility gate (example_entry.jl) and gallery recording (app_data.jl),
+# so BRM's tracked source names no specific client project.
+const CONFIDENTIAL_EXT_PREFIXES = let dir = @__DIR__
+    prefixes = String[]
+    for _name in sort(readdir(dir))
+        m = match(r"^(.+)-ext\.jl$", _name)
+        m === nothing && continue
+        path = joinpath(dir, _name)
+        isfile(path) || continue
+        include(path)
+        push!(prefixes, String(m.captures[1]))
     end
+    prefixes
 end
 
 end # module

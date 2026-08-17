@@ -492,12 +492,14 @@
     """
     record_gallery(record_dir::String, record_base::String) = begin
         # Build the per-item path list. Same iteration as the gallery
-        # view; recording covers shell + per-card endpoints. Bruno
-        # examples are skipped when `bruno-ext.jl` isn't on disk -- the
-        # docs CI doesn't have the gitignored ext, so the bruno data
-        # extras would fail to load and `compute_steps` would die.
+        # view; recording covers shell + per-card endpoints. Confidential
+        # client-project examples (`<prefix>-*`) are skipped when their
+        # gitignored `<prefix>-ext.jl` didn't load -- e.g. the docs CI lacks
+        # the ext, so the dataset extras would fail to load and
+        # `compute_steps` would die. Loaded prefixes come from
+        # `CONFIDENTIAL_EXT_PREFIXES`, so no project name is hardcoded here.
         examples_dir_local = examples_dir
-        bruno_loaded = isfile(joinpath(dirname(@__DIR__), "src", "bruno-ext.jl"))
+        loaded_ext_prefixes = CONFIDENTIAL_EXT_PREFIXES
         items = let xs = []
             isdir(examples_dir_local) || mkpath(examples_dir_local)
             files = sort(filter(endswith(".jl"),
@@ -505,7 +507,10 @@
                          by=mtime, rev=true)
             for path in files
                 slug = replace(basename(path), r"\.jl$" => "")
-                (!bruno_loaded && startswith(slug, "bruno-")) && continue
+                _g = findfirst(p -> startswith(slug, "$p-"), loaded_ext_prefixes)
+                (_g !== nothing &&
+                 !isfile(joinpath(dirname(@__DIR__), "src",
+                                  "$(loaded_ext_prefixes[_g])-ext.jl"))) && continue
                 lines = readlines(path)
                 header = Dict{String,String}()
                 i = 1

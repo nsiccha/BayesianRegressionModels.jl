@@ -55,8 +55,9 @@ end
     end
 
     # NamedTuple view of `df`, merged with namespace-dispatched extras so
-    # extensions (e.g. bruno-ext.jl) can splice in `dose_times` etc. without
-    # touching macro.jl. `@brm` only needs `hasproperty`/`getproperty` on
+    # extensions (e.g. a confidential `<prefix>-ext.jl`) can splice in
+    # `dose_times` etc. without touching macro.jl. `@brm` only needs
+    # `hasproperty`/`getproperty` on
     # its data argument, so the NamedTuple stands in for the DataFrame.
     container(namespace=:default) = begin
         cols = (; (Symbol(c) => df[!, c] for c in names(df))...)
