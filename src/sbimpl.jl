@@ -1618,9 +1618,19 @@ _sb_mi_normal = StanBlocks.@slic begin
     # Typed-LHS sampling form: explicit `vector[n_mis]` so SLIC declares
     # y_mis as a vector parameter rather than inferring scalar from the
     # bare `normal(...)` call (which has no size-bearing kwarg).
+    #
+    # `maybe_index` is StanBlocks' shape-robust distribution-arg slicer:
+    # a rank-1 vector arg lowers to `arg[idx]`, a rank-0 scalar arg passes
+    # through unchanged. So a SCALAR family arg -- e.g. `sigma` from
+    # `sigma ~ Exponential(2)` in `mi(y) ~ Normal(mu, sigma)` -- broadcasts
+    # rather than being indexed. Raw `scale[Jmis]` on a `real` scalar traces
+    # to `anything` and breaks the StanBlocks tracer (snag
+    # `sbimpl-mi-impute`); `maybe_index` is the same builtin StanBlocks' own
+    # native missing-outcome auto-imputation uses, so no call-site lifting is
+    # needed and every scalar/vector combination of `loc`/`scale` traces.
     n_mis = num_elements(Jmis)
-    y_mis :: vector[n_mis] ~ normal(loc[Jmis], scale[Jmis])
-    y_obs ~ normal(loc[Jobs], scale[Jobs])
+    y_mis :: vector[n_mis] ~ normal(maybe_index(loc, Jmis), maybe_index(scale, Jmis))
+    y_obs ~ normal(maybe_index(loc, Jobs), maybe_index(scale, Jobs))
     return mi_merge(y_obs, y_mis, Jobs, Jmis,
                     num_elements(Jobs) + n_mis)
 end
@@ -2616,9 +2626,6 @@ _as_real(_) = nothing
 
 _as_error_exception(e::ErrorException) = e
 _as_error_exception(_) = nothing
-
-_scalar_or_lift(::Real, scalar_v, other_v) = :(rep_vector($scalar_v, num_elements($other_v)))
-_scalar_or_lift(_, scalar_v, _other_v) = scalar_v
 
 """
     stan_code(sb::SBBRMI) -> String
@@ -4811,13 +4818,11 @@ function _sb_mi_family_kwargs(::Type{Normal}, rhs::ExprColumn, data)
     loc, scale = args
     loc_v   = _sb_mi_kwarg_value(loc,   data)
     scale_v = _sb_mi_kwarg_value(scale, data)
-    # Submodel body unconditionally subscripts (`scale[Jmis]` etc.), so a
-    # scalar arg has to be lifted to a vector at the call site. Use the
-    # other arg's length probe -- LP names are always full-length.
-    scale_expr = _scalar_or_lift(scale, scale_v, loc_v)
-    loc_expr   = _scalar_or_lift(loc,   loc_v,   scale_v)
-    [Expr(:kw, :loc,   loc_expr),
-     Expr(:kw, :scale, scale_expr)]
+    # The submodel body slices each arg with `maybe_index`, which broadcasts
+    # a scalar and indexes a vector, so no call-site lifting is needed: pass
+    # the resolved bindings straight through, scalar or full-length alike.
+    [Expr(:kw, :loc,   loc_v),
+     Expr(:kw, :scale, scale_v)]
 end
 
 # Resolve a family-arg into the symbol the submodel body should reference.
@@ -7110,9 +7115,12 @@ _sb_collect_terms_expr!(acc, ::typeof(+), x) = foreach(a -> _sb_collect_terms!(a
 # `(expr | group)` is kept as-is; `_sb_linear_predictor!` splits it off into
 # the ranef side of the additive linear predictor.
 _sb_collect_terms_expr!(acc, ::typeof(|), x) = push!(acc, x)
-# `coef * a` -- sampled scalar times a data column. Kept whole here so the
-# classifier in `_sb_linear_predictor!` can route it into direct_terms
-# (the user supplies their own coefficient via the scalar; no popefs beta).
+# `a * b` -- kept whole for the predictor-term layer. Under `~`, a `*` over raw
+# data columns is a protect-style materialised term (popefs supplies its beta);
+# a `*` that references a sampled coefficient is NOT a formula term at all and is
+# rejected in `_sb_predictor_term!(::typeof(*))` with a pointer to the assignment
+# (`=`) form. The old `scalar*data` LP escape hatch was dropped in 84434c7 so `~`
+# stays formula-only and `coef * col` has exactly one spelling (`lp = coef * col`).
 _sb_collect_terms_expr!(acc, ::typeof(*), x) = push!(acc, x)
 # `factor(c, ref=k)`: configurable reference level for a categorical
 # column. Re-encode at term-collection time (swap level k <-> level 1)
@@ -7663,7 +7671,7 @@ end
 # subtree to a Stan data vector and let popefs supply the beta. Errors out
 # if any leaf isn't a raw data column (e.g. references a sampled parameter
 # directly), preserving the old "unsupported" diagnostic.
-function _sb_predictor_term!(stmts, data, f::Function, t; kwargs...)
+function _sb_materialize_protect_term!(stmts, data, f, t)
     try
         v = collect(Float64, _sb_materialize_vec(t))
         cn = _sb_wrapper_col_name(Symbol(f), t)
@@ -7676,6 +7684,31 @@ function _sb_predictor_term!(stmts, data, f::Function, t; kwargs...)
         _ee = _as_error_exception(err); isnothing(_ee) && rethrow()
         error("sbimpl: unsupported predictor-term function `$f` (supported: `mo`, `mo1`, `me`, `s`, `ar`, `protect`, `zscale`, `center`, `standardize`, or any expression in raw data columns) -- materialization failed: $(_ee.msg)")
     end
+end
+_sb_predictor_term!(stmts, data, f::Function, t; kwargs...) =
+    _sb_materialize_protect_term!(stmts, data, f, t)
+
+# Does term `t` reference a sampled parameter (a NamedColumn NOT backed by a raw
+# data column)? Mirrors `_materialize_named`'s DataColumn / not-DataColumn split.
+_sb_term_refs_param(t::NamedColumn) = !(parent(t) isa DataColumn)
+_sb_term_refs_param(t::ExprColumn) = any(_sb_term_refs_param, getargs(t))
+_sb_term_refs_param(_) = false
+
+# `coef * col` under `~`: a sampled coefficient times a data column is an
+# ASSIGNMENT-path expression (`lp = coef * col`, emitted as `.*`), not a `~`
+# formula summand -- the `scalar*data` LP escape hatch was dropped in 84434c7 so
+# the product has exactly one spelling. Reject that shape with the exact remedy;
+# a `*` over raw data columns only is still a valid protect-style materialised
+# term and falls through to the generic path above.
+function _sb_predictor_term!(stmts, data, ::typeof(*), t; target=nothing, kwargs...)
+    if _sb_term_refs_param(t)
+        lp = isnothing(target) ? "<lp>" : string(target)
+        error("sbimpl: a `~` predictor RHS multiplies a sampled coefficient by a data " *
+              "column (a `coef * col` term); that is an assignment, not a formula summand. " *
+              "Write it with `=` instead of `~`: `$lp = <coef> * <col>` (emitted as `.*`), " *
+              "not `$lp ~ 0 + <coef> * <col>`.")
+    end
+    _sb_materialize_protect_term!(stmts, data, *, t)
 end
 
 # Recursively materialize an ExprColumn / NamedColumn tree into a plain
