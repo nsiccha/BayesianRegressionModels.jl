@@ -268,11 +268,11 @@ Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
 interval_normal = (@brm begin
     sigma ~ Exponential(2)
     mu ~ 1 + x
-    lower ~ interval_censored(Normal(mu, sigma); upper=upper)
+    y_lower ~ interval_censored(Normal(mu, sigma); upper=y_upper)
 end)((;
     x=[-1.0, 0.0, 1.0],
-    lower=[-0.4, 0.1, 0.8],
-    upper=[-0.1, 0.4, 1.2],
+    y_lower=[-0.4, 0.1, 0.8],
+    y_upper=[-0.1, 0.4, 1.2],
 ))
 """, :interval_normal; title="Interval-censored Normal evidence")
 ```
