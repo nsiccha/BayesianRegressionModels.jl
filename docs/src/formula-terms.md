@@ -456,7 +456,7 @@ Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
 horseshoe_model = (@brm begin
     beta_sparse ~ Horseshoe(local_scale=0.5, global_scale=0.1)
     sigma ~ Exponential(1)
-    mu ~ 0 + beta_sparse * x
+    mu = beta_sparse * x
     y ~ Normal(mu, sigma)
 end)((; x=[-1.0, 0.5, 2.0], y=[0.2, 1.1, -0.4]))
 """, :horseshoe_model; title="Scalar horseshoe prior")
@@ -470,6 +470,14 @@ lambda ~ half-Cauchy(0, local_scale)
 tau    ~ half-Cauchy(0, global_scale)
 beta_sparse = raw * lambda * tau
 ```
+
+A sampled coefficient enters the linear predictor through an **assignment**
+(`mu = beta_sparse * x`), not a `~` formula term. A `~` right-hand side is
+formula-style only — an intercept plus population/group summands whose
+coefficients `SBBRMI` allocates — so `mu ~ 0 + beta_sparse * x` is rejected:
+`beta_sparse` is your own sampled scalar, not a data column, and the `.*`
+product is what you want to write directly. Use `=` for any linear predictor
+that multiplies a sampled parameter by data.
 
 `local_scale` and `global_scale` are optional positive finite formula
 constants. Both default to `1.0`; the no-keyword spelling
