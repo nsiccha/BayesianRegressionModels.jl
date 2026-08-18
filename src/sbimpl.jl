@@ -2484,6 +2484,28 @@ _sb_is_stan_data_value(::Any) = true
 _sb_is_stan_data_value(v::AbstractArray) =
     eltype(v) <: Real || eltype(v) <: AbstractArray
 
+# Stan reserved keywords. BRM names each emitted Stan `data` variable verbatim
+# after its DataFrame column (`keys(data)` below), so a column named `lower`,
+# `upper`, `real`, `int`, ... would be emitted as `vector[lower_n] lower;` — a
+# program `transpiles()` accepts but `stanc` rejects with "Ill-formed
+# identifier ... reserved keyword". The set is exactly the identifiers this
+# `stanc` rejects, enumerated against the pinned compiler (snag
+# `reserved-keyword`). It is deliberately NOT broadened to the full C++ keyword
+# list: `stanc` accepts `double`/`float`/`class`/... as identifiers, so
+# rejecting those here would break currently-compiling models.
+const _SB_STAN_RESERVED_IDENTIFIERS = Set{Symbol}((
+    :functions, :data, :parameters, :model, :transformed, :generated, :quantities,
+    :return, :if, :else, :while, :for, :in, :break, :continue, :profile, :print,
+    :reject, :target, :int, :real, :complex, :vector, :row_vector, :matrix, :array,
+    :tuple, :void, :ordered, :positive_ordered, :simplex, :unit_vector,
+    :sum_to_zero_vector, :cholesky_factor_corr, :cholesky_factor_cov, :corr_matrix,
+    :cov_matrix, :complex_vector, :complex_row_vector, :complex_matrix, :lower,
+    :upper, :offset, :multiplier, :var, :typedef, :struct, :auto, :export, :extern,
+    :static,
+    # `:true`/`:false` are the Bool literals in Julia, not Symbols — quote them.
+    Symbol("true"), Symbol("false"),
+))
+
 SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
        centered_groups=Set{Symbol}(), _frozen_preproc=nothing) = begin
     cv_groups = cv_groups isa Set ? cv_groups : Set{Symbol}(cv_groups)
@@ -2563,6 +2585,19 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     for k in collect(keys(data))
         _sb_is_stan_data_value(data[k]) || delete!(data, k)
     end
+    # `keys(data)` is now exactly the set of Stan `data` identifiers this model
+    # emits. Reject any that collide with a Stan reserved keyword here — with an
+    # actionable BRM-level error — instead of returning invalid Stan that only
+    # `stanc` catches (snag `reserved-keyword`).
+    reserved_cols = sort!(Symbol[k for k in keys(data)
+                                 if k in _SB_STAN_RESERVED_IDENTIFIERS])
+    isempty(reserved_cols) || error(
+        "sbimpl: column name(s) ", join(reserved_cols, ", "), " collide with Stan ",
+        "reserved keyword(s). BRM emits each data column verbatim as a Stan `data` ",
+        "identifier (e.g. `vector[", first(reserved_cols), "_n] ", first(reserved_cols),
+        ";`), which `stanc` rejects with \"Ill-formed identifier\". Rename the ",
+        "offending column(s) before building the model — e.g. `lower`/`upper` -> ",
+        "`y_lower`/`y_upper` for interval-censored endpoints.")
     body = Expr(:block, stmts...)
     model = StanBlocks.SlicModel(body, data, mod)
     SBBRMI(brmi, model, data, preproc)

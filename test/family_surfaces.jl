@@ -842,6 +842,41 @@ end
         missing_bounds(df); mod=@__MODULE__)
 end
 
+@testset "reserved-keyword data columns are rejected before Stan" begin
+    # BRM emits each data column verbatim as a Stan `data` identifier, so a
+    # column named after a Stan reserved keyword (`lower`/`upper`/`real`/...)
+    # emitted `vector[lower_n] lower;` — invalid Stan that `transpiles()`
+    # accepted but `stanc` rejected. The SBBRMI constructor now rejects the
+    # collision with an actionable BRM error (snag `reserved-keyword`).
+    reserved_builder = @brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x
+        lower ~ interval_censored(Normal(mu, sigma); upper=upper)
+    end
+    reserved_df = (;
+        x=[-1.0, 0.0, 1.0],
+        lower=[-0.4, 0.1, 0.8],
+        upper=[-0.1, 0.4, 1.2],
+    )
+    @test_throws "reserved keyword" SBBRMI(reserved_builder(reserved_df); mod=@__MODULE__)
+
+    # The documented rename (`lower`/`upper` -> `y_lower`/`y_upper`) builds and
+    # its emitted program is stanc-clean.
+    renamed_builder = @brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x
+        y_lower ~ interval_censored(Normal(mu, sigma); upper=y_upper)
+    end
+    renamed_df = (;
+        x=[-1.0, 0.0, 1.0],
+        y_lower=[-0.4, 0.1, 0.8],
+        y_upper=[-0.1, 0.4, 1.2],
+    )
+    plan = generative_plan(renamed_builder, renamed_df; mod=@__MODULE__)
+    code = BayesianRegressionModels.stan_code(plan)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+end
+
 composed_numeric_df = (;
     y_truncated=[-0.6, 0.1, 1.1],
     y_lower_truncated=[-0.25, 0.2, 1.8],
