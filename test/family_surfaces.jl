@@ -732,6 +732,51 @@ end
     @test families[:count_interval] === :interval_censored
 end
 
+@testset "mi() missing-response transpiles for scalar and vector family args" begin
+    # Regression for snag `sbimpl-mi-impute`: `mi(y) ~ Normal(mu, sigma)` with a
+    # SCALAR `sigma` parameter used to emit `sigma[Jmis]` inside `_sb_mi_normal`,
+    # which the StanBlocks tracer rejects (`tracetype not defined for anything`)
+    # because a `real` scalar cannot be int-vector indexed. The submodel now
+    # slices each family arg with `maybe_index`, so a scalar broadcasts and a
+    # vector is indexed. This is the canonical `docs/src/feature-atlas.md`
+    # `missing_gaussian` example.
+    scalar_scale = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x
+        mi(y) ~ Normal(mu, sigma)
+    end)((;
+        x=[-1.0, 0.5, 2.0, 0.25],
+        y=Union{Missing,Float64}[0.2, missing, -0.4, missing],
+    ))
+    sb = SBBRMI(scalar_scale; mod=@__MODULE__)
+    code = BayesianRegressionModels.stan_code(sb)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    # The scalar scale broadcasts — it must never be int-vector indexed.
+    @test !occursin("sigma[", code)
+    # The full-length location IS indexed at the observed and missing rows.
+    @test occursin("mu[Jobs_y]", code)
+    @test occursin("mu[Jmis_y]", code)
+    # Observed rows contribute the likelihood; imputed values are the
+    # optimised-away posterior-predictive draws reassembled by `mi_merge`.
+    @test occursin("y_obs ~ normal(mu[Jobs_y], sigma);", code)
+    @test occursin("mi_merge(", code)
+
+    # A distributional (full-length vector) scale must still be indexed — the
+    # `maybe_index` slice adapts per arg rank, so this path is unregressed.
+    vector_scale = (@brm begin
+        mu ~ 1 + x
+        log(s) ~ 1 + x
+        mi(y) ~ Normal(mu, s)
+    end)((;
+        x=[-1.0, 0.5, 2.0, 0.25],
+        y=Union{Missing,Float64}[0.2, missing, -0.4, missing],
+    ))
+    vcode = BayesianRegressionModels.stan_code(SBBRMI(vector_scale; mod=@__MODULE__))
+    @test StanBlocks.stanc_check(vcode; warn_pedantic=false).ok
+    @test occursin("s[Jobs_y]", vcode)
+    @test occursin("s[Jmis_y]", vcode)
+end
+
 @testset "Julia-native wrapper surface and capability gate" begin
     brmi = family_builder(df)
     rhs_for(target) = begin
