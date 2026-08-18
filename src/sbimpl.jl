@@ -1618,9 +1618,19 @@ _sb_mi_normal = StanBlocks.@slic begin
     # Typed-LHS sampling form: explicit `vector[n_mis]` so SLIC declares
     # y_mis as a vector parameter rather than inferring scalar from the
     # bare `normal(...)` call (which has no size-bearing kwarg).
+    #
+    # `maybe_index` is StanBlocks' shape-robust distribution-arg slicer:
+    # a rank-1 vector arg lowers to `arg[idx]`, a rank-0 scalar arg passes
+    # through unchanged. So a SCALAR family arg -- e.g. `sigma` from
+    # `sigma ~ Exponential(2)` in `mi(y) ~ Normal(mu, sigma)` -- broadcasts
+    # rather than being indexed. Raw `scale[Jmis]` on a `real` scalar traces
+    # to `anything` and breaks the StanBlocks tracer (snag
+    # `sbimpl-mi-impute`); `maybe_index` is the same builtin StanBlocks' own
+    # native missing-outcome auto-imputation uses, so no call-site lifting is
+    # needed and every scalar/vector combination of `loc`/`scale` traces.
     n_mis = num_elements(Jmis)
-    y_mis :: vector[n_mis] ~ normal(loc[Jmis], scale[Jmis])
-    y_obs ~ normal(loc[Jobs], scale[Jobs])
+    y_mis :: vector[n_mis] ~ normal(maybe_index(loc, Jmis), maybe_index(scale, Jmis))
+    y_obs ~ normal(maybe_index(loc, Jobs), maybe_index(scale, Jobs))
     return mi_merge(y_obs, y_mis, Jobs, Jmis,
                     num_elements(Jobs) + n_mis)
 end
@@ -2581,9 +2591,6 @@ _as_real(_) = nothing
 
 _as_error_exception(e::ErrorException) = e
 _as_error_exception(_) = nothing
-
-_scalar_or_lift(::Real, scalar_v, other_v) = :(rep_vector($scalar_v, num_elements($other_v)))
-_scalar_or_lift(_, scalar_v, _other_v) = scalar_v
 
 """
     stan_code(sb::SBBRMI) -> String
@@ -4776,13 +4783,11 @@ function _sb_mi_family_kwargs(::Type{Normal}, rhs::ExprColumn, data)
     loc, scale = args
     loc_v   = _sb_mi_kwarg_value(loc,   data)
     scale_v = _sb_mi_kwarg_value(scale, data)
-    # Submodel body unconditionally subscripts (`scale[Jmis]` etc.), so a
-    # scalar arg has to be lifted to a vector at the call site. Use the
-    # other arg's length probe -- LP names are always full-length.
-    scale_expr = _scalar_or_lift(scale, scale_v, loc_v)
-    loc_expr   = _scalar_or_lift(loc,   loc_v,   scale_v)
-    [Expr(:kw, :loc,   loc_expr),
-     Expr(:kw, :scale, scale_expr)]
+    # The submodel body slices each arg with `maybe_index`, which broadcasts
+    # a scalar and indexes a vector, so no call-site lifting is needed: pass
+    # the resolved bindings straight through, scalar or full-length alike.
+    [Expr(:kw, :loc,   loc_v),
+     Expr(:kw, :scale, scale_v)]
 end
 
 # Resolve a family-arg into the symbol the submodel body should reference.
