@@ -7080,9 +7080,12 @@ _sb_collect_terms_expr!(acc, ::typeof(+), x) = foreach(a -> _sb_collect_terms!(a
 # `(expr | group)` is kept as-is; `_sb_linear_predictor!` splits it off into
 # the ranef side of the additive linear predictor.
 _sb_collect_terms_expr!(acc, ::typeof(|), x) = push!(acc, x)
-# `coef * a` -- sampled scalar times a data column. Kept whole here so the
-# classifier in `_sb_linear_predictor!` can route it into direct_terms
-# (the user supplies their own coefficient via the scalar; no popefs beta).
+# `a * b` -- kept whole for the predictor-term layer. Under `~`, a `*` over raw
+# data columns is a protect-style materialised term (popefs supplies its beta);
+# a `*` that references a sampled coefficient is NOT a formula term at all and is
+# rejected in `_sb_predictor_term!(::typeof(*))` with a pointer to the assignment
+# (`=`) form. The old `scalar*data` LP escape hatch was dropped in 84434c7 so `~`
+# stays formula-only and `coef * col` has exactly one spelling (`lp = coef * col`).
 _sb_collect_terms_expr!(acc, ::typeof(*), x) = push!(acc, x)
 # `factor(c, ref=k)`: configurable reference level for a categorical
 # column. Re-encode at term-collection time (swap level k <-> level 1)
@@ -7633,7 +7636,7 @@ end
 # subtree to a Stan data vector and let popefs supply the beta. Errors out
 # if any leaf isn't a raw data column (e.g. references a sampled parameter
 # directly), preserving the old "unsupported" diagnostic.
-function _sb_predictor_term!(stmts, data, f::Function, t; kwargs...)
+function _sb_materialize_protect_term!(stmts, data, f, t)
     try
         v = collect(Float64, _sb_materialize_vec(t))
         cn = _sb_wrapper_col_name(Symbol(f), t)
@@ -7646,6 +7649,31 @@ function _sb_predictor_term!(stmts, data, f::Function, t; kwargs...)
         _ee = _as_error_exception(err); isnothing(_ee) && rethrow()
         error("sbimpl: unsupported predictor-term function `$f` (supported: `mo`, `mo1`, `me`, `s`, `ar`, `protect`, `zscale`, `center`, `standardize`, or any expression in raw data columns) -- materialization failed: $(_ee.msg)")
     end
+end
+_sb_predictor_term!(stmts, data, f::Function, t; kwargs...) =
+    _sb_materialize_protect_term!(stmts, data, f, t)
+
+# Does term `t` reference a sampled parameter (a NamedColumn NOT backed by a raw
+# data column)? Mirrors `_materialize_named`'s DataColumn / not-DataColumn split.
+_sb_term_refs_param(t::NamedColumn) = !(parent(t) isa DataColumn)
+_sb_term_refs_param(t::ExprColumn) = any(_sb_term_refs_param, getargs(t))
+_sb_term_refs_param(_) = false
+
+# `coef * col` under `~`: a sampled coefficient times a data column is an
+# ASSIGNMENT-path expression (`lp = coef * col`, emitted as `.*`), not a `~`
+# formula summand -- the `scalar*data` LP escape hatch was dropped in 84434c7 so
+# the product has exactly one spelling. Reject that shape with the exact remedy;
+# a `*` over raw data columns only is still a valid protect-style materialised
+# term and falls through to the generic path above.
+function _sb_predictor_term!(stmts, data, ::typeof(*), t; target=nothing, kwargs...)
+    if _sb_term_refs_param(t)
+        lp = isnothing(target) ? "<lp>" : string(target)
+        error("sbimpl: a `~` predictor RHS multiplies a sampled coefficient by a data " *
+              "column (a `coef * col` term); that is an assignment, not a formula summand. " *
+              "Write it with `=` instead of `~`: `$lp = <coef> * <col>` (emitted as `.*`), " *
+              "not `$lp ~ 0 + <coef> * <col>`.")
+    end
+    _sb_materialize_protect_term!(stmts, data, *, t)
 end
 
 # Recursively materialize an ExprColumn / NamedColumn tree into a plain
