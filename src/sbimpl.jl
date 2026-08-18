@@ -7151,19 +7151,33 @@ end
 # terms with synthetic group names so the ran-term coalescer in
 # `_sb_emit_ranefs!` keeps them as separate (degenerate K=1) blocks.
 # Mirrors vimpl's `vmeta_sampling_rhs(::ExprColumn{typeof(doublepipe)})`.
+#
+# The intercept-suppressing `0` (`0 + x || g` == "uncorrelated slope x, no
+# intercept") is the standard formula-language drop-intercept marker and
+# contributes no term -- drop it BEFORE splitting into per-term nocor groups,
+# exactly as `_sb_collect_terms!(::Int)` does on the correlated `|` path. Left
+# in, `0` claimed its own `g__nocor__1` group that then had zero terms after
+# `_sb_terms` dropped it in `_sb_emit_ranefs!`, so `(0 + x || g)` -- a single
+# uncorrelated slope, and a documented feature-atlas example -- errored on "no
+# terms" instead of emitting that lone slope as an independent scalar ranef.
 _sb_collect_terms_expr!(acc, ::typeof(doublepipe), x) = begin
     args = getargs(x)
     length(args) == 2 || error("sbimpl: `||` zerocorr expects 2 args, got $(length(args))")
     lhs, rhs = args
     rhs_nc = _as_named_column(rhs)
     isnothing(rhs_nc) && error("sbimpl: `||` zerocorr RHS must be a NamedColumn group, got $(typeof(rhs))")
-    inner = _zerocorr_inner(lhs)
+    inner = filter(!_sb_is_drop_intercept, _zerocorr_inner(lhs))
+    isempty(inner) && error(
+        "sbimpl: `(… || $(name(rhs_nc)))` has no terms after dropping `0`; an ",
+        "uncorrelated block needs at least one slope or intercept term")
     for (i, term) in enumerate(inner)
         nocor = NamedColumn(Symbol(name(rhs_nc), :__nocor__, i), parent(rhs_nc))
         push!(acc, ExprColumn(|, term, nocor))
     end
 end
 
+# The `0` drop-intercept marker (`x::Int == 0`), matching `_sb_collect_terms!`.
+_sb_is_drop_intercept(t) = t isa Int && t == 0
 _zerocorr_inner(lhs::ExprColumn) = getf(lhs) === (+) ? collect(getargs(lhs)) : Any[lhs]
 _zerocorr_inner(lhs) = Any[lhs]
 # `a & b` is the interaction operator (parallels StatsModels.jl). `&` has
