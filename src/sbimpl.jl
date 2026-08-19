@@ -2207,6 +2207,25 @@ struct SBBRMI{P<:BRMI, M, D<:AbstractDict, PP<:AbstractDict}
     preproc::PP
 end
 
+"""
+    parent(sb::SBBRMI) -> BRMI
+
+Return the parsed [`BRMI`](@ref) that `sb` wraps. This is the public, stable
+accessor for an `SBBRMI`'s underlying model; prefer it over the `sb.parent`
+field, which is an implementation detail. Mirrors [`parent(::TuringBRMI)`](@ref).
+
+The introspection accessors [`structure_of`](@ref) and [`priors_of`](@ref) also
+accept an `SBBRMI` directly (unwrapping through this accessor), so a consumer
+holding only the emitted model never has to reach for the wrapped `BRMI`.
+"""
+Base.parent(sb::SBBRMI) = sb.parent
+
+# Accept the emitted `SBBRMI` wrapper directly, so a consumer holding only the
+# emitted model (and not the bare `BRMI`) can split it into prior / model views
+# without reaching into internals. Both unwrap through the `parent` accessor.
+structure_of(sb::SBBRMI) = structure_of(parent(sb))
+priors_of(sb::SBBRMI)    = priors_of(parent(sb))
+
 # Resolve formula-level `effect(...) ~ Normal(...)` statements against the
 # authoritative population-column labels before emission. The returned vector
 # for each LP is aligned 1:1 with `popcoefnames`; `nothing` means retain the
