@@ -7,7 +7,7 @@ using Test
 using BayesianRegressionModels
 using StanBlocks
 using LogDensityProblems
-using Distributions: Cauchy, Exponential, LKJCholesky, Normal
+using Distributions: Cauchy, Dirichlet, Exponential, LKJCholesky, Normal
 
 const EFFECT_PRIOR_CACHE = joinpath(tempdir(), "brm-effect-priors")
 const EFFECT_PRIOR_RUNTIME = get(ENV, "BRM_EFFECT_RUNTIME", "1") != "0"
@@ -69,6 +69,60 @@ end
         @test all(isfinite, gradient)
     else
         @info "Skipping effect-prior BridgeStan gate (BRM_EFFECT_RUNTIME=0)"
+    end
+end
+
+@testset "sampled scalar parameter in an effect-prior argument" begin
+    sampled_scale = @brm df begin
+        slope_prior_sd ~ Exponential(10.0)
+        mu ~ 1 + x
+        effect(mu, x) ~ Normal(0.0, slope_prior_sd)
+        y ~ Normal(mu, 1.0)
+    end
+
+    sb = SBBRMI(sampled_scale; mod=@__MODULE__)
+    code = BayesianRegressionModels.stan_code(sb)
+    @test StanBlocks.stan.transpiles(sb.model)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    @test occursin("slope_prior_sd ~ exponential((1.0 ./ 10.0));", code)
+    @test occursin(
+        "pop_mu_beta_pop ~ normal([0.0, 0.0]', [1.0, slope_prior_sd]');",
+        code)
+    @test first(findfirst("slope_prior_sd ~ exponential", code)) <
+          first(findfirst("pop_mu_beta_pop ~ normal", code))
+
+    # Raw data columns remain forbidden as prior arguments.
+    data_arg = @brm df begin
+        mu ~ 1 + x
+        effect(mu, x) ~ Normal(0.0, y)
+        y ~ Normal(mu, 1.0)
+    end
+    @test_throws "backed by DataColumn" SBBRMI(data_arg; mod=@__MODULE__)
+
+    # A vector-valued prior declaration has the same sampling-expression
+    # carrier, but is not a scalar parameter and must not cross this seam.
+    vector_arg = @brm df begin
+        simplex_scale ~ Dirichlet([1.0, 1.0])
+        mu ~ 1 + x
+        effect(mu, x) ~ Normal(0.0, simplex_scale)
+        y ~ Normal(mu, 1.0)
+    end
+    @test_throws "prior args must be literals or already-declared scalar parameters" SBBRMI(
+        vector_arg; mod=@__MODULE__)
+
+    if EFFECT_PRIOR_RUNTIME
+        isdir(EFFECT_PRIOR_CACHE) || mkpath(EFFECT_PRIOR_CACHE)
+        problem = StanBlocks.stan_instantiate(
+            sb.model;
+            path=joinpath(EFFECT_PRIOR_CACHE, string(hash(code)) * ".stan"))
+        dimension = LogDensityProblems.dimension(problem)
+        q = [0.03 * ((i % 7) - 3) for i in 1:dimension]
+        lp, gradient = LogDensityProblems.logdensity_and_gradient(problem, q)
+        @test isfinite(lp)
+        @test length(gradient) == dimension
+        @test all(isfinite, gradient)
+    else
+        @info "Skipping sampled-effect-prior BridgeStan gate (BRM_EFFECT_RUNTIME=0)"
     end
 end
 

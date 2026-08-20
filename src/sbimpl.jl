@@ -4508,7 +4508,29 @@ _sb_prior_arg(x::Real) = x
 _sb_prior_arg(x::Symbol) = x
 _sb_prior_arg(x::NamedColumn) = _sb_prior_arg_named(x, parent(x))
 _sb_prior_arg_named(x, ::MissingColumn) = name(x)
+# After a formula-local scalar prior has been parsed, later references carry
+# that declaration as their backing expression rather than a MissingColumn.
+# Recognise only scalar-prior RHS families here; data and vector parameters keep
+# the existing rejection path.
+function _sb_prior_arg_named(x, op::ExprColumn{typeof(~)})
+    lhs_raw, rhs_raw = getargs(op, 2)
+    lhs = _as_named_column(lhs_raw)
+    rhs = _as_expr_column(rhs_raw)
+    if !isnothing(lhs) && parent(lhs) isa MissingColumn &&
+       name(lhs) === name(x) && !isnothing(rhs) &&
+       _sb_is_scalar_prior_family(getf(rhs))
+        return name(x)
+    end
+    error(_sb_prior_arg_backing_error(x, op))
+end
+_sb_is_scalar_prior_family(::typeof(Horseshoe)) = true
+_sb_is_scalar_prior_family(::Type{D}) where {D<:LocationScale} = true
+_sb_is_scalar_prior_family(::Type{D}) where {D<:Distribution} =
+    !(D <: VonMises) && !isnothing(_sb_stan_dist_name(D))
+_sb_is_scalar_prior_family(_) = false
 _sb_prior_arg_named(x, d) = error(
+    _sb_prior_arg_backing_error(x, d))
+_sb_prior_arg_backing_error(x, d) = string(
     "sbimpl: prior arg `$(name(x))` is backed by $(typeof(d)); ",
     "prior args must be literals or already-declared scalar parameters.")
 _sb_prior_arg(x::ExprColumn) = Expr(:call, getf(x), map(_sb_prior_arg, getargs(x))...)
