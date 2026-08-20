@@ -74,6 +74,29 @@ projection. Model-derived HSGPs are currently one-dimensional, isotropic, and
 ungrouped; raw-data HSGPs retain their variadic, anisotropic, and group-specific
 forms when `orthogonal_to` is omitted.
 
+After fitting, [`hsgp_population_curve`](@ref) evaluates the combined
+population exposure contribution on a fixed grid without fabricating assay
+rows or referring to emitted Stan names:
+
+```julia
+curve = hsgp_population_curve(
+    descriptor, constrained_draws, constrained_names,
+    collect(range(0.01, 5.0; length=100));
+    predictor=:mu, coefficient=:x, term=:hsgp_x)
+
+curve.linear  # beta_x * x, draws × grid
+curve.hsgp    # orthogonal residual nonlinear contribution, draws × grid
+curve.total   # the supported total exposure curve
+```
+
+`constrained_draws` and `constrained_names` must include transformed
+parameters (`include_tp=true` in BridgeStan), because every posterior draw has
+its own sampled training `x`. BRM uses those values to replay the exact fitted
+intercept/linear projection on the new grid; re-orthogonalizing against the
+grid would define a different curve. Evaluation outside the formula's fixed
+`domain` is rejected. This is a population partial effect only: it deliberately
+excludes the intercept, other covariates, and subject-specific random slopes.
+
 ### Interval-censored predictor
 
 Use `interval_censored(x; upper=lloq)` when `x` is quantified on some rows and

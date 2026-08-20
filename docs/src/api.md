@@ -111,6 +111,7 @@ BayesianRegressionModels.reprocess
 BayesianRegressionModels.restan_data
 BayesianRegressionModels.population_draws
 BayesianRegressionModels.transport_draws
+BayesianRegressionModels.hsgp_population_curve
 BayesianRegressionModels.RanefBlock
 BayesianRegressionModels.ranef_blocks
 BayesianRegressionModels.ranef_coordinates

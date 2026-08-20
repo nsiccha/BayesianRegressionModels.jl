@@ -746,3 +746,199 @@ function term_draws(d::BRMDescriptor, draws::AbstractMatrix, unc_names;
     out[:, resolved.coordinates] .= 0.0
     out
 end
+
+function _hsgp_population_curve_term(d::BRMDescriptor, predictor::Symbol,
+                                     coefficient::Symbol, term::Symbol)
+    all_entries = _brm_term_coordinate_entries(d.plan.parent, predictor)
+    entries = [e for e in all_entries if e.term === term]
+    length(entries) == 1 || error(
+        "BRM prediction: term `$term` occurs $(length(entries)) times on logical " *
+        "predictor `$predictor`; expected exactly one orthogonal HSGP term. " *
+        "Available term labels are " *
+        "$(Tuple(sort!(unique(e.term for e in all_entries), by=string))).")
+    value = only(entries).value
+    getf(value) === hsgp || error(
+        "BRM prediction: term `$term` on logical predictor `$predictor` is not " *
+        "an `hsgp(...)` term; a total HSGP population curve is undefined.")
+
+    args = getargs(value)
+    length(args) == 1 || error(
+        "BRM prediction: `hsgp_population_curve` supports exactly one HSGP " *
+        "axis, but term `$term` has $(length(args)).")
+    axis = _sb_named_inner(:hsgp, only(args))
+    name(axis) === coefficient || error(
+        "BRM prediction: term `$term` uses axis `$(name(axis))`, not requested " *
+        "population coefficient `$coefficient`.")
+    parent(axis) isa ExprColumn || error(
+        "BRM prediction: term `$term` uses a raw-data axis. " *
+        "`hsgp_population_curve` is deliberately restricted to a sampled " *
+        "model-derived axis so its fitted draw-wise orthogonalization is explicit.")
+
+    kw = getkwargs(value)
+    get(kw, :orthogonal_to, nothing) === :linear || error(
+        "BRM prediction: term `$term` must declare " *
+        "`orthogonal_to=:linear`; otherwise adding `beta*$coefficient` to the " *
+        "HSGP does not have the public total-effect meaning this API promises.")
+    haskey(kw, :by) && error(
+        "BRM prediction: grouped HSGP term `$term` has no single population " *
+        "curve; `hsgp_population_curve` excludes subject/group effects.")
+    _sb_gp_iso(kw, :hsgp) || error(
+        "BRM prediction: model-derived HSGP term `$term` must be isotropic.")
+
+    K, _ = _sb_hsgp_options(kw, 1)
+    fits = _sb_hsgp_domain_fits(kw, 1; required=true)
+    (; value, K=only(K), fit=only(fits))
+end
+
+function _hsgp_population_curve_grid(grid, fit, term::Symbol)
+    isempty(grid) && error(
+        "BRM prediction: fixed grid for term `$term` must not be empty.")
+    all(x -> x isa Real && isfinite(x), grid) || error(
+        "BRM prediction: fixed grid for term `$term` must contain only finite " *
+        "real values.")
+    values = collect(Float64, grid)
+    center, L = fit
+    lower, upper = center - L, center + L
+    all(x -> lower <= x <= upper, values) || error(
+        "BRM prediction: fixed grid for term `$term` contains values outside " *
+        "its fitted HSGP domain ($lower, $upper). Extrapolating this compact " *
+        "basis is refused.")
+    values
+end
+
+function _hsgp_population_curve_basis(PHI_grid_raw::AbstractMatrix,
+                                      grid::AbstractVector,
+                                      PHI_train_raw::AbstractMatrix,
+                                      x_train::AbstractVector)
+    n_train = length(x_train)
+    size(PHI_train_raw, 1) == n_train || error(
+        "BRM prediction: internal HSGP training-basis row-count mismatch.")
+    size(PHI_grid_raw, 2) == size(PHI_train_raw, 2) || error(
+        "BRM prediction: internal HSGP basis-width mismatch.")
+
+    x_mean = sum(x_train) / n_train
+    x_centered = x_train .- x_mean
+    x_ss = sum(abs2, x_centered)
+    out = Matrix{Float64}(undef, size(PHI_grid_raw))
+    for b in axes(PHI_train_raw, 2)
+        phi_train = @view PHI_train_raw[:, b]
+        phi_mean = sum(phi_train) / n_train
+        slope = x_ss > 1e-12 ?
+            dot(x_centered, phi_train .- phi_mean) / x_ss : 0.0
+        @views out[:, b] .= PHI_grid_raw[:, b] .- phi_mean .-
+                            (grid .- x_mean) .* slope
+    end
+    out
+end
+
+function _hsgp_population_curve_sqrt_spd(omega2::AbstractMatrix,
+                                         sigma::Real, rho::Real)
+    isfinite(rho) && rho > 0 || error(
+        "BRM prediction: an HSGP length-scale draw is not finite and positive " *
+        "(got $rho).")
+    isfinite(sigma) && sigma >= 0 || error(
+        "BRM prediction: an HSGP marginal-SD draw is not finite and " *
+        "nonnegative (got $sigma).")
+    scale = sigma * sqrt(rho * 2.5066282746310002)
+    [scale * exp(-0.25 * rho * rho * omega2[b, 1])
+     for b in axes(omega2, 1)]
+end
+
+"""
+    hsgp_population_curve(d::BRMDescriptor, draws, constrained_names, grid;
+                          predictor::Symbol, coefficient::Symbol,
+                          term::Symbol)
+
+Evaluate the population exposure contribution of one model-derived,
+one-dimensional `hsgp(...; orthogonal_to=:linear)` term on a fixed grid. The
+returned named tuple contains `grid` and three draws × grid matrices:
+
+- `linear` — the population coefficient contribution `beta * grid`;
+- `hsgp` — the residual nonlinear HSGP contribution;
+- `total` — `linear + hsgp`, the quantity consumers normally want.
+
+`draws` must contain CONSTRAINED posterior draws as rows, in
+`constrained_names` order. The names must include transformed parameters: the
+sampled model-derived axis is required to reconstruct the fitted projection for
+each draw. With BridgeStan, obtain both with `include_tp=true,
+include_gq=false`.
+
+The public addresses come from the formula. For
+`mu ~ ... + x + hsgp(x; orthogonal_to=:linear, ...)`, use
+`predictor=:mu`, `coefficient=:x`, and `term=:hsgp_x`. Compiler-owned carrier
+names are resolved through the descriptor and never form part of this API.
+
+The curve is population-only: it includes no intercept, other covariates, or
+group-specific random slopes. The grid must lie inside the fixed `domain`
+fitted by the model. Raw-data, grouped, multidimensional, non-orthogonal, and
+non-HSGP terms fail closed rather than returning a quantity with different
+semantics.
+"""
+function hsgp_population_curve(d::BRMDescriptor, draws::AbstractMatrix,
+                               constrained_names, grid::AbstractVector;
+                               predictor::Symbol, coefficient::Symbol,
+                               term::Symbol)
+    size(draws, 2) == length(constrained_names) || error(
+        "BRM prediction: draw matrix has $(size(draws, 2)) columns but the " *
+        "model has $(length(constrained_names)) constrained coordinates. " *
+        "`draws` must be draws × coordinates, in `constrained_names` order.")
+    spec = _hsgp_population_curve_term(d, predictor, coefficient, term)
+    grid_values = _hsgp_population_curve_grid(grid, spec.fit, term)
+
+    beta_coordinates = brm_population_effect_coordinates(
+        d, predictor, constrained_names; coefficient).coordinates
+    length(beta_coordinates) == 1 || error(
+        "BRM prediction: population coefficient `$coefficient` on `$predictor` " *
+        "does not resolve to exactly one scalar coordinate.")
+    x_coordinates = brm_output_coordinates(
+        d, coefficient, constrained_names; role=:linear_predictor)
+    isempty(x_coordinates) && error(
+        "BRM prediction: model-derived HSGP axis `$coefficient` has no sampled " *
+        "training coordinates.")
+    rho_coordinates = brm_term_coordinates(
+        d, predictor, constrained_names;
+        term, parameter=:length_scale).coordinates
+    sigma_coordinates = brm_term_coordinates(
+        d, predictor, constrained_names;
+        term, parameter=:sd).coordinates
+    weight_coordinates = brm_term_coordinates(
+        d, predictor, constrained_names;
+        term, parameter=:basis_weights).coordinates
+    length(rho_coordinates) == 1 || error(
+        "BRM prediction: term `$term` must expose one length-scale coordinate.")
+    length(sigma_coordinates) == 1 || error(
+        "BRM prediction: term `$term` must expose one marginal-SD coordinate.")
+    length(weight_coordinates) == spec.K || error(
+        "BRM prediction: term `$term` exposes $(length(weight_coordinates)) " *
+        "basis weights but its fitted formula requires $(spec.K).")
+
+    PHI_grid_raw, omega = _sb_apply_hsgp(
+        (spec.fit,), (grid_values,), (spec.K,))
+    n_draws, n_grid = size(draws, 1), length(grid_values)
+    linear = Matrix{Float64}(undef, n_draws, n_grid)
+    nonlinear = Matrix{Float64}(undef, n_draws, n_grid)
+    for draw in 1:n_draws
+        beta = draws[draw, only(beta_coordinates)]
+        x_train = collect(Float64, @view draws[draw, x_coordinates])
+        all(isfinite, x_train) || error(
+            "BRM prediction: model-derived HSGP axis `$coefficient` contains " *
+            "a non-finite value in constrained draw $draw.")
+        PHI_train_raw, _ = _sb_apply_hsgp(
+            (spec.fit,), (x_train,), (spec.K,))
+        PHI = _hsgp_population_curve_basis(
+            PHI_grid_raw, grid_values, PHI_train_raw, x_train)
+        rho = draws[draw, only(rho_coordinates)]
+        sigma = draws[draw, only(sigma_coordinates)]
+        weights = collect(Float64, @view draws[draw, weight_coordinates])
+        isfinite(beta) && all(isfinite, weights) || error(
+            "BRM prediction: population slope or HSGP basis weights contain a " *
+            "non-finite value in constrained draw $draw.")
+        sqrt_spd = _hsgp_population_curve_sqrt_spd(omega, sigma, rho)
+        @views linear[draw, :] .= beta .* grid_values
+        @views nonlinear[draw, :] .= PHI * (sqrt_spd .* weights)
+    end
+
+    (; predictor, coefficient, term,
+       domain=(spec.fit[1] - spec.fit[2], spec.fit[1] + spec.fit[2]),
+       grid=grid_values, linear, hsgp=nonlinear, total=linear + nonlinear)
+end
