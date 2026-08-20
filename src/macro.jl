@@ -219,7 +219,7 @@ function weighted end
 
 """
     interval_censored(base; upper)
-    interval_censored(lower; upper)
+    interval_censored(x; upper, lower=0)
 
 Formula marker for genuine interval evidence. On a response RHS, the observed
 response column supplies each interval's lower endpoint and `upper` supplies
@@ -236,16 +236,17 @@ Posterior prediction remains on the uncoarsened base-response scale. This is
 separate from Distributions.jl's `censored`, which is the distribution of
 `clamp(X, lower, upper)` and therefore has atoms at its thresholds.
 
-Inside a linear predictor, the same spelling defines an interval-censored
-covariate:
+Inside a linear predictor, `x` is the observed covariate and `upper` is its
+row-specific quantification limit:
 
 ```julia
-mu ~ 1 + interval_censored(concentration_lower; upper=concentration_upper)
+mu ~ 1 + interval_censored(concentration; upper=lloq)
 ```
 
-Rows with equal endpoints are exact covariates. Rows with `lower < upper`
-allocate latent predictor values with a truncated Normal prior; configure that
-prior with `latent(<lp|:>, interval_censored(concentration_lower)) ~ Normal(...)`.
+By convention, `concentration == lloq` marks a BLOQ row; values above `lloq`
+are exact. BLOQ rows allocate latent predictor values between `lower` (zero by
+default) and `lloq` with a truncated Normal prior; configure that
+prior with `latent(<lp|:>, interval_censored(concentration)) ~ Normal(...)`.
 This predictor form is implemented by `SBBRMI`.
 
 The marker is intentionally formula-local: unlike `truncated` and `censored`,

@@ -1561,8 +1561,8 @@ _sb_me = StanBlocks.@slic begin
     return x_true
 end
 
-# Interval-censored predictor. Exact rows stay data; strict intervals allocate
-# only the unknown coordinates, give them the term's Normal prior truncated to
+# BLOQ predictor. Quantified rows stay data; `x == lloq` rows allocate only the
+# unknown coordinates, give them the term's Normal prior truncated to
 # their row-wise bounds, then scatter exact and latent values back onto the
 # formula's row axis. This is evidence about the predictor itself, not a
 # response-likelihood wrapper and not an LLOQ/2 substitution.
@@ -3358,10 +3358,10 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             prefix="sbimpl: reprocess")
         new_preproc[key] = e
     elseif e.kind === :interval_censored_predictor
-        lower_name, upper_name = e.raw_ref
+        x_name, upper_name = e.raw_ref
         plan = _sb_interval_censored_predictor_plan(
-            lower_name, _sb_df_column(df, lower_name),
-            upper_name, _sb_df_column(df, upper_name))
+            x_name, _sb_df_column(df, x_name),
+            upper_name, _sb_df_column(df, upper_name), e.const_.lower)
         new_data[key] = plan.x_exact
         new_data[e.const_.lower_key] = plan.x_lower
         new_data[e.const_.upper_key] = plan.x_upper
@@ -5287,7 +5287,12 @@ function popcoefnames(brmi::BRMI, lhs::Symbol)
         for c in cols
             # Non-intercept pop columns are Symbol references; a stray Expr
             # (only the intercept probe emits one) maps back to :Intercept.
-            push!(labels, c isa Symbol ? c : :Intercept)
+            label = if t isa ExprColumn && getf(t) === interval_censored
+                name(_sb_named_inner(:interval_censored, only(getargs(t))))
+            else
+                c isa Symbol ? c : :Intercept
+            end
+            push!(labels, label)
         end
     end
     labels
@@ -5456,7 +5461,7 @@ function _sb_term_config(spec, t, spelling)
     (f === me || f === interval_censored) || error(
         "sbimpl: `$spelling` — `$(nameof(f))` has no latent covariate to " *
         "configure. `latent(...)` applies to `me(x, sd)` and " *
-        "`interval_censored(lower; upper=upper)` predictor terms.")
+        "`interval_censored(x; upper=lloq)` predictor terms.")
     isnothing(spec.component) || error("sbimpl: `$spelling` takes no component slot")
     T = _as_distribution_type(spec.family)
     (!isnothing(T) && T <: Normal) || error(
@@ -5600,34 +5605,41 @@ function _sb_me_latent_args(term_overrides, t)
     isnothing(cfg) ? (0.0, 1.0) : (cfg.loc, cfg.scale)
 end
 
-function _sb_interval_censored_predictor_plan(lower_name::Symbol, lower_raw,
-                                               upper_name::Symbol, upper_raw)
-    lower = collect(Float64,
-        _sb_real_vec(:interval_censored, lower_name, lower_raw))
+function _sb_interval_censored_predictor_plan(x_name::Symbol, x_raw,
+                                               upper_name::Symbol, upper_raw,
+                                               lower::Real=0.0)
+    x = collect(Float64, _sb_real_vec(:interval_censored, x_name, x_raw))
     upper = collect(Float64,
         _sb_real_vec(:interval_censored, upper_name, upper_raw))
-    isempty(lower) && error(
-        "sbimpl: interval-censored predictor `$lower_name` cannot be empty")
-    length(lower) == length(upper) || error(
-        "sbimpl: interval-censored predictor endpoints `$lower_name` and " *
-        "`$upper_name` must have equal lengths ($(length(lower)) vs " *
+    isempty(x) && error(
+        "sbimpl: interval-censored predictor `$x_name` cannot be empty")
+    length(x) == length(upper) || error(
+        "sbimpl: interval-censored predictor `$x_name` and LLOQ column " *
+        "`$upper_name` must have equal lengths ($(length(x)) vs " *
         "$(length(upper)))")
-    all(isfinite, lower) || error(
-        "sbimpl: interval-censored predictor lower endpoints `$lower_name` " *
-        "must be finite")
+    all(isfinite, x) || error(
+        "sbimpl: interval-censored predictor `$x_name` must be finite")
     all(isfinite, upper) || error(
-        "sbimpl: interval-censored predictor upper endpoints `$upper_name` " *
+        "sbimpl: interval-censored predictor LLOQs `$upper_name` " *
         "must be finite")
-    invalid = findfirst(i -> lower[i] > upper[i], eachindex(lower))
+    isfinite(lower) || error(
+        "sbimpl: interval-censored predictor lower bound must be finite")
+    invalid = findfirst(i -> x[i] < upper[i], eachindex(x))
     isnothing(invalid) || error(
-        "sbimpl: interval-censored predictor row $invalid has lower endpoint " *
-        "$(lower[invalid]) above upper endpoint $(upper[invalid])")
-    Jinterval = findall(i -> lower[i] < upper[i], eachindex(lower))
+        "sbimpl: interval-censored predictor row $invalid has `$x_name` = " *
+        "$(x[invalid]) below its LLOQ $(upper[invalid]); under the `x == LLOQ` " *
+        "BLOQ convention, quantified values must exceed LLOQ")
+    Jinterval = findall(i -> x[i] == upper[i], eachindex(x))
     isempty(Jinterval) && error(
-        "sbimpl: `interval_censored($lower_name; upper=$upper_name)` has no " *
-        "strict interval rows; use the exact covariate `$lower_name` directly")
-    Jexact = findall(i -> lower[i] == upper[i], eachindex(lower))
-    (; x_exact=lower[Jexact], x_lower=lower[Jinterval],
+        "sbimpl: `interval_censored($x_name; upper=$upper_name)` has no BLOQ " *
+        "rows (`$x_name == $upper_name`); use `$x_name` directly")
+    invalid_bound = findfirst(i -> lower >= upper[i], Jinterval)
+    isnothing(invalid_bound) || error(
+        "sbimpl: interval-censored predictor row $(Jinterval[invalid_bound]) " *
+        "requires lower < LLOQ, got $lower >= " *
+        "$(upper[Jinterval[invalid_bound]])")
+    Jexact = findall(i -> x[i] > upper[i], eachindex(x))
+    (; x_exact=x[Jexact], x_lower=fill(Float64(lower), length(Jinterval)),
        x_upper=upper[Jinterval], Jexact=collect(Int, Jexact),
        Jinterval=collect(Int, Jinterval))
 end
@@ -7550,8 +7562,9 @@ _sb_predictor_term!(stmts, data, ::typeof(me), t;
 end
 
 
-# Predictor-side `interval_censored(lower; upper=upper)`. Equal endpoints are
-# exact observed covariates; strict intervals get one latent coordinate each.
+# Predictor-side `interval_censored(x; upper=lloq, lower=0)`. `x` is the
+# observed covariate: `x == lloq` marks a BLOQ row and `x > lloq` is exact.
+# BLOQ rows get one latent coordinate in `(lower, lloq)`; no flag is needed.
 # The derived-data key is also the idempotence marker: a term used for both the
 # population slope and `(… | group)` random slope must own ONE latent vector,
 # with both design matrices referencing the same merged predictor.
@@ -7560,14 +7573,19 @@ _sb_predictor_term!(stmts, data, ::typeof(interval_censored), t;
     args = getargs(t)
     kw = getkwargs(t)
     length(args) == 1 || error(
-        "sbimpl: predictor `interval_censored(lower; upper=upper)` expects " *
-        "one positional lower-endpoint column, got $(length(args))")
-    keys(kw) == (:upper,) || error(
-        "sbimpl: predictor `interval_censored(lower; upper=upper)` requires " *
-        "exactly the `upper` keyword; got $(collect(keys(kw)))")
-    lower_name, lower_raw = _sb_inner_data(:interval_censored, only(args))
+        "sbimpl: predictor `interval_censored(x; upper=lloq)` expects one " *
+        "positional observed-covariate column, got $(length(args))")
+    (haskey(kw, :upper) && all(k -> k in (:lower, :upper), keys(kw))) || error(
+        "sbimpl: predictor `interval_censored(x; upper=lloq)` requires `upper` " *
+        "and accepts only the optional numeric `lower`; got " *
+        "$(collect(keys(kw)))")
+    x_name, x_raw = _sb_inner_data(:interval_censored, only(args))
     upper_name, upper_raw = _sb_inner_data(:interval_censored, kw.upper)
-    suffix = Symbol(lower_name, :_, upper_name)
+    lower = get(kw, :lower, 0.0)
+    lower isa Real || error(
+        "sbimpl: predictor `interval_censored($x_name; ...)` expects a numeric " *
+        "constant for `lower`, got $(typeof(lower))")
+    suffix = Symbol(x_name, :_, upper_name)
     exact_key = Symbol(:icp_exact_, suffix)
     lower_key = Symbol(:icp_lower_, suffix)
     upper_key = Symbol(:icp_upper_, suffix)
@@ -7581,7 +7599,7 @@ _sb_predictor_term!(stmts, data, ::typeof(interval_censored), t;
     haskey(data, exact_key) && return col_name
 
     plan = _sb_interval_censored_predictor_plan(
-        lower_name, lower_raw, upper_name, upper_raw)
+        x_name, x_raw, upper_name, upper_raw, lower)
     data[exact_key] = plan.x_exact
     data[lower_key] = plan.x_lower
     data[upper_key] = plan.x_upper
@@ -7589,8 +7607,9 @@ _sb_predictor_term!(stmts, data, ::typeof(interval_censored), t;
     data[interval_index_key] = plan.Jinterval
     _sb_record_preproc!(data, exact_key, PreprocEntry(
         :interval_censored_predictor,
-        (; lower_key, upper_key, exact_index_key, interval_index_key),
-        (lower_name, upper_name), true))
+        (; lower=Float64(lower), lower_key, upper_key, exact_index_key,
+           interval_index_key),
+        (x_name, upper_name), true))
 
     loc, scale = _sb_me_latent_args(term_overrides, t)
     push!(stmts, :($col_name ~ _sb_interval_censored_predictor(;

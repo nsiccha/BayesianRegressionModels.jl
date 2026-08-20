@@ -19,7 +19,7 @@ signature — the rest are covered by their docstrings on the [API](@ref) page.
 | `ar(time; p=1)` | AR(p) noise process ordered by `time`; only `p=1` is emitted | — |
 | `mo(c)`, `mo1(c)` | monotonic effect of an ordered factor via Dirichlet increments | — |
 | `me(x, sd)` | measurement-error covariate — `x` is observed with known `sd` | — |
-| `interval_censored(lower; upper)` | exact/interval covariate with bounded latent values on strict intervals | — |
+| `interval_censored(x; upper=lloq, lower=0)` | quantified/BLOQ covariate with bounded latent values on BLOQ rows | — |
 | `factor(c; ref=k)` | treatment contrasts for a categorical column, reference level `k` | ✓ |
 | `protect(x)` | materialize a raw data expression as one literal column | ✓ |
 
@@ -28,38 +28,40 @@ as an implicit `protect(...)` and materialized the same way.
 
 ### Interval-censored predictor
 
-Use `interval_censored(lower; upper=upper)` when a continuous covariate is
-known exactly on some rows and only to lie in an interval on others. Equal
-endpoints are exact observations. Each strict interval allocates one latent
-covariate value, constrained to its row-wise bounds, and the merged vector then
-enters the ordinary fixed- or random-effect design matrix:
+Use `interval_censored(x; upper=lloq)` when `x` is quantified on some rows and
+BLOQ on others. Store the measured concentration on quantified rows and the
+row-specific LLOQ on BLOQ rows; the convention `x == lloq` identifies BLOQ, so
+no separate flag is needed. Each BLOQ row allocates one latent covariate value
+between zero and its LLOQ, and the merged vector enters the ordinary fixed- or
+random-effect design matrix:
 
 ```julia
 model = (@brm begin
     qtc ~ Normal(mu, sigma)
-    mu ~ 1 + interval_censored(conc_lower; upper=conc_upper)
-    latent(mu, interval_censored(conc_lower)) ~ Normal(0, 5)
+    mu ~ 1 + interval_censored(conc; upper=lloq)
+    effect(mu, conc) ~ Normal(0, 2)
+    latent(mu, interval_censored(conc)) ~ Normal(0, 5)
     sigma ~ Exponential(1)
 end)((;
     qtc=[401.0, 408.0, 415.0],
-    conc_lower=[0.7, 0.0, 1.2],
-    conc_upper=[0.7, 0.25, 1.2],
+    conc=[0.7, 0.25, 1.2],
+    lloq=[0.25, 0.25, 0.4],
 ))
 ```
 
 The term's default latent prior is `Normal(0, 1)`; use
-`latent(<lp|:>, interval_censored(lower)) ~ Normal(location, scale)` to set it.
-Only the lower-column name appears in that address because term addresses omit
-keywords. Reusing the same term as a fixed effect and a random slope shares one
-latent covariate vector. `reprocess` rebuilds the exact/interval split from the
-new endpoint columns.
+`latent(<lp|:>, interval_censored(x)) ~ Normal(location, scale)` to set it.
+The population slope keeps the ordinary address `effect(<lp>, x)`. Reusing the
+same term as a fixed effect and a random slope shares one latent covariate
+vector. `reprocess` rebuilds the quantified/BLOQ split from new `x` and `lloq`
+columns.
 
 This is a continuous latent-covariate model, not an `LLOQ/2` substitution.
-For a BLQ assay row, use the scientifically justified bounds (commonly `0` and
-the row's LLOQ); for a quantified row, repeat the observed concentration as
-both endpoints. Bounds must be finite, `lower <= upper`, and at least one row
-must be a strict interval. The predictor form is `SBBRMI`-only and is distinct
-from the response-likelihood form documented under [Likelihoods](@ref).
+For a BLOQ assay row the lower bound defaults to zero and can be changed with a
+numeric `lower=`. Values and LLOQs must be finite; `x` must equal its LLOQ on
+BLOQ rows and exceed it on quantified rows, and at least one row must be BLOQ.
+The predictor form is `SBBRMI`-only and is distinct from the response-likelihood
+form documented under [Likelihoods](@ref).
 
 `gp` and `hsgp` are distinct terms with no compatibility alias. Both are direct
 predictor summands carrying their own latent draws and hyperparameters, so
@@ -230,7 +232,7 @@ knots, penalty decomposition, and intercept constraint. Passing
 
 Some terms own parameters that no coefficient address can reach. `s(x)`'s
 smoothing scale, `mo(c)`'s Dirichlet increments, `me(x, sd)`'s latent true
-covariate, `interval_censored(lower; upper=upper)`'s bounded latent values, and
+covariate, `interval_censored(x; upper=lloq)`'s bounded latent values, and
 a Gaussian process's length scale and amplitude all live inside the term's own
 submodel. None is a `beta_pop` column or a grouping-factor margin. They are
 addressed by naming the term itself in the target slot, in the same
@@ -271,7 +273,7 @@ end)((;
 | `sd` | `t2(x, z)` | one of the `rr` / `rn` / `nr` penalty SDs | half-standard-normal |
 | `simplex` | `mo(c)`, `mo1(c)` | Dirichlet concentration | `Dirichlet(1)` |
 | `latent` | `me(x, sd)` | latent true covariate | `Normal(0, 1)` |
-| `latent` | `interval_censored(lower; upper=upper)` | latent covariate on strict-interval rows | truncated `Normal(0, 1)` |
+| `latent` | `interval_censored(x; upper=lloq)` | latent covariate on BLOQ rows | truncated `Normal(0, 1)` |
 | `length_scale` | `gp(x…)`, `hsgp(x…)` | GP length scale `rho` | `LogNormal(0, 1)` |
 | `sd` | `gp(x…)`, `hsgp(x…)` | GP marginal amplitude `sigma` | `LogNormal(0, 1)` |
 
