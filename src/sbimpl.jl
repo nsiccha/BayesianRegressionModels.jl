@@ -307,8 +307,10 @@ end
 # statement targets a shared `|ID|` bucket. `family[i] == 0` retains BRM's
 # historical half-standard-normal density for that margin; `family[i] == 1`
 # selects an Exponential whose `rate[i]` is already in Stan's rate
-# parameterization. A single vector density lets block defaults and
-# margin-specific overrides compose without double-prioring any element.
+# parameterization; `family[i] == 2` selects a zero-centered Normal whose
+# positive `rate[i]` entry is its scale (a half-Normal after the LHS bound).
+# A single vector density lets block defaults and margin-specific overrides
+# compose without double-prioring any element.
 StanBlocks.@deffun begin
     @lhs @lpxf brm_ranef_sd_lpdf(tau::vector[n], family::vector[n],
                                   rate::vector[n])::real = begin
@@ -316,8 +318,10 @@ StanBlocks.@deffun begin
         for i in 1:n
             if family[i] == 0
                 rv += std_normal_lpdf(tau[i])::real
-            else
+            elseif family[i] == 1
                 rv += exponential_lpdf(tau[i], rate[i])::real
+            else
+                rv += normal_lpdf(tau[i], 0., rate[i])::real
             end
         end
         rv
@@ -2397,7 +2401,8 @@ function _sb_is_prior_declaration(brmi::BRMI, lp::Symbol)
     rhs_e = _as_expr_column(rhs)
     isnothing(rhs_e) && return false
     f = getf(rhs_e)
-    f === Horseshoe || !isnothing(_as_distribution_type(f))
+    f === Horseshoe || f === LKJCovarianceFactor ||
+        !isnothing(_as_distribution_type(f))
 end
 
 # Names of the predictors an `effect(...)` address may legitimately reach.
@@ -2698,6 +2703,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     data[_SB_PREPROC_KEY] = isnothing(_frozen_preproc) ?
         Dict{Symbol,PreprocEntry}() :
         _SBPreprocContext(Dict{Symbol,PreprocEntry}(), _frozen_preproc)
+    _sb_validate_covariance_factor_names(brmi)
     # The shared, backend-neutral pass owns raw-data materialisation,
     # likelihood-decorator claims, and target -> observation row axes. Its
     # input `data` already carries the Stan preprocessing side-channel, which
@@ -2917,7 +2923,8 @@ end
 
 _sb_plan_lhs_name(x::Symbol) = x
 _sb_plan_lhs_name(x::Expr) =
-    x.head === :(::) && !isempty(x.args) ? _sb_plan_lhs_name(x.args[1]) : nothing
+    (x.head === :(::) || x.head === :ref) && !isempty(x.args) ?
+        _sb_plan_lhs_name(x.args[1]) : nothing
 _sb_plan_lhs_name(_) = nothing
 
 _sb_plan_family(x::Expr) = begin
@@ -3348,6 +3355,31 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             :ranef_factor_dummy,
             (; levels, level=e.const_.level, n_levels=e.const_.n_levels),
             e.raw_ref, true)
+    elseif e.kind === :joint_response
+        names = Tuple(e.raw_ref)
+        names == Tuple(e.const_.outcomes) || error(
+            "sbimpl: reprocess: joint-response provenance for `$key` changed " *
+            "outcome order")
+        columns = map(names) do outcome
+            NamedColumn(outcome, DataColumn(_sb_df_column(df, outcome)))
+        end
+        joint = JointResponseColumn(columns)
+        values = _brm_joint_response_values(joint; prefix="sbimpl: reprocess")
+        nobs = length(values)
+        for source in e.const_.mean_sources
+            source_values = _sb_df_column(df, source)
+            source_values isa AbstractVector || error(
+                "sbimpl: reprocess: joint-response mean source `$source` must " *
+                "be a vector, got $(typeof(source_values))")
+            length(source_values) == nobs || error(
+                "sbimpl: reprocess: joint-response mean source `$source` has " *
+                "$(length(source_values)) rows, but the aligned outcomes have " *
+                "$nobs rows")
+        end
+        new_data[key] = values
+        new_data[e.const_.n_key] = nobs
+        push!(handled, e.const_.n_key)
+        new_preproc[key] = e
     elseif e.kind === :kernel_subject_count
         subjects = _sb_kernel_subject_values(
             _sb_df_column(df, e.raw_ref), e.raw_ref)
@@ -4491,8 +4523,40 @@ function _sb_emit_prior!(stmts, target, ::Type{D}, op) where {D <: Distribution}
     # and parameterizations.  Some translations (scale -> inverse scale,
     # probability -> odds) create Stan expressions, so applying `_sb_prior_arg`
     # afterwards would mistake those already-lowered Exprs for formula nodes.
-    arg_exprs = _sb_stan_dist_args(D, map(_sb_prior_arg, getargs(op)))
-    push!(stmts, Expr(:call, :~, target, Expr(:call, stan_name, arg_exprs...)))
+    prior_args = map(_sb_prior_arg, getargs(op))
+    arg_exprs = _sb_stan_dist_args(D, prior_args)
+    rhs = Expr(:call, stan_name, arg_exprs...)
+    kwargs = getkwargs(op)
+    if !isempty(kwargs)
+        unknown = Symbol[k for k in keys(kwargs) if !(k in (:lower, :upper))]
+        isempty(unknown) || error(
+            "sbimpl: `$target ~ $(nameof(D))(...)` accepts only `lower` and " *
+            "`upper` declaration-bound keywords, got $unknown")
+        # A Stan declaration bound omits the truncation normalizer. That is
+        # exact up to a parameter-independent constant only when the family
+        # hyperparameters are fixed, so reject hierarchical bounds here.
+        all(a -> a isa Real && !(a isa Bool), prior_args) || error(
+            "sbimpl: bounded scalar prior `$target ~ $(nameof(D))(...)` requires " *
+            "numeric formula-constant distribution arguments; a bound with " *
+            "sampled hyperparameters needs an explicit normalized density")
+        bounds = Dict{Symbol,Float64}()
+        for key in (:lower, :upper)
+            haskey(kwargs, key) || continue
+            value = _sb_prior_arg(kwargs[key])
+            (value isa Real && !(value isa Bool) && isfinite(value)) || error(
+                "sbimpl: `$target ~ $(nameof(D))(...; $key=...)` requires a " *
+                "finite numeric formula constant, got $(repr(value))")
+            bounds[key] = Float64(value)
+        end
+        haskey(bounds, :lower) && haskey(bounds, :upper) &&
+            bounds[:lower] >= bounds[:upper] && error(
+                "sbimpl: bounded scalar prior `$target` requires `lower < upper`, " *
+                "got $(bounds[:lower]) >= $(bounds[:upper])")
+        insert!(rhs.args, 2, Expr(:parameters,
+            (Expr(:kw, key, bounds[key]) for key in (:lower, :upper)
+             if haskey(bounds, key))...))
+    end
+    push!(stmts, Expr(:call, :~, target, rhs))
     true
 end
 _sb_emit_prior!(_, _, _, _) = false
@@ -4516,6 +4580,99 @@ Keeping the two seams separate also leaves every existing downstream
 when adding methods from a downstream module.
 """
 _sb_emit_vector_prior!(_stmts, _data, _target, _f, _op) = false
+
+function _sb_lkj_covariance_factor_spec(target::Symbol, op::ExprColumn)
+    args = getargs(op)
+    length(args) == 1 || error(
+        "sbimpl: `$target ~ LKJCovarianceFactor(K; ...)` needs exactly one " *
+        "dimension argument, got $(length(args))")
+    K = only(args)
+    K isa Integer && !(K isa Bool) && K >= 1 || error(
+        "sbimpl: `$target ~ LKJCovarianceFactor(K; ...)` needs an integer " *
+        "dimension >= 1, got $(repr(K))")
+
+    kw = getkwargs(op)
+    unknown = Symbol[k for k in keys(kw) if !(k in (:scale_prior, :shape))]
+    isempty(unknown) || error(
+        "sbimpl: `$target ~ LKJCovarianceFactor(...)` accepts only " *
+        "`scale_prior` and `shape`, got $unknown")
+
+    scale_prior = get(kw, :scale_prior, ExprColumn(Exponential, 1.0))
+    scale_prior isa ExprColumn || error(
+        "sbimpl: `scale_prior` for `$target` must be a positive-support " *
+        "distribution call, got $(typeof(scale_prior))")
+    scale_family = _as_distribution_type(getf(scale_prior))
+    !isnothing(scale_family) && scale_family <: Exponential || error(
+        "sbimpl: `scale_prior` for `$target` currently supports " *
+        "`Exponential(scale)` only, which guarantees positive residual " *
+        "scales; got `$(getf(scale_prior))`")
+    isempty(getkwargs(scale_prior)) || error(
+        "sbimpl: `Exponential` scale_prior for `$target` accepts no keywords")
+    scale_args = getargs(scale_prior)
+    length(scale_args) == 1 || error(
+        "sbimpl: `Exponential` scale_prior for `$target` needs exactly one " *
+        "Julia scale argument")
+    scale = only(scale_args)
+    scale isa Real && !(scale isa Bool) && isfinite(scale) && scale > 0 || error(
+        "sbimpl: `Exponential` scale_prior for `$target` needs a finite, " *
+        "strictly positive scale, got $(repr(scale))")
+
+    shape = get(kw, :shape, 1.0)
+    shape isa Real && !(shape isa Bool) && isfinite(shape) && shape > 0 || error(
+        "sbimpl: LKJ `shape` for `$target` must be finite and strictly " *
+        "positive, got $(repr(shape))")
+    (; K=Int(K), scale=Float64(scale), shape=Float64(shape))
+end
+
+function _sb_validate_covariance_factor_names(brmi::BRMI)
+    operation_names = Set{Symbol}(keys(brmi.operations))
+    for (target, value) in pairs(brmi.operations)
+        column = _as_named_column(value)
+        isnothing(column) && continue
+        op = parent(column)
+        op isa ExprColumn && getf(op) === (~) || continue
+        _, rhs = getargs(op, 2)
+        rhs_e = _as_expr_column(rhs)
+        isnothing(rhs_e) && continue
+        getf(rhs_e) === LKJCovarianceFactor || continue
+        reserved = (
+            Symbol(target, :_n),
+            Symbol(target, :_scales),
+            Symbol(target, :_L_corr),
+        )
+        collision = findfirst(in(operation_names), reserved)
+        isnothing(collision) || error(
+            "sbimpl: `$target ~ LKJCovarianceFactor(...)` reserves emitted " *
+            "binding `$(reserved[collision])`, but the formula also declares " *
+            "or references that name. Rename `$target` or the colliding name.")
+    end
+    nothing
+end
+
+function _sb_emit_vector_prior!(stmts, data, target,
+                                ::typeof(LKJCovarianceFactor), op)
+    spec = _sb_lkj_covariance_factor_spec(target, op)
+    n_key = Symbol(target, :_n)
+    scale_name = Symbol(target, :_scales)
+    corr_name = Symbol(target, :_L_corr)
+    haskey(data, n_key) && error(
+        "sbimpl: `$target ~ LKJCovarianceFactor(...)` reserves data key " *
+        "`$n_key`, but that name is already used")
+    data[n_key] = spec.K
+
+    # Julia's Exponential constructor takes SCALE; Stan's exponential family
+    # takes RATE. Keep the same normalization used by ordinary BRM priors.
+    rate = inv(spec.scale)
+    push!(stmts, Expr(:call, :~, scale_name,
+        Expr(:call, :exponential,
+             Expr(:parameters, Expr(:kw, :n, n_key)), rate)))
+    corr_lhs = Expr(:(::), corr_name,
+                    Expr(:ref, :cholesky_factor_corr, n_key))
+    push!(stmts, Expr(:call, :~, corr_lhs,
+                      Expr(:call, :lkj_corr_cholesky, spec.shape)))
+    push!(stmts, :($target = diag_pre_multiply($scale_name, $corr_name)))
+    true
+end
 
 # `s ~ Dirichlet(alpha)` / `s ~ Dirichlet(K, a)` declares a SIMPLEX PARAMETER.
 #
@@ -4686,6 +4843,160 @@ _sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lo
     _sb_sampling_backed!(stmts, data, key, parent(lhs), rhs; id_lookup, obs_n,
                          cv_groups, centered_groups, group_block_lookup,
                          effect_overrides, r2d2)
+
+function _sb_joint_factor_reference(target::Symbol, factor, K::Int)
+    factor isa NamedColumn || error(
+        "sbimpl: `MvNormalCholesky` factor for joint response `$target` must " *
+        "name an earlier `LKJCovarianceFactor` declaration, got " *
+        "$(typeof(factor))")
+    declaration = parent(factor)
+    declaration isa ExprColumn && getf(declaration) === (~) || error(
+        "sbimpl: joint-response factor `$(name(factor))` must be declared " *
+        "before `$target` with `~ LKJCovarianceFactor(...)`")
+    lhs, rhs = getargs(declaration, 2)
+    lhs isa NamedColumn && parent(lhs) isa MissingColumn || error(
+        "sbimpl: joint-response factor `$(name(factor))` must be a sampled " *
+        "parameter, not observed data")
+    rhs isa ExprColumn && getf(rhs) === LKJCovarianceFactor || error(
+        "sbimpl: joint-response factor `$(name(factor))` is not backed by " *
+        "`LKJCovarianceFactor(...)`")
+    spec = _sb_lkj_covariance_factor_spec(name(factor), rhs)
+    spec.K == K || error(
+        "sbimpl: joint response `$target` has $K ordered outcomes but factor " *
+        "`$(name(factor))` has dimension $(spec.K)")
+    name(factor)
+end
+
+function _sb_joint_mean_reference(target::Symbol, outcome::Symbol, mean_arg,
+                                  data, nobs::Int)
+    mean_arg isa NamedColumn || error(
+        "sbimpl: mean for joint outcome `$outcome` in `$target` must be a " *
+        "named, row-aligned predictor (for example `mu_$outcome ~ ...`), got " *
+        "$(typeof(mean_arg))")
+    backing = parent(mean_arg)
+    if backing isa DataColumn
+        values = parent(backing)
+        values isa AbstractVector && length(values) == nobs || error(
+            "sbimpl: data-backed mean `$(name(mean_arg))` for joint outcome " *
+            "`$outcome` must have $nobs rows")
+    elseif backing isa ExprColumn && getf(backing) === (~)
+        lhs, rhs = getargs(backing, 2)
+        rhs_e = _as_expr_column(rhs)
+        if lhs isa NamedColumn && parent(lhs) isa MissingColumn &&
+           !isnothing(rhs_e) &&
+           (getf(rhs_e) === Horseshoe || getf(rhs_e) === LKJCovarianceFactor ||
+            !isnothing(_as_distribution_type(getf(rhs_e))))
+            error(
+                "sbimpl: `$(name(mean_arg))` is a scalar prior declaration, " *
+                "not a row-aligned mean for joint outcome `$outcome`. Declare " *
+                "a predictor such as `$(name(mean_arg)) ~ 1 + ...` first.")
+        end
+    elseif !(backing isa ExprColumn)
+        error(
+            "sbimpl: mean `$(name(mean_arg))` for joint outcome `$outcome` " *
+            "is not backed by data or a model declaration")
+    end
+
+    # Validate every ordinary raw row-axis source reachable from this mean.
+    # `kernel(...)` is intentionally opaque here: its grouped/ragged inputs may
+    # live on several axes, and StanBlocks owns the returned cell shape. Named
+    # references to another declaration are opaque for the same reason.
+    source_lengths = Pair{Symbol,Int}[]
+    if backing isa DataColumn
+        push!(source_lengths, name(mean_arg) => length(parent(backing)))
+    elseif backing isa ExprColumn && getf(backing) in ((~), assign)
+        _, mean_rhs = getargs(backing, 2)
+        if !(mean_rhs isa ExprColumn && getf(mean_rhs) === kernel)
+            found = Tuple{Symbol,Int}[]
+            _sb_collect_data_lengths!(found, mean_rhs)
+            append!(source_lengths, (source => len for (source, len) in found))
+        end
+    end
+    unique!(source_lengths)
+    for (source, len) in source_lengths
+        len == nobs || error(
+            "sbimpl: mean `$(name(mean_arg))` for joint outcome `$outcome` " *
+            "uses row-axis source `$source` with $len rows, but the aligned " *
+            "outcomes have $nobs rows")
+    end
+    (; expression=_sb_scalar_expr(mean_arg, data),
+       sources=Tuple(first.(source_lengths)))
+end
+
+function _sb_sampling!(stmts, data, key, lhs::JointResponseColumn, rhs;
+                       id_lookup=_sb_empty_id_lookup(), kwargs...)
+    rhs isa ExprColumn && getf(rhs) === MvNormalCholesky || error(
+        "sbimpl: vector response $(collect(joint_response_names(lhs))) supports " *
+        "the explicit joint family `MvNormalCholesky(means, factor)`; got " *
+        "$(rhs isa ExprColumn ? getf(rhs) : typeof(rhs))")
+    isempty(getkwargs(rhs)) || error(
+        "sbimpl: `MvNormalCholesky` accepts no keywords")
+    args = getargs(rhs)
+    length(args) == 2 || error(
+        "sbimpl: `MvNormalCholesky(means, factor)` needs exactly two arguments")
+    means, factor = args
+    means isa AbstractVector || error(
+        "sbimpl: `MvNormalCholesky` means must use vector syntax " *
+        "`[mu1, mu2, ...]`, got $(typeof(means))")
+
+    outcomes = joint_response_names(lhs)
+    K = length(outcomes)
+    length(means) == K || error(
+        "sbimpl: joint response $(collect(outcomes)) has $K outcomes but " *
+        "`MvNormalCholesky` received $(length(means)) means")
+    data_key = _joint_response_data_key(lhs)
+    n_key = _joint_response_n_key(lhs)
+    observed = get(data, data_key, nothing)
+    observed isa AbstractVector{<:AbstractVector{<:Real}} || error(
+        "sbimpl: internal joint-response data `$data_key` was not packed " *
+        "as one ordered vector per aligned row")
+    all(row -> length(row) == K, observed) || error(
+        "sbimpl: internal joint-response data `$data_key` has a row whose " *
+        "outcome width differs from $K")
+    nobs = length(observed)
+    get(data, n_key, nothing) == nobs || error(
+        "sbimpl: internal joint-response row count `$n_key` disagrees with data")
+
+    factor_name = _sb_joint_factor_reference(key, factor, K)
+    mean_specs = ntuple(i -> _sb_joint_mean_reference(
+        key, outcomes[i], means[i], data, nobs), K)
+    mean_exprs = map(spec -> spec.expression, mean_specs)
+    mean_sources = Tuple(unique!(Symbol[
+        source for spec in mean_specs for source in spec.sources]))
+
+    # Record one row-grouped observation input with all source columns in stable
+    # formula order. Replay regenerates the row vectors and their row count.
+    _sb_record_preproc!(data, data_key, PreprocEntry(
+        :joint_response, (; n_key, outcomes, mean_sources), outcomes, true))
+
+    # Build a row-grouped mean collection first, then apply the likelihood at
+    # top level. StanBlocks' ragged-observation path owns the full observation
+    # triad: a model density, a flat predictive draw with row segments, and one
+    # aggregate pointwise likelihood scalar per row. A dense observation slice
+    # inside `plate` is intentionally predictive-only under its general contract.
+    mean_key = Symbol(key, :_means)
+    observed_cell = Symbol(key, :_observed_cell)
+    mean_cells = ntuple(i -> Symbol(key, :_mean_cell_, i), K)
+    mean_cell = Symbol(key, :_mean_vector)
+    raw_mean_vector = Expr(:vect, mean_cells...)
+    # Tie the result's dimension to the ragged observation cell. The zero term
+    # is algebraically inert; its symbolic size is what makes the collected
+    # plate result a RaggedVector rather than a dense matrix.
+    sized_mean_vector = Expr(:call, :+,
+        Expr(:call, :.*, 0.0, observed_cell), raw_mean_vector)
+    cell_body = Expr(:block,
+        Expr(:(=), mean_cell, sized_mean_vector),
+        mean_cell)
+    plate_call = Expr(:call, :plate,
+        Expr(:parameters, Expr(:kw, :outer, Expr(:tuple, n_key))),
+        data_key, mean_exprs...)
+    plate_do = Expr(:do, plate_call,
+        Expr(:->, Expr(:tuple, observed_cell, mean_cells...), cell_body))
+    push!(stmts, Expr(:call, :~, mean_key, plate_do))
+    push!(stmts, Expr(:call, :~, data_key,
+        Expr(:call, :multi_normal_cholesky, mean_key, factor_name)))
+    nothing
+end
 
 # `effect(...) ~ Distribution(...)` is metadata consumed by constructor prepasses;
 # it deliberately emits no independent parameter or likelihood statement.
@@ -5115,7 +5426,10 @@ function _sb_shared_population_cols!(cols, data,
                                      design::_BRMPopulationDesign)
     for column in design.columns
         if isnothing(column.source)
-            push!(cols, :(rep_vector(1.0, num_elements($(design.row_source)))))
+            row_value = data[design.row_source]
+            row_extent = row_value isa Integer && !(row_value isa Bool) ?
+                design.row_source : :(num_elements($(design.row_source)))
+            push!(cols, :(rep_vector(1.0, $row_extent)))
         else
             push!(cols, _sb_shared_population_column!(data, column))
         end
@@ -7660,7 +7974,10 @@ _sb_predictor_col(t::Int, data, _stmts, pop_terms=(); obs_n::Union{Symbol,Nothin
     isnothing(probe) && (probe = _sb_group_n_obs_probe(data, ran_terms))
     isnothing(probe) && !isnothing(obs_n) && (probe = obs_n)
     isnothing(probe) && (probe = _sb_any_data_symbol(data, target))
-    :(rep_vector(1., num_elements($probe)))
+    probe_value = get(data, probe, nothing)
+    extent = probe_value isa Integer && !(probe_value isa Bool) ?
+        probe : :(num_elements($probe))
+    :(rep_vector(1., $extent))
 end
 _sb_predictor_col(t::NamedColumn, data, _stmts, _pop_terms=(); kwargs...) = _predictor_col_for(t, parent(t), data)
 

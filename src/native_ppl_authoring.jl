@@ -8892,6 +8892,12 @@ function _lower_brmi(brmi::BRM.BRMI)
     observed = BRM.outcomes(brmi)
     isempty(observed) && throw(CapabilityError(
         :outcomes, "expected at least one observed response"))
+    joint = [o.response for o in observed if o.response isa Tuple]
+    isempty(joint) || throw(CapabilityError(
+        :correlated_joint_outcomes,
+        "correlated joint outcomes $(joint) are supported by the " *
+        "StanBlocks backend only; NativePPL cannot silently replace one " *
+        "multivariate density with independent scalar terms"))
     if length(observed) > 1
         normal_exp = 0
         bernoulli_outcomes = 0

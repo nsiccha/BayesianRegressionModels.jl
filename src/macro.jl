@@ -364,6 +364,29 @@ function mi end
 function ragged end
 
 """
+    LKJCovarianceFactor(K; scale_prior=Exponential(1), shape=1)
+
+Formula-only composite prior for the Cholesky factor of a `K`-dimensional
+covariance matrix. The StanBlocks backend samples positive marginal scales and
+an LKJ correlation Cholesky factor, then binds
+`diag_pre_multiply(scales, L_corr)` to the declaration's left-hand side.
+
+Use the result with [`MvNormalCholesky`](@ref). This is a formula marker rather
+than a Distributions.jl constructor.
+"""
+function LKJCovarianceFactor end
+
+"""
+    MvNormalCholesky(mean, factor)
+
+Formula-only multivariate Normal family whose second argument is already the
+lower Cholesky factor of the covariance. A vector response such as
+`[y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)` is one row-wise joint
+likelihood, not two conditionally independent scalar likelihoods.
+"""
+function MvNormalCholesky end
+
+"""
     _brm(formula::Union{Expr,AbstractString}; df=nothing) -> Expr
 
 The macro-free entry point behind [`@brm`](@ref). Parses a formula block
@@ -384,7 +407,8 @@ _brm(x::Expr; df=nothing) = begin
         "likelihood, or write a top-level `lhs ~ rhs` formula.")
     lhs, x = x.head == :(=) ? x.args : (:($(gensym("model"))(__df__)), x)
     alllocals = OrderedDict{Symbol,Symbol}()
-    info = (;alllocals)
+    jointkeys = Set{Symbol}()
+    info = (;alllocals, jointkeys)
     x = parse!(x; info)
     nonlocals = [key for (key, value) in pairs(alllocals) if value == :nonlocal]
     maybelocals = [key for (key, value) in pairs(alllocals) if value == :maybelocal]
@@ -434,6 +458,9 @@ elseif x.head == :(=)
 elseif isxcall(x, :~) && _is_effect_lhs(x.args[2])
     _, lhs, rhs = x.args
     _parse_effect!(lhs, rhs; info)
+elseif isxcall(x, :~) && Meta.isexpr(x.args[2], :vect)
+    _, lhs, rhs = x.args
+    _parse_joint_response!(lhs, rhs; info)
 elseif isxcall(x, :~)
     _, lhs, rhs = x.args
     # Shield brms-style `(e | ID | g)` ranef IDs from parselocals! so the bare
@@ -449,6 +476,47 @@ elseif isxcall(x, :~)
 else
     dump(x)
     error("Don't know how to handle parse!($x)!")
+end
+
+function _joint_response_symbols(lhs::Expr)
+    Meta.isexpr(lhs, :vect) || error(
+        "@brm: a joint response must use vector syntax `[y1, y2]`")
+    length(lhs.args) >= 2 || error(
+        "@brm: a joint response needs at least two outcome columns; got " *
+        "$(length(lhs.args))")
+    all(x -> x isa Symbol, lhs.args) || error(
+        "@brm: every entry of a joint response must be a bare data-column " *
+        "name, got `$lhs`")
+    names = Tuple(lhs.args)
+    length(unique(names)) == length(names) || error(
+        "@brm: joint response columns must be unique and ordered, got `$lhs`")
+    names
+end
+
+function _parse_joint_response!(lhs::Expr, rhs; info)
+    names = _joint_response_symbols(lhs)
+    parselocals!(rhs; info, val=:nonlocal)
+
+    key = _joint_response_operation_key(names)
+    reserved = _joint_response_reserved_keys(names)
+    collision = findfirst(k -> haskey(info.alllocals, k), reserved)
+    isnothing(collision) || error(
+        "@brm: generated joint-response binding `$(reserved[collision])` " *
+        "collides with another formula binding; rename that formula name or " *
+        "one of the outcome columns")
+    info.alllocals[key] = :local
+    hasproperty(info, :jointkeys) && union!(info.jointkeys, reserved)
+
+    columns = Expr(:tuple, map(names) do n
+        qn = QuoteNode(n)
+        :($NamedColumn($qn,
+            hasproperty(__df__, $qn) ?
+                $DataColumn(getproperty(__df__, $qn)) : $MissingColumn()))
+    end...)
+    joint = :($JointResponseColumn($columns))
+    parsed_rhs = _x(rhs)
+    :($key = $NamedColumn($(QuoteNode(key)),
+        $ExprColumn(~, $joint, $parsed_rhs)))
 end
 
 # Public prior-address heads. The user writes the PARAMETER as the head --
@@ -685,7 +753,12 @@ function _nested_brm_payload(x::Expr)
 end
 
 parselocals!(x; kwargs...) = x
-parselocals!(x::Symbol; info, val) = get!(info.alllocals, x, val)
+function parselocals!(x::Symbol; info, val)
+    hasproperty(info, :jointkeys) && x in info.jointkeys && error(
+        "@brm: formula name `$x` collides with a generated joint-response " *
+        "binding; rename that formula name or one of the outcome columns")
+    get!(info.alllocals, x, val)
+end
 parselocals!(x::Expr; info, val) = if Meta.isexpr(x, :->)
     # Shield a `do`-block lambda (see `_x`): its params are bound inside the
     # block and its body is verbatim SLIC — registering those symbols as data
@@ -926,6 +999,40 @@ struct MultiMembershipTerm{G<:Tuple,W} <: AbstractColumn
     weights::W
     normalize::Bool
 end
+
+"""
+    JointResponseColumn(columns)
+
+Internal ordered collection of the data-backed columns on a vector likelihood
+LHS. It survives parsing and replay as one response node so a backend cannot
+mistake the declaration for several independent scalar likelihoods.
+"""
+struct JointResponseColumn{C<:Tuple} <: AbstractColumn
+    columns::C
+    function JointResponseColumn(columns::C) where {C<:Tuple}
+        length(columns) >= 2 || throw(ArgumentError(
+            "a joint response needs at least two columns"))
+        all(c -> c isa NamedColumn, columns) || throw(ArgumentError(
+            "every joint-response entry must be a named column"))
+        names = map(name, columns)
+        length(unique(names)) == length(names) || throw(ArgumentError(
+            "joint-response columns must be unique"))
+        new{C}(columns)
+    end
+end
+
+joint_response_columns(x::JointResponseColumn) = getfield(x, :columns)
+joint_response_names(x::JointResponseColumn) = map(name, joint_response_columns(x))
+_joint_response_operation_key(names) =
+    Symbol("brm_joint_", join(string.(names), "__"))
+function _joint_response_reserved_keys(names)
+    key = _joint_response_operation_key(names)
+    (key, Symbol(key, :_observed), Symbol(key, :_n), Symbol(key, :_means))
+end
+_joint_response_data_key(x::JointResponseColumn) =
+    Symbol(_joint_response_operation_key(joint_response_names(x)), :_observed)
+_joint_response_n_key(x::JointResponseColumn) =
+    Symbol(_joint_response_operation_key(joint_response_names(x)), :_n)
 
 function MultiMembershipTerm(groups...; weights=nothing, normalize=true)
     length(groups) >= 2 || throw(ArgumentError(
@@ -1290,5 +1397,13 @@ Base.show(io::IO, x::MultiMembershipTerm) = begin
     print(io, ")")
 end
 Base.show(io::IO, x::NamedColumn) = print(io, name(x))
+Base.show(io::IO, x::JointResponseColumn) = begin
+    print(io, "[")
+    for (i, n) in enumerate(joint_response_names(x))
+        i == 1 || print(io, ", ")
+        print(io, n)
+    end
+    print(io, "]")
+end
 
 end

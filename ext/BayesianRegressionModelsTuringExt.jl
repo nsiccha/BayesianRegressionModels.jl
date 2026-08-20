@@ -192,6 +192,7 @@ end
 
 _brm_group_scale_distribution(family, rate) = family == 0 ?
     truncated(Normal(), 0.0, Inf) : family == 1 ? Exponential(inv(rate)) :
+    family == 2 ? truncated(Normal(0.0, rate), 0.0, Inf) :
     error("Turing backend: internal unsupported random-effect SD prior family $family")
 _brm_group_scale_distributions(families, rates) =
     [_brm_group_scale_distribution(families[i], rates[i])
@@ -199,7 +200,7 @@ _brm_group_scale_distributions(families, rates) =
 # Stan's positive-constrained Normal sampling statements omit the truncation
 # normalization that `truncated(Normal(), 0, Inf)` includes in Turing.
 _brm_group_scale_log_normalization(families) =
-    -count(iszero, families) * log(2.0)
+    -count(family -> family == 0 || family == 2, families) * log(2.0)
 function _brm_group_scale_site_adjustment(scales, families, rates)
     adjustment = zero(eltype(scales))
     log_two = log(2.0)
@@ -215,6 +216,14 @@ function _brm_group_scale_site_adjustment(scales, families, rates)
             rate = rates[i]
             adjustment += log(rate) - rate * value + 0.5 * value^2 +
                           log_sqrt_two_pi - log_two
+        elseif families[i] == 2
+            # Replace the concrete half-standard-Normal site with Stan's
+            # positive-constrained Normal(0, scale) kernel. `rates` retains its
+            # historical field name but carries the Normal scale for family 2.
+            value = scales[i]
+            scale = rates[i]
+            adjustment += -log(scale) - 0.5 * (value / scale)^2 +
+                          0.5 * value^2 - log_two
         else
             error("Turing backend: internal unsupported random-effect SD " *
                   "prior family $(families[i])")

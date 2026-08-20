@@ -1169,6 +1169,12 @@ function _turing_response_owners(responses, plans)
 end
 
 function _brm_turing_plan(brmi::BRMI)
+    joint = [o.response for o in outcomes(brmi) if o.response isa Tuple]
+    isempty(joint) || error(
+        "Turing backend: correlated joint outcomes $(joint) are " *
+        "supported by the StanBlocks backend only. Construct `SBBRMI(brmi)`; " *
+        "TuringBRMI cannot silently replace one multivariate density with " *
+        "independent scalar terms.")
     observations = _turing_direct_observations(brmi)
     length(observations) == 1 &&
         return _brm_turing_single_plan(brmi, only(observations))
