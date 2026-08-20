@@ -19,11 +19,47 @@ signature — the rest are covered by their docstrings on the [API](@ref) page.
 | `ar(time; p=1)` | AR(p) noise process ordered by `time`; only `p=1` is emitted | — |
 | `mo(c)`, `mo1(c)` | monotonic effect of an ordered factor via Dirichlet increments | — |
 | `me(x, sd)` | measurement-error covariate — `x` is observed with known `sd` | — |
+| `interval_censored(lower; upper)` | exact/interval covariate with bounded latent values on strict intervals | — |
 | `factor(c; ref=k)` | treatment contrasts for a categorical column, reference level `k` | ✓ |
 | `protect(x)` | materialize a raw data expression as one literal column | ✓ |
 
 A plain RHS expression in raw data columns (`log(exposure)`, `x^2`) is treated
 as an implicit `protect(...)` and materialized the same way.
+
+### Interval-censored predictor
+
+Use `interval_censored(lower; upper=upper)` when a continuous covariate is
+known exactly on some rows and only to lie in an interval on others. Equal
+endpoints are exact observations. Each strict interval allocates one latent
+covariate value, constrained to its row-wise bounds, and the merged vector then
+enters the ordinary fixed- or random-effect design matrix:
+
+```julia
+model = (@brm begin
+    qtc ~ Normal(mu, sigma)
+    mu ~ 1 + interval_censored(conc_lower; upper=conc_upper)
+    latent(mu, interval_censored(conc_lower)) ~ Normal(0, 5)
+    sigma ~ Exponential(1)
+end)((;
+    qtc=[401.0, 408.0, 415.0],
+    conc_lower=[0.7, 0.0, 1.2],
+    conc_upper=[0.7, 0.25, 1.2],
+))
+```
+
+The term's default latent prior is `Normal(0, 1)`; use
+`latent(<lp|:>, interval_censored(lower)) ~ Normal(location, scale)` to set it.
+Only the lower-column name appears in that address because term addresses omit
+keywords. Reusing the same term as a fixed effect and a random slope shares one
+latent covariate vector. `reprocess` rebuilds the exact/interval split from the
+new endpoint columns.
+
+This is a continuous latent-covariate model, not an `LLOQ/2` substitution.
+For a BLQ assay row, use the scientifically justified bounds (commonly `0` and
+the row's LLOQ); for a quantified row, repeat the observed concentration as
+both endpoints. Bounds must be finite, `lower <= upper`, and at least one row
+must be a strict interval. The predictor form is `SBBRMI`-only and is distinct
+from the response-likelihood form documented under [Likelihoods](@ref).
 
 `gp` and `hsgp` are distinct terms with no compatibility alias. Both are direct
 predictor summands carrying their own latent draws and hyperparameters, so
@@ -194,11 +230,11 @@ knots, penalty decomposition, and intercept constraint. Passing
 
 Some terms own parameters that no coefficient address can reach. `s(x)`'s
 smoothing scale, `mo(c)`'s Dirichlet increments, `me(x, sd)`'s latent true
-covariate and a Gaussian process's length scale and amplitude all live inside
-the term's own submodel, and none of them is a `beta_pop` column or a
-grouping-factor margin. They are addressed by naming the term itself in the
-target slot, in the same head-position grammar the rest of the prior surface
-uses:
+covariate, `interval_censored(lower; upper=upper)`'s bounded latent values, and
+a Gaussian process's length scale and amplitude all live inside the term's own
+submodel. None is a `beta_pop` column or a grouping-factor margin. They are
+addressed by naming the term itself in the target slot, in the same
+head-position grammar the rest of the prior surface uses:
 
 ```
 <quantity>(<linear predictor | :>, <term>[, <component>]) ~ <distribution>
@@ -235,6 +271,7 @@ end)((;
 | `sd` | `t2(x, z)` | one of the `rr` / `rn` / `nr` penalty SDs | half-standard-normal |
 | `simplex` | `mo(c)`, `mo1(c)` | Dirichlet concentration | `Dirichlet(1)` |
 | `latent` | `me(x, sd)` | latent true covariate | `Normal(0, 1)` |
+| `latent` | `interval_censored(lower; upper=upper)` | latent covariate on strict-interval rows | truncated `Normal(0, 1)` |
 | `length_scale` | `gp(x…)`, `hsgp(x…)` | GP length scale `rho` | `LogNormal(0, 1)` |
 | `sd` | `gp(x…)`, `hsgp(x…)` | GP marginal amplitude `sigma` | `LogNormal(0, 1)` |
 

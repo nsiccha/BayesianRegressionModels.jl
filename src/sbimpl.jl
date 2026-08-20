@@ -1561,6 +1561,19 @@ _sb_me = StanBlocks.@slic begin
     return x_true
 end
 
+# Interval-censored predictor. Exact rows stay data; strict intervals allocate
+# only the unknown coordinates, give them the term's Normal prior truncated to
+# their row-wise bounds, then scatter exact and latent values back onto the
+# formula's row axis. This is evidence about the predictor itself, not a
+# response-likelihood wrapper and not an LLOQ/2 substitution.
+_sb_interval_censored_predictor = StanBlocks.@slic begin
+    n_interval = num_elements(Jinterval)
+    x_interval :: vector[n_interval] ~ truncated(
+        normal, x_true_loc, x_true_scale; lower=x_lower, upper=x_upper)
+    return mi_merge(x_exact, x_interval, Jexact, Jinterval,
+                    num_elements(Jexact) + n_interval)
+end
+
 # Carvalho-Polson-Scott horseshoe prior, scalar form. Standard
 # reparameterisation: beta = raw * lambda * tau with raw ~ N(0,1) and
 # half-Cauchy(0,1) local + global scales. Each `coef ~ Horseshoe()`
@@ -1592,8 +1605,12 @@ StanBlocks.@deffun begin
     mi_merge(y_obs::vector[n_obs], y_mis::vector[n_mis],
              Jobs::int[n_obs], Jmis::int[n_mis], n::int)::vector[n] = begin
         rv = rep_vector(0., n)
-        for i in 1:n_obs; rv[Jobs[i]] = y_obs[i]; end
-        for i in 1:n_mis; rv[Jmis[i]] = y_mis[i]; end
+        if n_obs > 0
+            for i in 1:n_obs; rv[Jobs[i]] = y_obs[i]; end
+        end
+        if n_mis > 0
+            for i in 1:n_mis; rv[Jmis[i]] = y_mis[i]; end
+        end
         return rv
     end
 end
@@ -2035,15 +2052,15 @@ end
 # ==============================================================================
 
 # ---- preprocessing-constant provenance (decision nr3v8n A) ------------------
-# Each Category-A transform (zscale/standardize/center/factor/mo/s/t2/gp/hsgp) and the
-# element-wise `protect`/implicit-fn fallback compute a data-derived constant in
-# Julia at construct-time and land only the TRANSFORMED result in `data`. To
-# support `reprocess`/`restan_data` on a new DataFrame we record, per EMITTED
-# data key, how to regenerate that key from a new df:
+# Each Category-A transform (zscale/standardize/center/factor/mo/s/t2/gp/hsgp),
+# interval-censored predictor, and element-wise `protect`/implicit-fn fallback
+# computes data-derived values in Julia at construct-time and lands only the
+# transformed/split result in `data`. To support `reprocess`/`restan_data` on a
+# new DataFrame we record, per EMITTED data key, how to regenerate it:
 #   kind         -- which transform (:zscale/:standardize/:center/:factor/:mo/
 #                   :spline/:tensor_spline/:gp/:hsgp/:protect/:interaction/
 #                   :categorical_outcome/:ordinal_outcome/
-#                   :ordinal_threshold_predictor)
+#                   :ordinal_threshold_predictor/:interval_censored_predictor)
 #   const_       -- the fitted constant: (μ,σ) / μ / level-vector / TPS basis /
 #                   tensor-spline margins/centers / exact-GP axis metadata /
 #                   HSGP (μ,L,K,c) / categorical
@@ -3340,6 +3357,21 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             e.const_.kind, raw, length(response), e.const_.response, e.raw_ref;
             prefix="sbimpl: reprocess")
         new_preproc[key] = e
+    elseif e.kind === :interval_censored_predictor
+        lower_name, upper_name = e.raw_ref
+        plan = _sb_interval_censored_predictor_plan(
+            lower_name, _sb_df_column(df, lower_name),
+            upper_name, _sb_df_column(df, upper_name))
+        new_data[key] = plan.x_exact
+        new_data[e.const_.lower_key] = plan.x_lower
+        new_data[e.const_.upper_key] = plan.x_upper
+        new_data[e.const_.exact_index_key] = plan.Jexact
+        new_data[e.const_.interval_index_key] = plan.Jinterval
+        for owned in (e.const_.lower_key, e.const_.upper_key,
+                      e.const_.exact_index_key, e.const_.interval_index_key)
+            push!(handled, owned)
+        end
+        new_preproc[key] = e
     elseif e.kind === :factor || e.kind === :mo
         v = _sb_df_column(df, e.raw_ref)
         levels = freeze ? e.const_ : _sb_fit_levels(v)
@@ -3412,8 +3444,9 @@ of a naive per-column `sb.model(; col=…)` rebind is avoided. Returns a NEW
   of the default same-group replay.
 
 Covered: the Julia-side transforms (`zscale`/`standardize`/`center`/`factor`/
-`mo`/`s`/`t2`/`gp`/`hsgp`), `protect`/implicit-fn columns (re-materialised on
-`new_df`), typed `mm(...)` and ordinary plain/`|ID|` random-effect group
+`mo`/`s`/`t2`/`gp`/`hsgp`), interval-censored predictor splits,
+`protect`/implicit-fn columns (re-materialised on `new_df`), typed `mm(...)`
+and ordinary plain/`|ID|` random-effect group
 indices, `kernel(...)` subject counts and `ragged(x, group)` columns,
 formula-boundary `ragged(response, group)` observations and their data-backed
 `censored`/`truncated`/`interval_censored` bounds (both re-gathered from the
@@ -5345,7 +5378,7 @@ _sb_t2_sd_index(c::Symbol) = findfirst(==(c), _SB_T2_BLOCKS)
 # spellings of one key in one predictor (`s(x) + s(x)`) make the address
 # ambiguous — the resolver reports that as its own error rather than silently
 # configuring whichever copy the walker reached first.
-const _SB_PRIOR_TERMS = (mo, mo1, me, s, t2, gp, hsgp)
+const _SB_PRIOR_TERMS = (mo, mo1, me, interval_censored, s, t2, gp, hsgp)
 function _sb_term_address_map(brmi::BRMI, lhs::Symbol)
     out = Dict{Symbol,Vector{Any}}()
     op = linear_predictor_op(brmi, lhs)
@@ -5420,9 +5453,10 @@ function _sb_term_config(spec, t, spelling)
             "sbimpl: `$spelling ~ Dirichlet(...)` does not accept keywords")
         return (:simplex, (; alpha=map(_sb_effect_prior_arg, spec.arguments)))
     end
-    f === me || error(
+    (f === me || f === interval_censored) || error(
         "sbimpl: `$spelling` — `$(nameof(f))` has no latent covariate to " *
-        "configure. `latent(...)` applies to `me(x, sd)`.")
+        "configure. `latent(...)` applies to `me(x, sd)` and " *
+        "`interval_censored(lower; upper=upper)` predictor terms.")
     isnothing(spec.component) || error("sbimpl: `$spelling` takes no component slot")
     T = _as_distribution_type(spec.family)
     (!isnothing(T) && T <: Normal) || error(
@@ -5559,11 +5593,43 @@ function _sb_mo_alpha_expr(term_overrides, t, n_levels)
     Expr(:vect, map(Float64, a)...)
 end
 
-# Location/scale of a `me` term's latent true covariate. The (0, 1) default is
-# the standard normal the unconfigured submodel has always used.
+# Location/scale of a latent-covariate term. The (0, 1) default preserves the
+# historical `me` contract and is also the interval-predictor default.
 function _sb_me_latent_args(term_overrides, t)
     cfg = _sb_term_cfg(term_overrides, t, :latent)
     isnothing(cfg) ? (0.0, 1.0) : (cfg.loc, cfg.scale)
+end
+
+function _sb_interval_censored_predictor_plan(lower_name::Symbol, lower_raw,
+                                               upper_name::Symbol, upper_raw)
+    lower = collect(Float64,
+        _sb_real_vec(:interval_censored, lower_name, lower_raw))
+    upper = collect(Float64,
+        _sb_real_vec(:interval_censored, upper_name, upper_raw))
+    isempty(lower) && error(
+        "sbimpl: interval-censored predictor `$lower_name` cannot be empty")
+    length(lower) == length(upper) || error(
+        "sbimpl: interval-censored predictor endpoints `$lower_name` and " *
+        "`$upper_name` must have equal lengths ($(length(lower)) vs " *
+        "$(length(upper)))")
+    all(isfinite, lower) || error(
+        "sbimpl: interval-censored predictor lower endpoints `$lower_name` " *
+        "must be finite")
+    all(isfinite, upper) || error(
+        "sbimpl: interval-censored predictor upper endpoints `$upper_name` " *
+        "must be finite")
+    invalid = findfirst(i -> lower[i] > upper[i], eachindex(lower))
+    isnothing(invalid) || error(
+        "sbimpl: interval-censored predictor row $invalid has lower endpoint " *
+        "$(lower[invalid]) above upper endpoint $(upper[invalid])")
+    Jinterval = findall(i -> lower[i] < upper[i], eachindex(lower))
+    isempty(Jinterval) && error(
+        "sbimpl: `interval_censored($lower_name; upper=$upper_name)` has no " *
+        "strict interval rows; use the exact covariate `$lower_name` directly")
+    Jexact = findall(i -> lower[i] == upper[i], eachindex(lower))
+    (; x_exact=lower[Jexact], x_lower=lower[Jinterval],
+       x_upper=upper[Jinterval], Jexact=collect(Int, Jexact),
+       Jinterval=collect(Int, Jinterval))
 end
 
 # ---- gp / hsgp length scale and marginal amplitude --------------------------
@@ -7482,6 +7548,57 @@ _sb_predictor_term!(stmts, data, ::typeof(me), t;
                                         x_true_loc=$loc, x_true_scale=$scale)))
     col_name
 end
+
+
+# Predictor-side `interval_censored(lower; upper=upper)`. Equal endpoints are
+# exact observed covariates; strict intervals get one latent coordinate each.
+# The derived-data key is also the idempotence marker: a term used for both the
+# population slope and `(… | group)` random slope must own ONE latent vector,
+# with both design matrices referencing the same merged predictor.
+_sb_predictor_term!(stmts, data, ::typeof(interval_censored), t;
+                    term_overrides=Dict{Symbol,Any}(), kwargs...) = begin
+    args = getargs(t)
+    kw = getkwargs(t)
+    length(args) == 1 || error(
+        "sbimpl: predictor `interval_censored(lower; upper=upper)` expects " *
+        "one positional lower-endpoint column, got $(length(args))")
+    keys(kw) == (:upper,) || error(
+        "sbimpl: predictor `interval_censored(lower; upper=upper)` requires " *
+        "exactly the `upper` keyword; got $(collect(keys(kw)))")
+    lower_name, lower_raw = _sb_inner_data(:interval_censored, only(args))
+    upper_name, upper_raw = _sb_inner_data(:interval_censored, kw.upper)
+    suffix = Symbol(lower_name, :_, upper_name)
+    exact_key = Symbol(:icp_exact_, suffix)
+    lower_key = Symbol(:icp_lower_, suffix)
+    upper_key = Symbol(:icp_upper_, suffix)
+    exact_index_key = Symbol(:Jexact_, suffix)
+    interval_index_key = Symbol(:Jinterval_, suffix)
+    col_name = Symbol(:interval_censored_, suffix)
+
+    # Population terms emit before random effects. Reusing the same term in a
+    # random slope therefore returns the already-owned latent predictor rather
+    # than duplicating its prior/submodel statement.
+    haskey(data, exact_key) && return col_name
+
+    plan = _sb_interval_censored_predictor_plan(
+        lower_name, lower_raw, upper_name, upper_raw)
+    data[exact_key] = plan.x_exact
+    data[lower_key] = plan.x_lower
+    data[upper_key] = plan.x_upper
+    data[exact_index_key] = plan.Jexact
+    data[interval_index_key] = plan.Jinterval
+    _sb_record_preproc!(data, exact_key, PreprocEntry(
+        :interval_censored_predictor,
+        (; lower_key, upper_key, exact_index_key, interval_index_key),
+        (lower_name, upper_name), true))
+
+    loc, scale = _sb_me_latent_args(term_overrides, t)
+    push!(stmts, :($col_name ~ _sb_interval_censored_predictor(;
+        x_exact=$exact_key, x_lower=$lower_key, x_upper=$upper_key,
+        Jexact=$exact_index_key, Jinterval=$interval_index_key,
+        x_true_loc=$loc, x_true_scale=$scale)))
+    col_name
+end
 # Penalized thin-plate predictor `s(x)`. Fits a frozen rank-10 TPS eigenbasis
 # from the raw training column, then stashes its two-column null-space matrix
 # and eight-column penalty-whitened range matrix as Stan data. `_sb_s` owns the
@@ -7715,7 +7832,7 @@ function _sb_materialize_protect_term!(stmts, data, f, t)
         return cn
     catch err
         _ee = _as_error_exception(err); isnothing(_ee) && rethrow()
-        error("sbimpl: unsupported predictor-term function `$f` (supported: `mo`, `mo1`, `me`, `s`, `ar`, `protect`, `zscale`, `center`, `standardize`, or any expression in raw data columns) -- materialization failed: $(_ee.msg)")
+        error("sbimpl: unsupported predictor-term function `$f` (supported: `mo`, `mo1`, `me`, `interval_censored`, `s`, `ar`, `protect`, `zscale`, `center`, `standardize`, or any expression in raw data columns) -- materialization failed: $(_ee.msg)")
     end
 end
 _sb_predictor_term!(stmts, data, f::Function, t; kwargs...) =

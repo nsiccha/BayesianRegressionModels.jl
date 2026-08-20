@@ -62,8 +62,8 @@ export me, mi, s, t2, ar, mo, mo1, hsgp, OrderedLogistic, Ordinal,
 # Hierarchical biomarker family — formula-surface markers for custom likelihood + submodel
 export TruncatedNormal, biomarker_hierarchical_parametric, kernel, ragged
 # Julia-native response-family composition. `truncated` and `censored` are the
-# exact Distributions.jl functions; `interval_censored` is BRM's narrow formula
-# shim for evidence that a latent response lies between two row-wise bounds.
+# exact Distributions.jl functions; `interval_censored` is BRM's formula marker
+# for row-wise interval evidence on either a response or a predictor.
 export truncated, censored, interval_censored
 # A julianic `@jmodel` body is ordinary Julia, so the distributions it names must
 # be real `Distributions` objects resolved in the AUTHOR's scope. Re-export the
@@ -153,6 +153,7 @@ export popefs, _popefs_normal, _popefs_coefs, _popefs_normal_coefs,
        brm_col_variances, brm_r2d2_scale,
        multi_membership_intercept, multi_membership_correlated,
        _sb_mo, _sb_cat, _sb_cat_normal, _sb_ar1, _sb_s, _sb_t2, _sb_me,
+       _sb_interval_censored_predictor,
        _sb_gp, _sb_gp_aniso, _sb_hsgp, _sb_hsgp_aniso,
        _sb_hsgp_by, _sb_hsgp_by_aniso,
        brm_exp_quad_cov, brm_hsgp_sqrt_spd,

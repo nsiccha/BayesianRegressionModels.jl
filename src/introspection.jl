@@ -340,7 +340,9 @@ formula order. Each entry has
 `class` is `:term_sd`, `:term_simplex`, `:term_latent` or
 `:term_length_scale`. `term` is the canonicalised term key: the term as the
 formula spells it, minus numeric and keyword arguments, so `me(x, 0.5)` and
-`me(x)` both key as `Symbol("me(x)")`, and `hsgp(x; k=20)` keys as
+`me(x)` both key as `Symbol("me(x)")`,
+`interval_censored(lower; upper=upper)` keys as
+`Symbol("interval_censored(lower)")`, and `hsgp(x; k=20)` keys as
 `Symbol("hsgp(x)")`. `predictor === nothing` means the statement is the default
 layer for every linear predictor carrying that term; a `Symbol` restricts it to
 one. `component` is `nothing` except for `sd(lp, t2(x, z), rr)`, where it names
@@ -354,6 +356,7 @@ Which parameter each class reaches:
 | `sd(lp, t2(x, z), rr\\|rn\\|nr)` | one of the three tensor smoothing SDs |
 | `simplex(lp, mo1(c))` | the monotonic-increment Dirichlet concentration |
 | `latent(lp, me(x))` | the latent true covariate `x_true` |
+| `latent(lp, interval_censored(lower))` | the covariate values on strict-interval rows |
 | `sd(lp, gp(x))` / `sd(lp, hsgp(x))` | the GP marginal amplitude `sigma` |
 | `length_scale(lp, gp(x))` / `length_scale(lp, hsgp(x))` | the GP length scale `rho` |
 
