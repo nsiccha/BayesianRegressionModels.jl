@@ -35,8 +35,9 @@ no separate flag is needed. Each BLOQ row allocates one latent covariate value
 between zero and its LLOQ, and the merged vector enters the ordinary fixed- or
 random-effect design matrix:
 
-```julia
-model = (@brm begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+interval_censored_predictor_model = (@brm begin
     qtc ~ Normal(mu, sigma)
     mu ~ 1 + interval_censored(conc; upper=lloq)
     effect(mu, conc) ~ Normal(0, 2)
@@ -47,6 +48,8 @@ end)((;
     conc=[0.7, 0.25, 1.2],
     lloq=[0.25, 0.25, 0.4],
 ))
+""", :interval_censored_predictor_model;
+    title="Interval-censored concentration predictor")
 ```
 
 The term's default latent prior is `Normal(0, 1)`; use
