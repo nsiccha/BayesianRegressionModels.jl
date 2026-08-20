@@ -295,12 +295,19 @@ covariance Cholesky factor. Dispatch tag — lowering lives in `_sb_gp` /
 function gp end
 
 """
-    hsgp(x...; k=20, c=1.5, cov=:exp_quad, iso=true, by=nothing)
+    hsgp(x...; k=20, c=1.5, cov=:exp_quad, iso=true, by=nothing,
+         domain=nothing, orthogonal_to=nothing)
 
 Hilbert-space approximate Gaussian-process predictor. The StanBlocks backend
 supports variadic axes, per-axis `k`/`c` tuples, isotropic or anisotropic length
-scales, and optional group-specific basis weights via `by=`. In formulas this
-method is used only as a dispatch tag.
+scales, and optional group-specific basis weights via `by=`. For raw data axes,
+`domain=(lower, upper)` fixes the approximation interval instead of deriving it
+through `c`. A one-dimensional model-derived axis, such as the sampled `x` from
+`log(x) ~ ...`, requires that explicit domain and evaluates its basis inside
+Stan. `orthogonal_to=:linear` removes the intercept and current linear-`x`
+directions from a one-dimensional basis, so `x + hsgp(x; ...)` separates the
+linear slope from residual nonlinear shape. In formulas this method is used
+only as a dispatch tag.
 """
 hsgp(args...; kwargs...) = error("hsgp is a formula marker and cannot be called directly")
 

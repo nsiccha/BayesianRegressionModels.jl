@@ -1700,6 +1700,46 @@ StanBlocks.@deffun begin
         end
         return rv
     end
+
+    # A model-derived HSGP axis is not available while Julia materialises the
+    # data dictionary, so its eigenfunctions have to be evaluated inside Stan.
+    # `omega2`, `center`, and `L` still describe one FIXED approximation domain;
+    # only the locations `x` vary with the sampled latent predictor.
+    @stanonly brm_hsgp_basis_1d(x::vector[n], omega2::matrix[m, 1],
+                                center::real, L::real)::matrix[n, m] = begin
+        PHI::matrix[n, m]
+        inv_sqrt_L = 1. / sqrt(L)
+        for b in 1:m
+            omega = sqrt(omega2[b, 1])
+            for i in 1:n
+                PHI[i, b] = inv_sqrt_L * sin(omega * (x[i] - center + L))
+            end
+        end
+        return PHI
+    end
+
+    # Remove the intercept and linear-x directions from a one-dimensional
+    # HSGP basis. At a degenerate all-equal x draw the linear direction is the
+    # intercept, so centering alone is the well-defined limiting projection.
+    # This keeps a separately declared population slope interpretable while
+    # the HSGP carries only residual nonlinear shape.
+    @stanonly brm_hsgp_orthogonalize_linear(PHI::matrix[n, m],
+                                             x::vector[n])::matrix[n, m] = begin
+        out::matrix[n, m]
+        x_centered = x - mean(x)
+        x_ss = dot_self(x_centered)
+        for b in 1:m
+            phi_centered = col(PHI, b) - mean(col(PHI, b))
+            if x_ss > 1e-12
+                phi_centered = phi_centered - x_centered *
+                    (dot_product(x_centered, phi_centered) / x_ss)
+            end
+            for i in 1:n
+                out[i, b] = phi_centered[i]
+            end
+        end
+        return out
+    end
 end
 
 # Exact latent squared-exponential GP. The non-centred draw keeps the geometry
@@ -1760,6 +1800,34 @@ _sb_hsgp_aniso = StanBlocks.@slic begin
     rho :: vector[n_axes] ~ lognormal(0., 1.; lower=rho_lower)
     sigma    ~ lognormal(0., 1.; lower=0.)
     beta_raw ~ std_normal(; n=n_basis)
+    sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma, rho)
+    return PHI * (sqrt_spd .* beta_raw)
+end
+
+# One-dimensional HSGP over a model-derived vector. Unlike `_sb_hsgp`, PHI is
+# evaluated at runtime because `x` may be a sampled linear predictor or an
+# assignment such as `x = exp(log_x)`. The approximation domain and spectral
+# frequencies remain formula constants/data, so the length-scale validity
+# floor is still a legal static Stan parameter bound.
+_sb_hsgp_latent = StanBlocks.@slic begin
+    n_basis = dims(omega2)[1]
+    PHI = brm_hsgp_basis_1d(x, omega2, center, L)
+    rho_iso  ~ lognormal(0., 1.; lower=rho_lower)
+    sigma    ~ lognormal(0., 1.; lower=0.)
+    beta_raw ~ std_normal(; n=n_basis)
+    rho = rep_vector(rho_iso, 1)
+    sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma, rho)
+    return PHI * (sqrt_spd .* beta_raw)
+end
+
+_sb_hsgp_latent_orthogonal = StanBlocks.@slic begin
+    n_basis = dims(omega2)[1]
+    PHI_raw = brm_hsgp_basis_1d(x, omega2, center, L)
+    PHI = brm_hsgp_orthogonalize_linear(PHI_raw, x)
+    rho_iso  ~ lognormal(0., 1.; lower=rho_lower)
+    sigma    ~ lognormal(0., 1.; lower=0.)
+    beta_raw ~ std_normal(; n=n_basis)
+    rho = rep_vector(rho_iso, 1)
     sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma, rho)
     return PHI * (sqrt_spd .* beta_raw)
 end
@@ -1876,6 +1944,55 @@ _sb_hsgp_options(kw, n_axes::Int) = begin
     Tuple(Int(x) for x in K), Tuple(Float64(x) for x in c)
 end
 
+# `domain` is the actual compact interval used by the HSGP eigenfunctions,
+# unlike `c`, which expands a domain inferred from raw training data. A latent
+# axis has no Julia-time values from which to infer that interval, so it must
+# supply one explicitly. Variadic raw HSGPs may supply one pair per axis.
+function _sb_hsgp_domain_fits(kw, n_axes::Int; required::Bool=false)
+    if !haskey(kw, :domain)
+        required && error(
+            "sbimpl: `hsgp(...)` over a model-derived axis requires an explicit " *
+            "fixed `domain=(lower, upper)`; its sampled values do not exist " *
+            "while the HSGP basis is being configured")
+        return nothing
+    end
+    haskey(kw, :c) && error(
+        "sbimpl: `hsgp(...; domain=...)` fixes the approximation boundary " *
+        "directly and cannot also specify the data-derived expansion factor `c`")
+
+    raw = kw[:domain]
+    is_pair(x) = (x isa Tuple || x isa AbstractVector) && length(x) == 2 &&
+                 all(v -> v isa Real && isfinite(v), x)
+    pairs = if n_axes == 1 && is_pair(raw)
+        (raw,)
+    elseif (raw isa Tuple || raw isa AbstractVector) && length(raw) == n_axes &&
+           all(is_pair, raw)
+        Tuple(raw)
+    else
+        expectation = n_axes == 1 ? "`(lower, upper)`" :
+            "one `(lower, upper)` pair per axis"
+        error("sbimpl: `hsgp(...; domain=...)` expects $expectation, got $(repr(raw))")
+    end
+
+    ntuple(n_axes) do j
+        lower, upper = Float64.(pairs[j])
+        lower < upper || error(
+            "sbimpl: `hsgp(...; domain=...)` needs lower < upper on axis $j, " *
+            "got ($lower, $upper)")
+        ((lower + upper) / 2, (upper - lower) / 2)
+    end
+end
+
+function _sb_hsgp_orthogonal_to(kw, n_axes::Int)
+    value = get(kw, :orthogonal_to, nothing)
+    (isnothing(value) || value === :linear) || error(
+        "sbimpl: `hsgp(...; orthogonal_to=...)` supports only `:linear`, got $(repr(value))")
+    value === :linear && n_axes != 1 && error(
+        "sbimpl: `hsgp(...; orthogonal_to=:linear)` currently supports exactly " *
+        "one predictor axis, got $n_axes")
+    value
+end
+
 _sb_gp_iso(kw, label::Symbol) = begin
     iso = get(kw, :iso, true)
     iso isa Bool || error("sbimpl: `$label(...; iso=...)` expects Bool, got $(typeof(iso))")
@@ -1904,11 +2021,12 @@ function _check_term_kwargs(::typeof(gp), kw)
 end
 
 function _check_term_kwargs(::typeof(hsgp), kw)
-    allowed = (:cov, :iso, :k, :c, :by)
+    allowed = (:cov, :iso, :k, :c, :by, :domain, :orthogonal_to)
     unknown = filter(k -> k ∉ allowed, keys(kw))
     isempty(unknown) || error(
         "hsgp: unsupported keyword(s): $(join(unknown, ", ")); " *
-        "supported keywords are `cov`, `iso`, `k`, `c`, and `by`")
+        "supported keywords are `cov`, `iso`, `k`, `c`, `by`, `domain`, and " *
+        "`orthogonal_to`")
     _sb_gp_cov(kw, :hsgp)
     _sb_gp_iso(kw, :hsgp)
     nothing
@@ -2035,6 +2153,23 @@ function _sb_apply_hsgp(fits::Tuple, axes::Tuple, K::Tuple)
         end
     end
     PHI, omega2
+end
+
+function _sb_orthogonalize_hsgp_linear(PHI::AbstractMatrix,
+                                       x::AbstractVector{<:Real})
+    size(PHI, 1) == length(x) || error(
+        "hsgp: internal orthogonalization row-count mismatch")
+    xc = collect(Float64, x)
+    xc .-= sum(xc) / length(xc)
+    ss = sum(abs2, xc)
+    out = Matrix{Float64}(undef, size(PHI))
+    for b in axes(PHI, 2)
+        phi = collect(Float64, @view PHI[:, b])
+        phi .-= sum(phi) / length(phi)
+        ss > 0 && (phi .-= xc .* (dot(xc, phi) / ss))
+        out[:, b] = phi
+    end
+    out
 end
 
 
@@ -3296,8 +3431,16 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
     elseif e.kind === :hsgp
         axes = _sb_gp_axes_from_df(df, e.raw_ref, :hsgp)
         K = e.const_.K
-        fits = freeze ? e.const_.fits : _sb_fit_hsgp(axes, K, e.const_.c)
+        domain_fits = get(e.const_, :domain_fits, nothing)
+        _sb_hsgp_check_explicit_domain(domain_fits, axes)
+        # An explicit domain is part of the formula, not a fitted constant: it
+        # stays fixed even when other preprocessing constants are re-fitted.
+        fits = !isnothing(domain_fits) ? domain_fits :
+               freeze ? e.const_.fits : _sb_fit_hsgp(axes, K, e.const_.c)
         PHI, omega2 = _sb_apply_hsgp(fits, axes, K)
+        orthogonal_to = get(e.const_, :orthogonal_to, nothing)
+        orthogonal_to === :linear &&
+            (PHI = _sb_orthogonalize_hsgp_linear(PHI, only(axes)))
         new_data[key] = PHI
         new_data[e.const_.omega2_key] = omega2
         push!(handled, e.const_.omega2_key)
@@ -3308,7 +3451,8 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         new_data[e.const_.rho_lower_key] = _sb_hsgp_rho_lower_data(fits, K, iso)
         push!(handled, e.const_.rho_lower_key)
         new_preproc[key] = PreprocEntry(:hsgp,
-            (; fits, K, c=e.const_.c, iso, omega2_key=e.const_.omega2_key,
+            (; fits, K, c=e.const_.c, iso, domain_fits, orthogonal_to,
+             omega2_key=e.const_.omega2_key,
              rho_lower_key=e.const_.rho_lower_key), e.raw_ref, false)
     elseif e.kind === :categorical_outcome
         v = _sb_df_column(df, e.raw_ref)
@@ -5726,6 +5870,8 @@ _sb_gp_submodel(::Val{:_sb_hsgp}) = _sb_hsgp
 _sb_gp_submodel(::Val{:_sb_hsgp_aniso}) = _sb_hsgp_aniso
 _sb_gp_submodel(::Val{:_sb_hsgp_by}) = _sb_hsgp_by
 _sb_gp_submodel(::Val{:_sb_hsgp_by_aniso}) = _sb_hsgp_by_aniso
+_sb_gp_submodel(::Val{:_sb_hsgp_latent}) = _sb_hsgp_latent
+_sb_gp_submodel(::Val{:_sb_hsgp_latent_orthogonal}) = _sb_hsgp_latent_orthogonal
 
 _sb_gp_rho_lhs(::Val{:_sb_gp}) = :rho
 _sb_gp_rho_lhs(::Val{:_sb_gp_aniso}) = :(rho :: vector[n_axes])
@@ -5733,6 +5879,8 @@ _sb_gp_rho_lhs(::Val{:_sb_hsgp}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_aniso}) = :(rho :: vector[n_axes])
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_by}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_by_aniso}) = :(rho :: vector[n_axes])
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_latent}) = :rho_iso
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_latent_orthogonal}) = :rho_iso
 
 function _sb_gp_prior_stmt(lhs, cfg)
     rhs = copy(cfg.rhs)
@@ -7748,28 +7896,109 @@ _sb_predictor_term!(stmts, data, ::typeof(gp), t; group_block_lookup=Dict(),
     col_name
 end
 
-# `hsgp(x...; k, c, by, iso)` is the Hilbert-space approximation. Scalar `k`
-# and `c` broadcast across axes; tuples/vectors specify one value per axis.
-# The tensor basis has `prod(k)` columns. With `by=`, only those basis weights
-# vary per group; length-scale and marginal-SD hyperparameters stay shared.
-function _sb_hsgp_fit_for_emission(data, key, names, axes, K, c, iso)
+# `hsgp(x...; k, c, by, iso, domain, orthogonal_to)` is the Hilbert-space
+# approximation. Raw axes retain the historical Julia-precomputed basis.
+# A one-dimensional model-derived axis instead evaluates that basis inside Stan
+# and therefore requires an explicit fixed domain.
+function _sb_hsgp_fit_for_emission(data, key, names, axes, K, c, iso,
+                                   domain_fits, orthogonal_to)
     frozen = _sb_frozen_preproc_entry(data, key, :hsgp, names)
-    isnothing(frozen) && return _sb_fit_hsgp(axes, K, c)
+    fresh = isnothing(domain_fits) ? _sb_fit_hsgp(axes, K, c) : domain_fits
+    isnothing(frozen) && return fresh
     const_ = frozen.const_
-    (const_.K == K && const_.c == c && const_.iso == iso) || error(
+    frozen_domain = get(const_, :domain_fits, nothing)
+    frozen_orthogonal = get(const_, :orthogonal_to, nothing)
+    (const_.K == K && const_.c == c && const_.iso == iso &&
+     frozen_domain == domain_fits && frozen_orthogonal === orthogonal_to) || error(
         "sbimpl: resample replay: fitted HSGP configuration for `$key` no " *
         "longer matches the re-emitted formula")
     const_.fits
+end
+
+function _sb_hsgp_raw_axes(args)
+    inners = Tuple(_sb_named_inner(:hsgp, a) for a in args)
+    names = Tuple(name(i) for i in inners)
+    backings = Tuple(parent(i) for i in inners)
+    raw = map(backings) do backing
+        backing isa DataColumn ? parent(backing) : nothing
+    end
+    names, backings, raw
+end
+
+function _sb_hsgp_check_explicit_domain(fits, axes)
+    isnothing(fits) && return
+    for j in eachindex(axes)
+        center, L = fits[j]
+        lower, upper = center - L, center + L
+        all(x -> lower <= x <= upper, axes[j]) || error(
+            "sbimpl: `hsgp(...; domain=...)` axis $j contains training values " *
+            "outside its fixed domain ($lower, $upper)")
+    end
 end
 
 _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
                     term_overrides=Dict{Symbol,Any}(), kwargs...) = begin
     args = getargs(t); kw = getkwargs(t)
     _check_term_kwargs(hsgp, kw)
-    names, axes = _sb_gp_axes(:hsgp, args)
-    K, c = _sb_hsgp_options(kw, length(axes))
+    isempty(args) && error("sbimpl: `hsgp(x...)` expects at least one positional axis")
+    names, backings, raw = _sb_hsgp_raw_axes(args)
+    raw_flags = map(x -> !isnothing(x), raw)
+    (all(raw_flags) || all(!, raw_flags)) || error(
+        "sbimpl: `hsgp(...)` cannot mix raw-data and model-derived axes")
+    is_raw = all(raw_flags)
+    n_axes = length(args)
+    K, c = _sb_hsgp_options(kw, n_axes)
+    domain_fits = _sb_hsgp_domain_fits(kw, n_axes; required=!is_raw)
+    orthogonal_to = _sb_hsgp_orthogonal_to(kw, n_axes)
+    orthogonal_to === :linear && haskey(kw, :by) && error(
+        "sbimpl: `hsgp(...; orthogonal_to=:linear)` is an ungrouped " *
+        "population-shape constraint and cannot be combined with `by=`")
     suffix = join(string.(names), "_")
     iso = _sb_gp_iso(kw, :hsgp)
+
+    if !is_raw
+        n_axes == 1 || error(
+            "sbimpl: model-derived `hsgp(...)` currently supports exactly one axis")
+        iso || error(
+            "sbimpl: one-dimensional model-derived `hsgp(...)` requires `iso=true`")
+        haskey(kw, :by) && error(
+            "sbimpl: model-derived `hsgp(...; by=...)` is not supported; " *
+            "use an ungrouped population HSGP residual")
+        all(b -> b isa ExprColumn, backings) || error(
+            "sbimpl: model-derived `hsgp($(only(names)))` expects a sampled " *
+            "linear predictor or assignment, got $(typeof(only(backings)))")
+
+        x_name = only(names)
+        center, L = only(domain_fits)
+        # The spectral frequencies depend only on the fixed approximation
+        # domain. Evaluate them with a one-row dummy axis; PHI itself is rebuilt
+        # from the live sampled x inside `_sb_hsgp_latent*`.
+        _, omega2 = _sb_apply_hsgp(domain_fits, ([center],), K)
+        omega2_name = Symbol(:omega2_hsgp_, suffix)
+        data[omega2_name] = omega2
+        _sb_record_static!(data, omega2_name)
+        rho_lower = _sb_hsgp_rho_lower_data(domain_fits, K, true)
+        col_name = Symbol(:hsgp_, suffix)
+        submodel_name = orthogonal_to === :linear ?
+            :_sb_hsgp_latent_orthogonal : :_sb_hsgp_latent
+        submodel = _sb_gp_submodel_expr(submodel_name, term_overrides, t)
+        push!(stmts, :($col_name ~ $submodel(;
+            x=$x_name, omega2=$omega2_name, center=$center, L=$L,
+            rho_lower=$rho_lower)))
+        return col_name
+    end
+
+    axes = ntuple(n_axes) do j
+        v = collect(Float64, _sb_real_vec(:hsgp, names[j], raw[j]))
+        isempty(v) && error("sbimpl: `hsgp($(names[j]))` cannot use an empty axis")
+        all(isfinite, v) || error(
+            "sbimpl: `hsgp($(names[j]))` requires finite values")
+        v
+    end
+    n = length(first(axes))
+    all(v -> length(v) == n, axes) || error(
+        "sbimpl: `hsgp(x...)` axes must have equal lengths (got $(length.(axes)))")
+    _sb_hsgp_check_explicit_domain(domain_fits, axes)
 
     if haskey(kw, :by)
         block_info = _sb_find_group_block(hsgp, t, group_block_lookup)
@@ -7782,14 +8011,18 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         omega2_name = Symbol(:omega2_hsgp_, suffix, :_by_, gname)
         rho_lower_name = Symbol(:rho_lower_hsgp_, suffix, :_by_, gname)
         fits = _sb_hsgp_fit_for_emission(
-            data, PHI_name, names, axes, K, c, iso)
+            data, PHI_name, names, axes, K, c, iso,
+            domain_fits, orthogonal_to)
         PHI, omega2 = _sb_apply_hsgp(fits, axes, K)
+        orthogonal_to === :linear &&
+            (PHI = _sb_orthogonalize_hsgp_linear(PHI, only(axes)))
         data[PHI_name] = PHI
         data[omega2_name] = omega2
         data[rho_lower_name] = _sb_hsgp_rho_lower_data(fits, K, iso)
         _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp,
-            (; fits, K, c, iso, omega2_key=omega2_name,
-             rho_lower_key=rho_lower_name), names, false))
+            (; fits, K, c, iso, domain_fits, orthogonal_to,
+             omega2_key=omega2_name, rho_lower_key=rho_lower_name),
+            names, false))
         col_name = Symbol(:hsgp_, suffix, :_by_, gname)
         submodel = _sb_gp_submodel_expr(
             iso ? :_sb_hsgp_by : :_sb_hsgp_by_aniso, term_overrides, t)
@@ -7803,14 +8036,18 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     omega2_name = Symbol(:omega2_hsgp_, suffix)
     rho_lower_name = Symbol(:rho_lower_hsgp_, suffix)
     fits = _sb_hsgp_fit_for_emission(
-        data, PHI_name, names, axes, K, c, iso)
+        data, PHI_name, names, axes, K, c, iso,
+        domain_fits, orthogonal_to)
     PHI, omega2 = _sb_apply_hsgp(fits, axes, K)
+    orthogonal_to === :linear &&
+        (PHI = _sb_orthogonalize_hsgp_linear(PHI, only(axes)))
     data[PHI_name] = PHI
     data[omega2_name] = omega2
     data[rho_lower_name] = _sb_hsgp_rho_lower_data(fits, K, iso)
     _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp,
-        (; fits, K, c, iso, omega2_key=omega2_name,
-         rho_lower_key=rho_lower_name), names, false))
+        (; fits, K, c, iso, domain_fits, orthogonal_to,
+         omega2_key=omega2_name, rho_lower_key=rho_lower_name),
+        names, false))
     col_name = Symbol(:hsgp_, suffix)
     submodel = _sb_gp_submodel_expr(
         iso ? :_sb_hsgp : :_sb_hsgp_aniso, term_overrides, t)
