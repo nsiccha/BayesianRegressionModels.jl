@@ -16,6 +16,127 @@ function gp_term_df(; shift_x=0.0, shift_x2=0.0)
     (; x, x2, y, g)
 end
 
+function latent_hsgp_df(; shift=0.0)
+    t = collect(range(-1.0, 1.0; length=GP_TERM_N)) .+ shift
+    latent_conc = exp.(-1.4 .+ 0.8 .* t)
+    lloq = fill(0.3, GP_TERM_N)
+    c_obs = max.(latent_conc, lloq)
+    zbl = Float64.(latent_conc .<= lloq)
+    nominal_time = repeat([1, 2], outer=GP_TERM_N ÷ 2)
+    subject = repeat(1:(GP_TERM_N ÷ 2), inner=2)
+    y = 0.2 .* latent_conc
+    (; t, nominal_time, subject, zbl, c_obs, lloq, y)
+end
+
+latent_hsgp_model(df) = @brm df begin
+    log(x) ~ 1 + factor(nominal_time) + (1 | assay | subject)
+    assay_sd ~ Exponential(1)
+    c_obs ~ censored(LogNormal(log(x), assay_sd); lower=lloq)
+    mu ~ 1 + factor(nominal_time) + zbl + x +
+         hsgp(x; k=5, domain=(0.01, 5.0), orthogonal_to=:linear) +
+         (1 + x | qt | subject)
+    length_scale(:, hsgp(x)) ~ Uniform(1.5, 4.0)
+    sd(:, hsgp(x)) ~ Normal(0, 0.5)
+    sigma ~ Exponential(1)
+    y ~ Normal(mu, sigma)
+end
+
+@testset "HSGP over a model-derived axis" begin
+    df = latent_hsgp_df()
+    brmi = latent_hsgp_model(df)
+    @test :x in popcoefnames(brmi, :mu)
+    @test :zbl in popcoefnames(brmi, :mu)
+    @test ranefcoefnames(brmi, :qt) == [
+        (predictor=:mu, coefficient=:Intercept),
+        (predictor=:mu, coefficient=:x),
+    ]
+
+    sb = SBBRMI(brmi; mod=@__MODULE__)
+    code = StanBlocks.stan_code(sb.model)
+    @test !haskey(sb.data, :PHI_hsgp_x)
+    @test size(sb.data[:omega2_hsgp_x]) == (5, 1)
+    @test sb.preproc[:omega2_hsgp_x].kind === :static
+    @test occursin("brm_hsgp_basis_1d", code)
+    @test occursin("brm_hsgp_orthogonalize_linear", code)
+    @test occursin(r"vector\[[^]]+\] hsgp_x =", code)
+    @test occursin("x = exp(log_x);", code)
+    @test occursin("hsgp_x_rho_iso ~ uniform(1.5, 4.0);", code)
+    @test occursin("hsgp_x_sigma ~ normal(0.0, 0.5);", code)
+    @test StanBlocks.stan.transpiles(sb.model)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+
+    replay = reprocess(sb, latent_hsgp_df(; shift=0.2))
+    @test replay.data[:omega2_hsgp_x] == sb.data[:omega2_hsgp_x]
+    @test StanBlocks.stan_code(replay.model) == code
+
+    missing_domain = @brm df begin
+        log_x ~ 1 + t
+        x = exp(log_x)
+        mu ~ 1 + x + hsgp(x; k=5, orthogonal_to=:linear)
+        y ~ Normal(mu, 1)
+    end
+    @test_throws "requires an explicit fixed `domain" SBBRMI(
+        missing_domain; mod=@__MODULE__)
+
+    domain_and_c = @brm df begin
+        log_x ~ 1 + t
+        x = exp(log_x)
+        mu ~ 1 + hsgp(x; k=5, c=1.5, domain=(0.01, 5.0))
+        y ~ Normal(mu, 1)
+    end
+    @test_throws "cannot also specify" SBBRMI(domain_and_c; mod=@__MODULE__)
+
+    invalid_domain = @brm df begin
+        log_x ~ 1 + t
+        x = exp(log_x)
+        mu ~ 1 + hsgp(x; k=5, domain=(5.0, 0.01))
+        y ~ Normal(mu, 1)
+    end
+    @test_throws "needs lower < upper" SBBRMI(invalid_domain; mod=@__MODULE__)
+end
+
+@testset "orthogonal raw HSGP uses the same public contract" begin
+    df = gp_term_df()
+    brmi = @brm df begin
+        loc ~ 1 + x + hsgp(x; k=4, domain=(-2.0, 2.0),
+                           orthogonal_to=:linear)
+        y ~ Normal(loc, 1)
+    end
+    sb = SBBRMI(brmi; mod=@__MODULE__)
+    PHI = sb.data[:PHI_hsgp_x]
+    xc = df.x .- sum(df.x) / length(df.x)
+    @test maximum(abs, vec(sum(PHI; dims=1))) < 1e-12
+    @test maximum(abs, vec(transpose(xc) * PHI)) < 1e-12
+
+    replay_df = gp_term_df(; shift_x=0.25)
+    replay = reprocess(sb, replay_df; freeze_constants=false)
+    replay_xc = replay_df.x .- sum(replay_df.x) / length(replay_df.x)
+    replay_PHI = replay.data[:PHI_hsgp_x]
+    @test maximum(abs, vec(sum(replay_PHI; dims=1))) < 1e-12
+    @test maximum(abs, vec(transpose(replay_xc) * replay_PHI)) < 1e-12
+    @test replay.preproc[:PHI_hsgp_x].const_.fits ==
+          sb.preproc[:PHI_hsgp_x].const_.fits
+
+    @test_throws "outside its fixed domain" reprocess(
+        sb, gp_term_df(; shift_x=3.0))
+
+    grouped_orthogonal = @brm df begin
+        loc ~ 1 + x + hsgp(x; k=4, domain=(-2.0, 2.0),
+                           orthogonal_to=:linear, by=g)
+        y ~ Normal(loc, 1)
+    end
+    @test_throws "cannot be combined with `by=`" SBBRMI(
+        grouped_orthogonal; mod=@__MODULE__)
+
+    outside = merge(df, (; x=2 .* df.x))
+    bad = @brm outside begin
+        loc ~ 1 + x + hsgp(x; k=4, domain=(-1.5, 1.5),
+                           orthogonal_to=:linear)
+        y ~ Normal(loc, 1)
+    end
+    @test_throws "outside its fixed domain" SBBRMI(bad; mod=@__MODULE__)
+end
+
 exact_gp_model(df) = @brm df begin
     loc ~ 1 + gp(x, x2; iso=false)
     y ~ Normal(loc, 1)

@@ -15,7 +15,7 @@ signature — the rest are covered by their docstrings on the [API](@ref) page.
 | `s(x)` | rank-10 penalized thin-plate regression spline | — |
 | `t2(x, z)` | two-margin tensor-product smooth | — |
 | `gp(x…; cov=:exp_quad, iso=true, jitter=1e-9)` | exact latent Gaussian process, noncentered Cholesky draw | — |
-| `hsgp(x…; k=20, c=1.5, iso=true, by=nothing)` | Hilbert-space GP approximation over `prod(k)` basis functions | — |
+| `hsgp(x…; k=20, c=1.5, iso=true, by=nothing, domain=nothing, orthogonal_to=nothing)` | Hilbert-space GP approximation over `prod(k)` basis functions | — |
 | `ar(time; p=1)` | AR(p) noise process ordered by `time`; only `p=1` is emitted | — |
 | `mo(c)`, `mo1(c)` | monotonic effect of an ordered factor via Dirichlet increments | — |
 | `me(x, sd)` | measurement-error covariate — `x` is observed with known `sd` | — |
@@ -25,6 +25,45 @@ signature — the rest are covered by their docstrings on the [API](@ref) page.
 
 A plain RHS expression in raw data columns (`log(exposure)`, `x^2`) is treated
 as an implicit `protect(...)` and materialized the same way.
+
+### HSGP over a model-derived predictor
+
+A one-dimensional `hsgp` axis may be a sampled linear predictor or formula
+assignment, not only a raw dataframe column. This makes a latent concentration
+available to both a linear effect and a residual nonlinear effect in one joint
+model:
+
+```julia
+@brm df begin
+    log(x) ~ 1 + factor(nominal_time) + (1 | assay | subject)
+    sigma_assay_log ~ Exponential(0.5)
+    c_obs ~ censored(LogNormal(log(x), sigma_assay_log); lower=lloq)
+
+    mu ~ 1 + factor(nominal_time) + zbl + x +
+         hsgp(x; k=5, domain=(0.01, 5.0), orthogonal_to=:linear) +
+         (1 + x | qt | subject)
+    sigma ~ Exponential(1)
+    qtc ~ Normal(mu, sigma)
+end
+```
+
+The explicit `domain=(lower, upper)` is required because sampled `x` values do
+not exist when Julia configures the basis. It is the actual compact HSGP
+interval, so it cannot be combined with the raw-data expansion factor `c` and
+remains fixed during `reprocess`, including with `freeze_constants=false`.
+Choose it to cover scientifically plausible posterior support for every latent
+`x`: the domain configures the approximation but does not truncate or otherwise
+constrain `x` at runtime.
+
+`orthogonal_to=:linear` centers every basis column and projects it off the
+current sampled `x` direction at each draw. Use it when the formula also
+contains `x`; the population coefficient then carries the linear association
+and the HSGP carries only residual nonlinear shape. The option also works for a
+one-dimensional raw axis. The orthogonality option is ungrouped: multiplying
+the basis by group-specific weights would no longer preserve the global
+projection. Model-derived HSGPs are currently one-dimensional, isotropic, and
+ungrouped; raw-data HSGPs retain their variadic, anisotropic, and group-specific
+forms when `orthogonal_to` is omitted.
 
 ### Interval-censored predictor
 
