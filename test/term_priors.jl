@@ -42,6 +42,7 @@ term_df() = (;
     z  = [cos(2i) for i in 1:TERM_N],
     xo = [sin(3i) for i in 1:TERM_N],
     c  = [1 + (i % 4) for i in 1:TERM_N],
+    subject = repeat(1:8; inner=5),
 )
 
 code_of(brmi) = StanBlocks.stan_code(SBBRMI(brmi; mod=@__MODULE__).model)
@@ -179,6 +180,25 @@ end
     @test occursin("me_xo_x_true ~ normal(1, 4);", code)
     # The observation likelihood is never configurable.
     @test occursin("xo ~ normal(me_xo_x_true, sd_xo);", code)
+    @test transpiles_and_stanc(m)
+end
+
+@testset "one me latent column is reused by population and random slopes" begin
+    m = @brm term_df() begin
+        y ~ Normal(mu, 1.)
+        mu ~ 1 + me(xo, 0.3) + (1 + me(xo, 0.3) | p | subject)
+        latent(mu, me(xo)) ~ Normal(0, 2)
+    end
+
+    @test popcoefnames(m, :mu) == [:Intercept, :me_xo]
+    @test ranefcoefnames(m, :p) == [
+        (predictor=:mu, coefficient=:Intercept),
+        (predictor=:mu, coefficient=:me_xo),
+    ]
+
+    code = code_of(m)
+    @test count(line -> occursin("me_xo_x_true ~ normal(0, 2);", line),
+                eachline(IOBuffer(code))) == 1
     @test transpiles_and_stanc(m)
 end
 
@@ -337,7 +357,8 @@ end
     if TERM_PRIOR_RUNTIME
         m = @brm term_df() begin
             y ~ Normal(mu, 1.)
-            mu ~ 1 + s(x) + t2(x, z) + mo(c) + me(xo, 0.3)
+            mu ~ 1 + s(x) + t2(x, z) + mo(c) + me(xo, 0.3) +
+                 (1 + me(xo, 0.3) | p | subject)
             sd(:, s(x)) ~ Exponential(2)
             sd(:, t2(x, z), rr) ~ Exponential(3)
             simplex(:, mo(c)) ~ Dirichlet(2)
