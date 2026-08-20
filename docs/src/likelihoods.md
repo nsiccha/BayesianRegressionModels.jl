@@ -113,6 +113,11 @@ These are three different likelihood contracts:
   `log(CDF(upper) - CDF(response))` for the genuine interval observation
   `(response, upper]`, while prediction remains on the uncoarsened base scale.
 
+The same marker has a separate predictor-side form,
+`interval_censored(x; upper=lloq)`, for a quantified/BLOQ covariate. It
+allocates bounded latent predictor values on rows where `x == lloq` rather than
+changing a response likelihood; see [Interval-censored predictor](@ref).
+
 Bounds may be numeric literals or observed row-wise columns. The initial
 family-gated surface covers `Normal`, `LogNormal`, `Exponential`, `Weibull`,
 and `Poisson`; BRM rejects other base families until their aggregate density,

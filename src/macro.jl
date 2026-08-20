@@ -219,10 +219,11 @@ function weighted end
 
 """
     interval_censored(base; upper)
+    interval_censored(x; upper, lower=0)
 
-Formula-only RHS wrapper for genuine interval evidence. The observed response
-column supplies each interval's lower endpoint and `upper` supplies its upper
-endpoint:
+Formula marker for genuine interval evidence. On a response RHS, the observed
+response column supplies each interval's lower endpoint and `upper` supplies
+its upper endpoint:
 
 ```julia
 y_lower ~ interval_censored(Normal(mu, sigma); upper=y_upper)
@@ -234,6 +235,19 @@ families too; unlike inclusive truncation it receives no predecessor shift.
 Posterior prediction remains on the uncoarsened base-response scale. This is
 separate from Distributions.jl's `censored`, which is the distribution of
 `clamp(X, lower, upper)` and therefore has atoms at its thresholds.
+
+Inside a linear predictor, `x` is the observed covariate and `upper` is its
+row-specific quantification limit:
+
+```julia
+mu ~ 1 + interval_censored(concentration; upper=lloq)
+```
+
+By convention, `concentration == lloq` marks a BLOQ row; values above `lloq`
+are exact. BLOQ rows allocate latent predictor values between `lower` (zero by
+default) and `lloq` with a truncated Normal prior; configure that
+prior with `latent(<lp|:>, interval_censored(concentration)) ~ Normal(...)`.
+This predictor form is implemented by `SBBRMI`.
 
 The marker is intentionally formula-local: unlike `truncated` and `censored`,
 there is no existing Distributions.jl value with these per-row evidence
@@ -476,7 +490,8 @@ _effect_address_symbol(x) = error(
 # the same term, because the measurement SD is a constant OF the term, not part
 # of its identity. Keyword arguments are likewise excluded -- `hsgp(x; k=20)`
 # and `hsgp(x)` are the same term with different tuning.
-const _TERM_HEADS = (:s, :t2, :mo, :mo1, :me, :gp, :hsgp, :ar)
+const _TERM_HEADS =
+    (:s, :t2, :mo, :mo1, :me, :interval_censored, :gp, :hsgp, :ar)
 
 _is_term_address(x) = Meta.isexpr(x, :call) && !isempty(x.args) &&
                       x.args[1] isa Symbol && x.args[1] in _TERM_HEADS
