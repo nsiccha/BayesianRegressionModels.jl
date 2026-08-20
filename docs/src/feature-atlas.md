@@ -145,6 +145,47 @@ end)((;
 title="Shared mean and precision group covariance")
 ```
 
+## Multi-axis population PK kernel
+
+The subject frame has one row per person, while the observation frame has one
+row per concentration measurement. Those axes deliberately have different
+lengths and the observation rows are interleaved. `ragged(x, group)` joins the
+flat observation columns to the subject axis; `kernel(...)` then evaluates one
+structural-model cell per subject. In the generated StanBlocks pane, that
+public BRM kernel lowers to a `plate`.
+
+This is a deliberately small one-compartment IV-bolus model,
+`C(t) = dose / V * exp(-(CL / V)t)`. The shared `pk` ID gives `CL` and `V` one
+correlated between-subject variability block.
+
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+population_pk = (@brm begin
+    sigma ~ Exponential(1)
+    log(CL) ~ 1 + (1 | pk | subject)
+    log(V)  ~ 1 + (1 | pk | subject)
+
+    predicted_concentration ~ kernel(
+        ragged(time, obs_subject), dose, CL, V,
+    ) do ts, d, cl, volume
+        d / volume * exp((-cl / volume) * ts)
+    end
+
+    ragged(concentration, obs_subject) ~
+        Normal(predicted_concentration, sigma)
+end)((;
+    # Subject axis: one row per subject.
+    subject=["alice", "bob"],
+    dose=[100.0, 80.0],
+
+    # Observation axis: one row per sample, interleaved by subject.
+    obs_subject=["alice", "bob", "alice", "bob", "alice"],
+    time=[0.5, 0.25, 1.5, 1.0, 3.0],
+    concentration=[8.1, 7.6, 5.2, 4.9, 2.1],
+))
+""", :population_pk; title="Multi-axis population PK kernel")
+```
+
 ## Categorical population terms
 
 ```@eval

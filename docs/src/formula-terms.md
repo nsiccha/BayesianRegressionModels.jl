@@ -165,7 +165,8 @@ different thing from `weighted(...)`, which scales the likelihood.
 
 `ragged`'s `x` may be a linear predictor declared in the same `@brm` block or a
 raw flat data column; `group` names, for every row of that frame, which subject
-the row belongs to.
+the row belongs to. See the [multi-axis population PK kernel](@ref) for a
+runnable example whose subject and observation columns have different lengths.
 
 ## Fixed-one contribution: `offset(x)`
 
@@ -594,10 +595,9 @@ predictor. Like every other scalar-parameter prior declaration it is addressable
 by name anywhere later in the formula block, `kernel(...)` cells included. It is
 implemented only by the `SBBRMI` StanBlocks backend.
 
-The complete kernel form belongs to the
-[PLATE architecture blueprint](plate-building-blocks.md). That page is explicit
-about which snippets are proposals; it does not present them as executable
-backend examples.
+The [multi-axis population PK kernel](@ref) shows the executable base shape:
+ordinary formula parameters feed a `kernel(...)` cell, while `ragged(...)`
+attaches a secondary observation frame to the subject axis.
 
 The inciting shape is a per-**event** multiplier: `diet` scales dose
 bioavailability inside the cell, so what the model needs is a `K`-simplex
