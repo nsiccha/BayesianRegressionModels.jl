@@ -5056,7 +5056,8 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     r2d2_scale = haskey(r2d2.names, brmi_key) ?
         _sb_r2d2_resid_scale(r2d2.names[brmi_key]) : nothing
     _sb_emit_ranefs!(stmts, data, target, ran_terms, summands;
-                     id_lookup, brmi_key, cv_groups, centered_groups, r2d2_scale)
+                     id_lookup, brmi_key, cv_groups, centered_groups, r2d2_scale,
+                     term_overrides)
 
     if length(summands) == 1
         push!(stmts, :($target = $(only(summands))))
@@ -5912,14 +5913,19 @@ end
 # `_sb_predictor_col(::Int, ...)`. Callers that have no flat per-row index in
 # hand omit it; `mm(...)`'s `<mm>_idx` is an n_obs x n_memberships MATRIX, so
 # `num_elements` would give it rows*cols and it is deliberately NOT threaded.
-function _sb_ranef_cols!(cols, data, stmts, t, gterms=(); group_idx=nothing)
-    _sb_ranef_cols_dispatch!(cols, data, stmts, t, _sb_cat_levels(t), gterms; group_idx)
+function _sb_ranef_cols!(cols, data, stmts, t, gterms=(); group_idx=nothing,
+                         term_overrides=Dict{Symbol,Any}())
+    _sb_ranef_cols_dispatch!(cols, data, stmts, t, _sb_cat_levels(t), gterms;
+                             group_idx, term_overrides)
 end
 _sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(offset)}, gterms=(); kwargs...) =
     error("sbimpl: `offset(...)` is a population-level fixed contribution and cannot appear inside a random-effects term")
-_sb_ranef_cols_dispatch!(cols, data, stmts, t, ::Nothing, gterms=(); group_idx=nothing) =
-    _sb_maybe_push_col!(cols, _sb_predictor_col(t, data, stmts, gterms; group_idx))
-function _sb_ranef_cols_dispatch!(cols, data, _stmts, t, levels, _gterms=(); group_idx=nothing)
+_sb_ranef_cols_dispatch!(cols, data, stmts, t, ::Nothing, gterms=();
+                         group_idx=nothing, term_overrides=Dict{Symbol,Any}()) =
+    _sb_maybe_push_col!(cols, _sb_predictor_col(
+        t, data, stmts, gterms; group_idx, term_overrides))
+function _sb_ranef_cols_dispatch!(cols, data, _stmts, t, levels, _gterms=();
+                                  group_idx=nothing, term_overrides=nothing)
     n_levels, idx = _sb_level_index(levels)
     # Single-level factor: `2:n_levels` is empty, so this contributes 0 dummy
     # columns uniformly (no shape special-case) — a `(1 + c | g)` degenerates to
@@ -6027,7 +6033,8 @@ function _sb_emit_ranefs!(stmts, data, target::Symbol, ran_terms, summands;
                            brmi_key::Symbol=target,
                            cv_groups=Set{Symbol}(),
                            centered_groups=Set{Symbol}(),
-                           r2d2_scale=nothing)
+                           r2d2_scale=nothing,
+                           term_overrides=Dict{Symbol,Any}())
     isempty(ran_terms) && return
     # Partition: ID'd terms route to the pre-emitted shared bucket; plain terms
     # coalesce per-target via the existing `ranef_correlated` block. Bare-
@@ -6054,7 +6061,7 @@ function _sb_emit_ranefs!(stmts, data, target::Symbol, ran_terms, summands;
         desc = plain_descs[k]
         isempty(gterms) && error("sbimpl: ranef `(… | $k)` has no terms after dropping `0`")
         _sb_emit_ranef_block!(stmts, data, target, desc, gterms, summands;
-                              cv_groups, centered_groups, r2d2_scale)
+                              cv_groups, centered_groups, r2d2_scale, term_overrides)
     end
     for k in id_keys_seen
         gterms = id_terms_by_bucket[k]
@@ -6065,7 +6072,8 @@ function _sb_emit_ranefs!(stmts, data, target::Symbol, ran_terms, summands;
         # here beyond slicing it per sub-formula.
         info = get(id_lookup, (brmi_key, k), nothing)
         info === nothing && error("sbimpl: internal — no pre-emitted bucket for (target=$brmi_key, id=$(k[1]), group=$(k[2]))")
-        _sb_emit_id_ranef_block!(stmts, data, target, info, gterms, summands)
+        _sb_emit_id_ranef_block!(stmts, data, target, info, gterms, summands;
+                                 term_overrides)
     end
 end
 
@@ -6078,7 +6086,8 @@ end
 # default. See the cv-contagion note above `ranef_intercept` in this file.
 function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, gterms, summands;
                                 cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
-                                r2d2_scale=nothing)
+                                r2d2_scale=nothing,
+                                term_overrides=Dict{Symbol,Any}())
     g_backing = _as_data_column(parent(group))
     isnothing(g_backing) && error("sbimpl: group `$(name(group))` must be a raw data column")
     g = name(group)
@@ -6138,7 +6147,8 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, 
     else
         col_exprs = Any[]
         for t in gterms
-            _sb_ranef_cols!(col_exprs, data, stmts, t, gterms; group_idx=idx_name)
+            _sb_ranef_cols!(col_exprs, data, stmts, t, gterms;
+                            group_idx=idx_name, term_overrides)
         end
         if isempty(col_exprs)
             # Every slope term degenerated to zero columns (e.g. `(0 + c | g)`
@@ -6169,7 +6179,8 @@ end
 function _sb_emit_ranef_block!(stmts, data, target::Symbol,
                                 term::MultiMembershipTerm, gterms, summands;
                                 cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
-                                r2d2_scale=nothing)
+                                r2d2_scale=nothing,
+                                term_overrides=Dict{Symbol,Any}())
     isnothing(r2d2_scale) || error(
         "sbimpl: `r2d2` decompositions over typed `mm(...)` multi-membership " *
         "random effects are not yet supported")
@@ -6233,7 +6244,7 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol,
     else
         col_exprs = Any[]
         for t in gterms
-            _sb_ranef_cols!(col_exprs, data, stmts, t, gterms)
+            _sb_ranef_cols!(col_exprs, data, stmts, t, gterms; term_overrides)
         end
         Z_name = Symbol(:Z_, target, :_, suffix)
         k_name = Symbol(:n_terms_, target, :_, suffix)
@@ -6251,7 +6262,8 @@ end
 
 function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::Tuple{NamedColumn,NamedColumn}, gterms, summands;
                                 cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
-                                r2d2_scale=nothing)
+                                r2d2_scale=nothing,
+                                term_overrides=Dict{Symbol,Any}())
     isnothing(r2d2_scale) || error(
         "sbimpl: `r2d2` decompositions over stratified `gr(g, by=b)` random " *
         "effects are not yet supported")
@@ -6292,7 +6304,8 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::Tuple{NamedCo
     r_name = Symbol(:r_, target, :_, suffix)
     col_exprs = Any[]
     for t in gterms
-        _sb_ranef_cols!(col_exprs, data, stmts, t, gterms; group_idx=idx_name)
+        _sb_ranef_cols!(col_exprs, data, stmts, t, gterms;
+                        group_idx=idx_name, term_overrides)
     end
     Z_name = Symbol(:Z_, target, :_, suffix)
     k_name = Symbol(:n_terms_, target, :_, suffix)
@@ -7173,12 +7186,14 @@ end
 # Emit the per-sub-formula reference to a pre-emitted ID bucket: slice the
 # bucket's draw matrix at this target's column range, apply this target's Z,
 # and append the resulting per-row contribution to `summands`.
-function _sb_emit_id_ranef_block!(stmts, data, target::Symbol, info, gterms, summands)
+function _sb_emit_id_ranef_block!(stmts, data, target::Symbol, info, gterms, summands;
+                                  term_overrides=Dict{Symbol,Any}())
     (; bucket_name, cols, idx_name, suffix) = info
     r_name = Symbol(:r_, target, :_, suffix)
     col_exprs = Any[]
     for t in gterms
-        _sb_ranef_cols!(col_exprs, data, stmts, t, gterms; group_idx=idx_name)
+        _sb_ranef_cols!(col_exprs, data, stmts, t, gterms;
+                        group_idx=idx_name, term_overrides)
     end
     length(col_exprs) == length(cols) ||
         error("sbimpl: id-bucket `$suffix` for target `$target`: expanded $(length(col_exprs)) columns but reserved $(length(cols)) — internal mismatch")
@@ -7556,8 +7571,13 @@ _sb_predictor_term!(stmts, data, ::typeof(me), t;
     data[sd_name] = Float64(sd_arg)
     col_name = Symbol(:me_, xname)
     loc, scale = _sb_me_latent_args(term_overrides, t)
-    push!(stmts, :($col_name ~ _sb_me(; x_obs=$xname, sd_x=$sd_name,
-                                        x_true_loc=$loc, x_true_scale=$scale)))
+    stmt = :($col_name ~ _sb_me(; x_obs=$xname, sd_x=$sd_name,
+                                  x_true_loc=$loc, x_true_scale=$scale))
+    # One latent true covariate may feed several design collectors. In
+    # particular, `me(x, sd)` can be both a population effect and a random
+    # slope; those collectors share `stmts`, so reuse an exact earlier
+    # submodel call instead of asking StanBlocks to bind the same return twice.
+    stmt in stmts || push!(stmts, stmt)
     col_name
 end
 
