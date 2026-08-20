@@ -33,8 +33,9 @@ assignment, not only a raw dataframe column. This makes a latent concentration
 available to both a linear effect and a residual nonlinear effect in one joint
 model:
 
-```julia
-@brm df begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+latent_hsgp_model = (@brm begin
     log(x) ~ 1 + factor(nominal_time) + (1 | assay | subject)
     sigma_assay_log ~ Exponential(0.5)
     c_obs ~ censored(LogNormal(log(x), sigma_assay_log); lower=lloq)
@@ -44,7 +45,15 @@ model:
          (1 + x | qt | subject)
     sigma ~ Exponential(1)
     qtc ~ Normal(mu, sigma)
-end
+end)((;
+    nominal_time=repeat([1, 2]; outer=4),
+    subject=repeat(1:4; inner=2),
+    zbl=[1., 1., 1., 1., 0., 0., 0., 0.],
+    c_obs=[0.3, 0.3, 0.3, 0.3, 0.31, 0.37, 0.44, 0.54],
+    lloq=fill(0.3, 8),
+    qtc=[1.1, 1.2, 1.4, 1.5, 1.7, 1.8, 2.0, 2.1],
+))
+""", :latent_hsgp_model; title="Latent concentration with linear and HSGP effects")
 ```
 
 The explicit `domain=(lower, upper)` is required because sampled `x` values do
