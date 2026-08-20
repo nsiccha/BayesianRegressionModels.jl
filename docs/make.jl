@@ -50,7 +50,6 @@ makedocs(
         "Feature atlas" => "feature-atlas.md",
         "Turing backend" => "turing-backend.md",
         "Gallery" => "gallery.md",
-        "Complete-PLATE blueprint" => "plate-building-blocks.md",
         "API" => "api.md",
     ],
     checkdocs = :none,

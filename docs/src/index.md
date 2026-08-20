@@ -112,12 +112,10 @@ and — as with any BRM response — you also get the pointwise log-likelihood
 This is the main structural difference. brms takes a single `data.frame`, so
 every column shares one row axis. `@brm` takes any column collection — a
 `NamedTuple` is fine — whose columns may live on *different* row axes, and
-different linear predictors in one model may be defined on different axes:
-
-The [complete PLATE blueprint](plate-building-blocks.md) explains the
-multi-axis kernel design. It is an architecture proposal rather than a
-runnable model example, so it is kept separate from the build-generated model
-atlas.
+different linear predictors in one model may be defined on different axes. The
+[multi-axis population PK kernel](@ref) is a runnable example: its subject
+columns have one row per person, while its observation columns have one row per
+sample.
 
 [`ragged`](@ref)`(x, group)` attaches a flat secondary frame to the grouping
 axis, and [`kernel`](@ref) broadcasts a do-block *cell* — arbitrary Julia,
