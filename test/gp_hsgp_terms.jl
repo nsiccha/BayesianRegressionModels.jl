@@ -65,6 +65,44 @@ end
     @test StanBlocks.stan.transpiles(sb.model)
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
 
+    @testset "public fixed-grid population curve matches the fitted summand" begin
+        if GP_RUN_BRIDGESTAN
+            isdir(GP_TERM_CACHE) || mkpath(GP_TERM_CACHE)
+            problem = StanBlocks.stan_instantiate(
+                sb.model;
+                path=joinpath(GP_TERM_CACHE,
+                              "latent-" * string(hash(code)) * ".stan"))
+            dimension = LogDensityProblems.dimension(problem)
+            q = [0.04 * ((i % 7) - 3) for i in 1:dimension]
+            names = StanBlocks.BridgeStan.param_names(
+                problem.model; include_tp=true, include_gq=false)
+            constrained = StanBlocks.BridgeStan.param_constrain(
+                problem.model, q; include_tp=true, include_gq=false)
+            descriptor = brm_descriptor(sb)
+            x_coordinates = brm_output_coordinates(
+                descriptor, :x, names; role=:linear_predictor)
+            grid = constrained[x_coordinates]
+            curve = hsgp_population_curve(
+                descriptor, reshape(constrained, 1, :), names, grid;
+                predictor=:mu, coefficient=:x, term=:hsgp_x)
+
+            hsgp_coordinates = brm_output_coordinates(
+                descriptor, :hsgp_x, names)
+            beta_coordinate = only(brm_population_effect_coordinates(
+                descriptor, :mu, names; coefficient=:x).coordinates)
+            @test vec(curve.hsgp) ≈ constrained[hsgp_coordinates] atol=1e-10
+            @test maximum(abs, curve.hsgp) > 0
+            @test vec(curve.linear) ≈ constrained[beta_coordinate] .* grid atol=1e-12
+            @test curve.total ≈ curve.linear + curve.hsgp atol=1e-12
+            @test collect(curve.domain) ≈ [0.01, 5.0]
+            @test_throws "outside its fitted HSGP domain" hsgp_population_curve(
+                descriptor, reshape(constrained, 1, :), names, [0.0];
+                predictor=:mu, coefficient=:x, term=:hsgp_x)
+        else
+            @info "Skipping BridgeStan latent-HSGP curve gate (BRM_GP_RUNTIME=0)"
+        end
+    end
+
     replay = reprocess(sb, latent_hsgp_df(; shift=0.2))
     @test replay.data[:omega2_hsgp_x] == sb.data[:omega2_hsgp_x]
     @test StanBlocks.stan_code(replay.model) == code
@@ -119,6 +157,10 @@ end
 
     @test_throws "outside its fixed domain" reprocess(
         sb, gp_term_df(; shift_x=3.0))
+
+    @test_throws "uses a raw-data axis" hsgp_population_curve(
+        brm_descriptor(sb), zeros(1, 0), String[], [0.0];
+        predictor=:loc, coefficient=:x, term=:hsgp_x)
 
     grouped_orthogonal = @brm df begin
         loc ~ 1 + x + hsgp(x; k=4, domain=(-2.0, 2.0),
