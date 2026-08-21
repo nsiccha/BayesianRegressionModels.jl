@@ -58,6 +58,11 @@ makedocs(
     warnonly = true,
 )
 
+BRMDocsComparisons.validate_required_stan_outputs(
+    joinpath(@__DIR__, "build", ".documenter", "warfarin.md"),
+    (:warfarin_pk_brmi, :warfarin_pd_brmi, :warfarin_joint_brmi),
+)
+
 # Copy committed live-brm recordings into the VitePress build tree so
 # the gallery embed resolves the same URLs in production as in dev
 # (where vite proxies /live-brm to the running app on :8121).

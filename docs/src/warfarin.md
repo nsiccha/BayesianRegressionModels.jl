@@ -70,6 +70,7 @@ Main.BRMDocsComparisons.comparison(
     ),
     :warfarin_pk_brmi;
     title="Public Warfarin population PK",
+    require_stan=true,
 )
 ```
 
@@ -106,6 +107,7 @@ Main.BRMDocsComparisons.comparison(
     ),
     :warfarin_pd_brmi;
     title="Public Warfarin turnover PD",
+    require_stan=true,
 )
 ```
 
@@ -148,6 +150,7 @@ Main.BRMDocsComparisons.comparison(
     ),
     :warfarin_joint_brmi;
     title="Joint Warfarin PK/PD",
+    require_stan=true,
 )
 ```
 

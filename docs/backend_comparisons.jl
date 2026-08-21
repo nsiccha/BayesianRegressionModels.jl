@@ -95,13 +95,14 @@ function exception_text(backend::AbstractString, err)
     "$backend unsupported for this BRM example\n\n$reason"
 end
 
-function stan_emissions(brmi::BRM.BRMI)
+function stan_emissions(brmi::BRM.BRMI, mod::Module; required::Bool=false)
     try
-        sb = Base.invokelatest(BRM.SBBRMI, brmi)
+        sb = Base.invokelatest(BRM.SBBRMI, brmi; mod=mod)
         sb_source = strip(sprint(show, sb), '\n')
         stan_source = strip(Base.invokelatest(BRM.stan_code, sb), '\n')
         return sb_source, stan_source
     catch err
+        required && rethrow()
         reason = exception_text("StanBlocks", err)
         return reason, "Stan emission unavailable because StanBlocks lowering failed.\n\n" *
                        sprint(showerror, err)
@@ -164,7 +165,8 @@ Evaluate one displayed BRM example and emit the fixed four-pane comparison.
 The StanBlocks, Stan, and Turing panes are always derived during this build.
 """
 function comparison(mod::Module, code::AbstractString, brmi_name::Symbol;
-                    title=replace(string(brmi_name), '_' => ' '))
+                    title=replace(string(brmi_name), '_' => ' '),
+                    require_stan::Bool=false)
     displayed = strip(code, '\n')
     Core.eval(mod, :(using BayesianRegressionModels, Distributions))
     evaluate_source(mod, displayed)
@@ -172,7 +174,7 @@ function comparison(mod::Module, code::AbstractString, brmi_name::Symbol;
     brmi = candidate isa Function ? Base.invokelatest(candidate) : candidate
     brmi isa BRM.BRMI || error(
         "docs comparison `$brmi_name` did not evaluate to or construct a BRMI")
-    sb_source, stan_source = stan_emissions(brmi)
+    sb_source, stan_source = stan_emissions(brmi, mod; required=require_stan)
     turing_source = turing_emission(brmi)
     return Markdown.MD([
         Markdown.Code("brm-comparison", string(title)),
@@ -181,6 +183,35 @@ function comparison(mod::Module, code::AbstractString, brmi_name::Symbol;
         Markdown.Code("stan", stan_source),
         Markdown.Code("julia", turing_source),
     ])
+end
+
+"""Assert that a generated page contains complete required Stan comparisons."""
+function validate_required_stan_outputs(path::AbstractString,
+                                        brmi_names::Tuple)
+    source = read(path, String)
+    expected = length(brmi_names)
+    comparisons = length(collect(eachmatch(
+        r"(?m)^```brm-comparison\s*$", source)))
+    comparisons == expected || error(
+        "$(basename(path)) generated $comparisons required comparisons; " *
+        "expected $expected")
+
+    stan_fences = length(collect(eachmatch(r"(?m)^```stan\s*$", source)))
+    stan_fences == expected || error(
+        "$(basename(path)) generated $stan_fences Stan panes; expected $expected")
+
+    for name in brmi_names
+        occursin("function $name", source) || error(
+            "$(basename(path)) omitted the exact `$name` declaration")
+    end
+
+    for fallback in ("StanBlocks unsupported for this BRM example",
+                     "Stan emission unavailable because StanBlocks lowering failed")
+        occursin(fallback, source) && error(
+            "$(basename(path)) contains forbidden required-backend fallback: " *
+            fallback)
+    end
+    return nothing
 end
 
 function validate_generated_templates(paths)
