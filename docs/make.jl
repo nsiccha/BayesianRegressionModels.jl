@@ -48,6 +48,7 @@ makedocs(
         "Formula terms" => "formula-terms.md",
         "Likelihoods" => "likelihoods.md",
         "Feature atlas" => "feature-atlas.md",
+        "Warfarin PK → PD" => "warfarin.md",
         "Turing backend" => "turing-backend.md",
         "Gallery" => "gallery.md",
         "API" => "api.md",

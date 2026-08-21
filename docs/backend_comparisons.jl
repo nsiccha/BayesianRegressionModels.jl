@@ -119,6 +119,17 @@ function comparison(mod::Module, code::AbstractString, brmi_name::Symbol;
     ])
 end
 
+"""
+Render a reviewed source excerpt without evaluating it during the docs build.
+
+This is for complete examples whose surrounding helper definitions and runtime
+acceptance harness live in a linked repository source file. Ordinary standalone
+`@brm` examples should use `comparison` so every backend pane is generated.
+"""
+function source_excerpt(code::AbstractString)
+    return Markdown.MD([Markdown.Code("julia", strip(code, '\n'))])
+end
+
 function validate_generated_templates(paths)
     for path in paths
         source = read(path, String)
@@ -148,9 +159,10 @@ function validate_no_bypasses(paths)
             language in executable_fences || continue
             occursin("@brm", code) || continue
             occursin("Main.BRMDocsComparisons.comparison(", code) && continue
+            occursin("Main.BRMDocsComparisons.source_excerpt(", code) && continue
             error("$path contains a standalone executable `@brm` example " *
                   "in a `$language` fence; use the generated four-pane " *
-                  "comparison")
+                  "comparison or an explicitly reviewed source excerpt")
         end
         if endswith(path, "turing-backend.md")
             occursin("Main.BRMDocsComparisons.comparison", source) && error(
