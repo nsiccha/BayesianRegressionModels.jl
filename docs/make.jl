@@ -7,6 +7,7 @@ const GENERATED_EXAMPLE_PAGES = [
     joinpath(@__DIR__, "src", "formula-terms.md"),
     joinpath(@__DIR__, "src", "likelihoods.md"),
     joinpath(@__DIR__, "src", "feature-atlas.md"),
+    joinpath(@__DIR__, "src", "warfarin.md"),
 ]
 const DOCS_MARKDOWN_PAGES = sort!(String[
     joinpath(root, file)
@@ -48,7 +49,7 @@ makedocs(
         "Formula terms" => "formula-terms.md",
         "Likelihoods" => "likelihoods.md",
         "Feature atlas" => "feature-atlas.md",
-        "Warfarin PK → PD" => "warfarin.md",
+        "Warfarin PK/PD" => "warfarin.md",
         "Turing backend" => "turing-backend.md",
         "Gallery" => "gallery.md",
         "API" => "api.md",

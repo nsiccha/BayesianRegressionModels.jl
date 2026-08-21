@@ -227,6 +227,11 @@ and gradient checks. The accompanying [audit notes](https://github.com/nsiccha/B
 map every retained prior, structural equation, solver tolerance, and known
 generated-quantity difference back to the public source.
 
+The [Warfarin PK/PD page](warfarin.md) also renders the separately specified
+joint model: one posterior in which shared subject-level PK effects feed both
+the PK and PD likelihoods, so PK uncertainty propagates into PD and PD data can
+update PK quantities.
+
 ```julia
 include("research/warfarin/reproduce.jl")
 models = warfarin_sbbrmis()
