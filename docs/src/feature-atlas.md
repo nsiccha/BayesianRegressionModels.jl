@@ -62,6 +62,31 @@ end)((;
 """, :multi_response; title="Shared and independent responses")
 ```
 
+## Correlated Gaussian multi-response model
+
+The vector response is one row-wise multivariate likelihood. Outcome order is
+the order written on both sides, and `L_res` is the estimated residual
+covariance Cholesky factor (marginal scales plus an LKJ correlation factor).
+
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+correlated_response = (@brm begin
+    L_res ~ LKJCovarianceFactor(
+        2; scale_prior=Exponential(1), shape=2,
+    )
+    shared_log_rate ~ Normal(0, 1)
+    concentration_mu = exp(-exp(shared_log_rate) * time)
+    effect_mu = 1.0 - concentration_mu
+    [concentration, effect] ~ MvNormalCholesky(
+        [concentration_mu, effect_mu], L_res)
+end)((;
+    time=[0.0, 1.0, 2.0, 4.0],
+    concentration=[1.0, 0.72, 0.51, 0.27],
+    effect=[0.03, 0.18, 0.43, 0.79],
+))
+""", :correlated_response; title="Correlated Gaussian responses")
+```
+
 ## Canonical Binomial-logit model
 
 ```@eval
@@ -186,6 +211,34 @@ end)((;
 """, :population_pk; title="Multi-axis population PK kernel")
 ```
 
+## Verified public Warfarin PK/PD reproduction
+
+The repository includes a complete executable translation of Sebastian
+Weber's public StanCon 2018 Warfarin programs: a first-stage one-compartment
+oral PK model with lag, allometry, four independent subject effects, and
+Gamma overdispersion; followed by a turnover PD ODE conditioned on the public
+PK posterior medians, with three independent PD subject effects and the same
+observation family.
+
+The [reproduction script](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/warfarin/reproduce.jl)
+contains the typed ODE and likelihood definitions, a public two-subject data
+slice, both `@brm` declarations, `stanc` checks, and finite BridgeStan density
+and gradient checks. The accompanying [audit notes](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/warfarin/README.md)
+map every retained prior, structural equation, solver tolerance, and known
+generated-quantity difference back to the public source.
+
+```julia
+include("research/warfarin/reproduce.jl")
+models = warfarin_sbbrmis()
+```
+
+This is the strongest identifiable public match to the Warfarin model
+mentioned in [brms issue #1509](https://github.com/paul-buerkner/brms/issues/1509#issuecomment-1598639613),
+but the issue itself provides no equations or citation, so identity with the
+commenter's private working model cannot be proved. The public StanCon model
+is two separate scalar-Gamma stages; it does not need the correlated Gaussian
+outcome surface above.
+
 ## Categorical population terms
 
 ```@eval
@@ -221,14 +274,16 @@ end)((;
 
 ## Random-effect scale and correlation priors
 
-The `p` identifier gives the group block a stable prior address. The scale
-override applies only to the `x` margin; the intercept keeps the shared default.
+The `p` identifier gives the group block a stable prior address. The shared
+half-Normal sets both scales, then the more-specific Exponential override
+replaces it only on the `x` margin.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
 grouped_priors = (@brm begin
     sigma ~ Exponential(2)
     mu ~ 1 + x + (1 + x | p | subject)
+    sd(:, p) ~ Normal(0, 0.5)
     sd(mu, p, x) ~ Exponential(0.25)
     cor(:, p) ~ LKJCholesky(2, 2.5)
     outcome ~ Normal(mu, sigma)

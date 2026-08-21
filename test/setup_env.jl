@@ -41,7 +41,7 @@ const PINS = [
     ("MutatingFunctions", "https://github.com/nsiccha/MutatingFunctions.jl.git", "92687c809f60493422b11158ac8abba32b21cdf9"),
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "121de3194f02044e00bac0d11019a93458ddb63a"),  # main
     ("TreeArrays",        "https://github.com/nsiccha/TreeArrays.jl.git",        "c317cc003fc41c2d933c27dc80799141eebd434e"),  # main
-    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "626fe4ba90ee1eb5bc9e5c5ee1d9a90ef607ba24"),  # devibe
+    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "139a6ba6dee09e050862d35ce434768ef73e6a7c"),  # devibe
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "8fa829b39d6f519deaf13cd03ee17e8df6b7b9c2"),  # dev
 ]

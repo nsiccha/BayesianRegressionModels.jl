@@ -92,6 +92,8 @@ BayesianRegressionModels.BinomialLogit
 BayesianRegressionModels.interval_censored
 BayesianRegressionModels.CircularVonMises
 BayesianRegressionModels.SkewDoubleExponential
+BayesianRegressionModels.LKJCovarianceFactor
+BayesianRegressionModels.MvNormalCholesky
 ```
 
 `BetaBinomial` is re-exported unchanged from Distributions.jl and documented

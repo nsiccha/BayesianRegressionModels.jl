@@ -253,12 +253,28 @@ end
     end
     @test_throws "matches no shared" SBBRMI(unknown_id(df); mod=@__MODULE__)
 
-    bad_sd_family = @brm begin
+    half_normal_sd = @brm begin
         eta ~ 1 + (1 | p | subject)
-        sd(:, p) ~ Normal(0, 1)
+        sd(:, p) ~ Normal(0, 0.5)
         y ~ Normal(eta, 1)
     end
-    @test_throws "currently supports `Exponential" SBBRMI(bad_sd_family(df); mod=@__MODULE__)
+    half_normal_sb = SBBRMI(half_normal_sd(df); mod=@__MODULE__)
+    half_normal_code = BayesianRegressionModels.stan_code(half_normal_sb)
+    @test occursin("b_p_subject_tau ~ brm_ranef_sd([2]', [0.5]');",
+                   half_normal_code)
+    @test StanBlocks.stanc_check(half_normal_code; warn_pedantic=false).ok
+    half_normal_decl = only(d for d in generative_plan(half_normal_sb).declarations
+                            if d.target === :b_p_subject)
+    @test half_normal_decl.keywords.sd_family == Expr(:vect, 2)
+    @test half_normal_decl.keywords.sd_rate == Expr(:vect, 0.5)
+
+    shifted_normal_sd = @brm begin
+        eta ~ 1 + (1 | p | subject)
+        sd(:, p) ~ Normal(0.1, 0.5)
+        y ~ Normal(eta, 1)
+    end
+    @test_throws "requires `location == 0`" SBBRMI(
+        shifted_normal_sd(df); mod=@__MODULE__)
 
     bad_cor_family = @brm begin
         eta ~ 1 + (1 | p | subject)

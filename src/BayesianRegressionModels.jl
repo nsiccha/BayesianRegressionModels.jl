@@ -50,6 +50,7 @@ include("adaptive_centering.jl")
 # (web-macro, downstream extensions, tests) reaches for.
 export @brm, @n, @x, @getproperty
 export assign, effect, r2d2, doublepipe, gr, mm, gp, offset, zscale, center, standardize, protect, factor
+export LKJCovarianceFactor, MvNormalCholesky
 export weighted, AbstractWeights, AnalyticWeights, FrequencyWeights,
        ProbabilityWeights, UnitWeights, Weights,
        aweights, fweights, pweights, uweights, weights

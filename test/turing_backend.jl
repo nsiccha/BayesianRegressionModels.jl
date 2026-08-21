@@ -2416,6 +2416,20 @@ end
     @test precision_block.sd_rate == [0.5, 2.0]
     @test mean_block.lkj_eta == precision_block.lkj_eta == 2.5
 
+    ext = Base.get_extension(BRM, :BayesianRegressionModelsTuringExt)
+    half_normal_value = 0.4
+    half_normal_scale = 0.5
+    half_normal_site = ext._brm_group_scale_distribution(
+        2, half_normal_scale)
+    @test logpdf(half_normal_site, half_normal_value) +
+          ext._brm_group_scale_log_normalization([2]) ≈
+          logpdf(Normal(0.0, half_normal_scale), half_normal_value)
+    standard_half_normal = truncated(Normal(), 0.0, Inf)
+    @test logpdf(standard_half_normal, half_normal_value) +
+          ext._brm_group_scale_site_adjustment(
+              [half_normal_value], [2], [half_normal_scale]) ≈
+          logpdf(Normal(0.0, half_normal_scale), half_normal_value)
+
     L_shared = cholesky(Symmetric(Matrix{Float64}(I, 4, 4)))
     params = Dict(
         Turing.@varname(beta_mean) => [0.1, 0.2],

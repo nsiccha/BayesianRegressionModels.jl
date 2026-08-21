@@ -39,6 +39,8 @@ _brm_rebind_value(x::NestedPredictorFormula, df) =
     NestedPredictorFormula(_brm_rebind_value(parent(x), df))
 _brm_rebind_value(x::LikelihoodColumn, df) = LikelihoodColumn(
     _brm_rebind_value(parent(x), df), _brm_rebind_value(rhs(x), df))
+_brm_rebind_value(x::JointResponseColumn, df) = JointResponseColumn(
+    map(value -> _brm_rebind_value(value, df), joint_response_columns(x)))
 function _brm_rebind_value(x::NamedColumn, df)
     column_name = name(x)
     payload = parent(x)
@@ -125,6 +127,9 @@ function _brm_collect_mm_sources!(out, x::MultiMembershipTerm)
     weights = getfield(x, :weights)
     isnothing(weights) || foreach(w -> push!(out, name(w)), weights)
 end
+function _brm_collect_mm_sources!(out, x::JointResponseColumn)
+    foreach(a -> _brm_collect_mm_sources!(out, a), joint_response_columns(x))
+end
 
 _brm_collect_non_mm_sources!(_, _) = nothing
 function _brm_collect_non_mm_sources!(out, x::NamedColumn)
@@ -136,6 +141,9 @@ function _brm_collect_non_mm_sources!(out, x::ExprColumn)
     foreach(v -> _brm_collect_non_mm_sources!(out, v), values(getkwargs(x)))
 end
 _brm_collect_non_mm_sources!(_, ::MultiMembershipTerm) = nothing
+function _brm_collect_non_mm_sources!(out, x::JointResponseColumn)
+    foreach(a -> _brm_collect_non_mm_sources!(out, a), joint_response_columns(x))
+end
 
 _brm_collect_data!(_data, _x; skip=Set{Symbol}()) = nothing
 function _brm_collect_data!(data, x::NamedColumn; skip=Set{Symbol}())
@@ -154,6 +162,55 @@ function _brm_collect_data!(data, x::MultiMembershipTerm; skip=Set{Symbol}())
     weights = getfield(x, :weights)
     isnothing(weights) || foreach(a -> _brm_collect_data!(data, a; skip), weights)
 end
+function _brm_joint_response_values(x::JointResponseColumn;
+                                    prefix="BRM backend lowering")
+    columns = joint_response_columns(x)
+    names = joint_response_names(x)
+    all(c -> parent(c) isa DataColumn, columns) || error(
+        "$prefix: joint response $(collect(names)) requires every outcome to " *
+        "be a data-backed column")
+    raw = map(columns) do column
+        values = parent(parent(column))
+        values isa AbstractVector || error(
+            "$prefix: joint outcome `$(name(column))` must be a vector, got " *
+            "$(typeof(values))")
+        value_type = nonmissingtype(eltype(values))
+        value_type <: Real || error(
+            "$prefix: joint outcome `$(name(column))` must be real-valued, got " *
+            "element type $(eltype(values))")
+        any(ismissing, values) && error(
+            "$prefix: joint outcome `$(name(column))` contains `missing`. " *
+            "`MvNormalCholesky` uses an aligned complete-row likelihood and " *
+            "never silently drops or factorizes missing outcome patterns. " *
+            "Supply complete aligned rows or model the outcomes separately.")
+        collected = collect(Float64, values)
+        all(isfinite, collected) || error(
+            "$prefix: joint outcome `$(name(column))` contains non-finite values")
+        collected
+    end
+    lengths = map(length, raw)
+    all(==(first(lengths)), lengths) || error(
+        "$prefix: joint outcomes $(collect(names)) must be row-aligned and have " *
+        "equal lengths, got $(collect(lengths))")
+    first(lengths) > 0 || error(
+        "$prefix: joint outcomes $(collect(names)) must contain at least one row")
+    # StanBlocks' top-level ragged-observation contract is the representation
+    # that preserves one JOINT density contribution per aligned row.  All cells
+    # have the same width here, but keeping the outer row collection explicit
+    # prevents a dense matrix from being interpreted as elementwise observations.
+    [Float64[values[row] for values in raw] for row in eachindex(first(raw))]
+end
+
+# Pack one ordered response vector per aligned row before concrete emission.
+# The target-to-observation map sizes intercept-only mean predictors from the
+# explicit scalar row count, while StanBlocks sees a top-level RaggedVector and
+# therefore emits one joint density / predictive vector per row.
+function _brm_collect_data!(data, x::JointResponseColumn; skip=Set{Symbol}())
+    values = _brm_joint_response_values(x)
+    data[_joint_response_data_key(x)] = values
+    data[_joint_response_n_key(x)] = length(values)
+    nothing
+end
 
 _brm_is_nothing_column(x::NamedColumn) =
     name(x) === :nothing && parent(x) isa MissingColumn
@@ -163,6 +220,7 @@ _brm_observation_name(lhs::NamedColumn) =
     parent(lhs) isa DataColumn ? name(lhs) : nothing
 _brm_observation_name(lhs::ExprColumn{typeof(ragged)}) =
     _brm_observation_name(first(getargs(lhs)))
+_brm_observation_name(lhs::JointResponseColumn) = _joint_response_data_key(lhs)
 function _brm_observation_name(lhs::ExprColumn)
     args = getargs(lhs)
     length(args) == 1 ? _brm_observation_name(only(args)) : nothing
@@ -178,6 +236,9 @@ function _brm_collect_rhs_refs!(target_obs, x::ExprColumn, obs_name)
     foreach(v -> _brm_collect_rhs_refs!(target_obs, v, obs_name),
             values(getkwargs(x)))
 end
+function _brm_collect_rhs_refs!(target_obs, x::Union{Tuple,AbstractVector}, obs_name)
+    foreach(a -> _brm_collect_rhs_refs!(target_obs, a, obs_name), x)
+end
 
 function _brm_collect_target_obs(brmi::BRMI)
     target_obs = Dict{Symbol,Symbol}()
@@ -187,7 +248,8 @@ function _brm_collect_target_obs(brmi::BRMI)
         op isa ExprColumn || continue
         getf(op) === (~) || continue
         lhs, rhs = getargs(op, 2)
-        obs_name = _brm_observation_name(lhs)
+        obs_name = lhs isa JointResponseColumn ?
+            _joint_response_n_key(lhs) : _brm_observation_name(lhs)
         isnothing(obs_name) && continue
         get!(target_obs, obs_name, obs_name)
         _brm_collect_rhs_refs!(target_obs, rhs, obs_name)
@@ -1552,7 +1614,9 @@ function _brm_simple_population_design(target::Symbol, rhs,
             "`$target` is absent from materialized data")
         return nothing
     end
-    n = length(data[row_source])
+    row_value = data[row_source]
+    n = row_value isa Integer && !(row_value isa Bool) ?
+        Int(row_value) : length(row_value)
 
     columns = map(raw_columns) do column
         values = isnothing(column.source) ? ones(Float64, n) : column.values
@@ -1690,23 +1754,49 @@ _brm_numeric_constant(_x) = nothing
 
 # ---- shared random-effect prior resolution ---------------------------------
 
-function _brm_ranef_sd_rate(spec, spelling::AbstractString;
-                            prefix="BRM backend lowering")
+function _brm_ranef_sd_prior(spec, spelling::AbstractString;
+                             prefix="BRM backend lowering")
     T = _as_distribution_type(spec.family)
-    (!isnothing(T) && T <: Exponential) || error(
-        "$prefix: `$spelling` currently supports `Exponential(scale)`; got " *
-        "`$(spec.family)`. An unmentioned scale keeps the backend default prior.")
-    isempty(spec.keywords) || error(
-        "$prefix: `$spelling ~ Exponential(...)` does not accept keywords")
-    length(spec.arguments) in (0, 1) || error(
-        "$prefix: `$spelling ~ Exponential` expects zero or one Julia scale argument")
-    scale = isempty(spec.arguments) ? 1.0 :
-            _brm_numeric_constant(only(spec.arguments))
-    isnothing(scale) && error(
-        "$prefix: `$spelling` scale must be a numeric formula constant")
-    isfinite(scale) && scale > 0 || error(
-        "$prefix: `$spelling` scale must be finite and strictly positive, got $scale")
-    1.0 / scale
+    if !isnothing(T) && T <: Exponential
+        isempty(spec.keywords) || error(
+            "$prefix: `$spelling ~ Exponential(...)` does not accept keywords")
+        length(spec.arguments) in (0, 1) || error(
+            "$prefix: `$spelling ~ Exponential` expects zero or one Julia scale argument")
+        scale = isempty(spec.arguments) ? 1.0 :
+                _brm_numeric_constant(only(spec.arguments))
+        isnothing(scale) && error(
+            "$prefix: `$spelling` scale must be a numeric formula constant")
+        isfinite(scale) && scale > 0 || error(
+            "$prefix: `$spelling` scale must be finite and strictly positive, got $scale")
+        # Distributions.Exponential uses scale; Stan's density uses rate.
+        return (; family=1, hyperparameter=1.0 / scale)
+    elseif !isnothing(T) && T <: Normal
+        isempty(spec.keywords) || error(
+            "$prefix: `$spelling ~ Normal(...)` does not accept keywords; " *
+            "the random-effect scale is already constrained to be positive")
+        length(spec.arguments) <= 2 || error(
+            "$prefix: `$spelling ~ Normal` expects zero, one, or two Julia arguments")
+        location = isempty(spec.arguments) ? 0.0 :
+                   _brm_numeric_constant(spec.arguments[1])
+        scale = length(spec.arguments) < 2 ? 1.0 :
+                _brm_numeric_constant(spec.arguments[2])
+        isnothing(location) && error(
+            "$prefix: `$spelling` Normal location must be a numeric formula constant")
+        location == 0 || error(
+            "$prefix: `$spelling ~ Normal(location, scale)` is a half-Normal " *
+            "prior on a positive random-effect scale and therefore requires " *
+            "`location == 0`; got $location")
+        isnothing(scale) && error(
+            "$prefix: `$spelling` Normal scale must be a numeric formula constant")
+        isfinite(scale) && scale > 0 || error(
+            "$prefix: `$spelling` Normal scale must be finite and strictly " *
+            "positive, got $scale")
+        return (; family=2, hyperparameter=scale)
+    end
+    error(
+        "$prefix: `$spelling` supports `Exponential(scale)` or the zero-centered " *
+        "half-Normal spelling `Normal(0, scale)`; got `$(spec.family)`. An " *
+        "unmentioned scale keeps the backend default half-standard-Normal prior.")
 end
 
 function _brm_ranef_lkj_eta(spec, n_terms::Int;
@@ -1791,7 +1881,7 @@ function _brm_resolve_ranef_effect_overrides(
             Dict{Symbol,Any}(
                 :margins => margins,
                 :sd_default => nothing,
-                :sd_overrides => Dict{Int,Tuple{Float64,Int}}(),
+                :sd_overrides => Dict{Int,Tuple{Int,Float64,Int}}(),
                 :lkj_eta => nothing)
         end
         if spec.class === :cor
@@ -1801,20 +1891,21 @@ function _brm_resolve_ranef_effect_overrides(
                 spec, length(margins); prefix)
             continue
         end
-        rate = _brm_ranef_sd_rate(spec, "sd(:, $(spec.id))"; prefix)
+        prior = _brm_ranef_sd_prior(spec, "sd(:, $(spec.id))"; prefix)
         claim = _brm_ranef_margin_claim(spec, margins; prefix)
         if isnothing(claim)
             state[:sd_default] === nothing || error(
                 "$prefix: duplicate block SD prior for `sd(:, $(spec.id))`")
-            state[:sd_default] = rate
+            state[:sd_default] = prior
             continue
         end
         indices, rank = claim
         for index in indices
             held = get(state[:sd_overrides], index, nothing)
-            if isnothing(held) || rank > held[2]
-                state[:sd_overrides][index] = (rate, rank)
-            elseif rank == held[2]
+            if isnothing(held) || rank > held[3]
+                state[:sd_overrides][index] =
+                    (prior.family, prior.hyperparameter, rank)
+            elseif rank == held[3]
                 error("$prefix: two SD prior statements are equally specific " *
                       "and both set margin $(margins[index]) of `|$(spec.id)|`")
             end
@@ -1823,13 +1914,15 @@ function _brm_resolve_ranef_effect_overrides(
     out = Dict{Any,NamedTuple}()
     for (key, state) in states
         margins = state[:margins]
-        default_rate = state[:sd_default]
-        sd_family = fill(isnothing(default_rate) ? 0 : 1, length(margins))
-        sd_rate = fill(isnothing(default_rate) ? 1.0 : default_rate,
+        default_prior = state[:sd_default]
+        sd_family = fill(isnothing(default_prior) ? 0 : default_prior.family,
+                         length(margins))
+        sd_rate = fill(isnothing(default_prior) ? 1.0 :
+                       default_prior.hyperparameter,
                        length(margins))
-        for (index, (rate, _)) in state[:sd_overrides]
-            sd_family[index] = 1
-            sd_rate[index] = rate
+        for (index, (family, hyperparameter, _)) in state[:sd_overrides]
+            sd_family[index] = family
+            sd_rate[index] = hyperparameter
         end
         out[key] = (; sd_family, sd_rate,
                     lkj_eta=isnothing(state[:lkj_eta]) ? 1.0 : state[:lkj_eta],

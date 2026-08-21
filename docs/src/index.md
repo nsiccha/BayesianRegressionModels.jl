@@ -137,8 +137,10 @@ registry of parameter names.
 
 Not feature-complete against brms. The gaps a brms user is most likely to hit:
 
-- **No residual correlation between responses.** Several responses in one
-  block are modelled independently; there is no `set_rescor(TRUE)`.
+- **Residual correlation is Gaussian and complete-row only.** Use
+  `[y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)` with a declared
+  `LKJCovarianceFactor`; partially missing response vectors and non-Gaussian
+  residual copulas are not implemented.
 - **No fixed / known covariance groups.** `by=` is the only [`gr`](@ref)
   option — no `cov=`, so no phylogenetic or pedigree random effects.
 - **Autocorrelation is AR(1) only.** [`ar`](@ref)`(time; p=1)` is the entire

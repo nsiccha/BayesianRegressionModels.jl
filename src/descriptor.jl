@@ -376,7 +376,22 @@ _brm_population_effect_entries(brmi) = [
        block=Symbol(:pop_, _sb_lp_emitted_name(l.name, l.link_lhs_fn)),
        link=l.link_lhs_fn)
     for l in linear_predictors(brmi)
+    if !_brm_is_joint_covariance_factor(brmi, l.name)
 ]
+
+function _brm_is_joint_covariance_factor(brmi, name::Symbol)
+    haskey(brmi.operations, name) || return false
+    value = brmi.operations[name]
+    value isa NamedColumn || return false
+    op = parent(value)
+    op isa ExprColumn && getf(op) === (~) || return false
+    _, rhs = getargs(op, 2)
+    rhs isa ExprColumn && getf(rhs) === LKJCovarianceFactor
+end
+
+_brm_joint_covariance_factors(brmi) = Symbol[
+    l.name for l in linear_predictors(brmi)
+    if _brm_is_joint_covariance_factor(brmi, l.name)]
 
 _brm_highlight_spec(x::Union{Symbol,AbstractString}) =
     (Symbol(x), nothing, nothing)
@@ -784,8 +799,13 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
     # column (including a plate-local alias, `kernel_y => dv`).
     df_columns = Set{Symbol}(data_columns(brmi))
     for d in plan.declarations
-        d.role === :observation && !isnothing(d.data_source) &&
+        d.role === :observation && !isnothing(d.data_source) || continue
+        entry = get(plan.preproc, d.data_source, nothing)
+        if entry isa PreprocEntry && entry.kind === :joint_response
+            union!(df_columns, Symbol.(entry.raw_ref))
+        else
             push!(df_columns, d.data_source)
+        end
     end
 
     # --- inputs: the Stan data block + its dataframe provenance -------------
@@ -841,9 +861,11 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
     end
     targets = collect(keys(by_name))
     population_effects = _brm_population_effect_entries(brmi)
+    covariance_factors = _brm_joint_covariance_factors(brmi)
     logical_outputs = _brm_logical_outputs(
         stan, by_name, targets, _brm_kernel_cell_values(brmi),
-        (e.logical for e in population_effects))
+        Iterators.flatten(((e.logical for e in population_effects),
+                           covariance_factors)))
 
     # Linear-predictor names come from the FORMULA, not from the emitted body:
     # `mu = pop_mu + r_mu_g` is an `=`, so no declaration binds it, yet it is
@@ -869,6 +891,8 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
             o.generative === :pointwise_loglik ? :pointwise_loglik : :posterior_predictive
         elseif !isnothing(decl)
             _brm_declaration_role(decl)
+        elseif o.name in covariance_factors
+            :parameter
         elseif o.name in lps
             :linear_predictor
         elseif o.generative === :draw

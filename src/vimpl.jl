@@ -23,7 +23,25 @@ struct VBRMI{P<:BRMI,M<:NamedTuple}
     parent::P
     meta::M
 end
-VBRMI(p::BRMI) = VBRMI(p, finalize(foldl(vmeta, p.operations; init=(;materialized=(;), blocks=(;)))))
+function VBRMI(p::BRMI)
+    # Reject the backend capability at the model boundary before walking any
+    # earlier composite-prior declaration. Otherwise the formula-order prior
+    # fails first with a misleading marker-constructor MethodError.
+    for value in values(p.operations)
+        value isa NamedColumn || continue
+        op = parent(value)
+        op isa ExprColumn && getf(op) === (~) || continue
+        lhs, _ = getargs(op, 2)
+        lhs isa JointResponseColumn || continue
+        error(
+            "VBRMI: correlated joint outcomes $(joint_response_names(lhs)) are " *
+            "supported by the StanBlocks backend only. Construct `SBBRMI(brmi)`; " *
+            "VBRMI cannot silently replace one multivariate density with " *
+            "independent scalar terms.")
+    end
+    VBRMI(p, finalize(foldl(
+        vmeta, p.operations; init=(;materialized=(;), blocks=(;)))))
+end
 
 """
     Part{F<:Function,D<:NamedTuple}
@@ -155,6 +173,10 @@ vmeta_sampling(meta, lhs::NamedColumn{<:Any,<:DataColumn}, rhs) = begin
     meta, o = vmeta_sampling_rhs(meta, rhs; group=:__population__)
     meta, LikelihoodColumn(parent(parent(lhs)), o)
 end
+vmeta_sampling(_meta, lhs::JointResponseColumn, _rhs) = error(
+    "VBRMI: correlated joint outcomes $(joint_response_names(lhs)) are supported " *
+    "by the StanBlocks backend only. Construct `SBBRMI(brmi)`; VBRMI cannot " *
+    "silently replace one multivariate density with independent scalar terms.")
 """
     vmeta_sampling_rhs(meta, rhs; group) -> (meta', broadcasted)
 
