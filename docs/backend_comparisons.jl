@@ -10,6 +10,7 @@ const BRM = BayesianRegressionModels
 const EXAMPLE_MODULES = Dict{Symbol,Module}()
 const PANE_IDS = "brm|stanblocks|stan|turing"
 const PANE_LABELS = "BRM authoring|StanBlocks model|Stan source|Turing model"
+const REPOSITORY_ROOT = normpath(joinpath(@__DIR__, ".."))
 
 """Return one stable evaluation module for all executable blocks on a page."""
 example_module(name::Symbol) = get!(EXAMPLE_MODULES, name) do
@@ -25,6 +26,68 @@ function evaluate_source(mod::Module, displayed::AbstractString)
         value = Core.eval(mod, expression)
     end
     return value
+end
+
+function definition_name(expression)
+    expression isa Expr || return nothing
+    if expression.head === :function
+        signature = expression.args[1]
+        signature isa Expr && signature.head === :call || return nothing
+        name = first(signature.args)
+        return name isa Symbol ? name : nothing
+    end
+    for argument in expression.args
+        name = definition_name(argument)
+        isnothing(name) || return name
+    end
+    return nothing
+end
+
+function repository_source(relative_path::AbstractString)
+    path = normpath(joinpath(REPOSITORY_ROOT, relative_path))
+    relative = relpath(path, REPOSITORY_ROOT)
+    (!isempty(splitpath(relative)) && first(splitpath(relative)) == "..") &&
+        error("repository source path escapes the repository root: $relative_path")
+    return read(path, String)
+end
+
+"""Return one function declaration exactly as written in a repository source file."""
+function source_function(relative_path::AbstractString, name::Symbol)
+    source = repository_source(relative_path)
+    marker = "function $name"
+    matches = findall(marker, source)
+    length(matches) == 1 || error(
+        "expected one `$marker` declaration in $relative_path, found $(length(matches))")
+    start = first(only(matches))
+    expression, next_position = Meta.parse(source, start; greedy=true, raise=true)
+    definition_name(expression) === name || error(
+        "source at `$marker` in $relative_path did not parse as that function")
+    stop = prevind(source, next_position)
+    return strip(SubString(source, start, stop), '\n')
+end
+
+"""Evaluate a source file's shared prelude, stopping before a named function."""
+function evaluate_source_prelude(mod::Module, relative_path::AbstractString;
+                                 before::Symbol,
+                                 starting_at::Union{Nothing,AbstractString}=nothing)
+    source = repository_source(relative_path)
+    if !isnothing(starting_at)
+        matches = findall(starting_at, source)
+        length(matches) == 1 || error(
+            "expected one `$starting_at` marker in $relative_path, " *
+            "found $(length(matches))")
+        source = SubString(source, first(only(matches)), lastindex(source))
+    end
+    Core.eval(mod, :(using BayesianRegressionModels, Distributions, StanBlocks))
+    parsed = Meta.parseall(source;
+                           filename=relative_path)
+    expressions = parsed.head === :toplevel ? parsed.args : Any[parsed]
+    for expression in expressions
+        expression isa LineNumberNode && continue
+        definition_name(expression) === before && return nothing
+        Core.eval(mod, expression)
+    end
+    error("$relative_path does not define `$before`; shared prelude was not bounded")
 end
 
 function exception_text(backend::AbstractString, err)
@@ -97,17 +160,6 @@ function turing_emission(brmi::BRM.BRMI)
 end
 
 """
-Render a reviewed source excerpt without evaluating it during the docs build.
-
-This is for complete examples whose surrounding helper definitions and runtime
-acceptance harness live in a linked repository source file. Ordinary standalone
-`@brm` examples should use `comparison` so every backend pane is generated.
-"""
-function source_excerpt(code::AbstractString)
-    return Markdown.MD([Markdown.Code("julia", strip(code, '\n'))])
-end
-
-"""
 Evaluate one displayed BRM example and emit the fixed four-pane comparison.
 The StanBlocks, Stan, and Turing panes are always derived during this build.
 """
@@ -116,9 +168,10 @@ function comparison(mod::Module, code::AbstractString, brmi_name::Symbol;
     displayed = strip(code, '\n')
     Core.eval(mod, :(using BayesianRegressionModels, Distributions))
     evaluate_source(mod, displayed)
-    brmi = Core.eval(mod, brmi_name)
+    candidate = Core.eval(mod, brmi_name)
+    brmi = candidate isa Function ? Base.invokelatest(candidate) : candidate
     brmi isa BRM.BRMI || error(
-        "docs comparison `$brmi_name` did not evaluate to a BRMI")
+        "docs comparison `$brmi_name` did not evaluate to or construct a BRMI")
     sb_source, stan_source = stan_emissions(brmi)
     turing_source = turing_emission(brmi)
     return Markdown.MD([
@@ -152,6 +205,8 @@ function validate_no_bypasses(paths)
         "julia", "jldoctest", "@eval", "@example", "@repl", "@setup"))
     for path in paths
         source = read(path, String)
+        occursin("BRMDocsComparisons.source_excerpt", source) && error(
+            "$path bypasses the build-generated four-pane comparison")
         for block in eachmatch(r"(?ms)^```([^\n]*)\n(.*?)^```\s*$", source)
             info, code = block.captures
             fence_parts = split(strip(info))
@@ -159,7 +214,6 @@ function validate_no_bypasses(paths)
             language in executable_fences || continue
             occursin("@brm", code) || continue
             occursin("Main.BRMDocsComparisons.comparison(", code) && continue
-            occursin("Main.BRMDocsComparisons.source_excerpt(", code) && continue
             error("$path contains a standalone executable `@brm` example " *
                   "in a `$language` fence; use the generated four-pane " *
                   "comparison")

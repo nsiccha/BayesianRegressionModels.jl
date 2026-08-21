@@ -35,9 +35,9 @@ The [BRM feature atlas](feature-atlas.md) gives every executable example the
 same build-generated four-way view: BRM authoring, the emitted StanBlocks model,
 generated Stan, and the selected Turing model.
 
-The [Warfarin PK → PD example](warfarin.md) shows a complete structural-model
-workflow: a population PK fit followed by a turnover-PD fit conditioned on
-fixed subject-specific PK posterior medians.
+The [Warfarin PK/PD examples](warfarin.md) render both the faithful public
+two-stage workflow and a joint one-posterior model where shared latent PK
+effects feed the PK and PD likelihoods.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
