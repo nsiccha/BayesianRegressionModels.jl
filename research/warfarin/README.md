@@ -94,3 +94,11 @@ BRM_WARFARIN_RUNTIME=1 julia --startup-file=no --project=test \
 ```
 
 Set `BRM_WARFARIN_RUNTIME=0` for lowering and `stanc` only.
+
+## Related joint model
+
+[`joint_reproduce.jl`](joint_reproduce.jl) combines the PK and PD likelihoods
+in one posterior and shares the latent subject-level PK quantities between
+them, so their uncertainty propagates into the turnover model. It is a new BRM
+model, not part of the exact public two-stage reproduction; its contract and
+the residual-covariance boundary are documented in [`JOINT.md`](JOINT.md).
