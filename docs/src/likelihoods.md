@@ -42,6 +42,7 @@ are rejected rather than silently treated as a standard beta likelihood.
 | `Ordinal(structure, link, eta; ...)` | `Cumulative()` or `StoppingRatio()` crossed with `LogitLink()`, `ProbitLink()`, or `CloglogLink()` |
 | `CircularVonMises(mu, kappa; interval=(-pi, pi))` | von Mises on a fixed principal interval |
 | `TruncatedNormal(mu, sigma, lower, upper)` | legacy censored-Normal marker; new models should use `censored` below |
+| `[y1, y2, ...] ~ MvNormalCholesky([mu1, mu2, ...], L)` | row-wise correlated Gaussian outcomes using a declared `LKJCovarianceFactor` |
 
 ### Response compositions and modifiers
 
@@ -59,6 +60,46 @@ Every specialized family is expected to supply the fitted density, pointwise
 log likelihood, and posterior-predictive RNG used by BRM's generated
 quantities. Truncation and censoring additionally require matching CDF/CCDF
 paths; ragged observations additionally require a sized RNG.
+
+## Correlated Gaussian outcomes
+
+Use one ordered vector likelihood when several measurements from the same row
+have experimental residual covariance that should be estimated rather than
+treated as independent:
+
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+correlated_measurements = (@brm begin
+    L_res ~ LKJCovarianceFactor(
+        2; scale_prior=Exponential(1), shape=2,
+    )
+    shared_log_rate ~ Normal(0, 1)
+    concentration_mu = exp(-exp(shared_log_rate) * time)
+    response_mu = 1.0 - concentration_mu
+    [concentration, response] ~ MvNormalCholesky(
+        [concentration_mu, response_mu], L_res)
+end)((;
+    time=[0.0, 1.0, 2.0, 4.0],
+    concentration=[1.0, 0.72, 0.51, 0.27],
+    response=[0.03, 0.18, 0.43, 0.79],
+))
+""", :correlated_measurements; title="Estimated experimental covariance")
+```
+
+`LKJCovarianceFactor(K; scale_prior=Exponential(1), shape=1)` samples `K`
+positive marginal scales and an LKJ Cholesky correlation factor, then returns
+`diag_pre_multiply(scales, L_corr)`. The likelihood lowers to Stan's native
+`multi_normal_cholesky`: each aligned data row contributes one joint scalar
+log likelihood and one ordered predictive vector. The example deliberately
+uses one sampled rate in both mechanistic means; shared parameters need no
+special syntax beyond ordinary formula-block assignments.
+
+This first surface is deliberately strict. Every outcome and mean has the same
+row axis, the number of means and factor dimension must match the left-hand
+side, and outcome rows must be complete, finite, and nonempty. A missing value
+is rejected; BRM never silently drops the row or replaces the joint density
+with conditionally independent pieces. Correlated outcomes are currently an
+[`SBBRMI`](@ref)-only feature.
 
 ## Adding another likelihood
 

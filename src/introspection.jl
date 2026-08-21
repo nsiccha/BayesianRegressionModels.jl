@@ -91,6 +91,10 @@ _data_backed_inner(_x, _) = nothing
 _observed_lhs_or_nothing(x) = _data_backed_or_nothing(x)
 _observed_lhs_or_nothing(x::ExprColumn{typeof(ragged)}) =
     _data_backed_or_nothing(first(getargs(x)))
+function _observed_lhs_or_nothing(x::JointResponseColumn)
+    all(c -> c isa NamedColumn && parent(c) isa DataColumn,
+        joint_response_columns(x)) ? x : nothing
+end
 
 # ---- outcomes ---------------------------------------------------------------
 
@@ -109,6 +113,10 @@ Return one entry per `<response> ~ Family(args...)` likelihood (i.e. every
   `logistic(odds)`. Distributional models with multiple LPs (e.g.
   `Normal(loc, err)` where both `loc ~ ...` and `log(err) ~ ...`)
   produce one entry per LP.
+- `(; role=:joint_means, names)` -- the ordered row-aligned predictors of an
+  `MvNormalCholesky` joint response.
+- `(; role=:covariance_factor, name)` -- that joint response's declared
+  `LKJCovarianceFactor`.
 - `(; role=:constant, value)` -- numeric literal.
 - `(; role=:expression, expr)` -- catch-all opaque ExprColumn.
 """
@@ -119,13 +127,32 @@ function outcomes(brmi::BRMI)
         op === nothing && continue
         getf(op) === (~) || continue
         lhs, rh = getargs(op, 2)
-        isnothing(_observed_lhs_or_nothing(lhs)) && continue
+        observed = _observed_lhs_or_nothing(lhs)
+        isnothing(observed) && continue
         isnothing(_as_expr_column(rh)) && continue
         family = getf(rh)
-        args = [_classify_arg(a) for a in getargs(rh)]
-        push!(out, (; response=k, family, args))
+        args = _classify_outcome_args(family, rh)
+        response = observed isa JointResponseColumn ?
+            Tuple(joint_response_names(observed)) : k
+        push!(out, (; response, family, args))
     end
     out
+end
+
+_classify_outcome_args(_family, rh) =
+    [_classify_arg(a) for a in getargs(rh)]
+function _classify_outcome_args(::typeof(MvNormalCholesky), rh)
+    args = getargs(rh)
+    length(args) == 2 || return [_classify_arg(a) for a in args]
+    means, factor = args
+    mean_names = means isa AbstractVector &&
+                 all(x -> x isa NamedColumn, means) ?
+                 Tuple(name(x) for x in means) : nothing
+    factor_name = factor isa NamedColumn ? name(factor) : nothing
+    [isnothing(mean_names) ? (; role=:expression, expr=means) :
+                              (; role=:joint_means, names=mean_names),
+     isnothing(factor_name) ? (; role=:expression, expr=factor) :
+                              (; role=:covariance_factor, name=factor_name)]
 end
 
 # Convenience accessors so callers don't recompute filters by hand.
@@ -736,14 +763,26 @@ function _trace!(brmi, n::Symbol, data, intermediates, seen)
     op = linear_predictor_op(brmi, n)
     if isnothing(op)
         # Maybe a likelihood node -- look for `~` op even if LHS is data.
-        haskey(brmi.operations, n) || return
-        outer = _named_op(brmi.operations[n])
+        outer = haskey(brmi.operations, n) ?
+            _named_op(brmi.operations[n]) : _joint_response_operation(brmi, n)
         outer === nothing && return
         getf(outer) === (~) || return
         op = outer
     end
     _, rhs = getargs(op, 2)
     _trace_expr!(brmi, rhs, data, intermediates, seen)
+end
+
+function _joint_response_operation(brmi::BRMI, response::Symbol)
+    for value in values(brmi.operations)
+        outer = _named_op(value)
+        outer === nothing && continue
+        getf(outer) === (~) || continue
+        lhs, _ = getargs(outer, 2)
+        lhs isa JointResponseColumn || continue
+        response in joint_response_names(lhs) && return outer
+    end
+    nothing
 end
 
 # Dispatch on argument type for traversal -- no Symbol switch.
@@ -769,6 +808,11 @@ function _trace_expr!(brmi, expr::ExprColumn, data, intermediates, seen)
         _trace_expr!(brmi, a, data, intermediates, seen)
     end
 end
+function _trace_expr!(brmi, expr::AbstractVector, data, intermediates, seen)
+    for a in expr
+        _trace_expr!(brmi, a, data, intermediates, seen)
+    end
+end
 function _trace_expr!(brmi, expr::MultiMembershipTerm, data, intermediates, seen)
     for a in getargs(expr)
         _trace_expr!(brmi, a, data, intermediates, seen)
@@ -778,6 +822,11 @@ function _trace_expr!(brmi, expr::MultiMembershipTerm, data, intermediates, seen
         for a in weights
             _trace_expr!(brmi, a, data, intermediates, seen)
         end
+    end
+end
+function _trace_expr!(brmi, expr::JointResponseColumn, data, intermediates, seen)
+    for column in joint_response_columns(expr)
+        _trace_expr!(brmi, column, data, intermediates, seen)
     end
 end
 _trace_expr!(_, _, _, _, _) = nothing
@@ -815,6 +864,14 @@ end
 _push_if_data_name!(out, k, v::NamedColumn) = _push_if_data_inner!(out, k, parent(v))
 _push_if_data_name!(_out, _k, _v) = nothing
 _push_if_data_inner!(out, k, ::DataColumn) = (push!(out, k); nothing)
+function _push_if_data_inner!(out, _k, op::ExprColumn{typeof(~)})
+    lhs, _ = getargs(op, 2)
+    lhs isa JointResponseColumn || return nothing
+    for column in joint_response_columns(lhs)
+        parent(column) isa DataColumn && push!(out, name(column))
+    end
+    nothing
+end
 _push_if_data_inner!(_out, _k, _p) = nothing
 
 """
@@ -827,8 +884,13 @@ function hierarchical_outcomes(brmi::BRMI)
     [o for o in outcomes(brmi) if _has_re(brmi, o)]
 end
 function _has_re(brmi::BRMI, o)
-    lp = primary_lp(o)
-    isnothing(lp) && return false
-    p = predictors(brmi, lp.link_lp)
-    !isnothing(p) && !isempty(p.re_terms)
+    for arg in o.args
+        names = arg.role === :linear_predictor ? (arg.link_lp,) :
+                arg.role === :joint_means ? arg.names : ()
+        for lp_name in names
+            p = predictors(brmi, lp_name)
+            !isnothing(p) && !isempty(p.re_terms) && return true
+        end
+    end
+    false
 end

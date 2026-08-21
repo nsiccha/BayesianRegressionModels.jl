@@ -378,8 +378,9 @@ scale.
 
 ### Current limits
 
-- `sd` on `s(x)` / `t2(x, z)` accepts `Exponential(scale)` only, matching the
-  grouping-factor SD surface. `Distributions.Exponential` is
+- `sd` on `s(x)` / `t2(x, z)` accepts `Exponential(scale)` only. In contrast,
+  an addressed shared grouping-factor SD also accepts the zero-centered
+  half-Normal spelling `Normal(0, scale)`. `Distributions.Exponential` is
   scale-parameterized while Stan's `exponential_lpdf` takes a rate; BRM
   performs the conversion.
 - `simplex` accepts `Dirichlet(a)` (one concentration, broadcast over every
@@ -559,6 +560,33 @@ All of these fail loudly rather than silently sampling something else:
   unsupported in combination with `r2d2`.
 - A column that also carries its own `effect(lp, coef) ~ Normal(loc, scale)`
   statement is dropped from the simplex and keeps that explicit prior.
+
+## Bounded scalar parameter priors
+
+A non-data scalar prior may add finite numeric `lower` and/or `upper`
+declaration bounds. This is the direct spelling for a fitted positive scale
+with the same fixed-hyperparameter Normal kernel as a Stan
+`real<lower=0>` parameter:
+
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+bounded_scalar = (@brm begin
+    sigma ~ Normal(0, 2; lower=0.0)
+    mu ~ 1 + x
+    y ~ Normal(mu, sigma)
+end)((;
+    x=[-1.0, 0.5, 2.0],
+    y=[0.2, 1.1, -0.4],
+))
+""", :bounded_scalar; title="Bounded scalar parameter prior")
+```
+
+Only `lower` and `upper` are accepted, both bounds and all distribution
+arguments must be numeric formula constants, and two bounds must satisfy
+`lower < upper`. BRM emits the bound on the Stan declaration and the ordinary
+family kernel in the model block, exactly as in hand-written Stan. This
+surface is SBBRMI-only; a bound with sampled hyperparameters needs an explicit
+normalized parameterization and is rejected.
 
 ## Scalar horseshoe prior: `coef ~ Horseshoe(...)`
 

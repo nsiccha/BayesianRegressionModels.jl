@@ -97,6 +97,17 @@ function turing_emission(brmi::BRM.BRMI)
 end
 
 """
+Render a reviewed source excerpt without evaluating it during the docs build.
+
+This is for complete examples whose surrounding helper definitions and runtime
+acceptance harness live in a linked repository source file. Ordinary standalone
+`@brm` examples should use `comparison` so every backend pane is generated.
+"""
+function source_excerpt(code::AbstractString)
+    return Markdown.MD([Markdown.Code("julia", strip(code, '\n'))])
+end
+
+"""
 Evaluate one displayed BRM example and emit the fixed four-pane comparison.
 The StanBlocks, Stan, and Turing panes are always derived during this build.
 """
@@ -148,6 +159,7 @@ function validate_no_bypasses(paths)
             language in executable_fences || continue
             occursin("@brm", code) || continue
             occursin("Main.BRMDocsComparisons.comparison(", code) && continue
+            occursin("Main.BRMDocsComparisons.source_excerpt(", code) && continue
             error("$path contains a standalone executable `@brm` example " *
                   "in a `$language` fence; use the generated four-pane " *
                   "comparison")

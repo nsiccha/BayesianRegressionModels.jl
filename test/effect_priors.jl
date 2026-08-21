@@ -72,6 +72,27 @@ end
     end
 end
 
+@testset "bounded scalar priors retain their Stan declaration support" begin
+    bounded = @brm df begin
+        sigma ~ Normal(0, 2; lower=0.0)
+        y ~ Normal(0, sigma)
+    end
+    bounded_sb = SBBRMI(bounded; mod=@__MODULE__)
+    bounded_code = BayesianRegressionModels.stan_code(bounded_sb)
+    @test occursin("real<lower=0.0> sigma;", bounded_code)
+    @test occursin("sigma ~ normal(0, 2);", bounded_code)
+    @test StanBlocks.stanc_check(bounded_code; warn_pedantic=false).ok
+
+    @test_throws "requires `lower < upper`" SBBRMI((@brm df begin
+        sigma ~ Normal(0, 2; lower=1.0, upper=0.0)
+        y ~ Normal(0, sigma)
+    end); mod=@__MODULE__)
+    @test_throws "accepts only `lower` and `upper`" SBBRMI((@brm df begin
+        sigma ~ Normal(0, 2; typo=0.0)
+        y ~ Normal(0, sigma)
+    end); mod=@__MODULE__)
+end
+
 @testset "sampled scalar parameter in an effect-prior argument" begin
     sampled_scale = @brm df begin
         slope_prior_sd ~ Exponential(10.0)
