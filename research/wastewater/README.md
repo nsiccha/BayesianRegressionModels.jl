@@ -42,6 +42,12 @@ The generation-interval PMF `g` and shedding PMF `sh` are passed as **data**
 (captured into the plate cell), so they are re-bindable without editing the
 model — no baked-in constants.
 
+`wastewater_brm_model` expresses the same model on the **`@brm` formula
+surface**: a smooth `hsgp` log-Rt, a per-site seeding ranef, and the
+renewal/shedding `@deffun`s in a `kernel(...)` cell. `g` and `sh` are referenced
+directly in the cell and captured as shared data — the kernel-cell data-vector
+capture that this port motivated (see below).
+
 ## Verification
 
 `test/wastewater_model.jl` gates both variants on transpile + `stanc` + finite
@@ -49,16 +55,15 @@ BridgeStan density/gradient (`julia --project=test test/wastewater_model.jl`),
 plus a data re-bind. Measured green on strato2: 10/10 assertions; core and
 censored each dim=91.
 
-## Known BRM limitation surfaced here
+## BRM enhancement this port drove
 
-The `@brm` **kernel** formula surface cannot yet thread a shared, non-per-subject
-data vector (a generation-interval / delay PMF) into its cell — neither by
-lexical capture nor as a data kwarg (measured: `Could not find g in model,
-builtin, Main`). Plate-level capture at the `@slic` layer *does* work (used
-here), which is why this port is written at the `@slic` layer — the faithful
-EpiSewer reference is hand-written Stan at that same layer anyway. Lifting that
-into the `@brm` kernel surface would be a BRM ergonomics enhancement (tracked
-separately); it is not needed for the model to be correct.
+Originally the `@brm` **kernel** cell could not see a shared, non-per-subject
+data vector (a generation-interval / delay PMF) — a free reference failed with
+`Could not find g in model, builtin, Main`. That is now fixed: a name referenced
+in a kernel do-block that is a real df column (and not a formula name) is
+registered as shared Stan data, so the kernel cell captures it the way a `plate`
+captures a `@slic` data kwarg. `wastewater_brm_model` uses exactly this — `g` /
+`sh` as data in the formula-level model. Gated by `test/kernel_capture.jl`.
 
 ## Faithful-but-simplified
 

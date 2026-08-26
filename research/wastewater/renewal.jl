@@ -140,3 +140,55 @@ function wastewater_censored_model(data = wastewater_fixture())
         end
     end
 end
+
+# --- the same model on the `@brm` formula surface -----------------------------
+# Since the kernel-cell data-vector capture landed, the generation-interval `g`
+# and shedding PMF `sh` reach the cell as DATA (referenced by name), so the model
+# reads as an ordinary `@brm` formula: a smooth log-Rt (`hsgp`), a per-site
+# seeding ranef, and the renewal/shedding `@deffun`s in the kernel cell.
+
+"""
+    wastewater_brm_fixture(; nsites = 3, nt = 28)
+
+Dataset for the `@brm` form: per-site ragged observed-log-concentration series
+(`dv`) and a matching time grid (`t_grid`), a flat time frame (`time_x` with
+`time_site` naming each row's site) for the smooth log-Rt, and the fixed
+generation-interval / shedding PMFs `g` / `sh` as shared data captured into the
+kernel cell.
+"""
+function wastewater_brm_fixture(; nsites = 3, nt = 28)
+    sites = ["site$(i)" for i in 1:nsites]
+    g  = [0.05, 0.15, 0.25, 0.22, 0.16, 0.10, 0.07]
+    sh = [0.02, 0.08, 0.15, 0.18, 0.17, 0.13, 0.10, 0.08, 0.06, 0.03]
+    (;
+        site = sites,
+        t_grid = [collect(1.0:nt) for _ in sites],
+        dv = [[log(50.0) + 1.4 * exp(-((t - 14.0) / 6)^2) + 0.1 * sin(t / 3) for t in 1:nt]
+              for _ in sites],
+        time_x = reduce(vcat, [collect(1.0:nt) for _ in sites]),
+        time_site = reduce(vcat, [fill(s, nt) for s in sites]),
+        g = g, sh = sh,
+    )
+end
+
+"""
+    wastewater_brm_model([data])
+
+The EpiSewer-style renewal model as a single `@brm` formula. `g` and `sh` are
+referenced directly in the kernel do-block and captured as shared data (no baked
+`@deffun` constants). Returns a `BRMI`; lower with `SBBRMI(wastewater_brm_model())`.
+"""
+function wastewater_brm_model(data = wastewater_brm_fixture())
+    @brm data begin
+        sigma_obs ~ Exponential(1.0)                 # measurement noise (log scale)
+        log_scale ~ Normal(0.0, 1.0)                 # load -> concentration scaling
+        log_rt ~ 1 + hsgp(time_x; k = 10)            # smooth log-Rt over time
+        log_I0 ~ 1 + (1 | site)                      # per-site seeding
+        conc ~ kernel(t_grid, dv, ragged(log_rt, time_site), log_I0) do ts, yy, logRt_i, lI0
+            infections = ww_renewal(logRt_i, g, exp(lI0))   # g captured as data
+            load = ww_shed(infections, sh)                   # sh captured as data
+            yy ~ normal(log(load) + log_scale, sigma_obs)
+            load
+        end
+    end
+end

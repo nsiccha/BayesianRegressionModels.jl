@@ -408,11 +408,19 @@ _brm(x::Expr; df=nothing) = begin
     lhs, x = x.head == :(=) ? x.args : (:($(gensym("model"))(__df__)), x)
     alllocals = OrderedDict{Symbol,Symbol}()
     jointkeys = Set{Symbol}()
-    info = (;alllocals, jointkeys)
+    captures = Set{Symbol}()
+    info = (;alllocals, jointkeys, captures)
     x = parse!(x; info)
     nonlocals = [key for (key, value) in pairs(alllocals) if value == :nonlocal]
     maybelocals = [key for (key, value) in pairs(alllocals) if value == :maybelocal]
-    finalize = :($_expand_nested_predictor_formulas((;$(keys(alllocals)...))))
+    # kernel(...) do-block captures: body free-symbols that are NOT already a
+    # formula name. `capturedata` keeps only those present as df columns, so a
+    # do-block param, cell-local, or typo that is not a column is silently
+    # dropped (and a non-column typo still errors loudly at the backend/StanBlocks
+    # trace, exactly as before this capture path existed).
+    real_captures = sort!(collect(setdiff(captures, keys(alllocals))))
+    finalize = :($_expand_nested_predictor_formulas(
+        $Base.merge((;$(keys(alllocals)...)), __caps__)))
     # ONE shared builder body, parameterised on the `__df__` symbol. Nonlocals
     # bind via the @getproperty (hasproperty→MissingColumn) fallback so a name
     # that isn't a df column (e.g. a multi-equation predictor/param like
@@ -425,6 +433,7 @@ _brm(x::Expr; df=nothing) = begin
         [:($nonlocal = @getproperty __ddf__.$nonlocal) for nonlocal in nonlocals]...,
         :((;$(maybelocals...)) = $maybedata(__df__)),
         x,
+        :(__caps__ = $capturedata(__df__, ($(map(QuoteNode, real_captures)...),))),
         finalize,
     )
     if isnothing(df)
@@ -764,6 +773,14 @@ parselocals!(x::Expr; info, val) = if Meta.isexpr(x, :->)
     # block and its body is verbatim SLIC — registering those symbols as data
     # columns would be wrong. Genuine outer params are registered by their own
     # `~`/`=` lines.
+    #
+    # But a FREE reference in the cell body to a shared model-data vector (e.g. a
+    # generation-interval PMF) IS a capture. Collect the candidate names; `_brm`
+    # keeps only those that are real df columns AND are not formula names, then
+    # registers them as shared data so the emitted plate cell resolves them the
+    # way a `plate` captures a `@slic` data kwarg. Cell params/locals and typos
+    # that are not columns fall away in `_brm`.
+    hasproperty(info, :captures) && _collect_capture_syms!(info.captures, x.args[2])
     x
 elseif _is_nested_brm(x)
     parselocals!(_nested_brm_payload(x); info, val)
@@ -877,6 +894,47 @@ to surface response-side names that may be data (observed) or
 parameters (sampled).
 """
 maybedata(x) = MaybeData(x)
+
+"""
+    capturedata(df, names::Tuple) -> NamedTuple
+
+Bind the subset of `names` that ARE columns of `df` as [`NamedColumn`](@ref)s
+over [`DataColumn`](@ref)s, skipping absent names. Used by [`@brm`](@ref) to
+register a `kernel(...)` do-block's free references to SHARED model-data vectors
+(e.g. a generation-interval / delay PMF) as data, so the emitted plate cell
+captures them the same way a `plate` captures a `@slic` data kwarg. A name that
+is not a column is dropped here and left for the backend to resolve (a builtin,
+or a loud "not found" at trace) — so this never turns a typo or a cell-local
+into silent data.
+"""
+capturedata(df, names::Tuple) = (;
+    (n => NamedColumn(n, DataColumn(getproperty(df, n)))
+     for n in names if hasproperty(df, n))...)
+
+# Collect bare Symbols in ARGUMENT positions (never call heads) inside a
+# `do`-block cell body — the candidate names a kernel cell references freely.
+# `_brm` keeps only those that are real df columns (via `capturedata`) and are not
+# themselves formula names; do-block params and cell-locals that are not columns
+# fall away there, so no exclusion set is needed here. Mirrors `parselocals!`'s
+# call-head skipping so a function name (`exp`, `renewal`) is never captured.
+_collect_capture_syms!(acc, x) = nothing
+_collect_capture_syms!(acc, x::Symbol) = (push!(acc, x); nothing)
+function _collect_capture_syms!(acc, x::Expr)
+    if Meta.isexpr(x, :->)
+        _collect_capture_syms!(acc, x.args[2])
+    elseif Meta.isexpr(x, (:call, :kw))
+        for a in x.args[2:end]
+            _collect_capture_syms!(acc, a)
+        end
+    elseif Meta.isexpr(x, :.)
+        _collect_capture_syms!(acc, x.args[1])
+    else
+        for a in x.args
+            _collect_capture_syms!(acc, a)
+        end
+    end
+    nothing
+end
 
 """
     AbstractColumn
