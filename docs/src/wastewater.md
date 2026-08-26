@@ -9,6 +9,10 @@ selected Turing model. The build reads the declaration directly from the
 checked-in reproduction script, so the displayed BRM source cannot drift from
 the executable source.
 
+A **parallel StanBlocks-native port** of the EpiSewer library is at
+[StanBlocks — EpiSewer case study](https://nsiccha.github.io/StanBlocks.jl/dev/examples/case-studies/episewer);
+the full multi-stream CDC model is on the [CDC ww-inference page](/wastewater-cdc).
+
 The model has three EpiSewer modules:
 
 1. **Infection model** — a renewal process. Latent incidence follows
