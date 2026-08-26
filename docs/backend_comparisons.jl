@@ -207,6 +207,28 @@ function slic_model_panes(mod::Module, code::AbstractString, model_name::Symbol;
     ])
 end
 
+"""
+Render a StanBlocks `compile_slic_bundle` model (a multi-part `@slic`/`@deffun`
+workspace that is not a single `@brm` or `@slic` function): `include` its source file,
+show the parent-body source held in `body_name`, then the generated Stan from
+`builder_name()` (a zero-arg builder returning the bundle result with a `.code`
+field). Two panes — there is no `@brm` authoring pane or Turing pane. Errors closed.
+"""
+function bundle_model_panes(mod::Module, include_relpath::AbstractString,
+                            body_name::Symbol, builder_name::Symbol; title)
+    Core.eval(mod, :(using BayesianRegressionModels, Distributions, StanBlocks))
+    path = normpath(joinpath(REPOSITORY_ROOT, include_relpath))
+    Base.invokelatest(Base.include, mod, path)
+    body = strip(Core.eval(mod, body_name), '\n')
+    result = Base.invokelatest(Core.eval(mod, builder_name))
+    stan_source = strip(result.code, '\n')
+    return Markdown.MD([
+        Markdown.Paragraph([Markdown.Bold(string(title))]),
+        Markdown.Code("julia", body),
+        Markdown.Code("stan", stan_source),
+    ])
+end
+
 """Assert that a generated page contains complete required Stan comparisons."""
 function validate_required_stan_outputs(path::AbstractString,
                                         brmi_names::Tuple)

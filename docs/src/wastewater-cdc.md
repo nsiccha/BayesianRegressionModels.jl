@@ -94,21 +94,15 @@ Main.BRMDocsComparisons.slic_model_panes(
 
 The [StanBlocks port](https://nsiccha.github.io/StanBlocks.jl/dev/examples/case-studies/wastewater)
 expresses the *same math* with the same module decomposition (a renewal scan, AR
-processes, shedding/delay convolutions), and differs in **one** place — how the
-subpopulation axis is written:
-
-- **here (BRM):** `I_mat ~ plate(ww; outer=(K,)) do wwi … end`, one independent cell
-  per subpopulation, aggregated as `I_agg = I_mat * w`. `plate` is BRM's idiomatic
-  per-group construct, and it is *load-bearing*: the per-subpopulation **sampled**
-  parameters (`eps_d`, `log_I0`, `logM_k`, …) are introduced inside the cell, which a
-  `@deffun` cannot do (`@deffun` bodies have no `~`). This mirrors the CDC original's
-  per-subpopulation *loop*.
-- **StanBlocks:** an internal `@deffun` subpopulation loop returning a
-  `tuple(matrix, matrix)` — closer to the CDC original's per-subpopulation *tuple
-  return*.
-
-Both are faithful; the difference is each package expressing the same loop in its
-natural shape, and is intentional rather than an artifact.
+processes, shedding/delay convolutions), and — after a coordinated convergence — the
+**same subpopulation-axis idiom**: both use `plate` over the K subpopulations
+(`I_mat ~ plate(…) do … end`, then `I_mat * w`), with the within-subpopulation time
+recurrence in a `@deffun` the cell calls. `plate` is load-bearing for this shape: the
+per-subpopulation **sampled** parameters (`eps_d`, `log_I0`, `logM_k`, …) are
+introduced inside the cell, which a `@deffun` cannot do (`@deffun` bodies have no
+`~`). The realized per-subpopulation `effective_Rt` stays internal to the renewal
+scan on both sides (it isn't used in any likelihood). So the two ports are
+structurally aligned.
 
 ## Provenance
 
