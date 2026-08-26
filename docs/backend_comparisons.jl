@@ -185,6 +185,28 @@ function comparison(mod::Module, code::AbstractString, brmi_name::Symbol;
     ])
 end
 
+"""
+Render a StanBlocks-backend (`@slic`) model that is NOT expressed through the `@brm`
+formula surface: its exact model source (read from the repository, drift-proof) plus
+the generated Stan it emits. There is no `@brm` authoring pane or Turing pane because
+such a model does not go through the formula DSL — this is the honest two-pane view
+for a model that lives at BRM's backend layer. Errors if the emission fails.
+"""
+function slic_model_panes(mod::Module, code::AbstractString, model_name::Symbol;
+                          title=replace(string(model_name), '_' => ' '))
+    displayed = strip(code, '\n')
+    Core.eval(mod, :(using BayesianRegressionModels, Distributions, StanBlocks))
+    evaluate_source(mod, displayed)
+    candidate = Core.eval(mod, model_name)
+    model = candidate isa Function ? Base.invokelatest(candidate) : candidate
+    stan_source = strip(Base.invokelatest(BRM.stan_code, model), '\n')
+    return Markdown.MD([
+        Markdown.Paragraph([Markdown.Bold(string(title))]),
+        Markdown.Code("julia", displayed),
+        Markdown.Code("stan", stan_source),
+    ])
+end
+
 """Assert that a generated page contains complete required Stan comparisons."""
 function validate_required_stan_outputs(path::AbstractString,
                                         brmi_names::Tuple)

@@ -52,6 +52,7 @@ makedocs(
         "Feature atlas" => "feature-atlas.md",
         "Warfarin PK/PD" => "warfarin.md",
         "Wastewater Rt" => "wastewater.md",
+        "CDC ww-inference" => "wastewater-cdc.md",
         "Turing backend" => "turing-backend.md",
         "Gallery" => "gallery.md",
         "API" => "api.md",
