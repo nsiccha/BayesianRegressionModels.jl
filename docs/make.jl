@@ -53,6 +53,7 @@ makedocs(
         "Warfarin PK/PD" => "warfarin.md",
         "Wastewater Rt" => "wastewater.md",
         "CDC ww-inference" => "wastewater-cdc.md",
+        "Grey-seal IPM" => "seal-ipm.md",
         "Turing backend" => "turing-backend.md",
         "Gallery" => "gallery.md",
         "API" => "api.md",
