@@ -199,7 +199,7 @@ function slic_model_panes(mod::Module, code::AbstractString, model_name::Symbol;
     evaluate_source(mod, displayed)
     candidate = Core.eval(mod, model_name)
     model = candidate isa Function ? Base.invokelatest(candidate) : candidate
-    stan_source = strip(Base.invokelatest(BRM.stan_code, model), '\n')
+    stan_source = strip(Base.invokelatest(StanBlocks.stan_code, model), '\n')
     return Markdown.MD([
         Markdown.Paragraph([Markdown.Bold(string(title))]),
         Markdown.Code("julia", displayed),
