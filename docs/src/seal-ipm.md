@@ -8,10 +8,13 @@ streams. It is the most complete demonstration that BRM's backend hosts a real,
 research-grade state-space model, and it is verified (assembled + `stanc`-clean, ~52 KB
 of Stan) by `test/seal_ipm.jl`.
 
-Like the [full CDC ww-inference model](/wastewater-cdc), it is **not** a `@brm` formula
-model — the multi-stream state-space structure and the parameter-carrying scan exceed
-the formula DSL — so it lives at BRM's `@slic` / `@deffun` backend layer, and the view
-below is the two panes that apply: the model source, and the Stan it emits.
+Like the [full CDC ww-inference model](/wastewater-cdc), it is authored one layer down
+— directly on BRM's StanBlocks backend (`@slic` + `@deffun`) rather than the `@brm`
+formula surface — because the multi-stream, parameter-carrying state-space shape isn't
+something today's formula terms compose directly. That is an authoring choice about the
+current surface (which is extensible), not a fundamental limit; there is simply no
+`@brm` source pane, so the view below is the two panes that apply: the model source and
+the Stan it emits.
 
 A **parallel StanBlocks-native port** of the same spotlight is at
 [StanBlocks — grey-seal IPM case study](https://nsiccha.github.io/StanBlocks.jl/dev/examples/case-studies/grey-seal-ipm):
