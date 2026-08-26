@@ -8389,7 +8389,7 @@ end
 # phi / epsilon parameters and returns the per-row u[t] as a single length-N
 # column. popefs multiplies by an overall beta -- harmless, but a direct-
 # summand variant would skip it.
-_sb_predictor_term!(stmts, data, ::typeof(ar), t; kwargs...) = begin
+_sb_predictor_term!(stmts, data, ::typeof(ar), t; target=nothing, kwargs...) = begin
     args = getargs(t)
     kw = getkwargs(t)
     p = get(kw, :p, 1)
@@ -8400,7 +8400,12 @@ _sb_predictor_term!(stmts, data, ::typeof(ar), t; kwargs...) = begin
     # for named data columns, but be defensive -- the submodel uses it as a
     # length probe via `num_elements(time)`.
     data[xname] = collect(Float64, raw)
-    col_name = Symbol(:ar_, xname)
+    # Namespace the AR(1) column (and thus the `_sb_ar1` phi/epsilon parameters it
+    # owns) by the RESPONSE, not just the time column: two `ar(time; p=1)` terms
+    # over the SAME time axis on different responses (e.g. a shared-Rt model with
+    # `log_ru ~ 1 + ar(t)` AND `logit_ihr ~ 1 + ar(t)`) would otherwise both emit
+    # `ar_<t> ~ _sb_ar1(...)` and collide (`name ∉ keys(info)`).
+    col_name = isnothing(target) ? Symbol(:ar_, xname) : Symbol(:ar_, target, :_, xname)
     push!(stmts, :($col_name ~ _sb_ar1(; time=$xname)))
     col_name
 end

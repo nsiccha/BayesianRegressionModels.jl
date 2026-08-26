@@ -40,6 +40,7 @@
 
 using BayesianRegressionModels
 using StanBlocks
+using Distributions: LogNormal   # BRM re-exports Normal/Exponential; LogNormal is not
 
 StanBlocks.@deffun begin
     # Differenced-AR on log scale: x[i]=x[i-1]+beta*(x[i-1]-x[i-2])+sigma*eps[i].
@@ -108,6 +109,16 @@ StanBlocks.@deffun begin
         end
         l
     end
+    # Jurisdiction aggregate: population-weighted sum across subpopulation columns
+    # of the collected infection matrix. `I_mat` is [nt x K] (one column per subpop),
+    # `w` the population weights; `I_mat * w` is Stan matrix-vector product -> vector[nt].
+    # (Used by the @brm surface form below, where `*` at the formula level is the
+    # Wilkinson interaction operator, not matmul — so the matmul lives here.)
+    wsum(I_mat::matrix[m, K], w::vector[K])::vector[m] = I_mat * w
+    # Expected admissions from the aggregate latent infections: day-of-week multiplier
+    # exp(log_dow), AR(1)-logit IHR inv_logit(logit_p), and jurisdiction population.
+    ihr_scale(lat::vector[nt], logit_p::vector[nt], log_dow::vector[nt],
+              npop::real)::vector[nt] = npop * (exp(log_dow) .* inv_logit(logit_p) .* lat)
 end
 
 """
@@ -194,4 +205,107 @@ function cdc_ww_inference_model(data = cdc_ww_inference_fixture())
         phi_h ~ normal(0.0, 1.0; lower = 0.0)
         h ~ neg_binomial_2(n_pop * H, phi_h)
     end
+end
+
+# ---------------------------------------------------------------------------
+# The SAME full CDC model expressed on the `@brm` FORMULA surface.
+#
+# This is the direct refutation of "the CDC model cannot be a @brm model": every
+# coupled piece is a formula-level statement. The one faithful re-parameterization
+# vs. the @slic form is the reference log-Rᵘ prior — the @slic version uses a
+# differenced-AR (`dar_logru`, which needs a top-level innovation vector the formula
+# surface does not yet declare); the @brm form uses the built-in `ar(time; p=1)`
+# autoregressive term (AR(1) around a mean), a faithful autoregressive-Rt prior in
+# the same spirit. The day-of-week effect is a log-additive `factor(dow)` (the
+# regression-idiomatic form of the @slic Dirichlet mean-1 multiplier).
+#
+# How each formula seam carries the model:
+#   - shared daily log-Rᵘ .............. `log_ru ~ 1 + ar(time_grid; p=1)`, CLOSED
+#                                        OVER inside the kernel cell (top-level
+#                                        latents/params close over a plate cell);
+#   - infection feedback + renewal ..... `renewal_feedback` @deffun in the cell;
+#   - multi-subpopulation hierarchy .... `kernel(...) do ... end` broadcasts the
+#                                        per-subpop renewal+WW cell; the per-subpop
+#                                        AR(1) deviation is drawn IN the cell
+#                                        (`eps_d ~ std_normal()` + `ar1_dev`); the
+#                                        `(1|site)` seeding intercept derives the
+#                                        kernel grouping; cells collect to a matrix;
+#   - per-subpop wastewater ............ censored-lognormal `~` INSIDE the cell;
+#   - jurisdiction aggregate ........... `I_agg = wsum(I_mat, w)` (population-weighted);
+#   - hospital admissions .............. delay convolution + `ar(...)`-logit IHR +
+#                                        `factor(dow)` day-of-week + `NegativeBinomial2`
+#                                        on the dense aggregate.
+#
+# Verified: transpile + stanc + finite BridgeStan density/gradient; see
+# `test/cdc_ww_inference.jl`. NOT sampled — the deliverable is the model.
+"""
+    cdc_ww_brm_fixture(; K = 3, nt = 84, n_seed = 15)
+
+Dataset for [`cdc_ww_brm_model`](@ref), shaped for the `@brm` formula surface: `K`
+catchment subpopulations (`site`), a per-site daily time grid `t_grid`, per-site
+log-concentration series `ww`, a shared jurisdiction time frame `time_grid`, the
+day-of-week index `dow`, the daily admissions count `hosp`, the fixed
+generation-interval / shedding / delay PMFs `g`/`sh`/`dl`, population weights `w`,
+and the scalar constants (`nt`, `n_pop`) the kernel cell references.
+"""
+function cdc_ww_brm_fixture(; K = 3, nt = 84, n_seed = 15)
+    g  = [0.02, 0.06, 0.12, 0.16, 0.16, 0.14, 0.11, 0.08, 0.06, 0.04, 0.03, 0.02]
+    sh = [0.01, 0.05, 0.12, 0.17, 0.17, 0.14, 0.11, 0.08, 0.06, 0.05, 0.03, 0.01]
+    dl = [0.01, 0.03, 0.06, 0.11, 0.14, 0.13, 0.12, 0.10, 0.08, 0.07, 0.06, 0.05, 0.03, 0.01]
+    sites = string.('a':('a' + (K - 1)))
+    (;
+        site = sites,
+        n_seed = n_seed,
+        t_grid = [collect(1.0:nt) for _ in 1:K],
+        ww = [[log(30.0) + 0.7 * exp(-((t - 45.0) / 15)^2) + 0.05 * sin(t / 4) for t in 1:nt]
+              for _ in 1:K],
+        time_grid = collect(1.0:nt),
+        dow = [((t - 1) % 7) + 1 for t in 1:nt],
+        hosp = [max(0, round(Int, 20 + 40 * exp(-((t - 50.0) / 14)^2))) for t in 1:nt],
+        g = g, sh = sh, dl = dl,
+        w = (ws = [K - i + 1.0 for i in 1:K]; ws ./ sum(ws)),
+        nt = nt, n_pop = 500000.0,
+    )
+end
+
+"""
+    cdc_ww_brm_model([df]) -> SBBRMI
+
+The full CDC `ww-inference-model` on the `@brm` formula surface, returned as an
+`SBBRMI` (its `.model` is the StanBlocks `StanModel`). See the block comment above
+for how each of the four coupled pieces maps onto a formula seam. Re-bind data with
+`cdc_ww_brm_model(cdc_ww_brm_fixture(; K = 2, nt = 56))`.
+"""
+function cdc_ww_brm_model(df = cdc_ww_brm_fixture(); mod::Module = @__MODULE__)
+    brmi = @brm df begin
+        # infection-process + subpopulation-hierarchy hyperparameters
+        gamma       ~ LogNormal(-4.0, 0.5)          # infection feedback strength
+        phi_delta   ~ Exponential(2.0)              # per-subpop AR(1) persistence
+        sigma_delta ~ Exponential(4.0)              # per-subpop AR(1) scale
+        log_scale   ~ Normal(0.0, 1.0)              # log genomes / per-person volume
+        sigma_ww    ~ Exponential(1.0)              # wastewater measurement SD
+        # shared reference daily log-Rᵘ (autoregressive), closed over in each cell
+        log_ru      ~ 1 + ar(time_grid; p = 1)
+        # per-subpopulation seeding intercept — derives the kernel grouping
+        log_I0      ~ 1 + (1 | site)
+        # per-subpopulation renewal + wastewater; collect I_k trajectories into a matrix
+        I_mat ~ kernel(t_grid, ww, log_I0) do ts, wwi, lI0
+            eps_d::vector[nt] ~ std_normal()
+            delta_k = ar1_dev(eps_d, phi_delta, sigma_delta)
+            logRt_k = log_ru + delta_k
+            I_k = renewal_feedback(logRt_k, g, gamma, exp(lI0), 0.0, n_seed)
+            C_k = shed_convolve(I_k, sh)
+            wwi ~ censored(normal, log(C_k) + log_scale, sigma_ww; lower = log(2.0))
+            I_k
+        end
+        # jurisdiction aggregate infections (population-weighted across subpops)
+        I_agg = wsum(I_mat, w)
+        # hospital admissions on the aggregate: delay + AR(1)-logit IHR + day-of-week + NB
+        logit_ihr ~ 1 + ar(time_grid; p = 1)
+        log_dow   ~ 0 + factor(dow)
+        phi_h     ~ Exponential(1.0)
+        lat       = delay_convolve(I_agg, dl)
+        hosp ~ NegativeBinomial2(ihr_scale(lat, logit_ihr, log_dow, n_pop), phi_h)
+    end
+    SBBRMI(brmi; mod)
 end
