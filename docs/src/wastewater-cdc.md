@@ -13,26 +13,33 @@ A **parallel StanBlocks-native port** of the same CDC model lives at
 same math, expressed in StanBlocks' own idiom (see the note on the subpopulation
 axis below).
 
-## Why this one is NOT the four-pane view
+## Why this one is authored at the backend layer
 
-Every other model page uses the four-pane split — *`@brm` authoring → StanBlocks →
-Stan → Turing*. That split is, by definition, a comparison of a **`@brm` formula
-model** across backends. This model is not a `@brm` formula model, and cannot be:
-its structure exceeds the formula DSL. Specifically —
+Most model pages use the four-pane split — *`@brm` authoring → StanBlocks → Stan →
+Turing* — a comparison of a **`@brm` formula model** across backends. This model is
+authored one layer down, directly on BRM's StanBlocks backend (`@slic` + `@deffun`),
+so there is no `@brm` formula source to put in the first pane; the view below is the
+two panes that apply.
 
-- it has a **multi-level** shape: independent per-subpopulation renewal cells whose
-  outputs are **aggregated** (population-weighted) and then feed a **second**
-  observation stream (hospitalizations) at the jurisdiction level; and
-- it carries several **latent parameter processes** — a differenced-AR weekly
-  log-Rᵘ, per-subpopulation AR(1) deviations, an AR(1)-logit IHR, a day-of-week
-  Dirichlet — that are not formula terms.
+That is an authoring choice, not a wall. Two things pushed it below the *current*
+formula surface:
 
-So it lives at BRM's **backend layer** (`@slic` + `@deffun` over StanBlocks), which
-*can* host it. The honest rendering below is therefore the two panes that apply: the
-exact model source, and the Stan it emits (whose `functions {}` block contains the
-`@deffun` scan recipes). This is the concrete answer to "how well can BRM support
-these models": the backend hosts the full model; the formula surface does not reach
-it.
+- a **multi-level** shape — independent per-subpopulation renewal cells whose outputs
+  are **aggregated** (population-weighted) and then feed a **second** observation
+  stream (hospitalizations) at the jurisdiction level; and
+- several **latent parameter processes** — a differenced-AR weekly log-Rᵘ,
+  per-subpopulation AR(1) deviations, an AR(1)-logit IHR, a day-of-week Dirichlet —
+  that today's formula terms don't compose directly.
+
+Neither is a fundamental limit of the DSL — the formula surface is extensible, and a
+single-catchment cut of this model *does* fit it (see [the EpiSewer page](/wastewater);
+the kernel data-vector capture that page relies on was added for exactly this family).
+Growing the formula surface to reach the multi-level, multi-stream case is a real
+option, just larger than this port. Until then, the honest and complete way to render
+the full model is its exact `@slic` source and the Stan it emits (whose `functions {}`
+block carries the `@deffun` scan recipes). Net: BRM's backend hosts the full model
+today; expressing it through the formula surface is a matter of extending that surface,
+not of any impossibility.
 
 ## The model
 
