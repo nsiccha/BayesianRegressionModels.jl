@@ -8,6 +8,11 @@ from the upstream `model_definition.md`, and it is verified end to end (transpil
 `stanc` + finite BridgeStan density/gradient, dim ≈ 380) by
 `test/cdc_ww_inference.jl`.
 
+A **parallel StanBlocks-native port** of the same CDC model lives at
+[StanBlocks — wastewater case study](https://nsiccha.github.io/StanBlocks.jl/dev/examples/case-studies/wastewater):
+same math, expressed in StanBlocks' own idiom (see the note on the subpopulation
+axis below).
+
 ## Why this one is NOT the four-pane view
 
 Every other model page uses the four-pane split — *`@brm` authoring → StanBlocks →
@@ -84,6 +89,26 @@ Main.BRMDocsComparisons.slic_model_panes(
     title="Full CDC ww-inference model (@slic backend)",
 )
 ```
+
+## Relation to the StanBlocks port
+
+The [StanBlocks port](https://nsiccha.github.io/StanBlocks.jl/dev/examples/case-studies/wastewater)
+expresses the *same math* with the same module decomposition (a renewal scan, AR
+processes, shedding/delay convolutions), and differs in **one** place — how the
+subpopulation axis is written:
+
+- **here (BRM):** `I_mat ~ plate(ww; outer=(K,)) do wwi … end`, one independent cell
+  per subpopulation, aggregated as `I_agg = I_mat * w`. `plate` is BRM's idiomatic
+  per-group construct, and it is *load-bearing*: the per-subpopulation **sampled**
+  parameters (`eps_d`, `log_I0`, `logM_k`, …) are introduced inside the cell, which a
+  `@deffun` cannot do (`@deffun` bodies have no `~`). This mirrors the CDC original's
+  per-subpopulation *loop*.
+- **StanBlocks:** an internal `@deffun` subpopulation loop returning a
+  `tuple(matrix, matrix)` — closer to the CDC original's per-subpopulation *tuple
+  return*.
+
+Both are faithful; the difference is each package expressing the same loop in its
+natural shape, and is intentional rather than an artifact.
 
 ## Provenance
 
