@@ -46,8 +46,7 @@ end
 # weighted aggregate, and delay + AR(1)-logit IHR + factor(dow) + NB hospitalizations
 # on the dense jurisdiction aggregate). Refutes "the CDC model cannot be a @brm model".
 @testset "CDC ww-inference — @brm formula-surface form" begin
-    sb = cdc_ww_brm_model()
-    m = sb.model
+    m = SBBRMI(cdc_ww_brm_model()).model
     @test transpiles(m)
     @test compiles(m)
     @test cdc_stanc_ok(m)
@@ -55,7 +54,7 @@ end
 end
 
 @testset "CDC ww-inference — @brm form re-binds new data (different K / horizon)" begin
-    m = cdc_ww_brm_model(cdc_ww_brm_fixture(; K = 2, nt = 56)).model
+    m = SBBRMI(cdc_ww_brm_model(cdc_ww_brm_fixture(; K = 2, nt = 56))).model
     @test transpiles(m)
     @test cdc_stanc_ok(m)
 end

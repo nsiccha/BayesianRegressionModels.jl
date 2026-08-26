@@ -269,15 +269,15 @@ function cdc_ww_brm_fixture(; K = 3, nt = 84, n_seed = 15)
 end
 
 """
-    cdc_ww_brm_model([df]) -> SBBRMI
+    cdc_ww_brm_model([df]) -> BRMI
 
-The full CDC `ww-inference-model` on the `@brm` formula surface, returned as an
-`SBBRMI` (its `.model` is the StanBlocks `StanModel`). See the block comment above
-for how each of the four coupled pieces maps onto a formula seam. Re-bind data with
+The full CDC `ww-inference-model` on the `@brm` formula surface, returned as a
+`BRMI`; lower with `SBBRMI(cdc_ww_brm_model())`. See the block comment above for how
+each of the four coupled pieces maps onto a formula seam. Re-bind data with
 `cdc_ww_brm_model(cdc_ww_brm_fixture(; K = 2, nt = 56))`.
 """
-function cdc_ww_brm_model(df = cdc_ww_brm_fixture(); mod::Module = @__MODULE__)
-    brmi = @brm df begin
+function cdc_ww_brm_model(df = cdc_ww_brm_fixture())
+    @brm df begin
         # infection-process + subpopulation-hierarchy hyperparameters
         gamma       ~ LogNormal(-4.0, 0.5)          # infection feedback strength
         phi_delta   ~ Exponential(2.0)              # per-subpop AR(1) persistence
@@ -307,5 +307,4 @@ function cdc_ww_brm_model(df = cdc_ww_brm_fixture(); mod::Module = @__MODULE__)
         lat       = delay_convolve(I_agg, dl)
         hosp ~ NegativeBinomial2(ihr_scale(lat, logit_ihr, log_dow, n_pop), phi_h)
     end
-    SBBRMI(brmi; mod)
 end

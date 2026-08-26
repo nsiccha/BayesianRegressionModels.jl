@@ -9,6 +9,7 @@ const GENERATED_EXAMPLE_PAGES = [
     joinpath(@__DIR__, "src", "feature-atlas.md"),
     joinpath(@__DIR__, "src", "warfarin.md"),
     joinpath(@__DIR__, "src", "wastewater.md"),
+    joinpath(@__DIR__, "src", "wastewater-cdc.md"),
 ]
 const DOCS_MARKDOWN_PAGES = sort!(String[
     joinpath(root, file)
@@ -70,6 +71,11 @@ BRMDocsComparisons.validate_required_stan_outputs(
 BRMDocsComparisons.validate_required_stan_outputs(
     joinpath(@__DIR__, "build", ".documenter", "wastewater.md"),
     (:wastewater_brm_model,),
+)
+
+BRMDocsComparisons.validate_required_stan_outputs(
+    joinpath(@__DIR__, "build", ".documenter", "wastewater-cdc.md"),
+    (:cdc_ww_brm_model,),
 )
 
 # Copy committed live-brm recordings into the VitePress build tree so
