@@ -13,6 +13,11 @@ model — the multi-stream state-space structure and the parameter-carrying scan
 the formula DSL — so it lives at BRM's `@slic` / `@deffun` backend layer, and the view
 below is the two panes that apply: the model source, and the Stan it emits.
 
+A **parallel StanBlocks-native port** of the same spotlight is at
+[StanBlocks — grey-seal IPM case study](https://nsiccha.github.io/StanBlocks.jl/dev/examples/case-studies/grey-seal-ipm):
+same verbatim SlicTranspiler source, so the two ports are faithful to each other and to
+the upstream.
+
 ## The model
 
 A **year-recursive, age/sex-structured** population process, observed through eight
