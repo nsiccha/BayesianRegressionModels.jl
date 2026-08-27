@@ -178,8 +178,10 @@ function warfarin_pk_brmi(data = warfarin_fixture())
 
         lag_logit ~ 1 + (1 | tlag_bsv | subject)
         log_ka ~ 1 + (1 | ka_bsv | subject)
-        log_cl0 ~ 1 + (1 | cl_bsv | subject)
-        log_v0 ~ 1 + (1 | v_bsv | subject)
+        # Allometric weight scaling as a formula OFFSET (fixed exponents 0.75 / 1.0),
+        # not hand-wired in the kernel cell: clearance ~ weight^0.75, volume ~ weight^1.
+        log_cl0 ~ 1 + offset(0.75 * log_weight_ratio) + (1 | cl_bsv | subject)
+        log_v0 ~ 1 + offset(log_weight_ratio) + (1 | v_bsv | subject)
 
         effect(lag_logit, :) ~ Normal(0.0, 2.0)
         effect(log_ka, :) ~ Normal(log(1.0), log(2.0) / 1.96)
@@ -191,15 +193,15 @@ function warfarin_pk_brmi(data = warfarin_fixture())
         sd(:, v_bsv) ~ Normal(0.0, 0.5)
 
         pk_pred ~ kernel(
-            pk_time, dose, log_weight_ratio, pk_dv,
+            pk_time, dose, pk_dv,
             lag_logit, log_ka, log_cl0, log_v0,
-        ) do times, dose_i, log_weight_i, observed,
+        ) do times, dose_i, observed,
              lag_i, lka_i, lcl_i, lv_i
+            # log_cl0 / log_v0 already carry the allometric offset (formula term above),
+            # so the cell uses them directly — no weight scaling hand-wired here.
             log_tlag_i = log_inv_logit(lag_i)
-            log_cl_i = lcl_i + 0.75 * log_weight_i
-            log_v_i = lv_i + log_weight_i
             prediction = exp(warfarin_pk_logconcentration(
-                times, log(dose_i), lka_i, log_cl_i, log_v_i, log_tlag_i,
+                times, log(dose_i), lka_i, lcl_i, lv_i, log_tlag_i,
             )) + 1e-5
             observed ~ warfarin_gamma2_overdisp(
                 prediction, sigma_pk, kappa_pk * 25.0,

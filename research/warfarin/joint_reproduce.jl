@@ -24,8 +24,10 @@ function warfarin_joint_brmi(data = warfarin_fixture())
 
         lag_logit ~ 1 + (1 | tlag_bsv | subject)
         log_ka ~ 1 + (1 | ka_bsv | subject)
-        log_cl0 ~ 1 + (1 | cl_bsv | subject)
-        log_v0 ~ 1 + (1 | v_bsv | subject)
+        # Allometric weight scaling as a formula OFFSET (fixed exponents 0.75 / 1.0),
+        # shared by both the PK and PD cells below — not hand-wired in either cell.
+        log_cl0 ~ 1 + offset(0.75 * log_weight_ratio) + (1 | cl_bsv | subject)
+        log_v0 ~ 1 + offset(log_weight_ratio) + (1 | v_bsv | subject)
         log_r0 ~ 1 + (1 | r0_bsv | subject)
         log_inv_kout ~ 1 + (1 | kout_bsv | subject)
         log_ec50 ~ 1 + (1 | ec50_bsv | subject)
@@ -46,15 +48,13 @@ function warfarin_joint_brmi(data = warfarin_fixture())
         sd(:, ec50_bsv) ~ Normal(0.0, 0.5)
 
         pk_pred ~ kernel(
-            pk_time, dose, log_weight_ratio, pk_dv,
+            pk_time, dose, pk_dv,
             lag_logit, log_ka, log_cl0, log_v0,
-        ) do times, dose_i, log_weight_i, observed,
+        ) do times, dose_i, observed,
              lag_i, lka_i, lcl_i, lv_i
             log_tlag_i = log_inv_logit(lag_i)
-            log_cl_i = lcl_i + 0.75 * log_weight_i
-            log_v_i = lv_i + log_weight_i
             prediction = exp(warfarin_pk_logconcentration(
-                times, log(dose_i), lka_i, log_cl_i, log_v_i, log_tlag_i,
+                times, log(dose_i), lka_i, lcl_i, lv_i, log_tlag_i,
             )) + 1e-5
             pk_pointwise_loglik = warfarin_gamma2_overdisp_lpdfs(
                 observed, prediction, sigma_pk, kappa_pk * 25.0,
@@ -66,17 +66,15 @@ function warfarin_joint_brmi(data = warfarin_fixture())
         end
 
         pd_pred ~ kernel(
-            pd_time, dose, log_weight_ratio, pd_dv,
+            pd_time, dose, pd_dv,
             lag_logit, log_ka, log_cl0, log_v0,
             log_r0, log_inv_kout, log_ec50,
-        ) do times, dose_i, log_weight_i, observed,
+        ) do times, dose_i, observed,
              lag_i, lka_i, lcl_i, lv_i,
              lr0_i, linvkout_i, lec50_i
             log_tlag_i = log_inv_logit(lag_i)
-            log_cl_i = lcl_i + 0.75 * log_weight_i
-            log_v_i = lv_i + log_weight_i
             prediction = warfarin_turnover_prediction(
-                times, log(dose_i), lka_i, log_cl_i, log_v_i,
+                times, log(dose_i), lka_i, lcl_i, lv_i,
                 log_tlag_i, lr0_i, linvkout_i, lec50_i,
             )
             pd_pointwise_loglik = warfarin_gamma2_overdisp_lpdfs(

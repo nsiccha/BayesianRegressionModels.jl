@@ -55,8 +55,11 @@ The reviewed two-stage source revision is `9fa8f77`.
 ### Stage 1: population PK
 
 The PK stage is a one-compartment oral model with first-order absorption and a
-bounded lag. Clearance and volume use fixed allometric weight effects. Four
-independent subject effects modify lag, absorption, clearance, and volume.
+bounded lag. Clearance and volume carry fixed allometric weight effects as formula
+`offset` terms — `log_cl0 ~ 1 + offset(0.75 * log_weight_ratio) + (1|cl_bsv|subject)`
+and `log_v0 ~ 1 + offset(log_weight_ratio) + …` — rather than hand-wiring the weight
+scaling inside the kernel cell. Four independent subject effects modify lag,
+absorption, clearance, and volume.
 
 The declaration below is extracted verbatim from `warfarin_pk_brmi` in the
 reviewed source. Its `kernel(...)` cell evaluates one ragged
