@@ -62,6 +62,7 @@ export me, mi, s, t2, ar, mo, mo1, hsgp, OrderedLogistic, Ordinal,
        sb_group_demo, addprop
 # Hierarchical biomarker family — formula-surface markers for custom likelihood + submodel
 export TruncatedNormal, biomarker_hierarchical_parametric, kernel, ragged
+export brm_multinomial, brm_multinomial_lpmf, brm_multinomial_lpmfs, brm_multinomial_rng
 # Julia-native response-family composition. `truncated` and `censored` are the
 # exact Distributions.jl functions; `interval_censored` is BRM's formula marker
 # for row-wise interval evidence on either a response or a predictor.

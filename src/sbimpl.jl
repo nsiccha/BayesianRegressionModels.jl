@@ -594,6 +594,58 @@ StanBlocks.@deffun begin
     end
 end
 
+# Multinomial composition likelihood — a per-row K-category count response
+# `obs::int[nrow, K]`. Two dispatch methods on `probs`: SHARED (one `vector[K]`
+# simplex across all rows) delegates to StanBlocks' multi-row builtin; PER-ROW
+# (`matrix[nrow, K]`, row i its own simplex — e.g. a scan carrier like the seal's
+# per-year age composition) loops over rows. `Multinomial(N, probs)` routes here
+# (`_sb_lik_family!(::Type{<:Multinomial})`); StanBlocks dispatches by the Stan type
+# of `probs`. NOTE the `_rng` companions take a BARE type-TOKEN leading arg
+# (`int[nrow, K]`, no name) as every sized `_rng` builtin does (multinomial_rng,
+# builtin.jl) — a NAMED leading arg makes the auto-GQ `_gen` twin fail to type.
+StanBlocks.@deffun begin
+    @lhs @lpxf brm_multinomial_lpmf(obs::int[nrow, K], probs::matrix[nrow, K], N::int[nrow])::real = begin
+        ll = 0.0
+        for i in 1:nrow
+            ll = ll + multinomial_lpmf(obs[i], to_vector(probs[i, :]), N[i])
+        end
+        ll
+    end
+    @lhs brm_multinomial_lpmf(obs::int[nrow, K], probs::vector[K], N::int[nrow])::real =
+        multinomial_lpmf(obs, probs, N)
+    # pointwise (per-row) log-likelihood twin for the `_likelihood` generated quantity.
+    brm_multinomial_lpmfs(obs::int[nrow, K], probs::matrix[nrow, K], N::int[nrow])::vector[nrow] = begin
+        lls::vector[nrow]
+        for i in 1:nrow
+            lls[i] = multinomial_lpmf(obs[i], to_vector(probs[i, :]), N[i])
+        end
+        lls
+    end
+    brm_multinomial_lpmfs(obs::int[nrow, K], probs::vector[K], N::int[nrow])::vector[nrow] = begin
+        lls::vector[nrow]
+        for i in 1:nrow
+            lls[i] = multinomial_lpmf(obs[i], probs, N[i])
+        end
+        lls
+    end
+    # posterior-predictive (per-row) draw twin for the `_gen` generated quantity —
+    # BARE type-token leading arg.
+    brm_multinomial_rng(int[nrow, K], probs::matrix[nrow, K], N::int[nrow])::int[nrow, K] = begin
+        rv::int[nrow, K]
+        for i in 1:nrow
+            rv[i, :] = multinomial_rng(to_vector(probs[i, :]), N[i])
+        end
+        rv
+    end
+    brm_multinomial_rng(int[nrow, K], probs::vector[K], N::int[nrow])::int[nrow, K] = begin
+        rv::int[nrow, K]
+        for i in 1:nrow
+            rv[i, :] = multinomial_rng(probs, N[i])
+        end
+        rv
+    end
+end
+
 ranef_intercept_centered = StanBlocks.@slic begin
     log_scale ~ std_normal()
     xi ~ normal(0., exp(log_scale); n=n_groups)
@@ -9467,6 +9519,16 @@ _sb_stan_dist_args(::Type{<:NegativeBinomial}, args::Tuple{Any}) =
     (args[1], 1.0)
 _sb_stan_dist_args(::Type{<:NegativeBinomial}, args::Tuple{Any,Any}) =
     (args[1], _sb_stan_success_odds(args[2]))
+
+# Multinomial composition likelihood. `Multinomial(N, probs)` -> the `brm_multinomial`
+# density (above), which dispatches on the Stan type of `probs`: `vector[K]` (shared
+# simplex) or `matrix[nrow, K]` (per-row simplex, e.g. a scan carrier). Response `obs`
+# is a per-row `int[nrow, K]` count matrix.
+function _sb_lik_family!(stmts, target, ::Type{<:Multinomial}, args::Tuple{Any,Any}, data)
+    N_expr = _sb_scalar_expr(args[1], data)
+    probs_expr = _sb_scalar_expr(args[2], data)
+    _sb_lik_stan_exprs!(stmts, target, :brm_multinomial, (probs_expr, N_expr))
+end
 
 # Default: look up the Stan name from the table and emit
 # `target ~ <stan-name>(<lowered-args>...)` via `_sb_lik_stan!`. Families

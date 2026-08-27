@@ -27,3 +27,17 @@ end
     end
     @test cf_stanc_ok(m(df))
 end
+
+@testset "Multinomial composition obs — int[n,K] response, PER-ROW probs (matrix)" begin
+    K = 3; n = 12
+    probsmat = permutedims(reduce(hcat, [[0.3, 0.5, 0.2] .+ 0.05 * sin(t) for t in 1:n]))  # n x K per-row
+    probsmat = probsmat ./ sum(probsmat; dims = 2)                                          # renormalize rows
+    comps = [[6, 10, 4] for _ in 1:n]
+    compmat = permutedims(reduce(hcat, comps))
+    Nrow = [sum(c) for c in comps]
+    df = (; year = collect(1:n), comp = compmat, samp = Nrow, rowprobs = probsmat)
+    m(df) = @brm df begin
+        comp ~ Multinomial(samp, rowprobs)      # per-row simplex -> brm_multinomial matrix method
+    end
+    @test cf_stanc_ok(m(df))
+end
