@@ -9141,6 +9141,11 @@ _sb_stan_dist_name(::Type{<:BinomialLogit})       = :binomial_logit
 _sb_stan_dist_name(::Type{<:BetaBinomial})        = :beta_binomial
 _sb_stan_dist_name(::Type{<:Poisson})             = :poisson
 _sb_stan_dist_name(::Type{<:NegativeBinomial})    = :neg_binomial
+# Composition families. Distributions `Multinomial(n, p)` -> Stan
+# `multinomial(obs | probs, N)` (StanBlocks' 3-arg builtin; N explicit); the
+# per-row `int[n,K]` response form shares `probs` across rows.
+_sb_stan_dist_name(::Type{<:Multinomial})         = :multinomial
+_sb_stan_dist_name(::Type{<:Categorical})         = :categorical
 _sb_stan_dist_name(::Type) = nothing
 
 # Per-family argument normalization between Julia constructors and native Stan
@@ -9448,6 +9453,11 @@ _sb_stan_dist_args(::Type{<:Binomial}, args::Tuple{Any}) = (args[1], 0.5)
 _sb_stan_dist_args(::Type{<:Poisson}, ::Tuple{}) = (1.0,)
 
 _sb_stan_dist_args(::Type{<:VonMises}, args::Tuple{Any}) = (0.0, args[1])
+
+# Distributions `Multinomial(n, p)` -> StanBlocks `multinomial(obs | probs, N)`:
+# reorder to (probs, N) so the emitted `obs ~ multinomial(probs, N)` matches the
+# builtin `multinomial_lpmf(obs, probs, N)`.
+_sb_stan_dist_args(::Type{<:Multinomial}, args::Tuple{Any,Any}) = (args[2], args[1])
 
 # Distributions.jl `NegativeBinomial(r, p)` counts failures before `r`
 # successes.  Native Stan `neg_binomial(alpha, beta)` uses shape and inverse
