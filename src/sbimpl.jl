@@ -9496,6 +9496,18 @@ _record_scalar_data!(args...) = nothing
 # needed there.
 _sb_scalar_expr(x::ExprColumn, data) = begin
     f = getf(x)
+    # Body-level `state.field` / `state[i]` on a model value (macro.jl getproperty /
+    # getindex) render as Stan `.` / `[` so a `@deffun` struct/array return can be
+    # consumed directly — `state = scan(...); y ~ f(state.population_total)`.
+    if f === getproperty
+        obj, field = getargs(x)      # field is a QuoteNode(:name)
+        return Expr(:., _sb_scalar_expr(obj, data), field)
+    elseif f === getindex
+        obj = first(getargs(x))
+        idxs = getargs(x)[2:end]
+        return Expr(:ref, _sb_scalar_expr(obj, data),
+                    (_sb_scalar_expr(a, data) for a in idxs)...)
+    end
     op = f === (*) ? Symbol(".*") :
          f === (/) ? Symbol("./") :
          f

@@ -1165,48 +1165,31 @@ getop(x) = getf(x)
 getop(::ExprColumn{typeof(doublepipe)}) = :||
 getop(::ExprColumn{typeof(assign)}) = :(=)
 
-"""
-    _body_index_error(what, idx)
-
-Raise the actionable error for `x[i]` applied to a model value in a `@brm`
-**body** expression.
-
-A body-level `lhs = rhs` is evaluated as ordinary Julia, so `s[1]` lands on the
-[`NamedColumn`](@ref) / [`ExprColumn`](@ref) the formula built as a real Julia
-`getindex` — Stan is nowhere in sight yet. Without these methods that is a bare
-`MethodError: no method matching getindex(::NamedColumn{…}, ::Int64)` at
-`@brm`-eval time, before any backend runs, which says nothing about the
-body-versus-cell boundary that actually caused it (snag
-`indexing-a-simpl-addabf26`).
-
-Defined only on `NamedColumn` / `ExprColumn`, the two column types that carry
-model values. A `DataColumn` / `MaterializedColumn` wraps concrete Julia data,
-where a `MethodError` on `getindex` remains the honest answer.
-"""
-_body_index_error(what, idx) = error("""
-@brm: cannot index $(what === nothing ? "a derived model value" : "the model value `$what`") in a formula BODY expression$(isempty(idx) ? "" : " (`[$(join(idx, ", "))]`)").
-
-A body-level `lhs = rhs` is evaluated as ordinary JULIA, so this index lands on
-the column object the formula built rather than becoming Stan's `[`. Only a
-`kernel(...)` do-block is transpiled to Stan, so that is where an index belongs:
-
-    pred ~ kernel(t, dose, dv, log_CL) do ts, d, yy, lCL
-        log_F_diet_2 = log_F_magnitude * $(what === nothing ? "s" : what)[1]
-        ...
-    end
-
-Deriving it there does NOT cost you the name: it is emitted as a named
-transformed parameter `pred_log_F_diet_2` and is present in every posterior
-draw — only the `pred_` prefix differs from a body-level binding.
-
-Note that Stan vector FUNCTIONS do work in a body, written qualified —
-`StanBlocks.cumulative_sum(s)`, `StanBlocks.append_row(0.0, s)` — because
-StanBlocks declares them but does not export the bare names. Indexing has no
-such spelling; use the cell.
-""")
-
-Base.getindex(x::NamedColumn, i...) = _body_index_error(name(x), i)
-Base.getindex(x::ExprColumn, i...) = _body_index_error(nothing, i)
+# Body-level INDEX / FIELD access on a model value TRANSPILES to Stan.
+#
+# A body `lhs = rhs` is macro-processed, but `_x` leaves `.` / `[]` as ordinary
+# runtime operations on the evaluated column object — it deliberately cannot tell
+# `state.field` on a model value from `Module.func` on a module (both are
+# `Expr(:., …)`); only the runtime RECEIVER type can. So the lowering lives here:
+# a `getindex` / `getproperty` on a `NamedColumn` / `ExprColumn` (the two column
+# types that carry model values) builds an `ExprColumn` that `_sb_scalar_expr`
+# renders as Stan `x[i]` / `x.field`. StanBlocks already lowers `getindex` /
+# `getproperty` on Stan values (arrays, `NamedTuple` struct returns), so this gives
+# `@slic` PARITY for consuming a `@deffun` struct/array return directly —
+# `state = scan(...); y ~ f(state.population_total)` — instead of hand-rolled
+# accessor `@deffun`s. `getproperty` delegates the struct's OWN fields so internal
+# access (which uses `getfield` / `name` / `parent` / `getf`, never dot) is
+# untouched; every other name becomes a Stan field access.
+Base.getindex(x::NamedColumn, i...) = ExprColumn(getindex, x, i...)
+Base.getindex(x::ExprColumn, i...) = ExprColumn(getindex, x, i...)
+function Base.getproperty(x::NamedColumn, f::Symbol)
+    (f === :name || f === :parent) && return getfield(x, f)
+    ExprColumn(getproperty, x, QuoteNode(f))
+end
+function Base.getproperty(x::ExprColumn, f::Symbol)
+    (f === :f || f === :args || f === :kwargs) && return getfield(x, f)
+    ExprColumn(getproperty, x, QuoteNode(f))
+end
 
 """
     LikelihoodColumn(parent, rhs)
