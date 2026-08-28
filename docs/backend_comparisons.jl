@@ -66,6 +66,29 @@ function source_function(relative_path::AbstractString, name::Symbol)
     return strip(SubString(source, start, stop), '\n')
 end
 
+"""Return an exact, marker-bounded source region from a repository file."""
+function source_region(relative_path::AbstractString;
+                       starting_at::AbstractString,
+                       ending_before::AbstractString)
+    source = repository_source(relative_path)
+    starts = findall(starting_at, source)
+    length(starts) == 1 || error(
+        "expected one `$starting_at` marker in $relative_path, found $(length(starts))")
+    start = first(only(starts))
+
+    stops = findall(ending_before, source)
+    stops = filter(r -> first(r) > start, stops)
+    length(stops) == 1 || error(
+        "expected one `$ending_before` marker after `$starting_at` in " *
+        "$relative_path, found $(length(stops))")
+    stop = prevind(source, first(only(stops)))
+    return strip(SubString(source, start, stop), '\n')
+end
+
+"""Render a drift-proof repository source region as a documentation code block."""
+source_code_region(relative_path::AbstractString; language="julia", kwargs...) =
+    Markdown.MD([Markdown.Code(language, source_region(relative_path; kwargs...))])
+
 """Evaluate a source file's shared prelude, stopping before a named function."""
 function evaluate_source_prelude(mod::Module, relative_path::AbstractString;
                                  before::Symbol,
