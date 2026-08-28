@@ -40,7 +40,7 @@
 
 using BayesianRegressionModels
 using StanBlocks
-using Distributions: LogNormal   # BRM re-exports Normal/Exponential; LogNormal is not
+using Distributions: Beta, Dirichlet, LogNormal
 
 StanBlocks.@deffun begin
     # Differenced-AR on log scale: x[i]=x[i-1]+beta*(x[i-1]-x[i-2])+sigma*eps[i].
@@ -115,6 +115,34 @@ StanBlocks.@deffun begin
     # (Used by the @brm surface form below, where `*` at the formula level is the
     # Wilkinson interaction operator, not matmul — so the matmul lives here.)
     wsum(I_mat::matrix[m, K], w::vector[K])::vector[m] = I_mat * w
+    # Expand one weekly latent value onto a daily row axis through a data index.
+    weekly_expand(x::vector[nw], week_idx::int[nt])::vector[nt] = x[week_idx]
+    # Build sparse wastewater-record means from the latent subpopulation matrix.
+    # Records own independent time, subpopulation and lab-site mappings, so a
+    # latent reference/uncovered population need not have a wastewater series.
+    ww_expected_log(I_mat::matrix[nt, K], sh::vector[nsh],
+                    sample_time::int[n], sample_subpop::int[n],
+                    sample_lab::int[n], log_lab_mod::vector[nlab],
+                    log10_g::real, mwpd::real)::vector[n] = begin
+        out::vector[n]
+        for i in 1:n
+            shed = 0.0
+            for lag in 1:nsh
+                t = sample_time[i] - lag + 1
+                shed = shed + (t >= 1 ? sh[lag] * I_mat[t, sample_subpop[i]] : 0.0)
+            end
+            out[i] = log(10.0) * log10_g + log(shed + 1e-8) - log(mwpd) +
+                     log_lab_mod[sample_lab[i]]
+        end
+        out
+    end
+    gather_exp(x::vector[nlab], idx::int[n])::vector[n] = exp(x[idx])
+    take_window(x::vector[n], start_idx::int, width::int)::vector[width] =
+        x[start_idx:(start_idx + width - 1)]
+    scale_simplex(x::vector[K], scale::real)::vector[K] = scale * x
+    hospital_daily_mean(lat::vector[nt], logit_p::vector[nt], dow::int[nt],
+                        dow_effect::vector[7], npop::real)::vector[nt] =
+        npop * (dow_effect[dow] .* inv_logit(logit_p) .* lat)
     # Expected admissions from the aggregate latent infections: day-of-week multiplier
     # exp(log_dow), AR(1)-logit IHR inv_logit(logit_p), and jurisdiction population.
     ihr_scale(lat::vector[nt], logit_p::vector[nt], log_dow::vector[nt],
@@ -239,32 +267,67 @@ end
 # Verified: transpile + stanc + finite BridgeStan density/gradient; see
 # `test/cdc_ww_inference.jl`. NOT sampled — the deliverable is the model.
 """
-    cdc_ww_brm_fixture(; K = 3, nt = 84, n_seed = 15)
+    cdc_ww_brm_fixture(; K = 3, nt = 84, uot = 50, ht = 14)
 
-Dataset for [`cdc_ww_brm_model`](@ref), shaped for the `@brm` formula surface: `K`
-catchment subpopulations (`site`), a per-site daily time grid `t_grid`, per-site
-log-concentration series `ww`, a shared jurisdiction time frame `time_grid`, the
-day-of-week index `dow`, the daily admissions count `hosp`, the fixed
-generation-interval / shedding / delay PMFs `g`/`sh`/`dl`, population weights `w`,
-and the scalar constants (`nt`, `n_pop`) the kernel cell references.
+Multi-frame fixture for [`cdc_ww_brm_model`](@ref). `K` is the number of latent
+subpopulations and includes an uncovered reference population at index one. The
+latent kernel has one row per subpopulation, while wastewater measurements occupy
+their own sparse record frame with explicit time, subpopulation, lab-site and LOD
+mappings. Several lab sites may map to one catchment and repeated sampling times are
+valid. Hospital observations remain a dense daily jurisdiction stream in this first
+modular fixture.
 """
-function cdc_ww_brm_fixture(; K = 3, nt = 84, n_seed = 15)
+function cdc_ww_brm_fixture(; K = 3, nt = 84, uot = 50, ht = 14)
+    K >= 2 || error("cdc_ww_brm_fixture needs at least a reference and one sampled subpopulation")
+    nt >= 14 || error("cdc_ww_brm_fixture needs at least 14 observed days")
+    uot >= 1 || error("cdc_ww_brm_fixture needs a positive unobserved seeding window")
+    ht >= 0 || error("cdc_ww_brm_fixture needs a nonnegative forecast horizon")
     g  = [0.02, 0.06, 0.12, 0.16, 0.16, 0.14, 0.11, 0.08, 0.06, 0.04, 0.03, 0.02]
     sh = [0.01, 0.05, 0.12, 0.17, 0.17, 0.14, 0.11, 0.08, 0.06, 0.05, 0.03, 0.01]
     dl = [0.01, 0.03, 0.06, 0.11, 0.14, 0.13, 0.12, 0.10, 0.08, 0.07, 0.06, 0.05, 0.03, 0.01]
-    sites = string.('a':('a' + (K - 1)))
+    n_total = uot + nt + ht
+    n_weeks = cld(n_total, 7)
+    subpopulation = [i == 1 ? "reference-uncovered" : "catchment-$(i - 1)" for i in 1:K]
+    subpop_size = collect(range(2.0, 1.0; length=K))
+    subpop_weight = subpop_size ./ sum(subpop_size)
+
+    # At least two lab sites map to the first sampled catchment. This creates
+    # repeated (subpopulation, time) records without duplicating latent states.
+    n_labs = K
+    ww_lab = ["lab-$i" for i in 1:n_labs]
+    lab_to_subpop = [i <= 2 ? 2 : min(K, i) for i in 1:n_labs]
+    ww_time = Int[]
+    ww_subpop = Int[]
+    ww_lab_idx = Int[]
+    ww_lod = Float64[]
+    ww_log_conc = Float64[]
+    for lab in 1:n_labs, observed_day in 1:7:nt
+        push!(ww_time, uot + observed_day)
+        push!(ww_subpop, lab_to_subpop[lab])
+        push!(ww_lab_idx, lab)
+        lod = log(2.0 + 0.25 * lab + 0.01 * observed_day)
+        latent_signal = log(15.0 + 8.0 * exp(-((observed_day - nt / 2) / 15)^2)) +
+                        0.08 * lab
+        push!(ww_lod, lod)
+        # A value exactly at its row-specific LOD selects the censored branch.
+        push!(ww_log_conc, (observed_day + lab) % 4 == 0 ? lod : max(lod + 0.05, latent_signal))
+    end
+
     (;
-        site = sites,
-        n_seed = n_seed,
-        t_grid = [collect(1.0:nt) for _ in 1:K],
-        ww = [[log(30.0) + 0.7 * exp(-((t - 45.0) / 15)^2) + 0.05 * sin(t / 4) for t in 1:nt]
-              for _ in 1:K],
-        time_grid = collect(1.0:nt),
-        dow = [((t - 1) % 7) + 1 for t in 1:nt],
+        subpopulation,
+        is_reference = [i == 1 ? 1.0 : 0.0 for i in 1:K],
+        t_grid = [collect(1.0:n_total) for _ in 1:K],
+        time_grid = collect(1.0:n_total),
+        week_grid = collect(1.0:n_weeks),
+        week_idx = [min(n_weeks, div(t - 1, 7) + 1) for t in 1:n_total],
+        dow = [mod(t - uot - 1, 7) + 1 for t in 1:n_total],
+        ww_lab, lab_to_subpop, ww_time, ww_subpop, ww_lab_idx, ww_lod, ww_log_conc,
         hosp = [max(0, round(Int, 20 + 40 * exp(-((t - 50.0) / 14)^2))) for t in 1:nt],
         g = g, sh = sh, dl = dl,
-        w = (ws = [K - i + 1.0 for i in 1:K]; ws ./ sum(ws)),
-        nt = nt, n_pop = 500000.0,
+        w = subpop_weight,
+        uot, nt, ht, n_total, n_weeks, K, n_labs,
+        mwpd = 757.0,
+        n_pop = 500000.0,
     )
 end
 
@@ -278,33 +341,63 @@ each of the four coupled pieces maps onto a formula seam. Re-bind data with
 """
 function cdc_ww_brm_model(df = cdc_ww_brm_fixture())
     @brm df begin
-        # infection-process + subpopulation-hierarchy hyperparameters
-        gamma       ~ LogNormal(-4.0, 0.5)          # infection feedback strength
-        phi_delta   ~ Exponential(2.0)              # per-subpop AR(1) persistence
-        sigma_delta ~ Exponential(4.0)              # per-subpop AR(1) scale
-        log_scale   ~ Normal(0.0, 1.0)              # log genomes / per-person volume
-        sigma_ww    ~ Exponential(1.0)              # wastewater measurement SD
-        # shared reference daily log-Rᵘ (autoregressive), closed over in each cell
-        log_ru      ~ 1 + ar(time_grid; p = 1)
-        # per-subpopulation seeding intercept — derives the kernel grouping
-        log_I0      ~ 1 + (1 | site)
-        # per-subpopulation renewal + wastewater; collect I_k trajectories into a matrix
-        I_mat ~ kernel(t_grid, ww, log_I0) do ts, wwi, lI0
-            eps_d::vector[nt] ~ std_normal()
+        # Shared epidemic parameters. The public formula surface currently has an
+        # ordinary AR term rather than CDC's differenced-AR vector process; the
+        # documentation states that approximation explicitly.
+        gamma       ~ LogNormal(-4.0, 0.5)
+        phi_delta   ~ Beta(2.0, 8.0)
+        sigma_delta ~ Exponential(4.0)
+        log10_g     ~ Normal(12.0, 1.0)
+
+        log_ru_week ~ 1 + ar(week_grid; p = 1)
+        effect(log_ru_week, Intercept) ~ Normal(0.0, 0.5)
+        log_ru = weekly_expand(log_ru_week, week_idx)
+
+        # Hierarchical incidence and initial growth are defined over the latent
+        # subpopulation axis, including the uncovered reference population.
+        logit_I0      ~ 1 + (1 | initial | subpopulation)
+        initial_growth ~ 1 + (1 | growth | subpopulation)
+        effect(logit_I0, Intercept) ~ Normal(-9.0, 1.0)
+        effect(initial_growth, Intercept) ~ Normal(0.0, 0.05)
+        sd(:, initial) ~ Normal(0.0, 0.75)
+        sd(:, growth) ~ Normal(0.0, 0.05)
+
+        # The kernel produces latent trajectories only. Observation frames are
+        # mapped onto this matrix after the cell has been collected.
+        I_mat ~ kernel(t_grid, is_reference, logit_I0, initial_growth) do ts, isref, lI0, growth_i
+            eps_d::vector[n_total] ~ std_normal()
             delta_k = ar1_dev(eps_d, phi_delta, sigma_delta)
-            logRt_k = log_ru + delta_k
-            I_k = renewal_feedback(logRt_k, g, gamma, exp(lI0), 0.0, n_seed)
-            C_k = shed_convolve(I_k, sh)
-            wwi ~ censored(normal, log(C_k) + log_scale, sigma_ww; lower = log(2.0))
-            I_k
+            logRt_k = log_ru + (1.0 - isref) * delta_k
+            renewal_feedback(logRt_k, g, gamma, inv_logit(lI0), growth_i, uot)
         end
+
+        # Sparse wastewater records have independent time, subpopulation, lab
+        # and record-specific LOD mappings. Multiple labs may observe the same
+        # catchment/time pair; the reference population may have no records.
+        log_lab_mod ~ 0 + (1 | ww_scale | ww_lab)
+        log_sigma_ww ~ 1 + (1 | ww_noise | ww_lab)
+        effect(log_sigma_ww, Intercept) ~ Normal(log(0.35), 0.5)
+        sd(:, ww_scale) ~ Normal(0.0, 0.5)
+        sd(:, ww_noise) ~ Normal(0.0, 0.35)
+        ww_mu = ww_expected_log(I_mat, sh, ww_time, ww_subpop, ww_lab_idx,
+                                log_lab_mod, log10_g, mwpd)
+        ww_sigma = gather_exp(log_sigma_ww, ww_lab_idx)
+        ww_log_conc ~ censored(Normal(ww_mu, ww_sigma); lower = ww_lod)
+
         # jurisdiction aggregate infections (population-weighted across subpops)
         I_agg = wsum(I_mat, w)
-        # hospital admissions on the aggregate: delay + AR(1)-logit IHR + day-of-week + NB
-        logit_ihr ~ 1 + ar(time_grid; p = 1)
-        log_dow   ~ 0 + factor(dow)
-        phi_h     ~ Exponential(1.0)
-        lat       = delay_convolve(I_agg, dl)
-        hosp ~ NegativeBinomial2(ihr_scale(lat, logit_ihr, log_dow, n_pop), phi_h)
+
+        # Dense daily hospital stream for the first checkpoint. The next module
+        # replaces this fixed frame with explicit stream and interval mappings.
+        logit_ihr_week ~ 1 + ar(week_grid; p = 1)
+        effect(logit_ihr_week, Intercept) ~ Normal(-4.6, 0.3)
+        logit_ihr = weekly_expand(logit_ihr_week, week_idx)
+        dow_share ~ Dirichlet(7, 5.0)
+        dow_effect = scale_simplex(dow_share, 7.0)
+        phi_h ~ Exponential(1.0)
+        lat = delay_convolve(I_agg, dl)
+        hosp_mu_full = hospital_daily_mean(lat, logit_ihr, dow, dow_effect, n_pop)
+        hosp_mu = take_window(hosp_mu_full, uot + 1, nt)
+        hosp ~ NegativeBinomial2(hosp_mu, phi_h)
     end
 end

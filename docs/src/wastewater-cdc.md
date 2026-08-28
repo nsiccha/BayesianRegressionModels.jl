@@ -20,19 +20,25 @@ This is a genuinely multi-level, multi-stream renewal model. Its composition is 
 the formula surface, while the sequential numerical kernels are ordinary
 `@deffun`s. The seams are:
 
-- **Shared reference log-Rᵘ** — `log_ru ~ 1 + ar(time_grid; p=1)`, closed over
-  inside the per-subpopulation cell.
-- **Multi-subpopulation hierarchy** — `I_mat ~ kernel(t_grid, ww, log_I0) do …
-  end` broadcasts a renewal and wastewater cell over catchments. Each cell draws an
-  AR(1) deviation and returns its infection trajectory.
+- **Shared reference log-Rᵘ** — `log_ru_week ~ 1 + ar(week_grid; p=1)` is
+  expanded onto the daily latent axis and closed over inside each
+  per-subpopulation cell.
+- **Latent subpopulation hierarchy** — `I_mat ~ kernel(t_grid, is_reference,
+  logit_I0, initial_growth) do … end` broadcasts only the renewal process. Each
+  cell draws an AR(1) deviation and returns its infection trajectory; the uncovered
+  reference cell suppresses that deviation.
 - **Infection feedback and renewal** — `renewal_feedback` performs the carried-state
   scan inside each cell.
-- **Wastewater measurements** — a left-censored log-normal observation is evaluated
-  against shedding-convolved infections.
+- **Sparse wastewater measurements** — `ww_expected_log` gathers arbitrary
+  `(time, subpopulation, lab)` records from the collected latent matrix. The
+  left-censored log-normal likelihood uses a separate lab hierarchy and one LOD per
+  record, so a latent subpopulation may have no wastewater records and several labs
+  may observe the same catchment/time pair.
 - **Jurisdiction aggregation** — `wsum(I_mat, w)` forms a population-weighted
   infection trajectory.
-- **Hospital admissions** — a delay convolution, time-varying logit IHR, weekday
-  effect, and negative-binomial likelihood consume the aggregate trajectory.
+- **Hospital admissions** — a delay convolution, weekly time-varying logit IHR,
+  mean-one simplex weekday effect, and negative-binomial likelihood consume the
+  aggregate trajectory.
 
 The carried-state scans cannot be written as formula statements or `kernel`
 control flow. `wsum` similarly owns the cross-cell matrix multiplication because
@@ -91,17 +97,22 @@ The example preserves the high-level causal order from CDC's
    measurements.
 4. Delay-convolved aggregate incidence drives weekday-adjusted hospital counts.
 
+The current fixture now includes the CDC model's distinct latent and observation
+axes: a 50-day unobserved period, an uncovered reference population, sparse and
+repeated site/lab/time records, record-specific detection limits, lab-level scale
+and noise effects, and a mean-one simplex weekday multiplier.
+
 It does **not** yet reproduce these defining CDC details:
 
-- weekly differenced-AR global log-R and weekly mean-reverting IHR;
-- the 50-day unobserved seeding window with hierarchical initial incidence and
-  initial growth;
-- a reference or uncovered population that has no wastewater observations;
-- sparse, possibly repeated site/lab/time records with record-specific detection
-  limits;
-- inferred shedding kinetics and site/lab scale and noise hierarchies; or
-- CDC's mean-one simplex weekday effect, component switches, and forecast/generated-
-  quantity contract.
+- the weekly **differenced**-AR global log-R process (the formula model currently
+  uses an ordinary weekly AR term) and CDC's exact mean-reverting IHR
+  parameterization;
+- CDC's exact back-calculation of the seeding trajectory from incidence on the
+  first observed day;
+- inferred triangular shedding kinetics and their upstream prior
+  parameterization; or
+- component switches, composable count-stream mappings, interval aggregation, and
+  the forecast/generated-quantity contract.
 
 The executable upstream
 [`wwinference.stan`](https://github.com/CDCgov/ww-inference-model/blob/main/inst/stan/wwinference.stan)
@@ -120,6 +131,17 @@ are introduced per cell, while `@deffun` owns only deterministic recurrence.
 The companion is closer to CDC on the global R process, but it shares several
 simplifications listed above and is not presented as a numerical reference
 implementation.
+
+## BRM authoring boundary exposed by this port
+
+The public `@brm` surface can express an ordinary AR(1) predictor with
+`ar(week_grid; p=1)`, but it cannot currently declare the weekly vector innovations
+needed by CDC's differenced-AR process. That gap is tracked as BRM snag
+`brm-formula-diff-52808dea`. Until a shared formula primitive is approved and
+landed, this page labels the ordinary-AR substitution rather than presenting it as
+posterior-equivalent. The recurrence itself is already expressible as a small
+`@deffun`; the awkward part is declaring and composing the latent vector on the
+formula surface with replay and descriptor semantics.
 
 ## Provenance
 
