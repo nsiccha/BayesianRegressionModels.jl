@@ -100,17 +100,16 @@ The example preserves the high-level causal order from CDC's
 The current fixture now includes the CDC model's distinct latent and observation
 axes: a 50-day unobserved period, an uncovered reference population, sparse and
 repeated site/lab/time records, record-specific detection limits, lab-level scale
-and noise effects, and a mean-one simplex weekday multiplier.
+and noise effects, a normalized inferred triangular shedding trajectory, hierarchical
+first-observed incidence and growth with CDC's seeding back-calculation, bounded
+stationary subpopulation AR deviations, and a mean-one simplex weekday multiplier.
 
 It does **not** yet reproduce these defining CDC details:
 
 - the weekly **differenced**-AR global log-R process (the formula model currently
   uses an ordinary weekly AR term) and CDC's exact mean-reverting IHR
   parameterization;
-- CDC's exact back-calculation of the seeding trajectory from incidence on the
-  first observed day;
-- inferred triangular shedding kinetics and their upstream prior
-  parameterization; or
+- the exact upstream hyperprior values supplied by CDC's R interface; or
 - component switches, composable count-stream mappings, interval aggregation, and
   the forecast/generated-quantity contract.
 

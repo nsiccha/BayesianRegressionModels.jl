@@ -1,8 +1,10 @@
-# Full port of the CDC `ww-inference-model` (github.com/CDCgov/ww-inference-model)
-# — a joint wastewater + hospital-admissions renewal model — onto BRM's StanBlocks
-# backend. Authorized by decision `2026-08-26T16-44-33-638-1yz7ybe` (option B).
+# Structural companion for the CDC `ww-inference-model`
+# (github.com/CDCgov/ww-inference-model): a joint wastewater +
+# hospital-admissions renewal model on BRM's StanBlocks backend. Authorized by
+# decision `2026-08-26T16-44-33-638-1yz7ybe` (option B).
 #
-# The model (faithful to `model_definition.md`) has four coupled pieces:
+# The upstream model has four coupled pieces; the comments below identify which
+# semantics this executable structural companion preserves.
 #
 #  1. INFECTION PROCESS. Reference-subpopulation weekly unadjusted log-Rᵘ follows a
 #     differenced autoregression, `log Rᵘ(tᵢ)=log Rᵘ(tᵢ₋₁)+β·Δ+σ_r ε` (`dar_logru`).
@@ -43,22 +45,28 @@ using StanBlocks
 using Distributions: Beta, Dirichlet, LogNormal
 
 StanBlocks.@deffun begin
-    # Differenced-AR on log scale: x[i]=x[i-1]+beta*(x[i-1]-x[i-2])+sigma*eps[i].
-    dar_logru(logru1::real, eps::vector[nw], beta::real, sigma::real)::vector[nw] = begin
-        x::vector[nw]
+    # CDC's global process: an AR(1) on first differences followed by cumulative
+    # summation. `eps` has one fewer element than the returned weekly trajectory.
+    dar_logru(logru1::real, eps::vector[ni], beta::real, sigma::real,
+              n_weeks::int)::vector[n_weeks] = begin
+        x::vector[n_weeks]
+        diff::vector[ni]
         x[1] = logru1
-        if nw >= 2
-            x[2] = x[1] + sigma * eps[2]
+        if n_weeks >= 2
+            diff[1] = sigma * eps[1]
+            x[2] = x[1] + diff[1]
         end
-        for i in 3:nw
-            x[i] = x[i - 1] + beta * (x[i - 1] - x[i - 2]) + sigma * eps[i]
+        for i in 3:n_weeks
+            diff[i - 1] = beta * diff[i - 2] + sigma * eps[i - 1]
+            x[i] = x[i - 1] + diff[i - 1]
         end
         x
     end
-    # AR(1) deviation: d[t]=phi*d[t-1]+sigma*eps[t].
+    # Stationary AR(1) deviation around a supplied mean trajectory. CDC uses the
+    # stationary initial scale for subpopulation R and IHR deviations.
     ar1_dev(eps::vector[nt], phi::real, sigma::real)::vector[nt] = begin
         d::vector[nt]
-        d[1] = sigma * eps[1]
+        d[1] = sigma * eps[1] / sqrt(1.0 - square(phi))
         for t in 2:nt
             d[t] = phi * d[t - 1] + sigma * eps[t]
         end
@@ -82,6 +90,30 @@ StanBlocks.@deffun begin
             end
         end
         I
+    end
+    # CDC parameterizes incidence by the per-capita value on the first observed
+    # day, then back-calculates the beginning of the unobserved growth period.
+    renewal_from_first_observed(logRt::vector[nt], g::vector[ng], gamma::real,
+                                i_first_obs::real, growth::real,
+                                uot::int)::vector[nt] =
+        renewal_feedback(logRt, g, gamma,
+                         exp(log(i_first_obs) - uot * growth), growth, uot)
+    # Normalized triangular shedding trajectory on the log10 viral-load scale,
+    # matching CDC's `get_vl_trajectory` recurrence.
+    viral_shedding_trajectory(t_peak::real, viral_peak::real,
+                              duration_shedding::real, n::int)::vector[n] = begin
+        s::vector[n]
+        growth = viral_peak / t_peak
+        wane = viral_peak / (duration_shedding - t_peak)
+        for t in 1:n
+            if t <= t_peak
+                s[t] = exp(log(10.0) * growth * t)
+            else
+                log10_load = viral_peak + wane * t_peak - wane * t
+                s[t] = exp(log(10.0) * (log10_load < 0.0 ? 0.0 : log10_load))
+            end
+        end
+        s / sum(s)
     end
     # Shedding-load convolution: C(t)=Σ_{k=1}^{nsh} s(k) I(t-k+1).
     shed_convolve(I::vector[nt], s::vector[nsh])::vector[nt] = begin
@@ -172,7 +204,8 @@ function cdc_ww_inference_fixture(; K = 3, nt = 84, n_weeks = 12, n_seed = 15)
         dow = [((t - 1) % 7) + 1 for t in 1:nt],
         w = (ws = [K - i + 1.0 for i in 1:K]; ws ./ sum(ws)),   # normalized population weights
         lloq = log(5.0), n_pop = 500000.0,
-        nt = nt, n_weeks = n_weeks, ng = length(g), nsh = length(s), nd = length(d),
+        nt = nt, n_weeks = n_weeks, n_innov = n_weeks - 1,
+        ng = length(g), nsh = length(s), nd = length(d),
         K = K, n_seed = n_seed,
     )
 end
@@ -191,8 +224,8 @@ function cdc_ww_inference_model(data = cdc_ww_inference_fixture())
         logru1 ~ normal(0.0, 0.5)
         beta   ~ normal(0.5, 0.2; lower = 0.0, upper = 1.0)
         sigma_r ~ normal(0.0, 0.2; lower = 0.0)
-        eps_r::vector[n_weeks] ~ std_normal()
-        logru_daily = dar_logru(logru1, eps_r, beta, sigma_r)[week_idx]
+        eps_r::vector[n_innov] ~ std_normal()
+        logru_daily = dar_logru(logru1, eps_r, beta, sigma_r, n_weeks)[week_idx]
         # shared subpopulation-hierarchy hyperparameters
         m_int ~ normal(0.0, 0.5)
         gamma ~ lognormal(-4.0, 0.5)                    # infection feedback
@@ -236,33 +269,29 @@ function cdc_ww_inference_model(data = cdc_ww_inference_fixture())
 end
 
 # ---------------------------------------------------------------------------
-# The SAME full CDC model expressed on the `@brm` FORMULA surface.
+# The same four-component structural model expressed on the `@brm` FORMULA surface.
 #
-# This is the direct refutation of "the CDC model cannot be a @brm model": every
-# coupled piece is a formula-level statement. The one faithful re-parameterization
-# vs. the @slic form is the reference log-Rᵘ prior — the @slic version uses a
-# differenced-AR (`dar_logru`, which needs a top-level innovation vector the formula
-# surface does not yet declare); the @brm form uses the built-in `ar(time; p=1)`
-# autoregressive term (AR(1) around a mean), a faithful autoregressive-Rt prior in
-# the same spirit. The day-of-week effect is a log-additive `factor(dow)` (the
-# regression-idiomatic form of the @slic Dirichlet mean-1 multiplier).
+# Every coupled piece is composed at formula level, while deterministic scans live
+# in typed `@deffun`s. The reference log-Rᵘ prior is an explicit approximation: the
+# @slic companion uses `dar_logru`, whereas @brm currently has no vector-latent
+# declaration for those innovations and therefore uses its ordinary AR term. The
+# weekday multiplier is a directly sampled simplex scaled to mean one.
 #
 # How each formula seam carries the model:
-#   - shared daily log-Rᵘ .............. `log_ru ~ 1 + ar(time_grid; p=1)`, CLOSED
-#                                        OVER inside the kernel cell (top-level
-#                                        latents/params close over a plate cell);
-#   - infection feedback + renewal ..... `renewal_feedback` @deffun in the cell;
+#   - shared weekly log-Rᵘ ............. `log_ru_week ~ 1 + ar(week_grid; p=1)`,
+#                                        expanded daily and closed over in the cell;
+#   - infection feedback + renewal ..... `renewal_from_first_observed` @deffun;
 #   - multi-subpopulation hierarchy .... `kernel(...) do ... end` broadcasts the
-#                                        per-subpop renewal+WW cell; the per-subpop
-#                                        AR(1) deviation is drawn IN the cell
+#                                        per-subpop latent renewal cell; stationary
+#                                        AR(1) deviations are drawn IN the cell
 #                                        (`eps_d ~ std_normal()` + `ar1_dev`); the
-#                                        `(1|site)` seeding intercept derives the
-#                                        kernel grouping; cells collect to a matrix;
-#   - per-subpop wastewater ............ censored-lognormal `~` INSIDE the cell;
+#                                        hierarchical initial incidence and growth
+#                                        LPs derive the grouping; cells collect;
+#   - sparse wastewater ................ record mappings gather from `I_mat`, then
+#                                        a lab-hierarchical censored Normal is fit;
 #   - jurisdiction aggregate ........... `I_agg = wsum(I_mat, w)` (population-weighted);
-#   - hospital admissions .............. delay convolution + `ar(...)`-logit IHR +
-#                                        `factor(dow)` day-of-week + `NegativeBinomial2`
-#                                        on the dense aggregate.
+#   - hospital admissions .............. delay convolution + weekly AR-logit IHR +
+#                                        mean-one simplex DOW + `NegativeBinomial2`.
 #
 # Verified: transpile + stanc + finite BridgeStan density/gradient; see
 # `test/cdc_ww_inference.jl`. NOT sampled — the deliverable is the model.
@@ -323,7 +352,7 @@ function cdc_ww_brm_fixture(; K = 3, nt = 84, uot = 50, ht = 14)
         dow = [mod(t - uot - 1, 7) + 1 for t in 1:n_total],
         ww_lab, lab_to_subpop, ww_time, ww_subpop, ww_lab_idx, ww_lod, ww_log_conc,
         hosp = [max(0, round(Int, 20 + 40 * exp(-((t - 50.0) / 14)^2))) for t in 1:nt],
-        g = g, sh = sh, dl = dl,
+        g = g, sh = sh, dl = dl, nsh = length(sh),
         w = subpop_weight,
         uot, nt, ht, n_total, n_weeks, K, n_labs,
         mwpd = 757.0,
@@ -334,9 +363,9 @@ end
 """
     cdc_ww_brm_model([df]) -> BRMI
 
-The full CDC `ww-inference-model` on the `@brm` formula surface, returned as a
-`BRMI`; lower with `SBBRMI(cdc_ww_brm_model())`. See the block comment above for how
-each of the four coupled pieces maps onto a formula seam. Re-bind data with
+An executable structural port of CDC's four-component model on the `@brm` formula
+surface, returned as a `BRMI`; lower with `SBBRMI(cdc_ww_brm_model())`. See the
+block comment above for the current parity boundary. Re-bind data with
 `cdc_ww_brm_model(cdc_ww_brm_fixture(; K = 2, nt = 56))`.
 """
 function cdc_ww_brm_model(df = cdc_ww_brm_fixture())
@@ -348,6 +377,11 @@ function cdc_ww_brm_model(df = cdc_ww_brm_fixture())
         phi_delta   ~ Beta(2.0, 8.0)
         sigma_delta ~ Exponential(4.0)
         log10_g     ~ Normal(12.0, 1.0)
+        t_peak      ~ LogNormal(log(4.0), 0.25)
+        viral_peak  ~ Normal(6.0, 1.0)
+        shed_tail   ~ LogNormal(log(14.0), 0.3)
+        dur_shed = t_peak + shed_tail
+        shedding = viral_shedding_trajectory(t_peak, viral_peak, dur_shed, nsh)
 
         log_ru_week ~ 1 + ar(week_grid; p = 1)
         effect(log_ru_week, Intercept) ~ Normal(0.0, 0.5)
@@ -368,7 +402,8 @@ function cdc_ww_brm_model(df = cdc_ww_brm_fixture())
             eps_d::vector[n_total] ~ std_normal()
             delta_k = ar1_dev(eps_d, phi_delta, sigma_delta)
             logRt_k = log_ru + (1.0 - isref) * delta_k
-            renewal_feedback(logRt_k, g, gamma, inv_logit(lI0), growth_i, uot)
+            renewal_from_first_observed(logRt_k, g, gamma,
+                                        inv_logit(lI0), growth_i, uot)
         end
 
         # Sparse wastewater records have independent time, subpopulation, lab
@@ -379,7 +414,7 @@ function cdc_ww_brm_model(df = cdc_ww_brm_fixture())
         effect(log_sigma_ww, Intercept) ~ Normal(log(0.35), 0.5)
         sd(:, ww_scale) ~ Normal(0.0, 0.5)
         sd(:, ww_noise) ~ Normal(0.0, 0.35)
-        ww_mu = ww_expected_log(I_mat, sh, ww_time, ww_subpop, ww_lab_idx,
+        ww_mu = ww_expected_log(I_mat, shedding, ww_time, ww_subpop, ww_lab_idx,
                                 log_lab_mod, log10_g, mwpd)
         ww_sigma = gather_exp(log_sigma_ww, ww_lab_idx)
         ww_log_conc ~ censored(Normal(ww_mu, ww_sigma); lower = ww_lod)
