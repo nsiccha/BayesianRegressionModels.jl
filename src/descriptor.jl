@@ -1138,6 +1138,9 @@ function _brm_term_label(::typeof(hsgp), t)
     Symbol(:hsgp_, suffix, :_by_, name(group))
 end
 _brm_term_label(f, t) = _sb_term_key(t)
+_brm_term_label(f, t, _target) = _brm_term_label(f, t)
+_brm_term_label(::typeof(dar), t, target) =
+    Symbol(:dar_, target, :_, name(_sb_named_inner(:dar, only(getargs(t)))))
 
 _brm_term_parameter_bindings(::typeof(mo), _t) =
     (; simplex=:simplex_incr)
@@ -1148,15 +1151,18 @@ function _brm_term_parameter_bindings(::typeof(hsgp), t)
     haskey(getkwargs(t), :by) && return (; length_scale=rho, sd=:sigma)
     (; length_scale=rho, sd=:sigma, basis_weights=:beta_raw)
 end
+_brm_term_parameter_bindings(::typeof(dar), _t) =
+    (; ar=:beta, sd=:sigma, innovations=:z)
 _brm_term_parameter_bindings(_f, _t) = NamedTuple()
 
 function _brm_term_coordinate_entries(brmi, logical::Symbol)
     predictors = [lp for lp in linear_predictors(brmi) if lp.name === logical]
     length(predictors) == 1 || return NamedTuple[]
     link = only(predictors).link_lhs_fn
+    target = _sb_lp_emitted_name(logical, link)
     entries = NamedTuple[]
     for terms in values(_sb_term_address_map(brmi, logical)), t in terms
-        push!(entries, (; term=_brm_term_label(getf(t), t), value=t, link))
+        push!(entries, (; term=_brm_term_label(getf(t), t, target), value=t, link))
     end
     entries
 end
@@ -1200,6 +1206,7 @@ public term-output label BRM derives from the formula (for example
 | `mo(...)` / `mo1(...)` | `:simplex` |
 | ungrouped `hsgp(...)` | `:length_scale`, `:sd`, `:basis_weights` |
 | grouped `hsgp(...; by=...)` | `:length_scale`, `:sd` |
+| `dar(...)` | `:ar`, `:sd`, `:innovations` |
 
 The returned named tuple contains `logical`, `term`, `parameter`, the owning
 [`BRMOutput`](@ref), `coordinates`, and the formula LHS `link` / `inverse_link`.

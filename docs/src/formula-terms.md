@@ -17,6 +17,7 @@ signature — the rest are covered by their docstrings on the [API](@ref) page.
 | `gp(x…; cov=:exp_quad, iso=true, jitter=1e-9)` | exact latent Gaussian process, noncentered Cholesky draw | — |
 | `hsgp(x…; k=20, c=1.5, iso=true, by=nothing, domain=nothing, orthogonal_to=nothing)` | Hilbert-space GP approximation over `prod(k)` basis functions | — |
 | `ar(time; p=1)` | AR(p) noise process ordered by `time`; only `p=1` is emitted | — |
+| `dar(time; p=1)` | direct differenced-AR(1) trajectory with bounded persistence and scaled innovations | — |
 | `mo(c)`, `mo1(c)` | monotonic effect of an ordered factor via Dirichlet increments | — |
 | `me(x, sd)` | measurement-error covariate — `x` is observed with known `sd` | — |
 | `interval_censored(x; upper=lloq, lower=0)` | quantified/BLOQ covariate with bounded latent values on BLOQ rows | — |
@@ -25,6 +26,40 @@ signature — the rest are covered by their docstrings on the [API](@ref) page.
 
 A plain RHS expression in raw data columns (`log(exposure)`, `x^2`) is treated
 as an implicit `protect(...)` and materialized the same way.
+
+### Differenced-AR(1) trajectories
+
+`dar(time; p=1)` is not an alias for `ar(time; p=1)`. It emits the path
+
+```
+x[1] = 0
+d[t] = beta * d[t-1] + sigma * z[t]    # d[0] = 0
+x[t+1] = x[t] + d[t]
+```
+
+as a direct predictor summand. In `log_r_week ~ 1 + dar(week)`, the population
+intercept is therefore the initial level `x0`; the trajectory receives no
+second `beta_pop` multiplier. The term samples `beta` on `[0, 1]`, a positive
+innovation scale `sigma`, and `length(week)-1` standardized innovations `z`.
+Its defaults are the CDC wastewater priors `beta ~ Normal(0.5, 0.2)` truncated
+to `[0, 1]` and `sigma ~ Normal(0, 0.2)` truncated at zero.
+
+The time column must be nonempty, finite, strictly increasing, and unique.
+Its values establish order; spacing does not rescale the recurrence. Expand a
+weekly path onto a daily axis explicitly with a deterministic index operation
+such as `log_r = weekly_expand(log_r_week, week_idx)`. `reprocess` may replace
+the ordered grid, including its length, without changing the Stan source.
+
+Configure the two model-scale priors by addressing the term:
+
+```julia
+ar(:, dar(week)) ~ Normal(0.4, 0.1)  # bounded persistence beta
+sd(:, dar(week)) ~ Normal(0.0, 0.3)  # positive innovation sigma
+```
+
+`ar` accepts `Normal`, `Beta`, or an in-bounds `Uniform`; `sd` accepts the
+positive-scale family set documented below. The standardized `z` innovations
+are inspectable through the descriptor but deliberately have no prior override.
 
 ### HSGP over a model-derived predictor
 
@@ -309,7 +344,8 @@ Some terms own parameters that no coefficient address can reach. `s(x)`'s
 smoothing scale, `mo(c)`'s Dirichlet increments, `me(x, sd)`'s latent true
 covariate, `interval_censored(x; upper=lloq)`'s bounded latent values, and
 a Gaussian process's length scale and amplitude all live inside the term's own
-submodel. None is a `beta_pop` column or a grouping-factor margin. They are
+submodel. A `dar` trajectory likewise owns its persistence and innovation
+scale. None is a `beta_pop` column or a grouping-factor margin. They are
 addressed by naming the term itself in the target slot, in the same
 head-position grammar the rest of the prior surface uses:
 
@@ -351,6 +387,8 @@ end)((;
 | `latent` | `interval_censored(x; upper=lloq)` | latent covariate on BLOQ rows | truncated `Normal(0, 1)` |
 | `length_scale` | `gp(x…)`, `hsgp(x…)` | GP length scale `rho` | `LogNormal(0, 1)` |
 | `sd` | `gp(x…)`, `hsgp(x…)` | GP marginal amplitude `sigma` | `LogNormal(0, 1)` |
+| `ar` | `dar(time)` | bounded persistence `beta` | truncated `Normal(0.5, 0.2)` on `[0, 1]` |
+| `sd` | `dar(time)` | innovation scale `sigma` | half-`Normal(0, 0.2)` |
 
 **Spell the term the way the formula does, minus numeric and keyword
 arguments.** `me(w_obs, 0.3)` is addressed as `me(w_obs)` and `t2(x, z; k=(5,5))`
@@ -400,7 +438,10 @@ scale.
   them; the isotropic form has a single shared one. With `by=g` the length
   scale and amplitude are shared across groups, so one statement configures the
   whole term.
-- `ar`'s autocorrelation has no address yet.
+- `ar(:, dar(time))` accepts `Normal`, `Beta`, or `Uniform`; every declaration
+  stays within `[0, 1]`. `sd(:, dar(time))` accepts the same positive-scale
+  families as a GP amplitude. The older `ar(time)` term's transformed
+  autocorrelation still has no prior address.
 
 The backend compatibility floor for configured `gp` / `hsgp` term priors is
 StanBlocks `10529af04d42a330df383864059c2b61a11d9480`. These statements splice
