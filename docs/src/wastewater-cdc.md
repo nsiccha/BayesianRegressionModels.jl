@@ -20,7 +20,7 @@ This is a genuinely multi-level, multi-stream renewal model. Its composition is 
 the formula surface, while the sequential numerical kernels are ordinary
 `@deffun`s. The seams are:
 
-- **Shared reference log-Rᵘ** — `log_ru_week ~ 1 + ar(week_grid; p=1)` is
+- **Shared reference log-Rᵘ** — `log_ru_week ~ 1 + dar(week_grid; p=1)` is
   expanded onto the daily latent axis and closed over inside each
   per-subpopulation cell.
 - **Latent subpopulation hierarchy** — `I_mat ~ kernel(t_grid, is_reference,
@@ -104,13 +104,12 @@ axes: a 50-day unobserved period, an uncovered reference population, sparse and
 repeated site/lab/time records, record-specific detection limits, lab-level scale
 and noise effects, a normalized inferred triangular shedding trajectory, hierarchical
 first-observed incidence and growth with CDC's seeding back-calculation, bounded
-stationary subpopulation AR deviations, and a mean-one simplex weekday multiplier.
+stationary subpopulation AR deviations, the weekly differenced-AR reference process,
+and a mean-one simplex weekday multiplier.
 
 It does **not** yet reproduce these defining CDC details:
 
-- the weekly **differenced**-AR global log-R process (the formula model currently
-  uses an ordinary weekly AR term) and CDC's exact mean-reverting IHR
-  parameterization;
+- CDC's exact mean-reverting IHR parameterization;
 - the exact upstream hyperprior values supplied by CDC's R interface; or
 - CDC's component switches.
 
@@ -128,20 +127,19 @@ subpopulation parameters with `plate`. The `@brm` `kernel` term serves the same
 sampling role: parameters such as subpopulation innovations and initial incidence
 are introduced per cell, while `@deffun` owns only deterministic recurrence.
 
-The companion is closer to CDC on the global R process, but it shares several
-simplifications listed above and is not presented as a numerical reference
-implementation.
+Both forms use the same differenced-AR global R recurrence. The companion shares
+the remaining simplifications listed above and is not presented as a numerical
+reference implementation.
 
-## BRM authoring boundary exposed by this port
+## BRM authoring gap removed by this port
 
-The public `@brm` surface can express an ordinary AR(1) predictor with
-`ar(week_grid; p=1)`, but it cannot currently declare the weekly vector innovations
-needed by CDC's differenced-AR process. That gap is tracked as BRM snag
-`brm-formula-diff-52808dea`. Until a shared formula primitive is approved and
-landed, this page labels the ordinary-AR substitution rather than presenting it as
-posterior-equivalent. The recurrence itself is already expressible as a small
-`@deffun`; the awkward part is declaring and composing the latent vector on the
-formula surface with replay and descriptor semantics.
+This example exposed that the ordinary `ar` term could not represent CDC's
+differenced-AR weekly process. BRM snag `brm-formula-diff-52808dea` added the direct
+summand `dar(week_grid; p=1)`: the term owns bounded persistence, innovation scale,
+and standardized innovations, while the formula intercept supplies the initial
+level. Replay and descriptor semantics now derive from that term as they do for
+other formula components. The example uses it directly; the remaining differences
+above are model-port scope rather than this former authoring limitation.
 
 ## Composable counts and forecasts
 

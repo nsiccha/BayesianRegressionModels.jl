@@ -316,13 +316,12 @@ end
 # The same four-component structural model expressed on the `@brm` FORMULA surface.
 #
 # Every coupled piece is composed at formula level, while deterministic scans live
-# in typed `@deffun`s. The reference log-Rᵘ prior is an explicit approximation: the
-# @slic companion uses `dar_logru`, whereas @brm currently has no vector-latent
-# declaration for those innovations and therefore uses its ordinary AR term. The
-# weekday multiplier is a directly sampled simplex scaled to mean one.
+# in typed `@deffun`s. The shared reference log-Rᵘ uses the same differenced-AR
+# recurrence as the @slic companion. The weekday multiplier is a directly sampled
+# simplex scaled to mean one.
 #
 # How each formula seam carries the model:
-#   - shared weekly log-Rᵘ ............. `log_ru_week ~ 1 + ar(week_grid; p=1)`,
+#   - shared weekly log-Rᵘ ............. `log_ru_week ~ 1 + dar(week_grid; p=1)`,
 #                                        expanded daily and closed over in the cell;
 #   - infection feedback + renewal ..... `renewal_from_first_observed` @deffun;
 #   - multi-subpopulation hierarchy .... `kernel(...) do ... end` broadcasts the
@@ -476,9 +475,8 @@ block comment above for the current parity boundary. Re-bind data with
 """
 function cdc_ww_brm_model(df = cdc_ww_brm_fixture())
     @brm df begin
-        # Shared epidemic parameters. The public formula surface currently has an
-        # ordinary AR term rather than CDC's differenced-AR vector process; the
-        # documentation states that approximation explicitly.
+        # Shared epidemic parameters. `dar` owns the zero-start differenced-AR
+        # innovations while the intercept remains the initial weekly log-Rᵘ level.
         gamma       ~ LogNormal(-4.0, 0.5)
         phi_delta   ~ Beta(2.0, 8.0)
         sigma_delta ~ Exponential(4.0)
@@ -489,7 +487,7 @@ function cdc_ww_brm_model(df = cdc_ww_brm_fixture())
         dur_shed = t_peak + shed_tail
         shedding = viral_shedding_trajectory(t_peak, viral_peak, dur_shed, nsh)
 
-        log_ru_week ~ 1 + ar(week_grid; p = 1)
+        log_ru_week ~ 1 + dar(week_grid; p = 1)
         effect(log_ru_week, Intercept) ~ Normal(0.0, 0.5)
         log_ru = weekly_expand(log_ru_week, week_idx)
 

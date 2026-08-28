@@ -152,8 +152,8 @@ end
 
 # The four-component model expressed on the @brm formula surface: latent
 # subpopulation renewal, sparse lab/site wastewater, generic interval count streams,
-# and named forecast generated quantities. The differenced-global-R substitution is
-# an explicit documented limitation, not a parity claim.
+# and named forecast generated quantities. The global weekly log-R process uses
+# BRM's direct differenced-AR term rather than an ordinary-AR substitution.
 @testset "CDC ww-inference — @brm structural port" begin
     df = cdc_ww_brm_fixture()
     sb = SBBRMI(cdc_ww_brm_model(df))
@@ -162,6 +162,8 @@ end
     @test compiles(m)
     @test cdc_stanc_ok(m)
     code = StanBlocks.stan_code(m)
+    @test occursin("differenced_ar1_path", code)
+    @test occursin("dar_log_ru_week_week_grid_beta", code)
     @test occursin("renewal_from_first_observed", code)
     @test occursin("viral_shedding_trajectory", code)
     @test occursin("count_interval_mean", code)
