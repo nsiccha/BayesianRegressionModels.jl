@@ -10,7 +10,7 @@ BridgeStan density/gradient by `test/cdc_ww_inference.jl`; those gates establish
 working model artifact, not posterior parity with CDC.
 
 For a smaller introduction to the renewal and shedding pieces, start with the
-[single-catchment wastewater example](/wastewater). A parallel StanBlocks-native
+[single-catchment wastewater example](wastewater.md). A parallel StanBlocks-native
 case study is available in the
 [StanBlocks documentation](https://nsiccha.github.io/StanBlocks.jl/dev/examples/case-studies/wastewater).
 
@@ -92,12 +92,12 @@ current Turing executor. Its construction error documents that backend boundary.
 The example preserves the high-level causal order from CDC's
 [`model_definition.md`](https://github.com/CDCgov/ww-inference-model/blob/main/model_definition.md):
 
-1. Unadjusted reproduction numbers drive feedback-adjusted renewal incidence.
-2. Subpopulation trajectories vary around a shared process and aggregate by
-   population weight.
-3. Shedding-convolved subpopulation incidence drives censored wastewater
-   measurements.
-4. Delay-convolved mapped incidence drives weekday-adjusted interval counts.
+- **Transmission:** unadjusted reproduction numbers drive feedback-adjusted renewal incidence.
+- **Subpopulations:** trajectories vary around a shared process and aggregate by
+  population weight.
+- **Wastewater:** shedding-convolved subpopulation incidence drives censored wastewater
+  measurements.
+- **Counts:** delay-convolved mapped incidence drives weekday-adjusted interval counts.
 
 The current fixture now includes the CDC model's distinct latent and observation
 axes: a 50-day unobserved period, an uncovered reference population, sparse and

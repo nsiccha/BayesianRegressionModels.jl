@@ -11,7 +11,8 @@ the executable source.
 
 A **parallel StanBlocks-native port** of the EpiSewer library is at
 [StanBlocks — EpiSewer case study](https://nsiccha.github.io/StanBlocks.jl/dev/examples/case-studies/episewer);
-the full multi-stream CDC model is on the [CDC ww-inference page](/wastewater-cdc).
+the larger multi-stream structural port is on the
+[CDC ww-inference page](wastewater-cdc.md).
 
 The model has three EpiSewer modules:
 

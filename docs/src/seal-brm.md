@@ -7,7 +7,7 @@ verbatim SlicTranspiler research model (the same one rendered as a
 [StanBlocks-native case study](https://nsiccha.github.io/StanBlocks.jl/dev/examples/case-studies/grey-seal-ipm)):
 every regression / random-effect / covariate piece is hoisted onto a brms-style
 formula, while the mechanistic core stays a `@deffun` scan — exactly as the
-[CDC ww-inference model](/wastewater-cdc) keeps its renewal scan in a `@deffun`. It is
+[CDC ww-inference model](wastewater-cdc.md) keeps its renewal scan in a `@deffun`. It is
 rendered in the standard four-pane view and verified (transpile + `stanc` + `compiles`)
 by `test/seal_brm.jl`.
 

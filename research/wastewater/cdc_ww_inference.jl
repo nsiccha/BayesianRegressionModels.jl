@@ -257,7 +257,7 @@ end
 """
     cdc_ww_inference_model([data])
 
-The full CDC `ww-inference-model` as a re-bindable `@slic` model: multi-subpopulation
+A StanBlocks-native structural companion to CDC's `ww-inference-model`: multi-subpopulation
 differenced-AR Rt with infection feedback, per-subpopulation censored wastewater
 measurement, and a joint negative-binomial hospital-admissions stream. Swap data with
 `cdc_ww_inference_model()(; h = new_h, …)`.
