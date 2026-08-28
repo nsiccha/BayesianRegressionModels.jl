@@ -3,7 +3,7 @@
 This page maps the four coupled components of CDC's
 [`ww-inference-model`](https://github.com/CDCgov/ww-inference-model) onto the
 `@brm` formula surface: infection renewal, subpopulation variation, wastewater
-measurements, and hospital admissions. It is an executable **structural port**, not
+measurements, and interval-valued count streams. It is an executable **structural port**, not
 a drop-in or numerically equivalent reproduction of the current CDC model. The
 comparison below is verified through transpilation, `stanc`, and a finite
 BridgeStan density/gradient by `test/cdc_ww_inference.jl`; those gates establish a
@@ -36,9 +36,11 @@ the formula surface, while the sequential numerical kernels are ordinary
   may observe the same catchment/time pair.
 - **Jurisdiction aggregation** — `wsum(I_mat, w)` forms a population-weighted
   infection trajectory.
-- **Hospital admissions** — a delay convolution, weekly time-varying logit IHR,
-  mean-one simplex weekday effect, and negative-binomial likelihood consume the
-  aggregate trajectory.
+- **Count streams** — `count_interval_mean` maps each stream to arbitrary latent
+  subpopulation weights, a delay PMF, a population multiplier, and a stationary
+  weekly logit-rate trajectory. Observation rows may be daily or inclusive
+  multi-day intervals; a mean-one simplex weekday effect and negative-binomial
+  likelihood finish the component.
 
 The carried-state scans cannot be written as formula statements or `kernel`
 control flow. `wsum` similarly owns the cross-cell matrix multiplication because
@@ -95,7 +97,7 @@ The example preserves the high-level causal order from CDC's
    population weight.
 3. Shedding-convolved subpopulation incidence drives censored wastewater
    measurements.
-4. Delay-convolved aggregate incidence drives weekday-adjusted hospital counts.
+4. Delay-convolved mapped incidence drives weekday-adjusted interval counts.
 
 The current fixture now includes the CDC model's distinct latent and observation
 axes: a 50-day unobserved period, an uncovered reference population, sparse and
@@ -110,8 +112,7 @@ It does **not** yet reproduce these defining CDC details:
   uses an ordinary weekly AR term) and CDC's exact mean-reverting IHR
   parameterization;
 - the exact upstream hyperprior values supplied by CDC's R interface; or
-- component switches, composable count-stream mappings, interval aggregation, and
-  the forecast/generated-quantity contract.
+- CDC's component switches.
 
 The executable upstream
 [`wwinference.stan`](https://github.com/CDCgov/ww-inference-model/blob/main/inst/stan/wwinference.stan)
@@ -141,6 +142,38 @@ landed, this page labels the ordinary-AR substitution rather than presenting it 
 posterior-equivalent. The recurrence itself is already expressible as a small
 `@deffun`; the awkward part is declaring and composing the latent vector on the
 formula surface with replay and descriptor semantics.
+
+## Composable counts and forecasts
+
+The count likelihood is not tied to a column called `hosp` or to one row per day.
+The fixture carries one row per observed interval:
+
+- `count_start`, `count_stop`, and `count_stream_idx` define the record axis;
+- `count_subpop_weights[:, stream]` maps the latent subpopulation matrix into that
+  stream's catchment;
+- `count_delay[:, stream]` supplies its infection-to-observation delay; and
+- `count_population[stream]` supplies the absolute-count scale.
+
+The default fixture deliberately crosses two shapes: daily jurisdiction hospital
+admissions and weekly totals over only the sampled catchments. Adding another count
+source is therefore a data extension—append a stream column and its records—rather
+than a second hand-written likelihood.
+
+Forecast mappings use the same deterministic functions but are not responses in the
+calibration likelihood. The emitted Stan descriptor owns three named generated
+quantities: `forecast_infections`, `forecast_count_mean`, and
+`forecast_ww_log_mean`. The reproduction exposes both layers without a parallel
+registry:
+
+```julia
+plan = cdc_ww_brm_plan(df)          # declarations and replay provenance
+descriptor = cdc_ww_brm_descriptor(df)
+```
+
+The descriptor derives `fit`, `predict`, `pointwise_loglik`, `replay`, and
+`reprocess` from the executable model. Consumers should resolve the named forecast
+outputs from `descriptor.outputs`; they should not parse generated Stan identifiers
+or infer them from declaration order.
 
 ## Provenance
 
