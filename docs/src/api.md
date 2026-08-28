@@ -61,6 +61,7 @@ BayesianRegressionModels.me
 BayesianRegressionModels.s
 BayesianRegressionModels.t2
 BayesianRegressionModels.ar
+BayesianRegressionModels.dar
 BayesianRegressionModels.mo
 BayesianRegressionModels.mo1
 BayesianRegressionModels.kernel

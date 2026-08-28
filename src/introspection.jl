@@ -235,13 +235,14 @@ end
 # both skip on this list rather than on a hand-copied tuple that can drift as
 # classes are added.
 const _NON_EFFECT_CLASSES =
-    (:sd, :cor, :term_sd, :term_simplex, :term_latent, :term_length_scale)
+    (:sd, :cor, :term_sd, :term_ar, :term_simplex, :term_latent,
+     :term_length_scale)
 
 # The classes that address a TERM's own parameters, as built by
 # `_prior_address`. Kept beside `_NON_EFFECT_CLASSES` so adding a class means
 # editing one place.
 const _TERM_PRIOR_CLASSES =
-    (:term_sd, :term_simplex, :term_latent, :term_length_scale)
+    (:term_sd, :term_ar, :term_simplex, :term_latent, :term_length_scale)
 
 """
     effect_priors(brmi::BRMI) -> Vector{NamedTuple}
@@ -356,7 +357,7 @@ end
     term_priors(brmi::BRMI) -> Vector{NamedTuple}
 
 Return the prior statements captured by [`@brm`](@ref) that address a *term's
-own* parameters — the `sd`, `simplex`, `latent` and `length_scale` heads
+own* parameters — the `sd`, `ar`, `simplex`, `latent` and `length_scale` heads
 applied to a term rather than to a coefficient or a grouping factor — in
 formula order. Each entry has
 
@@ -364,7 +365,7 @@ formula order. Each entry has
 (; class, term, predictor, component, family, arguments, keywords, expression)
 ```
 
-`class` is `:term_sd`, `:term_simplex`, `:term_latent` or
+`class` is `:term_sd`, `:term_ar`, `:term_simplex`, `:term_latent` or
 `:term_length_scale`. `term` is the canonicalised term key: the term as the
 formula spells it, minus numeric and keyword arguments, so `me(x, 0.5)` and
 `me(x)` both key as `Symbol("me(x)")`,
@@ -386,6 +387,7 @@ Which parameter each class reaches:
 | `latent(lp, interval_censored(x))` | the covariate values on BLOQ rows |
 | `sd(lp, gp(x))` / `sd(lp, hsgp(x))` | the GP marginal amplitude `sigma` |
 | `length_scale(lp, gp(x))` / `length_scale(lp, hsgp(x))` | the GP length scale `rho` |
+| `ar(lp, dar(time))` | the differenced-AR persistence coefficient `beta` |
 
 Standardized raw innovations (`b_pen_raw`, `z`, `beta_raw`, `epsilon`) are
 deliberately NOT addressable: they carry no independent scale, and giving them

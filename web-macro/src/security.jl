@@ -30,7 +30,7 @@ _ALLOWED_CALLS = Set{Symbol}([
     :OrderedLogistic, :Ordinal, :Cumulative, :StoppingRatio,
     :LogitLink, :ProbitLink, :CloglogLink, :Categorical, :CategoricalLogit,
     :zscale, :center, :standardize, :factor, :offset, :protect,
-    :s, :bs, :t2, :gp, :hsgp, :ar, :ar1, :mo, :mo1, :mi,
+    :s, :bs, :t2, :gp, :hsgp, :ar, :dar, :ar1, :mo, :mo1, :mi,
     :cbind, :mvbind, :mm, :gr, :dp, :me, :centered,
     :Horseshoe, :ZeroInflatedPoisson, :weighted,
     :length, :unique, :sort, :size, :eltype, :nrow, :ncol,

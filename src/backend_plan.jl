@@ -1283,7 +1283,7 @@ _brm_data_expression_sources!(sources, _term) = sources
 _brm_data_expression_sources(term) =
     _brm_data_expression_sources!(Symbol[], term)
 
-# A BRM DSL term head (`mo`, `me`, `s`, `t2`, `gp`, `hsgp`, `ar`, `mo1`) is a
+# A BRM DSL term head (`mo`, `me`, `s`, `t2`, `gp`, `hsgp`, `ar`, `dar`, `mo1`) is a
 # parameter-owning special term, NOT a pure data function: it carries no method
 # that accepts a materialized data value, so broadcasting it as if it were
 # `log`/`*` throws a bare `MethodError` (`mo(::Int64)`). Such a term is never

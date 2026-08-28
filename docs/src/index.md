@@ -143,8 +143,10 @@ Not feature-complete against brms. The gaps a brms user is most likely to hit:
   residual copulas are not implemented.
 - **No fixed / known covariance groups.** `by=` is the only [`gr`](@ref)
   option — no `cov=`, so no phylogenetic or pedigree random effects.
-- **Autocorrelation is AR(1) only.** [`ar`](@ref)`(time; p=1)` is the entire
-  surface: no MA, ARMA, compound symmetry, unstructured, CAR or SAR.
+- **Autocorrelation is first-order only.** [`ar`](@ref)`(time; p=1)` emits an
+  ordinary AR(1) noise column; [`dar`](@ref)`(time; p=1)` emits a direct
+  differenced-AR(1) trajectory. There is no MA, ARMA, compound symmetry,
+  unstructured, CAR or SAR surface.
 - **Fewer families.** [Likelihoods](@ref) is the complete list, and it is
   considerably shorter than brms'.
 

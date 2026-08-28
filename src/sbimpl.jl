@@ -70,6 +70,23 @@ emitter. Dispatch tag — see `_sb_ar1`.
 function ar end
 
 """
+    dar(time; p=1)
+
+Differenced-autoregressive trajectory marker. The StanBlocks backend emits the
+weekly path
+
+`x[1] = 0`, `d[t] = beta * d[t-1] + sigma * z[t]`,
+`x[t+1] = x[t] + d[t]`,
+
+with `0 <= beta <= 1`, `sigma > 0`, and standardized innovations `z`. It is a
+direct predictor summand, so a formula intercept supplies the initial level and
+no additional population coefficient multiplies the path. The time values must
+be finite and strictly increasing. Only `p=1` is supported. Dispatch tag — see
+`_sb_dar1`.
+"""
+function dar end
+
+"""
     Horseshoe
 
 Carvalho-Polson-Scott horseshoe shrinkage prior marker. Use as a prior
@@ -1320,6 +1337,32 @@ _sb_ar1 = StanBlocks.@slic begin
     phi = tanh(phi_raw)
     epsilon ~ std_normal(; n=n_obs)
     return ar1_recurse(phi, epsilon, n_obs)
+end
+
+# Differenced AR(1) path. Starting at zero is load-bearing: `1 + dar(time)`
+# leaves the formula intercept as the initial level instead of sampling a
+# second, confounded location inside the term. The first difference has no
+# inherited momentum (`d[0] = 0`), matching the CDC recurrence exactly.
+StanBlocks.@deffun begin
+    differenced_ar1_path(beta::real, sigma::real, z::vector[n])::vector[n + 1] = begin
+        x = rep_vector(0., n + 1)
+        increment = 0.
+        if n > 0
+            for t in 1:n
+                increment = beta * increment + sigma * z[t]
+                x[t + 1] = x[t] + increment
+            end
+        end
+        x
+    end
+end
+
+_sb_dar1 = StanBlocks.@slic begin
+    n_innov = num_elements(time) - 1
+    beta ~ normal(0.5, 0.2; lower=0., upper=1.)
+    sigma ~ normal(0., 0.2; lower=0.)
+    z ~ std_normal(; n=n_innov)
+    return differenced_ar1_path(beta, sigma, z)
 end
 
 # Penalized 1-D thin-plate regression spline. `Xnull` contains the unpenalized
@@ -5453,7 +5496,8 @@ _sb_real_vec(label::Symbol, n::Symbol, v) =
 _sb_classify_term!(t::ExprColumn, pop_terms, ran_terms, direct_terms) = begin
     f = getf(t)
     f === (|) && (push!(ran_terms, t); return)
-    (f === offset || f === mo1 || f === s || f === t2 || f === gp || f === hsgp) &&
+    (f === offset || f === mo1 || f === s || f === t2 || f === gp ||
+     f === hsgp || f === dar) &&
         (push!(direct_terms, t); return)
     push!(pop_terms, t)
 end
@@ -5916,7 +5960,7 @@ _sb_t2_sd_index(c::Symbol) = findfirst(==(c), _SB_T2_BLOCKS)
 # spellings of one key in one predictor (`s(x) + s(x)`) make the address
 # ambiguous — the resolver reports that as its own error rather than silently
 # configuring whichever copy the walker reached first.
-const _SB_PRIOR_TERMS = (mo, mo1, me, interval_censored, s, t2, gp, hsgp)
+const _SB_PRIOR_TERMS = (mo, mo1, me, interval_censored, s, t2, gp, hsgp, dar)
 function _sb_term_address_map(brmi::BRMI, lhs::Symbol)
     out = Dict{Symbol,Vector{Any}}()
     op = linear_predictor_op(brmi, lhs)
@@ -5931,6 +5975,7 @@ end
 
 _sb_term_spelling(spec) = begin
     head = spec.class === :term_sd ? "sd" :
+           spec.class === :term_ar ? "ar" :
            spec.class === :term_simplex ? "simplex" :
            spec.class === :term_length_scale ? "length_scale" : "latent"
     lp = isnothing(spec.predictor) ? ":" : string(spec.predictor)
@@ -5959,19 +6004,28 @@ function _sb_term_config(spec, t, spelling)
                 "sbimpl: `$spelling` names no penalty block of `$(spec.term)`; " *
                 "valid blocks are " * join(("`$b`" for b in _SB_T2_BLOCKS), ", ") * ".")
             return (Symbol(:sd_, spec.component), (; rate=_sb_ranef_sd_rate(spec, spelling)))
-        elseif f === gp || f === hsgp
-            # A GP's `sigma` is its marginal amplitude -- the standard deviation
-            # of the latent function -- so it rides the same `sd` head as every
-            # other scale, and takes the general positive-scale family set rather
-            # than `brm_ranef_sd`'s Exponential-only switch.
+        elseif f === gp || f === hsgp || f === dar
+            # GP amplitude and differenced-AR innovation sigma are both positive
+            # model-scale standard deviations, so they share the general
+            # positive-scale family set.
             isnothing(spec.component) || error(
                 "sbimpl: `$spelling` names a component, but `$(nameof(f))(...)` " *
-                "has exactly one marginal amplitude.")
-            return (:sigma, _sb_gp_scale_prior(spec, spelling))
+                "has exactly one scale parameter.")
+            cfg = f === dar ?
+                _sb_gp_scale_prior(spec, spelling;
+                    default="`Normal(0, 0.2)` truncated to be positive") :
+                _sb_gp_scale_prior(spec, spelling)
+            return (:sigma, cfg)
         end
         error("sbimpl: `$spelling` — `$(nameof(f))` has no scale to configure. " *
-              "`sd(...)` on a term applies to `s(x)`, `t2(x, z)`, `gp(x...)` " *
-              "and `hsgp(x...)`.")
+              "`sd(...)` on a term applies to `s(x)`, `t2(x, z)`, `gp(x...)`, " *
+              "`hsgp(x...)`, and `dar(time)`.")
+    elseif spec.class === :term_ar
+        f === dar || error(
+            "sbimpl: `$spelling` — `$(nameof(f))` has no bounded persistence " *
+            "coefficient to configure. `ar(...)` on a term applies to `dar(time)`.")
+        isnothing(spec.component) || error("sbimpl: `$spelling` takes no component slot")
+        return (:ar, _sb_dar_ar_prior(spec, spelling))
     elseif spec.class === :term_length_scale
         (f === gp || f === hsgp) || error(
             "sbimpl: `$spelling` — `$(nameof(f))` has no length scale to " *
@@ -6197,18 +6251,18 @@ _sb_gp_scale_const(x::Real) = Float64(x)
 function _sb_gp_scale_const(x)
     (Meta.isexpr(x, :call) && length(x.args) == 3 && x.args[1] === Symbol("./") &&
      x.args[2] isa Real && x.args[3] isa Real) || error(
-        "sbimpl: a gp/hsgp scale prior takes numeric formula constants, " *
+        "sbimpl: a positive-scale prior takes numeric formula constants, " *
         "got $(repr(x))")
     Float64(x.args[2] / x.args[3])
 end
 
-function _sb_gp_scale_prior(spec, spelling::AbstractString)
+function _sb_gp_scale_prior(spec, spelling::AbstractString;
+                            default="`LogNormal(0, 1)` truncated to be positive")
     T = _as_distribution_type(spec.family)
     (!isnothing(T) && any(F -> T <: F, _SB_GP_SCALE_FAMILIES)) || error(
         "sbimpl: `$spelling` supports " *
         join(("`$(nameof(F))`" for F in _SB_GP_SCALE_FAMILIES), ", ") *
-        "; got `$(spec.family)`. An unmentioned scale keeps `LogNormal(0, 1)` " *
-        "truncated to be positive.")
+        "; got `$(spec.family)`. An unmentioned scale keeps $default.")
     isempty(spec.keywords) || error(
         "sbimpl: `$spelling ~ $(spec.family)(...)` does not accept keywords; " *
         "the declaration bounds follow from the family.")
@@ -6224,6 +6278,44 @@ function _sb_gp_scale_prior(spec, spelling::AbstractString)
         "sbimpl: `$spelling ~ Uniform($lower, $upper)` bounds a positive scale, " *
         "so it needs `0 <= lower < upper`.")
     (; rhs, lower, upper)
+end
+
+# A differenced-AR persistence is a unit-interval coefficient, not a positive
+# scale. Normal/Beta/Uniform cover the useful bounded families without
+# pretending the unconstrained `phi_raw` of the older `ar(...)` term is the
+# same parameter. The default `_sb_dar1` statement is Normal(0.5, 0.2)
+# truncated to [0, 1], matching the CDC model this term unblocks.
+const _SB_DAR_AR_FAMILIES = (Normal, Beta, Uniform)
+function _sb_dar_ar_prior(spec, spelling::AbstractString)
+    T = _as_distribution_type(spec.family)
+    (!isnothing(T) && any(F -> T <: F, _SB_DAR_AR_FAMILIES)) || error(
+        "sbimpl: `$spelling` supports " *
+        join(("`$(nameof(F))`" for F in _SB_DAR_AR_FAMILIES), ", ") *
+        "; got `$(spec.family)`. An unmentioned coefficient keeps " *
+        "`Normal(0.5, 0.2)` truncated to `[0, 1]`.")
+    isempty(spec.keywords) || error(
+        "sbimpl: `$spelling ~ $(spec.family)(...)` does not accept keywords; " *
+        "the declaration is bounded by the differenced-AR contract.")
+    args = map(_sb_effect_prior_arg, spec.arguments)
+    all(a -> a isa Real && isfinite(a), args) || error(
+        "sbimpl: `$spelling` hyperparameters must be finite numeric formula " *
+        "constants, got $(repr(args))")
+    try
+        T(args...)
+    catch err
+        error("sbimpl: `$spelling` has invalid `$(spec.family)` hyperparameters " *
+              "$(repr(args)): $(sprint(showerror, err))")
+    end
+    stan_args = map(_sb_gp_scale_const, _sb_stan_dist_args(T, Tuple(args)))
+    rhs = Expr(:call, _sb_stan_dist_name(T), stan_args...)
+    if T <: Uniform
+        lower, upper = stan_args
+        (0 <= lower < upper <= 1) || error(
+            "sbimpl: `$spelling ~ Uniform($lower, $upper)` must stay inside " *
+            "the differenced-AR persistence bounds `[0, 1]`.")
+        return (; rhs, lower, upper)
+    end
+    (; rhs, lower=0.0, upper=1.0)
 end
 
 # The base SLIC behind each submodel name, and the exact LHS each declares `rho`
@@ -6269,6 +6361,16 @@ function _sb_gp_submodel_expr(submodel::Symbol, term_overrides, t)
     isnothing(rho_cfg) || push!(stmts, _sb_gp_prior_stmt(_sb_gp_rho_lhs(v), rho_cfg))
     isnothing(sigma_cfg) || push!(stmts, _sb_gp_prior_stmt(:sigma, sigma_cfg))
     Base.merge(_sb_gp_submodel(v), stmts...)
+end
+
+function _sb_dar_submodel_expr(term_overrides, t)
+    beta_cfg = _sb_term_cfg(term_overrides, t, :ar)
+    sigma_cfg = _sb_term_cfg(term_overrides, t, :sigma)
+    (isnothing(beta_cfg) && isnothing(sigma_cfg)) && return :_sb_dar1
+    stmts = Any[]
+    isnothing(beta_cfg) || push!(stmts, _sb_gp_prior_stmt(:beta, beta_cfg))
+    isnothing(sigma_cfg) || push!(stmts, _sb_gp_prior_stmt(:sigma, sigma_cfg))
+    Base.merge(_sb_dar1, stmts...)
 end
 
 # The single carrier every prior surface rides on. Folding the term dict into
@@ -6399,6 +6501,10 @@ end
 function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(t2), t, summands;
                                term_overrides=Dict{Symbol,Any}())
     push!(summands, _sb_predictor_term!(stmts, data, t2, t; target, term_overrides))
+end
+function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(dar), t, summands;
+                               term_overrides=Dict{Symbol,Any}())
+    push!(summands, _sb_predictor_term!(stmts, data, dar, t; target, term_overrides))
 end
 _sb_emit_direct_expr!(_stmts, _data, _target::Symbol, f, _t, _summands; kwargs...) =
     error("sbimpl: unsupported direct-summand term `$f`")
@@ -8461,6 +8567,35 @@ _sb_predictor_term!(stmts, data, ::typeof(ar), t; target=nothing, kwargs...) = b
     push!(stmts, :($col_name ~ _sb_ar1(; time=$xname)))
     col_name
 end
+
+# `dar(time; p=1)` is the direct differenced-AR trajectory. Unlike `ar`, the
+# term owns the whole model-scale contribution: its beta/sigma/z parameters
+# produce a zero-start path that is added to the formula intercept without a
+# second population coefficient.
+_sb_predictor_term!(stmts, data, ::typeof(dar), t;
+                    target::Symbol, term_overrides=Dict{Symbol,Any}(), kwargs...) = begin
+    args = getargs(t)
+    kw = getkwargs(t)
+    unknown = filter(k -> k !== :p, keys(kw))
+    isempty(unknown) || error(
+        "sbimpl: `dar(time; p=1)` accepts only `p`; unsupported keyword(s): " *
+        join(unknown, ", "))
+    p = get(kw, :p, 1)
+    p == 1 || error("sbimpl: `dar(time; p=$p)` only supports p=1")
+    length(args) == 1 || error(
+        "sbimpl: `dar(time; p=1)` expects 1 positional arg, got $(length(args))")
+    xname, raw = _sb_inner_data(:dar, only(args))
+    v = collect(Float64, _sb_real_vec(:dar, xname, raw))
+    isempty(v) && error("sbimpl: `dar($xname)` cannot use an empty time axis")
+    all(isfinite, v) || error("sbimpl: `dar($xname)` requires finite time values")
+    all(>(0), diff(v)) || error(
+        "sbimpl: `dar($xname)` requires a strictly increasing, unique time axis")
+    data[xname] = v
+    col_name = Symbol(:dar_, target, :_, xname)
+    submodel = _sb_dar_submodel_expr(term_overrides, t)
+    push!(stmts, :($col_name ~ $submodel(; time=$xname)))
+    col_name
+end
 # Vector-wise wrapper predictors: `zscale`, `standardize`, and `center`
 # need the whole inner column to compute (mean / sd are not element-wise),
 # so the generic broadcast-based fallback in `_sb_materialize_vec` won't
@@ -8504,7 +8639,7 @@ function _sb_materialize_protect_term!(stmts, data, f, t)
         return cn
     catch err
         _ee = _as_error_exception(err); isnothing(_ee) && rethrow()
-        error("sbimpl: unsupported predictor-term function `$f` (supported: `mo`, `mo1`, `me`, `interval_censored`, `s`, `ar`, `protect`, `zscale`, `center`, `standardize`, or any expression in raw data columns) -- materialization failed: $(_ee.msg)")
+        error("sbimpl: unsupported predictor-term function `$f` (supported: `mo`, `mo1`, `me`, `interval_censored`, `s`, `ar`, `dar`, `protect`, `zscale`, `center`, `standardize`, or any expression in raw data columns) -- materialization failed: $(_ee.msg)")
     end
 end
 _sb_predictor_term!(stmts, data, f::Function, t; kwargs...) =
