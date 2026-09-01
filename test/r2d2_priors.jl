@@ -13,7 +13,7 @@ using Test
 using BayesianRegressionModels
 using StanBlocks
 using LogDensityProblems
-using Distributions: Beta, Exponential, Normal
+using Distributions: Beta, Exponential, LKJCholesky, Normal
 
 const R2D2_CACHE = joinpath(tempdir(), "brm-r2d2-priors")
 const R2D2_RUNTIME = get(ENV, "BRM_R2D2_RUNTIME", "1") != "0"
@@ -102,6 +102,16 @@ end
     # No sampled SD prior survives -- the decomposition derives the scales.
     @test !occursin("brm_ranef_sd", code)
 
+    # Formula-derived R2D2 constants are recorded as frozen preprocessing, so
+    # a shared-ID resample target can rebuild them and move only z to GQ.
+    replayed = reprocess(sb, df; resample_groups=[:subject])
+    replayed_code = BayesianRegressionModels.stan_code(replayed)
+    @test StanBlocks.stan.transpiles(replayed.model)
+    @test StanBlocks.stanc_check(replayed_code; warn_pedantic=false).ok
+    replayed_block = only(b for b in ranef_blocks(replayed) if b.id === :p)
+    @test replayed_block.generated
+    @test replayed_block.family === :ranef_correlated_draws_r2d2
+
     if R2D2_RUNTIME
         isdir(R2D2_CACHE) || mkpath(R2D2_CACHE)
         problem = StanBlocks.stan_instantiate(
@@ -151,6 +161,102 @@ end
     @test occursin("r_eta_subject", control_code)
 end
 
+@testset "R2D2M2 random-effect block and per-margin ICC spellings" begin
+    # One global R² and one simplex across the shared covariance block.  The
+    # third margin uses a different observation channel's residual scale while
+    # retaining the block's single LKJ prior.
+    joint_builder = @brm begin
+        sigma_pk ~ Exponential(1)
+        sigma_qt ~ Exponential(1)
+        log_Vc   ~ 1 + (1 | p | subject)
+        log_k10  ~ 1 + (1 | p | subject)
+        log_k12  ~ 1 + (1 | p | subject)
+        log_k21  ~ 1 + (1 | p | subject)
+        log_ka   ~ 1 + (1 | p | subject)
+        qt_base  ~ 1 + (1 | p | subject)
+        qt_slope ~ 1 + (1 | p | subject)
+        sd(:, p) ~ r2d2(mean_R2=0.5, prec_R2=4,
+                        concentration=0.7, reference_scale=sigma_pk)
+        sd(qt_base, p)  ~ r2d2(reference_scale=sigma_qt)
+        sd(qt_slope, p) ~ r2d2(reference_scale=sigma_qt)
+        cor(:, p) ~ LKJCholesky(7, 2)
+        conc ~ Normal(log_Vc + log_k10 + log_k12 + log_k21 + log_ka +
+                      qt_base + qt_slope, sigma_pk)
+    end
+    joint_brmi = joint_builder(df)
+    joint_specs = [s for s in ranef_effect_priors(joint_brmi)
+                   if s.class === :sd]
+    @test length(joint_specs) == 3
+    @test all(s -> s.family === r2d2, joint_specs)
+
+    joint = SBBRMI(joint_brmi; mod=@__MODULE__)
+    joint_code = BayesianRegressionModels.stan_code(joint)
+    @test StanBlocks.stan.transpiles(joint.model)
+    @test StanBlocks.stanc_check(joint_code; warn_pedantic=false).ok
+    @test occursin("b_p_subject_r2d2_1_R2 ~ beta(2.0, 2.0);", joint_code)
+    @test occursin("simplex[b_p_subject_r2d2_1_alpha_n] b_p_subject_r2d2_1_phi;",
+                   joint_code)
+    @test joint.data[:b_p_subject_r2d2_1_alpha] == fill(0.7, 7)
+    @test occursin("b_p_subject_L ~ lkj_corr_cholesky(2.0);", joint_code)
+    @test occursin("sigma_pk", joint_code)
+    @test occursin("sigma_qt", joint_code)
+    @test count("sigma_pk ~ exponential", joint_code) == 1
+    @test count("sigma_qt ~ exponential", joint_code) == 1
+    @test !occursin("b_p_subject_tau ~", joint_code)
+
+    # The same non-centred geometry is replayable for new group levels: only
+    # z moves to generated quantities; R², phi, L and both reference scales
+    # remain fitted coordinates.
+    joint_cv = reprocess(joint, df; resample_groups=[:subject])
+    joint_cv_code = BayesianRegressionModels.stan_code(joint_cv)
+    @test StanBlocks.stan.transpiles(joint_cv.model)
+    @test StanBlocks.stanc_check(joint_cv_code; warn_pedantic=false).ok
+    block = only(b for b in ranef_blocks(joint_cv) if b.id === :p)
+    @test block.generated
+    @test block.family === :ranef_correlated_draws_r2d2
+
+    # The older whole-predictor spelling can now retain an explicit LKJ eta on
+    # the same shared bucket as well.
+    flat_cor_builder = @brm begin
+        eta_a ~ 1 + wt + (1 | p | subject)
+        eta_b ~ 1 + age + (1 | p | subject)
+        effect(eta_a, :) ~ r2d2(R2=Beta(1, 1), tau_bsv=0.5)
+        effect(eta_b, :) ~ r2d2(R2=Beta(1, 1), tau_bsv=0.5)
+        cor(:, p) ~ LKJCholesky(2, 3)
+        conc ~ Normal(eta_a + eta_b, 1)
+    end
+    flat_cor = SBBRMI(flat_cor_builder(df); mod=@__MODULE__)
+    flat_cor_code = BayesianRegressionModels.stan_code(flat_cor)
+    @test StanBlocks.stan.transpiles(flat_cor.model)
+    @test StanBlocks.stanc_check(flat_cor_code; warn_pedantic=false).ok
+    @test occursin("b_p_subject_L ~ lkj_corr_cholesky(3.0);", flat_cor_code)
+
+    # Without a block-wide statement each address owns an independent R².
+    # A one-margin simplex is deterministic, so each addressed margin is the
+    # per-margin ICC construction; the unaddressed middle margin keeps a free
+    # half-Normal scale.
+    icc_builder = @brm begin
+        sigma_pk ~ Exponential(1)
+        sigma_qt ~ Exponential(1)
+        eta_a ~ 1 + (1 | p | subject)
+        eta_b ~ 1 + (1 | p | subject)
+        eta_c ~ 1 + (1 | p | subject)
+        sd(eta_a, p) ~ r2d2(R2=Beta(1, 1), reference_scale=sigma_pk)
+        sd(eta_c, p) ~ r2d2(mean_R2=0.25, prec_R2=4,
+                            reference_scale=sigma_qt)
+        cor(:, p) ~ LKJCholesky(3, 2)
+        conc ~ Normal(eta_a + eta_b + eta_c, sigma_pk)
+    end
+    icc = SBBRMI(icc_builder(df); mod=@__MODULE__)
+    icc_code = BayesianRegressionModels.stan_code(icc)
+    @test StanBlocks.stan.transpiles(icc.model)
+    @test StanBlocks.stanc_check(icc_code; warn_pedantic=false).ok
+    @test occursin("b_p_subject_r2d2_1_R2 ~ beta(1.0, 1.0);", icc_code)
+    @test occursin("b_p_subject_r2d2_2_R2 ~ beta(1.0, 3.0);", icc_code)
+    @test occursin("b_p_subject_r2d2_free_tau_2 ~ std_normal();", icc_code)
+    @test occursin("b_p_subject_L ~ lkj_corr_cholesky(2.0);", icc_code)
+end
+
 @testset "rejected shapes error loudly" begin
     # `:` is positional in every slot now, so `effect(:, eta)` parses — but an
     # r2d2 decomposition is whole-predictor by construction, so its address
@@ -197,6 +303,30 @@ end
         conc ~ Normal(eta, 1)
     end
     @test_throws "DERIVES" SBBRMI(sd_conflict(df); mod=@__MODULE__)
+
+    missing_reference = @brm begin
+        eta ~ 1 + (1 | p | subject)
+        sd(:, p) ~ r2d2(R2=Beta(1, 1))
+        conc ~ Normal(eta, 1)
+    end
+    @test_throws "reference_scale" SBBRMI(missing_reference(df); mod=@__MODULE__)
+
+    competing_ranef_scales = @brm begin
+        eta ~ 1 + (1 | p | subject)
+        sd(:, p) ~ r2d2(R2=Beta(1, 1), reference_scale=1)
+        sd(eta, p) ~ Exponential(1)
+        conc ~ Normal(eta, 1)
+    end
+    @test_throws "direct-scale" SBBRMI(competing_ranef_scales(df); mod=@__MODULE__)
+
+    second_global_r2 = @brm begin
+        eta_a ~ 1 + (1 | p | subject)
+        eta_b ~ 1 + (1 | p | subject)
+        sd(:, p) ~ r2d2(R2=Beta(1, 1), reference_scale=1)
+        sd(eta_a, p) ~ r2d2(R2=Beta(2, 2), reference_scale=2)
+        conc ~ Normal(eta_a + eta_b, 1)
+    end
+    @test_throws "may override only" SBBRMI(second_global_r2(df); mod=@__MODULE__)
 
     # Splitting the derived residual variance across several RE margins needs a
     # second simplex the flat decomposition does not build.

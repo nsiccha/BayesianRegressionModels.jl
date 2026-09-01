@@ -559,8 +559,8 @@ block.
 
 The intercept is excluded from the simplex. Its design column is constant, so
 `Var(x_k) = 0` there, and an intercept is a location rather than explained
-variance. A predictor whose only non-intercept column count is one needs no
-simplex parameter at all: `phi = [1]` becomes a data constant.
+variance. A predictor whose only non-intercept column count is one emits a
+`simplex[1]`; it is deterministically `[1]` and adds no sampler dimensions.
 
 ### The random effect plays the residual role
 
@@ -595,12 +595,76 @@ All of these fail loudly rather than silently sampling something else:
   that this decomposition does not build.
 - A shared `(… | ID | g)` bucket is all-or-nothing: either every margin's
   predictor carries an `r2d2` statement or none does.
-- `cor(:, ID)` is not yet composable; an `r2d2` block keeps LKJ `eta = 1`.
-- Adaptive centering (`centered_groups`), cv-contagious sizing (`cv_groups`),
-  stratified `gr(g, by=b)` groups, and `mm(...)` multi-membership terms are all
-  unsupported in combination with `r2d2`.
+- `cor(:, ID)` composes with a shared-ID decomposition and controls its LKJ
+  `eta`; the marginal scales remain derived.
+- Non-centred shared-ID `resample_groups` replay is supported. Adaptive
+  centering (`centered_groups`), plain-group R2D2 resampling, stratified
+  `gr(g, by=b)` groups, and `mm(...)` multi-membership terms remain unsupported.
 - A column that also carries its own `effect(lp, coef) ~ Normal(loc, scale)`
   statement is dropped from the simplex and keeps that explicit prior.
+
+## Random-effect R2D2M2 and per-margin ICC: `sd(...) ~ r2d2(...)`
+
+Use the same marker on an `sd` address when the decomposition is over the
+marginal variances of a shared random-effect block rather than over one linear
+predictor's population coefficients:
+
+```julia
+joint = @brm begin
+    sigma_pk ~ Exponential(1)
+    sigma_qt ~ Exponential(1)
+
+    log_Vc   ~ 1 + (1 | p | subject)
+    log_k10  ~ 1 + (1 | p | subject)
+    qt_base  ~ 1 + (1 | p | subject)
+    qt_slope ~ 1 + (1 | p | subject)
+
+    sd(:, p) ~ r2d2(mean_R2=0.5, prec_R2=2,
+                    concentration=1, reference_scale=sigma_pk)
+    sd(qt_base, p)  ~ r2d2(reference_scale=sigma_qt)
+    sd(qt_slope, p) ~ r2d2(reference_scale=sigma_qt)
+    cor(:, p) ~ LKJCholesky(4, 2)
+end
+```
+
+The block-wide statement samples one global R² and one Dirichlet simplex over
+the four marginal variances. Margin `j` is reconstructed as
+
+```
+tau[j] = reference_scale[j] * sqrt(phi[j] * R2 / (1 - R2))
+```
+
+so the simplex allocates explained-variance odds in observation-scale units.
+The two more-specific statements change only the QT margins' reference scale;
+they do not create extra R² parameters. This is the explicit multi-response
+form: BRM does not guess which observation scale belongs to a latent predictor.
+The LKJ factor and the non-centred
+`b = diag_pre_multiply(tau, L) * z` construction are unchanged.
+
+`R2=Beta(a,b)` and `mean_R2=`/`prec_R2=` are equivalent spellings. `alpha=`
+and `concentration=` are aliases for the symmetric Dirichlet concentration.
+`reference_scale=` is required and may be a positive numeric formula constant
+or an earlier sampled scalar parameter.
+
+For independent per-margin ICC priors, omit the block-wide statement and
+address margins separately:
+
+```julia
+sd(log_Vc, p)  ~ r2d2(R2=Beta(1, 1), reference_scale=sigma_pk)
+sd(qt_base, p) ~ r2d2(mean_R2=0.5, prec_R2=2,
+                      reference_scale=sigma_qt)
+```
+
+Each address then owns its own R². A one-margin group emits a deterministic
+`simplex[1]`, so `R2 = tau² / (tau² + reference_scale²)` is exactly the ICC.
+Margins not addressed by either statement keep their ordinary
+half-standard-Normal scale prior. A block may not mix R2D2 addresses with
+explicit direct-scale `sd(...)` priors; use separate blocks when both
+constructions are required.
+
+Random-effect R2D2 is SBBRMI-only. It supports ordinary non-centred shared-ID
+blocks, `cor(:, ID)`, and `reprocess(...; resample_groups=[group])`. Centered,
+stratified, and multi-membership blocks fail loudly.
 
 ## Bounded scalar parameter priors
 

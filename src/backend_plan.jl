@@ -1925,6 +1925,8 @@ function _brm_resolve_ranef_effect_overrides(
             sd_rate[index] = hyperparameter
         end
         out[key] = (; sd_family, sd_rate,
+                    has_sd=(!isnothing(default_prior) ||
+                            !isempty(state[:sd_overrides])),
                     lkj_eta=isnothing(state[:lkj_eta]) ? 1.0 : state[:lkj_eta],
                     margins)
     end

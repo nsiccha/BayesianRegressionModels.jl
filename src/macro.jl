@@ -196,6 +196,41 @@ cross-predictor correlation.
 
 `r2d2` is a formula marker, not a callable function; the SBBRMI backend lowers
 it. Inspect captured statements with [`r2d2_priors`](@ref).
+
+The same marker on a random-effect SD address is the partial-R2D2M2 form:
+
+```julia
+@brm begin
+    sigma_pk ~ Exponential(1)
+    sigma_qt ~ Exponential(1)
+    log_CL   ~ 1 + (1 | p | subject)
+    qt_base  ~ 1 + (1 | p | subject)
+
+    sd(:, p) ~ r2d2(mean_R2=0.5, prec_R2=2,
+                    concentration=1, reference_scale=sigma_pk)
+    sd(qt_base, p) ~ r2d2(reference_scale=sigma_qt)
+    cor(:, p) ~ LKJCholesky(2, 2)
+end
+```
+
+This spelling samples one block-wide `R2`, allocates its odds
+`R2 / (1 - R2)` across the addressed marginal variances with a Dirichlet
+simplex, and derives margin `j` as
+`tau[j] = reference_scale[j] * sqrt(phi[j] * R2 / (1 - R2))`. `R2=Beta(a,b)`
+and the equivalent mean/precision spelling are both accepted; `alpha=` and
+`concentration=` are aliases. A more-specific `sd(lp, id[, coefficient])`
+statement under a block-wide decomposition may override only
+`reference_scale`, which is how one correlated block can span observation
+channels with different residual units. `cor(:, id)` remains an independent
+LKJ prior and the non-centred draw geometry is unchanged.
+
+Without a block-wide `sd(:, id)` statement, every R2D2 SD address owns its own
+R2 and simplex. A one-margin address has a deterministic `simplex[1]` and is
+therefore the per-margin ICC construction. Unaddressed margins retain their
+ordinary half-standard-Normal scale prior. Random-effect R2D2 is SBBRMI-only;
+centered and stratified buckets remain unsupported, while non-centred
+`resample_groups` replay redraws only the standardised group coordinates and
+transports the fitted R2, simplex, reference scales, and correlation factor.
 """
 function r2d2 end
 
