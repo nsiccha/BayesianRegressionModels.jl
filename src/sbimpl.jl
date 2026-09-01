@@ -2828,6 +2828,49 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     # for per-sub-formula emission below.
     id_buckets = _sb_collect_id_buckets(brmi)
     ranef_effect_overrides = _sb_ranef_effect_overrides(brmi, id_buckets)
+    ranef_r2d2_overrides = _sb_ranef_r2d2_overrides(brmi, id_buckets)
+    # A sampled observation/reference scale must be declared before the bucket
+    # prepass consumes it.  Opted-in R2D2 models alone move those scalar priors
+    # forward; the ordinary statement order stays byte-identical.
+    reference_prior_keys = Set{Symbol}(
+        ref for decomposition in values(ranef_r2d2_overrides)
+            for ref in decomposition.references)
+    early_prior_keys = Set{Symbol}()
+    if !isempty(reference_prior_keys)
+        operation_keys = collect(keys(brmi.operations))
+        positions = Dict(key => index for (index, key) in pairs(operation_keys))
+        missing = setdiff(reference_prior_keys, Set(operation_keys))
+        isempty(missing) || error(
+            "sbimpl: R2D2 reference scale(s) $(join(sort!(collect(missing)), ", ")) " *
+            "are not model declarations")
+        last_reference = maximum(positions[key] for key in reference_prior_keys)
+        # Move the scalar-prior prefix as a unit, in formula order. This keeps
+        # a reference scale whose prior depends on an earlier sampled scalar
+        # valid after both declarations move ahead of the ranef prepass.
+        for key in operation_keys[1:last_reference]
+            nc = _as_named_column(brmi.operations[key])
+            isnothing(nc) && continue
+            op = _as_expr_column(parent(nc))
+            (!isnothing(op) && getf(op) === (~)) || continue
+            lhs, rhs_raw = getargs(op, 2)
+            lhs_nc = _as_named_column(lhs)
+            rhs = _as_expr_column(rhs_raw)
+            (!isnothing(lhs_nc) && name(lhs_nc) === key &&
+             parent(lhs_nc) isa MissingColumn && !isnothing(rhs) &&
+             _sb_is_scalar_prior_family(getf(rhs))) || continue
+            push!(early_prior_keys, key)
+        end
+        unresolved = setdiff(reference_prior_keys, early_prior_keys)
+        isempty(unresolved) || error(
+            "sbimpl: R2D2 reference scale(s) " *
+            "$(join(sort!(collect(unresolved)), ", ")) must be backed by " *
+            "supported sampled scalar priors")
+        for key in operation_keys
+            key in early_prior_keys || continue
+            nc = _as_named_column(brmi.operations[key])
+            _sb_emit!(stmts, data, key, parent(nc))
+        end
+    end
     # Prepass 2a: whole-predictor R2D2 decompositions. Resolved and emitted
     # BEFORE the bucket statement below, which consumes the derived residual
     # scales. Empty unless the formula carries an `effect(..., :) ~ r2d2(...)`
@@ -2835,7 +2878,8 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     r2d2_overrides = _sb_r2d2_overrides(brmi, id_buckets, effect_overrides)
     r2d2_names = _sb_emit_r2d2_params!(stmts, data, r2d2_overrides)
     id_lookup = _sb_emit_id_buckets!(stmts, data, id_buckets;
-        cv_groups, centered_groups, ranef_effect_overrides, r2d2_names)
+        cv_groups, centered_groups, ranef_effect_overrides, r2d2_names,
+        ranef_r2d2_overrides)
     # Prepass 2.5: group-block terms. For each `mu ~ f(...)` where f has a
     # _sb_term_group_block declaration, allocate one ranef_correlated_draws
     # block per (f, group-column) pair. The lookup is threaded into _sb_emit!
@@ -2850,6 +2894,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     # map before either backend emits or executes anything.
     target_obs = context.target_obs
     for (key, op) in pairs(brmi.operations)
+        key in early_prior_keys && continue
         nc = _as_named_column(op)
         isnothing(nc) && error("sbimpl: top-level op `$key` is not a NamedColumn")
         obs_n = get(target_obs, key, nothing)
@@ -7254,7 +7299,11 @@ end
 # only for explicitly configured buckets, preserving default emission byte for
 # byte when the formula contains no ranef effect statements.
 function _sb_ranef_effect_overrides(brmi::BRMI, id_buckets)
-    specs = ranef_effect_priors(brmi)
+    # `sd(...) ~ r2d2(...)` is a derived-scale prior, not a distribution on a
+    # sampled `tau`.  Resolve it in `_sb_ranef_r2d2_overrides`; the ordinary
+    # resolver still sees `cor(...)` and every direct-scale SD statement.
+    specs = [spec for spec in ranef_effect_priors(brmi)
+             if !(spec.class === :sd && spec.family === r2d2)]
     isempty(specs) && return Dict{Tuple{Symbol,Any},NamedTuple}()
     margins = Dict{Tuple{Symbol,Any},Any}()
     for (key, bucket) in id_buckets
@@ -7267,6 +7316,223 @@ function _sb_ranef_effect_overrides(brmi::BRMI, id_buckets)
         specs, margins; prefix="sbimpl")
     Dict{Tuple{Symbol,Any},NamedTuple}(key => value
         for (key, value) in resolved)
+end
+
+# ---- random-effect R2D2M2 variance decomposition --------------------------
+#
+# `sd(...) ~ r2d2(...)` is the partial-R2D2M2 spelling for a shared random-
+# effect covariance block.  A block-wide address creates one global R² and one
+# Dirichlet allocation across every selected marginal scale.  More-specific
+# statements may replace only a margin's observation/reference scale:
+#
+#   sd(:, p)       ~ r2d2(mean_R2=.5, prec_R2=2,
+#                          reference_scale=sigma_pk)
+#   sd(qt_base, p) ~ r2d2(reference_scale=sigma_qt)
+#
+# With no block-wide statement, each addressed subset is its own decomposition;
+# a one-margin subset has `simplex[1]` and therefore reduces exactly to an ICC
+# prior.  Unaddressed margins retain an independent half-standard-Normal scale.
+# Correlation remains a separate `cor(:, p) ~ LKJCholesky(K, eta)` prior.
+
+function _sb_ranef_r2d2_reference(spec, spelling)
+    haskey(spec.keywords, :reference_scale) || error(
+        "sbimpl: `$spelling ~ r2d2(...)` requires `reference_scale=`; " *
+        "use the observation/residual SD whose variance defines R²")
+    value = _sb_effect_prior_arg(spec.keywords.reference_scale)
+    if value isa Real
+        isfinite(value) && value > 0 || error(
+            "sbimpl: `$spelling` reference_scale must be finite and strictly " *
+            "positive, got $value")
+        return Float64(value)
+    end
+    value isa Symbol || error(
+        "sbimpl: `$spelling` reference_scale must be a positive numeric " *
+        "formula constant or an already-declared sampled scalar parameter, " *
+        "got $(repr(value))")
+    value
+end
+
+function _sb_ranef_r2d2_config(spec, spelling; override_only=false)
+    isempty(spec.arguments) || error(
+        "sbimpl: `$spelling ~ r2d2(...)` takes keyword arguments only")
+    known = (:R2, :mean_R2, :prec_R2, :alpha, :concentration,
+             :reference_scale)
+    for key in keys(spec.keywords)
+        key in known || error(
+            "sbimpl: unknown r2d2 keyword `$key` for `$spelling`; supported " *
+            "keywords are $(join(known, ", "))")
+    end
+    reference = _sb_ranef_r2d2_reference(spec, spelling)
+    if override_only
+        extras = [key for key in keys(spec.keywords)
+                  if key !== :reference_scale]
+        isempty(extras) || error(
+            "sbimpl: a margin-specific `$spelling ~ r2d2(...)` under a " *
+            "block-wide decomposition may override only `reference_scale`; " *
+            "the block owns one global R² and concentration")
+        return (; reference)
+    end
+
+    has_beta = haskey(spec.keywords, :R2)
+    has_moments = haskey(spec.keywords, :mean_R2) ||
+                  haskey(spec.keywords, :prec_R2)
+    has_beta && has_moments && error(
+        "sbimpl: `$spelling ~ r2d2(...)` must use either `R2=Beta(a,b)` or " *
+        "`mean_R2=`/`prec_R2=`, not both")
+    if has_beta
+        r2_a, r2_b = _sb_r2d2_beta(spec.keywords.R2, spelling)
+    else
+        mean_r2 = get(spec.keywords, :mean_R2, 0.5)
+        prec_r2 = get(spec.keywords, :prec_R2, 2.0)
+        mean_r2 isa Real && isfinite(mean_r2) && 0 < mean_r2 < 1 || error(
+            "sbimpl: `$spelling` mean_R2 must be a finite number strictly " *
+            "between zero and one, got $(repr(mean_r2))")
+        prec_r2 isa Real && isfinite(prec_r2) && prec_r2 > 0 || error(
+            "sbimpl: `$spelling` prec_R2 must be finite and strictly positive, " *
+            "got $(repr(prec_r2))")
+        r2_a = Float64(mean_r2 * prec_r2)
+        r2_b = Float64((1 - mean_r2) * prec_r2)
+    end
+    haskey(spec.keywords, :alpha) &&
+        haskey(spec.keywords, :concentration) && error(
+            "sbimpl: `$spelling ~ r2d2(...)` accepts either `alpha=` or " *
+            "`concentration=`, not both")
+    raw_alpha = get(spec.keywords, :alpha,
+                    get(spec.keywords, :concentration, 1.0))
+    alpha = _sb_r2d2_positive(raw_alpha, "concentration", spelling)
+    (; reference, r2_a, r2_b, alpha)
+end
+
+function _sb_ranef_r2d2_spelling(spec)
+    "sd($(isnothing(spec.predictor) ? ":" : spec.predictor), $(spec.id)" *
+    (isnothing(spec.coefficient) ? "" : ", $(spec.coefficient)") * ")"
+end
+
+function _sb_ranef_r2d2_overrides(brmi::BRMI, id_buckets)
+    all_specs = ranef_effect_priors(brmi)
+    specs = [spec for spec in all_specs
+             if spec.class === :sd && spec.family === r2d2]
+    isempty(specs) && return Dict{Tuple{Symbol,Any},NamedTuple}()
+
+    out = Dict{Tuple{Symbol,Any},NamedTuple}()
+    for id in unique(spec.id for spec in specs)
+        matches = [key for key in keys(id_buckets) if first(key) === id]
+        isempty(matches) && error(
+            "sbimpl: `sd(:, $id) ~ r2d2(...)` matches no shared `|$id|` " *
+            "random-effect block")
+        length(matches) == 1 || error(
+            "sbimpl: public `|$id|` addresses $(length(matches)) blocks with " *
+            "different grouping factors; use a unique ID")
+        key = only(matches)
+        bucket = id_buckets[key]
+        bucket.group_desc isa Tuple && error(
+            "sbimpl: `sd(...) ~ r2d2(...)` for stratified `|$id| " *
+            "gr(..., by=...)` buckets is not yet supported")
+        margins = _sb_id_bucket_margins(bucket)
+        id_specs = [spec for spec in specs if spec.id === id]
+        direct_sd = [spec for spec in all_specs
+                     if spec.id === id && spec.class === :sd &&
+                        spec.family !== r2d2]
+        isempty(direct_sd) || error(
+            "sbimpl: `|$id|` mixes `sd(...) ~ r2d2(...)` with a direct-scale " *
+            "SD prior. R2D2 derives the addressed marginal scales; keep direct " *
+            "SD priors on a different block or leave unaddressed margins at " *
+            "their default half-Normal prior.")
+
+        block_specs = [spec for spec in id_specs
+                       if isnothing(spec.predictor) &&
+                          isnothing(spec.coefficient)]
+        length(block_specs) <= 1 || error(
+            "sbimpl: duplicate block-wide `sd(:, $id) ~ r2d2(...)` statements")
+        groups = NamedTuple[]
+        if !isempty(block_specs)
+            base_spec = only(block_specs)
+            base = _sb_ranef_r2d2_config(
+                base_spec, _sb_ranef_r2d2_spelling(base_spec))
+            references = fill(base.reference, length(margins))
+            claims = Dict{Int,Int}()
+            for spec in id_specs
+                spec === base_spec && continue
+                spelling = _sb_ranef_r2d2_spelling(spec)
+                override = _sb_ranef_r2d2_config(
+                    spec, spelling; override_only=true)
+                claim = _sb_ranef_margin_index(spec, margins)
+                isnothing(claim) && error(
+                    "sbimpl: duplicate block-wide R2D2 statement for `|$id|`")
+                indices, rank = claim
+                for index in indices
+                    held = get(claims, index, -1)
+                    rank == held && error(
+                        "sbimpl: two R2D2 reference-scale statements are equally " *
+                        "specific for margin $(margins[index]) of `|$id|`")
+                    if rank > held
+                        references[index] = override.reference
+                        claims[index] = rank
+                    end
+                end
+            end
+            push!(groups, (; indices=collect(eachindex(margins)), references,
+                            r2_a=base.r2_a, r2_b=base.r2_b,
+                            alpha=base.alpha))
+        else
+            claimed = Dict{Int,String}()
+            for spec in id_specs
+                spelling = _sb_ranef_r2d2_spelling(spec)
+                config = _sb_ranef_r2d2_config(spec, spelling)
+                claim = _sb_ranef_margin_index(spec, margins)
+                isnothing(claim) && error(
+                    "sbimpl: internal block-wide R2D2 resolution error for `$spelling`")
+                indices, _ = claim
+                for index in indices
+                    haskey(claimed, index) && error(
+                        "sbimpl: `$spelling` overlaps $(claimed[index]) on " *
+                        "margin $(margins[index]) of `|$id|`")
+                    claimed[index] = spelling
+                end
+                push!(groups, (; indices=collect(indices),
+                                references=fill(config.reference,
+                                                length(indices)),
+                                r2_a=config.r2_a, r2_b=config.r2_b,
+                                alpha=config.alpha))
+            end
+        end
+        references = unique(Symbol[ref for group in groups
+                                   for ref in group.references
+                                   if ref isa Symbol])
+        out[key] = (; margins, groups, references)
+    end
+    out
+end
+
+function _sb_emit_ranef_r2d2_tau!(stmts, data, bucket_name, n_terms,
+                                   decomposition)
+    tau = Any[nothing for _ in 1:n_terms]
+    for (group_index, group) in enumerate(decomposition.groups)
+        stem = Symbol(bucket_name, :_r2d2_, group_index)
+        r2_name = Symbol(stem, :_R2)
+        phi_name = Symbol(stem, :_phi)
+        alpha_name = Symbol(stem, :_alpha)
+        push!(stmts, :($r2_name ~ beta($(group.r2_a), $(group.r2_b))))
+        data[alpha_name] = fill(group.alpha, length(group.indices))
+        _sb_record_static!(data, alpha_name)
+        push!(stmts, :($phi_name ~ dirichlet($alpha_name)))
+        for (local_index, margin_index) in enumerate(group.indices)
+            ref = group.references[local_index]
+            tau[margin_index] = :($ref * sqrt(
+                ($phi_name[$local_index] * $r2_name) / (1. - $r2_name)))
+        end
+    end
+    # A partial per-margin ICC leaves every unaddressed margin on the ordinary
+    # half-standard-Normal scale prior.  They are scalars here so the final
+    # `tau` can be one fully specified transformed vector without nuisance
+    # entries for derived margins.
+    for margin_index in eachindex(tau)
+        isnothing(tau[margin_index]) || continue
+        free_name = Symbol(bucket_name, :_r2d2_free_tau_, margin_index)
+        push!(stmts, :($free_name ~ std_normal(; lower=0.)))
+        tau[margin_index] = free_name
+    end
+    Expr(:vect, tau...)
 end
 
 # ---- R2D2 whole-predictor variance decomposition ----------------------------
@@ -7438,6 +7704,7 @@ function _sb_emit_r2d2_params!(stmts, data, r2d2_overrides)
             push!(stmts, :($tau_name ~ std_normal(; lower=0.)))
         else
             data[tau_name] = spec.tau_bsv
+            _sb_record_static!(data, tau_name)
         end
         if spec.n_shares == 0
             names[target] = (; r2_name=nothing, phi_name=nothing, tau_name)
@@ -7452,6 +7719,7 @@ function _sb_emit_r2d2_params!(stmts, data, r2d2_overrides)
         # columns means no variance to decompose — not a degenerate-shape branch.
         alpha_name = Symbol(:r2d2_, target, :_alpha)
         data[alpha_name] = fill(spec.alpha, spec.n_shares)
+        _sb_record_static!(data, alpha_name)
         push!(stmts, :($phi_name ~ dirichlet($alpha_name)))
         names[target] = (; r2_name, phi_name, tau_name)
     end
@@ -7504,6 +7772,9 @@ function _sb_emit_r2d2_popefs!(stmts, data, target, X_name, pop_name,
     data[share_name] = spec.share_idx
     data[fall_name]  = fallback
     data[loc_name]   = beta_loc
+    _sb_record_static!(data, share_name)
+    _sb_record_static!(data, fall_name)
+    _sb_record_static!(data, loc_name)
     push!(stmts, :($varx_name = brm_col_variances(
         $X_name, dims($X_name)[1], dims($X_name)[2])))
     push!(stmts, :($scale_name = brm_r2d2_scale(
@@ -7682,7 +7953,8 @@ _sb_ranef_term_ncols(t, _) = error("sbimpl: unsupported ranef term $(typeof(t)):
 function _sb_emit_id_buckets!(stmts, data, buckets;
                               cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
                               ranef_effect_overrides=Dict{Tuple{Symbol,Any},NamedTuple}(),
-                              r2d2_names=Dict{Symbol,NamedTuple}())
+                              r2d2_names=Dict{Symbol,NamedTuple}(),
+                              ranef_r2d2_overrides=Dict{Tuple{Symbol,Any},NamedTuple}())
     lookup = _sb_empty_id_lookup()
     for (k, bucket) in pairs(buckets)
         id_sym, _ = k
@@ -7708,15 +7980,26 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
         # here or none does.
         margins = _sb_id_bucket_margins(bucket)
         r2d2_tau = nothing
-        if !isempty(r2d2_names) &&
+        bucket_r2d2 = get(ranef_r2d2_overrides, k, nothing)
+        if !isnothing(bucket_r2d2)
+            !isempty(r2d2_names) &&
+                all(m -> haskey(r2d2_names, m.predictor), margins) && error(
+                    "sbimpl: `|$id_sym|` carries both whole-predictor " *
+                    "`effect(..., :) ~ r2d2(...)` and random-effect " *
+                    "`sd(...) ~ r2d2(...)` decompositions; choose one " *
+                    "variance allocation for the block")
+            !isnothing(ranef_effect) && ranef_effect.has_sd && error(
+                "sbimpl: `|$id_sym|` carries both an R2D2-derived scale and a " *
+                "direct sampled SD prior; choose one scale prior")
+            r2d2_tau = _sb_emit_ranef_r2d2_tau!(
+                stmts, data, bucket_name, n_terms_total, bucket_r2d2)
+        elseif !isempty(r2d2_names) &&
            all(m -> haskey(r2d2_names, m.predictor), margins)
-            isnothing(ranef_effect) || error(
+            (!isnothing(ranef_effect) && ranef_effect.has_sd) && error(
                 "sbimpl: `|$id_sym|` carries both an `r2d2` decomposition and an " *
-                "`sd(...)` / `cor(...)` statement on `$id_sym`. The decomposition " *
+                "`sd(...)` statement on `$id_sym`. The decomposition " *
                 "DERIVES the block's marginal scales, so a sampled SD prior on " *
-                "the same block has nothing to apply to; drop one of the two. " *
-                "(An `cor(:, $id_sym)` LKJ prior is planned but not built: " *
-                "an r2d2 block currently keeps LKJ eta 1.)")
+                "the same block has nothing to apply to; drop one of the two.")
             # One margin per predictor, for the same reason the plain path
             # insists on `(1 | g)`: each predictor contributes exactly one
             # derived residual scale `sqrt((1 - R2) * tau_bsv^2)`, and handing
@@ -7736,7 +8019,9 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
         end
         idx_name = _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, desc;
                                                 cv_groups, centered_groups, id_sym,
-                                                ranef_effect, r2d2_tau)
+                                                ranef_effect, r2d2_tau,
+                                                r2d2_lkj_eta=(isnothing(ranef_effect) ?
+                                                    1.0 : ranef_effect.lkj_eta))
         for (brmi_key, cols) in per_target_ranges
             lookup[(brmi_key, k)] = (; bucket_name, cols, idx_name, suffix)
         end
@@ -7755,7 +8040,8 @@ _sb_id_bucket_suffix(id_sym, g::Tuple{NamedColumn,NamedColumn}) =
 # callers use to slice the draw matrix per sub-formula.
 function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g::NamedColumn;
                                       cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
-                                      id_sym=nothing, ranef_effect=nothing, r2d2_tau=nothing)
+                                      id_sym=nothing, ranef_effect=nothing, r2d2_tau=nothing,
+                                      r2d2_lkj_eta=1.0)
     idx_name, n_name = _sb_ensure_group_data!(data, g)
     gname = name(g)
     if !isnothing(r2d2_tau)
@@ -7764,19 +8050,25 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g:
         # deliberately not wired -- a derived scale interacts with both, and
         # neither has been designed, so they fail loudly rather than silently
         # sampling something else.
-        gname in cv_groups && error(
-            "sbimpl: group `$gname` is in `cv_groups` and also carries an " *
-            "`r2d2` decomposition; the cv re-draw path for derived marginal " *
-            "scales is not implemented")
         gname in centered_groups && error(
             "sbimpl: group `$gname` is in `centered_groups` and also carries an " *
             "`r2d2` decomposition; the centered path for derived marginal " *
             "scales is not implemented")
+        n_groups = n_name
+        if gname in cv_groups
+            # Match the ordinary non-centred CV path: taint the block through
+            # its size expression so only `z_flat` moves to generated
+            # quantities. R², phi, the reference scales and L stay fitted and
+            # remain name-transportable.
+            n_cv_name = Symbol(bucket_name, :_n_g)
+            push!(stmts, :($n_cv_name = maximum($idx_name)))
+            n_groups = n_cv_name
+        end
         tau_name = Symbol(bucket_name, :_r2d2_tau)
         push!(stmts, :($tau_name = $r2d2_tau))
         push!(stmts, :($bucket_name ~ ranef_correlated_draws_r2d2(;
-            group_idx=$idx_name, n_groups=$n_name, n_terms=$n_terms_name,
-            tau=$tau_name, lkj_eta=1.)))
+            group_idx=$idx_name, n_groups=$n_groups, n_terms=$n_terms_name,
+            tau=$tau_name, lkj_eta=$r2d2_lkj_eta)))
         return idx_name
     end
     sd_family = isnothing(ranef_effect) ? nothing : Expr(:vect, ranef_effect.sd_family...)
@@ -7824,7 +8116,8 @@ end
 function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name,
                                        g::Tuple{NamedColumn,NamedColumn};
                                        cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
-                                       id_sym=nothing, ranef_effect=nothing, r2d2_tau=nothing)
+                                       id_sym=nothing, ranef_effect=nothing, r2d2_tau=nothing,
+                                       r2d2_lkj_eta=1.0)
     gname, bname = name(g[1]), name(g[2])
     id_str = isnothing(id_sym) ? "ID" : String(id_sym)
     isnothing(r2d2_tau) || error(

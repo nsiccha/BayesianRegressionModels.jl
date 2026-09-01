@@ -457,6 +457,10 @@ end
 function _turing_model_context(brmi::BRMI, observation, model_operations)
     isempty(r2d2_priors(brmi)) || error(
         "Turing backend: R2D2 priors are not yet supported")
+    any(spec -> spec.class === :sd && spec.family === r2d2,
+        ranef_effect_priors(brmi)) && error(
+        "Turing backend: random-effect `sd(...) ~ r2d2(...)` priors are " *
+        "SBBRMI-only")
     isempty(term_priors(brmi)) || error(
         "Turing backend: term-parameter priors are not yet supported")
 
