@@ -682,7 +682,7 @@ _brm_output_segments(o) =
 """
     brm_descriptor(sb::SBBRMI; name=nothing, operations=Dict(), titles=Dict(), highlights=())
     brm_descriptor(plan::GenerativePlan; …)
-    brm_descriptor(builder::Function, df; mod=@__MODULE__, cv_groups=Set(), …)
+    brm_descriptor(builder::Function, df; mod=@__MODULE__, cv_groups=Set(), held_out=(), …)
 
 Derive the one authoritative executable semantic descriptor for a `@brm`
 declaration. See [`BRMDescriptor`](@ref) for the fields.
@@ -710,6 +710,7 @@ hand, so an operation that appears can be executed.
 | `:transpile` | `:stan` | always |
 | `:instantiate` | `:stan` | always |
 | `:fit` | `:stan` | the traced model has ≥1 parameter and ≥1 likelihood term |
+| `:prior_predictive` | `:stan` | every emitted observation is held out; returns the prior-only `StanProblem` for sampling |
 | `:predict` | `:stan` | the Stan program emits ≥1 posterior-predictive draw **and** ≥1 BRM observation resolves to it |
 | `:pointwise_loglik` | `:stan` | the Stan program emits ≥1 pointwise log-likelihood |
 | `:replay` | `:brm` | the descriptor was built from a `@brm` builder (rebuild on a new dataframe, e.g. new subjects) |
@@ -720,6 +721,14 @@ hand, so an operation that appears can be executed.
 Stan data keys. `:reprocess` forwards both `freeze_constants=` and the checked
 new-population `resample_groups=` CV/GQ re-emission described by
 [`reprocess`](@ref).
+
+The builder form's `held_out` keyword names one response, a collection of
+responses, or `:all`. A partial selection removes only those likelihoods; the
+remaining observations still offer `:fit`. `held_out=:all` removes every
+likelihood, preserves predictive generated quantities, and derives
+`:prior_predictive` instead of mislabelling the result as a fit. Sampling uses
+the returned `StanProblem` exactly as a fitted problem; pass its unconstrained
+draws to `:predict` for prior-predictive observations.
 
 # Extension points
 
@@ -779,11 +788,12 @@ end
 
 function brm_descriptor(builder::Function, df;
                         mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
+                        held_out=(),
                         name::Union{Nothing,Symbol}=nothing,
                         operations=Dict{Symbol,Any}(),
                         titles=Dict{Symbol,String}(),
                         highlights=())
-    brm_descriptor(generative_plan(builder, df; mod, cv_groups);
+    brm_descriptor(generative_plan(builder, df; mod, cv_groups, held_out);
                    name, operations, titles, highlights)
 end
 
@@ -843,8 +853,13 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
             # The observation's Stan data key is its `data_source`; `target` is
             # the emitted SLIC binding, which for a plate-nested observation is
             # a plate-local alias (`kernel_y` for the column `dv`).
+            # A held-out observation inside `kernel(...)` can disappear from
+            # the executable data block altogether: activity analysis retains
+            # only its `<source>_n` size for the generated draw. The plan's
+            # held-out set is the authoritative provenance in that case.
             (d.target in input_names ||
-             (!isnothing(d.data_source) && d.data_source in input_names)) || error(
+             (!isnothing(d.data_source) &&
+              (d.data_source in input_names || d.data_source in plan.held_out))) || error(
                 "brm_descriptor: observation `$(d.target)` resolves to no data input of " *
                 "the emitted model — the plan and the traced model disagree; " *
                 "re-derive the plan.")
@@ -942,6 +957,15 @@ function _brm_reprocess_supported(plan, outputs)
     end
 end
 
+function _brm_all_observations_held_out(plan)
+    observations = [d for d in plan.declarations if d.role === :observation]
+    isempty(observations) && return false
+    all(observations) do declaration
+        source = declaration.data_source
+        !isnothing(source) && source in plan.held_out
+    end
+end
+
 function _brm_derive_operations(plan, stan, outputs, columns)
     ops = BRMOperation[]
     predictive = Symbol[o.name for o in outputs if o.role === :posterior_predictive]
@@ -954,6 +978,17 @@ function _brm_derive_operations(plan, stan, outputs, columns)
                                 Tuple(so.outputs), :stan,
                                 (d; kwargs...) -> StanBlocks.stan_execute(
                                     d.stan, so.name; kwargs...)))
+    end
+
+    if _brm_all_observations_held_out(plan)
+        instantiate = only(op for op in stan.operations
+                           if op.name === :instantiate)
+        parameters = Tuple(o.name for o in outputs if o.kind === :parameter)
+        push!(ops, BRMOperation(
+            :prior_predictive, "Sample the prior-predictive model",
+            Tuple(instantiate.inputs), parameters, :stan,
+            (d; kwargs...) -> StanBlocks.stan_execute(
+                d.stan, :instantiate; kwargs...)))
     end
 
     if !isnothing(plan.builder)
@@ -1568,13 +1603,17 @@ Run a derived operation.
 ```julia
 brm_execute(d, :transpile)                       # the Stan source
 prob = brm_execute(d, :fit)                      # a BridgeStan-backed StanProblem
+prior_prob = brm_execute(prior_d, :prior_predictive) # prior-only StanProblem
 brm_execute(d, :predict; problem=prob, draws=theta_unc, seed=1234)
 brm_execute(d, :replay, new_df)                  # a NEW BRMDescriptor
 ```
 
 `:stan`-origin operations forward to StanBlocks' `stan_execute` (data keywords
-re-bind inputs; `:predict` requires `draws` and `seed`). `:brm`-origin
-operations take the new dataframe positionally and return a new descriptor.
+re-bind inputs; `:predict` requires `draws` and `seed`).
+`:prior_predictive` delegates to StanBlocks' `:instantiate`: like `:fit`, it
+returns the `StanProblem` a sampler consumes, without calling a model that has
+no likelihood a fit. `:brm`-origin operations take the new dataframe
+positionally and return a new descriptor.
 Unknown names fail closed via [`brm_operation`](@ref).
 """
 brm_execute(d::BRMDescriptor, name::Symbol, args...; kwargs...) =

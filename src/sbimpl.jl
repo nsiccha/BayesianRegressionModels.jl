@@ -2396,7 +2396,7 @@ end
 
 """
     SBBRMI(brmi::BRMI; mod=@__MODULE__, cv_groups=Set{Symbol}(),
-           centered_groups=Set{Symbol}()) -> SBBRMI
+           centered_groups=Set{Symbol}(), held_out=()) -> SBBRMI
 
 StanBlocks backend: walks `brmi`, emits a `StanBlocks.SlicModel`, and
 materialises the data dict. Pass `mod` if you're constructing the model
@@ -2433,6 +2433,14 @@ rather than silently emitting an in-sample block. Note also that centered and
 non-centered emissions use different unconstrained coordinates, so fitted
 draws are not interchangeable between them.
 
+`held_out` names one response, a collection of responses, or `:all`. Each
+named observation is emitted through StanBlocks' cv activity analysis: its
+likelihood is removed while its predictive draw remains in generated
+quantities. Other likelihoods remain active, so `held_out=:qt_y` fits the rest
+of a joint model while drawing QT-only parameters from their priors;
+`held_out=:all` produces the prior-predictive model. Names resolve against both
+top-level responses and data-backed observations inside `kernel(...)` cells.
+
 Formula statements `sd(:, ID) ~ Exponential(scale)` and
 `cor(:, ID) ~ LKJCholesky(K, eta)` configure a shared `|ID|` block.
 An SD statement can instead select one emitted margin with
@@ -2451,12 +2459,20 @@ sbbrmi = SBBRMI(brmi)
 src   = stan_code(sbbrmi)
 ```
 """
-struct SBBRMI{P<:BRMI, M, D<:AbstractDict, PP<:AbstractDict}
+struct SBBRMI{P<:BRMI, M, D<:AbstractDict, PP<:AbstractDict, HO<:AbstractSet{Symbol}}
     parent::P
     model::M
     data::D
     preproc::PP
+    held_out::HO
 end
+
+# Preserve the historical positional constructor used by downstream code that
+# rebuilds an SBBRMI around the same emitted body/data. Public hold-out state is
+# attached by the keyword constructor below; an explicit four-argument rebuild
+# retains the historical unmarked metadata contract.
+SBBRMI(parent::BRMI, model, data::AbstractDict, preproc::AbstractDict) =
+    SBBRMI(parent, model, data, preproc, Set{Symbol}())
 
 """
     parent(sb::SBBRMI) -> BRMI
@@ -2778,7 +2794,7 @@ const _SB_STAN_RESERVED_IDENTIFIERS = Set{Symbol}((
 ))
 
 SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
-       centered_groups=Set{Symbol}(), _frozen_preproc=nothing) = begin
+       centered_groups=Set{Symbol}(), held_out=(), _frozen_preproc=nothing) = begin
     cv_groups = cv_groups isa Set ? cv_groups : Set{Symbol}(cv_groups)
     centered_groups = centered_groups isa Set ? centered_groups : Set{Symbol}(centered_groups)
     both = intersect(cv_groups, centered_groups)
@@ -2872,7 +2888,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
         "`y_lower`/`y_upper` for interval-censored endpoints.")
     body = Expr(:block, stmts...)
     model = StanBlocks.SlicModel(body, data, mod)
-    SBBRMI(brmi, model, data, preproc)
+    _sb_apply_held_out(SBBRMI(brmi, model, data, preproc), held_out)
 end
 
 _as_data_column(x::DataColumn) = x
@@ -3006,7 +3022,7 @@ This is a declaration plan, not an RNG executor: it does not claim that a
 component-wise consumer draw is prior-predictive. Its purpose is to expose the
 one authoritative program and provenance an executor must consume.
 """
-struct GenerativePlan{P,M,D,PP,DS,B,CV}
+struct GenerativePlan{P,M,D,PP,DS,B,CV,HO}
     parent::P
     model::M
     data::D
@@ -3014,7 +3030,14 @@ struct GenerativePlan{P,M,D,PP,DS,B,CV}
     declarations::DS
     builder::B
     cv_groups::CV
+    held_out::HO
 end
+
+# Keep the pre-held-out positional shape source-compatible. New plans derived
+# through the public constructors always carry the explicit selection field.
+GenerativePlan(parent, model, data, preproc, declarations, builder, cv_groups) =
+    GenerativePlan(parent, model, data, preproc, declarations, builder,
+                   cv_groups, Set{Symbol}())
 
 _sb_plan_lhs_name(x::Symbol) = x
 _sb_plan_lhs_name(x::Expr) =
@@ -3170,13 +3193,86 @@ function _generative_plan(sb::SBBRMI, builder, cv_groups)
     data_scope = Dict{Symbol,Union{Nothing,Symbol}}(k => k for k in keys(data))
     _sb_plan_collect!(declarations, body, data_scope)
     GenerativePlan(parent, model, data, preproc, Tuple(declarations), builder,
-                   copy(cv_groups))
+                   copy(cv_groups), copy(sb.held_out))
+end
+
+function _sb_held_out_request(held_out)
+    (held_out === nothing || held_out === ()) &&
+        return (; all=false, names=Set{Symbol}())
+    held_out === :all && return (; all=true, names=Set{Symbol}())
+    held_out isa AbstractString && error(
+        "sbimpl: `held_out` expects a response Symbol, a collection of response " *
+        "Symbols, or `:all`; got $(repr(held_out))")
+    values = held_out isa Symbol ? (held_out,) : try
+        collect(held_out)
+    catch
+        error("sbimpl: `held_out` expects a response Symbol, a collection of " *
+              "response Symbols, or `:all`; got $(repr(held_out))")
+    end
+    all(x -> x isa Symbol, values) || error(
+        "sbimpl: every `held_out` response must be a Symbol; got $(repr(values))")
+    names = Set{Symbol}(values)
+    :all in names && error(
+        "sbimpl: use `held_out=:all` by itself; do not mix `:all` with response names")
+    (; all=false, names)
+end
+
+# Resolve public response names through the emitted declaration inventory. This
+# is what makes a nested `qy ~ normal(...)` inside `kernel(..., qt_y, ...)`
+# addressable as `held_out=:qt_y`: the declaration records `target=:qy` and
+# `data_source=:qt_y`, while StanBlocks must receive the mark on the latter.
+function _sb_apply_held_out(sb::SBBRMI, held_out)
+    request = _sb_held_out_request(held_out)
+    !request.all && isempty(request.names) && return sb
+
+    plan = _generative_plan(sb, nothing, Set{Symbol}())
+    aliases = Dict{Symbol,Set{Symbol}}()
+    sources = Set{Symbol}()
+    for declaration in plan.declarations
+        declaration.role === :observation || continue
+        source = declaration.data_source
+        isnothing(source) && error(
+            "sbimpl: observation `$(declaration.target)` has no data source; " *
+            "cannot apply `held_out`")
+        haskey(sb.data, source) || error(
+            "sbimpl: observation `$(declaration.target)` resolves to absent Stan " *
+            "data key `$source`; cannot apply `held_out`")
+        push!(sources, source)
+        for alias in (declaration.target, source)
+            push!(get!(() -> Set{Symbol}(), aliases, alias), source)
+        end
+    end
+    isempty(sources) && error(
+        "sbimpl: `held_out` was requested, but this BRMI emits no observation likelihoods")
+
+    selected = if request.all
+        sources
+    else
+        unknown = sort!(collect(setdiff(request.names, Set(keys(aliases)))))
+        isempty(unknown) || error(
+            "sbimpl: `held_out` names unknown response(s) $(unknown). Available " *
+            "responses: $(sort!(collect(keys(aliases)))).")
+        ambiguous = sort!(Symbol[name for name in request.names
+                                 if length(aliases[name]) > 1])
+        isempty(ambiguous) || error(
+            "sbimpl: `held_out` alias(es) $(ambiguous) each resolve to several " *
+            "response data sources. Name the dataframe response column instead.")
+        reduce(union, (aliases[name] for name in request.names);
+               init=Set{Symbol}())
+    end
+
+    marked = Dict{Symbol,Any}(sb.data)
+    for source in selected
+        marked[source] = StanBlocks.stan.maybecv(source, marked[source])
+    end
+    model = StanBlocks.SlicModel(sb.model.model, marked, sb.model.mod)
+    SBBRMI(sb.parent, model, marked, sb.preproc, selected)
 end
 
 """
     generative_plan(sb::SBBRMI) -> GenerativePlan
-    generative_plan(builder::Function, df; mod=@__MODULE__, cv_groups=Set()) -> GenerativePlan
-    generative_plan(plan::GenerativePlan, new_df; cv_groups=Set()) -> GenerativePlan
+    generative_plan(builder::Function, df; mod=@__MODULE__, cv_groups=Set(), held_out=()) -> GenerativePlan
+    generative_plan(plan::GenerativePlan, new_df; cv_groups=Set(), held_out=()) -> GenerativePlan
 
 Snapshot the declarations BRM actually emitted. The inventory is derived from
 `sb.model.model`, so auto-introduced population coefficients, random-effect
@@ -3203,20 +3299,21 @@ replay semantics instead.
 generative_plan(sb::SBBRMI) = _generative_plan(sb, nothing, Set{Symbol}())
 
 function generative_plan(builder::Function, df;
-                         mod::Module=@__MODULE__, cv_groups=Set{Symbol}())
+                         mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
+                         held_out=())
     brmi = Base.invokelatest(builder, df)
     brmi isa BRMI || error(
         "generative_plan: builder returned $(typeof(brmi)); expected a BRMI from `@brm begin ... end`")
     cv_groups = cv_groups isa Set ? cv_groups : Set{Symbol}(cv_groups)
-    _generative_plan(SBBRMI(brmi; mod, cv_groups), builder, cv_groups)
+    _generative_plan(SBBRMI(brmi; mod, cv_groups, held_out), builder, cv_groups)
 end
 
 function generative_plan(plan::GenerativePlan, new_df;
-                         cv_groups=plan.cv_groups)
+                         cv_groups=plan.cv_groups, held_out=plan.held_out)
     isnothing(plan.builder) && error(
         "generative_plan: this plan was built from an SBBRMI and has no reusable `@brm` builder. " *
         "Construct it with `generative_plan(builder, df)` to rebuild the same declarations for new groups.")
-    generative_plan(plan.builder, new_df; mod=plan.model.mod, cv_groups)
+    generative_plan(plan.builder, new_df; mod=plan.model.mod, cv_groups, held_out)
 end
 
 stan_code(plan::GenerativePlan) = StanBlocks.stan_code(plan.model)
@@ -3331,7 +3428,7 @@ function _sb_mark_resample_groups(sb::SBBRMI, groups)
         "sbimpl: resample replay: failed to mark group index provenance for " *
         "$(sort!(collect(setdiff(groups, seen))))")
     model = StanBlocks.SlicModel(sb.model.model, marked, sb.model.mod)
-    SBBRMI(sb.parent, model, marked, sb.preproc)
+    SBBRMI(sb.parent, model, marked, sb.preproc, copy(sb.held_out))
 end
 
 function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool)
@@ -3339,7 +3436,7 @@ function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool)
     # not historically retain.  The public ergonomic path starts from the
     # ordinary non-centred fit; fail if the supplied artifact used a different
     # emission rather than silently changing it while adding CV sizing.
-    baseline = SBBRMI(sb.parent; mod=sb.model.mod)
+    baseline = SBBRMI(sb.parent; mod=sb.model.mod, held_out=sb.held_out)
     stan_code(baseline) == stan_code(sb) || error(
         "sbimpl: `resample_groups` requires an SBBRMI emitted with the default " *
         "non-centered, non-CV constructor. The supplied model used additional " *
@@ -3350,13 +3447,23 @@ function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool)
     rebound = _sb_rebind_brmi(sb.parent, new_df)
     cv_template = SBBRMI(
         rebound; mod=sb.model.mod, cv_groups=groups,
+        held_out=sb.held_out,
         _frozen_preproc=freeze ? sb.preproc : nothing)
     _sb_assert_cv_reemission(cv_template, groups)
     preproc = _sb_resample_preproc(sb.preproc, cv_template.preproc, groups)
     hybrid = SBBRMI(cv_template.parent, cv_template.model,
-                    cv_template.data, preproc)
+                    cv_template.data, preproc, copy(cv_template.held_out))
     prepared = reprocess(hybrid, new_df; freeze_constants=freeze)
     _sb_mark_resample_groups(prepared, groups)
+end
+
+function _sb_reprocess_data_value(sb::SBBRMI, key::Symbol, value)
+    key in sb.held_out || return value
+    raw = StanBlocks.getvalue(value)
+    ismissing(raw) && error(
+        "sbimpl: held-out response `$key` carries no recoverable data value; " *
+        "rebuild the SBBRMI from its dataframe before reprocessing")
+    raw
 end
 
 # Recompute one transform-output data key against `df`. `freeze=true` applies
@@ -3759,7 +3866,8 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
     end
     # 2. Account for every remaining old data key: pass-through raw columns, or
     #    frozen structural scalars; ERROR on any unaccounted derived structure.
-    for (k, v) in sb.data
+    for (k, stored) in sb.data
+        v = _sb_reprocess_data_value(sb, k, stored)
         k in handled && continue
         k in interaction_keys && continue
         if v isa AbstractVector
@@ -3791,12 +3899,14 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
         _sb_reprocess_entry!(new_data, new_preproc, handled, key, e, new_df, freeze_constants)
     end
     new_model = StanBlocks.SlicModel(sb.model.model, new_data, sb.model.mod)
-    SBBRMI(sb.parent, new_model, new_data, new_preproc)
+    _sb_apply_held_out(
+        SBBRMI(sb.parent, new_model, new_data, new_preproc), sb.held_out)
 end
 
 function reprocess(plan::GenerativePlan, new_df; freeze_constants::Bool=true,
                    resample_groups=())
-    sb = SBBRMI(plan.parent, plan.model, plan.data, plan.preproc)
+    sb = SBBRMI(plan.parent, plan.model, plan.data, plan.preproc,
+                copy(plan.held_out))
     groups = _sb_resample_group_set(resample_groups)
     replayed = reprocess(sb, new_df; freeze_constants,
                          resample_groups=groups)
