@@ -609,8 +609,9 @@ Use the same marker on an `sd` address when the decomposition is over the
 marginal variances of a shared random-effect block rather than over one linear
 predictor's population coefficients:
 
-```julia
-joint = @brm begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+joint_ranef_r2d2 = (@brm begin
     sigma_pk ~ Exponential(1)
     sigma_qt ~ Exponential(1)
 
@@ -624,7 +625,8 @@ joint = @brm begin
     sd(qt_base, p)  ~ r2d2(reference_scale=sigma_qt)
     sd(qt_slope, p) ~ r2d2(reference_scale=sigma_qt)
     cor(:, p) ~ LKJCholesky(4, 2)
-end
+end)((; subject=[1, 1, 2, 2]))
+""", :joint_ranef_r2d2; title="Joint random-effect R2D2M2")
 ```
 
 The block-wide statement samples one global R² and one Dirichlet simplex over
@@ -649,10 +651,21 @@ or an earlier sampled scalar parameter.
 For independent per-margin ICC priors, omit the block-wide statement and
 address margins separately:
 
-```julia
-sd(log_Vc, p)  ~ r2d2(R2=Beta(1, 1), reference_scale=sigma_pk)
-sd(qt_base, p) ~ r2d2(mean_R2=0.5, prec_R2=2,
-                      reference_scale=sigma_qt)
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+icc_ranef_r2d2 = (@brm begin
+    sigma_pk ~ Exponential(1)
+    sigma_qt ~ Exponential(1)
+
+    log_Vc  ~ 1 + (1 | p | subject)
+    qt_base ~ 1 + (1 | p | subject)
+
+    sd(log_Vc, p)  ~ r2d2(R2=Beta(1, 1), reference_scale=sigma_pk)
+    sd(qt_base, p) ~ r2d2(mean_R2=0.5, prec_R2=2,
+                          reference_scale=sigma_qt)
+    cor(:, p) ~ LKJCholesky(2, 2)
+end)((; subject=[1, 1, 2, 2]))
+""", :icc_ranef_r2d2; title="Independent per-margin ICC priors")
 ```
 
 Each address then owns its own R². A one-margin group emits a deterministic
