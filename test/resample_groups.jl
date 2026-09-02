@@ -21,6 +21,11 @@ plain_resample_builder = @brm begin
     y ~ Normal(mu, 1.0)
 end
 
+hsgp_resample_builder = @brm begin
+    mu ~ 1 + hsgp(dose; k = 5) + (1 | subject)
+    y ~ Normal(mu, 1.0)
+end
+
 resample_train = (;
     subject = repeat([1, 2, 3], inner=2),
     zage = collect(range(-1.0, 1.0; length=6)),
@@ -103,4 +108,42 @@ resample_future = (;
         first(findfirst("parameters {", plain_code)):first(findfirst(
             "model {", plain_code))]
     @test !occursin("r_mu_subject_xi", plain_params)
+end
+
+# Regression: `resample_groups` re-emits the fitted BRMI against the new frame,
+# so a prediction slice whose `hsgp(...)` axis is CONSTANT (a fixed future dose)
+# reaches HSGP emission with an all-equal axis. Frozen replay must apply the
+# fitted basis there — it must NOT re-fit and trip the degeneracy guard. A
+# lazy-fit regression in `_sb_hsgp_fit_for_emission` (eager `fresh = _sb_fit_hsgp`
+# ahead of the frozen-entry early return) made this crash `hsgp: degenerate
+# input`; plain frozen `reprocess` was always lazy and unaffected. Snag
+# `reprocess-freeze-c4ac8241` (reporter Bruno:arv393); the entangled kernel/ragged
+# twin of this lock lives in test/kernel_ragged_reprocess_snag.jl.
+@testset "frozen HSGP basis survives resample onto a constant axis" begin
+    hsgp_train = (; subject = repeat([1, 2, 3], inner=2),
+                    dose = collect(range(-1.0, 1.0; length=6)), y = zeros(6))
+    # A single repeated dose value → the HSGP axis is degenerate on the slice.
+    hsgp_future = (; subject = repeat([101, 203, 307, 409], inner=2),
+                     dose = fill(2.0, 8), y = zeros(8))
+
+    fitted = SBBRMI(hsgp_resample_builder(hsgp_train); mod=@__MODULE__)
+    fit_fits = fitted.preproc[:PHI_hsgp_dose].const_.fits
+
+    replay = reprocess(fitted, hsgp_future; freeze_constants=true,
+                       resample_groups=[:subject])
+    # The fitted (mu, L) basis is reused verbatim, applied at the constant axis.
+    @test replay.preproc[:PHI_hsgp_dose].const_.fits == fit_fits
+    @test size(replay.data[:PHI_hsgp_dose]) == (8, 5)
+    @test all(isfinite, replay.data[:PHI_hsgp_dose])
+    @test all(r -> r == replay.data[:PHI_hsgp_dose][1, :],
+              eachrow(replay.data[:PHI_hsgp_dose]))
+    # The spectral weights and the basis-validity rho floor derive from the
+    # fitted basis, so both must match the training data verbatim.
+    @test replay.data[:omega2_hsgp_dose] == fitted.data[:omega2_hsgp_dose]
+    @test replay.data[:rho_lower_hsgp_dose] == fitted.data[:rho_lower_hsgp_dose]
+    @test replay.data[:n_subject] == 4
+
+    # `freeze_constants=false` genuinely has no domain to fit on this slice.
+    @test_throws "hsgp: degenerate input" reprocess(
+        fitted, hsgp_future; freeze_constants=false, resample_groups=[:subject])
 end
