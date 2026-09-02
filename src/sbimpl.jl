@@ -8793,8 +8793,13 @@ end
 function _sb_hsgp_fit_for_emission(data, key, names, axes, K, c, iso,
                                    domain_fits, orthogonal_to)
     frozen = _sb_frozen_preproc_entry(data, key, :hsgp, names)
-    fresh = isnothing(domain_fits) ? _sb_fit_hsgp(axes, K, c) : domain_fits
-    isnothing(frozen) && return fresh
+    # Fit the fresh basis LAZILY — only when there is no frozen entry to return.
+    # A constant prediction axis (e.g. a fixed future dose) trips `_sb_fit_hsgp`'s
+    # degeneracy check, so evaluating it eagerly crashed frozen CV-template
+    # re-emission even though `const_.fits` is what gets returned. (`f5a177d`
+    # had this lazy; `2e929f7` regressed it while threading in `domain_fits`.)
+    isnothing(frozen) && return isnothing(domain_fits) ?
+        _sb_fit_hsgp(axes, K, c) : domain_fits
     const_ = frozen.const_
     frozen_domain = get(const_, :domain_fits, nothing)
     frozen_orthogonal = get(const_, :orthogonal_to, nothing)
