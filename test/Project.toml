@@ -41,7 +41,7 @@ rev = "c317cc003fc41c2d933c27dc80799141eebd434e"
 
 [sources.StanBlocks]
 url = "https://github.com/nsiccha/StanBlocks.jl"
-rev = "139a6ba6dee09e050862d35ce434768ef73e6a7c"
+rev = "66448dec6049b543d1dde745d7527b24fd01239e"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"

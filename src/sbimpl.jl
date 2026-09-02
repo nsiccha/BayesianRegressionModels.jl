@@ -355,6 +355,46 @@ StanBlocks.@deffun begin
         end
         rv
     end
+    # Predictive companions for `brm_ranef_sd`. A `regime="prior"`
+    # (likelihood-free) program lowers EVERY parameter to a generated-quantities
+    # `_rng` re-draw (StanBlocks fixed_param path; stanblocks-use §8/§34), so a
+    # `(1 | p | subject)` block's `tau ~ brm_ranef_sd(...; lower=0.)` needs a
+    # companion or tracing fails loudly naming the signature to add.
+    #
+    # The load-bearing form is the SCALAR per-element draw. Because the `~`
+    # carries `lower=0.`, StanBlocks wraps the re-draw in its `truncated` HOF
+    # (`lower_conditioning_rng`), which rejection-samples THIS scalar per element
+    # and keeps only draws >= 0 (the decision that landed the StanBlocks fix:
+    # "redraw_rng_expr wraps a plain family carrying user lower/upper kwargs into
+    # the truncated HOF's variant call"). So each branch returns the family's
+    # UNTRUNCATED base draw -- the counterpart of the density switch above -- and
+    # lets that wrapper enforce the bound: family 0 a std Normal (-> half-std-
+    # Normal after truncation, matching `std_normal_lpdf` on a `>=0` parameter),
+    # family 1 Exponential(rate) (already >= 0), else Normal(0, rate) (-> half-
+    # Normal). Returning `abs(...)` here would PRE-truncate and be wrong for an
+    # unbounded use of the family, whose density is then the full two-sided
+    # Normal. The sized-token form is the §8/§30 protocol for an unbounded sized
+    # re-draw and delegates to the scalar. Nested `if`/`else`, not `elseif`, for
+    # the same StanBlocks-pin reason as the density above (snag
+    # `ranef-sd-lpdf-el-a190739d`).
+    brm_ranef_sd_rng(family::real, rate::real)::real = begin
+        if family == 0
+            normal_rng(0., 1.)
+        else
+            if family == 1
+                exponential_rng(rate)
+            else
+                normal_rng(0., rate)
+            end
+        end
+    end
+    brm_ranef_sd_rng(vector[n], family::vector[n], rate::vector[n])::vector[n] = begin
+        rv::vector[n]
+        for i in 1:n
+            rv[i] = brm_ranef_sd_rng(family[i], rate[i])
+        end
+        rv
+    end
 end
 
 

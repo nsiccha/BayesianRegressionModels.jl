@@ -5,7 +5,7 @@
 using Test
 using BayesianRegressionModels
 using StanBlocks
-using Distributions: Exponential, Normal
+using Distributions: Exponential, LKJCholesky, Normal
 
 joint_builder = @brm begin
     sigma_y ~ Exponential(1)
@@ -159,4 +159,84 @@ kernel_df = (;
     @test alias.held_out == Set([:qt_y])
     @test BayesianRegressionModels.stan_code(alias) ==
           BayesianRegressionModels.stan_code(pk_only)
+end
+
+# A shared `|ID|` block whose marginal scales carry an explicit `sd(...)` prior
+# samples `tau` through the custom `@lpxf brm_ranef_sd` family. When the `@brm`
+# formula carries NO observation `~` statement (a `regime="prior"` program:
+# nothing likelihood-shaped is in the trace) StanBlocks lowers the whole program
+# to generated quantities (fixed_param) and RE-DRAWS every `tau` from
+# `brm_ranef_sd_rng`. Without that predictive companion, trace fails loudly at
+# `stan_code` naming exactly this signature to add (stanblocks-use §8/§34); this
+# pins that it is present and the program empties its `parameters` block.
+#
+# This is NOT `held_out=:all`: that marks the response with `maybecv`, which
+# drops the likelihood but keeps the parameters SAMPLED from their priors under
+# NUTS (dimension > 0, covered by the top-level testset above). The fixed_param
+# prior is the response-free formula, exactly as a consumer (Bruno's
+# `regime="prior"`) builds it by dropping the observation statements.
+#
+# The three per-margin family codes exercised are 0 (default half-standard-
+# Normal, the intercept), 1 (`Exponential`, `x`) and 2 (half-`Normal(0, scale)`,
+# `z`) -- the exact switch `brm_ranef_sd_rng` walks. Because `tau ~ ...` carries
+# `lower=0.`, the re-draw goes through StanBlocks' truncation HOF, which calls
+# the SCALAR `brm_ranef_sd_rng` per element.
+@testset "regime=prior shared |ID| sd() re-draws through brm_ranef_sd_rng" begin
+    ranef_sd_df = (;
+        x = [-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        z = [0.3, -0.2, 0.5, -0.4, 0.1, 0.0],
+        subject = [1, 1, 2, 2, 3, 3],
+    )
+
+    # Fitted twin (a response likelihood present): `tau` stays a SAMPLED
+    # parameter scored by the custom family's density in the model block.
+    fitted = @brm begin
+        eta ~ 1 + x + z + (1 + x + z | p | subject)
+        sd(eta, p, x) ~ Exponential(1 / 3)
+        sd(eta, p, z) ~ Normal(0, 2)
+        cor(:, p) ~ LKJCholesky(3, 2)
+        y ~ Normal(eta, 1)
+    end
+    fitted_df = (; ranef_sd_df..., y = [-2.4, -2.2, -2.0, -1.8, -1.7, -1.5])
+    fitted_code = BayesianRegressionModels.stan_code(SBBRMI(fitted(fitted_df); mod=@__MODULE__))
+    @test occursin("brm_ranef_sd_lpdf", fitted_code)
+    @test occursin(r"~\s*brm_ranef_sd\(", fitted_code)   # sampled in the model block
+
+    # Prior program: same block, NO `y ~ ...`.
+    prior = @brm begin
+        eta ~ 1 + x + z + (1 + x + z | p | subject)
+        sd(eta, p, x) ~ Exponential(1 / 3)   # margin x  -> family 1 (Exponential)
+        sd(eta, p, z) ~ Normal(0, 2)         # margin z  -> family 2 (half-Normal)
+        cor(:, p) ~ LKJCholesky(3, 2)
+    end
+    sb = SBBRMI(prior(ranef_sd_df); mod=@__MODULE__)
+    @test StanBlocks.stan.transpiles(sb.model)
+    prior_code = BayesianRegressionModels.stan_code(sb)
+    @test StanBlocks.stanc_check(prior_code; warn_pedantic=false).ok
+    @test occursin("brm_ranef_sd_rng", prior_code)        # re-drawn in GQ
+    @test !occursin(r"~\s*brm_ranef_sd\(", prior_code)    # NOT sampled in the model block
+    # Every parameter, `tau` included, is a GQ draw -> the `parameters` block is
+    # empty (the fixed_param program has zero sampler dimensions).
+    @test occursin(r"parameters\s*\{\s*\}", prior_code)
+
+    prior_problem = StanBlocks.stan_instantiate(sb.model)
+    @test StanBlocks.LogDensityProblems.dimension(prior_problem) == 0
+    @test isfinite(StanBlocks.LogDensityProblems.logdensity(prior_problem, Float64[]))
+
+    # Bruno ARV-393 exact shape: a block-wide `sd(:, p) ~ Exponential(2/3)`
+    # emits family = all 1 (Exponential), rate = 1.5 (the Distributions
+    # `Exponential(scale=2/3)` -> Stan rate-1.5 conversion) for every margin.
+    # Each is re-drawn per element as `exponential(rate[i])`, matching the
+    # density's own `exponential_lpdf(tau[i], rate[i])` -- the per-family
+    # rng<->lpdf agreement the consumer requires.
+    bruno = @brm begin
+        eta ~ 1 + x + z + (1 + x + z | p | subject)
+        sd(:, p) ~ Exponential(2 / 3)
+    end
+    bruno_code = BayesianRegressionModels.stan_code(SBBRMI(bruno(ranef_sd_df); mod=@__MODULE__))
+    @test StanBlocks.stanc_check(bruno_code; warn_pedantic=false).ok
+    @test occursin("brm_ranef_sd_rng", bruno_code)      # re-drawn, not sampled
+    @test !occursin(r"~\s*brm_ranef_sd\(", bruno_code)
+    @test occursin("[1, 1, 1]'", bruno_code)            # family = all Exponential
+    @test occursin("[1.5, 1.5, 1.5]'", bruno_code)      # rate = 1.5 from Exp(2/3)
 end
