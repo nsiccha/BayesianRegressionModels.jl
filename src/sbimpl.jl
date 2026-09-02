@@ -328,6 +328,16 @@ end
 # positive `rate[i]` entry is its scale (a half-Normal after the LHS bound).
 # A single vector density lets block defaults and margin-specific overrides
 # compose without double-prioring any element.
+#
+# The family switch is written as NESTED `if`/`else` rather than an
+# `if`/`elseif`/`else` chain on purpose. StanBlocks renders `elseif` as Stan
+# `else if` only from `86fce35cd1fc4d0767f12ca39cf9bb64551e94b1` (2026-08-13)
+# on; on an older checkout — Bruno's `deps/StanBlocks.jl` pin `05835dbe`, one
+# day earlier — the chain overflowed the stack inside `stan_code`, so every
+# model with an explicit ranef `sd(...)` prior was unbuildable there. The two
+# spellings emit the same program up to block nesting (snag
+# `ranef-sd-lpdf-el-a190739d`); keep this shape until every consumer pin has
+# passed that StanBlocks commit.
 StanBlocks.@deffun begin
     @lhs @lpxf brm_ranef_sd_lpdf(tau::vector[n], family::vector[n],
                                   rate::vector[n])::real = begin
@@ -335,10 +345,12 @@ StanBlocks.@deffun begin
         for i in 1:n
             if family[i] == 0
                 rv += std_normal_lpdf(tau[i])::real
-            elseif family[i] == 1
-                rv += exponential_lpdf(tau[i], rate[i])::real
             else
-                rv += normal_lpdf(tau[i], 0., rate[i])::real
+                if family[i] == 1
+                    rv += exponential_lpdf(tau[i], rate[i])::real
+                else
+                    rv += normal_lpdf(tau[i], 0., rate[i])::real
+                end
             end
         end
         rv

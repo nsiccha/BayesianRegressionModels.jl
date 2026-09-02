@@ -12,6 +12,16 @@ using Distributions: Cauchy, Exponential, LKJCholesky, Normal
 const RANEF_EFFECT_CACHE = joinpath(tempdir(), "brm-ranef-effect-priors")
 const RANEF_EFFECT_RUNTIME = get(ENV, "BRM_RANEF_EFFECT_RUNTIME", "1") != "0"
 
+# The emitted `brm_ranef_sd_lpdf` Stan function, from its signature to the
+# closing brace of its body (the emitter closes every function at column 0).
+function ranef_sd_function(code::AbstractString)
+    start = findfirst("real brm_ranef_sd_lpdf(", code)
+    isnothing(start) && error("brm_ranef_sd_lpdf is not in the emitted program")
+    stop = findnext("\n}", code, first(start))
+    isnothing(stop) && error("brm_ranef_sd_lpdf has no closing brace")
+    code[first(start):last(stop)]
+end
+
 df = (;
     x = [-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
     cat = [1, 2, 3, 1, 2, 3],
@@ -63,6 +73,14 @@ end
     code = BayesianRegressionModels.stan_code(sb)
     @test StanBlocks.stan.transpiles(sb.model)
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    # The shared-|p| `sd(...)` path emits `brm_ranef_sd_lpdf` itself — a family
+    # switch inside a `for` loop — so pin that the function reaches the rendered
+    # program, not only its call site below. Its body is deliberately nested
+    # `if`/`else` (see the emitter comment in src/sbimpl.jl): as an `elseif`
+    # chain it overflowed the stack in `stan_code` on every StanBlocks before
+    # `86fce35`, which downstream pins may still predate.
+    @test occursin("real brm_ranef_sd_lpdf(", code)
+    @test !occursin("else if", ranef_sd_function(code))
     @test occursin("b_p_subject_L ~ lkj_corr_cholesky(2.0);", code)
     @test occursin(
         "b_p_subject_tau ~ brm_ranef_sd([1, 1, 1, 1, 1, 1]', " *
@@ -363,4 +381,25 @@ end
         y ~ Normal(eta_Vc, 1)
     end
     @test_throws "matches no random-effect margin" SBBRMI(unknown(df); mod=@__MODULE__)
+end
+
+# The observed-cQTc shape (Bruno:arv393, snag `ranef-sd-lpdf-el-a190739d`):
+# one intercept-only random effect in a NAMED bucket with an explicit
+# block-level sd prior. It reaches `brm_ranef_sd_lpdf` exactly like the
+# correlated multi-term block above, so it is the smallest model that pins the
+# emitted function.
+@testset "single-term named bucket `(1 | ri | subject)` + `sd(:, ri)` emits" begin
+    single = @brm begin
+        eta ~ 1 + (1 | ri | subject)
+        sd(:, ri) ~ Exponential(10.0)
+        y ~ Normal(eta, 1)
+    end
+    single_sb = SBBRMI(single(df); mod=@__MODULE__)
+    single_code = BayesianRegressionModels.stan_code(single_sb)
+    @test StanBlocks.stan.transpiles(single_sb.model)
+    @test StanBlocks.stanc_check(single_code; warn_pedantic=false).ok
+    @test occursin("real brm_ranef_sd_lpdf(", single_code)
+    @test !occursin("else if", ranef_sd_function(single_code))
+    @test occursin("b_ri_subject_tau ~ brm_ranef_sd([1]', [0.1]');", single_code)
+    @test brm_descriptor(single_sb) isa BRMDescriptor
 end
