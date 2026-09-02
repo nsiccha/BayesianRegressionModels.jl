@@ -70,6 +70,15 @@
 #   `noncentered` — true iff the sampled coordinate is a standard normal scaled
 #              into the effect. Zeroing (population mean) and re-drawing (a
 #              fresh group from the fitted covariance) are BOTH valid only here.
+#   `tau`    — the submodel-internal name of the per-margin FITTED between-group
+#              SD vector, so the emitted carrier is `<binding>_<tau>` (a
+#              `vector[n_terms]` in `ranefcoefnames` order). `:tau` for the
+#              sampled-scale families, `:r2d2_tau` for the derived-scale R2D2
+#              families (a transformed parameter), and `nothing` for a block
+#              with no per-margin SD vector — a scalar `(1 | g)` intercept
+#              (scale `exp(log_scale)`) or a stratified `gr(g, by=b)` block (one
+#              `tau` per stratum). `brm_ranef_sd_coordinates` (src/descriptor.jl)
+#              is the consumer; keep it in lockstep with the `@slic` bodies.
 #
 # Every layout below was measured against BridgeStan's `param_unc_names`, not
 # inferred from the Stan type. Keep this table in lockstep with the `@slic`
@@ -84,16 +93,16 @@
 # additionally asserts each block's `z` against the EMITTED STAN SOURCE, which
 # needs no BridgeStan and catches this drift at declaration level.
 const _RANEF_FAMILIES = Dict{Symbol,NamedTuple}(
-    :ranef_intercept           => (; z = :xi,     layout = :group,           noncentered = true),
-    :ranef_intercept_draws     => (; z = :xi,     layout = :group,           noncentered = true),
-    :ranef_correlated          => (; z = :z_flat, layout = :flat_term_group, noncentered = true),
-    :ranef_correlated_draws    => (; z = :z_flat, layout = :flat_term_group, noncentered = true),
-    :ranef_correlated_draws_effect => (; z = :z_flat, layout = :flat_term_group, noncentered = true),
-    :ranef_intercept_r2d2      => (; z = :xi,     layout = :group,           noncentered = true),
-    :ranef_correlated_r2d2     => (; z = :z_flat, layout = :flat_term_group, noncentered = true),
-    :ranef_correlated_draws_r2d2 => (; z = :z_flat, layout = :flat_term_group, noncentered = true),
-    :ranef_correlated_by       => (; z = :z,      layout = :group_term,      noncentered = true),
-    :ranef_correlated_by_draws => (; z = :z,      layout = :group_term,      noncentered = true),
+    :ranef_intercept           => (; z = :xi,     layout = :group,           noncentered = true,  tau = nothing),
+    :ranef_intercept_draws     => (; z = :xi,     layout = :group,           noncentered = true,  tau = nothing),
+    :ranef_correlated          => (; z = :z_flat, layout = :flat_term_group, noncentered = true,  tau = :tau),
+    :ranef_correlated_draws    => (; z = :z_flat, layout = :flat_term_group, noncentered = true,  tau = :tau),
+    :ranef_correlated_draws_effect => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :tau),
+    :ranef_intercept_r2d2      => (; z = :xi,     layout = :group,           noncentered = true,  tau = nothing),
+    :ranef_correlated_r2d2     => (; z = :z_flat, layout = :flat_term_group, noncentered = true,  tau = :r2d2_tau),
+    :ranef_correlated_draws_r2d2 => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :r2d2_tau),
+    :ranef_correlated_by       => (; z = :z,      layout = :group_term,      noncentered = true,  tau = nothing),
+    :ranef_correlated_by_draws => (; z = :z,      layout = :group_term,      noncentered = true,  tau = nothing),
     # Centered emissions — the opt-in `SBBRMI(...; centered_groups = [:g])` path,
     # which SHIPS. They are DESCRIBED here so `ranef_blocks` can list them, and
     # refused at the operation by `_ranef_assert_noncentered`: the coordinate is
@@ -101,11 +110,13 @@ const _RANEF_FAMILIES = Dict{Symbol,NamedTuple}(
     # different quantity. Describing is always safe; substituting is not. Layouts
     # measured against `param_unc_names` with n_terms=3, n_groups=2 so `.g.t` and
     # `.t.g` are distinguishable, against the `ranef_correlated_by` control in
-    # the same capture.
-    :ranef_intercept_centered        => (; z = :xi, layout = :group,      noncentered = false),
-    :ranef_correlated_centered       => (; z = :b,  layout = :group_term, noncentered = false),
-    :ranef_correlated_draws_centered => (; z = :b,  layout = :group_term, noncentered = false),
-    :ranef_correlated_draws_centered_effect => (; z = :b_cols_bc, layout = :group_term, noncentered = false),
+    # the same capture. `tau` stays directly readable under centering (the b's
+    # are centered, the scale is still sampled), so `brm_ranef_sd_coordinates`
+    # resolves it regardless of the `noncentered` flag.
+    :ranef_intercept_centered        => (; z = :xi, layout = :group,      noncentered = false, tau = nothing),
+    :ranef_correlated_centered       => (; z = :b,  layout = :group_term, noncentered = false, tau = :tau),
+    :ranef_correlated_draws_centered => (; z = :b,  layout = :group_term, noncentered = false, tau = :tau),
+    :ranef_correlated_draws_centered_effect => (; z = :b_cols_bc, layout = :group_term, noncentered = false, tau = :tau),
 )
 
 """

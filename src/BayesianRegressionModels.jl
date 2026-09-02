@@ -104,6 +104,7 @@ export NativePPL
 export BRMDescriptor, BRMInput, BRMOutput, BRMOperation, BRMHighlight
 export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
        brm_population_effect_coordinates, brm_term_coordinates,
+       brm_ranef_sd_coordinates,
        brm_operation, brm_execute, brm_columns, required_brm_inputs
 
 # Accessor helpers for column types — used unqualified by html renderers,

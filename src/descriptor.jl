@@ -1546,6 +1546,136 @@ function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
 end
 
 """
+    brm_ranef_sd_coordinates(d::BRMDescriptor, logical::Symbol, constrained_names;
+                             id::Symbol, coefficient=:Intercept)
+
+Resolve one margin's FITTED between-group standard deviation (`tau`) in a shared
+correlated random-effect block to its exact constrained posterior coordinate,
+without constructing or parsing an emitter-owned `<binding>_tau` name. This is
+the random-effect-scale sibling of
+[`brm_population_effect_coordinates`](@ref): that resolver gives the population
+LOCATION of a margin, this one gives its group SCALE, so a consumer can form a
+population-predictive quantity such as `inverse_link(intercept_draw + sd_draw *
+z)` with no name interpretation.
+
+`logical` is the margin's PUBLIC linear-predictor name — the bare inner name for
+an LHS-link LP (`:Vc` for `log(Vc) ~ …`); `id` is the brms-style `|ID|` bucket
+symbol (`:p` for `(1 | p | subject)`); and `coefficient` is the margin's
+coefficient label (`:Intercept` for an intercept-only block, a slope column for
+a correlated slope). These are exactly the ordered addresses
+[`ranefcoefnames`](@ref)`(brmi, id)` reports, in the same order the emitted
+`tau` vector uses.
+
+The returned named tuple carries `logical`, `id`, `coefficient`, the owning
+[`BRMOutput`](@ref), `coordinates` (the one matching index into
+`constrained_names`), and the margin predictor's LHS `link` / `inverse_link` —
+the SAME link the population-effect resolver returns for that predictor, so the
+intercept and the scale live on one scale and compose directly:
+
+```julia
+d  = brm_descriptor(builder, df; mod=@__MODULE__)
+mu  = brm_population_effect_coordinates(d, :Vc, constrained_names;
+                                        coefficient=:Intercept)
+tau = brm_ranef_sd_coordinates(d, :Vc, constrained_names;
+                               id=:p, coefficient=:Intercept)
+loc   = constrained_draws[:, only(mu.coordinates)]
+scale = constrained_draws[:, only(tau.coordinates)]
+Vc_upper = tau.inverse_link.(loc .+ scale .* quantile(Normal(), 0.975))
+```
+
+Both the sampled-scale families (`sd(:, id) ~ Exponential(...)` and the default
+half-normal) and the derived-scale R2D2 families (`sd(:, id) ~ r2d2(...)`, whose
+`tau` is a transformed parameter — so pass `constrained_names` /
+`constrained_draws` that INCLUDE transformed parameters) are covered; the
+resolver follows the block's emitted scale carrier either way, and centering
+does not change the carrier.
+
+It fails closed — never selecting by descriptor order or parsing a
+compiler-owned name — when the `|ID|` bucket, margin, or scale carrier is
+absent, ambiguous, or has drifted from the supplied constrained names. A block
+whose scale is not a per-margin `tau` vector — a scalar `(1 | g)` intercept
+(scale `exp(log_scale)`) or a stratified `gr(g, by=b)` block (one `tau` per
+stratum) — is refused with a message naming the family, rather than returning a
+coordinate of a different quantity.
+"""
+function brm_ranef_sd_coordinates(d::BRMDescriptor, logical::Symbol,
+                                  constrained_names;
+                                  id::Symbol, coefficient::Symbol=:Intercept)
+    brmi = d.plan.parent
+
+    # 1. The shared block for this `|ID|` bucket.
+    all_blocks = ranef_blocks(d.plan)
+    blocks = [b for b in all_blocks if b.id === id]
+    if isempty(blocks)
+        available = unique!(Symbol[b.id for b in all_blocks if !isnothing(b.id)])
+        error("brm_descriptor: no shared random-effect `|ID|` block `$id`. This " *
+              "model's shared blocks are: " *
+              (isempty(available) ? "(none)" : join(string.(available), ", ")) *
+              ". A plain `(… | g)` block has no `|ID|` and is not addressed here.")
+    end
+    length(blocks) == 1 || error(
+        "brm_descriptor: `|ID|` bucket `$id` identifies $(length(blocks)) " *
+        "random-effect blocks with different grouping factors; the ID-only " *
+        "address is ambiguous.")
+    block = only(blocks)
+
+    # 2. The margin's index in `ranefcoefnames` order, which is the `tau`-vector
+    # order — never a position guess and never a parsed carrier name.
+    margins = ranefcoefnames(brmi, id)
+    isnothing(margins) && error(
+        "brm_descriptor: `ranefcoefnames(brmi, :$id)` is `nothing`; `$id` names " *
+        "no addressable shared random-effect block.")
+    matches = findall(
+        m -> m.predictor === logical && m.coefficient === coefficient, margins)
+    length(matches) == 1 || error(
+        "brm_descriptor: margin `(predictor=$logical, coefficient=$coefficient)` " *
+        "occurs $(length(matches)) times in block `|$id|`; its ordered margins " *
+        "are $(Tuple(margins)).")
+    margin_index = only(matches)
+
+    # 3. The block's emitted scale carrier. `_RANEF_FAMILIES` (src/prediction.jl)
+    # is the ONE place coupled to the emitted names.
+    spec = _RANEF_FAMILIES[block.family]
+    tau_suffix = get(spec, :tau, nothing)
+    isnothing(tau_suffix) && error(
+        "brm_descriptor: random-effect block `$(block.binding)` (`|$id|`, family " *
+        "`$(block.family)`) has no per-margin `tau` scale vector to resolve. A " *
+        "scalar `(1 | g)` intercept parameterises its scale as `exp(log_scale)` " *
+        "and a stratified `gr(g, by=b)` block emits one `tau` per stratum; " *
+        "neither is a single per-margin coordinate.")
+    tau_name = Symbol(block.binding, :_, tau_suffix)
+
+    outputs = BRMOutput[
+        o for o in d.outputs
+        if o.role === :random_effect && o.name === tau_name &&
+           !isnothing(o.declaration) && o.declaration.target === block.binding
+    ]
+    length(outputs) == 1 || error(
+        "brm_descriptor: random-effect block `$(block.binding)` (`|$id|`) resolves " *
+        "its scale carrier to `$tau_name`, which owns $(length(outputs)) descriptor " *
+        "outputs; expected exactly one. Re-reflect the model that produced the " *
+        "posterior draws.")
+    output = only(outputs)
+
+    coordinates = _brm_emitted_coordinates(output, constrained_names)
+    length(coordinates) == block.n_terms || error(
+        "brm_descriptor: scale carrier `$tau_name` for block `|$id|` owns " *
+        "$(block.n_terms) marginal SDs but resolves to $(length(coordinates)) " *
+        "constrained coordinates. Re-reflect the model that produced the " *
+        "posterior draws.")
+
+    predictors = [lp for lp in linear_predictors(brmi) if lp.name === logical]
+    length(predictors) == 1 || error(
+        "brm_descriptor: margin predictor `$logical` resolves to " *
+        "$(length(predictors)) linear predictors; expected exactly one.")
+    link = only(predictors).link_lhs_fn
+
+    (; logical, id, coefficient, output,
+       coordinates=[coordinates[margin_index]],
+       link, inverse_link=InverseFunctions.inverse(link))
+end
+
+"""
     brm_output_coordinates(d::BRMDescriptor, logical::Symbol, constrained_names;
                            role=nothing) -> Vector{Int}
 
