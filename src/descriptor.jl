@@ -646,19 +646,54 @@ function _brm_logical_outputs(stan, by_name, targets, cell_values,
     logical
 end
 
+# Indices of the SINGLE output that physically carries a formula quantity's
+# constrained draws for a declaration, among `outputs` matching `pred`.
+#
+# In an ordinary fit that carrier is a sampled `:parameter`; in a likelihood-free
+# `regime="prior"` program (no observation `~`) StanBlocks re-draws the same
+# quantity from its prior into generated quantities under the SAME constrained
+# name (the `_rng` companions), so its kind is `:generated_quantity`. Both
+# physically hold the quantity's constrained draws and are addressable against
+# BridgeStan's constrained names.
+#
+# The `:parameter` carrier is PREFERRED: the GQ carrier is used only when NO
+# sampled carrier matches `pred`. So a fit is byte-for-byte unchanged (the
+# sampled carrier still wins), and if a future prior-draw companion ever emits a
+# GQ twin BESIDE a sampled parameter, the sampled one is still selected — the
+# label attach does not strip a valid fitted carrier's labels and a fitted
+# coordinate query does not start failing on the twin. A genuine `:parameter`
+# ambiguity (two sampled carriers) is preserved for the caller's own
+# `length(...) == 1` fail-closed check, because the GQ fallback fires only on an
+# EMPTY parameter match and so cannot mask it. A `:transformed_parameter` (a
+# derived value such as a fused `mu`, or an R2D2 `tau`) is deliberately NOT a
+# draw carrier here — those are matched by exact carrier name where addressed —
+# which keeps the population/categorical/term single-carrier guarantee intact.
+function _brm_carrier_indices(outputs, pred)
+    idx = findall(o -> pred(o) && o.kind === :parameter, outputs)
+    isempty(idx) || return idx
+    findall(o -> pred(o) && o.kind === :generated_quantity, outputs)
+end
+
 # Attach coefficient labels to the population block's coefficient vector.
 #
 # `popefs` (sbimpl.jl) declares exactly ONE parameter, `beta_pop`, so within a
-# population block the coefficient vector is the unique `:parameter`-kind
-# output. Labelling that one is unambiguous; if a future `popefs` ever grew a
-# second parameter the uniqueness check fails and nothing is labelled, rather
-# than the wrong output being labelled — a missing label is a plain UI, a
-# wrong label is a lie about which covariate a posterior column belongs to.
+# population block the coefficient vector is the unique draw carrier (a sampled
+# `:parameter` in a fit, its `:generated_quantity` re-draw in a prior program).
+# Labelling that one is unambiguous; if a future `popefs` ever grew a second
+# such carrier the uniqueness check fails and nothing is labelled, rather than
+# the wrong output being labelled — a missing label is a plain UI, a wrong label
+# is a lie about which covariate a posterior column belongs to.
 function _brm_label_population!(outputs, brmi, pop_lp)
     for (block, lp) in pop_lp
-        idx = findall(o -> o.role === :population_effect && o.kind === :parameter &&
-                           !isnothing(o.declaration) && o.declaration.target === block,
-                      outputs)
+        # The coefficient vector is the block INTERNAL (`pop_<lp>_beta_pop`, whose
+        # name differs from the block target); the block RESULT (`pop_<lp>`, name
+        # === target) is the linear-predictor value, not a coefficient carrier.
+        # `name !== block` is load-bearing for a prior program: there the block
+        # result assignment is ALSO emitted as a generated quantity under the
+        # same target, so filtering by target alone would match two GQ carriers.
+        idx = _brm_carrier_indices(outputs,
+                  o -> o.role === :population_effect && !isnothing(o.declaration) &&
+                       o.declaration.target === block && o.name !== block)
         length(idx) == 1 || continue
         labels = _brm_labels(brmi, lp)
         isnothing(labels) && continue
@@ -1259,6 +1294,14 @@ parameter owned by that declaration. Consumers never construct or parse the
 compiler-owned carrier name. Missing or duplicate predictors/terms/owners,
 unsupported parameter roles, and descriptor/artifact coordinate drift all
 error rather than selecting by descriptor order.
+
+Generated-aware: for a response-free `regime="prior"` program (no observation
+`~`) StanBlocks re-draws every term carrier from its prior into generated
+quantities under the same constrained name, so pass `constrained_names` built
+with `include_gq=true` (`BridgeStan.param_names(prob.model; include_tp=true,
+include_gq=true)`) and this resolves the GQ carrier exactly as it resolves the
+sampled `:parameter` in an ordinary fit; a sampled carrier is preferred when
+both exist.
 """
 function brm_term_coordinates(d::BRMDescriptor, logical::Symbol,
                               constrained_names;
@@ -1293,17 +1336,15 @@ function brm_term_coordinates(d::BRMDescriptor, logical::Symbol,
         "no parameter role `$parameter`; available roles are $(keys(bindings)).")
     binding = getproperty(bindings, parameter)
     expected = Symbol(_brm_stan_name(owner), :_, binding)
-    outputs = BRMOutput[
-        o for o in d.outputs
-        if o.kind === :parameter && !isnothing(o.declaration) &&
-           o.declaration.target === owner.target && o.name === expected
-    ]
-    length(outputs) == 1 || error(
+    idxs = _brm_carrier_indices(d.outputs,
+               o -> !isnothing(o.declaration) &&
+                    o.declaration.target === owner.target && o.name === expected)
+    length(idxs) == 1 || error(
         "brm_descriptor: term `$term` on logical predictor `$logical` resolves " *
-        "parameter role `$parameter` to $(length(outputs)) declaration-owned " *
+        "parameter role `$parameter` to $(length(idxs)) declaration-owned " *
         "posterior carriers; expected exactly one. Re-reflect the model that " *
         "produced the posterior draws.")
-    output = only(outputs)
+    output = d.outputs[only(idxs)]
 
     coordinates = _brm_emitted_coordinates(output, constrained_names)
     expected_count = _brm_term_coordinate_count(
@@ -1415,16 +1456,18 @@ function _brm_categorical_effect_coordinates(d::BRMDescriptor,
         "terms; expected exactly one.")
     categorical = only(entries)
 
-    outputs = BRMOutput[
-        o for o in d.outputs
-        if o.kind === :parameter && !isnothing(o.declaration) &&
-           o.declaration.target === block
-    ]
-    length(outputs) == 1 || error(
+    # The contrast vector is the block INTERNAL (`cat_<lp>_<col>_beta`, name !==
+    # target); the block RESULT (name === target) is the categorical term value.
+    # `name !== block` is load-bearing for a prior program, where the block
+    # result assignment is ALSO a generated quantity under the same target.
+    idxs = _brm_carrier_indices(d.outputs,
+               o -> !isnothing(o.declaration) && o.declaration.target === block &&
+                    o.name !== block)
+    length(idxs) == 1 || error(
         "brm_descriptor: categorical address `$coefficient` on logical " *
         "predictor `$logical` resolves to block `$block`, which owns " *
-        "$(length(outputs)) parameter carriers; expected exactly one.")
-    output = only(outputs)
+        "$(length(idxs)) parameter carriers; expected exactly one.")
+    output = d.outputs[only(idxs)]
 
     coordinates = _brm_emitted_coordinates(output, constrained_names)
     expected_count = length(categorical.nonreference_levels)
@@ -1482,6 +1525,16 @@ Resolution is fail-closed. Missing or duplicate logical predictors, missing or
 duplicate population carriers, unavailable/duplicate coefficient labels, and
 descriptor/artifact coordinate drift all error rather than selecting by
 descriptor order.
+
+Generated-aware: for a response-free `regime="prior"` program (no observation
+`~`), the numeric coefficient and categorical contrast carriers move from
+`parameters` into generated quantities under the same constrained names, so
+pass `constrained_names` built with `include_gq=true`
+(`BridgeStan.param_names(prob.model; include_tp=true, include_gq=true)`) and
+this resolves the GQ carrier exactly as it resolves the sampled `:parameter` in
+an ordinary fit — including the coefficient `labels`, so a prior-only descriptor
+keeps its addressable population coordinates. A sampled carrier is preferred
+when both exist.
 """
 function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
                                            constrained_names;
@@ -1509,16 +1562,18 @@ function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
             categorical_block)
     end
 
-    outputs = BRMOutput[
-        o for o in d.outputs
-        if o.role === :population_effect && o.kind === :parameter &&
-           !isnothing(o.declaration) && o.declaration.target === entry.block
-    ]
-    length(outputs) == 1 || error(
+    # The coefficient vector is the block INTERNAL (name !== target); the block
+    # RESULT (name === target) is the linear-predictor value. `name !== block`
+    # is load-bearing for a prior program, where the block result assignment is
+    # ALSO a generated quantity under the same target (see _brm_carrier_indices).
+    idxs = _brm_carrier_indices(d.outputs,
+               o -> o.role === :population_effect && !isnothing(o.declaration) &&
+                    o.declaration.target === entry.block && o.name !== entry.block)
+    length(idxs) == 1 || error(
         "brm_descriptor: logical predictor `$logical` resolves to population " *
-        "block `$(entry.block)`, which owns $(length(outputs)) parameter " *
+        "block `$(entry.block)`, which owns $(length(idxs)) parameter " *
         "carriers; expected exactly one.")
-    output = only(outputs)
+    output = d.outputs[only(idxs)]
 
     labels = output.labels
     isnothing(labels) && error(
@@ -1597,6 +1652,14 @@ whose scale is not a per-margin `tau` vector — a scalar `(1 | g)` intercept
 (scale `exp(log_scale)`) or a stratified `gr(g, by=b)` block (one `tau` per
 stratum) — is refused with a message naming the family, rather than returning a
 coordinate of a different quantity.
+
+Generated-aware: for a response-free `regime="prior"` program (no observation
+`~`) StanBlocks re-draws the shared-`|ID|` scale from `brm_ranef_sd_rng` into
+generated quantities under the same `<binding>_tau` name (the resolver already
+follows that name + `:random_effect` role, so no kind branch is needed). Pass
+`constrained_names` with `include_gq=true` (and, as for the R2D2 derived-scale
+family, `include_tp=true`) and it resolves the GQ `tau` carrier exactly as it
+resolves the sampled one in a fit.
 """
 function brm_ranef_sd_coordinates(d::BRMDescriptor, logical::Symbol,
                                   constrained_names;
