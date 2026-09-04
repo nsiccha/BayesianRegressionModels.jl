@@ -37,8 +37,13 @@ const TESTENV = @__DIR__
 # is on, for humans; the pin itself is the full SHA and needs no branch.
 const PINS = [
     # MutatingFunctions carries the SubArray-gather activity fix the julianic
-    # 0-alloc surface depends on (main).
-    ("MutatingFunctions", "https://github.com/nsiccha/MutatingFunctions.jl.git", "92687c809f60493422b11158ac8abba32b21cdf9"),
+    # 0-alloc surface depends on (main). Pinned at/after b353559 (2026-08-13),
+    # where the LinearAlgebra/Random/Statistics integrations became strong
+    # `[deps]` instead of package extensions. The pre-b353559 ext trio
+    # (MutatingFunctions{LinearAlgebra,Random,Statistics}Ext) SELF-DEADLOCKS a
+    # fresh parallel precompile under Pkg 1.10, so this pin must never regress
+    # below b353559.
+    ("MutatingFunctions", "https://github.com/nsiccha/MutatingFunctions.jl.git", "4fc41b1c7b774133ceaacc4ff3c34c67b15b87b2"),  # main
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "121de3194f02044e00bac0d11019a93458ddb63a"),  # main
     ("TreeArrays",        "https://github.com/nsiccha/TreeArrays.jl.git",        "c317cc003fc41c2d933c27dc80799141eebd434e"),  # main
     ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "66448dec6049b543d1dde745d7527b24fd01239e"),  # devibe (prior-predictive fix: likelihood-free program lowers every parameter to a GQ _rng)

@@ -29,7 +29,10 @@ julia = "1.10"
 
 [sources.MutatingFunctions]
 url = "https://github.com/nsiccha/MutatingFunctions.jl"
-rev = "b4948cca48e7e60701b013385d958045ce9e936f"
+# At/after b353559 (2026-08-13): stdlib integrations are strong `[deps]`, not
+# extensions. The pre-b353559 ext trio self-deadlocks a fresh parallel
+# precompile under Pkg 1.10; never regress this pin below b353559.
+rev = "4fc41b1c7b774133ceaacc4ff3c34c67b15b87b2"
 
 [sources.OutputSignatures]
 url = "https://github.com/nsiccha/OutputSignatures.jl"
