@@ -14,7 +14,7 @@ using CategoricalArrays: categorical
 using Distributions: Bernoulli, Beta, Binomial, Categorical, Cauchy, Dirichlet,
                      Exponential, Gamma, InverseGaussian, LocationScale,
                      LogNormal, MixtureModel, Multinomial, MvNormal, Normal,
-                     Poisson, TDist, Uniform, Weibull, truncated
+                     Poisson, TDist, Uniform, VonMises, Weibull, truncated
 using LogExpFunctions: logistic, logit
 using Statistics: mean
 
@@ -749,6 +749,60 @@ end
     likelihood = only(BRM._brm_rk_plan(brmi).responses)
     @test (likelihood.family, likelihood.link) === (:beta_binomial_logit, :logit)
     @test likelihood.scale == 4.0
+end
+
+@testset "group-C von-Mises plan shapes" begin
+    # The demand-battery shape (circular.jl): identity-link location +
+    # log-link kappa submodel; kappa rides the scale-predictor slot
+    # and the principal interval rides the interval slot.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        log(kappa) ~ 1
+        y ~ CircularVonMises(mu, kappa; interval=(-pi, pi))
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:von_mises, :identity)
+    @test likelihood.predictor === :mu
+    @test isnothing(likelihood.scale)
+    @test likelihood.scale_predictor === :kappa
+    @test likelihood.interval == (-Float64(pi), Float64(pi))
+    # Exact head with a sampled kappa; no interval.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        k ~ LogNormal(0, 1)
+        y ~ VonMises(mu, k)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:von_mises, :identity)
+    @test likelihood.predictor === :mu
+    @test likelihood.scale === :k
+    @test isnothing(likelihood.scale_predictor)
+    @test isnothing(likelihood.interval)
+    # Literal kappa inlines.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        y ~ VonMises(mu, 1.7)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:von_mises, :identity)
+    @test likelihood.scale == 1.7
+    @test isnothing(likelihood.scale_predictor)
+    @test isnothing(likelihood.interval)
+    # Omitted interval defaults to (-pi, pi) (SB `_brm_circular_interval`).
+    brmi = @brm df begin
+        mu ~ 1 + x
+        y ~ CircularVonMises(mu, 1.7)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test likelihood.interval == (-Float64(pi), Float64(pi))
+    # A (0, 2pi) principal interval plans (values must live there).
+    dfc = merge(df, (; y=[0.5, 2.0, 6.0, 1.0, 5.5, 0.1]))
+    brmi = @brm dfc begin
+        mu ~ 1 + x
+        y ~ CircularVonMises(mu, 1.7; interval=(0.0, 6.283185307179586))
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test likelihood.interval == (0.0, 6.283185307179586)
 end
 
 @testset "weights, evidence, and multi-response" begin
@@ -2529,7 +2583,8 @@ end
 # CategoricalLogit and Ordinal are admitted by the leveled slice, see
 # "leveled plan shapes", so they are not listed here; hurdle Poisson
 # is admitted, see "group-C hurdle-poisson plan shapes"; scalar-zi ZIP
-# is admitted, see "group-C ZIP plan shapes").
+# is admitted, see "group-C ZIP plan shapes"; von-Mises/CircularVonMises
+# is admitted, see "group-C von-Mises plan shapes").
 @testset "fail closed: slice-2 demand (not yet admitted)" begin
     # Group B: LocationScale-TDist (t_regression.jl) is admitted — see
     # "group-B student-t plan shapes" above.
@@ -2570,12 +2625,8 @@ end
         tau ~ Beta(2, 2)
         y ~ SkewDoubleExponential(mu, s, tau)
     end)
-    # Group C: CircularVonMises (circular.jl).
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
-        mu ~ 1 + x
-        log(kappa) ~ 1
-        y ~ CircularVonMises(mu, kappa; interval=(-pi, pi))
-    end)
+    # Group C: CircularVonMises (circular.jl) is admitted — see
+    # "group-C von-Mises plan shapes" above.
 end
 
 # Slice-2 group-A scope edges (per the rk:brm scoping answer): no
@@ -2931,6 +2982,77 @@ end
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         logit(mu) ~ 1 + x
         b ~ MixtureModel([BetaBinomial2(h, mu, 5.0)], [1.0])
+    end)
+end
+
+@testset "fail closed: group-C von-Mises scope edges" begin
+    # Location predictor must be identity-link (the triple wants identity).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        y ~ VonMises(mu, 1.7)
+    end)
+    # Kappa submodel must be log-link (only log inverts into (0, Inf)).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        kappa ~ 1 + x
+        y ~ VonMises(mu, kappa)
+    end)
+    # Wrong arity: the 2-arg location/concentration spelling only.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        y ~ VonMises(mu)
+    end)
+    # 1-arg `VonMises(kappa)` names no location predictor.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        y ~ VonMises(1.7)
+    end)
+    # Non-positive literal kappa (positivity).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        y ~ VonMises(mu, 0.0)
+    end)
+    # A data column is never a scalar kappa.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        y ~ VonMises(mu, z)
+    end)
+    # The location predictor cannot feed the kappa slot too (the
+    # log-link pin fires first).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        y ~ VonMises(mu, mu)
+    end)
+    # Circular values outside the half-open principal interval.
+    dfout = merge(df, (; y=[0.5, -0.2, 0.1, Float64(pi), 1.4, 1.1]))
+    @test_throws ErrorException BRM._brm_rk_plan(@brm dfout begin
+        mu ~ 1 + x
+        y ~ CircularVonMises(mu, 1.7; interval=(-pi, pi))
+    end)
+    # Bool responses are not real-valued (thin-layer bind rule).
+    dfb = merge(df, (; y=[true, false, true, false, true, false]))
+    @test_throws ErrorException BRM._brm_rk_plan(@brm dfb begin
+        mu ~ 1 + x
+        y ~ VonMises(mu, 1.7)
+    end)
+    # Interval width must be 2pi (macro-time shape rule).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        y ~ CircularVonMises(mu, 1.7; interval=(0.0, 1.0))
+    end)
+    # `interval` is the only admitted keyword (macro-time shape rule).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        y ~ CircularVonMises(mu, 1.7; period=2pi)
+    end)
+    # No weights or evidence on the group-C triple (no driving case).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        y ~ weighted(VonMises(mu, 1.7), fweights(n))
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        y ~ censored(VonMises(mu, 1.7); upper=1.0)
     end)
 end
 

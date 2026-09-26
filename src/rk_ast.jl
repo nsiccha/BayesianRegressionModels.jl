@@ -317,7 +317,7 @@ _rk_ast_response_uses_scale(family::Symbol) =
     family === :gamma_log || family === :beta_logit ||
     family === :beta_binomial_logit ||
     family === :student_t || family === :hurdle_poisson ||
-    family === :wald
+    family === :wald || family === :von_mises
 
 # The scale-slot body spelling inside a bare response statement. A
 # direct scale (outer name, literal, or the plan-forbidden nothing)
@@ -597,6 +597,19 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
         # changes nothing.
         _rk_ast_dotted(:ZeroInflatedPoisson,
             _rk_ast_dotted(:exp, predictor), leaf[:zero_inflation])
+    elseif response.family === :von_mises
+        # Twin heads (thin-layer decision, pair fam-vonmises): exact
+        # `VonMises(mu, kappa)` maps to `VonMises.(mu, kappa)` and
+        # `CircularVonMises` appends the literal principal interval
+        # (Distributions `(mu, kappa)` order + `(lo, hi)`). kappa
+        # rides the scale slot (scalars inline bare, the `log(kappa)`
+        # submodel under `exp.`). No fused head: one spelling either
+        # way.
+        interval = response.interval
+        interval === nothing ?
+            _rk_ast_dotted(:VonMises, predictor, leaf[:scale]) :
+            _rk_ast_dotted(:CircularVonMises, predictor, leaf[:scale],
+                interval[1], interval[2])
     elseif response.family === :categorical_logit
         # Reference-coded: K−1 non-reference etas, class 1 the implicit
         # zero reference (class order follows predictor order).
@@ -670,7 +683,8 @@ function _rk_ast_mixture_leaves(response::_RKLikelihoodSpec,
             _RKResponseEvidence(:none, nothing, nothing), response.label,
             response.trials, nothing, nothing, Symbol[], Symbol[], nothing,
             nothing, Symbol[], nothing, Symbol[], nothing,
-            _RKMixtureComponent[], nothing, nothing, nothing, nothing)
+            _RKMixtureComponent[], nothing, nothing, nothing, nothing,
+            nothing)
         cleaf = Dict{Symbol,Any}(:predictor => loc)
         if _rk_ast_response_uses_scale(comp.family)
             cleaf[:scale] =
