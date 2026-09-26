@@ -3906,6 +3906,126 @@ end
     @test cb.slices == [(:mu, 1:2)]
 end
 
+# Shared mm/gr fixture (same values as the SB parity probes).
+mmgrdf = (;
+    df...,
+    g1=["a", "a", "b", "c", "b", "a"],
+    g2=["b", "c", "c", "a", "a", "b"],
+    w1=[2.0, 1.0, 0.0, 1.0, 3.0, 1.0],
+    w2=[1.0, 1.0, 3.0, 2.0, 1.0, 1.0],
+    grp=["s1", "s1", "s2", "s3", "s3", "s4"],
+    arm=["A", "A", "A", "B", "B", "B"],
+)
+
+@testset "ranef mm bucket plan shape" begin
+    # (1|mm) default weights — :intercept1, no eta, SB-spelled symbol.
+    eq = BRM._brm_rk_plan(@brm mmgrdf begin
+        mu ~ 1 + x + (1 | mm(g1, g2))
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    eb = only(eq.ranef_buckets)
+    @test eb.id === nothing
+    @test eb.group === :mm__g1__g2
+    @test eb.kind === :intercept1
+    @test isnan(eb.lkj_eta)
+    @test eb.label === :bucket_mm__g1__g2
+    @test eb.grouping.form === :mm
+    @test eb.grouping.columns == (:g1, :g2)
+    @test eb.grouping.weights === nothing
+    @test eb.grouping.normalize
+    @test [(m.predictor, m.coefficient) for m in eb.margins] ==
+        [(:mu, :Intercept)]
+    @test eb.slices == [(:mu, 1:1)]
+    gather = only(eq.predictors).terms[end]
+    @test gather.kind === :ranef_gather
+    @test gather.options == (bucket_id=nothing, bucket_group=:mm__g1__g2)
+    @test gather.addressee === :r_mu_mm__g1__g2
+    @test eq.columns[:g1] == ["a", "a", "b", "c", "b", "a"]
+    @test eq.columns[:g2] == ["b", "c", "c", "a", "a", "b"]
+    # Weighted + raw spellings ride the payload; the symbol mirrors SB.
+    wt = BRM._brm_rk_plan(@brm mmgrdf begin
+        mu ~ 1 + x + (1 | mm(g1, g2; weights=(w1, w2)))
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    wb = only(wt.ranef_buckets)
+    @test wb.group === :mm__g1__g2__w__w1__w2
+    @test wb.kind === :intercept1
+    @test wb.grouping.weights == (:w1, :w2)
+    @test wb.grouping.normalize
+    @test wt.columns[:w1] == [2.0, 1.0, 0.0, 1.0, 3.0, 1.0]
+    raw = BRM._brm_rk_plan(@brm mmgrdf begin
+        mu ~ 1 + x + (1 | mm(g1, g2; weights=(w1, w2), normalize=false))
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    rb = only(raw.ranef_buckets)
+    @test rb.group === :mm__g1__g2__w__w1__w2__raw
+    @test rb.grouping.weights == (:w1, :w2)
+    @test !rb.grouping.normalize
+    # (1+x|mm) — :correlated with eta.
+    corr = BRM._brm_rk_plan(@brm mmgrdf begin
+        mu ~ 1 + x + (1 + x | mm(g1, g2; weights=(w1, w2)))
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    cb = only(corr.ranef_buckets)
+    @test cb.kind === :correlated
+    @test cb.lkj_eta == 1.0
+    @test [m.coefficient for m in cb.margins] == [:Intercept, :x]
+    @test cb.slices == [(:mu, 1:2)]
+    # (0+x|mm) — SB asymmetry: the CORRELATED path (vacuous 1x1 LKJ),
+    # never the plain :slope1 geometry.
+    sl = BRM._brm_rk_plan(@brm mmgrdf begin
+        mu ~ 1 + x + (0 + x | mm(g1, g2; weights=(w1, w2)))
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    slb = only(sl.ranef_buckets)
+    @test slb.kind === :correlated
+    @test slb.lkj_eta == 1.0
+    @test [m.coefficient for m in slb.margins] == [:x]
+    @test slb.slices == [(:mu, 1:1)]
+end
+
+@testset "ranef gr bucket plan shape" begin
+    # (1|gr) — ALWAYS :correlated (SB has no intercept special-case).
+    int = BRM._brm_rk_plan(@brm mmgrdf begin
+        mu ~ 1 + x + (1 | gr(grp, by=arm))
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    ib = only(int.ranef_buckets)
+    @test ib.id === nothing
+    @test ib.group === :grp__by__arm
+    @test ib.kind === :correlated
+    @test ib.lkj_eta == 1.0
+    @test ib.label === :bucket_grp__by__arm
+    @test ib.grouping.form === :gr
+    @test ib.grouping.columns == (:grp,)
+    @test ib.grouping.by === :arm
+    @test [(m.predictor, m.coefficient) for m in ib.margins] ==
+        [(:mu, :Intercept)]
+    @test ib.slices == [(:mu, 1:1)]
+    gather = only(int.predictors).terms[end]
+    @test gather.kind === :ranef_gather
+    @test gather.options == (bucket_id=nothing, bucket_group=:grp__by__arm)
+    @test gather.addressee === :r_mu_grp__by__arm
+    @test int.columns[:grp] == ["s1", "s1", "s2", "s3", "s3", "s4"]
+    @test int.columns[:arm] == ["A", "A", "A", "B", "B", "B"]
+    # (1+x|gr) — :correlated, two margins.
+    corr = BRM._brm_rk_plan(@brm mmgrdf begin
+        mu ~ 1 + x + (1 + x | gr(grp, by=arm))
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    cb = only(corr.ranef_buckets)
+    @test cb.kind === :correlated
+    @test [m.coefficient for m in cb.margins] == [:Intercept, :x]
+    @test cb.slices == [(:mu, 1:2)]
+end
+
 @testset "ranef categorical slope dummies" begin
     treatment = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x + (1 + c | g)
@@ -4118,18 +4238,56 @@ end
             y ~ Normal(mu, s)
         end)
     end
-    # mm(...) is deferred.
-    rk_throws_admission("mm(...)") do
+    # `|ID|` over mm(...) is rejected (mirrors SB: one shared block).
+    rk_throws_admission("already defines one shared") do
         BRM._brm_rk_plan(@brm df begin
-            mu ~ 1 + x + (1 | mm(g, h))
+            mu ~ 1 + x + (1 | ID | mm(g, h))
             s ~ Exponential(1)
             y ~ Normal(mu, s)
         end)
     end
-    # gr(...; by=...) is deferred.
-    rk_throws_admission("by=") do
+    # `|ID|` over gr(...; by=...) is staged for v1.1 (SB supports it).
+    rk_throws_admission("staged for v1.1") do
+        BRM._brm_rk_plan(@brm df begin
+            mu ~ 1 + x + (1 | ID | gr(g, by=h))
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    end
+    # `||` over mm(...) hits the generic zerocorr gate.
+    rk_throws_admission("||") do
+        BRM._brm_rk_plan(@brm df begin
+            mu ~ 1 + x + (1 || mm(g, h))
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    end
+    # Categorical membership columns are out (SB pools DECLARED levels).
+    rk_throws_admission("CategoricalVector") do
+        BRM._brm_rk_plan(@brm (; df..., gc=categorical(df.gs)) begin
+            mu ~ 1 + x + (1 | mm(gc, h))
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    end
+    # Straddling groups fail (shared no-straddle validation; the
+    # attribution is the shared helper's, like other shared errors).
+    try
         BRM._brm_rk_plan(@brm df begin
             mu ~ 1 + x + (1 | gr(g, by=h))
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+        @test false
+    catch err
+        @test err isa ErrorException
+        @test occursin("straddles multiple strata", sprint(showerror, err))
+    end
+    # r2d2 over mm/gr blocks is rejected (mirrors SB's residual rule).
+    rk_throws_admission("r2d2") do
+        BRM._brm_rk_plan(@brm df begin
+            mu ~ 1 + x + (1 | mm(g, h))
+            effect(mu, :) ~ r2d2()
             s ~ Exponential(1)
             y ~ Normal(mu, s)
         end)

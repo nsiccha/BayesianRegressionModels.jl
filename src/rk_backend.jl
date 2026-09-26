@@ -294,14 +294,27 @@ struct _RKRanefMargin
     z::_RKRanefZRecipe
 end
 
+struct _RKRanefGrouping
+    form::Symbol # :plain | :mm | :gr
+    columns::Tuple # mm: membership group columns; gr: (group,); plain: (group,)
+    weights::Union{Nothing,Tuple} # mm weight columns (nothing = default 1/M)
+    normalize::Bool # mm only
+    by::Union{Nothing,Symbol} # gr stratum column
+end
+
+_rk_plain_grouping(group::Symbol) = _RKRanefGrouping(:plain, (group,), nothing, true, nothing)
+
 struct _RKRanefBucket
     id::Union{Nothing,Symbol}
-    group::Symbol # bound grouping column (raw; crossed strings if categorical)
+    group::Symbol # bound grouping column (raw; crossed strings if categorical),
+        # or the synthetic mm/gr block symbol (SB spelling; the AST carries
+        # the real column refs in the grouping payload)
     kind::Symbol # :intercept1 | :slope1 | :correlated
     margins::Vector{_RKRanefMargin}
     slices::Vector{Tuple{Symbol,UnitRange{Int}}}
     lkj_eta::Float64 # correlated only; NaN otherwise
     label::Symbol # :bucket_<suffix>
+    grouping::_RKRanefGrouping
 end
 
 struct _RKVectorParameter
@@ -3315,22 +3328,21 @@ function _rk_gate_ranef_interaction!(t, target::Symbol, what::String,
     return nothing
 end
 
-function _rk_lower_ranef_bucket(context, id::Union{Nothing,Symbol},
-        gname::Symbol, targets::Vector{Any},
+# Shared margin loop for every draws-regime grouping form (plain, mm,
+# gr): lower each target's effects to Z recipes, slice per target.
+# `form` names the block in errors ("random effect" / "`mm(...)` random
+# effect" / "`gr(...; by=...)` random effect").
+function _rk_bucket_margins!(margins::Vector{_RKRanefMargin},
+        slices::Vector{Tuple{Symbol,UnitRange{Int}}}, context,
+        targets::Vector{Any}, id::Union{Nothing,Symbol},
         columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol},
-        derived::Vector{_RKDerivedSpec})
+        derived::Vector{_RKDerivedSpec}, form::String)
     prefix = "RK backend"
     data = context.data
-    raw = get(data, gname, nothing)
-    bound = _rk_ranef_group_column!(columns, taken, gname, raw,
-        id === nothing ? "predictor `$(first(targets)[1])` random effect" :
-            "`|$id|` random-effect block")
-    margins = _RKRanefMargin[]
-    slices = Tuple{Symbol,UnitRange{Int}}[]
     cursor = 0
     for (target, d) in targets
-        what = id === nothing ? "predictor `$target` random effect" :
-            "`|$id|` random-effect block for predictor `$target`"
+        what = id === nothing ? "predictor `$target` $form" :
+            "`|$id|` $form block for predictor `$target`"
         _rk_gate_ranef_factor!(d.effects, target, what)
         lowered = _sb_ranef_lowered_terms(collect(Any, d.effects))
         before = length(margins)
@@ -3348,6 +3360,23 @@ function _rk_lower_ranef_bucket(context, id::Union{Nothing,Symbol},
         push!(slices, (target, (cursor+1):(cursor+ncols)))
         cursor += ncols
     end
+    margins, slices
+end
+
+function _rk_lower_ranef_bucket(context, id::Union{Nothing,Symbol},
+        gname::Symbol, targets::Vector{Any},
+        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol},
+        derived::Vector{_RKDerivedSpec})
+    prefix = "RK backend"
+    data = context.data
+    raw = get(data, gname, nothing)
+    bound = _rk_ranef_group_column!(columns, taken, gname, raw,
+        id === nothing ? "predictor `$(first(targets)[1])` random effect" :
+            "`|$id|` random-effect block")
+    margins = _RKRanefMargin[]
+    slices = Tuple{Symbol,UnitRange{Int}}[]
+    _rk_bucket_margins!(margins, slices, context, targets, id, columns,
+        taken, derived, "random effect")
     isempty(margins) && return nothing
     kind = if id !== nothing || length(margins) > 1
         :correlated
@@ -3358,7 +3387,151 @@ function _rk_lower_ranef_bucket(context, id::Union{Nothing,Symbol},
     end
     eta = kind === :correlated ? 1.0 : NaN
     _RKRanefBucket(id, bound, kind, margins, slices, eta,
-        _rk_ranef_bucket_label(id, bound))
+        _rk_ranef_bucket_label(id, bound), _rk_plain_grouping(bound))
+end
+
+# Synthetic block symbols mirror the SB spellings exactly (shared
+# `_brm_mm_suffix`; the `__by__` join SB inlines): the thin layer derives
+# the same symbol from the emitted `mm(...)`/`gr(...)` call.
+_rk_mm_block_symbol(term::MultiMembershipTerm) = _brm_mm_suffix(term)
+_rk_gr_block_symbol(gname::Symbol, byname::Symbol) =
+    Symbol(gname, :__by__, byname)
+
+# Lookup name shared by bucket planning and gather attach: the bound
+# column for plain blocks, the synthetic block symbol for mm/gr.
+function _rk_bucket_lookup_name(decl)
+    desc = decl.descriptor
+    desc isa NamedColumn && return name(desc)
+    desc isa MultiMembershipTerm && return _rk_mm_block_symbol(desc)
+    if desc isa Tuple
+        length(desc) == 2 || error(
+            "RK backend: internal: unexpected `gr(...)` descriptor " *
+            "arity `$(length(desc))`")
+        return _rk_gr_block_symbol(name(desc[1]), name(desc[2]))
+    end
+    error("RK backend: internal: unexpected group descriptor " *
+        "`$(typeof(desc))`")
+end
+
+# Whole-predictor `r2d2` makes every ranef of that predictor the residual
+# (SB threads the derived scale into each block); SB rejects that over
+# mm/gr blocks, so the draws regime fails it closed here.
+function _rk_gate_ranef_r2d2!(brmi::BRMI, target::Symbol, what::String)
+    prefix = "RK backend"
+    for spec in r2d2_priors(brmi)
+        if isnothing(spec.predictor) || spec.predictor === target
+            error("$prefix: $what under an `r2d2` decomposition is not " *
+                "in the draws regime (mirrors SB: the residual scale " *
+                "over `mm(...)`/`gr(...; by=...)` blocks is not " *
+                "supported); drop the `r2d2` statement")
+        end
+    end
+    nothing
+end
+
+function _rk_lower_ranef_mm_bucket(context, term::MultiMembershipTerm,
+        targets::Vector{Any}, columns::Dict{Symbol,AbstractVector},
+        taken::Set{Symbol}, derived::Vector{_RKDerivedSpec})
+    prefix = "RK backend"
+    data = context.data
+    sym = _rk_mm_block_symbol(term)
+    group_names = _brm_mm_group_names(term)
+    weight_names = _brm_mm_weight_names(term)
+    what = "predictor `$(first(targets)[1])` `mm(...)` random effect"
+    for gname in group_names
+        raw = get(data, gname, nothing)
+        raw isa AbstractVector || error(
+            "$prefix: $what grouping `$gname` must be a vector")
+        raw isa CA.CategoricalVector && error(
+            "$prefix: $what grouping `$gname` is a `CategoricalVector`, " *
+            "which is not in the draws regime (SB pools categorical " *
+            "memberships' DECLARED levels while the thin layer fits " *
+            "observed levels — recode to plain values or await " *
+            "declared-pooling support)")
+        any(ismissing, raw) && error(
+            "$prefix: $what grouping `$gname` has missing values")
+        _rk_ranef_group_column!(columns, taken, gname, raw, what)
+    end
+    if !isnothing(weight_names)
+        for wname in weight_names
+            raw = get(data, wname, nothing)
+            raw isa AbstractVector || error(
+                "$prefix: $what weight `$wname` must be a vector")
+            columns[wname] = raw
+        end
+    end
+    # Full SB-identical validation (row counts, weight magnitudes, row
+    # totals, normalization): the SHAPE the thin layer re-derives from
+    # the same raw columns. The prepared payload itself stays SB-side;
+    # the thin layer fits the union from the bound raw columns.
+    raw_groups = Tuple(columns[gname] for gname in group_names)
+    raw_weights = isnothing(weight_names) ? nothing :
+        Tuple(columns[wname] for wname in weight_names)
+    _brm_prepare_mm(raw_groups, raw_weights, getfield(term, :normalize);
+        group_names, weight_names, prefix)
+    margins = _RKRanefMargin[]
+    slices = Tuple{Symbol,UnitRange{Int}}[]
+    _rk_bucket_margins!(margins, slices, context, targets, nothing, columns,
+        taken, derived, "`mm(...)` random effect")
+    isempty(margins) && return nothing
+    # SB asymmetry mirror: intercept-only takes the scalar geometry;
+    # EVERYTHING else (including a lone slope) takes the correlated path
+    # with the vacuous 1x1 LKJ at K = 1 — never the plain slope geometry.
+    kind = if length(margins) == 1 && margins[1].z.kind === :ones
+        :intercept1
+    else
+        :correlated
+    end
+    eta = kind === :correlated ? 1.0 : NaN
+    grouping = _RKRanefGrouping(:mm, group_names, weight_names,
+        getfield(term, :normalize), nothing)
+    _RKRanefBucket(nothing, sym, kind, margins, slices, eta,
+        _rk_ranef_bucket_label(nothing, sym), grouping)
+end
+
+function _rk_level_codes(col::AbstractVector)
+    levels = _rk_grouping_levels(col)
+    table = Dict{Any,Int}(level => i for (i, level) in enumerate(levels))
+    [table[v] for v in col], length(levels)
+end
+
+function _rk_lower_ranef_gr_bucket(context, gcol::NamedColumn, bcol::NamedColumn,
+        targets::Vector{Any}, columns::Dict{Symbol,AbstractVector},
+        taken::Set{Symbol}, derived::Vector{_RKDerivedSpec})
+    prefix = "RK backend"
+    data = context.data
+    parent(gcol) isa DataColumn || error(
+        "$prefix: predictor `$(first(targets)[1])` group `$(name(gcol))` " *
+        "must be a raw data column")
+    parent(bcol) isa DataColumn || error(
+        "$prefix: predictor `$(first(targets)[1])` `by=$(name(bcol))` " *
+        "must be a raw data column")
+    gname, byname = name(gcol), name(bcol)
+    what = "predictor `$(first(targets)[1])` `gr(...; by=...)` random effect"
+    for (cname, raw) in ((gname, get(data, gname, nothing)),
+            (byname, get(data, byname, nothing)))
+        raw isa AbstractVector || error(
+            "$prefix: $what column `$cname` must be a vector")
+        any(ismissing, raw) && error(
+            "$prefix: $what column `$cname` has missing values")
+        _rk_ranef_group_column!(columns, taken, cname, raw, what)
+    end
+    # No-straddle validation on thin-layer-order codes (the straddle
+    # PROPERTY is order-independent; shared SB helper).
+    g_codes, n_groups = _rk_level_codes(columns[gname])
+    b_codes, _ = _rk_level_codes(columns[byname])
+    _brm_group_strata(g_codes, b_codes, n_groups, gname, byname)
+    margins = _RKRanefMargin[]
+    slices = Tuple{Symbol,UnitRange{Int}}[]
+    _rk_bucket_margins!(margins, slices, context, targets, nothing, columns,
+        taken, derived, "`gr(...; by=...)` random effect")
+    isempty(margins) && return nothing
+    # SB mirror: stratified blocks are ALWAYS correlated (K = 1 takes the
+    # vacuous per-stratum 1x1-LKJ route — never the scalar geometries).
+    sym = _rk_gr_block_symbol(gname, byname)
+    grouping = _RKRanefGrouping(:gr, (gname,), nothing, true, byname)
+    _RKRanefBucket(nothing, sym, :correlated, margins, slices, 1.0,
+        _rk_ranef_bucket_label(nothing, sym), grouping)
 end
 
 function _rk_plan_ranef_buckets(brmi::BRMI, context,
@@ -3376,14 +3549,26 @@ function _rk_plan_ranef_buckets(brmi::BRMI, context,
         what = "predictor `$(d.predictor)` random effect"
         d.uncorrelated && error(
             "$prefix: $what with `||` is not in the draws regime " *
-            "(admitted: `(effects | group)`, `(effects | ID | group)`)")
-        d.descriptor isa MultiMembershipTerm && error(
-            "$prefix: $what with `mm(...)` is not in the draws regime " *
-            "(admitted: `(effects | group)`, `(effects | ID | group)`)")
-        d.descriptor isa Tuple && error(
-            "$prefix: $what with `gr(...; by=...)` is not in the draws " *
-            "regime (admitted: `(effects | group)`, " *
-            "`(effects | ID | group)`)")
+            "(admitted: `(effects | group)`, `(effects | ID | group)`, " *
+            "`(effects | mm(...))`, `(effects | gr(...; by=...))`)")
+        if d.descriptor isa MultiMembershipTerm
+            what_mm = "predictor `$(d.predictor)` `mm(...)` random effect"
+            isnothing(d.id) || error(
+                "$prefix: $what_mm with `|$(d.id)|` is not in the draws " *
+                "regime (mirrors SB: `mm(...)` already defines one " *
+                "shared coefficient block)")
+            _rk_gate_ranef_r2d2!(brmi, d.predictor, what_mm)
+        elseif d.descriptor isa Tuple
+            what_gr = "predictor `$(d.predictor)` `gr(...; by=...)` " *
+                "random effect"
+            isnothing(d.id) || error(
+                "$prefix: $what_gr with `|$(d.id)|` is not in the draws " *
+                "regime yet (SB supports it via " *
+                "`ranef_correlated_by_draws`; the stratified multislice " *
+                "is staged for v1.1 — use a plain `(effects | " *
+                "gr(...; by=...))` block)")
+            _rk_gate_ranef_r2d2!(brmi, d.predictor, what_gr)
+        end
         isempty(d.effects) && error(
             "$prefix: $what has no terms after dropping `0` (mirrors SB)")
     end
@@ -3397,8 +3582,37 @@ function _rk_plan_ranef_buckets(brmi::BRMI, context,
     id_keys = Tuple{Symbol,Symbol}[]
     id_decls = Dict{Tuple{Symbol,Symbol},Vector{Any}}()
     id_groups = Dict{Symbol,Symbol}()
+    mm_keys = Tuple{Symbol,Symbol}[]
+    mm_decls = Dict{Tuple{Symbol,Symbol},Any}()
+    gr_keys = Tuple{Symbol,Symbol}[]
+    gr_decls = Dict{Tuple{Symbol,Symbol},Any}()
     for d in declarations
         desc = d.descriptor
+        if desc isa MultiMembershipTerm
+            # ID'd + r2d2-gated above; one bucket per (target, block).
+            key = (d.predictor, _rk_mm_block_symbol(desc))
+            haskey(mm_decls, key) && error(
+                "$prefix: predictor `$(d.predictor)` repeats " *
+                "multi-membership block `mm($(join(_brm_mm_group_names(desc), ", ")))` " *
+                "(mirrors SB: merge the declarations into one block)")
+            push!(mm_keys, key)
+            mm_decls[key] = d
+            continue
+        elseif desc isa Tuple
+            # ID'd + r2d2-gated above; one bucket per (target, block).
+            length(desc) == 2 || error(
+                "$prefix: internal: unexpected `gr(...)` descriptor " *
+                "arity `$(length(desc))`")
+            gcol, bcol = desc
+            key = (d.predictor, _rk_gr_block_symbol(name(gcol), name(bcol)))
+            haskey(gr_decls, key) && error(
+                "$prefix: predictor `$(d.predictor)` repeats " *
+                "stratified block `gr($(name(gcol)), by=$(name(bcol)))` " *
+                "(mirrors SB: merge the declarations into one block)")
+            push!(gr_keys, key)
+            gr_decls[key] = d
+            continue
+        end
         desc isa NamedColumn || error(
             "$prefix: internal: unexpected group descriptor " *
             "`$(typeof(desc))`")
@@ -3451,6 +3665,24 @@ function _rk_plan_ranef_buckets(brmi::BRMI, context,
         for d in decls
             lookup[(d.predictor, gname, id)] = bucket
         end
+        isnothing(bucket) || push!(buckets, bucket)
+    end
+    for key in mm_keys
+        target, sym = key
+        d = mm_decls[key]
+        bucket = _rk_lower_ranef_mm_bucket(context, d.descriptor,
+            Any[(target, d)], columns, taken, derived)
+        # Degenerate blocks record `nothing` like plain ones (no gather).
+        lookup[(target, sym, nothing)] = bucket
+        isnothing(bucket) || push!(buckets, bucket)
+    end
+    for key in gr_keys
+        target, sym = key
+        d = gr_decls[key]
+        gcol, bcol = d.descriptor
+        bucket = _rk_lower_ranef_gr_bucket(context, gcol, bcol,
+            Any[(target, d)], columns, taken, derived)
+        lookup[(target, sym, nothing)] = bucket
         isnothing(bucket) || push!(buckets, bucket)
     end
     buckets, lookup
@@ -4601,11 +4833,7 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
     end
     for term in grouped
         decl = _brm_group_declaration(target, term)
-        decl.descriptor isa NamedColumn || error(
-            "$prefix: internal: unexpected group descriptor " *
-            "`$(typeof(decl.descriptor))`")
-        gname = name(decl.descriptor)
-        key = (target, gname, decl.id)
+        key = (target, _rk_bucket_lookup_name(decl), decl.id)
         haskey(ranef_buckets, key) || error(
             "$prefix: internal: no draws-regime bucket for predictor " *
             "`$target` term `$term`")

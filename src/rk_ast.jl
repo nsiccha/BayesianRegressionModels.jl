@@ -808,6 +808,33 @@ function _rk_ast_ranef_names!(plan::_RKStructuralPlan, taken::Set{Symbol})
     draws, effects
 end
 
+# Group position of a `varying_draws` call: the bare column for plain
+# blocks, an `mm(...)`/`gr(...)` call otherwise. Shapes match the
+# parser's exactly (committed tests compare against `Meta.parse`).
+# `weights` rides iff supplied; `normalize=false` rides iff raw (both
+# default otherwise, matching the thin-layer surface defaults).
+function _rk_ast_group_expr(grouping::_RKRanefGrouping)
+    form = grouping.form
+    form === :plain && return only(grouping.columns)
+    if form === :mm
+        call = Expr(:call, :mm, grouping.columns...)
+        kws = Expr[]
+        grouping.weights !== nothing &&
+            push!(kws, Expr(:kw, :weights, Expr(:tuple, grouping.weights...)))
+        grouping.normalize ||
+            push!(kws, Expr(:kw, :normalize, false))
+        isempty(kws) || insert!(call.args, 2, Expr(:parameters, kws...))
+        return call
+    end
+    if form === :gr
+        call = Expr(:call, :gr, only(grouping.columns))
+        insert!(call.args, 2,
+            Expr(:parameters, Expr(:kw, :by, grouping.by)))
+        return call
+    end
+    error("RK backend: internal: unexpected ranef grouping form `$form`")
+end
+
 # One bucket's varying statements (uniform split form): a draws
 # statement plus one slice per target predictor. Shapes match the
 # parser's exactly (committed tests compare against `Meta.parse`), so
@@ -816,7 +843,8 @@ end
 function _rk_ast_bucket_stmts(bucket::_RKRanefBucket, draws::Symbol,
         effects::Dict{Tuple{Symbol,Symbol,Union{Symbol,Nothing}},Symbol})
     margins = Any[_rk_ast_bucket_margin(m.z) for m in bucket.margins]
-    call = Expr(:call, :varying_draws, bucket.group, Expr(:vect, margins...))
+    call = Expr(:call, :varying_draws, _rk_ast_group_expr(bucket.grouping),
+        Expr(:vect, margins...))
     if bucket.kind === :correlated
         insert!(call.args, 2,
             Expr(:parameters, Expr(:kw, :eta, bucket.lkj_eta)))

@@ -771,6 +771,81 @@ end
     @test :f1 in ret.args
 end
 
+@testset "ranef mm/gr group calls match surface" begin
+    mmgrdf = (;
+        x=[0.2, -0.1, 0.4, 0.3, -0.5, 0.1],
+        y=[0.1, 0.2, 0.3, -0.2, 0.15, 0.05],
+        g1=["a", "a", "b", "c", "b", "a"],
+        g2=["b", "c", "c", "a", "a", "b"],
+        w1=[2.0, 1.0, 0.0, 1.0, 3.0, 1.0],
+        w2=[1.0, 1.0, 3.0, 2.0, 1.0, 1.0],
+        grp=["s1", "s1", "s2", "s3", "s3", "s4"],
+        arm=["A", "A", "A", "B", "B", "B"],
+    )
+    # Default weights: bare mm(g1, g2), no eta (intercept1).
+    eq = BRM._brm_rk_plan(@brm mmgrdf begin
+        mu ~ 1 + x + (1 | mm(g1, g2))
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    varying = rk_varying_stmts(BRM._rk_emit_ast(eq, false).main)
+    @test length(varying) == 2
+    @test rk_strip_lines(varying[1]) == rk_parsed_surface(
+        "ranef_draws_mm__g1__g2 ~ varying_draws(mm(g1, g2), [1])")
+    @test rk_strip_lines(varying[2]) == rk_parsed_surface(
+        "ranef_mu_mm__g1__g2 ~ varying_slice(ranef_draws_mm__g1__g2, 1)")
+    # Weighted + raw spellings ride kwargs; correlated takes eta.
+    wt = BRM._brm_rk_plan(@brm mmgrdf begin
+        mu ~ 1 + x + (1 + x | mm(g1, g2; weights=(w1, w2)))
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    varying = rk_varying_stmts(BRM._rk_emit_ast(wt, false).main)
+    @test rk_strip_lines(varying[1]) == rk_parsed_surface(
+        "ranef_draws_mm__g1__g2__w__w1__w2 ~ " *
+        "varying_draws(mm(g1, g2; weights=(w1, w2)), [1, x]; eta = 1.0)")
+    raw = BRM._brm_rk_plan(@brm mmgrdf begin
+        mu ~ 1 + x + (1 | mm(g1, g2; weights=(w1, w2), normalize=false))
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    varying = rk_varying_stmts(BRM._rk_emit_ast(raw, false).main)
+    @test rk_strip_lines(varying[1]) == rk_parsed_surface(
+        "ranef_draws_mm__g1__g2__w__w1__w2__raw ~ " *
+        "varying_draws(mm(g1, g2; weights=(w1, w2), normalize=false), [1])")
+    # Lone mm slope: correlated (eta rides — the SB asymmetry).
+    sl = BRM._brm_rk_plan(@brm mmgrdf begin
+        mu ~ 1 + x + (0 + x | mm(g1, g2; weights=(w1, w2)))
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    varying = rk_varying_stmts(BRM._rk_emit_ast(sl, false).main)
+    @test rk_strip_lines(varying[1]) == rk_parsed_surface(
+        "ranef_draws_mm__g1__g2__w__w1__w2 ~ " *
+        "varying_draws(mm(g1, g2; weights=(w1, w2)), [x]; eta = 1.0)")
+    # gr: always correlated, K = 1 included.
+    gi = BRM._brm_rk_plan(@brm mmgrdf begin
+        mu ~ 1 + x + (1 | gr(grp, by=arm))
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    varying = rk_varying_stmts(BRM._rk_emit_ast(gi, false).main)
+    @test rk_strip_lines(varying[1]) == rk_parsed_surface(
+        "ranef_draws_grp__by__arm ~ " *
+        "varying_draws(gr(grp; by=arm), [1]; eta = 1.0)")
+    @test rk_strip_lines(varying[2]) == rk_parsed_surface(
+        "ranef_mu_grp__by__arm ~ varying_slice(ranef_draws_grp__by__arm, 1)")
+    gc = BRM._brm_rk_plan(@brm mmgrdf begin
+        mu ~ 1 + x + (1 + x | gr(grp, by=arm))
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    varying = rk_varying_stmts(BRM._rk_emit_ast(gc, false).main)
+    @test rk_strip_lines(varying[1]) == rk_parsed_surface(
+        "ranef_draws_grp__by__arm ~ " *
+        "varying_draws(gr(grp; by=arm), [1, x]; eta = 1.0)")
+end
+
 @testset "ranef dummy values in AST" begin
     codedf = (; df..., c=[2, 4, 2, 6, 4, 6])
     plan = BRM._brm_rk_plan(@brm codedf begin
