@@ -706,16 +706,18 @@ For exact totals, `c=1` is the sampled group total and `c=0` is the total
 scaled around its prior location. The exact marginal prior remains correlated
 at either endpoint. Each group/term cell receives its own control automatically.
 
-For an S2Z block (`SBBRMI(...; s2z_groups, s2z_rho)`), each of the `J-1` free
-Helmert contrasts of each coefficient is one scalar cell with zero location and
-scale `tau_k`: `c=0` is the standard-normal contrast `z`, `c=1` the centered
-contrast `tau_k * z`. The compiled model must be an endpoint frame, so every
-coefficient's `s2z_rho` must be uniformly `0` or `1`; interior (Sean's partial
-map) weights raise. Controls are per contrast in the orthonormal basis, not per
-group. The collapsed population coefficients stay untouched, and
-`recover_s2z_draws` applies to the returned compiled-frame draws. Totals cells
-precede S2Z cells in the pair order. Neither can currently share one wrapper
-with ordinary, HSGP, or cdar cells.
+For an S2Z block compiled with `s2z_coordinates=:groups`, each group of each
+coefficient is one scalar cell with zero location and scale `tau_k`: `c=0` is
+the standard-normal group coordinate `w_j` and `c=1` the centered `tau_k * w_j`.
+The compiled per-group `s2z_rho` is the starting frame. This is the per-group
+analogue of Sean's partial map; the extra auxiliary mean dimension is sampled
+too but never reaches the likelihood. With the default contrast coordinates,
+each of the `J-1` free Helmert contrasts is a cell instead. There the compiled
+model must be an endpoint frame (`s2z_rho` uniformly `0` or `1` per
+coefficient), and controls mix groups. The collapsed population coefficients
+stay untouched, and `recover_s2z_draws` applies to the returned compiled-frame
+draws. Totals cells precede S2Z cells in the pair order. Neither can currently
+share one wrapper with ordinary, HSGP, or cdar cells.
 
 For an HSGP, each basis weight is one scalar cell with zero location and
 per-basis scale `brm_hsgp_sqrt_spd(omega2, sigma, rho)[basis]`; `c=0` is the

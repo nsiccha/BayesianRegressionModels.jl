@@ -48,6 +48,10 @@ function select_s2z_rho(s2z_model, pilot_model, draws::AbstractMatrix, names;
             "for predictor `$predictor`"))
         block = only(hits)
     end
+    block.coordinates === :groups && throw(ArgumentError(
+        "select_s2z_rho: Fisher weights parameterize Sean's linear interpolation " *
+        "of contrast coordinates, but group `$group` uses `s2z_coordinates=:groups`; " *
+        "use select_s2z_centeredness instead"))
     size(draws, 2) == length(names) ||
         throw(DimensionMismatch("select_s2z_rho: draws columns must match names"))
     n_draws = size(draws, 1)
@@ -213,22 +217,24 @@ function _s2z_carrier_is_scalar(block, group)
     isnothing(_RANEF_FAMILIES[block.family].tau)
 end
 
-# Contrast-coordinate partial centering (design note §2). At an endpoint
-# compiled frame every free Helmert contrast of an S2Z block is a scalar,
-# zero-location cell: `s2z_rho = 0` samples `z ~ N(0, 1)` (c = 0) and
-# `s2z_rho = 1` samples `tau * z ~ N(0, tau^2)` (c = 1). Any power-interpolated
-# source `tau^c * z` is then an exact coordinate change on the same collapsed
-# target. Controls belong to contrasts, not groups: contrast `r` puts squared
-# weight `r/(r+1)` on group `r + 1` and `1/(r+1)` on groups `1:r` together.
+# Scalar S2Z centering cells. With `s2z_coordinates=:groups` every group
+# coordinate is already an independent zero-location cell `tau^c * w_j`, at any
+# compiled `c`. With contrast coordinates (design note §2) only an endpoint
+# frame is scalar: `s2z_rho = 0` samples `z ~ N(0, 1)` (c = 0) and `s2z_rho = 1`
+# samples `tau * z ~ N(0, tau^2)` (c = 1). Any power-interpolated source
+# `tau^c * z` is then an exact coordinate change on the same collapsed target.
+# Contrast controls are not group controls: contrast `r` puts squared weight
+# `r/(r+1)` on group `r + 1` and `1/(r+1)` on groups `1:r` together.
 
 """
     _s2z_centering_cells(model, unc_names)
 
 Scalar centering cells of every S2Z block, ordered by block, then coefficient,
-then contrast: `indices` (free contrast coordinates), `scales` (the matching
-`log(tau_k)` coordinates), zero `locations` and the compiled frame `targets`.
-A coefficient whose compiled `s2z_rho` column is not uniformly 0 or 1 is
-refused: Sean's interior map `delta = tau * P * D^-1 * u` is not a
+then contrast or group: `indices` (sampled coordinates), `scales` (the
+matching `log(tau_k)` coordinates), zero `locations` and the compiled frame
+`targets`. Group coordinates accept any compiled centeredness. For contrast
+coordinates, a coefficient whose compiled `s2z_rho` column is not uniformly 0
+or 1 is refused: Sean's interior map `delta = tau * P * D^-1 * u` is not a
 per-contrast power interpolation, so no scalar source frame reproduces it.
 """
 function _s2z_centering_cells(model, names)
@@ -237,16 +243,18 @@ function _s2z_centering_cells(model, names)
         coords = _s2z_coordinates(model, block, names)
         for k in axes(coords.contrasts, 2)
             weights = view(block.rho, :, k)
-            target = all(iszero, weights) ? 0.0 : all(isone, weights) ? 1.0 :
+            groups = block.coordinates === :groups
+            groups || all(iszero, weights) || all(isone, weights) ||
                 throw(ArgumentError(
                     "S2Z block `$(block.group)` coefficient `$(block.columns[k])` " *
                     "was compiled with interior centering weights; contrast " *
                     "centering needs an endpoint frame, so compile it with " *
-                    "`s2z_rho = 0` (noncentered) or `s2z_rho = 1` (centered)"))
+                    "`s2z_rho = 0` (noncentered) or `s2z_rho = 1` (centered), " *
+                    "or use `s2z_coordinates = :groups`"))
             for r in axes(coords.contrasts, 1)
                 push!(indices, coords.contrasts[r, k])
                 push!(scales, coords.scales[k])
-                push!(targets, target)
+                push!(targets, groups ? weights[r] : first(weights))
             end
         end
     end
@@ -257,23 +265,25 @@ end
     select_s2z_centeredness(model, draws, unc_names;
         criterion=:position, gradients=nothing, grid=0:0.1:1)
 
-Select one centering per S2Z free contrast from a saved pilot of an endpoint
-S2Z model (`SBBRMI(...; s2z_groups, s2z_rho=0)` or `s2z_rho=1`). `draws` and
-optional `gradients` are draws × coordinates in the COMPILED model frame; no
-density or gradient calls are made. Contrast `r` of coefficient `k` is
-scored as the scalar cell `tau_k^c * z_rk` (location zero): `:position`
-minimizes log SD minus mean log Jacobian, `:gradient` minimizes the
-position-gradient correlation and needs matching exact gradients.
+Select one centering per S2Z cell from a saved pilot. With
+`s2z_coordinates=:groups` the cells are groups (any compiled centeredness);
+with contrast coordinates they are the free Helmert contrasts of an endpoint
+model (`s2z_rho=0` or `1`). `draws` and optional `gradients` are draws ×
+coordinates in the COMPILED model frame; no density or gradient calls are
+made. Each cell `tau_k^c * w` has location zero: `:position` minimizes log SD
+minus mean log Jacobian, `:gradient` minimizes the position-gradient
+correlation and needs matching exact gradients.
 
 The returned `centeredness` vector is ordered by block, coefficient and then
-contrast. Pass it to `adaptive_centering_problem(model, problem, backend;
-centeredness)`, with `nonlinear_adapt=false` for a fixed post-hoc refit. When
-the model also has total-coefficient blocks, their cells come first:
+group or contrast. Pass it to `adaptive_centering_problem(model, problem,
+backend; centeredness)`, with `nonlinear_adapt=false` for a fixed post-hoc
+refit. For group coordinates, `reshape(centeredness, J, K)` is also a valid
+`s2z_rho` for a recompiled fixed model. When the model also has
+total-coefficient blocks, their cells come first:
 `vcat(select_total_centeredness(...).centeredness, s2z.centeredness)`.
 
-These are per-contrast controls in the orthonormal Helmert basis, not the
-per-group weights of [`select_s2z_rho`](@ref); see that function for Sean's
-Fisher-rule weights.
+[`select_s2z_rho`](@ref) instead gives Sean's Fisher-rule weights for the
+linear interpolation of contrast coordinates.
 """
 function select_s2z_centeredness(model, draws::AbstractMatrix, names;
         criterion=:position, gradients=nothing, grid=0.:0.1:1.)

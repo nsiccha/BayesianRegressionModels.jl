@@ -43,10 +43,16 @@ sb0 = SBBRMI(builder(data); mod=@__MODULE__, s2z_groups=[:g], s2z_rho=0.0,
     total_groups=())
 sbm = SBBRMI(builder(data); mod=@__MODULE__, s2z_groups=[:g], s2z_rho=[0.0, 1.0],
     total_groups=())
+# Group coordinates accept any compiled per-group centeredness.
+cgroups = reshape(collect(range(0.0, 1.0; length=J * K)), J, K)
+sbg = SBBRMI(builder(data); mod=@__MODULE__, s2z_groups=[:g], s2z_coordinates=:groups,
+    s2z_rho=cgroups, total_groups=())
 problem0 = compile(sb0, :ncp)
 problemm = compile(sbm, :mixed)
+problemg = compile(sbg, :groups)
 names0 = BridgeStan.param_unc_names(problem0.model)
 namesm = BridgeStan.param_unc_names(problemm.model)
+namesg = BridgeStan.param_unc_names(problemg.model)
 println("S2Z_WHMC_COMPILED ", names0); flush(stdout)
 
 @testset "S2Z contrast cells" begin
@@ -59,6 +65,11 @@ println("S2Z_WHMC_COMPILED ", names0); flush(stdout)
     @test cells.targets == zeros(K * (J - 1))
     mixed = cells_of(sbm, namesm)
     @test mixed.targets == vcat(zeros(J - 1), ones(J - 1))
+    groups = cells_of(sbg, namesg)
+    gcoords = BRM._s2z_coordinates(sbg, only(s2z_effect_blocks(sbg)), namesg)
+    @test groups.indices == vec(gcoords.contrasts)
+    @test length(groups.indices) == J * K
+    @test groups.targets == vec(cgroups)
     # Interior (Sean's partial map) weights have no scalar source frame.
     interior = SBBRMI(builder(data); mod=@__MODULE__, s2z_groups=[:g],
         s2z_rho=0.4, total_groups=())
@@ -71,8 +82,9 @@ println("S2Z_WHMC_COMPILED ", names0); flush(stdout)
     @test_throws ArgumentError select_s2z_centeredness(plain, zeros(3, 1), ["a"])
 end
 
-@testset "Exact S2Z contrast transport ($tag)" for (tag, sb, problem, names) in (
-        (:ncp, sb0, problem0, names0), (:mixed, sbm, problemm, namesm))
+@testset "Exact S2Z transport ($tag)" for (tag, sb, problem, names) in (
+        (:ncp, sb0, problem0, names0), (:mixed, sbm, problemm, namesm),
+        (:groups, sbg, problemg, namesg))
     physical, coords = physical_point(sb, names)
     cells = cells_of(sb, names)
     ell = physical[cells.scales]
@@ -208,4 +220,35 @@ end
             " sampling_gradients=", refit.sampling_evaluation_counter,
             " centeredness=", selected.centeredness); flush(stdout)
     end
+end
+
+# Per-group controls on the unbalanced data: contrast controls mix data-rich
+# and data-poor groups and leave divergent transitions (15 and 12 of 2000 on
+# two seeds when measured); group coordinates adapt each level on its own
+# (1, 1 and 0 on three seeds).
+@testset "Per-group S2Z centering on unbalanced groups" begin
+    sbn = SBBRMI(builder(data); mod=@__MODULE__, s2z_groups=[:g],
+        s2z_coordinates=:groups, total_groups=())
+    problem = compile(sbn, :groups_ncp)
+    names = BridgeStan.param_unc_names(problem.model)
+    fits = map(((:groups, sbn, problem), (:contrasts, sb0, problem0))) do (tag, sb, p)
+        rp = adaptive_centering_problem(sb, p, AutoEnzyme())
+        fit = adaptive_warmup_mcmc(Xoshiro(27), rp; n_draws=2000,
+            nonlinear_adapt=true, monitor_ess=false)
+        sources = [last(q).c for q in WarmupHMC.reparam_sources(rp)]
+        println("S2Z_UNBALANCED ", tag, " divergent=", fit.n_divergent_samples,
+            " sampling_gradients=", fit.sampling_evaluation_counter,
+            " centeredness=", round.(sources; digits=1)); flush(stdout)
+        (; fit, sources)
+    end
+    groups, contrasts = fits
+    @test all(isfinite, groups.fit.posterior_position)
+    @test groups.fit.n_divergent_samples < contrasts.fit.n_divergent_samples
+    @test groups.fit.n_divergent_samples <= 5
+    # The best-informed intercept level ends up more centered than the least.
+    @test groups.sources[J] > groups.sources[1]
+    recovered = recover_s2z_draws(sbn, permutedims(groups.fit.posterior_position), names;
+        rng=Xoshiro(6))[:mu]
+    @test all(isfinite, recovered.effects)
+    @test maximum(abs, sum(recovered.deviations; dims=2)) < 1e-9
 end

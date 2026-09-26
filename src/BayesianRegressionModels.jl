@@ -100,7 +100,8 @@ export LKJCovarianceFactor, MvNormalCholesky
 export Flat, TotalEffectBlock, total_effect_blocks, recover_population_draws, select_total_centeredness
 export S2ZEffectBlock, s2z_effect_blocks, recover_s2z_draws, select_s2z_rho,
        select_s2z_centeredness
-export brm_s2z_contrast, brm_s2z_theta, brm_s2z_deviations, brm_s2z_effects, brm_s2z_recover_rng
+export brm_s2z_contrast, brm_s2z_theta, brm_s2z_deviations, brm_s2z_effects, brm_s2z_recover_rng,
+       brm_s2z_group, brm_s2z_group_deviations
 export brm_total, brm_total_recover_rng, brm_total_deviations
 export weighted, AbstractWeights, AnalyticWeights, FrequencyWeights,
        ProbabilityWeights, UnitWeights, Weights,

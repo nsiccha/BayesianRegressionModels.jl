@@ -531,13 +531,22 @@ per coefficient, or a `J × K` matrix in `[0, 1]`. Intermediate values use Sean'
 projected partial map. `select_s2z_rho` chooses these weights from a pilot with
 brms's Fisher rule.
 
-For WarmupHMC, compile an endpoint frame instead: `s2z_rho=0` (standard-normal
-contrasts) or `s2z_rho=1` (centered contrasts). A vector such as `[0, 1]` sets the
-endpoint per coefficient. `adaptive_centering_problem` then gives every free
-contrast its own scalar centering control with zero location and scale `tau_k`:
+#### Per-group coordinates and WarmupHMC
+
+`s2z_coordinates=:groups` samples one coordinate per group instead of the `J - 1`
+contrasts: independent cells `s_j ~ N(0, tau^(2c_j))`, with `w = s ./ tau.^c`
+and deviations `tau * (w - mean(w))`. This is Sean's per-group projected map
+with one extra dimension: `mean(w)` is an independent `N(0, 1/J)` auxiliary
+that never reaches the likelihood, so the posterior is unchanged. Here
+`s2z_rho` is each group's power-interpolation centeredness `c` (0 =
+noncentered, 1 = centered; default 0).
+
+Because every group is an independent scalar cell, `adaptive_centering_problem`
+gives each group and coefficient its own online centering control, starting
+from the compiled `c`:
 
 ```julia
-sb = SBBRMI(brmi; s2z_groups=[:g], s2z_rho=0.0)
+sb = SBBRMI(brmi; s2z_groups=[:g], s2z_coordinates=:groups)
 problem = StanBlocks.stan_instantiate(sb.model)
 adaptive = adaptive_centering_problem(sb, problem, AutoEnzyme())
 fit = WarmupHMC.adaptive_warmup_mcmc(Xoshiro(1), adaptive;
@@ -549,18 +558,29 @@ recovered = recover_s2z_draws(sb, permutedims(fit.posterior_position), names)
 For a post-hoc refit, `select_s2z_centeredness(sb, draws, names; criterion)` scores
 the same cells from compiled-frame pilot draws, using the same losses as
 `select_total_centeredness`. Pass its `centeredness` to a fresh
-`adaptive_centering_problem` and fit with `nonlinear_adapt=false`.
+`adaptive_centering_problem` and fit with `nonlinear_adapt=false`, or recompile
+with `s2z_rho=reshape(centeredness, J, K)`.
+
+Starting from the noncentered frame is the robust default. A fully centered
+start on a weakly identified scale can spend warmup in the funnel before
+adaptation moves away from it.
+
+#### Contrast coordinates and WarmupHMC
+
+With the default contrast coordinates, compile an endpoint frame: `s2z_rho=0`
+(standard-normal contrasts) or `s2z_rho=1` (centered contrasts); a vector such
+as `[0, 1]` sets the endpoint per coefficient. The same wrapper and selector
+then treat every free contrast as a scalar cell with zero location and scale
+`tau_k`. Interior weights have no per-contrast equivalent and are refused.
 
 These controls belong to contrasts, not groups. Contrast `r` puts weight
-`r/(r+1)` on group `r+1` and the remainder on groups `1:r`, so a control mostly
-follows one group but is basis dependent. With unbalanced groups and a weakly
-identified scale, a contrast that mixes data-rich and data-poor groups can
-settle between their preferred centerings and leave some divergent
-transitions. In that case, compare with ordinary per-group adaptive centering
-(`s2z_groups=()`). Interior `s2z_rho` weights have no
-per-contrast equivalent and are refused by the wrapper. S2Z and total cells can
-share one wrapper, with totals first. Neither can yet be combined with ordinary,
-HSGP or `cdar` cells.
+`r/(r+1)` on group `r+1` and the remainder on groups `1:r`. With unbalanced
+groups and a weakly identified scale, a contrast that mixes data-rich and
+data-poor groups can settle between their preferred centerings and leave
+divergent transitions that per-group coordinates avoid.
+
+S2Z and total cells can share one wrapper, with totals first. Neither can yet be
+combined with ordinary, HSGP or `cdar` cells.
 
 ### Response-level wrappers
 
