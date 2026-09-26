@@ -1336,6 +1336,101 @@ end
     _check_parity_gradient(backend, u)
 end
 
+@testset "rk parity beta-binomial sampled precision" begin
+    bb_cols = (;
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        n=[10, 8, 12, 6, 9, 11],
+        c=[3, 5, 7, 2, 6, 4],
+    )
+    brmi = @brm bb_cols begin
+        logit(mu) ~ 1 + x
+        effect(mu, Intercept) ~ Normal(0, 5)
+        effect(mu, x) ~ Normal(0, 2.5)
+        phi ~ Gamma(2, 0.1)
+        c ~ BetaBinomial2(n, mu, phi)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 3
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+        (:sampled, :phi, 1, :exp),
+    ]
+    u = [0.5, -0.25, 1.1]
+    nt = constrain(layout, u)
+    b = Vector(nt.mu)
+    mu = logistic.(b[1] .+ b[2] .* bb_cols.x)
+    ll = sum(logpdf.(BetaBinomial2.(bb_cols.n, mu, nt.phi), bb_cols.c))
+    pr = logpdf(Normal(0, 5), b[1]) + logpdf(Normal(0, 2.5), b[2]) +
+        logpdf(Gamma(2, 0.1), nt.phi)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # Jacobian: phi's exp (betas ride identity).
+    @test logjac(layout, u) ≈ u[3]
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[3]
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity beta-binomial literal precision" begin
+    bb_cols = (;
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        c=[3, 5, 7, 2, 6, 4],
+    )
+    brmi = @brm bb_cols begin
+        logit(mu) ~ 1
+        effect(mu, Intercept) ~ Normal(0, 5)
+        c ~ BetaBinomial2(10, mu, 5.0)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 1
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 1, :identity),
+    ]
+    u = [0.5]
+    nt = constrain(layout, u)
+    b = Vector(nt.mu)
+    mu = logistic.(b[1] .+ bb_cols.x .* 0.0)
+    ll = sum(logpdf.(BetaBinomial2.(10, mu, 5.0), bb_cols.c))
+    pr = logpdf(Normal(0, 5), b[1])
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity beta-binomial column trials literal precision" begin
+    bb_cols = (;
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        n=[10, 8, 12, 6, 9, 11],
+        c=[3, 5, 7, 2, 6, 4],
+    )
+    brmi = @brm bb_cols begin
+        logit(mu) ~ 1 + x
+        effect(mu, Intercept) ~ Normal(0, 5)
+        effect(mu, x) ~ Normal(0, 2.5)
+        c ~ BetaBinomial2(n, mu, 5.0)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 2
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+    ]
+    u = [0.5, -0.25]
+    nt = constrain(layout, u)
+    b = Vector(nt.mu)
+    mu = logistic.(b[1] .+ b[2] .* bb_cols.x)
+    ll = sum(logpdf.(BetaBinomial2.(bb_cols.n, mu, 5.0), bb_cols.c))
+    pr = logpdf(Normal(0, 5), b[1]) + logpdf(Normal(0, 2.5), b[2])
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    _check_parity_gradient(backend, u)
+end
+
 @testset "rk parity kernel Ex1 pk1cmt" begin
     brmi = @brm _kernel_pk1cmt_cols begin
         sigma ~ Exponential(1)

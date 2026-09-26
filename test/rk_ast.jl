@@ -314,6 +314,38 @@ end
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end
 
+@testset "group-D beta-binomial AST shape" begin
+    # Twin head (thin-layer decision, pair fam-betabinom):
+    # `BetaBinomial2(n, mu, phi)` maps to
+    # `BetaBinomial2.(n, logistic.(mu), phi)` (hurdle precedent);
+    # no fused head.
+    brmi = @brm df begin
+        logit(mu) ~ 1 + x
+        phi ~ Gamma(2, 0.1)
+        b ~ BetaBinomial2(h, mu, phi)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.main.args[end] == Expr(:call, :.~, :b,
+        Expr(:., :BetaBinomial2, Expr(:tuple,
+            :h,
+            Expr(:., :logistic, Expr(:tuple, :mu)),
+            :phi)))
+    # Literal trials + literal precision inline bare; the fused-heads
+    # flag changes nothing (one head either way).
+    brmi = @brm df begin
+        logit(mu) ~ 1 + x
+        c ~ BetaBinomial2(10, mu, 5.0)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :c,
+        Expr(:., :BetaBinomial2, Expr(:tuple,
+            10,
+            Expr(:., :logistic, Expr(:tuple, :mu)),
+            5.0)))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+end
+
 @testset "evidence and weights shapes" begin
     brmi = @brm df begin
         mu ~ 1 + x
