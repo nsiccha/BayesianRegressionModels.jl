@@ -54,16 +54,18 @@ const PINS = [
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
-    # through. 0411861 (2026-09-26, main): the fam-inversegaussian
-    # thin-layer slice (InverseGaussianFam + (log, log) triple + scalar
-    # lambda scale slot + `InverseGaussian.(exp.(eta), lambda)` surface
-    # head + corpus 59_inversegaussian; rebased over the d625939 fam-zip
-    # and term-mi-v2 landings), over the ec0b6a9 stack (term-horseshoe
-    # slice over the 361fd71 fam-student slice and the 45f765e GLM-object
-    # base, plus the HurdlePoisson response slice with corpus 57_hurdle,
-    # the fam-zip ZIP response slice with corpus 58_zip, and the term-mi
-    # Case-A missingness slice).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "04118619fc88cf4ecb945d1986189d6d33d7754b"),  # main
+    # through. a758d52 (2026-09-26, main): the ec0b6a9 term-mi stack
+    # (the term-horseshoe thin-layer slice over the 361fd71 fam-student
+    # slice and the 45f765e GLM-object base, plus the HurdlePoisson,
+    # fam-zip ZIP, and term-mi Case-A slices; over bernoulli-links main
+    # 5d6a794) plus the fam-inversegaussian Wald response slice
+    # (InverseGaussianFam + (log, log) triple + scalar lambda scale
+    # slot + `InverseGaussian.(exp.(eta), lambda)` surface head + corpus
+    # 59_inversegaussian) plus the fam-betabinom BetaBinomial2 response
+    # slice (BetaBinomial2Fam + (logit, logit) triple + trials/scale
+    # slots + `BetaBinomial2.(n, logistic.(mu), phi)` surface head +
+    # corpus 59_betabinomial2).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "a758d520f58436f3a292f138807a768a9d84c18a"),  # main
 ]
 
 function main()
