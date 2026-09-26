@@ -54,18 +54,13 @@ const PINS = [
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
-    # through. a758d52 (2026-09-26, main): the ec0b6a9 term-mi stack
-    # (the term-horseshoe thin-layer slice over the 361fd71 fam-student
-    # slice and the 45f765e GLM-object base, plus the HurdlePoisson,
-    # fam-zip ZIP, and term-mi Case-A slices; over bernoulli-links main
-    # 5d6a794) plus the fam-inversegaussian Wald response slice
-    # (InverseGaussianFam + (log, log) triple + scalar lambda scale
-    # slot + `InverseGaussian.(exp.(eta), lambda)` surface head + corpus
-    # 59_inversegaussian) plus the fam-betabinom BetaBinomial2 response
-    # slice (BetaBinomial2Fam + (logit, logit) triple + trials/scale
-    # slots + `BetaBinomial2.(n, logistic.(mu), phi)` surface head +
-    # corpus 59_betabinomial2).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "a758d520f58436f3a292f138807a768a9d84c18a"),  # main
+    # through. d7fe90f (2026-09-26, main): the fam-interval slice
+    # (interval-censored parity slice plus the open-below fix e854079:
+    # `_poisson_cell` interval arm `log(F(ub)-F(y))` with no -1 shift,
+    # contract docstring, I1/I2 BridgeStan pins) over the a758d52 stack
+    # (term-mi + bernoulli-links + inversegaussian Wald + betabinom
+    # BetaBinomial2).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "d7fe90f1444ead772973953fa0cda7d3ae065f70"),  # main
 ]
 
 function main()
