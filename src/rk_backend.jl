@@ -40,6 +40,12 @@ const _RK_ADMITTED_TRIPLES = Set{Tuple{Symbol,Symbol,Symbol}}([
     (:binomial_probit, :probit, :probit),
     (:binomial_cloglog, :cloglog, :cloglog),
     (:beta_logit, :logit, :logit),
+    # Group D (beta-binomial): BetaBinomial2 over a logit-link mean
+    # predictor; trials ride the trials slot (Int column or literal,
+    # Binomial rule) and precision rides the scalar-only scale slot
+    # (sampled / assignment / positive literal — predictor-fed
+    # precision is deferred, the Beta-kappa precedent).
+    (:beta_binomial_logit, :logit, :logit),
     # Group B (robust): location-scale Student-t over an identity
     # predictor; nu rides its own plan slot (literal / sampled /
     # assignment — no modeled-nu predictor).
@@ -63,8 +69,8 @@ const _RK_ADMITTED_TRIPLES = Set{Tuple{Symbol,Symbol,Symbol}}([
 # layer admits neither on the new triples, so the planner fails closed).
 const _RK_SLICE2_FAMILIES = Set{Symbol}([
     :bernoulli_probit, :bernoulli_cloglog, :binomial_probit,
-    :binomial_cloglog, :beta_logit, :student_t, :hurdle_poisson,
-    :zero_inflated_poisson, :wald,
+    :binomial_cloglog, :beta_logit, :beta_binomial_logit, :student_t,
+    :hurdle_poisson, :zero_inflated_poisson, :wald,
 ])
 # Leveled simplex responses (multinomial/categorical) name a simplex
 # vector parameter instead of a linear predictor, so they skip the
@@ -130,6 +136,8 @@ struct _RKLikelihoodSpec
                    # :multinomial | :categorical | slice-2 group A:
                    # :bernoulli_probit | :bernoulli_cloglog |
                    # :binomial_probit | :binomial_cloglog | :beta_logit |
+                   # group D: :beta_binomial_logit (trials slot +
+                   # scalar-only precision on the scale slot) |
                    # group B: :student_t | group C: :hurdle_poisson
                    # (p_zero rides the scale / scale-predictor slots) |
                    # :zero_inflated_poisson |
@@ -420,7 +428,9 @@ const _RK_ADMITTED_SPELLINGS =
     "`log(lambda) ~ ...` (`p0` a `logit(p0) ~ ...` predictor, sampled " *
     "parameter, or (0, 1] literal) or `y ~ InverseGaussian(mu, lam)` + " *
     "`log(mu) ~ ...` (`lam` a sampled parameter, scalar assignment, " *
-    "or positive literal)"
+    "or positive literal), or group D: `c ~ BetaBinomial2(n, " *
+    "mu, phi)` + `logit(mu) ~ ...` (`n` an integer column or literal; " *
+    "`phi` a sampled parameter, scalar assignment, or positive literal)"
 
 function _rk_predictor_link(brmi::BRMI, target::Symbol)
     prefix = "RK backend"
@@ -956,6 +966,47 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
             "spellings: $_RK_ADMITTED_SPELLINGS")
         return (; family=:binomial_logit, link=:logit, scale=nothing,
             scale_predictor=nothing, trials, location=stripped)
+    elseif head === BetaBinomial2
+        length(args) == 3 || error(
+            "$prefix: response `$response` `BetaBinomial2` needs " *
+            "`(trials, mean, precision)`; write `BetaBinomial2(n, mu, " *
+            "phi)` with a `logit(mu)` predictor")
+        trials = _rk_trials_argument(args[1], response, parameters,
+            assignments, consts, aliases)
+        location = _rk_location_arg(args[2], candidates, response, "mean",
+            "itself; write `BetaBinomial2(n, mu, phi)` with a " *
+            "`logit(mu)` predictor (group D has no " *
+            "`BetaBinomial2(n, logistic(..), phi)` spelling)")
+        plink = predictor_link[location]
+        # Scalar-only precision (the Beta `_rk_beta_shape_args`
+        # rule): a linear predictor fails closed here with a plain
+        # error (predictor-fed precision is deferred), and the
+        # empty-candidates `_rk_scale_argument` call below admits a
+        # sampled parameter, a scalar assignment, or a positive
+        # literal only — never a data column.
+        precision_arg = args[3]
+        precision_arg isa NamedColumn &&
+            name(precision_arg) in candidates && error(
+                "$prefix: response `$response` `BetaBinomial2` precision " *
+                "cannot be the linear predictor " *
+                "`$(name(precision_arg))`; predictor-fed precision is " *
+                "not admitted — write a sampled parameter, a positive " *
+                "literal, or a scalar assignment")
+        precision, precision_predictor = _rk_scale_argument(precision_arg,
+            parameters, assignments, consts, aliases, response,
+            "precision", Symbol[])
+        precision_predictor === nothing || error(
+            "$prefix: response `$response` `BetaBinomial2` precision " *
+            "cannot be a linear predictor (predictor-fed precision is " *
+            "not admitted)")
+        triple = (:beta_binomial_logit, plink, plink)
+        triple in _RK_ADMITTED_TRIPLES || error(
+            "$prefix: response `$response` pairs `BetaBinomial2` with " *
+            "a $plink-link predictor; write " *
+            "`BetaBinomial2(n, mu, phi)` with a `logit(mu)` predictor " *
+            "(group D admits a logit mu link only)")
+        return (; family=:beta_binomial_logit, link=plink, scale=precision,
+            scale_predictor=nothing, trials, location)
     elseif head === NegativeBinomial2
         length(args) == 2 || error(
             "$prefix: response `$response` `NegativeBinomial2` needs " *
@@ -5042,9 +5093,10 @@ function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
         # validation there, so it fails here with BRM-side attribution).
         (eltype(values) <: Real && all(>(0), values)) || error(
             "$prefix: response `$response` must hold strictly positive values")
-    elseif family === :binomial_logit
+    elseif family === :binomial_logit || family === :beta_binomial_logit
         # Rowwise y <= n is checked once trials cross (below): trials may
-        # be a column or a literal, and neither is visible here.
+        # be a column or a literal, and neither is visible here. The
+        # beta-binomial shares the Binomial value rule exactly.
         (eltype(values) <: Integer && all(>=(0), values)) || error(
             "$prefix: response `$response` must hold non-negative integers")
     elseif family === :binomial_probit || family === :binomial_cloglog
@@ -5100,7 +5152,7 @@ function _rk_gate_trials_values!(specs::AbstractVector,
     prefix = "RK backend"
     for spec in specs
         spec.family in (:binomial_logit, :binomial_probit,
-            :binomial_cloglog) ||
+            :binomial_cloglog, :beta_binomial_logit) ||
             (spec.family === :mixture && spec.trials !== nothing) || continue
         trials = spec.trials
         n = if trials isa Int
@@ -5116,9 +5168,11 @@ function _rk_gate_trials_values!(specs::AbstractVector,
             "$prefix: response `$(spec.response)` trials must be " *
             "non-negative every row")
         y = columns[spec.response]
+        noun = spec.family === :beta_binomial_logit ? "BetaBinomial2" :
+            "Binomial"
         all(y .<= n) || error(
             "$prefix: response `$(spec.response)` exceeds its trials " *
-            "(`$trials`) on some row; Binomial needs y <= n every row")
+            "(`$trials`) on some row; $noun needs y <= n every row")
     end
     nothing
 end

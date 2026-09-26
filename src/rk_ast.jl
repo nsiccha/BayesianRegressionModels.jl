@@ -315,6 +315,7 @@ end
 _rk_ast_response_uses_scale(family::Symbol) =
     family === :gaussian || family === :nb2_log ||
     family === :gamma_log || family === :beta_logit ||
+    family === :beta_binomial_logit ||
     family === :student_t || family === :hurdle_poisson ||
     family === :wald
 
@@ -520,6 +521,17 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
     elseif response.family === :binomial_cloglog
         _rk_ast_dotted(:Binomial, leaf[:trials],
             _rk_ast_dotted(:cloglog, predictor))
+    elseif response.family === :beta_binomial_logit
+        # Twin head (thin-layer decision, pair fam-betabinom): the
+        # plan's `BetaBinomial2(n, mu, phi)` maps to
+        # `BetaBinomial2.(n, logistic.(mu), phi)` (hurdle precedent);
+        # precision rides the scale slot, scalars inline bare. No
+        # fused head: one spelling either way.
+        wrap_location ? _rk_ast_dotted(:BetaBinomial2, leaf[:trials],
+            _rk_ast_dotted(:logistic, predictor),
+            leaf[:scale]) :
+        _rk_ast_dotted(:BetaBinomial2, leaf[:trials], predictor,
+            leaf[:scale])
     elseif response.family === :beta_logit
         # Mean-concentration form: the plan pins mu (the predictor
         # itself) and kappa identical in both positions, so the same
@@ -724,7 +736,8 @@ function _rk_ast_response_stmt(response::_RKLikelihoodSpec,
         leaf[:zero_inflation] = response.zero_inflation
     end
     if family === :binomial_logit || family === :binomial_probit ||
-            family === :binomial_cloglog || family === :multinomial
+            family === :binomial_cloglog || family === :beta_binomial_logit ||
+            family === :multinomial
         leaf[:trials] = response.trials
     end
     if response.weights !== nothing

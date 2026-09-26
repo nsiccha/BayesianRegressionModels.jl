@@ -699,6 +699,58 @@ end
     @test isnothing(likelihood.scale_predictor)
 end
 
+@testset "group-D beta-binomial plan shapes" begin
+    # The pair-probe B1 shape (peer todo 1nefktn): logit-link mean +
+    # column trials + sampled precision, explicit effect priors.
+    brmi = @brm df begin
+        logit(mu) ~ 1 + x
+        phi ~ Gamma(2, 0.1)
+        effect(mu, Intercept) ~ Normal(0, 5)
+        effect(mu, x) ~ Normal(0, 2.5)
+        b ~ BetaBinomial2(h, mu, phi)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:beta_binomial_logit, :logit)
+    @test likelihood.predictor === :mu
+    @test likelihood.trials === :h
+    @test likelihood.scale === :phi
+    @test isnothing(likelihood.scale_predictor)
+    # The pair-probe B2 shape: intercept-only mean + literal trials +
+    # literal precision.
+    brmi = @brm df begin
+        logit(mu) ~ 1
+        c ~ BetaBinomial2(10, mu, 5.0)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:beta_binomial_logit, :logit)
+    @test likelihood.predictor === :mu
+    @test likelihood.trials == 10
+    @test likelihood.scale == 5.0
+    @test isnothing(likelihood.scale_predictor)
+    # A scalar assignment precision rides the scale slot by name.
+    brmi = @brm df begin
+        logit(mu) ~ 1 + x
+        kappa ~ Exponential(1)
+        phi = kappa + 1.0
+        b ~ BetaBinomial2(h, mu, phi)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    likelihood = only(plan.responses)
+    @test (likelihood.family, likelihood.link) === (:beta_binomial_logit, :logit)
+    @test likelihood.scale === :phi
+    @test isnothing(likelihood.scale_predictor)
+    @test any(a -> a.name === :phi, plan.assignments)
+    # A folded-constant precision inlines to its value.
+    brmi = @brm df begin
+        logit(mu) ~ 1 + x
+        phi = 4.0
+        b ~ BetaBinomial2(h, mu, phi)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:beta_binomial_logit, :logit)
+    @test likelihood.scale == 4.0
+end
+
 @testset "weights, evidence, and multi-response" begin
     brmi = @brm df begin
         mu ~ 1 + x
@@ -2780,6 +2832,105 @@ end
         log(mu) ~ 1 + x
         lam ~ LogNormal(-0.3, 1.0)
         z ~ censored(InverseGaussian(mu, lam); upper=5)
+    end)
+end
+
+@testset "fail closed: group-D beta-binomial scope edges" begin
+    # The mean predictor must be logit-link (logit-only, Beta precedent).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        b ~ BetaBinomial2(h, mu, 5.0)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        b ~ BetaBinomial2(h, mu, 5.0)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        probit(mu) ~ 1 + x
+        b ~ BetaBinomial2(h, mu, 5.0)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        cloglog(mu) ~ 1 + x
+        b ~ BetaBinomial2(h, mu, 5.0)
+    end)
+    # Three arguments, no `logistic`-wrapped mean spelling.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        logit(mu) ~ 1 + x
+        b ~ BetaBinomial2(h, mu)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        eta ~ 1 + x
+        b ~ BetaBinomial2(h, logistic(eta), 5.0)
+    end)
+    # Precision must be finite and positive.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        logit(mu) ~ 1 + x
+        b ~ BetaBinomial2(h, mu, 0.0)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        logit(mu) ~ 1 + x
+        b ~ BetaBinomial2(h, mu, -2.0)
+    end)
+    # A data column is never a scalar precision.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        logit(mu) ~ 1 + x
+        b ~ BetaBinomial2(h, mu, z)
+    end)
+    # Predictor-fed precision is deferred (Beta-kappa precedent): the
+    # location predictor itself and a second predictor both fail here.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        logit(mu) ~ 1 + x
+        b ~ BetaBinomial2(h, mu, mu)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        logit(mu) ~ 1 + x
+        log(phi) ~ 1 + z
+        b ~ BetaBinomial2(h, mu, phi)
+    end)
+    # Trials: integer column or non-negative integer literal only.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        logit(mu) ~ 1 + x
+        b ~ BetaBinomial2(n, mu, 5.0)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        logit(mu) ~ 1 + x
+        b ~ BetaBinomial2(2.5, mu, 5.0)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        logit(mu) ~ 1 + x
+        b ~ BetaBinomial2(-1, mu, 5.0)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        logit(mu) ~ 1 + x
+        t ~ Exponential(1)
+        b ~ BetaBinomial2(t, mu, 5.0)
+    end)
+    # Response gate: non-negative integers with y <= n every row.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        logit(mu) ~ 1 + x
+        bf ~ BetaBinomial2(h, mu, 5.0)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        logit(mu) ~ 1 + x
+        c ~ BetaBinomial2(h, mu, 5.0)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        logit(mu) ~ 1 + x
+        c ~ BetaBinomial2(2, mu, 5.0)
+    end)
+    # No weights or evidence on the group-D triple (no driving case).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        logit(mu) ~ 1 + x
+        b ~ weighted(BetaBinomial2(h, mu, 5.0), fweights(n))
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        logit(mu) ~ 1 + x
+        b ~ censored(BetaBinomial2(h, mu, 5.0); upper=1)
+    end)
+    # Mixture components stay out of v1.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        logit(mu) ~ 1 + x
+        b ~ MixtureModel([BetaBinomial2(h, mu, 5.0)], [1.0])
     end)
 end
 
