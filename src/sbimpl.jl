@@ -1690,12 +1690,15 @@ end
 # The constrained hyperparameters and the per-group draws are separate plates.
 # StanBlocks now natively collects a fixed constrained-matrix cell as
 # `array[n_strata] cholesky_factor_corr[n_terms]` (StanBlocks `0421b28`), so
-# this is no longer a flat typed-LHS workaround. The group plate takes
-# `stratum_idx[group_idx]` as its positional per-cell scalar: a whole-array
-# gather of a constrained plate result still has no tracetype, while per-cell
-# scalar indexing does. With `n_groups` sized from a cv-marked `group_idx`,
-# only this group plate (z and b) re-draws in generated quantities; the
-# stratum-level L/tau plates stay fitted.
+# this is no longer a flat typed-LHS workaround. The group plate takes the
+# per-GROUP `stratum_idx` vector as its positional per-cell scalar (cell `g`
+# reads element `g`): a whole-array gather of a constrained plate result
+# still has no tracetype, while per-cell scalar indexing does. Do NOT gather
+# it through `group_idx` here — `stratum_idx[group_idx]` is per-observation
+# (length `n_obs`), and cell-indexing that into `n_groups` cells silently
+# truncates to the first `n_groups` rows' strata. With `n_groups` sized from
+# a cv-marked `group_idx`, only this group plate (z and b) re-draws in
+# generated quantities; the stratum-level L/tau plates stay fitted.
 ranef_correlated_by = StanBlocks.@slic begin
     L_s ~ plate(; outer=(n_strata,)) do s
         L::cholesky_factor_corr[n_terms] ~ lkj_corr_cholesky(1.)
@@ -1705,7 +1708,7 @@ ranef_correlated_by = StanBlocks.@slic begin
         tau::vector[n_terms] ~ std_normal(; lower=0.)
         tau
     end
-    b_T ~ plate(stratum_idx[group_idx]; outer=(n_groups,)) do sidx
+    b_T ~ plate(stratum_idx; outer=(n_groups,)) do sidx
         L_g = L_s[sidx]
         tau_g = tau_s[:, sidx]
         z_g::vector[n_terms] ~ std_normal()
@@ -1730,7 +1733,7 @@ ranef_correlated_by_draws = StanBlocks.@slic begin
         tau::vector[n_terms] ~ std_normal(; lower=0.)
         tau
     end
-    b_T ~ plate(stratum_idx[group_idx]; outer=(n_groups,)) do sidx
+    b_T ~ plate(stratum_idx; outer=(n_groups,)) do sidx
         L_g = L_s[sidx]
         tau_g = tau_s[:, sidx]
         z_g::vector[n_terms] ~ std_normal()

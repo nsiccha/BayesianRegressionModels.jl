@@ -83,4 +83,4 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "d94ddcdbccf30e5284dcc8846bb462426322c67f"
+rev = "38973ca0ec7cf858ad36032d9c37a2d55fcf299a"
