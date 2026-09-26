@@ -1,0 +1,211 @@
+# S2Z contrast centering through WarmupHMC: cell metadata, exact coordinate
+# transport against the compiled endpoint target, scoring-frame invariance,
+# and online plus post-hoc fits. Run with
+# `julia --project=test test/s2z_warmuphmc.jl`.
+using Test, Random, LinearAlgebra, Statistics, Distributions
+using BayesianRegressionModels, StanBlocks, BridgeStan, LogDensityProblems
+using WarmupHMC, Enzyme
+using DifferentiationInterface: AutoEnzyme
+const BRM = BayesianRegressionModels
+
+builder = @brm begin
+    mu ~ 1 + x + (1 + x || g)
+    effect(mu, Intercept) ~ Normal(0, 5)
+    effect(mu, x) ~ Normal(0, 2)
+    y ~ Normal(mu, 0.5)
+end
+# Unbalanced groups: data-poor levels favour noncentered contrasts and
+# data-rich levels centered ones.
+sizes = [1, 2, 3, 4, 6, 8, 10, 14]
+data = let rng = Xoshiro(11)
+    g = vcat((fill(j, n) for (j, n) in enumerate(sizes))...)
+    x = randn(rng, length(g))
+    b0, b1 = 0.8 .* randn(rng, length(sizes)), 0.3 .* randn(rng, length(sizes))
+    y = 1.0 .+ 0.5 .* x .+ b0[g] .+ b1[g] .* x .+ 0.5 .* randn(rng, length(g))
+    (; x, g, y)
+end
+J, K = length(sizes), 2
+
+compile(sb, tag) = StanBlocks.stan_instantiate(sb.model;
+    path=joinpath(mktempdir(), "s2z_whmc_$tag.stan"))
+cells_of(sb, names) = BRM._s2z_centering_cells(sb, names)
+
+# A physical (compiled-frame) point with distinct scales per coefficient.
+function physical_point(sb, names; seed=3)
+    coords = BRM._s2z_coordinates(sb, only(s2z_effect_blocks(sb)), names)
+    x = 0.4 .* randn(Xoshiro(seed), length(names))
+    x[coords.scales] .= log.([1.7, 0.4])
+    x[coords.theta] .= [1.0, 0.5]
+    x, coords
+end
+
+sb0 = SBBRMI(builder(data); mod=@__MODULE__, s2z_groups=[:g], s2z_rho=0.0,
+    total_groups=())
+sbm = SBBRMI(builder(data); mod=@__MODULE__, s2z_groups=[:g], s2z_rho=[0.0, 1.0],
+    total_groups=())
+problem0 = compile(sb0, :ncp)
+problemm = compile(sbm, :mixed)
+names0 = BridgeStan.param_unc_names(problem0.model)
+namesm = BridgeStan.param_unc_names(problemm.model)
+println("S2Z_WHMC_COMPILED ", names0); flush(stdout)
+
+@testset "S2Z contrast cells" begin
+    block = only(s2z_effect_blocks(sb0))
+    coords = BRM._s2z_coordinates(sb0, block, names0)
+    cells = cells_of(sb0, names0)
+    @test cells.indices == vec(coords.contrasts)
+    @test cells.scales == repeat(coords.scales; inner=J - 1)
+    @test cells.locations == zeros(K * (J - 1))
+    @test cells.targets == zeros(K * (J - 1))
+    mixed = cells_of(sbm, namesm)
+    @test mixed.targets == vcat(zeros(J - 1), ones(J - 1))
+    # Interior (Sean's partial map) weights have no scalar source frame.
+    interior = SBBRMI(builder(data); mod=@__MODULE__, s2z_groups=[:g],
+        s2z_rho=0.4, total_groups=())
+    @test_throws ArgumentError cells_of(interior, names0)
+    @test_throws ArgumentError adaptive_centering_problem(interior, problem0,
+        AutoEnzyme(); unc_names=names0)
+    # Models without S2Z blocks contribute no cells.
+    plain = SBBRMI(builder(data); mod=@__MODULE__, total_groups=())
+    @test isempty(cells_of(plain, names0).indices)
+    @test_throws ArgumentError select_s2z_centeredness(plain, zeros(3, 1), ["a"])
+end
+
+@testset "Exact S2Z contrast transport ($tag)" for (tag, sb, problem, names) in (
+        (:ncp, sb0, problem0, names0), (:mixed, sbm, problemm, namesm))
+    physical, coords = physical_point(sb, names)
+    cells = cells_of(sb, names)
+    ell = physical[cells.scales]
+    n = length(cells.indices)
+    for c in (0.0, 0.37, 1.0, collect(range(0, 1; length=n)))
+        rp = adaptive_centering_problem(sb, problem, AutoEnzyme(); centeredness=c)
+        ir = WarmupHMC.reparametrizer(rp)
+        @test length(ir.pairs) == n
+        _, source = WarmupHMC._inverse_with_logabsdet_jacobian(ir, physical)
+        cs = c isa Real ? fill(c, n) : c
+        # Source coordinates are power-interpolated contrasts; nothing else moves.
+        @test source[cells.indices] ≈ physical[cells.indices] .* exp.((cs .- cells.targets) .* ell)
+        rest = setdiff(eachindex(physical), cells.indices)
+        @test source[rest] == physical[rest]
+        jac, mapped = ir(source)
+        @test mapped ≈ physical atol = 1e-12
+        @test jac ≈ sum((cells.targets .- cs) .* ell) atol = 1e-12
+        lp, g = LogDensityProblems.logdensity_and_gradient(rp, source)
+        @test lp ≈ LogDensityProblems.logdensity(problem, physical) + jac atol = 1e-10
+        fd = map(eachindex(source)) do i
+            h = zeros(length(source)); h[i] = 1e-5
+            (LogDensityProblems.logdensity(rp, source + h) -
+             LogDensityProblems.logdensity(rp, source - h)) / 2e-5
+        end
+        @test g ≈ fd atol = 1e-6 rtol = 1e-6
+        # Candidate coordinates and gradients do not depend on the source frame
+        # that supplied the physical observation.
+        plan = WarmupHMC.candidate_scoring_plan(rp)
+        frame = plan.prepare(ir, source, g)
+        gphys = last(LogDensityProblems.logdensity_and_gradient(problem, physical))
+        for (p, (index, value)) in enumerate(ir.pairs), candidate in (0.0, 0.5, 1.0)
+            _, position, gradient = plan.score(frame, p, index, value,
+                WarmupHMC.PartiallyCentered(candidate))
+            t, e = cells.targets[p], ell[p]
+            @test position ≈ physical[index] * exp((candidate - t) * e) atol = 1e-12
+            @test gradient ≈ gphys[index] * exp((t - candidate) * e) atol = 1e-9
+        end
+    end
+end
+
+@testset "Totals and S2Z contrasts share one scalar plan" begin
+    mixed_builder = @brm begin
+        mu ~ 1 + (1 | g)
+        log(sigma) ~ 1 + (1 | h)
+        y ~ Normal(mu, sigma)
+    end
+    df = (; g=data.g, h=mod1.(eachindex(data.g), 3), y=data.y)
+    sb = SBBRMI(mixed_builder(df); mod=@__MODULE__, s2z_groups=[:g], s2z_rho=0.0,
+        total_groups=[:h])
+    @test length(total_effect_blocks(sb)) == 1
+    @test length(s2z_effect_blocks(sb)) == 1
+    problem = compile(sb, :totals)
+    names = BridgeStan.param_unc_names(problem.model)
+    totals = BRM._total_centering_cells(sb, names)
+    s2z = cells_of(sb, names)
+    @test length(totals.indices) == 3 && length(s2z.indices) == J - 1
+    c = collect(range(0.1, 0.9; length=length(totals.indices) + J - 1))
+    rp = adaptive_centering_problem(sb, problem, AutoEnzyme(); centeredness=c)
+    ir = WarmupHMC.reparametrizer(rp)
+    @test first.(ir.pairs) == vcat(totals.indices, s2z.indices)
+    physical = 0.3 .* randn(Xoshiro(8), length(names))
+    _, source = WarmupHMC._inverse_with_logabsdet_jacobian(ir, physical)
+    jac, mapped = ir(source)
+    @test mapped ≈ physical atol = 1e-12
+    lp, g = LogDensityProblems.logdensity_and_gradient(rp, source)
+    @test lp ≈ LogDensityProblems.logdensity(problem, physical) + jac atol = 1e-10
+    fd = map(eachindex(source)) do i
+        h = zeros(length(source)); h[i] = 1e-5
+        (LogDensityProblems.logdensity(rp, source + h) -
+         LogDensityProblems.logdensity(rp, source - h)) / 2e-5
+    end
+    @test g ≈ fd atol = 1e-6 rtol = 1e-6
+end
+
+# End-to-end fits use balanced groups with a well-identified slope. On the
+# unbalanced data above the slope scale forms a funnel: fixed CP diverges for
+# both ordinary and S2Z coordinates, and per-contrast online controls still
+# leave a few divergent transitions where per-group ordinary controls do not.
+balanced = let rng = Xoshiro(12)
+    g = repeat(1:J; inner=6)
+    x = randn(rng, length(g))
+    b0, b1 = 0.8 .* randn(rng, J), 0.6 .* randn(rng, J)
+    (; x, g, y=1.0 .+ 0.5 .* x .+ b0[g] .+ b1[g] .* x .+ 0.5 .* randn(rng, length(g)))
+end
+
+@testset "Online and post-hoc S2Z contrast fits" begin
+    sb = SBBRMI(builder(balanced); mod=@__MODULE__, s2z_groups=[:g], s2z_rho=0.0,
+        total_groups=())
+    problem = compile(sb, :balanced)
+    names = BridgeStan.param_unc_names(problem.model)
+    physical, coords = physical_point(sb, names)
+    physical[vec(coords.contrasts)] .= 0.0
+    rp = adaptive_centering_problem(sb, problem, AutoEnzyme())
+    _, initial = WarmupHMC._inverse_with_logabsdet_jacobian(WarmupHMC.reparametrizer(rp), physical)
+    fit = adaptive_warmup_mcmc(Xoshiro(27), rp; init=initial, n_draws=2000,
+        nonlinear_adapt=true, monitor_ess=false,
+        callback=(state, stage) -> begin
+            println("S2Z_WHMC_BOUNDARY ", stage, " window=", state.outer_counter)
+            flush(stdout); false
+        end)
+    @test size(fit.posterior_position, 2) >= 2000
+    @test all(isfinite, fit.posterior_position)
+    @test fit.n_divergent_samples == 0
+    sources = [last(p).c for p in WarmupHMC.reparam_sources(rp)]
+    @test all(c -> 0 <= c <= 1, sources)
+    # Adaptation moved away from the compiled noncentered frame.
+    @test any(>(0), sources)
+    println("S2Z_ONLINE_COMPLETE sampling_gradients=", fit.sampling_evaluation_counter,
+        " centeredness=", round.(sources; digits=1)); flush(stdout)
+    pilot = permutedims(fit.posterior_position)
+    # Returned draws are compiled-frame, so the usual recovery applies.
+    recovered = recover_s2z_draws(sb, pilot, names; rng=Xoshiro(5))[:mu]
+    @test size(recovered.population) == (size(pilot, 1), 2)
+    @test all(isfinite, recovered.population)
+    @test abs(mean(recovered.population[:, 1]) - 1.0) < 0.6
+    @test abs(mean(recovered.population[:, 2]) - 0.5) < 0.6
+    gradients = permutedims(hcat([last(LogDensityProblems.logdensity_and_gradient(
+        problem, collect(row))) for row in eachrow(pilot)]...))
+    for criterion in (:position, :gradient)
+        selected = select_s2z_centeredness(sb, pilot, names; criterion, gradients)
+        @test selected.indices == cells_of(sb, names).indices
+        @test size(selected.losses) == (K * (J - 1), 11)
+        @test all(c -> 0 <= c <= 1, selected.centeredness)
+        fixed = adaptive_centering_problem(sb, problem, AutoEnzyme();
+            centeredness=selected.centeredness)
+        _, start = WarmupHMC._inverse_with_logabsdet_jacobian(
+            WarmupHMC.reparametrizer(fixed), physical)
+        refit = adaptive_warmup_mcmc(Xoshiro(29), fixed; init=start, n_draws=2000,
+            nonlinear_adapt=false, monitor_ess=false)
+        @test all(isfinite, refit.posterior_position)
+        @test refit.n_divergent_samples == 0
+        println("S2Z_POSTHOC_COMPLETE criterion=", criterion,
+            " sampling_gradients=", refit.sampling_evaluation_counter,
+            " centeredness=", selected.centeredness); flush(stdout)
+    end
+end

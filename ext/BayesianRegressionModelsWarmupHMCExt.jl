@@ -609,30 +609,35 @@ function _adaptive_cdar_centering_reparametrizer(blocks)
     state, WarmupHMC.IndexedReparametrization(pairs)
 end
 
-mutable struct BRMTotalCenteringState
+# Scalar cells with a constant location and a raw log-scale coordinate: exact
+# totals (location = prior total, compiled at c = 1) and S2Z free contrasts
+# (location 0, compiled at c = 0 or 1). Cells enumerate totals first, then S2Z
+# contrasts, each in its family's cell order (`BRM._total_centering_cells`,
+# `BRM._s2z_centering_cells`), which the post-hoc selectors share.
+mutable struct BRMScalarCenteringState
     indices::Vector{Int}
     scales::Vector{Int}
     locations::Vector{Float64}
     sources::Vector{Float64}
 end
 
-struct BRMTotalCenteringArgument{KIND} <: Function
-    state::BRMTotalCenteringState
+struct BRMScalarCenteringArgument{KIND} <: Function
+    state::BRMScalarCenteringState
     pair_number::Int
 end
-(arg::BRMTotalCenteringArgument{:location})(x) = arg.state.locations[arg.pair_number]
-(arg::BRMTotalCenteringArgument{:log_scale})(x) = x[arg.state.scales[arg.pair_number]]
+(arg::BRMScalarCenteringArgument{:location})(x) = arg.state.locations[arg.pair_number]
+(arg::BRMScalarCenteringArgument{:log_scale})(x) = x[arg.state.scales[arg.pair_number]]
 
-function _sync_sources!(state::BRMTotalCenteringState,ir)
-    length(state.sources) == length(ir.pairs) || throw(DimensionMismatch("total centering pair count changed"))
+function _sync_sources!(state::BRMScalarCenteringState,ir)
+    length(state.sources) == length(ir.pairs) || throw(DimensionMismatch("scalar centering pair count changed"))
     for (p,(index,value)) in enumerate(ir.pairs)
-        index == state.indices[p] || throw(ArgumentError("total centering pair order changed"))
+        index == state.indices[p] || throw(ArgumentError("scalar centering pair order changed"))
         state.sources[p] = value.source.c
     end
     ir
 end
 
-function _prepare_frame(state::BRMTotalCenteringState,ir,position,gradient)
+function _prepare_frame(state::BRMScalarCenteringState,ir,position,gradient)
     _sync_sources!(state,ir)
     source = copy(state.sources)
     location = copy(state.locations)
@@ -646,22 +651,17 @@ function _prepare_frame(state::BRMTotalCenteringState,ir,position,gradient)
     BRMAdaptiveCenteringFrame(source,location,scale,innovation,invariant_gradient)
 end
 
-function _adaptive_total_centering_reparametrizer(model,blocks,names)
-    indices,scales,locations = Int[],Int[],Float64[]
-    for block in blocks
-        coords = BRM._total_coordinates(model,block,names)
-        mu = block.A*block.location
-        for k in axes(coords.totals,2), g in axes(coords.totals,1)
-            push!(indices,coords.totals[g,k])
-            push!(scales,coords.scales[k])
-            push!(locations,mu[k])
-        end
-    end
-    state = BRMTotalCenteringState(indices,scales,locations,ones(length(indices)))
+function _adaptive_scalar_centering_reparametrizer(model,names)
+    totals = BRM._total_centering_cells(model,names)
+    s2z = BRM._s2z_centering_cells(model,names)
+    indices = vcat(totals.indices,s2z.indices)
+    targets = vcat(totals.targets,s2z.targets)
+    state = BRMScalarCenteringState(indices,vcat(totals.scales,s2z.scales),
+        vcat(totals.locations,s2z.locations),copy(targets))
     pairs = [indices[p] => WarmupHMC.Reparametrization(
-        WarmupHMC.PartiallyCentered(1.),WarmupHMC.PartiallyCentered(1.),
-        BRMTotalCenteringArgument{:location}(state,p),
-        BRMTotalCenteringArgument{:log_scale}(state,p)) for p in eachindex(indices)]
+        WarmupHMC.PartiallyCentered(targets[p]),WarmupHMC.PartiallyCentered(targets[p]),
+        BRMScalarCenteringArgument{:location}(state,p),
+        BRMScalarCenteringArgument{:log_scale}(state,p)) for p in eachindex(indices)]
     state,WarmupHMC.IndexedReparametrization(pairs)
 end
 
@@ -682,11 +682,11 @@ end
         unc_names=nothing, centeredness=nothing)
 
 Wrap a compiled BRM log-density in WarmupHMC's strictly-online adaptive
-centering for exact total-coefficient blocks, ordinary scalar or correlated
-random-effect blocks, squared-exponential HSGP basis weights (ungrouped or
-grouped), or `cdar` correlated-walk cells. Ordinary and HSGP cells adapt
-together in one wrapper; `cdar` cells form a separate plan and mix with
-neither family.
+centering for exact total-coefficient blocks, S2Z free contrasts, ordinary
+scalar or correlated random-effect blocks, squared-exponential HSGP basis
+weights (ungrouped or grouped), or `cdar` correlated-walk cells. Ordinary and
+HSGP cells adapt together in one wrapper, as do totals and S2Z contrasts;
+`cdar` cells form a separate plan and mix with neither family.
 
 `model` is the `SBBRMI` or `GenerativePlan` that emitted `problem`. When
 `problem` is StanBlocks' `StanProblem`, unconstrained names are read from its
@@ -705,7 +705,17 @@ exact. Literal endpoints are preserved: `c=0` is BRM's standardised draw and
 For exact totals, `c=1` is the sampled group total and `c=0` is the total
 scaled around its prior location. The exact marginal prior remains correlated
 at either endpoint. Each group/term cell receives its own control automatically.
-Totals cannot currently share one wrapper with ordinary, HSGP, or cdar cells.
+
+For an S2Z block (`SBBRMI(...; s2z_groups, s2z_rho)`), each of the `J-1` free
+Helmert contrasts of each coefficient is one scalar cell with zero location and
+scale `tau_k`: `c=0` is the standard-normal contrast `z`, `c=1` the centered
+contrast `tau_k * z`. The compiled model must be an endpoint frame, so every
+coefficient's `s2z_rho` must be uniformly `0` or `1`; interior (Sean's partial
+map) weights raise. Controls are per contrast in the orthonormal basis, not per
+group. The collapsed population coefficients stay untouched, and
+`recover_s2z_draws` applies to the returned compiled-frame draws. Totals cells
+precede S2Z cells in the pair order. Neither can currently share one wrapper
+with ordinary, HSGP, or cdar cells.
 
 For an HSGP, each basis weight is one scalar cell with zero location and
 per-basis scale `brm_hsgp_sqrt_spd(omega2, sigma, rho)[basis]`; `c=0` is the
@@ -737,10 +747,11 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
     hsgp_blocks = BRM._adaptive_hsgp_centering_blocks(model, names)
     cdar_blocks = BRM._adaptive_cdar_centering_blocks(model, names)
     total_blocks = BRM.total_effect_blocks(model)
-    if !isempty(total_blocks)
+    s2z_blocks = BRM.s2z_effect_blocks(model)
+    if !isempty(total_blocks) || !isempty(s2z_blocks)
         isempty(blocks) && isempty(hsgp_blocks) && isempty(cdar_blocks) || throw(ArgumentError(
-            "adaptive total coefficients cannot yet be mixed with ordinary, HSGP, or cdar blocks; use total_groups=() for the conventional model"))
-        state,ir = _adaptive_total_centering_reparametrizer(model,total_blocks,names)
+            "adaptive total coefficients and S2Z contrasts cannot yet be mixed with ordinary, HSGP, or cdar blocks; use total_groups=() and s2z_groups=() for the conventional model"))
+        state,ir = _adaptive_scalar_centering_reparametrizer(model,names)
         _initial_centering!(state,ir,centeredness)
         scoring = WarmupHMC.CandidateScoringPlan(
             (ir_,q,g) -> _prepare_frame(state,ir_,q,g), _score_candidate;

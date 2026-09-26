@@ -456,8 +456,9 @@ R2D2 blocks use the conventional representation. A request for totals on an
 unsupported group raises an error.
 
 Automatic selection retains the conventional representation if some ordinary
-group blocks require it. A single adaptive wrapper currently uses one geometry
-family: totals, ordinary random effects, or HSGP weights.
+group blocks require it. A single adaptive wrapper currently combines totals
+with S2Z contrasts, or ordinary random effects with HSGP weights, but not both
+pairs.
 
 #### WarmupHMC and recovery
 
@@ -513,6 +514,53 @@ one recovered population draw per posterior draw. `resample=:subject` redraws
 existing groups too. Total blocks require frozen preprocessing for replay and use
 this transport route for resampling; `reprocess(...; resample_groups=...)` is not
 supported for them. Improper population priors have no prior-predictive distribution.
+
+### Posterior-preserving sum-to-zero (S2Z) effects
+
+`SBBRMI(brmi; s2z_groups=[:g], s2z_rho=...)` opts a grouping factor into the
+S2Z construction of brms PR #1919. Each coefficient's `J` group effects become
+`J - 1` free orthonormal (Helmert) contrasts plus a block mean. The mean is
+integrated into the population coefficients exactly, as for totals, and is
+recovered afterwards. The current scope is one independent Gaussian grouping
+structure per predictor with `J >= 2`, a population column for every group
+column, and Normal or `Flat()` population priors (Student-t priors are not yet
+supported).
+
+`s2z_rho` sets the compiled frame per group and coefficient: a scalar, one weight
+per coefficient, or a `J × K` matrix in `[0, 1]`. Intermediate values use Sean's
+projected partial map. `select_s2z_rho` chooses these weights from a pilot with
+brms's Fisher rule.
+
+For WarmupHMC, compile an endpoint frame instead: `s2z_rho=0` (standard-normal
+contrasts) or `s2z_rho=1` (centered contrasts). A vector such as `[0, 1]` sets the
+endpoint per coefficient. `adaptive_centering_problem` then gives every free
+contrast its own scalar centering control with zero location and scale `tau_k`:
+
+```julia
+sb = SBBRMI(brmi; s2z_groups=[:g], s2z_rho=0.0)
+problem = StanBlocks.stan_instantiate(sb.model)
+adaptive = adaptive_centering_problem(sb, problem, AutoEnzyme())
+fit = WarmupHMC.adaptive_warmup_mcmc(Xoshiro(1), adaptive;
+    n_draws=2000, nonlinear_adapt=true)
+names = BridgeStan.param_unc_names(problem.model)
+recovered = recover_s2z_draws(sb, permutedims(fit.posterior_position), names)
+```
+
+For a post-hoc refit, `select_s2z_centeredness(sb, draws, names; criterion)` scores
+the same cells from compiled-frame pilot draws, using the same losses as
+`select_total_centeredness`. Pass its `centeredness` to a fresh
+`adaptive_centering_problem` and fit with `nonlinear_adapt=false`.
+
+These controls belong to contrasts, not groups. Contrast `r` puts weight
+`r/(r+1)` on group `r+1` and the remainder on groups `1:r`, so a control mostly
+follows one group but is basis dependent. With unbalanced groups and a weakly
+identified scale, a contrast that mixes data-rich and data-poor groups can
+settle between their preferred centerings and leave some divergent
+transitions. In that case, compare with ordinary per-group adaptive centering
+(`s2z_groups=()`). Interior `s2z_rho` weights have no
+per-contrast equivalent and are refused by the wrapper. S2Z and total cells can
+share one wrapper, with totals first. Neither can yet be combined with ordinary,
+HSGP or `cdar` cells.
 
 ### Response-level wrappers
 

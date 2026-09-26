@@ -212,3 +212,73 @@ function _s2z_carrier_is_scalar(block, group)
         "is outside the supported scope"))
     isnothing(_RANEF_FAMILIES[block.family].tau)
 end
+
+# Contrast-coordinate partial centering (design note §2). At an endpoint
+# compiled frame every free Helmert contrast of an S2Z block is a scalar,
+# zero-location cell: `s2z_rho = 0` samples `z ~ N(0, 1)` (c = 0) and
+# `s2z_rho = 1` samples `tau * z ~ N(0, tau^2)` (c = 1). Any power-interpolated
+# source `tau^c * z` is then an exact coordinate change on the same collapsed
+# target. Controls belong to contrasts, not groups: contrast `r` puts squared
+# weight `r/(r+1)` on group `r + 1` and `1/(r+1)` on groups `1:r` together.
+
+"""
+    _s2z_centering_cells(model, unc_names)
+
+Scalar centering cells of every S2Z block, ordered by block, then coefficient,
+then contrast: `indices` (free contrast coordinates), `scales` (the matching
+`log(tau_k)` coordinates), zero `locations` and the compiled frame `targets`.
+A coefficient whose compiled `s2z_rho` column is not uniformly 0 or 1 is
+refused: Sean's interior map `delta = tau * P * D^-1 * u` is not a
+per-contrast power interpolation, so no scalar source frame reproduces it.
+"""
+function _s2z_centering_cells(model, names)
+    indices, scales, targets = Int[], Int[], Float64[]
+    for block in s2z_effect_blocks(model)
+        coords = _s2z_coordinates(model, block, names)
+        for k in axes(coords.contrasts, 2)
+            weights = view(block.rho, :, k)
+            target = all(iszero, weights) ? 0.0 : all(isone, weights) ? 1.0 :
+                throw(ArgumentError(
+                    "S2Z block `$(block.group)` coefficient `$(block.columns[k])` " *
+                    "was compiled with interior centering weights; contrast " *
+                    "centering needs an endpoint frame, so compile it with " *
+                    "`s2z_rho = 0` (noncentered) or `s2z_rho = 1` (centered)"))
+            for r in axes(coords.contrasts, 1)
+                push!(indices, coords.contrasts[r, k])
+                push!(scales, coords.scales[k])
+                push!(targets, target)
+            end
+        end
+    end
+    (; indices, scales, locations=zeros(length(indices)), targets)
+end
+
+"""
+    select_s2z_centeredness(model, draws, unc_names;
+        criterion=:position, gradients=nothing, grid=0:0.1:1)
+
+Select one centering per S2Z free contrast from a saved pilot of an endpoint
+S2Z model (`SBBRMI(...; s2z_groups, s2z_rho=0)` or `s2z_rho=1`). `draws` and
+optional `gradients` are draws × coordinates in the COMPILED model frame; no
+density or gradient calls are made. Contrast `r` of coefficient `k` is
+scored as the scalar cell `tau_k^c * z_rk` (location zero): `:position`
+minimizes log SD minus mean log Jacobian, `:gradient` minimizes the
+position-gradient correlation and needs matching exact gradients.
+
+The returned `centeredness` vector is ordered by block, coefficient and then
+contrast. Pass it to `adaptive_centering_problem(model, problem, backend;
+centeredness)`, with `nonlinear_adapt=false` for a fixed post-hoc refit. When
+the model also has total-coefficient blocks, their cells come first:
+`vcat(select_total_centeredness(...).centeredness, s2z.centeredness)`.
+
+These are per-contrast controls in the orthonormal Helmert basis, not the
+per-group weights of [`select_s2z_rho`](@ref); see that function for Sean's
+Fisher-rule weights.
+"""
+function select_s2z_centeredness(model, draws::AbstractMatrix, names;
+        criterion=:position, gradients=nothing, grid=0.:0.1:1.)
+    isempty(s2z_effect_blocks(model)) &&
+        throw(ArgumentError("model has no S2Z blocks"))
+    _select_scalar_centeredness(_s2z_centering_cells(model, names), draws, names;
+        criterion, gradients, grid)
+end
