@@ -2074,3 +2074,137 @@ end
     @test _rk_query(twin, :posterior, u_twin) ≈
         _rk_query(backend, :posterior, u)
 end
+
+@testset "rk parity interval-gaussian literal upper" begin
+    # Interval-censored Gaussian: each row contributes
+    # log(Phi(hi) - Phi(y)) (the response is the lower endpoint).
+    # Independent Distributions.jl cdf-difference oracle.
+    cols = (;
+        x=[0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
+        y=[0.2, 0.8, 1.1, 0.4, 1.5, 0.9],
+    )
+    brmi = @brm cols begin
+        mu ~ 1 + x
+        s ~ Exponential(1)
+        y ~ interval_censored(Normal(mu, s); upper=2.0)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 3
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+        (:sampled, :s, 1, :exp),
+    ]
+    u = [0.2, -0.3, 0.1]
+    nt = constrain(layout, u)
+    mu_o = nt.mu[1] .+ nt.mu[2] .* cols.x
+    ll = sum(log.(cdf.(Normal.(mu_o, nt.s), 2.0) .-
+        cdf.(Normal.(mu_o, nt.s), cols.y)))
+    pr = logpdf(Normal(0, 1), nt.mu[1]) +
+        logpdf(Normal(0, 1), nt.mu[2]) +
+        logpdf(Exponential(1), nt.s)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ u[3]
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[3]
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity interval-gaussian column upper" begin
+    # Rowwise upper endpoints from a data column.
+    cols = (;
+        x=[0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
+        y=[0.2, 0.8, 1.1, 0.4, 1.5, 0.9],
+        hi=[2.0, 1.5, 2.5, 1.0, 2.0, 1.2],
+    )
+    brmi = @brm cols begin
+        mu ~ 1 + x
+        s ~ Exponential(1)
+        y ~ interval_censored(Normal(mu, s); upper=hi)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 3
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+        (:sampled, :s, 1, :exp),
+    ]
+    u = [0.2, -0.3, 0.1]
+    nt = constrain(layout, u)
+    mu_o = nt.mu[1] .+ nt.mu[2] .* cols.x
+    ll = sum(log.(cdf.(Normal.(mu_o, nt.s), cols.hi) .-
+        cdf.(Normal.(mu_o, nt.s), cols.y)))
+    pr = logpdf(Normal(0, 1), nt.mu[1]) +
+        logpdf(Normal(0, 1), nt.mu[2]) +
+        logpdf(Exponential(1), nt.s)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ u[3]
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[3]
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity interval-poisson literal upper" begin
+    # Interval-censored Poisson: each row contributes
+    # log(F(hi) - F(c)) — the response is the OPEN lower endpoint of
+    # (c, hi] (brm-use contract; SB's `interval_evidence_impl_poisson`
+    # computes `log_diff_exp(poisson_lcdf(hi), poisson_lcdf(lo))`
+    # with no -1 shift).
+    cols = (;
+        x=[0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
+        c=[0, 2, 1, 3, 0, 1],
+    )
+    brmi = @brm cols begin
+        log(lambda) ~ 1 + x
+        c ~ interval_censored(Poisson(lambda); upper=5)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 2
+    @test _layout_signature(layout) == [
+        (:coefficient, :lambda_coef, 2, :identity),
+    ]
+    u = [0.2, -0.3]
+    nt = constrain(layout, u)
+    lam = exp.(nt.lambda[1] .+ nt.lambda[2] .* cols.x)
+    ll = sum(log.(cdf.(Poisson.(lam), 5) .-
+        cdf.(Poisson.(lam), cols.c)))
+    pr = logpdf(Normal(0, 1), nt.lambda[1]) +
+        logpdf(Normal(0, 1), nt.lambda[2])
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity interval-poisson column upper" begin
+    # Rowwise integer-valued upper endpoints from a data column.
+    cols = (;
+        x=[0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
+        c=[0, 2, 1, 3, 0, 1],
+        hi=[3, 4, 2, 5, 1, 3],
+    )
+    brmi = @brm cols begin
+        log(lambda) ~ 1 + x
+        c ~ interval_censored(Poisson(lambda); upper=hi)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 2
+    @test _layout_signature(layout) == [
+        (:coefficient, :lambda_coef, 2, :identity),
+    ]
+    u = [0.2, -0.3]
+    nt = constrain(layout, u)
+    lam = exp.(nt.lambda[1] .+ nt.lambda[2] .* cols.x)
+    ll = sum(log.(cdf.(Poisson.(lam), cols.hi) .-
+        cdf.(Poisson.(lam), cols.c)))
+    pr = logpdf(Normal(0, 1), nt.lambda[1]) +
+        logpdf(Normal(0, 1), nt.lambda[2])
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    _check_parity_gradient(backend, u)
+end
