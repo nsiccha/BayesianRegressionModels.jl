@@ -54,13 +54,16 @@ const PINS = [
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
-    # through. d7fe90f (2026-09-26, main): the fam-interval slice
-    # (interval-censored parity slice plus the open-below fix e854079:
-    # `_poisson_cell` interval arm `log(F(ub)-F(y))` with no -1 shift,
-    # contract docstring, I1/I2 BridgeStan pins) over the a758d52 stack
-    # (term-mi + bernoulli-links + inversegaussian Wald + betabinom
-    # BetaBinomial2).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "d7fe90f1444ead772973953fa0cda7d3ae065f70"),  # main
+    # through. d94ddcd (2026-09-26, main): the d7fe90f interval stack
+    # (the fam-interval slice over the a758d52 betabinom stack: ec0b6a9
+    # term-mi over bernoulli-links main 5d6a794, plus the
+    # fam-inversegaussian Wald and fam-betabinom BetaBinomial2 response
+    # slices) plus the fam-vonmises von-Mises response slice
+    # (VonMisesFam + (identity, identity) triple + kappa on the
+    # scale/scale-predictor slots + `interval` plan slot + twin heads
+    # `VonMises.(mu, kappa)` / `CircularVonMises.(mu, kappa, lo, hi)`
+    # + corpus 61_vonmises; includes the 61_interval golden rebless).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "d94ddcdbccf30e5284dcc8846bb462426322c67f"),  # main
 ]
 
 function main()
