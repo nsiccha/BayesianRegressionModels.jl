@@ -35,7 +35,8 @@ using CategoricalArrays: categorical, levelcode
 using DifferentiationInterface: AutoEnzyme
 using Distributions: Beta, Cauchy, Dirichlet, Exponential, Gamma,
                      InverseGaussian, LocationScale, LogNormal, MixtureModel,
-                     Normal, Poisson, TDist, cdf, logcdf, logccdf, logpdf
+                     Normal, Poisson, TDist, VonMises, cdf, logcdf, logccdf,
+                     logpdf
 using Enzyme
 using LogDensityProblems
 using LogExpFunctions: logistic, logit
@@ -2204,6 +2205,101 @@ end
         logpdf(Normal(0, 1), nt.lambda[2])
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity von-Mises circular kappa submodel" begin
+    v_cols = (;
+        x=[-1.0, -0.25, 0.5, 1.0],
+        y=[-2.8, -0.4, 1.1, 2.9],
+    )
+    brmi = @brm v_cols begin
+        mu ~ 1 + x
+        log(kappa) ~ 1
+        y ~ CircularVonMises(mu, kappa; interval=(-pi, pi))
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 3
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+        (:coefficient, :kappa_coef, 1, :identity),
+    ]
+    u = [0.5, -0.25, 0.3]
+    nt = constrain(layout, u)
+    b = Vector(nt.mu)
+    mu = b[1] .+ b[2] .* v_cols.x
+    kap = exp(only(nt.kappa))
+    ll = sum(logpdf.(BRM.CircularVonMises.(mu, kap;
+        interval=(-Float64(pi), Float64(pi))), v_cols.y))
+    pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2]) +
+        logpdf(Normal(0, 1), only(nt.kappa))
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # All-identity layout: no Jacobian.
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity von-Mises exact sampled kappa" begin
+    v_cols = (;
+        x=[-1.0, -0.25, 0.5, 1.0],
+        y=[-2.0, 0.3, 1.5, -1.2],
+    )
+    brmi = @brm v_cols begin
+        mu ~ 1 + x
+        k ~ LogNormal(0, 1)
+        y ~ VonMises(mu, k)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 3
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+        (:sampled, :k, 1, :exp),
+    ]
+    u = [0.5, -0.25, 0.2]
+    nt = constrain(layout, u)
+    b = Vector(nt.mu)
+    mu = b[1] .+ b[2] .* v_cols.x
+    ll = sum(logpdf.(VonMises.(mu, nt.k), v_cols.y))
+    pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2]) +
+        logpdf(LogNormal(0, 1), nt.k)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ u[3]
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[3]
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity von-Mises circular literal kappa" begin
+    v_cols = (;
+        x=[-1.0, -0.25, 0.5, 1.0],
+        y=[0.5, 2.0, 6.0, 1.0],
+    )
+    brmi = @brm v_cols begin
+        mu ~ 1 + x
+        y ~ CircularVonMises(mu, 1.7; interval=(0.0, 6.283185307179586))
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 2
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+    ]
+    u = [1.0, -0.5]
+    nt = constrain(layout, u)
+    b = Vector(nt.mu)
+    mu = b[1] .+ b[2] .* v_cols.x
+    ll = sum(logpdf.(BRM.CircularVonMises.(mu, 1.7;
+        interval=(0.0, 6.283185307179586)), v_cols.y))
+    pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2])
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # All-identity layout: no Jacobian.
     @test logjac(layout, u) ≈ 0.0
     @test _rk_query(backend, :posterior, u) ≈ ll + pr
     _check_parity_gradient(backend, u)

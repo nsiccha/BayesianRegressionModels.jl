@@ -64,13 +64,20 @@ const _RK_ADMITTED_TRIPLES = Set{Tuple{Symbol,Symbol,Symbol}}([
     # sampled / assignment — modeled lambda deferred, Beta-kappa
     # precedent).
     (:wald, :log, :log),
+    # Group C (circular): von-Mises over an identity-link location
+    # predictor; kappa rides the scale slot (scalar literal /
+    # sampled / assignment) or the scale-predictor slot (a
+    # `log(kappa)` submodel — the hurdle vscale precedent). Exact
+    # `VonMises` and `CircularVonMises` share the triple; the
+    # principal interval rides the plan's `interval` slot.
+    (:von_mises, :identity, :identity),
 ])
 # Slice-2 families: no weights or evidence (no driving case — the thin
 # layer admits neither on the new triples, so the planner fails closed).
 const _RK_SLICE2_FAMILIES = Set{Symbol}([
     :bernoulli_probit, :bernoulli_cloglog, :binomial_probit,
     :binomial_cloglog, :beta_logit, :beta_binomial_logit, :student_t,
-    :hurdle_poisson, :zero_inflated_poisson, :wald,
+    :hurdle_poisson, :zero_inflated_poisson, :wald, :von_mises,
 ])
 # Leveled simplex responses (multinomial/categorical) name a simplex
 # vector parameter instead of a linear predictor, so they skip the
@@ -142,6 +149,9 @@ struct _RKLikelihoodSpec
                    # (p_zero rides the scale / scale-predictor slots) |
                    # :zero_inflated_poisson |
                    # :wald (lambda rides the scalar-only scale slot) |
+                   # :von_mises (kappa rides the
+                   # scale / scale-predictor slots, the principal
+                   # interval the `interval` slot) |
                    # longtail: :mvnormal_cholesky (joint correlated outcomes)
                    # | :mixture (finite MixtureModel response)
     link::Symbol   # effective link: :identity | :logit | :log |
@@ -193,6 +203,10 @@ struct _RKLikelihoodSpec
     # response is `mi(...)` (Case A obs-rows-only likelihood over the
     # packed `y_obs` column); every other response leaves it `nothing`.
     mi_jobs::Union{Nothing,Symbol}
+    # Von-Mises trailing field: the `CircularVonMises` principal
+    # interval `(lo, hi)` (validated `2pi` pair); exact `VonMises`
+    # and every other family leave it `nothing`.
+    interval::Union{Nothing,Tuple{Float64,Float64}}
 end
 
 struct _RKTermSpec
@@ -430,7 +444,10 @@ const _RK_ADMITTED_SPELLINGS =
     "`log(mu) ~ ...` (`lam` a sampled parameter, scalar assignment, " *
     "or positive literal), or group D: `c ~ BetaBinomial2(n, " *
     "mu, phi)` + `logit(mu) ~ ...` (`n` an integer column or literal; " *
-    "`phi` a sampled parameter, scalar assignment, or positive literal)"
+    "`phi` a sampled parameter, scalar assignment, or positive literal), " *
+    "or group C: `y ~ VonMises(mu, kappa)` / `y ~ CircularVonMises(mu, " *
+    "kappa; interval=(lo, hi))` + `mu ~ ...` (`kappa` a `log(kappa) ~ ...` " *
+    "predictor, sampled parameter, or positive literal)"
 
 function _rk_predictor_link(brmi::BRMI, target::Symbol)
     prefix = "RK backend"
@@ -765,6 +782,21 @@ function _rk_probability_literal(x::Number, response::Symbol, what::String)
     value
 end
 
+# `CircularVonMises` principal interval: only the `interval` keyword is
+# admitted (macro validation already enforces the shape, so this is
+# RK-attributed defense plus the parse). The pair rule itself is the
+# shared `_brm_circular_interval` (finite endpoints, `lo < hi`, width
+# `2pi` within `8eps`).
+function _rk_circular_interval(kwargs, response::Symbol)
+    prefix = "RK backend"
+    for key in keys(kwargs)
+        key === :interval || error(
+            "$prefix: response `$response` `CircularVonMises` takes only " *
+            "the `interval` keyword, got `$key`")
+    end
+    _brm_circular_interval(kwargs)
+end
+
 # Classifies the peeled distribution call against the response's
 # referenced predictors (one, or two for a distributional response). The
 # location predictor is identified positionally per family; a second
@@ -772,9 +804,10 @@ end
 # families return the same shape (location is the lead predictor; the
 # categorical-logit tail arrives via `extra`). Returns
 # `(; family, link, scale, scale_predictor, trials, location)` plus a `nu`
-# key on the Student-t arm and a `zero_inflation` key on the
-# zero-inflated-Poisson arm only; the caller rejects unclaimed candidates
-# and a scale slot naming the location.
+# key on the Student-t arm, a `zero_inflation` key on the
+# zero-inflated-Poisson arm, and an `interval` key on the von-Mises arm
+# only; the caller rejects unclaimed candidates and a scale slot naming
+# the location.
 function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
         predictor_link::Dict{Symbol,Symbol}, parameters::Set{Symbol},
         assignments::Set{Symbol}, consts::Dict{Symbol,Float64},
@@ -785,10 +818,12 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
     head = getf(rhs)
     args = getargs(rhs)
     # Ordinal carries its SB keywords (`discrimination`, `per_threshold`);
-    # the arm below admits exactly those two.
-    head !== Ordinal && (isempty(getkwargs(rhs)) || error(
-        "$prefix: response `$response` distribution keywords are out of " *
-        "slice 1; admitted spellings: $_RK_ADMITTED_SPELLINGS"))
+    # the arm below admits exactly those two. `CircularVonMises`
+    # carries its SB `interval` keyword the same way.
+    head !== Ordinal && head !== CircularVonMises &&
+        (isempty(getkwargs(rhs)) || error(
+            "$prefix: response `$response` distribution keywords are out of " *
+            "slice 1; admitted spellings: $_RK_ADMITTED_SPELLINGS"))
     if head === Normal
         length(args) == 2 || error(
             "$prefix: response `$response` `Normal` needs `(location, scale)`")
@@ -1169,6 +1204,38 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
         return (; family=:zero_inflated_poisson, link=plink, scale=nothing,
             scale_predictor=nothing, trials=nothing, location,
             zero_inflation=zi)
+    elseif head === VonMises || head === CircularVonMises
+        circular = head === CircularVonMises
+        headname = circular ? "CircularVonMises" : "VonMises"
+        length(args) == 2 || error(
+            "$prefix: response `$response` `$headname` needs " *
+            "`(location, concentration)`; write `$headname(mu, kappa)` " *
+            "with a `mu ~ ...` predictor")
+        location = _rk_location_arg(args[1], candidates, response, "location",
+            "itself, not a deterministic transform; write the transform " *
+            "into the predictor formula")
+        plink = predictor_link[location]
+        # kappa rides the scale slot (scalar sampled parameter /
+        # assignment / positive literal) or the scale-predictor slot (a
+        # `log(kappa)` submodel — the hurdle vscale precedent).
+        kappa, kappa_predictor = _rk_scale_argument(args[2], parameters,
+            assignments, consts, aliases, response, "concentration",
+            candidates)
+        kappa_predictor !== nothing &&
+            predictor_link[kappa_predictor] !== :log && error(
+                "$prefix: response `$response` `$headname` concentration " *
+                "predictor `$(kappa_predictor)` must be log-link; " *
+                "write a `log(kappa) ~ ...` submodel")
+        interval = circular ? _rk_circular_interval(getkwargs(rhs), response) :
+            nothing
+        triple = (:von_mises, plink, plink)
+        triple in _RK_ADMITTED_TRIPLES || error(
+            "$prefix: response `$response` pairs `$headname` with a " *
+            "$plink-link predictor; write `$headname(mu, kappa)` " *
+            "with an identity-link predictor")
+        return (; family=:von_mises, link=plink, scale=kappa,
+            scale_predictor=kappa_predictor, trials=nothing, location,
+            interval)
     elseif head === MvNormalCholesky
         # Joint correlated-outcomes response (SB
         # `[y1..yK] ~ MvNormalCholesky([mu1..muK], L)`): Phase 4 resolved
@@ -4476,7 +4543,8 @@ function _rk_plan_me_observations!(response_specs::Vector{_RKLikelihoodSpec},
             nothing, _RKResponseEvidence(:none, nothing, nothing),
             source, nothing, nothing, nothing, Symbol[], Symbol[],
             nothing, nothing, Symbol[], nothing, Symbol[], nothing,
-            _RKMixtureComponent[], nothing, nothing, nothing, nothing))
+            _RKMixtureComponent[], nothing, nothing, nothing, nothing,
+            nothing))
     end
     nothing
 end
@@ -5062,7 +5130,8 @@ function _rk_gate_acyclic!(parameters::AbstractVector,
 end
 
 function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
-        response::Symbol)
+        response::Symbol,
+        interval::Union{Nothing,Tuple{Float64,Float64}} = nothing)
     prefix = "RK backend"
     any(ismissing, values) && error(
         "$prefix: response `$response` has missing values; wrap it in " *
@@ -5072,6 +5141,22 @@ function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
             "$prefix: response `$response` must be real-valued")
         all(isfinite, values) || error(
             "$prefix: response `$response` must be finite")
+    elseif family === :von_mises
+        # Exact `VonMises` support moves with mu (unknowable here), so
+        # only finiteness gates; the kernel returns -Inf out of support
+        # (SB `brm_von_mises_lpdf` branch structure). Circular adds the
+        # half-open principal interval `[lo, hi)`. Bool excluded either
+        # way (thin-layer bind rule, pair contract).
+        (eltype(values) <: Real && eltype(values) !== Bool) || error(
+            "$prefix: response `$response` must be real-valued")
+        all(isfinite, values) || error(
+            "$prefix: response `$response` must be finite")
+        if interval !== nothing
+            lo, hi = interval
+            all(y -> lo <= y < hi, values) || error(
+                "$prefix: response `$response` must hold values in " *
+                "[$lo, $hi)")
+        end
     elseif family === :bernoulli_logit
         # Mirrors the thin layer: Bool or 0/1 integers (float 0.0/1.0 fails
         # validation there, so it fails here with BRM-side attribution).
@@ -5647,7 +5732,7 @@ function _rk_plan_joint_response!(entry, link::Symbol, predictor::Symbol,
         nothing, nothing, nothing, evidence, entry.key, nothing, nothing,
         nothing, extra, Symbol[], nothing, nothing, Symbol[], nothing,
         outcomes[2:end], stem, _RKMixtureComponent[], nothing, nothing,
-        nothing, nothing)
+        nothing, nothing, nothing)
 end
 
 # Joint responses link their LKJ factor stem explicitly (SB's
@@ -6544,12 +6629,12 @@ function _brm_rk_plan(brmi::BRMI)
         mixture_components = _RKMixtureComponent[]
         mixture_weights::Union{Nothing,Vector{Float64},Symbol} = nothing
         family, link, scale, scale_predictor, trials, predictor, nu,
-        zero_inflation = if head === Categorical
+        zero_inflation, interval = if head === Categorical
             length(getargs(entry.rhs)) == 1 || error(
                 "$prefix: response `$(entry.key)` `Categorical` needs " *
                 "`Categorical(s)` with a `Dirichlet`-sampled `s`")
             (:categorical, :identity, nothing, nothing, nothing, nothing,
-                nothing, nothing)
+                nothing, nothing, nothing)
         elseif head === Multinomial
             length(getargs(entry.rhs)) == 2 || error(
                 "$prefix: response `$(entry.key)` `Multinomial` needs " *
@@ -6558,7 +6643,7 @@ function _brm_rk_plan(brmi::BRMI)
             mtrials = _rk_trials_argument(getargs(entry.rhs)[1], entry.key,
                 parameter_names, assignment_names, consts, aliases)
             (:multinomial, :identity, nothing, nothing, mtrials, nothing,
-                nothing, nothing)
+                nothing, nothing, nothing)
         elseif head === MixtureModel
             mclassified = _rk_classify_mixture(entry.rhs, candidates,
                 predictor_link, parameter_names, assignment_names, consts,
@@ -6566,7 +6651,8 @@ function _brm_rk_plan(brmi::BRMI)
             mixture_components = mclassified.components
             mixture_weights = mclassified.weights
             (mclassified.family, mclassified.link, nothing, nothing,
-                mclassified.trials, mclassified.anchor, nothing, nothing)
+                mclassified.trials, mclassified.anchor, nothing, nothing,
+                nothing)
         else
             if head === CategoricalLogit && isempty(candidates)
                 # Zero-arg shape: K=1 (rejected per 0dteta6) or arity mismatch.
@@ -6591,7 +6677,8 @@ function _brm_rk_plan(brmi::BRMI)
             (classified.family, classified.link, classified.scale,
                 classified.scale_predictor, classified.trials,
                 classified.location, get(classified, :nu, nothing),
-                get(classified, :zero_inflation, nothing))
+                get(classified, :zero_inflation, nothing),
+                get(classified, :interval, nothing))
         end
         if entry.missing_response !== nothing &&
                 family ∉ (:gaussian, :gamma_log, :beta_logit)
@@ -6714,7 +6801,7 @@ function _brm_rk_plan(brmi::BRMI)
             # indices. Everything else (predictors, levels, `n_obs`) stays
             # full-length — only the likelihood restricts to observed rows.
             gated = _rk_gate_response_values!(family,
-                mi_plan.observed_values, entry.key)
+                mi_plan.observed_values, entry.key, interval)
             columns[entry.key] = gated
             mi_jobs = Symbol(:Jobs_, entry.key)
             haskey(columns, mi_jobs) && error(
@@ -6728,7 +6815,7 @@ function _brm_rk_plan(brmi::BRMI)
                 only(unique!(map(c -> c.family, mixture_components))) :
                 family
             gated = _rk_gate_response_values!(gate_family,
-                leveled.response_values, entry.key)
+                leveled.response_values, entry.key, interval)
             columns[entry.key] = gated
         end
         push!(response_specs, _RKLikelihoodSpec(family, link, entry.key,
@@ -6738,7 +6825,7 @@ function _brm_rk_plan(brmi::BRMI)
             leveled.ordinal_structure, leveled.discrimination,
             leveled.threshold_columns, leveled.threshold_coefs, Symbol[],
             nothing, mixture_components, mixture_weights, nu,
-            zero_inflation, mi_jobs))
+            zero_inflation, mi_jobs, interval))
     end
     # Measurement-error observations ride synthetic responses (SB's
     # `x_obs ~ Normal(x_true, sd)` likelihood per `me` term).

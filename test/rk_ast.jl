@@ -17,7 +17,7 @@ using BayesianRegressionModels
 using Distributions: Bernoulli, Beta, Binomial, Categorical, Dirichlet,
                      Exponential, Gamma, InverseGaussian, LocationScale,
                      LogNormal, MixtureModel, Multinomial, Normal, Poisson,
-                     TDist, truncated
+                     TDist, VonMises, truncated
 using LogExpFunctions: logistic, logit
 using Statistics: mean
 
@@ -346,6 +346,35 @@ end
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end
 
+@testset "group-C von-Mises AST shape" begin
+    # Twin heads (thin-layer decision, pair fam-vonmises): exact
+    # `VonMises(mu, kappa)` maps to `VonMises.(mu, kappa)`, and the
+    # `log(kappa)` submodel inverts under `exp.` like any scale
+    # predictor.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        log(kappa) ~ 1
+        y ~ VonMises(mu, kappa)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.main.args[end] == Expr(:call, :.~, :y,
+        Expr(:., :VonMises, Expr(:tuple, :mu,
+            Expr(:., :exp, Expr(:tuple, :kappa)))))
+    # `CircularVonMises` appends the literal principal interval;
+    # literals inline, and the fused-heads flag changes nothing (one
+    # head either way).
+    brmi = @brm df begin
+        mu ~ 1 + x
+        y ~ CircularVonMises(mu, 1.7; interval=(-pi, pi))
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :y,
+        Expr(:., :CircularVonMises, Expr(:tuple, :mu, 1.7,
+            -Float64(pi), Float64(pi))))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+end
+
 @testset "evidence and weights shapes" begin
     brmi = @brm df begin
         mu ~ 1 + x
@@ -617,7 +646,7 @@ end
             nothing, BRM._RKResponseEvidence(:none, nothing, nothing), :y,
             nothing, nothing, nothing, Symbol[], Symbol[], nothing, nothing,
             Symbol[], nothing, Symbol[], nothing, BRM._RKMixtureComponent[],
-            nothing, nothing, nothing, nothing)],
+            nothing, nothing, nothing, nothing, nothing)],
         [BRM._RKPredictorSpec(:n, :identity, BRM._RKTermSpec[
             BRM._RKTermSpec(:intercept, Symbol[], (;), :Intercept, :Intercept),
             BRM._RKTermSpec(:continuous, [:n], (;), :n, :n)], :n)],
