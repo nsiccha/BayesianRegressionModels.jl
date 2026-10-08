@@ -108,7 +108,7 @@ vector monster_experiment(
     for(t in 1:n_time) {
         real concentration_venous = dot_product(unit_volume_flow, all_concentration_out[t]);
         real concentration_inhale = ((t <= no_exposure_times) ? concentration_exposure : 0.0);
-        real concentration_alveolar = ((concentration_inhale + concentration_venous) / (VPR + partition_coefficient_alveolar));
+        real concentration_alveolar = (((VPR * concentration_inhale) + concentration_venous) / (VPR + partition_coefficient_alveolar));
         real concentration_exhale = ((0.7 * concentration_alveolar) + (0.3 * concentration_inhale));
         prediction[t] = (monster_min_concentration() + concentration_venous);
         prediction[(n_time + t)] = (monster_min_concentration() + concentration_exhale);
@@ -471,7 +471,7 @@ transformed parameters {
         );
         pred_144_Vl[plate_i__pl_1] = exp(log_Vl[plate_i__pl_1]);
         pred_144_volume_fraction[:, plate_i__pl_1] = append_row(
-            ((0.837 - pred_144_Vl[plate_i__pl_1]) * softmax([log_Vwp[plate_i__pl_1], log_Vpp[plate_i__pl_1]]')),
+            ((0.873 - pred_144_Vl[plate_i__pl_1]) * softmax([log_Vwp[plate_i__pl_1], log_Vpp[plate_i__pl_1]]')),
             pred_144_Vl[plate_i__pl_1]
         );
         pred_144_partition_coefficient[:, plate_i__pl_1] = exp([log_Pwp[plate_i__pl_1], log_Ppp[plate_i__pl_1], log_Pf[plate_i__pl_1], log_Pl[plate_i__pl_1]]');
