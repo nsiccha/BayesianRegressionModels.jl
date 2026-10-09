@@ -64,8 +64,15 @@ const PINS = [
     # never zipped), which BRM's emitted do-blocks use instead of Ref operands;
     # bed5d467 deprecates those Ref operands, and ecf99453 packs every hidden
     # bound operand (captures included) into one prepared-AD context, clear
-    # of the 32-argument gradient cliff.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "ecf994537aa229e987e9f862146496a2842409d3"),  # main
+    # of the 32-argument gradient cliff. 1603d87a adds
+    # `prepare_sampler(...; retain=(:pointwise,))` and
+    # `sampler_value_gradient_and_retained!` (pointwise densities from the
+    # gradient's reverse sweep), which BRM's lockstep NLME gradient uses; it
+    # contains ecf99453 and bed5d467, plus 3fc1f0c7, 54d4a7b9 and 46d5520c.
+    # 5c2b80d5 contains 1603d87a and names every @rkppl predictor node after
+    # its authored name, so a scalar lone intercept `mu = mu_Intercept` stays
+    # queryable as `mu`.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "5c2b80d53e33cd0d485c302a73e98466dd94118e"),  # main
 ]
 
 function main()
