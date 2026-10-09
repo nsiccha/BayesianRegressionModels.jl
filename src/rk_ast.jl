@@ -1367,9 +1367,11 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 priors[key]
             else
                 # R2D2 overrides are Normal-only by construction
-                # (planner gate); normalize to the family shape here.
+                # (planner gate); normalize to the family shape here. The
+                # budget allocates no share to a zero-width factor block.
                 r2 = get(r2d2.overrides, term.addressee, nothing)
-                r2 === nothing ? (kind === :intercept ? (:Normal, (0.0, 1.0)) :
+                r2 === nothing ? (kind === :intercept ||
+                        _rk_zero_width_factor(term) ? (:Normal, (0.0, 1.0)) :
                     (:Normal, (0.0, _rk_ast_r2d2_scale(r2d2, term.addressee;
                         scalar=kind !== :factor,
                         variance_values=kind === :factor ?
