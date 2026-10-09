@@ -62,7 +62,9 @@ const PINS = [
     # once, without a ones vector). 83707d4d adds closure captures in plate
     # cells and scan steps (an enclosing name a do-block reads is shared whole,
     # never zipped), which BRM's emitted do-blocks use instead of Ref operands.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "83707d4d4992998e3d3d33461743d7e9d4c5be1f"),  # main
+    # 5c2b80d5 names every @rkppl predictor node after its authored name, so a
+    # scalar lone intercept `mu = mu_Intercept` stays queryable as `mu`.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "5c2b80d53e33cd0d485c302a73e98466dd94118e"),  # main
 ]
 
 function main()
