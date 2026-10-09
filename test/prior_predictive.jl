@@ -283,16 +283,14 @@ end
           BayesianRegressionModels.stan_code(pk_only)
 end
 
-# Placement under partial hold-out. A parameter read only by the held-out
-# likelihood is informed by nothing left in `model`, so StanBlocks' activity
-# analysis should re-draw it from its prior in generated quantities, exactly as
-# it does when the response column is omitted. Shared parameters stay sampled.
-# StanBlocks still counts a cv-held-out observation as likelihood-reaching, so
-# the held-out-only scale stays a sampled parameter today: a capability gap
-# tracked upstream by StanBlocks snag held-out-observa-5ca873e1 (reported via
-# BRM snag held-out-retains-2f8dd4cd). The posterior is unchanged — NUTS samples
-# that scale from exactly its prior — so these are `@test_broken`, not refusals;
-# they flip to `@test` with the StanBlocks pin that carries the fix.
+# Held-out versus omitted responses are two different transformations (user,
+# StanBlocks decision 1dmnxji, 2026-10-09): `held_out` cv-marks the response,
+# which is the given-a-fit transformation — its likelihood leaves `model`, but
+# every parameter it reads, even one only it reads, stays a parameter so a
+# fit's draws supply it. Omitting the response column is the not-conditioning
+# transformation: everything no remaining likelihood reaches re-draws in
+# generated quantities. Pin both placements, side by side, in every observation
+# shape (BRM snag held-out-retains-2f8dd4cd).
 output_kinds(sb) = Dict(o.name => o.kind for o in brm_descriptor(sb).outputs)
 
 plate_builder = @brm begin
@@ -324,29 +322,28 @@ ragged_df = (;
     obs_y=[1.0, 2.1, 0.9, 1.2, 2.3],
 )
 
-@testset "partial hold-out: held-out-only parameters leave `parameters`" begin
-    # Omitting the response column is the control: the unbound `z` reaches no
-    # likelihood, so `sigma_z` already re-draws in generated quantities.
-    omitted = @test_logs (:warn, r"bind\(s\) no data column") SBBRMI(
-        joint_builder((; x=joint_df.x, y=joint_df.y)); mod=@__MODULE__)
-    @test output_kinds(omitted)[:sigma_z] === :generated_quantity
-
+@testset "held-out response keeps its parameters; omitted response re-draws them" begin
+    drop(data, name) = NamedTuple(k => v for (k, v) in pairs(data) if k !== name)
     cases = (
-        (label="top-level", sb=SBBRMI(joint_builder(joint_df); mod=@__MODULE__, held_out=:z),
-         exclusive=:sigma_z, shared=(:sigma_y, :pop_mu_beta_pop), twin=:z_gen),
-        (label="kernel cell", sb=SBBRMI(kernel_builder(kernel_df); mod=@__MODULE__, held_out=:qt_y),
-         exclusive=:sigma_qt, shared=(:sigma_pk,), twin=nothing),
-        (label="@plate cell", sb=SBBRMI(plate_builder(kernel_df); mod=@__MODULE__, held_out=:qt_y),
-         exclusive=:sigma_qt, shared=(:sigma_pk,), twin=nothing),
-        (label="ragged join", sb=SBBRMI(ragged_builder(ragged_df); mod=@__MODULE__, held_out=:obs_y),
-         exclusive=:sigma_y, shared=(:sigma_qt,), twin=:obs_y_gen),
+        (label="top-level", builder=joint_builder, data=joint_df, response=:z,
+         exclusive=:sigma_z, shared=(:sigma_y, :pop_mu_beta_pop)),
+        (label="kernel cell", builder=kernel_builder, data=kernel_df, response=:qt_y,
+         exclusive=:sigma_qt, shared=(:sigma_pk,)),
+        (label="@plate cell", builder=plate_builder, data=kernel_df, response=:qt_y,
+         exclusive=:sigma_qt, shared=(:sigma_pk,)),
+        (label="ragged join", builder=ragged_builder, data=ragged_df, response=:obs_y,
+         exclusive=:sigma_y, shared=(:sigma_qt,)),
     )
     for case in cases
         @testset "$(case.label)" begin
-            kinds = output_kinds(case.sb)
-            @test all(name -> kinds[name] === :parameter, case.shared)
-            isnothing(case.twin) || @test kinds[case.twin] === :generated_quantity
-            @test_broken kinds[case.exclusive] === :generated_quantity
+            held = output_kinds(SBBRMI(case.builder(case.data); mod=@__MODULE__,
+                                       held_out=case.response))
+            omitted = output_kinds(@test_logs (:warn,) match_mode=:any SBBRMI(
+                case.builder(drop(case.data, case.response)); mod=@__MODULE__))
+            @test all(name -> held[name] === :parameter, case.shared)
+            @test all(name -> omitted[name] === :parameter, case.shared)
+            @test held[case.exclusive] === :parameter
+            @test omitted[case.exclusive] === :generated_quantity
         end
     end
 end
