@@ -283,6 +283,74 @@ end
           BayesianRegressionModels.stan_code(pk_only)
 end
 
+# Placement under partial hold-out. A parameter read only by the held-out
+# likelihood is informed by nothing left in `model`, so StanBlocks' activity
+# analysis should re-draw it from its prior in generated quantities, exactly as
+# it does when the response column is omitted. Shared parameters stay sampled.
+# StanBlocks still counts a cv-held-out observation as likelihood-reaching, so
+# the held-out-only scale stays a sampled parameter today: a capability gap
+# tracked upstream by StanBlocks snag held-out-observa-5ca873e1 (reported via
+# BRM snag held-out-retains-2f8dd4cd). The posterior is unchanged — NUTS samples
+# that scale from exactly its prior — so these are `@test_broken`, not refusals;
+# they flip to `@test` with the StanBlocks pin that carries the fix.
+output_kinds(sb) = Dict(o.name => o.kind for o in brm_descriptor(sb).outputs)
+
+plate_builder = @brm begin
+    sigma_pk ~ Exponential(1)
+    sigma_qt ~ Exponential(1)
+    log_scale ~ 1 + (1 | p | subject)
+    @plate for i in eachindex(log_scale)
+        location = (dose[i] / 10.0) * exp(log_scale[i])
+        pk_y[i] ~ normal(location, sigma_pk)
+        qt_y[i] ~ normal(location, sigma_qt)
+        loc[i] = location
+    end
+end
+
+ragged_builder = @brm begin
+    sigma_y ~ Exponential(1)
+    sigma_qt ~ Exponential(1)
+    log_scale ~ 1 + (1 | p | subject)
+    pred ~ kernel(ragged(obs_idx, obs_subject), qt_y, log_scale) do idxs, qt_obs, ls
+        qt_obs ~ normal(exp(ls), sigma_qt)
+        idxs .* exp(ls)
+    end
+    ragged(obs_y, obs_subject) ~ Normal(pred, sigma_y)
+end
+
+ragged_df = (;
+    subject=[:a, :b, :c], qt_y=[0.8, 1.2, 1.7],
+    obs_subject=[:a, :a, :b, :c, :c], obs_idx=[1.0, 2.0, 1.0, 1.0, 2.0],
+    obs_y=[1.0, 2.1, 0.9, 1.2, 2.3],
+)
+
+@testset "partial hold-out: held-out-only parameters leave `parameters`" begin
+    # Omitting the response column is the control: the unbound `z` reaches no
+    # likelihood, so `sigma_z` already re-draws in generated quantities.
+    omitted = @test_logs (:warn, r"bind\(s\) no data column") SBBRMI(
+        joint_builder((; x=joint_df.x, y=joint_df.y)); mod=@__MODULE__)
+    @test output_kinds(omitted)[:sigma_z] === :generated_quantity
+
+    cases = (
+        (label="top-level", sb=SBBRMI(joint_builder(joint_df); mod=@__MODULE__, held_out=:z),
+         exclusive=:sigma_z, shared=(:sigma_y, :pop_mu_beta_pop), twin=:z_gen),
+        (label="kernel cell", sb=SBBRMI(kernel_builder(kernel_df); mod=@__MODULE__, held_out=:qt_y),
+         exclusive=:sigma_qt, shared=(:sigma_pk,), twin=nothing),
+        (label="@plate cell", sb=SBBRMI(plate_builder(kernel_df); mod=@__MODULE__, held_out=:qt_y),
+         exclusive=:sigma_qt, shared=(:sigma_pk,), twin=nothing),
+        (label="ragged join", sb=SBBRMI(ragged_builder(ragged_df); mod=@__MODULE__, held_out=:obs_y),
+         exclusive=:sigma_y, shared=(:sigma_qt,), twin=:obs_y_gen),
+    )
+    for case in cases
+        @testset "$(case.label)" begin
+            kinds = output_kinds(case.sb)
+            @test all(name -> kinds[name] === :parameter, case.shared)
+            isnothing(case.twin) || @test kinds[case.twin] === :generated_quantity
+            @test_broken kinds[case.exclusive] === :generated_quantity
+        end
+    end
+end
+
 @testset "kernel-nested omitted response: count-form plate forward-simulates" begin
     # The one prior spelling for kernel responses: the model identical, the
     # outcome columns omitted. The plate drops the unbound positionals (count
