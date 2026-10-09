@@ -66,8 +66,10 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # location stays scalar; 0f7d2521 gives other locations their rows once,
 # without a ones vector), 83707d4d (closure captures in plate cells and
 # scan steps, used instead of Ref operands; bed5d467 deprecates the Ref
-# spelling) and ecf99453 (hidden bound operands packed into one AD context).
+# spelling), ecf99453 (hidden bound operands packed into one AD context) and
+# 1603d87a (sampler queries that retain pointwise densities from the reverse
+# sweep).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "ecf994537aa229e987e9f862146496a2842409d3"
+rev = "1603d87abf19a2b89fcd7b4908b1e025954a81f5"
