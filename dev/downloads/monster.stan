@@ -5,9 +5,6 @@ real brm_vector_prior_180e10f5bbee3641_lpdf(
     real arg_1,
     real arg_2
 ) {
-    if((x[1] < 0.0)) {
-        return negative_infinity();
-    }
     return scaled_inv_chi_scale_lpdf(x[1] | arg_1, arg_2);
 }
 real scaled_inv_chi_scale_lpdf(
