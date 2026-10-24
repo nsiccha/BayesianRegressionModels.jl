@@ -293,26 +293,26 @@ transformed data {
     int pop_log_VMI_n_covariates = 1;
     matrix[num_elements(subject_idx), 1] X_log_KMI = hcat(rep_vector(1.0, num_elements(subject_idx)));
     int pop_log_KMI_n_covariates = 1;
-    array[kernel_nsub_pred_144] int pred_144_pred_72__pl_len_1;
-    array[kernel_nsub_pred_144] int pred_144_pred_144__pl_len_1;
-    array[kernel_nsub_pred_144] int pred_144__pl_len_1;
+    array[kernel_nsub_pred_144] int pred_144_pred_72__pl_len;
+    array[kernel_nsub_pred_144] int pred_144_pred_144__pl_len;
+    array[kernel_nsub_pred_144] int pred_144__pl_len;
     for(plate_i__pl_1 in 1:kernel_nsub_pred_144) {
-        pred_144_pred_72__pl_len_1[plate_i__pl_1] = (
+        pred_144_pred_72__pl_len[plate_i__pl_1] = (
             (1 + (ragged_end(times_72.2, plate_i__pl_1) - ragged_start(times_72.2, plate_i__pl_1))) +
             (1 + (ragged_end(times_72.2, plate_i__pl_1) - ragged_start(times_72.2, plate_i__pl_1)))
         );
-        pred_144_pred_144__pl_len_1[plate_i__pl_1] = (
+        pred_144_pred_144__pl_len[plate_i__pl_1] = (
             (1 + (ragged_end(times_144.2, plate_i__pl_1) - ragged_start(times_144.2, plate_i__pl_1))) +
             (1 + (ragged_end(times_144.2, plate_i__pl_1) - ragged_start(times_144.2, plate_i__pl_1)))
         );
-        pred_144__pl_len_1[plate_i__pl_1] = (
+        pred_144__pl_len[plate_i__pl_1] = (
             (1 + (ragged_end(times_144.2, plate_i__pl_1) - ragged_start(times_144.2, plate_i__pl_1))) +
             (1 + (ragged_end(times_144.2, plate_i__pl_1) - ragged_start(times_144.2, plate_i__pl_1)))
         );
     }
-    array[kernel_nsub_pred_144] int pred_144_pred_72__pl_end_1 = cumulative_sum(pred_144_pred_72__pl_len_1);
-    array[kernel_nsub_pred_144] int pred_144_pred_144__pl_end_1 = cumulative_sum(pred_144_pred_144__pl_len_1);
-    array[kernel_nsub_pred_144] int pred_144__pl_end_1 = cumulative_sum(pred_144__pl_len_1);
+    array[kernel_nsub_pred_144] int pred_144_pred_72__pl_end = cumulative_sum(pred_144_pred_72__pl_len);
+    array[kernel_nsub_pred_144] int pred_144_pred_144__pl_end = cumulative_sum(pred_144_pred_144__pl_len);
+    array[kernel_nsub_pred_144] int pred_144__pl_end = cumulative_sum(pred_144__pl_len);
 }
 parameters {
     cholesky_factor_corr[n_terms_VPR_subject] b_VPR_subject_L;
@@ -456,8 +456,8 @@ transformed parameters {
     vector[num_elements(subject_idx)] pop_log_KMI = (X_log_KMI * pop_log_KMI_beta_pop);
     vector[subject_idx_n] r_log_KMI_KMI_subject = b_KMI_subject[subject_idx, 1];
     vector[num_elements(subject_idx)] log_KMI = (pop_log_KMI + r_log_KMI_KMI_subject);
-    vector[sum(pred_144_pred_72__pl_len_1)] pred_144_pred_72__pl_mem_1;
-    vector[sum(pred_144_pred_144__pl_len_1)] pred_144_pred_144__pl_mem_1;
+    vector[sum(pred_144_pred_72__pl_len)] pred_144_pred_72;
+    vector[sum(pred_144_pred_144__pl_len)] pred_144_pred_144;
     matrix[(2 + 1), kernel_nsub_pred_144] pred_144_volume_fraction;
     vector[kernel_nsub_pred_144] pred_144_Vl;
     matrix[4, kernel_nsub_pred_144] pred_144_unit_volume_flow;
@@ -472,8 +472,8 @@ transformed parameters {
             pred_144_Vl[plate_i__pl_1]
         );
         pred_144_partition_coefficient[:, plate_i__pl_1] = exp([log_Pwp[plate_i__pl_1], log_Ppp[plate_i__pl_1], log_Pf[plate_i__pl_1], log_Pl[plate_i__pl_1]]');
-        pred_144_pred_72__pl_mem_1[
-            ragged_start(pred_144_pred_72__pl_end_1, plate_i__pl_1):ragged_end(pred_144_pred_72__pl_end_1, plate_i__pl_1)
+        pred_144_pred_72[
+            ragged_start(pred_144_pred_72__pl_end, plate_i__pl_1):ragged_end(pred_144_pred_72__pl_end, plate_i__pl_1)
         ] = monster_experiment(
             times_72.1[ragged_start(times_72.2, plate_i__pl_1):ragged_end(times_72.2, plate_i__pl_1)],
             exposure_72,
@@ -489,8 +489,8 @@ transformed parameters {
             exp(log_KMI[plate_i__pl_1]),
             n_substeps
         );
-        pred_144_pred_144__pl_mem_1[
-            ragged_start(pred_144_pred_144__pl_end_1, plate_i__pl_1):ragged_end(pred_144_pred_144__pl_end_1, plate_i__pl_1)
+        pred_144_pred_144[
+            ragged_start(pred_144_pred_144__pl_end, plate_i__pl_1):ragged_end(pred_144_pred_144__pl_end, plate_i__pl_1)
         ] = monster_experiment(
             times_144.1[ragged_start(times_144.2, plate_i__pl_1):ragged_end(times_144.2, plate_i__pl_1)],
             exposure_144,
@@ -572,8 +572,8 @@ model {
     for(plate_i__pl_1 in 1:kernel_nsub_pred_144) {
         venous_72.1[ragged_start(venous_72.2, plate_i__pl_1):ragged_end(venous_72.2, plate_i__pl_1)] ~ lognormal(
             log(
-                pred_144_pred_72__pl_mem_1[
-                    ragged_start(pred_144_pred_72__pl_end_1, plate_i__pl_1):ragged_end(pred_144_pred_72__pl_end_1, plate_i__pl_1)
+                pred_144_pred_72[
+                    ragged_start(pred_144_pred_72__pl_end, plate_i__pl_1):ragged_end(pred_144_pred_72__pl_end, plate_i__pl_1)
                 ][
                     venous_72_index.1[
                         ragged_start(venous_72_index.2, plate_i__pl_1):ragged_end(venous_72_index.2, plate_i__pl_1)
@@ -584,8 +584,8 @@ model {
         );
         exhaled_72.1[ragged_start(exhaled_72.2, plate_i__pl_1):ragged_end(exhaled_72.2, plate_i__pl_1)] ~ lognormal(
             log(
-                pred_144_pred_72__pl_mem_1[
-                    ragged_start(pred_144_pred_72__pl_end_1, plate_i__pl_1):ragged_end(pred_144_pred_72__pl_end_1, plate_i__pl_1)
+                pred_144_pred_72[
+                    ragged_start(pred_144_pred_72__pl_end, plate_i__pl_1):ragged_end(pred_144_pred_72__pl_end, plate_i__pl_1)
                 ][
                     exhaled_72_index.1[
                         ragged_start(exhaled_72_index.2, plate_i__pl_1):ragged_end(exhaled_72_index.2, plate_i__pl_1)
@@ -596,8 +596,8 @@ model {
         );
         venous_144.1[ragged_start(venous_144.2, plate_i__pl_1):ragged_end(venous_144.2, plate_i__pl_1)] ~ lognormal(
             log(
-                pred_144_pred_144__pl_mem_1[
-                    ragged_start(pred_144_pred_144__pl_end_1, plate_i__pl_1):ragged_end(pred_144_pred_144__pl_end_1, plate_i__pl_1)
+                pred_144_pred_144[
+                    ragged_start(pred_144_pred_144__pl_end, plate_i__pl_1):ragged_end(pred_144_pred_144__pl_end, plate_i__pl_1)
                 ][
                     venous_144_index.1[
                         ragged_start(venous_144_index.2, plate_i__pl_1):ragged_end(venous_144_index.2, plate_i__pl_1)
@@ -608,8 +608,8 @@ model {
         );
         exhaled_144.1[ragged_start(exhaled_144.2, plate_i__pl_1):ragged_end(exhaled_144.2, plate_i__pl_1)] ~ lognormal(
             log(
-                pred_144_pred_144__pl_mem_1[
-                    ragged_start(pred_144_pred_144__pl_end_1, plate_i__pl_1):ragged_end(pred_144_pred_144__pl_end_1, plate_i__pl_1)
+                pred_144_pred_144[
+                    ragged_start(pred_144_pred_144__pl_end, plate_i__pl_1):ragged_end(pred_144_pred_144__pl_end, plate_i__pl_1)
                 ][
                     exhaled_144_index.1[
                         ragged_start(exhaled_144_index.2, plate_i__pl_1):ragged_end(exhaled_144_index.2, plate_i__pl_1)
@@ -621,7 +621,7 @@ model {
     }
 }
 generated quantities {
-    vector[sum(pred_144__pl_len_1)] pred_144__pl_mem_1;
+    vector[sum(pred_144__pl_len)] pred_144;
     vector[num_elements(venous_72.1)] venous_72_gen;
     vector[num_elements(venous_72.2)] venous_72_likelihood;
     vector[num_elements(exhaled_72.1)] exhaled_72_gen;
@@ -634,8 +634,8 @@ generated quantities {
         venous_72_gen[ragged_start(venous_72.2, plate_i__pl_1):ragged_end(venous_72.2, plate_i__pl_1)] = lognormal_vector_rng(
             (1 + (ragged_end(venous_72.2, plate_i__pl_1) - ragged_start(venous_72.2, plate_i__pl_1))),
             log(
-                pred_144_pred_72__pl_mem_1[
-                    ragged_start(pred_144_pred_72__pl_end_1, plate_i__pl_1):ragged_end(pred_144_pred_72__pl_end_1, plate_i__pl_1)
+                pred_144_pred_72[
+                    ragged_start(pred_144_pred_72__pl_end, plate_i__pl_1):ragged_end(pred_144_pred_72__pl_end, plate_i__pl_1)
                 ][
                     venous_72_index.1[
                         ragged_start(venous_72_index.2, plate_i__pl_1):ragged_end(venous_72_index.2, plate_i__pl_1)
@@ -646,8 +646,8 @@ generated quantities {
         );
         venous_72_likelihood[plate_i__pl_1] = lognormal_lpdf(venous_72.1[ragged_start(venous_72.2, plate_i__pl_1):ragged_end(venous_72.2, plate_i__pl_1)] | 
             log(
-                pred_144_pred_72__pl_mem_1[
-                    ragged_start(pred_144_pred_72__pl_end_1, plate_i__pl_1):ragged_end(pred_144_pred_72__pl_end_1, plate_i__pl_1)
+                pred_144_pred_72[
+                    ragged_start(pred_144_pred_72__pl_end, plate_i__pl_1):ragged_end(pred_144_pred_72__pl_end, plate_i__pl_1)
                 ][
                     venous_72_index.1[
                         ragged_start(venous_72_index.2, plate_i__pl_1):ragged_end(venous_72_index.2, plate_i__pl_1)
@@ -659,8 +659,8 @@ generated quantities {
         exhaled_72_gen[ragged_start(exhaled_72.2, plate_i__pl_1):ragged_end(exhaled_72.2, plate_i__pl_1)] = lognormal_vector_rng(
             (1 + (ragged_end(exhaled_72.2, plate_i__pl_1) - ragged_start(exhaled_72.2, plate_i__pl_1))),
             log(
-                pred_144_pred_72__pl_mem_1[
-                    ragged_start(pred_144_pred_72__pl_end_1, plate_i__pl_1):ragged_end(pred_144_pred_72__pl_end_1, plate_i__pl_1)
+                pred_144_pred_72[
+                    ragged_start(pred_144_pred_72__pl_end, plate_i__pl_1):ragged_end(pred_144_pred_72__pl_end, plate_i__pl_1)
                 ][
                     exhaled_72_index.1[
                         ragged_start(exhaled_72_index.2, plate_i__pl_1):ragged_end(exhaled_72_index.2, plate_i__pl_1)
@@ -671,8 +671,8 @@ generated quantities {
         );
         exhaled_72_likelihood[plate_i__pl_1] = lognormal_lpdf(exhaled_72.1[ragged_start(exhaled_72.2, plate_i__pl_1):ragged_end(exhaled_72.2, plate_i__pl_1)] | 
             log(
-                pred_144_pred_72__pl_mem_1[
-                    ragged_start(pred_144_pred_72__pl_end_1, plate_i__pl_1):ragged_end(pred_144_pred_72__pl_end_1, plate_i__pl_1)
+                pred_144_pred_72[
+                    ragged_start(pred_144_pred_72__pl_end, plate_i__pl_1):ragged_end(pred_144_pred_72__pl_end, plate_i__pl_1)
                 ][
                     exhaled_72_index.1[
                         ragged_start(exhaled_72_index.2, plate_i__pl_1):ragged_end(exhaled_72_index.2, plate_i__pl_1)
@@ -684,8 +684,8 @@ generated quantities {
         venous_144_gen[ragged_start(venous_144.2, plate_i__pl_1):ragged_end(venous_144.2, plate_i__pl_1)] = lognormal_vector_rng(
             (1 + (ragged_end(venous_144.2, plate_i__pl_1) - ragged_start(venous_144.2, plate_i__pl_1))),
             log(
-                pred_144_pred_144__pl_mem_1[
-                    ragged_start(pred_144_pred_144__pl_end_1, plate_i__pl_1):ragged_end(pred_144_pred_144__pl_end_1, plate_i__pl_1)
+                pred_144_pred_144[
+                    ragged_start(pred_144_pred_144__pl_end, plate_i__pl_1):ragged_end(pred_144_pred_144__pl_end, plate_i__pl_1)
                 ][
                     venous_144_index.1[
                         ragged_start(venous_144_index.2, plate_i__pl_1):ragged_end(venous_144_index.2, plate_i__pl_1)
@@ -696,8 +696,8 @@ generated quantities {
         );
         venous_144_likelihood[plate_i__pl_1] = lognormal_lpdf(venous_144.1[ragged_start(venous_144.2, plate_i__pl_1):ragged_end(venous_144.2, plate_i__pl_1)] | 
             log(
-                pred_144_pred_144__pl_mem_1[
-                    ragged_start(pred_144_pred_144__pl_end_1, plate_i__pl_1):ragged_end(pred_144_pred_144__pl_end_1, plate_i__pl_1)
+                pred_144_pred_144[
+                    ragged_start(pred_144_pred_144__pl_end, plate_i__pl_1):ragged_end(pred_144_pred_144__pl_end, plate_i__pl_1)
                 ][
                     venous_144_index.1[
                         ragged_start(venous_144_index.2, plate_i__pl_1):ragged_end(venous_144_index.2, plate_i__pl_1)
@@ -709,8 +709,8 @@ generated quantities {
         exhaled_144_gen[ragged_start(exhaled_144.2, plate_i__pl_1):ragged_end(exhaled_144.2, plate_i__pl_1)] = lognormal_vector_rng(
             (1 + (ragged_end(exhaled_144.2, plate_i__pl_1) - ragged_start(exhaled_144.2, plate_i__pl_1))),
             log(
-                pred_144_pred_144__pl_mem_1[
-                    ragged_start(pred_144_pred_144__pl_end_1, plate_i__pl_1):ragged_end(pred_144_pred_144__pl_end_1, plate_i__pl_1)
+                pred_144_pred_144[
+                    ragged_start(pred_144_pred_144__pl_end, plate_i__pl_1):ragged_end(pred_144_pred_144__pl_end, plate_i__pl_1)
                 ][
                     exhaled_144_index.1[
                         ragged_start(exhaled_144_index.2, plate_i__pl_1):ragged_end(exhaled_144_index.2, plate_i__pl_1)
@@ -721,8 +721,8 @@ generated quantities {
         );
         exhaled_144_likelihood[plate_i__pl_1] = lognormal_lpdf(exhaled_144.1[ragged_start(exhaled_144.2, plate_i__pl_1):ragged_end(exhaled_144.2, plate_i__pl_1)] | 
             log(
-                pred_144_pred_144__pl_mem_1[
-                    ragged_start(pred_144_pred_144__pl_end_1, plate_i__pl_1):ragged_end(pred_144_pred_144__pl_end_1, plate_i__pl_1)
+                pred_144_pred_144[
+                    ragged_start(pred_144_pred_144__pl_end, plate_i__pl_1):ragged_end(pred_144_pred_144__pl_end, plate_i__pl_1)
                 ][
                     exhaled_144_index.1[
                         ragged_start(exhaled_144_index.2, plate_i__pl_1):ragged_end(exhaled_144_index.2, plate_i__pl_1)
@@ -731,10 +731,8 @@ generated quantities {
             ),
             sigma_exhaled
         );
-        pred_144__pl_mem_1[
-            ragged_start(pred_144__pl_end_1, plate_i__pl_1):ragged_end(pred_144__pl_end_1, plate_i__pl_1)
-        ] = pred_144_pred_144__pl_mem_1[
-            ragged_start(pred_144_pred_144__pl_end_1, plate_i__pl_1):ragged_end(pred_144_pred_144__pl_end_1, plate_i__pl_1)
+        pred_144[ragged_start(pred_144__pl_end, plate_i__pl_1):ragged_end(pred_144__pl_end, plate_i__pl_1)] = pred_144_pred_144[
+            ragged_start(pred_144_pred_144__pl_end, plate_i__pl_1):ragged_end(pred_144_pred_144__pl_end, plate_i__pl_1)
         ];
     }
 }
