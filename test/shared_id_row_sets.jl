@@ -147,6 +147,53 @@ end
     end
 end
 
+@stestset "Student-t and known-value joined blocks agree on RK and Stan" begin
+    student_t = @brm SR.CELLS begin
+        sa ~ Exponential(1)
+        st ~ Exponential(1)
+        a ~ 1 + x + (1 + x | k | kreis)
+        b ~ 1 + xb + (1 | k | kreis_b)
+        ranef(:, k) ~ TDist(4)
+        ya ~ Normal(a, sa)
+        rows = groups(cell_b => cells)
+        @plate for j in eachindex(cells)
+            tb[j] ~ Normal(sum(b[rows[j]]), st)
+        end
+    end
+    known = @brm SR.CELLS begin
+        sa ~ Exponential(1)
+        st ~ Exponential(1)
+        a ~ 1 + x + (1 + x | k | kreis)
+        b ~ 1 + xb + (1 | k | kreis_b)
+        sd(b, k) = 0.4
+        cor(:, k) = [1.0 0.3 0.2; 0.3 1.0 -0.1; 0.2 -0.1 1.0]
+        ya ~ Normal(a, sa)
+        rows = groups(cell_b => cells)
+        @plate for j in eachindex(cells)
+            tb[j] ~ Normal(sum(b[rows[j]]), st)
+        end
+    end
+    for (label, brmi) in (("student_t", student_t), ("known", known))
+        rk, problem = consumer_problem(brmi)
+        sb = SBBRMI(brmi; mod=SR, total_groups=())
+        @test only(ranef_blocks(sb)).n_groups == 5
+        stan = stan_problem(sb, label)
+        names = BridgeStan.param_unc_names(stan.model)
+        transport = brm_coordinate_transport(rk, sb, names)
+        @test length(transport) == length(names) == length(coordinate_names(rk.model.layout))
+        for u in (zeros(length(transport)),
+                  collect(range(-0.43, 0.51; length=length(transport))))
+            stan_u = brm_rk_point_to_stan(transport, u)
+            value, gradient = LogDensityProblems.logdensity_and_gradient(problem, u)
+            stan_gradient = similar(stan_u)
+            stan_value, _ = BridgeStan.log_density_gradient!(stan.model, stan_u,
+                stan_gradient; propto=false, jacobian=true)
+            @test value ≈ brm_stan_logdensity_to_rk(transport, u, stan_value) atol=2e-11 rtol=2e-11
+            @test gradient ≈ brm_stan_gradient_to_rk(transport, u, stan_gradient) atol=2e-10 rtol=2e-10
+        end
+    end
+end
+
 @stestset "a forecast replay codes new rows into the fitted levels" begin
     fit = SBBRMI(SR.cells(SR.CELLS); mod=SR, total_groups=())
     fit_names = BridgeStan.param_unc_names(stan_problem(fit, "forecast_fit").model)
