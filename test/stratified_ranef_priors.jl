@@ -91,6 +91,14 @@ end
     @test samples(c, "b_mu__g__by__b_g__by__b_tau_s_tau", raw"lognormal\(-1, 0\.75\);")
     @test only(ranef_blocks(sb)).family === :ranef_correlated_by_draws_generic
     @test stanc_ok(sb)
+    # A statement that sets no scale keeps the block's half-normal default,
+    # not an unstratified lone intercept's `LogNormal(0, 1)`.
+    law_only = @brm DF begin
+        mu ~ 1 + x + (1 | gr(g, by=b))
+        ranef(mu, g) ~ Normal()
+        y ~ Normal(mu, 1.0)
+    end
+    @test code(build(law_only)) == code(build(intercept_default))
     # The unconfigured block keeps the default emission.
     default_sb = build(intercept_default)
     @test only(ranef_blocks(default_sb)).family === :ranef_correlated_by_draws

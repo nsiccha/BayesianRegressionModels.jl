@@ -334,10 +334,11 @@ Base.@nospecializeinfer function _brm_resolve_grouping_addresses(@nospecialize(b
                            b.id, descriptor))
         end
         # The plain path samples a lone intercept's scale as `exp(log_scale)`
-        # with `log_scale ~ std_normal()`; an `|ID|` margin is half-normal.
+        # with `log_scale ~ std_normal()`; an `|ID|` margin is half-normal, as
+        # is every margin of a stratified block, written with an ID or not.
         intercept_only = length(b.effects) == 1 && only(b.effects) isa Integer &&
                          only(b.effects) == 1
-        if intercept_only && !(i in scaled) &&
+        if intercept_only && !_brm_grouping_stratified(b) && !(i in scaled) &&
            !any(p -> isnothing(p) || p === b.predictor, r2d2_predictors)
             address = Any[:sd, b.id]
             push!(get!(defaults, first(b.declarations), Pair{Symbol,Any}[]),
