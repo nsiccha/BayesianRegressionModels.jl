@@ -109,9 +109,9 @@ end
         original_names = BridgeStan.param_unc_names(original.model)
         println("ORDINARY $tag PARAMETERS ", original_names)
         original_blocks = adaptive_centering_blocks(conventional, original_names)
-        intercept_block = only(b for b in original_blocks if b.ranef.n_terms == 1 &&
-            b.ranef.family in BRM._ADAPTIVE_INTERCEPT_FAMILIES)
-        slope_block = only(b for b in original_blocks if !(b === intercept_block))
+        # The `||` terms are the one-margin blocks of their generated IDs.
+        intercept_block = only(b for b in original_blocks if b.ranef.id === :mu__g__nocor__1)
+        slope_block = only(b for b in original_blocks if b.ranef.id === :mu__g__nocor__2)
         pop_indices = [only(findall(==("pop_mu_beta_pop.$k"), original_names)) for k in 1:2]
         J, K = 3, 2
         m_offset = [0.3, -0.2]
