@@ -4512,6 +4512,13 @@ _as_real(_) = nothing
 _as_error_exception(e::ErrorException) = e
 _as_error_exception(_) = nothing
 
+# `stan_code`, `stan_model` and `stan_instantiate` are StanBlocks' own
+# functions: BRM adds methods for its types and re-exports the same bindings,
+# so `using StanBlocks` beside `using BayesianRegressionModels` leaves them
+# unambiguous. A `SlicModel` (also one rebuilt from an emitted `SBBRMI`, such
+# as a `cv_groups` model marked with `StanBlocks.stan.maybecv`) takes
+# StanBlocks' own method, which traces in the newest method world.
+
 """
     stan_code(sb::SBBRMI) -> String
 
@@ -4523,20 +4530,7 @@ emitted before compiling.
 # the public newest-world entry for consumer-defined method-based families
 # and extensions. This boundary is used only while compiling a model,
 # never during sampling.
-stan_code(sb::SBBRMI) = Base.invokelatest(StanBlocks.stan_code, sb.model)
-
-"""
-    stan_code(model::StanBlocks.SlicModel) -> String
-
-Return the transpiled Stan source for a SLIC model, using the same
-world-age-safe boundary as `stan_code(::SBBRMI)`. This is the supported trace
-entry for a model rebuilt from an emitted `SBBRMI` after construction — for
-example a `cv_groups` model whose group index was marked with
-`StanBlocks.stan.maybecv` just before tracing. This boundary also preserves
-visibility of consumer-defined family hooks in an older compiled caller.
-"""
-stan_code(model::StanBlocks.SlicModel) =
-    Base.invokelatest(StanBlocks.stan_code, model)
+StanBlocks.stan_code(sb::SBBRMI) = Base.invokelatest(StanBlocks.stan_code, sb.model)
 
 """
     stan_data(sb::SBBRMI) -> Dict
@@ -4570,7 +4564,7 @@ current world, preserving visibility of consumer-defined hooks as in `stan_code`
 above. Prefer this over `StanBlocks.stan_model(sb.model)` when the trace may
 run inside a function that also built `sb`.
 """
-stan_model(sb::SBBRMI; kwargs...) =
+StanBlocks.stan_model(sb::SBBRMI; kwargs...) =
     Base.invokelatest(StanBlocks.stan_model, sb.model; kwargs...)
 
 """
@@ -4581,7 +4575,7 @@ in the current world, for the same lowering-time registration reason as
 `stan_code` above. Prefer this over `StanBlocks.stan_instantiate(sb.model)`
 when the build may run inside a function that also built `sb`.
 """
-stan_instantiate(sb::SBBRMI; kwargs...) =
+StanBlocks.stan_instantiate(sb::SBBRMI; kwargs...) =
     Base.invokelatest(StanBlocks.stan_instantiate, sb.model; kwargs...)
 
 """
@@ -5345,7 +5339,7 @@ function generative_plan(plan::GenerativePlan, new_df;
     _generative_plan(sb,plan.builder,cv_groups)
 end
 
-stan_code(plan::GenerativePlan) = Base.invokelatest(StanBlocks.stan_code, plan.model)
+StanBlocks.stan_code(plan::GenerativePlan) = Base.invokelatest(StanBlocks.stan_code, plan.model)
 
 Base.show(io::IO, plan::GenerativePlan) = begin
     nprior = count(d -> d.role === :prior, plan.declarations)
