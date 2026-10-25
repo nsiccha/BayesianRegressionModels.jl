@@ -33,7 +33,15 @@ const _SB_S2Z_PLANS_KEY = :__brm_s2z_plans__
 
 # Compile-time information only. Numerical design, prior and weight constants
 # live in model data; descriptors/replay use the same binding record.
-"""Fitted design, prior and coordinate identities for one S2Z block."""
+"""
+Fitted design, prior and coordinate identities for one S2Z block.
+
+`population` is the sampled `theta` (the population coefficients with the
+block means integrated in), `recovered` the block means `μ` and `coefficients`
+the conventional population coefficients `theta - B μ`, both recovered in
+generated quantities, indexed like `population_columns`. `effects` are the
+conventional per-level effects `r + μ`.
+"""
 struct S2ZEffectBlock
     predictor::Symbol
     group::Symbol
@@ -43,6 +51,7 @@ struct S2ZEffectBlock
     deviations::Symbol
     recovered::Symbol
     effects::Symbol
+    coefficients::Symbol
     group_index::Symbol
     group_count::Symbol
     columns::Tuple
@@ -500,7 +509,7 @@ function _sb_emit_s2z!(stmts, data, target, plan; mod::Module=@__MODULE__)
         s2z_lp = :($s2z_lp + $pop)
     end
     block = S2ZEffectBlock(plan.target, plan.group, z, Symbol(tau, :_tau), theta, r, mu, b,
-        idx, ng, Tuple(c.label for c in plan.columns),
+        beta, idx, ng, Tuple(c.label for c in plan.columns),
         Tuple(plan.design.columns[c].label for c in plan.absorbed),
         plan.B, copy(data[loc]), copy(data[prec]), copy(plan.weights), copy(plan.Z),
         plan.coordinates)

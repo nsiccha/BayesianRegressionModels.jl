@@ -1593,6 +1593,15 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
         outputs[i] = BRMOutput(o.name,o.kind,o.type,o.size,o.constraints,o.generative,
             o.source,role,o.declaration,block.predictor,labels,o.segments)
     end
+    # An S2Z block's recovered conventional coefficients `theta - B μ` are its
+    # predictor's population coefficients, labelled like an exact total block's.
+    for block in s2z_effect_blocks(plan), i in eachindex(outputs)
+        o = outputs[i]
+        o.name === block.coefficients || continue
+        outputs[i] = BRMOutput(o.name,o.kind,o.type,o.size,o.constraints,o.generative,
+            o.source,:population_effect,o.declaration,block.predictor,
+            collect(Symbol,block.population_columns),o.segments)
+    end
     outputs = _brm_ranef_components(outputs, plan, stan)
     outputs = _brm_output_dims(outputs, plan, stan)
     outputs = _brm_output_addresses(outputs, plan, stan)
@@ -1893,7 +1902,7 @@ function _brm_output_addresses(outputs, plan, stan)
     for block in Iterators.flatten((total_effect_blocks(plan), s2z_effect_blocks(plan)))
         keys = (block.binding, block.scales, block.population, block.deviations,
                 (block isa S2ZEffectBlock ?
-                     (block.recovered, block.effects, block.coordinates) : ())...)
+                     (block.recovered, block.effects, block.coefficients) : ())...)
         foreach(key -> own!(key, block.predictor), keys)
         # The statements these carriers belong to (a scale's sampled `tau`).
         for o in outputs
@@ -3128,9 +3137,10 @@ an emitted `pop_*` / `cat_*` name. Returns a named tuple with:
 - `inverse_link` — the transform from the fitted linear-predictor scale back to
   the declared quantity (`identity`, `exp`, …);
 - `recovered` — `true` when the coefficient was absorbed by an exact
-  total-coefficient block and the coordinates address its recovered generated
-  carrier rather than a sampled parameter (`false` otherwise; categorical
-  contrast blocks are never absorbed, so the categorical result omits it).
+  total-coefficient or a sum-to-zero block and the coordinates address its
+  recovered generated carrier rather than a sampled parameter (`false`
+  otherwise; categorical contrast blocks are never absorbed, so the categorical
+  result omits it).
 
 A categorical predictor is addressed by the formula column, just like its
 `effect(logical, column)` prior. Its result additionally contains `predictor`,
@@ -3184,6 +3194,17 @@ way. A recovered draw is one exact conditional sample per posterior draw, so it
 carries conditional RNG noise a sampled parameter does not; consumers that need
 sampled-frame quantities must refuse `recovered=true` loudly rather than mix
 the two frames silently.
+
+Sum-to-zero aware: a sum-to-zero block (`s2z_groups`) integrates its block
+means `μ` into the population coefficients it matches, so the sampled
+`theta = β + B μ` is not the conventional coefficient `β`. Such a coefficient
+resolves to the recovered conventional coefficients `theta - B μ` in generated
+quantities, with `recovered=true`. It pairs with the recovered effects `r + μ`
+that [`brm_ranef_draws`](@ref) reports for the block: both use the same `μ`
+draw, so a row's `X β + Z b` equals the sampled `X theta + Z r` exactly, with
+no recovery noise, and `inverse_link(population + effect)` is a level's own
+value. Names without generated quantities are refused with the remedy
+(`include_gq=true`).
 """
 function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
                                            constrained_names;
@@ -3250,17 +3271,27 @@ function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
         end
     end
 
-    # Exact-total fallback: the coefficient may have been absorbed by an exact
-    # total-coefficient block, in which case the recovered generated carrier
-    # addresses it. A sampled conventional resolution above always wins.
+    # Recovered fallback: the coefficient may have been absorbed by an exact
+    # total-coefficient or a sum-to-zero block, in which case the recovered
+    # generated carrier addresses it. A sampled conventional resolution above
+    # always wins.
     blocks = hasproperty(d.plan, :bindings) ?
-        [b for b in total_effect_blocks(d.plan) if b.predictor === logical] : []
-    recovered = _brm_total_recovered_coordinates(
+        [b for b in Iterators.flatten((total_effect_blocks(d.plan),
+                                       s2z_effect_blocks(d.plan)))
+         if b.predictor === logical] : []
+    recovered = _brm_recovered_population_coordinates(
         d, logical, coefficient, constrained_names, entry, blocks)
     isnothing(recovered) || return recovered
 
-    # Neither the conventional carrier nor any exact-total block addresses the
-    # coefficient: the original failures, unchanged.
+    # Neither the conventional carrier nor any absorbing block addresses the
+    # coefficient: the original failures, unchanged. A predictor whose every
+    # population column an absorbing block took (`1 + (1 | g)` under S2Z) has
+    # no conventional carrier, so it names the absorbed labels instead.
+    isempty(idxs) && !isempty(blocks) && error(
+        "brm_descriptor: coefficient `$coefficient` occurs 0 times on logical " *
+        "predictor `$logical`; available labels are " *
+        "$(Tuple(unique!(vcat(sort!(collect(keys(categorical))),
+                              Symbol[c for b in blocks for c in b.population_columns])))).")
     length(idxs) == 1 || error(
         "brm_descriptor: logical predictor `$logical` resolves to population " *
         "block `$(entry.block)`, which owns $(length(idxs)) parameter " *
@@ -3274,8 +3305,8 @@ function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
         "does not expose a stable population-coordinate address.")
     label_indices = findall(==(coefficient), labels)
     # Absorbed labels are addressable through the recovery above, so they are
-    # available labels too. Models without a total block for this predictor
-    # report exactly the conventional set, as before.
+    # available labels too. Models without an absorbing block for this
+    # predictor report exactly the conventional set, as before.
     recovered_labels = Symbol[c for b in blocks for c in b.population_columns]
     design_columns = _brm_population_design_columns(
         hasproperty(d.plan, :bindings) ? d.plan.bindings : Dict(), entry.block)
@@ -3292,21 +3323,34 @@ function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
     # returned from the conventional attempt above.
 end
 
-# Resolve a coefficient absorbed by an exact total-coefficient block to its
-# recovered generated carrier (`TotalEffectBlock.population`, indexed like
-# `population_columns`). Returns `nothing` when no block of this predictor
-# claims the coefficient, so the caller falls through to its conventional
-# failures; every contradiction (two blocks, a duplicated absorbed label, a
-# missing or ambiguous recovered carrier, labels that disagree with the
+# The recovered generated carrier of an absorbing block, indexed like its
+# `population_columns`: an exact total block's population coefficients, and an
+# S2Z block's conventional coefficients `theta - B μ` (its `population` is the
+# sampled `theta`, which also carries the block means).
+_brm_recovered_population(block::TotalEffectBlock) = block.population
+_brm_recovered_population(block::S2ZEffectBlock) = block.coefficients
+_brm_absorbing_block_kind(::TotalEffectBlock) = "exact total-coefficient"
+_brm_absorbing_block_kind(::S2ZEffectBlock) = "sum-to-zero"
+
+# Resolve a coefficient absorbed by an exact total-coefficient or sum-to-zero
+# block to its recovered generated carrier. Returns `nothing` when no block of
+# this predictor claims the coefficient, so the caller falls through to its
+# conventional failures; every contradiction (two blocks, a duplicated absorbed
+# label, a missing or ambiguous recovered carrier, labels that disagree with the
 # descriptor, descriptor/artifact coordinate drift) errors rather than guessing.
-function _brm_total_recovered_coordinates(d::BRMDescriptor, logical::Symbol,
-                                          coefficient::Symbol, constrained_names,
-                                          entry, blocks)
+# A predictor has at most one absorbing block: the emitter builds either an
+# exact total block or an S2Z block for it, never both.
+function _brm_recovered_population_coordinates(d::BRMDescriptor, logical::Symbol,
+                                               coefficient::Symbol, constrained_names,
+                                               entry, blocks)
     length(blocks) <= 1 || error(
         "brm_descriptor: logical predictor `$logical` resolves to " *
-        "$(length(blocks)) exact total-coefficient blocks; expected at most one.")
+        "$(length(blocks)) exact total-coefficient or sum-to-zero blocks; " *
+        "expected at most one.")
     isempty(blocks) && return nothing
     block = only(blocks)
+    kind = _brm_absorbing_block_kind(block)
+    carrier = _brm_recovered_population(block)
     positions = findall(==(coefficient), block.population_columns)
     isempty(positions) && return nothing
     length(positions) == 1 || error(
@@ -3314,26 +3358,31 @@ function _brm_total_recovered_coordinates(d::BRMDescriptor, logical::Symbol,
         "times in the recovered population columns of logical predictor " *
         "`$logical`; expected exactly one.")
     ridxs = _brm_carrier_indices(d.outputs,
-                o -> o.role === :population_effect && o.name === block.population)
+                o -> o.role === :population_effect && o.name === carrier)
     length(ridxs) == 1 || error(
-        "brm_descriptor: logical predictor `$logical` has an exact total block " *
-        "whose recovered carrier `$(block.population)` matches $(length(ridxs)) " *
+        "brm_descriptor: logical predictor `$logical` has a $kind block " *
+        "whose recovered carrier `$carrier` matches $(length(ridxs)) " *
         "draw carriers; expected exactly one.")
     routput = d.outputs[only(ridxs)]
     rlabels = routput.labels
     isnothing(rlabels) && error(
-        "brm_descriptor: recovered carrier `$(block.population)` for logical " *
+        "brm_descriptor: recovered carrier `$carrier` for logical " *
         "predictor `$logical` has no coefficient labels; re-reflect the model " *
         "that produced the posterior draws.")
     rindices = findall(==(coefficient), rlabels)
     length(rindices) == 1 || error(
         "brm_descriptor: absorbed coefficient `$coefficient` occurs " *
-        "$(length(rindices)) times on recovered carrier `$(block.population)` " *
-        "(labels are $(Tuple(rlabels))); the descriptor and the total block " *
+        "$(length(rindices)) times on recovered carrier `$carrier` " *
+        "(labels are $(Tuple(rlabels))); the descriptor and the $kind block " *
         "disagree — re-reflect the model.")
     rcoordinates = _brm_element_coordinates(routput, constrained_names)
+    isempty(rcoordinates) && routput.kind === :generated_quantity && error(
+        "brm_descriptor: coefficient `$coefficient` of logical predictor " *
+        "`$logical` was absorbed by a $kind block and is recovered in " *
+        "generated quantities (`$carrier`); pass constrained names that include " *
+        "them (`include_gq=true`).")
     length(rcoordinates) == length(rlabels) || error(
-        "brm_descriptor: recovered carrier `$(block.population)` has " *
+        "brm_descriptor: recovered carrier `$carrier` has " *
         "$(length(rlabels)) coefficient labels but resolves to " *
         "$(length(rcoordinates)) constrained coordinates. Re-reflect the " *
         "model that produced the posterior draws.")

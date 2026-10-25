@@ -137,6 +137,7 @@ const _ADAPTIVE_INTERCEPT_FAMILIES = Set((
 const _ADAPTIVE_STRATIFIED_FAMILIES = Set((
     :ranef_correlated_by,
     :ranef_correlated_by_draws,
+    :ranef_correlated_by_draws_generic,
 ))
 
 # R2D2 blocks DERIVE their marginal scales (`tau[j] = reference_scale[j] *

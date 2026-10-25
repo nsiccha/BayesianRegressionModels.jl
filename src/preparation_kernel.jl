@@ -85,39 +85,45 @@ function _brm_kernel_subject_values(raw, group::Symbol; prefix="BRM kernel prepa
 end
 
 # An empty `ev_vals` is a zero-row axis (a design with no rows on it, such as
-# no placebo observations): every cell gets an empty slice. Each cell holds
-# its rows ascending. The RK graph computes this on every call of a reader
-# whose design is a runtime input, so it finds each row's cell once and sizes
-# every cell before filling it.
+# no placebo observations): every cell gets an empty slice. A row whose label
+# names no cell is read by no cell, as `groups(g => labels)` leaves it in no
+# group (decision `0z97g0b`). An `observed` response is the exception: an
+# entry no cell observes would be an observation carried into the fit
+# unconditioned (`_brm_kernel_unobserved_entries`). Each cell holds its rows
+# ascending. The RK graph computes this on every call of a reader whose design
+# is a runtime input, so it finds each row's cell once and sizes every cell
+# before filling it.
 function _brm_kernel_ragged_partition(a_name::Symbol, grp_name::Symbol,
                                      ev_vals::AbstractVector,
-                                     subject_vals::AbstractVector; prefix="BRM kernel preparation")
+                                     subject_vals::AbstractVector;
+                                     prefix="BRM kernel preparation", observed::Bool=false)
     _brm_kernel_check_missing_labels(a_name, grp_name, ev_vals; prefix)
     cell = _brm_label_positions(ev_vals, subject_vals)
     counts = zeros(Int, length(subject_vals))
     for i in cell
         i == 0 || (counts[i] += 1)
     end
-    sum(counts) == length(cell) ||
-        _brm_kernel_unknown_labels(a_name, grp_name, ev_vals, cell; prefix)
+    observed && sum(counts) != length(cell) &&
+        _brm_kernel_unobserved_entries(a_name, grp_name, ev_vals, cell; prefix)
     rows = [Vector{Int}(undef, n) for n in counts]
     fill!(counts, 0)
     for (r, i) in enumerate(cell)
-        rows[i][counts[i] += 1] = r
+        i == 0 || (rows[i][counts[i] += 1] = r)
     end
     rows
 end
 
 # Refuses what `_brm_kernel_ragged_partition` refuses, with the same messages,
-# without building the partition: it only confirms that every row's label
-# names a cell. The RK design binder validates each design this way, and the
-# graph builds the partition itself.
+# without building the partition. The RK design binder validates each design
+# this way, and the graph builds the partition itself.
 function _brm_kernel_check_ragged_partition(a_name::Symbol, grp_name::Symbol,
                                            ev_vals::AbstractVector,
-                                           subject_vals::AbstractVector; prefix="BRM kernel preparation")
+                                           subject_vals::AbstractVector;
+                                           prefix="BRM kernel preparation", observed::Bool=false)
     _brm_kernel_check_missing_labels(a_name, grp_name, ev_vals; prefix)
-    _brm_labels_name_cells(ev_vals, subject_vals) || _brm_kernel_unknown_labels(
-        a_name, grp_name, ev_vals, _brm_label_positions(ev_vals, subject_vals); prefix)
+    observed && !_brm_labels_name_cells(ev_vals, subject_vals) &&
+        _brm_kernel_unobserved_entries(a_name, grp_name, ev_vals,
+            _brm_label_positions(ev_vals, subject_vals); prefix)
     nothing
 end
 
@@ -125,13 +131,17 @@ _brm_kernel_check_missing_labels(a_name, grp_name, ev_vals; prefix) =
     _brm_has_missing(ev_vals) && error(
         "$prefix: kernel(...) `ragged($a_name, $grp_name)`: `$grp_name` must be a " *
         "column with no missing labels.")
-function _brm_kernel_unknown_labels(a_name, grp_name, ev_vals, cell; prefix)
+# refused: a response entry in no cell is an observation the fit would carry
+# without conditioning on it — the row mask the user removed (`1bwqnxs`); a
+# fit receives only the observations it conditions on (`0q8hcwq`).
+function _brm_kernel_unobserved_entries(a_name, grp_name, ev_vals, cell; prefix)
     unknown = Any[v for (v, i) in zip(ev_vals, cell) if i == 0]
     error(
-        "$prefix: kernel(...) `ragged($a_name, $grp_name)`: label(s) " *
-        "$(unique(unknown)) in `$grp_name` name no subject in the kernel's " *
-        "per-subject frame. Every event row must belong to a subject this " *
-        "kernel walks.")
+        "$prefix: kernel(...) `ragged($a_name, $grp_name)`: the response `$a_name` ",
+        "is observed through `$grp_name`, but its entries labelled $(unique(unknown)) ",
+        "belong to no cell, so no cell would observe them. A fit receives only the ",
+        "observations it conditions on: pass `$a_name` with only the entries the cells ",
+        "observe, and predict the others by replaying the fit (`reprocess`).")
 end
 
 _brm_has_missing(values::AbstractVector) = Missing <: eltype(values) && any(ismissing, values)
@@ -287,7 +297,8 @@ _brm_ragged_column_length!(lens, name, ::_BRMAbsentResponse) = lens
 
 function _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals;
                                  prefix="BRM kernel preparation",
-                                 allow_unbound_observation=false, order=nothing)
+                                 allow_unbound_observation=false, order=nothing,
+                                 observed::Bool=false)
     a_name = name(arg_col)
     decl = parent(arg_col)
     is_lp = decl isa ExprColumn && getf(decl) === (~)
@@ -318,7 +329,9 @@ function _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals;
     end
     _brm_kernel_check_ragged_axis(a_name, grp_name, lens, n_ev; prefix)
 
-    rows = _brm_kernel_ragged_partition(a_name, grp_name, ev_vals, g_vals; prefix)
+    # An omitted response is observed too: its draw covers every entry.
+    rows = _brm_kernel_ragged_partition(a_name, grp_name, ev_vals, g_vals; prefix,
+        observed=observed || is_unbound)
     if !isnothing(order)
         (order isa NamedColumn && parent(order) isa DataColumn) || error(
             "$prefix: kernel(...) `ragged($a_name, $grp_name; order=…)`: `order=` ",
@@ -336,7 +349,8 @@ function _brm_kernel_check_ragged_axis(a_name, grp_name, lens, n_ev;
         L == n_ev || error(
             "$prefix: `$a_name` read through `$grp_name`: `$a_name` has $L entries ",
             "(data vector `$nm`) but `$grp_name` has $n_ev. The grouping column must ",
-            "name the subject of EVERY entry of `$a_name`.")
+            "label EVERY entry of `$a_name`; an entry whose label names no cell is ",
+            "read by no cell.")
     end
     nothing
 end
@@ -346,7 +360,9 @@ end
 # its raw columns rather than a planned input. `names` is
 # `[x, group, cell, axis...]` (plus the `order` column before the axes in the
 # ordered form); `axes` are the row-wise data columns of `x`'s own frame, each
-# checked against `groups` as `_brm_kernel_ragged_rows` checks them.
+# checked against `groups` as `_brm_kernel_ragged_rows` checks them. A row in
+# no cell is skipped here; a response's coverage is refused where its data is
+# bound (`_rk_prepare_kernel_value`, `_rk_design_cell_check`), not in the graph.
 function brm_ragged_rows(names, groups, cells, axes...)
     x, group, cell = names[1], names[2], names[3]
     _brm_ragged_rows_graph(x, group, groups, cell, cells, names[4:end], axes)
@@ -363,11 +379,12 @@ function _brm_ragged_rows_graph(x, group, groups, cell, cells, axis_names, axes)
 end
 # Refuses what `brm_ragged_rows` refuses (`brm_ragged_rows_ordered` given
 # `order` and its `times`), with the same messages, without building the
-# partition.
+# partition; with `observed`, also a response entry in no cell.
 function _brm_check_ragged_rows(x, group, groups, cell, cells, axis_names, axes;
-                               order=nothing, times=nothing)
+                               order=nothing, times=nothing, observed::Bool=false)
     ev_vals, labels = _brm_ragged_rows_labels(x, group, groups, cell, cells, axis_names, axes)
-    _brm_kernel_check_ragged_partition(x, group, ev_vals, labels; prefix="RK backend")
+    _brm_kernel_check_ragged_partition(x, group, ev_vals, labels; prefix="RK backend",
+        observed)
     order === nothing ||
         _brm_kernel_check_order(times, order, group, length(groups); prefix="RK backend")
     nothing
