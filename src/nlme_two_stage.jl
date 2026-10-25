@@ -125,12 +125,13 @@ brm_nlme_unit_eta(p::BRMNLMEUnitProblem, z) = p.factor * z
 """
     brm_nlme_draws(m::BRMNLMEModel, θ, σ, ω, unit_draws) -> Matrix{Float64}
 
-Full RK packed unconstrained draws (draws × `m.view.coordinates`, the order of
-`coordinate_names(rk.model.layout)`) at fixed population values: `θ`, `σ`, and
-Ω's covariance coordinates from NLMEEstimation's `ω`, with unit `i`'s
-coordinates taken row by row from `unit_draws[i]` (draws × the unit's
-dimension, in its [`BRMNLMEUnitProblem`](@ref) coordinates). Every unit gives
-the same number of draws. This is the result shape BRM's approximate-inference
+Full RK packed unconstrained draws, one column per draw (`m.view.coordinates`
+× draws, rows in the order of `coordinate_names(rk.model.layout)`, as
+[`rk_restore_draws`](@ref) and `rk_draw_values` take them), at fixed
+population values: `θ`, `σ`, and Ω's covariance coordinates from
+NLMEEstimation's `ω`, with unit `i`'s coordinates taken from `unit_draws[i]`
+(the unit's dimension × draws, in its [`BRMNLMEUnitProblem`](@ref)
+coordinates). Every unit gives the same number of draws. This is the result shape BRM's approximate-inference
 methods share, so their output reaches the usual readers and replay paths.
 Implemented by the NLMEEstimation extension.
 """
@@ -147,13 +148,15 @@ units (the subjects of [`brm_nlme_view`](@ref)):
    estimates `θ`, `σ` and Ω. With `minibatch_size = b`, each iteration's E-step
    samples a random batch of `b` units (`NLMEEstimation.SAEMOptions(minibatch_size=b)`);
    `options` passes a whole `SAEMOptions` instead. Other keywords go to
-   [`brm_nlme_fit`](@ref) (`start`, `inits`, `progress`, …). `stage1` reuses
-   an earlier `brm_nlme_fit(x, saem; …)` result instead, for example to
-   resample the units or to refit them after new data at yesterday's
-   population estimates.
+   [`brm_nlme_fit`](@ref) (`start`, `inits`, `progress`, `rng`, …); pass
+   `rng` for a reproducible stage 1, since SAEM otherwise draws from the
+   global RNG. `stage1` reuses an earlier `brm_nlme_fit(x, saem; …)` result
+   of the same `x` instead (its model is the one sampled), for example to
+   resample the units with another sampler.
 2. **Units:** every unit's conditional posterior at those estimates,
    [`brm_nlme_unit_problem`](@ref), is sampled by `sampler(problem)`. It
-   returns a draws × dimension matrix in the problem's coordinates, and every
+   returns a dimension × draws matrix in the problem's coordinates (WarmupHMC's
+   `posterior_position` orientation), and every
    unit returns the same number of draws. Units are sampled on `threads` tasks,
    each with its own prepared copy of the model's cells, so `sampler` must be
    safe to call concurrently (an independent RNG per unit, as below). A nested
@@ -173,7 +176,7 @@ Implemented by the NLMEEstimation extension.
 using NLMEEstimation, WarmupHMC, Random
 fit = brm_two_stage_fit(RKBRMI(model); minibatch_size=64) do unit
     run = adaptive_warmup_mcmc(Xoshiro(unit.subject), unit)
-    permutedims(Matrix(run.posterior_position))
+    Matrix(run.posterior_position)
 end
 ```
 """
