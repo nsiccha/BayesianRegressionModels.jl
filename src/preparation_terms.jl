@@ -300,26 +300,34 @@ function _brm_cdar_cor(value, context)
     end
     nothing, _brm_cdar_cor_matrix(value)
 end
-_brm_cdar_cor_matrix(C::AbstractMatrix{<:Real}) = Matrix{Float64}(C)
-function _brm_cdar_cor_matrix(v::AbstractVector{<:Real})
+const _BRM_CDAR_COR = "cdar(...; cor=...)"
+_brm_cdar_cor_matrix(x) = _brm_correlation_matrix(x; what=_BRM_CDAR_COR)
+_brm_cdar_factor(C) = _brm_correlation_factor(C; what=_BRM_CDAR_COR)
+
+# A known correlation matrix supplied as data: a matrix, or a flattened square
+# matrix (one data-frame column), checked and factored once in Julia. Shared by
+# `cdar(...; cor=C)` and the level correlation of a grouping (`cor=C`,
+# src/level_correlation.jl); `what` names the spelling in the errors.
+_brm_correlation_matrix(C::AbstractMatrix{<:Real}; what) = Matrix{Float64}(C)
+function _brm_correlation_matrix(v::AbstractVector{<:Real}; what)
     P = isqrt(length(v))
     P * P == length(v) || error(
-        "BRM term preparation: `cdar(...; cor=...)` got a vector of length $(length(v)), " *
+        "BRM term preparation: `$what` got a vector of length $(length(v)), " *
         "which is not a flattened square matrix")
     Matrix{Float64}(reshape(collect(Float64, v), P, P))
 end
-_brm_cdar_cor_matrix(x) = error(
-    "BRM term preparation: `cdar(...; cor=...)` needs a `P × P` numeric matrix " *
+_brm_correlation_matrix(x; what) = error(
+    "BRM term preparation: `$what` needs a `P × P` numeric matrix " *
     "(a data field or a literal), got $(typeof(x))")
-function _brm_cdar_factor(C::AbstractMatrix{<:Real})
+function _brm_correlation_factor(C::AbstractMatrix{<:Real}; what)
     size(C, 1) == size(C, 2) || error(
-        "BRM term preparation: `cdar(...; cor=...)` needs a square matrix, got $(size(C))")
-    all(isfinite, C) || error("BRM term preparation: `cdar(...; cor=...)` must be finite")
+        "BRM term preparation: `$what` needs a square matrix, got $(size(C))")
+    all(isfinite, C) || error("BRM term preparation: `$what` must be finite")
     maximum(abs.(C .- C')) <= 1e-10 * max(1.0, maximum(abs.(C))) || error(
-        "BRM term preparation: `cdar(...; cor=...)` must be symmetric")
+        "BRM term preparation: `$what` must be symmetric")
     F = LinearAlgebra.cholesky(LinearAlgebra.Symmetric(Matrix{Float64}(C)); check=false)
     LinearAlgebra.issuccess(F) || error(
-        "BRM term preparation: `cdar(...; cor=...)` must be positive definite")
+        "BRM term preparation: `$what` must be positive definite")
     Matrix{Float64}(F.L)
 end
 function _brm_cdar_indices(step_raw, steps, group_raw, groups; prefix="BRM term preparation")

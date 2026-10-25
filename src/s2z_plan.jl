@@ -111,6 +111,9 @@ function _sb_s2z_plan(brmi, prepared, predictor, overrides, rho, requested;
         group = only(selected)
         own = filter(d -> _s2z_declaration_group(d) === group, declarations)
         any(d -> d.descriptor isa Tuple, own) && throw(ArgumentError("stratified blocks"))
+        any(d -> !isnothing(_brm_declaration_level_cor(d)), own) && throw(ArgumentError(
+            "correlated levels (`gr(...; cor=...)`): a sum-to-zero contrast basis " *
+            "over level-correlated effects is not implemented"))
         plans = _brm_simple_random_effect_plans(brmi, target, prepared.context;
             select=d -> _s2z_declaration_group(d) === group)
         isnothing(plans) && throw(ArgumentError("unresolved random-effect plans"))

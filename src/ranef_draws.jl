@@ -53,6 +53,11 @@ Each block is one named tuple:
   block. A subject's own coefficient on the natural scale is
   `inverse_link(population + effect)`, with the population value from
   [`brm_population_effect_coordinates`](@ref).
+- `level_cor` — draws × levels × levels: the correlation of the block's levels,
+  `L L'` of the factor its `gr(g; cor=Omega)` names (the sampled `Omega`, or a
+  known correlation supplied as data), for a level-correlated block; `nothing`
+  for every other block. Each margin's effects then have correlation
+  `level_cor` across levels.
 
 An exact total-coefficient block reports one entry per absorbed column, each
 with one margin, as the conventional `(… || g)` emission reports one block
@@ -104,7 +109,8 @@ function brm_ranef_draws(d::BRMDescriptor, draws::AbstractMatrix, constrained_na
                 stratum=entry.stratum, margins=collect(m.margins),
                 levels=entry.levels, link=links,
                 inverse_link=InverseFunctions.inverse.(links), sd=entry.sd,
-                cor=entry.cor, effects=entry.effects))
+                cor=entry.cor, effects=entry.effects,
+                level_cor=get(entry, :level_cor, nothing)))
         end
     end
     result
@@ -145,7 +151,13 @@ function _brm_ranef_block_draws(d, block::RanefBlock, draws, names)
     cor = K == 1 ? ones(n, 1, 1) : _brm_ranef_cor_draws(reshape(
         _brm_ranef_carrier_draws(d, block, get(keywords, :L, Symbol(block.binding, :_L)),
                                  K * K, draws, names), n, K, K))
-    (; sd, cor, effects=_brm_ranef_effect_draws(d, block, spec, sd, draws, names))
+    # A level-correlated block reads its levels' factor as a submodel input.
+    G = block.n_groups
+    level_cor = haskey(spec, :level_correlation) ? _brm_ranef_cor_draws(reshape(
+        _brm_ranef_carrier_draws(d, block, keywords[spec.level_correlation],
+                                 G * G, draws, names), n, G, G)) : nothing
+    (; sd, cor, effects=_brm_ranef_effect_draws(d, block, spec, sd, draws, names),
+       level_cor)
 end
 
 # One stratified `gr(g, by=b)` block: the `tau` and `L` it emitted for each

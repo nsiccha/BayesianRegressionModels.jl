@@ -281,6 +281,8 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
                 L=K == 1 || L_value !== nothing ? nothing : Symbol(draws, ".L"),
                 scale_priors=Tuple(priors)),
                 bucket.dist === nothing ? (;) : (; mixing=Symbol(draws, ".w")),
+                bucket.level_cor === nothing ? (;) :
+                    (; level_correlation=bucket.level_cor.name),
                 known || L_value !== nothing ?
                     (; known_scales=Tuple(p isa Real ? p : nothing for p in priors),
                        known_cor=bucket.known_cor) : (;)))
@@ -299,8 +301,19 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
             end
         end
     end
+    # `gr(g; cor=...)`: the levels of every margin are correlated by the
+    # factor's `L`, so the rows gather `L * draws` (src/level_correlation.jl).
+    gathered = draws
+    if bucket.level_cor !== nothing
+        grouping.form === :plain || error(
+            "RK backend: a level correlation over a `$(grouping.form)` grouping " *
+            "is not implemented")
+        gathered = _rk_ast_fresh_name(string(draws, "_level"), taken)
+        push!(stmts, Expr(:(=), gathered, Expr(:call, :*,
+            _rk_ast_level_factor!(stmts, taken, bucket.level_cor), draws)))
+    end
     # An ordinary RKPPL gather, so a per-cell query reads only its own row.
-    gather_margin(col, margin) = Expr(:ref, draws, indices[col], margin)
+    gather_margin(col, margin) = Expr(:ref, gathered, indices[col], margin)
     for (target, margins) in bucket.slices
         summands = Any[]
         for margin in margins
@@ -340,6 +353,25 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
         push!(stmts, Expr(:(=), effects[(target, bucket.group, bucket.id)], value))
     end
     stmts
+end
+
+# A level correlation's factor as a pure call argument: the sampled
+# declaration's name, or the known factor's `hcat` constant inline.
+_rk_ast_level_factor_value(lc::_BRMLevelCorrelation) =
+    lc.kind === :parameter ? lc.name : Expr(:call, :hcat,
+        (Expr(:vect, lc.factor[:, j]...) for j in axes(lc.factor, 2))...)
+
+# The RK value of a level correlation's lower Cholesky factor: the sampled
+# `LKJCholesky` declaration by name, or a known correlation's factor as a
+# constant (RKPPL takes pure calls, so `hcat` of its columns), like a known
+# `cor(:, ID) = R`.
+_rk_ast_level_factor!(stmts, taken, lc::_BRMLevelCorrelation) =
+    _rk_ast_level_factor!(stmts, taken, lc, Val(lc.kind))
+_rk_ast_level_factor!(_stmts, _taken, lc, ::Val{:parameter}) = lc.name
+function _rk_ast_level_factor!(stmts, taken, lc, ::Val{:data})
+    name = _rk_ast_fresh_name(string("L_levelcor_", lc.name), taken)
+    push!(stmts, Expr(:(=), name, _rk_ast_level_factor_value(lc)))
+    name
 end
 
 # A penalized smooth, as StanBlocks' `_sb_s_generic`/`_sb_t2_generic`: the

@@ -830,6 +830,35 @@ const _SB_KNOWN_RANEF_FAMILIES = Dict{Tuple{Bool,Bool},Tuple{Symbol,StanBlocks.S
                      ranef_correlated_draws_known_cor_student_t),
 )
 
+# ---- Correlation across the levels of a grouping (`gr(g; cor=...)`) --------
+#
+# A block whose grouping carries a level correlation (src/level_correlation.jl)
+# draws its `n_groups x n_terms` effects exactly as its Gaussian non-centered
+# family does, and multiplies them on the left by `L_level`, the lower Cholesky
+# factor of the levels' correlation matrix: the sampled `LKJCholesky`
+# declaration the formula names, or a data factor. Each coefficient's effects
+# then have correlation `L_level * L_level'` across levels while one level's
+# coefficients keep the block's own scales and correlation, so the block's law
+# is `Omega ⊗ Sigma` (the intrinsic coregionalisation model). The families are
+# derived from their base bodies, like the Student-t ones, so they cannot drift.
+# The standardized draws stay `z_flat`; the returned effects are correlated.
+const _SB_LEVEL_CORRELATED_RANEF_BASES = (
+    :ranef_correlated_draws, :ranef_correlated_draws_generic,
+    :ranef_correlated_draws_known_scale, :ranef_correlated_draws_known_cor)
+
+_sb_level_correlated_family(family::Symbol) = Symbol(family, :_levelcor)
+
+function _sb_level_correlated_ranef(base::StanBlocks.SlicModel, family::Symbol)
+    family in _SB_LEVEL_CORRELATED_RANEF_BASES || error(
+        "sbimpl: a level correlation (`gr(g; cor=...)`) is not implemented " *
+        "for the `$family` random-effect emission")
+    body = deepcopy(base.model)
+    at = findfirst(s -> Meta.isexpr(s, :return), body.args)
+    isnothing(at) && error("sbimpl: random-effect submodel `$family` has no `return`")
+    body.args[at] = Expr(:return, :(L_level * $(only(body.args[at].args))))
+    StanBlocks.SlicModel(body, base.data, base.mod, base.observations)
+end
+
 # Plain `(1 | g)` with a derived scale. Sibling of `ranef_intercept`, whose
 # `log_scale ~ std_normal()` is exactly the sampled degree of freedom R2D2
 # replaces.
@@ -2946,6 +2975,24 @@ _sb_hsgp_by_aniso = StanBlocks.@slic begin
     return rows_dot_product(PHI_scaled, beta[group_idx, :])
 end
 
+# A submodel that reads its level-by-column matrix through the input `input`
+# (the grouped HSGP's weight block `beta`) reads `L_level * input` instead: the
+# same body with the levels of every column correlated by `L_level`, the lower
+# Cholesky factor of a level correlation (src/level_correlation.jl).
+function _sb_level_correlated_input(base::StanBlocks.SlicModel, input::Symbol)
+    level = Symbol(input, :_level)
+    substitute(x) = x === input ? level :
+        x isa Expr ? Expr(x.head, map(substitute, x.args)...) : x
+    body = Expr(:block, :($level = L_level * $input), map(substitute, base.model.args)...)
+    StanBlocks.SlicModel(body, base.data, base.mod, base.observations)
+end
+
+# `hsgp(x...; by=g, cor=Omega)`: every basis function's group weights are
+# `L_level * z`, i.e. `MVN(0, S(omega_j) * Omega)` after spectral scaling — the
+# intrinsic coregionalisation model over the levels of `g`.
+_sb_hsgp_by_levelcor = _sb_level_correlated_input(_sb_hsgp_by, :beta)
+_sb_hsgp_by_aniso_levelcor = _sb_level_correlated_input(_sb_hsgp_by_aniso, :beta)
+
 # Categorical -> (n_levels::Int, per-row level index::Vector{Int}). Mirrors
 # vimpl._level_index so the integer indices the walker stashes in `data`
 # agree with what the cimpl-side uses.
@@ -3532,6 +3579,9 @@ const _SB_THRESHOLD_LOCATED_KEY = :__brm_threshold_located__
 # value it removed (see `_sb_note_group_column!`). Settled once emission is
 # complete by `_sb_settle_group_columns!`.
 const _SB_GROUP_COLUMNS_KEY = :__brm_group_columns__
+# Row count of each `mi(...)` column, which never reaches the Stan data as
+# itself (see `_sb_observation_extent!`).
+const _SB_SKIPPED_ROWS_KEY = :__brm_skipped_rows__
 function _sb_record_binding!(data, key, role, logical; family=nothing, metadata...)
     bindings = get(data, _SB_BINDINGS_KEY, nothing)
     isnothing(bindings) || (bindings[key] = (; role, logical, family, metadata...))
@@ -4116,6 +4166,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     end
     nodes = Dict(node.name => node for node in _brm_prepared_nodes(prepared))
     prepass = context.prepass
+    data[_SB_SKIPPED_ROWS_KEY] = get(prepass, :skipped_rows, Dict{Symbol,Int}())
     # Hyper-predictor statements validate here (they need the term context)
     # and ride the `data` side-channel to their term's emitter; the statement
     # emitter skips them below.
@@ -4166,6 +4217,12 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     _brm_operation_references!(prior_value_refs, ranef_effect_overrides)
     for term in gb_terms
         _brm_operation_references!(prior_value_refs, term.fields)
+    end
+    # A level correlation (`gr(g; cor=Omega)`) is read by its bucket's draws
+    # statement in the prepass below, so its declaration moves ahead of it.
+    for bucket in values(id_buckets)
+        value = get(bucket, :level_cor, nothing)
+        isnothing(value) || push!(prior_value_refs, name(value))
     end
     # A sampled observation/reference scale must be declared before the bucket
     # prepass consumes it.  Opted-in R2D2 models alone move those scalar priors
@@ -4288,6 +4345,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     pop!(data, _SB_HYPER_PLANS_KEY, ())
     pop!(data, _SB_THRESHOLD_LOCATED_KEY)
     pop!(data, _SB_FRESH_COVARIATES_KEY, nothing)
+    pop!(data, _SB_SKIPPED_ROWS_KEY)
     preproc_ctx = pop!(data, _SB_PREPROC_KEY, Dict{Symbol,PreprocEntry}())
     preproc = preproc_ctx isa _SBPreprocContext ? preproc_ctx.recorded : preproc_ctx
     # Drop leaked non-Stan data (raw `CategoricalVector`/string predictor columns
@@ -5654,8 +5712,9 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         push!(handled, e.const_.n_key)
         impute || (new_preproc[key] = e)
     elseif e.kind === :axis_extent
-        # The row count of a model-scope `ragged(x, group)` axis that sizes `x`.
-        new_data[key] = _sb_reprocess_column_length(df, e.raw_ref, "declared row axis")
+        # The row count of a model-scope `ragged(x, group)` axis that sizes `x`,
+        # or of an `mi(y)` column that sizes an intercept-only predictor.
+        new_data[key] = _sb_reprocess_column_length(df, e.raw_ref, "row axis")
         new_preproc[key] = e
     elseif e.kind === :kernel_subject_count
         if e.const_ isa NamedTuple && get(e.const_, :from_data_length, false)
@@ -7481,6 +7540,21 @@ function _sb_emit_vector_prior!(stmts, data, target,
     push!(stmts, Expr(:call, :~, corr_lhs,
                       Expr(:call, :lkj_corr_cholesky, _sb_effect_prior_arg(spec.shape))))
     push!(stmts, :($target = diag_pre_multiply($scale_name, $corr_name)))
+    true
+end
+
+# `Omega ~ LKJCholesky(K, eta)`: a `cholesky_factor_corr[K]` parameter that a
+# grouping factor's `cor=` reads by name. The dimension is a data scalar, as for
+# `LKJCovarianceFactor`.
+function _sb_emit_vector_prior!(stmts, data, target, ::Type{<:LKJCholesky}, op)
+    spec = _brm_lkj_cholesky_spec(target, op; prefix="sbimpl")
+    n_key = Symbol(target, :_n)
+    haskey(data, n_key) && error(
+        "sbimpl: `$target ~ LKJCholesky(...)` reserves data key `$n_key`, but " *
+        "that name is already used")
+    data[n_key] = spec.K
+    lhs = Expr(:(::), target, Expr(:ref, :cholesky_factor_corr, n_key))
+    push!(stmts, Expr(:call, :~, lhs, Expr(:call, :lkj_corr_cholesky, spec.eta)))
     true
 end
 
@@ -9552,6 +9626,8 @@ _sb_gp_submodel(::Val{:_sb_hsgp_partial}) = _sb_hsgp_partial
 _sb_gp_submodel(::Val{:_sb_hsgp_partial_aniso}) = _sb_hsgp_partial_aniso
 _sb_gp_submodel(::Val{:_sb_hsgp_by}) = _sb_hsgp_by
 _sb_gp_submodel(::Val{:_sb_hsgp_by_aniso}) = _sb_hsgp_by_aniso
+_sb_gp_submodel(::Val{:_sb_hsgp_by_levelcor}) = _sb_hsgp_by_levelcor
+_sb_gp_submodel(::Val{:_sb_hsgp_by_aniso_levelcor}) = _sb_hsgp_by_aniso_levelcor
 _sb_gp_submodel(::Val{:_sb_hsgp_latent}) = _sb_hsgp_latent
 _sb_gp_submodel(::Val{:_sb_hsgp_latent_orthogonal}) = _sb_hsgp_latent_orthogonal
 _sb_gp_submodel(::Val{:_sb_gp_periodic}) = _sb_gp_periodic
@@ -9565,6 +9641,8 @@ _sb_gp_rho_lhs(::Val{:_sb_hsgp_partial}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_partial_aniso}) = :(rho :: vector[n_axes])
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_by}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_by_aniso}) = :(rho :: vector[n_axes])
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_by_levelcor}) = :rho_iso
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_by_aniso_levelcor}) = :(rho :: vector[n_axes])
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_latent}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_latent_orthogonal}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_gp_periodic}) = :rho
@@ -10607,12 +10685,17 @@ function _sb_collect_id_buckets(declarations)
             "already defines one shared coefficient block across its " *
             "membership columns")
         k = (id_sym, _sb_group_key(desc))
+        level_cor = _brm_declaration_level_cor(declaration)
         if !haskey(buckets, k)
-            buckets[k] = (group_desc=desc, per_target=Pair{Symbol,Vector{Any}}[])
+            buckets[k] = (group_desc=desc, per_target=Pair{Symbol,Vector{Any}}[],
+                          level_cor)
         else
             # Consistency check: same id must always pair with the same group.
             _sb_group_desc_matches(buckets[k].group_desc, desc) ||
                 error("sbimpl: `|$id_sym|` sees conflicting grouping factors ($(buckets[k].group_desc) vs $desc)")
+            _brm_level_cor_name(buckets[k].level_cor) === _brm_level_cor_name(level_cor) ||
+                error("sbimpl: the terms of `|$id_sym|` name different level " *
+                      "correlations; give every one the same `gr(...; cor=...)`")
         end
         push!(buckets[k].per_target,
               declaration.predictor => collect(Any, declaration.effects))
@@ -11942,9 +12025,16 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
             r2d2_tau = Expr(:vect,
                 [_sb_r2d2_resid_scale(r2d2_names[m.predictor]) for m in margins]...)
         end
+        level_cor = get(bucket, :level_cor, nothing)
         # Likelihood-inactive margins (`src/sb_marginal_ranef.jl`): sample only
         # the active margins' marginal block and complete the rest exactly.
         if _sb_marginal_eligible(desc, ranef_effect, r2d2_tau)
+            !isnothing(level_cor) && marginal_targets isa AbstractDict &&
+                !isnothing(get(marginal_targets, k, nothing)) && error(
+                "sbimpl: `|$id_sym|` correlates the levels of `$(name(desc))` " *
+                "(`gr(...; cor=...)`), and an omitted response leaves some of its " *
+                "margins outside every likelihood; the marginal emission of a " *
+                "level-correlated block is not implemented")
             inactive = marginal_targets isa AbstractDict ?
                 get(marginal_targets, k, nothing) : nothing
             if !isnothing(inactive)
@@ -11966,11 +12056,76 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
                                                 ranef_effect, r2d2_tau, mod,
                                                 r2d2_lkj_eta=(isnothing(ranef_effect) ?
                                                     1.0 : ranef_effect.lkj_eta))
+        isnothing(level_cor) || _sb_apply_level_correlation!(stmts, data,
+            bucket_name, desc, level_cor; id_sym, cv_groups, centered_groups,
+            ranef_effect, r2d2_tau)
         for (brmi_key, cols) in per_target_ranges
             lookup[(brmi_key, k)] = (; bucket_name, cols, idx_name, suffix)
         end
     end
     lookup
+end
+
+# Turn the `|ID|` block just emitted as `<bucket> ~ <family>(...)` into its
+# level-correlated family (see `_sb_level_correlated_ranef`): the same
+# statement, the derived submodel, and the levels' Cholesky factor as
+# `L_level`. The binding record keeps its metadata under the derived family and
+# names the correlation it reads.
+function _sb_apply_level_correlation!(stmts, data, bucket_name, g::NamedColumn,
+                                      value; id_sym, cv_groups, centered_groups,
+                                      ranef_effect, r2d2_tau)
+    gname = name(g)
+    what = "gr($gname; cor=$(_brm_level_cor_label(value)))"
+    refuse(why) = error(
+        "sbimpl: `|$id_sym|` correlates the levels of `$gname` (`$what`), and " *
+        "$why; that combination is not implemented")
+    gname in cv_groups && refuse("`$gname` is in `cv_groups`")
+    gname in centered_groups && refuse("`$gname` is in `centered_groups`")
+    !isnothing(ranef_effect) && !isnothing(ranef_effect.dist) &&
+        refuse("the block is Student-t (`ranef(...) ~ TDist(...)`)")
+    isnothing(r2d2_tau) || refuse("its scales are derived by an `r2d2` decomposition")
+    lc = _brm_level_correlation(value; what, prefix="sbimpl")
+    _brm_check_level_correlation(lc, data[Symbol(:n_, gname)];
+                                 what, group=gname, prefix="sbimpl")
+    at = findlast(s -> Meta.isexpr(s, :call) && s.args[1] === :~ &&
+                       s.args[2] === bucket_name, stmts)
+    isnothing(at) && error(
+        "sbimpl: internal — no `$bucket_name ~ ...` statement to correlate")
+    call = stmts[at].args[3]
+    head = call.args[1]
+    bindings = get(data, _SB_BINDINGS_KEY, nothing)
+    record = isnothing(bindings) ? nothing : get(bindings, bucket_name, nothing)
+    family = !isnothing(record) && !isnothing(record.family) ? record.family : head
+    family isa Symbol || error(
+        "sbimpl: internal — `$bucket_name` has no recorded random-effect family")
+    base = head isa Symbol ? getfield(@__MODULE__, head) : head
+    call.args[1] = _sb_level_correlated_ranef(base, family)
+    parameters = only(a for a in call.args if Meta.isexpr(a, :parameters))
+    push!(parameters.args, Expr(:kw, :L_level, _sb_level_correlation_factor!(data, lc)))
+    metadata = isnothing(record) ? (;) :
+        Base.structdiff(record, NamedTuple{(:role, :logical, :family)})
+    _sb_record_binding!(data, bucket_name, :random_effect, gname;
+        metadata..., family=_sb_level_correlated_family(family),
+        level_correlation=lc.name)
+    nothing
+end
+
+# The Stan value of a level correlation's lower Cholesky factor: the sampled
+# `LKJCholesky` declaration by name, or a data factor computed once in Julia
+# and replayed frozen, like a known `cor(:, ID) = R`.
+_sb_level_correlation_factor!(data, lc::_BRMLevelCorrelation) =
+    _sb_level_correlation_factor!(data, lc, Val(lc.kind))
+_sb_level_correlation_factor!(_data, lc, ::Val{:parameter}) = lc.name
+function _sb_level_correlation_factor!(data, lc, ::Val{:data})
+    key = Symbol(:L_levelcor_, lc.name)
+    if haskey(data, key)
+        data[key] == lc.factor || error(
+            "sbimpl: data key `$key` is already taken by another value")
+    else
+        data[key] = lc.factor
+        _sb_record_static!(data, key)
+    end
+    key
 end
 
 # Emit a Student-t `|ID|` block: the bucket's Gaussian draws submodel -- the
@@ -12802,7 +12957,8 @@ _sb_predictor_col(t::Int, data, _stmts, pop_terms=(); obs_n::Union{Symbol,Nothin
     #      path has `ran_terms` and no `group_idx`, the ranef path the reverse.
     #   2. The observation column threaded from the likelihood walker
     #      (`obs_n`). Covers purely-intercept formulas like `loc ~ 1` whose
-    #      length matches the observed `~` target consuming `loc`.
+    #      length matches the observed `~` target consuming `loc`, including an
+    #      `mi(y)` target, whose row count `_sb_observation_extent!` binds.
     #   2b. The per-row level index `<c>_idx` of a categorical peer whose raw
     #      levels are not numeric (a string-leveled `CategoricalVector`), which
     #      tier 1d's numeric guard rightly skips. Its own block emits that index
@@ -12826,13 +12982,31 @@ _sb_predictor_col(t::Int, data, _stmts, pop_terms=(); obs_n::Union{Symbol,Nothin
     isnothing(probe) && (probe = _sb_n_obs_probe_deep(direct_terms, data))
     isnothing(probe) && (probe = group_idx)
     isnothing(probe) && (probe = _sb_group_n_obs_probe(data, ran_terms))
-    isnothing(probe) && !isnothing(obs_n) && (probe = obs_n)
+    isnothing(probe) && !isnothing(obs_n) && (probe = _sb_observation_extent!(data, obs_n))
     isnothing(probe) && (probe = _sb_cat_index_probe(direct_terms))
     isnothing(probe) && (probe = _sb_any_data_symbol(data, target))
     probe_value = get(data, probe, nothing)
     extent = probe_value isa Integer && !(probe_value isa Bool) ?
         probe : :(num_elements($probe))
     :(rep_vector(1., $extent))
+end
+
+# Tier 2's observation source, as something the Stan data holds. An `mi(y)`
+# column never reaches the data as itself (its observation is emitted as
+# observed values plus missing coordinates), so an intercept-only predictor
+# that only such an observation sizes binds `y`'s row count as `n_rows_y`,
+# which replay recomputes from `y`'s length (`:axis_extent`).
+function _sb_observation_extent!(data, source::Symbol)
+    haskey(data, source) && return source
+    rows = get(get(data, _SB_SKIPPED_ROWS_KEY, Dict{Symbol,Int}()), source, nothing)
+    isnothing(rows) && return source
+    extent = Symbol(:n_rows_, source)
+    get(data, extent, rows) === rows || error(
+        "sbimpl: data column `$extent` collides with the row count BRM binds for ",
+        "`mi($source)`; rename that column")
+    data[extent] = rows
+    _sb_record_preproc!(data, extent, PreprocEntry(:axis_extent, nothing, source, false))
+    extent
 end
 _sb_predictor_col(t::NamedColumn, data, _stmts, _pop_terms=(); kwargs...) = _predictor_col_for(t, parent(t), data)
 
@@ -13403,7 +13577,24 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
             names, false))
         rho_plan = _sb_hyper_plan_for(hyper_plans, :length_scale)
         sigma_plan = _sb_hyper_plan_for(hyper_plans, :sd)
-        if isnothing(rho_plan) && isnothing(sigma_plan)
+        level_cor = get(kw, :cor, nothing)
+        if !isnothing(level_cor)
+            # `cor=` correlates the levels of `by` (src/level_correlation.jl).
+            what = "hsgp($axes_suffix; by=$gname, cor=$(_brm_level_cor_label(level_cor)))"
+            (isnothing(rho_plan) && isnothing(sigma_plan)) || error(
+                "sbimpl: `$what` with hyper-predicted length scales or " *
+                "amplitudes is not implemented")
+            lc = _brm_level_correlation(level_cor; what, prefix="sbimpl")
+            _brm_check_level_correlation(lc, data[Symbol(:n_, gname)];
+                                         what, group=gname, prefix="sbimpl")
+            submodel = _sb_gp_submodel_expr(
+                iso ? :_sb_hsgp_by_levelcor : :_sb_hsgp_by_aniso_levelcor,
+                term_overrides, t)
+            push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
+                submodel, term_overrides, t; PHI=PHI_name, omega2=omega2_name,
+                rho_lower=rho_lower_name, beta=info.block_name, group_idx=info.idx_name,
+                L_level=_sb_level_correlation_factor!(data, lc))))
+        elseif isnothing(rho_plan) && isnothing(sigma_plan)
             submodel = _sb_gp_submodel_expr(
                 iso ? :_sb_hsgp_by : :_sb_hsgp_by_aniso, term_overrides, t)
             push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
@@ -14123,7 +14314,8 @@ _sb_is_side_channel_key(k::Symbol) =
     k === _SB_PREPROC_KEY || k === _SB_BINDINGS_KEY ||
     k === _SB_THRESHOLD_LOCATED_KEY || k === _SB_HYPER_PLANS_KEY ||
     k === _SB_TOTAL_PLANS_KEY || k === _SB_S2Z_PLANS_KEY ||
-    k === _SB_HS_PLANS_KEY || k === _SB_GROUP_COLUMNS_KEY
+    k === _SB_HS_PLANS_KEY || k === _SB_GROUP_COLUMNS_KEY ||
+    k === _SB_SKIPPED_ROWS_KEY
 
 # Return `k` if `v` is a flat (non-ragged) vector, else `nothing` — replaces
 # the old `_is_flat_vec` Bool predicate so the caller composes via the

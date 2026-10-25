@@ -39,6 +39,13 @@ by hand, bounds read through the binding (censored, scalar, truncated),
 invalid vectors, the refusal of the retired formula-level `ragged(y, group) ~ …`,
 and replay/resample regathering a grouped response and its bound.
 
+`plate_matrix_data.jl` checks per-cell matrix data, a pre-grouped
+`Vector{Matrix}` read as `X[i]` in a cell: RKBRMI density and gradient against
+an independent oracle, and the flattened `reshape(Xf[i], n[i], k)` twin equal
+to it on RKBRMI and BridgeStan. SBBRMI emission of the `Vector{Matrix}` spelling
+is `@test_broken` until StanBlocks ingests it (StanBlocks snag
+`ragged-matrix-da-163255e9`).
+
 `fixed_ranef_scales.jl` checks random-effect scales and correlations held at
 known values, `sd(lp, ID) = value` and `cor(:, ID) = R`. It covers:
 
@@ -54,6 +61,22 @@ known values, `sd(lp, ID) = value` and `cor(:, ID) = R`. It covers:
   included.
 
 Set `BRM_FIXED_RANEF_RUNTIME=0` to skip the compiled-model sets.
+
+`level_correlation.jl` checks correlated levels of a grouping factor:
+`gr(g; cor=Omega)` and `hsgp(x...; by=g, cor=Omega)`, with a declared
+`Omega ~ LKJCholesky(K, eta)` or a known data matrix. It covers:
+
+- SBBRMI emission and stanc acceptance;
+- the descriptor, the generative plan and the description;
+- refusals of wrong shapes;
+- the SB density against a hand-written raw-Stan intrinsic-coregionalisation
+  program;
+- RK density and gradient equal to SB, through `brm_coordinate_transport` and
+  an explicit map for the grouped HSGP;
+- `brm_ranef_draws`' `level_cor`, and replay.
+
+Combinations not implemented yet are `@test_broken`. Set
+`BRM_LEVEL_CORRELATION_RUNTIME=0` to skip the compiled-model sets.
 
 `sd_prior_input_names.jl` checks that a scale prior's caller scalar may share a
 name with a binding of the submodel the prior is merged into, such as `tau` in
@@ -584,6 +607,15 @@ cases, frozen row masks, and retention
 of fitted missing coordinates during subject kernel CV. It uses only root
 dependencies, so `julia --project=. test/missing_covariates.jl` also works;
 trailing filters such as `anchors` or `kernel CV` select focused blocks.
+
+`mi_intercept_only.jl` checks an intercept-only predictor that only an `mi(...)`
+likelihood sizes: `log(sigma) ~ 1` or `mu ~ 1` read by `mi(y) ~ Normal(...)` or
+`LogNormal(...)`, and the scale of a covariate model `mi(x) ~ LogNormal(mx, sx)`.
+SBBRMI sizes it by the column's row count `n_rows_y` and RKBRMI fills it over
+the column's rows; replay recomputes both. Densities and gradients on both
+backends equal a twin
+that declares the intercept as a scalar parameter. Run
+`julia --project=test test/mi_intercept_only.jl`.
 
 `rk_single_level_factor.jl` checks a single-level treatment-coded factor on the
 RK route. Its K=1 source equals the K=2 source apart from the level list and the

@@ -392,7 +392,15 @@ struct _RKRanefBucket
     # constant Cholesky factor instead of an LKJ draw. Known scales
     # (`sd(...) = value`) ride `sd_priors` as `_BRMKnownScale` entries.
     known_cor::Union{Nothing,Matrix{Float64}}
+    # `gr(g; cor=Omega)`: the correlation of the block's LEVELS
+    # (src/level_correlation.jl); the block's draws are multiplied on the left
+    # by its Cholesky factor before the rows gather them.
+    level_cor::Union{Nothing,_BRMLevelCorrelation}
 end
+_RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping, sd_priors,
+        decomposition, dist, known_cor) =
+    _RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping,
+        sd_priors, decomposition, dist, known_cor, nothing)
 _RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping, sd_priors,
         decomposition, dist) =
     _RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping,
@@ -4163,8 +4171,27 @@ function _rk_lower_ranef_bucket(context, id::Union{Nothing,Symbol},
         :slope1
     end
     eta = kind === :correlated ? 1.0 : NaN
-    _RKRanefBucket(id, bound, kind, margins, slices, eta,
+    bucket = _RKRanefBucket(id, bound, kind, margins, slices, eta,
         _rk_ranef_bucket_label(id, bound), _rk_plain_grouping(bound))
+    level_cor = _rk_bucket_level_correlation(context, id, gname,
+        [d for (_, d) in targets])
+    isnothing(level_cor) && return bucket
+    _RKRanefBucket((getfield(bucket, f) for f in fieldnames(_RKRanefBucket)
+                    if f !== :level_cor)..., level_cor)
+end
+
+# The resolved level correlation of one `|ID|` block (`gr(g; cor=...)`), checked
+# against the training levels of `g`: the grouping-address rewrite lowers every
+# ID-less level-correlated block onto a generated `|ID|`.
+function _rk_bucket_level_correlation(context, id, gname, declarations)
+    label = "the `|$id|` random-effect block"
+    value = _brm_block_level_cor(declarations, label; prefix="RK backend")
+    isnothing(value) && return nothing
+    what = "gr($gname; cor=$(_brm_level_cor_label(value)))"
+    lc = _brm_level_correlation(value; what, prefix="RK backend")
+    training = _brm_fit_input_source(gname, context.data[gname])
+    _brm_check_level_correlation(lc, first(_brm_level_index(training));
+                                 what, group=gname, prefix="RK backend")
 end
 
 # Synthetic block symbols mirror the SB spellings exactly (shared
@@ -4543,10 +4570,16 @@ Base.@nospecializeinfer function _rk_plan_ranef_buckets(@nospecialize(brmi::BRMI
             reduced && known_cor !== nothing &&
                 (known_cor = known_cor[positions, positions])
         end
+        bucket.level_cor !== nothing && (dist !== nothing || decomposition !== nothing) &&
+            error("$prefix: `|$(bucket.id)|` correlates the levels of " *
+                  "`$(bucket.group)` (`gr(...; cor=...)`), and its block is " *
+                  (dist !== nothing ? "Student-t" : "an `r2d2` decomposition") *
+                  "; that combination is not implemented")
         replacement = _RKRanefBucket(bucket.id, bucket.group, bucket.kind,
             bucket.margins, bucket.slices, eta, bucket.label,
             bucket.grouping, sd_priors, decomposition, dist,
-            known_cor !== nothing && size(known_cor, 1) >= 2 ? known_cor : nothing)
+            known_cor !== nothing && size(known_cor, 1) >= 2 ? known_cor : nothing,
+            bucket.level_cor)
         buckets[i] = replacement
         for (key, value) in lookup
             value === bucket && (lookup[key] = replacement)
@@ -5033,8 +5066,13 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
             source = _rk_mint_generated!(taken, columns, string(id, "_group_source"))
         end
         columns[source] = raw
+        level_cor = get(state.by, :level_cor, nothing)
+        level_cor !== nothing && !isempty(hyper_plans) && error(
+            "$prefix: predictor `$target` `hsgp(...; by=..., cor=...)` with " *
+            "hyper-predicted length scales or amplitudes is not implemented")
         (; group_index=idx, group_source=source,
-            group_levels=collect(state.by.levels), n_groups=length(state.by.levels))
+            group_levels=collect(state.by.levels), n_groups=length(state.by.levels),
+            level_cor)
     end
     # `fits` (each axis's center and half-width) is metadata for design
     # checks (`rk_design_binder`); the emitted basis computes its own.
@@ -6147,6 +6185,12 @@ function _rk_plan_parameters!(prepared, data::AbstractDict,
                 consts, aliases, parameters, assign_names))
             continue
         end
+        # A level correlation's factor (`Omega ~ LKJCholesky(K, eta)`), read
+        # by name by the `gr(g; cor=Omega)` / `hsgp(...; cor=Omega)` it serves.
+        if callable === LKJCholesky
+            push!(specs, _rk_lkj_cholesky_parameter(parameter.name, prior))
+            continue
+        end
         declaration_bounds = callable !== truncated &&
             any(key -> key in (:lower, :upper), keys(prior.kwargs))
         family_prior = declaration_bounds ? _BRMPreparedExpr(callable,
@@ -6426,6 +6470,25 @@ function _rk_lkj_factor_parameter(name::Symbol, prior::_BRMPreparedExpr,
         "strictly positive, got $(repr(shape_raw))")
     _RKSampledParameter(name, :LKJCovarianceFactor, (Int(K), theta, shape),
         nothing, name)
+end
+
+# `Omega ~ LKJCholesky(K, eta)`: a literal dimension and shape, as on SB
+# (`_brm_lkj_cholesky_spec`).
+function _rk_lkj_cholesky_parameter(name::Symbol, prior::_BRMPreparedExpr)
+    prefix = "RK backend"
+    isempty(prior.kwargs) || error(
+        "$prefix: `$name ~ LKJCholesky(K, eta)` takes no keywords")
+    length(prior.args) == 2 || error(
+        "$prefix: `$name ~ LKJCholesky(K, eta)` needs a dimension and a shape, " *
+        "got $(length(prior.args)) arguments")
+    K, eta = prior.args
+    K isa Integer && !(K isa Bool) && K >= 1 || error(
+        "$prefix: `$name ~ LKJCholesky(K, eta)` needs an integer dimension " *
+        ">= 1, got $(repr(K))")
+    eta isa Real && !(eta isa Bool) && isfinite(eta) && eta > 0 || error(
+        "$prefix: LKJ shape `eta` for `$name` must be a finite, strictly " *
+        "positive literal, got $(repr(eta))")
+    _RKSampledParameter(name, :LKJCholesky, (Int(K), Float64(eta)), nothing, name)
 end
 
 function _rk_plan_vector_parameters!(prepared,
