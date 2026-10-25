@@ -289,6 +289,38 @@ end
           brm_columns(brm_descriptor(PLATE_BUILDER, PLATE_DATA; mod=@__MODULE__))
     @test sprint(show, PLATE_BUILDER) == PLATE_SOURCE
 
+    # A statement that reads its own response leaves it an observed response;
+    # a read by another statement makes it a parameter (snag
+    # brm-translation-cac32d2f).
+    self_scaled = @brm begin
+        mu ~ 1 + x
+        y ~ Normal(mu, 0.1 * y)
+    end
+    @test brm_columns(self_scaled) == (:x, :y)
+    @test brm_columns(self_scaled) ==
+          brm_columns(brm_descriptor(self_scaled, FAMILY_DATA; mod=@__MODULE__))
+    read_later = @brm begin
+        mu ~ 1 + x
+        y ~ Normal(mu, 0.1 * y)
+        y2 ~ Normal(y, 1.0)
+    end
+    @test brm_columns(read_later) == (:x, :y2)
+    # A cell that only observes ends in a no-result marker, which is no column;
+    # its observation is data whether or not its own law reads it.
+    cell_data = (; s=["a", "b", "c"], land=[100.0, 200.0, 300.0])
+    for observe in (:(land[i] ~ Normal(exp(mu[i]), 2.0)),
+                    :(land[i] ~ Normal(exp(mu[i]), 0.002 * land[i])))
+        observed = Core.eval(@__MODULE__, BRM._brm(quote
+            mu ~ 0 + factor(s)
+            @plate for i in eachindex(land)
+                $observe
+            end
+        end))
+        @test brm_columns(observed) == (:land, :s)
+        @test brm_columns(observed) ==
+              brm_columns(brm_descriptor(observed, cell_data; mod=@__MODULE__))
+    end
+
     # Fragments compose into one builder exactly as one block written in the
     # fragments' order; the grouping and the cell may sit in different fragments.
     predictor = @brm begin mu ~ 1 + x end
