@@ -182,7 +182,7 @@ end
 
 @stestset "RKBRMI: the density of the scalar twin" begin
     # RK admits a modeled Normal scale; a modeled LogNormal scale is outside its
-    # current slice whatever the response, observed or `mi`.
+    # current slice whatever the response, observed or `mi` (todo `0pioanf`).
     check_rk_twin(normal_scale(COLS), normal_scale_twin(COLS),
         Dict(:sigma_Intercept => :log_sigma))
     check_rk_twin(normal_location(COLS), normal_location_twin(COLS),
