@@ -2064,6 +2064,15 @@ function _brm_vector_declaration(x::Expr)
         "such as `Normal.(0.0, 1.0)`")
     Expr(:call, :~, lhs.args[1], Expr(:call, _brm_vector_prior, range.args[3], law))
 end
+# The plain operator a dotted operator broadcasts (`.*` -> `*`), or `nothing`
+# for any other call head.
+_brm_plain_operator(head) = nothing
+function _brm_plain_operator(head::Symbol)
+    op = string(head)
+    length(op) > 1 && startswith(op, ".") || return nothing
+    plain = Symbol(op[2:end])
+    Base.isoperator(plain) ? plain : nothing
+end
 # The element law of a broadcast prior: `f.(args...)` is the call `f(args...)`
 # and a dotted operator `.*` is `*`, at every depth.
 _brm_undot(x) = x
@@ -2071,11 +2080,7 @@ function _brm_undot(x::Expr)
     args = map(_brm_undot, x.args)
     Meta.isexpr(x, :., 2) && Meta.isexpr(x.args[2], :tuple) &&
         return Expr(:call, args[1], args[2].args...)
-    if Meta.isexpr(x, :call) && args[1] isa Symbol
-        op = string(args[1])
-        length(op) > 1 && startswith(op, ".") && Base.isoperator(Symbol(op[2:end])) &&
-            (args[1] = Symbol(op[2:end]))
-    end
+    Meta.isexpr(x, :call) && (args[1] = something(_brm_plain_operator(args[1]), args[1]))
     Expr(x.head, args...)
 end
 
@@ -2422,8 +2427,24 @@ end
 
 _x(x) = x
 _x(x::Symbol) = x
+# Formula arithmetic applies per row, so the dotted arithmetic operators are
+# exact aliases of the plain ones: `a .* b` builds the `ExprColumn` of `a * b`
+# and every backend emits the same program (decision `0iefgns`). Evaluating a
+# dotted head itself fails, because broadcast syntax is not a binding; any
+# other dotted operator is refused with the admitted set.
+const _BRM_DOTTED_ARITHMETIC = (:+, :-, :*, :/, :^)
+function _brm_formula_call_head(x::Expr)
+    head = first(x.args)
+    plain = _brm_plain_operator(head)
+    isnothing(plain) && return head
+    plain in _BRM_DOTTED_ARITHMETIC || error(
+        "@brm: `$(sprint(Base.show_unquoted, x))`: the dotted operator `$head` is not " *
+        "admitted in a formula. The dotted arithmetic operators `.* ./ .+ .- .^` " *
+        "mean exactly the plain ones, because formula arithmetic applies per row.")
+    plain
+end
 _x(x::Expr) = if x.head == :call
-    Expr(:call, ExprColumn, _x.(x.args)...) |> fixcall
+    Expr(:call, ExprColumn, _x(_brm_formula_call_head(x)), _x.(x.args[2:end])...) |> fixcall
 elseif _is_nested_brm(x)
     Expr(:call, NestedPredictorFormula, _x(_nested_brm_payload(x)))
 elseif x.head ==  :||
