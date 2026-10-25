@@ -55,6 +55,22 @@ known values, `sd(lp, ID) = value` and `cor(:, ID) = R`. It covers:
 
 Set `BRM_FIXED_RANEF_RUNTIME=0` to skip the compiled-model sets.
 
+`level_correlation.jl` checks correlated levels of a grouping factor:
+`gr(g; cor=Omega)` and `hsgp(x...; by=g, cor=Omega)`, with a declared
+`Omega ~ LKJCholesky(K, eta)` or a known data matrix. It covers:
+
+- SBBRMI emission and stanc acceptance;
+- the descriptor, the generative plan and the description;
+- refusals of wrong shapes;
+- the SB density against a hand-written raw-Stan intrinsic-coregionalisation
+  program;
+- RK density and gradient equal to SB, through `brm_coordinate_transport` and
+  an explicit map for the grouped HSGP;
+- `brm_ranef_draws`' `level_cor`, and replay.
+
+Combinations not implemented yet are `@test_broken`. Set
+`BRM_LEVEL_CORRELATION_RUNTIME=0` to skip the compiled-model sets.
+
 `sd_prior_input_names.jl` checks that a scale prior's caller scalar may share a
 name with a binding of the submodel the prior is merged into, such as `tau` in
 `sd(:, ID) ~ Exponential(tau)`. It covers Gaussian, general-family,
