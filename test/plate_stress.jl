@@ -116,9 +116,10 @@ const crossed_groups = StanBlocks.@slic (;
 end
 
 
-# Known gaps. `@test_broken` makes the suite green today, but turns a newly
-# supported capability into an unexpected pass that must be promoted above.
-const matrix_cell_gap = StanBlocks.@slic (;n=3, k=2) begin
+# A cell whose result is a matrix (StanBlocks a57951eb; a known gap before).
+# Nothing observes it, so it is a compiler case only: a dead plate lowers to
+# generated quantities (see `prior_only_simplex_plate` below).
+const matrix_cell = StanBlocks.@slic (;n=3, k=2) begin
     theta ~ plate(; outer=(n,)) do g
         z::vector[k * k] ~ std_normal()
         to_matrix(z, k, k)
@@ -143,6 +144,8 @@ const prior_only_simplex_plate = StanBlocks.@slic (;n=3, k=3) begin
     end
 end
 
+# Known gaps. `@test_broken` makes the suite green today, but turns a newly
+# supported capability into an unexpected pass that must be promoted above.
 const vararg_cell_gap = StanBlocks.@slic (;
     x=[0.1, 0.2, 0.3],
     y=[0.3, 0.2, 0.1],
@@ -302,6 +305,7 @@ const EXPECTED_DIMENSIONS = Dict(
             "crossed groups" => crossed_groups,
             "crossed local reuse" => crossed_local_reuse,
             "as-matrix aggregation" => as_matrix_agg,
+            "matrix cell" => matrix_cell,
             "annotated plate groups" => annotated_plate_groups,
             "annotated scan AR(1)" => annotated_scan_ar1,
             "annotated nested scan" => annotated_nested_scan,
@@ -366,7 +370,6 @@ const EXPECTED_DIMENSIONS = Dict(
 
     @testset "known capability gaps" begin
         if RUN_GAPS
-            @test_broken StanBlocks.transpiles(matrix_cell_gap; re=false)
             @test_broken StanBlocks.transpiles(vararg_cell_gap; re=false)
             @test_broken occursin("reduce_sum", StanBlocks.stan_code(scalar_likelihood))
         else
