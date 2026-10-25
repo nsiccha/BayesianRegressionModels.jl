@@ -39,6 +39,13 @@ by hand, bounds read through the binding (censored, scalar, truncated),
 invalid vectors, the refusal of the retired formula-level `ragged(y, group) ~ …`,
 and replay/resample regathering a grouped response and its bound.
 
+`plate_matrix_data.jl` checks per-cell matrix data, a pre-grouped
+`Vector{Matrix}` read as `X[i]` in a cell: RKBRMI density and gradient against
+an independent oracle, and the flattened `reshape(Xf[i], n[i], k)` twin equal
+to it on RKBRMI and BridgeStan. SBBRMI emission of the `Vector{Matrix}` spelling
+is `@test_broken` until StanBlocks ingests it (StanBlocks snag
+`ragged-matrix-da-163255e9`).
+
 `fixed_ranef_scales.jl` checks random-effect scales and correlations held at
 known values, `sd(lp, ID) = value` and `cor(:, ID) = R`. It covers:
 
