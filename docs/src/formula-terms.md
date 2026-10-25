@@ -1004,9 +1004,10 @@ mu ~ 1 + transient(logt; series) + saturating(logd; series)
 ```
 
 Multiplicatively — baseline plus bump times response —
-through intercept-free named predictors combined by assignment (write `*`:
-the formula layer is element-wise by intent and sbimpl dots it — a literal
-`.*` is evaluated at parse time and fails):
+through intercept-free named predictors combined by assignment (write `*`
+or `.*`: the formula layer is element-wise by intent and sbimpl dots it —
+the dotted spellings `.* ./ .+ .- .^` are exact aliases of the plain
+operators):
 
 ```text
 brmi = (@brm df begin
