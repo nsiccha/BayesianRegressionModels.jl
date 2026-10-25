@@ -203,11 +203,18 @@ function _brm_nlme_prior_writes!(writes, ::Val{:population}, record, values, val
     x === nothing || push!(writes, (record.declaration, get(record, :index, ()), x))
     writes
 end
+# A block's recorded law broadcasts over its coefficients: a literal-vector
+# argument holds one value per coefficient (per-level priors,
+# `_rk_addressee_prior`).
+_brm_nlme_block_law(x, i) = x
+_brm_nlme_block_law(x::Expr, i) =
+    Meta.isexpr(x, :vect) ? x.args[i] :
+    Expr(x.head, (_brm_nlme_block_law(a, i) for a in x.args)...)
 function _brm_nlme_prior_writes!(writes, ::Val{:population_block}, record, values, value)
-    x = _brm_nlme_record_median(record, value)
-    x === nothing && return writes
+    prior = get(record, :prior, nothing)
     for i in eachindex(record.labels)
-        push!(writes, (record.declaration, (i,), x))
+        x = _brm_prior_median(_brm_prior_law(_brm_nlme_block_law(prior, i), value))
+        x === nothing || push!(writes, (record.declaration, (i,), x))
     end
     writes
 end

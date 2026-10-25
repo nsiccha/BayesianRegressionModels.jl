@@ -12,8 +12,9 @@
 # names now arrive as the base's `brm_prior_input_<name>` inputs, as a term or
 # `sd(...)` prior's already did, so each model's density equals its literal
 # twin's. The exact-total and sum-to-zero SD priors now pass those inputs too.
-# One prior still covers every coefficient its address reaches, so an
-# array-valued field is refused there exactly as on the Normal path.
+# One undotted prior still covers every coefficient its address reaches, so an
+# array-valued field is refused there exactly as on the Normal path; the
+# per-coefficient spelling is `effect(lp, block) .~ Family.(...)`.
 #
 # Run: julia --startup-file=no --project=test test/effect_prior_data_fields.jl
 # Set BRM_EFFECT_RUNTIME=0 to skip the compiled Stan densities.
@@ -220,10 +221,9 @@ end
         y ~ Normal(w, 1.0)
     end
     data = merge(LEVELS, (; wscale=[1.0, 2.0, 3.0, 4.0]))
-    # One prior covers every coefficient its address reaches, so this is
-    # refused, as on the plain Normal path, rather than vectorised silently.
-    # One value per level is a capability gap whose spelling awaits the
-    # user's design decision (snag `brm-data-field-i-62ec2369`), not a wrong
-    # shape.
-    @test_broken (sb(per_level(data)); true)
+    # refused: one undotted prior covers every coefficient its address
+    # reaches, as Julia's `Normal(0.0, [...])` is an error; one value per level
+    # is `effect(w, g) .~ Normal.(...)` (decision `1xaf4fx`,
+    # `test/effect_prior_vector_arguments.jl`).
+    @test_throws r"effect\(lp, block\) \.~ Normal\.\(\.\.\.\)" sb(per_level(data))
 end
