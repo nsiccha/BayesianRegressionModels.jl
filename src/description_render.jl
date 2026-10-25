@@ -589,8 +589,7 @@ function _brmd_gp_fragment(c,approximate)
         end
         get(c.keywords,:iso,true)===true && push!(prose,_brmd_text(c,:isotropic_length_scale))
         grouped && push!(prose,_brmd_text(c,:grouped_basis_weights))
-        grouped && haskey(c.keywords,:cor) && push!(prose,_brmd_text(c,
-            :level_correlated_basis_weights;correlation=_brmd_level_correlation_name(c.keywords[:cor])))
+        grouped && haskey(c.keywords,:cor) && push!(prose,_brmd_hsgp_level_prose(c,c.keywords[:cor]))
         if get(c.keywords,:orthogonal_to,nothing)!==nothing
             push!(equations,"\\Phi_{\\mathrm{"*_brmd_text(c,:math_used)*"}}=(I-P_{[1,x]})\\Phi_{\\mathrm{"*_brmd_text(c,:math_raw)*"}}")
             push!(prose,_brmd_text(c,:orthogonal_projection))
@@ -914,6 +913,15 @@ function _brmd_ranef_level_correlation(d,b)
 end
 _brmd_level_correlation_name(x::BRMDescriptionReference)=x.name
 _brmd_level_correlation_name(x)=x
+# A grouped HSGP's `cor=`: a constant level correlation, or the multigroup
+# coherence `multigroup(Omega, tau)` (src/level_correlation.jl).
+_brmd_hsgp_level_prose(c,x)=_brmd_text(c,:level_correlated_basis_weights;
+    correlation=_brmd_level_correlation_name(x))
+_brmd_hsgp_level_prose(c,x::BRMDescriptionComponent)=x.callable===multigroup ?
+    _brmd_text(c,:multigroup_basis_weights;
+        correlation=_brmd_level_correlation_name(x.arguments[1]),
+        tau=_brmd_level_correlation_name(x.arguments[2])) :
+    _brmd_text(c,:level_correlated_basis_weights;correlation=_brmd_level_correlation_name(x))
 function _brmd_builtin_kind(::Val{:random_effect},c)
     k=c.keywords
     id=_brmd_block_math(c,c.id)

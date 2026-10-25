@@ -137,6 +137,7 @@ const _ADAPTIVE_INTERCEPT_FAMILIES = Set((
 const _ADAPTIVE_STRATIFIED_FAMILIES = Set((
     :ranef_correlated_by,
     :ranef_correlated_by_draws,
+    :ranef_correlated_by_draws_generic,
 ))
 
 # R2D2 blocks DERIVE their marginal scales (`tau[j] = reference_scale[j] *
@@ -177,7 +178,9 @@ random-effect block without parsing generated Stan.
 - `cholesky_free` indexes Stan's `K(K-1)/2` unconstrained values for a
   correlated block's `cholesky_factor_corr[K] L`; it is empty at `K=1`.
 - `log_scales` indexes the unconstrained values underlying the positive scale:
-  `tau` for a correlated emission, or `log_scale` for the `(1 | g)` fast path.
+  `tau` for a correlated emission, `log_scale` for the `(1 | g)` fast path, or
+  one stratum's column of the sampled `tau_s_tau` for a stratum of a
+  `gr(g, by=b)` block.
 
 Construct with [`adaptive_centering_blocks`](@ref).  Indices are resolved by
 name against the caller-supplied unconstrained-name vector; no ordering of the
@@ -746,8 +749,9 @@ end
 # One block's frame: the same name spells the whole-file loop uses, factored
 # so centered replay (prediction.jl) resolves ONE block's hyperparameters
 # without tripping over a sibling this contract skips or refuses. Returns
-# `nothing` for a family outside every set below; stratified blocks raise
-# rather than being silently left fixed. An R2D2 block needs the emitted
+# `nothing` for a family outside every set below. A stratified block has one
+# frame per stratum, which `_adaptive_stratified_blocks` resolves; it raises
+# here rather than being read as one frame. An R2D2 block needs the emitted
 # model's scale context `r2d2` (`_adaptive_r2d2_context`), which only
 # `adaptive_centering_blocks` builds: R2D2 blocks are never centered, so the
 # replay caller never reaches one. A known-value block needs its binding
@@ -759,10 +763,10 @@ function _adaptive_block(ranef::RanefBlock, unc_names, pos; r2d2=nothing,
                          known=nothing, effects=nothing)
     ranef.family in _ADAPTIVE_STRATIFIED_FAMILIES && error(
         "BRM adaptive centering: stratified block `$(ranef.binding)` ",
-        "(`$(ranef.family)`, group `$(ranef.group)`, by `$(ranef.by)`) is ",
-        "not supported by the first correlated-block contract. It has one ",
-        "Cholesky/scale frame per stratum and must not be treated as an ",
-        "ordinary single-frame block.",
+        "(`$(ranef.family)`, group `$(ranef.group)`, by `$(ranef.by)`) has one ",
+        "scale/Cholesky frame per stratum, not one frame; resolve it through ",
+        "`adaptive_centering_blocks(model, unc_names)`, which returns one block ",
+        "per stratum.",
     )
     _ranef_level_correlated(ranef.family) && error(
         "BRM adaptive centering: block `$(ranef.binding)` correlates the levels ",
@@ -863,6 +867,68 @@ function _adaptive_known_block(ranef::RanefBlock, unc_names, pos, record;
     )
 end
 
+# A stratified `gr(g, by=b)` block (`ranef_correlated_by*`) as one ordinary
+# block per stratum. Stratum `s` samples its own scales `tau_s[:, s]` and
+# correlation factor `L_s[s]`, and only its levels read them: level `g` draws
+# `b[g] = diag(tau_s[:, s]) * L_s[s] * z[g]` with `s = stratum_idx[g]`. So
+# stratum `s` is exactly an ordinary block over its own levels, and no two
+# strata share a coordinate. Each stratum's block keeps the block's binding,
+# group and `by`, and holds the stratum's levels in block order, the order
+# `brm_ranef_draws` reports them; the blocks follow the stratum order. These
+# families are always non-centred: `centered_groups` refuses a stratified
+# group at emission.
+function _adaptive_stratified_blocks(ranef::RanefBlock, unc_names, pos, plan)
+    spec = _RANEF_FAMILIES[ranef.family]
+    S, stratum = _ranef_stratum_index(plan, ranef, "BRM adaptive centering")
+    K, binding = ranef.n_terms, ranef.binding
+    effects = ranef_coordinates(ranef, unc_names)
+    # The sampled scales are a `matrix<lower=0>[K, S]`, named and stored
+    # column-major.
+    tau = reshape(_adaptive_named_indices(pos,
+        ["$(binding)_$(_adaptive_stratum_carrier(spec, :scale)).$k.$s"
+         for s in 1:S for k in 1:K], binding, "scale"), K, S)
+    cholesky = _adaptive_stratum_cholesky(pos, binding,
+        _adaptive_stratum_carrier(spec, :correlation_cholesky), S, K)
+    blocks = AdaptiveCenteringBlock[]
+    for s in 1:S
+        members = findall(==(s), stratum)
+        part = RanefBlock(binding, ranef.family, ranef.group, ranef.id, ranef.by,
+            ranef.levels[members], K, length(members), ranef.z, ranef.noncentered,
+            ranef.generated, ranef.population)
+        push!(blocks, AdaptiveCenteringBlock(part, ranef.noncentered ? 0.0 : 1.0,
+            effects[:, members], cholesky[s], tau[:, s]))
+    end
+    blocks
+end
+
+# The parameter a stratified family samples in each stratum's plate cell for
+# `component` (`:scale`, `:correlation_cholesky`): `tau_s_tau` and `L_s_L`,
+# which the collected `tau_s` and `L_s` copy. `_RANEF_FAMILIES` labels them.
+_adaptive_stratum_carrier(spec, component) =
+    only(carrier for (carrier, c) in pairs(spec.internals) if c === component)
+
+# The Cholesky coordinates of each stratum's correlation factor, stratum by
+# stratum in Stan's `cholesky_factor_corr` order; none for a one-margin block,
+# whose single-margin form samples no factor (`_sb_single_margin_ranef`).
+# The factors are an `array[S] cholesky_factor_corr[K]`, which Stan stores
+# element-major (stratum `s` at `(s-1)*m+1 : s*m`, `m = K(K-1)/2`) but names
+# array-index-fastest, as for the `:group_term` carrier in `ranef_coordinates`:
+# the names locate the carrier's contiguous segment, and positions within it
+# follow the storage order (measured against BridgeStan `param_constrain`).
+function _adaptive_stratum_cholesky(pos, binding, carrier, S, K)
+    m = K * (K - 1) ÷ 2
+    m == 0 && return [Int[] for _ in 1:S]
+    found = _adaptive_named_indices(pos,
+        ["$(binding)_$(carrier).$s.$i" for i in 1:m for s in 1:S], binding, "Cholesky")
+    start = minimum(found)
+    sort(found) == start:(start + S * m - 1) || error(
+        "BRM adaptive centering: stratified block `$binding` resolves its ",
+        "`array[$S] cholesky_factor_corr[$K]` coordinates to a non-contiguous ",
+        "unconstrained segment. The model and `unc_names` do not describe the ",
+        "same emission.")
+    [collect(start + (s - 1) * m .+ (0:m-1)) for s in 1:S]
+end
+
 """
     adaptive_centering_blocks(model, unc_names) -> Vector{AbstractAdaptiveCenteringBlock}
 
@@ -913,9 +979,13 @@ block's mixing weight. The same map then reads `C_g` in place of `C`, so `c=0`
 is the emitted standardised draw and `c=1` the level's effect `b[g]`. The
 weights are read, never transformed.
 
-Stratified `gr(g, by=b)` blocks currently raise rather than being silently
-left fixed: they carry one `L,tau` frame per stratum and need a separate indexed
-metadata contract. Intercept-only `(1 | mm(...))` blocks adapt through the
+A stratified `gr(g, by=b)` block samples one `tau`, `L` frame per stratum of
+`b`, and each group reads its own stratum's frame. It is returned as one
+[`AdaptiveCenteringBlock`](@ref) per stratum, in stratum order: the stratum's
+`tau` and `L` coordinates over the effects of its groups. Each such block keeps
+the stratified block's `binding`, `group` and `by`, and its `ranef.levels` are
+the stratum's groups in block order, as [`brm_ranef_draws`](@ref) lists them.
+Intercept-only `(1 | mm(...))` blocks adapt through the
 ordinary scalar path (their downstream gather is linear); an `mm` block with
 any slope term, including a slope-only `(0 + x | mm(...))`, shares the ordinary
 correlated emission and adapts with it.
@@ -941,6 +1011,10 @@ function adaptive_centering_blocks(model, unc_names)
         _adaptive_r2d2_context(model, pos) : nothing
     out = AbstractAdaptiveCenteringBlock[]
     for ranef in ranefs
+        if ranef.family in _ADAPTIVE_STRATIFIED_FAMILIES
+            append!(out, _adaptive_stratified_blocks(ranef, unc_names, pos, plan))
+            continue
+        end
         blk = _adaptive_block(ranef, unc_names, pos; r2d2,
                               known=_adaptive_known_record(plan, ranef))
         isnothing(blk) || push!(out, blk)

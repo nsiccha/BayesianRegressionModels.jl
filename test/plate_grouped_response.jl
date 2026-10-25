@@ -135,12 +135,14 @@ end
 
     @testset "invalid axes fail before Stan" begin
         mismatched = merge(flat_data, (; obs_subject=flat_data.obs_subject[1:end-1]))
-        @test_throws "grouping column must name" SBBRMI(
+        @test_throws "grouping column must label EVERY entry" SBBRMI(
             flat_builder(mismatched); mod=@__MODULE__)
         unknown = merge(flat_data, (;
             obs_subject=["s1", "s2", "s3", "s2", "s3", "not-a-subject"],
         ))
-        @test_throws "name no subject" SBBRMI(flat_builder(unknown); mod=@__MODULE__)
+        # refused: an observation in no cell would be carried into the fit
+        # without conditioning on it (`0q8hcwq`, `1bwqnxs`).
+        @test_throws "belong to no cell" SBBRMI(flat_builder(unknown); mod=@__MODULE__)
         already_grouped = merge(flat_data, (; obs_y=expected))
         @test_throws "ALREADY a ragged per-subject column" SBBRMI(
             flat_builder(already_grouped); mod=@__MODULE__)
@@ -162,7 +164,7 @@ end
     short_bound = merge(censored_flat_data, (;
         pk_lloq=censored_flat_data.pk_lloq[1:end-1],
     ))
-    @test_throws "grouping column must name" SBBRMI(
+    @test_throws "grouping column must label EVERY entry" SBBRMI(
         censored_flat_builder(short_bound); mod=@__MODULE__)
 end
 
