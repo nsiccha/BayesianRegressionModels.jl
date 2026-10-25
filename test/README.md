@@ -349,6 +349,16 @@ address (`brm_nlme_start(m, inits)`) give the addressed θ, σ and Ω with zero
 `brm_nlme_joint_start` of that start. Run it in the NLMEEstimation scratch
 environment described below.
 
+`nlme_two_stage.jl` checks one unit's conditional problem
+(`brm_nlme_unit_problem`) on flat and nested models. Its log-density
+differences equal the full RK model's at points assembled by `brm_nlme_draws`,
+and its gradient matches finite differences. The file also runs
+`brm_two_stage_fit` end to end, full-batch and minibatch, with a WarmupHMC
+unit sampler, and checks that units sampled on several threads give exactly
+the single-threaded draws. Run it in the NLMEEstimation scratch environment
+described below, with `--threads` above 1 so the threading check exercises
+concurrency.
+
 `start_values.jl` checks `brm_start`, initial values keyed by prior address,
 on both backends. For a correlated population-PK model, a linked predictor,
 a categorical predictor with a `Dirichlet` simplex, and an exact-total block,
