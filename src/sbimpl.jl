@@ -16165,16 +16165,22 @@ _sb_scalar_expr(x::ExprColumn, data) = begin
         return Expr(:ref, _sb_scalar_expr(obj, data),
                     (_sb_scalar_expr(a, data) for a in idxs)...)
     end
+    args = Any[_sb_scalar_expr(a, data) for a in getargs(x)]
+    # A Julia callable Stan spells differently (`vcat` -> nested `append_row`,
+    # `cumsum` -> `cumulative_sum`, ...) takes the kernel cells' spelling.
+    if isempty(getkwargs(x))
+        stan = _sb_julia_stan_call(f, args)
+        stan === nothing || return stan
+    end
     op = f === (*) ? Symbol(".*") :
          f === (/) ? Symbol("./") :
          f
     # Julia parses a flat product as one variadic call. StanBlocks' dotted
     # arithmetic is binary, so retain the original operand order in a left fold.
-    if f === (*) && isempty(getkwargs(x)) && length(getargs(x)) > 2
-        args = map(a -> _sb_scalar_expr(a, data), getargs(x))
+    if f === (*) && isempty(getkwargs(x)) && length(args) > 2
         return foldl((left, right) -> Expr(:call, op, left, right), args)
     end
-    call = Expr(:call, op, (_sb_scalar_expr(a, data) for a in getargs(x))...)
+    call = Expr(:call, op, args...)
     isempty(getkwargs(x)) || insert!(call.args, 2,
         Expr(:parameters, (Expr(:kw, key, _sb_scalar_expr(value, data))
                            for (key, value) in pairs(getkwargs(x)))...))
