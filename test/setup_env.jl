@@ -122,7 +122,9 @@ const PINS = [
     # translates RKBRMI backends through. 911df2b96 adds 39185dd24 (a call
     # on static operands, such as the GP jitter/period guards over caller
     # literals, is decided while JAX traces; snag jax-source-liter-a9e6219e).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "911df2b96f50d612670ac9c15d40a7f0470c80d0"),  # main
+    # 38265d407 adds 711b2034d (`reshape` with a `Colon` dimension, e.g. the
+    # GP pair locations, translates; snag jax-source-resha-959acdfb).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "38265d40757a66ee88f0b7420cb023f7afaf202a"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.5); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "d16c4efb72b963f45de9d6f632c38d46706c23e1"),  # main
