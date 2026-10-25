@@ -764,6 +764,12 @@ function _adaptive_block(ranef::RanefBlock, unc_names, pos; r2d2=nothing,
         "Cholesky/scale frame per stratum and must not be treated as an ",
         "ordinary single-frame block.",
     )
+    _ranef_level_correlated(ranef.family) && error(
+        "BRM adaptive centering: block `$(ranef.binding)` correlates the levels ",
+        "of `$(ranef.group)` with each other (`gr(...; cor=...)`), so its levels ",
+        "share one factor across levels; per-level centering of such a block is ",
+        "not implemented, and it is not silently left fixed either.",
+    )
     # A Student-t block is its Gaussian family's frame with level `g`'s factor
     # scaled by `sqrt(w[g])`: the Gaussian frame is resolved over the block's
     # own effect coordinates, then carried in derived-scale form with the

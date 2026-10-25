@@ -111,6 +111,9 @@ function _sb_s2z_plan(brmi, prepared, predictor, overrides, rho, requested;
         group = only(selected)
         own = filter(d -> _s2z_declaration_group(d) === group, declarations)
         any(d -> d.descriptor isa Tuple, own) && throw(ArgumentError("stratified blocks"))
+        any(d -> !isnothing(_brm_declaration_level_cor(d)), own) && throw(ArgumentError(
+            "correlated levels (`gr(...; cor=...)`): a sum-to-zero contrast basis " *
+            "over level-correlated effects is not implemented"))
         plans = _brm_simple_random_effect_plans(brmi, target, prepared.context;
             select=d -> _s2z_declaration_group(d) === group)
         isnothing(plans) && throw(ArgumentError("unresolved random-effect plans"))
@@ -456,7 +459,7 @@ function _sb_emit_s2z!(stmts, data, target, plan; mod::Module=@__MODULE__)
     _sb_record_preproc!(data, rhon, PreprocEntry(:s2z_weights,
         (; levels=plan.levels, rho=copy(plan.weights)), plan.group, true))
     prior = _sb_vector_positive_priors(_brm_total_scales, :tau, plan.scale_priors)
-    push!(stmts, :($tau ~ $(prior.model)(; n=$nk)))
+    push!(stmts, Expr(:call, :~, tau, _sb_configured_prior_call(prior, :n => nk)))
     if plan.coordinates === :groups
         push!(stmts, :($z::matrix[$ng, $nk] ~ brm_s2z_group($tau, $rhon)))
     else

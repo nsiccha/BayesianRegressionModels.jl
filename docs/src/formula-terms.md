@@ -17,6 +17,7 @@ signature — the rest are covered by their docstrings on the [API](@ref) page.
 | `gp(x…; cov=:exp_quad, iso=true, jitter=1e-9)` | exact latent Gaussian process, noncentered Cholesky draw | — |
 | `gp(x; cov=:periodic, period, jitter=1e-9)` | exact latent GP under Stan's periodic kernel, one axis | — |
 | `hsgp(x…; k=20, c=1.5, iso=true, by=nothing, domain=nothing, orthogonal_to=nothing, centeredness=0)` | Hilbert-space GP approximation over `prod(k)` basis functions; optional fixed partial centering | — |
+| `hsgp(x…; by=g, cor=Omega)` | grouped HSGP whose group weights are correlated across the levels of `g` by `Omega` ("Correlated levels of a grouping factor" below) | — |
 | `hsgp(x; k=20, cov=:periodic, period)` | periodic Hilbert-space basis: `k` harmonics, `2k` cosine/sine functions | — |
 | `ar(time; p=1)` | AR(p) noise process ordered by `time`; only `p=1` is emitted | — |
 | `dar(time; p=1)` | direct differenced-AR(1) trajectory with bounded persistence and scaled innovations | — |
@@ -453,12 +454,43 @@ Used on the right of `|` in a random-effect block.
 | Term | What it does |
 | --- | --- |
 | `gr(g)` | ordinary grouping factor / strata |
+| `gr(g; cor=Omega)` | grouping factor whose levels are correlated with each other by `Omega` (below) |
 | `mm(g1, g2, …; weights=(w1, w2, …), normalize=true)` | multi-membership — one coefficient block shared across two or more levels per row |
 
 `mm` needs at least two group columns; omitting `weights` gives exact equal
 weights `1/M`. Supplied weights must be present, real, finite, nonnegative and
 sum to something positive on every row. It does not combine with `|ID|`,
 `cv_groups` or `centered_groups`, which error explicitly.
+
+### Correlated levels of a grouping factor
+
+Every other grouping keeps its levels independent: `(… | ID | g)` and
+`cor(:, ID)` correlate the coefficients *within* one level. `cor=` correlates
+the **levels** of `g` with each other, the intrinsic coregionalisation model,
+so a sparsely observed level borrows from the levels it is correlated with.
+The correlation is declared once in the `@brm` block and named wherever it
+applies. With `Omega ~ LKJCholesky(17, 2.0)` declared, the formula
+`mu ~ 1 + t + (0 + t | gr(region; cor=Omega)) + hsgp(t; k=20, by=region, cor=Omega)`
+gives the regional slopes and the regional HSGP curves one shared, learned
+correlation between the 17 regions.
+
+- `Omega ~ LKJCholesky(K, eta)` is a sampled `cholesky_factor_corr[K]` under
+  the LKJ prior, with literal `K` (the number of levels of `g`) and `eta`.
+  `cor=C` may instead name a known correlation matrix supplied as data.
+- A random-effect block `(effects | gr(g; cor=Omega))` multiplies its levels ×
+  coefficients effects on the left by `L_Omega`: its law is `Omega ⊗ Sigma`,
+  each level keeping the block's own covariance.
+- A grouped HSGP `hsgp(x…; by=g, cor=Omega)` draws every basis function's
+  group weights as `L_Omega * z`, i.e. `MVN(0, S(ω_j) Omega)`.
+- Terms naming the same `Omega` share it. An ID-less `gr(g; cor=…)` block
+  lowers under its generated `|lp__g|` ID, and `sd(:, g)` addresses reach it.
+
+`SBBRMI` and `RKBRMI` implement it with equal densities; `VBRMI` refuses it.
+`brm_ranef_draws` reports each level-correlated block's `level_cor`. Not yet
+implemented, each refused by name: `cv_groups`, `centered_groups` and
+`resample_groups` on the grouping, Student-t and R2D2 blocks, `gr(g; by=b,
+cor=…)`, hyper-predicted HSGP scales, `s2z_groups`, adaptive centering and the
+NLME view. Exact totals leave such a block conventional.
 
 ### Exact total coefficients
 

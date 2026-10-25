@@ -276,6 +276,9 @@ function _sb_total_plan(brmi, prepared, predictor, overrides, buckets, sd_overri
     # Do not reinterpret shared/correlated/stratified/multi-membership blocks.
     any(d -> d.raw_group isa MultiMembershipTerm || d.descriptor isa Tuple, declarations) &&
         return ineligible("its block is multi-membership, stratified or shared")
+    # A total integrates each level on its own; correlated levels couple them.
+    any(d -> !isnothing(_brm_declaration_level_cor(d)), declarations) &&
+        return ineligible("its random-effect levels are correlated (`gr(...; cor=...)`)")
     plans = _brm_simple_random_effect_plans(brmi,target,prepared.context)
     isnothing(plans) && return ineligible("its random effects are not one simple grouping")
     group = first(plans).group
@@ -648,7 +651,7 @@ function _sb_emit_total!(stmts,data,target,plan;mod::Module=@__MODULE__)
     # Vector scale prior is assembled through the existing prior translator,
     # retaining its normalization and support rules.
     prior = _sb_vector_positive_priors(_brm_total_scales,:tau,plan.scale_priors)
-    push!(stmts,:($tau ~ $(prior.model)(;n=$nk)))
+    push!(stmts,Expr(:call,:~,tau,_sb_configured_prior_call(prior,:n => nk)))
     mixture_indices = findall(v -> !isnothing(v.nu),plan.prior_info)
     mixture = isempty(mixture_indices) ? nothing : Symbol(:total_mixture_,suffix)
     cp = prec

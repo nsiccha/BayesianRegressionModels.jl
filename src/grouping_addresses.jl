@@ -30,7 +30,10 @@
 #     k-th `||` term on `g` of `lp` -> `|lp__g__nocor__k|`
 #
 # A block no statement reaches is left as written, so a model without
-# grouping-column addresses is unchanged. A rewritten scalar intercept block
+# grouping-column addresses is unchanged, unless its grouping correlates its
+# levels (`gr(g; cor=...)`, src/level_correlation.jl): such a block always
+# lowers under its generated ID, keeping `gr(g; cor=...)` as its grouping, since
+# the `|ID|` machinery is where each backend correlates a block's levels. A rewritten scalar intercept block
 # keeps its plain default `LogNormal(0, 1)` scale when no `sd` statement
 # reaches it (an `|ID|` margin defaults to half-normal). An `|ID|` keeps its ID
 # address only; a name that is both an `|ID|` and the grouping column of an
@@ -241,12 +244,18 @@ column, so resolving twice is free.
 Base.@nospecializeinfer function _brm_resolve_grouping_addresses(@nospecialize(brmi::BRMI);
                                                                  prefix=_BRM_GROUPING_PREFIX)
     specs = ranef_effect_priors(brmi)
-    isempty(specs) && return brmi
     declarations = _brm_group_declarations(brmi)
+    # A block whose grouping carries a level correlation (`gr(g; cor=...)`,
+    # src/level_correlation.jl) always lowers through the shared `|ID|`
+    # machinery, addressed or not: that is where each backend correlates the
+    # levels of a block's draws.
+    correlated = Symbol[_brm_grouping_column(d) for d in declarations
+                        if isnothing(d.id) && !isnothing(_brm_declaration_level_cor(d))]
+    isempty(specs) && isempty(correlated) && return brmi
     ids = Set{Symbol}(d.id for d in declarations if !isnothing(d.id))
     idless = Set{Symbol}(_brm_grouping_column(d) for d in declarations
                          if isnothing(d.id) && !isnothing(_brm_grouping_column(d)))
-    groups = Symbol[]
+    groups = unique(correlated)
     for spec in specs
         spec.id in idless || continue
         spec.id in ids && error(
@@ -280,6 +289,14 @@ Base.@nospecializeinfer function _brm_resolve_grouping_addresses(@nospecialize(b
 
     rewritten = Set{Int}(d for reach in reaches for i in reach
                          for d in blocks[i].declarations)
+    level_cor = Dict{Int,Any}()
+    for (i, b) in enumerate(blocks)
+        value = _brm_block_level_cor(declarations[b.declarations],
+                                     _brm_grouping_label(b); prefix)
+        isnothing(value) && continue
+        level_cor[i] = value
+        union!(rewritten, b.declarations)
+    end
     scaled = Set{Int}(i for (spec, reach) in zip(addressed, reaches)
                       if spec.class === :sd for i in reach)
     r2d2_predictors = [p.predictor for p in r2d2_priors(brmi)]
@@ -287,11 +304,13 @@ Base.@nospecializeinfer function _brm_resolve_grouping_addresses(@nospecialize(b
     defaults = Dict{Int,Vector{Pair{Symbol,Any}}}()
     for (i, b) in enumerate(blocks)
         all(in(rewritten), b.declarations) || continue
+        descriptor = haskey(level_cor, i) ?
+            ExprColumn(gr, b.descriptor; cor=level_cor[i]) : b.descriptor
         for d in b.declarations
             term = declarations[d].expression
             replacement[d] = push!(get(replacement, d, Any[]),
                 ExprColumn(|, b.zerocorr ? only(b.effects) : first(getargs(term)),
-                           b.id, b.descriptor))
+                           b.id, descriptor))
         end
         # The plain path samples a lone intercept's scale as `exp(log_scale)`
         # with `log_scale ~ std_normal()`; an `|ID|` margin is half-normal.

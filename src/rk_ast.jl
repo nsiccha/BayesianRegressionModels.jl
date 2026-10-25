@@ -1806,6 +1806,13 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 _rk_ast_dotted(:Exponential, theta)))
             push!(stmts, Expr(:call, :~, L, Expr(:call, :LKJCholesky, K, eta)))
             push!(stmts, Expr(:(=), parameter.name, Expr(:call, :.*, scales, L)))
+        elseif parameter.family === :LKJCholesky
+            # A level correlation's factor: its free values share Stan's
+            # `cholesky_factor_corr` transform and carry over by name.
+            sampled = _rk_ast_sampled(parameter)
+            push!(stmts, sampled)
+            _rk_coordinate_record!(coordinates, (; kind=:lkj_cholesky,
+                declaration=parameter.name, K=first(parameter.args)))
         else
             sampled = _rk_ast_sampled(parameter)
             push!(stmts, sampled)

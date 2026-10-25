@@ -223,6 +223,13 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
     # until it can hold a family fixed (NLMEEstimation snag
     # `fixed-omega-fami-a1322422`).
     for r in ranefs
+        # Correlated levels (`gr(g; cor=...)`) couple the subjects, which an
+        # NLME reading treats as independent.
+        haskey(r, :level_correlation) && _brm_nlme_error(
+            "brm_nlme_view: random-effect block `|$(r.id)|` correlates the levels " *
+            "of `$(r.group)` with each other (`gr($(r.group); cor=$(r.level_correlation))`), " *
+            "so its subjects are not independent and the model has no NLME " *
+            "reading. Fit it with the Stan or RK sampler.")
         haskey(r, :known_scales) && _brm_nlme_error(
             "brm_nlme_view: random-effect block `|$(r.id)|` (group `$(r.group)`) " *
             "holds a known scale or correlation (`sd(...) = value` / " *

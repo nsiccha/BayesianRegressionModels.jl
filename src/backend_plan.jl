@@ -254,8 +254,23 @@ _brm_register_sampling_lhs!(ctx::AbstractDict,
     _brm_register_skipped_inner!(ctx, only(getargs(lhs)))
 
 _brm_register_skipped_inner!(_, _) = nothing
-_brm_register_skipped_inner!(ctx::AbstractDict, inner::NamedColumn) =
-    (push!(get!(ctx, :skip_data, Set{Symbol}()), name(inner)); nothing)
+# A skipped column never reaches the materialized data as itself, yet it can be
+# the only observation that sizes an intercept-only predictor (`log(sigma) ~ 1`
+# read by `mi(y) ~ ...`), so its row count is recorded beside the skip.
+function _brm_register_skipped_inner!(ctx::AbstractDict, inner::NamedColumn)
+    push!(get!(ctx, :skip_data, Set{Symbol}()), name(inner))
+    rows = _brm_skipped_column_rows(parent(inner))
+    isnothing(rows) || (get!(ctx, :skipped_rows, Dict{Symbol,Int}())[name(inner)] = rows)
+    nothing
+end
+_brm_skipped_column_rows(backing::DataColumn) = _brm_skipped_column_rows(parent(backing))
+_brm_skipped_column_rows(raw::AbstractVector) = length(raw)
+_brm_skipped_column_rows(_) = nothing
+
+# The row count of observation source `source` when the backends materialize
+# it themselves (an `mi(...)` column), else `nothing`.
+_brm_skipped_observation_rows(context, source) =
+    get(get(context.prepass, :skipped_rows, Dict{Symbol,Int}()), source, nothing)
 
 # Multi-membership-only sources are Julia-side preprocessing inputs, not raw
 # backend data. A source also used elsewhere remains ordinary model data.
@@ -1459,7 +1474,7 @@ function _brm_random_effect_group(raw)
         "BRM backend lowering: `gr(...)` group must be one raw data column; " *
         "got `$(repr(group))`")
     kwargs = getkwargs(raw)
-    unknown = setdiff(Set(keys(kwargs)), Set((:by, :id)))
+    unknown = setdiff(Set(keys(kwargs)), Set((:by, :id, :cor)))
     isempty(unknown) || error(
         "BRM backend lowering: `gr(...)` has unsupported keyword(s) " *
         "$(sort!(collect(unknown)))")
@@ -1469,7 +1484,17 @@ function _brm_random_effect_group(raw)
             "BRM backend lowering: `gr(...; by=...)` must name one raw data " *
             "column; got `$(repr(by))`")
     end
-    (; group, by, id=_brm_group_id(get(kwargs, :id, nothing)))
+    # `cor=` correlates the levels of `group` (src/level_correlation.jl).
+    cor = get(kwargs, :cor, nothing)
+    if !isnothing(cor)
+        _brm_level_correlation(cor; what="gr($(name(group)); cor=$(_brm_level_cor_label(cor)))")
+        isnothing(by) || error(
+            "BRM backend lowering: `gr($(name(group)); by=..., cor=...)` is not " *
+            "implemented: a level correlation over a stratified block has no " *
+            "single level ordering yet. Use `gr($(name(group)); cor=...)` " *
+            "without `by=`")
+    end
+    (; group, by, id=_brm_group_id(get(kwargs, :id, nothing)), cor)
 end
 
 function _brm_group_declaration(predictor::Symbol, term::ExprColumn)
