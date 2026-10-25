@@ -777,7 +777,9 @@ kernel_schedule(n; subject=collect(1:n)) = (;
     primary = brm_output(d, :loc)
     @test primary.logical === :loc
     @test primary.name in (o.name for o in plate_outputs)
-    @test startswith(string(primary.name), "loc__pl_mem_")
+    # StanBlocks names a plate value after itself (fd91d0c): the collected
+    # ragged return is the flat vector `loc`.
+    @test primary.name === :loc
 
     # Every value this cell names is addressable, including the scratch link
     # inverses. That is the deliberate width of the rule (decision `1tpze5q`):

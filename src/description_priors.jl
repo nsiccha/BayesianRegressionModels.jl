@@ -219,7 +219,8 @@ function _brmd_ranef_priors!(priors,d,groups,anchors,notation,texts)
         logscale = group.block.family in (:ranef_intercept,:ranef_intercept_draws,:ranef_intercept_centered)
         derived = group.block.family in (:ranef_intercept_r2d2,
             :ranef_correlated_r2d2,:ranef_correlated_draws_r2d2,
-            :ranef_correlated_by,:ranef_correlated_by_draws)
+            :ranef_correlated_by,:ranef_correlated_by_draws,
+            :ranef_correlated_by_draws_generic)
         if logscale
             push!(priors,_brmd_prior(d,(group.key...,:log_scale),_brmd_default_normal(),NamedTuple(),
                 (;kind=:default,transformed_quantity=:sd,transform=:exp),anchors,notation,texts))

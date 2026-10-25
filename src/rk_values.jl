@@ -201,6 +201,19 @@ function _rk_ast_stratified_draws!(definitions, taken, K, eta, group, stratum)
     _rk_ast_block_call!(definitions, taken, "brm_stratified_draws", block, b)
 end
 
+# One positive scale law per margin of a bucket. Stan's ordinary unnamed
+# intercept and multi-membership intercept families sample
+# log_scale ~ Normal(0,1). Shared-ID, slope and stratified families keep their
+# half-normal scale default.
+function _rk_ast_bucket_scale_priors(bucket, bindings, taken)
+    priors = bucket.sd_priors
+    all(isequal(first(priors)), priors) || return [
+        _rk_ast_positive_prior(prior, bindings, taken) for prior in priors]
+    default = bucket.kind === :intercept1 ? :LogNormal : :HalfNormal
+    fill(_rk_ast_positive_prior(first(priors), bindings, taken; default),
+         length(bucket.margins))
+end
+
 # The degrees of freedom of a Student-t bucket as an RK value: a numeric
 # constant, or the graph value of the declared scalar it names.
 _rk_ast_student_t_nu(::Nothing, _bindings, _taken) = nothing
@@ -225,7 +238,8 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
     levels_of = grouping.form === :plain ? get(level_sources, group, group) : group
     if grouping.form === :gr
         _rk_ast_stratified_group_component!(definitions, stmts, taken, draws,
-            group, grouping.by, K, bucket.lkj_eta)
+            group, grouping.by, K, bucket.lkj_eta,
+            _rk_ast_bucket_scale_priors(bucket, bindings, taken))
     elseif bucket.decomposition !== nothing
         # Shared R2D2M2 budgets derive the scales in the main block; the
         # component still owns its correlation factor and draws.
@@ -235,15 +249,7 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
         _rk_ast_group_component!(definitions, stmts, taken, draws, levels_of, K,
             bucket.lkj_eta, (); scale_value=tau)
     else
-        # Stan's ordinary unnamed intercept and multi-membership intercept
-        # families sample log_scale ~ Normal(0,1). Shared-ID, slope and
-        # stratified families keep their half-normal scale default.
-        default = bucket.kind === :intercept1 ? :LogNormal : :HalfNormal
-        priors = if all(isequal(first(bucket.sd_priors)), bucket.sd_priors)
-            fill(_rk_ast_positive_prior(first(bucket.sd_priors), bindings, taken; default), K)
-        else
-            [_rk_ast_positive_prior(prior, bindings, taken) for prior in bucket.sd_priors]
-        end
+        priors = _rk_ast_bucket_scale_priors(bucket, bindings, taken)
         # Known values (`sd(...) = value`, `cor(:, ID) = R`) are constants: a
         # known scale is its number in `tau`, a known correlation a constant
         # Cholesky factor in place of the LKJ draw.

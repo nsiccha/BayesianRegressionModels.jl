@@ -246,9 +246,10 @@ end
         sd(:, probe) ~ Exponential(1.0)
         y ~ Normal(mu, 1.0)
     end
-    # Covariance priors for stratified blocks are not built, with or without
-    # an `|ID|`.
-    @test_broken (build(stratified); true)
+    # A stratified block takes the statement in every stratum
+    # (test/stratified_ranef_priors.jl).
+    @test occursin(r"b_mu__probe__by__site_probe__by__site_tau_s_tau\[[^\]]*\]\s*~ exponential\(\(1\.0 \./ 1\.0\)\);",
+                   code(build(stratified)))
     joint = @brm DF begin
         mu ~ 1 + c1 + (1 + c1 || probe)
         sd(:, probe) ~ r2d2(mean_R2=0.5, prec_R2=2.0, reference_scale=1.0)

@@ -122,8 +122,14 @@ end
                      isdefined(BayesianRegressionModels, nm) &&
                      getproperty(BayesianRegressionModels, nm) isa StanBlocks.SlicModel)
     tabled = Set(keys(BayesianRegressionModels._RANEF_FAMILIES))
+    # Families derived from a base submodel when a block needs them (a
+    # level-correlated block, a stratified block its `sd`/`cor` statements
+    # configure) have a row but no submodel of their own name.
+    derived = Set{Symbol}(BayesianRegressionModels._sb_level_correlated_family(f)
+                          for f in BayesianRegressionModels._SB_LEVEL_CORRELATED_RANEF_BASES)
+    push!(derived, :ranef_correlated_by_draws_generic)
     @test isempty(setdiff(emitted, tabled))   # an emission with no row
-    @test isempty(setdiff(tabled, emitted))   # a row for a submodel that is gone
+    @test isempty(setdiff(tabled, emitted ∪ derived))   # a row for a submodel that is gone
     # Pin the count too: both setdiffs stay empty if a submodel and its row are
     # deleted together, which is fine, but a silent DROP should still be read.
     @test length(emitted) == 28 # twelve established layouts + generic centered/noncentered + scalar slope + two Student-t + three marginalized |ID| (active, centered active, completion) + known scale/correlation, their two Student-t forms and their two centered forms + two centered Student-t

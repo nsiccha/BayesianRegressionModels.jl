@@ -56,8 +56,12 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # c7293b88 evaluates Stan's vectorised builtins elementwise there, so a per-axis
 # `fmax(0.0, rho_lower_…)` floor reports one bound per coordinate; b97fc5a6 reads shared
 # scan arguments once per step; c4671eb's values-free `maybecv(:y)` holds out an
-# observation with no values given a fit (BRM's forecast replay).
-rev = "c4671eb85737b39688a5ff748a162d64b78fc56a"
+# observation with no values given a fit (BRM's forecast replay). fd91d0c names a plate's
+# Stan values after their own names (no `__pl_mem_1` suffix) and adds `stan_interface`;
+# 785edf4 describes tuple descriptor entries by their `fields`; a57951eb lets a plate cell
+# bind a matrix local; c9504e99 ingests a `Vector{Matrix}` data value as a `RaggedMatrix`
+# whose `X[g]` is the g-th matrix in a plate cell.
+rev = "c9504e9911da428cec94389f98f9757455321ab7"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
