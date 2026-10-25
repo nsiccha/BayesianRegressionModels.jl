@@ -20,6 +20,10 @@
 # to StanBlocks. Everything else passes through unchanged: StanBlocks
 # spellings keep their current Stan source, and a caller helper resolves to the
 # `@deffun` of the same name, whose Julia methods are what RKBRMI calls.
+#
+# A model-scope expression (`u = vcat(a, b)`, a likelihood argument) holds the
+# callable `@brm` evaluated, and `_sb_scalar_expr` spells it through the same
+# `_sb_julia_stan_call` table.
 
 # The value `head` names in `scope`, or `nothing` when nothing binds it there.
 _sb_cell_binding(scope, head) = nothing
@@ -36,26 +40,26 @@ function _sb_cell_binding(scope::Module, head::Expr)
 end
 
 # The Stan builtin a Julia callable is spelled as, for calls and dotted calls.
-_sb_cell_stan_name(callable) = nothing
-_sb_cell_stan_name(::typeof(LogExpFunctions.logistic)) = :inv_logit
-_sb_cell_stan_name(::typeof(LogExpFunctions.log1pexp)) = :log1p_exp
-_sb_cell_stan_name(::typeof(LogExpFunctions.log1mexp)) = :log1m_exp
-_sb_cell_stan_name(::typeof(LogExpFunctions.logsumexp)) = :log_sum_exp
-_sb_cell_stan_name(::typeof(cumsum)) = :cumulative_sum
+_sb_julia_stan_name(callable) = nothing
+_sb_julia_stan_name(::typeof(LogExpFunctions.logistic)) = :inv_logit
+_sb_julia_stan_name(::typeof(LogExpFunctions.log1pexp)) = :log1p_exp
+_sb_julia_stan_name(::typeof(LogExpFunctions.log1mexp)) = :log1m_exp
+_sb_julia_stan_name(::typeof(LogExpFunctions.logsumexp)) = :log_sum_exp
+_sb_julia_stan_name(::typeof(cumsum)) = :cumulative_sum
 
 # The Stan call for a Julia call, or `nothing` to keep the authored call.
-function _sb_cell_stan_call(callable, args)
-    name = _sb_cell_stan_name(callable)
+function _sb_julia_stan_call(callable, args)
+    name = _sb_julia_stan_name(callable)
     name === nothing ? nothing : Expr(:call, name, args...)
 end
 # Constructors whose Stan builtin depends on the result's rank.
-_sb_cell_stan_call(::typeof(fill), args) =
+_sb_julia_stan_call(::typeof(fill), args) =
     length(args) == 2 ? Expr(:call, :rep_vector, args...) :
     length(args) == 3 ? Expr(:call, :rep_matrix, args...) : nothing
-_sb_cell_stan_call(::typeof(zeros), args) = _sb_cell_stan_call(fill, Any[0.0; args])
-_sb_cell_stan_call(::typeof(ones), args) = _sb_cell_stan_call(fill, Any[1.0; args])
+_sb_julia_stan_call(::typeof(zeros), args) = _sb_julia_stan_call(fill, Any[0.0; args])
+_sb_julia_stan_call(::typeof(ones), args) = _sb_julia_stan_call(fill, Any[1.0; args])
 # Stan concatenates two values at a time.
-_sb_cell_stan_call(::typeof(vcat), args) = length(args) < 2 ? nothing :
+_sb_julia_stan_call(::typeof(vcat), args) = length(args) < 2 ? nothing :
     foldl((a, b) -> Expr(:call, :append_row, a, b), args)
 
 _sb_cell_combinator(head) =
@@ -92,14 +96,14 @@ function _sb_cell_value(x::Expr, scope)
         args = Any[_sb_cell_argument(a, scope) for a in x.args[2:end]]
         if !any(_sb_cell_keyword_argument, args)
             callable = _sb_cell_binding(scope, head)
-            rewritten = callable === nothing ? nothing : _sb_cell_stan_call(callable, args)
+            rewritten = callable === nothing ? nothing : _sb_julia_stan_call(callable, args)
             rewritten === nothing || return rewritten
         end
         return Expr(:call, head, args...)
     elseif _brm_is_broadcast_call(x)
         head = first(x.args)
         callable = _sb_cell_binding(scope, head)
-        name = callable === nothing ? nothing : _sb_cell_stan_name(callable)
+        name = callable === nothing ? nothing : _sb_julia_stan_name(callable)
         return Expr(:., something(name, head),
             Expr(:tuple, (_sb_cell_argument(a, scope) for a in x.args[2].args)...))
     elseif x.head === :. && length(x.args) == 2 && x.args[2] isa QuoteNode

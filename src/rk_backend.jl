@@ -418,8 +418,10 @@ _RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping) =
 
 struct _RKVectorParameter
     name::Symbol
-    family::Symbol # :ordered_normal | :vector_normal | :simplex_dirichlet
-    args::Tuple # literals: (location, scale) / (concentration-vector,)
+    family::Symbol # :ordered_normal | :vector_normal | :simplex_dirichlet |
+                   # :elementwise | :mvnormal
+    args::Tuple # literals: (location, scale) / (concentration-vector,);
+                # :elementwise (element::_RKSampledParameter,); :mvnormal (mean, Σ)
     size::Union{Nothing,Int}
     label::Symbol
 end
@@ -6176,8 +6178,9 @@ function _rk_plan_parameters!(prepared, data::AbstractDict,
             "$prefix: parameter `$(parameter.name)` prior is not a " *
             "distribution call")
         callable = prior.callable
-        # Dirichlet simplexes plan as vector parameters (below), not here.
-        callable === Dirichlet && continue
+        # Dirichlet simplexes, declared vectors and `MvNormal` vectors plan
+        # as vector parameters (`_rk_plan_vector_parameters!`), not here.
+        _rk_vector_prior_callable(callable) && continue
         # LKJ covariance-factor stems plan as stem declarations (the
         # thin layer derives `<stem>_scales`/`<stem>_L_corr` itself).
         if callable === LKJCovarianceFactor
@@ -6191,83 +6194,129 @@ function _rk_plan_parameters!(prepared, data::AbstractDict,
             push!(specs, _rk_lkj_cholesky_parameter(parameter.name, prior))
             continue
         end
-        declaration_bounds = callable !== truncated &&
-            any(key -> key in (:lower, :upper), keys(prior.kwargs))
-        family_prior = declaration_bounds ? _BRMPreparedExpr(callable,
-            prior.args, (; (key => value for (key, value) in pairs(prior.kwargs)
-                if !(key in (:lower, :upper)))...)) : prior
-        family, args, support_override = if callable === truncated
-            # Keyword bounds are validated inside the truncated gate.
-            _rk_truncated_prior(prior, parameter.name, (bound, side) ->
-                _rk_truncation_bound(bound, parameter.name, side, data,
-                    consts, aliases, parameters, assign_names))
-        elseif callable === LocationScale
-            _rk_locationscale_studentt(family_prior, parameter.name)
-        else
-            callable isa Type || error(
-                "$prefix: parameter `$(parameter.name)` prior " *
-                "`$(string(callable))` is out of slice 1 (admitted: " *
-                "$(join(_RK_SLICE1_PRIOR_ARITY_KEYS, ", ")))")
-            name = nameof(callable)
-            haskey(_RK_SLICE1_PRIOR_ARITY, name) || error(
-                "$prefix: parameter `$(parameter.name)` prior `$name` is " *
-                "out of slice 1 (admitted: " *
-                "$(join(_RK_SLICE1_PRIOR_ARITY_KEYS, ", ")))")
-            isempty(family_prior.kwargs) || error(
-                "$prefix: parameter `$(parameter.name)` prior keywords " *
-                "are out of slice 1")
-            (name, prior.args, nothing)
-        end
-        if declaration_bounds
-            lower = _rk_parameter_bound(get(prior.kwargs, :lower, -Inf),
-                parameter.name, :lower, data, consts, aliases, parameters, assign_names)
-            upper = _rk_parameter_bound(get(prior.kwargs, :upper, Inf),
-                parameter.name, :upper, data, consts, aliases, parameters, assign_names)
-            if lower isa Number && upper isa Number
-                lower < upper || error("$prefix: parameter `$(parameter.name)` " *
-                    "declaration bounds require lower < upper")
-            end
-            support_override = (:restricted, lower, upper)
-        end
-        expected = _RK_SLICE1_PRIOR_ARITY[family]
-        length(args) == expected || error(
-            "$prefix: parameter `$(parameter.name)` prior `$family` needs " *
-            "$expected argument(s), got $(length(args))")
-        resolved = Any[]
-        for arg in args
-            if arg isa Number
-                value = Float64(arg)
-                isfinite(value) || error(
-                    "$prefix: parameter `$(parameter.name)` prior " *
-                    "hyperparameters must be finite")
-                push!(resolved, value)
-            elseif arg isa _BRMPreparedRef
-                kind, value = _rk_resolve_use_ref(arg.name, consts, aliases,
-                    parameters, assign_names,
-                    "parameter `$(parameter.name)` prior")
-                kind === :number || _rk_gate_literal_args(family, parameter.name)
-                push!(resolved, value)
-            else
-                value = _rk_prior_argument_expr(arg, parameter.name, data,
-                    consts, aliases, parameters, assign_names)
-                value isa Number || _rk_gate_literal_args(family, parameter.name)
-                push!(resolved, value)
-            end
-        end
-        family === :Uniform &&
-            _rk_check_uniform_bounds(resolved, parameter.name)
-        # A zero-location Normal/Cauchy half keeps its `HalfNormal`/
-        # `HalfCauchy` spelling; both spellings have the normalized density.
-        if (family === :Normal || family === :Cauchy) &&
-                support_override == (:truncated, 0.0, Inf) &&
-                resolved[1] isa Number && resolved[1] == 0
-            support_override = :positive
-        end
-        push!(specs, _RKSampledParameter(
-            parameter.name, family, Tuple(resolved), support_override,
-            parameter.name))
+        push!(specs, _rk_sampled_parameter(parameter.name, prior, data,
+            consts, aliases, parameters, assign_names))
     end
     specs
+end
+_rk_vector_prior_callable(f) =
+    f === Dirichlet || f === _brm_vector_prior || (f isa Type && f <: MvNormal)
+
+# One scalar sampled parameter `name ~ prior`. With `elements = n` it is the
+# element law of a declared vector `name[1:n] .~ prior` instead: a data-vector
+# argument with `n` elements applies elementwise (`_rk_vector_prior_arg`);
+# every other argument resolves as in a scalar prior.
+function _rk_sampled_parameter(name::Symbol, prior::_BRMPreparedExpr,
+        data::AbstractDict, consts::Dict{Symbol,Float64},
+        aliases::Dict{Symbol,Symbol}, parameters::Set{Symbol},
+        assign_names::Set{Symbol}; elements::Union{Nothing,Int}=nothing)
+    prefix = "RK backend"
+    callable = prior.callable
+    declaration_bounds = callable !== truncated &&
+        any(key -> key in (:lower, :upper), keys(prior.kwargs))
+    family_prior = declaration_bounds ? _BRMPreparedExpr(callable,
+        prior.args, (; (key => value for (key, value) in pairs(prior.kwargs)
+            if !(key in (:lower, :upper)))...)) : prior
+    family, args, support_override = if callable === truncated
+        # Keyword bounds are validated inside the truncated gate.
+        _rk_truncated_prior(prior, name, (bound, side) ->
+            _rk_truncation_bound(bound, name, side, data,
+                consts, aliases, parameters, assign_names))
+    elseif callable === LocationScale
+        _rk_locationscale_studentt(family_prior, name)
+    else
+        callable isa Type || error(
+            "$prefix: parameter `$name` prior " *
+            "`$(string(callable))` is out of slice 1 (admitted: " *
+            "$(join(_RK_SLICE1_PRIOR_ARITY_KEYS, ", ")))")
+        family_name = nameof(callable)
+        haskey(_RK_SLICE1_PRIOR_ARITY, family_name) || error(
+            "$prefix: parameter `$name` prior `$family_name` is " *
+            "out of slice 1 (admitted: " *
+            "$(join(_RK_SLICE1_PRIOR_ARITY_KEYS, ", ")))")
+        isempty(family_prior.kwargs) || error(
+            "$prefix: parameter `$name` prior keywords " *
+            "are out of slice 1")
+        (family_name, prior.args, nothing)
+    end
+    if declaration_bounds
+        lower = _rk_parameter_bound(get(prior.kwargs, :lower, -Inf),
+            name, :lower, data, consts, aliases, parameters, assign_names)
+        upper = _rk_parameter_bound(get(prior.kwargs, :upper, Inf),
+            name, :upper, data, consts, aliases, parameters, assign_names)
+        if lower isa Number && upper isa Number
+            lower < upper || error("$prefix: parameter `$name` " *
+                "declaration bounds require lower < upper")
+        end
+        support_override = (:restricted, lower, upper)
+    end
+    expected = _RK_SLICE1_PRIOR_ARITY[family]
+    length(args) == expected || error(
+        "$prefix: parameter `$name` prior `$family` needs " *
+        "$expected argument(s), got $(length(args))")
+    resolved = Any[]
+    for arg in args
+        vector = isnothing(elements) ? nothing :
+            _rk_vector_prior_arg(arg, name, data, elements)
+        if !isnothing(vector)
+            _rk_gate_literal_args(family, name)
+            push!(resolved, vector)
+        elseif arg isa Number
+            value = Float64(arg)
+            isfinite(value) || error(
+                "$prefix: parameter `$name` prior " *
+                "hyperparameters must be finite")
+            push!(resolved, value)
+        elseif arg isa _BRMPreparedRef
+            kind, value = _rk_resolve_use_ref(arg.name, consts, aliases,
+                parameters, assign_names,
+                "parameter `$name` prior")
+            kind === :number || _rk_gate_literal_args(family, name)
+            push!(resolved, value)
+        else
+            value = _rk_prior_argument_expr(arg, name, data,
+                consts, aliases, parameters, assign_names)
+            value isa Number || _rk_gate_literal_args(family, name)
+            push!(resolved, value)
+        end
+    end
+    family === :Uniform &&
+        _rk_check_uniform_bounds(resolved, name)
+    # A zero-location Normal/Cauchy half keeps its `HalfNormal`/
+    # `HalfCauchy` spelling; both spellings have the normalized density.
+    if (family === :Normal || family === :Cauchy) &&
+            support_override == (:truncated, 0.0, Inf) &&
+            resolved[1] isa Number && resolved[1] == 0
+        support_override = :positive
+    end
+    _RKSampledParameter(name, family, Tuple(resolved), support_override, name)
+end
+
+# A data-vector argument of a declared vector's element law, which has `n`
+# elements and applies elementwise: a data column (by its name, which the
+# program binds) or a data-only expression (as its values, like a Dirichlet
+# concentration). `nothing` for a scalar or sampled argument.
+_rk_vector_prior_arg(_arg, _name, _data, _n) = nothing
+function _rk_vector_prior_arg(arg::_BRMPreparedRef, name, data, n)
+    value = get(data, arg.name, nothing)
+    value isa AbstractVector || return nothing
+    _rk_vector_prior_length_check(name, arg.name, value, n)
+    arg.name
+end
+function _rk_vector_prior_arg(arg::_BRMPreparedExpr, name, data, n)
+    value = _rk_data_only_value(arg, data)
+    value isa AbstractVector{<:Real} || return nothing
+    _rk_vector_prior_length_check(name, arg, value, n)
+    Expr(:vect, Float64.(value)...)
+end
+_rk_vector_prior_length_check(name, arg, value, n) = length(value) == n || error(
+    "RK backend: `$name[1:$n] .~ ...`: the argument `$arg` has $(length(value)) " *
+    "elements, not $n")
+# The value of a prepared expression over literals and data only, else `nothing`.
+function _rk_data_only_value(arg::_BRMPreparedExpr, data)
+    refs = _brm_prepared_references(arg)
+    all(ref -> haskey(data, ref), refs) || return nothing
+    _brm_eval_prepared_expr(arg, NamedTuple{refs}(map(ref -> data[ref], refs)))
 end
 
 _rk_gate_literal_args(family::Symbol, name::Symbol) =
@@ -6491,23 +6540,85 @@ function _rk_lkj_cholesky_parameter(name::Symbol, prior::_BRMPreparedExpr)
     _RKSampledParameter(name, :LKJCholesky, (Int(K), Float64(eta)), nothing, name)
 end
 
-function _rk_plan_vector_parameters!(prepared,
-        consts::Dict{Symbol,Float64})
+function _rk_plan_vector_parameters!(prepared, data::AbstractDict,
+        consts::Dict{Symbol,Float64}, aliases::Dict{Symbol,Symbol},
+        parameters::Set{Symbol}, assign_names::Set{Symbol})
     prefix = "RK backend"
     specs = _RKVectorParameter[]
     for parameter in prepared.parameters
         prior = parameter.prior
         prior isa _BRMPreparedExpr || continue
-        prior.callable === Dirichlet || continue
-        isempty(prior.kwargs) || error(
-            "$prefix: parameter `$(parameter.name)` `Dirichlet` takes no " *
-            "keywords")
-        alpha = _rk_dirichlet_alpha(prior.args, parameter.name, consts)
-        push!(specs, _RKVectorParameter(parameter.name, :simplex_dirichlet,
-            (alpha,), length(alpha), parameter.name))
+        name = parameter.name
+        if prior.callable === Dirichlet
+            isempty(prior.kwargs) || error(
+                "$prefix: parameter `$name` `Dirichlet` takes no keywords")
+            alpha = _rk_dirichlet_alpha(prior.args, name, consts)
+            push!(specs, _RKVectorParameter(name, :simplex_dirichlet,
+                (alpha,), length(alpha), name))
+        elseif prior.callable === _brm_vector_prior
+            # `name[1:n] .~ law` (decision `19ssmud`): `n` elements of `law`.
+            len, law = prior.args
+            n = _rk_vector_prior_length(name, len, data, consts)
+            law isa _BRMPreparedExpr || error(
+                "$prefix: `$name[1:n] .~ ...` needs a scalar distribution")
+            element = _rk_sampled_parameter(name, law, data, consts, aliases,
+                parameters, assign_names; elements=n)
+            push!(specs, _RKVectorParameter(name, :elementwise, (element,), n, name))
+        elseif prior.callable isa Type && prior.callable <: MvNormal
+            push!(specs, _rk_mvnormal_parameter(name, prior, prepared, data,
+                consts, aliases, parameters, assign_names))
+        end
     end
     specs
 end
+
+function _rk_vector_prior_length(name, len, data, consts)
+    value = len isa Real ? len :
+        len isa _BRMPreparedRef ? get(data, len.name, get(consts, len.name, nothing)) :
+        len isa _BRMPreparedExpr ? _rk_data_only_value(len, data) : nothing
+    value isa Real && isinteger(value) && value >= 0 || error(
+        "RK backend: `$name[1:n] .~ ...` needs a nonnegative integer length " *
+        "`n` computed from literals and data; got `$len`")
+    Int(value)
+end
+
+# `name ~ MvNormal(...)` (decision `187g4va`), read by `_brm_mvnormal_parts`
+# exactly as SBBRMI reads it: a covariance matrix is RKPPL's one-draw
+# `name[1:n] ~ MvNormal(mean, Σ)`; every other scale is independent normals,
+# `name[1:n] .~ Normal.(mean, σ)`. Data values enter as literals, except a
+# data column used as the mean, which is referenced by its own name.
+function _rk_mvnormal_parameter(target, prior, prepared, data, consts, aliases,
+        parameters, assign_names)
+    op = _named_op(prepared.source_operations[target])
+    (; n, mean, mean_arg, scale) = _brm_mvnormal_parts(target, last(getargs(op, 2));
+        prefix="RK backend")
+    covariance = scale isa AbstractMatrix && !(scale isa Diagonal)
+    literal(x::AbstractVector) = Expr(:vect, Float64.(x)...)
+    mu = mean === :zero ? (covariance ? Expr(:call, :zeros, n) : 0.0) :
+        mean isa AbstractVector ? (mean_arg isa NamedColumn &&
+            parent(mean_arg) isa DataColumn ? name(mean_arg) : literal(mean)) :
+        _rk_prior_argument_expr(first(prior.args), target, data, consts, aliases,
+            parameters, assign_names)
+    if covariance
+        rows = [Expr(:row, Float64.(scale[i, :])...) for i in axes(scale, 1)]
+        return _RKVectorParameter(target, :mvnormal, (mu, Expr(:vcat, rows...)), n, target)
+    end
+    sigma = scale isa Diagonal ? literal(sqrt.(diag(scale))) :
+        scale isa UniformScaling ? sqrt(Float64(scale.λ)) :
+        scale isa AbstractVector ? literal(scale) :
+        scale isa Real ? Float64(scale) :
+        _rk_resolve_mvnormal_scale(last(prior.args), target, data, consts, aliases,
+            parameters, assign_names)
+    element = _RKSampledParameter(target, :Normal, (mu, sigma), nothing, target)
+    _RKVectorParameter(target, :elementwise, (element,), n, target)
+end
+# A sampled scalar standard deviation, `MvNormal(zeros(k), sig)`.
+_rk_resolve_mvnormal_scale(arg::_BRMPreparedRef, name, data, consts, aliases,
+        parameters, assign_names) = last(_rk_resolve_use_ref(arg.name, consts,
+    aliases, parameters, assign_names, "parameter `$name` prior"))
+_rk_resolve_mvnormal_scale(arg, name, data, consts, aliases, parameters,
+        assign_names) = _rk_prior_argument_expr(arg, name, data, consts,
+    aliases, parameters, assign_names)
 
 # `LocationScale(mu, s, TDist(nu))` unwraps to the 3-arg Stan-order
 # `:StudentT` plan (`TDist` stays rejected as a bare head). Args stay
@@ -8224,7 +8335,8 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
         kept_assignments, context.data, parameter_names)
     parameters = _rk_plan_parameters!(prepared, context.data, consts,
         aliases, parameter_names, assignment_names)
-    vector_specs = _rk_plan_vector_parameters!(prepared, consts)
+    vector_specs = _rk_plan_vector_parameters!(prepared, context.data, consts,
+        aliases, parameter_names, assignment_names)
     vector_by_name = Dict{Symbol,_RKVectorParameter}(
         spec.name => spec for spec in vector_specs)
     assignments = _rk_plan_assignments!(kept_assignments, exprs,
