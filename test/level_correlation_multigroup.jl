@@ -320,3 +320,12 @@ points(n) = (zeros(n), collect(range(-0.43, 0.51; length=n)), [0.37sin(i) for i 
         @test true
     end
 end
+
+@testset "replay keeps the fitted levels and the multigroup coherence" begin
+    df = level_df()
+    sb = SBBRMI(mg(df); mod=@__MODULE__)
+    @test BRM.stan_code(reprocess(sb, df)) == BRM.stan_code(sb)
+    subset = (; t=df.t[1:8], g=df.g[1:8], u=df.u[1:8], y=df.y[1:8])
+    @test occursin("brm_hsgp_multigroup_weights(", BRM.stan_code(reprocess(sb, subset)))
+    @test reprocess(RKBRMI(mg(df)), df) isa RKBRMI
+end
