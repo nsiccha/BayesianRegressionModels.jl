@@ -1905,14 +1905,65 @@ statement is rejected with a message saying so.
 - The left-hand side must be a non-data name. A vector-valued *response* keeps
   its own spelling ([`MvNormalCholesky`](@ref), `[y1, y2] ~ ...`); `MvNormal`
   is not added to the family table.
-- No keywords: bounds on a multivariate normal parameter are not supported.
+- No keywords: bounds on a multivariate normal parameter are not supported. A
+  vector of independent bounded elements is a declared vector,
+  `x[1:n] .~ Family.(...)` (next section).
 - A parameter-bearing *covariance* (an `LKJCovarianceFactor` product, a sampled
   matrix) is not admitted here; use the scalar-scale form or compose the
   vector inside a `@deffun`.
+- `RKBRMI` builds the same statement with the same density: a covariance
+  matrix as one `rho[1:n] ~ MvNormal(mean, Σ)` draw, every other scale as
+  independent normals `rho[1:n] .~ Normal.(mean, σ)`.
 - Not available to `VBRMI`. `TuringBRMI` retains the generic callable, so the
   same statement lowers there through its own path; [`Dirichlet`](@ref),
   [`s`](@ref), and [`r2d2`](@ref) are likewise supported by both executable
   backends.
+
+## Declared vector parameter: `x[1:n] .~ Family.(...)`
+
+`x[1:n] .~ Family.(args...)` declares a **vector parameter** of `n` elements,
+each drawn from the scalar law `Family(args...)` — what Julia's broadcasting
+means, and the spelling RKPPL uses for its declared arrays (decision
+`19ssmud`). It is the one-line form of a per-group vector such as one bounded
+scale per section, which a factor regression (`phi ~ 0 + factor(section)` plus
+`effect(phi, section) ~ ...`) used to stand in for. Later statements read it by
+name, and `@plate` cells by position (`phi[s]`).
+
+```julia
+@brm begin
+    phi[1:length(total)] .~ Normal.(0.0, 0.5; lower = 0.0, upper = 2.0)
+    @plate for s in eachindex(total)
+        total[s] ~ Normal(10.0 * g[s], phi[s])
+    end
+end
+```
+
+- **Length.** `n` is an integer, a scalar data field, or an expression over
+  data (`length(total)`), evaluated when the model is built.
+- **Element law.** Any scalar prior family BRM lowers, with the scalar
+  declaration bounds `lower`/`upper` (the family kernel on the bounded
+  support, no truncation normalizer), `truncated.(...)` (normalized), or an
+  affine `LocationScale.(...)`. Arguments are literals, scalar data, sampled
+  scalars (`z[1:4] .~ Normal.(0.0, tau)`), or data vectors of `n` elements,
+  which apply elementwise (`w[1:length(ws)] .~ Normal.(0.0, ws; lower = 0.0)`).
+  A data-only expression (`fill(0.5, n)`, `ws ./ 2`) is evaluated at build time.
+- **Role.** A declared vector is always a parameter: a prior in
+  `generative_plan` (with `dimension == (n,)`), in `brm_description` and in the
+  prior program, with no predictive `_gen` twin. An undeclared
+  `a ~ Normal(0.0, ws)` over a data vector `ws` keeps the omitted-response
+  meaning.
+
+### What it emits
+
+| Backend | `phi[1:n] .~ Normal.(0.0, 0.5; lower = 0.0, upper = 2.0)` |
+|---|---|
+| `SBBRMI` | data `phi_n`; `vector<lower=0.0, upper=2.0>[phi_n] phi;` and `phi ~ normal(0.0, 0.5);` |
+| `RKBRMI` | `phi[1:4] .~ restricted.(Normal.(0.0, 0.5), 0.0, 2.0)` (for `n == 4`) |
+
+A data-vector argument is referenced by its own name on both backends; a
+data-only expression is shipped as data `<x>_arg<k>` on `SBBRMI` and written
+as its values on `RKBRMI`. A typed left-hand side, `x::vector[n] ~ ...`, is
+not `@brm` syntax and is refused with a pointer to this spelling.
 
 ## Function-valued arguments: lambdas and `do` blocks
 
