@@ -5683,10 +5683,10 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         new_data[key] = copy(e.const_.W)
         new_preproc[key] = e
     elseif e.kind === :s2z_weights
+        # One row per fitted level. The block's own `:group_index` record
+        # re-codes the replay rows through those frozen levels and refuses an
+        # unseen one, so a replay over any subset of them keeps every weight.
         freeze || throw(ArgumentError("S2Z replay requires freeze_constants=true; centering weights are fitted-level quantities"))
-        levels = _sb_df_column(df, e.raw_ref)
-        collect(_brm_fit_levels(levels)) == collect(e.const_.levels) ||
-            throw(ArgumentError("S2Z replay needs identical group levels; centering weights cannot be remapped to new levels yet"))
         new_data[key] = copy(e.const_.rho)
         new_preproc[key] = e
     elseif e.kind === :zscale || e.kind === :standardize ||
@@ -6212,7 +6212,9 @@ Covered: the Julia-side transforms (`zscale`/`standardize`/`center`/`factor`/
 `mo`/`s`/`t2`/`gp`/`hsgp`), interval-censored predictor splits,
 `protect`/implicit-fn columns (re-materialised on `new_df`), typed `mm(...)`
 and ordinary plain/`|ID|` random-effect group
-indices, `kernel(...)` subject counts and `ragged(x, group)` columns, continuous
+indices, sum-to-zero (`s2z_groups`) blocks (rows re-coded through the fitted
+levels, any subset of them; the fitted centering weights kept; frozen only),
+`kernel(...)` subject counts and `ragged(x, group)` columns, continuous
 × continuous interaction columns, typed observation weights, categorical
 outcomes, and pass-through raw columns (plain data, `me` obs values, `ar`
 time). A consumer `_sb_submodel_rhs!` term is called again on `new_df`, and
