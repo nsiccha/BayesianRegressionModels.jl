@@ -634,6 +634,43 @@ function _fit_run(::typeof(NE.empirical_bayes), m, start, _ebes, phases; kwargs.
         start.omega_matrix, result)
 end
 
+# Full RK packed draws at fixed population values (src/nlme_two_stage.jl): the
+# population point with Ω's covariance coordinates mapped from ω, and each
+# unit's standardized coordinates row by row. A unit problem's `z` (`η = C z`,
+# `C = chol(Ω)`) is BRM's own packed subject coordinate under that mapping.
+function BRM.brm_nlme_draws(m::BRM.BRMNLMEModel, θ, σ, ω, unit_draws)
+    n = NE.nsubjects(m)
+    length(unit_draws) == n || throw(DimensionMismatch(
+        "brm_nlme_draws: $(length(unit_draws)) units' draws for $n units"))
+    S = size(first(unit_draws), 1)
+    base = _prior_omega_map(m, θ, σ, ω).mapped
+    draws = repeat(permutedims(base), S, 1)
+    for (i, Z) in enumerate(unit_draws)
+        block = m.view.subject_coordinates[i]
+        size(Z) == (S, length(block)) || throw(DimensionMismatch(
+            "brm_nlme_draws: unit $i gave a $(size(Z, 1)) × $(size(Z, 2)) draw " *
+            "matrix; expected $S × $(length(block)), the same draw count for every unit"))
+        draws[:, block] .= Z
+    end
+    draws
+end
+
+function BRM.brm_two_stage_fit(sampler, x; minibatch_size=nothing, options=nothing,
+        kwargs...)
+    options !== nothing && minibatch_size !== nothing && throw(ArgumentError(
+        "brm_two_stage_fit: pass `minibatch_size` or a whole `options`, not both"))
+    options = something(options, minibatch_size === nothing ? NE.SAEMOptions() :
+        NE.SAEMOptions(minibatch_size=minibatch_size))
+    stage1 = BRM.brm_nlme_fit(x, NE.saem; ebes=false, options, kwargs...)
+    m, result = stage1.model, stage1.result
+    θ, σ, ω = result.theta, result.sigma, result.omega
+    Ω = NE.omega_matrix(NE.nlme_layout(m), ω)
+    units = [BRM.brm_nlme_unit_problem(m, i, θ, σ, Ω) for i in 1:NE.nsubjects(m)]
+    unit_draws = [Matrix{Float64}(sampler(unit)) for unit in units]
+    (; draws=BRM.brm_nlme_draws(m, θ, σ, ω, unit_draws),
+       coordinates=m.view.coordinates, units, unit_draws, stage1)
+end
+
 function BRM.brm_nlme_fit(x, estimator; start=nothing, inits=nothing, ebes=true,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
         nested_groups=NamedTuple(), progress=nothing, kwargs...)
