@@ -175,14 +175,34 @@ function _brm_grouping_reach(spec, blocks; prefix=_BRM_GROUPING_PREFIX)
             "`$g` without an `|ID|`; those blocks belong to " *
             join(unique(("`$(b.predictor)`" for b in on)), ", ") * ".")
     end
+    # A stratified block takes scale and correlation priors, which apply to
+    # every stratum; the other statements have no per-stratum form yet.
+    unsupported = _brm_grouping_stratified_gap(spec)
     for i in reach
-        _brm_grouping_stratified(blocks[i]) && error(
+        _brm_grouping_stratified(blocks[i]) && !isnothing(unsupported) && error(
             "$prefix: `$spelling` reaches the stratified block " *
             "`(… | gr($g; by=$(name(last(blocks[i].descriptor)))))` of " *
-            "`$(blocks[i].predictor)`; covariance priors for stratified " *
-            "blocks are not supported yet.")
+            "`$(blocks[i].predictor)`; $unsupported for stratified blocks " *
+            "are not supported yet.")
     end
     reach
+end
+
+# A block's grouping as a formula term spells it: the column, or `gr(g; by=b)`
+# for a stratified block.
+_brm_grouping_spelling(group::NamedColumn) = group
+_brm_grouping_spelling((group, by)::Tuple{NamedColumn,NamedColumn}) =
+    ExprColumn(gr, group; by)
+
+# What a statement sets that a stratified block cannot take yet, or `nothing`.
+function _brm_grouping_stratified_gap(spec)
+    spec.family === _brm_known && return "known scales and correlations"
+    spec.class === :sd && spec.family === r2d2 && return "`r2d2` decompositions"
+    if spec.class === :ranef
+        T = _as_distribution_type(spec.family)
+        (isnothing(T) || !(T <: Normal)) && return "Student-t random-effect laws"
+    end
+    nothing
 end
 
 # Refuse, in the statements' own spelling, everything the per-block `|ID|`
@@ -305,7 +325,8 @@ Base.@nospecializeinfer function _brm_resolve_grouping_addresses(@nospecialize(b
     for (i, b) in enumerate(blocks)
         all(in(rewritten), b.declarations) || continue
         descriptor = haskey(level_cor, i) ?
-            ExprColumn(gr, b.descriptor; cor=level_cor[i]) : b.descriptor
+            ExprColumn(gr, b.descriptor; cor=level_cor[i]) :
+            _brm_grouping_spelling(b.descriptor)
         for d in b.declarations
             term = declarations[d].expression
             replacement[d] = push!(get(replacement, d, Any[]),
