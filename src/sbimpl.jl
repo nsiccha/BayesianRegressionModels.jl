@@ -794,7 +794,10 @@ _sb_bound_name(x::Expr) = Meta.isexpr(x, :(::)) ? _sb_bound_name(x.args[1]) : no
 _sb_bound_name(_) = nothing
 
 function _sb_single_margin_ranef(base::StanBlocks.SlicModel)
-    body = deepcopy(base.model)
+    # Read-only: `rewrite` builds fresh `Expr` nodes and shares the leaves. A
+    # configured family's body holds values (a custom prior's `ValueUDF`, which
+    # references a module), so it cannot be `deepcopy`d.
+    body = base.model
     factors = Set{Symbol}()
     for stmt in body.args
         Meta.isexpr(stmt, :call) && stmt.args[1] === :~ &&
