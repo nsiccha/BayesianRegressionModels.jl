@@ -73,8 +73,9 @@ end
     code = stan(icm(df))
     @test occursin("cholesky_factor_corr[Omega_n] Omega;", code)
     @test occursin("Omega ~ lkj_corr_cholesky(2.0);", code)
-    # the slope block's levels x coefficients effects, left-multiplied
-    @test occursin("b_mu__g_g = (Omega * ((diag_pre_multiply(b_mu__g_g_tau, b_mu__g_g_L) * b_mu__g_g_z)'));", code)
+    # the slope block's levels x coefficients effects, left-multiplied; one
+    # margin, so no correlation factor of its own (test/single_margin_blocks.jl)
+    @test occursin("b_mu__g_g = (Omega * ((diag_matrix(b_mu__g_g_tau) * b_mu__g_g_z)'));", code)
     # the grouped HSGP's weights, left-multiplied by the same factor
     @test occursin("hsgp_t_by_g_beta_level = (Omega * b_hsgpw_t_g);", code)
     @test occursin("rows_dot_product(hsgp_t_by_g_PHI_scaled, hsgp_t_by_g_beta_level[g_idx, :])", code)

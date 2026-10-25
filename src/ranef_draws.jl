@@ -182,11 +182,15 @@ function _brm_ranef_stratified_draws(d, block::RanefBlock, draws, names)
         "$S strata.")
     tau = reshape(_brm_ranef_carrier_draws(d, block,
         Symbol(block.binding, :_, spec.stratum_tau), K * S, draws, names), n, K, S)
-    L = reshape(_brm_ranef_carrier_draws(d, block,
-        Symbol(block.binding, :_, spec.stratum_L), S * K * K, draws, names), n, S, K, K)
-    cor = similar(L)
-    for s in 1:S
-        cor[:, s, :, :] = _brm_ranef_cor_draws(L[:, s, :, :])
+    # A one-margin block emits no correlation factor (`_sb_single_margin_ranef`).
+    cor = ones(n, S, 1, 1)
+    if K > 1
+        L = reshape(_brm_ranef_carrier_draws(d, block,
+            Symbol(block.binding, :_, spec.stratum_L), S * K * K, draws, names), n, S, K, K)
+        cor = similar(L)
+        for s in 1:S
+            cor[:, s, :, :] = _brm_ranef_cor_draws(L[:, s, :, :])
+        end
     end
     (; strata, stratum=collect(Int, stratum), sd=permutedims(tau, (1, 3, 2)), cor,
        effects=_brm_ranef_effect_draws(d, block, spec, nothing, draws, names))
