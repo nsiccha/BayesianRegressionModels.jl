@@ -154,6 +154,7 @@ function _brm_laplace_mode!(p::BRMLaplaceProblem, φ::AbstractVector)
             iterations=0)
     end
     previous = fill(Inf, length(blocks))
+    history = Vector{Float64}[]
     for iteration in 1:p.maxiter
         hessians = _brm_nlme_sampler_hessian_blocks(m, u)
         steps = [_brm_laplace_step(hessians[i], current.gradient[block])
@@ -161,12 +162,15 @@ function _brm_laplace_mode!(p::BRMLaplaceProblem, φ::AbstractVector)
         decrements = [dot(current.gradient[block], steps[i])
             for (i, block) in enumerate(blocks)]
         # A unit is at its mode once its Newton decrement is below `tol`, or
-        # once a step no longer shrinks a decrement already at rounding level.
+        # once a full Newton step (below) no longer shrinks its decrement: in
+        # Newton's quadratic region that is the decrement's rounding floor,
+        # which the scale of the unit's density sets.
         converged = all(eachindex(blocks)) do i
             decrements[i] <= p.tol ||
-                (decrements[i] <= 1e-16 && decrements[i] >= previous[i] / 4)
+                (decrements[i] <= 1e-8 && decrements[i] >= previous[i] / 4)
         end
         previous = decrements
+        push!(history, decrements)
         if converged
             factors = map(_brm_laplace_factor, hessians)
             any(isnothing, factors) && _brm_nlme_error(
@@ -203,8 +207,12 @@ function _brm_laplace_mode!(p::BRMLaplaceProblem, φ::AbstractVector)
         u = trial_u
         current = trial
     end
+    worst = argmax(last(history))
     _brm_nlme_error("brm_laplace_problem: the unit modes did not converge in " *
-        "$(p.maxiter) Newton iterations (largest Newton decrement above tol = $(p.tol))")
+        "$(p.maxiter) Newton iterations at population point $(repr(collect(φ))). " *
+        "Unit $(repr(m.view.levels[worst]))'s Newton decrements, last iterations " *
+        "first: $(reverse([h[worst] for h in history[max(1, end - 5):end]])) " *
+        "(tol = $(p.tol))")
 end
 
 _brm_laplace_value(state) = state.finite ? state.value +
@@ -254,37 +262,89 @@ function LogDensityProblems.logdensity_and_gradient(p::BRMLaplaceProblem,
 end
 
 """
-    brm_laplace_draws(p::BRMLaplaceProblem, P::AbstractMatrix; rng=Random.default_rng())
-        -> (; draws, diagnostics)
+    brm_laplace_draws(p::BRMLaplaceProblem, P::AbstractMatrix;
+        rng=Random.default_rng(), conditional=0) -> (; draws, diagnostics)
 
 Complete draws from population draws `P` (`p.names` rows × draws, e.g. a
-sampler's `posterior_position`): at each population draw every unit's random
+sampler's `posterior_position`). At each population draw every unit's random
 effects are drawn from its Laplace approximation, the Gaussian at its
-conditional mode with covariance (−H_i)⁻¹.
+conditional mode with covariance (−H_i)⁻¹, or, with `conditional = K > 0`, from
+its exact conditional posterior by importance resampling: `K` proposals per
+unit from that Gaussian, weighted by the model's conditional density, one
+resampled. All units' `k`-th proposals are scored by one model evaluation.
 
 - `draws` — the model's packed unconstrained coordinates (rows, the order of
   `rk_restore_draws`) × draws; its population rows are `P`. Pass it to
   [`rk_restore_draws`](@ref) and the other readers of a full RK fit.
-- `diagnostics` — `(; newton_steps)`, the Newton steps each draw's mode search
-  took from the previous draw's modes.
+- `diagnostics` — `newton_steps`, the Newton steps each draw's mode search
+  took from the previous draw's modes; with `conditional > 0` also
+  `importance_ess`, units × draws, each unit's effective number of proposals
+  (`(Σw)²/Σw²`, at most `K`). A small value marks a unit whose conditional
+  posterior is far from Gaussian, where more proposals are needed.
 """
 function brm_laplace_draws(p::BRMLaplaceProblem, P::AbstractMatrix;
-        rng=Random.default_rng())
+        rng=Random.default_rng(), conditional::Integer=0)
     size(P, 1) == length(p.population) || throw(DimensionMismatch(
         "population draws have $(size(P, 1)) rows, the problem has " *
         "$(length(p.population)) population coordinates"))
+    conditional >= 0 || throw(ArgumentError(
+        "brm_laplace_draws: conditional = $conditional proposals; pass 0 for " *
+        "Laplace draws or a positive count for importance resampling"))
     blocks = p.model.view.subject_coordinates
     draws = Matrix{Float64}(undef, length(p.u), size(P, 2))
     newton_steps = Vector{Int}(undef, size(P, 2))
+    importance_ess = Matrix{Float64}(undef, conditional > 0 ? length(blocks) : 0,
+        size(P, 2))
     for k in axes(P, 2)
         state = _brm_laplace_mode!(p, view(P, :, k))
         state.finite || _brm_nlme_error(
             "brm_laplace_draws: population draw $k has a nonfinite density")
-        draws[:, k] .= state.u
-        for (i, block) in enumerate(blocks)
-            draws[block, k] .+= state.factors[i].U \ randn(rng, length(block))
-        end
         newton_steps[k] = state.iterations
+        draws[:, k] .= state.u
+        if conditional == 0
+            for (i, block) in enumerate(blocks)
+                draws[block, k] .+= state.factors[i].U \ randn(rng, length(block))
+            end
+        else
+            picks = _brm_laplace_resample(p, state, conditional, rng)
+            for (i, block) in enumerate(blocks)
+                draws[block, k] .= picks.z[i]
+            end
+            importance_ess[:, k] .= picks.ess
+        end
     end
-    (; draws, diagnostics=(; newton_steps))
+    diagnostics = conditional > 0 ? (; newton_steps, importance_ess) : (; newton_steps)
+    (; draws, diagnostics)
+end
+
+# Importance resampling of every unit's conditional posterior with its Laplace
+# Gaussian as the proposal. A proposal z = ẑ + C⁻ᵀε has log proposal density
+# −|ε|²/2 up to a per-unit constant, so its log weight is the unit's model
+# density there plus |ε|²/2.
+function _brm_laplace_resample(p::BRMLaplaceProblem, state, K, rng)
+    m = p.model
+    blocks = m.view.subject_coordinates
+    ε = [randn(rng, length(block), K) for block in blocks]
+    proposals = [state.u[block] .+ state.factors[i].U \ ε[i]
+        for (i, block) in enumerate(blocks)]
+    logw = Matrix{Float64}(undef, length(blocks), K)
+    u = copy(state.u)
+    for j in 1:K
+        for (i, block) in enumerate(blocks)
+            u[block] .= view(proposals[i], :, j)
+        end
+        units = _brm_laplace_unit_values(m, _rk_pointwise_values(m.pointwise, u), u)
+        for i in eachindex(blocks)
+            logw[i, j] = units[i] + sum(abs2, view(ε[i], :, j)) / 2
+        end
+    end
+    z = Vector{Vector{Float64}}(undef, length(blocks))
+    ess = Vector{Float64}(undef, length(blocks))
+    for i in eachindex(blocks)
+        w = exp.(view(logw, i, :) .- maximum(view(logw, i, :)))
+        ess[i] = sum(w)^2 / sum(abs2, w)
+        pick = searchsortedfirst(cumsum(w), rand(rng) * sum(w))
+        z[i] = proposals[i][:, min(pick, K)]
+    end
+    (; z, ess)
 end

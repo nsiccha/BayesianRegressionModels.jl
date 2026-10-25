@@ -129,6 +129,28 @@ end
         @test LogDensityProblems.logdensity(p, φ) ≈
             laplace_population_logprior(rk, p, u) + units atol=1e-10
     end
+    # Conditional draws by importance resampling follow each unit's exact
+    # conditional posterior, here its mean by quadrature on a fine grid.
+    φ = 0.4 .* randn(rng, length(p.population))
+    u = laplace_point(p, φ)
+    values = BRM._rk_constrained_values(rk, u)
+    β, τ = values.pop_log_mu.beta_pop, only(values.b_g.tau)
+    n = 2000
+    out = brm_laplace_draws(p, repeat(φ, 1, n); rng=Xoshiro(9), conditional=64)
+    @test size(out.diagnostics.importance_ess) == (length(p.model.view.levels), n)
+    @test all(e -> 1 <= e <= 64, out.diagnostics.importance_ess)
+    grid = range(-8, 8; length=4001)
+    for (i, rows) in enumerate(laplace_rows(p, data.g))
+        a = β[1] .+ β[2] .* data.x[rows]
+        logpost = [sum(logpdf.(Poisson.(exp.(a .+ τ * z)), y[rows])) + logpdf(Normal(), z)
+            for z in grid]
+        w = exp.(logpost .- maximum(logpost))
+        mean_z = sum(w .* grid) / sum(w)
+        sd_z = sqrt(sum(w .* (grid .- mean_z) .^ 2) / sum(w))
+        z = out.draws[only(p.model.view.subject_coordinates[i]), :]
+        @test abs(mean(z) - mean_z) < 4 * sd_z / sqrt(n)
+        @test std(z) ≈ sd_z rtol=0.1
+    end
 end
 
 @stestset "Laplace draws keep the population draws and draw each unit from its Gaussian" begin
@@ -155,6 +177,11 @@ end
         @test abs(mean(z) - mean_z) < 4 * sd_z / sqrt(n)
         @test std(z) ≈ sd_z rtol=0.1
     end
+    # The Laplace Gaussian is a Gaussian unit's exact conditional, so every
+    # importance weight is equal.
+    conditional = brm_laplace_draws(p, repeat(φ, 1, 20); rng=Xoshiro(4), conditional=50)
+    @test all(isapprox.(conditional.diagnostics.importance_ess, 50; rtol=1e-8))
+    @test_throws ArgumentError brm_laplace_draws(p, repeat(φ, 1, 2); conditional=-1)
     @test_throws DimensionMismatch brm_laplace_draws(p, zeros(1, 2))
     @test_throws DimensionMismatch LogDensityProblems.logdensity(p, zeros(1))
 end
