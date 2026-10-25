@@ -4525,6 +4525,13 @@ Base.@nospecializeinfer function _rk_plan_ranef_buckets(@nospecialize(brmi::BRMI
             push!(plain_ids, d.id)
             key = (d.id, get!(id_groups, d.id, gname))
             prior = get(id_decls, key, Any[])
+            for p in prior
+                p.predictor === d.predictor && name(p.descriptor) !== gname && error(
+                    "$prefix: predictor `$(d.predictor)` groups its `|$(d.id)|` " *
+                    "terms by both `$(name(p.descriptor))` and `$gname`; a " *
+                    "predictor reads its margins of one block through one " *
+                    "grouping column (mirrors SB)")
+            end
             any(p -> p.predictor === d.predictor, prior) && error(
                 "$prefix: predictor `$(d.predictor)` repeats " *
                 "random-effect block ID `$(d.id)`, group `$gname` " *
