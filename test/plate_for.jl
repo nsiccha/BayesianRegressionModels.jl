@@ -321,7 +321,9 @@ end
     # StanBlocks' do-block `plate` collects no result from a cell ending in
     # `nothing` (StanBlocks snag `result-less-do-f-3076f098`), which is how
     # `@brm` lowers an observation-only cell.
-    carriers(code) = length(collect(eachmatch(r"__pl_mem_\d+;", code)))
+    # A collected per-cell vector is one flat `vector[sum(<name>__pl_len)] <name>;`
+    # (StanBlocks fd91d0c names a plate value after itself).
+    carriers(code) = length(collect(eachmatch(r"\[sum\((\w+)__pl_len\)\] \1;", code)))
     for (label, data, with_output, effect_only) in PLATE_EFFECT_PAIRS
         @testset "$label" begin
             old_sb = SBBRMI(with_output(data); mod=@__MODULE__, total_groups=())

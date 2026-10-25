@@ -117,9 +117,9 @@ BRM adds:
 - `logical` — the BRM-level quantity whose value this emitted Stan output
   physically carries, or `nothing` for an internal. It is narrower than
   `declaration`: `pop_mu_beta_pop` belongs to the `pop_mu` declaration but is
-  one of its internals, so it carries no logical target. For a ragged
-  `kernel(...)` result, `logical == :loc` can accompany an emitted `name` such
-  as `:loc__pl_mem_1`; consumers keep the logical identity while addressing
+  one of its internals, so it carries no logical target. For a `kernel(...)`
+  cell value, `logical == :qt_loc` accompanies an emitted `name` such as
+  `:pk_loc_qt_loc`; consumers keep the logical identity while addressing
   BridgeStan through the emitted name.
 
   **Every named value a `kernel(...)` cell assigns carries one too** — no
@@ -134,7 +134,7 @@ BRM adds:
       conc                                 # the RETURN
   end
 
-  brm_output(d, :qt_loc)     # BRMOutput(name = :pk_loc_qt_loc__pl_mem_1,
+  brm_output(d, :qt_loc)     # BRMOutput(name = :pk_loc_qt_loc,
                              #           logical = :qt_loc, role = :group_block, …)
   brm_output(d, :conc)       # the same cell's other named value
   brm_output(d, :pk_loc)     # the collected return
@@ -2260,8 +2260,9 @@ end
 
 Return the unique emitted output that physically carries the BRM quantity
 `logical`. This resolves BRM meaning to Stan representation without parsing an
-emitter-owned name. For example, a ragged `loc ~ kernel(...)` result can resolve
-to an output named `loc__pl_mem_1` while retaining `logical == :loc`.
+emitter-owned name. For example, the cell value `qt_loc` under
+`pk_loc ~ kernel(...)` resolves to an output named `pk_loc_qt_loc` while
+retaining `logical == :qt_loc`.
 
 `logical` is normally a declaration target. It is also the name of any value a
 `kernel(...)` cell assigns — see the `logical` field on [`BRMOutput`](@ref) —
