@@ -456,7 +456,7 @@ function _sb_emit_s2z!(stmts, data, target, plan; mod::Module=@__MODULE__)
     _sb_record_preproc!(data, rhon, PreprocEntry(:s2z_weights,
         (; levels=plan.levels, rho=copy(plan.weights)), plan.group, true))
     prior = _sb_vector_positive_priors(_brm_total_scales, :tau, plan.scale_priors)
-    push!(stmts, :($tau ~ $(prior.model)(; n=$nk)))
+    push!(stmts, Expr(:call, :~, tau, _sb_configured_prior_call(prior, :n => nk)))
     if plan.coordinates === :groups
         push!(stmts, :($z::matrix[$ng, $nk] ~ brm_s2z_group($tau, $rhon)))
     else

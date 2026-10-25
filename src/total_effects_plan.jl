@@ -648,7 +648,7 @@ function _sb_emit_total!(stmts,data,target,plan;mod::Module=@__MODULE__)
     # Vector scale prior is assembled through the existing prior translator,
     # retaining its normalization and support rules.
     prior = _sb_vector_positive_priors(_brm_total_scales,:tau,plan.scale_priors)
-    push!(stmts,:($tau ~ $(prior.model)(;n=$nk)))
+    push!(stmts,Expr(:call,:~,tau,_sb_configured_prior_call(prior,:n => nk)))
     mixture_indices = findall(v -> !isnothing(v.nu),plan.prior_info)
     mixture = isempty(mixture_indices) ? nothing : Symbol(:total_mixture_,suffix)
     cp = prec
