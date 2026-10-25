@@ -116,6 +116,7 @@ include("nlme_conditional.jl")
 include("nlme_start.jl")
 include("start_values.jl")
 include("nlme_fit.jl")
+include("nlme_two_stage.jl")
 include("covariate_resampling.jl")
 export modeled_covariates
 using SHA: sha256
@@ -155,7 +156,7 @@ export brm_total, brm_total_recover_rng, brm_total_deviations, brm_total_locatio
 export weighted, AbstractWeights, AnalyticWeights, FrequencyWeights,
        ProbabilityWeights, UnitWeights, Weights,
        aweights, fweights, pweights, uweights, weights
-export me, mi, s, t2, ar, dar, rw, cdar, car, mo, mo1, hsgp, OrderedLogistic, Ordinal,
+export me, mi, s, t2, ar, dar, rw, cdar, car, mo, mo1, hsgp, multigroup, OrderedLogistic, Ordinal,
        OrdinalStructure, Cumulative, StoppingRatio,
        OrdinalLink, LogitLink, ProbitLink, CloglogLink, Horseshoe,
        CategoricalLogit, ZeroInflatedPoisson, HurdlePoisson, NegativeBinomial2,
@@ -239,6 +240,8 @@ export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
        BRMNLMEView, BRMNLMEViewError, brm_nlme_view,
        BRMNLMEJointMap, brm_nlme_joint_map, brm_nlme_joint_start,
        brm_nlme_joint_values, brm_nlme_start, brm_nlme_estimates, brm_nlme_fit,
+       BRMNLMEUnitProblem, brm_nlme_unit_problem, brm_nlme_unit_eta, brm_nlme_draws,
+       brm_two_stage_fit,
        BRMNLMEConditionalProblem, brm_nlme_conditional_problem,
        brm_nlme_conditional_point,
        BRMNLMEModel, brm_nlme_model, brm_nlme_loglikelihood,
@@ -324,9 +327,10 @@ export popefs, _popefs_normal, _popefs_coefs, _popefs_normal_coefs,
        _sb_gp, _sb_gp_aniso, _sb_hsgp, _sb_hsgp_aniso,
        _sb_hsgp_partial, _sb_hsgp_partial_aniso,
        _sb_hsgp_by, _sb_hsgp_by_aniso, _sb_hsgp_by_levelcor, _sb_hsgp_by_aniso_levelcor,
+       _sb_hsgp_by_multigroup, _sb_hsgp_by_aniso_multigroup,
        _sb_hsgp_latent, _sb_hsgp_latent_orthogonal,
        _sb_gp_periodic, _sb_hsgp_periodic,
-       brm_exp_quad_cov, brm_hsgp_sqrt_spd, brm_hsgp_log_sqrt_spd,
+       brm_exp_quad_cov, brm_hsgp_sqrt_spd, brm_hsgp_log_sqrt_spd, brm_hsgp_multigroup_weights,
        brm_hsgp_scale_fraction, brm_hsgp_remaining_scale_fraction,
        brm_hsgp_centered_log_scale, brm_hsgp_remaining_log_scale,
        brm_hsgp_basis_1d,

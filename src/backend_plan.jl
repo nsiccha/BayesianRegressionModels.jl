@@ -1487,7 +1487,8 @@ function _brm_random_effect_group(raw)
     # `cor=` correlates the levels of `group` (src/level_correlation.jl).
     cor = get(kwargs, :cor, nothing)
     if !isnothing(cor)
-        _brm_level_correlation(cor; what="gr($(name(group)); cor=$(_brm_level_cor_label(cor)))")
+        what = "gr($(name(group)); cor=$(_brm_level_cor_label(cor)))"
+        _brm_refuse_block_multigroup(_brm_level_correlation(cor; what), what)
         isnothing(by) || error(
             "BRM backend lowering: `gr($(name(group)); by=..., cor=...)` is not " *
             "implemented: a level correlation over a stratified block has no " *

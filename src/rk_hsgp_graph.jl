@@ -324,7 +324,7 @@ _rk_ast_hsgp_substitute(value, values) = value
 # with its value: a squared-exponential term passes its axes and the graph
 # composes its basis; a periodic term passes its prepared `PHI` and `omega2`.
 function _rk_ast_hsgp_value_graph!(definitions, term, taken, inputs, sigma, rho, z;
-        group_index=nothing)
+        group_index=nothing, multigroup=nothing)
     options = term.options
     D = length(term.columns)
     rho_by_group = any(p -> p.hyper === :length_scale, options.hyper_plans)
@@ -348,6 +348,14 @@ function _rk_ast_hsgp_value_graph!(definitions, term, taken, inputs, sigma, rho,
         push!(body.args, Expr(:(=), Expr(:tuple, :PHI, :omega2),
             Expr(:call, basis, formals...)))
     end
+    # `cor=multigroup(Omega, tau)`: the group weights of each basis frequency
+    # are correlated by its multigroup coherence (src/level_correlation.jl).
+    zw = :z
+    if multigroup !== nothing
+        push!(body.args,
+            :(z_multigroup = brm_hsgp_multigroup_weights(z, omega2, rho, L_level, tau_level)))
+        zw = :z_multigroup
+    end
     if group_index === nothing
         # Hyper-predicted scales arrive as one-element vectors.
         sigma_value, rho_value = :sigma, :rho
@@ -359,14 +367,14 @@ function _rk_ast_hsgp_value_graph!(definitions, term, taken, inputs, sigma, rho,
         push!(arguments, :group_index)
         if !sigma_by_group && !rho_by_group
             push!(body.args, :(weights = $(weight_plate(:sigma, :rho))),
-                :(scaled_z = z .* transpose(weights)))
+                :(scaled_z = $zw .* transpose(weights)))
         else
             frequencies = D == 1 ? :(transpose(omega2)) : :(transpose(vec(sum(omega2; dims=2))))
             push!(body.args, :(frequencies = $frequencies),
                 :(scale = sigma .* (rho .* sqrt(2pi)).^($D / 2)),
                 :(exponent = (rho .^ 2) .* frequencies),
                 :(spectra = scale .* exp.(-0.25 .* exponent)),
-                :(scaled_z = z .* spectra))
+                :(scaled_z = $zw .* spectra))
         end
         # The same row-wise contraction as the scalar sum: gather the
         # original group's mode weights, multiply by the row's basis,
@@ -374,10 +382,13 @@ function _rk_ast_hsgp_value_graph!(definitions, term, taken, inputs, sigma, rho,
         push!(body.args, :(rows = scaled_z[group_index,:]),
             :(value = vec(sum(PHI .* rows; dims=2))), Expr(:return,:value))
     end
+    # The call below passes these last, after `group_index`.
+    multigroup === nothing || append!(arguments, (:L_level, :tau_level))
     # Terms with the same spectral shape share one explicit numerical graph.
     entry = _rk_ast_shared_definition!(definitions, taken, "brm_hsgp_spectral_graph",
         arguments, body; kernel=true)
     values = [last.(inputs)..., sigma, rho, z]
     group_index === nothing || push!(values, group_index)
+    multigroup === nothing || push!(values, multigroup.L, multigroup.tau)
     Expr(:call, entry, values...)
 end

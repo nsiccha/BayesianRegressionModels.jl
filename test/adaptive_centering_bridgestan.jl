@@ -655,10 +655,18 @@ function check_r2d2_wrapper(sb; stan_tau=r2d2_stan_tau)
               stan_tau(problem, x, block) rtol=1e-12
     end
 
-    wrapped = adaptive_centering_problem(sb, problem, AutoEnzyme())
-    ir = WarmupHMC.reparametrizer(wrapped)
     # Pair order: ordinary cells, then R2D2 cells, each block-major.
     ordered = vcat([b for b in blocks if b isa AdaptiveCenteringBlock], r2d2)
+    check_ranef_wrapper(sb, problem, x, ordered)
+end
+
+# The wrapper's exactness contract at `x` for a model whose cells are those of
+# `ordered`, in pair order: the default controls give the compiled density, and
+# under other controls the map is the independent per-block map, with its
+# density identity, gradient, inverse and candidate-scoring frame.
+function check_ranef_wrapper(sb, problem, x, ordered)
+    wrapped = adaptive_centering_problem(sb, problem, AutoEnzyme())
+    ir = WarmupHMC.reparametrizer(wrapped)
     @test first.(ir.pairs) == reduce(vcat, [vec(b.effects) for b in ordered])
 
     plain = LogDensityProblems.logdensity_and_gradient(problem, x)
@@ -694,12 +702,12 @@ function check_r2d2_wrapper(sb; stan_tau=r2d2_stan_tau)
     @test inverse_ljac ≈ -ljac atol=2e-12
     @test roundtrip ≈ x atol=2e-12
 
-    # The candidate-scoring frame reads each R2D2 cell's derived scale.
+    # The candidate-scoring frame reads each cell's scale, an R2D2 cell's
+    # derived one included.
     frame = AC_EXT._prepare_frame(state, ir, x, gradient)
     @test frame.source == controls
-    p = sum(b.ranef.n_terms * b.ranef.n_groups for b in ordered
-            if b isa AdaptiveCenteringBlock; init=0)
-    for block in r2d2, g in 1:block.ranef.n_groups
+    p = 0
+    for block in ordered, g in 1:block.ranef.n_groups
         C = BayesianRegressionModels._adaptive_block_cholesky(x, block, g)
         for k in 1:block.ranef.n_terms
             p += 1
@@ -1038,4 +1046,131 @@ end
          LogDensityProblems.logdensity(wrapped, minus)) / (2step)
     end for i in eachindex(x)]
     @test gradient ≈ finite_difference atol=2e-5 rtol=2e-5
+end
+
+# ---- Stratified `gr(g, by=b)` blocks ----------------------------------------
+#
+# A stratified block samples one `tau` and `L` per stratum of `b`, and each
+# group reads its own stratum's frame, so `adaptive_centering_blocks` returns
+# one ordinary block per stratum (snag `adaptive-warmup-e099a250`). Oracles:
+# each stratum block's levels, scales and correlation are `brm_ranef_draws`'
+# entry for that stratum, Stan's own constrained values at the same point; at
+# `c = 1` the source coordinates are Stan's own per-level effects; then the
+# exactness contract every block family meets (`check_ranef_wrapper`).
+using Distributions: LogNormal
+using Random: Xoshiro
+# Strata of 2, 3 and 2 groups, interleaved in the level order, so a stratum's
+# groups are not a contiguous run of the block's levels.
+const STRATIFIED_DF = (; g=[1, 1, 2, 2, 3, 3, 3, 4, 4, 5, 6, 6, 7, 7, 7],
+    b=[1, 1, 2, 2, 1, 1, 1, 3, 3, 2, 3, 3, 2, 2, 2],
+    x=round.(sin.(1:15); digits=3), t=round.(cos.(2 .* (1:15)); digits=3),
+    y=round.(cos.(3 .* (1:15)); digits=3))
+const STRATIFIED_VARIANTS = [
+    "one margin" => @brm(begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 | gr(g, by=b))
+        y ~ Normal(mu, sigma)
+    end),
+    "three margins" => @brm(begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 + x + t | gr(g, by=b))
+        y ~ Normal(mu, sigma)
+    end),
+    "one |ID| block over two predictors" => @brm(begin
+        mu ~ 1 + x + (1 + x | p | gr(g, by=b))
+        log(sigma) ~ 1 + (1 | p | gr(g, by=b))
+        y ~ Normal(mu, sigma)
+    end),
+    "configured sd and cor" => @brm(begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 + x | gr(g, by=b))
+        sd(mu, g, Intercept) ~ Exponential(2.0)
+        sd(mu, g, x) ~ LogNormal(0, 0.5)
+        cor(mu, g) ~ LKJCholesky(2, 3.0)
+        y ~ Normal(mu, sigma)
+    end),
+]
+
+stratified_sb(builder) =
+    SBBRMI(builder(STRATIFIED_DF); total_groups=(), mod=@__MODULE__)
+
+# The stratified block's per-stratum blocks at `x`, checked against Stan.
+function check_stratified_blocks(sb, problem)
+    names = StanBlocks.BridgeStan.param_unc_names(problem.model)
+    x = 0.6 .* sin.(1:length(names)) .+ 0.1 .* cos.(3 .* (1:length(names)))
+    ranef = only(r for r in ranef_blocks(sb) if !isnothing(r.by))
+    blocks = adaptive_centering_blocks(sb, names)
+    @test all(b -> b isa AdaptiveCenteringBlock && b.ranef.binding === ranef.binding,
+              blocks)
+    @test sort(reduce(vcat, [vec(b.effects) for b in blocks])) ==
+          sort(vec(ranef_coordinates(ranef, names)))
+    constrained = StanBlocks.BridgeStan.param_names(problem.model; include_tp=true)
+    entries(y) = brm_ranef_draws(brm_descriptor(sb), permutedims(
+        StanBlocks.BridgeStan.param_constrain(problem.model, y; include_tp=true)),
+        constrained; group=:g)
+    at_x = entries(x)
+    @test [b.ranef.levels for b in blocks] == [e.levels for e in at_x] ==
+          [[1, 3], [2, 5, 7], [4, 6]]
+    for (block, entry) in zip(blocks, at_x)
+        @test block.target_c == 0.0
+        @test block.ranef.by === ranef.by
+        @test BayesianRegressionModels._adaptive_block_taus(x, block) ≈ entry.sd[1, :] rtol=1e-12
+        L = BayesianRegressionModels._adaptive_block_correlation(x, block)
+        @test L * L' ≈ entry.cor[1, :, :] rtol=1e-12
+    end
+    # At `c = 1` a cell's source coordinate is its level's effect.
+    centred = adaptive_centering_problem(sb, problem, AutoEnzyme(); centeredness=1.0)
+    _, position = WarmupHMC.reparametrizer(centred)(x)
+    for (block, entry) in zip(blocks, entries(position))
+        @test x[block.effects] ≈ permutedims(entry.effects[1, :, :]) rtol=1e-12
+    end
+    blocks, x
+end
+
+@testset "BridgeStan stratified $label adapts exactly" for (label, builder) in
+        STRATIFIED_VARIANTS
+    sb = stratified_sb(builder)
+    problem = StanBlocks.stan_instantiate(sb.model)
+    blocks, x = check_stratified_blocks(sb, problem)
+    check_ranef_wrapper(sb, problem, x, blocks)
+    # The controls report lists every (level, term) cell, stratum by stratum.
+    rows = adaptive_centering_controls(adaptive_centering_problem(sb, problem,
+        AutoEnzyme()), sb)
+    @test [r.level for r in rows] ==
+          reduce(vcat, [repeat(b.ranef.levels; inner=b.ranef.n_terms) for b in blocks])
+    @test all(r -> r.binding === only(unique(b.ranef.binding for b in blocks)), rows)
+end
+
+@testset "learned order over a stratified block" begin
+    sb = stratified_sb(last(STRATIFIED_VARIANTS[2]))
+    problem = StanBlocks.stan_instantiate(sb.model)
+    names = StanBlocks.BridgeStan.param_unc_names(problem.model)
+    x = 0.5 .* sin.(1:length(names))
+    controls = vcat([isodd(c) ? [0.1, 0.5, 0.9] : [0.95, 0.2, 0.6] for c in 1:7]...)
+    wrapped = adaptive_centering_problem(sb, problem, AutoEnzyme(); ranef_order=:learned,
+                                         centeredness=controls)
+    ir = WarmupHMC.reparametrizer(wrapped)
+    @test ir isa AC_EXT.BRMOrderedCenteringReparametrization
+    @test length(ir.orders) == 3
+    ljac, mapped = ir(x)
+    @test ljac ≈ fd_logabsdet(ir, x) atol=1e-6
+    inverse_ljac, roundtrip = WarmupHMC.InverseFunctions.inverse(ir)(mapped)
+    @test roundtrip ≈ x atol=1e-12
+    @test inverse_ljac ≈ -ljac atol=1e-12
+    lp = LogDensityProblems.logdensity(wrapped, x)
+    @test lp ≈ ljac + LogDensityProblems.logdensity(problem, mapped) atol=1e-10
+end
+
+@testset "WarmupHMC adapts a stratified intercept online" begin
+    sb = stratified_sb(last(first(STRATIFIED_VARIANTS)))
+    online = adaptive_centering_problem(sb, StanBlocks.stan_instantiate(sb.model),
+                                        AutoEnzyme())
+    WarmupHMC.adaptive_warmup_mcmc(
+        Xoshiro(0x20261025), online;
+        n_draws=20, n_evaluations=120, stepsize_adaptation_limit=20,
+        max_tree_depth=7, progress=nothing, monitor_ess=false,
+    )
+    adapted = [value.c for (_, value) in WarmupHMC.reparam_sources(online)]
+    @test length(adapted) == 7
+    @test all(c -> c in 0.0:0.1:1.0, adapted)
 end

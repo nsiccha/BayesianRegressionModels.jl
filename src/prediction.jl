@@ -782,6 +782,23 @@ _ranef_data_vec(data, key, target, fam) = begin
     data[key]
 end
 
+# A stratified `gr(g, by=b)` block's stratum count `S` and the stratum in `1:S`
+# of each of its levels, read from the data its declaration passes as
+# `n_strata` and `stratum_idx`. `caller` prefixes the error.
+function _ranef_stratum_index(plan, block::RanefBlock, caller)
+    keywords = only(x for x in plan.declarations
+                    if x.role === :prior && x.target === block.binding).keywords
+    S = _ranef_data_int(plan.data, keywords.n_strata, block.binding, block.family)
+    stratum = _ranef_data_vec(plan.data, keywords.stratum_idx, block.binding,
+                              block.family)
+    (stratum isa AbstractVector{<:Integer} && length(stratum) == block.n_groups &&
+     all(in(1:S), stratum)) || error(
+        "$caller: stratum index `$(keywords.stratum_idx)` of block ",
+        "`$(block.binding)` is not one stratum in 1:$S for each of its ",
+        "$(block.n_groups) levels.")
+    S, collect(Int, stratum)
+end
+
 # The Stan coordinate name of entry (t, g) of a block. For vector and matrix
 # carriers the name's position in `unc_names` IS the coordinate's position,
 # and that is all `ranef_coordinates` needs. For `:group_term`

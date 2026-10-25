@@ -118,19 +118,29 @@ function _rk_ast_hsgp_grouped(definitions, term, inputs, floors, extent, taken, 
     weights = grouped ? (Expr(:call, :(:), 1, G), extent) : (extent,)
     push!(block.statements, Expr(:call, :.~, Expr(:ref, z, weights...),
         _rk_ast_dotted(:Normal, 0, 1)))
-    # `hsgp(...; by=g, cor=Omega)`: every basis function's group weights are
-    # correlated across levels by the factor's `L` (src/level_correlation.jl).
-    level_cor = get(options, :level_cor, nothing)
-    weights_value = z
-    if level_cor !== nothing
-        L = _rk_block_argument!(block, :L_level, _rk_ast_level_factor_value(level_cor))
-        weights_value = _rk_block_local!(block, :z_level)
-        push!(block.statements, Expr(:(=), weights_value, Expr(:call, :*, L, z)))
-    end
+    weights_value, multigroup = _rk_ast_hsgp_level_weights!(block, z,
+        get(options, :level_cor, nothing))
     value = _rk_block_local!(block, :value)
     push!(block.statements, Expr(:(=), value, _rk_ast_hsgp_value_graph!(definitions,
-        term, taken, arguments, sigma, rho, weights_value; group_index)))
+        term, taken, arguments, sigma, rho, weights_value; group_index, multigroup)))
     _rk_ast_block_call!(definitions, taken, "brm_grouped_hsgp", block, value)
+end
+
+# The level weights of a grouped HSGP's `cor=` (src/level_correlation.jl).
+# `cor=Omega` correlates every basis function's group weights by the factor's
+# `L`; `cor=multigroup(Omega, tau)` hands `L` and `tau` to the spectral graph,
+# which forms the frequency-dependent weights once it has the frequencies.
+_rk_ast_hsgp_level_weights!(_block, z, ::Nothing) = (z, nothing)
+function _rk_ast_hsgp_level_weights!(block, z, lc::_BRMLevelCorrelation)
+    L = _rk_block_argument!(block, :L_level, _rk_ast_level_factor_value(lc))
+    weights = _rk_block_local!(block, :z_level)
+    push!(block.statements, Expr(:(=), weights, Expr(:call, :*, L, z)))
+    (weights, nothing)
+end
+function _rk_ast_hsgp_level_weights!(block, z, lc::_BRMMultigroupCorrelation)
+    L = _rk_block_argument!(block, :L_level, _rk_ast_level_factor_value(lc.base))
+    tau = _rk_block_argument!(block, :tau_level, lc.tau)
+    (z, (; L, tau))
 end
 function _rk_ast_structured_block(definitions, field, taken, bindings)
     K, G = field.n_per_group, length(field.levels)
