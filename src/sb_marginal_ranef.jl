@@ -248,12 +248,23 @@ function _sb_emit_marginal_id_bucket!(stmts, data, bucket_name, n_terms_name,
         push!(stmts, :($completion_groups = maximum($idx_name)))
     end
     # The active correlation submatrix of `LKJ(K, eta)` is `LKJ(a, eta + m / 2)`.
-    push!(stmts, Expr(:call, :~, Expr(:(::), L_name, Expr(:ref, :cholesky_factor_corr, n_active)),
-                      Expr(:call, :lkj_corr_cholesky, eta + m / 2)))
+    # One active margin has no correlation: its factor is the constant 1
+    # (`_sb_single_margin_ranef`).
+    if a == 1
+        haskey(data, L_name) && error(
+            "sbimpl: marginal `$bucket_name` reserves data key `$L_name`, but that " *
+            "name is already used")
+        data[L_name] = ones(1, 1)
+        _sb_record_static!(data, L_name)
+    else
+        push!(stmts, Expr(:call, :~,
+            Expr(:(::), L_name, Expr(:ref, :cholesky_factor_corr, n_active)),
+            Expr(:call, :lkj_corr_cholesky, eta + m / 2)))
+    end
     scale = _sb_vector_prior_statement(tau_name, tau_name, resolved[active_cols],
         n_active; positive=true, mod, scope=@__MODULE__)
     push!(stmts, scale.statement)
-    for hyper in (L_name, tau_name)
+    for hyper in (a == 1 ? (tau_name,) : (L_name, tau_name))
         _sb_record_binding!(data, hyper, :random_effect, gname; marginal_of=bucket_name)
     end
 

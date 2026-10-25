@@ -772,6 +772,82 @@ ranef_correlated_draws_student_t =
 ranef_correlated_draws_generic_student_t =
     _sb_student_t_ranef(ranef_correlated_draws_generic, :ranef_correlated_draws_generic)
 
+# ---- One-margin blocks: no correlation factor -------------------------------
+#
+# A block with one margin has no correlation: its 1x1 Cholesky factor is the
+# constant 1. So a correlated family called for one margin takes its
+# single-margin form, derived here: the correlation factor's declaration and
+# LKJ density are dropped, and the block scales by `diag_matrix(tau)` where
+# the family scales by `diag_pre_multiply(tau, L)`. This is what `ranef_slope`
+# does and what RKBRMI's group effects do at K = 1. The block keeps its
+# family name: the family's readers already treat one margin as uncorrelated
+# (no `L` coordinates, unit correlation).
+#
+# The factor is `L ~ lkj_corr_cholesky(...)`, or a stratified family's
+# `L_s ~ plate(...)` of them, read through a cell alias `L_g = L_s[s]`. Any
+# other read of it is an error: the transform must not guess.
+_sb_is_lkj_law(x) = Meta.isexpr(x, :call) && x.args[1] === :lkj_corr_cholesky
+_sb_holds_lkj_law(x) = _sb_is_lkj_law(x) ||
+    (x isa Expr && any(_sb_holds_lkj_law, x.args))
+_sb_bound_name(x::Symbol) = x
+_sb_bound_name(x::Expr) = Meta.isexpr(x, :(::)) ? _sb_bound_name(x.args[1]) : nothing
+_sb_bound_name(_) = nothing
+
+function _sb_single_margin_ranef(base::StanBlocks.SlicModel)
+    body = deepcopy(base.model)
+    factors = Set{Symbol}()
+    for stmt in body.args
+        Meta.isexpr(stmt, :call) && stmt.args[1] === :~ &&
+            _sb_holds_lkj_law(stmt.args[3]) || continue
+        name = _sb_bound_name(stmt.args[2])
+        name isa Symbol || error(
+            "sbimpl: `$(stmt)` holds the correlation factor under a left side the " *
+            "single-margin transform does not recognise")
+        push!(factors, name)
+    end
+    isempty(factors) && return base
+    rewrite(x) = x
+    function rewrite(x::Expr)
+        if Meta.isexpr(x, :call) && x.args[1] === :diag_pre_multiply &&
+           length(x.args) == 3 && x.args[3] in factors
+            return Expr(:call, :diag_matrix, rewrite(x.args[2]))
+        end
+        if Meta.isexpr(x, :block)
+            kept = Any[]
+            for stmt in x.args
+                # The factor's own statement, and a cell alias of one stratum's factor.
+                Meta.isexpr(stmt, :call) && stmt.args[1] === :~ &&
+                    _sb_bound_name(stmt.args[2]) in factors && continue
+                if Meta.isexpr(stmt, :(=), 2) && stmt.args[1] isa Symbol &&
+                   Meta.isexpr(stmt.args[2], :ref) && stmt.args[2].args[1] in factors
+                    push!(factors, stmt.args[1])
+                    continue
+                end
+                push!(kept, rewrite(stmt))
+            end
+            return Expr(:block, kept...)
+        end
+        Expr(x.head, map(rewrite, x.args)...)
+    end
+    body = rewrite(body)
+    reads(x) = x isa Symbol ? x in factors : x isa Expr && any(reads, x.args)
+    reads(body) && error(
+        "sbimpl: a random-effect family reads its correlation factor " *
+        "($(join(sort!(collect(factors)), ", "))) other than through " *
+        "`diag_pre_multiply(tau, L)`; its single-margin form is not derived")
+    StanBlocks.SlicModel(body, base.data, base.mod, base.observations)
+end
+
+# The submodel and keywords that emit one block with `n_terms` margins:
+# `model` itself, or its single-margin form without the `lkj_eta` only the
+# dropped LKJ density read. `model` is a family's name or a `SlicModel`.
+_sb_ranef_model(model::Symbol, n_terms::Integer) = n_terms == 1 ?
+    _sb_single_margin_family(model) : model
+_sb_ranef_model(model::StanBlocks.SlicModel, n_terms::Integer) = n_terms == 1 ?
+    _sb_single_margin_ranef(model) : model
+_sb_ranef_kwargs(kwargs, n_terms::Integer) = n_terms == 1 ?
+    filter(kw -> !(Meta.isexpr(kw, :kw) && kw.args[1] === :lkj_eta), kwargs) : kwargs
+
 # ---- R2D2: derived random-effect scales -----------------------------------
 #
 # The `effect(..., :) ~ r2d2(...)` family DERIVES the marginal scale
@@ -4535,6 +4611,13 @@ _as_real(_) = nothing
 _as_error_exception(e::ErrorException) = e
 _as_error_exception(_) = nothing
 
+# `stan_code`, `stan_model` and `stan_instantiate` are StanBlocks' own
+# functions: BRM adds methods for its types and re-exports the same bindings,
+# so `using StanBlocks` beside `using BayesianRegressionModels` leaves them
+# unambiguous. A `SlicModel` (also one rebuilt from an emitted `SBBRMI`, such
+# as a `cv_groups` model marked with `StanBlocks.stan.maybecv`) takes
+# StanBlocks' own method, which traces in the newest method world.
+
 """
     stan_code(sb::SBBRMI) -> String
 
@@ -4546,20 +4629,7 @@ emitted before compiling.
 # the public newest-world entry for consumer-defined method-based families
 # and extensions. This boundary is used only while compiling a model,
 # never during sampling.
-stan_code(sb::SBBRMI) = Base.invokelatest(StanBlocks.stan_code, sb.model)
-
-"""
-    stan_code(model::StanBlocks.SlicModel) -> String
-
-Return the transpiled Stan source for a SLIC model, using the same
-world-age-safe boundary as `stan_code(::SBBRMI)`. This is the supported trace
-entry for a model rebuilt from an emitted `SBBRMI` after construction — for
-example a `cv_groups` model whose group index was marked with
-`StanBlocks.stan.maybecv` just before tracing. This boundary also preserves
-visibility of consumer-defined family hooks in an older compiled caller.
-"""
-stan_code(model::StanBlocks.SlicModel) =
-    Base.invokelatest(StanBlocks.stan_code, model)
+StanBlocks.stan_code(sb::SBBRMI) = Base.invokelatest(StanBlocks.stan_code, sb.model)
 
 """
     stan_data(sb::SBBRMI) -> Dict
@@ -4593,7 +4663,7 @@ current world, preserving visibility of consumer-defined hooks as in `stan_code`
 above. Prefer this over `StanBlocks.stan_model(sb.model)` when the trace may
 run inside a function that also built `sb`.
 """
-stan_model(sb::SBBRMI; kwargs...) =
+StanBlocks.stan_model(sb::SBBRMI; kwargs...) =
     Base.invokelatest(StanBlocks.stan_model, sb.model; kwargs...)
 
 """
@@ -4604,7 +4674,7 @@ in the current world, for the same lowering-time registration reason as
 `stan_code` above. Prefer this over `StanBlocks.stan_instantiate(sb.model)`
 when the build may run inside a function that also built `sb`.
 """
-stan_instantiate(sb::SBBRMI; kwargs...) =
+StanBlocks.stan_instantiate(sb::SBBRMI; kwargs...) =
     Base.invokelatest(StanBlocks.stan_instantiate, sb.model; kwargs...)
 
 """
@@ -5368,7 +5438,7 @@ function generative_plan(plan::GenerativePlan, new_df;
     _generative_plan(sb,plan.builder,cv_groups)
 end
 
-stan_code(plan::GenerativePlan) = Base.invokelatest(StanBlocks.stan_code, plan.model)
+StanBlocks.stan_code(plan::GenerativePlan) = Base.invokelatest(StanBlocks.stan_code, plan.model)
 
 Base.show(io::IO, plan::GenerativePlan) = begin
     nprior = count(d -> d.role === :prior, plan.declarations)
@@ -10434,6 +10504,7 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, 
     _sb_set_group_index_datum!(data, n_name, n_levels, g)
     _sb_record_group_index!(data, idx_name, n_name, g, parent(g_backing))
     r_name = Symbol(:r_, target, :_, g)
+    single_margin_family = nothing
     # The size expression the non-centered submodels are given. Bound to a named
     # local in the cv case so it appears once as `int <r>_n_g = max(<g>_idx);`
     # rather than being inlined into every declaration -- same shape as
@@ -10500,21 +10571,21 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, 
         if length(gterms) == 1 && length(col_exprs) == 1 && !is_centered
             push!(stmts, :($r_name ~ ranef_slope(;
                 Z=$Z_name, group_idx=$idx_name, n_groups=$n_groups_expr)))
-        elseif is_centered
-            k_name = Symbol(:n_terms_, target, :_, g)
-            data[k_name] = length(col_exprs)
-            push!(stmts, :($r_name ~ ranef_correlated_centered(;
-                Z=$Z_name, group_idx=$idx_name,
-                n_groups=$n_name, n_terms=$k_name)))
         else
+            K = length(col_exprs)
             k_name = Symbol(:n_terms_, target, :_, g)
-            data[k_name] = length(col_exprs)
-            push!(stmts, :($r_name ~ ranef_correlated(;
-                Z=$Z_name, group_idx=$idx_name,
-                n_groups=$n_groups_expr, n_terms=$k_name)))
+            data[k_name] = K
+            family = is_centered ? :ranef_correlated_centered : :ranef_correlated
+            push!(stmts, _sb_ranef_statement(r_name, family,
+                Any[Expr(:kw, :Z, Z_name), Expr(:kw, :group_idx, idx_name),
+                    Expr(:kw, :n_groups, is_centered ? n_name : n_groups_expr),
+                    Expr(:kw, :n_terms, k_name)], K))
+            # A one-margin block calls its family's single-margin form.
+            K == 1 && (single_margin_family = family)
         end
     end
     _sb_record_binding!(data,r_name,:random_effect,g;predictor=description_predictor,
+        family=single_margin_family,
         columns=length(gterms)==1 && gterms[1]===1 ? (:Intercept,) :
             Tuple(c isa Symbol ? c : :Intercept for c in col_exprs))
     push!(summands, r_name)
@@ -10580,6 +10651,7 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol,
 
     b_name = Symbol(:b_, target, :_, suffix)
     r_name = Symbol(:r_, target, :_, suffix)
+    single_margin_family = nothing
     if length(gterms) == 1 && gterms[1] === 1
         push!(stmts, :($b_name ~ ranef_intercept_draws(;
             group_idx=$idx_name, n_groups=$n_name)))
@@ -10593,16 +10665,20 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol,
         end
         Z_name = Symbol(:Z_, target, :_, suffix)
         k_name = Symbol(:n_terms_, target, :_, suffix)
-        data[k_name] = length(col_exprs)
+        K = length(col_exprs)
+        data[k_name] = K
         push!(stmts, :($Z_name = $(Expr(:call, :hcat, col_exprs...))))
-        push!(stmts, :($b_name ~ ranef_correlated_draws(;
-            Z=$Z_name, group_idx=$idx_name,
-            n_groups=$n_name, n_terms=$k_name)))
+        push!(stmts, _sb_ranef_statement(b_name, :ranef_correlated_draws,
+            Any[Expr(:kw, :Z, Z_name), Expr(:kw, :group_idx, idx_name),
+                Expr(:kw, :n_groups, n_name), Expr(:kw, :n_terms, k_name)], K))
+        # A one-margin block calls its family's single-margin form.
+        K == 1 && (single_margin_family = :ranef_correlated_draws)
         push!(stmts, :($r_name = multi_membership_correlated(
             $Z_name, $b_name, $idx_name, $weight_name,
             $n_obs_name, $n_memberships_name)))
     end
     _sb_record_binding!(data,b_name,:random_effect,suffix;predictor=description_predictor,
+        family=single_margin_family,
         columns=length(gterms)==1 && gterms[1]===1 ? (:Intercept,) :
             Tuple(c isa Symbol ? c : :Intercept for c in col_exprs))
     push!(summands, r_name)
@@ -10658,13 +10734,16 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::Tuple{NamedCo
     end
     Z_name = Symbol(:Z_, target, :_, suffix)
     k_name = Symbol(:n_terms_, target, :_, suffix)
-    data[k_name] = length(col_exprs)
+    K = length(col_exprs)
+    data[k_name] = K
     push!(stmts, :($Z_name = $(Expr(:call, :hcat, col_exprs...))))
-    push!(stmts, :($r_name ~ ranef_correlated_by(;
-        Z=$Z_name, group_idx=$idx_name,
-        n_groups=$n_groups_name, n_terms=$k_name,
-        stratum_idx=$s_idx_name, n_strata=$n_strata_nm)))
+    push!(stmts, _sb_ranef_statement(r_name, :ranef_correlated_by,
+        Any[Expr(:kw, :Z, Z_name), Expr(:kw, :group_idx, idx_name),
+            Expr(:kw, :n_groups, n_groups_name), Expr(:kw, :n_terms, k_name),
+            Expr(:kw, :stratum_idx, s_idx_name), Expr(:kw, :n_strata, n_strata_nm)], K))
+    # A one-margin block calls its family's single-margin form.
     _sb_record_binding!(data,r_name,:random_effect,g;predictor=description_predictor,
+        family=K == 1 ? :ranef_correlated_by : nothing,
         columns=Tuple(c isa Symbol ? c : :Intercept for c in col_exprs))
     push!(summands, r_name)
 end
@@ -12128,6 +12207,36 @@ function _sb_level_correlation_factor!(data, lc, ::Val{:data})
     key
 end
 
+# The single-margin forms of the families emitted by name, derived once.
+const _SB_SINGLE_MARGIN_FAMILIES = Dict{Symbol,StanBlocks.SlicModel}(
+    family => _sb_single_margin_ranef(getfield(@__MODULE__, family))
+    for family in (:ranef_correlated, :ranef_correlated_centered,
+                   :ranef_correlated_draws, :ranef_correlated_draws_centered,
+                   :ranef_correlated_draws_r2d2, :ranef_correlated_draws_student_t,
+                   :ranef_correlated_draws_centered_student_t,
+                   :ranef_correlated_by, :ranef_correlated_by_draws))
+_sb_single_margin_family(family::Symbol) = get(_SB_SINGLE_MARGIN_FAMILIES, family) do
+    error("sbimpl: random-effect family `$family` has no single-margin form; " *
+          "add it to `_SB_SINGLE_MARGIN_FAMILIES`")
+end
+
+# `binding ~ model(; kwargs...)` for a block with `n_terms` margins.
+_sb_ranef_statement(binding, model, kwargs, n_terms::Integer) =
+    Expr(:call, :~, binding, Expr(:call, _sb_ranef_model(model, n_terms),
+        Expr(:parameters, _sb_ranef_kwargs(kwargs, n_terms)...)))
+
+# Record the family of a one-margin block emitted by name: it calls the
+# family's single-margin `SlicModel`, so its declaration cannot name it. An
+# existing record keeps its other fields.
+function _sb_record_single_margin!(data, binding, logical, family::Symbol, n_terms::Integer)
+    n_terms == 1 || return nothing
+    bindings = get(data, _SB_BINDINGS_KEY, nothing)
+    isnothing(bindings) && return nothing
+    bindings[binding] = haskey(bindings, binding) ?
+        merge(bindings[binding], (; family)) : (; role=:random_effect, logical, family)
+    nothing
+end
+
 # Emit a Student-t `|ID|` block: the bucket's Gaussian draws submodel -- the
 # default one, or the generic one when `sd(...)` / `cor(...)` configure it,
 # non-centered or, for a group in `centered_groups`, centered -- turned into its
@@ -12166,10 +12275,10 @@ function _sb_emit_student_t_id_bucket!(stmts, data, bucket_name, n_terms_name,
     else
         model = centered ? :ranef_correlated_draws_centered_student_t :
                            :ranef_correlated_draws_student_t
+        _sb_record_single_margin!(data, bucket_name, gname, model, data[n_terms_name])
     end
     push!(kwargs, Expr(:kw, :nu, nu))
-    push!(stmts, Expr(:call, :~, bucket_name,
-                      Expr(:call, model, Expr(:parameters, kwargs...))))
+    push!(stmts, _sb_ranef_statement(bucket_name, model, kwargs, data[n_terms_name]))
     nothing
 end
 
@@ -12237,8 +12346,7 @@ function _sb_emit_known_id_bucket!(stmts, data, bucket_name, n_terms_name,
     _sb_record_binding!(data, bucket_name, :random_effect, gname; family,
         known_scales=Tuple(_brm_is_known_scale(p) ? p.value : nothing for p in priors),
         known_cor)
-    push!(stmts, Expr(:call, :~, bucket_name,
-                      Expr(:call, model, Expr(:parameters, kwargs...))))
+    push!(stmts, _sb_ranef_statement(bucket_name, model, kwargs, data[n_terms_name]))
     nothing
 end
 
@@ -12289,6 +12397,7 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g:
                                       mod::Module=@__MODULE__, r2d2_lkj_eta=1.0)
     idx_name, n_name = _sb_ensure_group_data!(data, g)
     gname = name(g)
+    K = data[n_terms_name]
     dist = isnothing(ranef_effect) ? nothing : ranef_effect.dist
     if _brm_ranef_has_known(ranef_effect)
         isnothing(r2d2_tau) || error(
@@ -12333,9 +12442,11 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g:
         end
         tau_name = Symbol(bucket_name, :_r2d2_tau)
         push!(stmts, :($tau_name = $r2d2_tau))
-        push!(stmts, :($bucket_name ~ ranef_correlated_draws_r2d2(;
-            group_idx=$idx_name, n_groups=$n_groups, n_terms=$n_terms_name,
-            tau=$tau_name, lkj_eta=$r2d2_lkj_eta)))
+        push!(stmts, _sb_ranef_statement(bucket_name, :ranef_correlated_draws_r2d2,
+            Any[Expr(:kw, :group_idx, idx_name), Expr(:kw, :n_groups, n_groups),
+                Expr(:kw, :n_terms, n_terms_name), Expr(:kw, :tau, tau_name),
+                Expr(:kw, :lkj_eta, r2d2_lkj_eta)], K))
+        _sb_record_single_margin!(data, bucket_name, gname, :ranef_correlated_draws_r2d2, K)
         return idx_name
     end
     # An explicit `ranef(:, ID) ~ Normal()` resolves an entry with no SD or
@@ -12357,6 +12468,7 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g:
                                           :ranef_correlated_draws_generic
         _sb_record_binding!(data, bucket_name, :random_effect, gname; family)
     end
+    n_groups = n_name
     if gname in cv_groups
         # Same submodel as the default branch; only the SIZE EXPRESSION differs.
         # Tracing `maximum(<g>_idx)` at the CALL SITE carries the cv taint on
@@ -12365,46 +12477,21 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g:
         # column-major layout are unchanged. Bound to a named local first so the
         # size appears once as `int <b>_n_g = max(<g>_idx);` instead of being
         # inlined into every declaration.
-        n_cv_name = Symbol(bucket_name, :_n_g)
-        push!(stmts, :($n_cv_name = maximum($idx_name)))
-        if isnothing(ranef_effect)
-            push!(stmts, :($bucket_name ~ ranef_correlated_draws(;
-                group_idx=$idx_name, n_groups=$n_cv_name, n_terms=$n_terms_name)))
-        else
-            push!(stmts, Expr(:call, :~, bucket_name,
-                Expr(:call, generic_model, Expr(:parameters,
-                    Expr(:kw, :group_idx, idx_name),
-                    Expr(:kw, :n_groups, n_cv_name),
-                    Expr(:kw, :n_terms, n_terms_name),
-                    Expr(:kw, :lkj_eta, lkj_eta),
-                    generic_dependency_kwargs...))))
-        end
-    elseif gname in centered_groups
-        if isnothing(ranef_effect)
-            push!(stmts, :($bucket_name ~ ranef_correlated_draws_centered(;
-                group_idx=$idx_name, n_groups=$n_name, n_terms=$n_terms_name)))
-        else
-            push!(stmts, Expr(:call, :~, bucket_name,
-                Expr(:call, generic_model, Expr(:parameters,
-                    Expr(:kw, :group_idx, idx_name),
-                    Expr(:kw, :n_groups, n_name),
-                    Expr(:kw, :n_terms, n_terms_name),
-                    Expr(:kw, :lkj_eta, lkj_eta),
-                    generic_dependency_kwargs...))))
-        end
+        n_groups = Symbol(bucket_name, :_n_g)
+        push!(stmts, :($n_groups = maximum($idx_name)))
+    end
+    kwargs = Any[Expr(:kw, :group_idx, idx_name), Expr(:kw, :n_groups, n_groups),
+                 Expr(:kw, :n_terms, n_terms_name)]
+    if isnothing(ranef_effect)
+        # The cv size expression keeps the non-centered default (`SBBRMI`
+        # refuses a group in both `cv_groups` and `centered_groups`).
+        family = gname in centered_groups && !(gname in cv_groups) ?
+            :ranef_correlated_draws_centered : :ranef_correlated_draws
+        push!(stmts, _sb_ranef_statement(bucket_name, family, kwargs, K))
+        _sb_record_single_margin!(data, bucket_name, gname, family, K)
     else
-        if isnothing(ranef_effect)
-            push!(stmts, :($bucket_name ~ ranef_correlated_draws(;
-                group_idx=$idx_name, n_groups=$n_name, n_terms=$n_terms_name)))
-        else
-            push!(stmts, Expr(:call, :~, bucket_name,
-                Expr(:call, generic_model, Expr(:parameters,
-                    Expr(:kw, :group_idx, idx_name),
-                    Expr(:kw, :n_groups, n_name),
-                    Expr(:kw, :n_terms, n_terms_name),
-                    Expr(:kw, :lkj_eta, lkj_eta),
-                    generic_dependency_kwargs...))))
-        end
+        push!(stmts, _sb_ranef_statement(bucket_name, generic_model,
+            Any[kwargs..., Expr(:kw, :lkj_eta, lkj_eta), generic_dependency_kwargs...], K))
     end
     idx_name
 end
@@ -12437,11 +12524,12 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name,
         push!(stmts, :($n_cv_name = maximum($(info.idx_name))))
         n_groups_name = n_cv_name
     end
-    push!(stmts, :($bucket_name ~ ranef_correlated_by_draws(;
-        group_idx=$(info.idx_name),
-        n_groups=$n_groups_name,
-        n_terms=$n_terms_name,
-        stratum_idx=$(info.s_idx_name), n_strata=$(info.n_strata_name))))
+    K = data[n_terms_name]
+    push!(stmts, _sb_ranef_statement(bucket_name, :ranef_correlated_by_draws,
+        Any[Expr(:kw, :group_idx, info.idx_name), Expr(:kw, :n_groups, n_groups_name),
+            Expr(:kw, :n_terms, n_terms_name), Expr(:kw, :stratum_idx, info.s_idx_name),
+            Expr(:kw, :n_strata, info.n_strata_name)], K))
+    _sb_record_single_margin!(data, bucket_name, gname, :ranef_correlated_by_draws, K)
     info.idx_name
 end
 

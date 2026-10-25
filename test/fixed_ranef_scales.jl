@@ -284,9 +284,10 @@ FIXED_RUNTIME && @stestset "BridgeStan: known equals sampled at the known value"
         instantiate(build(single_sampled_builder)).model
     tau = sqrt(0.1)
     for _ in 1:3
-        # A one-margin block keeps its 1x1 correlation factor on both sides.
-        base = merge(shared_point(rng, "b_ka_subject", 1),
-            Dict("b_ka_subject_L.1.1" => 1.0))
+        # A one-margin block declares no correlation factor on either side.
+        base = shared_point(rng, "b_ka_subject", 1)
+        @test !any(n -> startswith(n, "b_ka_subject_L"), BridgeStan.param_names(known))
+        @test !any(n -> startswith(n, "b_ka_subject_L"), BridgeStan.param_names(twin))
         sampled = stan_lp(twin, merge(base, Dict("b_ka_subject_tau.1" => tau)))
         @test sampled - stan_lp(known, base) ≈ logpdf(Normal(), tau) atol=1e-10
     end
@@ -338,8 +339,7 @@ FIXED_RUNTIME && @stestset "BridgeStan: centered = non-centered through b = C z"
             r = 0.6rand(rng) - 0.3
             L = isnothing(known_L) ? (K == 1 ? ones(1, 1) : Matrix(cholesky([1 r; r 1]).L)) :
                 Matrix(cholesky(known_L).L)
-            correlation = isnothing(known_L) ?
-                (K == 1 ? Dict("$(block)_L.1.1" => 1.0) : lkj_factor("$(block)_L", r)) :
+            correlation = isnothing(known_L) && K > 1 ? lkj_factor("$(block)_L", r) :
                 Dict{String,Float64}()
             tau = Union{Nothing,Float64}[known_scales...]
             for (j, k) in enumerate(findall(isnothing, known_scales))

@@ -641,11 +641,15 @@ _brm_inventory() = (; reads=Set{Symbol}(), responses=Set{Symbol}(),
                       latent=Set{Symbol}(), cell_bound=Set{Symbol}(),
                       constant_reads=Set{Symbol}())
 
-function _brm_inventory_statement!(inventory, lhs, rhs, legacy_kernel_doblock)
+function _brm_inventory_statement!(inventory, lhs, rhs, legacy_kernel_doblock, read_before)
     isxcall(lhs, :mi) && length(lhs.args) == 2 && lhs.args[2] isa Symbol &&
         push!(inventory.data, lhs.args[2])
     (isxcall(rhs, :kernel) || legacy_kernel_doblock) && lhs isa Symbol &&
         push!(inventory.latent, lhs)
+    # A statement that reads its own response (`y ~ Normal(mu, 0.1 * y)`) leaves
+    # it an observed response; only another statement's read makes it a
+    # parameter. A later statement that reads it adds the read back.
+    lhs isa Symbol && !(lhs in read_before) && delete!(inventory.reads, lhs)
     inventory
 end
 
@@ -908,10 +912,11 @@ elseif isxcall(x, :~)
     # literal, not a bare Symbol. _x then sees the three-arg form and emits an
     # ExprColumn{|} with the id as a Symbol value.
     rhs = rewrite_ranef_ids(rhs)
+    read_before = hasproperty(info, :inventory) ? copy(info.inventory.reads) : nothing
     parselocals!(rhs; info, val=:nonlocal)
     parselocals!(lhs; info, val=:maybelocal)
     hasproperty(info, :inventory) &&
-        _brm_inventory_statement!(info.inventory, lhs, rhs, legacy_kernel_doblock)
+        _brm_inventory_statement!(info.inventory, lhs, rhs, legacy_kernel_doblock, read_before)
     parsed = :(@n $lhs = @x $(Expr(:call, :~, lhs, rhs)))
     legacy_kernel_doblock ?
         Expr(:block, :($_brm_depwarn_kernel_doblock()), parsed) : parsed
@@ -2466,6 +2471,10 @@ _brm_cell_value_refs!(acc, x::Symbol) = (push!(acc, x); acc)
 function _brm_cell_value_refs!(acc, x::Expr)
     values = if Meta.isexpr(x, :->)
         (x.args[2],)
+    elseif Meta.isexpr(x, :block) && _brm_cell_has_no_result(x.args)
+        # A cell body's terminal `nothing` marks "no collected result"; it
+        # reads no value (an observation-only `@plate` cell ends in it).
+        _brm_cell_without_result(x.args)
     elseif Meta.isexpr(x, (:call, :macrocall, :kw))
         x.args[2:end]
     elseif _brm_is_broadcast_call(x)
