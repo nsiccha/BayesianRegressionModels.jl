@@ -15,8 +15,9 @@ The indices of each group of the vector `g`.
 `groups(g)` has one group per distinct value of `g`, in sorted order of the
 values. `groups(g => labels)` has one group per entry of `labels`, in that
 order: the indices of `g` that hold that label (none, if no entry of `g`
-does). Within a group the indices are in ascending `order` (a vector indexed
-like `g`) when it is given, ties in index order, and in index order otherwise.
+does). An entry of `g` whose label is not listed is in no group. Within a
+group the indices are in ascending `order` (a vector indexed like `g`) when it
+is given, ties in index order, and in index order otherwise.
 
 ```julia
 julia> groups(["b", "a", "b", "a"]; order = [4, 9, 1, 2])
@@ -29,6 +30,11 @@ julia> groups(["b", "a", "b", "a"] => ["b", "c", "a"])
  [1, 3]
  []
  [2, 4]
+
+julia> groups(["b", "a", "d", "a"] => ["a", "b"])
+2-element Vector{Vector{Int64}}:
+ [2, 4]
+ [1]
 ```
 
 In a `@brm` model, `@plate for p in groups(probe; order = day)` has one cell per
@@ -36,8 +42,10 @@ group of the data vector `probe`, and `p` is that group's indices: a read
 `x[p]` of a value indexed like `probe` is `x` at those indices in that order.
 A plate over subjects reads another vector's entries per subject through a
 model-scope binding, `events = groups(event_subject => subject)`, as
-`x[events[i]]`. Either way the cell means what the same loop computes in
-Julia. See [`kernel`](@ref).
+`x[events[i]]`; an entry whose label names no cell is read by no cell. A
+response observed through a binding, `y[events[i]] ~ …`, must have every entry
+in a cell. Either way the cell means what the same loop computes in Julia. See
+[`kernel`](@ref).
 """
 groups(g::AbstractVector; order::Union{Nothing,AbstractVector}=nothing) =
     _brm_groups(g, sort!(unique(_brm_groups_labels(g))), order)
@@ -60,11 +68,10 @@ function _brm_groups(g, cells, order)
         position[label] = j
     end
     indices = [Int[] for _ in cells]
+    # An entry whose label is not listed is in no group (decision `0z97g0b`).
     for (r, label) in enumerate(labels)
         j = get(position, label, 0)
-        j == 0 && throw(ArgumentError(
-            "groups: `g` holds $(repr(label)), which is not among the labels"))
-        push!(indices[j], r)
+        j == 0 || push!(indices[j], r)
     end
     if order !== nothing
         length(order) == length(labels) || throw(DimensionMismatch(

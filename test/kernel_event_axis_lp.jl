@@ -285,10 +285,13 @@ end
         @test_throws "label(s) Any[\"s2\"] in `dose_subject` name no subject" reprocess(
             sb, unseen)
 
+        # A dose whose subject the plate does not list is read by no cell
+        # (decision `0z97g0b`): row 5 joins no subject's doses.
         stray = merge(replay_df, (;
             dose_subject = ["s1", "s3", "s2", "s1", "s9", "s3", "s2", "s1", "s3"],
         ))
-        @test_throws "name no subject" reprocess(sb, stray)
+        @test reprocess(sb, stray).data[:kernel_pred_log_F_ragged] ==
+              [[2, 6, 9], [1, 4, 8], [3, 7]]
     end
 
     @testset "BridgeStan runtime — the event-axis LP is a live parameter" begin
@@ -368,9 +371,11 @@ end
             ev_arity_model(df); mod = @__MODULE__)
         @test_throws "ragged(...) takes only the `into=` keyword" ev_kwarg_model(df)
 
-        # A label naming no subject the kernel walks.
+        # A dose whose subject the plate does not list is read by no cell
+        # (decision `0z97g0b`).
         stray = ev_df(; dose_subject = ["s1", "s1", "s2", "s2", "s9", "s3", "s3"])
-        @test_throws "name no subject" SBBRMI(ev_model(stray); mod = @__MODULE__)
+        stray_rows = SBBRMI(ev_model(stray); mod = @__MODULE__).data[:kernel_pred_log_F_ragged]
+        @test sort!(reduce(vcat, stray_rows)) == [1, 2, 3, 4, 6, 7]
 
     end
 
