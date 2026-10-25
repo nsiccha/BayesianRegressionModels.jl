@@ -81,6 +81,79 @@ function _brm_rk_periodic_basis(x, k, period, anchor, mask)
     state.PHI, state.harmonics, state.rho_lower
 end
 
+# `hsgp(x...; by=g, cor=multigroup(Omega, tau))` (src/level_correlation.jl):
+# basis column `b` of the levels × basis standardized weights `z` is correlated
+# across levels by the multigroup coherence
+# `C_b = exp(-(sum_a rho_a^2 omega2[b, a]) / 2 * D2)`, `D2 = 2 tau (1 - Omega)`,
+# with `Omega = L L'`. The returned weights are `chol(C_b + 1e-6 I) * z[:, b]`;
+# the spectral scaling stays with the caller. The unit diagonal is set exactly,
+# so rounding in `L L'` never perturbs it. StanBlocks' twin is the
+# `@stanonly` deffun of the same name in src/sbimpl.jl; keep both in lockstep.
+function brm_hsgp_multigroup_weights(z, omega2, rho, L, tau)
+    G, M = size(z, 1), size(z, 2)
+    T = promote_type(eltype(z), eltype(L), typeof(tau), eltype(rho))
+    Omega = L * transpose(L)
+    out = similar(z, T, G, M)
+    for b in 1:M
+        e = _brm_hsgp_frequency_exponent(omega2, rho, b)
+        C = Matrix{T}(undef, G, G)
+        for j in 1:G, i in 1:G
+            C[i, j] = i == j ? one(T) + T(1e-6) : exp(-e * tau * (1 - Omega[i, j]))
+        end
+        chol = _brm_lower_cholesky(C)
+        for i in 1:G
+            acc = zero(T)
+            for k in 1:i
+                acc += chol[i, k] * z[k, b]
+            end
+            out[i, b] = acc
+        end
+    end
+    out
+end
+
+# `sum_a rho_a^2 omega2[b, a]`: a one-axis basis carries one frequency per mode.
+_brm_hsgp_frequency_exponent(omega2::AbstractVector, rho::Real, b) = rho^2 * omega2[b]
+_brm_hsgp_frequency_exponent(omega2::AbstractVector, rho, b) = rho[1]^2 * omega2[b]
+function _brm_hsgp_frequency_exponent(omega2::AbstractMatrix, rho::Real, b)
+    e = zero(rho)
+    for a in axes(omega2, 2)
+        e += rho^2 * omega2[b, a]
+    end
+    e
+end
+function _brm_hsgp_frequency_exponent(omega2::AbstractMatrix, rho, b)
+    e = zero(eltype(rho))
+    for a in axes(omega2, 2)
+        e += rho[a]^2 * omega2[b, a]
+    end
+    e
+end
+
+# Plain-loop lower Cholesky factor of a symmetric positive-definite matrix, so
+# Enzyme differentiates it without a LAPACK rule.
+function _brm_lower_cholesky(C::AbstractMatrix{T}) where {T}
+    n = size(C, 1)
+    chol = zeros(T, n, n)
+    for j in 1:n
+        d = C[j, j]
+        for k in 1:(j - 1)
+            d -= chol[j, k]^2
+        end
+        d > 0 || error("brm_hsgp_multigroup_weights: the multigroup coherence " *
+                       "is not positive definite (pivot $j is $d)")
+        chol[j, j] = sqrt(d)
+        for i in (j + 1):n
+            t = C[i, j]
+            for k in 1:(j - 1)
+                t -= chol[i, k] * chol[j, k]
+            end
+            chol[i, j] = t / chol[j, j]
+        end
+    end
+    chol
+end
+
 function brm_hsgp_sqrt_spd(omega2, sigma, rho::Real)
     scale = sigma * (rho * sqrt(2pi))^(size(omega2, 2) / 2)
     result = Vector{promote_type(typeof(sigma), typeof(rho))}(undef, size(omega2, 1))

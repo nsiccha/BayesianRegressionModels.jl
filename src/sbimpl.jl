@@ -2790,6 +2790,28 @@ StanBlocks.@deffun begin
         return rv
     end
 
+    @stanonly brm_hsgp_multigroup_weights(beta::matrix[k, m], omega2::matrix[m, d],
+                                           rho::vector[d], L::matrix[k, k],
+                                           tau::real)::matrix[k, m] = begin
+        rv::matrix[k, m]
+        Omega = multiply_lower_tri_self_transpose(L)
+        for b in 1:m
+            exponent = 0.
+            for axis in 1:d
+                exponent += rho[axis] * rho[axis] * omega2[b, axis]
+            end
+            C::matrix[k, k]
+            for j in 1:k
+                for i in 1:k
+                    C[i, j] = exp(-exponent * tau * (1 - Omega[i, j]))
+                end
+                C[j, j] = 1.000001
+            end
+            rv[:, b] = cholesky_decompose(C) * beta[:, b]
+        end
+        return rv
+    end
+
     @stanonly brm_hsgp_log_sqrt_spd(omega2::matrix[m, d], sigma::real,
                                      rho::vector[d])::vector[m] = begin
         rv::vector[m]
@@ -3107,6 +3129,25 @@ end
 # intrinsic coregionalisation model over the levels of `g`.
 _sb_hsgp_by_levelcor = _sb_level_correlated_input(_sb_hsgp_by, :beta)
 _sb_hsgp_by_aniso_levelcor = _sb_level_correlated_input(_sb_hsgp_by_aniso, :beta)
+
+# `hsgp(x...; by=g, cor=multigroup(Omega, tau))`: basis column `b` of the level
+# weights is `chol(C_b) * beta[:, b]` with the frequency-dependent multigroup
+# coherence `C_b` (`brm_hsgp_multigroup_weights`, src/level_correlation.jl). It
+# reads the length scale, so the weights are formed just before the first
+# statement that reads `input`, after `rho` exists.
+function _sb_multigroup_input(base::StanBlocks.SlicModel, input::Symbol)
+    level = Symbol(input, :_level)
+    reads(x) = x === input || (x isa Expr && any(reads, x.args))
+    substitute(x) = x === input ? level :
+        x isa Expr ? Expr(x.head, map(substitute, x.args)...) : x
+    stmts = base.model.args
+    at = findfirst(reads, stmts)
+    weights = :($level = brm_hsgp_multigroup_weights($input, omega2, rho, L_level, tau_level))
+    body = Expr(:block, stmts[1:at-1]..., weights, map(substitute, stmts[at:end])...)
+    StanBlocks.SlicModel(body, base.data, base.mod, base.observations)
+end
+_sb_hsgp_by_multigroup = _sb_multigroup_input(_sb_hsgp_by, :beta)
+_sb_hsgp_by_aniso_multigroup = _sb_multigroup_input(_sb_hsgp_by_aniso, :beta)
 
 # Categorical -> (n_levels::Int, per-row level index::Vector{Int}). Mirrors
 # vimpl._level_index so the integer indices the walker stashes in `data`
@@ -9819,6 +9860,8 @@ _sb_gp_submodel(::Val{:_sb_hsgp_by}) = _sb_hsgp_by
 _sb_gp_submodel(::Val{:_sb_hsgp_by_aniso}) = _sb_hsgp_by_aniso
 _sb_gp_submodel(::Val{:_sb_hsgp_by_levelcor}) = _sb_hsgp_by_levelcor
 _sb_gp_submodel(::Val{:_sb_hsgp_by_aniso_levelcor}) = _sb_hsgp_by_aniso_levelcor
+_sb_gp_submodel(::Val{:_sb_hsgp_by_multigroup}) = _sb_hsgp_by_multigroup
+_sb_gp_submodel(::Val{:_sb_hsgp_by_aniso_multigroup}) = _sb_hsgp_by_aniso_multigroup
 _sb_gp_submodel(::Val{:_sb_hsgp_latent}) = _sb_hsgp_latent
 _sb_gp_submodel(::Val{:_sb_hsgp_latent_orthogonal}) = _sb_hsgp_latent_orthogonal
 _sb_gp_submodel(::Val{:_sb_gp_periodic}) = _sb_gp_periodic
@@ -9834,6 +9877,8 @@ _sb_gp_rho_lhs(::Val{:_sb_hsgp_by}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_by_aniso}) = :(rho :: vector[n_axes])
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_by_levelcor}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_by_aniso_levelcor}) = :(rho :: vector[n_axes])
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_by_multigroup}) = :rho_iso
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_by_aniso_multigroup}) = :(rho :: vector[n_axes])
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_latent}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_latent_orthogonal}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_gp_periodic}) = :rho
@@ -12297,6 +12342,17 @@ end
 # The Stan value of a level correlation's lower Cholesky factor: the sampled
 # `LKJCholesky` declaration by name, or a data factor computed once in Julia
 # and replayed frozen, like a known `cor(:, ID) = R`.
+# The grouped-HSGP submodel and level arguments of a `cor=`: the constant
+# (ICM) correlation, or the frequency-dependent multigroup coherence.
+_sb_hsgp_level_submodel(::_BRMLevelCorrelation, iso) =
+    iso ? :_sb_hsgp_by_levelcor : :_sb_hsgp_by_aniso_levelcor
+_sb_hsgp_level_submodel(::_BRMMultigroupCorrelation, iso) =
+    iso ? :_sb_hsgp_by_multigroup : :_sb_hsgp_by_aniso_multigroup
+_sb_hsgp_level_arguments!(data, lc::_BRMLevelCorrelation) =
+    (; L_level=_sb_level_correlation_factor!(data, lc))
+_sb_hsgp_level_arguments!(data, lc::_BRMMultigroupCorrelation) =
+    (; L_level=_sb_level_correlation_factor!(data, lc.base), tau_level=lc.tau)
+
 _sb_level_correlation_factor!(data, lc::_BRMLevelCorrelation) =
     _sb_level_correlation_factor!(data, lc, Val(lc.kind))
 _sb_level_correlation_factor!(_data, lc, ::Val{:parameter}) = lc.name
@@ -13797,13 +13853,12 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
             lc = _brm_level_correlation(level_cor; what, prefix="sbimpl")
             _brm_check_level_correlation(lc, data[Symbol(:n_, gname)];
                                          what, group=gname, prefix="sbimpl")
-            submodel = _sb_gp_submodel_expr(
-                iso ? :_sb_hsgp_by_levelcor : :_sb_hsgp_by_aniso_levelcor,
-                term_overrides, t)
+            submodel = _sb_gp_submodel_expr(_sb_hsgp_level_submodel(lc, iso),
+                                            term_overrides, t)
             push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
                 submodel, term_overrides, t; PHI=PHI_name, omega2=omega2_name,
                 rho_lower=rho_lower_name, beta=info.block_name, group_idx=info.idx_name,
-                L_level=_sb_level_correlation_factor!(data, lc))))
+                _sb_hsgp_level_arguments!(data, lc)...)))
         elseif isnothing(rho_plan) && isnothing(sigma_plan)
             submodel = _sb_gp_submodel_expr(
                 iso ? :_sb_hsgp_by : :_sb_hsgp_by_aniso, term_overrides, t)
