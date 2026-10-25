@@ -14,7 +14,32 @@ using Random
 using StanBlocks
 using BayesianRegressionModels
 import BridgeStan
+import Distributions
+using Distributions: ContinuousUnivariateDistribution, InverseGamma
 const BRM = BayesianRegressionModels
+
+# A custom scale-prior family. SBBRMI lowers its configured `sd(...)` prior as a
+# value (a StanBlocks `ValueUDF`, which references a module), so a one-margin
+# block's form must be derived without copying the family body: docs
+# `monster.md`'s `sd(:, VPR) ~ ScaledInvChiScale(...)` failed with "deepcopy of
+# Modules not supported" when it was.
+struct SMScaledInvChiScale <: ContinuousUnivariateDistribution
+    nu::Float64
+    s::Float64
+end
+Distributions.logpdf(d::SMScaledInvChiScale, tau::Real) = tau > 0 ?
+    Distributions.logpdf(InverseGamma(d.nu / 2, d.nu * d.s^2 / 2), tau^2) + log(2 * tau) : -Inf
+Base.minimum(::SMScaledInvChiScale) = 0.0
+Base.maximum(::SMScaledInvChiScale) = Inf
+BRM._sb_stan_dist_name(::Type{<:SMScaledInvChiScale}) = :sm_scaled_inv_chi_scale
+StanBlocks.@deffun begin
+    @lpxf sm_scaled_inv_chi_scale_lpdf(tau::real, nu::real, s::real)::real =
+        scaled_inv_chi_square_lpdf(square(tau), nu, s) + log(2.0 * tau)
+    sm_scaled_inv_chi_scale_lpdfs(tau::real, nu::real, s::real)::real =
+        sm_scaled_inv_chi_scale_lpdf(tau, nu, s)
+    sm_scaled_inv_chi_scale_rng(nu::real, s::real)::real =
+        sqrt(scaled_inv_chi_square_rng(nu, s))
+end
 
 const SM_RUNTIME = get(ENV, "BRM_SINGLE_MARGIN_RUNTIME", "1") != "0"
 const SM_N = 60
@@ -64,6 +89,12 @@ const SM_CASES = [
     "|ID| sd ~ prior" => ((@brm SM_DATA begin
         mu ~ 1 + x1 + (1 | p | g)
         sd(:, p) ~ Exponential(2)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end), (;)),
+    "|ID| sd ~ custom-family prior" => ((@brm SM_DATA begin
+        mu ~ 1 + x1 + (1 | p | g)
+        sd(:, p) ~ SMScaledInvChiScale(4.0, log(1.3))
         sigma ~ Exponential(1)
         y ~ Normal(mu, sigma)
     end), (;)),
