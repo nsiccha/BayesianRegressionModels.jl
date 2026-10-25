@@ -238,3 +238,30 @@ end
         @test gradient ≈ laplace_fd(ψ -> LogDensityProblems.logdensity(p, ψ), φ) rtol=1e-7 atol=1e-7
     end
 end
+
+@stestset "a unit density that is not concave everywhere still finds its mode" begin
+    # A random effect on a negative-binomial shape makes a unit's density
+    # non-concave away from its mode; the mode search then steps along −H
+    # with reflected, floored eigenvalues.
+    rng = Xoshiro(17)
+    η = [0.8 + 0.4 * x + 0.5 * randn(rng) for x in LAPLACE_X]
+    counts = [rand(rng, NegativeBinomial(2.0, 2.0 / (2.0 + exp(e)))) for e in η]
+    rk = RKBRMI(@brm (; g=LAPLACE_G, x=LAPLACE_X, y=counts) begin
+        log(mu) ~ 1 + x + (1 | um | g)
+        log(shape) ~ 1 + (1 | us | g)
+        y ~ NegativeBinomial2(mu, shape)
+    end)
+    p = brm_laplace_problem(rk; ad_backend=NLME_AD)
+    scales = findall(n -> occursin(".tau.", String(n)), p.names)
+    @test length(scales) == 2
+    indefinite(φ) = any(B -> !isposdef(Symmetric(-B)),
+        BRM._brm_nlme_sampler_hessian_blocks(p.model, laplace_point(p, φ)))
+    candidates = [(φ = zeros(length(p.population)); φ[scales] .= s; φ)
+        for s in (1.0, 2.0, 3.0, 4.0)]
+    φ = candidates[findfirst(indefinite, candidates)]
+    @test indefinite(φ)
+    value, gradient = LogDensityProblems.logdensity_and_gradient(p, φ)
+    @test isfinite(value) && all(isfinite, gradient)
+    @test p.nonfinite == 0
+    @test gradient ≈ laplace_fd(ψ -> LogDensityProblems.logdensity(p, ψ), φ; h=1e-4) rtol=1e-6 atol=1e-6
+end

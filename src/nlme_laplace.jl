@@ -126,18 +126,16 @@ function _brm_laplace_factor(block)
 end
 
 # A Newton step for one unit. Away from its mode a unit's density need not be
-# concave there; Levenberg damping then shifts −H until it is.
+# concave (a likelihood that is not log-concave in its effects, such as a
+# random effect on a negative-binomial shape). The step then uses −H with its
+# eigenvalues reflected to their magnitudes and floored at 1, the curvature of
+# the standardized draws' prior: an ascent direction scaled by the curvature
+# along each eigenvector.
 function _brm_laplace_step(block, g)
     F = _brm_laplace_factor(block)
     F === nothing || return F \ g
-    shift = max(1.0, maximum(abs, block))
-    for _ in 1:60
-        F = cholesky(Symmetric(shift * I - block); check=false)
-        issuccess(F) && return F \ g
-        shift *= 2
-    end
-    _brm_nlme_error("brm_laplace_problem: a unit's Hessian has no positive-definite " *
-        "shift; its density is not finite")
+    E = eigen(Symmetric(-block))
+    E.vectors * ((E.vectors' * g) ./ max.(abs.(E.values), 1.0))
 end
 
 """
