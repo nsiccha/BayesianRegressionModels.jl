@@ -197,23 +197,37 @@ end
     @test all(sum(abs2, @view(L[i, 1:i])) ≈ 1 for i in 1:3)
 end
 
-@testset "stratified correlated blocks refuse the single-frame contract" begin
+# A stratified block has one `tau`, `L` frame per stratum; each stratum is an
+# ordinary block over its groups (snag `adaptive-warmup-e099a250`). Its factors
+# are an `array[S] cholesky_factor_corr[K]`, which Stan names
+# array-index-fastest but stores stratum by stratum: with `K = 3` a name lookup
+# would give stratum 1 the coordinates 4, 6 and 8.
+const UNC_STRATIFIED = [
+    "sigma",
+    "pop_mu_beta_pop.1",
+    "pop_mu_beta_pop.2",
+    ("r_mu_subject__by__stratum_L_s_L.$s.$i" for i in 1:3 for s in 1:2)...,
+    ("r_mu_subject__by__stratum_tau_s_tau.$k.$s" for s in 1:2 for k in 1:3)...,
+    ("r_mu_subject__by__stratum_b_T_z_g.$k.$g" for g in 1:2 for k in 1:3)...,
+]
+
+@testset "stratified blocks resolve one block per stratum" begin
     by_df = merge(df, (; stratum=repeat([1, 2], inner=3)))
     by_builder = @brm begin
         sigma ~ Exponential(1)
-        mu ~ 1 + x + (1 + x | gr(subject, by=stratum))
+        mu ~ 1 + x + (1 + x + t | gr(subject, by=stratum))
         y ~ Normal(mu, sigma)
     end
     by_sb = SBBRMI(by_builder(by_df); total_groups=(), mod=@__MODULE__)
-    err = try
-        adaptive_centering_blocks(by_sb, String[])
-        nothing
-    catch e
-        e
-    end
-    @test err isa ErrorException
-    @test occursin("stratified", lowercase(err.msg))
-    @test occursin("r_mu_subject__by__stratum", err.msg)
+    blocks = adaptive_centering_blocks(by_sb, UNC_STRATIFIED)
+    @test length(blocks) == 2
+    @test all(b -> b isa AdaptiveCenteringBlock, blocks)
+    @test all(b -> b.ranef.binding === :r_mu_subject__by__stratum &&
+                   b.ranef.by === :stratum && b.target_c == 0.0, blocks)
+    @test [b.ranef.levels for b in blocks] == [[11], [12]]
+    @test [b.effects for b in blocks] == [reshape(16:18, 3, 1), reshape(19:21, 3, 1)]
+    @test [b.cholesky_free for b in blocks] == [[4, 5, 6], [7, 8, 9]]
+    @test [b.log_scales for b in blocks] == [[10, 11, 12], [13, 14, 15]]
 end
 
 @testset "cdar walks resolve through the cdar metadata contract" begin

@@ -165,15 +165,8 @@ end
 # order, the stratum index of each level, and the block's effect matrix.
 function _brm_ranef_stratified_draws(d, block::RanefBlock, draws, names)
     spec = _RANEF_FAMILIES[block.family]
-    keywords = _brm_ranef_keywords(d, block)
-    n, K, G = size(draws, 1), block.n_terms, block.n_groups
-    S = _ranef_data_int(d.plan.data, keywords.n_strata, block.binding, block.family)
-    stratum = _ranef_data_vec(d.plan.data, keywords.stratum_idx, block.binding,
-                              block.family)
-    (stratum isa AbstractVector{<:Integer} && length(stratum) == G &&
-     all(in(1:S), stratum)) || error(
-        "brm_ranef_draws: stratum index `$(keywords.stratum_idx)` of block ",
-        "`$(block.binding)` is not one stratum in 1:$S for each of its $G levels.")
+    n, K = size(draws, 1), block.n_terms
+    S, stratum = _ranef_stratum_index(d.plan, block, "brm_ranef_draws")
     # The emitter's own coding of the `by` column (`_sb_ensure_group_data!`).
     strata = collect(_sb_fit_levels(column_data(d.plan.parent, block.by)))
     length(strata) == S || error(
@@ -192,7 +185,7 @@ function _brm_ranef_stratified_draws(d, block::RanefBlock, draws, names)
             cor[:, s, :, :] = _brm_ranef_cor_draws(L[:, s, :, :])
         end
     end
-    (; strata, stratum=collect(Int, stratum), sd=permutedims(tau, (1, 3, 2)), cor,
+    (; strata, stratum, sd=permutedims(tau, (1, 3, 2)), cor,
        effects=_brm_ranef_effect_draws(d, block, spec, nothing, draws, names))
 end
 
