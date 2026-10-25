@@ -35,6 +35,10 @@ the value a sampler takes as its initial position.
   correlation matrix in the same order.
 - `name = value` sets a scalar parameter (`sigma ~ Exponential(1)`) or a vector
   parameter (cutpoints, a `Dirichlet` simplex) on its constrained scale.
+- `name = values` sets a latent declared in a `@plate` cell (`log_T ~
+  Normal(loc, s)`) on its constrained scale: one flat vector, cell after cell,
+  or one vector per cell when its length varies by cell. Stan only; RKBRMI
+  builds no cell latents.
 
 Every other coordinate keeps the constrained value it has at `base`, a full
 unconstrained point of the same backend (default all zeros: coefficients 0,
@@ -116,10 +120,34 @@ _brm_start_population_target(predictor, coefficient, value) = error(
 _brm_start_parameter_value(name, value::Real) = _brm_start_real("`$name`", value)
 _brm_start_parameter_value(name, value::AbstractVector{<:Real}) =
     [_brm_start_real("`$name`", x) for x in value]
+# One vector per `@plate` cell, for a cell latent whose length varies by cell.
+_brm_start_parameter_value(name, value::AbstractVector{<:AbstractVector{<:Real}}) =
+    [[_brm_start_real("`$name` in cell $g", x) for x in v] for (g, v) in enumerate(value)]
 _brm_start_parameter_value(name, value) = error(
     "brm_start: `$name` is neither a linear predictor (give its coefficients " *
     "as a NamedTuple) nor an `|ID|` block; as a named parameter it takes a " *
-    "real value or a vector, got $(repr(value))")
+    "real value or a vector, or one vector per cell for a `@plate` cell " *
+    "latent, got $(repr(value))")
+
+# A parameter's values in its output's element order. Per-cell vectors are a
+# ragged cell latent's segments, cell after cell; anything else has no cells.
+_brm_start_flat_values(name, output, value::Real) = [value]
+_brm_start_flat_values(name, output, value::AbstractVector{<:Real}) = value
+function _brm_start_flat_values(name, output, value::AbstractVector{<:AbstractVector})
+    ends = output.segments
+    isnothing(ends) && error(
+        "brm_start: `$name` takes one vector per cell only as a `@plate` cell " *
+        "latent whose length varies by cell; give its values as one vector")
+    lengths = diff([0; ends])
+    length(value) == length(lengths) || throw(DimensionMismatch(
+        "brm_start: cell latent `$name` has $(length(lengths)) cells, got " *
+        "$(length(value)) vectors"))
+    for (g, (v, n)) in enumerate(zip(value, lengths))
+        length(v) == n || throw(DimensionMismatch(
+            "brm_start: cell latent `$name` has $n values in cell $g, got $(length(v))"))
+    end
+    reduce(vcat, value; init=Float64[])
+end
 
 function _brm_start_ranef_target(id, margins, Σ::AbstractMatrix)
     K = length(margins)
@@ -296,11 +324,17 @@ function _brm_rk_start_writes!(writes, ::Val{:parameter}, t, records, values)
             "a named parameter of this model. Named parameters: " *
             (isempty(available) ? "(none)" : join(string.(available), ", ")))
     end
+    value = _brm_rk_start_value(t.name, t.value)
     current = _brm_rk_declaration_value(values, t.name)
-    size(current) == size(t.value) || throw(DimensionMismatch(
-        "brm_start: `$(t.name)` has size $(size(current)), got $(size(t.value))"))
-    push!(writes, (t.name, (), t.value))
+    size(current) == size(value) || throw(DimensionMismatch(
+        "brm_start: `$(t.name)` has size $(size(current)), got $(size(value))"))
+    push!(writes, (t.name, (), value))
 end
+
+_brm_rk_start_value(name, value) = value
+_brm_rk_start_value(name, value::AbstractVector{<:AbstractVector}) = error(
+    "brm_start: `$name` takes one vector per cell only as a `@plate` cell latent, " *
+    "and RKBRMI builds no cell latents; give its values as one vector")
 
 function _brm_rk_start_writes!(writes, ::Val{:ranef}, t, records, values)
     blocks = [r for r in records if r.kind === :ranef && isequal(r.id, t.id)]
@@ -449,12 +483,14 @@ function _brm_sb_start_writes!(writes, absorbed, ::Val{:parameter}, t, d, names,
     isempty(brm_outputs(d; logical=t.name)) && error(
         "brm_start: `$(t.name)` is not a linear predictor, an `|ID|` block or a " *
         "named parameter of this model")
-    order = _brm_element_coordinates(brm_output(d, t.name), names)
+    output = brm_output(d, t.name)
+    order = _brm_element_coordinates(output, names)
     isempty(order) && error(
         "brm_start: `$(t.name)` has no sampled coordinate in the compiled Stan model")
-    length(order) == length(t.value) || throw(DimensionMismatch(
-        "brm_start: `$(t.name)` has $(length(order)) Stan values, got $(length(t.value))"))
-    for (i, value) in zip(order, t.value isa Number ? (t.value,) : t.value)
+    values = _brm_start_flat_values(t.name, output, t.value)
+    length(order) == length(values) || throw(DimensionMismatch(
+        "brm_start: `$(t.name)` has $(length(order)) Stan values, got $(length(values))"))
+    for (i, value) in zip(order, values)
         push!(writes, (i, value))
     end
 end
