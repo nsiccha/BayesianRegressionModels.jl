@@ -634,6 +634,66 @@ function _fit_run(::typeof(NE.empirical_bayes), m, start, _ebes, phases; kwargs.
         start.omega_matrix, result)
 end
 
+# Full RK packed draws at fixed population values (src/nlme_two_stage.jl): the
+# population point with Ω's covariance coordinates mapped from ω, and each
+# unit's standardized coordinates row by row. A unit problem's `z` (`η = C z`,
+# `C = chol(Ω)`) is BRM's own packed subject coordinate under that mapping.
+function BRM.brm_nlme_draws(m::BRM.BRMNLMEModel, θ, σ, ω, unit_draws)
+    n = NE.nsubjects(m)
+    length(unit_draws) == n || throw(DimensionMismatch(
+        "brm_nlme_draws: $(length(unit_draws)) units' draws for $n units"))
+    S = size(first(unit_draws), 1)
+    base = _prior_omega_map(m, θ, σ, ω).mapped
+    draws = repeat(permutedims(base), S, 1)
+    for (i, Z) in enumerate(unit_draws)
+        block = m.view.subject_coordinates[i]
+        size(Z) == (S, length(block)) || throw(DimensionMismatch(
+            "brm_nlme_draws: unit $i gave a $(size(Z, 1)) × $(size(Z, 2)) draw " *
+            "matrix; expected $S × $(length(block)), the same draw count for every unit"))
+        draws[:, block] .= Z
+    end
+    draws
+end
+
+function BRM.brm_two_stage_fit(sampler, x; minibatch_size=nothing, options=nothing,
+        threads::Integer=Threads.nthreads(), stage1=nothing, kwargs...)
+    threads >= 1 || throw(ArgumentError("brm_two_stage_fit: `threads` must be at least 1"))
+    options !== nothing && minibatch_size !== nothing && throw(ArgumentError(
+        "brm_two_stage_fit: pass `minibatch_size` or a whole `options`, not both"))
+    stage1 !== nothing && (options !== nothing || minibatch_size !== nothing ||
+        !isempty(kwargs)) && throw(ArgumentError(
+        "brm_two_stage_fit: a given `stage1` fit is reused as it is; pass its " *
+        "SAEM settings to brm_nlme_fit instead, not both"))
+    if stage1 === nothing
+        options = something(options, minibatch_size === nothing ? NE.SAEMOptions() :
+            NE.SAEMOptions(minibatch_size=minibatch_size))
+        stage1 = BRM.brm_nlme_fit(x, NE.saem; ebes=false, options, kwargs...)
+    end
+    m, result = stage1.model, stage1.result
+    θ, σ, ω = result.theta, result.sigma, result.omega
+    Ω = NE.omega_matrix(NE.nlme_layout(m), ω)
+    n = NE.nsubjects(m)
+    units = [BRM.brm_nlme_unit_problem(m, i, θ, σ, Ω) for i in 1:n]
+    unit_draws = Vector{Matrix{Float64}}(undef, n)
+    # One task per worker model drains a shared queue of units; a failing
+    # sampler surfaces through `wait` as a TaskFailedException.
+    # A nested model's units evaluate through its one whole-model sampler.
+    nworkers = m.cell_gradient === nothing ? 1 : min(threads, n)
+    workers = [m; [BRM._brm_nlme_worker_model(m) for _ in 2:nworkers]]
+    queue = Channel{Int}(n)
+    foreach(i -> put!(queue, i), 1:n)
+    close(queue)
+    tasks = map(workers) do worker
+        Threads.@spawn for i in queue
+            unit = worker === m ? units[i] : BRM.brm_nlme_unit_problem(worker, i, θ, σ, Ω)
+            unit_draws[i] = Matrix{Float64}(sampler(unit))
+        end
+    end
+    foreach(wait, tasks)
+    (; draws=BRM.brm_nlme_draws(m, θ, σ, ω, unit_draws),
+       coordinates=m.view.coordinates, units, unit_draws, stage1)
+end
+
 function BRM.brm_nlme_fit(x, estimator; start=nothing, inits=nothing, ebes=true,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
         nested_groups=NamedTuple(), progress=nothing, kwargs...)
