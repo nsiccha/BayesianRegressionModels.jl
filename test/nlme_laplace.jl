@@ -12,6 +12,7 @@
 # RUN: julia --project=test test/nlme_laplace.jl [testset-filter...]
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LinearAlgebra, LogDensityProblems, Random, Statistics
+using LogExpFunctions: logit
 
 function laplace_population_logprior(rk, p, u)
     plan = RKEXT._rk_translated_plan(rk.plan)
@@ -194,4 +195,46 @@ end
     @test_throws ArgumentError brm_laplace_draws(p, repeat(φ, 1, 2); conditional=-1)
     @test_throws DimensionMismatch brm_laplace_draws(p, zeros(1, 2))
     @test_throws DimensionMismatch LogDensityProblems.logdensity(p, zeros(1))
+end
+
+# Fourth-order central differences of `f` at `φ`.
+laplace_fd(f, φ; h=1e-3) = map(eachindex(φ)) do j
+    e = (1:length(φ)) .== j
+    (-f(φ .+ 2h .* e) + 8f(φ .+ h .* e) - 8f(φ .- h .* e) + f(φ .- 2h .* e)) / 12h
+end
+
+@stestset "the Laplace gradient follows the implicit-function theorem" begin
+    # Gaussian: the gradient of the analytic marginal.
+    data = (; g=LAPLACE_G, x=LAPLACE_X, y=LAPLACE_Y)
+    rk = RKBRMI(laplace_slope_model(data))
+    p = brm_laplace_problem(rk; ad_backend=NLME_AD)
+    for _ in 1:2
+        φ = 0.4 .* randn(LAPLACE_RNG, length(p.population))
+        value, gradient = LogDensityProblems.logdensity_and_gradient(p, φ)
+        @test value ≈ laplace_gaussian_marginal(p, rk, data, φ) atol=1e-10
+        @test gradient ≈ laplace_fd(ψ -> laplace_gaussian_marginal(p, rk, data, ψ), φ) rtol=1e-7 atol=1e-7
+    end
+    # Count likelihoods, where the unit Hessians move with the modes: the
+    # gradient of the Laplace marginal itself.
+    rng = Xoshiro(13)
+    η = [0.3 + 0.5 * x + 0.5 * randn(rng) for x in LAPLACE_X]
+    counts = [rand(rng, NegativeBinomial(4.0, 4.0 / (4.0 + exp(e)))) for e in η]
+    successes = [rand(rng, Binomial(12, 1 / (1 + exp(0.5 - e)))) for e in η]
+    models = (
+        @brm((; g=LAPLACE_G, x=LAPLACE_X, y=counts), begin
+            phi ~ Exponential(1)
+            log(mu) ~ 1 + x + (1 + x | g)
+            y ~ NegativeBinomial2(mu, phi)
+        end),
+        @brm((; g=LAPLACE_G, x=LAPLACE_X, H=successes, n=fill(12, length(successes))), begin
+            logit(p) ~ 1 + x + (1 | g)
+            H ~ Binomial(n, p)
+        end),
+    )
+    for brmi in models
+        p = brm_laplace_problem(RKBRMI(brmi); ad_backend=NLME_AD)
+        φ = 0.3 .* randn(rng, length(p.population))
+        _, gradient = LogDensityProblems.logdensity_and_gradient(p, φ)
+        @test gradient ≈ laplace_fd(ψ -> LogDensityProblems.logdensity(p, ψ), φ) rtol=1e-7 atol=1e-7
+    end
 end

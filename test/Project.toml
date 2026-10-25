@@ -135,8 +135,10 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # model-level index reads the gathered value whole: a model-scope `vcat` of
 # `car` returns lowers; snag lower-a-brm-emit-2136dcc0), and contains
 # 26d24ab55 (in-cell `MvNormal` observations), 965564845 (dotted cell
-# latents) and a987c279a (LogExpFunctions 1.0.2 admitted).
+# latents) and a987c279a (LogExpFunctions 1.0.2 admitted). 6ab16f510 adds
+# cf9dde7ca (`prepare_ad_third`, third-order contractions D³f[v, v, ·], which
+# the per-unit Laplace gradient takes; snag prepared-third-o-1e44dcc9).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "1d5b163fe8d217ad785e55c9d43851a428b0136d"
+rev = "6ab16f510eb5bd055efa789529adba842836a962"
