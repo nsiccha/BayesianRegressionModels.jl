@@ -104,10 +104,17 @@ argument_plates(sb) = [s for s in sb.model.model.args if
     Meta.isexpr(s, :call) && length(s.args) == 3 && s.args[1] === :~ &&
     s.args[2] isa Symbol && startswith(String(s.args[2]), "y_argument_")]
 # The reported shape: `addprop` applied to a plate result's whole flat memory,
-# then sliced to one subject inside the per-subject observation loop.
-whole_memory_addprop(code) = occursin(r"addprop\(\w+__pl_mem_\d+,", code)
+# then sliced to one subject inside the per-subject observation loop. The flat
+# memory is the bare carrier `loc`, sliced by its own `loc__pl_end` (StanBlocks
+# fd91d0c names a plate value after itself); emission may break the lines.
+whole_memory_addprop(code) = occursin(
+    r"addprop\(\s*(\w+)\s*,[^\[\]]*\)\s*\[\s*ragged_start\(\s*\1__pl_end\s*,", code)
 @test whole_memory_addprop(
-    "addprop(loc__pl_mem_1, sigma_add, sigma_prop)[ragged_start(loc__pl_end_1, g)")
+    "addprop(loc, sigma_add, sigma_prop)[ragged_start(loc__pl_end, g)")
+@test whole_memory_addprop(
+    "addprop(\n    loc,\n    sigma_add,\n    sigma_prop\n)[\n    ragged_start(loc__pl_end, g)")
+@test !whole_memory_addprop(
+    "addprop(loc[ragged_start(loc__pl_end, g):ragged_end(loc__pl_end, g)], sigma_add, sigma_prop)")
 
 @testset "row-wise scale over a plate result runs per subject" begin
     sb = SBBRMI(model_scope(grouped_data); mod=@__MODULE__)
