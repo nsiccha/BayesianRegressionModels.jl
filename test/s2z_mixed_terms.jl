@@ -31,7 +31,7 @@ end
 
 # The ordinary model's block(s) for S2Z block `block` of predictor `lp`, one
 # per coefficient: its own plain block, the `|ID|` bucket named in `ids`, or
-# the `g__nocor__k` margins of a `(… || g)` split.
+# the generated `|lp__g__nocor__k|` margins of a `(… || g)` split.
 function ordinary_blocks(block, oblocks, lp, ids)
     base(g) = let m = match(BRM._RANEF_NOCOR_RE, String(g))
         isnothing(m) ? String(g) : only(m.captures)
@@ -46,7 +46,7 @@ function ordinary_blocks(block, oblocks, lp, ids)
     end
     K = length(block.columns)
     K == 1 && return [only(own)]
-    [only(b for b in own if endswith(String(b.ranef.binding), "__nocor__$k")) for k in 1:K]
+    [only(b for b in own if b.ranef.id === Symbol(lp, :__, block.group, :__nocor__, k)) for k in 1:K]
 end
 
 # The ordinary joint density of S2Z point `x` with each block's omitted mean

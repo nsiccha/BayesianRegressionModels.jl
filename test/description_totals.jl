@@ -112,8 +112,9 @@ end
     (; r, c) = totals_pair(m)
     @test r.complete
     blocks(d) = [x.id for x in d.components if x.kind === :random_effect]
+    # Each `||` term is the block of its generated `|ID|`, conventional or absorbed.
     @test blocks(r) == blocks(c) ==
-        [(:random_effect, (:independent, 1), :g), (:random_effect, (:independent, 2), :g)]
+        [(:random_effect, :mu__g__nocor__1, :g), (:random_effect, :mu__g__nocor__2, :g)]
     for key in blocks(r)
         @test totals_law(totals_prior(r, (key..., :sd, 1))) == totals_law(totals_prior(c, (key..., :sd, 1)))
     end

@@ -305,11 +305,19 @@ end
     c = constrained_draws(build(nocor_builder; total_groups = (),
                                 centered_groups = [:site]))
     blocks = brm_ranef_draws(c.d, c.draws, c.names; group = :subject)
-    @test [b.family for b in blocks] == [:ranef_intercept, :ranef_slope]
+    # Each term is the one-margin block of its generated `|ID|`.
+    @test [b.family for b in blocks] == [:ranef_correlated_draws_generic, :ranef_correlated_draws]
+    @test [b.id for b in blocks] == [:mu__subject__nocor__1, :mu__subject__nocor__2]
     @test [only(b.margins).coefficient for b in blocks] == [:Intercept, :x]
-    @test check_rows(c, blocks[1], "r_mu_subject__nocor__1", 1:1, Zint, data.subject)
-    @test check_rows(c, blocks[2], "r_mu_subject__nocor__2", 1:1, Zslope, data.subject)
-    @test blocks[2].sd[:, 1] == c.draws[:, c.col["r_mu_subject__nocor__2_tau.1"]]
+    # Both add up in one per-row product on `subject`.
+    joint = true
+    for r in eachindex(data.subject), i in axes(c.draws, 1)
+        expected = sum(dot(Z(r), b.effects[i, findfirst(==(data.subject[r]), b.levels), 1:1])
+                       for (b, Z) in zip(blocks, (Zint, Zslope)))
+        joint &= isapprox(value(c, i, "r_mu_subject__joint.$r"), expected; atol = 1e-10)
+    end
+    @test joint
+    @test blocks[2].sd[:, 1] == c.draws[:, c.col["b_mu__subject__nocor__2_subject_tau.1"]]
     site = only(brm_ranef_draws(c.d, c.draws, c.names; group = :site))
     @test site.family === :ranef_correlated_centered
     @test check_rows(c, site, "r_mu_site", 1:2, Zboth, data.site)
@@ -319,9 +327,10 @@ end
     sb = build(totals_builder)
     c = constrained_draws(sb)
     blocks = brm_ranef_draws(c.d, c.draws, c.names)
+    # Each absorbed `||` column keeps the generated `|ID|` its term lowers under.
     @test [(b.family, b.id, only(b.margins)) for b in blocks] ==
-        [(:brm_total, nothing, (predictor = :mu, coefficient = :Intercept)),
-         (:brm_total, nothing, (predictor = :mu, coefficient = :x)),
+        [(:brm_total, :mu__subject__nocor__1, (predictor = :mu, coefficient = :Intercept)),
+         (:brm_total, :mu__subject__nocor__2, (predictor = :mu, coefficient = :x)),
          (:brm_total, :q, (predictor = :nu, coefficient = :Intercept))]
     @test only(brm_ranef_draws(c.d, c.draws, c.names; id = :q)).binding === :total_nu
     for t in total_effect_blocks(sb)

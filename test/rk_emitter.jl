@@ -4879,15 +4879,20 @@ end
         [(:mu, :Intercept)]
 end
 
+@stestset "ranef `||` lowers as one-margin ID buckets" begin
+    # An unaddressed `||` term is its generated one-margin `|ID|` block
+    # (src/grouping_addresses.jl), which the draws regime samples.
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + (0 + x || g)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    bucket = only(plan.ranef_buckets)
+    @test bucket.id === :mu__g__nocor__1
+    @test [(m.predictor, m.coefficient) for m in bucket.margins] == [(:mu, :x)]
+end
+
 @stestset "fail closed: ranef draws-regime battery" begin
-    # `||` zerocorr is deferred.
-    rk_throws_admission("||") do
-        BRM._brm_rk_plan(@brm df begin
-            mu ~ 1 + x + (0 + x || g)
-            s ~ Exponential(1)
-            y ~ Normal(mu, s)
-        end)
-    end
     # `|ID|` over mm(...) is rejected (mirrors SB: one shared block).
     rk_throws_admission("already defines one shared") do
         BRM._brm_rk_plan(@brm df begin

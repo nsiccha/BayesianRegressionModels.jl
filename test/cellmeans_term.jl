@@ -439,18 +439,20 @@ zcols(code, z) = only(
     end
     @test zcols(stan(sloped), "Z_mu_g") == "hcat(x, c_dummy_1, c_dummy_2, c_dummy_3)"
 
-    # Zero-correlation `||` splits the LHS into single-term blocks; the decision
-    # still belongs to the ORIGINAL left-hand side.
+    # Zero-correlation `||` splits the LHS into single-term blocks (one
+    # generated `|ID|` each); the decision still belongs to the ORIGINAL
+    # left-hand side.
     free = @brm df begin
         mu ~ 1 + (0 + c || g)
         y ~ Normal(mu, 1.0)
     end
-    @test zcols(stan(free), "Z_mu_g__nocor__1") == "hcat(c_dummy_1, c_dummy_2, c_dummy_3)"
+    @test zcols(stan(free), "Z_mu_mu__g__nocor__1_g") == "hcat(c_dummy_1, c_dummy_2, c_dummy_3)"
     withint = @brm df begin
         mu ~ 1 + (1 + c || g)
         y ~ Normal(mu, 1.0)
     end
-    @test zcols(stan(withint), "Z_mu_g__nocor__2") == "hcat(c_dummy_2, c_dummy_3)"
+    # The intercept block and the treatment-coded `c` block share one product.
+    @test endswith(zcols(stan(withint), "Z_mu_g__joint"), ", c_dummy_2, c_dummy_3)")
 end
 
 @testset "random effects: shared |ID| buckets size, name and address every level" begin
