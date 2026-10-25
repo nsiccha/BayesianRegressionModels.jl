@@ -1459,7 +1459,7 @@ function _brm_random_effect_group(raw)
         "BRM backend lowering: `gr(...)` group must be one raw data column; " *
         "got `$(repr(group))`")
     kwargs = getkwargs(raw)
-    unknown = setdiff(Set(keys(kwargs)), Set((:by, :id)))
+    unknown = setdiff(Set(keys(kwargs)), Set((:by, :id, :cor)))
     isempty(unknown) || error(
         "BRM backend lowering: `gr(...)` has unsupported keyword(s) " *
         "$(sort!(collect(unknown)))")
@@ -1469,7 +1469,17 @@ function _brm_random_effect_group(raw)
             "BRM backend lowering: `gr(...; by=...)` must name one raw data " *
             "column; got `$(repr(by))`")
     end
-    (; group, by, id=_brm_group_id(get(kwargs, :id, nothing)))
+    # `cor=` correlates the levels of `group` (src/level_correlation.jl).
+    cor = get(kwargs, :cor, nothing)
+    if !isnothing(cor)
+        _brm_level_correlation(cor; what="gr($(name(group)); cor=$(_brm_level_cor_label(cor)))")
+        isnothing(by) || error(
+            "BRM backend lowering: `gr($(name(group)); by=..., cor=...)` is not " *
+            "implemented: a level correlation over a stratified block has no " *
+            "single level ordering yet. Use `gr($(name(group)); cor=...)` " *
+            "without `by=`")
+    end
+    (; group, by, id=_brm_group_id(get(kwargs, :id, nothing)), cor)
 end
 
 function _brm_group_declaration(predictor::Symbol, term::ExprColumn)

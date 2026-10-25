@@ -443,6 +443,23 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         record.declaration, (), :identity))
 end
 
+# A level correlation's factor (`Omega ~ LKJCholesky(K, eta)`): Stan's packed
+# `cholesky_factor_corr` coordinates, under the declaration's own name on both
+# sides, as one whole-factor correlation entry.
+function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
+        ::Val{:lkj_cholesky}, record, rk, d, stan, stan_pos)
+    K = record.K
+    for m in 1:(K * (K - 1)) ÷ 2
+        address = (; kind=:level_correlation, name=record.declaration, index=m)
+        push!(pairs, BRMCoordinatePair(address, Symbol(record.declaration, ".", m),
+            _brm_stan_name(stan_pos, string(record.declaration, ".", m), address),
+            record.declaration, (m,), :cholesky))
+    end
+    push!(correlations, (; group=nothing, id=nothing, target=nothing,
+        declaration=record.declaration, rk_declaration=record.declaration,
+        stan_carrier=String(record.declaration), K))
+end
+
 # The SB population binding of one predictor and its coefficient carrier.
 function _brm_transport_population_binding(d, predictor::Symbol)
     bindings = hasproperty(d.plan, :bindings) ? d.plan.bindings : Dict()

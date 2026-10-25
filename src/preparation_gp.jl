@@ -198,7 +198,8 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
         source, raw = _brm_term_data(:hsgp, by, context)
         # A frozen replay keeps the training groups (`_brm_fitted`).
         levels = _brm_fitted_levels(source, raw)
-        (; source, levels, idx=_brm_apply_levels(levels, raw))
+        (; source, levels, idx=_brm_apply_levels(levels, raw),
+           level_cor=_brm_hsgp_level_correlation(get(kw, :cor, nothing), source, levels))
     end
     n_basis = cov === :periodic ? 2 * only(K) : prod(K)
     centeredness = _brm_hsgp_centeredness(kw, n_basis)
@@ -261,6 +262,16 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
     deps = (sources..., (isnothing(by_state) ? () : (by_state.source,))...,
             (isnothing(rows) ? () : (rows.source,))...)
     _BRMPreparedTerm(hsgp, sources, state, deps)
+end
+
+# `hsgp(x...; by=g, cor=Omega)`: the resolved correlation of the levels of `g`
+# (src/level_correlation.jl), one row and column per fitted level.
+_brm_hsgp_level_correlation(::Nothing, _group, _levels) = nothing
+function _brm_hsgp_level_correlation(value, group, levels)
+    what = "hsgp(...; by=$group, cor=$(_brm_level_cor_label(value)))"
+    lc = _brm_level_correlation(value; what, prefix="BRM term preparation")
+    _brm_check_level_correlation(lc, length(levels); what, group,
+                                 prefix="BRM term preparation")
 end
 
 function _brm_replay_gp_axes(training, context, label; allow_empty::Bool=false,
