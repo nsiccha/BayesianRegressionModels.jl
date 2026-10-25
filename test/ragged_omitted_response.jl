@@ -64,13 +64,15 @@ omitted_ragged_data = (;
     @test replayed.model.observations == observations
     @test replayed.data[bound_key] == [[0.21, 0.23, 0.25], [0.22, 0.24]]
 
-    @test_throws "grouping column must name" SBBRMI(
+    @test_throws "grouping column must label EVERY entry" SBBRMI(
         omitted_ragged_builder(merge(omitted_ragged_data,
             (; pk_lloq=fill(0.1, 6)))); mod=@__MODULE__)
     @test_throws "ALREADY a ragged per-subject column" SBBRMI(
         omitted_ragged_builder(merge(omitted_ragged_data,
             (; pk_lloq=[fill(0.1, 3), fill(0.1, 4)]))); mod=@__MODULE__)
-    @test_throws "name no subject" SBBRMI(
+    # refused: an omitted response's entries in no cell would get no draw;
+    # every entry of a response read through a binding belongs to a cell.
+    @test_throws "belong to no cell" SBBRMI(
         omitted_ragged_builder(merge(omitted_ragged_data,
             (; obs_subject=fill("unknown", 7)))); mod=@__MODULE__)
 end

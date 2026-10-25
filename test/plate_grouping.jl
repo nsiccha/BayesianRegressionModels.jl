@@ -149,7 +149,9 @@ drop_column(data, column) = NamedTuple(k => v for (k, v) in pairs(data) if k !==
     @test groups(["a", "b"] => ["b", "c", "a"]) == [[2], Int[], [1]]
     @test groups(GROUPED.obs_subject => GROUPED.subject; order=GROUPED.obs_time) ==
         [[3, 5], [1, 4], [2, 6]]
-    @test_throws "not among the labels" groups(["a", "d"] => ["a", "b"])
+    # An entry whose label is not listed is in no group (decision `0z97g0b`).
+    @test groups(["a", "d", "b", "a"] => ["a", "b"]) == [[1, 4], [3]]
+    @test groups(["d"] => ["a"]) == [Int[]]
     @test_throws "listed twice" groups(["a"] => ["a", "a"])
 end
 

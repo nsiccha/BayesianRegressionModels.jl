@@ -295,7 +295,8 @@ end
 # columns (`brm_ragged_rows`), or `nothing` when no column labels the cells
 # (a `groups(g)` plate): the partition is then a planned input. The axis
 # columns checked against `group` are an LP's data columns, or the joined
-# column itself unless it is a response, which a design may omit.
+# column itself unless it is a response, which a design may omit. `observed`
+# marks a response, whose design check refuses an entry in no cell.
 function _rk_kernel_partition_source!(columns, value, group, cell_column, order,
         is_lp::Bool, observed::Bool)
     cell_column === nothing && return nothing
@@ -309,7 +310,7 @@ function _rk_kernel_partition_source!(columns, value, group, cell_column, order,
         get!(columns, column, values)
     end
     (; x=name(value), group=name(group), cell=name(cell_column), order=order_name,
-        axes=Symbol[first(axis) for axis in axes])
+        axes=Symbol[first(axis) for axis in axes], observed)
 end
 
 # Each data input's subject count; an absent replay response has none.
@@ -368,8 +369,10 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             value, group = _brm_kernel_ragged_args(argument; prefix="RK backend")
             value isa NamedColumn || error("RK backend: ragged input must name a column or predictor")
             (; into, order) = _brm_kernel_ragged_options(argument; prefix="RK backend")
+            # A response the cell observes must have every entry in a cell.
             partition = _brm_kernel_ragged_rows(value, group, group_values;
-                prefix="RK backend", order)
+                prefix="RK backend", order,
+                observed=_rk_kernel_column_name(value) in observed)
             if params[i] in scanned && parent(value) isa DataColumn
                 # A response a scan observes is bound one series per subject
                 # and read in place, as RKPPL observes it.
