@@ -4659,6 +4659,21 @@ end
     @test cb.kind === :correlated
     @test [m.coefficient for m in cb.margins] == [:Intercept, :x]
     @test cb.slices == [(:mu, 1:2)]
+    # (1|ID|gr) — one bucket that every predictor naming the ID slices.
+    shared = BRM._brm_rk_plan(@brm mmgrdf begin
+        mu ~ 1 + x + (1 | ID | gr(grp, by=arm))
+        log(s) ~ 1 + (1 | ID | gr(grp, by=arm))
+        y ~ Normal(mu, s)
+    end)
+    sb = only(shared.ranef_buckets)
+    @test sb.id === :ID
+    @test sb.group === :grp__by__arm
+    @test sb.label === :bucket_ID_grp__by__arm
+    @test sb.grouping.form === :gr
+    @test sb.grouping.by === :arm
+    @test [(m.predictor, m.coefficient) for m in sb.margins] ==
+        [(:mu, :Intercept), (:s, :Intercept)]
+    @test sb.slices == [(:mu, 1:1), (:s, 2:2)]
 end
 
 @stestset "ranef categorical slope dummies" begin
@@ -4881,10 +4896,10 @@ end
             y ~ Normal(mu, s)
         end)
     end
-    # `|ID|` over gr(...; by=...) is staged for v1.1 (SB supports it).
-    rk_throws_admission("staged for v1.1") do
-        BRM._brm_rk_plan(@brm df begin
-            mu ~ 1 + x + (1 | ID | gr(g, by=h))
+    # refused: one `|ID|` names one grouping (mirrors SB's one bucket per ID).
+    rk_throws_admission("conflicting grouping factors") do
+        BRM._brm_rk_plan(@brm mmgrdf begin
+            mu ~ 1 + x + (1 | ID | grp) + (0 + x | ID | gr(grp, by=arm))
             s ~ Exponential(1)
             y ~ Normal(mu, s)
         end)
