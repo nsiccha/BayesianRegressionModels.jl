@@ -11,6 +11,28 @@
 #
 # `Omega` is a model-scope declaration `Omega ~ LKJCholesky(K, eta)` (a sampled
 # correlation) or a data matrix (a known correlation, factored once in Julia).
+#
+# `hsgp(x; by=g, cor=multigroup(Omega, tau))` replaces the constant correlation
+# by the multigroup coherence: basis frequency `omega_b` correlates the levels
+# by `C_b = exp(-(rho omega_b)^2 / 2 * D2)` with the Gram distance
+# `D2 = 2 tau (1 - Omega)`, so slow components are shared more than fast ones.
+# It is the HSGP form of the kernel `(1 + D2)^(-d/2) k_SE(dx; rho sqrt(1 + D2))`
+# (`brm_hsgp_multigroup_weights`). A random-effect block has no frequencies and
+# refuses it.
+
+"""
+    multigroup(Omega, tau)
+
+The frequency-dependent level correlation of a grouped HSGP,
+`hsgp(x...; by = g, cor = multigroup(Omega, tau))`. Each basis frequency `ω`
+correlates the levels of `g` by `exp(-(ρ ω)² / 2 · D2)` with the Gram distance
+`D2 = 2 tau (1 - Omega)`: levels share their slow components more than their
+fast ones, and the lag-0 correlation of two levels is `(1 + D2)^(-1/2)` (one
+axis). `Omega` is an `LKJCholesky` declaration or a known correlation matrix,
+as for `cor = Omega`; `tau` is a declared positive scalar parameter or a
+positive constant. Formula-only: it is read by `@brm` and never called.
+"""
+function multigroup end
 
 """
     _BRMLevelCorrelation
@@ -52,7 +74,59 @@ function _brm_level_correlation(value; what::AbstractString,
           "matrix. Declare the correlation before the formula that reads it.")
 end
 
+"""
+    _BRMMultigroupCorrelation
+
+The resolved `cor = multigroup(Omega, tau)` of a grouped HSGP: the level
+correlation `base` (as for `cor = Omega`) and the Gram scale `tau`, either the
+name of a declared scalar parameter or a positive constant.
+"""
+struct _BRMMultigroupCorrelation
+    base::_BRMLevelCorrelation
+    tau::Union{Symbol,Float64}
+end
+
+function _brm_level_correlation(value::ExprColumn{typeof(multigroup)}; what::AbstractString,
+                                prefix::AbstractString="BRM backend lowering")
+    args = getargs(value)
+    (length(args) == 2 && isempty(getkwargs(value))) || error(
+        "$prefix: `$what` takes `multigroup(Omega, tau)`: a level correlation " *
+        "and a positive Gram scale, no keywords")
+    _BRMMultigroupCorrelation(_brm_level_correlation(first(args); what, prefix),
+                              _brm_multigroup_tau(last(args); what, prefix))
+end
+
+# The Gram scale of `multigroup(Omega, tau)`: a declared scalar parameter (its
+# prior, written by the author, gives it positive support) or a positive
+# constant, literal or data.
+function _brm_multigroup_tau(value::Real; what, prefix)
+    isfinite(value) && value > 0 || error(
+        "$prefix: `$what` needs a positive finite Gram scale `tau`, got $value")
+    Float64(value)
+end
+function _brm_multigroup_tau(value::NamedColumn; what, prefix)
+    source = parent(value)
+    if source isa DataColumn
+        data = parent(source)
+        data isa Real || error(
+            "$prefix: `$what` reads `tau = $(name(value))` from data, which " *
+            "must be one positive number, got a $(typeof(data))")
+        return _brm_multigroup_tau(data; what, prefix)
+    end
+    op = _as_expr_column(source)
+    (!isnothing(op) && getf(op) === (~)) || error(
+        "$prefix: `$what` names `tau = $(name(value))`, which is neither a " *
+        "declared scalar parameter (`$(name(value)) ~ LogNormal(0, 1)`) nor a " *
+        "positive constant")
+    name(value)
+end
+_brm_multigroup_tau(value; what, prefix) = error(
+    "$prefix: `$what` needs a declared scalar parameter or a positive " *
+    "constant as `tau`, got `$(repr(value))`")
+
 # A level correlation fits a grouping of `n_levels` levels exactly.
+_brm_check_level_correlation(lc::_BRMMultigroupCorrelation, n_levels::Integer; kwargs...) =
+    (_brm_check_level_correlation(lc.base, n_levels; kwargs...); lc)
 function _brm_check_level_correlation(lc::_BRMLevelCorrelation, n_levels::Integer;
                                       what, group, prefix="BRM backend lowering")
     lc.K == n_levels || error(
@@ -69,8 +143,21 @@ _brm_group_level_cor(_raw) = nothing
 
 _brm_level_cor_name(::Nothing) = nothing
 _brm_level_cor_name(value::NamedColumn) = name(value)
+_brm_level_cor_name(value::ExprColumn{typeof(multigroup)}) =
+    Symbol(_brm_level_cor_label(value))
 _brm_level_cor_label(value::NamedColumn) = name(value)
+_brm_level_cor_label(value::ExprColumn{typeof(multigroup)}) =
+    "multigroup(" * join(map(_brm_level_cor_label, getargs(value)), ", ") * ")"
 _brm_level_cor_label(value) = repr(value)
+
+# A random-effect block correlates whole levels with one correlation; the
+# multigroup coherence varies with frequency, which only an HSGP has.
+_brm_refuse_block_multigroup(::_BRMLevelCorrelation, _what) = nothing
+_brm_refuse_block_multigroup(lc::_BRMMultigroupCorrelation, what) = error(
+    "BRM backend lowering: `$what` is refused: `multigroup(...)` makes the " *
+    "level correlation depend on the basis frequency, which only a grouped " *
+    "`hsgp(...; by=..., cor=multigroup(...))` has. Give the block " *
+    "`cor = $(lc.base.name)` to share the same `Omega`")
 
 # The one `cor=` shared by declarations that lower as one block. Every term of
 # a block must name the same correlation (or none): the block's levels are

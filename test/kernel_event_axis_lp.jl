@@ -281,14 +281,19 @@ end
             brm_descriptor(replayed; name = :joint_pk_qt_replay, highlights = ()),
             :log_F; role = :linear_predictor).logical === :log_F
 
+        # refused: frozen replay has no coordinate for a new subject. The
+        # doses of `s2`, which the design no longer lists, are read by no cell
+        # (decision `0z97g0b`), so the unseen level is what refuses it.
         unseen = merge(replay_df, (; subject = ["s3", "s1", "s9"]))
-        @test_throws "label(s) Any[\"s2\"] in `dose_subject` name no subject" reprocess(
-            sb, unseen)
+        @test_throws "unseen level `s9`" reprocess(sb, unseen)
 
+        # A dose whose subject the plate does not list is read by no cell
+        # (decision `0z97g0b`): row 5 joins no subject's doses.
         stray = merge(replay_df, (;
             dose_subject = ["s1", "s3", "s2", "s1", "s9", "s3", "s2", "s1", "s3"],
         ))
-        @test_throws "name no subject" reprocess(sb, stray)
+        @test reprocess(sb, stray).data[:kernel_pred_log_F_ragged] ==
+              [[2, 6, 9], [1, 4, 8], [3, 7]]
     end
 
     @testset "BridgeStan runtime — the event-axis LP is a live parameter" begin
@@ -360,7 +365,8 @@ end
         @test_throws "ALREADY a ragged per-subject column" SBBRMI(
             ev_preragged_model(df); mod = @__MODULE__)
         # The grouping column must cover the predictor's OWN frame.
-        @test_throws "row axis" SBBRMI(ev_wrong_axis_model(df); mod = @__MODULE__)
+        @test_throws "grouping column must label EVERY entry" SBBRMI(
+            ev_wrong_axis_model(df); mod = @__MODULE__)
         # Arity and keywords are rejected at @brm construction / lowering.
         # `into=` is the one accepted keyword; any other (here the retired
         # `by=`) is refused at construction.
@@ -368,9 +374,11 @@ end
             ev_arity_model(df); mod = @__MODULE__)
         @test_throws "ragged(...) takes only the `into=` keyword" ev_kwarg_model(df)
 
-        # A label naming no subject the kernel walks.
+        # A dose whose subject the plate does not list is read by no cell
+        # (decision `0z97g0b`).
         stray = ev_df(; dose_subject = ["s1", "s1", "s2", "s2", "s9", "s3", "s3"])
-        @test_throws "name no subject" SBBRMI(ev_model(stray); mod = @__MODULE__)
+        stray_rows = SBBRMI(ev_model(stray); mod = @__MODULE__).data[:kernel_pred_log_F_ragged]
+        @test sort!(reduce(vcat, stray_rows)) == [1, 2, 3, 4, 6, 7]
 
     end
 

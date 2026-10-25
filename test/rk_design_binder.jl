@@ -380,9 +380,11 @@ end
     # A baseline time past the fixed HSGP domain.
     refused_alike(merge(base, (; base_time=[2.0; base.base_time[2:end]])),
         "lies outside its fixed domain")
-    # A dose row naming a subject the design does not have.
-    refused_alike(merge(base, (; dose_subject=[base.dose_subject[1:end-1]; "zz"])),
-        "name no subject")
+    # A dose row naming a subject the design does not have is read by no cell
+    # (decision `0z97g0b`), on both paths.
+    stray = merge(base, (; dose_subject=[base.dose_subject[1:end-1]; "zz"]))
+    @test (reprocess(rk, stray; resample_groups=[:subject]); true)
+    @test (binder(stray); true)
     # A dose column on another axis than its subject labels.
     refused_alike(merge(base, (; vessel=base.vessel[1:end-1])), "but `dose_subject` has 6")
     # Per-subject inputs that disagree on the subject count.
@@ -421,7 +423,8 @@ end
     base = designs[1]
     @test_throws "must be a column on" reprocess(rk, merge(base, (; dose_rank=base.dose_rank[1:end-1])))
     @test_throws "must be a column on" binder(merge(base, (; dose_rank=base.dose_rank[1:end-1])))
-    @test_throws "name no subject" binder(merge(base, (; dose_subject=[base.dose_subject[1:end-1]; "zz"])))
+    # A dose row naming a subject the design does not have is read by no cell.
+    @test (binder(merge(base, (; dose_subject=[base.dose_subject[1:end-1]; "zz"]))); true)
 end
 
 @stestset "weights and ordered outcomes bind as the design holds them" begin
@@ -469,6 +472,13 @@ end
     binder = check_binder(rk, new; resample_groups=[:subject], want=:loc,
         runtime=subject_effects)
     @test length(binder.classes) == 1 && !occursin("replayed in full", sprint(show, binder))
+    # A dose row of a subject the design does not list is read by no cell
+    # (decision `0z97g0b`). refused: an observation row of one would be a
+    # response entry no cell observes (`0q8hcwq`), even with `y` omitted.
+    design = new[2]
+    @test (binder(merge(design, (; dose_subject=[design.dose_subject[1:end-1]; "zz"]))); true)
+    @test_throws "belong to no cell" binder(
+        merge(design, (; obs_subject=[design.obs_subject[1:end-1]; "zz"])))
     # The fitted subjects (frozen grouping).
     fitted = [flat_pk_data(rng, length(labels); labels, responses=false)
         for labels in (["s2", "s5"], ["s1", "s3", "s6"])]

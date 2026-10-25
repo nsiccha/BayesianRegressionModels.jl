@@ -349,6 +349,29 @@ address (`brm_nlme_start(m, inits)`) give the addressed θ, σ and Ω with zero
 `brm_nlme_joint_start` of that start. Run it in the NLMEEstimation scratch
 environment described below.
 
+`nlme_two_stage.jl` checks one unit's conditional problem
+(`brm_nlme_unit_problem`) on flat and nested models. Its log-density
+differences equal the full RK model's at points assembled by `brm_nlme_draws`,
+and its gradient matches finite differences. The file also runs
+`brm_two_stage_fit` end to end, full-batch and minibatch, with a WarmupHMC
+unit sampler, and checks that units sampled on several threads give exactly
+the single-threaded draws. Run it in the NLMEEstimation scratch environment
+described below, with `--threads` above 1 so the threading check exercises
+concurrency.
+
+`nlme_svi.jl` checks minibatch stochastic variational inference
+(`brm_svi_fit`). The minibatch split of the RK target is checked first: the
+global prior and Jacobian term plus every subject's cell term equal the full
+RK log density and gradient, at a point with non-unit covariance. The scaled
+batches of a partition of the subjects average to the full density and
+gradient, and each subject's term equals `brm_nlme_unit_problem`'s density.
+On synthetic Gaussian (intercept and slope) and Poisson (intercept) models
+it compares the fitted draws with four NUTS chains: posterior means agree, and
+the global coordinates' sds may be narrower, as variational approximations
+are, but not wider. Starts (prior medians, a packed point, `inits`) and their
+refusals are covered too, and a flat-row grouped model is a `@test_broken`
+capability gap. It runs in the test environment above.
+
 `start_values.jl` checks `brm_start`, initial values keyed by prior address,
 on both backends. For a correlated population-PK model, a linked predictor,
 a categorical predictor with a `Dirichlet` simplex, and an exact-total block,
