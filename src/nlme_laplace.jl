@@ -38,18 +38,25 @@ density is the Laplace approximation of the model's marginal log posterior
 density in those unconstrained coordinates, exact when the model is Gaussian
 in the random effects. Each evaluation finds every unit's mode by Newton's
 method with a per-unit backtracking line search, from the modes of the
-previous evaluation, until every unit's Newton decrement gᵀ(−H)⁻¹g is at
+previous evaluation moved to first order in the population step, until every unit's Newton decrement gᵀ(−H)⁻¹g is at
 most `tol`, or stops shrinking at rounding level. The log determinant moves
 with the modes to first order; the standardized draws' N(0, I) prior makes
 −H ≥ I for log-concave likelihoods, so the default `tol` keeps the modes to
-about 1e-12. A search that has not converged after `maxiter` iterations
-raises an error. The gradient comes from the implicit-function theorem with
+about 1e-12. The gradient comes from the implicit-function theorem with
 third-derivative contractions of the model density.
 
-A population point where the model's density, gradient or unit Hessians
-overflow during the mode search, so that no finite Newton step exists, has log
-density `-Inf`, as the full model's density there would; a sampler treats it
-as a divergent step. `problem.nonfinite` counts such points.
+Two kinds of population point have log density `-Inf`, which a sampler treats
+as a divergent step, as at the extreme points a diverging warm-up trajectory
+reaches:
+
+- the model's density, gradient or unit Hessians overflow during the mode
+  search, so that no finite Newton step exists (the full model's density there
+  is not finite either); `problem.nonfinite` counts them;
+- the mode search has not converged after `maxiter` Newton steps, as when a
+  start lies far up an exponential's slope, where Newton gains about one unit
+  per step; `problem.unconverged` counts them, and a warning names the point,
+  the unit and its last decrements. At a point a sampler would accept this
+  marks a defect.
 
 A problem holds the last modes as mutable state: use one per chain
 (`deepcopy` gives a copy its own prepared AD workspaces).
@@ -65,9 +72,11 @@ mutable struct BRMLaplaceProblem{M<:BRMNLMEModel,B}
     names::Vector{Symbol}
     third::Base.RefValue{Any}
     u::Vector{Float64}
+    factors::Base.RefValue{Any}
     tol::Float64
     maxiter::Int
     nonfinite::Int
+    unconverged::Int
 end
 
 Base.show(io::IO, p::BRMLaplaceProblem) = print(io, "BRMLaplaceProblem(",
@@ -80,7 +89,7 @@ function brm_laplace_problem(backend::RKBRMI; ad_backend, subject_group=nothing,
     m = brm_nlme_model(backend; ad_backend, subject_group, nested_groups)
     population = findall(!=(:subject_effect), m.view.role)
     BRMLaplaceProblem(m, ad_backend, population, m.view.coordinates[population],
-        Ref{Any}(nothing), copy(m.unit), Float64(tol), Int(maxiter), 0)
+        Ref{Any}(nothing), copy(m.unit), Ref{Any}(nothing), Float64(tol), Int(maxiter), 0, 0)
 end
 
 # Implemented by `BayesianRegressionModelsReactiveKernelsEnzymeExt`: a prepared
@@ -138,11 +147,32 @@ function _brm_laplace_step(block, g)
     E.vectors * ((E.vectors' * g) ./ max.(abs.(E.values), 1.0))
 end
 
+# The mode search's start: the previous evaluation's modes moved to first order
+# in the population step Δφ, dẑ = (−H_zz)⁻¹ H_zφ Δφ, from one colored HVP at
+# the previous modes and their factors. It leaves an O(Δφ²) error, so a small
+# step (an HMC leapfrog step) needs fewer Newton steps.
+function _brm_laplace_predict(p::BRMLaplaceProblem, φ)
+    u = copy(p.u)
+    u[p.population] .= φ
+    factors = p.factors[]
+    factors === nothing && return u
+    step = zeros(length(u))
+    step[p.population] .= φ .- view(p.u, p.population)
+    any(!iszero, step) || return u
+    moved = _rk_eta_hvp(p.model.eta_hvp, step, p.u)
+    _brm_laplace_finite(moved) || return u
+    for (i, block) in enumerate(p.model.view.subject_coordinates)
+        u[block] .+= factors[i] \ moved[block]
+    end
+    u
+end
+
 """
     _brm_laplace_mode!(p::BRMLaplaceProblem, φ) -> state
 
 Every unit's conditional mode at population point `φ`, by Newton's method
-from the modes of the previous evaluation. `state` holds the packed point `u`
+from the modes of the previous evaluation, moved to first order in the
+population step. `state` holds the packed point `u`
 at the modes, the sampler density's `value` and `gradient` there, each unit's
 Hessian block, the Cholesky factor of its negation, and the number of Newton
 steps taken.
@@ -153,8 +183,7 @@ function _brm_laplace_mode!(p::BRMLaplaceProblem, φ::AbstractVector)
     length(φ) == length(p.population) || throw(DimensionMismatch(
         "the population point has length $(length(φ)), the problem has " *
         "$(length(p.population)) population coordinates"))
-    u = copy(p.u)
-    u[p.population] .= φ
+    u = _brm_laplace_predict(p, φ)
     current = _brm_laplace_evaluate(m, u)
     if !(isfinite(current.value) && _brm_laplace_finite(current.gradient))
         # The previous modes may be far from this point's; start again at zero.
@@ -190,6 +219,7 @@ function _brm_laplace_mode!(p::BRMLaplaceProblem, φ::AbstractVector)
                 "brm_laplace_problem: a unit's density has a stationary point that " *
                 "is not a maximum at this population point")
             p.u = u
+            p.factors[] = factors
             return (; u, value=current.value, gradient=current.gradient, hessians,
                 factors, finite=true, iterations=iteration - 1)
         end
@@ -222,11 +252,14 @@ function _brm_laplace_mode!(p::BRMLaplaceProblem, φ::AbstractVector)
         current = trial
     end
     worst = argmax(last(history))
-    _brm_nlme_error("brm_laplace_problem: the unit modes did not converge in " *
-        "$(p.maxiter) Newton iterations at population point $(repr(collect(φ))). " *
-        "Unit $(repr(m.view.levels[worst]))'s Newton decrements, last iterations " *
-        "first: $(reverse([h[worst] for h in history[max(1, end - 5):end]])) " *
-        "(tol = $(p.tol))")
+    @warn("brm_laplace_problem: the unit modes did not converge in " *
+        "$(p.maxiter) Newton iterations at population point $(repr(collect(φ))); " *
+        "its log density is -Inf. Unit $(repr(m.view.levels[worst]))'s Newton " *
+        "decrements, last iterations first: " *
+        "$(reverse([h[worst] for h in history[max(1, end - 5):end]])) " *
+        "(tol = $(p.tol))", maxlog=3)
+    p.unconverged += 1
+    (; u, value=-Inf, finite=false, iterations=p.maxiter)
 end
 
 _brm_laplace_value(state) = state.finite ? state.value +

@@ -130,16 +130,27 @@ end
         @test LogDensityProblems.logdensity(p, φ) ≈
             laplace_population_logprior(rk, p, u) + units atol=1e-10
     end
-    # A population point where the rates overflow scores -Inf, as the full
-    # model's density there does, and is counted.
+    # A population point where the rates overflow at the start scores -Inf, as
+    # the full model's density there does, and is counted. Without previous
+    # modes (no predictor) the search starts at zero, where they overflow.
     overflow = zeros(length(p.population))
     overflow[findfirst(==(Symbol("pop_log_mu.beta_pop.1")), p.names)] = 800.0
+    p.u .= p.model.unit
+    p.factors[] = nothing
     before = p.nonfinite
     value, gradient = LogDensityProblems.logdensity_and_gradient(p, overflow)
     @test value == -Inf && all(isnan, gradient)
     @test p.nonfinite == before + 1
     @test !isfinite(LogDensityProblems.logdensity(
         rk_logdensity_problem(rk; ad_backend=NLME_AD), laplace_point(p, overflow)))
+    # From modes at an ordinary point the predictor starts far up the rates'
+    # exponential, where Newton gains about one unit per step: the search does
+    # not converge, scores -Inf, is counted and warns.
+    LogDensityProblems.logdensity(p, zeros(length(p.population)))
+    before = p.unconverged
+    value = @test_logs (:warn, r"did not converge") match_mode=:any LogDensityProblems.logdensity(p, overflow)
+    @test value == -Inf
+    @test p.unconverged == before + 1
     # Conditional draws by importance resampling follow each unit's exact
     # conditional posterior, here its mean by quadrature on a fine grid.
     φ = 0.4 .* randn(rng, length(p.population))
