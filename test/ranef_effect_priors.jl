@@ -372,13 +372,16 @@ end
     @test_throws "addresses 2 blocks" SBBRMI(ambiguous_id(df); mod=@__MODULE__, total_groups=())
     @test_throws "ambiguous" ranefcoefnames(ambiguous_id(df), :p)
 
-    stratified_df = merge(df, (; stratum=[1, 1, 1, 2, 2, 2]))
+    stratified_df = merge(df, (; stratum=[1, 1, 1, 1, 2, 2]))
     stratified = @brm begin
         eta ~ 1 + (1 | p | gr(subject, by=stratum))
         sd(:, p) ~ Exponential(1)
         y ~ Normal(eta, 1)
     end
-    @test_throws "stratified" SBBRMI(stratified(stratified_df); mod=@__MODULE__, total_groups=())
+    # Every stratum's scale takes the prior (test/stratified_ranef_priors.jl).
+    @test only(ranef_blocks(SBBRMI(stratified(stratified_df); mod=@__MODULE__,
+                                   total_groups=()))).family ===
+          :ranef_correlated_by_draws_generic
 
     # `cor(lp, g)` parses -- it addresses one predictor's correlated block
     # grouped by a column without an ID (decision `06ntfvg`) -- and a target

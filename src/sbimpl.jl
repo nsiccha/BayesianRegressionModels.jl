@@ -444,15 +444,21 @@ function _sb_native_vector_prior(target::Symbol, priors, nvalue; positive::Bool,
        dependencies=sort!(collect(dependencies)))
 end
 
+_sb_is_vcat_prior(statement) = Meta.isexpr(statement.args[3], :call) &&
+    statement.args[3].args[1] === :vcat
+
 # The one `lhs ~ <vector prior>` statement for per-margin `priors` (`nothing`
 # is the default `Normal()` margin), and the model names its arguments read.
 # `positive` adds `lower=0` to every margin. `scope` is the module the
 # statement is traced in: a direct native family must resolve there.
 # `declaration` is the target's typed declaration in the merged base, if any.
+# `vcat=false` keeps the margins out of StanBlocks' `vcat` prior family, which
+# a plate cell cannot hold yet; they take the generated family instead.
 function _sb_vector_prior_statement(lhs, target::Symbol, priors, nvalue;
                                     positive::Bool, mod::Module, scope::Module,
                                     declaration=lhs isa Symbol ?
-                                        Expr(:(::), lhs, Expr(:ref, :vector, nvalue)) : lhs)
+                                        Expr(:(::), lhs, Expr(:ref, :vector, nvalue)) : lhs,
+                                    vcat::Bool=true)
     priors = Any[isnothing(prior) ? ExprColumn(Normal) : prior for prior in priors]
     # Stan's native univariate families vectorise over their variate. When every
     # margin has the exact same mapped distribution, retain that natural Stan
@@ -475,7 +481,7 @@ function _sb_vector_prior_statement(lhs, target::Symbol, priors, nvalue;
         end
     end
     native = _sb_native_vector_prior(target, priors, nvalue; positive, declaration)
-    isnothing(native) || return native
+    isnothing(native) || (!vcat && _sb_is_vcat_prior(native.statement)) || return native
     family, args = _sb_vector_prior_family(priors; positive, mod)
     # Intrinsic bounds belong to the value family, including when this
     # parameter is redrawn in generated quantities.
@@ -7627,6 +7633,40 @@ function _sb_generic_ranef_submodel(priors, base::StanBlocks.SlicModel;
     _sb_vector_positive_priors(base, :tau, resolved; mod)
 end
 
+# A stratified bucket that `sd(...)` / `cor(...)` statements configure (family
+# `ranef_correlated_by_draws_generic`): `ranef_correlated_by_draws` with every
+# stratum's correlation factor `LKJ(lkj_eta)` and every stratum's `tau` taking
+# the margins' scale priors (`nothing` is the default half-normal margin), so
+# its coordinates are the unconfigured block's. `Base.merge` replaces top-level
+# statements only, so the two stratum plate cells are rewritten here; the
+# returned `(; model, inputs)` is `_sb_merge_bound_vector_prior`'s.
+function _sb_stratified_ranef_submodel(priors; mod::Module=@__MODULE__)
+    base = ranef_correlated_by_draws
+    declaration = :(tau::vector[n_terms])
+    # The statement sits in a plate cell, which cannot hold StanBlocks' `vcat`
+    # prior family yet (StanBlocks snag `a-vcat-prior-fam-4a4fae26`).
+    prior = _sb_vector_prior_statement(declaration, :tau, priors, :n_terms;
+                                       positive=true, mod, scope=base.mod,
+                                       declaration, vcat=false)
+    body = deepcopy(base.model)
+    law = _sb_plate_cell_law(body, :L_s, :L)
+    law.args[3] = :(lkj_corr_cholesky(lkj_eta))
+    law = _sb_plate_cell_law(body, :tau_s, :tau)
+    law.args[2] = prior.statement.args[2]
+    law.args[3] = _sb_bind_vector_prior_inputs(prior.statement.args[3], prior.dependencies)
+    (; model=StanBlocks.SlicModel(body, base.data, base.mod, base.observations),
+       inputs=[_sb_term_prior_input(d) => d for d in prior.dependencies])
+end
+
+# The `name ~ law` statement in the cell of the model-scope `plate ~ plate(...)`.
+function _sb_plate_cell_law(body, plate::Symbol, name::Symbol)
+    statement = only(s for s in body.args if Meta.isexpr(s, :call) &&
+                     s.args[1] === :~ && s.args[2] === plate)
+    cell = statement.args[3].args[2].args[2]
+    only(s for s in cell.args if Meta.isexpr(s, :call) && s.args[1] === :~ &&
+         _sb_bound_name(s.args[2]) === name)
+end
+
 """
     _sb_emit_vector_prior!(stmts, data, target, f, op)
 
@@ -10995,9 +11035,6 @@ Base.@nospecializeinfer function _sb_ranef_effect_overrides(@nospecialize(brmi::
     isempty(specs) && return Dict{Tuple{Symbol,Any},NamedTuple}()
     margins = Dict{Tuple{Symbol,Any},Any}()
     for (key, bucket) in id_buckets
-        bucket.group_desc isa Tuple && any(spec -> spec.id === first(key), specs) &&
-            error("sbimpl: covariance-prior effects for stratified " *
-                  "`|$(first(key))| gr(..., by=...)` buckets are not yet supported")
         margins[key] = _sb_id_bucket_margins(bucket; frozen_preproc)
     end
     resolved = _brm_resolve_ranef_effect_overrides(
@@ -12457,8 +12494,10 @@ _sb_id_bucket_suffix(id_sym, g::Tuple{NamedColumn,NamedColumn}) =
 # Emit the shared `b_<suffix> ~ …_draws(...)` statement for one ID bucket.
 # Plain group -> `ranef_correlated_draws` (or its `_cv` / `_centered` variant
 # when the group is opted in); `gr(g, by=b)` group -> stratified
-# `ranef_correlated_by_draws`, with cv support and centered still rejected.
-# Returns the idx_name callers use to slice the draw matrix per sub-formula.
+# `ranef_correlated_by_draws` (`ranef_correlated_by_draws_generic` when
+# `sd(...)` / `cor(...)` configure it), with cv support and centered still
+# rejected. Returns the idx_name callers use to slice the draw matrix per
+# sub-formula.
 function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g::NamedColumn;
                                       cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
                                       id_sym=nothing, ranef_effect=nothing, r2d2_tau=nothing,
@@ -12573,8 +12612,12 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name,
     isnothing(r2d2_tau) || error(
         "sbimpl: `r2d2` decompositions for stratified `|$id_str| " *
         "gr($gname, by=$bname)` buckets are not yet supported")
-    isnothing(ranef_effect) || error(
-        "sbimpl: covariance-prior effects for stratified `|$id_str| " *
+    _brm_ranef_has_known(ranef_effect) && error(
+        "sbimpl: known scales or correlations (`sd(...) = value`, " *
+        "`cor(...) = R`) for stratified `|$id_str| gr($gname, by=$bname)` " *
+        "buckets are not yet supported")
+    isnothing(ranef_effect) || isnothing(ranef_effect.dist) || error(
+        "sbimpl: Student-t random-effect laws for stratified `|$id_str| " *
         "gr($gname, by=$bname)` buckets are not yet supported")
     gname in centered_groups && error(
         "sbimpl: centered parameterization requested for group `$gname`, but it ",
@@ -12593,11 +12636,22 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name,
         n_groups_name = n_cv_name
     end
     K = data[n_terms_name]
-    push!(stmts, _sb_ranef_statement(bucket_name, :ranef_correlated_by_draws,
-        Any[Expr(:kw, :group_idx, info.idx_name), Expr(:kw, :n_groups, n_groups_name),
-            Expr(:kw, :n_terms, n_terms_name), Expr(:kw, :stratum_idx, info.s_idx_name),
-            Expr(:kw, :n_strata, info.n_strata_name)], K))
-    _sb_record_single_margin!(data, bucket_name, gname, :ranef_correlated_by_draws, K)
+    kwargs = Any[Expr(:kw, :group_idx, info.idx_name), Expr(:kw, :n_groups, n_groups_name),
+                 Expr(:kw, :n_terms, n_terms_name), Expr(:kw, :stratum_idx, info.s_idx_name),
+                 Expr(:kw, :n_strata, info.n_strata_name)]
+    # An explicit `ranef(:, ID) ~ Normal()` with no SD or correlation statement
+    # is the default law and keeps the default emission byte for byte.
+    if isnothing(ranef_effect) || !(ranef_effect.has_sd || ranef_effect.has_cor)
+        push!(stmts, _sb_ranef_statement(bucket_name, :ranef_correlated_by_draws, kwargs, K))
+        _sb_record_single_margin!(data, bucket_name, gname, :ranef_correlated_by_draws, K)
+    else
+        config = _sb_stratified_ranef_submodel(ranef_effect.sd_prior; mod)
+        _sb_record_binding!(data, bucket_name, :random_effect, gname;
+                            family=:ranef_correlated_by_draws_generic)
+        push!(stmts, _sb_ranef_statement(bucket_name, config.model,
+            Any[kwargs..., Expr(:kw, :lkj_eta, ranef_effect.lkj_eta),
+                (Expr(:kw, k, v) for (k, v) in config.inputs)...], K))
+    end
     info.idx_name
 end
 

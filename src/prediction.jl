@@ -245,6 +245,10 @@ for (family, shape) in _SB_STUDENT_T_RANEF_SHAPES
     _RANEF_STUDENT_T_BASES[student_t] = family
 end
 
+# A stratified block that `sd(...)` / `cor(...)` statements configure keeps the
+# unconfigured block's coordinates (`_sb_stratified_ranef_submodel`).
+_RANEF_FAMILIES[:ranef_correlated_by_draws_generic] = _RANEF_FAMILIES[:ranef_correlated_by_draws]
+
 # Level-correlated blocks (`gr(g; cor=...)`, `_sb_level_correlated_ranef`)
 # keep their base family's carriers: the same standardized draws, scales and
 # correlation factor. Their returned effects are the base effects multiplied on

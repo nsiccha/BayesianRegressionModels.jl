@@ -412,12 +412,32 @@ function _rk_ast_group_component!(definitions, statements, taken, name, group, K
     name
 end
 
+# The `levels(s) x K` scales of a stratified block: every stratum's scale of
+# margin `j` takes `priors[j]`. One shared law broadcasts over the whole matrix;
+# distinct laws are stated per margin and collected column by column.
+function _rk_ast_stratum_scales(priors, index)
+    strata = Expr(:call, :levels, :s)
+    if all(isequal(first(priors)), priors)
+        prior = first(priors)
+        return Expr[Expr(:call, :.~, Expr(:ref, :tau, strata, index),
+            _rk_ast_dotted(prior.args[1], prior.args[2:end]...))]
+    end
+    scales = [Symbol(:tau_, j) for j in eachindex(priors)]
+    statements = Expr[Expr(:call, :.~, Expr(:ref, scale, strata),
+            _rk_ast_dotted(prior.args[1], prior.args[2:end]...))
+        for (scale, prior) in zip(scales, priors)]
+    push!(statements, Expr(:(=), :tau, Expr(:call, :hcat, scales...)))
+    statements
+end
+
 # Stratified group-level effects: one scale vector (and factor) per stratum.
+# `priors` holds one positive prior per margin, shared by every stratum.
 function _rk_ast_stratified_group_component!(definitions, statements, taken, name,
-        group, stratum, K, eta)
+        group, stratum, K, eta, priors)
+    priors, prior_inputs, prior_values = _rk_ast_component_prior_inputs(priors,
+        (:g, :s, :tau, :L, :k, :z, :b, :i, (Symbol(:tau_, j) for j in 1:K)...))
     index = Expr(:call, :(:), 1, K)
-    body = Expr(:block, Expr(:call, :.~, Expr(:ref, :tau, Expr(:call, :levels, :s), index),
-        _rk_ast_dotted(:restricted, Expr(:call, :Normal, 0, 1), 0.0, Inf)))
+    body = Expr(:block, _rk_ast_stratum_scales(priors, index)...)
     if K > 1
         cell = Expr(:call, :~, Expr(:ref, :L, :k), Expr(:call, :LKJCholesky, K, eta))
         push!(body.args, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
@@ -434,8 +454,9 @@ function _rk_ast_stratified_group_component!(definitions, statements, taken, nam
         Expr(:for, Expr(:(=), :i, Expr(:call, :eachindex, :g)), Expr(:block, cell))))
     push!(body.args, Expr(:return, :b))
     callee = _rk_ast_shared_definition!(definitions, taken,
-        "brm_stratified_group_effects", (:g, :s), body)
-    push!(statements, _rk_ast_component_call(name, callee, group, stratum))
+        "brm_stratified_group_effects", (:g, :s, prior_inputs...), body)
+    push!(statements, _rk_ast_component_call(name, callee, group, stratum,
+        prior_values...))
     name
 end
 

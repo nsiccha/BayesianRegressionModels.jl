@@ -55,7 +55,9 @@ absorbed coefficients at 0. An `|ID|` such a block absorbed keeps its address:
 `ID = Σ` or `(; sd)` sets the block's total scale, the SD of each group's
 total around `A β`, which is the margin's between-group SD. An `|ID|` that a
 sum-to-zero block (`s2z_groups`) claimed keeps its address the same way:
-`(; sd)` sets the block's scale `tau`.
+`(; sd)` sets the block's scale `tau`. A coefficient a sum-to-zero block
+absorbed sets the block's sampled population coefficient `theta = β + B μ`
+to the value, taking the block means `μ` as zero.
 
 An `|ID|` block whose margins are partly integrated out of the model (an
 omitted response) samples only its active margins; their scales and
@@ -449,6 +451,25 @@ function _brm_sb_start_writes!(writes, absorbed, ::Val{:population}, t, d, names
     if !isnothing(k)
         push!(get!(absorbed, totals[k].predictor, Pair{Symbol,Float64}[]),
             t.coefficient => t.value)
+        return
+    end
+    # A sum-to-zero block samples `theta = β + B μ`; with its block means at
+    # zero, `theta` is the coefficient's value.
+    s2z = s2z_effect_blocks(d.plan)
+    k = _brm_sb_absorbing_block(s2z, t.predictor, t.coefficient)
+    if !isnothing(k)
+        block = s2z[k]
+        outputs = [o for o in d.outputs if o.name === block.population]
+        length(outputs) == 1 || error(
+            "brm_start: sum-to-zero coefficients `$(block.population)` own " *
+            "$(length(outputs)) descriptor outputs; expected exactly one")
+        coordinates = _brm_element_coordinates(only(outputs), names)
+        length(coordinates) == length(block.population_columns) || error(
+            "brm_start: sum-to-zero coefficients `$(block.population)` have " *
+            "$(length(block.population_columns)) columns but " *
+            "$(length(coordinates)) Stan values")
+        push!(writes, (coordinates[findfirst(==(t.coefficient),
+            block.population_columns)], t.value))
         return
     end
     q = brm_population_effect_coordinates(d, t.predictor, names;
