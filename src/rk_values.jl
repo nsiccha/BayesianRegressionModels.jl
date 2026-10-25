@@ -766,7 +766,8 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
         for a in ordinary_assignments if a.expression isa Number), context.data)
     parameters = _rk_plan_parameters!(prepared, context.data, consts,
         Dict{Symbol,Symbol}(), parameter_names, assignment_names)
-    vectors = [_rk_plan_vector_parameters!(prepared, consts); threshold_vectors]
+    vectors = [_rk_plan_vector_parameters!(prepared, context.data, consts,
+        Dict{Symbol,Symbol}(), parameter_names, assignment_names); threshold_vectors]
     predictor_order = Symbol[op.name for op in program.operations
         if op.role === :predictor && op.name in referenced &&
             !any(route -> route.name === op.name, routes)]

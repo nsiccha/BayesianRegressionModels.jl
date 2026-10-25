@@ -1153,11 +1153,30 @@ function _rk_ast_vector_parameter(parameter::_RKVectorParameter)
     elseif parameter.family === :vector_normal
         return Expr(:call, :.~, Expr(:ref, parameter.name,
             Expr(:call, :(:), 1, parameter.size)), _rk_ast_dotted(:Normal, parameter.args...))
+    elseif parameter.family === :elementwise
+        # A declared vector: its element's scalar law, broadcast.
+        law = last(_rk_ast_sampled(only(parameter.args)).args)
+        return Expr(:call, :.~, Expr(:ref, parameter.name,
+            Expr(:call, :(:), 1, parameter.size)), _rk_ast_broadcast_law(law))
+    elseif parameter.family === :mvnormal
+        return Expr(:call, :~, Expr(:ref, parameter.name,
+            Expr(:call, :(:), 1, parameter.size)),
+            Expr(:call, :MvNormal, parameter.args...))
     end
     parameter.family === :simplex_dirichlet || return nothing
     alpha = only(parameter.args)
     Expr(:call, :~, parameter.name,
         Expr(:call, :Dirichlet, Expr(:vect, alpha...)))
+end
+
+# `restricted(Normal(a, b), lo, hi)` -> `restricted.(Normal.(a, b), lo, hi)`:
+# a scalar law broadcast over a declared vector, its wrapped base law too.
+function _rk_ast_broadcast_law(law::Expr)
+    Meta.isexpr(law, :call) || return law
+    head, args = law.args[1], law.args[2:end]
+    head in (:restricted, :truncated) && !isempty(args) &&
+        (args = [_rk_ast_broadcast_law(first(args)); args[2:end]])
+    Expr(:., head, Expr(:tuple, args...))
 end
 
 # A `@plate` block: `name[i] ~ Normal(loc, scale)` over the range

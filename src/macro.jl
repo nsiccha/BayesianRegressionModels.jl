@@ -898,6 +898,8 @@ elseif isxcall(x, :~) && Meta.isexpr(x.args[2], :tuple)
 elseif isxcall(x, :~) && _is_hyper_lhs(x.args[2])
     _, lhs, rhs = x.args
     _parse_hyper!(lhs, rhs; info)
+elseif isxcall(x, :.~)
+    parse!(_brm_vector_declaration(x); info)
 elseif isxcall(x, :~)
     _, lhs, rhs = x.args
     legacy_kernel_doblock = _is_brm_legacy_kernel_doblock(rhs)
@@ -916,7 +918,6 @@ elseif isxcall(x, :~)
     legacy_kernel_doblock ?
         Expr(:block, :($_brm_depwarn_kernel_doblock()), parsed) : parsed
 else
-    dump(x)
     error("Don't know how to handle parse!($x)!")
 end
 
@@ -2027,6 +2028,52 @@ function _brm_known end
 
 const _KNOWN_VALUE_HEADS = (:sd, :cor)
 
+# `name[1:n] .~ Family.(args...; kwargs...)` declares a vector parameter: `n`
+# elements, each drawn from `Family(args...; kwargs...)`, which is what Julia's
+# broadcasting means and what RKPPL's declared arrays spell (decision
+# `19ssmud`). A data-vector argument applies elementwise. The statement lowers
+# to `name ~ _brm_vector_prior(n, Family(args...; kwargs...))`, so it is an
+# ordinary parameter declaration everywhere downstream and prints back as
+# written.
+"""
+    _brm_vector_prior(n, law)
+
+Internal marker for a declared vector parameter, `name[1:n] .~ law`: `n`
+elements, each with the scalar prior `law`. Never called.
+"""
+function _brm_vector_prior end
+
+function _brm_vector_declaration(x::Expr)
+    _, lhs, rhs = x.args
+    spelled = sprint(Base.show_unquoted, x)
+    Meta.isexpr(lhs, :ref, 2) && lhs.args[1] isa Symbol || error(
+        "@brm: `$spelled`: a vector parameter is declared " *
+        "`name[1:n] .~ Family.(args...)`")
+    range = lhs.args[2]
+    isxcall(range, :(:)) && length(range.args) == 3 && range.args[2] == 1 || error(
+        "@brm: `$spelled`: the declared index range must be `1:n`, with `n` an " *
+        "integer, a scalar data field or an expression over data")
+    law = _brm_undot(rhs)
+    Meta.isexpr(law, :call) || error(
+        "@brm: `$spelled`: the right-hand side must be a scalar distribution, " *
+        "such as `Normal.(0.0, 1.0)`")
+    Expr(:call, :~, lhs.args[1], Expr(:call, _brm_vector_prior, range.args[3], law))
+end
+# The element law of a broadcast prior: `f.(args...)` is the call `f(args...)`
+# and a dotted operator `.*` is `*`, at every depth.
+_brm_undot(x) = x
+function _brm_undot(x::Expr)
+    args = map(_brm_undot, x.args)
+    Meta.isexpr(x, :., 2) && Meta.isexpr(x.args[2], :tuple) &&
+        return Expr(:call, args[1], args[2].args...)
+    if Meta.isexpr(x, :call) && args[1] isa Symbol
+        op = string(args[1])
+        length(op) > 1 && startswith(op, ".") && Base.isoperator(Symbol(op[2:end])) &&
+            (args[1] = Symbol(op[2:end]))
+    end
+    Expr(x.head, args...)
+end
+
 # The RHS of `f(args...) = value` reaches the macro as a short-form function
 # body: `Expr(:block, LineNumberNode, value)`.
 function _brm_known_value_expr(rhs, lhs)
@@ -2217,8 +2264,11 @@ elseif x.head == :call
         @warn "Don't know how to handle xassignable($x)!"
         Symbol(x)
     end
+elseif x.head == :(::)
+    error("@brm: a typed left-hand side `$x` is not @brm syntax. Declare a " *
+          "vector parameter as `$(x.args[1])[1:n] .~ Family.(args...)`, or a " *
+          "joint normal one as `$(x.args[1]) ~ MvNormal(...)`")
 else
-    dump(x)
     error("Don't know how to handle xassignable($x)!")
 end
 xname(x::Symbol) = Meta.quot(x)
@@ -3062,6 +3112,16 @@ _show_top(io::IO, key, op::ExprColumn{<:Union{typeof(~),typeof(assign)}}) = begi
         _show_bare(io, only(getargs(last(args))))
         return
     end
+    # A declared vector parameter prints as written: `phi[1:n] .~ Normal.(...)`.
+    if getf(op) === (~) && last(args) isa ExprColumn{typeof(_brm_vector_prior)}
+        len, law = getargs(last(args))
+        _show_bare(io, first(args))
+        print(io, "[1:")
+        _brm_show_operand(io, len, 0)
+        print(io, "] .~ ")
+        _brm_show_dotted(io, law)
+        return
+    end
     # An `@plate for` cell prints as written.
     if getf(op) === (~) && last(args) isa ExprColumn{typeof(kernel)}
         body = first(getargs(last(args)))
@@ -3153,6 +3213,31 @@ end
 # as a Symbol, so the value keeps its colon and re-parses to the same keyword.
 _brm_show_keyword_value(io::IO, x) = _brm_show_operand(io, x, 0)
 _brm_show_keyword_value(io::IO, x::Symbol) = show(io, x)
+# The element law of a declared vector prints broadcast, as written:
+# `Normal.(0.0, w_scale; lower=0.0)`, `truncated.(Normal.(0.0, 1.0), 0.0, 2.0)`.
+_brm_show_dotted(io::IO, x) = _brm_show_operand(io, x, 0)
+function _brm_show_dotted(io::IO, x::ExprColumn)
+    op = _brm_infix_symbol(x)
+    if !isnothing(op)
+        print(io, "(")
+        for (i, arg) in enumerate(getargs(x))
+            i == 1 || print(io, " .", op, " ")
+            _brm_show_dotted(io, arg)
+        end
+        return print(io, ")")
+    end
+    _show_call_head(io, getf(x))
+    print(io, ".(")
+    for (i, arg) in enumerate(getargs(x))
+        i == 1 || print(io, ", ")
+        _brm_show_dotted(io, arg)
+    end
+    for (i, (key, value)) in enumerate(pairs(getkwargs(x)))
+        print(io, i == 1 ? "; " : ", ", key, "=")
+        _brm_show_keyword_value(io, value)
+    end
+    print(io, ")")
+end
 # A resolved call head prints as the name the user wrote. Julia prints a
 # type/callable binding module-qualified unless it is visible from the
 # display context, so a docs build (whose `Main` never imports
