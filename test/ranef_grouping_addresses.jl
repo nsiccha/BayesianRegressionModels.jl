@@ -61,8 +61,17 @@ twin = @brm DF begin
 end
 
 @stestset "address resolution and the rewritten parent" begin
-    # A model without grouping-column addresses is the model as written.
-    @test BRM._brm_resolve_prior_addresses(nocor) === nocor
+    # A model without grouping-column addresses or `||` blocks is the model as
+    # written.
+    correlated = @brm DF begin
+        mu ~ 1 + c1 + (1 + c1 | probe)
+        y ~ Normal(mu, 1.0)
+    end
+    @test BRM._brm_resolve_prior_addresses(correlated) === correlated
+    # An unaddressed `||` block lowers under its generated IDs all the same,
+    # its lone intercept keeping the plain `LogNormal(0, 1)` scale.
+    @test [(s.class, s.id) for s in ranef_effect_priors(BRM._brm_resolve_prior_addresses(nocor))] ==
+          [(:sd, :mu__probe__nocor__1)]
 
     sb = build(addressed)
     parent_brmi = parent(sb)
@@ -103,7 +112,8 @@ end
     @test BRM.stan_data(build(layered))[:b_mu__probe__nocor__3_probe_tau] == [0.5]
     @test stanc_ok(build(layered))
 
-    # A statement reaches only its own blocks; the rest stay as written.
+    # A statement reaches only its own blocks; the rest keep their defaults
+    # (a plain block no statement reaches stays as written).
     only_sigma = @brm DF begin
         mu ~ 1 + c1 + s1 + (1 + c1 + s1 || probe)
         log(sigma) ~ 1 + (1 | probe)
@@ -111,8 +121,15 @@ end
         y ~ Normal(mu, sigma)
     end
     c = code(build(only_sigma))
-    @test "r_mu_probe__nocor__1_log_scale ~ std_normal();" in lines_with(c, "~")
+    @test "b_mu__probe__nocor__1_probe_tau ~ lognormal(0.0, 1.0);" in lines_with(c, "~")
     @test "b_sigma__probe_probe_tau ~ exponential((1.0 ./ 1.0));" in lines_with(c, "~")
+    only_mu = @brm DF begin
+        mu ~ 1 + c1 + s1 + (1 + c1 + s1 || probe)
+        log(sigma) ~ 1 + (1 | probe)
+        sd(mu, probe) ~ Exponential(1.0)
+        y ~ Normal(mu, sigma)
+    end
+    @test "r_log_sigma_probe_log_scale ~ std_normal();" in lines_with(code(build(only_mu)), "~")
 
     # A reached lone intercept keeps its plain `LogNormal(0, 1)` default.
     one_slope = @brm DF begin
@@ -297,19 +314,12 @@ GROUPING_RUNTIME && @stestset "BridgeStan: restated defaults are the unaddressed
     plain = instantiate(build(nocor)).model
     lowered = instantiate(build(restated)).model
     # Plain name -> lowered name of the same constrained value. A lone
-    # intercept's `exp(log_scale)` is the lowered `tau`. The lowered one-margin
-    # blocks declare no correlation factor, exactly as the plain ones.
+    # intercept's `exp(log_scale)` is the lowered `tau`. The `||` blocks lower
+    # under the same generated IDs addressed or not (their per-term law against
+    # plain blocks is pinned in test/ranef_joint_gather.jl); the plain block on
+    # `log(sigma)` is named by the emitted predictor `log_sigma`, the generated
+    # ID by the public one, `sigma`.
     rename = Dict{String,String}()
-    for (k, block) in enumerate(("mu__probe__nocor__1", "mu__probe__nocor__2",
-                                 "mu__probe__nocor__3"))
-        plain_block = "r_mu_probe__nocor__$k"
-        rename["$(plain_block)_$(k == 1 ? "log_scale" : "tau.1")"] = "b_$(block)_probe_tau.1"
-        for j in 1:6
-            rename["$(plain_block)_xi.$j"] = "b_$(block)_probe_z_flat.$j"
-        end
-    end
-    # The plain block is named by the emitted predictor `log_sigma`, the
-    # generated ID by the public one, `sigma`.
     rename["r_log_sigma_probe_log_scale"] = "b_sigma__probe_probe_tau.1"
     for j in 1:6
         rename["r_log_sigma_probe_xi.$j"] = "b_sigma__probe_probe_z_flat.$j"
@@ -349,8 +359,8 @@ GROUPING_RUNTIME && @stestset "RKBRMI: the same law as SBBRMI" begin
         ranef(sigma, probe) ~ TDist(5.0)
         y ~ Normal(mu, sigma)
     end
-    # An addressed `||` block lowers as `|ID|` blocks, which RK samples.
-    for (name, brmi) in (("addressed", addressed), ("student", student))
+    # A `||` block lowers as `|ID|` blocks, which RK samples, addressed or not.
+    for (name, brmi) in (("addressed", addressed), ("nocor", nocor), ("student", student))
         rk, problem = consumer_problem(brmi)
         sb = build(brmi)
         stan = instantiate(sb)
