@@ -104,9 +104,9 @@ end
     d = brm_descriptor(factor_model, (; src=[1, 2, 1, 2, 1, 2], x, y);
                        mod=@__MODULE__, name=:zero_element_control)
     beta = only(o for o in d.stan.outputs if o.name === :cat_mu_src_beta)
-    wrong = StanBlocks.ModelOutput(beta.name, beta.kind, beta.type, beta.size,
-                                   beta.constraints, beta.generative, beta.source,
-                                   beta.segments, (2,))
+    # Every field copied except `dims`, so new StanBlocks fields need no edit.
+    wrong = StanBlocks.ModelOutput((field === :dims ? (2,) : getfield(beta, field)
+                                    for field in fieldnames(StanBlocks.ModelOutput))...)
     stan = (; outputs=[o === beta ? wrong : o for o in d.stan.outputs])
     # refused: two sources disagreeing on an element count is a defect to
     # surface, never one to settle by picking a side (one source of truth, dev §3).
