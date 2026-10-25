@@ -104,6 +104,10 @@ end
     @test only(ranef_blocks(default_sb)).family === :ranef_correlated_by_draws
     @test samples(code(default_sb), "b_mu__g__by__b_g__by__b_tau_s_tau", raw"std_normal\(\);")
     @test !samples(code(default_sb), "b_mu__g__by__b_g__by__b_tau_s_tau", "lognormal")
+    # The scientific description names each stratum's configured law.
+    described(sb) = sprint(show, brm_description(sb).priors)
+    @test occursin("builtin.lognormal, (-1, 0.75)", described(sb))
+    @test !occursin("lognormal", described(default_sb))
     @test stanc_ok(build(intercept; cv_groups=(:g,)))
 end
 
@@ -111,6 +115,7 @@ end
     sb = build(slope)
     c = code(sb)
     @test samples(c, "b_mu__g__by__b_g__by__b_L_s_L", raw"lkj_corr_cholesky\(3\.0\);")
+    @test occursin("builtin.lkj_corr_cholesky, (3.0,)", sprint(show, brm_description(sb).priors))
     # Mixed families take one generated per-coordinate family in the stratum
     # cell (a plate cell cannot hold StanBlocks' `vcat` prior family yet).
     @test samples(c, "b_mu__g__by__b_g__by__b_tau_s_tau", "brm_vector_prior_")
