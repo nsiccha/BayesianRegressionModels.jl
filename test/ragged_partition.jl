@@ -4,7 +4,9 @@
 # once, through a dense table for machine-integer labels over a compact range
 # or a hash table keyed by the labels' element type, and sizes every cell
 # before filling it. Oracle: the original partition, a `Dict{Any,Int}` lookup
-# and `push!` per row, on every label kind; the same refusals.
+# and `push!` per row, on every label kind; the same refusals. A row whose
+# label names no cell is read by no cell (decision `0z97g0b`); only a response
+# (`observed=true`) refuses it.
 #
 # The RK design binder validates each design's joins without building their
 # partitions (snag `rk-design-binder-9d6b7561`): `_brm_check_ragged_rows`
@@ -23,8 +25,7 @@ function reference_partition(ev_vals, subject_vals)
     rows = [Int[] for _ in eachindex(subject_vals)]
     for (r, v) in enumerate(ev_vals)
         i = get(pos, v, 0)
-        i == 0 && error("unknown label $v")
-        push!(rows[i], r)
+        i == 0 || push!(rows[i], r)
     end
     rows
 end
@@ -66,10 +67,21 @@ partition(ev, labels) = BRM._brm_kernel_ragged_partition(:x, :g, ev, labels)
     @test partition([4, 4], [4, 9, 4]) == reference_partition([4, 4], [4, 9, 4])
 end
 
-@testset "an unknown or missing label is refused as before" begin
-    @test_throws "label(s) Any[42] in `g` name no subject" partition([1, 42, 42], [1, 2])
-    @test_throws "label(s) Any[\"zz\"] in `g` name no subject" partition(["a", "zz"], ["a"])
-    @test_throws "label(s) Any[1] in `g` name no subject" partition([1], Int[])
+observed_partition(ev, labels) =
+    BRM._brm_kernel_ragged_partition(:x, :g, ev, labels; observed=true)
+
+@testset "a row in no cell is read by no cell; a response refuses it" begin
+    # A label no cell lists leaves its row in no cell (decision `0z97g0b`).
+    @test partition([1, 42, 42], [1, 2]) == [[1], Int[]]
+    @test partition(["a", "zz"], ["a"]) == [[1]]
+    @test partition([1], Int[]) == Vector{Int}[]
+    @test partition([7, 3, 9, 3], [3, 9]) == reference_partition([7, 3, 9, 3], [3, 9])
+    # refused: a response entry in no cell would be an observation the fit
+    # carries without conditioning on it (`0q8hcwq`, `1bwqnxs`).
+    @test_throws "entries labelled Any[42] belong to no cell" observed_partition([1, 42, 42], [1, 2])
+    @test_throws "entries labelled Any[\"zz\"] belong to no cell" observed_partition(["a", "zz"], ["a"])
+    @test observed_partition([2, 1, 2], [1, 2]) == partition([2, 1, 2], [1, 2])
+    # refused: a missing label is not a label (unchanged).
     @test_throws "must be a column with no missing labels" partition([1, missing], [1])
     @test_throws "must be a column with no missing labels" partition(Any[missing], [1])
 end
@@ -91,7 +103,7 @@ outcome(f) = try f(); :ok catch e; sprint(showerror, e) end
         ([3, 1, 3, 2], [1, 2, 3], ([0.1, 0.2, 0.3, 0.4],)),          # accepted
         (["b", "a", "b"], ["a", "b"], ()),                            # accepted, no axis
         (Int[], [1, 2], (Float64[],)),                                # zero-row axis
-        ([1, 42, 42], [1, 2], ([0.1, 0.2, 0.3],)),                    # unknown label
+        ([1, 42, 42], [1, 2], ([0.1, 0.2, 0.3],)),                    # a row in no cell
         (["a", "zz"], ["a"], ([0.1, 0.2],)),
         ([1, missing], [1, 2], ([0.1, 0.2],)),                        # missing label
         ([1, 2, 1], [1, 2], ([0.1, 0.2],)),                           # axis length
@@ -113,16 +125,27 @@ outcome(f) = try f(); :ok catch e; sprint(showerror, e) end
                 names[4:end], axes; order=:t, times))
         end
     end
-    @test outcome(() -> BRM._brm_check_ragged_rows(:x, :g, [1, 42], :c, [1], [], ())) ==
-        "RK backend: kernel(...) `ragged(x, g)`: label(s) Any[42] in `g` name no subject " *
-        "in the kernel's per-subject frame. Every event row must belong to a subject this " *
-        "kernel walks."
+    # A row in no cell is read by no cell; a response (`observed`) refuses it,
+    # in the check exactly as in the partition.
+    @test outcome(() -> BRM._brm_check_ragged_rows(:x, :g, [1, 42], :c, [1], [], ())) == :ok
+    @test outcome(() -> BRM._brm_check_ragged_rows(:x, :g, [1, 42], :c, [1], [], ();
+            observed=true)) ==
+        outcome(() -> BRM._brm_kernel_ragged_partition(:x, :g, [1, 42], [1];
+            prefix="RK backend", observed=true)) ==
+        "RK backend: kernel(...) `ragged(x, g)`: the response `x` is observed through " *
+        "`g`, but its entries labelled Any[42] belong to no cell, so no cell would " *
+        "observe them. A fit receives only the observations it conditions on: pass `x` " *
+        "with only the entries the cells observe, and predict the others by replaying " *
+        "the fit (`reprocess`)."
+    @test outcome(() -> BRM._brm_check_ragged_rows(:x, :g, [1, 1], :c, [1], [], ();
+            observed=true)) == :ok
     # The check builds no partition: on a 24,000-row join it allocates less
     # than one integer per row (the cell labels and a lookup table).
     for (groups, cells) in ((fill(7, 24_000), [7]), (repeat(1:400; inner=60), collect(1:400)),
             (repeat(["n$(j)" for j in 1:400]; inner=60), ["n$(j)" for j in 1:400]))
         axis = (zeros(length(groups)),)
-        check() = BRM._brm_check_ragged_rows(:x, :g, groups, :c, cells, [:a], axis)
+        check() = BRM._brm_check_ragged_rows(:x, :g, groups, :c, cells, [:a], axis;
+            observed=true)
         build() = BRM.brm_ragged_rows([:x, :g, :c, :a], groups, cells, axis...)
         check(); build()
         @test @allocated(check()) < 8 * length(groups) < @allocated(build())

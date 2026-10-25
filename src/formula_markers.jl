@@ -246,7 +246,10 @@ facilities = groups(fac_district => district)       # each district's facilities
 end
 ```
 
-and the plate has one cell per entry of `district`, in that order. An index
+and the plate has one cell per entry of `district`, in that order. A facility
+whose district `district` does not list is read by no cell, so the cells may
+observe only some districts' totals; a response observed through a binding
+(`y[obs[i]] ~ …`) must have every entry in a cell. An index
 vector into another grouping's entries — an event schedule's global read number
 per observation — is read as positions among the cell's indices of that
 grouping, `indexin(obs_read[obs[i]], reads[i])` with

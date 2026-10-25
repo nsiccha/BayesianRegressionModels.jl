@@ -405,7 +405,8 @@ function _rk_design_cell_check(kernel, design)
             _brm_check_ragged_rows(entry.x, entry.group, column(entry.group),
                 entry.cell, column(entry.cell), entry.axes,
                 Tuple(column(axis) for axis in entry.axes); entry.order,
-                times=entry.order === nothing ? nothing : column(entry.order))
+                times=entry.order === nothing ? nothing : column(entry.order),
+                observed=get(entry, :observed, false))
         end
         nothing
     end

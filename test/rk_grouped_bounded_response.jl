@@ -155,7 +155,7 @@ end
         merge(data, (; y=[0.1, -0.1, 0.4])), censored))
     @test_throws "lower bounds must not exceed" RKBRMI(PublicGroupedBoundedResponse.build(
         merge(data, (; hi=[1.0, -0.1, 1.0])), censored))
-    @test_throws "grouping column must name" RKBRMI(PublicGroupedBoundedResponse.build(
+    @test_throws "grouping column must label EVERY entry" RKBRMI(PublicGroupedBoundedResponse.build(
         merge(data, (; lo=zeros(2))), censored))
     @test_throws "strictly below" RKBRMI(PublicGroupedBoundedResponse.interval(
         merge(data, (; hi=[1.0, 0.0, 1.0]))))

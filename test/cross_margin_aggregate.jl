@@ -113,6 +113,21 @@ end
         (logpdf(Poisson(3), 7) + logpdf(Poisson(1), 10))
 end
 
+@testset "a facility whose district lists no total is read by no cell" begin
+    # The plate's cells list only the observed districts (decision `0z97g0b`):
+    # facilities 3 and 4 belong to district 2, which has no total here. Their
+    # effects stay parameters, and the density loses exactly district 2's term.
+    # At zero every facility rate is 1, so district 2's rate is 2.
+    full = merge(agg_df, (; district = [1, 2], Y = [10, 7]))
+    first_only = merge(agg_df, (; district = [1], Y = [10]))
+    sb = SBBRMI(agg_builder(first_only); mod = @__MODULE__)
+    @test ragged_data(sb) == [[1, 2]]
+    @test StanBlocks.stanc_check(BRM.stan_code(sb); warn_pedantic = false).ok
+    @test LogDensityProblems.dimension(rkprob(agg_builder(first_only))) == 6
+    @test rkdensity(agg_builder(first_only)) ≈
+        rkdensity(agg_builder(full)) - logpdf(Poisson(2), 7)
+end
+
 @testset "ragged views over different groupings share one set of cells" begin
     two_views = @brm begin
         log_lambda ~ 1 + (1 | fac | facility)
@@ -168,9 +183,6 @@ end
         agg_builder(merge(df, (; district = [1, 2], Y = [10]))))
     @test_throws "unique subject per row" SBBRMI(
         agg_builder(merge(df, (; district = [1, 1]))); mod = @__MODULE__)
-    # refused: a facility whose district has no row would be dropped silently.
-    @test_throws "name no subject" SBBRMI(
-        agg_builder(merge(df, (; district = [1, 3]))); mod = @__MODULE__)
 
     # refused: one plate has one set of cells.
     two_cells = @brm begin
