@@ -84,7 +84,7 @@ end
         c = components(u)
         values = Dict("pop_theta_beta_pop.1"=>u[intercept],
             "pop_score_beta_pop.1"=>u[a], "pop_score_beta_pop.2"=>u[b],
-            "b_p_subject_L.1.1"=>1.0, "b_p_subject_tau.1"=>c.tau,
+            "b_p_subject_tau.1"=>c.tau,
             "hsgp_x_rho_iso"=>c.r, "hsgp_x_sigma"=>c.s,
             "mo_rank_simplex_incr.1"=>c.increments[1],
             "mo_rank_simplex_incr.2"=>c.increments[2])

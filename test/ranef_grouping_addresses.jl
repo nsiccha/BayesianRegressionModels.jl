@@ -296,8 +296,8 @@ GROUPING_RUNTIME && @stestset "BridgeStan: restated defaults are the unaddressed
     plain = instantiate(build(nocor)).model
     lowered = instantiate(build(restated)).model
     # Plain name -> lowered name of the same constrained value. A lone
-    # intercept's `exp(log_scale)` is the lowered `tau`; the lowered blocks
-    # also carry a 1x1 correlation factor, which is identically 1.
+    # intercept's `exp(log_scale)` is the lowered `tau`. The lowered one-margin
+    # blocks declare no correlation factor, exactly as the plain ones.
     rename = Dict{String,String}()
     for (k, block) in enumerate(("mu__probe__nocor__1", "mu__probe__nocor__2",
                                  "mu__probe__nocor__3"))
@@ -331,9 +331,7 @@ GROUPING_RUNTIME && @stestset "BridgeStan: restated defaults are the unaddressed
             target = get(rename, name, name)
             mapped[target] = endswith(name, "log_scale") ? exp(value) : value
         end
-        for name in lowered_names
-            endswith(name, "_L.1.1") && (mapped[name] = 1.0)
-        end
+        @test Set(keys(mapped)) == Set(lowered_names)
         u_plain = BridgeStan.param_unconstrain(plain, [values[n] for n in plain_names])
         u_lowered = BridgeStan.param_unconstrain(lowered, [mapped[n] for n in lowered_names])
         @test BridgeStan.log_density(plain, u_plain; propto=false, jacobian=true) ≈
