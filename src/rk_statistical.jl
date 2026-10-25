@@ -133,6 +133,16 @@ brm_level_indices(labels, source) = _rk_value_level_indices(labels, source)
 brm_fit_levels(source::CA.CategoricalArray) = CA.categorical(CA.levels(source);
     levels=CA.levels(source), ordered=CA.isordered(source))
 brm_fit_levels(source::AbstractVector) = collect(CA.levels(source))
+# A shared `|ID|` block's fitted levels when its predictors group their rows by
+# different columns: the union of the columns' labels, in the order
+# `_brm_joint_levels` gives SBBRMI (the planner refused columns sharing none).
+function brm_joint_fit_levels(sources::AbstractVector...)
+    levels = _brm_joint_levels([Symbol(:column_, i) => source
+                                for (i, source) in enumerate(sources)];
+                               id=:joint, prefix="brm_joint_fit_levels")
+    all(source -> source isa CA.CategoricalArray, sources) || return collect(levels)
+    CA.categorical(levels; levels, ordered=all(CA.isordered, sources))
+end
 # No longer emitted: the gather is written inline as `draws[indices, margin]`.
 # Kept for RK sources printed before that change, which import it by name.
 brm_ranef_column(draws, indices, margin) = draws[indices, margin]
