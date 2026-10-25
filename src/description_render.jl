@@ -589,6 +589,8 @@ function _brmd_gp_fragment(c,approximate)
         end
         get(c.keywords,:iso,true)===true && push!(prose,_brmd_text(c,:isotropic_length_scale))
         grouped && push!(prose,_brmd_text(c,:grouped_basis_weights))
+        grouped && haskey(c.keywords,:cor) && push!(prose,_brmd_text(c,
+            :level_correlated_basis_weights;correlation=_brmd_level_correlation_name(c.keywords[:cor])))
         if get(c.keywords,:orthogonal_to,nothing)!==nothing
             push!(equations,"\\Phi_{\\mathrm{"*_brmd_text(c,:math_used)*"}}=(I-P_{[1,x]})\\Phi_{\\mathrm{"*_brmd_text(c,:math_raw)*"}}")
             push!(prose,_brmd_text(c,:orthogonal_projection))
@@ -902,6 +904,16 @@ function _brmd_compact_expression(c,x,definitions,notes,counter;root=false,seen=
     push!(definitions,_brmd_assignment_equation(localcontext,symbol,reduced))
     BRMDescriptionReference(:intermediate_expression,:local,key)
 end
+# The name a level-correlated block's `gr(g; cor=...)` reads (the sampled
+# declaration or the known matrix's data field), or `nothing`.
+function _brmd_ranef_level_correlation(d,b)
+    _ranef_level_correlated(b.family) || return nothing
+    bindings=hasproperty(d.plan,:bindings) ? d.plan.bindings : Dict()
+    binding=get(bindings,b.binding,nothing)
+    isnothing(binding) ? nothing : get(binding,:level_correlation,nothing)
+end
+_brmd_level_correlation_name(x::BRMDescriptionReference)=x.name
+_brmd_level_correlation_name(x)=x
 function _brmd_builtin_kind(::Val{:random_effect},c)
     k=c.keywords
     id=_brmd_block_math(c,c.id)
@@ -912,6 +924,8 @@ function _brmd_builtin_kind(::Val{:random_effect},c)
         _brmd_text(c,k.shared ? :shared_covariance_block : :independent_covariance_block),
         _brmd_text(c,k.correlated ? :correlated_margins : :uncorrelated_margins))," ")
     k.by===nothing || (prose*=" "*_brmd_text(c,:stratified_covariance))
+    level=get(k,:level_correlation,nothing)
+    isnothing(level) || (prose*=" "*_brmd_text(c,:level_correlated_groups;correlation=level))
     haskey(k,:total) && (prose*=" "*_brmd_text(c,:exact_total_deviations;owner=last(k.total)))
     nu=get(k,:student_t_nu,nothing)
     law=isnothing(nu) ? "\\sim\\mathcal N_{"*string(k.n_terms)*"}(0,"*covariance*")" :
@@ -1037,7 +1051,8 @@ function brm_description(d::BRMDescriptor; hooks=(),labels=Dict(),prior_anchors=
         kwargs=(; group=b.group,id=b.id,n_terms=b.n_terms,n_groups=b.n_groups,
             levels=_brmd_snapshot(b.levels),margins=group.margins,
             correlated=group.correlated,shared=group.shared,noncentered=b.noncentered,by=b.by,
-            student_t_nu=_brmd_ranef_student_t_nu(group))
+            student_t_nu=_brmd_ranef_student_t_nu(group),
+            level_correlation=_brmd_ranef_level_correlation(d,b))
         haskey(group,:total) && (kwargs=merge(kwargs,(;total=(:total_effect,group.total.binding.logical))))
         push!(roots,_brmd_component(env,group.key,:random_effect,nothing,(),kwargs))
     end

@@ -245,6 +245,21 @@ for (family, shape) in _SB_STUDENT_T_RANEF_SHAPES
     _RANEF_STUDENT_T_BASES[student_t] = family
 end
 
+# Level-correlated blocks (`gr(g; cor=...)`, `_sb_level_correlated_ranef`)
+# keep their base family's carriers: the same standardized draws, scales and
+# correlation factor. Their returned effects are the base effects multiplied on
+# the left by the levels' Cholesky factor, the submodel input `L_level`, so a
+# reader that works on one level's draws alone (transport, resampling,
+# centering) must refuse them; `level_correlation` marks them.
+for family in _SB_LEVEL_CORRELATED_RANEF_BASES
+    _RANEF_FAMILIES[_sb_level_correlated_family(family)] =
+        merge(_RANEF_FAMILIES[family], (; level_correlation = :L_level))
+end
+
+# Whether a block's levels are correlated with each other.
+_ranef_level_correlated(family::Symbol) =
+    haskey(get(_RANEF_FAMILIES, family, (;)), :level_correlation)
+
 # The per-level mixing-weight carrier of a block's family, or `nothing` for a
 # Gaussian block.
 _ranef_mixing(family::Symbol) = get(_RANEF_FAMILIES[family], :mixing, nothing)
@@ -1317,6 +1332,18 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
             "BRM prediction: block `$(bt.binding)` has $(bt.n_terms) terms in the ",
             "target model but $(bf.n_terms) in the source. The design changed; ",
             "draws cannot be transported.")
+        # Correlated levels share one factor over the whole level set, so a
+        # level's draws mean nothing without the others: only the same levels,
+        # in the same order, carry over.
+        _ranef_level_correlated(bt.family) &&
+            !(bf.levels == bt.levels && !any(g -> g in resample_set,
+                                              _ranef_group_symbols(bt.group))) && error(
+            "BRM prediction: block `$(bt.binding)` correlates the levels of ",
+            "`$(bt.group)` (`gr(...; cor=...)`), so its draws transport only onto ",
+            "the same levels in the same order and cannot be resampled; the ",
+            "target has levels $(repr(bt.levels)) against the source's ",
+            "$(repr(bf.levels)). New or dropped levels of a level-correlated ",
+            "block are not implemented.")
         # A centered/noncentered MIX is a family mismatch and refused above:
         # the centered variants are distinct families, so `bf` shares `bt`'s
         # emission here.

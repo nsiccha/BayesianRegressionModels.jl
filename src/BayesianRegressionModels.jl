@@ -40,6 +40,7 @@ include("preparation_responses.jl")
 include("preparation_term_priors.jl")
 include("optional_priors.jl")
 include("grouping_addresses.jl")
+include("level_correlation.jl")
 include("preparation_terms.jl")
 include("preparation_gp.jl")
 include("preparation_structured.jl")
@@ -322,7 +323,7 @@ export popefs, _popefs_normal, _popefs_coefs, _popefs_normal_coefs,
        _sb_interval_censored_predictor,
        _sb_gp, _sb_gp_aniso, _sb_hsgp, _sb_hsgp_aniso,
        _sb_hsgp_partial, _sb_hsgp_partial_aniso,
-       _sb_hsgp_by, _sb_hsgp_by_aniso,
+       _sb_hsgp_by, _sb_hsgp_by_aniso, _sb_hsgp_by_levelcor, _sb_hsgp_by_aniso_levelcor,
        _sb_hsgp_latent, _sb_hsgp_latent_orthogonal,
        _sb_gp_periodic, _sb_hsgp_periodic,
        brm_exp_quad_cov, brm_hsgp_sqrt_spd, brm_hsgp_log_sqrt_spd,

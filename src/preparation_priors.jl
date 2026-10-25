@@ -262,3 +262,27 @@ function _brm_lkj_covariance_factor_spec(target::Symbol, op::ExprColumn;
     end
     (; K=Int(K), scale_prior, shape)
 end
+
+# `Omega ~ LKJCholesky(K, eta)` at model scope: the Cholesky factor of a K x K
+# correlation matrix under the LKJ law, read by name wherever a term correlates
+# the levels of a grouping factor (`gr(g; cor=Omega)`, `hsgp(x; by=g, cor=Omega)`).
+# Distributions.jl's third positional argument (`uplo`) is a storage choice BRM
+# does not offer: every backend uses the lower factor.
+function _brm_lkj_cholesky_spec(target::Symbol, op::ExprColumn;
+                                prefix="BRM preparation")
+    args, kw = getargs(op), getkwargs(op)
+    isempty(kw) || error(
+        "$prefix: `$target ~ LKJCholesky(K, eta)` takes no keywords, got " *
+        "$(collect(keys(kw)))")
+    length(args) == 2 || error(
+        "$prefix: `$target ~ LKJCholesky(K, eta)` needs a dimension and a " *
+        "shape, got $(length(args)) arguments")
+    K, eta = args[1], _brm_prior_constant(args[2])
+    K isa Integer && !(K isa Bool) && K >= 1 || error(
+        "$prefix: `$target ~ LKJCholesky(K, eta)` needs an integer dimension " *
+        ">= 1, got $(repr(K))")
+    eta isa Real && !(eta isa Bool) && isfinite(eta) && eta > 0 || error(
+        "$prefix: LKJ shape `eta` for `$target` must be a finite, strictly " *
+        "positive number, got $(repr(eta))")
+    (; K=Int(K), eta=Float64(eta))
+end

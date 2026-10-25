@@ -276,6 +276,9 @@ function _sb_total_plan(brmi, prepared, predictor, overrides, buckets, sd_overri
     # Do not reinterpret shared/correlated/stratified/multi-membership blocks.
     any(d -> d.raw_group isa MultiMembershipTerm || d.descriptor isa Tuple, declarations) &&
         return ineligible("its block is multi-membership, stratified or shared")
+    # A total integrates each level on its own; correlated levels couple them.
+    any(d -> !isnothing(_brm_declaration_level_cor(d)), declarations) &&
+        return ineligible("its random-effect levels are correlated (`gr(...; cor=...)`)")
     plans = _brm_simple_random_effect_plans(brmi,target,prepared.context)
     isnothing(plans) && return ineligible("its random effects are not one simple grouping")
     group = first(plans).group

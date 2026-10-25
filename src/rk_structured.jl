@@ -118,9 +118,18 @@ function _rk_ast_hsgp_grouped(definitions, term, inputs, floors, extent, taken, 
     weights = grouped ? (Expr(:call, :(:), 1, G), extent) : (extent,)
     push!(block.statements, Expr(:call, :.~, Expr(:ref, z, weights...),
         _rk_ast_dotted(:Normal, 0, 1)))
+    # `hsgp(...; by=g, cor=Omega)`: every basis function's group weights are
+    # correlated across levels by the factor's `L` (src/level_correlation.jl).
+    level_cor = get(options, :level_cor, nothing)
+    weights_value = z
+    if level_cor !== nothing
+        L = _rk_block_argument!(block, :L_level, _rk_ast_level_factor_value(level_cor))
+        weights_value = _rk_block_local!(block, :z_level)
+        push!(block.statements, Expr(:(=), weights_value, Expr(:call, :*, L, z)))
+    end
     value = _rk_block_local!(block, :value)
     push!(block.statements, Expr(:(=), value, _rk_ast_hsgp_value_graph!(definitions,
-        term, taken, arguments, sigma, rho, z; group_index)))
+        term, taken, arguments, sigma, rho, weights_value; group_index)))
     _rk_ast_block_call!(definitions, taken, "brm_grouped_hsgp", block, value)
 end
 function _rk_ast_structured_block(definitions, field, taken, bindings)
