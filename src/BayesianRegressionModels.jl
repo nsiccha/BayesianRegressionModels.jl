@@ -116,6 +116,7 @@ include("nlme_conditional.jl")
 include("nlme_start.jl")
 include("start_values.jl")
 include("nlme_fit.jl")
+include("nlme_svi.jl")
 include("covariate_resampling.jl")
 export modeled_covariates
 using SHA: sha256
