@@ -1927,16 +1927,11 @@ means, and the spelling RKPPL uses for its declared arrays (decision
 `19ssmud`). It is the one-line form of a per-group vector such as one bounded
 scale per section, which a factor regression (`phi ~ 0 + factor(section)` plus
 `effect(phi, section) ~ ...`) used to stand in for. Later statements read it by
-name, and `@plate` cells by position (`phi[s]`).
-
-```julia
-@brm begin
-    phi[1:length(total)] .~ Normal.(0.0, 0.5; lower = 0.0, upper = 2.0)
-    @plate for s in eachindex(total)
-        total[s] ~ Normal(10.0 * g[s], phi[s])
-    end
-end
-```
+name, and `@plate` cells by position (`phi[s]`). For example,
+`phi[1:length(total)] .~ Normal.(0.0, 0.5; lower = 0.0, upper = 2.0)` declares
+one scale in `(0, 2)` per entry of the data vector `total`, and a cell
+`@plate for s in eachindex(total)` observes `total[s] ~ Normal(10.0 * g[s], phi[s])`
+with its own section's scale.
 
 - **Length.** `n` is an integer, a scalar data field, or an expression over
   data (`length(total)`), evaluated when the model is built.
