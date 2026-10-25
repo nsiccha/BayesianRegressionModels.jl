@@ -328,8 +328,10 @@ function _sb_vector_priors(base::StanBlocks.SlicModel, target::Symbol, priors;
                             mod::Module=base.mod)
     for prior in priors
         isnothing(prior) || !any(_brm_is_array_value, getargs(prior)) || error(
-            "sbimpl: each coefficient's `$(getf(prior))` prior needs scalar " *
-            "arguments; index or reduce an array-valued argument explicitly")
+            "sbimpl: each coefficient's `$(sprint(_show_call_head, getf(prior)))` " *
+            "prior needs scalar arguments; index or reduce an array-valued " *
+            "argument explicitly, or read one value per coefficient with " *
+            "`effect(lp, block) .~ $(sprint(_show_call_head, getf(prior))).(...)`")
     end
     declaration = only(node for node in base.model.args if node isa Expr &&
         node.head === :(::) && node.args[1] === target)
@@ -2268,6 +2270,40 @@ function _sb_cat_prior_model(prior::ExprColumn, n_contrasts::Int; mod::Module=@_
     _sb_vector_priors(_sb_cat_generic, :beta, fill(prior, n_contrasts); mod)
 end
 
+# A categorical block whose coefficients each carry a prior (`nothing` = the
+# default `Normal(0, 1)`), as `col_name ~ <block submodel>`: the plain submodel
+# when none is set, its Normal sibling over per-coefficient locations and
+# scales when all are Normal (one shared pair keeps Stan's scalar spelling, the
+# statement a single block-wide prior emits), else the generic base with one
+# statement per coefficient. `submodels` is the coding's
+# `(plain, normal, generic)` triple.
+function _sb_emit_cat_block_priors!(stmts, col_name::Symbol, idx_name::Symbol,
+                                    n_name::Symbol, priors, submodels;
+                                    mod::Module=@__MODULE__)
+    plain, normal, generic = submodels
+    if all(isnothing, priors)
+        push!(stmts, :($col_name ~ $plain(; x=$idx_name, n_levels=$n_name)))
+    elseif all(_sb_is_normal_effect_prior, priors)
+        beta_loc = Any[0.0 for _ in priors]
+        beta_scale = Any[1.0 for _ in priors]
+        for i in eachindex(priors)
+            isnothing(priors[i]) && continue
+            beta_loc[i], beta_scale[i] = _sb_effect_normal_args(priors[i])
+        end
+        shared = !isempty(priors) && allequal(beta_loc) && allequal(beta_scale)
+        loc = shared ? first(beta_loc) : Expr(:vect, beta_loc...)
+        scale = shared ? first(beta_scale) : Expr(:vect, beta_scale...)
+        push!(stmts, :($col_name ~ $normal(;
+            x=$idx_name, n_levels=$n_name, beta_loc=$loc, beta_scale=$scale)))
+    else
+        default = ExprColumn(Normal, 0.0, 1.0)
+        configured = _sb_vector_priors(generic, :beta,
+                                       Any[something(p, default) for p in priors]; mod)
+        push!(stmts, Expr(:call, :~, col_name, _sb_configured_prior_call(
+            configured, :x => idx_name, :n_levels => n_name)))
+    end
+end
+
 # Cell-mean coded categorical predictor (decision `0woa6hh`): the FIRST
 # categorical term of a predictor with no intercept owns one coefficient per
 # level and no reference, so every level can carry its own prior. Siblings of
@@ -2290,12 +2326,6 @@ _sb_cat_cells_generic = StanBlocks.@slic begin
     return beta[x]
 end
 
-# One prior per level; an unconfigured level keeps the default `Normal(0, 1)`.
-function _sb_cat_cells_prior_model(priors::AbstractVector; mod::Module=@__MODULE__)
-    default = ExprColumn(Normal, 0.0, 1.0)
-    _sb_vector_priors(_sb_cat_cells_generic, :beta,
-                      Any[something(p, default) for p in priors]; mod)
-end
 
 # Minimal `ar(time, p=1)` autoregressive submodel. Adds an AR(1) noise process
 # `u[t] = phi * u[t-1] + epsilon[t]` (with `u[1] = epsilon[1]`; no stationary
@@ -3786,6 +3816,15 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing, provenan
             Dict{Symbol,Int}()
         end
     end
+    # The coefficient labels of each categorical block, its levels in fitted
+    # order without a treatment block's reference: what an elementwise prior
+    # reads its arguments over. Asked only when one addresses the block.
+    resolved_block_labels = Dict{Symbol,Dict{Symbol,Vector{String}}}()
+    block_labels_of(lp::Symbol) = get!(resolved_block_labels, lp) do
+        Dict{Symbol,Vector{String}}(
+            e.emitted => string.(e.cellmeans ? e.levels : e.levels[2:end])
+            for e in something(_sb_cat_entries(brmi, lp; frozen_preproc), ()))
+    end
 
     # Interaction `a & b` terms emit one `beta_pop` column per expanded
     # contrast and are addressable as a TERM through `effect(lp, a & b)`.
@@ -3823,24 +3862,31 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing, provenan
         _brm_claim_effect_prior!(get_cell, set_cell!, spec, what;
                                  prefix="sbimpl", level_address)
     # Claim a whole categorical block: its single shared cell when treatment
-    # coded, every per-level cell when cell-mean coded.
+    # coded, every per-level cell when cell-mean coded. An elementwise prior
+    # gives a treatment block one cell per contrast too.
     function _claim_cat_block!(target, emitted, spec)
         target_cat = get!(cat_overrides, target) do
             Dict{Symbol,Any}()
         end
         n_cells = get(cellmeans_of(target), emitted, nothing)
-        if isnothing(n_cells)
+        held = get(target_cat, emitted, nothing)
+        if isnothing(n_cells) && !(held isa AbstractVector) &&
+           !_brm_is_elementwise(spec.expression)
             _claim!(() -> get(target_cat, emitted, nothing),
                     v -> (target_cat[emitted] = v), spec,
                     "`$target`'s `$emitted` contrast block")
-        else
-            cells = get!(target_cat, emitted) do
-                Any[nothing for _ in 1:n_cells]
-            end
-            for level in 1:n_cells
-                _claim!(() -> cells[level], v -> (cells[level] = v), spec,
-                        "`$target`'s `$emitted` cell mean $level")
-            end
+            return
+        end
+        labels = block_labels_of(target)[emitted]
+        isnothing(n_cells) || length(labels) == n_cells || error(
+            "sbimpl: internal categorical-block error: `$emitted` has " *
+            "$(length(labels)) levels and $n_cells cell means")
+        cells = held isa AbstractVector ? held :
+            (target_cat[emitted] = Any[held for _ in labels])
+        what = isnothing(n_cells) ? "contrast" : "cell mean"
+        for (k, element) in enumerate(_brm_effect_elements(spec, labels; prefix="sbimpl"))
+            _claim!(() -> cells[k], v -> (cells[k] = v), element,
+                    "`$target`'s `$emitted` $what $k")
         end
     end
 
@@ -3927,7 +3973,9 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing, provenan
                 cells = get!(target_cat, emitted) do
                     Any[nothing for _ in 1:cellmeans_of(target)[emitted]]
                 end
-                _claim!(() -> cells[level], v -> (cells[level] = v), spec,
+                element = only(_brm_effect_elements(spec, (spec.coefficient,);
+                                                    prefix="sbimpl"))
+                _claim!(() -> cells[level], v -> (cells[level] = v), element,
                         "`$target`'s `$emitted` cell mean $level";
                         level_address=true)
                 continue
@@ -3939,7 +3987,9 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing, provenan
             # direct `int_…` label address refines it (level bonus below),
             # mirroring block vs `<c>_lvl_<k>` for cell means.
             if !isnothing(labels) && haskey(interaction_map, spec.coefficient)
-                for lab in interaction_map[spec.coefficient]
+                term_labels = interaction_map[spec.coefficient]
+                elements = _brm_effect_elements(spec, term_labels; prefix="sbimpl")
+                for (lab, element) in zip(term_labels, elements)
                     idx = findfirst(==(lab), labels)
                     isnothing(idx) && error(
                         "sbimpl: internal interaction-address error: `$lab`, " *
@@ -3948,7 +3998,7 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing, provenan
                     cells = get!(pop_overrides, target) do
                         Any[nothing for _ in labels]
                     end
-                    _claim!(() -> cells[idx], v -> (cells[idx] = v), spec,
+                    _claim!(() -> cells[idx], v -> (cells[idx] = v), element,
                             "`$target`'s `$lab` column")
                 end
                 continue
@@ -3980,7 +4030,9 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing, provenan
             # `<c>_lvl_<k>` bonus.
             in_interaction = any(labs -> spec.coefficient in labs,
                                  values(interaction_map))
-            _claim!(() -> cells[idx], v -> (cells[idx] = v), spec,
+            element = only(_brm_effect_elements(spec, (spec.coefficient,);
+                                                prefix="sbimpl"))
+            _claim!(() -> cells[idx], v -> (cells[idx] = v), element,
                     "`$target`'s `$(spec.coefficient)` column";
                     level_address=in_interaction)
         end
@@ -9020,11 +9072,14 @@ function _sb_cat_entries(brmi::BRMI, lhs::Symbol; frozen_preproc=nothing)
         # of levels the replayed rows happen to carry.
         record = isnothing(frozen_preproc) ? nothing :
             get(frozen_preproc, Symbol(name(t), :_idx), nothing)
-        n_levels = !isnothing(record) && record.kind === :factor ?
-            length(record.const_) : first(_sb_level_index(_sb_cat_levels(t)))
+        frozen = !isnothing(record) && record.kind === :factor
+        n_levels = frozen ? length(record.const_) :
+            first(_sb_level_index(_sb_cat_levels(t)))
+        # The fitted level order, reference first: `_sb_emit_cat!`'s coefficients.
+        levels = frozen ? record.const_ : _sb_fit_levels(_sb_cat_levels(t))
         push!(entries, (; address=name(t),
                           emitted=_sb_cat_block_name(emitted_lp, name(t)),
-                          term=t, cellmeans, n_levels))
+                          term=t, cellmeans, n_levels, levels))
     end
     entries
 end
@@ -10176,6 +10231,13 @@ function _sb_emit_cat!(stmts, data, target::Symbol, t::NamedColumn, summands;
             x=$idx_name, n_levels=$n_name, beta_loc=0.0, beta_scale=$scale_name)))
     elseif isnothing(prior)
         push!(stmts, :($col_name ~ _sb_cat(; x=$idx_name, n_levels=$n_name)))
+    elseif prior isa AbstractVector
+        # One prior per contrast, from an elementwise `effect(lp, c) .~ ...`.
+        length(prior) == n_levels - 1 || error(
+            "sbimpl: internal effect-prior alignment error for `$col_name`: " *
+            "$(length(prior)) per-contrast priors for $(n_levels - 1) contrasts")
+        _sb_emit_cat_block_priors!(stmts, col_name, idx_name, n_name, prior,
+            (:_sb_cat, :_sb_cat_normal, _sb_cat_generic); mod)
     elseif _sb_is_normal_effect_prior(prior)
         loc, scale = _sb_effect_normal_args(prior)
         push!(stmts, :($col_name ~ _sb_cat_normal(;
@@ -10209,28 +10271,8 @@ function _sb_emit_cat_cells!(stmts, col_name::Symbol, idx_name::Symbol,
     length(priors) == n_levels || error(
         "sbimpl: internal effect-prior alignment error for `$col_name`: " *
         "$(length(priors)) per-level priors for $n_levels cell means")
-    if all(isnothing, priors)
-        push!(stmts, :($col_name ~ _sb_cat_cells(; x=$idx_name, n_levels=$n_name)))
-    elseif all(_sb_is_normal_effect_prior, priors)
-        beta_loc = Any[0.0 for _ in priors]
-        beta_scale = Any[1.0 for _ in priors]
-        for i in eachindex(priors)
-            isnothing(priors[i]) && continue
-            beta_loc[i], beta_scale[i] = _sb_effect_normal_args(priors[i])
-        end
-        # One shared Normal over every level keeps Stan's natural scalar
-        # spelling -- the statement a treatment-coded block emits for the same
-        # `effect(lp, c)` -- and only per-level priors need the vectors.
-        shared = !isempty(priors) && allequal(beta_loc) && allequal(beta_scale)
-        loc = shared ? first(beta_loc) : Expr(:vect, beta_loc...)
-        scale = shared ? first(beta_scale) : Expr(:vect, beta_scale...)
-        push!(stmts, :($col_name ~ _sb_cat_cells_normal(;
-            x=$idx_name, n_levels=$n_name, beta_loc=$loc, beta_scale=$scale)))
-    else
-        push!(stmts, Expr(:call, :~, col_name, _sb_configured_prior_call(
-            _sb_cat_cells_prior_model(priors; mod),
-            :x => idx_name, :n_levels => n_name)))
-    end
+    _sb_emit_cat_block_priors!(stmts, col_name, idx_name, n_name, priors,
+        (:_sb_cat_cells, :_sb_cat_cells_normal, _sb_cat_cells_generic); mod)
 end
 
 # Expand a ranef LHS term into one-or-more design-matrix column references.

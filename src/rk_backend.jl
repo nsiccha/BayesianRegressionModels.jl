@@ -3431,7 +3431,8 @@ function _rk_materialize_effect_prior(expression, target::Symbol, label::Symbol;
     any(_brm_is_array_value, raw) && error(
         "$prefix: predictor `$target` population-effect prior for " *
         "`$label` needs scalar location and scale; index or reduce an " *
-        "array-valued argument explicitly")
+        "array-valued argument explicitly, or read one value per " *
+        "coefficient with `effect(lp, block) .~ $(nameof(head)).(...)`")
     location = _brm_effect_number(raw[1])
     scale = _brm_effect_number(raw[2])
     isnothing(location) && error(
@@ -3513,6 +3514,36 @@ function _rk_materialize_effect_prior_cells(overrides, n::Integer,
     cells
 end
 
+# One `(family, args)` for an addressee's design columns. A factor block's
+# columns may carry per-level priors of one family (an elementwise
+# `effect(lp, g) .~ ...` or per-level statements): an argument that differs
+# across them is the literal vector of its values in the block's level order,
+# which its broadcast prior statement reads elementwise.
+function _rk_addressee_prior(cells, idxs, design, terms, target::Symbol,
+        addressee::Symbol; prefix="RK backend")
+    agreed = cells[first(idxs)]
+    all(i -> cells[i] == agreed, idxs) && return agreed
+    term = findfirst(t -> t.kind === :factor && t.addressee === addressee, terms)
+    !isnothing(term) &&
+        all(i -> first(cells[i]) === first(agreed) &&
+                 length(last(cells[i])) == length(last(agreed)), idxs) || error(
+        "$prefix: predictor `$target` addressee `$addressee` has " *
+        "disagreeing population priors across its columns; its columns " *
+        "need one shared prior, or per-level priors of one family on a " *
+        "factor block")
+    labels = terms[term].options.labels
+    position = Dict(design.columns[i].label => i for i in idxs)
+    length(labels) == length(idxs) && all(l -> haskey(position, l), labels) || error(
+        "$prefix: internal: factor addressee `$addressee` of `$target` has " *
+        "columns $(join((design.columns[i].label for i in idxs), ", ")) for " *
+        "levels $(join(labels, ", "))")
+    args = map(eachindex(last(agreed))) do j
+        values = [last(cells[position[label]])[j] for label in labels]
+        allequal(values) ? first(values) : Expr(:vect, values...)
+    end
+    (first(agreed), Tuple(args))
+end
+
 Base.@nospecializeinfer function _rk_population_priors(@nospecialize(brmi::BRMI), design, target::Symbol,
         available::Tuple, factor_addressees::Set{Symbol},
         terms::Vector{_RKTermSpec}, derived::Vector{_RKDerivedSpec},
@@ -3548,14 +3579,9 @@ Base.@nospecializeinfer function _rk_population_priors(@nospecialize(brmi::BRMI)
         # HorseshoePrior — no PopulationPrior row (R2D2 precedent).
         addressee in hs_addressees && continue
         idxs = groups[addressee]
-        agreed = cells[first(idxs)]
-        all(i -> cells[i] == agreed, idxs) || error(
-            "$prefix: predictor `$target` addressee `$addressee` has " *
-            "disagreeing population priors across its columns; slice 1 " *
-            "needs one shared prior per addressee (address the source " *
-            "column, not individual levels)")
-        push!(priors, _RKPopulationPrior(
-            target, addressee, agreed[1], agreed[2]))
+        family, args = _rk_addressee_prior(cells, idxs, design, terms, target,
+            addressee; prefix)
+        push!(priors, _RKPopulationPrior(target, addressee, family, args))
     end
     known = Set(order)
     # A zero-width factor block has no design cell, and its prior reaches
