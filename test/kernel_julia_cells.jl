@@ -242,10 +242,10 @@ end
     cell_names, cell_values = stan_density_points(joined_in_cell(FIELDS), "in-cell-vcat")
     @test names == cell_names
     @test values ≈ cell_values atol=1e-10 rtol=1e-12
-    # Not built on RKBRMI yet: RKPPL refuses a model-scope `vcat` of the
-    # values `car` submodels return (ReactiveKernels snag lower-a-brm-emit-2136dcc0);
-    # the cell spelling above runs there.
-    @test_broken (RKBRMI(brmi); true)
+    # RKBRMI runs the model-scope join of the values `car` submodels return
+    # (RK 1d5b163fe, snag lower-a-brm-emit-2136dcc0): its density and
+    # gradient equal the compiled Stan above.
+    check_transported(brmi, "model-scope-vcat")
     # Joined ordinary LPs run the authored Julia on RKBRMI, equal to SBBRMI.
     lps = joined_lps(LPS)
     @test occursin("m = append_row(m_a, m_b);",
