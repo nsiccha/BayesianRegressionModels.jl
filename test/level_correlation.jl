@@ -155,7 +155,8 @@ end
 @testset "combinations not implemented yet" begin
     df = level_df()
     m = slope(df)
-    # Capability gaps, tracked as follow-ups; each refuses by name today.
+    # Capability gaps, each refused by name today; tracked by BRM todo
+    # `2026-10-25T05-58-32-890-0lopk07`.
     @test_broken builds(() -> SBBRMI(m; mod=@__MODULE__, cv_groups=[:g]))
     @test_broken builds(() -> SBBRMI(m; mod=@__MODULE__, centered_groups=[:g]))
     @test_broken builds(() -> reprocess(SBBRMI(m; mod=@__MODULE__), df; resample_groups=[:g]))
@@ -339,7 +340,8 @@ end
                 include_tp=true)) for u in unc)
             block = only(brm_ranef_draws(brm_descriptor(sb), draws, names))
             @test size(block.level_cor) == (3, R, R)
-            # Capability gap: per-level centering of correlated levels.
+            # Capability gap: per-level centering of correlated levels
+            # (BRM todo `2026-10-25T05-58-32-890-0lopk07`).
             @test_broken builds(() -> BRM.adaptive_centering_blocks(sb,
                 BS.param_unc_names(stan.model)))
             for i in 1:3
