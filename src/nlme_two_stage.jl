@@ -43,15 +43,17 @@ Base.show(io::IO, p::BRMNLMEUnitProblem) = print(io, "BRMNLMEUnitProblem(subject
 Unit `i`'s conditional posterior at fixed population values `θ`, `σ` and `Ω`:
 Ω is the natural-effect covariance as [`brm_nlme_estimates`](@ref) takes it, one
 matrix for a flat model or one per covariance family for a nested one. The unit
-is evaluated on its own observation cells, so the model needs a
+is evaluated on its own observation cells, so a flat model needs a
 subject-indexed cell (`@plate for`, or exact totals and random-effect blocks
 whose observations RK attributes to cells); a flat-row grouped model is
-refused with the reason.
+refused with the reason. A nested model's unit gradient evaluates the whole
+model (`brm_nlme_loglikelihoods_and_gradients`), so its cost grows with the
+number of units.
 """
 function brm_nlme_unit_problem(m::BRMNLMEModel, i::Integer, θ, σ, Ω)
     _brm_nlme_check_point(m, θ, σ, Ω)
     1 <= i <= length(m.view.levels) || throw(BoundsError(m.view.levels, i))
-    m.cell_query === nothing && _brm_nlme_error(
+    m.cell_query === nothing && !_brm_nlme_ragged(m.view) && _brm_nlme_error(
         "brm_nlme_unit_problem: a unit is evaluated on its own observation " *
         "cells, but this model's observations are flat grouped rows with no " *
         "subject-indexed cell")
@@ -92,6 +94,27 @@ function LogDensityProblems.logdensity_and_gradient(p::BRMNLMEUnitProblem, z)
     _brm_nlme_unit_prior(z) + value, transpose(p.factor) * gradient .- z
 end
 
+# A copy of `m` with its own prepared subject-cell queries and compact gradient
+# samplers, so units evaluate concurrently on another thread; everything else
+# is shared read-only. A nested (ragged) model evaluates subjects through the
+# whole-model sampler and has no per-cell workspace to copy.
+function _brm_nlme_worker_model(m::BRMNLMEModel)
+    m.cell_gradient === nothing && _brm_nlme_error(
+        "brm_two_stage_fit: units of a nested model evaluate through the " *
+        "whole-model sampler, which one thread owns; use `threads = 1`")
+    cell_query = map(m.cell_query) do cell
+        (; cell.names, cell.positions,
+           query=_rk_nlme_cell_query(m.backend, cell.names))
+    end
+    selected = sort!(vcat(m.theta, m.sigma, first(m.view.subject_coordinates)))
+    cell_gradient = (samplers=map(cell -> _rk_nlme_compact_cell_sampler(m.backend,
+        cell.names, m.unit, selected), m.cell_query), lock=ReentrantLock())
+    BRMNLMEModel(m.view, m.backend, m.sampler, m.pointwise, m.eta_hvp, m.attribution,
+        m.theta, m.sigma, m.eta_blocks, m.unit, m.observations_query,
+        m.observations_pushforward, m.observed, m.observation_attribution,
+        cell_query, cell_gradient, m.population_prior, m.prior_structure)
+end
+
 """
     brm_nlme_unit_eta(p::BRMNLMEUnitProblem, z) -> Vector
 
@@ -115,7 +138,7 @@ function brm_nlme_draws end
 
 """
     brm_two_stage_fit(sampler, x; minibatch_size=nothing, options=nothing,
-        kwargs...) -> NamedTuple
+        threads=Threads.nthreads(), stage1=nothing, kwargs...) -> NamedTuple
 
 A two-stage approximate posterior for a model with conditionally independent
 units (the subjects of [`brm_nlme_view`](@ref)):
@@ -124,11 +147,18 @@ units (the subjects of [`brm_nlme_view`](@ref)):
    estimates `θ`, `σ` and Ω. With `minibatch_size = b`, each iteration's E-step
    samples a random batch of `b` units (`NLMEEstimation.SAEMOptions(minibatch_size=b)`);
    `options` passes a whole `SAEMOptions` instead. Other keywords go to
-   [`brm_nlme_fit`](@ref) (`start`, `inits`, `progress`, …).
+   [`brm_nlme_fit`](@ref) (`start`, `inits`, `progress`, …). `stage1` reuses
+   an earlier `brm_nlme_fit(x, saem; …)` result instead, for example to
+   resample the units or to refit them after new data at yesterday's
+   population estimates.
 2. **Units:** every unit's conditional posterior at those estimates,
    [`brm_nlme_unit_problem`](@ref), is sampled by `sampler(problem)`. It
    returns a draws × dimension matrix in the problem's coordinates, and every
-   unit returns the same number of draws.
+   unit returns the same number of draws. Units are sampled on `threads` tasks,
+   each with its own prepared copy of the model's cells, so `sampler` must be
+   safe to call concurrently (an independent RNG per unit, as below). A nested
+   model samples on one thread: its units evaluate through the whole-model
+   sampler.
 
 Each unit's posterior is exact given the population estimates; the population
 uncertainty is not propagated (empirical Bayes). That is negligible with many
