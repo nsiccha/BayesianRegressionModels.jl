@@ -281,9 +281,11 @@ end
             brm_descriptor(replayed; name = :joint_pk_qt_replay, highlights = ()),
             :log_F; role = :linear_predictor).logical === :log_F
 
+        # refused: frozen replay has no coordinate for a new subject. The
+        # doses of `s2`, which the design no longer lists, are read by no cell
+        # (decision `0z97g0b`), so the unseen level is what refuses it.
         unseen = merge(replay_df, (; subject = ["s3", "s1", "s9"]))
-        @test_throws "label(s) Any[\"s2\"] in `dose_subject` name no subject" reprocess(
-            sb, unseen)
+        @test_throws "unseen level `s9`" reprocess(sb, unseen)
 
         # A dose whose subject the plate does not list is read by no cell
         # (decision `0z97g0b`): row 5 joins no subject's doses.
@@ -363,7 +365,8 @@ end
         @test_throws "ALREADY a ragged per-subject column" SBBRMI(
             ev_preragged_model(df); mod = @__MODULE__)
         # The grouping column must cover the predictor's OWN frame.
-        @test_throws "row axis" SBBRMI(ev_wrong_axis_model(df); mod = @__MODULE__)
+        @test_throws "grouping column must label EVERY entry" SBBRMI(
+            ev_wrong_axis_model(df); mod = @__MODULE__)
         # Arity and keywords are rejected at @brm construction / lowering.
         # `into=` is the one accepted keyword; any other (here the retired
         # `by=`) is refused at construction.
