@@ -129,6 +129,16 @@ end
         @test LogDensityProblems.logdensity(p, φ) ≈
             laplace_population_logprior(rk, p, u) + units atol=1e-10
     end
+    # A population point where the rates overflow scores -Inf, as the full
+    # model's density there does, and is counted.
+    overflow = zeros(length(p.population))
+    overflow[findfirst(==(Symbol("pop_log_mu.beta_pop.1")), p.names)] = 800.0
+    before = p.nonfinite
+    value, gradient = LogDensityProblems.logdensity_and_gradient(p, overflow)
+    @test value == -Inf && all(isnan, gradient)
+    @test p.nonfinite == before + 1
+    @test !isfinite(LogDensityProblems.logdensity(
+        rk_logdensity_problem(rk; ad_backend=NLME_AD), laplace_point(p, overflow)))
     # Conditional draws by importance resampling follow each unit's exact
     # conditional posterior, here its mean by quadrature on a fine grid.
     φ = 0.4 .* randn(rng, length(p.population))

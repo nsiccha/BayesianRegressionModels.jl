@@ -43,9 +43,13 @@ most `tol`, or stops shrinking at rounding level. The log determinant moves
 with the modes to first order; the standardized draws' N(0, I) prior makes
 −H ≥ I for log-concave likelihoods, so the default `tol` keeps the modes to
 about 1e-12. A search that has not converged after `maxiter` iterations
-raises an error. The
-gradient comes from the implicit-function theorem with third-derivative
-contractions of the model density.
+raises an error. The gradient comes from the implicit-function theorem with
+third-derivative contractions of the model density.
+
+A population point where the model's density, gradient or unit Hessians
+overflow during the mode search, so that no finite Newton step exists, has log
+density `-Inf`, as the full model's density there would; a sampler treats it
+as a divergent step. `problem.nonfinite` counts such points.
 
 A problem holds the last modes as mutable state: use one per chain
 (`deepcopy` gives a copy its own prepared AD workspaces).
@@ -63,6 +67,7 @@ mutable struct BRMLaplaceProblem{M<:BRMNLMEModel,B}
     u::Vector{Float64}
     tol::Float64
     maxiter::Int
+    nonfinite::Int
 end
 
 Base.show(io::IO, p::BRMLaplaceProblem) = print(io, "BRMLaplaceProblem(",
@@ -75,7 +80,7 @@ function brm_laplace_problem(backend::RKBRMI; ad_backend, subject_group=nothing,
     m = brm_nlme_model(backend; ad_backend, subject_group, nested_groups)
     population = findall(!=(:subject_effect), m.view.role)
     BRMLaplaceProblem(m, ad_backend, population, m.view.coordinates[population],
-        Ref{Any}(nothing), copy(m.unit), Float64(tol), Int(maxiter))
+        Ref{Any}(nothing), copy(m.unit), Float64(tol), Int(maxiter), 0)
 end
 
 # Implemented by `BayesianRegressionModelsReactiveKernelsEnzymeExt`: a prepared
@@ -97,6 +102,15 @@ function _brm_laplace_unit_values(m::BRMNLMEModel, pointwise, u)
         values[i] -= 0.5 * sum(abs2, view(u, block))
     end
     values
+end
+
+_brm_laplace_finite(x) = all(isfinite, x)
+
+# A population point whose mode search overflows: the model density is not
+# finite near it, so it scores -Inf.
+function _brm_laplace_nonfinite!(p::BRMLaplaceProblem, u, iterations)
+    p.nonfinite += 1
+    (; u, value=-Inf, finite=false, iterations)
 end
 
 function _brm_laplace_evaluate(m::BRMNLMEModel, u::Vector{Float64})
@@ -144,19 +158,20 @@ function _brm_laplace_mode!(p::BRMLaplaceProblem, φ::AbstractVector)
     u = copy(p.u)
     u[p.population] .= φ
     current = _brm_laplace_evaluate(m, u)
-    if !isfinite(current.value)
+    if !(isfinite(current.value) && _brm_laplace_finite(current.gradient))
         # The previous modes may be far from this point's; start again at zero.
         for block in blocks
             u[block] .= 0.0
         end
         current = _brm_laplace_evaluate(m, u)
-        isfinite(current.value) || return (; u, value=current.value, finite=false,
-            iterations=0)
+        isfinite(current.value) && _brm_laplace_finite(current.gradient) ||
+            return _brm_laplace_nonfinite!(p, u, 0)
     end
     previous = fill(Inf, length(blocks))
     history = Vector{Float64}[]
     for iteration in 1:p.maxiter
         hessians = _brm_nlme_sampler_hessian_blocks(m, u)
+        all(_brm_laplace_finite, hessians) || return _brm_laplace_nonfinite!(p, u, iteration - 1)
         steps = [_brm_laplace_step(hessians[i], current.gradient[block])
             for (i, block) in enumerate(blocks)]
         decrements = [dot(current.gradient[block], steps[i])
@@ -193,6 +208,7 @@ function _brm_laplace_mode!(p::BRMLaplaceProblem, φ::AbstractVector)
         trial = _brm_laplace_evaluate(m, trial_u)
         for _ in 1:60
             rejected = [i for i in eachindex(blocks) if !(isfinite(trial.units[i]) &&
+                _brm_laplace_finite(view(trial.gradient, blocks[i])) &&
                 (decrements[i] <= 1e-8 ||
                  trial.units[i] >= current.units[i] + 1e-4 * scale[i] * decrements[i]))]
             isempty(rejected) && break
@@ -202,8 +218,8 @@ function _brm_laplace_mode!(p::BRMLaplaceProblem, φ::AbstractVector)
             end
             trial = _brm_laplace_evaluate(m, trial_u)
         end
-        all(isfinite, trial.units) || _brm_nlme_error(
-            "brm_laplace_problem: the mode search reached a nonfinite unit density")
+        all(isfinite, trial.units) && _brm_laplace_finite(trial.gradient) ||
+            return _brm_laplace_nonfinite!(p, u, iteration)
         u = trial_u
         current = trial
     end
