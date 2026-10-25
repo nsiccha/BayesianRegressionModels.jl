@@ -1,6 +1,5 @@
 # src/nlme_svi.jl — minibatch stochastic variational inference over an
-# RK-lowered population model's own packed coordinates, with an
-# importance-sampling correction of the fitted approximation.
+# RK-lowered population model's own packed coordinates.
 #
 # The target is the RK sampler density p(u) over the packed unconstrained point
 # u = (g, z_1, …, z_N): g holds every coordinate that is not a subject draw
@@ -15,38 +14,37 @@
 # ℓ_i the subject's observation cells. A batch of B subjects, its terms scaled
 # by N/B, is an unbiased estimate of that sum, and of its gradient.
 #
-# The variational family is Gaussian over u, with a global factor and one
-# factor per subject anchored at a reference global point g_ref:
+# The variational family is Gaussian and factorizes into a global factor and
+# one factor per subject:
 #
-#     g   = μ + L ε,                               ε ~ N(0, I)
-#     z_i = m_i + A_i (g - g_ref) + S_i ε_i,       ε_i ~ N(0, I)
+#     g   = μ + exp.(ρ) .* ε + Β η,         ε ~ N(0, I), η ~ N(0, I_r)
+#     z_i ~ N(m_i, Λ_i⁻¹)
 #
-# L and S_i are lower triangular with positive diagonals (`MeanFieldGlobal`
-# keeps L diagonal). A_i moves a subject's draws with the globals (without it,
-# `coupling=false`, the factors are independent); because the subjects follow
-# g through A_i, moving μ moves them too, which keeps the location of the
-# globals and the subjects' means from fighting each other. The map
-# (ε, ε_1, …) → u is block lower triangular, so log q(u) needs only diag(L) and
-# diag(S_i). Stochastic steps move a subject's parameters only when the subject
-# is in the batch; Laplace refreshes (one per window of iterations, a handful of
-# full-model passes) set every subject's factor to its conditional mode,
-# curvature and linear response at the current global mean.
-#
-# The Gaussian optimum of the ELBO is too narrow for hierarchical scales, so the
-# fit is followed by importance sampling of the posterior: a Student-t proposal
-# for g, adapted to the weighted draws over a few pilot rounds, and for each
-# drawn g a Laplace proposal for every subject's draws. PSIS smooths the weights;
-# where k̂ < 0.7 the draws are resampled in proportion to them.
+# The global covariance is diagonal (`MeanFieldGlobal`) or diagonal plus rank r
+# (`LowRankGlobal(r)`, Β is D × r); Adam moves it every iteration along the
+# minibatch ELBO gradient. A subject's factor moves only when the subject is in
+# the batch, by a natural-gradient step: the improved Bayesian learning rule of
+# Lin, Schmidt and Khan (2020), whose curvature estimate comes from the same
+# reparameterized draw (Stein's lemma) and whose precision update stays
+# positive definite. That step is Newton-like, so a subject's factor settles in
+# a few visits, where plain gradient steps on its mean and scale need hundreds.
 
 """
-    BRMSVIFamily
+    MeanFieldGlobal()
+    LowRankGlobal(rank)
 
-The global variational factor of [`brm_svi`](@ref): `FullRankGlobal()` (a dense
-lower-triangular Cholesky factor) or `MeanFieldGlobal()` (a diagonal one).
+The global variational factor of [`brm_svi`](@ref): a diagonal Gaussian, or a
+diagonal plus a rank-`rank` factor.
 """
 abstract type BRMSVIFamily end
-struct FullRankGlobal <: BRMSVIFamily end
 struct MeanFieldGlobal <: BRMSVIFamily end
+struct LowRankGlobal <: BRMSVIFamily
+    rank::Int
+    LowRankGlobal(rank::Integer) = rank >= 1 ? new(rank) :
+        throw(ArgumentError("LowRankGlobal: rank must be at least 1, got $rank"))
+end
+_brm_svi_rank(::MeanFieldGlobal) = 0
+_brm_svi_rank(f::LowRankGlobal) = f.rank
 
 # ── The minibatch target ─────────────────────────────────────────────────────
 
@@ -113,102 +111,30 @@ function _brm_svi_unit_term!(gg, gz, t, i, g, z)
     value - sum(abs2, z) / 2 - length(z) * log(2π) / 2
 end
 
-# ── Laplace refresh of the subject factors ───────────────────────────────────
-#
-# Every subject's conditional p(z_i | g, y_i) at once, from full-model passes:
-# the sampler gradient, and one Hessian-vector product per block position whose
-# direction moves that position in every subject (conditional independence
-# makes the result each subject's Hessian column, as in
-# `_brm_nlme_hessian_blocks`). Newton steps move each z_i to its mode at the
-# global mean; the factor's covariance is the inverse negative Hessian, and its
-# coupling the mode's linear response to the globals, A_i = -H_zz⁻¹ H_zg, from
-# one more product per global coordinate.
+# ── Variational parameters ───────────────────────────────────────────────────
 
-function _brm_svi_hessian_blocks(t, u)
-    m = t.m
-    H = [zeros(t.d, t.d) for _ in t.units]
-    for k in 1:t.d
-        direction = zeros(length(u))
-        foreach(block -> direction[block[k]] = 1.0, t.units)
-        hv = _rk_eta_hvp(m.eta_hvp, direction, u)
-        for (i, block) in enumerate(t.units)
-            H[i][:, k] .= view(hv, block)
-        end
-    end
-    map(h -> Symmetric((h + h') / 2), H)
-end
-
-# The negative Hessian with its eigenvalues floored, so that a Newton step
-# always ascends and the factor is a proper Gaussian.
-function _brm_svi_precision(H; floor=1e-3)
-    e = eigen(Symmetric(-Matrix(H)))
-    Symmetric(e.vectors * Diagonal(max.(e.values, floor)) * e.vectors')
-end
-
-# Newton steps moving every subject's draws in the packed point `u` (globals
-# held) to their conditional modes; returns the precision blocks there.
-function _brm_svi_unit_modes!(t, u; iterations=20, max_step=3.0, gtol=1e-6)
-    gradient = zeros(length(u))
-    for _ in 1:iterations
-        _rk_value_gradient_and_pointwise!(t.m.sampler, gradient, u)
-        maximum(i -> maximum(abs, view(gradient, t.units[i])), eachindex(t.units)) < gtol && break
-        H = _brm_svi_hessian_blocks(t, u)
-        for (i, block) in enumerate(t.units)
-            step = _brm_svi_precision(H[i]) \ gradient[block]
-            n = norm(step)
-            n > max_step && (step .*= max_step / n)
-            u[block] .+= step
-        end
-    end
-    map(_brm_svi_precision, _brm_svi_hessian_blocks(t, u))
-end
-
-function _brm_svi_laplace_refresh!(t, q; kwargs...)
-    m = t.m
-    u = copy(m.unit)
-    u[t.globals] .= q.μ
-    for (i, block) in enumerate(t.units)
-        u[block] .= view(q.M, :, i) .+ view(q.A, :, :, i) * (q.μ .- q.ref)
-    end
-    precisions = _brm_svi_unit_modes!(t, u; kwargs...)
-    cross = [zeros(t.d, length(t.globals)) for _ in t.units]
-    if size(q.A, 2) > 0
-        for (k, j) in enumerate(t.globals)
-            direction = zeros(length(u))
-            direction[j] = 1.0
-            hv = _rk_eta_hvp(m.eta_hvp, direction, u)
-            for (i, block) in enumerate(t.units)
-                cross[i][:, k] .= view(hv, block)
-            end
-        end
-    end
-    for (i, block) in enumerate(t.units)
-        Λ = precisions[i]
-        q.M[:, i] .= view(u, block)
-        S = cholesky(inv(Λ)).L
-        q.R[:, i] .= log.(diag(S))
-        q.So[:, :, i] .= Matrix(S) .- Diagonal(diag(S))
-        size(q.A, 2) > 0 && (q.A[:, :, i] .= Λ \ cross[i])
-    end
-    q.ref .= q.μ
-    q
-end
-
-# ── Variational parameters and Adam ──────────────────────────────────────────
-
-function _brm_svi_params(t, μ, family::BRMSVIFamily, coupling; global_scale,
-        unit_scale)
+function _brm_svi_params(t, μ, family::BRMSVIFamily; global_scale, unit_scale)
     D, d, N = length(t.globals), t.d, length(t.units)
-    (; family, coupling,
-       μ=Vector{Float64}(μ), ref=Vector{Float64}(μ), ρ=fill(log(global_scale), D),
-       Lo=zeros(D, D),
-       M=zeros(d, N), R=fill(log(unit_scale), d, N), So=zeros(d, d, N),
-       A=zeros(d, coupling ? D : 0, N))
+    Λ = repeat(Matrix{Float64}(I, d, d) ./ unit_scale^2, 1, 1, N)
+    (; family, μ=Vector{Float64}(μ), ρ=fill(log(global_scale), D),
+       Β=zeros(D, _brm_svi_rank(family)), M=zeros(d, N), Λ,
+       U=repeat(Matrix{Float64}(I, d, d) ./ unit_scale, 1, 1, N))
 end
 
-_brm_svi_L(q) = LowerTriangular(q.Lo) - Diagonal(diag(q.Lo)) + Diagonal(exp.(q.ρ))
-_brm_svi_S(q, i) = LowerTriangular(view(q.So, :, :, i)) -
-    Diagonal(diag(view(q.So, :, :, i))) + Diagonal(exp.(view(q.R, :, i)))
+_brm_svi_global_covariance(q) = Diagonal(exp.(2 .* q.ρ)) + q.Β * q.Β'
+
+# A draw of the globals from its two standard normal parts.
+_brm_svi_draw_global(q, ε, η) = q.μ .+ exp.(q.ρ) .* ε .+ q.Β * η
+# A draw of subject i from ε_i: m_i + U_i⁻ᵀ ε_i, with U_i the lower Cholesky
+# factor of the precision Λ_i.
+_brm_svi_draw_unit(q, i, εi) =
+    view(q.M, :, i) .+ LowerTriangular(view(q.U, :, :, i))' \ εi
+
+# The entropy of q, up to the constant (D + N d)(1 + log 2π)/2.
+_brm_svi_entropy(q) = logdet(_brm_svi_global_covariance(q)) / 2 -
+    sum(log, (q.U[k, k, i] for k in axes(q.U, 1), i in axes(q.U, 3)))
+
+# ── The global factor: Adam ──────────────────────────────────────────────────
 
 mutable struct _BRMSVIAdam
     lr::Float64
@@ -230,368 +156,98 @@ function _brm_svi_step!(opt::_BRMSVIAdam, x, g, lr=opt.lr)
     x
 end
 
-# The global parameters as one vector, and the per-subject parameters as one
-# column each, so that Adam keeps one state for the globals and one per subject.
-_brm_svi_global_vector(q) = vcat(q.μ, q.ρ, vec(q.Lo))
+# The global parameters as one vector [μ; ρ; vec(Β)].
+_brm_svi_global_vector(q) = vcat(q.μ, q.ρ, vec(q.Β))
 function _brm_svi_set_global!(q, x)
     D = length(q.μ)
     q.μ .= view(x, 1:D)
     q.ρ .= view(x, D+1:2D)
-    vec(q.Lo) .= view(x, 2D+1:length(x))
-    q
-end
-_brm_svi_unit_vector(q, i) = vcat(view(q.M, :, i), view(q.R, :, i),
-    vec(view(q.So, :, :, i)), vec(view(q.A, :, :, i)))
-function _brm_svi_set_unit!(q, i, x)
-    d = size(q.M, 1)
-    q.M[:, i] .= view(x, 1:d)
-    q.R[:, i] .= view(x, d+1:2d)
-    vec(view(q.So, :, :, i)) .= view(x, 2d+1:2d+d^2)
-    vec(view(q.A, :, :, i)) .= view(x, 2d+d^2+1:length(x))
+    vec(q.Β) .= view(x, 2D+1:length(x))
     q
 end
 
-_brm_svi_strict_lower!(X) = (for j in axes(X, 2), k in 1:min(j, size(X, 1)); X[k, j] = 0.0; end; X)
+# The gradient of the global vector from w, the ELBO's gradient in the global
+# coordinates, the draw's (ε, η), and the entropy's own gradient.
+function _brm_svi_global_gradient(q, w, ε, η)
+    Σinv = inv(Symmetric(Matrix(_brm_svi_global_covariance(q))))
+    s = exp.(q.ρ)
+    gρ = w .* ε .* s .+ diag(Σinv) .* s .^ 2
+    gΒ = w * η' .+ Σinv * q.Β
+    vcat(w, gρ, vec(gΒ))
+end
 
-# Scale-preconditioned ("whitened") steps. A location moves in units of its own
-# factor (μ = μ₀ + L μ̃, m_i = m₀ + S_i m̃), and the off-diagonal and coupling
-# entries of a row in units of that row's scale. Adam's step size then means a
-# fraction of the current posterior scale, which stays meaningful when a
-# global's posterior sd shrinks like 1/√N.
-function _brm_svi_whitened_step!(opt, x, grad, lr, location_factor, row_scale, D)
+# A scale-preconditioned ("whitened") global step for polishing: μ moves in
+# units of the global covariance's Cholesky factor and each Β row in units of
+# its scale, so Adam's step size means a fraction of the current posterior
+# scale, which stays meaningful when a global's posterior sd shrinks like 1/√N.
+function _brm_svi_whitened_global_step!(opt, q, x, grad, lr)
+    D = length(q.μ)
+    C = Matrix(cholesky(Symmetric(Matrix(_brm_svi_global_covariance(q)))).L)
+    scale = vcat(ones(D), vec(repeat(exp.(q.ρ), 1, size(q.Β, 2))))
     grad = copy(grad)
-    grad[1:D] .= location_factor' * view(grad, 1:D)
+    grad[1:D] .= C' * view(grad, 1:D)
     rest = D+1:length(x)
-    grad[rest] .*= row_scale
+    grad[rest] .*= scale
     step = zeros(length(x))
     _brm_svi_step!(opt, step, grad, lr)
-    x[1:D] .+= location_factor * view(step, 1:D)
-    x[rest] .+= row_scale .* view(step, rest)
+    x[1:D] .+= C * view(step, 1:D)
+    x[rest] .+= scale .* view(step, rest)
     x
 end
 
-# Row scales of the global vector [μ; ρ; vec(Lo)] past μ: 1 for ρ, the row's
-# diagonal for each Lo entry.
-_brm_svi_global_row_scale(q) = vcat(ones(length(q.ρ)),
-    vec(repeat(exp.(q.ρ), 1, length(q.ρ))))
-# … and of the unit vector [m; R; vec(So); vec(A)] past m.
-function _brm_svi_unit_row_scale(q, i)
-    s = exp.(view(q.R, :, i))
-    vcat(ones(length(s)), vec(repeat(s, 1, length(s))),
-        vec(repeat(s, 1, size(q.A, 2))))
-end
+# ── A subject's factor: one natural-gradient step ───────────────────────────
 
-# The gradient of a global parameter vector from the global-coordinate
-# gradient w (already including the batch's coupling term) and ε.
-function _brm_svi_global_gradient(q, w, ε, gμ)
-    D = length(q.μ)
-    gρ = w .* ε .* exp.(q.ρ) .+ 1.0
-    gLo = q.family isa FullRankGlobal ? _brm_svi_strict_lower!(w * ε') : zeros(D, D)
-    vcat(gμ, gρ, vec(gLo))
+# The improved Bayesian learning rule step of size β for subject i, from the
+# gradient `gz` of log p at its draw z = m + U⁻ᵀ ε. Stein's lemma gives
+# E[∇ log p εᵀ] = E[∇² log p] U⁻ᵀ, so -sym(gz εᵀ Uᵀ) estimates the negative
+# Hessian; with G = that estimate - Λ the precision moves to
+# Λ + β G + β²/2 G Λ⁻¹ G = ½(Λ + (Λ + βG) Λ⁻¹ (Λ + βG)), positive definite for
+# any G, and the mean to m + β Λ_new⁻¹ gz.
+function _brm_svi_unit_step!(q, i, gz, εi, β)
+    Λ = Symmetric(q.Λ[:, :, i])
+    U = LowerTriangular(view(q.U, :, :, i))
+    H = gz * (U * εi)'
+    G = -(H + H') ./ 2 .- Λ
+    Λnew = Symmetric(Λ .+ β .* G .+ (β^2 / 2) .* (G * (Λ \ G)))
+    F = cholesky(Λnew)
+    q.Λ[:, :, i] .= Λnew
+    q.U[:, :, i] .= F.L
+    q.M[:, i] .+= β .* (F \ gz)
+    q
 end
 
 # ── One minibatch iteration ──────────────────────────────────────────────────
 
-function _brm_svi_iteration!(rng, t, q, global_opt, unit_opts, batch, lr_global,
-        lr_unit; local_steps=1, whiten=false)
+# One draw of the globals, one draw per batch subject, the minibatch ELBO
+# gradient, an Adam step of the globals and a natural-gradient step of each
+# batch subject. Returns the minibatch estimate of E_q log p (without the
+# entropy).
+function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
+        whiten=false)
     D, d, N = length(t.globals), t.d, length(t.units)
     s = N / length(batch)
-    L = _brm_svi_L(q)
-    gg, gz = zeros(D), zeros(d)
-    # Extra local steps refine the batch's factors against fresh draws of the
-    # current global factor, before the step every parameter takes together.
-    for _ in 2:local_steps, i in batch
-        g = q.μ .+ L * randn(rng, D)
-        v = g .- q.ref
-        εi = randn(rng, d)
-        z = view(q.M, :, i) .+ view(q.A, :, :, i) * v .+ _brm_svi_S(q, i) * εi
-        _brm_svi_unit_term!(gg, gz, t, i, g, z)
-        _brm_svi_unit_update!(q, i, unit_opts[i],
-            _brm_svi_unit_gradient(q, i, gz, v, εi), lr_unit, whiten)
-    end
-    ε = randn(rng, D)
-    g = q.μ .+ L * ε
-    v = g .- q.ref
+    ε, η = randn(rng, D), randn(rng, size(q.Β, 2))
+    g = _brm_svi_draw_global(q, ε, η)
     P, gP = _brm_svi_global_term(t, g)
-    total = copy(gP)
-    coupling = zeros(D)
+    w = copy(gP)
+    gg, gz = zeros(D), zeros(d)
     batch_value = 0.0
-    unit_gradients = Vector{Vector{Float64}}(undef, length(batch))
+    steps = Vector{Tuple{Vector{Float64},Vector{Float64}}}(undef, length(batch))
     for (k, i) in enumerate(batch)
         εi = randn(rng, d)
-        z = view(q.M, :, i) .+ view(q.A, :, :, i) * v .+ _brm_svi_S(q, i) * εi
-        batch_value += _brm_svi_unit_term!(gg, gz, t, i, g, z)
-        total .+= s .* gg
-        size(q.A, 2) > 0 && (coupling .+= s .* (view(q.A, :, :, i)' * gz))
-        unit_gradients[k] = _brm_svi_unit_gradient(q, i, gz, v, εi)
+        batch_value += _brm_svi_unit_term!(gg, gz, t, i, g, _brm_svi_draw_unit(q, i, εi))
+        w .+= s .* gg
+        steps[k] = (copy(gz), εi)
     end
     x = _brm_svi_global_vector(q)
-    # Subject draws follow g through A_i, so the coupling term reaches μ as well
-    # as L: μ's gradient is the one along which the subjects' means follow.
-    grad = _brm_svi_global_gradient(q, total .+ coupling, ε, total .+ coupling)
-    whiten ? _brm_svi_whitened_step!(global_opt, x, grad, lr_global, Matrix(L),
-            _brm_svi_global_row_scale(q), D) :
+    grad = _brm_svi_global_gradient(q, w, ε, η)
+    whiten ? _brm_svi_whitened_global_step!(global_opt, q, x, grad, lr_global) :
         _brm_svi_step!(global_opt, x, grad, lr_global)
     _brm_svi_set_global!(q, x)
     for (k, i) in enumerate(batch)
-        _brm_svi_unit_update!(q, i, unit_opts[i], unit_gradients[k], lr_unit, whiten)
+        _brm_svi_unit_step!(q, i, steps[k]..., β)
     end
     P + s * batch_value
-end
-
-function _brm_svi_unit_update!(q, i, opt, grad, lr, whiten)
-    xi = _brm_svi_unit_vector(q, i)
-    whiten ? _brm_svi_whitened_step!(opt, xi, grad, lr, Matrix(_brm_svi_S(q, i)),
-            _brm_svi_unit_row_scale(q, i), size(q.M, 1)) :
-        _brm_svi_step!(opt, xi, grad, lr)
-    _brm_svi_set_unit!(q, i, xi)
-end
-
-function _brm_svi_unit_gradient(q, i, gz, v, εi)
-    d = length(gz)
-    gR = gz .* εi .* exp.(view(q.R, :, i)) .+ 1.0
-    gSo = _brm_svi_strict_lower!(gz * εi')
-    gA = size(q.A, 2) > 0 ? gz * v' : zeros(d, 0)
-    vcat(gz, gR, vec(gSo), vec(gA))
-end
-
-# The entropy of q, up to the constant (D + N d)(1 + log 2π)/2.
-_brm_svi_entropy(q) = sum(q.ρ) + sum(q.R)
-
-# ── Draws from q and the PSIS check ──────────────────────────────────────────
-
-# The global proposal is a multivariate Student-t with `df` degrees of freedom
-# (`Inf`: Gaussian) around `center` with scale factor `C`; its heavier tails
-# keep the importance weights of the variational fit's too narrow global
-# marginal bounded.
-function _brm_svi_global_proposal(rng, center, C, df)
-    D = length(center)
-    ε = randn(rng, D)
-    r = isinf(df) ? 1.0 : sqrt(df / rand(rng, Chisq(df)))
-    g = center .+ C * (r .* ε)
-    δ2 = sum(abs2, ε) * r^2
-    logq = isinf(df) ? -δ2 / 2 - D * log(2π) / 2 :
-        SpecialFunctions.loggamma((df + D) / 2) - SpecialFunctions.loggamma(df / 2) -
-        D * log(df * π) / 2 - (df + D) / 2 * log1p(δ2 / df)
-    g, logq - logdet(C)
-end
-
-# Importance weights on the global draws alone. Given g the posterior factors
-# over subjects, so each subject's marginal p(y_i | g) is estimated from K draws
-# of its conditional proposal, and one of them is kept in proportion to its
-# weight. The weighted pairs (g, kept z) target the posterior exactly for every
-# K (the extended-space argument of pseudo-marginal importance sampling); K = 1
-# is the plain joint importance weight. Returns the kept packed draws (one per
-# column), the global log weights, and each draw's summed per-subject noise of
-# the marginal estimates.
-function _brm_svi_unit_importance(rng, t, q, n, K; center=q.μ,
-        C=_brm_svi_L(q), df=Inf, conditional=:laplace)
-    D, d, N = length(t.globals), t.d, length(t.units)
-    m = t.m
-    U = repeat(m.unit, 1, n)
-    logw = zeros(n)
-    noise = zeros(n)
-    candidates = [zeros(d, K) for _ in 1:N]
-    unit_logw = zeros(N, K)
-    for j in 1:n
-        g, logq = _brm_svi_global_proposal(rng, center, C, df)
-        v = g .- q.ref
-        U[t.globals, j] .= g
-        P, _ = _brm_svi_global_term(t, g)
-        logw[j] = P - logq
-        # Each subject's conditional proposal at this g: the fitted factor, or
-        # (`:laplace`) the Gaussian at the conditional mode with the inverse
-        # negative Hessian there, from Newton steps started at the factor's
-        # mean. The Laplace conditional is exact when p(z_i | g, y_i) is
-        # Gaussian, so its weights then carry no per-subject noise.
-        factors = map(eachindex(t.units)) do i
-            (view(q.M, :, i) .+ view(q.A, :, :, i) * v, _brm_svi_S(q, i))
-        end
-        if conditional === :laplace
-            u = U[:, j]
-            for (i, block) in enumerate(t.units)
-                u[block] .= first(factors[i])
-            end
-            precisions = _brm_svi_unit_modes!(t, u)
-            factors = map(eachindex(t.units)) do i
-                (u[t.units[i]], cholesky(inv(precisions[i])).L)
-            end
-        end
-        for k in 1:K
-            u = U[:, j]
-            for (i, block) in enumerate(t.units)
-                εi = randn(rng, d)
-                center_i, S = factors[i]
-                z = center_i .+ S * εi
-                candidates[i][:, k] .= z
-                u[block] .= z
-                # log N(z; 0, I) − log q_i(z | g); the likelihood is added below.
-                unit_logw[i, k] = -sum(abs2, z) / 2 + sum(abs2, εi) / 2 +
-                    sum(log, diag(S))
-            end
-            unit_logw[:, k] .+= _brm_nlme_sum_by_subject(m,
-                _rk_pointwise_values(m.pointwise, u))
-        end
-        noise_j = 0.0
-        for (i, block) in enumerate(t.units)
-            row = view(unit_logw, i, :)
-            logw[j] += LogExpFunctions.logsumexp(row) - log(K)
-            p = exp.(row .- maximum(row))
-            # The relative variance of this subject's marginal estimate over
-            # its K draws (delta method: the variance of its log).
-            K > 1 && (noise_j += Statistics.var(p) / (Statistics.mean(p)^2 * K))
-            k = K == 1 ? 1 : _brm_svi_resample(rng, p ./ sum(p), 1)[1]
-            U[block, j] .= view(candidates[i], :, k)
-        end
-        noise[j] = noise_j
-    end
-    U, logw, noise
-end
-
-"""
-    brm_svi(m::BRMNLMEModel; batch_size, rng, ...) -> NamedTuple
-
-Minibatch stochastic variational inference for a population model with
-conditionally independent subjects, over the RK backend's packed unconstrained
-coordinates (internal prototype; its public spelling is not settled).
-"""
-function brm_svi(m::BRMNLMEModel; rng=Random.default_rng(), batch_size=32,
-        max_iterations=100_000, family::BRMSVIFamily=FullRankGlobal(), coupling=true,
-        lr_global=0.01, lr_unit=0.05, local_steps=1, start=nothing,
-        global_scale=0.1, unit_scale=1.0, ndraws=1000, unit_draws=:auto,
-        proposal_df=4.0, proposal_inflation=1.2, adapt_rounds=6,
-        polish_lr=0.05, window=nothing, patience=3, min_windows=5,
-        polish_windows=20, laplace_refresh=true, refresh_windows=1,
-        conditional=:laplace, khat_threshold=0.7)
-    t = _brm_svi_target(m)
-    N = length(t.units)
-    μ = start === nothing ? first(_brm_nlme_prior_median_point(m))[t.globals] :
-        Vector{Float64}(start)[t.globals]
-    q = _brm_svi_params(t, μ, family, coupling; global_scale, unit_scale)
-    fit_seconds = @elapsed fit = _brm_svi_fit!(rng, t, q; batch_size, max_iterations,
-        lr_global, lr_unit, polish_lr, local_steps, window, patience, min_windows,
-        polish_windows, laplace_refresh, refresh_windows)
-    check_seconds = @elapsed check = _brm_svi_check(rng, t, fit.q; ndraws,
-        unit_draws, proposal_df, proposal_inflation, khat_threshold, adapt_rounds,
-        conditional)
-    (; draws=check.draws, diagnostics=(; check.diagnostics..., fit.elbo,
-        fit.elbo_windows, fit.converged, fit.iterations, fit.q, globals=t.globals,
-        fit_seconds, check_seconds))
-end
-
-# Stochastic optimization in two phases. Exploration runs Adam at constant
-# step sizes until the ELBO stops improving detectably: the mean over a window
-# (one pass over the subjects, at least 100 iterations) has risen by less than
-# twice its standard error in each of the last `patience` windows, after at
-# least `min_windows`. Polishing then restarts Adam on scale-preconditioned
-# steps (`polish_lr`, a fraction of the current factor scale), decays them as
-# 1/√k over `polish_windows` windows, and returns the average of q over those
-# iterations (Polyak–Ruppert), which damps the noise a stochastic step leaves.
-function _brm_svi_fit!(rng, t, q; batch_size, max_iterations, lr_global, lr_unit,
-        polish_lr, local_steps, window, patience, min_windows, polish_windows,
-        laplace_refresh, refresh_windows)
-    N = length(t.units)
-    adam(lr) = (_BRMSVIAdam(length(_brm_svi_global_vector(q)), lr),
-        [_BRMSVIAdam(length(_brm_svi_unit_vector(q, i)), lr) for i in 1:N])
-    global_opt, unit_opts = adam(lr_global)
-    B = min(batch_size, N)
-    W = window === nothing ? max(cld(N, B), 100) : window
-    trace = Float64[]
-    windows = NamedTuple{(:mean, :var),Tuple{Float64,Float64}}[]
-    polish_start = 0
-    average = nothing
-    laplace_refresh && _brm_svi_laplace_refresh!(t, q)
-    for it in 1:max_iterations
-        polishing = polish_start > 0
-        scale = polishing ? 1 / sqrt(1 + (it - polish_start) / W) : 1.0
-        batch = _brm_svi_batch(rng, N, B)
-        value = _brm_svi_iteration!(rng, t, q, global_opt, unit_opts, batch,
-            scale * (polishing ? polish_lr : lr_global),
-            scale * (polishing ? polish_lr : lr_unit); local_steps, whiten=polishing)
-        push!(trace, value + _brm_svi_entropy(q))
-        if polishing
-            k = it - polish_start
-            for name in (:μ, :ref, :ρ, :Lo, :M, :R, :So, :A)
-                a, x = getfield(average, name), getfield(q, name)
-                @. a += (x - a) / k
-            end
-            k >= polish_windows * W && return (; q=average, elbo=trace,
-                elbo_windows=first.(windows), converged=true, iterations=it)
-        end
-        it % W == 0 || continue
-        w = view(trace, it-W+1:it)
-        push!(windows, (; mean=Statistics.mean(w), var=Statistics.var(w)))
-        !polishing && laplace_refresh && length(windows) % refresh_windows == 0 &&
-            _brm_svi_laplace_refresh!(t, q)
-        if !polishing && length(windows) >= max(min_windows, patience + 1)
-            stalled = all(length(windows)-patience+1:length(windows)) do k
-                a, b = windows[k-1], windows[k]
-                b.mean - a.mean < 2 * sqrt((a.var + b.var) / W)
-            end
-            if stalled
-                polish_start = it
-                average = deepcopy(q)
-                global_opt, unit_opts = adam(polish_lr)
-            end
-        end
-    end
-    (; q=average === nothing ? q : average, elbo=trace,
-       elbo_windows=first.(windows), converged=false, iterations=max_iterations)
-end
-
-# The PSIS check of a fitted q, and its importance-resampled draws.
-function _brm_svi_check(rng, t, q; ndraws, unit_draws, proposal_df,
-        proposal_inflation, khat_threshold, adapt_rounds=0, conditional=:laplace,
-        adapt_draws=min(ndraws, max(250, 25length(t.globals))), unit_noise=0.25,
-        max_unit_draws=64, adapt_khat=0.5)
-    D = length(t.globals)
-    # `unit_draws = :auto` picks K per round so that the summed per-subject
-    # noise of the marginal estimates, measured in the previous round, falls
-    # to `unit_noise` (pilot K = 4, at most `max_unit_draws`).
-    K = unit_draws === :auto ? 4 : unit_draws
-    next_K(noise) = unit_draws === :auto ?
-        clamp(ceil(Int, K * Statistics.median(noise) / unit_noise), 1, max_unit_draws) : K
-    sample(n, center, C) = _brm_svi_unit_importance(rng, t, q, n, K;
-        center, C, df=proposal_df, conditional)
-    record(psis, noise) = (; pareto_k=psis.pareto_k, ess=psis.ess, unit_draws=K,
-        unit_noise=Statistics.median(noise))
-    # Adaptive importance sampling: each pilot round moves the global proposal
-    # to its weighted draws' mean, and its covariance toward theirs (inflated
-    # again), blended with the previous covariance in proportion to the
-    # round's effective sample size but at least halfway, so that a round
-    # dominated by a few draws cannot collapse it. Adaptation stops once a
-    # pilot reaches k̂ < `adapt_khat` or after `adapt_rounds` pilots; the
-    # final draws come from the proposal with the smallest pilot k̂.
-    proposal = (; center=q.μ, C=proposal_inflation * Matrix(_brm_svi_L(q)))
-    best = (; proposal, pareto_k=Inf)
-    rounds = Any[]
-    for round in 1:adapt_rounds
-        U, logw, noise = sample(adapt_draws, proposal.center, proposal.C)
-        psis = brm_psis_weights(logw)
-        push!(rounds, record(psis, noise))
-        psis.pareto_k < best.pareto_k && (best = (; proposal, psis.pareto_k))
-        K = next_K(noise)
-        psis.pareto_k < adapt_khat && break
-        G = view(U, t.globals, :)
-        center = G * psis.weights
-        Σ = (G .- center) * Diagonal(psis.weights) * (G .- center)'
-        α = clamp(psis.ess / (10D), 0.5, 1.0)
-        previous = proposal.C * proposal.C' / proposal_inflation^2
-        Σ = α .* Σ .+ (1 - α) .* previous
-        proposal = (; center, C=proposal_inflation * Matrix(cholesky(Symmetric(Σ + 1e-12I)).L))
-    end
-    final = adapt_rounds > 0 ? best.proposal : proposal
-    U, logw, noise = sample(ndraws, final.center, final.C)
-    psis = brm_psis_weights(logw)
-    push!(rounds, record(psis, noise))
-    corrected = psis.pareto_k < khat_threshold
-    # Draws × packed coordinates, the shape every BRM draw reader takes.
-    proposal_draws = permutedims(U)
-    draws = corrected ?
-        proposal_draws[_brm_svi_resample(rng, psis.weights, ndraws), :] : proposal_draws
-    (; draws, diagnostics=(; corrected, pareto_k=psis.pareto_k, ess=psis.ess,
-        proposal=proposal_draws, log_weights=psis.log_weights, raw_log_weights=logw,
-        rounds))
 end
 
 # `B` distinct subjects drawn uniformly from `1:N` in O(B) (Floyd's algorithm),
@@ -606,18 +262,201 @@ function _brm_svi_batch(rng, N, B)
     collect(chosen)
 end
 
-# Systematic resampling: `n` indices drawn in proportion to `weights`.
-function _brm_svi_resample(rng, weights, n)
-    c = cumsum(weights)
-    u0 = rand(rng) / n
-    out = Vector{Int}(undef, n)
-    j = 1
-    for k in 1:n
-        u = u0 + (k - 1) / n
-        while j < length(c) && c[j] < u
-            j += 1
+const _BRM_SVI_PHASES = (lower="Lower to ReactiveKernels", prepare="Prepare NLME model",
+    target="Minibatch target", fit="Stochastic optimization", draws="Draws from q")
+
+# Stochastic optimization in two phases. Exploration runs at constant step
+# sizes (`lr_global` for Adam, `unit_step` for the subjects' natural-gradient
+# steps) until the ELBO stops improving detectably: the mean over a window (one
+# pass over the subjects, at least 100 iterations) has risen, over the last
+# `patience` windows, by less than twice the standard error of that rise, after
+# at least `min_windows`. Comparing across several windows rather than
+# neighbouring ones lets a slow drift show above the minibatch noise. Polishing then restarts Adam on scale-preconditioned global
+# steps (`polish_lr`, a fraction of the current scale), decays every step size
+# as 1/√k over `polish_windows` windows, and returns the average of q over
+# those iterations (Polyak–Ruppert), which damps the noise a stochastic step
+# leaves.
+function _brm_svi_fit!(rng, t, q; batch_size, max_iterations, lr_global, unit_step,
+        polish_lr, window, patience, min_windows, polish_windows, node=nothing)
+    N = length(t.units)
+    adam(lr) = _BRMSVIAdam(length(_brm_svi_global_vector(q)), lr)
+    global_opt = adam(lr_global)
+    B = min(batch_size, N)
+    W = window === nothing ? max(cld(N, B), 100) : window
+    trace = Float64[]
+    windows = NamedTuple{(:mean, :var),Tuple{Float64,Float64}}[]
+    polish_start = 0
+    average = nothing
+    for it in 1:max_iterations
+        polishing = polish_start > 0
+        scale = polishing ? 1 / sqrt(1 + (it - polish_start) / W) : 1.0
+        value = _brm_svi_iteration!(rng, t, q, global_opt, _brm_svi_batch(rng, N, B),
+            scale * (polishing ? polish_lr : lr_global), scale * unit_step;
+            whiten=polishing)
+        push!(trace, value + _brm_svi_entropy(q))
+        if polishing
+            k = it - polish_start
+            for name in (:μ, :ρ, :Β, :M, :Λ)
+                a, x = getfield(average, name), getfield(q, name)
+                @. a += (x - a) / k
+            end
+            k >= polish_windows * W && return (; q=_brm_svi_factor!(average),
+                elbo=trace, elbo_windows=first.(windows), converged=true,
+                iterations=it)
         end
-        out[k] = j
+        it % W == 0 || continue
+        w = view(trace, it-W+1:it)
+        push!(windows, (; mean=Statistics.mean(w), var=Statistics.var(w)))
+        _brm_throw_if_interrupted(node)
+        _brm_update_progress!(node, string(polishing ?
+            "polishing $(it - polish_start)/$(polish_windows * W)" :
+            "exploring, window $(length(windows))", " · iteration $it · ELBO ≈ ",
+            round(last(windows).mean; sigdigits=6)))
+        if !polishing && length(windows) >= max(min_windows, patience + 1)
+            a, b = windows[end-patience], windows[end]
+            stalled = b.mean - a.mean < 2 * sqrt((a.var + b.var) / W)
+            if stalled
+                polish_start = it
+                average = deepcopy(q)
+                global_opt = adam(polish_lr)
+            end
+        end
     end
-    out
+    (; q=average === nothing ? q : _brm_svi_factor!(average), elbo=trace,
+       elbo_windows=first.(windows), converged=false, iterations=max_iterations)
+end
+
+# The subjects' Cholesky factors of an averaged precision.
+function _brm_svi_factor!(q)
+    for i in axes(q.Λ, 3)
+        q.U[:, :, i] .= cholesky(Symmetric(q.Λ[:, :, i])).L
+    end
+    q
+end
+
+# `n` draws from q as packed RK points, one per column.
+function _brm_svi_draws(rng, t, q, n)
+    U = repeat(t.m.unit, 1, n)
+    for j in 1:n
+        U[t.globals, j] .= _brm_svi_draw_global(q, randn(rng, length(q.μ)),
+            randn(rng, size(q.Β, 2)))
+        for (i, block) in enumerate(t.units)
+            U[block, j] .= _brm_svi_draw_unit(q, i, randn(rng, t.d))
+        end
+    end
+    U
+end
+
+# The model through its preparation phases, as for `brm_nlme_fit`: lowering to
+# RK and `brm_nlme_model`. A stage `x` has already passed is reused.
+_brm_svi_lowered(x::BRMI, phase) = _brm_run_phase(_ -> RKBRMI(x), phase)
+_brm_svi_lowered(x::Union{RKBRMI,BRMNLMEModel}, phase) = (_brm_reuse_phase!(phase); x)
+_brm_svi_lowered(x, phase) = throw(ArgumentError(
+    "brm_svi_fit: expected a @brm model (BRMI), an RKBRMI or a BRMNLMEModel, " *
+    "got $(typeof(x))"))
+
+_brm_svi_model(x::RKBRMI, phase; ad_backend, shared_point) =
+    _brm_run_phase(phase) do node
+        _brm_nlme_model(x, node; ad_backend=ad_backend === nothing ?
+            _brm_svi_default_ad(x) : ad_backend, observation_ad_backend=nothing,
+            shared_point, subject_group=nothing, nested_groups=NamedTuple())
+    end
+function _brm_svi_model(m::BRMNLMEModel, phase; ad_backend, shared_point)
+    ad_backend === nothing && shared_point === nothing || throw(ArgumentError(
+        "brm_svi_fit: a prepared BRMNLMEModel already fixes its ad_backend and " *
+        "shared_point; pass them to brm_nlme_model instead"))
+    _brm_reuse_phase!(phase)
+    m
+end
+
+# Implemented by `BayesianRegressionModelsReactiveKernelsEnzymeExt`: reverse-mode
+# `AutoEnzyme`, the backend `brm_nlme_model` requires.
+_brm_svi_default_ad(x) = throw(ArgumentError(
+    "brm_svi_fit: pass `ad_backend` (reverse-mode AutoEnzyme), or load Enzyme " *
+    "and DifferentiationInterface for that default"))
+
+# The packed point the globals' means start from: the prior medians, a full
+# packed point `start`, or address-keyed `inits` over the prior medians.
+function _brm_svi_start(m::BRMNLMEModel, start, inits)
+    start === nothing || inits === nothing || throw(ArgumentError(
+        "brm_svi_fit: give either `start` or `inits`, not both"))
+    median = first(_brm_nlme_prior_median_point(m))
+    start === nothing || return (length(start) == length(median) ||
+        throw(DimensionMismatch("brm_svi_fit: `start` has $(length(start)) " *
+            "coordinates, the RK layout has $(length(median))")); Vector{Float64}(start))
+    inits === nothing && return median
+    brm_start(m.backend, inits; base=median)
+end
+
+"""
+    brm_svi_fit(x; batch_size=32, rng=Random.default_rng(),
+        family=MeanFieldGlobal(), ndraws=1000, start=nothing, inits=nothing,
+        ad_backend=nothing, shared_point=nothing, progress=nothing, kwargs...)
+        -> (; draws, coordinates, diagnostics)
+
+Minibatch stochastic variational inference for a model whose subjects are
+conditionally independent given the population (the subjects of
+[`brm_nlme_view`](@ref)), over the RK backend's packed unconstrained
+coordinates. Each iteration evaluates `batch_size` subjects, through their own
+observation cells, and scales them to all subjects, so its cost follows the
+batch size, not the number of subjects.
+
+- `x` — a `@brm` model ([`BRMI`](@ref)), its [`RKBRMI`](@ref), or a prepared
+  [`BRMNLMEModel`](@ref). For a BRMI or RKBRMI the model is prepared with
+  `ad_backend` (default reverse-mode `AutoEnzyme`, which needs Enzyme loaded)
+  and `shared_point`, as [`brm_nlme_model`](@ref) takes them. The observations
+  must lie in subject-indexed cells (`@plate for` over the subjects) with flat
+  (not nested) subject blocks.
+- `family` — the global factor: `MeanFieldGlobal()` (diagonal) or
+  `LowRankGlobal(r)` (diagonal plus rank `r`). Each subject has its own
+  full-covariance Gaussian factor.
+- `start` / `inits` — where the globals' means start: the prior medians by
+  default, a full RK packed point, or initial values keyed by prior address as
+  [`brm_start`](@ref) takes them (the rest at the prior medians).
+- `progress` — a Treebars node or backend symbol: one `BRM SVI fit` node with
+  the phases Lower to ReactiveKernels, Prepare NLME model, Minibatch target
+  (the subjects' cell gradients and the start), Stochastic optimization (its
+  message names the window, iteration and ELBO) and Draws from q. An interrupt raises `Treebars.ProgressInterrupted` at the
+  next window.
+- Optimizer controls: `max_iterations`, `lr_global` (Adam on the globals),
+  `unit_step` (the subjects' natural-gradient step), `polish_lr`, `window`,
+  `patience`, `min_windows`, `polish_windows`, `global_scale` and `unit_scale`
+  (initial factor scales).
+
+Returns `draws`, `ndraws` draws from the fitted approximation as RK packed
+unconstrained points (coordinates × draws, one column per draw, the order of
+`coordinate_names(rk.model.layout)`), their `coordinates`, and `diagnostics`:
+the ELBO trace (`elbo`, `elbo_windows`, up to a constant), `converged`,
+`iterations`, the variational parameters `q`, the packed positions of the
+global coordinates (`globals`), `seconds` of optimization, and the prepared
+`model`. The approximation is variational: posterior means are close, and
+the spread of the population, scale and correlation coordinates is too narrow.
+"""
+function brm_svi_fit(x; rng=Random.default_rng(), batch_size=32,
+        max_iterations=100_000, family::BRMSVIFamily=MeanFieldGlobal(),
+        lr_global=0.01, unit_step=0.1, start=nothing, inits=nothing,
+        ad_backend=nothing, shared_point=nothing, global_scale=0.1, unit_scale=1.0,
+        ndraws=1000, polish_lr=0.05, window=nothing, patience=10, min_windows=40,
+        polish_windows=20, progress=nothing)
+    _brm_with_progress(progress; description="BRM SVI fit") do node
+        _brm_with_phases(node, _BRM_SVI_PHASES) do phases
+            m = _brm_svi_model(_brm_svi_lowered(x, phases.lower), phases.prepare;
+                ad_backend, shared_point)
+            t, μ = _brm_run_phase(phases.target) do _
+                t = _brm_svi_target(m)
+                t, _brm_svi_start(m, start, inits)[t.globals]
+            end
+            q = _brm_svi_params(t, μ, family; global_scale, unit_scale)
+            seconds = @elapsed fit = _brm_enter_phase(phases.fit) do phase
+                _brm_svi_fit!(rng, t, q; batch_size, max_iterations, lr_global,
+                    unit_step, polish_lr, window, patience, min_windows,
+                    polish_windows, node=phase)
+            end
+            draws = _brm_run_phase(_ -> _brm_svi_draws(rng, t, fit.q, ndraws),
+                phases.draws)
+            (; draws, coordinates=copy(m.view.coordinates), diagnostics=(;
+                fit.elbo, fit.elbo_windows, fit.converged, fit.iterations, fit.q,
+                globals=t.globals, seconds, model=m))
+        end
+    end
 end

@@ -18,6 +18,9 @@ _brm_with_phases(f, ::Nothing, labels::NamedTuple) = f(map(_ -> nothing, labels)
 # `f(phase)` while `phase` runs.
 _brm_enter_phase(f, ::Nothing) = f(nothing)
 
+# The running message of `node`.
+_brm_update_progress!(::Nothing, message) = nothing
+
 _brm_throw_if_interrupted(::Nothing) = nothing
 _brm_interrupt_requested(::Nothing) = false
 
