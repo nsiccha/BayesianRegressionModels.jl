@@ -592,6 +592,15 @@ of fitted missing coordinates during subject kernel CV. It uses only root
 dependencies, so `julia --project=. test/missing_covariates.jl` also works;
 trailing filters such as `anchors` or `kernel CV` select focused blocks.
 
+`mi_intercept_only.jl` checks an intercept-only predictor that only an `mi(...)`
+likelihood sizes: `log(sigma) ~ 1` or `mu ~ 1` read by `mi(y) ~ Normal(...)` or
+`LogNormal(...)`, and the scale of a covariate model `mi(x) ~ LogNormal(mx, sx)`.
+SBBRMI sizes it by the column's row count `n_rows_y` and RKBRMI fills it over
+the column's rows; replay recomputes both. Densities and gradients on both
+backends equal a twin
+that declares the intercept as a scalar parameter. Run
+`julia --project=test test/mi_intercept_only.jl`.
+
 `rk_single_level_factor.jl` checks a single-level treatment-coded factor on the
 RK route. Its K=1 source equals the K=2 source apart from the level list and the
 zero-width coefficient declaration, as SBBRMI declares `vector[0]`. Densities and
