@@ -5735,10 +5735,10 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         new_data[key] = copy(e.const_.W)
         new_preproc[key] = e
     elseif e.kind === :s2z_weights
+        # One row per fitted level. The block's own `:group_index` record
+        # re-codes the replay rows through those frozen levels and refuses an
+        # unseen one, so a replay over any subset of them keeps every weight.
         freeze || throw(ArgumentError("S2Z replay requires freeze_constants=true; centering weights are fitted-level quantities"))
-        levels = _sb_df_column(df, e.raw_ref)
-        collect(_brm_fit_levels(levels)) == collect(e.const_.levels) ||
-            throw(ArgumentError("S2Z replay needs identical group levels; centering weights cannot be remapped to new levels yet"))
         new_data[key] = copy(e.const_.rho)
         new_preproc[key] = e
     elseif e.kind === :zscale || e.kind === :standardize ||
@@ -6264,7 +6264,9 @@ Covered: the Julia-side transforms (`zscale`/`standardize`/`center`/`factor`/
 `mo`/`s`/`t2`/`gp`/`hsgp`), interval-censored predictor splits,
 `protect`/implicit-fn columns (re-materialised on `new_df`), typed `mm(...)`
 and ordinary plain/`|ID|` random-effect group
-indices, `kernel(...)` subject counts and `ragged(x, group)` columns, continuous
+indices, sum-to-zero (`s2z_groups`) blocks (rows re-coded through the fitted
+levels, any subset of them; the fitted centering weights kept; frozen only),
+`kernel(...)` subject counts and `ragged(x, group)` columns, continuous
 × continuous interaction columns, typed observation weights, categorical
 outcomes, and pass-through raw columns (plain data, `me` obs values, `ar`
 time). A consumer `_sb_submodel_rhs!` term is called again on `new_df`, and
@@ -16221,16 +16223,22 @@ _sb_scalar_expr(x::ExprColumn, data) = begin
         return Expr(:ref, _sb_scalar_expr(obj, data),
                     (_sb_scalar_expr(a, data) for a in idxs)...)
     end
+    args = Any[_sb_scalar_expr(a, data) for a in getargs(x)]
+    # A Julia callable Stan spells differently (`vcat` -> nested `append_row`,
+    # `cumsum` -> `cumulative_sum`, ...) takes the kernel cells' spelling.
+    if isempty(getkwargs(x))
+        stan = _sb_julia_stan_call(f, args)
+        stan === nothing || return stan
+    end
     op = f === (*) ? Symbol(".*") :
          f === (/) ? Symbol("./") :
          f
     # Julia parses a flat product as one variadic call. StanBlocks' dotted
     # arithmetic is binary, so retain the original operand order in a left fold.
-    if f === (*) && isempty(getkwargs(x)) && length(getargs(x)) > 2
-        args = map(a -> _sb_scalar_expr(a, data), getargs(x))
+    if f === (*) && isempty(getkwargs(x)) && length(args) > 2
         return foldl((left, right) -> Expr(:call, op, left, right), args)
     end
-    call = Expr(:call, op, (_sb_scalar_expr(a, data) for a in getargs(x))...)
+    call = Expr(:call, op, args...)
     isempty(getkwargs(x)) || insert!(call.args, 2,
         Expr(:parameters, (Expr(:kw, key, _sb_scalar_expr(value, data))
                            for (key, value) in pairs(getkwargs(x)))...))
