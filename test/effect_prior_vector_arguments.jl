@@ -186,6 +186,40 @@ end
     @test code(interaction(data)) == code(twin(data))
 end
 
+# A data-only expression is evaluated when the model is built: the same
+# numbers as the literal per-level model, on both backends.
+@stestset "a data-only expression as the vector" begin
+    data = merge(LEVELS, (; wscale=SCALES))
+    expression_model = @brm begin
+        w ~ 0 + factor(g)
+        effect(w, g) .~ Normal.(0.0, wscale ./ 2)
+        y ~ Normal(w, 1.0)
+    end
+    literal = @brm begin
+        w ~ 0 + factor(g)
+        effect(w, g_lvl_1) ~ Normal(0.0, 0.25)
+        effect(w, g_lvl_2) ~ Normal(0.0, 0.5)
+        effect(w, g_lvl_3) ~ Normal(0.0, 1.0)
+        effect(w, g_lvl_4) ~ Normal(0.0, 2.0)
+        y ~ Normal(w, 1.0)
+    end
+    @test stan_points(expression_model(data), "halved") ==
+          stan_points(literal(LEVELS), "halved_literal")
+    check_rk_against_stan(expression_model(data), "halved")
+end
+
+# The NLME prior-median start reads a per-level block's recorded law per
+# coefficient: each contrast starts at its own location.
+@stestset "a per-level block's prior medians start each coefficient at its own" begin
+    backend = RKBRMI(treatment(merge(LEVELS, (; wloc=WLOC))))
+    record = only(r for r in BRM._brm_nlme_records(backend.plan)
+                  if r.kind === :population_block)
+    writes = Tuple{Symbol,Tuple,Any}[]
+    BRM._brm_nlme_prior_writes!(writes, Val(:population_block), record, nothing, _ -> nothing)
+    @test [w[2] for w in writes] == [(1,), (2,), (3,)]
+    @test [w[3] for w in writes] == WLOC
+end
+
 # A wildcard predictor slot gives every predictor owning the block the vector.
 @stestset "a wildcard predictor reads the vector for each owner" begin
     data = merge(LEVELS, (; wscale=SCALES))
