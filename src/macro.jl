@@ -902,6 +902,11 @@ elseif isxcall(x, :~) && Meta.isexpr(x.args[2], :tuple)
 elseif isxcall(x, :~) && _is_hyper_lhs(x.args[2])
     _, lhs, rhs = x.args
     _parse_hyper!(lhs, rhs; info)
+elseif isxcall(x, :.~) && _is_optional_prior_lhs(x.args[2])
+    _parse_effect!(_optional_prior_address(x.args[2]), _brm_elementwise_law(x);
+                   info, optional=true)
+elseif isxcall(x, :.~) && _is_effect_lhs(x.args[2])
+    _parse_effect!(x.args[2], _brm_elementwise_law(x); info)
 elseif isxcall(x, :.~)
     parse!(_brm_vector_declaration(x); info)
 elseif isxcall(x, :~)
@@ -2049,7 +2054,7 @@ elements, each with the scalar prior `law`. Never called.
 function _brm_vector_prior end
 
 function _brm_vector_declaration(x::Expr)
-    _, lhs, rhs = x.args
+    lhs = x.args[2]
     spelled = sprint(Base.show_unquoted, x)
     Meta.isexpr(lhs, :ref, 2) && lhs.args[1] isa Symbol || error(
         "@brm: `$spelled`: a vector parameter is declared " *
@@ -2058,11 +2063,37 @@ function _brm_vector_declaration(x::Expr)
     isxcall(range, :(:)) && length(range.args) == 3 && range.args[2] == 1 || error(
         "@brm: `$spelled`: the declared index range must be `1:n`, with `n` an " *
         "integer, a scalar data field or an expression over data")
-    law = _brm_undot(rhs)
+    Expr(:call, :~, lhs.args[1],
+         Expr(:call, _brm_vector_prior, range.args[3], _brm_element_law(x)))
+end
+function _brm_element_law(x::Expr)
+    law = _brm_undot(x.args[3])
     Meta.isexpr(law, :call) || error(
-        "@brm: `$spelled`: the right-hand side must be a scalar distribution, " *
-        "such as `Normal.(0.0, 1.0)`")
-    Expr(:call, :~, lhs.args[1], Expr(:call, _brm_vector_prior, range.args[3], law))
+        "@brm: `$(sprint(Base.show_unquoted, x))`: the right-hand side must be a " *
+        "scalar distribution, such as `Normal.(0.0, 1.0)`")
+    law
+end
+
+# `effect(lp, block) .~ Family.(args...; kwargs...)` gives each coefficient of
+# the addressed block, in coefficient-label order, `Family(args...; kwargs...)`
+# with an array-valued argument read at that coefficient's position (decision
+# `1xaf4fx`): the same broadcast reading as a declared vector, on an address.
+"""
+    _brm_elementwise(law)
+
+Internal marker for an elementwise coefficient prior, `effect(lp, block) .~
+law`: each coefficient the address reaches gets `law` with its array-valued
+arguments read at the coefficient's position. Never called.
+"""
+function _brm_elementwise end
+
+function _brm_elementwise_law(x::Expr)
+    address = _is_optional_prior_lhs(x.args[2]) ? x.args[2].args[2] : x.args[2]
+    address.args[1] === :effect || error(
+        "@brm: `$(sprint(Base.show_unquoted, x))`: an elementwise `.~` prior " *
+        "addresses population coefficients, `effect(lp, block) .~ Family.(...)`; " *
+        "write `~` for a `$(address.args[1])(...)` prior")
+    Expr(:call, _brm_elementwise, _brm_element_law(x))
 end
 # The plain operator a dotted operator broadcasts (`.*` -> `*`), or `nothing`
 # for any other call head.
@@ -3150,6 +3181,13 @@ _show_top(io::IO, key, op::ExprColumn{<:Union{typeof(~),typeof(assign)}}) = begi
         _brm_show_operand(io, len, 0)
         print(io, "] .~ ")
         _brm_show_dotted(io, law)
+        return
+    end
+    # An elementwise coefficient prior prints as written: `effect(w, g) .~ Normal.(...)`.
+    if getf(op) === (~) && last(args) isa ExprColumn{typeof(_brm_elementwise)}
+        _show_bare(io, first(args))
+        print(io, " .~ ")
+        _brm_show_dotted(io, only(getargs(last(args))))
         return
     end
     # An `@plate for` cell prints as written.

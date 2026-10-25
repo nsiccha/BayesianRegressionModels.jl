@@ -2747,6 +2747,10 @@ function _brm_validate_population_effect_spec(spec;
                                                prefix="BRM backend lowering")
     spec.expression isa ExprColumn || error(
         "$prefix: population `effect(...)` RHS must be a callable prior expression")
+    _brm_is_elementwise(spec.expression) && spec.coefficient === _EFFECT_COLON && error(
+        "$prefix: `$(_brm_effect_spelling(spec)) .~ …` reads its arguments per " *
+        "coefficient of one addressed block, and `:` reaches several blocks with " *
+        "no single coefficient order; name the block, as `effect(lp, g) .~ …`")
     nothing
 end
 
@@ -2786,6 +2790,70 @@ function _brm_is_array_value(value::NamedColumn)
     false
 end
 
+# ---- elementwise coefficient priors ------------------------------------------
+#
+# `effect(lp, block) .~ Family.(args...)` (decision `1xaf4fx`) reaches the
+# block's coefficients in coefficient-label order and gives the `k`-th
+# `Family(args...)` with each array-valued argument read at `k`, which is what
+# Julia's broadcast means. Arguments of a nested law are read the same way
+# (`truncated.(Normal.(0.0, w), 0.0, Inf)`); keywords apply to every element,
+# as a broadcast call passes them. Each resolver claims the coefficients of an
+# address with `_brm_effect_elements`, so every consumer of a resolved cell
+# sees one ordinary scalar law per coefficient.
+_brm_is_elementwise(expression) = expression isa ExprColumn{typeof(_brm_elementwise)}
+
+_brm_is_element_law(x) = x isa ExprColumn && _brm_prior_constructor(getf(x))
+_brm_is_elementwise_array(x) =
+    !_brm_is_element_law(x) && (_brm_is_array_value(x) || _brm_data_value(x) isa AbstractArray)
+
+function _brm_elementwise_arrays!(arrays, law::ExprColumn)
+    for arg in getargs(law)
+        _brm_is_element_law(arg) ? _brm_elementwise_arrays!(arrays, arg) :
+            _brm_is_elementwise_array(arg) && push!(arrays, arg)
+    end
+    arrays
+end
+
+_brm_law_element(x, k::Int) =
+    _brm_is_element_law(x) ?
+        ExprColumn(getf(x), map(arg -> _brm_law_element(arg, k), getargs(x))...;
+                   getkwargs(x)...) :
+    _brm_is_elementwise_array(x) ? x[k] : x
+
+"""
+    _brm_effect_elements(spec, labels; prefix) -> Vector
+
+One prior statement per coefficient of `labels`, the coefficients `spec`'s
+address reaches in coefficient-label order: `spec` itself for each, or, for an
+elementwise `effect(lp, block) .~ law`, `spec` with the coefficient's element
+of `law`. An array argument must hold one entry per coefficient.
+"""
+function _brm_effect_elements(spec, labels; prefix="BRM backend lowering")
+    _brm_is_elementwise(spec.expression) || return fill(spec, length(labels))
+    law = only(getargs(spec.expression))
+    spelling = "$(_brm_effect_spelling(spec)) .~ $(sprint(_brm_show_dotted, law))"
+    for (key, value) in pairs(getkwargs(law))
+        _brm_is_elementwise_array(value) && error(
+            "$prefix: `$spelling` passes the array `$key` to every coefficient, " *
+            "as a broadcast call passes its keywords; write one statement per " *
+            "coefficient for per-coefficient `$key` values")
+    end
+    for arg in _brm_elementwise_arrays!(Any[], law)
+        shown = sprint(_brm_show_operand, arg, 0)
+        values = _brm_data_value(arg)
+        values isa AbstractVector || error(
+            "$prefix: `$spelling` reads `$shown` per coefficient, so it must be " *
+            "a data vector; " * (isnothing(values) ?
+                "a model vector has no length to check against the address" :
+                "it is a $(ndims(values))-dimensional array"))
+        length(values) == length(labels) || error(
+            "$prefix: `$spelling` reads `$shown` per coefficient: the address " *
+            "reaches $(length(labels)) (" * join(string.(labels), ", ") *
+            "), but `$shown` has $(length(values)) entries")
+    end
+    [merge(spec, (; expression=_brm_law_element(law, k))) for k in eachindex(labels)]
+end
+
 function _brm_normal_effect_args(rhs::ExprColumn;
                                  prefix="BRM backend lowering")
     args = getargs(rhs)
@@ -2794,7 +2862,8 @@ function _brm_normal_effect_args(rhs::ExprColumn;
         "and scale arguments, got $(length(args))")
     any(_brm_is_array_value, args) && error(
         "$prefix: each coefficient's Normal prior needs scalar location and scale; " *
-        "index or reduce an array-valued argument explicitly")
+        "index or reduce an array-valued argument explicitly, or read one value " *
+        "per coefficient with `effect(lp, block) .~ Normal.(...)`")
     isempty(args) && return (0.0, 1.0)
     length(args) == 1 && return (only(args), 1.0)
     args
@@ -2820,6 +2889,11 @@ _brm_numeric_constant(_x) = nothing
 function _brm_effect_number(x)
     x isa NamedColumn && parent(x) isa DataColumn || return _brm_numeric_constant(x)
     value = parent(parent(x))
+    value isa Real && !(value isa Bool) ? Float64(value) : nothing
+end
+# An element `v[k]` of a data vector, as an elementwise prior reads it.
+function _brm_effect_number(x::ExprColumn{typeof(getindex)})
+    value = _brm_data_value(x)
     value isa Real && !(value isa Bool) ? Float64(value) : nothing
 end
 
@@ -3229,12 +3303,13 @@ Base.@nospecializeinfer function _brm_simple_population_effect_overrides(@nospec
         if all_predictors && matched_defaults !== nothing && !isempty(indices)
             push!(matched_defaults, spec_index)
         end
-        for idx in indices
+        elements = _brm_effect_elements(spec, labels[indices]; prefix)
+        for (idx, element) in zip(indices, elements)
             column = design.columns[idx]
             level_address = spec.coefficient === column.label &&
                             column.effect_block !== column.label
             _brm_claim_effect_prior!(
-                () -> cells[idx], v -> (cells[idx] = v), spec,
+                () -> cells[idx], v -> (cells[idx] = v), element,
                 "`$(design.target)`'s `$(labels[idx])` column";
                 prefix, level_address)
         end
