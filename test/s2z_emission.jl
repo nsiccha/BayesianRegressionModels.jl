@@ -181,7 +181,8 @@ end
     block = only(s2z_effect_blocks(sb))
     code = BRM.stan_code(sb)
     @test s2z_stanc_ok(sb)
-    # Same-level replay rebinds; changed levels fail on the weights.
+    # Same-level and subset replays rebind through the fitted levels; an unseen
+    # level fails on the block's group index.
     replay = reprocess(sb, (; data..., x=data.x .+ 0.7))
     @test replay.data[block.group_index] == sb.data[block.group_index]
     @test BRM.stan_code(replay) == code
@@ -191,7 +192,11 @@ end
     replay_reordered = reprocess(sb, reordered)
     @test replay_reordered.data[block.group_index] == [2, 2, 1, 1, 3, 3]
     subset = (; x=[9., 8., 7., 6.], g=[1, 1, 2, 2], y=zeros(4))
-    @test_throws ArgumentError reprocess(sb, subset)
+    replay_subset = reprocess(sb, subset)
+    @test replay_subset.data[block.group_index] == [1, 1, 2, 2]
+    @test replay_subset.data[block.group_count] == 3
+    @test replay_subset.data[:s2z_rho_mu] == sb.data[:s2z_rho_mu]
+    @test BRM.stan_code(replay_subset) == code
     @test_throws ArgumentError reprocess(sb, data; freeze_constants=false)
     plan = generative_plan(normal_builder, data; s2z_groups=[:g], s2z_rho=0.4,
         total_groups=())
@@ -204,6 +209,50 @@ end
     @test_throws ArgumentError population_draws(sb, draws, names; groups=:g)
     @test_throws ArgumentError transport_draws(plan, plan, draws, names, names)
     @test_throws ArgumentError reprocess(sb, data; resample_groups=[:g])
+end
+
+@testset "S2Z frozen replay of held-out rows over a subset of the fitted levels" begin
+    # Held-out rows whose groups are some of the fitted ones, beside an
+    # ordinary crossed grouping, under a Student-t likelihood (snag
+    # `s2z-reprocess-su-1823f316`). The replay predicts its rows exactly as the
+    # same rows predict in a replay of the training rows plus the held-out ones.
+    train = (; g=[1, 1, 2, 2, 3, 3, 4, 4], u=[1, 2, 3, 1, 2, 3, 1, 2],
+             y=[0.3, 1.1, -0.4, 0.8, 1.9, 0.2, -1.0, 0.5])
+    held = (; g=[3, 1, 3], u=[2, 2, 1], y=[0.7, -0.2, 1.4])
+    both = (; g=vcat(train.g, held.g), u=vcat(train.u, held.u), y=vcat(train.y, held.y))
+    builder = @brm begin
+        mu ~ 1 + (1 | u) + (1 | g)
+        effect(mu, Intercept) ~ Normal(0, 5)
+        sigma ~ Exponential(1)
+        y ~ LocationScale(mu, sigma, TDist(4))
+    end
+    sb = SBBRMI(builder(train); mod=@__MODULE__, s2z_groups=[:g], s2z_rho=1.0,
+                total_groups=())
+    block = only(s2z_effect_blocks(sb))
+    replay = reprocess(sb, held)
+    @test BRM.stan_code(replay) == BRM.stan_code(sb)
+    @test replay.data[block.group_index] == [3, 1, 3]
+    @test replay.data[block.group_count] == 4
+    @test replay.data[:s2z_rho_mu] == sb.data[:s2z_rho_mu]
+    # A level the fit never saw still has no fitted coordinate.
+    @test_throws ErrorException reprocess(sb, (; g=[3, 5], u=[1, 2], y=[0.0, 0.0]))
+    held_model = StanBlocks.stan_instantiate(replay.model;
+        path=joinpath(mktempdir(), "s2z_held.stan")).model
+    both_model = StanBlocks.stan_instantiate(reprocess(sb, both).model;
+        path=joinpath(mktempdir(), "s2z_both.stan")).model
+    names = BridgeStan.param_unc_names(held_model)
+    @test names == BridgeStan.param_unc_names(both_model)
+    tp_names = BridgeStan.param_names(held_model; include_tp=true)
+    mu_held = findall(n -> startswith(n, "mu."), tp_names)
+    mu_both = findall(n -> startswith(n, "mu."),
+        BridgeStan.param_names(both_model; include_tp=true))
+    @test length(mu_held) == 3
+    @test length(mu_both) == 11
+    for trial in 1:4
+        x = 0.5 * randn(Xoshiro(400 + trial), length(names))
+        @test BridgeStan.param_constrain(held_model, x; include_tp=true)[mu_held] ≈
+            BridgeStan.param_constrain(both_model, x; include_tp=true)[mu_both[9:11]] atol = 1e-12
+    end
 end
 
 @testset "S2Z Julia recovery statistics" begin

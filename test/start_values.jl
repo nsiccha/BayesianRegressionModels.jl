@@ -270,6 +270,89 @@ end
     @test_throws Exception brm_start(sb, model, (; s=[0.5, 0.6, 0.2]))
 end
 
+# A latent declared in a `@plate` cell, one value per entry of the cell's
+# location: 3 values in cell 1, 2 in cell 2 (brm-use kernel.md).
+const CELL_LATENT_DATA = (; mu=[[10.0, 20.0, 5.0], [7.0, 3.0]], obs=[[1, 2], [1]],
+    y=[[11.0, 19.0], [6.5]], total=[36.0, 10.5])
+
+@stestset "a @plate cell latent takes one flat vector or one vector per cell" begin
+    brmi = @brm CELL_LATENT_DATA begin
+        sigma ~ Exponential(1.0)
+        @plate for i in eachindex(total)
+            loc = log.(mu[i])
+            log_T ~ Normal(loc, 0.5)
+            T = exp.(log_T)
+            y[i] ~ Normal(T[obs[i]], sigma)
+            total[i] ~ Normal(sum(T), 0.01 * total[i])
+        end
+    end
+    sb = SBBRMI(brmi; mod=@__MODULE__)
+    model = compiled(sb, "cell_latent")
+    d = brm_descriptor(sb)
+    @test brm_output(d, :log_T).segments == [3, 5]
+    per_cell = [log.([9.0, 21.0, 6.0]), log.([7.5, 3.0])]
+    inits = (; log_T=per_cell, sigma=0.5)
+    saved = deepcopy(inits)
+    s = brm_start(sb, model, inits)
+    @test inits == saved
+    @test isfinite(BridgeStan.log_density(model, s))
+    θ, names = constrained(model, s)
+    @test θ[brm_output_coordinates(d, :log_T, names)] ≈ reduce(vcat, per_cell) rtol=1e-12
+    @test θ[only(brm_output_coordinates(d, :sigma, names))] ≈ 0.5 rtol=1e-12
+    # One flat vector, cell after cell, is the same point.
+    @test brm_start(sb, model, (; log_T=reduce(vcat, per_cell), sigma=0.5)) == s
+    # Unaddressed coordinates keep a random base.
+    base = 0.3 .* randn(Xoshiro(5), length(s))
+    u = brm_start(sb, model, (; log_T=per_cell); base)
+    k = brm_output_coordinates(d, :log_T, String.(BridgeStan.param_unc_names(model)))
+    rest = setdiff(eachindex(u), k)
+    @test u[rest] ≈ base[rest] rtol=1e-10 atol=1e-12
+    # refused: the cells' counts and lengths are the model's.
+    @test_throws DimensionMismatch brm_start(sb, model, (; log_T=per_cell[1:1]))
+    @test_throws DimensionMismatch brm_start(sb, model,
+        (; log_T=[per_cell[1], [per_cell[2]; 0.0]]))
+    @test_throws DimensionMismatch brm_start(sb, model, (; log_T=zeros(4)))
+    @test_throws ErrorException brm_start(sb, model, (; log_T=[per_cell[1], [NaN, 1.0]]))
+    # refused: per-cell vectors address a cell latent; `sigma` is one value.
+    @test_throws ErrorException brm_start(sb, model, (; sigma=[[0.5]]))
+end
+
+@stestset "a bounded cell latent is set on its constrained scale" begin
+    brmi = @brm CELL_LATENT_DATA begin
+        sigma ~ Exponential(1.0)
+        @plate for i in eachindex(total)
+            T ~ LogNormal(log.(mu[i]), 0.5)
+            y[i] ~ Normal(T[obs[i]], sigma)
+            total[i] ~ Normal(sum(T), 0.01 * total[i])
+        end
+    end
+    sb = SBBRMI(brmi; mod=@__MODULE__)
+    model = compiled(sb, "cell_latent_bounded")
+    d = brm_descriptor(sb)
+    @test brm_output(d, :T).constraints == (; lower=0.0)
+    per_cell = [[9.0, 21.0, 6.0], [7.5, 3.0]]
+    s = brm_start(sb, model, (; T=per_cell))
+    θ, names = constrained(model, s)
+    @test θ[brm_output_coordinates(d, :T, names)] ≈ reduce(vcat, per_cell) rtol=1e-12
+    # The unconstrained coordinates are the lower-bound transform's, not the values.
+    k = brm_output_coordinates(d, :T, String.(BridgeStan.param_unc_names(model)))
+    @test s[k] ≈ log.(reduce(vcat, per_cell)) rtol=1e-12
+    # refused: a value outside the latent's support.
+    @test_throws Exception brm_start(sb, model, (; T=[per_cell[1], [-1.0, 3.0]]))
+end
+
+@stestset "per-cell values have no target on RKBRMI" begin
+    data = (; x=collect(range(-1, 1; length=8)), y=cos.(1:8))
+    brmi = @brm data begin
+        s ~ Dirichlet([1.0, 2.0, 1.5])
+        mu ~ 1 + x
+        loc = mu + 0.8 * s[1] - s[3]
+        y ~ Normal(loc, 1)
+    end
+    # refused: RKBRMI builds no cell latents, and `s` is one vector.
+    @test_throws ErrorException brm_start(RKBRMI(brmi), (; s=[[0.5], [0.3], [0.2]]))
+end
+
 @stestset "invalid addresses and values are refused" begin
     brmi = nlme_plate_pk(NLME_PLATE_DATA)
     rk = RKBRMI(brmi)

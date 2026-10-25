@@ -267,7 +267,7 @@ Return the population-coefficient prior statements captured by [`@brm`](@ref),
 in formula order. Each entry has
 
 ```julia
-(; predictor, coefficient, family, arguments, keywords, expression)
+(; predictor, coefficient, family, arguments, keywords, expression, elementwise)
 ```
 
 Both slots are always present: `predictor` and `coefficient` are each either
@@ -277,7 +277,10 @@ a `Symbol` or `Symbol(":")`, the wildcard meaning *every value of this slot*.
 statement, which the backends fan out over every column the term emits.
 `expression` is the exact parsed RHS [`ExprColumn`](@ref);
 `family`, `arguments`, and `keywords` are its decomposed, directly inspectable
-parts.
+parts. `elementwise` is `true` for `effect(lp, block) .~ Family.(args...)`, which
+gives each coefficient of the block `Family(args...)` with its array-valued
+arguments read at the coefficient's position; `family`, `arguments`, and
+`keywords` then decompose that element law.
 
 A `Symbol(":")` slot is the *default layer*: the SBBRMI backend applies such a
 statement to every parameter it reaches, and lets a more specific statement —
@@ -309,9 +312,11 @@ Base.@nospecializeinfer function effect_priors(@nospecialize(brmi::BRMI))
             "effect_priors: malformed effect address with $(length(address)) arguments")
         predictor = address[1]
         coefficient = address[2]
-        push!(out, (; predictor, coefficient, family=getf(rhs_e),
-                     arguments=getargs(rhs_e), keywords=getkwargs(rhs_e),
-                     expression=rhs_e))
+        elementwise = _brm_is_elementwise(rhs_e)
+        law = elementwise ? only(getargs(rhs_e)) : rhs_e
+        push!(out, (; predictor, coefficient, family=getf(law),
+                     arguments=getargs(law), keywords=getkwargs(law),
+                     expression=rhs_e, elementwise))
     end
     out
 end
