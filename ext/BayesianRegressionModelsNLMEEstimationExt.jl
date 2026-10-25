@@ -636,21 +636,23 @@ end
 
 # Full RK packed draws at fixed population values (src/nlme_two_stage.jl): the
 # population point with Ω's covariance coordinates mapped from ω, and each
-# unit's standardized coordinates row by row. A unit problem's `z` (`η = C z`,
+# unit's standardized coordinates column by column (one column per draw, the
+# orientation of `rk_restore_draws`). A unit problem's `z` (`η = C z`,
 # `C = chol(Ω)`) is BRM's own packed subject coordinate under that mapping.
 function BRM.brm_nlme_draws(m::BRM.BRMNLMEModel, θ, σ, ω, unit_draws)
     n = NE.nsubjects(m)
     length(unit_draws) == n || throw(DimensionMismatch(
         "brm_nlme_draws: $(length(unit_draws)) units' draws for $n units"))
-    S = size(first(unit_draws), 1)
+    S = size(first(unit_draws), 2)
     base = _prior_omega_map(m, θ, σ, ω).mapped
-    draws = repeat(permutedims(base), S, 1)
+    draws = repeat(base, 1, S)
     for (i, Z) in enumerate(unit_draws)
         block = m.view.subject_coordinates[i]
-        size(Z) == (S, length(block)) || throw(DimensionMismatch(
+        size(Z) == (length(block), S) || throw(DimensionMismatch(
             "brm_nlme_draws: unit $i gave a $(size(Z, 1)) × $(size(Z, 2)) draw " *
-            "matrix; expected $S × $(length(block)), the same draw count for every unit"))
-        draws[:, block] .= Z
+            "matrix; expected $(length(block)) × $S (dimension × draws), the same " *
+            "draw count for every unit"))
+        draws[block, :] .= Z
     end
     draws
 end

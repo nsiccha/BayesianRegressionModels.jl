@@ -24,7 +24,7 @@ rk_density(rk) = rk_logdensity_problem(rk; ad_backend=AutoEnzyme(; mode=Enzyme.R
     n = length(m.view.levels)
     full = rk_density(rk)
     rng = Random.MersenneTwister(4)
-    others = [randn(rng, 1, length(b)) for b in m.view.subject_coordinates]
+    others = [randn(rng, length(b), 1) for b in m.view.subject_coordinates]
     for i in 1:n
         p = brm_nlme_unit_problem(m, i, θ, σ, Ω)
         d = LogDensityProblems.dimension(p)
@@ -32,7 +32,7 @@ rk_density(rk) = rk_logdensity_problem(rk; ad_backend=AutoEnzyme(; mode=Enzyme.R
         @test brm_nlme_unit_eta(p, ones(d)) ≈ cholesky(Symmetric(Ω)).L * ones(d)
         z1, z2 = 0.3 .* randn(rng, d), 0.3 .* randn(rng, d)
         point(z) = vec(brm_nlme_draws(m, θ, σ, ω,
-            [j == i ? permutedims(z) : others[j] for j in 1:n]))
+            [j == i ? reshape(z, :, 1) : others[j] for j in 1:n]))
         # Only unit i changes: the difference of the full RK density is the
         # difference of the unit problem's.
         @test LogDensityProblems.logdensity(p, z1) - LogDensityProblems.logdensity(p, z2) ≈
@@ -48,9 +48,11 @@ rk_density(rk) = rk_logdensity_problem(rk; ad_backend=AutoEnzyme(; mode=Enzyme.R
     end
     # The population coordinates of an assembled draw are the fixed point's.
     draws = brm_nlme_draws(m, θ, σ, ω, others)
-    @test size(draws) == (1, length(m.view.coordinates))
-    @test draws[1, m.theta] ≈ θ
-    @test draws[1, m.sigma] ≈ σ
+    @test size(draws) == (length(m.view.coordinates), 1)
+    @test draws[m.theta, 1] ≈ θ
+    @test draws[m.sigma, 1] ≈ σ
+    # The readers take this orientation directly: one restored value per draw.
+    @test length(rk_restore_draws(rk, draws).sigma) == 1
 end
 
 @stestset "wrong inputs are refused" begin
@@ -60,7 +62,7 @@ end
     θ, σ, ω, Ω = start.theta, start.sigma, start.omega, start.omega_matrix
     @test_throws BoundsError brm_nlme_unit_problem(m, 99, θ, σ, Ω)
     n = length(m.view.levels)
-    ragged = [zeros(j == 1 ? 2 : 3, length(b)) for (j, b) in enumerate(m.view.subject_coordinates)]
+    ragged = [zeros(length(b), j == 1 ? 2 : 3) for (j, b) in enumerate(m.view.subject_coordinates)]
     @test_throws "the same draw count for every unit" brm_nlme_draws(m, θ, σ, ω, ragged)
     @test_throws "not both" brm_two_stage_fit(identity, rk; minibatch_size=2,
         options=NE.SAEMOptions())
@@ -68,29 +70,36 @@ end
 
 function warmup_sampler(unit)
     run = WarmupHMC.adaptive_warmup_mcmc(Random.Xoshiro(unit.subject), unit)
-    permutedims(Matrix(run.posterior_position))
+    Matrix(run.posterior_position)
 end
 
 @stestset "two-stage fit: SAEM population, sampled units, RK packed draws" begin
     rk = RKBRMI(nlme_plate_pk(NLME_PLATE_DATA))
     for minibatch_size in (nothing, 2)
-        fit = brm_two_stage_fit(warmup_sampler, rk; minibatch_size)
+        # SAEM draws from `rng`; NLMEEstimation defaults to the global RNG.
+        fit = brm_two_stage_fit(warmup_sampler, rk; minibatch_size,
+            rng=Random.Xoshiro(2026))
         m = fit.stage1.model
         @test fit.coordinates == coordinate_names(rk.model.layout)
         @test length(fit.units) == length(m.view.levels)
-        S = size(first(fit.unit_draws), 1)
+        S = size(first(fit.unit_draws), 2)
         @test S > 10
-        @test size(fit.draws) == (S, length(fit.coordinates))
+        @test size(fit.draws) == (length(fit.coordinates), S)
         @test all(isfinite, fit.draws)
         # Population coordinates are fixed at the SAEM estimates; units vary.
-        @test all(fit.draws[:, m.theta] .== permutedims(fit.stage1.result.theta))
+        @test all(fit.draws[m.theta, :] .== fit.stage1.result.theta)
         for (i, block) in enumerate(m.view.subject_coordinates)
-            @test fit.draws[:, block] == fit.unit_draws[i]
-            @test all(>(0), vec(std(fit.unit_draws[i]; dims=1)))
+            @test fit.draws[block, :] == fit.unit_draws[i]
+            @test all(>(0), vec(std(fit.unit_draws[i]; dims=2)))
         end
         # Every draw is a finite point of the full RK model.
         full = rk_density(rk)
-        @test all(isfinite(LogDensityProblems.logdensity(full, fit.draws[k, :])) for k in 1:S)
+        @test all(isfinite(LogDensityProblems.logdensity(full, fit.draws[:, k])) for k in 1:S)
+        # Readers take the draws as they come: one restored value per draw,
+        # and σ fixed at the SAEM estimate.
+        restored = rk_restore_draws(rk, fit.draws)
+        @test length(restored.sigma) == S
+        @test all(==(first(restored.sigma)), restored.sigma)
     end
 end
 
@@ -99,7 +108,7 @@ end
     # model's cells must reproduce the single-threaded draws exactly, given
     # one shared stage-1 SAEM fit.
     rk = RKBRMI(nlme_plate_pk(NLME_PLATE_DATA))
-    stage1 = brm_nlme_fit(rk, NE.saem; ebes=false)
+    stage1 = brm_nlme_fit(rk, NE.saem; ebes=false, rng=Random.Xoshiro(2026))
     serial = brm_two_stage_fit(warmup_sampler, rk; stage1, threads=1)
     parallel = brm_two_stage_fit(warmup_sampler, rk; stage1, threads=3)
     @test serial.stage1 === stage1
@@ -118,7 +127,7 @@ end
     ω = NE.omega_parameters(layout, Ω)
     full = rk_density(rk)
     rng = Random.MersenneTwister(7)
-    others = [randn(rng, 1, length(b)) for b in m.view.subject_coordinates]
+    others = [randn(rng, length(b), 1) for b in m.view.subject_coordinates]
     n = length(m.view.levels)
     for i in 1:n
         p = brm_nlme_unit_problem(m, i, θ, σ, Ω)
@@ -128,7 +137,7 @@ end
         @test diag(p.factor) ≈ sqrt.([0.49; fill(0.36, d - 1)])
         z1, z2 = 0.3 .* randn(rng, d), 0.3 .* randn(rng, d)
         point(z) = vec(brm_nlme_draws(m, θ, σ, ω,
-            [j == i ? permutedims(z) : others[j] for j in 1:n]))
+            [j == i ? reshape(z, :, 1) : others[j] for j in 1:n]))
         @test LogDensityProblems.logdensity(p, z1) - LogDensityProblems.logdensity(p, z2) ≈
               LogDensityProblems.logdensity(full, point(z1)) -
               LogDensityProblems.logdensity(full, point(z2)) atol=1e-9
@@ -140,11 +149,11 @@ end
         @test gradient ≈ fd atol=1e-5 rtol=1e-5
     end
     # A nested model samples on one worker, whatever `threads` says.
-    stage1 = brm_nlme_fit(rk, NE.saem; ebes=false, groups...,
+    stage1 = brm_nlme_fit(rk, NE.saem; ebes=false, groups..., rng=Random.Xoshiro(2026),
         options=NE.SAEMOptions(iterations=3, burnin=1, mcmc_burnin=0,
             adapt_iterations=0, numeric_maxiter=2, mstep_interval=3, omega_floor=0.05))
     fit = brm_two_stage_fit(warmup_sampler, rk; stage1, threads=3)
-    @test size(fit.draws, 2) == length(m.view.coordinates)
-    @test all(isfinite(LogDensityProblems.logdensity(full, fit.draws[k, :]))
-              for k in 1:size(fit.draws, 1))
+    @test size(fit.draws, 1) == length(m.view.coordinates)
+    @test all(isfinite(LogDensityProblems.logdensity(full, fit.draws[:, k]))
+              for k in 1:size(fit.draws, 2))
 end
