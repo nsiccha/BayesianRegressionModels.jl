@@ -468,15 +468,11 @@ Every other grouping keeps its levels independent: `(… | ID | g)` and
 `cor(:, ID)` correlate the coefficients *within* one level. `cor=` correlates
 the **levels** of `g` with each other, the intrinsic coregionalisation model,
 so a sparsely observed level borrows from the levels it is correlated with.
-The correlation is declared once and named wherever it applies:
-
-```julia
-@brm data begin
-    Omega ~ LKJCholesky(17, 2.0)
-    mu ~ 1 + t + (0 + t | gr(region; cor=Omega)) + hsgp(t; k=20, by=region, cor=Omega)
-    y ~ Normal(mu, sigma)
-end
-```
+The correlation is declared once in the `@brm` block and named wherever it
+applies. With `Omega ~ LKJCholesky(17, 2.0)` declared, the formula
+`mu ~ 1 + t + (0 + t | gr(region; cor=Omega)) + hsgp(t; k=20, by=region, cor=Omega)`
+gives the regional slopes and the regional HSGP curves one shared, learned
+correlation between the 17 regions.
 
 - `Omega ~ LKJCholesky(K, eta)` is a sampled `cholesky_factor_corr[K]` under
   the LKJ prior, with literal `K` (the number of levels of `g`) and `eta`.

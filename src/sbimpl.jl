@@ -319,15 +319,47 @@ _sb_vector_prior_coordinates(family) = nothing
 _sb_vector_prior_coordinates(family::StanBlocks.ValueFamily) =
     lock(() -> get(_SB_VECTOR_PRIOR_COORDINATES, family, nothing), _SB_GEN_LOCK)
 
+# Coefficient priors: `(; model, inputs)`, the configured base and the
+# `kwarg => name` pairs its caller passes so the prior can read the caller's
+# names (data fields, constants, sampled scalars). Each prior is one
+# coefficient's, so an array-valued argument is refused as on the plain
+# Normal path (`_brm_normal_effect_args`) instead of vectorising over the block.
 function _sb_vector_priors(base::StanBlocks.SlicModel, target::Symbol, priors;
                             mod::Module=base.mod)
+    for prior in priors
+        isnothing(prior) || !any(_brm_is_array_value, getargs(prior)) || error(
+            "sbimpl: each coefficient's `$(getf(prior))` prior needs scalar " *
+            "arguments; index or reduce an array-valued argument explicitly")
+    end
     declaration = only(node for node in base.model.args if node isa Expr &&
         node.head === :(::) && node.args[1] === target)
     prior = _sb_vector_prior_statement(target, target, priors, length(priors);
                                        positive=false, mod, scope=base.mod,
                                        declaration=deepcopy(declaration))
-    Base.merge(base, prior.statement)
+    _sb_merge_bound_vector_prior(base, prior)
 end
+
+# The merged statement is traced in the base's own scope, so the caller names
+# its arguments read arrive as `brm_prior_input_<name>` kwargs, as a
+# term-owned prior's do (`_sb_term_model_call`). Unbound, the base resolved
+# them in BRM's module instead: a data field failed to trace ("Could not find
+# wscale in model"), and one named like a BRM-visible function (`scale`)
+# silently became that function. Passed under their own names they would
+# rebind the base's: `sd(:, ID) ~ Exponential(tau)` turned the block's `tau`
+# into an input, and `Exponential(nu)` on a Student-t block silently read its
+# degrees of freedom.
+function _sb_merge_bound_vector_prior(base::StanBlocks.SlicModel, prior)
+    statement = prior.statement
+    rhs = _sb_bind_vector_prior_inputs(statement.args[3], prior.dependencies)
+    (; model=Base.merge(base, Expr(:call, :~, statement.args[2], rhs)),
+       inputs=[_sb_term_prior_input(d) => d for d in prior.dependencies])
+end
+
+# The call `configured.model(; kwargs..., <its prior inputs>...)`.
+_sb_configured_prior_call(configured, kwargs::Pair...) =
+    Expr(:call, configured.model, Expr(:parameters,
+        (Expr(:kw, key, value) for (key, value) in kwargs)...,
+        (Expr(:kw, key, value) for (key, value) in configured.inputs)...))
 
 function _sb_direct_vector_prior(target::Symbol, prior, nvalue; positive::Bool)
     emitted = Any[]
@@ -469,16 +501,7 @@ function _sb_vector_positive_priors(base::StanBlocks.SlicModel,
     end
     prior = _sb_vector_prior_statement(lhs, target, priors, nvalue;
                                        positive=true, mod, scope=base.mod)
-    # The merged statement is traced in the base's own scope, so the caller
-    # names its arguments read arrive as `brm_prior_input_<name>` kwargs, as a
-    # term-owned prior's do (`_sb_term_model_call`). Passed under their own
-    # names they would rebind the base's: `sd(:, ID) ~ Exponential(tau)`
-    # turned the block's `tau` into an input, and `Exponential(nu)` on a
-    # Student-t block silently read its degrees of freedom.
-    statement = prior.statement
-    rhs = _sb_bind_vector_prior_inputs(statement.args[3], prior.dependencies)
-    (; model=Base.merge(base, Expr(:call, :~, statement.args[2], rhs)),
-       inputs=[_sb_term_prior_input(d) => d for d in prior.dependencies])
+    _sb_merge_bound_vector_prior(base, prior)
 end
 
 # Only a vector prior's positional arguments read the caller: its keyword
@@ -4076,8 +4099,8 @@ function _sb_population_prior_rhs(priors; coefficients::Bool=false, mod::Module=
                 kwargs=(; beta_loc=Expr(:vect, beta_loc...),
                          beta_scale=Expr(:vect, beta_scale...)))
     end
-    (; model=_sb_population_prior_model(priors; coefficients, mod),
-       kwargs=NamedTuple())
+    configured = _sb_population_prior_model(priors; coefficients, mod)
+    (; model=configured.model, kwargs=(; configured.inputs...))
 end
 
 _sb_effect_prior_arg(x) = _sb_prior_arg(x)
@@ -10142,10 +10165,9 @@ function _sb_emit_cat!(stmts, data, target::Symbol, t::NamedColumn, summands;
         push!(stmts, :($col_name ~ _sb_cat_normal(;
             x=$idx_name, n_levels=$n_name, beta_loc=$loc, beta_scale=$scale)))
     else
-        model = _sb_cat_prior_model(prior, n_levels - 1; mod)
-        push!(stmts, Expr(:call, :~, col_name,
-            Expr(:call, model, Expr(:parameters,
-                Expr(:kw, :x, idx_name), Expr(:kw, :n_levels, n_name)))))
+        push!(stmts, Expr(:call, :~, col_name, _sb_configured_prior_call(
+            _sb_cat_prior_model(prior, n_levels - 1; mod),
+            :x => idx_name, :n_levels => n_name)))
     end
     push!(summands, col_name)
 end
@@ -10189,10 +10211,9 @@ function _sb_emit_cat_cells!(stmts, col_name::Symbol, idx_name::Symbol,
         push!(stmts, :($col_name ~ _sb_cat_cells_normal(;
             x=$idx_name, n_levels=$n_name, beta_loc=$loc, beta_scale=$scale)))
     else
-        model = _sb_cat_cells_prior_model(priors; mod)
-        push!(stmts, Expr(:call, :~, col_name,
-            Expr(:call, model, Expr(:parameters,
-                Expr(:kw, :x, idx_name), Expr(:kw, :n_levels, n_name)))))
+        push!(stmts, Expr(:call, :~, col_name, _sb_configured_prior_call(
+            _sb_cat_cells_prior_model(priors; mod),
+            :x => idx_name, :n_levels => n_name)))
     end
 end
 
