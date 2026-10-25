@@ -3556,6 +3556,9 @@ const _SB_THRESHOLD_LOCATED_KEY = :__brm_threshold_located__
 # value it removed (see `_sb_note_group_column!`). Settled once emission is
 # complete by `_sb_settle_group_columns!`.
 const _SB_GROUP_COLUMNS_KEY = :__brm_group_columns__
+# Row count of each `mi(...)` column, which never reaches the Stan data as
+# itself (see `_sb_observation_extent!`).
+const _SB_SKIPPED_ROWS_KEY = :__brm_skipped_rows__
 function _sb_record_binding!(data, key, role, logical; family=nothing, metadata...)
     bindings = get(data, _SB_BINDINGS_KEY, nothing)
     isnothing(bindings) || (bindings[key] = (; role, logical, family, metadata...))
@@ -4140,6 +4143,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     end
     nodes = Dict(node.name => node for node in _brm_prepared_nodes(prepared))
     prepass = context.prepass
+    data[_SB_SKIPPED_ROWS_KEY] = get(prepass, :skipped_rows, Dict{Symbol,Int}())
     # Hyper-predictor statements validate here (they need the term context)
     # and ride the `data` side-channel to their term's emitter; the statement
     # emitter skips them below.
@@ -4318,6 +4322,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     pop!(data, _SB_HYPER_PLANS_KEY, ())
     pop!(data, _SB_THRESHOLD_LOCATED_KEY)
     pop!(data, _SB_FRESH_COVARIATES_KEY, nothing)
+    pop!(data, _SB_SKIPPED_ROWS_KEY)
     preproc_ctx = pop!(data, _SB_PREPROC_KEY, Dict{Symbol,PreprocEntry}())
     preproc = preproc_ctx isa _SBPreprocContext ? preproc_ctx.recorded : preproc_ctx
     # Drop leaked non-Stan data (raw `CategoricalVector`/string predictor columns
@@ -5684,8 +5689,9 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         push!(handled, e.const_.n_key)
         impute || (new_preproc[key] = e)
     elseif e.kind === :axis_extent
-        # The row count of a model-scope `ragged(x, group)` axis that sizes `x`.
-        new_data[key] = _sb_reprocess_column_length(df, e.raw_ref, "declared row axis")
+        # The row count of a model-scope `ragged(x, group)` axis that sizes `x`,
+        # or of an `mi(y)` column that sizes an intercept-only predictor.
+        new_data[key] = _sb_reprocess_column_length(df, e.raw_ref, "row axis")
         new_preproc[key] = e
     elseif e.kind === :kernel_subject_count
         if e.const_ isa NamedTuple && get(e.const_, :from_data_length, false)
@@ -12930,7 +12936,8 @@ _sb_predictor_col(t::Int, data, _stmts, pop_terms=(); obs_n::Union{Symbol,Nothin
     #      path has `ran_terms` and no `group_idx`, the ranef path the reverse.
     #   2. The observation column threaded from the likelihood walker
     #      (`obs_n`). Covers purely-intercept formulas like `loc ~ 1` whose
-    #      length matches the observed `~` target consuming `loc`.
+    #      length matches the observed `~` target consuming `loc`, including an
+    #      `mi(y)` target, whose row count `_sb_observation_extent!` binds.
     #   2b. The per-row level index `<c>_idx` of a categorical peer whose raw
     #      levels are not numeric (a string-leveled `CategoricalVector`), which
     #      tier 1d's numeric guard rightly skips. Its own block emits that index
@@ -12954,13 +12961,31 @@ _sb_predictor_col(t::Int, data, _stmts, pop_terms=(); obs_n::Union{Symbol,Nothin
     isnothing(probe) && (probe = _sb_n_obs_probe_deep(direct_terms, data))
     isnothing(probe) && (probe = group_idx)
     isnothing(probe) && (probe = _sb_group_n_obs_probe(data, ran_terms))
-    isnothing(probe) && !isnothing(obs_n) && (probe = obs_n)
+    isnothing(probe) && !isnothing(obs_n) && (probe = _sb_observation_extent!(data, obs_n))
     isnothing(probe) && (probe = _sb_cat_index_probe(direct_terms))
     isnothing(probe) && (probe = _sb_any_data_symbol(data, target))
     probe_value = get(data, probe, nothing)
     extent = probe_value isa Integer && !(probe_value isa Bool) ?
         probe : :(num_elements($probe))
     :(rep_vector(1., $extent))
+end
+
+# Tier 2's observation source, as something the Stan data holds. An `mi(y)`
+# column never reaches the data as itself (its observation is emitted as
+# observed values plus missing coordinates), so an intercept-only predictor
+# that only such an observation sizes binds `y`'s row count as `n_rows_y`,
+# which replay recomputes from `y`'s length (`:axis_extent`).
+function _sb_observation_extent!(data, source::Symbol)
+    haskey(data, source) && return source
+    rows = get(get(data, _SB_SKIPPED_ROWS_KEY, Dict{Symbol,Int}()), source, nothing)
+    isnothing(rows) && return source
+    extent = Symbol(:n_rows_, source)
+    get(data, extent, rows) === rows || error(
+        "sbimpl: data column `$extent` collides with the row count BRM binds for ",
+        "`mi($source)`; rename that column")
+    data[extent] = rows
+    _sb_record_preproc!(data, extent, PreprocEntry(:axis_extent, nothing, source, false))
+    extent
 end
 _sb_predictor_col(t::NamedColumn, data, _stmts, _pop_terms=(); kwargs...) = _predictor_col_for(t, parent(t), data)
 
@@ -14268,7 +14293,8 @@ _sb_is_side_channel_key(k::Symbol) =
     k === _SB_PREPROC_KEY || k === _SB_BINDINGS_KEY ||
     k === _SB_THRESHOLD_LOCATED_KEY || k === _SB_HYPER_PLANS_KEY ||
     k === _SB_TOTAL_PLANS_KEY || k === _SB_S2Z_PLANS_KEY ||
-    k === _SB_HS_PLANS_KEY || k === _SB_GROUP_COLUMNS_KEY
+    k === _SB_HS_PLANS_KEY || k === _SB_GROUP_COLUMNS_KEY ||
+    k === _SB_SKIPPED_ROWS_KEY
 
 # Return `k` if `v` is a flat (non-ragged) vector, else `nothing` — replaces
 # the old `_is_flat_vec` Bool predicate so the caller composes via the

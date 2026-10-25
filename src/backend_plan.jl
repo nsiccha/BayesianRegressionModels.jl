@@ -254,8 +254,23 @@ _brm_register_sampling_lhs!(ctx::AbstractDict,
     _brm_register_skipped_inner!(ctx, only(getargs(lhs)))
 
 _brm_register_skipped_inner!(_, _) = nothing
-_brm_register_skipped_inner!(ctx::AbstractDict, inner::NamedColumn) =
-    (push!(get!(ctx, :skip_data, Set{Symbol}()), name(inner)); nothing)
+# A skipped column never reaches the materialized data as itself, yet it can be
+# the only observation that sizes an intercept-only predictor (`log(sigma) ~ 1`
+# read by `mi(y) ~ ...`), so its row count is recorded beside the skip.
+function _brm_register_skipped_inner!(ctx::AbstractDict, inner::NamedColumn)
+    push!(get!(ctx, :skip_data, Set{Symbol}()), name(inner))
+    rows = _brm_skipped_column_rows(parent(inner))
+    isnothing(rows) || (get!(ctx, :skipped_rows, Dict{Symbol,Int}())[name(inner)] = rows)
+    nothing
+end
+_brm_skipped_column_rows(backing::DataColumn) = _brm_skipped_column_rows(parent(backing))
+_brm_skipped_column_rows(raw::AbstractVector) = length(raw)
+_brm_skipped_column_rows(_) = nothing
+
+# The row count of observation source `source` when the backends materialize
+# it themselves (an `mi(...)` column), else `nothing`.
+_brm_skipped_observation_rows(context, source) =
+    get(get(context.prepass, :skipped_rows, Dict{Symbol,Int}()), source, nothing)
 
 # Multi-membership-only sources are Julia-side preprocessing inputs, not raw
 # backend data. A source also used elsewhere remains ordinary model data.

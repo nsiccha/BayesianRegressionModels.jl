@@ -161,6 +161,13 @@ end
 
 Base.@nospecializeinfer function _rk_model_predictor_geometry(@nospecialize(brmi::BRMI), context, target; kwargs...)
     data = copy(context.data)
+    # An `mi(...)` observation column never reaches the materialized data, yet
+    # it alone sizes an intercept-only predictor its likelihood reads
+    # (`log(sigma) ~ 1`). As for a modeled covariate below, that row axis is
+    # metadata, not executable values.
+    source = get(context.target_obs, target, nothing)
+    rows = isnothing(source) ? nothing : _brm_skipped_observation_rows(context, source)
+    isnothing(rows) || haskey(data, source) || (data[source] = Base.OneTo(rows))
     geometry_context = _BRMBackendContext(context.parent, data, context.prepass,
         context.target_obs, context.target_axes, context.term_priors,
         context.group_declarations)
