@@ -1184,7 +1184,7 @@ end
 
 function _rk_ast_gp_covariance!(definitions, taken, x, sigma, rho, period, jitter;
         periodic=false)
-    templates = StatisticalPreparation._GP_COVARIANCE_MODELS
+    templates = StatisticalPreparation._GP_FORMULA_COVARIANCE_MODELS
     pair = _rk_ast_statistical_call!(definitions, taken,
         :brm_gp_pair_locations, :x; kernel=true,
         template=templates.gp_pair_locations)
