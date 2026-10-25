@@ -14,7 +14,8 @@ using Random
 using StanBlocks
 using BayesianRegressionModels
 import BridgeStan
-using Distributions: ContinuousUnivariateDistribution, InverseGamma, logpdf
+import Distributions
+using Distributions: ContinuousUnivariateDistribution, InverseGamma
 const BRM = BayesianRegressionModels
 
 # A custom scale-prior family. SBBRMI lowers its configured `sd(...)` prior as a
@@ -26,8 +27,8 @@ struct SMScaledInvChiScale <: ContinuousUnivariateDistribution
     nu::Float64
     s::Float64
 end
-logpdf(d::SMScaledInvChiScale, tau::Real) = tau > 0 ?
-    logpdf(InverseGamma(d.nu / 2, d.nu * d.s^2 / 2), tau^2) + log(2 * tau) : -Inf
+Distributions.logpdf(d::SMScaledInvChiScale, tau::Real) = tau > 0 ?
+    Distributions.logpdf(InverseGamma(d.nu / 2, d.nu * d.s^2 / 2), tau^2) + log(2 * tau) : -Inf
 Base.minimum(::SMScaledInvChiScale) = 0.0
 Base.maximum(::SMScaledInvChiScale) = Inf
 BRM._sb_stan_dist_name(::Type{<:SMScaledInvChiScale}) = :sm_scaled_inv_chi_scale
