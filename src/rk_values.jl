@@ -281,6 +281,8 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
                 L=K == 1 || L_value !== nothing ? nothing : Symbol(draws, ".L"),
                 scale_priors=Tuple(priors)),
                 bucket.dist === nothing ? (;) : (; mixing=Symbol(draws, ".w")),
+                bucket.level_cor === nothing ? (;) :
+                    (; level_correlation=bucket.level_cor.name),
                 known || L_value !== nothing ?
                     (; known_scales=Tuple(p isa Real ? p : nothing for p in priors),
                        known_cor=bucket.known_cor) : (;)))

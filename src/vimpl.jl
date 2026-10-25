@@ -272,6 +272,9 @@ _normalize_group(g::ExprColumn{typeof(gr)}) = begin
     length(args) == 1 || error("gr(...) expects exactly one positional group, got $(length(args))")
     group = args[1]
     isnothing(_as_named_column(group)) && error("gr(...) expects a NamedColumn group, got $(typeof(group))")
+    haskey(kw, :cor) && error(
+        "VBRMI: `gr($(name(_as_named_column(group))); cor=...)` correlates the " *
+        "levels of a grouping, which VBRMI does not implement; use SBBRMI or RKBRMI")
     by = get(kw, :by, nothing)
     by === nothing && return group
     isnothing(_as_named_column(by)) && error("gr(...; by=...) expects a NamedColumn for `by`, got $(typeof(by))")

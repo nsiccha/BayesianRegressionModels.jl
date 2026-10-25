@@ -61,6 +61,8 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
         resample_groups=(), held_out=_rk_held_out_names(rk.plan))
     prefix = "RK reprocess"
     freeze_constants || return RKBRMI(_brm_rebind_brmi(parent(rk), new_data); held_out)
+    _rk_refuse_level_correlated_resample(parent(rk),
+        _rk_resample_group_set(resample_groups; prefix); prefix)
     # A data-free backend (`RKBRMI(brmi, state)`) replays from its fitted state.
     rk.fitted === nothing || return _rk_fitted_replay(brm_source(rk), new_data,
         _rk_fitted_state(rk); resample_groups, held_out, previous=rk, prefix)
@@ -148,6 +150,30 @@ _rk_replay_buckets(_plan) = ()
 # Plain blocks read their levels from a fit-role copy of the grouping column;
 # `mm(...)` and `gr(...; by=...)` blocks still read the bound columns' levels,
 # so a replay of their groups is refused unless they are resampled.
+# Correlated levels (`gr(g; cor=...)`, `hsgp(...; by=g, cor=...)`) share one
+# factor over the fitted level set; new levels would need a larger one.
+function _rk_refuse_level_correlated_resample(brmi, groups::Set{Symbol}; prefix)
+    isempty(groups) && return nothing
+    correlated = Symbol[_brm_grouping_column(d) for d in _brm_group_declarations(brmi)
+                        if !isnothing(_brm_declaration_level_cor(d))]
+    for predictor in linear_predictors(brmi)
+        operation = linear_predictor_op(brmi, predictor.name)
+        isnothing(operation) && continue
+        for term in _brm_additive_terms(last(getargs(operation, 2)))
+            term isa ExprColumn && getf(term) === hsgp || continue
+            kw = getkwargs(term)
+            haskey(kw, :cor) && push!(correlated, name(kw.by))
+        end
+    end
+    hit = sort!(collect(intersect(groups, correlated)))
+    isempty(hit) || error(
+        "$prefix: `resample_groups` names $(hit), whose levels are correlated " *
+        "(`gr(...; cor=...)` / `hsgp(...; by=..., cor=...)`): the correlation " *
+        "covers the fitted levels only, and new levels of a level-correlated " *
+        "grouping are not implemented")
+    nothing
+end
+
 function _rk_check_replay_groupings(plan, groups::Set{Symbol}; prefix)
     for bucket in _rk_replay_buckets(plan)
         bucket.decomposition === nothing || error(
