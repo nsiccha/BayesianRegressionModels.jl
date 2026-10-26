@@ -11,6 +11,7 @@
 # Run: julia --project=test test/derived_columns.jl [testset substrings...]
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using Random, Statistics
+using LogExpFunctions: logistic
 
 derived_shift(x::AbstractVector) = x .+ 0.5
 derived_codes(g::AbstractVector) = [findfirst(==(c), ["a", "b", "c", "d"]) for c in g]
@@ -289,4 +290,184 @@ end
         y ~ Normal(mu, sigma)
     end
     @test density(RKBRMI(builder(design), state)) ≈ reference atol=1e-10
+end
+
+# Every other site that reads a raw column, each against the same model given
+# the column as data.
+derived_side(h::AbstractVector) = [c == "u" ? 1 : 2 for c in h]
+derived_label(v::AbstractVector) = string.(v) .* "_x"
+sites = let n = N
+    (; t=flat.t, x=flat.x, g=flat.g, y=flat.y, h=["u", "v"][mod1.(1:n, 2)],
+        lo_raw=fill(-3.0, n), ny=rand(rng, 3:8, n), yp=exp.(randn(rng, n)),
+        time=collect(1.0:n), age=randn(rng, 4), sid=mod1.(1:n, 4),
+        rm=Float64.(flat.x .> 0), pid=repeat(1:6, inner=4),
+        day=repeat(4.0:-1.0:1.0, outer=6), from=[1, 2, 3], to=[2, 3, 4])
+end
+sites = merge(sites, (; ky=[rand(rng, 0:v) for v in sites.ny]))
+site_lev = derived_codes(sites.g)
+with(extra) = merge(sites, extra)
+
+@stestset "every other raw-column site reads a data-only assignment" begin
+    cases = [
+        ("uncorrelated ||",
+         (@brm sites begin sigma ~ Exponential(1); lev = derived_codes(g)
+            mu ~ 1 + (1 + x || lev); y ~ Normal(mu, sigma) end),
+         (@brm with((; lev=site_lev)) begin sigma ~ Exponential(1)
+            mu ~ 1 + (1 + x || lev); y ~ Normal(mu, sigma) end)),
+        ("shared |ID|",
+         (@brm sites begin lev = derived_codes(g); mu ~ 1 + (1 | p | lev)
+            log(sigma) ~ 1 + (1 | p | lev); y ~ Normal(mu, sigma) end),
+         (@brm with((; lev=site_lev)) begin mu ~ 1 + (1 | p | lev)
+            log(sigma) ~ 1 + (1 | p | lev); y ~ Normal(mu, sigma) end)),
+        ("stratum of gr(g, by = ...)",
+         (@brm sites begin sigma ~ Exponential(1); side = derived_side(h)
+            mu ~ 1 + (1 | gr(g, by = side)); y ~ Normal(mu, sigma) end),
+         (@brm with((; side=derived_side(sites.h))) begin sigma ~ Exponential(1)
+            mu ~ 1 + (1 | gr(g, by = side)); y ~ Normal(mu, sigma) end)),
+        ("group of gr(g, by = ...)",
+         (@brm sites begin sigma ~ Exponential(1); lev = derived_codes(g)
+            mu ~ 1 + (1 | gr(lev, by = h)); y ~ Normal(mu, sigma) end),
+         (@brm with((; lev=site_lev)) begin sigma ~ Exponential(1)
+            mu ~ 1 + (1 | gr(lev, by = h)); y ~ Normal(mu, sigma) end)),
+        ("multi-membership",
+         (@brm sites begin sigma ~ Exponential(1); lev = derived_codes(g)
+            lev2 = derived_same(reverse(lev)); mu ~ 1 + (1 | mm(lev, lev2))
+            y ~ Normal(mu, sigma) end),
+         (@brm with((; lev=site_lev, lev2=reverse(site_lev))) begin sigma ~ Exponential(1)
+            mu ~ 1 + (1 | mm(lev, lev2)); y ~ Normal(mu, sigma) end)),
+        ("spline",
+         (@brm sites begin sigma ~ Exponential(1); tt = derived_shift(t)
+            mu ~ 1 + s(tt); y ~ Normal(mu, sigma) end),
+         (@brm with((; tt=sites.t .+ 0.5)) begin sigma ~ Exponential(1)
+            mu ~ 1 + s(tt); y ~ Normal(mu, sigma) end)),
+        ("tensor spline",
+         (@brm sites begin sigma ~ Exponential(1); tt = derived_shift(t)
+            mu ~ 1 + t2(tt, x); y ~ Normal(mu, sigma) end),
+         (@brm with((; tt=sites.t .+ 0.5)) begin sigma ~ Exponential(1)
+            mu ~ 1 + t2(tt, x); y ~ Normal(mu, sigma) end)),
+        ("exact gp",
+         (@brm sites begin sigma ~ Exponential(1); tt = derived_shift(t)
+            mu ~ 1 + gp(tt); y ~ Normal(mu, sigma) end),
+         (@brm with((; tt=sites.t .+ 0.5)) begin sigma ~ Exponential(1)
+            mu ~ 1 + gp(tt); y ~ Normal(mu, sigma) end)),
+        ("hsgp data axis",
+         (@brm sites begin sigma ~ Exponential(1); tt = derived_shift(t)
+            mu ~ 1 + hsgp(tt; k = 5); y ~ Normal(mu, sigma) end),
+         (@brm with((; tt=sites.t .+ 0.5)) begin sigma ~ Exponential(1)
+            mu ~ 1 + hsgp(tt; k = 5); y ~ Normal(mu, sigma) end)),
+        ("hsgp rows mask",
+         (@brm sites begin sigma ~ Exponential(1); keep = derived_same(rm)
+            mu ~ 1 + hsgp(x; k = 4, rows = keep); y ~ Normal(mu, sigma) end),
+         (@brm with((; keep=copy(sites.rm))) begin sigma ~ Exponential(1)
+            mu ~ 1 + hsgp(x; k = 4, rows = keep); y ~ Normal(mu, sigma) end)),
+        ("measurement error",
+         (@brm sites begin sigma ~ Exponential(1); tt = derived_shift(t)
+            mu ~ 1 + me(tt, 0.2); y ~ Normal(mu, sigma) end),
+         (@brm with((; tt=sites.t .+ 0.5)) begin sigma ~ Exponential(1)
+            mu ~ 1 + me(tt, 0.2); y ~ Normal(mu, sigma) end)),
+        ("ar time",
+         (@brm sites begin sigma ~ Exponential(1); tm = derived_same(time)
+            mu ~ 1 + ar(tm; p = 1); y ~ Normal(mu, sigma) end),
+         (@brm with((; tm=copy(sites.time))) begin sigma ~ Exponential(1)
+            mu ~ 1 + ar(tm; p = 1); y ~ Normal(mu, sigma) end)),
+        ("dar time",
+         (@brm sites begin sigma ~ Exponential(1); tm = derived_same(time)
+            mu ~ 1 + dar(tm; p = 1); y ~ Normal(mu, sigma) end),
+         (@brm with((; tm=copy(sites.time))) begin sigma ~ Exponential(1)
+            mu ~ 1 + dar(tm; p = 1); y ~ Normal(mu, sigma) end)),
+        ("areal field",
+         (@brm sites begin sigma ~ Exponential(1); area = derived_codes(g)
+            mu ~ 1 + car(area; edges = (from, to), type = :icar); y ~ Normal(mu, sigma) end),
+         (@brm with((; area=site_lev)) begin sigma ~ Exponential(1)
+            mu ~ 1 + car(area; edges = (from, to), type = :icar); y ~ Normal(mu, sigma) end)),
+        ("indexed standardize",
+         (@brm sites begin sigma ~ Exponential(1); gi = derived_same(sid)
+            mu ~ 1 + x + standardize(age)[gi]; y ~ Normal(mu, sigma) end),
+         (@brm with((; gi=copy(sites.sid))) begin sigma ~ Exponential(1)
+            mu ~ 1 + x + standardize(age)[gi]; y ~ Normal(mu, sigma) end)),
+        ("factor reference",
+         (@brm sites begin sigma ~ Exponential(1); lev = derived_codes(g)
+            mu ~ 1 + factor(lev; ref = 2); y ~ Normal(mu, sigma) end),
+         (@brm with((; lev=site_lev)) begin sigma ~ Exponential(1)
+            mu ~ 1 + factor(lev; ref = 2); y ~ Normal(mu, sigma) end)),
+        ("bare categorical",
+         (@brm sites begin sigma ~ Exponential(1); cat = derived_label(g)
+            mu ~ 0 + cat; y ~ Normal(mu, sigma) end),
+         (@brm with((; cat=derived_label(sites.g))) begin sigma ~ Exponential(1)
+            mu ~ 0 + cat; y ~ Normal(mu, sigma) end)),
+        ("censoring bound",
+         (@brm sites begin sigma ~ Exponential(1); lo = derived_shift(lo_raw)
+            mu ~ 1 + x; y ~ censored(Normal(mu, sigma); lower = lo) end),
+         (@brm with((; lo=sites.lo_raw .+ 0.5)) begin sigma ~ Exponential(1)
+            mu ~ 1 + x; y ~ censored(Normal(mu, sigma); lower = lo) end)),
+        ("truncation bound",
+         (@brm sites begin sigma ~ Exponential(1); lo = derived_shift(lo_raw)
+            mu ~ 1 + x; y ~ truncated(Normal(mu, sigma), lo, 10.0) end),
+         (@brm with((; lo=sites.lo_raw .+ 0.5)) begin sigma ~ Exponential(1)
+            mu ~ 1 + x; y ~ truncated(Normal(mu, sigma), lo, 10.0) end)),
+        ("interval bound",
+         (@brm sites begin sigma ~ Exponential(1); up = derived_shift(y)
+            mu ~ 1 + x; y ~ interval_censored(Normal(mu, sigma); upper = up) end),
+         (@brm with((; up=sites.y .+ 0.5)) begin sigma ~ Exponential(1)
+            mu ~ 1 + x; y ~ interval_censored(Normal(mu, sigma); upper = up) end)),
+        ("trials",
+         (@brm sites begin nt = derived_same(ny); eta ~ 1 + x
+            ky ~ Binomial(nt, logistic(eta)) end),
+         (@brm with((; nt=copy(sites.ny))) begin eta ~ 1 + x
+            ky ~ Binomial(nt, logistic(eta)) end)),
+        ("observed response",
+         (@brm sites begin sigma ~ Exponential(1); ly = log(yp)
+            mu ~ 1 + x; ly ~ Normal(mu, sigma) end),
+         (@brm with((; ly=log.(sites.yp))) begin sigma ~ Exponential(1)
+            mu ~ 1 + x; ly ~ Normal(mu, sigma) end)),
+        ("plate over groups(g)",
+         (@brm sites begin sigma ~ Exponential(1); q = derived_same(pid); mu ~ 1 + x
+            @plate for p in groups(q); y[p] ~ Normal(mu[p], sigma); end end),
+         (@brm with((; q=copy(sites.pid))) begin sigma ~ Exponential(1); mu ~ 1 + x
+            @plate for p in groups(q); y[p] ~ Normal(mu[p], sigma); end end)),
+        ("plate order",
+         (@brm sites begin sigma ~ Exponential(1); dd = derived_same(day); mu ~ 1 + x
+            @plate for p in groups(pid; order = dd); y[p] ~ Normal(mu[p], sigma); end end),
+         (@brm with((; dd=copy(sites.day))) begin sigma ~ Exponential(1); mu ~ 1 + x
+            @plate for p in groups(pid; order = dd); y[p] ~ Normal(mu[p], sigma); end end)),
+    ]
+    for (label, derived, host) in cases
+        @testset "$label" begin
+            sb_same_program(derived, host)
+            rk_same_density(derived, host)
+        end
+    end
+end
+
+@stestset "grouping options and replays over a data-only grouping" begin
+    derived = @brm sites begin
+        sigma ~ Exponential(1)
+        lev = derived_codes(g)
+        mu ~ 1 + x + (1 | lev)
+        y ~ Normal(mu, sigma)
+    end
+    host = @brm with((; lev=site_lev)) begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 | lev)
+        y ~ Normal(mu, sigma)
+    end
+    for options in ((; cv_groups=(:lev,)), (; centered_groups=(:lev,)),
+            (; total_groups=()), (; s2z_groups=(:lev,), s2z_rho=0.5))
+        a, b = SBBRMI(derived; mod=@__MODULE__, options...), SBBRMI(host; mod=@__MODULE__, options...)
+        @test sprint(show, stan_code(a)) == sprint(show, stan_code(b))
+        @test stan_data(a) == stan_data(b)
+    end
+    design = (; t=flat.t[1:8], x=flat.x[1:8], g=["d", "c", "b", "a", "a", "b", "c", "d"],
+        y=flat.y[1:8], h=sites.h[1:8])
+    host_design = merge(design, (; lev=derived_codes(design.g)))
+    replayed = reprocess(SBBRMI(derived; mod=@__MODULE__), design)
+    expected = reprocess(SBBRMI(host; mod=@__MODULE__), host_design)
+    @test sprint(show, stan_code(replayed)) == sprint(show, stan_code(expected))
+    @test stan_data(replayed) == stan_data(expected)
+    rk, rkh = RKBRMI(derived), RKBRMI(host)
+    u = fill(0.1, rk.model.layout.total)
+    density(backend) = LogDensityProblems.logdensity(
+        rk_logdensity_problem(backend; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse)), u)
+    @test density(reprocess(rk, design; resample_groups=(:lev,))) ≈
+        density(reprocess(rkh, host_design; resample_groups=(:lev,))) atol=1e-10
 end

@@ -292,6 +292,19 @@ function _brm_data_assignment_value(x::ExprColumn, state, inputs)
     end
 end
 
+# The assignment an operation declares: the assignment itself, or the one an
+# observation statement observes under the same name (`ly = log(yp)` followed
+# by `ly ~ Normal(mu, sigma)` takes the name `ly` for the observation).
+_brm_assignment_column(_op) = nothing
+function _brm_assignment_column(op::NamedColumn)
+    payload = parent(op)
+    payload isa ExprColumn{typeof(assign)} && return op
+    payload isa ExprColumn{typeof(~)} || return nothing
+    lhs = first(getargs(payload))
+    lhs isa NamedColumn && name(lhs) === name(op) &&
+        parent(lhs) isa ExprColumn{typeof(assign)} ? lhs : nothing
+end
+
 function _brm_data_assignment!(state::_BRMDataAssignments, key::Symbol, rhs)
     haskey(state.values, key) && return state.values[key]
     key in state.unresolved && return nothing
@@ -320,8 +333,9 @@ Base.@nospecializeinfer function _brm_resolve_data_assignments(@nospecialize(brm
     state = _BRMDataAssignments(prefix)
     resolved = Any[]
     for (key, op) in _brm_operation_entries(brmi)
-        op isa NamedColumn && parent(op) isa ExprColumn{typeof(assign)} || continue
-        node = last(getargs(parent(op), 2))
+        assignment = _brm_assignment_column(op)
+        assignment === nothing && continue
+        node = last(getargs(parent(assignment), 2))
         value = _brm_data_assignment!(state, key, node)
         # A literal alone (`n = 3`) reads no data and stays a model constant.
         (value === nothing || isempty(state.inputs[key])) && continue
