@@ -4514,8 +4514,9 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
         _SBPreprocContext(Dict{Symbol,PreprocEntry}(), _frozen_preproc)
     data[_SB_BINDINGS_KEY] = Dict{Symbol,NamedTuple}()
     data[_SB_GROUP_COLUMNS_KEY] = Dict{Symbol,Union{Nothing,Some}}()
-    # `name = constant(expr)` becomes an ordinary data field before anything
-    # else reads the formula. Replay restores the fitted value from
+    # `name = constant(expr)` becomes an ordinary data field before the
+    # formula is lowered; only the prior addresses above are read first, and
+    # they leave a constant to this step. Replay restores the fitted value from
     # its `:constant` record instead of evaluating `expr` on the new data.
     brmi, constants = _brm_resolve_constants(brmi; prefix="sbimpl",
         fitted=(key, source) -> _sb_fitted_constant(data, key, source))

@@ -546,6 +546,14 @@ const LATER_COR = level_cor(LEVELS_LATER.t)
     for u in (zeros(n), fill(0.3, n), collect(range(-0.4, 0.4; length=n)))
         @test rk_value(problem, u) == rk_value(supplied, u)
     end
+    # refused: a block has one correlation for every frequency, so
+    # `multigroup(...)` is for a grouped `hsgp` only, whatever it wraps.
+    blocked = @brm begin
+        C = constant(level_cor(t))
+        mu ~ 1 + t + (1 + t | gr(g; cor=multigroup(C, 1.0)))
+        y ~ Normal(mu, 1.0)
+    end
+    @test_throws "is refused: `multigroup(...)`" SBBRMI(blocked(LEVELS); mod=@__MODULE__)
 end
 
 @stestset "replay keeps a fitted matrix constant" begin

@@ -391,17 +391,30 @@ _brm_level_cor_label(value::Tuple) =
 _brm_level_cor_label(value) = repr(value)
 
 # A random-effect block correlates whole levels with one correlation; the
-# multigroup coherence varies with frequency, which only an HSGP has.
-_brm_refuse_block_multigroup(::_BRMLevelCorrelation, _what) = nothing
-_brm_refuse_block_multigroup(lc::_BRMMultigroupCorrelation, what) = error(
+# multigroup coherence varies with frequency, which only an HSGP has. The
+# refusal names the base correlation to share when there is one.
+_brm_refuse_block_multigroup(base::Union{Symbol,Nothing}, what) = error(
     "BRM backend lowering: `$what` is refused: `multigroup(...)` makes the " *
     "level correlation depend on the basis frequency, which only a grouped " *
-    "`hsgp(...; by=..., cor=multigroup(...))` has. Give the block " *
-    "`cor = $(lc.base.name)` to share the same `Omega`")
-_brm_refuse_block_multigroup(::_BRMMultigroupCoordinates, what) = error(
-    "BRM backend lowering: `$what` is refused: `multigroup(...)` makes the " *
-    "level correlation depend on the basis frequency, which only a grouped " *
-    "`hsgp(...; by=..., cor=multigroup(...))` has")
+    "`hsgp(...; by=..., cor=multigroup(...))` has" *
+    (isnothing(base) ? "" : ". Give the block `cor = $base` to share the same `Omega`"))
+
+# Check the `cor=` of a random-effect block when the block is declared.
+# Declarations are read before a backend resolves the model's constants (prior
+# addresses resolve first, and `RKBRMI` keeps its parent's constants unresolved
+# for replay), so a correlation that names a `constant(...)` has no value yet:
+# the backend checks it when it lowers the block, as it checks a supplied
+# matrix. `multigroup(...)` is refused from its syntax alone, whatever it wraps.
+_brm_check_block_level_correlation(value; what) =
+    (_brm_level_correlation(value; what); nothing)
+_brm_check_block_level_correlation(value::NamedColumn; what) =
+    _brm_is_constant_declaration(parent(value)) ? nothing :
+        (_brm_level_correlation(value; what); nothing)
+function _brm_check_block_level_correlation(value::ExprColumn{typeof(multigroup)}; what)
+    args = getargs(value)
+    base = isempty(args) ? nothing : first(args)
+    _brm_refuse_block_multigroup(base isa NamedColumn ? name(base) : nothing, what)
+end
 
 # The one `cor=` shared by declarations that lower as one block. Every term of
 # a block must name the same correlation (or none): the block's levels are
