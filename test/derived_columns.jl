@@ -243,6 +243,34 @@ end
     rk_in_graph(rk, :key, (:pt_subject,))
 end
 
+@stestset "a plate's labels and a vector its cells read are data-only assignments" begin
+    cells = merge(panel, (; xo=collect(range(-1.0, 1.0; length=length(obs_subject)))))
+    derived = @brm cells begin
+        sigma ~ Exponential(1)
+        b ~ Normal(0, 1)
+        cell = derived_same(subject)
+        m ~ 1 + (1 | cell)
+        key = derived_same(obs_subject)
+        xs = derived_shift(xo)
+        rows = groups(key => cell)
+        @plate for i in eachindex(m)
+            y[rows[i]] ~ Normal(m[i] + b * sum(xs[rows[i]]), sigma)
+        end
+    end
+    host = @brm merge(cells, (; cell=copy(subject), key=copy(obs_subject),
+            xs=cells.xo .+ 0.5)) begin
+        sigma ~ Exponential(1)
+        b ~ Normal(0, 1)
+        m ~ 1 + (1 | cell)
+        rows = groups(key => cell)
+        @plate for i in eachindex(m)
+            y[rows[i]] ~ Normal(m[i] + b * sum(xs[rows[i]]), sigma)
+        end
+    end
+    sb_same_program(derived, host)
+    rk_same_density(derived, host)
+end
+
 @stestset "constants a data-only assignment reads are computed in the graph" begin
     covariate = [randn(rng, N - 2); NaN; NaN]
     data = merge(flat, (; z=covariate))
