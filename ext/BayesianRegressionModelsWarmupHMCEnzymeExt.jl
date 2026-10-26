@@ -149,4 +149,118 @@ function LogDensityProblems.logdensity_and_gradient(
     ljac + ld, gradient
 end
 
+# ---- Wider plans: one reverse pass over the map, block by block -------------
+#
+# Above K<=2, WarmupHMC differentiates the plan pair by pair: each pair's two
+# accessor calls go through Enzyme's generic reverse pass, which allocates its
+# tape per call. On ArbeitsplatzAtlas atlas-16 (26,402 pairs, widest block 6)
+# that was 23 MiB per gradient on the ordinary plan and 68 MiB when known-value
+# blocks put it on the joint plan; with four chains on threads, Julia's GC then
+# took 34-50 % of the wall time (snag warmuphmc-adapti-e35d58ad). The same
+# map, written block by block with each row walked inline as `_block_location`
+# walks it, reverses in one pass: 0.7 MiB there.
+#
+# It covers an ordinary plan wider than K<=2, and a joint plan whose cells are
+# all random-effect pairs (no HSGP, total, S2Z or car cells) of Gaussian blocks.
+# Every other plan keeps WarmupHMC's generic path. The log density is
+# WarmupHMC's own transform; the gradient equals the generic one to rounding,
+# not bitwise (the reverse pass sums the same terms in another order).
+const WidePairs{N} = Vector{Pair{Int,WarmupHMC.Reparametrization{
+    FloatCentering,FloatCentering,
+    Tuple{AC_EXT.BRMAdaptiveCenteringArgument{:location,N},
+          AC_EXT.BRMAdaptiveCenteringArgument{:log_scale,N}},
+}}}
+const JointPairs{N} = Vector{Pair{Int,WarmupHMC.Reparametrization{
+    FloatCentering,FloatCentering,
+    Tuple{AC_EXT.BRMJointAdaptiveCenteringArgument{:location,N},
+          AC_EXT.BRMJointAdaptiveCenteringArgument{:log_scale,N}},
+}}}
+
+function LogDensityProblems.logdensity_and_gradient(
+    problem::WarmupHMC.ReparametrizedProblem{
+        WarmupHMC.IndexedReparametrization{WidePairs{N}},P,B,
+    },
+    x::AbstractVector,
+) where {N,P,B}
+    _blockwise_logdensity_and_gradient(problem,
+        first(problem.reparametrizer.pairs).second.args[1].state, x)
+end
+
+function LogDensityProblems.logdensity_and_gradient(
+    problem::WarmupHMC.ReparametrizedProblem{
+        WarmupHMC.IndexedReparametrization{JointPairs{N}},P,B,
+    },
+    x::AbstractVector,
+) where {N,P,B}
+    state = first(problem.reparametrizer.pairs).second.args[1].state
+    if state.n_hsgp + state.n_scalar + length(state.car.sources) == 0 &&
+            !any(AC_EXT._block_mixed, state.ranef.blocks)
+        return _blockwise_logdensity_and_gradient(problem, state.ranef, x)
+    end
+    invoke(LogDensityProblems.logdensity_and_gradient,
+        Tuple{WarmupHMC.ReparametrizedProblem,AbstractVector}, problem, x)
+end
+
+function _blockwise_logdensity_and_gradient(problem, state, x)
+    ljac, y = problem.reparametrizer(x)
+    ld, model_gradient =
+        LogDensityProblems.logdensity_and_gradient(problem.problem, y)
+    position = convert(Vector{Float64}, x)
+    gradient = zeros(Float64, length(position))
+    Enzyme.autodiff(Enzyme.Reverse, _blockwise_objective, Enzyme.Active,
+        Enzyme.Duplicated(position, gradient), Enzyme.Const(state),
+        Enzyme.Const(model_gradient))
+    for index in eachindex(gradient)
+        index in state.effect_indices ||
+            (gradient[index] += model_gradient[index])
+    end
+    ljac + ld, gradient
+end
+
+# `sum(seed[i] * y[i]) + log|J|` over the plan's pairs, `y` the map of each pair
+# in WarmupHMC's per-pair spelling (`warmuphmc-use` §5c) with the location and
+# log-scale `_block_location` and the log-scale accessor compute. Only flat
+# arrays and an `NTuple{N}` of innovations are read inside the loops, the
+# Julia 1.10 rule `_block_location` states.
+function _blockwise_objective(x, state, seed)
+    acc = zero(eltype(x))
+    for bi in eachindex(state.blocks)
+        acc += _blockwise_objective(x, state, bi, seed)
+    end
+    acc
+end
+
+function _blockwise_objective(x, state::AC_EXT._BRMRanefCenteringState{N}, bi,
+                              seed) where {N}
+    T = eltype(x)
+    block = state.blocks[bi]
+    K = block.ranef.n_terms
+    t = block.target_c
+    lookup = state.pair_lookup[bi]
+    acc = zero(T)
+    for g in 1:block.ranef.n_groups
+        innovations = ntuple(_ -> zero(T), Val(N))
+        for j in 1:K
+            tau = AC_EXT._block_tau(x, block, j)
+            stick = one(T)
+            offset = (j - 1) * (j - 2) ÷ 2
+            m = zero(T)
+            for l in 1:j-1
+                z = AC_EXT._block_cpc(x, block, offset + l)
+                m += (tau * (stick * z)) * innovations[l]
+                stick *= sqrt(one(T) - z * z)
+            end
+            s = tau * stick
+            c = state.sources[lookup[j, g]]
+            index = block.effects[j, g]
+            u = x[index]
+            j < K && (innovations = Base.setindex(innovations, (u - c * m) / s^c, j))
+            log_scale = log(s)
+            acc += seed[index] * (t * m + (u - c * m) * exp(log_scale * (t - c)))
+            acc += log_scale * (t - c)
+        end
+    end
+    acc
+end
+
 end
