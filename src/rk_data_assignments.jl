@@ -17,12 +17,12 @@ function _rk_attach_data_assignments!(plan, assignments, constants)
 end
 _rk_attach_data_assignments!(plan::_RKUnconditionedPlan, _assignments, _constants) = plan
 
-_rk_plan_taken(plan::_RKStructuralPlan) = union(Set{Symbol}(keys(plan.columns)),
+_rk_plan_taken(plan::_RKStructuralPlan) = union!(Set{Symbol}(keys(plan.columns)),
     (d.name for d in plan.derived), (p.name for p in plan.parameters),
     (p.name for p in plan.predictors), (a.name for a in plan.assignments),
     (v.name for v in plan.vector_parameters))
-_rk_plan_taken(plan::_RKValuePlan) = union(_rk_plan_taken(plan.regression),
-    Set{Symbol}(keys(plan.columns)), (a.name for a in plan.assignments))
+_rk_plan_taken(plan::_RKValuePlan) = union!(_rk_plan_taken(plan.regression),
+    keys(plan.columns), (a.name for a in plan.assignments))
 
 function _rk_attach_data_assignments!(derived::Vector{_RKDerivedSpec}, columns,
         taken::Set{Symbol}, assignments, constants)
