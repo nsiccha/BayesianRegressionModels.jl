@@ -138,7 +138,12 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # latents) and a987c279a (LogExpFunctions 1.0.2 admitted). 6ab16f510 adds
 # cf9dde7ca (`prepare_ad_third`, third-order contractions D³f[v, v, ·], which
 # the per-unit Laplace gradient takes; snag prepared-third-o-1e44dcc9).
+# 8d29971f2 adds d5b22ec53 (a native matrix product with a non-strided
+# operand, such as a compact cell's row of a correlated group block, runs
+# an owned loop instead of LinearAlgebra's tiled generic `mul!`: ~2.8 KB
+# instead of ~89 KB per compact-cell gradient, which brm_svi_fit calls once
+# per batched subject; snag compact-cell-gra-ebf0a114).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "6ab16f510eb5bd055efa789529adba842836a962"
+rev = "8d29971f2c4f263aa781f4e52b1fe7d7ce31c2f8"
