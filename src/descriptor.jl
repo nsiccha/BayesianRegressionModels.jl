@@ -2917,13 +2917,19 @@ function _brm_categorical_effect_entry(plan, emitted_lp::Symbol,
     length(args) == 1 || return nothing
     predictor = _as_named_column(only(args))
     isnothing(predictor) && return nothing
-    ref = _as_integer(get(getkwargs(term), :ref, 1))
-    isnothing(ref) && return nothing
-    decode = ref == 1 ? identity :
-        level -> level == 1 ? ref : level == ref ? 1 : level
+    decode = _brm_factor_level_decoder(get(getkwargs(term), :ref, 1))
     _brm_categorical_effect_entry(
         plan, emitted_lp, name(lowered), name(predictor), decode; cellmeans)
 end
+
+# The fitted level each code of a releveled factor's record stands for. An
+# integer `ref=k` swaps codes `k` and 1 (`_sb_relevel_codes`), so decoding swaps
+# them back. A string `ref` names a level value: the record already holds the
+# level values with the reference first (`_sb_string_factor_levels`), so they
+# decode as they are.
+_brm_factor_level_decoder(ref::Integer) = ref == 1 ? identity :
+    level -> level == 1 ? ref : level == ref ? 1 : level
+_brm_factor_level_decoder(::AbstractString) = identity
 
 _brm_categorical_effect_entry(_plan, _emitted_lp::Symbol, _term;
                               cellmeans::Bool=false) = nothing
