@@ -1009,6 +1009,18 @@ against BridgeStan's own `diag(tau) * L`, the `adaptive_centering_controls`
 report, copy isolation, the declared fallback of a model without a correlated
 block, and a short WarmupHMC run that is checkpointed and resumed.
 
+`adaptive_centering_blockwise_gradient.jl` covers the block-level reverse pass
+that BRM's WarmupHMC/Enzyme extension runs for an ordinary plan wider than
+`K ≤ 2` and for a joint plan whose cells are all Gaussian random-effect pairs
+(snag `warmuphmc-adapti-e35d58ad`). On compiled toy models (three margins,
+a stratified `gr(g, by = b)` block, known correlations and SDs) it checks which
+plans take that pass and which keep WarmupHMC's generic per-pair path (Student-t
+mixing, HSGP cells), that the log density equals the generic path's exactly and
+the gradient to rounding, and that the pass allocates under a quarter of what
+the generic path does. It also checks the candidate-scoring frame, which builds
+a Gaussian block's factor once per block, bit for bit against the per-level
+frame.
+
 `adaptive_hsgp_centering.jl` checks pilot-selection under spectral underflow,
 the partial-coordinate Jacobian, Turing/Enzyme versus StanBlocks/BridgeStan
 density and gradient parity, physical constrained quantities, and the
