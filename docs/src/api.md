@@ -32,6 +32,7 @@ BayesianRegressionModels.@n
 BayesianRegressionModels.@x
 BayesianRegressionModels.@getproperty
 BayesianRegressionModels._brm
+BayesianRegressionModels.brm
 BayesianRegressionModels.parse!
 ```
 
