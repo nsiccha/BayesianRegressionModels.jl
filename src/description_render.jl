@@ -74,6 +74,13 @@ function _brmd_call_math(::typeof(StanBlocks.stan.builtin.to_matrix),args,_kwarg
 end
 _brmd_builtin_call(::typeof(StanBlocks.stan.builtin.to_matrix),c)=BRMDescriptionFragment(
     prose=(_brmd_text(c,:matrix_conversion),),covers=(c.id,))
+# StanBlocks' `reshape(v, m, n)` fills an m×n matrix column by column, as
+# `to_matrix(v, m, n)` does.
+_brmd_call_math(::typeof(StanBlocks.stan.builtin.reshape),args,kwargs,c) = length(args)==3 ?
+    _brmd_call_math(StanBlocks.stan.builtin.to_matrix,args,kwargs,c) :
+    "\\operatorname{"*_brmd_text(c,:math_reshape)*"}\\left("*join(args,",")*"\\right)"
+_brmd_builtin_call(::typeof(StanBlocks.stan.builtin.reshape),c)=length(c.arguments)==3 ?
+    BRMDescriptionFragment(prose=(_brmd_text(c,:matrix_reshape),),covers=(c.id,)) : nothing
 function _brmd_call_math(::typeof(StanBlocks.stan.builtin.rep_matrix),args,_kwargs,_c)
     length(args)==3 && return first(args)*"\\,\\mathbf1_{"*args[2]*"\\times "*args[3]*"}"
     "\\operatorname{rep}_{\\mathrm{matrix}}\\left("*join(args,",")*"\\right)"
@@ -176,6 +183,13 @@ _brmd_call_math(::typeof(logistic), args, _kwargs, _c) = "\\operatorname{logit}^
 _brmd_call_math(::typeof(StanBlocks.stan.builtin.inv_logit),args,_kwargs,_c) =
     "\\frac{1}{1+\\exp\\left(-"*only(args)*"\\right)}"
 _brmd_builtin_call(::typeof(StanBlocks.stan.builtin.inv_logit),c)=BRMDescriptionFragment(covers=(c.id,))
+# log1p(x) = log(1 + x), expm1(x) = exp(x) - 1: standard functions with their
+# standard names, elementwise when broadcast.
+_brmd_call_math(::typeof(log1p),args,_kwargs,_c) = "\\operatorname{log1p}\\left("*only(args)*"\\right)"
+_brmd_call_math(::typeof(expm1),args,_kwargs,_c) = "\\operatorname{expm1}\\left("*only(args)*"\\right)"
+for f in (log1p,expm1)
+    @eval _brmd_builtin_call(::$(typeof(f)),c)=BRMDescriptionFragment(covers=(c.id,))
+end
 for f in (StanBlocks.stan.builtin.max,StanBlocks.stan.builtin.min)
     op=f===StanBlocks.stan.builtin.max ? "max" : "min"
     @eval _brmd_call_math(::$(typeof(f)),args,_kwargs,_c) =
@@ -204,6 +218,9 @@ _brmd_law(::Type{<:Binomial}) = :binomial
 _brmd_law(::Type{<:BinomialLogit}) = :binomial_logit
 _brmd_law(::Type{<:Poisson}) = :poisson
 _brmd_law(::Type{<:NegativeBinomial}) = :negative_binomial
+_brmd_law(::Type{<:NegativeBinomial2}) = :negative_binomial_mean
+# A known value (`sd(...) = v`, `cor(:, ID) = R`) is the point mass at it.
+_brmd_law(::Type{<:Dirac}) = :point_mass
 _brmd_law(::Type{<:Dirichlet}) = :dirichlet
 _brmd_law(::Type{<:LKJCholesky}) = :lkj
 _brmd_law(::Type{<:Weibull}) = :weibull
@@ -219,6 +236,7 @@ for (name,law) in ((:normal,:normal_sd),(:std_normal,:standard_normal),
         (:gamma,:gamma_rate),(:beta,:beta),(:cauchy,:cauchy),(:student_t,:student_t_location_scale),
         (:bernoulli,:bernoulli),(:bernoulli_logit,:bernoulli_logit),
         (:binomial,:binomial),(:binomial_logit,:binomial_logit),(:poisson,:poisson),
+        (:neg_binomial_2,:negative_binomial_mean),
         (:dirichlet,:dirichlet),(:lkj_corr_cholesky,:lkj),(:weibull,:weibull),(:uniform,:uniform),(:inv_gamma,:inverse_gamma),
         (:multi_normal_cholesky,:mvnormal_cholesky))
     if isdefined(StanBlocks.stan.builtin,name)
@@ -240,6 +258,9 @@ _brmd_law_math(c,::Val{:lognormal_sd},a) = "\\operatorname{LogNormal}_{\\mathrm{
 _brmd_law_math(_c,::Val{:bernoulli_logit},a) = "\\operatorname{Bernoulli}(\\operatorname{logit}^{-1}(" * only(a) * "))"
 _brmd_law_math(_c,::Val{:binomial_logit},a) = "\\operatorname{Binomial}(" * a[1] * ",\\operatorname{logit}^{-1}(" * a[2] * "))"
 _brmd_law_math(_c,::Val{:lkj},a) = "\\operatorname{LKJCholesky}(" * join(a,",") * ")"
+_brmd_law_math(c,::Val{:negative_binomial_mean},a) = "\\operatorname{NegBinomial}_{\\mathrm{"*
+    _brmd_text(c,:math_mean_dispersion)*"}}(" * join(a,",") * ")"
+_brmd_law_math(_c,::Val{:point_mass},a) = "\\operatorname{Dirac}\\left(" * only(a) * "\\right)"
 # `brm_icar(node1, node2, comp_start, comp_size)`: the edge lists and component
 # segments are data, named rather than spelled out.
 _brmd_law_math(c,::Val{:icar},_a) = "\\operatorname{ICAR}(\\text{"*_brmd_text(c,:math_icar_edges)*
@@ -270,6 +291,7 @@ _brmd_law_prose(c,::Val{:student_t_location_scale}) = _brmd_text(c,:law_student_
 _brmd_law_prose(c,::Val{:affine}) = _brmd_text(c,:law_affine)
 _brmd_law_prose(c,::Val{:mvnormal_cholesky}) = _brmd_text(c,:law_mvnormal_cholesky)
 _brmd_law_prose(c,::Val{:exact_total}) = _brmd_text(c,:law_exact_total)
+_brmd_law_prose(c,::Val{:negative_binomial_mean}) = _brmd_text(c,:law_negative_binomial_mean)
 _brmd_law_prose(c,::Val{L}) where L = _brmd_text(c,:law_declared;law=L)
 
 # Children `(id..., :coordinate, i)` of a BRM-generated vector prior.
@@ -297,6 +319,7 @@ function _brmd_distribution_math(c,x::BRMDescriptionComponent)
         _brmd_distribution_math(c,x.arguments[3])*")"
     law===:exact_total && return _brmd_exact_total_math(
         brm_description_math(c,x.arguments[1]),haskey(x.keywords,:group_columns))
+    law===:point_mass && return _brmd_law_math(c,Val(law),(_brmd_point_mass_math(c,only(x.arguments)),))
     _brmd_law_math(c,Val(law),map(a -> brm_description_math(c,a),x.arguments))
 end
 _brmd_distribution_math(c,x) = brm_description_math(c,x)
@@ -516,18 +539,24 @@ function _brmd_builtin_call(::typeof(kernel),c)
     aliases=filter(b->b.role===:alias,c.bindings)
     definitions=String[]; notes=NamedTuple[]; counter=Ref(0)
     binding_prose=String[]
+    # A binding's value reads the enclosing model, never the cell's own names:
+    # `log_a` in `ragged(log_a, g, labels)` is the model's `log_a`.
+    outer=BRMDescriptionComponent(c.id,c.kind,c.callable,c.arguments,c.keywords,c.axes,
+        c.outputs,c.priors,c.fitted_constants,c.children,c.provenance,c.notation,
+        Tuple(b for b in c.bindings if b.role!==:alias))
     for (index,b) in enumerate(aliases)
         symbol="a_{"*string(c.provenance.description_number)*","*string(index)*"}"
         push!(notes,(;name=(:kernel_binding,c.id,b.name),symbol,
             meaning=_brmd_text(c,:kernel_input_meaning;name=b.name,owner=c.provenance.owner)))
-        value=_brmd_compact_expression(c,b.value,definitions,notes,counter;root=true)
-        localcontext=_brmd_render_context(c;notation=(c.notation...,notes...))
+        value=_brmd_compact_expression(outer,b.value,definitions,notes,counter;root=true)
+        localcontext=_brmd_render_context(outer;notation=(c.notation...,notes...))
         push!(definitions,_brmd_assignment_equation(localcontext,symbol,value))
         push!(binding_prose,_brmd_text(c,:kernel_input;name=b.name,symbol))
     end
     body=last(first(c.arguments).arguments)
     final=body isa BRMDescriptionComponent && body.callable===:block && !isempty(body.arguments) ? last(body.arguments) : body
-    readable=!(final isa BRMDescriptionComponent && final.kind===:syntax &&
+    # A cell that only observes collects no value (`nothing`): no K relation.
+    readable=!isnothing(final) && !(final isa BRMDescriptionComponent && final.kind===:syntax &&
         final.callable in (:if,:for,:while,:block))
     equations=readable ? (_brmd_assignment_equation(c,_brmd_kernel_math(c,c),final),) : ()
     BRMDescriptionFragment(prose=(_brmd_text(c,:kernel_mapping;owner=c.provenance.owner),binding_prose...),
@@ -922,15 +951,23 @@ _brmd_hsgp_level_prose(c,x::BRMDescriptionComponent)=x.callable===multigroup ?
         correlation=_brmd_level_correlation_name(x.arguments[1]),
         tau=_brmd_level_correlation_name(x.arguments[2])) :
     _brmd_text(c,:level_correlated_basis_weights;correlation=_brmd_level_correlation_name(x))
+# How a block's margins correlate (`_brmd_block_correlation`), as one sentence.
+_brmd_correlation_text(::Val{:estimated}) = :correlated_margins
+_brmd_correlation_text(::Val{:known}) = :known_correlation
+_brmd_correlation_text(::Val{:identity}) = :identity_correlation
+_brmd_correlation_text(::Val{:none}) = :uncorrelated_margins
 function _brmd_builtin_kind(::Val{:random_effect},c)
     k=c.keywords
     id=_brmd_block_math(c,c.id)
     subscript=k.by===nothing ? id : id*",s(i)"
     D="D_{"*subscript*"}"; omega="\\Omega_{"*subscript*"}"; L="L_{"*subscript*"}"; C="C_{"*subscript*"}"
-    covariance=k.correlated ? D*omega*D : D*"^2"
+    # A correlation held at the identity leaves the margins independent.
+    correlation=get(k,:correlation,k.correlated ? :estimated : :none)
+    correlated=correlation in (:estimated,:known)
+    covariance=correlated ? D*omega*D : D*"^2"
     prose=join((_brmd_text(c,:group_deviations;group=k.group,n_terms=k.n_terms,n_groups=k.n_groups),
         _brmd_text(c,k.shared ? :shared_covariance_block : :independent_covariance_block),
-        _brmd_text(c,k.correlated ? :correlated_margins : :uncorrelated_margins))," ")
+        _brmd_text(c,_brmd_correlation_text(Val(correlation))))," ")
     k.by===nothing || (prose*=" "*_brmd_text(c,:stratified_covariance))
     level=get(k,:level_correlation,nothing)
     isnothing(level) || (prose*=" "*_brmd_text(c,:level_correlated_groups;correlation=level))
@@ -947,10 +984,14 @@ function _brmd_builtin_kind(::Val{:random_effect},c)
     design=Tuple("\\mathbf z_{"*_brmd_escape(owner)*","*id*",j}=["*
         join((m.predictor!==owner ? "0" : m.coefficient===:Intercept ? "1" : brm_description_symbol(c,m.coefficient)
             for m in margins),",")*"]" for owner in unique(m.predictor for m in margins))
-    definition=k.correlated ? omega*"="*L*L*"^{\\mathsf T},\\quad "*C*"="*D*L : C*"="*D
+    definition=correlated ? omega*"="*L*L*"^{\\mathsf T},\\quad "*C*"="*D*L : C*"="*D
     BRMDescriptionFragment(prose=(prose,),equations=("\\mathbf b_{"*id*",i}"*law,mixture...,
         definition*",\\quad "*D*"=\\operatorname{diag}(\\mathrm{SD}_{"*subscript*"})",design...),covers=(c.id,))
 end
+# A known matrix (a correlation `cor(:, ID) = R`) keeps its rows and columns.
+_brmd_point_mass_math(c,x)=brm_description_math(c,x)
+_brmd_point_mass_math(c,x::NamedTuple)=haskey(x,:size) && haskey(x,:values) && length(x.size)==2 ?
+    _brmd_matrix_math(x) : brm_description_math(c,x)
 _brmd_matrix_math(x::NamedTuple)=begin
     rows,cols=x.size
     "\\begin{bmatrix}"*join((join((string(x.values[r+(j-1)*rows]) for j in 1:cols),"&") for r in 1:rows),"\\\\")*"\\end{bmatrix}"
@@ -1058,7 +1099,8 @@ function brm_description(d::BRMDescriptor; hooks=(),labels=Dict(),prior_anchors=
         b=group.block
         kwargs=(; group=b.group,id=b.id,n_terms=b.n_terms,n_groups=b.n_groups,
             levels=_brmd_snapshot(b.levels),margins=group.margins,
-            correlated=group.correlated,shared=group.shared,noncentered=b.noncentered,by=b.by,
+            correlated=group.correlated,correlation=group.correlation,
+            shared=group.shared,noncentered=b.noncentered,by=b.by,
             student_t_nu=_brmd_ranef_student_t_nu(group),
             level_correlation=_brmd_ranef_level_correlation(d,b))
         haskey(group,:total) && (kwargs=merge(kwargs,(;total=(:total_effect,group.total.binding.logical))))

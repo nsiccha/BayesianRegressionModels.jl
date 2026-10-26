@@ -518,6 +518,28 @@ It runs under the test project:
 julia --startup-file=no --project=test test/description_concatenation.jl
 ```
 
+`description_known_values.jl` describes random-effect blocks held at known
+values. A correlation held at the identity (`cor(:, ID) = I`) leaves the
+margins independent, with covariance D²; a known matrix is described as such.
+A known `sd(...) = v` or `cor(:, ID) = R` is the point mass `Dirac`, a
+described law with a matrix shown as a matrix, and the sampled scales of such
+a block are listed once, as its `sd` priors. It also checks the mean and
+dispersion of `NegativeBinomial2`, at top level and in a `@plate` cell. It runs
+under the test project:
+
+```sh
+julia --startup-file=no --project=test test/description_known_values.jl
+```
+
+`description_cell_functions.jl` describes the elementary functions a `@plate`
+cell's statements use: `log1p` and `expm1` by their standard names, and
+StanBlocks' `reshape(v, m, n)` as the column-major fill. It runs
+under the test project:
+
+```sh
+julia --startup-file=no --project=test test/description_cell_functions.jl
+```
+
 ## ODE solvers in kernel cells
 
 `rk_kernel_ode_cell.jl` runs the population-PK `@plate for` cell of
