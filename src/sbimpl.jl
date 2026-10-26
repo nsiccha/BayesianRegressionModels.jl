@@ -2812,6 +2812,124 @@ StanBlocks.@deffun begin
         return rv
     end
 
+    @stanonly brm_hsgp_multigroup_coordinate_weights(z::matrix[n_grid, m],
+            omega2::matrix[m, d], rho::vector[d], coordinates::matrix[n_levels, n_space],
+            center::vector[n_space], scale::vector[n_space], lambda::real,
+            k::int, method::int)::matrix[n_levels, m] = begin
+        rv::matrix[n_levels, m]
+        A::matrix[n_levels, k * n_space]
+        V::matrix[n_levels, n_grid ÷ k]
+        for b in 1:m
+            exponent = 0.
+            for axis in 1:d
+                exponent += rho[axis] * rho[axis] * omega2[b, axis]
+            end
+            r = lambda / sqrt(exponent)
+            for axis in 1:n_space
+                S::matrix[k, n_levels]
+                if method == 1
+                    # inducing points: the grid kernel's Cholesky solve
+                    h = sqrt(square(scale[axis]) + square(r / 1.5))
+                    Ka::matrix[k, k]
+                    for j in 1:k
+                        for i in 1:k
+                            Ka[i, j] = exp(-square(h * (i - j)) / (2 * square(r)))
+                        end
+                        Ka[j, j] = 1.000000001
+                    end
+                    # relative to the nearest grid point, which the
+                    # normalization cancels: finite at any range
+                    for i in 1:n_levels
+                        dx = coordinates[i, axis] - center[axis]
+                        shift = square(dx - h * (round(dx / h + (k + 1) / 2.) - (k + 1) / 2.))
+                        for p in 1:k
+                            S[p, i] = exp(-(square(dx - h * (p - (k + 1) / 2.)) - shift) /
+                                          (2 * square(r)))
+                        end
+                    end
+                    S = mdivide_left_tri_low(cholesky_decompose(Ka), S)
+                else
+                    # Hilbert space: the box's sine basis, spectrally weighted
+                    L = sqrt(square(scale[axis]) + square(3.2 * r))
+                    nu1 = 3.141592653589793 / (2 * L)
+                    for i in 1:n_levels
+                        for p in 1:k
+                            S[p, i] = sin(p * nu1 * (coordinates[i, axis] - center[axis] + L)) *
+                                exp(-square(r) / 4 * (square(p * nu1) - square(nu1)))
+                        end
+                    end
+                end
+                for i in 1:n_levels
+                    len = sqrt(dot_self(S[:, i]))
+                    for p in 1:k
+                        A[i, (axis - 1) * k + p] = S[p, i] / len
+                    end
+                end
+            end
+            # Contract the grid weights with the axes' features one axis at a
+            # time, axis 1 (the fastest index) first, as matrix products.
+            V = A[:, 1:k] * to_matrix(z[:, b], k, n_grid ÷ k)
+            n = n_grid ÷ k
+            for axis in 2:n_space
+                n = n ÷ k
+                for q in 1:n
+                    V[:, q] = rows_dot_product(A[:, ((axis - 1) * k + 1):(axis * k)],
+                                               V[:, (k * (q - 1) + 1):(k * q)])
+                end
+            end
+            rv[:, b] = V[:, 1]
+        end
+        return rv
+    end
+
+    @stanonly brm_hsgp_multigroup_inducing_weights(z::matrix[n_points, m],
+            omega2::matrix[m, d], rho::vector[d], coordinates::matrix[n_levels, n_space],
+            positions::matrix[n_points, n_space], lambda::real)::matrix[n_levels, m] = begin
+        rv::matrix[n_levels, m]
+        Kuu::matrix[n_points, n_points]
+        S::matrix[n_points, n_levels]
+        for b in 1:m
+            exponent = 0.
+            for axis in 1:d
+                exponent += rho[axis] * rho[axis] * omega2[b, axis]
+            end
+            r2 = square(lambda) / exponent
+            for q in 1:n_points
+                for p in 1:n_points
+                    t = 0.
+                    for axis in 1:n_space
+                        t += square(positions[p, axis] - positions[q, axis])
+                    end
+                    Kuu[p, q] = exp(-t / (2 * r2))
+                end
+                Kuu[q, q] = 1.00000001
+            end
+            for i in 1:n_levels
+                for p in 1:n_points
+                    t = 0.
+                    for axis in 1:n_space
+                        t += square(coordinates[i, axis] - positions[p, axis])
+                    end
+                    S[p, i] = t
+                end
+                # relative to the nearest position, which the normalization
+                # cancels: finite at any range
+                shift = S[1, i]
+                for p in 2:n_points
+                    shift = fmin(shift, S[p, i])
+                end
+                for p in 1:n_points
+                    S[p, i] = exp(-(S[p, i] - shift) / (2 * r2))
+                end
+            end
+            S = mdivide_left_tri_low(cholesky_decompose(Kuu), S)
+            for i in 1:n_levels
+                rv[i, b] = dot_product(S[:, i], z[:, b]) / sqrt(dot_self(S[:, i]))
+            end
+        end
+        return rv
+    end
+
     @stanonly brm_hsgp_log_sqrt_spd(omega2::matrix[m, d], sigma::real,
                                      rho::vector[d])::vector[m] = begin
         rv::vector[m]
@@ -3135,19 +3253,59 @@ _sb_hsgp_by_aniso_levelcor = _sb_level_correlated_input(_sb_hsgp_by_aniso, :beta
 # coherence `C_b` (`brm_hsgp_multigroup_weights`, src/level_correlation.jl). It
 # reads the length scale, so the weights are formed just before the first
 # statement that reads `input`, after `rho` exists.
-function _sb_multigroup_input(base::StanBlocks.SlicModel, input::Symbol)
+function _sb_multigroup_input(base::StanBlocks.SlicModel, input::Symbol,
+        weights=:(brm_hsgp_multigroup_weights($input, omega2, rho, L_level, tau_level)))
     level = Symbol(input, :_level)
     reads(x) = x === input || (x isa Expr && any(reads, x.args))
     substitute(x) = x === input ? level :
         x isa Expr ? Expr(x.head, map(substitute, x.args)...) : x
     stmts = base.model.args
     at = findfirst(reads, stmts)
-    weights = :($level = brm_hsgp_multigroup_weights($input, omega2, rho, L_level, tau_level))
-    body = Expr(:block, stmts[1:at-1]..., weights, map(substitute, stmts[at:end])...)
+    body = Expr(:block, stmts[1:at-1]..., :($level = $weights),
+                map(substitute, stmts[at:end])...)
     StanBlocks.SlicModel(body, base.data, base.mod, base.observations)
 end
 _sb_hsgp_by_multigroup = _sb_multigroup_input(_sb_hsgp_by, :beta)
 _sb_hsgp_by_aniso_multigroup = _sb_multigroup_input(_sb_hsgp_by_aniso, :beta)
+
+# `cor=multigroup(coordinates, lambda; k)`: `beta` is the `k^D x n_basis`
+# standardized weights on the inducing grid, and each basis column's level
+# weights come from the coordinate coherence of that frequency
+# (`brm_hsgp_multigroup_coordinate_weights`, src/rk_statistical.jl).
+const _SB_MULTIGROUP_COORDINATE_WEIGHTS = :(brm_hsgp_multigroup_coordinate_weights(
+    beta, omega2, rho, coordinates_level, center_level, scale_level, lambda_level,
+    k_level, method_level))
+_sb_hsgp_by_multigroup_coordinates =
+    _sb_multigroup_input(_sb_hsgp_by, :beta, _SB_MULTIGROUP_COORDINATE_WEIGHTS)
+_sb_hsgp_by_aniso_multigroup_coordinates =
+    _sb_multigroup_input(_sb_hsgp_by_aniso, :beta, _SB_MULTIGROUP_COORDINATE_WEIGHTS)
+# `multigroup(coordinates, lambda; method = :inducing, inducing = (ux, uy))`:
+# `beta` is one row of standardized weights per free inducing position
+# (`brm_hsgp_multigroup_inducing_weights`, src/rk_statistical.jl).
+const _SB_MULTIGROUP_INDUCING_WEIGHTS = :(brm_hsgp_multigroup_inducing_weights(
+    beta, omega2, rho, coordinates_level, positions_level, lambda_level))
+_sb_hsgp_by_multigroup_inducing =
+    _sb_multigroup_input(_sb_hsgp_by, :beta, _SB_MULTIGROUP_INDUCING_WEIGHTS)
+_sb_hsgp_by_aniso_multigroup_inducing =
+    _sb_multigroup_input(_sb_hsgp_by_aniso, :beta, _SB_MULTIGROUP_INDUCING_WEIGHTS)
+# `multigroup((x, y); k)`, `lambda` left out: the term declares its own spatial
+# scale, log-normal around the coordinates' extent and bounded below where the
+# basis resolves every frequency that matters (decision `100gkpq`).
+function _sb_multigroup_own_lambda(base::StanBlocks.SlicModel)
+    rename(x) = x === :lambda_level ? :lambda :
+        x isa Expr ? Expr(x.head, map(rename, x.args)...) : x
+    body = Expr(:block, :(lambda ~ lognormal(lambda_location, 1.; lower=lambda_lower)),
+                map(rename, base.model.args)...)
+    StanBlocks.SlicModel(body, base.data, base.mod, base.observations)
+end
+_sb_hsgp_by_multigroup_coordinates_lambda =
+    _sb_multigroup_own_lambda(_sb_hsgp_by_multigroup_coordinates)
+_sb_hsgp_by_aniso_multigroup_coordinates_lambda =
+    _sb_multigroup_own_lambda(_sb_hsgp_by_aniso_multigroup_coordinates)
+_sb_hsgp_by_multigroup_inducing_lambda =
+    _sb_multigroup_own_lambda(_sb_hsgp_by_multigroup_inducing)
+_sb_hsgp_by_aniso_multigroup_inducing_lambda =
+    _sb_multigroup_own_lambda(_sb_hsgp_by_aniso_multigroup_inducing)
 
 # Categorical -> (n_levels::Int, per-row level index::Vector{Int}). Mirrors
 # vimpl._level_index so the integer indices the walker stashes in `data`
@@ -9959,6 +10117,20 @@ _sb_gp_submodel(::Val{:_sb_hsgp_by_levelcor}) = _sb_hsgp_by_levelcor
 _sb_gp_submodel(::Val{:_sb_hsgp_by_aniso_levelcor}) = _sb_hsgp_by_aniso_levelcor
 _sb_gp_submodel(::Val{:_sb_hsgp_by_multigroup}) = _sb_hsgp_by_multigroup
 _sb_gp_submodel(::Val{:_sb_hsgp_by_aniso_multigroup}) = _sb_hsgp_by_aniso_multigroup
+_sb_gp_submodel(::Val{:_sb_hsgp_by_multigroup_coordinates}) = _sb_hsgp_by_multigroup_coordinates
+_sb_gp_submodel(::Val{:_sb_hsgp_by_aniso_multigroup_coordinates}) =
+    _sb_hsgp_by_aniso_multigroup_coordinates
+_sb_gp_submodel(::Val{:_sb_hsgp_by_multigroup_inducing}) = _sb_hsgp_by_multigroup_inducing
+_sb_gp_submodel(::Val{:_sb_hsgp_by_aniso_multigroup_inducing}) =
+    _sb_hsgp_by_aniso_multigroup_inducing
+_sb_gp_submodel(::Val{:_sb_hsgp_by_multigroup_coordinates_lambda}) =
+    _sb_hsgp_by_multigroup_coordinates_lambda
+_sb_gp_submodel(::Val{:_sb_hsgp_by_aniso_multigroup_coordinates_lambda}) =
+    _sb_hsgp_by_aniso_multigroup_coordinates_lambda
+_sb_gp_submodel(::Val{:_sb_hsgp_by_multigroup_inducing_lambda}) =
+    _sb_hsgp_by_multigroup_inducing_lambda
+_sb_gp_submodel(::Val{:_sb_hsgp_by_aniso_multigroup_inducing_lambda}) =
+    _sb_hsgp_by_aniso_multigroup_inducing_lambda
 _sb_gp_submodel(::Val{:_sb_hsgp_latent}) = _sb_hsgp_latent
 _sb_gp_submodel(::Val{:_sb_hsgp_latent_orthogonal}) = _sb_hsgp_latent_orthogonal
 _sb_gp_submodel(::Val{:_sb_gp_periodic}) = _sb_gp_periodic
@@ -9976,6 +10148,14 @@ _sb_gp_rho_lhs(::Val{:_sb_hsgp_by_levelcor}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_by_aniso_levelcor}) = :(rho :: vector[n_axes])
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_by_multigroup}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_by_aniso_multigroup}) = :(rho :: vector[n_axes])
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_by_multigroup_coordinates}) = :rho_iso
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_by_aniso_multigroup_coordinates}) = :(rho :: vector[n_axes])
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_by_multigroup_inducing}) = :rho_iso
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_by_aniso_multigroup_inducing}) = :(rho :: vector[n_axes])
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_by_multigroup_coordinates_lambda}) = :rho_iso
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_by_aniso_multigroup_coordinates_lambda}) = :(rho :: vector[n_axes])
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_by_multigroup_inducing_lambda}) = :rho_iso
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_by_aniso_multigroup_inducing_lambda}) = :(rho :: vector[n_axes])
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_latent}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_latent_orthogonal}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_gp_periodic}) = :rho
@@ -12282,6 +12462,13 @@ function _sb_emit_group_blocks!(stmts, data, gb_terms)
             data[n_terms_name] = field.n_per_group
             _sb_record_static!(data, n_terms_name)
             idx_name, n_name = _sb_ensure_group_data!(data, group_col)
+            # A field may draw a fixed number of rows (`n_rows`) instead of one
+            # per level; the term still reads the grouping's index.
+            if haskey(field, :n_rows)
+                n_name = Symbol(:n_rows_, suffix)
+                data[n_name] = field.n_rows
+                _sb_record_static!(data, n_name)
+            end
             _sb_emit_block_draw!(stmts, field.prior, block_name, idx_name, n_name, n_terms_name, suffix)
             info = allocated[suffix] = (; block_name, idx_name, n_per_group=field.n_per_group)
         end
@@ -12574,6 +12761,66 @@ _sb_hsgp_level_arguments!(data, lc::_BRMLevelCorrelation) =
     (; L_level=_sb_level_correlation_factor!(data, lc))
 _sb_hsgp_level_arguments!(data, lc::_BRMMultigroupCorrelation) =
     (; L_level=_sb_level_correlation_factor!(data, lc.base), tau_level=lc.tau)
+function _sb_hsgp_level_submodel(lc::_BRMMultigroupCoordinates, iso)
+    base = Symbol(:_sb_hsgp_by_, iso ? "" : "aniso_", :multigroup_,
+                  isempty(lc.positions) ? :coordinates : :inducing)
+    isnothing(lc.lambda) ? Symbol(base, :_lambda) : base
+end
+# The coordinates and the grid geometry they fit are data, computed once in
+# Julia and replayed frozen, like a known correlation's factor. Free inducing
+# positions are data the same way, or the declared vector parameters by name.
+function _sb_hsgp_level_arguments!(data, lc::_BRMMultigroupCoordinates)
+    stem = Symbol(:multigroup_, join(lc.axes, "_"))
+    isempty(lc.positions) || return (;
+        coordinates_level=_sb_static_level_datum!(data, Symbol(stem, :_coordinates),
+                                                  lc.coordinates),
+        positions_level=_sb_multigroup_positions!(data, stem, lc),
+        _sb_multigroup_lambda!(data, Symbol(stem, :_inducing_,
+            join((p.name for p in lc.positions), "_")), stem, lc)...)
+    method = _brm_multigroup_method_code(lc.method)
+    center, scale, _ = brm_multigroup_coordinate_grid(lc.coordinates, lc.k, method, lc.c)
+    # One grid per method, size and (for a box) factor: `multigroup_x_y_inducing20`.
+    grid = Symbol(stem, :_, lc.method, lc.k,
+                  lc.method === :hsgp ? "_c" * replace(string(lc.c), "." => "p") : "")
+    (; coordinates_level=_sb_static_level_datum!(data, Symbol(stem, :_coordinates),
+                                                 lc.coordinates),
+       center_level=_sb_static_level_datum!(data, Symbol(grid, :_center), center),
+       scale_level=_sb_static_level_datum!(data, Symbol(grid, :_scale), scale),
+       _sb_multigroup_lambda!(data, grid, stem, lc)..., k_level=lc.k, method_level=method)
+end
+# The spatial scale: the declared parameter or constant, or the term's own
+# prior's location (per coordinates) and lower bound (per approximation).
+function _sb_multigroup_lambda!(data, approximation, stem, lc)
+    isnothing(lc.lambda) || return (; lambda_level=lc.lambda)
+    (; location, lower) = _brm_multigroup_default_lambda(lc)
+    (; lambda_location=_sb_static_level_datum!(data, Symbol(stem, :_lambda_location), location),
+       lambda_lower=_sb_static_level_datum!(data, Symbol(approximation, :_lambda_lower), lower))
+end
+# The positions as one points × axes matrix: a data matrix when every axis is
+# data, else the axes (data vectors or declared vector parameters) side by side.
+function _sb_multigroup_positions!(data, stem, lc)
+    names = join((position.name for position in lc.positions), "_")
+    all(position -> !isnothing(position.values), lc.positions) &&
+        return _sb_static_level_datum!(data, Symbol(stem, :_inducing_, names),
+                                       reduce(hcat, (p.values for p in lc.positions)))
+    columns = map(lc.positions) do position
+        isnothing(position.values) ? position.name :
+            _sb_static_level_datum!(data, Symbol(stem, :_inducing_, position.name),
+                                    position.values)
+    end
+    length(columns) == 1 && return :(to_matrix($(only(columns)), $(lc.n_points), 1))
+    foldl((a, b) -> :(append_col($a, $b)), columns)
+end
+function _sb_static_level_datum!(data, key, value)
+    if haskey(data, key)
+        data[key] == value || error(
+            "sbimpl: data key `$key` is already taken by another value")
+    else
+        data[key] = value
+        _sb_record_static!(data, key)
+    end
+    key
+end
 
 _sb_level_correlation_factor!(data, lc::_BRMLevelCorrelation) =
     _sb_level_correlation_factor!(data, lc, Val(lc.kind))
@@ -14344,7 +14591,13 @@ function _sb_term_group_block(::typeof(hsgp), call)
     names = Tuple(name(_sb_named_inner(:hsgp, a)) for a in args)
     K, _ = _sb_hsgp_options(kw, length(args))
     fname = Symbol(:hsgpw_, join(string.(names), "_"))
-    (; fields=[(; name=fname, n_per_group=prod(K), group=(; kwarg=:by), prior=:iid_normal)])
+    field = (; name=fname, n_per_group=prod(K), group=(; kwarg=:by), prior=:iid_normal)
+    # `cor = multigroup(coordinates, lambda; k)` draws its standardized weights
+    # on the `k^D` inducing grid instead of per level (src/level_correlation.jl).
+    cor = get(kw, :cor, nothing)
+    _brm_multigroup_coordinates_form(cor) &&
+        (field = merge(field, (; n_rows=_brm_multigroup_grid_size(cor))))
+    (; fields=[field])
 end
 
 # `ar(time; p=1)` AR(1) residual submodel. Routes to `_sb_ar1`, which owns the

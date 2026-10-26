@@ -348,12 +348,18 @@ function _rk_ast_hsgp_value_graph!(definitions, term, taken, inputs, sigma, rho,
         push!(body.args, Expr(:(=), Expr(:tuple, :PHI, :omega2),
             Expr(:call, basis, formals...)))
     end
-    # `cor=multigroup(Omega, tau)`: the group weights of each basis frequency
-    # are correlated by its multigroup coherence (src/level_correlation.jl).
+    # `cor=multigroup(...)`: the group weights of each basis frequency are
+    # correlated by its multigroup coherence (src/level_correlation.jl); the
+    # level-correlation emitter supplies the statement (src/rk_structured.jl).
     zw = :z
     if multigroup !== nothing
-        push!(body.args,
-            :(z_multigroup = brm_hsgp_multigroup_weights(z, omega2, rho, L_level, tau_level)))
+        weights = multigroup.weights
+        if Meta.isexpr(weights, :block)
+            statements = filter(x -> !(x isa LineNumberNode), weights.args)
+            append!(body.args, statements[1:end-1])
+            weights = last(statements)
+        end
+        push!(body.args, :(z_multigroup = $weights))
         zw = :z_multigroup
     end
     if group_index === nothing
@@ -383,12 +389,12 @@ function _rk_ast_hsgp_value_graph!(definitions, term, taken, inputs, sigma, rho,
             :(value = vec(sum(PHI .* rows; dims=2))), Expr(:return,:value))
     end
     # The call below passes these last, after `group_index`.
-    multigroup === nothing || append!(arguments, (:L_level, :tau_level))
+    multigroup === nothing || append!(arguments, multigroup.formals)
     # Terms with the same spectral shape share one explicit numerical graph.
     entry = _rk_ast_shared_definition!(definitions, taken, "brm_hsgp_spectral_graph",
         arguments, body; kernel=true)
     values = [last.(inputs)..., sigma, rho, z]
     group_index === nothing || push!(values, group_index)
-    multigroup === nothing || push!(values, multigroup.L, multigroup.tau)
+    multigroup === nothing || append!(values, multigroup.values)
     Expr(:call, entry, values...)
 end
