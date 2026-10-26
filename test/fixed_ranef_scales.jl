@@ -506,9 +506,10 @@ end
     known = [p for p in description.priors if get(p.source, :kind, nothing) === :known]
     @test length(known) == 1
 
-    # refused: NLMEEstimation cannot hold a covariance family fixed yet
-    # (NLMEEstimation snag `fixed-omega-fami-a1322422`).
-    @test_throws "fixed-omega-fami-a1322422" brm_nlme_view(RKBRMI(mixed_builder(DF)))
+    # Known gap: NLMEEstimation holds families fixed (`FixedOmega`), but
+    # brm_nlme_view does not hand it known-value blocks yet (todo
+    # 2026-10-16T18-16-39-760-0840h34).
+    @test_broken (brm_nlme_view(RKBRMI(mixed_builder(DF))); true)
     # Adaptive centering describes a known-value block in derived-scale form:
     # a known SD is a constant log-scale, a sampled one its coordinate, and a
     # known correlation a constant factor with no Cholesky coordinates.

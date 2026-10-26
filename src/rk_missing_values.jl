@@ -11,7 +11,14 @@ struct _RKMissingValueSpec
     missing_mask::Symbol
     nmissing::Int
     distribution::_BRMPreparedExpr
+    # Sample a standard normal draw per missing value and compute the value
+    # from its law's location and scale (`RKBRMI(...; completions=:noncentered)`).
+    noncentered::Bool
 end
+_RKMissingValueSpec(source, observed, observed_rows, missing_rows, observed_component,
+        missing_lookup, missing_mask, nmissing, distribution) =
+    _RKMissingValueSpec(source, observed, observed_rows, missing_rows, observed_component,
+        missing_lookup, missing_mask, nmissing, distribution, false)
 
 function _rk_mi_predictor_plan(term::NamedColumn)
     operation = parent(term)
@@ -251,6 +258,9 @@ function _rk_prepare_missing_value!(columns, taken, observation, program, comple
         nothing, observation.weight, nothing)
 end
 
+# Emits the completion block and returns the name of the block local that
+# holds its sampled coordinates (`y_mis`, or `z_mis` when non-centered), or
+# `nothing` when nothing is missing.
 function _rk_emit_missing_value!(definitions, statements, bindings, taken, completion)
     geometry = _rk_ast_statistical_call!(definitions, taken,
         :brm_covariate_geometry, completion.observed, completion.observed_rows,
@@ -262,19 +272,36 @@ function _rk_emit_missing_value!(definitions, statements, bindings, taken, compl
         return nothing
     end
     distribution = _rk_mi_gather(completion.distribution, completion.missing_rows)
-    law = _rk_ast_value_distribution(distribution, bindings, taken)
     # One block, as StanBlocks' `_sb_mi_response`: the missing entries with
     # their law, completed onto the covariate's original row axis. The
     # declared dimensions belong to the missing-row axis; unlike an
     # observation broadcast, the statement samples that independent array.
-    block = _rk_block_body(law)
+    if completion.noncentered
+        # `y_mis = location .+ scale .* z_mis` (`exp.(…)` for LogNormal),
+        # `z_mis ~ N(0, 1)`: the same law, in standardized coordinates.
+        location, scale = map(arg -> _rk_value_expr!(bindings, arg, taken), distribution.args)
+        block = _rk_block_body(location, scale)
+    else
+        law = _rk_ast_value_distribution(distribution, bindings, taken)
+        block = _rk_block_body(law)
+    end
     observed = _rk_block_argument!(block, :observed, completion.observed_component)
     rows = _rk_block_argument!(block, :rows, completion.missing_rows)
     lookup = _rk_block_argument!(block, :lookup, completion.missing_lookup)
     mask = _rk_block_argument!(block, :mask, completion.missing_mask)
-    missing = _rk_block_local!(block, :y_mis)
-    push!(block.statements, Expr(:call, :.~,
-        Expr(:ref, missing, Expr(:call, :axes, rows, 1)), law))
+    if completion.noncentered
+        sampled = _rk_block_local!(block, :z_mis)
+        push!(block.statements, Expr(:call, :.~,
+            Expr(:ref, sampled, Expr(:call, :axes, rows, 1)), _rk_ast_dotted(:Normal, 0, 1)))
+        missing = _rk_block_local!(block, :y_mis)
+        value = Expr(:call, :.+, location, Expr(:call, :.*, scale, sampled))
+        push!(block.statements, Expr(:(=), missing,
+            distribution.callable === LogNormal ? _rk_ast_dotted(:exp, value) : value))
+    else
+        missing = sampled = _rk_block_local!(block, :y_mis)
+        push!(block.statements, Expr(:call, :.~,
+            Expr(:ref, missing, Expr(:call, :axes, rows, 1)), law))
+    end
     # Completion is a whole covariate value on its original row axis. Keep
     # the gather and mask in an explicit graph when downstream likelihoods
     # have different observation axes, rather than inferring a scalar recipe.
@@ -284,6 +311,7 @@ function _rk_emit_missing_value!(definitions, statements, bindings, taken, compl
     push!(statements, Expr(:call, :~, completion.source,
         _rk_ast_block_call!(definitions, taken, "brm_missing_covariate", block,
             completed)))
+    sampled
 end
 
 function _rk_source_loop_indices!(names, statement)

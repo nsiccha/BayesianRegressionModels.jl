@@ -483,7 +483,7 @@ _rk_once!(compute, once::_RKOnce) = lock(once.lock) do
 end
 
 """
-    RKBRMI(brmi; held_out=())
+    RKBRMI(brmi; held_out=(), completions=:centered)
     RKBRMI(brmi, plan, built)
 
 A [`BRMI`](@ref) lowered to the ReactiveKernels backend. `plan` is the strict,
@@ -493,6 +493,16 @@ is loaded. Implemented only by that extension; the generic here lets the core
 validate and materialise plans without loading RK.
 `held_out` selects a strict subset of response names whose likelihoods are
 withheld. Authored priors and sampled coordinates remain in the program.
+`completions` parametrizes the `mi(...)` completions of a model with
+assignments or `@plate` cells: `:centered` samples each missing value under
+its law; `:noncentered` samples one standard-normal draw per missing value
+and computes the value from its law's location and scale (`Normal`,
+`LogNormal`; other laws are refused). Both are the same model. A
+non-centered completion whose rows lie on the subject grouping axis is a unit
+draw of [`brm_nlme_view`](@ref) (two-stage, SVI, Laplace and the NLME
+estimators) instead of a shared latent; it has no Stan counterpart in
+[`brm_coordinate_transport`](@ref). [`reprocess`](@ref) keeps the backend's
+parametrization.
 
 The three-argument constructor wraps an existing artifact build without
 planning, translation, emitted-definition evaluation or kernel construction.

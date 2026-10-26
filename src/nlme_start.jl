@@ -229,6 +229,21 @@ function _brm_nlme_prior_writes!(writes, ::Val{:ranef}, record, values, value)
     _brm_rk_scale_writes!(writes, record,
         [_brm_prior_median(_brm_prior_law(law, value)) for law in laws], values)
 end
+# Every stratum's scale of margin `k` takes margin `k`'s law: one row per
+# stratum of `tau[levels(by), 1:K]`, or entry `s` of `tau_k[levels(by)]`.
+function _brm_nlme_prior_writes!(writes, ::Val{:stratified_ranef}, record, values, value)
+    strata = size(_brm_rk_declaration_value(values, something(record.scales,
+        (record.scale,))[1]), 1)
+    for (k, law) in enumerate(record.scale_priors)
+        x = _brm_prior_median(_brm_prior_law(law, value))
+        x === nothing && continue
+        for s in 1:strata
+            push!(writes, isnothing(record.scales) ? (record.scale, (s, k), x) :
+                (record.scales[k], (s,), x))
+        end
+    end
+    writes
+end
 
 # `m`'s unit point with its prior-median coordinates set, and the positions of
 # those coordinates. Every other coordinate keeps the unit point's exact value,
