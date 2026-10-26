@@ -369,8 +369,10 @@ Base.@nospecializeinfer function _brm_prune_priors(program, kept, priors; margin
     full = _sb_collect_id_buckets(declarations)
     reduced = _sb_collect_id_buckets(filter(d -> d.predictor in predictors, declarations))
     width(bucket) = length(_sb_id_bucket_margins(bucket))
-    widths = Dict(key => (K=width(bucket), a=haskey(reduced, key) ? width(reduced[key]) : 0)
-                  for (key, bucket) in full)
+    kept_width(key) = let k = _sb_matching_id_bucket_key(reduced, key)
+        isnothing(k) ? 0 : width(reduced[k])
+    end
+    widths = Dict(key => (K=width(bucket), a=kept_width(key)) for (key, bucket) in full)
     narrowed = Dict(first(key) => w for (key, w) in widths if 0 < w.a < w.K)
     for (key, w) in widths
         0 < w.a < w.K || continue

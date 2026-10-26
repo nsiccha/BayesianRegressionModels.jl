@@ -1088,10 +1088,9 @@ end
 
 # One direction per position within a subject block colors that position in
 # every subject. Conditional independence makes its HVP the corresponding
-# column of each subject's Hessian. The sampler also includes z ~ N(0, I): at
-# the unit point z = η, so adding I removes that prior's Hessian.
-function _brm_nlme_hessian_blocks(m::BRMNLMEModel, θ, σ, H)
-    u = _brm_nlme_point(m, θ, σ, H)
+# column of each subject's Hessian of the sampler density at the packed point
+# `u`, which includes the standardized draws' N(0, I) prior.
+function _brm_nlme_sampler_hessian_blocks(m::BRMNLMEModel, u::Vector{Float64})
     nη = maximum(length, m.view.subject_coordinates)
     blocks = [Matrix{Float64}(undef, length(c), length(c))
         for c in m.view.subject_coordinates]
@@ -1104,8 +1103,17 @@ function _brm_nlme_hessian_blocks(m::BRMNLMEModel, θ, σ, H)
         for (i, coordinates) in enumerate(m.view.subject_coordinates)
             k <= length(coordinates) || continue
             blocks[i][:, k] .= view(hv, coordinates)
-            blocks[i][k, k] += 1.0
         end
+    end
+    blocks
+end
+
+# The conditional likelihood's η Hessian blocks: at the unit point z = η, so
+# adding I removes the standardized draws' prior from the sampler's blocks.
+function _brm_nlme_hessian_blocks(m::BRMNLMEModel, θ, σ, H)
+    blocks = _brm_nlme_sampler_hessian_blocks(m, _brm_nlme_point(m, θ, σ, H))
+    for block in blocks, k in axes(block, 1)
+        block[k, k] += 1.0
     end
     blocks
 end

@@ -1655,11 +1655,21 @@ Base.@nospecializeinfer function _brm_simple_random_effect_plans(
             raw isa AbstractVector || error(
                 "BRM backend lowering: grouping column `$group` must be a " *
                 "vector")
-            # A frozen replay keeps the training groups (`_brm_fitted`).
-            levels = collect(_brm_fitted_levels(group, raw))
-            n_levels, indices = _brm_fit_frozen(group) ?
-                (length(levels), _brm_apply_fitted_levels(levels, raw)) :
-                _brm_level_index(raw)
+            # A frozen replay keeps the training groups (`_brm_fitted`). A
+            # shared `|ID|` whose predictors join several columns codes each
+            # into their joint levels.
+            joint = isnothing(id) || !isnothing(by) ? Symbol[] :
+                _brm_joint_group_columns(context.group_declarations, id)
+            levels, (n_levels, indices) = if length(joint) > 1
+                levels = collect(_brm_fitted_joint_levels(id, joint, context.data;
+                    prefix="BRM backend lowering"))
+                levels, (length(levels), _brm_apply_fitted_levels(levels, raw))
+            else
+                levels = collect(_brm_fitted_levels(group, raw))
+                levels, _brm_fit_frozen(group) ?
+                    (length(levels), _brm_apply_fitted_levels(levels, raw)) :
+                    _brm_level_index(raw)
+            end
             length(levels) == n_levels || error(
                 "BRM backend lowering: inconsistent fitted levels for " *
                 "group `$group`")
@@ -2086,6 +2096,24 @@ function _brm_fitted(fit, tag::Symbol, name::Symbol, values)
 end
 _brm_fitted_levels(name::Symbol, values) = _brm_fitted(_brm_fit_levels, :levels, name, values)
 
+# The plain grouping columns a shared `|ID|` names, in appearance order: more
+# than one when predictors on different row sets join its levels by label.
+_brm_joint_group_columns(declarations, id::Symbol) =
+    unique(name(d.descriptor) for d in declarations
+           if d.id === id && !d.uncorrelated && d.descriptor isa NamedColumn)
+
+# The joint levels of a joined `|ID|` block's `columns`: fitted from the
+# training columns on a frozen replay, recorded when exporting, or read from the
+# exported fits on a data-free replay (`_brm_fitted`, keyed by the ID).
+function _brm_fitted_joint_levels(id::Symbol, columns, data; prefix)
+    joint(source) = _brm_joint_levels([c => source(c) for c in columns]; id, prefix)
+    frozen = _brm_frozen_replay()
+    frozen === nothing && return joint(c -> data[c])
+    _brm_frozen_fit(frozen, (:joint_levels, id)) do
+        joint(c -> get(frozen.training, c, data[c]))
+    end
+end
+
 # A fit the planner computes from a fit-role input (`_rk_fit_twin!`), which
 # already holds the training values on a frozen replay: computed, recorded when
 # exporting, or read from the exported fits on a data-free replay.
@@ -2130,6 +2158,41 @@ _brm_level_index(raw::AbstractVector) = begin
     levels = _brm_fit_levels(raw)
     lookup = Dict(level => i for (i, level) in enumerate(levels))
     length(levels), Int[lookup[level] for level in raw]
+end
+
+# The levels of one shared `|ID|` block whose predictors group their rows by
+# different columns (`(1 | k | g_a)` beside `(1 | k | g_b)`): the columns name
+# levels of one factor, so the block has one level per distinct label among
+# them, and every column is coded into that set by label. One column keeps its
+# own levels (`_brm_fit_levels`), so a block over a single column is unchanged.
+# Two columns that share no label cannot name one factor, and are refused.
+function _brm_joint_levels(columns::AbstractVector{<:Pair}; id::Symbol, prefix)
+    length(columns) == 1 && return _brm_fit_levels(last(only(columns)))
+    labels = [Set{Any}(_brm_fit_levels(raw)) for (_, raw) in columns]
+    for (i, (name, _)) in enumerate(columns)
+        any(j -> j != i && !isdisjoint(labels[i], labels[j]), eachindex(columns)) && continue
+        error("$prefix: `|$id|` joins the grouping columns ",
+              join(("`$(first(c))`" for c in columns), ", "),
+              " by label, but `$name` shares no label with any of the others, so ",
+              "they cannot name levels of one factor. Give the blocks of different ",
+              "grouping factors different IDs.")
+    end
+    raws = [raw for (_, raw) in columns]
+    if all(raw -> raw isa CA.CategoricalVector, raws) &&
+       allequal(CA.levels(raw) for raw in raws)
+        return CA.levels(first(raws))
+    end
+    values = reduce(vcat, (collect(raw isa CA.CategoricalVector ?
+                                   CA.unwrap.(raw) : raw) for raw in raws))
+    try
+        sort(unique(values))
+    catch err
+        error("$prefix: `|$id|` joins the grouping columns ",
+              join(("`$(first(c))`" for c in columns), ", "),
+              " by label, but their labels do not sort together ",
+              "($(sprint(showerror, err))). Store every column's labels with ",
+              "one element type.")
+    end
 end
 
 # ---- cell-mean coding of an intercept-free predictor (decision `0woa6hh`) ----

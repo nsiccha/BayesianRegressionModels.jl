@@ -366,13 +366,28 @@ end
 
 struct _RKRanefGrouping
     form::Symbol # :plain | :mm | :gr
-    columns::Tuple # mm: membership group columns; gr: (group,); plain: (group,)
+    columns::Tuple # mm: membership group columns; gr: (group,); plain: (group,),
+        # or every column of a shared `|ID|` whose predictors join them by label
     weights::Union{Nothing,Tuple} # mm weight columns (nothing = default 1/M)
     normalize::Bool # mm only
     by::Union{Nothing,Symbol} # gr stratum column
+    # Joined plain `|ID|` only: `target => column` each predictor gathers by.
+    targets::Tuple{Vararg{Pair{Symbol,Symbol}}}
 end
+_RKRanefGrouping(form, columns, weights, normalize, by) =
+    _RKRanefGrouping(form, columns, weights, normalize, by, ())
 
 _rk_plain_grouping(group::Symbol) = _RKRanefGrouping(:plain, (group,), nothing, true, nothing)
+_rk_joint_grouping(targets) = _RKRanefGrouping(:plain, Tuple(unique(last.(targets))),
+    nothing, true, nothing, Tuple(targets))
+_rk_joins_columns(grouping::_RKRanefGrouping) = !isempty(grouping.targets)
+# What a plain block's level set is keyed by: its column, or a joined block's
+# columns (their joint levels differ from any one column's).
+_rk_level_source_key(grouping::_RKRanefGrouping) =
+    _rk_joins_columns(grouping) ? grouping.columns : first(grouping.columns)
+# The column a predictor's rows gather a plain block's effects by.
+_rk_target_group(grouping::_RKRanefGrouping, target::Symbol) =
+    _rk_joins_columns(grouping) ? Dict(grouping.targets)[target] : first(grouping.columns)
 
 struct _RKRanefBucket
     id::Union{Nothing,Symbol}
@@ -4177,15 +4192,30 @@ function _rk_lower_ranef_bucket(context, id::Union{Nothing,Symbol},
         derived::Vector{_RKDerivedSpec})
     prefix = "RK backend"
     data = context.data
-    raw = get(data, gname, nothing)
-    bound = _rk_ranef_group_column!(columns, taken, gname, raw,
-        id === nothing ? "predictor `$(first(targets)[1])` random effect" :
-            "`|$id|` random-effect block")
-    # The block's levels are read from a fit-role copy of the grouping
-    # column: the training groups on a frozen `reprocess`, so a replay keeps
-    # the fitted effects of the groups it holds (the column itself under
-    # `resample_groups`).
-    _rk_fit_twin!(derived, columns, taken, data, bound)
+    what = id === nothing ? "predictor `$(first(targets)[1])` random effect" :
+        "`|$id|` random-effect block"
+    # A shared `|ID|` whose predictors group their rows by different columns
+    # is one block over the columns' joint levels (`_brm_joint_levels`).
+    group_of = Pair{Symbol,Symbol}[target => name(d.descriptor) for (target, d) in targets]
+    joined = unique(last.(group_of))
+    if length(joined) > 1
+        _brm_joint_levels([g => _brm_fit_input_source(g, data[g]) for g in joined];
+                          id, prefix)
+        isnothing(_brm_block_level_cor([d for (_, d) in targets], what; prefix)) || error(
+            "$prefix: `|$id|` joins the grouping columns " *
+            join(("`$g`" for g in joined), ", ") * " by label and correlates its " *
+            "levels (`gr(...; cor=...)`); a level correlation over joined columns " *
+            "is not implemented")
+    end
+    for g in joined
+        _rk_ranef_group_column!(columns, taken, g, get(data, g, nothing), what)
+        # The block's levels are read from a fit-role copy of each grouping
+        # column: the training groups on a frozen `reprocess`, so a replay
+        # keeps the fitted effects of the groups it holds (the column itself
+        # under `resample_groups`).
+        _rk_fit_twin!(derived, columns, taken, data, g)
+    end
+    bound = gname
     margins = _RKRanefMargin[]
     slices = Tuple{Symbol,UnitRange{Int}}[]
     _rk_bucket_margins!(margins, slices, context, targets, id, columns,
@@ -4200,7 +4230,8 @@ function _rk_lower_ranef_bucket(context, id::Union{Nothing,Symbol},
     end
     eta = kind === :correlated ? 1.0 : NaN
     bucket = _RKRanefBucket(id, bound, kind, margins, slices, eta,
-        _rk_ranef_bucket_label(id, bound), _rk_plain_grouping(bound))
+        _rk_ranef_bucket_label(id, bound),
+        length(joined) > 1 ? _rk_joint_grouping(group_of) : _rk_plain_grouping(bound))
     level_cor = _rk_bucket_level_correlation(context, id, gname,
         [d for (_, d) in targets])
     isnothing(level_cor) && return bucket
@@ -4413,6 +4444,7 @@ Base.@nospecializeinfer function _rk_plan_ranef_buckets(@nospecialize(brmi::BRMI
     id_keys = Tuple{Symbol,Symbol}[]
     id_decls = Dict{Tuple{Symbol,Symbol},Vector{Any}}()
     id_groups = Dict{Symbol,Symbol}()
+    plain_ids = Set{Symbol}()
     mm_keys = Tuple{Symbol,Symbol}[]
     mm_decls = Dict{Tuple{Symbol,Symbol},Any}()
     gr_keys = Tuple{Symbol,Symbol}[]
@@ -4440,7 +4472,7 @@ Base.@nospecializeinfer function _rk_plan_ranef_buckets(@nospecialize(brmi::BRMI
             gcol, bcol = desc
             sym = _rk_gr_block_symbol(name(gcol), name(bcol))
             if d.id !== nothing
-                haskey(id_groups, d.id) && id_groups[d.id] != sym && error(
+                haskey(id_groups, d.id) && (d.id in plain_ids || id_groups[d.id] != sym) && error(
                     "$prefix: `|$(d.id)|` sees conflicting grouping factors " *
                     "(`$(id_groups[d.id])` vs `$sym`) (mirrors SB)")
                 id_groups[d.id] = sym
@@ -4483,12 +4515,23 @@ Base.@nospecializeinfer function _rk_plan_ranef_buckets(@nospecialize(brmi::BRMI
             push!(plain_keys, key)
             plain_decls[key] = d
         else
-            haskey(id_groups, d.id) && id_groups[d.id] != gname && error(
+            # One plain `|ID|` over several columns is one block: predictors
+            # on different row sets join its levels by label (as SB,
+            # `_sb_collect_id_buckets`); a stratified block under the same ID
+            # is a different grouping factor.
+            haskey(id_groups, d.id) && !(d.id in plain_ids) && error(
                 "$prefix: `|$(d.id)|` sees conflicting grouping factors " *
                 "(`$(id_groups[d.id])` vs `$gname`) (mirrors SB)")
-            id_groups[d.id] = gname
-            key = (d.id, gname)
+            push!(plain_ids, d.id)
+            key = (d.id, get!(id_groups, d.id, gname))
             prior = get(id_decls, key, Any[])
+            for p in prior
+                p.predictor === d.predictor && name(p.descriptor) !== gname && error(
+                    "$prefix: predictor `$(d.predictor)` groups its `|$(d.id)|` " *
+                    "terms by both `$(name(p.descriptor))` and `$gname`; a " *
+                    "predictor reads its margins of one block through one " *
+                    "grouping column (mirrors SB)")
+            end
             any(p -> p.predictor === d.predictor, prior) && error(
                 "$prefix: predictor `$(d.predictor)` repeats " *
                 "random-effect block ID `$(d.id)`, group `$gname` " *
@@ -4510,10 +4553,21 @@ Base.@nospecializeinfer function _rk_plan_ranef_buckets(@nospecialize(brmi::BRMI
     for key in id_keys
         id, gname = key
         decls = id_decls[key]
+        # A joined block whose predictors an omitted response leaves unread
+        # would be planned narrower here than SB's full block over every
+        # column's levels (`_sb_emit_joint_id_bucket!`).
+        all_columns = unique(name(d.descriptor) for d in context.group_declarations
+                             if d.id === id && d.descriptor isa NamedColumn)
+        length(all_columns) > 1 && length(decls) < count(d -> d.id === id &&
+                !d.uncorrelated, context.group_declarations) && error(
+            "$prefix: `|$id|` joins the grouping columns " *
+            join(("`$c`" for c in all_columns), ", ") * " by label, and an omitted " *
+            "response leaves some of its predictors outside every likelihood; a " *
+            "joined block narrowed to its read predictors is not implemented on RK")
         bucket = _rk_lower_ranef_bucket(context, id, gname,
             Any[(d.predictor, d) for d in decls], columns, taken, derived)
         for d in decls
-            lookup[(d.predictor, gname, id)] = bucket
+            lookup[(d.predictor, name(d.descriptor), id)] = bucket
         end
         isnothing(bucket) || push!(buckets, bucket)
     end
@@ -4564,9 +4618,12 @@ Base.@nospecializeinfer function _rk_plan_ranef_buckets(@nospecialize(brmi::BRMI
     # src/sb_marginal_ranef.jl).
     full = Dict{Tuple{Symbol,Any},Vector{NamedTuple}}(
         key => _sb_id_bucket_margins(b) for (key, b) in _sb_collect_id_buckets(context))
+    full_margins(bucket, default) =
+        let key = _sb_matching_id_bucket_key(full, _rk_sb_bucket_key(bucket))
+            isnothing(key) ? default : full[key]
+        end
     overrides = _brm_resolve_ranef_effect_overrides(direct,
-        Dict((bucket.id, bucket.group) =>
-                get(full, _rk_sb_bucket_key(bucket), bucket.margins)
+        Dict((bucket.id, bucket.group) => full_margins(bucket, bucket.margins)
              for bucket in buckets if bucket.id !== nothing); prefix)
     whole = isempty(decompositions) ? Set{Symbol}() :
         Set(s.predictor for s in r2d2_priors(brmi))
@@ -4574,8 +4631,7 @@ Base.@nospecializeinfer function _rk_plan_ranef_buckets(@nospecialize(brmi::BRMI
         bucket = buckets[i]
         override = get(overrides, (bucket.id, bucket.group), nothing)
         decomposition = get(decompositions, (bucket.id, bucket.group), nothing)
-        all_margins = bucket.id === nothing ? nothing :
-            get(full, _rk_sb_bucket_key(bucket), nothing)
+        all_margins = bucket.id === nothing ? nothing : full_margins(bucket, nothing)
         reduced = !isnothing(all_margins) && length(all_margins) > length(bucket.margins)
         override === nothing && decomposition === nothing && !reduced && continue
         found = reduced ? [findfirst(x -> x.predictor === m.predictor &&

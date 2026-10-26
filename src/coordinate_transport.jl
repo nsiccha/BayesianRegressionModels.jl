@@ -698,7 +698,10 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
     end
     # Standardized draws: one per (level, margin), paired by level label. A
     # centered block pairs each with the effect of the same (level, margin).
-    rk_levels = _rk_grouping_levels(rk.plan.columns[record.group])
+    # A joined `|ID|` block's levels are its columns' joint levels.
+    rk_levels = _rk_grouping_levels(haskey(record, :joint_columns) ?
+        brm_joint_fit_levels((rk.plan.columns[c] for c in record.joint_columns)...) :
+        rk.plan.columns[record.group])
     G = length(rk_levels)
     G == block.n_groups || error(
         "brm_coordinate_transport: grouping `$(record.group)` has " *
@@ -1123,6 +1126,36 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
     end
 end
 
+# A cell latent (`x ~ Law(...)` on a bare `@plate` cell name): RK declares it
+# under its authored name, one draw per cell or one array per cell; SB as one
+# ragged carrier its descriptor addresses by that name. Both hold the draws cell
+# after cell, entry after entry (column-major within a cell), under the same
+# law's transform.
+function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
+        ::Val{:cell_latent}, record, rk, d, stan, stan_pos)
+    output = brm_output(d, record.name)
+    names = stan[_brm_element_coordinates(output, stan)]
+    elements = Tuple{Tuple,Symbol}[]
+    for rk_name in _rk_layout_coordinate_names(rk)
+        scoped = _brm_transport_scoped(rk_name)
+        !isnothing(scoped) && first(scoped) === record.declaration || continue
+        push!(elements, (last(scoped), rk_name))
+    end
+    length(names) == length(elements) || _brm_transport_error(:parameterization_mismatch,
+        "brm_coordinate_transport: cell latent `$(record.name)` has " *
+        "$(length(elements)) RK and $(length(names)) Stan coordinates")
+    for ((index, rk_name), stan_name) in zip(elements, names)
+        push!(pairs, BRMCoordinatePair((; kind=:cell_latent, name=record.name, index),
+            rk_name, stan_name, record.declaration, index, :identity))
+    end
+end
+
+# An entry of an RK constrained value: a cell latent holding one array per
+# cell is read cell first, then within that cell's array.
+_brm_rk_value_entry(value, index) = value[index...]
+_brm_rk_value_entry(value::AbstractVector{<:AbstractArray}, index) =
+    value[first(index)][Base.tail(index)...]
+
 function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         ::Val{kind}, record, rk, d, stan, stan_pos) where {kind}
     error("brm_coordinate_transport: internal: no pairing for RK record kind `$kind`")
@@ -1495,7 +1528,7 @@ function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
     for pair in t.pairs
         pair.relation in (:cholesky, :simplex, :centered) && continue
         value = _brm_rk_declaration_value(rk_values, pair.rk_declaration)
-        rk_value = isempty(pair.rk_index) ? value : value[pair.rk_index...]
+        rk_value = isempty(pair.rk_index) ? value : _brm_rk_value_entry(value, pair.rk_index)
         compare("$(pair.address) (`$(pair.rk)` / `$(pair.stan_value)`)", rk_value,
             _brm_physical(Val(pair.relation), stan_value(pair.stan_value)))
         checked += 1

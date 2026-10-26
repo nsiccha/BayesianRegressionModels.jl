@@ -372,6 +372,19 @@ are, but not wider. Starts (prior medians, a packed point, `inits`) and their
 refusals are covered too, and a flat-row grouped model is a `@test_broken`
 capability gap. It runs in the test environment above.
 
+`nlme_laplace.jl` checks the per-unit Laplace marginal (`brm_laplace_problem`,
+`brm_laplace_draws`) against oracles written from the model equations: Gaussian
+random-intercept and correlated intercept-and-slope models equal their analytic
+marginals and that marginal's gradient; a Poisson random intercept equals a
+per-unit Laplace formula from a scalar Newton search; and NB and binomial
+gradients match fourth-order differences of the Laplace marginal. Laplace draws
+of a Gaussian unit match its exact conditional, and importance-resampled
+(`conditional = K`) Poisson unit draws match each unit's conditional mean and
+SD by quadrature. It also covers a unit density that is not concave
+everywhere, and the two kinds of population point that score `-Inf`. It needs
+ReactiveKernels with `prepare_ad_third` (the test pin) and runs in the test
+environment above.
+
 `start_values.jl` checks `brm_start`, initial values keyed by prior address,
 on both backends. For a correlated population-PK model, a linked predictor,
 a categorical predictor with a `Dirichlet` simplex, and an exact-total block,
@@ -516,6 +529,28 @@ It runs under the test project:
 
 ```sh
 julia --startup-file=no --project=test test/description_concatenation.jl
+```
+
+`description_known_values.jl` describes random-effect blocks held at known
+values. A correlation held at the identity (`cor(:, ID) = I`) leaves the
+margins independent, with covariance D²; a known matrix is described as such.
+A known `sd(...) = v` or `cor(:, ID) = R` is the point mass `Dirac`, a
+described law with a matrix shown as a matrix, and the sampled scales of such
+a block are listed once, as its `sd` priors. It also checks the mean and
+dispersion of `NegativeBinomial2`, at top level and in a `@plate` cell. It runs
+under the test project:
+
+```sh
+julia --startup-file=no --project=test test/description_known_values.jl
+```
+
+`description_cell_functions.jl` describes the elementary functions a `@plate`
+cell's statements use: `log1p` and `expm1` by their standard names, and
+StanBlocks' `reshape(v, m, n)` as the column-major fill. It runs
+under the test project:
+
+```sh
+julia --startup-file=no --project=test test/description_cell_functions.jl
 ```
 
 ## ODE solvers in kernel cells
@@ -832,6 +867,16 @@ singleton input axes, against independent and compiled Stan targets.
 `rk_kernel_values.jl` checks unequal and empty grouped cells, explicit ragged
 joins, lexical native callables, distinct catalogue/response axes and in-cell
 held-out aliases without rewriting the original BRMI.
+`rk_cell_latents.jl` checks latents declared in a `@plate` cell on RKBRMI:
+scalar, varying-length vector and bounded latents, and laws reading sampled
+scalars. Each matches the compiled Stan model under `brm_coordinate_transport`
+(density, gradient and the physical check), and the vector latent also matches
+an independent oracle. The file also covers draws restored per cell, a latent
+nothing reads (not sampled on either backend), `brm_start` addressing the
+latent by name on both backends, and frozen replay onto the fit's cells and
+its refusal for new cells. The refusals and the known gap (a law reading a
+per-cell predictor, ReactiveKernels snag `rkppl-cell-laten-b18e668a`) are
+covered as well.
 `rk_grouped_bounded_response.jl` gathers observed rows before bounded-response
 validation and keeps scalar or row-specific censoring, truncation and interval
 bounds aligned with uneven/empty subject cells. Complete source replay,

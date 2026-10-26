@@ -130,8 +130,10 @@ const PINS = [
     # (a `@plate` cell observes one vector jointly with `MvNormal`),
     # 965564845 (a dotted cell latent holds one value per element) and
     # a987c279a (LogExpFunctions 1.0.2 admitted; streamed `logsumexp` keeps
-    # tie derivatives).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "1d5b163fe8d217ad785e55c9d43851a428b0136d"),  # main
+    # tie derivatives). 6ab16f510 adds cf9dde7ca (`prepare_ad_third`,
+    # third-order contractions D³f[v, v, ·] for the per-unit Laplace
+    # gradient; snag prepared-third-o-1e44dcc9).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "6ab16f510eb5bd055efa789529adba842836a962"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.5); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "d16c4efb72b963f45de9d6f632c38d46706c23e1"),  # main
