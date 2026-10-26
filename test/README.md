@@ -553,6 +553,24 @@ under the test project:
 julia --startup-file=no --project=test test/description_cell_functions.jl
 ```
 
+`description_plate_cells.jl` checks that a `@plate for` cell is described as
+written, in its own index. It covers:
+
+- entry reads `x[i]`, row reads `x[rows[i]]` with each row set stated once,
+  and `indexin` positions;
+- a `groups(g; order = t)` plate's group rows;
+- a sum over one row set, also when a long relation names it as one term;
+- a collected output `y[i] = …`;
+- a cell latent among the cell's statements and in the prior table.
+
+It also checks that no input binding gets a symbol, that each part's sentences
+come before its own equations on the page, and the incomplete-page line in both
+of its variants and in both languages. It runs under the test project:
+
+```sh
+julia --startup-file=no --project=test test/description_plate_cells.jl
+```
+
 ## ODE solvers in kernel cells
 
 `rk_kernel_ode_cell.jl` runs the population-PK `@plate for` cell of
