@@ -287,6 +287,20 @@ end
         ya ~ Normal(a, 1)
     end
     @test_throws "groups its `|k|` terms by both" SBBRMI(two_columns; mod=SR, total_groups=())
+    # refused: `kreis_b` (no Kreis C) is coded into the 5 joint levels for
+    # `|k|`, so a block over `kreis_b` alone would read another coding under
+    # the same index name `kreis_b_idx`.
+    alone = @brm SR.CELLS begin
+        a ~ 1 + x + (1 + x | k | kreis)
+        b ~ 1 + xb + (1 | k | kreis_b) + (0 + xb | kreis_b)
+        ya ~ Normal(a, 1)
+        rows = groups(cell_b => cells)
+        @plate for j in eachindex(cells)
+            tb[j] ~ Normal(sum(b[rows[j]]), 1)
+        end
+    end
+    @test_throws "Another random-effect block groups by `kreis_b` alone" SBBRMI(
+        alone; mod=SR, total_groups=())
     # refused: one `|ID|` names one block, and a stratified block is a different
     # grouping factor (mirrors RK, test/rk_emitter.jl).
     stratified = @brm merge(SR.ALIGNED, (; arm=[1, 1, 1, 1, 2, 2, 2, 2])) begin
