@@ -340,6 +340,16 @@ with(extra) = merge(sites, extra)
             mu ~ 1 + s(tt); y ~ Normal(mu, sigma) end),
          (@brm with((; tt=sites.t .+ 0.5)) begin sigma ~ Exponential(1)
             mu ~ 1 + s(tt); y ~ Normal(mu, sigma) end)),
+        ("interaction",
+         (@brm sites begin sigma ~ Exponential(1); tt = derived_shift(t)
+            mu ~ 1 + x * tt; y ~ Normal(mu, sigma) end),
+         (@brm with((; tt=sites.t .+ 0.5)) begin sigma ~ Exponential(1)
+            mu ~ 1 + x * tt; y ~ Normal(mu, sigma) end)),
+        ("center and zscale",
+         (@brm sites begin sigma ~ Exponential(1); tt = derived_shift(t)
+            mu ~ 1 + center(tt) + zscale(tt) & x; y ~ Normal(mu, sigma) end),
+         (@brm with((; tt=sites.t .+ 0.5)) begin sigma ~ Exponential(1)
+            mu ~ 1 + center(tt) + zscale(tt) & x; y ~ Normal(mu, sigma) end)),
         ("tensor spline",
          (@brm sites begin sigma ~ Exponential(1); tt = derived_shift(t)
             mu ~ 1 + t2(tt, x); y ~ Normal(mu, sigma) end),
