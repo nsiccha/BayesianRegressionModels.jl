@@ -630,13 +630,12 @@ function _brm_start_known_cor(t, P, known)
 end
 
 # A known-value SB block (`_sb_emit_known_id_bucket!`): its sampled scales are
-# `<binding>_tau`, or `<binding>_tau_free` when some scale is known, and a known
-# correlation has no `L`.
+# `_sb_known_scale_carrier`, and a known correlation has no `L`.
 function _brm_sb_start_known_writes!(writes, t, d, block, P, lookup)
     record = d.plan.bindings[block.binding]
     known = record.known_scales
     free = findall(isnothing, collect(known))
-    carrier = string(block.binding, length(free) < length(known) ? "_tau_free" : "_tau")
+    carrier = _sb_known_scale_carrier(block.binding, known)
     if !isnothing(t.sd)
         for (k, j) in enumerate(P)
             if isnothing(known[k])

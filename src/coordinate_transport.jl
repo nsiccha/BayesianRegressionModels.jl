@@ -698,7 +698,10 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
     end
     # Standardized draws: one per (level, margin), paired by level label. A
     # centered block pairs each with the effect of the same (level, margin).
-    rk_levels = _rk_grouping_levels(rk.plan.columns[record.group])
+    # A joined `|ID|` block's levels are its columns' joint levels.
+    rk_levels = _rk_grouping_levels(haskey(record, :joint_columns) ?
+        brm_joint_fit_levels((rk.plan.columns[c] for c in record.joint_columns)...) :
+        rk.plan.columns[record.group])
     G = length(rk_levels)
     G == block.n_groups || error(
         "brm_coordinate_transport: grouping `$(record.group)` has " *
