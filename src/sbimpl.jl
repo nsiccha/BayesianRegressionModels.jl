@@ -9839,15 +9839,22 @@ end
 # The level weights of a hyper-predicted grouped HSGP with `cor=`, correlated as
 # in the shared-scale submodels before the per-group spectral scales multiply
 # them (src/level_correlation.jl, `_brm_check_hyper_level_correlation`). The
-# multigroup coherence reads the shared length scale as a per-axis `rho`, as
+# multigroup coherences read the shared length scale as a per-axis `rho`, as
 # in `_sb_hsgp_by`.
 _sb_hsgp_hyper_levels(base, ::Nothing) = base
 _sb_hsgp_hyper_levels(base, ::_BRMLevelCorrelation) =
     _sb_level_correlated_input(base, :beta)
 _sb_hsgp_hyper_levels(base, ::_BRMMultigroupCorrelation) =
     _sb_multigroup_input(base, :beta)
+function _sb_hsgp_hyper_levels(base, lc::_BRMMultigroupCoordinates)
+    weights = isempty(lc.positions) ? _SB_MULTIGROUP_COORDINATE_WEIGHTS :
+        _SB_MULTIGROUP_INDUCING_WEIGHTS
+    model = _sb_multigroup_input(base, :beta, weights)
+    isnothing(lc.lambda) ? _sb_multigroup_own_lambda(model) : model
+end
 _sb_hsgp_hyper_level_inputs!(_body, ::Union{Nothing,_BRMLevelCorrelation}) = nothing
-_sb_hsgp_hyper_level_inputs!(body, ::_BRMMultigroupCorrelation) =
+_sb_hsgp_hyper_level_inputs!(body,
+        ::Union{_BRMMultigroupCorrelation,_BRMMultigroupCoordinates}) =
     push!(body, :(rho = rep_vector(rho_iso, dims(omega2)[2])))
 
 # Ungrouped scalar variant: one predicted value, so four spliced statements

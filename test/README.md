@@ -101,8 +101,9 @@ Combinations not implemented yet are `@test_broken`. Set
 `level_correlation_hyper.jl` checks per-level amplitudes and length scales
 (the hyper-predictors `log(sd(hsgp(x))) ~ 1 + (1 | g)` and
 `log(length_scale(hsgp(x))) ~ 1 + (1 | g)`) on a grouped HSGP with correlated
-levels, `cor=Omega` or `cor=multigroup(Omega, tau)`: SBBRMI emission and stanc
-acceptance, one- and two-axis terms, the refused per-level length scale under
+levels, `cor=Omega`, `cor=multigroup(Omega, tau)` or
+`cor=multigroup((x, y), lambda; k)`: SBBRMI emission and stanc acceptance,
+one- and two-axis terms, the refused per-level length scale under either
 `multigroup`, descriptor, description and replay, the SB density against
 hand-written raw-Stan programs, and RK density and gradient equal to SB. The
 same `BRM_LEVEL_CORRELATION_RUNTIME=0` skips its compiled-model sets.

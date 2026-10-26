@@ -1,8 +1,8 @@
 # test/level_correlation_hyper.jl — per-level amplitudes and length scales of a
 # grouped HSGP whose levels are correlated: the hyper-predictors
 # `log(sd(hsgp(x))) ~ 1 + (1 | g)` and `log(length_scale(hsgp(x))) ~ 1 + (1 | g)`
-# on `hsgp(x...; by=g, cor=Omega)` and `cor=multigroup(Omega, tau)`, on SBBRMI
-# and RKBRMI (src/level_correlation.jl, `_brm_check_hyper_level_correlation`).
+# on `hsgp(x...; by=g, cor=Omega)`, `cor=multigroup(Omega, tau)` and
+# `cor=multigroup((x, y), lambda; k)`, on SBBRMI and RKBRMI (src/level_correlation.jl, `_brm_check_hyper_level_correlation`).
 # Basis function `j` draws the level weights from
 # `MVN(0, diag(s_j) C_j diag(s_j))`, `s_j[g] = sqrt(S_g(omega_j))`.
 #
@@ -31,6 +31,8 @@ function level_df(; N=36, seed=11)
     rng = Random.MersenneTwister(seed)
     (; t=collect(range(0.0, 10.0; length=N)), u=collect(range(-1.0, 1.0; length=N)),
        g=repeat(1:R, N ÷ R), y=randn(rng, N),
+       # the levels' coordinates, for the multigroup coherence over coordinates
+       sx=[10.0, 40.0, 70.0, 95.0], sy=[20.0, 130.0, 60.0, 100.0],
        C=[1.0 0.5 0.2 0.1; 0.5 1.0 0.3 0.2; 0.2 0.3 1.0 0.4; 0.1 0.2 0.4 1.0])
 end
 
@@ -75,11 +77,25 @@ const mg_2d = @brm begin
     y ~ Normal(mu, 1.0)
 end
 
+# The multigroup coherence over the levels' coordinates, with a declared
+# spatial scale and with the term's own.
+const mgc_sd = @brm begin
+    lambda ~ LogNormal(5.7, 0.3; lower=230.0)
+    mu ~ 1 + t + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), lambda; k=6))
+    log(sd(hsgp(t))) ~ 1 + (1 | g)
+    y ~ Normal(mu, 1.0)
+end
+const mgd_sd = @brm begin
+    mu ~ 1 + t + hsgp(t; k=5, by=g, cor=multigroup((sx, sy); k=6))
+    log(sd(hsgp(t))) ~ 1 + (1 | g)
+    y ~ Normal(mu, 1.0)
+end
+
 stan(brmi) = BRM.stan_code(SBBRMI(brmi; mod=@__MODULE__))
 
 @testset "SBBRMI emission" begin
     df = level_df()
-    for model in (icm_sd, icm_both, icm_known, icm_2d, mg_sd, mg_2d)
+    for model in (icm_sd, icm_both, icm_known, icm_2d, mg_sd, mg_2d, mgc_sd, mgd_sd)
         @test StanBlocks.stanc_check(stan(model(df)); warn_pedantic=false).ok
     end
     code = stan(icm_sd(df))
@@ -88,6 +104,11 @@ stan(brmi) = BRM.stan_code(SBBRMI(brmi; mod=@__MODULE__))
     code = stan(mg_sd(df))
     @test occursin("hsgp_t_by_g_beta_level = brm_hsgp_multigroup_weights(b_hsgpw_t_g, " *
                    "omega2_hsgp_t_by_g, hsgp_t_by_g_rho, Omega, tau);", code)
+    code = stan(mgc_sd(df))
+    @test occursin("hsgp_t_by_g_beta_level = brm_hsgp_multigroup_coordinate_weights(" *
+                   "b_hsgpw_t_g, omega2_hsgp_t_by_g, hsgp_t_by_g_rho,", code)
+    @test occursin("rows_dot_product(hsgp_t_by_g_S, hsgp_t_by_g_beta_level[g_idx, :])", code)
+    @test occursin("hsgp_t_by_g_lambda ~ lognormal(", stan(mgd_sd(df)))
     sb = SBBRMI(icm_known(df); mod=@__MODULE__)
     @test sb.data[:L_levelcor_C] ≈ Matrix(cholesky(Symmetric(df.C)).L)
     @test occursin("L_levelcor_C * b_hsgpw_t_g", BRM.stan_code(sb))
@@ -108,11 +129,20 @@ end
     end
     @test_throws "with a hyper-predicted length scale is refused" SBBRMI(mg_rho(df); mod=@__MODULE__)
     @test_throws "with a hyper-predicted length scale is refused" RKBRMI(mg_rho(df))
+    # refused: over known coordinates the range lambda / (rho omega) reads the
+    # one shared length scale the same way.
+    mgc_rho = @brm begin
+        mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((sx, sy); k=6))
+        log(length_scale(hsgp(t))) ~ 1 + (1 | g)
+        y ~ Normal(mu, 1.0)
+    end
+    @test_throws "with a hyper-predicted length scale is refused" SBBRMI(mgc_rho(df); mod=@__MODULE__)
+    @test_throws "with a hyper-predicted length scale is refused" RKBRMI(mgc_rho(df))
 end
 
 @testset "descriptor, description and replay" begin
     df = level_df()
-    for model in (icm_both, mg_sd)
+    for model in (icm_both, mg_sd, mgd_sd)
         sb = SBBRMI(model(df); mod=@__MODULE__)
         d = brm_descriptor(sb)
         @test brm_output(d, :Omega).dims == (R, R)
@@ -256,9 +286,10 @@ points(n) = (zeros(n), collect(range(-0.43, 0.51; length=n)), [0.37sin(i) for i 
 # RK's coordinate `n` under SB's name, for a term over the axes `axes`
 # ("t" or "t_u") with `M` basis functions.
 function stan_name(n, axes, M)
-    (startswith(n, "Omega.") || n == "tau") && return n
+    (startswith(n, "Omega.") || n in ("tau", "lambda")) && return n
     rk, sb = "hsgp_" * axes * ".", "hsgp_" * axes * "_by_g_"
     n == rk * "rho" && return sb * "rho_iso"
+    n == rk * "lambda" && return sb * "lambda"
     n == "mu_Intercept" && return "pop_mu_beta_pop.1"
     for hyper in ("rho", "sigma")
         n == rk * hyper * "_Intercept" && return sb * "beta0_" * hyper
@@ -278,7 +309,8 @@ end
         df = level_df()
         for (tag, model, axes) in (("icm_sd", icm_sd, "t"), ("icm_both", icm_both, "t"),
                                    ("icm_known", icm_known, "t"), ("icm_2d", icm_2d, "t_u"),
-                                   ("mg_sd", mg_sd, "t"), ("mg_2d", mg_2d, "t_u"))
+                                   ("mg_sd", mg_sd, "t"), ("mg_2d", mg_2d, "t_u"),
+                                   ("mgc_sd", mgc_sd, "t"), ("mgd_sd", mgd_sd, "t"))
             m = model(df)
             rk = RKBRMI(m)
             sb = SBBRMI(m; mod=@__MODULE__)
