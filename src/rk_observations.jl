@@ -72,6 +72,41 @@ Base.@nospecializeinfer function _brm_rk_plan(@nospecialize(brmi::BRMI); held_ou
     isempty(selected) ? original : _RKHeldOutPlan(original, selected)
 end
 
+# The completion parametrization a lowering asks for: `:centered` (the default)
+# samples each missing value under its law; `:noncentered` samples a standard
+# normal draw per missing value, so a completion is a unit draw for the NLME
+# paths (`brm_nlme_view`). Only location-scale laws have that form.
+_rk_plan_completions(plan, mode::Symbol) =
+    mode === :centered ? plan : mode === :noncentered ? _rk_noncentered_completions(plan) :
+    throw(ArgumentError("completions must be :centered or :noncentered, got :$mode"))
+_rk_noncentered_completions(plan::_RKValuePlan) = _RKValuePlan(plan.regression,
+    plan.assignments, plan.observations, plan.columns,
+    map(_rk_noncentered_completion, plan.completions))
+_rk_noncentered_completions(plan::_RKHeldOutPlan) =
+    _RKHeldOutPlan(_rk_noncentered_completions(plan.parent), plan.held_out)
+function _rk_noncentered_completions(plan::_RKStructuralPlan)
+    any(r -> r.mi_jobs !== nothing, plan.responses) && error(
+        "RK backend: completions=:noncentered is built for models whose `mi(...)` " *
+        "completions lower to a value plan (models with assignments or `@plate` " *
+        "cells); this model's completions lower to the regression plan")
+    plan
+end
+const _RK_NONCENTERED_LAWS = (Normal, LogNormal)
+function _rk_noncentered_completion(c::_RKMissingValueSpec)
+    d = c.distribution
+    d.callable in _RK_NONCENTERED_LAWS && isempty(d.kwargs) && length(d.args) == 2 ||
+        error("RK backend: completions=:noncentered needs a location-scale law " *
+            "(`Normal(location, scale)` or `LogNormal(location, scale)`) for " *
+            "`mi($(c.source))`; its law is `$(d.callable)`")
+    _RKMissingValueSpec(c.source, c.observed, c.observed_rows, c.missing_rows,
+        c.observed_component, c.missing_lookup, c.missing_mask, c.nmissing, d, true)
+end
+# The completion parametrization of an existing plan, which a replay keeps.
+_rk_completion_mode(plan::_RKValuePlan) =
+    any(c -> c.noncentered, plan.completions) ? :noncentered : :centered
+_rk_completion_mode(plan::_RKHeldOutPlan) = _rk_completion_mode(plan.parent)
+_rk_completion_mode(plan) = :centered
+
 Base.@nospecializeinfer function _rk_held_out_selection(@nospecialize(brmi::BRMI), held_out)
     request = _brm_held_out_request(held_out; prefix="RK backend")
     isempty(request.names) && return Set{Symbol}()

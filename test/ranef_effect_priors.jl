@@ -363,14 +363,23 @@ end
     end
     @test_throws "expects `LKJCholesky" SBBRMI(bad_cor_family(df); mod=@__MODULE__, total_groups=())
 
-    ambiguous_id = @brm begin
+    # One `|p|` over two grouping columns is one block over their joint levels
+    # (decision 05d6dw7): `sd(:, p)` sets both margins. Columns sharing no
+    # label cannot name one factor.
+    joined_id = @brm begin
         eta_a ~ 1 + (1 | p | subject)
         eta_b ~ 1 + (1 | p | cat)
         sd(:, p) ~ Exponential(1)
         y ~ Normal(eta_a + eta_b, 1)
     end
-    @test_throws "addresses 2 blocks" SBBRMI(ambiguous_id(df); mod=@__MODULE__, total_groups=())
-    @test_throws "ambiguous" ranefcoefnames(ambiguous_id(df), :p)
+    joined_sb = SBBRMI(joined_id(df); mod=@__MODULE__, total_groups=())
+    @test only(ranef_blocks(joined_sb)).n_terms == 2
+    @test ranefcoefnames(joined_id(df), :p) ==
+          [(; predictor=:eta_a, coefficient=:Intercept),
+           (; predictor=:eta_b, coefficient=:Intercept)]
+    @test_throws "shares no label" SBBRMI(
+        joined_id(merge(df, (; cat=["a", "b", "c", "a", "b", "c"])));
+        mod=@__MODULE__, total_groups=())
 
     stratified_df = merge(df, (; stratum=[1, 1, 1, 1, 2, 2]))
     stratified = @brm begin

@@ -235,11 +235,25 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
     # A plain block reads its levels from the grouping column's fit-role copy
     # (`_rk_fit_twin!`), and positions each row's group among them. An mm
     # block's levels are its members' joint levels.
-    levels_of = grouping.form === :plain ? get(level_sources, group, group) : group
+    levels_of = grouping.form === :plain ?
+        get(level_sources, _rk_level_source_key(grouping), group) : group
     if grouping.form === :gr
+        priors = _rk_ast_bucket_scale_priors(bucket, bindings, taken)
         _rk_ast_stratified_group_component!(definitions, stmts, taken, draws,
-            group, grouping.by, K, bucket.lkj_eta,
-            _rk_ast_bucket_scale_priors(bucket, bindings, taken))
+            group, grouping.by, K, bucket.lkj_eta, priors)
+        # One scale row and factor per stratum of `by`: `tau[levels(by), 1:K]`,
+        # or one `tau_k[levels(by)]` per margin when the margins' laws differ
+        # (`_rk_ast_stratum_scales`), and `L[levels(by)]`. The NLME view reads
+        # one covariance family per stratum; the coordinate transport leaves
+        # the block unpaired.
+        _rk_coordinate_record!(coordinates, (; kind=:stratified_ranef,
+            group, by=grouping.by, id=bucket.id, bucket_kind=bucket.kind,
+            margins=Tuple((m.predictor, m.coefficient) for m in bucket.margins),
+            scale=Symbol(draws, ".tau"),
+            scales=all(isequal(first(priors)), priors) ? nothing :
+                Tuple(Symbol(draws, ".tau_", k) for k in 1:K),
+            z=Symbol(draws, ".z"), L=K == 1 ? nothing : Symbol(draws, ".L"),
+            scale_priors=Tuple(priors)))
     elseif bucket.decomposition !== nothing
         # Shared R2D2M2 budgets derive the scales in the main block; the
         # component still owns its correlation factor and draws.
@@ -289,6 +303,7 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
                 bucket.dist === nothing ? (;) : (; mixing=Symbol(draws, ".w")),
                 bucket.level_cor === nothing ? (;) :
                     (; level_correlation=bucket.level_cor.name),
+                _rk_joins_columns(grouping) ? (; joint_columns=grouping.columns) : (;),
                 known || L_value !== nothing ?
                     (; known_scales=Tuple(p isa Real ? p : nothing for p in priors),
                        known_cor=bucket.known_cor) : (;)))
@@ -299,7 +314,7 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
     indices = Dict{Symbol,Symbol}()
     if grouping.form !== :gr
         for col in grouping.columns
-            indices[col] = get!(level_indices, (col, group)) do
+            indices[col] = get!(level_indices, (col, levels_of)) do
                 idx = _rk_ast_fresh_name(grouping.form === :mm ?
                     string(group, "_", col, "_level") : string(col, "_level"), taken)
                 push!(stmts, Expr(:(=), idx, Expr(:call, :brm_level_indices, col, levels_of)))
@@ -341,7 +356,7 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
                 end
                 result
             else
-                gather_margin(group, margin)
+                gather_margin(_rk_target_group(grouping, target), margin)
             end
             recipe = bucket.margins[margin].z
             if recipe.kind !== :ones
@@ -950,9 +965,9 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
         (p.name for p in plan.regression.predictors))
     hoisted = _rk_nested_kernel_arguments(plan, bindings, taken)
     for assignment in plan.assignments
-        if assignment isa _RKPreparedKernelAssignment && haskey(hoisted.kernels, assignment.name)
+        if assignment isa _RKPreparedKernelAssignment
             _rk_emit_value_assignment!(defs, stmts, bindings, taken, assignment;
-                arguments=hoisted.kernels[assignment.name])
+                arguments=get(hoisted.kernels, assignment.name, nothing), coordinates)
         else
             _rk_emit_value_assignment!(defs, stmts, bindings, taken, assignment)
         end
@@ -963,9 +978,13 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
                 target=assignment.name))
     end
     for completion in plan.completions
-        _rk_emit_missing_value!(defs, stmts, bindings, taken, completion)
-        completion.nmissing > 0 && _rk_coordinate_record!(coordinates,
-            (; kind=:missing_value, target=completion.source))
+        sampled = _rk_emit_missing_value!(defs, stmts, bindings, taken, completion)
+        # `declaration` holds the completion's sampled coordinates: the missing
+        # values, or their standardized draws when non-centered.
+        sampled === nothing || _rk_coordinate_record!(coordinates,
+            (; kind=:missing_value, target=completion.source,
+               declaration=Symbol(completion.source, ".", sampled),
+               noncentered=completion.noncentered))
     end
     for observation in plan.observations
         # Observed in its kernel's plate cell.

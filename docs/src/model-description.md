@@ -49,6 +49,11 @@ units, symbols, hooks and links are presentation metadata. They do not alter
 source, data, draws or inference caches. Units and biological meanings must be
 supplied; a name such as `log_CL` does not establish a log transformation.
 
+`prose` and `equations` hold every sentence and equation in inventory order.
+`sections` holds the same sentences and equations per described component, as
+`(; id, prose, equations)`; the Markdown writes each part's sentences followed
+by its own equations, in model order.
+
 `components` is an ordered recursive inventory. Each component has an exact
 logical tuple `id`, `kind`, actual `callable`, `arguments`, `keywords`, `children`,
 `axes`, `outputs`, `priors`, `fitted_constants`, `bindings`, `notation` and
@@ -177,6 +182,20 @@ ID. Repeated nested names can be addressed by an authored tuple path.
 Kernel lambda aliases point to actual model arguments. No generated prefix or
 declaration-order assumption is needed.
 Reference-valued keywords use the same math API, including identity aliases.
+
+A `@plate for` cell is described as written, in its own index. A read `x[i]`
+renders as `x` subscripted by `i`. A read `x[rows[i]]` through a model-scope
+binding `rows = groups(g => labels)` renders as `x` subscripted by `rows_i`,
+and `rows_i = {j : g_j = labels_i}` is stated once per binding. In a
+`groups(g)` plate, `x[p]` renders as `x` subscripted by `J_p`, group `p`'s rows.
+`indexin(…)` positions render as written. A sum of elementwise reads of one row
+set, `sum(exp.(x[rows[i]]))`, renders as the sum over `j` in `rows_i` of
+`exp(x_j)`. An output `y[i] = …` renders as `y_i`. A cell latent's law is one
+of the cell's statements, and its prior row reads in the cell's names. The
+cell's sentence states its index and its row sets; its statements follow as
+their own parts. A deprecated `kernel(...) do` cell has no authored plate and
+keeps the grouped input mapping below.
+
 Kernel equations show the grouped input mapping; scientific child hooks provide
 their recurrences without inserting lambda or block syntax into the equation.
 Cell assignments emit separate indexing and arithmetic relations, and the
@@ -273,7 +292,9 @@ Claims outside that subtree or for nonexistent IDs raise an error.
 `result.complete` certifies inventory coverage. The consumer remains responsible
 for independent scientific review of its handwritten hooks. Unsupported calls
 and syntax retain precise `coverage` records and `diagnostics`; the Markdown
-renderer labels such a result **incomplete**.
+renderer labels such a result **incomplete**, with the number of uncovered
+components and their callables (a component without one by its kind), and
+lists them under "Coverage gaps".
 Population Horseshoe allocation nodes currently retain explicit gaps. Their
 Gaussian conditionals do not establish coverage of the allocation.
 

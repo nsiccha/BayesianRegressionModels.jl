@@ -104,6 +104,20 @@ without string templating:
   BridgeStan density matching the integer-coded twin;
 - order-free structural `merge`, and the refused `effect(<unknown predictor>, :)`.
 
+`builder_without_eval.jl` checks `brm(source; mod)`, the builder of a runtime
+`Expr` that evaluates no code, and `merge` of builders, which goes through it:
+
+- nothing is defined (the world counter does not move), against the
+  `Core.eval(mod, _brm(expr))` control, which defines a method per model;
+- the same model as the compiled builder: equal BRMIs, byte-identical Stan and
+  data, family members and split fragments, and a sweep of every `@brm` block
+  of a list of test files (`BRM_BUILDER_SWEEP=all` sweeps every file,
+  `BRM_BUILDER_SWEEP=a.jl,b.jl` names files);
+- the Julia of `constant(expr)` evaluates as compiled code would, and
+  definitions and mutation are refused;
+- fragments a package defines compose in another package's precompile workload,
+  where the evaluating route fails with "closed module".
+
 `kernel_population_lp.jl` checks per-subject linear predictors without a random
 effect (a typical value plus covariates) read as `x[i]`, beside a random-effect
 predictor and in a no-random-effects panel, against an independent density
@@ -359,6 +373,25 @@ the single-threaded draws. Run it in the NLMEEstimation scratch environment
 described below, with `--threads` above 1 so the threading check exercises
 concurrency.
 
+`nlme_units_panel.jl` (test environment) reads a public synthetic regional
+panel (`nlme_panel_fixture.jl`: regions ⊃ districts ⊃ municipalities and
+district-years) as region units. It checks that a stratified
+`gr(muni, by=sclass)` block is one covariance family per stratum, with every
+municipality in its class's family and its region; that
+`RKBRMI(...; completions=:noncentered)` makes each missing cell of an `mi(...)`
+completion a unit draw in a family fixed at unit variance (and that the
+default keeps them shared, and a non-location-scale law is refused); that
+district-year totals cells are attributed to the region owning their rows;
+and that every region's unit problem differs from the full RK density by its
+own unit alone, in value and gradient.
+`nlme_units_panel_fit.jl` runs NLMEEstimation on the same panel: the fixed
+completion family (`NLMEEstimation.fixed_omega`), prior-median starts in every
+stratum, the population prior's ω gradient against finite differences with a
+fixed family present, stratified estimates by stratum, and a timed
+`brm_two_stage_fit`. Run it in the NLMEEstimation scratch environment
+described below; NLMEEstimation master needs Treebars `a2f9e41` or later,
+newer than this environment's pin.
+
 `nlme_svi.jl` checks minibatch stochastic variational inference
 (`brm_svi_fit`). The minibatch split of the RK target is checked first: the
 global prior and Jacobian term plus every subject's cell term equal the full
@@ -534,6 +567,46 @@ It runs under the test project:
 
 ```sh
 julia --startup-file=no --project=test test/description_concatenation.jl
+```
+
+`description_known_values.jl` describes random-effect blocks held at known
+values. A correlation held at the identity (`cor(:, ID) = I`) leaves the
+margins independent, with covariance D²; a known matrix is described as such.
+A known `sd(...) = v` or `cor(:, ID) = R` is the point mass `Dirac`, a
+described law with a matrix shown as a matrix, and the sampled scales of such
+a block are listed once, as its `sd` priors. It also checks the mean and
+dispersion of `NegativeBinomial2`, at top level and in a `@plate` cell. It runs
+under the test project:
+
+```sh
+julia --startup-file=no --project=test test/description_known_values.jl
+```
+
+`description_cell_functions.jl` describes the elementary functions a `@plate`
+cell's statements use: `log1p` and `expm1` by their standard names, and
+StanBlocks' `reshape(v, m, n)` as the column-major fill. It runs
+under the test project:
+
+```sh
+julia --startup-file=no --project=test test/description_cell_functions.jl
+```
+
+`description_plate_cells.jl` checks that a `@plate for` cell is described as
+written, in its own index. It covers:
+
+- entry reads `x[i]`, row reads `x[rows[i]]` with each row set stated once,
+  and `indexin` positions;
+- a `groups(g; order = t)` plate's group rows;
+- a sum over one row set, also when a long relation names it as one term;
+- a collected output `y[i] = …`;
+- a cell latent among the cell's statements and in the prior table.
+
+It also checks that no input binding gets a symbol, that each part's sentences
+come before its own equations on the page, and the incomplete-page line in both
+of its variants and in both languages. It runs under the test project:
+
+```sh
+julia --startup-file=no --project=test test/description_plate_cells.jl
 ```
 
 ## ODE solvers in kernel cells
@@ -850,6 +923,17 @@ singleton input axes, against independent and compiled Stan targets.
 `rk_kernel_values.jl` checks unequal and empty grouped cells, explicit ragged
 joins, lexical native callables, distinct catalogue/response axes and in-cell
 held-out aliases without rewriting the original BRMI.
+`rk_cell_latents.jl` checks latents declared in a `@plate` cell on RKBRMI:
+scalar, varying-length vector and bounded latents, and laws reading sampled
+scalars or a per-cell formula predictor (`m[i]`, which needs the RK pin
+`0470e9e13` or later). Each matches the compiled Stan model under `brm_coordinate_transport`
+(density, gradient and the physical check), and the vector latent also matches
+an independent oracle. The file also covers draws restored per cell, a latent
+nothing reads (not sampled on either backend), `brm_start` addressing the
+latent by name on both backends, and frozen replay onto the fit's cells and
+its refusal for new cells, the refusals, and one known gap: a law reading a
+top-level vector parameter at the cell (`b[i]`), which BRM's RK preparation
+refuses as a per-subject linear predictor.
 `rk_grouped_bounded_response.jl` gathers observed rows before bounded-response
 validation and keeps scalar or row-specific censoring, truncation and interval
 bounds aligned with uneven/empty subject cells. Complete source replay,
@@ -1026,6 +1110,18 @@ re-implementation. The compiled half checks a `K=3` block at both endpoints
 against BridgeStan's own `diag(tau) * L`, the `adaptive_centering_controls`
 report, copy isolation, the declared fallback of a model without a correlated
 block, and a short WarmupHMC run that is checkpointed and resumed.
+
+`adaptive_centering_blockwise_gradient.jl` covers the block-level reverse pass
+that BRM's WarmupHMC/Enzyme extension runs for an ordinary plan wider than
+`K ≤ 2` and for a joint plan whose cells are all Gaussian random-effect pairs
+(snag `warmuphmc-adapti-e35d58ad`). On compiled toy models (three margins,
+a stratified `gr(g, by = b)` block, known correlations and SDs) it checks which
+plans take that pass and which keep WarmupHMC's generic per-pair path (Student-t
+mixing, HSGP cells), that the log density equals the generic path's exactly and
+the gradient to rounding, and that the pass allocates under a quarter of what
+the generic path does. It also checks the candidate-scoring frame, which builds
+a Gaussian block's factor once per block, bit for bit against the per-level
+frame.
 
 `adaptive_hsgp_centering.jl` checks pilot-selection under spectral underflow,
 the partial-coordinate Jacobian, Turing/Enzyme versus StanBlocks/BridgeStan

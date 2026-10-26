@@ -55,7 +55,10 @@ function brm_nlme_joint_map(rk::RKBRMI, sb::SBBRMI; path,
         "the standardized subject draws this map fills; build the SBBRMI " *
         "without `centered_groups`")
     blocks = NamedTuple[]
-    for (; family, record, indices) in _brm_nlme_families(rk, view)
+    # The transport has refused stratified blocks and non-centered completions
+    # (both unpaired), so every family here is an estimated plain block.
+    for family in _brm_nlme_families(rk, view)
+        record = family.record
         key = _brm_nlme_block_identity(record)
         scales = BRMCoordinatePair[]
         for margin in record.margins
@@ -72,29 +75,29 @@ function brm_nlme_joint_map(rk::RKBRMI, sb::SBBRMI; path,
             if f.group === record.group && isequal(f.id, record.id)]
         length(factors) == (isnothing(record.L) ? 0 : 1) || _brm_nlme_error(
             "brm_nlme_joint_map: correlation factor for $key is not paired")
-        push!(blocks, (; family, record, indices, scales,
+        push!(blocks, (; family..., scales,
             factor=isempty(factors) ? nothing : only(factors)))
     end
     BRMNLMEJointMap(rk, sb, problem, stan_model, view, transport, blocks)
 end
 
-# One entry per covariance family, in the view's family order: its random-effect
-# record and its margins' positions in a flat subject block.
+# One entry per covariance family, in the view's family order: its coordinate
+# record, its stratum (`nothing` outside a stratified block), its fixed
+# covariance (`nothing` when estimated) and its margins' positions in
+# `view.block_margins`.
 function _brm_nlme_families(rk::RKBRMI, view::BRMNLMEView)
-    families = NamedTuple[]
-    for record in _brm_nlme_records(rk.plan)
-        record.kind === :ranef || continue
-        key = _brm_nlme_block_identity(record)
-        indices = findall(m -> isequal(m.block, key), view.block_margins)
-        length(indices) == length(record.margins) &&
+    families = map(enumerate(view.families)) do (family, f)
+        indices = findall(m -> isequal(m.block, f.block), view.block_margins)
+        f.fixed === nothing || return (; family, record=f.record, stratum=f.stratum,
+            fixed=f.fixed, indices)
+        length(indices) == length(f.record.margins) &&
             [(view.block_margins[i].predictor, view.block_margins[i].coefficient)
-                for i in indices] == collect(record.margins) || _brm_nlme_error(
-            "NLME covariance: random-effect block $key does not match the " *
+                for i in indices] == collect(f.record.margins) || _brm_nlme_error(
+            "NLME covariance: random-effect block $(f.block) does not match the " *
             "NLME margin order")
-        push!(families, (; family=length(families) + 1, record, indices))
+        (; family, record=f.record, stratum=f.stratum, fixed=nothing, indices)
     end
-    length(families) == length(view.family_sizes) ==
-        length(unique(m.block for m in view.block_margins)) ||
+    length(families) == length(unique(m.block for m in view.block_margins)) ||
         _brm_nlme_error("NLME covariance: random-effect blocks are not unique")
     families
 end
@@ -127,12 +130,13 @@ function _brm_nlme_joint_subject_order(view::BRMNLMEView, subjects)
     order
 end
 
-function _brm_nlme_joint_scale(values, record, K)
+function _brm_nlme_joint_scale(values, record, K, stratum=nothing)
     scales = if isnothing(record.scales)
         value = _brm_rk_declaration_value(values, record.scale)
-        value isa Number ? [value] : vec(collect(value))
+        _brm_nlme_stratum_scales(value, stratum)
     else
-        [_brm_rk_declaration_value(values, name) for name in record.scales]
+        [_brm_nlme_stratum_entry(_brm_rk_declaration_value(values, name), stratum)
+            for name in record.scales]
     end
     length(scales) == K || _brm_nlme_error(
         "NLME covariance: random-effect scale of `$(record.group)` has " *
@@ -141,6 +145,27 @@ function _brm_nlme_joint_scale(values, record, K)
         "NLME covariance: a random-effect scale of `$(record.group)` is not " *
         "finite and positive")
     Float64.(scales)
+end
+
+# A block's scale vector, or one stratum's row of a stratified block's
+# `levels(by) × K` scale matrix; a per-margin scale is a number, or one entry
+# per stratum.
+_brm_nlme_stratum_scales(value::Number, ::Nothing) = [value]
+_brm_nlme_stratum_scales(value::AbstractVector, ::Nothing) = collect(value)
+_brm_nlme_stratum_scales(value::AbstractMatrix, stratum::Int) = collect(value[stratum, :])
+_brm_nlme_stratum_entry(value, ::Nothing) = value
+_brm_nlme_stratum_entry(value::AbstractVector, stratum::Int) = value[stratum]
+
+# `diag(scale) L` of an estimated family at the constrained values.
+function _brm_nlme_natural_factor(values, record, K, stratum)
+    scale = _brm_nlme_joint_scale(values, record, K, stratum)
+    L = isnothing(record.L) ? Matrix{Float64}(I, K, K) :
+        Matrix{Float64}(_brm_nlme_stratum_entry(
+            _brm_rk_declaration_value(values, record.L), stratum))
+    size(L) == (K, K) || _brm_nlme_error(
+        "NLME covariance: correlation factor of `$(record.group)` has size " *
+        "$(size(L)), expected ($K, $K)")
+    Diagonal(scale) * L
 end
 
 # The natural covariance of every family and the natural subject effects at a
@@ -155,15 +180,10 @@ function _brm_nlme_natural(rk::RKBRMI, view::BRMNLMEView, families, u::AbstractV
         zeros(Float64, nη, nη)
     eta = ragged ? [zeros(Float64, length(c)) for c in view.subject_coordinates] :
         zeros(Float64, nη, length(view.levels))
-    for (; family, record, indices) in families
+    for (; family, record, stratum, fixed, indices) in families
         K = length(indices)
-        scale = _brm_nlme_joint_scale(values, record, K)
-        L = isnothing(record.L) ? Matrix{Float64}(I, K, K) :
-            Matrix{Float64}(_brm_rk_declaration_value(values, record.L))
-        size(L) == (K, K) || _brm_nlme_error(
-            "NLME covariance: correlation factor of `$(record.group)` has size " *
-            "$(size(L)), expected ($K, $K)")
-        A = Diagonal(scale) * L
+        A = fixed !== nothing ? Matrix{Float64}(cholesky(Symmetric(fixed)).L) :
+            _brm_nlme_natural_factor(values, record, K, stratum)
         if ragged
             omega[family] = A * A'
         else

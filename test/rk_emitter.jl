@@ -5015,8 +5015,10 @@ end
             y ~ Normal(mu, s)
         end)
     end
-    # One ID, two groups is ambiguous (mirrors SB).
-    rk_throws_admission("conflicting grouping") do
+    # refused: one predictor reads its margins of a block through one grouping
+    # column (mirrors SB). Different predictors on different columns join one
+    # block by label (decision 05d6dw7, test/shared_id_row_sets.jl).
+    rk_throws_admission("groups its `|ID|` terms by both") do
         BRM._brm_rk_plan(@brm df begin
             mu ~ 1 + x + (1 | ID | g) + (1 | ID | h)
             s ~ Exponential(1)
