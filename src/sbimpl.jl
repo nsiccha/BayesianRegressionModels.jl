@@ -5686,6 +5686,7 @@ function _sb_mark_resample_groups(sb::SBBRMI, groups)
 end
 
 function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool, held_out)
+    _brm_refuse_joint_resample(sb.parent, groups; prefix="sbimpl: reprocess")
     isempty(total_effect_blocks(sb)) || throw(ArgumentError(
         "total-coefficient prediction uses generative_plan(plan,new_df) and transport_draws(...;resample=groups) to share one recovered population draw across new groups; resample_groups does not perform this recovery"))
     isempty(s2z_effect_blocks(sb)) || throw(ArgumentError(
@@ -5835,12 +5836,17 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         raw isa AbstractVector || error(
             "sbimpl: reprocess: random-effects grouping column `$(e.raw_ref)` " *
             "must be a vector, got $(typeof(raw))")
-        levels = freeze ? e.const_.levels : _sb_fit_levels(raw)
+        # A joined `|ID|` block's columns refit their joint levels together.
+        joint = haskey(e.const_, :columns) ?
+            (; columns=e.const_.columns, id=e.const_.id) : (;)
+        levels = freeze ? e.const_.levels : isempty(joint) ? _sb_fit_levels(raw) :
+            _brm_joint_levels([c => _sb_df_column(df, c) for c in joint.columns];
+                              id=joint.id, prefix="sbimpl: reprocess")
         new_data[key] = _sb_apply_group_levels(levels, raw, e.raw_ref)
         new_data[e.const_.n_groups_key] = length(levels)
         push!(handled, e.const_.n_groups_key)
         new_preproc[key] = PreprocEntry(
-            :group_index, (; levels, n_groups_key=e.const_.n_groups_key),
+            :group_index, (; levels, n_groups_key=e.const_.n_groups_key, joint...),
             e.raw_ref, true)
     elseif e.kind === :ranef_factor_dummy
         source = _sb_factor_source_column(e.raw_ref)
@@ -10910,12 +10916,17 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::Tuple{NamedCo
     push!(summands, r_name)
 end
 
-# Pre-pass: harvest every `|ID|` ranef across all sub-formulas and bucket by
-# (id_sym, group_key). Returns an OrderedDict keyed by bucket, carrying
-# `(group_desc, per_target::Vector{Pair{Symbol, Vector}})` in appearance order.
+# Pre-pass: harvest every `|ID|` ranef across all sub-formulas into one bucket
+# per ID. Returns an OrderedDict keyed by `(id_sym, group_key)` of the ID's first
+# declaration, carrying `(group_desc, per_target::Vector{Pair{Symbol, Vector}},
+# group_descs, level_cor)` in appearance order; `group_descs[i]` is the grouping
+# of `per_target[i]`. Plain `(… | ID | g)` terms over different columns share
+# one bucket: the columns name levels of one factor, joined by label
+# (`_brm_joint_levels`), and each predictor gathers its rows by its own column.
 # Non-ID'd ranef terms are left alone for the existing per-target emitter.
 function _sb_collect_id_buckets(declarations)
     buckets = OrderedCollections.OrderedDict{Tuple{Symbol,Any}, Any}()
+    keys_by_id = Dict{Symbol,Tuple{Symbol,Any}}()
     for declaration in declarations
         declaration.uncorrelated && continue
         id_sym = declaration.id
@@ -10925,23 +10936,79 @@ function _sb_collect_id_buckets(declarations)
             "sbimpl: `(e | ID | mm(...))` is not supported; `mm(...)` " *
             "already defines one shared coefficient block across its " *
             "membership columns")
-        k = (id_sym, _sb_group_key(desc))
         level_cor = _brm_declaration_level_cor(declaration)
-        if !haskey(buckets, k)
+        k = get(keys_by_id, id_sym, nothing)
+        if isnothing(k)
+            k = keys_by_id[id_sym] = (id_sym, _sb_group_key(desc))
             buckets[k] = (group_desc=desc, per_target=Pair{Symbol,Vector{Any}}[],
-                          level_cor)
+                          group_descs=Pair{Symbol,Any}[], level_cor)
         else
-            # Consistency check: same id must always pair with the same group.
-            _sb_group_desc_matches(buckets[k].group_desc, desc) ||
-                error("sbimpl: `|$id_sym|` sees conflicting grouping factors ($(buckets[k].group_desc) vs $desc)")
-            _brm_level_cor_name(buckets[k].level_cor) === _brm_level_cor_name(level_cor) ||
+            bucket = buckets[k]
+            _sb_group_desc_matches(bucket.group_desc, desc) ||
+                (bucket.group_desc isa NamedColumn && desc isa NamedColumn) ||
+                error("sbimpl: `|$id_sym|` sees conflicting grouping factors " *
+                      "($(_sb_group_label(bucket.group_desc)) vs " *
+                      "$(_sb_group_label(desc))); one `|ID|` names one block, " *
+                      "so give these blocks different IDs")
+            for (predictor, seen) in bucket.group_descs
+                predictor === declaration.predictor || continue
+                _sb_group_desc_matches(seen, desc) || error(
+                    "sbimpl: predictor `$predictor` groups its `|$id_sym|` " *
+                    "terms by both `$(name(seen))` and `$(name(desc))`; a " *
+                    "predictor reads its margins of one block through one " *
+                    "grouping column")
+            end
+            _brm_level_cor_name(bucket.level_cor) === _brm_level_cor_name(level_cor) ||
                 error("sbimpl: the terms of `|$id_sym|` name different level " *
                       "correlations; give every one the same `gr(...; cor=...)`")
         end
         push!(buckets[k].per_target,
               declaration.predictor => collect(Any, declaration.effects))
+        push!(buckets[k].group_descs, declaration.predictor => desc)
     end
     buckets
+end
+
+_sb_group_label(g::NamedColumn) = "`$(name(g))`"
+_sb_group_label(g::Tuple{NamedColumn,NamedColumn}) =
+    "`gr($(name(g[1])), by=$(name(g[2])))`"
+_sb_group_label(g) = repr(g)
+
+# The distinct grouping columns of a collected `|ID|` bucket, in appearance
+# order: one for an ordinary block, several when predictors on different row
+# sets join one block by label.
+_sb_bucket_group_columns(bucket) =
+    unique(name, NamedColumn[desc for (_, desc) in bucket.group_descs
+                             if desc isa NamedColumn])
+_sb_bucket_joins_columns(bucket) = length(_sb_bucket_group_columns(bucket)) > 1
+
+# `resample_groups` naming a grouping column of a joined `|ID|` block. New
+# levels of one column would have to join the other columns' fitted levels,
+# which neither backend builds yet; refused rather than drawn wrongly.
+function _brm_refuse_joint_resample(brmi::BRMI, groups; prefix)
+    isempty(groups) && return nothing
+    for (key, bucket) in _sb_collect_id_buckets(brmi)
+        _sb_bucket_joins_columns(bucket) || continue
+        names = name.(_sb_bucket_group_columns(bucket))
+        hit = sort!(collect(intersect(Set{Symbol}(groups), names)))
+        isempty(hit) || error(
+            "$prefix: `resample_groups` names $(hit), a grouping column of the ",
+            "shared `|$(first(key))|` block, whose predictors join the columns ",
+            join(("`$c`" for c in names), ", "), " by label; drawing new levels ",
+            "of a joined block is not implemented")
+    end
+    nothing
+end
+
+# The key in `buckets` of the bucket that `key` (from another collection over
+# the same declarations) names. A plain `|ID|` names one bucket whatever column
+# its first declaration in a subset groups by, so collections over different
+# predictor subsets are matched by ID; stratified keys carry their grouping.
+function _sb_matching_id_bucket_key(buckets, key)
+    haskey(buckets, key) && return key
+    last(key) isa Symbol || return nothing
+    found = [k for k in keys(buckets) if first(k) === first(key) && last(k) isa Symbol]
+    isempty(found) ? nothing : only(found)
 end
 
 _sb_collect_id_buckets(context::_BRMBackendContext) =
@@ -12264,6 +12331,12 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
                 [_sb_r2d2_resid_scale(r2d2_names[m.predictor]) for m in margins]...)
         end
         level_cor = get(bucket, :level_cor, nothing)
+        if _sb_bucket_joins_columns(bucket)
+            _sb_emit_joint_id_bucket!(stmts, data, lookup, k, bucket, bucket_name,
+                n_terms_name, suffix, per_target_ranges; cv_groups, centered_groups,
+                ranef_effect, r2d2_tau, mod)
+            continue
+        end
         # Likelihood-inactive margins (`src/sb_marginal_ranef.jl`): sample only
         # the active margins' marginal block and complete the rest exactly.
         if _sb_marginal_eligible(desc, ranef_effect, r2d2_tau)
@@ -12302,6 +12375,52 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
         end
     end
     lookup
+end
+
+# One `|ID|` block over predictors that group their rows by different columns
+# (`_sb_collect_id_buckets`): the ordinary draws statement over the columns'
+# joint levels, and each predictor's slice gathered through its own column's
+# index into them. A model option naming any of the columns (`centered_groups`)
+# applies to the whole block, the one block they share.
+#
+# Refused until designed: a level correlation (`gr(g; cor=...)`) and
+# `cv_groups` (the cv size is `maximum(<g>_idx)` of one column, which need not
+# reach every joint level). An omitted response keeps the whole block (no
+# marginal split; `src/sb_marginal_ranef.jl`): the full block's prior on the
+# unread margins is exact, so the fit is correct with the extra dimensions.
+function _sb_emit_joint_id_bucket!(stmts, data, lookup, k, bucket, bucket_name,
+                                   n_terms_name, suffix, per_target_ranges;
+                                   cv_groups, centered_groups, ranef_effect,
+                                   r2d2_tau, mod)
+    id_sym = first(k)
+    columns = _sb_bucket_group_columns(bucket)
+    names = Tuple(name.(columns))
+    what = "`|$id_sym|` joins the grouping columns $(join(("`$c`" for c in names), ", "))"
+    isnothing(get(bucket, :level_cor, nothing)) || error(
+        "sbimpl: $what by label and correlates its levels (`gr(...; cor=...)`); a " *
+        "level correlation over joined columns is not implemented")
+    for c in names
+        c in cv_groups && error(
+            "sbimpl: $what by label, and `$c` is in `cv_groups`; cv re-drawing a " *
+            "joined block is not implemented")
+    end
+    desc = bucket.group_desc
+    centered = any(in(centered_groups), names) ?
+        union(centered_groups, (name(desc),)) : centered_groups
+    idx_names, n_name = _sb_ensure_joint_group_data!(data, columns, id_sym)
+    group_data = (idx_names[name(desc)], n_name)
+    _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, desc;
+        cv_groups, centered_groups=centered, id_sym, ranef_effect, r2d2_tau, mod,
+        r2d2_lkj_eta=(isnothing(ranef_effect) ? 1.0 : ranef_effect.lkj_eta),
+        group_data)
+    group_of = Dict{Symbol,Symbol}(predictor => name(desc)
+                                   for (predictor, desc) in bucket.group_descs)
+    for (brmi_key, cols) in per_target_ranges
+        g = group_of[brmi_key]
+        lookup[(brmi_key, (id_sym, g))] =
+            (; bucket_name, cols, idx_name=idx_names[g], suffix)
+    end
+    nothing
 end
 
 # Turn the `|ID|` block just emitted as `<bucket> ~ <family>(...)` into its
@@ -12574,11 +12693,14 @@ _sb_id_bucket_suffix(id_sym, g::Tuple{NamedColumn,NamedColumn}) =
 # `sd(...)` / `cor(...)` configure it), with cv support and centered still
 # rejected. Returns the idx_name callers use to slice the draw matrix per
 # sub-formula.
+# `group_data` is the `(idx_name, n_name)` a joined block's caller already coded
+# (`_sb_ensure_joint_group_data!`); by default the block codes `g` itself.
 function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g::NamedColumn;
                                       cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
                                       id_sym=nothing, ranef_effect=nothing, r2d2_tau=nothing,
-                                      mod::Module=@__MODULE__, r2d2_lkj_eta=1.0)
-    idx_name, n_name = _sb_ensure_group_data!(data, g)
+                                      mod::Module=@__MODULE__, r2d2_lkj_eta=1.0,
+                                      group_data=_sb_ensure_group_data!(data, g))
+    idx_name, n_name = group_data
     gname = name(g)
     K = data[n_terms_name]
     dist = isnothing(ranef_effect) ? nothing : ranef_effect.dist
@@ -12753,6 +12875,14 @@ end
 # `_sb_submodel_rhs!` hook), and overwriting it would silently change what that
 # writer's statement reads.
 function _sb_set_group_index_datum!(data, key::Symbol, value, gname::Symbol)
+    joint = _sb_joint_group_record(data, key)
+    haskey(data, key) && !isequal(data[key], value) && !isnothing(joint) && error(
+        "sbimpl: `$gname` groups a shared `|ID|` block whose predictors join the ",
+        "columns $(join(("`$c`" for c in joint.columns), ", ")) by label, so `$key` ",
+        "codes `$gname` into their $(length(joint.levels)) joint levels. Another ",
+        "random-effect block groups by `$gname` alone, over its own levels, and ",
+        "would read a different coding under the same name. Give that block the ",
+        "same `|ID|`, or group it by a copy of the column under another name.")
     haskey(data, key) && !isequal(data[key], value) && error(
         "sbimpl: `$key` is the index BRM derives from the ranef grouping column ",
         "`$gname`, but `data[:$key]` already holds a different value written by ",
@@ -12802,6 +12932,49 @@ function _sb_settle_group_columns!(stmts, data, noted)
             "(levels `1:n_$g`) instead.")
     end
     nothing
+end
+
+# The `:group_index` record of `key` when a joined `|ID|` block wrote it, else
+# `nothing`.
+function _sb_joint_group_record(data, key::Symbol)
+    pp = get(data, _SB_PREPROC_KEY, nothing)
+    pp isa _SBPreprocContext && (pp = pp.recorded)
+    entry = pp isa AbstractDict ? get(pp, key, nothing) : nothing
+    entry isa PreprocEntry && entry.kind === :group_index &&
+        haskey(entry.const_, :columns) ? entry.const_ : nothing
+end
+
+# The group data of an `|ID|` bucket whose predictors group their rows by
+# different columns: one level set for the block (`_brm_joint_levels`; on a
+# frozen replay the fitted one), sized by `n_<first column>`, and each column's
+# rows coded into it as `<column>_idx`. Every column's `:group_index` record
+# carries the joint levels and the columns they join, so a replay codes it into
+# the fitted levels and a refit (`freeze_constants=false`) re-joins the new
+# columns. Returns the per-column index names and the size name.
+function _sb_ensure_joint_group_data!(data, columns::Vector{NamedColumn}, id_sym::Symbol)
+    raws = map(columns) do g
+        g_backing = _as_data_column(parent(g))
+        isnothing(g_backing) && error("sbimpl: group `$(name(g))` must be a raw data column")
+        name(g) => parent(g_backing)
+    end
+    names = Tuple(first.(raws))
+    n_name = Symbol(:n_, first(names))
+    frozen = _sb_frozen_preproc(data)
+    fitted = isnothing(frozen) ? nothing : get(frozen, Symbol(first(names), :_idx), nothing)
+    levels = fitted isa PreprocEntry && fitted.kind === :group_index ?
+        fitted.const_.levels : _brm_joint_levels(raws; id=id_sym, prefix="sbimpl")
+    _sb_set_group_index_datum!(data, n_name, length(levels), first(names))
+    idx_names = Dict{Symbol,Symbol}()
+    for (gname, raw) in raws
+        idx_name = idx_names[gname] = Symbol(gname, :_idx)
+        _sb_note_group_column!(data, gname)
+        _sb_set_group_index_datum!(data, idx_name,
+            _sb_apply_group_levels(levels, raw, gname), gname)
+        _sb_record_preproc!(data, idx_name, PreprocEntry(
+            :group_index, (; levels, n_groups_key=n_name, columns=names, id=id_sym),
+            gname, true))
+    end
+    idx_names, n_name
 end
 
 # Ensure `group_idx` / `n_groups` for a plain-group ranef descriptor are stashed

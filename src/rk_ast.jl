@@ -1510,14 +1510,18 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     # A plain block's group levels are a fitted value of its grouping's
     # fit-role column (`subject_fit_levels = brm_fit_levels(subject_fit)`),
     # read by every block over that grouping.
-    level_sources = Dict{Symbol,Symbol}()
+    # A joined `|ID|` block's levels are the joint levels of all its columns'
+    # fit-role copies (`brm_joint_fit_levels`), keyed by those columns.
+    level_sources = Dict{Any,Symbol}()
     for bucket in plan.ranef_buckets
         grouping = bucket.grouping
         grouping.form === :plain || continue
-        group = first(grouping.columns)
-        (haskey(fit_sources, group) && !haskey(level_sources, group)) || continue
-        level_sources[group] = _rk_ast_fitted_value!(stmts, taken, fitted,
-            :brm_fit_levels, Expr(:call, :brm_fit_levels, fit_sources[group]))
+        key = _rk_level_source_key(grouping)
+        (all(in(keys(fit_sources)), grouping.columns) && !haskey(level_sources, key)) ||
+            continue
+        recipe = _rk_joins_columns(grouping) ? :brm_joint_fit_levels : :brm_fit_levels
+        level_sources[key] = _rk_ast_fitted_value!(stmts, taken, fitted, recipe,
+            Expr(:call, recipe, (fit_sources[c] for c in grouping.columns)...))
     end
     for (bi, bucket) in enumerate(plan.ranef_buckets)
         bucket.decomposition === nothing && continue
