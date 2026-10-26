@@ -203,9 +203,9 @@ end
 @stestset "a panel's population predictor on another row axis is refused" begin
     data = merge(POP_PANEL, (; event_w=[0.1, 0.2, 0.3, 0.4, 0.5]))
     brmi = pop_panel_other_axis(data)
-    @test_throws "data column `event_w` has 5 rows for 3 subjects" SBBRMI(
+    @test_throws "data vector `event_w` has 5 rows for 3 subjects" SBBRMI(
         brmi; mod=@__MODULE__, total_groups=())
-    @test_throws "data column `event_w` has 5 rows for 3 subjects" RKBRMI(brmi)
+    @test_throws "data vector `event_w` has 5 rows for 3 subjects" RKBRMI(brmi)
 end
 
 # Both string spellings of the categorical: a plain `Vector{String}` lowers

@@ -37,8 +37,9 @@ the value a sampler takes as its initial position.
   parameter (cutpoints, a `Dirichlet` simplex) on its constrained scale.
 - `name = values` sets a latent declared in a `@plate` cell (`log_T ~
   Normal(loc, s)`) on its constrained scale: one flat vector, cell after cell,
-  or one vector per cell when its length varies by cell. Stan only; RKBRMI
-  builds no cell latents.
+  or one vector per cell when its length varies by cell (one number per cell
+  for a scalar latent). Both backends take both forms and give the same
+  physical point.
 
 Every other coordinate keeps the constrained value it has at `base`, a full
 unconstrained point of the same backend (default all zeros: coefficients 0,
@@ -318,10 +319,21 @@ function _brm_start_unknown_population(t, records, n)
 end
 
 function _brm_rk_start_writes!(writes, ::Val{:parameter}, t, records, values)
+    # A `@plate` cell latent, addressed by its authored name.
+    latent = [r for r in records if r.kind === :cell_latent && r.name === t.name]
+    if !isempty(latent)
+        length(latent) == 1 || error("brm_start: two `@plate` cells declare a " *
+            "latent `$(t.name)`; it has no single address")
+        r = only(latent)
+        current = _brm_rk_declaration_value(values, r.declaration)
+        push!(writes, (r.declaration, (), _brm_rk_cell_latent_value(t.name, current, t.value)))
+        return
+    end
     found = [r for r in records if r.kind in (:scalar, :vector) &&
         r.declaration === t.name]
     if isempty(found)
-        available = [r.declaration for r in records if r.kind in (:scalar, :vector)]
+        available = [r.kind === :cell_latent ? r.name : r.declaration
+            for r in records if r.kind in (:scalar, :vector, :cell_latent)]
         error("brm_start: `$(t.name)` is not a linear predictor, an `|ID|` block or " *
             "a named parameter of this model. Named parameters: " *
             (isempty(available) ? "(none)" : join(string.(available), ", ")))
@@ -335,8 +347,40 @@ end
 
 _brm_rk_start_value(name, value) = value
 _brm_rk_start_value(name, value::AbstractVector{<:AbstractVector}) = error(
-    "brm_start: `$name` takes one vector per cell only as a `@plate` cell latent, " *
-    "and RKBRMI builds no cell latents; give its values as one vector")
+    "brm_start: `$name` takes one vector per cell only as a `@plate` cell " *
+    "latent; give its values as one vector")
+
+# A cell latent's start in RK's constrained form: one number per cell for a
+# scalar latent, one vector per cell for an array latent, given per cell or as
+# one flat vector cell after cell (SBBRMI's two forms).
+function _brm_rk_cell_latent_value(name, current::AbstractVector{<:Real}, value)
+    value isa AbstractVector{<:Real} && length(value) == length(current) ||
+        throw(DimensionMismatch("brm_start: cell latent `$name` holds one value " *
+            "in each of its $(length(current)) cells; give one number per cell"))
+    Vector{Float64}(value)
+end
+function _brm_rk_cell_latent_value(name, current::AbstractVector{<:AbstractVector}, value)
+    lengths = length.(current)
+    if value isa AbstractVector{<:AbstractVector}
+        length(value) == length(lengths) || throw(DimensionMismatch(
+            "brm_start: cell latent `$name` has $(length(lengths)) cells, got " *
+            "$(length(value)) vectors"))
+        for (g, (v, n)) in enumerate(zip(value, lengths))
+            length(v) == n || throw(DimensionMismatch(
+                "brm_start: cell latent `$name` has $n values in cell $g, got $(length(v))"))
+        end
+        return [Vector{Float64}(v) for v in value]
+    end
+    value isa AbstractVector{<:Real} && length(value) == sum(lengths; init=0) ||
+        throw(DimensionMismatch("brm_start: cell latent `$name` has " *
+            "$(sum(lengths; init=0)) values in cells of lengths $lengths; give " *
+            "one vector per cell or one flat vector cell after cell"))
+    ends = cumsum(lengths)
+    [Vector{Float64}(value[(e - n + 1):e]) for (n, e) in zip(lengths, ends)]
+end
+_brm_rk_cell_latent_value(name, current, value) = error(
+    "brm_start: cell latent `$name` holds $(typeof(current)) values; only " *
+    "scalar and vector cell latents take a start")
 
 function _brm_rk_start_writes!(writes, ::Val{:ranef}, t, records, values)
     blocks = [r for r in records if r.kind === :ranef && isequal(r.id, t.id)]

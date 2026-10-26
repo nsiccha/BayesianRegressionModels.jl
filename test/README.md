@@ -885,6 +885,16 @@ singleton input axes, against independent and compiled Stan targets.
 `rk_kernel_values.jl` checks unequal and empty grouped cells, explicit ragged
 joins, lexical native callables, distinct catalogue/response axes and in-cell
 held-out aliases without rewriting the original BRMI.
+`rk_cell_latents.jl` checks latents declared in a `@plate` cell on RKBRMI:
+scalar, varying-length vector and bounded latents, and laws reading sampled
+scalars. Each matches the compiled Stan model under `brm_coordinate_transport`
+(density, gradient and the physical check), and the vector latent also matches
+an independent oracle. The file also covers draws restored per cell, a latent
+nothing reads (not sampled on either backend), `brm_start` addressing the
+latent by name on both backends, and frozen replay onto the fit's cells and
+its refusal for new cells. The refusals and the known gap (a law reading a
+per-cell predictor, ReactiveKernels snag `rkppl-cell-laten-b18e668a`) are
+covered as well.
 `rk_grouped_bounded_response.jl` gathers observed rows before bounded-response
 validation and keeps scalar or row-specific censoring, truncation and interval
 bounds aligned with uneven/empty subject cells. Complete source replay,
@@ -1061,6 +1071,18 @@ re-implementation. The compiled half checks a `K=3` block at both endpoints
 against BridgeStan's own `diag(tau) * L`, the `adaptive_centering_controls`
 report, copy isolation, the declared fallback of a model without a correlated
 block, and a short WarmupHMC run that is checkpointed and resumed.
+
+`adaptive_centering_blockwise_gradient.jl` covers the block-level reverse pass
+that BRM's WarmupHMC/Enzyme extension runs for an ordinary plan wider than
+`K ≤ 2` and for a joint plan whose cells are all Gaussian random-effect pairs
+(snag `warmuphmc-adapti-e35d58ad`). On compiled toy models (three margins,
+a stratified `gr(g, by = b)` block, known correlations and SDs) it checks which
+plans take that pass and which keep WarmupHMC's generic per-pair path (Student-t
+mixing, HSGP cells), that the log density equals the generic path's exactly and
+the gradient to rounding, and that the pass allocates under a quarter of what
+the generic path does. It also checks the candidate-scoring frame, which builds
+a Gaussian block's factor once per block, bit for bit against the per-level
+frame.
 
 `adaptive_hsgp_centering.jl` checks pilot-selection under spectral underflow,
 the partial-coordinate Jacobian, Turing/Enzyme versus StanBlocks/BridgeStan
