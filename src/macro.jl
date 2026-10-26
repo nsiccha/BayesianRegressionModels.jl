@@ -467,9 +467,9 @@ function standardize end
 """
     name = constant(expr)
 
-A scalar or vector computed from the data when the model is built, such as a
-prior hyperparameter calibrated on the observations or a grid a plate cell
-reads:
+A scalar or array computed from the data when the model is built, such as a
+prior hyperparameter calibrated on the observations, a grid a plate cell reads
+or a known correlation matrix:
 
 ```julia
 @brm begin
@@ -481,9 +481,10 @@ end
 
 `expr` is ordinary Julia, evaluated once on whole columns of the data. A bare
 name in it that is not a field of the data resolves in the builder's scope.
-The result must be one finite real number or a vector of them; a vector's
-length is fixed by that evaluation. The constant is Stan data on `SBBRMI` and
-a bound value on `RKBRMI`, usable wherever a data field of the same value is.
+The result must be one finite real number or an array of them (a vector, a
+matrix, …); an array's shape is fixed by that evaluation. The constant is Stan
+data on `SBBRMI` and a bound value on `RKBRMI`, usable wherever a data field of
+the same value is.
 
 Replay keeps the fitted value, like `standardize`'s mean and SD: `reprocess`,
 `reprocess(...; resample_groups)` and `generative_plan(plan, new_df)` reuse it

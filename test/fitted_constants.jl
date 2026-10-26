@@ -1,6 +1,6 @@
 # test/fitted_constants.jl — `name = constant(expr)`: a scalar calibrated on
 # the data when the model is built and frozen at that value on replay (snag
-# `bruno-fit-time-d-dba90310`, user design decision `00kjor3`), or a vector of
+# `bruno-fit-time-d-dba90310`, user design decision `00kjor3`), or an array of
 # such numbers (snag `brm-constant-exp-86604df5`).
 #
 # A constant is evaluated once on whole columns and is then an ordinary data
@@ -14,6 +14,7 @@
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using Serialization: serialize, deserialize
 using Statistics: mean, std, var
+using LinearAlgebra: cholesky, Symmetric
 using LogExpFunctions: logistic
 const stan_code = BRM.stan_code
 const stan_data = BRM.stan_data
@@ -352,9 +353,9 @@ end
     data.x[1] = 10.0
     @test stan_data(sb)[:xs] == [1.0, 2.0, 3.0]
     @test sb.preproc[:xs].const_.value == [1.0, 2.0, 3.0]
-    # The admitted value: a fresh `Vector` of the elements' promoted type, so
-    # integers stay integers (as in a supplied data field) and a range or a
-    # loosely typed vector is materialised.
+    # The admitted value: a fresh `Array` of the elements' promoted type, so
+    # integers stay integers (as in a supplied data field) and a range, a view
+    # or a loosely typed array is materialised; its shape is the value's.
     @test BRM._brm_constant_value(1:4) == [1, 2, 3, 4]
     @test BRM._brm_constant_value(1:4) isa Vector{Int}
     @test BRM._brm_constant_value(Any[1.0, 2]) isa Vector{Float64}
@@ -363,7 +364,14 @@ end
     v = [0.5, 1.5]
     @test BRM._brm_constant_value(v) == v && BRM._brm_constant_value(v) !== v
     @test BRM._brm_constant_value(2.5) === 2.5
-    for refused in ([1.0, NaN], [true, false], [1.0, missing], [1.0 2.0], "a", true, -Inf)
+    m = [1.0 0.5; 0.5 1.0]
+    @test BRM._brm_constant_value(m) == m && BRM._brm_constant_value(m) !== m
+    @test BRM._brm_constant_value(m') isa Matrix{Float64}
+    @test BRM._brm_constant_value(view(m, :, 1)) isa Vector{Float64}
+    @test BRM._brm_constant_value(reshape(1.0:8.0, 2, 2, 2)) isa Array{Float64,3}
+    @test BRM._brm_constant_value(Any[1 2.0; 3 4]) isa Matrix{Float64}
+    for refused in ([1.0, NaN], [true, false], [1.0, missing], [1.0 Inf], [true false],
+                    ["a" "b"], "a", true, -Inf)
         @test BRM._brm_constant_value(refused) === nothing
     end
 end
@@ -486,6 +494,123 @@ end
     end
 end
 
+# ---- array constants of any rank -------------------------------------------
+#
+# A constant's shape is not restricted: it is the data field it computes, so a
+# matrix constant goes wherever a data matrix does. The model below correlates
+# the levels of `g` by a known correlation calibrated on the training times.
+
+# A correlation of the four levels that decays with level distance on the scale
+# of the largest time (an exponential kernel, so positive definite).
+level_cor(t) = [exp(-abs(i - j) / maximum(t)) for i in 1:4, j in 1:4]
+
+const LEVELS = (; t=collect(range(0.5, 6.0; length=16)), g=repeat(1:4, 4),
+    y=[0.3, -0.2, 0.8, 0.1, 0.5, 0.0, 1.1, 0.4, 0.9, 0.2, 1.4, 0.6, 1.2, 0.5, 1.6, 0.9])
+const LEVEL_COR = level_cor(LEVELS.t)
+
+const LEVEL_CORRELATED = @brm begin
+    C = constant(level_cor(t))
+    mu ~ 1 + t + (1 + t | gr(g; cor=C))
+    y ~ Normal(mu, 1.0)
+end
+# The same model with the correlation supplied as a data field.
+const LEVEL_COR_SUPPLIED = @brm begin
+    mu ~ 1 + t + (1 + t | gr(g; cor=C))
+    y ~ Normal(mu, 1.0)
+end
+with_cor(data, C=LEVEL_COR) = merge(data, (; C))
+# A replay design on later times, on which `level_cor` gives another
+# correlation.
+const LEVELS_LATER = (; t=[8.0, 9.0, 10.0, 12.0], g=[1, 2, 3, 4], y=[1.0, 0.7, 1.9, 1.2])
+const LATER_COR = level_cor(LEVELS_LATER.t)
+
+@stestset "a matrix constant is the data matrix it computes" begin
+    sb = SBBRMI(LEVEL_CORRELATED(LEVELS); mod=@__MODULE__)
+    reference = SBBRMI(LEVEL_COR_SUPPLIED(with_cor(LEVELS)); mod=@__MODULE__)
+    @test stan_code(sb) == stan_code(reference)
+    @test stan_data(sb) == stan_data(reference)
+    @test sb.preproc[:C].kind === :constant
+    @test sb.preproc[:C].const_.value == LEVEL_COR
+    @test sb.preproc[:C].const_.value isa Matrix{Float64}
+    @test StanBlocks.stan.compiles(sb.model)
+    names, densities = stan_density_points(LEVEL_CORRELATED(LEVELS), "matrix-constant")
+    supplied_names, supplied_densities = stan_density_points(
+        LEVEL_COR_SUPPLIED(with_cor(LEVELS)), "matrix-constant-supplied")
+    @test names == supplied_names
+    @test densities == supplied_densities
+    ad_backend = AutoEnzyme(; mode=Enzyme.Reverse)
+    problem = rk_logdensity_problem(RKBRMI(LEVEL_CORRELATED(LEVELS)); ad_backend)
+    supplied = rk_logdensity_problem(RKBRMI(LEVEL_COR_SUPPLIED(with_cor(LEVELS))); ad_backend)
+    n = LogDensityProblems.dimension(problem)
+    @test n == LogDensityProblems.dimension(supplied)
+    for u in (zeros(n), fill(0.3, n), collect(range(-0.4, 0.4; length=n)))
+        @test rk_value(problem, u) == rk_value(supplied, u)
+    end
+end
+
+@stestset "replay keeps a fitted matrix constant" begin
+    sb = SBBRMI(LEVEL_CORRELATED(LEVELS); mod=@__MODULE__, total_groups=())
+    reference = SBBRMI(LEVEL_COR_SUPPLIED(with_cor(LEVELS)); mod=@__MODULE__, total_groups=())
+    frozen = reprocess(sb, LEVELS_LATER)
+    @test frozen.preproc[:C].const_.value == LEVEL_COR
+    twin = reprocess(reference, with_cor(LEVELS_LATER))
+    @test stan_code(frozen) == stan_code(twin)
+    @test stan_data(frozen) == stan_data(twin)
+    fresh = reprocess(sb, LEVELS_LATER; freeze_constants=false)
+    @test fresh.preproc[:C].const_.value == LATER_COR
+    @test stan_data(fresh)[:L_levelcor_C] ≈ Matrix(cholesky(Symmetric(LATER_COR)).L)
+    ad_backend = AutoEnzyme(; mode=Enzyme.Reverse)
+    rk = RKBRMI(LEVEL_CORRELATED(LEVELS))
+    replay = rk_logdensity_problem(reprocess(rk, LEVELS_LATER); ad_backend)
+    rk_twin = rk_logdensity_problem(
+        reprocess(RKBRMI(LEVEL_COR_SUPPLIED(with_cor(LEVELS))), with_cor(LEVELS_LATER)); ad_backend)
+    n = LogDensityProblems.dimension(replay)
+    @test n == LogDensityProblems.dimension(rk_twin)
+    for u in (zeros(n), fill(0.2, n))
+        @test rk_value(replay, u) == rk_value(rk_twin, u)
+    end
+    # The data-free fitted state carries the matrix.
+    state = deserialize(IOBuffer(sprint(serialize, brm_fitted_state(rk))))
+    @test state.constants[:C] == LEVEL_COR
+    bound = rk_logdensity_problem(RKBRMI(LEVEL_CORRELATED(LEVELS_LATER), state); ad_backend)
+    for u in (zeros(n), fill(0.2, n))
+        @test rk_value(bound, u) == rk_value(replay, u)
+    end
+end
+
+@stestset "the description reports a matrix constant with its shape" begin
+    markdown = brm_description_markdown(brm_description(
+        brm_descriptor(LEVEL_CORRELATED, LEVELS; mod=@__MODULE__)))
+    @test occursin("Its fitted value is (size = (4, 4), values = ($(join(LEVEL_COR, ", "))))", markdown)
+end
+
+@stestset "a constant of higher rank is the data field it computes" begin
+    # The constant adds no rule of its own about shape: a rank-3 constant and a
+    # rank-3 data field give the same outcome, built or refused.
+    data = (; x=[0.2, 0.5, 0.9, 1.4], y=[0.3, 0.6, 1.1, 1.5])
+    A = reshape(collect(1.0:8.0), 2, 2, 2) ./ maximum(data.y)
+    cubed = @brm begin
+        A = constant(reshape(collect(1.0:8.0), 2, 2, 2) ./ maximum(y))
+        b ~ Normal(0, 1)
+        sigma ~ Exponential(1)
+        mu = b * x + A[1, 2, 2]
+        y ~ Normal(mu, sigma)
+    end
+    cubed_supplied = @brm begin
+        b ~ Normal(0, 1)
+        sigma ~ Exponential(1)
+        mu = b * x + A[1, 2, 2]
+        y ~ Normal(mu, sigma)
+    end
+    outcome(f) = try
+        (:built, stan_code(f()))
+    catch err
+        (:refused, sprint(showerror, err))
+    end
+    @test outcome(() -> SBBRMI(cubed(data); mod=@__MODULE__)) ==
+          outcome(() -> SBBRMI(cubed_supplied(merge(data, (; A))); mod=@__MODULE__))
+end
+
 # A body built from a runtime string and `Core.eval`'d inside a function: the
 # eval defines each constant's closure in a world newer than the function's,
 # and the backends built in that same function evaluate it there (snag
@@ -550,15 +675,15 @@ end
     end)(PANEL); mod=@__MODULE__))
     @test occursin("failed", message) && occursin("DomainError", message)
     # refused: a constant is data, so each value is one finite real number
-    # (decision `00kjor3`); a vector holds such numbers and nothing else.
-    for expression in (:(fill(NaN, 3)), :(conc .> 1.0), :(reshape(conc, 3, 4)),
+    # (decision `00kjor3`); an array holds such numbers and nothing else.
+    for expression in (:(fill(NaN, 3)), :(conc .> 1.0), :(reshape(conc .> 1.0, 3, 4)),
                        :(string(first(conc))), :(Inf))
         model = eval(:(@brm begin
             a = constant($expression)
             y ~ Normal(0, 1.0)
         end))
         message = refusal(() -> SBBRMI(model(PANEL); mod=@__MODULE__))
-        @test occursin("one finite real number or a vector of them", message)
+        @test occursin("one finite real number or an array of them", message)
     end
     message = refusal(() -> SBBRMI((@brm begin
         a = constant(mean(nonexistent_column))
