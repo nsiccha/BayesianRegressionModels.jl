@@ -4514,8 +4514,8 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
         _SBPreprocContext(Dict{Symbol,PreprocEntry}(), _frozen_preproc)
     data[_SB_BINDINGS_KEY] = Dict{Symbol,NamedTuple}()
     data[_SB_GROUP_COLUMNS_KEY] = Dict{Symbol,Union{Nothing,Some}}()
-    # `name = constant(expr)` becomes an ordinary scalar data field before
-    # anything else reads the formula. Replay restores the fitted value from
+    # `name = constant(expr)` becomes an ordinary data field before anything
+    # else reads the formula. Replay restores the fitted value from
     # its `:constant` record instead of evaluating `expr` on the new data.
     brmi, constants = _brm_resolve_constants(brmi; prefix="sbimpl",
         fitted=(key, source) -> _sb_fitted_constant(data, key, source))
@@ -6033,7 +6033,7 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         new_preproc[key] = e
     elseif e.kind === :constant
         if freeze
-            new_data[key] = e.const_.value
+            new_data[key] = copy(e.const_.value)
             new_preproc[key] = e
         else
             node = _brm_rebind_value(e.const_.node, df)

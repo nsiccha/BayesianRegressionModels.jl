@@ -107,13 +107,12 @@ function _brm_rebind_brmi(brmi::BRMI, df)
         map(value -> _brm_rebind_value(value, df), values(operations))))
 end
 
-# ---- `name = constant(expr)`: data-calibrated scalars ---------------------
+# ---- `name = constant(expr)`: data-calibrated scalars and vectors ---------
 #
 # A backend resolves every constant declaration before lowering: the declared
-# name becomes an ordinary scalar data field (`NamedColumn(name,
-# DataColumn(value))`), exactly what a data container carrying that field
-# produces, so every downstream rule for named scalar constants applies
-# unchanged. The value is the fitted one when replay supplies it and is
+# name becomes an ordinary data field (`NamedColumn(name, DataColumn(value))`),
+# exactly what a data container carrying that field produces, so every
+# downstream rule for named scalar or vector data applies unchanged. The value is the fitted one when replay supplies it and is
 # otherwise evaluated from the bound inputs. `SBBRMI` records it as a
 # `:constant` preprocessing entry whose `raw_ref` is the `_BRMConstantSource`.
 
@@ -186,17 +185,32 @@ function _brm_evaluate_constant(key::Symbol, node::ExprColumn{typeof(constant)};
         error("$prefix: evaluating `$key = constant($(spec.expression))` failed: ",
               sprint(showerror, err))
     end
-    (value isa Real && !(value isa Bool) && isfinite(value)) || error(
+    admitted = _brm_constant_value(value)
+    isnothing(admitted) && error(
         "$prefix: `$key = constant($(spec.expression))` evaluated to " *
-        "$(repr(value)) (::$(typeof(value))); a constant is one finite real number")
-    value
+        "$(repr(value)) (::$(typeof(value))); a constant is one finite real " *
+        "number or a vector of them")
+    admitted
+end
+
+# A constant is one finite real number, or a vector of finite real numbers
+# whose length its evaluation fixes. A vector is copied into a fresh `Vector`
+# of its elements' promoted type, so the fitted value never aliases a data
+# column or anything else the expression returned.
+_brm_constant_value(_value) = nothing
+_brm_constant_value(value::Real) = value isa Bool || !isfinite(value) ? nothing : value
+function _brm_constant_value(value::AbstractVector)
+    all(v -> v isa Real && !(v isa Bool) && isfinite(v), value) || return nothing
+    T = isempty(value) ? Float64 :
+        isconcretetype(eltype(value)) ? eltype(value) : mapreduce(typeof, promote_type, value)
+    Vector{T}(value)
 end
 
 """
     _brm_resolve_constants(brmi; fitted, prefix) -> (resolved, constants)
 
-Replace every `name = constant(expr)` declaration of `brmi` by a scalar data
-field holding its value. `fitted(name, source)` returns a value restored from a
+Replace every `name = constant(expr)` declaration of `brmi` by a data field
+holding its value (a scalar or a vector). `fitted(name, source)` returns a value restored from a
 fitted model, or `nothing` to evaluate `expr` from its bound inputs. Returns
 the resolved `BRMI` and one `(; name, value, source, node)` per constant, in
 formula order. A model without constants is returned unchanged.

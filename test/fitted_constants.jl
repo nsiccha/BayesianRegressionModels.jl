@@ -1,9 +1,10 @@
 # test/fitted_constants.jl — `name = constant(expr)`: a scalar calibrated on
 # the data when the model is built and frozen at that value on replay (snag
-# `bruno-fit-time-d-dba90310`, user design decision `00kjor3`).
+# `bruno-fit-time-d-dba90310`, user design decision `00kjor3`), or a vector of
+# such numbers (snag `brm-constant-exp-86604df5`).
 #
-# A constant is evaluated once on whole columns and is then an ordinary scalar
-# data field: Stan data on SBBRMI, a number in the RKBRMI graph. Replay keeps
+# A constant is evaluated once on whole columns and is then an ordinary data
+# field: Stan data on SBBRMI, a bound value in the RKBRMI graph. Replay keeps
 # the fitted value, so `reprocess`, `reprocess(...; resample_groups)` and
 # `generative_plan(plan, new_df)` need no inputs for it, while
 # `reprocess(...; freeze_constants=false)` evaluates it again on the new data.
@@ -11,6 +12,7 @@
 # Run: julia --startup-file=no --project=test test/fitted_constants.jl
 
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
+using Serialization: serialize, deserialize
 using Statistics: mean, std, var
 using LogExpFunctions: logistic
 const stan_code = BRM.stan_code
@@ -192,7 +194,7 @@ end
     catch e
         e
     end
-    @test err isa ErrorException && occursin("one finite real number", err.msg)
+    @test err isa ErrorException && occursin("one finite real number or a vector of them", err.msg)
     # A scalar the data supplies directly is taken from the new data as well.
     plain = SBBRMI(SUPPLIED(supplied(PANEL)); mod=@__MODULE__, total_groups=())
     replay = merge(NO_CONC, (; ec50_loc=9.0, ec50_scale=1.0, V=2.0))
@@ -252,6 +254,236 @@ end
         maximum(PANEL.conc) + 2.0
     @test StanBlocks.stan.compiles(sb.model)
     @test RKBRMI(builder(OFFSET)(panel)) isa RKBRMI
+end
+
+# ---- vector constants (snag `brm-constant-exp-86604df5`) -------------------
+#
+# A constant may be a vector of finite reals, its length fixed when it is
+# evaluated: a data vector on SBBRMI, a bound vector on RKBRMI, recorded and
+# frozen on every replay path exactly like a scalar. The model below reads a
+# grid calibrated on the training times in every subject's plate cell.
+
+# Five offsets doubling up to the largest training time.
+time_grid(t) = maximum(t) .* (2.0 .^ (-4:0))
+
+const CELLS = (; subject_id=1:4,
+    tobs=[[0.5, 1.0, 2.0], [0.3, 1.5, 2.5], [1.0, 2.0, 3.0], [0.2, 0.8, 1.6]],
+    yobs=[[0.4, 0.7, 1.5], [0.2, 1.1, 1.9], [0.9, 1.4, 2.4], [0.1, 0.6, 1.2]],
+    wt=[0.6, 0.7, 0.8, 0.75])
+const GRID = time_grid(reduce(vcat, CELLS.tobs))
+
+const GRIDDED = @brm begin
+    grid = constant(time_grid(reduce(vcat, tobs)))
+    sigma ~ Exponential(1)
+    rate ~ 1 + wt + (1 | p | subject_id)
+    @plate for i in eachindex(rate)
+        pred = rate[i] .* tobs[i] ./ sum(grid)
+        yobs[i] ~ normal(pred, sigma)
+    end
+end
+# The same model with the grid supplied as a data field.
+const GRID_SUPPLIED = @brm begin
+    sigma ~ Exponential(1)
+    rate ~ 1 + wt + (1 | p | subject_id)
+    @plate for i in eachindex(rate)
+        pred = rate[i] .* tobs[i] ./ sum(grid)
+        yobs[i] ~ normal(pred, sigma)
+    end
+end
+with_grid(data, grid=GRID) = merge(data, (; grid))
+
+# A replay design: two of the fitted subjects with later times and no
+# responses, on which `time_grid` would give a different grid.
+const LATER = (; subject_id=[2, 3], tobs=[[4.0, 8.0], [6.0]], wt=[0.7, 0.8])
+const LATER_GRID = time_grid(reduce(vcat, LATER.tobs))
+# The same design with responses: a density, and a fresh-constant replay
+# (which may not omit responses), read them.
+const LATER_OBS = merge(LATER, (; yobs=[[1.0, 2.0], [1.5]]))
+# New subjects with responses, for a replay that resamples the grouping (an
+# SBBRMI forecast cannot resample yet, todo `1fnt1zu`).
+const NEW_SUBJECTS = (; subject_id=[11, 12], tobs=[[4.0, 8.0], [6.0]],
+    yobs=[[1.0, 2.0], [1.5]], wt=[0.5, 0.9])
+
+rk_value(problem, u) = LogDensityProblems.logdensity(problem, u)
+
+@stestset "a vector constant is the data vector it computes" begin
+    saved = deepcopy(CELLS)
+    sb = SBBRMI(GRIDDED(CELLS); mod=@__MODULE__)
+    reference = SBBRMI(GRID_SUPPLIED(with_grid(CELLS)); mod=@__MODULE__)
+    @test stan_code(sb) == stan_code(reference)
+    @test stan_data(sb)[:grid] == GRID
+    @test stan_data(sb)[:grid] isa Vector{Float64}
+    @test sb.preproc[:grid].kind === :constant
+    @test StanBlocks.stan.compiles(sb.model)
+    # The compiled programs give the same density at the same coordinates.
+    names, densities = stan_density_points(GRIDDED(CELLS), "vector-constant")
+    supplied_names, supplied_densities = stan_density_points(
+        GRID_SUPPLIED(with_grid(CELLS)), "vector-constant-supplied")
+    @test names == supplied_names
+    @test densities == supplied_densities
+    # RKBRMI binds the grid: the graph is the supplied model's.
+    ad_backend = AutoEnzyme(; mode=Enzyme.Reverse)
+    rk = RKBRMI(GRIDDED(CELLS))
+    @test rk_bound_data(rk).grid == GRID
+    problem = rk_logdensity_problem(rk; ad_backend)
+    supplied = rk_logdensity_problem(RKBRMI(GRID_SUPPLIED(with_grid(CELLS))); ad_backend)
+    n = LogDensityProblems.dimension(problem)
+    @test n == LogDensityProblems.dimension(supplied)
+    for u in (zeros(n), fill(0.3, n), collect(range(-0.4, 0.4; length=n)))
+        @test rk_value(problem, u) == rk_value(supplied, u)
+    end
+    @test isequal(CELLS, saved)
+end
+
+@stestset "a vector constant's value never aliases what its expression returned" begin
+    # `constant(x)` evaluates to the data column itself; the fitted value is a
+    # copy, so changing the container afterwards leaves the model unchanged.
+    data = (; x=[1.0, 2.0, 3.0], y=[0.1, 0.4, 0.2])
+    builder = @brm begin
+        xs = constant(x)
+        b ~ Normal(0, 1)
+        sigma ~ Exponential(1)
+        mu = b * xs
+        y ~ Normal(mu, sigma)
+    end
+    sb = SBBRMI(builder(data); mod=@__MODULE__)
+    @test stan_data(sb)[:xs] == data.x
+    @test stan_data(sb)[:xs] !== data.x
+    data.x[1] = 10.0
+    @test stan_data(sb)[:xs] == [1.0, 2.0, 3.0]
+    @test sb.preproc[:xs].const_.value == [1.0, 2.0, 3.0]
+    # The admitted value: a fresh `Vector` of the elements' promoted type, so
+    # integers stay integers (as in a supplied data field) and a range or a
+    # loosely typed vector is materialised.
+    @test BRM._brm_constant_value(1:4) == [1, 2, 3, 4]
+    @test BRM._brm_constant_value(1:4) isa Vector{Int}
+    @test BRM._brm_constant_value(Any[1.0, 2]) isa Vector{Float64}
+    @test BRM._brm_constant_value(Union{Missing,Float64}[1.0, 2.0]) isa Vector{Float64}
+    @test BRM._brm_constant_value(Float64[]) == Float64[]
+    v = [0.5, 1.5]
+    @test BRM._brm_constant_value(v) == v && BRM._brm_constant_value(v) !== v
+    @test BRM._brm_constant_value(2.5) === 2.5
+    for refused in ([1.0, NaN], [true, false], [1.0, missing], [1.0 2.0], "a", true, -Inf)
+        @test BRM._brm_constant_value(refused) === nothing
+    end
+end
+
+@stestset "replay keeps a fitted vector constant" begin
+    # Conventional random effects: `resample_groups` does not recover exact
+    # totals (that is `generative_plan`, below).
+    sb = SBBRMI(GRIDDED(CELLS); mod=@__MODULE__, total_groups=())
+    reference = SBBRMI(GRID_SUPPLIED(with_grid(CELLS)); mod=@__MODULE__, total_groups=())
+    for (design, kw) in ((LATER, (;)), (NEW_SUBJECTS, (; resample_groups=[:subject_id])))
+        frozen = reprocess(sb, design; kw...)
+        @test stan_data(frozen)[:grid] == GRID
+        @test frozen.preproc[:grid] === sb.preproc[:grid]
+        # The replay is the data-field twin's replay of the design carrying
+        # the fitted grid: same program, same data.
+        twin = reprocess(reference, with_grid(design); kw...)
+        @test stan_code(frozen) == stan_code(twin)
+        @test stan_data(frozen) == stan_data(twin)
+    end
+    # The fitted value is not shared with the replay's data.
+    @test stan_data(reprocess(sb, LATER))[:grid] !== sb.preproc[:grid].const_.value
+    fresh = reprocess(sb, LATER; freeze_constants=false)
+    @test stan_data(fresh)[:grid] == LATER_GRID
+    @test fresh.preproc[:grid].const_.value == LATER_GRID
+    # A rebuilt plan for new groups keeps the fitted grid.
+    plan = generative_plan(GRIDDED, CELLS; mod=@__MODULE__)
+    @test plan.data[:grid] == GRID
+    @test generative_plan(plan, NEW_SUBJECTS).data[:grid] == GRID
+end
+
+@stestset "RKBRMI replays, binds designs and exports a fitted vector constant" begin
+    ad_backend = AutoEnzyme(; mode=Enzyme.Reverse)
+    rk = RKBRMI(GRIDDED(CELLS))
+    supplied = RKBRMI(GRID_SUPPLIED(with_grid(CELLS)))
+    for (design, kw) in ((LATER, (;)), (NEW_SUBJECTS, (; resample_groups=[:subject_id])))
+        replay = reprocess(rk, design; kw...)
+        @test rk_bound_data(replay).grid == GRID
+        # The replay is the supplied model's replay of the same design.
+        twin = reprocess(supplied, with_grid(design); kw...)
+        @test rk_bound_data(twin).grid == GRID
+        # A design binder binds what the planned replay binds.
+        binder = rk_design_binder(rk; kw...)
+        @test binder(design).grid == GRID
+        @test binder(design).tobs == rk_bound_data(replay).tobs
+    end
+    @test :grid in keys(rk_design_binder(rk).fitted)
+    # `freeze_constants=false` evaluates the grid on the design.
+    @test rk_bound_data(reprocess(rk, LATER_OBS; freeze_constants=false)).grid == LATER_GRID
+    # The data-free fitted state carries the grid, and a design bound from the
+    # state alone gives the training fit's replay of it.
+    state = brm_fitted_state(rk)
+    @test state.constants[:grid] == GRID
+    restored = deserialize(IOBuffer(sprint(serialize, state)))
+    @test restored.constants[:grid] == GRID
+    @test rk_bound_data(RKBRMI(GRIDDED(LATER), restored)).grid == GRID
+    @test rk_bound_data(RKBRMI(GRIDDED(NEW_SUBJECTS), restored;
+        resample_groups=[:subject_id])).grid == GRID
+    # The density of the fitted subjects on later times (new subjects' effects
+    # are supplied as values, not sampled, so they have no such density).
+    let design = LATER_OBS
+        bound = RKBRMI(GRIDDED(design), restored)
+        @test rk_bound_data(bound).grid == GRID
+        replay = reprocess(rk, design)
+        problem = rk_logdensity_problem(bound; ad_backend)
+        reference = rk_logdensity_problem(replay; ad_backend)
+        n = LogDensityProblems.dimension(problem)
+        @test n == LogDensityProblems.dimension(reference)
+        for u in (zeros(n), fill(0.2, n))
+            @test rk_value(problem, u) == rk_value(reference, u)
+        end
+    end
+end
+
+@stestset "the descriptor and the description report a vector constant" begin
+    descriptor = brm_descriptor(GRIDDED, CELLS; mod=@__MODULE__)
+    input = only(i for i in descriptor.inputs if i.name === :grid)
+    @test input.transform === :constant
+    @test isnothing(input.column)
+    @test :grid ∉ brm_columns(descriptor)
+    description = brm_description(descriptor)
+    call = only(c for c in brm_description_components(description) if c.callable === constant)
+    @test only(x for x in description.coverage if x.id == call.id).status === :covered
+    markdown = brm_description_markdown(description)
+    @test occursin("Its fitted value is ($(join(GRID, ", ")))", markdown)
+end
+
+@stestset "a vector constant is a prior's data vector" begin
+    # A declared vector parameter and per-coefficient effect priors read a
+    # vector constant as they read the data vector it computes.
+    data = (; y=[0.4, 1.3, -0.2, 2.1, 0.9, 1.7], g=["a", "b", "c", "d", "a", "c"])
+    centres = [mean(data.y[data.g .== l]) for l in ("a", "b", "c", "d")]
+    calibrated = @brm begin
+        locs = constant([mean(y[g .== l]) for l in ("a", "b", "c", "d")])
+        phi[1:4] .~ Normal.(locs, 1.0)
+        sigma ~ Exponential(1)
+        w ~ 0 + g
+        effect(w, g) .~ Normal.(locs, 2.0)
+        mu = phi[1] + w
+        y ~ Normal(mu, sigma)
+    end
+    supplied_locs = @brm begin
+        phi[1:4] .~ Normal.(locs, 1.0)
+        sigma ~ Exponential(1)
+        w ~ 0 + g
+        effect(w, g) .~ Normal.(locs, 2.0)
+        mu = phi[1] + w
+        y ~ Normal(mu, sigma)
+    end
+    with_locs = merge(data, (; locs=centres))
+    sb = SBBRMI(calibrated(data); mod=@__MODULE__, total_groups=())
+    @test stan_code(sb) == stan_code(SBBRMI(supplied_locs(with_locs); mod=@__MODULE__, total_groups=()))
+    @test stan_data(sb)[:locs] == centres
+    @test StanBlocks.stan.compiles(sb.model)
+    ad_backend = AutoEnzyme(; mode=Enzyme.Reverse)
+    rk = rk_logdensity_problem(RKBRMI(calibrated(data)); ad_backend)
+    rk_supplied = rk_logdensity_problem(RKBRMI(supplied_locs(with_locs)); ad_backend)
+    n = LogDensityProblems.dimension(rk)
+    for u in (zeros(n), fill(0.3, n))
+        @test rk_value(rk, u) == rk_value(rk_supplied, u)
+    end
 end
 
 # A body built from a runtime string and `Core.eval`'d inside a function: the
@@ -317,11 +549,17 @@ end
         y ~ Normal(0, a)
     end)(PANEL); mod=@__MODULE__))
     @test occursin("failed", message) && occursin("DomainError", message)
-    message = refusal(() -> SBBRMI((@brm begin
-        a = constant(conc)
-        y ~ Normal(0, a)
-    end)(PANEL); mod=@__MODULE__))
-    @test occursin("one finite real number", message)
+    # refused: a constant is data, so each value is one finite real number
+    # (decision `00kjor3`); a vector holds such numbers and nothing else.
+    for expression in (:(fill(NaN, 3)), :(conc .> 1.0), :(reshape(conc, 3, 4)),
+                       :(string(first(conc))), :(Inf))
+        model = eval(:(@brm begin
+            a = constant($expression)
+            y ~ Normal(0, 1.0)
+        end))
+        message = refusal(() -> SBBRMI(model(PANEL); mod=@__MODULE__))
+        @test occursin("one finite real number or a vector of them", message)
+    end
     message = refusal(() -> SBBRMI((@brm begin
         a = constant(mean(nonexistent_column))
         y ~ Normal(a, 1.0)

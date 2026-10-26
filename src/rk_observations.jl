@@ -63,8 +63,8 @@ _rk_plan_summary(plan::_RKHeldOutPlan) =
 Base.@nospecializeinfer function _brm_rk_plan(@nospecialize(brmi::BRMI); held_out=(),
         fitted_constants=(_name, _source) -> nothing)
     brmi = _brm_resolve_prior_addresses(brmi)
-    # A `constant(...)` becomes a named scalar data constant, which the graph
-    # holds as a number: evaluated here, or the fitted value on a frozen
+    # A `constant(...)` becomes a named data constant (a number or a vector),
+    # which the graph binds: evaluated here, or the fitted value on a frozen
     # `reprocess` replay.
     brmi, constants = _brm_resolve_constants(brmi; fitted=fitted_constants,
         prefix="RK backend")
