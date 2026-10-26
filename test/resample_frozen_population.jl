@@ -232,9 +232,12 @@ end
     @test BRM.stan_code(reprocess(fit, train)) == BRM.stan_code(fit)
     @test restan_data(fit, train) == StanBlocks.stan_data(fit.model)
     two = merge(two_subjects, (; sex=[1, 2], grp=[1, 1]))
-    @test stanc_ok(reprocess(fit, two; resample_groups=[:subject]))
-    # Capability gap, not a refusal: the `|ID|` bucket reserves its columns
-    # from the replay rows' levels (todo `05x61gq`).
-    @test_broken stanc_ok(reprocess(fit, merge(one_subject, (; sex=[1], grp=[1]));
-                                    resample_groups=[:subject]))
+    resampled_two = reprocess(fit, two; resample_groups=[:subject])
+    @test stanc_ok(resampled_two)
+    # Rows with one level of the slope's factor: a frozen resample re-emits the
+    # fitted model, so the `|ID|` bucket keeps every fitted column (before, it
+    # reserved them from the replay rows' levels; todo `05x61gq`).
+    one = reprocess(fit, merge(one_subject, (; sex=[1], grp=[1])); resample_groups=[:subject])
+    @test stanc_ok(one)
+    @test BRM.stan_code(one) == BRM.stan_code(resampled_two)
 end

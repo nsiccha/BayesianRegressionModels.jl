@@ -115,11 +115,12 @@ function _rk_ast_hsgp_grouped(definitions, term, inputs, floors, extent, taken, 
     z = _rk_block_local!(block, :z)
     # A periodic extent reads its prepared basis argument.
     extent = _rk_ast_hsgp_substitute(extent, Dict(arguments))
-    weights = grouped ? (Expr(:call, :(:), 1, G), extent) : (extent,)
+    level_cor = get(options, :level_cor, nothing)
+    weights = grouped ? (Expr(:call, :(:), 1, _rk_ast_hsgp_weight_rows(level_cor, G)),
+                         extent) : (extent,)
     push!(block.statements, Expr(:call, :.~, Expr(:ref, z, weights...),
         _rk_ast_dotted(:Normal, 0, 1)))
-    weights_value, multigroup = _rk_ast_hsgp_level_weights!(block, z,
-        get(options, :level_cor, nothing))
+    weights_value, multigroup = _rk_ast_hsgp_level_weights!(block, z, level_cor, options)
     value = _rk_block_local!(block, :value)
     push!(block.statements, Expr(:(=), value, _rk_ast_hsgp_value_graph!(definitions,
         term, taken, arguments, sigma, rho, weights_value; group_index, multigroup)))
@@ -128,20 +129,69 @@ end
 
 # The level weights of a grouped HSGP's `cor=` (src/level_correlation.jl).
 # `cor=Omega` correlates every basis function's group weights by the factor's
-# `L`; `cor=multigroup(Omega, tau)` hands `L` and `tau` to the spectral graph,
-# which forms the frequency-dependent weights once it has the frequencies.
-_rk_ast_hsgp_level_weights!(_block, z, ::Nothing) = (z, nothing)
-function _rk_ast_hsgp_level_weights!(block, z, lc::_BRMLevelCorrelation)
+# `L`; a `multigroup` coherence hands its arguments to the spectral graph,
+# which forms the frequency-dependent weights once it has the frequencies:
+# `weights` is that graph statement over `z`, `omega2`, `rho` and `formals`,
+# bound to the block values `values`.
+_rk_ast_hsgp_level_weights!(_block, z, ::Nothing, _options) = (z, nothing)
+function _rk_ast_hsgp_level_weights!(block, z, lc::_BRMLevelCorrelation, _options)
     L = _rk_block_argument!(block, :L_level, _rk_ast_level_factor_value(lc))
     weights = _rk_block_local!(block, :z_level)
     push!(block.statements, Expr(:(=), weights, Expr(:call, :*, L, z)))
     (weights, nothing)
 end
-function _rk_ast_hsgp_level_weights!(block, z, lc::_BRMMultigroupCorrelation)
+function _rk_ast_hsgp_level_weights!(block, z, lc::_BRMMultigroupCorrelation, _options)
     L = _rk_block_argument!(block, :L_level, _rk_ast_level_factor_value(lc.base))
     tau = _rk_block_argument!(block, :tau_level, lc.tau)
-    (z, (; L, tau))
+    (z, (; weights=:(brm_hsgp_multigroup_weights(z, omega2, rho, L_level, tau_level)),
+           formals=[:L_level, :tau_level], values=Any[L, tau]))
 end
+# The coordinates are fit-role data columns; the graph assembles them and
+# derives the inducing grid (`brm_multigroup_coordinate_grid`) in place.
+function _rk_ast_hsgp_level_weights!(block, z, lc::_BRMMultigroupCoordinates, options)
+    columns = Any[_rk_block_argument!(block, Symbol(:coordinate_, j), column)
+                  for (j, column) in enumerate(options.coordinate_columns)]
+    positions = Any[_rk_block_argument!(block, Symbol(:position_, j), column)
+                    for (j, column) in enumerate(get(options, :position_columns, ()))]
+    lambda = isnothing(lc.lambda) ? _rk_multigroup_own_lambda!(block, lc) :
+        _rk_block_argument!(block, :lambda_level, lc.lambda)
+    formals = [Symbol(:coordinate_, j) for j in eachindex(columns)]
+    if !isempty(lc.positions)
+        position_formals = [Symbol(:position_, j) for j in eachindex(positions)]
+        weights = quote
+            coordinates_level = hcat($(formals...))
+            positions_level = hcat($(position_formals...))
+            brm_hsgp_multigroup_inducing_weights(z, omega2, rho, coordinates_level,
+                positions_level, lambda_level)
+        end
+        return (z, (; weights, formals=[formals; position_formals; :lambda_level],
+                    values=Any[columns; positions; lambda]))
+    end
+    method = _brm_multigroup_method_code(lc.method)
+    weights = quote
+        coordinates_level = hcat($(formals...))
+        grid_level = brm_multigroup_coordinate_grid(coordinates_level, $(lc.k), $method, $(lc.c))
+        brm_hsgp_multigroup_coordinate_weights(z, omega2, rho, coordinates_level,
+            grid_level, lambda_level, $method)
+    end
+    (z, (; weights, formals=[formals; :lambda_level], values=Any[columns; lambda]))
+end
+
+# `multigroup((x, y); k)`: the term's own spatial scale, with SBBRMI's prior
+# (`_sb_multigroup_own_lambda`, decision `100gkpq`).
+function _rk_multigroup_own_lambda!(block, lc)
+    (; location, lower) = _brm_multigroup_default_lambda(lc)
+    lambda = _rk_block_local!(block, :lambda)
+    push!(block.statements, Expr(:call, :~, lambda,
+        Expr(:call, :restricted, Expr(:call, :LogNormal, location, 1.0), lower, Inf)))
+    lambda
+end
+
+# The rows of a grouped HSGP's standardized weights: one per level, or one per
+# grid point, basis function or inducing position for
+# `multigroup(coordinates, lambda; ...)`.
+_rk_ast_hsgp_weight_rows(_level_cor, n_groups) = n_groups
+_rk_ast_hsgp_weight_rows(lc::_BRMMultigroupCoordinates, _n_groups) = lc.n_points
 function _rk_ast_structured_block(definitions, field, taken, bindings)
     K, G = field.n_per_group, length(field.levels)
     K isa Integer && K > 0 || error("RK backend: structured field needs a positive width")

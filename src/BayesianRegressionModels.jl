@@ -4,6 +4,7 @@ module BayesianRegressionModels
 # intermediate: expression tree + column metadata).
 using OrderedCollections
 include("macro.jl")
+include("builder_interpreter.jl")
 include("groups.jl")
 include("ar1_normal.jl")
 
@@ -17,6 +18,7 @@ include("introspection.jl")
 # likelihood into a LogDensityProblems-compatible object.
 using LogExpFunctions, InverseFunctions, Distributions, ElasticArrays, Libdl,
       LogDensityProblems, LinearAlgebra, SpecialFunctions, Random, Statistics
+using StaticArrays: SMatrix, SVector, MMatrix, MVector
 using StatsBase: AbstractWeights, AnalyticWeights, FrequencyWeights,
                  ProbabilityWeights, UnitWeights, Weights,
                  aweights, fweights, pweights, uweights, weights
@@ -115,6 +117,7 @@ include("nlme_joint_start.jl")
 include("nlme_conditional.jl")
 include("nlme_start.jl")
 include("nlme_laplace.jl")
+include("nlme_laplace_structured.jl")
 include("start_values.jl")
 include("nlme_fit.jl")
 include("nlme_two_stage.jl")
@@ -128,6 +131,7 @@ include("posterior_diagnostics.jl")
 # Per-draw random-effect SDs, correlations and per-level effects, read from
 # the emitted carriers through the descriptor and the description metadata.
 include("ranef_draws.jl")
+include("multigroup_readers.jl")
 
 # Prior/likelihood power-scaling sensitivity — PSIS weights, CJS distance, the
 # per-variable summary, and the SBBRMI input assembly. After the descriptor
@@ -213,7 +217,7 @@ export brm_ordinal, brm_ordinal_lpmf, brm_ordinal_lpmfs, brm_ordinal_rng,
 export Data, MaybeData, maybedata
 export AbstractColumn, MissingColumn, DataColumn, NamedColumn,
        ExprColumn, LikelihoodColumn, MaterializedColumn
-export BRMI, BRMBuilder, VBRMI, SBBRMI, TuringBRMI, RKBRMI, GenerativeDeclaration, GenerativePlan,
+export BRMI, BRMBuilder, brm, VBRMI, SBBRMI, TuringBRMI, RKBRMI, GenerativeDeclaration, GenerativePlan,
        brm_distribution_type, turing_model_source,
        turing_pointwise_loglikelihoods, turing_predictive_model,
        turing_generated_quantities, turing_posterior_predictive,
@@ -233,6 +237,7 @@ export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
        brm_population_effect_coordinates, brm_term_coordinates,
        brm_length_scale_floor,
        brm_ranef_sd_coordinates, brm_ranef_draws,
+       brm_multigroup_coherence, brm_multigroup_field,
        BRMCoordinatePair, BRMCoordinateTransport, BRMCoordinateTransportError,
        brm_coordinate_transport,
        brm_rk_to_stan, brm_stan_to_rk, brm_check_coordinate_transport,
@@ -250,7 +255,8 @@ export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
        BRMNLMEModel, brm_nlme_model, brm_nlme_loglikelihood,
        brm_nlme_loglikelihood_and_gradient, brm_nlme_loglikelihoods,
        brm_nlme_loglikelihoods_and_gradients,
-       BRMLaplaceProblem, brm_laplace_problem, brm_laplace_draws,
+       BRMLaplaceProblem, BRMStructuredLaplaceProblem, brm_laplace_problem,
+       brm_laplace_draws,
        brm_operation, brm_execute, brm_columns, required_brm_inputs
 export brm_transform_constants
 
@@ -332,9 +338,15 @@ export popefs, _popefs_normal, _popefs_coefs, _popefs_normal_coefs,
        _sb_hsgp_partial, _sb_hsgp_partial_aniso,
        _sb_hsgp_by, _sb_hsgp_by_aniso, _sb_hsgp_by_levelcor, _sb_hsgp_by_aniso_levelcor,
        _sb_hsgp_by_multigroup, _sb_hsgp_by_aniso_multigroup,
+       _sb_hsgp_by_multigroup_coordinates, _sb_hsgp_by_aniso_multigroup_coordinates,
+       _sb_hsgp_by_multigroup_inducing, _sb_hsgp_by_aniso_multigroup_inducing,
+       _sb_hsgp_by_multigroup_coordinates_lambda, _sb_hsgp_by_aniso_multigroup_coordinates_lambda,
+       _sb_hsgp_by_multigroup_inducing_lambda, _sb_hsgp_by_aniso_multigroup_inducing_lambda,
        _sb_hsgp_latent, _sb_hsgp_latent_orthogonal,
        _sb_gp_periodic, _sb_hsgp_periodic,
        brm_exp_quad_cov, brm_hsgp_sqrt_spd, brm_hsgp_log_sqrt_spd, brm_hsgp_multigroup_weights,
+       brm_hsgp_multigroup_coordinate_weights, brm_multigroup_coordinate_grid,
+       brm_hsgp_multigroup_inducing_weights, brm_multigroup_inducing_resolution,
        brm_hsgp_scale_fraction, brm_hsgp_remaining_scale_fraction,
        brm_hsgp_centered_log_scale, brm_hsgp_remaining_log_scale,
        brm_hsgp_basis_1d,

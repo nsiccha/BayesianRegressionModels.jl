@@ -32,7 +32,8 @@ const ENZYME_EXT = Base.get_extension(BRM, :BayesianRegressionModelsWarmupHMCEnz
 const AC_EXT = Base.get_extension(BRM, :BayesianRegressionModelsWarmupHMCExt)
 
 # The declared-order scoring frame as it was built before: the factor and the
-# work arrays rebuilt for every level.
+# work arrays rebuilt for every level. A pair centred on a population
+# coefficient (`pair_location`, hierarchical centring) adds it to its location.
 function per_level_frame(state, position, gradient)
     T = promote_type(eltype(position), eltype(gradient), Float64)
     n = length(state.sources)
@@ -53,9 +54,11 @@ function per_level_frame(state, position, gradient)
                 A[j, l] = c * C[j, l]
             end
             s = C[j, j]
-            z[j] = (position[block.effects[j, g]] - c * m) / s^c
+            beta = state.pair_location[p]
+            loc = beta == 0 ? m : m + position[beta]
+            z[j] = (position[block.effects[j, g]] - c * loc) / s^c
             A[j, j] = s^c
-            location[p] = m
+            location[p] = loc
             scale[p] = s
             innovation[p] = z[j]
         end

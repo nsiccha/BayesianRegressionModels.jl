@@ -483,7 +483,7 @@ _rk_once!(compute, once::_RKOnce) = lock(once.lock) do
 end
 
 """
-    RKBRMI(brmi; held_out=())
+    RKBRMI(brmi; held_out=(), completions=:centered)
     RKBRMI(brmi, plan, built)
 
 A [`BRMI`](@ref) lowered to the ReactiveKernels backend. `plan` is the strict,
@@ -493,6 +493,16 @@ is loaded. Implemented only by that extension; the generic here lets the core
 validate and materialise plans without loading RK.
 `held_out` selects a strict subset of response names whose likelihoods are
 withheld. Authored priors and sampled coordinates remain in the program.
+`completions` parametrizes the `mi(...)` completions of a model with
+assignments or `@plate` cells: `:centered` samples each missing value under
+its law; `:noncentered` samples one standard-normal draw per missing value
+and computes the value from its law's location and scale (`Normal`,
+`LogNormal`; other laws are refused). Both are the same model. A
+non-centered completion whose rows lie on the subject grouping axis is a unit
+draw of [`brm_nlme_view`](@ref) (two-stage, SVI, Laplace and the NLME
+estimators) instead of a shared latent; it has no Stan counterpart in
+[`brm_coordinate_transport`](@ref). [`reprocess`](@ref) keeps the backend's
+parametrization.
 
 The three-argument constructor wraps an existing artifact build without
 planning, translation, emitted-definition evaluation or kernel construction.
@@ -5190,7 +5200,8 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
             "hyper-predicted length scales or amplitudes is not implemented")
         (; group_index=idx, group_source=source,
             group_levels=collect(state.by.levels), n_groups=length(state.by.levels),
-            level_cor)
+            level_cor, _rk_plan_level_coordinates!(level_cor, data, columns, taken,
+                                                   derived)...)
     end
     # `fits` (each axis's center and half-width) is metadata for design
     # checks (`rk_design_binder`); the emitted basis computes its own.
@@ -5199,6 +5210,19 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
             fixed_fits=state.explicit_domain ? state.fits : nothing,
             latent=state.latent, orthogonal, common..., grouped...), id, id)
 end
+
+# `cor = multigroup(coordinates, lambda; k)` reads the levels' coordinates as
+# fit-role inputs, so a frozen replay keeps the training coordinates; the
+# graph derives the inducing grid from them (src/rk_structured.jl). Free
+# inducing positions are fit-role inputs too when they are data, and the
+# declared vector parameters by name otherwise.
+_rk_plan_level_coordinates!(_level_cor, data, columns, taken, derived) = (;)
+_rk_plan_level_coordinates!(lc::_BRMMultigroupCoordinates, data, columns, taken, derived) =
+    (; coordinate_columns=Tuple(_rk_fit_twin!(derived, columns, taken, data, axis)
+                                for axis in lc.axes),
+       position_columns=Tuple(isnothing(position.values) ? position.name :
+                                  _rk_fit_twin!(derived, columns, taken, data, position.name)
+                              for position in lc.positions))
 
 # ---- AR(1) latent-path terms (mirrors `_sb_ar1`) ----
 #

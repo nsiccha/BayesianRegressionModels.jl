@@ -10,6 +10,7 @@
 using Random, Statistics, Distributions, CSV, DataFrames, JSON
 using BayesianRegressionModels, StanBlocks, BridgeStan, LogDensityProblems
 using WarmupHMC, Enzyme
+include(joinpath(@__DIR__, "quorum.jl"))  # chains through WarmupHMC's quorum sampler
 using DifferentiationInterface: AutoEnzyme
 
 const BRM = BayesianRegressionModels
@@ -41,7 +42,7 @@ rp = try
 catch
     problem
 end
-fit = adaptive_warmup_mcmc(Xoshiro(44001), rp; init=missing, n_draws=800,
+fit = quorum_fit(Xoshiro(44001), rp; init=missing, n_draws=800,
     nonlinear_adapt=false, monitor_ess=false)
 P = fit.posterior_position
 names = BridgeStan.param_names(problem.model; include_tp=true)

@@ -58,14 +58,27 @@ parameter_law_latent(data) = @brm data begin
     end
 end
 
-# The law reads a per-cell formula predictor as `m[i]`. RKPPL's cell-latent
-# shape rule refuses a per-index read of a model value (ReactiveKernels snag
-# `rkppl-cell-laten-b18e668a`); SBBRMI builds it.
+# The law reads a per-cell formula predictor as `m[i]`: a model value read at
+# the index (rkppl-use §13; ReactiveKernels snag `rkppl-cell-laten-b18e668a`).
 predictor_law_latent(data) = @brm data begin
     sigma ~ Exponential(1.0)
     m ~ 1 + x
     @plate for i in eachindex(total)
         log_T ~ Normal(log.(mu[i]) .+ m[i], 0.5)
+        T = exp.(log_T)
+        y[i] ~ Normal(T[obs[i]], sigma)
+        total[i] ~ Normal(sum(T), 0.01 * total[i])
+    end
+end
+
+# The law reads a top-level vector parameter at the cell, `b[i]`. RKPPL admits
+# it; BRM's RK preparation still refuses it as a per-subject linear predictor
+# (todo 2026-10-26T08-15-30-153-1n962h6).
+vector_parameter_law_latent(data) = @brm data begin
+    sigma ~ Exponential(1.0)
+    b[1:2] .~ Normal(0.0, 1.0)
+    @plate for i in eachindex(total)
+        log_T ~ Normal(log.(mu[i]) .+ b[i], 0.5)
         T = exp.(log_T)
         y[i] ~ Normal(T[obs[i]], sigma)
         total[i] ~ Normal(sum(T), 0.01 * total[i])
@@ -160,8 +173,13 @@ end
     @test count(n -> startswith(String(n), "log_T."), coordinate_names(c.rk.model.layout)) == 5
 end
 
-@stestset "known gap: a law reading a per-cell predictor" begin
-    @test_broken (RKBRMI(predictor_law_latent(CELLS)).model; true)
+@stestset "the law may read a per-cell predictor" begin
+    c = check_against_stan(predictor_law_latent(CELLS), "predictor_law_latent")
+    @test count(n -> startswith(String(n), "log_T."), coordinate_names(c.rk.model.layout)) == 5
+end
+
+@stestset "known gap: the law reads a vector parameter at the cell" begin
+    @test_broken (RKBRMI(vector_parameter_law_latent(CELLS)).model; true)
 end
 
 @stestset "a latent nothing observes is not sampled" begin

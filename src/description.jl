@@ -88,6 +88,13 @@ coverage, not the independent scientific correctness of handwritten hooks.
 `model_id` is the unchanged inference identity; labels, prose and `texts` do not
 alter it. `texts` holds the language the description was written in; a
 description constructed without it is English.
+
+`prose` and `equations` hold every sentence and every equation in inventory
+order. `sections` holds the same sentences and equations per described
+component, `(; id, prose, equations)` in that order, so a reader sees each
+part's equations right after its sentences; the Markdown is written from them.
+A description constructed without sections has one section holding all of
+`prose`, then all of `equations`.
 """
 struct BRMDescription
     model_id::String
@@ -100,10 +107,14 @@ struct BRMDescription
     diagnostics::Tuple
     complete::Bool
     texts::BRMDescriptionTexts
+    sections::Tuple
 end
 # Without texts, a description is in the default English, as in brm_description.
 BRMDescription(model_id,components,prose,equations,notation,priors,coverage,diagnostics,complete) =
     BRMDescription(model_id,components,prose,equations,notation,priors,coverage,diagnostics,complete,_BRMD_EN_TEXTS)
+BRMDescription(model_id,components,prose,equations,notation,priors,coverage,diagnostics,complete,texts) =
+    BRMDescription(model_id,components,prose,equations,notation,priors,coverage,diagnostics,complete,texts,
+        ((;id=(),prose=Tuple(prose),equations=Tuple(equations)),))
 
 """
     brm_description_texts(description_or_context)
@@ -244,4 +255,5 @@ brm_description_components(description::BRMDescription) =
 include("description_semantics.jl")
 include("description_priors.jl")
 include("description_render.jl")
+include("description_plates.jl")
 include("description_allocations.jl")

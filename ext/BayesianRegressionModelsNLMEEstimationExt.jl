@@ -30,6 +30,14 @@ NE.nlme_layout(m::BRM.BRMNLMEModel) = BRM._brm_nlme_ragged(m.view) ?
         eta_blocks=m.eta_blocks)
 
 NE.evaluation_style(::BRM.BRMNLMEModel) = NE.BatchedEvaluation()
+
+# Families whose covariance the model fixes (a non-centered completion's unit
+# variance); NLMEEstimation estimates the others.
+function NE.fixed_omega(m::BRM.BRMNLMEModel)
+    pairs = [f => NE.FixedOmega(family.fixed)
+        for (f, family) in enumerate(m.view.families) if family.fixed !== nothing]
+    isempty(pairs) ? nothing : pairs
+end
 # Only a prepared compact subject-cell sampler differentiates one subject's
 # population coordinates; every other model uses the lockstep batch.
 NE.saem_population_gradient_style(m::BRM.BRMNLMEModel) =
@@ -51,9 +59,6 @@ BRM._brm_nlme_forward_backend(ad_backend::AutoEnzyme) =
 # an LKJ correlation Cholesky factor R, with C = diag(τ) R. These helpers move
 # the *authored* RK prior to NLME's ω measure; the standardized subject draws
 # are omitted because NLMEEstimation supplies their Gaussian prior itself.
-_prior_positions(m, declaration) = findall(name ->
-    BRM._brm_nlme_owned(name, declaration), m.view.coordinates)
-
 function _prior_entry(layout, position)
     only(e for e in layout.entries if e.offset <= position < e.offset + e.size)
 end
@@ -90,30 +95,23 @@ end
 
 function _read_prior_structure(m::BRM.BRMNLMEModel)
     layout = m.backend.model.layout
-    records = [r for r in BRM._brm_nlme_records(m.backend.plan) if r.kind === :ranef]
-    families = map(records) do record
-        K = length(record.margins)
-        scale_positions = Int[]
-        if isnothing(record.scales)
-            append!(scale_positions, _prior_positions(m, record.scale))
-        else
-            length(record.scales) == K || BRM._brm_nlme_error(
-                "population prior: scale declarations do not match the random-effect block")
-            for declaration in record.scales
-                append!(scale_positions, _prior_positions(m, declaration))
-            end
-        end
-        length(scale_positions) == K || BRM._brm_nlme_error(
-            "population prior: expected $K scale coordinates for `$(record.group)`")
-        factor_positions = isnothing(record.L) ? Int[] : _prior_positions(m, record.L)
-        length(factor_positions) == K * (K - 1) ÷ 2 || BRM._brm_nlme_error(
-            "population prior: correlation coordinates do not match the random-effect block")
-        (; K, scale_positions, factor_positions)
+    # The view's covariance families, in NLMELayout order: one per block, or
+    # one per stratum of a stratified block.
+    # A fixed family (a completion's unit variance) has no BRM coordinates: its
+    # ω entries hold the fixed values and carry no prior.
+    families = map(m.view.families) do family
+        K = family.size
+        fixed = family.fixed !== nothing
+        fixed || length(family.scales) == K &&
+            length(family.factor) == K * (K - 1) ÷ 2 || BRM._brm_nlme_error(
+            "population prior: scale or correlation coordinates do not match the random-effect block")
+        (; K, fixed, scale_positions=family.scales, factor_positions=family.factor)
     end
     omega_positions = reduce(vcat,
         (vcat(f.scale_positions, f.factor_positions) for f in families); init=Int[])
-    length(omega_positions) == NE.nomega(NE.nlme_layout(m)) || BRM._brm_nlme_error(
-        "population prior: BRM covariance coordinates do not match NLME ω")
+    length(omega_positions) == NE.nomega(NE.nlme_layout(m)) -
+            sum(f -> f.K * (f.K + 1) ÷ 2, filter(f -> f.fixed, families); init=0) ||
+        BRM._brm_nlme_error("population prior: BRM covariance coordinates do not match NLME ω")
     families = map(families) do family
         scale_entries = map(family.scale_positions) do position
             entry = _prior_entry(layout, position)
@@ -143,7 +141,7 @@ end
 function _prior_omega_map(m::BRM.BRMNLMEModel, structure, θ, σ, ω)
     chol = NE.omega_cholesky(NE.nlme_layout(m), ω)
     C = BRM._brm_nlme_ragged(m.view) ? chol : Matrix(chol)
-    J = zeros(Float64, length(ω), length(ω))
+    J = zeros(Float64, length(structure.omega_positions), length(ω))
     omega_positions = structure.omega_positions
     omega_logjac_gradient = Float64[]
     log_omega_jacobian = 0.0
@@ -162,8 +160,13 @@ function _prior_omega_map(m::BRM.BRMNLMEModel, structure, θ, σ, ω)
     margin_start = 1
     omega_start = 1
     urow = 1
-    for (family, (; K, scale_positions, factor_positions, scale_entries)) in
+    for (family, (; K, fixed, scale_positions, factor_positions, scale_entries)) in
             enumerate(structure.families)
+        if fixed
+            margin_start += K
+            omega_start += K * (K + 1) ÷ 2
+            continue
+        end
         block = BRM._brm_nlme_ragged(m.view) ? C[family] :
             C[margin_start:(margin_start + K - 1), margin_start:(margin_start + K - 1)]
         τ = [norm(view(block, i, 1:i)) for i in 1:K]

@@ -27,6 +27,10 @@ context's notation. Rendering an unknown call does not establish coverage.
 function brm_description_math(c::BRMDescriptionContext,x::BRMDescriptionReference)
     x.logical isa Tuple && any(n -> n.name==x.logical,c.notation) &&
         return brm_description_symbol(c,x.logical)
+    if x.axis===:cell
+        output=_brmd_plate_output_math(c,x.name)
+        isnothing(output) || return output
+    end
     aliases=filter(b -> x.axis!==:cell && b.name===x.name && b.role in (:alias,:constant),c.bindings)
     if !isempty(aliases)
         value=only(aliases).value
@@ -35,6 +39,9 @@ function brm_description_math(c::BRMDescriptionContext,x::BRMDescriptionReferenc
         remaining=Tuple(b for b in c.bindings if b.name!==x.name)
         localcontext=BRMDescriptionComponent(c.id,c.kind,c.callable,c.arguments,c.keywords,
             c.axes,c.outputs,c.priors,c.fitted_constants,c.children,c.provenance,c.notation,remaining)
+        # A `@plate` cell's input is what the authored cell reads at its index.
+        read=only(aliases).role===:alias ? _brmd_plate_read_of(c,x.name) : nothing
+        isnothing(read) || return _brmd_plate_read_math(localcontext,read,value)
         isequal(value,x) || return brm_description_math(localcontext,value)
     end
     any(n->n.name==x.name && haskey(n,:symbol),c.notation) &&
@@ -144,7 +151,7 @@ function brm_description_math(c::BRMDescriptionContext, x::BRMDescriptionCompone
         elseif x.callable in (:tuple,:vect)
             return "\\left["*join((brm_description_math(c,a) for a in x.arguments),", ")*"\\right]"
         elseif x.callable===:(=) && first(x.arguments) isa BRMDescriptionReference
-            return brm_description_symbol(c,first(x.arguments).name)*"="*brm_description_math(c,last(x.arguments))
+            return _brmd_cell_name_math(c,first(x.arguments).name)*"="*brm_description_math(c,last(x.arguments))
         elseif x.callable===:return
             return brm_description_math(c,only(x.arguments))
         elseif x.callable===:. && length(x.arguments)==2
@@ -156,6 +163,10 @@ function brm_description_math(c::BRMDescriptionContext, x::BRMDescriptionCompone
     end
     get(x.provenance,:concatenation,false) &&
         return "\\left["*join((brm_description_math(c,a) for a in x.arguments),";\\ ")*"\\right]"
+    if x.callable===sum
+        rows=_brmd_plate_sum_math(c,x)
+        isnothing(rows) || return rows
+    end
     if x.callable===StanBlocks.stan.builtin.maybe_index
         value=first(x.arguments)
         (value isa Number || value isa BRMDescriptionReference && value.axis===:scalar) &&
@@ -427,6 +438,10 @@ _brmd_builtin_call(::StanBlocks.SlicModel,c)=BRMDescriptionFragment(covers=(c.id
 # Only BRM-generated vector priors decompose; other value families stay gaps.
 _brmd_builtin_call(::StanBlocks.ValueFamily,c)=isempty(_brmd_coordinates(c)) ? nothing :
     _brmd_coordinatewise_fragment(c)
+# `x[1:n] .~ Family.(...)` (`_brm_vector_prior(n, law)`): one element law,
+# itself a described component, shared by every coordinate.
+_brmd_builtin_call(::typeof(_brm_vector_prior),c)=BRMDescriptionFragment(
+    prose=(_brmd_text(c,:vector_prior),),covers=(c.id,))
 # `vcat` is SLIC's block-wise prior family, decomposing the same way, or,
 # outside distribution position, value concatenation (`_brmd_distribution`).
 _brmd_builtin_call(::typeof(vcat),c)=!isempty(_brmd_coordinates(c)) ? _brmd_coordinatewise_fragment(c) :
@@ -535,7 +550,18 @@ end
 function _brmd_call_math(::typeof(StanBlocks.stan.builtin.maybe_index),args,_kwargs,c)
     "\\operatorname{"*_brmd_text(c,:math_select)*"}_{\\mathrm{"*_brmd_text(c,:math_scalar_vector)*"}}\\left("*join(args,",")*"\\right)"
 end
+# The value a kernel cell collects, or `nothing` when it collects none: a cell
+# that only observes ends in `nothing`, and a trailing loop or block is no value.
+function _brmd_kernel_final(c)
+    body=last(first(c.arguments).arguments)
+    final=body isa BRMDescriptionComponent && body.callable===:block && !isempty(body.arguments) ? last(body.arguments) : body
+    isnothing(final) || final isa BRMDescriptionReference && final.name===:nothing && final.axis===:local ||
+        final isa BRMDescriptionComponent && final.kind===:syntax && final.callable in (:if,:for,:while,:block) ?
+        nothing : final
+end
 function _brmd_builtin_call(::typeof(kernel),c)
+    plate=_brmd_cell_plate(c)
+    isnothing(plate) || return _brmd_plate_fragment(c,plate)
     aliases=filter(b->b.role===:alias,c.bindings)
     definitions=String[]; notes=NamedTuple[]; counter=Ref(0)
     binding_prose=String[]
@@ -553,12 +579,8 @@ function _brmd_builtin_call(::typeof(kernel),c)
         push!(definitions,_brmd_assignment_equation(localcontext,symbol,value))
         push!(binding_prose,_brmd_text(c,:kernel_input;name=b.name,symbol))
     end
-    body=last(first(c.arguments).arguments)
-    final=body isa BRMDescriptionComponent && body.callable===:block && !isempty(body.arguments) ? last(body.arguments) : body
-    # A cell that only observes collects no value (`nothing`): no K relation.
-    readable=!isnothing(final) && !(final isa BRMDescriptionComponent && final.kind===:syntax &&
-        final.callable in (:if,:for,:while,:block))
-    equations=readable ? (_brmd_assignment_equation(c,_brmd_kernel_math(c,c),final),) : ()
+    final=_brmd_kernel_final(c)
+    equations=isnothing(final) ? () : (_brmd_assignment_equation(c,_brmd_kernel_math(c,c),final),)
     BRMDescriptionFragment(prose=(_brmd_text(c,:kernel_mapping;owner=c.provenance.owner),binding_prose...),
         equations=(equations...,definitions...),notation=Tuple(notes),covers=(c.id,))
 end
@@ -586,6 +608,7 @@ function _brmd_gp_fragment(c,approximate)
     axes=join(("\$"*brm_description_math(c,a)*"\$" for a in c.arguments),", ")
     prose=String[_brmd_text(c,approximate ? :hilbert_space_process : :gaussian_process;covariance=covname,axes)]
     equations=String[]
+    covers=Any[c.id]
     if !approximate
         jitter=brm_description_math(c,get(c.keywords,:jitter,1e-9))
         push!(equations,"f\\mid\\ell,\\tau\\sim\\mathcal N(0,K)")
@@ -618,7 +641,13 @@ function _brmd_gp_fragment(c,approximate)
         end
         get(c.keywords,:iso,true)===true && push!(prose,_brmd_text(c,:isotropic_length_scale))
         grouped && push!(prose,_brmd_text(c,:grouped_basis_weights))
-        grouped && haskey(c.keywords,:cor) && push!(prose,_brmd_hsgp_level_prose(c,c.keywords[:cor]))
+        if grouped && haskey(c.keywords,:cor)
+            # The level prose describes `cor=` whole, a `multigroup(...)` call included.
+            level=c.keywords[:cor]
+            push!(prose,_brmd_hsgp_level_prose(c,level))
+            level isa BRMDescriptionComponent &&
+                append!(covers,(node.id for node in brm_description_components(level)))
+        end
         if get(c.keywords,:orthogonal_to,nothing)!==nothing
             push!(equations,"\\Phi_{\\mathrm{"*_brmd_text(c,:math_used)*"}}=(I-P_{[1,x]})\\Phi_{\\mathrm{"*_brmd_text(c,:math_raw)*"}}")
             push!(prose,_brmd_text(c,:orthogonal_projection))
@@ -627,7 +656,7 @@ function _brmd_gp_fragment(c,approximate)
     else
         return nothing
     end
-    BRMDescriptionFragment(; prose=Tuple(prose),equations=Tuple(equations),covers=(c.id,))
+    BRMDescriptionFragment(; prose=Tuple(prose),equations=Tuple(equations),covers=Tuple(covers))
 end
 _brmd_builtin_call(::typeof(gp),c) = _brmd_gp_fragment(c,false)
 _brmd_builtin_call(::typeof(hsgp),c) = _brmd_gp_fragment(c,true)
@@ -707,10 +736,14 @@ _brmd_builtin_kind(::Val{:submodel_output},c)=BRMDescriptionFragment(
 function _brmd_builtin_kind(::Val{:syntax},c)
     c.callable in (:block,:tuple,:vect,:ref,:(=),:return,:->,:.,:(::),:kw,:parameters) || return nothing
     c.callable===:(=) && first(c.arguments) isa BRMDescriptionReference &&
-        return _brmd_assignment_fragment(c,brm_description_symbol(c,first(c.arguments).name),last(c.arguments))
+        return _brmd_assignment_fragment(c,_brmd_cell_name_math(c,first(c.arguments).name),last(c.arguments))
     BRMDescriptionFragment(covers=(c.id,))
 end
-_brmd_builtin_kind(::Val{:parameter},c) = BRMDescriptionFragment(covers=(c.id,))
+# A sampled declaration inside a statement body. In a `@plate` cell it is a cell
+# latent, one of the cell's statements.
+_brmd_builtin_kind(::Val{:parameter},c) = isnothing(_brmd_cell_plate(c)) ||
+    !(first(c.arguments) isa BRMDescriptionReference) ? BRMDescriptionFragment(covers=(c.id,)) :
+    _brmd_plate_latent_fragment(c)
 _brmd_builtin_kind(::Val{:assignment},c) = _brmd_assignment_fragment(c,
     brm_description_math(c,c.arguments[1]),c.arguments[2];
     prose=(_brmd_text(c,:assignment;owner=c.provenance.owner),))
@@ -777,6 +810,9 @@ _brmd_population_addends(c,x)=x isa BRMDescriptionComponent && x.callable===(+) 
     Tuple(t for a in x.arguments for t in _brmd_population_addends(c,a)) : (_brmd_term_math(c,x),)
 function _brmd_builtin_kind(::Val{:predictor},c)
     lhs,rhs=c.arguments
+    # A `@plate` cell's statements and collected value are its own description.
+    rhs isa BRMDescriptionComponent && rhs.callable===kernel && !isnothing(_brmd_cell_plate(rhs)) &&
+        return BRMDescriptionFragment(covers=(c.id,))
     columns=c.provenance.design_columns
     definitions=String[]
     notation=NamedTuple[]
@@ -905,7 +941,8 @@ function _brmd_render_context(c;notation=c.notation,provenance=c.provenance)
 end
 function _brmd_compact_expression(c,x,definitions,notes,counter;root=false,seen=())
     length(brm_description_math(c,x))<=100 && return x
-    if x isa BRMDescriptionReference && x.axis!==:cell && !(x.name in seen)
+    # A `@plate` cell's input is its authored read, never its formal's binding.
+    if x isa BRMDescriptionReference && x.axis!==:cell && !(x.name in seen) && isnothing(_brmd_plate_read_of(c,x.name))
         aliases=filter(b->b.name===x.name && b.role in (:alias,:constant),c.bindings)
         if length(aliases)==1 && !isequal(only(aliases).value,x)
             return _brmd_compact_expression(c,only(aliases).value,definitions,notes,counter;
@@ -913,8 +950,10 @@ function _brmd_compact_expression(c,x,definitions,notes,counter;root=false,seen=
         end
     end
     if x isa BRMDescriptionComponent
-        args=map(a->_brmd_compact_expression(c,a,definitions,notes,counter;seen),x.arguments)
-        kwargs=map(a->_brmd_compact_expression(c,a,definitions,notes,counter;seen),x.keywords)
+        # A sum over a plate's rows is one term: its elementwise body stays whole.
+        whole=x.callable===sum && !isnothing(_brmd_plate_sum_math(c,x))
+        args=whole ? x.arguments : map(a->_brmd_compact_expression(c,a,definitions,notes,counter;seen),x.arguments)
+        kwargs=whole ? x.keywords : map(a->_brmd_compact_expression(c,a,definitions,notes,counter;seen),x.keywords)
         reduced=BRMDescriptionComponent(x.id,x.kind,x.callable,args,kwargs,x.axes,
             x.outputs,x.priors,x.fitted_constants,x.children,x.provenance,x.notation,x.bindings)
     elseif x isa Union{Tuple,NamedTuple}
@@ -946,11 +985,26 @@ _brmd_level_correlation_name(x)=x
 # coherence `multigroup(Omega, tau)` (src/level_correlation.jl).
 _brmd_hsgp_level_prose(c,x)=_brmd_text(c,:level_correlated_basis_weights;
     correlation=_brmd_level_correlation_name(x))
-_brmd_hsgp_level_prose(c,x::BRMDescriptionComponent)=x.callable===multigroup ?
-    _brmd_text(c,:multigroup_basis_weights;
+function _brmd_hsgp_level_prose(c,x::BRMDescriptionComponent)
+    x.callable===multigroup || return _brmd_text(c,:level_correlated_basis_weights;
+        correlation=_brmd_level_correlation_name(x))
+    # `multigroup((x, y), lambda; k)`: coordinates in place of a correlation.
+    first(x.arguments) isa Tuple || return _brmd_text(c,:multigroup_basis_weights;
         correlation=_brmd_level_correlation_name(x.arguments[1]),
-        tau=_brmd_level_correlation_name(x.arguments[2])) :
-    _brmd_text(c,:level_correlated_basis_weights;correlation=_brmd_level_correlation_name(x))
+        tau=_brmd_level_correlation_name(x.arguments[2]))
+    names(fields)=join(("`"*string(_brmd_level_correlation_name(a))*"`" for a in fields),", ")
+    # `multigroup((x, y); k)` leaves the spatial scale to the term: λ.
+    own=length(x.arguments)==1
+    lambda=own ? "λ" : _brmd_level_correlation_name(x.arguments[2])
+    approximation=haskey(x.keywords,:inducing) ?
+        _brmd_text(c,:multigroup_coordinate_positions;positions=names(x.keywords[:inducing]),lambda) :
+        _brmd_text(c,Symbol(:multigroup_coordinate_,
+                _brmd_level_correlation_name(get(x.keywords,:method,:hsgp)));
+            k=get(x.keywords,:k,_BRM_MULTIGROUP_COORDINATE_K),
+            c=get(x.keywords,:c,_BRM_MULTIGROUP_HSGP_C),lambda)
+    _brmd_text(c,:multigroup_coordinate_basis_weights;coordinates=names(first(x.arguments)),lambda)*
+        " "*approximation*(own ? " "*_brmd_text(c,:multigroup_coordinate_own_lambda) : "")
+end
 # How a block's margins correlate (`_brmd_block_correlation`), as one sentence.
 _brmd_correlation_text(::Val{:estimated}) = :correlated_margins
 _brmd_correlation_text(::Val{:known}) = :known_correlation
@@ -1126,7 +1180,7 @@ function brm_description(d::BRMDescriptor; hooks=(),labels=Dict(),prior_anchors=
     ids=Set(c.id for c in inventory)
     length(ids)==length(inventory) || error("description: duplicate logical semantic component IDs")
     covered=Set{Tuple}()
-    prose=String[]; equations=String[]; added_notation=NamedTuple[]
+    prose=String[]; equations=String[]; added_notation=NamedTuple[]; sections=NamedTuple[]
     for (index,c) in enumerate(inventory)
         fragment=_brmd_hook(c,hooks)
         if isnothing(fragment)
@@ -1142,13 +1196,15 @@ function brm_description(d::BRMDescriptor; hooks=(),labels=Dict(),prior_anchors=
         end
         append!(prose,fragment.prose); append!(equations,fragment.equations)
         append!(added_notation,fragment.notation)
+        isempty(fragment.prose) && isempty(fragment.equations) ||
+            push!(sections,(;id=c.id,prose=fragment.prose,equations=fragment.equations))
     end
     coverage=Tuple(BRMDescriptionCoverage(c.id,c.id in covered ? :covered : :unsupported,
-        c.id in covered ? "" : _brmd_text(texts,:coverage_gap;callable=_brmd_callable_name(c.callable),id=c.id),
+        c.id in covered ? "" : _brmd_text(texts,:coverage_gap;callable=_brmd_gap_name(c),id=c.id),
         c.provenance) for c in inventory)
     diagnostics=Tuple(x.reason for x in coverage if x.status !== :covered)
     BRMDescription(d.id,Tuple(roots),Tuple(prose),Tuple(equations),
-        (notation...,added_notation...),priors,coverage,diagnostics,isempty(diagnostics),texts)
+        (notation...,added_notation...),priors,coverage,diagnostics,isempty(diagnostics),texts,Tuple(sections))
 end
 brm_description(prepared::Union{SBBRMI,GenerativePlan};kwargs...) =
     brm_description(brm_descriptor(prepared);kwargs...)
@@ -1186,11 +1242,26 @@ function _brmd_prior_definition(p,label)
     (_brmd_distribution_math(localcontext,reduced),support...,definitions...)
 end
 
+# A gap is named by its callable; a component without one, by its kind.
+_brmd_gap_name(c)=isnothing(c.callable) ? c.kind : _brmd_callable_name(c.callable)
+# The opening line of an incomplete description: how many components have no
+# scientific description, and their distinct names in inventory order.
+function _brmd_incomplete_line(description)
+    byid=Dict(c.id=>c for c in brm_description_components(description))
+    gaps=[x for x in description.coverage if x.status!==:covered]
+    callables=unique(haskey(byid,x.id) ? _brmd_gap_name(byid[x.id]) : :unknown for x in gaps)
+    _brmd_text(description,length(gaps)==1 ? :incomplete_description_one : :incomplete_description;
+        count=length(gaps),callables=join(("`"*string(f)*"`" for f in callables),", "))
+end
+
 """
     brm_description_markdown(description)
 
 Render deterministic Markdown with display LaTeX, an effective prior table,
-notation entries and explicit coverage diagnostics. Every prior row owns a model-scoped
+notation entries and explicit coverage diagnostics. Each described part's
+sentences are followed by its own equations (`description.sections`). An
+incomplete description opens by naming how many parts have no description and
+their callables. Every prior row owns a model-scoped
 anchor; component references link to these targets by default. `prior_anchors`
 remain additional outbound links. Use `prefix` for repeated model instances.
 The page is written in the description's language (`texts=` of `brm_description`).
@@ -1199,12 +1270,15 @@ function brm_description_markdown(description::BRMDescription;prefix=nothing)
     io=IOBuffer()
     t=description.texts
     text(name;values...)=_brmd_text(t,name;values...)
-    println(io,text(description.complete ? :complete_description : :incomplete_description))
-    for paragraph in description.prose
-        println(io,"\n",paragraph)
-    end
-    for equation in description.equations
-        println(io,"\n\$\$\n",equation,"\n\$\$")
+    println(io,description.complete ? text(:complete_description) : _brmd_incomplete_line(description))
+    # Each described part: its sentences, then its own equations.
+    for section in description.sections
+        for paragraph in section.prose
+            println(io,"\n",paragraph)
+        end
+        for equation in section.equations
+            println(io,"\n\$\$\n",equation,"\n\$\$")
+        end
     end
     if !isempty(description.priors)
         targets=Dict{String,Tuple}()

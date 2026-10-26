@@ -353,7 +353,12 @@ end); total_groups=(), mod=@__MODULE__)
     car_state, car_ir = CAR_AC_EXT._adaptive_car_centering_reparametrizer(car)
     set_car_sources!(car_state, car_ir, controls[n_ranef + 1:end])
     car_ljac, car_mapped = car_ir(x)
-    ranef_state, ranef_ir = CAR_AC_EXT._adaptive_centering_reparametrizer(ordinary)
+    # The `grp` block is centred on the population coefficients (hierarchical
+    # centring), so its own wrapper takes the same locations.
+    locations = BRM._adaptive_ranef_locations(CAR_AC_JOINT_SB, ordinary, names)
+    @test count(!=(0), locations[only(ordinary)]) == 2
+    ranef_state, ranef_ir = CAR_AC_EXT._adaptive_centering_reparametrizer(ordinary,
+                                                                          locations)
     set_car_sources!(ranef_state, ranef_ir, controls[1:n_ranef])
     ranef_ljac, ranef_mapped = ranef_ir(x)
     @test ljac ≈ car_ljac + ranef_ljac atol=1e-12
@@ -372,6 +377,7 @@ end); total_groups=(), mod=@__MODULE__)
         v -> LogDensityProblems.logdensity(wrapped, v), x; step=1e-5) atol=3e-5 rtol=3e-5
     rows = adaptive_centering_controls(wrapped, CAR_AC_JOINT_SB)
     @test [r.family for r in rows] == vcat(fill(:ranef, n_ranef), fill(:car, n_car))
+    @test all(r -> r.location !== nothing, rows[1:n_ranef])
 
     # Learned order: the car cells keep their per-cell maps inside it.
     learned = adaptive_centering_problem(CAR_AC_JOINT_SB, problem, DI.AutoEnzyme();
@@ -384,7 +390,7 @@ end); total_groups=(), mod=@__MODULE__)
     @test learned_mapped[car_coords] ≈ car_mapped[car_coords] atol=1e-13
     learned_ranef = BRM.AdaptiveCenteringBlock[only(ordinary)]
     _, ranef_only = CAR_AC_EXT._adaptive_ordered_centering_reparametrizer(
-        learned_ranef, BRM._HSGPAdaptiveCenteringBlock[])
+        learned_ranef, BRM._HSGPAdaptiveCenteringBlock[]; locations)
     WarmupHMC.restore_reparam_controls!(ranef_only, controls[1:n_ranef])
     ranef_ljac_learned, ranef_mapped_learned = ranef_only(x)
     @test learned_ljac ≈ car_ljac + ranef_ljac_learned atol=1e-12

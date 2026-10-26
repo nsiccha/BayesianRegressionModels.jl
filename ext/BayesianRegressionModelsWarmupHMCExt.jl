@@ -23,6 +23,7 @@ mutable struct BRMAdaptiveCenteringState{N} <: _BRMRanefCenteringState{N}
     pair_terms::Vector{Int}
     pair_groups::Vector{Int}
     pair_mixing::Vector{Int}
+    pair_location::Vector{Int}
     pair_lookup::Vector{Matrix{Int}}
     sources::Vector{Float64}
     effect_indices::BitSet
@@ -31,12 +32,16 @@ end
 # Pairs are block-major, then group-major, then term-major. `pair_mixing[p]`
 # is the coordinate `log w[g]` of a Student-t pair's level, `0` for a Gaussian
 # block: accessors read that integer once per call, never the block's `mixing`
-# vector inside their loops (see `_pair_mixing_scale`).
-function _ranef_pair_layout(blocks)
+# vector inside their loops (see `_pair_mixing_scale`). `pair_location[p]` is
+# the coordinate of the population coefficient pair `p` is centred on, `0` for
+# a pair centred on 0 (`BRM._adaptive_ranef_locations`, one entry per term of
+# each block; `locations[bi]` aligns with `blocks[bi]`, `nothing` for none).
+function _ranef_pair_layout(blocks, locations=nothing)
     pair_blocks = Int[]
     pair_terms = Int[]
     pair_groups = Int[]
     pair_mixing = Int[]
+    pair_location = Int[]
     pair_lookup = [zeros(Int, b.ranef.n_terms, b.ranef.n_groups) for b in blocks]
     sources = Float64[]
     for (bi, block) in enumerate(blocks), g in 1:block.ranef.n_groups,
@@ -45,18 +50,46 @@ function _ranef_pair_layout(blocks)
         push!(pair_terms, k)
         push!(pair_groups, g)
         push!(pair_mixing, _block_mixed(block) ? block.mixing[g] : 0)
+        locs = isnothing(locations) ? nothing : locations[bi]
+        push!(pair_location, isnothing(locs) ? 0 : locs[k])
         push!(sources, block.target_c)
         pair_lookup[bi][k, g] = length(sources)
     end
     effect_indices = BitSet(Iterators.flatten(vec(b.effects) for b in blocks))
-    (pair_blocks, pair_terms, pair_groups, pair_mixing, pair_lookup, sources,
-     effect_indices)
+    (pair_blocks, pair_terms, pair_groups, pair_mixing, pair_location, pair_lookup,
+     sources, effect_indices)
 end
 
-BRMAdaptiveCenteringState(blocks) =
+BRMAdaptiveCenteringState(blocks, locations=nothing) =
     BRMAdaptiveCenteringState{_innovation_capacity(blocks)}(
-        collect(blocks), _ranef_pair_layout(blocks)...,
+        collect(blocks), _ranef_pair_layout(blocks, locations)...,
     )
+
+# The per-block location vectors of `blocks` from the map
+# `BRM._adaptive_ranef_locations` returns (keyed by the original blocks).
+_block_locations(blocks, locations) =
+    [get(locations, b, nothing) for b in blocks]
+
+# A location is read, never transformed: a coefficient some cell rewrites
+# would make the triangular Jacobian wrong.
+function _check_locations_read_only(state, rewritten)
+    for j in state.pair_location
+        j == 0 || !(j in rewritten) || error(
+            "BRM adaptive centering: a random-effect cell is centred on coordinate " *
+            "$j, which another cell rewrites; refusing an inexact transform.")
+    end
+end
+
+# Pair `p`'s source-frame location: the conditional mean `m` plus, for a pair
+# centred on a population coefficient, that coefficient's value. It is read
+# from the state's flat `pair_location`, and a pair centred on 0 keeps `m`
+# itself, so its arithmetic is unchanged bit for bit. The coefficient is never
+# rewritten by the map. `@inline`: an outlined call taking the state inside a
+# differentiated loop is the Julia 1.10 GC hazard `_block_location` describes.
+@inline function _with_location(m, x, state, p)
+    j = state.pair_location[p]
+    j == 0 ? m : m + x[j]
+end
 
 # Derived-scale blocks — R2D2 blocks, and ordinary blocks inside the joint
 # wrapper — keep their own state and argument types for the same reason HSGP
@@ -68,14 +101,15 @@ mutable struct BRMR2D2AdaptiveCenteringState{N} <: _BRMRanefCenteringState{N}
     pair_terms::Vector{Int}
     pair_groups::Vector{Int}
     pair_mixing::Vector{Int}
+    pair_location::Vector{Int}
     pair_lookup::Vector{Matrix{Int}}
     sources::Vector{Float64}
     effect_indices::BitSet
 end
 
-BRMR2D2AdaptiveCenteringState(blocks) =
+BRMR2D2AdaptiveCenteringState(blocks, locations=nothing) =
     BRMR2D2AdaptiveCenteringState{_innovation_capacity(blocks)}(
-        collect(blocks), _ranef_pair_layout(blocks)...,
+        collect(blocks), _ranef_pair_layout(blocks, locations)...,
     )
 
 # A block's marginal scale `tau[i]`: a sampled coordinate for an ordinary
@@ -179,10 +213,17 @@ end
 # on the state, because accessors run under `Enzyme.Const`.  Recursion is
 # deliberately avoided: a recursive scalar callable here corrupted Julia's GC
 # after ~1,750 sustained gradients (fixed by ade46ac/bd9ca2d/b5f4a86).
+#
+# A pair centred on a population coefficient (`pair_location`) adds it to its
+# source-frame location: margin `i`'s innovation is `(u - c * (m + beta)) /
+# s^c`, and the returned location is `m + beta` (`_with_location`). The model
+# coordinate is unchanged; only blocks compiled non-centred carry a location,
+# where WarmupHMC's pair map `(x - c * loc) / s^c` then samples the level's
+# total at `c = 1`.
 function _block_location(x, state::_BRMRanefCenteringState{N}, pair_number) where {N}
     bi, k, g = _pair_location(state, pair_number)
     T = eltype(x)
-    k == 1 && return zero(T)
+    k == 1 && return _with_location(zero(T), x, state, pair_number)
     block = state.blocks[bi]
     lookup = state.pair_lookup[bi]
     r = _pair_mixing_scale(x, state, pair_number)
@@ -202,10 +243,11 @@ function _block_location(x, state::_BRMRanefCenteringState{N}, pair_number) wher
             c = state.sources[lookup[i, g]]
             u = x[block.effects[i, g]]
             s = tau * stick
-            innovations = Base.setindex(innovations, (u - c * m) / s^c, i)
+            innovations = Base.setindex(innovations,
+                (u - c * _with_location(m, x, state, lookup[i, g])) / s^c, i)
         end
     end
-    m
+    _with_location(m, x, state, pair_number)
 end
 
 function (arg::BRMAdaptiveCenteringArgument{:location})(x)
@@ -314,9 +356,13 @@ function _centering_frame(state::_BRMRanefCenteringState{N}, position, gradient,
                 end
                 s = C[j, j]
                 u = position[block.effects[k, g]]
-                z[j] = (u - c * m) / s^c
+                # The source-frame location, a population coefficient included
+                # (`_with_location`); it does not depend on the innovations, so
+                # `A` and the invariant gradient are unchanged by it.
+                loc = _with_location(m, position, state, p)
+                z[j] = (u - c * loc) / s^c
                 A[j, j] = s^c
-                location[p] = m
+                location[p] = loc
                 scale[p] = s
                 innovation[p] = z[j]
             end
@@ -354,8 +400,10 @@ function _problem_unc_names(problem)
     BRM.StanBlocks.BridgeStan.param_unc_names(getproperty(problem, :model))
 end
 
-function _adaptive_centering_reparametrizer(blocks)
-    state = BRMAdaptiveCenteringState(blocks)
+function _adaptive_centering_reparametrizer(blocks, locations=nothing)
+    state = BRMAdaptiveCenteringState(blocks,
+        isnothing(locations) ? nothing : _block_locations(blocks, locations))
+    _check_locations_read_only(state, state.effect_indices)
     pairs = [begin
         block = state.blocks[state.pair_blocks[p]]
         k = state.pair_terms[p]
@@ -1145,7 +1193,7 @@ const _NO_CAR_BLOCKS = BRM._CARAdaptiveCenteringBlock[]
 # per-pair wrapper below and the learned-order wrapper
 # (`_adaptive_ordered_centering_reparametrizer`).
 function _joint_centering_state(blocks, hsgp_blocks, r2d2_blocks, scalar_cells,
-                                car_blocks=_NO_CAR_BLOCKS)
+                                car_blocks=_NO_CAR_BLOCKS; locations=nothing)
     hsgp_state = BRMHSGPAdaptiveCenteringState(hsgp_blocks)
     scalar_state = _scalar_centering_state(scalar_cells)
     car_state = BRMCARAdaptiveCenteringState(car_blocks)
@@ -1196,7 +1244,9 @@ function _joint_centering_state(blocks, hsgp_blocks, r2d2_blocks, scalar_cells,
     ranef_state = BRMR2D2AdaptiveCenteringState(vcat(
         BRM.R2D2AdaptiveCenteringBlock[BRM._adaptive_derived_block(b) for b in blocks],
         r2d2_blocks,
-    ))
+    ), isnothing(locations) ? nothing :
+        vcat(_block_locations(blocks, locations), _block_locations(r2d2_blocks, locations)))
+    _check_locations_read_only(ranef_state, union(effects...))
     n_ranef = sum(b -> b.ranef.n_terms * b.ranef.n_groups, blocks; init=0)
     n_r2d2 = length(ranef_state.sources) - n_ranef
     n_hsgp = length(hsgp_state.sources)
@@ -1220,9 +1270,9 @@ _joint_cell_index(state::BRMJointAdaptiveCenteringState, p) =
 
 function _adaptive_joint_centering_reparametrizer(
         blocks, hsgp_blocks, r2d2_blocks=BRM.R2D2AdaptiveCenteringBlock[],
-        scalar_cells=_NO_SCALAR_CELLS, car_blocks=_NO_CAR_BLOCKS)
+        scalar_cells=_NO_SCALAR_CELLS, car_blocks=_NO_CAR_BLOCKS; locations=nothing)
     state = _joint_centering_state(blocks, hsgp_blocks, r2d2_blocks, scalar_cells,
-                                   car_blocks)
+                                   car_blocks; locations)
     pairs = [_joint_cell_index(state, p) => WarmupHMC.Reparametrization(
                  WarmupHMC.PartiallyCentered(c), WarmupHMC.PartiallyCentered(c),
                  BRMJointAdaptiveCenteringArgument(state, p, :location),
@@ -1476,9 +1526,9 @@ end
 
 function _adaptive_ordered_centering_reparametrizer(
         blocks, hsgp_blocks, r2d2_blocks=BRM.R2D2AdaptiveCenteringBlock[],
-        scalar_cells=_NO_SCALAR_CELLS, car_blocks=_NO_CAR_BLOCKS)
+        scalar_cells=_NO_SCALAR_CELLS, car_blocks=_NO_CAR_BLOCKS; locations=nothing)
     state = _joint_centering_state(blocks, hsgp_blocks, r2d2_blocks, scalar_cells,
-                                   car_blocks)
+                                   car_blocks; locations)
     n = length(state.ranef.blocks)
     matrices() = [Matrix{Int}(undef, 0, 0) for _ in 1:n]
     vectors() = [Int[] for _ in 1:n]
@@ -1510,12 +1560,16 @@ function _ordered_group_forward!(y, x, state, block, lookup, g, C, Cp, perms, q,
             m += Cp[_tri(j, i)] * w[i]
         end
         s = Cp[_tri(j, j)]
-        w = _tset(w, (u[a] - c * m) / s^c, j)
+        # The source-frame location adds a population coefficient for a pair
+        # centred on one (`_with_location`; only blocks compiled at `t = 0`
+        # carry one, so `t * m` keeps the model-frame mean).
+        loc = _with_location(m, x, state, lookup[a, g])
+        w = _tset(w, (u[a] - c * loc) / s^c, j)
         if declared
             # WarmupHMC's per-pair spelling (`warmuphmc-use` §5c), so the
             # declared order reproduces the per-pair wrapper.
             log_scale = log(s)
-            y[block.effects[a, g]] = t * m + (u[a] - c * m) * exp(log_scale * (t - c))
+            y[block.effects[a, g]] = t * loc + (u[a] - c * loc) * exp(log_scale * (t - c))
             ljac += log_scale * (t - c)
         else
             b = _tset(b, m + s * w[j], a)
@@ -1563,7 +1617,8 @@ function _ordered_group_inverse!(y, x, state, block, lookup, g, C, Cp, perms, q,
         if declared
             c = state.sources[lookup[k, g]]
             log_scale = log(s)
-            y[block.effects[k, g]] = c * m + (v[k] - t * m) * exp(log_scale * (c - t))
+            y[block.effects[k, g]] = c * _with_location(m, x, state, lookup[k, g]) +
+                (v[k] - t * m) * exp(log_scale * (c - t))
             ljac += log_scale * (c - t)
         else
             b = _tset(b, m + s * z[k], k)
@@ -1581,7 +1636,7 @@ function _ordered_group_inverse!(y, x, state, block, lookup, g, C, Cp, perms, q,
         end
         s = Cp[_tri(j, j)]
         w = _tset(w, (b[a] - m) / s, j)
-        y[block.effects[a, g]] = c * m + s^c * w[j]
+        y[block.effects[a, g]] = c * _with_location(m, x, state, lookup[a, g]) + s^c * w[j]
         ljac += (c - 1) * log(s)
     end
     ljac
@@ -2207,6 +2262,30 @@ function _initial_controls(centeredness, n)
     values
 end
 
+# `centeredness = :midpoint` (opt-in): every random-effect cell of a block with
+# sampled, known or Student-t scales starts at `c = 0.5`; R2D2-scaled blocks,
+# whose derived scales can become very small or large, and every other cell
+# kind (HSGP, car, cdar, totals, S2Z) keep their compiled start. Any other
+# `centeredness` passes through. `current` holds every cell's compiled start in
+# pair order.
+_start_controls(centeredness, state, current) =
+    centeredness === :midpoint ? _midpoint_controls(state, current) : centeredness
+
+_midpoint_ranef(state) = nothing
+_midpoint_ranef(state::_BRMRanefCenteringState) = state
+_midpoint_ranef(state::BRMJointAdaptiveCenteringState) = state.ranef
+
+function _midpoint_controls(state, current)
+    out = collect(Float64, current)
+    ranef = _midpoint_ranef(state)
+    isnothing(ranef) && return out
+    for p in eachindex(ranef.sources)
+        block = ranef.blocks[ranef.pair_blocks[p]]
+        block.ranef.family in BRM._ADAPTIVE_R2D2_FAMILIES || (out[p] = 0.5)
+    end
+    out
+end
+
 function _initial_centering!(state,ir,centeredness)
     values = _initial_controls(centeredness,length(ir.pairs))
     isnothing(values) && return ir
@@ -2236,12 +2315,26 @@ DifferentiationInterface backend WarmupHMC uses for the exact source-to-model
 transport.
 
 By default the sampler starts in the compiled model's own frame; an explicit
-`centeredness` scalar or vector selects its initial controls. It independently scores
-the 11 `c=0:0.1:1` candidates for each `(group, term)` cell from a one-pass
-source-invariant innovation frame. The selected score is a fixed-frame proxy;
-the transform applied to the model and its hyperparameter gradients remain
-exact. Literal endpoints are preserved: `c=0` is BRM's standardised draw and
-`c=1` is the model-scale correlated effect.
+`centeredness` scalar or vector selects its initial controls, and the opt-in
+`centeredness = :midpoint` starts every random-effect cell of a block with
+sampled, known or Student-t scales at `c = 0.5` while R2D2-scaled blocks and
+every other cell kind (HSGP, car, cdar, total, S2Z) keep their compiled start.
+It independently scores the 11 `c=0:0.1:1` candidates for each `(group, term)`
+cell from a one-pass source-invariant innovation frame. The selected score is a
+fixed-frame proxy; the transform applied to the model and its hyperparameter
+gradients remain exact. `c=0` is BRM's standardised draw. A cell of a block
+compiled non-centred is centred on its predictor's matching population
+coefficient (hierarchical centring: the intercept for an intercept term,
+`beta_x` for a slope on `x`), so its `c=1` coordinate is the level's total
+`beta + b[j]` rather than the deviation `b[j]`; centring the deviation on 0
+leaves the population coefficient and the block's mean on a ridge no control
+removes. A cell stays centred on 0 when its predictor has no matching sampled,
+unbounded coefficient (absorbed into totals or S2Z, bounded, or absent), when
+its grouping is nested in a coarser grouping of the same predictor (each of its
+levels inside one level of the other: its parent is that level's total, which
+another cell rewrites), and when its block is compiled centred
+(`centered_groups`, whose `c=1` stays the model-scale effect).
+[`adaptive_centering_controls`](@ref) reports each cell's `location`.
 
 For exact totals, `c=1` is the sampled group total. Each total is centred on
 its column's own location: the least-squares fit of that column's totals on the group-level
@@ -2400,9 +2493,16 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
             isempty(BRM._adaptive_car_centering_blocks(model, names)) ||
             throw(ArgumentError("s2z_rule=:fisher cannot yet be combined with " *
                 "totals, ordinary, HSGP, car or cdar blocks"))
-        return _adaptive_s2z_fisher_problem(model, problem, ad_backend, names; centeredness)
+        # `:midpoint` starts random-effect cells, and this wrapper has none.
+        return _adaptive_s2z_fisher_problem(model, problem, ad_backend, names;
+            centeredness=centeredness === :midpoint ? nothing : centeredness)
     end
+    centeredness isa Symbol && centeredness !== :midpoint && throw(ArgumentError(
+        "centeredness must be a real in [0, 1], one such value per cell, or " *
+        "`:midpoint`; got `:$centeredness`"))
     blocks = BRM.adaptive_centering_blocks(model, names)
+    # Hierarchical centring: each eligible cell's population coefficient.
+    locations = BRM._adaptive_ranef_locations(model, blocks, names)
     hsgp_blocks = BRM._adaptive_hsgp_centering_blocks(model, names)
     cdar_blocks = BRM._adaptive_cdar_centering_blocks(model, names)
     car_blocks = BRM._adaptive_car_centering_blocks(model, names)
@@ -2447,8 +2547,9 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
             any(b -> b.ranef.n_terms > 1, blocks)
         _, ir = _adaptive_ordered_centering_reparametrizer(ordinary, hsgp_blocks,
             r2d2_blocks, scalar ? _scalar_centering_cells(model, names) : _NO_SCALAR_CELLS,
-            car_blocks)
-        return _ordered_centering_problem(ir, problem, ad_backend, centeredness)
+            car_blocks; locations)
+        return _ordered_centering_problem(ir, problem, ad_backend,
+            _start_controls(centeredness, ir.state, WarmupHMC.reparam_controls(ir)))
     end
     state, ir = if !isempty(cdar_blocks)
         (isempty(blocks) && isempty(hsgp_blocks) && isempty(car_blocks)) || error(
@@ -2459,21 +2560,22 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
         _adaptive_cdar_centering_reparametrizer(cdar_blocks)
     elseif scalar
         _adaptive_joint_centering_reparametrizer(ordinary, hsgp_blocks, r2d2_blocks,
-            _scalar_centering_cells(model, names), car_blocks)
+            _scalar_centering_cells(model, names), car_blocks; locations)
     elseif !isempty(r2d2_blocks)
         _adaptive_joint_centering_reparametrizer(ordinary, hsgp_blocks, r2d2_blocks,
-            _NO_SCALAR_CELLS, car_blocks)
+            _NO_SCALAR_CELLS, car_blocks; locations)
     elseif !isempty(car_blocks) && isempty(ordinary) && isempty(hsgp_blocks)
         _adaptive_car_centering_reparametrizer(car_blocks)
     elseif !isempty(car_blocks) || (!isempty(ordinary) && !isempty(hsgp_blocks))
         _adaptive_joint_centering_reparametrizer(ordinary, hsgp_blocks,
-            BRM.R2D2AdaptiveCenteringBlock[], _NO_SCALAR_CELLS, car_blocks)
+            BRM.R2D2AdaptiveCenteringBlock[], _NO_SCALAR_CELLS, car_blocks; locations)
     elseif !isempty(hsgp_blocks)
         _adaptive_hsgp_centering_reparametrizer(hsgp_blocks)
     else
-        _adaptive_centering_reparametrizer(ordinary)
+        _adaptive_centering_reparametrizer(ordinary, locations)
     end
-    _initial_centering!(state,ir,centeredness)
+    _initial_centering!(state, ir,
+        _start_controls(centeredness, state, [last(p).source.c for p in ir.pairs]))
     WarmupHMC.ReparametrizedProblem(
         ir, problem, ad_backend; scoring_plan=_candidate_scoring_plan(state),
     )
@@ -2509,9 +2611,10 @@ function _centering_values(ir::BRMTotalsBesideCenteringReparametrization)
 end
 
 _control_row(cell, index, names, family; binding=nothing, group=nothing,
-             margin=nothing, level=nothing, term=nothing, rank=nothing, c, target) =
+             margin=nothing, level=nothing, term=nothing, rank=nothing,
+             location=nothing, c, target) =
     (; cell, index, name=names[index], family, binding, group, margin, level, term,
-       rank, c=Float64(c), target=Float64(target))
+       rank, location, c=Float64(c), target=Float64(target))
 
 function _control_rows!(rows, state::_BRMRanefCenteringState, orders, offset, values,
                         names, margins)
@@ -2525,6 +2628,7 @@ function _control_rows!(rows, state::_BRMRanefCenteringState, orders, offset, va
             margin=length(labels) == ranef.n_terms ? labels[k] : nothing,
             level=ranef.levels[g], term=k,
             rank=isnothing(orders) ? k : findfirst(==(k), view(orders[bi], :, g)),
+            location=state.pair_location[p] == 0 ? nothing : names[state.pair_location[p]],
             c=controls[offset + p], target=targets[offset + p]))
     end
     offset + length(state.sources)

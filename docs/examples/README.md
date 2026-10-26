@@ -21,6 +21,11 @@ purge their Stan tags before instantiating, so reruns are reproducible and never
 reuse stale programs. No `Manifest.toml` is committed: resolve locally (above)
 or in CI; the `[sources]` revs in `Project.toml` pin the unregistered deps.
 
+Every script samples through `quorum.jl`: WarmupHMC's quorum sampler
+`completion_warmup_mcmc` over 4 independent adaptive chains, stopping once 3
+hold their draws (`min_completed = div(3n, 4)`, brm-use `references/fitting.md`);
+a chain still warming up then is left out and named in a `QUORUM:` line.
+
 `modelcomp_loo.jl` reads the saved fits from `model_comparison.jl` — run that
 first. `mister_p.jl` unpacks its gzipped input to `.out/tmp/` on first run
 (requires `gunzip`).
