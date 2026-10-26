@@ -195,7 +195,7 @@ end
     catch e
         e
     end
-    @test err isa ErrorException && occursin("one finite real number or a vector of them", err.msg)
+    @test err isa ErrorException && occursin("one finite real number or an array of them", err.msg)
     # A scalar the data supplies directly is taken from the new data as well.
     plain = SBBRMI(SUPPLIED(supplied(PANEL)); mod=@__MODULE__, total_groups=())
     replay = merge(NO_CONC, (; ec50_loc=9.0, ec50_scale=1.0, V=2.0))
@@ -585,8 +585,8 @@ end
 end
 
 @stestset "a constant of higher rank is the data field it computes" begin
-    # The constant adds no rule of its own about shape: a rank-3 constant and a
-    # rank-3 data field give the same outcome, built or refused.
+    # The constant adds no rule of its own about shape: a rank-3 constant
+    # resolves to the rank-3 data field it computes, as a supplied one would.
     data = (; x=[0.2, 0.5, 0.9, 1.4], y=[0.3, 0.6, 1.1, 1.5])
     A = reshape(collect(1.0:8.0), 2, 2, 2) ./ maximum(data.y)
     cubed = @brm begin
@@ -602,13 +602,21 @@ end
         mu = b * x + A[1, 2, 2]
         y ~ Normal(mu, sigma)
     end
-    outcome(f) = try
-        (:built, stan_code(f()))
-    catch err
-        (:refused, sprint(showerror, err))
+    sb = SBBRMI(cubed(data); mod=@__MODULE__)
+    @test sb.preproc[:A].kind === :constant
+    @test sb.preproc[:A].const_.value == A
+    @test sb.preproc[:A].const_.value isa Array{Float64,3}
+    supplied = SBBRMI(cubed_supplied(merge(data, (; A))); mod=@__MODULE__)
+    # Capability gap, for a supplied rank-3 field and a constant alike:
+    # StanBlocks has no Stan data type for a rank-3 array yet (StanBlocks snag
+    # `stan-type-has-no-b2d832be`).
+    transpiles(sb) = try
+        stan_code(sb); true
+    catch
+        false
     end
-    @test outcome(() -> SBBRMI(cubed(data); mod=@__MODULE__)) ==
-          outcome(() -> SBBRMI(cubed_supplied(merge(data, (; A))); mod=@__MODULE__))
+    @test_broken transpiles(supplied)
+    @test_broken transpiles(sb)
 end
 
 # A body built from a runtime string and `Core.eval`'d inside a function: the
