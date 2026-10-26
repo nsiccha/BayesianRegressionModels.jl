@@ -64,6 +64,27 @@ struct _BRMLapRow
     t222::Float64
 end
 
+# ψ_n(y + P) − ψ_n(P) for n = 0, 1, 2 (pg is its negative for n = 2). For a
+# small count y they are exact sums over the integers below y (ψ(x + 1) =
+# ψ(x) + 1/x and its derivatives), cheaper than the special functions.
+@inline function _brm_lap_polygammas(y::Float64, P::Float64, third::Bool)
+    if 0 <= y <= 50 && isinteger(y)
+        s1 = s2 = s3 = 0.0
+        for k in 0:(Int(y) - 1)
+            x = inv(P + k)
+            x2 = x * x
+            s1 += x
+            s2 += x2
+            s3 += x2 * x
+        end
+        return s1, -s2, -2s3
+    end
+    yP = y + P
+    dg = digamma(yP) - digamma(P)
+    tg = trigamma(yP) - trigamma(P)
+    dg, tg, third ? polygamma(2, P) - polygamma(2, yP) : 0.0
+end
+
 @inline function _brm_lap_row(f::Int8, y::Float64, n::Float64, a::Float64, b::Float64,
         third::Bool, moving::Bool=true)
     if f === _BRM_LAP_POISSON
@@ -86,19 +107,17 @@ end
         if !moving
             third || return _BRMLapRow(P * l1q + y * (a - b) + y * l1q, g1, 0.0, h11,
                 q * g1, 0.0, 0.0, 0.0, 0.0, 0.0)
-            dg = digamma(yP) - digamma(P)
+            dg = first(_brm_lap_polygammas(y, P, false))
             return _BRMLapRow(loggamma(yP) - loggamma(P) + P * l1q + y * (a - b) + y * l1q,
                 g1, P * (l1q + 1 + dg) - yP * r, h11, q * g1, 0.0,
                 -q * r * (1 - 2q) * yP, q * r * (y - 2q * yP), 0.0, 0.0)
         end
-        dg = digamma(yP) - digamma(P)
-        tg = trigamma(yP) - trigamma(P)
+        dg, tg, pg = _brm_lap_polygammas(y, P, third)
         v = loggamma(yP) - loggamma(P) + P * l1q + y * (a - b) + y * l1q
         g2 = P * (l1q + 1 + dg) - yP * r
         h12 = q * g1
         h22 = P * (P * tg + l1q + dg + 2) + yP * r^2 - (3P + y) * r
         third || return _BRMLapRow(v, g1, g2, h11, h12, h22, 0.0, 0.0, 0.0, 0.0)
-        pg = polygamma(2, P) - polygamma(2, yP)
         t111 = -q * r * (1 - 2q) * yP
         t112 = q * r * (y - 2q * yP)
         t122 = -q * (P + 2yP * r^2 - (3P + y) * r)
@@ -162,6 +181,11 @@ mutable struct BRMStructuredLaplaceProblem{K}
     link::Vector{Symbol}
     fixed::Vector{Float64}   # a literal parameter's value (`port` 0)
     Z::Matrix{Float64}
+    # Z by entry, its nonzeros only: rows `zptr[e]:zptr[e+1]-1` of (`zrow`,
+    # `zval`). A row reads one or a few of its unit's effects.
+    zptr::Vector{Int}
+    zrow::Vector{Int}
+    zval::Vector{Float64}
     # Coordinates that move M (random-effect scales and correlation factors).
     omega::Vector{Int}
     # A(φ) = A0 + J (φ − φ0) when it is affine (`affine`): J by entry, rows
@@ -306,7 +330,8 @@ function _brm_structured_laplace_problem(backend::RKBRMI, view::BRMNLMEView; ad_
     p = BRMStructuredLaplaceProblem(backend, view, population, view.coordinates[population],
         blocks, d, kernels, family, ys, trials, constant, entry, fill(true, length(family)),
         unit_terms, port, index,
-        link, fixed, zeros(d, length(port)), omega, false, u0[population],
+        link, fixed, zeros(d, length(port)), Int[], Int[], Float64[], omega, false,
+        u0[population],
         zeros(length(port)), Int[], Int[], Float64[], copy(u0), Ref{Any}(nothing),
         Float64(tol), Int(maxiter), 0, 0)
     _brm_slap_design!(p, u0)
@@ -473,6 +498,15 @@ function _brm_slap_design!(p::BRMStructuredLaplaceProblem, u0)
         e = p.entry[t]
         p.moving[t] = _brm_lap_width(p.family[t]) == 2 && any(!iszero, view(p.Z, :, e + 1))
     end
+    p.zptr = [1]; p.zrow = Int[]; p.zval = Float64[]
+    for e in axes(p.Z, 2)
+        for a in axes(p.Z, 1)
+            p.Z[a, e] == 0.0 && continue
+            push!(p.zrow, a)
+            push!(p.zval, p.Z[a, e])
+        end
+        push!(p.zptr, length(p.zrow) + 1)
+    end
     # Check at another population point and other draws, unit by unit.
     rng = Random.Xoshiro(20261026)
     u1 = copy(u0)
@@ -500,85 +534,205 @@ function _brm_slap_design!(p::BRMStructuredLaplaceProblem, u0)
     p
 end
 
-# Unit i's density f_i(z) = Σ_t ℓ_t − |z|²/2, gradient g and Hessian H, with
-# entries ψ_e = A_e + c_eᵀ z.
-function _brm_slap_unit!(g, H, p::BRMStructuredLaplaceProblem, A, c, i, z)
+# Σ_k f(k) over 1:d as a plain loop: Base's `sum` over a range goes through
+# `mapreduce`, which costs more than the handful of products it adds here.
+@inline function _brm_slap_sum(f::F, d::Int) where {F}
+    s = 0.0
+    @inbounds for k in 1:d
+        s += f(k)
+    end
+    s
+end
+
+# Z_eᵀ b, x += α Z_e, X += α Z_e1 Z_e2ᵀ and Z_e1ᵀ Q Z_e2 over Z's nonzeros.
+@inline function _brm_slap_zdot(p::BRMStructuredLaplaceProblem, e, b)
+    s = 0.0
+    @inbounds for k in p.zptr[e]:(p.zptr[e + 1] - 1)
+        s += p.zval[k] * b[p.zrow[k]]
+    end
+    s
+end
+@inline function _brm_slap_zadd!(x, p::BRMStructuredLaplaceProblem, e, α)
+    @inbounds for k in p.zptr[e]:(p.zptr[e + 1] - 1)
+        x[p.zrow[k]] += α * p.zval[k]
+    end
+    x
+end
+@inline function _brm_slap_zouter!(X, p::BRMStructuredLaplaceProblem, e1, e2, α)
+    @inbounds for k1 in p.zptr[e1]:(p.zptr[e1 + 1] - 1)
+        x1 = α * p.zval[k1]
+        for k2 in p.zptr[e2]:(p.zptr[e2 + 1] - 1)
+            X[p.zrow[k1], p.zrow[k2]] += x1 * p.zval[k2]
+        end
+    end
+    X
+end
+@inline function _brm_slap_zquad(p::BRMStructuredLaplaceProblem, e1, e2, Q)
+    s = 0.0
+    @inbounds for k1 in p.zptr[e1]:(p.zptr[e1 + 1] - 1), k2 in p.zptr[e2]:(p.zptr[e2 + 1] - 1)
+        s += p.zval[k1] * Q[p.zrow[k1], p.zrow[k2]] * p.zval[k2]
+    end
+    s
+end
+
+# One unit's buffers, reused across units: the mode search's (g, H, their
+# trial copies, the step, the trial point, the mode, a factor) and the draws
+# space's (b = M z, the likelihood's gradient gb and Hessian Hb in b, Hb M).
+struct _BRMSlapWork
+    g::Vector{Float64}
+    H::Matrix{Float64}
+    gt::Vector{Float64}
+    Ht::Matrix{Float64}
+    step::Vector{Float64}
+    trial::Vector{Float64}
+    z::Vector{Float64}
+    L::Matrix{Float64}
+    b::Vector{Float64}
+    gb::Vector{Float64}
+    Hb::Matrix{Float64}
+    T::Matrix{Float64}
+end
+_BRMSlapWork(d) = _BRMSlapWork(zeros(d), zeros(d, d), zeros(d), zeros(d, d), zeros(d),
+    zeros(d), zeros(d), zeros(d, d), zeros(d), zeros(d), zeros(d, d), zeros(d, d))
+
+# Unit i's density f_i(z) = Σ_t ℓ_t − |z|²/2 (less its terms in φ alone, see
+# `_brm_lap_row`), gradient g and Hessian H. Each term reads b = M z through
+# its few Z entries; the likelihood's gradient and Hessian accumulate in b
+# (gb, Hb) and map back once: g = Mᵀ gb − z, H = Mᵀ Hb M − I.
+function _brm_slap_unit!(g, H, w::_BRMSlapWork, p::BRMStructuredLaplaceProblem, A, M, i, z)
     d = p.d
+    b, gb, Hb, T = w.b, w.gb, w.Hb, w.T
     f = 0.0
-    for k in 1:d
-        f -= 0.5 * z[k]^2
-        g[k] = -z[k]
-        for l in 1:d
-            H[k, l] = k == l ? -1.0 : 0.0
+    @inbounds for a in 1:d
+        f -= 0.5 * z[a]^2
+        b[a] = _brm_slap_sum(k -> M[a, k] * z[k], d)
+        gb[a] = 0.0
+        for c in 1:d
+            Hb[a, c] = 0.0
         end
     end
     @inbounds for t in p.unit_terms[i]
         e = p.entry[t]
+        moving = p.moving[t]
         two = _brm_lap_width(p.family[t]) == 2
-        a = A[e]
-        b = two ? A[e + 1] : 0.0
-        for k in 1:d
-            a += c[k, e] * z[k]
-            two && (b += c[k, e + 1] * z[k])
-        end
-        r = _brm_lap_row(p.family[t], p.y[t], p.trials[t], a, b, false, p.moving[t])
+        a = A[e] + _brm_slap_zdot(p, e, b)
+        bb = two ? A[e + 1] + (moving ? _brm_slap_zdot(p, e + 1, b) : 0.0) : 0.0
+        r = _brm_lap_row(p.family[t], p.y[t], p.trials[t], a, bb, false, moving)
         f += r.v
-        for k in 1:d
-            ck1 = c[k, e]
-            ck2 = two ? c[k, e + 1] : 0.0
-            (ck1 == 0.0 && ck2 == 0.0) && continue
-            g[k] += ck1 * r.g1 + ck2 * r.g2
-            u1 = r.h11 * ck1 + r.h12 * ck2
-            u2 = r.h12 * ck1 + r.h22 * ck2
-            for l in 1:d
-                H[l, k] += c[l, e] * u1 + (two ? c[l, e + 1] * u2 : 0.0)
-            end
+        _brm_slap_zadd!(gb, p, e, r.g1)
+        _brm_slap_zouter!(Hb, p, e, e, r.h11)
+        if moving
+            _brm_slap_zadd!(gb, p, e + 1, r.g2)
+            _brm_slap_zouter!(Hb, p, e, e + 1, r.h12)
+            _brm_slap_zouter!(Hb, p, e + 1, e, r.h12)
+            _brm_slap_zouter!(Hb, p, e + 1, e + 1, r.h22)
         end
+    end
+    @inbounds for k in 1:d
+        g[k] = _brm_slap_sum(a -> M[a, k] * gb[a], d) - z[k]
+        for l in 1:d
+            T[k, l] = _brm_slap_sum(c -> Hb[k, c] * M[c, l], d)
+        end
+    end
+    @inbounds for k in 1:d, l in 1:d
+        H[k, l] = _brm_slap_sum(a -> M[a, k] * T[a, l], d) - (k == l)
     end
     f
 end
 
-# Unit i's mode by Newton's method from z0: its own iterations, backtracking,
-# stop (Newton decrement at most `tol`, or at its rounding floor) and restart.
-function _brm_slap_unit_mode(p::BRMStructuredLaplaceProblem, A, c, i, z0)
-    d = p.d
-    g = zeros(d); H = zeros(d, d); gt = zeros(d); Ht = zeros(d, d)
-    z = copy(z0)
-    f = _brm_slap_unit!(g, H, p, A, c, i, z)
+# In-place lower Cholesky factor of a small d × d matrix (its lower triangle);
+# false unless the matrix is positive definite. Units' blocks are a handful of
+# effects, where LAPACK's call overhead and allocations would dominate.
+function _brm_slap_chol!(A::AbstractMatrix{Float64})
+    d = size(A, 1)
+    @inbounds for j in 1:d
+        s = A[j, j]
+        for k in 1:(j - 1)
+            s -= A[j, k]^2
+        end
+        s > 0 || return false
+        l = sqrt(s)
+        A[j, j] = l
+        for i in (j + 1):d
+            r = A[i, j]
+            for k in 1:(j - 1)
+                r -= A[i, k] * A[j, k]
+            end
+            A[i, j] = r / l
+        end
+    end
+    true
+end
+
+# x = (L Lᵀ)⁻¹ b, L the lower factor from `_brm_slap_chol!`.
+function _brm_slap_cholsolve!(x, L, b)
+    d = length(b)
+    @inbounds for i in 1:d
+        r = b[i]
+        for k in 1:(i - 1)
+            r -= L[i, k] * x[k]
+        end
+        x[i] = r / L[i, i]
+    end
+    @inbounds for i in d:-1:1
+        r = x[i]
+        for k in (i + 1):d
+            r -= L[k, i] * x[k]
+        end
+        x[i] = r / L[i, i]
+    end
+    x
+end
+
+# The Newton step (−H)⁻¹ g, or where −H is not positive definite the step along
+# −H with reflected, floored eigenvalues (`_brm_laplace_step`).
+function _brm_slap_step!(w::_BRMSlapWork, H, g)
+    w.L .= .-H
+    _brm_slap_chol!(w.L) ? _brm_slap_cholsolve!(w.step, w.L, g) :
+        copyto!(w.step, _brm_laplace_step(H, g))
+end
+
+# Unit i's mode by Newton's method from z0 into `w.z` (its Hessian there in
+# `w.H`): its own iterations, backtracking, stop (Newton decrement at most
+# `tol`, or at its rounding floor) and restart. Returns (status, steps).
+function _brm_slap_unit_mode!(w::_BRMSlapWork, p::BRMStructuredLaplaceProblem, A, M, i, z0)
+    z, g, H, gt, Ht = w.z, w.g, w.H, w.gt, w.Ht
+    copyto!(z, z0)
+    f = _brm_slap_unit!(g, H, w, p, A, M, i, z)
     if !(isfinite(f) && all(isfinite, g))
         fill!(z, 0.0)
-        f = _brm_slap_unit!(g, H, p, A, c, i, z)
-        isfinite(f) && all(isfinite, g) || return (; status=:nonfinite, z, iterations=0)
+        f = _brm_slap_unit!(g, H, w, p, A, M, i, z)
+        isfinite(f) && all(isfinite, g) || return :nonfinite, 0
     end
     previous = Inf
     for iteration in 1:p.maxiter
-        all(isfinite, H) || return (; status=:nonfinite, z, iterations=iteration - 1)
-        step = _brm_laplace_step(H, g)
+        all(isfinite, H) || return :nonfinite, iteration - 1
+        step = _brm_slap_step!(w, H, g)
         λ = dot(g, step)
-        if λ <= p.tol || (λ <= 1e-8 && λ >= previous / 4)
-            return (; status=:converged, z, f, H, iterations=iteration - 1)
-        end
+        (λ <= p.tol || (λ <= 1e-8 && λ >= previous / 4)) && return :converged, iteration - 1
         previous = λ
         t = 1.0
         accepted = false
         for _ in 1:60
-            trial = z .+ t .* step
-            ft = _brm_slap_unit!(gt, Ht, p, A, c, i, trial)
+            w.trial .= z .+ t .* step
+            ft = _brm_slap_unit!(gt, Ht, w, p, A, M, i, w.trial)
             if isfinite(ft) && all(isfinite, gt) && (λ <= 1e-8 || ft >= f + 1e-4 * t * λ)
-                z = trial; f = ft
-                g, gt = gt, g
-                H, Ht = Ht, H
+                copyto!(z, w.trial)
+                copyto!(g, gt)
+                copyto!(H, Ht)
+                f = ft
                 accepted = true
                 break
             end
             t /= 2
         end
-        accepted || return (; status=:nonfinite, z, iterations=iteration)
+        accepted || return :nonfinite, iteration
     end
-    (; status=:unconverged, z, iterations=p.maxiter)
+    :unconverged, p.maxiter
 end
 
-# Every unit's mode at population point φ, from the previous modes.
+# Every unit's mode at population point φ, from the previous modes, and the
+# lower Cholesky factor of each unit's −H there (`L[:, :, i]`).
 function _brm_slap_mode!(p::BRMStructuredLaplaceProblem, φ::AbstractVector)
     length(φ) == length(p.population) || throw(DimensionMismatch(
         "the population point has length $(length(φ)), the problem has " *
@@ -592,142 +746,158 @@ function _brm_slap_mode!(p::BRMStructuredLaplaceProblem, φ::AbstractVector)
     A = p.affine ? _brm_slap_affine_A(p, φ) :
         _brm_slap_psi!(zeros(length(p.port)), p, values)
     M, dM = _brm_slap_effect_maps(p, uA)
-    c = M' * p.Z
-    if !(all(isfinite, A) && all(isfinite, c))
+    if !(all(isfinite, A) && all(isfinite, M))
         p.nonfinite += 1
         return (; finite=false, value=-Inf, iterations=0)
     end
     u = copy(uA)
-    modes = Vector{Any}(undef, length(p.blocks))
+    L = zeros(p.d, p.d, length(p.blocks))
+    w = _BRMSlapWork(p.d)
     iterations = 0
     for (i, block) in enumerate(p.blocks)
-        mode = _brm_slap_unit_mode(p, A, c, i, p.u[block])
-        if mode.status !== :converged
-            mode.status === :nonfinite ? (p.nonfinite += 1) : (p.unconverged += 1)
-            mode.status === :unconverged && @warn("brm_laplace_problem: unit " *
+        status, steps = _brm_slap_unit_mode!(w, p, A, M, i, view(p.u, block))
+        if status !== :converged
+            status === :nonfinite ? (p.nonfinite += 1) : (p.unconverged += 1)
+            status === :unconverged && @warn("brm_laplace_problem: unit " *
                 "$(repr(p.view.levels[i]))'s mode did not converge in $(p.maxiter) " *
                 "Newton iterations at population point $(repr(collect(φ))); its log " *
                 "density is -Inf", maxlog=3)
-            return (; finite=false, value=-Inf, iterations=mode.iterations)
+            return (; finite=false, value=-Inf, iterations=steps)
         end
-        u[block] .= mode.z
-        modes[i] = mode
-        iterations = max(iterations, mode.iterations)
+        u[block] .= w.z
+        Li = view(L, :, :, i)
+        Li .= .-w.H
+        _brm_slap_chol!(Li) || _brm_nlme_error(
+            "brm_laplace_problem: a unit's density has a stationary point that is not " *
+            "a maximum at this population point")
+        iterations = max(iterations, steps)
     end
-    factors = map(mode -> _brm_laplace_factor(mode.H), modes)
-    any(isnothing, factors) && _brm_nlme_error(
-        "brm_laplace_problem: a unit's density has a stationary point that is not " *
-        "a maximum at this population point")
     p.u = u
-    p.factors[] = factors
-    (; finite=true, u, uA, values, A, c, M, dM, modes, factors, iterations)
+    p.factors[] = L
+    (; finite=true, u, uA, values, A, M, dM, L, iterations)
 end
+
+# log det(L Lᵀ) for a lower factor.
+_brm_slap_logdet(L) = 2 * sum(k -> log(L[k, k]), axes(L, 1))
 
 # The mode search's unit densities leave out terms that do not move with the
 # effects; the value sums every term in full.
 function _brm_slap_value(p::BRMStructuredLaplaceProblem, state)
     state.finite || return -Inf
     v = sum(p.constant)
-    for (i, F) in enumerate(state.factors)
-        z = view(state.u, p.blocks[i])
-        v += _brm_slap_unit_value(p, state.A, state.c, i, z) +
-            size(F, 1) / 2 * log(2π) - logdet(F) / 2
+    for (i, block) in enumerate(p.blocks)
+        z = view(state.u, block)
+        v += _brm_slap_unit_value(p, state.A, state.M, i, z) +
+            p.d / 2 * log(2π) - _brm_slap_logdet(view(state.L, :, :, i)) / 2
     end
     v + _rk_slap_prior(p.kernels, state.uA)
 end
 
-function _brm_slap_unit_value(p::BRMStructuredLaplaceProblem, A, c, i, z)
+function _brm_slap_unit_value(p::BRMStructuredLaplaceProblem, A, M, i, z)
     v = -0.5 * sum(abs2, z)
+    b = M * z
     for t in p.unit_terms[i]
         e = p.entry[t]
         two = _brm_lap_width(p.family[t]) == 2
-        a = A[e] + dot(view(c, :, e), z)
-        b = two ? A[e + 1] + dot(view(c, :, e + 1), z) : 0.0
-        v += _brm_lap_row(p.family[t], p.y[t], p.trials[t], a, b, true, p.moving[t]).v
+        a = A[e] + _brm_slap_zdot(p, e, b)
+        bb = two ? A[e + 1] + _brm_slap_zdot(p, e + 1, b) : 0.0
+        v += _brm_lap_row(p.family[t], p.y[t], p.trials[t], a, bb, true, p.moving[t]).v
     end
     v
 end
 
-# Log density and gradient over the population coordinates (see the header).
+# Log density and gradient over the population coordinates (see the header),
+# in each unit's draws space b = M z: with Q = M h⁻¹ Mᵀ, (C h⁻¹ Cᵀ)_pq =
+# Z_pᵀ Q Z_q, C v = Zᵀ (M v), and Γ's sum over a unit's terms is
+# Hb (M h⁻¹) + gb vᵀ + wb ẑᵀ, with Hb, gb, wb the terms' ℓ″, ℓ′ and w in b.
 function _brm_slap_value_and_gradient(p::BRMStructuredLaplaceProblem, state)
     d = p.d
-    A, c, u, Z = state.A, state.c, state.u, p.Z
+    A, M, u = state.A, state.M, state.u
     w = zeros(length(p.port))
     Γ = zeros(d, d)
     value = sum(p.constant)
     rows = _BRMLapRow[]
     taus = Float64[]
-    s = zeros(d); v = zeros(d); x = zeros(d); y = zeros(d)
+    hinv = zeros(d, d); unit = zeros(d); T = zeros(d, d); Q = zeros(d, d)
+    b = zeros(d); sb = zeros(d); v = zeros(d); Mv = zeros(d)
+    gb = zeros(d); wb = zeros(d); Hb = zeros(d, d)
     for (i, block) in enumerate(p.blocks)
-        F = state.factors[i]
-        hinv = inv(F)
+        Li = view(state.L, :, :, i)
+        for k in 1:d
+            fill!(unit, 0.0)
+            unit[k] = 1.0
+            _brm_slap_cholsolve!(view(hinv, :, k), Li, unit)
+        end
         z = view(u, block)
-        value += d / 2 * log(2π) - logdet(F) / 2 - 0.5 * sum(abs2, z)
-        terms = p.unit_terms[i]
-        fill!(s, 0.0)
+        value += d / 2 * log(2π) - _brm_slap_logdet(Li) / 2 - 0.5 * sum(abs2, z)
+        @inbounds for a in 1:d
+            b[a] = _brm_slap_sum(k -> M[a, k] * z[k], d)
+            for l in 1:d
+                T[a, l] = _brm_slap_sum(k -> M[a, k] * hinv[k, l], d)       # M h⁻¹
+            end
+        end
+        @inbounds for a in 1:d, c in 1:d
+            Q[a, c] = _brm_slap_sum(l -> T[a, l] * M[c, l], d)               # M h⁻¹ Mᵀ
+        end
+        fill!(sb, 0.0); fill!(gb, 0.0); fill!(wb, 0.0); fill!(Hb, 0.0)
         empty!(rows); empty!(taus)
+        terms = p.unit_terms[i]
         @inbounds for t in terms
             e = p.entry[t]
+            moving = p.moving[t]
             two = _brm_lap_width(p.family[t]) == 2
-            c1 = view(c, :, e)
-            a = A[e] + dot(c1, z)
-            b = two ? A[e + 1] + dot(view(c, :, e + 1), z) : 0.0
-            r = _brm_lap_row(p.family[t], p.y[t], p.trials[t], a, b, true, p.moving[t])
+            a = A[e] + _brm_slap_zdot(p, e, b)
+            bb = two ? A[e + 1] + (moving ? _brm_slap_zdot(p, e + 1, b) : 0.0) : 0.0
+            r = _brm_lap_row(p.family[t], p.y[t], p.trials[t], a, bb, true, moving)
             push!(rows, r)
             value += r.v
-            m11 = dot(c1, hinv, c1)
-            if two
-                c2 = view(c, :, e + 1)
-                m12 = dot(c1, hinv, c2)
-                m22 = dot(c2, hinv, c2)
-                τ1 = m11 * r.t111 + 2m12 * r.t112 + m22 * r.t122
-                τ2 = m11 * r.t112 + 2m12 * r.t122 + m22 * r.t222
-                for k in 1:d
-                    s[k] += 0.5 * (τ1 * c1[k] + τ2 * c2[k])
-                end
-            else
-                τ1 = m11 * r.t111
-                τ2 = 0.0
-                for k in 1:d
-                    s[k] += 0.5 * τ1 * c1[k]
-                end
-            end
+            m11 = _brm_slap_zquad(p, e, e, Q)
+            m12 = moving ? _brm_slap_zquad(p, e, e + 1, Q) : 0.0
+            m22 = moving ? _brm_slap_zquad(p, e + 1, e + 1, Q) : 0.0
+            τ1 = m11 * r.t111 + 2m12 * r.t112 + m22 * r.t122
+            τ2 = two ? m11 * r.t112 + 2m12 * r.t122 + m22 * r.t222 : 0.0
             push!(taus, τ1, τ2)
+            _brm_slap_zadd!(sb, p, e, 0.5 * τ1)
+            _brm_slap_zadd!(gb, p, e, r.g1)
+            _brm_slap_zouter!(Hb, p, e, e, r.h11)
+            if moving
+                _brm_slap_zadd!(sb, p, e + 1, 0.5 * τ2)
+                _brm_slap_zadd!(gb, p, e + 1, r.g2)
+                _brm_slap_zouter!(Hb, p, e, e + 1, r.h12)
+                _brm_slap_zouter!(Hb, p, e + 1, e, r.h12)
+                _brm_slap_zouter!(Hb, p, e + 1, e + 1, r.h22)
+            end
         end
-        mul!(v, hinv, s)
+        # s = Mᵀ sb, v = h⁻¹ s, and M v for the terms' C v.
+        fill!(v, 0.0)
+        @inbounds for l in 1:d
+            sl = _brm_slap_sum(a -> M[a, l] * sb[a], d)
+            for k in 1:d
+                v[k] += hinv[k, l] * sl
+            end
+        end
+        @inbounds for a in 1:d
+            Mv[a] = _brm_slap_sum(k -> M[a, k] * v[k], d)
+        end
         @inbounds for (j, t) in enumerate(terms)
             e = p.entry[t]
-            two = _brm_lap_width(p.family[t]) == 2
+            moving = p.moving[t]
             r = rows[j]
-            c1 = view(c, :, e)
-            cv1 = dot(c1, v)
-            # x = h⁻¹(ℓ″ C)ᵀ row + ℓ′ v + w ẑ for each parameter, into Z_e.
-            if two
-                c2 = view(c, :, e + 1)
-                cv2 = dot(c2, v)
-                w1 = r.g1 + 0.5 * taus[2j - 1] + r.h11 * cv1 + r.h12 * cv2
+            cv1 = _brm_slap_zdot(p, e, Mv)
+            cv2 = moving ? _brm_slap_zdot(p, e + 1, Mv) : 0.0
+            w1 = r.g1 + 0.5 * taus[2j - 1] + r.h11 * cv1 + r.h12 * cv2
+            w[e] = w1
+            _brm_slap_zadd!(wb, p, e, w1)
+            if _brm_lap_width(p.family[t]) == 2
                 w2 = r.g2 + 0.5 * taus[2j] + r.h12 * cv1 + r.h22 * cv2
-                w[e] = w1
                 w[e + 1] = w2
-                for k in 1:d
-                    y[k] = r.h11 * c1[k] + r.h12 * c2[k]
-                end
-                _brm_slap_gamma!(Γ, x, hinv, y, r.g1, v, w1, z, view(Z, :, e))
-                for k in 1:d
-                    y[k] = r.h12 * c1[k] + r.h22 * c2[k]
-                end
-                _brm_slap_gamma!(Γ, x, hinv, y, r.g2, v, w2, z, view(Z, :, e + 1))
-            else
-                w1 = r.g1 + 0.5 * taus[2j - 1] + r.h11 * cv1
-                w[e] = w1
-                for k in 1:d
-                    y[k] = r.h11 * c1[k]
-                end
-                _brm_slap_gamma!(Γ, x, hinv, y, r.g1, v, w1, z, view(Z, :, e))
+                moving && _brm_slap_zadd!(wb, p, e + 1, w2)
             end
         end
+        @inbounds for a in 1:d, l in 1:d
+            Γ[a, l] += _brm_slap_sum(c -> Hb[a, c] * T[c, l], d) + gb[a] * v[l] + wb[a] * z[l]
+        end
     end
-    # w is a cotangent on the link-scale entries; the RK values are natural.
     gradient = p.affine ? _brm_slap_affine_pullback(p, w) :
         _rk_slap_pullback(p.kernels, state.uA,
             _brm_slap_cotangents(p, state.values, w))[p.population]
@@ -736,24 +906,6 @@ function _brm_slap_value_and_gradient(p::BRMStructuredLaplaceProblem, state)
     end
     prior, prior_gradient = _rk_slap_prior_gradient(p.kernels, state.uA)
     value + prior, gradient .+ prior_gradient[p.population]
-end
-
-# Γ += Z_e xᵀ with x = h⁻¹ y + g v + w z (skipping Z_e's zero rows).
-@inline function _brm_slap_gamma!(Γ, x, hinv, y, g, v, w, z, Ze)
-    any(!iszero, Ze) || return Γ
-    mul!(x, hinv, y)
-    d = length(x)
-    @inbounds for l in 1:d
-        x[l] += g * v[l] + w * z[l]
-    end
-    @inbounds for a in 1:d
-        za = Ze[a]
-        za == 0.0 && continue
-        for l in 1:d
-            Γ[a, l] += za * x[l]
-        end
-    end
-    Γ
 end
 
 # Per-port cotangents for the RK pullback from the entries' cotangents.
@@ -796,7 +948,7 @@ function brm_laplace_draws(p::BRMStructuredLaplaceProblem, P::AbstractMatrix;
     newton_steps = Vector{Int}(undef, size(P, 2))
     importance_ess = Matrix{Float64}(undef, conditional > 0 ? length(p.blocks) : 0,
         size(P, 2))
-    g = zeros(p.d); H = zeros(p.d, p.d)
+    g = zeros(p.d); H = zeros(p.d, p.d); work = _BRMSlapWork(p.d)
     for k in axes(P, 2)
         state = _brm_slap_mode!(p, view(P, :, k))
         state.finite || _brm_nlme_error(
@@ -804,7 +956,8 @@ function brm_laplace_draws(p::BRMStructuredLaplaceProblem, P::AbstractMatrix;
         newton_steps[k] = state.iterations
         draws[:, k] .= state.u
         for (i, block) in enumerate(p.blocks)
-            U = state.factors[i].U
+            # −H = L Lᵀ, so ẑ + L⁻ᵀ ε has covariance (−H)⁻¹.
+            U = LowerTriangular(state.L[:, :, i])'
             if conditional == 0
                 draws[block, k] .+= U \ randn(rng, p.d)
                 continue
@@ -813,7 +966,7 @@ function brm_laplace_draws(p::BRMStructuredLaplaceProblem, P::AbstractMatrix;
             # rows only: proposal ẑ + U⁻¹ε has log density −|ε|²/2 + const.
             ε = randn(rng, p.d, conditional)
             proposals = state.u[block] .+ U \ ε
-            logw = [_brm_slap_unit!(g, H, p, state.A, state.c, i, view(proposals, :, j)) +
+            logw = [_brm_slap_unit!(g, H, work, p, state.A, state.M, i, view(proposals, :, j)) +
                 sum(abs2, view(ε, :, j)) / 2 for j in 1:conditional]
             wts = exp.(logw .- maximum(logw))
             importance_ess[i, k] = sum(wts)^2 / sum(abs2, wts)
