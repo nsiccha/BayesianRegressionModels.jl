@@ -1,8 +1,10 @@
 # Effective priors share the emitter's selector resolver. Never reinterpret
 # selector precedence in a reporting consumer.
-function _brmd_prior(d, id, expression, support, source, anchors, notation, texts;bindings=())
+function _brmd_prior(d, id, expression, support, source, anchors, notation, texts;bindings=(),cell=nothing)
     env = _brmd_environment(d, id, :prior, (), _brmd_constants(d.plan), notation, texts)
     isempty(bindings) || (env=merge(env,(;bindings)))
+    # A cell latent's prior reads in the cell's names, as its statement does.
+    isnothing(cell) || (env=last(_brmd_cell_environment(cell.column,env,(:prior,id...,:cell);owner=cell.owner)))
     if expression isa ExprColumn
         support=merge(support,(; (k=>_brmd_snapshot(v) for (k,v) in pairs(getkwargs(expression))
             if k in (:lower,:upper))...))
@@ -375,13 +377,13 @@ function _brmd_total_priors!(priors,d,groups,anchors,notation,texts)
 end
 
 # A top-level declaration's own family and keywords, with data substituted.
-function _brmd_declared_prior(d,logical,declaration,anchors,notation,texts)
+function _brmd_declared_prior(d,logical,declaration,anchors,notation,texts;cell=nothing)
     f = _brmd_binding(declaration.family,d.plan.model.mod)
     raw = Expr(:call,declaration.family,Expr(:parameters,
         (Expr(:kw,k,_brmd_substitute(v,d.plan.data)) for (k,v) in pairs(declaration.keywords))...),
         (_brmd_substitute(a,d.plan.data) for a in declaration.arguments)...)
     _brmd_prior(d,logical,raw,merge(_brmd_support(f),declaration.constraints),
-        (; kind=:declaration, family=f),anchors,notation,texts)
+        (; kind=:declaration, family=f),anchors,notation,texts;cell)
 end
 
 function _brmd_priors(d, anchors, notation, texts;groups=_brmd_ranef_metadata(d))
@@ -405,6 +407,7 @@ function _brmd_priors(d, anchors, notation, texts;groups=_brmd_ranef_metadata(d)
         carrier=_sb_known_scale_carrier(group.block.binding,record.known_scales)
         isnothing(carrier) || push!(inventoried,carrier)
     end
+    kernels=nothing
     for declaration in d.plan.declarations
         role = _brm_declaration_role(declaration,d.plan.bindings)
         role in (:population_effect,:random_effect) && continue
@@ -425,7 +428,13 @@ function _brmd_priors(d, anchors, notation, texts;groups=_brmd_ranef_metadata(d)
                 o.declaration.target===declaration.target &&
                 o.declaration.context==declaration.context,d.outputs)
             declaration.role === :prior || sampled || continue
-            push!(priors,_brmd_declared_prior(d,logical,declaration,anchors,notation,texts))
+            cell=nothing
+            if length(declaration.context)==1
+                kernels=something(kernels,_brmd_kernel_columns(d))
+                owner=only(declaration.context)
+                haskey(kernels,owner) && (cell=(;owner,column=kernels[owner]))
+            end
+            push!(priors,_brmd_declared_prior(d,logical,declaration,anchors,notation,texts;cell))
         end
     end
     Tuple(priors), groups
