@@ -7,26 +7,35 @@
 # Poisson random intercept a scalar Newton search and second derivative per
 # unit. The model's priors and log-Jacobians of the population coordinates come
 # from RK's `:prior` and `:log_jacobian` queries, less the standardized draws'
-# N(0, 1) terms.
+# N(0, 1) terms. Every oracle runs against both implementations: the
+# row-structured one (`BRMStructuredLaplaceProblem`, which these regression
+# models get by default) and the whole-model one (`structured=false`).
 #
 # RUN: julia --project=test test/nlme_laplace.jl [testset-filter...]
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LinearAlgebra, LogDensityProblems, Random, Statistics
 using LogExpFunctions: logit
 
+const LAPLACE_STRUCTURED = (true, false)
+
+laplace_view(p::BRMLaplaceProblem) = p.model.view
+laplace_view(p::BRMStructuredLaplaceProblem) = p.view
+laplace_problem(rk, structured) =
+    brm_laplace_problem(rk; ad_backend=NLME_AD, structured)
+
 function laplace_population_logprior(rk, p, u)
     plan = RKEXT._rk_translated_plan(rk.plan)
     prior = prepare_query(rk.model, plan, :prior)
     jacobian = prepare_query(rk.model, plan, :log_jacobian)
-    draws = findall(==(:subject_effect), p.model.view.role)
+    draws = findall(==(:subject_effect), laplace_view(p).role)
     Base.invokelatest(prior, u) + Base.invokelatest(jacobian, u) -
         sum(logpdf(Normal(), u[j]) for j in draws)
 end
 
-laplace_point(p, φ) = (u = zeros(length(p.model.unit)); u[p.population] .= φ; u)
+laplace_point(p, φ) = (u = zeros(length(p.u)); u[p.population] .= φ; u)
 
 # Unit labels in the view's order, and each unit's data rows.
-laplace_rows(p, g) = [findall(==(string(level)), g) for level in p.model.view.levels]
+laplace_rows(p, g) = [findall(==(string(level)), g) for level in laplace_view(p).levels]
 
 const LAPLACE_RNG = Xoshiro(20261025)
 const LAPLACE_G = vcat([fill("g$i", 2 + i % 3) for i in 1:6]...)
@@ -72,12 +81,20 @@ end
 
 @stestset "a Gaussian model's Laplace marginal is its analytic marginal" begin
     data = (; g=LAPLACE_G, x=LAPLACE_X, y=LAPLACE_Y)
-    for build in (laplace_intercept_model, laplace_slope_model)
+    for build in (laplace_intercept_model, laplace_slope_model),
+            structured in LAPLACE_STRUCTURED
         rk = RKBRMI(build(data))
-        p = brm_laplace_problem(rk; ad_backend=NLME_AD)
-        nη = length(first(p.model.view.subject_coordinates))
-        @test length(p.population) == length(p.model.view.coordinates) - 6nη
+        p = laplace_problem(rk, structured)
+        @test p isa (structured ? BRMStructuredLaplaceProblem : BRMLaplaceProblem)
+        nη = length(first(laplace_view(p).subject_coordinates))
+        @test length(p.population) == length(laplace_view(p).coordinates) - 6nη
         @test LogDensityProblems.dimension(p) == length(p.names)
+        for _ in 1:4
+            φ = 0.5 .* randn(LAPLACE_RNG, length(p.population))
+            @test LogDensityProblems.logdensity(p, φ) ≈
+                laplace_gaussian_marginal(p, rk, data, φ) atol=1e-10
+        end
+        structured && continue
         # The oracle's reading of the coordinates is the model's: its
         # conditional density at a random point equals the hand-written one.
         u = randn(LAPLACE_RNG, length(p.model.unit))
@@ -93,11 +110,6 @@ end
                 data.y[k]) for k in rows)
         end
         @test model ≈ hand rtol=1e-12
-        for _ in 1:4
-            φ = 0.5 .* randn(LAPLACE_RNG, length(p.population))
-            @test LogDensityProblems.logdensity(p, φ) ≈
-                laplace_gaussian_marginal(p, rk, data, φ) atol=1e-10
-        end
     end
 end
 
@@ -109,103 +121,112 @@ end
         log(mu) ~ 1 + x + (1 | g)
         y ~ Poisson(mu)
     end)
-    p = brm_laplace_problem(rk; ad_backend=NLME_AD)
-    for _ in 1:3
+    for structured in LAPLACE_STRUCTURED
+        p = laplace_problem(rk, structured)
+        for _ in 1:3
+            φ = 0.4 .* randn(rng, length(p.population))
+            u = laplace_point(p, φ)
+            values = BRM._rk_constrained_values(rk, u)
+            β, τ = values.pop_log_mu.beta_pop, only(values.b_g.tau)
+            # Per unit, ℓ(z) = Σ_k [y_k (a_k + τ z) − exp(a_k + τ z) − log y_k!] − z²/2,
+            # maximized by scalar Newton; −ℓ''(z) = τ² Σ_k exp(a_k + τ z) + 1.
+            units = sum(laplace_rows(p, data.g)) do rows
+                a = β[1] .+ β[2] .* data.x[rows]
+                ℓ(z) = sum(logpdf.(Poisson.(exp.(a .+ τ * z)), y[rows])) + logpdf(Normal(), z)
+                z = 0.0
+                for _ in 1:100
+                    rate = exp.(a .+ τ * z)
+                    z += (τ * sum(y[rows] .- rate) - z) / (τ^2 * sum(rate) + 1)
+                end
+                ℓ(z) + log(2π) / 2 - log(τ^2 * sum(exp.(a .+ τ * z)) + 1) / 2
+            end
+            @test LogDensityProblems.logdensity(p, φ) ≈
+                laplace_population_logprior(rk, p, u) + units atol=1e-10
+        end
+        # A population point where the rates overflow scores -Inf, as the full
+        # model's density there does, and is counted. Without previous modes (no
+        # predictor) the whole-model search starts at zero, where they overflow;
+        # the structured one sees the overflow in the rows' parameters.
+        overflow = zeros(length(p.population))
+        overflow[findfirst(==(Symbol("pop_log_mu.beta_pop.1")), p.names)] = 800.0
+        if !structured
+            p.u .= p.model.unit
+            p.factors[] = nothing
+        end
+        before = p.nonfinite
+        value, gradient = LogDensityProblems.logdensity_and_gradient(p, overflow)
+        @test value == -Inf && all(isnan, gradient)
+        @test p.nonfinite == before + 1
+        @test !isfinite(LogDensityProblems.logdensity(
+            rk_logdensity_problem(rk; ad_backend=NLME_AD), laplace_point(p, overflow)))
+        if !structured
+            # From modes at an ordinary point the predictor starts far up the
+            # rates' exponential, where Newton gains about one unit per step: the
+            # search does not converge, scores -Inf, is counted and warns.
+            LogDensityProblems.logdensity(p, zeros(length(p.population)))
+            before = p.unconverged
+            value = @test_logs (:warn, r"did not converge") match_mode=:any LogDensityProblems.logdensity(p, overflow)
+            @test value == -Inf
+            @test p.unconverged == before + 1
+        end
+        # Conditional draws by importance resampling follow each unit's exact
+        # conditional posterior, here its mean by quadrature on a fine grid.
         φ = 0.4 .* randn(rng, length(p.population))
         u = laplace_point(p, φ)
         values = BRM._rk_constrained_values(rk, u)
         β, τ = values.pop_log_mu.beta_pop, only(values.b_g.tau)
-        # Per unit, ℓ(z) = Σ_k [y_k (a_k + τ z) − exp(a_k + τ z) − log y_k!] − z²/2,
-        # maximized by scalar Newton; −ℓ''(z) = τ² Σ_k exp(a_k + τ z) + 1.
-        units = sum(laplace_rows(p, data.g)) do rows
+        n = 2000
+        out = brm_laplace_draws(p, repeat(φ, 1, n); rng=Xoshiro(9), conditional=64)
+        @test size(out.diagnostics.importance_ess) == (length(laplace_view(p).levels), n)
+        @test all(e -> 1 <= e <= 64, out.diagnostics.importance_ess)
+        grid = range(-8, 8; length=4001)
+        for (i, rows) in enumerate(laplace_rows(p, data.g))
             a = β[1] .+ β[2] .* data.x[rows]
-            ℓ(z) = sum(logpdf.(Poisson.(exp.(a .+ τ * z)), y[rows])) + logpdf(Normal(), z)
-            z = 0.0
-            for _ in 1:100
-                rate = exp.(a .+ τ * z)
-                z += (τ * sum(y[rows] .- rate) - z) / (τ^2 * sum(rate) + 1)
-            end
-            ℓ(z) + log(2π) / 2 - log(τ^2 * sum(exp.(a .+ τ * z)) + 1) / 2
+            logpost = [sum(logpdf.(Poisson.(exp.(a .+ τ * z)), y[rows])) + logpdf(Normal(), z)
+                for z in grid]
+            w = exp.(logpost .- maximum(logpost))
+            mean_z = sum(w .* grid) / sum(w)
+            sd_z = sqrt(sum(w .* (grid .- mean_z) .^ 2) / sum(w))
+            z = out.draws[only(laplace_view(p).subject_coordinates[i]), :]
+            @test abs(mean(z) - mean_z) < 4 * sd_z / sqrt(n)
+            @test std(z) ≈ sd_z rtol=0.1
         end
-        @test LogDensityProblems.logdensity(p, φ) ≈
-            laplace_population_logprior(rk, p, u) + units atol=1e-10
-    end
-    # A population point where the rates overflow at the start scores -Inf, as
-    # the full model's density there does, and is counted. Without previous
-    # modes (no predictor) the search starts at zero, where they overflow.
-    overflow = zeros(length(p.population))
-    overflow[findfirst(==(Symbol("pop_log_mu.beta_pop.1")), p.names)] = 800.0
-    p.u .= p.model.unit
-    p.factors[] = nothing
-    before = p.nonfinite
-    value, gradient = LogDensityProblems.logdensity_and_gradient(p, overflow)
-    @test value == -Inf && all(isnan, gradient)
-    @test p.nonfinite == before + 1
-    @test !isfinite(LogDensityProblems.logdensity(
-        rk_logdensity_problem(rk; ad_backend=NLME_AD), laplace_point(p, overflow)))
-    # From modes at an ordinary point the predictor starts far up the rates'
-    # exponential, where Newton gains about one unit per step: the search does
-    # not converge, scores -Inf, is counted and warns.
-    LogDensityProblems.logdensity(p, zeros(length(p.population)))
-    before = p.unconverged
-    value = @test_logs (:warn, r"did not converge") match_mode=:any LogDensityProblems.logdensity(p, overflow)
-    @test value == -Inf
-    @test p.unconverged == before + 1
-    # Conditional draws by importance resampling follow each unit's exact
-    # conditional posterior, here its mean by quadrature on a fine grid.
-    φ = 0.4 .* randn(rng, length(p.population))
-    u = laplace_point(p, φ)
-    values = BRM._rk_constrained_values(rk, u)
-    β, τ = values.pop_log_mu.beta_pop, only(values.b_g.tau)
-    n = 2000
-    out = brm_laplace_draws(p, repeat(φ, 1, n); rng=Xoshiro(9), conditional=64)
-    @test size(out.diagnostics.importance_ess) == (length(p.model.view.levels), n)
-    @test all(e -> 1 <= e <= 64, out.diagnostics.importance_ess)
-    grid = range(-8, 8; length=4001)
-    for (i, rows) in enumerate(laplace_rows(p, data.g))
-        a = β[1] .+ β[2] .* data.x[rows]
-        logpost = [sum(logpdf.(Poisson.(exp.(a .+ τ * z)), y[rows])) + logpdf(Normal(), z)
-            for z in grid]
-        w = exp.(logpost .- maximum(logpost))
-        mean_z = sum(w .* grid) / sum(w)
-        sd_z = sqrt(sum(w .* (grid .- mean_z) .^ 2) / sum(w))
-        z = out.draws[only(p.model.view.subject_coordinates[i]), :]
-        @test abs(mean(z) - mean_z) < 4 * sd_z / sqrt(n)
-        @test std(z) ≈ sd_z rtol=0.1
     end
 end
 
 @stestset "Laplace draws keep the population draws and draw each unit from its Gaussian" begin
     data = (; g=LAPLACE_G, x=LAPLACE_X, y=LAPLACE_Y)
     rk = RKBRMI(laplace_intercept_model(data))
-    p = brm_laplace_problem(rk; ad_backend=NLME_AD)
-    φ = 0.3 .* randn(LAPLACE_RNG, length(p.population))
-    n = 4000
-    out = brm_laplace_draws(p, repeat(φ, 1, n); rng=Xoshiro(3))
-    @test size(out.draws) == (length(p.model.unit), n)
-    @test all(out.draws[p.population, :] .== φ)
-    # Later draws start at the earlier draws' modes, which are this point's.
-    @test all(==(0), out.diagnostics.newton_steps[2:end])
-    @test rk_restore_draws(rk, out.draws) isa NamedTuple
-    # A Gaussian unit's conditional posterior is exact: η_i | y_i has precision
-    # n_i/σ² + 1/τ² and mean (Σ_k r_k / σ²) / precision, with z_i = η_i / τ.
-    (; β, σ) = laplace_gaussian_parts(rk, laplace_point(p, φ))
-    τ = only(BRM._rk_constrained_values(rk, laplace_point(p, φ)).b_g.tau)
-    for (i, rows) in enumerate(laplace_rows(p, data.g))
-        precision = length(rows) / σ^2 + 1 / τ^2
-        mean_z = sum(data.y[rows] .- β[1] .- β[2] .* data.x[rows]) / σ^2 / precision / τ
-        sd_z = 1 / sqrt(precision) / τ
-        z = out.draws[only(p.model.view.subject_coordinates[i]), :]
-        @test abs(mean(z) - mean_z) < 4 * sd_z / sqrt(n)
-        @test std(z) ≈ sd_z rtol=0.1
+    for structured in LAPLACE_STRUCTURED
+        p = laplace_problem(rk, structured)
+        φ = 0.3 .* randn(LAPLACE_RNG, length(p.population))
+        n = 4000
+        out = brm_laplace_draws(p, repeat(φ, 1, n); rng=Xoshiro(3))
+        @test size(out.draws) == (length(p.u), n)
+        @test all(out.draws[p.population, :] .== φ)
+        # Later draws start at the earlier draws' modes, which are this point's.
+        @test all(==(0), out.diagnostics.newton_steps[2:end])
+        @test rk_restore_draws(rk, out.draws) isa NamedTuple
+        # A Gaussian unit's conditional posterior is exact: η_i | y_i has precision
+        # n_i/σ² + 1/τ² and mean (Σ_k r_k / σ²) / precision, with z_i = η_i / τ.
+        (; β, σ) = laplace_gaussian_parts(rk, laplace_point(p, φ))
+        τ = only(BRM._rk_constrained_values(rk, laplace_point(p, φ)).b_g.tau)
+        for (i, rows) in enumerate(laplace_rows(p, data.g))
+            precision = length(rows) / σ^2 + 1 / τ^2
+            mean_z = sum(data.y[rows] .- β[1] .- β[2] .* data.x[rows]) / σ^2 / precision / τ
+            sd_z = 1 / sqrt(precision) / τ
+            z = out.draws[only(laplace_view(p).subject_coordinates[i]), :]
+            @test abs(mean(z) - mean_z) < 4 * sd_z / sqrt(n)
+            @test std(z) ≈ sd_z rtol=0.1
+        end
+        # The Laplace Gaussian is a Gaussian unit's exact conditional, so every
+        # importance weight is equal.
+        conditional = brm_laplace_draws(p, repeat(φ, 1, 20); rng=Xoshiro(4), conditional=50)
+        @test all(isapprox.(conditional.diagnostics.importance_ess, 50; rtol=1e-8))
+        @test_throws ArgumentError brm_laplace_draws(p, repeat(φ, 1, 2); conditional=-1)
+        @test_throws DimensionMismatch brm_laplace_draws(p, zeros(1, 2))
+        @test_throws DimensionMismatch LogDensityProblems.logdensity(p, zeros(1))
     end
-    # The Laplace Gaussian is a Gaussian unit's exact conditional, so every
-    # importance weight is equal.
-    conditional = brm_laplace_draws(p, repeat(φ, 1, 20); rng=Xoshiro(4), conditional=50)
-    @test all(isapprox.(conditional.diagnostics.importance_ess, 50; rtol=1e-8))
-    @test_throws ArgumentError brm_laplace_draws(p, repeat(φ, 1, 2); conditional=-1)
-    @test_throws DimensionMismatch brm_laplace_draws(p, zeros(1, 2))
-    @test_throws DimensionMismatch LogDensityProblems.logdensity(p, zeros(1))
 end
 
 # Fourth-order central differences of `f` at `φ`.
@@ -218,8 +239,8 @@ end
     # Gaussian: the gradient of the analytic marginal.
     data = (; g=LAPLACE_G, x=LAPLACE_X, y=LAPLACE_Y)
     rk = RKBRMI(laplace_slope_model(data))
-    p = brm_laplace_problem(rk; ad_backend=NLME_AD)
-    for _ in 1:2
+    for structured in LAPLACE_STRUCTURED, _ in 1:2
+        p = laplace_problem(rk, structured)
         φ = 0.4 .* randn(LAPLACE_RNG, length(p.population))
         value, gradient = LogDensityProblems.logdensity_and_gradient(p, φ)
         @test value ≈ laplace_gaussian_marginal(p, rk, data, φ) atol=1e-10
@@ -242,8 +263,8 @@ end
             H ~ Binomial(n, p)
         end),
     )
-    for brmi in models
-        p = brm_laplace_problem(RKBRMI(brmi); ad_backend=NLME_AD)
+    for brmi in models, structured in LAPLACE_STRUCTURED
+        p = laplace_problem(RKBRMI(brmi), structured)
         φ = 0.3 .* randn(rng, length(p.population))
         _, gradient = LogDensityProblems.logdensity_and_gradient(p, φ)
         @test gradient ≈ laplace_fd(ψ -> LogDensityProblems.logdensity(p, ψ), φ) rtol=1e-7 atol=1e-7
@@ -262,17 +283,70 @@ end
         log(shape) ~ 1 + (1 | us | g)
         y ~ NegativeBinomial2(mu, shape)
     end)
-    p = brm_laplace_problem(rk; ad_backend=NLME_AD)
-    scales = findall(n -> occursin(".tau.", String(n)), p.names)
+    generic = laplace_problem(rk, false)
+    scales = findall(n -> occursin(".tau.", String(n)), generic.names)
     @test length(scales) == 2
     indefinite(φ) = any(B -> !isposdef(Symmetric(-B)),
-        BRM._brm_nlme_sampler_hessian_blocks(p.model, laplace_point(p, φ)))
-    candidates = [(φ = zeros(length(p.population)); φ[scales] .= s; φ)
+        BRM._brm_nlme_sampler_hessian_blocks(generic.model, laplace_point(generic, φ)))
+    candidates = [(φ = zeros(length(generic.population)); φ[scales] .= s; φ)
         for s in (1.0, 2.0, 3.0, 4.0)]
     φ = candidates[findfirst(indefinite, candidates)]
     @test indefinite(φ)
-    value, gradient = LogDensityProblems.logdensity_and_gradient(p, φ)
-    @test isfinite(value) && all(isfinite, gradient)
-    @test p.nonfinite == 0
-    @test gradient ≈ laplace_fd(ψ -> LogDensityProblems.logdensity(p, ψ), φ; h=1e-4) rtol=1e-6 atol=1e-6
+    for structured in LAPLACE_STRUCTURED
+        p = laplace_problem(rk, structured)
+        value, gradient = LogDensityProblems.logdensity_and_gradient(p, φ)
+        @test isfinite(value) && all(isfinite, gradient)
+        @test p.nonfinite == 0
+        @test gradient ≈ laplace_fd(ψ -> LogDensityProblems.logdensity(p, ψ), φ; h=1e-4) rtol=1e-6 atol=1e-6
+    end
+end
+
+@stestset "the row-structured Laplace is the whole-model one, and who gets it" begin
+    # Two count outcomes on one panel, one with a per-row shape predictor and
+    # its own random effect, a binomial share with trials, and correlated
+    # effects on another: every family slot of the structured path at once.
+    rng = Xoshiro(19)
+    e = Dict(g => 0.4 .* randn(rng, 3) for g in unique(LAPLACE_G))
+    works = [rand(rng, NegativeBinomial(4.0, 4.0 / (4.0 + exp(0.8 + 0.3x + e[g][1]))))
+        for (g, x) in zip(LAPLACE_G, LAPLACE_X)]
+    cites = [rand(rng, NegativeBinomial(2.0, 2.0 / (2.0 + exp(1.0 + e[g][2]))))
+        for g in LAPLACE_G]
+    shares = [rand(rng, Binomial(w, 1 / (1 + exp(0.3 - e[g][3]))))
+        for (g, w) in zip(LAPLACE_G, works)]
+    data = (; g=LAPLACE_G, x=LAPLACE_X, works, cites, shares, trials=copy(works))
+    panel = @brm data begin
+        phi_w ~ Exponential(1)
+        log(mu_w) ~ 1 + x + (1 + x | w | g)
+        works ~ NegativeBinomial2(mu_w, phi_w)
+        log(mu_c) ~ 1 + (1 | c | g)
+        log(shape_c) ~ 1 + (1 | s | g)
+        cites ~ NegativeBinomial2(mu_c, shape_c)
+        logit(p_s) ~ 1 + x + (1 | sh | g)
+        shares ~ Binomial(trials, p_s)
+    end
+    rk = RKBRMI(panel)
+    structured = laplace_problem(rk, :auto)
+    @test structured isa BRMStructuredLaplaceProblem
+    generic = laplace_problem(rk, false)
+    # The whole-model gradient's third-order contractions do not differentiate
+    # this panel's correlated block yet (Enzyme snag `nested-forward-o-9434176c`:
+    # the forward `gemm` rule's `dlascl` under an outer reverse sweep), so the
+    # structured gradient is checked against differences of its value, which
+    # equals the whole-model value.
+    for _ in 1:3
+        φ = 0.3 .* randn(rng, length(generic.population))
+        value, gradient = LogDensityProblems.logdensity_and_gradient(structured, φ)
+        @test value ≈ LogDensityProblems.logdensity(generic, φ) atol=1e-9
+        @test gradient ≈ laplace_fd(ψ -> LogDensityProblems.logdensity(structured, ψ), φ) rtol=1e-6 atol=1e-6
+    end
+    # Families outside the row structure keep the whole-model path, and
+    # requiring the structured one names why.
+    lognormal = RKBRMI(@brm (; g=LAPLACE_G, x=LAPLACE_X, y=exp.(LAPLACE_Y)) begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 | g)
+        y ~ LogNormal(mu, sigma)
+    end)
+    @test laplace_problem(lognormal, :auto) isa BRMLaplaceProblem
+    @test_throws BRM.BRMNLMEViewError laplace_problem(lognormal, true)
+    @test_throws ArgumentError laplace_problem(lognormal, :yes)
 end
