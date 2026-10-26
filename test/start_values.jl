@@ -349,7 +349,7 @@ end
         loc = mu + 0.8 * s[1] - s[3]
         y ~ Normal(loc, 1)
     end
-    # refused: RKBRMI builds no cell latents, and `s` is one vector.
+    # refused: `s` is one vector, not a `@plate` cell latent.
     @test_throws ErrorException brm_start(RKBRMI(brmi), (; s=[[0.5], [0.3], [0.2]]))
 end
 

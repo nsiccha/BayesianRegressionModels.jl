@@ -950,9 +950,9 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
         (p.name for p in plan.regression.predictors))
     hoisted = _rk_nested_kernel_arguments(plan, bindings, taken)
     for assignment in plan.assignments
-        if assignment isa _RKPreparedKernelAssignment && haskey(hoisted.kernels, assignment.name)
+        if assignment isa _RKPreparedKernelAssignment
             _rk_emit_value_assignment!(defs, stmts, bindings, taken, assignment;
-                arguments=hoisted.kernels[assignment.name])
+                arguments=get(hoisted.kernels, assignment.name, nothing), coordinates)
         else
             _rk_emit_value_assignment!(defs, stmts, bindings, taken, assignment)
         end

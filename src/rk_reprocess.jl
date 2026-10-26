@@ -97,14 +97,32 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
     if isempty(groups)
         fitted_names = _rk_layout_coordinate_names(rk)
         replay_names = _rk_bound_coordinate_names(replay)
-        fitted_names == replay_names || error(
-            "$prefix: the new data changes the fitted coordinates " *
-            "($(length(fitted_names)) fitted, $(length(replay_names)) on the " *
-            "replay), so the fit's draws do not apply to it. A grouping whose " *
-            "levels the replay does not freeze must be named in " *
-            "`resample_groups`.")
+        fitted_names == replay_names || _rk_refuse_replay_coordinates(plan,
+            fitted_names, replay_names; prefix)
     end
     replay
+end
+
+# A replay whose coordinates differ from the fit's. A `@plate` cell latent has
+# one draw per cell entry, so new cells change it; no grouping resample covers
+# that, so the refusal names the latent.
+function _rk_refuse_replay_coordinates(plan, fitted_names, replay_names; prefix)
+    count_of(names, root) = count(name -> _rk_record_root(name) === root, names)
+    latents = [record.name for record in _rk_coordinate_records(plan)
+        if record.kind === :cell_latent && count_of(fitted_names, record.declaration) !=
+            count_of(replay_names, record.declaration)]
+    isempty(latents) || error(
+        "$prefix: the new data's `@plate` cells give the cell latent(s) " *
+        "$(join(("`$name`" for name in latents), ", ")) a different number of " *
+        "draws than the fit's cells ($(length(fitted_names)) fitted coordinates, " *
+        "$(length(replay_names)) on the replay). A cell latent's draws belong to " *
+        "the fit's cells: replay onto those cells, or rebuild with " *
+        "`freeze_constants=false` for new cells.")
+    error("$prefix: the new data changes the fitted coordinates " *
+        "($(length(fitted_names)) fitted, $(length(replay_names)) on the " *
+        "replay), so the fit's draws do not apply to it. A grouping whose " *
+        "levels the replay does not freeze must be named in " *
+        "`resample_groups`.")
 end
 
 # The emitted program a backend's queries read, and the coordinate names its
