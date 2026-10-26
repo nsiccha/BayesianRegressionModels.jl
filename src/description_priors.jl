@@ -152,7 +152,7 @@ function _brmd_ranef_metadata(d)
         # `|ID|` block, the generated one of a `||` term or an addressed block
         # among them, is as independent of the other blocks as an ID-less one.
         push!(result,(; key,block,margins,configuration=cfg,declaration,
-            correlated=block.n_terms > 1,
+            correlated=block.n_terms > 1,correlation=_brmd_block_correlation(block.n_terms,cfg),
             shared=!isnothing(block.id) && length(unique(m.predictor for m in margins)) > 1))
     end
     # Exact totals replace one independent block per column. Each column keeps
@@ -169,12 +169,21 @@ function _brmd_ranef_metadata(d)
             block = (; binding=t.name, family=:brm_total, group=b.group, id, by=nothing,
                 levels, n_terms=1, n_groups=d.plan.data[b.group_count], noncentered=false)
             push!(result,(; key,block,margins=((;predictor=b.predictor,coefficient=label),),
-                configuration=nothing,declaration=t.declaration,correlated=false,
+                configuration=nothing,declaration=t.declaration,correlated=false,correlation=:none,
                 # An absorbed `|ID|` has exactly one margin, so it is never shared.
                 shared=false,total=(;binding=t.binding,column=k)))
         end
     end
     Tuple(result)
+end
+
+# How a block's margins correlate: a one-margin block has no correlation; a
+# `cor(:, ID) = R` holds it at the known `R`, which at the identity leaves the
+# margins independent; otherwise it is estimated.
+function _brmd_block_correlation(n_terms,cfg)
+    n_terms > 1 || return :none
+    isnothing(cfg) || isnothing(cfg.known_cor) ? :estimated :
+        isdiag(cfg.known_cor) ? :identity : :known
 end
 
 """Exact-total bindings in emission order, with their generative declaration."""
@@ -275,7 +284,7 @@ function _brmd_ranef_priors!(priors,d,groups,anchors,notation,texts)
         if group.correlated && !isnothing(cfg) && !isnothing(cfg.known_cor)
             # `cor(:, ID) = R`: the correlation is the point mass at `R`.
             push!(priors,_brmd_prior(d,(group.key...,:correlation),
-                ExprColumn(Dirac,cfg.known_cor),(; domain=:correlation),
+                ExprColumn(Dirac,_brmd_snapshot(cfg.known_cor)),(; domain=:correlation),
                 (; kind=:known),anchors,notation,texts))
         elseif group.correlated
             eta = isnothing(cfg) ? 1.0 : cfg.lkj_eta
@@ -382,17 +391,25 @@ function _brmd_priors(d, anchors, notation, texts;groups=_brmd_ranef_metadata(d)
     _brmd_total_priors!(priors,d,groups,anchors,notation,texts)
     categories=Set(cat.emitted for entry in _brm_population_effect_entries(d.plan.parent)
         for cat in _brm_categorical_effect_entries(d,entry.logical,entry.link))
-    # Exact-total carriers are inventoried semantically above.
-    total_carriers=Set{Symbol}()
+    # Carriers inventoried semantically above: exact totals, and a known-value
+    # block's sampled scales, its `(…, :sd, i)` priors; the vector its emission
+    # declares for them is not a second parameter.
+    inventoried=Set{Symbol}()
     for t in _brmd_total_bindings(d)
-        push!(total_carriers,t.name,t.binding.scale)
-        isnothing(t.binding.total.mixture_name) || push!(total_carriers,t.binding.total.mixture_name)
+        push!(inventoried,t.name,t.binding.scale)
+        isnothing(t.binding.total.mixture_name) || push!(inventoried,t.binding.total.mixture_name)
+    end
+    for group in groups
+        record=get(d.plan.bindings,group.block.binding,NamedTuple())
+        haskey(record,:known_scales) || continue
+        carrier=_sb_known_scale_carrier(group.block.binding,record.known_scales)
+        isnothing(carrier) || push!(inventoried,carrier)
     end
     for declaration in d.plan.declarations
         role = _brm_declaration_role(declaration,d.plan.bindings)
         role in (:population_effect,:random_effect) && continue
         declaration.target in categories && continue
-        isempty(declaration.context) && declaration.target in total_carriers && continue
+        isempty(declaration.context) && declaration.target in inventoried && continue
         # A plate declares a grouped computation, not a distribution on its
         # returned value. Its cell priors are already separate declarations.
         declaration.family === :plate && continue

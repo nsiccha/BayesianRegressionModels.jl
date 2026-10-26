@@ -12639,6 +12639,16 @@ function _sb_emit_known_id_bucket!(stmts, data, bucket_name, n_terms_name,
     nothing
 end
 
+# The sampled scale vector of a known-value block, from its binding and the
+# record's `known_scales` (`nothing` at a sampled margin): `<binding>_tau`,
+# `<binding>_tau_free` when some scale is known, or `nothing` when every scale
+# is known (`<binding>_tau` is then data).
+function _sb_known_scale_carrier(binding, known_scales)
+    free = count(isnothing, known_scales)
+    free == 0 && return nothing
+    Symbol(binding, free < length(known_scales) ? :_tau_free : :_tau)
+end
+
 # The `tau` value a known-value block passes in (see `_sb_emit_known_id_bucket!`).
 function _sb_emit_known_ranef_tau!(stmts, data, bucket_name, n_terms_name, priors;
                                    mod::Module)
@@ -12654,7 +12664,8 @@ function _sb_emit_known_ranef_tau!(stmts, data, bucket_name, n_terms_name, prior
     # An unaddressed margin keeps the shared block's half-standard-Normal scale.
     free_priors = Any[isnothing(prior) ? ExprColumn(Normal) : prior
                       for prior in priors[free]]
-    free_name = isempty(known) ? tau_name : Symbol(bucket_name, :_tau_free)
+    free_name = _sb_known_scale_carrier(bucket_name,
+        Tuple(i in known ? priors[i].value : nothing for i in eachindex(priors)))
     statement = _sb_vector_prior_statement(free_name, free_name,
         free_priors, length(free); positive=true, mod, scope=mod).statement
     push!(stmts, statement)
