@@ -61,21 +61,21 @@ function _rk_attach_data_assignments!(derived::Vector{_RKDerivedSpec}, columns,
     for (key, value) in raw
         value isa AbstractArray && !haskey(columns, key) && (columns[key] = value)
     end
+    # A fit-role twin reads the fit-role copy of every column and assignment.
     fit_twins = Dict{Symbol,Symbol}()
+    twin(x::Symbol) = haskey(fit_twins, x) ? fit_twins[x] :
+        haskey(raw, x) && raw[x] isa AbstractArray ?
+            _rk_fit_input!(derived, columns, taken, x, _brm_fit_input_source(x, raw[x])) : x
+    twin(x::Expr) = Expr(x.head, map(twin, x.args)...)
+    twin(x) = x
     for name in order
         push!(derived, _RKDerivedSpec(name, Expr(:_rk_data_assignment, lowered[name]), name))
         name in twinned || continue
-        # The fit-role twin is a definition over the inputs' fit-role copies.
         label = _rk_fit_label(name)
         index = findfirst(spec -> spec.label === label, derived)
         twin_name = index === nothing ? _rk_fit_name!(derived, columns, taken, name) :
             derived[index].name
         index === nothing || deleteat!(derived, index)
-        twin(x::Symbol) = haskey(fit_twins, x) ? fit_twins[x] :
-            haskey(raw, x) && raw[x] isa AbstractArray ?
-                _rk_fit_input!(derived, columns, taken, x, _brm_fit_input_source(x, raw[x])) : x
-        twin(x::Expr) = Expr(x.head, map(twin, x.args)...)
-        twin(x) = x
         push!(derived, _RKDerivedSpec(twin_name,
             Expr(:_rk_data_assignment, twin(lowered[name])), label))
         fit_twins[name] = twin_name
