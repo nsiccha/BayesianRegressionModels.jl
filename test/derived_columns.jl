@@ -54,11 +54,12 @@ function sb_same_program(derived, host)
     sd
 end
 
-# RKBRMI computes `name` in its graph and binds its inputs, not its value.
+# RKBRMI computes `name` in its graph: the program defines it, and binds its
+# inputs rather than its value.
 function rk_in_graph(rk, name, inputs)
     program = BRM._rk_retained_program(rk)
     @test any(s -> Meta.isexpr(s, :(=)) && first(s.args) === name, program.main.args)
-    bound = rk_bound_data(rk)
+    bound = BRM._rk_source_data_columns(rk.plan, program)
     @test !haskey(bound, name)
     for input in inputs
         @test haskey(bound, input)
@@ -124,10 +125,10 @@ end
     design = (; t=flat.t[1:12] .+ 2.0, x=flat.x[1:12], g=flat.g[1:12], y=flat.y[1:12])
     replay = reprocess(rk, design)
     replay_host = reprocess(rkh, merge(design, (; tt=design.t .+ 0.5)))
-    _, pd = consumer_problem(replay)
     u = fill(0.1, length(coordinate_names(replay.model.layout)))
-    ph = rk_logdensity_problem(replay_host; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
-    @test LogDensityProblems.logdensity(pd, u) ≈ LogDensityProblems.logdensity(ph, u) atol=1e-10
+    problem(backend) = rk_logdensity_problem(backend; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    @test LogDensityProblems.logdensity(problem(replay), u) ≈
+        LogDensityProblems.logdensity(problem(replay_host), u) atol=1e-10
 end
 
 @stestset "factors, groupings and monotonic effects read a data-only assignment" begin
@@ -170,10 +171,10 @@ end
             sigma ~ Exponential(1); mu ~ 1 + x + offset(tt); y ~ Normal(mu, sigma) end)),
         ("weights", (@brm flat begin
             sigma ~ Exponential(1); w = derived_shift(abs(t))
-            mu ~ 1 + x; y ~ weighted(Normal(mu, sigma), aweights(w)) end),
+            mu ~ 1 + x; y ~ weighted(Normal(mu, sigma), weights(w)) end),
          (@brm merge(flat, (; w=abs.(flat.t) .+ 0.5)) begin
             sigma ~ Exponential(1); mu ~ 1 + x
-            y ~ weighted(Normal(mu, sigma), aweights(w)) end)))
+            y ~ weighted(Normal(mu, sigma), weights(w)) end)))
         @testset "$label" begin
             sb_same_program(derived, host)
             rk_same_density(derived, host)
@@ -207,8 +208,9 @@ panel = (; subject=collect(1:NS), obs_subject, y=randn(rng, length(obs_subject))
         end
     end
     sb_same_program(derived, host)
-    rk, _ = rk_same_density(derived, host)
-    rk_in_graph(rk, :key, (:obs_subject,))
+    # The grouped response is gathered in Julia, as for a raw key (todo
+    # `0v3rk7u`), so neither program reads the key.
+    rk_same_density(derived, host)
 end
 
 @stestset "a predictor on a derived axis, gathered through a derived key" begin
@@ -264,7 +266,9 @@ end
     program = BRM._rk_retained_program(rk)
     defined = only(s for s in program.main.args if Meta.isexpr(s, :(=)) &&
         first(s.args) === :z_loc)
-    @test BRM._rk_source_symbols!(Set{Symbol}(), last(defined.args)) ⊆ Set([:z_fit])
+    # It reads the fit-role copy of `z`, never the design's `z`.
+    reads = BRM._rk_source_symbols!(Set{Symbol}(), last(defined.args))
+    @test :z_fit in reads && !(:z in reads)
     # A replay design with another mean keeps the fitted location and scale,
     # by reprocess and from a data-free fitted state alike.
     design = (; z=covariate[1:12] .+ 3.0, t=flat.t[1:12], x=flat.x[1:12],

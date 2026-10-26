@@ -1516,6 +1516,16 @@ function _brm_replay_random_effect_plan(
         training.sd_rate, training.lkj_eta)
 end
 
+# A grouping column's values. An assignment that reads a model value is no
+# data column, so it cannot group.
+function _brm_group_values(context, group::Symbol)
+    haskey(context.data, group) || error(
+        "BRM backend lowering: grouping `$group` is not data. An assignment ",
+        "groups only when it reads data alone, not a sampled parameter, a ",
+        "predictor or a modelled value")
+    context.data[group]
+end
+
 function _brm_replay_random_effect_plan(
         training::_BRMMultiMembershipPlan, context::_BRMBackendContext)
     raw_groups = Tuple(context.data[group] for group in training.groups)
@@ -1573,8 +1583,15 @@ _brm_group_id(value) = error(
     "BRM backend lowering: `gr(...; id=...)` expects a Symbol or String; " *
     "got $(typeof(value))")
 
+# A grouping is named by a data column or by an assignment: a data-only one is
+# resolved into a data column before any backend reads its values
+# (`_brm_resolve_data_assignments`), and a backend refuses any other where it
+# reads them (`_brm_group_values`).
+_brm_is_grouping_column(x) = x isa NamedColumn &&
+    (parent(x) isa DataColumn || parent(x) isa ExprColumn{typeof(assign)})
+
 function _brm_random_effect_group(raw)
-    if raw isa NamedColumn && parent(raw) isa DataColumn
+    if _brm_is_grouping_column(raw)
         return (; group=raw, by=nothing, id=nothing)
     end
     raw isa ExprColumn && getf(raw) === gr || error(
@@ -1585,7 +1602,7 @@ function _brm_random_effect_group(raw)
         "BRM backend lowering: `gr(...)` expects exactly one positional " *
         "group; got $(length(args))")
     group = only(args)
-    group isa NamedColumn && parent(group) isa DataColumn || error(
+    _brm_is_grouping_column(group) || error(
         "BRM backend lowering: `gr(...)` group must be one raw data column; " *
         "got `$(repr(group))`")
     kwargs = getkwargs(raw)
@@ -1595,7 +1612,7 @@ function _brm_random_effect_group(raw)
         "$(sort!(collect(unknown)))")
     by = get(kwargs, :by, nothing)
     if !isnothing(by)
-        by isa NamedColumn && parent(by) isa DataColumn || error(
+        _brm_is_grouping_column(by) || error(
             "BRM backend lowering: `gr(...; by=...)` must name one raw data " *
             "column; got `$(repr(by))`")
     end
@@ -1766,7 +1783,7 @@ Base.@nospecializeinfer function _brm_simple_random_effect_plans(
                 "random-effect block " *
                 "$(isnothing(id) ? "" : "ID `$id`, ")group `$group`")
             push!(seen, key)
-            raw = context.data[group]
+            raw = _brm_group_values(context, group)
             raw isa AbstractVector || error(
                 "BRM backend lowering: grouping column `$group` must be a " *
                 "vector")
@@ -1792,7 +1809,7 @@ Base.@nospecializeinfer function _brm_simple_random_effect_plans(
             stratum_indices = Int[]
             group_strata = Int[]
             if !isnothing(by)
-                raw_strata = context.data[by]
+                raw_strata = _brm_group_values(context, by)
                 raw_strata isa AbstractVector || error(
                     "BRM backend lowering: stratum column `$by` must be a " *
                     "vector")
