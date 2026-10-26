@@ -77,8 +77,13 @@ function BRM._rk_slap_kernels(backend::BRM.RKBRMI, ports::Tuple, effects::Tuple,
         have, want, bound)
     values = prepare_want(ports)
     v0 = _rk_slap_tuple(Base.invokelatest(values, u0), length(ports))
+    # Reverse pullbacks of each parameter, prepared on first use: a model
+    # whose parameters are affine in the population coordinates never needs
+    # them. RK prepares AD for one WANT port at a time (ReactiveKernels snag
+    # `ad-pullback-push-6f576925`), so this is one sweep per parameter.
     reverse = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse, ad_backend))
-    pullbacks = map(ports, v0) do port, value
+    pullbacks = Ref{Any}(nothing)
+    prepare_pullbacks() = map(ports, v0) do port, value
         seed = value isa Number ? 0.0 : zeros(Float64, length(value))
         Base.invokelatest(prepare_ad_pullback, prepare_want(port), reverse, seed, u0;
             active=:unconstrained)
@@ -102,16 +107,17 @@ function BRM._rk_slap_kernels(backend::BRM.RKBRMI, ports::Tuple, effects::Tuple,
     end
     prior = BRM._rk_nlme_population_prior(backend, u0, ad_backend)
     pointwise = BRM._rk_pointwise_query(backend)
-    (; values, nports=length(ports), pullbacks, blocks, nomega=length(omega), prior,
-        pointwise)
+    (; values, nports=length(ports), pullbacks, prepare_pullbacks, blocks,
+        nomega=length(omega), prior, pointwise)
 end
 
 BRM._rk_slap_values(k, u::Vector{Float64}) =
     _rk_slap_tuple(Base.invokelatest(k.values, u), k.nports)
 
 function BRM._rk_slap_pullback(k, u::Vector{Float64}, cotangents)
+    k.pullbacks[] === nothing && (k.pullbacks[] = k.prepare_pullbacks())
     gradient = zeros(Float64, length(u))
-    for (pullback, seed) in zip(k.pullbacks, cotangents)
+    for (pullback, seed) in zip(k.pullbacks[], cotangents)
         gradient .+= Base.invokelatest(ad_pullback, pullback, seed, u)
     end
     gradient

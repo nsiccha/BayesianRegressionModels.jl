@@ -21,7 +21,12 @@
 #
 #     L(φ) = Σ_t ℓ_t(ψ̂_t) − |ẑ|²/2 + prior(φ) + Σ_i (d/2 log 2π − ½ log det h_i)
 #
-# and the gradient is one reverse sweep of ψ(φ) plus a d × d contraction:
+# and the gradient is (∂A/∂φ)ᵀ w plus a d × d contraction. For a regression
+# A is affine in φ (design-matrix products, factor effects, log of a sampled
+# shape), so ∂A/∂φ is constant data recovered once (`J`, verified at other
+# points like Z) and no AD runs per evaluation beyond the prior's gradient and
+# the d-dimensional draws maps; otherwise the RK parameters are evaluated and
+# pulled back per evaluation:
 #
 #     ∇L = (∂A/∂φ)ᵀ w + ⟨Γ, ∂M/∂φ⟩ + ∇prior,
 #     w_t = ℓ′_t + ½ τ_t + ℓ″_t C_t v_i,   τ_t,s = Σ_pq (C_t h_i⁻¹ C_tᵀ)_pq ℓ‴_t,pqs,
@@ -159,6 +164,14 @@ mutable struct BRMStructuredLaplaceProblem{K}
     Z::Matrix{Float64}
     # Coordinates that move M (random-effect scales and correlation factors).
     omega::Vector{Int}
+    # A(φ) = A0 + J (φ − φ0) when it is affine (`affine`): J by entry, rows
+    # `jptr[e]:jptr[e+1]-1` of (`jcol` population index, `jval`).
+    affine::Bool
+    φ0::Vector{Float64}
+    A0::Vector{Float64}
+    jptr::Vector{Int}
+    jcol::Vector{Int}
+    jval::Vector{Float64}
     # Warm start: the last converged modes and their factors.
     u::Vector{Float64}
     factors::Base.RefValue{Any}
@@ -293,11 +306,81 @@ function _brm_structured_laplace_problem(backend::RKBRMI, view::BRMNLMEView; ad_
     p = BRMStructuredLaplaceProblem(backend, view, population, view.coordinates[population],
         blocks, d, kernels, family, ys, trials, constant, entry, fill(true, length(family)),
         unit_terms, port, index,
-        link, fixed, zeros(d, length(port)), omega, copy(u0), Ref{Any}(nothing),
+        link, fixed, zeros(d, length(port)), omega, false, u0[population],
+        zeros(length(port)), Int[], Int[], Float64[], copy(u0), Ref{Any}(nothing),
         Float64(tol), Int(maxiter), 0, 0)
     _brm_slap_design!(p, u0)
+    _brm_slap_population_design!(p, u0)
     _brm_slap_verify!(p, u0, term_response, term_row)
     p
+end
+
+# J = ∂A/∂φ by unit steps from u0 (exact for an affine A), kept when A is
+# affine at two other population points; the random-effect scales and
+# correlations move only M, so their columns must be zero.
+function _brm_slap_population_design!(p::BRMStructuredLaplaceProblem, u0)
+    nψ = length(p.port)
+    base = copy(u0)
+    for block in p.blocks
+        base[block] .= 0.0
+    end
+    A0 = _brm_slap_psi!(zeros(nψ), p, _rk_slap_values(p.kernels, base))
+    columns = Vector{Vector{Float64}}(undef, length(p.population))
+    ψ = zeros(nψ)
+    for (j, k) in enumerate(p.population)
+        u = copy(base)
+        u[k] += 1.0
+        _brm_slap_psi!(ψ, p, _rk_slap_values(p.kernels, u))
+        columns[j] = ψ .- A0
+    end
+    jptr = [1]; jcol = Int[]; jval = Float64[]
+    for e in 1:nψ
+        for j in eachindex(columns)
+            v = columns[j][e]
+            v == 0.0 && continue
+            push!(jcol, j); push!(jval, v)
+        end
+        push!(jptr, length(jcol) + 1)
+    end
+    p.φ0 = base[p.population]
+    p.A0 = A0
+    p.jptr, p.jcol, p.jval = jptr, jcol, jval
+    rng = Random.Xoshiro(20261028)
+    affine = all(isfinite, A0) && all(all(isfinite, c) for c in columns)
+    for _ in 1:2
+        affine || break
+        u = copy(base)
+        u[p.population] .+= 0.3 .* randn(rng, length(p.population))
+        exact = _brm_slap_psi!(zeros(nψ), p, _rk_slap_values(p.kernels, u))
+        predicted = _brm_slap_affine_A(p, u[p.population])
+        affine = all(isapprox.(predicted, exact; rtol=1e-9, atol=1e-9))
+    end
+    p.affine = affine
+    p
+end
+
+function _brm_slap_affine_A(p::BRMStructuredLaplaceProblem, φ)
+    Δ = φ .- p.φ0
+    A = copy(p.A0)
+    @inbounds for e in eachindex(A)
+        for k in p.jptr[e]:(p.jptr[e + 1] - 1)
+            A[e] += p.jval[k] * Δ[p.jcol[k]]
+        end
+    end
+    A
+end
+
+# Jᵀ w over the population coordinates.
+function _brm_slap_affine_pullback(p::BRMStructuredLaplaceProblem, w)
+    g = zeros(length(p.population))
+    @inbounds for e in eachindex(w)
+        we = w[e]
+        we == 0.0 && continue
+        for k in p.jptr[e]:(p.jptr[e + 1] - 1)
+            g[p.jcol[k]] += p.jval[k] * we
+        end
+    end
+    g
 end
 
 # Every term's log density at two points, against RK's own pointwise
@@ -355,11 +438,16 @@ function _brm_slap_effect_maps(p::BRMStructuredLaplaceProblem, u)
         usyn[p.blocks[l][l]] = 1.0
     end
     value, tangents = _rk_slap_effects(p.kernels, usyn)
-    M = reduce(hcat, (_brm_slap_bvector(value, l) for l in 1:p.d))
-    dM = [reduce(hcat, (_brm_slap_bvector(t, l) for l in 1:p.d)) for t in tangents]
-    size(M) == (p.d, p.d) || _brm_nlme_error(
-        "brm_laplace_problem: internal: the effect blocks hold $(size(M, 1)) draws " *
+    columns(draws) = [_brm_slap_bvector(draws, l) for l in 1:p.d]
+    b = columns(value)
+    all(c -> length(c) == p.d, b) || _brm_nlme_error(
+        "brm_laplace_problem: internal: the effect blocks hold $(length(first(b))) draws " *
         "per unit, the view $(p.d)")
+    M = [b[l][k] for k in 1:p.d, l in 1:p.d]
+    dM = map(tangents) do t
+        bt = columns(t)
+        [bt[l][k] for k in 1:p.d, l in 1:p.d]
+    end
     M, dM
 end
 
@@ -500,8 +588,9 @@ function _brm_slap_mode!(p::BRMStructuredLaplaceProblem, φ::AbstractVector)
     for block in p.blocks
         uA[block] .= 0.0
     end
-    values = _rk_slap_values(p.kernels, uA)
-    A = _brm_slap_psi!(zeros(length(p.port)), p, values)
+    values = p.affine ? nothing : _rk_slap_values(p.kernels, uA)
+    A = p.affine ? _brm_slap_affine_A(p, φ) :
+        _brm_slap_psi!(zeros(length(p.port)), p, values)
     M, dM = _brm_slap_effect_maps(p, uA)
     c = M' * p.Z
     if !(all(isfinite, A) && all(isfinite, c))
@@ -639,8 +728,9 @@ function _brm_slap_value_and_gradient(p::BRMStructuredLaplaceProblem, state)
         end
     end
     # w is a cotangent on the link-scale entries; the RK values are natural.
-    cotangents = _brm_slap_cotangents(p, state.values, w)
-    gradient = _rk_slap_pullback(p.kernels, state.uA, cotangents)[p.population]
+    gradient = p.affine ? _brm_slap_affine_pullback(p, w) :
+        _rk_slap_pullback(p.kernels, state.uA,
+            _brm_slap_cotangents(p, state.values, w))[p.population]
     for (j, k) in enumerate(p.omega)
         gradient[findfirst(==(k), p.population)] += dot(Γ, state.dM[j])
     end
