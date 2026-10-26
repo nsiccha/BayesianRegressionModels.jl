@@ -414,9 +414,14 @@ gradients match fourth-order differences of the Laplace marginal. Laplace draws
 of a Gaussian unit match its exact conditional, and importance-resampled
 (`conditional = K`) Poisson unit draws match each unit's conditional mean and
 SD by quadrature. It also covers a unit density that is not concave
-everywhere, and the two kinds of population point that score `-Inf`. It needs
-ReactiveKernels with `prepare_ad_third` (the test pin) and runs in the test
-environment above.
+everywhere, and the two kinds of population point that score `-Inf`. Every
+oracle runs against both implementations, the row-structured
+`BRMStructuredLaplaceProblem` these models get by default and the whole-model
+`BRMLaplaceProblem` (`structured=false`); a panel of an NB2 count with
+correlated effects, an NB2 count with a shape predictor and a binomial share
+checks that the two agree in value and gradient, and a LogNormal model that
+only the whole-model path takes it. It needs ReactiveKernels with
+`prepare_ad_third` (the test pin) and runs in the test environment above.
 
 `start_values.jl` checks `brm_start`, initial values keyed by prior address,
 on both backends. For a correlated population-PK model, a linked predictor,
