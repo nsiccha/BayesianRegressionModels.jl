@@ -471,3 +471,20 @@ end
     @test density(reprocess(rk, design; resample_groups=(:lev,))) ≈
         density(reprocess(rkh, host_design; resample_groups=(:lev,))) atol=1e-10
 end
+
+@stestset "a replay that cannot evaluate a data-only assignment" begin
+    derived = @brm sites begin
+        sigma ~ Exponential(1)
+        tt = derived_shift(t)
+        mu ~ 1 + x + tt
+        y ~ Normal(mu, sigma)
+    end
+    replay = (; x=sites.x[1:5], y=sites.y[1:5])
+    message = try
+        reprocess(SBBRMI(derived; mod=@__MODULE__), replay)
+        ""
+    catch err
+        sprint(showerror, err)
+    end
+    @test occursin("cannot evaluate data-only assignment `tt`", message)
+end

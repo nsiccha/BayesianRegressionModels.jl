@@ -211,15 +211,39 @@ function _rk_check_replay_groupings(plan, groups::Set{Symbol}; prefix)
     end
 end
 
-# Replay data with each omitted response standing in as a `_BRMAbsentResponse`.
+# A replay value the backend could not compute from the replay rows. The
+# replay data lacks it, and reading it raises the cause.
+struct _BRMReplayFailure
+    message::String
+end
+
+# Replay data with some values supplied by the backend: an omitted response
+# standing in as a `_BRMAbsentResponse`, a resolved constant, or a data-only
+# assignment evaluated on the replay rows (`_BRMReplayFailure` when it cannot be).
 struct _BRMReplayData{D}
     data::D
-    absent::Dict{Symbol,Any}
+    values::Dict{Symbol,Any}
 end
-Base.hasproperty(d::_BRMReplayData, key::Symbol) =
-    haskey(getfield(d, :absent), key) || hasproperty(getfield(d, :data), key)
-Base.getproperty(d::_BRMReplayData, key::Symbol) = haskey(getfield(d, :absent), key) ?
-    getfield(d, :absent)[key] : getproperty(getfield(d, :data), key)
+function Base.hasproperty(d::_BRMReplayData, key::Symbol)
+    values = getfield(d, :values)
+    haskey(values, key) ? !(values[key] isa _BRMReplayFailure) :
+        hasproperty(getfield(d, :data), key)
+end
+function Base.getproperty(d::_BRMReplayData, key::Symbol)
+    values = getfield(d, :values)
+    haskey(values, key) || return getproperty(getfield(d, :data), key)
+    value = values[key]
+    value isa _BRMReplayFailure && error(value.message)
+    value
+end
+
+# Raise why the replay data lacks `key` when the backend could not compute it.
+_brm_raise_replay_failure(_data, _key::Symbol) = nothing
+function _brm_raise_replay_failure(d::_BRMReplayData, key::Symbol)
+    value = get(getfield(d, :values), key, nothing)
+    value isa _BRMReplayFailure && error(value.message)
+    nothing
+end
 
 # A frozen replay keeps each `car(area; edges=...)` term's fitted graph and reads
 # only `area`, so edge vectors the new data omits keep their fitted values. A

@@ -6350,23 +6350,8 @@ end
 # A replay's data with every data-only assignment of the model
 # (`_brm_resolve_data_assignments`) evaluated on its rows, so each record that
 # reads one by name reads its replay value. A constant it reads keeps its fitted
-# value on a frozen replay. An assignment the replay cannot evaluate raises only
-# where something reads it.
-struct _SBReplayAssignments{D}
-    data::D
-    values::Dict{Symbol,Any}
-end
-Base.hasproperty(d::_SBReplayAssignments, key::Symbol) =
-    haskey(getfield(d, :values), key) || hasproperty(getfield(d, :data), key)
-function Base.getproperty(d::_SBReplayAssignments, key::Symbol)
-    values = getfield(d, :values)
-    haskey(values, key) || return getproperty(getfield(d, :data), key)
-    value = values[key]
-    value isa Exception && error("sbimpl: reprocess: the replay data cannot evaluate ",
-        "data-only assignment `$key`: ", sprint(showerror, value))
-    value
-end
-
+# value on a frozen replay. An assignment the replay rows cannot evaluate is
+# absent from the replay data and raises its cause where something reads it.
 function _sb_replay_data(sb::SBBRMI, df, freeze::Bool)
     prefix = "sbimpl: reprocess"
     constants = Dict{Symbol,Any}()
@@ -6386,11 +6371,12 @@ function _sb_replay_data(sb::SBBRMI, df, freeze::Bool)
             node = _brm_rebind_value(last(getargs(parent(assignment), 2)), base)
             _brm_data_assignment_value(node, _BRMDataAssignments(prefix), Set{Symbol}())
         catch err
-            err
+            _BRMReplayFailure(string(prefix, ": the replay data cannot evaluate ",
+                "data-only assignment `", key, "`: ", sprint(showerror, err)))
         end
-        value === nothing || (values[key] = value)
+        (value isa _BRMReplayFailure || _brm_is_data_value(value)) && (values[key] = value)
     end
-    isempty(values) ? df : _SBReplayAssignments(df, values)
+    isempty(values) ? df : _BRMReplayData(df, values)
 end
 
 """
@@ -6596,6 +6582,7 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
                     _sb_df_column(new_df, k), masked[k], "sbimpl: reprocess: data column `$k`") :
                     _sb_df_column(new_df, k)
             else
+                _brm_raise_replay_failure(new_df, k)
                 error(
                     "sbimpl: reprocess: data key `$k` is a derived vector with no ",
                     "preprocessing record and is not a column of the new DataFrame. ",
