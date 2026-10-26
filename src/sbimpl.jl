@@ -9811,15 +9811,18 @@ function _sb_hyper_intercept_stmt(hyper, plan, cfg, spelling)
     _sb_gp_prior_stmt(nm.beta, cfg)
 end
 
-function _sb_hsgp_by_hyper_model(term_overrides, t, rho_plan, sigma_plan)
+function _sb_hsgp_by_hyper_model(term_overrides, t, rho_plan, sigma_plan,
+                                 level=nothing)
     body = Any[]
     _sb_hyper_param_stmts!(body, :length_scale, rho_plan)
     _sb_hyper_param_stmts!(body, :sd, sigma_plan)
     push!(body, :(S = brm_hsgp_by_hyper_S(
         PHI, omega2, group_idx, rho_vec, sigma_vec, rho_lower)))
+    _sb_hsgp_hyper_level_inputs!(body, level)
     push!(body, :(return rows_dot_product(S, beta[group_idx, :])))
-    base = StanBlocks.SlicModel(Expr(:block, body...), Dict{Symbol,Any}(),
-                                @__MODULE__)
+    base = _sb_hsgp_hyper_levels(
+        StanBlocks.SlicModel(Expr(:block, body...), Dict{Symbol,Any}(), @__MODULE__),
+        level)
     stmts = Any[]
     rho_cfg = _sb_term_cfg(term_overrides, t, :length_scale)
     isnothing(rho_cfg) || push!(stmts, _sb_hyper_intercept_stmt(
@@ -9832,6 +9835,20 @@ function _sb_hsgp_by_hyper_model(term_overrides, t, rho_plan, sigma_plan)
     isempty(stmts) && return base
     Base.merge(base, stmts...)
 end
+
+# The level weights of a hyper-predicted grouped HSGP with `cor=`, correlated as
+# in the shared-scale submodels before the per-group spectral scales multiply
+# them (src/level_correlation.jl, `_brm_check_hyper_level_correlation`). The
+# multigroup coherence reads the shared length scale as a per-axis `rho`, as
+# in `_sb_hsgp_by`.
+_sb_hsgp_hyper_levels(base, ::Nothing) = base
+_sb_hsgp_hyper_levels(base, ::_BRMLevelCorrelation) =
+    _sb_level_correlated_input(base, :beta)
+_sb_hsgp_hyper_levels(base, ::_BRMMultigroupCorrelation) =
+    _sb_multigroup_input(base, :beta)
+_sb_hsgp_hyper_level_inputs!(_body, ::Union{Nothing,_BRMLevelCorrelation}) = nothing
+_sb_hsgp_hyper_level_inputs!(body, ::_BRMMultigroupCorrelation) =
+    push!(body, :(rho = rep_vector(rho_iso, dims(omega2)[2])))
 
 # Ungrouped scalar variant: one predicted value, so four spliced statements
 # onto today's submodel — no generator, no duplication of the base.
@@ -12823,8 +12840,11 @@ end
 # The Stan value of a level correlation's lower Cholesky factor: the sampled
 # `LKJCholesky` declaration by name, or a data factor computed once in Julia
 # and replayed frozen, like a known `cor(:, ID) = R`.
-# The grouped-HSGP submodel and level arguments of a `cor=`: the constant
-# (ICM) correlation, or the frequency-dependent multigroup coherence.
+# The grouped-HSGP submodel and level arguments of a `cor=`: independent levels
+# (no `cor=`), the constant (ICM) correlation, or the frequency-dependent
+# multigroup coherence.
+_sb_hsgp_level_submodel(::Nothing, iso) = iso ? :_sb_hsgp_by : :_sb_hsgp_by_aniso
+_sb_hsgp_level_arguments!(_data, ::Nothing) = (;)
 _sb_hsgp_level_submodel(::_BRMLevelCorrelation, iso) =
     iso ? :_sb_hsgp_by_levelcor : :_sb_hsgp_by_aniso_levelcor
 _sb_hsgp_level_submodel(::_BRMMultigroupCorrelation, iso) =
@@ -14500,27 +14520,23 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         rho_plan = _sb_hyper_plan_for(hyper_plans, :length_scale)
         sigma_plan = _sb_hyper_plan_for(hyper_plans, :sd)
         level_cor = get(kw, :cor, nothing)
+        # `cor=` correlates the levels of `by` (src/level_correlation.jl).
+        lc = nothing
         if !isnothing(level_cor)
-            # `cor=` correlates the levels of `by` (src/level_correlation.jl).
             what = "hsgp($axes_suffix; by=$gname, cor=$(_brm_level_cor_label(level_cor)))"
-            (isnothing(rho_plan) && isnothing(sigma_plan)) || error(
-                "sbimpl: `$what` with hyper-predicted length scales or " *
-                "amplitudes is not implemented")
             lc = _brm_level_correlation(level_cor; what, prefix="sbimpl")
             _brm_check_level_correlation(lc, data[Symbol(:n_, gname)];
                                          what, group=gname, prefix="sbimpl")
+            _brm_check_hyper_level_correlation(lc, hyper_plans; what, prefix="sbimpl")
+        end
+        level_arguments = _sb_hsgp_level_arguments!(data, lc)
+        if isnothing(rho_plan) && isnothing(sigma_plan)
             submodel = _sb_gp_submodel_expr(_sb_hsgp_level_submodel(lc, iso),
                                             term_overrides, t)
             push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
                 submodel, term_overrides, t; PHI=PHI_name, omega2=omega2_name,
                 rho_lower=rho_lower_name, beta=info.block_name, group_idx=info.idx_name,
-                _sb_hsgp_level_arguments!(data, lc)...)))
-        elseif isnothing(rho_plan) && isnothing(sigma_plan)
-            submodel = _sb_gp_submodel_expr(
-                iso ? :_sb_hsgp_by : :_sb_hsgp_by_aniso, term_overrides, t)
-            push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
-                submodel, term_overrides, t; PHI=PHI_name, omega2=omega2_name,
-                rho_lower=rho_lower_name, beta=info.block_name, group_idx=info.idx_name)))
+                level_arguments...)))
         else
             iso || error("sbimpl: internal error — hyper-predictor reached " *
                          "aniso grouped emission (B1 should have refused it)")
@@ -14531,11 +14547,11 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
                 "sbimpl: internal error — hyper-predictor needs `$G_name`, " *
                 "which prepass 2.5 should have stashed")
             submodel = _sb_hsgp_by_hyper_model(
-                term_overrides, t, rho_plan, sigma_plan)
+                term_overrides, t, rho_plan, sigma_plan, lc)
             push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
                 submodel, term_overrides, t; PHI=PHI_name, omega2=omega2_name,
                 rho_lower=rho_lower_name, beta=info.block_name,
-                group_idx=info.idx_name, G=G_name)))
+                group_idx=info.idx_name, G=G_name, level_arguments...)))
         end
         return col_name
     end
