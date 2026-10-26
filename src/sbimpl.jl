@@ -3452,14 +3452,15 @@ _sb_orthogonalize_hsgp_linear(PHI::AbstractMatrix, x::AbstractVector{<:Real}) = 
 # data / parameters / model).
 # ==============================================================================
 
-# During resample-group re-emission, the new-data BRMI still has to be lowered
-# once to obtain the CV-contagious Stan body.  Frozen replay must make fitted
-# transform constants available to that lowering pass: otherwise an eager
-# constructor-time fit can reject perfectly valid prediction data before
-# `reprocess` gets a chance to apply the training constants (notably an HSGP
-# axis that is constant only on the future schedule).  Keep the frozen inputs
-# separate from the entries recorded by this pass so the shape comparison in
-# `_sb_resample_preproc` remains meaningful.
+# A covariate-resample re-emission lowers the new-data BRMI to obtain its Stan
+# body (a fresh group resample does too, unfrozen; a frozen group resample
+# re-emits the fitted BRMI itself).  Frozen replay must
+# make fitted transform constants available to that lowering pass: otherwise
+# an eager constructor-time fit can reject perfectly valid prediction data
+# before `reprocess` gets a chance to apply the training constants (notably an
+# HSGP axis that is constant only on the future schedule).  Keep the frozen
+# inputs separate from the entries recorded by this pass so the shape
+# comparison in `_sb_resample_preproc` remains meaningful.
 
 struct _SBPreprocContext
     recorded::Dict{Symbol,PreprocEntry}
@@ -3530,6 +3531,19 @@ function _sb_record_group_index!(data, idx_key::Symbol, n_groups_key::Symbol,
     levels = _sb_fit_levels(raw)
     _sb_record_preproc!(data, idx_key, PreprocEntry(
         :group_index, (; levels, n_groups_key), group, true))
+end
+
+# A stratified `gr(g, by=b)` index also records `b`'s strata and each level's
+# stratum, so a replay codes its rows into the fitted levels and keeps every
+# level in its fitted stratum.
+function _sb_record_group_index!(data, keys::NamedTuple, group::Symbol, by::Symbol,
+                                 raw::AbstractVector, by_raw::AbstractVector,
+                                 stratum_idx::AbstractVector{Int})
+    _sb_record_preproc!(data, keys.idx_name, PreprocEntry(:group_index,
+        (; levels=_sb_fit_levels(raw), n_groups_key=keys.n_name, by,
+           strata=_sb_fit_levels(by_raw), stratum_idx=collect(stratum_idx),
+           stratum_idx_key=keys.s_idx_name, n_strata_key=keys.n_strata_name),
+        group, true))
 end
 
 # Model-shape data that do not depend on dataframe rows (for example the
@@ -5611,33 +5625,51 @@ _sb_same_raw_ref(a::NamedTuple, b::NamedTuple) =
     keys(a) == keys(b) && all(
         ab -> _sb_same_raw_ref(ab...), zip(values(a), values(b)))
 
-function _sb_resample_preproc(training, fresh, groups)
-    # A consumer term's record is the re-emission's own call on the new frame,
-    # which the replay re-invokes; an artifact built before those records
+# The replay's preprocessing records: the fit's, except that each resampled
+# group's levels are those of `new_df` (its new levels are drawn, not looked
+# up). `template` is the re-emission with the groups cv-contagious; a record
+# it has that `training` lacks (or the reverse) means the re-emission is not
+# the fitted model's shape.
+function _sb_resample_preproc(training, template, groups, new_df)
+    # A consumer term's record is the template's own call, which the replay
+    # re-invokes on the new frame; an artifact built before those records
     # existed has none.
     training_keys = Set(k for (k, e) in training if e.kind !== :submodel_hook)
-    fresh_keys = Set(k for (k, e) in fresh if e.kind !== :submodel_hook)
-    training_keys == fresh_keys || error(
-        "sbimpl: resample replay: rebuilding on the new DataFrame changed the " *
-        "preprocessed model shape (training-only keys: " *
-        "$(sort!(collect(setdiff(training_keys, fresh_keys)))); new-only keys: " *
-        "$(sort!(collect(setdiff(fresh_keys, training_keys))))). Preserve fitted " *
-        "factor/design dimensions or build and fit a genuinely new model.")
+    template_keys = Set(k for (k, e) in template if e.kind !== :submodel_hook)
+    training_keys == template_keys || error(
+        "sbimpl: resample replay: the re-emission changed the preprocessed model " *
+        "shape (training-only keys: " *
+        "$(sort!(collect(setdiff(training_keys, template_keys)))); new-only keys: " *
+        "$(sort!(collect(setdiff(template_keys, training_keys))))). Preserve fitted " *
+        "factor/design dimensions, rebuild an SBBRMI built by an older " *
+        "BayesianRegressionModels, or build and fit a genuinely new model.")
     out = Dict{Symbol,PreprocEntry}()
     for key in training_keys
         old = training[key]
-        new = fresh[key]
+        new = template[key]
         (old.kind === new.kind && _sb_same_raw_ref(old.raw_ref, new.raw_ref)) || error(
             "sbimpl: resample replay: preprocessing record `$key` changed from " *
             "$(old.kind)/$(repr(old.raw_ref)) to " *
-            "$(new.kind)/$(repr(new.raw_ref)); the rebuilt formula is not the " *
+            "$(new.kind)/$(repr(new.raw_ref)); the re-emission is not the " *
             "fitted model.")
-        out[key] = old.kind === :group_index && old.raw_ref in groups ? new : old
+        out[key] = old.kind === :group_index && old.raw_ref in groups ?
+            _sb_resampled_group_index(old, new_df) : old
     end
-    for (key, e) in fresh
+    for (key, e) in template
         e.kind === :submodel_hook && (out[key] = e)
     end
     out
+end
+
+# A resampled group's `:group_index` record over the levels `df` names; the
+# replay codes its rows into them, and its effects are drawn for each.
+function _sb_resampled_group_index(e::PreprocEntry, df)
+    raw = _sb_df_column(df, e.raw_ref)
+    raw isa AbstractVector || error(
+        "sbimpl: reprocess: random-effects grouping column `$(e.raw_ref)` " *
+        "must be a vector, got $(typeof(raw))")
+    PreprocEntry(:group_index, (; levels=_sb_fit_levels(raw),
+                 n_groups_key=e.const_.n_groups_key), e.raw_ref, true)
 end
 
 function _sb_assert_cv_reemission(sb::SBBRMI, groups)
@@ -5653,6 +5685,12 @@ function _sb_assert_cv_reemission(sb::SBBRMI, groups)
             entry isa PreprocEntry || continue
             entry.kind === :group_index || continue
             entry.raw_ref === group || continue
+            haskey(entry.const_, :by) && error(
+                "sbimpl: `resample_groups=[:$group]` reaches the stratified " *
+                "`gr($group, by=$(entry.const_.by))` random-effect block " *
+                "`$(d.target)`. Stratified, multi-membership, grouped-HSGP, and " *
+                "derived-scale R2D2 blocks are not supported by this " *
+                "new-population emission.")
             push!(hits, d)
         end
         isempty(hits) && error(
@@ -5714,15 +5752,22 @@ function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool, held_o
         "`cv_groups`) that cannot be inferred from SBBRMI. Rebuild the ordinary " *
         "fit artifact, then request `resample_groups` from it.")
 
-    # The replay's own `held_out` is applied to the replay data by the final
-    # `reprocess`, not by the template.
-    rebound = _sb_rebind_brmi(sb.parent, new_df)
+    # The template is the program the replay binds `new_df` to, with `groups`
+    # cv-contagious. Frozen, it is the fitted model itself, re-emitted from the
+    # fitted BRMI: the fitted design, and every response the fit observed in
+    # the fit's lowering, so a response `new_df` lacks is predicted given the
+    # fit (a forecast). Fresh, it is the model a fit on `new_df` would build,
+    # the formula rebound to `new_df` (its design follows `new_df`'s levels;
+    # without a response that is the prior program, which `reprocess` refuses
+    # to forecast with). The final `reprocess` binds `new_df`, the replay's own
+    # `held_out` and the forecast marks.
     cv_template = SBBRMI(
-        rebound; mod=sb.model.mod, cv_groups=groups,
+        freeze ? sb.parent : _sb_rebind_brmi(sb.parent, new_df);
+        mod=sb.model.mod, cv_groups=groups,
         held_out=(), total_groups=(), s2z_groups=(),
         _frozen_preproc=freeze ? sb.preproc : nothing)
     _sb_assert_cv_reemission(cv_template, groups)
-    preproc = _sb_resample_preproc(sb.preproc, cv_template.preproc, groups)
+    preproc = _sb_resample_preproc(sb.preproc, cv_template.preproc, groups, new_df)
     hybrid = SBBRMI(cv_template.parent, cv_template.model, cv_template.data, preproc,
                     Set{Symbol}(), cv_template.bindings)
     prepared = reprocess(hybrid, new_df; freeze_constants=freeze, held_out)
@@ -5739,6 +5784,37 @@ function _sb_reprocess_masked_axes(sb::SBBRMI, df)
             [(name(m), _sb_df_column(df, name(m))) for m in masks])
     end
     out
+end
+
+# The stratum data of a stratified `gr(g, by=b)` index whose replay rows `idx`
+# codes. Frozen, every level keeps its fitted stratum (a replay row placing its
+# level in another stratum is refused); fresh, the strata are `df`'s. Writes
+# the stratum keys and returns the record's stratum fields.
+function _sb_reprocess_strata!(new_data, handled, e::PreprocEntry, idx, df, freeze::Bool)
+    (; by, stratum_idx_key, n_strata_key) = e.const_
+    by_raw = _sb_df_column(df, by)
+    by_raw isa AbstractVector || error(
+        "sbimpl: reprocess: stratum column `$by` of `gr($(e.raw_ref), by=$by)` " *
+        "must be a vector, got $(typeof(by_raw))")
+    strata = freeze ? e.const_.strata : _sb_fit_levels(by_raw)
+    by_idx = _sb_apply_group_levels(strata, by_raw, by)
+    stratum_idx = if freeze
+        fitted = e.const_.stratum_idx
+        for (row, (level, stratum)) in enumerate(zip(idx, by_idx))
+            fitted[level] == stratum || error(
+                "sbimpl: reprocess: `gr($(e.raw_ref), by=$by)`: row $row puts level ",
+                "`$(e.const_.levels[level])` in stratum `$(strata[stratum])`, but the ",
+                "fit has it in stratum `$(strata[fitted[level]])`. A level's stratum is ",
+                "part of the fitted model; rebuild to fit a different stratification.")
+        end
+        fitted
+    else
+        _sb_stratum_idx(idx, by_idx, e.raw_ref, by)
+    end
+    new_data[stratum_idx_key] = stratum_idx
+    new_data[n_strata_key] = length(strata)
+    push!(handled, stratum_idx_key, n_strata_key)
+    (; by, strata, stratum_idx, stratum_idx_key, n_strata_key)
 end
 
 function _sb_reprocess_column_length(df, column, what)
@@ -5845,11 +5921,15 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         levels = freeze ? e.const_.levels : isempty(joint) ? _sb_fit_levels(raw) :
             _brm_joint_levels([c => _sb_df_column(df, c) for c in joint.columns];
                               id=joint.id, prefix="sbimpl: reprocess")
-        new_data[key] = _sb_apply_group_levels(levels, raw, e.raw_ref)
+        idx = _sb_apply_group_levels(levels, raw, e.raw_ref)
+        new_data[key] = idx
         new_data[e.const_.n_groups_key] = length(levels)
         push!(handled, e.const_.n_groups_key)
+        strata = haskey(e.const_, :by) ?
+            _sb_reprocess_strata!(new_data, handled, e, idx, df, freeze) : (;)
         new_preproc[key] = PreprocEntry(
-            :group_index, (; levels, n_groups_key=e.const_.n_groups_key, joint...),
+            :group_index, (; levels, n_groups_key=e.const_.n_groups_key, joint...,
+                           strata...),
             e.raw_ref, true)
     elseif e.kind === :ranef_factor_dummy
         source = _sb_factor_source_column(e.raw_ref)
@@ -6332,10 +6412,12 @@ of a naive per-column `sb.model(; col=…)` rebind is avoided. Returns a NEW
   `new_df`, then apply.
 - `resample_groups=()` (default): retain the fitted random-effect coordinates.
   Naming one or more ordinary grouping factors (for example `[:subject]`)
-  re-emits the BRMI with cv-contagious sizing, derives those groups' levels
-  from `new_df`, and marks their indices so their standardized effects are
-  re-drawn in generated quantities from the fitted covariance. Predictor
-  constants remain frozen unless `freeze_constants=false` is also requested.
+  re-emits the model with cv-contagious sizing for them (the fitted model; with
+  `freeze_constants=false`, the formula rebuilt on `new_df`), derives those
+  groups' levels from `new_df`, and marks their indices so their standardized
+  effects are re-drawn in generated quantities from the fitted covariance.
+  Predictor constants remain frozen unless `freeze_constants=false` is also
+  requested.
   This changes Stan source by construction; it is the new-population/CV twin
   of the default same-group replay.
 - `resample_covariates=()` (default): retain fitted covariate completions.
@@ -6359,9 +6441,12 @@ of a naive per-column `sb.model(; col=…)` rebind is avoided. Returns a NEW
   name and is shaped by the other arguments (`segments` for a ragged response),
   and the program has no `y` input and no `y_likelihood`. Its descriptor offers
   `:predict`, and `:fit` only while another response stays bound. This covers
-  top-level, plate-cell and grouped (`y[rows[i]]`) responses. A joint
-  (`MvNormalCholesky`) response, and a forecast together with `resample_groups`
-  or `resample_covariates`, are not supported yet and error.
+  top-level, plate-cell and grouped (`y[rows[i]]`) responses, also together
+  with `resample_groups` (rows of groups the fit never saw; frozen
+  preprocessing). A joint (`MvNormalCholesky`) response, and a forecast
+  together with `resample_covariates` or with `resample_groups` under
+  `freeze_constants=false` (both rebuild the program from the formula), are
+  not supported and error.
 
 Covered: the Julia-side transforms (`zscale`/`standardize`/`center`/`factor`/
 `mo`/`s`/`t2`/`gp`/`hsgp`), interval-censored predictor splits,
@@ -6381,8 +6466,9 @@ derived non-vector key with no preprocessing record is carried through
 when the replay DataFrame supplies its raw column; StanBlocks then retraces the
 derived carrier (for example a vector-of-vectors column becomes the ragged
 `mem`/`ends` data). Frozen replay errors loudly on an unseen fitted level.
-Stratified `gr(g, by=b)` group-index replay remains correct-or-loud unsupported
-rather than silently copying stale structure.
+A stratified `gr(g, by=b)` block replays its rows into the fitted levels, each
+level in its fitted stratum (a row placing a level in another stratum is
+refused); drawing new levels of one (`resample_groups`) is not supported.
 """
 function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
                    resample_groups=(),resample_covariates=(),
@@ -6392,20 +6478,25 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
     covariates = union(_sb_existing_covariates(sb.preproc),
         _sb_covariate_selection(sb.parent,resample_covariates))
     isempty(covariates) || union!(groups,_sb_covariate_resample_groups(sb.preproc))
-    # Both re-emissions below rebuild the program from the formula on `new_df`;
-    # without the response that is the prior program, not a forecast.
-    if !(isempty(covariates) && isempty(groups))
+    # The covariate re-emission, and a fresh (`freeze_constants=false`) group
+    # resample, rebuild the program from the formula on `new_df`; without the
+    # response that is the prior program, not a forecast. (A frozen
+    # `resample_groups` re-emits the fitted model, so it forecasts.)
+    if !isempty(covariates) || (!freeze_constants && !isempty(groups))
         # A covariate selected for `resample_covariates` is re-drawn there.
         absent = sort!([c for k in _sb_absent_responses(sb, new_df)
                         for c in _sb_response_columns(sb, k)
                         if !_sb_df_has_column(new_df, c) && !(c in covariates)])
+        how = isempty(covariates) ?
+            "`resample_groups` with `freeze_constants=false` rebuilds" :
+            "`resample_covariates` re-emits"
         isempty(absent) || error(
             "sbimpl: reprocess: the new data lacks response(s) `", join(absent, "`, `"),
             "`, so this replay would predict them given the fit (a forecast), but ",
-            "`resample_groups` / `resample_covariates` re-emit the program from the ",
-            "formula, which without the response is the prior program. A forecast ",
-            "with resampled groups or covariates is not supported yet (todo `1fnt1zu`); ",
-            "replay without `resample_groups` / `resample_covariates`, or include the response.")
+            how, " the program from the formula on the new data, which without the ",
+            "response is the prior program. A forecast with resampled covariates is ",
+            "not supported yet (todo `1fnt1zu`); a forecast with `resample_groups` keeps ",
+            "the fitted design (`freeze_constants=true`). Otherwise include the response.")
     end
     isempty(covariates) || return _sb_reprocess_covariates(
         sb,new_df,covariates,groups,freeze_constants,held_out)
@@ -10946,6 +11037,9 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::Tuple{NamedCo
     data[n_name]      = n_groups
     data[s_idx_name]  = stratum_idx
     data[n_strata_nm] = n_strata
+    _sb_record_group_index!(data, (; idx_name, n_name, s_idx_name,
+                                   n_strata_name=n_strata_nm),
+                            g, b, parent(g_backing), parent(b_backing), stratum_idx)
     r_name = Symbol(:r_, target, :_, suffix)
     col_exprs = Any[]
     for t in gterms
@@ -13070,7 +13164,10 @@ function _sb_ensure_group_data!(data, g::Tuple{NamedColumn,NamedColumn})
     _sb_set_group_index_datum!(data, n_name, n_groups, gname)
     _sb_set_group_index_datum!(data, s_idx_name, stratum_idx, gname)
     _sb_set_group_index_datum!(data, n_strata_name, n_strata, gname)
-    (; idx_name, n_name, s_idx_name, n_strata_name)
+    keys = (; idx_name, n_name, s_idx_name, n_strata_name)
+    _sb_record_group_index!(data, keys, gname, bname, parent(g_backing),
+                            parent(b_backing), stratum_idx)
+    keys
 end
 
 # Emit the per-sub-formula reference to a pre-emitted ID bucket: slice the

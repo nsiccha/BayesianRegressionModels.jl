@@ -231,10 +231,45 @@ end
     @test !occursin("y_likelihood", BRM.stan_code(forecast))
     @test BRM.stan_data(forecast)[scaled] == BRM.stan_data(fit)[scaled]
     @test length(generated_draws(forecast, "y_gen")) == 12
-    # A forecast that also re-draws new subjects is not built yet: both
-    # re-emissions rebuild the program from the formula, which without the
-    # response is the prior program (todo `1fnt1zu`).
-    @test_broken !isnothing(reprocess(fit, grid; resample_groups=[:subject]))
+end
+
+@testset "a forecast that re-draws new subjects" begin
+    # `resample_groups` re-emits the fitted model with `subject` cv-contagious,
+    # so the response the rows lack stays predicted given the fit; the formula
+    # rebuilt on rows without it would be the prior program (todo `1fnt1zu`).
+    fit = SBBRMI(decay(decay_window); mod=@__MODULE__, total_groups=())
+    scaled = only(k for (k, e) in fit.preproc if e.kind === :zscale)
+    future = (; subject=[:a, :d], wt=[60.0, 120.0],
+        t=[collect(0.5:0.5:3.0), collect(0.5:0.5:4.0)])
+    forecast = reprocess(fit, future; resample_groups=[:subject])
+    code = BRM.stan_code(forecast)
+    @test forecast.held_out == Set([:y])
+    @test !occursin(r"\by\b", stan_block(code, "data"))
+    @test !occursin("y_likelihood", code)
+    # same program as scoring placeholder responses for the new subjects,
+    # minus the placeholders
+    placeholders = reprocess(fit, merge(future, (; y=[zeros(6), zeros(8)]));
+        resample_groups=[:subject], held_out=:y)
+    for block in ("parameters", "model")
+        @test stan_block(code, block) == stan_block(BRM.stan_code(placeholders), block)
+    end
+    @test occursin("r_log_k_subject_xi = std_normal_vector_rng", code)
+    # `zscale(wt)` keeps the window's mean 75 and SD 15
+    @test BRM.stan_data(forecast)[scaled] == [-1.0, 3.0]
+    @test BRM.stan_data(forecast)[:subject_idx] == [1, 2]
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    y_gen = generated_draws(forecast, "y_gen")
+    @test length(y_gen) == 14 && all(isfinite, y_gen)
+    d = brm_descriptor(forecast)
+    @test :predict in operation_names(d)
+    @test :fit ∉ operation_names(d)
+    @test :y ∉ required_brm_inputs(d)
+    @test brm_output(d, :y).segments == [6, 14]
+    # Not built: with `freeze_constants=false` the resample rebuilds the program
+    # from the formula on the rows, which without `y` is the prior program
+    # (todo `1fnt1zu`).
+    @test_broken !isnothing(reprocess(fit, future; resample_groups=[:subject],
+                                      freeze_constants=false))
 end
 
 const grouped_response = @brm begin
