@@ -404,6 +404,10 @@ _brmd_builtin_call(::StanBlocks.SlicModel,c)=BRMDescriptionFragment(covers=(c.id
 # Only BRM-generated vector priors decompose; other value families stay gaps.
 _brmd_builtin_call(::StanBlocks.ValueFamily,c)=isempty(_brmd_coordinates(c)) ? nothing :
     _brmd_coordinatewise_fragment(c)
+# `x[1:n] .~ Family.(...)` (`_brm_vector_prior(n, law)`): one element law,
+# itself a described component, shared by every coordinate.
+_brmd_builtin_call(::typeof(_brm_vector_prior),c)=BRMDescriptionFragment(
+    prose=(_brmd_text(c,:vector_prior),),covers=(c.id,))
 # `vcat` is SLIC's block-wise prior family, decomposing the same way, or,
 # outside distribution position, value concatenation (`_brmd_distribution`).
 _brmd_builtin_call(::typeof(vcat),c)=!isempty(_brmd_coordinates(c)) ? _brmd_coordinatewise_fragment(c) :
