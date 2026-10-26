@@ -498,3 +498,19 @@ end
     end
     @test occursin("cannot evaluate data-only assignment `tt`", message)
 end
+
+# A function with only a Stan definition has no Julia method for the data, so
+# its assignment stays a model value that Stan computes.
+StanBlocks.@deffun derived_stan_shift(x::vector[n])::vector[n] = x + rep_vector(0.5, n)
+
+@stestset "a Stan-only function keeps its assignment a model value" begin
+    model = @brm sites begin
+        sigma ~ Exponential(1)
+        tt = derived_stan_shift(t)
+        mu ~ 1 + x
+        y ~ Normal(mu + tt, sigma)
+    end
+    sb = SBBRMI(model; mod=@__MODULE__)
+    @test occursin("derived_stan_shift(t)", sprint(show, stan_code(sb)))
+    @test !haskey(stan_data(sb), :tt)
+end
