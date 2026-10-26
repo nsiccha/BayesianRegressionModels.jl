@@ -10620,6 +10620,10 @@ function _sb_emit_ranefs!(stmts, data, target::Symbol, ran_terms, summands;
                               cv_groups, centered_groups, r2d2_scale, term_overrides,
                               description_predictor=brmi_key)
     end
+    # Slices that read one grouping index share one product
+    # (`_sb_emit_id_ranef_slices!`), in the order their first bucket appears.
+    slices_by_index = Dict{Symbol,Vector{Any}}()
+    index_order = Symbol[]
     for k in id_keys_seen
         gterms = id_terms_by_bucket[k]
         isempty(gterms) && error("sbimpl: ranef `(… | $(k[1]) | $(k[2]))` has no terms after dropping `0`")
@@ -10629,8 +10633,13 @@ function _sb_emit_ranefs!(stmts, data, target::Symbol, ran_terms, summands;
         # here beyond slicing it per sub-formula.
         info = get(id_lookup, (brmi_key, k), nothing)
         info === nothing && error("sbimpl: internal — no pre-emitted bucket for (target=$brmi_key, id=$(k[1]), group=$(k[2]))")
-        _sb_emit_id_ranef_block!(stmts, data, target, info, gterms, summands;
-                                 term_overrides)
+        haskey(slices_by_index, info.idx_name) ||
+            (push!(index_order, info.idx_name); slices_by_index[info.idx_name] = Any[])
+        push!(slices_by_index[info.idx_name], (info, gterms))
+    end
+    for idx_name in index_order
+        _sb_emit_id_ranef_slices!(stmts, data, target, slices_by_index[idx_name],
+                                  summands; term_overrides)
     end
 end
 
@@ -12858,6 +12867,51 @@ function _sb_emit_id_ranef_block!(stmts, data, target::Symbol, info, gterms, sum
         push!(stmts, :($Z_name = $(Expr(:call, :hcat, col_exprs...))))
         push!(stmts, :($r_name = rows_dot_product($Z_name, $bucket_name[$idx_name, $col_idx_name])))
     end
+    push!(summands, r_name)
+end
+
+# Several `|ID|` slices one sub-formula reads through the SAME grouping index
+# add up as ONE product per row. Each term of an addressed `(… || g)` is its own
+# one-margin bucket, and `(1 | a | g) + (x | b | g)` reads two:
+#
+#     sum_b rows_dot_product(Z_b, B_b[idx, cols_b])
+#       == rows_dot_product(hcat(Z_b...), hcat(B_b[:, cols_b]...)[idx, :])
+#
+# Emitted slice by slice, every term gathered, scaled and summed its own per-row
+# vector, so the gradient's per-row work grew with the number of terms (snag
+# `uncorrelated-gro-ce63c15a`: 42 `||` terms over 43,796 rows). Here the
+# per-level effects (`n_groups x K`, small) are put side by side and gathered
+# once. The buckets, their coordinates and their descriptor outputs are those of
+# the separate slices; only the order of the per-row sum changes.
+function _sb_emit_id_ranef_slices!(stmts, data, target::Symbol, slices, summands;
+                                   term_overrides=Dict{Symbol,Any}())
+    if length(slices) == 1
+        info, gterms = only(slices)
+        return _sb_emit_id_ranef_block!(stmts, data, target, info, gterms, summands;
+                                        term_overrides)
+    end
+    idx_name = first(slices)[1].idx_name
+    col_exprs = Any[]
+    effects = Any[]
+    for (info, gterms) in slices
+        (; bucket_name, cols, suffix) = info
+        n_before = length(col_exprs)
+        for t in gterms
+            _sb_ranef_cols!(col_exprs, data, stmts, t, gterms;
+                            group_idx=idx_name, term_overrides, target)
+        end
+        length(col_exprs) - n_before == length(cols) ||
+            error("sbimpl: id-bucket `$suffix` for target `$target`: expanded $(length(col_exprs) - n_before) columns but reserved $(length(cols)) — internal mismatch")
+        append!(effects, (:($bucket_name[:, $c]) for c in cols))
+    end
+    s = String(idx_name)
+    stem = Symbol(endswith(s, "_idx") ? s[1:(end - 4)] : s, :__joint)
+    Z_name = Symbol(:Z_, target, :_, stem)
+    E_name = Symbol(:E_, target, :_, stem)
+    r_name = Symbol(:r_, target, :_, stem)
+    push!(stmts, :($Z_name = $(Expr(:call, :hcat, col_exprs...))))
+    push!(stmts, :($E_name = $(Expr(:call, :hcat, effects...))))
+    push!(stmts, :($r_name = rows_dot_product($Z_name, $E_name[$idx_name, :])))
     push!(summands, r_name)
 end
 

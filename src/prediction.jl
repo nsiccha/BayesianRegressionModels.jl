@@ -970,10 +970,11 @@ end
 
 # Julia-side fresh standardised draws survive ONLY where no StanBlocks
 # generated-quantities re-draw exists: stratified `gr(g, by=b)` blocks
-# (`by !== nothing`), typed `mm(...)` blocks (`group isa Tuple`), plain
+# (`by !== nothing`), typed `mm(...)` blocks (`group isa Tuple`) and plain
 # (non-bucket) R2D2 blocks (whose cv sizing is unbuilt — the bucket R2D2
-# sibling IS cv-contagious), and zerocorr `||` synthetic `__nocor__` margins
-# (whose emission never sees the user's `cv_groups` spelling). Every other
+# sibling IS cv-contagious). A `(… || g)` term is a one-margin `|ID|` block on
+# the real column `g` (src/grouping_addresses.jl), which `cv_groups` reaches
+# like any other. Every other
 # NON-CENTERED conventional block re-draws Stan-side via `reprocess(...;
 # resample_groups=...)`, so fresh levels there are refused with the route
 # (decision 2026-09-18T13-47-28-143-1umq4k7). CENTERED blocks are exempt:
@@ -984,8 +985,7 @@ const _RANEF_NO_GQ_FAMILIES = (:ranef_intercept_r2d2, :ranef_correlated_r2d2)
 
 _ranef_fresh_draws_refused(bt::RanefBlock) =
     bt.noncentered && bt.by === nothing && bt.group isa Symbol &&
-    !(bt.family in _RANEF_NO_GQ_FAMILIES) &&
-    isnothing(match(_RANEF_NOCOR_RE, String(bt.group)))
+    !(bt.family in _RANEF_NO_GQ_FAMILIES)
 
 function _ranef_fresh_refusal(bt::RanefBlock, fresh::Bool, new_levels)
     reasons = String[]

@@ -71,17 +71,17 @@ end
     block = only(BRM.s2z_effect_blocks(sb))
     @test block.design ≈ hcat(ones(6), df.x)
     code = BRM.stan_code(pilot)
-    @test occursin("r_mu_g__nocor__1_log_scale", code)
-    @test occursin("r_mu_g__nocor__2_tau", code)
+    @test occursin("b_mu__g__nocor__1_g_tau ~ lognormal(0.0, 1.0);", code)
+    @test occursin("b_mu__g__nocor__2_g_tau", code)
     # Name-based (not positional) carrier lookup: decoy column first.
-    names = ["decoy_param", "r_mu_g__nocor__1_log_scale", "r_mu_g__nocor__2_tau.1"]
+    names = ["decoy_param", "b_mu__g__nocor__1_g_tau.1", "b_mu__g__nocor__2_g_tau.1"]
     taus1 = [0.5, 1.0, 2.0]
     taus2 = [0.25, 2.0, 4.0]
     draws = hcat(zeros(3), log.(taus1), log.(taus2))
     prec = fill(1.5, 3, 6)
     sel = BRM.select_s2z_rho(sb, pilot, draws, names; obs_prec=prec, group=:g)
     @test sel.carriers ==
-        ["r_mu_g__nocor__1_log_scale", "r_mu_g__nocor__2_tau.1"]
+        ["b_mu__g__nocor__1_g_tau.1", "b_mu__g__nocor__2_g_tau.1"]
     @test sel.sd ≈ [1.0, 2.0]
     # Median-of-three with ordered taus: output equals the single-draw
     # kernel candidate at the median draw. Kernel is the oracle here; the
@@ -102,7 +102,7 @@ end
     pilot = SBBRMI(normal_builder()(SEL_DATA); total_groups=())
     sb = SBBRMI(normal_builder()(SEL_DATA);
         s2z_groups=[:g], s2z_rho=0.5, total_groups=())
-    names = ["r_mu_g__nocor__1_log_scale", "r_mu_g__nocor__2_tau.1"]
+    names = ["b_mu__g__nocor__1_g_tau.1", "b_mu__g__nocor__2_g_tau.1"]
     draws = repeat([0.0 0.0], 2, 1)
     prec = fill(1.0, 2, 6)
     @test_throws ArgumentError BRM.select_s2z_rho(sb, pilot, draws, names;
@@ -138,7 +138,7 @@ end
     pilot = SBBRMI(normal_builder()(SEL_DATA); total_groups=())
     sb = SBBRMI(normal_builder()(SEL_DATA);
         s2z_groups=[:g], s2z_rho=0.5, total_groups=())
-    names = ["r_mu_g__nocor__1_log_scale", "r_mu_g__nocor__2_tau.1"]
+    names = ["b_mu__g__nocor__1_g_tau.1", "b_mu__g__nocor__2_g_tau.1"]
     draws = [log(0.5) log(1.5); log(1.0) log(2.0); log(2.0) log(2.5)]
     prec = fill(1.5, 3, 6)
     sel = BRM.select_s2z_rho(sb, pilot, draws, names; obs_prec=prec, group=:g)

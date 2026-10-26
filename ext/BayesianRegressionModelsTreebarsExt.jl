@@ -18,5 +18,7 @@ BRM._brm_enter_phase(f, phase::ProgressNode) = Treebars.with_prepared_progress(f
 BRM._brm_throw_if_interrupted(node::ProgressNode) = Treebars.throw_if_interrupted(node)
 BRM._brm_interrupt_requested(node::ProgressNode) = Treebars.interrupt_requested(node)
 BRM._brm_reuse_phase!(phase::ProgressNode) = (Treebars.reuse_progress!(phase); nothing)
+BRM._brm_update_progress!(node::ProgressNode, message) =
+    (Treebars.update_progress!(node, message); nothing)
 
 end

@@ -1,11 +1,12 @@
 # test/ranef_zerocorr.jl — `||` (zerocorr) uncorrelated random-effect blocks,
 # with the drop-intercept `0` marker.
 #
-# `(t1 + t2 + … || g)` expands into one INDEPENDENT `(t_i | g__nocor__i)` scalar
-# ranef per term (no shared correlation). The intercept-suppressing `0` in
-# `(0 + x || g)` is the standard formula-language drop-intercept marker and
-# contributes NO term, so the expander must drop it BEFORE splitting into
-# per-term nocor groups — exactly as the correlated `|` path drops `0` in
+# `(t1 + t2 + … || g)` lowers as one INDEPENDENT one-margin block per term (no
+# shared correlation), each under its generated `|lp__g__nocor__i|` ID on the
+# real grouping column `g` (src/grouping_addresses.jl). The intercept-suppressing
+# `0` in `(0 + x || g)` is the standard formula-language drop-intercept marker
+# and contributes NO term, so it is dropped BEFORE the split into per-term
+# blocks — exactly as the correlated `|` path drops `0` in
 # `_sb_collect_terms!(::Int)`.
 #
 # Regression: before `ac2db5b` the `0` claimed its own empty `g__nocor__1`
@@ -31,25 +32,23 @@ const zc_df = (; x=[-1.0, 0.5, 2.0, 0.25], g=[2, 1, 2, 3], y=[0.2, 1.1, -0.4, 0.
         mu ~ 1 + x + (0 + x || g)
         y ~ Normal(mu, 1.0)
     end
-    cor = @brm begin
-        mu ~ 1 + x + (0 + x | g)
+    twin = @brm begin
+        mu ~ 1 + x + (x | mu__g__nocor__1 | g)
         y ~ Normal(mu, 1.0)
     end
 
     zc_code  = codeof(zc, zc_df)
-    cor_code = codeof(cor, zc_df)
 
     # The bug was a hard error at emission — the lone slope now transpiles.
     @test stanc_ok(zc_code)
     @test !occursin("lkj_corr_cholesky", zc_code)
-    # The dropped `0` claims NO group: exactly ONE synthetic nocor group, not a
-    # spurious empty second one.
+    # The dropped `0` claims NO block: exactly ONE nocor block, not a spurious
+    # empty second one.
     @test occursin("g__nocor__1", zc_code)
     @test !occursin("g__nocor__2", zc_code)
-    # Correlation is vacuous with a single term, so the lone `||` slope emits
-    # Stan byte-identical to the single-term correlated `|` modulo the synthetic
-    # group name.
-    @test replace(zc_code, "g__nocor__1" => "g") == cor_code
+    # Correlation is vacuous with a single term: the lone `||` slope is the
+    # one-margin `|ID|` block it lowers under, written by hand.
+    @test zc_code == codeof(twin, zc_df)
 end
 
 @testset "multi-term `||` still splits into independent nocor groups" begin
@@ -73,19 +72,17 @@ end
     sb = SBBRMI(zerocorr(zc_df); mod=@__MODULE__, total_groups=())
     blocks = ranef_blocks(sb)
     @test length(blocks) == 2
-    @test [b.family for b in blocks] == [:ranef_intercept, :ranef_slope]
+    # The lone intercept keeps its LogNormal(0, 1) scale (the configured-scale
+    # family), the slope its half-normal one.
+    @test [b.family for b in blocks] == [:ranef_correlated_draws_generic, :ranef_correlated_draws]
+    @test [b.id for b in blocks] == [:mu__g__nocor__1, :mu__g__nocor__2]
     @test [b.group for b in blocks] == [:g, :g]
     @test all(b -> b.n_terms == 1 && b.n_groups == 3, blocks)
     @test all(b -> b.levels == [1, 2, 3], blocks)
     unc = String[]
     for b in blocks
-        if b.family === :ranef_intercept
-            push!(unc, "$(b.binding)_log_scale")
-            append!(unc, ["$(b.binding)_xi.$g" for g in 1:3])
-        else
-            push!(unc, "$(b.binding)_tau.1")
-            append!(unc, ["$(b.binding)_xi.$g" for g in 1:3])
-        end
+        push!(unc, "$(b.binding)_tau.1")
+        append!(unc, ["$(b.binding)_z_flat.$g" for g in 1:3])
     end
     adaptive = adaptive_centering_blocks(sb, unc)
     @test length(adaptive) == 2
