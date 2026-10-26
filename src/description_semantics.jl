@@ -290,7 +290,9 @@ function _brmd_resolve_alias(x::BRMDescriptionReference,bindings,seen=())
     _brmd_resolve_alias(value,bindings,(seen...,x.name))
 end
 
-function _brmd_value(x::ExprColumn{typeof(kernel)},env,id)
+# The scope of a kernel cell `owner`: its formals bound to its arguments, its
+# `=` locals, and the authored `@plate` it was written as (`_brmd_plate`).
+function _brmd_cell_environment(x::ExprColumn{typeof(kernel)},env,id;owner=env.provenance.owner)
     raw=getargs(x)
     lambda=_brm_inline_expr(first(raw))
     outer=Tuple(_brmd_value(a,env,(id...,:argument,i)) for (i,a) in enumerate(raw[2:end]))
@@ -302,9 +304,25 @@ function _brmd_value(x::ExprColumn{typeof(kernel)},env,id)
     refs=copy(env.references)
     foreach(n->refs[n]=:cell,names)
     localenv=merge(env,(; references=refs,bindings=(env.bindings...,aliases...),
-        provenance=merge(env.provenance,(;cell_owner=env.provenance.owner,cell_names=Tuple(unique(names))))))
+        provenance=merge(env.provenance,(;cell_owner=owner,cell_names=Tuple(unique(names)),
+            cell_plate=_brmd_plate(first(raw),params,outer)))))
+    lambda,outer,localenv
+end
+function _brmd_value(x::ExprColumn{typeof(kernel)},env,id)
+    lambda,outer,localenv=_brmd_cell_environment(x,env,id)
     body=_brmd_value(lambda,localenv,(id...,:cell))
     _brmd_component(localenv,id,:call,kernel,(body,outer...),_brmd_value(getkwargs(x),localenv,(id...,:keyword)))
+end
+# Each kernel cell's column, by owner: a cell latent's prior reads its scope.
+function _brmd_kernel_columns(d)
+    columns=Dict{Symbol,Any}()
+    for op in _brm_prepare_program(d.plan.parent).operations
+        op.expression isa ExprColumn || continue
+        args=getargs(op.expression)
+        length(args)==2 && last(args) isa ExprColumn{typeof(kernel)} || continue
+        columns[something(_brm_lp_logical_name(d.plan.parent,op.name),op.name)]=last(args)
+    end
+    columns
 end
 _brmd_cell_assignments!(_names,_x)=nothing
 function _brmd_cell_assignments!(names,x::Expr)
