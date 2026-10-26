@@ -932,17 +932,21 @@ function _brmd_hsgp_level_prose(c,x::BRMDescriptionComponent)
     x.callable===multigroup || return _brmd_text(c,:level_correlated_basis_weights;
         correlation=_brmd_level_correlation_name(x))
     # `multigroup((x, y), lambda; k)`: coordinates in place of a correlation.
-    first(x.arguments) isa Tuple && return _brmd_text(c,:multigroup_coordinate_basis_weights;
-        coordinates=join(("`"*string(_brmd_level_correlation_name(a))*"`" for a in first(x.arguments)),", "),
-        lambda=_brmd_level_correlation_name(x.arguments[2]))*" "*
+    first(x.arguments) isa Tuple || return _brmd_text(c,:multigroup_basis_weights;
+        correlation=_brmd_level_correlation_name(x.arguments[1]),
+        tau=_brmd_level_correlation_name(x.arguments[2]))
+    names(fields)=join(("`"*string(_brmd_level_correlation_name(a))*"`" for a in fields),", ")
+    # `multigroup((x, y); k)` leaves the spatial scale to the term: λ.
+    own=length(x.arguments)==1
+    lambda=own ? "λ" : _brmd_level_correlation_name(x.arguments[2])
+    approximation=haskey(x.keywords,:inducing) ?
+        _brmd_text(c,:multigroup_coordinate_positions;positions=names(x.keywords[:inducing]),lambda) :
         _brmd_text(c,Symbol(:multigroup_coordinate_,
                 _brmd_level_correlation_name(get(x.keywords,:method,:hsgp)));
             k=get(x.keywords,:k,_BRM_MULTIGROUP_COORDINATE_K),
-            c=get(x.keywords,:c,_BRM_MULTIGROUP_HSGP_C),
-            lambda=_brmd_level_correlation_name(x.arguments[2]))
-    _brmd_text(c,:multigroup_basis_weights;
-        correlation=_brmd_level_correlation_name(x.arguments[1]),
-        tau=_brmd_level_correlation_name(x.arguments[2]))
+            c=get(x.keywords,:c,_BRM_MULTIGROUP_HSGP_C),lambda)
+    _brmd_text(c,:multigroup_coordinate_basis_weights;coordinates=names(first(x.arguments)),lambda)*
+        " "*approximation*(own ? " "*_brmd_text(c,:multigroup_coordinate_own_lambda) : "")
 end
 function _brmd_builtin_kind(::Val{:random_effect},c)
     k=c.keywords

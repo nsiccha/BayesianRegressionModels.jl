@@ -5,11 +5,12 @@
 # `exp(-d^2 / (2 r^2))`, `r = lambda / (rho omega)`, approximated with `k`
 # functions per axis by a Hilbert-space sine basis (`method = :hsgp`, the
 # default) or inducing points on a grid (`method = :inducing`, for
-# approximate-inference loops). `lambda` must stay at or above 2√(ln 100) times
-# the approximation's resolution, so frequencies it cannot resolve are
-# negligible. Design: decisions `1ug0391` (spelling, range law), `0u9tpd6` with
+# approximate-inference loops); with `lambda` at or above 2√(ln 100) times the
+# approximation's resolution, frequencies it cannot resolve are negligible.
+# Design: decisions `1ug0391` (spelling, range law), `0u9tpd6` with
 # the user's feedback on it and on brief `dg6hem` (both approximations, HSGP the
-# default), `114k5fg` and `100gkpq` (no clamp; the user's lower bound on lambda).
+# default), `114k5fg` and `100gkpq` (no clamp; a lower bound on lambda's prior),
+# `0yrmmdq` (free inducing positions).
 #
 #     julia --project=test test/level_correlation_multigroup_coordinates.jl
 #
@@ -38,7 +39,10 @@ function coordinate_data(; seed=3)
     rng = Random.MersenneTwister(seed)
     sx, sy = 100 .* rand(rng, G), 150 .* rand(rng, G)
     (; t=repeat(collect(range(0.0, 10.0; length=T)), G), g=repeat(1:G, inner=T),
-       y=randn(rng, G * T), sx, sy, u=randn(rng, G * T))
+       y=randn(rng, G * T), sx, sy, u=randn(rng, G * T),
+       # 16 free inducing positions inside the levels' bounding box
+       ux=minimum(sx) .+ (maximum(sx) - minimum(sx)) .* rand(rng, 16),
+       uy=minimum(sy) .+ (maximum(sy) - minimum(sy)) .* rand(rng, 16))
 end
 
 const mgc = @brm begin
@@ -55,6 +59,27 @@ end
 const mgi = @brm begin
     lambda ~ LogNormal(5.7, 0.3; lower=230.0)
     mu ~ 1 + t + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), lambda; k=6, method=:inducing))
+    y ~ Normal(mu, 1.0)
+end
+# The term's own spatial scale (decision `100gkpq`): `lambda` left out.
+const mgd = @brm begin
+    mu ~ 1 + t + hsgp(t; k=5, by=g, cor=multigroup((sx, sy); k=6))
+    y ~ Normal(mu, 1.0)
+end
+# Free inducing positions (decision `0yrmmdq`): data, and declared vector
+# parameters an approximate-inference loop would optimize.
+const mgp = @brm begin
+    lambda ~ LogNormal(5.8, 0.3; lower=260.0)
+    mu ~ 1 + t + hsgp(t; k=5, by=g,
+                      cor=multigroup((sx, sy), lambda; method=:inducing, inducing=(ux, uy)))
+    y ~ Normal(mu, 1.0)
+end
+const mgq = @brm begin
+    lambda ~ LogNormal(5.8, 0.3; lower=260.0)
+    px[1:16] .~ Normal.(50.0, 30.0)
+    py[1:16] .~ Normal.(75.0, 40.0)
+    mu ~ 1 + t + hsgp(t; k=5, by=g,
+                      cor=multigroup((sx, sy), lambda; method=:inducing, inducing=(px, py)))
     y ~ Normal(mu, 1.0)
 end
 
@@ -186,6 +211,35 @@ end
     end
 end
 
+@testset "free inducing positions" begin
+    rng = Random.MersenneTwister(9)
+    s = hcat(100 .* rand(rng, 30), 150 .* rand(rng, 30))
+    u = hcat(100 .* rand(rng, 12), 150 .* rand(rng, 12))
+    P = size(u, 1)
+    omega2, rho, lambda = [0.01, 0.2, 9.0], 1.3, 60.0
+    unit = [[p == q ? 1.0 : 0.0 for q in 1:P, _ in eachindex(omega2)] for p in 1:P]
+    for b in eachindex(omega2)
+        r = lambda / (rho * sqrt(omega2[b]))
+        F = hcat((brm_hsgp_multigroup_inducing_weights(e, omega2, rho, s, u, lambda)[:, b]
+                  for e in unit)...)
+        C = F * F'
+        @test all(diag(C) .≈ 1)
+        # the dense, unit-diagonal predictive process with the same jitter
+        kern(a, c) = exp(-sum(abs2, a .- c) / (2r^2))
+        Kuu = [kern(u[p, :], u[q, :]) + (p == q ? 1e-8 : 0.0) for p in 1:P, q in 1:P]
+        Kxu = [kern(s[i, :], u[p, :]) for i in axes(s, 1), p in 1:P]
+        Q = Kxu * (Symmetric(Kuu) \ Kxu')
+        @test C ≈ Q ./ (sqrt.(diag(Q)) * sqrt.(diag(Q))') atol=1e-6
+    end
+    # finite far below the positions' spacing
+    @test all(isfinite, brm_hsgp_multigroup_inducing_weights(randn(rng, P, 1), [1.0], 1.0,
+                                                             s, u, 0.01))
+    @test brm_multigroup_inducing_resolution(s, 16) ≈
+        1.25 * maximum(maximum(c) - minimum(c) for c in eachcol(s)) / 3
+    @test_throws "positions must be 11 x 2" brm_hsgp_multigroup_inducing_weights(
+        randn(rng, 11, 1), [1.0], 1.0, s, u, 60.0)
+end
+
 @testset "SBBRMI emission" begin
     df = coordinate_data()
     sb = SBBRMI(mgc(df); mod=@__MODULE__)
@@ -213,6 +267,29 @@ end
     @test sb.data[:multigroup_sx_sy_inducing6_scale] ==
         brm_multigroup_coordinate_grid(hcat(df.sx, df.sy), KG, 1)[2]
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    # Free positions: one weight row per position, read from a data matrix or
+    # from the declared vectors side by side.
+    sb = SBBRMI(mgp(df); mod=@__MODULE__)
+    code = flat(BRM.stan_code(sb))
+    @test occursin("multigroup_sx_sy_coordinates, multigroup_sx_sy_inducing_ux_uy, lambda)", code)
+    @test sb.data[:multigroup_sx_sy_inducing_ux_uy] == hcat(df.ux, df.uy)
+    @test sb.data[:n_rows_hsgpw_t_g] == 16
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    code = flat(stan(mgq(df)))
+    @test occursin("brm_hsgp_multigroup_inducing_weights(", code)
+    @test occursin("append_col(px, py)", code)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    # The term's own spatial scale: log-normal around the largest extent,
+    # bounded below at 2√(ln 100) times the resolution.
+    sb = SBBRMI(mgd(df); mod=@__MODULE__)
+    code = flat(BRM.stan_code(sb))
+    @test occursin("hsgp_t_by_g_lambda", code)
+    s = hcat(df.sx, df.sy)
+    @test sb.data[:multigroup_sx_sy_lambda_location] ≈
+        log(maximum(maximum(c) - minimum(c) for c in eachcol(s)))
+    @test sb.data[:multigroup_sx_sy_hsgp6_c1p5_lambda_lower] ≈
+        2sqrt(log(100)) * brm_multigroup_coordinate_grid(s, KG, 2, 1.5)[3]
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
 end
 
 @testset "descriptor and description" begin
@@ -232,6 +309,14 @@ end
     md = BRM.brm_description_markdown(BRM.brm_description(brm_descriptor(
         SBBRMI(mgi(df); mod=@__MODULE__))))
     @test occursin("grid of 6 points per axis", md)
+    description = BRM.brm_description(brm_descriptor(SBBRMI(mgd(df); mod=@__MODULE__)))
+    @test description.complete
+    @test occursin("The spatial scale λ is the term's own parameter",
+                   BRM.brm_description_markdown(description))
+    description = BRM.brm_description(brm_descriptor(SBBRMI(mgq(df); mod=@__MODULE__)))
+    @test description.complete
+    @test occursin("inducing points at the positions `px`, `py`",
+                   BRM.brm_description_markdown(description))
 end
 
 @testset "wrong shapes are refused" begin
@@ -248,29 +333,30 @@ end
         mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((t, u), 40.0))
         y ~ Normal(mu, 1.0)
     end), "has 96 coordinates per axis, but grouping `g` has 12 levels")
-    # refused: `lambda` must stay at or above 2√(ln 100) times the
-    # resolution, so the frequencies the basis cannot resolve are negligible
-    # (decision `100gkpq`): an unbounded prior, and a constant below it, each
-    # named with the bound and a `k` that fits
+    # refused: free positions need `method = :inducing`, replace `k`, give one
+    # field per axis of one length, each a data vector or a declared vector
     refused(@brm(begin
-        lambda ~ LogNormal(3.0, 0.5)
-        mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), lambda; k=6))
+        mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), 400.0; inducing=(ux, uy)))
         y ~ Normal(mu, 1.0)
-    end), "can be as small as 0.0 (the lower end of its prior's support). Give its prior a lower bound")
-    need(k, method) = BRM._BRM_MULTIGROUP_RESOLUTION_RATIO *
-        brm_multigroup_coordinate_grid(hcat(df.sx, df.sy), k, method, 1.5)[3]
-    @test 40.0 < need(20, 2) < 62.0
-    fit = findfirst(k -> need(k, 2) <= 40.0, 20:200) + 19
+    end), "takes `inducing` positions only with `method = :inducing`")
     refused(@brm(begin
-        mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), 40.0))
+        mu ~ 1 + hsgp(t; k=5, by=g,
+                      cor=multigroup((sx, sy), 400.0; k=4, method=:inducing, inducing=(ux, uy)))
         y ~ Normal(mu, 1.0)
-    end), "Use a spatial scale of at least $(round(need(20, 2); sigdigits=3)), or use k = $fit")
-    # a truncated prior whose lower end meets the bound is accepted
-    @test SBBRMI(@brm(begin
-        lambda ~ LogNormal(5.0, 0.5; lower=62.0)
-        mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), lambda))
+    end), "takes either `k`")
+    refused(@brm(begin
+        mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), 400.0; method=:inducing, inducing=(ux,)))
         y ~ Normal(mu, 1.0)
-    end)(df); mod=@__MODULE__) isa SBBRMI
+    end), "one field per coordinate axis (2)")
+    refused(@brm(begin
+        mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), 400.0; method=:inducing, inducing=(ux, sx)))
+        y ~ Normal(mu, 1.0)
+    end), "positions have different lengths (16, 12)")
+    refused(@brm(begin
+        px ~ Normal(50.0, 30.0)
+        mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), 400.0; method=:inducing, inducing=(px, uy)))
+        y ~ Normal(mu, 1.0)
+    end), "neither a data vector nor a declared vector parameter")
     # refused: the range `lambda / (rho omega)` needs lambda > 0
     refused(@brm(begin
         mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), -1.0))
@@ -428,6 +514,80 @@ end
     end
 end
 
+# The free-position program by hand: per frequency, the positions' jittered
+# kernel, each level's whitened kernel to them, normalized.
+const MGP_REFERENCE = """
+data { int N; int G; int M; int P; vector[N] t; vector[N] y; array[N] int g;
+       matrix[N, M] PHI; vector[M] omega2; real rho_lower; matrix[G, 2] s; matrix[P, 2] u; }
+parameters {
+  real<lower=260> lambda;
+  vector[2] beta;
+  vector[M * P] zw;
+  real<lower=rho_lower> rho;
+  real<lower=0> sf;
+}
+model {
+  matrix[P, M] Z = to_matrix(zw, M, P)';
+  matrix[G, M] W;
+  for (j in 1:M) {
+    real r2 = square(lambda) / (square(rho) * omega2[j]);
+    matrix[P, P] Kuu;
+    for (p in 1:P) for (q in 1:P)
+      Kuu[p, q] = p == q ? 1.00000001 : exp(-squared_distance(u[p], u[q]) / (2 * r2));
+    matrix[P, P] Lu = cholesky_decompose(Kuu);
+    for (i in 1:G) {
+      vector[P] d2;
+      for (p in 1:P) d2[p] = squared_distance(s[i], u[p]);
+      vector[P] av = mdivide_left_tri_low(Lu, exp(-(d2 - min(d2)) / (2 * r2)));
+      W[i, j] = dot_product(av, Z[:, j]) / norm2(av);
+    }
+  }
+  vector[M] spd = sf * sqrt(rho * sqrt(2 * pi())) * exp(-0.25 * square(rho) * omega2);
+  vector[N] f;
+  for (n in 1:N) f[n] = dot_product(PHI[n], W[g[n]]' .* spd);
+  lambda ~ lognormal(5.8, 0.3); // constant bound: no truncation normalizer, as BRM emits
+  beta ~ std_normal();
+  zw ~ std_normal();
+  rho ~ lognormal(0, 1);
+  sf ~ lognormal(0, 1);
+  y ~ normal(beta[1] + beta[2] * t + f, 1);
+}
+"""
+
+@testset "SBBRMI density equals a hand-written free-position program" begin
+    if RUNTIME
+        df = coordinate_data()
+        sb = SBBRMI(mgp(df); mod=@__MODULE__)
+        problem = compiled(sb, "mgp")
+        names_brm = String.(BS.param_unc_names(problem.model))
+        PHI = sb.data[:PHI_hsgp_t_by_g]
+        path = joinpath(CACHE, "mgp_reference_" * string(hash(MGP_REFERENCE)) * ".stan")
+        isfile(path) || write(path, MGP_REFERENCE)
+        s, u = hcat(df.sx, df.sy), hcat(df.ux, df.uy)
+        reference = BS.StanModel(path, JSON.json(Dict("N"=>length(df.t), "G"=>G,
+            "M"=>size(PHI, 2), "P"=>16, "t"=>df.t, "y"=>df.y, "g"=>df.g,
+            "PHI"=>[PHI[i, :] for i in axes(PHI, 1)],
+            "omega2"=>vec(sb.data[:omega2_hsgp_t_by_g]),
+            "rho_lower"=>sb.data[:rho_lower_hsgp_t_by_g],
+            "s"=>[s[i, :] for i in axes(s, 1)], "u"=>[u[i, :] for i in axes(u, 1)])))
+        names_ref = String.(BS.param_unc_names(reference))
+        @test length(names_ref) == length(names_brm)
+        perm = [only(findall(==(reference_name(n)), names_ref)) for n in names_brm]
+        rng = Random.MersenneTwister(8)
+        for _ in 1:4
+            x = 0.7 .* randn(rng, length(names_brm))
+            v = zeros(length(names_ref)); v[perm] .= x
+            gx, gv = similar(x), similar(v)
+            lx, _ = BS.log_density_gradient!(problem.model, x, gx; propto=false, jacobian=true)
+            lv, _ = BS.log_density_gradient!(reference, v, gv; propto=false, jacobian=true)
+            @test lx ≈ lv atol=1e-10 rtol=1e-12
+            @test gx ≈ gv[perm] atol=1e-10 rtol=1e-10
+        end
+    else
+        @test true
+    end
+end
+
 rk_problem(rk) = rk_logdensity_problem(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
 
 points(n) = (zeros(n), collect(range(-0.43, 0.51; length=n)), [0.37sin(i) for i in 1:n])
@@ -435,7 +595,8 @@ points(n) = (zeros(n), collect(range(-0.43, 0.51; length=n)), [0.37sin(i) for i 
 @testset "RKBRMI equals SBBRMI" begin
     if RUNTIME
         df = coordinate_data()
-        for (tag, model) in ("mgc" => mgc, "fixed" => fixed, "mgi" => mgi)
+        for (tag, model) in ("mgc" => mgc, "fixed" => fixed, "mgi" => mgi, "mgd" => mgd,
+                             "mgp" => mgp, "mgq" => mgq)
             m = model(df)
             rk = RKBRMI(m)
             sb = SBBRMI(m; mod=@__MODULE__)
@@ -445,9 +606,11 @@ points(n) = (zeros(n), collect(range(-0.43, 0.51; length=n)), [0.37sin(i) for i 
             M = size(sb.data[:PHI_hsgp_t_by_g], 2)
             function stan_name(n)
                 n == "lambda" && return n
+                n == "hsgp_t.lambda" && return "hsgp_t_by_g_lambda"
                 n == "hsgp_t.rho" && return "hsgp_t_by_g_rho_iso"
                 n == "hsgp_t.sigma" && return "hsgp_t_by_g_sigma"
                 n == "mu_Intercept" && return "pop_mu_beta_pop.1"
+                occursin(r"^p[xy]\.\d+$", n) && return n
                 x = match(r"^hsgp_t\.z\.(\d+)\.(\d+)$", n)
                 x === nothing || return "zflat_hsgpw_t_g.$((parse(Int, x[1]) - 1) * M + parse(Int, x[2]))"
                 x = match(r"^pop_mu\.beta_pop\.(\d+)$", n)
@@ -457,7 +620,13 @@ points(n) = (zeros(n), collect(range(-0.43, 0.51; length=n)), [0.37sin(i) for i 
             perm = [only(findall(==(stan_name(n)), stan_names)) for n in rk_names]
             @test sort(perm) == collect(eachindex(stan_names))
             problem = rk_problem(rk)
-            for u in points(length(rk_names))
+            # Declared positions sit at the data positions, offset by the point:
+            # near-coincident positions make `K_uu` nearly singular, where any two
+            # implementations agree only to its condition number times eps.
+            at_positions(u) = [(x = match(r"^p([xy])\.(\d+)$", n); x === nothing ? u[i] :
+                getproperty(df, Symbol(:u, x[1]))[parse(Int, x[2])] + u[i])
+                for (i, n) in enumerate(rk_names)]
+            for u in at_positions.(points(length(rk_names)))
                 stan_u = zeros(length(u)); stan_u[perm] .= u
                 value, gradient = LogDensityProblems.logdensity_and_gradient(problem, u)
                 g = similar(stan_u)
@@ -475,20 +644,28 @@ end
 
 @testset "readers: coherence by distance and the fitted term" begin
     if RUNTIME
-        df = coordinate_data()
-        sb = SBBRMI(mgc(df); mod=@__MODULE__)
-        stan = compiled(sb, "mgc")
+      df = coordinate_data()
+      # the grid basis, and free positions read per draw from the declared vectors
+      for (tag, model) in ("mgc" => mgc, "mgd" => mgd, "mgq" => mgq)
+        sb = SBBRMI(model(df); mod=@__MODULE__)
+        stan = compiled(sb, tag)
         names = BS.param_names(stan.model; include_tp=true)
         rng = Random.MersenneTwister(4)
         unc = [0.6 .* randn(rng, BS.param_unc_num(stan.model)) for _ in 1:3]
+        # declared positions spread like the data positions (see the parity test)
+        for (j, n) in enumerate(BS.param_unc_names(stan.model))
+            x = match(r"^p([xy])\.(\d+)$", n)
+            x === nothing || foreach(u -> u[j] += getproperty(df, Symbol(:u, x[1]))[parse(Int, x[2])], unc)
+        end
         draws = reduce(vcat, permutedims(BS.param_constrain(stan.model, u; include_tp=true))
                        for u in unc)
         d = brm_descriptor(sb)
         column(name) = draws[:, only(findall(==(name), names))]
         omega2 = vec(sb.data[:omega2_hsgp_t_by_g])
-        r_min = brm_multigroup_coordinate_grid(hcat(df.sx, df.sy), KG, 2, 1.5)[3]
-        rho, lambda, sigma = column("hsgp_t_by_g_rho_iso"), column("lambda"),
-            column("hsgp_t_by_g_sigma")
+        r_min = tag == "mgq" ? brm_multigroup_inducing_resolution(hcat(df.sx, df.sy), 16) :
+            brm_multigroup_coordinate_grid(hcat(df.sx, df.sy), KG, 2, 1.5)[3]
+        rho, sigma = column("hsgp_t_by_g_rho_iso"), column("hsgp_t_by_g_sigma")
+        lambda = column(tag == "mgd" ? "hsgp_t_by_g_lambda" : "lambda")
         c = brm_multigroup_coherence(d, draws, names; distances=[0.0, 10.0, 50.0])
         @test c.predictor === :mu
         @test c.period ≈ 2pi ./ sqrt.(omega2)
@@ -524,6 +701,7 @@ end
         # an extrapolation (decision `0yrmmdq`, coverage)
         @test_throws "outside the region" brm_multigroup_field(d, draws, names;
             times, coordinates=[1e5 1e5])
+      end
     else
         @test true
     end
@@ -538,4 +716,8 @@ end
     @test occursin("brm_hsgp_multigroup_coordinate_weights(", BRM.stan_code(replayed))
     @test replayed.data[:multigroup_sx_sy_coordinates] == hcat(df.sx, df.sy)
     @test reprocess(RKBRMI(mgc(df)), df) isa RKBRMI
+    # free positions given as data stay the training positions
+    sb = SBBRMI(mgp(df); mod=@__MODULE__)
+    replayed = reprocess(sb, merge(subset, (; df.ux, df.uy)))
+    @test replayed.data[:multigroup_sx_sy_inducing_ux_uy] == hcat(df.ux, df.uy)
 end

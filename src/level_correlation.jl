@@ -42,13 +42,15 @@ as for `cor = Omega`; `tau` is a declared positive scalar parameter or a
 positive constant. Formula-only: it is read by `@brm` and never called.
 
     multigroup((x, y), lambda; k = 20, method = :hsgp, c = 1.5)
+    multigroup((x, y); k = 20, method = :hsgp, c = 1.5)
 
 The same coherence over known level coordinates: `D2 = |s_i - s_j|² / lambda²`,
 so frequency `ω` correlates two levels at distance `d` by `exp(-d² / (2 r²))`
 with spatial range `r = lambda / (ρ ω)`. One coordinate field per axis (one to
 three axes), each holding one value per level of `g` in the grouping's level
 order, as a known `cor = C` has one row per level. `lambda` is a declared
-positive scalar parameter or a positive constant, in the coordinates' unit.
+positive scalar parameter or a positive constant, in the coordinates' unit;
+left out, the term declares its own (see below).
 Each frequency's correlation is approximated with `k` functions per axis,
 rescaled to a unit diagonal, so the cost grows linearly in the number of
 levels: `method = :hsgp` (the default) uses a sine basis over a box of
@@ -60,10 +62,13 @@ inducing points on a grid of spacing `√(h₀² + (r / 1.5)²)` with
 The approximation resolves ranges down to `r₀`: the HSGP length-scale floor of
 the box `L₀`, or 1.25 base spacings `h₀`. A frequency whose range is below
 `r₀` has `ρ ω > lambda / r₀`, so its spectral amplitude stays below 1/100 of
-the zero-frequency amplitude (the HSGP truncation tolerance) when
-`lambda ≥ 2√(ln 100) r₀ ≈ 4.3 r₀`. The smallest value `lambda` can take — the
-constant, or the lower end of its prior's support (`lower = ...` or the
-family's own) — must meet that bound; a larger `k` lowers `r₀`.
+the zero-frequency amplitude (the HSGP truncation tolerance) whenever
+`lambda ≥ 2√(ln 100) r₀ ≈ 4.3 r₀`; a larger `k` lowers `r₀`. With `lambda`
+left out, the term's own spatial scale has the prior `LogNormal(log(E), 1)`,
+`E` the coordinates' largest extent, bounded below at `2√(ln 100) r₀`. A
+declared `lambda`'s prior is its author's: give it `lower = ...` at that bound,
+or raise `k`. `brm_multigroup_coherence` reports `r₀` and which frequencies
+are resolved.
 """
 function multigroup end
 
@@ -125,23 +130,27 @@ end
 The resolved `cor = multigroup((x, y), lambda; k, method, c)` of a grouped
 HSGP: the coordinate fields' names (`axes`), their values as levels × axes
 (`coordinates`), the spatial scale `lambda` (a declared scalar parameter's
-name or a positive constant), the functions per axis `k`, the approximation
-`method` (`:inducing` or `:hsgp`) and the HSGP box factor `c`.
+name, a positive constant, or `nothing` for the term's own), the functions per
+axis `k`, the approximation
+`method` (`:inducing` or `:hsgp`) and the HSGP box factor `c`. With
+`inducing = (ux, uy)`, `positions` holds one entry per axis, `(; name, values)`
+with the data values or `nothing` for a declared vector parameter, and
+`n_points` their common length; otherwise `positions` is empty and `n_points`
+the grid's `k^D`.
 """
 struct _BRMMultigroupCoordinates
     axes::Vector{Symbol}
     coordinates::Matrix{Float64}
-    lambda::Union{Symbol,Float64}
+    lambda::Union{Symbol,Float64,Nothing}
     k::Int
     method::Symbol
     c::Float64
+    positions::Vector{NamedTuple{(:name, :values),Tuple{Symbol,Union{Nothing,Vector{Float64}}}}}
+    n_points::Int
 end
 
 const _BRM_MULTIGROUP_COORDINATE_K = 20
 const _BRM_MULTIGROUP_HSGP_C = 1.5
-# `lambda / r₀` at which a frequency the approximation cannot resolve has at
-# most 1/100 of the zero-frequency spectral amplitude: `exp(-ratio² / 4) = 1/100`.
-const _BRM_MULTIGROUP_RESOLUTION_RATIO = 2sqrt(log(100))
 # The approximation's code in the emitted programs (Stan has no symbols).
 _brm_multigroup_method_code(method::Symbol) = _brm_multigroup_method_code(Val(method))
 _brm_multigroup_method_code(::Val{:inducing}) = 1
@@ -167,10 +176,14 @@ _brm_multigroup_coordinates_form(value::ExprColumn{typeof(multigroup)}) =
     !isempty(getargs(value)) && first(getargs(value)) isa Tuple
 _brm_multigroup_coordinates_form(_value) = false
 
-# The number `k^D` of standardized spatial weights per frequency of
-# `multigroup(coordinates, lambda; k)` (grid points or basis functions), read
-# from the formula alone: both backends size the weights by it.
+# The number of standardized spatial weights per frequency of
+# `multigroup(coordinates, lambda; k)`, read from the formula alone: `k^D` grid
+# points or basis functions, or the length of the `inducing` positions.
 function _brm_multigroup_grid_size(value)
+    haskey(getkwargs(value), :inducing) &&
+        return _brm_multigroup_position_count(getkwargs(value)[:inducing],
+            length(first(getargs(value))); what="multigroup(coordinates, lambda; inducing)",
+            prefix="BRM backend lowering")
     k = get(getkwargs(value), :k, _BRM_MULTIGROUP_COORDINATE_K)
     k isa Integer && k >= 2 || error(
         "BRM backend lowering: `multigroup(coordinates, lambda; k)` needs an " *
@@ -180,14 +193,15 @@ end
 
 function _brm_multigroup_coordinates(value; what, prefix)
     args, kw = getargs(value), getkwargs(value)
-    length(args) == 2 || error(
+    length(args) in (1, 2) || error(
         "$prefix: `$what` takes `multigroup((x, y), lambda; k = " *
-        "$(_BRM_MULTIGROUP_COORDINATE_K))`: the levels' coordinates and a " *
-        "positive spatial scale")
-    extra = setdiff(keys(kw), (:k, :method, :c))
+        "$(_BRM_MULTIGROUP_COORDINATE_K))`: the levels' coordinates and, " *
+        "optionally, a positive spatial scale")
+    extra = setdiff(keys(kw), (:k, :method, :c, :inducing))
     isempty(extra) || error(
         "$prefix: `$what` takes the keywords `k` (functions per axis), " *
-        "`method` (`:inducing` or `:hsgp`) and, for `:hsgp`, `c`; not " *
+        "`method` (`:inducing` or `:hsgp`), for `:hsgp` `c`, and for " *
+        "`:inducing` the positions `inducing`; not " *
         join(("`$key`" for key in extra), ", "))
     method = get(kw, :method, :hsgp)
     method in (:inducing, :hsgp) || error(
@@ -219,53 +233,91 @@ function _brm_multigroup_coordinates(value; what, prefix)
     k isa Integer && k >= 2 || error(
         "$prefix: `$what` needs an integer `k >= 2` functions per axis, " *
         "got `$(repr(k))`")
-    lc = _BRMMultigroupCoordinates(collect(Symbol, name.(fields)), reduce(hcat, columns),
-                                   _brm_multigroup_scale(last(args), :lambda; what, prefix),
-                                   Int(k), method, Float64(c))
-    _brm_multigroup_check_resolution(lc, _brm_multigroup_scale_lower(last(args));
-                                     what, prefix)
+    positions = haskey(kw, :inducing) ?
+        _brm_multigroup_positions(kw, length(fields); what, prefix) : []
+    _BRMMultigroupCoordinates(collect(Symbol, name.(fields)), reduce(hcat, columns),
+                              length(args) == 1 ? nothing :
+                                  _brm_multigroup_scale(last(args), :lambda; what, prefix),
+                              Int(k), method, Float64(c), positions,
+                              isempty(positions) ? Int(k)^length(fields) :
+                                  _brm_multigroup_position_count(kw[:inducing], length(fields); what, prefix))
 end
 
-# The smallest value a positive scale can take: the constant itself, or the
-# higher of its declared prior's `lower` and its family's own support.
-_brm_multigroup_scale_lower(value::Real) = Float64(value)
-function _brm_multigroup_scale_lower(value::NamedColumn)
-    source = parent(value)
-    source isa DataColumn && return Float64(parent(source))
-    law = last(getargs(_as_expr_column(source)))
-    law isa ExprColumn || return -Inf
-    f, args = getf(law), map(_brm_data_value, getargs(law))
-    family = f isa Type && f <: Distribution && !any(isnothing, args) ?
-        Float64(minimum(f(args...))) : -Inf
-    lower = _brm_data_value(get(getkwargs(law), :lower, nothing))
-    isnothing(lower) ? family : max(family, Float64(lower))
+# `lambda / r₀` at which a frequency the approximation cannot resolve has at
+# most 1/100 of the zero-frequency spectral amplitude: `exp(-ratio² / 4) = 1/100`.
+const _BRM_MULTIGROUP_RESOLUTION_RATIO = 2sqrt(log(100))
+# The finest range the approximation resolves (`brm_multigroup_coordinate_grid`,
+# `brm_multigroup_inducing_resolution`).
+_brm_multigroup_resolution(lc::_BRMMultigroupCoordinates) = isempty(lc.positions) ?
+    last(brm_multigroup_coordinate_grid(lc.coordinates, lc.k,
+                                        _brm_multigroup_method_code(lc.method), lc.c)) :
+    brm_multigroup_inducing_resolution(lc.coordinates, lc.n_points)
+# The term's own spatial scale, `multigroup((x, y); k)` (decision `100gkpq`):
+# `LogNormal(log(E), 1)` with `E` the coordinates' largest extent, bounded
+# below where every frequency the basis cannot resolve stays negligible.
+function _brm_multigroup_default_lambda(lc::_BRMMultigroupCoordinates)
+    extent = maximum(maximum(c) - minimum(c) for c in eachcol(lc.coordinates))
+    extent > 0 || error(
+        "BRM backend lowering: `multigroup((x, y); k)` sets its spatial scale " *
+        "from the coordinates' extent, but every level has the same coordinates; " *
+        "give `lambda` explicitly")
+    (; location=log(extent),
+       lower=_BRM_MULTIGROUP_RESOLUTION_RATIO * _brm_multigroup_resolution(lc))
 end
 
-# Every frequency the approximation cannot resolve stays negligible only if
-# `lambda` never goes below `2√(ln 100)` times the resolution (`multigroup`).
-function _brm_multigroup_check_resolution(lc::_BRMMultigroupCoordinates, lower; what, prefix)
-    method = _brm_multigroup_method_code(lc.method)
-    bound(k) = _BRM_MULTIGROUP_RESOLUTION_RATIO *
-        last(brm_multigroup_coordinate_grid(lc.coordinates, k, method, lc.c))
-    need = bound(lc.k)
-    lower >= need && return lc
-    shown(x) = round(x; sigdigits=3)
-    smallest = lc.lambda isa Symbol ?
-        "the spatial scale `$(lc.lambda)` can be as small as $(shown(lower)) (the " *
-        "lower end of its prior's support)" :
-        "the spatial scale `lambda = $(lc.lambda)` is below that"
-    fit = lower > 0 ? findfirst(k -> bound(k) <= lower, lc.k:4096) : nothing
-    error("$prefix: `$what`: with k = $(lc.k) functions per axis the " *
-          "approximation resolves spatial ranges down to " *
-          "$(shown(need / _BRM_MULTIGROUP_RESOLUTION_RATIO)), and the frequencies " *
-          "it cannot resolve stay negligible only if `lambda` is at least " *
-          "2√(ln 100) times that, $(shown(need)); $smallest. " *
-          (lc.lambda isa Symbol ?
-              "Give its prior a lower bound of at least $(shown(need)) " *
-              "(`lower = $(shown(need))`)" :
-              "Use a spatial scale of at least $(shown(need))") *
-          (isnothing(fit) ? "" :
-              ", or use k = $(lc.k + fit - 1), whose resolution fits $(shown(lower))"))
+# `inducing = (ux, uy)`: one field per coordinate axis, each a data vector or
+# a declared vector parameter (`ux[1:M] .~ ...`), all of one length `M`: the
+# positions an approximate-inference loop optimizes and a later fit fixes.
+function _brm_multigroup_positions(kw, n_axes; what, prefix)
+    get(kw, :method, :hsgp) === :inducing || error(
+        "$prefix: `$what` takes `inducing` positions only with `method = :inducing`")
+    haskey(kw, :k) && error(
+        "$prefix: `$what` takes either `k` (a grid of `k` points per axis) or " *
+        "`inducing` positions, not both; the positions' length is their number")
+    fields = kw[:inducing]
+    _brm_multigroup_position_count(fields, n_axes; what, prefix)
+    map(collect(fields)) do field
+        source = parent(field)
+        source isa DataColumn || return (; name=name(field), values=nothing)
+        raw = parent(source)
+        raw isa AbstractVector{<:Real} && all(isfinite, raw) || error(
+            "$prefix: `$what` inducing positions `$(name(field))` must be a " *
+            "vector of finite numbers")
+        (; name=name(field), values=Vector{Float64}(raw))
+    end
+end
+# The common length `M >= 2` of the positions' fields, one per coordinate axis.
+function _brm_multigroup_position_count(fields, n_axes; what, prefix)
+    fields isa Tuple && length(fields) == n_axes || error(
+        "$prefix: `$what` needs `inducing = (ux, ...)` with one field per " *
+        "coordinate axis ($n_axes), got `$(repr(fields))`")
+    lengths = map(fields) do field
+        field isa NamedColumn || error(
+            "$prefix: `$what` reads each inducing position from a data field or " *
+            "a declared vector parameter, got `$(repr(field))`")
+        source = parent(field)
+        source isa DataColumn && return length(parent(source))
+        n = _brm_multigroup_declared_length(field)
+        isnothing(n) && error(
+            "$prefix: `$what` names inducing positions `$(name(field))`, which " *
+            "is neither a data vector nor a declared vector parameter " *
+            "(`$(name(field))[1:M] .~ Normal.(...)`)")
+        n
+    end
+    allequal(lengths) || error(
+        "$prefix: `$what` positions have different lengths " *
+        "($(join(lengths, ", "))); give every axis the same points")
+    M = first(lengths)
+    M >= 2 || error("$prefix: `$what` needs at least two inducing positions, got $M")
+    M
+end
+# The length `n` of a declared `name[1:n] .~ law`, or `nothing`.
+function _brm_multigroup_declared_length(field::NamedColumn)
+    op = _as_expr_column(parent(field))
+    (!isnothing(op) && getf(op) === (~) &&
+     last(getargs(op)) isa ExprColumn{typeof(_brm_vector_prior)}) || return nothing
+    n = _brm_data_value(first(getargs(last(getargs(op)))))
+    n isa Real && isinteger(n) ? Int(n) : nothing
 end
 
 # A positive scale of `multigroup` (`tau`, `lambda`): a declared scalar
@@ -331,7 +383,7 @@ _brm_level_cor_label(value::NamedColumn) = name(value)
 function _brm_level_cor_label(value::ExprColumn{typeof(multigroup)})
     kw = getkwargs(value)
     "multigroup(" * join(map(_brm_level_cor_label, getargs(value)), ", ") *
-        (isempty(kw) ? "" : "; " * join(("$key = $(repr(v))" for (key, v) in pairs(kw)), ", ")) *
+        (isempty(kw) ? "" : "; " * join(("$key = $(_brm_level_cor_label(v))" for (key, v) in pairs(kw)), ", ")) *
         ")"
 end
 _brm_level_cor_label(value::Tuple) =

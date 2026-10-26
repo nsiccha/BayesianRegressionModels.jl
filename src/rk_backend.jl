@@ -5147,11 +5147,16 @@ end
 
 # `cor = multigroup(coordinates, lambda; k)` reads the levels' coordinates as
 # fit-role inputs, so a frozen replay keeps the training coordinates; the
-# graph derives the inducing grid from them (src/rk_structured.jl).
+# graph derives the inducing grid from them (src/rk_structured.jl). Free
+# inducing positions are fit-role inputs too when they are data, and the
+# declared vector parameters by name otherwise.
 _rk_plan_level_coordinates!(_level_cor, data, columns, taken, derived) = (;)
 _rk_plan_level_coordinates!(lc::_BRMMultigroupCoordinates, data, columns, taken, derived) =
     (; coordinate_columns=Tuple(_rk_fit_twin!(derived, columns, taken, data, axis)
-                                for axis in lc.axes))
+                                for axis in lc.axes),
+       position_columns=Tuple(isnothing(position.values) ? position.name :
+                                  _rk_fit_twin!(derived, columns, taken, data, position.name)
+                              for position in lc.positions))
 
 # ---- AR(1) latent-path terms (mirrors `_sb_ar1`) ----
 #

@@ -2882,6 +2882,54 @@ StanBlocks.@deffun begin
         return rv
     end
 
+    @stanonly brm_hsgp_multigroup_inducing_weights(z::matrix[n_points, m],
+            omega2::matrix[m, d], rho::vector[d], coordinates::matrix[n_levels, n_space],
+            positions::matrix[n_points, n_space], lambda::real)::matrix[n_levels, m] = begin
+        rv::matrix[n_levels, m]
+        Kuu::matrix[n_points, n_points]
+        S::matrix[n_points, n_levels]
+        for b in 1:m
+            exponent = 0.
+            for axis in 1:d
+                exponent += rho[axis] * rho[axis] * omega2[b, axis]
+            end
+            r2 = square(lambda) / exponent
+            for q in 1:n_points
+                for p in 1:n_points
+                    t = 0.
+                    for axis in 1:n_space
+                        t += square(positions[p, axis] - positions[q, axis])
+                    end
+                    Kuu[p, q] = exp(-t / (2 * r2))
+                end
+                Kuu[q, q] = 1.00000001
+            end
+            for i in 1:n_levels
+                for p in 1:n_points
+                    t = 0.
+                    for axis in 1:n_space
+                        t += square(coordinates[i, axis] - positions[p, axis])
+                    end
+                    S[p, i] = t
+                end
+                # relative to the nearest position, which the normalization
+                # cancels: finite at any range
+                shift = S[1, i]
+                for p in 2:n_points
+                    shift = fmin(shift, S[p, i])
+                end
+                for p in 1:n_points
+                    S[p, i] = exp(-(S[p, i] - shift) / (2 * r2))
+                end
+            end
+            S = mdivide_left_tri_low(cholesky_decompose(Kuu), S)
+            for i in 1:n_levels
+                rv[i, b] = dot_product(S[:, i], z[:, b]) / sqrt(dot_self(S[:, i]))
+            end
+        end
+        return rv
+    end
+
     @stanonly brm_hsgp_log_sqrt_spd(omega2::matrix[m, d], sigma::real,
                                      rho::vector[d])::vector[m] = begin
         rv::vector[m]
@@ -3231,6 +3279,33 @@ _sb_hsgp_by_multigroup_coordinates =
     _sb_multigroup_input(_sb_hsgp_by, :beta, _SB_MULTIGROUP_COORDINATE_WEIGHTS)
 _sb_hsgp_by_aniso_multigroup_coordinates =
     _sb_multigroup_input(_sb_hsgp_by_aniso, :beta, _SB_MULTIGROUP_COORDINATE_WEIGHTS)
+# `multigroup(coordinates, lambda; method = :inducing, inducing = (ux, uy))`:
+# `beta` is one row of standardized weights per free inducing position
+# (`brm_hsgp_multigroup_inducing_weights`, src/rk_statistical.jl).
+const _SB_MULTIGROUP_INDUCING_WEIGHTS = :(brm_hsgp_multigroup_inducing_weights(
+    beta, omega2, rho, coordinates_level, positions_level, lambda_level))
+_sb_hsgp_by_multigroup_inducing =
+    _sb_multigroup_input(_sb_hsgp_by, :beta, _SB_MULTIGROUP_INDUCING_WEIGHTS)
+_sb_hsgp_by_aniso_multigroup_inducing =
+    _sb_multigroup_input(_sb_hsgp_by_aniso, :beta, _SB_MULTIGROUP_INDUCING_WEIGHTS)
+# `multigroup((x, y); k)`, `lambda` left out: the term declares its own spatial
+# scale, log-normal around the coordinates' extent and bounded below where the
+# basis resolves every frequency that matters (decision `100gkpq`).
+function _sb_multigroup_own_lambda(base::StanBlocks.SlicModel)
+    rename(x) = x === :lambda_level ? :lambda :
+        x isa Expr ? Expr(x.head, map(rename, x.args)...) : x
+    body = Expr(:block, :(lambda ~ lognormal(lambda_location, 1.; lower=lambda_lower)),
+                map(rename, base.model.args)...)
+    StanBlocks.SlicModel(body, base.data, base.mod, base.observations)
+end
+_sb_hsgp_by_multigroup_coordinates_lambda =
+    _sb_multigroup_own_lambda(_sb_hsgp_by_multigroup_coordinates)
+_sb_hsgp_by_aniso_multigroup_coordinates_lambda =
+    _sb_multigroup_own_lambda(_sb_hsgp_by_aniso_multigroup_coordinates)
+_sb_hsgp_by_multigroup_inducing_lambda =
+    _sb_multigroup_own_lambda(_sb_hsgp_by_multigroup_inducing)
+_sb_hsgp_by_aniso_multigroup_inducing_lambda =
+    _sb_multigroup_own_lambda(_sb_hsgp_by_aniso_multigroup_inducing)
 
 # Categorical -> (n_levels::Int, per-row level index::Vector{Int}). Mirrors
 # vimpl._level_index so the integer indices the walker stashes in `data`
@@ -9948,6 +10023,17 @@ _sb_gp_submodel(::Val{:_sb_hsgp_by_aniso_multigroup}) = _sb_hsgp_by_aniso_multig
 _sb_gp_submodel(::Val{:_sb_hsgp_by_multigroup_coordinates}) = _sb_hsgp_by_multigroup_coordinates
 _sb_gp_submodel(::Val{:_sb_hsgp_by_aniso_multigroup_coordinates}) =
     _sb_hsgp_by_aniso_multigroup_coordinates
+_sb_gp_submodel(::Val{:_sb_hsgp_by_multigroup_inducing}) = _sb_hsgp_by_multigroup_inducing
+_sb_gp_submodel(::Val{:_sb_hsgp_by_aniso_multigroup_inducing}) =
+    _sb_hsgp_by_aniso_multigroup_inducing
+_sb_gp_submodel(::Val{:_sb_hsgp_by_multigroup_coordinates_lambda}) =
+    _sb_hsgp_by_multigroup_coordinates_lambda
+_sb_gp_submodel(::Val{:_sb_hsgp_by_aniso_multigroup_coordinates_lambda}) =
+    _sb_hsgp_by_aniso_multigroup_coordinates_lambda
+_sb_gp_submodel(::Val{:_sb_hsgp_by_multigroup_inducing_lambda}) =
+    _sb_hsgp_by_multigroup_inducing_lambda
+_sb_gp_submodel(::Val{:_sb_hsgp_by_aniso_multigroup_inducing_lambda}) =
+    _sb_hsgp_by_aniso_multigroup_inducing_lambda
 _sb_gp_submodel(::Val{:_sb_hsgp_latent}) = _sb_hsgp_latent
 _sb_gp_submodel(::Val{:_sb_hsgp_latent_orthogonal}) = _sb_hsgp_latent_orthogonal
 _sb_gp_submodel(::Val{:_sb_gp_periodic}) = _sb_gp_periodic
@@ -9967,6 +10053,12 @@ _sb_gp_rho_lhs(::Val{:_sb_hsgp_by_multigroup}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_by_aniso_multigroup}) = :(rho :: vector[n_axes])
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_by_multigroup_coordinates}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_by_aniso_multigroup_coordinates}) = :(rho :: vector[n_axes])
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_by_multigroup_inducing}) = :rho_iso
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_by_aniso_multigroup_inducing}) = :(rho :: vector[n_axes])
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_by_multigroup_coordinates_lambda}) = :rho_iso
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_by_aniso_multigroup_coordinates_lambda}) = :(rho :: vector[n_axes])
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_by_multigroup_inducing_lambda}) = :rho_iso
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_by_aniso_multigroup_inducing_lambda}) = :(rho :: vector[n_axes])
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_latent}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_latent_orthogonal}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_gp_periodic}) = :rho
@@ -12456,12 +12548,22 @@ _sb_hsgp_level_arguments!(data, lc::_BRMLevelCorrelation) =
     (; L_level=_sb_level_correlation_factor!(data, lc))
 _sb_hsgp_level_arguments!(data, lc::_BRMMultigroupCorrelation) =
     (; L_level=_sb_level_correlation_factor!(data, lc.base), tau_level=lc.tau)
-_sb_hsgp_level_submodel(::_BRMMultigroupCoordinates, iso) =
-    iso ? :_sb_hsgp_by_multigroup_coordinates : :_sb_hsgp_by_aniso_multigroup_coordinates
+function _sb_hsgp_level_submodel(lc::_BRMMultigroupCoordinates, iso)
+    base = Symbol(:_sb_hsgp_by_, iso ? "" : "aniso_", :multigroup_,
+                  isempty(lc.positions) ? :coordinates : :inducing)
+    isnothing(lc.lambda) ? Symbol(base, :_lambda) : base
+end
 # The coordinates and the grid geometry they fit are data, computed once in
-# Julia and replayed frozen, like a known correlation's factor.
+# Julia and replayed frozen, like a known correlation's factor. Free inducing
+# positions are data the same way, or the declared vector parameters by name.
 function _sb_hsgp_level_arguments!(data, lc::_BRMMultigroupCoordinates)
     stem = Symbol(:multigroup_, join(lc.axes, "_"))
+    isempty(lc.positions) || return (;
+        coordinates_level=_sb_static_level_datum!(data, Symbol(stem, :_coordinates),
+                                                  lc.coordinates),
+        positions_level=_sb_multigroup_positions!(data, stem, lc),
+        _sb_multigroup_lambda!(data, Symbol(stem, :_inducing_,
+            join((p.name for p in lc.positions), "_")), stem, lc)...)
     method = _brm_multigroup_method_code(lc.method)
     center, scale, _ = brm_multigroup_coordinate_grid(lc.coordinates, lc.k, method, lc.c)
     # One grid per method, size and (for a box) factor: `multigroup_x_y_inducing20`.
@@ -12471,7 +12573,30 @@ function _sb_hsgp_level_arguments!(data, lc::_BRMMultigroupCoordinates)
                                                  lc.coordinates),
        center_level=_sb_static_level_datum!(data, Symbol(grid, :_center), center),
        scale_level=_sb_static_level_datum!(data, Symbol(grid, :_scale), scale),
-       lambda_level=lc.lambda, k_level=lc.k, method_level=method)
+       _sb_multigroup_lambda!(data, grid, stem, lc)..., k_level=lc.k, method_level=method)
+end
+# The spatial scale: the declared parameter or constant, or the term's own
+# prior's location (per coordinates) and lower bound (per approximation).
+function _sb_multigroup_lambda!(data, approximation, stem, lc)
+    isnothing(lc.lambda) || return (; lambda_level=lc.lambda)
+    (; location, lower) = _brm_multigroup_default_lambda(lc)
+    (; lambda_location=_sb_static_level_datum!(data, Symbol(stem, :_lambda_location), location),
+       lambda_lower=_sb_static_level_datum!(data, Symbol(approximation, :_lambda_lower), lower))
+end
+# The positions as one points × axes matrix: a data matrix when every axis is
+# data, else the axes (data vectors or declared vector parameters) side by side.
+function _sb_multigroup_positions!(data, stem, lc)
+    names = join((position.name for position in lc.positions), "_")
+    all(position -> !isnothing(position.values), lc.positions) &&
+        return _sb_static_level_datum!(data, Symbol(stem, :_inducing_, names),
+                                       reduce(hcat, (p.values for p in lc.positions)))
+    columns = map(lc.positions) do position
+        isnothing(position.values) ? position.name :
+            _sb_static_level_datum!(data, Symbol(stem, :_inducing_, position.name),
+                                    position.values)
+    end
+    length(columns) == 1 && return :(to_matrix($(only(columns)), $(lc.n_points), 1))
+    foldl((a, b) -> :(append_col($a, $b)), columns)
 end
 function _sb_static_level_datum!(data, key, value)
     if haskey(data, key)
