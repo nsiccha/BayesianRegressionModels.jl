@@ -279,7 +279,7 @@ Gaussian conditionals do not establish coverage of the allocation.
 
 ## Exact totals and generated vector priors
 
-Exact totals (`total_groups=:auto`, deprecated) describe the
+Exact totals (`total_groups=:auto`; not the default) describe the
 authored hierarchy of the conventional program they replace. Each total column
 keeps its conventional random-effect identity: `(:random_effect, id, group)`
 for a declared `|ID|`, otherwise `(:independent, k)` in emission order. Its SD

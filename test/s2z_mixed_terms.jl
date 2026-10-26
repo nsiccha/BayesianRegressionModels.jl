@@ -364,13 +364,18 @@ end
 
 # Exact transport through the wrapper: source -> physical -> source, the
 # wrapped density and its Enzyme gradient against finite differences, and
-# scalar-cell candidates that do not depend on the supplying source frame.
+# candidates that do not depend on the supplying source frame. Sampled totals
+# sit beside the joint per-pair wrapper (mean-located, snag
+# exact-totals-fun-f116d6b2); without them the joint wrapper is the whole.
+# Controls keep the joint pair order.
 function wrapper_audit(sb, problem, names; seed=8)
     blocks = adaptive_centering_blocks(sb, names)
     hsgp = BRM._adaptive_hsgp_centering_blocks(sb, names)
     cells = AC_EXT._scalar_centering_cells(sb, names)
-    @test !isempty(cells.indices)
-    # Ordinary and HSGP cells keep their joint order; scalar cells follow.
+    cols = BRM._total_centering_columns(sb, names)
+    ntot = length(cols.indices)
+    @test !isempty(cells.indices) && cells.indices[1:ntot] == cols.indices
+    # Ordinary and HSGP cells keep their joint order; totals, then S2Z follow.
     _, joint = AC_EXT._adaptive_joint_centering_reparametrizer(
         BRM.AdaptiveCenteringBlock[b for b in blocks if b isa BRM.AdaptiveCenteringBlock],
         hsgp)
@@ -378,7 +383,11 @@ function wrapper_audit(sb, problem, names; seed=8)
     c = collect(range(0.1, 0.9; length=n_other + length(cells.indices)))
     rp = adaptive_centering_problem(sb, problem, AutoEnzyme(); centeredness=c)
     ir = WarmupHMC.reparametrizer(rp)
-    @test first.(ir.pairs) == vcat(first.(joint.pairs), cells.indices)
+    @test (ir isa AC_EXT.BRMTotalsBesideCenteringReparametrization) == (ntot > 0)
+    pairwise = ntot > 0 ? ir.primary : ir
+    @test (ntot > 0 ? WarmupHMC.reparam_controls(ir) : AC_EXT._primary_controls(ir)) ≈ c
+    @test [r.index for r in adaptive_centering_controls(rp, sb)] ==
+          vcat(first.(joint.pairs), cells.indices)
     physical = 0.3 .* randn(Xoshiro(seed), length(names))
     _, source = WarmupHMC._inverse_with_logabsdet_jacobian(ir, physical)
     jac, mapped = ir(source)
@@ -391,18 +400,39 @@ function wrapper_audit(sb, problem, names; seed=8)
          LogDensityProblems.logdensity(rp, source - h)) / 2e-5
     end
     @test g ≈ fd atol = 1e-5 rtol = 1e-5
-    plan = WarmupHMC.candidate_scoring_plan(rp)
-    frame = plan.prepare(ir, source, g)
+    # S2Z contrasts: the per-pair frame, constant location.
+    frame = AC_EXT._prepare_frame(AC_EXT._primary_state(pairwise), pairwise, source, g)
     gphys = last(LogDensityProblems.logdensity_and_gradient(problem, physical))
-    for (j, index) in enumerate(cells.indices), candidate in (0.0, 0.5, 1.0)
-        p = n_other + j
-        @test first(ir.pairs[p]) == index
-        _, position, gradient = plan.score(frame, p, index, last(ir.pairs[p]),
+    for j in ntot+1:length(cells.indices), candidate in (0.0, 0.5, 1.0)
+        index, p = cells.indices[j], n_other + j - ntot
+        @test first(pairwise.pairs[p]) == index
+        _, position, gradient = AC_EXT._score_candidate(frame, p, index, nothing,
             WarmupHMC.PartiallyCentered(candidate))
         t, e, m = cells.targets[j], physical[cells.scales[j]], cells.locations[j]
         @test position ≈ candidate * m + (physical[index] - t * m) * exp((candidate - t) * e) atol = 1e-10
         @test gradient ≈ gphys[index] * exp((t - candidate) * e) atol = 1e-8
     end
+    ntot > 0 || return rp
+    # Totals: the column's least-squares location, whatever the source frame.
+    Q = zeros(length(AC_EXT._CENTERING_CANDIDATES), ntot)
+    G = zeros(size(Q))
+    AC_EXT._mean_totals_candidates!(Q, G, ir.totals, source, g)
+    for col in eachindex(cols.scales)
+        r = cols.starts[col]:cols.starts[col+1]-1
+        J, P = length(r), cols.widths[col]
+        W = reshape(cols.design[cols.offsets[col] .+ (1:J*P)], J, P)
+        T = physical[cols.indices[r]]
+        loc = P == 0 ? zero(T) : W * ((W' * W) \ (W' * T))
+        e = physical[cols.scales[col]]
+        for (i, t) in enumerate(AC_EXT._CENTERING_CANDIDATES)
+            @test Q[i, r] ≈ loc .+ (T .- loc) .* exp((t - 1) * e) atol = 1e-10
+        end
+    end
+    positions = hcat((source .+ 0.05 .* randn(Xoshiro(s), length(source)) for s in 1:5)...)
+    gradients = hcat((last(LogDensityProblems.logdensity_and_gradient(rp, x))
+                      for x in eachcol(positions))...)
+    @test AC_EXT._totals_beside_select!(ir, positions, gradients) isa Bool
+    @test all(c -> c in AC_EXT._CENTERING_CANDIDATES, WarmupHMC.reparam_controls(ir))
     rp
 end
 

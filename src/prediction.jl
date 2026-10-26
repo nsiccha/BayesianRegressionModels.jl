@@ -1568,7 +1568,7 @@ would mean something else:
   `effect(mu, x) ~ Exponential(1)` leaves the vector declared unbounded (its
   density enforces the support), so that coefficient zeroes exactly;
 - a coefficient absorbed by an exact total-coefficient block (the `(1 | g)`
-  intercept under the deprecated `total_groups=:auto`), which is integrated out of
+  intercept under `total_groups=:auto`), which is integrated out of
   the sampled model and has no unconstrained coordinate;
 - a carrier absent from the unconstrained draws — re-drawn in generated
   quantities (an unconditioned program), or assembled from raw draws as a

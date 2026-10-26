@@ -651,7 +651,7 @@ end
     @test post_block.group === :g
     @test post_block.columns == (:Intercept,)
 
-    sb = @test_logs (:warn, r"unconditioned \(prior\) program") match_mode=:any SBBRMI(
+    sb = @test_logs (:warn, r"unconditioned \(prior\) program") SBBRMI(
         builder(prior_df); mod=@__MODULE__, total_groups=:auto)
     prior_block = only(total_effect_blocks(sb))
     @test (prior_block.predictor, prior_block.group, prior_block.columns) ==
@@ -693,7 +693,7 @@ end
     joint_post = SBBRMI(joint(joint_df); mod=@__MODULE__, total_groups=:auto)
     @test sort!([b.predictor for b in total_effect_blocks(joint_post)]) ==
         [:eta, :mu]
-    joint_prior = @test_logs (:warn, r"unconditioned \(prior\) program") match_mode=:any SBBRMI(
+    joint_prior = @test_logs (:warn, r"unconditioned \(prior\) program") SBBRMI(
         joint((; x=joint_df.x, g=joint_df.g)); mod=@__MODULE__, total_groups=:auto)
     @test sort!([b.predictor for b in total_effect_blocks(joint_prior)]) ==
         [:eta, :mu]

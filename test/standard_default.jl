@@ -1,7 +1,6 @@
 # SBBRMI's default random-effect parametrization is the standard
-# (non-centered) one (user point `073uzow`), and exact totals are deprecated
-# everywhere (user point `1qwe3nj`): an explicit `total_groups` request still
-# builds, with a deprecation warning, so fits that carry totals keep working.
+# (non-centered) one (user point `073uzow`); exact totals are built on request,
+# without a warning (they are not deprecated: user pick `1rncfjy`).
 # Snag `exact-totals-fun-f116d6b2`, user pick `0rz9l5s`.
 #
 # Run: julia --project=test test/standard_default.jl
@@ -29,15 +28,15 @@ function warnings_of(f)
     value, [string(r.message) for r in logger.logs]
 end
 
-@testset "totals are deprecated, still built on request" begin
-    sb = @test_logs (:warn, r"`total_groups` \(exact total coefficients\) is deprecated") match_mode=:any SBBRMI(
-        DEFAULT_BUILDER(DEFAULT_DATA); mod=@__MODULE__, total_groups=:auto)
+@testset "totals are built on request, without a warning" begin
+    sb, warnings = warnings_of(() -> SBBRMI(DEFAULT_BUILDER(DEFAULT_DATA); mod=@__MODULE__, total_groups=:auto))
+    @test !any(w -> occursin("total_groups", w), warnings)
     @test length(total_effect_blocks(sb)) == 1
 end
 
 @testset "the default is the standard parametrization" begin
     sb, warnings = warnings_of(() -> SBBRMI(DEFAULT_BUILDER(DEFAULT_DATA); mod=@__MODULE__))
-    @test !any(w -> occursin("deprecated", w), warnings)
+    @test !any(w -> occursin("total_groups", w), warnings)
     @test isempty(total_effect_blocks(sb))
     @test StanBlocks.stan_code(sb.model) ==
           StanBlocks.stan_code(SBBRMI(DEFAULT_BUILDER(DEFAULT_DATA); mod=@__MODULE__, total_groups=()).model)

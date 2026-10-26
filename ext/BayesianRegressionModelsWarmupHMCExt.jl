@@ -567,6 +567,334 @@ function _scalar_centering_reparametrizer(indices,scales,locations,targets)
     state,WarmupHMC.IndexedReparametrization(pairs)
 end
 
+# ---- Mean-located exact totals ------------------------------------------------
+#
+# Exact totals centred on their own column's location instead of a constant
+# (user pick `1rncfjy`, snag exact-totals-fun-f116d6b2). For one total column
+# (`BRM._TotalCenteringColumns`: J totals `T`, log-scale `ell`, location design
+# `W`, J x P) and cell controls `c`, let `a_j = exp((1 - c_j) * ell)` and
+# `A = Diagonal(a)`. The sampler coordinate is
+#
+#     x_j = loc_j + (T_j - loc_j) / a_j,    loc = W * ((W'W) \ (W'T)),
+#
+# the least-squares fit of the totals on `W`, a function of the totals that no
+# control moves (the column mean for a plain block). The inverse is
+# `loc = W * ((W'AW) \ (W'A x))`, `T = loc + A * (x - loc)`, and the
+# log-Jacobian of `x -> T` is `sum(log, a) + logdet(W'W) - logdet(W'AW)`. So
+# `c = 1` is the compiled total and `c = 0` gives `(T - loc) / tau`, the
+# standard non-centred deviations, with the location kept. The location couples
+# a column's cells, which `WarmupHMC.IndexedReparametrization` (a per-cell
+# Jacobian and a cell-by-cell inverse) cannot express, so the cells live in
+# their own reparametrizer, adapted by a `WarmupHMC.WindowSelectionPlan`. S2Z
+# contrasts, constant-location cells, follow the totals in the same wrapper.
+struct BRMMeanTotalsCenteringReparametrization{N} <: WarmupHMC.AbstractReparametrization
+    # Every scalar cell (`_scalar_centering_cells`: totals, then S2Z contrasts);
+    # `sources` holds the controls. Total cells ignore `locations`.
+    state::BRMScalarCenteringState
+    columns::BRM._TotalCenteringColumns
+    # The compiled frame of every cell.
+    targets::Vector{Float64}
+    # `1`: source -> compiled; `-1`: compiled -> source.
+    direction::Int
+end
+
+# The column's `N x N` systems are built and factored without a loop-carried
+# NTuple: Enzyme (Julia 1.10) returned wrong gradients for a tuple updated in a
+# loop at a runtime index (`M = _tset(M, M[k] + v, k)`) once a column had two
+# or more location predictors, with exact values (measured against central
+# differences: off by up to 2.4 at `N = 5`; correct to 1e-9 in this form). So
+# each Gram entry is a scalar sum over the column's cells, and the Cholesky
+# factor and solve are straight-line code for the compile-time `N`. Dimensions
+# past the column's width `P` carry an identity block: no location, no logdet.
+
+# Lower Cholesky factor of a row-major `N x N` NTuple (lower triangle read).
+@generated function _small_cholesky(M::NTuple{NN,T}, ::Val{N}) where {NN,T,N}
+    L(i, j) = Symbol(:L_, i, :_, j)
+    body = Expr[]
+    for j in 1:N
+        s = :(M[$((j - 1) * N + j)])
+        for k in 1:j-1
+            s = :($s - $(L(j, k)) * $(L(j, k)))
+        end
+        push!(body, :($(L(j, j)) = sqrt($s)))
+        for i in j+1:N
+            s = :(M[$((i - 1) * N + j)])
+            for k in 1:j-1
+                s = :($s - $(L(i, k)) * $(L(j, k)))
+            end
+            push!(body, :($(L(i, j)) = $s / $(L(j, j))))
+        end
+    end
+    quote
+        $(body...)
+        ($((i >= j ? L(i, j) : :(zero(T)) for i in 1:N for j in 1:N)...),)
+    end
+end
+
+# `(L L') \ r` for the factor `L` of `_small_cholesky`.
+@generated function _small_cholesky_solve(L::NTuple{NN,T}, r::NTuple{N,T}) where {NN,T,N}
+    y(i) = Symbol(:y_, i)
+    z(i) = Symbol(:z_, i)
+    body = Expr[]
+    for i in 1:N
+        s = :(r[$i])
+        for k in 1:i-1
+            s = :($s - L[$((i - 1) * N + k)] * $(y(k)))
+        end
+        push!(body, :($(y(i)) = $s / L[$((i - 1) * N + i)]))
+    end
+    for i in N:-1:1
+        s = y(i)
+        for k in i+1:N
+            s = :($s - L[$((k - 1) * N + i)] * $(z(k)))
+        end
+        push!(body, :($(z(i)) = $s / L[$((i - 1) * N + i)]))
+    end
+    quote
+        $(body...)
+        ($((z(i) for i in 1:N)...),)
+    end
+end
+
+# Entry `(p, q)`, `p >= q`, of `W'AW` and `W'BW` for column `col`
+# (`a_j = exp((1 - from_j) * ell)`, `b_j = exp((1 - to_j) * ell)`), or the
+# identity past the column's width.
+function _mean_total_gram(cols, col, from, to, ell, p, q)
+    T = typeof(ell)
+    p > cols.widths[col] && return (T(p == q), T(p == q))
+    lo, hi = cols.starts[col], cols.starts[col + 1] - 1
+    J, d0 = hi - lo + 1, cols.offsets[col]
+    sa = sb = zero(T)
+    for j in 1:J
+        cell = lo + j - 1
+        ww = cols.design[d0 + (p - 1) * J + j] * cols.design[d0 + (q - 1) * J + j]
+        sa += exp((1 - from[cell]) * ell) * ww
+        sb += exp((1 - to[cell]) * ell) * ww
+    end
+    sa, sb
+end
+
+# Entry `p` of `W'Ax`, zero past the column's width.
+function _mean_total_moment(x, cols, col, from, ell, p)
+    T = eltype(x)
+    p > cols.widths[col] && return zero(T)
+    lo, hi = cols.starts[col], cols.starts[col + 1] - 1
+    J, d0 = hi - lo + 1, cols.offsets[col]
+    s = zero(T)
+    for j in 1:J
+        cell = lo + j - 1
+        s += exp((1 - from[cell]) * ell) * cols.design[d0 + (p - 1) * J + j] *
+             x[cols.indices[cell]]
+    end
+    s
+end
+
+# Column `col` from controls `from` to `to` (`b_j = exp((1 - to_j) * ell)`):
+# `y_j = loc_j + (a_j / b_j) * (x_j - loc_j)`, with the location solved in the
+# `from` frame (the same in every frame). Returns the log-Jacobian
+# `sum((to - from) * ell) - logdet(W'AW) + logdet(W'BW)`. Every read of `x`
+# precedes the writes, and the column writes only its own cells, so `y === x`
+# is safe.
+function _mean_total_column_map!(y, x, cols, col, from, to, ::Val{N}) where {N}
+    T = eltype(x)
+    ell = x[cols.scales[col]]
+    lo, hi = cols.starts[col], cols.starts[col + 1] - 1
+    J, P, d0 = hi - lo + 1, cols.widths[col], cols.offsets[col]
+    M = ntuple(k -> cld(k, N) >= mod1(k, N) ?
+        _mean_total_gram(cols, col, from, to, ell, cld(k, N), mod1(k, N)) :
+        (zero(T), zero(T)), Val(N * N))
+    La = _small_cholesky(ntuple(k -> M[k][1], Val(N * N)), Val(N))
+    Lb = _small_cholesky(ntuple(k -> M[k][2], Val(N * N)), Val(N))
+    gamma = _small_cholesky_solve(La,
+        ntuple(p -> _mean_total_moment(x, cols, col, from, ell, p), Val(N)))
+    ljac = zero(T)
+    for p in 1:N
+        ljac += 2 * (log(Lb[(p - 1) * N + p]) - log(La[(p - 1) * N + p]))
+    end
+    for j in 1:J
+        cell = lo + j - 1
+        ljac += (to[cell] - from[cell]) * ell
+        loc = sum(ntuple(p -> p <= P ? cols.design[d0 + (p - 1) * J + j] * gamma[p] :
+                                       zero(T), Val(N)))
+        idx = cols.indices[cell]
+        y[idx] = loc + exp((to[cell] - from[cell]) * ell) * (x[idx] - loc)
+    end
+    ljac
+end
+
+function WarmupHMC.with_logabsdet_jacobian!(y::AbstractVector,
+        ir::BRMMeanTotalsCenteringReparametrization{N}, x::AbstractVector) where {N}
+    s, cols = ir.state, ir.columns
+    from, to = ir.direction > 0 ? (s.sources, ir.targets) : (ir.targets, s.sources)
+    ljac = zero(eltype(x))
+    for col in eachindex(cols.scales)
+        ljac += _mean_total_column_map!(y, x, cols, col, from, to, Val(N))
+    end
+    for p in cols.starts[end]:length(s.sources)
+        ljac += _cell_map!(y, x, s.indices[p], s.locations[p], x[s.scales[p]],
+            ir.targets[p], s.sources[p], ir.direction)
+    end
+    ljac, y
+end
+
+WarmupHMC.InverseFunctions.inverse(ir::BRMMeanTotalsCenteringReparametrization{N}) where {N} =
+    BRMMeanTotalsCenteringReparametrization{N}(ir.state, ir.columns, ir.targets, -ir.direction)
+
+WarmupHMC.reparam_controls(ir::BRMMeanTotalsCenteringReparametrization) =
+    copy(ir.state.sources)
+
+function WarmupHMC.restore_reparam_controls!(ir::BRMMeanTotalsCenteringReparametrization,
+                                             controls)
+    n = length(ir.state.sources)
+    controls isa AbstractVector && length(controls) == n || throw(ArgumentError(
+        "BRM mean-located totals centering controls must be one value per " *
+        "adaptive cell ($n): totals, then S2Z contrasts"))
+    all(c -> c isa Real && isfinite(c) && 0 <= c <= 1, controls) ||
+        throw(ArgumentError("centeredness values must lie in [0,1]"))
+    ir.state.sources .= controls
+    ir
+end
+
+WarmupHMC.snapshot_reparametrization(ir::BRMMeanTotalsCenteringReparametrization{N}) where {N} =
+    BRMMeanTotalsCenteringReparametrization{N}(
+        BRMScalarCenteringState(ir.state.indices, ir.state.scales, ir.state.locations,
+                                copy(ir.state.sources)),
+        ir.columns, ir.targets, ir.direction)
+
+# Every cell's candidate coordinates `Q[i, p]` and gradients `G[i, p]` at
+# `_CENTERING_CANDIDATES[i]`, from one source-frame draw `x` with gradient `gx`,
+# each cell moved alone (the other cells keep their source controls). A total's
+# candidate is exact. The location stays in place, so
+# `q = loc_j + (T_j - loc_j) / a'`. With `G` the gradient in the totals,
+# `M = W'AW`, `v = W'(I - A)G`, `u = M \ w_j` and the control change
+# `d = a' - a_j`, the candidate gradient is
+# `a' * (G_j + (v'u - d * G_j * w_j'u) / (1 + d * w_j'u))`, a rank-one update of
+# `M`. `G` itself comes from `gx = A * (G + W * (M \ v))`:
+# `G = gx ./ a - W * ((W'W) \ (W' * ((1 .- a) ./ a .* gx)))`.
+# S2Z cells score as in `_score_candidate`.
+function _mean_totals_candidates!(Q, G, ir::BRMMeanTotalsCenteringReparametrization, x, gx)
+    s, cols = ir.state, ir.columns
+    for col in eachindex(cols.scales)
+        lo, hi = cols.starts[col], cols.starts[col + 1] - 1
+        J, P = hi - lo + 1, cols.widths[col]
+        Wd = reshape(cols.design[cols.offsets[col] .+ (1:J*P)], J, P)
+        ell = x[cols.scales[col]]
+        idx = cols.indices[lo:hi]
+        a = exp.((1 .- s.sources[lo:hi]) .* ell)
+        xs, gs = x[idx], gx[idx]
+        if P == 0
+            loc, Gm, U, v = zeros(J), gs ./ a, zeros(0, J), zeros(0)
+        else
+            M = Wd' * (a .* Wd)
+            loc = Wd * (M \ (Wd' * (a .* xs)))
+            Gm = gs ./ a .- Wd * ((Wd' * Wd) \ (Wd' * ((1 .- a) ./ a .* gs)))
+            v = Wd' * ((1 .- a) .* Gm)
+            U = M \ Matrix(Wd')
+        end
+        totals = loc .+ a .* (xs .- loc)
+        for j in 1:J
+            u = view(U, :, j)
+            sj = P == 0 ? 0.0 : BRM.LinearAlgebra.dot(view(Wd, j, :), u)
+            rj = P == 0 ? 0.0 : BRM.LinearAlgebra.dot(v, u)
+            p = lo + j - 1
+            for (i, t) in enumerate(_CENTERING_CANDIDATES)
+                a2 = exp((1 - t) * ell)
+                d = a2 - a[j]
+                Q[i, p] = loc[j] + (totals[j] - loc[j]) / a2
+                G[i, p] = a2 * (Gm[j] + (rj - d * Gm[j] * sj) / (1 + d * sj))
+            end
+        end
+    end
+    for p in cols.starts[end]:length(s.sources)
+        tau, c, m = exp(x[s.scales[p]]), s.sources[p], s.locations[p]
+        f = tau^c
+        z = (x[s.indices[p]] - c * m) / f
+        h = f * gx[s.indices[p]]
+        for (i, t) in enumerate(_CENTERING_CANDIDATES)
+            Q[i, p] = t * m + tau^t * z
+            G[i, p] = h / tau^t
+        end
+    end
+    Q, G
+end
+
+# The window rule: WarmupHMC's 11 candidates and its default criterion, the
+# position-gradient correlation `Cor(q_t, g_t)` over the window's equally
+# weighted evidence, shared by every window-selected wrapper.
+# `candidates!(Q, G, position, gradient)` fills every cell's candidate
+# coordinates and gradients for one evidence column. Returns the new controls;
+# a cell with no finite loss keeps its control.
+function _window_select(old, positions, gradients, candidates!)
+    n = size(positions, 2)
+    shape = (length(_CENTERING_CANDIDATES), length(old))
+    Q, G = zeros(shape), zeros(shape)
+    mean_q, mean_g = zeros(shape), zeros(shape)
+    qq, gg, qg = zeros(shape), zeros(shape), zeros(shape)
+    for pass in 1:2, col in 1:n
+        candidates!(Q, G, view(positions, :, col), view(gradients, :, col))
+        if pass == 1
+            mean_q .+= Q ./ n
+            mean_g .+= G ./ n
+        else
+            qq .+= (Q .- mean_q) .^ 2
+            gg .+= (G .- mean_g) .^ 2
+            qg .+= (Q .- mean_q) .* (G .- mean_g)
+        end
+    end
+    new = copy(old)
+    for p in eachindex(old)
+        losses = [qg[i, p] / sqrt(qq[i, p] * gg[i, p]) for i in axes(qg, 1)]
+        finite = findall(isfinite, losses)
+        isempty(finite) && continue
+        new[p] = _CENTERING_CANDIDATES[finite[argmin(losses[finite])]]
+    end
+    new
+end
+
+# Every cell's candidates from its source-invariant frame (`_score_candidate`).
+function _frame_candidates!(Q, G, frame)
+    for p in axes(Q, 2), (i, t) in enumerate(_CENTERING_CANDIDATES)
+        _, Q[i, p], G[i, p] = _score_candidate(frame, p, 0, nothing,
+                                               WarmupHMC.PartiallyCentered(t))
+    end
+    Q, G
+end
+
+# Each cell's score is exact for that cell alone; the cells then move
+# together, so a column's simultaneous update is a coordinate-wise step, not a
+# joint optimum.
+function _mean_totals_select!(ir::BRMMeanTotalsCenteringReparametrization, positions,
+                              gradients)
+    size(positions, 2) > 2 || return false
+    old = WarmupHMC.reparam_controls(ir)
+    new = _window_select(old, positions, gradients,
+        (Q, G, x, g) -> _mean_totals_candidates!(Q, G, ir, x, g))
+    new == old && return false
+    WarmupHMC.restore_reparam_controls!(ir, new)
+    true
+end
+
+# The mean-located wrapper over every sampled total and, with `s2z=true`, the
+# S2Z contrasts after them.
+function _mean_totals_reparametrizer(model, names; s2z::Bool)
+    cells = s2z ? _scalar_centering_cells(model, names) :
+        BRM._total_centering_cells(model, names)
+    columns = BRM._total_centering_columns(model, names)
+    columns.indices == cells.indices[1:length(columns.indices)] ||
+        error("BRM mean-located totals: total cells and columns disagree")
+    N = max(1, maximum(columns.widths; init=1))
+    BRMMeanTotalsCenteringReparametrization{N}(_scalar_centering_state(cells), columns,
+                                               Float64.(cells.targets), 1)
+end
+
+function _mean_totals_centering_problem(model, problem, ad_backend, names, centeredness)
+    ir = _mean_totals_reparametrizer(model, names; s2z=true)
+    controls = _initial_controls(centeredness, length(ir.state.sources))
+    isnothing(controls) || WarmupHMC.restore_reparam_controls!(ir, controls)
+    WarmupHMC.ReparametrizedProblem(ir, problem, ad_backend;
+        scoring_plan=WarmupHMC.WindowSelectionPlan(_mean_totals_select!))
+end
+
 # Areal car cells (`BRM._adaptive_car_centering_blocks`): per block its `:icar`
 # `phi` cells or its `:bym2` `theta` cells, one per area. A `theta` cell is
 # centred on its area's total `intercept + a * phi`, read from coordinates no
@@ -1414,36 +1742,10 @@ const _CENTERING_CANDIDATES = range(0.0, 1.0; length=11)
 # keeps its control. The order is then re-derived from the new controls.
 function _ordered_select!(ir::BRMOrderedCenteringReparametrization, positions,
                           gradients)
-    n = size(positions, 2)
-    n > 2 || return false
+    size(positions, 2) > 2 || return false
     old = WarmupHMC.reparam_controls(ir)
-    candidates = [WarmupHMC.PartiallyCentered(t) for t in _CENTERING_CANDIDATES]
-    shape = (length(candidates), length(old))
-    mean_q, mean_g = zeros(shape), zeros(shape)
-    qq, gg, qg = zeros(shape), zeros(shape), zeros(shape)
-    # Two passes over the evidence: means, then centred moments.
-    for pass in 1:2, col in 1:n
-        frame = _ordered_frame(ir, positions[:, col], gradients[:, col])
-        for p in eachindex(old), (i, t) in enumerate(candidates)
-            _, q, g = _score_candidate(frame, p, 0, nothing, t)
-            if pass == 1
-                mean_q[i, p] += q / n
-                mean_g[i, p] += g / n
-            else
-                dq, dg = q - mean_q[i, p], g - mean_g[i, p]
-                qq[i, p] += dq * dq
-                gg[i, p] += dg * dg
-                qg[i, p] += dq * dg
-            end
-        end
-    end
-    new = copy(old)
-    for p in eachindex(old)
-        losses = [qg[i, p] / sqrt(qq[i, p] * gg[i, p]) for i in axes(qg, 1)]
-        finite = findall(isfinite, losses)
-        isempty(finite) && continue
-        new[p] = _CENTERING_CANDIDATES[finite[argmin(losses[finite])]]
-    end
+    new = _window_select(old, positions, gradients,
+        (Q, G, x, g) -> _frame_candidates!(Q, G, _ordered_frame(ir, x, g)))
     new == old && return false
     WarmupHMC.restore_reparam_controls!(ir, new)
     true
@@ -1454,6 +1756,121 @@ function _ordered_centering_problem(ir, problem, ad_backend, centeredness)
     isnothing(controls) || WarmupHMC.restore_reparam_controls!(ir, controls)
     plan = WarmupHMC.WindowSelectionPlan(_ordered_select!; synchronize! = _derive_orders!)
     WarmupHMC.ReparametrizedProblem(ir, problem, ad_backend; scoring_plan=plan)
+end
+
+# ---- Mean-located totals beside other adaptive cells --------------------------
+#
+# Ordinary, R2D2, HSGP and car cells (and S2Z contrasts) keep the wrapper they
+# would have without totals (`primary`: the joint per-pair wrapper, or the
+# learned-order wrapper), built without total cells; the totals join through a
+# mean-located wrapper beside it. The two rewrite disjoint coordinates and
+# neither reads the other's cells (`_joint_centering_state` refuses any overlap
+# over all cells), so the map applies both, the log-Jacobian is their sum, and
+# each selects its controls from the same window evidence. A per-pair primary
+# then adapts at restarting windows too, with the scores its online plan uses.
+# Controls keep the joint pair order: ordinary, R2D2 and HSGP cells (`split`),
+# then totals, then the primary's S2Z and car cells.
+struct BRMTotalsBesideCenteringReparametrization{P,T} <: WarmupHMC.AbstractReparametrization
+    primary::P
+    totals::T
+    split::Int
+end
+
+function WarmupHMC.with_logabsdet_jacobian!(y::AbstractVector,
+        ir::BRMTotalsBesideCenteringReparametrization, x::AbstractVector)
+    # The primary first: a per-pair inverse starts by copying its input.
+    l1, _ = WarmupHMC.with_logabsdet_jacobian!(y, ir.primary, x)
+    l2, _ = WarmupHMC.with_logabsdet_jacobian!(y, ir.totals, x)
+    l1 + l2, y
+end
+
+WarmupHMC.InverseFunctions.inverse(ir::BRMTotalsBesideCenteringReparametrization) =
+    BRMTotalsBesideCenteringReparametrization(WarmupHMC.InverseFunctions.inverse(ir.primary),
+        WarmupHMC.InverseFunctions.inverse(ir.totals), ir.split)
+
+_primary_state(ir::WarmupHMC.IndexedReparametrization) = _centering_state(ir)
+_primary_state(ir::BRMOrderedCenteringReparametrization) = ir.state
+_primary_controls(ir::WarmupHMC.IndexedReparametrization) =
+    [Float64(last(p).source.c) for p in ir.pairs]
+_primary_controls(ir::BRMOrderedCenteringReparametrization) = WarmupHMC.reparam_controls(ir)
+_primary_targets(ir::WarmupHMC.IndexedReparametrization) =
+    [Float64(last(p).target.c) for p in ir.pairs]
+_primary_targets(ir::BRMOrderedCenteringReparametrization) = ir.targets
+
+function _restore_primary!(ir::WarmupHMC.IndexedReparametrization, controls)
+    ir.pairs .= [index => WarmupHMC.Reparametrization(value.target,
+        WarmupHMC.PartiallyCentered(Float64(c)), value.args...)
+        for ((index, value), c) in zip(ir.pairs, controls)]
+    _sync_sources!(_centering_state(ir), ir)
+end
+_restore_primary!(ir::BRMOrderedCenteringReparametrization, controls) =
+    WarmupHMC.restore_reparam_controls!(ir, controls)
+
+_primary_synchronize!(ir::WarmupHMC.IndexedReparametrization) =
+    _sync_sources!(_centering_state(ir), ir)
+_primary_synchronize!(ir::BRMOrderedCenteringReparametrization) = _derive_orders!(ir)
+
+# A per-pair primary scores each cell from its own source-invariant frame
+# (`_prepare_frame`, `_score_candidate`), as its online plan does.
+function _primary_select!(ir::WarmupHMC.IndexedReparametrization, positions, gradients)
+    size(positions, 2) > 2 || return false
+    state = _centering_state(ir)
+    old = _primary_controls(ir)
+    new = _window_select(old, positions, gradients,
+        (Q, G, x, g) -> _frame_candidates!(Q, G, _prepare_frame(state, ir, x, g)))
+    new == old && return false
+    _restore_primary!(ir, new)
+    true
+end
+_primary_select!(ir::BRMOrderedCenteringReparametrization, positions, gradients) =
+    _ordered_select!(ir, positions, gradients)
+
+function WarmupHMC.reparam_controls(ir::BRMTotalsBesideCenteringReparametrization)
+    p = _primary_controls(ir.primary)
+    vcat(p[1:ir.split], WarmupHMC.reparam_controls(ir.totals), p[ir.split+1:end])
+end
+
+function WarmupHMC.restore_reparam_controls!(ir::BRMTotalsBesideCenteringReparametrization,
+                                             controls)
+    np, nt = length(_primary_controls(ir.primary)), length(ir.totals.state.sources)
+    controls isa AbstractVector && length(controls) == np + nt || throw(ArgumentError(
+        "BRM centering controls must be one value per adaptive cell ($(np + nt)), in " *
+        "the joint pair order: ordinary, R2D2 and HSGP cells, totals, S2Z, car"))
+    all(c -> c isa Real && isfinite(c) && 0 <= c <= 1, controls) ||
+        throw(ArgumentError("centeredness values must lie in [0,1]"))
+    WarmupHMC.restore_reparam_controls!(ir.totals, controls[ir.split .+ (1:nt)])
+    _restore_primary!(ir.primary, vcat(controls[1:ir.split], controls[ir.split+nt+1:end]))
+    ir
+end
+
+_totals_beside_select!(ir, positions, gradients) =
+    _primary_select!(ir.primary, positions, gradients) |
+    _mean_totals_select!(ir.totals, positions, gradients)
+
+_totals_beside_synchronize!(ir) = (_primary_synchronize!(ir.primary); ir)
+
+function _totals_beside_centering_problem(model, problem, ad_backend, names, centeredness,
+                                          ordinary, hsgp_blocks, r2d2_blocks, car_blocks,
+                                          learned)
+    # Refuses overlapping or cross-reading coordinates over every cell, totals
+    # included, as the single wrapper did.
+    _joint_centering_state(ordinary, hsgp_blocks, r2d2_blocks,
+                           _scalar_centering_cells(model, names), car_blocks)
+    s2z = BRM._s2z_centering_cells(model, names)
+    primary = last(learned ?
+        _adaptive_ordered_centering_reparametrizer(ordinary, hsgp_blocks, r2d2_blocks,
+                                                   s2z, car_blocks) :
+        _adaptive_joint_centering_reparametrizer(ordinary, hsgp_blocks, r2d2_blocks,
+                                                 s2z, car_blocks))
+    state = _primary_state(primary)
+    ir = BRMTotalsBesideCenteringReparametrization(primary,
+        _mean_totals_reparametrizer(model, names; s2z=false),
+        state.n_ranef + state.n_r2d2 + state.n_hsgp)
+    controls = _initial_controls(centeredness, length(WarmupHMC.reparam_controls(ir)))
+    isnothing(controls) || WarmupHMC.restore_reparam_controls!(ir, controls)
+    WarmupHMC.ReparametrizedProblem(ir, problem, ad_backend;
+        scoring_plan=WarmupHMC.WindowSelectionPlan(_totals_beside_select!;
+            synchronize! = _totals_beside_synchronize!))
 end
 
 # cdar walk cells are scalar zero-location cells like HSGP basis weights, so
@@ -1826,9 +2243,23 @@ the transform applied to the model and its hyperparameter gradients remain
 exact. Literal endpoints are preserved: `c=0` is BRM's standardised draw and
 `c=1` is the model-scale correlated effect.
 
-For exact totals, `c=1` is the sampled group total and `c=0` is the total
-scaled around its prior location. The exact marginal prior remains correlated
-at either endpoint. Each group/term cell receives its own control automatically.
+For exact totals, `c=1` is the sampled group total. Each total is centred on
+its column's own location: the least-squares fit of that column's totals on the group-level
+design of the coefficients it absorbs, which for a plain block is the mean of
+the column's totals. Cell `j` samples `loc_j + (T_j - loc_j) / tau^(1-c_j)`, so
+`c=0` gives the standard non-centred deviations `(T_j - loc_j) / tau` with the
+location kept, and the location is a function of the totals, with nothing to
+choose. The location couples a column's cells, so these cells live in their own
+reparametrizer, adapted at each restarting window by WarmupHMC's candidate grid
+and default criterion (`Cor(q_t, g_t)`, each cell scored exactly with the
+others at their current controls) through a `WarmupHMC.WindowSelectionPlan`
+over the window's evidence (the retained pool by default; see
+`nonlinear_evidence`). Beside ordinary, R2D2, HSGP or car cells, those cells
+keep the wrapper they would have without totals (per-pair, or learned-order)
+and the totals' wrapper joins it; both then select at restarting windows from
+the same evidence, the per-pair cells with the scores their online plan uses.
+Controls keep the pair order below. The exact marginal prior remains correlated at either endpoint. Each
+group/term cell receives its own control automatically.
 A total block emitted in generated quantities (no observed likelihood reaches
 it) has no sampler coordinate, so it has no cell and does not count as a totals
 block when choosing the wrapper. The same holds for every other family: an
@@ -1983,6 +2414,8 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
             "adaptive total coefficients and S2Z contrasts cannot yet be mixed with cdar blocks; use total_groups=() and s2z_groups=() for the conventional model"))
     end
     if scalar && isempty(blocks) && isempty(hsgp_blocks) && isempty(car_blocks)
+        isempty(total_blocks) || return _mean_totals_centering_problem(
+            model, problem, ad_backend, names, centeredness)
         state,ir = _adaptive_scalar_centering_reparametrizer(model,names)
         _initial_centering!(state,ir,centeredness)
         return WarmupHMC.ReparametrizedProblem(ir,problem,ad_backend;
@@ -2004,6 +2437,11 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
         b for b in blocks if b isa BRM.AdaptiveCenteringBlock]
     r2d2_blocks = BRM.R2D2AdaptiveCenteringBlock[
         b for b in blocks if b isa BRM.R2D2AdaptiveCenteringBlock]
+    # Totals beside other cells: mean-located totals next to the wrapper the
+    # other cells would have without them.
+    isempty(total_blocks) || return _totals_beside_centering_problem(model, problem,
+        ad_backend, names, centeredness, ordinary, hsgp_blocks, r2d2_blocks, car_blocks,
+        ranef_order === :learned && any(b -> b.ranef.n_terms > 1, blocks))
     # cdar cells never share a wrapper; the branch below refuses the mix.
     if ranef_order === :learned && isempty(cdar_blocks) &&
             any(b -> b.ranef.n_terms > 1, blocks)
@@ -2046,6 +2484,8 @@ end
 _centering_state(ir::WarmupHMC.IndexedReparametrization) =
     isempty(ir.pairs) ? nothing : first(ir.pairs).second.args[1].state
 _centering_state(ir::BRMOrderedCenteringReparametrization) = ir.state
+_centering_state(ir::BRMMeanTotalsCenteringReparametrization) = ir.state
+_centering_state(ir::BRMTotalsBesideCenteringReparametrization) = ir
 _centering_state(::BRMS2ZMapReparametrization) = throw(ArgumentError(
     "adaptive_centering_controls: an `s2z_rule=:fisher` wrapper has one J-by-K " *
     "weight matrix per S2Z block, not per-cell controls; read them with " *
@@ -2053,11 +2493,20 @@ _centering_state(::BRMS2ZMapReparametrization) = throw(ArgumentError(
 
 _centering_orders(::WarmupHMC.IndexedReparametrization) = nothing
 _centering_orders(ir::BRMOrderedCenteringReparametrization) = ir.orders
+_centering_orders(::BRMMeanTotalsCenteringReparametrization) = nothing
+_centering_orders(ir::BRMTotalsBesideCenteringReparametrization) =
+    _centering_orders(ir.primary)
 
 _centering_values(ir::WarmupHMC.IndexedReparametrization) =
     ([last(p).source.c for p in ir.pairs], [last(p).target.c for p in ir.pairs])
 _centering_values(ir::BRMOrderedCenteringReparametrization) =
     (WarmupHMC.reparam_controls(ir), ir.targets)
+_centering_values(ir::BRMMeanTotalsCenteringReparametrization) =
+    (WarmupHMC.reparam_controls(ir), ir.targets)
+function _centering_values(ir::BRMTotalsBesideCenteringReparametrization)
+    t = _primary_targets(ir.primary)
+    (WarmupHMC.reparam_controls(ir), vcat(t[1:ir.split], ir.totals.targets, t[ir.split+1:end]))
+end
 
 _control_row(cell, index, names, family; binding=nothing, group=nothing,
              margin=nothing, level=nothing, term=nothing, rank=nothing, c, target) =
@@ -2141,6 +2590,16 @@ function _control_rows!(rows, state::BRMJointAdaptiveCenteringState, orders, off
     offset = _control_rows!(rows, state.hsgp, nothing, offset, values, names, margins)
     offset = _control_rows!(rows, state.scalar, nothing, offset, values, names, margins)
     _control_rows!(rows, state.car, nothing, offset, values, names, margins)
+end
+
+function _control_rows!(rows, ir::BRMTotalsBesideCenteringReparametrization, orders,
+                        offset, values, names, margins)
+    s = _primary_state(ir.primary)
+    offset = _control_rows!(rows, s.ranef, orders, offset, values, names, margins)
+    offset = _control_rows!(rows, s.hsgp, nothing, offset, values, names, margins)
+    offset = _control_rows!(rows, ir.totals.state, nothing, offset, values, names, margins)
+    offset = _control_rows!(rows, s.scalar, nothing, offset, values, names, margins)
+    _control_rows!(rows, s.car, nothing, offset, values, names, margins)
 end
 
 _control_margins(model::Union{BRM.GenerativePlan,BRM.SBBRMI}) =

@@ -175,7 +175,7 @@ end
     for c in (0.0, 1.0)
         rp = adaptive_centering_problem(totals_sb, problem, AutoEnzyme(); centeredness = c)
         ir = WarmupHMC.reparametrizer(rp)
-        @test [index for (index, _) in ir.pairs] == vec(MU_COORDS.totals)
+        @test ir.state.indices == ir.columns.indices == vec(MU_COORDS.totals)
         _, source = WarmupHMC._inverse_with_logabsdet_jacobian(ir, physical)
         jac, mapped = ir(source)
         @test mapped ≈ physical atol = 1e-12

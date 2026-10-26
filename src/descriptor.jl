@@ -3460,7 +3460,7 @@ with `include_gq=true` (and, as for the R2D2 derived-scale family,
 the sampled one in a fit.
 
 Exact totals: an `|ID|` that an exact total-coefficient block absorbed (see
-[`total_effect_blocks`](@ref); the deprecated `total_groups=:auto` does this for
+[`total_effect_blocks`](@ref); `total_groups=:auto` does this for
 independent margins) keeps this address. Its margin's SD is that block's total
 scale, the SD of each group's total around the population value `A β`, and the
 returned coordinate is that scale's element. A block emitted in generated

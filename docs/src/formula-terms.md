@@ -494,13 +494,12 @@ NLME view. Exact totals leave such a block conventional.
 
 ### Exact total coefficients
 
-!!! warning "Deprecated"
-    Exact total coefficients (`total_groups`) are deprecated and warn once per
-    session; they still build, so fits and replays that carry them keep
-    working. The StanBlocks backend's default is the standard (non-centered)
-    parametrization. For groupings whose blocks the data identify strongly or
-    unevenly, use the sum-to-zero parametrization (`s2z_groups`, `s2z_rho`) with
-    WarmupHMC adaptive centering.
+!!! note "Not the default"
+    The StanBlocks backend's default is the standard (non-centered)
+    parametrization; exact total coefficients are requested with
+    `total_groups`. For groupings whose blocks the data identify strongly or
+    unevenly, the sum-to-zero parametrization (`s2z_groups`, `s2z_rho`) with
+    WarmupHMC adaptive centering is the other alternative.
 
 With `total_groups=:auto`, the StanBlocks backend uses **total coefficients** for
 eligible independent random effects. For example, in
@@ -600,7 +599,7 @@ BRM discovers each total's scale and supplies independent centering controls:
 using Random, Enzyme, WarmupHMC, BridgeStan, StanBlocks
 using DifferentiationInterface: AutoEnzyme
 
-sb = SBBRMI(total_intercept_model)
+sb = SBBRMI(total_intercept_model; total_groups=:auto)
 problem = StanBlocks.stan_instantiate(sb.model)
 backend = AutoEnzyme(;
     mode=Enzyme.set_runtime_activity(Enzyme.Reverse),
@@ -611,14 +610,22 @@ fit = WarmupHMC.adaptive_warmup_mcmc(Xoshiro(1), adaptive;
     n_draws=2000, nonlinear_adapt=true)
 ```
 
-`centeredness=1` means model-scale totals; `0` means scaled totals. Intermediate
-values may differ by group and coefficient. The marginal totals remain
-correlated under their exact prior, including at the NCP endpoint. Online
-selection uses WarmupHMC's default position-gradient loss. For a fixed fit, use
-`nonlinear_adapt=false`.
+`centeredness=1` means model-scale totals. Each total is centred on its
+column's own location, the least-squares fit of the column's totals on the group-level design
+of the coefficients it absorbs (for the plain block above, the mean of the
+subject intercepts): group `j` samples `loc_j + (T_j - loc_j) / tau^(1 - c_j)`.
+So `0` gives the standard non-centred deviations with the location kept, and the
+location is a function of the totals, with nothing to choose. Because the
+location couples a column's groups, WarmupHMC selects these controls at each
+restarting window (over the window's evidence, the retained pool by default)
+with its default position-gradient loss, each group scored exactly with the
+others at their current controls. Ordinary, HSGP or car cells in the same model
+then select at the same windows. Intermediate values may differ by group
+and coefficient. The marginal totals remain correlated under their exact prior,
+including at the NCP endpoint. For a fixed fit, use `nonlinear_adapt=false`.
 
 For a post-hoc refit, call `select_total_centeredness(sb, draws, names)` on a
-pilot in the compiled model frame, then pass its `centeredness` vector to
+pilot in the compiled model frame (it scores the same mean-located frame), then pass its `centeredness` vector to
 `adaptive_centering_problem`. The default `criterion=:position` needs positions;
 `criterion=:gradient` additionally needs matching compiled-frame gradients.
 Both inputs are draws × coordinates. Selection makes no additional gradient

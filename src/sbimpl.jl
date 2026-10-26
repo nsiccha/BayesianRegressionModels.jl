@@ -3588,25 +3588,22 @@ default. For groupings whose blocks the data identify strongly or unevenly, use
 S2Z (`s2z_groups`, `s2z_rho`, below) with WarmupHMC adaptive centering
 (`adaptive_centering_problem`).
 
-!!! warning "Deprecated"
-    `total_groups` (exact total coefficients) is deprecated and warns once per
-    session; it still builds, so fits and replays that carry totals keep
-    working. `total_groups=:auto` integrates matching population coefficients
-    into group totals when the exact Gaussian conditional construction is
-    available: one grouping structure per predictor, independent random-effect
-    margins, and Normal, Flat, or Student-t population priors (Student-t uses
-    its exact Gaussian scale mixture). Unmatched fixed effects and `offset(...)`
-    terms remain explicit summands. Original population coefficients and
-    deviations are recovered in generated quantities; inspect
-    [`total_effect_blocks`](@ref). Naming a group explicitly requires every
-    block of that group to be eligible and errors otherwise, naming each
-    predictor whose block would stay conventional and why.
-    `total_groups=[:g => [:b]]` (or `:g => :b`) requests only `b`'s block on
-    `g`; entries mix, as in `[:subject, :g => [:b, :c]]`. `:auto` keeps the
-    whole model conventional when any block must stay conventional. Scale priors
-    may be any supported family on the positive half-line, or one of them
-    truncated at zero with no upper bound. Correlated, crossed, stratified,
-    multi-membership and R2D2 blocks are never totals.
+`total_groups` requests exact total coefficients instead (default `()`, none).
+`total_groups=:auto` integrates matching population coefficients into group
+totals when the exact Gaussian conditional construction is available: one
+grouping structure per predictor, independent random-effect margins, and
+Normal, Flat, or Student-t population priors (Student-t uses its exact Gaussian
+scale mixture). Unmatched fixed effects and `offset(...)` terms remain explicit
+summands. Original population coefficients and deviations are recovered in
+generated quantities; inspect [`total_effect_blocks`](@ref). Naming a group
+explicitly requires every block of that group to be eligible and errors
+otherwise, naming each predictor whose block would stay conventional and why.
+`total_groups=[:g => [:b]]` (or `:g => :b`) requests only `b`'s block on `g`;
+entries mix, as in `[:subject, :g => [:b, :c]]`. `:auto` keeps the whole model
+conventional when any block must stay conventional. Scale priors may be any
+supported family on the positive half-line, or one of them truncated at zero
+with no upper bound. Correlated, crossed, stratified, multi-membership and R2D2
+blocks are never totals.
 
 `s2z_groups` is an opt-in collection of grouping-factor names (default `()`,
 disabled) emitted in the posterior-preserving sum-to-zero parameterization:

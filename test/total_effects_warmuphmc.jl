@@ -36,15 +36,15 @@ println("TOTAL_WHMC_COMPILED");flush(stdout)
             (LogDensityProblems.logdensity(rp,source+h)-LogDensityProblems.logdensity(rp,source-h))/2e-5
         end
         @test g ≈ fd atol=1e-7 rtol=1e-7
-        # Candidate coordinates and marginal gradients must be independent of
-        # which source frame supplied the same physical observation.
-        plan = WarmupHMC.candidate_scoring_plan(rp)
-        frame = @inferred plan.prepare(ir,source,g)
-        for (p,(index,value)) in enumerate(ir.pairs), candidate in (0.,0.5,1.)
-            _,position,gradient = plan.score(frame,p,index,value,WarmupHMC.PartiallyCentered(candidate))
-            mu=2.;ell=physical[only(coords.scales)]
-            @test position ≈ candidate*mu+(physical[index]-mu)*exp((candidate-1)*ell) atol=1e-12
-            @test gradient ≈ last(LogDensityProblems.logdensity_and_gradient(problem,physical))[index]*exp((1-candidate)*ell) atol=1e-10
+        # Mean-located cells (test/total_effects_mean_location.jl): every
+        # candidate coordinate is the totals' mean plus the deviation over
+        # tau^(1-c), whichever source frame supplied the physical observation.
+        ext = Base.get_extension(BRM,:BayesianRegressionModelsWarmupHMCExt)
+        Q = zeros(length(ext._CENTERING_CANDIDATES),length(coords.totals));G = similar(Q)
+        ext._mean_totals_candidates!(Q,G,ir,source,g)
+        T = physical[vec(coords.totals)];ell=physical[only(coords.scales)]
+        for (i,candidate) in enumerate(ext._CENTERING_CANDIDATES)
+            @test Q[i,:] ≈ mean(T) .+ (T .- mean(T)).*exp((candidate-1)*ell) atol=1e-12
         end
     end
 end
@@ -60,7 +60,7 @@ end
     @test size(fit.posterior_position,2) >= 2000
     @test all(isfinite,fit.posterior_position)
     @test fit.n_divergent_samples == 0
-    @test all(0<=last(p).c<=1 for p in WarmupHMC.reparam_sources(rp))
+    @test all(c->0<=c<=1,WarmupHMC.reparam_controls(WarmupHMC.reparametrizer(rp)))
     @test abs(mean(fit.posterior_position[coords.totals[1,1],:])-0.5) < 0.4
     println("TOTAL_ONLINE_COMPLETE sampling_gradients=",fit.sampling_evaluation_counter)
     pilot=permutedims(fit.posterior_position)

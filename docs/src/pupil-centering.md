@@ -1,7 +1,7 @@
 # Pupil: numeric scale predictor and automatic totals
 
-!!! warning "Exact totals are deprecated"
-    This study uses exact total coefficients (`total_groups`), which are deprecated: SBBRMI's default is the standard parametrization, and for groupings whose blocks the data identify strongly or unevenly BRM recommends the sum-to-zero (S2Z) parametrization (`s2z_groups`, `s2z_rho`) with WarmupHMC adaptive centering. The results below are kept as recorded; the code passes `total_groups=:auto` explicitly.
+!!! note "Exact totals are not the default"
+    This study uses exact total coefficients (`total_groups`). SBBRMI's default is the standard parametrization, so the code passes `total_groups=:auto` explicitly. For groupings whose blocks the data identify strongly or unevenly, BRM also offers the sum-to-zero (S2Z) parametrization (`s2z_groups`, `s2z_rho`) with WarmupHMC adaptive centering.
 
 ## Result
 

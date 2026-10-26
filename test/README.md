@@ -431,16 +431,34 @@ This explicit PDF mode requires Quarto and a working LuaLaTeX installation;
 render failures propagate. Outputs use a temporary directory, or the directory
 specified by `BRM_DESCRIPTION_TEX_OUTPUT`.
 
-## Standard parametrization by default; exact totals deprecated
+## Standard parametrization by default
 
 `standard_default.jl` checks that `SBBRMI`, `generative_plan` and
 `brm_descriptor` emit the standard (non-centered) parametrization when no
-`total_groups` is given, and that an explicit `total_groups=:auto` still builds
-exact totals with a deprecation warning. The totals files below pass
-`total_groups=:auto` explicitly:
+`total_groups` is given, and that an explicit `total_groups=:auto` builds exact
+totals without a warning. The totals files below pass `total_groups=:auto`
+explicitly:
 
 ```sh
 julia --project=test test/standard_default.jl
+```
+
+## Mean-located exact totals under adaptive centering
+
+`total_effects_mean_location.jl` checks that `adaptive_centering_problem`
+centres each total on its column's least-squares fit on the column's location
+design (the mean of the totals for a plain block; group-level predictors widen
+the design), on a plain block and on one with group-level predictors: the
+column table, the exact map (round trip, log-Jacobian against finite
+differences and its closed form `sum(log a) + logdet(W'W) - logdet(W'AW)`,
+aliasing, wrapped density and gradient), the `c = 1` and `c = 0` frames, the
+window rule's per-cell candidates against a direct rebuild of each cell's
+frame, `select_total_centeredness` against those candidates, the controls
+round trip and report, an online fit, and totals beside an ordinary correlated
+block (declared and learned order), whose controls keep the joint pair order:
+
+```sh
+julia --project=test test/total_effects_mean_location.jl
 ```
 
 ## Per-predictor S2Z weights

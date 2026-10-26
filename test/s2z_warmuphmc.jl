@@ -144,7 +144,10 @@ end
     c = collect(range(0.1, 0.9; length=length(totals.indices) + J - 1))
     rp = adaptive_centering_problem(sb, problem, AutoEnzyme(); centeredness=c)
     ir = WarmupHMC.reparametrizer(rp)
-    @test first.(ir.pairs) == vcat(totals.indices, s2z.indices)
+    # Mean-located totals and S2Z contrasts share one wrapper, totals first.
+    @test ir.state.indices == vcat(totals.indices, s2z.indices)
+    @test ir.columns.indices == totals.indices
+    @test WarmupHMC.reparam_controls(ir) == c
     physical = 0.3 .* randn(Xoshiro(8), length(names))
     _, source = WarmupHMC._inverse_with_logabsdet_jacobian(ir, physical)
     jac, mapped = ir(source)
