@@ -122,8 +122,10 @@ end
     @test occursin("\nNotation:\n",hierarchical) && occursin("\nAchse: ",hierarchical)
     @test occursin("**K1.** ",hierarchical)
     gaps=brm_description_markdown(brm_description(TEXT_DESCRIPTORS.horseshoe;texts=DE))
-    @test startswith(gaps,"Unvollständige Modellbeschreibung: Es bleiben semantische Abdeckungslücken.\n")
-    @test occursin("\nAbdeckungslücken:\n\n- Keine wissenschaftliche Beschreibung für ",gaps)
+    # The opening line counts the gaps and names them; a component without a
+    # callable by its kind (snag brm-description-256b3b35).
+    @test startswith(gaps,"Unvollständige Modellbeschreibung: 1 Teil hat keine wissenschaftliche Beschreibung (`prior_allocation`); er ist unten unter „Abdeckungslücken“ aufgeführt.\n")
+    @test occursin("\nAbdeckungslücken:\n\n- Keine wissenschaftliche Beschreibung für prior_allocation bei (:allocation, :mu)",gaps)
     @test any(p->occursin("\\operatorname{Exponential}_{\\mathrm{Rate}}",p) ||
         occursin("\\operatorname{Exponential}_{\\mathrm{Skala}}",p),pages)
 end

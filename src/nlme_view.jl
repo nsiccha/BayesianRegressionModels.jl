@@ -18,8 +18,9 @@
 
 A model that has no nonlinear-mixed-effects reading in [`brm_nlme_view`](@ref):
 no subject-level random effects, more than one grouping factor, a non-plain
-grouping (`gr(...)`, `mm(...)`), or a coordinate the semantic inventory does not
-cover. `message` names the offending declaration or coordinates.
+grouping (`gr(...; cor=...)`, `mm(...)`), or a coordinate the semantic
+inventory does not cover. A stratified `gr(g, by=b)` block is read as one
+covariance family per stratum. `message` names the offending declaration or coordinates.
 """
 struct BRMNLMEViewError <: Exception
     message::String
@@ -54,6 +55,18 @@ unconstrained coordinate vector (`coordinates`, in packed order).
   for a block without an ID, the predictor that owns it (`nothing` otherwise).
 - `family_sizes[f]` and `subject_families[i]` — each covariance family's
   dimension and the ordered family IDs for subject `i`'s block instances.
+- `families[f]` — `(; block, record, stratum, size, scales, factor, fixed)`:
+  family `f`'s block identity, its coordinate record, its stratum (the
+  position of the `by` level for a stratified `gr(g, by=b)` block, `nothing`
+  otherwise), its dimension, the packed positions of its scales (margin
+  order) and of its LKJ correlation factor (empty for `K = 1`), and its fixed
+  covariance (`nothing` when estimated). A stratified block has one family
+  per stratum; each level's block belongs to its stratum's family, and its
+  `block` identity carries `stratum` (the `by` level). A non-centered
+  completion (`RKBRMI(brmi; completions=:noncentered)`) whose rows lie on the
+  grouping axis is one family of size 1 with covariance fixed at 1: each
+  missing cell is an instance of it in the subject owning its row, with role
+  `:subject_effect` (its block identity carries `completion=true`).
 - `subject_margins[i]` — the compact coordinates' family margin and grouping
   level labels for subject `i`.
 - `mu_references` — one `(; predictor, coefficient, link, population, subject,
@@ -82,9 +95,13 @@ struct BRMNLMEView
     subject_families::Vector{Vector{Int}}
     subject_margins::Vector{Vector{NamedTuple}}
     nested_groups::NamedTuple
+    families::Vector{NamedTuple}
+    ragged::Bool
 end
 
-_brm_nlme_ragged(view::BRMNLMEView) = !isempty(view.nested_groups)
+# Subjects whose η blocks differ in shape (nested groupings, stratified
+# blocks) use NLMEEstimation's ragged layout.
+_brm_nlme_ragged(view::BRMNLMEView) = view.ragged
 
 Base.show(io::IO, v::BRMNLMEView) = print(io, "BRMNLMEView(",
     length(v.levels), " subjects of `", v.group, "`, ",
@@ -194,6 +211,24 @@ function _brm_nlme_mu_references(backend, block_margins, population, rows, nrows
     references
 end
 
+# The stratum position (into `strata`, the `by` column's levels) of each level
+# of a stratified block's grouping column. Every level lies in one stratum.
+function _brm_nlme_level_strata(groups, by, levels, strata, record)
+    index = Dict(_brm_transport_level(level) => s for (s, level) in enumerate(strata))
+    stratum = Dict{Any,Int}()
+    for (g, b) in zip(groups, by)
+        key, s = _brm_transport_level(g), index[_brm_transport_level(b)]
+        get!(stratum, key, s) == s || _brm_nlme_error(
+            "brm_nlme_view: level $(repr(g)) of `$(record.group)` lies in more than " *
+            "one stratum of `$(record.by)`, so the stratified block " *
+            "`gr($(record.group), by=$(record.by))` has no NLME reading")
+    end
+    Int[get(stratum, _brm_transport_level(level)) do
+            error("brm_nlme_view: internal: level $(repr(level)) of " *
+                "`$(record.group)` has no row")
+        end for level in levels]
+end
+
 """
     brm_nlme_view(backend::RKBRMI; subject_group=nothing,
                   nested_groups=NamedTuple()) -> BRMNLMEView
@@ -214,15 +249,14 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
     names = Vector{Symbol}(_rk_layout_coordinate_names(backend))
     position = Dict{Symbol,Int}(n => i for (i, n) in enumerate(names))
     records = _brm_nlme_records(backend.plan)
-    ranefs = [r for r in records if r.kind === :ranef]
+    ranefs = [r for r in records if r.kind in (:ranef, :stratified_ranef)]
     isempty(ranefs) && _brm_nlme_error(
         "brm_nlme_view: the model has no subject-level random effects; an NLME " *
         "reading needs at least one `(... | group)` block")
-    # NLMEEstimation estimates every covariance family it is given; a block
-    # whose scale or correlation is held at a known value has no reading there
-    # until it can hold a family fixed (NLMEEstimation snag
-    # `fixed-omega-fami-a1322422`).
+    # NLMEEstimation can hold a family fixed (`FixedOmega`), but known-value
+    # blocks are not handed to it yet (todo 2026-10-16T18-16-39-760-0840h34).
     for r in ranefs
+        r.kind === :ranef || continue
         # Correlated levels (`gr(g; cor=...)`) couple the subjects, which an
         # NLME reading treats as independent.
         haskey(r, :level_correlation) && _brm_nlme_error(
@@ -233,9 +267,9 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
         haskey(r, :known_scales) && _brm_nlme_error(
             "brm_nlme_view: random-effect block `|$(r.id)|` (group `$(r.group)`) " *
             "holds a known scale or correlation (`sd(...) = value` / " *
-            "`cor(:, ID) = R`). NLMEEstimation estimates every covariance family " *
-            "and cannot hold one fixed yet (NLMEEstimation snag " *
-            "`fixed-omega-fami-a1322422`), so this model has no NLME reading. " *
+            "`cor(:, ID) = R`). BRM does not yet hand known-value blocks to " *
+            "NLMEEstimation's fixed covariance families (BRM todo " *
+            "2026-10-16T18-16-39-760-0840h34), so this model has no NLME reading. " *
             "Estimate the block, or fit it with the Stan or RK sampler.")
     end
     groups = unique(r.group for r in ranefs)
@@ -293,6 +327,9 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
             end
         end
     end
+    # The subject owning each row of the grouping column.
+    row_subject = Int[subject_index[_brm_transport_level(label)]
+        for label in backend.plan.columns[group]]
     role = fill(:unclaimed, length(names))
     subject = zeros(Int, length(names))
     claim!(i, r) = (role[i] === :unclaimed || error(
@@ -312,19 +349,23 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
     block_margins = NamedTuple[]
     subject_margins = [NamedTuple[] for _ in 1:n]
     subject_families = [Int[] for _ in 1:n]
-    family_sizes = Int[]
+    families = NamedTuple[]
     population = Dict{Tuple{Symbol,Symbol},Int}()
     for record in records
         kind = record.kind
         if kind === :ranef
-            family = length(family_sizes) + 1
-            push!(family_sizes, length(record.margins))
-            for declaration in (isnothing(record.scales) ? (record.scale,) : record.scales)
-                claim_declaration!(declaration, :subject_scale)
-            end
-            isnothing(record.L) || claim_declaration!(record.L, :subject_correlation)
-            mixing = get(record, :mixing, nothing)
+            family = length(families) + 1
             block = _brm_nlme_block_identity(record)
+            scales = reduce(vcat, (claim_declaration!(declaration, :subject_scale)
+                for declaration in (isnothing(record.scales) ? (record.scale,) : record.scales)))
+            factor = isnothing(record.L) ? Int[] :
+                claim_declaration!(record.L, :subject_correlation)
+            length(scales) == length(record.margins) || error(
+                "brm_nlme_view: internal: block `|$(record.id)|` has $(length(scales)) " *
+                "scale coordinates for $(length(record.margins)) margins")
+            push!(families, (; block, record, stratum=nothing, size=length(scales),
+                scales, factor, fixed=nothing))
+            mixing = get(record, :mixing, nothing)
             for (k, (predictor, coefficient)) in enumerate(record.margins)
                 push!(block_margins, (; block, predictor, coefficient))
                 for g in eachindex(group_levels[record.group])
@@ -353,6 +394,41 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
                     push!(blocks[g], i)
                     push!(subject_margins[g], (; block, predictor=:none,
                         coefficient=:mixing, level=levels[g]))
+                end
+            end
+        elseif kind === :stratified_ranef
+            # One covariance family per stratum of `by`; each level's block
+            # belongs to its stratum's family.
+            K = length(record.margins)
+            strata = Any[_rk_grouping_levels(backend.plan.columns[record.by])...]
+            stratum_of = _brm_nlme_level_strata(backend.plan.columns[record.group],
+                backend.plan.columns[record.by], group_levels[record.group], strata, record)
+            first_family = length(families) + 1
+            for (s, level) in enumerate(strata)
+                block = (; _brm_nlme_block_identity(record)..., stratum=level)
+                scales = Int[coordinate(isnothing(record.scales) ?
+                        Symbol(record.scale, ".", s, ".", k) : Symbol(record.scales[k], ".", s))
+                    for k in 1:K]
+                foreach(i -> claim!(i, :subject_scale), scales)
+                factor = isnothing(record.L) ? Int[] :
+                    claim_declaration!(Symbol(record.L, ".", s), :subject_correlation)
+                push!(families, (; block, record, stratum=s, size=K, scales, factor,
+                    fixed=nothing))
+                for (predictor, coefficient) in record.margins
+                    push!(block_margins, (; block, predictor, coefficient))
+                end
+            end
+            for g in eachindex(group_levels[record.group])
+                i = owner[record.group][g]
+                s = stratum_of[g]
+                push!(subject_families[i], first_family + s - 1)
+                for (k, (predictor, coefficient)) in enumerate(record.margins)
+                    c = coordinate(Symbol(record.z, ".", g, ".", k))
+                    claim!(c, :subject_effect)
+                    subject[c] = i
+                    push!(blocks[i], c)
+                    push!(subject_margins[i], (; block=families[first_family + s - 1].block,
+                        predictor, coefficient, level=group_levels[record.group][g]))
                 end
             end
         elseif kind === :population
@@ -393,8 +469,34 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
             # unconstrained layout.
             claim_declaration!(record.declaration, :shared_latent)
         elseif kind === :missing_value
-            # Only the completion's sampled y_mis carrier is a parameter.
-            claim_declaration!(Symbol(record.target, ".y_mis"), :shared_latent)
+            # Only the completion's sampled carrier is a parameter. A
+            # non-centered completion whose rows lie on the grouping axis is
+            # one standard-normal draw per missing cell: a unit draw of the
+            # subject owning the cell's row, in a family whose variance is
+            # fixed at 1. Every other completion is shared by all subjects.
+            missing_rows = record.noncentered ?
+                _brm_nlme_completion_missing_rows(backend.plan, record.target, length(row_subject)) :
+                nothing
+            if missing_rows === nothing
+                claim_declaration!(record.declaration, :shared_latent)
+            else
+                family = length(families) + 1
+                block = (; group=record.target, id=nothing, predictor=record.target,
+                    completion=true)
+                push!(families, (; block, record, stratum=nothing, size=1,
+                    scales=Int[], factor=Int[], fixed=fill(1.0, 1, 1)))
+                push!(block_margins, (; block, predictor=record.target, coefficient=:missing))
+                for (k, r) in enumerate(missing_rows)
+                    c = coordinate(Symbol(record.declaration, ".", k))
+                    claim!(c, :subject_effect)
+                    i = row_subject[r]
+                    subject[c] = i
+                    push!(blocks[i], c)
+                    push!(subject_families[i], family)
+                    push!(subject_margins[i], (; block, predictor=record.target,
+                        coefficient=:missing, level=r))
+                end
+            end
         elseif kind === :submodel
             # A provider may be deterministic and own no packed coordinates.
             # Its sampled declarations are scoped under its target.
@@ -410,15 +512,20 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
     isempty(unclaimed) || _brm_nlme_error(
         "brm_nlme_view: $(length(unclaimed)) coordinate(s) are not covered by the " *
         "semantic inventory: $(join(string.(unclaimed), ", ")). Random effects " *
-        "must use a plain `(... | group)` grouping, not `gr(...)` or `mm(...)`.")
+        "must use a plain `(... | group)` grouping or a stratified " *
+        "`gr(group, by=stratum)`, not `mm(...)`.")
     labels = map(_brm_transport_level, backend.plan.columns[group])
     rows = [findall(x -> isequal(x, _brm_transport_level(level)), labels) for level in levels]
-    mu_references = isempty(nested_groups) ?
+    # Subjects of a stratified block, or with completion draws, hold different
+    # families, so their blocks differ in shape, as nested ones do.
+    ragged = !isempty(nested_groups) ||
+        any(f -> f.stratum !== nothing || f.fixed !== nothing, families)
+    mu_references = ragged ? NamedTuple[] :
         _brm_nlme_mu_references(backend, block_margins, population,
-            rows, length(labels)) : NamedTuple[]
+            rows, length(labels))
     BRMNLMEView(group, levels, names, role, subject, blocks, block_margins,
-        mu_references, rows, family_sizes, subject_families, subject_margins,
-        nested_groups)
+        mu_references, rows, Int[f.size for f in families],
+        subject_families, subject_margins, nested_groups, families, ragged)
 end
 
 # ── Evaluation for NLME estimators ───────────────────────────────────────────
@@ -443,8 +550,7 @@ function _brm_nlme_unit_point(backend::RKBRMI, view::BRMNLMEView;
             "brm_nlme_model: shared_point contains a nonfinite shared latent coordinate")
     end
     values = _rk_constrained_values(backend, u)
-    for record in _brm_nlme_records(backend.plan)
-        record.kind === :ranef || continue
+    for record in unique(f.record for f in view.families if f.fixed === nothing)
         for declaration in (isnothing(record.scales) ? (record.scale,) : record.scales)
             scale = _brm_rk_declaration_value(values, declaration)
             all(isequal(1), scale) || _brm_nlme_error(
@@ -452,13 +558,16 @@ function _brm_nlme_unit_point(backend::RKBRMI, view::BRMNLMEView;
                 "at the zero unconstrained point; its transform has no unit point here")
         end
         isnothing(record.L) && continue
-        L = _brm_rk_declaration_value(values, record.L)
-        L == I || _brm_nlme_error(
-            "brm_nlme_model: correlation factor `$(record.L)` is not the identity at " *
-            "the zero unconstrained point")
+        _brm_nlme_identity_factor(_brm_rk_declaration_value(values, record.L)) ||
+            _brm_nlme_error("brm_nlme_model: correlation factor `$(record.L)` is " *
+                "not the identity at the zero unconstrained point")
     end
     u
 end
+
+# A block's factor, or a stratified block's factors (one per stratum).
+_brm_nlme_identity_factor(L::AbstractMatrix) = L == I
+_brm_nlme_identity_factor(L::AbstractVector) = all(_brm_nlme_identity_factor, L)
 
 _brm_nlme_gaussian_plan(plan::_RKHeldOutPlan) =
     isempty(plan.held_out) && _brm_nlme_gaussian_plan(plan.parent)
@@ -576,6 +685,23 @@ function _brm_nlme_moments(m, arguments, tangents=())
             for i in 1:nsubjects]
 end
 
+# The grouping-axis rows of a completion's missing cells, in the order of its
+# sampled coordinates, when its observed and missing rows cover exactly the
+# `nrows` rows of the grouping column; `nothing` otherwise.
+_brm_nlme_completion_missing_rows(plan::_RKHeldOutPlan, target, nrows) =
+    _brm_nlme_completion_missing_rows(plan.parent, target, nrows)
+_brm_nlme_completion_missing_rows(_plan, _target, _nrows) = nothing
+function _brm_nlme_completion_missing_rows(plan::_RKValuePlan, target, nrows)
+    matches = [c for c in plan.completions if c.source === target]
+    length(matches) == 1 || return nothing
+    c = only(matches)
+    observed = get(plan.columns, c.observed_rows, nothing)
+    missing = get(plan.columns, c.missing_rows, nothing)
+    (observed === nothing || missing === nothing) && return nothing
+    sort(vcat(observed, missing)) == collect(1:nrows) || return nothing
+    collect(Int, missing)
+end
+
 _brm_nlme_completion_rows(_plan, _name, _nrows) = nothing
 function _brm_nlme_completion_rows(plan::_RKValuePlan, name, nrows)
     matches = [c for c in plan.completions if c.observed === name]
@@ -589,6 +715,27 @@ function _brm_nlme_completion_rows(plan::_RKValuePlan, name, nrows)
     # subject grouping axis before its observed-value density is attributable.
     sort(vcat(observed, missing)) == collect(1:nrows) || return nothing
     observed
+end
+
+# The grouping-axis rows each cell of a plate observation reads, through the
+# ragged joins (`groups(g => cells)`, `ragged(x, g => cells)`) of the plate
+# that observes `name`: per cell, the union over the joins whose row labels lie
+# on the `nrows`-row grouping axis. `nothing` when no such join exists.
+_brm_nlme_cell_rows(_plan, _name, _nrows) = nothing
+function _brm_nlme_cell_rows(plan::_RKValuePlan, name, nrows)
+    for a in plan.assignments
+        a isa _RKPreparedKernelAssignment || continue
+        any(o -> o.source === name, a.observations) || continue
+        joins = [a.columns[input.rows] for input in a.inputs
+            if input.kind === :gather && get(input, :partition, nothing) !== nothing &&
+                length(a.columns[input.partition.group]) == nrows]
+        isempty(joins) && return nothing
+        ncells = length(first(joins))
+        all(rows -> length(rows) == ncells, joins) || return nothing
+        return [sort!(unique!(reduce(vcat, (rows[k] for rows in joins))))
+            for k in 1:ncells]
+    end
+    nothing
 end
 
 function _brm_nlme_attribution(backend::RKBRMI, view::BRMNLMEView, fields)
@@ -608,6 +755,21 @@ function _brm_nlme_attribution(backend::RKBRMI, view::BRMNLMEView, fields)
                 "brm_nlme_model: completed-covariate observation `$name` has $m " *
                 "densities for $(length(completion_rows)) observed rows")
             push!(attribution, name => row_subject[completion_rows])
+            continue
+        end
+        # One density per cell of a ragged join over the grouping axis (a
+        # district total over its rows): the subject owning every one of the
+        # cell's rows.
+        cell_rows = _brm_nlme_cell_rows(backend.plan, name, L)
+        if cell_rows !== nothing && length(cell_rows) == m
+            push!(attribution, name => map(enumerate(cell_rows)) do (k, rows)
+                owners = unique(row_subject[rows])
+                length(owners) == 1 || _brm_nlme_error(
+                    "brm_nlme_model: cell $k of observation `$name` reads rows of " *
+                    "$(length(owners)) subjects of `$(view.group)`, so its density " *
+                    "belongs to no single subject")
+                only(owners)
+            end)
             continue
         end
         # One density element per row of the grouping column: flat rows on the
@@ -1088,10 +1250,9 @@ end
 
 # One direction per position within a subject block colors that position in
 # every subject. Conditional independence makes its HVP the corresponding
-# column of each subject's Hessian. The sampler also includes z ~ N(0, I): at
-# the unit point z = η, so adding I removes that prior's Hessian.
-function _brm_nlme_hessian_blocks(m::BRMNLMEModel, θ, σ, H)
-    u = _brm_nlme_point(m, θ, σ, H)
+# column of each subject's Hessian of the sampler density at the packed point
+# `u`, which includes the standardized draws' N(0, I) prior.
+function _brm_nlme_sampler_hessian_blocks(m::BRMNLMEModel, u::Vector{Float64})
     nη = maximum(length, m.view.subject_coordinates)
     blocks = [Matrix{Float64}(undef, length(c), length(c))
         for c in m.view.subject_coordinates]
@@ -1104,8 +1265,17 @@ function _brm_nlme_hessian_blocks(m::BRMNLMEModel, θ, σ, H)
         for (i, coordinates) in enumerate(m.view.subject_coordinates)
             k <= length(coordinates) || continue
             blocks[i][:, k] .= view(hv, coordinates)
-            blocks[i][k, k] += 1.0
         end
+    end
+    blocks
+end
+
+# The conditional likelihood's η Hessian blocks: at the unit point z = η, so
+# adding I removes the standardized draws' prior from the sampler's blocks.
+function _brm_nlme_hessian_blocks(m::BRMNLMEModel, θ, σ, H)
+    blocks = _brm_nlme_sampler_hessian_blocks(m, _brm_nlme_point(m, θ, σ, H))
+    for block in blocks, k in axes(block, 1)
+        block[k, k] += 1.0
     end
     blocks
 end

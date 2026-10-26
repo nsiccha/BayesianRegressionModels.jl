@@ -568,8 +568,10 @@ inspected and composed before any data exists:
 - `merge(a, b, …)` concatenates the fragments' sources into one builder;
 - `show(builder)` prints the source.
 
-`Core.eval(mod, _brm(expr))` returns the same object for a source `Expr`, so a
-model family can be assembled from interpolated `Expr` fragments.
+[`brm(expr; mod)`](@ref brm) returns the same builder for a source `Expr`
+without evaluating code, so a model family can be assembled from interpolated
+`Expr` fragments at run time, in a precompile workload or from code compiled
+before the family existed.
 """
 struct BRMBuilder{F} <: Function
     f::F
@@ -577,8 +579,9 @@ struct BRMBuilder{F} <: Function
     columns::Tuple{Vararg{Symbol}}
     scope::Module
 end
-# A merged builder's function is defined by `Core.eval`; calling it through
-# `invokelatest` keeps it usable from code compiled before the merge.
+# A builder obtained by evaluating `_brm` code defines its function in a newer
+# world; calling it through `invokelatest` keeps it usable from code compiled
+# before that.
 (b::BRMBuilder)(df) = Base.invokelatest(b.f, df)
 
 """
@@ -607,6 +610,9 @@ defines, and a `@plate` cell may read a `groups(...)` binding declared in
 another fragment. A statement repeated across fragments is a duplicate, as in
 one block. To replace a built model's statements by address, `merge` the
 built [`BRMI`](@ref)s instead.
+
+The merged builder is [`brm`](@ref)`(source; mod)` of the composed source, so
+merging evaluates no code: names resolve in the fragments' module.
 """
 function Base.merge(a::BRMBuilder, b::BRMBuilder, rest::BRMBuilder...)
     builders = (a, b, rest...)
@@ -617,7 +623,7 @@ function Base.merge(a::BRMBuilder, b::BRMBuilder, rest::BRMBuilder...)
         "their statements call would resolve in only one of them. Define the " *
         "fragments in one module.")
     source = Expr(:block, (stmt for x in builders for stmt in x.source.args)...)
-    Core.eval(scope, _brm(source))
+    brm(source; mod=scope)
 end
 
 Base.show(io::IO, b::BRMBuilder) = begin
@@ -723,16 +729,37 @@ _brm_builder_columns(static, scoped...) =
 
 The macro-free entry point behind [`@brm`](@ref). Parses a formula block
 and returns either a function definition (`df=nothing`, default) or a
-`let`-wrapped BRMI construction (`df` supplied). Useful when you want to
-construct the formula expression programmatically rather than via the
-macro.
+`let`-wrapped BRMI construction (`df` supplied): code that the macro compiles
+where it is written. To build a model from a runtime `Expr` without evaluating
+code, use [`brm`](@ref).
 """
-_brm(x::AbstractString; kwargs...) = _brm(Meta.parse("""
+_brm(x::AbstractString; kwargs...) = _brm(_brm_source_block(x); kwargs...)
+_brm_source_block(x::AbstractString) = Meta.parse("""
 begin
     $x
 end
-"""); kwargs...)
+""")
 _brm(x::Expr; df=nothing) = begin
+    (; named, lhs, body, source, columns) = _brm_builder_code(x; df)
+    if isnothing(df) && named
+        # named no-df: the caller's `f(df) = body` function definition.
+        Expr(:(=), lhs, body)
+    elseif isnothing(df)
+        # no-df: `gensym_model(__df__) = body`, a reusable `df -> BRMI` builder,
+        # wrapped with its authored source and data-free column inventory.
+        Expr(:block, Expr(:(=), lhs, body),
+             Expr(:call, BRMBuilder, lhs.args[1], QuoteNode(source), columns,
+                  Expr(:macrocall, Symbol("@__MODULE__"), LineNumberNode(0))))
+    else
+        # baked: the SAME body with `__df__` bound to the literal df.
+        Expr(:let, Expr(:block, :(__df__ = $df)), body)
+    end
+end
+
+# The parsed formula as the pieces `_brm` assembles into code and `brm`
+# interprets: the `__df__ -> BRMI` builder body, the authored source, and, for
+# an unnamed builder, the expression of its column inventory.
+function _brm_builder_code(x::Expr; df=nothing)
     (x.head == :block || x.head == :(=) || isxcall(x, :~) ||
      _is_brm_plate(x)) || error(
         "@brm: a standalone predictor fragment such as `@brm(1 + x)` is " *
@@ -793,22 +820,10 @@ _brm(x::Expr; df=nothing) = begin
     # enclosing state; reads of never-assigned names (call heads, spliced
     # values) still resolve outward exactly as before.
     body = Expr(:let, Expr(:block, unique!([keys(alllocals)..., :__ddf__, :__caps__])...), body)
-    if isnothing(df) && named
-        # named no-df: the caller's `f(df) = body` function definition.
-        Expr(:(=), lhs, body)
-    elseif isnothing(df)
-        # no-df: `gensym_model(__df__) = body`, a reusable `df -> BRMI` builder,
-        # wrapped with its authored source and data-free column inventory.
-        columns = _brm_inventory_columns_expr(inventory, captures, keys(alllocals))
-        Expr(:block, Expr(:(=), lhs, body),
-             Expr(:call, BRMBuilder, lhs.args[1], QuoteNode(source), columns,
-                  Expr(:macrocall, Symbol("@__MODULE__"), LineNumberNode(0))))
-    else
-        # baked: the SAME body with `__df__` bound to the literal df.
-        Expr(:let, Expr(:block, :(__df__ = $df)), body)
-    end
+    columns = fragment ? _brm_inventory_columns_expr(inventory, captures, keys(alllocals)) :
+        nothing
+    (; named, lhs, body, source, columns)
 end
-brm(df, formula::AbstractString) = eval(_brm(formula; df))
 
 """
     parse!(x; info) -> Expr

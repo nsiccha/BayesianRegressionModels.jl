@@ -20,6 +20,7 @@ end
 # pairs), `scalars`, or `other` (the constrained values of declarations without
 # a BRM address). Random-effect blocks are read from Ω separately.
 _brm_nlme_named!(::Val{:ranef}, acc, record, values) = acc
+_brm_nlme_named!(::Val{:stratified_ranef}, acc, record, values) = acc
 function _brm_nlme_named!(::Val{:population}, acc, record, values)
     push!(get!(acc.population, record.predictor, Pair{Symbol,Any}[]),
         record.coefficient => _brm_nlme_record_value(values, record))
@@ -67,14 +68,35 @@ function _brm_nlme_check_point(m::BRMNLMEModel, θ, σ, Ω)
     nothing
 end
 
-function _brm_nlme_block(Ω::AbstractMatrix, record)
+function _brm_nlme_covariance(Ω::AbstractMatrix)
     covariance = Matrix{Float64}(Ω)
     sd = sqrt.(diag(covariance))
     cor = covariance ./ (sd * sd')
     cor[diagind(cor)] .= 1 # exactly, as `brm_start` requires of a correlation
-    (; group=record.group,
-       margins=[(; predictor, coefficient) for (predictor, coefficient) in record.margins],
-       covariance, sd, cor)
+    (; covariance, sd, cor)
+end
+
+_brm_nlme_margins(record) =
+    [(; predictor, coefficient) for (predictor, coefficient) in record.margins]
+
+# A block under its key: `(; group, margins, covariance, sd, cor)`. A
+# stratified block is one entry, `(; group, by, margins, strata)`, whose
+# `strata` pairs each `by` level with that stratum's `(; covariance, sd, cor)`.
+function _brm_nlme_add_block!(blocks, record, ::Nothing, Ω, backend)
+    push!(blocks, _brm_nlme_block_key(record) => (; group=record.group,
+        margins=_brm_nlme_margins(record), _brm_nlme_covariance(Ω)...))
+end
+function _brm_nlme_add_block!(blocks, record, stratum::Int, Ω, backend)
+    key = _brm_nlme_block_key(record)
+    at = findfirst(p -> first(p) === key, blocks)
+    if at === nothing
+        push!(blocks, key => (; group=record.group, by=record.by,
+            margins=_brm_nlme_margins(record), strata=Pair{Any,Any}[]))
+        at = length(blocks)
+    end
+    level = _rk_grouping_levels(backend.plan.columns[record.by])[stratum]
+    push!(last(blocks[at]).strata, level => _brm_nlme_covariance(Ω))
+    blocks
 end
 
 """
@@ -99,7 +121,9 @@ Returns `(; point, eta)`:
   - a sampled scalar under its name, constrained (`point.sigma`, not its log);
   - a random-effect block under its `|ID|` (`point.pk`), or
     `var"<predictor>|<group>"` for a block without one, as
-    `(; group, margins, covariance, sd, cor)` on the η scale;
+    `(; group, margins, covariance, sd, cor)` on the η scale; a stratified
+    `gr(g, by=b)` block as `(; group, by, margins, strata)`, whose `strata`
+    pairs each level of `b` with its stratum's `(; covariance, sd, cor)`;
   - `other` — the constrained values of estimated or fixed declarations that
     have no BRM address (shared HSGP and imputation latents, simplexes,
     thresholds), under their program names; empty when there are none.
@@ -124,9 +148,13 @@ function brm_nlme_estimates(m::BRMNLMEModel, θ::AbstractVector, σ::AbstractVec
     for record in _brm_nlme_records(backend.plan)
         _brm_nlme_named!(Val(record.kind), acc, record, values)
     end
-    blocks = Pair{Symbol,Any}[_brm_nlme_block_key(record) => _brm_nlme_block(
-            _brm_nlme_ragged(view) ? Ω[family] : Ω[indices, indices], record)
-        for (; family, record, indices) in _brm_nlme_families(backend, view)]
+    blocks = Pair{Symbol,Any}[]
+    for (; family, record, stratum, fixed, indices) in _brm_nlme_families(backend, view)
+        # A fixed family (a completion's unit draws) is no random-effect block.
+        fixed === nothing || continue
+        _brm_nlme_add_block!(blocks, record, stratum,
+            _brm_nlme_ragged(view) ? Ω[family] : Ω[indices, indices], backend)
+    end
     # Predictors and their coefficients in formula order; records arrive in
     # emission order.
     specs = _brm_nlme_regression(backend.plan).predictors

@@ -4,6 +4,7 @@ module BayesianRegressionModels
 # intermediate: expression tree + column metadata).
 using OrderedCollections
 include("macro.jl")
+include("builder_interpreter.jl")
 include("groups.jl")
 include("ar1_normal.jl")
 
@@ -114,6 +115,7 @@ include("nlme_view.jl")
 include("nlme_joint_start.jl")
 include("nlme_conditional.jl")
 include("nlme_start.jl")
+include("nlme_laplace.jl")
 include("start_values.jl")
 include("nlme_fit.jl")
 include("nlme_two_stage.jl")
@@ -213,7 +215,7 @@ export brm_ordinal, brm_ordinal_lpmf, brm_ordinal_lpmfs, brm_ordinal_rng,
 export Data, MaybeData, maybedata
 export AbstractColumn, MissingColumn, DataColumn, NamedColumn,
        ExprColumn, LikelihoodColumn, MaterializedColumn
-export BRMI, BRMBuilder, VBRMI, SBBRMI, TuringBRMI, RKBRMI, GenerativeDeclaration, GenerativePlan,
+export BRMI, BRMBuilder, brm, VBRMI, SBBRMI, TuringBRMI, RKBRMI, GenerativeDeclaration, GenerativePlan,
        brm_distribution_type, turing_model_source,
        turing_pointwise_loglikelihoods, turing_predictive_model,
        turing_generated_quantities, turing_posterior_predictive,
@@ -251,6 +253,7 @@ export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
        BRMNLMEModel, brm_nlme_model, brm_nlme_loglikelihood,
        brm_nlme_loglikelihood_and_gradient, brm_nlme_loglikelihoods,
        brm_nlme_loglikelihoods_and_gradients,
+       BRMLaplaceProblem, brm_laplace_problem, brm_laplace_draws,
        brm_operation, brm_execute, brm_columns, required_brm_inputs
 export brm_transform_constants
 

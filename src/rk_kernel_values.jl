@@ -455,8 +455,11 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
                 first(statement.args) === :~
             lhs, distribution = statement.args[2:end]
             index = findfirst(==(lhs), params)
-            index === nothing && error(
-                "RK backend: kernel `$name` sampled cell declarations need a statistical submodel")
+            if index === nothing
+                push!(body, _rk_kernel_cell_latent(scope, lhs, distribution, name,
+                    raw_body, program))
+                continue
+            end
             argument = arguments[index]
             argument isa NamedColumn && parent(argument) isa MissingColumn && continue
             # The emitter calls the AR(1) submodel in the cell, which observes
@@ -662,13 +665,61 @@ const _RK_AR1_NORMAL_SUBMODELS = (
     end),
 )
 
+# A `~` on a bare cell name that is no formal and no `=`-bound local declares a
+# latent of the cell (brm-use kernel.md "Latents in a cell"): one draw per cell,
+# one per entry where the law's arguments are arrays. The prepared body keeps it
+# as the local assignment `name = _rk_cell_latent(law)`, so slicing and local
+# naming treat it as the cell local the rest of the cell reads;
+# `_rk_emit_kernel_plate!` declares it at model scope as RKPPL's dotted cell
+# latent (rkppl-use §13, "One latent array per index").
+_rk_cell_latent(law) = error("RK backend: internal: a cell latent marker was evaluated")
+_rk_is_cell_latent(statement) = Meta.isexpr(statement, :(=), 2) &&
+    Meta.isexpr(last(statement.args), :call) &&
+    first(last(statement.args).args) === _rk_cell_latent
+
+function _rk_kernel_cell_latent(scope, lhs, law, kernel, raw_body, program)
+    lhs isa Symbol || error(
+        "RK backend: kernel `$kernel` declares a cell latent on `$lhs`; a latent is a bare cell name")
+    any(statement -> Meta.isexpr(statement, :(=)) && first(statement.args) === lhs, raw_body) &&
+        error("RK backend: kernel `$kernel` observes its cell local `$lhs`; a cell latent " *
+            "needs a name no `=` in the cell binds")
+    (haskey(program.context.data, lhs) || any(op -> op.name === lhs, program.operations)) &&
+        error("RK backend: kernel `$kernel` declares a cell latent `$lhs`, which already " *
+            "names a model value")
+    _rk_kernel_latent_family(scope, law, kernel, lhs)
+    Expr(:(=), lhs, Expr(:call, _rk_cell_latent, law))
+end
+
+# A cell latent's law: a univariate Distributions family with positional
+# arguments, broadcast over them per cell.
+function _rk_kernel_latent_family(scope, law, kernel, lhs)
+    callable = _rk_kernel_observation_callee(scope, law, kernel)
+    callable === StanBlocks.normal && (callable = Normal)
+    callable isa Type && callable <: UnivariateDistribution || error(
+        "RK backend: kernel `$kernel` cell latent `$lhs` needs a univariate " *
+        "Distributions family such as `Normal(…)` or `LogNormal(…)`; got `$(first(law.args))`")
+    any(arg -> Meta.isexpr(arg, (:parameters, :kw)), law.args[2:end]) && error(
+        "RK backend: kernel `$kernel` cell latent `$lhs` takes positional law arguments only")
+    callable
+end
+
 # A cell statement in the emitted program: its calls bound, and an
 # `AR1Normal` observation calling the AR(1) submodel, added to the program's
-# definitions once.
-_rk_kernel_cell_statement(statement, kernel, defs, bindings, taken) =
-    _is_brm_ar1_normal(statement) ?
-        _rk_kernel_ar1_normal_call!(statement, kernel, defs, bindings, taken) :
-        _rk_kernel_bind_calls(statement, kernel.scope, bindings, taken)
+# definitions once. A cell latent keeps its marker, with its family named and
+# its arguments' calls bound, for `_rk_emit_kernel_plate!` to declare.
+function _rk_kernel_cell_statement(statement, kernel, defs, bindings, taken)
+    _is_brm_ar1_normal(statement) &&
+        return _rk_kernel_ar1_normal_call!(statement, kernel, defs, bindings, taken)
+    _rk_is_cell_latent(statement) || return _rk_kernel_bind_calls(statement,
+        kernel.scope, bindings, taken)
+    lhs, marker = statement.args
+    law = only(marker.args[2:end])
+    family = _rk_value_callee!(bindings,
+        _rk_kernel_latent_family(kernel.scope, law, kernel.name, lhs), taken)
+    args = Any[_rk_kernel_bind_calls(arg, kernel.scope, bindings, taken)
+        for arg in law.args[2:end]]
+    Expr(:(=), lhs, Expr(:call, _rk_cell_latent, Expr(:call, family, args...)))
+end
 
 function _rk_kernel_ar1_normal_call!(statement, kernel, defs, bindings, taken)
     defs === nothing && error(
@@ -1135,7 +1186,7 @@ end
 # in the same order, because RK prepares a cell's data-only work once only when
 # bound data fix the plate's domain (rkppl-use §13 "Arrays per index").
 function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
-        rendered=(), defs=nothing)
+        rendered=(), defs=nothing, coordinates=nothing)
     # `rendered` outputs are already emitted program expressions (hoisted
     # observation arguments): their calls are bound, not cell source.
     written = Any[outputs..., rendered...]
@@ -1146,6 +1197,10 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
     # run.
     isempty(written) && isempty(scanned) && return
     slice = _rk_kernel_value_slice(kernel, Expr(:tuple, last.(written)..., scanned...))
+    # The cell latents the program reads. One nothing reads is a generated
+    # draw, absent from the fitted program as on SBBRMI.
+    latents = Symbol[first(statement.args) for statement in slice.body
+        if _rk_is_cell_latent(statement)]
     any(input -> input.kind === :omitted, slice.inputs) && error(
         "RK backend: kernel `$(kernel.name)` reads an unbound in-cell response outside its observation")
     cell = Any[[_rk_kernel_cell_statement(statement, slice, defs, bindings, taken)
@@ -1177,6 +1232,18 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
     model = union!(Set{Symbol}(), taken, _rk_source_symbols!(Set{Symbol}(), statements),
         (input.kind === :gather ? input.rows : input.source for input in values(inputs)),
         (input.source for input in values(inputs)), slice.globals, first.(written), (range,))
+    # A cell latent is declared at model scope under its authored name when no
+    # model name spells it (its coordinates then read `name.<cell>…`); the cell
+    # local of that name reads the cell's own entry back.
+    declared = Dict{Symbol,Symbol}(latent => _rk_ast_fresh_name(string(latent), model)
+        for latent in latents)
+    union!(taken, values(declared))
+    # Its coordinate record names the authored latent (its `brm_start` and
+    # descriptor address) and the cell it belongs to.
+    for latent in latents
+        _rk_coordinate_record!(coordinates, (; kind=:cell_latent,
+            declaration=declared[latent], name=latent, kernel=kernel.name))
+    end
     cell_names = _rk_source_symbols!(Set{Symbol}(slice.params), cell)
     avoid = union(model, cell_names)
     reads = Dict{Symbol,Any}(l => _rk_ast_fresh_name(string(l, "_cell"), avoid)
@@ -1194,6 +1261,18 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
     body = Any[_rk_kernel_cell_reads(statement, reads) for statement in cell]
     for (k, (cells, _)) in enumerate(written)
         body[end - length(written) + k].args[1] = Expr(:ref, cells, index)
+    end
+    # `name = _rk_cell_latent(Family(args...))` becomes the cell's draw,
+    # `<declared>[i] .~ Family.(args...)`, and its local `name = <declared>[i]`.
+    locals_of = Dict{Symbol,Symbol}(get(reads, latent, latent) => declared[latent]
+        for latent in latents)
+    body = mapreduce(vcat, body; init=Any[]) do statement
+        _rk_is_cell_latent(statement) || return Any[statement]
+        lhs, marker = statement.args
+        law = only(marker.args[2:end])
+        entry = Expr(:ref, locals_of[lhs], index)
+        Any[Expr(:call, :.~, entry, Expr(:., first(law.args), Expr(:tuple, law.args[2:end]...))),
+            Expr(:(=), lhs, entry)]
     end
     push!(statements, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
         Expr(:for, Expr(:(=), index, Expr(:call, :eachindex, range)),
@@ -1292,7 +1371,7 @@ _rk_flatten_cells!(defs, taken, cells) =
 # per subject: a per-subject observation reads it cell by cell, a flattened one
 # reads one value per response row.
 function _rk_emit_value_assignment!(defs, statements, bindings, taken,
-        kernel::_RKPreparedKernelAssignment; arguments=nothing)
+        kernel::_RKPreparedKernelAssignment; arguments=nothing, coordinates=nothing)
     arguments === nothing || (kernel = _rk_kernel_with_arguments(kernel, arguments))
     # A cell without a collected value writes only what its observations read.
     outputs, after = kernel.collected === nothing ? (Any[], Any[]) : (
@@ -1322,7 +1401,7 @@ function _rk_emit_value_assignment!(defs, statements, bindings, taken,
         end
     end
     _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
-        rendered=arguments === nothing ? () : arguments.outputs, defs)
+        rendered=arguments === nothing ? () : arguments.outputs, defs, coordinates)
     append!(statements, after)
 end
 
