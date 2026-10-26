@@ -55,7 +55,10 @@ function brm_nlme_joint_map(rk::RKBRMI, sb::SBBRMI; path,
         "the standardized subject draws this map fills; build the SBBRMI " *
         "without `centered_groups`")
     blocks = NamedTuple[]
-    for (; family, record, indices) in _brm_nlme_families(rk, view)
+    # The transport has refused stratified blocks and non-centered completions
+    # (both unpaired), so every family here is an estimated plain block.
+    for family in _brm_nlme_families(rk, view)
+        record = family.record
         key = _brm_nlme_block_identity(record)
         scales = BRMCoordinatePair[]
         for margin in record.margins
@@ -72,7 +75,7 @@ function brm_nlme_joint_map(rk::RKBRMI, sb::SBBRMI; path,
             if f.group === record.group && isequal(f.id, record.id)]
         length(factors) == (isnothing(record.L) ? 0 : 1) || _brm_nlme_error(
             "brm_nlme_joint_map: correlation factor for $key is not paired")
-        push!(blocks, (; family, record, indices, scales,
+        push!(blocks, (; family..., scales,
             factor=isempty(factors) ? nothing : only(factors)))
     end
     BRMNLMEJointMap(rk, sb, problem, stan_model, view, transport, blocks)
