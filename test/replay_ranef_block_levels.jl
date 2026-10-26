@@ -137,11 +137,14 @@ end
     end
     sb = SBBRMI(zc(train); mod=@__MODULE__, total_groups=())
     @test [b.levels for b in ranef_blocks(sb) if b.group === :h] == [H_LEVELS, H_LEVELS]
-    # Not built: `reprocess` looks the margins' `:group_index` records up under
-    # their synthetic `h__nocor__k` names, which no replay frame carries
-    # (`type NamedTuple has no field h__nocor__1`), on full frames too.
-    @test_broken (reprocess(sb, train); true)
-    @test_broken (reprocess(sb, new_g; resample_groups=[:g]); true)
+    # Each `||` term is a one-margin `|ID|` block on the real column `h`, whose
+    # `:group_index` record a replay frame carries (before, the records named
+    # synthetic `h__nocor__k` columns no frame has).
+    same_rp = reprocess(sb, train)
+    @test BayesianRegressionModels.stan_code(same_rp) == BayesianRegressionModels.stan_code(sb)
+    for rp in (same_rp, reprocess(sb, new_g; resample_groups=[:g]))
+        @test [b.levels for b in ranef_blocks(rp) if b.group === :h] == [H_LEVELS, H_LEVELS]
+    end
 end
 
 @testset "a block sized by its index addresses that prefix of the fitted labels" begin

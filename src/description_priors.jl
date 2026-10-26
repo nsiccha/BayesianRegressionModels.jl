@@ -148,9 +148,12 @@ function _brmd_ranef_metadata(d)
             hits = [v for (k,v) in overrides if first(k) === block.id]
             isempty(hits) || (cfg=only(hits))
         end
+        # Shared: one `|ID|` block across several predictors. A one-predictor
+        # `|ID|` block, the generated one of a `||` term or an addressed block
+        # among them, is as independent of the other blocks as an ID-less one.
         push!(result,(; key,block,margins,configuration=cfg,declaration,
             correlated=block.n_terms > 1,
-            shared=!isnothing(block.id)))
+            shared=!isnothing(block.id) && length(unique(m.predictor for m in margins)) > 1))
     end
     # Exact totals replace one independent block per column. Each column keeps
     # the logical identity of the conventional block it replaces: its declared
@@ -167,7 +170,8 @@ function _brmd_ranef_metadata(d)
                 levels, n_terms=1, n_groups=d.plan.data[b.group_count], noncentered=false)
             push!(result,(; key,block,margins=((;predictor=b.predictor,coefficient=label),),
                 configuration=nothing,declaration=t.declaration,correlated=false,
-                shared=!isnothing(id),total=(;binding=t.binding,column=k)))
+                # An absorbed `|ID|` has exactly one margin, so it is never shared.
+                shared=false,total=(;binding=t.binding,column=k)))
         end
     end
     Tuple(result)

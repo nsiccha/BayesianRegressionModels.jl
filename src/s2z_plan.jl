@@ -127,7 +127,8 @@ function _sb_s2z_plan(brmi, prepared, predictor, overrides, rho, requested;
             select=d -> _s2z_declaration_group(d) === group)
         isnothing(plans) && throw(ArgumentError("unresolved random-effect plans"))
         all(p -> p.zero_correlation || length(p.columns) == 1, plans) ||
-            throw(ArgumentError("correlated block (write `||` or one column per term)"))
+            throw(ArgumentError("correlated block (write `||` or one column per term; " *
+                "a categorical term's contrasts stay one correlated block inside `||`)"))
         group in cv_groups && throw(ArgumentError("`cv_groups` overlap"))
         group in centered_groups && throw(ArgumentError("`centered_groups` overlap"))
         J = length(first(plans).levels)

@@ -153,11 +153,16 @@ function _s2z_check_pilot_rows(s2z_model, pilot_model, block, group)
 end
 
 # Per-coefficient pilot scale-carrier unconstrained names. A lone plain block
-# maps directly; `||` terms map by exact `__nocor__k` binding suffix; anything
-# else matches by carrier-kind consistency with the design (constant columns
-# take scalar `log_scale` carriers, varying columns vector `tau` carriers),
-# failing closed on ambiguity. `generated` (GQ-resampled) pilot blocks are
-# fine: their hyperparameters stay sampled.
+# maps directly; `||` terms map by the `k` of their generated
+# `|lp__g__nocor__k|` ID; anything else matches by carrier-kind consistency
+# with the design (constant columns take scalar `log_scale` carriers, varying
+# columns vector `tau` carriers), failing closed on ambiguity. `generated`
+# (GQ-resampled) pilot blocks are fine: their hyperparameters stay sampled.
+_s2z_nocor_term(b) = isnothing(b.id) ? nothing :
+    let m = match(r"__nocor__([0-9]+)$", String(b.id))
+        isnothing(m) ? nothing : parse(Int, only(m.captures))
+    end
+
 function _s2z_pilot_carriers(pilot_model, group, K, Z)
     blocks = filter(b -> b.group === group && isnothing(b.by),
         ranef_blocks(pilot_model))
@@ -170,10 +175,10 @@ function _s2z_pilot_carriers(pilot_model, group, K, Z)
         return [_s2z_carrier(blocks[1], group, 1)]
     end
     selected = Vector{RanefBlock}(undef, K)
-    use_nocor = any(b -> occursin("__nocor__", String(b.binding)), blocks)
+    use_nocor = any(b -> !isnothing(_s2z_nocor_term(b)), blocks)
     if use_nocor
         for k in 1:K
-            hits = filter(b -> endswith(String(b.binding), "__nocor__$(k)"), blocks)
+            hits = filter(b -> _s2z_nocor_term(b) == k, blocks)
             length(hits) == 1 || throw(ArgumentError(
                 "select_s2z_rho: pilot model has $(length(hits)) blocks for " *
                 "group `$group` coefficient $k (expected one `__nocor__$(k)` block)"))

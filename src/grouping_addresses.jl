@@ -29,11 +29,15 @@
 #     plain `(… | g)` of `lp`      -> `|lp__g|`
 #     k-th `||` term on `g` of `lp` -> `|lp__g__nocor__k|`
 #
-# A block no statement reaches is left as written, so a model without
-# grouping-column addresses is unchanged, unless its grouping correlates its
-# levels (`gr(g; cor=...)`, src/level_correlation.jl): such a block always
-# lowers under its generated ID, keeping `gr(g; cor=...)` as its grouping, since
-# the `|ID|` machinery is where each backend correlates a block's levels. A rewritten scalar intercept block
+# A plain `(… | g)` block no statement reaches is left as written, unless its
+# grouping correlates its levels (`gr(g; cor=...)`, src/level_correlation.jl):
+# such a block always lowers under its generated ID, keeping `gr(g; cor=...)`
+# as its grouping, since the `|ID|` machinery is where each backend correlates
+# a block's levels. An uncorrelated `(… || g)` block always lowers under its
+# generated IDs, addressed or not, so its terms are gathered in one product per
+# row with the predictor's other blocks on `g` (snag
+# `uncorrelated-gro-ce63c15a`) and honor `centered_groups` / `cv_groups` by the
+# real column. A rewritten scalar intercept block
 # keeps its plain default `LogNormal(0, 1)` scale when no `sd` statement
 # reaches it (an `|ID|` margin defaults to half-normal). An `|ID|` keeps its ID
 # address only; a name that is both an `|ID|` and the grouping column of an
@@ -271,11 +275,18 @@ Base.@nospecializeinfer function _brm_resolve_grouping_addresses(@nospecialize(b
     # levels of a block's draws.
     correlated = Symbol[_brm_grouping_column(d) for d in declarations
                         if isnothing(d.id) && !isnothing(_brm_declaration_level_cor(d))]
-    isempty(specs) && isempty(correlated) && return brmi
+    # So does every uncorrelated `(… || g)` block: one one-margin `|ID|` block
+    # per term, which each backend gathers together with the predictor's other
+    # blocks on `g` (`_sb_emit_id_ranef_slices!`) and which takes the whole
+    # shared-block surface (`centered_groups`, `cv_groups`, RK draws).
+    zerocorr = Symbol[_brm_grouping_column(d) for d in declarations
+                      if isnothing(d.id) && d.uncorrelated &&
+                         !isnothing(_brm_grouping_column(d))]
+    isempty(specs) && isempty(correlated) && isempty(zerocorr) && return brmi
     ids = Set{Symbol}(d.id for d in declarations if !isnothing(d.id))
     idless = Set{Symbol}(_brm_grouping_column(d) for d in declarations
                          if isnothing(d.id) && !isnothing(_brm_grouping_column(d)))
-    groups = unique(correlated)
+    groups = unique(vcat(correlated, zerocorr))
     for spec in specs
         spec.id in idless || continue
         spec.id in ids && error(
@@ -316,6 +327,9 @@ Base.@nospecializeinfer function _brm_resolve_grouping_addresses(@nospecialize(b
         isnothing(value) && continue
         level_cor[i] = value
         union!(rewritten, b.declarations)
+    end
+    for b in blocks
+        b.zerocorr && union!(rewritten, b.declarations)
     end
     scaled = Set{Int}(i for (spec, reach) in zip(addressed, reaches)
                       if spec.class === :sd for i in reach)
