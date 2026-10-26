@@ -14,7 +14,6 @@
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using Serialization: serialize, deserialize
 using Statistics: mean, std, var
-using LinearAlgebra: cholesky, Symmetric
 using LogExpFunctions: logistic
 const stan_code = BRM.stan_code
 const stan_data = BRM.stan_data
@@ -564,9 +563,15 @@ end
     twin = reprocess(reference, with_cor(LEVELS_LATER))
     @test stan_code(frozen) == stan_code(twin)
     @test stan_data(frozen) == stan_data(twin)
+    # `freeze_constants=false` evaluates the matrix on the design, and the
+    # replay is the twin's fresh replay of a design carrying that matrix. (Both
+    # keep the fitted level-correlation factor, a `:static` record of the fit:
+    # BRM todo `2026-10-26T22-47-08-990-1ym8kho`.)
     fresh = reprocess(sb, LEVELS_LATER; freeze_constants=false)
     @test fresh.preproc[:C].const_.value == LATER_COR
-    @test stan_data(fresh)[:L_levelcor_C] ≈ Matrix(cholesky(Symmetric(LATER_COR)).L)
+    twin_fresh = reprocess(reference, with_cor(LEVELS_LATER, LATER_COR); freeze_constants=false)
+    @test stan_code(fresh) == stan_code(twin_fresh)
+    @test stan_data(fresh) == stan_data(twin_fresh)
     ad_backend = AutoEnzyme(; mode=Enzyme.Reverse)
     rk = RKBRMI(LEVEL_CORRELATED(LEVELS))
     replay = rk_logdensity_problem(reprocess(rk, LEVELS_LATER); ad_backend)
