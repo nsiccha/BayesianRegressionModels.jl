@@ -1016,11 +1016,21 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         :submodel, record.target, rk, d, stan, stan_pos)
 end
 
+# A stratified `gr(g, by=b)` block is not paired with SB's
+# `ranef_correlated_by_draws` layout yet; its coordinates stay unpaired, so
+# the coverage check names them.
+_brm_transport_pairs!(pairs, correlations, simplexes, centered,
+    ::Val{:stratified_ranef}, record, rk, d, stan, stan_pos) = nothing
+
+# A non-centered completion's standardized draws have no SB counterpart (SB
+# samples the missing values); they stay unpaired, so the coverage check
+# names them.
 function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         ::Val{:missing_value}, record, rk, d, stan, stan_pos)
+    record.noncentered && return nothing
     _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
         :missing_value, record.target, rk, d, stan, stan_pos;
-        only_declaration=Symbol(record.target, ".y_mis"))
+        only_declaration=record.declaration)
 end
 
 # The Stan declaration type and RK layout transform of each vector family the

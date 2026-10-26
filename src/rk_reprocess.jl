@@ -60,7 +60,8 @@ example an `mi(y)` response or a bounded likelihood) needs them.
 function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
         resample_groups=(), held_out=_rk_held_out_names(rk.plan))
     prefix = "RK reprocess"
-    freeze_constants || return RKBRMI(_brm_rebind_brmi(parent(rk), new_data); held_out)
+    freeze_constants || return RKBRMI(_brm_rebind_brmi(parent(rk), new_data); held_out,
+        completions=_rk_completion_mode(rk.plan))
     _rk_refuse_level_correlated_resample(parent(rk),
         _rk_resample_group_set(resample_groups; prefix); prefix)
     _brm_refuse_joint_resample(parent(rk),
@@ -82,8 +83,9 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
     _, fitted = _brm_resolve_constants(parent(rk); prefix)
     constants = Dict{Symbol,Any}(c.name => c.value for c in fitted)
     plan = _brm_with_frozen_replay(_BRMFrozenReplay(training, groups)) do
-        _brm_rk_plan(rebound; held_out,
-            fitted_constants=(name, _source) -> get(constants, name, nothing))
+        _rk_plan_completions(_brm_rk_plan(rebound; held_out,
+            fitted_constants=(name, _source) -> get(constants, name, nothing)),
+            _rk_completion_mode(rk.plan))
     end
     retained = _rk_retained_program(rk)
     replayed = _rk_emit_ast(plan)

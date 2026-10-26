@@ -359,6 +359,25 @@ the single-threaded draws. Run it in the NLMEEstimation scratch environment
 described below, with `--threads` above 1 so the threading check exercises
 concurrency.
 
+`nlme_units_panel.jl` (test environment) reads a public synthetic regional
+panel (`nlme_panel_fixture.jl`: regions ⊃ districts ⊃ municipalities and
+district-years) as region units. It checks that a stratified
+`gr(muni, by=sclass)` block is one covariance family per stratum, with every
+municipality in its class's family and its region; that
+`RKBRMI(...; completions=:noncentered)` makes each missing cell of an `mi(...)`
+completion a unit draw in a family fixed at unit variance (and that the
+default keeps them shared, and a non-location-scale law is refused); that
+district-year totals cells are attributed to the region owning their rows;
+and that every region's unit problem differs from the full RK density by its
+own unit alone, in value and gradient.
+`nlme_units_panel_fit.jl` runs NLMEEstimation on the same panel: the fixed
+completion family (`NLMEEstimation.fixed_omega`), prior-median starts in every
+stratum, the population prior's ω gradient against finite differences with a
+fixed family present, stratified estimates by stratum, and a timed
+`brm_two_stage_fit`. Run it in the NLMEEstimation scratch environment
+described below; NLMEEstimation master needs Treebars `a2f9e41` or later,
+newer than this environment's pin.
+
 `nlme_svi.jl` checks minibatch stochastic variational inference
 (`brm_svi_fit`). The minibatch split of the RK target is checked first: the
 global prior and Jacobian term plus every subject's cell term equal the full
