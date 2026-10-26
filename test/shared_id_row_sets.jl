@@ -68,9 +68,45 @@ cells(d) = @brm d begin
         tb[j] ~ Normal(sum(b[rows[j]]), st)
     end
 end
+
+# atlas-16 as a minimal fit (snag forecast-replay-a44fea87): part 1 (`a`) on
+# every unit-year, its response `ya` with a suppressed cell (`mi`), and a
+# stratified unit block; part 2 (`b`) only on the unit-years of the observed
+# district-years, sharing `|k|` with part 1 by label, reading part 1's
+# completed response through a model-scope gather `c[pos_b]`, and observed as
+# district-year totals. 4 units x 2 years in districts A, B.
+const AT_KREIS = ["A", "A", "B", "B", "A", "A", "B", "B"]
+const AT_KY = ["A-1", "A-1", "B-1", "B-1", "A-2", "A-2", "B-2", "B-2"]
+const AT_PART1 = (; kreis=AT_KREIS, unit=[1, 2, 3, 4, 1, 2, 3, 4],
+    size=[1, 1, 2, 2, 1, 1, 2, 2], x=[-1.0, 0.5, -0.5, 1.0, 0.0, 1.5, -1.5, 0.25],
+    ya=Union{Missing,Float64}[1.2, 2.5, missing, 0.8, 1.4, 2.2, 3.1, 0.9], c0=0.3)
+# The fit: part 2 on year 1, whose district-year totals are observed.
+const AT_FIT = (; AT_PART1..., kreis_b=AT_KREIS[1:4], xb=[-0.9, 0.6, -0.4, 1.1],
+    pos_b=[1, 2, 3, 4], ky_b=AT_KY[1:4], cells=["A-1", "B-1"], tb=[3.9, 2.6])
+# The forecast: part 2 on year 2, district-years the fit never saw, no totals.
+const AT_FUTURE = (; AT_PART1..., kreis_b=AT_KREIS[5:8], xb=[0.1, 1.6, -1.4, 0.35],
+    pos_b=[5, 6, 7, 8], ky_b=AT_KY[5:8], cells=["A-2", "B-2"])
+atlas(d) = @brm d begin
+    sa ~ Exponential(1)
+    st ~ Exponential(1)
+    a ~ 1 + x + (1 | k | kreis) + (1 | gr(unit, by=size))
+    mi(ya) ~ LogNormal(a, sa)
+    c = log(ya) - c0
+    c_b = c[pos_b]
+    b ~ 1 + xb + c_b + (1 | k | kreis_b) + (1 | ko | ky_b)
+    sd(:, k) ~ Exponential(1)
+    sd(:, ko) ~ Exponential(1)
+    rows = groups(ky_b => cells)
+    @plate for j in eachindex(tb)
+        tb[j] ~ Normal(sum(exp.(b[rows[j]])), st)
+    end
+end
 end
 
 const SR = SharedIdRowSets
+
+stan_block(code, name) = (k = findfirst("\n" * name * " {", code);
+    code[k[1]+1:findnext("\n}", code, k[1] + 1)[end]])
 
 function stan_problem(sb, name)
     path = joinpath(tempdir(), "brm-shared-id-row-sets", name * ".stan")
@@ -215,6 +251,52 @@ end
     rk = RKBRMI(SR.cells(SR.CELLS))
     rk_replay = reprocess(rk, merge(future, (; tb=[0.4, 0.1])))
     @test coordinate_names(rk_replay.model.layout) == coordinate_names(rk.model.layout)
+end
+
+@stestset "a minimal fit forecasts district-years it never saw" begin
+    # snag forecast-replay-a44fea87: part 2 fits only the observed
+    # district-years; the forecast replays it onto new district-years, whose
+    # `ko` effects are drawn from the fitted `sd(:, ko)`, while the joined `|k|`
+    # block, the stratified unit block and part 1's `mi()` completions keep
+    # their fitted coordinates.
+    fit = SBBRMI(SR.atlas(SR.AT_FIT); mod=SR, total_groups=())
+    fitted = stan_problem(fit, "atlas_fit")
+    forecast = reprocess(fit, SR.AT_FUTURE; resample_groups=[:ky_b])
+    code = stan_code(forecast)
+    @test forecast.held_out == Set([:tb])
+    @test !occursin(r"\btb\b", stan_block(code, "data"))
+    @test !occursin("tb_likelihood", code)
+    # the program of scoring placeholder totals, minus the placeholders
+    placeholders = reprocess(fit, merge(SR.AT_FUTURE, (; tb=[0.0, 0.0]));
+        resample_groups=[:ky_b], held_out=:tb)
+    for block in ("parameters", "model")
+        @test stan_block(code, block) == stan_block(stan_code(placeholders), block)
+    end
+    data = BRM.stan_data(forecast)
+    @test data[:kreis_idx] == [1, 1, 2, 2, 1, 1, 2, 2]
+    @test data[:kreis_b_idx] == [1, 1, 2, 2]
+    @test data[:ky_b_idx] == [1, 1, 2, 2]
+    @test data[:pos_b] == [5, 6, 7, 8]
+    @test data[:unit__by__size_idx] == [1, 2, 3, 4, 1, 2, 3, 4]
+    problem = stan_problem(forecast, "atlas_forecast")
+    names = BridgeStan.param_unc_names(problem.model)
+    # every fitted coordinate but the fitted district-years' standardized effects
+    @test names == [n for n in BridgeStan.param_unc_names(fitted.model) if n in names]
+    @test length(names) == length(BridgeStan.param_unc_names(fitted.model)) - 2
+    @test any(startswith("ya_y_mis"), names)
+    q = collect(range(-0.3, 0.4; length=length(names)))
+    all_names = BridgeStan.param_names(problem.model; include_tp=true, include_gq=true)
+    values = BridgeStan.param_constrain(problem.model, q; include_tp=true, include_gq=true,
+        rng=BridgeStan.StanRNG(problem.model, 1))
+    @test all(isfinite, values)
+    @test count(startswith("tb_gen."), all_names) == 2
+    @test count(startswith("b."), all_names) == 4
+    d = brm_descriptor(forecast)
+    @test :predict in [o.name for o in d.operations]
+    @test :fit in [o.name for o in d.operations]       # `ya` is still observed
+    # a district the fit never saw is still refused for the joined block
+    @test_throws "unseen level `C`" reprocess(fit, merge(SR.AT_FUTURE,
+        (; kreis_b=["A", "C", "B", "B"])); resample_groups=[:ky_b])
 end
 
 @stestset "descriptor, draws and adaptive centering read the joined block" begin
