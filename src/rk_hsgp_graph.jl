@@ -37,17 +37,19 @@ _rk_hsgp_fit_graph_formals(term) = (_rk_hsgp_per_axis(:axis_fit, length(term.col
 _rk_hsgp_fit_actuals(term) = (_rk_hsgp_fit_axes(term)...,
     (_rk_hsgp_mask(term) === nothing ? () : (term.options.fit_mask,))...)
 _rk_hsgp_clamped(options) = get(options, :extrapolate, :error) === :clamp
-_rk_hsgp_orthogonal(options) = get(options, :orthogonal, nothing) === :linear
+_rk_hsgp_orthogonal(options) = get(options, :orthogonal, nothing)
 
 # Where each fitted quantity sits in a term's `fit` vector: every axis's center
 # and half-width, then every axis's training range when the basis clamps, then
-# the axis mean, its sum of squares and each basis column's mean and
-# projection coefficient when the basis is orthogonal to the linear term.
+# for `orthogonal_to=` each basis column's mean — after the axis mean and its
+# sum of squares, and followed by each column's projection coefficient, when
+# the basis is orthogonal to the linear term.
 function _rk_hsgp_fit_index(options, D)
     ranges = _rk_hsgp_clamped(options) ? 2D : 0
+    axis = _rk_hsgp_orthogonal(options) === :linear ? 2 : 0
     (; center=j -> 2j - 1, width=j -> 2j,
         lower=j -> 2D + 2j - 1, upper=j -> 2D + 2j,
-        axis_mean=2D + ranges + 1, axis_ss=2D + ranges + 2, columns=2D + ranges + 2)
+        axis_mean=2D + ranges + 1, axis_ss=2D + ranges + 2, columns=2D + ranges + axis)
 end
 
 # Each axis's half-width, and its center when the basis reads it: formula
@@ -157,27 +159,25 @@ function _rk_ast_hsgp_fit!(definitions, statements, term, taken)
         end
     end
     value = Expr(:vect, entries...)
-    if _rk_hsgp_orthogonal(options)
+    orthogonal = _rk_hsgp_orthogonal(options)
+    if orthogonal !== nothing
         # The column means and projections are fitted on the basis at the
-        # fit-role axis, as the basis graph evaluates it at the rows.
-        cell, row_values, _ = _rk_ast_hsgp_cell!(body, K, centers, widths, inputs)
+        # fit-role axes (their masked rows), as the basis graph evaluates it at
+        # the rows.
+        cell, row_values, row_inputs = _rk_ast_hsgp_cell!(body, K, centers, widths, inputs)
         _rk_hsgp_clamped(options) && (cell = _rk_ast_hsgp_clamp(cell, row_values, D))
-        x = only(inputs)
         inner = _rk_ast_graph_plate([:(1:$B)], [:b], cell)
-        fit_rows = _rk_ast_graph_plate(Any[x], [:x], Expr(:block, :(values = $inner), :values))
+        row_value = :values
+        if masked
+            push!(row_inputs, :mask_fit)
+            push!(row_values, :m)
+            row_value = :(m .* values)
+        end
+        fit_rows = _rk_ast_graph_plate(row_inputs, row_values,
+            Expr(:block, :(values = $inner), row_value))
         push!(body.args, :(fit_basis = stack($fit_rows; dims=1)))
-        push!(body.args, :(axis_mean = sum($x) / length($x)))
-        push!(body.args, :(fit_axis_centered = $x .- axis_mean))
-        push!(body.args, :(axis_ss = sum(fit_axis_centered .^ 2)))
-        columns = _rk_ast_graph_plate([:(1:$B)], [:b], Base.remove_linenums!(quote
-                fit_phi = fit_basis[:, b]
-                phi_mean = sum(fit_phi) / length(fit_phi)
-                fit_centered = fit_phi .- phi_mean
-                [phi_mean, axis_ss > 1e-12 ?
-                    sum(fit_axis_centered .* fit_centered) / axis_ss : 0.0]
-            end))
-        push!(body.args, :(column_fits = stack($columns; dims=2)))
-        value = :(vcat($value, [axis_mean, axis_ss], column_fits[1, :], column_fits[2, :]))
+        value = _rk_ast_hsgp_projection_fit!(Val(orthogonal), body, value, inputs, B,
+                                             masked ? :(sum(mask_fit)) : nothing)
     end
     push!(body.args, :(fit = $value), :(return fit))
     entry = _rk_ast_shared_definition!(definitions, taken, "brm_hsgp_fit_graph",
@@ -185,6 +185,37 @@ function _rk_ast_hsgp_fit!(definitions, statements, term, taken)
     name = _rk_ast_fresh_name(string(options.id, "_fit"), taken)
     push!(statements, Expr(:(=), name, Expr(:call, entry, _rk_hsgp_fit_actuals(term)...)))
     name
+end
+
+# `orthogonal_to=`'s projection fitted on `fit_basis`, the basis at the fit-role
+# rows (rows outside a mask are zero, and `rows` counts the rest), appended to
+# the `fit` vector `value`: the law of `_brm_hsgp_projection_fit`.
+function _rk_ast_hsgp_projection_fit!(::Val{:intercept}, body, value, _inputs, B, rows)
+    count = rows === nothing ? :(length(fit_phi)) : rows
+    columns = _rk_ast_graph_plate([:(1:$B)], [:b], Base.remove_linenums!(quote
+            fit_phi = fit_basis[:, b]
+            sum(fit_phi) / $count
+        end))
+    push!(body.args, :(column_means = $columns))
+    :(vcat($value, column_means))
+end
+
+function _rk_ast_hsgp_projection_fit!(::Val{:linear}, body, value, inputs, B, rows)
+    rows === nothing || error(
+        "BRM backend lowering: internal error — `orthogonal_to=:linear` with `rows=`")
+    x = only(inputs)
+    push!(body.args, :(axis_mean = sum($x) / length($x)))
+    push!(body.args, :(fit_axis_centered = $x .- axis_mean))
+    push!(body.args, :(axis_ss = sum(fit_axis_centered .^ 2)))
+    columns = _rk_ast_graph_plate([:(1:$B)], [:b], Base.remove_linenums!(quote
+            fit_phi = fit_basis[:, b]
+            phi_mean = sum(fit_phi) / length(fit_phi)
+            fit_centered = fit_phi .- phi_mean
+            [phi_mean, axis_ss > 1e-12 ?
+                sum(fit_axis_centered .* fit_centered) / axis_ss : 0.0]
+        end))
+    push!(body.args, :(column_fits = stack($columns; dims=2)))
+    :(vcat($value, [axis_mean, axis_ss], column_fits[1, :], column_fits[2, :]))
 end
 
 # The basis matrix and squared frequencies of one basis structure (modes,
@@ -230,7 +261,27 @@ function _rk_ast_hsgp_basis_graph!(definitions, term, taken)
     outer = _rk_ast_graph_plate(row_inputs, row_values,
         Expr(:block, :(values = $inner), row_value))
     push!(body.args, :(basis_rows = $outer))
-    if get(options, :orthogonal, nothing) === :linear
+    orthogonal = _rk_hsgp_orthogonal(options)
+    if orthogonal === :intercept
+        # `orthogonal_to=:intercept`: center every basis column over the rows
+        # (the masked ones; the others stay zero) — the fit-role column means
+        # when fitted, otherwise the current rows' own (a model-derived axis
+        # at every draw, as SB's `brm_hsgp_center_columns`).
+        push!(body.args, :(raw_basis = stack(basis_rows; dims=1)))
+        if fitted
+            index = _rk_hsgp_fit_index(options, D)
+            mean = :(fit[$(index.columns) + b])
+        else
+            mean = :(sum(phi) / $(masked ? :(sum(mask)) : :(length(phi))))
+        end
+        centered = :(phi .- $mean)
+        column = _rk_ast_graph_plate([:(1:$B)], [:b], Base.remove_linenums!(quote
+                phi = raw_basis[:, b]
+                $(masked ? :(mask .* $centered) : centered)
+            end))
+        push!(body.args, :(basis_columns = $column))
+        push!(body.args, :(PHI = stack(basis_columns; dims=2)))
+    elseif orthogonal === :linear
         # `orthogonal_to=:linear` (one axis, by preparation): center every
         # basis column and project out the centered axis, column by column,
         # from the current axis values — the law of SB's in-graph

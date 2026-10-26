@@ -160,15 +160,9 @@ function _brm_hsgp_latent_basis(state, x)
         frequency = sqrt(state.omega2[k, 1])
         PHI[i, k] = inv_sqrt_L * sin(frequency * (x[i] - state.center + state.L))
     end
-    state.orthogonal === :linear || return PHI
-    xc = x .- sum(x) / length(x)
-    ss = sum(abs2, xc)
-    for k in axes(PHI, 2)
-        column = @view PHI[:, k]
-        column .-= sum(column) / length(column)
-        ss > 0 && (column .-= xc .* (dot(xc, column) / ss))
-    end
-    PHI
+    # The sampled axis is the term's rows, so each draw fits its own projection.
+    projection = BRM._brm_hsgp_projection_fit(state.orthogonal, PHI, (x,))
+    BRM._brm_hsgp_project(projection, PHI, (x,))
 end
 
 Turing.@model function _brm_turing_hsgp_latent_term(state, x)

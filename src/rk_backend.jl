@@ -5118,8 +5118,8 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
     # The periodic prepared state carries no `orthogonal` field (the
     # raw-kw gate above refuses `orthogonal_to=` for periodic first).
     orthogonal = get(state, :orthogonal, nothing)
-    orthogonal === :linear && state.by !== nothing && error(
-        "$prefix: predictor `$target` `hsgp(...; orthogonal_to=:linear)` " *
+    orthogonal !== nothing && state.by !== nothing && error(
+        "$prefix: predictor `$target` `hsgp(...; orthogonal_to=$(repr(orthogonal)))` " *
         "is an ungrouped population-shape constraint and cannot be " *
         "combined with `by=`")
     axes = Tuple(prepared.source)
@@ -5156,11 +5156,13 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
             Expr(:_rk_data_preparation, :brm_hsgp_row_mask, source), name))
         name
     end
-    # An automatic exp-quad basis interval is fitted in-graph to fit-role
-    # copies of the axes and of the `rows=` mask, so a frozen `reprocess`
-    # keeps the training interval while the basis reads the new rows.
+    # An automatic exp-quad basis interval, and an `orthogonal_to=` projection,
+    # are fitted in-graph to fit-role copies of the axes and of the `rows=`
+    # mask, so a frozen `reprocess` keeps the training fits while the basis
+    # reads the new rows.
     fit_axes, fit_mask = nothing, nothing
-    if !state.latent && !state.explicit_domain && state.cov === :exp_quad
+    if !state.latent && state.cov === :exp_quad &&
+            (!state.explicit_domain || orthogonal !== nothing)
         fit_axes = Tuple(_rk_fit_twin!(derived, columns, taken, data, axis)
             for axis in axes)
         if mask !== nothing
