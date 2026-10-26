@@ -18,6 +18,7 @@ include("introspection.jl")
 # likelihood into a LogDensityProblems-compatible object.
 using LogExpFunctions, InverseFunctions, Distributions, ElasticArrays, Libdl,
       LogDensityProblems, LinearAlgebra, SpecialFunctions, Random, Statistics
+using StaticArrays: SMatrix, SVector, MMatrix, MVector
 using StatsBase: AbstractWeights, AnalyticWeights, FrequencyWeights,
                  ProbabilityWeights, UnitWeights, Weights,
                  aweights, fweights, pweights, uweights, weights
@@ -116,6 +117,7 @@ include("nlme_joint_start.jl")
 include("nlme_conditional.jl")
 include("nlme_start.jl")
 include("nlme_laplace.jl")
+include("nlme_laplace_structured.jl")
 include("start_values.jl")
 include("nlme_fit.jl")
 include("nlme_two_stage.jl")
@@ -253,7 +255,8 @@ export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
        BRMNLMEModel, brm_nlme_model, brm_nlme_loglikelihood,
        brm_nlme_loglikelihood_and_gradient, brm_nlme_loglikelihoods,
        brm_nlme_loglikelihoods_and_gradients,
-       BRMLaplaceProblem, brm_laplace_problem, brm_laplace_draws,
+       BRMLaplaceProblem, BRMStructuredLaplaceProblem, brm_laplace_problem,
+       brm_laplace_draws,
        brm_operation, brm_execute, brm_columns, required_brm_inputs
 export brm_transform_constants
 

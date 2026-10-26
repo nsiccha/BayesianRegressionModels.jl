@@ -30,7 +30,7 @@ julia = "1.10"
 path = "../.."
 
 [sources.StanBlocks]
-rev = "3aba023afd840115545e64f1482d6f3973a0d073"
+rev = "c9504e9911da428cec94389f98f9757455321ab7"
 url = "https://github.com/nsiccha/StanBlocks.jl"
 
 [sources.Treebars]
@@ -38,5 +38,5 @@ rev = "c02aa16ab1b08e4f5283597fe678a88e69555cd1"
 url = "https://github.com/nsiccha/Treebars.jl"
 
 [sources.WarmupHMC]
-rev = "7aed40b18bd4cdabb75330f285d5c9b355575ab9"
+rev = "0194dce08e986ff17fd5a788bb315c6431b7858e"
 url = "https://github.com/nsiccha/WarmupHMC.jl"
