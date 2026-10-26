@@ -217,6 +217,121 @@ Base.@nospecializeinfer function _brm_resolve_constants(@nospecialize(brmi::BRMI
     _brm_rebind_brmi(brmi, _BRMConstantSubstitution(values)), Tuple(resolved)
 end
 
+# ---- data-only assignments: `name = f(columns...)` ------------------------
+#
+# An assignment whose right-hand side reads data alone (data columns, scalar
+# data fields, resolved constants, other such assignments) is itself data, so
+# every site that accepts a raw column accepts it (user decision `1tb1jrg`). A
+# backend resolves it, after the constants, into an ordinary data field holding
+# its value, as `_brm_resolve_constants` does. Its right-hand side is evaluated
+# with the model-scope semantics RKBRMI emits (`_rk_value_expr!`): arithmetic,
+# comparisons and built-in math apply per element, indexing and vector literals
+# keep their own meaning, and any other call takes whole arrays. SBBRMI binds
+# the value as data; RKBRMI computes it in its graph from the assignment's own
+# inputs (`_rk_attach_data_assignments!`). A call with no Julia method for its
+# data (a Stan-only `@deffun`) leaves the assignment as it is.
+struct _BRMDataAssignmentSubstitution
+    values::Dict{Symbol,Any}
+end
+function _brm_rebind_value(x::NamedColumn, s::_BRMDataAssignmentSubstitution)
+    payload = parent(x)
+    haskey(s.values, name(x)) && payload isa ExprColumn{typeof(assign)} &&
+        return NamedColumn(name(x), DataColumn(s.values[name(x)]))
+    payload isa Union{DataColumn,MissingColumn} && return x
+    NamedColumn(name(x), _brm_rebind_value(payload, s))
+end
+
+struct _BRMDataAssignments
+    values::Dict{Symbol,Any}
+    inputs::Dict{Symbol,Set{Symbol}}
+    unresolved::Set{Symbol}
+    prefix::String
+end
+_BRMDataAssignments(prefix) = _BRMDataAssignments(Dict{Symbol,Any}(),
+    Dict{Symbol,Set{Symbol}}(), Set{Symbol}(), prefix)
+
+_brm_is_elementwise_builtin(f) = haskey(_RK_DERIVED_BINOPS, f) ||
+    haskey(_RK_DERIVED_CMP, f) || haskey(_RK_DERIVED_MATH, f)
+
+# A value a data field can hold.
+_brm_is_data_value(_x) = false
+_brm_is_data_value(::Union{Real,AbstractString}) = true
+_brm_is_data_value(::AbstractArray) = true
+
+# The value of a data-only node, or `nothing` when it reads a model value (a
+# parameter, a predictor, an assignment that is not data-only) or calls
+# something without a Julia method for its data. `inputs` collects the data
+# fields it reads.
+_brm_data_assignment_value(x::Real, _state, _inputs) = x
+_brm_data_assignment_value(_x, _state, _inputs) = nothing
+function _brm_data_assignment_value(x::NamedColumn, state, inputs)
+    backing = parent(x)
+    backing isa DataColumn && (push!(inputs, name(x)); return parent(backing))
+    backing isa ExprColumn{typeof(assign)} || return nothing
+    value = _brm_data_assignment!(state, name(x), last(getargs(backing, 2)))
+    value === nothing || push!(inputs, name(x))
+    value
+end
+function _brm_data_assignment_value(x::ExprColumn, state, inputs)
+    f = getf(x)
+    (f === assign || f === (~) || _brm_is_term_head(f) ||
+        (f isa Type && f <: Distributions.Distribution)) && return nothing
+    args = map(arg -> _brm_data_assignment_value(arg, state, inputs), getargs(x))
+    any(isnothing, args) && return nothing
+    kwargs = map(arg -> _brm_data_assignment_value(arg, state, inputs), getkwargs(x))
+    any(isnothing, values(kwargs)) && return nothing
+    f === getindex && isempty(kwargs) && return getindex(args...)
+    f === Base.vect && isempty(kwargs) && return Base.vect(args...)
+    isempty(kwargs) && _brm_is_elementwise_builtin(f) && return broadcast(f, args...)
+    hasmethod(f, Tuple{map(typeof, args)...}, keys(kwargs)) || return nothing
+    try
+        Base.invokelatest(f, args...; kwargs...)
+    catch err
+        error("$(state.prefix): evaluating the data-only call `$x` failed: ",
+            sprint(showerror, err))
+    end
+end
+
+function _brm_data_assignment!(state::_BRMDataAssignments, key::Symbol, rhs)
+    haskey(state.values, key) && return state.values[key]
+    key in state.unresolved && return nothing
+    inputs = Set{Symbol}()
+    value = _brm_data_assignment_value(rhs, state, inputs)
+    # A value no data field can hold (a tuple) keeps its assignment, and so
+    # does every assignment that reads it.
+    (value === nothing || !_brm_is_data_value(value)) &&
+        (push!(state.unresolved, key); return nothing)
+    state.inputs[key] = inputs
+    state.values[key] = value
+end
+
+"""
+    _brm_resolve_data_assignments(brmi; prefix) -> (resolved, assignments)
+
+Replace every data-only assignment of `brmi` (one that reads at least one
+data field and no model value) by a data field holding its value. Returns
+the resolved `BRMI` and one `(; name, value, node, inputs)` per resolved
+assignment in formula order: `node` is its right-hand side as written and
+`inputs` the data fields and resolved assignments it reads. A model without
+one is returned unchanged.
+"""
+Base.@nospecializeinfer function _brm_resolve_data_assignments(@nospecialize(brmi::BRMI);
+        prefix::AbstractString="BRM")
+    state = _BRMDataAssignments(prefix)
+    resolved = Any[]
+    for (key, op) in _brm_operation_entries(brmi)
+        op isa NamedColumn && parent(op) isa ExprColumn{typeof(assign)} || continue
+        node = last(getargs(parent(op), 2))
+        value = _brm_data_assignment!(state, key, node)
+        # A literal alone (`n = 3`) reads no data and stays a model constant.
+        (value === nothing || isempty(state.inputs[key])) && continue
+        push!(resolved, (; name=key, value, node, inputs=state.inputs[key]))
+    end
+    isempty(resolved) && return brmi, ()
+    values = Dict{Symbol,Any}(a.name => a.value for a in resolved)
+    _brm_rebind_brmi(brmi, _BRMDataAssignmentSubstitution(values)), Tuple(resolved)
+end
+
 # Materialise a user data vector without silently deleting missing rows. A
 # likelihood decorator may deliberately keep its response out of this generic
 # data dict and model the missing values itself; that decision is made by the

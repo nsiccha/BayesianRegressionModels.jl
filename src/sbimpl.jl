@@ -4320,6 +4320,9 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
         _sb_record_preproc!(data, c.name,
             PreprocEntry(:constant, (; c.value, c.node), c.source, false))
     end
+    # A data-only assignment becomes a data field the same way, evaluated here
+    # from this model's data (user decision `1tb1jrg`).
+    brmi, _ = _brm_resolve_data_assignments(brmi; prefix="sbimpl")
     # Predictors whose intercept an ordinal response's thresholds supply: their
     # categorical terms stay treatment-coded (see `_brm_cellmeans_block`).
     data[_SB_THRESHOLD_LOCATED_KEY] = _brm_threshold_located_predictors(brmi)

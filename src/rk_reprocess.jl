@@ -69,7 +69,7 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
     rk.fitted === nothing || return _rk_fitted_replay(brm_source(rk), new_data,
         _rk_fitted_state(rk); resample_groups, held_out, previous=rk, prefix)
     groups = _rk_resample_group_set(resample_groups; prefix)
-    training = _rk_training_columns(parent(rk))
+    training = _rk_frozen_training(parent(rk))
     unknown = setdiff(groups, keys(training))
     isempty(unknown) || error(
         "$prefix: `resample_groups` names $(sort!(collect(unknown))), which " *
@@ -264,6 +264,17 @@ function _rk_training_columns(brmi::BRMI)
         _rk_raw_data_columns!(columns, op)
     end
     merge!(columns, _brm_backend_context(brmi; retain_mm_sources=true).data)
+end
+
+# What a frozen replay fits from (`_BRMFrozenReplay`): the fit's data columns
+# and each data-only assignment's training value, which a fit
+# (`standardize(tt)`) reads like a column (`_brm_resolve_data_assignments`).
+function _rk_frozen_training(brmi::BRMI)
+    training = _rk_training_columns(brmi)
+    resolved, _ = _brm_resolve_constants(brmi; prefix="RK replay")
+    _, assignments = _brm_resolve_data_assignments(resolved; prefix="RK replay")
+    foreach(a -> training[a.name] = a.value, assignments)
+    training
 end
 
 _rk_raw_data_columns!(columns, _x) = columns
