@@ -61,4 +61,89 @@ BRM._rk_nlme_compact_cell_value_and_gradient!(sampler::CompactCellSampler,
         active::Vector{Float64}, selected::Vector{Int}, row::Int) =
     cell_value_and_gradient!(sampler, gradient, base, active, selected, row)
 
+# The row-structured Laplace (src/nlme_laplace_structured.jl): the likelihood
+# parameters `ports` (natural scale, one value per row or a scalar) at a
+# packed point, a reverse pullback of each, the random-effect draws `effects`
+# (one levels × K matrix per block) with their forward derivatives along the
+# `omega` coordinates, and the population prior.
+_rk_slap_tuple(value, n) = n == 1 ? (value,) : Tuple(value)
+
+function BRM._rk_slap_kernels(backend::BRM.RKBRMI, ports::Tuple, effects::Tuple,
+        omega::Vector{Int}, u0::Vector{Float64}, ad_backend)
+    bound = BRM.rk_bound_data(backend)
+    spec = backend.model.spec
+    have = (:unconstrained, keys(bound)...)
+    prepare_want(want) = Base.invokelatest(ReactiveKernels.prepare, spec;
+        have, want, bound)
+    values = prepare_want(ports)
+    v0 = _rk_slap_tuple(Base.invokelatest(values, u0), length(ports))
+    reverse = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse, ad_backend))
+    pullbacks = map(ports, v0) do port, value
+        seed = value isa Number ? 0.0 : zeros(Float64, length(value))
+        Base.invokelatest(prepare_ad_pullback, prepare_want(port), reverse, seed, u0;
+            active=:unconstrained)
+    end
+    # One draws kernel per block, differentiated along the `omega` coordinates
+    # that block owns (`<block>.…`; AD takes one WANT port at a time).
+    names = BRM._rk_layout_coordinate_names(backend)
+    forward = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Forward, ad_backend))
+    blocks = map(effects) do effect
+        kernel = prepare_want(effect)
+        owned = findall(k -> startswith(String(names[k]), string(effect, ".")), omega)
+        directions = Tuple(begin
+            v = zeros(Float64, length(u0))
+            v[omega[j]] = 1.0
+            v
+        end for j in owned)
+        pushforward = isempty(directions) ? nothing :
+            Base.invokelatest(prepare_ad_pushforward, kernel, forward, directions, u0;
+                active=:unconstrained)
+        (; kernel, owned, directions, pushforward)
+    end
+    prior = BRM._rk_nlme_population_prior(backend, u0, ad_backend)
+    pointwise = BRM._rk_pointwise_query(backend)
+    (; values, nports=length(ports), pullbacks, blocks, nomega=length(omega), prior,
+        pointwise)
+end
+
+BRM._rk_slap_values(k, u::Vector{Float64}) =
+    _rk_slap_tuple(Base.invokelatest(k.values, u), k.nports)
+
+function BRM._rk_slap_pullback(k, u::Vector{Float64}, cotangents)
+    gradient = zeros(Float64, length(u))
+    for (pullback, seed) in zip(k.pullbacks, cotangents)
+        gradient .+= Base.invokelatest(ad_pullback, pullback, seed, u)
+    end
+    gradient
+end
+
+# Each block's draws, and per `omega` coordinate the tangent of every block's
+# draws (zero for the blocks it does not own).
+function BRM._rk_slap_effects(k, u::Vector{Float64})
+    values = Vector{Any}(undef, length(k.blocks))
+    tangents = [Vector{Any}(undef, length(k.blocks)) for _ in 1:k.nomega]
+    for (b, block) in enumerate(k.blocks)
+        if block.pushforward === nothing
+            values[b] = Base.invokelatest(block.kernel, u)
+        else
+            values[b], t = Base.invokelatest(ad_value_and_pushforward,
+                block.pushforward, block.directions, u)
+            for (j, tj) in zip(block.owned, t)
+                tangents[j][b] = tj
+            end
+        end
+        for j in 1:k.nomega
+            isassigned(tangents[j], b) || (tangents[j][b] = zero(values[b]))
+        end
+    end
+    Tuple(values), map(Tuple, tangents)
+end
+
+BRM._rk_slap_pointwise(k, u::Vector{Float64}) = BRM._rk_pointwise_values(k.pointwise, u)
+
+BRM._rk_slap_prior(k, u::Vector{Float64}) =
+    BRM._rk_nlme_population_prior_value(k.prior, u)
+BRM._rk_slap_prior_gradient(k, u::Vector{Float64}) =
+    BRM._rk_nlme_population_prior_value_gradient(k.prior, u)
+
 end
