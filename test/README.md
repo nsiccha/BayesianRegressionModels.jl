@@ -867,6 +867,16 @@ singleton input axes, against independent and compiled Stan targets.
 `rk_kernel_values.jl` checks unequal and empty grouped cells, explicit ragged
 joins, lexical native callables, distinct catalogue/response axes and in-cell
 held-out aliases without rewriting the original BRMI.
+`rk_cell_latents.jl` checks latents declared in a `@plate` cell on RKBRMI:
+scalar, varying-length vector and bounded latents, and laws reading sampled
+scalars. Each matches the compiled Stan model under `brm_coordinate_transport`
+(density, gradient and the physical check), and the vector latent also matches
+an independent oracle. The file also covers draws restored per cell, a latent
+nothing reads (not sampled on either backend), `brm_start` addressing the
+latent by name on both backends, and frozen replay onto the fit's cells and
+its refusal for new cells. The refusals and the known gap (a law reading a
+per-cell predictor, ReactiveKernels snag `rkppl-cell-laten-b18e668a`) are
+covered as well.
 `rk_grouped_bounded_response.jl` gathers observed rows before bounded-response
 validation and keeps scalar or row-specific censoring, truncation and interval
 bounds aligned with uneven/empty subject cells. Complete source replay,
