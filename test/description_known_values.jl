@@ -39,9 +39,9 @@ fragment_prose(r, needle) = filter(p -> occursin(needle, p), r.prose)
     c = block(r, :gs)
     @test c.keywords.correlation === :identity
     @test only(fragment_prose(r, "Group deviations for `g`")) ==
-        "Group deviations for `g` have 3 margin(s) across 3 fitted levels. The declared " *
-        "ID shares one covariance block across its predictors. Its correlation is held " *
-        "at the identity: its margins are independent."
+        "Group deviations for `g` have 3 margin(s) across 3 fitted levels. This block is " *
+        "independent of separately declared blocks. Its correlation is held at the " *
+        "identity: its margins are independent."
     @test "\\mathbf b_{1,i}\\sim\\mathcal N_{3}(0,D_{1}^2)" in r.equations
     @test !any(e -> occursin("\\Omega_{1}", e), r.equations)
     # The known correlation is still inventoried, as the point mass at I.
