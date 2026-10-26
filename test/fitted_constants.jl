@@ -620,9 +620,10 @@ end
     @test sb.preproc[:A].const_.value == A
     @test sb.preproc[:A].const_.value isa Array{Float64,3}
     supplied = SBBRMI(cubed_supplied(merge(data, (; A))); mod=@__MODULE__)
-    # Capability gap, for a supplied rank-3 field and a constant alike:
-    # StanBlocks has no Stan data type for a rank-3 array yet (StanBlocks snag
-    # `stan-type-has-no-b2d832be`).
+    # Capability gap, for a supplied rank-3 field and a constant alike: the
+    # StanBlocks this suite pins has no Stan data type for a rank-3 array. It
+    # landed in StanBlocks `19932eb8` (snag `stan-type-has-no-b2d832be`); moving
+    # the pin and flipping these is BRM todo `2026-10-26T23-15-00-019-1r4te7b`.
     transpiles(sb) = try
         stan_code(sb); true
     catch
