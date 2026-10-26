@@ -112,9 +112,10 @@ end
 # A backend resolves every constant declaration before lowering: the declared
 # name becomes an ordinary data field (`NamedColumn(name, DataColumn(value))`),
 # exactly what a data container carrying that field produces, so every
-# downstream rule for named scalar or vector data applies unchanged. The value is the fitted one when replay supplies it and is
-# otherwise evaluated from the bound inputs. `SBBRMI` records it as a
-# `:constant` preprocessing entry whose `raw_ref` is the `_BRMConstantSource`.
+# downstream rule for named scalar or vector data applies unchanged. The value
+# is the fitted one when replay supplies it and is otherwise evaluated from the
+# bound inputs. `SBBRMI` records it as a `:constant` preprocessing entry whose
+# `raw_ref` is the `_BRMConstantSource`.
 
 # Identity of a constant across builder runs: what it computes, not the
 # closure or data it computed it from.
@@ -210,10 +211,11 @@ end
     _brm_resolve_constants(brmi; fitted, prefix) -> (resolved, constants)
 
 Replace every `name = constant(expr)` declaration of `brmi` by a data field
-holding its value (a scalar or a vector). `fitted(name, source)` returns a value restored from a
-fitted model, or `nothing` to evaluate `expr` from its bound inputs. Returns
-the resolved `BRMI` and one `(; name, value, source, node)` per constant, in
-formula order. A model without constants is returned unchanged.
+holding its value (a scalar or a vector). `fitted(name, source)` returns a
+value restored from a fitted model, or `nothing` to evaluate `expr` from its
+bound inputs. Returns the resolved `BRMI` and one `(; name, value, source,
+node)` per constant, in formula order. A model without constants is returned
+unchanged.
 """
 Base.@nospecializeinfer function _brm_resolve_constants(@nospecialize(brmi::BRMI);
         fitted=(_name, _source) -> nothing, prefix::AbstractString="BRM")
