@@ -96,6 +96,13 @@ likelihood(mu, sigma) = sum(logpdf.(Normal.(mu, sigma), vp_data.y))
     ids = Set(c.id for c in brm_description(sb).components)
     @test (:parameter, :phi) in ids && (:observation, :phi) ∉ ids
     @test brm_output(brm_descriptor(sb), :phi).dims == (4,)
+    # The declaration is described: one element law shared by every coordinate.
+    description = brm_description(sb)
+    @test description.complete
+    @test occursin("Each coordinate of this vector independently follows the same " *
+                   "separately described prior", BRM.brm_description_markdown(description))
+    @test occursin("Jede Koordinate dieses Vektors folgt unabhängig", BRM.brm_description_markdown(
+        brm_description(sb; texts=BRM.description_texts(:de))))
 end
 
 @stestset "data-vector argument applies elementwise" begin

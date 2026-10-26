@@ -10,6 +10,7 @@
 using Random, Statistics, Distributions, JSON
 using BayesianRegressionModels, StanBlocks, BridgeStan, LogDensityProblems
 using WarmupHMC, Enzyme
+include(joinpath(@__DIR__, "quorum.jl"))  # chains through WarmupHMC's quorum sampler
 using DifferentiationInterface: AutoEnzyme
 
 const BRM = BayesianRegressionModels
@@ -61,9 +62,10 @@ end
 
 results = Dict{String,Any}()
 
-# driver 1: adaptive single chain (the default, like the notebook's PyMC NUTS)
+# driver 1: the default, independent adaptive chains through WarmupHMC's quorum
+# sampler (`quorum.jl`), like the notebook's PyMC NUTS
 t = time()
-f1 = adaptive_warmup_mcmc(Xoshiro(42001), rp; init=missing, n_draws=800,
+f1 = quorum_fit(Xoshiro(42001), rp; init=missing, n_draws=800,
     nonlinear_adapt=false, monitor_ess=false)
 t1 = time() - t
 C1, n1 = constrain_all(f1.posterior_position)

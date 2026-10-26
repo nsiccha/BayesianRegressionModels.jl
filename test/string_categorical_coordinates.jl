@@ -116,6 +116,83 @@ for (shape, model, data) in (("flat", string_cat_flat, string_cat_flat_data),
     end
 end
 
+# `factor(c; ref="<level>")` on a String column keeps a contrast block of its
+# own, named after the reference (snag `label-the-k-1-co-55a27c5a`). It is the
+# same model as a `CategoricalVector` column declaring that level first, so a
+# point carried level by level gives the same log likelihood. Shown on a
+# `log(sigma)` predictor, as reported.
+string_cat_scale_ref(data) = @brm data begin
+    mu ~ 1 + (1 | e | subject)
+    log(sigma) ~ 1 + factor(arm; ref="q")
+    y ~ Normal(mu, sigma)
+end
+
+string_cat_scale(data) = @brm data begin
+    mu ~ 1 + (1 | e | subject)
+    log(sigma) ~ 1 + arm
+    y ~ Normal(mu, sigma)
+end
+
+@stestset "factor(c; ref=\"<level>\") on a String column resolves by its column" begin
+    fit(model, arm_column, name) = begin
+        sb = SBBRMI(model(string_cat_flat_data(arm_column)); mod=@__MODULE__,
+                    total_groups=())
+        m = compiled(sb, name)
+        (; sb, m, d=brm_descriptor(sb), names=String.(BridgeStan.param_names(m)))
+    end
+    str = fit(string_cat_scale_ref, ARM, "scale_string_ref")
+    cat = fit(string_cat_scale, categorical(ARM; levels=["q", "p", "r"]),
+              "scale_cat_q_first")
+
+    block = only(brm_outputs(str.d; kind=:parameter, component=:contrasts))
+    @test block.predictors == (:sigma,)
+    @test block.term === :arm
+    arm = brm_population_effect_coordinates(str.d, :sigma, str.names;
+                                            coefficient=:arm)
+    @test arm.output === block
+    @test arm.predictor === :arm
+    @test arm.coding === :treatment
+    @test arm.reference_level == "q"
+    @test arm.nonreference_levels == ["p", "r"]
+    @test [c.nonreference_level for c in arm.contrasts] == ["p", "r"]
+    @test all(c -> c.reference_level == "q", arm.contrasts)
+    @test length(arm.coordinates) == 2
+    @test arm.link === log && arm.inverse_link === exp
+
+    # The description lists one contrast prior per non-reference level.
+    r = brm_description(str.sb)
+    contrasts = filter(p -> get(p.source, :predictor, nothing) === :arm, r.priors)
+    @test [p.source.level for p in contrasts] == ["p", "r"]
+    @test all(p -> p.source.reference == "q", contrasts)
+
+    catarm = brm_population_effect_coordinates(cat.d, :sigma, cat.names;
+                                               coefficient=:arm)
+    @test catarm.reference_level == "q"
+    uc = [0.1 * sin(i) for i in 1:BridgeStan.param_unc_num(cat.m)]
+    θc = BridgeStan.param_constrain(cat.m, uc)
+    point(swap) = begin
+        θs = fill(NaN, length(str.names))
+        for (i, n) in enumerate(str.names)
+            j = findfirst(==(n), cat.names)
+            isnothing(j) || (θs[i] = θc[j])
+        end
+        qc = brm_population_effect_coordinates(cat.d, :sigma, cat.names)
+        qs = brm_population_effect_coordinates(str.d, :sigma, str.names)
+        θs[only(qs.coordinates)] = θc[only(qc.coordinates)]
+        by_level = Dict(c.nonreference_level => θc[c.coordinate]
+                        for c in catarm.contrasts)
+        levels = [c.nonreference_level for c in arm.contrasts]
+        swap && (levels = reverse(levels))
+        for (c, level) in zip(arm.contrasts, levels)
+            θs[c.coordinate] = by_level[level]
+        end
+        @test !any(isnan, θs)
+        BridgeStan.param_unconstrain(str.m, θs)
+    end
+    @test loglik(str, point(false)) ≈ loglik(cat, uc) rtol=1e-12
+    @test !isapprox(loglik(str, point(true)), loglik(cat, uc); rtol=1e-6)
+end
+
 @stestset "exact totals: Intercept recovered, the String levels stay sampled" begin
     str = string_cat_fit(string_cat_flat, string_cat_flat_data, ARM, "flat_string_auto";
                          total_groups=:auto)

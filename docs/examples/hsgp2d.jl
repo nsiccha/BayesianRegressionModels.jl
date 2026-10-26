@@ -7,6 +7,7 @@
 using Random, Statistics, Distributions, LinearAlgebra, DataFrames, JSON
 using BayesianRegressionModels, StanBlocks, BridgeStan, LogDensityProblems
 using WarmupHMC, Enzyme
+include(joinpath(@__DIR__, "quorum.jl"))  # chains through WarmupHMC's quorum sampler
 using DifferentiationInterface: AutoEnzyme
 
 const BRM = BayesianRegressionModels
@@ -36,7 +37,7 @@ sb = SBBRMI(builder(data); mod=@__MODULE__)
 problem = StanBlocks.stan_instantiate(sb.model; path=joinpath(SCRATCH, ".out", "stan", "hsgp2d.stan"))
 # No adaptive wrap: iso/grouped HSGPs are outside its supported shapes
 # (HSGP latents are noncentered by construction).
-fit = adaptive_warmup_mcmc(
+fit = quorum_fit(
     Xoshiro(1234), problem; init=missing, n_draws=600,
     nonlinear_adapt=false, monitor_ess=false,
 )

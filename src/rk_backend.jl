@@ -5201,7 +5201,8 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
             "hyper-predicted length scales or amplitudes is not implemented")
         (; group_index=idx, group_source=source,
             group_levels=collect(state.by.levels), n_groups=length(state.by.levels),
-            level_cor)
+            level_cor, _rk_plan_level_coordinates!(level_cor, data, columns, taken,
+                                                   derived)...)
     end
     # `fits` (each axis's center and half-width) is metadata for design
     # checks (`rk_design_binder`); the emitted basis computes its own.
@@ -5210,6 +5211,19 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
             fixed_fits=state.explicit_domain ? state.fits : nothing,
             latent=state.latent, orthogonal, common..., grouped...), id, id)
 end
+
+# `cor = multigroup(coordinates, lambda; k)` reads the levels' coordinates as
+# fit-role inputs, so a frozen replay keeps the training coordinates; the
+# graph derives the inducing grid from them (src/rk_structured.jl). Free
+# inducing positions are fit-role inputs too when they are data, and the
+# declared vector parameters by name otherwise.
+_rk_plan_level_coordinates!(_level_cor, data, columns, taken, derived) = (;)
+_rk_plan_level_coordinates!(lc::_BRMMultigroupCoordinates, data, columns, taken, derived) =
+    (; coordinate_columns=Tuple(_rk_fit_twin!(derived, columns, taken, data, axis)
+                                for axis in lc.axes),
+       position_columns=Tuple(isnothing(position.values) ? position.name :
+                                  _rk_fit_twin!(derived, columns, taken, data, position.name)
+                              for position in lc.positions))
 
 # ---- AR(1) latent-path terms (mirrors `_sb_ar1`) ----
 #
