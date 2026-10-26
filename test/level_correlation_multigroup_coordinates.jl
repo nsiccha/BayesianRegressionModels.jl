@@ -2,13 +2,14 @@
 # of a grouped HSGP over known level coordinates,
 # `hsgp(t; by=g, cor=multigroup((x, y), lambda; k))` (src/level_correlation.jl):
 # basis frequency `omega` correlates two levels at distance `d` by
-# `exp(-d^2 / (2 r^2))`, `r = sqrt((lambda / (rho omega))^2 + r_min^2)` for
-# the approximation's resolution `r_min`, approximated with `k` functions per
-# axis by a Hilbert-space sine basis (`method = :hsgp`, the default) or
-# inducing points on a grid (`method = :inducing`, for approximate-inference
-# loops). Design: decisions `1ug0391` (spelling, range law), `0u9tpd6` with the
-# user's feedback on it and on brief `dg6hem` (both approximations, HSGP the
-# default), `114k5fg` and `100gkpq` (no clamp: the resolution enters smoothly).
+# `exp(-d^2 / (2 r^2))`, `r = lambda / (rho omega)`, approximated with `k`
+# functions per axis by a Hilbert-space sine basis (`method = :hsgp`, the
+# default) or inducing points on a grid (`method = :inducing`, for
+# approximate-inference loops). `lambda` must stay at or above 2√(ln 100) times
+# the approximation's resolution, so frequencies it cannot resolve are
+# negligible. Design: decisions `1ug0391` (spelling, range law), `0u9tpd6` with
+# the user's feedback on it and on brief `dg6hem` (both approximations, HSGP the
+# default), `114k5fg` and `100gkpq` (no clamp; the user's lower bound on lambda).
 #
 #     julia --project=test test/level_correlation_multigroup_coordinates.jl
 #
@@ -41,18 +42,18 @@ function coordinate_data(; seed=3)
 end
 
 const mgc = @brm begin
-    lambda ~ LogNormal(3.0, 0.5)
+    lambda ~ LogNormal(5.7, 0.3; lower=230.0)
     mu ~ 1 + t + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), lambda; k=6))
     y ~ Normal(mu, 1.0)
 end
 # A constant spatial scale and the default grid.
 const fixed = @brm begin
-    mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), 40.0))
+    mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), 80.0))
     y ~ Normal(mu, 1.0)
 end
 # Inducing points.
 const mgi = @brm begin
-    lambda ~ LogNormal(3.0, 0.5)
+    lambda ~ LogNormal(5.7, 0.3; lower=230.0)
     mu ~ 1 + t + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), lambda; k=6, method=:inducing))
     y ~ Normal(mu, 1.0)
 end
@@ -63,11 +64,11 @@ flat(code) = replace(code, r"\(\s+" => "(", r",\s+" => ", ", r"\s+\)" => ")")
 
 # The K x P feature matrix of one frequency, read off unit standardized
 # weights: column p is the weights of z = e_p.
-function features(omega2, rho, s, center, scale, r_min, lambda, k, b; method=1)
+function features(omega2, rho, s, center, scale, lambda, k, b; method=1)
     P, M = k^size(s, 2), size(omega2, 1)
     hcat((brm_hsgp_multigroup_coordinate_weights(
         [p == q ? 1.0 : 0.0 for q in 1:P, _ in 1:M], omega2, rho, s, center, scale,
-        r_min, lambda, method)[:, b] for p in 1:P)...)
+        lambda, method)[:, b] for p in 1:P)...)
 end
 
 # An independent dense reference: the unit-diagonal predictive process over
@@ -112,40 +113,39 @@ end
     rho, lambda = 1.3, 60.0
     omega2 = [0.01, 0.04, 0.2, 1.5, 9.0]
     for b in eachindex(omega2)
-        r = sqrt((lambda / (rho * sqrt(omega2[b])))^2 + r_min^2)
-        F = features(omega2, rho, s, center, h0, r_min, lambda, k, b)
+        r = lambda / (rho * sqrt(omega2[b]))
+        F = features(omega2, rho, s, center, h0, lambda, k, b)
         C = F * F'
         @test all(diag(C) .≈ 1)
         # the Kronecker form equals the dense predictive process
         @test C ≈ dense_coherence(s, center, h0, r, k) atol=1e-8
-        # and approximates the exact kernel at that range
-        @test maximum(abs.(C .- exp.(-D2 ./ (2r^2)))) <= 0.02
+        # and approximates the exact kernel at every range it resolves
+        r >= r_min && @test maximum(abs.(C .- exp.(-D2 ./ (2r^2)))) <= 0.02
     end
-    # The resolution enters only through the range √(r² + r_min²): the fastest
-    # frequency (exact range λ/(ρω) = 15.4, below r_min) is the frequency whose
-    # exact range is that combined range, at no resolution.
+    # A range far below the resolution stays a finite, unit-diagonal
+    # coherence (its frequency is negligible by the formula's bound on λ), and
+    # the weights move with λ there too: no plateau.
     @test lambda / (rho * 3) < r_min
-    F = features(omega2, rho, s, center, h0, r_min, lambda, k, 5)
-    r5 = sqrt((lambda / (rho * 3))^2 + r_min^2)
-    @test F ≈ features([1.0], 1.0, s, center, h0, 0.0, r5, k, 1) atol=1e-10
-    # No plateau: the weights move with λ at every frequency, the fastest too.
     z = randn(rng, k^2, length(omega2))
     for method in (1, 2)
         scale = method == 1 ? h0 : brm_multigroup_coordinate_grid(s, k, 2, 1.5)[2]
+        F = features([1.0], 1.0, s, center, scale, r_min / 200, k, 1; method)
+        @test all(isfinite, F)
+        @test all(diag(F * F') .≈ 1)
         Wl(l) = brm_hsgp_multigroup_coordinate_weights(z, omega2, rho, s, center, scale,
-                                                       r_min, l, method)[:, 5]
+                                                       l, method)[:, 5]
         @test maximum(abs.(Wl(lambda * 1.001) .- Wl(lambda * 0.999))) > 1e-7
     end
     # Weights are linear in z.
-    W = brm_hsgp_multigroup_coordinate_weights(z, omega2, rho, s, center, h0, r_min, lambda, 1)
-    @test W[:, 2] ≈ features(omega2, rho, s, center, h0, r_min, lambda, k, 2) * z[:, 2]
+    W = brm_hsgp_multigroup_coordinate_weights(z, omega2, rho, s, center, h0, lambda, 1)
+    @test W[:, 2] ≈ features(omega2, rho, s, center, h0, lambda, k, 2) * z[:, 2]
     # One length scale per time axis: the exponent is the sum over axes.
     omega2_2 = [0.01 0.02; 0.3 0.1]
     W2 = brm_hsgp_multigroup_coordinate_weights(z[:, 1:2], omega2_2, [1.3, 0.4], s,
-                                                center, h0, r_min, lambda, 1)
+                                                center, h0, lambda, 1)
     W1 = brm_hsgp_multigroup_coordinate_weights(z[:, 1:2],
         [1.3^2 * 0.01 + 0.4^2 * 0.02, 1.3^2 * 0.3 + 0.4^2 * 0.1], 1.0, s, center, h0,
-        r_min, lambda, 1)
+        lambda, 1)
     @test W2 ≈ W1 atol=1e-12
     # The Hilbert-space approximation: box half-width c · half-extent, the
     # HSGP length-scale floor of that box, and the dense tensor basis.
@@ -154,38 +154,34 @@ end
     @test L0 ≈ 1.5 .* [(maximum(s[:, a]) - minimum(s[:, a])) / 2 for a in 1:2]
     @test r_min2 ≈ maximum((4 * L / pi) * sqrt(log(100) / (k^2 - 1)) for L in L0)
     for b in eachindex(omega2)
-        r = sqrt((lambda / (rho * sqrt(omega2[b])))^2 + r_min2^2)
-        F = features(omega2, rho, s, center, L0, r_min2, lambda, k, b; method=2)
+        r = lambda / (rho * sqrt(omega2[b]))
+        F = features(omega2, rho, s, center, L0, lambda, k, b; method=2)
         C = F * F'
         @test all(diag(C) .≈ 1)
         @test C ≈ dense_hsgp(s, center, L0, r, k) atol=1e-10
-        @test maximum(abs.(C .- exp.(-D2 ./ (2r^2)))) <= 0.03
+        r >= r_min2 && @test maximum(abs.(C .- exp.(-D2 ./ (2r^2)))) <= 0.03
     end
     @test_throws "`method` is 1" brm_hsgp_multigroup_coordinate_weights(z, omega2, rho, s,
-        center, h0, r_min, lambda, 3)
+        center, h0, lambda, 3)
 end
 
 @testset "the approximation at 1,514 levels" begin
     # The probe table of decision `100gkpq`: 1,514 uniform points in a
-    # 640 x 870 km box, k = 17 functions per axis. Each case is the exact
-    # kernel's range `lambda` (0 is the resolution alone) and the tolerance at
-    # the combined range √(λ² + r_min²): inducing points 0.016 at their
-    # resolution (1.25 grid spacings), falling with the range.
+    # 640 x 870 km box, k = 17 functions per axis, the error at ranges from the
+    # resolution up: inducing points 0.016 at theirs (1.25 grid spacings),
+    # falling with the range; the Hilbert-space basis 1e-3 throughout.
     rng = Random.MersenneTwister(1)
     s = hcat(640 .* rand(rng, 1514), 870 .* rand(rng, 1514))
     k = 17
     center, h0, r_min = brm_multigroup_coordinate_grid(s, k, 1)
     D2 = [sum(abs2, s[i, :] .- s[j, :]) for i in axes(s, 1), j in axes(s, 1)]
-    for (lambda, tolerance) in ((0.0, 0.016), (50.0, 0.005), (200.0, 1e-3), (1000.0, 1e-4), (1e4, 1e-4))
-        r = sqrt(lambda^2 + r_min^2)
-        F = features([1.0], 1.0, s, center, h0, r_min, lambda, k, 1)
+    for (r, tolerance) in ((r_min, 0.016), (1.5r_min, 0.005), (200.0, 1e-3), (1000.0, 1e-4), (1e4, 1e-4))
+        F = features([1.0], 1.0, s, center, h0, r, k, 1)
         @test maximum(abs.(F * F' .- exp.(-D2 ./ (2r^2)))) <= tolerance
     end
-    # The Hilbert-space approximation stays at or below 0.001 at every range.
     center, L0, r_min = brm_multigroup_coordinate_grid(s, k, 2, 1.5)
-    for lambda in (0.0, 100.0, 400.0, 1000.0, 1e4)
-        r = sqrt(lambda^2 + r_min^2)
-        F = features([1.0], 1.0, s, center, L0, r_min, lambda, k, 1; method=2)
+    for r in (r_min, 200.0, 400.0, 1000.0, 1e4)
+        F = features([1.0], 1.0, s, center, L0, r, k, 1; method=2)
         @test maximum(abs.(F * F' .- exp.(-D2 ./ (2r^2)))) <= 1e-3
     end
 end
@@ -194,27 +190,26 @@ end
     df = coordinate_data()
     sb = SBBRMI(mgc(df); mod=@__MODULE__)
     code = flat(BRM.stan_code(sb))
-    @test occursin("real<lower=0.0> lambda;", code)
+    @test occursin("real<lower=230.0> lambda;", code)
     @test occursin("brm_hsgp_multigroup_coordinate_weights(b_hsgpw_t_g, omega2_hsgp_t_by_g, " *
                    "hsgp_t_by_g_rho, multigroup_sx_sy_coordinates, multigroup_sx_sy_hsgp6_c1p5_center, " *
-                   "multigroup_sx_sy_hsgp6_c1p5_scale, multigroup_sx_sy_hsgp6_c1p5_r_min, lambda, 6, 2)", code)
+                   "multigroup_sx_sy_hsgp6_c1p5_scale, lambda, 6, 2)", code)
     @test occursin("rows_dot_product(hsgp_t_by_g_PHI_scaled, hsgp_t_by_g_beta_level[g_idx, :])", code)
     # The standardized weights live on the 6 x 6 grid, not one row per level.
     @test sb.data[:n_rows_hsgpw_t_g] == KG^2
     @test sb.data[:multigroup_sx_sy_coordinates] == hcat(df.sx, df.sy)
-    center, L0, r_min = brm_multigroup_coordinate_grid(hcat(df.sx, df.sy), KG, 2, 1.5)
+    center, L0, _ = brm_multigroup_coordinate_grid(hcat(df.sx, df.sy), KG, 2, 1.5)
     @test sb.data[:multigroup_sx_sy_hsgp6_c1p5_center] == center
     @test sb.data[:multigroup_sx_sy_hsgp6_c1p5_scale] == L0
-    @test sb.data[:multigroup_sx_sy_hsgp6_c1p5_r_min] == r_min
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
     # A constant spatial scale is inline; the default basis has 20 functions per axis.
     code = flat(stan(fixed(df)))
-    @test occursin("multigroup_sx_sy_hsgp20_c1p5_r_min, 40.0, 20, 2)", code)
+    @test occursin("multigroup_sx_sy_hsgp20_c1p5_scale, 80.0, 20, 2)", code)
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
     # Inducing points: their own grid geometry and method code 1.
     sb = SBBRMI(mgi(df); mod=@__MODULE__)
     code = flat(BRM.stan_code(sb))
-    @test occursin("multigroup_sx_sy_inducing6_r_min, lambda, 6, 1)", code)
+    @test occursin("multigroup_sx_sy_inducing6_scale, lambda, 6, 1)", code)
     @test sb.data[:multigroup_sx_sy_inducing6_scale] ==
         brm_multigroup_coordinate_grid(hcat(df.sx, df.sy), KG, 1)[2]
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
@@ -245,7 +240,7 @@ end
     # refused: a random-effect block has no frequencies for the coherence to
     # depend on (decision `0w54lkq`, scope)
     refused(@brm(begin
-        mu ~ 1 + (1 | gr(g; cor=multigroup((sx, sy), 40.0)))
+        mu ~ 1 + (1 | gr(g; cor=multigroup((sx, sy), 400.0)))
         y ~ Normal(mu, 1.0)
     end), "only a grouped `hsgp(...; by=..., cor=multigroup(...))` has")
     # refused: one coordinate per level (decision `1ug0391`, spelling)
@@ -253,6 +248,29 @@ end
         mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((t, u), 40.0))
         y ~ Normal(mu, 1.0)
     end), "has 96 coordinates per axis, but grouping `g` has 12 levels")
+    # refused: `lambda` must stay at or above 2√(ln 100) times the
+    # resolution, so the frequencies the basis cannot resolve are negligible
+    # (decision `100gkpq`): an unbounded prior, and a constant below it, each
+    # named with the bound and a `k` that fits
+    refused(@brm(begin
+        lambda ~ LogNormal(3.0, 0.5)
+        mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), lambda; k=6))
+        y ~ Normal(mu, 1.0)
+    end), "can be as small as 0.0 (the lower end of its prior's support). Give its prior a lower bound")
+    need(k, method) = BRM._BRM_MULTIGROUP_RESOLUTION_RATIO *
+        brm_multigroup_coordinate_grid(hcat(df.sx, df.sy), k, method, 1.5)[3]
+    @test 40.0 < need(20, 2) < 62.0
+    fit = findfirst(k -> need(k, 2) <= 40.0, 20:200) + 19
+    refused(@brm(begin
+        mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), 40.0))
+        y ~ Normal(mu, 1.0)
+    end), "Use a spatial scale of at least $(round(need(20, 2); sigdigits=3)), or use k = $fit")
+    # a truncated prior whose lower end meets the bound is accepted
+    @test SBBRMI(@brm(begin
+        lambda ~ LogNormal(5.0, 0.5; lower=62.0)
+        mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), lambda))
+        y ~ Normal(mu, 1.0)
+    end)(df); mod=@__MODULE__) isa SBBRMI
     # refused: the range `lambda / (rho omega)` needs lambda > 0
     refused(@brm(begin
         mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), -1.0))
@@ -260,27 +278,27 @@ end
     end), "needs a positive finite spatial scale `lambda`")
     # refused: the grid needs at least two points per axis
     refused(@brm(begin
-        mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), 40.0; k=1))
+        mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), 400.0; k=1))
         y ~ Normal(mu, 1.0)
     end), "integer `k >= 2`")
     # refused: the inducing grid spans the coordinates, so it has no box factor
     refused(@brm(begin
-        mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), 40.0; method=:inducing, c=1.5))
+        mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), 400.0; method=:inducing, c=1.5))
         y ~ Normal(mu, 1.0)
     end), "takes the box factor `c` only with `method = :hsgp`")
     # refused: the box must contain the coordinates with a margin
     refused(@brm(begin
-        mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), 40.0; c=0.9))
+        mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), 400.0; c=0.9))
         y ~ Normal(mu, 1.0)
     end), "needs a box factor `c > 1`")
     # refused: the two approximations of decision `0u9tpd6` only
     refused(@brm(begin
-        mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), 40.0; method=:fourier))
+        mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), 400.0; method=:fourier))
         y ~ Normal(mu, 1.0)
     end), "takes `method = :inducing` or `method = :hsgp`")
     # refused: no maximum spatial range (decision `1ug0391`, range)
     refused(@brm(begin
-        mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), 40.0; range=100.0))
+        mu ~ 1 + hsgp(t; k=5, by=g, cor=multigroup((sx, sy), 400.0; range=100.0))
         y ~ Normal(mu, 1.0)
     end), "takes the keywords `k` (functions per axis)")
     # refused: at most three coordinate axes (decision `1ug0391`, scope)
@@ -298,9 +316,9 @@ end
 const MGC_REFERENCE = """
 data { int N; int G; int M; int k; int method; vector[N] t; vector[N] y; array[N] int g;
        matrix[N, M] PHI; vector[M] omega2; real rho_lower;
-       matrix[G, 2] s; vector[2] center; vector[2] scale; real r_min; }
+       matrix[G, 2] s; vector[2] center; vector[2] scale; }
 parameters {
-  real<lower=0> lambda;
+  real<lower=230> lambda;
   vector[2] beta;
   vector[M * k * k] zw;
   real<lower=rho_lower> rho;
@@ -310,7 +328,7 @@ model {
   matrix[k * k, M] Z = to_matrix(zw, M, k * k)';
   matrix[G, M] W;
   for (j in 1:M) {
-    real r = sqrt(square(lambda) / (square(rho) * omega2[j]) + square(r_min));
+    real r = lambda / sqrt(square(rho) * omega2[j]);
     array[2] matrix[G, k] A;
     for (a in 1:2) {
       if (method == 1) {
@@ -321,8 +339,10 @@ model {
         matrix[k, k] Lu = cholesky_decompose(Kuu);
         for (i in 1:G) {
           vector[k] kv;
+          real o = s[i, a] - center[a];
+          real near = square(o - h * (round(o / h + (k + 1) / 2.0) - (k + 1) / 2.0));
           for (p in 1:k)
-            kv[p] = exp(-square(s[i, a] - center[a] - h * (p - (k + 1) / 2.0)) / (2 * square(r)));
+            kv[p] = exp(-(square(o - h * (p - (k + 1) / 2.0)) - near) / (2 * square(r)));
           vector[k] av = mdivide_left_tri_low(Lu, kv);
           A[a][i] = (av / norm2(av))';
         }
@@ -343,7 +363,7 @@ model {
   vector[M] spd = sf * sqrt(rho * sqrt(2 * pi())) * exp(-0.25 * square(rho) * omega2);
   vector[N] f;
   for (n in 1:N) f[n] = dot_product(PHI[n], W[g[n]]' .* spd);
-  lambda ~ lognormal(3.0, 0.5);
+  lambda ~ lognormal(5.7, 0.3); // constant bound: no truncation normalizer, as BRM emits
   beta ~ std_normal();
   zw ~ std_normal();
   rho ~ lognormal(0, 1);
@@ -381,14 +401,13 @@ end
         path = joinpath(CACHE, "mgc_reference_" * string(hash(MGC_REFERENCE)) * ".stan")
         isfile(path) || write(path, MGC_REFERENCE)
         s = hcat(df.sx, df.sy)
-        center, scale, r_min = brm_multigroup_coordinate_grid(s, KG, method, 1.5)
+        center, scale, _ = brm_multigroup_coordinate_grid(s, KG, method, 1.5)
         reference = BS.StanModel(path, JSON.json(Dict("N"=>length(df.t), "G"=>G, "M"=>M,
             "k"=>KG, "method"=>method, "t"=>df.t, "y"=>df.y, "g"=>df.g,
             "PHI"=>[PHI[i, :] for i in axes(PHI, 1)],
             "omega2"=>vec(sb.data[:omega2_hsgp_t_by_g]),
             "rho_lower"=>sb.data[:rho_lower_hsgp_t_by_g],
-            "s"=>[s[i, :] for i in axes(s, 1)], "center"=>center, "scale"=>scale,
-            "r_min"=>r_min)))
+            "s"=>[s[i, :] for i in axes(s, 1)], "center"=>center, "scale"=>scale)))
         names_ref = String.(BS.param_unc_names(reference))
         @test length(names_ref) == length(names_brm)
         perm = [only(findall(==(reference_name(n)), names_ref)) for n in names_brm]
@@ -467,15 +486,15 @@ end
         d = brm_descriptor(sb)
         column(name) = draws[:, only(findall(==(name), names))]
         omega2 = vec(sb.data[:omega2_hsgp_t_by_g])
-        r_min = sb.data[:multigroup_sx_sy_hsgp6_c1p5_r_min]
+        r_min = brm_multigroup_coordinate_grid(hcat(df.sx, df.sy), KG, 2, 1.5)[3]
         rho, lambda, sigma = column("hsgp_t_by_g_rho_iso"), column("lambda"),
             column("hsgp_t_by_g_sigma")
         c = brm_multigroup_coherence(d, draws, names; distances=[0.0, 10.0, 50.0])
         @test c.predictor === :mu
         @test c.period ≈ 2pi ./ sqrt.(omega2)
-        @test c.range ≈ sqrt.(lambda .^ 2 ./ (rho .^ 2 .* omega2') .+ r_min^2)
-        @test c.resolution == r_min
-        @test c.resolution_share ≈ r_min ./ c.range
+        @test c.range ≈ lambda ./ (rho .* sqrt.(omega2'))
+        @test c.resolution ≈ r_min
+        @test c.resolved == (c.range .>= c.resolution)
         @test c.coherence[:, :, 1] ≈ ones(3, length(omega2))
         @test c.coherence[:, 2, 3] ≈ exp.(-50.0^2 ./ (2 .* c.range[:, 2] .^ 2))
         # At the levels' own coordinates and the fitted times, the term is the

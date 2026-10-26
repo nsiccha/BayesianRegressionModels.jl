@@ -115,9 +115,10 @@ end
 # `hsgp(x...; by=g, cor=multigroup(coordinates, lambda; k, method))`
 # (src/level_correlation.jl): basis frequency `b` correlates the levels by
 # `exp(-d^2 / (2 r_b^2))`, `d` the distance between their coordinates and
-# `r_b = sqrt(lambda^2 / sum_a rho_a^2 omega2[b, a] + r_min^2)`: the exact
-# kernel's range `lambda / (rho omega)` seen at the approximation's resolution
-# `r_min`, smooth in both.
+# `r_b = lambda / sqrt(sum_a rho_a^2 omega2[b, a])`. A frequency whose range
+# is below the approximation's resolution gets a well-defined but inexact
+# coherence; the formula's `lambda >= 2 sqrt(log(100)) r_min` keeps its
+# spectral amplitude below 1/100 (src/level_correlation.jl).
 # Per axis, each level gets a unit feature vector of `k` entries, and level
 # `i`'s weight is `w_i' z[:, b]` with `w_i` the Kronecker product of its axes'
 # features, so the levels' correlation `W W'` has a unit diagonal and no
@@ -132,17 +133,17 @@ end
 # twin is the `@stanonly` deffun of the same name in src/sbimpl.jl; keep both
 # in lockstep.
 brm_hsgp_multigroup_coordinate_weights(z, omega2, rho, coordinates, center, scale,
-                                       r_min, lambda, method::Integer) =
+                                       lambda, method::Integer) =
     _brm_multigroup_coordinate_weights(_brm_multigroup_approximation(method), z, omega2,
-                                       rho, coordinates, center, scale, r_min, lambda)
+                                       rho, coordinates, center, scale, lambda)
 function _brm_multigroup_coordinate_weights(approximation, z, omega2, rho, coordinates,
-                                            center, scale, r_min, lambda)
+                                            center, scale, lambda)
     G, D = size(coordinates, 1), size(coordinates, 2)
     P, M = size(z, 1), size(z, 2)
     k = round(Int, P^(1 / D))
     k^D == P || error("brm_hsgp_multigroup_coordinate_weights: the spatial " *
                       "weights have $P rows, not k^$D for a whole k")
-    T = promote_type(eltype(z), eltype(rho), typeof(lambda), typeof(r_min))
+    T = promote_type(eltype(z), eltype(rho), typeof(lambda))
     out = similar(z, T, G, M)
     frame = Array{T}(undef, k, k, D)
     span = Vector{T}(undef, D)
@@ -152,7 +153,7 @@ function _brm_multigroup_coordinate_weights(approximation, z, omega2, rho, coord
         e = _brm_hsgp_frequency_exponent(omega2, rho, b)
         e > 0 || error("brm_hsgp_multigroup_coordinate_weights: basis " *
                        "frequency $b is zero; its spatial range is unbounded")
-        r = sqrt(lambda^2 / e + r_min^2)
+        r = lambda / sqrt(e)
         for axis in 1:D
             span[axis] = _brm_multigroup_axis_frame!(approximation, frame, axis,
                                                      scale[axis], r, k)
@@ -197,10 +198,10 @@ function _brm_multigroup_coordinate_weights(approximation, z, omega2, rho, coord
 end
 
 # The grid as one value, `brm_multigroup_coordinate_grid`'s tuple: what an RK
-# graph passes on without unpacking it.
+# graph passes on without unpacking it. Its resolution is the formula's check.
 brm_hsgp_multigroup_coordinate_weights(z, omega2, rho, coordinates, grid::Tuple,
                                        lambda, method::Integer) =
-    brm_hsgp_multigroup_coordinate_weights(z, omega2, rho, coordinates, grid...,
+    brm_hsgp_multigroup_coordinate_weights(z, omega2, rho, coordinates, grid[1], grid[2],
                                            lambda, method)
 
 _brm_multigroup_approximation(method::Integer) =
@@ -221,9 +222,13 @@ end
 _brm_multigroup_axis_frame!(::Val{:hsgp}, frame, axis, scale, r, k) = sqrt(scale^2 + (3.2r)^2)
 
 # A level's (unnormalized) features on one axis at `offset` from the centre.
+# The inducing kernel is taken relative to its value at the nearest grid
+# point, a constant factor the normalization cancels exactly; at a range far
+# below the spacing it would otherwise underflow to zero at every point.
 function _brm_multigroup_axis_features!(::Val{:inducing}, a, axis, frame, h, offset, r, k)
+    shift = (offset - h * (round(offset / h + (k + 1) / 2) - (k + 1) / 2))^2
     for p in 1:k
-        t = exp(-(offset - h * (p - (k + 1) / 2))^2 / (2r^2))
+        t = exp(-((offset - h * (p - (k + 1) / 2))^2 - shift) / (2r^2))
         for q in 1:(p - 1)
             t -= frame[p, q, axis] * a[q, axis]
         end
@@ -261,14 +266,17 @@ function brm_multigroup_coordinate_grid(coordinates::AbstractMatrix, k::Integer,
     _brm_multigroup_coordinate_grid(_brm_multigroup_approximation(method), center,
                                     upper .- lower, k, c)
 end
-function _brm_multigroup_coordinate_grid(::Val{:inducing}, center, extent, k, c)
-    h0 = extent ./ (k - 1)
-    (center, h0, 1.25maximum(h0))
-end
-function _brm_multigroup_coordinate_grid(::Val{:hsgp}, center, extent, k, c)
-    L0 = c .* extent ./ 2
-    (center, L0, maximum(_brm_hsgp_rho_lower((center[a], L0[a]), k) for a in eachindex(L0)))
-end
+_brm_multigroup_coordinate_grid(approximation::Val{:inducing}, center, extent, k, c) =
+    _brm_multigroup_grid_frame(approximation, center, extent ./ (k - 1), k)
+_brm_multigroup_coordinate_grid(approximation::Val{:hsgp}, center, extent, k, c) =
+    _brm_multigroup_grid_frame(approximation, center, c .* extent ./ 2, k)
+_brm_multigroup_grid_frame(approximation, center, scale, k) =
+    (center, scale, _brm_multigroup_resolution(approximation, center, scale, k))
+# The finest range the approximation resolves: 1.25 base grid spacings, or the
+# HSGP length-scale floor of the base box.
+_brm_multigroup_resolution(::Val{:inducing}, center, h0, k) = 1.25maximum(h0)
+_brm_multigroup_resolution(::Val{:hsgp}, center, L0, k) =
+    maximum(_brm_hsgp_rho_lower((center[a], L0[a]), k) for a in eachindex(L0))
 
 # `sum_a rho_a^2 omega2[b, a]`: a one-axis basis carries one frequency per mode.
 _brm_hsgp_frequency_exponent(omega2::AbstractVector, rho::Real, b) = rho^2 * omega2[b]

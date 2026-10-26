@@ -23,11 +23,11 @@ linear predictor when the model has more than one such term.
   `ω = √(Σ_a ω_a²)` of the temporal basis and its period `2π / ω`, in the
   time axis' unit.
 - `range` — draws × basis functions: each frequency's spatial range
-  `√(r² + r_min²)`, the exact kernel's range `r = λ / (ρ ω)` at the
-  approximation's resolution `r_min`.
-- `resolution`, `resolution_share` — `r_min` and, per draw and frequency,
-  `r_min / range`: near 0 where the exact kernel's range dominates, near 1
-  where the resolution does.
+  `λ / (ρ ω)`.
+- `resolution`, `resolved` — the finest range the approximation resolves and,
+  per draw and frequency, whether the range is at least that. The formula's
+  bound `λ ≥ 2√(ln 100) · resolution` keeps every unresolved frequency's
+  spectral amplitude below 1/100.
 - `distances`, `coherence` — draws × basis functions × distances: the
   correlation `exp(-d² / (2 r²))` of two levels at each distance `d`.
 """
@@ -87,7 +87,10 @@ function _brm_multigroup_coordinate_term(d::BRMDescriptor, predictor)
        omega2=_brm_multigroup_matrix(data[k.omega2]), fits,
        K=d.plan.preproc[k.PHI].const_.K,
        coordinates=data[k.coordinates_level], center=data[k.center_level],
-       scale=data[k.scale_level], r_min=data[k.r_min_level], grid_k=k.k_level,
+       scale=data[k.scale_level],
+       r_min=_brm_multigroup_resolution(_brm_multigroup_approximation(k.method_level),
+                                        data[k.center_level], data[k.scale_level], k.k_level),
+       grid_k=k.k_level,
        method=k.method_level, lambda=k.lambda_level, block=k.beta,
        n_basis=size(data[k.omega2], 1))
 end
@@ -132,12 +135,11 @@ function _brm_multigroup_coherence(term, values, distances)
     range = Matrix{Float64}(undef, S, J)
     for s in 1:S, b in 1:J
         e = _brm_hsgp_frequency_exponent(term.omega2, _brm_multigroup_rho(values, s), b)
-        range[s, b] = sqrt(values.lambda[s]^2 / e + term.r_min^2)
+        range[s, b] = values.lambda[s] / sqrt(e)
     end
     coherence = [exp(-d^2 / (2range[s, b]^2)) for s in 1:S, b in 1:J, d in distances]
     (; term=term.target, predictor=term.predictor, frequency, period=2pi ./ frequency,
-       range, resolution=term.r_min, resolution_share=term.r_min ./ range, distances,
-       coherence)
+       range, resolution=term.r_min, resolved=range .>= term.r_min, distances, coherence)
 end
 
 function _brm_multigroup_locations(term, coordinates)
@@ -175,7 +177,7 @@ function _brm_multigroup_field(term, values, times, locations)
         rho = _brm_multigroup_rho(values, s)
         scale = brm_hsgp_sqrt_spd(term.omega2, values.sigma[s], rho)
         W = brm_hsgp_multigroup_coordinate_weights(values.z[s], term.omega2, rho,
-            locations, term.center, term.scale, term.r_min, values.lambda[s], term.method)
+            locations, term.center, term.scale, values.lambda[s], term.method)
         out[s, :, :] = PHI * (scale .* transpose(W))
     end
     out

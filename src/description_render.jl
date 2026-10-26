@@ -934,7 +934,8 @@ function _brmd_hsgp_level_prose(c,x::BRMDescriptionComponent)
         _brmd_text(c,Symbol(:multigroup_coordinate_,
                 _brmd_level_correlation_name(get(x.keywords,:method,:hsgp)));
             k=get(x.keywords,:k,_BRM_MULTIGROUP_COORDINATE_K),
-            c=get(x.keywords,:c,_BRM_MULTIGROUP_HSGP_C))
+            c=get(x.keywords,:c,_BRM_MULTIGROUP_HSGP_C),
+            lambda=_brmd_level_correlation_name(x.arguments[2]))
     _brmd_text(c,:multigroup_basis_weights;
         correlation=_brmd_level_correlation_name(x.arguments[1]),
         tau=_brmd_level_correlation_name(x.arguments[2]))

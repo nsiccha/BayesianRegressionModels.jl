@@ -2814,7 +2814,7 @@ StanBlocks.@deffun begin
 
     @stanonly brm_hsgp_multigroup_coordinate_weights(z::matrix[n_grid, m],
             omega2::matrix[m, d], rho::vector[d], coordinates::matrix[n_levels, n_space],
-            center::vector[n_space], scale::vector[n_space], r_min::real, lambda::real,
+            center::vector[n_space], scale::vector[n_space], lambda::real,
             k::int, method::int)::matrix[n_levels, m] = begin
         rv::matrix[n_levels, m]
         A::matrix[n_levels, k * n_space]
@@ -2824,7 +2824,7 @@ StanBlocks.@deffun begin
             for axis in 1:d
                 exponent += rho[axis] * rho[axis] * omega2[b, axis]
             end
-            r = sqrt(square(lambda) / exponent + square(r_min))
+            r = lambda / sqrt(exponent)
             for axis in 1:n_space
                 S::matrix[k, n_levels]
                 if method == 1
@@ -2837,10 +2837,14 @@ StanBlocks.@deffun begin
                         end
                         Ka[j, j] = 1.000000001
                     end
+                    # relative to the nearest grid point, which the
+                    # normalization cancels: finite at any range
                     for i in 1:n_levels
+                        dx = coordinates[i, axis] - center[axis]
+                        shift = square(dx - h * (round(dx / h + (k + 1) / 2.) - (k + 1) / 2.))
                         for p in 1:k
-                            S[p, i] = exp(-square(coordinates[i, axis] - center[axis] -
-                                                  h * (p - (k + 1) / 2.)) / (2 * square(r)))
+                            S[p, i] = exp(-(square(dx - h * (p - (k + 1) / 2.)) - shift) /
+                                          (2 * square(r)))
                         end
                     end
                     S = mdivide_left_tri_low(cholesky_decompose(Ka), S)
@@ -3221,8 +3225,8 @@ _sb_hsgp_by_aniso_multigroup = _sb_multigroup_input(_sb_hsgp_by_aniso, :beta)
 # weights come from the coordinate coherence of that frequency
 # (`brm_hsgp_multigroup_coordinate_weights`, src/rk_statistical.jl).
 const _SB_MULTIGROUP_COORDINATE_WEIGHTS = :(brm_hsgp_multigroup_coordinate_weights(
-    beta, omega2, rho, coordinates_level, center_level, scale_level, r_min_level,
-    lambda_level, k_level, method_level))
+    beta, omega2, rho, coordinates_level, center_level, scale_level, lambda_level,
+    k_level, method_level))
 _sb_hsgp_by_multigroup_coordinates =
     _sb_multigroup_input(_sb_hsgp_by, :beta, _SB_MULTIGROUP_COORDINATE_WEIGHTS)
 _sb_hsgp_by_aniso_multigroup_coordinates =
@@ -12459,7 +12463,7 @@ _sb_hsgp_level_submodel(::_BRMMultigroupCoordinates, iso) =
 function _sb_hsgp_level_arguments!(data, lc::_BRMMultigroupCoordinates)
     stem = Symbol(:multigroup_, join(lc.axes, "_"))
     method = _brm_multigroup_method_code(lc.method)
-    center, scale, r_min = brm_multigroup_coordinate_grid(lc.coordinates, lc.k, method, lc.c)
+    center, scale, _ = brm_multigroup_coordinate_grid(lc.coordinates, lc.k, method, lc.c)
     # One grid per method, size and (for a box) factor: `multigroup_x_y_inducing20`.
     grid = Symbol(stem, :_, lc.method, lc.k,
                   lc.method === :hsgp ? "_c" * replace(string(lc.c), "." => "p") : "")
@@ -12467,7 +12471,6 @@ function _sb_hsgp_level_arguments!(data, lc::_BRMMultigroupCoordinates)
                                                  lc.coordinates),
        center_level=_sb_static_level_datum!(data, Symbol(grid, :_center), center),
        scale_level=_sb_static_level_datum!(data, Symbol(grid, :_scale), scale),
-       r_min_level=_sb_static_level_datum!(data, Symbol(grid, :_r_min), r_min),
        lambda_level=lc.lambda, k_level=lc.k, method_level=method)
 end
 function _sb_static_level_datum!(data, key, value)

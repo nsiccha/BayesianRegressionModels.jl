@@ -45,20 +45,25 @@ positive constant. Formula-only: it is read by `@brm` and never called.
 
 The same coherence over known level coordinates: `D2 = |s_i - s_j|² / lambda²`,
 so frequency `ω` correlates two levels at distance `d` by `exp(-d² / (2 r²))`
-with spatial range `r = √((lambda / (ρ ω))² + r₀²)`: the exact kernel's range
-seen at the approximation's resolution `r₀`, smooth in every parameter. One
-coordinate field per axis (one to three axes), each holding one value per
-level of `g` in the grouping's level order, as a known `cor = C` has one row
-per level. `lambda` is a declared positive scalar parameter or a positive
-constant, in the coordinates' unit. Each frequency's correlation is
-approximated with `k` functions per axis, rescaled to a unit diagonal, so the
-cost grows linearly in the number of levels: `method = :hsgp` (the default)
-uses a sine basis over a box of half-width `√(L₀² + (3.2 r)²)` with
-`L₀ = c · half-extent` (`c = 1.5` by default), and `r₀` the HSGP length-scale
-floor of the box `L₀`; `method = :inducing`, meant for approximate-inference
-loops, places inducing points on a grid of spacing `√(h₀² + (r / 1.5)²)` with
-`h₀ = extent / (k - 1)` per axis, and `r₀ = 1.25 max h₀`. A larger `k` lowers
-`r₀`.
+with spatial range `r = lambda / (ρ ω)`. One coordinate field per axis (one to
+three axes), each holding one value per level of `g` in the grouping's level
+order, as a known `cor = C` has one row per level. `lambda` is a declared
+positive scalar parameter or a positive constant, in the coordinates' unit.
+Each frequency's correlation is approximated with `k` functions per axis,
+rescaled to a unit diagonal, so the cost grows linearly in the number of
+levels: `method = :hsgp` (the default) uses a sine basis over a box of
+half-width `√(L₀² + (3.2 r)²)` with `L₀ = c · half-extent` (`c = 1.5` by
+default); `method = :inducing`, meant for approximate-inference loops, places
+inducing points on a grid of spacing `√(h₀² + (r / 1.5)²)` with
+`h₀ = extent / (k - 1)` per axis.
+
+The approximation resolves ranges down to `r₀`: the HSGP length-scale floor of
+the box `L₀`, or 1.25 base spacings `h₀`. A frequency whose range is below
+`r₀` has `ρ ω > lambda / r₀`, so its spectral amplitude stays below 1/100 of
+the zero-frequency amplitude (the HSGP truncation tolerance) when
+`lambda ≥ 2√(ln 100) r₀ ≈ 4.3 r₀`. The smallest value `lambda` can take — the
+constant, or the lower end of its prior's support (`lower = ...` or the
+family's own) — must meet that bound; a larger `k` lowers `r₀`.
 """
 function multigroup end
 
@@ -134,6 +139,9 @@ end
 
 const _BRM_MULTIGROUP_COORDINATE_K = 20
 const _BRM_MULTIGROUP_HSGP_C = 1.5
+# `lambda / r₀` at which a frequency the approximation cannot resolve has at
+# most 1/100 of the zero-frequency spectral amplitude: `exp(-ratio² / 4) = 1/100`.
+const _BRM_MULTIGROUP_RESOLUTION_RATIO = 2sqrt(log(100))
 # The approximation's code in the emitted programs (Stan has no symbols).
 _brm_multigroup_method_code(method::Symbol) = _brm_multigroup_method_code(Val(method))
 _brm_multigroup_method_code(::Val{:inducing}) = 1
@@ -211,9 +219,53 @@ function _brm_multigroup_coordinates(value; what, prefix)
     k isa Integer && k >= 2 || error(
         "$prefix: `$what` needs an integer `k >= 2` functions per axis, " *
         "got `$(repr(k))`")
-    _BRMMultigroupCoordinates(collect(Symbol, name.(fields)), reduce(hcat, columns),
-                              _brm_multigroup_scale(last(args), :lambda; what, prefix),
-                              Int(k), method, Float64(c))
+    lc = _BRMMultigroupCoordinates(collect(Symbol, name.(fields)), reduce(hcat, columns),
+                                   _brm_multigroup_scale(last(args), :lambda; what, prefix),
+                                   Int(k), method, Float64(c))
+    _brm_multigroup_check_resolution(lc, _brm_multigroup_scale_lower(last(args));
+                                     what, prefix)
+end
+
+# The smallest value a positive scale can take: the constant itself, or the
+# higher of its declared prior's `lower` and its family's own support.
+_brm_multigroup_scale_lower(value::Real) = Float64(value)
+function _brm_multigroup_scale_lower(value::NamedColumn)
+    source = parent(value)
+    source isa DataColumn && return Float64(parent(source))
+    law = last(getargs(_as_expr_column(source)))
+    law isa ExprColumn || return -Inf
+    f, args = getf(law), map(_brm_data_value, getargs(law))
+    family = f isa Type && f <: Distribution && !any(isnothing, args) ?
+        Float64(minimum(f(args...))) : -Inf
+    lower = _brm_data_value(get(getkwargs(law), :lower, nothing))
+    isnothing(lower) ? family : max(family, Float64(lower))
+end
+
+# Every frequency the approximation cannot resolve stays negligible only if
+# `lambda` never goes below `2√(ln 100)` times the resolution (`multigroup`).
+function _brm_multigroup_check_resolution(lc::_BRMMultigroupCoordinates, lower; what, prefix)
+    method = _brm_multigroup_method_code(lc.method)
+    bound(k) = _BRM_MULTIGROUP_RESOLUTION_RATIO *
+        last(brm_multigroup_coordinate_grid(lc.coordinates, k, method, lc.c))
+    need = bound(lc.k)
+    lower >= need && return lc
+    shown(x) = round(x; sigdigits=3)
+    smallest = lc.lambda isa Symbol ?
+        "the spatial scale `$(lc.lambda)` can be as small as $(shown(lower)) (the " *
+        "lower end of its prior's support)" :
+        "the spatial scale `lambda = $(lc.lambda)` is below that"
+    fit = lower > 0 ? findfirst(k -> bound(k) <= lower, lc.k:4096) : nothing
+    error("$prefix: `$what`: with k = $(lc.k) functions per axis the " *
+          "approximation resolves spatial ranges down to " *
+          "$(shown(need / _BRM_MULTIGROUP_RESOLUTION_RATIO)), and the frequencies " *
+          "it cannot resolve stay negligible only if `lambda` is at least " *
+          "2√(ln 100) times that, $(shown(need)); $smallest. " *
+          (lc.lambda isa Symbol ?
+              "Give its prior a lower bound of at least $(shown(need)) " *
+              "(`lower = $(shown(need))`)" :
+              "Use a spatial scale of at least $(shown(need))") *
+          (isnothing(fit) ? "" :
+              ", or use k = $(lc.k + fit - 1), whose resolution fits $(shown(lower))"))
 end
 
 # A positive scale of `multigroup` (`tau`, `lambda`): a declared scalar
