@@ -227,50 +227,53 @@ function brm_hsgp_multigroup_inducing_weights(z, omega2, rho, coordinates, posit
         "positions must be $P x $D, got $(size(positions, 1)) x $(size(positions, 2))")
     T = promote_type(eltype(z), eltype(rho), eltype(positions), typeof(lambda))
     out = similar(z, T, G, M)
-    chol = Matrix{T}(undef, P, P)
-    a = Vector{T}(undef, P)
-    d2 = Vector{T}(undef, P)
     for b in 1:M
         e = _brm_hsgp_frequency_exponent(omega2, rho, b)
         e > 0 || error("brm_hsgp_multigroup_inducing_weights: basis frequency $b " *
                        "is zero; its spatial range is unbounded")
         r2 = lambda^2 / e
+        Kuu = Matrix{T}(undef, P, P)
         for q in 1:P, p in 1:P
             t = zero(T)
             for axis in 1:D
                 t += (positions[p, axis] - positions[q, axis])^2
             end
-            chol[p, q] = p == q ? 1.00000001 : exp(-t / (2r2))
+            Kuu[p, q] = p == q ? 1.00000001 : exp(-t / (2r2))
         end
-        _brm_lower_cholesky!(chol)
+        # Every level's kernel to the positions, one column each, relative to
+        # its nearest position (a factor the normalization cancels: finite at
+        # any range), solved in one triangular solve: Enzyme's rule for it
+        # costs a few forward solves, a loop's reverse several times more.
+        Kus = Matrix{T}(undef, P, G)
         for i in 1:G
-            for p in 1:P
-                t = zero(T)
-                for axis in 1:D
-                    t += (coordinates[i, axis] - positions[p, axis])^2
-                end
-                d2[p] = t
+            shift = _brm_multigroup_squared_distance(coordinates, i, positions, 1)
+            for p in 2:P
+                shift = min(shift, _brm_multigroup_squared_distance(coordinates, i, positions, p))
             end
-            # Relative to the nearest position, a factor the normalization
-            # cancels: finite at any range.
-            shift = minimum(d2)
+            for p in 1:P
+                Kus[p, i] = exp(-(_brm_multigroup_squared_distance(coordinates, i, positions, p) -
+                                  shift) / (2r2))
+            end
+        end
+        A = LowerTriangular(_brm_lower_cholesky(Kuu)) \ Kus
+        for i in 1:G
             norm2 = zero(T)
-            for p in 1:P
-                t = exp(-(d2[p] - shift) / (2r2))
-                for q in 1:(p - 1)
-                    t -= chol[p, q] * a[q]
-                end
-                a[p] = t / chol[p, p]
-                norm2 += a[p]^2
-            end
             w = zero(T)
             for p in 1:P
-                w += a[p] * z[p, b]
+                norm2 += A[p, i]^2
+                w += A[p, i] * z[p, b]
             end
             out[i, b] = w / sqrt(norm2)
         end
     end
     out
+end
+function _brm_multigroup_squared_distance(coordinates, i, positions, p)
+    t = zero(promote_type(eltype(coordinates), eltype(positions)))
+    for axis in axes(positions, 2)
+        t += (coordinates[i, axis] - positions[p, axis])^2
+    end
+    t
 end
 
 """
