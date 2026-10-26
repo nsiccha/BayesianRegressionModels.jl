@@ -626,13 +626,13 @@ end
 
 # The independent per-block reference map, composed over blocks in pair order
 # (every block's scale is constant in every block's effects).
-function manual_blocks_map(x, blocks, controls)
+function manual_blocks_map(x, blocks, controls, location_of=Dict{Int,Int}())
     ljac = zero(eltype(x))
     y = copy(x)
     p = 0
     for block in blocks
         n = block.ranef.n_terms * block.ranef.n_groups
-        j, yb = manual_adaptive_map(x, block, controls[p+1:p+n])
+        j, yb = manual_adaptive_map(x, block, controls[p+1:p+n], location_of)
         ljac += j
         y[vec(block.effects)] .= yb[vec(block.effects)]
         p += n
@@ -674,11 +674,26 @@ function check_ranef_wrapper(sb, problem, x, ordered)
     @test adaptive[1] ≈ plain[1] atol=2e-12
     @test adaptive[2] ≈ plain[2] atol=2e-12
 
+    # Hierarchical centring: the population coefficient each cell reports it is
+    # centred on must be its margin's coefficient, read through the public
+    # descriptor; the reference map then uses that location.
+    # (`test/adaptive_centering_location.jl` pins which cells take one.)
+    unc_names = StanBlocks.BridgeStan.param_unc_names(problem.model)
+    location_of = Dict{Int,Int}()
+    for row in adaptive_centering_controls(wrapped, sb)
+        (row.family === :ranef && row.location !== nothing) || continue
+        resolved = brm_population_effect_coordinates(brm_descriptor(sb),
+            row.margin.predictor, unc_names; coefficient=row.margin.coefficient)
+        @test row.location == unc_names[only(resolved.coordinates)]
+        location_of[row.index] = only(resolved.coordinates)
+    end
+
     state = ir.pairs[1][2].args[1].state
     controls = collect(range(0.15, 0.85, length=length(ir.pairs)))
     set_adaptive_sources!(state, ir, controls)
     ljac, position = ir(x)
-    expected_ljac, expected_position = manual_blocks_map(x, ordered, controls)
+    expected_ljac, expected_position = manual_blocks_map(x, ordered, controls,
+                                                          location_of)
     @test ljac ≈ expected_ljac atol=1e-12
     @test position ≈ expected_position atol=1e-12
 
@@ -977,14 +992,30 @@ end
     for (sb, problem, c, twin, map, sign) in ((ncp_sb, ncp, 1.0, cp, perm, 1),
                                               (cp_sb, cp, 0.0, ncp, invperm(perm), -1))
         wrapped = adaptive_centering_problem(sb, problem, AutoEnzyme(); centeredness=c)
+        # Hierarchical centring: the non-centred emission's cells are centred on
+        # their population coefficients, so its `c = 1` frame samples each
+        # level's total `beta + b` and the centred twin reads `x - beta` there.
+        # The centred emission keeps location 0.
+        names = sb === ncp_sb ? ncp_names : cp_names
+        location_of = Dict(r.index => only(findall(==(r.location), names))
+            for r in adaptive_centering_controls(wrapped, sb)
+            if r.family === :ranef && r.location !== nothing)
+        @test isempty(location_of) == (sb === cp_sb)
         offsets = Float64[]
         for x in points
             lp, gradient = LogDensityProblems.logdensity_and_gradient(wrapped, x)
             twin_x = similar(x)
             twin_x[map] = x
+            for (i, j) in location_of
+                twin_x[map[i]] -= x[j]
+            end
             twin_lp, twin_gradient = LogDensityProblems.logdensity_and_gradient(twin, twin_x)
             push!(offsets, lp - twin_lp)
-            @test gradient ≈ twin_gradient[map] atol=1e-9 rtol=1e-9
+            expected = twin_gradient[map]
+            for (i, j) in location_of
+                expected[j] -= twin_gradient[map[i]]
+            end
+            @test gradient ≈ expected atol=1e-9 rtol=1e-9
         end
         @test offsets[2] ≈ offsets[1] atol=1e-10
         @test any(o -> isapprox(offsets[1], o; atol=1e-10), (0.0, sign * normalizer))
@@ -1118,11 +1149,20 @@ function check_stratified_blocks(sb, problem)
         L = BayesianRegressionModels._adaptive_block_correlation(x, block)
         @test L * L' ≈ entry.cor[1, :, :] rtol=1e-12
     end
-    # At `c = 1` a cell's source coordinate is its level's effect.
+    # At `c = 1` a cell's source coordinate is its level's total: its effect
+    # plus the population coefficient it is centred on (hierarchical centring;
+    # `g` is the only grouping, so every term with a population coefficient
+    # takes one, which `check_ranef_wrapper` checks against the descriptor).
     centred = adaptive_centering_problem(sb, problem, AutoEnzyme(); centeredness=1.0)
+    location_of = Dict(r.index => only(findall(==(r.location), names))
+        for r in adaptive_centering_controls(centred, sb)
+        if r.family === :ranef && r.location !== nothing)
+    @test !isempty(location_of)
+    beta(i) = haskey(location_of, i) ? x[location_of[i]] : 0.0
     _, position = WarmupHMC.reparametrizer(centred)(x)
     for (block, entry) in zip(blocks, entries(position))
-        @test x[block.effects] ≈ permutedims(entry.effects[1, :, :]) rtol=1e-12
+        @test x[block.effects] .- beta.(block.effects) ≈
+              permutedims(entry.effects[1, :, :]) rtol=1e-12
     end
     blocks, x
 end

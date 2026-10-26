@@ -34,6 +34,20 @@ const PUBLIC_CENTERING_BUILDERS = (
     ("correlated K=3", PUBLIC_CORRELATED_BUILDER),
 )
 
+# Hierarchical centring (decision
+# `BayesianRegressionModels:snag.fitted-seven-hie-76d07973/decisions/2026-10-26T13-20-57-865-1xdxiv1`):
+# a cell of a block compiled non-centred is centred on its predictor's matching
+# population coefficient. Each block term's coefficient, read through the public
+# descriptor (`t` has no population coefficient); 0 = centred on 0, as is every
+# cell of a block compiled centred.
+function public_centering_betas(sb, names, block)
+    block.target_c == 0.0 || return zeros(Int, block.ranef.n_terms)
+    terms = block.ranef.n_terms == 1 ? [:Intercept] : [:Intercept, :x, :t]
+    [term === :t ? 0 : only(brm_population_effect_coordinates(brm_descriptor(sb), :mu,
+        names; coefficient=term).coordinates) for term in terms]
+end
+public_centering_beta(v, betas, k) = betas[k] == 0 ? 0.0 : v[betas[k]]
+
 # Read the physical covariance factor from BridgeStan, independently of BRM's
 # transform/accessors. At K=1 there is no sampled correlation factor.
 function public_centering_factor(problem, block, q)
@@ -52,7 +66,7 @@ function public_centering_factor(problem, block, q)
     Diagonal(scales) * L
 end
 
-function public_centering_reference(q, block, controls, C)
+function public_centering_reference(q, block, controls, C, betas)
     mapped = copy(q)
     logjac = 0.0
     K, G = size(block.effects)
@@ -62,7 +76,8 @@ function public_centering_reference(q, block, controls, C)
             c = controls[(g - 1) * K + k]
             location = sum(C[k, j] * z[j] for j in 1:k-1; init=0.0)
             scale = C[k, k]
-            z[k] = (q[block.effects[k, g]] - c * location) / scale^c
+            beta = public_centering_beta(q, betas, k)
+            z[k] = (q[block.effects[k, g]] - c * (location + beta)) / scale^c
             mapped[block.effects[k, g]] =
                 block.target_c * location + scale^block.target_c * z[k]
             logjac += (block.target_c - c) * log(scale)
@@ -89,7 +104,7 @@ function public_weighted_correlation(x, y, weights)
         sqrt(sum(weights .* dx.^2) * sum(weights .* dy.^2))
 end
 
-function public_centering_scores(sb, problem, block, q, backend)
+function public_centering_scores(sb, problem, block, q, backend, betas)
     K, G = size(block.effects)
     n = 6
     weights = [1.0, 2.0, 1.0, 3.0, 2.0, 1.0]
@@ -108,7 +123,8 @@ function public_centering_scores(sb, problem, block, q, backend)
             C, z = factors[i], innovations[i]
             m = sum(C[k, j] * z[j, g] for j in 1:k-1; init=0.0)
             s = C[k, k]
-            positions[i] = t * m + s^t * z[k, g]
+            beta = public_centering_beta(model_positions[i], betas, k)
+            positions[i] = t * (m + beta) + s^t * z[k, g]
             gradients[i] = hs[i][k, g] / s^t
         end
         public_weighted_correlation(positions, gradients, weights)
@@ -121,7 +137,8 @@ function public_centering_scores(sb, problem, block, q, backend)
             for g in 1:G, k in 1:K
                 c = controls[(g - 1) * K + k]
                 m = sum(C[k, j] * z[j, g] for j in 1:k-1; init=0.0)
-                source[block.effects[k, g]] = c * m + C[k, k]^c * z[k, g]
+                beta = public_centering_beta(v, betas, k)
+                source[block.effects[k, g]] = c * (m + beta) + C[k, k]^c * z[k, g]
             end
             source
         end for (v, C, z) in zip(model_positions, factors, innovations)]
@@ -162,7 +179,9 @@ end
             # Cross-check marginal scales, not only the density identity.
             @test sqrt.(diag(C * C')) ≈ exp.(q[block.log_scales])
             backend = AutoEnzyme()
-            public_centering_scores(sb, problem, block, q, backend)
+            betas = public_centering_betas(sb, names, block)
+            @test count(!=(0), betas) == (centered ? 0 : min(2, block.ranef.n_terms))
+            public_centering_scores(sb, problem, block, q, backend, betas)
 
             default = adaptive_centering_problem(sb, problem, backend)
             @test first.(WarmupHMC.reparam_sources(default)) == selected
@@ -183,7 +202,7 @@ end
                 ir = WarmupHMC.reparametrizer(wrapped)
                 ljac, mapped = ir(q)
                 reference_ljac, reference_mapped =
-                    public_centering_reference(q, block, c, C)
+                    public_centering_reference(q, block, c, C, betas)
                 @test ljac ≈ reference_ljac atol=1e-12
                 @test mapped ≈ reference_mapped atol=1e-12
                 @test mapped[untouched] == q[untouched]
@@ -196,7 +215,8 @@ end
                 @test gradient ≈ public_centering_fd(wrapped, q) atol=2e-5 rtol=2e-5
                 if !centered && block.ranef.n_terms == 1
                     sd = only(C)
-                    @test mapped[selected] ≈ q[selected] ./ sd .^ c atol=1e-12
+                    beta = public_centering_beta(q, betas, 1)
+                    @test mapped[selected] ≈ (q[selected] .- c .* beta) ./ sd .^ c atol=1e-12
                     @test ljac ≈ -sum(c) * log(sd) atol=1e-12
                 end
 

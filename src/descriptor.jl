@@ -3281,10 +3281,7 @@ function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
     # total-coefficient or a sum-to-zero block, in which case the recovered
     # generated carrier addresses it. A sampled conventional resolution above
     # always wins.
-    blocks = hasproperty(d.plan, :bindings) ?
-        [b for b in Iterators.flatten((total_effect_blocks(d.plan),
-                                       s2z_effect_blocks(d.plan)))
-         if b.predictor === logical] : []
+    blocks = _brm_absorbing_blocks(d, logical)
     recovered = _brm_recovered_population_coordinates(
         d, logical, coefficient, constrained_names, entry, blocks)
     isnothing(recovered) || return recovered
@@ -3337,6 +3334,14 @@ _brm_recovered_population(block::TotalEffectBlock) = block.population
 _brm_recovered_population(block::S2ZEffectBlock) = block.coefficients
 _brm_absorbing_block_kind(::TotalEffectBlock) = "exact total-coefficient"
 _brm_absorbing_block_kind(::S2ZEffectBlock) = "sum-to-zero"
+
+# The exact total-coefficient and sum-to-zero blocks of logical predictor
+# `logical`, the blocks that can absorb its population columns.
+_brm_absorbing_blocks(d::BRMDescriptor, logical::Symbol) =
+    hasproperty(d.plan, :bindings) ?
+        [b for b in Iterators.flatten((total_effect_blocks(d.plan),
+                                       s2z_effect_blocks(d.plan)))
+         if b.predictor === logical] : []
 
 # Resolve a coefficient absorbed by an exact total-coefficient or sum-to-zero
 # block to its recovered generated carrier. Returns `nothing` when no block of
