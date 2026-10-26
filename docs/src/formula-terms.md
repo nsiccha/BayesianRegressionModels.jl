@@ -494,8 +494,16 @@ NLME view. Exact totals leave such a block conventional.
 
 ### Exact total coefficients
 
-The StanBlocks backend uses **total coefficients** by default for eligible
-independent random effects. For example, in
+!!! warning "Deprecated"
+    Exact total coefficients (`total_groups`) are deprecated and warn once per
+    session; they still build, so fits and replays that carry them keep
+    working. The StanBlocks backend's default is the standard (non-centered)
+    parametrization. For groupings whose blocks the data identify strongly or
+    unevenly, use the sum-to-zero parametrization (`s2z_groups`, `s2z_rho`) with
+    WarmupHMC adaptive centering.
+
+With `total_groups=:auto`, the StanBlocks backend uses **total coefficients** for
+eligible independent random effects. For example, in
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
@@ -508,7 +516,7 @@ end
 data = (; subject=[1, 1, 2, 2, 3, 3], x=[0., 1., 0., 1., 0., 1.],
           y=[0.2, 0.8, -0.1, 0.9, 0.4, 1.2])
 total_intercept_model = builder(data)
-""", :total_intercept_model; title="Exact total intercepts with a fixed slope")
+""", :total_intercept_model; title="Exact total intercepts with a fixed slope", total_groups=:auto)
 ```
 
 the sampled group intercept is `total[j] = intercept + deviation[j]`.
@@ -532,7 +540,7 @@ exact Gaussian scale mixture; `Flat()` denotes an improper uniform population
 prior. Marginalization preserves the supported population prior specified in
 the formula.
 
-`total_effect_blocks(sb)` reports the selected blocks. `total_groups=()` opts out;
+`total_effect_blocks(sb)` reports the selected blocks. `total_groups=()` (the default) opts out;
 `total_groups=[:subject]` requires every block of that group to be eligible;
 otherwise it raises an error naming each predictor whose block would stay
 conventional, why, and the eligible subset. `total_groups=[:subject => [:b]]`

@@ -431,6 +431,31 @@ This explicit PDF mode requires Quarto and a working LuaLaTeX installation;
 render failures propagate. Outputs use a temporary directory, or the directory
 specified by `BRM_DESCRIPTION_TEX_OUTPUT`.
 
+## Standard parametrization by default; exact totals deprecated
+
+`standard_default.jl` checks that `SBBRMI`, `generative_plan` and
+`brm_descriptor` emit the standard (non-centered) parametrization when no
+`total_groups` is given, and that an explicit `total_groups=:auto` still builds
+exact totals with a deprecation warning. The totals files below pass
+`total_groups=:auto` explicitly:
+
+```sh
+julia --project=test test/standard_default.jl
+```
+
+## Per-predictor S2Z weights
+
+`s2z_per_predictor_rho.jl` checks `s2z_rho = [:mu => w_mu, :sigma => w_sigma]`
+on two predictors with different coefficient counts on one S2Z grouping: each
+block gets its own weights; the Stan source equals the scalar build's, with only
+the `s2z_rho_*` data changed; the compiled model runs; unknown, missing,
+duplicate and non-Symbol predictor names and a wrong per-predictor length are
+refused; and a single `predictor => w` pair works:
+
+```sh
+julia --project=test test/s2z_per_predictor_rho.jl
+```
+
 ## Exact totals beside offsets
 
 `total_effects_offset.jl` checks that `offset(...)` terms, of data and of a

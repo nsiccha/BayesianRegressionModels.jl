@@ -116,7 +116,7 @@ end
         mu ~ 1 + x + (1 | g)
         y ~ Normal(mu, sigma)
     end
-    sb = SBBRMI(brmi; mod=@__MODULE__)
+    sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=:auto)
     blocks = total_effect_blocks(sb)
     @test length(blocks) == 1
     model = compiled(sb, "totals")
@@ -158,7 +158,7 @@ end
 
 @stestset "an |ID| absorbed by an exact total block keeps its scale address" begin
     brmi = lone_eta_pk(NLME_PLATE_DATA)
-    sb = SBBRMI(brmi; mod=@__MODULE__)
+    sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=:auto)
     blocks = Dict(b.predictor => b for b in total_effect_blocks(sb))
     @test sort!(collect(keys(blocks))) == [:log_CL, :log_V]
     model = compiled(sb, "lone_eta_totals")
@@ -206,7 +206,7 @@ end
     # Omitting the response leaves no likelihood reaching the totals: the block
     # and its scale are drawn in generated quantities, under the same address.
     prior_sb = SBBRMI(lone_eta_pk(Base.structdiff(NLME_PLATE_DATA, (; dv=nothing)));
-        mod=@__MODULE__)
+        mod=@__MODULE__, total_groups=:auto)
     prior = compiled(prior_sb, "lone_eta_prior")
     pd = brm_descriptor(prior_sb)
     gq_names = String.(BridgeStan.param_names(prior; include_tp=true, include_gq=true))

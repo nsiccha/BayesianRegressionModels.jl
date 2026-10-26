@@ -1,5 +1,8 @@
 # Pupil: hierarchical residual SD
 
+!!! warning "Exact totals are deprecated"
+    This study uses exact total coefficients (`total_groups`), which are deprecated: SBBRMI's default is the standard parametrization, and for groupings whose blocks the data identify strongly or unevenly BRM recommends the sum-to-zero (S2Z) parametrization (`s2z_groups`, `s2z_rho`) with WarmupHMC adaptive centering. The results below are kept as recorded; the code passes `total_groups=:auto` explicitly.
+
 ## Result
 
 **Automatic BRM totals work for both the mean and residual-scale predictors in this pupil model.** All 15 matched arms completed. With WHMC held fixed, online position adaptation of BRM totals gives **2.36× the total-cost efficiency of brms S2Z auto** in this pilot. Against ordinary brms NCP with native Stan, the gain is **400× per sampling gradient and 442× per total gradient**.
@@ -68,7 +71,7 @@ Main.BRMDocsComparisons.comparison(@__MODULE__,
 using StanBlocks, BridgeStan, WarmupHMC, Enzyme, Random
 using DifferentiationInterface: AutoEnzyme
 
-sb = SBBRMI(pupil_hierarchical_brm_model(); mod=@__MODULE__)
+sb = SBBRMI(pupil_hierarchical_brm_model(); mod=@__MODULE__, total_groups=:auto)
 problem = StanBlocks.stan_instantiate(sb.model)
 names = BridgeStan.param_unc_names(problem.model)
 adaptive = adaptive_centering_problem(sb, problem, AutoEnzyme(); centeredness=0.0)

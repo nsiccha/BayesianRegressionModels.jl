@@ -119,7 +119,7 @@ function exception_text(backend::AbstractString, err)
 end
 
 function stan_emissions(brmi::BRM.BRMI, mod::Module;
-                        required::Bool=false, total_groups=:auto)
+                        required::Bool=false, total_groups=())
     try
         sb = Base.invokelatest(BRM.SBBRMI, brmi; mod=mod, total_groups)
         sb_source = strip(sprint(show, sb), '\n')
@@ -153,7 +153,7 @@ The IR, StanBlocks, Stan, and Turing panes are always derived during this build.
 """
 function comparison(mod::Module, code::AbstractString, brmi_name::Symbol;
                     title=replace(string(brmi_name), '_' => ' '),
-                    require_stan::Bool=false, total_groups=:auto)
+                    require_stan::Bool=false, total_groups=())
     displayed = strip(code, '\n')
     Core.eval(mod, :(using BayesianRegressionModels, Distributions))
     evaluate_source(mod, displayed)

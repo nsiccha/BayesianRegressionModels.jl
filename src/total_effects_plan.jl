@@ -525,6 +525,13 @@ Base.@nospecializeinfer function _sb_plan_totals(@nospecialize(brmi),prepared,ov
         throw(ArgumentError("total_groups must be :auto, a grouping-factor name, `group => predictor(s)`, or a collection of these (empty disables totals)"))
     requested = selection === :auto ? nothing : _sb_total_request(selection)
     !isnothing(requested) && isempty(requested) && return Dict{Symbol,Any}()
+    # Deprecated everywhere (user point 1qwe3nj); the default is the standard
+    # parametrization (user point 073uzow). Still built, so fits and replays
+    # that carry totals keep working.
+    @warn "sbimpl: `total_groups` (exact total coefficients) is deprecated. " *
+          "SBBRMI's default is the standard parametrization; for groupings whose " *
+          "blocks the data identify strongly or unevenly, use S2Z (`s2z_groups`, " *
+          "`s2z_rho`) with WarmupHMC adaptive centring (`adaptive_centering_problem`)." maxlog=1 _id=:sbimpl_total_groups_deprecated
     out = Dict{Symbol,Any}()
     reasons = Dict{Symbol,String}()
     for predictor in prepared.predictors

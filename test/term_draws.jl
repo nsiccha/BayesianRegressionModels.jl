@@ -404,7 +404,7 @@ totals = @brm begin
     mu ~ 1 + age + (1 | group)
     y ~ Normal(mu, 1.0)
 end
-dt = brm_descriptor(totals, totals_df; mod = @__MODULE__, highlights = ())
+dt = brm_descriptor(totals, totals_df; mod = @__MODULE__, highlights = (), total_groups = :auto)
 tprob = brm_execute(dt, :fit)
 tunc = BS.param_unc_names(tprob.model)
 

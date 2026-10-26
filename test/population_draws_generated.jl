@@ -55,7 +55,7 @@ totals_builder = @brm begin
     y ~ Normal(mu, sigma)
     z ~ Normal(nu, sigma2)
 end
-totals_sb = SBBRMI(totals_builder(observed); mod = @__MODULE__)
+totals_sb = SBBRMI(totals_builder(observed); mod = @__MODULE__, total_groups = :auto)
 
 @testset "the fixtures carry a sampled and a generated block of one factor" begin
     blocks = ranef_blocks(conv_sb)
@@ -74,7 +74,7 @@ end
 # coordinate transport).
 @testset "a factor whose every block is generated is refused, not a no-op" begin
     for builder in (joint_builder, totals_builder)
-        kwargs = builder === joint_builder ? (; total_groups = ()) : (;)
+        kwargs = builder === joint_builder ? (; total_groups = ()) : (; total_groups = :auto)
         prior_sb = SBBRMI(builder(covariates); mod = @__MODULE__, kwargs...)
         @test all(b -> b.generated, ranef_blocks(prior_sb))
         @test all(BayesianRegressionModels._total_blocks_generated(
@@ -144,11 +144,11 @@ end
     # A response the caller already held out is not marked twice: the program
     # equals the one holding out both responses itself.
     both = merge(observed, (; z = randn(MersenneTwister(5), n)))
-    held = SBBRMI(totals_builder(both); mod = @__MODULE__, held_out = :z)
+    held = SBBRMI(totals_builder(both); mod = @__MODULE__, held_out = :z, total_groups = :auto)
     pop_held = population_model(held; groups = :subject)
     @test pop_held.held_out == Set([:y, :z])
     @test BayesianRegressionModels.stan_code(pop_held) == BayesianRegressionModels.stan_code(
-        population_model(SBBRMI(totals_builder(both); mod = @__MODULE__); groups = :subject))
+        population_model(SBBRMI(totals_builder(both); mod = @__MODULE__, total_groups = :auto); groups = :subject))
 end
 
 if !PRED_RUNTIME

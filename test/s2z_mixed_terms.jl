@@ -304,7 +304,7 @@ end
     @test s2z_stanc_ok(sb)
     @test brm_descriptor(sb) isa BRMDescriptor
     ids = Dict{Symbol,Any}(:a_s => :as, :a_c => :ac, :a_d => :ad)
-    # The default build turns each one-grouping predictor into exact totals.
+    # The ordinary twin: the standard parametrization of every block.
     ordinary = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
     audit(sb, ordinary, "relative_sites"; ids)
     audit(SBBRMI(brmi; mod=@__MODULE__, s2z_groups=[:site_g], s2z_rho=0.0),
@@ -411,7 +411,7 @@ end
         mu ~ 1 + x + hsgp(xc, yc; k=3) + (1 | region_g) + (1 | district_g)
         y ~ Poisson(exp(mu))
     end
-    sb = SBBRMI(mixed(FLAT); mod=@__MODULE__, s2z_groups=[:region_g], s2z_rho=1.0)
+    sb = SBBRMI(mixed(FLAT); mod=@__MODULE__, s2z_groups=[:region_g], s2z_rho=1.0, total_groups=:auto)
     problem = StanBlocks.stan_instantiate(sb.model;
         path=joinpath(mktempdir(), "s2z_joint_wrapper.stan"))
     names = BridgeStan.param_unc_names(problem.model)

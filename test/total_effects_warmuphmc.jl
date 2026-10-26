@@ -12,7 +12,7 @@ builder = @brm begin
 end
 data = (;school=repeat(1:6;inner=4),
     y=repeat(collect(range(0.5,3.5;length=6));inner=4) .+ repeat([-0.3,-0.1,0.1,0.3],6))
-sb = SBBRMI(builder(data);mod=@__MODULE__)
+sb = SBBRMI(builder(data);mod=@__MODULE__, total_groups=:auto)
 problem = StanBlocks.stan_instantiate(sb.model;path=joinpath(mktempdir(),"whmc-total.stan"))
 names = BridgeStan.param_unc_names(problem.model)
 block = only(total_effect_blocks(sb))

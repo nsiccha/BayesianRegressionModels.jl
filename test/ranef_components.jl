@@ -162,7 +162,7 @@ shapes = [
     "configured sd/cor priors, centred" =>
         () -> build(generic_builder; none..., centered_groups = [:subject]),
     "Student-t" => () -> build(student_builder; none...),
-    "exact totals" => () -> build(totals_builder),
+    "exact totals" => () -> build(totals_builder; total_groups = :auto),
     "known scale" => () -> build(known_mixed_builder; none...),
     "known scale and correlation" => () -> build(known_all_builder; none...),
     "R2D2 bucket" => () -> build(r2d2_bucket_builder; none...),
@@ -246,7 +246,7 @@ end
     @test count(==(:scale), bc) == 2 && count(==(:correlation_cholesky), bc) == 2
     @test :level_scale in bc && :level_correlation_cholesky in bc
 
-    d = brm_descriptor(build(totals_builder))
+    d = brm_descriptor(build(totals_builder; total_groups = :auto))
     for t in total_effect_blocks(d.plan)
         @test only(o for o in d.outputs if o.name === t.deviations).component === :effects
         @test only(o for o in d.outputs if o.name === t.scales).component === :scale

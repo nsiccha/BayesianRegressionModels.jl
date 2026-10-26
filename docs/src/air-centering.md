@@ -1,5 +1,8 @@
 # Air pollution: regional effects and automatic totals
 
+!!! warning "Exact totals are deprecated"
+    This study uses exact total coefficients (`total_groups`), which are deprecated: SBBRMI's default is the standard parametrization, and for groupings whose blocks the data identify strongly or unevenly BRM recommends the sum-to-zero (S2Z) parametrization (`s2z_groups`, `s2z_rho`) with WarmupHMC adaptive centering. The results below are kept as recorded; the code passes `total_groups=:auto` explicitly.
+
 ## Result
 
 This study applies BRM's built-in total-coefficient construction to two supported versions of the AIR model from the [Stan S2Z discussion](https://discourse.mc-stan.org/t/help-testing-brms-pr-for-sum-to-zero-and-partial-centering/41542). It retains the population effects and their priors, and compares ordinary brms, brms sum-to-zero (S2Z), and BRM totals on the same scientific quantities within each model.
@@ -81,7 +84,7 @@ The intercept-only target has 10 sampled dimensions in ordinary brms, totals and
 using StanBlocks, BridgeStan, WarmupHMC, Enzyme, Random
 using DifferentiationInterface: AutoEnzyme
 
-sb = SBBRMI(air_independent_brm_model(); mod=@__MODULE__)
+sb = SBBRMI(air_independent_brm_model(); mod=@__MODULE__, total_groups=:auto)
 problem = StanBlocks.stan_instantiate(sb.model)
 names = BridgeStan.param_unc_names(problem.model)
 adaptive = adaptive_centering_problem(sb, problem, AutoEnzyme(); centeredness=0.0)

@@ -64,7 +64,7 @@ end
     for (label, builder) in (("data offset", data_offset), ("model-valued offset", model_offset))
         @testset "$label" begin
             brmi = builder(OFFSET_DATA)
-            sb = SBBRMI(brmi; mod=@__MODULE__)
+            sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=:auto)
             block = only(total_effect_blocks(sb))
             @test block.predictor === :mu && block.group === :g
             @test block.population_columns == (:Intercept,)
@@ -88,7 +88,7 @@ end
                 sd(:, a) ~ Gamma(2, 0.5)
                 phi ~ Exponential(1)
                 y ~ NegativeBinomial2(mu, phi)
-            end); mod=@__MODULE__)
+            end); mod=@__MODULE__, total_groups=:auto)
             @test BRM.stan_code(no_offset) != code
             # Replay and the population program keep the offset.
             @test brm_descriptor(sb) isa BRMDescriptor
@@ -112,7 +112,7 @@ end
         sigma ~ Exponential(1)
         y ~ Normal(mu, sigma)
     end
-    auto = SBBRMI(m; mod=@__MODULE__)
+    auto = SBBRMI(m; mod=@__MODULE__, total_groups=:auto)
     @test length(total_effect_blocks(auto)) == 1
     r, c = brm_description(auto), brm_description(SBBRMI(m; mod=@__MODULE__, total_groups=()))
     @test r.complete && c.complete
@@ -129,7 +129,7 @@ end
         effect(sigma, Intercept) ~ Cauchy(0, 1)
         y ~ Normal(mu, sigma)
     end
-    @test isempty(total_effect_blocks(SBBRMI(mixed(data); mod=@__MODULE__)))
+    @test isempty(total_effect_blocks(SBBRMI(mixed(data); mod=@__MODULE__, total_groups=:auto)))
     @test_throws "`sigma`" SBBRMI(mixed(data); mod=@__MODULE__, total_groups=[:g])
     @test_throws "Gaussian grouping structure" SBBRMI(mixed(data); mod=@__MODULE__, total_groups=:g)
     @test_throws "no random-effect block" SBBRMI(mixed(data); mod=@__MODULE__, total_groups=[:h])

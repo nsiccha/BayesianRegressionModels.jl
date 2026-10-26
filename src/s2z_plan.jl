@@ -74,7 +74,8 @@ function _s2z_resolve_rho(rho, J::Int, K::Int, group::Symbol;
     isnothing(rho) && coordinates === :groups && (rho = 0.0)
     isnothing(rho) && throw(ArgumentError(
         "S2Z block `$group`: pass explicit `s2z_rho` (no public default yet); " *
-        "a scalar in [0,1], one weight per coefficient, or a J-by-K matrix"))
+        "a scalar in [0,1], one weight per coefficient, a J-by-K matrix, or " *
+        "`predictor => weights` pairs"))
     weights = rho isa Real ? fill(Float64(rho), J, K) :
         rho isa AbstractVector ? repeat(reshape(collect(Float64, rho), 1, :), J, 1) :
         rho isa AbstractMatrix ? collect(Float64, rho) :
@@ -87,6 +88,41 @@ function _s2z_resolve_rho(rho, J::Int, K::Int, group::Symbol;
     all(w -> isfinite(w) && 0 <= w <= 1, weights) || throw(ArgumentError(
         "S2Z block `$group`: centering weights must lie in [0,1]"))
     weights
+end
+
+# `s2z_rho` for one predictor's block. A collection of `predictor => weights`
+# pairs gives every S2Z predictor its own weights, so predictors on one
+# grouping can differ in their coefficients; any other value applies to every
+# predictor. A predictor the pairs do not name gets `nothing`.
+const _S2ZPredictorWeights = Union{Tuple{Vararg{Pair}},AbstractVector{<:Pair}}
+_s2z_predictor_rho(rho, _predictor::Symbol) = rho
+_s2z_predictor_rho(rho::Pair, predictor::Symbol) = _s2z_predictor_rho((rho,), predictor)
+function _s2z_predictor_rho(rho::_S2ZPredictorWeights, predictor::Symbol)
+    i = findfirst(p -> first(p) === predictor, rho)
+    isnothing(i) ? nothing : last(rho[i])
+end
+
+# Per-predictor weights name exactly the predictors with an S2Z block: every
+# sampled one, and no other.
+_s2z_check_predictor_rho(_rho, _with_block, _sampled) = nothing
+_s2z_check_predictor_rho(rho::Pair, with_block, sampled) =
+    _s2z_check_predictor_rho((rho,), with_block, sampled)
+function _s2z_check_predictor_rho(rho::_S2ZPredictorWeights, with_block, sampled)
+    names = Any[first(p) for p in rho]
+    all(n -> n isa Symbol, names) || throw(ArgumentError(
+        "`s2z_rho` pairs must be `predictor => weights` with Symbol predictor names; got $(repr(rho))"))
+    allunique(names) || throw(ArgumentError(
+        "`s2z_rho` names a predictor more than once: $(repr(rho))"))
+    unknown = setdiff(names, with_block)
+    isempty(unknown) || throw(ArgumentError(
+        "`s2z_rho` names $(join(("`$n`" for n in unknown), ", ")), which " *
+        "$(length(unknown) == 1 ? "has" : "have") no block on the S2Z grouping(s); " *
+        "S2Z predictors: $(join(("`$n`" for n in sort!(collect(with_block); by=string)), ", "))"))
+    unnamed = setdiff(sampled, names)
+    isempty(unnamed) || throw(ArgumentError(
+        "`s2z_rho` gives no weights for $(join(("`$n`" for n in sort!(collect(unnamed); by=string)), ", ")); " *
+        "add `predictor => weights` for every S2Z predictor"))
+    nothing
 end
 
 # The grouping factor a declaration's block is indexed by; a multi-membership
@@ -274,10 +310,14 @@ Base.@nospecializeinfer function _sb_plan_s2zs(@nospecialize(brmi), prepared, ov
               "research; they keep working, but prefer the default `:contrasts`."
         @warn msg maxlog=1 _id=:sbimpl_s2z_coordinates_groups
     end
+    with_block = Set(d.predictor for d in prepared.context.group_declarations
+                     if _s2z_declaration_group(d) in requested)
+    _s2z_check_predictor_rho(rho, with_block, setdiff(with_block, generated))
     out = Dict{Symbol,Any}()
     for predictor in prepared.predictors
         predictor.name in generated && continue
-        plan = _sb_s2z_plan(brmi, prepared, predictor, overrides, rho, requested;
+        plan = _sb_s2z_plan(brmi, prepared, predictor, overrides,
+                            _s2z_predictor_rho(rho, predictor.name), requested;
                             buckets, sd_overrides, ranef_r2d2_overrides,
                             cv_groups, centered_groups, coordinates)
         isnothing(plan) && continue

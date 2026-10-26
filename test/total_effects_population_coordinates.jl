@@ -59,7 +59,7 @@ function _synth_names(d)
 end
 
 @testset "absorbed coefficients resolve to the recovered carrier" begin
-    sb = SBBRMI(builder(df); mod=_MOD)  # default total_groups=:auto
+    sb = SBBRMI(builder(df); mod=_MOD, total_groups=:auto)  # default total_groups=:auto
     blocks = total_effect_blocks(sb)
     @test Set(b.predictor for b in blocks) == Set((:mu, :Vc))
     @test all(b -> b.population_columns == (:Intercept,), blocks)

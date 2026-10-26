@@ -19,7 +19,7 @@ totals_law(p) = (p.distribution.callable, p.distribution.arguments, p.support)
 
 # The same declaration under automatic exact totals and conventional emission.
 function totals_pair(m)
-    auto = SBBRMI(m; mod=@__MODULE__)
+    auto = SBBRMI(m; mod=@__MODULE__, total_groups=:auto)
     conventional = SBBRMI(m; mod=@__MODULE__, total_groups=())
     @test length(total_effect_blocks(auto)) == 1
     @test isempty(total_effect_blocks(conventional))
@@ -130,7 +130,7 @@ end
         sigma ~ Exponential(1)
         y ~ Normal(mu, sigma)
     end
-    r = brm_description(SBBRMI(t; mod=@__MODULE__))
+    r = brm_description(SBBRMI(t; mod=@__MODULE__, total_groups=:auto))
     @test r.complete
     @test totals_prior(r, (:population, :mu, :Intercept)).distribution.callable === TDist
     mixture = totals_prior(r, (:total_effect, :mu, :scale_mixture))
@@ -240,7 +240,7 @@ end
         sigma ~ Exponential(1)
         y ~ Normal(mu, sigma)
     end
-    r = brm_description(SBBRMI(m; mod=@__MODULE__, s2z_groups=[:g], s2z_rho=0.0))
+    r = brm_description(SBBRMI(m; mod=@__MODULE__, s2z_groups=[:g], s2z_rho=0.0, total_groups=:auto))
     @test !r.complete
     @test r.diagnostics == ("No scientific description for brm_s2z_contrast at (:prior, :parameter, :s2z_contrast_mu)",)
 end

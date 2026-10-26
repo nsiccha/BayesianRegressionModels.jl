@@ -82,7 +82,7 @@ end
 @testset "group-level columns join the intercept total" begin
     df = group_data()
     brmi = intercept_builder(df)
-    sb = SBBRMI(brmi; mod=@__MODULE__)
+    sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=:auto)
     block = only(total_effect_blocks(sb))
     labels = block.population_columns
     @test first(labels) === :Intercept
@@ -168,8 +168,8 @@ end
 
 @testset "frozen replay and rebuild keep the fitted group-level values" begin
     df = group_data()
-    plan = generative_plan(intercept_builder, df; mod=@__MODULE__)
-    sb = SBBRMI(intercept_builder(df); mod=@__MODULE__)
+    plan = generative_plan(intercept_builder, df; mod=@__MODULE__, total_groups=:auto)
+    sb = SBBRMI(intercept_builder(df); mod=@__MODULE__, total_groups=:auto)
     block = only(total_effect_blocks(sb))
     replay = reprocess(sb, (; df..., x=df.x .+ 0.7, almost=df.almost .- 0.2))
     @test BRM.stan_code(replay) == BRM.stan_code(sb)
@@ -223,7 +223,7 @@ end
 @testset "a random slope times a per-level value joins the slope total" begin
     df = group_data()
     brmi = slope_builder(df)
-    sb = SBBRMI(brmi; mod=@__MODULE__)
+    sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=:auto)
     block = only(total_effect_blocks(sb))
     @test block.columns == (:Intercept, :x)
     @test block.population_columns == (:Intercept, :x, :xw)
@@ -243,7 +243,7 @@ end
     end
     # A column proportional to the slope only up to one row stays sampled.
     broken = (; df..., xw=[i == 9 ? v + 0.5 : v for (i, v) in enumerate(df.xw)])
-    @test only(total_effect_blocks(SBBRMI(slope_builder(broken); mod=@__MODULE__))).group_columns == ()
+    @test only(total_effect_blocks(SBBRMI(slope_builder(broken); mod=@__MODULE__, total_groups=:auto))).group_columns == ()
 end
 
 @testset "a column that would make the totals' mean rank-deficient stays sampled" begin
@@ -256,7 +256,7 @@ end
         sd(:, a) ~ Normal(0, 1)
         y ~ Normal(mu, 1)
     end
-    sb = SBBRMI(brmi; mod=@__MODULE__)
+    sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=:auto)
     block = only(total_effect_blocks(sb))
     @test block.population_columns == (:Intercept, :w)
     @test block.group_columns == (:w,)

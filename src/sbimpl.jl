@@ -3574,7 +3574,7 @@ end
 
 """
     SBBRMI(brmi::BRMI; mod=@__MODULE__, cv_groups=Set{Symbol}(),
-           centered_groups=Set{Symbol}(), total_groups=:auto,
+           centered_groups=Set{Symbol}(), total_groups=(),
            s2z_groups=(), s2z_rho=nothing, s2z_coordinates=:contrasts,
            held_out=()) -> SBBRMI
 
@@ -3583,24 +3583,30 @@ materialises the data dict. Pass `mod` if you're constructing the model
 from a module other than `BayesianRegressionModels` so SLIC's symbol
 resolver finds your locally-defined submodels.
 
-`total_groups=:auto` integrates matching population coefficients into group
-totals when the exact Gaussian conditional construction is available. It supports
-one grouping structure per predictor, independent random-effect margins, and
-Normal, Flat, or Student-t population priors (Student-t uses its exact Gaussian
-scale mixture). Unmatched fixed effects and `offset(...)` terms remain explicit
-summands. Original population
-coefficients and deviations are recovered in generated quantities. Inspect
-[`total_effect_blocks`](@ref), or use `total_groups=()` for the conventional
-representation. Naming a group explicitly requires every block of that group to
-be eligible and errors otherwise, naming each predictor whose block would stay
-conventional and why. `total_groups=[:g => [:b]]` (or `:g => :b`) requests only
-`b`'s block on `g`, leaving the group's other blocks conventional; entries mix,
-as in `[:subject, :g => [:b, :c]]`. `:auto` keeps the whole model conventional
-when any block must stay conventional. Scale priors may be any supported family
-on the positive half-line, or one of them truncated at zero with no upper bound
-(`truncated(...; lower=0)` or `truncated(..., 0, Inf)`).
-Correlated, crossed, stratified, multi-membership and R2D2 blocks retain
-conventional emission under `:auto`.
+Random-effect blocks use the standard (non-centered) parametrization by
+default. For groupings whose blocks the data identify strongly or unevenly, use
+S2Z (`s2z_groups`, `s2z_rho`, below) with WarmupHMC adaptive centering
+(`adaptive_centering_problem`).
+
+!!! warning "Deprecated"
+    `total_groups` (exact total coefficients) is deprecated and warns once per
+    session; it still builds, so fits and replays that carry totals keep
+    working. `total_groups=:auto` integrates matching population coefficients
+    into group totals when the exact Gaussian conditional construction is
+    available: one grouping structure per predictor, independent random-effect
+    margins, and Normal, Flat, or Student-t population priors (Student-t uses
+    its exact Gaussian scale mixture). Unmatched fixed effects and `offset(...)`
+    terms remain explicit summands. Original population coefficients and
+    deviations are recovered in generated quantities; inspect
+    [`total_effect_blocks`](@ref). Naming a group explicitly requires every
+    block of that group to be eligible and errors otherwise, naming each
+    predictor whose block would stay conventional and why.
+    `total_groups=[:g => [:b]]` (or `:g => :b`) requests only `b`'s block on
+    `g`; entries mix, as in `[:subject, :g => [:b, :c]]`. `:auto` keeps the
+    whole model conventional when any block must stay conventional. Scale priors
+    may be any supported family on the positive half-line, or one of them
+    truncated at zero with no upper bound. Correlated, crossed, stratified,
+    multi-membership and R2D2 blocks are never totals.
 
 `s2z_groups` is an opt-in collection of grouping-factor names (default `()`,
 disabled) emitted in the posterior-preserving sum-to-zero parameterization:
@@ -3608,14 +3614,19 @@ J-1 free orthonormal contrast coordinates per coefficient with a fixed
 projected partial map, exact Gaussian marginalization of the omitted block
 means into the sampled population coefficients `theta`, and generated
 recovery quantities. `s2z_rho` is required whenever `s2z_groups` is nonempty
-(no public default yet): a scalar in [0,1] or one weight per coefficient
-(0 = noncentered contrasts, 1 = centered). First scope is scalar independent
+(no public default yet): a scalar in [0,1], one weight per coefficient, or a
+J-by-K matrix (0 = noncentered contrasts, 1 = centered), applied to every S2Z
+predictor; or `predictor => weights` pairs, one per S2Z predictor, when
+predictors on the grouping need different weights, e.g.
+`s2z_rho = [:mu => [1, 1, 1, 0], :sigma => 1.0]`. Pairs must name every
+sampled S2Z predictor and no other. WarmupHMC's `adaptive_centering_problem`
+adapts the weights online, starting from these. First scope is scalar independent
 blocks with J >= 2, fully matched population design and Flat/Normal
 population priors, one S2Z grouping per predictor; anything else errors
 loudly. The predictor's other groupings (crossed, nested or `|ID|`) and direct
 terms (`hsgp`, categorical blocks, ...) stay ordinary terms. Inspect
-[`s2z_effect_blocks`](@ref). S2Z groups are excluded from automatic totals
-and cannot overlap `centered_groups` or `cv_groups`. S2Z applies to the blocks
+[`s2z_effect_blocks`](@ref). S2Z groups are excluded from totals and cannot
+overlap `centered_groups` or `cv_groups`. S2Z applies to the blocks
 an observed likelihood reaches: a predictor that none reaches (its response
 omitted from the data, for example) keeps its block of the grouping
 conventional, re-drawn in generated quantities, while the grouping stays S2Z
@@ -4270,7 +4281,7 @@ const _SB_STAN_RESERVED_IDENTIFIERS = Set{Symbol}((
 # orchestration entry.
 Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
        mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
-       centered_groups=Set{Symbol}(), total_groups=:auto,
+       centered_groups=Set{Symbol}(), total_groups=(),
        s2z_groups=(), s2z_rho=nothing, s2z_coordinates=:contrasts, held_out=(),
        resample_covariates=(), _frozen_preproc=nothing, _marginal_id_targets=nothing,
        _s2z_generated=nothing, _source::BRMI=brmi)
@@ -5512,7 +5523,7 @@ _generative_plan_centered(plan::GenerativePlan) =
 function generative_plan(builder::Function, df;
                          mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
                          centered_groups=Set{Symbol}(),
-                         total_groups=:auto, s2z_groups=(), s2z_rho=nothing,
+                         total_groups=(), s2z_groups=(), s2z_rho=nothing,
                          s2z_coordinates=:contrasts, held_out=(),
                          _frozen_preproc=nothing)
     brmi = Base.invokelatest(builder, df)

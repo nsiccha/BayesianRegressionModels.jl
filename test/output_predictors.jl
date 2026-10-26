@@ -188,7 +188,7 @@ end
         sigma ~ Exponential(1)
         mu ~ 1 + x + (1 | p | g)
         y ~ Normal(mu, sigma)
-    end), DF; mod=@__MODULE__)
+    end), DF; mod=@__MODULE__, total_groups=:auto)
     @test !isempty(total_effect_blocks(totals.plan))
     @test all(o -> o.predictors == (:mu,), [o for o in sampled(totals) if o.logical !== :sigma])
     @test one_output(totals; role=:random_effect, component=:effects).predictors == (:mu,)

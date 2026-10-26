@@ -73,7 +73,7 @@ end
     brmi = selection_builder(SELECTION_DATA)
     # `:auto` keeps the whole model conventional when a block must stay
     # conventional (decision 1rar7wo).
-    @test isempty(total_effect_blocks(SBBRMI(brmi; mod=@__MODULE__)))
+    @test isempty(total_effect_blocks(SBBRMI(brmi; mod=@__MODULE__, total_groups=:auto)))
 
     # A whole-group request still covers every block, and its refusal names
     # each skipped predictor, why, and the subset that is available.
@@ -149,7 +149,7 @@ end
             y[i] ~ Normal(base[i] .+ 0.2 .* w[i], 0.5)
         end
     end
-    sb = SBBRMI(positional; mod=@__MODULE__)
+    sb = SBBRMI(positional; mod=@__MODULE__, total_groups=:auto)
     @test predictors(sb) == [:base]
     conventional = SBBRMI(positional; mod=@__MODULE__, total_groups=())
     original = (conventional, instantiate(conventional, "positional_conventional"))

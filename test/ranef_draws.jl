@@ -324,7 +324,7 @@ end
 end
 
 @testset "exact totals: one entry per absorbed column, Stan's deviations" begin
-    sb = build(totals_builder)
+    sb = build(totals_builder; total_groups = :auto)
     c = constrained_draws(sb)
     blocks = brm_ranef_draws(c.d, c.draws, c.names)
     # Each absorbed `||` column keeps the generated `|ID|` its term lowers under.

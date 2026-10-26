@@ -646,13 +646,13 @@ end
     fitted_df = (; g=[1, 1, 2, 2, 3, 3], y=[0.0, 1.0, 2.0, 3.0, 1.0, 2.0])
     prior_df = (; g=fitted_df.g)
 
-    post = SBBRMI(builder(fitted_df); mod=@__MODULE__)
+    post = SBBRMI(builder(fitted_df); mod=@__MODULE__, total_groups=:auto)
     post_block = only(total_effect_blocks(post))
     @test post_block.group === :g
     @test post_block.columns == (:Intercept,)
 
-    sb = @test_logs (:warn, r"unconditioned \(prior\) program") SBBRMI(
-        builder(prior_df); mod=@__MODULE__)
+    sb = @test_logs (:warn, r"unconditioned \(prior\) program") match_mode=:any SBBRMI(
+        builder(prior_df); mod=@__MODULE__, total_groups=:auto)
     prior_block = only(total_effect_blocks(sb))
     @test (prior_block.predictor, prior_block.group, prior_block.columns) ==
           (post_block.predictor, post_block.group, post_block.columns)
@@ -690,11 +690,11 @@ end
     joint_df = (;
         x=[0.0, 1.0, 0.0, 1.0, 2.0, 3.0], g=fitted_df.g,
         y1=fitted_df.y, y2=[1.0, 0.0, 1.0, 2.0, 0.0, 1.0])
-    joint_post = SBBRMI(joint(joint_df); mod=@__MODULE__)
+    joint_post = SBBRMI(joint(joint_df); mod=@__MODULE__, total_groups=:auto)
     @test sort!([b.predictor for b in total_effect_blocks(joint_post)]) ==
         [:eta, :mu]
-    joint_prior = @test_logs (:warn, r"unconditioned \(prior\) program") SBBRMI(
-        joint((; x=joint_df.x, g=joint_df.g)); mod=@__MODULE__)
+    joint_prior = @test_logs (:warn, r"unconditioned \(prior\) program") match_mode=:any SBBRMI(
+        joint((; x=joint_df.x, g=joint_df.g)); mod=@__MODULE__, total_groups=:auto)
     @test sort!([b.predictor for b in total_effect_blocks(joint_prior)]) ==
         [:eta, :mu]
     joint_code = BayesianRegressionModels.stan_code(joint_prior)
