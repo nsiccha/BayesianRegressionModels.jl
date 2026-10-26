@@ -1303,7 +1303,7 @@ hand, so an operation that appears can be executed.
 | `:predict` | `:stan` | the Stan program emits ≥1 posterior-predictive draw **and** ≥1 BRM observation resolves to it |
 | `:pointwise_loglik` | `:stan` | the Stan program emits ≥1 pointwise log-likelihood |
 | `:replay` | `:brm` | the descriptor was built from a `@brm` builder (rebuild on a new dataframe, e.g. new subjects) |
-| `:reprocess` | `:brm` | the declaration has no random-effect block, or every random-effect block has frozen same-group preprocessing (plain/`|ID|`/grouped-HSGP group indices or typed `mm(...)`; stratified `gr(g, by=b)` remains unsupported) |
+| `:reprocess` | `:brm` | the declaration has no random-effect block, or every random-effect block has frozen same-group preprocessing (plain/`|ID|`/stratified `gr(g, by=b)`/grouped-HSGP group indices or typed `mm(...)`) |
 
 `:replay` / `:reprocess` take the new dataframe positionally and return a NEW
 `BRMDescriptor`; their `inputs` are the dataframe columns in `d.columns`, not
