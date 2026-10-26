@@ -257,7 +257,7 @@ end
             y[rows[i]] ~ Normal(m[i] + b * sum(xs[rows[i]]), sigma)
         end
     end
-    host = @brm merge(cells, (; cell=copy(subject), key=copy(obs_subject),
+    host = @brm merge(cells, (; cell=copy(cells.subject), key=copy(obs_subject),
             xs=cells.xo .+ 0.5)) begin
         sigma ~ Exponential(1)
         b ~ Normal(0, 1)
