@@ -104,6 +104,20 @@ without string templating:
   BridgeStan density matching the integer-coded twin;
 - order-free structural `merge`, and the refused `effect(<unknown predictor>, :)`.
 
+`builder_without_eval.jl` checks `brm(source; mod)`, the builder of a runtime
+`Expr` that evaluates no code, and `merge` of builders, which goes through it:
+
+- nothing is defined (the world counter does not move), against the
+  `Core.eval(mod, _brm(expr))` control, which defines a method per model;
+- the same model as the compiled builder: equal BRMIs, byte-identical Stan and
+  data, family members and split fragments, and a sweep of every `@brm` block
+  of a list of test files (`BRM_BUILDER_SWEEP=all` sweeps every file,
+  `BRM_BUILDER_SWEEP=a.jl,b.jl` names files);
+- the Julia of `constant(expr)` evaluates as compiled code would, and
+  definitions and mutation are refused;
+- fragments a package defines compose in another package's precompile workload,
+  where the evaluating route fails with "closed module".
+
 `kernel_population_lp.jl` checks per-subject linear predictors without a random
 effect (a typical value plus covariates) read as `x[i]`, beside a random-effect
 predictor and in a no-random-effects panel, against an independent density
