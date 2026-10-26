@@ -280,12 +280,13 @@ function _brm_data_assignment_value(x::ExprColumn, state, inputs)
     any(isnothing, args) && return nothing
     kwargs = map(arg -> _brm_data_assignment_value(arg, state, inputs), getkwargs(x))
     any(isnothing, values(kwargs)) && return nothing
-    f === getindex && isempty(kwargs) && return getindex(args...)
-    f === Base.vect && isempty(kwargs) && return Base.vect(args...)
-    isempty(kwargs) && _brm_is_elementwise_builtin(f) && return broadcast(f, args...)
-    hasmethod(f, Tuple{map(typeof, args)...}, keys(kwargs)) || return nothing
+    kept = isempty(kwargs) && (f === getindex || f === Base.vect)
+    elementwise = isempty(kwargs) && _brm_is_elementwise_builtin(f)
+    kept || elementwise || hasmethod(f, Tuple{map(typeof, args)...}, keys(kwargs)) ||
+        return nothing
     try
-        Base.invokelatest(f, args...; kwargs...)
+        kept ? f(args...) : elementwise ? broadcast(f, args...) :
+            Base.invokelatest(f, args...; kwargs...)
     catch err
         error("$(state.prefix): evaluating the data-only call `$x` failed: ",
             sprint(showerror, err))
@@ -321,8 +322,9 @@ end
 """
     _brm_resolve_data_assignments(brmi; prefix) -> (resolved, assignments)
 
-Replace every data-only assignment of `brmi` (one that reads at least one
-data field and no model value) by a data field holding its value. Returns
+Replace every column-valued data-only assignment of `brmi` (one that reads at
+least one data field and no model value) by a data field holding its value. A
+scalar one stays a model value, which such a column computes inline. Returns
 the resolved `BRMI` and one `(; name, value, node, inputs)` per resolved
 assignment in formula order: `node` is its right-hand side as written and
 `inputs` the data fields and resolved assignments it reads. A model without
@@ -337,8 +339,10 @@ Base.@nospecializeinfer function _brm_resolve_data_assignments(@nospecialize(brm
         assignment === nothing && continue
         node = last(getargs(parent(assignment), 2))
         value = _brm_data_assignment!(state, key, node)
-        # A literal alone (`n = 3`) reads no data and stays a model constant.
-        (value === nothing || isempty(state.inputs[key])) && continue
+        # A literal alone (`n = 3`) reads no data and stays a model constant. A
+        # scalar (`m = mean(x)`) stays a model value that a prior or bound reads
+        # by name; a column assignment that reads it computes it inline.
+        value isa AbstractArray && !isempty(state.inputs[key]) || continue
         push!(resolved, (; name=key, value, node, inputs=state.inputs[key]))
     end
     isempty(resolved) && return brmi, ()

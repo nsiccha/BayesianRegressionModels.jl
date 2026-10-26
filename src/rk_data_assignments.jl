@@ -101,9 +101,9 @@ function _rk_lower_data_assignment(x::NamedColumn, assignments, constants, raw, 
     backing isa ExprColumn{typeof(assign)} || error(
         "RK backend: internal: data-only assignment reads `$key`, which is not data")
     haskey(assignments, key) && return key
-    # A literal assignment (`n = 3`) reads no data; it is its value.
-    _brm_data_assignment_value(last(getargs(backing, 2)),
-        _BRMDataAssignments("RK backend"), Set{Symbol}())
+    # A scalar assignment (`m = mean(x)`) or a literal (`n = 3`) is not a data
+    # column: it is computed where it is read, so a design recomputes it too.
+    _rk_lower_data_assignment(last(getargs(backing, 2)), assignments, constants, raw, used)
 end
 function _rk_lower_data_assignment(x::ExprColumn, assignments, constants, raw, used)
     lower(arg) = _rk_lower_data_assignment(arg, assignments, constants, raw, used)

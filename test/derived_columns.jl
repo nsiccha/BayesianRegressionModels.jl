@@ -320,6 +320,34 @@ end
     @test density(RKBRMI(builder(design), state)) ≈ reference atol=1e-10
 end
 
+@stestset "a column assignment recomputes a scalar assignment it reads" begin
+    # `m` is a model value a prior could read by name; `tc` is a column.
+    derived = @brm flat begin
+        sigma ~ Exponential(1)
+        m = mean(t)
+        tc = t .- m
+        mu ~ 1 + tc
+        y ~ Normal(mu, sigma)
+    end
+    host = @brm merge(flat, (; tc=flat.t .- mean(flat.t))) begin
+        sigma ~ Exponential(1)
+        m = mean(t)
+        mu ~ 1 + tc
+        y ~ Normal(mu, sigma)
+    end
+    sb = sb_same_program(derived, host)
+    rk, rkh = rk_same_density(derived, host)
+    rk_in_graph(rk, :tc, (:t,))
+    # A replay design's mean, as `t .- mean(t)` written inline would read it.
+    design = (; t=flat.t[1:12] .+ 3.0, x=flat.x[1:12], g=flat.g[1:12], y=flat.y[1:12])
+    expected = merge(design, (; tc=design.t .- mean(design.t)))
+    @test stan_data(reprocess(sb, design))[:tc] ≈ expected.tc
+    u = fill(0.1, length(coordinate_names(rk.model.layout)))
+    density(backend) = LogDensityProblems.logdensity(
+        rk_logdensity_problem(backend; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse)), u)
+    @test density(reprocess(rk, design)) ≈ density(reprocess(rkh, expected)) atol=1e-10
+end
+
 # Every other site that reads a raw column, each against the same model given
 # the column as data.
 derived_side(h::AbstractVector) = [c == "u" ? 1 : 2 for c in h]
