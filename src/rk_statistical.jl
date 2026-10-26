@@ -112,6 +112,93 @@ function brm_hsgp_multigroup_weights(z, omega2, rho, L, tau)
     out
 end
 
+# `hsgp(x...; by=g, cor=multigroup(coordinates, lambda; k))`
+# (src/level_correlation.jl): basis frequency `b` correlates the levels by
+# `exp(-d^2 / (2 r_b^2))`, `d` the distance between their coordinates and
+# `r_b = lambda / sqrt(sum_a rho_a^2 omega2[b, a])`, clamped below at `r_min`.
+# That correlation is approximated by inducing points on a `k^D` grid with
+# spacing `max(h0, r_b / 1.5)` per axis, centred at `center`: level `i`'s
+# weight is `w_i' z[:, b] / |w_i|`, `w_i` the Kronecker product over the axes
+# of `L_a \ k_a(s_ia)` (`L_a` the Cholesky factor of the axis's grid kernel),
+# so the levels' correlation is the unit-diagonal predictive process with no
+# `K x K` factor. `z` is `k^D x M` standard normals, axis 1 fastest; the
+# spectral scaling stays with the caller. StanBlocks' twin is the `@stanonly`
+# deffun of the same name in src/sbimpl.jl; keep both in lockstep.
+function brm_hsgp_multigroup_coordinate_weights(z, omega2, rho, coordinates,
+                                                center, h0, r_min, lambda)
+    G, D = size(coordinates, 1), size(coordinates, 2)
+    P, M = size(z, 1), size(z, 2)
+    k = round(Int, P^(1 / D))
+    k^D == P || error("brm_hsgp_multigroup_coordinate_weights: the spatial " *
+                      "weights have $P rows, not k^$D for a whole k")
+    T = promote_type(eltype(z), eltype(rho), typeof(lambda), typeof(r_min))
+    out = similar(z, T, G, M)
+    chol = Array{T}(undef, k, k, D)
+    a = Matrix{T}(undef, k, D)
+    for b in 1:M
+        e = _brm_hsgp_frequency_exponent(omega2, rho, b)
+        e > 0 || error("brm_hsgp_multigroup_coordinate_weights: basis " *
+                       "frequency $b is zero; its spatial range is unbounded")
+        r = max(lambda / sqrt(e), r_min)
+        for axis in 1:D
+            h = max(h0[axis], r / T(1.5))
+            for j in 1:k, i in 1:k
+                d = h * (i - j)
+                chol[i, j, axis] = i == j ? T(1.000000001) : exp(-d^2 / (2r^2))
+            end
+            _brm_lower_cholesky!(view(chol, :, :, axis))
+        end
+        for i in 1:G
+            for axis in 1:D
+                h = max(h0[axis], r / T(1.5))
+                offset = coordinates[i, axis] - center[axis]
+                norm2 = zero(T)
+                for p in 1:k
+                    t = exp(-(offset - h * (p - (k + 1) / 2))^2 / (2r^2))
+                    for q in 1:(p - 1)
+                        t -= chol[p, q, axis] * a[q, axis]
+                    end
+                    a[p, axis] = t / chol[p, p, axis]
+                    norm2 += a[p, axis]^2
+                end
+                norm = sqrt(norm2)
+                for p in 1:k
+                    a[p, axis] /= norm
+                end
+            end
+            acc = zero(T)
+            for p in 1:P
+                factor = one(T)
+                rest = p - 1
+                for axis in 1:D
+                    factor *= a[rest % k + 1, axis]
+                    rest ÷= k
+                end
+                acc += factor * z[p, b]
+            end
+            out[i, b] = acc
+        end
+    end
+    out
+end
+
+"""
+    brm_multigroup_coordinate_grid(coordinates, k) -> (center, h0, r_min)
+
+The data-derived geometry of `multigroup(coordinates, lambda; k)`: per axis the
+midpoint and the base spacing `extent / (k - 1)` of the `k`-point inducing
+grid, and the resolution floor `r_min`, the largest base spacing, below which
+no frequency's spatial range goes.
+"""
+function brm_multigroup_coordinate_grid(coordinates::AbstractMatrix, k::Integer)
+    k >= 2 || error("multigroup(coordinates, lambda; k): `k` must be at least 2, got $k")
+    D = size(coordinates, 2)
+    lower = [minimum(view(coordinates, :, a)) for a in 1:D]
+    upper = [maximum(view(coordinates, :, a)) for a in 1:D]
+    h0 = (upper .- lower) ./ (k - 1)
+    ((lower .+ upper) ./ 2, h0, maximum(h0))
+end
+
 # `sum_a rho_a^2 omega2[b, a]`: a one-axis basis carries one frequency per mode.
 _brm_hsgp_frequency_exponent(omega2::AbstractVector, rho::Real, b) = rho^2 * omega2[b]
 _brm_hsgp_frequency_exponent(omega2::AbstractVector, rho, b) = rho[1]^2 * omega2[b]
@@ -132,9 +219,19 @@ end
 
 # Plain-loop lower Cholesky factor of a symmetric positive-definite matrix, so
 # Enzyme differentiates it without a LAPACK rule.
-function _brm_lower_cholesky(C::AbstractMatrix{T}) where {T}
+_brm_lower_cholesky(C::AbstractMatrix{T}) where {T} =
+    _brm_lower_cholesky_into!(zeros(T, size(C)...), C)
+# In place on a freshly allocated, exclusively owned matrix: its lower
+# triangle becomes the factor and its strict upper triangle zero.
+function _brm_lower_cholesky!(C::AbstractMatrix)
+    _brm_lower_cholesky_into!(C, C)
+    for j in axes(C, 2), i in 1:(j - 1)
+        C[i, j] = 0
+    end
+    C
+end
+function _brm_lower_cholesky_into!(chol::AbstractMatrix, C::AbstractMatrix)
     n = size(C, 1)
-    chol = zeros(T, n, n)
     for j in 1:n
         d = C[j, j]
         for k in 1:(j - 1)
