@@ -284,34 +284,49 @@ function _centering_frame(state::_BRMRanefCenteringState{N}, position, gradient,
     innovation = Vector{T}(undef, n)
     invariant_gradient = Vector{T}(undef, n)
 
-    for (bi, block) in enumerate(state.blocks), g in 1:block.ranef.n_groups
+    for (bi, block) in enumerate(state.blocks)
         K = block.ranef.n_terms
-        order = isnothing(ordered) ? (1:K) : view(ordered.orders[bi], :, g)
-        C = isnothing(ordered) ? BRM._adaptive_block_cholesky(position, block, g) :
-            _unpacked(_source_group_factor(position, ordered, bi, g), K)
+        # In the declared order a Gaussian block's factor is the same for every
+        # level, so it is built once per block, and the work arrays are reused
+        # across levels (every level rewrites `A`'s lower triangle and all of
+        # `z`, `gu`, `h`). Rebuilt per level, the frame allocated about 10 MB
+        # per leaf on 25k levels (snag warmuphmc-adapti-e35d58ad); the values
+        # are unchanged, bit for bit.
+        shared = isnothing(ordered) && !_block_mixed(block) ?
+            BRM._adaptive_block_cholesky(position, block, 1) : nothing
         A = zeros(T, K, K)
         z = Vector{T}(undef, K)
-        for j in 1:K
-            k = order[j]
-            p = state.pair_lookup[bi][k, g]
-            c = source[p]
-            m = zero(T)
-            for l in 1:j-1
-                m += C[j, l] * z[l]
-                A[j, l] = c * C[j, l]
+        gu = Vector{T}(undef, K)
+        h = Vector{T}(undef, K)
+        for g in 1:block.ranef.n_groups
+            order = isnothing(ordered) ? (1:K) : view(ordered.orders[bi], :, g)
+            C = !isnothing(shared) ? shared :
+                isnothing(ordered) ? BRM._adaptive_block_cholesky(position, block, g) :
+                _unpacked(_source_group_factor(position, ordered, bi, g), K)
+            for j in 1:K
+                k = order[j]
+                p = state.pair_lookup[bi][k, g]
+                c = source[p]
+                m = zero(T)
+                for l in 1:j-1
+                    m += C[j, l] * z[l]
+                    A[j, l] = c * C[j, l]
+                end
+                s = C[j, j]
+                u = position[block.effects[k, g]]
+                z[j] = (u - c * m) / s^c
+                A[j, j] = s^c
+                location[p] = m
+                scale[p] = s
+                innovation[p] = z[j]
             end
-            s = C[j, j]
-            u = position[block.effects[k, g]]
-            z[j] = (u - c * m) / s^c
-            A[j, j] = s^c
-            location[p] = m
-            scale[p] = s
-            innovation[p] = z[j]
-        end
-        gu = gradient[block.effects[order, g]]
-        h = transpose(A) * gu
-        for j in 1:K
-            invariant_gradient[state.pair_lookup[bi][order[j], g]] = h[j]
+            for j in 1:K
+                gu[j] = gradient[block.effects[order[j], g]]
+            end
+            BRM.LinearAlgebra.mul!(h, transpose(A), gu)
+            for j in 1:K
+                invariant_gradient[state.pair_lookup[bi][order[j], g]] = h[j]
+            end
         end
     end
     BRMAdaptiveCenteringFrame(
