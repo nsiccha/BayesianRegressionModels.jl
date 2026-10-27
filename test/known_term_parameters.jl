@@ -430,6 +430,24 @@ KNOWN_RUNTIME && @stestset "hsgp_coordinate_draws: a known value in every draw" 
     @test out.marginal_sd == fill(0.4, 4)
 end
 
+# A frozen replay keeps the known value as a fitted constant, on new rows and
+# a new axis; the boundary check reads it in every draw.
+@stestset "reprocess and hsgp_boundary_check keep the known value" begin
+    sb = build(both_known)
+    shifted = merge(DF, (; x=DF.x .* 0.9, ell=5.0))
+    replay = reprocess(sb, shifted)
+    data = BRM.stan_data(replay)
+    known_keys = [k for k in keys(data) if occursin("_known_", string(k))]
+    @test sort(known_keys) == [:hsgp_x_known_length_scale, :hsgp_x_known_sigma]
+    @test data[:hsgp_x_known_length_scale] == 0.7
+    @test data[:hsgp_x_known_sigma] == 0.4
+    @test BRM.stan_code(replay) == BRM.stan_code(sb)
+    d = brm_descriptor(sb; name=:both)
+    check = hsgp_boundary_check(d, zeros(3, 0), String[]; predictor=:mu, term=:hsgp_x)
+    @test check.mean_rho ≈ [0.7]
+    @test check.floor_binding ≈ [0.7 < check.floor ? 1.0 : 0.0]
+end
+
 KNOWN_RUNTIME && @stestset "RKBRMI: the same law as SBBRMI" begin
     for (name, known, _, _) in DENSITY_CASES
         name in ("field", "both", "aniso", "periodic") || continue
@@ -469,7 +487,7 @@ KNOWN_RUNTIME && @stestset "RKBRMI: known equals sampled at the known value" beg
     for (name, known, sampled, laws) in DENSITY_CASES
         # Not on RKBRMI before any known value is read: smoothing-scale priors
         # (`_rk_gate_spline_term_priors!`) and `rw`/`cdar` terms as a whole
-        # (todo RK_GAP_TODO).
+        # (todo `1hq7nm0`).
         name in ("smooth", "rw", "cdar") && continue
         twin_builder = name == "dar" ? dar_rk_sampled : sampled
         known_rk, problem = consumer_problem(known(DF))
