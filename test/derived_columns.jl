@@ -320,6 +320,41 @@ end
     @test density(RKBRMI(builder(design), state)) ≈ reference atol=1e-10
 end
 
+@stestset "an array constant a data-only assignment reads is computed in the graph" begin
+    # A vector constant, read element by element (snag `brm-constant-exp-86604df5`).
+    covariate = [randn(rng, N - 2); NaN; NaN]
+    data = merge(flat, (; z=covariate))
+    builder = @brm begin
+        sigma ~ Exponential(1)
+        z_moments = constant([derived_mean(z), derived_sd(z)])
+        z_std = derived_standardize(z, z_moments[1], z_moments[2])
+        mu ~ 1 + z_std
+        y ~ Normal(mu, sigma)
+    end
+    derived = builder(data)
+    loc, scale = derived_mean(covariate), derived_sd(covariate)
+    host = @brm merge(data, (; z_std=derived_standardize(covariate, loc, scale))) begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + z_std
+        y ~ Normal(mu, sigma)
+    end
+    sb_same_program(derived, host)
+    rk, rkh = rk_same_density(derived, host)
+    rk_in_graph(rk, :z_std, (:z,))
+    rk_in_graph(rk, :z_moments, ())
+    # A replay design with another mean keeps the fitted moments, by reprocess
+    # and from a data-free fitted state alike.
+    design = (; z=covariate[1:12] .+ 3.0, t=flat.t[1:12], x=flat.x[1:12],
+        g=flat.g[1:12], y=flat.y[1:12])
+    expected = merge(design, (; z_std=derived_standardize(design.z, loc, scale)))
+    u = fill(0.1, length(coordinate_names(rk.model.layout)))
+    density(backend) = LogDensityProblems.logdensity(
+        rk_logdensity_problem(backend; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse)), u)
+    reference = density(reprocess(rkh, expected))
+    @test density(reprocess(rk, design)) ≈ reference atol=1e-10
+    @test density(RKBRMI(builder(design), brm_fitted_state(rk))) ≈ reference atol=1e-10
+end
+
 @stestset "a column assignment recomputes a scalar assignment it reads" begin
     # `m` is a model value a prior could read by name; `tc` is a column.
     # (`sum` has a Stan translation, `Statistics.mean` none.)
