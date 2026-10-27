@@ -12,6 +12,29 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.13
+
+- `reprocess(sb, rows; resample_groups = [:g])` on SBBRMI draws new levels of
+  a grouped HSGP, `hsgp(x...; by = g)`, as it draws new levels of a
+  `(… | g)` block: each new level's standardized basis weights are drawn
+  fresh, `z ~ Normal(0, 1)`, in generated quantities and scaled by the
+  spectral density at the draw's fitted length scale and amplitude. With a
+  per-level hyper-predictor, `log(sd(hsgp(x))) ~ 1 + (1 | g)` or
+  `log(length_scale(hsgp(x))) ~ 1 + (1 | g)`, the new level's hyper effect is
+  drawn from the fitted SD with it. The same holds for `cv_groups = [:g]`.
+  Before, both refused (`no cv-contagious size local`). Still refused, by
+  name: a grouped HSGP with `cor = …` (the correlation covers the fitted
+  levels only, todo `0lopk07`) and one with `orthogonal_to = …` (each level's
+  projection is fitted on that level's training rows, which a new level does
+  not have). Snag `resample-groups-6a6b2d58`.
+- On RKBRMI, `reprocess(rk, rows; resample_groups = [:g])`,
+  `rk_design_binder(rk; resample_groups = [:g])` and
+  `RKBRMI(brmi, state; resample_groups = [:g])` refuse a `g` that groups a
+  grouped HSGP, naming it: the term has no input for new levels' weights yet
+  (todo `10h1myt`). Before, a design that reused the fitted labels replayed
+  with the fitted levels' weights as the new levels', and any other design
+  failed as a changed program.
+
 ## 0.2.12
 
 - `population_draws(…; groups = :g)` and `population_model(sb; groups = :g)`

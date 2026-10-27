@@ -268,8 +268,11 @@ end
             op.name for op in brm_descriptor(sb_grouped).operations]
         @test_throws "unseen level" reprocess(
             sb_grouped, merge(replay_df, (; g=vcat(fill("a", 4), fill("c", 4)))))
-        @test_throws "no cv-contagious size" reprocess(
-            sb_grouped, replay_df; resample_groups=:g)
+        # New levels of `g` draw their weights in generated quantities (snag
+        # resample-groups-6a6b2d58; their law: test/resample_grouped_hsgp.jl).
+        resampled_code = StanBlocks.stan_code(
+            reprocess(sb_grouped, replay_df; resample_groups=:g).model)
+        @test occursin("zflat_hsgpw_x_g = std_normal_vector_rng", resampled_code)
 
         # The hsgp validity floor (decision 13keyez) is a function of the
         # fitted `L = c*max|x - mean(x)|`, so it tracks the BASIS, not the

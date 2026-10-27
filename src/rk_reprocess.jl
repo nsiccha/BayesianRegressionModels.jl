@@ -64,6 +64,8 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
         completions=_rk_completion_mode(rk.plan))
     _rk_refuse_level_correlated_resample(parent(rk),
         _rk_resample_group_set(resample_groups; prefix); prefix)
+    _rk_refuse_grouped_hsgp_resample(parent(rk),
+        _rk_resample_group_set(resample_groups; prefix); prefix)
     _brm_refuse_joint_resample(parent(rk),
         _rk_resample_group_set(resample_groups; prefix); prefix)
     # A data-free backend (`RKBRMI(brmi, state)`) replays from its fitted state.
@@ -193,6 +195,36 @@ function _rk_refuse_level_correlated_resample(brmi, groups::Set{Symbol}; prefix)
         "(`gr(...; cor=...)` / `hsgp(...; by=..., cor=...)`): the correlation " *
         "covers the fitted levels only, and new levels of a level-correlated " *
         "grouping are not implemented")
+    nothing
+end
+
+# A grouped HSGP (`hsgp(...; by=g)`) draws its standardized basis weights, and
+# the level effects of a `log(sd(hsgp(...))) ~ 1 + (1 | g)` hyper-predictor,
+# inside its own block, one row per level: unlike a `(… | g)` block's effects,
+# a replay has no input through which a caller supplies new levels' values.
+# A design that reuses the fitted labels keeps the fit's program and would read
+# the fitted levels' weights as the new levels' (measured: equal values); any
+# other design changes the program. Refuse both by name. SBBRMI draws new
+# levels in generated quantities (`_sb_emit_group_blocks!`).
+function _rk_refuse_grouped_hsgp_resample(brmi, groups::Set{Symbol}; prefix)
+    isempty(groups) && return nothing
+    grouped = Symbol[]
+    for predictor in linear_predictors(brmi)
+        operation = linear_predictor_op(brmi, predictor.name)
+        isnothing(operation) && continue
+        for term in _brm_additive_terms(last(getargs(operation, 2)))
+            term isa ExprColumn && getf(term) === hsgp || continue
+            kw = getkwargs(term)
+            haskey(kw, :by) && push!(grouped, name(kw.by))
+        end
+    end
+    hit = sort!(collect(intersect(groups, grouped)))
+    isempty(hit) || error(
+        "$prefix: `resample_groups` names $(hit), the grouping of a grouped " *
+        "`hsgp(...; by=...)`: its new levels' basis weights have no input on " *
+        "RKBRMI (a design reusing the fitted labels would read the fitted " *
+        "levels' weights). SBBRMI draws new levels of a grouped HSGP: " *
+        "`reprocess(sb, rows; resample_groups=...)`")
     nothing
 end
 
