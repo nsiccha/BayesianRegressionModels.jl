@@ -217,6 +217,139 @@ Base.@nospecializeinfer function _brm_resolve_constants(@nospecialize(brmi::BRMI
     _brm_rebind_brmi(brmi, _BRMConstantSubstitution(values)), Tuple(resolved)
 end
 
+# ---- data-only assignments: `name = f(columns...)` ------------------------
+#
+# An assignment whose right-hand side reads data alone (data columns, scalar
+# data fields, resolved constants, other such assignments) is itself data, so
+# every site that accepts a raw column accepts it (user decision `1tb1jrg`). A
+# backend resolves it, after the constants, into an ordinary data field holding
+# its value, as `_brm_resolve_constants` does. Its right-hand side is evaluated
+# with the model-scope semantics RKBRMI emits (`_rk_value_expr!`): arithmetic,
+# comparisons and built-in math apply per element, indexing and vector literals
+# keep their own meaning, and any other call takes whole arrays. SBBRMI binds
+# the value as data; RKBRMI computes it in its graph from the assignment's own
+# inputs (`_rk_attach_data_assignments!`). A call with no Julia method for its
+# data (a Stan-only `@deffun`) leaves the assignment as it is.
+struct _BRMDataAssignmentSubstitution
+    values::Dict{Symbol,Any}
+end
+function _brm_rebind_value(x::NamedColumn, s::_BRMDataAssignmentSubstitution)
+    payload = parent(x)
+    haskey(s.values, name(x)) && payload isa ExprColumn{typeof(assign)} &&
+        return NamedColumn(name(x), DataColumn(s.values[name(x)]))
+    payload isa Union{DataColumn,MissingColumn} && return x
+    NamedColumn(name(x), _brm_rebind_value(payload, s))
+end
+
+struct _BRMDataAssignments
+    values::Dict{Symbol,Any}
+    inputs::Dict{Symbol,Set{Symbol}}
+    unresolved::Set{Symbol}
+    prefix::String
+end
+_BRMDataAssignments(prefix) = _BRMDataAssignments(Dict{Symbol,Any}(),
+    Dict{Symbol,Set{Symbol}}(), Set{Symbol}(), prefix)
+
+_brm_is_elementwise_builtin(f) = haskey(_RK_DERIVED_BINOPS, f) ||
+    haskey(_RK_DERIVED_CMP, f) || haskey(_RK_DERIVED_MATH, f)
+
+# A value a data field can hold.
+_brm_is_data_value(_x) = false
+_brm_is_data_value(::Union{Real,AbstractString}) = true
+_brm_is_data_value(::AbstractArray) = true
+
+# The value of a data-only node, or `nothing` when it reads a model value (a
+# parameter, a predictor, an assignment that is not data-only) or calls
+# something without a Julia method for its data. `inputs` collects the data
+# fields it reads.
+_brm_data_assignment_value(x::Real, _state, _inputs) = x
+_brm_data_assignment_value(_x, _state, _inputs) = nothing
+function _brm_data_assignment_value(x::NamedColumn, state, inputs)
+    backing = parent(x)
+    backing isa DataColumn && (push!(inputs, name(x)); return parent(backing))
+    backing isa ExprColumn{typeof(assign)} || return nothing
+    value = _brm_data_assignment!(state, name(x), last(getargs(backing, 2)))
+    value === nothing || push!(inputs, name(x))
+    value
+end
+function _brm_data_assignment_value(x::ExprColumn, state, inputs)
+    f = getf(x)
+    (f === assign || f === (~) || _brm_is_term_head(f) ||
+        (f isa Type && f <: Distributions.Distribution)) && return nothing
+    args = map(arg -> _brm_data_assignment_value(arg, state, inputs), getargs(x))
+    any(isnothing, args) && return nothing
+    kwargs = map(arg -> _brm_data_assignment_value(arg, state, inputs), getkwargs(x))
+    any(isnothing, values(kwargs)) && return nothing
+    kept = isempty(kwargs) && (f === getindex || f === Base.vect)
+    elementwise = isempty(kwargs) && _brm_is_elementwise_builtin(f)
+    kept || elementwise || hasmethod(f, Tuple{map(typeof, args)...}, keys(kwargs)) ||
+        return nothing
+    try
+        kept ? f(args...) : elementwise ? broadcast(f, args...) :
+            Base.invokelatest(f, args...; kwargs...)
+    catch err
+        error("$(state.prefix): evaluating the data-only call `$x` failed: ",
+            sprint(showerror, err))
+    end
+end
+
+# The assignment an operation declares: the assignment itself, or the one an
+# observation statement observes under the same name (`ly = log(yp)` followed
+# by `ly ~ Normal(mu, sigma)` takes the name `ly` for the observation).
+_brm_assignment_column(_op) = nothing
+function _brm_assignment_column(op::NamedColumn)
+    payload = parent(op)
+    payload isa ExprColumn{typeof(assign)} && return op
+    payload isa ExprColumn{typeof(~)} || return nothing
+    lhs = first(getargs(payload))
+    lhs isa NamedColumn && name(lhs) === name(op) &&
+        parent(lhs) isa ExprColumn{typeof(assign)} ? lhs : nothing
+end
+
+function _brm_data_assignment!(state::_BRMDataAssignments, key::Symbol, rhs)
+    haskey(state.values, key) && return state.values[key]
+    key in state.unresolved && return nothing
+    inputs = Set{Symbol}()
+    value = _brm_data_assignment_value(rhs, state, inputs)
+    # A value no data field can hold (a tuple) keeps its assignment, and so
+    # does every assignment that reads it.
+    (value === nothing || !_brm_is_data_value(value)) &&
+        (push!(state.unresolved, key); return nothing)
+    state.inputs[key] = inputs
+    state.values[key] = value
+end
+
+"""
+    _brm_resolve_data_assignments(brmi; prefix) -> (resolved, assignments)
+
+Replace every column-valued data-only assignment of `brmi` (one that reads at
+least one data field and no model value) by a data field holding its value. A
+scalar one stays a model value, which such a column computes inline. Returns
+the resolved `BRMI` and one `(; name, value, node, inputs)` per resolved
+assignment in formula order: `node` is its right-hand side as written and
+`inputs` the data fields and resolved assignments it reads. A model without
+one is returned unchanged.
+"""
+Base.@nospecializeinfer function _brm_resolve_data_assignments(@nospecialize(brmi::BRMI);
+        prefix::AbstractString="BRM")
+    state = _BRMDataAssignments(prefix)
+    resolved = Any[]
+    for (key, op) in _brm_operation_entries(brmi)
+        assignment = _brm_assignment_column(op)
+        assignment === nothing && continue
+        node = last(getargs(parent(assignment), 2))
+        value = _brm_data_assignment!(state, key, node)
+        # A literal alone (`n = 3`) reads no data and stays a model constant. A
+        # scalar (`m = mean(x)`) stays a model value that a prior or bound reads
+        # by name; a column assignment that reads it computes it inline.
+        value isa AbstractArray && !isempty(state.inputs[key]) || continue
+        push!(resolved, (; name=key, value, node, inputs=state.inputs[key]))
+    end
+    isempty(resolved) && return brmi, ()
+    values = Dict{Symbol,Any}(a.name => a.value for a in resolved)
+    _brm_rebind_brmi(brmi, _BRMDataAssignmentSubstitution(values)), Tuple(resolved)
+end
+
 # Materialise a user data vector without silently deleting missing rows. A
 # likelihood decorator may deliberately keep its response out of this generic
 # data dict and model the missing values itself; that decision is made by the
@@ -1401,6 +1534,16 @@ function _brm_replay_random_effect_plan(
         training.sd_rate, training.lkj_eta)
 end
 
+# A grouping column's values. An assignment that reads a model value is no
+# data column, so it cannot group.
+function _brm_group_values(context, group::Symbol)
+    haskey(context.data, group) || error(
+        "BRM backend lowering: grouping `$group` is not data. An assignment ",
+        "groups only when it reads data alone, not a sampled parameter, a ",
+        "predictor or a modelled value")
+    context.data[group]
+end
+
 function _brm_replay_random_effect_plan(
         training::_BRMMultiMembershipPlan, context::_BRMBackendContext)
     raw_groups = Tuple(context.data[group] for group in training.groups)
@@ -1458,8 +1601,15 @@ _brm_group_id(value) = error(
     "BRM backend lowering: `gr(...; id=...)` expects a Symbol or String; " *
     "got $(typeof(value))")
 
+# A grouping is named by a data column or by an assignment: a data-only one is
+# resolved into a data column before any backend reads its values
+# (`_brm_resolve_data_assignments`), and a backend refuses any other where it
+# reads them (`_brm_group_values`).
+_brm_is_grouping_column(x) = x isa NamedColumn &&
+    (parent(x) isa DataColumn || parent(x) isa ExprColumn{typeof(assign)})
+
 function _brm_random_effect_group(raw)
-    if raw isa NamedColumn && parent(raw) isa DataColumn
+    if _brm_is_grouping_column(raw)
         return (; group=raw, by=nothing, id=nothing)
     end
     raw isa ExprColumn && getf(raw) === gr || error(
@@ -1470,7 +1620,7 @@ function _brm_random_effect_group(raw)
         "BRM backend lowering: `gr(...)` expects exactly one positional " *
         "group; got $(length(args))")
     group = only(args)
-    group isa NamedColumn && parent(group) isa DataColumn || error(
+    _brm_is_grouping_column(group) || error(
         "BRM backend lowering: `gr(...)` group must be one raw data column; " *
         "got `$(repr(group))`")
     kwargs = getkwargs(raw)
@@ -1480,7 +1630,7 @@ function _brm_random_effect_group(raw)
         "$(sort!(collect(unknown)))")
     by = get(kwargs, :by, nothing)
     if !isnothing(by)
-        by isa NamedColumn && parent(by) isa DataColumn || error(
+        _brm_is_grouping_column(by) || error(
             "BRM backend lowering: `gr(...; by=...)` must name one raw data " *
             "column; got `$(repr(by))`")
     end
@@ -1651,7 +1801,7 @@ Base.@nospecializeinfer function _brm_simple_random_effect_plans(
                 "random-effect block " *
                 "$(isnothing(id) ? "" : "ID `$id`, ")group `$group`")
             push!(seen, key)
-            raw = context.data[group]
+            raw = _brm_group_values(context, group)
             raw isa AbstractVector || error(
                 "BRM backend lowering: grouping column `$group` must be a " *
                 "vector")
@@ -1677,7 +1827,7 @@ Base.@nospecializeinfer function _brm_simple_random_effect_plans(
             stratum_indices = Int[]
             group_strata = Int[]
             if !isnothing(by)
-                raw_strata = context.data[by]
+                raw_strata = _brm_group_values(context, by)
                 raw_strata isa AbstractVector || error(
                     "BRM backend lowering: stratum column `$by` must be a " *
                     "vector")

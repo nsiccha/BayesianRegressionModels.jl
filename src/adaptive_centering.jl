@@ -1320,7 +1320,7 @@ function _adaptive_hsgp_centering_blocks(model, unc_names)
                 owner.family in (
                     :_sb_hsgp, :_sb_hsgp_aniso,
                     :_sb_hsgp_partial, :_sb_hsgp_partial_aniso,
-                    :_sb_hsgp_latent, :_sb_hsgp_latent_orthogonal,
+                    :_sb_hsgp_latent, :_sb_hsgp_latent_orthogonal, :_sb_hsgp_latent_centered,
                 ) || error(
                     "BRM adaptive centering: HSGP `$(entry.term)` resolved to " *
                     "unsupported emitted family `$(owner.family)`.",
@@ -1527,6 +1527,15 @@ end
 # addresses frequency `b` in level `g`.
 function _adaptive_grouped_hsgp_blocks!(
         out, descriptor, plan, pos, unc_names, logical, entry, kw)
+    # `cor=` correlates the levels' weights (or, for a coordinate multigroup
+    # coherence, draws them on an inducing grid), so no block is one level's.
+    haskey(kw, :cor) && error(
+        "BRM adaptive centering: grouped HSGP `$(entry.term)` on predictor ",
+        "`$logical` correlates the levels of `$(name(kw[:by]))` with each other ",
+        "(`cor=`), so its standardized weights are not per-level weights; ",
+        "per-level centering of such a term is not implemented, and it is not ",
+        "silently left fixed either.",
+    )
     K, _ = _sb_hsgp_options(kw, length(getargs(entry.value)))
     B = prod(K)
     gname = name(kw[:by])

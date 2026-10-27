@@ -64,6 +64,7 @@ include("rk_kernel_values.jl")
 include("rk_submodel_values.jl")
 include("rk_structured.jl")
 include("rk_observations.jl")
+include("rk_data_assignments.jl")
 include("rk_reprocess.jl")
 include("rk_design_binder.jl")
 include("rk_fitted_state.jl")
@@ -132,6 +133,7 @@ include("posterior_diagnostics.jl")
 # Per-draw random-effect SDs, correlations and per-level effects, read from
 # the emitted carriers through the descriptor and the description metadata.
 include("ranef_draws.jl")
+include("multigroup_readers.jl")
 
 # Prior/likelihood power-scaling sensitivity — PSIS weights, CJS distance, the
 # per-variable summary, and the SBBRMI input assembly. After the descriptor
@@ -237,6 +239,7 @@ export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
        brm_population_effect_coordinates, brm_term_coordinates,
        brm_length_scale_floor,
        brm_ranef_sd_coordinates, brm_ranef_draws,
+       brm_multigroup_coherence, brm_multigroup_field,
        BRMCoordinatePair, BRMCoordinateTransport, BRMCoordinateTransportError,
        brm_coordinate_transport,
        brm_rk_to_stan, brm_stan_to_rk, brm_check_coordinate_transport,
@@ -337,13 +340,19 @@ export popefs, _popefs_normal, _popefs_coefs, _popefs_normal_coefs,
        _sb_hsgp_partial, _sb_hsgp_partial_aniso,
        _sb_hsgp_by, _sb_hsgp_by_aniso, _sb_hsgp_by_levelcor, _sb_hsgp_by_aniso_levelcor,
        _sb_hsgp_by_multigroup, _sb_hsgp_by_aniso_multigroup,
-       _sb_hsgp_latent, _sb_hsgp_latent_orthogonal,
+       _sb_hsgp_by_multigroup_coordinates, _sb_hsgp_by_aniso_multigroup_coordinates,
+       _sb_hsgp_by_multigroup_inducing, _sb_hsgp_by_aniso_multigroup_inducing,
+       _sb_hsgp_by_multigroup_coordinates_lambda, _sb_hsgp_by_aniso_multigroup_coordinates_lambda,
+       _sb_hsgp_by_multigroup_inducing_lambda, _sb_hsgp_by_aniso_multigroup_inducing_lambda,
+       _sb_hsgp_latent, _sb_hsgp_latent_orthogonal, _sb_hsgp_latent_centered,
        _sb_gp_periodic, _sb_hsgp_periodic,
        brm_exp_quad_cov, brm_hsgp_sqrt_spd, brm_hsgp_log_sqrt_spd, brm_hsgp_multigroup_weights,
+       brm_hsgp_multigroup_coordinate_weights, brm_multigroup_coordinate_grid,
+       brm_hsgp_multigroup_inducing_weights, brm_multigroup_inducing_resolution,
        brm_hsgp_scale_fraction, brm_hsgp_remaining_scale_fraction,
        brm_hsgp_centered_log_scale, brm_hsgp_remaining_log_scale,
        brm_hsgp_basis_1d,
-       brm_hsgp_orthogonalize_linear,
+       brm_hsgp_orthogonalize_linear, brm_hsgp_center_columns,
        brm_hsgp_by_hyper_S,
        brm_periodic_cov, brm_hsgp_periodic_sqrt_spd,
        _sb_horseshoe, _sb_horseshoe_scaled,

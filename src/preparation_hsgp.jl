@@ -86,11 +86,13 @@ end
 
 function _brm_hsgp_orthogonal_to(kw, n_axes::Int)
     value = get(kw, :orthogonal_to, nothing)
-    (isnothing(value) || value === :linear) || error(
-        "sbimpl: `hsgp(...; orthogonal_to=...)` supports only `:linear`, got $(repr(value))")
+    (isnothing(value) || value === :linear || value === :intercept) || error(
+        "sbimpl: `hsgp(...; orthogonal_to=...)` supports `:intercept` and " *
+        "`:linear`, got $(repr(value))")
     value === :linear && n_axes != 1 && error(
         "sbimpl: `hsgp(...; orthogonal_to=:linear)` currently supports exactly " *
-        "one predictor axis, got $n_axes")
+        "one predictor axis, got $n_axes; `orthogonal_to=:intercept` centers " *
+        "the basis of any number of axes")
     value
 end
 
@@ -479,21 +481,102 @@ function _brm_hsgp_periodic_log_scale(harmonic::Real, sigma::Real, rho::Real)
     log(sigma) + (log(2) + log(SpecialFunctions.besselix(harmonic, a))) / 2
 end
 
-function _brm_orthogonalize_hsgp_linear(PHI::AbstractMatrix,
-                                       x::AbstractVector{<:Real})
+# `orthogonal_to=` constrains an exp-quad basis `PHI` by a projection fitted on
+# the rows the term is fitted on. `:intercept` subtracts every column's mean,
+# so the term sums to zero over those rows for any weights; `:linear` (one
+# axis) also projects every centered column off the centered axis. At a
+# constant axis the linear direction is the intercept, so centering alone is
+# the well-defined limiting projection. The fit is a preparation constant: a
+# frozen replay applies the training projection to its rows, so the term is the
+# same function there. `values` are the axis values of `PHI`'s rows; the
+# element type follows the inputs, so a model-derived axis projects its draws.
+_brm_hsgp_projection_fit(::Nothing, _PHI, _values) = nothing
+_brm_hsgp_projection_fit(orthogonal::Symbol, PHI, values::Tuple) =
+    _brm_hsgp_projection_fit(Val(orthogonal), PHI, values)
+
+function _brm_hsgp_projection_fit(::Val{:intercept}, PHI::AbstractMatrix,
+                                  _values::Tuple)
+    size(PHI, 1) > 0 || error(
+        "hsgp: `orthogonal_to` fits its projection on the rows the term is " *
+        "fitted on, and this term has none")
+    T = float(eltype(PHI))
+    column_means = map(1:size(PHI, 2)) do b
+        phi = collect(T, @view PHI[:, b])
+        sum(phi) / length(phi)
+    end
+    (; orthogonal=:intercept, column_means)
+end
+
+function _brm_hsgp_projection_fit(::Val{:linear}, PHI::AbstractMatrix,
+                                  values::Tuple)
+    x = only(values)
     size(PHI, 1) == length(x) || error(
         "hsgp: internal orthogonalization row-count mismatch")
-    xc = collect(Float64, x)
-    xc .-= sum(xc) / length(xc)
-    ss = sum(abs2, xc)
-    out = Matrix{Float64}(undef, size(PHI))
-    for b in axes(PHI, 2)
-        phi = collect(Float64, @view PHI[:, b])
-        phi .-= sum(phi) / length(phi)
-        ss > 0 && (phi .-= xc .* (dot(xc, phi) / ss))
+    (; column_means) = _brm_hsgp_projection_fit(Val(:intercept), PHI, values)
+    xc = collect(float(eltype(x)), x)
+    axis_mean = sum(xc) / length(xc)
+    xc .-= axis_mean
+    axis_ss = sum(abs2, xc)
+    slopes = map(1:size(PHI, 2)) do b
+        phi = collect(float(eltype(PHI)), @view PHI[:, b])
+        phi .-= column_means[b]
+        axis_ss > 0 ? dot(xc, phi) / axis_ss : zero(eltype(phi))
+    end
+    (; orthogonal=:linear, column_means, axis_mean, axis_ss, slopes)
+end
+
+_brm_hsgp_project(::Nothing, PHI, _values) = PHI
+_brm_hsgp_project(projection::NamedTuple, PHI::AbstractMatrix, values::Tuple) =
+    _brm_hsgp_project(Val(projection.orthogonal), projection, PHI, values)
+
+function _brm_hsgp_project(::Val{:intercept}, projection, PHI::AbstractMatrix,
+                           _values::Tuple)
+    (; column_means) = projection
+    length(column_means) == size(PHI, 2) || error(
+        "hsgp: internal projection column-count mismatch")
+    T = promote_type(float(eltype(PHI)), eltype(column_means))
+    out = Matrix{T}(undef, size(PHI))
+    for b in 1:size(PHI, 2)
+        phi = collect(T, @view PHI[:, b])
+        phi .-= column_means[b]
         out[:, b] = phi
     end
     out
+end
+
+function _brm_hsgp_project(::Val{:linear}, projection, PHI::AbstractMatrix,
+                           values::Tuple)
+    (; column_means, axis_mean, axis_ss, slopes) = projection
+    x = only(values)
+    size(PHI, 1) == length(x) && length(column_means) == size(PHI, 2) || error(
+        "hsgp: internal orthogonalization shape mismatch")
+    T = promote_type(float(eltype(PHI)), float(eltype(x)), eltype(column_means),
+                     typeof(axis_mean))
+    xc = collect(T, x)
+    xc .-= axis_mean
+    out = Matrix{T}(undef, size(PHI))
+    for b in 1:size(PHI, 2)
+        phi = collect(T, @view PHI[:, b])
+        phi .-= column_means[b]
+        axis_ss > 0 && (phi .-= xc .* slopes[b])
+        out[:, b] = phi
+    end
+    out
+end
+
+# The projection a frozen replay applies: the one its preparation recorded.
+function _brm_hsgp_frozen_projection(record, orthogonal; prefix)
+    isnothing(orthogonal) && return nothing
+    projection = get(record, :projection, nothing)
+    isnothing(projection) && error(
+        "$prefix: this `hsgp(...; orthogonal_to=$(repr(orthogonal)))` fit " *
+        "carries no fitted projection, so a frozen replay cannot evaluate " *
+        "its function on new rows; rebuild the fit, or replay with " *
+        "`freeze_constants=false` to re-fit the projection on the new rows")
+    projection.orthogonal === orthogonal || error(
+        "$prefix: internal error — recorded `hsgp` projection is " *
+        "$(repr(projection.orthogonal)), the formula declares $(repr(orthogonal))")
+    projection
 end
 
 
