@@ -12,6 +12,27 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.15
+
+- A term's own parameter takes a known value with `=` on its address, as a
+  random-effect SD does: `length_scale(<lp|:>, hsgp(x...)) = value` and
+  `sd(<lp|:>, hsgp(x...)) = value` (likewise for `gp`), the smoothing SDs of
+  `s(x)` and `t2(x, z)` (a `t2` may hold some of its three), `ar(...)` of
+  `dar`/`cdar`, `sd(...)` of `dar`/`rw`/`cdar`/`car` and `mixing(...)` of
+  `car`. An anisotropic length scale takes one value per axis (or one for all).
+  The value is a numeric constant, a data field or arithmetic over them. SBBRMI
+  binds it as the term's own data `<term>_known_<slot>`, a fitted constant
+  `reprocess` keeps, and RKBRMI as a constant (`gp`, `hsgp`, `dar`, `car`). A
+  known length scale replaces the HSGP's default declaration like an explicit
+  prior, so its validity floor does not bind it. `brm_term_coordinates`
+  errors for a known role, naming the value; transport, adaptive HSGP
+  centering and the HSGP diagnostics read it as a constant, and
+  `brm_description` lists it as `Dirac(value)`. Refused with their reasons:
+  `latent(...) = value`, `simplex(...) = value`, and a known value beside a
+  hyper-predictor of the same parameter. Snag `hsgp-length-scal-200dd332`.
+- The parse error for `=` on an address that takes no known value now names
+  the term-parameter addresses that do.
+
 ## 0.2.14
 
 - On RKBRMI, a plate output whose cells hold vectors is one vector per cell at

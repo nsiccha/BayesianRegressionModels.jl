@@ -2850,11 +2850,39 @@ function _brm_term_owners(d, logical::Symbol, entry)
     owners
 end
 
+# The term-prior class behind each public parameter role a known value can hold.
+const _BRM_TERM_ROLE_CLASS = (; sd=:term_sd, length_scale=:term_length_scale,
+                               ar=:term_ar, mixing=:term_mixing)
+
+"""
+The value `=` on its address holds one parameter role of a formula term at
+(`length_scale(lp, hsgp(x)) = 150.0`), or `nothing` when the role is sampled
+or the term has no such role.
+"""
+function _brm_term_known_value(brmi::BRMI, logical::Symbol, term, parameter::Symbol)
+    class = get(_BRM_TERM_ROLE_CLASS, parameter, nothing)
+    isnothing(class) && return nothing
+    term isa ExprColumn || return nothing
+    slots = [slot for slot in _brm_term_prior_slots(getf(term))
+             if slot.class === class && isnothing(slot.component)]
+    length(slots) == 1 || return nothing
+    per_term = _brm_term_override(
+        get(_brm_resolve_term_priors(brmi), logical, Dict()), term)
+    entry = isnothing(per_term) ? nothing : get(per_term, only(slots).name, nothing)
+    isnothing(entry) && return nothing
+    _brm_is_known_term_value(entry.spec.expression) ? entry.spec.expression.value : nothing
+end
+
 # The declaration-owned output that carries one parameter role of a formula
 # term, resolved from the term to its logical owner without parsing a name.
 function _brm_term_parameter_output(d::BRMDescriptor, logical::Symbol, entry,
                                     parameter::Symbol)
     term = entry.term
+    known = _brm_term_known_value(d.plan.parent, logical, entry.value, parameter)
+    isnothing(known) || error(
+        "brm_descriptor: term `$term` on logical predictor `$logical` holds its " *
+        "`$parameter` at the known value $known (`$parameter(...) = value`); it " *
+        "is not a parameter and has no posterior coordinate.")
     value_output = _brm_term_owner_output(d, logical, entry)
     owner = value_output.declaration
 

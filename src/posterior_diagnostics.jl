@@ -67,6 +67,22 @@ end
 _brm_diagnostic_vector(x::Number) = (x,)
 _brm_diagnostic_vector(x::AbstractArray) = x
 
+# Draws × values of one term hyperparameter role (`:length_scale`, `:sd`, …):
+# its constrained draws, or, held at a known value by `=` on its address
+# (`length_scale(lp, hsgp(x)) = value`), that value in every draw. A sampled
+# role resolved through `owner` must belong to that declaration.
+function _brm_term_hyper_draws(d, draws, names, predictor, entry, parameter;
+                               owner=nothing, what=string(parameter))
+    known = _brm_term_known_value(d.plan.parent, predictor, entry.value, parameter)
+    if !isnothing(known)
+        values = collect(Float64, known isa Real ? (known,) : known)
+        return repeat(permutedims(values), size(draws, 1))
+    end
+    resolved = brm_term_coordinates(d, predictor, names; term=entry.term, parameter)
+    isnothing(owner) || _adaptive_same_hsgp_owner(resolved, owner, what)
+    Matrix(@view draws[:, resolved.coordinates])
+end
+
 """
     hsgp_coordinate_draws(descriptor, constrained_draws, constrained_names;
                           predictor, term, centeredness=nothing,
@@ -103,13 +119,11 @@ function hsgp_coordinate_draws(d::BRMDescriptor, draws::AbstractMatrix, names;
         "HSGP coordinate diagnostics currently require an ungrouped exp_quad term")
     weights = brm_term_coordinates(d, predictor, names; term, parameter=:basis_weights)
     owner = weights.output.declaration
-    rho = _adaptive_same_hsgp_owner(brm_term_coordinates(
-        d, predictor, names; term, parameter=:length_scale), owner, "length scale")
-    sigma = _adaptive_same_hsgp_owner(brm_term_coordinates(
-        d, predictor, names; term, parameter=:sd), owner, "marginal SD")
     sampled = Matrix(@view draws[:, weights.coordinates])
-    rhos = Matrix(@view draws[:, rho.coordinates])
-    sigmas = collect(@view draws[:, only(sigma.coordinates)])
+    rhos = _brm_term_hyper_draws(d, draws, names, predictor, entry, :length_scale;
+                                 owner, what="length scale")
+    sigmas = vec(_brm_term_hyper_draws(d, draws, names, predictor, entry, :sd;
+                                       owner, what="marginal SD"))
     all(x -> isfinite(x) && x > 0, rhos) &&
         all(x -> isfinite(x) && x > 0, sigmas) || error(
         "HSGP coordinate diagnostics need finite positive constrained hyperparameters")
@@ -252,12 +266,11 @@ function hsgp_boundary_check(d::BRMDescriptor, draws::AbstractMatrix, names;
     plans = _brm_term_hyper_plans(d.plan, predictor, t)
     rho_plan = _sb_hyper_plan_for(plans, :length_scale)
     rho_draws = if isnothing(rho_plan)
-        rho = brm_term_coordinates(d, predictor, names; term,
-                                   parameter=:length_scale)
-        length(rho.coordinates) == 1 || error(
+        draws_mat = _brm_term_hyper_draws(d, draws, names, predictor, entry,
+                                          :length_scale)
+        size(draws_mat, 2) == 1 || error(
             "HSGP boundary check: term `$term` resolves `:length_scale` to " *
-            "$(length(rho.coordinates)) coordinates; expected one.")
-        draws_mat = Matrix(@view draws[:, rho.coordinates])
+            "$(size(draws_mat, 2)) values per draw; expected one.")
         all(x -> isfinite(x) && x > 0, draws_mat) || error(
             "HSGP boundary check: term `$term` needs finite positive " *
             "constrained length scales")

@@ -100,9 +100,12 @@ _rk_nonnegative_lower(x::Real) = x >= 0
 _rk_nonnegative_lower(::_BRMLengthScaleFloor) = true
 _rk_nonnegative_lower(_x) = false
 
-# A known scale (`sd(...) = value`) is its constant value.
+# A known scale (`sd(...) = value`) is its constant value, and so is a term's
+# own known scale or length scale (`sd(lp, hsgp(x)) = value`).
 _rk_ast_positive_prior(prior::_BRMKnownScale, _bindings, _taken; default=:HalfNormal) =
     prior.value
+_rk_ast_positive_prior(prior::_BRMKnownTermValue{<:Real}, _bindings, _taken;
+                       default=:HalfNormal) = prior.value
 function _rk_ast_positive_prior(prior, bindings, taken; default=:HalfNormal)
     prior === nothing && return default === :LogNormal ?
         Expr(:call, :LogNormal, 0, 1) :
@@ -446,6 +449,9 @@ end
 # `length_scale_floor` in a length-scale prior reads the term's validity floor,
 # the main-block value `floors`, or axis `j`'s entry of it (decision 1fk9b29).
 function _rk_ast_hsgp_rho_prior(options, floors, j, bindings, taken)
+    known = options.rho_prior
+    # A known anisotropic length scale holds one value per axis.
+    known isa _BRMKnownTermValue && return j === nothing ? known.value : known.value[j]
     prior = _rk_ast_positive_prior(options.rho_prior, bindings, taken)
     get(options, :rho_floor_named, false) || return prior
     _rk_ast_replace_floor_marker(prior, j === nothing ? floors : Expr(:ref, floors, j))

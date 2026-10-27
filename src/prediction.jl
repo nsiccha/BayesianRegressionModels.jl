@@ -2045,19 +2045,21 @@ function hsgp_population_curve(d::BRMDescriptor, draws::AbstractMatrix,
     isempty(x_coordinates) && error(
         "BRM prediction: model-derived HSGP axis `$coefficient` has no sampled " *
         "training coordinates.")
-    rho_coordinates = brm_term_coordinates(
-        d, predictor, constrained_names;
-        term, parameter=:length_scale).coordinates
-    sigma_coordinates = brm_term_coordinates(
-        d, predictor, constrained_names;
-        term, parameter=:sd).coordinates
+    entry = only(e for e in _brm_term_coordinate_entries(d.plan.parent, predictor)
+                 if e.term === term)
+    # A length scale or marginal SD held at a known value is that value in
+    # every draw.
+    rho_draws = _brm_term_hyper_draws(d, draws, constrained_names, predictor,
+                                      entry, :length_scale)
+    sigma_draws = _brm_term_hyper_draws(d, draws, constrained_names, predictor,
+                                        entry, :sd)
     weight_coordinates = brm_term_coordinates(
         d, predictor, constrained_names;
         term, parameter=:basis_weights).coordinates
-    length(rho_coordinates) == 1 || error(
-        "BRM prediction: term `$term` must expose one length-scale coordinate.")
-    length(sigma_coordinates) == 1 || error(
-        "BRM prediction: term `$term` must expose one marginal-SD coordinate.")
+    size(rho_draws, 2) == 1 || error(
+        "BRM prediction: term `$term` must expose one length scale.")
+    size(sigma_draws, 2) == 1 || error(
+        "BRM prediction: term `$term` must expose one marginal SD.")
     length(weight_coordinates) == spec.K || error(
         "BRM prediction: term `$term` exposes $(length(weight_coordinates)) " *
         "basis weights but its fitted formula requires $(spec.K).")
@@ -2077,8 +2079,8 @@ function hsgp_population_curve(d::BRMDescriptor, draws::AbstractMatrix,
             (spec.fit,), (x_train,), (spec.K,))
         PHI = _hsgp_population_curve_basis(
             PHI_grid_raw, grid_values, PHI_train_raw, x_train)
-        rho = draws[draw, only(rho_coordinates)]
-        sigma = draws[draw, only(sigma_coordinates)]
+        rho = rho_draws[draw, 1]
+        sigma = sigma_draws[draw, 1]
         weights = collect(Float64, @view draws[draw, weight_coordinates])
         isfinite(beta) && all(isfinite, weights) || error(
             "BRM prediction: population slope or HSGP basis weights contain a " *

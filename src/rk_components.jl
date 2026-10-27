@@ -479,7 +479,7 @@ function _rk_ast_hsgp_component!(definitions, statements, taken, name, inputs,
     if length(rho_priors) == 1
         prior = only(rho_priors)
         truncated && (prior = Expr(:call, :restricted, prior, :rho_floor, Inf))
-        push!(body.args, Expr(:call, :~, :rho_iso, prior))
+        push!(body.args, _rk_ast_hyper_statement(:rho_iso, prior))
     else
         rhos = Symbol[]
         for (j, prior) in enumerate(rho_priors)
@@ -487,11 +487,11 @@ function _rk_ast_hsgp_component!(definitions, statements, taken, name, inputs,
             push!(rhos, rho)
             truncated && (prior = Expr(:call, :restricted, prior,
                 Expr(:ref, :rho_floor, j), Inf))
-            push!(body.args, Expr(:call, :~, rho, prior))
+            push!(body.args, _rk_ast_hyper_statement(rho, prior))
         end
         push!(body.args, Expr(:(=), :rho, Expr(:vect, rhos...)))
     end
-    push!(body.args, Expr(:call, :~, :sigma, sigma_prior))
+    push!(body.args, _rk_ast_hyper_statement(:sigma, sigma_prior))
     push!(body.args, Expr(:call, :.~, Expr(:ref, :beta_raw, extent),
         _rk_ast_dotted(:Normal, 0, 1)))
     push!(body.args, Expr(:return, value))

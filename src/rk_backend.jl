@@ -4893,6 +4893,13 @@ end
 const _RK_GP_HYPER_ADMITTED = "LogNormal, InverseGamma, Gamma, Exponential, " *
     "or zero-location Normal"
 
+# A term hyperparameter's RK declaration: `sampled(prior)`'s sampled
+# parameter, or the known value itself when `=` on its address holds it there
+# (`length_scale(lp, gp(x)) = value`); the term block then binds it as a
+# constant (`_rk_ast_hyper_statement`).
+_rk_term_parameter(sampled, prior) = sampled(prior)
+_rk_term_parameter(_sampled, known::_BRMKnownTermValue) = known
+
 function _rk_gp_hyper_prior(prior, role::String, target::Symbol, axis::Symbol;
                             term::String="gp")
     prefix = "RK backend"
@@ -4996,21 +5003,23 @@ function _rk_plan_car_term!(prepared::_BRMPreparedTerm{typeof(car)},
         inv_scale=column(:inv_scale, state.inv_scale),
         is_struct=column(:is_struct, Float64.(state.struct_idx .> 0)))
     value = _rk_mint_generated!(taken, columns, stem)
-    sigma_family, sigma_args, sigma_support = _rk_gp_hyper_prior(
-        state.sd_prior, "scale", target, source; term="car")
-    # SB declares `sigma` with `lower=0` beside the plain kernel, so a
-    # zero-location Normal is restricted, not normalized (no `HalfNormal`)
-    sigma_support === :positive && (sigma_support = (:restricted, 0.0, Inf))
+    sigma_param = _rk_term_parameter(state.sd_prior) do prior
+        sigma_family, sigma_args, sigma_support = _rk_gp_hyper_prior(
+            prior, "scale", target, source; term="car")
+        # SB declares `sigma` with `lower=0` beside the plain kernel, so a
+        # zero-location Normal is restricted, not normalized (no `HalfNormal`)
+        sigma_support === :positive && (sigma_support = (:restricted, 0.0, Inf))
+        _RKSampledParameter(:sigma, sigma_family, sigma_args, sigma_support, :sigma)
+    end
     rho_param = state.type === :bym2 ?
-        _RKSampledParameter(:rho, _rk_car_mixing_prior(state.mixing_prior, target, source)..., :rho) :
+        _rk_term_parameter(prior -> _RKSampledParameter(:rho,
+            _rk_car_mixing_prior(prior, target, source)..., :rho), state.mixing_prior) :
         nothing
     _RKTermSpec(:car, Symbol[],
         (; value, area, source, type=state.type, n_struct=state.n_struct, nodes=state.nodes,
          graph..., inputs=(graph.node1, graph.node2, graph.struct_pos, graph.inv_scale,
                            graph.is_struct),
-         sigma_param=_RKSampledParameter(
-             :sigma, sigma_family, sigma_args, sigma_support, :sigma),
-         rho_param),
+         sigma_param, rho_param),
         value, value)
 end
 
@@ -5034,18 +5043,18 @@ function _rk_plan_gp_term!(prepared::_BRMPreparedTerm{typeof(gp)},
     sigma = Symbol(:sigma_gp, stem)
     z = Symbol(:z_gp, stem)
     f = Symbol(:f_gp, stem)
-    rho_family, rho_args, rho_support = _rk_gp_hyper_prior(
-        state.rho_prior, "length-scale", target, axis)
-    sig_family, sig_args, sig_support = _rk_gp_hyper_prior(
-        state.sigma_prior, "marginal-scale", target, axis)
+    rho_param = _rk_term_parameter(state.rho_prior) do prior
+        _RKSampledParameter(rho, _rk_gp_hyper_prior(
+            prior, "length-scale", target, axis)..., rho)
+    end
+    sigma_param = _rk_term_parameter(state.sigma_prior) do prior
+        _RKSampledParameter(sigma, _rk_gp_hyper_prior(
+            prior, "marginal-scale", target, axis)..., sigma)
+    end
     _RKTermSpec(:gp, [axis],
         (; rho, sigma, z, f, cov=state.cov,
          period=state.cov === :periodic ? Float64(state.period) : nothing,
-         jitter=Float64(state.jitter),
-         rho_param=_RKSampledParameter(
-             rho, rho_family, rho_args, rho_support, rho),
-         sigma_param=_RKSampledParameter(
-             sigma, sig_family, sig_args, sig_support, sigma)),
+         jitter=Float64(state.jitter), rho_param, sigma_param),
         f, f)
 end
 
@@ -5131,6 +5140,12 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
     # `length_scale_floor` in the length-scale prior reads the floor as a prior
     # argument, so the declaration needs no separate truncation (decision 1fk9b29).
     rho_floor_named = _brm_has_floor_marker(state.rho_prior)
+    for (hyper, prior) in ((:length_scale, state.rho_prior), (:sd, state.sigma_prior))
+        prior isa _BRMKnownTermValue && any(p -> p.hyper === hyper, hyper_plans) && error(
+            "$prefix: predictor `$target` holds the `hsgp(...)` $hyper at the " *
+            "known value $prior, but a `log($hyper(...)) ~ <formula>` " *
+            "hyper-predictor predicts it; keep one of the two statements")
+    end
     rho_floor_named && any(p -> p.hyper === :length_scale, hyper_plans) && error(
         "$prefix: predictor `$target` uses `length_scale_floor` in a " *
         "hyper-predicted length scale's prior, which is its log-scale " *
@@ -5846,20 +5861,17 @@ function _rk_plan_dar_term!(prepared::_BRMPreparedTerm{typeof(dar)},
         columns[zero] = zeros(length(prepared.state.time))
         return _RKTermSpec(:offset, [zero], (; zero_source=source), zero, Symbol(:offset_, zero))
     end
-    beta_family, beta_args, beta_support = _rk_dar_beta_prior(
-        prepared.state.ar_prior, target, source)
-    sigma_family, sigma_args, sigma_support = _rk_dar_sigma_prior(
-        prepared.state.sd_prior, target, source)
     stem = "dar_$(target)_$(source)"
     beta = _rk_mint_generated!(taken, columns, stem * "_beta")
     sigma = _rk_mint_generated!(taken, columns, stem * "_sigma")
+    beta_param = _rk_term_parameter(prepared.state.ar_prior) do prior
+        _RKSampledParameter(beta, _rk_dar_beta_prior(prior, target, source)..., beta)
+    end
+    sigma_param = _rk_term_parameter(prepared.state.sd_prior) do prior
+        _RKSampledParameter(sigma, _rk_dar_sigma_prior(prior, target, source)..., sigma)
+    end
     label = Symbol(stem)
-    _RKTermSpec(:dar, Symbol[],
-        (; beta, sigma, source,
-         beta_param=_RKSampledParameter(
-             beta, beta_family, beta_args, beta_support, beta),
-         sigma_param=_RKSampledParameter(
-             sigma, sigma_family, sigma_args, sigma_support, sigma)),
+    _RKTermSpec(:dar, Symbol[], (; beta, sigma, source, beta_param, sigma_param),
         label, label)
 end
 

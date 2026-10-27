@@ -63,7 +63,7 @@ function _rk_ast_hsgp_hyper!(block, options, hyper, prior, floor, G)
         value = _rk_block_local!(block, stem)
         hyper === :length_scale && options.rho_truncated &&
             (prior = Expr(:call, :restricted, prior, floor, Inf))
-        push!(block.statements, Expr(:call, :~, value, prior))
+        push!(block.statements, _rk_ast_hyper_statement(value, prior))
         return value, nothing
     end
     plan = plans[position]
