@@ -2917,13 +2917,19 @@ function _brm_categorical_effect_entry(plan, emitted_lp::Symbol,
     length(args) == 1 || return nothing
     predictor = _as_named_column(only(args))
     isnothing(predictor) && return nothing
-    ref = _as_integer(get(getkwargs(term), :ref, 1))
-    isnothing(ref) && return nothing
-    decode = ref == 1 ? identity :
-        level -> level == 1 ? ref : level == ref ? 1 : level
+    decode = _brm_factor_level_decoder(get(getkwargs(term), :ref, 1))
     _brm_categorical_effect_entry(
         plan, emitted_lp, name(lowered), name(predictor), decode; cellmeans)
 end
+
+# The fitted level each code of a releveled factor's record stands for. An
+# integer `ref=k` swaps codes `k` and 1 (`_sb_relevel_codes`), so decoding swaps
+# them back. A string `ref` names a level value: the record already holds the
+# level values with the reference first (`_sb_string_factor_levels`), so they
+# decode as they are.
+_brm_factor_level_decoder(ref::Integer) = ref == 1 ? identity :
+    level -> level == 1 ? ref : level == ref ? 1 : level
+_brm_factor_level_decoder(::AbstractString) = identity
 
 _brm_categorical_effect_entry(_plan, _emitted_lp::Symbol, _term;
                               cellmeans::Bool=false) = nothing
@@ -3275,10 +3281,7 @@ function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
     # total-coefficient or a sum-to-zero block, in which case the recovered
     # generated carrier addresses it. A sampled conventional resolution above
     # always wins.
-    blocks = hasproperty(d.plan, :bindings) ?
-        [b for b in Iterators.flatten((total_effect_blocks(d.plan),
-                                       s2z_effect_blocks(d.plan)))
-         if b.predictor === logical] : []
+    blocks = _brm_absorbing_blocks(d, logical)
     recovered = _brm_recovered_population_coordinates(
         d, logical, coefficient, constrained_names, entry, blocks)
     isnothing(recovered) || return recovered
@@ -3331,6 +3334,14 @@ _brm_recovered_population(block::TotalEffectBlock) = block.population
 _brm_recovered_population(block::S2ZEffectBlock) = block.coefficients
 _brm_absorbing_block_kind(::TotalEffectBlock) = "exact total-coefficient"
 _brm_absorbing_block_kind(::S2ZEffectBlock) = "sum-to-zero"
+
+# The exact total-coefficient and sum-to-zero blocks of logical predictor
+# `logical`, the blocks that can absorb its population columns.
+_brm_absorbing_blocks(d::BRMDescriptor, logical::Symbol) =
+    hasproperty(d.plan, :bindings) ?
+        [b for b in Iterators.flatten((total_effect_blocks(d.plan),
+                                       s2z_effect_blocks(d.plan)))
+         if b.predictor === logical] : []
 
 # Resolve a coefficient absorbed by an exact total-coefficient or sum-to-zero
 # block to its recovered generated carrier. Returns `nothing` when no block of

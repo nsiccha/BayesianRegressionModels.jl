@@ -6,6 +6,7 @@
 using Random, Statistics, Distributions, CSV, DataFrames, JSON
 using BayesianRegressionModels, StanBlocks, BridgeStan, LogDensityProblems
 using WarmupHMC, Enzyme
+include(joinpath(@__DIR__, "quorum.jl"))  # chains through WarmupHMC's quorum sampler
 using DifferentiationInterface: AutoEnzyme
 
 const BRM = BayesianRegressionModels
@@ -40,7 +41,7 @@ end
 sb = SBBRMI(builder(data); mod=@__MODULE__)
 problem = StanBlocks.stan_instantiate(sb.model; path=joinpath(SCRATCH, ".out", "stan", "pigs.stan"))
 rp = BRM.adaptive_centering_problem(sb, problem, AutoEnzyme(); centeredness=0.0)
-fit = adaptive_warmup_mcmc(
+fit = quorum_fit(
     Xoshiro(2611), rp; init=missing,
     n_draws=1000, nonlinear_adapt=true, monitor_ess=false,
 )

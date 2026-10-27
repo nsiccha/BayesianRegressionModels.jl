@@ -76,8 +76,11 @@ end
 # coordinates spell the correlation in the block order; the compiled ones are
 # those of the declared-order factor. Each group's effects go through
 # `Cp = cholesky(P Sigma P')` in its own order, then the declared-order
-# compiled frame at `target_c`.
-function _learned_reference(x, blocks, controls; source=_learned_source)
+# compiled frame at `target_c`. `beta(block, k)` is the coordinate of the
+# population coefficient term `k` is centred on (hierarchical centring), 0 for
+# none.
+function _learned_reference(x, blocks, controls; source=_learned_source,
+                            beta=(block, k) -> 0)
     y = copy(x)
     ljac = 0.0
     offset = 0
@@ -102,7 +105,8 @@ function _learned_reference(x, blocks, controls; source=_learned_source)
             for j in 1:K
                 a = perm[j]
                 m = sum(Cp[j, i] * w[i] for i in 1:j-1; init=0.0)
-                w[j] = (x[block.effects[a, g]] - c[a, g] * m) / Cp[j, j]^c[a, g]
+                loc = m + (beta(block, a) == 0 ? 0.0 : x[beta(block, a)])
+                w[j] = (x[block.effects[a, g]] - c[a, g] * loc) / Cp[j, j]^c[a, g]
                 b[a] = m + Cp[j, j] * w[j]
                 ljac += (1 - c[a, g]) * log(Cp[j, j])
             end
@@ -456,8 +460,15 @@ end
     @test only(ir.block_orders) == [2, 3, 1]
     @test only(ir.orders) == reshape([2, 3, 1,  3, 2, 1,  1, 2, 3], K, G)
     ljac, mapped = ir(q)
+    # Hierarchical centring: a block compiled non-centred centres the
+    # `Intercept` and `x` terms on their population coefficients, read through
+    # the public descriptor (`t` has none).
+    betas = centered ? zeros(Int, K) :
+        [term === :t ? 0 : only(brm_population_effect_coordinates(brm_descriptor(sb),
+            :mu, names; coefficient=term).coordinates) for term in (:Intercept, :x, :t)]
     reference_ljac, reference = _learned_reference(q, [block], controls;
-        source=(x, b) -> _learned_bridgestan_source(problem, b, x))
+        source=(x, b) -> _learned_bridgestan_source(problem, b, x),
+        beta=(b, k) -> betas[k])
     @test mapped ≈ reference atol=1e-12
     @test ljac ≈ reference_ljac atol=1e-12
     untouched = setdiff(eachindex(names), vec(block.effects), block.cholesky_free)
@@ -480,7 +491,9 @@ end
     @test [r.level for r in rows] == [block.ranef.levels[g] for g in 1:G for _ in 1:K]
     @test [r.term for r in rows] == repeat(1:K, G)
     @test [r.rank for r in rows] == [3, 1, 2,  3, 2, 1,  1, 2, 3]
-    constrained = BridgeStan.param_names(problem.model; include_tp=true, include_gq=true)
+    @test [r.location for r in rows] ==
+        repeat([k == 0 ? nothing : names[k] for k in betas], G)
+    constrained =BridgeStan.param_names(problem.model; include_tp=true, include_gq=true)
     draw = BridgeStan.param_constrain(problem.model, q; include_tp=true, include_gq=true,
                                       rng=BridgeStan.StanRNG(problem.model, 1))
     margins = only(brm_ranef_draws(brm_descriptor(sb), permutedims(draw),

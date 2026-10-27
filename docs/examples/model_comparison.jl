@@ -9,6 +9,7 @@ using Random, Statistics, Distributions, CSV, DataFrames, JSON, LogExpFunctions
 using PSIS
 using BayesianRegressionModels, StanBlocks, BridgeStan, LogDensityProblems
 using WarmupHMC, Enzyme
+include(joinpath(@__DIR__, "quorum.jl"))  # chains through WarmupHMC's quorum sampler
 using DifferentiationInterface: AutoEnzyme
 
 const BRM = BayesianRegressionModels
@@ -42,7 +43,7 @@ function fit_model(builder, data, tag, seed; draws=800)
     catch
         problem
     end
-    fit = adaptive_warmup_mcmc(
+    fit = quorum_fit(
         Xoshiro(seed), rp; init=missing, n_draws=draws,
         nonlinear_adapt=false, monitor_ess=false,
     )

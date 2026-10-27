@@ -195,10 +195,14 @@ function _brm_replay_preprocess(::Val{:hsgp}, entry, input::NamedTuple,
     evaluated = fresh ? axes :
         _brm_hsgp_replay_axes(axes, fits, support, extrapolate, mask; prefix,
                               fixed_domain=!isnothing(domain_fits))
+    # A frozen replay evaluates the training projection on its rows; a fresh
+    # one re-fits it on them, as it re-fits the interval.
     orthogonal_to = get(entry.const_, :orthogonal_to, nothing)
+    projection = freeze ? _brm_hsgp_frozen_projection(entry.const_, orthogonal_to;
+                                                      prefix) : nothing
     iso = entry.const_.iso
     basis = _brm_hsgp_basis_state(evaluated, K, :exp_quad, iso, nothing;
-        fits, orthogonal=orthogonal_to, anchor, mask)
+        fits, orthogonal=orthogonal_to, anchor, mask, projection)
     # A re-derived floor must stay below a floor-marked prior's upper bound.
     floor_upper = get(entry.const_, :floor_upper, nothing)
     isnothing(floor_upper) || _brm_check_hsgp_floor_below(
@@ -208,6 +212,7 @@ function _brm_replay_preprocess(::Val{:hsgp}, entry, input::NamedTuple,
     # Only a clamping record keeps its support; others stay as they were fitted.
     updated = haskey(entry.const_, :support) ?
         merge(entry.const_, (; fits, support)) : merge(entry.const_, (; fits))
+    isnothing(basis.projection) || (updated = merge(updated, (; basis.projection)))
     _BRMPreprocessResult(
         (primary=basis.PHI, omega2=basis.omega2, rho_lower=basis.rho_lower),
         _BRMPreprocEntry(:hsgp, updated, entry.raw_ref, false))

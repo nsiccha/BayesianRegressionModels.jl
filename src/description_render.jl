@@ -438,6 +438,10 @@ _brmd_builtin_call(::StanBlocks.SlicModel,c)=BRMDescriptionFragment(covers=(c.id
 # Only BRM-generated vector priors decompose; other value families stay gaps.
 _brmd_builtin_call(::StanBlocks.ValueFamily,c)=isempty(_brmd_coordinates(c)) ? nothing :
     _brmd_coordinatewise_fragment(c)
+# `x[1:n] .~ Family.(...)` (`_brm_vector_prior(n, law)`): one element law,
+# itself a described component, shared by every coordinate.
+_brmd_builtin_call(::typeof(_brm_vector_prior),c)=BRMDescriptionFragment(
+    prose=(_brmd_text(c,:vector_prior),),covers=(c.id,))
 # `vcat` is SLIC's block-wise prior family, decomposing the same way, or,
 # outside distribution position, value concatenation (`_brmd_distribution`).
 _brmd_builtin_call(::typeof(vcat),c)=!isempty(_brmd_coordinates(c)) ? _brmd_coordinatewise_fragment(c) :
@@ -604,6 +608,7 @@ function _brmd_gp_fragment(c,approximate)
     axes=join(("\$"*brm_description_math(c,a)*"\$" for a in c.arguments),", ")
     prose=String[_brmd_text(c,approximate ? :hilbert_space_process : :gaussian_process;covariance=covname,axes)]
     equations=String[]
+    covers=Any[c.id]
     if !approximate
         jitter=brm_description_math(c,get(c.keywords,:jitter,1e-9))
         push!(equations,"f\\mid\\ell,\\tau\\sim\\mathcal N(0,K)")
@@ -636,17 +641,32 @@ function _brmd_gp_fragment(c,approximate)
         end
         get(c.keywords,:iso,true)===true && push!(prose,_brmd_text(c,:isotropic_length_scale))
         grouped && push!(prose,_brmd_text(c,:grouped_basis_weights))
-        grouped && haskey(c.keywords,:cor) && push!(prose,_brmd_hsgp_level_prose(c,c.keywords[:cor]))
-        if get(c.keywords,:orthogonal_to,nothing)!==nothing
-            push!(equations,"\\Phi_{\\mathrm{"*_brmd_text(c,:math_used)*"}}=(I-P_{[1,x]})\\Phi_{\\mathrm{"*_brmd_text(c,:math_raw)*"}}")
-            push!(prose,_brmd_text(c,:orthogonal_projection))
+        if grouped && haskey(c.keywords,:cor)
+            # The level prose describes `cor=` whole, a `multigroup(...)` call included.
+            level=c.keywords[:cor]
+            push!(prose,_brmd_hsgp_level_prose(c,level))
+            level isa BRMDescriptionComponent &&
+                append!(covers,(node.id for node in brm_description_components(level)))
+        end
+        orthogonal=get(c.keywords,:orthogonal_to,nothing)
+        if orthogonal!==nothing
+            span,text=_brmd_hsgp_projection(orthogonal)
+            push!(equations,"\\Phi_{\\mathrm{"*_brmd_text(c,:math_used)*"}}=(I-P_{"*span*"})\\Phi_{\\mathrm{"*_brmd_text(c,:math_raw)*"}}")
+            push!(prose,_brmd_text(c,text))
         end
         push!(prose,_brmd_text(c,:partial_centering))
     else
         return nothing
     end
-    BRMDescriptionFragment(; prose=Tuple(prose),equations=Tuple(equations),covers=(c.id,))
+    BRMDescriptionFragment(; prose=Tuple(prose),equations=Tuple(equations),covers=Tuple(covers))
 end
+# The directions an `orthogonal_to=` projection removes, and the text saying so.
+# The snapshot holds the keyword's symbol as a reference to that name.
+_brmd_hsgp_projection(orthogonal::BRMDescriptionReference) =
+    _brmd_hsgp_projection(orthogonal.name)
+_brmd_hsgp_projection(orthogonal::Symbol) = _brmd_hsgp_projection(Val(orthogonal))
+_brmd_hsgp_projection(::Val{:linear}) = ("[1,x]", :orthogonal_projection)
+_brmd_hsgp_projection(::Val{:intercept}) = ("1", :intercept_projection)
 _brmd_builtin_call(::typeof(gp),c) = _brmd_gp_fragment(c,false)
 _brmd_builtin_call(::typeof(hsgp),c) = _brmd_gp_fragment(c,true)
 function _brmd_builtin_call(::typeof(me),c)
@@ -974,11 +994,26 @@ _brmd_level_correlation_name(x)=x
 # coherence `multigroup(Omega, tau)` (src/level_correlation.jl).
 _brmd_hsgp_level_prose(c,x)=_brmd_text(c,:level_correlated_basis_weights;
     correlation=_brmd_level_correlation_name(x))
-_brmd_hsgp_level_prose(c,x::BRMDescriptionComponent)=x.callable===multigroup ?
-    _brmd_text(c,:multigroup_basis_weights;
+function _brmd_hsgp_level_prose(c,x::BRMDescriptionComponent)
+    x.callable===multigroup || return _brmd_text(c,:level_correlated_basis_weights;
+        correlation=_brmd_level_correlation_name(x))
+    # `multigroup((x, y), lambda; k)`: coordinates in place of a correlation.
+    first(x.arguments) isa Tuple || return _brmd_text(c,:multigroup_basis_weights;
         correlation=_brmd_level_correlation_name(x.arguments[1]),
-        tau=_brmd_level_correlation_name(x.arguments[2])) :
-    _brmd_text(c,:level_correlated_basis_weights;correlation=_brmd_level_correlation_name(x))
+        tau=_brmd_level_correlation_name(x.arguments[2]))
+    names(fields)=join(("`"*string(_brmd_level_correlation_name(a))*"`" for a in fields),", ")
+    # `multigroup((x, y); k)` leaves the spatial scale to the term: λ.
+    own=length(x.arguments)==1
+    lambda=own ? "λ" : _brmd_level_correlation_name(x.arguments[2])
+    approximation=haskey(x.keywords,:inducing) ?
+        _brmd_text(c,:multigroup_coordinate_positions;positions=names(x.keywords[:inducing]),lambda) :
+        _brmd_text(c,Symbol(:multigroup_coordinate_,
+                _brmd_level_correlation_name(get(x.keywords,:method,:hsgp)));
+            k=get(x.keywords,:k,_BRM_MULTIGROUP_COORDINATE_K),
+            c=get(x.keywords,:c,_BRM_MULTIGROUP_HSGP_C),lambda)
+    _brmd_text(c,:multigroup_coordinate_basis_weights;coordinates=names(first(x.arguments)),lambda)*
+        " "*approximation*(own ? " "*_brmd_text(c,:multigroup_coordinate_own_lambda) : "")
+end
 # How a block's margins correlate (`_brmd_block_correlation`), as one sentence.
 _brmd_correlation_text(::Val{:estimated}) = :correlated_margins
 _brmd_correlation_text(::Val{:known}) = :known_correlation

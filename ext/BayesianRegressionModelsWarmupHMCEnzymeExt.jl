@@ -74,18 +74,28 @@ function LogDensityProblems.logdensity_and_gradient(
             target = value.target.c
             model_seed = model_gradient[index]
 
+            # A pair centred on a population coefficient adds it to its
+            # location, and term 1's coefficient to term 2's innovation
+            # (`AC_EXT._with_location`); a pair centred on 0 keeps the exact
+            # arithmetic below.
+            own_location = state.pair_location[pair_number]
             if term == 1
                 location = zero(T)
+                own_location == 0 || (location = location + x[own_location])
                 log_scale = log(C11)
             else
-                c = state.sources[state.pair_lookup[bi][1, group]]
+                first_pair = state.pair_lookup[bi][1, group]
+                first_location = state.pair_location[first_pair]
+                c = state.sources[first_pair]
                 u = x[block.effects[1, group]]
                 m = zero(T)
+                first_location == 0 || (m = m + x[first_location])
                 numerator = u - c * m
                 denominator = C11^c
                 innovation = numerator / denominator
                 location = zero(T)
                 location += C21 * innovation
+                own_location == 0 || (location = location + x[own_location])
                 log_scale = log(C22)
             end
 
@@ -103,6 +113,7 @@ function LogDensityProblems.logdensity_and_gradient(
             dlocation += (-dshifted) * source
             dlocation += model_seed * target
 
+            own_location == 0 || (gradient[own_location] += dlocation)
             if term == 1
                 dC11 = dlog_scale / C11
                 dtau1 = dC11 * one(T)
@@ -138,6 +149,8 @@ function LogDensityProblems.logdensity_and_gradient(
                 gradient[block.log_scales[1]] += dscale1
                 gradient[scale2_index] += dtau2 * tau2
                 gradient[effect_index] += dnumerator
+                first_location == 0 ||
+                    (gradient[first_location] += (-dnumerator) * c)
             end
             gradient[index] += dshifted
         end
@@ -254,9 +267,11 @@ function _blockwise_objective(x, state::AC_EXT._BRMRanefCenteringState{N}, bi,
             c = state.sources[lookup[j, g]]
             index = block.effects[j, g]
             u = x[index]
-            j < K && (innovations = Base.setindex(innovations, (u - c * m) / s^c, j))
+            # The pair's source-frame location (`AC_EXT._with_location`).
+            loc = AC_EXT._with_location(m, x, state, lookup[j, g])
+            j < K && (innovations = Base.setindex(innovations, (u - c * loc) / s^c, j))
             log_scale = log(s)
-            acc += seed[index] * (t * m + (u - c * m) * exp(log_scale * (t - c)))
+            acc += seed[index] * (t * loc + (u - c * loc) * exp(log_scale * (t - c)))
             acc += log_scale * (t - c)
         end
     end

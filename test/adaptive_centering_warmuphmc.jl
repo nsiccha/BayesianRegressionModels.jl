@@ -22,8 +22,10 @@ function set_adaptive_sources!(state, ir, controls)
 end
 
 # Level `g`'s factor is the block's `diag(tau) * L`, times `sqrt(w[g])` for a
-# Student-t block.
-function manual_adaptive_map(x, block, controls)
+# Student-t block. `location_of[i]` is the coordinate of the population
+# coefficient effect coordinate `i` is centred on (hierarchical centring);
+# absent means centred on 0.
+function manual_adaptive_map(x, block, controls, location_of=Dict{Int,Int}())
     y = copy(x)
     ljac = zero(eltype(x))
     p = 1
@@ -35,7 +37,9 @@ function manual_adaptive_map(x, block, controls)
             m = sum(C[k, l] * z[l] for l in 1:k-1; init=zero(eltype(x)))
             s = C[k, k]
             u = x[block.effects[k, g]]
-            z[k] = (u - c * m) / s^c
+            j = get(location_of, block.effects[k, g], 0)
+            beta = j == 0 ? zero(eltype(x)) : x[j]
+            z[k] = (u - c * (m + beta)) / s^c
             y[block.effects[k, g]] =
                 block.target_c * m + s^block.target_c * z[k]
             ljac += (block.target_c - c) * log(s)

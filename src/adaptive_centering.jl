@@ -951,6 +951,11 @@ u[k] = c[k] * sum(C[k,l] * z[l] for l < k) + C[k,k]^c[k] * z[k]
 with `C = diag(tau) * L`. At `K=1`, this reduces to `u = s^c * z` with
 `s = exp(log_scale)` and no Cholesky coordinates. Consequently `c=0` is the
 literal standardised draw and `c=1` is the literal model-scale effect.
+[`adaptive_centering_problem`](@ref) additionally centres the cells of a block
+compiled non-centred on their predictor's population coefficient where one
+matches (`u[k]` gains `c[k] * beta[k]`, so `c=1` is the level's total);
+that location is not part of this metadata, and
+[`adaptive_centering_controls`](@ref) reports it per cell.
 
 R2D2 blocks use the same map; only `tau` differs. It is not a coordinate but the
 emitted model's own derived scale — `ref * sqrt(phi[j] * R2 / (1 - R2))` for
@@ -1315,7 +1320,7 @@ function _adaptive_hsgp_centering_blocks(model, unc_names)
                 owner.family in (
                     :_sb_hsgp, :_sb_hsgp_aniso,
                     :_sb_hsgp_partial, :_sb_hsgp_partial_aniso,
-                    :_sb_hsgp_latent, :_sb_hsgp_latent_orthogonal,
+                    :_sb_hsgp_latent, :_sb_hsgp_latent_orthogonal, :_sb_hsgp_latent_centered,
                 ) || error(
                     "BRM adaptive centering: HSGP `$(entry.term)` resolved to " *
                     "unsupported emitted family `$(owner.family)`.",
@@ -1522,6 +1527,15 @@ end
 # addresses frequency `b` in level `g`.
 function _adaptive_grouped_hsgp_blocks!(
         out, descriptor, plan, pos, unc_names, logical, entry, kw)
+    # `cor=` correlates the levels' weights (or, for a coordinate multigroup
+    # coherence, draws them on an inducing grid), so no block is one level's.
+    haskey(kw, :cor) && error(
+        "BRM adaptive centering: grouped HSGP `$(entry.term)` on predictor ",
+        "`$logical` correlates the levels of `$(name(kw[:by]))` with each other ",
+        "(`cor=`), so its standardized weights are not per-level weights; ",
+        "per-level centering of such a term is not implemented, and it is not ",
+        "silently left fixed either.",
+    )
     K, _ = _sb_hsgp_options(kw, length(getargs(entry.value)))
     B = prod(K)
     gname = name(kw[:by])
@@ -2166,17 +2180,113 @@ end
 # beside a free intercept, centring `b[k]` ties every centred area to the
 # intercept along the direction `(intercept + d, b .- d)`, which a likelihood
 # that pins each area's total does not resolve. An intercept absorbed into exact
-# totals, or one declared with bounds (its coordinate is then not the value), is
-# not read. `:icar` `phi` cells are not centred on it: the ICAR's sum-to-zero
+# totals or S2Z, or one declared with bounds (its coordinate is then not the
+# value), is not read. `:icar` `phi` cells are not centred on it: the ICAR's sum-to-zero
 # already separates the field from the intercept.
-function _adaptive_car_intercept(descriptor, logical, unc_names)
-    :Intercept in popcoefnames(descriptor.plan.parent, logical) || return 0
+_adaptive_car_intercept(descriptor, logical, unc_names) =
+    _adaptive_population_coordinate(descriptor, logical, :Intercept, unc_names)
+
+# The unconstrained coordinate of predictor `logical`'s sampled population
+# coefficient `coefficient`, or 0 when the predictor has no such coefficient,
+# or it is absorbed into exact totals or S2Z (recovered, not sampled), or it is
+# declared with bounds (its coordinate is then not the value). Adaptive
+# centring reads it as a cell's location, never transforms it. An absorbed
+# coefficient is skipped before the lookup, which refuses an S2Z-absorbed one
+# when `unc_names` carries no generated quantities.
+function _adaptive_population_coordinate(descriptor, logical, coefficient, unc_names)
+    coefficient in popcoefnames(descriptor.plan.parent, logical) || return 0
+    any(b -> coefficient in b.population_columns,
+        _brm_absorbing_blocks(descriptor, logical)) && return 0
     resolved = brm_population_effect_coordinates(descriptor, logical, unc_names;
-                                                 coefficient=:Intercept)
+                                                 coefficient)
     (resolved.recovered || length(resolved.coordinates) != 1 ||
      resolved.output.kind !== :parameter ||
      !isempty(resolved.output.constraints)) && return 0
     only(resolved.coordinates)
+end
+
+# Hierarchical centring of random-effect cells (Gelfand, Sahu and Carlin 1995;
+# snag fitted-seven-hie-76d07973, decision 1xdxiv1). A cell of level `j`, term
+# `k` is centred on its predictor's population coefficient for that term, so
+# its `c=1` coordinate is the level's total `beta_k + b[k, j]` rather than the
+# deviation `b[k, j]`. Centring the deviation on 0 leaves the direction
+# `(beta + d, b .- d)` to the prior alone: with strongly identified levels on
+# few groups that ridge has width about `tau / sqrt(J)` and no control removes
+# it. The coefficient is read, never transformed, so the map stays exact.
+#
+# Returns, per block, one coordinate per term (0 = centred on 0). A block gets
+# none when it is compiled centred (`centered_groups`: the compiled coordinate
+# is then the deviation, which WarmupHMC's shared-location pair map cannot keep
+# while the source samples the total), groups by multi-membership, or has no
+# margin labels. A term gets none when its predictor has no matching sampled,
+# unbounded population coefficient (`_adaptive_population_coordinate`), and
+# when the block's grouping is nested in another grouping of the same predictor
+# (`_adaptive_nested_bindings`): a nested level's parent is the enclosing
+# level's total, a coordinate another cell rewrites, so it stays centred on 0.
+function _adaptive_ranef_locations(model, blocks, unc_names)
+    out = IdDict{Any,Vector{Int}}()
+    isempty(blocks) && return out
+    d = model isa BRMDescriptor ? model : brm_descriptor(model)
+    margins = Dict(m.block.binding => m.margins for m in _brmd_ranef_metadata(d))
+    nested = _adaptive_nested_bindings(d.plan, blocks, margins)
+    for block in blocks
+        K = block.ranef.n_terms
+        labels = get(margins, block.ranef.binding, ())
+        locs = zeros(Int, K)
+        if block.target_c == 0.0 && block.ranef.group isa Symbol && length(labels) == K
+            for k in 1:K
+                (block.ranef.binding, labels[k].predictor) in nested && continue
+                locs[k] = _adaptive_population_coordinate(d, labels[k].predictor,
+                                                          labels[k].coefficient,
+                                                          unc_names)
+            end
+        end
+        out[block] = locs
+    end
+    out
+end
+
+# `(binding, predictor)` pairs whose grouping is nested in a coarser grouping of
+# another block on the same predictor: every level of the first occurs with one
+# level of the second on the predictor's rows, and the second has fewer levels.
+# Rows are compared through the blocks' group-index data, which index the same
+# rows when they have the same length; blocks whose rows cannot be aligned
+# (different lengths, a resampled index) are not compared.
+function _adaptive_nested_bindings(plan, blocks, margins)
+    index = Dict{Symbol,AbstractVector}()
+    for block in blocks
+        binding = block.ranef.binding
+        haskey(index, binding) && continue
+        decl = only(x for x in plan.declarations
+                    if x.role === :prior && x.target === binding)
+        key = get(decl.keywords, :group_idx, nothing)
+        value = key isa Symbol ? get(plan.data, key, nothing) : nothing
+        value isa AbstractVector && (index[binding] = value)
+    end
+    by_predictor = Dict{Symbol,Vector{Symbol}}()
+    for (binding, labels) in margins, label in labels
+        haskey(index, binding) || continue
+        list = get!(by_predictor, label.predictor, Symbol[])
+        binding in list || push!(list, binding)
+    end
+    nested = Set{Tuple{Symbol,Symbol}}()
+    for (predictor, bindings) in by_predictor, a in bindings, b in bindings
+        a === b && continue
+        _adaptive_nested_in(index[a], index[b]) && push!(nested, (a, predictor))
+    end
+    nested
+end
+
+# Whether the levels coded by `inner` nest in those coded by `outer` on the same
+# rows: each inner level occurs with one outer level, and the outer grouping is
+# strictly coarser (a relabelling of the same grouping is not nesting).
+function _adaptive_nested_in(inner::AbstractVector, outer::AbstractVector)
+    length(inner) == length(outer) || return false
+    parent = Dict{eltype(inner),eltype(outer)}()
+    for (a, b) in zip(inner, outer)
+        get!(parent, a, b) == b || return false
+    end
+    length(unique(values(parent))) < length(parent)
 end
 
 # Stan's native `cholesky_factor_corr[K]` constrain transform.  Its
@@ -2277,9 +2387,12 @@ pair order (the order `centeredness` and checkpoints use). Every row has
 
 Random-effect rows also carry `binding`, `group`, `margin` (its
 `(; predictor, coefficient)`, as [`brm_ranef_draws`](@ref) labels it),
-`level`, `term` (the margin's declared position in its block) and `rank`, its
-position in the group's current triangular order: `term` itself under
-`ranef_order=:declared`, the learned position under `ranef_order=:learned`.
+`level`, `term` (the margin's declared position in its block), `rank`, its
+position in the group's current triangular order (`term` itself under
+`ranef_order=:declared`, the learned position under `ranef_order=:learned`),
+and `location`, the unconstrained name of the population coefficient the cell
+is centred on (so its `c=1` coordinate is the level's total), or `nothing` for
+a cell centred on 0 (see [`adaptive_centering_problem`](@ref)).
 HSGP and cdar rows carry `binding`, `margin = (; predictor, coefficient=term)`
 and `term` (the basis or walk cell). Car rows carry `binding`, `margin`, `level`
 (the area's label) and `term`: 1 for an `:icar` area's structured `phi` cell, 2

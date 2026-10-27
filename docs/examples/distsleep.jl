@@ -9,6 +9,7 @@
 using Random, Statistics, Distributions, CSV, DataFrames, JSON
 using BayesianRegressionModels, StanBlocks, BridgeStan, LogDensityProblems
 using WarmupHMC, Enzyme
+include(joinpath(@__DIR__, "quorum.jl"))  # chains through WarmupHMC's quorum sampler
 using DifferentiationInterface: AutoEnzyme
 
 const BRM = BayesianRegressionModels
@@ -33,7 +34,7 @@ end
 # Lowering happens in the caller (top level); see snag brm-totals-lower-a47c6227.
 function sample_fit(sb, problem, seed)
     rp = BRM.adaptive_centering_problem(sb, problem, AutoEnzyme(); centeredness=0.0)
-    fit = adaptive_warmup_mcmc(
+    fit = quorum_fit(
         Xoshiro(seed), rp; init=missing, n_draws=600,
         nonlinear_adapt=true, monitor_ess=false,
     )

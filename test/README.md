@@ -68,6 +68,20 @@ known values, `sd(lp, ID) = value` and `cor(:, ID) = R`. It covers:
 
 Set `BRM_FIXED_RANEF_RUNTIME=0` to skip the compiled-model sets.
 
+`hsgp_intercept_projection.jl` checks `hsgp(x...; orthogonal_to=:intercept)`:
+- every basis column centered over the term's rows, for two raw axes
+  (isotropic, anisotropic, an explicit `domain=`) and over the masked rows of
+  a `rows=` term, with the fitted projection recorded;
+- frozen SBBRMI replay evaluating the training projection on a subset of rows
+  (`:linear` too), and `freeze_constants=false` re-fitting it;
+- a model-derived axis centered in Stan (`brm_hsgp_center_columns`);
+- the refusals (`by=`, `anchor=`, `:linear` over two axes, an unknown value,
+  a projection fitted on no rows) and the description of the projection;
+- RKBRMI density and gradient equal to SBBRMI (BridgeStan) through the
+  coordinate transport, including a field that multiplies a positive weight.
+
+Set `BRM_HSGP_PROJECTION_RUNTIME=0` to skip the compiled parity sets.
+
 `level_correlation.jl` checks correlated levels of a grouping factor:
 `gr(g; cor=Omega)` and `hsgp(x...; by=g, cor=Omega)`, with a declared
 `Omega ~ LKJCholesky(K, eta)` or a known data matrix. It covers:
