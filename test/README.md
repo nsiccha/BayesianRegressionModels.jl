@@ -444,8 +444,12 @@ oracle runs against both implementations, the row-structured
 `BRMLaplaceProblem` (`structured=false`); a panel of an NB2 count with
 correlated effects, an NB2 count with a shape predictor and a binomial share
 checks that the two agree in value and gradient, and a LogNormal model that
-only the whole-model path takes it. It needs ReactiveKernels with
-`prepare_ad_third` (the test pin) and runs in the test environment above.
+only the whole-model path takes it. An NB2 model with a monotonic effect and a
+shape predictor, whose parameters are not affine in the population
+coordinates, checks the structured gradient's pullback of both parameters
+through RK against the whole-model gradient and differences. It needs
+ReactiveKernels with `prepare_ad_third` and pullbacks over several WANT ports
+(the test pin) and runs in the test environment above.
 
 `start_values.jl` checks `brm_start`, initial values keyed by prior address,
 on both backends. For a correlated population-PK model, a linked predictor,

@@ -63,7 +63,7 @@ BRM._rk_nlme_compact_cell_value_and_gradient!(sampler::CompactCellSampler,
 
 # The row-structured Laplace (src/nlme_laplace_structured.jl): the likelihood
 # parameters `ports` (natural scale, one value per row or a scalar) at a
-# packed point, a reverse pullback of each, the random-effect draws `effects`
+# packed point, one reverse pullback of them all, the random-effect draws `effects`
 # (one levels × K matrix per block) with their forward derivatives along the
 # `omega` coordinates, and the population prior.
 _rk_slap_tuple(value, n) = n == 1 ? (value,) : Tuple(value)
@@ -77,19 +77,18 @@ function BRM._rk_slap_kernels(backend::BRM.RKBRMI, ports::Tuple, effects::Tuple,
         have, want, bound)
     values = prepare_want(ports)
     v0 = _rk_slap_tuple(Base.invokelatest(values, u0), length(ports))
-    # Reverse pullbacks of each parameter, prepared on first use: a model
+    # One reverse pullback of every parameter, prepared on first use: a model
     # whose parameters are affine in the population coordinates never needs
-    # them. RK prepares AD for one WANT port at a time (ReactiveKernels snag
-    # `ad-pullback-push-6f576925`), so this is one sweep per parameter.
+    # it. Its seed holds one cotangent per port (untupled for a single port).
     reverse = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse, ad_backend))
-    pullbacks = Ref{Any}(nothing)
-    prepare_pullbacks() = map(ports, v0) do port, value
-        seed = value isa Number ? 0.0 : zeros(Float64, length(value))
-        Base.invokelatest(prepare_ad_pullback, prepare_want(port), reverse, seed, u0;
-            active=:unconstrained)
-    end
+    pullback = Ref{Any}(nothing)
+    seeds = map(value -> value isa Number ? 0.0 : zeros(Float64, length(value)), v0)
+    prepare_pullback() = Base.invokelatest(prepare_ad_pullback, values, reverse,
+        _rk_slap_seed(seeds), u0; active=:unconstrained)
     # One draws kernel per block, differentiated along the `omega` coordinates
-    # that block owns (`<block>.…`; AD takes one WANT port at a time).
+    # that block owns (`<block>.…`): each block's own directions only, which
+    # measured faster than one pushforward of every block along all of them
+    # (ReactiveKernels snag `ad-pullback-push-6f576925`).
     names = BRM._rk_layout_coordinate_names(backend)
     forward = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Forward, ad_backend))
     blocks = map(effects) do effect
@@ -107,20 +106,18 @@ function BRM._rk_slap_kernels(backend::BRM.RKBRMI, ports::Tuple, effects::Tuple,
     end
     prior = BRM._rk_nlme_population_prior(backend, u0, ad_backend)
     pointwise = BRM._rk_pointwise_query(backend)
-    (; values, nports=length(ports), pullbacks, prepare_pullbacks, blocks,
+    (; values, nports=length(ports), pullback, prepare_pullback, blocks,
         nomega=length(omega), prior, pointwise)
 end
 
 BRM._rk_slap_values(k, u::Vector{Float64}) =
     _rk_slap_tuple(Base.invokelatest(k.values, u), k.nports)
 
+_rk_slap_seed(cotangents) = length(cotangents) == 1 ? only(cotangents) : Tuple(cotangents)
+
 function BRM._rk_slap_pullback(k, u::Vector{Float64}, cotangents)
-    k.pullbacks[] === nothing && (k.pullbacks[] = k.prepare_pullbacks())
-    gradient = zeros(Float64, length(u))
-    for (pullback, seed) in zip(k.pullbacks[], cotangents)
-        gradient .+= Base.invokelatest(ad_pullback, pullback, seed, u)
-    end
-    gradient
+    k.pullback[] === nothing && (k.pullback[] = k.prepare_pullback())
+    Base.invokelatest(ad_pullback, k.pullback[], _rk_slap_seed(cotangents), u)
 end
 
 # Each block's draws, and per `omega` coordinate the tangent of every block's
