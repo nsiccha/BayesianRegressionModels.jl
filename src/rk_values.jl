@@ -944,12 +944,34 @@ _rk_weighted_observation(base, ::Nothing, bindings, taken) = base
 _rk_weighted_observation(base, weight::_BRMPreparedRef, bindings, taken) =
     _rk_ast_dotted(:weighted, base, _rk_value_expr!(bindings, weight, taken))
 
+# The other indexed outputs (`conc[i] = …` beside the collected one) each
+# kernel collects as graph values of their own names. A name another model
+# value holds (a data column, an assignment, a kernel's cells, a parameter or
+# predictor), or that two cells write, stays a cell value: SBBRMI's descriptor
+# likewise leaves it ambiguous rather than picking one.
+function _rk_kernel_output_names(plan::_RKValuePlan)
+    kernels = [a for a in plan.assignments if a isa _RKPreparedKernelAssignment]
+    held = Set{Symbol}(keys(plan.columns))
+    union!(held, (a.name for a in plan.assignments), (kernel.cells for kernel in kernels),
+        (p.name for p in plan.regression.parameters),
+        (p.name for p in plan.regression.predictors))
+    writers = Dict{Symbol,Int}()
+    for kernel in kernels, output in kernel.outputs
+        writers[output] = get(writers, output, 0) + 1
+    end
+    Dict{Symbol,Tuple{Vararg{Symbol}}}(kernel.name => Tuple(output
+        for output in kernel.outputs if writers[output] == 1 && !(output in held))
+        for kernel in kernels)
+end
+
 function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
     reserved = Set{Symbol}(keys(plan.columns))
     union!(reserved, (a.name for a in plan.assignments))
     kernel_cells = Set{Symbol}(a.cells for a in plan.assignments
         if a isa _RKPreparedKernelAssignment)
     union!(reserved, kernel_cells)
+    kernel_outputs = _rk_kernel_output_names(plan)
+    union!(reserved, Iterators.flatten(values(kernel_outputs)))
     lone_intercepts = Dict{Symbol,Any}()
     regression = _rk_emit_ast(plan.regression, false; values=true, reserved,
         coordinates, lone_intercepts)
@@ -962,12 +984,14 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
     taken = Set{Symbol}(keys(plan.columns))
     union!(taken, first.(bindings), (a.name for a in plan.assignments), kernel_cells,
         (p.name for p in plan.regression.parameters),
-        (p.name for p in plan.regression.predictors))
+        (p.name for p in plan.regression.predictors),
+        Iterators.flatten(values(kernel_outputs)))
     hoisted = _rk_nested_kernel_arguments(plan, bindings, taken)
     for assignment in plan.assignments
         if assignment isa _RKPreparedKernelAssignment
             _rk_emit_value_assignment!(defs, stmts, bindings, taken, assignment;
-                arguments=get(hoisted.kernels, assignment.name, nothing), coordinates)
+                arguments=get(hoisted.kernels, assignment.name, nothing), coordinates,
+                graph_outputs=kernel_outputs[assignment.name])
         else
             _rk_emit_value_assignment!(defs, stmts, bindings, taken, assignment)
         end
@@ -1019,7 +1043,8 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
     stmts = _rk_order_value_statements(stmts, setdiff(Set(keys(plan.columns)), computed), defs;
         observed=_rk_observed_names(plan))
     authored = union(Set(a.name for a in plan.assignments),
-        (p.name for p in plan.regression.predictors))
+        (p.name for p in plan.regression.predictors),
+        Iterators.flatten(values(kernel_outputs)))
     _rk_scalar_lone_intercepts(
         _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken),
             _rk_observed_names(plan); retained=authored, coordinates), lone_intercepts)
