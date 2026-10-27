@@ -1015,6 +1015,21 @@ _rk_ast_observed_slice(value::Expr, jobs, rows) =
 _rk_ast_linked_target(predictor) = predictor.link === :identity ?
     string(predictor.name) : string(predictor.link, "_", predictor.name)
 
+# Each linked predictor's linear predictor, by the name its responses read it
+# under: `log_v` of `log(v) ~ …`, whose authored name is the response-scale
+# value `v = exp.(log_v)`. A reader of link-scale values reads these.
+function _rk_link_scale_names(plan, predictors)
+    linked = Set(p.name for p in predictors if p.link !== :identity)
+    names = Dict{Symbol,Symbol}()
+    for statement in _rk_emit_ast(plan).main.args
+        Meta.isexpr(statement, :(=), 2) && first(statement.args) in linked || continue
+        value = last(statement.args)
+        Meta.isexpr(value, :., 2) && Meta.isexpr(value.args[2], :tuple, 1) || continue
+        names[first(statement.args)] = only(value.args[2].args)
+    end
+    names
+end
+
 # A monotonic component is named as SBBRMI names its carrier: the first
 # `mo(c)` is `mo_c`, and a repeat of the column, in another predictor or
 # twice in one, is `mo_<target>_c` with a serial if needed. `mo1` likewise.
