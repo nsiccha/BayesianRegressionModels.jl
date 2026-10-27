@@ -33,6 +33,40 @@ _rk_ode_rk45(f::F, y0, t0, ts, args::Vararg{Any,N}) where {F,N} =
 _rk_ode_bdf(f::F, y0, t0, ts, args::Vararg{Any,N}) where {F,N} =
     ReactiveKernels.rk_ode_bdf_tol(f, y0, t0, ts, 1e-6, 1e-6, 10^6, args...)
 
+# `T::shares(total) ~ Law(…)` in a `@plate` cell (src/cell_total_coordinates.jl)
+# is one joint latent per cell, `T[i] ~ _BRMShares{Law}(n, total, args…)`: its
+# `n - 1` packed coordinates are the isometric coordinates of the centred
+# `log.(T)` (Stan's simplex coordinates of the shares), mapped by BRM's own
+# maps onto positive values summing to `total`. The log-Jacobian is
+# `sum(log.(T)) - log(total)`, as on SBBRMI; it reads the total, which may be
+# a sampled value.
+ReactiveKernelsPPL.sampling_geometry(::Type{<:BRM._BRMShares}, args, shape) =
+    ReactiveKernelsPPL.ParameterGeometry((args[1],), :($(args[1]) - 1); support=:positive,
+        constrain=(u, shape, n, total, rest...) -> BRM._brm_shares_values(u, total),
+        unconstrain=(T, shape, n, total, rest...) -> _brm_shares_unconstrain(T, total),
+        logjac=(u, shape, n, total, rest...) ->
+            sum(BRM._brm_shares_log_values(u, total)) - log(total))
+
+# Values that do not sum to the total are no point of the latent: refused, never
+# rescaled.
+function _brm_shares_unconstrain(T, total)
+    isapprox(sum(T), total; rtol=1e-8) || throw(ArgumentError(
+        "a `shares(total)` cell latent's values must sum to its total: they sum " *
+        "to $(sum(T)), the total is $total"))
+    BRM._brm_shares_coordinates(T)
+end
+
+# The law's density at `T`, one entry at a time; inlined, since it reads data
+# beside sampled values (rkppl-use §13, "One joint latent per index").
+@inline function ReactiveKernelsPPL.sampling_logdensity(d::BRM._BRMShares{F}, T) where {F}
+    BRM._brm_shares_check_lengths(d.args, T)
+    total = zero(eltype(T))
+    for k in 1:length(T)
+        total += BRM.Distributions.logpdf(F(BRM._brm_shares_entries(d.args, k)...), T[k])
+    end
+    total
+end
+
 # The emitted source is the executable contract. Every statistical prior and
 # observation role lowers through the public RKPPL surface; binding supplies
 # the data, with no ordinal or missing-response plan mutations.

@@ -963,6 +963,11 @@ function _brm_kernel_cell_values(brmi)
         names = unique!(Symbol[s.args[1] for s in stmts
                                if Meta.isexpr(s, :(=)) && s.args[1] isa Symbol &&
                                   s.args[1] !== target])
+        # A latent in total coordinates is a cell local bound to the mapped
+        # coordinates (cell_total_coordinates.jl).
+        for name in keys(_brm_cell_total_latents(stmts, _brm_inline_scope(first(args))))
+            name in names || push!(names, name)
+        end
         isempty(names) || push!(cells, target => names)
     end
     cells

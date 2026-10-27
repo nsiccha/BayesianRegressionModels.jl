@@ -62,7 +62,9 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # 785edf4 describes tuple descriptor entries by their `fields`; a57951eb lets a plate cell
 # bind a matrix local; c9504e99 ingests a `Vector{Matrix}` data value as a `RaggedMatrix`
 # whose `X[g]` is the g-th matrix in a plate cell.
-rev = "c9504e9911da428cec94389f98f9757455321ab7"
+# f5e4650 adds Stan's `sum_to_zero_*` transforms (8e57a83) and `head`/`tail`/
+# `reverse` (359844e), which `T::shares(total)` cell latents call.
+rev = "f5e46509a15e22e62d02556522cd0f0cdc54bb95"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
@@ -151,8 +153,10 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # Laplace's non-affine fallback takes; snag ad-pullback-push-6f576925).
 # bf8040f16 contains b5e4760fc and adds 6316fe45d (that pullback over
 # several ports differentiates under plain Enzyme Reverse when the ports read
-# constant design matrices; snag several-port-pul-e6344d44).
+# constant design matrices; snag several-port-pul-e6344d44). 1c14fc131
+# contains bf8040f16 and adds 0e96da576 (one joint `@plate` cell latent per
+# index, which `T::shares(total)` emits; snag rkppl-per-index-5e9df9fe).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "bf8040f1643780506a523c833f2b593377082884"
+rev = "1c14fc131660d9fe828d5be91b945d21594607f0"

@@ -12,6 +12,21 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.4
+
+- A positive `@plate` cell latent can be given its total:
+  `T::shares(total) ~ Law(args…)`, such as
+  `T::shares(land[s]) ~ LogNormal(location, scale)`. `T` sums to `total` in
+  every draw, with `Law` as its law on that surface. It is the Stan program
+  `simplex[K] w; T = total * w; T ~ law(…)`: the sampler moves the K − 1
+  coordinates of Stan's simplex per cell, and BRM adds
+  `sum(log.(T)) - log(total)`. For a total from data this is the exact
+  conditional given the total, which needs no observation of it. The total
+  may also be a model value. Positive families only (`LogNormal`, `Gamma`,
+  …); SBBRMI and RKBRMI; `brm_start` takes `T`'s values, which must sum to
+  each cell's total. A draw of such a latent (prior predictive) is not built.
+  Snag `exact-sum-constr-7ba55c76`.
+
 ## 0.2.3
 
 - **Breaking:** `SBBRMI`, `generative_plan` and `brm_descriptor` default to
