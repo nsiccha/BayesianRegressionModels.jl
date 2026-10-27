@@ -3988,6 +3988,10 @@ const _SB_GROUP_COLUMNS_KEY = :__brm_group_columns__
 # Row count of each `mi(...)` column, which never reaches the Stan data as
 # itself (see `_sb_observation_extent!`).
 const _SB_SKIPPED_ROWS_KEY = :__brm_skipped_rows__
+# Free names the model reads that are a cell's non-collected indexed output
+# (`_brm_kernel_output_reads`): another cell may slice such a name like a
+# collected output.
+const _SB_KERNEL_OUTPUT_READS_KEY = :__brm_kernel_output_reads__
 function _sb_record_binding!(data, key, role, logical; family=nothing, metadata...)
     bindings = get(data, _SB_BINDINGS_KEY, nothing)
     isnothing(bindings) || (bindings[key] = (; role, logical, family, metadata...))
@@ -4561,6 +4565,8 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
         _SBPreprocContext(Dict{Symbol,PreprocEntry}(), _frozen_preproc)
     data[_SB_BINDINGS_KEY] = Dict{Symbol,NamedTuple}()
     data[_SB_GROUP_COLUMNS_KEY] = Dict{Symbol,Union{Nothing,Some}}()
+    output_reads = _brm_kernel_output_reads(brmi)
+    data[_SB_KERNEL_OUTPUT_READS_KEY] = Set(keys(output_reads))
     # `name = constant(expr)` becomes an ordinary data field before the
     # formula is lowered; only the prior addresses above are read first, and
     # they leave a constant to this step. Replay restores the fitted value from
@@ -4760,6 +4766,13 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     end
     _sb_check_mixture_membership_names(pop!(data, _SB_MIXTURE_MEMBERSHIPS_KEY, ()),
                                        keys(brmi.operations))
+    # StanBlocks stores a cell's non-collected output `tot` as `<target>_tot`;
+    # a model-scope read of `tot` reads that carrier, adding no second one.
+    pop!(data, _SB_KERNEL_OUTPUT_READS_KEY)
+    for (output, target) in output_reads
+        carrier = Symbol(target, :_, output)
+        map!(stmt -> _sb_subst_model_scope(stmt, output, carrier), stmts, stmts)
+    end
     # Post-pass: fuse pure-population Gaussian likelihoods into Stan's
     # `normal_id_glm_lpdf`. Whole-model, because its decisive guard is
     # "this linear predictor is read by exactly one likelihood". Every
@@ -7294,6 +7307,26 @@ _sb_subst_sym(x::Expr, from::Symbol, to) =
         Expr(x.head, (_sb_subst_sym(a, from, to) for a in x.args)...)
     end
 
+# `_sb_subst_sym` over a model-scope statement, leaving a cell body that binds
+# `from` (a parameter or a top-level assignment of its do-block) as it is: there
+# `from` is the cell's own value.
+_sb_subst_model_scope(x, from::Symbol, to) = _sb_subst_sym(x, from, to)
+_sb_subst_model_scope(x::QuoteNode, ::Symbol, _to) = x
+function _sb_subst_model_scope(x::Expr, from::Symbol, to)
+    if x.head === :-> && length(x.args) == 2
+        params = Meta.isexpr(x.args[1], :tuple) ? x.args[1].args : Any[x.args[1]]
+        body = x.args[2]
+        stmts = Meta.isexpr(body, :block) ? body.args : Any[body]
+        binds(s) = (Meta.isexpr(s, :(=), 2) || isxcall(s, :~)) && s.args[end-1] === from
+        (from in params || any(binds, stmts)) && return x
+    end
+    x.head === :. && length(x.args) == 2 && x.args[2] isa QuoteNode &&
+        return Expr(:., _sb_subst_model_scope(x.args[1], from, to), x.args[2])
+    x.head === :kw && length(x.args) == 2 &&
+        return Expr(:kw, x.args[1], _sb_subst_model_scope(x.args[2], from, to))
+    Expr(x.head, (_sb_subst_model_scope(a, from, to) for a in x.args)...)
+end
+
 # `ragged(x, group)` does ONE thing, whatever `x` is: take a flat row axis and a
 # key naming each of its rows' subject, and produce the ragged per-subject view.
 # This helper computes that grouping — the row indices — and enforces the
@@ -7502,6 +7535,7 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     unbound_idx = Set(_sb_kernel_unbound_cell_idx(dcols[2:end], params, body_stmts))
     dcol_names    = Symbol[]
     lp_cols       = Any[]
+    read_outputs  = Symbol[]
     ragged_specs  = Any[]
     ragged_cols   = Any[]
     for (i, c) in enumerate(dcols[2:end])
@@ -7529,6 +7563,11 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         if parent(c) isa DataColumn
             v = parent(parent(c))
             data[k] = v
+        elseif parent(c) isa MissingColumn && k in get(data, _SB_KERNEL_OUTPUT_READS_KEY, ())
+            # Another cell's non-collected indexed output, emitted before this
+            # cell (`_brm_prepare_program`): sliced by name like a collected
+            # output that carries no grouping of its own.
+            push!(read_outputs, k)
         elseif parent(c) isa MissingColumn
             # Unbound kernel positional: no data to bind and no LP bucket to
             # walk. An omitted OUTCOME (observed in-cell) drops out of the
@@ -7608,7 +7647,7 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         # The subject count is the common length of the pre-grouped data
         # columns or, when the cell slices only LPs (beside omitted outcomes),
         # of the per-subject columns those LPs read.
-        lp_names = Set(name(c) for c in lp_cols)
+        lp_names = union(Set(name(c) for c in lp_cols), read_outputs)
         counted = [(k, length(data[k])) for k in kept_names if k ∉ lp_names]
         isempty(counted) &&
             foreach(c -> append!(counted, _brm_kernel_lp_data_lengths(c)), lp_cols)
@@ -15530,7 +15569,7 @@ _sb_is_side_channel_key(k::Symbol) =
     k === _SB_THRESHOLD_LOCATED_KEY || k === _SB_HYPER_PLANS_KEY ||
     k === _SB_TOTAL_PLANS_KEY || k === _SB_S2Z_PLANS_KEY ||
     k === _SB_HS_PLANS_KEY || k === _SB_GROUP_COLUMNS_KEY ||
-    k === _SB_SKIPPED_ROWS_KEY
+    k === _SB_SKIPPED_ROWS_KEY || k === _SB_KERNEL_OUTPUT_READS_KEY
 
 # Return `k` if `v` is a flat (non-ragged) vector, else `nothing` — replaces
 # the old `_is_flat_vec` Bool predicate so the caller composes via the
