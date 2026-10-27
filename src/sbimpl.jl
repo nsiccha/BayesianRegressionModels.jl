@@ -9735,8 +9735,11 @@ Base.@nospecializeinfer function _sb_collect_hyper_plans(@nospecialize(brmi::BRM
         end
         if addr_lp === _EFFECT_COLON && length(reached) > 1
             found = join(("`$lp`" for (lp, _) in reached), ", ")
-            error("$prefix: `$spelling` is ambiguous — names no linear " *
-                  "predictor and `$term_key` appears in $found")
+            named = join(("`log($(_sb_hyper_spelling(hyper, lp, term_key))) ~ …`"
+                          for (lp, _) in reached), " or ")
+            error("$prefix: `log($spelling) ~ …` is ambiguous — names no linear " *
+                  "predictor and `$term_key` appears in $found. Name the " *
+                  "predictor whose term it predicts: $named")
         end
         lp, terms = only(reached)
         length(terms) == 1 || error(
