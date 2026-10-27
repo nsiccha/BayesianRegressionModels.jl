@@ -36,6 +36,16 @@ the value a sampler takes as its initial position.
   follow `ranefcoefnames(brmi, ID)`. `ID = (; sd, cor)` sets either part:
   `sd` is one positive value per margin (or one for all) and `cor` a
   correlation matrix in the same order.
+- `ID = (; sd, cor, effects)` also places the block's groups:
+  `effects = ["a" => 1.2, "b" => -0.4, …]` gives each listed level its
+  effect, one number for a one-margin block and one vector in
+  `ranefcoefnames` order otherwise. An effect is what the level adds to each
+  margin's linear predictor, on its link scale: the `effects` that
+  [`brm_ranef_draws`](@ref) reads back. The block's draws are solved for under
+  its scales and correlation as given (or at `base`), and a Student-t block's
+  mixing weights at `base`, so each listed group starts at its own value
+  instead of the population value. Unlisted levels keep their coordinates at
+  `base`: their standardized draws, or their effects in a centred block.
 - `name = value` sets a scalar parameter (`sigma ~ Exponential(1)`) or a vector
   parameter (cutpoints, a `Dirichlet` simplex) on its constrained scale.
 - `name = values` sets a latent declared in a `@plate` cell (`log_T ~
@@ -54,18 +64,22 @@ whatever scale and correlation are set.
 On an `SBBRMI` with exact total-coefficient blocks, a coefficient the block
 absorbed has no sampled coordinate: its value places every group's total at
 its population value `A β` — with group-level predictors in the block, the
-group's own `A (W[g,:] .* β)` — (zero deviations), with the block's unaddressed
-absorbed coefficients at 0. An `|ID|` such a block absorbed keeps its address:
-`ID = Σ` or `(; sd)` sets the block's total scale, the SD of each group's
-total around `A β`, which is the margin's between-group SD. An `|ID|` that a
-sum-to-zero block (`s2z_groups`) claimed keeps its address the same way:
-`(; sd)` sets the block's scale `tau`. A coefficient a sum-to-zero block
-absorbed sets the block's sampled population coefficient `theta = β + B μ`
-to the value, taking the block means `μ` as zero.
+group's own `A (W[g,:] .* β)` — plus the group's effect given through the
+`|ID|` the block absorbed (`(; effects)`, the deviation of the total), with
+the block's unaddressed absorbed coefficients and effects at 0. Such an
+`|ID|` keeps its address: `ID = Σ` or `(; sd)` sets the block's total scale,
+the SD of each group's total around `A β`, which is the margin's
+between-group SD. An `|ID|` that a sum-to-zero block (`s2z_groups`) claimed
+keeps its address the same way: `(; sd)` sets the block's scale `tau`, and
+`(; effects)`, which must list every level, sets the levels' deviations from
+their mean `μ`. A coefficient a sum-to-zero block absorbed, or effects given
+for it, set the block's sampled population coefficient `theta = β + B μ`,
+with `μ` the mean of the given effects (zero without) and an unaddressed
+coefficient at 0.
 
 An `|ID|` block whose margins are partly integrated out of the model (an
-omitted response) samples only its active margins; their scales and
-correlation are the corresponding sub-block of the given covariance.
+omitted response) samples only its active margins; their scales, correlation
+and effects are the corresponding parts of the given values.
 
 Unknown addresses, ambiguous names, wrong shapes and values outside a
 parameter's support are errors. The result is checked: constraining it
@@ -76,7 +90,7 @@ function brm_start end
 # One parsed address per target, independent of the backend.
 #   (; kind=:population, predictor, coefficient, value)
 #   (; kind=:categorical, predictor, coefficient, levels, values)
-#   (; kind=:ranef, id, margins, sd, cor)
+#   (; kind=:ranef, id, margins, sd, cor, effects)
 #   (; kind=:parameter, name, value)
 function _brm_start_targets(brmi::BRMI, inits::NamedTuple)
     targets = NamedTuple[]
@@ -167,20 +181,71 @@ function _brm_start_ranef_target(id, margins, Σ::AbstractMatrix)
     sd = sqrt.(Float64.(diag(Σ)))
     cor = Matrix{Float64}(Σ) ./ (sd * sd')
     cor[diagind(cor)] .= 1
-    (; kind=:ranef, id, margins, sd, cor=K == 1 ? nothing : cor)
+    (; kind=:ranef, id, margins, sd, cor=K == 1 ? nothing : cor, effects=nothing)
 end
 function _brm_start_ranef_target(id, margins, value::NamedTuple)
-    extra = setdiff(keys(value), (:sd, :cor))
+    extra = setdiff(keys(value), (:sd, :cor, :effects))
     isempty(extra) || error(
-        "brm_start: `|$id|` takes a covariance matrix or `(; sd, cor)`; unknown " *
-        "field(s) $(Tuple(extra))")
+        "brm_start: `|$id|` takes a covariance matrix or `(; sd, cor, effects)`; " *
+        "unknown field(s) $(Tuple(extra))")
     K = length(margins)
     sd = haskey(value, :sd) ? _brm_start_block_sd(id, K, value.sd) : nothing
     cor = haskey(value, :cor) ? _brm_start_block_cor(id, margins, value.cor) : nothing
-    (; kind=:ranef, id, margins, sd, cor=K == 1 ? nothing : cor)
+    effects = haskey(value, :effects) ?
+        _brm_start_block_effects(id, margins, value.effects) : nothing
+    (; kind=:ranef, id, margins, sd, cor=K == 1 ? nothing : cor, effects)
 end
 _brm_start_ranef_target(id, margins, value) = error(
-    "brm_start: `|$id|` takes a covariance matrix or `(; sd, cor)`, got $(repr(value))")
+    "brm_start: `|$id|` takes a covariance matrix or `(; sd, cor, effects)`, got " *
+    "$(repr(value))")
+
+# Per-level natural effects of an `|ID|` block, keyed by level label: one
+# number per level for a one-margin block, one vector in `ranefcoefnames` order
+# otherwise. Parsed into the labels and a levels × margins matrix.
+_brm_start_block_effects(id, margins, value::AbstractDict) =
+    _brm_start_block_effects(id, margins, collect(pairs(value)))
+function _brm_start_block_effects(id, margins, value::AbstractVector{<:Pair})
+    isempty(value) && return nothing
+    K = length(margins)
+    levels = _brm_transport_level.(first.(value))
+    allunique(levels) || error("brm_start: `|$id|.effects` repeats a level")
+    values = Matrix{Float64}(undef, length(value), K)
+    for (i, (level, v)) in enumerate(zip(levels, last.(value)))
+        values[i, :] = _brm_start_level_effect(id, margins, level, v)
+    end
+    (; levels, values)
+end
+_brm_start_block_effects(id, margins, value) = error(
+    "brm_start: `|$id|.effects` takes level => value pairs, got $(repr(value))")
+
+function _brm_start_level_effect(id, margins, level, v::Real)
+    length(margins) == 1 || throw(DimensionMismatch(
+        "brm_start: `|$id|` has $(length(margins)) margins $(Tuple(margins)); give " *
+        "level $(repr(level)) one effect per margin as a vector"))
+    [_brm_start_real("the effect of `|$id|` at level $(repr(level))", v)]
+end
+function _brm_start_level_effect(id, margins, level, v::AbstractVector{<:Real})
+    length(v) == length(margins) || throw(DimensionMismatch(
+        "brm_start: `|$id|` has $(length(margins)) margins $(Tuple(margins)) " *
+        "(`ranefcoefnames` order); level $(repr(level)) has $(length(v)) effects"))
+    [_brm_start_real("the effect of `|$id|` at level $(repr(level))", x) for x in v]
+end
+_brm_start_level_effect(id, margins, level, v) = error(
+    "brm_start: the effect of `|$id|` at level $(repr(level)) must be a real " *
+    "number or one per margin, got $(repr(v))")
+
+# The positions in `levels` (a block's level labels) of the given labels.
+function _brm_start_level_positions(id, given, levels)
+    normalized = _brm_transport_level.(levels)
+    map(given) do level
+        i = findall(l -> isequal(l, level), normalized)
+        isempty(i) && error("brm_start: `|$id|` has no level $(repr(level)); " *
+            "its levels are $(repr(normalized))")
+        length(i) == 1 || error("brm_start: internal: level $(repr(level)) " *
+            "occurs $(length(i)) times among the levels of `|$id|`")
+        only(i)
+    end
+end
 
 _brm_start_block_sd(id, K, sd::Real) = _brm_start_block_sd(id, K, fill(sd, K))
 function _brm_start_block_sd(id, K, sd::AbstractVector{<:Real})
@@ -245,25 +310,34 @@ function brm_start(rk::RKBRMI, inits::NamedTuple;
     records = _rk_coordinate_records(rk.plan)
     values = _rk_constrained_values(rk, u0)
     writes = Tuple{Symbol,Tuple,Any}[]
+    effects = NamedTuple[]
     for target in _brm_start_targets(parent(rk), inits)
         _brm_rk_start_writes!(writes, Val(target.kind), target, records, values)
+        target.kind === :ranef && !isnothing(target.effects) &&
+            push!(effects, (; target, record=_brm_rk_ranef_record(target, records)))
     end
-    _brm_rk_start_point(rk, values, writes)
+    _brm_rk_start_point(rk, values, writes, effects)
 end
 
 # Write `(declaration, index, value)` constrained values into `values` (the
-# constrained view of the base point), invert the layout, and check that the
-# point reproduces every written value.
-function _brm_rk_start_point(rk::RKBRMI, values, writes)
-    seen = Set{Tuple{Symbol,Tuple}}()
-    for (declaration, index, _) in writes
-        (declaration, index) in seen && error(
-            "brm_start: two addresses set RK value `$declaration`$(collect(index))")
-        push!(seen, (declaration, index))
-    end
+# constrained view of the base point), then the standardized draws that give
+# each block's addressed effects under its scales, correlation and mixing
+# weights as written, invert the layout, and check that the point reproduces
+# every written value and effect.
+function _brm_rk_start_point(rk::RKBRMI, values, writes, effects=NamedTuple[])
+    _brm_rk_check_distinct(writes)
     for (declaration, index, value) in writes
         values = _brm_rk_set_declaration_value(values, declaration, index, value)
     end
+    z_writes = Tuple{Symbol,Tuple,Any}[]
+    for (; target, record) in effects
+        _brm_rk_effect_writes!(z_writes, rk, values, target, record)
+    end
+    for (declaration, index, value) in z_writes
+        values = _brm_rk_set_declaration_value(values, declaration, index, value)
+    end
+    writes = [writes; z_writes]
+    _brm_rk_check_distinct(writes)
     u = Vector{Float64}(_rk_unconstrained_point(rk, values))
     all(isfinite, u) || error("brm_start: the RK point is not finite")
     check = _rk_constrained_values(rk, u)
@@ -272,7 +346,22 @@ function _brm_rk_start_point(rk::RKBRMI, values, writes)
         _brm_start_check("RK value `$declaration`$(collect(index))",
             isempty(index) ? got : got[index...], value)
     end
+    for (; target, record) in effects
+        (; rows, P) = _brm_rk_effect_rows(rk, target, record)
+        E = _brm_rk_block_effects(check, record, length(P))
+        _brm_start_check("effects of `|$(target.id)|`", E[rows, :],
+            target.effects.values[:, P])
+    end
     u
+end
+
+function _brm_rk_check_distinct(writes)
+    seen = Set{Tuple{Symbol,Tuple}}()
+    for (declaration, index, _) in writes
+        (declaration, index) in seen && error(
+            "brm_start: two addresses set RK value `$declaration`$(collect(index))")
+        push!(seen, (declaration, index))
+    end
 end
 
 function _brm_rk_start_writes!(writes, ::Val{:population}, t, records, values)
@@ -385,12 +474,16 @@ _brm_rk_cell_latent_value(name, current, value) = error(
     "brm_start: cell latent `$name` holds $(typeof(current)) values; only " *
     "scalar and vector cell latents take a start")
 
-function _brm_rk_start_writes!(writes, ::Val{:ranef}, t, records, values)
+function _brm_rk_ranef_record(t, records)
     blocks = [r for r in records if r.kind === :ranef && isequal(r.id, t.id)]
     length(blocks) == 1 || error(
         "brm_start: `|$(t.id)|` has $(length(blocks)) RK random-effect records; " *
         "expected one plain block")
-    r = only(blocks)
+    only(blocks)
+end
+
+function _brm_rk_start_writes!(writes, ::Val{:ranef}, t, records, values)
+    r = _brm_rk_ranef_record(t, records)
     P = _brm_start_margin_positions(t, r.margins)
     known = get(r, :known_scales, nothing)
     if !isnothing(t.sd)
@@ -408,6 +501,100 @@ function _brm_rk_start_writes!(writes, ::Val{:ranef}, t, records, values)
     elseif !isnothing(t.cor) && !isnothing(r.L)
         push!(writes, (r.L, (), _brm_start_lower_factor(t.cor[P, P])))
     end
+end
+
+# The rows of an RK block's standardized draws `z` (its levels) that the
+# target's given levels are, and the block's margins as positions `P` in the
+# target's `ranefcoefnames` order.
+function _brm_rk_effect_rows(rk, t, r)
+    levels = _rk_grouping_levels(haskey(r, :joint_columns) ?
+        brm_joint_fit_levels((rk.plan.columns[c] for c in r.joint_columns)...) :
+        rk.plan.columns[r.group])
+    (; rows=_brm_start_level_positions(t.id, t.effects.levels, levels),
+       P=_brm_start_margin_positions(t, r.margins))
+end
+
+# The standardized draws of an RK block whose given levels have the given
+# effects, the other levels' draws kept: one write of the whole `z`.
+function _brm_rk_effect_writes!(writes, rk, values, t, r)
+    (; rows, P) = _brm_rk_effect_rows(rk, t, r)
+    K = length(P)
+    D = t.effects.values[:, P]
+    z = copy(_brm_rk_declaration_value(values, r.z))
+    Z = z isa AbstractMatrix ? z : reshape(z, :, 1)
+    size(Z, 2) == K || error(
+        "brm_start: internal: RK draws `$(r.z)` have $(size(Z, 2)) margins, `|$(t.id)|` $K")
+    (; A, w) = _brm_rk_effect_factor(values, r, K)
+    level_A(g) = isnothing(w) ? A : sqrt(w[g]) * A
+    level = _brm_rk_level_correlation(values, r)
+    # A level-correlated block's effects are `level * B`, where row `g` of `B`
+    # is `level_A(g) * Z[g, :]`; the unaddressed levels keep their draws.
+    B = if isnothing(level)
+        D
+    else
+        rest = setdiff(axes(Z, 1), rows)
+        Brest = zeros(Float64, length(rest), K)
+        for (i, g) in enumerate(rest)
+            Brest[i, :] = level_A(g) * Z[g, :]
+        end
+        level[rows, rows] \ (D - level[rows, rest] * Brest)
+    end
+    for (i, g) in enumerate(rows)
+        Z[g, :] = level_A(g) \ B[i, :]
+    end
+    push!(writes, (r.z, (), z))
+end
+
+# An RK block's effects at constrained `values`, levels × margins, as the
+# emitted group component and gather compute them (`_rk_ast_group_component!`
+# in src/rk_components.jl, the level-correlated gather in src/rk_values.jl):
+# row `g` is `sqrt(w[g]) diag(tau) L z[g, :]` (`w` only for a Student-t block),
+# multiplied on the left by the levels' Cholesky factor in a level-correlated
+# block.
+function _brm_rk_block_effects(values, r, K)
+    z = _brm_rk_declaration_value(values, r.z)
+    Z = z isa AbstractMatrix ? z : reshape(z, :, 1)
+    (; A, w) = _brm_rk_effect_factor(values, r, K)
+    B = Matrix{Float64}(undef, size(Z)...)
+    for g in axes(Z, 1)
+        B[g, :] = (isnothing(w) ? A : sqrt(w[g]) * A) * Z[g, :]
+    end
+    level = _brm_rk_level_correlation(values, r)
+    isnothing(level) ? B : level * B
+end
+
+# `diag(tau) L` of a plain RK block at constrained `values`, and its per-level
+# mixing weights (`nothing` for a Gaussian block). A known scale or correlation
+# (`sd(...) = value`, `cor(:, ID) = R`) is the constant the block was emitted
+# with.
+function _brm_rk_effect_factor(values, r, K)
+    tau = if isnothing(r.scales)
+        v = _brm_rk_declaration_value(values, r.scale)
+        v isa Number ? [v] : collect(v)
+    else
+        known = get(r, :known_scales, nothing)
+        [isnothing(name) ? known[k] : _brm_rk_declaration_value(values, name)
+            for (k, name) in enumerate(r.scales)]
+    end
+    length(tau) == K || error(
+        "brm_start: internal: RK scale `$(r.scale)` has $(length(tau)) values for $K margins")
+    known_cor = get(r, :known_cor, nothing)
+    L = !isnothing(r.L) ? Matrix{Float64}(_brm_rk_declaration_value(values, r.L)) :
+        isnothing(known_cor) ? Matrix{Float64}(I, K, K) :
+        _brm_start_lower_factor(known_cor)
+    mixing = get(r, :mixing, nothing)
+    (; A=Diagonal(Vector{Float64}(tau)) * L,
+       w=isnothing(mixing) ? nothing : _brm_rk_declaration_value(values, mixing))
+end
+
+# The lower Cholesky factor of an RK block's level correlation (`gr(g;
+# cor=...)`): the sampled `LKJCholesky` declaration, or the known factor the
+# record carries; `nothing` for a block whose levels are independent.
+function _brm_rk_level_correlation(values, r)
+    name = get(r, :level_correlation, nothing)
+    isnothing(name) && return nothing
+    factor = get(r, :level_factor, nothing)
+    Matrix{Float64}(isnothing(factor) ? _brm_rk_declaration_value(values, name) : factor)
 end
 
 # A random-effect record's scales, `sd[k]` for its margin `k`; a `nothing`
@@ -465,7 +652,13 @@ function brm_start(sb::SBBRMI, stan_model, inits::NamedTuple;
     d = brm_descriptor(sb)
     totals = total_effect_blocks(d.plan)
     writes = Tuple{Int,Float64}[]
-    absorbed = Dict{Symbol,Vector{Pair{Symbol,Float64}}}()
+    # What is written per block once every target is read: the coefficients
+    # exact-total (`absorbed`) and S2Z (`s2z`) blocks absorbed, by predictor;
+    # the effects of `|ID|`s those blocks claimed, by (block binding, column);
+    # and the effects of conventional `|ID|` blocks.
+    deferred = (; absorbed=Dict{Symbol,Vector{Pair{Symbol,Float64}}}(),
+        s2z=Dict{Symbol,Vector{Pair{Symbol,Float64}}}(),
+        claimed=Dict{Tuple{Symbol,Int},NamedTuple}(), blocks=NamedTuple[])
     total_latents = _brm_total_latent_kinds(parent(sb))
     # Values of a `T::shares(total)` cell latent, checked against the model's
     # once the point is built: they must sum to each cell's total.
@@ -477,27 +670,39 @@ function brm_start(sb::SBBRMI, stan_model, inits::NamedTuple;
                 _brm_start_flat_values(target.name, brm_output(d, target.name), target.value))
             target = _brm_total_start_target(target, total_latents[target.name], d)
         end
-        _brm_sb_start_writes!(writes, absorbed, Val(target.kind), target, d,
+        _brm_sb_start_writes!(writes, deferred, Val(target.kind), target, d,
             names, totals)
     end
-    _brm_sb_start_totals!(writes, absorbed, sb, names, totals)
-    seen = Set{Int}()
-    for (i, _) in writes
-        i in seen && error("brm_start: two addresses set Stan value `$(names[i])`")
-        push!(seen, i)
-    end
+    _brm_sb_start_totals!(writes, deferred, sb, d, names, totals)
     θ = BridgeStan.param_constrain(stan_model, u0)
-    for (i, value) in writes
-        θ[i] = value
-    end
+    _brm_sb_start_apply!(θ, writes, names)
+    # An S2Z block's coordinates depend on its scale as written.
+    s2z_writes = _brm_sb_start_s2z!(deferred, d, names, θ)
+    writes = [writes; s2z_writes]
+    _brm_sb_start_apply!(θ, writes, names)
     u = BridgeStan.param_unconstrain(stan_model, θ)
     all(isfinite, u) || error("brm_start: the Stan point is not finite")
+    u = _brm_sb_start_block_effects(u, stan_model, d, deferred.blocks)
     check = BridgeStan.param_constrain(stan_model, u)
     for (i, value) in writes
         _brm_start_check("Stan value `$(names[i])`", check[i], value)
     end
     isempty(shares_values) || _brm_sb_start_check_shares(stan_model, d, u, shares_values)
     u
+end
+
+# Write `(index, value)` pairs into the constrained values `θ`, refusing two
+# writes of one value.
+function _brm_sb_start_apply!(θ, writes, names)
+    seen = Set{Int}()
+    for (i, _) in writes
+        i in seen && error("brm_start: two addresses set Stan value `$(names[i])`")
+        push!(seen, i)
+    end
+    for (i, value) in writes
+        θ[i] = value
+    end
+    θ
 end
 
 # The start's values of a `T::shares(total)` latent are the model's only when
@@ -518,30 +723,19 @@ _brm_sb_absorbing_block(totals, predictor, coefficient) =
     findfirst(b -> b.predictor === predictor && coefficient in b.population_columns,
         totals)
 
-function _brm_sb_start_writes!(writes, absorbed, ::Val{:population}, t, d, names, totals)
+function _brm_sb_start_writes!(writes, deferred, ::Val{:population}, t, d, names, totals)
     k = _brm_sb_absorbing_block(totals, t.predictor, t.coefficient)
     if !isnothing(k)
-        push!(get!(absorbed, totals[k].predictor, Pair{Symbol,Float64}[]),
+        push!(get!(deferred.absorbed, totals[k].predictor, Pair{Symbol,Float64}[]),
             t.coefficient => t.value)
         return
     end
-    # A sum-to-zero block samples `theta = β + B μ`; with its block means at
-    # zero, `theta` is the coefficient's value.
-    s2z = s2z_effect_blocks(d.plan)
-    k = _brm_sb_absorbing_block(s2z, t.predictor, t.coefficient)
-    if !isnothing(k)
-        block = s2z[k]
-        outputs = [o for o in d.outputs if o.name === block.population]
-        length(outputs) == 1 || error(
-            "brm_start: sum-to-zero coefficients `$(block.population)` own " *
-            "$(length(outputs)) descriptor outputs; expected exactly one")
-        coordinates = _brm_element_coordinates(only(outputs), names)
-        length(coordinates) == length(block.population_columns) || error(
-            "brm_start: sum-to-zero coefficients `$(block.population)` have " *
-            "$(length(block.population_columns)) columns but " *
-            "$(length(coordinates)) Stan values")
-        push!(writes, (coordinates[findfirst(==(t.coefficient),
-            block.population_columns)], t.value))
+    # A sum-to-zero block samples `theta = β + B μ`, written with the block's
+    # effects (`_brm_sb_start_s2z!`).
+    if !isnothing(_brm_sb_absorbing_block(s2z_effect_blocks(d.plan), t.predictor,
+            t.coefficient))
+        push!(get!(deferred.s2z, t.predictor, Pair{Symbol,Float64}[]),
+            t.coefficient => t.value)
         return
     end
     q = brm_population_effect_coordinates(d, t.predictor, names;
@@ -555,7 +749,7 @@ function _brm_sb_start_writes!(writes, absorbed, ::Val{:population}, t, d, names
     push!(writes, (only(q.coordinates), t.value))
 end
 
-function _brm_sb_start_writes!(writes, absorbed, ::Val{:categorical}, t, d, names, totals)
+function _brm_sb_start_writes!(writes, deferred, ::Val{:categorical}, t, d, names, totals)
     q = brm_population_effect_coordinates(d, t.predictor, names;
         coefficient=t.coefficient)
     hasproperty(q, :contrasts) || error(
@@ -575,7 +769,7 @@ function _brm_sb_start_writes!(writes, absorbed, ::Val{:categorical}, t, d, name
     end
 end
 
-function _brm_sb_start_writes!(writes, absorbed, ::Val{:parameter}, t, d, names, totals)
+function _brm_sb_start_writes!(writes, deferred, ::Val{:parameter}, t, d, names, totals)
     isempty(brm_outputs(d; logical=t.name)) && error(
         "brm_start: `$(t.name)` is not a linear predictor, an `|ID|` block or a " *
         "named parameter of this model")
@@ -591,14 +785,14 @@ function _brm_sb_start_writes!(writes, absorbed, ::Val{:parameter}, t, d, names,
     end
 end
 
-function _brm_sb_start_writes!(writes, absorbed, ::Val{:ranef}, t, d, names, totals)
+function _brm_sb_start_writes!(writes, deferred, ::Val{:ranef}, t, d, names, totals)
     blocks = [b for b in ranef_blocks(d) if isequal(b.id, t.id)]
     if isempty(blocks)
         scales = _brm_claimed_id_scales(d, t.id)
         isempty(scales) && error(
             "brm_start: `|$(t.id)|` has no sampled random-effect block in this " *
             "Stan model")
-        return _brm_sb_start_total_scales!(writes, t, scales, names)
+        return _brm_sb_start_total_scales!(writes, deferred, t, scales, names)
     end
     (; block, margins) = _brm_sb_ranef_block(d,
         (; group=only(unique(b.group for b in blocks)), id=t.id, margins=());
@@ -607,6 +801,9 @@ function _brm_sb_start_writes!(writes, absorbed, ::Val{:ranef}, t, d, names, tot
         "brm_start: `|$(t.id)|` block `$(block.binding)` is drawn in generated " *
         "quantities and has no sampled coordinates")
     P = _brm_start_margin_positions(t, margins)
+    # The effects are the block's draws under its scales and correlation as
+    # written, solved for once the point holds them.
+    isnothing(t.effects) || push!(deferred.blocks, (; t, block, P))
     pos = Dict(n => i for (i, n) in enumerate(names))
     lookup(name) = get(pos, name) do
         error("brm_start: `|$(t.id)|` expects Stan value `$name`, which the compiled " *
@@ -690,17 +887,30 @@ function _brm_sb_start_known_writes!(writes, t, d, block, P, lookup)
     nothing
 end
 
-# An exact-total block samples each group's total `A (W[g,:] .* β) + deviation`;
-# place every total at the population value the absorbed coefficients give.
-function _brm_sb_start_totals!(writes, absorbed, sb, names, totals)
+# An exact-total block samples each group's total `A (W[g,:] .* β) + deviation`,
+# the deviation being the group's effect. A block whose absorbed coefficients
+# or claimed `|ID|` effects are given places every total at its group's
+# population value plus its given effect; an unaddressed coefficient or effect
+# counts as 0.
+function _brm_sb_start_totals!(writes, deferred, sb, d, names, totals)
     for block in totals
-        given = get(absorbed, block.predictor, nothing)
-        isnothing(given) && continue
+        given = get(deferred.absorbed, block.predictor, Pair{Symbol,Float64}[])
+        effects = [get(deferred.claimed, (block.binding, k), nothing)
+            for k in eachindex(block.columns)]
+        isempty(given) && all(isnothing, effects) && continue
         β = zeros(Float64, length(block.population_columns))
         for (coefficient, value) in given
             β[only(findall(==(coefficient), collect(block.population_columns)))] = value
         end
         mu = _total_location(block, β)
+        levels = d.plan.preproc[block.group_index].const_.levels
+        length(levels) == size(mu, 1) || error(
+            "brm_start: internal: exact-total block of `$(block.predictor)` has " *
+            "$(length(levels)) level labels for $(size(mu, 1)) groups")
+        for (k, e) in enumerate(effects)
+            isnothing(e) && continue
+            mu[_brm_start_level_positions(e.id, e.levels, levels), k] .+= e.values
+        end
         coordinates = _total_coordinates(sb, block, names).totals
         size(coordinates) == size(mu) || error(
             "brm_start: internal: exact-total block of `$(block.predictor)` has " *
@@ -712,10 +922,11 @@ function _brm_sb_start_totals!(writes, absorbed, sb, names, totals)
 end
 
 # An `|ID|` an exact-total or S2Z block claimed: each margin's scale is the
-# block's scale `tau` (for totals, the SD of each group's total around `A β`).
-# The claimed margins are independent, so a correlation other than the
-# identity has no coordinate.
-function _brm_sb_start_total_scales!(writes, t, scales, names)
+# block's scale `tau` (for totals, the SD of each group's total around `A β`),
+# and its effects are written with the block (`_brm_sb_start_totals!`,
+# `_brm_sb_start_s2z!`). The claimed margins are independent, so a correlation
+# other than the identity has no coordinate.
+function _brm_sb_start_total_scales!(writes, deferred, t, scales, names)
     P = _brm_start_margin_positions(t, [s.margin for s in scales])
     length(P) == length(t.margins) || error(
         "brm_start: internal: $(length(P)) of the $(length(t.margins)) margins " *
@@ -723,11 +934,122 @@ function _brm_sb_start_total_scales!(writes, t, scales, names)
     isnothing(t.cor) || isapprox(t.cor, I; atol=1e-12) || error(
         "brm_start: the margins of `|$(t.id)|` are independent in this model's " *
         "exact total-coefficient or sum-to-zero blocks; its correlation must be the identity")
-    isnothing(t.sd) && return
+    isnothing(t.sd) && isnothing(t.effects) && return
     for (s, j) in zip(scales, P)
         s.output.kind === :generated_quantity && error(
             "brm_start: `|$(t.id)|` block `$(s.block.binding)` is drawn " *
             "in generated quantities and has no sampled coordinates")
-        push!(writes, (_brm_claimed_scale_coordinate(s, names, "brm_start"), t.sd[j]))
+        isnothing(t.sd) ||
+            push!(writes, (_brm_claimed_scale_coordinate(s, names, "brm_start"), t.sd[j]))
+        isnothing(t.effects) || (deferred.claimed[(s.block.binding, s.column)] =
+            (; id=t.id, levels=t.effects.levels, values=t.effects.values[:, j]))
     end
+end
+
+# A sum-to-zero block (`s2z_groups`) samples, per column `k`, the deviations
+# `r[:, k]` of its levels' effects from their mean `μ[k]` (through its contrast
+# or group coordinates) and `theta = β + B μ`, the block means `μ` being
+# integrated out. A column's given effects `e`, one per level, place
+# `r[:, k] = e .- μ[k]` with `μ[k] = mean(e)` under the column's scale at `θ`;
+# a column without effects keeps its coordinates and has `μ[k] = 0`. Each
+# `theta[p]` whose coefficient is given, or which a given column's mean reaches,
+# is written; an unaddressed coefficient counts as 0. Returns the writes.
+function _brm_sb_start_s2z!(deferred, d, names, θ)
+    writes = Tuple{Int,Float64}[]
+    for block in s2z_effect_blocks(d.plan)
+        given = get(deferred.s2z, block.predictor, Pair{Symbol,Float64}[])
+        effects = [get(deferred.claimed, (block.binding, k), nothing)
+            for k in eachindex(block.columns)]
+        isempty(given) && all(isnothing, effects) && continue
+        coordinates = _s2z_coordinates(d.plan, block, names)
+        levels = d.plan.preproc[block.group_index].const_.levels
+        J = length(levels)
+        μ = zeros(Float64, length(block.columns))
+        written = falses(length(block.population_columns))
+        for (k, e) in enumerate(effects)
+            isnothing(e) && continue
+            rows = _brm_start_level_positions(e.id, e.levels, levels)
+            length(rows) == J || error(
+                "brm_start: `|$(e.id)|` is a sum-to-zero block (`s2z_groups`), " *
+                "which samples its levels' effects as deviations from their mean; " *
+                "give the effects of all $J levels, not $(length(rows))")
+            values = zeros(Float64, J)
+            values[rows] = e.values
+            μ[k] = sum(values) / J
+            x = _s2z_block_coordinates(block, values .- μ[k],
+                θ[coordinates.scales[k]], k, θ[coordinates.contrasts[:, k]])
+            append!(writes, zip(coordinates.contrasts[:, k], x))
+            written .|= block.B[:, k] .!= 0
+        end
+        β = zeros(Float64, length(block.population_columns))
+        for (coefficient, value) in given
+            p = only(findall(==(coefficient), collect(block.population_columns)))
+            β[p] = value
+            written[p] = true
+        end
+        theta = β + block.B * μ
+        for p in findall(written)
+            push!(writes, (coordinates.theta[p], theta[p]))
+        end
+    end
+    writes
+end
+
+# The effects of conventional `|ID|` blocks, written into the unconstrained
+# point `u` that already holds every other start value. A block's effect
+# carrier, the one `brm_ranef_draws` reads, is linear in the block's own
+# coordinates (its standardized draws, or the effects themselves when centred)
+# while its scales, correlation and mixing weights stay as they are at `u`. So
+# the carrier's response to each coordinate is measured at `u`, and the
+# coordinates that give the effects are solved for, whatever the block's
+# emission. Levels are independent cells, measured together; a level-correlated
+# block (`gr(g; cor=...)`) couples its levels, so its given levels form one
+# cell. Levels without given effects keep their coordinates.
+function _brm_sb_start_block_effects(u, stan_model, d, pending)
+    isempty(pending) && return u
+    unc = String.(BridgeStan.param_unc_names(stan_model))
+    tp = String.(BridgeStan.param_names(stan_model; include_tp=true))
+    u = copy(u)
+    for (; t, block, P) in pending
+        rows = _brm_start_level_positions(t.id, t.effects.levels, block.levels)
+        D = t.effects.values[:, P]
+        position = ranef_coordinates(block, unc)
+        cells = _ranef_level_correlated(block.family) ? [collect(eachindex(rows))] :
+            [[i] for i in eachindex(rows)]
+        # A cell's coordinates and effects, margin fastest, then level.
+        coordinates(c) = vec(position[:, rows[c]])
+        effects(E, c) = vec(permutedims(E[rows[c], :]))
+        n = maximum(c -> length(coordinates(c)), cells)
+        probes = [copy(u) for _ in 1:n]
+        for c in cells, (j, x) in enumerate(coordinates(c))
+            probes[j][x] += 1
+        end
+        E = _brm_sb_start_effect_draws(stan_model, d, block, [[u]; probes], tp)
+        for c in cells
+            x = coordinates(c)
+            e0 = effects(E[1, :, :], c)
+            M = Matrix{Float64}(undef, length(e0), length(x))
+            for j in eachindex(x)
+                M[:, j] = effects(E[1 + j, :, :], c) .- e0
+            end
+            F = lu(M; check=false)
+            issuccess(F) || error(
+                "brm_start: the effects of `|$(t.id)|` do not determine the " *
+                "coordinates of its block `$(block.binding)` at this point")
+            u[x] .+= F \ (vec(permutedims(D[c, :])) .- e0)
+        end
+        all(isfinite, u) || error("brm_start: the Stan point is not finite")
+        E = _brm_sb_start_effect_draws(stan_model, d, block, [u], tp)
+        _brm_start_check("effects of `|$(t.id)|`", E[1, rows, :], D)
+    end
+    u
+end
+
+# Draws × levels × margins effects of a conventional `block` at the
+# unconstrained points `us`, read through the carriers `brm_ranef_draws` reads.
+function _brm_sb_start_effect_draws(stan_model, d, block, us, names)
+    draws = permutedims(reduce(hcat, [BridgeStan.param_constrain(stan_model, x;
+        include_tp=true) for x in us]))
+    isnothing(block.by) ? _brm_ranef_block_draws(d, block, draws, names).effects :
+        _brm_ranef_stratified_draws(d, block, draws, names).effects
 end

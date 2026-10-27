@@ -301,8 +301,11 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
                 L=K == 1 || L_value !== nothing ? nothing : Symbol(draws, ".L"),
                 scale_priors=Tuple(priors)),
                 bucket.dist === nothing ? (;) : (; mixing=Symbol(draws, ".w")),
+                # A level correlation's factor: its `LKJCholesky`
+                # declaration, or the known factor (`level_factor`).
                 bucket.level_cor === nothing ? (;) :
-                    (; level_correlation=bucket.level_cor.name),
+                    (; level_correlation=bucket.level_cor.name,
+                       level_factor=bucket.level_cor.factor),
                 _rk_joins_columns(grouping) ? (; joint_columns=grouping.columns) : (;),
                 known || L_value !== nothing ?
                     (; known_scales=Tuple(p isa Real ? p : nothing for p in priors),
