@@ -142,8 +142,11 @@ const PINS = [
     # index, `m[i]`; snag rkppl-cell-laten-b18e668a). b5e4760fc contains
     # 0470e9e13 and adds ae5aca6ba (prepared pullbacks and pushforwards over
     # several WANT ports in one sweep, which the structured Laplace's
-    # non-affine fallback takes; snag ad-pullback-push-6f576925).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "b5e4760fc1ecefdd74b2df4cfb68154382094ba1"),  # main
+    # non-affine fallback takes; snag ad-pullback-push-6f576925). bf8040f16
+    # contains b5e4760fc and adds 6316fe45d (that pullback over several ports
+    # differentiates under plain Enzyme Reverse when the ports read constant
+    # design matrices; snag several-port-pul-e6344d44).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "bf8040f1643780506a523c833f2b593377082884"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.5); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "d16c4efb72b963f45de9d6f632c38d46706c23e1"),  # main
