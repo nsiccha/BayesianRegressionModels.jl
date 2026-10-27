@@ -4725,7 +4725,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     # block per (f, group-column) pair. Each predictor's own lookup is threaded
     # into _sb_emit! so _sb_sampling_backed! can route declaring terms to their
     # emit hook with that predictor's block name and group-index name in hand.
-    group_blocks = _sb_emit_group_blocks!(stmts, data, gb_terms)
+    group_blocks = _sb_emit_group_blocks!(stmts, data, gb_terms; cv_groups)
     # Prepass 3: target -> observation-source map. Lets purely-intercept
     # linear predictors (`loc ~ 1`, `log(y_scale) ~ 1`) borrow N from the
     # observed `~` target that consumes them, instead of the hash-order
@@ -5940,9 +5940,9 @@ function _sb_assert_cv_reemission(sb::SBBRMI, groups)
             haskey(entry.const_, :by) && error(
                 "sbimpl: `resample_groups=[:$group]` reaches the stratified " *
                 "`gr($group, by=$(entry.const_.by))` random-effect block " *
-                "`$(d.target)`. Stratified, multi-membership, grouped-HSGP, and " *
-                "derived-scale R2D2 blocks are not supported by this " *
-                "new-population emission.")
+                "`$(d.target)`. Stratified, multi-membership, consumer " *
+                "structured-term, and derived-scale R2D2 blocks are not " *
+                "supported by this new-population emission.")
             push!(hits, d)
         end
         isempty(hits) && error(
@@ -5951,15 +5951,28 @@ function _sb_assert_cv_reemission(sb::SBBRMI, groups)
             "column.")
         for d in hits
             expected = Symbol(d.target, :_n_g)
-            get(d.keywords, :n_groups, nothing) === expected || error(
+            get(d.keywords, :n_groups, nothing) === expected && continue
+            _sb_cv_sized_group_block(sb.model.model, get(d.keywords, :beta, nothing),
+                                     d.keywords.group_idx) && continue
+            error(
                 "sbimpl: `resample_groups=[:$group]` reaches random-effect " *
                 "block `$(d.target)`, but that block has no cv-contagious size " *
-                "local `$expected`. Stratified, multi-membership, grouped-HSGP, " *
-                "and derived-scale R2D2 blocks are not supported by this " *
-                "new-population emission.")
+                "local `$expected`. Stratified, multi-membership, consumer " *
+                "structured-term, and derived-scale R2D2 blocks are not " *
+                "supported by this new-population emission.")
         end
     end
     nothing
+end
+
+# A grouped HSGP's per-level weights `beta` are a prepass-2.5 group block; for
+# a group in `cv_groups` its size is the local `<beta>_n_g = maximum(<g>_idx)`
+# (`_sb_emit_group_blocks!`), which carries the index's `maybecv` mark.
+function _sb_cv_sized_group_block(body::Expr, block, idx)
+    block isa Symbol || return false
+    size = Symbol(block, :_n_g)
+    any(s -> Meta.isexpr(s, :(=)) && s.args[1] === size && s.args[2] == :(maximum($idx)),
+        body.args)
 end
 
 function _sb_mark_resample_groups(sb::SBBRMI, groups)
@@ -9735,8 +9748,11 @@ Base.@nospecializeinfer function _sb_collect_hyper_plans(@nospecialize(brmi::BRM
         end
         if addr_lp === _EFFECT_COLON && length(reached) > 1
             found = join(("`$lp`" for (lp, _) in reached), ", ")
-            error("$prefix: `$spelling` is ambiguous — names no linear " *
-                  "predictor and `$term_key` appears in $found")
+            named = join(("`log($(_sb_hyper_spelling(hyper, lp, term_key))) ~ …`"
+                          for (lp, _) in reached), " or ")
+            error("$prefix: `log($spelling) ~ …` is ambiguous — names no linear " *
+                  "predictor and `$term_key` appears in $found. Name the " *
+                  "predictor whose term it predicts: $named")
         end
         lp, terms = only(reached)
         length(terms) == 1 || error(
@@ -12629,14 +12645,28 @@ function _sb_group_block_plan(gb_terms)
     plan
 end
 
+# A term whose group block draws a new level's row from the block's own prior,
+# so `cv_groups` / `resample_groups` can size it by the levels in the rows: a
+# grouped HSGP's standardized basis weights. A consumer structured term keeps
+# the data size, and `resample_groups` refuses it.
+_sb_group_block_resamples(_f) = false
+_sb_group_block_resamples(::typeof(hsgp)) = true
+
 # Allocate one block per planned suffix and return a per-predictor lookup
-# Dict{predictor => Dict{base block name => (; block_name, idx_name, n_per_group)}}.
+# Dict{predictor => Dict{base block name => (; block_name, idx_name,
+# n_per_group, n_levels, resampled)}}.
 # The inner key is the base `b_<field>_<gname>` that `_sb_find_group_block`
 # rebuilds from the term call; `block_name` is the block this predictor owns.
-function _sb_emit_group_blocks!(stmts, data, gb_terms)
+# `n_levels` is the level count the term sizes its per-level values by: the
+# data scalar `n_<g>`, or for a resampling term over a group in `cv_groups`
+# the local `<block>_n_g = maximum(<g>_idx)`, through which the `maybecv` mark
+# on the index reaches the block's size and StanBlocks re-draws the block in
+# generated quantities, as for an ordinary random-effect block
+# (`_sb_emit_id_bucket_sampling!`).
+function _sb_emit_group_blocks!(stmts, data, gb_terms; cv_groups=Set{Symbol}())
     lookup = Dict{Symbol, Dict{Symbol, NamedTuple}}()
     allocated = Dict{Symbol, NamedTuple}()
-    for (; key, rhs_e, field, base, suffix) in _sb_group_block_plan(gb_terms)
+    for (; key, f, rhs_e, field, base, suffix) in _sb_group_block_plan(gb_terms)
         info = get(allocated, suffix, nothing)
         if isnothing(info)
             group_col = _sb_resolve_group_col(field.group, rhs_e, data)
@@ -12644,16 +12674,24 @@ function _sb_emit_group_blocks!(stmts, data, gb_terms)
             n_terms_name = Symbol(:n_terms_, suffix)
             data[n_terms_name] = field.n_per_group
             _sb_record_static!(data, n_terms_name)
-            idx_name, n_name = _sb_ensure_group_data!(data, group_col)
+            idx_name, n_levels = _sb_ensure_group_data!(data, group_col)
+            resampled = _sb_group_block_resamples(f) && group_col isa NamedColumn &&
+                name(group_col) in cv_groups
+            if resampled
+                n_levels = Symbol(block_name, :_n_g)
+                push!(stmts, :($n_levels = maximum($idx_name)))
+            end
             # A field may draw a fixed number of rows (`n_rows`) instead of one
             # per level; the term still reads the grouping's index.
+            n_name = n_levels
             if haskey(field, :n_rows)
                 n_name = Symbol(:n_rows_, suffix)
                 data[n_name] = field.n_rows
                 _sb_record_static!(data, n_name)
             end
             _sb_emit_block_draw!(stmts, field.prior, block_name, idx_name, n_name, n_terms_name, suffix)
-            info = allocated[suffix] = (; block_name, idx_name, n_per_group=field.n_per_group)
+            info = allocated[suffix] = (; block_name, idx_name,
+                n_per_group=field.n_per_group, n_levels, resampled)
         end
         get!(Dict{Symbol, NamedTuple}, lookup, key)[Symbol(:b_, base)] = info
     end
@@ -14596,6 +14634,22 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
             "block — prepass 2.5 should have allocated it")
         info = block_info
         gname = name(_sb_resolve_group_col((; kwarg=:by), t, data))
+        # New levels (`cv_groups`, which `resample_groups` re-emits with) draw
+        # fresh standardized weights from the block's own prior; the two
+        # per-level constructions below have no value for a level the fit did
+        # not see.
+        if info.resampled
+            haskey(kw, :cor) && error(
+                "sbimpl: `resample_groups` / `cv_groups` names `$gname`, whose levels " *
+                "`hsgp($axes_suffix; by=$gname, cor=...)` correlates: the correlation " *
+                "covers the fitted levels only, and new levels of a level-correlated " *
+                "grouping are not implemented")
+            isnothing(orthogonal_to) || error(
+                "sbimpl: `resample_groups` / `cv_groups` names `$gname`, and " *
+                "`hsgp($axes_suffix; by=$gname, orthogonal_to=$(repr(orthogonal_to)))` " *
+                "projects each level's curve with a fit on that level's training " *
+                "rows; a new level has none, so its projection is undefined")
+        end
         # A repeat over the same axes and group on another predictor takes
         # `hsgp_<target>_<axes>_by_<g>`, like the ungrouped carrier.
         suffix, col_name = _sb_unique_structured_term_names(
@@ -14651,10 +14705,11 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         else
             iso || error("sbimpl: internal error — hyper-predictor reached " *
                          "aniso grouped emission (B1 should have refused it)")
-            # Level count, stashed by prepass 2.5 under the same
-            # `Symbol(:n_, gname)` convention `_sb_ensure_group_data!` uses.
-            G_name = Symbol(:n_, gname)
-            haskey(data, G_name) || error(
+            # Level count from prepass 2.5: the data scalar `n_<g>`, or the
+            # weights' cv-sized local, so a new level's hyper effects are
+            # re-drawn with its weights.
+            G_name = info.n_levels
+            info.resampled || haskey(data, G_name) || error(
                 "sbimpl: internal error — hyper-predictor needs `$G_name`, " *
                 "which prepass 2.5 should have stashed")
             submodel = _sb_hsgp_by_hyper_model(

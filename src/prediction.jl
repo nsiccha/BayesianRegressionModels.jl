@@ -947,22 +947,25 @@ _ranef_name_positions(unc_names) =
 
 # Resolve a user-supplied group selector to the blocks it names, erroring on a
 # selector that matches nothing (a typo'd factor must not silently do nothing).
+# A grouping whose only effects are grouped-HSGP weights (`grouped_hsgp`,
+# src/grouped_hsgp_blocks.jl) matches no block here and is not refused.
 _ranef_group_symbols(group::Symbol) = (group,)
 _ranef_group_symbols(group::Tuple) = group
 _ranef_group_symbols(group) = (group,)
 _ranef_group_matches(block::RanefBlock, group::Symbol) =
     group in _ranef_group_symbols(block.group)
 
-function _ranef_select(blocks, groups)
+function _ranef_select(blocks, groups; grouped_hsgp=())
     wanted = groups isa Symbol ? [groups] : collect(groups)
     out = RanefBlock[]
     for g in wanted
         hits = filter(b -> _ranef_group_matches(b, g), blocks)
-        isempty(hits) && error(
+        isempty(hits) && !any(b -> b.group === g, grouped_hsgp) && error(
             "BRM prediction: no random-effect block on grouping factor `$g`. ",
             "This model's grouped blocks are: ",
-            isempty(blocks) ? "(none)" :
-                join(unique(string(b.group) for b in blocks), ", "), ".")
+            isempty(blocks) && isempty(grouped_hsgp) ? "(none)" :
+                join(unique(vcat([string(b.group) for b in blocks],
+                                 [string(b.group) for b in grouped_hsgp])), ", "), ".")
         append!(out, hits)
     end
     unique!(b -> b.binding, out)
@@ -1071,6 +1074,14 @@ one block: selecting its grouping factor zeroes that factor's effects in *every*
 sub-formula that shares the bucket, which is what "population-level for `g`"
 means.
 
+A grouped HSGP, `hsgp(x...; by = g)`, is selected by its `by=` column: its
+standardized basis weights are zeroed, so the term is exactly zero on every
+row, and so are a hyper-predictor's per-level effects
+(`log(sd(hsgp(x))) ~ 1 + (1 | g)`), which puts every level at the population
+amplitude or length scale. [`ranef_blocks`](@ref) does not list these
+coordinates (they are not `ranef_*` submodels); a factor whose only effects
+they are is accepted.
+
 For exact total-coefficient blocks, each posterior draw instead recovers one
 population coefficient vector conditionally and replaces the selected group
 totals with its implied population means. `rng` controls this recovery. The
@@ -1111,18 +1122,25 @@ function population_draws(model, draws::AbstractMatrix, unc_names; groups,
         "population draws for S2Z block(s) $(join(sort!(collect(Set(b.group for b in s2z_hit))), ", ")) need recovery-aware population projection, which is not implemented yet"))
     all_totals = filter(b -> b.group in selected,total_effect_blocks(model))
     remaining = setdiff(selected,Set(b.group for b in all_totals))
-    all_blocks = isempty(remaining) ? RanefBlock[] : _ranef_select(ranef_blocks(model), remaining)
+    # A grouped HSGP's per-level weights and hyper effects are the grouping's
+    # effects too, though `ranef_blocks` does not list them.
+    hsgp_blocks = filter(b -> b.group in selected, _grouped_hsgp_blocks(model))
+    all_blocks = isempty(remaining) ? RanefBlock[] :
+        _ranef_select(ranef_blocks(model), remaining; grouped_hsgp=hsgp_blocks)
     # A generated block has no coordinate in `draws`; Stan draws its effects
     # when generated quantities are evaluated (see the docstring).
     blocks = filter(b -> !b.generated, all_blocks)
     total_blocks = _total_blocks_by_placement(model, all_totals).sampled
+    hsgp_sampled(b) = !b.generated || any(h -> !h.generated, b.hypers)
     for g in selected
         (any(b -> _ranef_group_matches(b, g), blocks) ||
-         any(b -> b.group === g, total_blocks)) && continue
+         any(b -> b.group === g, total_blocks) ||
+         any(b -> b.group === g && hsgp_sampled(b), hsgp_blocks)) && continue
         error(
             "BRM prediction: every random-effect block of grouping factor `$g` ",
             "(", join(vcat([string(b.binding) for b in all_blocks if _ranef_group_matches(b, g)],
-                           [string(b.binding) for b in all_totals if b.group === g]), ", "),
+                           [string(b.binding) for b in all_totals if b.group === g],
+                           [string(b.block) for b in hsgp_blocks if b.group === g]), ", "),
             ") is emitted in generated quantities, so `draws` carries no coordinate ",
             "of `$g` to zero. Stan draws those effects when generated quantities ",
             "are evaluated; population-level draws cannot set them to their mean.")
@@ -1134,6 +1152,11 @@ function population_draws(model, draws::AbstractMatrix, unc_names; groups,
         # — in both cases `0` reads as a zero contribution of that factor.
         out[:, vec(ranef_coordinates(b, unc_names))] .= 0.0
     end
+    # Zero standardized HSGP weights are a zero curve on every row (an
+    # `anchor=` or `orthogonal_to=` projection is linear in the weights), and
+    # zero hyper effects put every level at the population amplitude or length
+    # scale.
+    out[:, _grouped_hsgp_population_coordinates(hsgp_blocks, unc_names)] .= 0.0
     for block in total_blocks
         coordinates = _total_coordinates(model,block,unc_names)
         for i in axes(draws,1)
@@ -1199,6 +1222,14 @@ Every coordinate of `to` is accounted for exactly once, by NAME:
    R2D2 blocks, and zerocorr `||` synthetic margins — exactly a draw from the
    fitted covariance, because the `L` / `tau` hyperparameters are copied per
    draw by rule 3.
+   A grouped HSGP, `hsgp(x...; by = g)`, follows rules 1 and 2 for its
+   standardized basis weights and a hyper-predictor's per-level effects, which
+   [`ranef_blocks`](@ref) does not list: a level of `g` the source has is
+   copied from that level, and a new level (or every level, for `g` in
+   `resample`) is refused with the `resample_groups` route, whose target draws
+   them in generated quantities and is skipped here. Weights on a
+   `cor = multigroup((x, y), …)` inducing grid are shared by every level and
+   copy row for row.
 3. Every other coordinate must exist in `from` under the same name and is copied.
 
 Anything that does not fit those three rules raises. In particular a coordinate
@@ -1263,8 +1294,13 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
     (isempty(s2z_effect_blocks(from)) && isempty(s2z_effect_blocks(to))) ||
         throw(ArgumentError(
             "transport_draws does not support S2Z blocks yet; recovery-aware draw transport is not implemented"))
+    # A grouped HSGP's per-level weights are matched by level label too
+    # (src/grouped_hsgp_blocks.jl); `ranef_blocks` does not list them.
+    hsgp_from = _grouped_hsgp_blocks(plan_from)
+    hsgp_to = _grouped_hsgp_blocks(to)
     known_groups = Set{Symbol}()
     union!(known_groups,(b.group for b in totals_from))
+    union!(known_groups,(b.group for b in hsgp_from))
     for b in blocks_from
         union!(known_groups, _ranef_group_symbols(b.group))
     end
@@ -1434,6 +1470,20 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
                                    nu=isempty(fresh_mixing) ? nothing :
                                        _ranef_mixing_nu(from, bf, unc_from)))
         end
+    end
+
+    for bt in hsgp_to
+        matching = findall(b -> b.block === bt.block, hsgp_from)
+        length(matching) == 1 || error(
+            "BRM prediction: target model has grouped HSGP `$(bt.block)` (group ",
+            "`$(bt.group)`) with no counterpart in the source model; fitted draws ",
+            "cannot be transported onto it.")
+        bf = hsgp_from[only(matching)]
+        bf.n_basis == bt.n_basis && bf.per_level == bt.per_level || error(
+            "BRM prediction: grouped HSGP `$(bt.block)` has $(bt.n_basis) basis ",
+            "functions per row in the target and $(bf.n_basis) in the source; the ",
+            "basis changed, so draws cannot be transported.")
+        _grouped_hsgp_transport!(plan_idx, claimed, bf, bt, unc_from, unc_to, resample_set)
     end
 
     unresolved = String[]

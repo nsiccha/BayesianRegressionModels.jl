@@ -112,6 +112,7 @@ include("transform_constants.jl")
 # the emitted random-effect parameterization, so they live next to the emitter
 # rather than being re-derived (differently) in every consumer.
 include("prediction.jl")
+include("grouped_hsgp_blocks.jl")
 include("population_model.jl")
 include("response_pruning.jl")
 include("coordinate_transport.jl")

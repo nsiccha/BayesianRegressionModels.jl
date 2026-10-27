@@ -903,8 +903,11 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
 end
 
 # An ungrouped HSGP component, paired by its formula axes and parameter roles.
+# A grouped or hyper-predicted one is not paired yet; validation names its
+# coordinates.
 function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         ::Val{:hsgp}, record, rk, d, stan, stan_pos)
+    record.grouped && return nothing
     term_axes(t) = Tuple(name(_sb_named_inner(:hsgp, a)) for a in getargs(t))
     entry = _brm_term_entry(d, record.predictor,
         e -> getf(e.value) === hsgp && !haskey(getkwargs(e.value), :by) &&

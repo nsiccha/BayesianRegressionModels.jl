@@ -5196,7 +5196,9 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         level_cor = get(state.by, :level_cor, nothing)
         _brm_check_hyper_level_correlation(level_cor, hyper_plans;
             what="hsgp(...; by=..., cor=...)", prefix="$prefix: predictor `$target`")
-        (; group_index=idx, group_source=source,
+        # `group_column` is the authored `by` column, which `group_source`
+        # renames when that name is taken.
+        (; group_index=idx, group_source=source, group_column=state.by.source,
             group_levels=collect(state.by.levels), n_groups=length(state.by.levels),
             level_cor, _rk_plan_level_coordinates!(level_cor, data, columns, taken,
                                                    derived)...,

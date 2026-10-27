@@ -189,6 +189,7 @@ function _rk_fitted_replay_plan(template::BRMI, new_data, state::BRMFittedState;
         "$prefix: the fitted state was exported from another model:\n" *
         "  fitted: $(state.declaration)\n  replay: $declaration")
     groups = _rk_resample_group_set(resample_groups; prefix)
+    _rk_refuse_grouped_hsgp_resample(template, groups; prefix)
     unknown = setdiff(groups, keys(state.columns))
     isempty(unknown) || error(
         "$prefix: `resample_groups` names $(sort!(collect(unknown))), which " *
