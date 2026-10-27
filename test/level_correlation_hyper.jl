@@ -143,12 +143,21 @@ end
 
 @testset "descriptor, description and replay" begin
     df = level_df()
-    for model in (icm_both, mg_sd, mgd_sd)
+    # Each model with the declared parameters of its level correlation and
+    # the description's sentence for that correlation.
+    for (model, outputs, phrase) in (
+            (icm_both, (:Omega,), "`Omega`"),
+            (mg_sd, (:Omega, :tau), "`Omega`"),
+            (mgc_sd, (:lambda,), "spatial scale `lambda`"),
+            (mgd_sd, (), "The spatial scale λ is the term's own parameter"))
         sb = SBBRMI(model(df); mod=@__MODULE__)
         d = brm_descriptor(sb)
-        @test brm_output(d, :Omega).dims == (R, R)
+        for o in outputs
+            @test brm_output(d, o).role === :parameter
+        end
+        :Omega in outputs && @test brm_output(d, :Omega).dims == (R, R)
         md = BRM.brm_description_markdown(BRM.brm_description(d))
-        @test occursin("`Omega`", md)
+        @test occursin(phrase, md)
         @test BRM.stan_code(reprocess(sb, df)) == BRM.stan_code(sb)
         @test reprocess(RKBRMI(model(df)), df) isa RKBRMI
     end
