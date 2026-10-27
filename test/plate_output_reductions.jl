@@ -7,7 +7,7 @@
 # (decision `09e0gc5`) SBBRMI's `sum(cnt)` was the total of every entry of a
 # fixed-width output and did not compile for a ragged one, `cnt[g]` of a
 # fixed-width output failed to transpile, and RKBRMI read the cells laid end to
-# end. Each
+# end (BRM 0.2.6 to 0.2.10 raised an error for those on RKBRMI). Each
 # shape StanBlocks stores a plate in is covered: a scalar per cell, a vector of
 # fixed width (`matrix[K, N]`) and a ragged vector. Every model matches an
 # independent oracle on RKBRMI and on SBBRMI (BridgeStan), density and
@@ -94,33 +94,20 @@ const CASES = (
     ("scalar sum(cnt) + sum(cnt[k]) + cnt[2]", scalar_reads, scalar_oracle),
 )
 
-# RKBRMI reads the cells (`cnt_cells`) for these, and ReactiveKernels cannot
-# yet sum, index or observe a plate's VECTOR cells at model scope (snag
-# `ReactiveKernels/snags/summing-a-plate-eba2648d`): building or evaluating
-# them throws. Before, RKBRMI read the cells laid end to end and fitted another
-# model without an error. Scalar cells work.
-rk_vector_pending(label) = !startswith(label, "scalar")
-function rk_matches_oracle(build, oracle)
-    try
-        _, problem = consumer_problem(build(CELLS))
-        all(u -> LogDensityProblems.logdensity(problem, u) ≈ oracle(u), POINTS)
-    catch err
-        @info "RKBRMI vector cells (ReactiveKernels snag summing-a-plate-eba2648d)" err
-        false
+# RKBRMI reads the cells (`cnt_cells`), one vector per cell when they hold
+# vectors (ReactiveKernels 0.1.2, snag
+# `ReactiveKernels/snags/summing-a-plate-eba2648d`).
+function check_rk_cells(build, oracle)
+    backend, problem = consumer_problem(build(CELLS))
+    @test coordinate_names(backend.model.layout) == [:b]
+    for u in POINTS
+        check_consumer_point(problem, u, oracle)
     end
 end
 
 for (label, build, oracle) in CASES
     @stestset "RKBRMI $label" begin
-        if rk_vector_pending(label)
-            @test_broken rk_matches_oracle(build, oracle)
-        else
-            backend, problem = consumer_problem(build(CELLS))
-            @test coordinate_names(backend.model.layout) == [:b]
-            for u in POINTS
-                check_consumer_point(problem, u, oracle)
-            end
-        end
+        check_rk_cells(build, oracle)
     end
     @stestset "SBBRMI $label" begin
         stan = consumer_stan(build(CELLS), "plate_output_reductions_" *
@@ -150,7 +137,8 @@ end
 end
 
 # `cnt[k]` as a value of its own: the cells `k`, here two ragged cells read
-# entry by entry (StanBlocks' `rv[idx]`, StanBlocks 0.2.2).
+# entry by entry (StanBlocks' `rv[idx]`, StanBlocks 0.2.2; on RKBRMI one
+# vector per cell, ReactiveKernels 0.1.2).
 ragged_selection(data) = @brm data begin
     b ~ Normal(0.0, 1.0)
     @plate for s in eachindex(A)
@@ -159,14 +147,17 @@ ragged_selection(data) = @brm data begin
     sel = cnt[k]
     obs ~ Normal(sel[1] .+ sel[2], 1.0)
 end
+selection_oracle(u) = (c = cells(u)[CELLS.k]; prior(u) + gauss(c[1] .+ c[2], CELLS.obs))
+@stestset "RKBRMI ragged cnt[k] as a value" begin
+    check_rk_cells(ragged_selection, selection_oracle)
+end
 @stestset "SBBRMI ragged cnt[k] as a value" begin
     stan = consumer_stan(ragged_selection(CELLS), "plate_output_reductions_ragged_selection")
-    oracle(u) = (c = cells(u)[CELLS.k]; prior(u) + gauss(c[1] .+ c[2], CELLS.obs))
     for u in POINTS
         value, gradient = BridgeStan.log_density_gradient(
             stan.model, u; propto=false, jacobian=true)
-        @test value ≈ oracle(u) atol=2e-11 rtol=2e-11
-        reference = (oracle(u .+ 1e-5) - oracle(u .- 1e-5)) / 2e-5
+        @test value ≈ selection_oracle(u) atol=2e-11 rtol=2e-11
+        reference = (selection_oracle(u .+ 1e-5) - selection_oracle(u .- 1e-5)) / 2e-5
         @test only(gradient) ≈ reference atol=2e-7 rtol=2e-7
     end
 end
