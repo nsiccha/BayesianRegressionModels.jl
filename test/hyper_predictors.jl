@@ -98,8 +98,8 @@ hyper_grouped_names() = [
     @test occursin("beta0_sigma", code)
     @test !occursin("rho_iso", code)
     @test !occursin("lognormal", code)
-    # The validity floor binds per group inside the basis deffun.
-    @test occursin("brm_hsgp_by_hyper_S", code)
+    # The validity floor binds per group inside the spectral-weights deffun.
+    @test occursin("brm_hsgp_by_hyper_sqrt_spd", code)
     @test occursin("fmax", code)
 end
 
@@ -263,7 +263,7 @@ end
         rho_vec = [constrained[at("hsgp_x_by_g_rho_vec.1")],
                    constrained[at("hsgp_x_by_g_rho_vec.2")]]
         # `rho_vec` itself is unfloored: the validity floor binds downstream,
-        # per group, inside `brm_hsgp_by_hyper_S` (the `fmax` the spelling
+        # per group, inside `brm_hsgp_by_hyper_sqrt_spd` (the `fmax` the spelling
         # testset pins below), exactly as the bare term declares it upstream.
         @test rho_vec ≈ exp.(beta0_rho .+ sd_rho .* z_rho) atol=1e-10
         @test rho_vec[1] != rho_vec[2]

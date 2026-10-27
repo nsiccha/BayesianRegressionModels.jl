@@ -248,7 +248,7 @@ end
     @test occursin("brm_hsgp_multigroup_coordinate_weights(b_hsgpw_t_g, omega2_hsgp_t_by_g, " *
                    "hsgp_t_by_g_rho, multigroup_sx_sy_coordinates, multigroup_sx_sy_hsgp6_c1p5_center, " *
                    "multigroup_sx_sy_hsgp6_c1p5_scale, lambda, 6, 2)", code)
-    @test occursin("rows_dot_product(hsgp_t_by_g_PHI_scaled, hsgp_t_by_g_beta_level[g_idx, :])", code)
+    @test occursin("hsgp_t_by_g_beta_scaled = diag_post_multiply(hsgp_t_by_g_beta_level, hsgp_t_by_g_sqrt_spd);", code)
     # The standardized weights live on the 6 x 6 grid, not one row per level.
     @test sb.data[:n_rows_hsgpw_t_g] == KG^2
     @test sb.data[:multigroup_sx_sy_coordinates] == hcat(df.sx, df.sy)

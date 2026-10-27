@@ -12,6 +12,26 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.9
+
+- A grouped HSGP, `hsgp(x...; by = g)` on SBBRMI, costs one rows x basis pass
+  per gradient, within a factor of two of one ungrouped field over the same
+  rows. Its spectral weights now scale the levels x basis weights, and each
+  level's basis rows are multiplied by its level's weights, the rows sorted by
+  level once in transformed data. Before, the program held a rows x basis
+  value: the shared-scale form stored `<term>_PHI_scaled` and the per-level
+  form (`log(sd(hsgp(…))) ~ 1 + (1 | g)`) built `<term>_S` in one full pass
+  per level. The model is unchanged (equal log density and gradient). At 1,622
+  zones x 3 levels with `k = 15` per axis, a gradient takes 0.4 ms instead of
+  123 ms (per-level amplitude, `cor = Omega`) or 17 ms (shared scale), and a
+  draw carries about 23,000 values instead of 1.1 million.
+- Draws of such a term no longer carry the intermediates `<term>_PHI_scaled`
+  and `<term>_S`; `<term>_beta_scaled` (levels x basis) holds the scaled
+  weights, and row `i` of the field is the dot product of basis row `i` with
+  row `g[i]` of it. The exported Stan helper `brm_hsgp_by_hyper_S` is replaced
+  by `brm_hsgp_by_hyper_sqrt_spd` (the levels x basis spectral weights) and
+  `brm_hsgp_by_level_rows`. Snag `grouped-correlat-68e4a63c`.
+
 ## 0.2.8
 
 - `brm_start` places a random-effect block's groups at their own values:

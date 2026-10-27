@@ -100,7 +100,7 @@ stan(brmi) = BRM.stan_code(SBBRMI(brmi; mod=@__MODULE__))
     end
     code = stan(icm_sd(df))
     @test occursin("hsgp_t_by_g_beta_level = (Omega * b_hsgpw_t_g);", code)
-    @test occursin("rows_dot_product(hsgp_t_by_g_S, hsgp_t_by_g_beta_level[g_idx, :])", code)
+    @test occursin("hsgp_t_by_g_beta_scaled = (hsgp_t_by_g_beta_level .* hsgp_t_by_g_sqrt_spd);", code)
     code = stan(mg_sd(df))
     @test occursin("hsgp_t_by_g_beta_level = brm_hsgp_multigroup_weights(b_hsgpw_t_g, " *
                    "omega2_hsgp_t_by_g, hsgp_t_by_g_rho, Omega, tau);", code)
@@ -108,7 +108,7 @@ stan(brmi) = BRM.stan_code(SBBRMI(brmi; mod=@__MODULE__))
     code = replace(stan(mgc_sd(df)), r"\s+" => "")
     @test occursin("hsgp_t_by_g_beta_level=brm_hsgp_multigroup_coordinate_weights(" *
                    "b_hsgpw_t_g,omega2_hsgp_t_by_g,hsgp_t_by_g_rho,", code)
-    @test occursin("rows_dot_product(hsgp_t_by_g_S,hsgp_t_by_g_beta_level[g_idx,:])", code)
+    @test occursin("hsgp_t_by_g_beta_scaled=(hsgp_t_by_g_beta_level.*hsgp_t_by_g_sqrt_spd);", code)
     @test occursin("hsgp_t_by_g_lambda~lognormal(", replace(stan(mgd_sd(df)), r"\s+" => ""))
     sb = SBBRMI(icm_known(df); mod=@__MODULE__)
     @test sb.data[:L_levelcor_C] ≈ Matrix(cholesky(Symmetric(df.C)).L)
