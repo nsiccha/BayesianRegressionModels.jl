@@ -3036,6 +3036,20 @@ StanBlocks.@deffun begin
         return out
     end
 
+    # Remove the intercept direction from a one-dimensional HSGP basis:
+    # every column centered over the rows, so the term sums to zero over
+    # them at every draw (`orthogonal_to=:intercept`).
+    @stanonly brm_hsgp_center_columns(PHI::matrix[n, m])::matrix[n, m] = begin
+        out::matrix[n, m]
+        for b in 1:m
+            phi_centered = col(PHI, b) - mean(col(PHI, b))
+            for i in 1:n
+                out[i, b] = phi_centered[i]
+            end
+        end
+        return out
+    end
+
     # Per-group spectrally scaled HSGP basis for hyper-predictor models. Each
     # group g has its own (rho, sigma): scale PHI's rows by that group's
     # spectral weights, masked to the group's rows. The loop is why this is a
@@ -3208,6 +3222,24 @@ _sb_hsgp_latent_orthogonal = StanBlocks.@slic begin
     sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma, rho)
     return PHI * (sqrt_spd .* beta_raw)
 end
+
+_sb_hsgp_latent_centered = StanBlocks.@slic begin
+    n_basis = dims(omega2)[1]
+    PHI_raw = brm_hsgp_basis_1d(x, omega2, center, L)
+    PHI = brm_hsgp_center_columns(PHI_raw)
+    rho_iso  ~ lognormal(0., 1.; lower=rho_lower)
+    sigma    ~ lognormal(0., 1.; lower=0.)
+    beta_raw ~ std_normal(; n=n_basis)
+    rho = rep_vector(rho_iso, 1)
+    sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma, rho)
+    return PHI * (sqrt_spd .* beta_raw)
+end
+
+# The latent-axis submodel of each `orthogonal_to=` value.
+_sb_hsgp_latent_submodel(::Nothing) = :_sb_hsgp_latent
+_sb_hsgp_latent_submodel(orthogonal::Symbol) = _sb_hsgp_latent_submodel(Val(orthogonal))
+_sb_hsgp_latent_submodel(::Val{:linear}) = :_sb_hsgp_latent_orthogonal
+_sb_hsgp_latent_submodel(::Val{:intercept}) = :_sb_hsgp_latent_centered
 
 # Per-group HSGP. Length-scale/marginal-SD hyperparameters are shared across
 # groups (decision 7p44fo); only tensor-basis weights vary by group.
@@ -3594,7 +3626,6 @@ function _sb_hsgp_periodic_frozen_check(data, key, names, K::Integer,
     nothing
 end
 
-_sb_orthogonalize_hsgp_linear(PHI::AbstractMatrix, x::AbstractVector{<:Real}) = _brm_orthogonalize_hsgp_linear(PHI, x)
 
 
 # ==============================================================================
@@ -10172,6 +10203,7 @@ _sb_gp_submodel(::Val{:_sb_hsgp_by_aniso_multigroup_inducing_lambda}) =
     _sb_hsgp_by_aniso_multigroup_inducing_lambda
 _sb_gp_submodel(::Val{:_sb_hsgp_latent}) = _sb_hsgp_latent
 _sb_gp_submodel(::Val{:_sb_hsgp_latent_orthogonal}) = _sb_hsgp_latent_orthogonal
+_sb_gp_submodel(::Val{:_sb_hsgp_latent_centered}) = _sb_hsgp_latent_centered
 _sb_gp_submodel(::Val{:_sb_gp_periodic}) = _sb_gp_periodic
 _sb_gp_submodel(::Val{:_sb_hsgp_periodic}) = _sb_hsgp_periodic
 
@@ -10197,6 +10229,7 @@ _sb_gp_rho_lhs(::Val{:_sb_hsgp_by_multigroup_inducing_lambda}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_by_aniso_multigroup_inducing_lambda}) = :(rho :: vector[n_axes])
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_latent}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_latent_orthogonal}) = :rho_iso
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_latent_centered}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_gp_periodic}) = :rho
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_periodic}) = :rho_iso
 
@@ -14256,7 +14289,8 @@ function _sb_hsgp_fit_for_emission(data, key, names, axes, K, c, iso,
         _brm_check_hsgp_anchor(domain_fits, options.anchor; prefix="sbimpl")
         fits = isnothing(domain_fits) ?
             _brm_fit_hsgp(fitted_axes, K, c; anchor=options.anchor) : domain_fits
-        return (; fits, support=_brm_hsgp_support(fitted_axes, fits), axes)
+        return (; fits, support=_brm_hsgp_support(fitted_axes, fits), axes,
+                projection=nothing)
     end
     const_ = frozen.const_
     frozen_domain = get(const_, :domain_fits, nothing)
@@ -14274,7 +14308,9 @@ function _sb_hsgp_fit_for_emission(data, key, names, axes, K, c, iso,
     evaluated = _brm_hsgp_replay_axes(axes, const_.fits, support,
         options.extrapolate, mask; prefix="sbimpl: resample replay", names,
         fixed_domain=!isnothing(domain_fits))
-    (; fits=const_.fits, support, axes=evaluated)
+    projection = _brm_hsgp_frozen_projection(const_, orthogonal_to;
+                                             prefix="sbimpl: resample replay")
+    (; fits=const_.fits, support, axes=evaluated, projection)
 end
 
 _sb_hsgp_rows_source(options) =
@@ -14367,9 +14403,9 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     orthogonal_to = _sb_hsgp_orthogonal_to(kw, n_axes)
     !is_raw && partial && error(
         "sbimpl: partial centering currently requires a raw-data HSGP axis")
-    orthogonal_to === :linear && haskey(kw, :by) && error(
-        "sbimpl: `hsgp(...; orthogonal_to=:linear)` is an ungrouped " *
-        "population-shape constraint and cannot be combined with `by=`")
+    !isnothing(orthogonal_to) && haskey(kw, :by) && error(
+        "sbimpl: `hsgp(...; orthogonal_to=$(repr(orthogonal_to)))` is an " *
+        "ungrouped population-shape constraint and cannot be combined with `by=`")
     iso = _sb_gp_iso(kw, :hsgp)
 
     if !is_raw
@@ -14402,9 +14438,8 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         _sb_hsgp_floor_check(term_overrides, t, rho_lower,
             _brm_hsgp_floor_geometry(K, c, domain_fits, true),
             _brm_hsgp_floor_remedy(true))
-        submodel_name = orthogonal_to === :linear ?
-            :_sb_hsgp_latent_orthogonal : :_sb_hsgp_latent
-        submodel = _sb_gp_submodel_expr(submodel_name, term_overrides, t)
+        submodel = _sb_gp_submodel_expr(
+            _sb_hsgp_latent_submodel(orthogonal_to), term_overrides, t)
         push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
             submodel, term_overrides, t; x=x_name, omega2=omega2_name, center, L, rho_lower)))
         return col_name
@@ -14515,7 +14550,7 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     fits = fitted.fits
     basis = _brm_hsgp_basis_state(
         fitted.axes, K, cov, iso, period; fits, orthogonal=orthogonal_to,
-        options.anchor, mask)
+        options.anchor, mask, fitted.projection)
     PHI, omega2 = basis.PHI, basis.omega2
     data[PHI_name] = PHI
     data[omega2_name] = omega2
@@ -14529,6 +14564,8 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
                      _sb_hsgp_option_const(options, fitted.support)...,
                      floor_const...)
     partial && (preproc_const = merge(preproc_const, (; centeredness)))
+    isnothing(basis.projection) ||
+        (preproc_const = merge(preproc_const, (; basis.projection)))
     _sb_record_preproc!(data, PHI_name, PreprocEntry(
         :hsgp, preproc_const, names, false))
     submodel_name = if partial

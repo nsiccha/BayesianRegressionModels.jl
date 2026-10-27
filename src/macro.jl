@@ -429,7 +429,12 @@ through `c`. A one-dimensional model-derived axis, such as the sampled `x` from
 `log(x) ~ ...`, requires that explicit domain and evaluates its basis inside
 Stan. `orthogonal_to=:linear` removes the intercept and current linear-`x`
 directions from a one-dimensional basis, so `x + hsgp(x; ...)` separates the
-linear slope from residual nonlinear shape.
+linear slope from residual nonlinear shape. `orthogonal_to=:intercept` removes
+only the intercept direction, from a basis over any number of axes: every basis
+column is centered over the term's rows, so the term sums to zero over them and
+a level elsewhere in the model is not shared with the field. Both projections
+are fitted on the training rows and frozen on replay; neither combines with
+`by=` or `anchor=`.
 
 `cov=:periodic` selects the periodic-kernel approximation of Riutort-Mayol et
 al. (2023) over exactly one raw-data axis: `k` harmonics of `2pi / period`
