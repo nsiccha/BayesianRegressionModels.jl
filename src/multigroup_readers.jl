@@ -46,8 +46,10 @@ end
 
 The fitted multigroup term `f(t, s)` of a grouped HSGP with known level
 coordinates at every pair of `times` (a vector on the term's time axis) and
-locations (`coordinates`, one row per location and one column per coordinate
-axis): an array of draws × times × locations. At a fitted level's own
+locations: an array of draws × times × locations. `coordinates` gives the
+locations as the term takes its own, one vector per coordinate axis
+(`(xs, ys)` for `multigroup((x, y))`), or as a matrix with one row per location
+and one column per axis. At a fitted level's own
 coordinates this is that level's fitted series; at any other location it is
 the term's prediction there from the same draws (a neighbour prediction for a
 held-out level). `draws` and `constrained_names` are as for
@@ -177,12 +179,30 @@ function _brm_multigroup_coherence(term, values, distances)
        range, resolution=term.r_min, resolved=range .>= term.r_min, distances, coherence)
 end
 
+# The locations as a matrix, one row per location and one column per axis:
+# given one vector per axis, as the term takes its coordinates, or as the
+# matrix itself; a vector is one axis.
+_brm_multigroup_location_matrix(coordinates::AbstractMatrix{<:Real}) =
+    Matrix{Float64}(coordinates)
+_brm_multigroup_location_matrix(coordinates::AbstractVector{<:Real}) =
+    reshape(collect(Float64, coordinates), :, 1)
+function _brm_multigroup_location_matrix(
+        coordinates::Tuple{AbstractVector{<:Real},Vararg{AbstractVector{<:Real}}})
+    allequal(length.(coordinates)) || error(
+        "brm_multigroup_field: the `coordinates` axes have different lengths " *
+        "($(join(length.(coordinates), ", "))); each holds one value per location")
+    reduce(hcat, map(axis -> collect(Float64, axis), coordinates))
+end
+_brm_multigroup_location_matrix(coordinates) = error(
+    "brm_multigroup_field: `coordinates` takes one vector per coordinate axis, " *
+    "`(xs, ys)` as the term takes `multigroup((x, y))`, or a matrix with one " *
+    "row per location and one column per axis; got a `$(typeof(coordinates))`")
+
 function _brm_multigroup_locations(term, coordinates)
-    C = coordinates isa AbstractVector ? reshape(collect(Float64, coordinates), :, 1) :
-        Matrix{Float64}(coordinates)
+    C = _brm_multigroup_location_matrix(coordinates)
     size(C, 2) == size(term.coordinates, 2) || error(
-        "brm_multigroup_field: `coordinates` needs one column per coordinate " *
-        "axis ($(size(term.coordinates, 2))), got $(size(C, 2))")
+        "brm_multigroup_field: `coordinates` needs one vector (or matrix column) " *
+        "per coordinate axis ($(size(term.coordinates, 2))), got $(size(C, 2))")
     all(isfinite, C) || error("brm_multigroup_field: `coordinates` must be finite")
     # A location must lie where the approximation is defined at every
     # frequency: inside the inducing grid at its finest spacing or, for free

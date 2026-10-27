@@ -190,6 +190,54 @@ end
     @test_throws UndefKeywordError brm(:(y ~ Normal(0, 1)))
 end
 
+# A generative plan, a descriptor and a per-chain copy `deepcopy` the model. A
+# `brm` model holds a constant's evaluator as an interpreted closure over the
+# builder's scope, which holds `mod`, and `deepcopy` refuses a module (snag
+# brm-source-mod-c-37a8e5ec). A copy holds it as it holds a compiled closure:
+# code and module shared, captured variables copied.
+interpret(x) = BRM._brm_interpret(BRM._brm_expand(x, @__MODULE__), BRM._BRMScope(@__MODULE__))
+@testset "copies hold interpreted closures as compiled ones" begin
+    # A closure that captures nothing is its own copy, a module in its body too.
+    pure = interpret(:(v -> v + 0 * length(names(@__MODULE__))))
+    @test deepcopy(pure) === pure
+    # The control: Base's field-by-field copy of the same closure reaches `mod`.
+    @test_throws "deepcopy of Modules not supported" invoke(
+        Base.deepcopy_internal, Tuple{Any,IdDict}, pure, IdDict())
+    # A captured variable is copied, so the copy's is its own; `M` is in scope
+    # but unread, so it is not captured (a module, which no copy could hold).
+    counter = interpret(:(let M = Base, n = [0], k = 2
+        () -> push!(n, k)
+    end))
+    twin = deepcopy(counter)
+    @test counter() == [0, 2]
+    @test twin() == [0, 2]
+    @test counter() == [0, 2, 2]
+    # Closures over one scope still share it after one copy.
+    add, current = deepcopy(interpret(:(let n = [0]
+        (() -> push!(n, 1), () -> n)
+    end)))
+    add()
+    @test current() == [0, 1]
+end
+
+@testset "a brm model is copied, planned, described and replayed" begin
+    frame = (; x=DATA.x[1:12], subj=DATA.subj[1:12], y=DATA.y[1:12])
+    results = map((brm(FAMILY; mod=@__MODULE__), compiled(FAMILY))) do builder
+        brmi = builder(DATA)
+        model = sb(brmi)
+        @test code_and_data(deepcopy(brmi)) == code_and_data(brmi)
+        plan = generative_plan(model)
+        descriptor = brm_descriptor(model)
+        replay = reprocess(model, frame)
+        @test BRM.stan_data(replay)[:log_s] == BRM.stan_data(model)[:log_s]
+        (; declarations=[(d.role, d.target) for d in plan.declarations],
+           formula=descriptor.formula,
+           outputs=[(o.name, o.role, o.size) for o in brm_outputs(descriptor)],
+           replay=(BRM.stan_code(replay), BRM.stan_data(replay)))
+    end
+    @test results[1] == results[2]
+end
+
 # Every `@brm` block of this directory: the two builders agree on the columns,
 # the printed source and the built model (empty data and placeholder columns),
 # or fail with the same error.

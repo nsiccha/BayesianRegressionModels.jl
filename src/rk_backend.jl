@@ -5198,9 +5198,8 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         end
         columns[source] = raw
         level_cor = get(state.by, :level_cor, nothing)
-        level_cor !== nothing && !isempty(hyper_plans) && error(
-            "$prefix: predictor `$target` `hsgp(...; by=..., cor=...)` with " *
-            "hyper-predicted length scales or amplitudes is not implemented")
+        _brm_check_hyper_level_correlation(level_cor, hyper_plans;
+            what="hsgp(...; by=..., cor=...)", prefix="$prefix: predictor `$target`")
         (; group_index=idx, group_source=source,
             group_levels=collect(state.by.levels), n_groups=length(state.by.levels),
             level_cor, _rk_plan_level_coordinates!(level_cor, data, columns, taken,
