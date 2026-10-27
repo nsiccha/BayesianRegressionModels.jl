@@ -463,7 +463,11 @@ function brm_start(sb::SBBRMI, stan_model, inits::NamedTuple;
     totals = total_effect_blocks(d.plan)
     writes = Tuple{Int,Float64}[]
     absorbed = Dict{Symbol,Vector{Pair{Symbol,Float64}}}()
+    total_latents = _brm_total_latent_kinds(parent(sb))
     for target in _brm_start_targets(parent(sb), inits)
+        # A cell latent in total coordinates starts at its values' coordinates.
+        target.kind === :parameter && haskey(total_latents, target.name) &&
+            (target = _brm_total_start_target(target, total_latents[target.name], d))
         _brm_sb_start_writes!(writes, absorbed, Val(target.kind), target, d,
             names, totals)
     end

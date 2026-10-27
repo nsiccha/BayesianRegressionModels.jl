@@ -693,6 +693,14 @@ end
 # A cell latent's law: a univariate Distributions family with positional
 # arguments, broadcast over them per cell.
 function _rk_kernel_latent_family(scope, law, kernel, lhs)
+    # Total coordinates need a per-index vector latent with a joint density,
+    # which RKPPL cannot declare yet (cell_total_coordinates.jl).
+    _brm_total_coordinates_keyword(law) === nothing || error(
+        "RK backend: kernel `$kernel` cell latent `$lhs` asks for total coordinates " *
+        "(`coordinates = …`), which RKBRMI cannot sample yet: RKPPL has no per-cell " *
+        "vector latent with a joint density (ReactiveKernels snag " *
+        "`rkppl-per-index-5e9df9fe`). SBBRMI samples it; on RKBRMI drop the keyword " *
+        "to sample the latent in its own coordinates (the same model).")
     callable = _rk_kernel_observation_callee(scope, law, kernel)
     callable === StanBlocks.normal && (callable = Normal)
     callable isa Type && callable <: UnivariateDistribution || error(

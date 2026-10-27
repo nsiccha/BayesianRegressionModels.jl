@@ -156,8 +156,16 @@ function _sb_cell_statement(x::Expr, scope)
     Expr(:call, :~, x.args[2], _sb_cell_family(law, scope))
 end
 
-_sb_cell_statements(statements, scope) =
-    Any[_sb_cell_statement(statement, scope) for statement in statements]
+function _sb_cell_statements(statements, scope)
+    out = Any[]
+    for statement in statements
+        # A latent in total coordinates is two statements (cell_total_coordinates.jl).
+        total = _sb_cell_total_coordinates(statement, scope)
+        total === nothing ? push!(out, _sb_cell_statement(statement, scope)) :
+            append!(out, total)
+    end
+    out
+end
 _sb_cell_block(x, scope) = Meta.isexpr(x, :block) ?
     Expr(:block, _sb_cell_statements(x.args, scope)...) : _sb_cell_statement(x, scope)
 

@@ -7407,6 +7407,7 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     # so the plate is count-form over `outer` for them while bound positionals
     # keep slicing; the dropped cell parameter becomes a fresh per-cell `~`.
     kept_params = slice_params[kept]
+    _brm_check_cell_total_latents(body_stmts, params, _brm_inline_scope(lam); prefix="sbimpl")
     # The cell is Julia source; give StanBlocks its Stan spellings.
     body_stmts = _sb_cell_statements(_sb_cell_ar1_normal_calls(body_stmts, kept_params),
         _brm_inline_scope(lam))
