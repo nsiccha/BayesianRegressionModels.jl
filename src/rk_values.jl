@@ -988,13 +988,17 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
         (p.name for p in plan.regression.predictors),
         Iterators.flatten(values(kernel_outputs)))
     hoisted = _rk_nested_kernel_arguments(plan, bindings, taken)
+    # Each plate output's per-cell graph value, for model-scope reads by cell.
+    cells = Dict{Symbol,Symbol}()
     for assignment in plan.assignments
         if assignment isa _RKPreparedKernelAssignment
             _rk_emit_value_assignment!(defs, stmts, bindings, taken, assignment;
                 arguments=get(hoisted.kernels, assignment.name, nothing), coordinates,
                 graph_outputs=kernel_outputs[assignment.name])
+            _rk_plate_output_cells!(cells, stmts, assignment, kernel_outputs[assignment.name])
         else
-            _rk_emit_value_assignment!(defs, stmts, bindings, taken, assignment)
+            _rk_emit_value_assignment!(defs, stmts, bindings, taken,
+                _rk_plate_cell_reads(assignment, cells))
         end
         # A downstream submodel provider owns the declarations scoped under
         # its target; the transport pairs them with the SB declaration's.
@@ -1019,6 +1023,8 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
             _brm_prepare_expr(modifier.base)
         distribution isa _BRMPreparedExpr || error(
             "RK backend: response `$(observation.name)` needs a distribution call")
+        distribution = _rk_plate_cell_reads(distribution, cells,
+            read -> _rk_plate_cell_value!(stmts, bindings, taken, read))
         isempty(distribution.kwargs) || distribution.callable === Ordinal || error(
             "RK backend: response `$(observation.name)` distribution keywords are unsupported")
         observation isa _RKNestedObservation && ((observation, distribution) =

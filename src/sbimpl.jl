@@ -17081,6 +17081,9 @@ _record_scalar_data!(args...) = nothing
 # subtraction already element-wise-broadcast in Stan between vectors, no change
 # needed there.
 _sb_scalar_expr(x::ExprColumn, data) = begin
+    # A plate output reads one value per cell (`sb_plate_outputs.jl`).
+    read = _sb_plate_output_read(x, data)
+    read === nothing || return read
     f = getf(x)
     # Body-level `state.field` / `state[i]` on a model value (macro.jl getproperty /
     # getindex) render as Stan `.` / `[` so a `@deffun` struct/array return can be

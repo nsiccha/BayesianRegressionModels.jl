@@ -1452,6 +1452,74 @@ _rk_flatten_cells!(defs, taken, cells) =
     Expr(:call, _rk_shared_definition!(defs, taken, _RK_FLATTEN_CELLS_KERNEL; kernel=true),
         cells)
 
+# A plate output at model scope is one value per cell, as the Julia loop leaves
+# it: `out[i]` is cell `i`'s value and `sum(out)` adds the cells. The graph
+# value of the output's name is its cells concatenated, which formula terms and
+# observations read; `out[...]` and `sum(out)` read the cells instead (snag
+# `sum-a-vector-pla-812e04d2`, decision `09e0gc5`). `cells` maps each output
+# the kernel collected (the last one, and the other indexed outputs in
+# `graph_outputs`) to the graph value of its cells: the argument of the
+# `<output> = flatten_cells(<cells>)` statement that defines it.
+function _rk_plate_output_cells!(cells, statements, kernel::_RKPreparedKernelAssignment,
+        graph_outputs=())
+    outputs = (kernel.name, graph_outputs...)
+    for statement in statements
+        Meta.isexpr(statement, :(=), 2) && statement.args[1] in outputs &&
+            Meta.isexpr(statement.args[2], :call, 2) &&
+            statement.args[2].args[2] isa Symbol || continue
+        output, source = statement.args[1], statement.args[2].args[2]
+        (output === kernel.name ? source === kernel.cells : true) || continue
+        cells[output] = source
+    end
+    cells
+end
+# `bind` receives each read rewritten to the cells and returns what stands in
+# its place: the read itself in a model-scope assignment, a graph value of its
+# own in an observation's arguments (an observation location composes named
+# values, not reads of a plate's cell array).
+_rk_plate_cell_reads(x, cells, bind=identity) = x
+_rk_plate_cell_reads(x::Tuple, cells, bind=identity) =
+    map(value -> _rk_plate_cell_reads(value, cells, bind), x)
+_rk_plate_cell_reads(x::_BRMPreparedAssignment, cells, bind=identity) =
+    _BRMPreparedAssignment(x.name, _rk_plate_cell_reads(x.expression, cells, bind),
+        x.dependencies)
+function _rk_plate_cell_reads(x::_BRMPreparedExpr, cells, bind=identity)
+    read = _rk_plate_cell_read(x, cells, bind)
+    read === nothing || return bind(read)
+    _BRMPreparedExpr(x.callable, _rk_plate_cell_reads(x.args, cells, bind),
+        map(value -> _rk_plate_cell_reads(value, cells, bind), x.kwargs))
+end
+# `out[...]`, `sum(out)` or `sum(out[...])` of a plate output `out`, read over
+# its cells, or `nothing`.
+_rk_plate_cell_read(x::_BRMPreparedExpr, cells, bind) =
+    isempty(x.kwargs) && !isempty(x.args) ?
+        _rk_plate_cell_read(x.callable, x, cells, bind) : nothing
+_rk_plate_cell_read(_callable, _x, cells, bind) = nothing
+function _rk_plate_cell_read(::typeof(getindex), x, cells, bind)
+    ref = _rk_plate_cells_ref(first(x.args), cells)
+    ref === nothing && return nothing
+    _BRMPreparedExpr(getindex,
+        (ref, _rk_plate_cell_reads(Base.tail(x.args), cells, bind)...), x.kwargs)
+end
+function _rk_plate_cell_read(::typeof(sum), x, cells, bind)
+    length(x.args) == 1 || return nothing
+    inner = only(x.args)
+    ref = _rk_plate_cells_ref(inner, cells)
+    ref === nothing || return _BRMPreparedExpr(sum, (ref,), x.kwargs)
+    inner isa _BRMPreparedExpr && isempty(inner.kwargs) || return nothing
+    selected = _rk_plate_cell_read(inner.callable, inner, cells, bind)
+    selected === nothing ? nothing : _BRMPreparedExpr(sum, (selected,), x.kwargs)
+end
+_rk_plate_cells_ref(x, cells) = nothing
+_rk_plate_cells_ref(x::_BRMPreparedRef, cells) =
+    haskey(cells, x.name) ? _BRMPreparedRef(cells[x.name], x.axis) : nothing
+# An observation argument's read becomes a graph value of its own.
+function _rk_plate_cell_value!(statements, bindings, taken, read)
+    name = _rk_ast_fresh_name("plate_read", taken)
+    push!(statements, Expr(:(=), name, _rk_value_expr!(bindings, read, taken)))
+    _BRMPreparedRef(name, :whole)
+end
+
 # The kernel's value is its subject cells; formula terms read them
 # concatenated, a per-subject observation reads them cell by cell. The cell's
 # plate also writes every in-cell observation argument the observations read

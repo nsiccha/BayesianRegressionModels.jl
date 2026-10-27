@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.6
+## 0.2.8
 
 - `brm_start` places a random-effect block's groups at their own values:
   `ID = (; sd, cor, effects = ["a" => 1.2, "b" => -0.4, …])`, one number per
@@ -29,6 +29,33 @@ instead of failing at run time.
   level must be given). On RKBRMI it covers the plain blocks it addresses.
   Unlisted levels keep their coordinates at `base` (standardized draws, or
   effects in a centred block). Snag `odlplaus-ap-2-st-537291fd`.
+## 0.2.7
+
+- `structure_of(builder)` and `priors_of(builder)` split a data-free
+  `BRMBuilder` (from `@brm begin … end` or `brm(source; mod)`) into the builder
+  of its model statements and the builder of its prior-address statements, as
+  they already split a `BRMI`. `string(structure_of(builder))` and
+  `string(priors_of(builder))` are the model's structure and prior cards, with
+  no data bound; `optional(...)` priors stay as written. Snag
+  `show-a-model-s-s-596039d4`.
+- A builder prints an elementwise prior or a declared vector parameter as
+  written, `effect(mu, x) .~ Normal.(0, 1)`, where it printed
+  `.~(effect(mu, x), Normal.(0, 1))`.
+
+## 0.2.6
+
+- A plate output read at model scope is one value per cell, as the Julia loop
+  leaves it: after `cnt[s] = v` in `@plate for s in …`, `cnt[g]` is cell `g`'s
+  value, `sum(cnt)` adds the cells (elementwise when each holds a vector) and
+  `sum(cnt[idx])` adds the cells `idx`. SBBRMI computes these for every cell
+  shape; RKBRMI for cells that hold a number (vector cells wait on
+  ReactiveKernels snag `summing-a-plate-eba2648d`). Snag
+  `sum-a-vector-pla-812e04d2`, decision `09e0gc5`.
+  **Breaking:** on SBBRMI, `sum(cnt)` of an output whose cells hold vectors was
+  the total of every entry and is now the elementwise sum of the cells; write
+  `sum(sum(cnt))` for the total. On RKBRMI, `cnt[g]` and `sum(cnt)` of such an
+  output read the cells laid end to end and now raise an error until that
+  ReactiveKernels snag lands.
 
 ## 0.2.5
 
