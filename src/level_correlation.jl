@@ -369,6 +369,28 @@ function _brm_check_level_correlation(lc::_BRMLevelCorrelation, n_levels::Intege
     lc
 end
 
+# Hyper-predicted scales of a grouped HSGP with `cor=` (`log(sd(hsgp(x))) ~
+# 1 + (1 | g)`, `log(length_scale(hsgp(x))) ~ ...`): each level's spectral
+# scales multiply its correlated weights, so basis function `j` draws the level
+# weights from `MVN(0, diag(s_j) C_j diag(s_j))` with `s_j[g] = sqrt(S_g(omega_j))`
+# (`C_j = Omega`, or a multigroup coherence). Both multigroup coherences, over
+# a level correlation or over known coordinates, are functions of the one
+# length scale every level shares, so a per-level length scale leaves them
+# undefined; a per-level amplitude does not.
+_brm_check_hyper_level_correlation(::Nothing, _hyper_plans; kwargs...) = nothing
+_brm_check_hyper_level_correlation(::_BRMLevelCorrelation, _hyper_plans; kwargs...) = nothing
+function _brm_check_hyper_level_correlation(
+        ::Union{_BRMMultigroupCorrelation,_BRMMultigroupCoordinates}, hyper_plans;
+        what, prefix="BRM backend lowering")
+    any(p -> p.hyper === :length_scale, hyper_plans) && error(
+        "$prefix: `$what` with a hyper-predicted length scale is refused: the " *
+        "multigroup coherence is a function of one length scale shared by " *
+        "every level, which a per-level length scale removes. Predict the " *
+        "amplitude only (`log(sd(hsgp(...))) ~ 1 + (1 | g)`); per-level length " *
+        "scales are available under a constant level correlation `cor = Omega`")
+    nothing
+end
+
 # The `cor=` a random-effect declaration's `gr(...)` carries, unresolved.
 _brm_declaration_level_cor(d) = _brm_group_level_cor(d.raw_group)
 _brm_group_level_cor(raw::ExprColumn) =
