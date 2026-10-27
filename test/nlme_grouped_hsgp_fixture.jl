@@ -51,3 +51,16 @@ plate_hyper(data) = @brm data begin
 end
 
 weight_family(v) = findfirst(f -> hasproperty(f.block, :hsgp), v.families)
+
+# Lesions nested in subjects (1, 2 and 3 per subject), flat rows.
+const GH_NESTED = (;
+    subject=["a", "a", "b", "b", "b", "c", "c", "c", "c", "a", "b", "c", "a", "b"],
+    lesion=["a1", "a1", "b1", "b2", "b1", "c1", "c2", "c3", "c1", "a1", "b2", "c2", "a1", "b2"],
+    t=[-0.8, -0.2, -0.6, 0.1, 0.4, -0.9, -0.3, 0.2, 0.6, 0.5, 0.8, 0.7, 0.9, -0.4],
+    y=[0.4, -0.3, 0.9, 0.2, -0.6, 0.1, 0.5, 0.7, 0.0, -0.4, 0.8, 0.3, 0.6, -0.1])
+
+nested_hsgp(data) = @brm data begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + hsgp(t; by=lesion, k=2, domain=(-1.0, 1.0)) + (1 | subject) + (1 | lesion)
+    y ~ Normal(mu, sigma)
+end

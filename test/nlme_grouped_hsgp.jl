@@ -165,6 +165,24 @@ end
     check_unit_problems(m, Xoshiro(6))
 end
 
+@stestset "a nested grouping's levels are their subjects' units" begin
+    rk = RKBRMI(nested_hsgp(GH_NESTED))
+    nested = (lesion=:subject,)
+    v = brm_nlme_view(rk; subject_group=:subject, nested_groups=nested)
+    @test BRM._brm_nlme_ragged(v)
+    k = weight_family(v)
+    @test v.families[k].block.group === :lesion && v.families[k].size == 2
+    # Each lesion's two weights sit in the subject owning the lesion.
+    for (i, level) in enumerate(v.levels)
+        lesions = unique(GH_NESTED.lesion[GH_NESTED.subject .== level])
+        @test count(==(k), v.subject_families[i]) == length(lesions)
+        weights = [b.level for b in v.subject_margins[i] if hasproperty(b.block, :hsgp)]
+        @test weights == repeat(sort(lesions); inner=2)
+    end
+    m = brm_nlme_model(rk; ad_backend=NLME_AD, subject_group=:subject, nested_groups=nested)
+    check_lockstep(m, Xoshiro(9))
+end
+
 @stestset "a hyper-predicted amplitude's group effects are a unit family" begin
     rk = RKBRMI(plate_hyper(GH_PLATE))
     v = brm_nlme_view(rk)
