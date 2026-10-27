@@ -17,9 +17,18 @@ _brm_push_data_column!(_acc, ::Symbol, ::Number) = nothing
 _brm_collect_data_columns!(acc, x::ExprColumn) = begin
     getf(x) === (~) && return nothing
     for a in getargs(x); _brm_collect_data_columns!(acc, a); end
-    for v in values(getkwargs(x)); _brm_collect_data_columns!(acc, v); end
+    for (key, v) in pairs(getkwargs(x))
+        _brm_row_keyword(getf(x), Val(key)) && _brm_collect_data_columns!(acc, v)
+    end
     nothing
 end
+# A term keyword whose data lives on another axis than the term's rows names
+# no row axis: a level correlation (`cor = Omega`, a known `cor = C`, or the
+# levels' coordinates in `cor = multigroup((x, y))`) is one entry per level of
+# the term's grouping, and an areal term's `edges = (from, to)` one per edge.
+_brm_row_keyword(_f, ::Val) = true
+_brm_row_keyword(::Union{typeof(gr),typeof(hsgp)}, ::Val{:cor}) = false
+_brm_row_keyword(::typeof(car), ::Val{:edges}) = false
 _brm_collect_data_columns!(acc, x::Union{Tuple,AbstractVector}) = begin
     for a in x; _brm_collect_data_columns!(acc, a); end
     nothing

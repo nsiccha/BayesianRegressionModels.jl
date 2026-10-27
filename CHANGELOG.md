@@ -12,6 +12,19 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.5
+
+- A predictor read through a `@plate` grouping may hold a term whose keyword
+  data is not on the predictor's rows: the levels' coordinates in
+  `hsgp(t; by = g, cor = multigroup((x, y)))`, a known level correlation
+  `cor = C` on `hsgp` or `gr`, and `car(area; edges = (from, to))`. For
+  example `st ~ 0 + hsgp(day; by = probe, cor = multigroup((probe_x, probe_y)))`
+  read as `st[p]` in `@plate for p in groups(probe; order = day)`. Before,
+  RKBRMI and SBBRMI counted those fields as rows of the predictor and refused
+  it with "`st` read through `probe`: `st` has 40 entries (data vector
+  `probe_x`) …", also when the term sat in a predictor read that way beside
+  its other terms. Snag `rkbrmi-on-a-mode-0bd31c04`.
+
 ## 0.2.4
 
 - A positive `@plate` cell latent can be given its total:
