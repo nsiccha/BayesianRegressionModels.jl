@@ -12,6 +12,17 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.10
+
+- `cnt[idx]` of a plate output whose cells hold vectors of varying length is
+  the cells `idx` on SBBRMI too, as a value of its own (`sel = cnt[k]`, then
+  `sel[1]`), and SBBRMI's `sum(cnt)` / `sum(cnt[idx])` of such an output use
+  StanBlocks' own `sum` and `rv[idx]` of a ragged value instead of a BRM helper.
+  Needs StanBlocks 0.2.2 (`ffbaff09`, snag `selecting-severa-027a8191`); the
+  test environment pins it. Correction to 0.2.6: for these cells SBBRMI's
+  earlier `sum(cnt)` did not compute the total of every entry; it failed to
+  compile. Snag `sum-a-vector-pla-812e04d2`.
+
 ## 0.2.9
 
 - A grouped HSGP, `hsgp(x...; by = g)` on SBBRMI, costs one rows x basis pass
@@ -71,11 +82,12 @@ instead of failing at run time.
   shape; RKBRMI for cells that hold a number (vector cells wait on
   ReactiveKernels snag `summing-a-plate-eba2648d`). Snag
   `sum-a-vector-pla-812e04d2`, decision `09e0gc5`.
-  **Breaking:** on SBBRMI, `sum(cnt)` of an output whose cells hold vectors was
-  the total of every entry and is now the elementwise sum of the cells; write
-  `sum(sum(cnt))` for the total. On RKBRMI, `cnt[g]` and `sum(cnt)` of such an
-  output read the cells laid end to end and now raise an error until that
-  ReactiveKernels snag lands.
+  **Breaking:** on SBBRMI, `sum(cnt)` of an output whose cells hold vectors of
+  fixed width was the total of every entry and is now the elementwise sum of
+  the cells; write `sum(sum(cnt))` for the total. (For cells whose length
+  follows their data it did not compile; corrected in 0.2.10.) On RKBRMI,
+  `cnt[g]` and `sum(cnt)` of such an output read the cells laid end to end and
+  now raise an error until that ReactiveKernels snag lands.
 
 ## 0.2.5
 

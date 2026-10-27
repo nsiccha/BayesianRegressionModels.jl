@@ -4,8 +4,10 @@
 # After `@plate for s in eachindex(A); cnt[s] = v; end`, `cnt[g]` is cell `g`'s
 # value, `sum(cnt)` adds the cells (elementwise for vector cells) and
 # `sum(cnt[idx])` adds the cells `idx`. Before snag `sum-a-vector-pla-812e04d2`
-# (decision `09e0gc5`) SBBRMI summed every entry into one number and could not
-# index a fixed-width output, and RKBRMI read the cells laid end to end. Each
+# (decision `09e0gc5`) SBBRMI's `sum(cnt)` was the total of every entry of a
+# fixed-width output and did not compile for a ragged one, `cnt[g]` of a
+# fixed-width output failed to transpile, and RKBRMI read the cells laid end to
+# end. Each
 # shape StanBlocks stores a plate in is covered: a scalar per cell, a vector of
 # fixed width (`matrix[K, N]`) and a ragged vector. Every model matches an
 # independent oracle on RKBRMI and on SBBRMI (BridgeStan), density and
@@ -147,9 +149,8 @@ end
     @test_throws Exception BridgeStan.log_density(stan.model, [0.4])
 end
 
-# `cnt[k]` as a value of its own, with cells whose length follows their data,
-# needs StanBlocks to select several groups of a ragged value (snag
-# `StanBlocks/snags/selecting-severa-027a8191`); `sum(cnt[k])` works above.
+# `cnt[k]` as a value of its own: the cells `k`, here two ragged cells read
+# entry by entry (StanBlocks' `rv[idx]`, StanBlocks 0.2.2).
 ragged_selection(data) = @brm data begin
     b ~ Normal(0.0, 1.0)
     @plate for s in eachindex(A)
@@ -159,10 +160,14 @@ ragged_selection(data) = @brm data begin
     obs ~ Normal(sel[1] .+ sel[2], 1.0)
 end
 @stestset "SBBRMI ragged cnt[k] as a value" begin
-    @test_broken try
-        StanBlocks.stan.transpiles(SBBRMI(ragged_selection(CELLS); mod=@__MODULE__).model)
-    catch
-        false
+    stan = consumer_stan(ragged_selection(CELLS), "plate_output_reductions_ragged_selection")
+    oracle(u) = (c = cells(u)[CELLS.k]; prior(u) + gauss(c[1] .+ c[2], CELLS.obs))
+    for u in POINTS
+        value, gradient = BridgeStan.log_density_gradient(
+            stan.model, u; propto=false, jacobian=true)
+        @test value ≈ oracle(u) atol=2e-11 rtol=2e-11
+        reference = (oracle(u .+ 1e-5) - oracle(u .- 1e-5)) / 2e-5
+        @test only(gradient) ≈ reference atol=2e-7 rtol=2e-7
     end
 end
 
