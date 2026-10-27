@@ -24,6 +24,19 @@ covers interleaved rows, shared random effects, empty groups, raw-data controls
 and preservation of field and keyword names. Run it with
 `julia --project=. test/kernel_ragged_broadcast.jl` or the test environment above.
 
+`plate_output_reads.jl` checks that the model reads every indexed output of an
+`@plate for` cell by its name, not only the cell's last: a model-scope
+observation of a non-last output (written after or above the cell), both
+outputs of one cell read by the model, another cell reading it, and per-cell
+reads (`sum(tot)`, `tot[2]`) of scalar and vector cells. Each has the
+BridgeStan and RK log density and gradient of the spelling with that output
+collected last (the RK gradient of vector-cell reads is `@test_broken`, todo
+`1svm4l1`). It also covers the omitted response, `reprocess`, and
+the refusal of a name two cells write. Snag `model-scope-read-3649ae8a`.
+
+`changelog.jl` checks that `CHANGELOG.md`'s newest heading is the
+`Project.toml` version (`dev` §7.5).
+
 `plate_grouping.jl` checks model-scope `rows = groups(group => labels)`
 bindings that `@plate for` cells read as `x[rows[i]]`: `groups` itself,
 identical Stan source, descriptor outputs and RK log density to the legacy

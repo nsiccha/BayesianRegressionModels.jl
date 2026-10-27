@@ -333,6 +333,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
         "RK backend: kernel `$name` cell and positional argument counts disagree")
     isempty(getkwargs(rhs)) || error("RK backend: kernel `$name` has unsupported control keywords")
     scope = _brm_inline_scope(first(getargs(rhs)))
+    output_reads = _brm_kernel_output_reads(brmi)
     direct_lps = [argument for argument in arguments
         if argument isa NamedColumn && parent(argument) isa ExprColumn]
     ragged_cols = [argument for argument in arguments
@@ -417,7 +418,10 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             _rk_push_outer_length!(outer_lengths, values)
             push!(inputs, (; source, kind=:element, rows=nothing, column))
             scan && push!(scan_observed, (; param=params[i], source))
-        elseif argument isa NamedColumn && parent(argument) isa ExprColumn
+        elseif argument isa NamedColumn && (parent(argument) isa ExprColumn ||
+                parent(argument) isa MissingColumn && haskey(output_reads, _rk_kernel_column_name(argument)))
+            # A predictor or another cell's output, collected or not, is read
+            # through the graph value of its name.
             push!(inputs, (; source=_rk_kernel_column_name(argument), kind=:element,
                 rows=nothing, column=nothing))
         elseif argument isa NamedColumn && parent(argument) isa MissingColumn &&

@@ -137,13 +137,17 @@ Base.@nospecializeinfer function _brm_prepare_program(@nospecialize(brmi::BRMI);
     # mapping compile again for every model's operation NamedTuple.
     entries = _brm_operation_entries(brmi)
     names = first.(entries)
+    # A model-scope read of a cell's non-collected indexed output depends on
+    # that cell, as a read of its collected output does through its name.
+    output_reads = _brm_kernel_output_reads(brmi)
     prepared = Vector{_BRMPreparedOperation}(undef, length(entries))
     for (index, (key, raw)) in enumerate(entries)
         op = _named_op(raw)
         isnothing(op) && (op = raw)
         role = _brm_operation_role(op)
-        prepared[index] = _BRMPreparedOperation(key, role, op,
-            _brm_operation_dependencies(op, names, key, role))
+        dependencies = haskey(output_reads, key) ? (output_reads[key],) :
+            _brm_operation_dependencies(op, names, key, role)
+        prepared[index] = _BRMPreparedOperation(key, role, op, dependencies)
     end
     operations = Tuple(prepared)
     order = _brm_operation_order(operations)

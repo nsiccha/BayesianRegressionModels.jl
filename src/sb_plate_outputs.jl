@@ -29,6 +29,12 @@ StanBlocks.@deffun begin
     @inline brm_plate_cell(x::RaggedVector, i) = x[i]
 end
 
+# A plate output: a cell's collected one, or one of its other indexed outputs
+# the model reads (`_brm_kernel_output_reads`; its Stan name is set afterwards).
+_sb_plate_output(x, data) = _sb_kernel_producer(x) !== nothing ||
+    x isa NamedColumn && parent(x) isa MissingColumn &&
+    name(x) in get(data, _SB_KERNEL_OUTPUT_READS_KEY, ())
+
 # The Stan call for a model-scope read of a plate output, or `nothing` when
 # `x` is not one: `out[i]`, `sum(out)` and `sum(out[idx])`.
 _sb_plate_output_read(x::ExprColumn, data) = _sb_plate_output_read(getf(x), x, data)
@@ -36,23 +42,23 @@ _sb_plate_output_read(_f, _x, _data) = nothing
 function _sb_plate_output_read(::typeof(getindex), x, data)
     args = getargs(x)
     (length(args) == 2 && isempty(getkwargs(x)) &&
-        _sb_kernel_producer(first(args)) !== nothing) || return nothing
+        _sb_plate_output(first(args), data)) || return nothing
     Expr(:call, brm_plate_cell, (_sb_scalar_expr(arg, data) for arg in args)...)
 end
 function _sb_plate_output_read(::typeof(sum), x, data)
     args = getargs(x)
     (length(args) == 1 && isempty(getkwargs(x))) || return nothing
-    cells = _sb_plate_output_cells(only(args))
+    cells = _sb_plate_output_cells(only(args), data)
     cells === nothing && return nothing
     Expr(:call, brm_plate_sum, (_sb_scalar_expr(arg, data) for arg in cells)...)
 end
 # `(out,)` for a plate output `out`, `(out, idx)` for `out[idx]`.
-_sb_plate_output_cells(x) = _sb_kernel_producer(x) === nothing ? nothing : (x,)
-_sb_plate_output_cells(x::ExprColumn) = _sb_plate_output_cells(getf(x), x)
-_sb_plate_output_cells(_f, _x) = nothing
-function _sb_plate_output_cells(::typeof(getindex), x)
+_sb_plate_output_cells(x, data) = _sb_plate_output(x, data) ? (x,) : nothing
+_sb_plate_output_cells(x::ExprColumn, data) = _sb_plate_output_cells(getf(x), x, data)
+_sb_plate_output_cells(_f, _x, _data) = nothing
+function _sb_plate_output_cells(::typeof(getindex), x, data)
     args = getargs(x)
     (length(args) == 2 && isempty(getkwargs(x)) &&
-        _sb_kernel_producer(first(args)) !== nothing) || return nothing
+        _sb_plate_output(first(args), data)) || return nothing
     Tuple(args)
 end

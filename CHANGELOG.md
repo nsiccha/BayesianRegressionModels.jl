@@ -12,6 +12,20 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.16
+
+- The model reads every indexed output of an `@plate for` cell by its name, not
+  only the cell's last: `tot[s] = sum(x)` followed by `other[s] = x` in one
+  cell, then `obs ~ Normal(tot[idx], sigma)` outside it, written after or
+  before the cell. Another `@plate for` cell may read it as `tot[i]` too. Before,
+  only `other` was a model value, and reading `tot` failed with `Could not find
+  tot` (SBBRMI) or as an unknown factor coefficient (RKBRMI). Its per-cell
+  reads (`tot[g]`, `sum(tot)`, `sum(tot[idx])`, 0.2.6) mean what they mean for
+  the collected output. SBBRMI reads the value StanBlocks already stores for
+  the cell, with no second copy; RKBRMI reads its graph value. Density and
+  gradient equal the cell with `tot[s]` moved last. A name two cells write is
+  refused when the model reads it. Snag `model-scope-read-3649ae8a`.
+
 ## 0.2.15
 
 - A term's own parameter takes a known value with `=` on its address, as a

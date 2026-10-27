@@ -496,3 +496,51 @@ function _brm_kernel_rebase_index(idx_name::Symbol, idx, grp_name::Symbol, raw_g
         position[r]
     end
 end
+
+# The indexed outputs (`name[i] = …`) of each `@plate for` cell besides its
+# collected one, keyed by name, with the kernel targets of the cells writing
+# it. Only outputs the cell body still binds count: response pruning may have
+# dropped one.
+function _brm_kernel_side_outputs(@nospecialize(brmi::BRMI))
+    writers = Dict{Symbol,Vector{Symbol}}()
+    for (target, raw) in _brm_operation_entries(brmi)
+        op = _named_op(raw)
+        (op !== nothing && getf(op) === (~)) || continue
+        rhs = _as_expr_column(last(getargs(op)))
+        (rhs !== nothing && getf(rhs) === kernel && !isempty(getargs(rhs))) || continue
+        lam = first(getargs(rhs))
+        outputs = _brm_inline_outputs(lam)
+        isempty(outputs) && continue
+        body = _brm_inline_expr(lam).args[2]
+        stmts = Meta.isexpr(body, :block) ? body.args : Any[body]
+        bound = Set{Symbol}(stmt.args[1] for stmt in stmts
+            if Meta.isexpr(stmt, :(=), 2) && stmt.args[1] isa Symbol)
+        for output in outputs
+            output !== target && output in bound || continue
+            push!(get!(writers, output, Symbol[]), target)
+        end
+    end
+    writers
+end
+
+# Model-scope reads of such outputs: each free name the model reads outside
+# every cell (`obs ~ Normal(tot[idx], sigma)`) that is one cell's indexed
+# output, mapped to that cell's kernel target. The cell's value is then the
+# model value of that name, exactly like the collected output, whichever
+# indexed assignment of the cell comes last.
+function _brm_kernel_output_reads(@nospecialize(brmi::BRMI))
+    writers = _brm_kernel_side_outputs(brmi)
+    reads = Dict{Symbol,Symbol}()
+    isempty(writers) && return reads
+    for (key, raw) in _brm_operation_entries(brmi)
+        raw isa NamedColumn && parent(raw) isa MissingColumn || continue
+        cells = get(writers, key, nothing)
+        cells === nothing && continue
+        length(cells) == 1 || error(
+            "@brm: the model reads `$key`, an indexed output `$key[i] = …` of " *
+            "several `@plate for` cells (those collecting `" * join(cells, "`, `") *
+            "`); give each cell's output its own name")
+        reads[key] = only(cells)
+    end
+    reads
+end
