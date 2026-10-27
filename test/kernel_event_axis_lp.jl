@@ -578,7 +578,7 @@ ev_lesion_wide_df() = merge(ev_lesion_df(), (;
     end
 
     @testset "the subject-frame column is refused loudly, not misaligned" begin
-        @test_throws "row axis" SBBRMI(
+        @test_throws "grouping column must label EVERY entry" SBBRMI(
             ev_lesion_subjectcol_model(df); mod = @__MODULE__)
     end
 

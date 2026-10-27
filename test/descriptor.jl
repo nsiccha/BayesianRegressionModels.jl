@@ -225,7 +225,7 @@ end
         mu ~ 1 + x + (1 | p | g)
         y ~ Normal(mu, sigma)
     end
-    auto = brm_descriptor(totals_builder, df; mod=@__MODULE__)
+    auto = brm_descriptor(totals_builder, df; total_groups=:auto, mod=@__MODULE__)
     conventional = brm_descriptor(totals_builder, df; total_groups=(), mod=@__MODULE__)
     basis = only(i for i in auto.inputs if i.transform === :total_basis)
     @test basis.name === :total_A_mu

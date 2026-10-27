@@ -44,8 +44,8 @@ covariates = (; x = randn(rng, n), subject = repeat(11:16; inner = 4))
 observed = merge(covariates, (; y = randn(rng, n)))   # `z` omitted: unobserved
 
 # Conventional blocks (the correlated `|p|` / `|q|` buckets), then the exact
-# total-coefficient emission the default `total_groups=:auto` picks for the
-# same shape without the slope.
+# total-coefficient emission `total_groups=:auto` picks for the same shape
+# without the slope.
 conv_sb = SBBRMI(joint_builder(observed); mod = @__MODULE__, total_groups = ())
 totals_builder = @brm begin
     sigma  ~ Exponential(1)
