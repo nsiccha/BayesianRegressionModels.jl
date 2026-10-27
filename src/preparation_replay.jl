@@ -169,13 +169,15 @@ function _brm_check_hsgp_domain(fits, axes; prefix="BRM replay")
 end
 
 # The SB reprocess input is the replay axes plus, for a `rows=` term, the
-# replay mask (decision 1fk9b29).
+# replay mask (decision 1fk9b29), and for a `by=` term's projection the replay
+# rows' level codes (`group`, `_brm_hsgp_projection_group`).
 _brm_replay_preprocess(kind::Val{:hsgp}, entry, axes::Tuple, freeze, prefix) =
     _brm_replay_preprocess(kind, entry, (; axes, mask=nothing), freeze, prefix)
 
 function _brm_replay_preprocess(::Val{:hsgp}, entry, input::NamedTuple,
                                 freeze, prefix)
     (; axes, mask) = input
+    group = get(input, :group, nothing)
     covariance = get(entry.const_, :cov, :exp_quad)
     covariance === :periodic && return _brm_replay_periodic_hsgp(
         entry, axes, mask, prefix)
@@ -195,10 +197,14 @@ function _brm_replay_preprocess(::Val{:hsgp}, entry, input::NamedTuple,
     evaluated = fresh ? axes :
         _brm_hsgp_replay_axes(axes, fits, support, extrapolate, mask; prefix,
                               fixed_domain=!isnothing(domain_fits))
+    # A frozen replay evaluates the training projection on its rows; a fresh
+    # one re-fits it on them, as it re-fits the interval.
     orthogonal_to = get(entry.const_, :orthogonal_to, nothing)
+    projection = freeze ? _brm_hsgp_frozen_projection(entry.const_, orthogonal_to;
+                                                      prefix) : nothing
     iso = entry.const_.iso
     basis = _brm_hsgp_basis_state(evaluated, K, :exp_quad, iso, nothing;
-        fits, orthogonal=orthogonal_to, anchor, mask)
+        fits, orthogonal=orthogonal_to, anchor, mask, projection, group)
     # A re-derived floor must stay below a floor-marked prior's upper bound.
     floor_upper = get(entry.const_, :floor_upper, nothing)
     isnothing(floor_upper) || _brm_check_hsgp_floor_below(
@@ -208,6 +214,7 @@ function _brm_replay_preprocess(::Val{:hsgp}, entry, input::NamedTuple,
     # Only a clamping record keeps its support; others stay as they were fitted.
     updated = haskey(entry.const_, :support) ?
         merge(entry.const_, (; fits, support)) : merge(entry.const_, (; fits))
+    isnothing(basis.projection) || (updated = merge(updated, (; basis.projection)))
     _BRMPreprocessResult(
         (primary=basis.PHI, omega2=basis.omega2, rho_lower=basis.rho_lower),
         _BRMPreprocEntry(:hsgp, updated, entry.raw_ref, false))

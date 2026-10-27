@@ -430,6 +430,41 @@ function (f::_BRMClosure)(args...)
     _brm_interpret(f.body, scope)
 end
 
+# A copy of a model (`deepcopy`: a generative plan, a replay, a per-chain copy)
+# holds its closures as it holds compiled ones: the code and the module are
+# shared, and the variables a closure captures are copied. A body can hold a
+# `Module` (`@__MODULE__`, a macro's hygienic scope), which `deepcopy` refuses,
+# so neither is copied. The captured variables are the bindings of the
+# closure's scope chain that its body names. The chain is copied once per
+# `deepcopy`, so closures over one scope keep sharing it, and holds only those
+# bindings: a copy never carries the builder's data (`__df__`) or a local its
+# body does not read. A closure that captures nothing, as a constant's
+# evaluator, is its own copy, as a compiled one is.
+function Base.deepcopy_internal(f::_BRMClosure, stack::IdDict)
+    haskey(stack, f) && return stack[f]::_BRMClosure
+    captured = Tuple{Symbol,_BRMScope}[]
+    for name in _brm_body_names!(Set{Symbol}(), f.body)
+        name in f.parameters && continue
+        owner = _brm_binding_scope(f.scope, name)
+        isnothing(owner) || push!(captured, (name, owner))
+    end
+    isempty(captured) && return (stack[f] = f)
+    copied = stack[f] = _BRMClosure(f.parameters, f.body, _brm_scope_copy(f.scope, stack))
+    for (name, owner) in captured
+        get!(() -> Base.deepcopy_internal(owner.vars[name], stack),
+             _brm_scope_copy(owner, stack).vars, name)
+    end
+    copied
+end
+_brm_scope_copy(scope::_BRMScope, stack::IdDict) = get!(stack, scope) do
+    parent = scope.parent
+    _BRMScope(Dict{Symbol,Any}(),
+              isnothing(parent) ? nothing : _brm_scope_copy(parent, stack), scope.mod)
+end::_BRMScope
+_brm_body_names!(names, x::Symbol) = push!(names, x)
+_brm_body_names!(names, x::Expr) = (foreach(a -> _brm_body_names!(names, a), x.args); names)
+_brm_body_names!(names, _x) = names
+
 # ---- generators and comprehensions --------------------------------------------------
 
 # `(body for x in xs, y in ys if cond)`: one fresh scope per element binds the

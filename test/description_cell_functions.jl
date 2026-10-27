@@ -31,3 +31,24 @@ const DATA = (; x=[[0.1, 0.4, 0.2, 0.3], [0.5, 0.2, 0.1, 0.6]], total=[3.0, 2.5]
     @test german.complete
     @test any(p -> startswith(p, "Die Umformung füllt eine Matrix"), german.prose)
 end
+
+# The standard normal CDF and its inverse by their StatsFuns names (snag
+# normcdf-in-a-pla-f14c8c6e): Phi and its inverse, scalar and dotted.
+using StatsFuns: normcdf, norminvcdf
+
+@testset "a cell's normcdf and norminvcdf are described as Phi" begin
+    model = @brm DATA begin
+        sigma ~ Exponential(1)
+        mu ~ Normal(0, 1)
+        @plate for i in eachindex(total)
+            share = normcdf.(x[i] .- mu) .- normcdf(-mu)
+            total[i] ~ Normal(sum(share) + norminvcdf(0.25), sigma)
+        end
+    end
+    r = brm_description(SBBRMI(model))
+    @test r.complete
+    @test isempty(r.diagnostics)
+    @test any(e -> occursin("\\Phi\\left(", e), r.equations)
+    @test any(e -> occursin("\\Phi^{-1}\\left(", e), r.equations)
+    @test !any(e -> occursin("normcdf", e) || occursin("norminvcdf", e), r.equations)
+end

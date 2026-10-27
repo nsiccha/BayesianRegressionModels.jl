@@ -1320,7 +1320,7 @@ function _adaptive_hsgp_centering_blocks(model, unc_names)
                 owner.family in (
                     :_sb_hsgp, :_sb_hsgp_aniso,
                     :_sb_hsgp_partial, :_sb_hsgp_partial_aniso,
-                    :_sb_hsgp_latent, :_sb_hsgp_latent_orthogonal,
+                    :_sb_hsgp_latent, :_sb_hsgp_latent_orthogonal, :_sb_hsgp_latent_centered,
                 ) || error(
                     "BRM adaptive centering: HSGP `$(entry.term)` resolved to " *
                     "unsupported emitted family `$(owner.family)`.",

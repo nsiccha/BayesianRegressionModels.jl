@@ -2274,6 +2274,37 @@ end
     _check_parity_gradient(backend, u)
 end
 
+# `orthogonal_to=:intercept` centers every basis column over the rows, so the
+# smooth is the uncentered reference minus its mean over the rows.
+@stestset "rk parity hsgp 2d intercept projection" begin
+    brmi = @brm _parity_cols_hsgp begin
+        mu ~ 1 + hsgp(x, z; k = (4, 3), orthogonal_to = :intercept)
+        y ~ Normal(mu, sigma)
+        effect(mu, Intercept) ~ Normal(0, 5)
+        sigma ~ Exponential(1)
+    end
+    backend = _parity_backend(brmi)
+    layout = backend.model.layout
+    @test layout.total == 16
+    u = collect(range(-0.4, 0.4; length = layout.total))
+    nt = constrain(layout, u)
+    f = _ref_hsgp_muv([_parity_cols_hsgp.x, _parity_cols_hsgp.z], [4, 3],
+        [1.5, 1.5], [nt.hsgp_x_z.rho_iso], nt.hsgp_x_z.sigma,
+        Vector(nt.hsgp_x_z.beta_raw); iso = true)
+    f = f .- sum(f) / length(f)
+    ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ f, nt.sigma), _parity_cols_hsgp.y))
+    floors = _ref_hsgp_floors([_parity_cols_hsgp.x, _parity_cols_hsgp.z],
+        [4, 3], [1.5, 1.5]; iso=true)
+    pr = _ref_hsgp_prior(_parity_population(nt, backend, :mu)[1], nt.sigma,
+        [nt.hsgp_x_z.rho_iso], nt.hsgp_x_z.sigma, Vector(nt.hsgp_x_z.beta_raw), floors)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    jac = log(nt.hsgp_x_z.rho_iso - only(floors)) + log(nt.hsgp_x_z.sigma) + log(nt.sigma)
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
+    _check_parity_gradient(backend, u)
+end
+
 @stestset "rk parity hsgp k1" begin
     brmi = @brm _parity_cols_hsgp begin
         mu ~ 1 + hsgp(x; k = 1)

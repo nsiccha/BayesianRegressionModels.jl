@@ -3042,6 +3042,20 @@ StanBlocks.@deffun begin
         return out
     end
 
+    # Remove the intercept direction from a one-dimensional HSGP basis:
+    # every column centered over the rows, so the term sums to zero over
+    # them at every draw (`orthogonal_to=:intercept`).
+    @stanonly brm_hsgp_center_columns(PHI::matrix[n, m])::matrix[n, m] = begin
+        out::matrix[n, m]
+        for b in 1:m
+            phi_centered = col(PHI, b) - mean(col(PHI, b))
+            for i in 1:n
+                out[i, b] = phi_centered[i]
+            end
+        end
+        return out
+    end
+
     # Per-group spectrally scaled HSGP basis for hyper-predictor models. Each
     # group g has its own (rho, sigma): scale PHI's rows by that group's
     # spectral weights, masked to the group's rows. The loop is why this is a
@@ -3214,6 +3228,24 @@ _sb_hsgp_latent_orthogonal = StanBlocks.@slic begin
     sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma, rho)
     return PHI * (sqrt_spd .* beta_raw)
 end
+
+_sb_hsgp_latent_centered = StanBlocks.@slic begin
+    n_basis = dims(omega2)[1]
+    PHI_raw = brm_hsgp_basis_1d(x, omega2, center, L)
+    PHI = brm_hsgp_center_columns(PHI_raw)
+    rho_iso  ~ lognormal(0., 1.; lower=rho_lower)
+    sigma    ~ lognormal(0., 1.; lower=0.)
+    beta_raw ~ std_normal(; n=n_basis)
+    rho = rep_vector(rho_iso, 1)
+    sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma, rho)
+    return PHI * (sqrt_spd .* beta_raw)
+end
+
+# The latent-axis submodel of each `orthogonal_to=` value.
+_sb_hsgp_latent_submodel(::Nothing) = :_sb_hsgp_latent
+_sb_hsgp_latent_submodel(orthogonal::Symbol) = _sb_hsgp_latent_submodel(Val(orthogonal))
+_sb_hsgp_latent_submodel(::Val{:linear}) = :_sb_hsgp_latent_orthogonal
+_sb_hsgp_latent_submodel(::Val{:intercept}) = :_sb_hsgp_latent_centered
 
 # Per-group HSGP. Length-scale/marginal-SD hyperparameters are shared across
 # groups (decision 7p44fo); only tensor-basis weights vary by group.
@@ -3600,7 +3632,6 @@ function _sb_hsgp_periodic_frozen_check(data, key, names, K::Integer,
     nothing
 end
 
-_sb_orthogonalize_hsgp_linear(PHI::AbstractMatrix, x::AbstractVector{<:Real}) = _brm_orthogonalize_hsgp_linear(PHI, x)
 
 
 # ==============================================================================
@@ -4497,8 +4528,9 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
         _SBPreprocContext(Dict{Symbol,PreprocEntry}(), _frozen_preproc)
     data[_SB_BINDINGS_KEY] = Dict{Symbol,NamedTuple}()
     data[_SB_GROUP_COLUMNS_KEY] = Dict{Symbol,Union{Nothing,Some}}()
-    # `name = constant(expr)` becomes an ordinary scalar data field before
-    # anything else reads the formula. Replay restores the fitted value from
+    # `name = constant(expr)` becomes an ordinary data field before the
+    # formula is lowered; only the prior addresses above are read first, and
+    # they leave a constant to this step. Replay restores the fitted value from
     # its `:constant` record instead of evaluating `expr` on the new data.
     brmi, constants = _brm_resolve_constants(brmi; prefix="sbimpl",
         fitted=(key, source) -> _sb_fitted_constant(data, key, source))
@@ -4506,6 +4538,9 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
         _sb_record_preproc!(data, c.name,
             PreprocEntry(:constant, (; c.value, c.node), c.source, false))
     end
+    # A data-only assignment becomes a data field the same way, evaluated here
+    # from this model's data (user decision `1tb1jrg`).
+    brmi, _ = _brm_resolve_data_assignments(brmi; prefix="sbimpl")
     # Predictors whose intercept an ordinal response's thresholds supply: their
     # categorical terms stay treatment-coded (see `_brm_cellmeans_block`).
     data[_SB_THRESHOLD_LOCATED_KEY] = _brm_threshold_located_predictors(brmi)
@@ -6001,6 +6036,11 @@ function _sb_reprocess_strata!(new_data, handled, e::PreprocEntry, idx, df, free
     (; by, strata, stratum_idx, stratum_idx_key, n_strata_key)
 end
 
+# A record whose replay reads regenerated grouping codes: a `by=` HSGP's
+# per-level projection.
+_sb_reads_level_codes(e::PreprocEntry) =
+    e.kind === :hsgp && e.const_ isa NamedTuple && haskey(e.const_, :level_index)
+
 function _sb_reprocess_column_length(df, column, what)
     col = _sb_df_column(df, column)
     col isa AbstractVector || error(
@@ -6028,7 +6068,7 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         new_preproc[key] = e
     elseif e.kind === :constant
         if freeze
-            new_data[key] = e.const_.value
+            new_data[key] = copy(e.const_.value)
             new_preproc[key] = e
         else
             node = _brm_rebind_value(e.const_.node, df)
@@ -6264,9 +6304,15 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
                         :harmonics => e.const_.harmonics_key,
                         :rho_lower => e.const_.rho_lower_key)
     elseif e.kind === :hsgp
-        replay_and_bind(_sb_hsgp_replay_input(df, e;
-                            allow_empty=!isnothing(get(e.const_, :domain_fits, nothing))),
-                        :primary => key,
+        input = _sb_hsgp_replay_input(df, e;
+            allow_empty=!isnothing(get(e.const_, :domain_fits, nothing)))
+        # A `by=` term's projection reads the replay rows' level codes, which
+        # its grouping record (replayed first) has just written.
+        level_index = get(e.const_, :level_index, nothing)
+        isnothing(level_index) || (input = merge(input, (; group=(;
+            idx=new_data[level_index.idx_key],
+            new_preproc[level_index.idx_key].const_.levels))))
+        replay_and_bind(input, :primary => key,
                         :omega2 => e.const_.omega2_key,
                         :rho_lower => e.const_.rho_lower_key)
     elseif e.kind === :categorical_outcome
@@ -6531,6 +6577,38 @@ function _sb_reprocess_submodel_hook!(new_data, new_preproc, handled, key::Symbo
     nothing
 end
 
+# A replay's data with every data-only assignment of the model
+# (`_brm_resolve_data_assignments`) evaluated on its rows, so each record that
+# reads one by name reads its replay value. A constant it reads keeps its fitted
+# value on a frozen replay. An assignment the replay rows cannot evaluate is
+# absent from the replay data and raises its cause where something reads it.
+function _sb_replay_data(sb::SBBRMI, df, freeze::Bool)
+    prefix = "sbimpl: reprocess"
+    constants = Dict{Symbol,Any}()
+    for (key, e) in sb.preproc
+        e.kind === :constant || continue
+        constants[key] = freeze ? e.const_.value :
+            _brm_evaluate_constant(key, _brm_rebind_value(e.const_.node, df); prefix)
+    end
+    source = isempty(constants) ? sb.parent :
+        _brm_rebind_brmi(sb.parent, _BRMConstantSubstitution(constants))
+    base = _BRMReplayData(df, constants)
+    values = Dict{Symbol,Any}()
+    for (key, op) in _brm_operation_entries(source)
+        assignment = _brm_assignment_column(op)
+        (assignment === nothing || hasproperty(df, key)) && continue
+        value = try
+            node = _brm_rebind_value(last(getargs(parent(assignment), 2)), base)
+            _brm_data_assignment_value(node, _BRMDataAssignments(prefix), Set{Symbol}())
+        catch err
+            _BRMReplayFailure(string(prefix, ": the replay data cannot evaluate ",
+                "data-only assignment `", key, "`: ", sprint(showerror, err)))
+        end
+        (value isa _BRMReplayFailure || _brm_is_data_value(value)) && (values[key] = value)
+    end
+    isempty(values) ? df : _BRMReplayData(df, values)
+end
+
 """
     reprocess(sb::SBBRMI, new_df; freeze_constants=true,
               resample_groups=(), resample_covariates=(),
@@ -6594,8 +6672,10 @@ indices, sum-to-zero (`s2z_groups`) blocks (rows re-coded through the fitted
 levels, any subset of them; the fitted centering weights kept; frozen only),
 `kernel(...)` subject counts and `ragged(x, group)` columns, continuous
 × continuous interaction columns, typed observation weights, categorical
-outcomes, and pass-through raw columns (plain data, `me` obs values, `ar`
-time). A consumer `_sb_submodel_rhs!` term is called again on `new_df`, and
+outcomes, pass-through raw columns (plain data, `me` obs values, `ar`
+time), and data-only model-scope assignments (evaluated again on `new_df`; a
+constant one reads keeps its fitted value unless `freeze_constants=false`). A
+consumer `_sb_submodel_rhs!` term is called again on `new_df`, and
 every data key it writes comes from that call (its scalar keyword columns
 follow `freeze_constants`); the call must emit the fitted statements. A
 derived non-vector key with no preprocessing record is carried through
@@ -6609,6 +6689,7 @@ refused); drawing new levels of one (`resample_groups`) is not supported.
 function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
                    resample_groups=(),resample_covariates=(),
                    held_out=sb.held_out)
+    new_df = _sb_replay_data(sb, new_df, freeze_constants)
     groups = _sb_resample_group_set(resample_groups)
     covariates = union(_sb_existing_covariates(sb.preproc),
         _sb_covariate_selection(sb.parent,resample_covariates))
@@ -6672,6 +6753,7 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
     #    record. Interactions wait until their raw/transformed operands exist.
     for (key, e) in sb.preproc
         e.kind in (:interaction, :submodel_hook) && continue
+        _sb_reads_level_codes(e) && continue
         # A response a cell observes through a grouping (`y[rows[i]]`) is a
         # gathered key whose raw column the new data may lack. Its record is
         # kept, so a later replay onto rows with the response gathers it again.
@@ -6694,6 +6776,11 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
                 "` of the joint response `", join(outcomes, "`, `"), "`. A forecast of a ",
                 "joint response is not supported yet (todo `1fnt1zu`); include its outcome columns.")
         end
+        _sb_reprocess_entry!(new_data, new_preproc, handled, key, e, new_df, freeze_constants)
+    end
+    # 1a. A `by=` HSGP projection reads the level codes step 1 regenerated.
+    for (key, e) in sb.preproc
+        _sb_reads_level_codes(e) || continue
         _sb_reprocess_entry!(new_data, new_preproc, handled, key, e, new_df, freeze_constants)
     end
     # 1b. Re-invoke each consumer `_sb_submodel_rhs!` term on the new frame; it
@@ -6731,6 +6818,7 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
                     _sb_df_column(new_df, k), masked[k], "sbimpl: reprocess: data column `$k`") :
                     _sb_df_column(new_df, k)
             else
+                _brm_raise_replay_failure(new_df, k)
                 error(
                     "sbimpl: reprocess: data key `$k` is a derived vector with no ",
                     "preprocessing record and is not a column of the new DataFrame. ",
@@ -8828,10 +8916,10 @@ _sb_missing_preproc(plan, observed_key, missing_key) = PreprocEntry(
        observed_key, missing_key), plan.source, true)
 
 # Map a Julia function (typically the result of `InverseFunctions.inverse(...)`
-# for a link transform) to the Stan-side function name. Stan ships
-# `inv_logit` rather than `logistic`, so the bare `nameof` would emit a
-# call stanc rejects. Add other rename cases here as they come up.
-_sb_julia_to_stan_fn(f) = f === LogExpFunctions.logistic ? :inv_logit : Symbol(nameof(f))
+# for a link transform) to the Stan-side function name: the kernel cells'
+# table (`_sb_julia_stan_name`, sb_cell_julia.jl) where Stan spells it
+# differently (`logistic` -> `inv_logit`), else its own name.
+_sb_julia_to_stan_fn(f) = something(_sb_julia_stan_name(f), Symbol(nameof(f)))
 
 # Inner-arg unwrap helpers shared by `_sb_predictor_term!` overloads (mo, me,
 # s, t2, gp, hsgp, ar, mo1) and a few `mi`-style sites. Each step is a tiny dispatch
@@ -9770,15 +9858,18 @@ function _sb_hyper_intercept_stmt(hyper, plan, cfg, spelling)
     _sb_gp_prior_stmt(nm.beta, cfg)
 end
 
-function _sb_hsgp_by_hyper_model(term_overrides, t, rho_plan, sigma_plan)
+function _sb_hsgp_by_hyper_model(term_overrides, t, rho_plan, sigma_plan,
+                                 level=nothing)
     body = Any[]
     _sb_hyper_param_stmts!(body, :length_scale, rho_plan)
     _sb_hyper_param_stmts!(body, :sd, sigma_plan)
     push!(body, :(S = brm_hsgp_by_hyper_S(
         PHI, omega2, group_idx, rho_vec, sigma_vec, rho_lower)))
+    _sb_hsgp_hyper_level_inputs!(body, level)
     push!(body, :(return rows_dot_product(S, beta[group_idx, :])))
-    base = StanBlocks.SlicModel(Expr(:block, body...), Dict{Symbol,Any}(),
-                                @__MODULE__)
+    base = _sb_hsgp_hyper_levels(
+        StanBlocks.SlicModel(Expr(:block, body...), Dict{Symbol,Any}(), @__MODULE__),
+        level)
     stmts = Any[]
     rho_cfg = _sb_term_cfg(term_overrides, t, :length_scale)
     isnothing(rho_cfg) || push!(stmts, _sb_hyper_intercept_stmt(
@@ -9791,6 +9882,27 @@ function _sb_hsgp_by_hyper_model(term_overrides, t, rho_plan, sigma_plan)
     isempty(stmts) && return base
     Base.merge(base, stmts...)
 end
+
+# The level weights of a hyper-predicted grouped HSGP with `cor=`, correlated as
+# in the shared-scale submodels before the per-group spectral scales multiply
+# them (src/level_correlation.jl, `_brm_check_hyper_level_correlation`). The
+# multigroup coherences read the shared length scale as a per-axis `rho`, as
+# in `_sb_hsgp_by`.
+_sb_hsgp_hyper_levels(base, ::Nothing) = base
+_sb_hsgp_hyper_levels(base, ::_BRMLevelCorrelation) =
+    _sb_level_correlated_input(base, :beta)
+_sb_hsgp_hyper_levels(base, ::_BRMMultigroupCorrelation) =
+    _sb_multigroup_input(base, :beta)
+function _sb_hsgp_hyper_levels(base, lc::_BRMMultigroupCoordinates)
+    weights = isempty(lc.positions) ? _SB_MULTIGROUP_COORDINATE_WEIGHTS :
+        _SB_MULTIGROUP_INDUCING_WEIGHTS
+    model = _sb_multigroup_input(base, :beta, weights)
+    isnothing(lc.lambda) ? _sb_multigroup_own_lambda(model) : model
+end
+_sb_hsgp_hyper_level_inputs!(_body, ::Union{Nothing,_BRMLevelCorrelation}) = nothing
+_sb_hsgp_hyper_level_inputs!(body,
+        ::Union{_BRMMultigroupCorrelation,_BRMMultigroupCoordinates}) =
+    push!(body, :(rho = rep_vector(rho_iso, dims(omega2)[2])))
 
 # Ungrouped scalar variant: one predicted value, so four spliced statements
 # onto today's submodel — no generator, no duplication of the base.
@@ -10162,6 +10274,7 @@ _sb_gp_submodel(::Val{:_sb_hsgp_by_aniso_multigroup_inducing_lambda}) =
     _sb_hsgp_by_aniso_multigroup_inducing_lambda
 _sb_gp_submodel(::Val{:_sb_hsgp_latent}) = _sb_hsgp_latent
 _sb_gp_submodel(::Val{:_sb_hsgp_latent_orthogonal}) = _sb_hsgp_latent_orthogonal
+_sb_gp_submodel(::Val{:_sb_hsgp_latent_centered}) = _sb_hsgp_latent_centered
 _sb_gp_submodel(::Val{:_sb_gp_periodic}) = _sb_gp_periodic
 _sb_gp_submodel(::Val{:_sb_hsgp_periodic}) = _sb_hsgp_periodic
 
@@ -10187,6 +10300,7 @@ _sb_gp_rho_lhs(::Val{:_sb_hsgp_by_multigroup_inducing_lambda}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_by_aniso_multigroup_inducing_lambda}) = :(rho :: vector[n_axes])
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_latent}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_latent_orthogonal}) = :rho_iso
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_latent_centered}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_gp_periodic}) = :rho
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_periodic}) = :rho_iso
 
@@ -12780,8 +12894,11 @@ end
 # The Stan value of a level correlation's lower Cholesky factor: the sampled
 # `LKJCholesky` declaration by name, or a data factor computed once in Julia
 # and replayed frozen, like a known `cor(:, ID) = R`.
-# The grouped-HSGP submodel and level arguments of a `cor=`: the constant
-# (ICM) correlation, or the frequency-dependent multigroup coherence.
+# The grouped-HSGP submodel and level arguments of a `cor=`: independent levels
+# (no `cor=`), the constant (ICM) correlation, or the frequency-dependent
+# multigroup coherence.
+_sb_hsgp_level_submodel(::Nothing, iso) = iso ? :_sb_hsgp_by : :_sb_hsgp_by_aniso
+_sb_hsgp_level_arguments!(_data, ::Nothing) = (;)
 _sb_hsgp_level_submodel(::_BRMLevelCorrelation, iso) =
     iso ? :_sb_hsgp_by_levelcor : :_sb_hsgp_by_aniso_levelcor
 _sb_hsgp_level_submodel(::_BRMMultigroupCorrelation, iso) =
@@ -14246,7 +14363,8 @@ function _sb_hsgp_fit_for_emission(data, key, names, axes, K, c, iso,
         _brm_check_hsgp_anchor(domain_fits, options.anchor; prefix="sbimpl")
         fits = isnothing(domain_fits) ?
             _brm_fit_hsgp(fitted_axes, K, c; anchor=options.anchor) : domain_fits
-        return (; fits, support=_brm_hsgp_support(fitted_axes, fits), axes)
+        return (; fits, support=_brm_hsgp_support(fitted_axes, fits), axes,
+                projection=nothing)
     end
     const_ = frozen.const_
     frozen_domain = get(const_, :domain_fits, nothing)
@@ -14264,11 +14382,27 @@ function _sb_hsgp_fit_for_emission(data, key, names, axes, K, c, iso,
     evaluated = _brm_hsgp_replay_axes(axes, const_.fits, support,
         options.extrapolate, mask; prefix="sbimpl: resample replay", names,
         fixed_domain=!isnothing(domain_fits))
-    (; fits=const_.fits, support, axes=evaluated)
+    projection = _brm_hsgp_frozen_projection(const_, orthogonal_to;
+                                             prefix="sbimpl: resample replay")
+    (; fits=const_.fits, support, axes=evaluated, projection)
 end
 
 _sb_hsgp_rows_source(options) =
     isnothing(options.rows) ? nothing : name(_sb_named_inner(:hsgp, options.rows))
+
+# The `group` a `by=` HSGP's projection reads (`_brm_hsgp_projection_group`):
+# the grouping index the term reads and the levels its `:group_index` record
+# holds. `level_index` names both keys; `nothing` for a term without a
+# projection.
+_sb_hsgp_projection_group(_data, ::Nothing) = nothing
+function _sb_hsgp_projection_group(data, level_index::NamedTuple)
+    recorded = get(data, _SB_PREPROC_KEY, nothing)
+    recorded isa _SBPreprocContext && (recorded = recorded.recorded)
+    entry = recorded isa AbstractDict ? get(recorded, level_index.idx_key, nothing) : nothing
+    isnothing(entry) && error(
+        "sbimpl: internal error — grouping index `$(level_index.idx_key)` has no record")
+    (; idx=data[level_index.idx_key], entry.const_.levels)
+end
 
 # Replay needs the options next to the frozen fit; a term that uses none of
 # them records nothing new, so its preprocessing record is unchanged.
@@ -14357,9 +14491,6 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     orthogonal_to = _sb_hsgp_orthogonal_to(kw, n_axes)
     !is_raw && partial && error(
         "sbimpl: partial centering currently requires a raw-data HSGP axis")
-    orthogonal_to === :linear && haskey(kw, :by) && error(
-        "sbimpl: `hsgp(...; orthogonal_to=:linear)` is an ungrouped " *
-        "population-shape constraint and cannot be combined with `by=`")
     iso = _sb_gp_iso(kw, :hsgp)
 
     if !is_raw
@@ -14392,9 +14523,8 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         _sb_hsgp_floor_check(term_overrides, t, rho_lower,
             _brm_hsgp_floor_geometry(K, c, domain_fits, true),
             _brm_hsgp_floor_remedy(true))
-        submodel_name = orthogonal_to === :linear ?
-            :_sb_hsgp_latent_orthogonal : :_sb_hsgp_latent
-        submodel = _sb_gp_submodel_expr(submodel_name, term_overrides, t)
+        submodel = _sb_gp_submodel_expr(
+            _sb_hsgp_latent_submodel(orthogonal_to), term_overrides, t)
         push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
             submodel, term_overrides, t; x=x_name, omega2=omega2_name, center, L, rho_lower)))
         return col_name
@@ -14437,9 +14567,13 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
             data, PHI_name, names, axes, K, c, iso,
             domain_fits, orthogonal_to, options, mask)
         fits = fitted.fits
+        # `orthogonal_to=` projects each level's rows with that level's fit.
+        level_index = isnothing(orthogonal_to) ? nothing :
+            (; idx_key=info.idx_name, n_key=Symbol(:n_, gname))
         basis = _brm_hsgp_basis_state(
             fitted.axes, K, cov, iso, period; fits, orthogonal=orthogonal_to,
-            options.anchor, mask)
+            options.anchor, mask, fitted.projection,
+            group=_sb_hsgp_projection_group(data, level_index))
         PHI, omega2 = basis.PHI, basis.omega2
         data[PHI_name] = PHI
         data[omega2_name] = omega2
@@ -14447,35 +14581,33 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         floor_const = _sb_hsgp_floor_check(term_overrides, t, basis.rho_lower,
             _brm_hsgp_floor_geometry(K, c, fits, !isnothing(domain_fits)),
             _brm_hsgp_floor_remedy(!isnothing(domain_fits)))
-        _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp,
-            (; fits, K, c, iso, domain_fits, orthogonal_to,
+        preproc_const = (; fits, K, c, iso, domain_fits, orthogonal_to,
              omega2_key=omega2_name, rho_lower_key=rho_lower_name,
-             _sb_hsgp_option_const(options, fitted.support)..., floor_const...),
+             _sb_hsgp_option_const(options, fitted.support)..., floor_const...)
+        isnothing(basis.projection) ||
+            (preproc_const = merge(preproc_const, (; basis.projection, level_index)))
+        _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp, preproc_const,
             names, false))
         rho_plan = _sb_hyper_plan_for(hyper_plans, :length_scale)
         sigma_plan = _sb_hyper_plan_for(hyper_plans, :sd)
         level_cor = get(kw, :cor, nothing)
+        # `cor=` correlates the levels of `by` (src/level_correlation.jl).
+        lc = nothing
         if !isnothing(level_cor)
-            # `cor=` correlates the levels of `by` (src/level_correlation.jl).
             what = "hsgp($axes_suffix; by=$gname, cor=$(_brm_level_cor_label(level_cor)))"
-            (isnothing(rho_plan) && isnothing(sigma_plan)) || error(
-                "sbimpl: `$what` with hyper-predicted length scales or " *
-                "amplitudes is not implemented")
             lc = _brm_level_correlation(level_cor; what, prefix="sbimpl")
             _brm_check_level_correlation(lc, data[Symbol(:n_, gname)];
                                          what, group=gname, prefix="sbimpl")
+            _brm_check_hyper_level_correlation(lc, hyper_plans; what, prefix="sbimpl")
+        end
+        level_arguments = _sb_hsgp_level_arguments!(data, lc)
+        if isnothing(rho_plan) && isnothing(sigma_plan)
             submodel = _sb_gp_submodel_expr(_sb_hsgp_level_submodel(lc, iso),
                                             term_overrides, t)
             push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
                 submodel, term_overrides, t; PHI=PHI_name, omega2=omega2_name,
                 rho_lower=rho_lower_name, beta=info.block_name, group_idx=info.idx_name,
-                _sb_hsgp_level_arguments!(data, lc)...)))
-        elseif isnothing(rho_plan) && isnothing(sigma_plan)
-            submodel = _sb_gp_submodel_expr(
-                iso ? :_sb_hsgp_by : :_sb_hsgp_by_aniso, term_overrides, t)
-            push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
-                submodel, term_overrides, t; PHI=PHI_name, omega2=omega2_name,
-                rho_lower=rho_lower_name, beta=info.block_name, group_idx=info.idx_name)))
+                level_arguments...)))
         else
             iso || error("sbimpl: internal error — hyper-predictor reached " *
                          "aniso grouped emission (B1 should have refused it)")
@@ -14486,11 +14618,11 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
                 "sbimpl: internal error — hyper-predictor needs `$G_name`, " *
                 "which prepass 2.5 should have stashed")
             submodel = _sb_hsgp_by_hyper_model(
-                term_overrides, t, rho_plan, sigma_plan)
+                term_overrides, t, rho_plan, sigma_plan, lc)
             push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
                 submodel, term_overrides, t; PHI=PHI_name, omega2=omega2_name,
                 rho_lower=rho_lower_name, beta=info.block_name,
-                group_idx=info.idx_name, G=G_name)))
+                group_idx=info.idx_name, G=G_name, level_arguments...)))
         end
         return col_name
     end
@@ -14505,7 +14637,7 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     fits = fitted.fits
     basis = _brm_hsgp_basis_state(
         fitted.axes, K, cov, iso, period; fits, orthogonal=orthogonal_to,
-        options.anchor, mask)
+        options.anchor, mask, fitted.projection)
     PHI, omega2 = basis.PHI, basis.omega2
     data[PHI_name] = PHI
     data[omega2_name] = omega2
@@ -14519,6 +14651,8 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
                      _sb_hsgp_option_const(options, fitted.support)...,
                      floor_const...)
     partial && (preproc_const = merge(preproc_const, (; centeredness)))
+    isnothing(basis.projection) ||
+        (preproc_const = merge(preproc_const, (; basis.projection)))
     _sb_record_preproc!(data, PHI_name, PreprocEntry(
         :hsgp, preproc_const, names, false))
     submodel_name = if partial

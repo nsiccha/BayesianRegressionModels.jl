@@ -3059,9 +3059,10 @@ function _rk_fit_twin!(derived::Vector{_RKDerivedSpec},
 end
 
 # The fit-role input of `vname`, bound to `values` (already the training
-# values on a frozen replay).
+# values on a frozen replay). `columns` are the plan's bound columns: a
+# regression plan's, or a value plan's (`_RKValuePlan`), which hold any value.
 function _rk_fit_input!(derived::Vector{_RKDerivedSpec},
-        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol},
+        columns::AbstractDict{Symbol}, taken::Set{Symbol},
         vname::Symbol, values::AbstractVector)
     label = _rk_fit_label(vname)
     for spec in derived
@@ -5118,10 +5119,6 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
     # The periodic prepared state carries no `orthogonal` field (the
     # raw-kw gate above refuses `orthogonal_to=` for periodic first).
     orthogonal = get(state, :orthogonal, nothing)
-    orthogonal === :linear && state.by !== nothing && error(
-        "$prefix: predictor `$target` `hsgp(...; orthogonal_to=:linear)` " *
-        "is an ungrouped population-shape constraint and cannot be " *
-        "combined with `by=`")
     axes = Tuple(prepared.source)
     for axis in axes
         state.latent && continue
@@ -5156,11 +5153,13 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
             Expr(:_rk_data_preparation, :brm_hsgp_row_mask, source), name))
         name
     end
-    # An automatic exp-quad basis interval is fitted in-graph to fit-role
-    # copies of the axes and of the `rows=` mask, so a frozen `reprocess`
-    # keeps the training interval while the basis reads the new rows.
+    # An automatic exp-quad basis interval, and an `orthogonal_to=` projection,
+    # are fitted in-graph to fit-role copies of the axes and of the `rows=`
+    # mask, so a frozen `reprocess` keeps the training fits while the basis
+    # reads the new rows.
     fit_axes, fit_mask = nothing, nothing
-    if !state.latent && !state.explicit_domain && state.cov === :exp_quad
+    if !state.latent && state.cov === :exp_quad &&
+            (!state.explicit_domain || orthogonal !== nothing)
         fit_axes = Tuple(_rk_fit_twin!(derived, columns, taken, data, axis)
             for axis in axes)
         if mask !== nothing
@@ -5195,13 +5194,14 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         end
         columns[source] = raw
         level_cor = get(state.by, :level_cor, nothing)
-        level_cor !== nothing && !isempty(hyper_plans) && error(
-            "$prefix: predictor `$target` `hsgp(...; by=..., cor=...)` with " *
-            "hyper-predicted length scales or amplitudes is not implemented")
+        _brm_check_hyper_level_correlation(level_cor, hyper_plans;
+            what="hsgp(...; by=..., cor=...)", prefix="$prefix: predictor `$target`")
         (; group_index=idx, group_source=source,
             group_levels=collect(state.by.levels), n_groups=length(state.by.levels),
             level_cor, _rk_plan_level_coordinates!(level_cor, data, columns, taken,
-                                                   derived)...)
+                                                   derived)...,
+            _rk_plan_projection_levels!(orthogonal, state, idx, data, columns, taken,
+                                        derived, fit_mask)...)
     end
     # `fits` (each axis's center and half-width) is metadata for design
     # checks (`rk_design_binder`); the emitted basis computes its own.
@@ -5209,6 +5209,34 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         (; id, k, c, iso=state.iso, fits=state.fits,
             fixed_fits=state.explicit_domain ? state.fits : nothing,
             latent=state.latent, orthogonal, common..., grouped...), id, id)
+end
+
+# `orthogonal_to=` on a `by=` term is fitted per level (decision 15hn91t) on
+# the level codes of the fit-role rows: a fit-role input holding the training
+# rows' codes in the term's fitted levels on a frozen replay, beside the
+# group index `index` the term reads. Every level needs a fit row to fit its
+# projection on.
+_rk_plan_projection_levels!(::Nothing, _state, _index, _data, _columns, _taken,
+                            _derived, _fit_mask) = (;)
+function _rk_plan_projection_levels!(orthogonal::Symbol, state, index, data, columns,
+                                     taken, derived, fit_mask)
+    source = state.by.source
+    codes = _brm_apply_levels(state.by.levels,
+                              _brm_fit_input_source(source, data[source]))
+    index_fit = _rk_fit_input!(derived, columns, taken, index, codes)
+    frozen = _brm_frozen_replay()
+    # A data-free replay binds the exported fit, which no fit-role row computes.
+    if frozen === nothing || frozen.fits === nothing
+        rows = fit_mask === nothing ? trues(length(codes)) : columns[fit_mask] .> 0
+        for (level, label) in enumerate(state.by.levels)
+            any(row -> rows[row] && codes[row] == level, eachindex(codes)) || error(
+                "RK backend: `hsgp(...; orthogonal_to=$(repr(orthogonal)))` with " *
+                "`by=` fits each level's projection on that level's rows, and " *
+                "level `$label` has none (every row of it is outside the " *
+                "term's `rows=`)")
+        end
+    end
+    (; fit_group_index=index_fit)
 end
 
 # `cor = multigroup(coordinates, lambda; k)` reads the levels' coordinates as
