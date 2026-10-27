@@ -33,24 +33,35 @@ _rk_hsgp_fit_axes(term) = get(term.options, :fit_axes, nothing)
 _rk_hsgp_fitted(term) = _rk_hsgp_fit_axes(term) !== nothing
 _rk_hsgp_fit_formals(term) = _rk_hsgp_fitted(term) ? (:fit,) : ()
 _rk_hsgp_fit_graph_formals(term) = (_rk_hsgp_per_axis(:axis_fit, length(term.columns))...,
-    (_rk_hsgp_mask(term) === nothing ? () : (:mask_fit,))...)
+    (_rk_hsgp_mask(term) === nothing ? () : (:mask_fit,))...,
+    (_rk_hsgp_level_projected(term.options) ? (:group_fit,) : ())...)
 _rk_hsgp_fit_actuals(term) = (_rk_hsgp_fit_axes(term)...,
-    (_rk_hsgp_mask(term) === nothing ? () : (term.options.fit_mask,))...)
+    (_rk_hsgp_mask(term) === nothing ? () : (term.options.fit_mask,))...,
+    (_rk_hsgp_level_projected(term.options) ? (term.options.fit_group_index,) : ())...)
 _rk_hsgp_clamped(options) = get(options, :extrapolate, :error) === :clamp
 _rk_hsgp_orthogonal(options) = get(options, :orthogonal, nothing)
+# A `by=` term's `orthogonal_to=` projection is fitted per level (decision
+# 15hn91t) on the fit-role rows' level codes (`_rk_plan_projection_levels!`).
+_rk_hsgp_level_projected(options) = haskey(options, :fit_group_index)
 
 # Where each fitted quantity sits in a term's `fit` vector: every axis's center
 # and half-width, then every axis's training range when the basis clamps, then
 # for `orthogonal_to=` each basis column's mean — after the axis mean and its
 # sum of squares, and followed by each column's projection coefficient, when
-# the basis is orthogonal to the linear term.
+# the basis is orthogonal to the linear term. A per-level projection repeats
+# that projection block once per level, from offset `projection`.
 function _rk_hsgp_fit_index(options, D)
     ranges = _rk_hsgp_clamped(options) ? 2D : 0
     axis = _rk_hsgp_orthogonal(options) === :linear ? 2 : 0
     (; center=j -> 2j - 1, width=j -> 2j,
         lower=j -> 2D + 2j - 1, upper=j -> 2D + 2j,
-        axis_mean=2D + ranges + 1, axis_ss=2D + ranges + 2, columns=2D + ranges + axis)
+        axis_mean=2D + ranges + 1, axis_ss=2D + ranges + 2, columns=2D + ranges + axis,
+        projection=2D + ranges)
 end
+
+# The length of one level's projection block: the column means, after the
+# axis mean and sum of squares and followed by the slopes for `:linear`.
+_rk_hsgp_projection_stride(orthogonal::Symbol, B) = orthogonal === :linear ? 2 + 2B : B
 
 # Each axis's half-width, and its center when the basis reads it: formula
 # constants for a fixed domain, otherwise computed from the current axis --
@@ -176,8 +187,13 @@ function _rk_ast_hsgp_fit!(definitions, statements, term, taken)
         fit_rows = _rk_ast_graph_plate(row_inputs, row_values,
             Expr(:block, :(values = $inner), row_value))
         push!(body.args, :(fit_basis = stack($fit_rows; dims=1)))
-        value = _rk_ast_hsgp_projection_fit!(Val(orthogonal), body, value, inputs, B,
-                                             masked ? :(sum(mask_fit)) : nothing)
+        value = if _rk_hsgp_level_projected(options)
+            _rk_ast_hsgp_level_projection_fit!(Val(orthogonal), body, value, inputs,
+                                               B, options.n_groups, masked)
+        else
+            _rk_ast_hsgp_projection_fit!(Val(orthogonal), body, value, inputs, B,
+                                         masked ? :(sum(mask_fit)) : nothing)
+        end
     end
     push!(body.args, :(fit = $value), :(return fit))
     entry = _rk_ast_shared_definition!(definitions, taken, "brm_hsgp_fit_graph",
@@ -216,6 +232,50 @@ function _rk_ast_hsgp_projection_fit!(::Val{:linear}, body, value, inputs, B, ro
         end))
     push!(body.args, :(column_fits = stack($columns; dims=2)))
     :(vcat($value, [axis_mean, axis_ss], column_fits[1, :], column_fits[2, :]))
+end
+
+# A per-level projection: the block of `_rk_ast_hsgp_projection_fit!` fitted on
+# each level's fit-role rows (`group_fit .== g`, within the mask), one block per
+# level appended to `value` in level order (`_rk_hsgp_projection_stride`).
+function _rk_ast_hsgp_level_projection_fit!(::Val{:intercept}, body, value, _inputs,
+                                            B, G, masked)
+    weight = masked ? :(ifelse.(group_fit .== g, 1.0, 0.0) .* mask_fit) :
+        :(ifelse.(group_fit .== g, 1.0, 0.0))
+    columns = _rk_ast_graph_plate([:(1:$B)], [:b], Base.remove_linenums!(quote
+            sum(fit_basis[:, b] .* in_level) / level_rows
+        end))
+    levels = _rk_ast_graph_plate([:(1:$G)], [:g], Base.remove_linenums!(quote
+            in_level = $weight
+            level_rows = sum(in_level)
+            $columns
+        end))
+    push!(body.args, :(level_column_means = stack($levels; dims=2)))
+    :(vcat($value, vec(level_column_means)))
+end
+
+function _rk_ast_hsgp_level_projection_fit!(::Val{:linear}, body, value, inputs,
+                                            B, G, masked)
+    masked && error(
+        "BRM backend lowering: internal error — `orthogonal_to=:linear` with `rows=`")
+    x = only(inputs)
+    columns = _rk_ast_graph_plate([:(1:$B)], [:b], Base.remove_linenums!(quote
+            fit_phi = fit_basis[:, b]
+            phi_mean = sum(fit_phi .* in_level) / level_rows
+            fit_centered = (fit_phi .- phi_mean) .* in_level
+            [phi_mean, axis_ss > 1e-12 ?
+                sum(fit_axis_centered .* fit_centered) / axis_ss : 0.0]
+        end))
+    levels = _rk_ast_graph_plate([:(1:$G)], [:g], Base.remove_linenums!(quote
+            in_level = ifelse.(group_fit .== g, 1.0, 0.0)
+            level_rows = sum(in_level)
+            axis_mean = sum($x .* in_level) / level_rows
+            fit_axis_centered = ($x .- axis_mean) .* in_level
+            axis_ss = sum(fit_axis_centered .^ 2)
+            column_fits = stack($columns; dims=2)
+            vcat([axis_mean, axis_ss], column_fits[1, :], column_fits[2, :])
+        end))
+    push!(body.args, :(level_fits = stack($levels; dims=2)))
+    :(vcat($value, vec(level_fits)))
 end
 
 # The basis matrix and squared frequencies of one basis structure (modes,
@@ -262,7 +322,30 @@ function _rk_ast_hsgp_basis_graph!(definitions, term, taken)
         Expr(:block, :(values = $inner), row_value))
     push!(body.args, :(basis_rows = $outer))
     orthogonal = _rk_hsgp_orthogonal(options)
-    if orthogonal === :intercept
+    level_projected = _rk_hsgp_level_projected(options)
+    if level_projected
+        # A per-level projection (`by=`): every row projected with its own
+        # level's fitted block (`_rk_ast_hsgp_level_projection_fit!`), read at
+        # the row's level code.
+        index = _rk_hsgp_fit_index(options, D)
+        stride = _rk_hsgp_projection_stride(orthogonal, B)
+        push!(body.args, :(raw_basis = stack(basis_rows; dims=1)))
+        push!(body.args, :(level_offset = $(index.projection) .+ (group_index .- 1) .* $stride))
+        if orthogonal === :intercept
+            column = _rk_ast_graph_plate([:(1:$B)], [:b], Base.remove_linenums!(quote
+                    centered = raw_basis[:, b] .- fit[level_offset .+ b]
+                    $(masked ? :(mask .* centered) : :centered)
+                end))
+        else
+            push!(body.args, :(axis_centered = $(only(inputs)) .- fit[level_offset .+ 1]))
+            column = _rk_ast_graph_plate([:(1:$B)], [:b], Base.remove_linenums!(quote
+                    centered = raw_basis[:, b] .- fit[level_offset .+ (2 + b)]
+                    centered .- axis_centered .* fit[level_offset .+ ($(2 + B) + b)]
+                end))
+        end
+        push!(body.args, :(basis_columns = $column))
+        push!(body.args, :(PHI = stack(basis_columns; dims=2)))
+    elseif orthogonal === :intercept
         # `orthogonal_to=:intercept`: center every basis column over the rows
         # (the masked ones; the others stay zero) — the fit-role column means
         # when fitted, otherwise the current rows' own (a model-derived axis
@@ -327,7 +410,8 @@ function _rk_ast_hsgp_basis_graph!(definitions, term, taken)
     end
     push!(body.args, Expr(:return, Expr(:tuple, :PHI, :omega2)))
     _rk_ast_shared_definition!(definitions, taken, "brm_hsgp_basis_graph",
-        [inputs; _rk_hsgp_mask_formals(term)...; _rk_hsgp_fit_formals(term)...],
+        [inputs; _rk_hsgp_mask_formals(term)...; _rk_hsgp_fit_formals(term)...;
+         (level_projected ? (:group_index,) : ())...],
         body; kernel=true)
 end
 
@@ -396,8 +480,10 @@ function _rk_ast_hsgp_value_graph!(definitions, term, taken, inputs, sigma, rho,
     body = Expr(:block)
     if get(options, :cov, :exp_quad) !== :periodic
         basis = _rk_ast_hsgp_basis_graph!(definitions, term, taken)
+        # A per-level projection reads each row's level (the `group_index` below).
+        level_index = _rk_hsgp_level_projected(options) ? (:group_index,) : ()
         push!(body.args, Expr(:(=), Expr(:tuple, :PHI, :omega2),
-            Expr(:call, basis, formals...)))
+            Expr(:call, basis, formals..., level_index...)))
     end
     # `cor=multigroup(...)`: the group weights of each basis frequency are
     # correlated by its multigroup coherence (src/level_correlation.jl); the

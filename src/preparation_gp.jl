@@ -65,7 +65,7 @@ end
 # prepares terms with this alone.
 function _brm_hsgp_basis_geometry(axes, K, cov, iso, period;
                                   fits=nothing, orthogonal=nothing,
-                                  anchor=nothing, mask=nothing)
+                                  anchor=nothing, mask=nothing, group=nothing)
     cov === :periodic && return (; axes,
         harmonics=_brm_hsgp_periodic_harmonics(only(K)),
         rho_lower=_brm_hsgp_periodic_rho_lower(only(K)), fits=nothing)
@@ -77,10 +77,12 @@ end
 # `f(x) - f(x0)` for the same weights; `mask` zeroes the rows that carry no
 # predictor value (decision 1fk9b29). Both are data-only transforms of `PHI`,
 # as is `orthogonal_to=`'s projection: fitted on these axes' masked rows, or the
-# recorded `projection` of a frozen replay (`_brm_hsgp_projection_fit`).
+# recorded `projection` of a frozen replay (`_brm_hsgp_projection_fit`), and
+# per level of a `by=` term's `group` (`_brm_hsgp_projection_group`).
 function _brm_hsgp_basis_state(axes, K, cov, iso, period;
                                fits=nothing, orthogonal=nothing,
-                               anchor=nothing, mask=nothing, projection=nothing)
+                               anchor=nothing, mask=nothing, projection=nothing,
+                               group=nothing)
     geometry = _brm_hsgp_basis_geometry(axes, K, cov, iso, period; fits)
     if cov === :periodic
         PHI = _brm_apply_hsgp_periodic(period, only(axes), only(K))
@@ -94,10 +96,20 @@ function _brm_hsgp_basis_state(axes, K, cov, iso, period;
     isnothing(orthogonal) && !isnothing(projection) && error(
         "hsgp: internal error — a projection for a term without `orthogonal_to`")
     if !isnothing(orthogonal)
+        masked_axes = _brm_hsgp_masked_axes(axes, mask)
+        masked_group = _brm_hsgp_masked_group(group, mask)
+        rows = isnothing(mask) ? PHI : PHI[mask, :]
         isnothing(projection) && (projection = _brm_hsgp_projection_fit(
-            orthogonal, isnothing(mask) ? PHI : PHI[mask, :],
-            _brm_hsgp_masked_axes(axes, mask)))
-        PHI = _brm_hsgp_project(projection, PHI, axes)
+            orthogonal, rows, masked_axes, masked_group))
+        # Only the masked rows are projected (a level may have none); the
+        # others are zeroed below.
+        projected = _brm_hsgp_project(projection, rows, masked_axes, masked_group)
+        if isnothing(mask)
+            PHI = projected
+        else
+            PHI = zeros(eltype(projected), size(PHI))
+            PHI[mask, :] = projected
+        end
     end
     isnothing(anchor) || (PHI = PHI .- first(_brm_apply_hsgp(
         fits, Tuple([value] for value in anchor), K)))
@@ -262,7 +274,8 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
                                    prefix="BRM term preparation")
         _brm_check_hsgp_anchor(domain_fits, anchor; prefix="BRM term preparation")
         orthogonal = _brm_hsgp_orthogonal_to(kw, length(axes))
-        prepared = basis(axes, K, cov, iso, period; fits, orthogonal, anchor, mask)
+        prepared = basis(axes, K, cov, iso, period; fits, orthogonal, anchor, mask,
+                         group=_brm_hsgp_projection_group(by_state))
         prepared = merge(prepared, (; rho_lower=_brm_hsgp_declared_rho_lower(
             term, target, context, prepared.rho_lower,
             _brm_hsgp_floor_geometry(K, c, fits, !isnothing(domain_fits)),
@@ -323,6 +336,9 @@ function _brm_replay_term(::typeof(hsgp), training,
     axes = _brm_replay_gp_axes(training, context, :hsgp;
         allow_empty=periodic || get(st, :explicit_domain, false), mask)
     anchor = get(st, :anchor, nothing)
+    # The replay rows keep the training levels; a projection reads their codes.
+    by = isnothing(st.by) ? nothing :
+        merge(st.by, (; idx=_brm_apply_levels(st.by.levels, context.data[st.by.source])))
     state = if periodic
         basis = _brm_hsgp_basis_state(axes, st.K, :periodic, true, st.period;
                                       anchor, mask)
@@ -336,13 +352,10 @@ function _brm_replay_term(::typeof(hsgp), training,
         basis = _brm_hsgp_basis_state(evaluated, st.K, :exp_quad, st.iso, nothing;
             fits=st.fits, orthogonal, anchor, mask,
             projection=_brm_hsgp_frozen_projection(st, orthogonal;
-                                                   prefix="BRM term replay"))
+                                                   prefix="BRM term replay"),
+            group=_brm_hsgp_projection_group(by))
         merge(st, (; axes, PHI=basis.PHI, omega2=basis.omega2, rows))
     end
-    if !isnothing(st.by)
-        by = st.by
-        idx = _brm_apply_levels(by.levels, context.data[by.source])
-        state = merge(state, (; by=merge(by, (; idx))))
-    end
+    isnothing(by) || (state = merge(state, (; by)))
     _BRMPreparedTerm(hsgp, training.source, state, training.dependencies)
 end

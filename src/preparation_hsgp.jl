@@ -525,9 +525,65 @@ function _brm_hsgp_projection_fit(::Val{:linear}, PHI::AbstractMatrix,
     (; orthogonal=:linear, column_means, axis_mean, axis_ss, slopes)
 end
 
+# With `by=g` the projection is fitted per level (decision 15hn91t): each
+# level's statistics on that level's rows, and every row projected with its own
+# level's, so each level's field sums to zero over its rows (and with
+# `:linear` has no trend in the axis there) for any weights. `group` is
+# `(; idx, levels)`, each row's level code and the levels' labels; `nothing`
+# for an ungrouped term.
+_brm_hsgp_projection_fit(orthogonal, PHI, values, ::Nothing) =
+    _brm_hsgp_projection_fit(orthogonal, PHI, values)
+_brm_hsgp_projection_fit(::Nothing, _PHI, _values, ::NamedTuple) = nothing
+
+function _brm_hsgp_projection_fit(orthogonal::Symbol, PHI::AbstractMatrix,
+                                  values::Tuple, group::NamedTuple)
+    length(group.idx) == size(PHI, 1) || error(
+        "hsgp: internal per-level projection row-count mismatch")
+    per_level = map(eachindex(group.levels)) do level
+        rows = findall(==(level), group.idx)
+        isempty(rows) && error(
+            "hsgp: `orthogonal_to=$(repr(orthogonal))` with `by=` fits each " *
+            "level's projection on that level's rows, and level " *
+            "`$(group.levels[level])` has none" *
+            " (every row of it is outside the term's `rows=`)")
+        _brm_hsgp_projection_fit(orthogonal, PHI[rows, :],
+                                 map(value -> value[rows], values))
+    end
+    (; orthogonal, per_level)
+end
+
 _brm_hsgp_project(::Nothing, PHI, _values) = PHI
-_brm_hsgp_project(projection::NamedTuple, PHI::AbstractMatrix, values::Tuple) =
+function _brm_hsgp_project(projection::NamedTuple, PHI::AbstractMatrix, values::Tuple)
+    haskey(projection, :per_level) && error(
+        "hsgp: internal error — a per-level projection for an ungrouped term")
     _brm_hsgp_project(Val(projection.orthogonal), projection, PHI, values)
+end
+_brm_hsgp_project(projection, PHI, values, ::Nothing) =
+    _brm_hsgp_project(projection, PHI, values)
+_brm_hsgp_project(::Nothing, PHI, _values, ::NamedTuple) = PHI
+
+function _brm_hsgp_project(projection::NamedTuple, PHI::AbstractMatrix,
+                           values::Tuple, group::NamedTuple)
+    haskey(projection, :per_level) || error(
+        "hsgp: internal error — an ungrouped projection for a `by=` term")
+    (; per_level) = projection
+    length(group.idx) == size(PHI, 1) || error(
+        "hsgp: internal per-level projection row-count mismatch")
+    blocks = map(sort!(unique(group.idx))) do level
+        level in eachindex(per_level) || error(
+            "hsgp: internal error — row level $level has no fitted projection " *
+            "($(length(per_level)) fitted levels)")
+        rows = findall(==(level), group.idx)
+        rows => _brm_hsgp_project(per_level[level], PHI[rows, :],
+                                  map(value -> value[rows], values))
+    end
+    T = promote_type(float(eltype(PHI)), (eltype(last(block)) for block in blocks)...)
+    out = Matrix{T}(undef, size(PHI))
+    for (rows, projected) in blocks
+        out[rows, :] = projected
+    end
+    out
+end
 
 function _brm_hsgp_project(::Val{:intercept}, projection, PHI::AbstractMatrix,
                            _values::Tuple)
@@ -578,6 +634,15 @@ function _brm_hsgp_frozen_projection(record, orthogonal; prefix)
         "$(repr(projection.orthogonal)), the formula declares $(repr(orthogonal))")
     projection
 end
+
+# The `group` a `by=` term's projection is fitted and applied with: every row's
+# level code and the levels (`nothing` for an ungrouped term).
+_brm_hsgp_projection_group(::Nothing) = nothing
+_brm_hsgp_projection_group(by::NamedTuple) = (; by.idx, by.levels)
+
+_brm_hsgp_masked_group(::Nothing, _mask) = nothing
+_brm_hsgp_masked_group(group::NamedTuple, ::Nothing) = group
+_brm_hsgp_masked_group(group::NamedTuple, mask) = (; idx=group.idx[mask], group.levels)
 
 
 # ==============================================================================
