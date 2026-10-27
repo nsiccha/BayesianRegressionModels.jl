@@ -12,6 +12,20 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.17
+
+- A printed model (`show(brmi)`, `string(structure_of(m))`,
+  `string(priors_of(m))`, `show(builder)`) writes indexing, field access,
+  prefix operators, ranges and aliased families as the model wrote them:
+  `field[sk]` (was `getindex(field, sk)`), `state.a` (was
+  `getproperty(state, :(:a))`), `-k * t` (was `-(k) * t`), `x[1:3]` (was
+  `x[Colon(1, 3)]`), and `LocationScale(...)` and `Categorical(...)`, which
+  BRM exports (were Julia's names `AffineDistribution(...)` and
+  `DiscreteNonParametric(...)`, which a model using only BRM cannot re-parse).
+  `(-k)^2` and `(-1)^c` keep their parentheses on the built model and the
+  builder; the builder printed `-k ^ 2`, which re-parses as `-(k ^ 2)`. Snag
+  `brm-print-author-33b0b41d`.
+
 ## 0.2.16
 
 - The model reads every indexed output of an `@plate for` cell by its name, not
