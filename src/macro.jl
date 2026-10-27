@@ -777,6 +777,8 @@ function _brm_builder_code(x::Expr; df=nothing)
     lhs, x = named ? x.args : (:($(gensym("model"))(__df__)), x)
     source = Base.remove_linenums!(Meta.isexpr(x, :block) ?
         deepcopy(x) : Expr(:block, deepcopy(x)))
+    # `T::shares(total) ~ Law(…)` in a `@plate` cell (cell_total_coordinates.jl).
+    x = _brm_desugar_cell_bijections(x)
     alllocals = OrderedDict{Symbol,Symbol}()
     jointkeys = Set{Symbol}()
     captures = Set{Symbol}()

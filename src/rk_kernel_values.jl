@@ -671,8 +671,11 @@ const _RK_AR1_NORMAL_SUBMODELS = (
 # as the local assignment `name = _rk_cell_latent(law)`, so slicing and local
 # naming treat it as the cell local the rest of the cell reads;
 # `_rk_emit_kernel_plate!` declares it at model scope as RKPPL's dotted cell
-# latent (rkppl-use §13, "One latent array per index").
-_rk_cell_latent(law) = error("RK backend: internal: a cell latent marker was evaluated")
+# latent (rkppl-use §13, "One latent array per index"). A `T::shares(total)`
+# latent's marker also carries its bijection, its total and, in the plate, its
+# length: `_rk_cell_latent(law, :shares, total, n)`, declared as one joint
+# latent per index ("One joint latent per index").
+_rk_cell_latent(law, rest...) = error("RK backend: internal: a cell latent marker was evaluated")
 _rk_is_cell_latent(statement) = Meta.isexpr(statement, :(=), 2) &&
     Meta.isexpr(last(statement.args), :call) &&
     first(last(statement.args).args) === _rk_cell_latent
@@ -690,17 +693,31 @@ function _rk_kernel_cell_latent(scope, lhs, law, kernel, raw_body, program)
     Expr(:(=), lhs, Expr(:call, _rk_cell_latent, law))
 end
 
+# The names an expression reads as values: a call's or broadcast's function
+# and a property name are not values.
+function _rk_value_symbols!(found, x)
+    if x isa Symbol
+        push!(found, x)
+    elseif Meta.isexpr(x, :call)
+        foreach(arg -> _rk_value_symbols!(found, arg), x.args[2:end])
+    elseif Meta.isexpr(x, :., 2) && Meta.isexpr(x.args[2], :tuple)
+        foreach(arg -> _rk_value_symbols!(found, arg), x.args[2].args)
+    elseif Meta.isexpr(x, :., 2) && x.args[2] isa QuoteNode
+        _rk_value_symbols!(found, x.args[1])
+    elseif Meta.isexpr(x, :kw, 2)
+        _rk_value_symbols!(found, x.args[2])
+    elseif x isa Expr
+        foreach(arg -> _rk_value_symbols!(found, arg), x.args)
+    end
+    found
+end
+
 # A cell latent's law: a univariate Distributions family with positional
-# arguments, broadcast over them per cell.
+# arguments, broadcast over them per cell. A `T::shares(total)` latent's law
+# carries its bijection as an internal keyword (cell_total_coordinates.jl).
 function _rk_kernel_latent_family(scope, law, kernel, lhs)
-    # Total coordinates need a per-index vector latent with a joint density,
-    # which RKPPL cannot declare yet (cell_total_coordinates.jl).
-    _brm_total_coordinates_keyword(law) === nothing || error(
-        "RK backend: kernel `$kernel` cell latent `$lhs` asks for total coordinates " *
-        "(`coordinates = …`), which RKBRMI cannot sample yet: RKPPL has no per-cell " *
-        "vector latent with a joint density (ReactiveKernels snag " *
-        "`rkppl-per-index-5e9df9fe`). SBBRMI samples it; on RKBRMI drop the keyword " *
-        "to sample the latent in its own coordinates (the same model).")
+    spec = _brm_cell_bijection(law)
+    spec === nothing || (law = spec.law)
     callable = _rk_kernel_observation_callee(scope, law, kernel)
     callable === StanBlocks.normal && (callable = Normal)
     callable isa Type && callable <: UnivariateDistribution || error(
@@ -708,6 +725,7 @@ function _rk_kernel_latent_family(scope, law, kernel, lhs)
         "Distributions family such as `Normal(…)` or `LogNormal(…)`; got `$(first(law.args))`")
     any(arg -> Meta.isexpr(arg, (:parameters, :kw)), law.args[2:end]) && error(
         "RK backend: kernel `$kernel` cell latent `$lhs` takes positional law arguments only")
+    spec === nothing || _brm_check_shares_family(callable, lhs)
     callable
 end
 
@@ -722,11 +740,19 @@ function _rk_kernel_cell_statement(statement, kernel, defs, bindings, taken)
         kernel.scope, bindings, taken)
     lhs, marker = statement.args
     law = only(marker.args[2:end])
-    family = _rk_value_callee!(bindings,
-        _rk_kernel_latent_family(kernel.scope, law, kernel.name, lhs), taken)
+    callable = _rk_kernel_latent_family(kernel.scope, law, kernel.name, lhs)
+    spec = _brm_cell_bijection(law)
+    # A latent through `shares(total)` is drawn from `_BRMShares{Family}`, the
+    # family a type parameter of the law (rkppl-use §13).
+    family = _rk_value_callee!(bindings, spec === nothing ? callable : _BRMShares{callable}, taken)
+    plain = spec === nothing ? law : spec.law
     args = Any[_rk_kernel_bind_calls(arg, kernel.scope, bindings, taken)
-        for arg in law.args[2:end]]
-    Expr(:(=), lhs, Expr(:call, _rk_cell_latent, Expr(:call, family, args...)))
+        for arg in plain.args[2:end]]
+    # A latent through a bijection keeps it and its total on the marker for
+    # the plate.
+    bijection = spec === nothing ? () : (QuoteNode(spec.bijection),
+        _rk_kernel_bind_calls(spec.total, kernel.scope, bindings, taken))
+    Expr(:(=), lhs, Expr(:call, _rk_cell_latent, Expr(:call, family, args...), bijection...))
 end
 
 function _rk_kernel_ar1_normal_call!(statement, kernel, defs, bindings, taken)
@@ -1247,10 +1273,50 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
         for latent in latents)
     union!(taken, values(declared))
     # Its coordinate record names the authored latent (its `brm_start` and
-    # descriptor address) and the cell it belongs to.
+    # descriptor address), the cell it belongs to, and the bijection it is
+    # sampled through (`nothing` for its own coordinates).
+    bijections = Dict{Symbol,Any}()
+    for statement in slice.body
+        _rk_is_cell_latent(statement) || continue
+        spec = _brm_cell_bijection(only(last(statement.args).args[2:end]))
+        bijections[first(statement.args)] = spec === nothing ? nothing : spec.bijection
+    end
     for latent in latents
         _rk_coordinate_record!(coordinates, (; kind=:cell_latent,
-            declaration=declared[latent], name=latent, kernel=kernel.name))
+            declaration=declared[latent], name=latent, kernel=kernel.name,
+            bijection=bijections[latent]))
+    end
+    # A latent through a bijection is one joint draw per cell whose length the
+    # cell's data decide: the first law argument that reads data and nothing
+    # sampled sizes it, `length(arg)` (RKPPL's built-in `length`; the law's
+    # density checks that its other array arguments have that length).
+    if any(statement -> _rk_is_cell_latent(statement) &&
+            length(last(statement.args).args) == 4, cell)
+        known = union(Set{Symbol}(slice.params), locals, slice.globals)
+        data = Set{Symbol}(param for (param, input) in inputs if bound(input))
+        union!(data, (name for name in slice.globals if haskey(kernel.columns, name)))
+        reads_only_data(x) = all(name -> !(name in known) || name in data,
+            _rk_value_symbols!(Set{Symbol}(), x))
+        sizes_cell(x) = reads_only_data(x) &&
+            !isempty(intersect(_rk_value_symbols!(Set{Symbol}(), x), data))
+        cell = map(cell) do statement
+            Meta.isexpr(statement, :(=), 2) && statement.args[1] isa Symbol || return statement
+            if _rk_is_cell_latent(statement)
+                marker = last(statement.args)
+                length(marker.args) == 4 || return statement
+                lhs, law = first(statement.args), marker.args[2]
+                sizers = Any[arg for arg in law.args[2:end] if sizes_cell(arg)]
+                isempty(sizers) && error(
+                    "RK backend: kernel `$(kernel.name)` cell latent " *
+                    "`$lhs::$(marker.args[3].value)(…)` takes its length from a law " *
+                    "argument computed from the cell's data alone, such as " *
+                    "`LogNormal(log.(mu[i]), s)`; `$law` has none")
+                size = Expr(:call, :length, first(sizers))
+                return Expr(:(=), lhs, Expr(:call, marker.args..., size))
+            end
+            reads_only_data(statement.args[2]) && push!(data, statement.args[1])
+            statement
+        end
     end
     cell_names = _rk_source_symbols!(Set{Symbol}(slice.params), cell)
     avoid = union(model, cell_names)
@@ -1272,15 +1338,20 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
     end
     # `name = _rk_cell_latent(Family(args...))` becomes the cell's draw,
     # `<declared>[i] .~ Family.(args...)`, and its local `name = <declared>[i]`.
+    # Through `shares(total)` it is one joint draw,
+    # `<declared>[i] ~ _BRMShares{Family}(n, total, args...)`.
     locals_of = Dict{Symbol,Symbol}(get(reads, latent, latent) => declared[latent]
         for latent in latents)
     body = mapreduce(vcat, body; init=Any[]) do statement
         _rk_is_cell_latent(statement) || return Any[statement]
         lhs, marker = statement.args
-        law = only(marker.args[2:end])
+        law = marker.args[2]
         entry = Expr(:ref, locals_of[lhs], index)
-        Any[Expr(:call, :.~, entry, Expr(:., first(law.args), Expr(:tuple, law.args[2:end]...))),
-            Expr(:(=), lhs, entry)]
+        draw = length(marker.args) == 2 ?
+            Expr(:call, :.~, entry, Expr(:., first(law.args), Expr(:tuple, law.args[2:end]...))) :
+            Expr(:call, :~, entry, Expr(:call, first(law.args), marker.args[5], marker.args[4],
+                law.args[2:end]...))
+        Any[draw, Expr(:(=), lhs, entry)]
     end
     push!(statements, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
         Expr(:for, Expr(:(=), index, Expr(:call, :eachindex, range)),

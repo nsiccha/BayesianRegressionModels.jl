@@ -464,10 +464,16 @@ function brm_start(sb::SBBRMI, stan_model, inits::NamedTuple;
     writes = Tuple{Int,Float64}[]
     absorbed = Dict{Symbol,Vector{Pair{Symbol,Float64}}}()
     total_latents = _brm_total_latent_kinds(parent(sb))
+    # Values of a `T::shares(total)` cell latent, checked against the model's
+    # once the point is built: they must sum to each cell's total.
+    shares_values = Pair{Symbol,Vector{Float64}}[]
     for target in _brm_start_targets(parent(sb), inits)
-        # A cell latent in total coordinates starts at its values' coordinates.
-        target.kind === :parameter && haskey(total_latents, target.name) &&
-            (target = _brm_total_start_target(target, total_latents[target.name], d))
+        # A cell latent with a given total starts at its shares' coordinates.
+        if target.kind === :parameter && haskey(total_latents, target.name)
+            push!(shares_values, target.name =>
+                _brm_start_flat_values(target.name, brm_output(d, target.name), target.value))
+            target = _brm_total_start_target(target, total_latents[target.name], d)
+        end
         _brm_sb_start_writes!(writes, absorbed, Val(target.kind), target, d,
             names, totals)
     end
@@ -487,7 +493,22 @@ function brm_start(sb::SBBRMI, stan_model, inits::NamedTuple;
     for (i, value) in writes
         _brm_start_check("Stan value `$(names[i])`", check[i], value)
     end
+    isempty(shares_values) || _brm_sb_start_check_shares(stan_model, d, u, shares_values)
     u
+end
+
+# The start's values of a `T::shares(total)` latent are the model's only when
+# they sum to each cell's total; otherwise refused, never rescaled.
+function _brm_sb_start_check_shares(stan_model, d, u, shares_values)
+    θ = BridgeStan.param_constrain(stan_model, u; include_tp=true)
+    names = String.(BridgeStan.param_names(stan_model; include_tp=true))
+    for (name, values) in shares_values
+        model_values = θ[_brm_element_coordinates(brm_output(d, name), names)]
+        isapprox(model_values, values; rtol=1e-8) || error(
+            "brm_start: cell latent `$name::shares(total)`'s values must sum to " *
+            "each cell's total; the model's values for this start are " *
+            "$(model_values), the given ones $(values)")
+    end
 end
 
 _brm_sb_absorbing_block(totals, predictor, coefficient) =

@@ -110,16 +110,18 @@ of the same [`BRMI`](@ref):
   scale against Stan's `log_scale`), `:cholesky` (a correlation-factor
   coordinate; the whole factors are compared, see
   [`brm_check_coordinate_transport`](@ref)), `:simplex` (one free
-  coordinate of a simplex block; see below), or `:centered` (one standardized
-  draw of a centered random-effect block; see below);
+  coordinate of a simplex block; see below), `:centered` (one standardized
+  draw of a centered random-effect block; see below), or `:shares` (one
+  coordinate of a `T::shares(total)` cell latent: the same coordinate on both
+  sides, whose latent's values are compared cell by cell);
 - `stan_value` — the Stan constrained parameter name holding the physical
   value this coordinate parameterizes. It equals `stan` except inside a Stan
   array of vectors, whose unconstrained values BridgeStan stores array-major
   while `param_unc_names` lists the same block first-index-fastest, so the
   name at a position can belong to another element.
 
-In the `:identity`, `:exp` and `:cholesky` relations the two UNCONSTRAINED
-values are equal, so those coordinates move by a permutation. A `:simplex`
+In the `:identity`, `:exp`, `:cholesky` and `:shares` relations the two
+UNCONSTRAINED values are equal, so those coordinates move by a permutation. A `:simplex`
 block has the same physical simplex on both sides but different free
 coordinates: RK samples stick-breaking fractions `σ(u[j] + log(K-j))`, while
 Stan samples the inverse isometric log-ratio transform. Its `j`-th RK and Stan
@@ -1140,10 +1142,12 @@ end
 # under its authored name, one draw per cell or one array per cell; SB as one
 # ragged carrier its descriptor addresses by that name. Both hold the draws cell
 # after cell, entry after entry (column-major within a cell), under the same
-# law's transform.
+# law's transform. A `T::shares(total)` latent is one joint draw per cell on RK,
+# whose packed block is SB's carrier `T_coordinates` of that cell.
 function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         ::Val{:cell_latent}, record, rk, d, stan, stan_pos)
-    output = brm_output(d, record.name)
+    output = brm_output(d, get(record, :bijection, nothing) === nothing ?
+        record.name : _brm_total_coordinates_name(record.name))
     names = stan[_brm_element_coordinates(output, stan)]
     elements = Tuple{Tuple,Symbol}[]
     for rk_name in _rk_layout_coordinate_names(rk)
@@ -1154,9 +1158,10 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
     length(names) == length(elements) || _brm_transport_error(:parameterization_mismatch,
         "brm_coordinate_transport: cell latent `$(record.name)` has " *
         "$(length(elements)) RK and $(length(names)) Stan coordinates")
+    relation = get(record, :bijection, nothing) === nothing ? :identity : :shares
     for ((index, rk_name), stan_name) in zip(elements, names)
         push!(pairs, BRMCoordinatePair((; kind=:cell_latent, name=record.name, index),
-            rk_name, stan_name, record.declaration, index, :identity))
+            rk_name, stan_name, record.declaration, index, relation))
     end
 end
 
@@ -1536,12 +1541,33 @@ function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
     end
     checked = 0
     for pair in t.pairs
-        pair.relation in (:cholesky, :simplex, :centered) && continue
+        pair.relation in (:cholesky, :simplex, :centered, :shares) && continue
         value = _brm_rk_declaration_value(rk_values, pair.rk_declaration)
         rk_value = isempty(pair.rk_index) ? value : _brm_rk_value_entry(value, pair.rk_index)
         compare("$(pair.address) (`$(pair.rk)` / `$(pair.stan_value)`)", rk_value,
             _brm_physical(Val(pair.relation), stan_value(pair.stan_value)))
         checked += 1
+    end
+    # A `T::shares(total)` cell latent: both sides sample the same coordinates,
+    # so its values are compared, RK's against Stan's transformed parameter
+    # (the carrier's name without `_coordinates`), cell after cell.
+    shares = unique((pair.rk_declaration, first(split(pair.stan_value, ".")))
+        for pair in t.pairs if pair.relation === :shares)
+    if !isempty(shares)
+        tp_values = BridgeStan.param_constrain(stan_model, stan_u; include_tp=true)
+        tp_names = String.(BridgeStan.param_names(stan_model; include_tp=true))
+        for (declaration, carrier) in shares
+            stem = chopsuffix(carrier, "_coordinates")
+            stan_T = tp_values[findall(n -> startswith(n, stem * "."), tp_names)]
+            rk_T = reduce(vcat, _brm_rk_declaration_value(rk_values, declaration); init=Float64[])
+            length(rk_T) == length(stan_T) || error(
+                "brm_check_coordinate_transport: cell latent `$declaration` has " *
+                "$(length(rk_T)) RK values and $(length(stan_T)) Stan values `$stem`")
+            for (k, (a, b)) in enumerate(zip(rk_T, stan_T))
+                compare("cell latent `$declaration` value $k (`$stem`)", a, b)
+                checked += 1
+            end
+        end
     end
     for factor in t.correlations
         L = _brm_rk_declaration_value(rk_values, factor.rk_declaration)
