@@ -28,6 +28,7 @@ function _rk_attach_data_assignments!(derived::Vector{_RKDerivedSpec}, columns,
         taken::Set{Symbol}, assignments, constants)
     by_name = Dict{Symbol,Any}(a.name => a for a in assignments)
     constant_nodes = Dict{Symbol,Any}(c.name => c.node for c in constants)
+    constant_values = Dict{Symbol,Any}(c.name => c.value for c in constants)
     reads(name) = (input for input in by_name[name].inputs if haskey(by_name, input))
     closure(roots) = let found = Set{Symbol}()
         visit(name) = name in found || (push!(found, name); foreach(visit, reads(name)))
@@ -55,8 +56,9 @@ function _rk_attach_data_assignments!(derived::Vector{_RKDerivedSpec}, columns,
         spec = first(getargs(node))
         inputs = map(input -> _rk_constant_fit_input!(derived, columns, taken, input),
             Base.tail(getargs(node)))
+        evaluate = _RKConstantEvaluator(key, spec.evaluate, constant_values[key])
         push!(derived, _RKDerivedSpec(key, Expr(:_rk_data_assignment,
-            Expr(:call, _rk_whole_call(spec.evaluate, length(inputs), ()), inputs...)), key))
+            Expr(:call, _rk_whole_call(evaluate, length(inputs), ()), inputs...)), key))
     end
     for (key, value) in raw
         value isa AbstractArray && !haskey(columns, key) && (columns[key] = value)
@@ -139,4 +141,26 @@ function _rk_constant_fit_input!(derived, columns, taken, input::NamedColumn)
     values = _brm_fit_input_source(key, values)
     values isa AbstractVector || return values
     _rk_fit_input!(derived, columns, taken, key, values)
+end
+
+# A constant computed in the graph calls its evaluator there, and RK infers
+# every value that reads it from that call. A `brm(source; mod)` evaluator is
+# an interpreted closure (`_BRMClosure`), whose result Julia cannot infer, so
+# those values would dispatch at run time on every evaluation (snag
+# `constant-of-a-sc-942369d4`). The graph's value is the constant's value as
+# planning admits it (`_brm_constant_value`), of the type of the value the
+# plan resolved from the same inputs, and the call states that type.
+struct _RKConstantEvaluator{T,F} <: Function
+    name::Symbol
+    evaluate::F
+end
+_RKConstantEvaluator(name::Symbol, evaluate, value) =
+    _RKConstantEvaluator{typeof(value),typeof(evaluate)}(name, evaluate)
+function (f::_RKConstantEvaluator{T})(args...) where {T}
+    result = f.evaluate(args...)
+    value = _brm_constant_value(result)
+    value isa T || error("RK backend: `$(f.name) = constant(...)` evaluated to " *
+        "$(repr(result)) (::$(typeof(result))) in the graph, but to a $T when " *
+        "the model was planned from the same inputs")
+    value::T
 end
