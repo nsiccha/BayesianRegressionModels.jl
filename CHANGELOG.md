@@ -20,9 +20,9 @@ instead of failing at run time.
   `field[sk]` (was `getindex(field, sk)`), `state.a` (was
   `getproperty(state, :(:a))`), `-k * t` (was `-(k) * t`), `x[1:3]` (was
   `x[Colon(1, 3)]`), `m = a - b` (was `m = (a - b)`), and `LocationScale(...)`
-  and `Categorical(...)`, which
-  BRM exports (were Julia's names `AffineDistribution(...)` and
-  `DiscreteNonParametric(...)`, which a model using only BRM cannot re-parse).
+  and `Categorical(...)`, which BRM exports (were Julia's names
+  `AffineDistribution(...)` and `DiscreteNonParametric(...)`, which a model
+  using only BRM cannot re-parse).
   `(-k)^2` and `(-1)^c` keep their parentheses on the built model and the
   builder; the builder printed `-k ^ 2`, which re-parses as `-(k ^ 2)`. A
   statement whose side is a random-effect bar keeps its parentheses on the
