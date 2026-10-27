@@ -157,6 +157,55 @@ end
     @test PHI[3, :] ≈ PHI[2, :]
 end
 
+# A per-unit deviation on its own row set, grouped by an integer unit id and
+# read through a `groups(...)` binding in a `@plate` cell beside the units'
+# `|p|` block: the replay names both groupings.
+plate_builder = @brm begin
+    sigma ~ Exponential(1)
+    log_level ~ 1 + weight + (1 | p | subject)
+    log_rate ~ 1 + (1 | p | subject)
+    deviation ~ 0 + hsgp(obs_time; k = 16, c = 1.5, by = obs_subject,
+                         extrapolate = :clamp, anchor = 0.0)
+    obs = groups(obs_subject => subject)
+    @plate for i in eachindex(log_level)
+        loc[i] = exp(log_level[i]) .+ exp(log_rate[i]) .* obs_time[obs[i]] .+ deviation[obs[i]]
+        y[obs[i]] ~ normal(loc[i], sigma)
+    end
+end
+
+@testset "SBBRMI: a plate cell reads the new levels of a grouped HSGP" begin
+    plate_train = (; subject = [1, 2, 3], weight = [60.0, 75.0, 90.0],
+        obs_subject = repeat([1, 2, 3], inner = 5),
+        obs_time = repeat([0.0, 1.0, 2.0, 4.0, 8.0], 3), y = 1.0 .+ 0.1 .* (1:15))
+    fitted = SBBRMI(plate_builder(plate_train); mod = @__MODULE__)
+    fitted_parameters = Set(o.name for o in brm_descriptor(fitted).outputs
+                            if o.kind === :parameter)
+    # New ids, and new units that reuse the fitted ids: resampling draws both.
+    for ids in ([11, 12], [1, 2])
+        design = (; subject = ids, weight = [70.0, 80.0],
+            obs_subject = repeat(ids, inner = 3), obs_time = repeat([0.0, 3.0, 12.0], 2))
+        replay = reprocess(fitted, design; resample_groups = [:subject, :obs_subject])
+        code = StanBlocks.stan_code(replay.model)
+        @test StanBlocks.stanc_check(code; warn_pedantic = false).ok
+        params, gq = params_block(code), gq_block(code)
+        @test !occursin("zflat_hsgpw_obs_time_obs_subject", params)
+        @test occursin("zflat_hsgpw_obs_time_obs_subject = std_normal_vector_rng", gq)
+        @test !occursin("b_p_subject_z", params)
+        @test occursin("deviation = hsgp_obs_time_by_obs_subject", gq)
+        @test occursin("kernel_loc_y_ragged_gen", gq)
+        replay_parameters = Set(o.name for o in brm_descriptor(replay).outputs
+                                if o.kind === :parameter)
+        @test replay_parameters == setdiff(fitted_parameters,
+            Set([:zflat_hsgpw_obs_time_obs_subject, :b_p_subject_z_flat]))
+        @test all(abs.(replay.data[:PHI_hsgp_obs_time_by_obs_subject][[1, 4], :]) .< 1e-12)
+    end
+    # Naming only the subjects leaves the deviation's grouping frozen, which
+    # refuses an unseen level instead of reusing a fitted level's weights.
+    unseen = (; subject = [11, 12], weight = [70.0, 80.0],
+        obs_subject = repeat([11, 12], inner = 3), obs_time = repeat([0.0, 3.0, 12.0], 2))
+    @test_throws "unseen level" reprocess(fitted, unseen; resample_groups = [:subject])
+end
+
 @testset "new levels of a construction fitted per level" begin
     # Not built: new levels of a level-correlated grouping need the
     # correlation over a larger level set (todo 0lopk07); refused by name.
