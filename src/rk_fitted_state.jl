@@ -161,7 +161,7 @@ _rk_fitted_definition(statement, fitted) = Meta.isexpr(statement, :(=), 2) &&
 # The fits the planner computes in Julia, recorded while it plans the fit's own
 # data as a frozen replay of itself (`_brm_fitted`).
 function _rk_recorded_fits(rk::RKBRMI)
-    training = _rk_training_columns(parent(rk))
+    training = _rk_frozen_training(parent(rk))
     record = Dict{Tuple{Symbol,Symbol},Any}()
     constants = _rk_fitted_constants(rk)
     _brm_with_frozen_replay(_BRMFrozenReplay(training, Set{Symbol}(), nothing, record)) do

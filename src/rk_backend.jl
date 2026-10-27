@@ -3059,9 +3059,10 @@ function _rk_fit_twin!(derived::Vector{_RKDerivedSpec},
 end
 
 # The fit-role input of `vname`, bound to `values` (already the training
-# values on a frozen replay).
+# values on a frozen replay). `columns` are the plan's bound columns: a
+# regression plan's, or a value plan's (`_RKValuePlan`), which hold any value.
 function _rk_fit_input!(derived::Vector{_RKDerivedSpec},
-        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol},
+        columns::AbstractDict{Symbol}, taken::Set{Symbol},
         vname::Symbol, values::AbstractVector)
     label = _rk_fit_label(vname)
     for spec in derived

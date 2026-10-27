@@ -4492,6 +4492,9 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
         _sb_record_preproc!(data, c.name,
             PreprocEntry(:constant, (; c.value, c.node), c.source, false))
     end
+    # A data-only assignment becomes a data field the same way, evaluated here
+    # from this model's data (user decision `1tb1jrg`).
+    brmi, _ = _brm_resolve_data_assignments(brmi; prefix="sbimpl")
     # Predictors whose intercept an ordinal response's thresholds supply: their
     # categorical terms stay treatment-coded (see `_brm_cellmeans_block`).
     data[_SB_THRESHOLD_LOCATED_KEY] = _brm_threshold_located_predictors(brmi)
@@ -6502,6 +6505,38 @@ function _sb_reprocess_submodel_hook!(new_data, new_preproc, handled, key::Symbo
     nothing
 end
 
+# A replay's data with every data-only assignment of the model
+# (`_brm_resolve_data_assignments`) evaluated on its rows, so each record that
+# reads one by name reads its replay value. A constant it reads keeps its fitted
+# value on a frozen replay. An assignment the replay rows cannot evaluate is
+# absent from the replay data and raises its cause where something reads it.
+function _sb_replay_data(sb::SBBRMI, df, freeze::Bool)
+    prefix = "sbimpl: reprocess"
+    constants = Dict{Symbol,Any}()
+    for (key, e) in sb.preproc
+        e.kind === :constant || continue
+        constants[key] = freeze ? e.const_.value :
+            _brm_evaluate_constant(key, _brm_rebind_value(e.const_.node, df); prefix)
+    end
+    source = isempty(constants) ? sb.parent :
+        _brm_rebind_brmi(sb.parent, _BRMConstantSubstitution(constants))
+    base = _BRMReplayData(df, constants)
+    values = Dict{Symbol,Any}()
+    for (key, op) in _brm_operation_entries(source)
+        assignment = _brm_assignment_column(op)
+        (assignment === nothing || hasproperty(df, key)) && continue
+        value = try
+            node = _brm_rebind_value(last(getargs(parent(assignment), 2)), base)
+            _brm_data_assignment_value(node, _BRMDataAssignments(prefix), Set{Symbol}())
+        catch err
+            _BRMReplayFailure(string(prefix, ": the replay data cannot evaluate ",
+                "data-only assignment `", key, "`: ", sprint(showerror, err)))
+        end
+        (value isa _BRMReplayFailure || _brm_is_data_value(value)) && (values[key] = value)
+    end
+    isempty(values) ? df : _BRMReplayData(df, values)
+end
+
 """
     reprocess(sb::SBBRMI, new_df; freeze_constants=true,
               resample_groups=(), resample_covariates=(),
@@ -6565,8 +6600,10 @@ indices, sum-to-zero (`s2z_groups`) blocks (rows re-coded through the fitted
 levels, any subset of them; the fitted centering weights kept; frozen only),
 `kernel(...)` subject counts and `ragged(x, group)` columns, continuous
 × continuous interaction columns, typed observation weights, categorical
-outcomes, and pass-through raw columns (plain data, `me` obs values, `ar`
-time). A consumer `_sb_submodel_rhs!` term is called again on `new_df`, and
+outcomes, pass-through raw columns (plain data, `me` obs values, `ar`
+time), and data-only model-scope assignments (evaluated again on `new_df`; a
+constant one reads keeps its fitted value unless `freeze_constants=false`). A
+consumer `_sb_submodel_rhs!` term is called again on `new_df`, and
 every data key it writes comes from that call (its scalar keyword columns
 follow `freeze_constants`); the call must emit the fitted statements. A
 derived non-vector key with no preprocessing record is carried through
@@ -6580,6 +6617,7 @@ refused); drawing new levels of one (`resample_groups`) is not supported.
 function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
                    resample_groups=(),resample_covariates=(),
                    held_out=sb.held_out)
+    new_df = _sb_replay_data(sb, new_df, freeze_constants)
     groups = _sb_resample_group_set(resample_groups)
     covariates = union(_sb_existing_covariates(sb.preproc),
         _sb_covariate_selection(sb.parent,resample_covariates))
@@ -6702,6 +6740,7 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
                     _sb_df_column(new_df, k), masked[k], "sbimpl: reprocess: data column `$k`") :
                     _sb_df_column(new_df, k)
             else
+                _brm_raise_replay_failure(new_df, k)
                 error(
                     "sbimpl: reprocess: data key `$k` is a derived vector with no ",
                     "preprocessing record and is not a column of the new DataFrame. ",
