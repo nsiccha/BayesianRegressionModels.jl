@@ -3056,30 +3056,51 @@ StanBlocks.@deffun begin
         return out
     end
 
-    # Per-group spectrally scaled HSGP basis for hyper-predictor models. Each
-    # group g has its own (rho, sigma): scale PHI's rows by that group's
-    # spectral weights, masked to the group's rows. The loop is why this is a
-    # `@deffun` — `@slic` bodies cannot contain control flow. The rho floor
-    # applies uniformly: sampled shared hypers already carry it as a bound,
-    # predicted ones arrive unfloored and are floored here per element.
-    @stanonly brm_hsgp_by_hyper_S(PHI::matrix[n, m], omega2::matrix[m, d],
-            group_idx::int[n], rho_vec::vector[gcount],
-            sigma_vec::vector[gcount], rho_lower::real)::matrix[n, m] = begin
-        S = rep_matrix(0., n, m)
+    # A grouped HSGP's value: row i is `dot(PHI[i, :], W[group_idx[i], :])`,
+    # computed level by level as one basis-block x weights product, the work
+    # of one ungrouped field. `PHI_by_level` is `PHI` with its rows sorted by
+    # level (`level_order = sort_indices_asc(group_idx)`, `level_sorted` the
+    # sorted levels), both data, so the sort happens once in transformed data;
+    # each run of equal levels is one level's rows. Gathering `W[group_idx, :]`
+    # for `rows_dot_product` instead costs about six times as much (snag
+    # grouped-correlat-68e4a63c).
+    @stanonly brm_hsgp_by_level_rows(PHI_by_level::matrix[n, m], W::matrix[k, m],
+            level_order::int[n], level_sorted::int[n])::vector[n] = begin
+        rv::vector[n]
+        first_row = 1
+        while first_row <= n
+            level = level_sorted[first_row]
+            last_row = first_row
+            while last_row < n && level_sorted[last_row + 1] == level
+                last_row += 1
+            end
+            rv[level_order[first_row:last_row]] =
+                PHI_by_level[first_row:last_row, :] * W[level, :]'
+            first_row = last_row + 1
+        end
+        return rv
+    end
+
+    # Per-group spectral weights for hyper-predictor models: row g is
+    # `brm_hsgp_sqrt_spd` at group g's own (rho, sigma), a groups x basis
+    # matrix that scales the level weights (`_sb_hsgp_by_hyper_model`). The
+    # loop is why this is a `@deffun` — `@slic` bodies cannot contain control
+    # flow. The rho floor applies uniformly: sampled shared hypers already
+    # carry it as a bound, predicted ones arrive unfloored and are floored here
+    # per element.
+    @stanonly brm_hsgp_by_hyper_sqrt_spd(omega2::matrix[m, d],
+            rho_vec::vector[gcount], sigma_vec::vector[gcount],
+            rho_lower::real)::matrix[gcount, m] = begin
+        rv::matrix[gcount, m]
         for g in 1:gcount
             rho_g = fmax(rho_vec[g], rho_lower)
-            sigma_g = sigma_vec[g]
             sqrt_spd_g = brm_hsgp_sqrt_spd(
-                omega2, sigma_g, rep_vector(rho_g, d))
-            mg = rep_vector(0., n)
-            for i in 1:n
-                if group_idx[i] == g
-                    mg[i] = 1.
-                end
+                omega2, sigma_vec[g], rep_vector(rho_g, d))
+            for b in 1:m
+                rv[g, b] = sqrt_spd_g[b]
             end
-            S = S + diag_pre_multiply(mg, diag_post_multiply(PHI, sqrt_spd_g))
         end
-        return S
+        return rv
     end
 end
 
@@ -3249,23 +3270,35 @@ _sb_hsgp_latent_submodel(::Val{:intercept}) = :_sb_hsgp_latent_centered
 
 # Per-group HSGP. Length-scale/marginal-SD hyperparameters are shared across
 # groups (decision 7p44fo); only tensor-basis weights vary by group.
+#
+# The spectral weights scale the groups x basis weight matrix, never the rows x
+# basis basis `PHI`, and `brm_hsgp_by_level_rows` multiplies each level's basis
+# rows by that level's scaled weights: one rows x basis pass in all and no
+# rows x basis intermediate (snag grouped-correlat-68e4a63c). The level sort
+# reads data only, so it is transformed data.
 _sb_hsgp_by = StanBlocks.@slic begin
     n_axes = dims(omega2)[2]
+    level_order = sort_indices_asc(group_idx)
+    PHI_by_level = PHI[level_order, :]
+    level_sorted = group_idx[level_order]
     rho_iso ~ lognormal(0., 1.; lower=rho_lower)
     sigma   ~ lognormal(0., 1.; lower=0.)
     rho = rep_vector(rho_iso, n_axes)
     sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma, rho)
-    PHI_scaled = diag_post_multiply(PHI, sqrt_spd)
-    return rows_dot_product(PHI_scaled, beta[group_idx, :])
+    beta_scaled = diag_post_multiply(beta, sqrt_spd)
+    return brm_hsgp_by_level_rows(PHI_by_level, beta_scaled, level_order, level_sorted)
 end
 
 _sb_hsgp_by_aniso = StanBlocks.@slic begin
     n_axes = dims(omega2)[2]
+    level_order = sort_indices_asc(group_idx)
+    PHI_by_level = PHI[level_order, :]
+    level_sorted = group_idx[level_order]
     rho :: vector[n_axes] ~ lognormal(0., 1.; lower=rho_lower)
     sigma ~ lognormal(0., 1.; lower=0.)
     sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma, rho)
-    PHI_scaled = diag_post_multiply(PHI, sqrt_spd)
-    return rows_dot_product(PHI_scaled, beta[group_idx, :])
+    beta_scaled = diag_post_multiply(beta, sqrt_spd)
+    return brm_hsgp_by_level_rows(PHI_by_level, beta_scaled, level_order, level_sorted)
 end
 
 # A submodel that reads its level-by-column matrix through the input `input`
@@ -9804,9 +9837,9 @@ end
 # intercept-only hyper-LP must carry to reproduce today's predictive prior
 # exactly — a literal LogNormal intercept would constrain it positive):
 # intercept ~ Normal(0,1), ranef SD ~ half-Normal(0,1), NCP deviations.
-# The per-group loop lives in the `@stanonly brm_hsgp_by_hyper_S` deffun
-# (`@slic` bodies cannot contain control flow); it rebuilds its row mask
-# from `group_idx` at Stan runtime, so no hyper data is emitted and replay
+# The per-group loop lives in the `@stanonly brm_hsgp_by_hyper_sqrt_spd`
+# deffun (`@slic` bodies cannot contain control flow); each row reads its
+# group's weights through `group_idx`, so no hyper data is emitted and replay
 # needs no new preproc entry.
 function _sb_hyper_names(hyper)
     hyper === :length_scale && return (; beta=:beta0_rho, sd=:sd_rho,
@@ -9861,13 +9894,19 @@ end
 
 function _sb_hsgp_by_hyper_model(term_overrides, t, rho_plan, sigma_plan,
                                  level=nothing)
-    body = Any[]
+    body = Any[:(level_order = sort_indices_asc(group_idx)),
+               :(PHI_by_level = PHI[level_order, :]),
+               :(level_sorted = group_idx[level_order])]
     _sb_hyper_param_stmts!(body, :length_scale, rho_plan)
     _sb_hyper_param_stmts!(body, :sd, sigma_plan)
-    push!(body, :(S = brm_hsgp_by_hyper_S(
-        PHI, omega2, group_idx, rho_vec, sigma_vec, rho_lower)))
+    push!(body, :(sqrt_spd = brm_hsgp_by_hyper_sqrt_spd(
+        omega2, rho_vec, sigma_vec, rho_lower)))
     _sb_hsgp_hyper_level_inputs!(body, level)
-    push!(body, :(return rows_dot_product(S, beta[group_idx, :])))
+    # As `_sb_hsgp_by`: the spectral weights scale the groups x basis weights,
+    # here one row of spectral weights per group.
+    push!(body, :(beta_scaled = beta .* sqrt_spd),
+        :(return brm_hsgp_by_level_rows(
+            PHI_by_level, beta_scaled, level_order, level_sorted)))
     base = _sb_hsgp_hyper_levels(
         StanBlocks.SlicModel(Expr(:block, body...), Dict{Symbol,Any}(), @__MODULE__),
         level)

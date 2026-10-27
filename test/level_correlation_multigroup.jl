@@ -128,7 +128,7 @@ end
     @test occursin("real<lower=0.0> tau;", code)
     @test occursin("hsgp_t_by_g_beta_level = brm_hsgp_multigroup_weights(b_hsgpw_t_g, " *
                    "omega2_hsgp_t_by_g, hsgp_t_by_g_rho, Omega, tau);", code)
-    @test occursin("rows_dot_product(hsgp_t_by_g_PHI_scaled, hsgp_t_by_g_beta_level[g_idx, :])", code)
+    @test occursin("hsgp_t_by_g_beta_scaled = diag_post_multiply(hsgp_t_by_g_beta_level, hsgp_t_by_g_sqrt_spd);", code)
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
     # A known correlation is its Cholesky factor as data; a constant scale is inline.
     sb = SBBRMI(known(df); mod=@__MODULE__)
