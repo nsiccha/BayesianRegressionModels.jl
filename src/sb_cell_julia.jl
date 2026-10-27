@@ -7,9 +7,9 @@
 # `abs2.`, ...). This pass supplies the SB backend's remaining Stan spellings:
 #
 # - a deterministic call whose Julia callable is a differently named Stan
-#   builtin (`logistic` -> `inv_logit`, `cumsum` -> `cumulative_sum`,
-#   `fill`/`zeros`/`ones` -> `rep_vector`/`rep_matrix`, `vcat` ->
-#   `append_row`, ...);
+#   builtin (`logistic` -> `inv_logit`, `normcdf` -> `Phi`, `cumsum` ->
+#   `cumulative_sum`, `fill`/`zeros`/`ones` -> `rep_vector`/`rep_matrix`,
+#   `vcat` -> `append_row`, ...);
 # - an observation constructor from Distributions (`y ~ Normal(mu, s)`),
 #   through the `_sb_stan_distribution_call` table the top-level likelihoods
 #   use, also as the family of `censored`/`truncated`/`interval_censored`/
@@ -45,6 +45,9 @@ _sb_julia_stan_name(::typeof(LogExpFunctions.logistic)) = :inv_logit
 _sb_julia_stan_name(::typeof(LogExpFunctions.log1pexp)) = :log1p_exp
 _sb_julia_stan_name(::typeof(LogExpFunctions.log1mexp)) = :log1m_exp
 _sb_julia_stan_name(::typeof(LogExpFunctions.logsumexp)) = :log_sum_exp
+# The standard normal CDF and its inverse, one argument each.
+_sb_julia_stan_name(::typeof(StatsFuns.normcdf)) = :Phi
+_sb_julia_stan_name(::typeof(StatsFuns.norminvcdf)) = :inv_Phi
 _sb_julia_stan_name(::typeof(cumsum)) = :cumulative_sum
 
 # The Stan call for a Julia call, or `nothing` to keep the authored call.

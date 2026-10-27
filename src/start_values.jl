@@ -28,6 +28,9 @@ the value a sampler takes as its initial position.
   `effect(lp, x)`). Use the public predictor name: `CL` for
   `log(CL) ~ 1 + x`. A categorical predictor column takes level-keyed pairs,
   `lp = (; arm = ["b" => 0.4, "c" => -0.1])`, one per non-reference level.
+  The first categorical term of an intercept-free predictor (`0 + arm`,
+  `0 + factor(g)`) is coded as cell means and has no reference level: every
+  level is a coefficient, `lp = (; arm = ["a" => 1.1, "b" => 0.4, ...])`.
 - `ID = Σ` sets the scales and correlation of the shared `(… | ID | g)` block
   from the covariance matrix `Σ` of its natural effects. Rows and columns
   follow `ranefcoefnames(brmi, ID)`. `ID = (; sd, cor)` sets either part:
@@ -558,14 +561,17 @@ function _brm_sb_start_writes!(writes, absorbed, ::Val{:categorical}, t, d, name
     hasproperty(q, :contrasts) || error(
         "brm_start: `effect($(t.predictor), $(t.coefficient))` is a numeric " *
         "coefficient; give it one real value")
-    levels = [_brm_transport_level(c.nonreference_level) for c in q.contrasts]
+    # `coordinates` pairs with `nonreference_levels`: one per non-reference
+    # level under treatment coding, one per level for the cell means of an
+    # intercept-free predictor's first categorical term.
+    levels = _brm_transport_level.(q.nonreference_levels)
     for (level, value) in zip(t.levels, t.values)
         i = findall(l -> isequal(l, level), levels)
         length(i) == 1 || error(
             "brm_start: `effect($(t.predictor), $(t.coefficient))` has no " *
             "coefficient for level $(repr(level)); its coefficient levels are " *
             "$(repr(levels))")
-        push!(writes, (q.contrasts[only(i)].coordinate, value))
+        push!(writes, (q.coordinates[only(i)], value))
     end
 end
 

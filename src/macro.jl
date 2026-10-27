@@ -432,9 +432,11 @@ directions from a one-dimensional basis, so `x + hsgp(x; ...)` separates the
 linear slope from residual nonlinear shape. `orthogonal_to=:intercept` removes
 only the intercept direction, from a basis over any number of axes: every basis
 column is centered over the term's rows, so the term sums to zero over them and
-a level elsewhere in the model is not shared with the field. Both projections
-are fitted on the training rows and frozen on replay; neither combines with
-`by=` or `anchor=`.
+a level elsewhere in the model is not shared with the field. With `by=g` both
+projections are fitted per level: each group's basis is centered (and, for
+`:linear`, de-trended) over that group's own rows, so every group's field sums
+to zero over its rows. Both projections are fitted on the training rows and
+frozen on replay; neither combines with `anchor=`.
 
 `cov=:periodic` selects the periodic-kernel approximation of Riutort-Mayol et
 al. (2023) over exactly one raw-data axis: `k` harmonics of `2pi / period`
@@ -1529,9 +1531,10 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
             push!(rewritten, target)
         end
     end
+    source = _brm_plate_source(i, range,
+        first(_brm_plate_outputs(_brm_plate_loop(authored)[3], i)), cell_groupings, groupings)
     lambda = Expr(:->, Expr(:tuple, params...), Expr(:block, rewritten...),
-                  _brm_plate_source(i, range, first(_brm_plate_outputs(_brm_plate_loop(authored)[3], i)),
-                      cell_groupings, groupings))
+                  (; source, outputs=Tuple(outputs)))
     call = Expr(:call, :kernel, lambda, positionals...)
     Expr(:call, :~, target, call)
 end
@@ -2353,26 +2356,33 @@ struct _BRMInlineBody
     expression::Expr
     scope::Module
     # The authored `@plate for` cell this lambda was rewritten from, rendered
-    # with the model-scope `groups` bindings it reads, or `nothing`. Only
-    # `show` reads it; every backend lowers `expression`.
+    # with the model-scope `groups` bindings it reads, or `nothing`. `show` and
+    # the model description read it; every backend lowers `expression`.
     source::Union{String,Nothing}
+    # The cell's indexed outputs (`name[i] = …`) in authored order. The lambda
+    # binds each as a cell value, exactly like a bare local, and returns the
+    # last; RKBRMI collects every one of them as a graph value of its name.
+    outputs::Tuple{Vararg{Symbol}}
 end
-# `_brm_plate_kernel` hands the rendered cell to `_x` as a third `->` argument,
-# which `parselocals!` never reads; split it off here so emitters only ever see
-# the two-argument lambda.
+# `_brm_plate_kernel` hands the rendered cell and its indexed outputs to `_x` as
+# a third `->` argument, which `parselocals!` never reads; split it off here so
+# emitters only ever see the two-argument lambda.
 _BRMInlineBody(expression::Expr, scope::Module) =
     Meta.isexpr(expression, :->, 3) ?
         _BRMInlineBody(Expr(:->, expression.args[1], expression.args[2]), scope,
-                       expression.args[3]) :
-        _BRMInlineBody(expression, scope, nothing)
+                       expression.args[3].source, expression.args[3].outputs) :
+        _BRMInlineBody(expression, scope, nothing, ())
 _brm_inline_expr(x) = x
 _brm_inline_expr(x::_BRMInlineBody) = x.expression
 _brm_inline_scope(x) = Main
 _brm_inline_scope(x::_BRMInlineBody) = x.scope
+_brm_inline_outputs(x) = ()
+_brm_inline_outputs(x::_BRMInlineBody) = x.outputs
 Base.show(io::IO, x::_BRMInlineBody) =
     print(io, Base.remove_linenums!(deepcopy(x.expression)))
 Base.deepcopy_internal(x::_BRMInlineBody, stack::IdDict) =
-    _BRMInlineBody(Base.deepcopy_internal(x.expression, stack), x.scope, x.source)
+    _BRMInlineBody(Base.deepcopy_internal(x.expression, stack), x.scope, x.source,
+                   x.outputs)
 
 # `name = constant(expr)` keeps `expr` unevaluated. The builder binds each name
 # the expression reads, either to a field of the data or to a value in the

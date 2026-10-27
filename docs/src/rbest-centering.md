@@ -1,5 +1,8 @@
 # RBesT meta-analytic-predictive priors: sum-to-zero and automatic totals
 
+!!! note "Exact totals are not the default"
+    This study uses exact total coefficients (`total_groups`). SBBRMI's default is the standard parametrization, so the code passes `total_groups=:auto` explicitly. For groupings whose blocks the data identify strongly or unevenly, BRM also offers the sum-to-zero (S2Z) parametrization (`s2z_groups`, `s2z_rho`) with WarmupHMC adaptive centering.
+
 ## Result
 
 This study takes the meta-analytic-predictive (MAP) model of [RBesT](https://github.com/Novartis/RBesT), Novartis' evidence-synthesis package, and compares three ways of sampling the same posterior: RBesT's own program in its legacy and new sum-to-zero forms, BRM's conventional block under WarmupHMC, and BRM's exact total coefficients with post-hoc and online centering. It was prompted by [Sebastian Weber's report](https://discourse.mc-stan.org/t/help-testing-brms-pr-for-sum-to-zero-and-partial-centering/41542/32) of about 5× efficiency from sum-to-zero in RBesT and about 10× with auto-centering. Those figures are from Weber's own J = 4 simulation stress test (post 32: about 9.6, 43 and 106 effective draws per thousand gradients for legacy, sum-to-zero and auto-centering), a different and sum-to-zero-favorable geometry than RBesT's shipped datasets. The multipliers reported below are measured on the real AS (H = 8) and crohn (H = 6) datasets, are correspondingly smaller, and are not directly comparable to Weber's; the auto-centering method is not in pull request 64 and is not measured here.
@@ -70,7 +73,7 @@ BRM's conventional `centered_groups` samples the trial deviation `ε_h` with its
 using StanBlocks, BridgeStan, WarmupHMC, Enzyme, Random
 using DifferentiationInterface: AutoEnzyme
 
-sb = SBBRMI(rbest_as_brm_model(); mod=@__MODULE__)          # total_groups=:auto
+sb = SBBRMI(rbest_as_brm_model(); mod=@__MODULE__, total_groups=:auto)
 problem = StanBlocks.stan_instantiate(sb.model)
 names = BridgeStan.param_unc_names(problem.model)
 adaptive = adaptive_centering_problem(sb, problem, AutoEnzyme(); centeredness=0.0)

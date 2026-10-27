@@ -21,6 +21,10 @@ struct _RKPreparedKernelAssignment
     # The raw column whose rows label the cells (a random-effect grouping or a
     # `ragged(x, group => cells)` label column), or `nothing`.
     cell_column::Union{Nothing,Symbol}
+    # The cell's other indexed outputs (`conc[i] = …` beside the collected
+    # one): cell values the plate also collects, each as a graph value of its
+    # own name when that name is free (`_rk_kernel_output_names`).
+    outputs::Tuple{Vararg{Symbol}}
 end
 
 # The authored cell's lexical namespace is a stable callable authority, not
@@ -39,7 +43,7 @@ function Base.deepcopy_internal(x::_RKPreparedKernelAssignment, stack::IdDict)
         Base.deepcopy_internal(x.observations, stack),
         x.cells,
         Base.deepcopy_internal(x.scan_observed, stack),
-        x.cell_column)
+        x.cell_column, x.outputs)
 end
 _rk_kernel_column_name(column::NamedColumn) = name(column)
 
@@ -522,9 +526,13 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
     available = union(Set(keys(program.context.data)), Set(op.name for op in program.operations))
     globals = sort!(collect(intersect(setdiff(referenced, locals), available)))
     cells = _rk_ast_fresh_name(string(name, "_cells"), union(available, keys(columns)))
+    # An `@plate for` cell's indexed outputs other than the collected one, as
+    # far as the body still binds them (a pruned response may have taken one).
+    outputs = Tuple(output for output in _brm_inline_outputs(first(getargs(rhs)))
+        if output !== name && output in locals && !(output in params))
     _RKPreparedKernelAssignment(name, params, body, collected, scope, Tuple(inputs),
         globals, columns, group_values, Tuple(observations), cells, Tuple(scan_observed),
-        cell_column === nothing ? nothing : _rk_kernel_column_name(cell_column))
+        cell_column === nothing ? nothing : _rk_kernel_column_name(cell_column), outputs)
 end
 
 # A formula observation of kernel output whose response holds one array per
@@ -1448,14 +1456,22 @@ _rk_flatten_cells!(defs, taken, cells) =
 # concatenated, a per-subject observation reads them cell by cell. The cell's
 # plate also writes every in-cell observation argument the observations read
 # per subject: a per-subject observation reads it cell by cell, a flattened one
-# reads one value per response row.
+# reads one value per response row. Each other indexed output in
+# `graph_outputs` is collected the same way, as a graph value of its own name;
+# RKPPL runs it only in a query that reads it.
 function _rk_emit_value_assignment!(defs, statements, bindings, taken,
-        kernel::_RKPreparedKernelAssignment; arguments=nothing, coordinates=nothing)
+        kernel::_RKPreparedKernelAssignment; arguments=nothing, coordinates=nothing,
+        graph_outputs=())
     arguments === nothing || (kernel = _rk_kernel_with_arguments(kernel, arguments))
     # A cell without a collected value writes only what its observations read.
     outputs, after = kernel.collected === nothing ? (Any[], Any[]) : (
         Any[(kernel.cells, kernel.collected)],
         Any[Expr(:(=), kernel.name, _rk_flatten_cells!(defs, taken, kernel.cells))])
+    for output in graph_outputs
+        cells = _rk_ast_fresh_name(string(output, "_cells"), taken)
+        push!(outputs, (cells, output))
+        push!(after, Expr(:(=), output, _rk_flatten_cells!(defs, taken, cells)))
+    end
     for observation in kernel.observations
         named = Any[zip(observation.argument_names, observation.arguments)...]
         append!(named, ((entry.name, entry.expression) for entry in observation.bounds))
@@ -1597,7 +1613,7 @@ function _rk_kernel_with_arguments(kernel::_RKPreparedKernelAssignment, argument
     _RKPreparedKernelAssignment(kernel.name, [kernel.params; arguments.params], body,
         arguments.value, kernel.scope, (kernel.inputs..., arguments.inputs...),
         kernel.globals, kernel.columns, kernel.group_values, kernel.observations,
-        kernel.cells, kernel.scan_observed, kernel.cell_column)
+        kernel.cells, kernel.scan_observed, kernel.cell_column, kernel.outputs)
 end
 
 # The cell restricted to what `value` reads: the body statements producing
@@ -1618,7 +1634,7 @@ function _rk_kernel_value_slice(kernel::_RKPreparedKernelAssignment, value)
     kept = [i for (i, param) in enumerate(kernel.params) if param in needed]
     _RKPreparedKernelAssignment(kernel.name, kernel.params[kept], body, value,
         kernel.scope, kernel.inputs[kept], filter(in(needed), kernel.globals),
-        kernel.columns, kernel.group_values, (), kernel.cells, (), kernel.cell_column)
+        kernel.columns, kernel.group_values, (), kernel.cells, (), kernel.cell_column, ())
 end
 
 # The arrays and step locals a `@scan` block writes, and the responses it

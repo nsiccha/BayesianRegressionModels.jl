@@ -41,9 +41,9 @@ covariates = (; x = randn(rng, n), subject = repeat(11:16; inner = 4))
 observed = merge(covariates, (; y = randn(rng, n)))   # `z` omitted: unobserved
 complete = merge(observed, (; z = randn(rng, n)))
 
-totals_sb = SBBRMI(totals_builder(observed); mod = @__MODULE__)
-complete_sb = SBBRMI(totals_builder(complete); mod = @__MODULE__)
-prior_sb = SBBRMI(totals_builder(covariates); mod = @__MODULE__)
+totals_sb = SBBRMI(totals_builder(observed); mod = @__MODULE__, total_groups=:auto)
+complete_sb = SBBRMI(totals_builder(complete); mod = @__MODULE__, total_groups=:auto)
+prior_sb = SBBRMI(totals_builder(covariates); mod = @__MODULE__, total_groups=:auto)
 
 # `BRM.stan_instantiate` takes an `SBBRMI`; a `GenerativePlan` goes through its
 # traced program, in the current world for the same lowering-time reason.
@@ -144,7 +144,7 @@ end
     @test copied(transport_draws(totals_sb, regrid, draws, UNC, unc_regrid), draws, UNC, unc_regrid)
     # New subjects: kept levels copy their totals, new levels draw from the
     # recovered population; the generated block is the target's own re-draw.
-    plan = generative_plan(totals_builder, observed)
+    plan = generative_plan(totals_builder, observed; total_groups=:auto)
     future = (; x = randn(MersenneTwister(12), 8), subject = repeat(15:18; inner = 2),
               y = randn(MersenneTwister(13), 8))
     newplan = generative_plan(plan, future)
@@ -175,7 +175,7 @@ end
     for c in (0.0, 1.0)
         rp = adaptive_centering_problem(totals_sb, problem, AutoEnzyme(); centeredness = c)
         ir = WarmupHMC.reparametrizer(rp)
-        @test [index for (index, _) in ir.pairs] == vec(MU_COORDS.totals)
+        @test ir.state.indices == ir.columns.indices == vec(MU_COORDS.totals)
         _, source = WarmupHMC._inverse_with_logabsdet_jacobian(ir, physical)
         jac, mapped = ir(source)
         @test mapped ≈ physical atol = 1e-12

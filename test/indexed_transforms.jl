@@ -169,14 +169,14 @@ end
         ((new_age .- mean_) ./ sd_)[new_subject]
     read = reprocess(sbfit(IT.read, data; total_groups=()), new)
     @test BRM.stan_data(read)[:age_subject] == new_age[new_subject]
-    # Default exact-totals design: the per-group values live in the fitted
-    # totals, so a replay keeps them and refuses changed ones, as for the twin.
-    totals = sbfit(IT.standardized, data)
+    # Exact-totals design: the per-group values live in the fitted totals, so
+    # a replay keeps them and refuses changed ones, as for the twin.
+    totals = sbfit(IT.standardized, data; total_groups=:auto)
     @test BRM.stan_data(reprocess(totals, indexed_data(; x=zeros(N), y=zeros(N))))[:total_W_mu] ==
         BRM.stan_data(totals)[:total_W_mu]
     unrepresented = "has no representation in the fitted totals"
     @test_throws unrepresented reprocess(totals, indexed_data(; age=AGE .+ 1))
-    twin_totals = sbfit(IT.twin, twin_data(zscored(AGE)[SUBJECT]))
+    twin_totals = sbfit(IT.twin, twin_data(zscored(AGE)[SUBJECT]); total_groups=:auto)
     @test_throws unrepresented reprocess(twin_totals,
         twin_data(((AGE .+ 1 .- mean(AGE)) ./ std(AGE))[SUBJECT]))
     # A position past the per-group field is refused, never wrapped.

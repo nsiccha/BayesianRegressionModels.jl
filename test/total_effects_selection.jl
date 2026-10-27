@@ -73,7 +73,7 @@ end
     brmi = selection_builder(SELECTION_DATA)
     # `:auto` keeps the whole model conventional when a block must stay
     # conventional (decision 1rar7wo).
-    @test isempty(total_effect_blocks(SBBRMI(brmi; mod=@__MODULE__)))
+    @test isempty(total_effect_blocks(SBBRMI(brmi; mod=@__MODULE__, total_groups=:auto)))
 
     # A whole-group request still covers every block, and its refusal names
     # each skipped predictor, why, and the subset that is available.
@@ -149,7 +149,7 @@ end
             y[i] ~ Normal(base[i] .+ 0.2 .* w[i], 0.5)
         end
     end
-    sb = SBBRMI(positional; mod=@__MODULE__)
+    sb = SBBRMI(positional; mod=@__MODULE__, total_groups=:auto)
     @test predictors(sb) == [:base]
     conventional = SBBRMI(positional; mod=@__MODULE__, total_groups=())
     original = (conventional, instantiate(conventional, "positional_conventional"))
@@ -193,7 +193,9 @@ end
     @test length(blocks) == 3
     rp = adaptive_centering_problem(sb, problem, AutoEnzyme())
     ir = WarmupHMC.reparametrizer(rp)
-    @test length(ir.pairs) == 3 * length(SELECTION_DATA.unit) + length(SELECTION_DATA.unit)
+    # The totals sit beside the joint wrapper of the conventional blocks.
+    @test ir isa Base.get_extension(BRM, :BayesianRegressionModelsWarmupHMCExt).BRMTotalsBesideCenteringReparametrization
+    @test length(WarmupHMC.reparam_controls(ir)) == 3 * length(SELECTION_DATA.unit) + length(SELECTION_DATA.unit)
     physical = 0.3 .* randn(Xoshiro(8), length(names))
     _, source = WarmupHMC._inverse_with_logabsdet_jacobian(ir, physical)
     jac, mapped = ir(source)

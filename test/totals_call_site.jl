@@ -51,7 +51,7 @@ end
 # shape in the process. Returns the traced sources for the call-site
 # byte-identity check below.
 function build_and_trace_in_function(builder, data)
-    sb = SBBRMI(builder(data); mod=@__MODULE__)
+    sb = SBBRMI(builder(data); mod=@__MODULE__, total_groups=:auto)
     @test !isempty(total_effect_blocks(sb))
     direct_src = StanBlocks.stan_code(sb.model)
     src = BRM.stan_code(sb)
@@ -75,7 +75,7 @@ end
     @test applicable(BRM.stan_instantiate, infunc.sb)
 
     # Same builder + same data at top level: identical Stan source.
-    sb_top = SBBRMI(builder(data); mod=@__MODULE__)
+    sb_top = SBBRMI(builder(data); mod=@__MODULE__, total_groups=:auto)
     @test BRM.stan_code(sb_top) == infunc.src
     @test StanBlocks.stan_code(sb_top.model) == infunc.src
 end

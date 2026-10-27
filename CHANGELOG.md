@@ -1,0 +1,43 @@
+# Changelog
+
+All notable changes to BayesianRegressionModels.jl are documented here, newest
+first.
+
+Every landing that adds or changes public API (an export, a macro, a keyword, a
+method, or documented behaviour a dependant can rely on) bumps the patch digit
+in `Project.toml` and adds its entry under a new heading at the top of this
+file. An entry that breaks something a dependant relies on says **Breaking:**
+and what to change. A package or app that relies on an entry states its version
+as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
+environment that pins an older BRM commit is then refused when it resolves
+instead of failing at run time.
+
+## 0.2.3
+
+- **Breaking:** `SBBRMI`, `generative_plan` and `brm_descriptor` default to
+  `total_groups = ()`, the standard (non-centred) parametrization for every
+  random-effect block. Before, the default was `:auto`, which emitted exact
+  total coefficients for every eligible block. To keep exact totals, pass
+  `total_groups = :auto` (or the groups to integrate). For blocks the data
+  identify strongly or unevenly, S2Z (`s2z_groups`, `s2z_rho`) with WarmupHMC
+  adaptive centring (`adaptive_centering_problem`) is the recommended
+  alternative. Exact totals stay available and are not deprecated.
+- `s2z_rho` takes one weight vector per predictor,
+  `s2z_rho = [:mu => [1, 1, 1, 0], :sigma => 1]`, for predictors with
+  different numbers of coefficients on one S2Z grouping. The pairs must name
+  every sampled S2Z predictor and no other.
+- Under WarmupHMC adaptive centring, each exact total column is centred on its
+  own location, the least-squares fit of the column's totals on the
+  group-level predictors of the coefficients it absorbs (the mean of the totals
+  for an intercept-only block), so there is no location to choose. Other cells
+  in a model with totals choose their centring weights when a warm-up window
+  restarts. Snag `exact-totals-fun-f116d6b2`.
+
+## 0.2.2
+
+- `brm_start(sb, stan_model, inits)` takes a value for every level of an
+  intercept-free predictor's cell-means block (`0 + g`, `0 + factor(g)`),
+  `lp = (; g = ["a" => 1.1, "b" => 0.4, ...])`, on the link scale of a linked
+  predictor, as `brm_start(rk, inits)` already did. Before, the Stan method
+  found no coefficient for any level of such a block. Snag
+  `brm-start-sees-n-5b61087d`.

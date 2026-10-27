@@ -66,9 +66,9 @@ function robust_findiff(problem, d)
     return fd
 end
 
-# Oracle inputs shared by the hierarchical cases. Plain `(1 | g)` ranef
-# selects exact total coefficients (brm-use): totals T are sampled under
-# the collapsed marginal T ~ N(A*loc, tau^2*I + A*diag(1/prec)*A') with
+# Oracle inputs shared by the hierarchical cases. With `total_groups=:auto`,
+# plain `(1 | g)` ranef selects exact total coefficients (brm-use): totals T
+# are sampled under the collapsed marginal T ~ N(A*loc, tau^2*I + A*diag(1/prec)*A') with
 # beta integrated out; the totals scale default for plain scalar
 # intercepts is LogNormal(0,1) (src/total_effects_plan.jl). At u=0 all
 # Jacobians are 0 (identity/lb/exp at the origin).
@@ -79,13 +79,13 @@ const _LL2 = sum(logpdf.(Normal(0, 1), _Y2))
 const _STDN0 = logpdf(Normal(0, 1), 0.0)
 const _EXP1 = logpdf(Exponential(1), 1.0)
 
-@testset "robust edges G1 single group (default totals)" begin
+@testset "robust edges G1 single group (exact totals)" begin
     brmi = @brm (y=_Y1, g=[1, 1, 1, 1]) begin
         mu ~ 1 + (1 | g)
         y ~ Normal(mu, sigma)
         sigma ~ Exponential(1)
     end
-    sb = robust_build(brmi)
+    sb = robust_build(brmi; total_groups=:auto)
     if RUN_BRIDGESTAN
         d, lp, g, problem = robust_value(sb, "E-hier-1/G1-default")
         @test d == 3
@@ -119,7 +119,7 @@ end
         y ~ Normal(mu, sigma)
         sigma ~ Exponential(1)
     end
-    sb = robust_build(brmi)
+    sb = robust_build(brmi; total_groups=:auto)
     if RUN_BRIDGESTAN
         d, lp, g, problem = robust_value(sb, "E-hier-2/unbalanced")
         @test d == 4
@@ -489,7 +489,7 @@ end
         log(lambda) ~ 1 + (1 | g)
         y ~ Poisson(lambda)
     end
-    sb = robust_build(brmi)
+    sb = robust_build(brmi; total_groups=:auto)
     if RUN_BRIDGESTAN
         d, lp, g, problem = robust_value(sb, "B-poisg-1/G1")
         @test d == 2

@@ -120,7 +120,10 @@ end
     select_total_centeredness(model, draws, unc_names;
         criterion=:position, gradients=nothing, grid=0:0.1:1)
 
-Select each total coefficient's centering independently from a saved pilot.
+Select each total coefficient's centering independently from a saved pilot, in
+the mean-located frame `adaptive_centering_problem` samples (each total centred
+on its column's least-squares fit on the column's group-level design, the mean
+of the column's totals for a plain block), every other total kept at `c = 1`.
 `draws` and optional `gradients` are draws × coordinates in the COMPILED model
 frame. `:position` minimizes log SD minus mean log Jacobian; `:gradient`
 minimizes position-gradient correlation and requires matching exact gradients.
@@ -135,8 +138,57 @@ function select_total_centeredness(model,draws::AbstractMatrix,names;
     isempty(total_effect_blocks(model)) && throw(ArgumentError("model has no exact total-coefficient blocks"))
     blocks = _sampled_total_blocks(model,"select_total_centeredness",
         "the sampler has no total coordinate to center")
-    _select_scalar_centeredness(_total_centering_cells(model,names,blocks),draws,names;
+    _select_mean_total_centeredness(_total_centering_columns(model,names,blocks),draws,names;
         criterion,gradients,grid)
+end
+
+# The pilot scorer in the mean-located frame the WarmupHMC wrapper samples
+# (`_TotalCenteringColumns`): each cell is scored alone, the other cells of its
+# column kept at the compiled c = 1. Cell `j` of a column with design `W`,
+# leverage `h = w_j' (W'W) \ w_j` and `a = tau^(1-c)` has coordinate
+# `loc_j + (T_j - loc_j) / a` (`loc` the least-squares fit of the draw's totals
+# on `W`), log-Jacobian `log a - log(1 + (a - 1) h)` to the totals, and
+# gradient `a * g_j / (1 + (a - 1) h)`.
+function _select_mean_total_centeredness(cols,draws::AbstractMatrix,names;
+        criterion=:position,gradients=nothing,grid=0.:0.1:1.)
+    criterion in (:position,:gradient) || throw(ArgumentError("criterion must be :position or :gradient"))
+    size(draws,2) == length(names) && size(draws,1) > 2 ||
+        throw(DimensionMismatch("expected at least three draws, with one column per model coordinate"))
+    if criterion === :gradient
+        gradients isa AbstractMatrix && size(gradients) == size(draws) ||
+            throw(DimensionMismatch("gradient criterion needs matching compiled-frame gradients"))
+    end
+    candidates = Float64.(collect(grid))
+    !isempty(candidates) && all(c->isfinite(c) && 0<=c<=1,candidates) ||
+        throw(ArgumentError("centering grid must contain finite values in [0,1]"))
+    centeredness,losses = Float64[],Vector{Float64}[]
+    for col in eachindex(cols.scales)
+        cells = cols.starts[col]:cols.starts[col+1]-1
+        J,P = length(cells),cols.widths[col]
+        W = reshape(cols.design[cols.offsets[col] .+ (1:J*P)],J,P)
+        idx = cols.indices[cells]
+        T = draws[:,idx]
+        loc = P == 0 ? zero(T) : T*(W*((W'*W)\W'))
+        leverage = P == 0 ? zeros(J) : vec(sum(W .* (W/(W'*W)); dims=2))
+        ell = view(draws,:,cols.scales[col])
+        for (j,index) in enumerate(idx)
+            h = leverage[j]
+            scores = map(candidates) do c
+                a = exp.((1-c).*ell)
+                candidate = loc[:,j] .+ (T[:,j] .- loc[:,j])./a
+                if criterion === :position
+                    log(std(candidate)) + mean(log.(a) .- log.(1 .+ (a .- 1).*h))
+                else
+                    cor(candidate,view(gradients,:,index).*a./(1 .+ (a .- 1).*h))
+                end
+            end
+            all(isfinite,scores) || throw(ArgumentError("pilot gives degenerate/nonfinite centering scores for $(names[index])"))
+            push!(centeredness,candidates[argmin(scores)])
+            push!(losses,scores)
+        end
+    end
+    (;centeredness,indices=copy(cols.indices),grid=candidates,
+     losses=permutedims(hcat(losses...)),criterion)
 end
 
 # The exact total-coefficient blocks with sampler coordinates. A model with
@@ -167,6 +219,46 @@ function _total_centering_cells(model,names,blocks=_total_blocks_by_placement(mo
         end
     end
     (;indices,scales,locations,targets=ones(length(indices)))
+end
+
+# The same cells grouped by total column (block, random column `k`), for
+# mean-located centring (user pick `1rncfjy`, snag exact-totals-fun-f116d6b2):
+# column `c` owns cells `starts[c]:starts[c+1]-1` (one per group, sampler
+# coordinates `indices[cell]`), its log-scale coordinate is `scales[c]`, and its
+# location design is the `J x widths[c]` matrix stored column-major at
+# `design[offsets[c] .+ (1:J*widths[c])]`: the group-level columns `W[:, p]` of
+# the population coefficients the column absorbs (`A[k, p] != 0`), reduced to a
+# linearly independent set. A plain block's design is one column of ones. Each
+# total is then centred on its column's least-squares fit on that design (the
+# mean of the column's totals for a plain block), a function of the totals
+# themselves, so the centring has no location to choose.
+struct _TotalCenteringColumns
+    indices::Vector{Int}
+    starts::Vector{Int}
+    scales::Vector{Int}
+    widths::Vector{Int}
+    offsets::Vector{Int}
+    design::Vector{Float64}
+end
+
+function _total_centering_columns(model,names,blocks=_total_blocks_by_placement(model).sampled)
+    indices,starts,scales,widths,offsets,design = Int[],Int[1],Int[],Int[],Int[],Float64[]
+    for block in blocks
+        coords = _total_coordinates(model,block,names)
+        J = size(coords.totals,1)
+        for k in axes(coords.totals,2)
+            kept = zeros(J,0)
+            for p in axes(block.A,2)
+                iszero(block.A[k,p]) && continue
+                trial = hcat(kept,block.W[:,p])
+                rank(trial) == size(trial,2) && (kept = trial)
+            end
+            append!(indices,coords.totals[:,k]);push!(starts,length(indices)+1)
+            push!(scales,coords.scales[k]);push!(widths,size(kept,2))
+            push!(offsets,length(design));append!(design,vec(kept))
+        end
+    end
+    _TotalCenteringColumns(indices,starts,scales,widths,offsets,design)
 end
 
 # Pilot scorer shared by every scalar-cell family (totals, S2Z contrasts).

@@ -793,7 +793,9 @@ ranef_correlated_draws_generic_student_t =
 #
 # The factor is `L ~ lkj_corr_cholesky(...)`, or a stratified family's
 # `L_s ~ plate(...)` of them, read through a cell alias `L_g = L_s[s]`. Any
-# other read of it is an error: the transform must not guess.
+# other read of it is an error: the transform must not guess. `strict=false`
+# returns `nothing` instead, for a caller that only asks whether a form exists
+# (the SBBRMI display's template list).
 _sb_is_lkj_law(x) = Meta.isexpr(x, :call) && x.args[1] === :lkj_corr_cholesky
 _sb_holds_lkj_law(x) = _sb_is_lkj_law(x) ||
     (x isa Expr && any(_sb_holds_lkj_law, x.args))
@@ -801,7 +803,7 @@ _sb_bound_name(x::Symbol) = x
 _sb_bound_name(x::Expr) = Meta.isexpr(x, :(::)) ? _sb_bound_name(x.args[1]) : nothing
 _sb_bound_name(_) = nothing
 
-function _sb_single_margin_ranef(base::StanBlocks.SlicModel)
+function _sb_single_margin_ranef(base::StanBlocks.SlicModel; strict::Bool=true)
     # Read-only: `rewrite` builds fresh `Expr` nodes and shares the leaves. A
     # configured family's body holds values (a custom prior's `ValueUDF`, which
     # references a module), so it cannot be `deepcopy`d.
@@ -811,9 +813,11 @@ function _sb_single_margin_ranef(base::StanBlocks.SlicModel)
         Meta.isexpr(stmt, :call) && stmt.args[1] === :~ &&
             _sb_holds_lkj_law(stmt.args[3]) || continue
         name = _sb_bound_name(stmt.args[2])
-        name isa Symbol || error(
-            "sbimpl: `$(stmt)` holds the correlation factor under a left side the " *
-            "single-margin transform does not recognise")
+        if !(name isa Symbol)
+            strict || return nothing
+            error("sbimpl: `$(stmt)` holds the correlation factor under a left " *
+                  "side the single-margin transform does not recognise")
+        end
         push!(factors, name)
     end
     isempty(factors) && return base
@@ -842,10 +846,12 @@ function _sb_single_margin_ranef(base::StanBlocks.SlicModel)
     end
     body = rewrite(body)
     reads(x) = x isa Symbol ? x in factors : x isa Expr && any(reads, x.args)
-    reads(body) && error(
-        "sbimpl: a random-effect family reads its correlation factor " *
-        "($(join(sort!(collect(factors)), ", "))) other than through " *
-        "`diag_pre_multiply(tau, L)`; its single-margin form is not derived")
+    if reads(body)
+        strict || return nothing
+        error("sbimpl: a random-effect family reads its correlation factor " *
+              "($(join(sort!(collect(factors)), ", "))) other than through " *
+              "`diag_pre_multiply(tau, L)`; its single-margin form is not derived")
+    end
     StanBlocks.SlicModel(body, base.data, base.mod, base.observations)
 end
 
@@ -3777,7 +3783,7 @@ end
 
 """
     SBBRMI(brmi::BRMI; mod=@__MODULE__, cv_groups=Set{Symbol}(),
-           centered_groups=Set{Symbol}(), total_groups=:auto,
+           centered_groups=Set{Symbol}(), total_groups=(),
            s2z_groups=(), s2z_rho=nothing, s2z_coordinates=:contrasts,
            held_out=()) -> SBBRMI
 
@@ -3786,24 +3792,27 @@ materialises the data dict. Pass `mod` if you're constructing the model
 from a module other than `BayesianRegressionModels` so SLIC's symbol
 resolver finds your locally-defined submodels.
 
+Random-effect blocks use the standard (non-centered) parametrization by
+default. For groupings whose blocks the data identify strongly or unevenly, use
+S2Z (`s2z_groups`, `s2z_rho`, below) with WarmupHMC adaptive centering
+(`adaptive_centering_problem`).
+
+`total_groups` requests exact total coefficients instead (default `()`, none).
 `total_groups=:auto` integrates matching population coefficients into group
-totals when the exact Gaussian conditional construction is available. It supports
-one grouping structure per predictor, independent random-effect margins, and
+totals when the exact Gaussian conditional construction is available: one
+grouping structure per predictor, independent random-effect margins, and
 Normal, Flat, or Student-t population priors (Student-t uses its exact Gaussian
 scale mixture). Unmatched fixed effects and `offset(...)` terms remain explicit
-summands. Original population
-coefficients and deviations are recovered in generated quantities. Inspect
-[`total_effect_blocks`](@ref), or use `total_groups=()` for the conventional
-representation. Naming a group explicitly requires every block of that group to
-be eligible and errors otherwise, naming each predictor whose block would stay
-conventional and why. `total_groups=[:g => [:b]]` (or `:g => :b`) requests only
-`b`'s block on `g`, leaving the group's other blocks conventional; entries mix,
-as in `[:subject, :g => [:b, :c]]`. `:auto` keeps the whole model conventional
-when any block must stay conventional. Scale priors may be any supported family
-on the positive half-line, or one of them truncated at zero with no upper bound
-(`truncated(...; lower=0)` or `truncated(..., 0, Inf)`).
-Correlated, crossed, stratified, multi-membership and R2D2 blocks retain
-conventional emission under `:auto`.
+summands. Original population coefficients and deviations are recovered in
+generated quantities; inspect [`total_effect_blocks`](@ref). Naming a group
+explicitly requires every block of that group to be eligible and errors
+otherwise, naming each predictor whose block would stay conventional and why.
+`total_groups=[:g => [:b]]` (or `:g => :b`) requests only `b`'s block on `g`;
+entries mix, as in `[:subject, :g => [:b, :c]]`. `:auto` keeps the whole model
+conventional when any block must stay conventional. Scale priors may be any
+supported family on the positive half-line, or one of them truncated at zero
+with no upper bound. Correlated, crossed, stratified, multi-membership and R2D2
+blocks are never totals.
 
 `s2z_groups` is an opt-in collection of grouping-factor names (default `()`,
 disabled) emitted in the posterior-preserving sum-to-zero parameterization:
@@ -3811,14 +3820,19 @@ J-1 free orthonormal contrast coordinates per coefficient with a fixed
 projected partial map, exact Gaussian marginalization of the omitted block
 means into the sampled population coefficients `theta`, and generated
 recovery quantities. `s2z_rho` is required whenever `s2z_groups` is nonempty
-(no public default yet): a scalar in [0,1] or one weight per coefficient
-(0 = noncentered contrasts, 1 = centered). First scope is scalar independent
+(no public default yet): a scalar in [0,1], one weight per coefficient, or a
+J-by-K matrix (0 = noncentered contrasts, 1 = centered), applied to every S2Z
+predictor; or `predictor => weights` pairs, one per S2Z predictor, when
+predictors on the grouping need different weights, e.g.
+`s2z_rho = [:mu => [1, 1, 1, 0], :sigma => 1.0]`. Pairs must name every
+sampled S2Z predictor and no other. WarmupHMC's `adaptive_centering_problem`
+adapts the weights online, starting from these. First scope is scalar independent
 blocks with J >= 2, fully matched population design and Flat/Normal
 population priors, one S2Z grouping per predictor; anything else errors
 loudly. The predictor's other groupings (crossed, nested or `|ID|`) and direct
 terms (`hsgp`, categorical blocks, ...) stay ordinary terms. Inspect
-[`s2z_effect_blocks`](@ref). S2Z groups are excluded from automatic totals
-and cannot overlap `centered_groups` or `cv_groups`. S2Z applies to the blocks
+[`s2z_effect_blocks`](@ref). S2Z groups are excluded from totals and cannot
+overlap `centered_groups` or `cv_groups`. S2Z applies to the blocks
 an observed likelihood reaches: a predictor that none reaches (its response
 omitted from the data, for example) keeps its block of the grouping
 conventional, re-drawn in generated quantities, while the grouping stays S2Z
@@ -4473,7 +4487,7 @@ const _SB_STAN_RESERVED_IDENTIFIERS = Set{Symbol}((
 # orchestration entry.
 Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
        mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
-       centered_groups=Set{Symbol}(), total_groups=:auto,
+       centered_groups=Set{Symbol}(), total_groups=(),
        s2z_groups=(), s2z_rho=nothing, s2z_coordinates=:contrasts, held_out=(),
        resample_covariates=(), _frozen_preproc=nothing, _marginal_id_targets=nothing,
        _s2z_generated=nothing, _source::BRMI=brmi)
@@ -5034,19 +5048,30 @@ _sb_display_tree(x::QuoteNode) = QuoteNode(_sb_display_tree(x.value))
 _sb_display_tree(x::Expr) = Expr(x.head,
     (_sb_display_tree(a) for a in x.args if !(a isa LineNumberNode))...)
 
+# The named submodels a display may cite: every module-level `SlicModel`, and
+# the single-margin form of each one that has a correlation factor, which a
+# one-margin block calls (`_sb_ranef_statement`).
 function _sb_display_templates()
-    [(name, getfield(@__MODULE__, name))
-     for name in sort!(names(@__MODULE__; all=true, imported=false))
-     if isdefined(@__MODULE__, name) && getfield(@__MODULE__, name) isa StanBlocks.SlicModel]
+    templates = NamedTuple{(:name, :base, :single_margin)}[]
+    for name in sort!(names(@__MODULE__; all=true, imported=false))
+        isdefined(@__MODULE__, name) || continue
+        base = getfield(@__MODULE__, name)
+        base isa StanBlocks.SlicModel || continue
+        push!(templates, (; name, base, single_margin=false))
+        single = _sb_single_margin_ranef(base; strict=false)
+        isnothing(single) || single === base ||
+            push!(templates, (; name, base=single, single_margin=true))
+    end
+    templates
 end
 
 function _sb_display_configuration(model::StanBlocks.SlicModel, templates)
     body = _sb_display_tree(model.model)
     best = nothing
-    for (name, base) in templates
+    for (; name, base, single_margin) in templates
         base.mod === model.mod && isequal(base.data, model.data) || continue
         source = _sb_display_tree(base.model)
-        isequal(source, body) && return (; name, overrides=Any[])
+        isequal(source, body) && return (; name, single_margin, overrides=Any[])
         Meta.isexpr(source, :block) && Meta.isexpr(body, :block) || continue
         overrides = Any[stmt for stmt in body.args if !any(isequal(stmt), source.args)]
         # A compact configuration must retain some of the named template, and
@@ -5063,7 +5088,7 @@ function _sb_display_configuration(model::StanBlocks.SlicModel, templates)
         rebuilt = Base.merge(base, overrides...)
         isequal(_sb_display_tree(rebuilt.model), body) &&
             isequal(rebuilt.data, model.data) && rebuilt.mod === model.mod || continue
-        best = (; name, overrides)
+        best = (; name, single_margin, overrides)
     end
     best
 end
@@ -5088,19 +5113,23 @@ function _sb_display_parts(sb::SBBRMI)
         config = _sb_display_configuration(x, templates)
         isnothing(config) && return x
         base = GlobalRef(@__MODULE__, config.name)
-        isempty(config.overrides) && return base
+        isempty(config.overrides) && !config.single_margin && return base
         for (prior, alias) in configurations
             isequal(prior, config) && return alias
         end
+        stem = config.single_margin ? :_single_margin_ : :_configured_
         index = 1
-        alias = Symbol(config.name, :_configured_, index)
+        alias = Symbol(config.name, stem, index)
         while alias in used
             index += 1
-            alias = Symbol(config.name, :_configured_, index)
+            alias = Symbol(config.name, stem, index)
         end
         push!(used, alias)
-        constructor = Expr(:call, GlobalRef(Base, :merge), base,
-                           Expr(:quote, Expr(:block, config.overrides...)))
+        config.single_margin && (base = Expr(:call,
+            GlobalRef(@__MODULE__, :_sb_single_margin_ranef), base))
+        constructor = isempty(config.overrides) ? base :
+            Expr(:call, GlobalRef(Base, :merge), base,
+                 Expr(:quote, Expr(:block, config.overrides...)))
         push!(definitions, Expr(:(=), alias, constructor))
         push!(configurations, (config, alias))
         alias
@@ -5719,7 +5748,7 @@ _generative_plan_centered(plan::GenerativePlan) =
 function generative_plan(builder::Function, df;
                          mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
                          centered_groups=Set{Symbol}(),
-                         total_groups=:auto, s2z_groups=(), s2z_rho=nothing,
+                         total_groups=(), s2z_groups=(), s2z_rho=nothing,
                          s2z_coordinates=:contrasts, held_out=(),
                          _frozen_preproc=nothing)
     brmi = Base.invokelatest(builder, df)
@@ -6007,6 +6036,11 @@ function _sb_reprocess_strata!(new_data, handled, e::PreprocEntry, idx, df, free
     (; by, strata, stratum_idx, stratum_idx_key, n_strata_key)
 end
 
+# A record whose replay reads regenerated grouping codes: a `by=` HSGP's
+# per-level projection.
+_sb_reads_level_codes(e::PreprocEntry) =
+    e.kind === :hsgp && e.const_ isa NamedTuple && haskey(e.const_, :level_index)
+
 function _sb_reprocess_column_length(df, column, what)
     col = _sb_df_column(df, column)
     col isa AbstractVector || error(
@@ -6270,9 +6304,15 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
                         :harmonics => e.const_.harmonics_key,
                         :rho_lower => e.const_.rho_lower_key)
     elseif e.kind === :hsgp
-        replay_and_bind(_sb_hsgp_replay_input(df, e;
-                            allow_empty=!isnothing(get(e.const_, :domain_fits, nothing))),
-                        :primary => key,
+        input = _sb_hsgp_replay_input(df, e;
+            allow_empty=!isnothing(get(e.const_, :domain_fits, nothing)))
+        # A `by=` term's projection reads the replay rows' level codes, which
+        # its grouping record (replayed first) has just written.
+        level_index = get(e.const_, :level_index, nothing)
+        isnothing(level_index) || (input = merge(input, (; group=(;
+            idx=new_data[level_index.idx_key],
+            new_preproc[level_index.idx_key].const_.levels))))
+        replay_and_bind(input, :primary => key,
                         :omega2 => e.const_.omega2_key,
                         :rho_lower => e.const_.rho_lower_key)
     elseif e.kind === :categorical_outcome
@@ -6713,6 +6753,7 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
     #    record. Interactions wait until their raw/transformed operands exist.
     for (key, e) in sb.preproc
         e.kind in (:interaction, :submodel_hook) && continue
+        _sb_reads_level_codes(e) && continue
         # A response a cell observes through a grouping (`y[rows[i]]`) is a
         # gathered key whose raw column the new data may lack. Its record is
         # kept, so a later replay onto rows with the response gathers it again.
@@ -6735,6 +6776,11 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
                 "` of the joint response `", join(outcomes, "`, `"), "`. A forecast of a ",
                 "joint response is not supported yet (todo `1fnt1zu`); include its outcome columns.")
         end
+        _sb_reprocess_entry!(new_data, new_preproc, handled, key, e, new_df, freeze_constants)
+    end
+    # 1a. A `by=` HSGP projection reads the level codes step 1 regenerated.
+    for (key, e) in sb.preproc
+        _sb_reads_level_codes(e) || continue
         _sb_reprocess_entry!(new_data, new_preproc, handled, key, e, new_df, freeze_constants)
     end
     # 1b. Re-invoke each consumer `_sb_submodel_rhs!` term on the new frame; it
@@ -8871,10 +8917,10 @@ _sb_missing_preproc(plan, observed_key, missing_key) = PreprocEntry(
        observed_key, missing_key), plan.source, true)
 
 # Map a Julia function (typically the result of `InverseFunctions.inverse(...)`
-# for a link transform) to the Stan-side function name. Stan ships
-# `inv_logit` rather than `logistic`, so the bare `nameof` would emit a
-# call stanc rejects. Add other rename cases here as they come up.
-_sb_julia_to_stan_fn(f) = f === LogExpFunctions.logistic ? :inv_logit : Symbol(nameof(f))
+# for a link transform) to the Stan-side function name: the kernel cells'
+# table (`_sb_julia_stan_name`, sb_cell_julia.jl) where Stan spells it
+# differently (`logistic` -> `inv_logit`), else its own name.
+_sb_julia_to_stan_fn(f) = something(_sb_julia_stan_name(f), Symbol(nameof(f)))
 
 # Inner-arg unwrap helpers shared by `_sb_predictor_term!` overloads (mo, me,
 # s, t2, gp, hsgp, ar, mo1) and a few `mi`-style sites. Each step is a tiny dispatch
@@ -14345,6 +14391,20 @@ end
 _sb_hsgp_rows_source(options) =
     isnothing(options.rows) ? nothing : name(_sb_named_inner(:hsgp, options.rows))
 
+# The `group` a `by=` HSGP's projection reads (`_brm_hsgp_projection_group`):
+# the grouping index the term reads and the levels its `:group_index` record
+# holds. `level_index` names both keys; `nothing` for a term without a
+# projection.
+_sb_hsgp_projection_group(_data, ::Nothing) = nothing
+function _sb_hsgp_projection_group(data, level_index::NamedTuple)
+    recorded = get(data, _SB_PREPROC_KEY, nothing)
+    recorded isa _SBPreprocContext && (recorded = recorded.recorded)
+    entry = recorded isa AbstractDict ? get(recorded, level_index.idx_key, nothing) : nothing
+    isnothing(entry) && error(
+        "sbimpl: internal error — grouping index `$(level_index.idx_key)` has no record")
+    (; idx=data[level_index.idx_key], entry.const_.levels)
+end
+
 # Replay needs the options next to the frozen fit; a term that uses none of
 # them records nothing new, so its preprocessing record is unchanged.
 function _sb_hsgp_option_const(options, support)
@@ -14432,9 +14492,6 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     orthogonal_to = _sb_hsgp_orthogonal_to(kw, n_axes)
     !is_raw && partial && error(
         "sbimpl: partial centering currently requires a raw-data HSGP axis")
-    !isnothing(orthogonal_to) && haskey(kw, :by) && error(
-        "sbimpl: `hsgp(...; orthogonal_to=$(repr(orthogonal_to)))` is an " *
-        "ungrouped population-shape constraint and cannot be combined with `by=`")
     iso = _sb_gp_iso(kw, :hsgp)
 
     if !is_raw
@@ -14511,9 +14568,13 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
             data, PHI_name, names, axes, K, c, iso,
             domain_fits, orthogonal_to, options, mask)
         fits = fitted.fits
+        # `orthogonal_to=` projects each level's rows with that level's fit.
+        level_index = isnothing(orthogonal_to) ? nothing :
+            (; idx_key=info.idx_name, n_key=Symbol(:n_, gname))
         basis = _brm_hsgp_basis_state(
             fitted.axes, K, cov, iso, period; fits, orthogonal=orthogonal_to,
-            options.anchor, mask)
+            options.anchor, mask, fitted.projection,
+            group=_sb_hsgp_projection_group(data, level_index))
         PHI, omega2 = basis.PHI, basis.omega2
         data[PHI_name] = PHI
         data[omega2_name] = omega2
@@ -14521,10 +14582,12 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         floor_const = _sb_hsgp_floor_check(term_overrides, t, basis.rho_lower,
             _brm_hsgp_floor_geometry(K, c, fits, !isnothing(domain_fits)),
             _brm_hsgp_floor_remedy(!isnothing(domain_fits)))
-        _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp,
-            (; fits, K, c, iso, domain_fits, orthogonal_to,
+        preproc_const = (; fits, K, c, iso, domain_fits, orthogonal_to,
              omega2_key=omega2_name, rho_lower_key=rho_lower_name,
-             _sb_hsgp_option_const(options, fitted.support)..., floor_const...),
+             _sb_hsgp_option_const(options, fitted.support)..., floor_const...)
+        isnothing(basis.projection) ||
+            (preproc_const = merge(preproc_const, (; basis.projection, level_index)))
+        _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp, preproc_const,
             names, false))
         rho_plan = _sb_hyper_plan_for(hyper_plans, :length_scale)
         sigma_plan = _sb_hyper_plan_for(hyper_plans, :sd)

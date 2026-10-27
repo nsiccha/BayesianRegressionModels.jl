@@ -1,5 +1,8 @@
 # Pupil: numeric scale predictor and automatic totals
 
+!!! note "Exact totals are not the default"
+    This study uses exact total coefficients (`total_groups`). SBBRMI's default is the standard parametrization, so the code passes `total_groups=:auto` explicitly. For groupings whose blocks the data identify strongly or unevenly, BRM also offers the sum-to-zero (S2Z) parametrization (`s2z_groups`, `s2z_rho`) with WarmupHMC adaptive centering.
+
 ## Result
 
 BRM can express the pupil model from [post 3 of the Stan discussion](https://discourse.mc-stan.org/t/help-testing-brms-pr-for-sum-to-zero-and-partial-centering/41542/3), integrate its population mean coefficients, and expose its total coefficients to WHMC adaptation automatically.
@@ -77,7 +80,7 @@ The fixed reference location is 5651.9 for intercept totals and zero for slopes.
 using StanBlocks, BridgeStan, WarmupHMC, Enzyme, Random
 using DifferentiationInterface: AutoEnzyme
 
-sb = SBBRMI(pupil_numeric_brm_model(); mod=@__MODULE__)
+sb = SBBRMI(pupil_numeric_brm_model(); mod=@__MODULE__, total_groups=:auto)
 problem = StanBlocks.stan_instantiate(sb.model)
 names = BridgeStan.param_unc_names(problem.model)
 adaptive = adaptive_centering_problem(sb, problem, AutoEnzyme(); centeredness=0.0)

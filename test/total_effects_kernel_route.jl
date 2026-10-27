@@ -39,7 +39,7 @@ kernel_totals_df(; subs, seed = 1) = (;
 
 @testset "kernel totals — :auto integrates the subject bucket" begin
     train = kernel_totals_df(; subs = ["s1", "s2", "s3"])
-    sb = SBBRMI(kernel_totals_builder(train); mod = @__MODULE__)
+    sb = SBBRMI(kernel_totals_builder(train); mod = @__MODULE__, total_groups=:auto)
     # The premise of the question: default `:auto` claims this shape, so the
     # GQ resample route is closed and recovery is the only way through.
     @test !isempty(total_effect_blocks(sb))
@@ -51,8 +51,8 @@ if get(ENV, "BRM_TOTALS_KERNEL_RUNTIME", "1") == "1"
 @testset "kernel totals — recovery transports onto new subjects" begin
     train  = kernel_totals_df(; subs = ["s1", "s2", "s3"])
     future = kernel_totals_df(; subs = ["s2", "s3", "n1", "n2"], seed = 7)
-    sb = SBBRMI(kernel_totals_builder(train); mod = @__MODULE__)
-    new_plan = generative_plan(kernel_totals_builder, future; mod = @__MODULE__)
+    sb = SBBRMI(kernel_totals_builder(train); mod = @__MODULE__, total_groups=:auto)
+    new_plan = generative_plan(kernel_totals_builder, future; mod = @__MODULE__, total_groups=:auto)
 
     fit_p = StanBlocks.stan_instantiate(sb.model)
     new_p = StanBlocks.stan_instantiate(new_plan.model)

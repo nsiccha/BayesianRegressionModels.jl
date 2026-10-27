@@ -189,7 +189,7 @@ end
         mu ~ 1 + x + (1 | subject)
         y1 ~ Normal(mu, sigma)
     end
-    sb = SBBRMI(builder(df); mod=_MOD)  # default total_groups=:auto
+    sb = SBBRMI(builder(df); mod=_MOD, total_groups=:auto)
     blocks = total_effect_blocks(sb)
     @test length(blocks) == 1 && only(blocks).population_columns == (:Intercept,)
     d = brm_descriptor(sb; name=:axis_recovered)
