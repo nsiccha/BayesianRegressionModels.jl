@@ -12,6 +12,19 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.7
+
+- `structure_of(builder)` and `priors_of(builder)` split a data-free
+  `BRMBuilder` (from `@brm begin … end` or `brm(source; mod)`) into the builder
+  of its model statements and the builder of its prior-address statements, as
+  they already split a `BRMI`. `string(structure_of(builder))` and
+  `string(priors_of(builder))` are the model's structure and prior cards, with
+  no data bound; `optional(...)` priors stay as written. Snag
+  `show-a-model-s-s-596039d4`.
+- A builder prints an elementwise prior or a declared vector parameter as
+  written, `effect(mu, x) .~ Normal.(0, 1)`, where it printed
+  `.~(effect(mu, x), Normal.(0, 1))`.
+
 ## 0.2.6
 
 - A plate output read at model scope is one value per cell, as the Julia loop

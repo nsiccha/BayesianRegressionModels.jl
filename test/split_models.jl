@@ -7,7 +7,8 @@
 # `merge(structure_of(b), priors_of(b))` must recompose an equivalent model.
 # `show(::BRMI)` prints the model's statements as authored (decision `0eqw9xp`),
 # so each fragment prints as its own source card; `d.formula` and the web BRMI
-# view print the same source.
+# view print the same source. A data-free `BRMBuilder` splits its source
+# statements the same way, into two builders.
 
 using Test
 using BayesianRegressionModels
@@ -102,6 +103,88 @@ end
     @test opkeys(structure_of(structure_of(inline))) == opkeys(structure_of(inline))
     @test isempty(opkeys(priors_of(structure_of(inline))))
     @test isempty(opkeys(structure_of(priors_of(inline))))
+end
+
+# A data-free builder splits its source the same way, so a listing shows the
+# structure and prior cards without binding data (snag show-a-model-s-s-596039d4).
+@testset "a builder splits its source without data" begin
+    ranef_df = merge(df, (; z=[1, 2, 3, 1, 2, 3]))
+    builder = @brm begin
+        log_ka ~ 1 + x + mo1(z) + (1 + x | pk | subject)
+        effect(log_ka, Intercept) ~ Normal(log(1 / 8), 0.8)
+        sigma ~ Exponential(1)
+        optional(effect(log_ka, weight)) ~ Normal(0, 0.1)
+        sd(:, pk) ~ Exponential(1)
+        y ~ Normal(log_ka, sigma)
+        cor(:, pk) ~ LKJCholesky(2, 2)
+        ranef(:, pk) ~ TDist(4)
+        simplex(log_ka, mo1(z)) ~ Dirichlet(2, 1)
+        effect(log_ka, x) .~ Normal.(0.0, 0.5)
+        sd(log_ka, pk, x) = 0.3
+    end
+    source = deepcopy(builder.source)
+    structure, priors = structure_of(builder), priors_of(builder)
+    @test structure isa BRMBuilder
+    @test priors isa BRMBuilder
+    @test split(sprint(show, structure), '\n') == [
+        "log_ka ~ 1 + x + mo1(z) + (1 + x | pk | subject)",
+        "sigma ~ Exponential(1)", "y ~ Normal(log_ka, sigma)"]
+    # Every prior head, the optional marker, an elementwise prior and a known
+    # value, each as written (`.~` infix, as the built model prints it).
+    @test split(sprint(show, priors), '\n') == [
+        "effect(log_ka, Intercept) ~ Normal(log(1 / 8), 0.8)",
+        "optional(effect(log_ka, weight)) ~ Normal(0, 0.1)",
+        "sd(:, pk) ~ Exponential(1)", "cor(:, pk) ~ LKJCholesky(2, 2)",
+        "ranef(:, pk) ~ TDist(4)", "simplex(log_ka, mo1(z)) ~ Dirichlet(2, 1)",
+        "effect(log_ka, x) .~ Normal.(0.0, 0.5)", "sd(log_ka, pk, x) = 0.3"]
+    @test builder.source == source
+
+    # The source test and the operation test split alike: the builder's cards
+    # are the built model's.
+    built = builder(ranef_df)
+    @test sprint(show, builder) == sprint(show, built)
+    @test sprint(show, structure) == sprint(show, structure_of(built))
+    @test sprint(show, priors) == sprint(show, priors_of(built))
+    @test brm_columns(structure) == brm_columns(builder)
+    @test stan(structure(ranef_df)) == stan(structure_of(built))
+    @test stan(merge(structure, priors)(ranef_df)) == stan(built)
+
+    # A declared vector parameter and an r2d2 decomposition: the first declares
+    # a parameter (structure), the second is a prior address.
+    declared = @brm begin
+        phi[1:2] .~ Normal.(0.0, 0.5; lower = 0.0)
+        mu ~ 1 + x
+        effect(mu, :) ~ r2d2(R2 = 0.5)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end
+    @test sprint(show, structure_of(declared)) ==
+          "phi[1:2] .~ Normal.(0.0, 0.5; lower=0.0)\nmu ~ 1 + x\n" *
+          "sigma ~ Exponential(1)\ny ~ Normal(mu, sigma)"
+    @test sprint(show, priors_of(declared)) == "effect(mu, :) ~ r2d2(; R2=0.5)"
+    @test sprint(show, declared) == sprint(show, declared(df))
+
+    # A `begin … end` statement in a `brm(source; mod)` body is spliced in, as
+    # the parser splices it.
+    fragment = quote
+        effect(mu, x) ~ Normal(0, 0.5)
+        sigma ~ Exponential(1)
+    end
+    nested = brm(quote
+        mu ~ 1 + x
+        $fragment
+        y ~ Normal(mu, sigma)
+    end; mod=@__MODULE__)
+    @test sprint(show, structure_of(nested)) ==
+          "mu ~ 1 + x\nsigma ~ Exponential(1)\ny ~ Normal(mu, sigma)"
+    @test sprint(show, priors_of(nested)) == "effect(mu, x) ~ Normal(0, 0.5)"
+    @test sprint(show, structure_of(nested)) == sprint(show, structure_of(nested(df)))
+
+    # A model without priors has an empty prior card.
+    plain = @brm begin sigma ~ Exponential(1); mu ~ 1 + x; y ~ Normal(mu, sigma) end
+    @test sprint(show, priors_of(plain)) == ""
+    @test brm_columns(priors_of(plain)) == ()
+    @test sprint(show, structure_of(plain)) == sprint(show, plain)
 end
 
 println("split_models.jl: all testsets passed")
