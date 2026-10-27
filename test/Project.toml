@@ -159,7 +159,11 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # constant design matrices; snag several-port-pul-e6344d44). 1c14fc131
 # contains bf8040f16 and adds 0e96da576 (one joint `@plate` cell latent per
 # index, which `T::shares(total)` emits; snag rkppl-per-index-5e9df9fe).
+# e32d442c6 contains 1c14fc131 and adds d35aee6cd (ReactiveKernels 0.1.2,
+# ReactiveKernelsPPL 0.1.1: a `@plate` output whose cells hold vectors is one
+# vector per cell, so model-scope `sum(cnt)`, `sum(cnt[k])` and `cnt[g]` read
+# it; snag summing-a-plate-eba2648d).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "1c14fc131660d9fe828d5be91b945d21594607f0"
+rev = "e32d442c629af3889865a3611bef131cb91d2a0a"

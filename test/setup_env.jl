@@ -148,8 +148,12 @@ const PINS = [
     # design matrices; snag several-port-pul-e6344d44). 1c14fc131 contains
     # bf8040f16 and adds 0e96da576 (one joint `@plate` cell latent per index
     # with a caller-owned geometry, which `T::shares(total)` emits; snag
-    # rkppl-per-index-5e9df9fe); RK's Project.toml files are unchanged.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "1c14fc131660d9fe828d5be91b945d21594607f0"),  # main
+    # rkppl-per-index-5e9df9fe). e32d442c6 contains 1c14fc131 and adds
+    # d35aee6cd (ReactiveKernels 0.1.2, ReactiveKernelsPPL 0.1.1: a `@plate`
+    # output whose cells hold vectors is one vector per cell, so model-scope
+    # `sum(cnt)`, `sum(cnt[k])` and `cnt[g]` read it; snag
+    # summing-a-plate-eba2648d).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "e32d442c629af3889865a3611bef131cb91d2a0a"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.5); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "d16c4efb72b963f45de9d6f632c38d46706c23e1"),  # main

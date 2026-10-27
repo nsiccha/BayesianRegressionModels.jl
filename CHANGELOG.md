@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.11
+
+- On RKBRMI, a plate output whose cells hold vectors is one vector per cell at
+  model scope, as on SBBRMI: after `cnt[s] = v` in `@plate for s in …`,
+  `sum(cnt)` adds the cells elementwise, `sum(cnt[idx])` adds the cells `idx`,
+  `cnt[g]` is cell `g`'s vector and `sel = cnt[idx]` is those cells, for
+  vectors of fixed width and for vectors whose length follows the cell's data.
+  From 0.2.6 to 0.2.10 these reads raised an error on RKBRMI. Needs
+  ReactiveKernels 0.1.2 and ReactiveKernelsPPL 0.1.1 (`e32d442c`,
+  ReactiveKernels snag `summing-a-plate-eba2648d`); the test environment pins
+  it. With an older ReactiveKernels the reads raise the error as before.
+
 ## 0.2.10
 
 - `cnt[idx]` of a plate output whose cells hold vectors of varying length is
