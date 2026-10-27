@@ -437,6 +437,23 @@ fixed family present, stratified estimates by stratum, and a timed
 described below; NLMEEstimation master needs Treebars `a2f9e41` or later,
 newer than this environment's pin.
 
+`nlme_grouped_hsgp.jl` (test environment) reads a grouped HSGP,
+`hsgp(x; by=g)`, whose levels are the subjects: on a flat-row model and on a
+subject plate that reads `hsgp(ecg_time; by=ecg_subject)` through
+`groups(ecg_subject => subject)`, each level's basis weights are one fixed
+family of unit draws in its subject's block, the length scale and amplitude
+stay shared, and lockstep, single-subject and unit-problem densities match the
+full RK density. It also covers a subject without a level (ragged blocks), a
+hyper-predicted amplitude's `(1 | g)` effects as an estimated family, the
+shared readings (levels that are not subjects, `cor = C`, a declared
+`Omega ~ LKJCholesky`) and the refusal of labels that name only some
+subjects. Its data and models live in `nlme_grouped_hsgp_fixture.jl`.
+`nlme_grouped_hsgp_fit.jl` runs NLMEEstimation on those models: the weight
+family in `NLMEEstimation.fixed_omega`, `check_protocol` on flat and ragged
+layouts, the population prior's ω gradient beside the fixed family, and short
+SAEM, FOCE(I) and empirical-Bayes fits read back by name. Run it in the
+NLMEEstimation scratch environment described below.
+
 `nlme_svi.jl` checks minibatch stochastic variational inference
 (`brm_svi_fit`). The minibatch split of the RK target is checked first: the
 global prior and Jacobian term plus every subject's cell term equal the full

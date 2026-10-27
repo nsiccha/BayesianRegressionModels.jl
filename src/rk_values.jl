@@ -456,6 +456,8 @@ _rk_ast_replace_floor_marker(value::Expr, floor) =
     Expr(value.head, (_rk_ast_replace_floor_marker(a, floor) for a in value.args)...)
 _rk_ast_replace_floor_marker(value, _floor) = value
 
+# The term's statements, and the sampled block locals of a grouped or
+# hyper-predicted term (`_rk_ast_hsgp_grouped`; `nothing` for an ungrouped one).
 function _rk_ast_value_hsgp(definitions, term, taken, bindings)
     options = term.options
     periodic = get(options, :cov, :exp_quad) === :periodic
@@ -497,9 +499,10 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
         extent = :(1:$(prod(_rk_hsgp_modes(options))))
     end
     if grouped
-        push!(stmts, Expr(:call, :~, options.id,
-            _rk_ast_hsgp_grouped(definitions, term, inputs, floors, extent, taken, bindings)))
-        return stmts
+        call, locals = _rk_ast_hsgp_grouped(definitions, term, inputs, floors, extent,
+            taken, bindings)
+        push!(stmts, Expr(:call, :~, options.id, call))
+        return stmts, locals
     end
     axes = periodic || options.iso ? 1 : length(term.columns)
     rho_priors = [_rk_ast_hsgp_rho_prior(options, floors, axes == 1 ? nothing : j,
@@ -513,7 +516,7 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
     _rk_ast_hsgp_component!(definitions, stmts, taken, options.id, inputs, floors,
         rho_priors, sigma_prior, value, extent; truncated=options.rho_truncated,
         base=periodic ? "brm_periodic_hsgp_effect" : "brm_hsgp_effect")
-    stmts
+    stmts, nothing
 end
 
 _rk_plan_summary(plan::_RKValuePlan) = string(

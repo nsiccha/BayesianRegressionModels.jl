@@ -12,6 +12,24 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.11
+
+- `brm_nlme_view` reads a grouped HSGP, `hsgp(x; by = g)`, on RKBRMI. When
+  the levels of `g` are the subjects (the subject grouping, a column whose
+  labels are subjects such as `ecg_subject`, or a grouping named in
+  `nested_groups`), each level's standardized basis weights are unit draws
+  of its subject, in one family of size k whose covariance is fixed at the
+  identity (`NLMEEstimation.fixed_omega`); the `(1 | g)` effects of a
+  hyper-predicted amplitude or length scale are an estimated family of size
+  1; the length scale, amplitude and hyper intercepts stay `:shared_latent`.
+  Any other grouped HSGP, and one whose `cor=` correlates its levels, is
+  `:shared_latent` as a whole, with the declared `Omega ~ LKJCholesky(...)`
+  its `cor=` reads. Before, every grouped HSGP left its
+  coordinates outside the semantic inventory, and `brm_nlme_view` refused the
+  model. Labels that name some subjects and not others are refused. A subject
+  without a level of `g` makes the layout ragged. Snag
+  `nlme-unit-role-f-c29361b0`.
+
 ## 0.2.10
 
 - `cnt[idx]` of a plate output whose cells hold vectors of varying length is
