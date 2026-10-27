@@ -1743,16 +1743,23 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         end
         for term in predictor.terms
             term.kind === :hsgp || continue
-            append!(stmts, _rk_ast_value_hsgp(defs, term, taken, bindings))
-            # Ungrouped HSGP components own scalar hyperparameters and basis
-            # weights; grouped or hyper-predicted terms stay unrecorded.
-            (haskey(term.options, :group_index) ||
-                !isempty(get(term.options, :hyper_plans, ()))) && continue
+            hsgp_stmts, locals = _rk_ast_value_hsgp(defs, term, taken, bindings)
+            append!(stmts, hsgp_stmts)
+            # An HSGP component owns its hyperparameters and basis weights
+            # under its id. A grouped or hyper-predicted term (`grouped`) also
+            # names its `by` column, levels and sampled block locals, which
+            # the NLME view reads; `level_correlation` marks a `cor=` that
+            # couples its levels. The Stan transport pairs ungrouped terms.
             _rk_coordinate_record!(coordinates, (; kind=:hsgp,
                 declaration=term.options.id, predictor=predictor.name,
                 axes=Tuple(term.columns),
                 iso=get(term.options, :cov, :exp_quad) === :periodic ||
-                    term.options.iso))
+                    term.options.iso,
+                grouped=locals !== nothing,
+                group=get(term.options, :group_column, nothing),
+                levels=get(term.options, :group_levels, nothing),
+                level_correlation=get(term.options, :level_cor, nothing) !== nothing,
+                locals))
         end
         for term in predictor.terms
             term.kind === :gp || continue
