@@ -104,11 +104,12 @@ stan(brmi) = BRM.stan_code(SBBRMI(brmi; mod=@__MODULE__))
     code = stan(mg_sd(df))
     @test occursin("hsgp_t_by_g_beta_level = brm_hsgp_multigroup_weights(b_hsgpw_t_g, " *
                    "omega2_hsgp_t_by_g, hsgp_t_by_g_rho, Omega, tau);", code)
-    code = stan(mgc_sd(df))
-    @test occursin("hsgp_t_by_g_beta_level = brm_hsgp_multigroup_coordinate_weights(" *
-                   "b_hsgpw_t_g, omega2_hsgp_t_by_g, hsgp_t_by_g_rho,", code)
-    @test occursin("rows_dot_product(hsgp_t_by_g_S, hsgp_t_by_g_beta_level[g_idx, :])", code)
-    @test occursin("hsgp_t_by_g_lambda ~ lognormal(", stan(mgd_sd(df)))
+    # The emitted call spans lines; compare without whitespace.
+    code = replace(stan(mgc_sd(df)), r"\s+" => "")
+    @test occursin("hsgp_t_by_g_beta_level=brm_hsgp_multigroup_coordinate_weights(" *
+                   "b_hsgpw_t_g,omega2_hsgp_t_by_g,hsgp_t_by_g_rho,", code)
+    @test occursin("rows_dot_product(hsgp_t_by_g_S,hsgp_t_by_g_beta_level[g_idx,:])", code)
+    @test occursin("hsgp_t_by_g_lambda~lognormal(", replace(stan(mgd_sd(df)), r"\s+" => ""))
     sb = SBBRMI(icm_known(df); mod=@__MODULE__)
     @test sb.data[:L_levelcor_C] ≈ Matrix(cholesky(Symmetric(df.C)).L)
     @test occursin("L_levelcor_C * b_hsgpw_t_g", BRM.stan_code(sb))
