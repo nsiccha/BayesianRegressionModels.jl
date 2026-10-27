@@ -249,6 +249,73 @@ end
     @test_throws ErrorException brm_start(sb, model, (; mu=(; arm=0.1)))
 end
 
+# The first categorical term of an intercept-free predictor is coded as cell
+# means (decision `0woa6hh`): no reference level, one coefficient per level.
+@stestset "an intercept-free categorical term takes a value for every level" begin
+    cell_values(sb, model, s, lp, column) = begin
+        θ, names = constrained(model, s)
+        q = brm_population_effect_coordinates(brm_descriptor(sb), lp, names;
+            coefficient=column)
+        @test q.coding === :cellmeans
+        Dict(BRM._brm_transport_level(c.level) => θ[c.coordinate] for c in q.cells)
+    end
+
+    data = (; subject=repeat(["a", "b", "c", "d"], 3),
+        arm=categorical(repeat(["p", "q", "r"], 4)), y=sin.(1:12))
+    brmi = @brm data begin
+        sigma ~ Exponential(1)
+        mu ~ 0 + arm + (1 | e | subject)
+        y ~ Normal(mu, sigma)
+    end
+    inits = (; mu=(; arm=["p" => 0.3, "q" => 0.25, "r" => -0.4]),
+        e=fill(0.04, 1, 1), sigma=0.2)
+    (; rk, sb, model, t, u, s) = same_point(brmi, inits, "cellmeans")
+    @test brm_rk_point_to_stan(t, u) ≈ s rtol=1e-10 atol=1e-12
+    cells = cell_values(sb, model, s, :mu, :arm)
+    @test [cells[l] for l in ("p", "q", "r")] ≈ [0.3, 0.25, -0.4] rtol=1e-12
+    # An unaddressed level keeps its base value.
+    partial = brm_start(sb, model, (; mu=(; arm=["q" => 0.25])))
+    @test cell_values(sb, model, partial, :mu, :arm)["p"] == 0
+    @test brm_rk_point_to_stan(t, brm_start(rk, (; mu=(; arm=["q" => 0.25])))) ≈
+        partial rtol=1e-10 atol=1e-12
+    # refused: a level the column never takes has no coefficient.
+    @test_throws ErrorException brm_start(rk, (; mu=(; arm=["s" => 0.1])))
+    @test_throws ErrorException brm_start(sb, model, (; mu=(; arm=["s" => 0.1])))
+
+    # A linked predictor over a plain String column through `factor`, with an
+    # elementwise prior: values are on the link scale, keyed by the public name.
+    linked = (; subject=repeat(["a", "b", "c", "d"], 3),
+        kind=repeat(["x", "y", "z"], 4), n=[1, 2, 4, 2, 1, 3, 0, 2, 5, 1, 3, 2],
+        y=2 .+ sin.(1:12), w_loc=[0.1, 0.6, 1.2])
+    brmi = @brm linked begin
+        log(w) ~ 0 + factor(kind) + (1 | e | subject)
+        effect(w, kind) .~ Normal.(w_loc, 0.7)
+        n ~ Poisson(w)
+    end
+    inits = (; w=(; kind=["x" => log(1.5), "y" => log(2.0), "z" => log(3.0)]),
+        e=fill(0.09, 1, 1))
+    (; rk, sb, model, t, u, s) = same_point(brmi, inits, "cellmeans_linked")
+    @test brm_rk_point_to_stan(t, u) ≈ s rtol=1e-10 atol=1e-12
+    cells = cell_values(sb, model, s, :w, :kind)
+    @test [cells[l] for l in ("x", "y", "z")] ≈ log.([1.5, 2.0, 3.0]) rtol=1e-12
+
+    # A plain String column without `factor` codes its levels in the predictor's
+    # own coefficient vector, and takes the same pairs.
+    brmi = @brm linked begin
+        sigma ~ Exponential(1)
+        mu ~ 0 + kind
+        y ~ Normal(mu, sigma)
+    end
+    inits = (; mu=(; kind=["x" => 1.0, "y" => 2.0, "z" => 3.0]))
+    (; rk, sb, model, t, u, s) = same_point(brmi, inits, "cellmeans_string")
+    @test brm_rk_point_to_stan(t, u) ≈ s rtol=1e-10 atol=1e-12
+    θ, names = constrained(model, s)
+    q = brm_population_effect_coordinates(brm_descriptor(sb), :mu, names;
+        coefficient=:kind)
+    @test q.coding === :cellmeans
+    @test θ[q.coordinates] ≈ [1.0, 2.0, 3.0] rtol=1e-12
+end
+
 @stestset "a vector parameter is set on its constrained scale" begin
     data = (; x=collect(range(-1, 1; length=8)), y=cos.(1:8))
     brmi = @brm data begin

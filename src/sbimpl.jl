@@ -8887,10 +8887,10 @@ _sb_missing_preproc(plan, observed_key, missing_key) = PreprocEntry(
        observed_key, missing_key), plan.source, true)
 
 # Map a Julia function (typically the result of `InverseFunctions.inverse(...)`
-# for a link transform) to the Stan-side function name. Stan ships
-# `inv_logit` rather than `logistic`, so the bare `nameof` would emit a
-# call stanc rejects. Add other rename cases here as they come up.
-_sb_julia_to_stan_fn(f) = f === LogExpFunctions.logistic ? :inv_logit : Symbol(nameof(f))
+# for a link transform) to the Stan-side function name: the kernel cells'
+# table (`_sb_julia_stan_name`, sb_cell_julia.jl) where Stan spells it
+# differently (`logistic` -> `inv_logit`), else its own name.
+_sb_julia_to_stan_fn(f) = something(_sb_julia_stan_name(f), Symbol(nameof(f)))
 
 # Inner-arg unwrap helpers shared by `_sb_predictor_term!` overloads (mo, me,
 # s, t2, gp, hsgp, ar, mo1) and a few `mi`-style sites. Each step is a tiny dispatch

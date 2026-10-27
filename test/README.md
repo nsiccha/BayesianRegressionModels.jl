@@ -619,9 +619,9 @@ julia --startup-file=no --project=test test/description_known_values.jl
 ```
 
 `description_cell_functions.jl` describes the elementary functions a `@plate`
-cell's statements use: `log1p` and `expm1` by their standard names, and
-StanBlocks' `reshape(v, m, n)` as the column-major fill. It runs
-under the test project:
+cell's statements use: `log1p` and `expm1` by their standard names,
+StanBlocks' `reshape(v, m, n)` as the column-major fill, and StatsFuns'
+`normcdf`/`norminvcdf` as Phi and its inverse. It runs under the test project:
 
 ```sh
 julia --startup-file=no --project=test test/description_cell_functions.jl
