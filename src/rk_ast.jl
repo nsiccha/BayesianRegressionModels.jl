@@ -1490,6 +1490,14 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 (term.options.group_source, term.options.group_levels)
         end
     end
+    # Data-only assignments, their fit-role twins and the constants they read
+    # come first: any term, index or fit may read them (`_rk_attach_data_assignments!`).
+    for derived in plan.derived
+        Meta.isexpr(derived.expression, :_rk_data_assignment) || continue
+        expression = _rk_ast_data_expr!(defs, stmts, bindings, taken,
+            only(derived.expression.args); fitted)
+        push!(stmts, Expr(:(=), derived.name, expression))
+    end
     for name in sort!(collect(keys(index_sources)); by=string)
         source, levels = index_sources[name]
         call = _rk_ast_statistical_call!(defs, taken, :brm_prepared_indices,
@@ -1498,7 +1506,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     end
     for derived in plan.derived
         # A fit-role input is bound data (`_rk_fit_twin!`), not a definition.
-        derived.expression.head === :_rk_fit_input && continue
+        derived.expression.head in (:_rk_fit_input, :_rk_data_assignment) && continue
         expression = _rk_ast_data_expr!(defs, stmts, bindings, taken, derived.expression;
             fitted)
         push!(stmts, Expr(:(=), derived.name, expression))
