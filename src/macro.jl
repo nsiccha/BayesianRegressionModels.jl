@@ -432,9 +432,11 @@ directions from a one-dimensional basis, so `x + hsgp(x; ...)` separates the
 linear slope from residual nonlinear shape. `orthogonal_to=:intercept` removes
 only the intercept direction, from a basis over any number of axes: every basis
 column is centered over the term's rows, so the term sums to zero over them and
-a level elsewhere in the model is not shared with the field. Both projections
-are fitted on the training rows and frozen on replay; neither combines with
-`by=` or `anchor=`.
+a level elsewhere in the model is not shared with the field. With `by=g` both
+projections are fitted per level: each group's basis is centered (and, for
+`:linear`, de-trended) over that group's own rows, so every group's field sums
+to zero over its rows. Both projections are fitted on the training rows and
+frozen on replay; neither combines with `anchor=`.
 
 `cov=:periodic` selects the periodic-kernel approximation of Riutort-Mayol et
 al. (2023) over exactly one raw-data axis: `k` harmonics of `2pi / period`

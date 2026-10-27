@@ -650,9 +650,11 @@ function _brmd_gp_fragment(c,approximate)
         end
         orthogonal=get(c.keywords,:orthogonal_to,nothing)
         if orthogonal!==nothing
+            # With `by=` the projection is fitted on each group's rows (decision 15hn91t).
             span,text=_brmd_hsgp_projection(orthogonal)
-            push!(equations,"\\Phi_{\\mathrm{"*_brmd_text(c,:math_used)*"}}=(I-P_{"*span*"})\\Phi_{\\mathrm{"*_brmd_text(c,:math_raw)*"}}")
-            push!(prose,_brmd_text(c,text))
+            per_group=grouped ? "^{(g)}" : ""
+            push!(equations,"\\Phi"*per_group*"_{\\mathrm{"*_brmd_text(c,:math_used)*"}}=(I-P"*per_group*"_{"*span*"})\\Phi"*per_group*"_{\\mathrm{"*_brmd_text(c,:math_raw)*"}}")
+            push!(prose,_brmd_text(c,grouped ? Symbol(text,:_by_group) : text))
         end
         push!(prose,_brmd_text(c,:partial_centering))
     else

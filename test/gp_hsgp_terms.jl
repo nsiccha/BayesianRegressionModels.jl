@@ -162,13 +162,18 @@ end
         brm_descriptor(sb), zeros(1, 0), String[], [0.0];
         predictor=:loc, coefficient=:x, term=:hsgp_x)
 
+    # With `by=` the projection is fitted on each group's rows (decision 15hn91t).
     grouped_orthogonal = @brm df begin
         loc ~ 1 + x + hsgp(x; k=4, domain=(-2.0, 2.0),
                            orthogonal_to=:linear, by=g)
         y ~ Normal(loc, 1)
     end
-    @test_throws "cannot be combined with `by=`" SBBRMI(
-        grouped_orthogonal; mod=@__MODULE__)
+    grouped_sb = SBBRMI(grouped_orthogonal; mod=@__MODULE__)
+    grouped_PHI = grouped_sb.data[:PHI_hsgp_x_by_g]
+    for level in unique(df.g)
+        rows = findall(==(level), df.g)
+        @test maximum(abs, grouped_PHI[rows, :]' * [ones(length(rows)) df.x[rows]]) < 1e-10
+    end
 
     outside = merge(df, (; x=2 .* df.x))
     bad = @brm outside begin

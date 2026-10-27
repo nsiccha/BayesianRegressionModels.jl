@@ -6007,6 +6007,11 @@ function _sb_reprocess_strata!(new_data, handled, e::PreprocEntry, idx, df, free
     (; by, strata, stratum_idx, stratum_idx_key, n_strata_key)
 end
 
+# A record whose replay reads regenerated grouping codes: a `by=` HSGP's
+# per-level projection.
+_sb_reads_level_codes(e::PreprocEntry) =
+    e.kind === :hsgp && e.const_ isa NamedTuple && haskey(e.const_, :level_index)
+
 function _sb_reprocess_column_length(df, column, what)
     col = _sb_df_column(df, column)
     col isa AbstractVector || error(
@@ -6270,9 +6275,15 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
                         :harmonics => e.const_.harmonics_key,
                         :rho_lower => e.const_.rho_lower_key)
     elseif e.kind === :hsgp
-        replay_and_bind(_sb_hsgp_replay_input(df, e;
-                            allow_empty=!isnothing(get(e.const_, :domain_fits, nothing))),
-                        :primary => key,
+        input = _sb_hsgp_replay_input(df, e;
+            allow_empty=!isnothing(get(e.const_, :domain_fits, nothing)))
+        # A `by=` term's projection reads the replay rows' level codes, which
+        # its grouping record (replayed first) has just written.
+        level_index = get(e.const_, :level_index, nothing)
+        isnothing(level_index) || (input = merge(input, (; group=(;
+            idx=new_data[level_index.idx_key],
+            new_preproc[level_index.idx_key].const_.levels))))
+        replay_and_bind(input, :primary => key,
                         :omega2 => e.const_.omega2_key,
                         :rho_lower => e.const_.rho_lower_key)
     elseif e.kind === :categorical_outcome
@@ -6713,6 +6724,7 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
     #    record. Interactions wait until their raw/transformed operands exist.
     for (key, e) in sb.preproc
         e.kind in (:interaction, :submodel_hook) && continue
+        _sb_reads_level_codes(e) && continue
         # A response a cell observes through a grouping (`y[rows[i]]`) is a
         # gathered key whose raw column the new data may lack. Its record is
         # kept, so a later replay onto rows with the response gathers it again.
@@ -6735,6 +6747,11 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
                 "` of the joint response `", join(outcomes, "`, `"), "`. A forecast of a ",
                 "joint response is not supported yet (todo `1fnt1zu`); include its outcome columns.")
         end
+        _sb_reprocess_entry!(new_data, new_preproc, handled, key, e, new_df, freeze_constants)
+    end
+    # 1a. A `by=` HSGP projection reads the level codes step 1 regenerated.
+    for (key, e) in sb.preproc
+        _sb_reads_level_codes(e) || continue
         _sb_reprocess_entry!(new_data, new_preproc, handled, key, e, new_df, freeze_constants)
     end
     # 1b. Re-invoke each consumer `_sb_submodel_rhs!` term on the new frame; it
@@ -14344,6 +14361,20 @@ end
 _sb_hsgp_rows_source(options) =
     isnothing(options.rows) ? nothing : name(_sb_named_inner(:hsgp, options.rows))
 
+# The `group` a `by=` HSGP's projection reads (`_brm_hsgp_projection_group`):
+# the grouping index the term reads and the levels its `:group_index` record
+# holds. `level_index` names both keys; `nothing` for a term without a
+# projection.
+_sb_hsgp_projection_group(_data, ::Nothing) = nothing
+function _sb_hsgp_projection_group(data, level_index::NamedTuple)
+    recorded = get(data, _SB_PREPROC_KEY, nothing)
+    recorded isa _SBPreprocContext && (recorded = recorded.recorded)
+    entry = recorded isa AbstractDict ? get(recorded, level_index.idx_key, nothing) : nothing
+    isnothing(entry) && error(
+        "sbimpl: internal error — grouping index `$(level_index.idx_key)` has no record")
+    (; idx=data[level_index.idx_key], entry.const_.levels)
+end
+
 # Replay needs the options next to the frozen fit; a term that uses none of
 # them records nothing new, so its preprocessing record is unchanged.
 function _sb_hsgp_option_const(options, support)
@@ -14431,9 +14462,6 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     orthogonal_to = _sb_hsgp_orthogonal_to(kw, n_axes)
     !is_raw && partial && error(
         "sbimpl: partial centering currently requires a raw-data HSGP axis")
-    !isnothing(orthogonal_to) && haskey(kw, :by) && error(
-        "sbimpl: `hsgp(...; orthogonal_to=$(repr(orthogonal_to)))` is an " *
-        "ungrouped population-shape constraint and cannot be combined with `by=`")
     iso = _sb_gp_iso(kw, :hsgp)
 
     if !is_raw
@@ -14510,9 +14538,13 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
             data, PHI_name, names, axes, K, c, iso,
             domain_fits, orthogonal_to, options, mask)
         fits = fitted.fits
+        # `orthogonal_to=` projects each level's rows with that level's fit.
+        level_index = isnothing(orthogonal_to) ? nothing :
+            (; idx_key=info.idx_name, n_key=Symbol(:n_, gname))
         basis = _brm_hsgp_basis_state(
             fitted.axes, K, cov, iso, period; fits, orthogonal=orthogonal_to,
-            options.anchor, mask)
+            options.anchor, mask, fitted.projection,
+            group=_sb_hsgp_projection_group(data, level_index))
         PHI, omega2 = basis.PHI, basis.omega2
         data[PHI_name] = PHI
         data[omega2_name] = omega2
@@ -14520,10 +14552,12 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         floor_const = _sb_hsgp_floor_check(term_overrides, t, basis.rho_lower,
             _brm_hsgp_floor_geometry(K, c, fits, !isnothing(domain_fits)),
             _brm_hsgp_floor_remedy(!isnothing(domain_fits)))
-        _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp,
-            (; fits, K, c, iso, domain_fits, orthogonal_to,
+        preproc_const = (; fits, K, c, iso, domain_fits, orthogonal_to,
              omega2_key=omega2_name, rho_lower_key=rho_lower_name,
-             _sb_hsgp_option_const(options, fitted.support)..., floor_const...),
+             _sb_hsgp_option_const(options, fitted.support)..., floor_const...)
+        isnothing(basis.projection) ||
+            (preproc_const = merge(preproc_const, (; basis.projection, level_index)))
+        _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp, preproc_const,
             names, false))
         rho_plan = _sb_hyper_plan_for(hyper_plans, :length_scale)
         sigma_plan = _sb_hyper_plan_for(hyper_plans, :sd)

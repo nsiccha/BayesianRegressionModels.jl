@@ -74,11 +74,19 @@ Set `BRM_FIXED_RANEF_RUNTIME=0` to skip the compiled-model sets.
   a `rows=` term, with the fitted projection recorded;
 - frozen SBBRMI replay evaluating the training projection on a subset of rows
   (`:linear` too), and `freeze_constants=false` re-fitting it;
+- `by=g` projected within each level (decision 15hn91t), with and without
+  `cor=Omega`, with a per-level amplitude (`log(sd(hsgp(...))) ~ 1 + (1 | g)`),
+  with `rows=`, and `:linear`: each group's basis is its raw
+  basis minus that group's column means (and orthogonal to its `1` and `x`),
+  one projection per level is recorded, a frozen replay over a subset of the
+  groups keeps each level's projection, and a fresh replay re-fits it;
 - a model-derived axis centered in Stan (`brm_hsgp_center_columns`);
-- the refusals (`by=`, `anchor=`, `:linear` over two axes, an unknown value,
-  a projection fitted on no rows) and the description of the projection;
+- the refusals (`anchor=`, `:linear` over two axes, an unknown value, a
+  projection fitted on no rows, a group with no row in `rows=`) and the
+  description of the projection (per group for `by=`);
 - RKBRMI density and gradient equal to SBBRMI (BridgeStan) through the
-  coordinate transport, including a field that multiplies a positive weight.
+  coordinate transport, including a field that multiplies a positive weight
+  and the grouped models above.
 
 Set `BRM_HSGP_PROJECTION_RUNTIME=0` to skip the compiled parity sets.
 
