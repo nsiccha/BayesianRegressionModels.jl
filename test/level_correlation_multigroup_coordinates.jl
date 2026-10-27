@@ -680,6 +680,10 @@ end
         times = unique(df.t)
         f = brm_multigroup_field(d, draws, names; times, coordinates=s)
         @test size(f) == (3, T, G)
+        # One vector per axis, as the term takes its coordinates, reads the same
+        # locations as the matrix.
+        @test brm_multigroup_field(d, draws, names; times,
+                                   coordinates=(df.sx, df.sy)) == f
         PHI = sb.data[:PHI_hsgp_t_by_g]
         M = length(omega2)
         for i in 1:3
@@ -705,6 +709,25 @@ end
     else
         @test true
     end
+end
+
+@testset "readers: field locations given as the term takes its coordinates" begin
+    df = coordinate_data()
+    term = BRM._brm_multigroup_coordinate_term(brm_descriptor(SBBRMI(mgc(df); mod=@__MODULE__)),
+                                               nothing)
+    s = hcat(df.sx, df.sy)
+    locations(c) = BRM._brm_multigroup_locations(term, c)
+    @test locations((df.sx, df.sy)) == s
+    @test locations(s) == s
+    @test locations((df.sx[2:3], df.sy[2:3])) == s[2:3, :]
+    @test locations((Float32.(df.sx), df.sy)) ≈ s
+    # refused: axes of different lengths name no set of locations
+    @test_throws "different lengths" locations((df.sx, df.sy[1:3]))
+    # refused: the term has two axes
+    @test_throws "per coordinate axis (2), got 1" locations((df.sx,))
+    @test_throws "per coordinate axis (2), got 3" locations((df.sx, df.sy, df.sx))
+    # refused: a vector of locations is neither one vector per axis nor a matrix
+    @test_throws "one vector per coordinate axis" locations([s[1, :], s[2, :]])
 end
 
 @testset "replay keeps the fitted levels and their coordinates" begin
