@@ -600,6 +600,53 @@ model.
 structure_of(brmi::BRMI) = _select_ops(brmi, op_nc -> !_is_effect_prior_op(op_nc))
 
 """
+    priors_of(builder::BRMBuilder) -> BRMBuilder
+    structure_of(builder::BRMBuilder) -> BRMBuilder
+
+The same split for a model that has no data yet: the builder of the source's
+prior-address statements, and the builder of the rest, each in formula order.
+A builder prints as its source, so `string(structure_of(builder))` and
+`string(priors_of(builder))` are the structure and prior cards of
+`builder(df)`, without building it. An `optional(...)` prior stays in
+`priors_of` as written, since only data decide whether its address exists.
+
+Each part is a builder exactly as if its statements were written as their own
+`@brm` block, so `merge(structure_of(builder), priors_of(builder))` builds an
+equivalent model. As for `merge` of builders, each part is
+[`brm`](@ref)`(source; mod)` of its statements: names resolve in the builder's
+module.
+
+```jldoctest
+julia> using BayesianRegressionModels
+
+julia> builder = @brm begin
+           mu ~ 1 + x
+           effect(mu, Intercept) ~ Normal(0, 1)
+           y ~ Normal(mu, 0.5)
+       end;
+
+julia> structure_of(builder)
+mu ~ 1 + x
+y ~ Normal(mu, 0.5)
+
+julia> priors_of(builder)
+effect(mu, Intercept) ~ Normal(0, 1)
+```
+"""
+priors_of(b::BRMBuilder) = _select_statements(b, _is_prior_address_statement)
+structure_of(b::BRMBuilder) = _select_statements(b, !_is_prior_address_statement)
+
+# Rebuild a builder from the source statements that satisfy `keep`. A nested
+# `begin … end` statement is spliced in, as `parse!` splices it.
+_select_statements(b::BRMBuilder, keep) =
+    brm(Expr(:block, filter(keep, _brm_source_statements!(Any[], b.source))...);
+        mod=b.scope)
+_brm_source_statements!(out, x) = push!(out, x)
+_brm_source_statements!(out, ::LineNumberNode) = out
+_brm_source_statements!(out, x::Expr) = Meta.isexpr(x, :block) ?
+    (foreach(a -> _brm_source_statements!(out, a), x.args); out) : push!(out, x)
+
+"""
     brm_source(backend::Union{SBBRMI,RKBRMI}) -> BRMI
 
 Return the [`BRMI`](@ref) `backend` was built from, exactly as passed to

@@ -576,6 +576,8 @@ inspected and composed before any data exists:
 - [`brm_columns(builder)`](@ref brm_columns(::BRMBuilder)) lists the data
   columns the model reads;
 - `merge(a, b, …)` concatenates the fragments' sources into one builder;
+- `structure_of(builder)` and `priors_of(builder)` split the source into the
+  model and its prior-address statements, each a builder;
 - `show(builder)` prints the source.
 
 [`brm(expr; mod)`](@ref brm) returns the same builder for a source `Expr`
@@ -1636,8 +1638,11 @@ function _brm_source_infix(x::Expr)
     x.head in (:||, :&&) && return x.head
     Meta.isexpr(x, :call) && length(x.args) >= 3 && x.args[1] isa Symbol &&
         !any(a -> Meta.isexpr(a, :parameters), x.args) &&
-        Base.isbinaryoperator(x.args[1]) ? x.args[1] : nothing
+        _brm_is_infix_operator(x.args[1]) ? x.args[1] : nothing
 end
+# `Base.isbinaryoperator` answers false for `.~`, which a vector parameter or an
+# elementwise prior is written with (`phi[1:n] .~ Normal.(0, 1)`).
+_brm_is_infix_operator(op::Symbol) = Base.isbinaryoperator(op) || op === Symbol(".~")
 function _brm_print_arguments(io::IO, args, open, close)
     print(io, open)
     positional = filter(a -> !Meta.isexpr(a, :parameters), args)
@@ -1763,6 +1768,17 @@ function _optional_prior_address(x::Expr)
         "`optional(effect(mu, weight)) ~ Normal(0, 1)`; got `$x`.")
     x.args[2]
 end
+
+# A source statement is a PRIOR-address statement iff its left-hand side is a
+# prior address, bare or wrapped in `optional(...)`: `address ~ prior`,
+# `address .~ law` or the known value `address = value`. These are exactly the
+# statements `parse!` lowers onto the `effect` carrier, so this test splits a
+# builder's source (`priors_of(::BRMBuilder)`) the way `_is_effect_prior_op`
+# splits a BRMI's operations.
+_brm_statement_lhs(x) = isxcall(x, :~) || isxcall(x, :.~) ? x.args[2] :
+    Meta.isexpr(x, :(=), 2) ? x.args[1] : nothing
+_is_prior_address_statement(x) =
+    (lhs = _brm_statement_lhs(x); _is_optional_prior_lhs(lhs) || _is_effect_lhs(lhs))
 # A bare `:` reaches the macro as an ordinary Symbol, so the address vector
 # stays homogeneous and no separate Colon carrier is needed. `:` means "the
 # default" -- the base layer that a more specific statement overrides.
