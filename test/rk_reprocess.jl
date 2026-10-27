@@ -119,6 +119,17 @@ smooth_rows_centered(d) = @brm d begin
     mu ~ 1 + hsgp(x; k=5, rows=keep, orthogonal_to=:intercept)
     y ~ Normal(mu, sigma)
 end
+# `by=`: each level's projection is fitted on that level's rows.
+smooth_grouped_centered(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + hsgp(x, z; k=(3, 3), by=gs, orthogonal_to=:intercept)
+    y ~ Normal(mu, sigma)
+end
+smooth_grouped_linear(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + hsgp(x; k=5, by=gs, orthogonal_to=:linear)
+    y ~ Normal(mu, sigma)
+end
 smooth_clamped(d) = @brm d begin
     sigma ~ Exponential(1)
     mu ~ 1 + hsgp(x; k=5, extrapolate=:clamp)
@@ -374,7 +385,7 @@ end
 @stestset "hsgp keeps the training basis interval" begin
     for build in (RM.smooth, RM.smooth_rows, RM.smooth_2d, RM.smooth_orthogonal,
             RM.smooth_clamped, RM.smooth_orthogonal_domain, RM.smooth_2d_centered,
-            RM.smooth_rows_centered)
+            RM.smooth_rows_centered, RM.smooth_grouped_centered, RM.smooth_grouped_linear)
         check_frozen(build, 2:5)
         # One row is a degenerate axis of its own; the training interval applies.
         check_frozen(build, [7])
@@ -476,7 +487,7 @@ end
     for build in (RM.string_factor, RM.monotonic, RM.fitted_constant, RM.zscaled,
             RM.zscaled_log, RM.grouped, RM.smooth, RM.smooth_rows, RM.smooth_orthogonal,
             RM.smooth_orthogonal_domain, RM.smooth_2d_centered, RM.smooth_rows_centered,
-            RM.thin_plate, RM.tensor)
+            RM.smooth_grouped_centered, RM.smooth_grouped_linear, RM.thin_plate, RM.tensor)
         rk = RKBRMI(build(TRAIN))
         u = point(rk)
         @test density(reprocess(rk, TRAIN), u) == density(rk, u)

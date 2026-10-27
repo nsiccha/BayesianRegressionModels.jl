@@ -92,6 +92,44 @@ const DP = Turing.DynamicPPL
     @test only(only(replayed[7].plan.predictors).terms).state.by.levels == [1, 2, 3]
 end
 
+# `by=` with `orthogonal_to=`: each group's basis is projected on that group's
+# rows (decision 15hn91t), so every group's effect sums to zero over its rows
+# (and has no trend in x with `:linear`); a frozen replay keeps each group's
+# projection.
+@testset "grouped HSGP projection is fitted per level" begin
+    x = collect(range(-1.5, 1.5; length=12)) .^ 3
+    data = (; x, g=repeat(1:3; inner=4), y=zeros(12))
+    centered = @brm begin
+        mu ~ 1 + hsgp(x; k=4, by=g, orthogonal_to=:intercept)
+        y ~ Normal(mu, 1)
+    end
+    linear = @brm begin
+        mu ~ 1 + x + hsgp(x; k=4, by=g, orthogonal_to=:linear)
+        y ~ Normal(mu, 1)
+    end
+    for (builder, directions) in ((centered, rows -> ones(length(rows), 1)),
+                                  (linear, rows -> [ones(length(rows)) x[rows]]))
+        backend = TuringBRMI(builder(data))
+        term = only(filter(term -> term.callable === hsgp,
+                           only(backend.plan.predictors).terms))
+        PHI = term.state.PHI
+        values = (; rho=max(1.1, term.state.rho_lower + 0.1), sigma=0.6,
+                  beta_raw=collect(range(-0.3, 0.4; length=3 * size(PHI, 2))))
+        effect = Turing.generated_quantities(
+            BRM._brm_turing_term_model(term, 12), values).effect
+        for level in 1:3
+            rows = findall(==(level), data.g)
+            @test maximum(abs, PHI[rows, :]' * directions(rows)) < 1e-10
+            @test maximum(abs, effect[rows]' * directions(rows)) < 1e-10
+        end
+        rows = [2, 3, 9]
+        replay = reprocess(backend, map(column -> column[rows], data))
+        replay_term = only(filter(term -> term.callable === hsgp,
+                                  only(replay.plan.predictors).terms))
+        @test replay_term.state.PHI ≈ PHI[rows, :] atol=1e-12
+    end
+end
+
 @testset "explicit HSGP length-scale prior replaces its default floor" begin
     x_values = collect(range(-1, 1; length=12))
     z_values = cos.(x_values)

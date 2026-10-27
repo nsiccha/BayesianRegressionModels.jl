@@ -432,9 +432,11 @@ directions from a one-dimensional basis, so `x + hsgp(x; ...)` separates the
 linear slope from residual nonlinear shape. `orthogonal_to=:intercept` removes
 only the intercept direction, from a basis over any number of axes: every basis
 column is centered over the term's rows, so the term sums to zero over them and
-a level elsewhere in the model is not shared with the field. Both projections
-are fitted on the training rows and frozen on replay; neither combines with
-`by=` or `anchor=`.
+a level elsewhere in the model is not shared with the field. With `by=g` both
+projections are fitted per level: each group's basis is centered (and, for
+`:linear`, de-trended) over that group's own rows, so every group's field sums
+to zero over its rows. Both projections are fitted on the training rows and
+frozen on replay; neither combines with `anchor=`.
 
 `cov=:periodic` selects the periodic-kernel approximation of Riutort-Mayol et
 al. (2023) over exactly one raw-data axis: `k` harmonics of `2pi / period`
@@ -467,8 +469,9 @@ function standardize end
 """
     name = constant(expr)
 
-A scalar computed from the data when the model is built, such as a prior
-hyperparameter calibrated on the observations:
+A scalar or array computed from the data when the model is built, such as a
+prior hyperparameter calibrated on the observations, a grid a plate cell reads
+or a known correlation matrix:
 
 ```julia
 @brm begin
@@ -480,8 +483,10 @@ end
 
 `expr` is ordinary Julia, evaluated once on whole columns of the data. A bare
 name in it that is not a field of the data resolves in the builder's scope.
-The result must be one finite real number. The constant is Stan data on
-`SBBRMI` and a constant on `RKBRMI`, usable wherever a scalar data field is.
+The result must be one finite real number or an array of them (a vector, a
+matrix, …); an array's shape is fixed by that evaluation. The constant is Stan
+data on `SBBRMI` and a bound value on `RKBRMI`, usable wherever a data field of
+the same value is.
 
 Replay keeps the fitted value, like `standardize`'s mean and SD: `reprocess`,
 `reprocess(...; resample_groups)` and `generative_plan(plan, new_df)` reuse it

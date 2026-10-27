@@ -87,6 +87,17 @@ smooth_rows_centered(d) = @brm d begin
     mu ~ 1 + hsgp(x; k=5, rows=keep, orthogonal_to=:intercept)
     y ~ Normal(mu, sigma)
 end
+# `by=`: each level's projection is fitted on that level's rows.
+smooth_grouped_centered(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + hsgp(x, z; k=(3, 3), by=gs, orthogonal_to=:intercept)
+    y ~ Normal(mu, sigma)
+end
+smooth_grouped_linear(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + hsgp(x; k=5, by=gs, orthogonal_to=:linear)
+    y ~ Normal(mu, sigma)
+end
 smooth_clamped(d) = @brm d begin
     sigma ~ Exponential(1)
     mu ~ 1 + hsgp(x; k=5, extrapolate=:clamp)
@@ -133,7 +144,8 @@ end
 const SUPPORTED = (FM.zscaled, FM.centered, FM.standardized, FM.zscaled_log,
     FM.factors, FM.grouped, FM.smooth, FM.smooth_rows, FM.smooth_2d,
     FM.smooth_orthogonal, FM.smooth_clamped, FM.smooth_orthogonal_domain,
-    FM.smooth_2d_centered, FM.smooth_rows_centered, FM.tensor, FM.shrunk)
+    FM.smooth_2d_centered, FM.smooth_rows_centered, FM.smooth_grouped_centered,
+    FM.smooth_grouped_linear, FM.tensor, FM.shrunk)
 rows(data, index) = map(column -> column[index], data)
 without(data, name) = NamedTuple{Tuple(k for k in keys(data) if k !== name)}(data)
 

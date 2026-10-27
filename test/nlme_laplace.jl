@@ -350,3 +350,29 @@ end
     @test_throws BRM.BRMNLMEViewError laplace_problem(lognormal, true)
     @test_throws ArgumentError laplace_problem(lognormal, :yes)
 end
+
+@stestset "parameters not affine in the population coordinates are pulled back through RK" begin
+    # A monotonic effect's coefficient times its simplex is not affine in the
+    # packed coordinates, so the structured gradient pulls both NB2
+    # parameters back through RK in one sweep instead of a constant Jacobian.
+    rng = Xoshiro(23)
+    rank = [1 + j % 3 for j in eachindex(LAPLACE_G)]
+    e = Dict(g => 0.5 * randn(rng) for g in unique(LAPLACE_G))
+    y = [rand(rng, NegativeBinomial(3.0, 3.0 / (3.0 + exp(0.6 + 0.4r + e[g]))))
+        for (g, r) in zip(LAPLACE_G, rank)]
+    rk = RKBRMI(@brm (; g=LAPLACE_G, x=LAPLACE_X, rank, y) begin
+        log(mu) ~ 1 + mo(rank) + (1 | g)
+        log(shape) ~ 1 + x
+        y ~ NegativeBinomial2(mu, shape)
+    end)
+    structured = laplace_problem(rk, true)
+    @test !structured.affine
+    generic = laplace_problem(rk, false)
+    for _ in 1:3
+        φ = 0.3 .* randn(rng, length(generic.population))
+        value, gradient = LogDensityProblems.logdensity_and_gradient(structured, φ)
+        @test value ≈ LogDensityProblems.logdensity(generic, φ) atol=1e-9
+        @test gradient ≈ last(LogDensityProblems.logdensity_and_gradient(generic, φ)) rtol=1e-7 atol=1e-7
+        @test gradient ≈ laplace_fd(ψ -> LogDensityProblems.logdensity(structured, ψ), φ) rtol=1e-6 atol=1e-6
+    end
+end

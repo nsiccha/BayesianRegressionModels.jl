@@ -21,6 +21,7 @@ ReactiveKernelsPPLExamples = "a4d4be3d-45c5-49cc-80d7-34e606a16bce"
 SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
 StanBlocks = "2e771a56-c23a-4e0b-9282-20c2e37157e9"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+StatsFuns = "4c63d2b9-4356-54db-8cca-17b64c39e42c"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 Treebars = "e1e568c4-3a56-40a4-95fa-9b9c6c16fccb"
 Turing = "fce5fe82-541a-59a6-adf8-730c64b5f9a0"
@@ -145,7 +146,13 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # per batched subject; snag compact-cell-gra-ebf0a114). 0470e9e13 contains
 # 8d29971f2 and adds fe5c508c2 (a `@plate` cell latent's law reads a model
 # value at the index, `m[i]`; snag rkppl-cell-laten-b18e668a).
+# b5e4760fc contains 0470e9e13 and adds ae5aca6ba (prepared pullbacks and
+# pushforwards over several WANT ports in one sweep, which the structured
+# Laplace's non-affine fallback takes; snag ad-pullback-push-6f576925).
+# bf8040f16 contains b5e4760fc and adds 6316fe45d (that pullback over
+# several ports differentiates under plain Enzyme Reverse when the ports read
+# constant design matrices; snag several-port-pul-e6344d44).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "0470e9e13587459c3b566d9f0aaa9be25592d1e5"
+rev = "bf8040f1643780506a523c833f2b593377082884"

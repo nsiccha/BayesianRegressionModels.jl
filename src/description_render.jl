@@ -201,6 +201,15 @@ _brmd_call_math(::typeof(expm1),args,_kwargs,_c) = "\\operatorname{expm1}\\left(
 for f in (log1p,expm1)
     @eval _brmd_builtin_call(::$(typeof(f)),c)=BRMDescriptionFragment(covers=(c.id,))
 end
+# The standard normal CDF Phi and its inverse, by their StatsFuns and Stan names.
+for (fs,op) in (((StatsFuns.normcdf,StanBlocks.stan.builtin.Phi),"\\Phi"),
+        ((StatsFuns.norminvcdf,StanBlocks.stan.builtin.inv_Phi),"\\Phi^{-1}"))
+    for f in fs
+        @eval _brmd_call_math(::$(typeof(f)),args,_kwargs,_c) =
+            $op*"\\left("*only(args)*"\\right)"
+        @eval _brmd_builtin_call(::$(typeof(f)),c)=BRMDescriptionFragment(covers=(c.id,))
+    end
+end
 for f in (StanBlocks.stan.builtin.max,StanBlocks.stan.builtin.min)
     op=f===StanBlocks.stan.builtin.max ? "max" : "min"
     @eval _brmd_call_math(::$(typeof(f)),args,_kwargs,_c) =
@@ -650,9 +659,11 @@ function _brmd_gp_fragment(c,approximate)
         end
         orthogonal=get(c.keywords,:orthogonal_to,nothing)
         if orthogonal!==nothing
+            # With `by=` the projection is fitted on each group's rows (decision 15hn91t).
             span,text=_brmd_hsgp_projection(orthogonal)
-            push!(equations,"\\Phi_{\\mathrm{"*_brmd_text(c,:math_used)*"}}=(I-P_{"*span*"})\\Phi_{\\mathrm{"*_brmd_text(c,:math_raw)*"}}")
-            push!(prose,_brmd_text(c,text))
+            per_group=grouped ? "^{(g)}" : ""
+            push!(equations,"\\Phi"*per_group*"_{\\mathrm{"*_brmd_text(c,:math_used)*"}}=(I-P"*per_group*"_{"*span*"})\\Phi"*per_group*"_{\\mathrm{"*_brmd_text(c,:math_raw)*"}}")
+            push!(prose,_brmd_text(c,grouped ? Symbol(text,:_by_group) : text))
         end
         push!(prose,_brmd_text(c,:partial_centering))
     else
