@@ -98,6 +98,16 @@ Set `BRM_HSGP_PROJECTION_RUNTIME=0` to skip the compiled parity sets.
 Combinations not implemented yet are `@test_broken`. Set
 `BRM_LEVEL_CORRELATION_RUNTIME=0` to skip the compiled-model sets.
 
+`level_correlation_hyper.jl` checks per-level amplitudes and length scales
+(the hyper-predictors `log(sd(hsgp(x))) ~ 1 + (1 | g)` and
+`log(length_scale(hsgp(x))) ~ 1 + (1 | g)`) on a grouped HSGP with correlated
+levels, `cor=Omega`, `cor=multigroup(Omega, tau)` or
+`cor=multigroup((x, y), lambda; k)`: SBBRMI emission and stanc acceptance,
+one- and two-axis terms, the refused per-level length scale under either
+`multigroup`, descriptor, description and replay, the SB density against
+hand-written raw-Stan programs, and RK density and gradient equal to SB. The
+same `BRM_LEVEL_CORRELATION_RUNTIME=0` skips its compiled-model sets.
+
 `sd_prior_input_names.jl` checks that a scale prior's caller scalar may share a
 name with a binding of the submodel the prior is merged into, such as `tau` in
 `sd(:, ID) ~ Exponential(tau)`. It covers Gaussian, general-family,
