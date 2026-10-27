@@ -1113,6 +1113,16 @@ function _rk_ast_ranef_names!(
     draws, effects
 end
 
+# A term hyperparameter's law in its block: the sampled parameter's prior, or
+# the value its address holds it at (`length_scale(lp, gp(x)) = value`).
+_rk_ast_param_law(parameter::_RKSampledParameter) = last(_rk_ast_sampled(parameter).args)
+_rk_ast_param_law(known::_BRMKnownTermValue) = known.value
+
+# A term hyperparameter's block statement: `name ~ law`, or `name = value` for a
+# known value, which is a constant of the block rather than a parameter.
+_rk_ast_hyper_statement(name, law::Real) = Expr(:(=), name, law)
+_rk_ast_hyper_statement(name, law) = Expr(:call, :~, name, law)
+
 function _rk_ast_sampled(parameter::_RKSampledParameter)
     name = parameter.name
     family, override = parameter.family, parameter.support_override
@@ -1221,14 +1231,14 @@ end
 # (locations, sigma, rho, period, jitter); `period` is 0 for exp_quad.
 function _rk_ast_gp_block!(definitions, taken, term)
     options = term.options
-    rho_prior = last(_rk_ast_sampled(options.rho_param).args)
-    sigma_prior = last(_rk_ast_sampled(options.sigma_param).args)
+    rho_prior = _rk_ast_param_law(options.rho_param)
+    sigma_prior = _rk_ast_param_law(options.sigma_param)
     block = _rk_block_body(rho_prior, sigma_prior)
     x = _rk_block_argument!(block, :x, only(term.columns))
     rho, sigma = _rk_block_local!(block, :rho), _rk_block_local!(block, :sigma)
     axis, z = _rk_block_local!(block, :axis), _rk_block_local!(block, :z)
-    push!(block.statements, Expr(:call, :~, rho, rho_prior),
-        Expr(:call, :~, sigma, sigma_prior),
+    push!(block.statements, _rk_ast_hyper_statement(rho, rho_prior),
+        _rk_ast_hyper_statement(sigma, sigma_prior),
         Expr(:(=), axis, Expr(:call, :eachindex, x)),
         Expr(:call, :.~, Expr(:ref, z, axis), _rk_ast_dotted(:Normal, 0, 1)))
     covariance = _rk_ast_gp_covariance!(definitions, taken, x, sigma, rho,
@@ -1286,8 +1296,8 @@ end
 # returning the level path.
 function _rk_ast_dar_block!(definitions, taken, term, nsteps)
     options = term.options
-    beta_prior = last(_rk_ast_sampled(options.beta_param).args)
-    sigma_prior = last(_rk_ast_sampled(options.sigma_param).args)
+    beta_prior = _rk_ast_param_law(options.beta_param)
+    sigma_prior = _rk_ast_param_law(options.sigma_param)
     block = _rk_block_body(beta_prior, sigma_prior)
     T = _rk_block_argument!(block, :T, nsteps)
     beta, sigma = _rk_block_local!(block, :beta), _rk_block_local!(block, :sigma)
@@ -1301,8 +1311,8 @@ function _rk_ast_dar_block!(definitions, taken, term, nsteps)
             Expr(:call, :*, sigma, innovation))),
         Expr(:(=), Expr(:ref, level, t), Expr(:call, :+,
             Expr(:ref, level, previous), Expr(:ref, increment, t))))
-    push!(block.statements, Expr(:call, :~, beta, beta_prior),
-        Expr(:call, :~, sigma, sigma_prior),
+    push!(block.statements, _rk_ast_hyper_statement(beta, beta_prior),
+        _rk_ast_hyper_statement(sigma, sigma_prior),
         Expr(:macrocall, Symbol("@scan"), LineNumberNode(0), Expr(:block,
             Expr(:(=), Expr(:ref, level, 1), 0.0),
             Expr(:(=), Expr(:ref, increment, 1), 0.0),
@@ -1319,8 +1329,8 @@ end
 function _rk_ast_car_block!(definitions, taken, term, positions)
     options = term.options
     bym2 = options.type === :bym2
-    sigma_prior = last(_rk_ast_sampled(options.sigma_param).args)
-    rho_prior = bym2 ? last(_rk_ast_sampled(options.rho_param).args) : nothing
+    sigma_prior = _rk_ast_param_law(options.sigma_param)
+    rho_prior = bym2 ? _rk_ast_param_law(options.rho_param) : nothing
     block = bym2 ? _rk_block_body(sigma_prior, rho_prior) : _rk_block_body(sigma_prior)
     node1 = _rk_block_argument!(block, :node1, options.node1)
     node2 = _rk_block_argument!(block, :node2, options.node2)
@@ -1334,10 +1344,10 @@ function _rk_ast_car_block!(definitions, taken, term, positions)
     sigma, phi = _rk_block_local!(block, :sigma), _rk_block_local!(block, :phi)
     cs, field = _rk_block_local!(block, :cs), _rk_block_local!(block, :phi_full)
     effects = _rk_block_local!(block, :effects)
-    push!(block.statements, Expr(:call, :~, sigma, sigma_prior))
+    push!(block.statements, _rk_ast_hyper_statement(sigma, sigma_prior))
     if bym2
         rho, theta = _rk_block_local!(block, :rho), _rk_block_local!(block, :theta)
-        push!(block.statements, Expr(:call, :~, rho, rho_prior),
+        push!(block.statements, _rk_ast_hyper_statement(rho, rho_prior),
             Expr(:call, :.~, Expr(:ref, theta, Expr(:call, :axes, inv_scale, 1)),
                 _rk_ast_dotted(:Normal, 0, 1)))
     end

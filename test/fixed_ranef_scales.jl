@@ -146,19 +146,15 @@ stan_data_of(sb) = BRM.stan_data(sb)
         sd(:, p) = 0.3
         y ~ Normal(mu, 1)
     end
-    # refused: only random-effect `sd`/`cor` addresses take a known value
-    # (`1kicac2`); a known population term is `offset(...)`.
+    # refused: only random-effect `sd`/`cor` addresses and a term's own
+    # parameters take a known value (`1kicac2`; term parameters in
+    # test/known_term_parameters.jl); a known population term is `offset(...)`.
     @test_throws "offset(...)" @eval @brm $DF begin
         mu ~ 1 + x
         effect(mu, x) = 0.5
         y ~ Normal(mu, 1)
     end
-    @test_throws "random-effect blocks only" @eval @brm $DF begin
-        mu ~ 1 + s(x)
-        sd(mu, s(x)) = 0.5
-        y ~ Normal(mu, 1)
-    end
-    @test_throws "only random-effect `sd(...)` and `cor(...)`" @eval @brm $DF begin
+    @test_throws "only random-effect `sd(...)` / `cor(...)`" @eval @brm $DF begin
         mu ~ 1 + (1 | p | subject)
         ranef(:, p) = 0.5
         y ~ Normal(mu, 1)

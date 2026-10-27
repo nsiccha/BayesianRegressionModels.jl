@@ -886,6 +886,9 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
          (:structured, :phi, true), (:unstructured, :theta, true)) :
         ((:sd, :sigma, false), (:structured, :phi, true))
     for (parameter, local_name, elementwise) in roles
+        # A role held at a known value is a constant on both backends.
+        isnothing(_brm_term_known_value(d.plan.parent, record.predictor,
+            entry.value, parameter)) || continue
         stan_names = _brm_transport_elements(
             _brm_term_parameter_output(d, record.predictor, entry, parameter), stan,
             (; base..., parameter))
@@ -918,19 +921,25 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         _brm_term_parameter_output(d, record.predictor, entry, parameter), stan,
         (; base..., parameter))
     scale = record.declaration
-    rho = role_names(:length_scale)
-    rk_rho = record.iso ? [Symbol(scale, ".rho_iso")] :
-        [Symbol(scale, ".rho_", j) for j in eachindex(record.axes)]
-    length(rk_rho) == length(rho) || error(
-        "brm_coordinate_transport: HSGP $(base) has $(length(rk_rho)) RK and " *
-        "$(length(rho)) SB length scales")
-    for (j, (rk_name, stan_name)) in enumerate(zip(rk_rho, rho))
-        push!(pairs, BRMCoordinatePair((; base..., parameter=:length_scale, index=j),
-            rk_name, stan_name, rk_name, (), :identity))
+    # A length scale or amplitude held at a known value is a constant on both
+    # backends, so it has no coordinate to pair.
+    known(parameter) = !isnothing(_brm_term_known_value(d.plan.parent,
+        record.predictor, entry.value, parameter))
+    if !known(:length_scale)
+        rho = role_names(:length_scale)
+        rk_rho = record.iso ? [Symbol(scale, ".rho_iso")] :
+            [Symbol(scale, ".rho_", j) for j in eachindex(record.axes)]
+        length(rk_rho) == length(rho) || error(
+            "brm_coordinate_transport: HSGP $(base) has $(length(rk_rho)) RK and " *
+            "$(length(rho)) SB length scales")
+        for (j, (rk_name, stan_name)) in enumerate(zip(rk_rho, rho))
+            push!(pairs, BRMCoordinatePair((; base..., parameter=:length_scale, index=j),
+                rk_name, stan_name, rk_name, (), :identity))
+        end
     end
     sigma = Symbol(scale, ".sigma")
-    push!(pairs, BRMCoordinatePair((; base..., parameter=:sd, index=1), sigma,
-        only(role_names(:sd)), sigma, (), :identity))
+    known(:sd) || push!(pairs, BRMCoordinatePair((; base..., parameter=:sd, index=1),
+        sigma, only(role_names(:sd)), sigma, (), :identity))
     weights = Symbol(scale, ".beta_raw")
     for (j, stan_name) in enumerate(role_names(:basis_weights))
         push!(pairs, BRMCoordinatePair((; base..., parameter=:basis_weights, index=j),

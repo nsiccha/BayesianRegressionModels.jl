@@ -2062,9 +2062,12 @@ end
 #
 # `sd(<lp|:>, <ID>[, <coefficient>]) = value` and `cor(:, <ID>) = R` hold a
 # shared random-effect block's marginal scale or correlation matrix at a KNOWN
-# value instead of sampling it (nlmixr2's `fix()` on an omega). `=` keeps BRM's
-# split: `~` declares something stochastic, `=` a known model value. The
-# address grammar is exactly the `~` one.
+# value instead of sampling it (nlmixr2's `fix()` on an omega). A term's own
+# parameter address, `length_scale(<lp|:>, hsgp(x)) = value`,
+# `sd(<lp|:>, hsgp(x)) = value`, `ar(<lp|:>, dar(t)) = value`, …, holds that
+# parameter at a known value the same way. `=` keeps BRM's split: `~` declares
+# something stochastic, `=` a known model value. The address grammar is
+# exactly the `~` one.
 #
 # A known value lowers onto the same `effect(...)` carrier and the same
 # generated key as its `~` twin, with the value wrapped in the `_brm_known`
@@ -2076,11 +2079,12 @@ end
     _brm_known(value)
 
 Internal marker for a known-value prior-address statement,
-`sd(lp, ID) = value` or `cor(:, ID) = R`. Never called.
+`sd(lp, ID) = value`, `cor(:, ID) = R` or a term's own
+`length_scale(lp, hsgp(x)) = value`. Never called.
 """
 function _brm_known end
 
-const _KNOWN_VALUE_HEADS = (:sd, :cor)
+const _KNOWN_VALUE_HEADS = (:sd, :cor, :length_scale, :ar, :mixing)
 
 # `name[1:n] .~ Family.(args...; kwargs...)` declares a vector parameter: `n`
 # elements, each drawn from `Family(args...; kwargs...)`, which is what Julia's
@@ -2187,15 +2191,22 @@ function _parse_effect!(lhs::Expr, rhs; info, known::Bool=false, optional::Bool=
     head = lhs.args[1]::Symbol
     args = map(_prior_slot, lhs.args[2:end])
     if known
+        head === :latent && error(
+            "@brm: `$lhs = ...`: a `latent(...)` address names the covariate " *
+            "values a measurement-error term infers from its observations, so " *
+            "a known value would leave nothing to infer; write the covariate " *
+            "itself in the formula instead of the term.")
+        head === :simplex && error(
+            "@brm: `$lhs = ...`: a monotonic term with known shares is a " *
+            "population coefficient on a fixed scoring of its levels; compute " *
+            "that scoring as data and write it in the formula as a population " *
+            "covariate instead of the term.")
         head in _KNOWN_VALUE_HEADS || error(
-            "@brm: only random-effect `sd(...)` and `cor(...)` addresses take a " *
-            "known value with `=`; got `$lhs = ...`. Use `~` for a prior" *
+            "@brm: only random-effect `sd(...)` / `cor(...)` addresses and a " *
+            "term's own `sd`, `length_scale`, `ar` and `mixing` addresses " *
+            "take a known value with `=`; got `$lhs = ...`. Use `~` " *
+            "for a prior" *
             (head === :effect ? ", or `offset(...)` for a known population term." : "."))
-        any(_is_term_key, args) && error(
-            "@brm: `$lhs = ...` addresses a term's own scale; a known value is " *
-            "supported for random-effect blocks only, " *
-            "`sd(<linear_predictor|:>, <ID>[, <coefficient>]) = value`. Use `~` " *
-            "for a prior on `$lhs`.")
         rhs = Expr(:call, _brm_known, _brm_known_value_expr(rhs, lhs))
     end
     address = _prior_address(head, args)

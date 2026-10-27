@@ -320,12 +320,40 @@ function _brmd_flat_priors!(priors,d,model,values,path,declarations,anchors,nota
             (;kind=:flat,proper=false,annotation=_brmd_snapshot(annotation)),anchors,notation,texts))
     end
 end
+# A term parameter held at a known value (`length_scale(lp, hsgp(x)) = value`)
+# is assigned from its submodel input (`_sb_known_input`), bound to the term's
+# static datum: its law is the point mass at that value, as a known
+# random-effect scale's is. Known smoothing scales scattered beside sampled
+# ones (`brm_scatter_margins`) are listed as the known part of `sd_pen`.
+function _brmd_known_priors!(priors,d,model,values,path,anchors,notation,texts)
+    model.model isa Expr && model.model.head===:block || return
+    for stmt in model.model.args
+        Meta.isexpr(stmt,:(=),2) || continue
+        lhs,rhs=stmt.args
+        Meta.isexpr(lhs,:(::)) && (lhs=first(lhs.args))
+        if _sb_is_known_input(rhs)
+            input,id=rhs,(path...,lhs)
+        elseif Meta.isexpr(rhs,:call) && first(rhs.args)===:brm_scatter_margins &&
+               _sb_is_known_input(rhs.args[3])
+            input,id=rhs.args[3],(path...,lhs,:known)
+        else
+            continue
+        end
+        key=get(values,input,nothing)
+        value=key isa Symbol ? get(d.plan.data,key,nothing) : key
+        value isa Union{Real,AbstractVector{<:Real}} || error(
+            "description: the known value `$input` of `$(join(path, "."))` has no data value")
+        push!(priors,_brmd_prior(d,id,ExprColumn(Dirac,value),NamedTuple(),
+            (;kind=:known),anchors,notation,texts))
+    end
+end
 function _brmd_submodel_priors!(priors,d,model,values,path,anchors,notation,texts,stack=())
     model isa StanBlocks.SlicModel || return
     model in stack && error("description: recursive SLIC submodel at $path")
     declarations = GenerativeDeclaration[]
     _sb_plan_collect!(declarations,model.model,Dict{Symbol,Symbol}(k=>k for k in keys(values)),(),Set{Symbol}(),Set{Symbol}(),Set())
     _brmd_flat_priors!(priors,d,model,values,path,declarations,anchors,notation,texts)
+    _brmd_known_priors!(priors,d,model,values,path,anchors,notation,texts)
     bindings=Tuple((;name=p.target,role=:parameter,path=(p.context...,p.target),
         value=BRMDescriptionReference(p.target,:scalar,(path...,p.context...,p.target)),prior_ids=())
         for p in declarations if p.role===:prior && p.family!==:plate)

@@ -1063,7 +1063,9 @@ struct _HSGPAdaptiveCenteringBlock
     target_c::Vector{Float64}
     effects::Vector{Int}
     # One length scale per `omega2` column, or the single shared one of an
-    # isotropic multi-axis term (`_brm_hsgp_omega2`).
+    # isotropic multi-axis term (`_brm_hsgp_omega2`). Coordinate `0` (here or
+    # in `sd`) is a value held known by `=` on its address, carried as both of
+    # its bounds (`_adaptive_hsgp_hyper`).
     length_scales::Vector{Int}
     # Compiler-declared bounds of each length scale and the marginal SD; an
     # upper bound is `Inf` unless declared (`_adaptive_bounds`).
@@ -1209,6 +1211,44 @@ function _adaptive_same_hsgp_owner(resolved, owner, role)
     resolved
 end
 
+# An HSGP term's length scales and marginal SD as its adaptive blocks read
+# them: each sampled one's unconstrained coordinate with its declared bounds,
+# or, held at a known value by `=` on its address
+# (`length_scale(lp, hsgp(x)) = value`), coordinate 0 with both bounds at that
+# value (`_adaptive_hsgp_hyper`).
+function _adaptive_hsgp_hypers(descriptor, logical, unc_names, entry, owner)
+    rho = _adaptive_hsgp_hyper_coordinates(descriptor, logical, unc_names,
+        entry, owner, :length_scale, "length scale")
+    sigma = _adaptive_hsgp_hyper_coordinates(descriptor, logical, unc_names,
+        entry, owner, :sd, "marginal SD")
+    length(rho.coordinates) >= 1 || error(
+        "BRM adaptive centering: HSGP `$(entry.term)` has no length-scale coordinate.",
+    )
+    length(sigma.coordinates) == 1 || error(
+        "BRM adaptive centering: HSGP `$(entry.term)` must have one marginal-SD coordinate.",
+    )
+    rho, sigma
+end
+
+function _adaptive_hsgp_hyper_coordinates(descriptor, logical, unc_names, entry,
+                                          owner, parameter, what)
+    known = _brm_term_known_value(descriptor.plan.parent, logical, entry.value, parameter)
+    if !isnothing(known)
+        values = collect(Float64, known isa Real ? (known,) : known)
+        return (; coordinates=zeros(Int, length(values)), lower=values, upper=copy(values))
+    end
+    resolved = _adaptive_same_hsgp_owner(brm_term_coordinates(
+        descriptor, logical, unc_names; term=entry.term, parameter), owner, what)
+    lower, upper = _adaptive_bounds(descriptor, resolved.output,
+        length(resolved.coordinates), entry.term, what)
+    (; coordinates=collect(resolved.coordinates), lower, upper)
+end
+
+# One length scale or marginal SD of an HSGP block at the unconstrained point
+# `x`: its constrained coordinate, or its known value at coordinate 0.
+_adaptive_hsgp_hyper(x, coordinate::Int, lower, upper) =
+    iszero(coordinate) ? lower : _adaptive_constrain(x[coordinate], lower, upper)
+
 # Whether a formula term is emitted in generated quantities: no observed
 # likelihood reaches it (for example, its response is omitted). Its weights or
 # innovations then have no sampler coordinate, so it has no adaptive cell, like
@@ -1332,38 +1372,18 @@ function _adaptive_hsgp_centering_blocks(model, unc_names)
                 "`beta_raw` coordinates this transform requires.",
             )
 
-            rho = _adaptive_same_hsgp_owner(brm_term_coordinates(
-                descriptor, logical, unc_names;
-                term=entry.term, parameter=:length_scale,
-            ), owner, "length scale")
-            sigma = _adaptive_same_hsgp_owner(brm_term_coordinates(
-                descriptor, logical, unc_names;
-                term=entry.term, parameter=:sd,
-            ), owner, "marginal SD")
-            length(rho.coordinates) >= 1 || error(
-                "BRM adaptive centering: HSGP `$(entry.term)` has no length-scale coordinate.",
-            )
-            length(sigma.coordinates) == 1 || error(
-                "BRM adaptive centering: HSGP `$(entry.term)` must have one marginal-SD coordinate.",
-            )
+            rho, sigma = _adaptive_hsgp_hypers(
+                descriptor, logical, unc_names, entry, owner)
 
             omega2 = _brm_hsgp_omega2(plan, owner,
                 "BRM adaptive centering: HSGP `$(entry.term)`",
                 length(weights.coordinates), length(rho.coordinates))
-
-            rho_lower, rho_upper = _adaptive_bounds(
-                descriptor, rho.output, length(rho.coordinates), entry.term,
-                "length scale",
-            )
-            sigma_lower, sigma_upper = only.(_adaptive_bounds(
-                descriptor, sigma.output, 1, entry.term, "marginal SD",
-            ))
             push!(out, _HSGPAdaptiveCenteringBlock(
                 logical, entry.term,
                 _brm_hsgp_centeredness(kw, length(weights.coordinates)),
                 collect(weights.coordinates),
-                collect(rho.coordinates), rho_lower, rho_upper,
-                only(sigma.coordinates), sigma_lower, sigma_upper,
+                rho.coordinates, rho.lower, rho.upper,
+                only(sigma.coordinates), only(sigma.lower), only(sigma.upper),
                 omega2, Float64[],
             ))
         end
@@ -1380,8 +1400,9 @@ function _adaptive_hsgp_centering_blocks(model, unc_names)
         # claimed exactly once.
         (block.logical, block.term) in seen_terms && continue
         push!(seen_terms, (block.logical, block.term))
-        append!(claimed_scales, block.length_scales)
-        push!(claimed_scales, block.sd)
+        # A known value (coordinate 0) claims no coordinate.
+        append!(claimed_scales, filter(!iszero, block.length_scales))
+        iszero(block.sd) || push!(claimed_scales, block.sd)
     end
     length(unique(claimed_effects)) == length(claimed_effects) &&
         length(unique(claimed_scales)) == length(claimed_scales) || error(
@@ -1430,22 +1451,11 @@ function _adaptive_periodic_hsgp_block!(
         "`beta_raw` coordinates this transform requires.",
     )
 
-    rho = _adaptive_same_hsgp_owner(brm_term_coordinates(
-        descriptor, logical, unc_names;
-        term=entry.term, parameter=:length_scale,
-    ), owner, "length scale")
-    sigma = _adaptive_same_hsgp_owner(brm_term_coordinates(
-        descriptor, logical, unc_names;
-        term=entry.term, parameter=:sd,
-    ), owner, "marginal SD")
+    rho, sigma = _adaptive_hsgp_hypers(descriptor, logical, unc_names, entry, owner)
     length(rho.coordinates) == 1 || error(
         "BRM adaptive centering: periodic HSGP `$(entry.term)` owns " *
         "$(length(rho.coordinates)) length-scale coordinates; the cosine/sine " *
         "spectrum needs exactly one.",
-    )
-    length(sigma.coordinates) == 1 || error(
-        "BRM adaptive centering: periodic HSGP `$(entry.term)` must have one " *
-        "marginal-SD coordinate.",
     )
 
     harmonics_key = get(owner.keywords, :harmonics, nothing)
@@ -1475,13 +1485,6 @@ function _adaptive_periodic_hsgp_block!(
         "refusing crossed term metadata.",
     )
 
-    rho_lower, rho_upper = _adaptive_bounds(
-        descriptor, rho.output, length(rho.coordinates), entry.term,
-        "length scale",
-    )
-    sigma_lower, sigma_upper = only.(_adaptive_bounds(
-        descriptor, sigma.output, 1, entry.term, "marginal SD",
-    ))
     target_c = _brm_hsgp_centeredness(kw, n_weights)
     all(iszero, target_c) || error(
         "BRM adaptive centering: periodic HSGP `$(entry.term)` carries a " *
@@ -1491,8 +1494,8 @@ function _adaptive_periodic_hsgp_block!(
     push!(out, _HSGPAdaptiveCenteringBlock(
         logical, entry.term, target_c,
         collect(weights.coordinates),
-        collect(rho.coordinates), rho_lower, rho_upper,
-        only(sigma.coordinates), sigma_lower, sigma_upper,
+        rho.coordinates, rho.lower, rho.upper,
+        only(sigma.coordinates), only(sigma.lower), only(sigma.upper),
         Matrix{Float64}(undef, 0, 0), harmonics,
     ))
     out
@@ -1551,55 +1554,29 @@ function _adaptive_grouped_hsgp_blocks!(
     flat = _adaptive_named_indices(pos, flat_names, entry.term,
         "grouped HSGP basis weights")
 
-    rho = brm_term_coordinates(
-        descriptor, logical, unc_names;
-        term=entry.term, parameter=:length_scale,
-    )
-    sigma = brm_term_coordinates(
-        descriptor, logical, unc_names;
-        term=entry.term, parameter=:sd,
-    )
-    owner = rho.output.declaration
-    isnothing(owner) && error(
-        "BRM adaptive centering: grouped HSGP `$(entry.term)` length scale " *
-        "has no compiler declaration owner.",
-    )
+    owner = _brm_term_owner_output(descriptor, logical, entry).declaration
     if owner.family isa Symbol
         owner.family in (:_sb_hsgp_by, :_sb_hsgp_by_aniso) || error(
             "BRM adaptive centering: grouped HSGP `$(entry.term)` resolved to " *
             "unsupported emitted family `$(owner.family)`.",
         )
     end
-    sigma = _adaptive_same_hsgp_owner(sigma, owner, "marginal SD")
+    rho, sigma = _adaptive_hsgp_hypers(descriptor, logical, unc_names, entry, owner)
     get(owner.keywords, :beta, nothing) === block || error(
         "BRM adaptive centering: grouped HSGP `$(entry.term)` declaration " *
         "does not carry the expected per-group weight block; refusing " *
         "crossed term metadata.",
     )
-    length(rho.coordinates) >= 1 || error(
-        "BRM adaptive centering: grouped HSGP `$(entry.term)` has no length-scale coordinate.",
-    )
-    length(sigma.coordinates) == 1 || error(
-        "BRM adaptive centering: grouped HSGP `$(entry.term)` must have one marginal-SD coordinate.",
-    )
     omega2 = _brm_hsgp_omega2(plan, owner,
         "BRM adaptive centering: grouped HSGP `$(entry.term)`",
         B, length(rho.coordinates))
-    rho_lower, rho_upper = _adaptive_bounds(
-        descriptor, rho.output, length(rho.coordinates), entry.term,
-        "length scale",
-    )
-    sigma_lower, sigma_upper = only.(_adaptive_bounds(
-        descriptor, sigma.output, 1, entry.term, "marginal SD",
-    ))
     target_c = _brm_hsgp_centeredness(kw, B)
-    rho_idx = collect(rho.coordinates)
-    sd_idx = only(sigma.coordinates)
     for g in 1:G
         push!(out, _HSGPAdaptiveCenteringBlock(
             logical, entry.term, target_c,
             flat[(g-1)*B+1:g*B],
-            rho_idx, rho_lower, rho_upper, sd_idx, sigma_lower, sigma_upper,
+            rho.coordinates, rho.lower, rho.upper,
+            only(sigma.coordinates), only(sigma.lower), only(sigma.upper),
             omega2, Float64[],
         ))
     end
@@ -1663,18 +1640,18 @@ function _adaptive_hsgp_log_scale(x::AbstractVector,
             "$(length(block.length_scales)) length scales; the cosine/sine " *
             "spectrum needs exactly one.",
         )
-        sigma = _adaptive_constrain(x[block.sd], block.sd_lower, block.sd_upper)
-        rho = _adaptive_constrain(x[block.length_scales[1]],
+        sigma = _adaptive_hsgp_hyper(x, block.sd, block.sd_lower, block.sd_upper)
+        rho = _adaptive_hsgp_hyper(x, block.length_scales[1],
             block.length_scale_lower[1], block.length_scale_upper[1])
         return _adaptive_hsgp_floor(
             _brm_hsgp_periodic_log_scale(block.harmonics[basis], sigma, rho))
     end
-    sigma = _adaptive_constrain(x[block.sd], block.sd_lower, block.sd_upper)
+    sigma = _adaptive_hsgp_hyper(x, block.sd, block.sd_lower, block.sd_upper)
     value = log(sigma)
     iso = length(block.length_scales) == 1
     for axis in axes(block.omega2, 2)
         j = iso ? 1 : axis
-        rho = _adaptive_constrain(x[block.length_scales[j]],
+        rho = _adaptive_hsgp_hyper(x, block.length_scales[j],
             block.length_scale_lower[j], block.length_scale_upper[j])
         value += 0.5 * log(rho * 2.5066282746310002)
         value -= 0.25 * rho * rho * block.omega2[basis, axis]

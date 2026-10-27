@@ -9926,17 +9926,27 @@ function _sb_hsgp_by_hyper_model(term_overrides, t, rho_plan, sigma_plan,
     base = _sb_hsgp_hyper_levels(
         StanBlocks.SlicModel(Expr(:block, body...), Dict{Symbol,Any}(), @__MODULE__),
         level)
-    stmts = Any[]
-    rho_cfg = _sb_term_cfg(term_overrides, t, :length_scale)
-    isnothing(rho_cfg) || push!(stmts, _sb_hyper_intercept_stmt(
-        :length_scale, rho_plan, rho_cfg,
-        isnothing(rho_plan) ? "" : rho_plan.spelling))
-    sigma_cfg = _sb_term_cfg(term_overrides, t, :sigma)
-    isnothing(sigma_cfg) || push!(stmts, _sb_hyper_intercept_stmt(
-        :sd, sigma_plan, sigma_cfg,
-        isnothing(sigma_plan) ? "" : sigma_plan.spelling))
+    stmts = _sb_hyper_configured(term_overrides, t, rho_plan, sigma_plan)
     isempty(stmts) && return base
     Base.merge(base, stmts...)
+end
+
+# The configured hyperparameters of a hyper-predicted GP term: the prior
+# statements of its predicted hypers' intercepts and of its sampled ones, and
+# the input assignments of the sampled ones held at a known value (a predicted
+# hyper cannot be known; `_sb_term_entry_config` refuses that pair).
+function _sb_hyper_configured(term_overrides, t, rho_plan, sigma_plan)
+    stmts = Any[]
+    for (hyper, slot, plan) in ((:length_scale, :length_scale, rho_plan),
+                                (:sd, :sigma, sigma_plan))
+        cfg = _sb_term_cfg(term_overrides, t, slot)
+        isnothing(cfg) && continue
+        push!(stmts, _sb_known_cfg(cfg) ?
+            Expr(:(=), _sb_hyper_names(hyper).sampled, _sb_known_input(cfg.slot)) :
+            _sb_hyper_intercept_stmt(hyper, plan, cfg,
+                isnothing(plan) ? "" : plan.spelling))
+    end
+    stmts
 end
 
 # The level weights of a hyper-predicted grouped HSGP with `cor=`, correlated as
@@ -9980,15 +9990,8 @@ function _sb_gp_hyper_submodel_expr(submodel::Symbol, term_overrides, t,
         push!(stmts, :($(nm.beta) ~ normal(0., 1.)))
         push!(stmts, det)
     end
-    rho_cfg = _sb_term_cfg(term_overrides, t, :length_scale)
-    isnothing(rho_cfg) || push!(stmts, _sb_hyper_intercept_stmt(
-        :length_scale, rho_plan, rho_cfg,
-        isnothing(rho_plan) ? "" : rho_plan.spelling))
-    sigma_cfg = _sb_term_cfg(term_overrides, t, :sigma)
-    isnothing(sigma_cfg) || push!(stmts, _sb_hyper_intercept_stmt(
-        :sd, sigma_plan, sigma_cfg,
-        isnothing(sigma_plan) ? "" : sigma_plan.spelling))
-    Base.merge(base, stmts...)
+    Base.merge(base, stmts...,
+        _sb_hyper_configured(term_overrides, t, rho_plan, sigma_plan)...)
 end
 
 # The three penalty blocks of a tensor smooth, in the order `_sb_t2` samples
@@ -10037,12 +10040,84 @@ function _sb_term_prior_overrides(brmi::BRMI;
     Dict{Symbol,Dict{Symbol,Any}}(
         lp => Dict{Symbol,Any}(
             key => Dict{Symbol,Any}(
-                slot => ((lp, key, slot) in intercepts ?
-                    _sb_hyper_intercept_scale_prior(entry) :
-                    _sb_term_slot_config(Val(slot), entry))
+                slot => _sb_term_entry_config(Val(slot), entry, (lp, key, slot) in intercepts)
                 for (slot, entry) in slots)
             for (key, slots) in terms)
         for (lp, terms) in resolved)
+end
+
+function _sb_term_entry_config(slot::Val, entry, hyper_intercept::Bool)
+    spelling = _sb_term_prior_spelling(entry)
+    if _brm_is_known_term_value(entry.spec.expression)
+        hyper_intercept && error(
+            "sbimpl: `$spelling = $(entry.spec.expression)` holds the parameter " *
+            "at a known value, but a `log(...) ~ <formula>` hyper-predictor " *
+            "predicts it; keep one of the two statements")
+        return (; known=entry.spec.expression.value, spelling, slot=_sb_slot_name(slot))
+    end
+    hyper_intercept ? _sb_hyper_intercept_scale_prior(entry) :
+        _sb_term_slot_config(slot, entry)
+end
+
+_sb_slot_name(::Val{slot}) where {slot} = slot
+
+# Whether a resolved term-slot configuration holds a known value rather than a
+# prior.
+_sb_known_cfg(cfg) = hasproperty(cfg, :known)
+
+# A known value reaches its term submodel as an input, `brm_known_<slot>`,
+# bound to the term's own static datum `<term>_known_<slot>`
+# (`_sb_term_model_call`): data a submodel binds itself would be one global
+# name that every term instance shares.
+_sb_known_input(slot::Symbol) = Symbol(:brm_known_, slot)
+_sb_is_known_input(x) = x isa Symbol && startswith(String(x), "brm_known_")
+
+# Registers each known value of `term` as the static datum
+# `<stem>_known_<name>` (a fitted constant `reprocess` keeps) and returns its
+# input binding.
+function _sb_known_term_inputs!(data, stem, values)
+    isempty(values) && return Pair{Symbol,Symbol}[]
+    isnothing(data) && error(
+        "sbimpl: internal error — a known term value reached a term call " *
+        "without its data")
+    map(collect(values)) do (name, value)
+        key = Symbol(stem, :_known_, name)
+        data[key] = value
+        _sb_record_static!(data, key)
+        _sb_known_input(name) => key
+    end
+end
+
+# The parameter name a submodel statement's LHS declares (`rho` in
+# `rho :: vector[n_axes]`).
+_sb_decl_name(lhs::Symbol) = lhs
+_sb_decl_name(lhs::Expr) = Meta.isexpr(lhs, :(::), 2) ? _sb_decl_name(lhs.args[1]) :
+    error("sbimpl: internal error — no declared name in `$lhs`")
+
+# A term submodel with its configured parameters, one `(lhs, cfg)` pair per
+# slot (`nothing` when unconfigured): a prior replaces the parameter's
+# statement, keeping its declaration, and a known value replaces it with an
+# assignment from its input (`_sb_known_assignment`).
+function _sb_configured_term_submodel(base, slots...)
+    stmts = Any[]
+    for (lhs, cfg) in slots
+        isnothing(cfg) && continue
+        push!(stmts, _sb_known_cfg(cfg) ? _sb_known_assignment(lhs, cfg.slot) :
+            _sb_gp_prior_stmt(lhs, cfg))
+    end
+    Base.merge(base, stmts...)
+end
+
+# `name = brm_known_<slot>`. A vector declaration (an anisotropic term's
+# `rho :: vector[n_axes]`) is sized by the input itself: its length was
+# checked against the axes when the known value was resolved, and StanBlocks
+# compares declared and inferred sizes by name.
+function _sb_known_assignment(lhs, slot::Symbol)
+    input = _sb_known_input(slot)
+    Meta.isexpr(lhs, :(::), 2) && Meta.isexpr(lhs.args[2], :ref) &&
+        lhs.args[2].args[1] === :vector || return Expr(:(=), _sb_decl_name(lhs), input)
+    Expr(:(=), Expr(:(::), _sb_decl_name(lhs),
+        Expr(:ref, :vector, :(dims($input)[1]))), input)
 end
 
 function _sb_hyper_intercept_scale_prior(entry)
@@ -10081,10 +10156,19 @@ end
 # A spliced term is its own SLIC scope. Supply the prior's model inputs through
 # explicit kwargs and distinct local names, including when an outer parameter
 # happens to have the same name as a term-owned parameter (for example rho).
-function _sb_term_model_call(submodel, overrides, term; kwargs...)
-    refs = _sb_prior_references(_brm_term_override(overrides, term))
+#
+# A known value (`length_scale(lp, hsgp(x)) = value`) becomes the static datum
+# `<stem>_known_<slot>` in `data`, read through `_sb_known_input`.
+function _sb_term_model_call(submodel, overrides, term; data=nothing, stem=nothing,
+                             kwargs...)
+    per_term = _brm_term_override(overrides, term)
+    refs = _sb_prior_references(per_term)
     args = Any[Expr(:kw, key, value) for (key, value) in pairs(kwargs)]
     append!(args, (Expr(:kw, _sb_term_prior_input(ref), ref) for ref in refs))
+    known = isnothing(per_term) ? () :
+        [cfg.slot => cfg.known for cfg in values(per_term) if _sb_known_cfg(cfg)]
+    append!(args, (Expr(:kw, input, key)
+                   for (input, key) in _sb_known_term_inputs!(data, stem, known)))
     Expr(:call, submodel, Expr(:parameters, args...))
 end
 
@@ -10096,19 +10180,49 @@ _sb_term_sd_slots(::typeof(s)) = (:sd,)
 _sb_term_sd_slots(::typeof(t2)) = map(c -> Symbol(:sd_, c), _SB_T2_BLOCKS)
 # `mod` is the SBBRMI caller's module: the smooth generics are BRM-owned, so
 # their `base.mod` cannot see consumer-defined custom families.
-function _sb_term_sd_submodel(term_overrides, t; mod::Module=@__MODULE__)
+function _sb_term_sd_submodel(term_overrides, t; mod::Module=@__MODULE__,
+                              data=nothing, stem=nothing)
     slots = _sb_term_sd_slots(getf(t))
     all(slot -> isnothing(_sb_term_cfg(term_overrides, t, slot)), slots) &&
         return (; model=getf(t) === s ? _sb_s_generic : _sb_t2_generic,
                 kwargs=NamedTuple())
-    priors = Any[]
-    for slot in slots
-        cfg = _sb_term_cfg(term_overrides, t, slot)
-        push!(priors, isnothing(cfg) ? nothing : cfg.prior)
-    end
+    cfgs = [_sb_term_cfg(term_overrides, t, slot) for slot in slots]
     base = getf(t) === s ? _sb_s_generic : _sb_t2_generic
+    known = findall(cfg -> !isnothing(cfg) && _sb_known_cfg(cfg), cfgs)
+    isempty(known) || return _sb_known_term_sd_submodel(base, cfgs, known;
+        mod, data, stem)
+    priors = Any[isnothing(cfg) ? nothing : cfg.prior for cfg in cfgs]
     configured = _sb_vector_positive_priors(base, :sd_pen, priors; mod)
     (; model=configured.model, kwargs=(; configured.inputs...))
+end
+
+# A smooth whose smoothing scales are held at known values
+# (`sd(lp, s(x)) = value`, `sd(lp, t2(x, z), rr) = value`): every scale known
+# reads `sd_pen` from its static datum; otherwise the remaining scales are
+# sampled with their priors as `sd_pen_free` and scattered beside the known
+# ones, as a random-effect block mixes known and sampled margins. The known
+# values and their positions are the term's static data
+# (`_sb_known_term_inputs!`).
+function _sb_known_term_sd_submodel(base, cfgs, known; mod::Module, data, stem)
+    values = Float64[cfgs[i].known for i in known]
+    if length(known) == length(cfgs)
+        inputs = _sb_known_term_inputs!(data, stem, (:sd_pen => values,))
+        model = Base.merge(base, Expr(:(=), :sd_pen, _sb_known_input(:sd_pen)))
+        return (; model, kwargs=(; inputs...))
+    end
+    free = setdiff(eachindex(cfgs), known)
+    priors = Any[isnothing(cfgs[i]) ? ExprColumn(Normal) : cfgs[i].prior for i in free]
+    prior = _sb_vector_prior_statement(:sd_pen_free, :sd_pen_free, priors,
+        length(free); positive=true, mod, scope=base.mod)
+    rhs = _sb_bind_vector_prior_inputs(prior.statement.args[3], prior.dependencies)
+    inputs = _sb_known_term_inputs!(data, stem, (:sd_pen => values,
+        :sd_pen_free_idx => free, :sd_pen_idx => known))
+    scatter = :(sd_pen = brm_scatter_margins(sd_pen_free,
+        $(_sb_known_input(:sd_pen)), $(_sb_known_input(:sd_pen_free_idx)),
+        $(_sb_known_input(:sd_pen_idx)), $(length(cfgs))))
+    model = Base.merge(base, Expr(:call, :~, prior.statement.args[2], rhs), scatter)
+    (; model, kwargs=(; inputs...,
+        (_sb_term_prior_input(d) => d for d in prior.dependencies)...))
 end
 
 function _sb_positive_term_prior_stmt(name::Symbol, index::Int, prior)
@@ -10379,26 +10493,21 @@ function _sb_gp_submodel_expr(submodel::Symbol, term_overrides, t)
     sigma_cfg = _sb_term_cfg(term_overrides, t, :sigma)
     (isnothing(rho_cfg) && isnothing(sigma_cfg)) && return submodel
     v = Val(submodel)
-    stmts = Any[]
-    isnothing(rho_cfg) || push!(stmts, _sb_gp_prior_stmt(_sb_gp_rho_lhs(v), rho_cfg))
-    isnothing(sigma_cfg) || push!(stmts, _sb_gp_prior_stmt(:sigma, sigma_cfg))
-    Base.merge(_sb_gp_submodel(v), stmts...)
+    _sb_configured_term_submodel(_sb_gp_submodel(v),
+        (_sb_gp_rho_lhs(v), rho_cfg), (:sigma, sigma_cfg))
 end
 
 function _sb_dar_submodel_expr(term_overrides, t)
     beta_cfg = _sb_term_cfg(term_overrides, t, :ar)
     sigma_cfg = _sb_term_cfg(term_overrides, t, :sigma)
     (isnothing(beta_cfg) && isnothing(sigma_cfg)) && return :_sb_dar1
-    stmts = Any[]
-    isnothing(beta_cfg) || push!(stmts, _sb_gp_prior_stmt(:beta, beta_cfg))
-    isnothing(sigma_cfg) || push!(stmts, _sb_gp_prior_stmt(:sigma, sigma_cfg))
-    Base.merge(_sb_dar1, stmts...)
+    _sb_configured_term_submodel(_sb_dar1, (:beta, beta_cfg), (:sigma, sigma_cfg))
 end
 
 function _sb_rw_submodel_expr(term_overrides, t)
     sigma_cfg = _sb_term_cfg(term_overrides, t, :sigma)
     isnothing(sigma_cfg) && return :_sb_rw1
-    Base.merge(_sb_rw1, _sb_gp_prior_stmt(:sigma, sigma_cfg))
+    _sb_configured_term_submodel(_sb_rw1, (:sigma, sigma_cfg))
 end
 
 function _sb_car_submodel_expr(term_overrides, t, type::Symbol)
@@ -10411,20 +10520,15 @@ function _sb_car_submodel_expr(term_overrides, t, type::Symbol)
         "share, but `car(...; type=:icar)` has none")
     base = type === :bym2 ? :_sb_car_bym2 : :_sb_car_icar
     (isnothing(rho_cfg) && isnothing(sigma_cfg)) && return base
-    stmts = Any[]
-    isnothing(rho_cfg) || push!(stmts, _sb_gp_prior_stmt(:rho, rho_cfg))
-    isnothing(sigma_cfg) || push!(stmts, _sb_gp_prior_stmt(:sigma, sigma_cfg))
-    Base.merge(type === :bym2 ? _sb_car_bym2 : _sb_car_icar, stmts...)
+    _sb_configured_term_submodel(type === :bym2 ? _sb_car_bym2 : _sb_car_icar,
+        (:rho, rho_cfg), (:sigma, sigma_cfg))
 end
 
 function _sb_cdar_submodel_expr(term_overrides, t)
     rho_cfg = _sb_term_cfg(term_overrides, t, :ar)
     sigma_cfg = _sb_term_cfg(term_overrides, t, :sigma)
     (isnothing(rho_cfg) && isnothing(sigma_cfg)) && return :_sb_cdar
-    stmts = Any[]
-    isnothing(rho_cfg) || push!(stmts, _sb_gp_prior_stmt(:rho, rho_cfg))
-    isnothing(sigma_cfg) || push!(stmts, _sb_gp_prior_stmt(:sigma, sigma_cfg))
-    Base.merge(_sb_cdar, stmts...)
+    _sb_configured_term_submodel(_sb_cdar, (:rho, rho_cfg), (:sigma, sigma_cfg))
 end
 
 # The single carrier every prior surface rides on. Folding the term dict into
@@ -14294,7 +14398,7 @@ _sb_predictor_term!(stmts, data, ::typeof(s), t;
     # both matrices at new x values against these constants.
     _sb_record_preproc!(data, Xnull_name,
         PreprocEntry(:spline, (; fit, zpen_key=Zpen_name), xname, false))
-    prior = _sb_term_sd_submodel(term_overrides, t; mod)
+    prior = _sb_term_sd_submodel(term_overrides, t; mod, data, stem=col_name)
     prior_kwargs = Any[Expr(:kw, :Xnull, Xnull_name), Expr(:kw, :Zpen, Zpen_name)]
     append!(prior_kwargs, (Expr(:kw, k, v) for (k, v) in pairs(prior.kwargs)))
     push!(stmts, Expr(:call, :~, col_name,
@@ -14350,7 +14454,7 @@ _sb_predictor_term!(stmts, data, ::typeof(t2), t;
         (; fit, zrr_key=Zrr_name, zrn_key=Zrn_name, znr_key=Znr_name),
         names, false))
     col_name = Symbol(:t2_, suffix)
-    prior = _sb_term_sd_submodel(term_overrides, t; mod)
+    prior = _sb_term_sd_submodel(term_overrides, t; mod, data, stem=col_name)
     prior_kwargs = Any[
         Expr(:kw, :Xfixed, Xfixed_name), Expr(:kw, :Zrr, Zrr_name),
         Expr(:kw, :Zrn, Zrn_name), Expr(:kw, :Znr, Znr_name)]
@@ -14413,13 +14517,13 @@ _sb_predictor_term!(stmts, data, ::typeof(gp), t; group_block_lookup=Dict(),
         period = prepared.state.period
         submodel = _sb_gp_submodel_expr(:_sb_gp_periodic, term_overrides, t)
         push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
-            submodel, term_overrides, t; X=X_name, jitter, period)))
+            submodel, term_overrides, t; data, stem=col_name, X=X_name, jitter, period)))
         return col_name
     end
     submodel = _sb_gp_submodel_expr(
         prepared.state.iso ? :_sb_gp : :_sb_gp_aniso, term_overrides, t)
     push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
-        submodel, term_overrides, t; X=X_name, jitter)))
+        submodel, term_overrides, t; data, stem=col_name, X=X_name, jitter)))
     col_name
 end
 
@@ -14499,7 +14603,7 @@ end
 # preprocessing record is unchanged.
 function _sb_hsgp_floor_check(term_overrides, t, floor, geometry, remedy)
     cfg = _sb_term_cfg(term_overrides, t, :length_scale)
-    isnothing(cfg) && return (;)
+    (isnothing(cfg) || _sb_known_cfg(cfg)) && return (;)
     upper = _brm_floor_prior_upper(cfg.prior)
     isnothing(upper) && return (;)
     statement = "$(cfg.spelling) ~ $(cfg.prior)"
@@ -14604,7 +14708,7 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         submodel = _sb_gp_submodel_expr(
             _sb_hsgp_latent_submodel(orthogonal_to), term_overrides, t)
         push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
-            submodel, term_overrides, t; x=x_name, omega2=omega2_name, center, L, rho_lower)))
+            submodel, term_overrides, t; data, stem=col_name, x=x_name, omega2=omega2_name, center, L, rho_lower)))
         return col_name
     end
 
@@ -14699,7 +14803,7 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
             submodel = _sb_gp_submodel_expr(_sb_hsgp_level_submodel(lc, iso),
                                             term_overrides, t)
             push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
-                submodel, term_overrides, t; PHI=PHI_name, omega2=omega2_name,
+                submodel, term_overrides, t; data, stem=col_name, PHI=PHI_name, omega2=omega2_name,
                 rho_lower=rho_lower_name, beta=info.block_name, group_idx=info.idx_name,
                 level_arguments...)))
         else
@@ -14715,7 +14819,7 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
             submodel = _sb_hsgp_by_hyper_model(
                 term_overrides, t, rho_plan, sigma_plan, lc)
             push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
-                submodel, term_overrides, t; PHI=PHI_name, omega2=omega2_name,
+                submodel, term_overrides, t; data, stem=col_name, PHI=PHI_name, omega2=omega2_name,
                 rho_lower=rho_lower_name, beta=info.block_name,
                 group_idx=info.idx_name, G=G_name, level_arguments...)))
         end
@@ -14766,9 +14870,9 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
             submodel_name, term_overrides, t, rho_plan, sigma_plan)
     end
     call = partial ? _sb_term_model_call(
-        submodel, term_overrides, t; PHI=PHI_name, omega2=omega2_name,
+        submodel, term_overrides, t; data, stem=col_name, PHI=PHI_name, omega2=omega2_name,
         rho_lower=rho_lower_name, centeredness=centeredness_name) :
-        _sb_term_model_call(submodel, term_overrides, t; PHI=PHI_name,
+        _sb_term_model_call(submodel, term_overrides, t; data, stem=col_name, PHI=PHI_name,
                             omega2=omega2_name, rho_lower=rho_lower_name)
     push!(stmts, Expr(:call, :~, col_name, call))
     col_name
@@ -14832,7 +14936,7 @@ function _sb_hsgp_periodic_term!(stmts, data, t, names, raw, is_raw, K, kw,
         names, false))
     submodel = _sb_gp_submodel_expr(:_sb_hsgp_periodic, term_overrides, t)
     push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
-        submodel, term_overrides, t; PHI=PHI_name,
+        submodel, term_overrides, t; data, stem=col_name, PHI=PHI_name,
         harmonics=harmonics_name, rho_lower=rho_lower_name)))
     col_name
 end
@@ -14893,7 +14997,7 @@ _sb_predictor_term!(stmts, data, ::typeof(dar), t;
     col_name = Symbol(:dar_, target, :_, xname)
     submodel = _sb_dar_submodel_expr(term_overrides, t)
     push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
-        submodel, term_overrides, t; time=xname)))
+        submodel, term_overrides, t; data, stem=col_name, time=xname)))
     col_name
 end
 # `rw(time)` is the pure random-walk trajectory: `dar` without a persistence
@@ -14916,7 +15020,7 @@ _sb_predictor_term!(stmts, data, ::typeof(rw), t;
     _sb_record_preproc!(data, keys_.time_idx, PreprocEntry(:rw, (; steps=st.steps, keys=keys_), xname, true))
     submodel = _sb_rw_submodel_expr(term_overrides, t)
     push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
-        submodel, term_overrides, t; keys_...)))
+        submodel, term_overrides, t; data, stem=col_name, keys_...)))
     col_name
 end
 # `cdar(step; by=group, cor=C)`: the grouped correlated damped walk. The shared
@@ -14958,7 +15062,7 @@ _sb_predictor_term!(stmts, data, ::typeof(cdar), t;
         (; steps=st.steps, groups=st.groups, L=st.L, keys=keys_), (xname, gname), true))
     submodel = _sb_cdar_submodel_expr(term_overrides, t)
     push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
-        submodel, term_overrides, t; keys_...)))
+        submodel, term_overrides, t; data, stem=col_name, keys_...)))
     col_name
 end
 # `car(area; edges=(from, to), type=...)`: the shared preparation builds the
@@ -15005,7 +15109,7 @@ _sb_predictor_term!(stmts, data, ::typeof(car), t;
         (; type, graph, keys=keys_), (aname, fname, tname), true))
     submodel = _sb_car_submodel_expr(term_overrides, t, type)
     push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
-        submodel, term_overrides, t; keys_...)))
+        submodel, term_overrides, t; data, stem=col_name, keys_...)))
     col_name
 end
 # Vector-wise wrapper predictors: `zscale`, `standardize`, and `center`

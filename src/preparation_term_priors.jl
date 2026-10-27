@@ -214,6 +214,87 @@ function _brm_floor_prior_spec(spec, term, slot, spelling)
                  keywords=_brm_substitute_floor(spec.keywords, spelling)))
 end
 
+# ---- a term parameter held at a known value ---------------------------------
+#
+# `length_scale(<lp|:>, hsgp(x)) = value` (and every other term-parameter
+# address with `=`) holds that parameter at a known value: data or a constant
+# on every backend, never sampled. Like an explicit prior it replaces the
+# parameter's whole default declaration, so an HSGP's validity floor does not
+# bind it (decision 0v1op0o: the declaration wins).
+"""
+    _BRMKnownTermValue(value)
+
+A term's own parameter held at a known value by `=` on its address. `value`
+has the parameter's shape: a number, or a `Vector{Float64}` with one length
+scale per axis of an anisotropic `gp`/`hsgp` term. It replaces the prior
+expression in every backend's term configuration.
+"""
+struct _BRMKnownTermValue{T}
+    value::T
+end
+Base.show(io::IO, known::_BRMKnownTermValue) = print(io, known.value)
+
+_brm_is_known_term_value(prior) = prior isa _BRMKnownTermValue
+
+# The number of length scales a `gp`/`hsgp` term samples: one when isotropic
+# (a periodic term always is), else one per axis.
+function _brm_gp_length_scale_count(term::ExprColumn)
+    label = nameof(getf(term))
+    kw = getkwargs(term)
+    _brm_gp_cov(kw, label) === :periodic && return 1
+    _brm_gp_iso(kw, label) ? 1 : length(getargs(term))
+end
+
+_brm_known_term_shape(_callable, term, slot, value, spelling; prefix) =
+    _brm_known_term_scalar(value, spelling; prefix)
+function _brm_known_term_shape(::Union{typeof(gp),typeof(hsgp)}, term, slot,
+                               value, spelling; prefix)
+    slot.name === :length_scale || return _brm_known_term_scalar(value, spelling; prefix)
+    n = _brm_gp_length_scale_count(term)
+    n == 1 && return _brm_known_term_scalar(value, spelling; prefix)
+    # One known value holds every axis's length scale at it.
+    value isa Real && return fill(Float64(value), n)
+    value isa AbstractVector && length(value) == n || error(
+        "$prefix: `$spelling = value` holds an anisotropic term's $n length " *
+        "scales, one per axis in the term's axis order; got " *
+        "$(_brm_known_value_shape(value))")
+    collect(Float64, value)
+end
+
+_brm_known_value_shape(value::Real) = "the number $value"
+_brm_known_value_shape(value::AbstractArray) =
+    "a $(join(size(value), "×")) array"
+
+function _brm_known_term_scalar(value, spelling; prefix)
+    value isa Real && return Float64(value)
+    error("$prefix: `$spelling = value` holds one number; got " *
+          _brm_known_value_shape(value))
+end
+
+_brm_check_known_support(::Val{:positive}, value, spelling; prefix) =
+    all(v -> isfinite(v) && v > 0, value) || error(
+        "$prefix: `$spelling = $value` must be finite and strictly positive")
+_brm_check_known_support(::Val{:unit_interval}, value, spelling; prefix) =
+    all(v -> 0 <= v <= 1, value) || error(
+        "$prefix: `$spelling = $value` must lie in the parameter's support [0, 1]")
+
+# A resolved known-value statement: its expression becomes the validated value
+# in the parameter's shape.
+function _brm_known_term_spec(spec, term, slot, spelling; prefix)
+    spec.family === _brm_known || return spec
+    raw = only(getargs(spec.expression))
+    value = _brm_known_value(raw)
+    isnothing(value) && error(
+        "$prefix: `$spelling = $raw` needs a known value: a numeric formula " *
+        "constant, a data field, or arithmetic over them. A sampled quantity " *
+        "or a distribution is not a known value; write `$spelling ~ <prior>` " *
+        "to estimate it.")
+    value = _brm_known_term_shape(getf(term), term, slot, value, spelling; prefix)
+    _brm_check_known_support(Val(slot.support), value, spelling; prefix)
+    merge(spec, (; expression=_BRMKnownTermValue(value), arguments=(value,),
+                 keywords=(;)))
+end
+
 _brm_term_slot_ambiguity(_callable) = "this term has several parameter components"
 _brm_term_slot_ambiguity(::typeof(t2)) = "a tensor smooth has three independent smoothing scales"
 function _brm_resolve_term_slot(term, spec; prefix="BRM preparation")
@@ -283,7 +364,9 @@ Base.@nospecializeinfer function _brm_resolve_term_priors(@nospecialize(brmi::BR
                 "that tells them apart, as in `hsgp(x; cov=:periodic)`")
             term = only(terms)
             slot = _brm_resolve_term_slot(term, spec; prefix)
-            resolved = _brm_floor_prior_spec(spec, term, slot, spelling)
+            resolved = _brm_known_term_spec(
+                _brm_floor_prior_spec(spec, term, slot, spelling),
+                term, slot, spelling; prefix)
             key = length(shared) > 1 ? _brm_term_full_key(term) : spec.term
             per_term = get!(get!(result, target, Dict{Symbol,Dict{Symbol,Any}}()),
                             key, Dict{Symbol,Any}())
