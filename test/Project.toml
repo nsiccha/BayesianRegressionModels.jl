@@ -64,7 +64,10 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # whose `X[g]` is the g-th matrix in a plate cell.
 # f5e4650 adds Stan's `sum_to_zero_*` transforms (8e57a83) and `head`/`tail`/
 # `reverse` (359844e), which `T::shares(total)` cell latents call.
-rev = "f5e46509a15e22e62d02556522cd0f0cdc54bb95"
+# ffbaff09 (StanBlocks 0.2.2) selects several groups of a ragged value, `rv[idx]`,
+# and sums its groups elementwise, `sum(rv)` (snag selecting-severa-027a8191), which
+# BRM's model-scope reads of a ragged plate output pass through.
+rev = "ffbaff097bbbe2f5c7b8153d6033ce9b0387c248"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"

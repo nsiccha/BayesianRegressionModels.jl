@@ -5,47 +5,23 @@
 #
 # StanBlocks stores the plate's cells in one of three shapes: a scalar per cell
 # as `vector[N]`, a vector of a fixed width as `matrix[K, N]` (one column per
-# cell), any other vector as a ragged value. Its own `M[g]` of the matrix is a
-# row and its `sum` of a matrix or a ragged value is the total of every entry,
-# so a model-scope read of a plate output goes through these helpers, one
-# method per stored shape. The scalar methods are inlined, so a scalar output
-# keeps its Stan source (snag `sum-a-vector-pla-812e04d2`, decision `09e0gc5`).
+# cell), any other vector as a ragged value. Stan's `M[g]` of the matrix is a
+# row and its `sum` of a matrix is the total of every entry, so a model-scope
+# read of a plate output goes through these helpers, one method per stored
+# shape; a ragged value already reads by group in StanBlocks. The scalar
+# methods are inlined, so a scalar output keeps its Stan source (snag
+# `sum-a-vector-pla-812e04d2`, decision `09e0gc5`).
 StanBlocks.@deffun begin
-    brm_ragged_cells_sum(mem::vector[k], ends::int[n])::vector[ragged_length(ends, 1)] = begin
-        @stan_assert n > 0 "sum of a plate output: the plate has no cells"
-        total = mem[ragged_start(ends, 1):ragged_end(ends, 1)]
-        for g in 2:n
-            @stan_assert ragged_length(ends, g) == ragged_length(ends, 1) "sum of a plate output adds its cells elementwise, but the cells have different lengths"
-            total = total + mem[ragged_start(ends, g):ragged_end(ends, g)]
-        end
-        total
-    end
-    brm_ragged_cells_sum(mem::vector[k], ends::int[n], idx::int[m])::vector[ragged_length(ends, idx[1])] = begin
-        @stan_assert m > 0 "sum of a plate output's cells: no cells selected"
-        total = mem[ragged_start(ends, idx[1]):ragged_end(ends, idx[1])]
-        for j in 2:m
-            @stan_assert ragged_length(ends, idx[j]) == ragged_length(ends, idx[1]) "sum of a plate output adds its cells elementwise, but the cells have different lengths"
-            total = total + mem[ragged_start(ends, idx[j]):ragged_end(ends, idx[j])]
-        end
-        total
-    end
-end
-
-# An inlined body is traced where it is called, so it reaches the ragged
-# helper by value.
-@eval StanBlocks.@deffun begin
     @inline brm_plate_sum(x::vector[n]) = sum(x)
     @inline brm_plate_sum(x::int[n]) = sum(x)
     @inline brm_plate_sum(x::matrix[k, n]) = x * rep_vector(1.0, cols(x))
-    # A ragged value goes in as its memory and its (data) ends, so that the
-    # caller's declaration is sized by the ends alone; a size naming the whole
-    # ragged value would name its parameter memory, which stanc refuses.
-    @inline brm_plate_sum(x::RaggedVector) = $(brm_ragged_cells_sum)(x.mem, x.ends)
+    # StanBlocks sums a ragged value's groups elementwise and selects several
+    # groups with an index array (StanBlocks 0.2.2, snag selecting-severa-027a8191).
+    @inline brm_plate_sum(x::RaggedVector) = sum(x)
     @inline brm_plate_sum(x::vector[n], idx::int[m]) = sum(x[idx])
     @inline brm_plate_sum(x::int[n], idx::int[m]) = sum(x[idx])
     @inline brm_plate_sum(x::matrix[k, n], idx::int[m]) = x[:, idx] * rep_vector(1.0, size(idx))
-    @inline brm_plate_sum(x::RaggedVector, idx::int[m]) =
-        $(brm_ragged_cells_sum)(x.mem, x.ends, idx)
+    @inline brm_plate_sum(x::RaggedVector, idx::int[m]) = sum(x[idx])
     @inline brm_plate_cell(x::vector[n], i) = x[i]
     @inline brm_plate_cell(x::int[n], i) = x[i]
     @inline brm_plate_cell(x::matrix[k, n], i::int) = col(x, i)
