@@ -98,6 +98,16 @@ Set `BRM_HSGP_PROJECTION_RUNTIME=0` to skip the compiled parity sets.
 Combinations not implemented yet are `@test_broken`. Set
 `BRM_LEVEL_CORRELATION_RUNTIME=0` to skip the compiled-model sets.
 
+`level_correlation_hyper.jl` checks per-level amplitudes and length scales
+(the hyper-predictors `log(sd(hsgp(x))) ~ 1 + (1 | g)` and
+`log(length_scale(hsgp(x))) ~ 1 + (1 | g)`) on a grouped HSGP with correlated
+levels, `cor=Omega`, `cor=multigroup(Omega, tau)` or
+`cor=multigroup((x, y), lambda; k)`: SBBRMI emission and stanc acceptance,
+one- and two-axis terms, the refused per-level length scale under either
+`multigroup`, descriptor, description and replay, the SB density against
+hand-written raw-Stan programs, and RK density and gradient equal to SB. The
+same `BRM_LEVEL_CORRELATION_RUNTIME=0` skips its compiled-model sets.
+
 `sd_prior_input_names.jl` checks that a scale prior's caller scalar may share a
 name with a binding of the submodel the prior is merged into, such as `tau` in
 `sd(:, ID) ~ Exponential(tau)`. It covers Gaussian, general-family,
@@ -434,8 +444,12 @@ oracle runs against both implementations, the row-structured
 `BRMLaplaceProblem` (`structured=false`); a panel of an NB2 count with
 correlated effects, an NB2 count with a shape predictor and a binomial share
 checks that the two agree in value and gradient, and a LogNormal model that
-only the whole-model path takes it. It needs ReactiveKernels with
-`prepare_ad_third` (the test pin) and runs in the test environment above.
+only the whole-model path takes it. An NB2 model with a monotonic effect and a
+shape predictor, whose parameters are not affine in the population
+coordinates, checks the structured gradient's pullback of both parameters
+through RK against the whole-model gradient and differences. It needs
+ReactiveKernels with `prepare_ad_third` and pullbacks over several WANT ports
+(the test pin) and runs in the test environment above.
 
 `start_values.jl` checks `brm_start`, initial values keyed by prior address,
 on both backends. For a correlated population-PK model, a linked predictor,
