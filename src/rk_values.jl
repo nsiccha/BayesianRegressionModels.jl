@@ -946,15 +946,13 @@ _rk_weighted_observation(base, weight::_BRMPreparedRef, bindings, taken) =
 
 # The other indexed outputs (`conc[i] = …` beside the collected one) each
 # kernel collects as graph values of their own names. A name another model
-# value holds (a data column, an assignment, a kernel's cells, a parameter or
-# predictor), or that two cells write, stays a cell value: SBBRMI's descriptor
-# likewise leaves it ambiguous rather than picking one.
+# value holds (`_rk_plan_taken`: a data column, a derived value, an assignment,
+# a parameter or predictor; or a kernel's cells), or that two cells write,
+# stays a cell value: SBBRMI's descriptor likewise leaves it ambiguous rather
+# than picking one.
 function _rk_kernel_output_names(plan::_RKValuePlan)
     kernels = [a for a in plan.assignments if a isa _RKPreparedKernelAssignment]
-    held = Set{Symbol}(keys(plan.columns))
-    union!(held, (a.name for a in plan.assignments), (kernel.cells for kernel in kernels),
-        (p.name for p in plan.regression.parameters),
-        (p.name for p in plan.regression.predictors))
+    held = union!(_rk_plan_taken(plan), (kernel.cells for kernel in kernels))
     writers = Dict{Symbol,Int}()
     for kernel in kernels, output in kernel.outputs
         writers[output] = get(writers, output, 0) + 1
