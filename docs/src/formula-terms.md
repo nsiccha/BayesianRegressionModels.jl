@@ -494,8 +494,15 @@ NLME view. Exact totals leave such a block conventional.
 
 ### Exact total coefficients
 
-The StanBlocks backend uses **total coefficients** by default for eligible
-independent random effects. For example, in
+!!! note "Not the default"
+    The StanBlocks backend's default is the standard (non-centered)
+    parametrization; exact total coefficients are requested with
+    `total_groups`. For groupings whose blocks the data identify strongly or
+    unevenly, the sum-to-zero parametrization (`s2z_groups`, `s2z_rho`) with
+    WarmupHMC adaptive centering is the other alternative.
+
+With `total_groups=:auto`, the StanBlocks backend uses **total coefficients** for
+eligible independent random effects. For example, in
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
@@ -508,7 +515,7 @@ end
 data = (; subject=[1, 1, 2, 2, 3, 3], x=[0., 1., 0., 1., 0., 1.],
           y=[0.2, 0.8, -0.1, 0.9, 0.4, 1.2])
 total_intercept_model = builder(data)
-""", :total_intercept_model; title="Exact total intercepts with a fixed slope")
+""", :total_intercept_model; title="Exact total intercepts with a fixed slope", total_groups=:auto)
 ```
 
 the sampled group intercept is `total[j] = intercept + deviation[j]`.
@@ -532,7 +539,7 @@ exact Gaussian scale mixture; `Flat()` denotes an improper uniform population
 prior. Marginalization preserves the supported population prior specified in
 the formula.
 
-`total_effect_blocks(sb)` reports the selected blocks. `total_groups=()` opts out;
+`total_effect_blocks(sb)` reports the selected blocks. `total_groups=()` (the default) opts out;
 `total_groups=[:subject]` requires every block of that group to be eligible;
 otherwise it raises an error naming each predictor whose block would stay
 conventional, why, and the eligible subset. `total_groups=[:subject => [:b]]`
@@ -592,7 +599,7 @@ BRM discovers each total's scale and supplies independent centering controls:
 using Random, Enzyme, WarmupHMC, BridgeStan, StanBlocks
 using DifferentiationInterface: AutoEnzyme
 
-sb = SBBRMI(total_intercept_model)
+sb = SBBRMI(total_intercept_model; total_groups=:auto)
 problem = StanBlocks.stan_instantiate(sb.model)
 backend = AutoEnzyme(;
     mode=Enzyme.set_runtime_activity(Enzyme.Reverse),
@@ -603,14 +610,22 @@ fit = WarmupHMC.adaptive_warmup_mcmc(Xoshiro(1), adaptive;
     n_draws=2000, nonlinear_adapt=true)
 ```
 
-`centeredness=1` means model-scale totals; `0` means scaled totals. Intermediate
-values may differ by group and coefficient. The marginal totals remain
-correlated under their exact prior, including at the NCP endpoint. Online
-selection uses WarmupHMC's default position-gradient loss. For a fixed fit, use
-`nonlinear_adapt=false`.
+`centeredness=1` means model-scale totals. Each total is centred on its
+column's own location, the least-squares fit of the column's totals on the group-level design
+of the coefficients it absorbs (for the plain block above, the mean of the
+subject intercepts): group `j` samples `loc_j + (T_j - loc_j) / tau^(1 - c_j)`.
+So `0` gives the standard non-centred deviations with the location kept, and the
+location is a function of the totals, with nothing to choose. Because the
+location couples a column's groups, WarmupHMC selects these controls at each
+restarting window (over the window's evidence, the retained pool by default)
+with its default position-gradient loss, each group scored exactly with the
+others at their current controls. Ordinary, HSGP or car cells in the same model
+then select at the same windows. Intermediate values may differ by group
+and coefficient. The marginal totals remain correlated under their exact prior,
+including at the NCP endpoint. For a fixed fit, use `nonlinear_adapt=false`.
 
 For a post-hoc refit, call `select_total_centeredness(sb, draws, names)` on a
-pilot in the compiled model frame, then pass its `centeredness` vector to
+pilot in the compiled model frame (it scores the same mean-located frame), then pass its `centeredness` vector to
 `adaptive_centering_problem`. The default `criterion=:position` needs positions;
 `criterion=:gradient` additionally needs matching compiled-frame gradients.
 Both inputs are draws × coordinates. Selection makes no additional gradient

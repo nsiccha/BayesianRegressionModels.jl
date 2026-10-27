@@ -9,7 +9,7 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
     ordinary = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
     centered = SBBRMI(brmi; mod=@__MODULE__, total_groups=(),
         centered_groups=[:subject])
-    total = SBBRMI(brmi; mod=@__MODULE__)
+    total = SBBRMI(brmi; mod=@__MODULE__, total_groups=:auto)
     @test isempty(total_effect_blocks(ordinary))
     @test isempty(total_effect_blocks(centered))
     @test !isempty(total_effect_blocks(total))
@@ -127,7 +127,7 @@ end
     artifact = BRM.emit_rk_artifact(brmi; case_id="retained-exact-total")
     built = build_kernel(rk_translate_artifact(artifact))
     rk = RKBRMI(brmi, artifact.plan, built)
-    sb = SBBRMI(brmi; mod=@__MODULE__)
+    sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=:auto)
     @test !isempty(total_effect_blocks(sb))
     stan = BRM.stan_instantiate(sb; path=joinpath(tempdir(),
         "brm-coordinate-transport", "retained-total.stan"))

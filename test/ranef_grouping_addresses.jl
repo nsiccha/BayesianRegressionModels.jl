@@ -91,7 +91,8 @@ end
     # The program is the hand-written split-ID program, conventional and with
     # exact totals.
     @test code(sb) == code(build(twin))
-    @test code(SBBRMI(addressed; mod=@__MODULE__)) == code(SBBRMI(twin; mod=@__MODULE__))
+    @test code(SBBRMI(addressed; mod=@__MODULE__, total_groups=:auto)) ==
+          code(SBBRMI(twin; mod=@__MODULE__, total_groups=:auto))
     @test stanc_ok(sb)
 end
 
@@ -283,7 +284,7 @@ end
 end
 
 @stestset "exact totals and other block emissions" begin
-    auto = SBBRMI(addressed; mod=@__MODULE__)
+    auto = SBBRMI(addressed; mod=@__MODULE__, total_groups=:auto)
     @test [(t.predictor, t.group, t.columns) for t in total_effect_blocks(auto)] ==
           [(:mu, :probe, (:Intercept, :c1, :s1)), (:sigma, :probe, (:Intercept,))]
     c = code(auto)

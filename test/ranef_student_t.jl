@@ -299,8 +299,8 @@ end
         y ~ Normal(mu, sigma)
     end
     # Positive control: the Gaussian twin is selected automatically.
-    @test !isempty(total_effect_blocks(SBBRMI(intercept_gaussian(df); mod=@__MODULE__)))
-    auto = SBBRMI(intercept_t(df); mod=@__MODULE__)
+    @test !isempty(total_effect_blocks(SBBRMI(intercept_gaussian(df); mod=@__MODULE__, total_groups=:auto)))
+    auto = SBBRMI(intercept_t(df); mod=@__MODULE__, total_groups=:auto)
     @test isempty(total_effect_blocks(auto))
     @test only(ranef_blocks(auto)).family === :ranef_correlated_draws_student_t
     @test_throws "Gaussian grouping structure" SBBRMI(intercept_t(df);

@@ -106,8 +106,8 @@ BridgeStan.param_constrain(model, draw; include_tp = true, include_gq = true,
 # Exact total-coefficient blocks
 
 A selected factor may carry exact total-coefficient blocks
-([`total_effect_blocks`](@ref), the default `total_groups = :auto` for an
-independent Gaussian block). Each such predictor reads its block's population
+([`total_effect_blocks`](@ref), requested with `total_groups`, e.g. `:auto`
+for an independent Gaussian block). Each such predictor reads its block's population
 mean `Z * (A * beta)` instead of the group totals — with group-level predictors
 in the block (`TotalEffectBlock.group_columns`), each group's own mean
 `Z * (A * (W[g,:] .* beta))` — where `beta` is the

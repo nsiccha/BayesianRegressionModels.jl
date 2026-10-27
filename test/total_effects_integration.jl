@@ -21,12 +21,12 @@ try
 @testset "BRM total coefficients" begin
     for builder in (normal_builder,student_builder)
         brmi = builder(data)
-        sb = SBBRMI(brmi;mod=@__MODULE__)
+        sb = SBBRMI(brmi;mod=@__MODULE__, total_groups=:auto)
         block = only(total_effect_blocks(sb))
         @test block.group === :g
         @test block.columns == (:Intercept,:x)
         @test isempty(total_effect_blocks(SBBRMI(brmi;total_groups=())))
-        @test isempty(total_effect_blocks(SBBRMI(brmi;centered_groups=[:g])))
+        @test isempty(total_effect_blocks(SBBRMI(brmi;centered_groups=[:g], total_groups=:auto)))
         @test_throws ArgumentError SBBRMI(brmi;total_groups=:missing_group)
         code = BRM.stan_code(sb)
         @test StanBlocks.stanc_check(code;warn_pedantic=false).ok
@@ -71,7 +71,7 @@ try
                 x = q .+ 0.25randn(Xoshiro(32+trial),length(q))
                 @test BridgeStan.log_density(problem.model,x;propto=false) ≈ original_marginal(x) atol=1e-10
             end
-            prior = SBBRMI(builder((;x=data.x,g=data.g)))
+            prior = SBBRMI(builder((;x=data.x,g=data.g)); total_groups=:auto)
             @test StanBlocks.stanc_check(BRM.stan_code(prior);warn_pedantic=false).ok
         end
         replay = reprocess(sb,(;data...,x=data.x.+0.7))
@@ -84,7 +84,7 @@ try
         @test cov(recovered.population) ≈ inv(conditional.factor) atol=0.06
         @test maximum(abs,recovered.totals .- recovered.deviations .-
             reshape(recovered.population*block.A',4000,1,2)) < 1e-12
-        plan = generative_plan(builder,data)
+        plan = generative_plan(builder,data; total_groups=:auto)
         newdata = (;x=[9.,8.,7.,6.],g=[3,3,4,4],y=[0.,0.,0.,0.])
         newplan = generative_plan(plan,newdata)
         newblock = only(total_effect_blocks(newplan))
@@ -112,7 +112,7 @@ end
         mu ~ 1 + x + (1|a|g)
         y ~ Normal(mu,1)
     end
-    sb = SBBRMI(random_intercept(data))
+    sb = SBBRMI(random_intercept(data); total_groups=:auto)
     block = only(total_effect_blocks(sb))
     @test block.population_columns == (:Intercept,)
     @test size(block.A) == (1,1)
@@ -134,7 +134,7 @@ end
     end
     for builder in (correlated,crossed,unsupported)
         brmi = builder((;data...,g2=[1,2,1,2,1,2]))
-        @test isempty(total_effect_blocks(SBBRMI(brmi)))
+        @test isempty(total_effect_blocks(SBBRMI(brmi; total_groups=:auto)))
         @test_throws ArgumentError SBBRMI(brmi;total_groups=:g)
     end
     mixed = @brm begin
@@ -143,7 +143,7 @@ end
         y ~ Normal(mu + eta,1)
     end
     mixed_brmi = mixed((;data...,g2=[1,2,1,2,1,2]))
-    @test isempty(total_effect_blocks(SBBRMI(mixed_brmi)))
+    @test isempty(total_effect_blocks(SBBRMI(mixed_brmi; total_groups=:auto)))
     @test only(total_effect_blocks(SBBRMI(mixed_brmi;total_groups=:g))).group === :g
     changed_student = @brm begin
         mu ~ 1 + center(x) + (1+x||g)
@@ -151,8 +151,8 @@ end
         effect(mu,center_x) ~ Flat()
         y ~ Normal(mu,1)
     end
-    source_plan = generative_plan(student_builder,data)
-    changed_plan = generative_plan(changed_student,data)
+    source_plan = generative_plan(student_builder,data; total_groups=:auto)
+    changed_plan = generative_plan(changed_student,data; total_groups=:auto)
     # Prior compatibility is checked before any coordinate values are used.
     @test_throws ArgumentError transport_draws(source_plan,changed_plan,
         zeros(1,0),String[],String[])

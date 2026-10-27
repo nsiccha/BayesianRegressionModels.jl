@@ -59,7 +59,7 @@ function _synth_names(d)
 end
 
 @testset "absorbed coefficients resolve to the recovered carrier" begin
-    sb = SBBRMI(builder(df); mod=_MOD)  # default total_groups=:auto
+    sb = SBBRMI(builder(df); mod=_MOD, total_groups=:auto)
     blocks = total_effect_blocks(sb)
     @test Set(b.predictor for b in blocks) == Set((:mu, :Vc))
     @test all(b -> b.population_columns == (:Intercept,), blocks)
@@ -106,10 +106,11 @@ end
         brm_population_effect_coordinates(d, :mu, names; coefficient=:Typo)
     end
 
-    # A constrained-name vector that omits the generated-quantities axis
-    # errors as descriptor/artifact drift rather than returning an empty slice.
+    # A constrained-name vector that omits the generated-quantities axis is
+    # refused, naming the `include_gq=true` names that carry the recovered
+    # coefficient, rather than returning an empty slice.
     names_no_gq = filter(n -> !startswith(n, "population_"), names)
-    @test_throws "Re-reflect" brm_population_effect_coordinates(
+    @test_throws "include_gq=true" brm_population_effect_coordinates(
         d, :mu, names_no_gq; coefficient=:Intercept)
 
     # The resolved carriers are the independently emitted Stan program's own

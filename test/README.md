@@ -505,6 +505,49 @@ This explicit PDF mode requires Quarto and a working LuaLaTeX installation;
 render failures propagate. Outputs use a temporary directory, or the directory
 specified by `BRM_DESCRIPTION_TEX_OUTPUT`.
 
+## Standard parametrization by default
+
+`standard_default.jl` checks that `SBBRMI`, `generative_plan` and
+`brm_descriptor` emit the standard (non-centered) parametrization when no
+`total_groups` is given, and that an explicit `total_groups=:auto` builds exact
+totals without a warning. The totals files below pass `total_groups=:auto`
+explicitly:
+
+```sh
+julia --project=test test/standard_default.jl
+```
+
+## Mean-located exact totals under adaptive centering
+
+`total_effects_mean_location.jl` checks that `adaptive_centering_problem`
+centres each total on its column's least-squares fit on the column's location
+design (the mean of the totals for a plain block; group-level predictors widen
+the design), on a plain block and on one with group-level predictors: the
+column table, the exact map (round trip, log-Jacobian against finite
+differences and its closed form `sum(log a) + logdet(W'W) - logdet(W'AW)`,
+aliasing, wrapped density and gradient), the `c = 1` and `c = 0` frames, the
+window rule's per-cell candidates against a direct rebuild of each cell's
+frame, `select_total_centeredness` against those candidates, the controls
+round trip and report, an online fit, and totals beside an ordinary correlated
+block (declared and learned order), whose controls keep the joint pair order:
+
+```sh
+julia --project=test test/total_effects_mean_location.jl
+```
+
+## Per-predictor S2Z weights
+
+`s2z_per_predictor_rho.jl` checks `s2z_rho = [:mu => w_mu, :sigma => w_sigma]`
+on two predictors with different coefficient counts on one S2Z grouping: each
+block gets its own weights; the Stan source equals the scalar build's, with only
+the `s2z_rho_*` data changed; the compiled model runs; unknown, missing,
+duplicate and non-Symbol predictor names and a wrong per-predictor length are
+refused; and a single `predictor => w` pair works:
+
+```sh
+julia --project=test test/s2z_per_predictor_rho.jl
+```
+
 ## Exact totals beside offsets
 
 `total_effects_offset.jl` checks that `offset(...)` terms, of data and of a
@@ -1111,7 +1154,8 @@ four-pane helper, checks the emitted Stan, and scores the generated Turing
 model.
 `sbbrmi_display.jl` evaluates the displayed configured-submodel bindings and
 body in a fresh module, requiring identical generated Stan and data. It covers
-shared and distinct configurations, unchanged default calls, and replay.
+shared and distinct configurations, unchanged default calls, one-margin grouped
+blocks (named through their family's single-margin form), and replay.
 `callable_priors.jl` checks distribution-factory shape registration and a
 complete-call Stan AST translation against the original Julia factory's
 density.
