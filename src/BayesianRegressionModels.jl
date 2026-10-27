@@ -23,6 +23,7 @@ using StatsBase: AbstractWeights, AnalyticWeights, FrequencyWeights,
                  ProbabilityWeights, UnitWeights, Weights,
                  aweights, fweights, pweights, uweights, weights
 import CategoricalArrays as CA
+import StatsFuns
 include("likelihood_distributions.jl")
 include("preparation_basis.jl")
 include("preparation_hsgp.jl")

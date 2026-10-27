@@ -201,6 +201,15 @@ _brmd_call_math(::typeof(expm1),args,_kwargs,_c) = "\\operatorname{expm1}\\left(
 for f in (log1p,expm1)
     @eval _brmd_builtin_call(::$(typeof(f)),c)=BRMDescriptionFragment(covers=(c.id,))
 end
+# The standard normal CDF Phi and its inverse, by their StatsFuns and Stan names.
+for (fs,op) in (((StatsFuns.normcdf,StanBlocks.stan.builtin.Phi),"\\Phi"),
+        ((StatsFuns.norminvcdf,StanBlocks.stan.builtin.inv_Phi),"\\Phi^{-1}"))
+    for f in fs
+        @eval _brmd_call_math(::$(typeof(f)),args,_kwargs,_c) =
+            $op*"\\left("*only(args)*"\\right)"
+        @eval _brmd_builtin_call(::$(typeof(f)),c)=BRMDescriptionFragment(covers=(c.id,))
+    end
+end
 for f in (StanBlocks.stan.builtin.max,StanBlocks.stan.builtin.min)
     op=f===StanBlocks.stan.builtin.max ? "max" : "min"
     @eval _brmd_call_math(::$(typeof(f)),args,_kwargs,_c) =
