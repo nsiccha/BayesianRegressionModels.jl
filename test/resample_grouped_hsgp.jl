@@ -37,6 +37,16 @@ hyper_builder = @brm begin
     y ~ Normal(mu, sigma)
 end
 
+# The option set of a per-subject time deviation as a downstream consumer
+# writes it: a larger basis, clamped past the fitted interval, anchored at 0.
+anchored_builder = @brm begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + hsgp(t; by = subject, k = 16, c = 1.5, extrapolate = :clamp, anchor = 0.0) +
+        (1 | subject)
+    log(sd(hsgp(t))) ~ 1 + (1 | subject)
+    y ~ Normal(mu, sigma)
+end
+
 cor_builder = @brm begin
     sigma ~ Exponential(1)
     Omega ~ LKJCholesky(3, 2.0)
@@ -131,6 +141,20 @@ end
                  "hsgp_t_by_subject_rho_iso")
         @test occursin(name, params)
     end
+
+    # Anchored and clamped: the frozen basis is zero at the anchor and holds
+    # its edge value past the fitted interval, for new levels too.
+    anchored = SBBRMI(anchored_builder(train); mod = @__MODULE__)
+    edge = (; subject = repeat(["n1", "n2"], inner = 3), t = repeat([0.0, 10.0, 14.0], 2))
+    anchored_replay = reprocess(anchored, edge; resample_groups = [:subject])
+    anchored_code = StanBlocks.stan_code(anchored_replay.model)
+    @test StanBlocks.stanc_check(anchored_code; warn_pedantic = false).ok
+    @test occursin("zflat_hsgpw_t_subject = std_normal_vector_rng", gq_block(anchored_code))
+    @test occursin("hsgp_t_by_subject_z_sigma", gq_block(anchored_code))
+    PHI = anchored_replay.data[:PHI_hsgp_t_by_subject]
+    @test size(PHI) == (6, 16)
+    @test all(abs.(PHI[[1, 4], :]) .< 1e-12)
+    @test PHI[3, :] ≈ PHI[2, :]
 end
 
 @testset "new levels of a construction fitted per level" begin
