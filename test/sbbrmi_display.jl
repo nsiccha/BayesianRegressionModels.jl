@@ -75,7 +75,28 @@ end
     end
     text = display_roundtrip(SBBRMI(grouped))
     @test occursin("tau ~ cauchy(", text)
+    # The block has one margin, so it calls its family's single-margin form,
+    # which the display names rather than printing an untraced submodel. One
+    # margin of the generic family and of `ranef_correlated_draws` is the same
+    # submodel (neither has a correlation factor), so either name reproduces it.
+    @test occursin("BayesianRegressionModels._sb_single_margin_ranef(" *
+                   "BayesianRegressionModels.ranef_correlated_draws", text)
+    correlated = @brm (; df..., group=repeat(1:4; inner=6)) begin
+        mu ~ 1 + x + (1 + x | site | group)
+        sd(:, site) ~ Cauchy(0, 2)
+        y ~ Normal(mu, 1.)
+    end
+    text = display_roundtrip(SBBRMI(correlated))
+    @test occursin("tau ~ cauchy(", text)
     @test occursin("ranef_correlated_draws_generic", text)
+    @test !occursin("_sb_single_margin_ranef", text)
+    plain = @brm (; df..., group=repeat(1:4; inner=6)) begin
+        mu ~ 1 + (1 | site | group)
+        y ~ Normal(mu, 1.)
+    end
+    text = display_roundtrip(SBBRMI(plain))
+    @test occursin("ranef_correlated_draws_single_margin_1 = " *
+                   "BayesianRegressionModels._sb_single_margin_ranef(", text)
 
     # Replaying on new data retains the display behavior.
     display_roundtrip(reprocess(sb, (; x=df.x .+ 0.1, y=df.y)))

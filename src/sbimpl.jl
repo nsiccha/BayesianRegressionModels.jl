@@ -793,7 +793,9 @@ ranef_correlated_draws_generic_student_t =
 #
 # The factor is `L ~ lkj_corr_cholesky(...)`, or a stratified family's
 # `L_s ~ plate(...)` of them, read through a cell alias `L_g = L_s[s]`. Any
-# other read of it is an error: the transform must not guess.
+# other read of it is an error: the transform must not guess. `strict=false`
+# returns `nothing` instead, for a caller that only asks whether a form exists
+# (the SBBRMI display's template list).
 _sb_is_lkj_law(x) = Meta.isexpr(x, :call) && x.args[1] === :lkj_corr_cholesky
 _sb_holds_lkj_law(x) = _sb_is_lkj_law(x) ||
     (x isa Expr && any(_sb_holds_lkj_law, x.args))
@@ -801,7 +803,7 @@ _sb_bound_name(x::Symbol) = x
 _sb_bound_name(x::Expr) = Meta.isexpr(x, :(::)) ? _sb_bound_name(x.args[1]) : nothing
 _sb_bound_name(_) = nothing
 
-function _sb_single_margin_ranef(base::StanBlocks.SlicModel)
+function _sb_single_margin_ranef(base::StanBlocks.SlicModel; strict::Bool=true)
     # Read-only: `rewrite` builds fresh `Expr` nodes and shares the leaves. A
     # configured family's body holds values (a custom prior's `ValueUDF`, which
     # references a module), so it cannot be `deepcopy`d.
@@ -811,9 +813,11 @@ function _sb_single_margin_ranef(base::StanBlocks.SlicModel)
         Meta.isexpr(stmt, :call) && stmt.args[1] === :~ &&
             _sb_holds_lkj_law(stmt.args[3]) || continue
         name = _sb_bound_name(stmt.args[2])
-        name isa Symbol || error(
-            "sbimpl: `$(stmt)` holds the correlation factor under a left side the " *
-            "single-margin transform does not recognise")
+        if !(name isa Symbol)
+            strict || return nothing
+            error("sbimpl: `$(stmt)` holds the correlation factor under a left " *
+                  "side the single-margin transform does not recognise")
+        end
         push!(factors, name)
     end
     isempty(factors) && return base
@@ -842,10 +846,12 @@ function _sb_single_margin_ranef(base::StanBlocks.SlicModel)
     end
     body = rewrite(body)
     reads(x) = x isa Symbol ? x in factors : x isa Expr && any(reads, x.args)
-    reads(body) && error(
-        "sbimpl: a random-effect family reads its correlation factor " *
-        "($(join(sort!(collect(factors)), ", "))) other than through " *
-        "`diag_pre_multiply(tau, L)`; its single-margin form is not derived")
+    if reads(body)
+        strict || return nothing
+        error("sbimpl: a random-effect family reads its correlation factor " *
+              "($(join(sort!(collect(factors)), ", "))) other than through " *
+              "`diag_pre_multiply(tau, L)`; its single-margin form is not derived")
+    end
     StanBlocks.SlicModel(body, base.data, base.mod, base.observations)
 end
 
@@ -5007,19 +5013,30 @@ _sb_display_tree(x::QuoteNode) = QuoteNode(_sb_display_tree(x.value))
 _sb_display_tree(x::Expr) = Expr(x.head,
     (_sb_display_tree(a) for a in x.args if !(a isa LineNumberNode))...)
 
+# The named submodels a display may cite: every module-level `SlicModel`, and
+# the single-margin form of each one that has a correlation factor, which a
+# one-margin block calls (`_sb_ranef_statement`).
 function _sb_display_templates()
-    [(name, getfield(@__MODULE__, name))
-     for name in sort!(names(@__MODULE__; all=true, imported=false))
-     if isdefined(@__MODULE__, name) && getfield(@__MODULE__, name) isa StanBlocks.SlicModel]
+    templates = NamedTuple{(:name, :base, :single_margin)}[]
+    for name in sort!(names(@__MODULE__; all=true, imported=false))
+        isdefined(@__MODULE__, name) || continue
+        base = getfield(@__MODULE__, name)
+        base isa StanBlocks.SlicModel || continue
+        push!(templates, (; name, base, single_margin=false))
+        single = _sb_single_margin_ranef(base; strict=false)
+        isnothing(single) || single === base ||
+            push!(templates, (; name, base=single, single_margin=true))
+    end
+    templates
 end
 
 function _sb_display_configuration(model::StanBlocks.SlicModel, templates)
     body = _sb_display_tree(model.model)
     best = nothing
-    for (name, base) in templates
+    for (; name, base, single_margin) in templates
         base.mod === model.mod && isequal(base.data, model.data) || continue
         source = _sb_display_tree(base.model)
-        isequal(source, body) && return (; name, overrides=Any[])
+        isequal(source, body) && return (; name, single_margin, overrides=Any[])
         Meta.isexpr(source, :block) && Meta.isexpr(body, :block) || continue
         overrides = Any[stmt for stmt in body.args if !any(isequal(stmt), source.args)]
         # A compact configuration must retain some of the named template, and
@@ -5036,7 +5053,7 @@ function _sb_display_configuration(model::StanBlocks.SlicModel, templates)
         rebuilt = Base.merge(base, overrides...)
         isequal(_sb_display_tree(rebuilt.model), body) &&
             isequal(rebuilt.data, model.data) && rebuilt.mod === model.mod || continue
-        best = (; name, overrides)
+        best = (; name, single_margin, overrides)
     end
     best
 end
@@ -5061,19 +5078,23 @@ function _sb_display_parts(sb::SBBRMI)
         config = _sb_display_configuration(x, templates)
         isnothing(config) && return x
         base = GlobalRef(@__MODULE__, config.name)
-        isempty(config.overrides) && return base
+        isempty(config.overrides) && !config.single_margin && return base
         for (prior, alias) in configurations
             isequal(prior, config) && return alias
         end
+        stem = config.single_margin ? :_single_margin_ : :_configured_
         index = 1
-        alias = Symbol(config.name, :_configured_, index)
+        alias = Symbol(config.name, stem, index)
         while alias in used
             index += 1
-            alias = Symbol(config.name, :_configured_, index)
+            alias = Symbol(config.name, stem, index)
         end
         push!(used, alias)
-        constructor = Expr(:call, GlobalRef(Base, :merge), base,
-                           Expr(:quote, Expr(:block, config.overrides...)))
+        config.single_margin && (base = Expr(:call,
+            GlobalRef(@__MODULE__, :_sb_single_margin_ranef), base))
+        constructor = isempty(config.overrides) ? base :
+            Expr(:call, GlobalRef(Base, :merge), base,
+                 Expr(:quote, Expr(:block, config.overrides...)))
         push!(definitions, Expr(:(=), alias, constructor))
         push!(configurations, (config, alias))
         alias

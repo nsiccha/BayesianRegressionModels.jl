@@ -1118,7 +1118,8 @@ four-pane helper, checks the emitted Stan, and scores the generated Turing
 model.
 `sbbrmi_display.jl` evaluates the displayed configured-submodel bindings and
 body in a fresh module, requiring identical generated Stan and data. It covers
-shared and distinct configurations, unchanged default calls, and replay.
+shared and distinct configurations, unchanged default calls, one-margin grouped
+blocks (named through their family's single-margin form), and replay.
 `callable_priors.jl` checks distribution-factory shape registration and a
 complete-call Stan AST translation against the original Julia factory's
 density.
