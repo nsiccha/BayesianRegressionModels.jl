@@ -12,6 +12,24 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.6
+
+- `brm_start` places a random-effect block's groups at their own values:
+  `ID = (; sd, cor, effects = ["a" => 1.2, "b" => -0.4, …])`, one number per
+  level for a one-margin `|ID|` block, one vector in `ranefcoefnames` order
+  otherwise. An effect is what the level adds to each margin's linear
+  predictor on its link scale, the `effects` that `brm_ranef_draws` reads
+  back. Before, every group started at the population value: natural effects
+  at 0, and every exact total at `A β`. On SBBRMI this covers non-centred,
+  centred (`centered_groups`), Student-t (at the base mixing weights),
+  stratified (`gr(g, by = b)`) and level-correlated (`gr(g; cor = …)`)
+  blocks, an `|ID|` an exact-total block absorbed (each total is then
+  `A (W[g, :] .* β)` plus its group's effect) and an `|ID|` a sum-to-zero
+  block claimed (its deviations from their mean and `theta = β + B μ`; every
+  level must be given). On RKBRMI it covers the plain blocks it addresses.
+  Unlisted levels keep their coordinates at `base` (standardized draws, or
+  effects in a centred block). Snag `odlplaus-ap-2-st-537291fd`.
+
 ## 0.2.5
 
 - A predictor read through a `@plate` grouping may hold a term whose keyword

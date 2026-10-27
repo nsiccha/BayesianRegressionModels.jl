@@ -606,6 +606,18 @@ function _s2z_block_deviations(block, values, tau, k)
     tau .* (w .- sum(w) / length(w))
 end
 
+# The inverse of `_s2z_block_deviations`: the coordinates of coefficient `k`
+# whose zero-sum deviations are `r`. Group coordinates keep the mean of `w`,
+# the one direction the deviations leave free, at that of `current`.
+function _s2z_block_coordinates(block, r, tau, k, current)
+    rho = view(block.rho, :, k)
+    block.coordinates === :groups ||
+        return _s2z_helmert_transpose_mul(_s2z_partial_inverse(r, tau, rho))
+    scale = exp.(rho .* log(tau))
+    w = current ./ scale
+    (r ./ tau .+ sum(w) / length(w)) .* scale
+end
+
 """
     recover_s2z_draws(model, draws, unc_names; rng=Random.default_rng())
 
