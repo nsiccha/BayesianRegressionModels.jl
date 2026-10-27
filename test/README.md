@@ -454,6 +454,20 @@ layouts, the population prior's ω gradient beside the fixed family, and short
 SAEM, FOCE(I) and empirical-Bayes fits read back by name. Run it in the
 NLMEEstimation scratch environment described below.
 
+`population_grouped_hsgp.jl` checks the population and transport routes on a
+grouped HSGP, `hsgp(t; by = g)`, whose weights `ranef_blocks` does not list.
+It runs a shared trend, per-subject deviations with a per-subject amplitude
+and a `(1 | subject)` intercept on one grouping column. `population_draws`
+zeroes the weights and the amplitude effects with the intercept (BridgeStan:
+the deviation is 0 on every row). `population_model` keeps the fitted
+coordinates, agrees with it on everything the program computes, is
+idempotent and survives `reprocess`. A grouping whose only effects are a
+grouped HSGP is accepted. `transport_draws` copies the weights by level label
+onto a model with a level dropped, and refuses a new or resampled level with
+the `resample_groups` route. It also checks the ambiguity message for an
+unqualified hyper-predictor. `BRM_PRED_RUNTIME=0` skips the compiled-model
+sets.
+
 `nlme_svi.jl` checks minibatch stochastic variational inference
 (`brm_svi_fit`). The minibatch split of the RK target is checked first: the
 global prior and Jacobian term plus every subject's cell term equal the full

@@ -12,6 +12,34 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.12
+
+- `population_draws(…; groups = :g)` and `population_model(sb; groups = :g)`
+  treat a grouped HSGP, `hsgp(x...; by = g)`, as one of `g`'s effects: its
+  standardized basis weights are zeroed, so the term is exactly zero on every
+  row, and so are a per-level hyper-predictor's effects
+  (`log(sd(hsgp(x))) ~ 1 + (1 | g)`), so every level sits at the population
+  amplitude or length scale. The two routes agree. A grouping whose only
+  effects are a grouped HSGP is accepted. The term is selected by its `by=`
+  column's own name. Before, both routes kept every group's fitted curve: a
+  `groups = :g` that also zeroed a `(1 | g)` block returned a prediction that
+  still held each group's HSGP deviation, and a grouping with no other block
+  was refused. `ranef_blocks` is unchanged and does not list these
+  coordinates.
+- `transport_draws` copies a grouped HSGP's weights and per-level hyper
+  effects by level label. A level the source lacks (or every level of a
+  `resample`d grouping) is refused, naming the
+  `reprocess(…; resample_groups = [:g])` route. A target that draws them in
+  generated quantities is skipped. Weights on a `cor = multigroup((x, y), …)`
+  inducing grid copy row for row. Before, the weights were copied by
+  coordinate name: on a target with a level dropped, later levels silently
+  read earlier levels' weights.
+- An unqualified hyper-predictor, `log(sd(hsgp(t))) ~ …`, on an `hsgp(t)` that
+  two predictors carry is still refused as ambiguous. The message now spells
+  the statement with its `log(…)` and names each predictor-qualified fix,
+  `log(sd(<predictor>, hsgp(t))) ~ …`.
+- Snag `brm-use-silent-o-0039d181`, decision `0wlazld`.
+
 ## 0.2.11
 
 - `brm_nlme_view` reads a grouped HSGP, `hsgp(x; by = g)`, on RKBRMI. When

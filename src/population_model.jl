@@ -79,6 +79,53 @@ function _sb_population_total!(body::Expr, block::TotalEffectBlock)
     nothing
 end
 
+# A grouped HSGP of a selected grouping (src/grouped_hsgp_blocks.jl). Its
+# levels × basis weights block reads `0.0 *` the standardized weights, and a
+# hyper-predictor's level effects (`r_sigma` / `r_rho` in the term's submodel)
+# read `0.0 *` theirs, so the term is zero on every row and every level sits at
+# the population amplitude or length scale, as zero coordinates give in
+# `population_draws`. The reads stay, so every coordinate keeps its fitted
+# placement. Applying it to an already-population program changes nothing.
+_sb_population_zeroed(x) = Meta.isexpr(x, :call, 3) && x.args[1] === :* && x.args[2] === 0.0
+_sb_population_zero(x) = _sb_population_zeroed(x) ? x : :(0.0 * $x)
+
+function _sb_population_grouped_hsgp!(body::Expr, b)
+    at = findall(s -> Meta.isexpr(s, :(=)) && s.args[1] === b.block, body.args)
+    length(at) == 1 || error(
+        "population_model: grouped HSGP weights `$(b.block)` are assigned ",
+        "$(length(at)) times in the emitted body; expected exactly once")
+    stmt = body.args[only(at)]
+    stmt.args[2] = _sb_population_zero(stmt.args[2])
+    isempty(b.hypers) && return nothing
+    calls = findall(s -> Meta.isexpr(s, :call, 3) && s.args[1] === :~ &&
+                         _sb_plan_lhs_name(s.args[2]) === b.term, body.args)
+    length(calls) == 1 || error(
+        "population_model: grouped HSGP term `$(b.term)` is declared ",
+        "$(length(calls)) times in the emitted body; expected exactly once")
+    rhs = body.args[only(calls)].args[3]
+    callee = rhs.args[1]
+    callee isa StanBlocks.SlicModel || error(
+        "population_model: grouped HSGP term `$(b.term)` predicts its ",
+        "hyperparameters per level, but its declaration calls `$(repr(callee))`, ",
+        "not a submodel value")
+    model = _sb_plan_copy(callee.model)
+    for h in b.hypers
+        r = _sb_hyper_names(h.hyper).r
+        hits = Ref(0)
+        rewrite(x) = x isa Expr ?
+            (Meta.isexpr(x, :(=)) && x.args[1] === r ?
+                (hits[] += 1; Expr(:(=), r, _sb_population_zero(x.args[2]))) :
+                Expr(x.head, map(rewrite, x.args)...)) : x
+        model = rewrite(model)
+        hits[] == 1 || error(
+            "population_model: grouped HSGP term `$(b.term)` assigns its ",
+            "$(h.hyper) level effects `$r` $(hits[]) times; expected exactly once")
+    end
+    rhs.args[1] = StanBlocks.SlicModel(model, deepcopy(callee.data), callee.mod,
+                                       callee.observations)
+    nothing
+end
+
 """
     population_model(sb::SBBRMI; groups) -> SBBRMI
 
@@ -102,6 +149,16 @@ BridgeStan.param_constrain(model, draw; include_tp = true, include_gq = true,
 
 [`brm_descriptor`](@ref)`(pop)` mounts it like any other model, so
 `brm_execute(d, :predict; draws, seed)` reads the same draws.
+
+# Grouped HSGPs
+
+A grouped HSGP, `hsgp(x...; by = g)`, is selected by its `by=` column, though
+[`ranef_blocks`](@ref) does not list it: its levels × basis weights read
+`0.0 *` their standardized draws, so the term is zero on every row, and a
+hyper-predictor's per-level effects (`log(sd(hsgp(x))) ~ 1 + (1 | g)`) read
+zero too, so every level sits at the population amplitude or length scale.
+This agrees with [`population_draws`](@ref), which zeroes the same
+coordinates.
 
 # Exact total-coefficient blocks
 
@@ -148,7 +205,7 @@ population mean on selected totals), so its descriptor id does too.
 # Refused
 
 - A selected factor with a sum-to-zero block (`s2z_groups`).
-- A factor that names no random-effect block.
+- A factor that names no random-effect block and no grouped HSGP.
 """
 function population_model(sb::SBBRMI; groups)
     selected = Set{Symbol}(groups isa Symbol ? (groups,) : groups)
@@ -159,10 +216,13 @@ function population_model(sb::SBBRMI; groups)
         "population_model: S2Z block(s) of $(join(sort!(collect(Set(b.group for b in s2z))), ", ")) ",
         "need recovery-aware population projection, which is not implemented yet"))
     totals = filter(b -> b.group in selected, total_effect_blocks(sb))
-    # A factor with a total block need not have an ordinary block as well.
+    # A factor with a total block need not have an ordinary block as well, nor
+    # one whose effects are a grouped HSGP's weights.
     total_factors = Set(b.group for b in totals)
+    hsgp_blocks = filter(b -> b.group in selected, _grouped_hsgp_blocks(sb))
     all_blocks = ranef_blocks(sb)
-    blocks = vcat(_ranef_select(all_blocks, setdiff(selected, total_factors)),
+    blocks = vcat(_ranef_select(all_blocks, setdiff(selected, total_factors);
+                                grouped_hsgp=hsgp_blocks),
                   filter(b -> any(g -> _ranef_group_matches(b, g), total_factors), all_blocks))
     unique!(b -> b.binding, blocks)
     targets = Dict(b.binding => b for b in blocks if !b.population)
@@ -189,6 +249,9 @@ function population_model(sb::SBBRMI; groups)
     isempty(unmatched) || error(
         "population_model: random-effect block(s) $(join(sort!(collect(unmatched)), ", ")) ",
         "have no top-level declaration in the emitted body")
+    for b in hsgp_blocks
+        _sb_population_grouped_hsgp!(body, b)
+    end
 
     # The declaration's callee is now a value, so the block's family travels in
     # its binding record, which `ranef_blocks` and the descriptor roles read.
