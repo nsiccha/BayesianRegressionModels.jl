@@ -40,7 +40,8 @@ unconstrained coordinate vector (`coordinates`, in packed order).
 - `role[c]` — `:population` (population coefficients, categorical contrasts,
   monotonic simplexes, ordinal thresholds and vector parameters),
   `:shared_latent` (fixed sampled coordinates from HSGP components,
-  missing-value completions and submodels),
+  missing-value completions and submodels; a grouped HSGP whose levels are
+  the units shares only its hyperparameters),
   `:scalar` (other sampled scalars such as residual scales),
   `:subject_scale` / `:subject_correlation` (the random-effect scales and
   Cholesky correlation factors, i.e. Ω), or `:subject_effect` /
@@ -66,7 +67,15 @@ unconstrained coordinate vector (`coordinates`, in packed order).
   completion (`RKBRMI(brmi; completions=:noncentered)`) whose rows lie on the
   grouping axis is one family of size 1 with covariance fixed at 1: each
   missing cell is an instance of it in the subject owning its row, with role
-  `:subject_effect` (its block identity carries `completion=true`).
+  `:subject_effect` (its block identity carries `completion=true`). A grouped
+  HSGP `hsgp(x; by=g)` without `cor=` whose levels are the units (`g` is the
+  subject grouping, a nested grouping, or a column whose labels are subjects)
+  is one family whose size is its number of basis functions, with covariance
+  fixed at the identity: each level's standardized weights are an instance of
+  it in the subject owning the level (its block identity carries `hsgp`, the
+  term's declaration). Each `(1 | g)` effect of a hyper-predicted amplitude or
+  length scale (`log(sd(hsgp(x))) ~ 1 + (1 | g)`) is an estimated family of
+  size 1 over the same units.
 - `subject_margins[i]` — the compact coordinates' family margin and grouping
   level labels for subject `i`.
 - `mu_references` — one `(; predictor, coefficient, link, population, subject,
@@ -209,6 +218,53 @@ function _brm_nlme_mu_references(backend, block_margins, population, rows, nrows
         end
     end
     references
+end
+
+# The subject owning each level of a grouped HSGP whose levels are units, or
+# `nothing` when the term is shared by the subjects: an ungrouped term, a
+# `cor=` that couples its levels, or a `by` column whose levels name no
+# subject. The levels are units when `by` is a nested grouping (each level
+# owned by its subject) or when every level names a subject: the subject
+# grouping itself, or another column with its labels, joined by label as one
+# `|ID|` joins grouping columns.
+function _brm_nlme_hsgp_units(record, group, subject_index, owner, group_levels,
+        nested_groups)
+    record.grouped && record.group !== nothing && !record.level_correlation ||
+        return nothing
+    by = record.group
+    if haskey(nested_groups, by)
+        index = Dict(_brm_transport_level(level) => g
+            for (g, level) in enumerate(group_levels[by]))
+        return Int[owner[by][get(index, _brm_transport_level(level)) do
+                error("brm_nlme_view: internal: level $(repr(level)) of `$by` " *
+                    "has no row")
+            end] for level in record.levels]
+    end
+    units = Int[get(subject_index, _brm_transport_level(level), 0)
+        for level in record.levels]
+    all(iszero, units) && return nothing
+    unmatched = record.levels[iszero.(units)]
+    isempty(unmatched) || _brm_nlme_error(
+        "brm_nlme_view: `hsgp($(join(record.axes, ", ")); by=$by)` in " *
+        "`$(record.predictor)` has levels that are subjects of `$group` and levels " *
+        "that are not ($(join(repr.(unmatched), ", "))), so its weights are " *
+        "neither one subject's each nor shared by all. Group it by the subjects, " *
+        "by a grouping nested in them (`nested_groups`), or by labels that name " *
+        "no subject.")
+    units
+end
+
+# A hyper-predictor's `(1 | g)` effects of a grouped HSGP, as a random-effect
+# record: one margin, the log-scale intercept of the predicted
+# hyperparameter (`log(sd(<predictor>, hsgp(x)))`), its scale and its
+# standardized draws `<z>.<level>`.
+function _brm_nlme_hsgp_hyper_record(record, hyper, effects)
+    address = Symbol("log(", hyper, "(", record.predictor, ", hsgp(",
+        join(record.axes, ", "), ")))")
+    (; kind=:hsgp_hyper, group=record.group, id=nothing,
+        margins=((address, :Intercept),),
+        scale=Symbol(record.declaration, ".", effects.scale), scales=nothing, L=nothing,
+        z=Symbol(record.declaration, ".", effects.z))
 end
 
 # The stratum position (into `strata`, the `by` column's levels) of each level
@@ -463,11 +519,79 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
             claim_declaration!(record.declaration, :population)
         elseif kind === :scalar
             claim_declaration!(record.declaration, :scalar)
-        elseif kind === :hsgp
-            # The whole HSGP component, including its scale, length and basis
-            # weights, is shared across subjects and remains in the original
-            # unconstrained layout.
+        elseif kind === :lkj_cholesky
+            # A declared level correlation (`Omega ~ LKJCholesky(K, eta)`),
+            # which only a grouped HSGP's `cor=` can read here (a random-effect
+            # block's was refused above): shared, like that term's weights.
             claim_declaration!(record.declaration, :shared_latent)
+        elseif kind === :hsgp
+            units = _brm_nlme_hsgp_units(record, group, subject_index, owner,
+                group_levels, nested_groups)
+            if units === nothing
+                # The whole HSGP component, including its scale, length and
+                # basis weights, is shared across subjects and remains in the
+                # original unconstrained layout.
+                claim_declaration!(record.declaration, :shared_latent)
+            else
+                # Grouped by the units: each level's standardized weights are
+                # unit draws of the subject owning the level, one family fixed
+                # at the identity (the spectral scaling stays in the model).
+                # A hyper-predictor's `(1 | g)` effects are one estimated
+                # family each. The shared hyperparameters stay shared.
+                for (hyper, effects) in pairs(record.locals.hypers)
+                    effects === nothing && continue
+                    hyper_record = _brm_nlme_hsgp_hyper_record(record, hyper, effects)
+                    family = length(families) + 1
+                    block = _brm_nlme_block_identity(hyper_record)
+                    scale = coordinate(hyper_record.scale)
+                    claim!(scale, :subject_scale)
+                    push!(families, (; block, record=hyper_record, stratum=nothing,
+                        size=1, scales=[scale], factor=Int[], fixed=nothing))
+                    margin = only(hyper_record.margins)
+                    push!(block_margins, (; block, predictor=first(margin),
+                        coefficient=last(margin)))
+                    for (g, i) in enumerate(units)
+                        c = coordinate(Symbol(hyper_record.z, ".", g))
+                        claim!(c, :subject_effect)
+                        subject[c] = i
+                        push!(blocks[i], c)
+                        push!(subject_families[i], family)
+                        push!(subject_margins[i], (; block, predictor=first(margin),
+                            coefficient=last(margin), level=record.levels[g]))
+                    end
+                end
+                weights = Symbol(record.declaration, ".", record.locals.weights)
+                M, rest = divrem(count(name -> _brm_nlme_owned(name, weights), names),
+                    length(units))
+                M > 0 && rest == 0 || error("brm_nlme_view: internal: HSGP weights " *
+                    "`$weights` do not hold one row per level of `$(record.group)`")
+                family = length(families) + 1
+                block = (; group=record.group, id=nothing, predictor=record.predictor,
+                    hsgp=record.declaration)
+                push!(families, (; block, record, stratum=nothing, size=M,
+                    scales=Int[], factor=Int[], fixed=Matrix{Float64}(I, M, M)))
+                coefficients = [Symbol("hsgp(", join(record.axes, ", "), ")[", j, "]")
+                    for j in 1:M]
+                for coefficient in coefficients
+                    push!(block_margins, (; block, predictor=record.predictor, coefficient))
+                end
+                for (g, i) in enumerate(units)
+                    push!(subject_families[i], family)
+                    for (j, coefficient) in enumerate(coefficients)
+                        c = coordinate(Symbol(weights, ".", g, ".", j))
+                        claim!(c, :subject_effect)
+                        subject[c] = i
+                        push!(blocks[i], c)
+                        push!(subject_margins[i], (; block, predictor=record.predictor,
+                            coefficient, level=record.levels[g]))
+                    end
+                end
+                # Hyperparameters and hyper-predictor intercepts.
+                for (i, name) in enumerate(names)
+                    role[i] === :unclaimed && _brm_nlme_owned(name, record.declaration) &&
+                        claim!(i, :shared_latent)
+                end
+            end
         elseif kind === :missing_value
             # Only the completion's sampled carrier is a parameter. A
             # non-centered completion whose rows lie on the grouping axis is
@@ -517,9 +641,11 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
     labels = map(_brm_transport_level, backend.plan.columns[group])
     rows = [findall(x -> isequal(x, _brm_transport_level(level)), labels) for level in levels]
     # Subjects of a stratified block, or with completion draws, hold different
-    # families, so their blocks differ in shape, as nested ones do.
+    # families, so their blocks differ in shape, as nested ones do; so do
+    # subjects without a level of a grouped HSGP.
     ragged = !isempty(nested_groups) ||
-        any(f -> f.stratum !== nothing || f.fixed !== nothing, families)
+        any(f -> f.stratum !== nothing || get(f.block, :completion, false), families) ||
+        !allequal(subject_families)
     mu_references = ragged ? NamedTuple[] :
         _brm_nlme_mu_references(backend, block_margins, population,
             rows, length(labels))
