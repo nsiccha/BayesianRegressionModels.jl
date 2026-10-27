@@ -10,7 +10,7 @@
 #
 # Run: julia --project=test test/derived_columns.jl [testset substrings...]
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
-using Random, Statistics
+using Random, Statistics, Logging
 using LogExpFunctions: logistic
 
 derived_shift(x::AbstractVector) = x .+ 0.5
@@ -353,6 +353,90 @@ end
     reference = density(reprocess(rkh, expected))
     @test density(reprocess(rk, design)) ≈ reference atol=1e-10
     @test density(RKBRMI(builder(design), brm_fitted_state(rk))) ≈ reference atol=1e-10
+end
+
+# The values of `rk`'s graph whose type RK preparation cannot infer, by name,
+# from the warnings it logs, when `want` is cut with every data input a HAVE
+# port and none bound. Bound data would be evaluated at preparation instead,
+# and every value computed from it alone would take its runtime type.
+function uninferred_values(rk, want)
+    inputs = rk_bound_data(rk)
+    logs, _ = Test.collect_test_logs(min_level=Logging.Warn) do
+        ReactiveKernels.prepare(rk.model.spec; have=(:unconstrained, keys(inputs)...), want)
+    end
+    names = Symbol[]
+    for log in logs
+        m = match(r"^ReactiveKernels: `([^`]+)` is not concretely typed", string(log.message))
+        m === nothing || push!(names, Symbol(m.captures[1]))
+    end
+    names
+end
+
+# The type Julia infers for the value of the program statement `name = f(args...)`,
+# its arguments literals or bound data.
+function inferred_statement_type(rk, name)
+    program = BRM._rk_retained_program(rk)
+    statement = only(s for s in program.main.args if Meta.isexpr(s, :(=)) &&
+        first(s.args) === name)
+    call = last(statement.args)
+    callee = only(last(b) for b in program.bindings if first(b) === first(call.args))
+    inputs = rk_bound_data(rk)
+    argument_types = map(a -> a isa Symbol ? typeof(inputs[a]) : typeof(a), call.args[2:end])
+    Base.promote_op(callee, argument_types...)
+end
+
+@stestset "constants of a brm(source) model are concretely typed in the graph" begin
+    # `brm(source; mod)` evaluates a constant through an interpreted closure,
+    # whose result Julia cannot infer; the graph value is a Float64 or a
+    # Vector{Float64} all the same, so nothing reading it dispatches at run
+    # time, also in a cut that computes it on every call (snag
+    # `constant-of-a-sc-942369d4`). Scalar constants read scalar data fields,
+    # as in a model standardized by given moments.
+    data = merge(flat, (; z=randn(rng, N), z_center=0.25, z_spread=2.0))
+    source = quote
+        sigma ~ Exponential(1)
+        z_loc = constant(z_center)
+        z_scale = constant(z_spread)
+        x_moments = constant([derived_mean(x), derived_sd(x)])
+        z_std = (z - z_loc) / z_scale
+        x_std = (x - x_moments[1]) / x_moments[2]
+        mu ~ 1 + z_std + x_std
+        y ~ Normal(mu, sigma)
+    end
+    derived = brm(data, source; mod=@__MODULE__)
+    host = @brm merge(data, (; z_std=(data.z .- 0.25) ./ 2.0,
+            x_std=(data.x .- derived_mean(data.x)) ./ derived_sd(data.x))) begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + z_std + x_std
+        y ~ Normal(mu, sigma)
+    end
+    rk, _ = rk_same_density(derived, host)
+    for name in (:z_loc, :z_scale, :x_moments)
+        rk_in_graph(rk, name, ())
+    end
+    @test inferred_statement_type(rk, :z_loc) === Float64
+    @test inferred_statement_type(rk, :z_scale) === Float64
+    @test inferred_statement_type(rk, :x_moments) === Vector{Float64}
+    # A cut of a plate's value computes a scalar constant on every call from no
+    # input, and RK checks that recipe (with the evaluator untyped, it reports
+    # both constants).
+    subjects = (; subject=collect(1:6), age=[31.0, 45.0, 52.0, 38.0, 60.0, 27.0],
+        obs_subject=repeat(1:6, inner=3), t=repeat([0.5, 1.0, 2.0], 6),
+        y=randn(rng, 18), age_center=42.0, age_spread=11.0)
+    plate = brm(subjects, quote
+        sigma ~ Exponential(1)
+        age_loc = constant(age_center)
+        age_scale = constant(age_spread)
+        age_std = (age - age_loc) / age_scale
+        log_k ~ 1 + age_std + (1 | subject)
+        rows = groups(obs_subject => subject)
+        @plate for i in eachindex(log_k)
+            mu = exp.(-exp(log_k[i]) .* t[rows[i]])
+            y[rows[i]] ~ Normal(mu, sigma)
+            loc[i] = mu
+        end
+    end; mod=@__MODULE__)
+    @test isempty(uninferred_values(RKBRMI(plate), (:loc,)))
 end
 
 @stestset "a column assignment recomputes a scalar assignment it reads" begin
