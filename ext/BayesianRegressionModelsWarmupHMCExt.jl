@@ -937,7 +937,9 @@ end
 
 function _mean_totals_centering_problem(model, problem, ad_backend, names, centeredness)
     ir = _mean_totals_reparametrizer(model, names; s2z=true)
-    controls = _initial_controls(centeredness, length(ir.state.sources))
+    # Totals and S2Z cells keep their compiled start under `:midpoint`.
+    controls = _initial_controls(centeredness === :midpoint ? nothing : centeredness,
+                                 length(ir.state.sources))
     isnothing(controls) || WarmupHMC.restore_reparam_controls!(ir, controls)
     WarmupHMC.ReparametrizedProblem(ir, problem, ad_backend;
         scoring_plan=WarmupHMC.WindowSelectionPlan(_mean_totals_select!))
@@ -1906,22 +1908,27 @@ _totals_beside_synchronize!(ir) = (_primary_synchronize!(ir.primary); ir)
 
 function _totals_beside_centering_problem(model, problem, ad_backend, names, centeredness,
                                           ordinary, hsgp_blocks, r2d2_blocks, car_blocks,
-                                          learned)
+                                          learned; locations=nothing)
     # Refuses overlapping or cross-reading coordinates over every cell, totals
-    # included, as the single wrapper did.
+    # included, as the single wrapper did; a population location read from a
+    # total cell is refused here too.
     _joint_centering_state(ordinary, hsgp_blocks, r2d2_blocks,
-                           _scalar_centering_cells(model, names), car_blocks)
+                           _scalar_centering_cells(model, names), car_blocks; locations)
     s2z = BRM._s2z_centering_cells(model, names)
     primary = last(learned ?
         _adaptive_ordered_centering_reparametrizer(ordinary, hsgp_blocks, r2d2_blocks,
-                                                   s2z, car_blocks) :
+                                                   s2z, car_blocks; locations) :
         _adaptive_joint_centering_reparametrizer(ordinary, hsgp_blocks, r2d2_blocks,
-                                                 s2z, car_blocks))
+                                                 s2z, car_blocks; locations))
     state = _primary_state(primary)
     ir = BRMTotalsBesideCenteringReparametrization(primary,
         _mean_totals_reparametrizer(model, names; s2z=false),
         state.n_ranef + state.n_r2d2 + state.n_hsgp)
-    controls = _initial_controls(centeredness, length(WarmupHMC.reparam_controls(ir)))
+    # Random-effect pairs lead both the joint order and this wrapper's, so
+    # `:midpoint` moves exactly them; totals keep their compiled start.
+    controls = _initial_controls(
+        _start_controls(centeredness, state, WarmupHMC.reparam_controls(ir)),
+        length(WarmupHMC.reparam_controls(ir)))
     isnothing(controls) || WarmupHMC.restore_reparam_controls!(ir, controls)
     WarmupHMC.ReparametrizedProblem(ir, problem, ad_backend;
         scoring_plan=WarmupHMC.WindowSelectionPlan(_totals_beside_select!;
@@ -2541,7 +2548,7 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
     # other cells would have without them.
     isempty(total_blocks) || return _totals_beside_centering_problem(model, problem,
         ad_backend, names, centeredness, ordinary, hsgp_blocks, r2d2_blocks, car_blocks,
-        ranef_order === :learned && any(b -> b.ranef.n_terms > 1, blocks))
+        ranef_order === :learned && any(b -> b.ranef.n_terms > 1, blocks); locations)
     # cdar cells never share a wrapper; the branch below refuses the mix.
     if ranef_order === :learned && isempty(cdar_blocks) &&
             any(b -> b.ranef.n_terms > 1, blocks)

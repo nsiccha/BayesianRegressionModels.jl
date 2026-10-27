@@ -217,6 +217,10 @@ end
     rows = adaptive_centering_controls(rp, m.sb)
     @test [r.index for r in rows] == vec(m.coords.totals)
     @test all(r -> r.c == 0.6 && r.target == 1.0, rows)
+    # `:midpoint` moves random-effect cells only: totals keep the compiled start.
+    midpoint = WarmupHMC.reparametrizer(adaptive_centering_problem(m.sb, m.problem,
+        AutoEnzyme(); centeredness=:midpoint))
+    @test WarmupHMC.reparam_controls(midpoint) == midpoint.targets
 end
 
 @testset "online fit" begin
@@ -239,7 +243,8 @@ end
 
 # Totals beside an ordinary correlated block: the ordinary cells keep the
 # wrapper they would have without totals (per-pair for the declared order,
-# learned-order otherwise) and the mean-located totals join beside it.
+# learned-order otherwise), centred on their population coefficients, and the
+# mean-located totals join beside it.
 const MIXED = @brm begin
     mu ~ 1 + x + (1 + x | h)
     log(sigma) ~ 1 + (1 | g)
@@ -265,7 +270,17 @@ end
     @test ir.primary isa (order === :declared ? WarmupHMC.IndexedReparametrization :
                           EXT.BRMOrderedCenteringReparametrization)
     @test WarmupHMC.reparam_controls(ir) ≈ c
-    @test [r.index for r in adaptive_centering_controls(rp, sb)] == vcat(first.(joint.pairs), totals)
+    rows = adaptive_centering_controls(rp, sb)
+    @test [r.index for r in rows] == vcat(first.(joint.pairs), totals)
+    # The ordinary cells keep their hierarchical centring on `mu`'s population
+    # coefficients beside the totals; the totals have no such location.
+    nranef = length(joint.pairs)
+    @test all(r -> !isnothing(r.location), rows[1:nranef])
+    @test all(r -> isnothing(r.location), rows[nranef+1:end])
+    midpoint = WarmupHMC.reparametrizer(adaptive_centering_problem(sb, problem, AutoEnzyme();
+        centeredness=:midpoint, ranef_order=order))
+    @test WarmupHMC.reparam_controls(midpoint)[1:nranef] == fill(0.5, nranef)
+    @test WarmupHMC.reparam_controls(midpoint)[nranef+1:end] == midpoint.totals.targets
     physical = 0.4 .* randn(Xoshiro(5), length(names))
     _, source = WarmupHMC._inverse_with_logabsdet_jacobian(ir, physical)
     jac, mapped = ir(source)
