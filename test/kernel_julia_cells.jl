@@ -3,6 +3,7 @@
 # Distributions observation constructors.
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using LogExpFunctions
+using StatsFuns: normcdf, norminvcdf
 
 # A caller's own function that happens to share a Julia name keeps its
 # meaning: callables are matched by identity, never by spelling.
@@ -45,6 +46,9 @@ const STAN = BRM._sb_cell_statements
         :(z = rep_vector(a, n) .+ rep_vector(0.0, n))
     @test spell(:(z = ones(m, n))) == :(z = rep_matrix(1.0, m, n))
     @test spell(:(z = vcat(a, b, c))) == :(z = append_row(append_row(a, b), c))
+    @test spell(:(z = normcdf.((a .- x) ./ s) .- normcdf(b))) ==
+        :(z = Phi.((a .- x) ./ s) .- Phi(b))
+    @test spell(:(z = norminvcdf(p))) == :(z = inv_Phi(p))
     # Stan spellings, Julia names Stan shares, and unbound names pass through.
     for ex in (:(e = 2.0 * inv_logit(s * x) - 1.0), :(z = rep_vector(a, 3)),
             :(z = exp.(x) .+ sum(x)), :(z = my_helper(x; k = 2)))
@@ -163,6 +167,67 @@ end
     end
 end
 
+# The standard normal CDF and its inverse by their StatsFuns names, scalar and
+# dotted: class shares between thresholds of a lognormal size law, as a zone
+# model writes them.
+normcdf_cell(data) = @brm data begin
+    sigma ~ Exponential(1)
+    base ~ Normal(0, 1)
+    log_s ~ Normal(0, 0.5)
+    amp ~ Normal(0, 1)
+    @plate for i in eachindex(c)
+        below = normcdf((0.05 - base) / exp(log_s))
+        share = normcdf.((c[i] .- base) ./ exp(log_s)) .- below
+        loc[i] = amp .* share .+ norminvcdf(logistic(base))
+        y[i] ~ Normal(loc[i], sigma)
+    end
+end
+
+phi_spelled_cell(data) = @brm data begin
+    sigma ~ Exponential(1)
+    base ~ Normal(0, 1)
+    log_s ~ Normal(0, 0.5)
+    amp ~ Normal(0, 1)
+    @plate for i in eachindex(c)
+        below = Phi((0.05 - base) / exp(log_s))
+        share = Phi.((c[i] .- base) ./ exp(log_s)) .- below
+        loc[i] = amp .* share .+ inv_Phi(inv_logit(base))
+        y[i] ~ normal(loc[i], sigma)
+    end
+end
+
+function normcdf_oracle(data, names)
+    index = Dict(n => findfirst(==(n), names) for n in (:sigma, :base, :log_s, :amp))
+    u -> begin
+        sigma, base, log_s, amp = exp(u[index[:sigma]]), u[index[:base]],
+            u[index[:log_s]], u[index[:amp]]
+        Phi(x) = cdf(Normal(), x)
+        shift = quantile(Normal(), LogExpFunctions.logistic(base))
+        logpdf(Exponential(1), sigma) + u[index[:sigma]] + logpdf(Normal(0, 1), base) +
+            logpdf(Normal(0, 0.5), log_s) + logpdf(Normal(0, 1), amp) +
+            sum(sum(logpdf.(Normal.(amp .* (Phi.((c .- base) ./ exp(log_s)) .-
+                Phi((0.05 - base) / exp(log_s))) .+ shift, sigma), y))
+                for (c, y) in zip(data.c, data.y))
+    end
+end
+
+@stestset "normcdf and norminvcdf take Stan's Phi and inv_Phi" begin
+    brmi = normcdf_cell(DATA)
+    code = BRM.stan_code(SBBRMI(brmi; mod=@__MODULE__, total_groups=()))
+    @test code == BRM.stan_code(SBBRMI(phi_spelled_cell(DATA); mod=@__MODULE__,
+        total_groups=()))
+    @test occursin("Phi(", code) && occursin("inv_Phi(", code) &&
+        !occursin("normcdf", code) && !occursin("norminvcdf", code)
+    backend, problem = consumer_problem(brmi)
+    names = coordinate_names(backend.model.layout)
+    oracle = normcdf_oracle(DATA, names)
+    stan = consumer_stan(brmi, "julia-first-normcdf")
+    for u in ([0.0, 0.0, 0.0, 0.0], [0.3, -0.2, 0.1, 0.4], [-0.4, 0.25, -0.3, 0.2])
+        check_consumer_point(problem, u, oracle)
+        check_consumer_stan(problem, stan, MAPPING, backend, u)
+    end
+end
+
 # A model-scope value is Julia too: `@brm` holds the callable it evaluated,
 # and SBBRMI spells it through the cells' table. Three areal fields joined
 # once at model scope and read per cell, as a zone model with one field per
@@ -213,7 +278,8 @@ scope_calls(data) = @brm data begin
     steps = cumsum([a, b, a])
     level = fill(a, 3) + zeros(3)
     p = logistic([a, b, a])
-    y ~ Normal(steps + level + p + logsumexp([a, b]), sigma)
+    q = normcdf([a, b, a])
+    y ~ Normal(steps + level + p + q + logsumexp([a, b]), sigma)
 end
 
 function check_transported(brmi, name)
@@ -255,7 +321,7 @@ end
     calls = BRM.stan_code(SBBRMI(scope_calls((; y=[0.3, -0.2, 0.5])); mod=@__MODULE__,
         total_groups=()))
     for spelled in ("cumulative_sum([a, b, a]')", "rep_vector(a, 3)", "rep_vector(0.0, 3)",
-            "inv_logit([a, b, a]')", "log_sum_exp([a, b]')")
+            "inv_logit([a, b, a]')", "Phi([a, b, a]')", "log_sum_exp([a, b]')")
         @test occursin(spelled, calls)
     end
     @test consumer_stan(scope_calls((; y=[0.3, -0.2, 0.5])), "model-scope-calls") !== nothing
