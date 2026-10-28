@@ -807,8 +807,15 @@ function _brm_builder_code(x::Expr; df=nothing)
     # dropped (and a non-column typo still errors loudly at the backend/StanBlocks
     # trace, exactly as before this capture path existed).
     real_captures = sort!(collect(setdiff(captures, keys(alllocals))))
+    # Names a statement reads before the statement that declares them: the body
+    # binds such a read like any other nonlocal, and finalization replaces it by
+    # the declaration (`_brm_resolve_forward_reads`).
+    forward = Tuple(sort!([key for (key, value) in pairs(alllocals)
+        if value == :nonlocal && (key in inventory.assigned ||
+            key in inventory.responses || key in inventory.latent ||
+            key in inventory.data)]))
     finalize = :($_brm_finalize_operations(
-        (;$(keys(alllocals)...)), __caps__))
+        (;$(keys(alllocals)...)), __caps__, $forward))
     # ONE shared builder body, parameterised on the `__df__` symbol. Nonlocals
     # bind via the @getproperty (hasproperty→MissingColumn) fallback so a name
     # that isn't a df column (e.g. a multi-equation predictor/param like
@@ -3066,25 +3073,103 @@ combine: an address is validated against the model it configures at backend
 lowering (`SBBRMI(...)`), exactly as for an inline prior — never here.
 
 Structural fragments compose the same way, in any order. A fragment that only
-READS a name another fragment defines (`y ~ Normal(mu, sigma)` without a `mu`
-formula) carries a bare placeholder for it, and a placeholder never overrides
-a definition: `merge(lp_fragment, obs_fragment)` and
-`merge(obs_fragment, lp_fragment)` both keep `mu`'s formula.
+READS a name another fragment declares (`y ~ Normal(mu, sigma)` without a `mu`
+formula, or `m ~ 1 + y` beside `y`'s likelihood) carries a read binding for it
+(a bare placeholder, or the data column), and a read binding never overrides a
+declaration: `merge(lp_fragment, obs_fragment)` and
+`merge(obs_fragment, lp_fragment)` both keep `mu`'s formula and `y`'s
+likelihood. The fragment's reads then refer to the declaration, as they would
+in one block.
 """
-Base.merge(a::BRMI, b::BRMI) = BRMI(Base.merge(a.operations,
-    _brm_drop_shadowing_placeholders(b.operations, a.operations)))
+Base.merge(a::BRMI, b::BRMI) = _brm_resolve_forward_reads(
+    BRMI(Base.merge(a.operations,
+        _brm_drop_shadowing_reads(b.operations, a.operations))),
+    _brm_read_binding_names(a, b))
 Base.merge(a::BRMI, b::BRMI, rest::BRMI...) =
     foldl(Base.merge, rest; init=Base.merge(a, b))
 
-# A builder binds every name it reads but does not define to a `MissingColumn`
-# placeholder; such an entry is a reference, not a declaration.
-_brm_is_placeholder(op) = op isa NamedColumn && parent(op) isa MissingColumn
+# A builder binds every name it reads but does not declare: a data column to its
+# values, any other name to a `MissingColumn` placeholder. Such an entry is a
+# reference, not a declaration.
+_brm_is_read_binding(op) =
+    op isa NamedColumn && parent(op) isa Union{MissingColumn,DataColumn}
+_brm_read_binding_names(models::BRMI...) = Tuple(unique!(Symbol[
+    key for model in models for (key, op) in pairs(model.operations)
+    if _brm_is_read_binding(op)]))
 
-# `incoming`'s operations minus the placeholders that would shadow a name
-# `existing` already carries, in `incoming`'s order.
-_brm_drop_shadowing_placeholders(incoming::NamedTuple, existing::NamedTuple) =
+# A read of a name the model declares refers to that declaration wherever the
+# two statements stand. The builder body runs in source order, so a statement
+# that reads a name above its declaration (or a fragment that reads what
+# another fragment declares) holds a placeholder for it; the finished model
+# replaces each such placeholder by the declaration, through the shared rebind
+# map. `mu ~ 1 + c` above `c = log(1 + x)` is then the model with the two lines
+# swapped, in every position a read can stand (snag formula-covariat-5673c470).
+# A declaration slot (the left-hand side of `~` or `=`) is not a read, and a
+# declaration that reads its own name keeps that read a placeholder.
+#
+# A read of a data column stays data, as a statement above `x = log(x)` reads
+# the raw `x`, with one exception: the column a later `mi(y) ~ …` completes.
+# Its raw values are the response with missing entries, which no statement can
+# use, so a read above the completion reads the completion as one below does.
+struct _BRMForwardReads
+    declarations::Dict{Symbol,Any}
+    resolved::Dict{Symbol,Any}
+    active::Set{Symbol}
+end
+
+Base.@nospecializeinfer function _brm_resolve_forward_reads(
+        @nospecialize(brmi::BRMI), names::Tuple{Vararg{Symbol}})
+    isempty(names) && return brmi
+    entries = _brm_operation_entries(brmi)
+    declarations = Dict{Symbol,Any}(key => op for (key, op) in entries
+        if key in names && op isa NamedColumn && !_brm_is_read_binding(op))
+    isempty(declarations) && return brmi
+    reads = _BRMForwardReads(declarations, Dict{Symbol,Any}(), Set{Symbol}())
+    resolved = map(entries) do (key, op)
+        haskey(declarations, key) ? _brm_forward_declaration(reads, key) :
+            _brm_rebind_value(op, reads)
+    end
+    BRMI(NamedTuple{Tuple(first.(entries))}(Tuple(resolved)))
+end
+
+function _brm_forward_declaration(reads::_BRMForwardReads, key::Symbol)
+    haskey(reads.resolved, key) && return reads.resolved[key]
+    key in reads.active && return nothing
+    push!(reads.active, key)
+    declaration = reads.declarations[key]
+    value = NamedColumn(key, _brm_rebind_value(parent(declaration), reads))
+    delete!(reads.active, key)
+    reads.resolved[key] = value
+end
+
+function _brm_rebind_value(x::NamedColumn, reads::_BRMForwardReads)
+    payload = parent(x)
+    declared = get(reads.declarations, name(x), nothing)
+    if !isnothing(declared) && (payload isa MissingColumn ||
+            payload isa DataColumn && _brm_is_completion(declared))
+        declaration = _brm_forward_declaration(reads, name(x))
+        return isnothing(declaration) ? x : declaration
+    end
+    payload isa Union{MissingColumn,DataColumn} && return x
+    NamedColumn(name(x), _brm_rebind_value(payload, reads))
+end
+_brm_is_completion(op) = op isa NamedColumn && parent(op) isa ExprColumn{typeof(~)} &&
+    first(getargs(parent(op))) isa ExprColumn{typeof(mi)}
+function _brm_rebind_value(x::ExprColumn{typeof(~)}, reads::_BRMForwardReads)
+    lhs, rest... = getargs(x)
+    ExprColumn(~, lhs, map(value -> _brm_rebind_value(value, reads), rest)...;
+               _brm_rebind_value(getkwargs(x), reads)...)
+end
+# A constant reads data only, never a model value.
+_brm_rebind_value(x::ExprColumn{typeof(constant)}, ::_BRMForwardReads) = x
+
+# `incoming`'s operations minus the read bindings that would shadow a name
+# `existing` already carries, in `incoming`'s order. A data binding counts too:
+# `merge(likelihood_fragment, reader_fragment)` used to replace `y`'s likelihood
+# by the reader's binding of the column and drop it from the model.
+_brm_drop_shadowing_reads(incoming::NamedTuple, existing::NamedTuple) =
     (; (key => op for (key, op) in pairs(incoming)
-        if !(_brm_is_placeholder(op) && haskey(existing, key)))...)
+        if !(_brm_is_read_binding(op) && haskey(existing, key)))...)
 
 # Nested predictor formulas are normalised at builder execution time, after
 # data columns have values (categorical K is therefore known) but before a BRMI
@@ -3206,9 +3291,10 @@ end
 # expanding nested formulas read the operations as syntax, so only constructing
 # the model's own NamedTuple and BRMI specializes on it.
 Base.@nospecializeinfer function _brm_finalize_operations(
-        @nospecialize(operations::NamedTuple), @nospecialize(captures::NamedTuple))
+        @nospecialize(operations::NamedTuple), @nospecialize(captures::NamedTuple),
+        forward::Tuple{Vararg{Symbol}}=())
     isempty(captures) || (operations = Base.merge(operations, captures))
-    _expand_nested_predictor_formulas(operations)
+    _brm_resolve_forward_reads(_expand_nested_predictor_formulas(operations), forward)
 end
 
 Base.@nospecializeinfer function _expand_nested_predictor_formulas(
