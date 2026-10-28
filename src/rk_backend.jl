@@ -7232,6 +7232,8 @@ end
 # closed, mirroring the Turing backend.
 Base.@nospecializeinfer function _rk_peel_mi_observation(@nospecialize(brmi::BRMI), observation, plan)
     prefix = "RK backend"
+    _brm_mi_grouped(plan.totals) && error(
+        "$prefix: internal: `mi($(plan.source))::shares(total, rows)` lowers on the value plan")
     _rk_gate_mi_case_a!(brmi, observation.key, plan.source)
     rhs = observation.rhs
     rhs isa ExprColumn || error(

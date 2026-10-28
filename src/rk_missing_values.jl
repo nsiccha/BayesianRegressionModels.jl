@@ -14,11 +14,14 @@ struct _RKMissingValueSpec
     # Sample a standard normal draw per missing value and compute the value
     # from its law's location and scale (`RKBRMI(...; completions=:noncentered)`).
     noncentered::Bool
+    # `nothing`, or the names of the free and grouped missing rows, the groups'
+    # ends and residuals of `mi(x)::shares(total, rows)` (cell_total_coordinates.jl).
+    totals::Union{Nothing,NamedTuple}
 end
 _RKMissingValueSpec(source, observed, observed_rows, missing_rows, observed_component,
-        missing_lookup, missing_mask, nmissing, distribution) =
+        missing_lookup, missing_mask, nmissing, distribution, noncentered=false) =
     _RKMissingValueSpec(source, observed, observed_rows, missing_rows, observed_component,
-        missing_lookup, missing_mask, nmissing, distribution, false)
+        missing_lookup, missing_mask, nmissing, distribution, noncentered, nothing)
 
 function _rk_mi_predictor_plan(term::NamedColumn)
     operation = parent(term)
@@ -249,7 +252,10 @@ function _rk_prepare_missing_value!(columns, taken, observation, program, comple
         Expr(:_rk_data_preparation, :brm_covariate_observed_rows, raw), jobs))
     delete!(columns, plan.source)
     delete!(columns, observation.name)
-    if _rk_mi_downstream(program, observation.name, plan.source)
+    # Grouped entries carry what their residuals say about the law whether or
+    # not anything reads the completion.
+    grouped = _brm_mi_grouped(plan.totals)
+    if grouped || _rk_mi_downstream(program, observation.name, plan.source)
         jmis = _rk_ast_fresh_name(string("Jmis_", plan.source), taken)
         component = _rk_ast_fresh_name(string(plan.source, "_observed_component"), taken)
         lookup = _rk_ast_fresh_name(string(plan.source, "_missing_lookup"), taken)
@@ -257,19 +263,50 @@ function _rk_prepare_missing_value!(columns, taken, observation, program, comple
         # Row partitions describe the declared covariate geometry. The
         # observed contribution, missing lookup and mask are graph values.
         columns[jmis] = plan.missing_indices
-        push!(derived, _RKDerivedSpec(jmis,
+        totals = grouped ? merge(_rk_prepare_missing_totals!(columns, taken, derived,
+            observation, plan, raw),
+            (; downstream=_rk_mi_downstream(program, observation.name, plan.source))) : nothing
+        push!(derived, _RKDerivedSpec(jmis, grouped ?
+            Expr(:_rk_data_preparation, :brm_covariate_total_rows, raw, totals.inputs...) :
             Expr(:_rk_data_preparation, :brm_covariate_missing_rows, raw), jmis))
         push!(completions, _RKMissingValueSpec(plan.source, observed,
-            jobs, jmis, component, lookup, mask, length(plan.missing_indices), observation.distribution))
+            jobs, jmis, component, lookup, mask, length(plan.missing_indices),
+            observation.distribution, false, totals))
     end
     _BRMPreparedObservation(observed, observation.lhs,
         _rk_mi_gather(observation.distribution, jobs), plan.observed_values,
         nothing, observation.weight, nothing)
 end
 
-# Emits the completion block and returns the name of the block local that
-# holds its sampled coordinates (`y_mis`, or `z_mis` when non-centered), or
-# `nothing` when nothing is missing.
+# The data of a completion's group totals: the three columns bound under
+# fresh names, and the free and grouped rows, ends and residuals as data
+# preparations from them (`brm_covariate_total_*`), so a replay recomputes
+# them from its own data.
+function _rk_prepare_missing_totals!(columns, taken, derived, observation, plan, raw)
+    spec = _brm_mi_totals_spec(observation.lhs; prefix="RK backend")
+    inputs = map((:group, :cells, :total)) do key
+        name = _rk_ast_fresh_name(string(plan.source, "_shares_", key), taken)
+        columns[name] = getproperty(spec, key).values
+        name
+    end
+    layout = _brm_totals_layout(plan.values, spec.group.values, spec.cells.values,
+        spec.total.values)
+    names = map((free_rows=(:free, :brm_covariate_total_free_rows),
+            grouped_rows=(:grouped, :brm_covariate_total_grouped_rows),
+            ends=(:ends, :brm_covariate_total_ends),
+            residuals=(:residuals, :brm_covariate_total_residuals))) do (field, recipe)
+        name = _rk_ast_fresh_name(string(plan.source, "_shares_", field), taken)
+        columns[name] = getproperty(layout, field)
+        push!(derived, _RKDerivedSpec(name,
+            Expr(:_rk_data_preparation, recipe, raw, inputs...), name))
+        name
+    end
+    merge(names, (; inputs))
+end
+
+# Emits the completion block and returns the names of the block locals that
+# hold its sampled coordinates (`(y_mis,)`, `(z_mis,)` when non-centered,
+# `(y_free, y_shares)` with group totals), or `nothing` when nothing is missing.
 function _rk_emit_missing_value!(definitions, statements, bindings, taken, completion)
     geometry = _rk_ast_statistical_call!(definitions, taken,
         :brm_covariate_geometry, completion.observed, completion.observed_rows,
@@ -280,6 +317,8 @@ function _rk_emit_missing_value!(definitions, statements, bindings, taken, compl
         push!(statements, Expr(:(=), completion.source, completion.observed_component))
         return nothing
     end
+    completion.totals === nothing ||
+        return _rk_emit_missing_totals!(definitions, statements, bindings, taken, completion)
     distribution = _rk_mi_gather(completion.distribution, completion.missing_rows)
     # One block, as StanBlocks' `_sb_mi_response`: the missing entries with
     # their law, completed onto the covariate's original row axis. The
@@ -320,7 +359,65 @@ function _rk_emit_missing_value!(definitions, statements, bindings, taken, compl
     push!(statements, Expr(:call, :~, completion.source,
         _rk_ast_block_call!(definitions, taken, "brm_missing_covariate", block,
             completed)))
-    sampled
+    (sampled,)
+end
+
+# The completion of `mi(x)::shares(total, rows)`, as StanBlocks'
+# `_sb_mi_shares_response`: the free missing entries under the law as written,
+# and the grouped ones as one joint latent whose coordinates are their shares
+# (`_BRMGroupedShares`), free first in `missing_rows` order. Returns the block
+# locals that hold sampled coordinates. When nothing reads the completion, the
+# free entries integrate out and are not emitted (a generated draw, as on
+# SBBRMI); the grouped ones stay, since their density says what the residuals
+# say about the law.
+function _rk_emit_missing_totals!(definitions, statements, bindings, taken, completion)
+    t = completion.totals
+    t.downstream || return _rk_emit_missing_shares!(definitions, statements, bindings,
+        taken, completion)
+    free_law = _rk_ast_value_distribution(
+        _rk_mi_gather(completion.distribution, t.free_rows), bindings, taken)
+    grouped = _rk_mi_gather(completion.distribution, t.grouped_rows)
+    family = _rk_value_callee!(bindings,
+        _BRMGroupedShares{completion.distribution.callable}, taken)
+    grouped_law = Expr(:call, family, t.ends, t.residuals,
+        map(arg -> _rk_value_expr!(bindings, arg, taken), grouped.args)...)
+    block = _rk_block_body(free_law, grouped_law)
+    observed = _rk_block_argument!(block, :observed, completion.observed_component)
+    free_rows = _rk_block_argument!(block, :free_rows, t.free_rows)
+    grouped_rows = _rk_block_argument!(block, :grouped_rows, t.grouped_rows)
+    lookup = _rk_block_argument!(block, :lookup, completion.missing_lookup)
+    mask = _rk_block_argument!(block, :mask, completion.missing_mask)
+    free = _rk_block_local!(block, :y_free)
+    push!(block.statements, Expr(:call, :.~,
+        Expr(:ref, free, Expr(:call, :axes, free_rows, 1)), free_law))
+    shares = _rk_block_local!(block, :y_shares)
+    push!(block.statements, Expr(:call, :~,
+        Expr(:ref, shares, Expr(:call, :axes, grouped_rows, 1)), grouped_law))
+    missing = _rk_block_local!(block, :y_mis)
+    push!(block.statements, Expr(:(=), missing, Expr(:call, :vcat, free, shares)))
+    completed = _rk_block_local!(block, :completed)
+    push!(block.statements, Expr(:(=), completed, _rk_ast_statistical_call!(definitions,
+        taken, :brm_completed_covariate, observed, missing, lookup, mask; kernel=true)))
+    push!(statements, Expr(:call, :~, completion.source,
+        _rk_ast_block_call!(definitions, taken, "brm_missing_covariate", block, completed)))
+    (free, shares)
+end
+
+function _rk_emit_missing_shares!(definitions, statements, bindings, taken, completion)
+    t = completion.totals
+    grouped = _rk_mi_gather(completion.distribution, t.grouped_rows)
+    family = _rk_value_callee!(bindings,
+        _BRMGroupedShares{completion.distribution.callable}, taken)
+    grouped_law = Expr(:call, family, t.ends, t.residuals,
+        map(arg -> _rk_value_expr!(bindings, arg, taken), grouped.args)...)
+    block = _rk_block_body(grouped_law)
+    grouped_rows = _rk_block_argument!(block, :grouped_rows, t.grouped_rows)
+    shares = _rk_block_local!(block, :y_shares)
+    push!(block.statements, Expr(:call, :~,
+        Expr(:ref, shares, Expr(:call, :axes, grouped_rows, 1)), grouped_law))
+    push!(statements, Expr(:call, :~, completion.source,
+        _rk_ast_block_call!(definitions, taken, "brm_missing_shares", block, shares)))
+    (shares,)
 end
 
 function _rk_source_loop_indices!(names, statement)

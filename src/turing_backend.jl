@@ -602,6 +602,9 @@ function _brm_turing_single_plan(brmi::BRMI, observation;
                                  additional_model_operations=(), training=nothing)
     missing_response = _brm_missing_response_plan(
         observation.lhs; prefix="Turing backend")
+    isnothing(missing_response) || isnothing(missing_response.totals) || error(
+        "Turing backend: `mi($(missing_response.source))::shares(total, rows)` is built " *
+        "on SBBRMI and RKBRMI only")
     (observation.lhs isa Union{NamedColumn,JointResponseColumn} || !isnothing(missing_response)) || error(
         "Turing backend: response decorators other than `mi(response)` and " *
         "response links are not yet supported")
