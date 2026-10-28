@@ -219,8 +219,57 @@ end
     @test sprint(show, symbols) == symbol_source
     @test sprint(show, structure_of(symbols)) == symbol_source
 
+    # Index access and an aliased family print as written, not as
+    # `getindex(field, subj)` and Julia's name for `LocationScale`,
+    # `AffineDistribution`, which BRM does not export (snag
+    # brm-print-author-33b0b41d).
+    indexed_source = "m ~ 1 + x\n" *
+        "field ~ 0 + y2\n" *
+        "mu = m + field[subj] * x\n" *
+        "sigma ~ Exponential(1 / 2)\n" *
+        "nu ~ Gamma(2.0, 10.0)\n" *
+        "y ~ LocationScale(mu, sigma, TDist(nu))"
+    indexed_builder = @brm begin
+        m ~ 1 + x
+        field ~ 0 + y2
+        mu = m + field[subj] * x
+        sigma ~ Exponential(1 / 2)
+        nu ~ Gamma(2.0, 10.0)
+        y ~ LocationScale(mu, sigma, TDist(nu))
+    end
+    indexed = indexed_builder(FAMILY_DATA)
+    @test sprint(show, indexed_builder) == indexed_source
+    @test sprint(show, indexed) == indexed_source
+    @test sprint(show, structure_of(indexed)) == indexed_source
+
+    # Prefix operators, negative literals, ranges, field access, a difference
+    # and `Categorical` (Julia's `DiscreteNonParametric`) print as written on
+    # the built model and on the builder, parenthesized where Julia needs it; a
+    # statement side keeps its parentheses only around a random-effect bar.
+    written_source = "k ~ Exponential(1)\n" *
+        "p ~ Dirichlet(3, 1)\n" *
+        "mu = -k * x + (-k) ^ 2 + x ^ -k + -(k + x) + -(-k) + (-1) ^ c\n" *
+        "v = x[1:2:9] + (-mu)[1:3] + state.a\n" *
+        "r = y - mu\n" *
+        "eta ~ (1 | subj)\n" *
+        "z ~ Categorical(p)"
+    written_builder = @brm begin
+        k ~ Exponential(1)
+        p ~ Dirichlet(3, 1)
+        mu = -k * x + (-k)^2 + x^-k + -(k + x) + -(-k) + (-1)^c
+        v = x[1:2:9] + (-mu)[1:3] + state.a
+        r = y - mu
+        eta ~ (1 | subj)
+        z ~ Categorical(p)
+    end
+    written = written_builder(FAMILY_DATA)
+    @test sprint(show, written_builder) == written_source
+    @test sprint(show, written) == written_source
+    @test sprint(show, BRM.brm(Meta.parse("begin\n" * written_source * "\nend");
+                               mod=@__MODULE__)) == written_source
+
     # The printed source is the model: re-parsing it gives the same program.
-    for m in (model, terms, assigned, symbols)
+    for m in (model, terms, assigned, symbols, indexed)
         reparsed = Core.eval(@__MODULE__,
             BRM._brm(Meta.parse("begin\n" * sprint(show, m) * "\nend"); df=FAMILY_DATA))
         @test sb_code(reparsed) == sb_code(m)
