@@ -8,7 +8,18 @@
 # any shared `~/github/nsiccha/<pkg>` checkout. A full-SHA revision is
 # branch-independent, so it does not matter that several of these live on a
 # `dev`/`devibe` branch rather than `main`; the commit only has to be pushed to
-# GitHub, which every pin below is.
+# GitHub, which every pin below is except Enzyme.
+#
+# Enzyme is the ecosystem's `dogfood` line (user pick on decision
+# `BayesianRegressionModels/decisions/2026-10-28T15-34-11-008-0n0kgfh`): reviewed
+# repairs no registered release carries, which BRM's RK cell gradients need. Its
+# commits live only in the KB hosts' Enzyme mirror (`MIRRORS`), and it runs
+# against its own libEnzyme build (`deps/dogfood_libenzyme.toml`), which exists
+# only on the hosts the Enzyme lane builds it for (gordito, Julia 1.10 and
+# 1.12). `apply_dogfood_libenzyme()` points `Enzyme_jll` at this host's build
+# through the KB resolver's own step, and refuses where there is none: the
+# stock library gives wrong Reverse gradients the build fixes (skill
+# `enzyme-use`).
 #
 # ReactiveKernels contributes four developed paths from ONE pinned checkout
 # (the monorepo root plus the nested `ReactiveKernelsDistributionKernels`,
@@ -152,12 +163,46 @@ const PINS = [
     # d35aee6cd (ReactiveKernels 0.1.2, ReactiveKernelsPPL 0.1.1: a `@plate`
     # output whose cells hold vectors is one vector per cell, so model-scope
     # `sum(cnt)`, `sum(cnt[k])` and `cnt[g]` read it; snag
-    # summing-a-plate-eba2648d).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "e32d442c629af3889865a3611bef131cb91d2a0a"),  # main
+    # summing-a-plate-eba2648d). b31d672fa contains e32d442c6 and is
+    # ReactiveKernels 0.1.6: a plate cell computes a value it reads at several
+    # rows (an `hcat` design, a column read, a level block) at those rows only
+    # (snag compact-cell-sam-d85d96ae), which BRM's nested-NLME totals cells
+    # need.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "b31d672faa820fe8bda46cf86d7cb2eb43cc8b20"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.5); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "d16c4efb72b963f45de9d6f632c38d46706c23e1"),  # main
+    # d37cb0b4 (Enzyme 0.13.216 dogfood, libEnzyme build 4be29b19): contains
+    # 93c452bd, Base concatenation of views, reshapes and transposes of Arrays
+    # beside dense or Const arrays in Reverse and Forward (snag
+    # native-reverse-t-6d51cae6), which a totals cell's `hcat` design read at
+    # its rows needs; EnzymeCore 0.8.27 comes from its `lib/EnzymeCore`.
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "d37cb0b45df7bad731bdb218d50b8f49c35bc99d"),  # dogfood (KB mirror only)
 ]
+
+# Pins whose commits are not on GitHub: the KB host mirror they come from.
+const MIRRORS = Dict(
+    "Enzyme" => joinpath(homedir(), ".local", "state", "kb-agents", "git-mirrors", "Enzyme.jl.git"),
+)
+
+# The KB resolver's dogfood-libEnzyme step (`_dogfood_libenzyme_fragment` in
+# Claude's `lib-resolve.sh`, the one implementation): it reads the developed
+# Enzyme's `deps/dogfood_libenzyme.toml`, checks this host's build against its
+# SHA256SUMS, writes `Enzyme_jll`'s library paths into the ignored
+# `test/LocalPreferences.toml`, and errors where the build is missing.
+function apply_dogfood_libenzyme()
+    lib = get(ENV, "BRM_TEST_KB_RESOLVER",
+        joinpath(homedir(), "github", "nsiccha", "Claude", "lib-resolve.sh"))
+    isfile(lib) || error("""
+        The pinned Enzyme is the dogfood line, which runs against its own
+        libEnzyme build; only the KB resolver ($lib, missing here) applies it.
+        Set BRM_TEST_KB_RESOLVER to Claude's lib-resolve.sh, or run on a KB
+        fleet host that has the build (skill enzyme-use).""")
+    step = read(Cmd(["bash", "-c",
+        "source \"\$1\" >/dev/null && _dogfood_libenzyme_fragment resolve", "_", lib]), String)
+    include_string(Main, step, "dogfood_libenzyme")
+    return nothing
+end
 
 function main()
     paths = Dict("BayesianRegressionModels" => REPO)
@@ -166,9 +211,13 @@ function main()
             name,
             rev;
             cache_root=joinpath(TESTENV, ".bootstrap"),
+            mirror=get(MIRRORS, name, ""),
             origin=url,
         )
     end
+    # Enzyme's EnzymeCore is its nested `lib/EnzymeCore` (Enzyme's
+    # `[sources]`, which Pkg 1.10 ignores).
+    paths["EnzymeCore"] = joinpath(paths["Enzyme"], "lib", "EnzymeCore")
     # Nested monorepo packages develop from the pinned ReactiveKernels
     # checkout (same revision, no separate pins).
     rk_root = paths["ReactiveKernels"]
@@ -189,6 +238,9 @@ function main()
     # extensions before the normal parallel pass. Julia 1.10.12 includes the
     # loadable_exts fix and uses ordinary parallel precompilation directly.
     Pkg.instantiate(; allow_autoprecomp=false)
+    # Before the first precompile, so Enzyme_jll builds against the declared
+    # libEnzyme.
+    apply_dogfood_libenzyme()
     if v"1.10" <= VERSION < v"1.10.12"
         withenv("JULIA_NUM_PRECOMPILE_TASKS" => "1") do
             Pkg.precompile(["Pathfinder", "Turing"])
