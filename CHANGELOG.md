@@ -12,6 +12,20 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.30
+
+- A data column that only a `name = constant(expr)` reads may hold `missing`.
+  `expr` takes the column whole (`c = constant(mean(skipmissing(y_data)))`)
+  and the model reads only the constant. `SBBRMI` and `RKBRMI` built such a
+  model, but `brm_descriptor`, and with it `brm_start` on `SBBRMI`,
+  `brm_description`, `prune_responses` and `modeled_covariates`, collected the
+  column as model data and refused it ("data column `y_data` contains
+  `missing` values"). They now collect the columns the backend does. A column
+  the model itself reads still refuses its missing cells. Likewise, a
+  `rows=`-masked HSGP axis that a constant also reads keeps its mask on those
+  paths, and an `mm(...)` grouping that a constant also reads stays
+  Julia-side.
+
 ## 0.2.29
 
 - `brm_svi_fit` fits units whose own rows pin them far more tightly than the

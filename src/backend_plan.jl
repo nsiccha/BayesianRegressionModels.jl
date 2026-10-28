@@ -446,6 +446,7 @@ function _brm_collect_non_mm_sources!(out, @nospecialize(x::NamedColumn))
 end
 _brm_collect_non_mm_sources!(out, @nospecialize(x::ExprColumn)) =
     _brm_foreach_child((@nospecialize(a)) -> _brm_collect_non_mm_sources!(out, a), x)
+_brm_collect_non_mm_sources!(_, @nospecialize(_x::ExprColumn{typeof(constant)})) = nothing
 _brm_collect_non_mm_sources!(_, @nospecialize(_x::MultiMembershipTerm)) = nothing
 function _brm_collect_non_mm_sources!(out, @nospecialize(x::JointResponseColumn))
     foreach(a -> _brm_collect_non_mm_sources!(out, a), joint_response_columns(x))
@@ -475,6 +476,7 @@ function _brm_classify_data_refs!(refs, @nospecialize(x::ExprColumn))
     end
     _brm_foreach_item((@nospecialize(a)) -> _brm_classify_data_refs!(refs, a), getkwargs(x))
 end
+_brm_classify_data_refs!(_refs, @nospecialize(_x::ExprColumn{typeof(constant)})) = nothing
 function _brm_classify_data_refs!(refs, @nospecialize(x::MultiMembershipTerm))
     foreach(a -> _brm_classify_data_refs!(refs, a), getargs(x))
     weights = getfield(x, :weights)
@@ -530,6 +532,15 @@ end
 _brm_collect_data!(data, @nospecialize(x::ExprColumn); skip=Set{Symbol}(),
                    masked=_BRM_NO_MASKED_AXES) =
     _brm_foreach_child((@nospecialize(a)) -> _brm_collect_data!(data, a; skip, masked), x)
+# The model reads a constant's value, never its inputs: `expr` takes them whole,
+# once, when the constant resolves (`_brm_resolve_constants`), so a column only
+# a constant reads may hold `missing`. Backends resolve constants before
+# building this context; the preparation passes over the unresolved model (the
+# descriptor's and description's semantics, response pruning, covariate
+# resampling) skip them here and in the two source walkers above, so they
+# collect the columns the backend does.
+_brm_collect_data!(_data, @nospecialize(_x::ExprColumn{typeof(constant)});
+                   skip=Set{Symbol}(), masked=_BRM_NO_MASKED_AXES) = nothing
 function _brm_collect_data!(data, @nospecialize(x::MultiMembershipTerm); skip=Set{Symbol}(),
                             masked=_BRM_NO_MASKED_AXES)
     foreach(a -> _brm_collect_data!(data, a; skip, masked), getargs(x))
