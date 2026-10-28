@@ -351,6 +351,47 @@ end
     @test_throws ErrorException _extract_layer1(nomark)
 end
 
+@testset "worker re-runs itself under the compute-token helper" begin
+    dir = mktempdir()
+    spec_path = joinpath(dir, "in.toml")
+    open(spec_path, "w") do io
+        println(io, "id = \"gate\"")
+        println(io, "brm_inputs = \"p.jl\"")
+    end
+    argv = ["--spec", spec_path, "--out", joinpath(dir, "out")]
+    # --no-token: the caller holds the token, so this process runs the case.
+    @test _token_gate(vcat(argv, ["--no-token"]); helper=nothing) === nothing
+    # refused: without the helper there is no token, and a heavy run never
+    # goes ungated unless its caller holds one (dev §11.3)
+    @test_throws ErrorException _token_gate(argv; helper=nothing)
+    # A stub helper records its argv and exits with a chosen status.
+    recorded = joinpath(dir, "helper.argv")
+    stub = joinpath(dir, "stub-helper")
+    write(stub, "#!/bin/sh\nprintf '%s\\n' \"\$@\" > '$recorded'\nexit 7\n")
+    chmod(stub, 0o755)
+    withenv("KB_COMPUTE_WHY" => nothing) do
+        @test _token_gate(argv; helper=stub) == 7
+    end
+    got = readlines(recorded)
+    @test got[1:3] == ["--why", "BRM fusion-append worker, case gate: " *
+        "RK sections and numbers with the SB reference", "--"]
+    @test got[4] == first(Base.julia_cmd().exec)
+    @test any(startswith("--threads=$(Threads.nthreads(:default))"), got)
+    @test "--project=$(Base.active_project())" in got
+    @test got[end-length(argv)-1:end] ==
+        vcat([joinpath(@__DIR__, "rk_append_worker.jl")], argv, ["--no-token"])
+    # The caller's KB_COMPUTE_WHY is the reason: no --why of the worker's own.
+    cmd = _token_cmd(argv, _parse_argv(argv), "gate"; helper=stub,
+        env=Dict("KB_COMPUTE_WHY" => "caller reason"))
+    @test cmd.exec[1:2] == [stub, "--"]
+    # A run a signal ended reads as 128 + signal.
+    write(stub, "#!/bin/sh\nkill -TERM \$\$\n")
+    @test _token_gate(argv; helper=stub) == 128 + 15
+    why(extra) = _token_why(_parse_argv(vcat(argv, extra)), "c")
+    @test why(["--no-sb"]) == "BRM fusion-append worker, case c: RK sections and numbers"
+    @test occursin("sb_map authoring", why(["--print-coords"]))
+end
+
 @testset "worker numbers.toml round-trips through TOML" begin
     rows = [(; posterior=-15.5, grad="PASS", grad_maxdiff=1.2e-16,
         sb_value=-15.5000000001, sb_grad_maxdiff=2.3e-14,

@@ -13,6 +13,17 @@ row arguments follow their response's subject partition. Original data ports
 remain available to other consumers. Prepare history-dependent row values
 before invoking this entry. The provider receives no model values or AD state.
 
+The appended definitions are evaluated in the build's own module, not in the
+module that defines this method, so a quoted body sees only Base and Core, the
+modules `ReactiveKernels`, `ReactiveKernelsPPL` and `BayesianRegressionModels`,
+RKPPL's exports, `@kernel`, `plate`, BRM's `brm_*` basis helpers, and the
+program's definitions and bindings. Any other function it calls (`logsumexp`,
+`loggamma`, a consumer helper, an RK family object) is bound as a leaf named
+from `entry` and called by that name
+(`push!(bindings, Symbol(entry, :_logsumexp) => logsumexp)`), or the law is
+defined with `ReactiveKernels.@kernel` in the consumer's module, where its
+names resolve, and bound as a child graph the entry calls.
+
 BRM calls the provider once per observation statement, each time with a fresh
 `entry`, and always through the second form: `N` is the number of constructor
 arguments that observation writes (`y ~ family(args...)` has `N =

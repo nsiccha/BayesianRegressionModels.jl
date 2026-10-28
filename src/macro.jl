@@ -788,6 +788,8 @@ function _brm_builder_code(x::Expr; df=nothing)
     captures = Set{Symbol}()
     groupings = _brm_plate_groupings(x)
     grouped_reads = Set{Symbol}()
+    # `mi(x)::shares(total, rows) ~ Law(…)` (cell_total_coordinates.jl).
+    x = _brm_desugar_mi_totals(x, groupings, grouped_reads)
     inventory = _brm_inventory()
     info = (;alllocals, jointkeys, captures, groupings, grouped_reads, inventory)
     x = parse!(x; info)
@@ -805,8 +807,15 @@ function _brm_builder_code(x::Expr; df=nothing)
     # dropped (and a non-column typo still errors loudly at the backend/StanBlocks
     # trace, exactly as before this capture path existed).
     real_captures = sort!(collect(setdiff(captures, keys(alllocals))))
+    # Names a statement reads before the statement that declares them: the body
+    # binds such a read like any other nonlocal, and finalization replaces it by
+    # the declaration (`_brm_resolve_forward_reads`).
+    forward = Tuple(sort!([key for (key, value) in pairs(alllocals)
+        if value == :nonlocal && (key in inventory.assigned ||
+            key in inventory.responses || key in inventory.latent ||
+            key in inventory.data)]))
     finalize = :($_brm_finalize_operations(
-        (;$(keys(alllocals)...)), __caps__))
+        (;$(keys(alllocals)...)), __caps__, $forward))
     # ONE shared builder body, parameterised on the `__df__` symbol. Nonlocals
     # bind via the @getproperty (hasproperty→MissingColumn) fallback so a name
     # that isn't a df column (e.g. a multi-equation predictor/param like
@@ -950,9 +959,13 @@ elseif isxcall(x, :~)
     rhs = rewrite_ranef_ids(rhs)
     read_before = hasproperty(info, :inventory) ? copy(info.inventory.reads) : nothing
     parselocals!(rhs; info, val=:nonlocal)
-    parselocals!(lhs; info, val=:maybelocal)
+    # A completion with group totals reads its keywords' columns as data.
+    totals = _brm_mi_totals_lhs(lhs)
+    response = totals === nothing ? lhs : Expr(:call, :mi, totals.inner)
+    totals === nothing || foreach(r -> parselocals!(r; info, val=:nonlocal), totals.reads)
+    parselocals!(response; info, val=:maybelocal)
     hasproperty(info, :inventory) &&
-        _brm_inventory_statement!(info.inventory, lhs, rhs, legacy_kernel_doblock, read_before)
+        _brm_inventory_statement!(info.inventory, response, rhs, legacy_kernel_doblock, read_before)
     parsed = :(@n $lhs = @x $(Expr(:call, :~, lhs, rhs)))
     legacy_kernel_doblock ?
         Expr(:block, :($_brm_depwarn_kernel_doblock()), parsed) : parsed
@@ -1341,9 +1354,13 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
     positionals = Any[]
     params = Symbol[]
     keys = Any[]
-    param_sources = Dict{Symbol,Any}()
+    # The names the cell binds itself, which no input name may take.
+    cell_locals = Set{Symbol}(stmt.args[1] for stmt in _brm_plate_flat_statements(stmts)
+        if Meta.isexpr(stmt, :(=), 2) && stmt.args[1] isa Symbol)
 
-    function add_input(source)
+    # `alias` names a second read of the same vector, `x[other[i]]` beside
+    # `x[rows[i]]`: each is its own gather, bound to its own cell name.
+    function add_input(source, alias=nothing)
         key = _brm_plate_input_key(source)
         found = findfirst(isequal(key), keys)
         found === nothing || return params[found]
@@ -1351,16 +1368,15 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
         param in output_set && error(
             "@brm: kernel `@plate` output `$param[$i]` also names a sliced input; " *
             "use a distinct output name")
-        if haskey(param_sources, param)
-            error(
-                "@brm: kernel `@plate` inputs `$(repr(param_sources[param]))` and " *
-                "`$(repr(source))` would both bind cell name `$param`; rename one " *
-                "source before the plate")
+        if param in params
+            param = something(alias, Symbol(param, :_, length(params) + 1))
+            while param in params || param in cell_locals || param in output_set
+                param = Symbol(param, :_)
+            end
         end
         push!(keys, key)
         push!(positionals, source)
         push!(params, param)
-        param_sources[param] = source
         param
     end
 
@@ -1426,14 +1442,15 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
                 "@brm: `$(sprint(Base.show_unquoted, ex))` reads the plate output " *
                 "`$name` at indices; a plate output has one value per cell, `$name[$i]`")
             read_grouping!(rows)
-            return add_input(_brm_plate_grouping_input(name, groupings[rows]))
+            return add_input(_brm_plate_grouping_input(name, groupings[rows]), Symbol(name, :_, rows))
         elseif indexed !== nothing
             idx, rows, target, zero = indexed
             read_grouping!(rows)
             read_grouping!(target)
             shown = sprint(Base.show_unquoted, ex)
             zero || push!(checks, :($_brm_check_indexin_zero($shown, $idx)))
-            return add_input(_brm_plate_indexin_input(idx, rows, target, groupings, shown))
+            return add_input(_brm_plate_indexin_input(idx, rows, target, groupings, shown),
+                Symbol(idx, :_, rows, :_, target))
         end
         if _brm_plate_indexed(ex, i)
             source = ex.args[1]
@@ -1457,6 +1474,25 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
     rewritten = Any[]
     bare_bindings = Dict{Symbol,Any}() # cell local => authored right-hand side
 
+    # A response observed through a binding has every entry in a cell
+    # (`0q8hcwq`), so a second binding observing it would observe every entry
+    # again. Reads through several bindings are independent gathers.
+    observed_through = Dict{Symbol,Symbol}() # response => the binding observing it
+    function observe!(lhs)
+        while Meta.isexpr(lhs, :ref, 2) && _brm_plate_binding_read(lhs, i, groupings) === nothing
+            lhs = lhs.args[1]
+        end
+        read = _brm_plate_binding_read(lhs, i, groupings)
+        read === nothing && return
+        name, rows = read
+        seen = get!(observed_through, name, rows)
+        seen === rows || error(
+            "@brm: kernel `@plate` cell observes `$name` through both `$seen` and " *
+            "`$rows`; a binding that observes a response places every entry in a " *
+            "cell, so the second would observe every entry of `$name` again. " *
+            "Observe `$name` through one binding.")
+    end
+
     # A `@scan` block keeps its shape: seeds, then one `for` loop of steps. Its
     # slice reads are rewritten like every other cell read; its `=`/`~` targets
     # are the scan's carried arrays and step locals, or (`y[i][t] ~ …`) entries
@@ -1477,6 +1513,7 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
             return Expr(:(=), rewrite(stmt.args[1]), rewrite(stmt.args[2]))
         elseif isxcall(stmt, :~)
             _brm_plate_check_observed(stmt.args[2], i, bare_bindings, output_set)
+            observe!(stmt.args[2])
             return Expr(:call, :~, rewrite(stmt.args[2]), rewrite(stmt.args[3]))
         end
         error(
@@ -1500,6 +1537,7 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
             end
         elseif isxcall(stmt, :~)
             _brm_plate_check_observed(stmt.args[2], i, bare_bindings, output_set)
+            observe!(stmt.args[2])
             push!(rewritten, Expr(:call, :~, rewrite(stmt.args[2]), rewrite(stmt.args[3])))
         elseif _is_brm_scan(stmt)
             push!(rewritten, Expr(:macrocall, stmt.args[1:end-1]..., rewrite_scan(stmt.args[end])))
@@ -2371,6 +2409,10 @@ xassignable(x::Expr) = if Meta.isexpr(x, (:tuple, :vect))
 elseif x.head == :call
     if length(x.args) == 2
         xassignable(x.args[2])
+    elseif length(x.args) == 3 && Meta.isexpr(x.args[2], :parameters)
+        # A wrapper with keywords binds its one positional column
+        # (`mi(x; _brm_shares_… = …)`, cell_total_coordinates.jl).
+        xassignable(x.args[3])
     else
         @warn "Don't know how to handle xassignable($x)!"
         Symbol(x)
@@ -3056,25 +3098,103 @@ combine: an address is validated against the model it configures at backend
 lowering (`SBBRMI(...)`), exactly as for an inline prior — never here.
 
 Structural fragments compose the same way, in any order. A fragment that only
-READS a name another fragment defines (`y ~ Normal(mu, sigma)` without a `mu`
-formula) carries a bare placeholder for it, and a placeholder never overrides
-a definition: `merge(lp_fragment, obs_fragment)` and
-`merge(obs_fragment, lp_fragment)` both keep `mu`'s formula.
+READS a name another fragment declares (`y ~ Normal(mu, sigma)` without a `mu`
+formula, or `m ~ 1 + y` beside `y`'s likelihood) carries a read binding for it
+(a bare placeholder, or the data column), and a read binding never overrides a
+declaration: `merge(lp_fragment, obs_fragment)` and
+`merge(obs_fragment, lp_fragment)` both keep `mu`'s formula and `y`'s
+likelihood. The fragment's reads then refer to the declaration, as they would
+in one block.
 """
-Base.merge(a::BRMI, b::BRMI) = BRMI(Base.merge(a.operations,
-    _brm_drop_shadowing_placeholders(b.operations, a.operations)))
+Base.merge(a::BRMI, b::BRMI) = _brm_resolve_forward_reads(
+    BRMI(Base.merge(a.operations,
+        _brm_drop_shadowing_reads(b.operations, a.operations))),
+    _brm_read_binding_names(a, b))
 Base.merge(a::BRMI, b::BRMI, rest::BRMI...) =
     foldl(Base.merge, rest; init=Base.merge(a, b))
 
-# A builder binds every name it reads but does not define to a `MissingColumn`
-# placeholder; such an entry is a reference, not a declaration.
-_brm_is_placeholder(op) = op isa NamedColumn && parent(op) isa MissingColumn
+# A builder binds every name it reads but does not declare: a data column to its
+# values, any other name to a `MissingColumn` placeholder. Such an entry is a
+# reference, not a declaration.
+_brm_is_read_binding(op) =
+    op isa NamedColumn && parent(op) isa Union{MissingColumn,DataColumn}
+_brm_read_binding_names(models::BRMI...) = Tuple(unique!(Symbol[
+    key for model in models for (key, op) in pairs(model.operations)
+    if _brm_is_read_binding(op)]))
 
-# `incoming`'s operations minus the placeholders that would shadow a name
-# `existing` already carries, in `incoming`'s order.
-_brm_drop_shadowing_placeholders(incoming::NamedTuple, existing::NamedTuple) =
+# A read of a name the model declares refers to that declaration wherever the
+# two statements stand. The builder body runs in source order, so a statement
+# that reads a name above its declaration (or a fragment that reads what
+# another fragment declares) holds a placeholder for it; the finished model
+# replaces each such placeholder by the declaration, through the shared rebind
+# map. `mu ~ 1 + c` above `c = log(1 + x)` is then the model with the two lines
+# swapped, in every position a read can stand (snag formula-covariat-5673c470).
+# A declaration slot (the left-hand side of `~` or `=`) is not a read, and a
+# declaration that reads its own name keeps that read a placeholder.
+#
+# A read of a data column stays data, as a statement above `x = log(x)` reads
+# the raw `x`, with one exception: the column a later `mi(y) ~ …` completes.
+# Its raw values are the response with missing entries, which no statement can
+# use, so a read above the completion reads the completion as one below does.
+struct _BRMForwardReads
+    declarations::Dict{Symbol,Any}
+    resolved::Dict{Symbol,Any}
+    active::Set{Symbol}
+end
+
+Base.@nospecializeinfer function _brm_resolve_forward_reads(
+        @nospecialize(brmi::BRMI), names::Tuple{Vararg{Symbol}})
+    isempty(names) && return brmi
+    entries = _brm_operation_entries(brmi)
+    declarations = Dict{Symbol,Any}(key => op for (key, op) in entries
+        if key in names && op isa NamedColumn && !_brm_is_read_binding(op))
+    isempty(declarations) && return brmi
+    reads = _BRMForwardReads(declarations, Dict{Symbol,Any}(), Set{Symbol}())
+    resolved = map(entries) do (key, op)
+        haskey(declarations, key) ? _brm_forward_declaration(reads, key) :
+            _brm_rebind_value(op, reads)
+    end
+    BRMI(NamedTuple{Tuple(first.(entries))}(Tuple(resolved)))
+end
+
+function _brm_forward_declaration(reads::_BRMForwardReads, key::Symbol)
+    haskey(reads.resolved, key) && return reads.resolved[key]
+    key in reads.active && return nothing
+    push!(reads.active, key)
+    declaration = reads.declarations[key]
+    value = NamedColumn(key, _brm_rebind_value(parent(declaration), reads))
+    delete!(reads.active, key)
+    reads.resolved[key] = value
+end
+
+function _brm_rebind_value(x::NamedColumn, reads::_BRMForwardReads)
+    payload = parent(x)
+    declared = get(reads.declarations, name(x), nothing)
+    if !isnothing(declared) && (payload isa MissingColumn ||
+            payload isa DataColumn && _brm_is_completion(declared))
+        declaration = _brm_forward_declaration(reads, name(x))
+        return isnothing(declaration) ? x : declaration
+    end
+    payload isa Union{MissingColumn,DataColumn} && return x
+    NamedColumn(name(x), _brm_rebind_value(payload, reads))
+end
+_brm_is_completion(op) = op isa NamedColumn && parent(op) isa ExprColumn{typeof(~)} &&
+    first(getargs(parent(op))) isa ExprColumn{typeof(mi)}
+function _brm_rebind_value(x::ExprColumn{typeof(~)}, reads::_BRMForwardReads)
+    lhs, rest... = getargs(x)
+    ExprColumn(~, lhs, map(value -> _brm_rebind_value(value, reads), rest)...;
+               _brm_rebind_value(getkwargs(x), reads)...)
+end
+# A constant reads data only, never a model value.
+_brm_rebind_value(x::ExprColumn{typeof(constant)}, ::_BRMForwardReads) = x
+
+# `incoming`'s operations minus the read bindings that would shadow a name
+# `existing` already carries, in `incoming`'s order. A data binding counts too:
+# `merge(likelihood_fragment, reader_fragment)` used to replace `y`'s likelihood
+# by the reader's binding of the column and drop it from the model.
+_brm_drop_shadowing_reads(incoming::NamedTuple, existing::NamedTuple) =
     (; (key => op for (key, op) in pairs(incoming)
-        if !(_brm_is_placeholder(op) && haskey(existing, key)))...)
+        if !(_brm_is_read_binding(op) && haskey(existing, key)))...)
 
 # Nested predictor formulas are normalised at builder execution time, after
 # data columns have values (categorical K is therefore known) but before a BRMI
@@ -3196,9 +3316,10 @@ end
 # expanding nested formulas read the operations as syntax, so only constructing
 # the model's own NamedTuple and BRMI specializes on it.
 Base.@nospecializeinfer function _brm_finalize_operations(
-        @nospecialize(operations::NamedTuple), @nospecialize(captures::NamedTuple))
+        @nospecialize(operations::NamedTuple), @nospecialize(captures::NamedTuple),
+        forward::Tuple{Vararg{Symbol}}=())
     isempty(captures) || (operations = Base.merge(operations, captures))
-    _expand_nested_predictor_formulas(operations)
+    _brm_resolve_forward_reads(_expand_nested_predictor_formulas(operations), forward)
 end
 
 Base.@nospecializeinfer function _expand_nested_predictor_formulas(

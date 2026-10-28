@@ -127,7 +127,8 @@ function brm_nlme_start(m::BRMNLMEModel, map::BRMNLMEJointMap, stan_u::AbstractV
         a.subject_coordinates == b.subject_coordinates &&
         a.block_margins == b.block_margins && a.family_sizes == b.family_sizes &&
         a.subject_families == b.subject_families &&
-        a.nested_groups == b.nested_groups || _brm_nlme_error(
+        a.nested_groups == b.nested_groups && a.shared_groups == b.shared_groups ||
+        _brm_nlme_error(
         "brm_nlme_start: the joint map's NLME partition differs from the model's")
     length(stan_u) == length(map.transport.stan_names) || throw(DimensionMismatch(
         "brm_nlme_start: $(length(stan_u)) Stan coordinates for " *
@@ -248,8 +249,10 @@ end
 # `m`'s unit point with its prior-median coordinates set, and the positions of
 # those coordinates. Every other coordinate keeps the unit point's exact value,
 # the fixed values of a fixed-shared model included.
-function _brm_nlme_prior_median_point(m::BRMNLMEModel)
-    view, backend = m.view, m.backend
+_brm_nlme_prior_median_point(m::BRMNLMEModel) =
+    _brm_nlme_prior_median_point(m.backend, m.view, m.unit)
+function _brm_nlme_prior_median_point(backend::RKBRMI, view::BRMNLMEView,
+        unit::AbstractVector)
     records = _brm_nlme_records(backend.plan)
     scalars = Dict(r.declaration => r for r in records if r.kind === :scalar)
     medians = Dict{Symbol,Union{Nothing,Float64}}()
@@ -265,7 +268,7 @@ function _brm_nlme_prior_median_point(m::BRMNLMEModel)
         delete!(pending, name)
         medians[name] = x
     end
-    values = _rk_constrained_values(backend, m.unit)
+    values = _rk_constrained_values(backend, unit)
     writes = Tuple{Symbol,Tuple,Any}[]
     for record in records
         _brm_nlme_prior_writes!(writes, Val(record.kind), record, values, value)
@@ -274,7 +277,7 @@ function _brm_nlme_prior_median_point(m::BRMNLMEModel)
     position = Dict(n => i for (i, n) in enumerate(view.coordinates))
     chosen = sort!(unique!([position[n] for (declaration, index, _) in writes
         for n in _brm_nlme_element_names(view, declaration, index)]))
-    u = copy(m.unit)
+    u = copy(unit)
     u[chosen] = point[chosen]
     u, chosen
 end

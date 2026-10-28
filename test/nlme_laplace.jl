@@ -349,6 +349,15 @@ end
     @test laplace_problem(lognormal, :auto) isa BRMLaplaceProblem
     @test_throws BRM.BRMNLMEViewError laplace_problem(lognormal, true)
     @test_throws ArgumentError laplace_problem(lognormal, :yes)
+    # So do observations that are not regression responses: a `@plate` cell's,
+    # or one whose distribution reads a model value. The row structure has no
+    # terms for them; before, :auto built it without them, a marginal that left
+    # those observations out.
+    for brmi in (nlme_plate_pk(NLME_PLATE_DATA), nlme_pk(NLME_DATA))
+        rk = RKBRMI(brmi)
+        @test laplace_problem(rk, :auto) isa BRMLaplaceProblem
+        @test_throws "is not a regression response" laplace_problem(rk, true)
+    end
 end
 
 @stestset "parameters not affine in the population coordinates are pulled back through RK" begin

@@ -42,10 +42,52 @@ exact recurrence per draw, `N(0, I)` innovations, the one-step covariance
 `sigma^2 (1 - rho^2) C`), also through `resample_groups`; a step inside the
 fitted grid is refused, and `freeze_constants=false` samples every step. Set
 `BRM_WALK_FORECAST_RUNTIME=0` to skip the compiled-model sets. Snag
-`per-group-statio-059ae6f6`.
+`per-group-statio-059ae6f6`. It also checks `resample_groups` naming a `cdar`
+term's `by` column: the levels the replay rows name, unseen ones included, are
+redrawn in generated quantities (the exact recurrence per draw, `N(0, I)`
+innovations, the stationary marginal SD), given the fitted levels the rows do
+not name for a correlated `C` (the conditional factors and the first state's
+conditional mean and SD); the fit's coordinates stay, `C` over the union of
+levels is read from the replay data and checked against the fit, and it
+composes with a resampled random effect. Snag `cdar-replay-new-57df8982`.
 
 `changelog.jl` checks that `CHANGELOG.md`'s newest heading is the
 `Project.toml` version (`dev` §7.5).
+
+`mi_group_totals.jl` checks `mi(x)::shares(total, rows)`, a completion whose
+missing entries have known group sums: the plan's residuals and its refusals;
+SBBRMI's density against an independent oracle (LogNormal, Gamma, the rows in
+place, a completion nothing reads); RKBRMI against SBBRMI through the coordinate
+transport, value and Enzyme gradient (the Gamma gradient is `@test_broken` on
+registered Enzyme, repaired on Enzyme dogfood from `4c73c40`, Enzyme snag
+`rkbrmi-gradient-519ec090`); frozen replay; the descriptor, the
+description, `brm_start`; and the refusals on VBRMI and of real-valued laws.
+Snag `mi-completion-wi-54222432`.
+
+`plate_subset_response_sums.jl` checks a response on some of a predictor's
+rows, the others observed only through group sums (suppressed cells of a count
+table): SBBRMI against an independent density for Poisson and NB2 cells, a
+frozen replay, and RKBRMI against SBBRMI. Snag `mi-completion-wi-54222432`.
+
+`forward_reads.jl` checks that a statement may read a name declared below it:
+a formula term computed from a parameter (with an `effect(...)` prior on its
+coefficient), from an `mi()` completion or from data alone, a grouping, a chain
+of assignments and the completed `mi()` column itself, each with the
+declaration moved below its readers, give the same Stan program and the same
+RK density and gradient as in source order; `merge` composes fragments that
+read each other in either order, builders and built `BRMI`s alike; and a
+fragment that only reads a data column no longer replaces another fragment's
+likelihood of it. Snag `formula-covariat-5673c470`.
+
+`rk_inline_response_location.jl` checks a response whose location is computed
+inline from model values (`y ~ NegativeBinomial2(exp(dev) * (…), phi)`) against
+the same location assigned first: SBBRMI gives both spellings one density, and
+RKBRMI agrees with SBBRMI (value and Enzyme gradient) on the assigned spelling
+and, for a Normal location and scale and a Bernoulli probability, on the inline
+one. The inline Poisson and NegativeBinomial2 cases are `@test_broken` until
+the test environment's ReactiveKernels pin carries an RKPPL that lowers an
+inline count rate (ReactiveKernelsPPL 0.1.2, RK main `f9a5c9c41`, ReactiveKernels
+snag `rkppl-logistic-a-b6e04821`). Snag `rkbrmi-on-a-resp-017c6f44`.
 
 `plate_gathered_predictor.jl` checks a predictor on its own rows that reads
 another part's values through model-scope gathers (`c2 = c[pos2]` of an `mi()`
@@ -85,15 +127,19 @@ and `binding-a-per-ce-e16efa8d`).
 
 `plate_level_axis_keywords.jl` checks a predictor read through a `@plate`
 grouping whose term keeps data off its rows: the levels' coordinates in
-`cor = multigroup((x, y))`, a known `cor = C` on `hsgp` and on `gr`, and
-`car(area; edges = (from, to))`. Each plate model's RKBRMI and SBBRMI
-(BridgeStan) density and gradient equal its plate-free twin's, the term as a
+`cor = multigroup((x, y))`, a known `cor = C` on `hsgp`, on `gr` and on
+`cdar`, and `car(area; edges = (from, to))`. Each plate model's RKBRMI and
+SBBRMI (BridgeStan) density and gradient equal its plate-free twin's (the
+`cdar` cases on SBBRMI only, since RKBRMI does not lower `cdar` yet; there
+RKBRMI is only checked to pass the row check), `cdar` summed per step through a
+`groups(t => steps)` binding equals the same `C` given by `constant(...)`, the term as a
 predictor of its own beside a random-effect predictor equals the term inside
 that predictor (on SBBRMI with `total_groups=()`, since under
 `total_groups=:auto` only the first keeps an exact-total block; that program
 is checked to evaluate), an RK
 replay keeps the density, and a covariate with one value per level is still
-refused as a row column (snag `rkbrmi-on-a-mode-0bd31c04`). Set
+refused as a row column (snags `rkbrmi-on-a-mode-0bd31c04`,
+`cdar-cor-matrix-c8278be6`). Set
 `BRM_PLATE_LEVEL_AXIS_RUNTIME=0` to skip the compiled-model sets.
 
 `fixed_ranef_scales.jl` checks random-effect scales and correlations held at
@@ -329,6 +375,16 @@ lower=lloq)` with `y` omitted: the warning, the observation role, the
 at `lloq`, and a fitted response beside it whose density equals the
 uncensored twin's.
 
+`omitted_discrete_response.jl` checks omitted responses with a discrete law.
+A `BetaBinomial2` and a `Binomial` count with data trials and a `logistic`
+mean give a `fixed_param` program drawing the fitted twin's law, within the
+trials; an omitted literal `BetaBinomial2` matches its mean/precision pmf; a
+fitted `Binomial` beside an omitted `BetaBinomial2` has the binomial-only
+density. Products, `logistic`, `truncated` and the `Bernoulli`-type families
+draw their bound twin's law, a continuous omitted response spells
+`logistic` as `inv_logit`, and a `@plate` cell's `BetaBinomial2` has the
+density of its `beta_binomial` spelling and lowers omitted.
+
 `adaptive_multiaxis_hsgp_centering.jl` checks online adaptive centering of
 two-axis squared-exponential HSGPs: isotropic (one length scale every axis
 reads) and `iso=false`, ungrouped and grouped, beside a shared random-effect
@@ -494,7 +550,42 @@ subjects. Its data and models live in `nlme_grouped_hsgp_fixture.jl`.
 family in `NLMEEstimation.fixed_omega`, `check_protocol` on flat and ragged
 layouts, the population prior's ω gradient beside the fixed family, and short
 SAEM, FOCE(I) and empirical-Bayes fits read back by name. Run it in the
+NLMEEstimation scratch environment described below. The lockstep and
+unit-problem checks live in `nlme_unit_checks.jl`, shared with `rk_cdar.jl`.
+
+`rk_cdar.jl` (test environment) checks `cdar(step; by=g, cor=C)` on RKBRMI:
+RK density and gradient equal SBBRMI's at transported coordinates for
+`cor = I`, a correlated `cor`, stated and known priors and a walk grouped by
+the units, the RK walk equals an independent stationary recurrence, and the
+printed source replays. Its NLME half reads districts nested in region units
+(`nested_groups=(kreis=:region,)`): each district's innovations are a fixed
+identity family in its region's block, `sigma` and `rho` stay shared, a `cor=`
+within the units keeps that reading and one across the units keeps the walk
+shared, lockstep and unit-problem densities match the full RK density, and
+`brm_laplace_problem` and `brm_svi_fit` take the model. A frozen RK replay is
+`@test_broken`. Its data and models live in `rk_cdar_fixture.jl`.
+`rk_cdar_fit.jl` runs NLMEEstimation on the nested model: the innovation
+family in `NLMEEstimation.fixed_omega`, `check_protocol` on the ragged layout,
+and short SAEM and empirical-Bayes fits read back by name. Run it in the
 NLMEEstimation scratch environment described below.
+
+`nlme_crossed.jl` (test environment) reads a random-effect block over a
+grouping crossed with the subjects (`shared_groups = (:class,)`, every class
+in several subjects) as shared latents in θ: roles, the refusal naming a
+grouping named in neither `nested_groups` nor `shared_groups` and the
+refusals of a bad `shared_groups`, lockstep, single-subject and unit-problem
+densities against the full RK density, the per-unit Laplace (row-structured
+and whole-model) against the analytic Gaussian marginal, the minibatch SVI
+split against the full RK target, `brm_nlme_estimates` naming the block for
+every block form (plain, stratified, Student-t, level-correlated, known
+scale) against the model's own predictor values, and a `car(...)` field,
+whose edges cross the subjects, read as shared latents. Its data and models
+live in `nlme_crossed_fixture.jl`. `nlme_crossed_fit.jl` runs NLMEEstimation
+on them: the population prior against RK's prior and log-Jacobian queries,
+prior-median starts of the crossed scales, a short `brm_nlme_fit(saem)` naming
+the block, and a two-stage fit holding it at its stage-1 estimate. Run it in
+the NLMEEstimation scratch environment described below. Snag
+`crossed-grouping-39d39fcc`.
 
 `population_grouped_hsgp.jl` checks the population and transport routes on a
 grouped HSGP, `hsgp(t; by = g)`, whose weights `ranef_blocks` does not list.
@@ -1162,6 +1253,11 @@ independent values/gradients, ordinary Reverse, strict same-BRMI Stan,
 complete source/data replay, original geometry/ownership and scalar algebra
 inside the actual built observation plate. A Bernoulli-logit case preserves
 integer response rows across uneven/empty cells.
+`rk_observation_source_names.jl` checks the two routes by which a caller-owned
+law calls a function the build module does not bind (`logsumexp`): a leaf named
+from `entry`, and a law defined in the consumer's module bound as a child
+graph. Each matches an independent mixture density with ordinary Reverse
+gradients and printed source replay.
 `rk_grouped_observation_arguments.jl` checks the equivalent outside-cell law,
 grouped argument collection, explicit ragged joins, empty cells, broadcasting,
 elementwise argument expressions and unchanged data ports. Each case checks

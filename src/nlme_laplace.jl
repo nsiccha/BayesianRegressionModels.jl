@@ -23,7 +23,8 @@
 """
     BRMLaplaceProblem
     brm_laplace_problem(backend::RKBRMI; ad_backend, subject_group=nothing,
-        nested_groups=NamedTuple(), tol=1e-24, maxiter=50, structured=:auto)
+        nested_groups=NamedTuple(), shared_groups=(), tol=1e-24, maxiter=50,
+        structured=:auto)
 
 Integrate every unit's standardized random effects out of an RK-lowered model
 by a Laplace approximation at their conditional mode, leaving the population
@@ -71,7 +72,9 @@ is one reverse sweep of the likelihood parameters. Otherwise it is a
 `BRMLaplaceProblem`, which differentiates the whole model. `structured=true`
 requires the first (refusing with the reason), `false` forces the second.
 
-`subject_group` and `nested_groups` are those of [`brm_nlme_view`](@ref).
+`subject_group`, `nested_groups` and `shared_groups` are those of
+[`brm_nlme_view`](@ref); the shared latents (a block over a grouping in
+`shared_groups`, a `car(...)` field) are population coordinates.
 Refused, with [`BRMNLMEViewError`](@ref): everything `brm_nlme_model`
 refuses, including Student-t random-effect blocks.
 """
@@ -95,11 +98,12 @@ Base.show(io::IO, p::BRMLaplaceProblem) = print(io, "BRMLaplaceProblem(",
     sum(length, p.model.view.subject_coordinates), " integrated random effects)")
 
 function brm_laplace_problem(backend::RKBRMI; ad_backend, subject_group=nothing,
-        nested_groups=NamedTuple(), tol=1e-24, maxiter=50, structured=:auto)
+        nested_groups=NamedTuple(), shared_groups=(), tol=1e-24, maxiter=50,
+        structured=:auto)
     structured in (:auto, true, false) || throw(ArgumentError(
         "brm_laplace_problem: structured = $(repr(structured)); pass :auto, true or false"))
     if structured !== false
-        view = brm_nlme_view(backend; subject_group, nested_groups)
+        view = brm_nlme_view(backend; subject_group, nested_groups, shared_groups)
         refusal = _brm_slap_refusal(backend, view)
         refusal === nothing && return _brm_structured_laplace_problem(backend, view;
             ad_backend, tol, maxiter)
@@ -107,7 +111,8 @@ function brm_laplace_problem(backend::RKBRMI; ad_backend, subject_group=nothing,
             "brm_laplace_problem: structured = true, but the model has no row structure: " *
             refusal)
     end
-    m = brm_nlme_model(backend; ad_backend, subject_group, nested_groups)
+    m = brm_nlme_model(backend; ad_backend, subject_group, nested_groups,
+        shared_groups)
     population = findall(!=(:subject_effect), m.view.role)
     BRMLaplaceProblem(m, ad_backend, population, m.view.coordinates[population],
         Ref{Any}(nothing), copy(m.unit), Ref{Any}(nothing), Float64(tol), Int(maxiter), 0, 0)

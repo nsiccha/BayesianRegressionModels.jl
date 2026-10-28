@@ -25,7 +25,7 @@ function BRM._rk_eta_hvp_query(backend::BRM.RKBRMI, unit::Vector{Float64}, ad_ba
         second_order, (zeros(Float64, length(unit)),), unit)
 end
 
-BRM._brm_svi_default_ad(::BRM.RKBRMI) = AutoEnzyme(; mode=Enzyme.Reverse)
+BRM._brm_rk_default_ad(caller, ::BRM.RKBRMI) = AutoEnzyme(; mode=Enzyme.Reverse)
 
 BRM._rk_eta_hvp(query, direction::Vector{Float64}, u::Vector{Float64}) =
     only(ad_hvp(query, (direction,), u))

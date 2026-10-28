@@ -708,8 +708,13 @@ function _brmd_builtin_call(::typeof(me),c)
     BRMDescriptionFragment(prose=(_brmd_text(c,:measurement_error),),
         equations=(brm_description_math(c,c.arguments[1])*"\\mid x^*\\sim\\mathcal N(x^*,{"*brm_description_math(c,c.arguments[2])*"}^2)",),covers=(c.id,))
 end
+# The share coordinates of `mi(x)::shares(total, rows)` (cell_total_coordinates.jl),
+# the one `flat()` declaration BRM emits: the observed residuals carry their law.
+_brmd_builtin_call(::typeof(StanBlocks.stan.builtin.flat),c) = BRMDescriptionFragment(
+    prose=(_brmd_text(c,:flat_shares),),covers=(c.id,))
 _brmd_builtin_call(::typeof(mi),c) = BRMDescriptionFragment(
-    prose=(_brmd_text(c,c.provenance.observation_role===:covariate_draw ? :fresh_completion : :missing_entries),),covers=(c.id,))
+    prose=(_brmd_text(c,c.provenance.observation_role===:covariate_draw ? :fresh_completion :
+        haskey(c.keywords,:_brm_shares_total) ? :missing_entries_totals : :missing_entries),),covers=(c.id,))
 function _brmd_builtin_call(::typeof(LKJCovarianceFactor),c)
     binding=get(c.provenance,:covariance_factor,nothing)
     isnothing(binding) && return nothing

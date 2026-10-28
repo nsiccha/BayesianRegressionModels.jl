@@ -8,9 +8,12 @@
 # The oracles are independent of the wrapper's accessors:
 #
 # - which coefficient each cell is centred on, from the formula: intercept and
-#   slope terms of a top-level grouping take theirs; a nested grouping, a term
-#   without a population coefficient, a block compiled centred and a predictor
-#   whose coefficient S2Z absorbed take none;
+#   slope terms of a top-level grouping take theirs; a nested grouping's level
+#   takes the intercept plus its enclosing level's effect (snag
+#   brm-zone-8-adapt-1b407672; `test/adaptive_centering_total_location.jl`
+#   covers factor levels, chains and crossed groupings); a term without a
+#   population coefficient, a block compiled centred and a predictor whose
+#   coefficient S2Z absorbed take none;
 # - the map in closed form, `z = (x - c * beta) / s^c` per K = 1 cell and the
 #   triangular form for a correlated block, with scales and the correlation
 #   factor read from BridgeStan's constrained values;
@@ -105,7 +108,7 @@ end
     @test locs[(:h, :t)] === nothing                     # no population `t`
 end
 
-@testset "nested, centred-compiled and S2Z-absorbed cells stay centred on 0" begin
+@testset "nested cells take their enclosing total; centred-compiled and S2Z-absorbed cells 0" begin
     nested = SBBRMI(merge(@brm(begin
         mu ~ 1 + (1 | band) + (1 | g)
         y ~ Normal(mu, sigma)
@@ -113,9 +116,17 @@ end
         sigma ~ Exponential(1)
     end))(data); mod = @__MODULE__, total_groups = ())
     pn = instantiate(nested)
-    locs = cell_locations(adaptive_centering_problem(nested, pn, AutoEnzyme()), nested)
-    @test locs[(:band, :Intercept)] == intercept_name(BS.param_unc_names(pn.model))
-    @test locs[(:g, :Intercept)] === nothing             # `g` nests in `band`
+    rows = [r for r in adaptive_centering_controls(
+                adaptive_centering_problem(nested, pn, AutoEnzyme()), nested)
+            if r.family === :ranef]
+    icpt = intercept_name(BS.param_unc_names(pn.model))
+    @test all(r -> r.location == icpt, (r for r in rows if r.group === :band))
+    for r in rows
+        r.group === :g || continue                       # `g` nests in `band`
+        b = band[findfirst(==(string(r.level)), g)]
+        @test r.location == icpt * " + " *
+              only(x.name for x in rows if x.group === :band && string(x.level) == b)
+    end
 
     centred = SBBRMI(M_MAIN.parent; mod = @__MODULE__, total_groups = (),
                      centered_groups = [:g])

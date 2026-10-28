@@ -242,6 +242,12 @@ _brm_slap_responses(plan::_RKValuePlan) = plan.regression.responses
 _brm_slap_responses(plan) = nothing
 _brm_slap_predictors(plan::_RKStructuralPlan) = plan.predictors
 _brm_slap_predictors(plan::_RKValuePlan) = plan.regression.predictors
+# Observations the row structure has no terms for: a value plan's observations
+# beside its regression responses (a distribution reading a model value, a
+# `@plate` cell's) and those of its kernel cells.
+_brm_slap_other_observations(plan) = Symbol[]
+_brm_slap_other_observations(plan::_RKValuePlan) = sort!(collect(union(
+    Set{Symbol}(o.name for o in plan.observations), _brm_nlme_plate_observations(plan))))
 
 # Why a model has no row structure, or `nothing` when it has one.
 function _brm_slap_refusal(backend::RKBRMI, view::BRMNLMEView)
@@ -249,6 +255,9 @@ function _brm_slap_refusal(backend::RKBRMI, view::BRMNLMEView)
     any(==(:subject_mixing), view.role) && return "a random-effect block is Student-t"
     responses = _brm_slap_responses(backend.plan)
     responses === nothing && return "the RK plan has no likelihood specs"
+    other = _brm_slap_other_observations(backend.plan)
+    isempty(other) || return "observation `$(first(other))` is not a regression " *
+        "response (it reads a model value or sits in a `@plate` cell)"
     for spec in responses
         _brm_slap_family(spec) === nothing &&
             return "response `$(spec.response)` has family `$(spec.family)`"
@@ -279,8 +288,11 @@ function _brm_structured_laplace_problem(backend::RKBRMI, view::BRMNLMEView; ad_
     all(b -> length(b) == d, blocks) || _brm_nlme_error(
         "brm_laplace_problem: units have effect blocks of different sizes")
     omega = findall(r -> r === :subject_scale || r === :subject_correlation, view.role)
-    records = [r for r in _rk_coordinate_records(backend.plan) if r.kind === :ranef]
-    effects = Tuple(Symbol(chopsuffix(String(r.z), ".z")) for r in records)
+    # The units' blocks only: a block over a grouping in `shared_groups` is
+    # population coordinates.
+    records = [r for r in _rk_coordinate_records(backend.plan)
+        if r.kind === :ranef && r.group ∉ view.shared_groups]
+    effects = Tuple(_brm_nlme_ranef_declaration(r) for r in records)
     # A linked predictor's slots read its linear predictor, by the name the
     # responses read it under; its authored name is the response-scale value.
     linked = _rk_link_scale_names(backend.plan, _brm_slap_predictors(backend.plan))
@@ -423,6 +435,12 @@ function _brm_slap_verify!(p::BRMStructuredLaplaceProblem, u0, response, row)
     for u in (u0, u0 .+ 0.1 .* randn(rng, length(u0)))
         ψ = _brm_slap_psi!(zeros(length(p.port)), p, _rk_slap_values(p.kernels, u))
         pointwise = _rk_slap_pointwise(p.kernels, u)
+        # Every observation of the model has its rows' terms here.
+        for name in keys(pointwise)
+            name in response || _brm_nlme_error("brm_laplace_problem: observation " *
+                "`$name` has no term in the row-structured Laplace, which therefore " *
+                "does not apply")
+        end
         for t in eachindex(p.family)
             e = p.entry[t]
             b = _brm_lap_width(p.family[t]) == 2 ? ψ[e + 1] : 0.0
