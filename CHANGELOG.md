@@ -12,6 +12,35 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.35
+
+- `adaptive_centering_problem` centres a random-effect cell on the total of
+  every term its level sits in, so its `c = 1` coordinate is that total:
+  - the intercept or slope coefficient (as since `303dafff`);
+  - for an intercept cell, the level of each `factor(f)` population term the
+    level sits in (its cell mean or treatment contrast);
+  - the effect of each coarser grouping of the same predictor that holds the
+    level, nested or crossed, when that grouping's cell for the term is a
+    scalar one.
+
+  For example, `log(w) ~ 0 + factor(cov) + (1 | sec) + (1 | pair)`, with each
+  `pair` inside one `cov` level and one `sec` level, centres a pair on
+  `beta[cov] + b_sec[sec]`. Before, such a cell was centred on 0 (no intercept,
+  and nested), which left the factor level, the section and the pair on a
+  ridge only the priors pin.
+  - **Behaviour change:** a nested grouping's cells (`(1 | g)` inside
+    `(1 | band)`) are no longer centred on 0. They are centred on the intercept
+    plus the enclosing level's effect.
+  - **Unchanged:** a level inside a correlated grouping's cell keeps location 0.
+    So do blocks compiled centred.
+  - **Pair order:** containing blocks now come before the blocks they contain.
+    A model declaring a nested grouping before its container sees its cells,
+    and a per-cell `centeredness=` vector, in that order.
+  - `adaptive_centering_controls` names every coordinate a cell's location
+    reads in `location`, joined by ` + `.
+
+  Snag `brm-zone-8-adapt-1b407672`, decision `1wxltaq`; closes owner todo
+  `137ptwv`.
 ## 0.2.34
 
 - A statement may read a name declared below it, in every position a read can

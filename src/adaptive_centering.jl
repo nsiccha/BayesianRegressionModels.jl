@@ -2497,43 +2497,201 @@ function _adaptive_population_coordinate(descriptor, logical, coefficient, unc_n
     only(resolved.coordinates)
 end
 
-# Hierarchical centring of random-effect cells (Gelfand, Sahu and Carlin 1995;
-# snag fitted-seven-hie-76d07973, decision 1xdxiv1). A cell of level `j`, term
-# `k` is centred on its predictor's population coefficient for that term, so
-# its `c=1` coordinate is the level's total `beta_k + b[k, j]` rather than the
-# deviation `b[k, j]`. Centring the deviation on 0 leaves the direction
-# `(beta + d, b .- d)` to the prior alone: with strongly identified levels on
-# few groups that ridge has width about `tau / sqrt(J)` and no control removes
-# it. The coefficient is read, never transformed, so the map stays exact.
+# Hierarchical centring of random-effect cells (Gelfand, Sahu and Carlin 1995).
+# A cell of level `j`, term `k` is centred on the total of every term its level
+# sits in, so its `c=1` coordinate is the level's total rather than the
+# deviation `b[k, j]`:
 #
-# Returns, per block, one coordinate per term (0 = centred on 0). A block gets
-# none when it is compiled centred (`centered_groups`: the compiled coordinate
-# is then the deviation, which WarmupHMC's shared-location pair map cannot keep
-# while the source samples the total), groups by multi-membership, or has no
-# margin labels. A term gets none when its predictor has no matching sampled,
-# unbounded population coefficient (`_adaptive_population_coordinate`), and
-# when the block's grouping is nested in another grouping of the same predictor
-# (`_adaptive_nested_bindings`): a nested level's parent is the enclosing
-# level's total, a coordinate another cell rewrites, so it stays centred on 0.
+# - its predictor's population coefficient for that term (snag
+#   fitted-seven-hie-76d07973, decision 1xdxiv1): `beta_k + b[k, j]`;
+# - for an intercept cell, the level of every categorical population term
+#   (`factor(f)`) the level sits in (snag brm-zone-8-adapt-1b407672, decision
+#   1wxltaq): `beta[f(j)] + b[j]`;
+# - the effect, for the same term, of every coarser grouping of the same
+#   predictor the level sits in, nested or crossed (same snag): a `pair` level
+#   inside a `section` level is centred on `beta[f(pair)] + b_section[section]`.
+#
+# Centring on less leaves the direction `(total + d, b .- d)` to the prior
+# alone: with strongly identified levels that ridge has width about
+# `tau / sqrt(J)` and no control removes it. Coefficients are read, never
+# transformed. A containing grouping's effect is a coordinate another cell
+# rewrites: the WarmupHMC extension maps containing cells first and reads that
+# effect in the source frame, so the map stays triangular and exact.
+#
+# Returns, per block, an `_AdaptiveRanefLocations`: one coefficient per term
+# (0 = none), plus per level its factor coordinates and containing cells. A
+# block gets none when it is compiled centred (`centered_groups`: the compiled
+# coordinate is then the deviation, which WarmupHMC's shared-location pair map
+# cannot keep while the source samples the total), groups by multi-membership,
+# or has no margin labels. A term gets no coefficient when its predictor has no
+# matching sampled, unbounded population coefficient
+# (`_adaptive_population_coordinate`). A term whose levels cannot be placed in
+# a containing grouping (its cell for that term is not a scalar one, or the
+# extension maps it after this block, or the row codes do not name this block's
+# levels) keeps the rule from before 1wxltaq: a nested grouping
+# (`_adaptive_nested_bindings`) stays centred on 0.
+struct _AdaptiveRanefLocations <: AbstractVector{Int}
+    coefficient::Vector{Int}
+    # `K x G`, or `nothing` when no level of the block sits in a factor level or
+    # a containing grouping: the further population coordinates of each level,
+    # and its containing cells `(block, term, group)`, coarsest grouping first.
+    factors::Union{Nothing,Matrix{Vector{Int}}}
+    containers::Union{Nothing,Matrix{Vector{Tuple{Any,Int,Int}}}}
+end
+Base.size(locations::_AdaptiveRanefLocations) = size(locations.coefficient)
+Base.getindex(locations::_AdaptiveRanefLocations, k::Int) = locations.coefficient[k]
+
 function _adaptive_ranef_locations(model, blocks, unc_names)
-    out = IdDict{Any,Vector{Int}}()
+    out = IdDict{Any,_AdaptiveRanefLocations}()
     isempty(blocks) && return out
     d = model isa BRMDescriptor ? model : brm_descriptor(model)
     margins = Dict(m.block.binding => m.margins for m in _brmd_ranef_metadata(d))
+    rows = _adaptive_group_rows(d.plan, blocks)
     nested = _adaptive_nested_bindings(d.plan, blocks, margins)
     for block in blocks
         K = block.ranef.n_terms
-        labels = get(margins, block.ranef.binding, ())
+        G = block.ranef.n_groups
+        binding = block.ranef.binding
+        labels = get(margins, binding, ())
         locs = zeros(Int, K)
+        factors = nothing
+        containers = nothing
         if block.target_c == 0.0 && block.ranef.group isa Symbol && length(labels) == K
             for k in 1:K
-                (block.ranef.binding, labels[k].predictor) in nested && continue
-                locs[k] = _adaptive_population_coordinate(d, labels[k].predictor,
-                                                          labels[k].coefficient,
+                predictor, coefficient = labels[k].predictor, labels[k].coefficient
+                outer = _adaptive_containers(block, predictor, coefficient, blocks,
+                                             margins, rows)
+                if isnothing(outer) && (binding, predictor) in nested
+                    continue
+                end
+                locs[k] = _adaptive_population_coordinate(d, predictor, coefficient,
                                                           unc_names)
+                isnothing(outer) && continue
+                levels = coefficient === :Intercept ?
+                    _adaptive_factor_levels(d, predictor, rows[binding], G, unc_names) :
+                    Tuple{Vector{Int},Vector{Int}}[]
+                isempty(outer) && isempty(levels) && continue
+                if isnothing(factors)
+                    factors = [Int[] for _ in 1:K, _ in 1:G]
+                    containers = [Tuple{Any,Int,Int}[] for _ in 1:K, _ in 1:G]
+                end
+                for g in 1:G
+                    for (coordinates, level) in levels
+                        j = coordinates[level[g]]
+                        j == 0 || push!(factors[k, g], j)
+                    end
+                    for (container, term, parent) in outer
+                        push!(containers[k, g], (container, term, parent[g]))
+                    end
+                end
             end
         end
-        out[block] = locs
+        out[block] = _AdaptiveRanefLocations(locs, factors, containers)
+    end
+    out
+end
+
+# Each block's group-index data (the row codes of its grouping), by binding.
+function _adaptive_group_index(plan, blocks)
+    index = Dict{Symbol,AbstractVector}()
+    for block in blocks
+        binding = block.ranef.binding
+        haskey(index, binding) && continue
+        decl = only(x for x in plan.declarations
+                    if x.role === :prior && x.target === binding)
+        key = get(decl.keywords, :group_idx, nothing)
+        value = key isa Symbol ? get(plan.data, key, nothing) : nothing
+        value isa AbstractVector && (index[binding] = value)
+    end
+    index
+end
+
+# The row codes of the blocks whose codes are their own levels `1:n_groups`. One
+# stratum of a stratified block is left out (its codes number every stratum's
+# levels), so it is never placed in or around another block.
+function _adaptive_group_rows(plan, blocks)
+    index = _adaptive_group_index(plan, blocks)
+    rows = Dict{Symbol,AbstractVector}()
+    for block in blocks
+        value = get(index, block.ranef.binding, nothing)
+        value isa AbstractVector{<:Integer} && !isempty(value) &&
+            extrema(value) == (1, block.ranef.n_groups) &&
+            (rows[block.ranef.binding] = value)
+    end
+    rows
+end
+
+# The coarser groupings of `predictor` that hold every level of `block` and
+# carry a cell for `coefficient`: `(container, term, parent)` per grouping,
+# `parent[g]` the container level holding level `g`, coarsest grouping first
+# (a strictly coarser container has fewer levels, so this is an order in which
+# every container comes after the containers holding it). `nothing` when a
+# grouping holds `block`'s levels but cannot be read as a container: its cell
+# for that term is not a scalar one, or it is an R2D2 block around an ordinary
+# one (the extension maps ordinary cells first), or `block`'s row codes are
+# unknown.
+function _adaptive_containers(block, predictor, coefficient, blocks, margins, rows)
+    binding = block.ranef.binding
+    haskey(rows, binding) || return nothing
+    inner = rows[binding]
+    out = Tuple{Any,Int,Vector{Int}}[]
+    for other in blocks
+        other === block && continue
+        other.ranef.group isa Symbol || continue
+        labels = get(margins, other.ranef.binding, ())
+        length(labels) == other.ranef.n_terms || continue
+        term = findfirst(l -> l.predictor === predictor && l.coefficient === coefficient,
+                         labels)
+        isnothing(term) && continue
+        outer = get(rows, other.ranef.binding, nothing)
+        isnothing(outer) && continue
+        _adaptive_nested_in(inner, outer) || continue
+        other.ranef.n_terms == 1 || return nothing
+        block isa AdaptiveCenteringBlock && !(other isa AdaptiveCenteringBlock) &&
+            return nothing
+        parent = zeros(Int, block.ranef.n_groups)
+        for (a, b) in zip(inner, outer)
+            parent[a] = b
+        end
+        push!(out, (other, term, parent))
+    end
+    sort!(out; by=container -> first(container).ranef.n_groups)
+end
+
+# Every categorical population term of `predictor` whose level is constant
+# within each level of a grouping with row codes `group_rows` (`G` levels): per
+# term, the coordinate of each level code (0 for a treatment-coded reference)
+# and each grouping level's code. The codes are the emitted ones, so code `c`
+# reads element `c` of a cell-mean carrier and element `c - 1` of a contrast
+# carrier, whatever `ref=` relevelled.
+function _adaptive_factor_levels(d, predictor, group_rows, G, unc_names)
+    out = Tuple{Vector{Int},Vector{Int}}[]
+    entries = _sb_cat_entries(d.plan.parent, predictor)
+    isnothing(entries) && return out
+    for e in entries
+        codes = get(d.plan.data, Symbol(e.address, :_idx), nothing)
+        codes isa AbstractVector{<:Integer} && length(codes) == length(group_rows) ||
+            continue
+        level = zeros(Int, G)
+        constant = true
+        for (g, c) in zip(group_rows, codes)
+            if level[g] == 0
+                level[g] = c
+            elseif level[g] != c
+                constant = false
+                break
+            end
+        end
+        constant || continue
+        resolved = brm_population_effect_coordinates(d, predictor, unc_names;
+                                                     coefficient=e.address)
+        n = e.cellmeans ? e.n_levels : e.n_levels - 1
+        length(resolved.coordinates) == n || error(
+            "BRM adaptive centering: categorical term `$(e.address)` of " *
+            "`$predictor` has $(e.n_levels) levels but resolves to " *
+            "$(length(resolved.coordinates)) coordinates.")
+        push!(out, (e.cellmeans ? collect(Int, resolved.coordinates) :
+                    vcat(0, collect(Int, resolved.coordinates)), level))
     end
     out
 end
@@ -2545,16 +2703,7 @@ end
 # rows when they have the same length; blocks whose rows cannot be aligned
 # (different lengths, a resampled index) are not compared.
 function _adaptive_nested_bindings(plan, blocks, margins)
-    index = Dict{Symbol,AbstractVector}()
-    for block in blocks
-        binding = block.ranef.binding
-        haskey(index, binding) && continue
-        decl = only(x for x in plan.declarations
-                    if x.role === :prior && x.target === binding)
-        key = get(decl.keywords, :group_idx, nothing)
-        value = key isa Symbol ? get(plan.data, key, nothing) : nothing
-        value isa AbstractVector && (index[binding] = value)
-    end
+    index = _adaptive_group_index(plan, blocks)
     by_predictor = Dict{Symbol,Vector{Symbol}}()
     for (binding, labels) in margins, label in labels
         haskey(index, binding) || continue

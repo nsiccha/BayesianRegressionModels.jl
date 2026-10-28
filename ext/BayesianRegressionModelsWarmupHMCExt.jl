@@ -27,6 +27,12 @@ mutable struct BRMAdaptiveCenteringState{N} <: _BRMRanefCenteringState{N}
     pair_lookup::Vector{Matrix{Int}}
     sources::Vector{Float64}
     effect_indices::BitSet
+    pair_factor_start::Vector{Int}
+    pair_factors::Vector{Int}
+    pair_container_start::Vector{Int}
+    pair_containers::Vector{Int}
+    pair_container_mask::Vector{UInt8}
+    extended::Bool
 end
 
 # Pairs are block-major, then group-major, then term-major. `pair_mixing[p]`
@@ -36,7 +42,17 @@ end
 # the coordinate of the population coefficient pair `p` is centred on, `0` for
 # a pair centred on 0 (`BRM._adaptive_ranef_locations`, one entry per term of
 # each block; `locations[bi]` aligns with `blocks[bi]`, `nothing` for none).
-function _ranef_pair_layout(blocks, locations=nothing)
+#
+# A pair whose level sits in a factor level or a containing grouping
+# (`BRM._AdaptiveRanefLocations`, snag brm-zone-8-adapt-1b407672) adds, in CSR
+# form, the factor levels' coordinates (`pair_factors`) and its containing pairs
+# (`pair_containers`, coarsest first). A containing pair always comes earlier in
+# pair order, so WarmupHMC's inverse, which rebuilds the source pair by pair,
+# has rebuilt it before it is read. `pair_container_mask[e]` marks which of the
+# earlier entries of the same list are themselves containers of entry `e`'s
+# pair. `originals[bi]` is the block `locations` names for `blocks[bi]` (the
+# joint wrapper maps derived copies of the ordinary blocks).
+function _ranef_pair_layout(blocks, locations=nothing, originals=blocks)
     pair_blocks = Int[]
     pair_terms = Int[]
     pair_groups = Int[]
@@ -57,7 +73,69 @@ function _ranef_pair_layout(blocks, locations=nothing)
     end
     effect_indices = BitSet(Iterators.flatten(vec(b.effects) for b in blocks))
     (pair_blocks, pair_terms, pair_groups, pair_mixing, pair_location, pair_lookup,
-     sources, effect_indices)
+     sources, effect_indices,
+     _ranef_container_layout(blocks, locations, originals, pair_blocks, pair_terms,
+                             pair_groups, pair_lookup)...)
+end
+
+# Containing cells a location reads, at most this many per pair (one bit each in
+# `pair_container_mask`).
+const _MAX_LOCATION_CONTAINERS = 8
+
+function _ranef_container_layout(blocks, locations, originals, pair_blocks, pair_terms,
+                                 pair_groups, pair_lookup)
+    n = length(pair_blocks)
+    factor_start = ones(Int, n + 1)
+    factors = Int[]
+    container_start = ones(Int, n + 1)
+    containers = Int[]
+    mask = UInt8[]
+    for p in 1:n
+        bi, k, g = pair_blocks[p], pair_terms[p], pair_groups[p]
+        locs = isnothing(locations) ? nothing : locations[bi]
+        if locs isa BRM._AdaptiveRanefLocations && !isnothing(locs.factors)
+            append!(factors, locs.factors[k, g])
+            first_entry = length(containers) + 1
+            for (block, term, group) in locs.containers[k, g]
+                ci = findfirst(o -> o === block, originals)
+                isnothing(ci) && error(
+                    "BRM adaptive centering: block `$(blocks[bi].ranef.binding)` is " *
+                    "centred on the effects of block `$(block.ranef.binding)`, which " *
+                    "this wrapper does not map; refusing an inexact transform.")
+                q = pair_lookup[ci][term, group]
+                q < p || error(
+                    "BRM adaptive centering: block `$(blocks[bi].ranef.binding)` is " *
+                    "centred on the effects of block `$(block.ranef.binding)`, which " *
+                    "is mapped after it; containing blocks must come first.")
+                push!(containers, q)
+            end
+            entries = first_entry:length(containers)
+            length(entries) <= _MAX_LOCATION_CONTAINERS || error(
+                "BRM adaptive centering: a cell of block " *
+                "`$(blocks[bi].ranef.binding)` sits in $(length(entries)) groupings; " *
+                "at most $_MAX_LOCATION_CONTAINERS are supported.")
+            # Each container's own containers sit in this list too (containment
+            # is transitive and they carry the same term), and earlier.
+            for e in entries
+                a = containers[e]
+                bits = 0x00
+                for f in container_start[a]:container_start[a + 1] - 1
+                    i = findfirst(==(containers[f]), view(containers, first_entry:e - 1))
+                    isnothing(i) && error(
+                        "BRM adaptive centering: block " *
+                        "`$(blocks[bi].ranef.binding)`'s containing cells do not " *
+                        "include those of their own containers; refusing an inexact " *
+                        "transform.")
+                    bits |= 0x01 << (i - 1)
+                end
+                push!(mask, bits)
+            end
+        end
+        factor_start[p + 1] = length(factors) + 1
+        container_start[p + 1] = length(containers) + 1
+    end
+    (factor_start, factors, container_start, containers, mask,
+     !isempty(factors) || !isempty(containers))
 end
 
 BRMAdaptiveCenteringState(blocks, locations=nothing) =
@@ -73,7 +151,7 @@ _block_locations(blocks, locations) =
 # A location is read, never transformed: a coefficient some cell rewrites
 # would make the triangular Jacobian wrong.
 function _check_locations_read_only(state, rewritten)
-    for j in state.pair_location
+    for j in Iterators.flatten((state.pair_location, state.pair_factors))
         j == 0 || !(j in rewritten) || error(
             "BRM adaptive centering: a random-effect cell is centred on coordinate " *
             "$j, which another cell rewrites; refusing an inexact transform.")
@@ -87,8 +165,61 @@ end
 # rewritten by the map. `@inline`: an outlined call taking the state inside a
 # differentiated loop is the Julia 1.10 GC hazard `_block_location` describes.
 @inline function _with_location(m, x, state, p)
+    _with_location(m, x, x, state, p)
+end
+
+# `src` holds the source frame of the pairs a location reads from containing
+# cells (snag brm-zone-8-adapt-1b407672): `x` itself, except in the learned-order
+# inverse, which rebuilds the source in another vector. Coefficients are read
+# from `x` (no cell rewrites them).
+@inline function _with_location(m, x, src, state, p)
     j = state.pair_location[p]
-    j == 0 ? m : m + x[j]
+    loc = j == 0 ? m : m + x[j]
+    (state.extended && (state.pair_factor_start[p] < state.pair_factor_start[p + 1] ||
+                        state.pair_container_start[p] < state.pair_container_start[p + 1])) ||
+        return loc
+    loc + _contained_location(x, src, state, p)
+end
+
+# The rest of pair `p`'s total: the coordinates of the factor levels its level
+# sits in, plus the effect of each containing cell `a`, coarsest first. A
+# containing cell is a scalar (`K = 1`) cell, so its compiled coordinate is
+# WarmupHMC's pair map `t*L + (u - c*L) * exp(log(s)*(t - c))` of its own source
+# `u` and location `L` (its factor levels plus the effects of its own
+# containers, read from the buffer), and its effect is `s` times that when the
+# block is compiled non-centred (`t = 0`), that itself when centred (`t = 1`).
+# Flat loads and an `NTuple` buffer only, `@inline`: the Julia 1.10 GC rule
+# `_block_location` states.
+@inline function _contained_location(x, src, state, p)
+    T = promote_type(eltype(x), eltype(src))
+    acc = zero(T)
+    for f in state.pair_factor_start[p]:state.pair_factor_start[p + 1] - 1
+        acc += x[state.pair_factors[f]]
+    end
+    lo = state.pair_container_start[p]
+    buffer = ntuple(_ -> zero(T), Val(_MAX_LOCATION_CONTAINERS))
+    for e in lo:state.pair_container_start[p + 1] - 1
+        a = state.pair_containers[e]
+        j = state.pair_location[a]
+        L = j == 0 ? zero(T) : convert(T, x[j])
+        for f in state.pair_factor_start[a]:state.pair_factor_start[a + 1] - 1
+            L += x[state.pair_factors[f]]
+        end
+        bits = state.pair_container_mask[e]
+        for i in 1:e - lo
+            (bits >> (i - 1)) & 0x01 == 0x01 && (L += buffer[i])
+        end
+        block = state.blocks[state.pair_blocks[a]]
+        s = _block_cholesky_entry(x, block, 1, 1) * _pair_mixing_scale(x, state, a)
+        c = state.sources[a]
+        t = block.target_c
+        u = src[block.effects[1, state.pair_groups[a]]]
+        y = t * L + (u - c * L) * exp(log(s) * (t - c))
+        b = t == 0 ? s * y : y
+        buffer = Base.setindex(buffer, b, e - lo + 1)
+        acc += b
+    end
+    acc
 end
 
 # Derived-scale blocks — R2D2 blocks, and ordinary blocks inside the joint
@@ -105,6 +236,12 @@ mutable struct BRMR2D2AdaptiveCenteringState{N} <: _BRMRanefCenteringState{N}
     pair_lookup::Vector{Matrix{Int}}
     sources::Vector{Float64}
     effect_indices::BitSet
+    pair_factor_start::Vector{Int}
+    pair_factors::Vector{Int}
+    pair_container_start::Vector{Int}
+    pair_containers::Vector{Int}
+    pair_container_mask::Vector{UInt8}
+    extended::Bool
 end
 
 BRMR2D2AdaptiveCenteringState(blocks, locations=nothing) =
@@ -1579,7 +1716,8 @@ function _joint_centering_state(blocks, hsgp_blocks, r2d2_blocks, scalar_cells,
     ranef_state = BRMR2D2AdaptiveCenteringState{N}(ranef_blocks,
         _ranef_pair_layout(ranef_blocks, isnothing(locations) ? nothing :
             vcat(_block_locations(blocks, locations),
-                 _block_locations(r2d2_blocks, locations)))...)
+                 _block_locations(r2d2_blocks, locations)),
+            vcat(BRM.AbstractAdaptiveCenteringBlock[], blocks, r2d2_blocks))...)
     _check_locations_read_only(ranef_state, union(effects...))
     n_ranef = sum(b -> b.ranef.n_terms * b.ranef.n_groups, blocks; init=0)
     n_r2d2 = length(ranef_state.sources) - n_ranef
@@ -1957,7 +2095,7 @@ function _ordered_group_inverse!(y, x, state, block, lookup, g, C, Cp, perms, q,
         if declared
             c = state.sources[lookup[k, g]]
             log_scale = log(s)
-            y[block.effects[k, g]] = c * _with_location(m, x, state, lookup[k, g]) +
+            y[block.effects[k, g]] = c * _with_location(m, x, y, state, lookup[k, g]) +
                 (v[k] - t * m) * exp(log_scale * (c - t))
             ljac += log_scale * (c - t)
         else
@@ -1976,7 +2114,7 @@ function _ordered_group_inverse!(y, x, state, block, lookup, g, C, Cp, perms, q,
         end
         s = Cp[_tri(j, j)]
         w = _tset(w, (b[a] - m) / s, j)
-        y[block.effects[a, g]] = c * _with_location(m, x, state, lookup[a, g]) + s^c * w[j]
+        y[block.effects[a, g]] = c * _with_location(m, x, y, state, lookup[a, g]) + s^c * w[j]
         ljac += (c - 1) * log(s)
     end
     ljac
@@ -2046,7 +2184,13 @@ function WarmupHMC.with_logabsdet_jacobian!(y::AbstractVector,
         ir::BRMOrderedCenteringReparametrization, x::AbstractVector)
     s = ir.state
     ljac = zero(eltype(x))
-    for bi in eachindex(s.ranef.blocks)
+    # A location that reads a containing cell reads its source: the inverse
+    # rebuilds it first (blocks in order, `_ordered_group_inverse!` reads `y`);
+    # the forward map walks the blocks backwards so that with `y === x` the
+    # containing (earlier) blocks are still unwritten.
+    blocks = s.ranef.extended && ir.direction > 0 ?
+        reverse(eachindex(s.ranef.blocks)) : eachindex(s.ranef.blocks)
+    for bi in blocks
         ljac += _ordered_block_map!(y, x, ir, bi)
     end
     offset = s.n_ranef + s.n_r2d2
@@ -2854,6 +2998,21 @@ _candidate_scoring_plan(state) = WarmupHMC.CandidateScoringPlan(
     synchronize! = ir_ -> _sync_sources!(state, ir_),
 )
 
+# Containing blocks first (snag brm-zone-8-adapt-1b407672): a cell centred on a
+# containing cell's effect reads that cell's source, which WarmupHMC's inverse
+# rebuilds pair by pair, so the containing pairs must come earlier. A block
+# sits after every block it is centred on: it has strictly more containing
+# blocks than any of them (containment is transitive). The sort is stable, so a
+# model without containing cells keeps its pair order.
+function _containers_first!(blocks, locations)
+    count_containers(block) = begin
+        l = get(locations, block, nothing)
+        l isa BRM._AdaptiveRanefLocations && !isnothing(l.containers) ?
+            length(unique(objectid(first(c)) for cs in l.containers for c in cs)) : 0
+    end
+    sort!(blocks; by=count_containers, alg=Base.Sort.MergeSort)
+end
+
 function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=nothing,
                                        centeredness=nothing, s2z_rule=:cells,
                                        ranef_order=:declared)
@@ -2919,6 +3078,8 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
         b for b in blocks if b isa BRM.AdaptiveCenteringBlock]
     r2d2_blocks = BRM.R2D2AdaptiveCenteringBlock[
         b for b in blocks if b isa BRM.R2D2AdaptiveCenteringBlock]
+    _containers_first!(ordinary, locations)
+    _containers_first!(r2d2_blocks, locations)
     # Totals beside other cells: mean-located totals next to the wrapper the
     # other cells would have without them.
     isempty(total_blocks) || return _totals_beside_centering_problem(model, problem,
@@ -3001,6 +3162,22 @@ _control_row(cell, index, names, family; binding=nothing, group=nothing,
     (; cell, index, name=names[index], family, binding, group, margin, level, term,
        rank, location, c=Float64(c), target=Float64(target))
 
+# The coordinates a cell's location reads: its population coefficient, the factor
+# levels its level sits in, and the coordinate of each containing cell (whose
+# effect is added), joined by ` + `; `nothing` for a cell centred on 0.
+function _location_label(state, p, names)
+    parts = String[]
+    j = state.pair_location[p]
+    j == 0 || push!(parts, names[j])
+    for f in state.pair_factor_start[p]:state.pair_factor_start[p + 1] - 1
+        push!(parts, names[state.pair_factors[f]])
+    end
+    for e in state.pair_container_start[p]:state.pair_container_start[p + 1] - 1
+        push!(parts, names[_pair_index(state, state.pair_containers[e])])
+    end
+    isempty(parts) ? nothing : join(parts, " + ")
+end
+
 function _control_rows!(rows, state::_BRMRanefCenteringState, orders, offset, values,
                         names, margins)
     controls, targets = values
@@ -3013,7 +3190,7 @@ function _control_rows!(rows, state::_BRMRanefCenteringState, orders, offset, va
             margin=length(labels) == ranef.n_terms ? labels[k] : nothing,
             level=ranef.levels[g], term=k,
             rank=isnothing(orders) ? k : findfirst(==(k), view(orders[bi], :, g)),
-            location=state.pair_location[p] == 0 ? nothing : names[state.pair_location[p]],
+            location=_location_label(state, p, names),
             c=controls[offset + p], target=targets[offset + p]))
     end
     offset + length(state.sources)
