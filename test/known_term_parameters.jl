@@ -450,7 +450,7 @@ end
 
 KNOWN_RUNTIME && @stestset "RKBRMI: the same law as SBBRMI" begin
     for (name, known, _, _) in DENSITY_CASES
-        name in ("field", "both", "aniso", "grouped", "periodic") || continue
+        name in ("field", "both", "aniso", "grouped", "periodic", "cdar") || continue
         brmi = known(DF)
         rk, problem = consumer_problem(brmi)
         sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
@@ -486,9 +486,9 @@ KNOWN_RUNTIME && @stestset "RKBRMI: known equals sampled at the known value" beg
     rng = MersenneTwister(5)
     for (name, known, sampled, laws) in DENSITY_CASES
         # Not on RKBRMI before any known value is read: smoothing-scale priors
-        # (`_rk_gate_spline_term_priors!`) and `rw`/`cdar` terms as a whole
+        # (`_rk_gate_spline_term_priors!`) and `rw` terms as a whole
         # (todo `1hq7nm0`).
-        name in ("smooth", "rw", "cdar") && continue
+        name in ("smooth", "rw") && continue
         twin_builder = name == "dar" ? dar_rk_sampled : sampled
         known_rk, problem = consumer_problem(known(DF))
         twin_rk, twin = consumer_problem(twin_builder(DF))
@@ -497,7 +497,7 @@ KNOWN_RUNTIME && @stestset "RKBRMI: known equals sampled at the known value" beg
         extra = setdiff(twin_names, names)
         @test issubset(names, twin_names)
         @test length(extra) == length(laws)
-        unit = name in ("dar", "car")
+        unit = name in ("dar", "car", "cdar")
         fixed = unit ? [log(v / (1 - v)) for (_, v) in laws] :
             [log(value) for (_, value) in laws]
         expected = name == "dar" ?

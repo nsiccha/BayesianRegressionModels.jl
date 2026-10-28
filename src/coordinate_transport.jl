@@ -919,6 +919,43 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
     end
 end
 
+# A grouped stationary AR(1) walk, paired by its step axis and parameter roles:
+# marginal SD and persistence as scalars, and the innovations by (group, step).
+# SB draws them as the flat column-major `eta` (entry `(w - 1) * P + g`), RK as
+# the matrix `eta[g, w]`; both order groups and steps by the fitted grid.
+function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
+        ::Val{:cdar}, record, rk, d, stan, stan_pos)
+    entry = _brm_term_entry(d, record.predictor,
+        e -> getf(e.value) === cdar &&
+            name(_sb_named_inner(:cdar, only(getargs(e.value)))) === record.step,
+        "`cdar($(record.step))`")
+    base = (; kind=:cdar, predictor=record.predictor, term=entry.term)
+    P = length(record.levels)
+    for (parameter, local_name) in ((:sd, :sigma), (:ar, :rho), (:innovations, :eta))
+        # A role held at a known value is a constant on both backends.
+        isnothing(_brm_term_known_value(d.plan.parent, record.predictor,
+            entry.value, parameter)) || continue
+        stan_names = _brm_transport_elements(
+            _brm_term_parameter_output(d, record.predictor, entry, parameter), stan,
+            (; base..., parameter))
+        declaration = Symbol(record.declaration, ".", getproperty(record.locals, local_name))
+        if parameter === :innovations
+            length(stan_names) == P * length(record.steps) || error(
+                "brm_coordinate_transport: cdar $(base) has $(P * length(record.steps)) RK " *
+                "and $(length(stan_names)) SB innovations")
+            for (j, stan_name) in enumerate(stan_names)
+                w, g = divrem(j - 1, P) .+ 1
+                push!(pairs, BRMCoordinatePair((; base..., parameter, index=j),
+                    Symbol(declaration, ".", g, ".", w), stan_name, declaration, (g, w),
+                    :identity))
+            end
+        else
+            push!(pairs, BRMCoordinatePair((; base..., parameter, index=1),
+                declaration, only(stan_names), declaration, (), :identity))
+        end
+    end
+end
+
 # An HSGP component, paired by its formula axes and parameter roles. A grouped
 # one (`by = g`) pairs below.
 _brm_transport_hsgp_axes(t) = Tuple(name(_sb_named_inner(:hsgp, a)) for a in getargs(t))

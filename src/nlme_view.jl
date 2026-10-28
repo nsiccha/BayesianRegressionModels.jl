@@ -43,7 +43,8 @@ unconstrained coordinate vector (`coordinates`, in packed order).
   `:shared_latent` (sampled coordinates shared by the units: HSGP components,
   missing-value completions, submodels, `car(...)` fields, and every
   coordinate of a random-effect block over a grouping in `shared_groups`; a
-  grouped HSGP whose levels are the units shares only its hyperparameters),
+  grouped HSGP or `cdar` walk whose levels are the units shares only its
+  hyperparameters),
   `:scalar` (other sampled scalars such as residual scales),
   `:subject_scale` / `:subject_correlation` (the random-effect scales and
   Cholesky correlation factors, i.e. Ω), or `:subject_effect` /
@@ -77,7 +78,13 @@ unconstrained coordinate vector (`coordinates`, in packed order).
   it in the subject owning the level (its block identity carries `hsgp`, the
   term's declaration). Each `(1 | g)` effect of a hyper-predicted amplitude or
   length scale (`log(sd(hsgp(x))) ~ 1 + (1 | g)`) is an estimated family of
-  size 1 over the same units.
+  size 1 over the same units. A walk `cdar(step; by=g, cor=C)` whose groups
+  are units in the same sense, and whose `cor=` couples only groups of one
+  subject, is one family whose size is its number of steps, with covariance
+  fixed at the identity: each group's standardized innovations are an
+  instance of it in the subject owning the group (its block identity carries
+  `cdar`, the term's declaration; the margins are `cdar(step)[s]` for each
+  step value `s`). Its marginal SD and persistence are `:shared_latent`.
 - `subject_margins[i]` — the compact coordinates' family margin and grouping
   level labels for subject `i`.
 - `mu_references` — one `(; predictor, coefficient, link, population, subject,
@@ -225,18 +232,16 @@ function _brm_nlme_mu_references(backend, block_margins, population, rows, nrows
     references
 end
 
-# The subject owning each level of a grouped HSGP whose levels are units, or
-# `nothing` when the term is shared by the subjects: an ungrouped term, a
-# `cor=` that couples its levels, a `by` column the caller named in
-# `shared_groups`, or one whose levels name no subject. The levels are units
-# when `by` is a nested grouping (each level owned by its subject) or when
-# every level names a subject: the subject grouping itself, or another column
-# with its labels, joined by label as one `|ID|` joins grouping columns.
-function _brm_nlme_hsgp_units(record, group, subject_index, owner, group_levels,
-        nested_groups, shared_groups)
-    record.grouped && record.group !== nothing && !record.level_correlation ||
-        return nothing
-    by = record.group
+# The subject owning each level `levels` of a term grouped by `by`, or
+# `nothing` when the term is shared by the subjects: a `by` column the caller
+# named in `shared_groups`, or one whose levels name no subject. The levels are
+# units when `by` is a nested grouping (each level owned by its subject) or
+# when every level names a subject: the subject grouping itself, or another
+# column with its labels, joined by label as one `|ID|` joins grouping
+# columns. `term` names the term and `states` its per-level values in the
+# refusal of a `by` mixing both kinds of label.
+function _brm_nlme_level_units(by, levels, term, states, group, subject_index, owner,
+        group_levels, nested_groups, shared_groups)
     by in shared_groups && return nothing
     if haskey(nested_groups, by)
         index = Dict(_brm_transport_level(level) => g
@@ -244,19 +249,47 @@ function _brm_nlme_hsgp_units(record, group, subject_index, owner, group_levels,
         return Int[owner[by][get(index, _brm_transport_level(level)) do
                 error("brm_nlme_view: internal: level $(repr(level)) of `$by` " *
                     "has no row")
-            end] for level in record.levels]
+            end] for level in levels]
     end
-    units = Int[get(subject_index, _brm_transport_level(level), 0)
-        for level in record.levels]
+    units = Int[get(subject_index, _brm_transport_level(level), 0) for level in levels]
     all(iszero, units) && return nothing
-    unmatched = record.levels[iszero.(units)]
+    unmatched = levels[iszero.(units)]
     isempty(unmatched) || _brm_nlme_error(
-        "brm_nlme_view: `hsgp($(join(record.axes, ", ")); by=$by)` in " *
-        "`$(record.predictor)` has levels that are subjects of `$group` and levels " *
-        "that are not ($(join(repr.(unmatched), ", "))), so its weights are " *
+        "brm_nlme_view: $term has levels that are subjects of `$group` and levels " *
+        "that are not ($(join(repr.(unmatched), ", "))), so its $states are " *
         "neither one subject's each nor shared by all. Group it by the subjects, " *
         "by a grouping nested in them (`nested_groups`), or by labels that name " *
         "no subject.")
+    units
+end
+
+# The subject owning each level of a grouped HSGP whose levels are units, or
+# `nothing` when the term is shared by the subjects: an ungrouped term, a
+# `cor=` that couples its levels, or levels that are not units
+# (`_brm_nlme_level_units`).
+function _brm_nlme_hsgp_units(record, group, subject_index, owner, group_levels,
+        nested_groups, shared_groups)
+    record.grouped && record.group !== nothing && !record.level_correlation ||
+        return nothing
+    _brm_nlme_level_units(record.group, record.levels,
+        "`hsgp($(join(record.axes, ", ")); by=$(record.group))` in `$(record.predictor)`",
+        "weights", group, subject_index, owner, group_levels, nested_groups, shared_groups)
+end
+
+# The subject owning each group of a `cdar(step; by=g, cor=C)` walk whose groups
+# are units (`_brm_nlme_level_units`), or `nothing` when the walk is shared by
+# the subjects: groups that are not units, or a `cor=` coupling groups of
+# different subjects. Each group's standardized innovations then enter only its
+# own subject's rows.
+function _brm_nlme_cdar_units(record, group, subject_index, owner, group_levels,
+        nested_groups, shared_groups)
+    units = _brm_nlme_level_units(record.group, record.levels,
+        "`cdar($(record.step); by=$(record.group))` in `$(record.predictor)`",
+        "innovations", group, subject_index, owner, group_levels, nested_groups,
+        shared_groups)
+    units === nothing && return nothing
+    all(c -> iszero(record.L[c]) || units[c[1]] == units[c[2]],
+        CartesianIndices(record.L)) || return nothing
     units
 end
 
@@ -305,11 +338,13 @@ function _brm_nlme_shared_groups(groups)
     Tuple(Symbol[unique(groups)...])
 end
 
-# The groupings a caller may name: those of random-effect blocks and of grouped
-# HSGPs.
-_brm_nlme_groupings(records) = unique(Symbol[r.group for r in records
-    if r.kind in (:ranef, :stratified_ranef) ||
-       (r.kind === :hsgp && r.grouped && r.group !== nothing)])
+# The groupings a caller may name: those of random-effect blocks and of the
+# terms grouped by a column of their own, grouped HSGPs and `cdar` walks.
+_brm_nlme_term_groupings(records) = unique(Symbol[r.group for r in records
+    if (r.kind === :hsgp && r.grouped && r.group !== nothing) || r.kind === :cdar])
+_brm_nlme_groupings(records) = unique(Symbol[
+    [r.group for r in records if r.kind in (:ranef, :stratified_ranef)];
+    _brm_nlme_term_groupings(records)])
 
 _brm_nlme_ticked(names) = join(string.("`", names, "`"), ", ")
 
@@ -318,8 +353,8 @@ function _brm_nlme_check_shared_groups(records, shared_groups, subject_group,
     known = _brm_nlme_groupings(records)
     for g in shared_groups
         g in known || _brm_nlme_error(
-            "brm_nlme_view: shared_groups names `$g`, which no random-effect block " *
-            "or grouped `hsgp(...; by = ...)` term groups by; the model's groupings " *
+            "brm_nlme_view: shared_groups names `$g`, which no random-effect block, " *
+            "grouped `hsgp(...; by = ...)` term or `cdar` walk groups by; the model's groupings " *
             "are $(_brm_nlme_ticked(known))")
         g === subject_group && _brm_nlme_error(
             "brm_nlme_view: `$g` is the subject grouping, so it cannot also be " *
@@ -339,7 +374,10 @@ function _brm_nlme_check_nested_groups(records, group, groups, nested_groups,
         shared_groups)
     expected = filter(!=(group), groups)
     missing_groups = filter(g -> !haskey(nested_groups, g), expected)
-    extra = filter(k -> k ∉ expected, collect(keys(nested_groups)))
+    # A term's own grouping (`cdar(...; by = g)`, `hsgp(...; by = g)`) may be
+    # named too, so that its levels are units.
+    terms = _brm_nlme_term_groupings(records)
+    extra = filter(k -> k ∉ expected && k ∉ terms, collect(keys(nested_groups)))
     isempty(missing_groups) && isempty(extra) && return nothing
     joined(k) = [r for r in records if r.kind in (:ranef, :stratified_ranef) &&
         k in get(r, :joint_columns, ()) && r.group !== k]
@@ -358,7 +396,7 @@ function _brm_nlme_check_nested_groups(records, group, groups, nested_groups,
             " Named in neither: $(_brm_nlme_ticked(missing_groups)).",
         isempty(extra) ? "" :
             " nested_groups names $(join(notes, ", ")), which is no subject-owned " *
-            "grouping of a random-effect block.",
+            "grouping of a random-effect block, `cdar` walk or grouped `hsgp` term.",
         " The subject-owned groupings are $(_brm_nlme_ticked(groups))",
         isempty(shared_groups) ? "." :
             "; the shared ones are $(_brm_nlme_ticked(shared_groups))."))
@@ -378,8 +416,10 @@ subject), or in `shared_groups`, a tuple of groupings crossed with the
 subjects. Every coordinate of a random-effect block over a shared grouping
 (its standardized draws, scales, correlation factor and Student-t mixing
 weights, for any block form) is a `:shared_latent`, and so is a grouped
-`hsgp(x; by = g)` with `g` in `shared_groups`. A `car(...)` field is always
-shared: its edges couple its areas. See [`BRMNLMEView`](@ref).
+`hsgp(x; by = g)` or a `cdar(step; by = g)` walk with `g` in `shared_groups`.
+`nested_groups` may also name the `by` grouping of a `cdar` or grouped `hsgp`
+term that no random effect uses, so that its levels are units. A `car(...)`
+field is always shared: its edges couple its areas. See [`BRMNLMEView`](@ref).
 
 Refuses with [`BRMNLMEViewError`](@ref) when the model has no such reading:
 no random effects over the subjects, a grouping named in neither
@@ -689,6 +729,45 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
                         claim!(i, :shared_latent)
                 end
             end
+        elseif kind === :cdar
+            units = _brm_nlme_cdar_units(record, group, subject_index, owner,
+                group_levels, nested_groups, shared_groups)
+            if units === nothing
+                # Shared by the subjects: the whole walk, scales and innovations.
+                claim_declaration!(record.declaration, :shared_latent)
+            else
+                # Each group's standardized innovations are unit draws of the
+                # subject owning the group, one family of size W fixed at the
+                # identity (the walk's scale and persistence stay in the
+                # model). The marginal SD and persistence stay shared.
+                eta = Symbol(record.declaration, ".", record.locals.eta)
+                W = length(record.steps)
+                family = length(families) + 1
+                block = (; group=record.group, id=nothing, predictor=record.predictor,
+                    cdar=record.declaration)
+                push!(families, (; block, record, stratum=nothing, size=W,
+                    scales=Int[], factor=Int[], fixed=Matrix{Float64}(I, W, W)))
+                coefficients = [Symbol("cdar(", record.step, ")[", step, "]")
+                    for step in record.steps]
+                for coefficient in coefficients
+                    push!(block_margins, (; block, predictor=record.predictor, coefficient))
+                end
+                for (g, i) in enumerate(units)
+                    push!(subject_families[i], family)
+                    for (w, coefficient) in enumerate(coefficients)
+                        c = coordinate(Symbol(eta, ".", g, ".", w))
+                        claim!(c, :subject_effect)
+                        subject[c] = i
+                        push!(blocks[i], c)
+                        push!(subject_margins[i], (; block, predictor=record.predictor,
+                            coefficient, level=record.levels[g]))
+                    end
+                end
+                for (i, name) in enumerate(names)
+                    role[i] === :unclaimed && _brm_nlme_owned(name, record.declaration) &&
+                        claim!(i, :shared_latent)
+                end
+            end
         elseif kind === :missing_value
             # Only the completion's sampled carrier is a parameter. A
             # non-centered completion whose rows lie on the grouping axis is
@@ -741,8 +820,8 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
         "$(join(string.(unclaimed), ", ")). The view reads population " *
         "coefficients, scalars and vectors, random-effect blocks on a plain " *
         "`(... | group)` or stratified `gr(group, by=stratum)` grouping, HSGP " *
-        "terms, `car(...)` fields, missing-value completions and submodels; " *
-        "other terms, such as `mm(...)` blocks, file no coordinate record.")
+        "terms, `cdar` walks, `car(...)` fields, missing-value completions and " *
+        "submodels; other terms, such as `mm(...)` blocks, file no coordinate record.")
     labels = map(_brm_transport_level, backend.plan.columns[group])
     rows = [findall(x -> isequal(x, _brm_transport_level(level)), labels) for level in levels]
     # Subjects of a stratified block, or with completion draws, hold different
