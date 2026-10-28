@@ -382,8 +382,16 @@ end
                                String.(BS.param_unc_names(problem.model)))
         fit_problem, fc_problem = instantiate(sb), instantiate(fc)
         @test walk(fc_problem) == walk(fit_problem)
-        D = LogDensityProblems.dimension(fc_problem)
-        cn, cv = constrained(fc_problem, 0.4 .* randn(Xoshiro(2), D))
+        # the resampled `gem` effects are generated, so the replay is the fit
+        # minus them; the fit's draws reach it through transport_draws
+        unc_fit = BS.param_unc_names(fit_problem.model)
+        unc_fc = BS.param_unc_names(fc_problem.model)
+        @test unc_fc == [n for n in unc_fit if n in unc_fc]
+        @test length(unc_fc) < length(unc_fit)
+        draws = [0.37sin(i + 5k) for k in 1:3, i in eachindex(unc_fit)]
+        moved = transport_draws(sb, fc, draws, unc_fit, unc_fc)
+        @test moved == draws[:, [findfirst(==(n), unc_fit) for n in unc_fc]]
+        cn, cv = constrained(fc_problem, moved[1, :])
         @test all(isfinite, pick(cn, cv, "cdar_mu_year"))
         @test length(pick(cn, cv, "cdar_mu_year_eta_lev")) == 2 * 5
     end
