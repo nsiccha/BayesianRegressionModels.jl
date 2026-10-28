@@ -1243,6 +1243,11 @@ independent values/gradients, ordinary Reverse, strict same-BRMI Stan,
 complete source/data replay, original geometry/ownership and scalar algebra
 inside the actual built observation plate. A Bernoulli-logit case preserves
 integer response rows across uneven/empty cells.
+`rk_observation_source_names.jl` checks the two routes by which a caller-owned
+law calls a function the build module does not bind (`logsumexp`): a leaf named
+from `entry`, and a law defined in the consumer's module bound as a child
+graph. Each matches an independent mixture density with ordinary Reverse
+gradients and printed source replay.
 `rk_grouped_observation_arguments.jl` checks the equivalent outside-cell law,
 grouped argument collection, explicit ragged joins, empty cells, broadcasting,
 elementwise argument expressions and unchanged data ports. Each case checks
