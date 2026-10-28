@@ -115,6 +115,25 @@ end
     check_unit_problems(m, Xoshiro(2))
 end
 
+@stestset "NLME view: a walk nests in the units through labels no formula reads" begin
+    # `kreis_region` repeats `region`, but no formula reads it, so the backend
+    # does not keep it: it is passed as labels (snag brm-nlme-view-ne-9971da9c).
+    df = merge(WALK_DF, (; kreis_region=copy(WALK_DF.region)))
+    rk = RKBRMI(walk_model(df))
+    by_name = brm_nlme_view(rk; NESTED...)
+    by_labels = brm_nlme_view(rk; subject_group=:region,
+        nested_groups=(kreis=df.kreis_region,))
+    @test cdar_family(by_labels) !== nothing
+    for field in (:levels, :coordinates, :role, :subject, :subject_coordinates,
+            :rows, :family_sizes, :subject_families, :subject_margins, :families)
+        @test isequal(getfield(by_labels, field), getfield(by_name, field))
+    end
+    # refused: a model holds only the values it reads, so the unread column
+    # has no name in it (user principle: BRM does not assume tabular data).
+    @test_throws "not a column the model reads" brm_nlme_view(rk;
+        subject_group=:region, nested_groups=(kreis=:kreis_region,))
+end
+
 @stestset "NLME view: a cor= within the units keeps the innovations unit-owned" begin
     rk = RKBRMI(correlated_model())
     v = brm_nlme_view(rk; NESTED...)

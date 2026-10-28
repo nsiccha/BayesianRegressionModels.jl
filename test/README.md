@@ -79,6 +79,16 @@ read each other in either order, builders and built `BRMI`s alike; and a
 fragment that only reads a data column no longer replaces another fragment's
 likelihood of it. Snag `formula-covariat-5673c470`.
 
+`rk_inline_response_location.jl` checks a response whose location is computed
+inline from model values (`y ~ NegativeBinomial2(exp(dev) * (…), phi)`) against
+the same location assigned first: SBBRMI gives both spellings one density, and
+RKBRMI agrees with SBBRMI (value and Enzyme gradient) on the assigned spelling
+and, for a Normal location and scale and a Bernoulli probability, on the inline
+one. The inline Poisson and NegativeBinomial2 cases are `@test_broken` until
+the test environment's ReactiveKernels pin carries an RKPPL that lowers an
+inline count rate (ReactiveKernelsPPL 0.1.2, RK main `f9a5c9c41`, ReactiveKernels
+snag `rkppl-logistic-a-b6e04821`). Snag `rkbrmi-on-a-resp-017c6f44`.
+
 `plate_gathered_predictor.jl` checks a predictor on its own rows that reads
 another part's values through model-scope gathers (`c2 = c[pos2]` of an `mi()`
 completion, `z2 = z[pos2]` where `z` reads part-1 data columns), read by a
@@ -364,6 +374,16 @@ lower=lloq)` with `y` omitted: the warning, the observation role, the
 `y_gen`-only output, the bound twin's predictive law, BridgeStan draws clamped
 at `lloq`, and a fitted response beside it whose density equals the
 uncensored twin's.
+
+`omitted_discrete_response.jl` checks omitted responses with a discrete law.
+A `BetaBinomial2` and a `Binomial` count with data trials and a `logistic`
+mean give a `fixed_param` program drawing the fitted twin's law, within the
+trials; an omitted literal `BetaBinomial2` matches its mean/precision pmf; a
+fitted `Binomial` beside an omitted `BetaBinomial2` has the binomial-only
+density. Products, `logistic`, `truncated` and the `Bernoulli`-type families
+draw their bound twin's law, a continuous omitted response spells
+`logistic` as `inv_logit`, and a `@plate` cell's `BetaBinomial2` has the
+density of its `beta_binomial` spelling and lowers omitted.
 
 `adaptive_multiaxis_hsgp_centering.jl` checks online adaptive centering of
 two-axis squared-exponential HSGPs: isotropic (one length scale every axis
@@ -1233,6 +1253,11 @@ independent values/gradients, ordinary Reverse, strict same-BRMI Stan,
 complete source/data replay, original geometry/ownership and scalar algebra
 inside the actual built observation plate. A Bernoulli-logit case preserves
 integer response rows across uneven/empty cells.
+`rk_observation_source_names.jl` checks the two routes by which a caller-owned
+law calls a function the build module does not bind (`logsumexp`): a leaf named
+from `entry`, and a law defined in the consumer's module bound as a child
+graph. Each matches an independent mixture density with ordinary Reverse
+gradients and printed source replay.
 `rk_grouped_observation_arguments.jl` checks the equivalent outside-cell law,
 grouped argument collection, explicit ragged joins, empty cells, broadcasting,
 elementwise argument expressions and unchanged data ports. Each case checks

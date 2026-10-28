@@ -370,6 +370,40 @@ end
     @test identity_link.inverse_link === identity
 end
 
+@testset "a linked declaration's :linear_predictor output is on the response scale" begin
+    # The output holds the value of the name that addresses it: the bare `x` of
+    # `f(x) ~ …`, `x = inverse(f)(η)`, never η. η's emitted carrier is a
+    # `:stan_derived` intermediate (snag descriptor-linea-bdc97fec).
+    linked_df = (; x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5], g=[1, 1, 2, 2, 3, 3],
+                   n=[5, 5, 5, 6, 6, 6], k=[0, 1, 3, 3, 5, 6],
+                   y=[-2.4, -2.2, -2.0, -1.8, -1.7, -1.5])
+    cases = (
+        (@brm(begin
+            log(Vc) ~ 1 + x + (1 | g)
+            y ~ Normal(log(Vc), 0.2)
+        end), :Vc, :log_Vc, "Vc = exp(log_Vc)", log),
+        (@brm(begin
+            logit(p) ~ 1 + x + (1 | g)
+            k ~ Binomial(n, p)
+        end), :p, :logit_p, "p = inv_logit(logit_p)", logit),
+    )
+    for (builder, public, eta, assignment, link) in cases
+        d = brm_descriptor(builder, linked_df; mod=@__MODULE__)
+        lp = brm_output(d, public; role=:linear_predictor)
+        @test lp.name === public
+        @test lp.predictors == (public,)
+        @test occursin(assignment,
+                       stan_code(SBBRMI(builder(linked_df); mod=@__MODULE__)))
+        carrier = only(o for o in d.outputs if o.name === eta)
+        @test carrier.role === :stan_derived
+        @test isnothing(carrier.logical)
+        @test carrier.predictors == ()
+        pop_name = "pop_$(eta)_beta_pop"
+        @test brm_population_effect_coordinates(
+            d, public, [pop_name * ".1", pop_name * ".2"]).link === link
+    end
+end
+
 @testset "categorical population coordinates — response-qualified contrasts" begin
     categorical_df = (;
         indication=[1, 2, 3, 1, 2, 3],

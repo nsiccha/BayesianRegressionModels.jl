@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.39
+## 0.2.44
 
 - A nested NLME model (`brm_nlme_model` with `subject_group` /
   `nested_groups`) whose observations have subject cells now evaluates one
@@ -28,6 +28,97 @@ instead of failing at run time.
   cells); a totals cell's gradient reads its `hcat` design from views, which
   needs the Enzyme `dogfood` line, so on registered Enzyme such a model's unit
   gradient raises `IllegalTypeAnalysisException` where it was slow before.
+
+## 0.2.43
+
+- `brm_start(rk)` and `brm_start(sb, stan_model)`, with no initial values,
+  compute a start from the data. Pathfinder runs over the population
+  coordinates with every unit's random effects integrated out by a Laplace
+  approximation (`brm_laplace_problem`), from a point drawn within one unit
+  of their prior medians (unconstrained scale); a start is a draw from its
+  Gaussian fit, with each unit's effects drawn from its own Laplace Gaussian
+  (`brm_laplace_draws`). Each group starts near its own value and each
+  block's SD near the groups' spread, with no values written by hand.
+  `chains = n` returns `n` independent draws from that fit for a sampler's
+  per-chain `init`; a failed Pathfinder run raises. The units are
+  `brm_nlme_view`'s (`subject_group`, `nested_groups`, `shared_groups`).
+  Its cost is the Laplace problem's: a few model gradients per evaluation for
+  regression-shaped models (the row-structured Laplace), many more for the
+  whole-model Laplace. Initial
+  values go on top of a start through `base`:
+  `brm_start(sb, model, inits; base = brm_start(sb, model))`;
+  `brm_start(x, inits)` without `base` keeps its zero base. Needs Pathfinder
+  loaded (a new weak dependency; WarmupHMC loads it) and, for the default
+  `ad_backend`, Enzyme and DifferentiationInterface. A model `brm_nlme_view`
+  does not partition into units, and an SBBRMI with exact total-coefficient
+  blocks, are refused with the reason.
+- `brm_laplace_problem(rk; structured = :auto)` no longer gives the
+  row-structured Laplace to a model with observations that are not regression
+  responses: a `@plate` cell's, or one whose distribution reads a model value
+  (`y ~ Normal(m, sigma)` with `m = …`). The row structure has no terms for
+  them, so it was built without them, a marginal that left those observations
+  out. Such models take the whole-model Laplace; `structured = true` refuses
+  them with the reason.
+
+## 0.2.42
+
+- An omitted response whose law is discrete (`Poisson`, `Binomial`,
+  `BetaBinomial2`, `NegativeBinomial2`, `Bernoulli`, `BernoulliLogit`,
+  `BinomialLogit`, also under `truncated`) is drawn from the law its fitted
+  twin's predictive draw uses: with `c` omitted, `c ~ Poisson(exp(eta) * w)`
+  draws `poisson_int_rng(…, exp(eta) .* w)`, as `c_gen` does when `c` is bound.
+  Stan has no discrete parameters, so such a statement is always an observation.
+  Before, it was lowered like a prior, and the prior program failed to build:
+  `logistic(...)` reached StanBlocks untranslated ("`tracetype` not defined for
+  logistic(::real)"), vector products stayed `*` and failed stanc, and
+  `truncated` over a discrete family was refused ("a sampled truncated prior
+  requires a continuous scalar value").
+- `BetaBinomial2(trials, mean, precision)` lowers with its response omitted and
+  in a `@plate` cell, bound or omitted, as
+  `beta_binomial(trials, mean .* precision, (1 - mean) .* precision)`. Before,
+  each was refused: "`BetaBinomial2` derives outcome structure from observed
+  response values …". Its outcome structure is its trials argument. `Ordinal`,
+  `OrderedLogistic`, `CategoricalLogit` and `Multinomial` keep that refusal.
+- A prior's arguments, and so an omitted continuous response's, spell Julia
+  callables as likelihood arguments do: `logistic` as `inv_logit`, `normcdf` as
+  `Phi`, `vcat` as `append_row`, `fill` as `rep_vector`, and so on. Snag
+  `prior-draws-refu-aeb3b1e0`.
+
+## 0.2.41
+
+- `brm_nlme_view` (and `brm_nlme_model`, `brm_nlme_fit`, `brm_svi_fit`,
+  `brm_laplace_problem` and the other NLME entry points, which pass it on) take
+  a nested grouping's parent labels as a vector as well as by column name:
+  `nested_groups = (g = data.g_region,)`, row-aligned with `g`. A backend keeps
+  only the columns its formulas read, so a parent column no formula reads was
+  refused as absent; it is now passed as labels, which are checked as a column
+  is. By name, such a column is refused as unread, and the refusal shows the
+  labels spelling.
+
+## 0.2.40
+
+- A `@plate` cell may read one vector through several `groups` bindings:
+  `eta[rows1[k]]` and `eta[rows2[k]]` read the same formula predictor or data
+  column at two row sets, each an independent gather, for example one sum per
+  class with a coefficient each. Before, `@brm` refused the second read
+  (`` would both bind cell name `eta`; rename one source before the plate ``),
+  and that rename was not reachable for a predictor. On SBBRMI each read now
+  gathers into its own data name, so a frozen `reprocess` replays both.
+  Snag `reading-one-form-4a7413e7`.
+
+## 0.2.39
+
+- `RKBRMI` lowers a response location or scale computed inline from model
+  values as it lowers the same value assigned first:
+  `y ~ NegativeBinomial2(exp(dev) * (exp(w) * x + z), phi)` and
+  `mu = exp(dev) * (exp(w) * x + z); y ~ NegativeBinomial2(mu, phi)` are one
+  model on both backends. Before, a model whose other statements kept it on the
+  formula route refused it ("mean must be the linear predictor `dev` itself").
+  A predictor read bare, or bare inside `logistic(eta)`, `TDist(nu)`, Gamma's
+  `mu/alpha` or Beta's `mu*kappa` / `(1-mu)*kappa`, keeps its formula
+  spelling. An inline count rate or mean (`Poisson`, `NegativeBinomial2`, …)
+  also needs ReactiveKernelsPPL 0.1.2 (RK main `f9a5c9c41`) or later;
+  earlier RKPPL refuses it with `broadcast the link`.
 
 ## 0.2.38
 
